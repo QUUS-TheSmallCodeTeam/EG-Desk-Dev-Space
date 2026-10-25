@@ -1,6 +1,7 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { EventEmitter } from 'node:events'
+import { readFile } from 'node:fs/promises'
 import { PassThrough } from 'node:stream'
 import {
   CLAUDE_ADAPTER_DEFAULTS, CLAUDE_CAPABILITIES, claudeRpcThreadId, claudeStartError, claudeTurnContent, createClaudeEngineAdapter,
@@ -82,12 +83,12 @@ function answer(child, sessionId, text = 'ok', messageId = 'msg_1') {
   child.send({ type: 'result', subtype: 'success', is_error: false, session_id: sessionId, duration_ms: 12, usage: { input_tokens: 3, output_tokens: 1 } })
 }
 
-function harness({ check = SIGNED_IN, env = BASE_ENV, childOptions = {}, ...options } = {}) {
+function harness({ check = SIGNED_IN, env = BASE_ENV, childOptions = {}, createAdapter = createClaudeEngineAdapter, ...options } = {}) {
   const children = [], spawns = [], timers = []
   let current = check
   let ids = 0
   const statusChanges = { count: 0 }
-  const adapter = createClaudeEngineAdapter({
+  const adapter = createAdapter({
     snapshot: () => current, refreshStatus: async () => current,
     env, platform: 'darwin', defaultCwd: CWD,
     resolveExecutable: () => EXE,
@@ -124,6 +125,27 @@ async function firstTurn(h, params = {}, text = 'Reply with exactly: ok') {
   const started = await h.adapter.startThread({ dynamicTools: TOOL_SPECS, ...params })
   const turn = await h.adapter.startTurn({ threadId: started.thread.id, input: [{ type: 'text', text, text_elements: [] }], clientUserMessageId: 'req-1' })
   return { threadId: started.thread.id, turnId: turn.turn.id, child: h.children.at(-1), started, turn }
+}
+
+// Deliberately reuse both CLI request_ids (and the inner MCP id) in every process.
+const permissionRequest = () => ({ type: 'control_request', request_id: 'reused-permission', request: {
+  subtype: 'can_use_tool', tool_name: 'Bash', tool_use_id: 'reused-tool', input: { command: 'echo hi' },
+} })
+const mcpRequest = () => ({ type: 'control_request', request_id: 'reused-mcp', request: {
+  subtype: 'mcp_message', server_name: 'egdesk', message: {
+    jsonrpc: '2.0', id: 7, method: 'tools/call', params: { name: 'egdesk_list_context', arguments: {} },
+  },
+} })
+const toolResult = text => ({ success: true, contentItems: [{ type: 'inputText', text }] })
+async function pendingRpcPair(h, child) {
+  const offset = h.events.requests.length
+  child.send(permissionRequest())
+  child.send(mcpRequest())
+  await until(() => h.events.requests.length === offset + 2)
+  const [permission, mcp] = h.events.requests.slice(offset)
+  assert.equal(permission.method, 'item/commandExecution/requestApproval')
+  assert.equal(mcp.method, 'item/tool/call')
+  return { permission, mcp }
 }
 
 test('the adapter meets the EngineAdapter contract and publishes a ready Claude row from the static check', () => {
@@ -249,7 +271,7 @@ test('approvals and questions become runtime server requests, and answers go bac
   const approval = h.events.requests[0]
   assert.equal(approval.method, 'item/commandExecution/requestApproval')
   assert.deepEqual([approval.params.threadId, approval.params.turnId, approval.params.itemId, approval.params.command, approval.params.cwd], [threadId, turnId, 'toolu_1', 'ls', CWD])
-  assert.deepEqual(approval.params.availableDecisions, ['accept', 'acceptForSession', 'decline', 'cancel'])
+  assert.deepEqual(approval.params.availableDecisions, ['accept', 'decline', 'cancel'], 'no rule means no promise of session permission')
   assert.equal(claudeRpcThreadId(approval.id), threadId)
   assert.equal(h.adapter.owns(approval.id), true)
   assert.equal(h.adapter.owns('claude:00000000-0000-4000-8000-999999999999:perm:1'), false)
@@ -258,33 +280,45 @@ test('approvals and questions become runtime server requests, and answers go bac
   await until(() => child.controlResponses().length === 1)
   assert.deepEqual(child.controlResponses()[0].response, { subtype: 'success', request_id: 'perm-1', response: { behavior: 'allow', updatedInput: { command: 'ls' } } })
   assert.equal(h.adapter.respond(approval.id, { decision: 'accept' }), false, 'answered once')
+  child.send({ type: 'control_request', request_id: 'perm-session', request: { subtype: 'can_use_tool', tool_name: 'Bash', tool_use_id: 'toolu_session', input: { command: 'ls' },
+    permission_suggestions: [{ type: 'addRules', behavior: 'allow', rules: [{ toolName: 'Bash', ruleContent: 'ls' }], destination: 'userSettings' }],
+  } })
+  await until(() => h.events.requests.length === 2)
+  const session = h.events.requests[1]
+  assert.deepEqual(session.params.availableDecisions, ['accept', 'acceptForSession', 'decline', 'cancel'])
+  assert.equal(h.adapter.respond(session.id, { decision: 'acceptForSession' }), true)
+  await until(() => child.controlResponses().length === 2)
+  assert.deepEqual(child.controlResponses()[1].response.response, {
+    behavior: 'allow', updatedInput: { command: 'ls' },
+    updatedPermissions: [{ type: 'addRules', behavior: 'allow', rules: [{ toolName: 'Bash', ruleContent: 'ls' }], destination: 'session' }],
+  })
   // AskUserQuestion: skip is allow with empty answers.
   child.send({ type: 'control_request', request_id: 'ask-1', request: { subtype: 'can_use_tool', tool_name: 'AskUserQuestion', tool_use_id: 'toolu_2', input: { questions: [{ question: 'Which?', header: 'Pick', options: [{ label: 'A' }, { label: 'B' }], multiSelect: true }] } } })
-  await until(() => h.events.requests.length === 2)
-  const question = h.events.requests[1]
+  await until(() => h.events.requests.length === 3)
+  const question = h.events.requests[2]
   assert.equal(question.method, 'item/tool/requestUserInput')
   assert.equal(question.params.questions[0].multiSelect, true)
   h.adapter.respond(question.id, { answers: { q0: { answers: ['A', 'B'] } } })
-  await until(() => child.controlResponses().length === 2)
-  assert.deepEqual(child.controlResponses()[1].response.response.updatedInput.answers, { 'Which?': 'A, B' })
+  await until(() => child.controlResponses().length === 3)
+  assert.deepEqual(child.controlResponses()[2].response.response.updatedInput.answers, { 'Which?': 'A, B' })
   // An EG-Desk tool call through the in-process MCP server.
   child.send({ type: 'control_request', request_id: 'mcp-1', request: { subtype: 'mcp_message', server_name: 'egdesk', message: { jsonrpc: '2.0', id: 7, method: 'tools/call', params: { name: 'egdesk_list_context', arguments: {} } } } })
-  await until(() => h.events.requests.length === 3)
-  const call = h.events.requests[2]
+  await until(() => h.events.requests.length === 4)
+  const call = h.events.requests[3]
   assert.deepEqual([call.method, call.params.tool, call.params.turnId], ['item/tool/call', 'egdesk_list_context', turnId])
   // While a call waits, the process is not put to sleep.
   child.send({ type: 'result', subtype: 'success', is_error: false, session_id: threadId })
   await until(() => h.methods().includes('turn/completed'))
   assert.equal(h.liveTimers(CLAUDE_ADAPTER_DEFAULTS.idleTimeoutMs).length, 0)
   assert.equal(h.adapter.respond(call.id, { success: true, contentItems: [{ type: 'inputText', text: '[]' }] }), true)
-  await until(() => child.controlResponses().length === 3)
-  assert.deepEqual(child.controlResponses()[2].response.response.mcp_response, { jsonrpc: '2.0', id: 7, result: { content: [{ type: 'text', text: '[]' }] } })
+  await until(() => child.controlResponses().length === 4)
+  assert.deepEqual(child.controlResponses()[3].response.response.mcp_response, { jsonrpc: '2.0', id: 7, result: { content: [{ type: 'text', text: '[]' }] } })
   assert.equal(h.liveTimers(CLAUDE_ADAPTER_DEFAULTS.idleTimeoutMs).length, 1, 'idle once nothing waits')
   // A tool EG-Desk cannot show a card for is refused without asking.
   child.send({ type: 'control_request', request_id: 'perm-2', request: { subtype: 'can_use_tool', tool_name: 'WebFetch', tool_use_id: 'toolu_3', input: { url: 'https://example.com' } } })
-  await until(() => child.controlResponses().length === 4)
-  assert.equal(child.controlResponses()[3].response.response.behavior, 'deny')
-  assert.equal(h.events.requests.length, 3)
+  await until(() => child.controlResponses().length === 5)
+  assert.equal(child.controlResponses()[4].response.response.behavior, 'deny')
+  assert.equal(h.events.requests.length, 4)
 })
 
 test('D-S4: an API key in EG-Desk\'s environment stops new starts until confirmed, and the key never reaches claude', async () => {
@@ -354,6 +388,125 @@ test('a crashed process ends only its own turn and pending approvals; the next t
   await h.adapter.startTurn({ threadId, input: [{ type: 'text', text: 'again' }] })
   assert.ok(h.spawns[1].args.includes(`--resume=${threadId}`))
 })
+
+for (const restart of ['crash', 'model change', 'release/resume', 'session eviction']) {
+  test(`RPC ids survive ${restart}: stale permission and MCP replies cannot consume reused CLI requests`, async t => {
+    const h = harness({ maxSessions: restart === 'session eviction' ? 1 : 500 })
+    t.after(() => h.adapter.dispose())
+    const { threadId, child } = await firstTurn(h)
+    child.send(init(threadId))
+    const stale = await pendingRpcPair(h, child)
+    const issued = [stale.permission.id, stale.mcp.id]
+
+    if (restart === 'crash') {
+      child.exit(1, null)
+      await until(() => h.adapter.stats().residentProcesses === 0)
+    } else if (restart === 'model change') {
+      answer(child, threadId)
+      await until(() => h.adapter.stats().activeTurns === 0)
+    } else {
+      await h.adapter.releaseThread(threadId)
+      if (restart === 'session eviction') {
+        const other = await firstTurn(h)
+        const pair = await pendingRpcPair(h, other.child)
+        issued.push(pair.permission.id, pair.mcp.id)
+        assert.notEqual(other.threadId, threadId)
+        assert.equal(h.adapter.stats().sessions, 1, 'the original session record was evicted')
+        await h.adapter.releaseThread(other.threadId)
+      }
+      await h.adapter.resumeThread({ threadId, dynamicTools: TOOL_SPECS })
+    }
+    await h.adapter.startTurn({ threadId, input: [{ type: 'text', text: 'again' }],
+      ...(restart === 'model change' ? { model: 'claude-other' } : {}) })
+    const currentChild = h.children.at(-1)
+    assert.notEqual(currentChild, child)
+    assert.equal(child.exited, true)
+    assert.equal(h.spawns.length, restart === 'session eviction' ? 3 : 2)
+    assert.ok(h.spawns.at(-1).args.includes(`--resume=${threadId}`))
+    const current = await pendingRpcPair(h, currentChild)
+    issued.push(current.permission.id, current.mcp.id)
+    assert.deepEqual(issued.map(id => Number(id.split(':').at(-1))), issued.map((_, index) => index + 1),
+      'one monotonic sequence is shared across permission, MCP, processes and session records')
+    for (const [kind, key] of [['perm', 'permission'], ['mcp', 'mcp']]) {
+      assert.match(current[key].id, new RegExp(`^claude:${threadId}:${kind}:\\d{1,12}$`))
+      assert.equal(claudeRpcThreadId(current[key].id), threadId)
+      assert.equal(h.adapter.owns(stale[key].id), false)
+    }
+
+    const before = [...currentChild.written], oldBefore = [...child.written]
+    for (const [id, result, error] of [
+      [stale.permission.id, { decision: 'accept' }],
+      [stale.permission.id, null, { code: -32000, message: 'late permission error' }],
+      [stale.mcp.id, toolResult('stale success')],
+      [stale.mcp.id, null, { code: -32000, message: 'late MCP error' }],
+    ]) {
+      assert.equal(h.adapter.respond(id, result, error), false)
+      assert.equal(h.adapter.owns(current.permission.id), true, 'new permission still awaits its own reply')
+      assert.equal(h.adapter.owns(current.mcp.id), true, 'new MCP call still awaits its own reply')
+    }
+    await tick()
+    assert.deepEqual(currentChild.written, before, 'no stale response was written to the new child')
+    assert.deepEqual(child.written, oldBefore, 'no response was written to the closed child')
+    assert.equal(h.adapter.respond(current.permission.id, { decision: 'accept' }), true)
+    assert.equal(h.adapter.respond(current.mcp.id, toolResult('current success')), true)
+    await until(() => currentChild.controlResponses().length === 2)
+    assert.deepEqual(currentChild.controlResponses().map(message => message.response), [
+      { subtype: 'success', request_id: 'reused-permission', response: { behavior: 'allow', updatedInput: { command: 'echo hi' } } },
+      { subtype: 'success', request_id: 'reused-mcp', response: { mcp_response: {
+        jsonrpc: '2.0', id: 7, result: { content: [{ type: 'text', text: 'current success' }] },
+      } } },
+    ])
+    assert.equal(h.adapter.respond(current.permission.id, { decision: 'accept' }), false)
+    assert.equal(h.adapter.respond(current.mcp.id, toolResult('duplicate')), false)
+  })
+}
+
+for (const lastKind of ['perm', 'mcp']) {
+  test(`RPC exhaustion fails closed without wrapping, including after restart (last id: ${lastKind})`, async t => {
+    // Fast-forward only the private counter in an in-memory module. No production
+    // reset/seed API, on-disk rewrite, or trillion-request loop is needed.
+    const source = await readFile(new URL('./claude-engine-adapter.mjs', import.meta.url), 'utf8')
+    assert.equal(source.split('let rpcCounter = 0').length, 2)
+    const nearLimit = source.replace('let rpcCounter = 0', 'let rpcCounter = 999_999_999_998')
+      .replace(/from '(\.\/[^']+)'/g, (_, specifier) => `from '${new URL(specifier, import.meta.url).href}'`)
+    const { createClaudeEngineAdapter: createAdapter } = await import(`data:text/javascript;base64,${Buffer.from(nearLimit).toString('base64')}`)
+    const h = harness({ createAdapter })
+    t.after(() => h.adapter.dispose())
+    const { threadId, child } = await firstTurn(h)
+    child.send(init(threadId))
+    child.send(lastKind === 'perm' ? permissionRequest() : mcpRequest())
+    await until(() => h.events.requests.length === 1)
+    const lastId = h.events.requests[0].id
+    assert.equal(lastId, `claude:${threadId}:${lastKind}:999999999999`)
+    assert.equal(claudeRpcThreadId(lastId), threadId)
+
+    const overflow = lastKind === 'perm' ? mcpRequest() : permissionRequest()
+    for (let attempt = 1; attempt <= 2; attempt++) {
+      child.send(overflow)
+      await until(() => child.controlResponses().length === attempt)
+      assert.deepEqual(child.controlResponses().at(-1).response, {
+        subtype: 'error', request_id: overflow.request_id, error: 'Claude RPC id space exhausted',
+      })
+      assert.equal(h.events.requests.length, 1, 'exhaustion never emits a wrapped or 13-digit RPC id')
+      assert.equal(h.adapter.owns(lastId), true, 'the last valid pending request remains answerable')
+    }
+    assert.equal(h.adapter.respond(lastId, lastKind === 'perm' ? { decision: 'accept' } : toolResult('last success')), true)
+    assert.equal(h.adapter.owns(lastId), false)
+    await h.adapter.releaseThread(threadId)
+    await h.adapter.resumeThread({ threadId })
+    await h.adapter.startTurn({ threadId, input: [{ type: 'text', text: 'again' }] })
+    const resumed = h.children.at(-1)
+    resumed.send(permissionRequest())
+    resumed.send(mcpRequest())
+    await until(() => resumed.controlResponses().length === 2)
+    assert.ok(resumed.controlResponses().every(message => message.response.subtype === 'error'
+      && message.response.error === 'Claude RPC id space exhausted'))
+    assert.equal(h.events.requests.length, 1, 'neither broker resets the exhausted adapter counter on restart')
+    assert.equal(h.adapter.respond(lastId, { decision: 'accept' }), false)
+    assert.equal(h.adapter.respond(lastId, null, { code: -32000, message: 'late error' }), false)
+    assert.equal(resumed.controlResponses().length, 2)
+  })
+}
 
 test('two resident processes at most: a busy third is refused, an idle one makes room, and idle conversations quit after 5 minutes', async () => {
   const h = harness()
@@ -473,19 +626,39 @@ test('turn content keeps one text as the SDK prompt line and puts context and im
     ['ENGINE_NOT_INSTALLED', 'ENGINE_VERSION_UNSUPPORTED', 'CLAUDE_CONTROL_TIMEOUT', 'Claude could not be started'])
 })
 
+test('the RPC parser retains the legacy permission/MCP prefixes and the 1–12 digit suffix contract', () => {
+  const threadId = 'abcdefab-cdef-4000-8000-abcdefabcdef'
+  for (const kind of ['perm', 'mcp']) {
+    for (const suffix of ['0', '1', '9', '10', '0001', '999999999999']) {
+      const id = `claude:${threadId}:${kind}:${suffix}`
+      assert.equal(claudeRpcThreadId(id), threadId)
+      assert.equal(claudeRpcThreadId(id.toUpperCase()), threadId)
+    }
+    for (const suffix of ['', '-1', '1.0', '1e3', '1000000000000', 'epoch:1', '1:1', '1x']) {
+      assert.equal(claudeRpcThreadId(`claude:${threadId}:${kind}:${suffix}`), null)
+    }
+  }
+})
+
 // The bridge wiring (codex-bridge-server.mjs) in miniature: the Claude
-// adapter feeds the same runtime, and runtime answers for Claude ids are
-// routed to it through the Codex responder.
-test('the chat runtime runs a Claude conversation end to end through the adapter: answer, approval, stop', async () => {
+// adapter feeds the same runtime, which routes Claude RPC ids without falling
+// through to the Codex responder, even after a child process is replaced.
+test('the chat runtime runs a Claude conversation end to end: answer, approval, stop and stale RPC rejection', async t => {
   const h = harness()
+  t.after(() => h.adapter.dispose())
   const registry = new EngineRegistry({ defaultEngineId: 'codex' })
   const codexAnswers = []
   registry.register(createCodexEngineAdapter({
     request: async method => { throw new Error(`no Codex call expected: ${method}`) },
-    respond: (...args) => h.adapter.owns(args[0]) ? h.adapter.respond(...args) : codexAnswers.push(args),
+    respond: (...args) => { codexAnswers.push(args); return false },
   }))
   registry.register(h.adapter)
-  const chat = new CodexChatRuntime({ engines: registry })
+  const pendingCalls = []
+  const provider = {
+    providerId: 'egdesk-rpc-test', specs: () => TOOL_SPECS,
+    dispatch: (_, event) => new Promise(resolve => pendingCalls.push({ event, resolve })),
+  }
+  const chat = new CodexChatRuntime({ engines: registry, toolProviders: [provider] })
   h.adapter.subscribe({
     notification: (_, message) => { void chat.handleNotification(message) },
     serverRequest: (_, message) => { void chat.handleServerRequest(message) },
@@ -517,6 +690,49 @@ test('the chat runtime runs a Claude conversation end to end through the adapter
   await chat.interrupt({ conversationId: accepted.conversationId, runId: next.runId })
   child.send({ type: 'result', subtype: 'error_during_execution', is_error: true, session_id: accepted.conversationId, terminal_reason: 'aborted_streaming' })
   await until(() => chat.snapshot().runs.find(run => run.runId === next.runId)?.status === 'interrupted')
+
+  // A process dies while both a permission and an asynchronous MCP call wait.
+  const oldTurn = await chat.send({ message: 'Request both tools', conversationId: accepted.conversationId })
+  const stale = await pendingRpcPair(h, child)
+  await until(() => pendingCalls.length === 1
+    && chat.snapshot().runs.find(run => run.runId === oldTurn.runId)?.pendingApprovals.length === 1)
+  child.exit(1, null)
+  await until(() => chat.snapshot().runs.find(run => run.runId === oldTurn.runId)?.status === 'failed')
+  const resumed = await chat.send({ message: 'Try again', conversationId: accepted.conversationId })
+  const currentChild = h.children.at(-1)
+  assert.notEqual(currentChild, child)
+  assert.ok(h.spawns.at(-1).args.includes(`--resume=${accepted.conversationId}`))
+  const current = await pendingRpcPair(h, currentChild)
+  const currentRun = () => chat.snapshot().runs.find(run => run.runId === resumed.runId)
+  await until(() => pendingCalls.length === 2 && currentRun()?.pendingApprovals.length === 1)
+  assert.notEqual(current.permission.id, stale.permission.id)
+  assert.notEqual(current.mcp.id, stale.mcp.id)
+  const before = [...currentChild.written]
+  for (const [id, result, error] of [
+    [stale.permission.id, { decision: 'accept' }],
+    [stale.permission.id, null, { code: -32000, message: 'late permission error' }],
+    [stale.mcp.id, toolResult('stale success')],
+    [stale.mcp.id, null, { code: -32000, message: 'late MCP error' }],
+  ]) assert.equal(chat.respond(id, result, error), false)
+  pendingCalls[0].resolve(toolResult('late provider completion'))
+  await tick()
+  assert.deepEqual(currentChild.written, before, 'late runtime/provider replies write nothing to the restarted child')
+  assert.deepEqual(codexAnswers, [], 'stale Claude replies never fall back to Codex')
+  assert.equal(h.adapter.owns(current.permission.id), true)
+  assert.equal(h.adapter.owns(current.mcp.id), true)
+  assert.equal(chat.dynamicRequestProviders.has(current.mcp.id), true, 'new provider request was not consumed')
+  assert.equal(currentRun().pendingApprovals.length, 1)
+  await chat.replyApproval({ conversationId: resumed.conversationId, runId: resumed.runId,
+    approvalId: currentRun().pendingApprovals[0].approvalId, decision: 'accept' })
+  pendingCalls[1].resolve(toolResult('current provider completion'))
+  await until(() => currentChild.controlResponses().length === 2)
+  assert.equal(currentChild.controlResponses()[0].response.response.behavior, 'allow')
+  assert.deepEqual(currentChild.controlResponses()[1].response.response.mcp_response, {
+    jsonrpc: '2.0', id: 7, result: { content: [{ type: 'text', text: 'current provider completion' }] },
+  })
+  assert.deepEqual(codexAnswers, [])
+  answer(currentChild, resumed.conversationId)
+  await until(() => currentRun().status === 'completed')
   await h.adapter.dispose()
   assert.equal(chat.connectionOf('claude'), 'offline')
   await tick()

@@ -1,8 +1,6 @@
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { execFileSync } from 'node:child_process';
-import { fileURLToPath } from 'node:url';
 import { createHash } from 'node:crypto';
 import { createPrivateQaTempDirectory, isOwnedAndPrivate } from './egdesk-qa-platform.mjs';
 
@@ -28,7 +26,11 @@ export const DEFAULT_LOADER_SOURCE = path.join(
   'Library/Application Support/Firefox/Profiles/egtc3irr.egdesk.default-release/chrome/utils',
 );
 
-const guardPath = fileURLToPath(new URL('./validate-firefox-profile.mjs', import.meta.url));
+export const QA_STAGE1_MODULES = Object.freeze([
+  'resources/surface/EGDeskSurfaceOntology.mjs',
+  'resources/surface/EGDeskSurfaceFileCard.mjs',
+  'resources/surface/EGDeskSurfaceTerminal.mjs',
+]);
 
 function refuse(reason) {
   throw new Error(`Refusing EG-Desk QA profile: ${reason}`);
@@ -49,10 +51,20 @@ export function qaProfileSourceFingerprints(profilePath) {
     'resources/EGDeskChatState.sys.mjs', 'resources/EGDeskTerminalState.sys.mjs', 'resources/terminal.html',
     'resources/egdesk-terminal-init.js', 'resources/EGDeskMarkdown.sys.mjs',
     'resources/EGDeskInputContext.sys.mjs', 'resources/EGDeskBriefingState.sys.mjs',
-    'resources/EGDeskBrowserAgentRuntimeParent.sys.mjs', 'resources/EGDeskBrowserAgentRuntimeChild.sys.mjs'];
+    'resources/EGDeskBrowserAgentRuntimeParent.sys.mjs', 'resources/EGDeskBrowserAgentRuntimeChild.sys.mjs',
+    ...QA_STAGE1_MODULES];
+  const surfaceFile = path.join(profile, 'chrome', names[0]);
+  if (fs.existsSync(surfaceFile) && (fs.realpathSync.native(surfaceFile) !== surfaceFile
+      || !fs.lstatSync(surfaceFile).isFile())) throw new Error('Profile source fingerprint refused a noncanonical file');
+  const surface = fs.existsSync(surfaceFile) ? fs.readFileSync(surfaceFile, 'utf8') : '';
   return Object.fromEntries(names.map(name => {
     const file = path.join(profile, 'chrome', name);
-    if (!fs.existsSync(file)) return [name, null];
+    if (!fs.existsSync(file)) {
+      if (QA_STAGE1_MODULES.includes(name) && surface.includes(path.basename(name))) {
+        throw new Error(`Declared QA profile module is missing: ${name}`);
+      }
+      return [name, null];
+    }
     if (fs.realpathSync.native(file) !== file || !fs.lstatSync(file).isFile()) throw new Error('Profile source fingerprint refused a noncanonical file');
     return [name, createHash('sha256').update(fs.readFileSync(file)).digest('hex')];
   }));
@@ -95,8 +107,8 @@ export function assertQaProfile(profilePath) {
   if (!path.basename(canonical).startsWith(QA_PROFILE_PREFIX) || path.dirname(canonical) !== canonicalTempRoot()) {
     refuse('profile must be a direct egdesk-chat-test-* child of the canonical temp directory');
   }
-  const home = fs.realpathSync.native(os.homedir());
-  if (canonical === path.parse(canonical).root || isAncestor(canonical, home)) {
+  const homes = [os.homedir(), os.userInfo().homedir].map(home => fs.realpathSync.native(home));
+  if (canonical === path.parse(canonical).root || homes.some(home => isAncestor(canonical, home))) {
     refuse('root, home, or an ancestor of home is not a QA profile');
   }
   const markerPath = path.join(canonical, QA_MARKER_NAME);
@@ -106,10 +118,9 @@ export function assertQaProfile(profilePath) {
       !fs.readFileSync(markerPath).equals(QA_MARKER_BYTES)) {
     refuse('marker must be a user-owned regular file with the exact V1 bytes');
   }
-  // The launcher/writer have their own guard. Keep them aligned without
-  // weakening the test-only checks above.
-  const guarded = execFileSync(process.execPath, [guardPath, canonical], { encoding: 'utf8' }).trim();
-  if (guarded !== canonical) refuse('launcher guard disagrees with QA profile validation');
+  // These in-process checks are stricter than validate-firefox-profile.mjs:
+  // both homes are protected and only marked direct temporary children pass.
+  // Do not launch a second process just to re-check this test-only path.
   return canonical;
 }
 

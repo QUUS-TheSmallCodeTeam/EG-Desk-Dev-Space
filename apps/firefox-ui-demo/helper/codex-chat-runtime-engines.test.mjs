@@ -66,6 +66,27 @@ test('runtime refuses missing, duplicate or invalid engine adapters before any w
   assert.throws(() => new CodexChatRuntime({ engines: [{ ...codexEngine([]), startTurn: undefined }] }), { code: 'INVALID_ENGINE_ADAPTER' })
 })
 
+test('Codex undefined response remains successful for approvals, answers and skipped questions', async () => {
+  const calls = [], replies = []
+  const chat = new CodexChatRuntime({ engines: [codexEngine(calls, { respond: (...args) => { replies.push(args) } })] })
+  chat.setConnection(true)
+  const run = await chat.send({ message: 'Ask me' })
+  await chat.handleServerRequest({ id: 1, method: 'item/commandExecution/requestApproval', params: {
+    threadId: run.conversationId, turnId: run.runId, itemId: 'bash', command: 'ls', availableDecisions: ['accept', 'decline'],
+  } })
+  const approval = chat.snapshot(run.conversationId).runs[0].pendingApprovals[0]
+  assert.equal((await chat.replyApproval({ ...run, approvalId: approval.approvalId, decision: 'accept' })).accepted, true)
+  for (const [index, action] of ['submit', 'skip'].entries()) {
+    await chat.handleServerRequest({ id: 2 + index, method: 'item/tool/requestUserInput', params: {
+      threadId: run.conversationId, turnId: run.runId, itemId: `question-${index}`, questions: [{ id: 'q0', header: 'Pick', question: 'Which?', options: [{ label: 'First', description: 'One' }] }],
+    } })
+    const input = chat.snapshot(run.conversationId).runs[0].pendingUserInputs.at(-1)
+    const accepted = await chat.replyUserInput({ ...run, userInputId: input.userInputId, action, answers: [{ questionId: 'q0', optionIndex: 0 }] })
+    assert.deepEqual([accepted.accepted, accepted.status], [true, 'replySent'])
+  }
+  assert.deepEqual(replies.map(reply => reply[0]), [1, 2, 3])
+})
+
 async function withStore(prefix, action) {
   const dataDir = createPrivateQaTempDirectory(prefix)
   let store = null

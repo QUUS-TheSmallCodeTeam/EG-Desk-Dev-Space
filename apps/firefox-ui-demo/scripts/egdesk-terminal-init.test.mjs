@@ -2,6 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { compileFunction } from 'node:vm';
+import { readSurfaceSource } from './egdesk-surface-source.mjs';
 import * as TerminalState from '../overlay/resources/EGDeskTerminalState.sys.mjs';
 
 const resources = new URL('../overlay/resources/', import.meta.url);
@@ -323,7 +324,7 @@ test('closing during spawn observes and closes the late owned session without en
 });
 
 test('production Card routes a shell request to a separate Card and rejects other frames and paths', () => {
-  const surfaceSource = readFileSync(new URL('../overlay/JS/eg-desk-surface.uc.js', import.meta.url), 'utf8').replace(/\r\n/g, '\n');
+  const surfaceSource = readSurfaceSource();
   const body = surfaceSource.match(/    const onTerminalReady = \(ev\) => \{([\s\S]*?)\n    \};/)?.[1];
   assert.ok(body, 'exercise the production iframe-message boundary');
   const ownFrame = {}, opened = [], title = { textContent: '' };

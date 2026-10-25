@@ -16,6 +16,12 @@ import { assertModelSelection } from './codex-model-catalog.mjs'
 import { mcpControlKind, nativeMcpServerKind, strongerControlKind } from './codex-inherited-mcp.mjs'
 import { DEFAULT_COMPUTER_CONTROL_POLICY, loadComputerControlOffOverrides, normalizeComputerControlPolicy, verifyComputerControlOff } from './codex-computer-control.mjs'
 import { RunOutputStore } from './codex-run-outputs.mjs'
+import { claudeRpcThreadId } from './claude-engine-adapter.mjs'
+import { CLAUDE_RATE_LIMIT_WINDOWS } from './claude-stream-translate.mjs'
+import { publicEpochMs } from './codex-account-usage.mjs'
+// Read tools work with an observe grant; interaction tools still require the
+// provider's Card, same-site, focus and wait-budget checks on every call.
+import { BROWSER_INTERACTION_TOOL_NAMES, BROWSER_READ_TOOL_NAMES } from './egdesk-browser-tool-runtime.mjs'
 
 const TERMINAL = new Set(['completed', 'interrupted', 'failed'])
 const ITEM_STATUS = new Set(['inProgress', 'completed', 'failed', 'declined'])
@@ -36,10 +42,7 @@ const REVIVE_TOOLS = new Set(['resumeAgent', 'sendInput', 'followupTask'])
 const AGENT_STATE = { pendingInit: 'starting', running: 'running', completed: 'completed', errored: 'errored', interrupted: 'interrupted', shutdown: 'closed', notFound: 'notFound' }
 const ACTIVITY_STATE = { started: 'running', interacted: 'running', interrupted: 'interrupted', completed: 'completed' }
 const SUBAGENT_DONE = new Set(['completed', 'errored', 'interrupted', 'closed', 'notFound'])
-// Guarded Browser tools a selected Card with an interaction grant may call.
-// Observation alone never unlocks them; same-site, focus and wait budgets are
-// enforced again by the Browser provider and the actor.
-const BROWSER_INTERACTION_TOOLS = ['egdesk_browser_navigate', 'egdesk_browser_click', 'egdesk_browser_fill', 'egdesk_browser_scroll', 'egdesk_browser_press', 'egdesk_browser_wait']
+const RATE_LIMIT_STATUSES = new Set(['allowed', 'allowed_warning', 'rejected'])
 const idText = value => typeof value === 'string' && value.length <= 300 ? value : null
 const runKey = (threadId, turnId) => `${threadId}/${turnId}`
 const copy = value => JSON.parse(JSON.stringify(value))
@@ -224,6 +227,7 @@ function safeUserInputQuestions(value) {
       questionId: question.id, header: publicText(question.header, 200), question: publicText(question.question, 2000),
       options: options && options.map(option => ({ label: publicText(option.label, 200), description: publicText(option.description, 1000) })),
       allowsOther: Boolean(options), isSecret: question.isSecret === true,
+      ...(question.multiSelect === true ? { multiSelect: true } : {}),
       rawLabels: options && options.map(option => option.label),
     })
   }
@@ -573,6 +577,18 @@ function cleanNotification(method, p, engineId = 'codex') {
     plan: Array.isArray(p.plan) ? p.plan.slice(0, 40).map(step => ({ step: publicText(step.step, 1000), status: ['pending', 'inProgress', 'completed'].includes(step.status) ? step.status : 'pending' })) : [],
   }
   if (method === 'error') return { ...base, error: publicError(p.error, 'TURN_ERROR', engineId), willRetry: p.willRetry === true }
+  if (method === 'egdesk/engine/rateLimit') {
+    if (engineId !== 'claude' || p.engineId !== engineId || !base.turnId || !RATE_LIMIT_STATUSES.has(p.status)) return null
+    const fraction = (value, max) => Number.isFinite(value) ? Math.min(max, Math.max(0, value)) : null
+    return { ...base, rateLimit: {
+      engineId, status: p.status,
+      window: CLAUDE_RATE_LIMIT_WINDOWS.includes(p.window) ? p.window : null,
+      windowMinutes: Number.isSafeInteger(p.windowMinutes) && p.windowMinutes > 0 && p.windowMinutes <= 525600 ? p.windowMinutes : null,
+      resetsAt: publicEpochMs(p.resetsAt), utilization: fraction(p.utilization, 1), usedPercent: fraction(p.usedPercent, 100),
+      overageStatus: RATE_LIMIT_STATUSES.has(p.overageStatus) ? p.overageStatus : null,
+      creditsRequired: p.creditsRequired === true, autoResume: false,
+    } }
+  }
   if (method === 'thread/tokenUsage/updated') return { ...base, usage: { modelContextWindow: Number.isFinite(p.tokenUsage?.modelContextWindow) ? p.tokenUsage.modelContextWindow : null, usedTokens: Number.isFinite(p.tokenUsage?.last?.totalTokens) ? p.tokenUsage.last.totalTokens : null } }
   if (method === 'serverRequest/resolved') return { ...base, requestId: p.requestId }
   return null
@@ -626,10 +642,11 @@ export class CodexChatRuntime {
     if (!(engines instanceof EngineRegistry)) for (const adapter of engines || [createCodexEngineAdapter({ request, respond })]) this.engines.register(adapter)
     const codex = this.engines.get('codex')
     if (typeof codex?.request !== 'function') throw chatError('INVALID_ENGINE_ADAPTER', 'The Codex engine adapter is required', 500)
-    // Codex-only escape hatch (config/read, bounded-QA proofs) and responder.
+    // Codex-only escape hatch (config/read, bounded-QA proofs).
     this.request = codex.request
     this.nativeRespond = codex.respond
     this.threadEngines = new Map()
+    this.threadResumeCwds = new Map()
     // CHAT-09: conversationId → { stateless, forkedFrom } of ordinary threads
     // started without saved history or branched from another conversation.
     this.threadSessions = new Map()
@@ -648,7 +665,19 @@ export class CodexChatRuntime {
           result = { success: false, contentItems: [{ type: 'inputText', text: JSON.stringify({ error: failure }) }] }
         }
       }
-      return error === undefined ? this.nativeRespond(id, result) : this.nativeRespond(id, result, error)
+      // Adapter RPC IDs are not Codex RPC IDs. Even a late Claude response
+      // must never fall through to the Codex responder after its broker closes.
+      let adapter = this.engines.adapters().find(candidate => candidate.owns?.(id))
+      if (!adapter) {
+        const threadId = claudeRpcThreadId(id)
+        if (threadId) {
+          if (this.threadEngine(threadId) !== 'claude') return false
+          adapter = this.engineOf(threadId)
+          if (!adapter) return false
+        }
+      }
+      const reply = adapter ? (...args) => adapter.respond(...args) : this.nativeRespond
+      return error === undefined ? reply(id, result) : reply(id, result, error)
     }
     this.store = store
     this.requireStore = requireStore
@@ -723,6 +752,10 @@ export class CodexChatRuntime {
   // Runtime state belongs to one engine: a run by its engine record, a thread
   // by its binding, a `${threadId}/…` key by its thread. Unbound means Codex.
   runEngine(run) { return run?.engine?.id || 'codex' }
+  engineOwnerHash(engineId, engineProfileId = null) {
+    // Keep Codex's existing unprefixed bridge account identity byte-for-byte.
+    return ownerHash(engineId === 'codex' ? this.getOwnerKey() : this.engines.require(engineId).ownerKey(engineProfileId))
+  }
   threadEngine(conversationId) { return this.threadEngines.get(conversationId) || 'codex' }
   keyEngine(key) {
     for (const [conversationId, engineId] of this.threadEngines) if (engineId !== 'codex' && key.startsWith(`${conversationId}/`)) return engineId
@@ -737,6 +770,52 @@ export class CodexChatRuntime {
   requestedEngine(body) {
     if (body.engineId === undefined || body.engineId === null) return null
     return this.engines.require(body.engineId).id
+  }
+
+  // Resolve before bridge authentication, including after a helper restart.
+  // The event checkpoint is authority; the row and an explicit choice must
+  // agree with it. Only a new chat uses the registry default. Auth first reads
+  // the binding, refreshes the selected account, then verifies that account.
+  requestEngine(body = {}, { verifyAccount = true } = {}) {
+    if (this.requireStore) this.assertStore()
+    const requested = this.requestedEngine(body)
+    const cid = idText(body.conversationId)
+    if (body.conversationId != null && !cid) throw chatError('INVALID_THREAD_ID', 'Invalid conversationId')
+    const clientThreadId = idText(body.clientThreadId) || idText(body.thread?.id)
+    let thread = this.store && clientThreadId ? this.store.getConversation(clientThreadId) : null
+    // Fork names its source conversation and a new destination client ID.
+    // Pairing is still enforced by send/resume/fork, not by this auth lookup.
+    if (this.store && cid && thread?.conversationId !== cid) thread = this.store.getConversationByNative?.(cid) || null
+    if (this.store && cid && !thread) throw chatError('NATIVE_BINDING_MISMATCH', 'Native conversation is not bound to a local chat', 409)
+    const boundCid = cid || thread?.conversationId
+    let bound = boundCid ? this.threadEngines.get(boundCid) : thread?.engineId
+    if (this.store && boundCid && thread) {
+      const binding = this.readNativeBinding(thread.clientThreadId, boundCid)
+      bound = binding.recordedEngine
+      this.engines.resolve({ requested, bound })
+      if (verifyAccount) this.assertNativeAccount(thread.clientThreadId, boundCid, bound, binding)
+    }
+    return this.engines.resolve({ requested, bound })
+  }
+
+  assertEngineContext(body, engineId) {
+    if (engineId !== 'claude') return
+    const nonempty = value => value != null && (!Array.isArray(value) || value.length > 0)
+    const capabilities = body.contextCapabilities
+    const resolution = body.contextResolution
+    if (['contextSnapshotIds', 'attachments', 'selectedSources'].some(key => nonempty(body[key])) ||
+        (capabilities != null && (typeof capabilities !== 'object' || Array.isArray(capabilities) || Object.values(capabilities).some(value => value !== false))) ||
+        (resolution != null && (typeof resolution !== 'object' || Array.isArray(resolution) || nonempty(resolution.chosen)))) {
+      throw chatError('CLAUDE_CONTEXT_UNSUPPORTED', '현재 Claude 연결에서는 선택한 자료를 사용할 수 없어 보내지 않았습니다. 자료를 제외한 뒤 다시 보내세요.', 409)
+    }
+  }
+
+  providerSupportsEngine(provider, engineId) {
+    // B2 is deferred: these providers still use Codex account/schema authority.
+    // Exclude them even during manifest verification; an old manifest that
+    // requires them must fail closed, never silently lose its recorded tools.
+    return engineId !== 'claude' || (provider !== this.contexts &&
+      !['egdesk-context-v1', 'egdesk-browser', 'egdesk-plan', COMPUTER_PROVIDER_ID].includes(provider.providerId))
   }
 
   // Which engine, version and engine account slot ran a turn; stored with the
@@ -765,9 +844,10 @@ export class CodexChatRuntime {
     catch (error) { throw this.providerFailure(error, provider) }
   }
 
-  collectToolSpecs(policy = null, { forManifest = false, browserInteraction = false, toolCeiling = null } = {}) {
+  collectToolSpecs(policy = null, { forManifest = false, browserInteraction = false, toolCeiling = null, engineId = 'codex' } = {}) {
     const specs = [], owners = new Map(), selected = [], manifest = []
     for (const [index, provider] of this.toolProviders.entries()) {
+      if (!this.providerSupportsEngine(provider, engineId)) continue
       const providerId = provider === this.contexts ? 'egdesk-context-v1' : provider.providerId
       // Ordinary Browser attachments are immutable Context sources, not live
       // actor grants. Keep older persisted Browser manifests verifiable without
@@ -787,9 +867,9 @@ export class CodexChatRuntime {
         const browser = provider.providerId === 'egdesk-browser' && spec?.name?.startsWith('egdesk_browser_')
         // AGENT-04: an Agent limited to watching gets only the computer tools that read.
         if (computerTools && !forManifest && !ceilingAllowsComputerTool(toolCeiling, spec?.type === 'function' ? computerToolMethod(spec.name) : '')) continue
-        if (policy === READ_ONLY_QA && !contextRead && !(browser && spec.name === 'egdesk_browser_observe')) continue
-        if (policy === BROWSER_BOUNDED && !contextRead && !(browser && (spec.name === 'egdesk_browser_observe'
-          || (browserInteraction && BROWSER_INTERACTION_TOOLS.includes(spec.name))))) continue
+        if (policy === READ_ONLY_QA && !contextRead && !(browser && BROWSER_READ_TOOL_NAMES.includes(spec.name))) continue
+        if (policy === BROWSER_BOUNDED && !contextRead && !(browser && (BROWSER_READ_TOOL_NAMES.includes(spec.name)
+          || (browserInteraction && BROWSER_INTERACTION_TOOL_NAMES.includes(spec.name))))) continue
         if (policy === FIXTURE_BROWSER_QA && !contextRead && !(browser && ['egdesk_browser_observe', 'egdesk_browser_click', 'egdesk_browser_fill'].includes(spec.name))) continue
         // AGENT-04: a new thread's catalog never offers Browser tools the Agent may not use.
         if (browser && !ceilingAllowsBrowserTool(toolCeiling, spec.name)) continue
@@ -1018,7 +1098,7 @@ export class CodexChatRuntime {
     this.streamId = randomUUID()
     this.seq = 0
     const ownThread = conversationId => this.threadEngine(conversationId) === engineId
-    for (const map of [this.threads, this.threadToolOwners, this.threadToolManifests, this.threadToolManifestStatus, this.threadSessions, this.pendingStarts, this.pendingResumes]) {
+    for (const map of [this.threads, this.threadResumeCwds, this.threadToolOwners, this.threadToolManifests, this.threadToolManifestStatus, this.threadSessions, this.pendingStarts, this.pendingResumes]) {
       for (const conversationId of [...map.keys()]) if (ownThread(conversationId)) map.delete(conversationId)
     }
     for (const set of [this.browserRegisteredThreads, this.loadedThreads, this.uncertainThreads, this.incompleteHistory]) {
@@ -1114,6 +1194,7 @@ export class CodexChatRuntime {
       qaReceipt: old.qaReceipt || null,
     })
     this.loadedThreads.add(id)
+    if (this.threadEngine(id) !== 'codex' && this.threads.get(id).cwd) this.threadResumeCwds.set(id, this.threads.get(id).cwd)
     if (this.threads.size > MAX_THREADS) {
       const oldest = [...this.threads.keys()].find(key => key !== id && ![...this.runs.values()].some(run => run.conversationId === key && !TERMINAL.has(run.status)))
       if (oldest) { this.threads.delete(oldest); this.loadedThreads.delete(oldest); this.truncated = true }
@@ -1164,7 +1245,7 @@ export class CodexChatRuntime {
       status: 'inProgress', stopRequested: false, stopConfirmed: false,
       messages: [], activities: [], artifacts: [], pendingApprovals: [], pendingUserInputs: [], subAgents: [], error: null,
       createdAt: this.now(), truncated: false, historyComplete: true,
-      ...(this.store ? { accountIdentity: { ownerHash: ownerHash(this.getOwnerKey()), status: 'verified' } } : {}),
+      ...(this.store ? { accountIdentity: { ownerHash: this.engineOwnerHash(this.threadEngine(threadId)), status: 'verified' } } : {}),
       cwdPublic: publicText(this.threads.get(threadId)?.cwd || '', 2000),
       // Runs from before engine records, or seen only in native history, keep
       // the thread's engine with an unknown version and account slot.
@@ -1219,10 +1300,16 @@ export class CodexChatRuntime {
     validateChatCwd(body)
     if (this.requireStore) this.assertStore()
     const requestedEngineId = this.requestedEngine(body)
-    const engineId = this.engines.resolve({ requested: requestedEngineId, bound: this.threadEngines.get(idText(body.conversationId)) })
-    // Durable ownership is still the Codex account hash. Fail closed rather
-    // than bind another engine's conversation to it.
-    if (this.store && engineId !== 'codex') throw engineError('ENGINE_UNAVAILABLE', 'Local chat history can bind only Codex conversations so far')
+    const clientThreadId = idText(body.clientThreadId) || idText(body.thread?.id)
+    const conversationId = idText(body.conversationId)
+    if (body.conversationId != null && !conversationId) throw chatError('INVALID_THREAD_ID', 'Invalid conversationId')
+    const storedThread = this.store && clientThreadId ? this.store.getConversation(clientThreadId) : null
+    let boundPolicy = this.threads.get(conversationId)?.executionPolicy || null
+    // After a helper restart the binding, not the default engine or Codex's
+    // connection state, determines both routing and the account to verify.
+    if (conversationId && storedThread?.conversationId === conversationId) boundPolicy = this.assertNativeAccount(clientThreadId, conversationId, requestedEngineId)
+    const engineId = this.requestEngine(body)
+    this.assertEngineContext(body, engineId)
     this.assertReady(engineId)
     if (typeof body.message !== 'string' || !body.message.trim()) throw chatError('EMPTY_MESSAGE', 'Message is required')
     if (body.message.length > MAX_TEXT) throw chatError('MESSAGE_TOO_LONG', `Message exceeds ${MAX_TEXT} characters`)
@@ -1278,11 +1365,8 @@ export class CodexChatRuntime {
       if (previous.fingerprint !== fingerprint) throw chatError('REQUEST_CONFLICT', 'requestId was already used for another request', 409)
       return previous.promise
     }
-    const clientThreadId = idText(body.clientThreadId) || idText(body.thread?.id)
-    const conversationId = idText(body.conversationId)
-    if (body.conversationId != null && !conversationId) throw chatError('INVALID_THREAD_ID', 'Invalid conversationId')
     if (this.store && !clientThreadId) throw chatError('INVALID_CLIENT_THREAD_ID', 'clientThreadId is required for durable chat', 400)
-    const requestOwnerHash = this.store ? ownerHash(this.getOwnerKey()) : null
+    const requestOwnerHash = this.store ? this.engineOwnerHash(engineId) : null
     if (this.store) {
       const knownThread = this.store.getConversation(clientThreadId)
       const knownRequest = knownThread ? this.store.getRequest({ clientThreadId, requestId }) : null
@@ -1300,7 +1384,7 @@ export class CodexChatRuntime {
         }
       }
     }
-    if (this.store && !requestOwnerHash) throw chatError('NATIVE_ACCOUNT_UNVERIFIED', 'Codex account identity is unavailable; local history remains readable', 403)
+    if (this.store && !requestOwnerHash) throw chatError('NATIVE_ACCOUNT_UNVERIFIED', 'AI engine account identity is unavailable; local history remains readable', 403)
     // A new request (replays above keep their first answer) may name only a
     // model the engine lists, and only an effort that model lists. Without a
     // list nothing changes. Unchosen settings still meet assertProcessConfiguration.
@@ -1331,7 +1415,6 @@ export class CodexChatRuntime {
       })
     }
     let acceptedLocal = null
-    let boundPolicy = this.threads.get(conversationId)?.executionPolicy || null
     if (!this.store && requestedPolicy && boundPolicy && requestedPolicy !== boundPolicy) throw chatError('POLICY_TRANSITION_FORBIDDEN', 'Start an explicit new conversation to change bounded execution modes', 409)
     if (!this.store && conversationId && requestedPolicy === FIXTURE_BROWSER_QA && !boundPolicy) throw chatError('FIXTURE_QA_NEW_CONVERSATION_REQUIRED', 'Start an explicit new fixture QA conversation with its narrowed native tool catalog', 409)
     if (!this.store && qaMarkers && (requestedPolicy || boundPolicy) !== READ_ONLY_QA) throw chatError('QA_COMMAND_POLICY_REQUIRED', 'Native QA command receipt requires readOnlyQa policy', 400)
@@ -1348,7 +1431,6 @@ export class CodexChatRuntime {
         if (conversationId && (!thread || thread.conversationId !== conversationId)) throw chatError('NATIVE_BINDING_MISMATCH', 'Native conversation is not bound to this local chat', 409)
         // Schema v2 also locks the local chat to the engine of its first send.
         if (requestedEngineId && thread?.engineId && thread.engineId !== requestedEngineId) throw engineError('ENGINE_MISMATCH', 'This conversation runs on another AI engine; continue in a new conversation')
-        if (conversationId) boundPolicy = this.assertNativeAccount(clientThreadId, conversationId, requestedEngineId)
         if (requestedPolicy && boundPolicy && requestedPolicy !== boundPolicy) throw chatError('POLICY_TRANSITION_FORBIDDEN', 'Start an explicit new conversation to change bounded execution modes', 409)
         if (conversationId && requestedPolicy === FIXTURE_BROWSER_QA && !boundPolicy) throw chatError('FIXTURE_QA_NEW_CONVERSATION_REQUIRED', 'Start an explicit new fixture QA conversation with its narrowed native tool catalog', 409)
         if (qaMarkers && (requestedPolicy || boundPolicy) !== READ_ONLY_QA) throw chatError('QA_COMMAND_POLICY_REQUIRED', 'Native QA command receipt requires readOnlyQa policy', 400)
@@ -1411,16 +1493,16 @@ export class CodexChatRuntime {
     const record = { fingerprint, settled: false, promise: null, engineId: context.engine.id }
     record.promise = this.startTurn(body, context).catch(error => {
       const failure = error instanceof Error ? error : new Error('Codex request failed')
-      if (this.store && acceptedLocal && !context.turnStartAttempted && [
+      if (this.store && acceptedLocal && !context.turnStartAttempted && (failure.definite === true || [
         'QA_POLICY_UNVERIFIED', 'QA_TOOL_ISOLATION_UNVERIFIED', 'QA_POLICY_UNAVAILABLE',
         'BROWSER_POLICY_REQUIRED', 'INVALID_BROWSER_SELECTION', 'BROWSER_UI_UNAVAILABLE',
         'BROWSER_TOOLS_UNAVAILABLE', 'QA_REQUIRES_NEW_CONVERSATION',
         'PROFILE_CEILING_UNAVAILABLE', 'PROFILE_CEILING_UNVERIFIED',
-      ].includes(failure.code)) {
+      ].includes(failure.code))) {
         try {
           this.store.recordRequestOutcome({
             clientThreadId: context.clientThreadId, requestId, ts: this.now(),
-            outcome: { accepted: false, dispatchStatus: 'rejected', conversationId: context.conversationId || null, localRunId: context.localRunId, error: publicError(failure, 'QA_POLICY_UNVERIFIED') },
+            outcome: { accepted: false, dispatchStatus: 'rejected', conversationId: context.conversationId || null, localRunId: context.localRunId, error: publicError(failure, failure.definite === true ? 'TURN_START_FAILED' : 'QA_POLICY_UNVERIFIED', context.engine.id) },
           })
         } catch { this.storeHealthy = false }
       }
@@ -1533,16 +1615,15 @@ export class CodexChatRuntime {
     }
   }
 
-  assertNativeAccount(clientThreadId, conversationId, engineId = null) {
-    if (!this.store) return this.threads.get(conversationId)?.executionPolicy || null
-    const expected = ownerHash(this.getOwnerKey())
-    if (!expected) throw chatError('NATIVE_ACCOUNT_UNVERIFIED', 'Current Codex account identity is unavailable', 403)
+  readNativeBinding(clientThreadId, conversationId) {
     let afterSeq = 0
     let recorded = null
     let executionPolicy = null
     let browserToolsRegistered = false
     let toolManifest = null
     let recordedEngine = 'codex'
+    let recordedProfile = null
+    let recordedCwd = null
     let session = null
     for (let page = 0; page < 1000; page++) {
       const result = this.store.listEvents(clientThreadId, { afterSeq, limit: 500 })
@@ -1550,6 +1631,8 @@ export class CodexChatRuntime {
         recorded = event.details.ownerHash || null
         // Bindings recorded before engine records are Codex.
         recordedEngine = idText(event.details.engine?.id) ? event.details.engine.id : 'codex'
+        recordedProfile = idText(event.details.engine?.engineProfileId)
+        recordedCwd = event.details.cwd ?? null
         executionPolicy = event.details.executionPolicy || null
         browserToolsRegistered = event.details.browserToolsRegistered === true
         toolManifest = event.details.toolManifest ?? null
@@ -1563,15 +1646,28 @@ export class CodexChatRuntime {
       if (page === 999) throw chatError('NATIVE_ACCOUNT_UNVERIFIED', 'Native account checkpoint exceeds the bounded read', 409)
     }
     if (!recorded) throw chatError('NATIVE_ACCOUNT_UNVERIFIED', 'Native account ownership was not recorded', 409)
+    const thread = this.store.getConversation(clientThreadId)
+    if (thread?.engineId && thread.engineId !== recordedEngine) throw engineError('ENGINE_MISMATCH', 'Stored conversation and native engine binding disagree')
+    if (thread?.engineProfileId && recordedProfile && thread.engineProfileId !== recordedProfile) throw chatError('NATIVE_ACCOUNT_MISMATCH', 'Stored conversation and native account slot disagree', 403)
+    return { recorded, recordedEngine, recordedProfile, recordedCwd, executionPolicy, browserToolsRegistered, toolManifest, session }
+  }
+
+  assertNativeAccount(clientThreadId, conversationId, engineId = null, binding = null) {
+    if (!this.store) return this.threads.get(conversationId)?.executionPolicy || null
+    const { recorded, recordedEngine, recordedProfile, recordedCwd, executionPolicy, browserToolsRegistered, toolManifest, session } = binding || this.readNativeBinding(clientThreadId, conversationId)
     if (engineId && engineId !== recordedEngine) throw engineError('ENGINE_MISMATCH', 'This conversation runs on another AI engine; continue in a new conversation')
-    // Durable ownership is the Codex account hash until engine accounts land.
-    if (recordedEngine !== 'codex') throw engineError('ENGINE_UNAVAILABLE', 'This conversation\'s AI engine is not available')
-    if (recorded !== expected) throw chatError('NATIVE_ACCOUNT_MISMATCH', 'This native conversation belongs to a different Codex account', 403)
+    const expected = this.engineOwnerHash(recordedEngine, recordedProfile)
+    if (!expected) throw chatError('NATIVE_ACCOUNT_UNVERIFIED', 'Current AI engine account identity is unavailable', 403)
+    if (recorded !== expected) throw chatError('NATIVE_ACCOUNT_MISMATCH', 'This native conversation belongs to a different AI engine account', 403)
     if (executionPolicy !== null && ![READ_ONLY_QA, BROWSER_BOUNDED, FIXTURE_BROWSER_QA].includes(executionPolicy)) throw chatError('QA_POLICY_UNVERIFIED', 'Stored native execution policy is unknown', 409)
     if (browserToolsRegistered) this.browserRegisteredThreads.add(conversationId)
     else this.browserRegisteredThreads.delete(conversationId)
     this.threadToolManifests.set(conversationId, toolManifest)
     this.threadEngines.set(conversationId, recordedEngine)
+    if (recordedEngine !== 'codex') {
+      if (typeof recordedCwd === 'string' && path.isAbsolute(recordedCwd) && recordedCwd.length <= 4096 && !recordedCwd.includes('\0')) this.threadResumeCwds.set(conversationId, recordedCwd)
+      else this.threadResumeCwds.delete(conversationId)
+    }
     if (session) this.threadSessions.set(conversationId, session)
     else this.threadSessions.delete(conversationId)
     return executionPolicy
@@ -1579,14 +1675,14 @@ export class CodexChatRuntime {
 
   persistNativeBinding(context, conversationId) {
     if (!this.store) return
-    const identityHash = ownerHash(this.getOwnerKey())
-    if (!identityHash || identityHash !== context.ownerHash) throw chatError('ACCOUNT_CHANGED', 'Codex account changed before native thread binding', 409)
+    const identityHash = this.engineOwnerHash(context.engine.id, context.engine.engineProfileId)
+    if (!identityHash || identityHash !== context.ownerHash) throw chatError('ACCOUNT_CHANGED', 'AI engine account changed before native thread binding', 409)
     try {
       this.store.appendEvent({
         eventKey: `native-thread:${context.requestId}`, clientThreadId: context.clientThreadId,
         requestId: context.requestId,
         localRunId: context.localRunId, event: 'native.thread.bound',
-        details: { conversationId, ownerHash: identityHash, executionPolicy: context.executionPolicy || null, browserToolsRegistered: context.browserToolsRegistered === true, toolManifest: context.toolManifest || [], engine: context.engine, ...(context.stateless ? { stateless: true } : {}) }, ts: this.now(),
+        details: { conversationId, ownerHash: identityHash, executionPolicy: context.executionPolicy || null, browserToolsRegistered: context.browserToolsRegistered === true, toolManifest: context.toolManifest || [], engine: context.engine, ...(context.engine.id !== 'codex' ? { cwd: this.threadResumeCwds.get(conversationId) || null } : {}), ...(context.stateless ? { stateless: true } : {}) }, ts: this.now(),
       })
       this.store.bindNative({ clientThreadId: context.clientThreadId, conversationId, engineId: context.engine.id, engineProfileId: context.engine.engineProfileId })
     } catch {
@@ -1629,8 +1725,8 @@ export class CodexChatRuntime {
     context.computerControl = !bounded && engine.id === 'codex' && this.computerControlReported ? { policy: computerPolicy } : null
     context.ceilingNotices = []
     const preparedProviders = new Map()
-    for (const provider of this.toolProviders) if ((!bounded && provider.providerId !== 'egdesk-browser') ||
-        (bounded && (provider === this.contexts || provider.providerId === 'egdesk-browser'))) {
+    for (const provider of this.toolProviders) if (this.providerSupportsEngine(provider, engine.id) && ((!bounded && provider.providerId !== 'egdesk-browser') ||
+        (bounded && (provider === this.contexts || provider.providerId === 'egdesk-browser')))) {
       let input = body
       if (provider.providerId === 'egdesk-browser' && ceiling?.browser === 'none') {
         // No Browser grant at all, even for a Card the user selected.
@@ -1659,6 +1755,9 @@ export class CodexChatRuntime {
       ? { ...(toolContext || {}), ...Object.fromEntries(Object.entries(extraContext).map(([key, value]) => [key, { kind: 'application', value }])) }
       : toolContext
     if (epoch !== this.epochOf(engine.id)) throw chatError('ACCOUNT_CHANGED', 'Codex account or connection changed', 409)
+    if (this.store && engine.id === 'claude' && this.engineOwnerHash(engine.id, context.engine.engineProfileId) !== context.ownerHash) {
+      throw Object.assign(chatError('ACCOUNT_CHANGED', 'AI engine account changed before dispatch', 409), { definite: true })
+    }
     if (bounded && !this.qaReady()) throw chatError('QA_POLICY_UNAVAILABLE', 'Bounded execution requires a verified native policy contract', 503)
     const qaOverrides = bounded ? await loadQaThreadOverrides(this.request, {
       threadId: context.conversationId && this.loadedThreads.has(context.conversationId) ? context.conversationId : null,
@@ -1696,7 +1795,7 @@ export class CodexChatRuntime {
         // not claim a clean QA catalog if an older ordinary thread could still
         // advertise write-capable EG-Desk or Browser tools to the model.
         const registered = this.threadToolOwners.get(cid)
-        const readOnlyNames = new Set([toolKey(null, 'egdesk_list_context'), toolKey(null, 'egdesk_read_source'), toolKey(null, 'egdesk_browser_observe')])
+        const readOnlyNames = new Set(['egdesk_list_context', 'egdesk_read_source', ...BROWSER_READ_TOOL_NAMES].map(name => toolKey(null, name)))
         if (qa && (!registered || [...registered.keys()].some(name => !readOnlyNames.has(name)))) {
           throw chatError('QA_REQUIRES_NEW_CONVERSATION', 'This thread has unknown or broader dynamic tools; start a new read-only QA conversation', 409)
         }
@@ -1760,7 +1859,7 @@ export class CodexChatRuntime {
       }
       if (bounded) this.persistExecutionPolicy(context, cid)
     } else {
-      const nativeTools = this.collectToolSpecs(policy, { browserInteraction: browserInteractionRequested, toolCeiling: ceiling })
+      const nativeTools = this.collectToolSpecs(policy, { browserInteraction: browserInteractionRequested, toolCeiling: ceiling, engineId: engine.id })
       if (nativeTools.specs.length) overrides.dynamicTools = nativeTools.specs
       if (bounded) Object.assign(overrides, qaOverrides)
       // Ordinary Agent questions may arrive outside Plan mode. Bounded threads never ask.
@@ -1830,6 +1929,7 @@ export class CodexChatRuntime {
     this.pendingStarts.set(cid, pending)
     let turnStartAttempted = false
     try {
+      if (this.store && this.engineOwnerHash(engine.id, context.engine.engineProfileId) !== context.ownerHash) throw Object.assign(chatError('ACCOUNT_CHANGED', 'AI engine account changed before dispatch', 409), { definite: true })
       turnStartAttempted = context.turnStartAttempted = true
       const result = await engine.startTurn({
         threadId: cid,
@@ -1895,7 +1995,8 @@ export class CodexChatRuntime {
     } catch (error) {
       // A native JSON-RPC error is a definite rejection. A lost/ambiguous reply
       // needs explicit reconciliation before another attempt can start a turn.
-      if (epoch === this.epochOf(engine.id) && (context.nativeTurnId || (turnStartAttempted && typeof error.code !== 'number'))) this.uncertainThreads.add(cid)
+      const uncertain = Boolean(context.nativeTurnId || (turnStartAttempted && error.definite !== true && typeof error.code !== 'number'))
+      if (epoch === this.epochOf(engine.id) && uncertain) this.uncertainThreads.add(cid)
       if (context.nativeTurnId && epoch === this.epochOf(engine.id)) {
         for (const event of pending.buffer.splice(0)) if (event.method === 'dynamic' || event.method === 'approval') {
           try { this.respond(event.rpcId, null, { code: -32000, message: 'Run binding failed; no tool authority was granted' }) } catch {}
@@ -1915,9 +2016,9 @@ export class CodexChatRuntime {
           this.store.recordRequestOutcome({
             clientThreadId: context.clientThreadId, requestId: context.requestId, ts: this.now(),
             outcome: {
-              accepted: Boolean(context.nativeTurnId), dispatchStatus: context.nativeTurnId || (turnStartAttempted && typeof error.code !== 'number') ? 'unknown' : 'rejected',
+              accepted: Boolean(context.nativeTurnId), dispatchStatus: uncertain ? 'unknown' : 'rejected',
               conversationId: cid || null, runId: context.nativeTurnId || null, localRunId: context.localRunId,
-              error: publicError(error, 'TURN_START_FAILED'),
+              error: publicError(error, 'TURN_START_FAILED', engine.id),
             },
           })
         } catch { this.storeHealthy = false }
@@ -1933,8 +2034,26 @@ export class CodexChatRuntime {
     this.pendingResumes.set(cid, pending)
     try {
       await this.queue
+      let currentCatalog = null, verifiedTools = null
+      let resumeOverrides = overrides
+      if (engineId === 'claude') {
+        const cwd = this.threadResumeCwds.get(cid)
+        if (!cwd) throw Object.assign(chatError('NATIVE_CWD_UNVERIFIED', 'The original working folder was not recorded; this conversation cannot be resumed safely', 409), { definite: true })
+        if (overrides.cwd && overrides.cwd !== cwd) throw Object.assign(chatError('CWD_CHANGE_UNSUPPORTED', 'A Claude conversation keeps the folder it started in; start a new conversation for another folder', 409), { definite: true })
+        currentCatalog = this.collectToolSpecs(null, { forManifest: true, engineId })
+        verifiedTools = verifiedManifestOwners(this.threadToolManifests.get(cid), currentCatalog.manifest, currentCatalog.owners)
+        if (verifiedTools.status !== 'verified') throw Object.assign(chatError('NATIVE_TOOL_MANIFEST_UNVERIFIED', 'The original tool catalog cannot be verified; start an explicit new conversation', 409), { definite: true })
+        // Claude does not save dynamic tools. Reconstruct only the original
+        // provider/schema-verified subset, never every currently installed tool.
+        const dynamicTools = currentCatalog.specs.flatMap(spec => {
+          if (spec.type === 'function') return verifiedTools.owners.has(toolKey(null, spec.name)) ? [spec] : []
+          const tools = spec.tools.filter(tool => verifiedTools.owners.has(toolKey(spec.name, tool.name)))
+          return tools.length ? [{ ...spec, tools }] : []
+        })
+        resumeOverrides = { ...overrides, cwd, dynamicTools }
+      }
       // Never fall back to thread/start if a historical ID is invalid or unavailable.
-      const result = await this.engineOf(cid).resumeThread({ threadId: cid, ...overrides, ...(policy ? {} : { config: ordinaryThreadConfig(overrides.config) }) })
+      const result = await this.engineOf(cid).resumeThread({ threadId: cid, ...resumeOverrides, ...(policy ? {} : { config: ordinaryThreadConfig(overrides.config) }) })
       if (epoch !== this.epochOf(engineId)) throw chatError('CONTEXT_CHANGED', 'Codex connection or account changed', 409)
       if (result?.thread?.id !== cid) throw chatError('THREAD_MISMATCH', 'Codex resumed a different thread', 502)
       let qaReceipt = null
@@ -1944,8 +2063,8 @@ export class CodexChatRuntime {
       }
       if (epoch !== this.epochOf(engineId)) throw chatError('CONTEXT_CHANGED', 'Codex connection or account changed', 409)
       this.rememberThread(cid, result, clientThreadId)
-      const currentCatalog = this.collectToolSpecs(null, { forManifest: true })
-      const verifiedTools = verifiedManifestOwners(this.threadToolManifests.get(cid), currentCatalog.manifest, currentCatalog.owners)
+      currentCatalog ||= this.collectToolSpecs(null, { forManifest: true, engineId })
+      verifiedTools ||= verifiedManifestOwners(this.threadToolManifests.get(cid), currentCatalog.manifest, currentCatalog.owners)
       this.threadToolOwners.set(cid, verifiedTools.owners)
       this.threadToolManifestStatus.set(cid, verifiedTools.status)
       if (policy) Object.assign(this.threads.get(cid), { executionPolicy: policy, qaReceipt })
@@ -1982,7 +2101,7 @@ export class CodexChatRuntime {
         run.error = turn.error
         run.truncated ||= Boolean(turn.truncated)
         run.historyComplete = retainedComplete || turn.itemsView === 'full'
-        for (const provider of this.toolProviders) await this.callProvider(provider, 'restoreRun', run)
+        for (const provider of this.toolProviders) if (this.providerSupportsEngine(provider, engineId)) await this.callProvider(provider, 'restoreRun', run)
         if (epoch !== this.epochOf(engineId)) throw chatError('CONTEXT_CHANGED', 'Codex connection or account changed', 409)
         const persisted = this.persistedRunStates.get(runKey(cid, turn.id))
         if (this.store && persisted && (persisted.status !== run.status || persisted.historyComplete !== run.historyComplete)) {
@@ -2010,13 +2129,9 @@ export class CodexChatRuntime {
 
   async resume(body) {
     if (this.requireStore) this.assertStore()
-    const engineId = this.threadEngine(idText(body.conversationId))
-    this.assertReady(engineId)
-    const epoch = this.epochOf(engineId)
     const cid = idText(body.conversationId)
     if (!cid) throw chatError('MISSING_THREAD_ID', 'conversationId is required')
     const requestedEngineId = this.requestedEngine(body)
-    this.engines.resolve({ requested: requestedEngineId, bound: this.threadEngines.get(cid) })
     let boundPolicy = this.threads.get(cid)?.executionPolicy || null
     if (this.store) {
       const clientThreadId = idText(body.clientThreadId)
@@ -2025,6 +2140,10 @@ export class CodexChatRuntime {
       if (!thread || thread.conversationId !== cid) throw chatError('NATIVE_BINDING_MISMATCH', 'Native conversation is not bound to this local chat', 409)
       boundPolicy = this.assertNativeAccount(clientThreadId, cid, requestedEngineId)
     }
+    const engineId = this.requestEngine(body)
+    this.assertEngineContext(body, engineId)
+    this.assertReady(engineId)
+    const epoch = this.epochOf(engineId)
     if (this.locks.has(cid) || this.pendingStarts.has(cid)) throw chatError('RUN_STARTING', 'Conversation request is still starting', 409)
     this.locks.add(cid)
     try {
@@ -2350,20 +2469,22 @@ export class CodexChatRuntime {
   }
 
   async replyApproval(body) {
-    this.assertReady()
+    this.assertReady(this.threadEngine(idText(body.conversationId)))
     const approval = this.pendingApprovals.get(body.approvalId)
     if (!approval || approval.conversationId !== body.conversationId || approval.runId !== body.runId || approval.status !== 'pending') {
       throw chatError('STALE_APPROVAL', 'Approval is stale, already answered, or belongs to another run', 409)
     }
     if (!approval.choices.includes(body.decision)) throw chatError('INVALID_DECISION', 'Unsupported approval choice')
     const run = this.findRun(body)
+    this.assertReady(this.runEngine(run))
     if (TERMINAL.has(run.status)) throw chatError('STALE_APPROVAL', 'Run has ended', 409)
-    if (body.decision === 'accept' && !this.ownedRuns.has(run)) throw chatError('NATIVE_RUN_UNBOUND', 'This native run has no verified EG-Desk dispatch binding', 409)
-    if (body.decision === 'accept' && ([READ_ONLY_QA, BROWSER_BOUNDED, FIXTURE_BROWSER_QA].includes(run.executionPolicy?.mode) ||
+    const grants = body.decision === 'accept' || body.decision === 'acceptForSession'
+    if (grants && !this.ownedRuns.has(run)) throw chatError('NATIVE_RUN_UNBOUND', 'This native run has no verified EG-Desk dispatch binding', 409)
+    if (grants && ([READ_ONLY_QA, BROWSER_BOUNDED, FIXTURE_BROWSER_QA].includes(run.executionPolicy?.mode) ||
         [READ_ONLY_QA, BROWSER_BOUNDED, FIXTURE_BROWSER_QA].includes(this.threads.get(run.conversationId)?.executionPolicy))) {
       throw chatError('BOUNDED_APPROVAL_FORBIDDEN', 'Bounded execution never grants an interactive approval', 403)
     }
-    if (body.decision === 'accept' && ceilingApprovalRefusal(run.toolCeiling, { kind: approval.kind, network: Boolean(approval.networkApprovalContext) })) {
+    if (grants && ceilingApprovalRefusal(run.toolCeiling, { kind: approval.kind, network: Boolean(approval.networkApprovalContext), session: body.decision === 'acceptForSession' })) {
       throw chatError('PROFILE_CEILING_FORBIDDEN', 'This Agent profile does not allow that action', 403)
     }
     // D-C3: [이번만 허락] answers this one question; [거절] declines it.
@@ -2377,7 +2498,9 @@ export class CodexChatRuntime {
     } else if (body.answers !== undefined) throw chatError('INVALID_DECISION', 'Only a computer permission question takes answers')
     // Mark before sending: a synchronous resolved event must not be overwritten.
     approval.status = 'replySent'
-    try { this.respond(approval.rpcId, reply) } catch (error) {
+    try {
+      if (this.respond(approval.rpcId, reply) === false) throw chatError('APPROVAL_DELIVERY_FAILED', 'The approval could not be delivered; no permission was confirmed', 502)
+    } catch (error) {
       approval.status = 'pending'
       throw error
     }
@@ -2398,31 +2521,37 @@ export class CodexChatRuntime {
       const index = input.questions.findIndex(question => question.questionId === answer.questionId)
       if (index < 0 || values.has(index)) throw invalid()
       const question = input.questions[index]
-      const hasOption = answer.optionIndex !== undefined, hasText = answer.text !== undefined
-      if (hasOption === hasText) throw invalid()
-      if (hasOption) {
+      const hasOption = answer.optionIndex !== undefined, hasOptions = answer.optionIndices !== undefined, hasText = answer.text !== undefined
+      if (Number(hasOption) + Number(hasOptions) + Number(hasText) !== 1) throw invalid()
+      if (hasOptions) {
+        const indices = answer.optionIndices
+        if (!question.multiSelect || !question.options || !Array.isArray(indices) || !indices.length || indices.length > question.options.length ||
+            new Set(indices).size !== indices.length || indices.some(index => !Number.isInteger(index) || index < 0 || index >= question.options.length)) throw invalid()
+        values.set(index, indices.map(choice => input.rawLabels[index][choice]))
+      } else if (hasOption) {
         if (!question.options || !Number.isInteger(answer.optionIndex) || answer.optionIndex < 0 || answer.optionIndex >= question.options.length) throw invalid()
-        values.set(index, input.rawLabels[index][answer.optionIndex])
+        values.set(index, [input.rawLabels[index][answer.optionIndex]])
       } else {
         if (question.options && !question.allowsOther) throw invalid()
         const text = typeof answer.text === 'string' ? answer.text : ''
         const trimmed = text.trim()
         // A private answer is sent exactly as typed; surrounding spaces may matter.
         if (!trimmed || trimmed.length > MAX_INPUT_ANSWER || text.includes('\0') || (question.isSecret && text.length > MAX_INPUT_ANSWER)) throw invalid()
-        values.set(index, question.isSecret ? text : trimmed)
+        values.set(index, [question.isSecret ? text : trimmed])
       }
     }
-    return Object.fromEntries(input.questions.map((question, index) => [question.questionId, { answers: [values.get(index)] }]))
+    return Object.fromEntries(input.questions.map((question, index) => [question.questionId, { answers: values.get(index) }]))
   }
 
   async replyUserInput(body) {
-    this.assertReady()
+    this.assertReady(this.threadEngine(idText(body.conversationId)))
     const input = typeof body.userInputId === 'string' ? this.pendingUserInputs.get(body.userInputId) : null
     if (!input || input.conversationId !== body.conversationId || input.runId !== body.runId || input.status !== 'pending') {
       throw chatError('STALE_USER_INPUT', 'Question is stale, already answered, or belongs to another run', 409)
     }
     if (!['submit', 'skip'].includes(body.action)) throw chatError('INVALID_USER_INPUT_ANSWER', 'Unsupported answer action')
     const run = this.findRun(body)
+    this.assertReady(this.runEngine(run))
     if (TERMINAL.has(run.status)) throw chatError('STALE_USER_INPUT', 'Run has ended', 409)
     let answers = null
     if (body.action === 'submit') {
@@ -2433,8 +2562,9 @@ export class CodexChatRuntime {
     // Mark before sending: a synchronous resolved event must not be overwritten.
     input.status = 'replySent'
     try {
-      if (answers) this.respond(input.rpcId, { answers })
-      else this.respond(input.rpcId, null, { code: -32000, message: 'User skipped the question' })
+      const delivered = answers ? this.respond(input.rpcId, { answers })
+        : this.respond(input.rpcId, null, { code: -32000, message: 'User skipped the question' })
+      if (delivered === false) throw chatError('USER_INPUT_DELIVERY_FAILED', 'The answer could not be delivered; no answer was confirmed', 502)
     } catch (error) {
       input.status = 'pending'
       throw error
@@ -2497,7 +2627,8 @@ export class CodexChatRuntime {
       nativeKind: p.kind ?? 'command',
       isNetworkApproval: p.networkApprovalContext != null,
       networkApprovalContext: publicNetworkContext(p.networkApprovalContext),
-      choices: Array.isArray(p.availableDecisions) ? p.availableDecisions.filter(value => ['accept', 'decline', 'cancel'].includes(value)) : ['accept', 'decline', 'cancel'],
+      choices: Array.isArray(p.availableDecisions) ? p.availableDecisions.filter(value => ['accept', 'decline', 'cancel'].includes(value)
+        || (value === 'acceptForSession' && this.threadEngine(idText(p.threadId)) === 'claude')) : ['accept', 'decline', 'cancel'],
     }
     return this.enqueue(event)
   }
@@ -2574,9 +2705,9 @@ export class CodexChatRuntime {
       const browser = !event.namespace && typeof event.tool === 'string' && event.tool.startsWith('egdesk_browser_')
       const selectedBrowser = browser && run.browserBinding?.cards?.find(card => card.cardId === event.arguments?.cardId)
       const boundedBrowser = selectedBrowser && ['observe', 'interact'].includes(selectedBrowser.permission)
-        && (event.tool === 'egdesk_browser_observe' || (selectedBrowser.permission === 'interact'
-          && BROWSER_INTERACTION_TOOLS.includes(event.tool)))
-      if ((mode === READ_ONLY_QA && !contextRead && !(browser && event.tool === 'egdesk_browser_observe')) ||
+        && (BROWSER_READ_TOOL_NAMES.includes(event.tool) || (selectedBrowser.permission === 'interact'
+          && BROWSER_INTERACTION_TOOL_NAMES.includes(event.tool)))
+      if ((mode === READ_ONLY_QA && !contextRead && !(browser && BROWSER_READ_TOOL_NAMES.includes(event.tool))) ||
           (mode === BROWSER_BOUNDED && !contextRead && !boundedBrowser) ||
           (mode === FIXTURE_BROWSER_QA && !contextRead && !(browser && ['egdesk_browser_observe', 'egdesk_browser_click', 'egdesk_browser_fill'].includes(event.tool))) ||
           (!mode && browser)) {
@@ -2591,7 +2722,7 @@ export class CodexChatRuntime {
       }
       const provider = this.threadToolOwners.get(run.conversationId)?.get(toolKey(event.namespace, event.tool))
       if (provider?.providerId === COMPUTER_PROVIDER_ID && this.refuseComputerCall(run, event)) return
-      if (!provider?.dispatch) this.respond(event.rpcId, null, { code: -32601, message: 'Unsupported dynamic tool' })
+      if (!provider?.dispatch || !this.providerSupportsEngine(provider, this.runEngine(run))) this.respond(event.rpcId, null, { code: -32601, message: 'Unsupported dynamic tool' })
       else if (this.dynamicRequestProviders.size >= 512 || this.dynamicRequestProviders.has(event.rpcId)) this.respond(event.rpcId, null, { code: -32000, message: 'Native tool callback capacity or ID conflict' })
       else {
         this.dynamicRequestProviders.set(event.rpcId, { provider, run, epoch: this.epochOf(this.runEngine(run)) })
@@ -2620,6 +2751,15 @@ export class CodexChatRuntime {
     switch (event.method) {
       case 'turn/started': return
       case 'thread/tokenUsage/updated': run.contextUsage = { ...event.usage, deliveryDebt: 0 }; this.seq++; return
+      case 'egdesk/engine/rateLimit': {
+        run.rateLimit = event.rateLimit
+        if (event.rateLimit.status === 'rejected' || event.rateLimit.creditsRequired) {
+          run.error = { ...publicError(event.rateLimit.creditsRequired ? 'Claude usage requires additional credits' : 'Claude usage limit reached', event.rateLimit.creditsRequired ? 'CLAUDE_CREDITS_REQUIRED' : 'CLAUDE_RATE_LIMIT', this.runEngine(run), { retryAt: event.rateLimit.resetsAt }), kind: 'quota' }
+        }
+        // Display only: no timer, resend, resume or permission is created here.
+        this.emit(run, 'run.rateLimit', { rateLimit: run.rateLimit, error: run.error })
+        return
+      }
       case 'item/started': return this.applyItem(run, event.item, false)
       case 'item/agentMessage/delta': return this.messageDelta(run, event.itemId, event.delta)
       case 'turn/plan/updated': {
@@ -2694,7 +2834,10 @@ export class CodexChatRuntime {
     if (event.isNetworkApproval && !event.networkApprovalContext) acceptDisabledReason = 'Network target or protocol is missing or unsupported.'
     else if (kind === 'commandExecution' && event.nativeKind !== 'command') acceptDisabledReason = 'This terminal-input approval type is not supported.'
     else if (kind === 'commandExecution' && !event.isNetworkApproval && !command) acceptDisabledReason = 'Command details are unavailable.'
-    const choices = acceptDisabledReason ? event.choices.filter(choice => choice !== 'accept') : event.choices
+    const choices = event.choices.filter(choice => {
+      if (acceptDisabledReason && (choice === 'accept' || choice === 'acceptForSession')) return false
+      return choice !== 'acceptForSession' || !ceilingApprovalRefusal(run.toolCeiling, { kind, network: event.isNetworkApproval, session: true })
+    })
     if (!choices.length) {
       this.respond(event.rpcId, null, { code: -32601, message: 'Approval target cannot be safely displayed' })
       run.error = publicError('Approval target is unavailable; no permission was granted', 'UNSUPPORTED_APPROVAL_TARGET')
@@ -3260,6 +3403,7 @@ export class CodexChatRuntime {
     for (const provider of this.toolProviders) provider.cancelRun?.(run)
     run.stopConfirmed = turn.status === 'interrupted'
     run.error = turn.error
+    if (run.error?.kind === 'quota' && run.rateLimit?.resetsAt) run.error = { ...run.error, retryAt: run.rateLimit.resetsAt }
     for (const message of run.messages) if (message.status === 'streaming') {
       message.status = run.status === 'failed' ? 'error' : run.status === 'interrupted' ? 'interrupted' : 'complete'
     }

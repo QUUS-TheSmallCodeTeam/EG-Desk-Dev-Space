@@ -11,8 +11,52 @@ import {
 // The surface stylesheet is read, never written: it is the source of truth
 // (D-G5 (가)) and this file holds it to the contrast table.
 const surfaceCss = readFileSync(new URL('../overlay/CSS/eg-desk-surface.uc.css', import.meta.url), 'utf8').replace(/\r\n/g, '\n');
+const surfaceRules = readCssRules(surfaceCss);
 
 const describeRows = rows => rows.map(r => `${r.scheme} ${r.pair}: ${r.ratio ?? r.reason} < ${r.minimum}`).join('\n');
+
+const environments = ['light', 'dark'].flatMap(scheme => [
+  { scheme }, { scheme, contrast: 'more' }, { scheme, forcedColors: true },
+  { scheme, contrast: 'more', forcedColors: true },
+]);
+const environmentName = env => [env.scheme, env.contrast, env.forcedColors && 'forced'].filter(Boolean).join('+');
+const rulesFor = (selector, env) => surfaceRules.filter(rule => rule.selectors.includes(selector)
+  && (env == null || mediaApplies(rule.media, env)));
+const declarationsFor = (selector, env) => Object.fromEntries(rulesFor(selector, env).flatMap(rule => rule.declarations));
+
+// A narrow test-side substitution for non-colour state tokens. Missing or
+// cyclic variables fail here instead of turning Number(var(...)) into NaN.
+// This is not a replacement for the production colour/CSS parsers.
+function resolveStateValue(value, properties, seen = new Set()) {
+  assert.equal(typeof value, 'string', 'a state declaration must exist');
+  const resolved = value.replace(/var\(\s*(--[\w-]+)\s*\)/g, (_, name) => {
+    assert.ok(!seen.has(name), `cyclic state token ${name}`);
+    assert.ok(Object.hasOwn(properties, name), `missing state token ${name}`);
+    return resolveStateValue(properties[name], properties, new Set([...seen, name]));
+  });
+  assert.doesNotMatch(resolved, /var\(/, `unsupported or unresolved state value: ${resolved}`);
+  return resolved;
+}
+
+const isDisabledSelector = selector => /:disabled\b|\[disabled(?:\s*=[^\]]+)?\]|\[aria-disabled\s*=\s*["']?true["']?\s*\]|\.egd-desk-window-control-disabled\b/i
+  .test(selector.replace(/:not\([^)]*\)/g, ''));
+const disabledOpacityRules = surfaceRules.filter(rule => rule.selectors.some(isDisabledSelector)
+  && rule.declarations.some(([name]) => name === 'opacity'));
+
+function resolvedDisabledOpacities(env) {
+  const root = readRootProperties(surfaceCss, env);
+  return disabledOpacityRules.filter(rule => mediaApplies(rule.media, env)).flatMap(rule => {
+    const properties = { ...root, ...Object.fromEntries(rule.declarations.filter(([name]) => name.startsWith('--'))) };
+    return rule.declarations.filter(([name]) => name === 'opacity').map(([, value]) => {
+      const resolved = resolveStateValue(value, properties);
+      assert.match(resolved, /^(?:0?(?:\.\d+)|\d+(?:\.\d+)?)$/, `${environmentName(env)} invalid opacity ${resolved}`);
+      const opacity = Number(resolved);
+      assert.ok(Number.isFinite(opacity) && opacity > 0 && opacity <= 1,
+        `${environmentName(env)} ${rule.selectors.join(', ')}: opacity must be visible, got ${resolved}`);
+      return opacity;
+    });
+  });
+}
 
 // ------------------------------------------------------------------ colours
 
@@ -143,15 +187,20 @@ test('DSN-04 every token the contrast table names resolves in light and dark', (
 });
 
 test('DSN-04 surface text, accent, state inks and focus outline meet 4.5:1 / 3:1 in light and dark', () => {
-  const failing = surfaceRows.filter(row => !row.todo && !row.pass);
+  const failing = surfaceRows.filter(row => !row.pass);
   assert.deepEqual(failing, [], describeRows(failing));
-  assert.ok(surfaceRows.filter(row => !row.todo).length >= 2 * CONTRAST_REQUIREMENTS.filter(row => !row[3]?.todo).length);
+  assert.ok(surfaceRows.length >= 2 * CONTRAST_REQUIREMENTS.length);
 });
 
-for (const todo of [...new Set(CONTRAST_REQUIREMENTS.map(row => row[3]?.todo).filter(Boolean))]) {
-  test(`DSN-04 known shortfall: ${todo}`, { todo }, () => {
-    const rows = surfaceRows.filter(row => row.todo === todo);
-    assert.ok(rows.length > 0);
+// Keep the two formerly failing groups as permanent, unmasked regressions.
+const contrastRegressions = new Map([
+  ['avatar contrast (D-G2)', ['avatar.tone-2.color', 'avatar.tone-3.color']],
+  ['focus-border contrast (S5)', ['--egd-focus-border']],
+]);
+for (const [name, foregrounds] of contrastRegressions) {
+  test(`DSN-04 regression: ${name}`, () => {
+    const rows = surfaceRows.filter(row => foregrounds.some(foreground => row.pair.startsWith(`${foreground} vs `)));
+    assert.ok(rows.length >= 2 * foregrounds.length);
     const failing = rows.filter(row => !row.pass);
     assert.deepEqual(failing, [], describeRows(failing));
   });
@@ -160,7 +209,15 @@ for (const todo of [...new Set(CONTRAST_REQUIREMENTS.map(row => row[3]?.todo).fi
 test('DSN-04 the S5 state-token table passes the more-contrast rows on today\'s light and dark tokens', () => {
   const extra = { ...STATE_TOKEN_TABLE.base, ...STATE_TOKEN_TABLE.prefersContrast };
   const rows = checkSurfaceContrast(surfaceCss, MORE_CONTRAST_REQUIREMENTS, { contrast: 'more', level: 'more', extra });
-  assert.equal(rows.filter(row => row.pair.startsWith('--egd-focus-outline-color')).length, 4);
+  const outlineRows = rows.filter(row => row.pair.startsWith('--egd-focus-outline-color'));
+  assert.equal(outlineRows.length, 2 * MORE_CONTRAST_REQUIREMENTS.filter(([, foreground]) => foreground === '--egd-focus-outline-color').length);
+  assert.ok(outlineRows.length >= 4);
+  for (const scheme of ['light+more', 'dark+more']) {
+    for (const background of ['--egd-surface', '--egd-surface-elevated']) {
+      assert.ok(outlineRows.some(row => row.scheme === scheme && row.pair === `--egd-focus-outline-color vs ${background}`),
+        `${scheme} lost focus coverage on ${background}`);
+    }
+  }
   const failing = rows.filter(row => !row.pass);
   assert.deepEqual(failing, [], describeRows(failing));
   const base = checkSurfaceContrast(surfaceCss, [['border', '--egd-focus-outline-color', '--egd-surface'],
@@ -176,10 +233,10 @@ test('DSN-04 the forced-colours table uses only system colours or plain numbers'
 });
 
 const hasMoreContrast = hasRootOverrides(surfaceCss, { scheme: 'light', contrast: 'more' })
-  || hasRootOverrides(surfaceCss, { scheme: 'dark', contrast: 'more' });
+  && hasRootOverrides(surfaceCss, { scheme: 'dark', contrast: 'more' });
 test('DSN-04 the surface prefers-contrast block meets 7:1 text / 4.5:1 borders',
-  hasMoreContrast ? {} : { todo: 'S5가 prefers-contrast :root 블록을 넣기 전까지' }, () => {
-    assert.ok(hasMoreContrast, 'no prefers-contrast :root block in eg-desk-surface.uc.css yet');
+  () => {
+    assert.ok(hasMoreContrast, 'both schemes require a prefers-contrast :root block');
     const rows = checkSurfaceContrast(surfaceCss, MORE_CONTRAST_REQUIREMENTS, { contrast: 'more', level: 'more' });
     const failing = rows.filter(row => !row.pass);
     assert.deepEqual(failing, [], describeRows(failing));
@@ -201,9 +258,434 @@ test('auditCssScale counts focus offsets, disabled opacity, literal font sizes a
   assert.deepEqual({ ...audit.borderRadii }, { '8px': 2 });
 });
 
-test('DSN-03 S5 target: one focus offset and one disabled opacity across the surface', { todo: 'S5 포커스·비활성 토큰 통일' }, () => {
+test('DSN-03 S5 target: one focus offset and one disabled opacity across the surface', () => {
   const audit = auditCssScale(surfaceCss);
   assert.ok(audit.focusVisibleRules > 0);
   assert.ok(Object.keys(audit.focusOutlineOffsets).length <= 1, JSON.stringify(audit.focusOutlineOffsets));
   assert.ok(Object.keys(audit.disabledOpacities).length <= 1, JSON.stringify(audit.disabledOpacities));
+  // Keep the original <= 1 limits, but never accept the single key "NaN"
+  // as proof that CSS variable opacities agree or even resolve.
+  for (const env of environments) {
+    const opacities = resolvedDisabledOpacities(env);
+    assert.ok(opacities.length > 0, `${environmentName(env)} has no disabled opacity declarations`);
+    assert.ok(new Set(opacities).size <= 1, `${environmentName(env)}: ${opacities.join(', ')}`);
+  }
+});
+
+// ------------------------------------------------------ D-G regressions
+
+test('D-G5 contrast thresholds and all six avatar requirement rows stay mandatory', () => {
+  assert.deepEqual(CONTRAST_RATIOS, { default: { text: 4.5, border: 3 }, more: { text: 7, border: 4.5 } });
+  for (const requirements of [CONTRAST_REQUIREMENTS, MORE_CONTRAST_REQUIREMENTS]) {
+    for (const [, ink, background, options] of requirements) {
+      assert.ok(!options?.todo && !options?.optional, `${ink} vs ${background} must not be bypassed`);
+    }
+  }
+  for (let tone = 0; tone < 6; tone++) {
+    assert.ok(CONTRAST_REQUIREMENTS.some(([type, ink, bg, options]) => type === 'text'
+      && ink === `avatar.tone-${tone}.color` && bg === `avatar.tone-${tone}.background` && !options?.optional),
+    `missing mandatory avatar tone ${tone} requirement`);
+  }
+});
+
+test('D-G5 the state table retains the agreed focus geometry and disabled opacity values', () => {
+  const base = {
+    '--egd-focus-outline-width': '2px',
+    '--egd-focus-outline-offset': '2px',
+    '--egd-focus-outline-inset': 'calc(-1 * var(--egd-focus-outline-width))',
+    '--egd-focus-outline-color': 'var(--egd-primary)',
+    '--egd-focus-outline': 'var(--egd-focus-outline-width) solid var(--egd-focus-outline-color)',
+    '--egd-opacity-disabled': '0.5',
+  };
+  for (const [name, value] of Object.entries(base)) assert.equal(STATE_TOKEN_TABLE.base[name], value, name);
+  assert.equal(STATE_TOKEN_TABLE.prefersContrast['--egd-opacity-disabled'], '0.6');
+  assert.equal(STATE_TOKEN_TABLE.forcedColors['--egd-opacity-disabled'], '1');
+  assert.equal(STATE_TOKEN_TABLE.forcedColors['--egd-text-disabled'], 'GrayText');
+});
+
+test('D-G5 CSS itself implements every state-table token in light/dark, more and forced environments', () => {
+  for (const env of environments) {
+    const expected = {
+      ...STATE_TOKEN_TABLE.base,
+      ...(env.contrast === 'more' ? STATE_TOKEN_TABLE.prefersContrast : {}),
+      ...(env.forcedColors ? STATE_TOKEN_TABLE.forcedColors : {}),
+    };
+    // No `extra` overlay: a proposal in the table cannot make absent CSS pass.
+    const actual = readRootProperties(surfaceCss, env);
+    const ontology = { ...actual, ...declarationsFor('.egd-ontology-card', env) };
+    for (const [name, value] of Object.entries(expected)) {
+      assert.equal(actual[name], value, `${environmentName(env)} ${name}`);
+      assert.equal(ontology[name], value, `${environmentName(env)} Ontology-local ${name}`);
+    }
+    if (env.contrast === 'more' || env.forcedColors) {
+      assert.ok(hasRootOverrides(surfaceCss, env), `${environmentName(env)} needs actual media root overrides`);
+    }
+  }
+});
+
+// Only the observed simple avatar compounds are cascaded here. In particular,
+// two classes outrank the later button.egd-codex-message-avatar reset. Browser
+// rendering and ancestor/layout behaviour remain separate integration checks.
+function avatarPaint(tone, env, chat) {
+  const classes = new Set(['egd-profile-avatar', `egd-profile-avatar-tone-${tone}`,
+    ...(chat ? ['egd-codex-message-avatar'] : [])]);
+  const paints = new Map();
+  for (const rule of surfaceRules) {
+    if (!mediaApplies(rule.media, env)) continue;
+    for (const selector of rule.selectors) {
+      const match = /^(button|span|div)?((?:\.[\w-]+)+)$/.exec(selector);
+      if (!match || (match[1] && match[1] !== (chat ? 'button' : 'span'))) continue;
+      const names = match[2].slice(1).split('.');
+      if (!names.every(name => classes.has(name))) continue;
+      const specificity = names.length * 100 + (match[1] ? 1 : 0);
+      for (const [name, value] of rule.declarations) {
+        const property = name === 'background-color' ? 'background' : name;
+        if (!['background', 'color'].includes(property)) continue;
+        if (!paints.has(property) || specificity >= paints.get(property).specificity) {
+          paints.set(property, { value, specificity, selector });
+        }
+      }
+    }
+  }
+  const properties = readRootProperties(surfaceCss, env);
+  return Object.fromEntries(['background', 'color'].map(name => {
+    const paint = paints.get(name);
+    assert.ok(paint, `${environmentName(env)} tone ${tone} ${name} missing`);
+    const color = resolveColor(paint.value, properties);
+    assert.ok(color, `${environmentName(env)} ${paint.selector} ${name}: ${paint.value}`);
+    return [name, color];
+  }));
+}
+
+test('D-G2 every profile and higher-specificity chat tone has pale paint, dark ink and 4.5:1 contrast', () => {
+  const failures = [];
+  const black = parseColor('#000');
+  const white = parseColor('#fff');
+  for (const scheme of ['light', 'dark']) {
+    const env = { scheme };
+    assert.deepEqual(readAvatarTones(surfaceCss, env).map(({ tone }) => tone), [0, 1, 2, 3, 4, 5]);
+    const properties = readRootProperties(surfaceCss, env);
+    for (let tone = 0; tone < 6; tone++) {
+      const chatSelector = `.egd-codex-message-avatar.egd-profile-avatar-tone-${tone}`;
+      const chatDeclarations = declarationsFor(chatSelector, env);
+      assert.ok(chatDeclarations.background || chatDeclarations['background-color'], `${chatSelector} paint is missing`);
+      assert.ok(chatDeclarations.color, `${chatSelector} ink is missing`);
+      const profile = avatarPaint(tone, env, false);
+      const chat = avatarPaint(tone, env, true);
+      assert.deepEqual(chat, profile, `${scheme} tone ${tone}: chat specificity must preserve the profile colours`);
+      for (const [kind, paint] of [['profile', profile], ['chat', chat]]) {
+        for (const canvas of ['--egd-surface', '--egd-surface-elevated']) {
+          const background = compositeOver(paint.background, resolveColor(properties[canvas], properties));
+          const ink = compositeOver(paint.color, background);
+          const ratio = contrastRatio(ink, background);
+          // Hue-independent light/dark bounds also reject an inverted pair
+          // that happens to pass WCAG. Existing palette mixes are welcome.
+          if (contrastRatio(background, black) < 10) failures.push(`${scheme} ${kind} tone ${tone} on ${canvas}: background is not pale`);
+          if (contrastRatio(ink, white) < 7) failures.push(`${scheme} ${kind} tone ${tone} on ${canvas}: ink is not dark`);
+          if (ratio < 4.5) failures.push(`${scheme} ${kind} tone ${tone} on ${canvas}: ${ratio} < 4.5`);
+        }
+      }
+    }
+  }
+  assert.deepEqual(failures, [], failures.join('\n'));
+});
+
+test('D-G3 CSS focus-border reaches 3:1 on both field surfaces without table overlays', () => {
+  const rows = checkSurfaceContrast(surfaceCss, [
+    ['border', '--egd-focus-border', '--egd-surface-elevated'],
+    ['border', '--egd-focus-border', '--egd-window-alt'],
+  ]);
+  assert.equal(rows.length, 4);
+  assert.deepEqual(rows.filter(row => !row.pass), [], describeRows(rows.filter(row => !row.pass)));
+});
+
+test('D-G3 search and Browser address focus use the resolved border instead of translucent or idle overrides', () => {
+  const selectors = ['.egd-agenda-switch-search:focus-within', '.egd-codex-thread-search:focus',
+    '.egd-browser-card .egd-card-omnibox:focus-within'];
+  for (const env of environments) {
+    const properties = readRootProperties(surfaceCss, env);
+    for (const selector of selectors) {
+      const edge = declarationsFor(selector, env)['border-color'];
+      assert.equal(edge, 'var(--egd-focus-border)', `${environmentName(env)} ${selector}`);
+      if (env.forcedColors) {
+        assert.equal(resolveStateValue(edge, properties), 'CanvasText');
+      } else {
+        for (const background of ['--egd-surface', '--egd-surface-elevated', '--egd-window-alt']) {
+          const minimum = env.contrast === 'more' ? 4.5 : 3;
+          const ratio = contrastRatio(resolveColor(edge, properties), resolveColor(properties[background], properties));
+          assert.ok(ratio >= minimum, `${environmentName(env)} ${selector} on ${background}: ${ratio} < ${minimum}`);
+        }
+      }
+    }
+  }
+});
+
+// Preserve existing focus coverage, including the narrow-viewport dock rule.
+// Counting only surviving declarations would let deleting a focus rule pass.
+const insetFocusSelectors = [
+  '.egd-board-menu-item:focus-visible',
+  '.egd-browser-menu-item:focus-visible',
+  '.egd-browser-agent-timeline .egd-browser-agent-timeline-close:focus-visible',
+  '.egd-minimap-stack-row:focus-visible',
+  '.egd-codex-thread-item:focus-visible',
+  '.egd-context-suggest-row:focus-within',
+  '.egd-ontology-stage-mini-tool:focus-visible',
+];
+// The focused row passes its local inset variable to descendants. Its button
+// needs an explicit outward reset while the row itself keeps the inset ring.
+const focusOffsetResets = new Map([['.egd-context-suggest button:focus-visible', '2px']]);
+const focusSelectors = [
+  ...insetFocusSelectors,
+  '.egd-semantic-proxy:focus-visible', '.egd-semantic-cluster:focus-visible',
+  '.egd-board-region-title:focus-visible', '.egd-board-region-menu-button:focus-visible',
+  '.egd-store-panel button:focus-visible', '.egd-portable-input:focus-visible',
+  '#egd-chat-return .egd-chat-return-button:focus-visible', '.egd-zoom-button:focus-visible',
+  '.egd-chat-card-action:focus-visible', '.egd-hud-pin:focus-visible', '.egd-hud-close:focus-visible',
+  '.egd-browser-card .egd-desk-window-control:focus-visible',
+  '.egd-browser-card .egd-card-nav-btn:focus-visible', '.egd-browser-card .egd-card-menu:focus-visible',
+  '.egd-browser-card .egd-browser-agent-badge:focus-visible', '.egd-browser-card .egd-browser-agent-hand:focus-visible',
+  '.egd-rail-icon:focus-visible', '.egd-rail-switcher:focus-visible', '.egd-minimap-board-label:focus-visible',
+  '.egd-dock-btn:focus-visible', '.egd-bag-chip:focus-visible', '.egd-bag-add:focus-visible',
+  '.egdesk-file-tree-item:focus-visible', '.egd-settings-btn:focus-visible', '.egd-settings-link:focus-visible',
+  '.egd-settings-segment:focus-visible', '.egd-settings-swatch:focus-visible', '.egd-settings-agent-row:focus-visible',
+  '.egd-codex-chat-shell button:focus-visible', '.egd-codex-messages:focus-visible', '.egd-resource-button:focus-visible',
+  '#egd-dock:focus-visible', 'button.egd-codex-session-badge-link:focus-visible', '.egd-settings-switch:focus-visible',
+  '.egd-codex-agent-peek-trigger:focus-visible', 'button.egd-codex-working-bubble:focus-visible',
+  '.egd-codex-computer-use:focus-visible', 'button.egd-codex-answer-fold-card:focus-visible',
+  'button.egd-codex-answer-fold-toggle:focus-visible', 'button.egd-result-card-back:focus-visible',
+  '.egd-context-suggest button:focus-visible', '.egd-codex-activity-focus',
+  '.egd-ontology-minimap-layer-pane:focus-visible', '.egd-ontology-minimap-node:focus-visible',
+];
+
+test('DSN-03 all existing focus selectors consume the canonical outline and offset', () => {
+  for (const selector of focusSelectors) {
+    assert.ok(rulesFor(selector).length > 0, `lost focus selector ${selector}`);
+    const declarations = declarationsFor(selector);
+    assert.equal(declarations.outline, 'var(--egd-focus-outline)', `${selector} outline`);
+    assert.equal(declarations['outline-offset'], 'var(--egd-focus-outline-offset)', `${selector} offset`);
+  }
+  for (const rule of surfaceRules) {
+    const selectors = rule.selectors.filter(selector => /:focus-(visible|within)\b/.test(selector)
+      || selector === '.egd-codex-activity-focus');
+    if (!selectors.length) continue;
+    for (const [name, value] of rule.declarations) {
+      const label = `${selectors.join(', ')} ${name}`;
+      if (name === 'outline') assert.equal(value, 'var(--egd-focus-outline)', label);
+      if (name === 'outline-offset') assert.equal(value, 'var(--egd-focus-outline-offset)', label);
+      if (name === 'outline-width') assert.equal(value, 'var(--egd-focus-outline-width)', label);
+      if (name === 'outline-color') assert.equal(value, 'var(--egd-focus-outline-color)', label);
+      if (name === 'outline-style') assert.equal(value, 'solid', label);
+    }
+  }
+});
+
+test('DSN-03 clipping-sensitive focus rings keep the inset through a local offset token', () => {
+  const sharedNames = new Set(Object.keys(STATE_TOKEN_TABLE.base));
+  const insetScopes = new Set(insetFocusSelectors.flatMap(selector => [selector, selector.replace(/:focus-(visible|within)\b/g, '')]));
+  for (const rule of surfaceRules) {
+    for (const [name, value] of rule.declarations) {
+      if (!sharedNames.has(name)) continue;
+      for (const selector of rule.selectors) {
+        if (selector === ':root' || selector === '.egd-ontology-card') continue;
+        assert.equal(name, '--egd-focus-outline-offset', `${selector} must not shadow shared state token ${name}`);
+        if (focusOffsetResets.has(selector)) assert.equal(value, focusOffsetResets.get(selector), `${selector} outward reset`);
+        else {
+          assert.ok(insetScopes.has(selector), `${selector} is not an approved inset scope`);
+          assert.equal(value, 'var(--egd-focus-outline-inset)', `${selector} local offset`);
+        }
+      }
+    }
+  }
+  for (const selector of focusSelectors) {
+    const local = {
+      ...declarationsFor(selector.replace(/:focus-(visible|within)\b/g, '')),
+      ...declarationsFor(selector),
+    };
+    if (insetFocusSelectors.includes(selector)) {
+      assert.equal(local['--egd-focus-outline-offset'], 'var(--egd-focus-outline-inset)', `${selector} must stay inset`);
+    } else if (focusOffsetResets.has(selector)) {
+      assert.equal(local['--egd-focus-outline-offset'], focusOffsetResets.get(selector), `${selector} must reset inherited inset`);
+    } else {
+      assert.equal(local['--egd-focus-outline-offset'], undefined, `${selector} acquired an unapproved offset`);
+    }
+    for (const env of environments) {
+      const environmentLocal = {
+        ...declarationsFor(selector.replace(/:focus-(visible|within)\b/g, ''), env),
+        ...declarationsFor(selector, env),
+      };
+      const properties = { ...readRootProperties(surfaceCss, env), ...Object.fromEntries(
+        Object.entries(environmentLocal).filter(([name]) => name.startsWith('--'))) };
+      assert.equal(resolveStateValue('var(--egd-focus-outline-width)', properties), '2px', `${selector} width`);
+      assert.equal(resolveStateValue('var(--egd-focus-outline-offset)', properties),
+        insetFocusSelectors.includes(selector) ? 'calc(-1 * 2px)' : '2px', `${environmentName(env)} ${selector}`);
+    }
+  }
+});
+
+const disabledOpacitySelectors = [
+  '.egd-desk-window-control-disabled',
+  '.egd-store-panel button[disabled]', '.egd-card-nav-btn:disabled', '.egd-rail-icon:disabled',
+  '.egd-codex-chip:disabled', '#egd-codex-activity-panel button:disabled', '.egd-codex-result-chip:disabled',
+  '.egd-file-chat-attach:disabled', '.egdesk-file-tree-item[aria-disabled="true"]', '.egdesk-file-view button:disabled',
+  '.egd-codex-send:disabled', '.egd-settings-btn[disabled]', '.egd-settings-link[disabled]',
+  '.egd-codex-stop:disabled', '.egd-codex-user-input input:disabled', '.egd-codex-thread-menu-item:disabled',
+  '.egd-codex-thread-menu-item:disabled:hover', 'button.egd-task-confirm-go[aria-disabled="true"]',
+  'button.egd-task-hold-resume[aria-disabled="true"]', 'button.egd-task-approve[aria-disabled="true"]',
+  'button.egd-task-reject[aria-disabled="true"]', 'button.egd-plan-approve[aria-disabled="true"]',
+  'button.egd-plan-reject[aria-disabled="true"]', 'button.egd-plan-confirm-go[aria-disabled="true"]',
+  '.egd-settings-switch:disabled', '.egd-context-suggest-add:disabled',
+];
+
+test('DSN-03 disabled declarations retain coverage and use one visible resolved opacity per environment', () => {
+  for (const selector of disabledOpacitySelectors) {
+    assert.equal(declarationsFor(selector).opacity, 'var(--egd-opacity-disabled)', `${selector} opacity`);
+  }
+  assert.ok(disabledOpacityRules.length > 0);
+  for (const rule of disabledOpacityRules) {
+    for (const [name, value] of rule.declarations) {
+      if (name === 'opacity') assert.equal(value, 'var(--egd-opacity-disabled)', rule.selectors.join(', '));
+    }
+  }
+  for (const env of environments) {
+    const opacities = resolvedDisabledOpacities(env);
+    assert.ok(opacities.length > 0);
+    assert.deepEqual([...new Set(opacities)], [env.forcedColors ? 1 : env.contrast === 'more' ? 0.6 : 0.5], environmentName(env));
+  }
+});
+
+test('D-G5 non-colour state checks reject unresolved and cyclic variables instead of NaN false passes', () => {
+  assert.equal(resolveStateValue('var(--disabled)', { '--disabled': '0.6' }), '0.6');
+  assert.throws(() => resolveStateValue('var(--missing)', {}), /missing state token/);
+  assert.throws(() => resolveStateValue('var(--a)', { '--a': 'var(--b)', '--b': 'var(--a)' }), /cyclic state token/);
+  assert.equal(isDisabledSelector('.button:not(:disabled):hover'), false);
+  assert.equal(isDisabledSelector('.button:hover:not([disabled])'), false);
+  assert.equal(isDisabledSelector(".button[aria-disabled='true']"), true);
+});
+
+// Expand the flat :is() lists used by the disabled override, without pretending
+// to be a browser selector engine. An unsupported selector cannot supply proof
+// of coverage. Keep !important visible for this check: readCssRules normally
+// strips it because colour arithmetic does not need declaration priority.
+const importantMarker = '__egd_test_important__';
+const priorityRules = readCssRules(surfaceCss.replace(/!\s*important\b/gi, importantMarker));
+function expandFlatIs(selector) {
+  const group = /:is\(([^()]*)\)/.exec(selector);
+  if (!group) return [selector];
+  return group[1].split(',').flatMap(choice => expandFlatIs(
+    selector.slice(0, group.index) + choice.trim() + selector.slice(group.index + group[0].length)));
+}
+const disabledTarget = selector => selector.replace(/:hover\b/g, '').replace(/^button(?=\.)/, '').trim();
+
+test('D-G3 forced colours keep automatic adjustment and visible GrayText on every disabled control', () => {
+  // Include width/motion media that mediaApplies deliberately does not model.
+  for (const rule of surfaceRules) {
+    for (const [name, value] of rule.declarations) {
+      if (name === 'forced-color-adjust') assert.notEqual(value.toLowerCase(), 'none', rule.selectors.join(', '));
+    }
+  }
+  const targets = [...new Set([
+    ...disabledOpacitySelectors,
+    '.egd-card-nav-btn:disabled:hover', '.egd-codex-chat-shell button:disabled',
+    'button.egd-codex-engine-choice:disabled', 'button.egd-codex-stateless-toggle:disabled',
+  ].map(disabledTarget))];
+  for (const env of environments.filter(env => env.forcedColors)) {
+    const properties = readRootProperties(surfaceCss, env);
+    assert.equal(resolveStateValue('var(--egd-text-disabled)', properties), 'GrayText');
+    assert.equal(resolveStateValue('var(--egd-opacity-disabled)', properties), '1');
+    const inkCoverage = new Set();
+    const childInkCoverage = new Set();
+    for (const [index, rule] of surfaceRules.entries()) {
+      if (!mediaApplies(rule.media, env)) continue;
+      for (const [name, value] of rule.declarations) {
+        if (name === 'forced-color-adjust') {
+          assert.equal(resolveStateValue(value, properties).toLowerCase(), 'auto', rule.selectors.join(', '));
+        }
+      }
+      const disabled = rule.selectors.filter(isDisabledSelector);
+      if (!disabled.length) continue;
+      const declarations = Object.fromEntries(rule.declarations);
+      const priorities = Object.fromEntries(priorityRules[index].declarations);
+      if (priorities.color?.endsWith(importantMarker)) {
+        // Any important disabled ink active here must remain system GrayText;
+        // a later important brand colour must not defeat the forced override.
+        assert.equal(resolveStateValue(declarations.color, properties), 'GrayText', disabled.join(', '));
+      }
+      if (!rule.media.some(media => /forced-colors/.test(media))) continue;
+      if (declarations.color == null) continue;
+      assert.equal(resolveStateValue(declarations.color, properties), 'GrayText', disabled.join(', '));
+      assert.ok(priorities.color?.endsWith(importantMarker), 'forced disabled ink must survive later component colours');
+      for (const selector of disabled.flatMap(expandFlatIs)) {
+        if (selector.endsWith(' *')) childInkCoverage.add(disabledTarget(selector.slice(0, -2)));
+        else {
+          inkCoverage.add(disabledTarget(selector));
+          assert.equal(resolveStateValue(declarations.opacity, properties), '1', `${selector} forced opacity`);
+          assert.ok(priorities.opacity?.endsWith(importantMarker), `${selector} forced opacity priority`);
+        }
+      }
+    }
+    for (const target of targets) {
+      assert.ok(inkCoverage.has(target), `${environmentName(env)} missing forced disabled ink for ${target}`);
+      assert.ok(childInkCoverage.has(target), `${environmentName(env)} child ink can override GrayText in ${target}`);
+    }
+  }
+});
+
+const idleInputEdges = [
+  ['#egd-board-scope input', 'border', '1px solid var(--egd-line-strong)'],
+  ['.egd-portable-input', 'border', '1px solid var(--egd-outline)'],
+  ['.egd-card-omnibox', 'border', '1px solid var(--egd-outline)'],
+  ['.egd-browser-card .egd-card-omnibox', 'border-color', 'var(--egd-outline-variant)'],
+  ['.egd-rail-search', 'border', '1px solid var(--egd-outline)'],
+  ['.egd-agenda-switch-search', 'border', '1px solid var(--egd-outline)'],
+  ['.egd-codex-thread-search', 'border', '1px solid var(--egd-chat-outline-soft)'],
+  ['.egd-codex-input-row', 'border', '1px solid var(--egd-outline)'],
+  ['.egd-settings-form-input', 'border', '1px solid var(--egd-outline)'],
+  ['.egd-settings-form-textarea', 'border', '1px solid var(--egd-outline)'],
+  ['.egd-codex-user-input input[type="text"]', 'border', '1px solid var(--egd-outline)'],
+  ['.egd-codex-user-input input[type="password"]', 'border', '1px solid var(--egd-outline)'],
+];
+
+test('D-G3 ordinary light/dark input edges retain the approved quiet palette and 1px geometry', () => {
+  const palette = {
+    light: { '--egd-outline': '#DEDFD8', '--egd-outline-variant': '#EAEAE4' },
+    dark: { '--egd-outline': '#4A4E47', '--egd-outline-variant': '#41463F' },
+  };
+  for (const scheme of ['light', 'dark']) {
+    const properties = readRootProperties(surfaceCss, { scheme });
+    for (const [name, value] of Object.entries(palette[scheme])) assert.equal(properties[name].toUpperCase(), value, `${scheme} ${name}`);
+    assert.equal(properties['--egd-line-strong'], 'color-mix(in srgb, var(--egd-wood-line) 45%, var(--egd-surface-elevated))');
+    for (const [selector, property, value] of idleInputEdges) {
+      const declarations = declarationsFor(selector, { scheme });
+      assert.equal(declarations[property], value, `${scheme} ${selector} ${property}`);
+      if (property === 'border') assert.ok(declarations['border-color'] == null,
+        `${scheme} ${selector}: idle border colour was overridden`);
+      assert.ok(declarations['border-width'] == null || declarations['border-width'] === '1px', `${selector} border width`);
+    }
+  }
+});
+
+test('D-G3 ordinary input edges become stronger through more/forced media, without widening controls', () => {
+  for (const env of environments.filter(env => env.contrast === 'more' || env.forcedColors)) {
+    const properties = readRootProperties(surfaceCss, env);
+    for (const [selector, property] of idleInputEdges) {
+      const declarations = declarationsFor(selector, env);
+      const border = declarations.border;
+      if (property === 'border') assert.match(border, /^1px solid /, `${environmentName(env)} ${selector} geometry`);
+      assert.ok(declarations['border-width'] == null || declarations['border-width'] === '1px', `${selector} border width`);
+      const expression = declarations['border-color'] || border?.replace(/^1px solid /, '');
+      assert.ok(expression, `${selector} lost its edge`);
+      if (env.forcedColors) {
+        assert.ok(['CanvasText', 'FieldText', 'ButtonBorder'].includes(resolveStateValue(expression, properties)),
+          `${environmentName(env)} ${selector}: edge must use a visible system colour`);
+      } else {
+        const edge = resolveColor(expression, properties);
+        assert.ok(edge, `${selector} unresolved edge: ${expression}`);
+        for (const canvas of ['--egd-surface-elevated', '--egd-window-alt']) {
+          const background = resolveColor(properties[canvas], properties);
+          const ratio = contrastRatio(edge, background);
+          assert.ok(ratio >= 4.5, `${environmentName(env)} ${selector} on ${canvas}: ${ratio} < 4.5`);
+        }
+      }
+    }
+  }
 });

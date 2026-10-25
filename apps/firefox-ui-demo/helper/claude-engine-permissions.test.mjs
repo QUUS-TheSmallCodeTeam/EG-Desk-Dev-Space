@@ -65,8 +65,8 @@ test('Bash and file tools become the runtime approval requests with the tool_use
   } })
   for (const name of ['Write', 'MultiEdit', 'NotebookEdit']) assert.equal(route(edit({ tool_name: name })).serverRequest.method, 'item/fileChange/requestApproval', name)
   assert.equal(route(bash({ tool_name: 'PowerShell' })).serverRequest.method, 'item/commandExecution/requestApproval')
-  // '이번 대화 동안 허용' is offered only when the screen and runtime support it.
-  assert.deepEqual(route(bash(), { offerSessionGrant: true }).serverRequest.params.availableDecisions, ['accept', 'acceptForSession', 'decline', 'cancel'])
+  // UI/runtime support alone cannot promise a grant with no actual rule.
+  assert.deepEqual(route(bash(), { offerSessionGrant: true }).serverRequest.params.availableDecisions, ['accept', 'decline', 'cancel'])
   assert.deepEqual(APPROVAL_DECISIONS, ['accept', 'acceptForSession', 'decline', 'cancel'])
 })
 
@@ -81,13 +81,14 @@ test('decisions map to PermissionResult: accept keeps the input, cancel interrup
   assert.deepEqual(approvalToPermissionResult(command, 'cancel'), { behavior: 'deny', message: 'User cancelled tool execution.', interrupt: true })
   assert.deepEqual(approvalToPermissionResult(command, 'yes please'), { behavior: 'deny', message: 'EG-Desk did not grant this tool.' })
 
-  // No usable suggestion: a command is allowed once (a bare "Bash" rule would allow every command).
+  // No usable suggestion: session decisions are refused, never silently
+  // downgraded to one-off and never expanded into a synthesized tool rule.
   const bare = route(bash()).pending
-  assert.deepEqual(approvalToPermissionResult(bare, 'acceptForSession'), { behavior: 'allow', updatedInput: { command: 'npm test', description: 'Run tests' } })
+  assert.deepEqual(approvalToPermissionResult(bare, 'acceptForSession'), { behavior: 'deny', message: 'No valid session permission rule is available; choose a one-time approval instead.' })
   const file = route(edit()).pending
-  assert.deepEqual(approvalToPermissionResult(file, 'acceptForSession').updatedPermissions, [{ type: 'addRules', rules: [{ toolName: 'Edit' }], behavior: 'allow', destination: 'session' }])
+  assert.equal(approvalToPermissionResult(file, 'acceptForSession').behavior, 'deny')
   const accepting = route(edit({ permission_suggestions: [{ type: 'setMode', mode: 'acceptEdits', destination: 'session' }] })).pending
-  assert.deepEqual(approvalToPermissionResult(accepting, 'acceptForSession').updatedPermissions, [{ type: 'setMode', mode: 'acceptEdits', destination: 'session' }])
+  assert.equal(approvalToPermissionResult(accepting, 'acceptForSession').behavior, 'deny')
 
   // Suggestions that would widen beyond an allow are dropped as a whole bundle.
   for (const unsafe of [
@@ -99,7 +100,7 @@ test('decisions map to PermissionResult: accept keeps the input, cancel interrup
   ]) {
     const pending = route(edit({ permission_suggestions: unsafe })).pending
     assert.equal(pending.suggestions, null, JSON.stringify(unsafe))
-    assert.deepEqual(approvalToPermissionResult(pending, 'acceptForSession').updatedPermissions, [{ type: 'addRules', rules: [{ toolName: 'Edit' }], behavior: 'allow', destination: 'session' }])
+    assert.equal(approvalToPermissionResult(pending, 'acceptForSession').behavior, 'deny')
   }
   // The approved input is a snapshot: later mutation of the request does not change what Claude runs.
   const request = bash()
@@ -107,6 +108,45 @@ test('decisions map to PermissionResult: accept keeps the input, cancel interrup
   request.input.command = 'rm -rf /'
   assert.equal(approvalToPermissionResult(snap, 'accept').updatedInput.command, 'npm test')
   assert.throws(() => approvalToPermissionResult(route(ask()).pending, 'accept'), TypeError)
+})
+
+test('session choices and actual permission payloads require sanitized rules for the requested tool', () => {
+  for (const make of [bash, edit]) {
+    const name = make().tool_name
+    for (const suggestions of [undefined, null, [], {},
+      [{ type: 'setMode', mode: 'acceptEdits' }], [{ type: 'addDirectories', directories: ['/work'] }],
+      [{ type: 'addRules', behavior: 'allow', rules: [] }],
+      [{ type: 'addRules', behavior: 'deny', rules: [{ toolName: name }] }],
+      [{ type: 'addRules', behavior: 'allow', rules: [{ toolName: 'AnotherTool' }] }],
+      [{ type: 'addRules', behavior: 'allow', rules: [{ toolName: name }] }, { type: 'setMode', mode: 'bypassPermissions' }],
+    ]) {
+      const routed = route(make({ permission_suggestions: suggestions }), { offerSessionGrant: true })
+      assert.deepEqual(routed.serverRequest.params.availableDecisions, ['accept', 'decline', 'cancel'])
+      const forged = serverResponseToPermissionResult(routed.pending, { decision: 'acceptForSession' })
+      assert.equal(forged.behavior, 'deny')
+      assert.equal(forged.updatedPermissions, undefined)
+      assert.deepEqual(approvalToPermissionResult(routed.pending, 'accept'), { behavior: 'allow', updatedInput: make().input })
+    }
+    const suggestions = [{ type: 'addRules', behavior: 'allow', rules: [{ toolName: name, ruleContent: 'bounded-rule' }], destination: 'userSettings', privateField: 'ignored' }]
+    const routed = route(make({ permission_suggestions: suggestions }), { offerSessionGrant: true })
+    assert.deepEqual(routed.serverRequest.params.availableDecisions, ['accept', 'acceptForSession', 'decline', 'cancel'])
+    suggestions[0].rules[0].ruleContent = 'changed-after-request'
+    assert.deepEqual(approvalToPermissionResult(routed.pending, 'acceptForSession'), {
+      behavior: 'allow', updatedInput: make().input,
+      updatedPermissions: [{ type: 'addRules', behavior: 'allow', rules: [{ toolName: name, ruleContent: 'bounded-rule' }], destination: 'session' }],
+    })
+    assert.deepEqual(route(make({ permission_suggestions: suggestions })).serverRequest.params.availableDecisions, ['accept', 'decline', 'cancel'], 'feature-off still hides the choice')
+  }
+})
+
+test('broker explicitly denies a forged session decision without a rule and keeps ordinary one-off acceptance', () => {
+  const broker = createClaudePermissionBroker({ threadId: THREAD, offerSessionGrant: true })
+  const first = broker.request(canUseTool('session-forged', bash()), { turnId: TURN })
+  assert.deepEqual(first.serverRequest.params.availableDecisions, ['accept', 'decline', 'cancel'])
+  const denied = broker.respond(first.serverRequest.id, { decision: 'acceptForSession' })
+  assert.deepEqual(denied.write.response.response, { behavior: 'deny', message: 'No valid session permission rule is available; choose a one-time approval instead.' })
+  const next = broker.request(canUseTool('one-off', bash()), { turnId: TURN })
+  assert.deepEqual(broker.respond(next.serverRequest.id, { decision: 'accept' }).write.response.response, { behavior: 'allow', updatedInput: bash().input })
 })
 
 test('AskUserQuestion becomes a runtime question card with private q<index> ids', () => {

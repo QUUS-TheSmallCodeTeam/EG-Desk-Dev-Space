@@ -286,7 +286,8 @@ export function normalizeLocalHistoryPage(page, clientThreadId) {
     localHistory: true,
   });
   const asRun = (run, event = {}) => ({
-    ...copy(run), ...localComputerFields(run, event), localRunId: run.localRunId || event.localRunId || undefined,
+    ...copy(run), ...localComputerFields(run, event), ...localRateLimitFields(run, event, page.thread),
+    localRunId: run.localRunId || event.localRunId || undefined,
     runId: run.runId || event.runId || undefined,
     localSeq: event.seq ?? run.localSeq,
     localHistory: true, localThreadId: clientThreadId, localConversationId,
@@ -298,6 +299,15 @@ export function normalizeLocalHistoryPage(page, clientThreadId) {
   const eventMessages = [];
   const eventRuns = [];
   for (const event of events) {
+    const storedRun = event.details?.run;
+    if (storedRun) Object.assign(storedRun, localRateLimitFields(storedRun, event, page.thread));
+    if (event.event === 'run.rateLimit') {
+      const projectedRun = (Array.isArray(page.runs) ? page.runs : []).find(run =>
+        event.localRunId && run.localRunId === event.localRunId || event.runId && run.runId === event.runId);
+      const rateLimit = publicRunRateLimit(event.details?.rateLimit, event, storedRun, projectedRun, page.thread);
+      event.details = { ...(storedRun ? { run: storedRun } : {}), rateLimit,
+        error: quotaErrorForRateLimit(rateLimit, event.details?.error) };
+    }
     if (event.details?.message) {
       const item = asMessage(event.details.message, event);
       const index = eventMessages.findIndex(previous => sameLocalMessage(previous, item));
@@ -322,12 +332,23 @@ export function normalizeLocalHistoryPage(page, clientThreadId) {
 export function createChatEpochScope({ makeController = () => new AbortController() } = {}) {
   let epoch = 0;
   const active = new Set();
+  const generations = new Map();
+  const generation = scope => generations.get(scope) || 0;
   return {
     current: () => epoch,
-    begin: () => { const controller = makeController(); const token = { epoch, controller, signal: controller.signal }; active.add(token); return token; },
-    valid: token => (typeof token === 'number' ? token : token.epoch) === epoch,
+    begin: (scope = 'codex') => { const controller = makeController();
+      const token = { epoch, scope, generation: generation(scope), controller, signal: controller.signal };
+      active.add(token); return token; },
+    valid: token => typeof token === 'number' ? token === epoch
+      : token.epoch === epoch && token.generation === generation(token.scope),
     finish: token => active.delete(token),
-    reset: () => { epoch++; for (const token of active) token.controller.abort(); active.clear(); },
+    reset: scope => {
+      if (scope === undefined) { epoch++; generations.clear(); }
+      else generations.set(scope, generation(scope) + 1);
+      for (const token of active) if (scope === undefined || token.scope === scope) {
+        token.controller.abort(); active.delete(token);
+      }
+    },
   };
 }
 const identityText = value => typeof value === 'string' ? value.trim() : '';
@@ -359,6 +380,14 @@ export function knownCodexAccountKey(key) {
   return !isProviderIdentity(identity.join(':'), mode);
 }
 export function detachNativeThread(thread, savedAccountKey, nonce) {
+  // Claude's durable binding is checked by /chat/resume, not a Codex account
+  // key from Desk preferences. Keep the original local/native routing pair.
+  if (thread.engineId === 'claude') return {
+    ...thread, conversationId: thread.conversationId || thread.retainedNativeBinding?.conversationId || null,
+    clientBindingId: thread.retainedNativeBinding?.clientThreadId || thread.clientBindingId || null,
+    bindingAccountKey: null, bindingState: 'server-check-required', retainedNativeBinding: null,
+    resuming: false, preparingInput: false, sendError: null,
+  };
   const prior = thread.retainedNativeBinding;
   const activeId = thread.conversationId;
   const conversationId = activeId || prior?.conversationId || null;
@@ -379,6 +408,8 @@ export function detachNativeThread(thread, savedAccountKey, nonce) {
   };
 }
 export function reconcileNativeThread(thread, authStatus) {
+  if (thread.engineId === 'claude') return thread.retainedNativeBinding?.conversationId
+    ? detachNativeThread(thread, null, null) : thread;
   const key = codexAccountKey(authStatus);
   const retained = thread.retainedNativeBinding;
   if (!key || !retained || thread.conversationId) return thread;
@@ -388,12 +419,16 @@ export function reconcileNativeThread(thread, authStatus) {
   return { ...thread, bindingState: 'quarantined', retainedNativeBinding: { ...retained, reason: knownCodexAccountKey(retained.accountKey) ? 'identity-mismatch' : 'ownership-unverified' } };
 }
 export const nativeBindingHeld = thread => !!thread?.retainedNativeBinding && !thread.conversationId;
-export function canResumeNativeThread(thread, authStatus) {
+export function canResumeNativeThread(thread, authStatus, context = {}) {
+  // This permits the server check, never grants native ownership locally.
+  if (thread?.engineId === 'claude') return !!thread.conversationId && chatThreadReadiness(thread, context).ready;
   return !!thread?.conversationId && thread.bindingState === 'verified'
     && knownCodexAccountKey(thread.bindingAccountKey)
     && thread.bindingAccountKey === codexAccountKey(authStatus);
 }
 export function nativeBindingForRun(thread, run) {
+  if (thread.engineId === 'claude') return { bindingAccountKey: null,
+    bindingState: run.accountIdentity?.status === 'verified' ? 'server-verified' : 'server-check-required' };
   const established = !!thread.conversationId && thread.conversationId === run.conversationId
     && thread.bindingState === 'verified' && knownCodexAccountKey(thread.bindingAccountKey);
   // Preserve proof for the same native conversation, never borrow it for a new CID.
@@ -420,8 +455,9 @@ export function settleReconciledRequests(state, clientThreadId, snapshot) {
 function ensureStream(state, id) {
   return state.streams[id] ||= { seen: {}, checkpoints: {}, seq: -1, generation: ++state.streamGeneration };
 }
-export function registerChatRequest(state, request, authStatus) {
-  state.requests[request.requestId] = { ...request, accountKey: codexAccountKey(authStatus), status: 'submitting' };
+export function registerChatRequest(state, request, authStatus, engineId = 'codex') {
+  state.requests[request.requestId] = { ...request, ...(engineId === 'claude' ? { engineId } : {}),
+    accountKey: engineId === 'claude' ? null : codexAccountKey(authStatus), status: 'submitting' };
 }
 export function snapshotChatDraft(thread, text, revision = 0) {
   return { text, revision, inputSources: copy(thread?.inputSources || []), briefingInputs: copy(thread?.briefingInputs || []) };
@@ -574,6 +610,11 @@ export function contextResolverErrorText(code) {
   })[code] || null;
 }
 
+export function claudeContextSendErrorText(code) {
+  return code === 'CLAUDE_CONTEXT_UNSUPPORTED'
+    ? '현재 Claude 연결에서는 선택한 자료를 사용할 수 없어 보내지 않았습니다. 자료를 제외한 뒤 다시 보내세요.' : null;
+}
+
 // CTX-04 '왜 이것이 붙었나': names from the screen (or the capture label),
 // reason words and scores only. No captured text.
 export function contextResolverRecordView(resolver, { labelFor = () => null, captures = [], boardTitleFor = () => null } = {}) {
@@ -604,16 +645,24 @@ export function contextResolverRecordView(resolver, { labelFor = () => null, cap
   return { title: CONTEXT_RESOLVER_RECORD_TITLE, boardText: contextBoardText(resolver.board, boardTitleFor), rows,
     summary: suggested ? `추천 ${suggested}개 중 ${chosen}개를 골라 붙였어요` : '추천 없이 직접 고른 자료만 붙였어요' };
 }
+// Display provenance only; native ownership and account proof stay on the server.
+function runEngineMatches(value, engineId) {
+  return [value?.engineId, value?.engine?.id].every(id => id === undefined || id === engineId);
+}
 function ensureRun(state, identity) {
   const request = state.requests[identity.requestId];
   const conversationId = identity.conversationId || request?.conversationId;
   const runId = identity.runId || request?.runId;
   if (!conversationId || !runId) return null;
   const key = runKey(conversationId, runId);
+  const engineId = identity.engineId ?? identity.engine?.id;
+  if (engineId !== undefined && (!isEngineId(engineId) || !runEngineMatches(identity, engineId)
+    || !runEngineMatches(state.runs[key], engineId))) return null;
   const run = state.runs[key] ||= {
     conversationId, runId, answerId: key, status: 'running', stopRequested: false,
     messages: [], activities: [], artifacts: [], pendingApprovals: [], pendingUserInputs: [], subAgents: [], error: null, summary: '',
   };
+  if (engineId !== undefined) run.engineId = engineId;
   for (const field of ['requestId', 'clientThreadId', 'localThreadId', 'answerId', 'authorName', 'authorAvatar']) {
     if (identity[field] || request?.[field]) run[field] = identity[field] || request[field];
   }
@@ -653,6 +702,12 @@ function localComputerFields(run, event) {
   if (COMPUTER_CONTROL_POLICIES.includes(policy)) fields.computerControl = { policy };
   return fields;
 }
+function localRateLimitFields(run, event, thread) {
+  if (!run || !Object.hasOwn(run, 'rateLimit')) return {};
+  const rateLimit = publicRunRateLimit(run.rateLimit, run, event, thread);
+  const error = quotaErrorForRateLimit(rateLimit, run.error);
+  return { rateLimit, ...(error || run.error?.kind === 'quota' ? { error } : {}) };
+}
 export function acceptChatRequest(state, response, requestId) {
   if (!response?.accepted) return null;
   const run = ensureRun(state, { ...response, requestId: response.requestId || requestId });
@@ -671,18 +726,24 @@ export function usableArtifact(artifact) {
 }
 export function reduceChatEvent(state, event, engineIds = [DEFAULT_CHAT_ENGINE_ID]) {
   // An engine the bridge has not listed is ignored, never shown as Codex.
-  if (event?.type !== 'chat.event' || event.v !== 2 || !engineIds.includes(chatEventEngineId(event))) return null;
+  const engineId = chatEventEngineId(event);
+  if (event?.type !== 'chat.event' || event.v !== 2 || !engineIds.includes(engineId)) return null;
   if (!event.streamId || !Number.isSafeInteger(event.seq)) return null;
+  const previous = state.runs[runKey(event.conversationId, event.runId)];
+  if (!runEngineMatches(event, engineId) || !runEngineMatches(previous, engineId)) return null;
+  const details = event.details || {};
+  const rateLimit = event.event === 'run.rateLimit' ? publicRunRateLimit(details.rateLimit, event, previous) : null;
+  if (event.event === 'run.rateLimit' && (!rateLimit || engineId !== 'claude'
+    || previous?.streamId === event.streamId && previous.seq >= event.seq)) return null;
   const stream = ensureStream(state, event.streamId);
   if (event.seq <= (stream.checkpoints[event.conversationId] ?? -1) || stream.seen[event.seq]) return null;
   stream.seen[event.seq] = true;
   stream.seq = Math.max(stream.seq, event.seq);
-  const run = ensureRun(state, event);
+  const run = ensureRun(state, { ...event, engineId });
   if (!run) return null;
   if (run.streamId && state.streams[run.streamId]?.generation > stream.generation) return null;
+  run.seq = run.streamId === event.streamId ? Math.max(run.seq ?? -1, event.seq) : event.seq;
   run.streamId = event.streamId;
-  run.seq = Math.max(run.seq || -1, event.seq);
-  const details = event.details || {};
   if (event.event === 'run.started') {
     recordRunToolCeiling(run, details.toolCeiling);
     recordRunComputerControl(run, details.computerControl);
@@ -745,12 +806,16 @@ export function reduceChatEvent(state, event, engineIds = [DEFAULT_CHAT_ENGINE_I
     else if (row && rows.length < MAX_SUB_AGENTS) rows.push(row);
   } else if (event.event === 'computer.used') {
     run.computerUse = computerUseWithEvent(run.computerUse, details);
+  } else if (event.event === 'run.rateLimit') {
+    run.rateLimit = rateLimit;
+    const error = quotaErrorForRateLimit(rateLimit, details.error);
+    if (error || details.error === null) run.error = error;
   } else if (event.event === 'run.stop_requested') {
     run.stopRequested = true;
     if (isRunBusy(run)) run.status = 'stopping';
   } else if (event.event === 'run.completed') {
     run.status = details.status || 'completed';
-    run.error = details.error || null;
+    run.error = quotaErrorForRateLimit(publicRunRateLimit(run.rateLimit, run), details.error) || details.error || null;
     endComputerUse(run);
     run.pendingApprovals = [];
     run.pendingUserInputs = [];
@@ -788,6 +853,15 @@ function mergeItems(existing, incoming, preferExisting) {
 }
 export function mergeChatSnapshot(state, snapshot, clientThreadId) {
   if (!snapshot?.conversationId) return [];
+  if (snapshot.streamId && !Number.isSafeInteger(snapshot.seq)) return [];
+  // A refused envelope must not advance the checkpoint and swallow valid SSE.
+  for (const incoming of snapshot.runs || []) {
+    const previous = state.runs[runKey(snapshot.conversationId, incoming.runId)];
+    const engineId = incoming.engineId ?? incoming.engine?.id ?? snapshot.engineId;
+    if (engineId !== undefined && (!isEngineId(engineId) || !runEngineMatches(incoming, engineId)
+      || !runEngineMatches(snapshot, engineId) || !runEngineMatches(previous, engineId))) return [];
+    if (incoming.rateLimit != null && !publicRunRateLimit(incoming.rateLimit, incoming, snapshot, previous)) return [];
+  }
   const stream = snapshot.streamId ? ensureStream(state, snapshot.streamId) : null;
   if (!stream || stream.generation === state.streamGeneration) state.connection = snapshot.connection || 'offline';
   const stale = stream && stream.seq > snapshot.seq;
@@ -800,7 +874,10 @@ export function mergeChatSnapshot(state, snapshot, clientThreadId) {
   };
   const changed = [];
   for (const incoming of snapshot.runs || []) {
-    const run = ensureRun(state, { ...incoming, conversationId: snapshot.conversationId, clientThreadId });
+    const previous = state.runs[runKey(snapshot.conversationId, incoming.runId)];
+    const rateLimit = publicRunRateLimit(incoming.rateLimit, incoming, snapshot, previous);
+    const run = ensureRun(state, { ...incoming, ...(snapshot.engineId !== undefined ? { engineId: snapshot.engineId } : {}),
+      conversationId: snapshot.conversationId, clientThreadId });
     if (!run) continue;
     const preserve = (stale && run.streamId === snapshot.streamId && run.seq > snapshot.seq)
       || (stream && run.streamId && state.streams[run.streamId]?.generation > stream.generation);
@@ -818,6 +895,9 @@ export function mergeChatSnapshot(state, snapshot, clientThreadId) {
     if (!preserve) {
       const localInputs = run.pendingUserInputs || [];
       for (const key of ['status', 'stopRequested', 'error', 'summary', 'plan', 'pendingApprovals', 'pendingUserInputs', 'subAgents', 'truncated', 'historyComplete', 'contextCaptures', 'contextEvents', 'briefing']) if (key in incoming) run[key] = copy(incoming[key]);
+      if ('rateLimit' in incoming && (stream || !run.streamId)) run.rateLimit = rateLimit;
+      const quotaError = quotaErrorForRateLimit(publicRunRateLimit(run.rateLimit, run), run.error);
+      if (quotaError) run.error = quotaError;
       run.pendingApprovals = (run.pendingApprovals || []).map(approval => ({ ...approval, id: approval.id || approval.approvalId }));
       // A snapshot never rewinds a local in-flight/sent/stale reply on the same question.
       run.pendingUserInputs = (Array.isArray(run.pendingUserInputs) ? run.pendingUserInputs : []).map(publicUserInput).filter(Boolean).map(input => {
@@ -856,10 +936,11 @@ export function runsForThread(state, thread) {
 }
 
 export function approvalRequestFor(run, approvalId, decision) {
-  if (run?.localHistory === true) return null;
-  const approval = run?.pendingApprovals.find(item => (item.approvalId || item.id) === approvalId);
-  if (!approval || approval.status !== 'pending' || approval.replyPending || approval.stale || !approval.choices?.includes(decision)) return null;
-  if (decision === 'accept' && !approvalScopeKnown(approval)) return null;
+  if (run?.localHistory === true || !['accept', 'acceptForSession', 'decline', 'cancel'].includes(decision)) return null;
+  const approval = run?.pendingApprovals?.find(item => (item.approvalId || item.id) === approvalId);
+  if (!approval || approval.status !== 'pending' || approval.replyPending || approval.stale
+    || !Array.isArray(approval.choices) || !approval.choices.includes(decision)) return null;
+  if (['accept', 'acceptForSession'].includes(decision) && !approvalScopeKnown(approval)) return null;
   return { approvalId, conversationId: run.conversationId, runId: run.runId, decision };
 }
 
@@ -875,7 +956,7 @@ export function approvalScopeKnown(approval) {
 }
 
 export function acknowledgeApprovalReply(run, reply) {
-  if (!reply?.accepted || reply.status !== 'replySent' || reply.conversationId !== run?.conversationId || reply.runId !== run?.runId) return false;
+  if (reply?.accepted !== true || reply.status !== 'replySent' || reply.conversationId !== run?.conversationId || reply.runId !== run?.runId) return false;
   const approval = run.pendingApprovals.find(item => (item.approvalId || item.id) === reply.approvalId);
   if (approval) { approval.status = 'replySent'; approval.replyPending = false; }
   return true;
@@ -902,7 +983,8 @@ function publicUserInput(value) {
       ? { label: shownText(option.label, 200), description: shownText(option.description, 1000) } : null);
     if (options?.includes(null)) return null;
     return { questionId, header: shownText(question.header, 200), question: text, options,
-      allowsOther: !!options && question.allowsOther === true, isSecret: question.isSecret === true };
+      allowsOther: !!options && question.allowsOther === true, isSecret: question.isSecret === true,
+      ...(question.multiSelect === true ? { multiSelect: true } : {}) };
   });
   if (questions.includes(null) || new Set(questions.map(question => question.questionId)).size !== questions.length) return null;
   return { userInputId, kind: 'userInput', status: value.status, itemId: nonEmptyId(value.itemId), isBlocking: value.isBlocking === true, questions };
@@ -917,7 +999,8 @@ const answerText = value => {
 };
 
 // The single gate for the card buttons and the bridge. `draft` is the UI-only
-// [{ questionId, choice: optionIndex | 'other' | null, text }] list.
+// [{ questionId, choice: optionIndex | 'other' | null, text }] list, with
+// optionIndices only for multi-select. Other clears the selected indices.
 export function userInputRequestFor(run, userInputId, draft, action = 'submit') {
   if (run?.localHistory === true || !isRunBusy(run) || !['submit', 'skip'].includes(action)) return null;
   const input = (run.pendingUserInputs || []).find(item => item.userInputId === userInputId);
@@ -930,8 +1013,24 @@ export function userInputRequestFor(run, userInputId, draft, action = 'submit') 
   for (const question of input.questions) {
     const matches = entries.filter(entry => entry.questionId === question.questionId);
     if (matches.length !== 1) return null;
-    const { choice, text } = matches[0];
+    const { choice, text, optionIndices } = matches[0];
     const freeText = question.options ? choice === 'other' && question.allowsOther : choice == null;
+    const hasIndices = Object.hasOwn(matches[0], 'optionIndices');
+    if (question.multiSelect === true) {
+      if (hasIndices && !Array.isArray(optionIndices)) return null;
+      if (freeText) {
+        if (optionIndices?.length || !answerText(text)) return null;
+        answers.push({ questionId: question.questionId, text: answerText(text) });
+      } else {
+        if (!question.options || choice != null || !hasIndices || !optionIndices.length || optionIndices.length > question.options.length
+          || new Set(optionIndices).size !== optionIndices.length
+          || [...optionIndices].some(index => !Number.isSafeInteger(index) || index < 0 || index >= question.options.length)
+          || text != null && (typeof text !== 'string' || text.trim())) return null;
+        answers.push({ questionId: question.questionId, optionIndices: [...optionIndices] });
+      }
+      continue;
+    }
+    if (hasIndices) return null;
     if (question.options && Number.isSafeInteger(choice) && choice >= 0 && choice < question.options.length) answers.push({ questionId: question.questionId, optionIndex: choice });
     else if (freeText && answerText(text)) answers.push({ questionId: question.questionId, text: answerText(text) });
     else return null;
@@ -940,7 +1039,7 @@ export function userInputRequestFor(run, userInputId, draft, action = 'submit') 
 }
 
 export function acknowledgeUserInputReply(run, reply) {
-  if (!reply?.accepted || reply.status !== 'replySent' || typeof reply.userInputId !== 'string'
+  if (reply?.accepted !== true || reply.status !== 'replySent' || typeof reply.userInputId !== 'string'
     || reply.conversationId !== run?.conversationId || reply.runId !== run?.runId) return false;
   const input = (run.pendingUserInputs || []).find(item => item.userInputId === reply.userInputId);
   if (input) { input.status = 'replySent'; input.replyPending = false; input.error = null; }
@@ -1429,9 +1528,26 @@ export const chatThreadEngineLocked = thread => !!thread && (!!thread.conversati
   || (Array.isArray(thread.messages) && thread.messages.length > 0));
 /** The room's engine: its locked one (older rooms are Codex), else its pick, else the app-wide recent engine (D4). */
 export function chatThreadEngineId(thread, { recentEngineId = null, engines = null } = {}) {
+  // An unavailable explicit choice still expresses intent; the server refuses it.
+  if (isEngineId(thread?.engineId)) return thread.engineId;
   if (chatThreadEngineLocked(thread)) return isEngineId(thread.engineId) ? thread.engineId : DEFAULT_CHAT_ENGINE_ID;
   const choices = chatEngineChoices(engines);
   return [thread?.engineId, recentEngineId].find(id => choices.some(choice => choice.id === id && choice.selectable)) || DEFAULT_CHAT_ENGINE_ID;
+}
+
+/** UI eligibility only. The helper remains authoritative for engine/account binding. */
+export function chatThreadReadiness(thread, context = {}) {
+  const engineId = chatThreadEngineId(thread, context);
+  const auth = context.authStatus || context.auth;
+  if (engineId === 'codex') return { engineId, ready: !!auth?.isLoggedIn && context.connected === true,
+    reason: !auth?.isLoggedIn ? 'Codex 연결 후 전송할 수 있습니다' : !context.connected ? 'Codex 연결을 확인해 주세요' : null };
+  const row = engineRows(context.engines).find(entry => entry.id === engineId);
+  const profiles = (Array.isArray(row?.profiles) ? row.profiles : []).filter(profile => profile?.active === true);
+  const signedIn = profiles.length === 1 && profiles[0].auth?.status === 'signedIn';
+  const ready = engineId === 'claude' && row?.status === 'ready' && signedIn && !row.statusReason;
+  return { engineId, ready, reason: ready ? null : row?.status === 'loginRequired' || profiles[0]?.auth?.status === 'signedOut'
+    ? 'Claude 로그인이 필요합니다' : row?.statusReason === 'CLAUDE_API_KEY_DETECTED'
+      ? 'Claude 연결 설정을 확인해 주세요' : 'Claude 연결을 확인해 주세요' };
 }
 
 // ReasoningEffort is a model-advertised string (SDK type: minimal|low|medium|high|xhigh).
@@ -1641,6 +1757,50 @@ export function usageRingView(auth) {
 }
 
 const ERROR_KIND_VALUES = ['auth', 'quota', 'permission', 'network', 'model', 'unknown'];
+// Mirrors the runtime's public Claude allowlists and bounds. Incoming reset
+// timestamps are already milliseconds; never parse provider strings here.
+const RUN_RATE_LIMIT_STATUSES = ['allowed', 'allowed_warning', 'rejected'];
+const RUN_RATE_LIMIT_WINDOWS = [
+  ['fiveHour', '5시간 한도'], ['weekly', '주간 한도'], ['weeklyOpus', 'Opus 주간 한도'],
+  ['weeklySonnet', 'Sonnet 주간 한도'], ['weeklyIncluded', '주간 포함 사용량 한도'], ['overage', '추가 사용량 한도'],
+];
+const rateLimitEpochMs = value => Number.isFinite(value) && value >= 946684800000 && value <= 253402300799999 ? Math.round(value) : null;
+function publicRunRateLimit(value, ...envelopes) {
+  if (!value || typeof value !== 'object' || Array.isArray(value) || value.engineId !== 'claude'
+    || !RUN_RATE_LIMIT_STATUSES.includes(value.status) || envelopes.some(envelope => !runEngineMatches(envelope, 'claude'))) return null;
+  const fraction = (number, max) => Number.isFinite(number) ? Math.min(max, Math.max(0, number)) : null;
+  return {
+    engineId: 'claude', status: value.status,
+    window: RUN_RATE_LIMIT_WINDOWS.some(([name]) => name === value.window) ? value.window : null,
+    windowMinutes: Number.isSafeInteger(value.windowMinutes) && value.windowMinutes > 0 && value.windowMinutes <= 525600 ? value.windowMinutes : null,
+    resetsAt: rateLimitEpochMs(value.resetsAt), utilization: fraction(value.utilization, 1), usedPercent: fraction(value.usedPercent, 100),
+    overageStatus: RUN_RATE_LIMIT_STATUSES.includes(value.overageStatus) ? value.overageStatus : null,
+    creditsRequired: value.creditsRequired === true, autoResume: false,
+  };
+}
+function quotaErrorForRateLimit(rateLimit, error) {
+  if (!rateLimit || rateLimit.status !== 'rejected' && !rateLimit.creditsRequired && error?.kind !== 'quota') return null;
+  return { code: rateLimit.creditsRequired ? 'CLAUDE_CREDITS_REQUIRED' : 'CLAUDE_RATE_LIMIT', origin: 'claude', kind: 'quota',
+    message: rateLimit.creditsRequired ? 'Claude 사용을 계속하려면 추가 사용량이 필요합니다.' : 'Claude 사용 한도에 도달했습니다.',
+    retryAt: rateLimit.resetsAt };
+}
+
+/** A reported quota observation, never availability proof or a resend action. */
+export function runRateLimitNotice(run, now = Date.now()) {
+  const rateLimit = publicRunRateLimit(run?.rateLimit, run);
+  if (!rateLimit) return null;
+  const level = rateLimit.status === 'rejected' || rateLimit.creditsRequired ? 'limit' : rateLimit.status === 'allowed_warning' ? 'warn' : 'ok';
+  const windowLabel = RUN_RATE_LIMIT_WINDOWS.find(([name]) => name === rateLimit.window)?.[1] || null;
+  const at = Number.isFinite(now) && Number.isFinite(new Date(now).getTime()) ? now : Date.now();
+  const clock = formatResetClock(rateLimit.resetsAt, at);
+  const resetLabel = clock ? `${rateLimit.resetsAt > at ? '초기화 예정' : '보고된 초기화 시각'}: ${clock}` : null;
+  const parts = [windowLabel, rateLimit.usedPercent === null ? null : `사용량 ${Math.round(rateLimit.usedPercent * 10) / 10}%`, resetLabel].filter(Boolean);
+  const text = rateLimit.creditsRequired ? 'Claude 사용을 계속하려면 추가 사용량이 필요합니다.' : level === 'limit' ? 'Claude 사용 한도에 도달했습니다.'
+    : level === 'warn' ? 'Claude 사용 한도에 가까워졌습니다.' : 'Claude 사용량을 확인했습니다.';
+  return { kind: 'quota', level, text: `${text}${parts.length ? ` ${parts.join(' · ')}.` : ''}`,
+    action: null, resetLabel, usedPercent: rateLimit.usedPercent };
+}
+
 /** Run error copy by kind (helper contract: run.error.kind, retryAt); model/unknown keep the reported text. */
 export function runErrorNotice(error, usage = null, now = Date.now()) {
   if (!error) return null;
@@ -1648,6 +1808,11 @@ export function runErrorNotice(error, usage = null, now = Date.now()) {
   const kind = ERROR_KIND_VALUES.includes(error.kind) ? error.kind : 'unknown';
   if (kind === 'auth') return { kind, text: '다시 로그인이 필요합니다.', action: 'login' };
   if (kind === 'quota') {
+    if (error.origin === 'claude') {
+      const notice = runRateLimitNotice({ rateLimit: { engineId: 'claude', status: 'rejected', resetsAt: error.retryAt,
+        creditsRequired: error.code === 'CLAUDE_CREDITS_REQUIRED' } }, now);
+      return { kind, text: notice.text, action: null };
+    }
     const resetAt = Number.isFinite(error.retryAt) && error.retryAt > now ? error.retryAt
       : Number.isFinite(usage?.resetsAt) && usage.resetsAt > now ? usage.resetsAt : null;
     const clock = formatResetClock(resetAt, now);

@@ -5,6 +5,7 @@ import path from 'node:path';
 import { createPrivateQaTempDirectory } from './egdesk-qa-platform.mjs';
 import { bootstrapQaProfile, canonicalTempRoot, LOADER_FILES } from './egdesk-chat-qa-profile.mjs';
 import { prepareQaFirefox, qaFirefoxPreferences, qaAutomationPorts } from './run-firefox-mcp-target.mjs';
+import { validateQaFixtureIsolation, QA_ISOLATION_MANIFEST } from './egdesk-qa-fixture-isolation.mjs';
 
 function remove(root, prefix) {
   assert.equal(path.dirname(root), canonicalTempRoot());
@@ -56,4 +57,28 @@ test('normal mode disables automation and port selection cannot alias the QA cha
   assert.throws(() => qaAutomationPorts(2828, 2828), /distinct/);
   assert.throws(() => qaAutomationPorts(2830, 6000), /2828/);
   assert.throws(() => qaAutomationPorts(2828, '6000;exit'), /valid/);
+});
+
+test('fixture preparation fails before writes for bad ports, and normal QA remains the original overlay', t => {
+  const source = createPrivateQaTempDirectory('egdesk-loader-launcher-');
+  t.after(() => remove(source, 'egdesk-loader-launcher-'));
+  for (const name of LOADER_FILES) fs.writeFileSync(path.join(source, name), `public fixture: ${name}`);
+  const { profile } = bootstrapQaProfile({ loaderSource: source });
+  t.after(() => remove(profile, 'egdesk-chat-test-'));
+  const env = { EGDESK_QA_FIXTURE_TRANSPORT: '1', EGDESK_QA_FIXTURE_PORT: '39220' };
+  for (const port of [undefined, '39218', '2829', '6001']) {
+    assert.throws(() => prepareQaFirefox(profile, { marionette: 2829, remote: 6001,
+      env: { ...env, EGDESK_QA_FIXTURE_PORT: port } }), /FIXTURE_PORT|distinct/);
+    assert.equal(fs.existsSync(path.join(profile, 'user.js')), false);
+    assert.equal(fs.existsSync(path.join(profile, QA_ISOLATION_MANIFEST)), false);
+  }
+  prepareQaFirefox(profile, { env: {}, marionette: 2829, remote: 6001 });
+  const file = path.join(profile, 'chrome', 'JS/eg-desk-surface.uc.js');
+  const original = fs.readFileSync(new URL('../overlay/JS/eg-desk-surface.uc.js', import.meta.url));
+  assert.deepEqual(fs.readFileSync(file), original);
+  assert.equal(fs.existsSync(path.join(profile, QA_ISOLATION_MANIFEST)), false);
+  prepareQaFirefox(profile, { env, marionette: 2829, remote: 6001 });
+  assert.equal(validateQaFixtureIsolation(profile, { env }).port, 39220);
+  assert.notDeepEqual(fs.readFileSync(file), original);
+  assert.deepEqual(fs.readFileSync(new URL('../overlay/JS/eg-desk-surface.uc.js', import.meta.url)), original);
 });

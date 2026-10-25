@@ -5,6 +5,7 @@ import { rm } from 'node:fs/promises'
 import { readFile } from 'node:fs/promises'
 import { backoffDelayMs, createChatHttpHandler, createRateLimitSync, createReconnectBackoff, guardBridgeRequest, readJsonBody, setBridgeCors } from './codex-bridge-http.mjs'
 import { CodexChatRuntime } from './codex-chat-runtime.mjs'
+import { createChatEngineAuth } from './codex-bridge-engine-auth.mjs'
 import { createCodexEngineAdapter } from './codex-engine-adapter.mjs'
 import { openChatStore } from './egdesk-chat-store.mjs'
 import { openProfileStore } from './egdesk-profile-store.mjs'
@@ -90,6 +91,36 @@ test('HTTP send preserves accepted/conversationId and adds run IDs without liste
   assert.equal(res.body.accepted, true)
   assert.equal(res.body.conversationId, 'thread')
   assert.deepEqual(received, { message: 'hi' })
+})
+
+test('actual bridge auth defaults only a new chat to Codex and refreshes its account before dispatch', async () => {
+  const calls = []
+  let loggedIn = false
+  const chat = new CodexChatRuntime({ request: async method => {
+    calls.push(method)
+    if (method === 'thread/start') return { thread: { id: 'codex-auth-thread' } }
+    if (method === 'turn/start') return { turn: { id: 'codex-auth-turn', status: 'inProgress', items: [] } }
+    throw new Error(`Unexpected call: ${method}`)
+  }, respond: () => {} })
+  chat.setConnection(true)
+  const auth = createChatEngineAuth({ chat, refreshCodexAccount: async () => { calls.push('auth') }, getCodexAuth: () => ({ isLoggedIn: loggedIn }) })
+  const handler = createChatHttpHandler(chat, auth)
+  const send = async body => { const res = response(); await handler(request(JSON.stringify(body)), res, new URL('http://localhost/chat/send')); return res }
+  const refused = await send({ message: 'New chat while logged out' })
+  assert.deepEqual([refused.status, refused.body.accepted, refused.body.code], [401, false, 'LOGIN_REQUIRED'])
+  assert.deepEqual(calls, ['auth'])
+  loggedIn = true
+  const accepted = await send({ message: 'New chat after login' })
+  assert.equal(accepted.body.accepted, true)
+  assert.deepEqual(calls, ['auth', 'auth', 'thread/start', 'turn/start'])
+})
+
+test('the server mounts the tested stored-engine auth function, without a Codex response-routing shim', async () => {
+  const source = await readFile(new URL('./codex-bridge-server.mjs', import.meta.url), 'utf8')
+  assert.match(source, /const ensureChatAuth = createChatEngineAuth\(\{ chat, refreshCodexAccount: refreshAccountState, getCodexAuth: \(\) => authState \}\)/)
+  assert.match(source, /createChatHttpHandler\(chat, ensureChatAuth\)/)
+  assert.match(source, /respond: nativeRespond,/)
+  assert.doesNotMatch(source, /respond:.*claudeEngine\.owns/)
 })
 
 test('HTTP send answers 400 MODEL_UNAVAILABLE or EFFORT_UNSUPPORTED for a choice outside the listed models, after auth and before any native call', async () => {

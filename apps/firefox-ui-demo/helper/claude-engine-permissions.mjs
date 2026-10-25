@@ -78,6 +78,7 @@ const TEXT = Object.freeze({
   unreadable: 'EG-Desk could not read this permission request; nothing was granted.',
   tooMany: 'Too many pending EG-Desk approvals; nothing was granted.',
   approvalUnavailable: 'EG-Desk could not show this approval; nothing was granted.',
+  sessionUnavailable: 'No valid session permission rule is available; choose a one-time approval instead.',
   questionUnavailable: 'EG-Desk could not show this question to the user.',
   invalidQuestions: 'AskUserQuestion called with no valid questions.',
   unsupportedTool: 'EG-Desk cannot ask the user to approve this tool yet; it was not run.',
@@ -261,26 +262,28 @@ export function routePermissionRequest(request, { threadId, turnId = null, rpcId
   if (!kind) return deny('unsupportedTool', TEXT.unsupportedTool)
   // The CLI's own short title of the request (e.g. "Claude wants to edit a.js").
   const reason = [r.title, r.description, r.decision_reason].find(value => shortText(value, L.maxReason)) || null
+  const approval = pending(kind, { suggestions: normalizeSuggestions(r.permission_suggestions, L) })
+  const canGrantSession = offerSessionGrant && sessionUpdates(approval).length > 0
   const params = {
     ...base,
     ...(reason ? { reason } : {}),
     ...(kind === 'commandExecution' ? { command: typeof input.command === 'string' ? input.command : null, cwd: typeof cwd === 'string' ? cwd : null } : {}),
-    availableDecisions: offerSessionGrant ? ['accept', 'acceptForSession', 'decline', 'cancel'] : ['accept', 'decline', 'cancel'],
+    availableDecisions: canGrantSession ? ['accept', 'acceptForSession', 'decline', 'cancel'] : ['accept', 'decline', 'cancel'],
   }
   return {
     route: 'approval',
     serverRequest: { id: rpcId, method: METHOD[kind], params },
-    pending: pending(kind, { suggestions: normalizeSuggestions(r.permission_suggestions, L) }),
+    pending: approval,
   }
 }
 
-// Session-scoped grant: CLI suggestions with destination 'session'. Without
-// usable suggestions a command tool falls back to a one-time allow (a bare
-// "Bash" rule would allow every command); other tools get a session rule.
+// Only actual, sanitized CLI allow rules for this tool can support a session
+// choice. Never synthesize a broad rule, silently turn that choice into one-off
+// permission, or treat a mode/directory change as a session rule for this tool.
 function sessionUpdates(pending) {
-  if (pending.suggestions?.length) return pending.suggestions.map(update => ({ ...structuredClone(update), destination: 'session' }))
-  if (COMMAND_TOOLS.has(pending.toolName)) return []
-  return [{ type: 'addRules', rules: [{ toolName: pending.toolName }], behavior: 'allow', destination: 'session' }]
+  if (!pending.suggestions?.length || pending.suggestions.some(update => update.type !== 'addRules' ||
+      update.rules.some(rule => rule.toolName !== pending.toolName))) return []
+  return pending.suggestions.map(update => ({ ...structuredClone(update), destination: 'session' }))
 }
 
 /** Runtime approval decision → PermissionResult. Unknown decisions are refused. */
@@ -288,6 +291,7 @@ export function approvalToPermissionResult(pending, decision) {
   if (!pending || !['commandExecution', 'fileChange'].includes(pending.kind)) throw new TypeError('approvalToPermissionResult requires an approval pending record')
   if (decision === 'accept' || decision === 'acceptForSession') {
     const updates = decision === 'acceptForSession' ? sessionUpdates(pending) : []
+    if (decision === 'acceptForSession' && !updates.length) return { behavior: 'deny', message: TEXT.sessionUnavailable }
     return { behavior: 'allow', updatedInput: structuredClone(pending.input), ...(updates.length ? { updatedPermissions: updates } : {}) }
   }
   if (decision === 'decline') return { behavior: 'deny', message: TEXT.declined }

@@ -1303,6 +1303,7 @@
   // can be added together, signed-in/Browser rows only by their own checkbox,
   // and rows outside the account or permission show only why.
   function buildContextSuggestions(thread, bridge) {
+    if (ChatState.chatThreadEngineId(thread, state.codex) !== 'codex') return null;
     const store = state.contextSuggest;
     const entry = store?.byThread?.[thread.id];
     if (!entry || entry.dismissed || Date.now() < (store.unsupportedUntil || 0) || !state.codex?.authStatus?.isLoggedIn) return null;
@@ -1669,28 +1670,40 @@
       || run.localHistory === true || !ChatState.isRunBusy(run);
     const answers = (input.questions || []).map(question => {
       const saved = Array.isArray(draft) ? draft.find(entry => entry?.questionId === question.questionId) : null;
-      return { questionId: question.questionId, choice: saved?.choice ?? null, text: typeof saved?.text === 'string' ? saved.text : '' };
+      return { questionId: question.questionId, choice: saved?.choice ?? null, text: typeof saved?.text === 'string' ? saved.text : '',
+        ...(question.multiSelect === true ? { optionIndices: Array.isArray(saved?.optionIndices) ? [...saved.optionIndices] : [] } : {}) };
     });
+    const copyAnswers = () => answers.map(answer => ({ ...answer,
+      ...(Array.isArray(answer.optionIndices) ? { optionIndices: [...answer.optionIndices] } : {}) }));
+    const canEdit = () => !locked && !!ChatState.userInputRequestFor(run, userInputId, null, 'skip');
     const focusKey = (index, part) => `${userInputId}\n${index}\n${part}`;
     const otherFields = [];
+    const optionControls = [];
     const submit = el('button', { type: 'button', 'aria-label': 'Agent 질문에 답변 보내기',
       data: { testid: 'chat-user-input-submit', focusKey: focusKey(-1, 'submit') },
-      onclick: () => { if (!locked && ChatState.userInputRequestFor(run, userInputId, answers)) actions.submit(answers); } }, '답변 보내기');
+      onclick: () => { if (canEdit() && ChatState.userInputRequestFor(run, userInputId, answers)) actions.submit(copyAnswers()); } }, '답변 보내기');
     const sync = () => {
-      for (const { field, answer } of otherFields) field.disabled = locked || answer.choice !== 'other';
-      submit.disabled = locked || !ChatState.userInputRequestFor(run, userInputId, answers);
+      for (const { field, answer } of otherFields) {
+        field.disabled = !canEdit() || answer.choice !== 'other';
+        if (field.value !== answer.text) field.value = answer.text;
+      }
+      for (const { control, answer, value, multi } of optionControls) {
+        control.checked = multi && value !== 'other' ? answer.choice !== 'other' && answer.optionIndices.includes(value) : answer.choice === value;
+        control.disabled = !canEdit();
+      }
+      submit.disabled = !canEdit() || !ChatState.userInputRequestFor(run, userInputId, answers);
     };
-    const changed = () => { if (locked) return; actions.draft(answers); sync(); };
+    const changed = () => { if (!canEdit()) return; actions.draft(copyAnswers()); sync(); };
     const textField = (question, answer, testid, part, label) => {
       const field = el('input', { type: question.isSecret ? 'password' : 'text', 'aria-label': label,
         autocomplete: question.isSecret ? 'off' : null, spellcheck: question.isSecret ? 'false' : null,
         maxlength: '4000', data: { testid, focusKey: focusKey(answers.indexOf(answer), part) },
-        oninput: ev => { answer.text = ev.target.value; changed(); },
+        oninput: ev => { if (!canEdit() || (question.options && answer.choice !== 'other')) return; answer.text = ev.target.value; changed(); },
         onkeydown: ev => {
           if (ev.key !== 'Enter' || !(ev.metaKey || ev.ctrlKey) || ev.shiftKey || ev.altKey) return;
           if (ev.isComposing || ev.keyCode === 229) return;
           ev.preventDefault();
-          if (!submit.disabled) actions.submit(answers);
+          if (canEdit() && ChatState.userInputRequestFor(run, userInputId, answers)) actions.submit(copyAnswers());
         } });
       field.value = answer.text;
       field.disabled = locked;
@@ -1708,18 +1721,34 @@
       if (sent && question.isSecret) {
         set.appendChild(el('p', { class: 'egd-codex-user-input-note' }, '비공개 답변 전달됨'));
       } else if (question.options) {
-        const radio = (value, part, text, description) => {
-          const control = el('input', { type: 'radio', name: `egd-user-input:${userInputId}:${index}`,
+        const multi = question.multiSelect === true;
+        const optionControl = (value, part, text, description) => {
+          const control = el('input', { type: multi ? 'checkbox' : 'radio', name: `egd-user-input:${userInputId}:${index}`,
             data: { testid: 'chat-user-input-option', questionId: question.questionId, optionIndex: String(value), focusKey: focusKey(index, part) },
-            onchange: ev => { if (ev.target.checked) { answer.choice = value; changed(); } } });
+            onchange: ev => {
+              if (!canEdit()) return;
+              if (multi) {
+                if (value === 'other') {
+                  answer.choice = ev.target.checked ? 'other' : null;
+                  answer.optionIndices = [];
+                } else {
+                  answer.choice = null;
+                  answer.text = '';
+                  answer.optionIndices = ev.target.checked ? [...new Set([...answer.optionIndices, value])]
+                    : answer.optionIndices.filter(optionIndex => optionIndex !== value);
+                }
+                changed();
+              } else if (ev.target.checked) { answer.choice = value; changed(); }
+            } });
           control.checked = answer.choice === value;
           control.disabled = locked;
+          optionControls.push({ control, answer, value, multi });
           return el('label', { class: 'egd-input-source-choice' }, control,
             el('span', {}, text, description ? el('small', {}, description) : null));
         };
-        question.options.forEach((option, optionIndex) => set.appendChild(radio(optionIndex, `option-${optionIndex}`, option.label, option.description)));
+        question.options.forEach((option, optionIndex) => set.appendChild(optionControl(optionIndex, `option-${optionIndex}`, option.label, option.description)));
         if (question.allowsOther) {
-          set.appendChild(radio('other', 'other-choice', '기타(직접 입력)', null));
+          set.appendChild(optionControl('other', 'other-choice', '기타(직접 입력)', null));
           const field = textField(question, answer, 'chat-user-input-other', 'other', '기타 답변 직접 입력');
           otherFields.push({ field, answer });
           set.appendChild(field);
@@ -1731,8 +1760,8 @@
     });
     const skip = el('button', { type: 'button', 'aria-label': 'Agent 질문 건너뛰기',
       data: { testid: 'chat-user-input-skip', focusKey: focusKey(-1, 'skip') },
-      onclick: () => { if (!locked) actions.skip(); } }, '건너뛰기');
-    skip.disabled = locked;
+      onclick: () => { if (canEdit()) actions.skip(); } }, '건너뛰기');
+    skip.disabled = !canEdit();
     sync();
     block.appendChild(el('div', { class: 'egd-codex-user-input-actions' }, submit, skip));
     if (input.error) block.appendChild(el('p', { class: 'egd-codex-user-input-error' }, input.error));
@@ -1890,13 +1919,15 @@
           block.appendChild(el('p', {}, `네트워크 대상: ${approval.networkApprovalContext.protocol || '프로토콜 미확인'} · ${approval.networkApprovalContext.host || '호스트 미확인'} · 이번 요청`));
         }
         if (!ChatState.approvalScopeKnown(approval)) block.appendChild(el('p', {}, approval.acceptDisabledReason || '요청 범위를 확인하지 못해 허용할 수 없습니다. 거절하거나 취소할 수 있습니다.'));
-        for (const decision of approval.choices || []) {
-          const label = { accept: '허용', decline: '거절', cancel: '취소' }[decision];
-          if (!label) continue;
+        for (const decision of Array.isArray(approval.choices) ? approval.choices : []) {
+          if (!['accept', 'acceptForSession', 'decline', 'cancel'].includes(decision)) continue;
+          const label = { accept: approval.choices.includes('acceptForSession') ? '이번만 허용' : '허용',
+            acceptForSession: '이번 연결 세션에서 허용', decline: '거절', cancel: '취소' }[decision];
           block.appendChild(el('button', {
             'aria-label': `승인 요청 ${label}`, data: { testid: 'chat-approval-choice', decision, approvalId },
-            disabled: approval.status !== 'pending' || approval.replyPending || approval.stale || (decision === 'accept' && !ChatState.approvalScopeKnown(approval)) ? 'true' : null,
-            onclick: () => state.codexBridge.replyApproval({ approvalId, conversationId: run.conversationId, runId: run.runId, decision }),
+            title: decision === 'acceptForSession' ? '현재 실행 연결에만 적용됩니다. 연결이 다시 시작되면 재승인이 필요합니다.' : null,
+            disabled: ChatState.approvalRequestFor(run, approvalId, decision) ? null : 'true',
+            onclick: () => { const request = ChatState.approvalRequestFor(run, approvalId, decision); if (request) state.codexBridge.replyApproval(request); },
           }, label));
         }
         if (approval.error) block.appendChild(el('p', { role: 'alert' }, approval.error));
@@ -1907,11 +1938,17 @@
         const reply = action => draft => state.codexBridge.replyUserInput({ userInputId: input.userInputId,
           conversationId: run.conversationId, runId: run.runId, action, draft });
         rows.push(codexUserInputBlock(run, input, userInputDrafts.get(draftKey), {
-          draft: answers => { if (input.status === 'pending' && !input.stale) userInputDrafts.set(draftKey, answers.map(entry => ({ ...entry }))); },
+          draft: answers => { if (ChatState.userInputRequestFor(run, input.userInputId, null, 'skip')) userInputDrafts.set(draftKey, answers.map(entry => ({ ...entry,
+            ...(Array.isArray(entry.optionIndices) ? { optionIndices: [...entry.optionIndices] } : {}) }))); },
           submit: reply('submit'), skip: () => reply('skip')(),
         }));
       }
-      if (run.error) rows.push(el('p', { class: 'egd-codex-error' }, ChatState.runErrorNotice(run.error, state.codex.authStatus?.usage).text));
+      const rateLimit = ChatState.runRateLimitNotice(run);
+      if (rateLimit) rows.push(el('p', { role: 'status', data: { testid: 'chat-run-rate-limit', level: rateLimit.level } }, rateLimit.text));
+      if (run.error) {
+        if (!(rateLimit && run.error.kind === 'quota')) rows.push(el('p', { class: 'egd-codex-error' }, ChatState.runErrorNotice(run.error,
+          [thread.engineId, run.engineId, run.engine?.id, run.error?.origin, run.rateLimit?.engineId].includes('claude') ? null : state.codex.authStatus?.usage).text));
+      }
     }
     if (!rows.length) rows.push(el('p', {}, '기록된 활동이 없습니다.'));
     const body = el('div', { class: 'egd-codex-activity-body' }, ...rows);
@@ -4711,6 +4748,23 @@
     return { left, top };
   }
 
+  function positionChatEngineMenu(menu, anchor) {
+    if (!menu?.isConnected || !anchor?.isConnected) return false;
+    const rect = menu.getBoundingClientRect();
+    const anchorRect = anchor.getBoundingClientRect();
+    const scaleX = rect.width / menu.offsetWidth;
+    const scaleY = rect.height / menu.offsetHeight;
+    if (![rect.left, rect.top, anchorRect.right, anchorRect.top, anchorRect.bottom, scaleX, scaleY].every(Number.isFinite)
+        || scaleX <= 0 || scaleY <= 0) return false;
+    const target = resolveFloatingMenuPlacement(anchorRect, rect.width, rect.height);
+    // Fixed descendants of the transformed Canvas use its containing block,
+    // not viewport coordinates. Correct the measured screen-space delta in
+    // that block's units; the same calculation also covers the unscaled HUD.
+    menu.style.left = `${(parseFloat(menu.style.left) || 0) + (target.left - rect.left) / scaleX}px`;
+    menu.style.top = `${(parseFloat(menu.style.top) || 0) + (target.top - rect.top) / scaleY}px`;
+    return true;
+  }
+
   function syncPanModeCursor() {
     const root = document.documentElement;
     root.classList.toggle('egd-pan-ready', !!state.panModifier);
@@ -6235,6 +6289,7 @@
         ? getCodexThreadById(codex, codex.activeThreadId)
         : null;
       const activeThread = explicitActiveThread || codex.threads[0] || null;
+      const activeEngine = ChatState.chatThreadReadiness(activeThread, codex);
       if (activeThread && codex.activeThreadId !== activeThread.id) {
         codex.activeThreadId = activeThread.id;
       }
@@ -6249,8 +6304,9 @@
       const bridgeNotice = codexBridgeNotice(codex);
       const statusBridge = bridgeNotice.state !== 'online'
         ? null
-        : (codex.error ? 'Codex 점검 필요' : 'Codex 연결됨');
-      const statusAccount = codex.authStatus.isLoggedIn
+        : activeEngine.engineId !== 'codex' ? (activeEngine.ready ? 'Claude 연결됨' : activeEngine.reason)
+          : (codex.error ? 'Codex 점검 필요' : 'Codex 연결됨');
+      const statusAccount = activeEngine.engineId !== 'codex' ? (activeEngine.ready ? '사용 가능' : activeEngine.reason) : codex.authStatus.isLoggedIn
         ? '로그인됨'
         : ((codex.isStartingLogin || codex.authStatus.loginInProgress) ? '로그인 중…' : '로그인 필요');
       const indicatorState = bridgeNotice.state === 'reconnecting'
@@ -6259,7 +6315,7 @@
       const connectionNotice = buildCodexBridgeNotice(codex, codexBridge);
 
       const chromeActions = [];
-      if (!codex.authStatus.isLoggedIn) {
+      if (activeEngine.engineId === 'codex' && !codex.authStatus.isLoggedIn) {
         chromeActions.push(el('button', {
           class: 'egd-codex-chip egd-codex-chip-primary',
           disabled: (codex.isStartingLogin || codex.authStatus.loginInProgress) ? 'true' : null,
@@ -6283,7 +6339,7 @@
         el('div', { class: 'egd-codex-chrome-actions' }, ...chromeActions),
       );
 
-      const authCardNeeded = !codex.authStatus.isLoggedIn && (
+      const authCardNeeded = activeEngine.engineId === 'codex' && !codex.authStatus.isLoggedIn && (
         codex.isStartingLogin
         || codex.authStatus.loginInProgress
         || codex.authStatus.authUrl
@@ -6921,14 +6977,16 @@
           },
         });
         if (!hasConversation) {
+          const canStart = activeEngine.engineId === 'codex' ? codex.authStatus.isLoggedIn : activeEngine.ready;
           const emptyChildren = [
-            el('div', { class: 'egd-codex-empty-eyebrow' }, codex.authStatus.isLoggedIn ? '새 대화' : 'Codex 연결'),
-            el('div', { class: 'egd-codex-empty-title' }, codex.authStatus.isLoggedIn ? '어떤 일을 함께할까요?' : '로그인 필요'),
+            el('div', { class: 'egd-codex-empty-eyebrow' }, canStart ? '새 대화' : activeEngine.engineId === 'claude' ? 'Claude 연결' : 'Codex 연결'),
+            el('div', { class: 'egd-codex-empty-title' }, canStart ? '어떤 일을 함께할까요?' : activeEngine.engineId === 'claude' ? activeEngine.reason : '로그인 필요'),
           ];
-          if (codex.authStatus.isLoggedIn) {
-            emptyChildren.push(el('div', { class: 'egd-codex-empty-sub' }, '질문을 하거나 자료를 첨부해 대화를 시작하세요.'));
+          if (canStart) {
+            emptyChildren.push(el('div', { class: 'egd-codex-empty-sub' }, activeEngine.engineId === 'claude'
+              ? '메시지를 입력해 대화를 시작하세요.' : '질문을 하거나 자료를 첨부해 대화를 시작하세요.'));
           }
-          if (!codex.authStatus.isLoggedIn) {
+          if (activeEngine.engineId === 'codex' && !codex.authStatus.isLoggedIn) {
             emptyChildren.push(el('div', { class: 'egd-codex-empty-actions' },
               el('button', {
                 class: 'egd-codex-chip egd-codex-chip-primary',
@@ -6943,7 +7001,8 @@
           }
           messages.appendChild(el('div', { class: 'egd-codex-empty-state' }, ...emptyChildren));
           // A new room picks its AI before the first message; after that the room keeps it.
-          if (codex.authStatus.isLoggedIn && !ChatState.chatThreadEngineLocked(activeThread)) {
+          if ((canStart || ChatState.chatEngineChoices(codex.engines).some(choice => choice.id === 'claude' && choice.selectable))
+              && !ChatState.chatThreadEngineLocked(activeThread)) {
             messages.appendChild(el('div', { class: 'egd-codex-engine-start', data: { testid: 'chat-engine-start' } },
               el('div', { class: 'egd-codex-engine-section-label' }, '이 대화에 쓸 AI'),
               renderEngineChoices(activeThread)));
@@ -6956,7 +7015,8 @@
           // AGENT-05: while the run is busy, one '[···] Agent 작업 중' bubble closes the
           // conversation; it replaces the dots inside the streaming answer.
           const workingRun = codexCurrentRun(activeThread);
-          const working = ChatState.nativeBindingHeld(activeThread) ? null : ChatState.agentWorkingView(workingRun, { connected: codex.connected });
+          const working = ChatState.nativeBindingHeld(activeThread) ? null : ChatState.agentWorkingView(workingRun,
+            { connected: activeEngine.engineId === 'claude' ? activeEngine.ready : codex.connected });
           // CHAT-07: an answer's face and name open the profile peek; focus moves into it.
           const peekOpenFor = (message) => codex.agentPeek?.threadId === activeThread.id && codex.agentPeek.messageId === message.id;
           const togglePeek = (message, ev) => {
@@ -7191,13 +7251,17 @@
         // CHAT-06 Await: the task list line sits right under the run state.
         const taskBoard = renderChatTaskBoard(codex, codexBridge, connectedFolderName);
         if (taskBoard) conversation.appendChild(taskBoard);
-        const runError =run?.status === 'failed' && run.error && run.error.code !== 'RUNTIME_LOST'
-          ? ChatState.runErrorNotice(run.error, codex.authStatus?.usage) : null;
+        const rateLimit = ChatState.runRateLimitNotice(run);
+        if (rateLimit) conversation.appendChild(el('p', { class: rateLimit.level === 'limit' ? 'egd-codex-error' : 'egd-codex-run-status', role: 'status',
+          data: { testid: 'chat-run-rate-limit', level: rateLimit.level } }, rateLimit.text));
+        const runError = run?.status === 'failed' && run.error && run.error.code !== 'RUNTIME_LOST' && !(rateLimit && run.error.kind === 'quota')
+          ? ChatState.runErrorNotice(run.error,
+            [activeThread.engineId, run.engineId, run.engine?.id, run.error?.origin, run.rateLimit?.engineId].includes('claude') ? null : codex.authStatus?.usage) : null;
         if (runError) conversation.appendChild(el('div', {
           class: `egd-codex-error egd-codex-run-error egd-codex-run-error-${runError.kind}`, role: 'alert',
           data: { testid: 'chat-run-error', kind: runError.kind },
         }, el('span', {}, runError.text),
-        runError.action === 'login' ? el('button', {
+        runError.action === 'login' && ChatState.chatThreadEngineId(activeThread, codex) === 'codex' ? el('button', {
           class: 'egd-codex-chip egd-codex-chip-primary', data: { testid: 'chat-run-error-login' },
           disabled: (codex.isStartingLogin || codex.authStatus.loginInProgress) ? 'true' : null,
           onclick: () => codexBridge.startLogin(),
@@ -7322,9 +7386,10 @@
               const height = Math.min(heightLimit, Math.max(40, input.scrollHeight));
               input.style.height = `${height}px`;
               input.style.overflowY = input.scrollHeight > height ? 'auto' : 'hidden';
-              const nativeSendHeld = activeThread.conversationId && !ChatState.canResumeNativeThread(activeThread, codex.authStatus);
-              sendButton.disabled = ChatState.nativeBindingHeld(activeThread) || nativeSendHeld || activeThread.preparingInput || codex.isSending || !input.value.trim() || !codex.authStatus.isLoggedIn || !codex.connected;
-              sendButton.title = ChatState.nativeBindingHeld(activeThread) || nativeSendHeld ? '보관된 연결을 현재 계정에 자동 연결하지 않습니다' : !codex.authStatus.isLoggedIn ? 'Codex 연결 후 전송할 수 있습니다' : !codex.connected ? 'Codex 연결을 확인해 주세요' : '보내기';
+              const readiness = ChatState.chatThreadReadiness(activeThread, codex);
+              const nativeSendHeld = activeThread.conversationId && !ChatState.canResumeNativeThread(activeThread, codex.authStatus, codex);
+              sendButton.disabled = ChatState.nativeBindingHeld(activeThread) || nativeSendHeld || activeThread.preparingInput || codex.isSending || !input.value.trim() || !readiness.ready;
+              sendButton.title = ChatState.nativeBindingHeld(activeThread) || nativeSendHeld ? '보관된 연결을 현재 계정에 자동 연결하지 않습니다' : readiness.reason || '보내기';
             };
             input.addEventListener('input', () => {
               codexBridge.setDraft(input.value, activeThread.id);
@@ -7410,6 +7475,9 @@
         contentChildren.push(mainPane);
       }
       body.appendChild(el('div', { class: shellClasses }, ...contentChildren));
+      // Rerender replaces the clicked chip. Anchor to this Chat surface's new
+      // chip after attachment, when both Canvas/HUD geometry and menu size exist.
+      positionChatEngineMenu(body.querySelector('.egd-codex-engine-panel'), body.querySelector('.egd-codex-engine-chip'));
       const msgEl = body.querySelector(".egd-codex-messages");
       if (msgEl) {
         const sentNewMessage = msgEl.dataset.lastUserMessageId !== messageState?.lastUserMessageId;
@@ -7668,7 +7736,7 @@
       state.contextSuggest = { unsupportedUntil: 0, byThread: {} };
     }
     function requestContextSuggestions(threadId, { force = false, immediate = false } = {}) {
-      if (!threadId) return;
+      if (!threadId || ChatState.chatThreadEngineId(getCodexThreadById(state.codex, threadId), state.codex) !== 'codex') return;
       window.clearTimeout(contextSuggestTimer);
       contextSuggestTimer = window.setTimeout(() => {
         contextSuggestTimer = 0;
@@ -7687,6 +7755,7 @@
       const store = state.contextSuggest;
       const thread = getCodexThreadById(state.codex, threadId);
       if (!store || Date.now() < (store.unsupportedUntil || 0) || !thread || ChatState.nativeBindingHeld(thread)
+          || ChatState.chatThreadEngineId(thread, state.codex) !== 'codex'
           || !state.codex.connected || !state.codex.authStatus.isLoggedIn) return;
       let body;
       try { body = JSON.stringify(collectContextResolverSignals(thread)); }
@@ -7738,9 +7807,9 @@
 
     async function ensureNativeReadyForSend(thread) {
       if (!thread?.conversationId) return true;
-      if (!ChatState.canResumeNativeThread(thread, state.codex.authStatus)) return false;
+      if (!ChatState.canResumeNativeThread(thread, state.codex.authStatus, state.codex)) return false;
       const key = `${ChatState.clientThreadBinding(thread)}|${thread.conversationId}`;
-      if (resumedNativeBindings.has(key)) return true;
+      if (thread.engineId !== 'claude' && resumedNativeBindings.has(key)) return true;
       const snapshot = await refreshConversation(thread, true);
       if (!snapshot) return false;
       resumedNativeBindings.add(key);
@@ -7749,24 +7818,25 @@
 
     async function refreshConversation(thread, resume = false) {
       if (!thread?.conversationId || refreshing.has(thread.conversationId)) return null;
-      if (resume && !ChatState.canResumeNativeThread(thread, state.codex.authStatus)) return null;
+      if (resume && !ChatState.canResumeNativeThread(thread, state.codex.authStatus, state.codex)) return null;
       const conversationId = thread.conversationId;
-      const token = epochScope.begin();
+      const token = epochScope.begin(ChatState.chatThreadEngineId(thread, state.codex));
       refreshing.set(conversationId, token);
       updateThreadById(thread.id, current => ({ ...current, resuming: true }));
       emit();
       try {
         const snapshot = resume
-          ? await fetchJson('/chat/resume', { method: 'POST', signal: token.signal, body: JSON.stringify({ conversationId, clientThreadId: ChatState.clientThreadBinding(thread) }) })
+          ? await fetchJson('/chat/resume', { method: 'POST', signal: token.signal, body: JSON.stringify({ conversationId, clientThreadId: ChatState.clientThreadBinding(thread),
+            ...(['codex', 'claude'].includes(thread.engineId) ? { engineId: thread.engineId } : {}) }) })
           : await fetchJson(`/chat/state?conversationId=${encodeURIComponent(conversationId)}`, { signal: token.signal });
-        if (!epochScope.valid(token)) return null;
+        if (!epochScope.valid(token) || ChatState.clientThreadBinding(getCodexThreadById(state.codex, thread.id)) !== ChatState.clientThreadBinding(thread)) return null;
         if (snapshot.conversationId !== conversationId) throw new Error('요청한 대화와 다른 연결 응답입니다. 기존 기록은 유지됩니다.');
         for (const run of ChatState.mergeChatSnapshot(protocol, snapshot, ChatState.clientThreadBinding(thread))) syncProtocolRun(run, { liveEvent: false });
         if (resume && ChatState.settleReconciledRequests(protocol, thread.id, snapshot)) updateThreadById(thread.id, current => ({ ...current, sendError: '대화 기록을 다시 확인했습니다. 접수 미확인 메시지와 실제 기록을 확인한 뒤 다음 요청을 보내세요.' }));
         emit();
         return snapshot;
       } catch (error) {
-        if (!epochScope.valid(token)) return null;
+        if (!epochScope.valid(token) || ChatState.clientThreadBinding(getCodexThreadById(state.codex, thread.id)) !== ChatState.clientThreadBinding(thread)) return null;
         updateThreadById(thread.id, current => ({ ...current, sendError: `상태를 확인하지 못했습니다: ${error.message}` }));
         emit();
         return null;
@@ -7862,6 +7932,13 @@
       scheduleDeskSessionSave();
     };
     const update = (patch) => {
+      // `connected` is the shared helper transport. A failed transport must
+      // not leave a stale ready Claude row enabling new sends.
+      if (patch.connected === false && !Object.hasOwn(patch, 'engines')) {
+        engineStatus.cancel();
+        patch = { ...patch, engines: (state.codex.engines || []).map(row => row.id === 'claude'
+          ? { ...row, status: 'offline', statusReason: 'bridgeDisconnected' } : row) };
+      }
       const accountKey = ChatState.codexAccountKey(patch.authStatus);
       if (ChatState.codexAccountChanged(state.codex.codexAccountKey, patch.authStatus)) {
         resetThreadConversations();
@@ -7961,6 +8038,44 @@
       };
     };
     const resetThreadConversations = () => {
+      if (state.codex.threads.some(thread => thread.engineId === 'claude')) {
+        // Codex sign-out/account switching cannot revoke Claude's separate
+        // native binding or abort its pending HTTP request with the shared epoch.
+        epochScope.reset('codex');
+        const codexThreads = state.codex.threads.filter(thread => thread.engineId !== 'claude');
+        const codexIds = new Set(codexThreads.map(thread => thread.id));
+        const codexBindings = new Set(codexThreads.map(ChatState.clientThreadBinding));
+        const codexConversations = new Set(codexThreads.map(thread => thread.conversationId).filter(Boolean));
+        for (const [id, request] of Object.entries(protocol.requests)) {
+          if (request.engineId === 'claude' || !codexIds.has(request.localThreadId) && !codexBindings.has(request.clientThreadId)) continue;
+          if (['submitting', 'unconfirmed'].includes(request.status)) protocol.unobservedPreviousRun = true;
+          delete protocol.requests[id];
+        }
+        for (const [id, run] of Object.entries(protocol.runs)) {
+          if (run.engineId === 'claude' || run.engine?.id === 'claude') continue;
+          if (!codexIds.has(run.localThreadId) && !codexBindings.has(run.clientThreadId) && !codexConversations.has(run.conversationId)) continue;
+          if (ChatState.isRunBusy(run)) protocol.unobservedPreviousRun = true;
+          codexConversations.add(run.conversationId);
+          delete protocol.runs[id];
+        }
+        for (const key of userInputDrafts.keys()) if ([...codexConversations].some(id => key.startsWith(`${id}/`))) userInputDrafts.delete(key);
+        for (const id of codexConversations) refreshing.delete(id);
+        for (const id of codexIds) if (state.contextSuggest?.byThread) delete state.contextSuggest.byThread[id];
+        resumedNativeBindings.clear();
+        state.codex.threads = state.codex.threads.map(thread => thread.engineId === 'claude' ? thread
+          : { ...ChatState.detachNativeThread(thread, state.codex.codexAccountKey, chatBindingNonce()), updatedAt: Date.now() });
+        clearBrowserToolTransport({ revoke: true });
+        streamReady = false;
+        try { source?.close(); } catch {}
+        source = null;
+        state.codex.codexAccountKey = null;
+        state.codex.connected = false;
+        state.codex.loginLog = '';
+        state.codex.error = null;
+        normalizeThreads();
+        scheduleReconnect();
+        return;
+      }
       epochScope.reset();
       clearBrowserToolTransport();
       forgetContextSuggestions();
@@ -8072,6 +8187,8 @@
       const recordedAccountKey = detail.bindingAccountKey || detail.retainedNativeBinding?.accountKey;
       const originalAccountKey = ChatState.knownCodexAccountKey(recordedAccountKey) ? recordedAccountKey : null;
       const restored = ChatState.reconcileNativeThread(ChatState.detachNativeThread({ ...base, id: clientThreadId,
+        engineId: detail.engineId || summary.engineId || 'codex',
+        clientBindingId: detail.clientBindingId || null,
         createdAt: summary.createdAt || base.createdAt, updatedAt: summary.updatedAt || base.updatedAt,
         conversationId: detail.conversationId || summary.conversationId || null,
         localConversationId: summary.localConversationId,
@@ -8309,6 +8426,11 @@
       if (event?.type?.startsWith('assistant-')) return;
       switch (event.type) {
         case 'engine.status':
+          // Codex login flicker may be held; Claude availability/account changes may not.
+          if (Array.isArray(event.engines)) {
+            const codexRows = (state.codex.engines || []).filter(row => row.id !== 'claude');
+            update({ engines: [...codexRows, ...event.engines.filter(row => row.id === 'claude')] });
+          }
           engineStatus.push(event.engines);
           return;
         // Task graph frames: the open sign-in gates (to tell a finished sign-in) and the task list.
@@ -8735,7 +8857,7 @@
         // Explicit recheck of an unconfirmed send: only the resume path can settle it.
         // A read-only refresh leaves the request unconfirmed and the room blocked.
         if (thread.conversationId) return refreshConversation(thread, true);
-        const token = epochScope.begin();
+        const token = epochScope.begin(ChatState.chatThreadEngineId(thread, state.codex));
         try {
           const snapshot = await fetchJson('/chat/state', { signal: token.signal });
           if (!epochScope.valid(token)) return null;
@@ -8764,13 +8886,17 @@
         const approval = run?.pendingApprovals.find(item => (item.approvalId || item.id) === approvalId);
         const request = ChatState.approvalRequestFor(run, approvalId, decision);
         if (!request) return false;
-        const token = epochScope.begin();
+        const token = epochScope.begin(run.engineId || run.engine?.id || 'codex');
         approval.replyPending = true;
+        approval.error = null;
         emit();
         try {
           const result = await fetchJson('/chat/approval', { method: 'POST', signal: token.signal, body: JSON.stringify(request) });
           if (!epochScope.valid(token)) return false;
-          ChatState.acknowledgeApprovalReply(run, result);
+          if (result?.approvalId !== approvalId || !ChatState.acknowledgeApprovalReply(run, result)) {
+            approval.error = '응답 전달 여부를 확인하지 못했습니다. 현재 상태를 다시 확인해 주세요.';
+            return false;
+          }
           return result;
         } catch (error) {
           if (!epochScope.valid(token)) return false;
@@ -8786,14 +8912,18 @@
         const draftKey = `${conversationId}/${runId}/${userInputId}`;
         const request = ChatState.userInputRequestFor(run, userInputId, draft ?? userInputDrafts.get(draftKey), action);
         if (!request) return false;
-        const token = epochScope.begin();
+        const token = epochScope.begin(run.engineId || run.engine?.id || 'codex');
         input.replyPending = true;
         input.error = null;
         emit();
         try {
           const result = await fetchJson('/chat/user-input', { method: 'POST', signal: token.signal, body: JSON.stringify(request) });
           if (!epochScope.valid(token)) return false;
-          if (ChatState.acknowledgeUserInputReply(run, result) && result.userInputId === userInputId) userInputDrafts.delete(draftKey);
+          if (result?.userInputId !== userInputId || !ChatState.acknowledgeUserInputReply(run, result)) {
+            input.error = '답변 전달 여부를 확인하지 못했습니다. 현재 상태를 다시 확인해 주세요.';
+            return false;
+          }
+          userInputDrafts.delete(draftKey);
           return result;
         } catch (error) {
           if (!epochScope.valid(token)) return false;
@@ -8811,7 +8941,7 @@
         const thread = getCodexThreadById(state.codex, threadId);
         const run = ChatState.runsForThread(protocol, thread).findLast(ChatState.isRunBusy);
         if (!run || run.stopPending || run.stopRequested) return false;
-        const token = epochScope.begin();
+        const token = epochScope.begin(run.engineId || run.engine?.id || 'codex');
         run.stopPending = true;
         run.stopUnconfirmed = false;
         revokeBrowserToolRunImmediately(run, thread);
@@ -9574,9 +9704,18 @@
         const activeThread = getActiveCodexThread(state.codex);
         const draftText = getCodexThreadDraft(state.codex, activeThread?.id || null);
         const content = draftText.trim();
-        if (!activeThread || ChatState.nativeBindingHeld(activeThread) || !content || threadBusy(activeThread) || !state.codex.authStatus.isLoggedIn || !state.codex.connected
-            || (activeThread.conversationId && !ChatState.canResumeNativeThread(activeThread, state.codex.authStatus))) return;
-        const token = epochScope.begin();
+        // Keep explicit intent even when the engine's live availability changes.
+        const engineId = ['codex', 'claude'].includes(activeThread?.engineId) ? activeThread.engineId
+          : ChatState.chatThreadEngineId(activeThread, { recentEngineId: state.codex.recentEngineId, engines: state.codex.engines });
+        if (activeThread && engineId === 'claude' && (activeThread.inputSources?.length || activeThread.briefingInputs?.length
+            || state.contextSuggest?.byThread?.[activeThread.id]?.picked?.length)) {
+          updateThreadById(activeThread.id, thread => ({ ...thread, sendError: ChatState.claudeContextSendErrorText('CLAUDE_CONTEXT_UNSUPPORTED') }));
+          emit();
+          return;
+        }
+        if (!activeThread || ChatState.nativeBindingHeld(activeThread) || !content || threadBusy(activeThread) || !ChatState.chatThreadReadiness(activeThread, state.codex).ready
+            || (activeThread.conversationId && !ChatState.canResumeNativeThread(activeThread, state.codex.authStatus, state.codex))) return;
+        const token = epochScope.begin(engineId);
         const submittedDraft = ChatState.snapshotChatDraft(activeThread, draftText, state.codex.threadDraftRevisions[activeThread.id] || 0);
         const selectedInputs = submittedDraft.inputSources;
         let submittedWasCleared = false;
@@ -9584,7 +9723,8 @@
         if (!await ensureNativeReadyForSend(activeThread) || !epochScope.valid(token)) { epochScope.finish(token); return; }
         const resumedThread = getCodexThreadById(state.codex, activeThread.id);
         if (!resumedThread || ChatState.clientThreadBinding(resumedThread) !== ChatState.clientThreadBinding(activeThread)
-            || resumedThread.conversationId !== activeThread.conversationId || threadBusy(resumedThread)) { epochScope.finish(token); return; }
+            || resumedThread.conversationId !== activeThread.conversationId || threadBusy(resumedThread)
+            || !ChatState.chatThreadReadiness(resumedThread, state.codex).ready) { epochScope.finish(token); return; }
         updateThreadById(activeThread.id, thread => ({ ...thread, preparingInput: true, sendError: null }));
         emit();
         try {
@@ -9592,6 +9732,8 @@
           if (!epochScope.valid(token)) { epochScope.finish(token); return; }
           const current = getCodexThreadById(state.codex, activeThread.id);
           if (!current || ChatState.clientThreadBinding(current) !== ChatState.clientThreadBinding(activeThread)) throw new Error('대화 연결이 바뀌었습니다. 초안을 다시 확인해 주세요.');
+          const readiness = ChatState.chatThreadReadiness(current, state.codex);
+          if (!readiness.ready) throw new Error(readiness.reason);
         } catch (error) {
           if (epochScope.valid(token)) updateThreadById(activeThread.id, thread => ({ ...thread, sendError: `자료를 준비하지 못해 전송하지 않았습니다: ${error.message}` }));
           epochScope.finish(token);
@@ -9618,12 +9760,10 @@
           return;
         }
         // The first send ties the room to its engine (D3) and makes it the app's recent one (D4).
-        const engineId = ChatState.chatThreadEngineId(getCodexThreadById(state.codex, activeThread.id) || activeThread,
-          { recentEngineId: state.codex.recentEngineId, engines: state.codex.engines });
         updateThreadById(activeThread.id, thread => thread.engineId === engineId ? thread : { ...thread, engineId });
         state.codex.recentEngineId = engineId;
         const authorProfile = activeThread.profileEnabled ? codexThreadAgentProfile(activeThread) : null;
-        ChatState.registerChatRequest(protocol, { requestId, clientThreadId: ChatState.clientThreadBinding(activeThread), localThreadId: activeThread.id, conversationId: activeThread.conversationId, authorName: authorProfile ? authorProfile.name : 'Codex', ...(authorProfile?.avatar ? { authorAvatar: authorProfile.avatar } : {}) }, state.codex.authStatus);
+        ChatState.registerChatRequest(protocol, { requestId, clientThreadId: ChatState.clientThreadBinding(activeThread), localThreadId: activeThread.id, conversationId: activeThread.conversationId, authorName: authorProfile ? authorProfile.name : engineId === 'claude' ? 'Claude' : 'Codex', ...(authorProfile?.avatar ? { authorAvatar: authorProfile.avatar } : {}) }, state.codex.authStatus, engineId);
         appendMessageToThread(activeThread.id, createCodexMessage('user', content, 'submitting', {
           readBy: [SELF_MEMBER], requestId, inputReferences,
         }), { countUnread: false });
@@ -9646,9 +9786,10 @@
           runtimeConfig.model = modelFields.model;
           runtimeConfig.effort = modelFields.effort;
           runtimeConfig.contextSnapshotIds = inputReferences.map(reference => reference.snapshotId);
-          runtimeConfig.contextCapabilities = ChatState.contextCapabilitiesForRequest(activeThread, state.codex.authStatus, runtimeConfig.contextSnapshotIds);
+          runtimeConfig.contextCapabilities = engineId === 'claude' ? null
+            : ChatState.contextCapabilitiesForRequest(activeThread, state.codex.authStatus, runtimeConfig.contextSnapshotIds);
           // CTX-03: the suggestion list this turn answered and the refs taken from it ([] when none).
-          runtimeConfig.contextResolution = ChatState.contextResolutionForSend(state.contextSuggest?.byThread?.[activeThread.id], selectedInputs,
+          runtimeConfig.contextResolution = engineId === 'claude' ? null : ChatState.contextResolutionForSend(state.contextSuggest?.byThread?.[activeThread.id], selectedInputs,
             { now: Date.now(), accountKey: ChatState.codexAccountKey(state.codex.authStatus) || null });
           if (runtimeConfig.contextResolution?.chosen.length && !runtimeConfig.contextCapabilities) {
             runtimeConfig.contextCapabilities = { read: true, reader: true, publishBriefing: true };
@@ -9667,7 +9808,7 @@
             signal: token.signal,
             body: JSON.stringify(chatRequest),
           });
-          if (!epochScope.valid(token)) return;
+          if (!epochScope.valid(token) || ChatState.clientThreadBinding(getCodexThreadById(state.codex, activeThread.id)) !== ChatState.clientThreadBinding(activeThread)) return;
           const run = ChatState.acceptChatRequest(protocol, result, requestId);
           if (run) {
             // CHAT-09: the reply confirms a one-time start; a bounded run keeps the room from branching.
@@ -9687,7 +9828,7 @@
             throw error;
           }
         } catch (error) {
-          if (!epochScope.valid(token)) return;
+          if (!epochScope.valid(token) || ChatState.clientThreadBinding(getCodexThreadById(state.codex, activeThread.id)) !== ChatState.clientThreadBinding(activeThread)) return;
           const request = protocol.requests[requestId];
           if (error.code === 'BROWSER_TOOLS_UNAVAILABLE') {
             error.message = '이 대화는 Browser 조작 도구가 등록되기 전에 만들어졌습니다. 기존 기록과 초안은 유지됩니다. 새 Chat을 만든 뒤 Browser에서 이번 실행의 조작 대상을 다시 선택해 주세요.';
@@ -9702,6 +9843,8 @@
           // asked again and shown again, and the message is not resent.
           const resolverText = ChatState.contextResolverErrorText(error.code);
           if (resolverText) error.message = resolverText;
+          const claudeContextText = ChatState.claudeContextSendErrorText(error.code);
+          if (claudeContextText) error.message = claudeContextText;
           if (error.code === 'RESOLUTION_EXPIRED') expireContextSuggestions(activeThread.id);
           if (error.conversationId) {
             request.conversationId = error.conversationId;
@@ -9713,13 +9856,18 @@
             const liveRevision = ++state.codex.liveRevision;
             updateThreadById(activeThread.id, thread => ({ ...thread,
               sendError: request.status === 'unconfirmed' ? `접수 여부를 확인하지 못했습니다. 자동으로 다시 보내지 않습니다. ${error.message}` : error.message,
-              messages: thread.messages.map(message => message.requestId === requestId ? { ...message, status: request.status, liveRevision, localHistory: false } : message),
+              // A definite Context refusal happened before native dispatch, so
+              // its temporary outgoing row is not part of the conversation.
+              messages: claudeContextText && request.status === 'failed'
+                ? thread.messages.filter(message => message.requestId !== requestId)
+                : thread.messages.map(message => message.requestId === requestId ? { ...message, status: request.status, liveRevision, localHistory: false } : message),
             }));
             if (request.status === 'failed' && submittedWasCleared
                 && ChatState.chatDraftMatches(getCodexThreadById(state.codex, activeThread.id), getCodexThreadDraft(state.codex, activeThread.id), state.codex.threadDraftRevisions[activeThread.id] || 0,
                   { text: '', revision: submittedDraft.revision, inputSources: [], briefingInputs: [] })) {
               state.codex.threadDrafts[activeThread.id] = submittedDraft.text;
               updateThreadById(activeThread.id, thread => ({ ...thread, inputSources: InputContext.addInputSources(thread.inputSources, selectedInputs), briefingInputs: submittedDraft.briefingInputs }));
+              state.codex.draft = getCodexThreadDraft(state.codex, state.codex.activeThreadId);
             }
           }
         } finally { epochScope.finish(token); if (epochScope.valid(token)) emit(); }
@@ -9995,6 +10143,8 @@
   // ============ Canvas Entity: Browser Card ============
   let cardZ = 40000;
   let cardSeq = 0;
+  function allocCardSeq() { return ++cardSeq; }
+  function raiseCardZ() { return ++cardZ; }
 
   // Logical 데스크톱 뷰포트 — 너무 좁으면 일부 데스크톱 사이트(Naver 등)가
   // 내부 최소 폭에 걸려 가로 스크롤이 생긴다. 1440x900 기준으로 렌더 후 축소.
@@ -10671,1926 +10821,9 @@
     };
   }
 
-  const ONTOLOGY_TIME_PANE_ORDER = ['past', 'present', 'future'];
-  const ONTOLOGY_GRAPH_SCHEMA_VERSION = 3;
-  const ONTOLOGY_TIME_PANE_LABELS = {
-    past: '과거',
-    present: '현재',
-    future: '미래',
-    multiverse: '분기',
-  };
-  const ONTOLOGY_LAYER_ORDER = ['virtual', 'physical'];
-  const ONTOLOGY_CAMERA_ZOOM_MIN = 0.72;
-  const ONTOLOGY_CAMERA_ZOOM_MAX = 2.2;
-  const ONTOLOGY_CAMERA_ZOOM_STEP = 0.12;
-  const ontologyModelCache = new WeakMap();
+  const spawnOntologyMapCard = surfaceForward('ontology', 'spawnOntologyMapCard');
 
-  function ontologyTitleCase(value) {
-    return String(value || '')
-      .split(/[._-]+/)
-      .filter(Boolean)
-      .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
-      .join(' ');
-  }
-
-  function createOntologyPlaneGeometry(point, extra = {}) {
-    const corners = {
-      tl: point(0, 0),
-      tr: point(1, 0),
-      br: point(1, 1),
-      bl: point(0, 1),
-    };
-    const pathFromPoints = (points) => `M ${points.map((p) => `${p.x.toFixed(1)} ${p.y.toFixed(1)}`).join(' L ')} Z`;
-    const rectPath = (u, v, w, h) => pathFromPoints([
-      point(u, v),
-      point(u + w, v),
-      point(u + w, v + h),
-      point(u, v + h),
-    ]);
-    return { corners, point, rectPath, ...extra };
-  }
-
-  function createOntologyDeckGeometry(bounds) {
-    const corner = (name) => ({
-      x: Number(bounds.x || 0) + Number(bounds.corners[name]?.x || 0),
-      y: Number(bounds.y || 0) + Number(bounds.corners[name]?.y || 0),
-    });
-    const sourceCorners = {
-      tl: corner('tl'),
-      tr: corner('tr'),
-      br: corner('br'),
-      bl: corner('bl'),
-    };
-    const lerpPoint = (a, b, t) => ({
-      x: a.x + (b.x - a.x) * t,
-      y: a.y + (b.y - a.y) * t,
-    });
-    const point = (u, v) => {
-      const top = lerpPoint(sourceCorners.tl, sourceCorners.tr, u);
-      const bottom = lerpPoint(sourceCorners.bl, sourceCorners.br, u);
-      return lerpPoint(top, bottom, v);
-    };
-    return createOntologyPlaneGeometry(point);
-  }
-
-  function ontologyUnprojectDeckPoint(geometry, target, initial = { u: 0.5, v: 0.5 }) {
-    let u = Number.isFinite(initial.u) ? initial.u : 0.5;
-    let v = Number.isFinite(initial.v) ? initial.v : 0.5;
-    const epsilon = 0.0005;
-    for (let iteration = 0; iteration < 8; iteration += 1) {
-      const current = geometry.point(u, v);
-      const alongU = geometry.point(u + epsilon, v);
-      const alongV = geometry.point(u, v + epsilon);
-      const ux = (alongU.x - current.x) / epsilon;
-      const uy = (alongU.y - current.y) / epsilon;
-      const vx = (alongV.x - current.x) / epsilon;
-      const vy = (alongV.y - current.y) / epsilon;
-      const determinant = ux * vy - uy * vx;
-      if (Math.abs(determinant) < 0.000001) break;
-      const errorX = target.x - current.x;
-      const errorY = target.y - current.y;
-      u += (errorX * vy - errorY * vx) / determinant;
-      v += (ux * errorY - uy * errorX) / determinant;
-    }
-    return { u, v };
-  }
-
-  function createOntologyLayerGeometry(geometry, frame) {
-    const point = (u, v) => geometry.point(
-      frame.u + u * frame.w,
-      frame.v + v * frame.h,
-    );
-    return createOntologyPlaneGeometry(point, { frame });
-  }
-
-  function createOntologyCameraGeometry(geometry, camera, focusSpec) {
-    const origin = {
-      u: focusSpec.u + focusSpec.w / 2,
-      v: focusSpec.v + focusSpec.h / 2,
-    };
-    const originPoint = geometry.point(origin.u, origin.v);
-    const cameraCenter = ontologyUnprojectDeckPoint(geometry, {
-      x: originPoint.x + (Number(camera.x) || 0),
-      y: originPoint.y + (Number(camera.y) || 0),
-    }, origin);
-    const zoom = Math.max(0.01, Number(camera.zoom) || 1);
-    const mapCoordinates = (u, v) => ({
-      u: cameraCenter.u + (u - origin.u) * zoom,
-      v: cameraCenter.v + (v - origin.v) * zoom,
-    });
-    const point = (u, v) => {
-      const mapped = mapCoordinates(u, v);
-      return geometry.point(mapped.u, mapped.v);
-    };
-    const viewportSpec = {
-      u: origin.u + (focusSpec.u - cameraCenter.u) / zoom,
-      v: origin.v + (focusSpec.v - cameraCenter.v) / zoom,
-      w: focusSpec.w / zoom,
-      h: focusSpec.h / zoom,
-    };
-    return createOntologyPlaneGeometry(point, { cameraCenter, viewportSpec });
-  }
-
-  function validateOntologyGraph(graph) {
-    if (graph?.schemaVersion !== ONTOLOGY_GRAPH_SCHEMA_VERSION) {
-      throw new Error(`Unsupported ontology graph schema: ${graph?.schemaVersion ?? 'missing'}`);
-    }
-    for (const field of ['nodes', 'snapshots', 'occurrences', 'referenceEdges']) {
-      if (!Array.isArray(graph[field])) throw new Error(`Ontology graph field must be an array: ${field}`);
-    }
-    return graph;
-  }
-
-  function getOntologyModel(graph) {
-    const cached = ontologyModelCache.get(graph);
-    if (cached) return cached;
-    const nodesById = new Map((graph?.nodes || []).map((node) => [node.id, node]));
-    const snapshots = (graph?.snapshots || []).slice();
-    const occurrences = (graph?.occurrences || []).slice();
-    const byRef = new Map(occurrences.map((occurrence) => [occurrence.refId, occurrence]));
-    const childrenByRef = new Map();
-    occurrences.forEach((occurrence) => {
-      if (!occurrence.parentRef) return;
-      if (!childrenByRef.has(occurrence.parentRef)) childrenByRef.set(occurrence.parentRef, []);
-      childrenByRef.get(occurrence.parentRef).push(occurrence);
-    });
-    childrenByRef.forEach((children) => children.sort((a, b) => (
-      (Number(a.order) || 0) - (Number(b.order) || 0) || a.refId.localeCompare(b.refId)
-    )));
-    const labelFor = (occurrence) => occurrence?.label
-      || nodesById.get(occurrence?.conceptId)?.label
-      || ontologyTitleCase(occurrence?.conceptId || occurrence?.refId || 'concept');
-    const rootsByPhase = new Map();
-    snapshots.forEach((snapshot) => {
-      const root = byRef.get(snapshot.rootRef);
-      if (root && !rootsByPhase.has(snapshot.timeSlice)) rootsByPhase.set(snapshot.timeSlice, root);
-    });
-    const isPlaneRoot = (occurrence) => {
-      if (!occurrence) return false;
-      const parent = occurrence.parentRef ? byRef.get(occurrence.parentRef) : null;
-      return !parent || parent.timeSlice !== occurrence.timeSlice || parent.snapshotId !== occurrence.snapshotId;
-    };
-    const planeRootsByCell = new Map();
-    occurrences.forEach((occurrence) => {
-      if (!isPlaneRoot(occurrence)) return;
-      const key = `${occurrence.timeSlice}:${occurrence.layer}`;
-      if (!planeRootsByCell.has(key)) planeRootsByCell.set(key, []);
-      planeRootsByCell.get(key).push(occurrence);
-    });
-    planeRootsByCell.forEach((roots) => roots.sort((a, b) => (
-      (Number(a.order) || 0) - (Number(b.order) || 0) || a.refId.localeCompare(b.refId)
-    )));
-    const model = {
-      snapshots,
-      occurrences,
-      byRef,
-      childrenByRef,
-      rootsByPhase,
-      isPlaneRoot,
-      planeRootsFor: (phase, layer) => planeRootsByCell.get(`${phase}:${layer}`) || [],
-      labelFor,
-      referenceEdges: graph?.referenceEdges || [],
-    };
-    ontologyModelCache.set(graph, model);
-    return model;
-  }
-
-  function getOntologyCamera(localState) {
-    const key = `${localState.activePane || 'present'}:coupled-layers`;
-    if (!localState.cameraByCell) localState.cameraByCell = {};
-    if (!localState.cameraByCell[key]) localState.cameraByCell[key] = { x: 0, y: 0, zoom: 1 };
-    const camera = localState.cameraByCell[key];
-    localState.pan = { x: camera.x, y: camera.y };
-    localState.zoom = camera.zoom;
-    return camera;
-  }
-
-  function setOntologyLayer(localState, layer) {
-    if (!ONTOLOGY_LAYER_ORDER.includes(layer)) return false;
-    localState.activeLayer = layer;
-    localState.activeStratum = layer;
-    localState.activeDepth = layer;
-    return true;
-  }
-
-  function adjustOntologyCameraZoom(camera, direction) {
-    camera.zoom = Math.max(
-      ONTOLOGY_CAMERA_ZOOM_MIN,
-      Math.min(ONTOLOGY_CAMERA_ZOOM_MAX, camera.zoom + direction * ONTOLOGY_CAMERA_ZOOM_STEP),
-    );
-  }
-
-  function resetOntologyCamera(camera) {
-    camera.x = 0;
-    camera.y = 0;
-    camera.zoom = 1;
-  }
-
-  function selectOntologyOccurrence(localState, model, refId, options = {}) {
-    const occurrence = model.byRef.get(refId);
-    if (!occurrence) return false;
-    localState.selectedRefId = occurrence.refId;
-    localState.selectedId = occurrence.refId;
-    localState.selectedConceptId = occurrence.conceptId;
-    localState.activePane = occurrence.timeSlice;
-    if (options.keepLayer !== true) setOntologyLayer(localState, occurrence.layer);
-    return true;
-  }
-
-  function activateOntologyPane(localState, model, phase, preferredConceptId = null) {
-    if (!ONTOLOGY_TIME_PANE_ORDER.includes(phase)) return false;
-    const candidates = model.occurrences.filter((occurrence) => occurrence.timeSlice === phase);
-    const target = candidates.find((occurrence) => occurrence.conceptId === preferredConceptId)
-      || model.rootsByPhase.get(phase)
-      || candidates[0];
-    localState.activePane = phase;
-    if (target) {
-      selectOntologyOccurrence(localState, model, target.refId);
-    } else {
-      localState.selectedRefId = null;
-      localState.selectedId = null;
-      localState.selectedConceptId = null;
-    }
-    return true;
-  }
-
-  function getOntologySideItems(model, phase, visibleRefs, selected) {
-    const phaseOccurrences = model.occurrences.filter((occurrence) => occurrence.timeSlice === phase);
-    const visibleConcepts = new Set(visibleRefs.map((occurrence) => occurrence.conceptId));
-    const edgeEndpointRefs = new Set();
-    model.referenceEdges.forEach((edge) => {
-      if (visibleRefs.some((occurrence) => occurrence.refId === edge.sourceRef)) edgeEndpointRefs.add(edge.targetRef);
-      if (visibleRefs.some((occurrence) => occurrence.refId === edge.targetRef)) edgeEndpointRefs.add(edge.sourceRef);
-    });
-    return phaseOccurrences.filter((occurrence) => (
-      model.isPlaneRoot(occurrence)
-      || edgeEndpointRefs.has(occurrence.refId)
-      || visibleConcepts.has(occurrence.conceptId)
-    )).sort((a, b) => {
-      const rank = (occurrence) => {
-        if (occurrence.conceptId === selected?.conceptId) return 0;
-        if (visibleConcepts.has(occurrence.conceptId)) return 1;
-        if (edgeEndpointRefs.has(occurrence.refId)) return 2;
-        if (model.isPlaneRoot(occurrence)) return 3;
-        return 4;
-      };
-      return rank(a) - rank(b)
-        || (Number(a.order) || 0) - (Number(b.order) || 0)
-        || a.refId.localeCompare(b.refId);
-    });
-  }
-
-  function drawOntologyText(parent, geometry, u, v, textValue, attrs = {}) {
-    const { anchor = 'middle', ...svgAttrs } = attrs;
-    const point = geometry.point(u, v);
-    const angle = Math.atan2(
-      geometry.corners.tr.y - geometry.corners.tl.y,
-      geometry.corners.tr.x - geometry.corners.tl.x,
-    ) * 180 / Math.PI;
-    const node = svgEl('text', {
-      x: point.x,
-      y: point.y,
-      transform: Math.abs(angle) > 0.1 ? `rotate(${angle.toFixed(2)} ${point.x.toFixed(1)} ${point.y.toFixed(1)})` : null,
-      'text-anchor': anchor,
-      fill: '#252c33',
-      'font-family': 'Inter, -apple-system, BlinkMacSystemFont, Segoe UI, system-ui, sans-serif',
-      'font-size': '12',
-      'font-weight': '800',
-      ...svgAttrs,
-    }, textValue);
-    parent.appendChild(node);
-    return node;
-  }
-
-  function drawOntologyChildPips(parent, geometry, spec, count, layer) {
-    const columns = 9;
-    const anchorU = spec.u + spec.w - 0.025;
-    const anchorV = spec.v + spec.h - 0.025;
-    const origin = geometry.point(anchorU, anchorV);
-    const alongU = geometry.point(anchorU + 0.01, anchorV);
-    const alongV = geometry.point(anchorU, anchorV + 0.01);
-    const pixelsPerU = Math.max(1, Math.hypot(alongU.x - origin.x, alongU.y - origin.y) / 0.01);
-    const pixelsPerV = Math.max(1, Math.hypot(alongV.x - origin.x, alongV.y - origin.y) / 0.01);
-    const pipSizePx = 7;
-    const pipGapPx = 4;
-    const pipW = Math.min(pipSizePx / pixelsPerU, spec.w / 14);
-    const pipH = Math.min(pipSizePx / pixelsPerV, spec.h / 5);
-    const gapX = pipW + pipGapPx / pixelsPerU;
-    const gapY = pipH + pipGapPx / pixelsPerV;
-    for (let index = 0; index < count; index += 1) {
-      const column = index % columns;
-      const row = Math.floor(index / columns);
-      const u = spec.u + spec.w - 0.025 - pipW - column * gapX;
-      const v = spec.v + spec.h - 0.025 - pipH - row * gapY;
-      parent.appendChild(svgEl('path', {
-        class: `egd-ontology-v2-pip egd-ontology-v2-pip-${layer}`,
-        d: geometry.rectPath(u, v, pipW, pipH),
-        fill: layer === 'virtual' ? 'rgba(103, 67, 166, 0.82)' : 'rgba(35, 76, 106, 0.84)',
-        stroke: 'rgba(255, 255, 255, 0.90)',
-        'stroke-width': '0.6',
-        'data-pip-index': String(index),
-      }));
-    }
-  }
-
-  function drawOntologyOccurrenceBox(parent, model, geometry, spec, occurrence, options = {}) {
-    const childCount = model.childrenByRef.get(occurrence.refId)?.length || 0;
-    const expandedRoot = !!(options.root && options.expanded);
-    const group = svgEl('g', {
-      class: `egd-ontology-v2-box${options.root ? ' egd-ontology-v2-box-root' : ''}${expandedRoot ? ' egd-ontology-v2-box-root-expanded' : ''}${options.side ? ' egd-ontology-v2-box-side' : ''}${options.overview ? ' egd-ontology-v2-box-overview' : ''}${options.context ? ' egd-ontology-v2-box-context' : ''}${options.behind ? ' egd-ontology-v2-box-behind' : ''}`,
-      data: {
-        refId: occurrence.refId,
-        conceptId: occurrence.conceptId,
-        phase: occurrence.timeSlice,
-        layer: occurrence.layer,
-        contextRole: options.contextRole || '',
-      },
-      onclick: options.onclick,
-    });
-    const boxPath = geometry.rectPath(spec.u, spec.v, spec.w, spec.h);
-    const boxFill = options.root ? 'rgba(255, 254, 250, 0.88)' : options.side ? 'rgba(255, 255, 255, 0.88)' : options.overview ? 'rgba(255, 255, 255, 0.92)' : 'rgba(255, 255, 255, 0.95)';
-    const boxStroke = occurrence.layer === 'virtual' ? 'rgba(103, 67, 166, 0.68)' : 'rgba(35, 76, 106, 0.70)';
-    group.appendChild(svgEl('path', {
-      class: `egd-ontology-v2-box-path egd-ontology-v2-box-path-${occurrence.layer}${expandedRoot ? ' egd-ontology-v2-box-fill' : ''}`,
-      d: boxPath,
-      fill: boxFill,
-      stroke: expandedRoot ? 'none' : boxStroke,
-      'stroke-width': options.root ? '2.3' : options.side ? '1.2' : '1.7',
-    }));
-    if (expandedRoot) {
-      const labelWidth = Math.min(spec.w * 0.40, Math.max(0.105, model.labelFor(occurrence).length * 0.013));
-      const gapStartU = spec.u + 0.035;
-      const gapEndU = gapStartU + labelWidth;
-      const topLeft = geometry.point(spec.u, spec.v);
-      const gapStart = geometry.point(gapStartU, spec.v);
-      const gapEnd = geometry.point(gapEndU, spec.v);
-      const topRight = geometry.point(spec.u + spec.w, spec.v);
-      const bottomRight = geometry.point(spec.u + spec.w, spec.v + spec.h);
-      const bottomLeft = geometry.point(spec.u, spec.v + spec.h);
-      group.appendChild(svgEl('path', {
-        class: `egd-ontology-v2-box-outline egd-ontology-v2-box-outline-${occurrence.layer}`,
-        d: `M ${gapEnd.x.toFixed(1)} ${gapEnd.y.toFixed(1)} L ${topRight.x.toFixed(1)} ${topRight.y.toFixed(1)} L ${bottomRight.x.toFixed(1)} ${bottomRight.y.toFixed(1)} L ${bottomLeft.x.toFixed(1)} ${bottomLeft.y.toFixed(1)} L ${topLeft.x.toFixed(1)} ${topLeft.y.toFixed(1)} L ${gapStart.x.toFixed(1)} ${gapStart.y.toFixed(1)}`,
-        fill: 'none',
-        stroke: boxStroke,
-        'stroke-width': '2.3',
-      }));
-      group.appendChild(svgEl('path', {
-        class: 'egd-ontology-v2-legend-gap',
-        d: `M ${gapStart.x.toFixed(1)} ${gapStart.y.toFixed(1)} L ${gapEnd.x.toFixed(1)} ${gapEnd.y.toFixed(1)}`,
-        fill: 'none',
-        stroke: boxFill,
-        'stroke-width': '3.2',
-      }));
-      drawOntologyText(group, geometry, gapStartU + 0.012, spec.v + 0.018, model.labelFor(occurrence), {
-        class: 'egd-ontology-v2-label egd-ontology-v2-label-root',
-        anchor: 'start',
-        'font-size': '14',
-        'font-weight': '900',
-      });
-    } else if (options.root) {
-      drawOntologyText(group, geometry, spec.u + spec.w / 2, spec.v + spec.h * 0.52, model.labelFor(occurrence), {
-        class: 'egd-ontology-v2-label egd-ontology-v2-label-root egd-ontology-v2-label-root-centered',
-        'font-size': '15',
-        'font-weight': '900',
-      });
-    } else {
-      drawOntologyText(group, geometry, spec.u + spec.w / 2, spec.v + spec.h * 0.48, model.labelFor(occurrence), {
-        class: 'egd-ontology-v2-label',
-        'font-size': options.side || options.context || options.overview ? '10' : '12',
-      });
-    }
-    if (childCount && !options.root && !options.side && (!options.context || options.contextRole === 'child')) {
-      drawOntologyChildPips(group, geometry, spec, childCount, occurrence.layer);
-    }
-    parent.appendChild(group);
-    return group;
-  }
-
-  function renderOntologyMap(stage, graph, localState) {
-    const model = getOntologyModel(graph);
-    if (!model.snapshots.length) {
-      stage.textContent = '';
-      stage.appendChild(el('div', { class: 'egd-ontology-empty' }, '표시할 composite snapshot이 없습니다.'));
-      return;
-    }
-    const rerender = () => renderOntologyMap(stage, graph, localState);
-    syncOntologyPresentationState();
-    if (!ONTOLOGY_TIME_PANE_ORDER.includes(localState.activePane)) localState.activePane = 'present';
-    if (!ONTOLOGY_LAYER_ORDER.includes(localState.activeLayer)) setOntologyLayer(localState, 'virtual');
-    let selected = model.byRef.get(localState.selectedRefId || localState.selectedId);
-    if (!selected || selected.timeSlice !== localState.activePane) {
-      selected = model.rootsByPhase.get(localState.activePane) || null;
-    }
-    const emptyPhase = !selected;
-    if (selected) {
-      selectOntologyOccurrence(localState, model, selected.refId, { keepLayer: true });
-    } else {
-      localState.selectedRefId = null;
-      localState.selectedId = null;
-      localState.selectedConceptId = null;
-    }
-    setOntologyLayer(
-      localState,
-      ONTOLOGY_LAYER_ORDER.includes(localState.activeLayer) ? localState.activeLayer : selected?.layer || 'virtual',
-    );
-    const layerPovShiftV = localState.activeLayer === 'physical' ? -0.170 : 0;
-    const camera = getOntologyCamera(localState);
-    const directChildren = emptyPhase ? [] : (model.childrenByRef.get(selected.refId) || []);
-    const mainChildren = directChildren.filter((occurrence) => occurrence.layer === localState.activeLayer);
-    const visibleRefs = selected ? [selected, ...directChildren] : [];
-    const visibleRefIds = new Set(visibleRefs.map((occurrence) => occurrence.refId));
-    const temporallyCoupledRefIds = new Set();
-    model.referenceEdges.forEach((edge) => {
-      const source = model.byRef.get(edge.sourceRef);
-      const target = model.byRef.get(edge.targetRef);
-      if (!source || !target || source.timeSlice === target.timeSlice) return;
-      if (visibleRefIds.has(source.refId) && target.timeSlice !== localState.activePane) {
-        temporallyCoupledRefIds.add(target.refId);
-      }
-      if (visibleRefIds.has(target.refId) && source.timeSlice !== localState.activePane) {
-        temporallyCoupledRefIds.add(source.refId);
-      }
-    });
-    const card = stage.closest?.('.egd-ontology-card');
-    if (card) {
-      card.classList.add('egd-ontology-canvas-first', 'egd-ontology-v2');
-      card.dataset.activePane = localState.activePane;
-      card.dataset.activeLayer = localState.activeLayer;
-      card.dataset.layerPovShiftV = layerPovShiftV.toFixed(3);
-    }
-
-    const stageRect = stage.getBoundingClientRect?.();
-    const height = 760;
-    const aspect = stageRect?.height > 100 ? stageRect.width / stageRect.height : 1.65;
-    const width = Math.max(1120, Math.min(1580, Math.round(height * aspect)));
-    const paneBounds = {};
-    const timeShares = localState.activePane === 'past'
-      ? [0.18, 0.82, 0.91, 1]
-      : localState.activePane === 'future'
-        ? [0, 0.09, 0.18, 0.82]
-        : [0, 0.18, 0.82, 1];
-    const activeTimeIndex = ONTOLOGY_TIME_PANE_ORDER.indexOf(localState.activePane);
-    const topY = 96;
-    // Keep the trailing layer above the Desk Dock instead of letting the
-    // projected plane disappear through the card's lower edge.
-    const bottomY = height - 72;
-    const topLeft = -48;
-    const topRight = width + 48;
-    const bottomLeft = -170;
-    const bottomRight = width + 170;
-    const sideTimeTiltY = 72;
-    const interpolateX = (left, right, t) => left + (right - left) * t;
-    const boundaryTiltY = (boundaryIndex) => {
-      if (boundaryIndex < activeTimeIndex) {
-        return sideTimeTiltY * (activeTimeIndex - boundaryIndex) / Math.max(1, activeTimeIndex);
-      }
-      if (boundaryIndex > activeTimeIndex + 1) {
-        return sideTimeTiltY * (boundaryIndex - activeTimeIndex - 1)
-          / Math.max(1, ONTOLOGY_TIME_PANE_ORDER.length - activeTimeIndex - 1);
-      }
-      return 0;
-    };
-    ONTOLOGY_TIME_PANE_ORDER.forEach((phase, index) => {
-      const leftTiltY = boundaryTiltY(index);
-      const rightTiltY = boundaryTiltY(index + 1);
-      paneBounds[phase] = {
-        x: 0,
-        y: 0,
-        w: width,
-        h: height,
-        corners: {
-          tl: {
-            x: interpolateX(topLeft, topRight, timeShares[index]),
-            y: topY - leftTiltY,
-          },
-          tr: {
-            x: interpolateX(topLeft, topRight, timeShares[index + 1]),
-            y: topY - rightTiltY,
-          },
-          br: {
-            x: interpolateX(bottomLeft, bottomRight, timeShares[index + 1]),
-            y: bottomY - rightTiltY,
-          },
-          bl: {
-            x: interpolateX(bottomLeft, bottomRight, timeShares[index]),
-            y: bottomY - leftTiltY,
-          },
-        },
-      };
-    });
-    const geometries = new Map(Object.entries(paneBounds).map(([phase, bounds]) => [
-      phase,
-      createOntologyDeckGeometry(bounds),
-    ]));
-    // Virtual and physical keep a stable world-space order. Selecting physical
-    // lowers the POV by one depth step; it never swaps the two plane frames.
-    const virtualLayerFrame = { u: 0, v: 0.055 + layerPovShiftV, w: 1, h: 0.620 };
-    const physicalLayerFrame = { u: 0, v: 0.225 + layerPovShiftV, w: 1, h: 0.620 };
-    const layerFrameSpecs = {
-      virtual: virtualLayerFrame,
-      physical: physicalLayerFrame,
-    };
-    const planeSpec = { u: 0, v: 0, w: 1, h: 1 };
-    const layerSpecs = {
-      virtual: { ...planeSpec },
-      physical: { ...planeSpec },
-    };
-    const sideLayerSpecs = layerSpecs;
-    const layerGeometries = new Map();
-    ONTOLOGY_TIME_PANE_ORDER.forEach((phase) => {
-      ONTOLOGY_LAYER_ORDER.forEach((layer) => {
-        layerGeometries.set(
-          `${phase}:${layer}`,
-          createOntologyLayerGeometry(geometries.get(phase), layerFrameSpecs[layer]),
-        );
-      });
-    });
-    const layerGeometryFor = (phase, layer) => layerGeometries.get(`${phase}:${layer}`);
-    const layerRenderOrder = ONTOLOGY_LAYER_ORDER
-      .filter((layer) => layer !== localState.activeLayer)
-      .concat(localState.activeLayer);
-
-    stage.textContent = '';
-    const svg = svgEl('svg', {
-      class: 'egd-ontology-svg egd-ontology-v2-svg',
-      viewBox: `0 0 ${width} ${height}`,
-      preserveAspectRatio: 'xMidYMid meet',
-      role: 'img',
-      'aria-label': '시간 및 가상 물리 층을 탐색하는 온톨로지 복합 렌즈',
-    });
-    const cameraGroup = svgEl('g', {
-      class: 'egd-ontology-v2-camera',
-      data: { cameraSpace: 'plane' },
-    });
-    const surfaceGroup = svgEl('g', { class: 'egd-ontology-v2-surfaces' });
-    const edgeGroup = svgEl('g', { class: 'egd-ontology-v2-reference-edges' });
-    const depthEdgeGroup = svgEl('g', { class: 'egd-ontology-v2-reference-edges egd-ontology-v2-depth-edges' });
-    const coupledBehindNodeGroup = svgEl('g', { class: 'egd-ontology-v2-nodes egd-ontology-v2-coupled-behind-nodes' });
-    const frontLayerVeilGroup = svgEl('g', { class: 'egd-ontology-v2-front-layer-veil' });
-    const activeNodeGroup = svgEl('g', { class: 'egd-ontology-v2-nodes egd-ontology-v2-active-nodes' });
-    const fixedNodeGroup = svgEl('g', { class: 'egd-ontology-v2-side-nodes' });
-    const cameraOverlayGroup = svgEl('g', { class: 'egd-ontology-v2-camera-overlays' });
-    const overlayGroup = svgEl('g', { class: 'egd-ontology-v2-overlays' });
-    const layerControlGroup = svgEl('g', { class: 'egd-ontology-v2-layer-controls' });
-    const placements = new Map();
-    const sideInventories = new Map();
-
-    ONTOLOGY_TIME_PANE_ORDER.forEach((phase) => {
-      const geometry = geometries.get(phase);
-      const active = phase === localState.activePane;
-      const pane = svgEl('g', {
-        class: `egd-ontology-time-coordinate egd-ontology-time-coordinate-${phase}${active ? ' egd-ontology-time-coordinate-active' : ''}`,
-        data: { phase },
-      });
-      const activateLayerAtPhase = (layer, ev) => {
-        ev?.preventDefault?.();
-        ev?.stopPropagation?.();
-        if (phase !== localState.activePane) activateOntologyPane(localState, model, phase, selected?.conceptId || null);
-        setOntologyLayer(localState, layer);
-        const related = model.occurrences.find((occurrence) => (
-          occurrence.timeSlice === phase && occurrence.layer === layer && occurrence.conceptId === selected?.conceptId
-        )) || model.occurrences.find((occurrence) => occurrence.timeSlice === phase && occurrence.layer === layer);
-        if (related) selectOntologyOccurrence(localState, model, related.refId, { keepLayer: true });
-        rerender();
-      };
-      pane.appendChild(svgEl('path', {
-        class: `egd-ontology-pane-hit egd-ontology-v2-time-axis-hit egd-ontology-v2-pane-hit-${phase}`,
-        d: geometry.rectPath(0.22, 0.0, 0.56, 0.085),
-        fill: 'transparent',
-        stroke: 'transparent',
-        onclick: (ev) => {
-          ev.preventDefault();
-          ev.stopPropagation();
-          activateOntologyPane(localState, model, phase, selected?.conceptId || null);
-          rerender();
-        },
-      }));
-      drawOntologyText(pane, geometry, 0.50, active ? 0.035 : 0.08, ONTOLOGY_TIME_PANE_LABELS[phase], {
-        class: 'egd-ontology-v2-time-coordinate-label',
-        fill: active ? 'rgba(39, 48, 56, 0.82)' : 'rgba(59, 66, 73, 0.58)',
-        'font-size': active ? '15' : '13',
-        'font-weight': '900',
-      });
-      const strutGroup = svgEl('g', {
-        class: `egd-ontology-v2-layer-struts${active ? ' egd-ontology-v2-layer-struts-active' : ''}`,
-        data: { phase },
-      });
-      [0.075, 0.925].forEach((u) => {
-        const from = layerGeometryFor(phase, localState.activeLayer).point(u, 0.060);
-        const trailingLayer = localState.activeLayer === 'virtual' ? 'physical' : 'virtual';
-        const to = layerGeometryFor(phase, trailingLayer).point(u, 0.060);
-        strutGroup.appendChild(svgEl('path', {
-          class: 'egd-ontology-v2-layer-strut',
-          d: `M ${from.x.toFixed(1)} ${from.y.toFixed(1)} L ${to.x.toFixed(1)} ${to.y.toFixed(1)}`,
-          fill: 'none',
-          stroke: active ? 'rgba(45, 90, 123, 0.34)' : 'rgba(45, 90, 123, 0.22)',
-          'stroke-width': active ? '1.35' : '0.95',
-          'stroke-dasharray': '5 5',
-          data: { phase, anchorU: u },
-        }));
-      });
-      pane.appendChild(strutGroup);
-      if (active) {
-        layerRenderOrder.forEach((layer) => {
-          const spec = layerSpecs[layer];
-          const layerGeometry = layerGeometryFor(phase, layer);
-          const layerActive = localState.activeLayer === layer;
-          pane.appendChild(svgEl('path', {
-            class: `egd-ontology-v2-layer-shadow egd-ontology-v2-layer-shadow-${layer}${layerActive ? ' egd-ontology-v2-layer-shadow-active' : ''}`,
-            d: layerGeometry.rectPath(spec.u, spec.v, spec.w, spec.h),
-            transform: 'translate(0 12)',
-            fill: layer === 'virtual' ? 'rgba(73, 52, 110, 0.045)' : 'rgba(27, 58, 78, 0.055)',
-            stroke: 'none',
-            data: { phase, layer },
-          }));
-          pane.appendChild(svgEl('path', {
-            class: `egd-ontology-v2-layer-pane egd-ontology-v2-layer-surface egd-ontology-v2-layer-surface-${layer}${layerActive ? ' egd-ontology-v2-layer-surface-active' : ' egd-ontology-v2-layer-surface-behind'}`,
-            d: layerGeometry.rectPath(spec.u, spec.v, spec.w, spec.h),
-            fill: layer === 'virtual' ? 'rgba(126, 87, 194, 0.078)' : 'rgba(45, 90, 123, 0.085)',
-            stroke: layer === 'virtual'
-              ? (layerActive ? 'rgba(103, 67, 166, 0.64)' : 'rgba(126, 87, 194, 0.38)')
-              : (layerActive ? 'rgba(35, 76, 106, 0.66)' : 'rgba(45, 90, 123, 0.40)'),
-            'stroke-width': layerActive ? '2.1' : '1.15',
-            data: { phase, layer, planeRole: layerActive ? 'main' : 'trailing' },
-            onclick: (ev) => {
-              if (localState.suppressNextSurfaceClick) {
-                localState.suppressNextSurfaceClick = false;
-                return;
-              }
-              activateLayerAtPhase(layer, ev);
-            },
-          }));
-        });
-        // Keep both layer selectors above the overlapping surfaces. Otherwise
-        // the front surface steals clicks from the visible trailing label.
-        layerRenderOrder.forEach((layer) => {
-          const spec = layerSpecs[layer];
-          const layerGeometry = layerGeometryFor(phase, layer);
-          const layerActive = localState.activeLayer === layer;
-          const activateLayerLabel = (ev) => activateLayerAtPhase(layer, ev);
-          const labelControl = svgEl('g', {
-            class: `egd-ontology-v2-layer-label-control egd-ontology-v2-layer-label-control-${layer}`,
-            data: { phase, layer },
-            role: 'button',
-            tabindex: '0',
-            'aria-label': `${layer === 'virtual' ? '가상' : '물리'} 층으로 이동`,
-            onclick: activateLayerLabel,
-            onkeydown: (ev) => {
-              if (ev.key === 'Enter' || ev.key === ' ') activateLayerLabel(ev);
-            },
-          });
-          labelControl.appendChild(svgEl('path', {
-            class: 'egd-ontology-v2-layer-label-hit',
-            d: layerGeometry.rectPath(spec.u + 0.012, spec.v + 0.012, 0.13, 0.11),
-            fill: 'transparent',
-            stroke: 'none',
-          }));
-          drawOntologyText(labelControl, layerGeometry, spec.u + 0.025, spec.v + 0.055, layer === 'virtual' ? '가상' : '물리', {
-            class: `egd-ontology-v2-layer-label egd-ontology-v2-layer-label-${layer}`,
-            anchor: 'start',
-            fill: layer === 'virtual'
-              ? (layerActive ? 'rgba(103, 67, 166, 0.88)' : 'rgba(103, 67, 166, 0.48)')
-              : (layerActive ? 'rgba(35, 76, 106, 0.90)' : 'rgba(35, 76, 106, 0.52)'),
-            'font-size': '11',
-            'font-weight': '900',
-          });
-          layerControlGroup.appendChild(labelControl);
-          if (!layerActive) {
-            const switchV = layer === 'physical' ? 0.86 : 0.02;
-            layerControlGroup.appendChild(svgEl('path', {
-              class: `egd-ontology-v2-layer-switch-hit egd-ontology-v2-layer-switch-hit-${layer}`,
-              d: layerGeometry.rectPath(spec.u + 0.08, spec.v + switchV, 0.84, 0.10),
-              fill: 'rgba(255, 255, 255, 0.001)',
-              stroke: 'none',
-              data: { phase, layer },
-              role: 'button',
-              tabindex: '0',
-              'aria-label': `${layer === 'virtual' ? '가상' : '물리'} 층으로 이동`,
-              onclick: activateLayerLabel,
-              onkeydown: (ev) => {
-                if (ev.key === 'Enter' || ev.key === ' ') activateLayerLabel(ev);
-              },
-            }));
-          }
-        });
-      } else {
-        layerRenderOrder.forEach((layer) => {
-          const spec = sideLayerSpecs[layer];
-          const layerGeometry = layerGeometryFor(phase, layer);
-          const layerActive = localState.activeLayer === layer;
-          pane.appendChild(svgEl('path', {
-            class: `egd-ontology-v2-layer-shadow egd-ontology-v2-side-layer-shadow egd-ontology-v2-layer-shadow-${layer}`,
-            d: layerGeometry.rectPath(spec.u, spec.v, spec.w, spec.h),
-            transform: 'translate(0 8)',
-            fill: layer === 'virtual' ? 'rgba(73, 52, 110, 0.030)' : 'rgba(27, 58, 78, 0.036)',
-            stroke: 'none',
-            data: { phase, layer },
-          }));
-          pane.appendChild(svgEl('path', {
-            class: `egd-ontology-v2-layer-pane egd-ontology-v2-side-layer egd-ontology-v2-side-layer-${layer}${layerActive ? ' egd-ontology-v2-side-layer-front' : ' egd-ontology-v2-side-layer-behind'}`,
-            d: layerGeometry.rectPath(spec.u, spec.v, spec.w, spec.h),
-            fill: layer === 'virtual' ? 'rgba(126, 87, 194, 0.025)' : 'rgba(45, 90, 123, 0.030)',
-            stroke: layer === 'virtual' ? 'rgba(126, 87, 194, 0.26)' : 'rgba(45, 90, 123, 0.28)',
-            'stroke-width': layerActive ? '1.25' : '0.95',
-            data: { phase, layer, planeRole: layerActive ? 'main' : 'trailing' },
-            onclick: (ev) => activateLayerAtPhase(layer, ev),
-          }));
-          drawOntologyText(pane, layerGeometry, spec.u + 0.06, spec.v + 0.085, layer === 'virtual' ? '가상' : '물리', {
-            class: `egd-ontology-v2-side-layer-label egd-ontology-v2-layer-label-${layer}`,
-            anchor: 'start',
-            fill: layer === 'virtual' ? 'rgba(103, 67, 166, 0.58)' : 'rgba(35, 76, 106, 0.62)',
-            'font-size': '8.5',
-            'font-weight': '900',
-          });
-        });
-      }
-      surfaceGroup.appendChild(pane);
-    });
-
-    const activeGeometry = layerGeometryFor(localState.activePane, localState.activeLayer);
-    const mainSpec = layerSpecs[localState.activeLayer];
-    const activeCameraGeometry = createOntologyCameraGeometry(activeGeometry, camera, mainSpec);
-    const cameraGeometriesByCell = new Map();
-    ONTOLOGY_TIME_PANE_ORDER.forEach((phase) => {
-      ONTOLOGY_LAYER_ORDER.forEach((layer) => {
-        cameraGeometriesByCell.set(
-          `${phase}:${layer}`,
-          createOntologyCameraGeometry(layerGeometryFor(phase, layer), camera, layerSpecs[layer]),
-        );
-      });
-    });
-    const activeLayerCameraGeometries = new Map(ONTOLOGY_LAYER_ORDER.map((layer) => [
-      layer,
-      cameraGeometriesByCell.get(`${localState.activePane}:${layer}`),
-    ]));
-    const cameraClipId = `egd-ontology-v2-camera-clip-${String(card?.id || 'card').replace(/[^a-z0-9_-]/gi, '-')}`;
-    const defs = svgEl('defs');
-    const cameraClip = svgEl('clipPath', { id: cameraClipId });
-    ONTOLOGY_LAYER_ORDER.forEach((layer) => {
-      const geometry = layerGeometryFor(localState.activePane, layer);
-      const spec = layerSpecs[layer];
-      cameraClip.appendChild(svgEl('path', { d: geometry.rectPath(spec.u, spec.v, spec.w, spec.h) }));
-    });
-    defs.appendChild(cameraClip);
-    const layerClipIds = new Map();
-    const layerClipBaseId = `egd-ontology-v2-layer-clip-${String(card?.id || 'card').replace(/[^a-z0-9_-]/gi, '-')}`;
-    ONTOLOGY_TIME_PANE_ORDER.forEach((phase) => {
-      ONTOLOGY_LAYER_ORDER.forEach((layer) => {
-        const clipId = `${layerClipBaseId}-${phase}-${layer}`;
-        const clip = svgEl('clipPath', { id: clipId });
-        clip.appendChild(svgEl('path', {
-          d: layerGeometryFor(phase, layer).rectPath(
-            layerSpecs[layer].u,
-            layerSpecs[layer].v,
-            layerSpecs[layer].w,
-            layerSpecs[layer].h,
-          ),
-        }));
-        defs.appendChild(clip);
-        layerClipIds.set(`${phase}:${layer}`, clipId);
-      });
-    });
-    svg.appendChild(defs);
-    cameraGroup.setAttribute('clip-path', `url(#${cameraClipId})`);
-    depthEdgeGroup.setAttribute('clip-path', `url(#${cameraClipId})`);
-    const trailingCameraLayer = localState.activeLayer === 'virtual' ? 'physical' : 'virtual';
-    const activeNodeClipId = layerClipIds.get(`${localState.activePane}:${localState.activeLayer}`);
-    const trailingNodeClipId = layerClipIds.get(`${localState.activePane}:${trailingCameraLayer}`);
-    activeNodeGroup.setAttribute('clip-path', `url(#${activeNodeClipId})`);
-    activeNodeGroup.dataset.clipLayer = localState.activeLayer;
-    coupledBehindNodeGroup.setAttribute('clip-path', `url(#${trailingNodeClipId})`);
-    coupledBehindNodeGroup.dataset.clipLayer = trailingCameraLayer;
-    cameraOverlayGroup.setAttribute('clip-path', `url(#${activeNodeClipId})`);
-    cameraOverlayGroup.dataset.clipLayer = localState.activeLayer;
-    frontLayerVeilGroup.appendChild(svgEl('path', {
-      class: `egd-ontology-v2-layer-occlusion egd-ontology-v2-layer-occlusion-${localState.activeLayer}`,
-      d: activeGeometry.rectPath(mainSpec.u, mainSpec.v, mainSpec.w, mainSpec.h),
-      fill: localState.activeLayer === 'virtual'
-        ? 'rgba(248, 246, 252, 0.48)'
-        : 'rgba(244, 248, 250, 0.48)',
-      data: { phase: localState.activePane, layer: localState.activeLayer },
-    }));
-    const rootExpanded = mainChildren.length > 0;
-    const rootWidth = rootExpanded ? Math.min(0.56, mainSpec.w - 0.18) : Math.min(0.34, mainSpec.w - 0.22);
-    const rootHeight = rootExpanded ? Math.min(0.30, mainSpec.h - 0.13) : Math.min(0.16, mainSpec.h - 0.20);
-    const rootSpec = selected ? {
-      u: mainSpec.u + (mainSpec.w - rootWidth) / 2,
-      v: mainSpec.v + (rootExpanded ? 0.18 : 0.23),
-      w: rootWidth,
-      h: rootHeight,
-    } : null;
-    if (selected && rootSpec) {
-      placements.set(selected.refId, { occurrence: selected, geometry: activeCameraGeometry, spec: rootSpec, kind: 'root', camera: true });
-    }
-    const parent = selected?.parentRef ? model.byRef.get(selected.parentRef) : null;
-    const crossLayerContextRefIds = new Set([
-      ...(parent && parent.layer !== localState.activeLayer ? [parent.refId] : []),
-      ...directChildren.filter((child) => child.layer !== localState.activeLayer).map((child) => child.refId),
-    ]);
-    if (parent) {
-      const parentLabelWidth = Math.max(0.14, Math.min(0.23, model.labelFor(parent).length * 0.016));
-      const tabSpec = { u: rootSpec.u + 0.025, v: rootSpec.v - 0.078, w: parentLabelWidth, h: 0.052 };
-      const tab = svgEl('g', {
-        class: 'egd-ontology-v2-breadcrumb',
-        data: { refId: parent.refId },
-        onclick: (ev) => {
-          ev.preventDefault();
-          ev.stopPropagation();
-          selectOntologyOccurrence(localState, model, parent.refId);
-          rerender();
-        },
-      });
-      tab.appendChild(svgEl('path', {
-        class: 'egd-ontology-v2-breadcrumb-path',
-        d: activeCameraGeometry.rectPath(tabSpec.u, tabSpec.v, tabSpec.w, tabSpec.h),
-        fill: 'rgba(248, 244, 236, 0.98)',
-        stroke: 'rgba(116, 104, 91, 0.44)',
-        'stroke-width': '1.4',
-      }));
-      drawOntologyText(tab, activeCameraGeometry, tabSpec.u + 0.025, tabSpec.v + tabSpec.h * 0.64, `← ${model.labelFor(parent)}`, {
-        class: 'egd-ontology-v2-breadcrumb-label', anchor: 'start', fill: 'rgba(47, 55, 63, 0.82)', 'font-size': '10', 'font-weight': '850',
-      });
-      cameraOverlayGroup.appendChild(tab);
-    }
-
-    if (emptyPhase) {
-      const marker = activeCameraGeometry.point(0.38, 0.34);
-      const markerTail = activeCameraGeometry.point(0.415, 0.34);
-      const emptyState = svgEl('g', {
-        class: 'egd-ontology-v2-empty-state',
-        data: { phase: localState.activePane, layer: localState.activeLayer },
-        role: 'status',
-        'aria-label': `${ONTOLOGY_TIME_PANE_LABELS[localState.activePane]} 시점에는 snapshot이 없습니다`,
-      });
-      emptyState.appendChild(svgEl('circle', {
-        class: 'egd-ontology-v2-empty-state-mark',
-        cx: marker.x,
-        cy: marker.y,
-        r: 4,
-        fill: localState.activeLayer === 'virtual' ? 'rgba(103, 67, 166, 0.56)' : 'rgba(35, 76, 106, 0.58)',
-      }));
-      emptyState.appendChild(svgEl('path', {
-        class: 'egd-ontology-v2-empty-state-line',
-        d: `M ${marker.x.toFixed(1)} ${marker.y.toFixed(1)} L ${markerTail.x.toFixed(1)} ${markerTail.y.toFixed(1)}`,
-        fill: 'none',
-        stroke: localState.activeLayer === 'virtual' ? 'rgba(103, 67, 166, 0.34)' : 'rgba(35, 76, 106, 0.36)',
-        'stroke-width': '1.4',
-      }));
-      drawOntologyText(emptyState, activeCameraGeometry, 0.43, 0.343, '이 시점에는 snapshot이 없습니다', {
-        class: 'egd-ontology-v2-empty-state-title',
-        anchor: 'start',
-        fill: 'rgba(47, 55, 63, 0.68)',
-        'font-size': '12',
-        'font-weight': '850',
-      });
-      drawOntologyText(emptyState, activeCameraGeometry, 0.43, 0.386, '상단 시간축에서 다른 시점을 선택할 수 있습니다', {
-        class: 'egd-ontology-v2-empty-state-help',
-        anchor: 'start',
-        fill: 'rgba(76, 83, 90, 0.46)',
-        'font-size': '9.5',
-        'font-weight': '700',
-      });
-      cameraOverlayGroup.appendChild(emptyState);
-    }
-
-    const childSpecs = [];
-    if (mainChildren.length) {
-      const columns = mainChildren.length === 1 ? 1 : Math.min(3, mainChildren.length);
-      const rows = Math.ceil(mainChildren.length / columns);
-      const areaU = rootSpec.u + 0.05;
-      const areaV = rootSpec.v + 0.09;
-      const areaW = rootSpec.w - 0.10;
-      const areaH = rootSpec.h - 0.13;
-      const gapU = 0.025;
-      const gapV = 0.025;
-      const cellW = Math.min(mainChildren.length === 1 ? areaW * 0.54 : areaW, (areaW - gapU * (columns - 1)) / columns);
-      const cellH = Math.min(0.10, (areaH - gapV * (rows - 1)) / rows);
-      mainChildren.forEach((child, index) => {
-        const row = Math.floor(index / columns);
-        const column = index % columns;
-        const usedW = columns * cellW + (columns - 1) * gapU;
-        const spec = {
-          u: areaU + (areaW - usedW) / 2 + column * (cellW + gapU),
-          v: areaV + Math.max(0, (areaH - (rows * cellH + (rows - 1) * gapV)) / 2) + row * (cellH + gapV),
-          w: cellW,
-          h: cellH,
-        };
-        childSpecs.push({ occurrence: child, spec });
-        placements.set(child.refId, { occurrence: child, geometry: activeCameraGeometry, spec, kind: 'child', camera: true });
-      });
-    }
-
-    const overviewSpecs = [];
-    ONTOLOGY_TIME_PANE_ORDER.forEach((phase) => {
-      const active = phase === localState.activePane;
-      const items = active
-        ? ONTOLOGY_LAYER_ORDER.flatMap((layer) => model.planeRootsFor(phase, layer))
-        : getOntologySideItems(model, phase, visibleRefs, selected);
-      if (!active) sideInventories.set(phase, items);
-      const layerIndexes = { virtual: 0, physical: 0 };
-      const visibleItems = items.slice(0, active ? 12 : 5).filter((occurrence) => (
-        !active || (occurrence.refId !== selected?.refId && !crossLayerContextRefIds.has(occurrence.refId))
-      ));
-      const layerCounts = {
-        virtual: visibleItems.filter((occurrence) => occurrence.layer !== 'physical').length,
-        physical: visibleItems.filter((occurrence) => occurrence.layer === 'physical').length,
-      };
-      visibleItems.forEach((occurrence) => {
-        const layer = occurrence.layer === 'physical' ? 'physical' : 'virtual';
-        const layerSpec = sideLayerSpecs[layer];
-        const geometry = layerGeometryFor(phase, layer);
-        const layerIndex = layerIndexes[layer]++;
-        const count = Math.max(1, layerCounts[layer]);
-        let spec;
-        let placementGeometry = geometry;
-        let cameraBound = false;
-        if (active) {
-          const focusOccupiesLayer = !!selected && selected.layer === layer;
-          const columns = focusOccupiesLayer ? 1 : Math.min(3, count);
-          const rows = Math.ceil(count / columns);
-          const areaU = focusOccupiesLayer ? 0.66 : 0.13;
-          const areaW = focusOccupiesLayer ? 0.25 : 0.74;
-          const gapU = 0.035;
-          const gapV = 0.035;
-          const cellW = Math.min(0.24, (areaW - gapU * (columns - 1)) / columns);
-          const cellH = Math.min(0.14, layerSpec.h * 0.26);
-          const usedW = columns * cellW + gapU * (columns - 1);
-          const usedH = rows * cellH + gapV * (rows - 1);
-          const column = layerIndex % columns;
-          const row = Math.floor(layerIndex / columns);
-          spec = {
-            u: areaU + (areaW - usedW) / 2 + column * (cellW + gapU),
-            v: layerSpec.v + Math.max(0.06, (layerSpec.h - usedH) / 2) + row * (cellH + gapV),
-            w: cellW,
-            h: cellH,
-          };
-          placementGeometry = activeLayerCameraGeometries.get(layer);
-          cameraBound = true;
-        } else {
-          const sideSafeArea = phase === 'past'
-            ? { u: 0.50, w: 0.46 }
-            : phase === 'future'
-              ? { u: 0.04, w: 0.46 }
-              : { u: 0.12, w: 0.76 };
-          const topPadding = Math.min(0.11, layerSpec.h * 0.24);
-          const availableHeight = Math.max(0.10, layerSpec.h - topPadding - 0.08);
-          const cellH = Math.min(0.12, availableHeight / count * 0.78);
-          const step = availableHeight / count;
-          spec = {
-            u: sideSafeArea.u,
-            v: layerSpec.v + topPadding + layerIndex * step,
-            w: sideSafeArea.w,
-            h: cellH,
-          };
-          if (temporallyCoupledRefIds.has(occurrence.refId)) {
-            placementGeometry = cameraGeometriesByCell.get(`${phase}:${layer}`);
-            cameraBound = true;
-          }
-        }
-        overviewSpecs.push({
-          occurrence,
-          geometry: placementGeometry,
-          spec,
-          phase,
-          active,
-          cameraBound,
-          behind: active && layer !== localState.activeLayer,
-        });
-        placements.set(occurrence.refId, {
-          occurrence,
-          geometry: placementGeometry,
-          spec,
-          kind: active ? 'overview' : 'side',
-          camera: cameraBound,
-        });
-      });
-    });
-
-    const centerOf = (placement) => {
-      return placement.geometry.point(
-        placement.spec.u + placement.spec.w / 2,
-        placement.spec.v + placement.spec.h / 2,
-      );
-    };
-    const anchorOf = (placement, anchor = 'center') => {
-      const { spec, geometry } = placement;
-      if (anchor === 'left') return geometry.point(spec.u, spec.v + spec.h / 2);
-      if (anchor === 'right') return geometry.point(spec.u + spec.w, spec.v + spec.h / 2);
-      if (anchor === 'top') return geometry.point(spec.u + spec.w / 2, spec.v);
-      if (anchor === 'bottom') return geometry.point(spec.u + spec.w / 2, spec.v + spec.h);
-      return centerOf(placement);
-    };
-    const planeUForScreenX = (geometry, v, screenX) => {
-      const left = geometry.point(0, v);
-      const right = geometry.point(1, v);
-      const span = right.x - left.x;
-      if (Math.abs(span) < 0.001) return 0.5;
-      return Math.max(0, Math.min(1, (screenX - left.x) / span));
-    };
-    const timeBoundarySegmentFor = (sourcePhase, targetPhase, layer) => {
-      const sourceIndex = ONTOLOGY_TIME_PANE_ORDER.indexOf(sourcePhase);
-      const targetIndex = ONTOLOGY_TIME_PANE_ORDER.indexOf(targetPhase);
-      if (sourceIndex < 0 || targetIndex < 0 || Math.abs(sourceIndex - targetIndex) !== 1) return null;
-      const leftPhase = ONTOLOGY_TIME_PANE_ORDER[Math.min(sourceIndex, targetIndex)];
-      const rightPhase = ONTOLOGY_TIME_PANE_ORDER[Math.max(sourceIndex, targetIndex)];
-      const boundaryGeometry = layerGeometryFor(leftPhase, layer);
-      if (!boundaryGeometry) return null;
-      return {
-        key: `${leftPhase}|${rightPhase}|${layer}`,
-        top: boundaryGeometry.corners.tr,
-        bottom: boundaryGeometry.corners.br,
-      };
-    };
-    const pointOnTimeBoundaryAtY = (boundary, screenY) => {
-      const spanY = boundary.bottom.y - boundary.top.y;
-      const t = Math.abs(spanY) < 0.001
-        ? 0.5
-        : Math.max(0, Math.min(1, (screenY - boundary.top.y) / spanY));
-      return {
-        x: boundary.top.x + (boundary.bottom.x - boundary.top.x) * t,
-        y: boundary.top.y + spanY * t,
-      };
-    };
-    const routeViaTimeBoundary = (start, end, sourcePhase, targetPhase, layer) => {
-      const boundary = timeBoundarySegmentFor(sourcePhase, targetPhase, layer);
-      if (!boundary) return null;
-      const entry = pointOnTimeBoundaryAtY(boundary, start.y);
-      const exit = pointOnTimeBoundaryAtY(boundary, end.y);
-      return {
-        boundary,
-        entry,
-        exit,
-        d: `M ${start.x.toFixed(1)} ${start.y.toFixed(1)} L ${entry.x.toFixed(1)} ${entry.y.toFixed(1)} L ${exit.x.toFixed(1)} ${exit.y.toFixed(1)} L ${end.x.toFixed(1)} ${end.y.toFixed(1)}`,
-      };
-    };
-    const edgeKeys = new Set();
-    const drawEdge = (sourceRef, targetRef, relation) => {
-      const source = placements.get(sourceRef);
-      const target = placements.get(targetRef);
-      if (!source || !target) return;
-      const key = `${sourceRef}|${relation}|${targetRef}`;
-      if (edgeKeys.has(key)) return;
-      edgeKeys.add(key);
-      const sourceOccurrence = source.occurrence;
-      const targetOccurrence = target.occurrence;
-      const temporal = sourceOccurrence.timeSlice !== targetOccurrence.timeSlice;
-      const crossLayer = sourceOccurrence.layer !== targetOccurrence.layer;
-      let kind = 'reference';
-      let sourceAnchor = 'right';
-      let targetAnchor = 'left';
-      let start;
-      let end;
-      let d;
-      let temporalBoundaryRoute = null;
-      let forward = true;
-      if (temporal) {
-        kind = 'temporal';
-        const sourceIndex = ONTOLOGY_TIME_PANE_ORDER.indexOf(sourceOccurrence.timeSlice);
-        const targetIndex = ONTOLOGY_TIME_PANE_ORDER.indexOf(targetOccurrence.timeSlice);
-        forward = targetIndex >= sourceIndex;
-        sourceAnchor = forward ? 'right' : 'left';
-        targetAnchor = forward ? 'left' : 'right';
-        start = anchorOf(source, sourceAnchor);
-        end = anchorOf(target, targetAnchor);
-        const boundaryLayer = sourceOccurrence.layer === targetOccurrence.layer
-          ? sourceOccurrence.layer
-          : localState.activeLayer;
-        temporalBoundaryRoute = routeViaTimeBoundary(
-          start,
-          end,
-          sourceOccurrence.timeSlice,
-          targetOccurrence.timeSlice,
-          boundaryLayer,
-        );
-        if (temporalBoundaryRoute) {
-          d = temporalBoundaryRoute.d;
-        } else {
-          const busX = (start.x + end.x) / 2;
-          d = `M ${start.x.toFixed(1)} ${start.y.toFixed(1)} L ${busX.toFixed(1)} ${start.y.toFixed(1)} L ${busX.toFixed(1)} ${end.y.toFixed(1)} L ${end.x.toFixed(1)} ${end.y.toFixed(1)}`;
-        }
-      } else if (crossLayer) {
-        kind = 'layer';
-        const depthCoordinates = source.depthCoordinates || target.depthCoordinates;
-        sourceAnchor = 'depth';
-        targetAnchor = 'depth';
-        const sourceDepthCoordinate = depthCoordinates?.[sourceRef];
-        const targetDepthCoordinate = depthCoordinates?.[targetRef];
-        start = sourceDepthCoordinate
-          ? source.geometry.point(sourceDepthCoordinate.u, sourceDepthCoordinate.v)
-          : centerOf(source);
-        end = targetDepthCoordinate
-          ? target.geometry.point(targetDepthCoordinate.u, targetDepthCoordinate.v)
-          : centerOf(target);
-        const sharedX = sourceOccurrence.layer === localState.activeLayer
-          ? start.x
-          : targetOccurrence.layer === localState.activeLayer
-            ? end.x
-            : (start.x + end.x) / 2;
-        start = { x: sharedX, y: start.y };
-        end = { x: sharedX, y: end.y };
-        d = `M ${start.x.toFixed(1)} ${start.y.toFixed(1)} L ${end.x.toFixed(1)} ${end.y.toFixed(1)}`;
-      } else {
-        const sourceCenter = centerOf(source);
-        const targetCenter = centerOf(target);
-        forward = targetCenter.x >= sourceCenter.x;
-        sourceAnchor = forward ? 'right' : 'left';
-        targetAnchor = forward ? 'left' : 'right';
-        start = anchorOf(source, sourceAnchor);
-        end = anchorOf(target, targetAnchor);
-        const busX = (start.x + end.x) / 2;
-        d = `M ${start.x.toFixed(1)} ${start.y.toFixed(1)} L ${busX.toFixed(1)} ${start.y.toFixed(1)} L ${busX.toFixed(1)} ${end.y.toFixed(1)} L ${end.x.toFixed(1)} ${end.y.toFixed(1)}`;
-      }
-      const edgeStroke = kind === 'temporal'
-        ? 'rgba(111, 90, 154, 0.46)'
-        : kind === 'layer'
-          ? 'rgba(35, 76, 106, 0.48)'
-          : 'rgba(82, 89, 98, 0.26)';
-      let temporalPaneClipId = null;
-      if (kind === 'temporal') {
-        temporalPaneClipId = `${layerClipBaseId}-temporal-${edgeKeys.size}`;
-        const temporalPaneClip = svgEl('clipPath', { id: temporalPaneClipId });
-        [sourceOccurrence, targetOccurrence].forEach((occurrence) => {
-          const clipGeometry = layerGeometryFor(occurrence.timeSlice, occurrence.layer);
-          const clipSpec = layerSpecs[occurrence.layer];
-          temporalPaneClip.appendChild(svgEl('path', {
-            d: clipGeometry.rectPath(clipSpec.u, clipSpec.v, clipSpec.w, clipSpec.h),
-          }));
-        });
-        defs.appendChild(temporalPaneClip);
-      }
-      const targetEdgeGroup = kind === 'layer' ? depthEdgeGroup : edgeGroup;
-      targetEdgeGroup.appendChild(svgEl('path', {
-        class: `egd-ontology-v2-edge egd-ontology-v2-edge-${kind}`,
-        d,
-        'clip-path': temporalPaneClipId ? `url(#${temporalPaneClipId})` : null,
-        fill: 'none',
-        stroke: edgeStroke,
-        'stroke-width': kind === 'temporal' ? '1.55' : kind === 'layer' ? '1.7' : '1.1',
-        'stroke-dasharray': kind === 'layer' ? '6 5' : null,
-        data: {
-          sourceRef,
-          targetRef,
-          sourceAnchor,
-          targetAnchor,
-          relation,
-          temporalBoundaryKey: temporalBoundaryRoute?.boundary.key || '',
-          temporalBoundaryAligned: temporalBoundaryRoute ? 'true' : 'false',
-          paneClipped: temporalPaneClipId ? 'true' : 'false',
-          depthDx: kind === 'layer' ? (end.x - start.x).toFixed(2) : '',
-          depthDy: kind === 'layer' ? (end.y - start.y).toFixed(2) : '',
-        },
-      }));
-      if (kind !== 'layer') {
-        edgeGroup.appendChild(svgEl('polygon', {
-          class: 'egd-ontology-v2-edge-arrow',
-          points: `${end.x},${end.y} ${end.x - (forward ? 6 : -6)},${end.y - 3} ${end.x - (forward ? 6 : -6)},${end.y + 3}`,
-          'clip-path': temporalPaneClipId ? `url(#${temporalPaneClipId})` : null,
-          fill: edgeStroke,
-        }));
-      }
-    };
-    model.referenceEdges.forEach((edge) => {
-      const source = model.byRef.get(edge.sourceRef);
-      const target = model.byRef.get(edge.targetRef);
-      const nestedOnOnePlane = source && target
-        && source.timeSlice === target.timeSlice
-        && source.layer === target.layer
-        && (source.parentRef === target.refId || target.parentRef === source.refId);
-      if (!nestedOnOnePlane) drawEdge(edge.sourceRef, edge.targetRef, edge.relation);
-    });
-
-    const contextualRefs = [];
-    if (parent && parent.layer !== localState.activeLayer) contextualRefs.push({ occurrence: parent, role: 'parent' });
-    directChildren.filter((child) => child.layer !== localState.activeLayer).forEach((child) => contextualRefs.push({ occurrence: child, role: 'child' }));
-    const visibleContextualRefs = contextualRefs.slice(0, 5);
-    visibleContextualRefs.forEach(({ occurrence, role }, index) => {
-      if (placements.has(occurrence.refId)) return;
-      const contextSpec = layerSpecs[occurrence.layer];
-      if (!contextSpec) return;
-      const mainPlacement = placements.get(selected?.refId);
-      if (!mainPlacement) return;
-      const w = Math.min(0.16, mainPlacement.spec.w * 0.38);
-      const h = Math.min(0.16, Math.max(0.13, mainPlacement.spec.h * 0.58));
-      const slot = (index + 1) / (visibleContextualRefs.length + 1);
-      const contextIsBelow = occurrence.layer === 'physical';
-      const contextCenterV = mainPlacement.spec.v + mainPlacement.spec.h * 0.58 + (contextIsBelow ? 0.025 : -0.025);
-      const trailingAnchorV = contextCenterV + (contextIsBelow ? -h / 2 : h / 2);
-      const activeDepthCoordinate = {
-        u: mainPlacement.spec.u + mainPlacement.spec.w * slot,
-        v: contextIsBelow ? mainPlacement.spec.v + mainPlacement.spec.h : mainPlacement.spec.v,
-      };
-      const activeDepthPoint = mainPlacement.geometry.point(activeDepthCoordinate.u, activeDepthCoordinate.v);
-      const contextGeometry = activeLayerCameraGeometries.get(occurrence.layer);
-      const trailingAnchorU = Math.max(
-        w / 2,
-        Math.min(1 - w / 2, planeUForScreenX(contextGeometry, trailingAnchorV, activeDepthPoint.x)),
-      );
-      const spec = {
-        u: trailingAnchorU - w / 2,
-        v: contextCenterV - h / 2,
-        w,
-        h,
-      };
-      const trailingDepthCoordinate = {
-        u: spec.u + spec.w / 2,
-        v: trailingAnchorV,
-      };
-      drawOntologyOccurrenceBox(coupledBehindNodeGroup, model, contextGeometry, spec, occurrence, {
-        context: true,
-        contextRole: role,
-        behind: true,
-        onclick: (ev) => {
-          ev.preventDefault();
-          ev.stopPropagation();
-          selectOntologyOccurrence(localState, model, occurrence.refId);
-          rerender();
-        },
-      });
-      const contextPlacement = {
-        occurrence,
-        geometry: contextGeometry,
-        spec,
-        camera: true,
-        kind: 'context',
-        depthCoordinates: {
-          [selected.refId]: activeDepthCoordinate,
-          [occurrence.refId]: trailingDepthCoordinate,
-        },
-      };
-      placements.set(occurrence.refId, contextPlacement);
-      if (selected) {
-        const explicitEdge = model.referenceEdges.find((edge) => (
-          (edge.sourceRef === selected.refId && edge.targetRef === occurrence.refId)
-          || (edge.sourceRef === occurrence.refId && edge.targetRef === selected.refId)
-        ));
-        const sourceRef = explicitEdge?.sourceRef || (role === 'parent' ? occurrence.refId : selected.refId);
-        const targetRef = explicitEdge?.targetRef || (role === 'parent' ? selected.refId : occurrence.refId);
-        drawEdge(sourceRef, targetRef, explicitEdge?.relation || occurrence.relation || 'contains');
-      }
-    });
-
-    ONTOLOGY_TIME_PANE_ORDER.filter((phase) => phase !== localState.activePane).forEach((phase) => {
-      const items = sideInventories.get(phase) || [];
-      if (items.length <= 5) return;
-      const fromPlacement = placements.get(selected?.refId);
-      if (!fromPlacement) return;
-      const forward = ONTOLOGY_TIME_PANE_ORDER.indexOf(phase) > ONTOLOGY_TIME_PANE_ORDER.indexOf(localState.activePane);
-      const from = anchorOf(fromPlacement, forward ? 'right' : 'left');
-      const sideGeometry = layerGeometryFor(phase, localState.activeLayer);
-      const to = sideGeometry.point(phase === 'past' ? 0.96 : 0.04, 0.52);
-      const boundaryRoute = routeViaTimeBoundary(
-        from,
-        to,
-        localState.activePane,
-        phase,
-        localState.activeLayer,
-      );
-      const busX = (from.x + to.x) / 2;
-      const d = boundaryRoute?.d
-        || `M ${from.x.toFixed(1)} ${from.y.toFixed(1)} L ${busX.toFixed(1)} ${from.y.toFixed(1)} L ${busX.toFixed(1)} ${to.y.toFixed(1)} L ${to.x.toFixed(1)} ${to.y.toFixed(1)}`;
-      edgeGroup.appendChild(svgEl('path', {
-        class: 'egd-ontology-v2-edge egd-ontology-v2-edge-bundle', d,
-        fill: 'none', stroke: 'rgba(111, 90, 154, 0.38)', 'stroke-width': '1.7',
-        data: {
-          temporalBoundaryKey: boundaryRoute?.boundary.key || '',
-          temporalBoundaryAligned: boundaryRoute ? 'true' : 'false',
-        },
-      }));
-      const labelPoint = boundaryRoute
-        ? {
-          x: (boundaryRoute.entry.x + boundaryRoute.exit.x) / 2,
-          y: (boundaryRoute.entry.y + boundaryRoute.exit.y) / 2 - 8,
-        }
-        : { x: busX, y: (from.y + to.y) / 2 - 8 };
-      edgeGroup.appendChild(svgEl('rect', {
-        class: 'egd-ontology-v2-bundle-label-bg', x: labelPoint.x - 18, y: labelPoint.y - 13, width: 36, height: 22, rx: 7,
-        fill: 'rgba(255, 255, 255, 0.94)', stroke: 'rgba(111, 90, 154, 0.46)', 'stroke-width': '1',
-      }));
-      edgeGroup.appendChild(svgEl('text', {
-        class: 'egd-ontology-v2-bundle-label', x: labelPoint.x, y: labelPoint.y + 3, 'text-anchor': 'middle',
-        fill: 'rgba(89, 69, 132, 0.94)', 'font-size': '10', 'font-weight': '900',
-      }, `+${items.length - 5}`));
-    });
-
-    if (selected && rootSpec) drawOntologyOccurrenceBox(activeNodeGroup, model, activeCameraGeometry, rootSpec, selected, {
-      root: true,
-      expanded: mainChildren.length > 0,
-    });
-    childSpecs.forEach(({ occurrence, spec }) => {
-      drawOntologyOccurrenceBox(activeNodeGroup, model, activeCameraGeometry, spec, occurrence, {
-        onclick: (ev) => {
-          ev.preventDefault();
-          ev.stopPropagation();
-          selectOntologyOccurrence(localState, model, occurrence.refId);
-          rerender();
-        },
-      });
-    });
-    overviewSpecs.forEach(({ occurrence, geometry, spec, phase, active, cameraBound, behind }) => {
-      const targetGroup = active
-        ? (behind ? coupledBehindNodeGroup : activeNodeGroup)
-        : fixedNodeGroup;
-      const renderedBox = drawOntologyOccurrenceBox(targetGroup, model, geometry, spec, occurrence, {
-        side: !active,
-        overview: active,
-        behind: behind || (!active && occurrence.layer !== localState.activeLayer),
-        onclick: (ev) => {
-          ev.preventDefault();
-          ev.stopPropagation();
-          if (!active) activateOntologyPane(localState, model, phase, occurrence.conceptId);
-          selectOntologyOccurrence(localState, model, occurrence.refId);
-          rerender();
-        },
-      });
-      if (!active) {
-        const clipId = layerClipIds.get(`${phase}:${occurrence.layer}`);
-        if (clipId) renderedBox.setAttribute('clip-path', `url(#${clipId})`);
-        renderedBox.dataset.clipLayer = occurrence.layer;
-        if (cameraBound) renderedBox.dataset.cameraCoupled = 'temporal';
-      }
-    });
-
-    const arrowY = 62;
-    const paneCenters = ONTOLOGY_TIME_PANE_ORDER.map((phase) => {
-      const geometry = geometries.get(phase);
-      return { phase, point: geometry.point(0.5, 0) };
-    }).sort((a, b) => a.point.x - b.point.x);
-    for (let index = 0; index < paneCenters.length - 1; index += 1) {
-      const from = paneCenters[index].point;
-      const to = paneCenters[index + 1].point;
-      overlayGroup.appendChild(svgEl('path', {
-        class: 'egd-ontology-v2-time-axis-arrow',
-        d: `M ${from.x + 24} ${arrowY} L ${to.x - 24} ${arrowY}`,
-        fill: 'none', stroke: 'rgba(111, 90, 154, 0.30)', 'stroke-width': '1.5', 'stroke-dasharray': '7 6',
-      }));
-      overlayGroup.appendChild(svgEl('polygon', {
-        class: 'egd-ontology-v2-time-axis-arrow-head',
-        points: `${to.x - 24},${arrowY} ${to.x - 34},${arrowY - 5} ${to.x - 34},${arrowY + 5}`,
-        fill: 'rgba(111, 90, 154, 0.66)',
-      }));
-    }
-
-    cameraGroup.appendChild(coupledBehindNodeGroup);
-    cameraGroup.appendChild(frontLayerVeilGroup);
-    cameraGroup.appendChild(activeNodeGroup);
-    cameraGroup.appendChild(cameraOverlayGroup);
-    svg.appendChild(surfaceGroup);
-    svg.appendChild(edgeGroup);
-    svg.appendChild(cameraGroup);
-    svg.appendChild(depthEdgeGroup);
-    svg.appendChild(fixedNodeGroup);
-    svg.appendChild(overlayGroup);
-    // Interaction controls stay above visual occlusion and shading layers.
-    svg.appendChild(layerControlGroup);
-    stage.appendChild(svg);
-    stage.appendChild(el('div', {
-      class: 'egd-ontology-stage-hint',
-      'aria-hidden': 'true',
-    }, '드래그 이동  ·  휠 스크롤  ·  ⌘/Ctrl + 휠 확대'));
-
-    const minimap = el('div', {
-      class: 'egd-ontology-minimap egd-ontology-v2-minimap',
-      data: {
-        activePane: localState.activePane,
-        activeStratum: localState.activeLayer,
-        zoom: camera.zoom.toFixed(2),
-      },
-      role: 'navigation',
-      'aria-label': `${ONTOLOGY_TIME_PANE_LABELS[localState.activePane]} pane 개념 분포 미니맵`,
-    });
-    const miniCorners = ONTOLOGY_LAYER_ORDER.flatMap((layer) => (
-      Object.values(layerGeometryFor(localState.activePane, layer).corners)
-    ));
-    const miniMinX = Math.min(...miniCorners.map((point) => point.x));
-    const miniMaxX = Math.max(...miniCorners.map((point) => point.x));
-    const miniMinY = Math.min(...miniCorners.map((point) => point.y));
-    const miniMaxY = Math.max(...miniCorners.map((point) => point.y));
-    const miniPadX = Math.max(8, (miniMaxX - miniMinX) * 0.018);
-    const miniPadY = Math.max(6, (miniMaxY - miniMinY) * 0.025);
-    const miniViewWidth = miniMaxX - miniMinX + miniPadX * 2;
-    const miniViewHeight = miniMaxY - miniMinY + miniPadY * 2;
-    const miniSvg = svgEl('svg', {
-      class: 'egd-ontology-minimap-map',
-      viewBox: `${(miniMinX - miniPadX).toFixed(1)} ${(miniMinY - miniPadY).toFixed(1)} ${(miniMaxX - miniMinX + miniPadX * 2).toFixed(1)} ${(miniMaxY - miniMinY + miniPadY * 2).toFixed(1)}`,
-      preserveAspectRatio: 'none',
-      data: { scope: 'active-pane', phase: localState.activePane },
-    });
-    layerRenderOrder.forEach((layer) => {
-      const miniGeometry = layerGeometryFor(localState.activePane, layer);
-      const spec = layerSpecs[layer];
-      const activateMiniRegion = (ev) => {
-        ev.preventDefault();
-        ev.stopPropagation();
-        setOntologyLayer(localState, layer);
-        rerender();
-      };
-      miniSvg.appendChild(svgEl('path', {
-        class: `egd-ontology-minimap-layer-pane egd-ontology-minimap-time-active${layer === localState.activeLayer ? ' egd-ontology-minimap-layer-pane-active' : ''}`,
-        d: miniGeometry.rectPath(spec.u, spec.v, spec.w, spec.h),
-        fill: layer === 'virtual' ? '#7E57C2' : '#2D5A7B',
-        data: { phase: localState.activePane, layer },
-        tabindex: '0',
-        role: 'button',
-        'aria-label': `${ONTOLOGY_TIME_PANE_LABELS[localState.activePane]} ${layer === 'virtual' ? '가상' : '물리'} 층으로 이동`,
-        onclick: activateMiniRegion,
-        onkeydown: (ev) => {
-          if (ev.key === 'Enter' || ev.key === ' ') activateMiniRegion(ev);
-        },
-      }));
-    });
-    const minimapRefs = new Set();
-    placements.forEach((placement, refId) => {
-      if (placement.occurrence.timeSlice !== localState.activePane) return;
-      if (minimapRefs.has(refId)) return;
-      minimapRefs.add(refId);
-      const occurrence = placement.occurrence;
-      const geometry = layerGeometryFor(occurrence.timeSlice, occurrence.layer);
-      const point = geometry.point(
-        placement.spec.u + placement.spec.w / 2,
-        placement.spec.v + placement.spec.h / 2,
-      );
-      const isSelected = refId === selected?.refId;
-      const markerSize = isSelected ? 5 : 3.5;
-      miniSvg.appendChild(svgEl('ellipse', {
-        class: `egd-ontology-minimap-node${isSelected ? ' egd-ontology-minimap-node-selected' : ''}`,
-        cx: point.x,
-        cy: point.y,
-        rx: markerSize * miniViewWidth / 168,
-        ry: markerSize * miniViewHeight / 110,
-        fill: occurrence.layer === 'virtual' ? '#6F469F' : '#244F6C',
-        stroke: 'rgba(255, 255, 255, 0.94)',
-        'stroke-width': isSelected ? '4' : '2.5',
-        data: { refId, phase: occurrence.timeSlice, layer: occurrence.layer },
-        role: 'button',
-        tabindex: '0',
-        'aria-label': `${model.labelFor(occurrence)} 개념으로 이동`,
-        onclick: (ev) => {
-          ev.preventDefault();
-          ev.stopPropagation();
-          selectOntologyOccurrence(localState, model, refId);
-          rerender();
-        },
-        onkeydown: (ev) => {
-          if (ev.key !== 'Enter' && ev.key !== ' ') return;
-          ev.preventDefault();
-          ev.stopPropagation();
-          selectOntologyOccurrence(localState, model, refId);
-          rerender();
-        },
-      }));
-    });
-    miniSvg.appendChild(svgEl('path', {
-      class: 'egd-ontology-minimap-viewport-halo',
-      d: activeGeometry.rectPath(
-        activeCameraGeometry.viewportSpec.u,
-        activeCameraGeometry.viewportSpec.v,
-        activeCameraGeometry.viewportSpec.w,
-        activeCameraGeometry.viewportSpec.h,
-      ),
-      fill: 'none', stroke: 'rgba(255, 255, 255, 0.92)', 'stroke-width': '4.2',
-    }));
-    miniSvg.appendChild(svgEl('path', {
-      class: 'egd-ontology-minimap-viewport',
-      d: activeGeometry.rectPath(
-        activeCameraGeometry.viewportSpec.u,
-        activeCameraGeometry.viewportSpec.v,
-        activeCameraGeometry.viewportSpec.w,
-        activeCameraGeometry.viewportSpec.h,
-      ),
-      fill: 'none',
-      stroke: localState.activeLayer === 'virtual' ? 'rgba(103, 67, 166, 0.96)' : 'rgba(35, 76, 106, 0.96)',
-      'stroke-width': '2.2',
-      'stroke-dasharray': '5 3',
-    }));
-    const minimapSummaryId = `${String(card?.id || 'ontology')}-minimap-summary`;
-    minimap.setAttribute('aria-describedby', minimapSummaryId);
-    minimap.appendChild(miniSvg);
-    minimap.appendChild(el('div', {
-      id: minimapSummaryId,
-      class: 'egd-ontology-minimap-context',
-    },
-      el('span', { class: 'egd-ontology-minimap-context-title' },
-        selected ? `${model.labelFor(selected)} 주변` : '선택된 개념 없음'),
-      el('span', { class: 'egd-ontology-minimap-context-coordinate' },
-        `${ONTOLOGY_TIME_PANE_LABELS[localState.activePane]} · ${localState.activeLayer === 'virtual' ? '가상' : '물리'}`,
-      ),
-    ));
-    minimap.appendChild(el('div', {
-      class: 'egd-ontology-minimap-legend',
-      'aria-hidden': 'true',
-    },
-      el('span', { class: 'egd-ontology-minimap-legend-item' },
-        el('i', { class: 'egd-ontology-minimap-legend-swatch egd-ontology-minimap-legend-swatch-virtual' }), '가상'),
-      el('span', { class: 'egd-ontology-minimap-legend-item' },
-        el('i', { class: 'egd-ontology-minimap-legend-swatch egd-ontology-minimap-legend-swatch-physical' }), '물리'),
-      el('span', { class: 'egd-ontology-minimap-legend-item' },
-        el('i', { class: 'egd-ontology-minimap-legend-swatch egd-ontology-minimap-legend-swatch-selected' }), '선택'),
-      el('span', { class: 'egd-ontology-minimap-legend-item' },
-        el('i', { class: 'egd-ontology-minimap-legend-swatch egd-ontology-minimap-legend-swatch-viewport' }), '화면'),
-    ));
-    stage.appendChild(minimap);
-    const tools = el('div', { class: 'egd-ontology-stage-mini-tools' },
-      el('button', { class: 'egd-ontology-stage-mini-tool egd-ontology-stage-mini-tool-zoom-in', title: '확대', onclick: (ev) => {
-        ev.stopPropagation(); adjustOntologyCameraZoom(camera, 1); rerender();
-      } }, '+'),
-      el('button', { class: 'egd-ontology-stage-mini-tool egd-ontology-stage-mini-tool-reset', title: '맞춤', onclick: (ev) => {
-        ev.stopPropagation(); resetOntologyCamera(camera); rerender();
-      } }, '⌂'),
-      el('button', { class: 'egd-ontology-stage-mini-tool egd-ontology-stage-mini-tool-zoom-out', title: '축소', onclick: (ev) => {
-        ev.stopPropagation(); adjustOntologyCameraZoom(camera, -1); rerender();
-      } }, '−'),
-    );
-    stage.appendChild(tools);
-    stage.appendChild(el('div', { class: 'egd-ontology-stage-zoom-label' }, `${Math.round(camera.zoom * 100)}%`));
-  }
-
-  async function loadOntologyGraph() {
-    const response = await fetch(ONTOLOGY_GRAPH_URL, { cache: 'no-store' });
-    if (!response.ok) throw new Error(`Ontology graph load failed: ${response.status}`);
-    return validateOntologyGraph(await response.json());
-  }
-
-  function spawnOntologyMapCard(initialState = {}) {
-    const sourceRef = singletonSourceRef('ontology-map', {
-      kind: 'ontology-map',
-      path: 'ontology/index.md',
-      openMode: 'interactive',
-    });
-    const existing = focusOpenSourceCard(sourceRef);
-    if (existing) return existing;
-
-    const id = `egd-ontology-card-${++cardSeq}`;
-    const placement = resolveCanvasCardPlacement('ontology', { avoidHud: false, margin: 12 });
-    const deskWindow = spawnDeskWindowShell({
-      id,
-      kind: 'ontology',
-      className: 'egd-ontology-card',
-      headerClassName: 'egd-ontology-header',
-      bodyClassName: 'egd-ontology-body',
-      inputPolicy: 'adapter-owned',
-      sourceRef,
-      minWidth: 680,
-      minHeight: 440,
-      createDirtyReason: 'create-ontology-card',
-      moveDirtyReason: 'move-ontology-card',
-      resizeDirtyReason: 'resize-ontology-card',
-      style: {
-        top: placement.y + 'px',
-        left: placement.x + 'px',
-        width: placement.width + 'px',
-        height: placement.height + 'px',
-        zIndex: String(++cardZ),
-      },
-    });
-    const card = deskWindow.root;
-    revealPlacedCanvasCard(card, placement);
-    deskWindow.slots.identity.classList.add('egd-ontology-titlebar-identity');
-    deskWindow.slots.identity.append(
-      el('div', { class: 'egd-ontology-title' }, '온톨로지'),
-      el('div', { class: 'egd-ontology-header-lens' }, '과거 · 현재 · 미래  /  가상 · 물리'),
-    );
-
-    const initialSelectedRefId = initialState.selectedRefId || initialState.selectedId || 'present.server';
-    const initialPane = ONTOLOGY_TIME_PANE_ORDER.includes(initialState.activePane) ? initialState.activePane : 'present';
-    const initialLayer = ONTOLOGY_LAYER_ORDER.includes(initialState.activeLayer || initialState.activeStratum)
-      ? (initialState.activeLayer || initialState.activeStratum)
-      : 'virtual';
-    const localState = {
-      mode: 'composite',
-      selectedId: initialSelectedRefId,
-      selectedRefId: initialSelectedRefId,
-      selectedConceptId: initialState.selectedConceptId || 'server',
-      focusTarget: 'object',
-      activePane: initialPane,
-      activeLayer: initialLayer,
-      activeStratum: initialLayer,
-      activeDepth: initialLayer,
-      pan: initialState.pan || { x: 0, y: 0 },
-      zoom: Number.isFinite(initialState.zoom) ? initialState.zoom : 1,
-      cameraByCell: initialState.cameraByCell || {},
-    };
-    card._ontologyState = localState;
-
-    let stage;
-    card._ontologyRender = () => {
-      if (stage && card._ontologyGraph) renderOntologyMap(stage, card._ontologyGraph, localState);
-    };
-    card._ontologyApplyWheelDelta = (deltaX = 0, deltaY = 0, modifiers = {}) => {
-      const camera = getOntologyCamera(localState);
-      if (modifiers.ctrlKey || modifiers.metaKey) {
-        adjustOntologyCameraZoom(camera, deltaY < 0 ? 1 : -1);
-      } else {
-        camera.x -= deltaX;
-        camera.y -= deltaY;
-      }
-      if (stage && card._ontologyGraph) renderOntologyMap(stage, card._ontologyGraph, localState);
-      return {
-        activePane: localState.activePane,
-        activeLayer: localState.activeLayer,
-        activeDepth: localState.activeLayer,
-        activeStratum: localState.activeLayer,
-        pan: { x: camera.x, y: camera.y },
-        zoom: camera.zoom,
-      };
-    };
-    card._ontologyPanBy = (deltaX = 0, deltaY = 0) => {
-      const camera = getOntologyCamera(localState);
-      camera.x += deltaX;
-      camera.y += deltaY;
-      card._ontologyRender();
-      return { x: camera.x, y: camera.y };
-    };
-    stage = el('div', {
-      class: 'egd-ontology-stage',
-      tabindex: '0',
-      'aria-label': 'EG-Desk ontology interaction canvas',
-    },
-      el('div', { class: 'egd-ontology-loading' }, '온톨로지 그래프를 불러오는 중...'),
-    );
-    const body = deskWindow.slots.content;
-    body.appendChild(stage);
-    deskWindow.onResize(() => {
-      if (card._ontologyGraph) renderOntologyMap(stage, card._ontologyGraph, localState);
-    });
-
-    let viewDrag = null;
-    const beginViewPan = (ev) => {
-      if (ev.button !== 0 || ev.target.closest('.egd-ontology-v2-breadcrumb, .egd-ontology-v2-layer-label-control, .egd-ontology-v2-layer-switch-hit, .egd-ontology-minimap, .egd-ontology-stage-mini-tools, .egd-ontology-stage-zoom-label')) return;
-      const conceptBox = ev.target.closest('.egd-ontology-v2-box');
-      if (conceptBox && !conceptBox.classList.contains('egd-ontology-v2-box-root')) return;
-      const paneHit = ev.target.closest('.egd-ontology-v2-pane-hit');
-      if (paneHit && paneHit.dataset.phase !== localState.activePane) return;
-      if (viewDrag) return;
-      focusCanvasCard(card);
-      try { stage.focus({ preventScroll: true }); } catch { stage.focus(); }
-      const camera = getOntologyCamera(localState);
-      viewDrag = { x: ev.clientX, y: ev.clientY, panX: camera.x, panY: camera.y, moved: false, pointerId: ev.pointerId ?? null };
-      if (ev.pointerId != null) {
-        try { stage.setPointerCapture(ev.pointerId); } catch {}
-      }
-      stage.classList.add('egd-ontology-stage-panning');
-      ev.preventDefault();
-    };
-    stage.addEventListener('pointerdown', beginViewPan, { capture: true });
-    stage.addEventListener('mousedown', beginViewPan, { capture: true });
-    stage.addEventListener('wheel', (ev) => {
-      ev.preventDefault();
-      ev.stopPropagation();
-      if (ev.target.closest('.egd-ontology-minimap, .egd-ontology-stage-mini-tools, .egd-ontology-stage-zoom-label')) return;
-      card._ontologyApplyWheelDelta(ev.deltaX, ev.deltaY, { ctrlKey: ev.ctrlKey, metaKey: ev.metaKey });
-    }, { capture: true, passive: false });
-    body.addEventListener('wheel', (ev) => {
-      if (!stage.contains(ev.target)) ev.stopPropagation();
-    }, { capture: true, passive: false });
-    stage.addEventListener('keydown', (ev) => {
-      let handled = true;
-      const camera = getOntologyCamera(localState);
-      if (ev.key === 'ArrowLeft') {
-        camera.x += 36;
-      } else if (ev.key === 'ArrowRight') {
-        camera.x -= 36;
-      } else if (ev.key === 'ArrowUp') {
-        camera.y += 36;
-      } else if (ev.key === 'ArrowDown') {
-        camera.y -= 36;
-      } else if (ev.key === '0') {
-        resetOntologyCamera(camera);
-      } else {
-        handled = false;
-      }
-      if (!handled) return;
-      ev.preventDefault();
-      ev.stopPropagation();
-      if (card._ontologyGraph) renderOntologyMap(stage, card._ontologyGraph, localState);
-    });
-
-    const onMove = (ev) => {
-      if (viewDrag) {
-        const distance = Math.hypot(ev.clientX - viewDrag.x, ev.clientY - viewDrag.y);
-        if (distance > 3) viewDrag.moved = true;
-        const camera = getOntologyCamera(localState);
-        camera.x = viewDrag.panX + (ev.clientX - viewDrag.x);
-        camera.y = viewDrag.panY + (ev.clientY - viewDrag.y);
-        if (card._ontologyGraph) renderOntologyMap(stage, card._ontologyGraph, localState);
-        stage.classList.add('egd-ontology-stage-panning');
-      }
-    };
-    const onUp = () => {
-      if (viewDrag?.moved) {
-        localState.suppressNextSurfaceClick = true;
-        setTimeout(() => { localState.suppressNextSurfaceClick = false; }, 0);
-      }
-      viewDrag = null;
-      stage.classList.remove('egd-ontology-stage-panning');
-    };
-    stage.addEventListener('mousemove', onMove, { capture: true });
-    stage.addEventListener('mouseup', onUp, { capture: true });
-    stage.addEventListener('pointermove', onMove, { capture: true });
-    stage.addEventListener('pointerup', onUp, { capture: true });
-    document.addEventListener('mousemove', onMove);
-    document.addEventListener('mouseup', onUp);
-    document.addEventListener('pointermove', onMove);
-    document.addEventListener('pointerup', onUp);
-    deskWindow.registerCleanup(() => {
-      document.removeEventListener('mousemove', onMove);
-      document.removeEventListener('mouseup', onUp);
-      document.removeEventListener('pointermove', onMove);
-      document.removeEventListener('pointerup', onUp);
-      stage.removeEventListener('pointerdown', beginViewPan, { capture: true });
-      stage.removeEventListener('mousedown', beginViewPan, { capture: true });
-      stage.removeEventListener('mousemove', onMove, { capture: true });
-      stage.removeEventListener('mouseup', onUp, { capture: true });
-      stage.removeEventListener('pointermove', onMove, { capture: true });
-      stage.removeEventListener('pointerup', onUp, { capture: true });
-    });
-
-    loadOntologyGraph()
-      .then((graph) => {
-        card._ontologyGraph = graph;
-        renderOntologyMap(stage, graph, localState);
-      })
-      .catch((error) => {
-        stage.textContent = '';
-        stage.appendChild(el('div', { class: 'egd-ontology-error' }, `온톨로지 그래프 로드 실패: ${error.message || String(error)}`));
-      });
-
-    return card;
-  }
-
-  async function requestLocalFilePacket(path, body, requestOptions = {}) {
-    if (!/^\/v1\/files\//.test(path)) throw new Error('허용되지 않은 파일 서비스 경로입니다.');
-    const headers = { 'Content-Type': 'application/json' };
-    for (const [name, value] of Object.entries(requestOptions.headers || {})) {
-      if (name.toLowerCase() !== 'x-egdesk-picker-channel' || typeof value !== 'string') throw new Error('허용되지 않은 파일 채널 헤더입니다.');
-      headers['X-EGDesk-Picker-Channel'] = value;
-    }
-    const controller = new window.AbortController();
-    const timer = window.setTimeout(() => controller.abort(), 15000);
-    try {
-      const response = await fetch(`http://127.0.0.1:39218${path}`, { method: 'POST', signal: controller.signal,
-        headers, body: JSON.stringify(body) });
-      const packet = await response.json();
-      if (!response.ok || packet?.ok !== true) {
-        // Preserve helper warnings without passing arbitrary response properties
-        // onto the Error object or accepting prototype keys from JSON.
-        const sanitizeDetails = (value, depth = 0) => {
-          if (value === null || typeof value === 'boolean') return value;
-          if (typeof value === 'string') return value.slice(0, 4096);
-          if (typeof value === 'number') return Number.isFinite(value) ? value : undefined;
-          if (depth >= 6 || !value || typeof value !== 'object') return undefined;
-          if (Array.isArray(value)) return value.slice(0, 128).map(item => sanitizeDetails(item, depth + 1));
-          return Object.fromEntries(Object.entries(value).slice(0, 64)
-            .filter(([key]) => !['__proto__', 'constructor', 'prototype'].includes(key))
-            .map(([key, item]) => [key, sanitizeDetails(item, depth + 1)]));
-        };
-        const details = packet?.details && typeof packet.details === 'object' && !Array.isArray(packet.details)
-          ? sanitizeDetails(packet.details) : undefined;
-        throw Object.assign(new Error(packet?.error || '파일 요청을 완료하지 못했습니다.'),
-          { code: packet?.code, status: response.status, ...(details ? { details } : {}) });
-      }
-      return packet;
-    } catch (error) {
-      if (error.name === 'AbortError') throw new Error('파일 요청의 완료를 확인하지 못했습니다. 편집 내용을 유지하고 상태를 다시 확인하세요.');
-      throw error;
-    } finally { window.clearTimeout(timer); }
-  }
-
-  function pickNativeFileDirectory() {
-    return new Promise((resolve, reject) => {
-      try {
-        const picker = Cc['@mozilla.org/filepicker;1'].createInstance(Ci.nsIFilePicker);
-        picker.init(window.browsingContext, 'EG-Desk에 연결할 폴더', Ci.nsIFilePicker.modeGetFolder);
-        picker.open(result => {
-          try { resolve(result === Ci.nsIFilePicker.returnOK ? picker.file.path : null); }
-          catch (error) { reject(error); }
-        });
-      } catch (error) { reject(error); }
-    });
-  }
-
-  function pickNativeFileSaveFile({ defaultName = 'copy.txt' } = {}) {
-    return new Promise((resolve, reject) => {
-      try {
-        const picker = Cc['@mozilla.org/filepicker;1'].createInstance(Ci.nsIFilePicker);
-        picker.init(window.browsingContext, '작업사본을 새 파일로 저장', Ci.nsIFilePicker.modeSave);
-        picker.defaultString = defaultName;
-        picker.appendFilters(Ci.nsIFilePicker.filterAll);
-        picker.open(result => {
-          try {
-            if (result === Ci.nsIFilePicker.returnCancel) { resolve(null); return; }
-            if (result === Ci.nsIFilePicker.returnReplace || picker.file.exists()) throw new Error('기존 파일은 덮어쓰지 않습니다. 다른 이름을 선택해 주세요.');
-            if (result !== Ci.nsIFilePicker.returnOK) throw new Error('저장 위치 선택을 확인하지 못했습니다.');
-            resolve({ parentPath: picker.file.parent.path, fileName: picker.file.leafName });
-          } catch (error) { reject(error); }
-        });
-      } catch (error) { reject(error); }
-    });
-  }
-
-  function spawnFileCard(options = {}) {
-    if (options.openMode !== 'new' && !options.restore) {
-      const existing = document.querySelector('.egd-file-card');
-      if (existing) { focusCanvasCard(existing); return existing; }
-    }
-    const placement = resolveCanvasCardPlacement('file');
-    const shell = spawnDeskWindowShell({ id: `egd-file-card-${++cardSeq}`, kind: 'file', className: 'egd-file-card',
-      activate: !options.restore, sourceRef: { kind: 'file-surface', id: `file-view-${chatBindingNonce()}`, scope: 'local-files' },
-      style: { left: `${placement.x}px`, top: `${placement.y}px`, width: `${placement.width}px`, height: `${placement.height}px` } });
-    const card = shell.root;
-    if (!options.restore) revealPlacedCanvasCard(card, placement);
-    card.dataset.testid = 'file-card';
-    card.setAttribute('aria-label', '파일 작업 창');
-    const title = el('strong', { class: 'egd-file-card-title' }, '파일');
-    const badge = el('span', { class: 'egd-file-card-state', role: 'status', data: { testid: 'file-card-status' } }, '준비 중');
-    shell.slots.identity.append(title, badge);
-    const attachButton = el('button', { type: 'button', class: 'egd-file-chat-attach', disabled: 'true',
-      'aria-label': '현재 작업사본을 Chat에 첨부', data: { testid: 'file-chat-attach' }, onclick: (event) => {
-        event.stopPropagation();
-        const threadId = state.codex.activeThreadId;
-        if (!threadId || !getCodexThreadById(state.codex, threadId)) { boardNotice('채팅방을 먼저 선택해 주세요.'); return; }
-        if (!chatInputSourceForView(card)) { boardNotice('첨부할 작업사본을 먼저 열어 주세요.'); return; }
-        openChatInputPanel(threadId, { viewIds: [card.id] });
-      } }, 'Chat에 첨부');
-    shell.slots.actions.appendChild(attachButton);
-    const notice = el('div', { class: 'egd-file-card-notice', role: 'status', hidden: true, data: { testid: 'file-card-notice' } });
-    const mount = el('div', { class: 'egd-file-card-mount' });
-    shell.slots.content.append(notice, mount);
-    let rootHandle = options.record?.root || null;
-    let view = null;
-    let restoring = !!options.record;
-    let preserveRestoreRecord = false;
-    let rootNeedsReconnect = false;
-    card._fileRecord = cloneJson(options.record || FileCardState.fileCardRecord(null));
-    const publish = snapshot => {
-      if (!card.isConnected || restoring) return;
-      const failedOriginal = preserveRestoreRecord && (!snapshot.fileId || (snapshot.fileId === options.record?.fileId && options.record?.draftId && !snapshot.draftId));
-      if (!failedOriginal) {
-        card._fileRecord = FileCardState.fileCardRecord(rootHandle, snapshot);
-        preserveRestoreRecord = false;
-      }
-      badge.textContent = failedOriginal ? '복구 확인 필요' : rootNeedsReconnect || snapshot.sourceConnection === 'reconnect-required' ? '보관 사본 · 원본 재연결 필요' : snapshot.dirty ? '작업사본 · 미저장' : '파일';
-      title.textContent = rootHandle?.name || '파일';
-      attachButton.disabled = !snapshot.fileId || !snapshot.draftId;
-      markAgendaDirty('file-view-state', card);
-    };
-    const ready = (async () => {
-      try {
-        const fileModule = ChromeUtils.importESModule('chrome://userchrome/content/EGDeskFileView.sys.mjs');
-        const service = fileModule.createEGDeskFileServiceCallbacks({ request: requestLocalFilePacket });
-        const pickers = fileModule.createEGDeskNativeFilePickers({ service, pickDirectory: pickNativeFileDirectory, pickSaveFile: pickNativeFileSaveFile });
-        view = fileModule.createEGDeskFileView({ document, service,
-          chooseRoot: async () => {
-            const selected = await pickers.chooseRoot();
-            if (selected) { rootHandle = selected; rootNeedsReconnect = false; notice.hidden = true; }
-            return selected;
-          },
-          chooseSaveAs: options => pickers.chooseSaveAs(options),
-          onState: publish,
-        });
-        card._fileView = view;
-        view.element.inert = !!options.record;
-        view.element.setAttribute('aria-busy', String(!!options.record));
-        mount.appendChild(view.element);
-        view.element.dataset.testid = 'file-view';
-        for (const [selector, testid] of Object.entries({
-          '.egdesk-file-connect': 'file-connect-root', '.egdesk-file-tree': 'file-tree', '.egdesk-file-search-input': 'file-search',
-          '.egdesk-file-editor': 'file-editor', '.egdesk-file-review-button': 'file-review',
-          '.egdesk-file-save-button': 'file-save-copy', '.egdesk-file-save-as-button': 'file-save-as', '.egdesk-file-reconnect-button': 'file-reconnect-source',
-        })) view.element.querySelector(selector)?.setAttribute('data-testid', testid);
-        if (options.record) {
-          const result = await FileCardState.restoreFileCard(view, options.record);
-          preserveRestoreRecord = !result.draftRestored && !result.fileRestored && !!(options.record.fileId || options.record.draftId);
-          rootNeedsReconnect = result.errors.some(error => error.scope === 'root');
-          if (result.errors.length) {
-            notice.hidden = false;
-            notice.textContent = result.draftRestored
-              ? '보관된 작업사본을 열었습니다. 원본 폴더는 다시 연결해야 합니다. 원본 권한을 자동으로 복원하지 않았습니다.'
-              : `이전 연결을 확인하지 못했습니다. 폴더를 다시 연결해 주세요. ${result.errors.map(error => error.message).join(' ')}`;
-          }
-          const scroller = view.element.querySelector('.egdesk-file-editor-label:not([hidden]) .egdesk-file-editor, .egdesk-file-viewer:not([hidden])');
-          if (scroller) scroller.scrollTop = options.record.scrollTop || 0;
-          card.dataset.restored = 'true';
-        }
-        restoring = false;
-        publish(view.snapshot());
-      } catch (error) {
-        restoring = false;
-        notice.hidden = false;
-        notice.textContent = `파일 화면을 준비하지 못했습니다: ${error.message}`;
-        badge.textContent = '연결 확인 필요';
-      } finally { if (view) { view.element.inert = false; view.element.setAttribute('aria-busy', 'false'); } }
-    })();
-    const closeGate = FileCardState.createFileCloseGate({
-      dispose: async () => { await ready; return view ? view.close() : true; },
-      onState: status => {
-        card.dataset.closeState = status.status;
-        if (status.status !== 'closed') { notice.hidden = false; notice.textContent = status.message; }
-      },
-    });
-    card._beforeClose = () => closeGate.requestClose();
-    card._fileReady = ready;
-    return card;
-  }
+  const spawnFileCard = surfaceForward('fileCard', 'spawnFileCard');
 
   // ============ Settings Canvas Card ============
   // 계정: the real ChatGPT sign-in, plan and usage from the bridge.
@@ -16249,230 +14482,7 @@
     deskWindow.registerCleanup(cleanupCard);
     return card;
   }
-  // ============ Terminal Canvas Card ============
-  const EGDESK_HELPER_PORT = 39218;
-  const TERMINAL_HTML_URL = 'chrome://userchrome/content/terminal.html';
-
-  function spawnTerminalCard(options = {}) {
-    const requestedShellId = typeof options?.shellId === 'string'
-      && /^[a-z][a-z0-9-]{0,31}$/.test(options.shellId) ? options.shellId : null;
-    const id = `egd-terminal-card-${++cardSeq}`;
-    const sourceRef = makeSourceRef('terminal-session', {
-      id,
-      scope: 'local-pty',
-    });
-    const placement = resolveCanvasCardPlacement('terminal');
-    const card = el('div', {
-      id,
-      class: 'egd-canvas-card egd-terminal-card',
-      style: {
-        top: placement.y + 'px',
-        left: placement.x + 'px',
-        width: placement.width + 'px',
-        height: placement.height + 'px',
-        zIndex: String(++cardZ),
-      },
-    });
-
-    // ---- Header ----
-    const header = el('div', { class: 'egd-card-header egd-terminal-header' },
-      el('div', { class: 'egd-card-topbar' },
-        el('div', { class: 'egd-card-dots-shell' },
-          el('div', { class: 'egd-card-dots' },
-            el('span', { class: 'egd-card-dot egd-card-dot-close', onclick: (ev) => { ev.stopPropagation(); closeCanvasCard(card, cleanupCard); } }),
-            el('span', { class: 'egd-card-dot egd-card-dot-min' }),
-            el('span', { class: 'egd-card-dot egd-card-dot-max' }),
-          ),
-        ),
-        el('div', { class: 'egd-terminal-title' }, '>_ Terminal'),
-      ),
-    );
-
-    // ---- Body with XUL browser ----
-    const body = el('div', { class: 'egd-card-body egd-terminal-body' });
-
-    // ---- Resize hit zones ----
-    const resizeHits = [
-      { cls: 'egd-card-resize-hit-n',  edges: { top: true } },
-      { cls: 'egd-card-resize-hit-e',  edges: { right: true } },
-      { cls: 'egd-card-resize-hit-s',  edges: { bottom: true } },
-      { cls: 'egd-card-resize-hit-w',  edges: { left: true } },
-      { cls: 'egd-card-resize-hit-nw', edges: { top: true, left: true } },
-      { cls: 'egd-card-resize-hit-ne', edges: { top: true, right: true } },
-      { cls: 'egd-card-resize-hit-se', edges: { bottom: true, right: true } },
-      { cls: 'egd-card-resize-hit-sw', edges: { bottom: true, left: true } },
-    ].map(({ cls, edges }) => el('div', {
-      class: `egd-card-resize-hit ${cls}`,
-      data: { edges: JSON.stringify(edges) },
-    }));
-
-    card.appendChild(header);
-    card.appendChild(body);
-    for (const hit of resizeHits) card.appendChild(hit);
-
-    const host = document.getElementById('egd-canvas-layer') || document.documentElement;
-    host.appendChild(card);
-    bindCardSourceRef(card, sourceRef);
-    markAgendaDirty('create-terminal-card', card);
-    setActiveEntity(card);
-    revealPlacedCanvasCard(card, placement);
-
-    // ---- Use iframe for terminal.html to isolate keyboard events ----
-    const termBrowser = el('iframe', {
-      src: requestedShellId ? TERMINAL_HTML_URL + '?shellId=' + encodeURIComponent(requestedShellId) : TERMINAL_HTML_URL,
-      style: { width: '100%', height: '100%', border: '0', background: '#1a1a2e', display: 'block' },
-    });
-    body.appendChild(termBrowser);
-    // ---- Card interactions ----
-    const activateCard = () => {
-      if (state.panModifier) return;
-      setActiveEntity(card);
-    };
-    const focusCard = () => {
-      focusCanvasCard(card);
-    };
-    const startPanIfNeeded = (ev) => {
-      if (!state.panModifier || ev.button !== 0) return false;
-      if (typeof state.startCanvasPanDrag !== 'function') return false;
-      state.startCanvasPanDrag(ev);
-      return true;
-    };
-    for (const target of [card, header]) {
-      target.addEventListener('mousedown', () => activateCard(), true);
-    }
-    // ---- Keyboard focus handoff ----
-    // chrome 문서에서는 iframe 요소 자체가 chrome activeElement가 되어야
-    // 키 이벤트가 서브문서(xterm)로 라우팅된다. xterm의 in-frame focus만으로는
-    // 프레임 경계를 못 넘으므로 부모 쪽에서 명시적으로 핸드오프한다.
-    const focusTerminal = () => {
-      if (card.hidden || card.style.display === 'none'
-        || (card.dataset.egdSemanticLevel && card.dataset.egdSemanticLevel !== 'detail')) return;
-      try {
-        termBrowser.focus();
-        termBrowser.contentWindow?.terminalAPI?.focus?.();
-      } catch {}
-    };
-    card.addEventListener('mousedown', () => {
-      if (state.panModifier) return;
-      // xterm의 mousedown preventDefault 이후에 포커스가 잡히도록 defer
-      setTimeout(focusTerminal, 0);
-    }, true);
-    // 최초 연결 완료 시 자동 포커스 (terminal.html이 terminal-ready postMessage 발송)
-    const onTerminalReady = (ev) => {
-      if (ev.source !== termBrowser.contentWindow) return;
-      if (ev.data?.type === 'terminal-new-session') {
-        const shellId = ev.data.shellId;
-        if (typeof shellId === 'string' && /^[a-z][a-z0-9-]{0,31}$/.test(shellId)) spawnTerminalCard({ shellId });
-        return;
-      }
-      if (ev.data?.type === 'terminal-ready') {
-        const label = ev.data.shellLabel;
-        if (typeof label === 'string' && label.length <= 80) header.querySelector('.egd-terminal-title').textContent = '>_ ' + label;
-        focusTerminal();
-      }
-      if (['terminal-ready', 'terminal-exit-confirmed', 'terminal-no-session'].includes(ev.data?.type)
-          && boardCloseRequests.has(card.dataset.projectionId)) {
-        void completeAgendaClose({ projectionId: card.dataset.projectionId });
-      }
-    };
-    window.addEventListener('message', onTerminalReady);
-
-    // ---- Header drag (move) ----
-    let drag = null;
-    header.addEventListener('mousedown', (ev) => {
-      if (startPanIfNeeded(ev)) return;
-      if (isCardFullscreen(card)) return;
-      if (ev.target.closest('.egd-card-dot')) return;
-      focusCard();
-      drag = { x: ev.clientX, y: ev.clientY, left: card.offsetLeft, top: card.offsetTop };
-      ev.preventDefault();
-    });
-    installCardHeaderFullscreenToggle(card, header);
-
-    // ---- Resize ----
-    let resize = null;
-    const MIN_W = 400;
-    const MIN_H = 300;
-    for (const hit of resizeHits) {
-      hit.addEventListener('mousedown', (ev) => {
-        if (startPanIfNeeded(ev)) return;
-        if (isCardFullscreen(card)) return;
-        focusCard();
-        const edges = JSON.parse(hit.dataset.edges);
-        resize = {
-          x: ev.clientX, y: ev.clientY,
-          left: card.offsetLeft, top: card.offsetTop,
-          width: card.offsetWidth, height: card.offsetHeight,
-          edges,
-        };
-        ev.preventDefault();
-        ev.stopPropagation();
-      });
-    }
-
-    const onMouseMove = (ev) => {
-      if (drag) {
-        const dx = ev.clientX - drag.x;
-        const dy = ev.clientY - drag.y;
-        const s = canvasZoom();
-        card.style.left = (drag.left + dx / s) + 'px';
-        card.style.top = (drag.top + dy / s) + 'px';
-      }
-      if (resize) {
-        const s = canvasZoom();
-        const dx = (ev.clientX - resize.x) / s;
-        const dy = (ev.clientY - resize.y) / s;
-        const e = resize.edges;
-        let newW = resize.width;
-        let newH = resize.height;
-        let newL = resize.left;
-        let newT = resize.top;
-        if (e.right)  newW = Math.max(MIN_W, resize.width + dx);
-        if (e.left)   { newW = Math.max(MIN_W, resize.width - dx); newL = resize.left + (resize.width - newW); }
-        if (e.bottom) newH = Math.max(MIN_H, resize.height + dy);
-        if (e.top)    { newH = Math.max(MIN_H, resize.height - dy); newT = resize.top + (resize.height - newH); }
-        card.style.width = newW + 'px';
-        card.style.height = newH + 'px';
-        card.style.left = newL + 'px';
-        card.style.top = newT + 'px';
-      }
-    };
-    const onMouseUp = () => {
-      if (drag) markAgendaDirty('move-terminal-card', card);
-      if (resize) markAgendaDirty('resize-terminal-card', card);
-      drag = null;
-      resize = null;
-    };
-    document.addEventListener('mousemove', onMouseMove);
-    document.addEventListener('mouseup', onMouseUp);
-
-    // ---- Cleanup ----
-    const cleanupCard = () => {
-      document.removeEventListener('mousemove', onMouseMove);
-      document.removeEventListener('mouseup', onMouseUp);
-      window.removeEventListener('message', onTerminalReady);
-      // Kill PTY session via the browser's terminalAPI
-      try {
-        const contentWin = termBrowser.contentWindow || termBrowser.contentDocument?.defaultView;
-        if (contentWin && contentWin.terminalAPI) {
-          void contentWin.terminalAPI.kill().catch(error => {
-            console.warn(TAG, 'terminal cleanup was not confirmed:', error);
-          });
-        }
-      } catch (e) {
-        console.warn(TAG, 'terminal cleanup error:', e);
-      }
-    };
-
-    console.warn(TAG, 'terminal card spawned (chrome:// + node bridge :39218)', id);
-    card._cleanup = cleanupCard;
-    card._termBrowser = termBrowser;
-    card._closeOwnedRuntime = async () => {
-      const api = termBrowser.contentWindow?.terminalAPI;
-      return api?.closeForBoard ? api.closeForBoard() : false;
-    };
-    return card;
-  }
+  const spawnTerminalCard = surfaceForward('terminal', 'spawnTerminalCard');
 
 
   // ============ Popup capture (window.open / target=_blank → card) ============
@@ -18646,6 +16656,51 @@
       console.error(TAG, 'boot failed:', err, err.stack);
     }
   }
+
+  // ============ Surface zone modules (overlay/resources/surface) ============
+  const SURFACE_MODULE_BASE = 'chrome://userchrome/content/surface/';
+  const surfaceZones = Object.create(null);
+  function surfaceForward(zone, name) { return (...args) => surfaceZones[zone][name](...args); }
+  function installSurfaceZones() {
+    const deps = Object.freeze({
+      FileCardState,
+      ONTOLOGY_GRAPH_URL,
+      TAG,
+      allocCardSeq,
+      bindCardSourceRef,
+      boardCloseRequests,
+      boardNotice,
+      canvasZoom,
+      chatBindingNonce,
+      chatInputSourceForView,
+      cloneJson,
+      closeCanvasCard,
+      completeAgendaClose,
+      el,
+      focusCanvasCard,
+      focusOpenSourceCard,
+      getCodexThreadById,
+      installCardHeaderFullscreenToggle,
+      isCardFullscreen,
+      makeSourceRef,
+      markAgendaDirty,
+      openChatInputPanel,
+      raiseCardZ,
+      resolveCanvasCardPlacement,
+      revealPlacedCanvasCard,
+      setActiveEntity,
+      singletonSourceRef,
+      spawnDeskWindowShell,
+      state,
+      svgEl,
+      syncOntologyPresentationState,
+    });
+    const load = (file) => ChromeUtils.importESModule(SURFACE_MODULE_BASE + file, { global: 'current' });
+    surfaceZones.ontology = load('EGDeskSurfaceOntology.mjs').createOntologyZone(deps);
+    surfaceZones.fileCard = load('EGDeskSurfaceFileCard.mjs').createFileCardZone(deps);
+    surfaceZones.terminal = load('EGDeskSurfaceTerminal.mjs').createTerminalZone(deps);
+  }
+  try { installSurfaceZones(); } catch (err) { console.error(TAG, 'surface zone install failed', err); }
 
   if (document.readyState === 'complete') boot();
   else window.addEventListener('load', boot, { once: true });

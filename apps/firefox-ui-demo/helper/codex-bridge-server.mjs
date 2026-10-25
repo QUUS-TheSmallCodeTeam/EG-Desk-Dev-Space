@@ -4,6 +4,7 @@ import { AppServerRpc } from './codex-app-server-rpc.mjs'
 import { normalizeNativeAuth, publicAuthIdentityKey, publicPlanType } from './codex-auth-state.mjs'
 import { usageDisplay } from './codex-account-usage.mjs'
 import { CodexChatRuntime } from './codex-chat-runtime.mjs'
+import { createChatEngineAuth } from './codex-bridge-engine-auth.mjs'
 import { codexDeviceLoginPatch, codexLoginInProgressResponse, codexLoginMode, codexLoginStartParams, createCodexEngineAdapter, describeCodexEngine, isStaleLoginFailure } from './codex-engine-adapter.mjs'
 import { EngineRegistry, createEngineStatusEmitter } from './engine-registry.mjs'
 import { claudeLoginTerminalCommand, createClaudeEngineStatus } from './claude-engine-auth.mjs'
@@ -190,12 +191,10 @@ const modelCatalog = createModelCatalogSync({
   identity: () => modelAccountKey(authState),
   onChange: () => engineStatus.check(),
 })
-// Codex and Claude both run turns. The runtime answers every engine request
-// (approval, question, EG-Desk tool) through the Codex responder, so Claude's
-// own ids are handed to the Claude adapter first.
+// Each adapter owns its responses; the chat runtime routes engine RPC IDs.
 const codexEngine = createCodexEngineAdapter({
   request: (method, params) => appServerRequest(method, params),
-  respond: (...args) => claudeEngine.owns(args[0]) ? claudeEngine.respond(...args) : nativeRespond(...args),
+  respond: nativeRespond,
   getOwnerKey: () => publicAuthIdentityKey(authState),
   isReady: () => appServerReady,
   getModels: () => modelCatalog.snapshot(),
@@ -281,17 +280,7 @@ const inheritedMcp = createInheritedMcpSync({
   ignoreThread: threadId => Boolean(threadId && chat.threads.get(threadId)?.executionPolicy),
   onChange: servers => broadcast({ type: 'mcp.inherited', v: BRIDGE_PROTOCOL_VERSION, provider: PROVIDER_ID, inheritedMcp: servers, ts: Date.now() }),
 })
-// Authentication of the engine a request names (Codex when it names none).
-const ensureChatAuth = async (body = {}) => {
-  const engine = engineRegistry.require(body?.engineId ?? engineRegistry.defaultEngineId)
-  if (engine.id !== PROVIDER_ID) {
-    engineRegistry.assertReady(engine.id)
-    return
-  }
-  chat.assertReady()
-  await refreshAccountState()
-  if (!authState.isLoggedIn) throw chatError('LOGIN_REQUIRED', 'Codex ChatGPT login is required', 401)
-}
+const ensureChatAuth = createChatEngineAuth({ chat, refreshCodexAccount: refreshAccountState, getCodexAuth: () => authState })
 const handleChatHttp = createChatHttpHandler(chat, ensureChatAuth)
 const handleComputerControlHttp = createComputerControlHttpHandler(chat, { port: BRIDGE_PORT })
 const handleContextHttp = createContextHttpHandler(contexts, ensureChatAuth, { port: BRIDGE_PORT })

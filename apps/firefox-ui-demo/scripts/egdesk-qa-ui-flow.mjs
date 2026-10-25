@@ -3,6 +3,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { FirefoxMcpChatHarness, waitUntil } from './firefox-mcp-chat-harness.mjs';
 import { qaProfileSourceFingerprints } from './egdesk-chat-qa-profile.mjs';
+import { qaBridgeUrl, assertQaProfileBridge } from './egdesk-qa-fixture-isolation.mjs';
 
 export function option(name, fallback = null) {
   const index = process.argv.indexOf(name);
@@ -16,9 +17,9 @@ export const attributeSelector = (name, value) => `[${name}=${JSON.stringify(val
 export const chrome = (harness, fn, arg = null) =>
   harness.evaluateChrome(`async () => await (${fn.toString()})(${JSON.stringify(arg)})`);
 
-export async function loopbackJson(route, { method = 'GET', body, token, includeHttpStatus = false } = {}) {
+export async function loopbackJson(route, { method = 'GET', body, token, includeHttpStatus = false, env = process.env } = {}) {
   if (typeof route !== 'string' || !route.startsWith('/') || route.startsWith('//')) throw new Error('Expected local bridge route');
-  const response = await fetch(`http://127.0.0.1:39218${route}`, {
+  const response = await fetch(qaBridgeUrl(route, env), {
     method, redirect: 'error', signal: AbortSignal.timeout(10000),
     headers: { ...(body ? { 'Content-Type': 'application/json' } : {}), ...(token ? { 'X-EGDESK-QA-Token': token } : {}) },
     ...(body ? { body: JSON.stringify(body) } : {}),
@@ -45,6 +46,8 @@ export async function runUiFlow(kind, callback) {
   const result = { kind, automatedAssertionsPassed: false, visualReview: 'pending',
     checks: [], screenshots: [], providerTurn: 'not-run' };
   try {
+    const isolation = assertQaProfileBridge(profile);
+    if (isolation) result.fixtureIsolation = isolation;
     harness = new FirefoxMcpChatHarness({ profile });
     result.profileSources = qaProfileSourceFingerprints(profile);
     await harness.connect();
@@ -97,9 +100,9 @@ export async function chatIdentity(harness) {
   });
 }
 
-export async function observeChatEvents(clientThreadId) {
+export async function observeChatEvents(clientThreadId, { env = process.env } = {}) {
   const controller = new AbortController();
-  const response = await fetch('http://127.0.0.1:39218/events?chatProtocol=2', { signal: controller.signal, redirect: 'error' });
+  const response = await fetch(qaBridgeUrl('/events?chatProtocol=2', env), { signal: controller.signal, redirect: 'error' });
   if (!response.ok || !response.body) throw new Error(`Chat event observation failed (${response.status})`);
   const events = [];
   let failure = null;

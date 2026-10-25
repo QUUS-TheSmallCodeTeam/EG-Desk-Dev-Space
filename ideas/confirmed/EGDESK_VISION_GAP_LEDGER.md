@@ -1,6 +1,7 @@
 # EG-Desk 비전 Gap 원장
 
-**기준일**: 2026-10-24 (최초 조사 코드 기준 `bebe45c`, 진행 기록은 `5760981`까지, 작업 브랜치 `claude/vision-gap-20261024`)  
+**기준일**: 2026-10-25 (최초 조사 코드 기준 `bebe45c`, 상태 표 집계는 `5760981`까지. 그 이후 연결·검증은 아래 2026-10-25 체크포인트에 기록. 작업 브랜치 `claude/vision-gap-20261024`)
+
 **정본 백로그**: [EGDESK_PRODUCT_VISION_AND_DEV_TODO.md](./EGDESK_PRODUCT_VISION_AND_DEV_TODO.md)  
 **범위**: 비전 문서의 미체크 항목 + 2026-10-24 대표님 추가 목표(기능·UI/UX·디자인 전부, Codex+Claude 구독 지원, 브라우저 제어, 컴퓨터 사용, Agent 캐릭터 설정)
 
@@ -83,7 +84,35 @@
 | 2026-10-24 | CTX-04 보낸 뒤 바뀐 자료, CTX-03 추천 모드·제외 목록·관련 Board 후보 (2-CTX) | 일부 유지(helper) / 일부 유지(helper) | `5a650c7`. 맥락 런타임이 대화별 Browser·파일 자료를 기억하고, 버스의 file.changed·browser.navigated를 따라 '바뀜'으로 표시함. 다음 메시지(일반 후속 질문 포함)에 내용 없는 한 줄(id·종류·이유 코드)과 context.sources.changed 이벤트가 붙음. `GET /context/sources`, packet의 staleSources. 메모리 안·상한 있음·계정이 바뀌면 지움. D-R2는 미결정이라 기본값은 그대로 두고 설정만 둠: contextSuggest {mode: always·firstMessage·off, neverSuggest: 사이트·폴더}, `GET/POST /context/suggest-settings`(목록의 사이트·폴더는 후보에서 빠지고, 직접 고른 것은 유지). 입력한 말이 들어 있는 저장 Board가 'board' 후보가 됨(가중치 15, 그 말은 Board 검색에만 쓰고 기록에 남기지 않음). QA 브리핑 계약이 targets[]를 받음. 브리지 한 줄(`contexts.attachServices`)과 화면 칩·설정(S10)은 연결 전. 패턴만: VS Code chat implicit context(MIT), cline FileContextTracker(Apache-2.0) |
 | 2026-10-24 | BRW-08 닫힌 shadow·내부 스크롤, BRW-12 시간 초과 뒤 동작 확인(reconcile), BRW-06 글자 기다리기·조용해질 때까지 대기 (1-A) | 일부 유지 / 일부 유지 / 완료 유지 | `5760981`(REA 묶음 가 계약 위). Agent가 보는 페이지 목록에 cursor:pointer·onclick 요소(clickable), 숨은 라디오·체크박스를 감싼 label, 내부 스크롤 상자(scrollable), 닫힌 shadow root(openOrClosedShadowRoot, 기본 위젯 제외)가 들어감. ref는 WeakRef(최신 관찰의 ref만 강하게 붙듦). 거절된 클릭은 무엇이 가렸는지 구조로만 알려 주고(obscuredBy), 뷰포트 안 중심을 누름. 조작 뒤 100ms마다 살펴 500ms 조용하면 끝냄(최대 1.5초, 입력권·예산 - 500ms를 넘지 않음). 새 읽기 전용 도구 `egdesk_browser_wait_text`(보이는 글자만, 찾는 글을 되읽어 주지 않음). 기존 도구 스키마는 그대로(해시 고정 시험). UI 시간 초과 뒤 helper가 한 번 물어 '확실히 안 들어감'일 때만 카드를 풀고, 동작은 다시 보내지 않음(REA EG-01). 시험: 소유 150/150, helper 전체 1104 통과·9 skip·실패 0, surface-state 354/354. chat 런타임의 도구 목록 import·wait_text 읽기 전용 표시와 화면 쪽 callId·budgetMs·reconcile 처리(S1)는 연결 전. Firefox 미실행이고, 이 커밋 뒤 headless browser-negative·대화 흐름은 다시 돌리지 않음 |
 
-## 다음 세션 시작점 (2026-10-24 마감)
+## 후속 연결 체크포인트 (2026-10-25)
+
+2026-10-24 인계를 받아 같은 브랜치에서 개발했다. 상태 표의 95개 항목은 이번 부분 연결만으로 완료로 올리지 않는다. Main은 통합·중앙 검증을, Astra/max 작업자는 구현·테스트·독립 검토를 나누어 맡았다.
+
+| 작업 | 이번 변경 | 검증 경계 |
+|---|---|---|
+| 화면 분리 1단계 | Ontology·File·Terminal 구역을 window 범위의 세 모듈로 이동하고 기존 진입점은 얇게 유지했다. | 실제 임시 Firefox 프로필에서 모듈 로딩과 카드 연결 확인. 전체 분리 계획의 2단계 이후는 아직 적용하지 않았다. Terminal 카드 로딩은 PTY 실행 확인이 아니다. |
+| Claude 런타임·HTTP 연결 | 저장된 엔진·계정에 따른 전송·재개·승인·질문, 원래 cwd·도구 목록 검증, 확정 거절 구분, 한도 이벤트를 연결했다. | 가짜 전송을 쓰는 실제 런타임·저장소·HTTP 테스트. 실제 Claude 구독 호출은 하지 않았다. 상세: [엔진 설계 §14.7](../../docs/references/engine-adapter-design.md#147-후속-연결-체크포인트-2026-10-25). |
+| 승인 경계·오래된 응답 | Agent 상한을 세션 허용으로 우회하지 못하게 하고, 응답 전달 실패를 성공으로 남기지 않는다. 프로세스 재시작 후에도 permission/MCP 요청 번호를 재사용하지 않는다. | 독립 검토 후 helper 전체 1,138 pass / 0 fail / 9 skip. 별도 검토자의 관련 109개·RPC 8개도 통과. |
+| 대비·포커스 | 남아 있던 4개 TODO를 실제 CSS 아바타·포커스·대비 증가 토큰으로 해결했다. 일반 모드의 옅은 테두리·목재 Canvas·화면 구조는 유지했다. | CSS 대비 기준을 낮추지 않았다. headless 밝은/어두운 화면을 확인했다. OS 대비 증가 모드는 실제로 활성화하지 못했으므로 해당 부분은 CSS 시험 근거만 있다. |
+| 테스트 격리·브라우저 회귀 | 별도 임시 프로필과 별도 브리지 포트에서만 fixture를 사용하고 복사본의 소스 해시를 남긴다. wait_text 읽기 전용 카탈로그도 런타임에 연결했다. | headless browser-negative의 12개 거절에서 실행 횟수 증가 0·자료 변경 없음, 카드·카메라 경계 확인. 모델 호출 0회이며 브라우저 시나리오 스크린샷 검증은 지원되지 않아 DOM·actor 증거와 구별한다. |
+
+**중앙 검증 결과**: helper 1,138 pass / 0 fail / 9 skip, scripts 930 pass / 0 fail / 1 skip / 0 todo. 일반 대화 fixture 72/72, Claude 화면 fixture 12/12, 4개 창 크기의 headless UI 회귀 274/274(직접 UI 조작 26개, 생략 0) 통과. 실제 Claude·Codex 모델 호출은 0회다. fixture는 UI와 응답 계약을 검증하며 실제 provider 실행이나 권한의 지속을 입증하지 않는다.
+
+독립 검토에서 찾은 계정 전환 경합은 수정했다. Claude 방이 있어도 이전 Codex 계정의 Browser·파일 캡처를 취소하며, 지연 완료 뒤 새 계정에 캡처 POST가 생기지 않는다. Claude 요청은 유지된다. 수정 후 독립 재검토 2/2도 통과했다. 엔진 메뉴가 Canvas 변환을 이중 적용받아 카드 밖에 뜨던 문제와 한도 안내의 여백 누락은 실제 스크린샷 확인 후 수정했다. 밝은/어두운 화면, 메뉴·승인·질문·한도·선택 자료 차단 화면을 확인했지만 모든 제품 사용성을 검증했다는 뜻은 아니다.
+
+**남겨 둔 범위**:
+
+- Claude 선택 자료·Codex 의존 EG-Desk provider(B2)는 아직 미지원이다. 선택 자료가 있으면 보내지 않고 요청문과 선택을 보존한다. Codex 권한으로 우회하거나 자료를 빼고 자동 전송하지 않는다.
+- 화면 분리 2단계 이후, S1의 callId·budgetMs·reconcile·대화상자·obscuredBy 연결과 2-BH 후속은 남았다. 이번 browser-negative 통과를 이 전체 연결의 완료로 해석하지 않는다.
+- 높이 600px의 작은 창에서는 긴 작성문이 입력칸 내부 스크롤로 일부만 보인다. 버튼 접근성 회귀는 통과했지만, 보내기 전 요청 전체를 다시 읽기 쉬운지는 별도 편집 UX 후속으로 남긴다. 이번 연결에서 작성기 구조를 새로 설계하지 않았다.
+- 실제 Claude 로그인·구독 모델 왕복, 운영 프로필 적용, Windows, OS 전면 포커스·키 입력은 이번 확인에 포함하지 않았다. 과거 인계 문서의 실계정 시험 절차만으로 자동 실행하지 않는다.
+- Rust는 관찰 전용 범위를 유지한다. REA 10 자동 중단, Jev 도입, 미결정 제품 정책은 이번 연결로 바꾸지 않았다. main 통합·push도 하지 않았다.
+
+**다음 재개 순서**: S1의 아직 연결되지 않은 브라우저 계약부터 작업 파일 소유권을 다시 나눈다. Claude B2는 엔진별 Context 권한·소유권 계약과 실제 CLI 확인을 분리해서 진행한다. 실제 계정 시험은 계정과 짧은 시험 범위를 먼저 확인하며, OS 전면 입력은 계속 별도 승인 대상으로 둔다.
+
+## 이전 세션 인계 원본 (2026-10-24 마감)
+
+아래는 당시 상태와 계획이다. 완료 여부가 달라진 항목은 위 2026-10-25 체크포인트를 우선한다.
 
 **지금 상태**: 브랜치 `claude/vision-gap-20261024`, 마지막 기능 커밋 `5760981`(1-A 브라우저 정확도, 이 원장 갱신 커밋은 그 위에 얹힘). 진행 중인 변경은 없다. 합친 상태에서 helper 시험 1104/1113 통과·실패 0(skip 9), 화면 쪽 시험 764/768 통과·실패 0·todo 4(todo는 S1·S5 몫). 마지막 headless 대화 흐름 72/72·UI 회귀 274/274는 `9dbfa51`·`b3ae83e` 시점 값이다. 그 뒤 1-A(`5760981`)가 Browser actor를 바꿨으므로 headless browser-negative와 대화 흐름을 다시 돌려 확인해야 한다.
 

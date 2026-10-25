@@ -253,8 +253,8 @@ Claude 출력 → `kind` 대응:
 | `item/tool/call`(EG-Desk 도구) → `{success, contentItems}` | dynamicTools | **'sdk' MCP**: `--mcp-config '{"mcpServers":{"egdesk":{"type":"sdk","name":"egdesk"}}}'`(SDK `subprocess_cli.py`와 같은 모양). CLI가 `control_request {subtype:'mcp_message', server_name:'egdesk', message: JSON-RPC}`로 보낸다. tools/list는 그 스레드의 도구 카탈로그(=Codex에 주는 dynamicTools specs, inputSchema 그대로), tools/call은 `item/tool/call`로 바꿔 `runtime.handleServerRequest`에 넣는다 → 기존 검사(run 바인딩, 실행 정책, Browser 카드 권한, Agent 한도) 뒤 provider.dispatch → 결과를 MCP CallToolResult로. 런타임이 거절하면 `isError` 결과로 Claude에게 알린다 |
 | `serverRequest/resolved` | Codex 알림 | CLI가 `control_cancel_request {request_id}`를 보내면 합성한다. 프로세스가 끝나면 남은 보류 전부 합성한다 |
 
-- **런타임이 아직 받지 않는 것**: `acceptForSession`(런타임 `handleServerRequest`가 선택지를 accept·decline·cancel로 거른다), `multiSelect` 질문 UI, 일반 도구 승인 카드. 변환 부품은 셋 다 준비돼 있다(`offerSessionGrant` 옵션, 질문에 `multiSelect:true` 표시). 런타임 선택지 필터와 화면 버튼은 런타임·화면 담당이 연다. [제안]
-- **런타임 응답 경로**: 런타임의 `respond`는 지금 Codex 어댑터로만 간다(`codex-chat-runtime.mjs` 생성자의 `this.nativeRespond = codex.respond`). 두 부품은 rpcId를 `claude:<threadId>:perm:<n>`·`claude:<threadId>:mcp:<n>`로 만들므로, Claude 연결(2-E)에서 이 접두어로 Claude 어댑터에 돌려보내면 된다. [제안]
+- **2026-10-25 구현 상태**: 런타임은 `acceptForSession`과 `multiSelect`를 전달한다. 세션 허용은 정규화된 같은 도구의 `addRules/allow` 규칙이 있을 때만 제공하며, `terminal: ask` 등 Agent 상한을 넘지 않는다. 규칙이 없는 세션 허용 요청을 1회 허용으로 조용히 바꾸지 않는다. 위 표의 2026-10-24 fallback 제안보다 이 제한이 우선한다. 일반 도구 승인 카드는 여전히 미구현이며, 화면 연결·실계정 검증 범위는 §14.7에서 구분한다.
+- **런타임 응답 경로(2026-10-25)**: 실제 요청을 소유한 엔진 어댑터로 보낸다. `claude:<threadId>:perm:<n>`·`claude:<threadId>:mcp:<n>`의 번호는 어댑터 수명 동안 재사용하지 않는다. 프로세스 재시작·모델 변경·세션 퇴출 후 도착한 이전 응답이 새 요청을 소비하지 않으며, Claude의 늦은 응답을 Codex로 우회하지 않는다. 전송 결과가 `false`이면 `replySent`나 성공으로 기록하지 않는다. [가짜 전송 기반 실제 어댑터·런타임 시험]
 - **승인 대기 시간**: stdio 통로의 승인·질문은 MCP 호출이 아니므로 이전에 걱정한 'MCP 호출 시간 제한에 걸린 승인'은 해당하지 않는다(SDK `canUseTool`은 무기한 대기 가능 [공식]). EG-Desk 도구 호출(tools/call)은 MCP 요청이므로 CLI의 MCP 시간 제한 영향은 받을 수 있다 [추정, §12].
 - **시작·중지 순서**: SDK는 스트리밍 입력 모드에서 먼저 `control_request {subtype:'initialize', hooks:null, …}`를 보낸다(query.py `initialize`). 이 요청에 `systemPromptSnapshot` 필드가 있으므로 §5.1의 `--system-prompt-snapshot` 충돌을 이 값으로 끌 수 있는지 확인한다 [추정]. 중지는 SIGINT 대신 `control_request {subtype:'interrupt'}`(query.py `interrupt`)를 기본으로 한다. 두 요청 모두 `buildControlRequest()`로 만든다. [제안]
 - **hooks·그 밖의 제어 요청**: EG-Desk는 hook 콜백을 등록하지 않는다. `hook_callback`이나 모르는 제어 요청이 오면 SDK처럼 `control_response {subtype:'error'}`로 그 요청만 실패시킨다.
@@ -519,7 +519,7 @@ Main 개발자 선에서 정할 것(대표님 결정 불필요): 일반 도구 �
 - 로그인이 안 돼 있으면 Terminal 카드에서 공식 로그인을 띄운다. EG-Desk는 명령 한 줄만 주고 자격증명은 보지 않는다(§14.4). [런타임: 단위 시험]
 - EG-Desk 환경에 Anthropic API 키가 있으면 Claude 줄에 `statusReason: 'CLAUDE_API_KEY_DETECTED'`가 붙고, 확인 전에는 Claude 대화를 시작하지 않는다. 확인하면 이번 helper 실행 동안 키를 빼고 구독으로 돈다. [런타임: 단위 시험]
 - 한도 도달은 초기화 시각만 보여 주고 저절로 다시 보내지 않는다(`usage.autoResume: false`). [런타임: 단위 시험]
-- **아직 Chat에서 Claude로 보낼 수는 없다.** 런타임이 저장소가 있을 때 Codex 외 엔진을 막는다(`codex-chat-runtime.mjs` `send()`의 'Local chat history can bind only Codex conversations so far'). 이 줄을 푸는 일은 런타임 담당(2-R)이다(§14.6).
+- **2026-10-24 시점에는 저장소가 있는 Chat에서 Claude 전송이 차단돼 있었다.** 이 공통 차단은 2026-10-25 제거하고 저장된 엔진·계정 바인딩 검증으로 대체했다. 이것만으로 Chat 사용 완료나 실계정 동작을 뜻하지 않으며, 현재 화면·자료 연결 제한은 §14.7에 기록한다.
 
 ### 14.2 구성 [런타임: 단위 시험, 실제 `claude` 미실행]
 
@@ -586,3 +586,22 @@ Main 개발자 선에서 정할 것(대표님 결정 불필요): 일반 도구 �
 8. 재개(`resumeThread`)에 그 대화의 `dynamicTools`와 기록된 `cwd`를 넘긴다(Claude는 도구 목록을 세션에 저장하지 않고, 세션 파일은 폴더별이다).
 
 출처(2-E에서 읽음): claude-agent-sdk-python `_internal/client.py:177-189`(initialize 뒤 prompt 줄), `types.py:1509-1512`(init.capabilities, 2.1.205부터); claude-agent-acp `src/acp-agent.ts:8620-8913`(cancelTurns·backstop), `:2903-2941`(터미널 로그인 방법 `auth login --claudeai|--console`), `src/session-mode.ts:358-362`('Manual' = default 모드); `claude 2.1.300 --help`(`--tools ""`, `--system-prompt-snapshot`, `--permission-mode` 선택지), `claude auth login --help`(`--claudeai`, `--console`).
+
+### 14.7 후속 연결 체크포인트 (2026-10-25)
+
+§14.6은 최초 인수인계 계약이다. 다음은 그 이후 구현·검증 상태이며, 실제 Claude 로그인이나 구독 모델 응답을 확인했다는 뜻은 아니다.
+
+| 경계 | 구현과 검증 범위 |
+|---|---|
+| 저장·인증·응답 | 대화에 저장된 엔진과 계정을 검증한 뒤 전송·재개·승인·질문 응답을 처리한다. 요청의 엔진 지정이 바인딩과 다르면 거부한다. Codex가 끊겼다는 이유만으로 준비된 Claude의 HTTP 요청을 막지 않는다. 실제 HTTP handler·저장소·어댑터와 가짜 전송으로 시험했다. |
+| 재개·불확실성 | 기록된 cwd와 검증된 원래 도구 subset만 복원한다. 원래 manifest를 확인할 수 없으면 축소하거나 새 대화로 몰래 대체하지 않는다. 시작 전 확정 거절과 이미 전달됐는지 알 수 없는 실패를 구별한다. |
+| 승인·질문·한도 | 일회성/세션 권한을 구별하고 Agent 상한을 재검사한다. 복수 선택은 고른 라벨 배열을 보낸다. 해당 Run의 한도·초기화 시각을 전달하지만 자동 재전송하지 않는다. 실제 응답 전달 실패를 성공으로 표시하지 않는다. |
+| 프로세스 재시작 | permission/MCP 요청 번호를 어댑터 단위로 증가시킨다. crash·release/resume·모델 변경·퇴출 뒤 동일한 CLI request_id가 다시 와도 이전 응답은 새 요청에 적용되지 않는다. 숫자 한계에 도달하면 재사용하지 않고 거부한다. |
+| 선택 자료·EG-Desk provider | **Claude 연결에서는 아직 미지원.** 선택 자료가 있으면 전송 전에 명시적으로 거부하며 Codex 계정·권한으로 우회하지 않는다. Codex 의존 provider는 Claude의 새 도구 목록에서 제외한다. 해당 provider를 포함한 과거 manifest는 검증을 완화해 복원하지 않는다. 최종 제품 능력을 폐기한 결정이 아니라 B2 엔진별 Context 연결 전의 구현 제한이다. |
+| 중앙 백엔드 회귀 | `node --test helper/*.test.mjs`: 1,138 pass / 0 fail / 9 skip. 별도 검토자가 관련 109개와 재시작 RPC 관련 8개를 실행해 확인했다. skip은 성공으로 세지 않았다. |
+| 계정 전환 중 캡처 | Codex 계정이 바뀌면 이전 Codex 요청·자료 캡처 토큰만 무효화하고 Claude 요청은 유지한다. 실제 지연 Browser·파일 캡처 함수를 시험해 이전 계정의 후속 캡처 POST 0건을 확인했고 독립 검토를 다시 받았다. |
+| 화면 연결 | 준비된 Claude와 로그아웃된 Codex를 제공하는 격리 fixture에서 실제 UI 전송·같은 방 재개·세션 승인 유무·복수 선택·한도·선택 자료 차단을 12/12 확인했다. 엔진 메뉴의 Canvas 좌표 보정과 한도 문구 여백은 스크린샷으로도 확인했다. 선택 자료 차단은 요청문·첨부를 보존하며 capture/send HTTP를 보내지 않는다. |
+| 중앙 화면 코드 회귀 | `node --test scripts/*.test.mjs`: 930 pass / 0 fail / 1 skip / 0 todo. 기존 대화 fixture 72/72도 재실행했다. fixture는 임시 프로필·전용 포트·검증된 복사본만 사용하며 실제 모델 호출은 없다. |
+| 실계정 범위 | 실제 CLI 로그인·모델 왕복, 운영 프로필 적용, OS 포커스·입력 검증은 이번 체크포인트에 포함하지 않는다. 화면 fixture는 어댑터의 실계정 실행·권한의 실제 지속·CLI 프로세스 전체 재시작을 입증하지 않는다. |
+
+실계정 시험은 §14.5의 과거 절차가 있다는 이유만으로 실행하지 않는다. 계정과 시험 범위를 확인한 별도 실행으로 남긴다.

@@ -9,6 +9,7 @@ import { createHash, randomBytes } from 'node:crypto';
 import { createServer } from 'node:http';
 import { fileURLToPath } from 'node:url';
 import { assertQaFixtureManifest } from './egdesk-chat-qa-profile.mjs';
+import { qaBridgeConfig, qaBridgeUrl } from './egdesk-qa-fixture-isolation.mjs';
 import { chatIdentity, chrome, loopbackJson, newQaThread, observeChatEvents, option, runUiFlow, selectorForId,
   sendFromComposer, waitUntil } from './egdesk-qa-ui-flow.mjs';
 
@@ -85,19 +86,29 @@ export function assertQaExecutionMode(cases, env = process.env) {
     assert.equal(env.EGDESK_QA_REAL_TURN, '1', 'explicit real-turn gate is required');
     assert.notEqual(env.EGDESK_QA_FIXTURE_TRANSPORT, '1', 'fixture transport is forbidden for provider cases');
   }
+  qaBridgeConfig(env);
 }
 
-export function assertNegativeFixtureBackend(profile, health, state) {
+export function assertNegativeFixtureBackend(profile, health, state, env = process.env) {
+  const config = qaBridgeConfig(env);
+  assert.equal(config.fixture, true, 'model-free probes require fixture mode');
   assert.equal(health?.ok, true, 'Browser probe fixture backend is unavailable');
   assert.equal(health?.fixture, true, 'model-free probes refuse a production backend');
   assert.equal(state?.fixture, true, 'Browser probes lack authenticated fixture control evidence');
   assert.equal(state?.profile, profile, 'fixture backend belongs to another Firefox profile');
+  for (const evidence of [health, state]) {
+    assert.equal(evidence.profile, profile, 'fixture backend belongs to another Firefox profile');
+    assert.equal(evidence.host, config.host, 'fixture backend host mismatch');
+    assert.equal(evidence.port, config.port, 'fixture backend port mismatch');
+    assert.equal(evidence.origin, config.origin, 'fixture backend origin mismatch');
+  }
   for (const key of ['sends', 'authWrites']) {
     assert.ok(Array.isArray(state.observed?.[key]) && state.observed[key].length === 0,
       `model-free Browser probes require zero fixture ${key}`);
   }
   assert.ok(Array.isArray(state.runs) && state.runs.length === 0, 'model-free Browser probes created a Chat run');
-  return { fixture: true, profile, sends: 0, authWrites: 0, runs: 0, providerTurns: 0 };
+  return { fixture: true, profile, host: config.host, port: config.port,
+    sends: 0, authWrites: 0, runs: 0, providerTurns: 0 };
 }
 
 export function assertQaAttachMode(cases, env = process.env) {
@@ -929,7 +940,7 @@ function makeFixtures(root) {
 async function assertBridgePreflight() {
   const health = await loopbackJson('/health');
   const auth = (await loopbackJson('/v1/state')).auth;
-  const endpoint = await fetch('http://127.0.0.1:39218/__qa/state', {
+  const endpoint = await fetch(qaBridgeUrl('/__qa/state'), {
     redirect: 'error', signal: AbortSignal.timeout(5000) });
   assertRealTransport({ realTurn: process.env.EGDESK_QA_REAL_TURN,
     fixtureTransport: process.env.EGDESK_QA_FIXTURE_TRANSPORT,
@@ -958,11 +969,11 @@ export function assertOrdinaryUiBaseline(reflection, cwd) {
 }
 
 export function assertUiQaRequest(emitted, { cwd, clientThreadId, conversationId = null,
-  sourceIds = [], qaOutputMarkers = [] } = {}) {
+  sourceIds = [], qaOutputMarkers = [] } = {}, env = process.env) {
   assert.equal(emitted?.forwardedToOriginalFetch, true,
     'QA request was not forwarded through the original Chat fetch');
-  assert.equal(emitted?.route, 'http://127.0.0.1:39218/chat/send',
-    'QA request did not use the production Chat route');
+  assert.equal(emitted?.route, qaBridgeUrl('/chat/send', env),
+    'QA request did not use the selected Chat route');
   assert.ok(typeof emitted?.requestId === 'string' && emitted.requestId,
     'QA request lacks a live request ID');
   assert.equal(emitted?.clientThreadId, clientThreadId, 'QA request belongs to another Chat thread');
@@ -988,12 +999,12 @@ export function assertUiQaRequest(emitted, { cwd, clientThreadId, conversationId
 // This is request reflection, not a permission grant. A/B's final UI routing
 // must put these exact bounded fields on the ordinary rendered Chat send.
 export function assertBrowserUiRequest(reflection, { cwd, clientThreadId, conversationId = null, selection,
-  expectedPolicyMode = 'fixtureBrowserQa' }) {
+  expectedPolicyMode = 'fixtureBrowserQa' }, env = process.env) {
   assert.ok(['fixtureBrowserQa', 'browserBounded'].includes(expectedPolicyMode), 'unsupported Browser proof policy');
   assert.equal(reflection?.forwardedToOriginalFetch, true,
     'Browser request was not forwarded through the original Chat fetch');
-  assert.equal(reflection?.route, 'http://127.0.0.1:39218/chat/send',
-    'Browser request did not use the production Chat route');
+  assert.equal(reflection?.route, qaBridgeUrl('/chat/send', env),
+    'Browser request did not use the selected Chat route');
   assert.ok(typeof reflection?.requestId === 'string' && reflection.requestId,
     'Browser request lacks a live request ID');
   assert.equal(reflection?.clientThreadId, clientThreadId,
@@ -1413,13 +1424,23 @@ async function reflectedOrdinaryRequest(harness, thread, cwd, sourceIds = [], { 
 // original fetch argument identity. This exports QA code, not a product API.
 export function installQaSendWitness(expected) {
     if (window.__egdeskQaSendInterceptor) throw new Error('QA Chat fetch interceptor is already installed');
-    const route = 'http://127.0.0.1:39218/chat/send';
+    const bridge = expected.bridge;
+    if (!bridge || typeof bridge.fixture !== 'boolean' || bridge.host !== '127.0.0.1'
+        || !Number.isSafeInteger(bridge.port) || bridge.port < 1 || bridge.port > 65535
+        || (bridge.fixture ? bridge.port === 39218 : bridge.port !== 39218)
+        || bridge.origin !== `http://127.0.0.1:${bridge.port}`) throw new Error('Invalid QA witness bridge endpoint');
+    const route = `${bridge.origin}/chat/send`;
     const original = window.fetch;
     if (typeof original !== 'function') throw new Error('Original Chat fetch is unavailable');
     const state = { original, wrapper: null, used: false, snapshot: null };
     const wrapper = function(input, init) {
       const url = typeof input === 'string' ? input : input?.url;
-      if (url !== route) return original.call(window, input, init);
+      if (url !== route) {
+        if (typeof url === 'string' && /\/chat\/send(?:[?#]|$)/.test(url)) {
+          throw new Error('QA Chat send endpoint mismatch');
+        }
+        return original.call(window, input, init);
+      }
       if (state.used) throw new Error('QA interceptor refuses a second Chat send');
       if (expected.qaOutputMarkers.length && (expected.qaOutputMarkers.length !== 2
           || new Set(expected.qaOutputMarkers).size !== 2
@@ -1572,7 +1593,7 @@ export function installQaSendWitness(expected) {
 }
 
 async function installQaSendInterceptor(harness, expected) {
-  return chrome(harness, installQaSendWitness, expected);
+  return chrome(harness, installQaSendWitness, { ...expected, bridge: qaBridgeConfig() });
 }
 
 const observedQaSend = harness => chrome(harness, () => window.__egdeskQaSendInterceptor?.snapshot || null);
@@ -3347,6 +3368,13 @@ export async function runBrowserDocumentReplacement(harness, fixture, deadlineMs
   return proof;
 }
 
+export function expectedBrowserCatalog(permission) {
+  assert.ok(['observe', 'interact'].includes(permission), 'unknown Browser permission');
+  return permission === 'observe' ? [BROWSER_TOOL_NAMES.observe, 'egdesk_browser_wait_text']
+    : [BROWSER_TOOL_NAMES.observe, 'egdesk_browser_navigate', BROWSER_TOOL_NAMES.click, BROWSER_TOOL_NAMES.fill,
+      'egdesk_browser_scroll', 'egdesk_browser_press', 'egdesk_browser_wait', 'egdesk_browser_wait_text'];
+}
+
 async function runBrowserNegativeProbes(harness, fixture, deadlineMs, result) {
   assertTurnTimeBudget(deadlineMs);
   result.browserNegativeStage = 'fixture-preflight';
@@ -3395,10 +3423,7 @@ async function runBrowserNegativeProbes(harness, fixture, deadlineMs, result) {
       permission, fixture);
     const unit = await newNegativeService(harness, thread, cardId, source, deadlineMs);
     assert.deepEqual(unit.service.specs(unit.prepared).map(item => item.name),
-      permission === 'observe' ? [BROWSER_TOOL_NAMES.observe]
-        : [BROWSER_TOOL_NAMES.observe, 'egdesk_browser_navigate',
-          BROWSER_TOOL_NAMES.click, BROWSER_TOOL_NAMES.fill,
-          'egdesk_browser_scroll', 'egdesk_browser_press', 'egdesk_browser_wait'],
+      expectedBrowserCatalog(permission),
     'test-only B service exposed the wrong permission-bound catalog');
     const receipt = await unit.service.bind(unit.run, unit.prepared);
     assert.equal(receipt.cards?.length, 1, 'test-only B service did not bind one Card');

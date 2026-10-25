@@ -29,8 +29,8 @@ export const SYSTEM_COLOR_KEYWORDS = Object.freeze([
 
 const SURFACES = ['--egd-surface', '--egd-surface-elevated', '--egd-window-alt', '--egd-topbar'];
 
-// Pairs every scheme must meet. A row with `todo` is a known shortfall that the
-// named step will fix; tests report it without failing.
+// Pairs every scheme must meet. These requirements are mandatory; CSS remains
+// the source of truth, with no generated palette or test-only value overrides.
 export const CONTRAST_REQUIREMENTS = Object.freeze([
   // Body and muted text on the main surfaces.
   ...SURFACES.map(bg => ['text', '--egd-on-surface', bg]),
@@ -55,38 +55,34 @@ export const CONTRAST_REQUIREMENTS = Object.freeze([
   // Agent avatar initials (.egd-profile-avatar-tone-N rules).
   ['text', 'avatar.tone-0.color', 'avatar.tone-0.background'],
   ['text', 'avatar.tone-1.color', 'avatar.tone-1.background'],
-  ['text', 'avatar.tone-2.color', 'avatar.tone-2.background', { todo: 'S1 아바타 대비 교정(D-G2)' }],
-  ['text', 'avatar.tone-3.color', 'avatar.tone-3.background', { todo: 'S1 아바타 대비 교정(D-G2)' }],
+  ['text', 'avatar.tone-2.color', 'avatar.tone-2.background'],
+  ['text', 'avatar.tone-3.color', 'avatar.tone-3.background'],
   ['text', 'avatar.tone-4.color', 'avatar.tone-4.background'],
   ['text', 'avatar.tone-5.color', 'avatar.tone-5.background'],
-  // Keyboard focus: 32 :focus-visible rules draw 2px var(--egd-primary).
+  // Existing accent-based edges and the shared keyboard focus outline.
   ['border', '--egd-primary', '--egd-surface'],
   ['border', '--egd-primary', '--egd-surface-elevated'],
   ['border', '--egd-primary', '--egd-window-alt'],
+  ...SURFACES.map(bg => ['border', '--egd-focus-outline-color', bg]),
   // Search fields and selected rows draw --egd-focus-border instead.
-  ['border', '--egd-focus-border', '--egd-surface-elevated', { todo: 'S5 포커스 토큰 통일' }],
-  ['border', '--egd-focus-border', '--egd-window-alt', { todo: 'S5 포커스 토큰 통일' }],
+  ...SURFACES.map(bg => ['border', '--egd-focus-border', bg]),
 ]);
 
-// prefers-contrast: more (macOS 대비 증가, Windows 고대비). Checked only when the
-// CSS declares such a :root block; `optional` rows are skipped if the token is
-// not declared yet.
+// prefers-contrast: more (macOS 대비 증가, Windows 고대비). The actual CSS block
+// must resolve every text and control-edge pair; missing tokens fail the check.
 export const MORE_CONTRAST_REQUIREMENTS = Object.freeze([
   ...SURFACES.map(bg => ['text', '--egd-on-surface', bg]),
   ...SURFACES.map(bg => ['text', '--egd-on-surface-variant', bg]),
   ['text', '--egd-secondary', '--egd-surface-elevated'],
-  ['border', '--egd-outline', '--egd-surface'],
-  ['border', '--egd-outline', '--egd-surface-elevated'],
-  ['border', '--egd-line-strong', '--egd-surface-elevated'],
-  ['border', '--egd-focus-outline-color', '--egd-surface', { optional: true }],
-  ['border', '--egd-focus-outline-color', '--egd-surface-elevated', { optional: true }],
-  ['border', '--egd-focus-border', '--egd-surface-elevated'],
+  ...Array.from({ length: 6 }, (_, tone) => ['text', `avatar.tone-${tone}.color`, `avatar.tone-${tone}.background`]),
+  ...['--egd-outline', '--egd-outline-variant', '--egd-line-strong', '--egd-focus-outline-color', '--egd-focus-border']
+    .flatMap(fg => SURFACES.map(bg => ['border', fg, bg])),
 ]);
 
-// [제안] Token table for S5. Names are EG-Desk's own; the grouping follows the
+// Regression token table for S5. Names are EG-Desk's own; the grouping follows the
 // Firefox tokens-shared.css focus-outline / opacity / prefers-contrast /
-// forced-colors layout. S5 copies these into the CSS; tests then hold the CSS
-// to MORE_CONTRAST_REQUIREMENTS.
+// forced-colors layout. The CSS is authored directly; tests compare its actual
+// declarations with this table and check MORE_CONTRAST_REQUIREMENTS.
 export const STATE_TOKEN_TABLE = Object.freeze({
   base: Object.freeze({
     '--egd-focus-outline-width': '2px',

@@ -78,6 +78,7 @@ export const CLAUDE_HELP_CHECKED_VERSION = CLAUDE_TRANSPORT_CHECKED_VERSION
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
 const RPC_ID = /^claude:([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}):(perm|mcp):\d{1,12}$/i
+const MAX_RPC_COUNTER = 999_999_999_999 // Keep every allocated id within RPC_ID's 12-digit suffix.
 const DATA_IMAGE = /^data:(image\/(?:png|jpeg|gif|webp));base64,([A-Za-z0-9+/]+={0,2})$/
 const plainObject = value => value && typeof value === 'object' && !Array.isArray(value) ? value : null
 const coreVersion = value => typeof value === 'string' && /^\d+\.\d+\.\d+/.test(value) ? value.split(/[-+]/)[0] : null
@@ -177,6 +178,9 @@ export function createClaudeEngineAdapter(options = {}) {
 
   const sinks = new Set()
   const sessions = new Map() // threadId → session record
+  // Adapter lifetime, not process/session lifetime: release, restart and record
+  // eviction must never let a delayed answer consume a new request's id.
+  let rpcCounter = 0
   let disposed = false
   let apiKeyConfirmed = false
   let gateFailure = null // { code, version } from a refused system/init; cleared when the version changes
@@ -189,6 +193,13 @@ export function createClaudeEngineAdapter(options = {}) {
   const statusChanged = () => { try { onStatusChange() } catch {} }
   const status = () => { try { return snapshot() || {} } catch { return {} } }
   const liveCount = () => [...sessions.values()].filter(session => session.proc || session.starting).length
+
+  function nextRpcId(threadId, kind) {
+    // The transport turns this into a control error; never wrap or emit an
+    // unparseable id, even after all earlier requests have been settled.
+    if (rpcCounter >= MAX_RPC_COUNTER) throw new RangeError('Claude RPC id space exhausted')
+    return `claude:${threadId}:${kind}:${++rpcCounter}`
+  }
 
   function usageRow() {
     if (!rate && !billing) return null
@@ -381,8 +392,10 @@ export function createClaudeEngineAdapter(options = {}) {
       const proc = {
         transport: null, exited: false, gateCode: null, mcpPending: new Map(), // rpc id → control request id
         flags: { cwd: spec.cwd, model: spec.model, effort: spec.effort, appendPrompt: spec.appendPrompt, tools: spec.tools },
-        broker: createClaudePermissionBroker({ threadId, egdeskServer: EGDESK_MCP_SERVER_NAME, offerSessionGrant: true }),
-        mcp: createEgdeskClaudeMcp({ threadId, tools: spec.tools, serverName: EGDESK_MCP_SERVER_NAME }),
+        broker: createClaudePermissionBroker({ threadId, egdeskServer: EGDESK_MCP_SERVER_NAME, offerSessionGrant: true,
+          nextRpcId: () => nextRpcId(threadId, 'perm') }),
+        mcp: createEgdeskClaudeMcp({ threadId, tools: spec.tools, serverName: EGDESK_MCP_SERVER_NAME,
+          nextRpcId: () => nextRpcId(threadId, 'mcp') }),
       }
       const hasTools = proc.mcp.listTools().length > 0
       const turnOf = () => session.activeTurn?.turnId ?? null

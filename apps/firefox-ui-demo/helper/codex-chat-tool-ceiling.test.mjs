@@ -164,6 +164,9 @@ test('runtime: terminal allow runs as ask (no automatic approval); approval matr
   assert.throws(() => effectiveToolCeiling({ terminal: 'sudo' }), error => error.code === 'INVALID_PROFILE' && error.httpStatus === 500)
   const refuse = (ceiling, request) => ceilingApprovalRefusal({ ...OPEN, ...ceiling }, request)?.axis ?? null
   assert.equal(refuse({}, { kind: 'commandExecution' }), null)
+  assert.equal(refuse({}, { kind: 'commandExecution', session: true }), 'terminal')
+  assert.equal(refuse({ terminal: 'allow' }, { kind: 'commandExecution', session: true }), 'terminal')
+  assert.equal(ceilingApprovalRefusal(null, { kind: 'commandExecution', session: true }), null)
   assert.equal(refuse({ terminal: 'none' }, { kind: 'commandExecution' }), 'terminal')
   assert.equal(refuse({ files: 'read' }, { kind: 'commandExecution' }), 'files')
   assert.equal(refuse({ network: 'off' }, { kind: 'commandExecution' }), 'network')
@@ -441,7 +444,7 @@ function browserProvider(log) {
       const permission = input.selectedSources.some(source => source.browserToolPermission === 'interact') ? 'interact' : 'observe'
       return { permission, interactionRequested: input.effectiveExecutionPolicy === 'browserBounded' && permission === 'interact' }
     },
-    specs: () => ['egdesk_browser_observe', 'egdesk_browser_click', 'egdesk_browser_fill'].map(spec),
+    specs: () => ['egdesk_browser_observe', 'egdesk_browser_click', 'egdesk_browser_fill', 'egdesk_browser_wait_text'].map(spec),
     requireThread() {}, registerThread(threadId) { log.push(['register', threadId]) },
     async bindRun(run, prepared) { if (prepared) run.browserBinding = { cards: [{ cardId: 'card-1', permission: prepared.permission }] } },
     async dispatch(run, event) { log.push(['dispatch', event.tool]); return { success: true, contentItems: [{ type: 'inputText', text: 'ok' }] } },
@@ -457,7 +460,7 @@ test('browser observe wins over a Card interaction grant: observe-only grant, ca
   const h = harness({ profiles: p.profiles, toolProviders: [browserProvider(log)] })
   const run = await h.chat.send({ message: 'Look at this page', clientThreadId: 'ui-browser', profileId: id, executionPolicy: { mode: 'browserBounded' }, selectedSources: selection('interact') })
   assert.deepEqual(log[0], ['prepare', ['observe']])
-  assert.deepEqual(h.started()[0].dynamicTools.map(spec => spec.name), ['egdesk_browser_observe'])
+  assert.deepEqual(h.started()[0].dynamicTools.map(spec => spec.name), ['egdesk_browser_observe', 'egdesk_browser_wait_text'])
   // QA isolation stays; the ceiling only adds native browser and desktop switches.
   assert.equal(h.started()[0].sandbox, 'read-only')
   assert.equal(h.started()[0].config.features.plugins, false)
@@ -469,6 +472,24 @@ test('browser observe wins over a Card interaction grant: observe-only grant, ca
   assert.equal(h.replies.at(-1)[0], 'click-1')
   assert.equal(h.replies.at(-1)[2].code, -32601)
   assert.equal(log.some(entry => entry[0] === 'dispatch'), false)
+  await h.toolCall(run, 'wait-text', 'egdesk_browser_wait_text')
+  assert.deepEqual(log.at(-1), ['dispatch', 'egdesk_browser_wait_text'])
+  assert.equal(h.replies.at(-1)[1].success, true)
+})
+
+test('read-only QA offers and dispatches wait_text under an observe ceiling without granting interaction', async t => {
+  const p = profileStore(t)
+  const id = p.add({ toolCeiling: { browser: 'observe' } })
+  const log = []
+  const h = harness({ profiles: p.profiles, toolProviders: [browserProvider(log)] })
+  const run = await h.chat.send({ message: 'Wait for visible text only', clientThreadId: 'ui-browser', profileId: id,
+    executionPolicy: { mode: 'readOnlyQa' }, selectedSources: selection('observe') })
+  assert.deepEqual(h.started()[0].dynamicTools.map(spec => spec.name), ['egdesk_browser_observe', 'egdesk_browser_wait_text'])
+  await h.toolCall(run, 'wait-text', 'egdesk_browser_wait_text')
+  assert.deepEqual(log.at(-1), ['dispatch', 'egdesk_browser_wait_text'])
+  assert.equal(h.replies.at(-1)[1].success, true)
+  await h.toolCall(run, 'click', 'egdesk_browser_click')
+  assert.equal(h.replies.at(-1)[2].code, -32601)
 })
 
 test('browser none drops the Browser grant, offers no Browser tools and refuses a Browser call the mode would allow', async t => {

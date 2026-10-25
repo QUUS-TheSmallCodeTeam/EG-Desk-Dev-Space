@@ -2,10 +2,11 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import test from 'node:test';
 import { compileFunction } from 'node:vm';
+import { readSurfaceSource } from './egdesk-surface-source.mjs';
 import * as SurfaceState from '../overlay/resources/EGDeskSurfaceState.sys.mjs';
 import { OBSERVE } from './verify-semantic-zoom.mjs';
 
-const overlay = readFileSync(new URL('../overlay/JS/eg-desk-surface.uc.js', import.meta.url), 'utf8');
+const overlay = readSurfaceSource();
 const functionSource = name => overlay.match(new RegExp(`  function ${name}\\([^]*?\\n  }`))?.[0];
 const production = (name, dependencies = {}) => {
   const source = functionSource(name);

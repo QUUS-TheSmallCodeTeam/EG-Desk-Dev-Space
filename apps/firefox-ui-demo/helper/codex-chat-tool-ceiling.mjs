@@ -5,13 +5,14 @@ import {
 import { nativeMcpServerKind } from './codex-inherited-mcp.mjs'
 import { classifyHostTool } from './egdesk-host-lease.mjs'
 import { normalizeToolCeiling } from './egdesk-profile-store.mjs'
+import { BROWSER_READ_TOOL_NAMES } from './egdesk-browser-tool-runtime.mjs'
 
 // AGENT-04: a saved Agent profile's tool ceiling, enforced on the Codex
 // thread it runs on. A ceiling only narrows what the user's own Codex setup
 // and this run's grants allow; it never widens them. null means no ceiling.
 
 // Browser tools a ceiling of 'observe' still allows.
-const BROWSER_OBSERVE_TOOLS = new Set(['egdesk_browser_observe'])
+const BROWSER_OBSERVE_TOOLS = new Set(BROWSER_READ_TOOL_NAMES)
 // MCP server kinds (codex-inherited-mcp rules) that drive a browser or the desktop.
 const COMPUTER_CONTROL_KINDS = new Set(['browser', 'desktop'])
 const controlsComputer = server => COMPUTER_CONTROL_KINDS.has(nativeMcpServerKind(server))
@@ -24,6 +25,7 @@ export const CEILING_MESSAGES = Object.freeze({
   browserDowngraded: '이 Agent는 브라우저를 보기만 할 수 있어 조작 허용은 적용하지 않았습니다',
   files: '이 Agent는 파일 쓰기가 허용되지 않습니다',
   terminal: '이 Agent는 터미널 명령이 허용되지 않습니다',
+  terminalSession: '이 Agent는 터미널 명령마다 승인이 필요합니다',
   network: '이 Agent는 인터넷 연결이 허용되지 않습니다',
   browserExternalInherited: '직접 연결한 외부 브라우저·컴퓨터 조작 도구(MCP)는 이 Agent에서도 쓸 수 있습니다. 막으려면 외부 도구(MCP)도 끄세요',
   nativeCheckUnavailable: '이 Codex 버전은 기능 상태를 알려 주지 않아, 브라우저·터미널 기능이 꺼졌는지는 확인하지 못했습니다',
@@ -85,10 +87,11 @@ export function computerRefusal(ceiling) {
  * command leaves the sandbox, so it may also write files or reach the
  * network: a read-only or offline ceiling refuses it as well.
  */
-export function ceilingApprovalRefusal(ceiling, { kind, network = false }) {
+export function ceilingApprovalRefusal(ceiling, { kind, network = false, session = false }) {
   if (!ceiling) return null
   if (kind === 'fileChange') return ceiling.files === 'read' ? { axis: 'files', title: CEILING_MESSAGES.files } : null
   if (kind !== 'commandExecution') return null
+  if (session && ['ask', 'allow'].includes(ceiling.terminal)) return { axis: 'terminal', title: CEILING_MESSAGES.terminalSession }
   if (network) return ceiling.network === 'off' ? { axis: 'network', title: CEILING_MESSAGES.network } : null
   if (ceiling.terminal === 'none') return { axis: 'terminal', title: CEILING_MESSAGES.terminal }
   if (ceiling.files === 'read') return { axis: 'files', title: CEILING_MESSAGES.files }

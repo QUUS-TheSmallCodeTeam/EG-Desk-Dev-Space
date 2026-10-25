@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import { existsSync, readFileSync, rmSync } from 'node:fs';
 import { Readable } from 'node:stream';
 import { compileFunction } from 'node:vm';
+import { readSurfaceSource } from './egdesk-surface-source.mjs';
 import { initialSurfaceMode, shouldFocusInitialBrowser, planBoardProjection, snapshotBoardProjection, remapMemberReferences, recoverDeskSnapshot, canPersistDeskSession, ownedProjectionMembers, missingProjectionMembers, fitSurfaceCamera, surfaceSemanticLevel, surfaceProximityClusters } from '../overlay/resources/EGDeskSurfaceState.sys.mjs';
 import * as Surface from '../overlay/resources/EGDeskSurfaceState.sys.mjs';
 import * as Chat from '../overlay/resources/EGDeskChatState.sys.mjs';
@@ -23,11 +24,65 @@ import { publicModelRows } from '../helper/codex-model-catalog.mjs';
 import { gateMatchesEvent } from '../helper/egdesk-await-router.mjs';
 import { publicBrowserLocation } from '../helper/egdesk-event-bus.mjs';
 import { composeAwaitResume } from '../helper/egdesk-await-resume.mjs';
+import { contrastRatio, mediaApplies, readAvatarTones, readCssRules, readRootProperties, resolveColor } from '../overlay/resources/EGDeskDesignTokens.sys.mjs';
+
+// Resolve only the non-colour state tokens used by the CSS assertions below;
+// colour parsing, mixing and contrast remain owned by the design-token helpers.
+function resolveCssStateValue(value, properties, seen = new Set()) {
+  assert.equal(typeof value, 'string', 'the CSS state declaration exists');
+  const resolved = value.replace(/var\(\s*(--[\w-]+)\s*\)/g, (_, name) => {
+    assert.ok(!seen.has(name), `cyclic CSS state token ${name}`);
+    assert.ok(Object.hasOwn(properties, name), `missing CSS state token ${name}`);
+    return resolveCssStateValue(properties[name], properties, new Set([...seen, name]));
+  });
+  assert.doesNotMatch(resolved, /var\(/, `unresolved CSS state value: ${resolved}`);
+  return resolved.replace(/^calc\(\s*(-?[\d.]+)\s*\*\s*(-?[\d.]+)px\s*\)$/, (_, factor, px) => `${Number(factor) * Number(px)}px`);
+}
+
+function cssDeclarationsFor(css, selector, env = {}) {
+  const rules = readCssRules(css).filter(rule => rule.selectors.includes(selector) && mediaApplies(rule.media, env));
+  assert.ok(rules.length, `${selector} has an applicable CSS rule`);
+  return Object.fromEntries(rules.flatMap(rule => rule.declarations));
+}
+
+function assertFocusTokens(css, selectors, { inset = false } = {}) {
+  for (const scheme of ['light', 'dark']) {
+    for (const mode of [{}, { contrast: 'more' }, { forcedColors: true }, { contrast: 'more', forcedColors: true }]) {
+      const env = { scheme, ...mode };
+      for (const selector of selectors) {
+        const declarations = cssDeclarationsFor(css, selector, env);
+        const properties = { ...readRootProperties(css, env),
+          ...Object.fromEntries(Object.entries(declarations).filter(([name]) => name.startsWith('--'))) };
+        const label = `${selector} ${JSON.stringify(env)}`;
+        assert.equal(declarations.outline, 'var(--egd-focus-outline)', `${label} shares the outline`);
+        assert.equal(declarations['outline-offset'], 'var(--egd-focus-outline-offset)', `${label} shares the offset`);
+        if (inset) assert.equal(declarations['--egd-focus-outline-offset'], 'var(--egd-focus-outline-inset)', `${label} keeps its local inset`);
+        const outline = resolveCssStateValue(declarations.outline, properties).match(/^(\S+) solid (.+)$/);
+        assert.ok(outline, `${label} resolves to a solid outline`);
+        assert.equal(outline[1], '2px', `${label} has a 2px outline`);
+        assert.equal(resolveCssStateValue(declarations['outline-offset'], properties), inset ? '-2px' : '2px', `${label} resolved offset`);
+        if (env.forcedColors) {
+          assert.equal(outline[2], 'CanvasText', `${label} uses system focus ink`);
+          continue;
+        }
+        const ink = resolveColor(outline[2], properties);
+        assert.ok(ink, `${label} resolves its focus colour`);
+        for (const background of ['var(--egd-surface)', 'var(--egd-surface-elevated)', 'var(--egd-window-alt)', 'var(--egd-topbar)',
+          ...(declarations.background ? [declarations.background] : [])]) {
+          const paint = resolveColor(background, properties);
+          assert.ok(paint, `${label} resolves ${background}`);
+          const minimum = env.contrast === 'more' ? 4.5 : 3;
+          assert.ok(contrastRatio(ink, paint) >= minimum, `${label} focus contrast on ${background} is at least ${minimum}:1`);
+        }
+      }
+    }
+  }
+}
 
 // Exercise the actual production runtime-config body, without executing the
 // Firefox overlay bootstrap, DOM handlers, bridge requests, or runtime code.
 // Source-body boundaries are identical for LF and Windows CRLF checkouts.
-const surfaceSource = readFileSync(new URL('../overlay/JS/eg-desk-surface.uc.js', import.meta.url), 'utf8').replace(/\r\n/g, '\n');
+const surfaceSource = readSurfaceSource();
 const runtimeConfigBody = surfaceSource.match(/  function codexThreadRuntimeConfig\(thread\) \{([\s\S]*?)\n  \}/)?.[1];
 assert.ok(runtimeConfigBody, 'production codexThreadRuntimeConfig must remain directly testable');
 const productionRuntimeConfig = compileFunction(runtimeConfigBody, ['thread', 'codexThreadAgentProfile', 'codexThreadToolMode', 'codexThreadSystemPrompt']);
@@ -2089,8 +2144,8 @@ test('Browser more-menu defers uncertain focusout and ignores a stale close afte
 
 test('Browser more-menu keyboard target has a visible focus style', () => {
   const css = readFileSync(new URL('../overlay/CSS/eg-desk-surface.uc.css', import.meta.url), 'utf8');
-  assert.ok(/\.egd-browser-menu-item:focus-visible\s*\{[^}]*outline:\s*2px solid var\(--egd-primary\)/.test(css),
-    'keyboard menu item needs the same visible focus outline as Browser toolbar buttons');
+  assertFocusTokens(css, ['.egd-browser-menu-item:focus-visible'], { inset: true });
+  assertFocusTokens(css, ['.egd-browser-card .egd-card-nav-btn:focus-visible']);
 });
 
 test('passive Board status stays off the lower Chat composer while its close control remains clickable', () => {
@@ -2135,15 +2190,16 @@ test('passive Board status stays off the lower Chat composer while its close con
 });
 
 test('empty logged-in Chat uses plain first-message guidance while keeping title and auth fallback', () => {
-  const body = surfaceSource.match(/          (const emptyChildren = \[[\s\S]*?)\n          messages\.appendChild\(el\('div', \{ class: 'egd-codex-empty-state' \}, \.\.\.emptyChildren\)\);/)?.[1];
+  const body = surfaceSource.match(/          (const canStart = [\s\S]*?)\n          messages\.appendChild\(el\('div', \{ class: 'egd-codex-empty-state' \}, \.\.\.emptyChildren\)\);/)?.[1];
   assert.ok(body, 'exercise the production empty-state branches');
   const calls = [];
   const renderEmpty = compileFunction(`return function renderEmpty(codex) {
+    const activeEngine = ChatState.chatThreadReadiness({engineId: 'codex'}, codex);
     ${body}\n    return emptyChildren;
-  }`, ['el', 'codexBridge'])((tag, props, ...children) => ({ tag, props, className: props.class, children }), {
+  }`, ['el', 'codexBridge', 'ChatState'])((tag, props, ...children) => ({ tag, props, className: props.class, children }), {
     startLogin: () => calls.push('login'),
     refreshAuthStatus: () => calls.push('refresh'),
-  });
+  }, Chat);
   const loggedIn = renderEmpty({ authStatus: { isLoggedIn: true } });
   const emptyClasses = ['egd-codex-empty-eyebrow', 'egd-codex-empty-title', 'egd-codex-empty-sub'];
   assert.deepEqual(loggedIn.map(node => node.className), emptyClasses);
@@ -2187,7 +2243,7 @@ test('Chat composer starts compact but expands and scrolls for long requests', (
   const sendButton = { disabled: true, title: '' };
   const activeThread = { id: 'thread-a', conversationId: null, preparingInput: false };
   const codex = { authStatus: { isLoggedIn: true }, connected: true, isSending: false };
-  const run = resize(input, activeThread, { nativeBindingHeld: () => false }, codex, sendButton);
+  const run = resize(input, activeThread, Chat, codex, sendButton);
   run();
   assert.equal(input.style.height, '40px');
   assert.equal(input.style.overflowY, 'hidden');
@@ -4215,7 +4271,7 @@ test('Chat composer reserves title, status and log space on compact cards', asyn
       querySelector: selector => selector === '.egd-codex-conversation-pane' ? pane : null };
     const sendButton = { disabled: true, title: '' };
     const resize = bindResize(input, { conversationId: null, preparingInput: false },
-      { nativeBindingHeld: () => false }, { authStatus: { isLoggedIn: true }, connected: true, isSending: false }, sendButton);
+      Chat, { authStatus: { isLoggedIn: true }, connected: true, isSending: false }, sendButton);
     return { input, main, resize, sendButton,
       remainingLogContentHeight: () => main.clientHeight - header.offsetHeight - 44 - notice
         - noticeMargin * 2 - (compact() ? 106 : 128) - input.offsetHeight - (compact() ? 24 : 52) };
@@ -4996,10 +5052,10 @@ test('run errors read by kind with the next step: login, reset time, permission,
   assert.deepEqual(Chat.runErrorNotice('문자열 오류'), { kind: 'unknown', text: '문자열 오류', action: null });
   assert.equal(Chat.runErrorNotice(null), null);
   // The conversation shows the notice with its button; the activity log uses the same words.
-  assert.match(surfaceSource, /ChatState\.runErrorNotice\(run\.error, codex\.authStatus\?\.usage\)/);
-  assert.match(surfaceSource, /runError\.action === 'login' \? el\('button'[\s\S]*?onclick: \(\) => codexBridge\.startLogin\(\)/);
+  assert.match(surfaceSource, /ChatState\.runErrorNotice\(run\.error,\s*\[activeThread\.engineId, run\.engineId, run\.engine\?\.id, run\.error\?\.origin, run\.rateLimit\?\.engineId\]\.includes\('claude'\) \? null : codex\.authStatus\?\.usage\)/);
+  assert.match(surfaceSource, /runError\.action === 'login' && ChatState\.chatThreadEngineId\(activeThread, codex\) === 'codex' \? el\('button'[\s\S]*?onclick: \(\) => codexBridge\.startLogin\(\)/);
   assert.match(surfaceSource, /runError\.action === 'retry' \? el\('button'[\s\S]*?onclick: \(\) => codexBridge\.retryRun\(activeThread\.id, run\.runId\)/);
-  assert.match(surfaceSource, /rows\.push\(el\('p', \{ class: 'egd-codex-error' \}, ChatState\.runErrorNotice\(run\.error, state\.codex\.authStatus\?\.usage\)\.text\)\)/);
+  assert.match(surfaceSource, /rows\.push\(el\('p', \{ class: 'egd-codex-error' \}, ChatState\.runErrorNotice\(run\.error,\s*\[thread\.engineId, run\.engineId, run\.engine\?\.id, run\.error\?\.origin, run\.rateLimit\?\.engineId\]\.includes\('claude'\) \? null : state\.codex\.authStatus\?\.usage\)\.text\)\)/);
 });
 
 test('Settings, avatar and usage CSS use approved tokens only', () => {
@@ -5011,7 +5067,25 @@ test('Settings, avatar and usage CSS use approved tokens only', () => {
   const token = name => css.match(new RegExp(`${name}:\\s*(#[0-9A-Fa-f]{6})`))?.[1]?.toLowerCase();
   assert.deepEqual([token('--egd-primary'), token('--egd-avatar-sage'), token('--egd-avatar-wood'), token('--egd-avatar-muted'),
     token('--egd-on-surface'), token('--egd-note')], AVATAR_PALETTE, 'the six tones are the store palette');
-  for (let tone = 0; tone < 6; tone++) assert.match(css, new RegExp(`\\.egd-profile-avatar-tone-${tone} \\{ background: var\\(--egd-`));
+  const light = readRootProperties(css, { scheme: 'light' });
+  for (const scheme of ['light', 'dark']) {
+    const properties = readRootProperties(css, { scheme });
+    const tones = readAvatarTones(css, { scheme });
+    assert.deepEqual(tones.map(({ tone }) => tone), [0, 1, 2, 3, 4, 5], `${scheme} keeps all six tones`);
+    for (const { tone, background, color } of tones) {
+      const paint = resolveColor(background, properties);
+      const ink = resolveColor(color, properties);
+      assert.ok(paint && ink, `${scheme} avatar tone ${tone} resolves both colours`);
+      assert.deepEqual(paint, resolveColor(background, light), `tone ${tone} keeps its pale background in both schemes`);
+      assert.deepEqual(ink, resolveColor('var(--egd-avatar-ink)', light), `tone ${tone} keeps the fixed avatar ink`);
+      assert.ok(contrastRatio(paint, resolveColor('#000', properties)) >= 10, `tone ${tone} has a pale background`);
+      assert.ok(contrastRatio(ink, resolveColor('#fff', properties)) >= 7, `tone ${tone} has dark ink`);
+      assert.ok(contrastRatio(ink, paint) >= 4.5, `${scheme} tone ${tone} initials meet 4.5:1`);
+      const chat = cssDeclarationsFor(css, `.egd-codex-message-avatar.egd-profile-avatar-tone-${tone}`, { scheme });
+      assert.deepEqual(resolveColor(chat.background, properties), paint, `chat tone ${tone} keeps the profile background`);
+      assert.deepEqual(resolveColor(chat.color, properties), ink, `chat tone ${tone} keeps the profile ink`);
+    }
+  }
 });
 
 test('Browser scroll/press are wired into the Card dispatch allow-list and receipt', () => {
@@ -5928,15 +6002,28 @@ test('dark scheme maps every approved light-dark pair onto the --egd-* tokens', 
     assert.equal(lightTokens.get(`--egd-${token}`)?.toLowerCase(), lightValue, `--egd-${token} light is --eg-${name}`);
     assert.equal(darkTokens.get(`--egd-${token}`)?.toLowerCase(), darkValue, `--egd-${token} dark is --eg-${name}`);
   }
-  // Rule-level pairs in the approved page: active edge, avatar, region line, desk veil.
-  for (const [token, lightValue, darkValue] of [['focus-border', '#A9B5A5', '#748673'], ['avatar-bg', '#DCE5DA', '#536552'],
+  // Rule-level pairs retain the avatar, region line and desk veil; the active
+  // edge is resolved from CSS and must meet contrast on its field surfaces.
+  for (const [token, lightValue, darkValue] of [['avatar-bg', '#DCE5DA', '#536552'],
     ['region-line', 'rgba(102, 91, 69, .21)', 'rgba(204, 198, 180, .19)'], ['wood-veil', 'rgba(245, 243, 239, .68)', 'rgba(36, 42, 40, .82)']]) {
     assert.deepEqual([lightTokens.get(`--egd-${token}`), darkTokens.get(`--egd-${token}`)], [lightValue, darkValue], token);
+  }
+  for (const scheme of ['light', 'dark']) {
+    for (const contrast of ['no-preference', 'more']) {
+      const properties = readRootProperties(surfaceCss, { scheme, contrast });
+      const edge = resolveColor('var(--egd-focus-border)', properties);
+      assert.ok(edge, `${scheme} ${contrast} focus border resolves`);
+      for (const background of ['--egd-surface-elevated', '--egd-window-alt']) {
+        const paint = resolveColor(`var(${background})`, properties);
+        assert.ok(paint, `${scheme} ${background} resolves`);
+        assert.ok(contrastRatio(edge, paint) >= (contrast === 'more' ? 4.5 : 3), `${scheme} ${contrast} focus border on ${background}`);
+      }
+    }
   }
   assert.match(approved, /light-dark\(#a9b5a5,#748673\)/);
   assert.match(approved, /light-dark\(#f5f3efad,#242a28d0\)/);
   // A literal light colour needs a dark value, unless it is an identity or a base mixed below.
-  const invariant = ['--egd-avatar-sage', '--egd-avatar-wood', '--egd-avatar-muted', '--egd-avatar-ink', '--egd-danger', '--egd-warning', '--egd-success'];
+  const invariant = ['--egd-avatar-sage', '--egd-avatar-wood', '--egd-avatar-muted', '--egd-avatar-ink', '--egd-avatar-paper', '--egd-avatar-note', '--egd-danger', '--egd-warning', '--egd-success'];
   for (const [name, value] of lightTokens) {
     if (!/^(#|rgba?\()/.test(value) && !/rgba\(/.test(value)) continue;
     if (invariant.includes(name)) assert.equal(darkTokens.has(name), false, `${name} stays the same in both schemes`);
@@ -5996,7 +6083,20 @@ test('hard-coded light and white colours outside the tokens are down to a short 
     assert.ok(/shadow|filter/.test(property) || (property === 'background' && alpha <= .3), `${head} ${property}: ${literal}`);
   }
   assert.doesNotMatch(surfaceCss, /var\(--egd-[a-z-]+, (#|rgba?\()/i, 'no colour fallbacks behind defined tokens');
-  assert.doesNotMatch(surfaceCss, /--egd-text\b/, 'the undefined text token is gone');
+  assert.doesNotMatch(surfaceCss, /--egd-text(?=\s*[:),])/, 'the undefined text token is gone');
+  for (const scheme of ['light', 'dark']) {
+    for (const [mode, opacity] of [[{}, 0.5], [{ contrast: 'more' }, 0.6], [{ forcedColors: true }, 1], [{ contrast: 'more', forcedColors: true }, 1]]) {
+      const env = { scheme, ...mode };
+      const properties = readRootProperties(surfaceCss, env);
+      assert.equal(Number(resolveCssStateValue('var(--egd-opacity-disabled)', properties)), opacity, `${JSON.stringify(env)} disabled opacity`);
+      for (const selector of ['.egd-settings-btn[disabled]', '.egd-settings-link[disabled]']) {
+        const declarations = cssDeclarationsFor(surfaceCss, selector, env);
+        assert.equal(Number(resolveCssStateValue(declarations.opacity, properties)), opacity, `${selector} resolves the disabled opacity`);
+      }
+      if (env.forcedColors) assert.equal(resolveCssStateValue('var(--egd-text-disabled)', properties), 'GrayText');
+      else assert.equal(properties['--egd-text-disabled'], undefined, 'system disabled ink is scoped to forced colours');
+    }
+  }
 });
 
 // DSN-04: rows and buttons grow with a larger font; state is not colour alone.
@@ -6035,7 +6135,16 @@ test('the chosen Dock tool, open room, Settings tab and File rail item are marke
   assert.match(surfaceSource, /'aria-current': activeThread && thread\.id === activeThread\.id \? 'true' : null,/);
   // Status dots already sit next to their words; the avatar ink stays readable on the fixed sage.
   assert.match(surfaceSource, /egd-codex-subagent-dot egd-codex-subagent-dot-\$\{display\.status\}`, 'aria-hidden': 'true' \}\),\n\s*el\('span', \{ class: 'egd-codex-subagent-name' \}/);
-  assert.match(rule('.egd-profile-avatar-tone-1'), /color: var\(--egd-avatar-ink\);/);
+  for (const scheme of ['light', 'dark']) {
+    const properties = readRootProperties(surfaceCss, { scheme });
+    const avatar = cssDeclarationsFor(surfaceCss, '.egd-profile-avatar-tone-1', { scheme });
+    const ink = resolveColor(avatar.color, properties);
+    const background = resolveColor(avatar.background, properties);
+    assert.ok(ink && background, `${scheme} sage avatar colours resolve`);
+    assert.deepEqual(ink, resolveColor('var(--egd-avatar-ink)', properties));
+    assert.deepEqual(background, resolveColor('var(--egd-avatar-sage)', properties));
+    assert.ok(contrastRatio(ink, background) >= 4.5, `${scheme} sage avatar initials meet 4.5:1`);
+  }
 });
 
 // ============ CNV-02 card placement and UX-02 minimap Boards ============
@@ -6405,9 +6514,15 @@ test('chat events are admitted for known engines only; Codex keeps working with 
   assert.equal(Chat.reduceChatEvent(state, { ...envelope('message.delta', 4, { messageId: 'm', delta: 'y' }), provider: 'other' }), null);
   assert.equal(Chat.reduceChatEvent(state, { ...envelope('message.delta', 5, { messageId: 'm', delta: 'z' }), engineId: 'claude' }), null,
     'Claude is ignored until the bridge lists it');
-  const listed = Chat.reduceChatEvent(state, { ...envelope('message.delta', 6, { messageId: 'm', delta: 'b' }), engineId: 'claude' },
+  const switched = Chat.reduceChatEvent(state, { ...envelope('message.delta', 6, { messageId: 'm', delta: 'b' }), engineId: 'claude' },
     Chat.knownChatEngineIds(engineRowsFixture));
-  assert.equal(listed.messages.find(message => message.id === 'm').content, 'ab', 'ignored events changed nothing');
+  assert.equal(switched, null, 'listing Claude does not permit changing the engine of an existing Codex run');
+  const listed = Chat.reduceChatEvent(state, { ...envelope('message.delta', 7, { messageId: 'm', delta: 'b' }), engineId: 'claude',
+    conversationId: 'claude-conversation', runId: 'claude-run', requestId: 'claude-request', clientThreadId: 'claude-ui' },
+    Chat.knownChatEngineIds(engineRowsFixture));
+  assert.equal(listed.messages.find(message => message.id === 'm').content, 'b', 'a listed engine has its own run');
+  assert.equal(Chat.reduceChatEvent(state, { ...envelope('message.delta', 8, { messageId: 'm', delta: 'b' }), engineId: 'codex' })
+    .messages.find(message => message.id === 'm').content, 'ab', 'ignored events changed no Codex content');
   assert.match(surfaceSource, /ChatState\.reduceChatEvent\(protocol, event, ChatState\.knownChatEngineIds\(state\.codex\.engines\)\)/);
 });
 
@@ -6524,7 +6639,7 @@ test('engine controls: header chip, new-room choices, locked-room panel and effo
     assert.equal(surfaceSource.match(pattern)?.length, 2, 'both Chat heads show the engine chip next to the usage meter');
   }
   assert.match(surfaceSource, /buildCodexSessionBadge\(thread, codexBridge\),\n                    renderEngineBadge\(thread\),/);
-  assert.match(surfaceSource, /if \(codex\.authStatus\.isLoggedIn && !ChatState\.chatThreadEngineLocked\(activeThread\)\) \{\n            messages\.appendChild\(el\('div', \{ class: 'egd-codex-engine-start'/);
+  assert.match(surfaceSource, /if \(\(canStart \|\| ChatState\.chatEngineChoices\(codex\.engines\)\.some\(choice => choice\.id === 'claude' && choice\.selectable\)\)\s*&& !ChatState\.chatThreadEngineLocked\(activeThread\)\) \{\n            messages\.appendChild\(el\('div', \{ class: 'egd-codex-engine-start'/);
 });
 
 test('only an empty room changes engine; effort changes apply to the next turn', () => {
@@ -6791,7 +6906,7 @@ test('engine.status replaces the engine rows; a brief \'로그인 필요\' after
   assert.equal(timers.size, 0, '/v1/state is fresher and cancels a held row');
   assert.equal(debouncer.push('bad'), true);
   assert.equal(applied.at(-1), null, 'a malformed frame reads as unknown');
-  assert.match(surfaceSource, /        case 'engine\.status':\n          engineStatus\.push\(event\.engines\);\n          return;/);
+  assert.match(surfaceSource, /        case 'engine\.status':[\s\S]*?update\(\{ engines: \[\.\.\.codexRows, \.\.\.event\.engines\.filter\(row => row\.id === 'claude'\)\] \}\);[\s\S]*?engineStatus\.push\(event\.engines\);\n          return;/);
   assert.match(surfaceSource, /apply: \(engines\) => update\(\{ engines \}\),/);
   assert.equal(surfaceSource.match(/if \(!epochScope\.valid\(token\)\) return;\n {8,10}engineStatus\.cancel\(\);\n {8,10}const status = bridgeState\?\.auth \|\| state\.codex\.authStatus;/g)?.length, 2,
     'both /v1/state reads cancel a held row');
@@ -6932,7 +7047,7 @@ test('card and Chat panel header buttons draw no native face and take their colo
   }
   const shared = surfaceCss.match(/^\.egd-chat-card-action,\n\.egd-hud-pin,\n\.egd-hud-close \{([^}]+)\}/m)?.[1] || '';
   assert.match(shared, /appearance: none;\n  background-color: transparent;/);
-  assert.match(surfaceCss, /^\.egd-chat-card-action:focus-visible,\n\.egd-hud-pin:focus-visible,\n\.egd-hud-close:focus-visible \{ outline: 2px solid var\(--egd-primary\); outline-offset: 1px; \}/m);
+  assertFocusTokens(surfaceCss, ['.egd-chat-card-action:focus-visible', '.egd-hud-pin:focus-visible', '.egd-hud-close:focus-visible']);
   // Hover keeps the light look: the outline edge and the paper layer, both tokens that the dark block redefines.
   assert.match(surfaceCss, /\.egd-chat-card-action:hover \{\n  border-color: var\(--egd-chat-outline-soft\);\n  background: var\(--egd-chat-layer-elevated\);/);
   // The header still builds exactly these two buttons with that class.
@@ -6970,7 +7085,7 @@ test('Chat room rows are buttons a keyboard can reach and choose, with the open 
   assert.equal(label({ title: '보고서', unreadCount: 0, preview: '' }), '보고서');
   assert.match(surfaceSource, /'aria-label': `\$\{thread\.title\} 채팅방 메뉴`,/);
   // A visible ring inside the list, and the row menu shows while focus is in the row.
-  assert.match(surfaceCss, /^\.egd-codex-thread-item:focus-visible \{\n  outline: 2px solid var\(--egd-primary\);\n  outline-offset: -2px;\n\}/m);
+  assertFocusTokens(surfaceCss, ['.egd-codex-thread-item:focus-visible'], { inset: true });
   assert.match(surfaceCss, /\.egd-codex-thread-item:focus-within \.egd-codex-thread-menu-trigger,/);
 
   // A room opened from the keyboard hands focus to its composer, or Back when there is none.
@@ -9425,7 +9540,7 @@ test('chat wiring: faces and names open the peek, the 작업 중 bubble closes t
   assert.match(surfaceSource, /      agentProfileDetail\(profileId, revision = null\) \{\n        if \(!ChatState\.isProfileId\(profileId\)\) return null;\n        const cached = agentProfileDetails\.get\(profileId\);\n        if \(cached && cached\.revision === revision\) return cached;/,
     'one read per active revision, so a redraw never asks again');
   // The bubble follows the last line, replaces the dots inside its run's answer, and opens the record; the status line stays.
-  assert.match(surfaceSource, /const working = ChatState\.nativeBindingHeld\(activeThread\) \? null : ChatState\.agentWorkingView\(workingRun, \{ connected: codex\.connected \}\);/);
+  assert.match(surfaceSource, /const working = ChatState\.nativeBindingHeld\(activeThread\) \? null : ChatState\.agentWorkingView\(workingRun,\s*\{ connected: activeEngine\.engineId === 'claude' \? activeEngine\.ready : codex\.connected \}\);/);
   assert.match(surfaceSource, /          appendControlNotices\(\);\n          if \(working\) \{\n            messages\.appendChild\(codexAgentWorkingRow\(working, \{/);
   assert.match(surfaceSource, /onOpen: \(\) => codexBridge\.openActivity\(activeThread\.id\)/);
   assert.match(surfaceSource, /&& !\(working && message\.runId && message\.runId === workingRun\?\.runId\)\) \{/);
@@ -10247,8 +10362,9 @@ test('CTX-03 a room that left the screen during the pause is not asked (asked ag
   const fakeWindow = { setTimeout: (callback, ms) => { pending = { callback, ms }; return 7; }, clearTimeout: () => { pending = null; } };
   const fakeDocument = { querySelectorAll: selector => selector === '.egd-codex-input' ? composers : [] };
   const request = compileFunction(`let contextSuggestTimer = 0;\n${source}\nreturn requestContextSuggestions;`,
-    ['window', 'document', 'resolveContextSuggestions', 'CONTEXT_SUGGEST_DEBOUNCE_MS'])(
-    fakeWindow, fakeDocument, (threadId, force) => { asked.push([threadId, force]); }, 400);
+    ['window', 'document', 'resolveContextSuggestions', 'CONTEXT_SUGGEST_DEBOUNCE_MS', 'ChatState', 'state', 'getCodexThreadById'])(
+    fakeWindow, fakeDocument, (threadId, force) => { asked.push([threadId, force]); }, 400, Chat,
+    {codex: {threads: [{id: 'room', engineId: 'codex'}]}}, (codex, id) => codex.threads.find(thread => thread.id === id));
   composers = [{ dataset: { threadId: 'room' } }];
   request('room');
   assert.equal(pending.ms, 400);

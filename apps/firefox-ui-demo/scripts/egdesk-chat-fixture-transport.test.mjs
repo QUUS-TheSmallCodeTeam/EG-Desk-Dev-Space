@@ -6,14 +6,16 @@ import { Readable } from 'node:stream';
 import { EventEmitter } from 'node:events';
 import test from 'node:test';
 import { bootstrapQaProfile, canonicalTempRoot, LOADER_FILES } from './egdesk-chat-qa-profile.mjs';
-import { createQaFixtureTransport } from './egdesk-chat-fixture-transport.mjs';
+import { createQaFixtureTransport, CLAUDE_FIXTURE_QUESTIONS, CLAUDE_FIXTURE_TEXT } from './egdesk-chat-fixture-transport.mjs';
+import { prepareQaFirefox } from './run-firefox-mcp-target.mjs';
 import { assertNativeTerminalExit } from './egdesk-chat-qa-contract.sys.mjs';
 import { assertPublishedBriefing, assertContextCaptureBatch, assertStoredAgentDelivery,
   captureContextReadEvidence, fingerprintQaBytes } from './egdesk-context-qa-contract.mjs';
 
 const TOKEN = 'unit-fixture-token-no-credentials';
+const FIXTURE_ENV = { EGDESK_QA_FIXTURE_TRANSPORT: '1', EGDESK_QA_FIXTURE_PORT: '49318' };
 
-function setup(t) {
+function setup(t, { claude = false } = {}) {
   const source = fs.mkdtempSync(path.join(canonicalTempRoot(), 'egdesk-loader-fixture-'));
   for (const name of LOADER_FILES) fs.writeFileSync(path.join(source, name), `unit fixture ${name}\n`);
   const { profile } = bootstrapQaProfile({ loaderSource: source });
@@ -26,7 +28,9 @@ function setup(t) {
   });
   const fetchBefore = globalThis.fetch;
   const eventSourceBefore = globalThis.EventSource;
-  const transport = createQaFixtureTransport({ profile, token: TOKEN });
+  prepareQaFirefox(profile, { env: FIXTURE_ENV });
+  const transport = createQaFixtureTransport({ profile, token: TOKEN,
+    env: { ...FIXTURE_ENV, ...(claude ? { EGDESK_QA_CLAUDE_FIXTURE: '1' } : {}) } });
   t.after(() => transport.dispose());
   assert.equal(globalThis.fetch, fetchBefore);
   assert.equal(globalThis.EventSource, eventSourceBefore);
@@ -64,7 +68,8 @@ test('fixture rejects unknown bridge/auth/send/approval URLs without forwarding 
   ]) {
     assert.equal((await request(handler, method, route, {})).status, 404, `${method} ${route}`);
   }
-  assert.equal((await request(handler, 'POST', 'http://127.0.0.1:39218/auth/unknown', {})).status, 404);
+  assert.equal((await request(handler, 'POST', 'http://127.0.0.1:49318/auth/unknown', {})).status, 404);
+  assert.equal((await request(handler, 'GET', 'http://127.0.0.1:39218/auth/status')).status, 400);
   assert.equal((await request(handler, 'POST', 'http://127.0.0.1:39219/auth/signout', {})).status, 400);
   const signedOut = await request(handler, 'POST', '/auth/signout', {});
   assert.equal(signedOut.status, 200);
@@ -74,6 +79,123 @@ test('fixture rejects unknown bridge/auth/send/approval URLs without forwarding 
   fetchSpy.mock.restore();
   assert.equal(globalThis.fetch, fetchBefore);
   assert.equal(globalThis.EventSource, eventSourceBefore);
+});
+
+const claudeSend = (handler, scenario, extra = {}) => request(handler, 'POST', '/chat/send', {
+  message: `EGDESK_QA_CLAUDE_${scenario} unit`, engineId: 'claude', profileEnabled: false,
+  clientThreadId: 'qa-claude-thread', requestId: `qa-claude-${scenario}`, ...extra,
+});
+
+test('Claude fixture is separately gated, Codex-offline and Context-blocking without provider I/O', async t => {
+  t.mock.method(globalThis, 'fetch', () => { throw new Error('No provider I/O in Claude fixture'); });
+  const original = setup(t);
+  assert.equal((await claudeSend(original.handler, 'TEXT')).status, 409);
+  const { handler } = setup(t, { claude: true });
+  const health = (await request(handler, 'GET', '/health')).body;
+  const state = (await request(handler, 'GET', '/v1/state')).body;
+  assert.equal(health.claudeFixture, true);
+  assert.equal(health.providerTurns, 0);
+  assert.equal(health.appServerReady, false);
+  assert.equal(state.auth.isLoggedIn, false);
+  assert.equal(state.engines.find(row => row.id === 'codex').status, 'offline');
+  const claude = state.engines.find(row => row.id === 'claude');
+  assert.equal(claude.status, 'ready');
+  assert.equal(claude.profiles[0].auth.status, 'signedIn');
+  assert.equal(claude.runtime.residentProcesses, 0);
+  assert.equal((await claudeSend(handler, 'TEXT', { engineId: 'codex' })).body.code, 'ENGINE_UNAVAILABLE');
+  for (const extra of [{ contextSnapshotIds: ['capture-1'] }, { selectedSources: [{ id: 's' }] },
+    { attachments: [{ id: 's' }] }, { contextResolution: { resolutionId: 'r' } }]) {
+    assert.equal((await claudeSend(handler, 'TEXT', extra)).body.code, 'CLAUDE_CONTEXT_UNSUPPORTED');
+  }
+  assert.equal((await request(handler, 'POST', '/context/captures', { sources: [] })).body.code, 'CLAUDE_CONTEXT_UNSUPPORTED');
+  const control = await fixtureState(handler);
+  assert.deepEqual(control.observed.sends, []);
+  assert.deepEqual(control.runs, []);
+  assert.deepEqual(control.observed.authWrites, []);
+});
+
+test('Claude fixture text and event identities remain Claude with the legacy SSE provider field', async t => {
+  const { handler } = setup(t, { claude: true });
+  assert.equal((await claudeSend(handler, 'TEXT')).status, 202);
+  const state = await fixtureState(handler), run = state.runs[0];
+  assert.equal(run.engine.id, 'claude');
+  assert.equal(run.status, 'completed');
+  assert.equal(run.messages.find(item => item.role === 'assistant').text, CLAUDE_FIXTURE_TEXT);
+  assert.ok(state.observed.events.every(event => event.provider === 'codex' && event.engineId === 'claude'));
+  assert.equal((await request(handler, 'GET', `/chat/state?conversationId=${run.conversationId}`)).body.connection, 'ready');
+});
+
+test('Claude session choice requires an offered valid rule; absent, wrong-run and duplicate replies are rejected', async t => {
+  const { handler } = setup(t, { claude: true });
+  for (const [scenario, decision] of [['SESSION_APPROVAL', 'acceptForSession'], ['APPROVAL_NO_SESSION', 'decline']]) {
+    const sent = (await claudeSend(handler, scenario)).body;
+    const run = (await fixtureState(handler)).runs.find(run => run.runId === sent.runId);
+    const approval = run.pendingApprovals[0];
+    assert.equal(approval.choices.includes('acceptForSession'), scenario === 'SESSION_APPROVAL');
+    assert.equal(run.fixtureApprovalOffer.adapterExecutionVerified, false);
+    if (scenario === 'SESSION_APPROVAL') {
+      assert.equal(run.fixtureApprovalOffer.sessionRule.destination, 'session');
+      assert.deepEqual(run.fixtureApprovalOffer.sessionRule.rules, [{ toolName: 'Bash', ruleContent: approval.command }]);
+    } else assert.equal(run.fixtureApprovalOffer.sessionRule, null);
+    const reply = { ...sent, approvalId: approval.approvalId, decision };
+    assert.equal((await request(handler, 'POST', '/chat/approval', { ...reply, runId: 'wrong' })).status, 409);
+    if (scenario === 'APPROVAL_NO_SESSION') assert.equal((await request(handler, 'POST', '/chat/approval',
+      { ...reply, decision: 'acceptForSession' })).status, 400);
+    assert.equal((await request(handler, 'POST', '/chat/approval', reply)).status, 202);
+    assert.equal((await request(handler, 'POST', '/chat/approval', reply)).status, 409);
+    assert.equal((await request(handler, 'POST', '/__qa/release', { runId: sent.runId, phase: 'approval' }, TOKEN)).status, 200);
+    assert.equal((await request(handler, 'POST', '/__qa/release', { runId: sent.runId, phase: 'run' }, TOKEN)).status, 200);
+  }
+  assert.deepEqual((await fixtureState(handler)).observed.approvals.map(reply => reply.decision), ['acceptForSession', 'decline']);
+});
+
+test('Claude multi-select survives snapshot restore and accepts only valid index arrays without dropping single-choice coverage', async t => {
+  const { handler } = setup(t, { claude: true });
+  const sent = (await claudeSend(handler, 'MULTI_SELECT')).body;
+  for (const extra of [{}, { engineId: 'codex' }, { engineId: 'claude', clientThreadId: 'foreign' }]) {
+    assert.equal((await request(handler, 'POST', '/chat/resume', { conversationId: sent.conversationId,
+      clientThreadId: 'qa-claude-thread', ...extra })).body.code, 'ENGINE_MISMATCH');
+  }
+  const snapshot = (await request(handler, 'POST', '/chat/resume', { conversationId: sent.conversationId,
+    clientThreadId: 'qa-claude-thread', engineId: 'claude' })).body;
+  const input = snapshot.runs[0].pendingUserInputs[0];
+  assert.deepEqual(input.questions, CLAUDE_FIXTURE_QUESTIONS);
+  assert.equal(snapshot.engineId, 'claude');
+  assert.equal(snapshot.connection, 'ready');
+  const reply = answers => request(handler, 'POST', '/chat/user-input', {
+    userInputId: input.userInputId, conversationId: sent.conversationId, runId: sent.runId, action: 'submit', answers,
+  });
+  for (const optionIndices of [[], [0, 0], [-1], [3], ['0'], [0.5]]) {
+    assert.equal((await reply([{ questionId: 'q0', optionIndices }, { questionId: 'q1', optionIndex: 0 }])).status, 400);
+  }
+  assert.equal((await reply([{ questionId: 'q0', optionIndices: [0], optionIndex: 1 }, { questionId: 'q1', optionIndex: 0 }])).status, 400);
+  assert.equal((await reply([{ questionId: 'q0', optionIndices: [0] }, { questionId: 'q1', optionIndices: [0] }])).status, 400);
+  assert.equal((await reply([{ questionId: 'q0', optionIndices: [0, 2] }, { questionId: 'q1', optionIndex: 1 }])).status, 200);
+  const answer = (await fixtureState(handler)).observed.userInputs[0].answers;
+  assert.deepEqual(answer[0].optionIndices, [0, 2]);
+  assert.deepEqual(answer[0].labels, ['문서', '검증']);
+  assert.equal(answer[1].optionIndex, 1);
+  assert.equal((await reply([{ questionId: 'q0', optionIndices: [0, 2] }, { questionId: 'q1', optionIndex: 1 }])).status, 409);
+});
+
+test('Claude rate-limit warning/rejection retain reset time and schedule no retry or automatic send', async t => {
+  const { handler } = setup(t, { claude: true });
+  const sent = (await claudeSend(handler, 'RATE_LIMIT')).body;
+  const before = await fixtureState(handler), warning = before.runs[0].rateLimit;
+  assert.equal(warning.status, 'allowed_warning');
+  assert.equal(warning.usedPercent, 90);
+  assert.equal(warning.autoResume, false);
+  const timer = t.mock.method(globalThis, 'setTimeout', () => { throw new Error('Quota must not schedule a timer'); });
+  assert.equal((await request(handler, 'POST', '/__qa/release', { runId: sent.runId, phase: 'claude-rate-rejected' }, TOKEN)).status, 200);
+  const after = await fixtureState(handler), rejected = after.runs[0];
+  assert.equal(rejected.rateLimit.status, 'rejected');
+  assert.equal(rejected.rateLimit.autoResume, false);
+  assert.equal(rejected.error.retryAt, rejected.rateLimit.resetsAt);
+  assert.equal(rejected.error.kind, 'quota');
+  assert.equal(rejected.status, 'failed');
+  assert.deepEqual(after.observed.sends, before.observed.sends);
+  assert.deepEqual(after.observed.resumes, before.observed.resumes);
+  assert.equal(timer.mock.callCount(), 0);
 });
 
 test('fixture refuses ordinary prompts and unauthenticated control routes', async (t) => {
@@ -130,6 +252,38 @@ const startStop = async handler => (await request(handler, 'POST', '/chat/send',
 })).body;
 const stopIdentity = run => ({ conversationId: run.conversationId, runId: run.runId, requestId: run.requestId });
 const fixtureState = async handler => (await request(handler, 'GET', '/__qa/state', null, TOKEN)).body;
+
+test('Codex STOP exposes a streaming message before the delayed POST ACK, including partial-history refresh', async t => {
+  const { handler } = setup(t);
+  const delayed = [];
+  const timer = t.mock.method(globalThis, 'setTimeout', (callback, ms) => {
+    assert.equal(ms, 80);
+    delayed.push(callback);
+    return 1;
+  });
+  const pending = startStop(handler);
+  await new Promise(resolve => setImmediate(resolve));
+  try {
+    const before = await fixtureState(handler), run = before.runs[0];
+    assert.equal(run.status, 'running');
+    assert.equal(before.observed.sends[0].respondedAt, undefined, 'POST is still pending');
+    await request(handler, 'POST', '/__qa/history', { partial: true }, TOKEN);
+    const snapshot = (await request(handler, 'GET', `/chat/state?conversationId=${run.conversationId}`)).body;
+    assert.equal(snapshot.historyComplete, false);
+    assert.equal((await request(handler, 'POST', '/__qa/delta', { runId: run.runId, delta: ' QA-RESUMED-DELTA' }, TOKEN)).status, 200);
+    const updated = (await fixtureState(handler)).runs[0].messages.filter(row => row.role === 'assistant');
+    assert.equal(updated.length, 1);
+    assert.equal(updated[0].text, 'Waiting for stop. QA-RESUMED-DELTA');
+    assert.equal(updated[0].status, 'streaming');
+  } finally {
+    timer.mock.restore();
+    for (const callback of delayed) callback();
+    await pending;
+  }
+  const after = await fixtureState(handler);
+  assert.equal(after.observed.events.filter(row => row.event === 'message.started').length, 1, 'ACK cannot restart the message');
+  assert.equal(after.runs[0].messages.find(row => row.role === 'assistant').text, 'Waiting for stop. QA-RESUMED-DELTA');
+});
 
 test('explicit Stop hold withholds HTTP and SSE until one exact release, never terminal completion', async t => {
   const fetchSpy = t.mock.method(globalThis, 'fetch', () => { throw new Error('No real provider or forwarding'); });

@@ -7,6 +7,8 @@ import { spawn, execFileSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { assertQaProfile, assertQaFixtureManifest } from './egdesk-chat-qa-profile.mjs';
 import { isOwnedAndPrivate } from './egdesk-qa-platform.mjs';
+import { qaBridgeConfig, assertFreshQaFixtureProfile, assertQaProfileBridge,
+  materializeQaFixtureIsolation, QA_ISOLATION_MANIFEST } from './egdesk-qa-fixture-isolation.mjs';
 
 function existingInfo(target) {
   try { return fs.lstatSync(target); }
@@ -69,9 +71,17 @@ export function qaFirefoxPreferences({ mode = 'automation', marionette = 2828, r
 }
 
 export function prepareQaFirefox(profilePath, options = {}) {
+  const env = options.env || process.env;
+  const bridge = qaBridgeConfig(env);
   const profile = assertQaProfile(profilePath);
   assertQaFixtureManifest(profile);
   refuseLockedProfile(profile);
+  if (bridge.fixture) {
+    assertFreshQaFixtureProfile(profile);
+    const ports = qaAutomationPorts(options.marionette, options.remote);
+    if ([ports.marionette, ports.remote].includes(bridge.port)) throw new Error('Fixture and automation ports must be distinct');
+  }
+  if (existingInfo(path.join(profile, QA_ISOLATION_MANIFEST))) assertQaProfileBridge(profile, env);
   const managed = qaFirefoxPreferences(options), target = path.join(profile, 'user.js');
   const userInfo = safeDestination(target, profile);
   if (userInfo && (!userInfo.isFile() || !isOwnedAndPrivate(target, userInfo))) {
@@ -110,6 +120,7 @@ export function prepareQaFirefox(profilePath, options = {}) {
   if (cssInfo && (!cssInfo.isFile() || !isOwnedAndPrivate(cssTarget, cssInfo))) throw new Error('Unsafe userChrome.css refused');
   const css = fs.readdirSync(path.join(chrome, 'CSS')).filter(name => name.endsWith('.uc.css')).sort();
   fs.writeFileSync(cssTarget, css.map(name => `@import url(${JSON.stringify(`CSS/${name}`)});`).join('\n') + '\n', { mode: 0o600 });
+  if (bridge.fixture) materializeQaFixtureIsolation(profile, { env });
   return profile;
 }
 
@@ -123,6 +134,7 @@ async function requireFreePort(port) {
 
 export async function launchQaFirefox({ profile, executable, mode = 'automation', marionette = 2828,
   remote = 6000, startUrl = 'about:blank' }) {
+  qaBridgeConfig(); // Missing/unsafe fixture ports fail before any port probe or launch.
   if (!path.isAbsolute(executable || '') || !fs.statSync(executable).isFile()) throw new Error('An installed Firefox executable is required');
   if (startUrl !== 'about:blank' && !/^http:\/\/127\.0\.0\.1:\d+\/egdesk-qa\/[A-Za-z0-9_-]{20,80}$/.test(startUrl)) {
     throw new Error('QA start URL must be about:blank or an explicit owned loopback fixture');
@@ -148,7 +160,7 @@ export async function launchQaFirefox({ profile, executable, mode = 'automation'
 if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
   try {
     const args = process.argv.slice(2), options = {};
-    const keys = { '--profile': 'profile', '--firefox-bin': 'executable', '--mode': 'mode',
+    const keys = { '--profile': 'profile', '--firefox-bin': 'executable', '--mode': 'mode', '--prepare-only': 'prepareOnly',
       '--marionette-port': 'marionette', '--remote-agent-port': 'remote', '--start-url': 'startUrl' };
     for (let i = 0; i < args.length; i += 2) {
       if (!keys[args[i]] || !args[i + 1] || options[keys[args[i]]] !== undefined) throw new Error('Unknown, duplicate or incomplete QA launcher argument');
@@ -157,9 +169,16 @@ if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.me
     options.profile ||= process.env.EGDESK_FIREFOX_PROFILE;
     options.executable ||= process.env.EGDESK_FIREFOX_BIN || (process.platform === 'win32'
       ? path.join(process.env.ProgramFiles || 'C:\\Program Files', 'Mozilla Firefox', 'firefox.exe') : '/usr/bin/firefox');
-    const launch = await launchQaFirefox(options);
-    process.stdout.write(`${JSON.stringify({ kind: 'isolated-qa-firefox', pid: launch.child.pid,
-      profile: launch.profile, mode: launch.mode, marionettePort: launch.marionette, remoteAgentPort: launch.remote })}\n`);
-    launch.child.once('exit', code => { process.exitCode = code ?? 1; });
+    if (options.prepareOnly !== undefined && options.prepareOnly !== '1') throw new Error('--prepare-only must be 1');
+    if (options.prepareOnly === '1') {
+      const profile = prepareQaFirefox(options.profile, options);
+      process.stdout.write(`${JSON.stringify({ kind: 'isolated-qa-firefox-prepared', profile,
+        bridge: qaBridgeConfig(), launched: false })}\n`);
+    } else {
+      const launch = await launchQaFirefox(options);
+      process.stdout.write(`${JSON.stringify({ kind: 'isolated-qa-firefox', pid: launch.child.pid,
+        profile: launch.profile, mode: launch.mode, marionettePort: launch.marionette, remoteAgentPort: launch.remote })}\n`);
+      launch.child.once('exit', code => { process.exitCode = code ?? 1; });
+    }
   } catch (error) { console.error(error.message); process.exitCode = 1; }
 }

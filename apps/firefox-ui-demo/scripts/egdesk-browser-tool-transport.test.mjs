@@ -1,13 +1,14 @@
 import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
 import { test } from 'node:test'
+import { readSurfaceSource } from './egdesk-surface-source.mjs'
 import * as ChatState from '../overlay/resources/EGDeskChatState.sys.mjs'
 
 globalThis.JSWindowActorParent ||= class {}
 const BrowserAgentReceipts = await import('../overlay/resources/EGDeskBrowserAgentRuntimeParent.sys.mjs')
 const { EGDeskBrowserAgentRuntimeParent, registerBrowserActionAuthorizer } = BrowserAgentReceipts
 
-const source = readFileSync(new URL('../overlay/JS/eg-desk-surface.uc.js', import.meta.url), 'utf8').replace(/\r\n/g, '\n')
+const source = readSurfaceSource()
 const between = (start, end) => {
   const first = source.indexOf(start)
   const last = source.indexOf(end, first)

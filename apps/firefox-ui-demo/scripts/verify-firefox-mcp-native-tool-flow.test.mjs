@@ -18,7 +18,7 @@ import {
   assertNativeAuthorityChain, assertPendingReadOnlyNoSideEffect,
   assertNativeFileAndCommand, assertSourceRead, assertBrowserToolFlow,
   browserToolReceipts, assertBrowserPositiveFlow, assertBrowserFocusOwnership, assertBrowserRenderedAnswer,
-  installQaSendWitness,
+  installQaSendWitness, expectedBrowserCatalog,
   assertPublicBrowserSseBindings,
   assertBrowserSameChatAddition, assertBrowserNegativeGuards,
   assertBrowserNegativeProbeResults,
@@ -90,6 +90,9 @@ test('real transport and effective native read-only policy are hard pre-turn gat
     qaOutputMarkers: [], hiddenMarkerAbsentFromModelAdmission: true };
   const expected = { cwd, clientThreadId, sourceIds: [] };
   assert.equal(assertUiQaRequest(emitted, expected), true);
+  const fixtureEnv = { EGDESK_QA_FIXTURE_TRANSPORT: '1', EGDESK_QA_FIXTURE_PORT: '39220' };
+  assert.equal(assertUiQaRequest({ ...emitted, route: 'http://127.0.0.1:39220/chat/send' }, expected, fixtureEnv), true);
+  assert.throws(() => assertUiQaRequest(emitted, expected, fixtureEnv), /selected Chat route/);
   const markers = ['QA_NATIVE_0123456789abcdef01234567', 'QA_COMMAND_0123456789abcdef'];
   assert.equal(assertUiQaRequest({ ...emitted, qaOutputMarkers: markers },
     { ...expected, qaOutputMarkers: markers }), true);
@@ -188,25 +191,38 @@ test('real Browser final answer must reach its native-item-bound visible Chat ro
 });
 
 test('model-free Browser probes require their own gate and exact untouched fixture backend', () => {
-  const env = { EGDESK_QA_BROWSER_NEGATIVE: '1', EGDESK_QA_FIXTURE_TRANSPORT: '1', EGDESK_QA_FIXTURE_TOKEN: 'QA_PUBLIC_TOKEN_0123456789' };
+  const env = { EGDESK_QA_BROWSER_NEGATIVE: '1', EGDESK_QA_FIXTURE_TRANSPORT: '1',
+    EGDESK_QA_FIXTURE_PORT: '49318', EGDESK_QA_FIXTURE_TOKEN: 'QA_PUBLIC_TOKEN_0123456789' };
   assert.doesNotThrow(() => assertQaExecutionMode(['browser-negative'], env));
   assert.throws(() => assertQaExecutionMode(['browser-negative'], { ...env, EGDESK_QA_BROWSER_NEGATIVE: '0' }), /NEGATIVE/);
   assert.throws(() => assertQaExecutionMode(['browser-negative'], { ...env, EGDESK_QA_FIXTURE_TRANSPORT: '0' }), /fixture/);
   assert.throws(() => assertQaExecutionMode(['browser'], env), /real-turn/);
   assert.throws(() => assertQaExecutionMode(['browser'], { ...env, EGDESK_QA_REAL_TURN: '1' }), /forbidden/);
-  const state = { fixture: true, profile: 'owned-profile', observed: { sends: [], authWrites: [] }, runs: [] };
-  const health = { ok: true, fixture: true };
-  assert.equal(assertNegativeFixtureBackend('owned-profile', health, state).providerTurns, 0);
-  assert.throws(() => assertNegativeFixtureBackend('other-profile', health, state), /another Firefox/);
-  assert.throws(() => assertNegativeFixtureBackend('owned-profile', { ...health, fixture: false }, state), /production/);
+  const identity = { fixture: true, profile: 'owned-profile', host: '127.0.0.1', port: 49318, origin: 'http://127.0.0.1:49318' };
+  const state = { ...identity, observed: { sends: [], authWrites: [] }, runs: [] };
+  const health = { ok: true, ...identity };
+  assert.equal(assertNegativeFixtureBackend('owned-profile', health, state, env).providerTurns, 0);
+  assert.throws(() => assertNegativeFixtureBackend('other-profile', health, state, env), /another Firefox/);
+  assert.throws(() => assertNegativeFixtureBackend('owned-profile', { ...health, fixture: false }, state, env), /production/);
   for (const key of ['sends', 'authWrites']) assert.throws(() => assertNegativeFixtureBackend('owned-profile', health,
-    { ...state, observed: { ...state.observed, [key]: [{}] } }), /zero fixture/);
-  assert.throws(() => assertNegativeFixtureBackend('owned-profile', health, { ...state, runs: [{}] }), /Chat run/);
+    { ...state, observed: { ...state.observed, [key]: [{}] } }, env), /zero fixture/);
+  assert.throws(() => assertNegativeFixtureBackend('owned-profile', health, { ...state, runs: [{}] }, env), /Chat run/);
+  assert.throws(() => assertNegativeFixtureBackend('owned-profile', { ...health, port: 39218 }, state, env), /port mismatch/);
+  assert.throws(() => assertQaExecutionMode(['browser-negative'], { ...env, EGDESK_QA_FIXTURE_PORT: undefined }), /FIXTURE_PORT/);
 });
 
 const negativeEnv = { EGDESK_QA_BROWSER_NEGATIVE: '1', EGDESK_QA_FIXTURE_TRANSPORT: '1',
+  EGDESK_QA_FIXTURE_PORT: '49318',
   EGDESK_QA_FIXTURE_TOKEN: 'QA_PUBLIC_TOKEN_0123456789', EGDESK_MARIONETTE_PORT: '2829',
   EGDESK_QA_BROWSER_NEGATIVE_HEADLESS: '1' };
+
+test('Browser permission catalog includes wait_text without granting observe-only write actions', () => {
+  assert.deepEqual(expectedBrowserCatalog('observe'), ['egdesk_browser_observe', 'egdesk_browser_wait_text']);
+  assert.deepEqual(expectedBrowserCatalog('interact'), ['egdesk_browser_observe', 'egdesk_browser_navigate',
+    'egdesk_browser_click', 'egdesk_browser_fill', 'egdesk_browser_scroll', 'egdesk_browser_press',
+    'egdesk_browser_wait', 'egdesk_browser_wait_text']);
+  assert.throws(() => expectedBrowserCatalog('admin'), /unknown Browser permission/);
+});
 
 test('only gated model-free Browser probes may attach to 2829; provider cases stay on 2828', () => {
   for (const port of ['2828', '2829']) assert.deepEqual(assertQaAttachMode(['browser-negative'],
@@ -457,14 +473,17 @@ test('Browser preflight reflects exact selected Card, one-time token binding and
 test('ordinary Browser witness forwards exact original fetch arguments and never injects policy', async () => {
   const hadWindow = Object.hasOwn(globalThis, 'window'), oldWindow = globalThis.window;
   const hadDocument = Object.hasOwn(globalThis, 'document'), oldDocument = globalThis.document;
-  const make = (policyMode = 'browserBounded') => {
+  const make = (policyMode = 'browserBounded', bridge = {
+    fixture: false, host: '127.0.0.1', port: 39218, origin: 'http://127.0.0.1:39218',
+  }) => {
     const selected = policyMode === 'browserBounded';
     const source = { id: 'source-witness', kind: 'browser', selectedByUser: true,
       browserToolPermission: 'interact', browserToolSelection: { token: 'token-witness', threadId: 'client-witness' },
       browserToolIdentity: { cardEpoch: 'epoch-witness' },
       sourceRef: { viewId: 'card-witness', profileId: 'profile-witness', accountId: '',
         uri: 'http://127.0.0.1:39220/egdesk-qa/QA_URL_0123456789abcdef' } };
-    const expected = { clientThreadId: 'client-witness', localThreadId: 'local-witness',
+    const expected = { bridge,
+      clientThreadId: 'client-witness', localThreadId: 'local-witness',
       cwd: '/owned-qa', message: 'Use the explicitly selected Browser', policyMode,
       qaOutputMarkers: [], sourceIds: selected ? null : [], hiddenMarker: null, conversationId: null,
       selectedCardId: selected ? source.sourceRef.viewId : null,
@@ -516,6 +535,20 @@ test('ordinary Browser witness forwards exact original fetch arguments and never
     assert.notEqual(native.calls[0].init, nativeInit);
     assert.deepEqual(JSON.parse(native.calls[0].body).executionPolicy, { mode: 'readOnlyQa' });
     assert.equal(native.fake.__egdeskQaSendInterceptor.snapshot.requestBodyUnmodified, false);
+    const isolated = make('browserBounded', { fixture: true, host: '127.0.0.1',
+      port: 39220, origin: 'http://127.0.0.1:39220' });
+    const isolatedInit = { method: 'POST', body: JSON.stringify(isolated.body) };
+    assert.throws(() => isolated.fake.fetch(route, isolatedInit), /endpoint mismatch/);
+    assert.equal(isolated.calls.length, 0);
+    await isolated.fake.fetch('http://127.0.0.1:39220/chat/send', isolatedInit);
+    assert.equal(isolated.calls[0].input, 'http://127.0.0.1:39220/chat/send');
+    assert.equal(isolated.calls[0].init, isolatedInit);
+    assert.equal(isolated.fake.__egdeskQaSendInterceptor.snapshot.route, 'http://127.0.0.1:39220/chat/send');
+    for (const bridge of [undefined, { fixture: true, host: '127.0.0.1', port: 39218, origin: 'http://127.0.0.1:39218' },
+      { fixture: true, host: '0.0.0.0', port: 39220, origin: 'http://0.0.0.0:39220' }]) {
+      globalThis.window = { fetch() { throw new Error('Must not forward'); } };
+      assert.throws(() => installQaSendWitness({ bridge }), /Invalid.*endpoint/);
+    }
   } finally {
     if (hadWindow) globalThis.window = oldWindow; else delete globalThis.window;
     if (hadDocument) globalThis.document = oldDocument; else delete globalThis.document;
