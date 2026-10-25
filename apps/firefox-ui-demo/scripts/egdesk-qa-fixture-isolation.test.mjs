@@ -11,7 +11,8 @@ import { prepareQaFirefox } from './run-firefox-mcp-target.mjs';
 import { createQaFixtureTransport } from './egdesk-chat-fixture-transport.mjs';
 import { loopbackJson, observeChatEvents } from './egdesk-qa-ui-flow.mjs';
 import { qaBridgeConfig, qaBridgeUrl, transformQaFixtureSource, materializeQaFixtureIsolation,
-  validateQaFixtureIsolation, assertQaProfileBridge, QA_ISOLATION_MANIFEST } from './egdesk-qa-fixture-isolation.mjs';
+  validateQaFixtureIsolation, assertQaProfileBridge, QA_ISOLATION_MANIFEST, QA_RUN_OUTPUTS_FILES } from './egdesk-qa-fixture-isolation.mjs';
+import { projectFileFixtureEnabled, transformProjectPickerResult, QA_PROJECT_PICKER_FILE } from './egdesk-qa-fixture-isolation.mjs';
 
 const ENV = Object.freeze({ EGDESK_QA_FIXTURE_TRANSPORT: '1', EGDESK_QA_FIXTURE_PORT: '39220' });
 const overlay = fileURLToPath(new URL('../overlay/', import.meta.url));
@@ -61,6 +62,142 @@ test('only approved endpoint literals and named constants change, not numbers or
   assert.throws(() => transformQaFixtureSource('JS/eg-desk-surface.uc.js',
     "fetch('http://127.0.0.1:39218/new-route')", 39220), /unapproved/);
   assert.throws(() => transformQaFixtureSource('JS/eg-desk-surface.uc.js', original, 39218), /FIXTURE_PORT/);
+});
+
+test('project picker transform is explicit and replaces only the OS-result function boundary', () => {
+  const original = fs.readFileSync(path.join(overlay, QA_PROJECT_PICKER_FILE), 'utf8');
+  const ordinary = transformQaFixtureSource(QA_PROJECT_PICKER_FILE, original, 39220);
+  assert.equal(ordinary.projectPickerTransform, undefined);
+  assert.match(ordinary.text, /picker\.open\(result =>/);
+  const transformed = transformQaFixtureSource(QA_PROJECT_PICKER_FILE, original, 39220, { projectFileFixture: true });
+  const from = ordinary.text.indexOf('  function pickNativeFileDirectory() {');
+  const end = ordinary.text.indexOf('  function pickNativeFileSaveFile(');
+  const replacementEnd = transformed.text.indexOf('  function pickNativeFileSaveFile(');
+  assert.equal(transformed.text.slice(0, from), ordinary.text.slice(0, from));
+  assert.equal(transformed.text.slice(replacementEnd), ordinary.text.slice(end));
+  assert.equal(transformed.projectPickerTransform.sourceBoundarySha256, hash(ordinary.text.slice(from, end)));
+  assert.equal(transformed.projectPickerTransform.replacementSha256, hash(transformed.text.slice(from, replacementEnd)));
+  assert.equal(transformed.replacements.osPickerResultBoundaries, 1);
+  const replacement = transformed.text.slice(from, replacementEnd);
+  assert.match(replacement, /\/__qa\/project-file\/picker/);
+  assert.doesNotMatch(replacement, /createInstance|openProject|attachProject|completePicker|__egdesk|window\[/);
+  assert.throws(() => transformProjectPickerResult(original + original, 39220), /ambiguous/);
+  assert.throws(() => transformProjectPickerResult(original.replace('picker.file.path', 'changed.path'), 39220), /boundary changed/);
+  assert.throws(() => transformProjectPickerResult(original, 39218), /FIXTURE_PORT/);
+  assert.equal(projectFileFixtureEnabled({}), false);
+  assert.equal(projectFileFixtureEnabled({ ...ENV, EGDESK_QA_PROJECT_FILE_FIXTURE: '1', EGDESK_QA_REAL_TURN: '0' }), true);
+  for (const env of [{ ...ENV, EGDESK_QA_PROJECT_FILE_FIXTURE: 'yes' },
+    { ...ENV, EGDESK_QA_PROJECT_FILE_FIXTURE: '1' },
+    { ...ENV, EGDESK_QA_PROJECT_FILE_FIXTURE: '1', EGDESK_QA_REAL_TURN: '1' },
+    { ...ENV, EGDESK_QA_PROJECT_FILE_FIXTURE: '1', EGDESK_QA_REAL_TURN: '0', EGDESK_QA_CLAUDE_FIXTURE: '1' }]) {
+    assert.throws(() => projectFileFixtureEnabled(env));
+  }
+});
+
+test('project picker copy, exact boundary descriptor and opt-in are bound into provenance', t => {
+  const profile = setup(t);
+  const env = { ...ENV, EGDESK_QA_PROJECT_FILE_FIXTURE: '1', EGDESK_QA_REAL_TURN: '0' };
+  const source = fs.readFileSync(path.join(overlay, QA_PROJECT_PICKER_FILE));
+  prepareQaFirefox(profile, { env });
+  const manifest = validateQaFixtureIsolation(profile, { env });
+  const entry = manifest.files[QA_PROJECT_PICKER_FILE];
+  assert.equal(entry.originalSha256, hash(source));
+  assert.equal(entry.transformedSha256, hash(fs.readFileSync(path.join(profile, 'chrome', QA_PROJECT_PICKER_FILE))));
+  assert.equal(entry.projectPickerTransform.kind, 'project-file-os-directory-result-v1');
+  assert.equal(entry.projectPickerTransform.synthetic, 'OS-picker-result-only');
+  for (const name of ['resources/EGDeskFileView.sys.mjs', 'resources/EGDeskFileCardState.sys.mjs',
+    'resources/EGDeskRunResult.sys.mjs', 'resources/EGDeskDiffView.sys.mjs', 'resources/EGDeskChangeReview.mjs']) {
+    assert.equal(manifest.files[name].originalSha256, hash(fs.readFileSync(path.join(overlay, name))));
+    assert.equal(manifest.files[name].transformedSha256, hash(fs.readFileSync(path.join(profile, 'chrome', name))));
+  }
+  assert.deepEqual(fs.readFileSync(path.join(overlay, QA_PROJECT_PICKER_FILE)), source);
+  assert.throws(() => validateQaFixtureIsolation(profile, { env: ENV }), /mismatch/);
+  assert.deepEqual(materializeQaFixtureIsolation(profile, { env }), manifest);
+  const manifestFile = path.join(profile, QA_ISOLATION_MANIFEST);
+  const changed = structuredClone(manifest);
+  changed.files[QA_PROJECT_PICKER_FILE].projectPickerTransform.replacementSha256 = '0'.repeat(64);
+  fs.writeFileSync(manifestFile, JSON.stringify(changed));
+  assert.throws(() => validateQaFixtureIsolation(profile, { env }), /mismatch/);
+});
+
+const RUN_OUTPUTS_ENV = Object.freeze({ ...ENV, EGDESK_QA_RUN_OUTPUTS_FIXTURE: '1', EGDESK_QA_REAL_TURN: '0' });
+
+test('RunOutputs opt-in fingerprints exactly its two Chat presenters and three unchanged renderers', t => {
+  assert.deepEqual(QA_RUN_OUTPUTS_FILES, ['resources/EGDeskChatRunResult.sys.mjs', 'resources/EGDeskChatChangeReview.sys.mjs',
+    'resources/EGDeskRunResult.sys.mjs', 'resources/EGDeskDiffView.sys.mjs', 'resources/EGDeskChangeReview.mjs']);
+  const before = Object.fromEntries(QA_RUN_OUTPUTS_FILES.map(name => [name, fs.readFileSync(path.join(overlay, name))]));
+  const ordinary = setup(t); prepareQaFirefox(ordinary, { env: ENV });
+  const ordinaryManifest = validateQaFixtureIsolation(ordinary, { env: ENV });
+  for (const name of QA_RUN_OUTPUTS_FILES) assert.equal(ordinaryManifest.files[name], undefined);
+  const profile = setup(t); prepareQaFirefox(profile, { env: RUN_OUTPUTS_ENV });
+  const manifest = validateQaFixtureIsolation(profile, { env: RUN_OUTPUTS_ENV });
+  assert.deepEqual(Object.keys(manifest.files).filter(name => !ordinaryManifest.files[name]), QA_RUN_OUTPUTS_FILES);
+  for (const name of QA_RUN_OUTPUTS_FILES) {
+    assert.deepEqual(manifest.files[name], { originalSha256: hash(before[name]), transformedSha256: hash(before[name]),
+      replacements: { endpointUrls: 0, helperPortConstants: 0 } });
+    assert.deepEqual(fs.readFileSync(path.join(profile, 'chrome', name)), before[name]);
+    assert.deepEqual(fs.readFileSync(path.join(overlay, name)), before[name], 'product module bytes must remain unchanged');
+  }
+  assert.equal(manifest.files[QA_PROJECT_PICKER_FILE].projectPickerTransform, undefined);
+  assert.deepEqual(materializeQaFixtureIsolation(profile, { env: RUN_OUTPUTS_ENV }), manifest);
+  assert.throws(() => validateQaFixtureIsolation(profile, { env: ENV }), /mismatch/);
+});
+
+test('RunOutputs invalid/mixed gates fail before profile preferences, overlay copies or provenance writes', t => {
+  const profile = setup(t);
+  const writes = ['writeFileSync', 'renameSync', 'cpSync'].map(method => t.mock.method(fs, method, () => {
+    throw new Error('A profile write must not precede mode validation');
+  }));
+  for (const patch of [{ EGDESK_QA_RUN_OUTPUTS_FIXTURE: 'yes' }, { EGDESK_QA_REAL_TURN: '1' },
+    { EGDESK_QA_REAL_TURN: undefined }, { EGDESK_QA_FIXTURE_TRANSPORT: '0' },
+    { EGDESK_QA_PROJECT_FILE_FIXTURE: '1' }, { EGDESK_QA_CLAUDE_FIXTURE: '1' }]) {
+    const env = { ...RUN_OUTPUTS_ENV, ...patch };
+    assert.throws(() => qaBridgeConfig(env), /fixture|isolated|Run outputs/i);
+    assert.throws(() => prepareQaFirefox(profile, { env }), /fixture|isolated|Run outputs/i);
+    assert.throws(() => materializeQaFixtureIsolation(profile, { env }), /fixture|isolated|Run outputs/i);
+  }
+  for (const spy of writes) { assert.equal(spy.mock.callCount(), 0); spy.mock.restore(); }
+  assert.equal(fs.existsSync(path.join(profile, QA_ISOLATION_MANIFEST)), false);
+});
+
+test('RunOutputs missing/tampered copies or manifest entries fail closed for every required module', t => {
+  const profile = setup(t); prepareQaFirefox(profile, { env: RUN_OUTPUTS_ENV });
+  const manifestFile = path.join(profile, QA_ISOLATION_MANIFEST), manifestBytes = fs.readFileSync(manifestFile);
+  const manifest = JSON.parse(manifestBytes);
+  for (const name of QA_RUN_OUTPUTS_FILES) {
+    const file = path.join(profile, 'chrome', name), original = fs.readFileSync(file);
+    fs.unlinkSync(file);
+    assert.throws(() => validateQaFixtureIsolation(profile, { env: RUN_OUTPUTS_ENV }), /ENOENT|missing/);
+    fs.writeFileSync(file, Buffer.concat([original, Buffer.from('\n// changed owned QA copy\n')]), { mode: 0o600 });
+    assert.throws(() => validateQaFixtureIsolation(profile, { env: RUN_OUTPUTS_ENV }), /hash mismatch/);
+    fs.writeFileSync(file, original);
+    for (const mutate of [value => { delete value.files[name]; },
+      value => { value.files[name].originalSha256 = '0'.repeat(64); },
+      value => { value.files[name].transformedSha256 = '0'.repeat(64); }]) {
+      const changed = structuredClone(manifest); mutate(changed); fs.writeFileSync(manifestFile, JSON.stringify(changed));
+      assert.throws(() => validateQaFixtureIsolation(profile, { env: RUN_OUTPUTS_ENV }), /mismatch/);
+    }
+    fs.writeFileSync(manifestFile, manifestBytes);
+    assert.deepEqual(fs.readFileSync(path.join(overlay, name)), original);
+  }
+  assert.deepEqual(validateQaFixtureIsolation(profile, { env: RUN_OUTPUTS_ENV }), manifest);
+});
+
+test('RunOutputs linked or missing copies reject materialization before even endpoint rewrites', t => {
+  const profile = setup(t); prepareQaFirefox(profile, { env: {} });
+  const surface = path.join(profile, 'chrome', 'JS/eg-desk-surface.uc.js'), surfaceBytes = fs.readFileSync(surface);
+  for (const name of QA_RUN_OUTPUTS_FILES) {
+    const file = path.join(profile, 'chrome', name), parked = path.join(profile, path.basename(name));
+    fs.renameSync(file, parked);
+    assert.throws(() => materializeQaFixtureIsolation(profile, { env: RUN_OUTPUTS_ENV }), /ENOENT|missing/);
+    fs.symlinkSync(parked, file);
+    assert.throws(() => materializeQaFixtureIsolation(profile, { env: RUN_OUTPUTS_ENV }), /linked|noncanonical/);
+    fs.unlinkSync(file); fs.linkSync(parked, file);
+    assert.throws(() => materializeQaFixtureIsolation(profile, { env: RUN_OUTPUTS_ENV }), /linked|noncanonical/);
+    fs.unlinkSync(file); fs.renameSync(parked, file);
+    assert.deepEqual(fs.readFileSync(surface), surfaceBytes);
+    assert.equal(fs.existsSync(path.join(profile, QA_ISOLATION_MANIFEST)), false);
+  }
 });
 
 test('fresh copy provenance binds every hash/count/port, leaves product bytes untouched and reapplies exactly', t => {

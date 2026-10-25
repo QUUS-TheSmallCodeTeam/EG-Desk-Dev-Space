@@ -5,13 +5,24 @@ import { fileURLToPath } from 'node:url';
 import { createHash } from 'node:crypto';
 import { assertQaFixtureManifest, qaProfileSourceFingerprints } from './egdesk-chat-qa-profile.mjs';
 import { isOwnedAndPrivate } from './egdesk-qa-platform.mjs';
+import { chatRunOutputsFixtureEnabled } from './egdesk-chat-run-outputs-fixture.mjs';
 
 export const QA_ISOLATION_MANIFEST = '.egdesk-qa-fixture-isolation.json';
+export const QA_PROJECT_PICKER_FILE = 'resources/surface/EGDeskSurfaceFileCard.mjs';
+export const QA_RUN_OUTPUTS_FILES = Object.freeze([
+  'resources/EGDeskChatRunResult.sys.mjs', 'resources/EGDeskChatChangeReview.sys.mjs',
+  'resources/EGDeskRunResult.sys.mjs', 'resources/EGDeskDiffView.sys.mjs', 'resources/EGDeskChangeReview.mjs',
+]);
 const OVERLAY = fileURLToPath(new URL('../overlay/', import.meta.url));
 const sha256 = bytes => createHash('sha256').update(bytes).digest('hex');
 const fail = message => { throw new Error(`QA fixture isolation: ${message}`); };
 
 export function qaBridgeConfig(env = process.env) {
+  // prepareQaFirefox calls this before copying files or writing preferences.
+  // Reuse the data-only sidecar gate (no dependency back to isolation), then
+  // exclude Claude here as well as at the transport boundary.
+  const runOutputsFixture = chatRunOutputsFixtureEnabled(env);
+  if (runOutputsFixture && env.EGDESK_QA_CLAUDE_FIXTURE === '1') fail('run outputs require a separate fixture mode from Claude');
   const flag = env.EGDESK_QA_FIXTURE_TRANSPORT;
   if (flag != null && flag !== '0' && flag !== '1') fail('invalid fixture mode');
   const fixture = flag === '1', value = env.EGDESK_QA_FIXTURE_PORT;
@@ -82,7 +93,55 @@ const CONSTANT_RULES = Object.freeze({
   'resources/egdesk-terminal-init.js': ['const HELPER_PORT = 39218;'],
 });
 
-export function transformQaFixtureSource(name, original, port) {
+export function projectFileFixtureEnabled(env = process.env) {
+  const flag = env.EGDESK_QA_PROJECT_FILE_FIXTURE;
+  if (flag != null && flag !== '0' && flag !== '1') fail('invalid project File fixture opt-in');
+  if (flag !== '1') return false;
+  if (env.EGDESK_QA_FIXTURE_TRANSPORT !== '1' || env.EGDESK_QA_REAL_TURN !== '0'
+      || env.EGDESK_QA_CLAUDE_FIXTURE === '1') fail('project File fixture requires isolated, model-free transport');
+  return true;
+}
+
+// Replace only the OS directory result. The shipped picker handshake, File
+// service, project attachment and FileView remain byte-identical. No globals,
+// function overrides after launch, or direct openProject calls are installed.
+export function transformProjectPickerResult(original, port) {
+  qaBridgeConfig({ EGDESK_QA_FIXTURE_TRANSPORT: '1', EGDESK_QA_FIXTURE_PORT: String(port) });
+  const start = '  function pickNativeFileDirectory() {';
+  const end = '  function pickNativeFileSaveFile(';
+  if (original.split(start).length !== 2 || original.split(end).length !== 2) {
+    fail('project picker result seam is missing or ambiguous');
+  }
+  const from = original.indexOf(start), to = original.indexOf(end);
+  const before = original.slice(from, to);
+  if (to <= from || !before.includes("Cc['@mozilla.org/filepicker;1'].createInstance(Ci.nsIFilePicker)")
+      || !before.includes('Ci.nsIFilePicker.modeGetFolder') || !before.includes('picker.file.path')) {
+    fail('project picker OS result boundary changed');
+  }
+  const replacement = `  function pickNativeFileDirectory() {
+    // Explicit, fingerprinted QA copy: only the OS folder result is synthetic.
+    return fetch('http://127.0.0.1:${port}/__qa/project-file/picker', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}',
+    }).then(async response => {
+      const packet = await response.json();
+      if (!response.ok || packet?.kind !== 'egdesk-project-file-picker-result'
+          || packet.synthetic !== true || !(packet.selection === null
+          || (typeof packet.selection === 'string' && packet.selection.startsWith('/')))) {
+        throw new Error('Owned QA picker result is unavailable; native picker is never a fallback');
+      }
+      return packet.selection;
+    });
+  }
+
+`;
+  return { text: original.slice(0, from) + replacement + original.slice(to),
+    descriptor: { kind: 'project-file-os-directory-result-v1',
+      sourceBoundarySha256: sha256(before), replacementSha256: sha256(replacement),
+      synthetic: 'OS-picker-result-only', nativePickerInvocations: 0,
+      endpoint: `http://127.0.0.1:${port}/__qa/project-file/picker` } };
+}
+
+export function transformQaFixtureSource(name, original, port, { projectFileFixture = false } = {}) {
   qaBridgeConfig({ EGDESK_QA_FIXTURE_TRANSPORT: '1', EGDESK_QA_FIXTURE_PORT: String(port) });
   let text = original;
   const replacements = { endpointUrls: 0, helperPortConstants: 0 };
@@ -98,21 +157,38 @@ export function transformQaFixtureSource(name, original, port) {
   if (/https?:\/\/(?:127\.0\.0\.1|localhost|\[::1\]):39218\b|\b(?:EGDESK_)?HELPER_PORT\s*=\s*39218\b/.test(text)) {
     fail(`unapproved production endpoint remains in ${name}`);
   }
+  if (projectFileFixture && name === QA_PROJECT_PICKER_FILE) {
+    const transformed = transformProjectPickerResult(text, port);
+    return { text: transformed.text, replacements: { ...replacements, osPickerResultBoundaries: 1 },
+      projectPickerTransform: transformed.descriptor };
+  }
   return { text, replacements };
 }
 
-function expectedFiles(profile, port) {
+function expectedFiles(profile, port, projectFileFixture = false, runOutputsFixture = false) {
   const files = {};
-  for (const [name, copyHash] of Object.entries(qaProfileSourceFingerprints(profile))) {
+  const fingerprints = qaProfileSourceFingerprints(profile);
+  if (projectFileFixture) {
+    for (const name of ['resources/EGDeskFileView.sys.mjs', 'resources/EGDeskFileCardState.sys.mjs',
+      'resources/EGDeskRunResult.sys.mjs', 'resources/EGDeskDiffView.sys.mjs', 'resources/EGDeskChangeReview.mjs']) {
+      fingerprints[name] = sha256(safeFile(path.join(profile, 'chrome', name), profile));
+    }
+  }
+  if (runOutputsFixture) for (const name of QA_RUN_OUTPUTS_FILES) {
+    fingerprints[name] = sha256(safeFile(path.join(profile, 'chrome', name), profile));
+  }
+  for (const [name, copyHash] of Object.entries(fingerprints)) {
     const source = path.join(OVERLAY, name), sourceInfo = infoOrNull(source);
     if (!sourceInfo && copyHash === null) continue;
     if (!sourceInfo || copyHash === null) fail(`overlay copy/source missing: ${name}`);
     const original = safeFile(source, path.resolve(OVERLAY));
-    const transformed = transformQaFixtureSource(name, original.toString('utf8'), port);
+    const transformed = transformQaFixtureSource(name, original.toString('utf8'), port, { projectFileFixture });
     files[name] = { originalSha256: sha256(original), transformedSha256: sha256(transformed.text),
-      replacements: transformed.replacements };
+      replacements: transformed.replacements,
+      ...(transformed.projectPickerTransform ? { projectPickerTransform: transformed.projectPickerTransform } : {}) };
   }
   if (!files['JS/eg-desk-surface.uc.js']?.replacements.endpointUrls) fail('missing surface bridge endpoints');
+  if (projectFileFixture && !files[QA_PROJECT_PICKER_FILE]?.projectPickerTransform) fail('missing project picker transform fingerprint');
   return files;
 }
 
@@ -135,7 +211,7 @@ export function validateQaFixtureIsolation(profilePath, { env = process.env, req
   if (!config.fixture) fail('fixture mode is required');
   const { profile } = assertQaFixtureManifest(profilePath);
   if (requireFresh) assertFreshQaFixtureProfile(profile);
-  const files = expectedFiles(profile, config.port), manifest = readManifest(profile);
+  const files = expectedFiles(profile, config.port, projectFileFixtureEnabled(env), chatRunOutputsFixtureEnabled(env)), manifest = readManifest(profile);
   checkManifest(manifest, profile, config, files);
   for (const [name, entry] of Object.entries(files)) {
     if (sha256(safeFile(path.join(profile, 'chrome', name), profile)) !== entry.transformedSha256) {
@@ -157,7 +233,8 @@ export function materializeQaFixtureIsolation(profilePath, { env = process.env }
   const config = qaBridgeConfig(env);
   if (!config.fixture) fail('fixture mode is required');
   const profile = assertFreshQaFixtureProfile(profilePath);
-  const files = expectedFiles(profile, config.port);
+  const projectFileFixture = projectFileFixtureEnabled(env);
+  const files = expectedFiles(profile, config.port, projectFileFixture, chatRunOutputsFixtureEnabled(env));
   const manifestPath = path.join(profile, QA_ISOLATION_MANIFEST);
   const existing = infoOrNull(manifestPath) ? readManifest(profile) : null;
   if (existing) checkManifest(existing, profile, config, files);
@@ -171,7 +248,7 @@ export function materializeQaFixtureIsolation(profilePath, { env = process.env }
     if (currentHash !== entry.originalSha256) fail(`not an unchanged overlay copy: ${name}`);
     const original = safeFile(path.join(OVERLAY, name), path.resolve(OVERLAY));
     if (sha256(original) !== entry.originalSha256) fail('source changed during materialization');
-    writes.push([destination, transformQaFixtureSource(name, original.toString('utf8'), config.port).text]);
+    writes.push([destination, transformQaFixtureSource(name, original.toString('utf8'), config.port, { projectFileFixture }).text]);
   }
   for (const [destination, text] of writes) fs.writeFileSync(destination, text);
   const manifest = { kind: 'egdesk-qa-fixture-isolation-v1', qaOnly: true, profile,

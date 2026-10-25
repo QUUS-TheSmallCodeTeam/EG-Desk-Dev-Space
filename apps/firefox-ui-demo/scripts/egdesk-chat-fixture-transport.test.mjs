@@ -8,6 +8,7 @@ import test from 'node:test';
 import vm from 'node:vm';
 import { bootstrapQaProfile, canonicalTempRoot, LOADER_FILES } from './egdesk-chat-qa-profile.mjs';
 import { createQaFixtureTransport, CLAUDE_FIXTURE_QUESTIONS, CLAUDE_FIXTURE_TEXT } from './egdesk-chat-fixture-transport.mjs';
+import { chatRunOutputFixtureIds, CHAT_RUN_OUTPUT_MARKER, CHAT_RUN_DIFF_MARKER } from './egdesk-chat-run-outputs-fixture.mjs';
 import { prepareQaFirefox } from './run-firefox-mcp-target.mjs';
 import { assertNativeTerminalExit, assertQaFixtureArtifact } from './egdesk-chat-qa-contract.sys.mjs';
 import { createChatProtocolState, mergeChatSnapshot, projectRunMessages, usableArtifact } from '../overlay/resources/EGDeskChatState.sys.mjs';
@@ -17,7 +18,7 @@ import { assertPublishedBriefing, assertContextCaptureBatch, assertStoredAgentDe
 const TOKEN = 'unit-fixture-token-no-credentials';
 const FIXTURE_ENV = { EGDESK_QA_FIXTURE_TRANSPORT: '1', EGDESK_QA_FIXTURE_PORT: '49318' };
 
-function setup(t, { claude = false, reader = false } = {}) {
+function setup(t, { claude = false, reader = false, projectFile = false, runOutputs = false } = {}) {
   const source = fs.mkdtempSync(path.join(canonicalTempRoot(), 'egdesk-loader-fixture-'));
   for (const name of LOADER_FILES) fs.writeFileSync(path.join(source, name), `unit fixture ${name}\n`);
   const { profile } = bootstrapQaProfile({ loaderSource: source });
@@ -30,9 +31,11 @@ function setup(t, { claude = false, reader = false } = {}) {
   });
   const fetchBefore = globalThis.fetch;
   const eventSourceBefore = globalThis.EventSource;
-  prepareQaFirefox(profile, { env: FIXTURE_ENV });
+  const fixtureEnv = { ...FIXTURE_ENV, ...(projectFile ? { EGDESK_QA_PROJECT_FILE_FIXTURE: '1', EGDESK_QA_REAL_TURN: '0' } : {}),
+    ...(runOutputs ? { EGDESK_QA_RUN_OUTPUTS_FIXTURE: '1', EGDESK_QA_REAL_TURN: '0' } : {}) };
+  prepareQaFirefox(profile, { env: fixtureEnv });
   const transport = createQaFixtureTransport({ profile, token: TOKEN,
-    env: { ...FIXTURE_ENV, ...(claude ? { EGDESK_QA_CLAUDE_FIXTURE: '1' } : {}),
+    env: { ...fixtureEnv, ...(claude ? { EGDESK_QA_CLAUDE_FIXTURE: '1' } : {}),
       ...(reader ? { EGDESK_QA_CLAUDE_READER_FIXTURE: '1', EGDESK_QA_REAL_TURN: '0' } : {}) } });
   t.after(() => transport.dispose());
   assert.equal(globalThis.fetch, fetchBefore);
@@ -40,9 +43,9 @@ function setup(t, { claude = false, reader = false } = {}) {
   return transport;
 }
 
-async function request(handler, method, url, body = null, token = null, onResponse = () => {}) {
+async function request(handler, method, url, body = null, token = null, onResponse = () => {}, extraHeaders = {}) {
   const req = Readable.from(body === null ? [] : [JSON.stringify(body)]);
-  Object.assign(req, { method, url, headers: token ? { 'x-egdesk-qa-token': token } : {} });
+  Object.assign(req, { method, url, headers: { ...(token ? { 'x-egdesk-qa-token': token } : {}), ...extraHeaders } });
   let status;
   let headers = {};
   let resolve;
@@ -57,6 +60,148 @@ async function request(handler, method, url, body = null, token = null, onRespon
   await handler(req, res);
   return completed;
 }
+
+const sendRunOutputs = (handler, scenario = 'RUN_OUTPUTS') => request(handler, 'POST', '/chat/send', {
+  message: `EGDESK_QA_${scenario} handler-only unit`, profileEnabled: false,
+  clientThreadId: `qa-output-${scenario}`, requestId: `qa-output-${scenario}` });
+const outputRoute = (path, run, itemId) => `${path}?${new URLSearchParams({ conversationId: run.conversationId, runId: run.runId,
+  ...(itemId === undefined ? {} : { itemId }) })}`;
+
+test('RunOutputs transport mode is explicit, excludes project/Claude/real turns, and leaves default routes disabled', async t => {
+  const fixture = setup(t), { handler, info } = fixture;
+  const env = { ...FIXTURE_ENV, EGDESK_QA_REAL_TURN: '0', EGDESK_QA_RUN_OUTPUTS_FIXTURE: '1' };
+  for (const patch of [{ EGDESK_QA_RUN_OUTPUTS_FIXTURE: 'yes' }, { EGDESK_QA_REAL_TURN: undefined },
+    { EGDESK_QA_REAL_TURN: '1' }, { EGDESK_QA_FIXTURE_TRANSPORT: '0' },
+    { EGDESK_QA_PROJECT_FILE_FIXTURE: '1' }, { EGDESK_QA_CLAUDE_FIXTURE: '1' }]) {
+    assert.throws(() => createQaFixtureTransport({ profile: info.profile, token: TOKEN, env: { ...env, ...patch } }));
+  }
+  for (const path of ['/chat/command-output', '/chat/run-changes']) {
+    for (const method of ['GET', 'OPTIONS', 'POST']) assert.equal((await request(handler, method, path)).status, 404);
+  }
+  for (const scenario of ['RUN_OUTPUTS', 'RUN_OUTPUTS_LOST']) assert.equal((await sendRunOutputs(handler, scenario)).status, 400);
+  const state = (await request(handler, 'GET', '/__qa/state', null, TOKEN)).body;
+  assert.equal(state.runOutputsFixture, undefined); assert.equal(state.runOutputs, undefined);
+  assert.equal(state.observed.approvalPostAttempts, undefined);
+  assert.deepEqual(state.runs, []); assert.deepEqual(state.observed.sends, []);
+});
+
+test('RunOutputs HTTP handler preserves loopback/token/CORS/SSE and GET views leave pending approvals unchanged', async t => {
+  const fetchSpy = t.mock.method(globalThis, 'fetch', () => { throw new Error('No provider or network access'); });
+  const { handler, info } = setup(t, { runOutputs: true });
+  assert.equal(info.runOutputsFixture, true); assert.equal(info.providerTurns, 0);
+  assert.equal((await request(handler, 'GET', '/__qa/state')).status, 403);
+  const state = async () => (await request(handler, 'GET', '/__qa/state', null, TOKEN)).body;
+  const initial = await state();
+  assert.equal(initial.runOutputsFixture, true); assert.equal(initial.providerTurns, 0);
+  assert.deepEqual(initial.runOutputs.requests, []); assert.equal(initial.observed.approvalPostAttempts, 0);
+  const wire = [];
+  const streamRequest = Object.assign(new EventEmitter(), { method: 'GET', url: '/events?chatProtocol=2', headers: {} });
+  const streamResponse = { writeHead(status, headers) { assert.equal(status, 200); assert.equal(headers['Content-Type'], 'text/event-stream'); },
+    write(value) { wire.push(value); return true; } };
+  await handler(streamRequest, streamResponse); t.after(() => streamRequest.emit('close'));
+  const ack = await sendRunOutputs(handler);
+  assert.equal(ack.status, 202);
+  const before = await state(), run = before.runs[0], ids = chatRunOutputFixtureIds(run.runId);
+  assert.equal(run.fixtureStage, 'run-outputs-ready'); assert.equal(run.pendingApprovals.length, 1);
+  assert.equal(run.pendingApprovals[0].status, 'pending');
+  assert.equal(before.runOutputs.requests.length, 0, 'metadata delivery must not prefetch output');
+  assert.equal(before.observed.events[0].event, 'run.started');
+  assert.ok(before.observed.events.some(event => event.event === 'activity.completed'));
+  assert.ok(before.observed.events.every(event => event.provider === 'codex' && event.runId === ack.body.runId));
+  assert.ok(wire.some(value => value.includes('"event":"approval.required"')));
+  assert.ok(!wire.join('').includes(CHAT_RUN_OUTPUT_MARKER) && !wire.join('').includes(CHAT_RUN_DIFF_MARKER));
+  let cors;
+  const observeHeaders = response => {
+    const original = response.writeHead;
+    response.writeHead = (status, headers) => { cors = headers; original(status, headers); };
+  };
+  for (const path of ['/chat/command-output', '/chat/run-changes']) {
+    assert.equal((await request(handler, 'OPTIONS', path, null, null, observeHeaders)).status, 204);
+    assert.equal(cors['Access-Control-Allow-Origin'], '*');
+    assert.ok(cors['Access-Control-Allow-Headers'].includes('X-EGDESK-QA-Token'));
+  }
+  for (const itemId of [ids.pass, ids.fail]) {
+    const response = await request(handler, 'GET', outputRoute('/chat/command-output', run, itemId), null, null, observeHeaders);
+    assert.equal(response.status, 200); assert.equal(response.body.complete, true);
+    assert.deepEqual([response.body.conversationId, response.body.runId, response.body.itemId], [run.conversationId, run.runId, itemId]);
+    assert.ok((response.body.head + response.body.tail).includes(CHAT_RUN_OUTPUT_MARKER));
+    assert.equal(cors['Access-Control-Allow-Origin'], '*');
+  }
+  for (const itemId of [ids.change, ids.proposed]) {
+    const response = await request(handler, 'GET', outputRoute('/chat/run-changes', run, itemId));
+    assert.equal(response.status, 200); assert.equal(response.body.retained, true);
+    assert.equal(response.body.items[0].itemId, itemId); assert.ok(response.body.items[0].files[0].diff.includes(CHAT_RUN_DIFF_MARKER));
+  }
+  const after = await state();
+  assert.deepEqual(after.runs, before.runs); assert.deepEqual(after.observed.events, before.observed.events);
+  assert.deepEqual(after.observed.approvals, []); assert.equal(after.observed.approvalPostAttempts, 0);
+  assert.equal(after.runOutputs.requests.length, 4);
+  assert.ok(after.runOutputs.requests.every(row => row.method === 'GET'));
+  assert.equal(after.runOutputs.options.length, 2);
+  assert.deepEqual(after.runOutputs.effects, { providerTurns: 0, shellExecutions: 0, fileWrites: 0, approvalPosts: 0 });
+  assert.equal(fetchSpy.mock.callCount(), 0);
+});
+
+test('RunOutputs HTTP routing rejects crossed identities, writes and injection routes; loss/disposal stay unavailable', async t => {
+  t.mock.method(globalThis, 'fetch', () => { throw new Error('No forwarding'); });
+  const fixture = setup(t, { runOutputs: true }), { handler } = fixture;
+  const state = async () => (await request(handler, 'GET', '/__qa/state', null, TOKEN)).body;
+  const ack = (await sendRunOutputs(handler)).body, ids = chatRunOutputFixtureIds(ack.runId);
+  const valid = outputRoute('/chat/command-output', ack, ids.pass);
+  for (const method of ['GET', 'OPTIONS']) {
+    assert.equal((await request(handler, method, `http://127.0.0.1:39218${valid}`)).status, 400);
+    assert.equal((await request(handler, method, valid, null, null, () => {}, { host: 'foreign.invalid' })).status, 400);
+  }
+  assert.equal((await state()).runOutputs.requests.length, 0, 'origin rejection precedes sidecar access');
+  assert.equal((await request(handler, 'GET', valid.replace(ack.conversationId, 'other-room'))).body.code, 'RUN_NOT_FOUND');
+  assert.equal((await request(handler, 'GET', `${valid}&itemId=duplicate`)).status, 400);
+  assert.equal((await request(handler, 'GET', `${valid}&cwd=/outside`)).status, 400);
+  const before = await state();
+  assert.equal((await request(handler, 'POST', valid, { output: 'must never be injected' })).status, 405);
+  assert.equal((await request(handler, 'POST', '/chat/run-changes', { diff: 'must never be injected' })).status, 405);
+  assert.equal((await request(handler, 'POST', '/__qa/run-outputs/seed', { event: 'approval.resolved' }, TOKEN)).status, 404);
+  assert.deepEqual((await state()).runs, before.runs);
+  // This negative handler test intentionally attempts one rejected approval;
+  // the native verifier must require this counter to remain zero.
+  assert.equal((await request(handler, 'POST', '/chat/approval', { ...ack, approvalId: ids.approval, decision: 'accept' })).status, 400);
+  assert.equal((await state()).observed.approvalPostAttempts, 1);
+  assert.deepEqual((await state()).observed.approvals, []);
+  const lost = (await sendRunOutputs(handler, 'RUN_OUTPUTS_LOST')).body, lostIds = chatRunOutputFixtureIds(lost.runId);
+  assert.equal((await request(handler, 'GET', outputRoute('/chat/command-output', lost, lostIds.fail))).body.code, 'COMMAND_OUTPUT_UNAVAILABLE');
+  const unavailable = await request(handler, 'GET', outputRoute('/chat/run-changes', lost));
+  assert.equal(unavailable.body.retained, false); assert.deepEqual(unavailable.body.items, []);
+  const beforeDispose = await state(); await fixture.dispose();
+  assert.equal((await request(handler, 'GET', valid)).status, 410);
+  const disposed = await state();
+  assert.equal(disposed.runOutputs.disposed, true); assert.equal(disposed.runOutputs.retainedBytes, 0);
+  assert.deepEqual(disposed.runs, beforeDispose.runs, 'disposal cannot resolve an approval or erase another run');
+});
+
+test('project File adapter and synthetic shell are strict opt-in; existing unknown-terminal behavior stays unchanged', async t => {
+  t.mock.method(globalThis, 'fetch', () => { throw new Error('No network/provider access'); });
+  const original = setup(t);
+  assert.equal((await request(original.handler, 'GET', '/__qa/project-file/state', null, TOKEN)).status, 404);
+  assert.equal((await request(original.handler, 'GET', '/terminal/shells')).status, 404);
+  const fixture = setup(t, { projectFile: true });
+  const headers = { host: '127.0.0.1:49318', 'content-type': 'application/json' };
+  const state = (await request(fixture.handler, 'GET', '/__qa/project-file/state', null, TOKEN, () => {}, headers)).body;
+  assert.equal(state.kind, 'egdesk-project-file-fixture');
+  assert.deepEqual(state.persisted, { projects: [], bindings: [] });
+  const catalog = (await request(fixture.handler, 'GET', '/terminal/shells', null, null, () => {}, headers)).body;
+  assert.equal(catalog.syntheticShell, true);
+  assert.equal(catalog.nativeProcessSpawns, 0);
+  const auth = (await request(fixture.handler, 'GET', '/auth/status')).body;
+  assert.equal(auth.isLoggedIn, false);
+  assert.equal(auth.accountId, null);
+  assert.equal((await request(fixture.handler, 'GET', '/health')).body.appServerReady, false);
+  assert.equal((await request(fixture.handler, 'POST', '/chat/send', { message: 'EGDESK_QA_TEXT unit' })).body.code, 'PROJECT_QA_MODEL_DISABLED');
+  const mainState = (await request(fixture.handler, 'GET', '/__qa/state', null, TOKEN)).body;
+  assert.equal(mainState.projectFileFixture, true);
+  assert.equal(mainState.providerTurns, 0);
+  assert.deepEqual(mainState.observed.sends, []);
+  assert.deepEqual(mainState.runs, []);
+  assert.equal((await request(fixture.handler, 'POST', '/v1/files/git/status', {}, null, () => {}, headers)).status, 403);
+});
 
 test('fixture rejects unknown bridge/auth/send/approval URLs without forwarding or replacing globals', async (t) => {
   const fetchBefore = globalThis.fetch;

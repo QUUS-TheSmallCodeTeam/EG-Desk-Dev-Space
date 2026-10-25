@@ -15,7 +15,8 @@ import { chatIdentity, chrome, loopbackJson, newQaThread, observeChatEvents, opt
 
 const BROWSER_TOOL_NAMES = Object.freeze({ observe: 'egdesk_browser_observe',
   click: 'egdesk_browser_click', fill: 'egdesk_browser_fill' });
-const QA_CASES = Object.freeze(['native', 'source', 'browser', 'browser-negative']);
+const QA_CASES = Object.freeze(['native', 'source', 'browser', 'browser-negative', 'browser-relay']);
+const MODEL_FREE_BROWSER_CASES = Object.freeze(['browser-negative', 'browser-relay']);
 const sha256 = value => createHash('sha256').update(value).digest('hex');
 const same = (a, b) => JSON.stringify(a) === JSON.stringify(b);
 const required = (value, label) => { assert.ok(value, label); return value; };
@@ -71,14 +72,18 @@ export function parseCases(value) {
   const cases = value.split(',');
   assert.ok(cases.length > 0 && cases.every(item => QA_CASES.includes(item))
     && new Set(cases).size === cases.length,
-  '--cases must be a comma-separated unique subset of native,source,browser,browser-negative');
+  '--cases must be a comma-separated unique subset of native,source,browser,browser-negative,browser-relay');
   return cases;
 }
 
 export function assertQaExecutionMode(cases, env = process.env) {
-  if (cases.includes('browser-negative')) {
-    assert.deepEqual(cases, ['browser-negative'], 'Browser simulator probes must run separately from provider cases');
+  if (cases.some(item => MODEL_FREE_BROWSER_CASES.includes(item))) {
+    assert.ok(cases.length === 1, 'Browser simulator probes must run separately from provider cases');
     assert.equal(env.EGDESK_QA_BROWSER_NEGATIVE, '1', 'explicit EGDESK_QA_BROWSER_NEGATIVE=1 is required');
+    if (cases[0] === 'browser-relay') {
+      assert.equal(env.EGDESK_QA_BROWSER_RELAY, '1', 'explicit EGDESK_QA_BROWSER_RELAY=1 is required');
+      assert.equal(env.EGDESK_QA_BROWSER_NEGATIVE_HEADLESS, '1', 'Browser relay acceptance is headless-only');
+    }
     assert.equal(env.EGDESK_QA_FIXTURE_TRANSPORT, '1', 'model-free Browser probes require the explicit fixture backend');
     assert.ok(typeof env.EGDESK_QA_FIXTURE_TOKEN === 'string' && env.EGDESK_QA_FIXTURE_TOKEN.length >= 16,
       'a fixture backend token is required');
@@ -113,13 +118,13 @@ export function assertNegativeFixtureBackend(profile, health, state, env = proce
 
 export function assertQaAttachMode(cases, env = process.env) {
   assertQaExecutionMode(cases, env);
-  const simulator = cases.length === 1 && cases[0] === 'browser-negative';
+  const simulator = cases.length === 1 && MODEL_FREE_BROWSER_CASES.includes(cases[0]);
   const headless = env.EGDESK_QA_BROWSER_NEGATIVE_HEADLESS;
   assert.ok(headless == null || headless === '0' || headless === '1', 'invalid headless diagnostic gate');
-  assert.ok(headless !== '1' || simulator, 'headless diagnostics are only for model-free browser-negative');
+  assert.ok(headless !== '1' || simulator, 'headless diagnostics are only for model-free Browser cases');
   assert.ok(env.EGDESK_MARIONETTE_PORT === '2828'
     || (simulator && env.EGDESK_MARIONETTE_PORT === '2829'),
-  'Lane C requires port 2828; only fixture-only browser-negative may attach to 2829');
+  'Lane C requires port 2828; only fixture-only Browser cases may attach to 2829');
   return { headlessDiagnostics: simulator && headless === '1' };
 }
 
@@ -267,7 +272,7 @@ export function scenarioCoverage(requestedCases, completedCases) {
   // A separately selected synthetic Browser probe is not native-model proof.
   // The stronger native-model Browser negative adapter is still unavailable,
   // so even all three positive model cases leave that explicit evidence gap.
-  const missingEvidence = QA_CASES.filter(item => item !== 'browser-negative'
+  const missingEvidence = QA_CASES.filter(item => !MODEL_FREE_BROWSER_CASES.includes(item)
     && !completedCases.includes(item)).map(item => `native-model-${item}`);
   missingEvidence.push('native-model-browser-negative');
   const fullScenarioVerified = selectedCasesVerified && missingEvidence.length === 0;
@@ -2525,7 +2530,7 @@ async function selectOwnedProbeSource(harness, thread, cardId, ownerTag, permiss
 }
 
 async function newNegativeService(harness, thread, cardId, source, deadlineMs,
-  { holdFirstBind = false } = {}) {
+  { holdFirstBind = false, relayEvidence = false } = {}) {
   // This B service instance uses a synthetic run and direct test-only UI
   // dispatcher. It never registers with A or claims model/native origin.
   const { createBrowserToolService } = await import('../helper/egdesk-browser-tool-runtime.mjs');
@@ -2588,7 +2593,8 @@ async function newNegativeService(harness, thread, cardId, source, deadlineMs,
         actorDiagnostic: sampled.actorDiagnostic, requestJsonLength: requestJson.length } : {}),
       ...(Object.hasOwn(response || {}, 'dispatchPhase') ? { dispatchPhase: response.dispatchPhase } : {}),
       ...(response?.timing && typeof response.timing === 'object' ? { timing: { ...response.timing } } : {}),
-      status: response?.status || null, error: String(response?.error || '').slice(0, 200) });
+      status: response?.status || null, error: String(response?.error || '').slice(0, 200),
+      ...(relayEvidence ? { wireRequest: structuredClone(request), wireResponse: structuredClone(response) } : {}) });
     if (request.kind === 'bind' && response?.binding) trace.binding = response.binding;
     return response;
   };
@@ -3375,6 +3381,320 @@ export function expectedBrowserCatalog(permission) {
       'egdesk_browser_scroll', 'egdesk_browser_press', 'egdesk_browser_wait', 'egdesk_browser_wait_text'];
 }
 
+const BROWSER_RELAY_UNVERIFIED = Object.freeze([
+  'lost-act-response-timeout-and-automatic-reconcile',
+  'dialog-kind-with-an-open-native-dialog',
+  'obscuredBy-with-a-real-obscuring-element',
+  'coordinate-or-trusted-input',
+]);
+
+function relayErrorEvidence(error) {
+  return { code: error.code, dispatchPhase: error.dispatchPhase, dispatched: error.dispatched,
+    ...(error.timing ? { timing: { ...error.timing } } : {}),
+    ...(error.reconcile ? { reconcile: { ...error.reconcile } } : {}) };
+}
+
+// These are independent actor snapshots, not DOM values supplied by the
+// request adapter. The fixture itself increments the click marker.
+function assertRelaySnapshot(proof, evidence, clicks, performs) {
+  const { binding, snapshot } = evidence || {};
+  assert.ok(binding?.cardId === proof.cardId && binding.cardEpoch === proof.cardEpoch
+    && binding.accountId === '' && snapshot?.cardId === proof.cardId,
+  'relay evidence escaped its owned, account-free Card');
+  assert.equal(snapshot.documentId, proof.documentId, 'relay evidence crossed actor documents');
+  assert.equal(snapshot.url, proof.fixture.url, 'relay evidence left the exact local fixture');
+  assert.ok(snapshot.text?.includes(proof.fixture.marker)
+    && snapshot.text.includes(`QA click count: ${clicks}`), 'relay lacks the actual fixture click count');
+  assert.ok(Number.isSafeInteger(snapshot.revision) && snapshot.viewport,
+    'relay evidence lacks the observed revision/viewport');
+  assert.equal(evidence.inputValue, '', 'relay changed the unrelated fixture input');
+  assert.deepEqual(snapshot.qaDiagnostics, { kind: 'actor-perform-entry',
+    actorDocumentId: proof.documentId, performCalls: performs }, 'relay actor perform count differs');
+}
+
+export function assertBrowserRelayProbeResults(proof) {
+  assertBrowserFixtureConfig(proof?.fixture?.url, proof?.fixture?.marker);
+  assert.equal(proof.simulatorOnly, true, 'relay probe uses a synthetic B run, not a model turn');
+  assert.equal(proof.nativeModelOriginVerified, false);
+  assert.equal(proof.providerTurns, 0);
+  assert.equal(proof.coordinateInputVerified, false);
+  assert.equal(proof.timeoutRecoveryVerified, false, 'explicit reconciliation is not transport-timeout proof');
+  assert.equal(proof.lateFenceTrigger, 'explicit-reconcile-before-delivery');
+  assert.deepEqual(proof.unverified, BROWSER_RELAY_UNVERIFIED, 'relay evidence gaps must remain explicit');
+  assert.ok(proof.cardId && proof.cardEpoch && proof.sourceId && proof.documentId
+    && proof.syntheticRunId?.startsWith('qa-browser-simulator-'), 'relay lost its selected-Card/run identity');
+  assert.equal(proof.preexistingBrowserCardStylesUnchanged, true);
+  assert.equal(proof.canvasPanZoomUnchanged, true);
+  const requests = proof.uiRequests;
+  assert.deepEqual(requests?.map(item => item.kind),
+    ['bind', 'observe', 'act', 'reconcile', 'observe', 'reconcile', 'act', 'observe', 'act', 'act', 'cancel'],
+    'relay sent an extra request, replayed input or omitted a bounded step');
+  for (const item of requests) {
+    const wire = item.wireRequest, response = item.wireResponse;
+    assert.ok(wire?.requestId && item.requestId === wire.requestId
+      && response?.requestId === wire.requestId && item.responseRequestId === wire.requestId
+      && wire.cardId === proof.cardId && item.cardId === proof.cardId
+      && wire.targetCardEpoch === proof.cardEpoch && item.targetCardEpoch === proof.cardEpoch
+      && wire.runId === proof.syntheticRunId && item.runId === proof.syntheticRunId
+      && wire.clientThreadId === proof.clientThreadId && item.clientThreadId === proof.clientThreadId
+      && item.status === response.status && Number.isFinite(item.attemptedAt)
+      && item.respondedAt >= item.attemptedAt, 'relay request/response correlation is incomplete');
+    if (item.kind === 'act') {
+      assert.deepEqual(item.action, wire.action, 'relay trace changed the requested action');
+      assert.deepEqual(item.guard, wire.guard, 'relay trace changed the observed guard');
+      assert.deepEqual(item.timing, response.timing, 'relay trace changed the actor timing');
+      assert.equal(item.dispatchPhase, response.dispatchPhase, 'relay trace changed the dispatch phase');
+    }
+  }
+  const observed = proof.staleRevision.observed;
+  assert.ok(observed?.observationId && observed.status === 'observed'
+    && observed.cardId === proof.cardId && observed.snapshot.documentId === proof.documentId);
+  assert.equal(proof.staleRevision.code, 'BROWSER_OBSERVATION_STALE');
+  assert.equal(proof.staleRevision.expectedRevision, observed.snapshot.revision + 1);
+  assert.equal(proof.staleRevision.uiActRequestsBefore, 0);
+  assert.equal(proof.staleRevision.uiActRequestsAfter, 0);
+  assertRelaySnapshot(proof, proof.staleRevision.before, 0, 0);
+  assertNegativeNoEffect(proof.staleRevision.before, proof.staleRevision.after, 'relay stale revision');
+
+  const duplicate = proof.duplicateCall, act = requests[2];
+  assert.ok(duplicate.callId && duplicate.callId === act.wireRequest.callId);
+  assert.equal(duplicate.uiActRequestsAfterFirst, 1);
+  assert.equal(duplicate.uiActRequestsAfterDuplicate, 1);
+  assert.deepEqual(duplicate.duplicate, duplicate.first, 'same native call ID changed its original result/evidence');
+  assert.equal(act.status, 'acted');
+  assert.equal(act.action.type, 'click');
+  const target = observed.snapshot.interactiveElements.find(item => item.label === 'Reveal QA details');
+  assert.ok(target?.ref && !target.disabled, 'relay click target was not freshly observed');
+  assertProbeGuard(act, observed.snapshot, target);
+  assertActedTiming(act, 0, 1, 'relay original call');
+  assertProbeActionDiagnostic(act, proof.cardId, 'post-actor', 'acted');
+  assert.ok(Number.isFinite(act.timing.actorReceivedAtMs) && act.timing.actorReceivedAtMs > 0,
+    'relay lost the actor receive timestamp');
+  assert.ok(Number.isSafeInteger(act.wireRequest.budgetMs) && act.wireRequest.budgetMs > 0,
+    'relay request lacks the backend relative budget');
+  assert.equal(duplicate.first.status, 'postcondition-observed');
+  assert.equal(duplicate.first.externalEffectVerified, false);
+  assert.deepEqual(duplicate.first.postcondition, { kind: 'visible-text', value: 'QA click count: 1',
+    matched: true, wasAlreadyTrue: false });
+  assert.ok(duplicate.first.dispatchReceipt?.actor === 'JSWindowActor'
+    && duplicate.first.dispatchReceipt.eventDispatched === true
+    && duplicate.first.dispatchReceipt.documentStillCurrent === true
+    && duplicate.first.dispatchReceipt.clickInputRoute === 'dom-click-no-pointerdown'
+    && duplicate.first.dispatchReceipt.targetClickObserved === true,
+  'relay click lacks its real current-document dispatch receipt');
+  assertRelaySnapshot(proof, duplicate.afterFirst, 1, 1);
+  assertNegativeNoEffect(duplicate.afterFirst, duplicate.afterDuplicate, 'duplicate native call ID');
+  assert.deepEqual(duplicate.first.after, act.wireResponse.receipt.after, 'backend lost the original action snapshot');
+  assert.deepEqual(duplicate.first.observation, act.wireResponse.receipt.observation,
+    'backend lost the original action evidence');
+
+  const entered = requests[3];
+  assert.equal(entered.wireRequest.callId, duplicate.callId);
+  assert.equal(entered.wireRequest.actRequestId, undefined,
+    'call-ID propagation must be proven without the request-ID fallback');
+  assert.equal(entered.status, 'reconciled');
+  assert.ok(entered.wireResponse.reconcile?.callId === duplicate.callId
+    && entered.wireResponse.reconcile.documentId === proof.documentId
+    && entered.wireResponse.reconcile.entered === true
+    && entered.wireResponse.reconcile.performing === false, 'reconcile lost the actual original-call record');
+  assert.deepEqual(entered.wireResponse.reconcile.timing,
+    { performEnterMs: act.timing.performEnterMs, performExitMs: act.timing.performExitMs },
+    'reconcile changed the original actor perform evidence');
+  assertNegativeNoEffect(duplicate.afterDuplicate, proof.afterEnteredReconcile, 'entered reconcile');
+
+  const late = proof.lateFence, fenced = requests[5], denied = requests[6];
+  assert.ok(late.observed?.observationId && late.observed.observationId !== observed.observationId
+    && late.observed.snapshot.documentId === proof.documentId, 'late request needs a fresh observation');
+  assert.ok(late.callId && late.callId !== duplicate.callId
+    && fenced.wireRequest.callId === late.callId && denied.wireRequest.callId === late.callId);
+  assert.equal(fenced.wireRequest.actRequestId, undefined,
+    'late fence must use the original call ID, not a fabricated request-ID match');
+  assert.equal(fenced.status, 'reconciled');
+  assert.deepEqual(fenced.wireResponse.reconcile, { version: 1, callId: late.callId,
+    documentId: proof.documentId, entered: false, fenced: true });
+  assertNegativeNoEffect(late.before, late.afterReconcile, 'not-entered reconcile');
+  const lateTarget = late.observed.snapshot.interactiveElements.find(item => item.label === 'Reveal QA details');
+  assertProbeGuard(denied, late.observed.snapshot, lateTarget);
+  assertNotDispatchedReceipt(denied, 'late fenced action');
+  assertProbeActionDiagnostic(denied, proof.cardId, 'actor', 'rejected');
+  assert.match(denied.error, /reconciled as never sent/i, 'late request failed for a reason other than the real actor fence');
+  assert.equal(denied.timing.performCallsBefore, 1);
+  assert.equal(denied.timing.performCallsAfter, 1);
+  assert.equal(late.denial.code, 'BROWSER_OBSERVATION_STALE');
+  assert.equal(late.denial.dispatchPhase, 'not-dispatched');
+  assert.equal(late.denial.dispatched, false);
+  assert.deepEqual(late.duplicateDenial, late.denial, 'duplicate denied call changed its original refusal');
+  assert.equal(late.uiActRequestsAfterFirst, 2);
+  assert.equal(late.uiActRequestsAfterDuplicate, 2);
+  assertRelaySnapshot(proof, late.afterFirst, 1, 1);
+  assertNegativeNoEffect(late.afterReconcile, late.afterFirst, 'late fenced action');
+  assertNegativeNoEffect(late.afterFirst, late.afterDuplicate, 'duplicate late action');
+
+  // An already-expired request is deterministically testable without delaying
+  // transport or replacing a live response. It is NOT a lost-response timeout.
+  const expired = proof.expiredRequest, expiry = requests[8], expiryReplay = requests[9];
+  assert.equal(expired.scope, 'already-expired-ui-request-not-response-timeout');
+  assert.deepEqual(expiryReplay.wireRequest, expiry.wireRequest);
+  assert.deepEqual(expiryReplay.wireResponse, expiry.wireResponse);
+  assert.ok(expiry.wireRequest.deadlineMs <= expiry.attemptedAt);
+  assertNotDispatchedReceipt(expiry, 'expired request');
+  assert.match(expiry.error, /expired/i);
+  assertNegativeNoEffect(expired.before, expired.afterFirst, 'expired request');
+  assertNegativeNoEffect(expired.afterFirst, expired.afterDuplicate, 'expired request replay');
+  assertRelaySnapshot(proof, expired.afterDuplicate, 1, 1);
+  assert.equal(requests.at(-1).status, 'cancelled', 'relay did not close its owned synthetic run');
+  return true;
+}
+
+export async function runBrowserRelayProbes(harness, fixture, deadlineMs, result) {
+  assertTurnTimeBudget(deadlineMs);
+  await assertBrowserFixtureServerReady(fixture);
+  await harness.assertRemoteProfile();
+  assert.equal(await chrome(harness, () =>
+    Cc['@mozilla.org/gfx/info;1'].getService(Ci.nsIGfxInfo).isHeadless), true,
+  'Browser relay acceptance requires an actually headless Firefox');
+  result.browserRelayStage = 'owned-fixture-setup';
+  await chrome(harness, () => window.__egdesk.surface.enterDesk());
+  const priorCards = await chrome(harness, () => [...document.querySelectorAll('.egd-browser-card')]
+    .map(card => ({ id: card.id, style: card.style.cssText })).sort((a, b) => a.id.localeCompare(b.id)));
+  const ownerTag = probeId('lane-c-relay-owner');
+  const cardId = await chrome(harness, ({ url, ownerTag }) => {
+    const card = window.__egdesk.cardRuntime.openBrowserCard(url, { openMode: 'new' });
+    card.dataset.egdeskQaNegativeOwner = ownerTag;
+    return card.id;
+  }, { url: fixture.url, ownerTag });
+  result.browserRelayOwnedCardId = cardId;
+  const snapshot = () => ownedNegativeBrowserSnapshot(harness, cardId, ownerTag, fixture);
+  await waitUntil(async () => { try { return await snapshot(); } catch { return null; } },
+    value => value?.snapshot?.text?.includes(fixture.marker), { timeoutMs: 15000, intervalMs: 200 });
+  const thread = await newQaThreadInVisibleChat(harness, 'QA Browser request relay', deadlineMs);
+  const initialChat = await chatIdentity(harness);
+  assert.equal(initialChat.threadId, thread.id);
+  assert.equal(initialChat.conversationId, null);
+  assert.deepEqual(initialChat.runs, []);
+  const camera = await chrome(harness, () => ({ pan: { ...window.__egdesk.state.panTarget },
+    zoom: window.__egdesk.state.zoomTarget }));
+  assertBeforeDeadline(deadlineMs);
+  const source = await selectOwnedProbeSource(harness, thread, cardId, ownerTag, 'interact', fixture);
+  const unit = await newNegativeService(harness, thread, cardId, source, deadlineMs, { relayEvidence: true });
+  const proof = result.browserRelay = { simulatorOnly: true, nativeModelOriginVerified: false, providerTurns: 0,
+    coordinateInputVerified: false, timeoutRecoveryVerified: false,
+    lateFenceTrigger: 'explicit-reconcile-before-delivery', unverified: [...BROWSER_RELAY_UNVERIFIED],
+    cardId, cardEpoch: source.browserToolIdentity.cardEpoch, sourceId: source.id,
+    syntheticRunId: unit.run.runId, clientThreadId: thread.wireClientThreadId, fixture,
+    uiRequests: unit.trace.requests };
+  const actCount = () => unit.trace.requests.filter(item => item.kind === 'act').length;
+  const observe = async () => {
+    assertBeforeDeadline(deadlineMs);
+    return unit.service.dispatch(unit.run, { tool: BROWSER_TOOL_NAMES.observe,
+      callId: probeId('qa-relay-observe'), arguments: { cardId } });
+  };
+  const clickEvent = (observed, callId, count) => {
+    const target = observed.snapshot.interactiveElements.find(item => item.label === 'Reveal QA details');
+    assert.ok(target?.ref && target.disabled === false, 'relay fixture button is unavailable');
+    return { tool: BROWSER_TOOL_NAMES.click, callId, arguments: { cardId,
+      observationId: observed.observationId, expectedRevision: observed.snapshot.revision,
+      ref: target.ref, expectedTarget: target,
+      postcondition: { kind: 'visible-text', value: `QA click count: ${count}` } } };
+  };
+  const reconcile = (observed, callId) => unit.uiDispatch({ version: 1,
+    requestId: probeId('qa-relay-reconcile'), kind: 'reconcile', runId: unit.run.runId,
+    clientThreadId: unit.run.clientThreadId, cardId, targetCardEpoch: proof.cardEpoch,
+    deadlineMs: Math.min(deadlineMs, Date.now() + 15000), budgetMs: 15000,
+    binding: unit.trace.binding, callId, guard: { documentId: observed.snapshot.documentId,
+      innerWindowId: observed.snapshot.innerWindowId, browsingContextId: observed.snapshot.browsingContextId } });
+  const deniedCall = async event => {
+    try { await unit.service.dispatch(unit.run, event); assert.fail('fenced Browser call unexpectedly succeeded'); }
+    catch (error) { assert.equal(error.code, 'BROWSER_OBSERVATION_STALE'); return relayErrorEvidence(error); }
+  };
+  try {
+    await unit.service.bind(unit.run, unit.prepared);
+    const observed = await observe();
+    proof.documentId = observed.snapshot.documentId;
+    result.browserRelayStage = 'stale-expected-revision';
+    const originalCall = clickEvent(observed, probeId('qa-relay-original'), 1);
+    const stale = { ...originalCall, callId: probeId('qa-relay-stale'),
+      arguments: { ...originalCall.arguments, expectedRevision: observed.snapshot.revision + 1 } };
+    const staleProof = proof.staleRevision = { observed, expectedRevision: stale.arguments.expectedRevision,
+      before: await snapshot(), uiActRequestsBefore: actCount() };
+    assertRelaySnapshot(proof, staleProof.before, 0, 0);
+    staleProof.code = await expectNegativeCode(unit.service.dispatch(unit.run, stale),
+      ['BROWSER_OBSERVATION_STALE'], 'relay stale expectedRevision');
+    Object.assign(staleProof, { after: await snapshot(), uiActRequestsAfter: actCount() });
+    assertNegativeNoEffect(staleProof.before, staleProof.after, 'relay stale revision');
+    result.browserRelayStage = 'original-call-id-duplicate';
+    const duplicate = proof.duplicateCall = { callId: originalCall.callId };
+    assertBeforeDeadline(deadlineMs);
+    duplicate.first = await unit.service.dispatch(unit.run, originalCall);
+    duplicate.afterFirst = await snapshot();
+    assert.equal(duplicate.first.status, 'postcondition-observed', 'original relay click was not confirmed');
+    assertRelaySnapshot(proof, duplicate.afterFirst, 1, 1);
+    duplicate.uiActRequestsAfterFirst = actCount();
+    duplicate.duplicate = await unit.service.dispatch(unit.run, originalCall);
+    duplicate.afterDuplicate = await snapshot();
+    duplicate.uiActRequestsAfterDuplicate = actCount();
+    assertNegativeNoEffect(duplicate.afterFirst, duplicate.afterDuplicate, 'duplicate original call ID');
+    result.browserRelayStage = 'reconcile-original-actor-evidence';
+    const entered = await reconcile(observed, originalCall.callId);
+    assert.equal(entered.status, 'reconciled', 'actual UI reconcile path is unavailable');
+    assert.ok(entered.reconcile?.callId === originalCall.callId
+      && entered.reconcile.documentId === proof.documentId && entered.reconcile.entered === true,
+    'actual actor has no record of the original call ID');
+    proof.afterEnteredReconcile = await snapshot();
+    result.browserRelayStage = 'real-actor-fence-before-late-delivery';
+    const fresh = await observe();
+    const lateCall = clickEvent(fresh, probeId('qa-relay-late'), 2);
+    const late = proof.lateFence = { observed: fresh, callId: lateCall.callId, before: await snapshot() };
+    const fenced = await reconcile(fresh, lateCall.callId);
+    assert.equal(fenced.status, 'reconciled', 'actual UI reconcile path is unavailable');
+    assert.deepEqual(fenced.reconcile, { version: 1, callId: lateCall.callId,
+      documentId: proof.documentId, entered: false, fenced: true },
+    'actual actor did not fence the late original call ID');
+    late.afterReconcile = await snapshot();
+    assertBeforeDeadline(deadlineMs);
+    late.denial = await deniedCall(lateCall);
+    late.afterFirst = await snapshot();
+    late.uiActRequestsAfterFirst = actCount();
+    late.duplicateDenial = await deniedCall(lateCall);
+    late.afterDuplicate = await snapshot();
+    late.uiActRequestsAfterDuplicate = actCount();
+    result.browserRelayStage = 'expired-request-no-success-or-replay';
+    const expiryObserved = await observe();
+    const expiryCall = clickEvent(expiryObserved, probeId('qa-relay-expired'), 2);
+    const target = expiryCall.arguments.expectedTarget;
+    const expired = proof.expiredRequest = { scope: 'already-expired-ui-request-not-response-timeout',
+      before: await snapshot() };
+    const expiredRequest = { version: 1, requestId: probeId('qa-relay-expired-request'), kind: 'act',
+      runId: unit.run.runId, clientThreadId: unit.run.clientThreadId, cardId,
+      targetCardEpoch: proof.cardEpoch, binding: unit.trace.binding, callId: expiryCall.callId,
+      deadlineMs: Date.now() - 1, budgetMs: 1, action: { type: 'click', ref: target.ref },
+      guard: { documentId: expiryObserved.snapshot.documentId, revision: expiryObserved.snapshot.revision,
+        viewport: expiryObserved.snapshot.viewport, url: expiryObserved.snapshot.url,
+        focusedRef: expiryObserved.snapshot.focusedElement?.ref || null, target } };
+    await unit.uiDispatch(expiredRequest);
+    expired.afterFirst = await snapshot();
+    await unit.uiDispatch(expiredRequest);
+    expired.afterDuplicate = await snapshot();
+  } finally {
+    // Close only this synthetic run. No browser/process/port ownership here.
+    await unit.service.cancelRun(unit.run);
+  }
+  const final = await chrome(harness, priorCards => ({
+    cards: priorCards.map(item => ({ id: item.id, style: document.getElementById(item.id)?.style.cssText ?? null })),
+    pan: { ...window.__egdesk.state.panTarget }, zoom: window.__egdesk.state.zoomTarget,
+  }), priorCards);
+  assert.deepEqual(final.cards, priorCards, 'relay changed preexisting Browser Card styles');
+  assert.deepEqual({ pan: final.pan, zoom: final.zoom }, camera, 'relay changed the Canvas camera');
+  const finalChat = await chatIdentity(harness);
+  assert.equal(finalChat.threadId, thread.id);
+  assert.equal(finalChat.conversationId, null);
+  assert.deepEqual(finalChat.runs, []);
+  Object.assign(proof, { preexistingBrowserCardStylesUnchanged: true, canvasPanZoomUnchanged: true });
+  assertBrowserRelayProbeResults(proof);
+  result.browserRelayStage = 'bounded-live-relay-probes-verified';
+  return proof;
+}
+
 async function runBrowserNegativeProbes(harness, fixture, deadlineMs, result) {
   assertTurnTimeBudget(deadlineMs);
   result.browserNegativeStage = 'fixture-preflight';
@@ -3921,9 +4241,9 @@ async function main() {
   const resumeSource = parseResumeSourceOptions({ threadId: option('--resume-source'),
     root: option('--resume-source-root'), sourceId: option('--resume-source-id'),
     originalHash: option('--resume-source-original-sha256') }, cases, resumeEmptyThreadId);
-  if (cases.includes('browser-negative')) assert.deepEqual(cases, ['browser-negative'],
+  if (cases.some(item => MODEL_FREE_BROWSER_CASES.includes(item))) assert.equal(cases.length, 1,
     'Browser simulator probes must run separately from provider cases');
-  const browserFixture = cases.includes('browser') || cases.includes('browser-negative')
+  const browserFixture = cases.includes('browser') || cases.some(item => MODEL_FREE_BROWSER_CASES.includes(item))
     ? assertBrowserFixtureConfig(
       required(option('--browser-fixture-url'), '--browser-fixture-url is required for Browser QA'),
       required(option('--browser-fixture-marker'), '--browser-fixture-marker is required for Browser QA'))
@@ -3941,6 +4261,25 @@ async function main() {
     const manifest = assertQaFixtureManifest(profile);
     check('dedicated real-turn fixture cwd exists', !!manifest.realTurnCwd);
     assertBeforeDeadline(deadlineMs);
+    if (cases.includes('browser-relay')) {
+      result.kind = 'browser-relay-test-only-simulator';
+      result.browserRelayAuthority = 'test-only-synthetic-B-service-through-live-UI-and-JSWindowActor';
+      result.nativeModelOriginVerified = false;
+      result.providerTurn = 'not-run-test-only-simulator';
+      const state = () => loopbackJson('/__qa/state', { token: process.env.EGDESK_QA_FIXTURE_TOKEN });
+      result.browserRelayBackendBefore = assertNegativeFixtureBackend(profile, await loopbackJson('/health'), await state());
+      try {
+        await runBrowserRelayProbes(harness, browserFixture, deadlineMs, result);
+        result.browserRelayDomProbeProofVerified = true;
+        result.visualPass = null;
+        result.visualReview = 'not-performed-dom-only';
+      } finally {
+        result.browserRelayBackendAfter = assertNegativeFixtureBackend(profile, await loopbackJson('/health'), await state());
+      }
+      result.completedCases.push('browser-relay');
+      Object.assign(result, scenarioCoverage(cases, result.completedCases));
+      return;
+    }
     if (cases.includes('browser-negative')) {
       result.kind = 'browser-negative-test-only-simulator';
       result.browserNegativeAuthority = 'test-only-synthetic-B-service-and-owned-UI';

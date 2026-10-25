@@ -4,7 +4,7 @@
 import { createHmac, randomUUID } from 'node:crypto';
 import { assertFreshAccountRoom, assertOrdinarySend, assertPlainRenderedMessage, assertQaFixtureArtifact } from './egdesk-chat-qa-contract.sys.mjs';
 import { assertQaFixtureManifest } from './egdesk-chat-qa-profile.mjs';
-import { attributeSelector, chatIdentity, chrome, loopbackJson, newQaThread,
+import { attributeSelector, chatIdentity, chrome, loopbackJson, newQaThread, openChat,
   replaceComposerText, runUiFlow, selectQaThread, sendFromComposer, visible, waitUntil } from './egdesk-qa-ui-flow.mjs';
 
 const token = process.env.EGDESK_QA_FIXTURE_TOKEN || '';
@@ -15,6 +15,72 @@ if (process.env.EGDESK_QA_FIXTURE_TRANSPORT !== '1' || token.length < 16) {
 async function canvasState(harness) {
   return chrome(harness, () => ({ cards: [...document.querySelectorAll('.egd-canvas-card')].map((node) => node.id).sort(),
     pan: { ...window.__egdesk.state.panTarget }, zoom: window.__egdesk.state.zoomTarget }));
+}
+
+function createChatNavigationReadiness(expectedThreadId = null) {
+  let prior = null, samples = 0;
+  return value => {
+    const target = value?.target, rect = target?.rect, camera = value?.camera;
+    const ready = value?.count === 1 && (!expectedThreadId || value.threadId === expectedThreadId) &&
+      !!value.rootId && target?.visible === true && target.disabled === false && target.hitCount === 9 &&
+      target.inside === true && target.clipped === false && rect &&
+      [rect.left, rect.top, rect.right, rect.bottom, camera?.x, camera?.y, camera?.zoom,
+        camera?.targetX, camera?.targetY, camera?.targetZoom].every(Number.isFinite) &&
+      Math.abs(camera.x - camera.targetX) < 0.25 && Math.abs(camera.y - camera.targetY) < 0.25 &&
+      Math.abs(camera.zoom - camera.targetZoom) < 0.0001;
+    if (!ready) { prior = null; samples = 0; return false; }
+    const geometry = [rect.left, rect.top, rect.right, rect.bottom, camera.x, camera.y, camera.zoom];
+    const identity = JSON.stringify([value.threadId, value.rootId, value.selector]);
+    if (prior?.identity === identity && geometry.every((n, i) => Math.abs(n - prior.geometry[i]) <= 0.25)) samples++;
+    else { prior = { identity, geometry }; samples = 1; }
+    return samples >= 3;
+  };
+}
+
+async function observeChatNavigation(harness, selector) {
+  return chrome(harness, selector => {
+    const matches = [...document.querySelectorAll(selector)], node = matches.length === 1 ? matches[0] : null;
+    const r = node?.getBoundingClientRect(), style = node && getComputedStyle(node), state = window.__egdesk?.state;
+    let clipped = false;
+    for (let parent = node?.parentElement; parent && r; parent = parent.parentElement) {
+      const css = getComputedStyle(parent), b = parent.getBoundingClientRect();
+      if ((/(auto|scroll|hidden|clip)/.test(css.overflowX) && (r.left < b.left || r.right > b.right)) ||
+          (/(auto|scroll|hidden|clip)/.test(css.overflowY) && (r.top < b.top || r.bottom > b.bottom))) clipped = true;
+    }
+    let hitCount = 0;
+    if (r) for (const y of [0.2, 0.5, 0.8]) for (const x of [0.2, 0.5, 0.8]) {
+      const hit = document.elementFromPoint(r.left + r.width * x, r.top + r.height * y);
+      if (hit && (node === hit || node.contains(hit))) hitCount++;
+    }
+    return { selector, count: matches.length, threadId: state?.codex?.activeThreadId || null,
+      rootId: node?.closest('#egd-hud, .egd-chat-card')?.id || null,
+      target: node && { visible: !node.closest('[hidden],[inert],[aria-hidden="true"],.egd-hud-hidden') &&
+        style.display !== 'none' && style.visibility !== 'hidden' && Number(style.opacity) > 0 && r.width > 0 && r.height > 0,
+        disabled: !!node.disabled, hitCount, clipped,
+        inside: r.left >= 0 && r.top >= 0 && r.right <= innerWidth && r.bottom <= innerHeight,
+        rect: { left: r.left, top: r.top, right: r.right, bottom: r.bottom } },
+      camera: { x: state?.pan?.x, y: state?.pan?.y, zoom: state?.zoom,
+        targetX: state?.panTarget?.x, targetY: state?.panTarget?.y, targetZoom: state?.zoomTarget } };
+  }, selector);
+}
+
+async function returnFromArtifactRoomToHome(harness, result, threadId) {
+  // Opening the artifact may pan away; one native Dock reveal precedes passive
+  // stabilization of the ORIGINAL Back control. Never retry a dispatched Back.
+  await openChat(harness);
+  const trace = result.postArtifactBack = { observations: [], clicked: false };
+  const observe = async selector => {
+    const value = await observeChatNavigation(harness, selector);
+    trace.observations.push(value); if (trace.observations.length > 16) trace.observations.shift();
+    return value;
+  };
+  const back = '.egd-codex-conversation-back';
+  trace.before = await waitUntil(() => observe(back), createChatNavigationReadiness(threadId),
+    { timeoutMs: 15000, intervalMs: 120 });
+  await harness.click(back);
+  trace.clicked = true;
+  trace.after = await waitUntil(() => observe('.egd-codex-thread-home-new'), createChatNavigationReadiness(),
+    { timeoutMs: 10000, intervalMs: 120 });
 }
 
 async function messages(harness) {
@@ -428,6 +494,7 @@ await runUiFlow('rendered-ui-fixture-transport', async ({ harness, check, captur
   await capture('fixture-artifact-open');
   } finally { await collectDiagnostics(); }
 
+  await returnFromArtifactRoomToHome(harness, result, threadA.id);
   const threadB = await newQaThread(harness, `QA B ${nonce}`);
   // The artifact Browser took the camera away from Chat; opening Chat again must leave its input on screen.
   check('Chat input is on screen and clear of the Dock after a Browser opened beside it', await chrome(harness, () => {

@@ -12,6 +12,9 @@ import { assertOrdinarySend } from './egdesk-chat-qa-contract.sys.mjs';
 import { createQaContextFixture } from './egdesk-context-qa-fixture.mjs';
 import { observeQaFixtureFile } from './egdesk-context-qa-contract.mjs';
 import { qaBridgeConfig, validateQaFixtureIsolation } from './egdesk-qa-fixture-isolation.mjs';
+import { projectFileFixtureEnabled } from './egdesk-qa-fixture-isolation.mjs';
+import { createProjectFileFixture } from './egdesk-project-file-fixture.mjs';
+import { chatRunOutputsFixtureEnabled, createChatRunOutputsFixture } from './egdesk-chat-run-outputs-fixture.mjs';
 import { routePermissionRequest } from '../helper/claude-engine-permissions.mjs'; // Pure shape translation only.
 
 const SCENARIO = /^EGDESK_QA_(COMPLETE|TEXT_ONLY|STOP|APPROVAL|USER_INPUT|SUBAGENT|LOST|START_FAIL|REJECT|AMBIGUOUS|CONTEXT|CLAUDE_TEXT|CLAUDE_SESSION_APPROVAL|CLAUDE_APPROVAL_NO_SESSION|CLAUDE_MULTI_SELECT|CLAUDE_RATE_LIMIT|CLAUDE_CONTEXT|CLAUDE_CONTEXT_BLOCKED)\b/;
@@ -78,12 +81,16 @@ const { port: PORT, host: HOST, origin } = config;
 if (env.EGDESK_QA_CLAUDE_FIXTURE != null && env.EGDESK_QA_CLAUDE_FIXTURE !== '1') throw new Error('Invalid Claude fixture gate');
 const claudeFixture = env.EGDESK_QA_CLAUDE_FIXTURE === '1';
 if (claudeFixture && env.EGDESK_QA_REAL_TURN === '1') throw new Error('Claude fixtures forbid real-provider mode');
+const runOutputsEnabled = chatRunOutputsFixtureEnabled(env);
+if (runOutputsEnabled && claudeFixture) throw new Error('Run outputs require a separate fixture mode from Claude');
 if (env.EGDESK_QA_CLAUDE_READER_FIXTURE != null && !['0', '1'].includes(env.EGDESK_QA_CLAUDE_READER_FIXTURE)) throw new Error('Invalid synthetic Claude Reader gate');
 const claudeReaderFixture = env.EGDESK_QA_CLAUDE_READER_FIXTURE === '1';
 if (claudeReaderFixture && (!claudeFixture || env.EGDESK_QA_REAL_TURN !== '0')) throw new Error('Synthetic Reader requires isolated Claude fixture and explicit real-turn zero');
 if (typeof token !== 'string' || token.length < 16) throw new Error('Fixture token must contain at least 16 characters');
 const fixture = assertQaFixtureManifest(profilePath);
 const profile = fixture.profile;
+const projectFileFixture = projectFileFixtureEnabled(env)
+  ? createProjectFileFixture({ profile, token, env }) : null;
 const artifactRoot = fixture.root;
 const artifactPath = fixture.artifactPath;
 const context = createQaContextFixture(profile);
@@ -96,9 +103,9 @@ const streamId = randomUUID();
 const contextScopeKey = randomUUID();
 let seq = 0;
 let turnCounter = 0;
-let connection = claudeFixture ? 'offline' : 'ready';
+let connection = claudeFixture || projectFileFixture ? 'offline' : 'ready';
 let authLookupFails = false;
-let authLoggedIn = !claudeFixture;
+let authLoggedIn = !claudeFixture && !projectFileFixture;
 let accountVariant = 'a';
 let claudeAccountVariant = 'a';
 let claudeEpoch = 0;
@@ -114,9 +121,11 @@ const heldResumes = [];
 const fixtureTerminals = new Map();
 const clients = new Set();
 const runs = new Map();
+const runOutputsFixture = runOutputsEnabled ? createChatRunOutputsFixture({ runs, envelope, env }) : null;
 const failedStarts = new Map();
 const observed = { sends: [], interrupts: [], resumes: [], approvals: [], userInputs: [], authWrites: [], events: [], reconnects: 0, replays: 0, heldResumes: 0, releasedResumes: 0, contextCaptureFailures: 0 };
 if (claudeFixture) Object.assign(observed, { blockedContexts: [], captures: [], contextRefusals: [] });
+if (runOutputsFixture) observed.approvalPostAttempts = 0;
 const runConnection = run => run?.engineId === 'claude' ? 'ready' : connection;
 const activeRun = run => ['running', 'inProgress'].includes(run?.status);
 const contextError = (code, message, httpStatus = 409) => { throw Object.assign(new Error(message), { code, httpStatus }); };
@@ -209,6 +218,8 @@ function envelope(run, event, details = {}, itemId) {
 }
 
 function authSnapshot() {
+  if (projectFileFixture) return { isLoggedIn: false, loginInProgress: false, statusText: 'Project QA: no provider',
+    requiresOpenaiAuth: true, accountId: null, authMode: null, accountEmail: null };
   return { isLoggedIn: authLoggedIn, loginInProgress: false, statusText: 'QA fixture only',
     requiresOpenaiAuth: !authLoggedIn, accountId: 'chatgpt', authMode: 'chatgpt',
     accountEmail: `qa-account-${accountVariant}@egdesk.invalid` };
@@ -604,6 +615,13 @@ const handler = async (req, res) => {
         || (req.socket?.remoteAddress && !['127.0.0.1', '::ffff:127.0.0.1'].includes(req.socket.remoteAddress))) {
       return json(res, 400, { error: 'Fixture accepts only its loopback origin' });
     }
+    if (runOutputsFixture && req.method === 'POST' && url.pathname === '/chat/approval') observed.approvalPostAttempts++;
+    const outputResponse = runOutputsFixture?.route(req.method, url);
+    if (outputResponse) return json(res, outputResponse.status, outputResponse.body);
+    if (projectFileFixture && await projectFileFixture.handle(req, res, url)) return;
+    if (projectFileFixture && req.method === 'POST' && url.pathname === '/chat/send') {
+      return json(res, 403, { accepted: false, code: 'PROJECT_QA_MODEL_DISABLED', error: 'Project QA never starts model turns' });
+    }
     const browserDocument = url.pathname.match(/^\/__qa\/browser-document\/([0-9a-f]{10})$/);
     if (req.method === 'GET' && browserDocument) {
       const file = path.join(artifactRoot, `context-browser-${browserDocument[1]}.html`);
@@ -624,7 +642,10 @@ const handler = async (req, res) => {
     if (req.method === 'GET' && url.pathname === '/__qa/state') {
       if (req.headers['x-egdesk-qa-token'] !== token) return json(res, 403, { error: 'Fixture token required' });
       return json(res, 200, { fixture: true, profile, host: HOST, port: PORT, origin, artifactRoot, artifactPath,
+        ...(projectFileFixture ? { projectFileFixture: true, providerTurns: 0,
+          nativePickerInvocations: 0, nativeProcessSpawns: 0 } : {}),
         ...(claudeFixture ? { claudeFixture: true, claudeReaderFixture, providerTurns: 0 } : {}),
+        ...(runOutputsFixture ? { runOutputsFixture: true, providerTurns: 0, runOutputs: runOutputsFixture.stats() } : {}),
         streamId, seq, clients: clients.size, observed, context: context.stats, pendingContextCaptures: heldCaptures.length,
         runs: [...runs.values()].map((run) => ({ ...runState(run), conversationId: run.conversationId,
           requestId: run.requestId, clientThreadId: run.clientThreadId, fixtureStage: run.fixtureStage || null,
@@ -830,13 +851,13 @@ const handler = async (req, res) => {
       return json(res, 200, { ok: true });
     }
     if (req.method === 'GET' && url.pathname === '/health') return json(res, 200, {
-      ok: true, fixture: true, profile, host: HOST, port: PORT, origin, appServerReady: !claudeFixture,
+      ok: true, fixture: true, profile, host: HOST, port: PORT, origin, appServerReady: !claudeFixture && !projectFileFixture,
       ...(claudeFixture ? { claudeFixture: true, claudeReaderFixture, providerTurns: 0, engines: engineRows() } : {}) });
     if (req.method === 'GET' && (url.pathname === '/v1/state' || url.pathname === '/auth/status')) {
       if (authLookupFails) return json(res, 503, { error: 'QA account refresh temporarily unavailable' });
       const auth = authSnapshot();
       return json(res, 200, url.pathname === '/auth/status' ? auth : {
-        protocolVersion: 2, provider: 'codex', appServerReady: !claudeFixture, auth,
+        protocolVersion: 2, provider: 'codex', appServerReady: !claudeFixture && !projectFileFixture, auth,
         ...(claudeFixture ? { engines: engineRows() } : {}),
         capabilities: { auth: ['status'], chat: ['send', 'stream', 'interrupt', 'resume', 'user-input', 'subagent-status'] },
       });
@@ -897,10 +918,12 @@ const handler = async (req, res) => {
             && run.engineId === 'claude' && run.clientThreadId === body.clientThreadId)) return json(res, 409, {
           code: 'ENGINE_MISMATCH', error: 'Unknown Claude fixture conversation binding' });
       } else if (body.engineId && body.engineId !== 'codex') return json(res, 409, { code: 'ENGINE_UNAVAILABLE', error: 'Claude fixture is not enabled' });
-      if (!SCENARIO.test(body.message)) {
+      const matchedScenario = body.message.match(SCENARIO)?.[1]
+        || (runOutputsFixture && body.message.match(/^EGDESK_QA_(RUN_OUTPUTS(?:_LOST)?)\b/)?.[1]);
+      if (!matchedScenario) {
         return json(res, 400, { error: 'Fixture accepts only explicit EGDESK_QA_* messages' });
       }
-      let scenario = body.message.match(SCENARIO)[1];
+      let scenario = matchedScenario;
       if (scenario.startsWith('CLAUDE_') !== claudeFixture) return json(res, 400, { error: 'Scenario belongs to another fixture mode' });
       if (scenario === 'CLAUDE_CONTEXT_BLOCKED') return refuseClaudeContext(res, url.pathname);
       if (claudeFixture && (scenario === 'CLAUDE_CONTEXT' || body.contextSnapshotIds?.length)) {
@@ -973,7 +996,8 @@ const handler = async (req, res) => {
       setTimeout(() => {
         json(res, 202, { accepted: true, conversationId, requestId, runId, answerId: run.answerId });
         observedSend.respondedAt = Date.now();
-        if (claudeFixture) claudeScenario(run);
+        if (runOutputsFixture?.accepts(scenario)) runOutputsFixture.seed(run);
+        else if (claudeFixture) claudeScenario(run);
         else if (scenario === 'COMPLETE') completeScenario(run);
         else if (scenario === 'TEXT_ONLY') textOnlyScenario(run);
         else if (scenario === 'STOP') { /* Already initialized before ACK. */ }
@@ -1084,9 +1108,13 @@ const handler = async (req, res) => {
 };
 const dispose = () => {
   for (const run of runs.values()) if (['armed', 'pending'].includes(run.stopAckHold?.state)) expireStopHold(run, 'disposed');
+  runOutputsFixture?.dispose();
+  return projectFileFixture?.dispose();
 };
 return { handler, dispose, info: { kind: 'egdesk-qa-fixture-ready', host: HOST, port: PORT,
+  ...(projectFileFixture ? projectFileFixture.info : {}),
   ...(claudeFixture ? { claudeFixture: true, claudeReaderFixture, providerTurns: 0 } : {}),
+  ...(runOutputsFixture ? { runOutputsFixture: true, providerTurns: 0 } : {}),
   profile, artifactPath, streamId, isolation, scope: 'QA-only transformed copies, no shipped runtime replacement' } };
 }
 

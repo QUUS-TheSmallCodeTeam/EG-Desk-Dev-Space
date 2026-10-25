@@ -22,6 +22,7 @@ import {
   assertPublicBrowserSseBindings,
   assertBrowserSameChatAddition, assertBrowserNegativeGuards,
   assertBrowserNegativeProbeResults,
+  assertBrowserRelayProbeResults,
   browserCameraSurfacePlan, assertBrowserCameraSurfaceIsolation, runBrowserCameraSurfaceIsolation,
   assertBrowserDocumentReplacement, runBrowserDocumentReplacement,
   browserViewportChanged,
@@ -215,6 +216,162 @@ const negativeEnv = { EGDESK_QA_BROWSER_NEGATIVE: '1', EGDESK_QA_FIXTURE_TRANSPO
   EGDESK_QA_FIXTURE_PORT: '49318',
   EGDESK_QA_FIXTURE_TOKEN: 'QA_PUBLIC_TOKEN_0123456789', EGDESK_MARIONETTE_PORT: '2829',
   EGDESK_QA_BROWSER_NEGATIVE_HEADLESS: '1' };
+
+test('relay CLI is separately gated, fixture-only and headless without changing negative baseline coverage', () => {
+  const env = { ...negativeEnv, EGDESK_QA_BROWSER_RELAY: '1' };
+  assert.deepEqual(parseCases('browser-relay'), ['browser-relay']);
+  assert.deepEqual(assertQaAttachMode(['browser-relay'], env), { headlessDiagnostics: true });
+  for (const key of ['EGDESK_QA_BROWSER_RELAY', 'EGDESK_QA_BROWSER_NEGATIVE',
+    'EGDESK_QA_FIXTURE_TRANSPORT', 'EGDESK_QA_FIXTURE_TOKEN', 'EGDESK_QA_BROWSER_NEGATIVE_HEADLESS']) {
+    assert.throws(() => assertQaAttachMode(['browser-relay'], { ...env, [key]: undefined }), undefined, key);
+  }
+  for (const other of ['browser-negative', 'native', 'source', 'browser']) {
+    assert.throws(() => assertQaAttachMode(['browser-relay', other], env), /separately/);
+  }
+  assert.deepEqual(scenarioCoverage(['browser-relay'], ['browser-relay']), {
+    selectedCasesVerified: true, fullScenarioVerified: false, coverage: 'partial',
+    missingEvidence: ['native-model-native', 'native-model-source', 'native-model-browser', 'native-model-browser-negative'],
+  });
+  assert.deepEqual(scenarioCoverage(['browser-negative'], ['browser-negative']),
+    scenarioCoverage(['browser-relay'], ['browser-relay']));
+  assert.throws(() => parseCases('browser-relay,browser-relay'));
+});
+
+// Hand-authored receipts below test only the fail-closed evidence validator.
+// They never execute runBrowserRelayProbes or count as live DOM acceptance.
+function relayEvidenceFixture() {
+  const cardId = 'relay-owned-card', cardEpoch = 'relay-owned-epoch', documentId = 'relay-owned-document';
+  const syntheticRunId = 'qa-browser-simulator-relay-unit', clientThreadId = 'relay-client';
+  const fixture = { url: 'http://127.0.0.1:39221/egdesk-qa/QA_URL_0123456789abcdef', marker: 'QA_DOM_0123456789abcdef' };
+  const target = { ref: 'el_1', tag: 'button', label: 'Reveal QA details', disabled: false };
+  const viewport = { width: 900, height: 700, devicePixelRatio: 1 };
+  const binding = { cardId, cardEpoch, accountId: '' };
+  const sample = clicks => ({ binding: { ...binding }, inputValue: '', snapshot: {
+    cardId, documentId, revision: 1 + clicks, url: fixture.url, viewport,
+    innerWindowId: 101, browsingContextId: 202,
+    text: [fixture.marker, `QA click count: ${clicks}`], interactiveElements: [target], focusedElement: null,
+    qaDiagnostics: { kind: 'actor-perform-entry', actorDocumentId: documentId, performCalls: clicks },
+  } });
+  const before = sample(0), after = sample(1);
+  const observed = { status: 'observed', cardId, observationId: 'observation-before', snapshot: before.snapshot };
+  const fresh = { status: 'observed', cardId, observationId: 'observation-after', snapshot: after.snapshot };
+  const guard = snapshot => ({ documentId, revision: snapshot.revision, viewport, url: fixture.url,
+    innerWindowId: 101, browsingContextId: 202, focusedRef: null, target });
+  const actTiming = { receivedAtMs: 100, actorReceivedAtMs: 101, authorizedAtMs: 102,
+    performEnterMs: 103, firstEventAtMs: 104, performExitMs: 105, performCallsBefore: 0, performCallsAfter: 1 };
+  const refusalTiming = { receivedAtMs: 200, actorReceivedAtMs: 201, performCallsBefore: 1, performCallsAfter: 1 };
+  const receipt = { dispatchReceipt: { actor: 'JSWindowActor', eventDispatched: true, documentStillCurrent: true,
+    clickInputRoute: 'dom-click-no-pointerdown', targetClickObserved: true },
+    after: after.snapshot, observation: { visibleTextChanged: true, addedText: ['QA click count: 1'] } };
+  const first = { status: 'postcondition-observed', cardId, action: 'click', ...receipt,
+    externalEffectVerified: false, postcondition: { kind: 'visible-text', value: 'QA click count: 1',
+      matched: true, wasAlreadyTrue: false }, timing: actTiming };
+  let seq = 0;
+  const request = (kind, status, wireExtra = {}, responseExtra = {}, traceExtra = {}) => {
+    const id = `relay-request-${++seq}`;
+    const wireRequest = { version: 1, kind, requestId: id, runId: syntheticRunId, clientThreadId,
+      cardId, targetCardEpoch: cardEpoch, deadlineMs: 1000, budgetMs: 500, binding, ...wireExtra };
+    const wireResponse = { requestId: id, status, ...responseExtra };
+    return { kind, requestId: id, responseRequestId: id, runId: syntheticRunId, clientThreadId,
+      cardId, targetCardEpoch: cardEpoch, deadlineMs: wireRequest.deadlineMs, attemptedAt: 90, respondedAt: 210,
+      status, error: wireResponse.error || '', ...(wireResponse.timing ? { timing: wireResponse.timing } : {}),
+      ...(kind === 'act' ? { action: wireRequest.action, guard: wireRequest.guard } : {}),
+      ...traceExtra, wireRequest, wireResponse };
+  };
+  const diagnostic = (phase, status) => ({ cardId, actionType: 'click', phase, status, sampledAtMs: 106 });
+  const original = request('act', 'acted', { callId: 'original-call', action: { type: 'click', ref: target.ref },
+    guard: guard(before.snapshot) }, { receipt, timing: actTiming }, {
+    action: { type: 'click', ref: target.ref }, guard: guard(before.snapshot),
+    actorDiagnostic: diagnostic('post-actor', 'acted') });
+  const entered = request('reconcile', 'reconciled', { callId: 'original-call', guard: { documentId } },
+    { reconcile: { version: 1, callId: 'original-call', documentId, entered: true, performing: false,
+      timing: { performEnterMs: 103, performExitMs: 105 } } });
+  const fence = request('reconcile', 'reconciled', { callId: 'late-call', guard: { documentId } },
+    { reconcile: { version: 1, callId: 'late-call', documentId, entered: false, fenced: true } });
+  const late = request('act', 'rejected', { callId: 'late-call', action: { type: 'click', ref: target.ref },
+    guard: guard(after.snapshot) }, { error: 'Browser action was reconciled as never sent; observe again',
+    dispatchPhase: 'not-dispatched', timing: refusalTiming }, {
+    action: { type: 'click', ref: target.ref }, guard: guard(after.snapshot),
+    dispatchPhase: 'not-dispatched', actorDiagnostic: diagnostic('actor', 'rejected') });
+  const expired = request('act', 'rejected', { callId: 'expired-call', deadlineMs: 89,
+    action: { type: 'click', ref: target.ref }, guard: guard(after.snapshot) },
+  { error: 'Invalid or expired Browser tool request', dispatchPhase: 'not-dispatched', timing: { receivedAtMs: 200 } },
+  { dispatchPhase: 'not-dispatched' });
+  const denial = { code: 'BROWSER_OBSERVATION_STALE', dispatchPhase: 'not-dispatched', dispatched: false,
+    timing: refusalTiming };
+  return structuredClone({ simulatorOnly: true, nativeModelOriginVerified: false, providerTurns: 0,
+    coordinateInputVerified: false, timeoutRecoveryVerified: false,
+    lateFenceTrigger: 'explicit-reconcile-before-delivery',
+    unverified: ['lost-act-response-timeout-and-automatic-reconcile', 'dialog-kind-with-an-open-native-dialog',
+      'obscuredBy-with-a-real-obscuring-element', 'coordinate-or-trusted-input'],
+    cardId, cardEpoch, documentId, sourceId: 'owned-selected-source', syntheticRunId, clientThreadId, fixture,
+    preexistingBrowserCardStylesUnchanged: true, canvasPanZoomUnchanged: true,
+    staleRevision: { observed, expectedRevision: 2, code: 'BROWSER_OBSERVATION_STALE',
+      uiActRequestsBefore: 0, uiActRequestsAfter: 0, before, after: before },
+    duplicateCall: { callId: 'original-call', first, duplicate: first, afterFirst: after, afterDuplicate: after,
+      uiActRequestsAfterFirst: 1, uiActRequestsAfterDuplicate: 1 },
+    afterEnteredReconcile: after,
+    lateFence: { observed: fresh, callId: 'late-call', before: after, afterReconcile: after,
+      afterFirst: after, afterDuplicate: after, denial, duplicateDenial: denial,
+      uiActRequestsAfterFirst: 2, uiActRequestsAfterDuplicate: 2 },
+    expiredRequest: { scope: 'already-expired-ui-request-not-response-timeout',
+      before: after, afterFirst: after, afterDuplicate: after },
+    uiRequests: [request('bind', 'bound'), request('observe', 'observed'), original, entered,
+      request('observe', 'observed'), fence, late, request('observe', 'observed'), expired,
+      structuredClone(expired), request('cancel', 'cancelled')],
+  });
+}
+
+test('relay evidence validator accepts bounded receipts without promoting them to timeout or live-test proof', () => {
+  assert.equal(assertBrowserRelayProbeResults(relayEvidenceFixture()), true);
+});
+
+test('relay evidence rejects duplicate DOM effects, stale admission, fabricated fences and missing actor evidence', () => {
+  const corruptions = [
+    p => { p.providerTurns = 1; }, p => { p.nativeModelOriginVerified = true; },
+    p => { p.timeoutRecoveryVerified = true; }, p => { p.unverified = []; },
+    p => { p.lateFenceTrigger = 'automatic-after-timeout'; },
+    p => { p.staleRevision.code = 'BROWSER_UI_TIMEOUT'; },
+    p => { p.staleRevision.expectedRevision--; }, p => { p.staleRevision.uiActRequestsAfter = 1; },
+    p => { p.staleRevision.after = structuredClone(p.duplicateCall.afterFirst); },
+    p => { p.duplicateCall.uiActRequestsAfterDuplicate = 2; },
+    p => { p.duplicateCall.afterDuplicate = structuredClone(p.duplicateCall.afterDuplicate);
+      p.duplicateCall.afterDuplicate.snapshot.text[1] = 'QA click count: 2'; },
+    p => { p.duplicateCall.afterDuplicate = structuredClone(p.duplicateCall.afterDuplicate);
+      p.duplicateCall.afterDuplicate.snapshot.qaDiagnostics.performCalls = 2; },
+    p => { p.duplicateCall.duplicate = { ...p.duplicateCall.first, status: 'postcondition-unverified' }; },
+    p => { p.uiRequests[2].wireRequest.callId = 'other-call'; },
+    p => { delete p.uiRequests[2].timing.actorReceivedAtMs; },
+    p => { delete p.uiRequests[2].wireRequest.budgetMs; },
+    p => { p.uiRequests[2].guard = { ...p.uiRequests[2].guard, revision: 99 }; },
+    p => { p.uiRequests[2].actorDiagnostic.phase = 'preflight'; },
+    p => { p.uiRequests[3].wireRequest.actRequestId = p.uiRequests[2].requestId; },
+    p => { p.uiRequests[3].wireResponse.reconcile.timing.performEnterMs++; },
+    p => { p.uiRequests[3].wireResponse.reconcile.entered = false; },
+    p => { p.uiRequests[3].wireResponse.reconcile.documentId = 'other-document'; },
+    p => { p.afterEnteredReconcile = structuredClone(p.afterEnteredReconcile);
+      p.afterEnteredReconcile.snapshot.revision++; },
+    p => { p.lateFence.observed.observationId = p.staleRevision.observed.observationId; },
+    p => { p.uiRequests[5].wireResponse.reconcile.fenced = false; },
+    p => { p.uiRequests[6].error = 'Browser target is stale'; },
+    p => { p.uiRequests[6].actorDiagnostic.phase = 'preflight'; },
+    p => { p.uiRequests[6].timing.performEnterMs = 205; },
+    p => { p.lateFence.denial.dispatched = 'unknown'; },
+    p => { p.lateFence.uiActRequestsAfterDuplicate = 3; },
+    p => { p.expiredRequest.scope = 'action-response-timeout'; },
+    p => { p.uiRequests[8].wireRequest.deadlineMs = 999; },
+    p => { p.uiRequests[9].wireResponse.status = 'acted'; },
+    p => { p.uiRequests.push(structuredClone(p.uiRequests[2])); },
+    p => { p.uiRequests[4].wireResponse.requestId = 'unrelated'; },
+    p => { p.uiRequests.at(-1).status = 'rejected'; },
+    p => { p.preexistingBrowserCardStylesUnchanged = false; },
+    p => { p.canvasPanZoomUnchanged = false; },
+  ];
+  for (const corrupt of corruptions) {
+    const proof = relayEvidenceFixture(); corrupt(proof);
+    assert.throws(() => assertBrowserRelayProbeResults(proof), undefined, corrupt.toString());
+  }
+});
 
 test('Browser permission catalog includes wait_text without granting observe-only write actions', () => {
   assert.deepEqual(expectedBrowserCatalog('observe'), ['egdesk_browser_observe', 'egdesk_browser_wait_text']);
