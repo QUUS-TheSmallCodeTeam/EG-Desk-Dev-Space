@@ -8,6 +8,7 @@ import { createHash } from 'node:crypto';
 import { prepareRunOutputDesk } from './verify-firefox-mcp-chat-run-outputs-flow.mjs';
 import { TASK_GATE_SELECTORS, taskGateRowSelector, assertTaskGateEnvironment, assertQuestionIdentity, assertNoContinue,
   assertDraftRetained, assertNewQuestionCleared, assertCodePointLimit, assertOneAnswer, assertTaskGateEvidence,
+  reconciledTaskGateRead, assertTaskGateStaleReconciled,
   observeTaskGate, observeTaskGateDesk, observeTaskGateTarget, observeTaskGateLimit, taskGateLimitReadable, assertTaskGateLimitPaint, readTaskGateLimit,
   runTaskGateFlow, runCli } from './verify-firefox-mcp-task-gate-flow.mjs';
 
@@ -24,6 +25,25 @@ const post = (ids, status = 200, extra = {}) => ({ sequence: 1, method: 'POST', 
   delegated: true, status, request: { graphId: ids.graphId, taskId: ids.taskId, gateId: ids.gateId,
     answer: ids.response?.kind === 'choice' ? { choice: 'kakao' } : { textCodePoints: 20 } }, response: {}, ...extra });
 
+function staleEvidence(next) {
+  const typed = ui({ ...next, question: next.label, value: '다음 답변', counted: 5, limit: 8, limitText: '5 / 8자', state: 'waiting' });
+  const before = state({ controls: [], original: { conversationId: 'native-original' },
+    persisted: { answers: [{ ...identity(), textSha256: sha('😀'.repeat(20)), codePoints: 20 }] },
+    fakeProviderTurns: [1, 2, 3].map(turnId => ({ turnId, conversationId: 'native-original' })) });
+  const pending = post(next, null, { delegated: false });
+  const accepted = { ...structuredClone(before), requests: [pending], held: { sequence: 1 }, pauseBroadcast: true,
+    controls: [{ action: 'accept-held', result: { status: 200, graphId: next.graphId } }],
+    fakeProviderTurns: [...before.fakeProviderTurns, { turnId: 4, conversationId: 'native-original' }],
+    persisted: { answers: [...before.persisted.answers, { graphId: next.graphId, taskId: next.taskId, gateId: next.gateId,
+      textSha256: sha(typed.value), codePoints: 5 }] } };
+  const read = { sequence: 2, method: 'GET', path: '/tasks/state', query: `?graphId=${next.graphId}`, delegated: true, status: 200,
+    response: { graph: { graphId: next.graphId, tasks: [{ taskId: next.taskId, gates: [{ gateId: next.gateId,
+      kind: 'userAction', label: next.label, response: next.response, status: 'satisfied' }] }] } } };
+  const after = { ...structuredClone(accepted), held: null, requests: [post(next, 409, { response: { code: 'TASK_GATE_STALE' } }), read] };
+  return { identity: next, before, accepted, after, typed,
+    ui: { ...typed, state: 'satisfied', value: '', choice: null, inputCount: 0, continueCount: 0, continueDisabled: true, notice: '' } };
+}
+
 // Assertion inputs ONLY. They are not fixture handler responses, a native
 // browser run, screenshot evidence, or proof that Harvey's UI is implemented.
 function evidence() {
@@ -33,11 +53,9 @@ function evidence() {
   const value = '😀'.repeat(20), textUi = ui({ value, counted: 20, limitText: '20 / 20자' });
   const rejectedTyped = ui({ value: 'pw: hunter2', counted: 11 }), rejectedUi = { ...rejectedTyped, notice: '해당 값을 빼고 다시 답해 주세요.' };
   const nextUi = ui({ ...next, question: next.label, value: '', limit: 8, counted: 0, limitText: '0 / 8자' });
-  const staleTyped = { ...nextUi, value: '다음 답변', counted: 5 }, staleUi = { ...staleTyped, notice: '이 조건은 이미 풀렸습니다.' };
   const before = state(), chosen = state({ requests: [post(choice)] });
   const rejected = state({ requests: [post(text, 400, { response: { code: 'TASK_GATE_ANSWER_PRIVATE' } })] });
   const written = state({ requests: [post(text)], persisted: { answers: [{ ...text, codePoints: 20, textSha256: sha(value) }] } });
-  const stale = state({ requests: [post(next, 409, { response: { code: 'TASK_GATE_STALE' } })] });
   const held = state({ requests: [post(choice, null, { delegated: false })], held: { sequence: 1 } });
   return { nativeInputs: true, domInjection: false, conversationId: 'native-original', threadId: 'local-original', clientThreadId: 'wire-original',
     fixture: { providerTurns: 0, nativeProcessSpawns: 0, original: { conversationId: 'native-original', clientThreadId: 'wire-original' },
@@ -51,7 +69,7 @@ function evidence() {
     rejected: { identity: text, before, after: rejected, typed: rejectedTyped, ui: rejectedUi, refreshed: structuredClone(rejectedUi) },
     text: { identity: text, before, after: written, ui: textUi, value },
     previousQuestion: rejectedUi, newQuestion: nextUi,
-    stale: { identity: next, before, after: stale, typed: staleTyped, ui: staleUi },
+    stale: staleEvidence(next),
     duplicate: { whileHeld: held, afterAttempt: structuredClone(held), disabled: true } };
 }
 
@@ -136,6 +154,61 @@ test('complete assertion sample is valid but remains only a unit sample, not nat
   assert.equal(assertTaskGateEvidence(evidence()), true);
 });
 
+test('Task R3 real-stale contract is rejected UI POST then exact GET reconciliation, not a lasting error or accepted UI answer', () => {
+  const proof = evidence().stale;
+  assert.equal(proof.ui.notice, '', 'automatic reconciliation may already remove the transient error');
+  assert.equal(assertTaskGateStaleReconciled(proof, 'local-original'), true);
+  assert.equal(reconciledTaskGateRead(proof.after, proof.identity, 1)?.sequence, 2);
+  for (const corrupt of [
+    value => { value.after.requests[0].status = 200; },
+    value => { value.after.requests[0].response.code = 'OTHER_ERROR'; },
+    value => { value.after.requests[0].delegated = false; },
+    value => { value.after.requests.push(post(value.identity, 200, { sequence: 3 })); },
+    value => { value.accepted.controls = []; },
+    value => { value.accepted.controls[0].result.status = 409; },
+    value => { value.accepted.controls[0].result.graphId = 'unrelated'; },
+    value => { value.accepted.held.sequence = 99; },
+    value => { value.accepted.requests[0].status = 200; },
+    value => { value.after.pauseBroadcast = false; },
+  ]) { const changed = structuredClone(proof); corrupt(changed); assert.throws(() => assertTaskGateStaleReconciled(changed, 'local-original')); }
+});
+
+test('stale reconciliation refuses missing, older, foreign, nondelegated or still-waiting read receipts and editable UI', () => {
+  const proof = evidence().stale;
+  for (const corrupt of [
+    value => { value.after.requests.pop(); },
+    value => { value.after.requests[1].sequence = 1; },
+    value => { value.after.requests[1].query = '?graphId=foreign'; },
+    value => { value.after.requests[1].query += '&graphId=foreign'; },
+    value => { value.after.requests[1].status = 500; },
+    value => { value.after.requests[1].delegated = false; },
+    value => { value.after.requests[1].response.graph.graphId = 'foreign'; },
+    value => { value.after.requests[1].response.graph.tasks[0].taskId = 'foreign'; },
+    value => { value.after.requests[1].response.graph.tasks[0].gates[0].gateId = 'foreign'; },
+    value => { value.after.requests[1].response.graph.tasks[0].gates[0].status = 'waiting'; },
+    value => { value.after.requests[1].response.graph.tasks[0].gates[0].response.maxLength = 500; },
+    value => { value.ui.state = 'waiting'; value.ui.notice = 'still an error'; },
+    value => { value.ui.inputCount = 1; },
+    value => { value.ui.continueCount = 1; },
+    value => { value.ui.threadId = 'foreign'; },
+    value => { value.ui.responseKey = 'different-question'; },
+  ]) { const changed = structuredClone(proof); corrupt(changed); assert.throws(() => assertTaskGateStaleReconciled(changed, 'local-original')); }
+});
+
+test('independent acceptance writes one matching answer; stale rejection cannot write, send or resume again', () => {
+  const proof = evidence().stale;
+  for (const corrupt of [
+    value => { value.accepted.persisted.answers.pop(); },
+    value => { value.accepted.persisted.answers[0].textSha256 = 'changed-old-answer'; },
+    value => { value.accepted.persisted.answers.at(-1).gateId = 'foreign'; },
+    value => { value.accepted.persisted.answers.at(-1).textSha256 = 'other-input'; },
+    value => { value.after.persisted.answers.push({ ...value.after.persisted.answers.at(-1) }); },
+    value => { value.after.fakeProviderTurns.push({ turnId: 5, conversationId: 'native-original' }); },
+    value => { value.accepted.fakeProviderTurns.at(-1).conversationId = 'other-room'; },
+    value => { value.after.requests.push({ method: 'POST', path: '/chat/send', sequence: 3 }); },
+  ]) { const changed = structuredClone(proof); corrupt(changed); assert.throws(() => assertTaskGateStaleReconciled(changed, 'local-original')); }
+});
+
 test('full validator rejects missing stages, lost drafts, wrong original thread, fake receipts and duplicate submits', () => {
   const corruptions = [
     proof => { proof.nativeInputs = false; }, proof => { proof.domInjection = true; },
@@ -146,7 +219,7 @@ test('full validator rejects missing stages, lost drafts, wrong original thread,
     proof => { proof.choice.after.requests[0].delegated = false; }, proof => { proof.rejected.ui.value = ''; },
     proof => { proof.rejected.refreshed.notice = ''; }, proof => { proof.text.ui.counted = 40; },
     proof => { proof.text.after.persisted.answers[0].textSha256 = 'not-original'; }, proof => { proof.newQuestion.notice = 'old'; },
-    proof => { proof.stale.ui.value = ''; }, proof => { proof.stale.after.requests[0].response.code = 'fake'; },
+    proof => { proof.stale.ui.value = 'not cleared'; }, proof => { proof.stale.after.requests[0].response.code = 'fake'; },
     proof => { proof.duplicate.afterAttempt.requests.push(post(identity())); }, proof => { proof.duplicate.disabled = false; },
     proof => { proof.duplicate.whileHeld.held = null; proof.duplicate.afterAttempt.held = null; },
     proof => { proof.choice.ui.choice = 'email'; }, proof => { proof.choice.ui.responseKey = '["wrong-question"]'; },
@@ -325,6 +398,9 @@ test('verifier delegates only native input and fixture controls, never directly 
     'first-use native exit and usable Dock proof must precede Chat Dock access');
   assert.doesNotMatch(source, /ready\(field\(text, 'limit'\)\)/, 'noninteractive metadata is not treated as a button');
   assert.match(source, /target\.hits === 9/); assert.match(source, /value\.hits === 9/, 'click controls keep all nine points');
+  assert.match(source, /evidence\.stale\.after = staleAfter/);
+  assert.match(source, /reconciledTaskGateRead\(value, next, rejectedSequence\)/);
+  assert.doesNotMatch(source, /read\(next\), value => !!value\.notice/, 'do not require a transient stale error to outlive real reconciliation');
   assert.doesNotMatch(source, /loopbackJson\(['"]\/tasks\/continue/);
   assert.doesNotMatch(source, /dispatchEvent|new (?:KeyboardEvent|InputEvent)|\.value\s*=|innerHTML\s*=/);
   assert.doesNotMatch(source, /newQaThread\(/, 'that shared helper writes fixture metadata; this flow uses native creation and read-only identity');

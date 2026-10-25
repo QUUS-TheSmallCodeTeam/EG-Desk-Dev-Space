@@ -83,6 +83,57 @@ export function assertOneAnswer(before, after, identity, status = 200) {
   for (const key of ['graphId', 'taskId', 'gateId']) assert.equal(row.request[key], identity[key]);
   return row;
 }
+
+export function reconciledTaskGateRead(state, identity, afterSequence) {
+  return state.requests.findLast(row => {
+    if (row.method !== 'GET' || row.path !== '/tasks/state' || row.sequence <= afterSequence
+      || row.delegated !== true || row.status !== 200) return false;
+    const ids = new URLSearchParams(row.query).getAll('graphId'), graph = row.response?.graph;
+    const gate = graph?.tasks?.find(task => task.taskId === identity.taskId)?.gates?.find(value => value.gateId === identity.gateId);
+    return ids.length === 1 && ids[0] === identity.graphId && graph?.graphId === identity.graphId
+      && gate?.status === 'satisfied' && gate.kind === 'userAction' && gate.label === identity.label
+      && JSON.stringify(gate.response) === JSON.stringify(identity.response);
+  }) || null;
+}
+
+// This race does NOT accept the UI request: it must retain its real 409.
+// A separate, explicitly recorded fixture acceptance resolves the question;
+// production then rereads it and removes the no-longer-editable draft.
+export function assertTaskGateStaleReconciled(proof, threadId) {
+  const { identity, before, accepted, after, typed, ui } = proof;
+  assertQuestionIdentity(typed, identity, threadId); assertQuestionIdentity(ui, identity, threadId);
+  const rejected = assertOneAnswer(before, after, identity, 409);
+  assert.equal(rejected.response.code, 'TASK_GATE_STALE');
+  assert.deepEqual(posts(after).slice(0, -1), posts(before), 'no old request rewritten');
+  assert.equal(posts(accepted).length, posts(before).length + 1);
+  const pending = posts(accepted).at(-1);
+  assert.equal(pending.sequence, rejected.sequence); assert.equal(accepted.held?.sequence, pending.sequence);
+  assert.equal(pending.status, null); assert.equal(pending.delegated, false);
+  assert.deepEqual(pending.request, rejected.request, 'the held native submission, not another attempt');
+  assert.ok(accepted.controls.some((row, index) => index >= before.controls.length && row.action === 'accept-held'
+    && row.result?.status === 200 && row.result.graphId === identity.graphId), 'real independent race acceptance receipt');
+  assert.equal(accepted.pauseBroadcast, true); assert.equal(after.pauseBroadcast, true, 'GET reconciliation before queued SSE is released');
+  assert.equal(accepted.persisted.answers.length, before.persisted.answers.length + 1);
+  const oldAnswerKeys = new Set(before.persisted.answers.map(row => JSON.stringify([row.graphId, row.taskId, row.gateId])));
+  const added = accepted.persisted.answers.filter(row => !oldAnswerKeys.has(JSON.stringify([row.graphId, row.taskId, row.gateId])));
+  assert.deepEqual(accepted.persisted.answers.filter(row => oldAnswerKeys.has(JSON.stringify([row.graphId, row.taskId, row.gateId]))),
+    before.persisted.answers, 'race setup preserves prior answers');
+  assert.equal(added.length, 1);
+  for (const key of ['graphId', 'taskId', 'gateId']) assert.equal(added[0][key], identity[key]);
+  assert.equal(added[0].textSha256, hash(normalized(typed.value)));
+  assert.equal(added[0].codePoints, Array.from(normalized(typed.value)).length);
+  assert.deepEqual(after.persisted.answers, accepted.persisted.answers, 'rejected UI attempt writes no second answer');
+  assert.equal(accepted.fakeProviderTurns.length, before.fakeProviderTurns.length + 1);
+  assert.deepEqual(accepted.fakeProviderTurns.slice(0, -1), before.fakeProviderTurns);
+  assert.ok(accepted.fakeProviderTurns.every(turn => turn.conversationId === before.original.conversationId));
+  assert.deepEqual(after.fakeProviderTurns, accepted.fakeProviderTurns, 'rejection/reconciliation cannot resume again');
+  assert.deepEqual(after.requests.filter(row => row.path === '/chat/send'), before.requests.filter(row => row.path === '/chat/send'));
+  assert.ok(reconciledTaskGateRead(after, identity, rejected.sequence), 'same original question must have a later real satisfied GET receipt');
+  assert.equal(ui.state, 'satisfied'); assert.equal(ui.inputCount, 0); assert.equal(ui.continueCount, 0);
+  assert.equal(ui.value, ''); assert.equal(ui.choice, null); assert.equal(ui.continueDisabled, true);
+  return true;
+}
+
 export function assertTaskGateEvidence(evidence) {
   assert.equal(evidence?.nativeInputs, true); assert.equal(evidence.domInjection, false);
   assert.equal(evidence.fixture.providerTurns, 0); assert.equal(evidence.fixture.nativeProcessSpawns, 0);
@@ -120,10 +171,7 @@ export function assertTaskGateEvidence(evidence) {
     && row.taskId === evidence.text.identity.taskId && row.gateId === evidence.text.identity.gateId
     && row.textSha256 === hash(normalized(evidence.text.value)) && row.codePoints === 20));
   assertNewQuestionCleared(evidence.previousQuestion, evidence.newQuestion);
-  assertOneAnswer(evidence.stale.before, evidence.stale.after, evidence.stale.identity, 409);
-  assert.equal(posts(evidence.stale.after).at(-1).response.code, 'TASK_GATE_STALE');
-  assertDraftRetained(evidence.stale.typed, evidence.stale.ui);
-  assert.ok(evidence.stale.ui.notice.trim());
+  assertTaskGateStaleReconciled(evidence.stale, evidence.threadId);
   assert.ok(Number.isSafeInteger(evidence.duplicate.whileHeld.held?.sequence), 'actual held POST exists');
   assert.equal(evidence.duplicate.whileHeld.held.sequence, evidence.duplicate.afterAttempt.held?.sequence);
   assert.equal(posts(evidence.duplicate.whileHeld).length, posts(evidence.duplicate.afterAttempt).length);
@@ -148,6 +196,8 @@ export async function observeTaskGate(harness, identity) {
       limit: one('limit') ? Number(one('limit').dataset.maxLength) : null,
       counted: one('limit') ? Number(one('limit').dataset.codePoints) : null,
       limitText: one('limit')?.textContent || '', notice: one('notice')?.textContent || '',
+      inputCount: row?.querySelectorAll(`[data-testid="${names.text}"],[data-testid="${names.choice}"]`).length || 0,
+      continueCount: row?.querySelectorAll(`[data-testid="${names.continue}"]`).length || 0,
       continueDisabled: !button || button.disabled === true || button.getAttribute('aria-disabled') === 'true' };
   }, { selector, names: TASK_GATE_SELECTORS });
 }
@@ -368,6 +418,7 @@ export async function runTaskGateFlow({ harness, result, check, capture, defer }
   const choiceAfter = await waitState(value => posts(value).at(-1)?.status === 200 && value.fakeProviderTurns.length === 2);
   evidence.choice = { identity: choice, before: choiceBefore, after: choiceAfter, ui: selectedChoice };
   assertOneAnswer(choiceBefore, choiceAfter, choice);
+  check('Native choice has one real accepted receipt; duplicate disabled input did not add a POST', posts(afterAttempt).length === posts(whileHeld).length);
   await control('complete-turn');
   await waitFor(harness, () => read(text), value => value.count === 1 && value.limit === 20, deadlineMs);
   assertQuestionIdentity(await read(text), text, local.id);
@@ -380,6 +431,7 @@ export async function runTaskGateFlow({ harness, result, check, capture, defer }
     else await click(field(text, 'continue'));
   });
   assertCodePointLimit(await read(text), tooLong, text.response.maxLength, { invalid: true });
+  check('Visible counter matches native code points and contract; oversized input sent no POST', true);
   const validText = '😀'.repeat(20);
   await type(text, validText);
   await withoutPost('text-enter', () => press('Enter', field(text, 'text')));
@@ -394,6 +446,7 @@ export async function runTaskGateFlow({ harness, result, check, capture, defer }
   evidence.noPosts.push({ stage: 'same-question-refresh', before: beforeRefresh, after: afterRefresh });
   evidence.rejected = { identity: text, before: rejectedBefore, after: rejectedAfter, typed, ui: rejectedUi, refreshed };
   assertDraftRetained(rejectedUi, refreshed, { notice: true });
+  check('Same-question private-answer rejection and refresh retain draft and explanation', true);
   // Change identity while an actual failed draft and notice are still present,
   // not after a successful answer has already cleared them.
   evidence.previousQuestion = await read(text);
@@ -402,21 +455,35 @@ export async function runTaskGateFlow({ harness, result, check, capture, defer }
   const emptyNext = await waitFor(harness, () => read(next), value => value.count === 1 && value.limit === 8, deadlineMs);
   assertQuestionIdentity(emptyNext, next, local.id); evidence.newQuestion = emptyNext;
   assertNewQuestionCleared(evidence.previousQuestion, emptyNext);
+  check('Changed question has its own identity and an empty draft', true);
   await type(text, validText);
   await readableLimit(text, validText);
   const textUi = await read(text), textBefore = await state();
   await click(field(text, 'continue'));
   const textAfter = await waitState(value => posts(value).at(-1)?.status === 200 && value.persisted.answers.length === 1 && value.fakeProviderTurns.length === 3);
   evidence.text = { identity: text, before: textBefore, after: textAfter, ui: textUi, value: validText };
+  assertOneAnswer(textBefore, textAfter, text);
+  check('Native valid text has one real accepted receipt and persisted answer', true);
   await control('complete-turn');
   await type(next, '다음 답변');
   const staleTyped = await read(next), staleBefore = await state();
+  evidence.stale = { identity: next, before: staleBefore, typed: staleTyped };
   await control('hold-next'); await click(field(next, 'continue'));
   await waitState(value => value.held !== null);
-  await control('accept-held'); await control('release');
+  await control('accept-held');
+  evidence.stale.accepted = await waitState(value => value.persisted.answers.length === staleBefore.persisted.answers.length + 1
+    && value.fakeProviderTurns.length === staleBefore.fakeProviderTurns.length + 1);
+  await control('release');
   const staleAfter = await waitState(value => posts(value).at(-1)?.response?.code === 'TASK_GATE_STALE');
-  const staleUi = await waitFor(harness, () => read(next), value => !!value.notice, deadlineMs);
-  evidence.stale = { identity: next, before: staleBefore, after: staleAfter, typed: staleTyped, ui: staleUi };
+  evidence.stale.after = staleAfter;
+  const rejectedSequence = assertOneAnswer(staleBefore, staleAfter, next, 409).sequence;
+  check('Native raced submission receives real 409 TASK_GATE_STALE, not a successful UI answer', true);
+  evidence.stale.after = await waitState(value => reconciledTaskGateRead(value, next, rejectedSequence));
+  evidence.stale.ui = await waitFor(harness, () => read(next), value => value.state === 'satisfied'
+    && value.inputCount === 0 && value.continueCount === 0, deadlineMs);
+  evidence.stale.after = await state();
+  assertTaskGateStaleReconciled(evidence.stale, local.id);
+  check('Stale reconciliation rereads the same resolved question with no second answer or replay', true);
   await control('flush');
   evidence.fixture = await state();
   assertTaskGateEvidence(evidence);
