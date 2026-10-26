@@ -1,5 +1,6 @@
 // Data-only fixture: real Profile/Desk HTTP handlers and SQLite stores.
-// No listener, provider, shell, picker, profile activation or room assignment.
+// No listener, provider, shell, picker, request-time activation or room assignment.
+// The optional active-profile seed is setup-only; activation HTTP stays blocked.
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
@@ -48,10 +49,12 @@ export function portableTransferFixtureEnabled(env = process.env) {
 
 function configuration(env) {
   assert.equal(portableTransferFixtureEnabled(env), true, 'Explicit portable-transfer fixture opt-in is required');
+  const profileVersion = env.EGDESK_QA_PORTABLE_TRANSFER_PROFILE_VERSION ?? 'head2-draft';
+  assert.ok(['head2-draft', 'head3-active2'].includes(profileVersion), 'Known portable fixture profile version is required');
   const value = env.EGDESK_QA_FIXTURE_PORT;
   assert.ok(typeof value === 'string' && /^[1-9][0-9]{0,4}$/.test(value) && Number(value) <= 65535 && Number(value) !== 39218,
     'Explicit nonproduction EGDESK_QA_FIXTURE_PORT is required');
-  return { host: '127.0.0.1', port: Number(value), origin: `http://127.0.0.1:${value}` };
+  return { host: '127.0.0.1', port: Number(value), origin: `http://127.0.0.1:${value}`, profileVersion };
 }
 
 function privateFile(filename) {
@@ -119,8 +122,18 @@ export function createPortableTransferFixture({ profile, token, env = process.en
     const revision1 = profiles.createDraft({ name: 'Owned QA portable profile', role: 'Portable fixture only',
       instructions: `${marker}_REVISION_1\nRead the owned sample; do not execute commands.`,
       toolCeiling: { browser: 'none', files: 'read', terminal: 'none', network: 'off', mcp: 'none' } });
-    profiles.saveDraft(revision1.id, { ...revision1.profile.head.body,
+    const revision2 = profiles.saveDraft(revision1.id, { ...revision1.profile.head.body,
       instructions: `${marker}_REVISION_2\nThis later draft must not replace a pinned earlier export.` }, 1);
+    if (config.profileVersion === 'head3-active2') {
+      // Use real store operations once, before initial evidence. Never expose
+      // activation as a fixture request or substitute active.body for head.body.
+      profiles.activate(revision1.id, 2, null);
+      profiles.saveDraft(revision1.id, { ...revision2.profile.head.body,
+        instructions: `${marker}_REVISION_3\nAn editable draft distinct from the active revision.`,
+        personality: { ...revision2.profile.head.body.personality,
+          examples: [{ user: 'Owned draft question', reply: 'Owned draft answer.\nKeep the active revision unchanged.' }],
+          avoid: ['Owned draft-only phrase'] } }, 2);
+    }
     const importFilename = 'owned-portable-import.md';
     const importText = ['---', 'name: owned-portable-import', 'description: Owned QA import, never activated.',
       'tools: Read, Grep, Glob', '---', `${marker}_IMPORT_ORIGINAL`,
@@ -142,9 +155,9 @@ export function createPortableTransferFixture({ profile, token, env = process.en
     const deskSeed = desk.saveCurrent({ state: deskState, parentGeneration: null, reason: 'explicit' });
     const databases = { profiles: path.join(dataDir, `profiles-${profiles.ownerHash}.sqlite`),
       desk: path.join(dataDir, `desk-${desk.ownerScopeHash}.sqlite`) };
-    const seed = { profileId: revision1.id, boardId, marker, importFilename, importPath, importText, importSha256: sha256(importText),
+    const seed = { profileId: revision1.id, profileVersion: config.profileVersion, boardId, marker, importFilename, importPath, importText, importSha256: sha256(importText),
       deskState, deskGeneration: deskSeed.generation,
-      revisions: [1, 2].map(revision => {
+      revisions: (config.profileVersion === 'head3-active2' ? [1, 2, 3] : [1, 2]).map(revision => {
         const source = profiles.exportRevision(revision1.id, revision);
         return { revision, hash: source.hash, body: source.body,
           exports: Object.fromEntries(['md', 'codex-toml'].map(format => {
@@ -278,7 +291,7 @@ export function createPortableTransferFixture({ profile, token, env = process.en
               entry.status = 200; sendJson(res, 200, { queued: true }); return true;
             }
             if (body?.operation === 'advance-profile-head' && exactKeys(['operation', 'expectedHeadRevision']) &&
-                body.expectedHeadRevision === 2 && headAdvances.length === 0) {
+                body.expectedHeadRevision === 2 && seed.profileVersion === 'head2-draft' && headAdvances.length === 0) {
               entry.before = persisted();
               const prior = profiles.exportRevision(seed.profileId, 2);
               const saved = profiles.saveDraft(seed.profileId, { ...prior.body,
@@ -306,10 +319,22 @@ export function createPortableTransferFixture({ profile, token, env = process.en
           pickerResults.push({ sequence: entry.sequence, request: body, ...packet });
           entry.status = 200; sendJson(res, 200, packet); return true;
         }
+        // Compare the original request target as well: URL normalization must
+        // not grant dot segments, encoded paths, fragments or even a bare '?'.
+        const draftPath = `/profiles/${seed.profileId}/draft`;
+        const exactDraft = req.url === draftPath && route === draftPath;
+        if (exactDraft && req.method === 'OPTIONS') {
+          if (req.headers['access-control-request-method'] && req.headers['access-control-request-method'] !== 'PUT') {
+            throw failure('QA_PORTABLE_ROUTE_BLOCKED', 'Only PUT may preflight this draft');
+          }
+          res.setHeader('access-control-allow-methods', 'PUT, OPTIONS');
+          entry.status = 204; res.writeHead(204); res.end(); return true;
+        }
+        const draftPut = exactDraft && req.method === 'PUT';
         const duplicateMatch = req.method === 'POST' ? POST_DUPLICATE.exec(route) : null;
-        const profileRoute = req.method === 'GET' && GET_PROFILE.test(route) || req.method === 'POST' && route === '/profiles/import' || !!duplicateMatch;
+        const profileRoute = req.method === 'GET' && GET_PROFILE.test(route) || req.method === 'POST' && route === '/profiles/import' || !!duplicateMatch || draftPut;
         const boardRoute = req.method === 'GET' && (GET_BOARD.test(route) || route === '/v1/desk/current');
-        if (!profileRoute && !boardRoute) throw failure('QA_PORTABLE_ROUTE_BLOCKED', 'Only profile reads/import/duplicate and saved Board reads/export are permitted');
+        if (!profileRoute && !boardRoute) throw failure('QA_PORTABLE_ROUTE_BLOCKED', 'Only profile reads/import/duplicate, the seeded draft PUT and saved Board reads/export are permitted');
         if (req.method === 'POST' && url.search) throw failure('QA_PORTABLE_ROUTE_BLOCKED', 'Profile mutations have no fixture query controls');
         entry.before = persisted();
         // The optional fault buffers only the armed original's duplicate reply.
@@ -318,10 +343,11 @@ export function createPortableTransferFixture({ profile, token, env = process.en
         const armedFault = duplicateMatch && duplicateReceiptFault?.state === 'armed' &&
           duplicateMatch[1] === duplicateReceiptFault.profileId ? duplicateReceiptFault : null;
         let bufferedHeaders, bufferedBody;
-        const chunks = []; let bytes = 0;
+        const chunks = [], requestHash = createHash('sha256'); let bytes = 0;
         const input = Readable.from((async function* () {
           for await (const part of req) {
             const chunk = Buffer.from(part); bytes += chunk.length;
+            requestHash.update(chunk);
             if (bytes <= IMPORT_TRACE_BYTES) chunks.push(chunk);
             yield chunk;
           }
@@ -343,11 +369,11 @@ export function createPortableTransferFixture({ profile, token, env = process.en
         assert.equal(handled, true, 'Allowlisted route must be owned by the real handler');
         const raw = Buffer.concat(chunks);
         entry.requestBytes = bytes; entry.requestTruncated = bytes > IMPORT_TRACE_BYTES;
+        entry.requestSha256 = requestHash.digest('hex');
         if (!entry.requestTruncated) {
-          entry.requestSha256 = sha256(raw);
           try {
             const body = JSON.parse(raw.toString('utf8'));
-            entry.request = { ...(Object.hasOwn(body, 'dryRun') ? { dryRun: body.dryRun } : {}),
+            entry.request = draftPut ? body : { ...(Object.hasOwn(body, 'dryRun') ? { dryRun: body.dryRun } : {}),
               ...(Object.hasOwn(body, 'filename') ? { filename: body.filename } : {}),
               ...(duplicateMatch && Object.hasOwn(body, 'revision') ? { revision: body.revision } : {}),
               ...(duplicateMatch && Object.hasOwn(body, 'name') ? { name: body.name } : {}),

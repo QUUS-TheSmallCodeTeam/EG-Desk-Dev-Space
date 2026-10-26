@@ -2,25 +2,29 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
 import net from 'node:net';
+import http from 'node:http';
 import childProcess from 'node:child_process';
 import { createHash } from 'node:crypto';
+import { DatabaseSync } from 'node:sqlite';
 import { Readable } from 'node:stream';
 import test from 'node:test';
 import { createPortableTransferFixture, portableTransferFixtureEnabled, assertPortableBoardCatalogSeed } from './egdesk-portable-transfer-fixture.mjs';
 import { bootstrapQaProfile, canonicalTempRoot, LOADER_FILES } from './egdesk-chat-qa-profile.mjs';
 import { createPrivateQaTempDirectory } from './egdesk-qa-platform.mjs';
 import { boardToJsonCanvas } from '../helper/egdesk-json-canvas.mjs';
+import { PERSONALITY_LIMITS } from '../helper/egdesk-profile-store.mjs';
 
 const TOKEN = 'owned-portable-transfer-unit-token';
 const ENV = { EGDESK_QA_PORTABLE_TRANSFER_FIXTURE: '1', EGDESK_QA_FIXTURE_TRANSPORT: '1',
   EGDESK_QA_REAL_TURN: '0', EGDESK_QA_FIXTURE_PORT: '49318' };
 const sha256 = value => createHash('sha256').update(value).digest('hex');
+const ACTIVE_DRAFT = { EGDESK_QA_PORTABLE_TRANSFER_PROFILE_VERSION: 'head3-active2' };
 
-function setup(t) {
+function setup(t, env = {}) {
   const loader = createPrivateQaTempDirectory('egdesk-portable-loader-');
   for (const name of LOADER_FILES) fs.writeFileSync(path.join(loader, name), `unit loader ${name}\n`, { mode: 0o600 });
   const { profile } = bootstrapQaProfile({ loaderSource: loader });
-  const fixture = createPortableTransferFixture({ profile, token: TOKEN, env: ENV });
+  const fixture = createPortableTransferFixture({ profile, token: TOKEN, env: { ...ENV, ...env } });
   const root = fixture.snapshot().root;
   t.after(() => {
     fixture.dispose();
@@ -37,7 +41,7 @@ function setup(t) {
 // In-memory HTTP request/response streams only: never a server or socket.
 async function request(fixture, method, route, body, options = {}) {
   const bytes = body === undefined ? [] : [Buffer.from(typeof body === 'string' ? body : JSON.stringify(body))];
-  const req = Readable.from(bytes);
+  const req = Readable.from(options.chunks ?? bytes);
   Object.assign(req, { method, url: route, socket: { remoteAddress: options.remoteAddress || '127.0.0.1' },
     headers: { host: '127.0.0.1:49318', ...(body === undefined ? {} : { 'content-type': 'application/json' }),
       ...(options.token ? { 'x-egdesk-qa-token': TOKEN } : {}), ...options.headers } });
@@ -45,10 +49,30 @@ async function request(fixture, method, route, body, options = {}) {
   const headers = {};
   const res = { setHeader(key, value) { headers[key.toLowerCase()] = value; },
     writeHead(value, supplied) { status = value; for (const [key, content] of Object.entries(supplied || {})) headers[key.toLowerCase()] = content; },
-    end(value) { text = String(value); endCount++; } };
+    end(value) { text = value === undefined ? '' : String(value); endCount++; } };
   const handled = await fixture.handle(req, res, options.suppliedUrl);
   assert.ok(endCount <= 1, 'one real handler response, not a replaced success plus an error');
-  return { handled, status, headers, text, body: text === undefined ? undefined : JSON.parse(text) };
+  return { handled, status, headers, text, body: text ? JSON.parse(text) : undefined };
+}
+
+function profileTables(state) {
+  const db = new DatabaseSync(state.databases.profiles, { readOnly: true });
+  try {
+    // Include any binding/auxiliary tables, not just the fixture's public projection.
+    return Object.fromEntries(db.prepare("SELECT name FROM sqlite_schema WHERE type='table' AND name NOT LIKE 'sqlite_%' ORDER BY name")
+      .all().map(({ name }) => [name, db.prepare(`SELECT * FROM "${name.replaceAll('"', '""')}"`).all().map(row => ({ ...row }))]));
+  } finally { db.close(); }
+}
+
+function assertDraftTrace(trace, payload, response, before, after) {
+  const raw = typeof payload === 'string' ? payload : JSON.stringify(payload);
+  assert.deepEqual([trace.method, trace.delegated, trace.status], ['PUT', true, response.status]);
+  assert.equal(trace.requestBytes, Buffer.byteLength(raw));
+  assert.equal(trace.requestSha256, sha256(raw));
+  assert.equal(trace.requestTruncated, false);
+  if (typeof payload !== 'string') assert.deepEqual(trace.request, payload, 'trace retains the actual supplied body, not a normalized reconstruction');
+  assert.deepEqual(trace.response, response.body); assert.equal(trace.responseSha256, sha256(response.text));
+  assert.deepEqual(trace.before, before.persisted); assert.deepEqual(trace.after, after.persisted);
 }
 
 test('explicit exclusive opt-in, canonical marked profile and token are checked before new fixture writes', t => {
@@ -57,6 +81,7 @@ test('explicit exclusive opt-in, canonical marked profile and token are checked 
     { ...ENV, EGDESK_QA_PORTABLE_TRANSFER_FIXTURE: 'true' }, { ...ENV, EGDESK_QA_REAL_TURN: '1' },
     { ...ENV, EGDESK_QA_FIXTURE_TRANSPORT: '0' }, { ...ENV, EGDESK_QA_FIXTURE_PORT: '39218' },
     { ...ENV, EGDESK_QA_FIXTURE_PORT: undefined }, { ...ENV, EGDESK_QA_FIXTURE_PORT: '65536' },
+    { ...ENV, EGDESK_QA_PORTABLE_TRANSFER_PROFILE_VERSION: 'head4-active2' },
     ...['EGDESK_QA_PROJECT_FILE_FIXTURE', 'EGDESK_QA_CLAUDE_FIXTURE', 'EGDESK_QA_RUN_OUTPUTS_FIXTURE',
       'EGDESK_QA_READER_FIXTURE', 'EGDESK_QA_BROWSER_NEGATIVE', 'EGDESK_QA_BROWSER_RELAY']
       .map(key => ({ ...ENV, [key]: '1' }))];
@@ -387,6 +412,256 @@ test('read-only Profile list/detail/revisions are actual saved SQLite records', 
   assert.ok(fixture.snapshot().requests.every(row => row.delegated && row.status === 200));
 });
 
+test('head3-active2 is an explicit setup-only seed; the default import/duplicate seed remains head2 draft', async t => {
+  const fixture = setup(t, ACTIVE_DRAFT), before = fixture.snapshot(), id = before.seed.profileId;
+  assert.equal(before.seed.profileVersion, 'head3-active2');
+  const detail = await request(fixture, 'GET', `/profiles/${id}`);
+  assert.deepEqual([detail.status, detail.body.headRevision, detail.body.activeRevision, detail.body.lifecycle], [200, 3, 2, 'active']);
+  assert.deepEqual(detail.body.head.body, before.seed.revisions[2].body);
+  assert.deepEqual(detail.body.active.body, before.seed.revisions[1].body);
+  assert.notDeepEqual(detail.body.head.body, detail.body.active.body);
+  assert.deepEqual(before.persisted.profiles.revisions.map(row => [row.revision, row.parent_revision]), [[1, null], [2, 1], [3, 2]]);
+  assert.deepEqual(before.initial, before.persisted);
+  assert.deepEqual(before.headAdvances, []);
+  assert.equal((await request(fixture, 'POST', '/__qa/portable-transfer/control',
+    { operation: 'advance-profile-head', expectedHeadRevision: 2 }, { token: true })).status, 400);
+  assert.equal((await request(fixture, 'POST', `/profiles/${id}/activate`, { revision: 3, expectedActiveRevision: 2 })).status, 403);
+  assert.deepEqual(fixture.snapshot().persisted, before.persisted);
+  const original = setup(t).snapshot();
+  assert.equal(original.seed.profileVersion, 'head2-draft');
+  assert.deepEqual(original.seed.revisions.map(row => row.revision), [1, 2]);
+  assert.deepEqual([original.persisted.profiles.records[0].active_revision, original.persisted.profiles.records[0].lifecycle], [null, 'draft']);
+});
+
+test('ephemeral HTTP draft PUT appends one real revision; GET, SQLite and evidence agree without changing active/past/other rows or exports', async t => {
+  let fixture;
+  const server = http.createServer(async (req, res) => {
+    if (!await fixture.handle(req, res)) { res.writeHead(404); res.end(); }
+  });
+  await new Promise((resolve, reject) => { server.once('error', reject); server.listen(0, '127.0.0.1', resolve); });
+  t.after(() => new Promise(resolve => { server.closeAllConnections(); server.close(resolve); }));
+  const port = server.address().port, origin = `http://127.0.0.1:${port}`;
+  fixture = setup(t, { ...ACTIVE_DRAFT, EGDESK_QA_FIXTURE_PORT: String(port) });
+  const send = async (method, route, payload, headers = {}) => {
+    const response = await fetch(origin + route, { method, headers: { 'content-type': 'application/json', ...headers },
+      ...(payload === undefined ? {} : { body: JSON.stringify(payload) }) });
+    const text = await response.text();
+    return { status: response.status, headers: Object.fromEntries(response.headers), text, body: text ? JSON.parse(text) : undefined };
+  };
+  const state = fixture.snapshot(), id = state.seed.profileId, route = `/profiles/${id}/draft`;
+  const preflight = await send('OPTIONS', route, undefined, { origin: 'chrome://browser', 'access-control-request-method': 'PUT',
+    'access-control-request-headers': 'content-type' });
+  assert.equal(preflight.status, 204); assert.equal(preflight.text, '');
+  assert.equal(preflight.headers['access-control-allow-origin'], 'chrome://browser');
+  assert.equal(preflight.headers['access-control-allow-methods'], 'PUT, OPTIONS');
+  assert.equal(fixture.snapshot().requests.at(-1).delegated, false, 'only this sidecar answers preflight');
+  assert.equal((await send('POST', '/profiles/import', { text: state.seed.importText, filename: state.seed.importFilename })).status, 201);
+  assert.equal((await send('POST', `/profiles/${id}/duplicate`, { revision: 2 })).status, 201);
+  const pins = {};
+  for (const revision of [1, 2, 3]) for (const format of ['md', 'codex-toml']) {
+    const path = `/profiles/${id}/export?format=${format}&revision=${revision}`;
+    pins[path] = (await send('GET', path)).text;
+  }
+  // Pre-existing file sentinel only, not a claim about native UI export IO.
+  fs.writeFileSync(path.join(state.exportsDir, 'before-draft.md'), 'Owned pre-existing export bytes\n', { flag: 'wx', mode: 0o600 });
+  const detail = await send('GET', `/profiles/${id}`), before = fixture.snapshot(), tablesBefore = profileTables(before);
+  const payload = { body: { ...detail.body.head.body, personality: { ...detail.body.head.body.personality,
+    examples: [{ user: ' 오늘 할 일? ', reply: '첫 번째 일을 정리해요.\r\n다음으로 확인해요.' }], avoid: [' 절대로 확실해 '] } }, expectedRevision: 3 };
+  const saved = await send('PUT', route, payload, { origin: 'chrome://browser' }), after = fixture.snapshot();
+  assert.deepEqual([saved.status, saved.body.id, saved.body.revision, saved.body.unchanged], [200, id, 4, false]);
+  const trace = after.requests.at(-1);
+  assertDraftTrace(trace, payload, saved, before, after);
+  assert.equal(after.requests.filter(row => row.method === 'PUT').length, 1);
+  const fetched = await send('GET', `/profiles/${id}`);
+  assert.equal(fetched.status, 200); assert.deepEqual(fetched.body, saved.body.profile);
+  assert.deepEqual([fetched.body.headRevision, fetched.body.activeRevision, fetched.body.lifecycle], [4, 2, 'active']);
+  assert.deepEqual(fetched.body.active, detail.body.active);
+  assert.deepEqual(fetched.body.head.body, { ...payload.body, personality: { ...payload.body.personality,
+    examples: [{ user: '오늘 할 일?', reply: '첫 번째 일을 정리해요.\n다음으로 확인해요.' }], avoid: ['절대로 확실해'] } });
+  const added = after.persisted.profiles.revisions.filter(row => row.profile_id === id && row.revision === 4);
+  assert.equal(added.length, 1); assert.equal(added[0].parent_revision, 3);
+  assert.equal(added[0].hash, saved.body.hash); assert.equal(added[0].hash, sha256(added[0].body_json));
+  assert.deepEqual(JSON.parse(added[0].body_json), fetched.body.head.body);
+  assert.deepEqual(after.persisted.profiles.records, before.persisted.profiles.records);
+  assert.deepEqual(after.persisted.profiles.revisions.filter(row => row.profile_id !== id || row.revision !== 4), before.persisted.profiles.revisions);
+  const tablesAfter = profileTables(after);
+  assert.equal(tablesAfter.profile_revisions.length, tablesBefore.profile_revisions.length + 1);
+  tablesAfter.profile_revisions = tablesAfter.profile_revisions.filter(row => row.profile_id !== id || row.revision !== 4);
+  const originalRecord = tablesBefore.profiles.find(row => row.id === id), changedRecord = tablesAfter.profiles.find(row => row.id === id);
+  assert.ok(changedRecord.updated_at >= originalRecord.updated_at, 'only the real draft-save timestamp may advance');
+  changedRecord.updated_at = originalRecord.updated_at;
+  assert.deepEqual(tablesAfter, tablesBefore, 'all old profile rows and any binding/auxiliary tables are preserved');
+  assert.deepEqual(after.persisted.desk, before.persisted.desk);
+  for (const key of ['exports', 'seed', 'catalogSeed', 'currentImportSha256', 'duplicateEvents', 'pickerResults', 'headAdvances', 'forbiddenPosts']) {
+    assert.deepEqual(after[key], before[key]);
+  }
+  for (const [path, text] of Object.entries(pins)) assert.equal((await send('GET', path)).text, text);
+  assert.deepEqual([after.providerTurns, after.nativePickerInvocations, after.nativeProcessSpawns], [0, 0, 0]);
+});
+
+test('unchanged and exact retry saves add no revision; stale changed body returns real 409 without overwriting head or active', async t => {
+  const fixture = setup(t, ACTIVE_DRAFT), seed = fixture.snapshot().seed, route = `/profiles/${seed.profileId}/draft`;
+  const original = { body: seed.revisions[2].body, expectedRevision: 3 }, before = fixture.snapshot();
+  const unchanged = await request(fixture, 'PUT', route, original);
+  assert.deepEqual([unchanged.status, unchanged.body.revision, unchanged.body.unchanged], [200, 3, true]);
+  assertDraftTrace(fixture.snapshot().requests.at(-1), original, unchanged, before, before);
+  assert.deepEqual(fixture.snapshot().persisted, before.persisted);
+  const payload = { ...original, body: { ...original.body, personality: { ...original.body.personality, avoid: ['Changed once'] } } };
+  const saved = await request(fixture, 'PUT', route, payload), changed = fixture.snapshot();
+  assert.deepEqual([saved.status, saved.body.revision, saved.body.unchanged], [200, 4, false]);
+  for (const expectedRevision of [4, 3]) {
+    const retry = { ...payload, expectedRevision }, response = await request(fixture, 'PUT', route, retry);
+    assert.deepEqual([response.status, response.body.revision, response.body.unchanged], [200, 4, true]);
+    assertDraftTrace(fixture.snapshot().requests.at(-1), retry, response, changed, changed);
+  }
+  const stale = await request(fixture, 'PUT', route, original), after = fixture.snapshot();
+  assert.deepEqual([stale.status, stale.body.code, stale.body.headRevision, stale.body.activeRevision], [409, 'PROFILE_REVISION_CONFLICT', 4, 2]);
+  assertDraftTrace(after.requests.at(-1), original, stale, changed, changed);
+  assert.deepEqual(after.persisted, changed.persisted);
+  assert.deepEqual((await request(fixture, 'GET', `/profiles/${seed.profileId}`)).body, saved.body.profile);
+  assert.deepEqual(after.forbiddenPosts, [], 'legacy POST evidence is not repurposed for PUT');
+});
+
+test('draft invalid shapes and oversized bodies are handled by real validation, fully evidenced when bounded, and add no revision', async t => {
+  const fixture = setup(t, ACTIVE_DRAFT), before = fixture.snapshot(), route = `/profiles/${before.seed.profileId}/draft`;
+  const payload = { body: before.seed.revisions[2].body, expectedRevision: 3 };
+  const cases = [null, [], '{malformed', {}, { body: payload.body }, { expectedRevision: 3 },
+    { ...payload, body: null }, { ...payload, body: [] }, { ...payload, expectedRevision: '3' }, { ...payload, expectedRevision: 0 },
+    ...['accountId', 'ownerHash', 'profileId', 'activeRevision', 'activate', 'roomId', 'toolPreset']
+      .map(key => ({ ...payload, [key]: 'not-a-grant' }))];
+  for (const body of cases) {
+    const response = await request(fixture, 'PUT', route, body), after = fixture.snapshot();
+    assert.equal(response.status, 400, JSON.stringify(body));
+    assertDraftTrace(after.requests.at(-1), body, response, before, before);
+    assert.deepEqual(after.persisted, before.persisted);
+  }
+  for (const size of [65536, 140 * 1024]) {
+    const body = { ...payload, body: { ...payload.body, instructions: 'x'.repeat(size) } }, raw = JSON.stringify(body);
+    const response = await request(fixture, 'PUT', route, raw), after = fixture.snapshot(), trace = after.requests.at(-1);
+    assert.deepEqual([response.status, response.body.code], [413, 'BODY_TOO_LARGE']);
+    assert.equal(trace.delegated, true); assert.equal(trace.requestBytes, Buffer.byteLength(raw));
+    assert.equal(trace.requestSha256, sha256(raw)); assert.equal(trace.requestTruncated, size > 128 * 1024);
+    if (!trace.requestTruncated) assert.deepEqual(trace.request, body);
+    else assert.equal(Object.hasOwn(trace, 'request'), false, 'never present partial JSON as the actual request object');
+    assert.deepEqual(trace.response, response.body); assert.equal(trace.responseSha256, sha256(response.text));
+    assert.deepEqual(trace.before, before.persisted); assert.deepEqual(trace.after, before.persisted);
+    assert.deepEqual(after.persisted, before.persisted);
+  }
+});
+
+test('chunked draft evidence hashes original UTF-8 bytes and never substitutes normalized text or an unread oversized tail', async t => {
+  const fixture = setup(t, ACTIVE_DRAFT), before = fixture.snapshot(), route = `/profiles/${before.seed.profileId}/draft`;
+  const payload = { body: { ...before.seed.revisions[2].body, personality: {
+    ...before.seed.revisions[2].body.personality, examples: [{ user: ` ${'e\u0301'.repeat(100)} `, reply: '😀\r\n🧭' }], avoid: [' e\u0301 '] } }, expectedRevision: 3 };
+  const raw = JSON.stringify(payload, null, 2), bytes = Buffer.from(raw);
+  const chunks = Array.from({ length: Math.ceil(bytes.length / 7) }, (_, i) => bytes.subarray(i * 7, (i + 1) * 7));
+  const response = await request(fixture, 'PUT', route, raw, { chunks }), after = fixture.snapshot();
+  assert.equal(response.status, 200);
+  assertDraftTrace(after.requests.at(-1), raw, response, before, after);
+  assert.deepEqual(after.requests.at(-1).request, payload);
+  assert.deepEqual(response.body.profile.head.body.personality.examples, [{ user: 'é'.repeat(100), reply: '😀\n🧭' }]);
+  assert.deepEqual(response.body.profile.head.body.personality.avoid, ['é']);
+  const large = Buffer.from(JSON.stringify({ body: { ...payload.body, instructions: 'x'.repeat(200 * 1024) }, expectedRevision: 4 }));
+  const delayedChunks = (async function* () {
+    for (let offset = 0; offset < large.length; offset += 8192) {
+      await new Promise(resolve => setImmediate(resolve));
+      yield large.subarray(offset, offset + 8192);
+    }
+  })();
+  const rejected = await request(fixture, 'PUT', route, large.toString('utf8'), { chunks: delayedChunks });
+  assert.deepEqual([rejected.status, rejected.body.code], [413, 'BODY_TOO_LARGE']);
+  const trace = fixture.snapshot().requests.at(-1);
+  assert.ok(trace.requestBytes > 65536 && trace.requestBytes <= large.length);
+  assert.equal(trace.requestSha256, sha256(large.subarray(0, trace.requestBytes)), 'hash only the bytes actually observed before rejection');
+  assert.equal(Object.hasOwn(trace, 'request'), false, 'a partial JSON request is not reconstructed');
+  assert.deepEqual(fixture.snapshot().persisted, after.persisted);
+});
+
+test('personality boundaries use backend Unicode code-point limits, reject overflow without truncating, and preserve multiline replies', async t => {
+  assert.deepEqual(PERSONALITY_LIMITS, { examples: 3, exampleUser: 100, exampleReply: 280, avoid: 8, avoidItem: 80 });
+  const fixture = setup(t, ACTIVE_DRAFT), before = fixture.snapshot(), route = `/profiles/${before.seed.profileId}/draft`;
+  const base = before.seed.revisions[2].body, L = PERSONALITY_LIMITS;
+  const personality = { ...base.personality,
+    examples: Array.from({ length: L.examples }, (_, i) => ({ user: `${i}${'😀'.repeat(L.exampleUser - 1)}`,
+      reply: `${i}${'😀'.repeat(138)}\n${'🧭'.repeat(140)}` })),
+    avoid: Array.from({ length: L.avoid }, (_, i) => `${i}${'😀'.repeat(L.avoidItem - 1)}`) };
+  assert.equal([...personality.examples[0].user].length, 100); assert.equal([...personality.examples[0].reply].length, 280);
+  assert.ok(personality.examples[0].user.length > 100, 'astral characters count once, not as UTF-16 units');
+  const invalid = [
+    { examples: [...personality.examples, personality.examples[0]] },
+    { examples: [{ user: '😀'.repeat(L.exampleUser + 1), reply: 'a' }] },
+    { examples: [{ user: 'q', reply: '😀'.repeat(L.exampleReply + 1) }] },
+    { examples: [{ user: '', reply: 'a' }] }, { examples: [{ user: 'q', reply: ' \n ' }] },
+    { examples: [{ user: 'first\nsecond', reply: 'a' }] }, { examples: [{ user: 'q', reply: 'a', extra: true }] },
+    { examples: ['q → a'] }, { examples: 'q' },
+    { avoid: [...personality.avoid, personality.avoid[0]] }, { avoid: ['😀'.repeat(L.avoidItem + 1)] },
+    { avoid: ['first\nsecond'] }, { avoid: [' '] }, { avoid: 'x' },
+  ];
+  for (const fields of invalid) {
+    const payload = { body: { ...base, personality: { ...base.personality, ...fields } }, expectedRevision: 3 };
+    const response = await request(fixture, 'PUT', route, payload), after = fixture.snapshot();
+    assert.deepEqual([response.status, response.body.code], [400, 'INVALID_PROFILE']);
+    assertDraftTrace(after.requests.at(-1), payload, response, before, before);
+    assert.deepEqual(after.persisted, before.persisted);
+  }
+  const payload = { body: { ...base, personality }, expectedRevision: 3 }, saved = await request(fixture, 'PUT', route, payload);
+  assert.deepEqual([saved.status, saved.body.revision, saved.body.unchanged], [200, 4, false]);
+  assert.deepEqual(saved.body.profile.head.body.personality, personality, 'no clipping of valid boundary strings');
+  assertDraftTrace(fixture.snapshot().requests.at(-1), payload, saved, before, fixture.snapshot());
+  assert.deepEqual((await request(fixture, 'GET', `/profiles/${before.seed.profileId}`)).body.head.body, payload.body);
+});
+
+test('empty examples and avoid arrays remove optional keys through the actual save without touching other fields or active', async t => {
+  const fixture = setup(t, ACTIVE_DRAFT), before = fixture.snapshot(), id = before.seed.profileId, base = before.seed.revisions[2].body;
+  const payload = { body: { ...base, personality: { ...base.personality, examples: [], avoid: [] } }, expectedRevision: 3 };
+  const saved = await request(fixture, 'PUT', `/profiles/${id}/draft`, payload);
+  assert.equal(saved.status, 200); assert.equal(saved.body.revision, 4);
+  const { examples, avoid, ...otherPersonality } = base.personality;
+  assert.deepEqual(saved.body.profile.head.body, { ...base, personality: otherPersonality });
+  assert.deepEqual(saved.body.profile.active.body, before.seed.revisions[1].body);
+  assert.deepEqual((await request(fixture, 'GET', `/profiles/${id}`)).body, saved.body.profile);
+});
+
+test('draft PUT and OPTIONS allow only the literal seeded path; other IDs, methods, queries, suffixes and normalized aliases cannot write', async t => {
+  const fixture = setup(t), initial = fixture.snapshot(), id = initial.seed.profileId, route = `/profiles/${id}/draft`;
+  const copy = await request(fixture, 'POST', `/profiles/${id}/duplicate`, { revision: 2 });
+  const before = fixture.snapshot(), payload = { body: before.seed.revisions[1].body, expectedRevision: 2 };
+  const paths = [`/profiles/${copy.body.id}/draft`, '/profiles/other/draft', `${route}/`, `${route}/activate`, `${route}?`,
+    `${route}?expectedRevision=2`, `${route}?accountId=other`, `${route}#`, `${route}#ignored`,
+    `/profiles/${id.toUpperCase()}/draft`, `/profiles/%${id.charCodeAt(0).toString(16)}${id.slice(1)}/draft`,
+    `/profiles/${id}/%64raft`, `/profiles/other/../${id}/draft`, `/profiles/${id}/./draft`,
+    `/profiles/${id}/draft/../draft`, `/profiles/${id}\\draft`, `http://127.0.0.1:49318${route}`];
+  for (const method of ['PUT', 'OPTIONS']) for (const path of paths) {
+    const response = await request(fixture, method, path, method === 'PUT' ? payload : undefined);
+    const code = path.startsWith('http:') ? 'QA_LOOPBACK_REQUIRED' : 'QA_PORTABLE_ROUTE_BLOCKED';
+    assert.deepEqual([response.status, response.body.code], [403, code], `${method} ${path}`);
+    assert.equal(fixture.snapshot().requests.at(-1).delegated, false);
+    assert.ok(!response.headers['access-control-allow-methods']?.includes('PUT'));
+  }
+  for (const method of ['GET', 'HEAD', 'POST', 'PATCH', 'DELETE']) {
+    assert.equal((await request(fixture, method, route, payload)).status, 403);
+    assert.equal(fixture.snapshot().requests.at(-1).delegated, false);
+  }
+  const wrongMethod = await request(fixture, 'OPTIONS', route, undefined, { headers: { 'access-control-request-method': 'DELETE' } });
+  assert.equal(wrongMethod.status, 403);
+  const allowed = await request(fixture, 'OPTIONS', route, undefined, { headers: { origin: 'chrome://browser', 'access-control-request-method': 'PUT' } });
+  assert.equal(allowed.status, 204); assert.equal(allowed.headers['access-control-allow-methods'], 'PUT, OPTIONS');
+  const control = await request(fixture, 'OPTIONS', '/__qa/portable-transfer/control');
+  assert.equal(control.status, 204); assert.ok(!control.headers['access-control-allow-methods']?.includes('PUT'), 'shared preflight is unchanged');
+  for (const options of [{ headers: { host: 'evil.invalid' } }, { headers: { origin: 'https://evil.invalid' } },
+    { headers: { 'sec-fetch-site': 'same-site' } }, { remoteAddress: '192.0.2.1' },
+    { suppliedUrl: new URL('http://127.0.0.1:49318/profiles/other/draft') }]) {
+    for (const method of ['PUT', 'OPTIONS']) {
+      const response = await request(fixture, method, route, method === 'PUT' ? payload : undefined, options);
+      assert.deepEqual([response.status, response.body.code], [403, 'QA_LOOPBACK_REQUIRED']);
+      assert.equal(fixture.snapshot().requests.at(-1).delegated, false);
+      assert.equal(response.headers['access-control-allow-origin'], undefined);
+    }
+  }
+  assert.deepEqual(fixture.snapshot().persisted, before.persisted);
+  assert.deepEqual(fixture.snapshot().exports, before.exports);
+});
+
 test('saved-head .canvas export is actual conversion, omits attachments and creates no Board or Desk revision', async t => {
   const fixture = setup(t), before = fixture.snapshot(), boardId = before.seed.boardId;
   const route = `/v1/boards/${boardId}/export?format=json-canvas`;
@@ -457,12 +732,13 @@ test('MD and TOML exports pin exact revision bytes and hashes without activating
 test('activation, record/room assignment, provider, terminal and other writes are refused and forbidden POST attempts remain visible', async t => {
   const fixture = setup(t), before = fixture.snapshot(), id = before.seed.profileId;
   const posts = [`/profiles/${id}/activate`, `/profiles/${id}/lifecycle`, '/profiles',
-    '/records/activate', '/chat/profile/assign', '/rooms/assign', '/chat/send', '/provider/run', '/terminal/spawn', '/terminal/write', '/__qa/portable-transfer/inject'];
+    '/records/activate', '/chat/profile/assign', '/rooms/assign', '/chat/send', '/provider/run', '/providers/config',
+    '/auth/login', '/auth/logout', '/terminal/spawn', '/terminal/write', '/__qa/portable-transfer/inject'];
   for (const route of posts) {
     const blocked = await request(fixture, 'POST', route, { revision: 1, profileId: id, roomId: 'owned-room', command: 'must-not-run' });
     assert.equal(blocked.status, 403, route); assert.equal(blocked.body.code, 'QA_PORTABLE_ROUTE_BLOCKED');
   }
-  assert.equal((await request(fixture, 'PUT', `/profiles/${id}/draft`, { body: before.seed.revisions[0].body, expectedRevision: 2 })).status, 403);
+  assert.equal((await request(fixture, 'PUT', '/profiles/other/draft', { body: before.seed.revisions[0].body, expectedRevision: 2 })).status, 403);
   assert.equal((await request(fixture, 'PUT', `/v1/boards/${before.seed.boardId}`, { body: {}, expectedRevision: 1 })).status, 403);
   assert.equal((await request(fixture, 'GET', '/terminal/shells')).status, 403);
   const after = fixture.snapshot();
