@@ -183,7 +183,8 @@ export function createPortableTransferFixture({ profile, token, env = process.en
     catalogSeed.coherentBeforeLaunch = true;
     const profileHandler = createProfileHttpHandler({ store: () => profiles, port: config.port });
     const deskHandler = createDeskHttpHandler({ store: () => desk, port: config.port });
-    const requests = [], forbiddenPosts = [], pickerResults = [], headAdvances = [], duplicateEvents = [];
+    const requests = [], forbiddenPosts = [], pickerResults = [], headAdvances = [], duplicateEvents = [], receiptFaults = [];
+    let duplicateReceiptFault = null;
     let queuedPicker = null;
     let disposed = false, sequence = 0;
     const exportFiles = () => {
@@ -206,6 +207,7 @@ export function createPortableTransferFixture({ profile, token, env = process.en
         currentImportSha256: sha256(fs.readFileSync(importPath)), requests: structuredClone(requests), forbiddenPosts: structuredClone(forbiddenPosts),
         queuedPicker: structuredClone(queuedPicker), pickerResults: structuredClone(pickerResults),
         headAdvances: structuredClone(headAdvances), duplicateEvents: structuredClone(duplicateEvents), exports: exportFiles(),
+        duplicateReceiptFault: structuredClone(duplicateReceiptFault), receiptFaults: structuredClone(receiptFaults),
         deskReadiness: { storeOpen: !disposed, seedGeneration: seed.deskGeneration,
           currentReads: requests.filter(row => row.method === 'GET' && row.path === '/v1/desk/current' && row.status === 200).length },
         providerTurns: 0, nativePickerInvocations: 0, nativeProcessSpawns: 0,
@@ -247,6 +249,19 @@ export function createPortableTransferFixture({ profile, token, env = process.en
           const exactKeys = keys => body && typeof body === 'object' && !Array.isArray(body) &&
             Object.keys(body).length === keys.length && keys.every(key => Object.hasOwn(body, key));
           if (route === CONTROL_ROUTE) {
+            if (body?.operation === 'arm-duplicate-receipt-fault') {
+              if (!exactKeys(['operation', 'profileId', 'revision', 'hash']) || duplicateReceiptFault ||
+                  body.profileId !== seed.profileId || !Number.isSafeInteger(body.revision) || body.revision < 1 || body.revision > 999999999 ||
+                  typeof body.hash !== 'string' || !/^[a-f0-9]{64}$/.test(body.hash)) {
+                throw failure('QA_RECEIPT_FAULT', 'One exact original-profile receipt fault may be armed once', 409);
+              }
+              const source = profiles.exportRevision(body.profileId, body.revision);
+              if (source.hash !== body.hash) throw failure('QA_RECEIPT_FAULT', 'Saved revision hash must match', 409);
+              entry.request = structuredClone(body); entry.requestSha256 = sha256(JSON.stringify(body));
+              duplicateReceiptFault = { state: 'armed', armSequence: entry.sequence, profileId: body.profileId,
+                revision: body.revision, hash: body.hash };
+              entry.status = 200; sendJson(res, 200, { ...duplicateReceiptFault }); return true;
+            }
             if (body?.operation === 'queue-picker') {
               const hasFilename = Object.hasOwn(body, 'filename');
               if (!exactKeys(['operation', 'kind', 'result', ...(hasFilename ? ['filename'] : [])]) || queuedPicker ||
@@ -297,8 +312,12 @@ export function createPortableTransferFixture({ profile, token, env = process.en
         if (!profileRoute && !boardRoute) throw failure('QA_PORTABLE_ROUTE_BLOCKED', 'Only profile reads/import/duplicate and saved Board reads/export are permitted');
         if (req.method === 'POST' && url.search) throw failure('QA_PORTABLE_ROUTE_BLOCKED', 'Profile mutations have no fixture query controls');
         entry.before = persisted();
-        // Observe the very bytes consumed by the actual handler. Do not replace
-        // its parser, store result or HTTP success envelope with fixture data.
+        // The optional fault buffers only the armed original's duplicate reply.
+        // Parser/auth/store still run unchanged; only an exact real 201 receipt
+        // may be malformed after SQLite and the actual event are recorded.
+        const armedFault = duplicateMatch && duplicateReceiptFault?.state === 'armed' &&
+          duplicateMatch[1] === duplicateReceiptFault.profileId ? duplicateReceiptFault : null;
+        let bufferedHeaders, bufferedBody;
         const chunks = []; let bytes = 0;
         const input = Readable.from((async function* () {
           for await (const part of req) {
@@ -309,10 +328,13 @@ export function createPortableTransferFixture({ profile, token, env = process.en
         })());
         Object.assign(input, { method: req.method, url: req.url, headers: req.headers, socket: req.socket });
         const response = {
-          writeHead(status, headers) { entry.status = status; return res.writeHead(status, headers); },
+          writeHead(status, headers) { entry.status = status;
+            if (armedFault) { bufferedHeaders = headers; return; }
+            return res.writeHead(status, headers); },
           end(body) {
             entry.responseSha256 = sha256(body);
             entry.response = JSON.parse(body);
+            if (armedFault) { bufferedBody = body; return; }
             return res.end(body);
           },
         };
@@ -345,6 +367,31 @@ export function createPortableTransferFixture({ profile, token, env = process.en
         }
         if (req.method === 'POST' && entry.status >= 400) {
           forbiddenPosts.push({ sequence: entry.sequence, path: route, code: entry.response?.code || 'PROFILE_ERROR' });
+        }
+        if (armedFault) {
+          assert.equal(typeof bufferedBody, 'string');
+          const created = entry.response, source = created?.profile?.source?.at(-1);
+          if (duplicateReceiptFault === armedFault && armedFault.state === 'armed' && entry.status === 201 &&
+              source?.kind === 'duplicate' && source.profileId === armedFault.profileId &&
+              source.revision === armedFault.revision && source.hash === armedFault.hash) {
+            const record = entry.after.profiles.records.find(row => row.id === created.id);
+            assert.ok(record && !entry.before.profiles.records.some(row => row.id === created.id));
+            assert.equal(record.lifecycle, 'draft'); assert.equal(record.active_revision, null);
+            const delivered = { ...created, profile: null }, bytes = JSON.stringify(delivered);
+            entry.deliveredStatus = 201; entry.deliveredResponse = delivered;
+            entry.deliveredResponseSha256 = sha256(bytes); entry.deliveredResponseBytes = Buffer.byteLength(bytes);
+            const fault = { kind: 'duplicate-receipt-profile-null', synthetic: true, armSequence: armedFault.armSequence,
+              sequence: entry.sequence, sourceProfileId: source.profileId, sourceRevision: source.revision, sourceHash: source.hash,
+              createdProfileId: created.id, actualResponseSha256: entry.responseSha256,
+              deliveredResponseSha256: entry.deliveredResponseSha256 };
+            // Consume before emitting; a second concurrent or later reply cannot
+            // reuse this fault. The real receipt/event remain unmodified.
+            armedFault.state = 'consumed'; armedFault.requestSequence = entry.sequence;
+            receiptFaults.push(fault); entry.receiptFault = fault;
+            sendJson(res, 201, delivered);
+          } else {
+            res.writeHead(entry.status, bufferedHeaders); res.end(bufferedBody);
+          }
         }
         return true;
       } catch (cause) {

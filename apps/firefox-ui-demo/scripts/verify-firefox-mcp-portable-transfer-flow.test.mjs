@@ -11,6 +11,8 @@ import { assertPortableEnvironment, assertPortableStoreInvariant, assertPortable
   assertPortableMissingHead, assertPortableAttachmentOmission,
   assertPortableDuplicateReady, assertPortableDuplicateUi, assertPortableDuplicatedDraft,
   assertPortableDuplicateNoReplay, assertPortableRejectedDeskAutosaves, runPortableDuplicateCase, PORTABLE_DUPLICATE_NOTICE,
+  assertPortableUnknownCreated, assertPortableUnknownUi, assertPortableUnknownNoReplay, runPortableDuplicateUnknownCase,
+  probePortableDisabledDuplicate, PORTABLE_DUPLICATE_UNKNOWN_NOTICE,
   observePortableFirstUse, preparePortableInstructionEdge, observePortableSettingsNavigation, navigatePortableSettings,
   portableObservationSources, PORTABLE_OBSERVATION_BUDGET, portableTextVisible } from './verify-firefox-mcp-portable-transfer-flow.mjs';
 
@@ -705,4 +707,127 @@ test('duplicate stage tolerates only real rejected Desk PUT during post-click ob
   assert.equal(proof.samples.at(-1).state.duplicateEvents.length, 1);
   assert.deepEqual(proof.samples.at(-1).state.persisted, proof.after.persisted);
   assert.match(h.checks.at(-1), /Desk autosave.*rejected.*SQLite unchanged/);
+});
+
+async function unknownFixture(t) {
+  const h = await duplicateFixture(t), success = await h.commit();
+  const source = success.after.persisted.profiles.revisions.find(row => row.profile_id === h.before.seed.profileId && row.revision === 3);
+  const target = { profileId: h.before.seed.profileId, revision: 3, hash: source.hash };
+  const before = h.fixture.snapshot(), uiBefore = structuredClone(h.uiBefore);
+  Object.assign(uiBefore, { settingsId: 'settings-owned', detailRevision: '3', transferState: 'idle',
+    target: { ...uiBefore.target, revision: '3', text: '내보낼 Agent: Owned QA portable profile · 초안 버전 3' },
+    duplicate: { ...uiBefore.duplicate, revision: '3' } });
+  const arm = async value => {
+    const packet = await request(h.fixture, 'POST', '/__qa/portable-transfer/control', { operation: 'arm-duplicate-receipt-fault', ...value });
+    assert.equal(packet.status, 200); return packet.value;
+  };
+  const commit = async () => {
+    const packet = await request(h.fixture, 'POST', `/profiles/${target.profileId}/duplicate`, { revision: 3 });
+    assert.equal(packet.status, 201); assert.equal(packet.value.profile, null);
+    const uiAfter = { ...structuredClone(uiBefore), agentNotice: PORTABLE_DUPLICATE_UNKNOWN_NOTICE,
+      duplicate: { ...uiBefore.duplicate, state: 'unknown', disabled: true } };
+    return { after: h.fixture.snapshot(), uiAfter, id: packet.value.id };
+  };
+  return { ...h, success, before, target, uiBefore, arm, commit };
+}
+
+test('unknown receipt proof requires real creation, exact synthetic provenance and original displayed v3 identity', async t => {
+  const h = await unknownFixture(t); await h.arm(h.target);
+  const { after, uiAfter, id } = await h.commit();
+  assert.equal(assertPortableUnknownCreated(h.before, after, h.uiBefore, uiAfter, h.target), id);
+  const samples = Array.from({ length: 4 }, () => ({ state: after, ui: uiAfter }));
+  assert.equal(assertPortableUnknownNoReplay(after, samples, h.uiBefore, h.target), true);
+  for (const alter of [state => { state.receiptFaults[0].synthetic = false; },
+    state => { state.receiptFaults[0].sourceRevision = 2; }, state => { state.duplicateReceiptFault.state = 'armed'; },
+    state => { state.requests.findLast(row => row.path.endsWith('/duplicate')).deliveredResponse.profile = {}; },
+    state => { state.requests.findLast(row => row.path.endsWith('/duplicate')).deliveredResponseBytes++; },
+    state => { state.requests.findLast(row => row.path.endsWith('/duplicate')).response.profile.activeRevision = 1; },
+    state => { state.persisted.profiles.records.find(row => row.id === id).active_revision = 1; },
+    state => { state.duplicateEvents.pop(); }]) {
+    const changed = structuredClone(after); alter(changed);
+    assert.throws(() => assertPortableUnknownCreated(h.before, changed, h.uiBefore, uiAfter, h.target));
+  }
+  for (const alter of [ui => { ui.duplicate.disabled = false; }, ui => { ui.duplicate.state = 'idle'; },
+    ui => { ui.detailId = id; }, ui => { ui.agentNotice = PORTABLE_DUPLICATE_NOTICE; },
+    ui => { ui.target.revision = '2'; }, ui => { ui.settingsId = 'other-settings'; },
+    ui => { ui.roomAssignments[0].agentProfileId = id; }]) {
+    const changed = structuredClone(uiAfter); alter(changed);
+    assert.throws(() => assertPortableUnknownUi(h.uiBefore, changed, h.target));
+  }
+  assert.equal((await request(h.fixture, 'PUT', '/v1/desk/current', {})).status, 403);
+  assert.equal(assertPortableUnknownNoReplay(after,
+    Array.from({ length: 3 }, () => ({ state: h.fixture.snapshot(), ui: uiAfter })), h.uiBefore, h.target), true);
+  await request(h.fixture, 'POST', `/profiles/${h.target.profileId}/duplicate`, { revision: 3 });
+  assert.throws(() => assertPortableUnknownNoReplay(after,
+    Array.from({ length: 3 }, () => ({ state: h.fixture.snapshot(), ui: uiAfter })), h.uiBefore, h.target));
+});
+
+test('disabled duplicate probe requires exact unknown binding, fresh complete geometry and one unretried native point', async () => {
+  const target = { profileId: 'prof-original', revision: 3, hash: 'a'.repeat(64) };
+  const uiBefore = { settingsId: 'settings-owned', target: { profileId: target.profileId, revision: '3' }, roomAssignments: [], activeThreadId: null };
+  const ui = { ...uiBefore, detailCount: 1, detailId: target.profileId, detailRevision: '3', detailLifecycle: 'draft',
+    duplicate: { count: 1, profileId: target.profileId, revision: '3', state: 'unknown', disabled: true }, agentNotice: PORTABLE_DUPLICATE_UNKNOWN_NOTICE };
+  const selector = '[data-testid="settings-agent-duplicate"][data-profile-id="prof-original"][data-revision="3"][data-state="unknown"]';
+  const value = { selector, settingsId: uiBefore.settingsId, owned: true, cards: 1, contents: 1, count: 1,
+    testid: 'settings-agent-duplicate', profileId: target.profileId, revision: '3', duplicateState: 'unknown', disabled: true, readOnly: false,
+    contentVisible: true, targetVisible: true, targetPaintReady: true, targetRect: { top: 10 }, targetClip: { top: 0 },
+    viewport: { top: 0 }, scrollTop: 2, point: { x: 300, y: 200 } };
+  let clicks = 0;
+  const options = { selector, target, uiBefore, readUi: async () => structuredClone(ui), readTarget: async () => structuredClone(value),
+    clickPoint: async () => { clicks++; }, assertDeadline() {} };
+  await probePortableDisabledDuplicate(options); assert.equal(clicks, 1);
+  for (const alter of [v => { v.disabled = false; }, v => { v.readOnly = true; }, v => { v.targetPaintReady = false; },
+    v => { v.profileId = 'other'; }, v => { v.revision = '2'; }, v => { v.duplicateState = 'pending'; },
+    v => { v.count = 2; }, v => { v.owned = false; }, v => { v.settingsId = 'other'; }]) {
+    clicks = 0;
+    await assert.rejects(probePortableDisabledDuplicate({ ...options, readTarget: async () => { const v = structuredClone(value); alter(v); return v; } }));
+    assert.equal(clicks, 0);
+  }
+  let reads = 0; clicks = 0;
+  await assert.rejects(probePortableDisabledDuplicate({ ...options, readTarget: async () => {
+    const v = structuredClone(value); if (++reads === 2) v.point.x++; return v;
+  } })); assert.equal(clicks, 0);
+  await assert.rejects(probePortableDisabledDuplicate({ ...options, clickPoint: async () => { clicks++; throw new Error('ambiguous'); } }), /ambiguous/);
+  assert.equal(clicks, 1);
+});
+
+test('disabled-only navigation never relaxes ordinary target or wrong-profile safety', async () => {
+  const target = { profileId: 'prof-original', revision: 3 };
+  const make = () => {
+    const h = settingsNavigationFixture({ selector: '[data-testid="settings-agent-duplicate"]', transferState: 'idle' });
+    const read = h.options.read;
+    h.options.read = async () => { const v = await read(); return { ...v, targetPaintReady: v.targetReady, targetReady: false,
+      testid: 'settings-agent-duplicate', profileId: target.profileId, revision: '3', duplicateState: 'unknown', disabled: true, readOnly: false }; };
+    h.options.focus = false; return h;
+  };
+  const normal = make(); await assert.rejects(navigatePortableSettings(normal.options)); assert.deepEqual(normal.wheels, []);
+  const allowed = make(); const result = await navigatePortableSettings({ ...allowed.options, disabledDuplicate: target });
+  assert.equal(result.targetReady, true); assert.ok(allowed.wheels.length > 0); assert.deepEqual(allowed.clicks, []);
+  const wrong = make(); await assert.rejects(navigatePortableSettings({ ...wrong.options, disabledDuplicate: { ...target, profileId: 'other' } }));
+  assert.deepEqual(wrong.wheels, []);
+});
+
+test('unknown stage selects original via clicks, arms exact displayed v3, creates once, and probes disabled without a POST', async t => {
+  const h = await unknownFixture(t), actions = [], checks = [];
+  let ui = { ...h.success.uiAfter, settingsId: h.uiBefore.settingsId }, posts = 0, probes = 0;
+  const options = { readState: async () => h.fixture.snapshot(), readUi: async () => structuredClone(ui),
+    armFault: h.arm, reach: async (selector, options) => { actions.push(['reach', selector, options]); },
+    capture: async (stage, subjects) => { actions.push(['capture', stage, subjects]); },
+    check: (name, passed) => { assert.equal(passed, true); checks.push(name); },
+    waitUi: async predicate => { assert.equal(predicate(ui), true); return structuredClone(ui); },
+    click: async selector => {
+      actions.push(['click', selector]);
+      if (selector.includes('> button.egd-settings-link')) ui = { ...ui, rows: [{ id: h.target.profileId }] };
+      else if (selector.includes('settings-agent-row')) ui = structuredClone(h.uiBefore);
+      else { posts++; ui = (await h.commit()).uiAfter; }
+    }, retryDisabled: async (selector, target, before) => {
+      probes++; assert.match(selector, /data-state="unknown"/); assert.deepEqual(target, h.target);
+      assertPortableUnknownUi(before, ui, target); // orchestration test only, not native proof
+    }, pause: async () => {}, assertDeadline() {} };
+  const proof = await runPortableDuplicateUnknownCase(options);
+  assert.equal(posts, 1); assert.equal(probes, 1); assert.equal(checks.length, 2);
+  assert.equal(proof.samples.length, 4); assert.equal(proof.after.receiptFaults.length, 1);
+  assert.equal(proof.after.duplicateEvents.length, 2, 'One earlier success plus one unknown-result creation');
+  assert.ok(actions.some(row => row[0] === 'reach' && row[2]?.disabledDuplicate?.revision === 3));
+  assert.match(proof.faultScope, /no network\/SSE fault/);
 });

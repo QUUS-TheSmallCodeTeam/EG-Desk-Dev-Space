@@ -1,6 +1,7 @@
 // Attach-only. Main starts the owned headless Firefox and fixture listener.
 // Native UI -> real flow/HTTP/SQLite -> real owned file IO. Only OS selection
-// results are synthetic; no DOM outcomes, flow results or IO receipts replaced.
+// results and one explicitly recorded malformed duplicate receipt are synthetic.
+// No DOM outcomes, SQLite creations or IO receipts are replaced.
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
@@ -18,6 +19,7 @@ const profileDuplicates = state => state.requests.filter(row => row.method === '
 const deskAutosave = row => row.method === 'PUT' && row.path === '/v1/desk/current';
 const nonDeskWrites = state => state.requests.filter(row => row.method !== 'GET' && !row.path.startsWith('/__qa/') && !deskAutosave(row));
 export const PORTABLE_DUPLICATE_NOTICE = '복제한 새 초안을 만들었습니다. 원본은 그대로이며, 아직 사용하거나 대화방에 배정하지 않았습니다.';
+export const PORTABLE_DUPLICATE_UNKNOWN_NOTICE = '복제 결과를 확인하지 못했습니다. Agent 목록에서 사본을 확인해 주세요. 이 설정 창에서는 같은 버전을 다시 복제하지 않습니다. 자동으로 다시 시도하지 않습니다.';
 export const PORTABLE_OBSERVATION_BUDGET = 12 * 1024;
 
 export function assertPortableEnvironment(env = process.env) {
@@ -427,7 +429,10 @@ function portableSettingsNavigationDom({ selector, settingsId }) {
     }
     if (wheelPoint) break;
   }
-  return { ...base, owned: true, contentVisible: visible(content), targetVisible, disabled, targetRect, targetClip,
+  return { ...base, owned: true, contentVisible: visible(content), targetVisible, disabled, readOnly: !!target.readOnly,
+    testid: target.dataset?.testid, profileId: target.dataset?.profileId, revision: target.dataset?.revision, duplicateState: target.dataset?.state,
+    targetRect, targetClip,
+    targetPaintReady: targetVisible && inside(targetRect, targetClip) && targetHits.every(Boolean) && owns(target, point.x, point.y),
     targetReady: targetVisible && !disabled && inside(targetRect, targetClip) && targetHits.every(Boolean) && owns(target, point.x, point.y),
     point, wheelPoint, bounds, viewport, scrollTop: content.scrollTop, scrollHeight: content.scrollHeight, clientHeight: content.clientHeight };
 }
@@ -448,12 +453,16 @@ export function portableTextVisible(paint, expected, needle = null) {
     paint.fragments.every(r => r.inside && r.hits.length === 3 && r.hits.every(Boolean));
 }
 
-export async function navigatePortableSettings({ read, wheelAt, clickPoint, pause, assertDeadline, focus = false, trace = [] }) {
+export async function navigatePortableSettings({ read, wheelAt, clickPoint, pause, assertDeadline, focus = false, trace = [], disabledDuplicate = null }) {
   let binding;
   const observe = async () => {
     assertDeadline(); const value = await read();
     assert.ok(value.owned && value.cards === 1 && value.contents === 1 && value.count === 1, 'One target in the same Settings content is required');
-    assert.ok(value.contentVisible && value.targetVisible && !value.disabled, 'Settings target is unavailable');
+    assert.ok(value.contentVisible && value.targetVisible, 'Settings target is unavailable');
+    if (disabledDuplicate) {
+      assert.equal(focus, false); assertDisabledDuplicateTarget(value, disabledDuplicate);
+      value.targetReady = value.targetPaintReady;
+    } else assert.equal(value.disabled, false, 'Settings target is unavailable');
     const next = JSON.stringify([value.settingsId, value.selector, value.transferState]);
     if (binding === undefined) binding = next;
     assert.equal(next, binding, 'Settings view changed during native navigation');
@@ -560,8 +569,8 @@ export async function runPortableTransferFlow({ harness, result, check }, { prof
   result.sourceProof = isolation.files; result.pickerTransform = descriptor;
   result.observationScripts = portableObservationSources().map(({ name, bytes }) => ({ name, bytes }));
   result.scope = { actual: ['headless native UI input', 'Profile/Board transfer flows', 'HTTP handlers', 'SQLite', 'owned Markdown read and exclusive file writes'],
-    synthetic: ['native OS picker result DTO only', 'prelaunch owned Board catalog seed'],
-    excluded: ['provider turns', 'OS picker interaction', 'hardware foreground', 'PTY/shell', 'production autosave'] };
+    synthetic: ['native OS picker result DTO', 'prelaunch owned Board catalog seed', 'one malformed duplicate receipt after actual SQLite creation; not a network/SSE fault'],
+    excluded: ['provider turns', 'OS picker interaction', 'hardware foreground', 'PTY/shell', 'production autosave', 'network/SSE disconnection'] };
   result.actions = []; result.unverified = [];
   const proof = result.portableProof = { captures: [], noReplay: [] }, token = env.EGDESK_QA_FIXTURE_TOKEN;
   const state = () => loopbackJson('/__qa/portable-transfer/state', { token, env });
@@ -591,13 +600,13 @@ export async function runPortableTransferFlow({ harness, result, check }, { prof
   };
   // Settings navigation never cycles through unrelated focus targets. Wheel
   // points belong to the observed outer scroller, followed by fresh geometry.
-  const reach = async (selector, { focus = false } = {}) => {
+  const reach = async (selector, { focus = false, disabledDuplicate = null } = {}) => {
     const settingsId = (await observePortableUi(harness)).settingsId;
     assert.ok(settingsId, 'Existing Settings card required for native scrolling');
     return navigatePortableSettings({ read: () => observePortableSettingsNavigation(harness, selector, settingsId),
       wheelAt: input => harness.wheelAt(input), clickPoint: point => harness.clickPoint(point),
       pause: () => new Promise(resolve => setTimeout(resolve, 75)), assertDeadline: () => assertBeforeDeadline(deadlineMs),
-      focus, trace: result.actions });
+      focus, disabledDuplicate, trace: result.actions });
   };
   const capture = async (stage, subjects, observation) => {
     const paints = [];
@@ -830,9 +839,25 @@ export async function runPortableTransferFlow({ harness, result, check }, { prof
   const afterDuplicate = await loopbackJson('/__qa/state', { token, env });
   check('duplicate adds no provider/send/auth/terminal activity', afterDuplicate.providerTurns === 0 &&
     afterDuplicate.observed.sends.length === 0 && afterDuplicate.observed.authWrites.length === 0 && afterDuplicate.runs.length === 0);
+  proof.successFinal = proof.final;
+  proof.duplicateUnknown = await runPortableDuplicateUnknownCase({ readState: state, readUi: () => observePortableUi(harness),
+    armFault: target => loopbackJson('/__qa/portable-transfer/control', { method: 'POST', token, env,
+      body: { operation: 'arm-duplicate-receipt-fault', ...target } }), reach, click, capture, check, waitUi,
+    retryDisabled: async (selector, target, uiBefore) => {
+      const point = await probePortableDisabledDuplicate({ selector, target, uiBefore,
+        readUi: () => observePortableUi(harness),
+        readTarget: () => observePortableSettingsNavigation(harness, selector, uiBefore.settingsId),
+        clickPoint: value => harness.clickPoint(value), assertDeadline: () => assertBeforeDeadline(deadlineMs) });
+      result.actions.push({ kind: 'native-disabled-duplicate-probe', selector, ...point, at: Date.now() });
+    }, pause: () => new Promise(resolve => setTimeout(resolve, 250)), assertDeadline: () => assertBeforeDeadline(deadlineMs) });
+  proof.final = await state();
+  const afterUnknown = await loopbackJson('/__qa/state', { token, env });
+  check('receipt fault adds no provider/send/auth/terminal activity', afterUnknown.providerTurns === 0 &&
+    afterUnknown.observed.sends.length === 0 && afterUnknown.observed.authWrites.length === 0 && afterUnknown.runs.length === 0);
   result.providerTurns = 0; result.nativePickerInvocations = 0; result.nativeProcessSpawns = 0;
   result.actualUiAndOwnedStorageVerified = true;
   result.profileDuplicateVerified = true;
+  result.profileDuplicateUnknownVerified = 'synthetic-malformed-receipt-after-actual-create-only';
   result.visualReview = 'pending-first-person-review';
 }
 
@@ -872,6 +897,158 @@ export async function runPortableDuplicateCase({ readState, readUi, reach, click
   check('any intervening Desk autosave is exactly rejected before delegation and leaves Desk/Board SQLite unchanged',
     assertPortableRejectedDeskAutosaves(before, samples.at(-1).state));
   return { before, uiBefore, clickState, clickUi, after, uiAfter, id, samples };
+}
+
+export function assertPortableUnknownUi(before, ui, target) {
+  assert.equal(ui.settingsId, before.settingsId); assert.ok(ui.settingsId);
+  assert.equal(ui.detailCount, 1); assert.equal(ui.detailId, target.profileId);
+  assert.equal(ui.detailRevision, String(target.revision)); assert.equal(ui.detailLifecycle, 'draft');
+  assert.deepEqual(ui.target, before.target);
+  assert.deepEqual(ui.duplicate, { count: 1, profileId: target.profileId, revision: String(target.revision), state: 'unknown', disabled: true });
+  assert.equal(ui.agentNotice, PORTABLE_DUPLICATE_UNKNOWN_NOTICE);
+  assert.deepEqual(ui.roomAssignments, before.roomAssignments); assert.equal(ui.activeThreadId, before.activeThreadId);
+  return true;
+}
+
+function assertDisabledDuplicateTarget(value, target) {
+  assert.equal(value.testid, 'settings-agent-duplicate'); assert.equal(value.profileId, target.profileId);
+  assert.equal(value.revision, String(target.revision)); assert.equal(value.duplicateState, 'unknown');
+  assert.equal(value.disabled, true); assert.equal(value.readOnly, false);
+}
+
+export async function probePortableDisabledDuplicate({ selector, target, uiBefore, readUi, readTarget, clickPoint, assertDeadline }) {
+  const observe = async () => {
+    assertDeadline(); assertPortableUnknownUi(uiBefore, await readUi(), target);
+    const value = await readTarget();
+    assertDisabledDuplicateTarget(value, target);
+    assert.equal(value.selector, selector); assert.equal(value.settingsId, uiBefore.settingsId);
+    assert.ok(value.owned && value.cards === 1 && value.contents === 1 && value.count === 1);
+    assert.ok(value.contentVisible && value.targetVisible && value.targetPaintReady,
+      'Disabled probe still requires the entire button, ancestor clipping and all nine hit points');
+    return value;
+  };
+  const first = await observe(), fresh = await observe();
+  for (const key of ['targetRect', 'targetClip', 'point', 'scrollTop', 'viewport']) assert.deepEqual(fresh[key], first[key]);
+  assertDeadline(); await clickPoint(fresh.point); // Exactly one input; never retry ambiguous input.
+  return fresh.point;
+}
+
+export function assertPortableUnknownCreated(before, after, uiBefore, uiAfter, target) {
+  assert.equal(target.profileId, before.seed.profileId); assert.deepEqual(after.seed, before.seed);
+  assertPortableUnknownUi(uiBefore, uiAfter, target);
+  assertPortableRejectedDeskAutosaves(before, after);
+  assert.equal(before.duplicateReceiptFault, null); assert.deepEqual(before.receiptFaults, []);
+  assert.equal(profileDuplicates(before).length, 1); assert.equal(before.duplicateEvents.length, 1);
+  assert.equal(profileDuplicates(after).length, 2); assert.equal(after.duplicateEvents.length, 2);
+  const call = profileDuplicates(after).at(-1), receipt = call.response;
+  assert.deepEqual(nonDeskWrites(after), [...nonDeskWrites(before), call]);
+  assert.equal(call.path, `/profiles/${target.profileId}/duplicate`); assert.equal(call.query, '');
+  assert.equal(call.delegated, true); assert.equal(call.status, 201); assert.equal(call.requestTruncated, false);
+  assert.deepEqual(call.request, { revision: target.revision });
+  assert.equal(call.requestSha256, sha256(JSON.stringify(call.request)));
+  assert.deepEqual(call.before, before.persisted); assert.deepEqual(call.after, after.persisted);
+  assert.equal(call.responseSha256, sha256(JSON.stringify(receipt)));
+  assert.equal(call.deliveredStatus, 201); assert.deepEqual(call.deliveredResponse, { ...receipt, profile: null });
+  const delivered = JSON.stringify(call.deliveredResponse);
+  assert.equal(call.deliveredResponseSha256, sha256(delivered)); assert.equal(call.deliveredResponseBytes, Buffer.byteLength(delivered));
+  const arm = after.requests.find(row => row.sequence === after.duplicateReceiptFault.armSequence);
+  assert.equal(arm.path, '/__qa/portable-transfer/control'); assert.equal(arm.method, 'POST'); assert.equal(arm.status, 200);
+  assert.deepEqual(arm.request, { operation: 'arm-duplicate-receipt-fault', ...target });
+  assert.equal(arm.requestSha256, sha256(JSON.stringify(arm.request)));
+  assert.deepEqual(after.duplicateReceiptFault, { state: 'consumed', armSequence: arm.sequence, ...target, requestSequence: call.sequence });
+  assert.ok(arm.sequence < call.sequence);
+  assert.deepEqual(after.receiptFaults, [{ kind: 'duplicate-receipt-profile-null', synthetic: true, armSequence: arm.sequence,
+    sequence: call.sequence, sourceProfileId: target.profileId, sourceRevision: target.revision, sourceHash: target.hash,
+    createdProfileId: receipt.id, actualResponseSha256: call.responseSha256, deliveredResponseSha256: call.deliveredResponseSha256 }]);
+  assert.deepEqual(call.receiptFault, after.receiptFaults[0]);
+  const source = before.persisted.profiles.revisions.find(row => row.profile_id === target.profileId && row.revision === target.revision);
+  assert.ok(source); assert.equal(source.hash, target.hash);
+  const old = before.persisted.profiles, next = after.persisted.profiles;
+  assert.equal(next.records.length, old.records.length + 1); assert.equal(next.revisions.length, old.revisions.length + 1);
+  for (const row of old.records) assert.deepEqual(next.records.find(item => item.id === row.id), row);
+  for (const row of old.revisions) assert.deepEqual(next.revisions.find(item => item.profile_id === row.profile_id && item.revision === row.revision), row);
+  const copy = next.records.find(row => !old.records.some(item => item.id === row.id));
+  assert.equal(copy.id, receipt.id); assert.equal(copy.lifecycle, 'draft'); assert.equal(copy.active_revision, null); assert.equal(copy.origin, 'user');
+  const revision = next.revisions.find(row => row.profile_id === copy.id);
+  const sourceBody = JSON.parse(source.body_json), body = { ...sourceBody, name: `${sourceBody.name} 사본` };
+  assert.equal(revision.revision, 1); assert.equal(revision.parent_revision, null);
+  assert.deepEqual(JSON.parse(revision.body_json), body); assert.equal(revision.hash, sha256(revision.body_json));
+  assert.equal(receipt.revision, 1); assert.equal(receipt.hash, revision.hash);
+  assert.equal(receipt.profile.id, copy.id); assert.equal(receipt.profile.lifecycle, 'draft');
+  assert.equal(receipt.profile.activeRevision, null); assert.equal(receipt.profile.active, null);
+  assert.equal(receipt.profile.headRevision, 1); assert.equal(receipt.profile.head.revision, 1);
+  assert.deepEqual(receipt.profile.head.body, body);
+  const provenance = JSON.parse(copy.source_json), entry = provenance.at(-1);
+  assert.deepEqual(provenance.slice(0, -1), JSON.parse(old.records.find(row => row.id === target.profileId).source_json));
+  assert.deepEqual(provenance, receipt.profile.source); assert.ok(Number.isSafeInteger(entry.at));
+  assert.deepEqual(entry, { kind: 'duplicate', origin: 'user', profileId: target.profileId, revision: target.revision,
+    hash: target.hash, name: sourceBody.name, at: entry.at });
+  assert.deepEqual(after.duplicateEvents, [...before.duplicateEvents, { sequence: call.sequence, sourceProfileId: target.profileId,
+    sourceRevision: target.revision, sourceHash: target.hash, profileId: copy.id, revision: 1, hash: revision.hash,
+    name: body.name, lifecycle: 'draft', activeRevision: null }]);
+  for (const key of ['exports', 'pickerResults', 'headAdvances', 'forbiddenPosts', 'currentImportSha256']) assert.deepEqual(after[key], before[key]);
+  for (const key of ['providerTurns', 'nativePickerInvocations', 'nativeProcessSpawns']) assert.equal(after[key], 0);
+  return copy.id;
+}
+
+export function assertPortableUnknownNoReplay(before, samples, uiBefore, target) {
+  assert.ok(samples.length >= 3);
+  for (const { state, ui } of samples) {
+    assertPortableUnknownUi(uiBefore, ui, target); assertPortableRejectedDeskAutosaves(before, state);
+    assert.deepEqual(nonDeskWrites(state), nonDeskWrites(before));
+    for (const key of ['persisted', 'duplicateEvents', 'duplicateReceiptFault', 'receiptFaults', 'exports', 'pickerResults', 'headAdvances', 'forbiddenPosts']) {
+      assert.deepEqual(state[key], before[key]);
+    }
+  }
+  return true;
+}
+
+export async function runPortableDuplicateUnknownCase({ readState, readUi, armFault, reach, click, retryDisabled, capture, check, waitUi, pause, assertDeadline }) {
+  assertDeadline();
+  const start = await readState(), startUi = await readUi();
+  const back = `${testid('settings-agent-detail')}[data-profile-id=${JSON.stringify(startUi.detailId)}] > button.egd-settings-link`;
+  await reach(back); await capture('duplicate-unknown-return-to-list', [{ selector: back, text: '← Agent 목록' }], await readUi());
+  await click(back, 'return to the actual Agent list');
+  await waitUi(ui => ui.rows.some(row => row.id === start.seed.profileId));
+  const row = `${testid('settings-agent-row')}[data-profile-id=${JSON.stringify(start.seed.profileId)}]`;
+  await reach(row); await click(row, 'select original saved profile for receipt fault');
+  const uiBefore = await waitUi(ui => ui.detailId === start.seed.profileId && ui.duplicate.state === 'idle' && !ui.duplicate.disabled);
+  const before = await readState(), revision = Number(uiBefore.detailRevision);
+  assert.deepEqual(before.persisted, start.persisted); assert.equal(uiBefore.settingsId, startUi.settingsId);
+  assertPortableRejectedDeskAutosaves(start, before); assert.deepEqual(nonDeskWrites(before), nonDeskWrites(start));
+  for (const key of ['duplicateEvents', 'exports', 'pickerResults', 'forbiddenPosts']) assert.deepEqual(before[key], start[key]);
+  assert.deepEqual(uiBefore.roomAssignments, startUi.roomAssignments); assert.equal(uiBefore.activeThreadId, startUi.activeThreadId);
+  assert.equal(uiBefore.detailCount, 1); assert.equal(uiBefore.detailLifecycle, 'draft');
+  assert.equal(uiBefore.target.profileId, start.seed.profileId); assert.equal(uiBefore.target.revision, String(revision));
+  assert.equal(uiBefore.target.source, 'draft'); assert.ok(Number.isSafeInteger(revision) && revision > 0);
+  assert.deepEqual(uiBefore.duplicate, { count: 1, profileId: start.seed.profileId, revision: String(revision), state: 'idle', disabled: false });
+  const source = before.persisted.profiles.revisions.find(item => item.profile_id === start.seed.profileId && item.revision === revision);
+  assert.ok(source); assert.equal(revision, Math.max(...before.persisted.profiles.revisions.filter(item => item.profile_id === start.seed.profileId).map(item => item.revision)));
+  const target = { profileId: start.seed.profileId, revision, hash: source.hash };
+  const selector = `${testid('settings-agent-duplicate')}[data-profile-id=${JSON.stringify(target.profileId)}][data-revision="${revision}"]`;
+  await reach(`${selector}[data-state="idle"]`);
+  assertDeadline(); await armFault(target);
+  const armed = await readState(), freshUi = await readUi();
+  assert.deepEqual(armed.persisted, before.persisted); assert.deepEqual(armed.duplicateEvents, before.duplicateEvents);
+  assert.deepEqual(nonDeskWrites(armed), nonDeskWrites(before));
+  assert.deepEqual(armed.duplicateReceiptFault, { state: 'armed', armSequence: armed.duplicateReceiptFault.armSequence, ...target });
+  for (const key of ['settingsId', 'detailId', 'detailRevision', 'detailLifecycle', 'target', 'duplicate', 'roomAssignments', 'activeThreadId']) assert.deepEqual(freshUi[key], uiBefore[key]);
+  assertDeadline(); await click(`${selector}[data-state="idle"]`, 'one actual duplicate with a declared malformed receipt');
+  const uiAfter = await waitUi(ui => ui.duplicate.state === 'unknown' && ui.duplicate.disabled && ui.agentNotice === PORTABLE_DUPLICATE_UNKNOWN_NOTICE);
+  const after = await readState(), id = assertPortableUnknownCreated(before, after, uiBefore, uiAfter, target);
+  check('malformed receipt follows exactly one real inactive draft creation, not a failed or fake store write', !!id);
+  await reach(testid('settings-agent-notice'));
+  assertPortableUnknownUi(uiBefore, await readUi(), target);
+  await capture('duplicate-receipt-unknown-notice', [{ selector: testid('settings-agent-notice'), text: PORTABLE_DUPLICATE_UNKNOWN_NOTICE }], await readUi());
+  const disabledSelector = `${selector}[data-state="unknown"]`;
+  await reach(disabledSelector, { disabledDuplicate: target });
+  await capture('duplicate-unknown-disabled-button', [{ selector: disabledSelector, text: '복제해서 새로 만들기' }], await readUi());
+  assertDeadline(); await retryDisabled(disabledSelector, target, uiBefore);
+  const samples = [];
+  for (let n = 0; n < 4; n++) { assertDeadline(); await pause(); samples.push({ state: await readState(), ui: await readUi() }); }
+  check('native point on disabled unknown duplicate produces zero additional POST/create; original identity remains fixed',
+    assertPortableUnknownNoReplay(after, samples, uiBefore, target));
+  return { start, before, uiBefore, target, armed, after, uiAfter, id, samples, faultScope: 'synthetic receipt only; no network/SSE fault' };
 }
 
 export async function runCli(argv = process.argv.slice(2), env = process.env) {

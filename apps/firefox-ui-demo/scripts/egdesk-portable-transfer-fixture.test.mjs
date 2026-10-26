@@ -228,6 +228,69 @@ test('actual duplicate POST pins visible v2 at head v3 and records one new draft
   assert.deepEqual([after.providerTurns, after.nativePickerInvocations, after.nativeProcessSpawns], [0, 0, 0]);
 });
 
+test('one explicitly armed malformed receipt follows actual creation and preserves the real receipt, source and SQLite', async t => {
+  const fixture = setup(t), before = fixture.snapshot(), source = before.seed.revisions[1], id = before.seed.profileId;
+  const target = { operation: 'arm-duplicate-receipt-fault', profileId: id, revision: 2, hash: source.hash };
+  const armed = await request(fixture, 'POST', '/__qa/portable-transfer/control', target, { token: true });
+  assert.equal(armed.status, 200); assert.equal(armed.body.state, 'armed');
+  assert.deepEqual(fixture.snapshot().persisted, before.persisted);
+  const copied = await request(fixture, 'POST', `/profiles/${id}/duplicate`, { revision: 2 });
+  assert.equal(copied.status, 201); assert.equal(copied.body.profile, null);
+  assert.equal(Number(copied.headers['content-length']), Buffer.byteLength(copied.text));
+  const after = fixture.snapshot(), trace = after.requests.at(-1), real = trace.response;
+  assert.equal(trace.delegated, true); assert.equal(trace.status, 201);
+  assert.deepEqual(copied.body, { ...real, profile: null }); assert.equal(real.profile.id, copied.body.id);
+  assert.deepEqual(real.profile.head.body, { ...source.body, name: `${source.body.name} 사본` });
+  assert.equal(after.persisted.profiles.records.length, before.persisted.profiles.records.length + 1);
+  assert.deepEqual(trace.before, before.persisted); assert.deepEqual(trace.after, after.persisted);
+  assert.equal(trace.responseSha256, sha256(JSON.stringify(real)));
+  assert.equal(trace.deliveredResponseSha256, sha256(copied.text));
+  assert.notEqual(trace.responseSha256, trace.deliveredResponseSha256);
+  assert.equal(after.duplicateEvents.length, 1); assert.equal(after.duplicateEvents[0].profileId, real.id);
+  assert.equal(after.receiptFaults.length, 1); assert.equal(after.receiptFaults[0].synthetic, true);
+  assert.equal(after.duplicateReceiptFault.state, 'consumed');
+  assert.equal(after.duplicateReceiptFault.requestSequence, trace.sequence);
+  assert.equal((await request(fixture, 'POST', '/__qa/portable-transfer/control', target, { token: true })).status, 409);
+  const second = await request(fixture, 'POST', `/profiles/${id}/duplicate`, { revision: 2 });
+  assert.equal(second.status, 201); assert.equal(second.body.profile.id, second.body.id, 'No second injected receipt fault');
+  assert.equal(fixture.snapshot().receiptFaults.length, 1);
+});
+
+test('receipt fault requires the token, exact original identity/revision/hash and cannot affect other or failed replies', async t => {
+  const fixture = setup(t), before = fixture.snapshot(), id = before.seed.profileId;
+  const route = '/__qa/portable-transfer/control';
+  const target = { operation: 'arm-duplicate-receipt-fault', profileId: id, revision: 2, hash: before.seed.revisions[1].hash };
+  assert.equal((await request(fixture, 'POST', route, target)).status, 403);
+  for (const changed of [{ ...target, profileId: 'other' }, { ...target, revision: '2' }, { ...target, revision: 0 },
+    { ...target, hash: '0'.repeat(64) }, { ...target, response: {} }, { ...target, revision: 1 }]) {
+    assert.ok((await request(fixture, 'POST', route, changed, { token: true })).status >= 400);
+    assert.equal(fixture.snapshot().duplicateReceiptFault, null);
+  }
+  assert.deepEqual(fixture.snapshot().persisted, before.persisted);
+  assert.equal((await request(fixture, 'POST', route, target, { token: true })).status, 200);
+  const failed = await request(fixture, 'POST', `/profiles/${id}/duplicate`, { revision: 999 });
+  assert.equal(failed.status, 404); assert.equal(failed.body.code, 'PROFILE_REVISION_NOT_FOUND');
+  assert.equal(Number(failed.headers['content-length']), Buffer.byteLength(failed.text));
+  const otherRevision = await request(fixture, 'POST', `/profiles/${id}/duplicate`, { revision: 1 });
+  assert.equal(otherRevision.status, 201); assert.equal(otherRevision.body.profile.id, otherRevision.body.id);
+  const otherProfile = await request(fixture, 'POST', `/profiles/${otherRevision.body.id}/duplicate`, { revision: 1 });
+  assert.equal(otherProfile.status, 201); assert.equal(otherProfile.body.profile.id, otherProfile.body.id);
+  assert.equal(fixture.snapshot().duplicateReceiptFault.state, 'armed');
+  assert.deepEqual(fixture.snapshot().receiptFaults, []);
+  assert.equal((await request(fixture, 'POST', `/profiles/${id}/duplicate`, { revision: 2 })).body.profile, null);
+  assert.equal(fixture.snapshot().receiptFaults.length, 1);
+});
+
+test('concurrent real duplicate calls can consume the armed receipt fault only once', async t => {
+  const fixture = setup(t), before = fixture.snapshot(), id = before.seed.profileId;
+  await request(fixture, 'POST', '/__qa/portable-transfer/control', { operation: 'arm-duplicate-receipt-fault',
+    profileId: id, revision: 2, hash: before.seed.revisions[1].hash }, { token: true });
+  const results = await Promise.all([1, 2].map(() => request(fixture, 'POST', `/profiles/${id}/duplicate`, { revision: 2 })));
+  assert.ok(results.every(row => row.status === 201));
+  assert.equal(results.filter(row => row.body.profile === null).length, 1);
+  assert.equal(fixture.snapshot().receiptFaults.length, 1); assert.equal(fixture.snapshot().duplicateEvents.length, 2);
+});
+
 test('duplicate optional name and omitted revision keep the actual store defaults and trace only supplied fields', async t => {
   const fixture = setup(t), before = fixture.snapshot(), route = `/profiles/${before.seed.profileId}/duplicate`;
   for (const payload of [{ name: 'Owned named copy' }, {}]) {
