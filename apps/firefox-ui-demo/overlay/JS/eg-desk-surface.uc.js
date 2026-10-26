@@ -516,6 +516,8 @@
     panTarget: { x: 0, y: 0 },
     zoom: 1,
     zoomTarget: 1,
+    // Transient user-camera history only; never part of the saved Desk pose.
+    canvasUserCameraRevision: 0,
     panCanvasByWheel: null,
     setCanvasPanTarget: null,
     setCanvasViewportTarget: null,
@@ -2259,13 +2261,41 @@
     return BriefingState.resolveBriefingTargets(step, { references: session.references, artifacts: session.artifacts, views, identity: session.identity });
   }
 
+  function briefingFitCamera(bounds, safe, panel) {
+    const area = (left, top, right, bottom) => ({ left, top, right, bottom, width: right - left, height: bottom - top });
+    const gap = 20;
+    const blocked = panel && [panel.left, panel.top, panel.right, panel.bottom].every(Number.isFinite)
+      && panel.right > panel.left && panel.bottom > panel.top
+      && panel.right + gap > safe.left && panel.left - gap < safe.right
+      && panel.bottom + gap > safe.top && panel.top - gap < safe.bottom;
+    // Stable ties prefer above, then right, left, below. Compare fitted zoom,
+    // not raw area: a wide target and a tall target need different free space.
+    const candidates = blocked ? [
+      area(safe.left, safe.top, safe.right, Math.min(safe.bottom, panel.top - gap)),
+      area(Math.max(safe.left, panel.right + gap), safe.top, safe.right, safe.bottom),
+      area(safe.left, safe.top, Math.min(safe.right, panel.left - gap), safe.bottom),
+      area(safe.left, Math.max(safe.top, panel.bottom + gap), safe.right, safe.bottom),
+    ] : [safe];
+    let best = null;
+    for (const candidate of candidates) {
+      if (![candidate.left, candidate.top, candidate.width, candidate.height].every(Number.isFinite)
+          || candidate.width <= 0 || candidate.height <= 0) continue;
+      const camera = SurfaceState.fitSurfaceCamera(bounds, candidate);
+      // The shared setter cannot fit below its existing minimum. Do not
+      // claim a fit which that setter would enlarge back into the panel.
+      if (camera.zoom < ZOOM_MIN || !Number.isFinite(camera.zoom)) continue;
+      if (!best || camera.zoom > best.zoom) best = camera;
+    }
+    return best;
+  }
+
   function fitBriefingTargets(resolved) {
     const bounds = BriefingState.briefingBounds(resolved);
     if (!bounds) return false;
     const safe = safeViewportRect({ margin: 28 });
-    const panelTop = document.getElementById('egd-answer-briefing')?.getBoundingClientRect().top;
-    if (panelTop > safe.top + 180) { safe.bottom = Math.min(safe.bottom, panelTop - 20); safe.height = safe.bottom - safe.top; }
-    const camera = SurfaceState.fitSurfaceCamera(bounds, safe);
+    const panel = document.getElementById('egd-answer-briefing')?.getBoundingClientRect();
+    const camera = briefingFitCamera(bounds, safe, panel);
+    if (!camera) return false;
     state.setCanvasViewportTarget?.(camera);
     focusCanvasCard(document.getElementById(resolved.find(item => item.status === 'available')?.view.id));
     return true;
@@ -2273,11 +2303,46 @@
 
   function closeAnswerBriefing(options = {}) {
     const session = state.codex.briefingSession;
+    session?.commentEditor?.dispose();
+    session?.preparationScope?.dispose();
     state.codex.briefingSession = null;
     document.getElementById('egd-answer-briefing')?.remove();
     if (!session || options.restore === false) return;
     state.setCanvasViewportTarget?.(session.previousView, { immediate: true });
     setActiveEntity(document.getElementById(session.previousView.activeEntityId));
+  }
+
+  function briefingInputReferences(thread, message) {
+    const local = [...(thread.briefingInputs || []), ...(thread.messages || []).flatMap(item => item.inputReferences || [])];
+    const accountKey = ChatState.codexAccountKey(state.codex.authStatus);
+    let scope = null;
+    try { scope = ChatState.chatContextRequestScope(thread, state.codex); } catch {}
+    const eligible = scope?.engineId === 'codex' && accountKey && state.codex.codexAccountKey === accountKey
+      && ChatState.canResumeNativeThread(thread, state.codex.authStatus)
+      && !!message.conversationId && scope.conversationId === message.conversationId;
+    return (message.contextCaptures || []).map(reference => {
+      // Backend capture descriptors do not carry the UI's original scope. Join
+      // only a matching saved constructor reference, never today's room as an
+      // invented origin. The unchanged reader/helper still verify authority.
+      const original = eligible && local.find(item => {
+        const origin = item.contextScope;
+        if (!reference.sourceId || reference.snapshotId !== reference.sourceId || !reference.hash
+            || item.sourceId !== reference.sourceId || item.snapshotId !== reference.snapshotId || item.hash !== reference.hash
+            || !origin || origin.conversationId !== message.conversationId
+            || ['engineId', 'engineProfileId', 'clientThreadId', 'conversationId'].some(key => origin[key] !== scope[key])
+            || [reference, item].some(capture => capture.clientThreadId !== origin.clientThreadId
+              || capture.engine?.engineId !== origin.engineId || capture.engine?.engineProfileId !== origin.engineProfileId)) return false;
+        try {
+          InputContext.inputReadContext(item, scope, { thread, accountKey, cachedAccountKey: state.codex.codexAccountKey });
+          return true;
+        } catch { return false; }
+      });
+      const joined = { ...reference, localSource: cloneJson((original
+        || local.find(item => item.sourceId === reference.sourceId && item.hash === reference.hash))?.localSource || null) };
+      if (original) joined.contextScope = cloneJson(original.contextScope);
+      else delete joined.contextScope;
+      return joined;
+    });
   }
 
   async function openAnswerBriefing(thread, message) {
@@ -2286,40 +2351,59 @@
       boardNotice('이 답변에 속하는 브리핑 연결을 확인하지 못했습니다.'); return;
     }
     if (state.codex.briefingSession) closeAnswerBriefing();
-    const local = thread.messages.flatMap(item => item.inputReferences || []);
     const session = state.codex.briefingSession = {
       ...BriefingState.beginBriefing(message.briefing, { pan: { ...state.panTarget }, zoom: state.zoomTarget, activeEntityId: state.activeEntityId }),
       threadId: thread.id, identity: { conversationId: message.conversationId, runId: message.runId, answerId: message.answerId },
-      references: (message.contextCaptures || []).map(reference => ({ ...reference,
-        localSource: local.find(item => item.sourceId === reference.sourceId)?.localSource || null })),
+      references: briefingInputReferences(thread, message),
       artifacts: message.artifacts || [],
       presentationId: chatBindingNonce(), preparing: true,
     };
-    renderAnswerBriefing();
-    const isCurrent = () => state.codex.briefingSession?.presentationId === session.presentationId;
-    const materialized = new Set();
-    for (const step of session.briefing.steps) {
-      const reference = session.references.find(item => item.sourceId === step.target?.sourceId);
-      if (!reference || !isCurrent()) continue;
-      if (step.target.hash && step.target.hash !== reference.hash) continue;
-      try {
-        const ranged = { ...reference, presentationRange: step.target.range };
-        const key = InputContext.inputEvidenceKey(ranged);
-        if (materialized.has(key)) continue;
-        materialized.add(key);
-        await state.codexBridge.openInputEvidence(thread.id, ranged, { isCurrent });
-      } catch (error) { if (isCurrent()) boardNotice(error.message); }
+    const preparationScope = session.preparationScope = state.codexBridge.createBriefingPreparationScope(thread.id);
+    const activeRoom = state.codex.activeThreadId, roomGeneration = state.codex.activityRoomGeneration || 0;
+    const isCurrent = () => state.codex.briefingSession?.presentationId === session.presentationId
+      && state.codex.activeThreadId === activeRoom && (state.codex.activityRoomGeneration || 0) === roomGeneration
+      && preparationScope.current();
+    const cameraRevision = state.canvasUserCameraRevision || 0;
+    try {
+      renderAnswerBriefing();
+      const materialized = new Set();
+      for (const step of session.briefing.steps) {
+        if (!isCurrent()) return;
+        const reference = session.references.find(item => item.sourceId === step.target?.sourceId);
+        if (!reference) continue;
+        if (step.target.hash && step.target.hash !== reference.hash) continue;
+        try {
+          const ranged = { ...reference, presentationRange: step.target.range };
+          const key = InputContext.inputEvidenceKey(ranged);
+          if (materialized.has(key)) continue;
+          materialized.add(key);
+          await state.codexBridge.openInputEvidence(thread.id, ranged, { isCurrent, reveal: false });
+        } catch (error) { if (isCurrent()) boardNotice(error.message); }
+      }
+      if (!isCurrent()) return;
+      state.codex.briefingSession.preparing = false;
+      renderAnswerBriefing();
+      if ((state.canvasUserCameraRevision || 0) === cameraRevision) fitBriefingTargets(briefingResolvedTargets(state.codex.briefingSession));
+    } finally {
+      preparationScope.dispose();
     }
-    if (!isCurrent()) return;
-    state.codex.briefingSession.preparing = false;
-    renderAnswerBriefing();
-    fitBriefingTargets(briefingResolvedTargets(state.codex.briefingSession));
   }
 
   function renderAnswerBriefing() {
     const session = state.codex.briefingSession;
     if (!session) return;
-    document.getElementById('egd-answer-briefing')?.remove();
+    const mounted = document.getElementById('egd-answer-briefing');
+    if (mounted?.isConnected && mounted._briefingSession === session) {
+      // Preparation finishing is not another entry. Keep the live editor,
+      // controller and its one list request, including an unconfirmed UUID.
+      const top = mounted.scrollTop, left = mounted.scrollLeft;
+      mounted._refreshBriefingEvidence();
+      session.commentEditor?.notify();
+      mounted.scrollTop = top; mounted.scrollLeft = left;
+      return;
+    }
+    session.commentEditor?.dispose();
+    mounted?.remove();
     const step = BriefingState.currentBriefingStep(session);
     const resolved = briefingResolvedTargets(session);
     const panel = el('section', { id: 'egd-answer-briefing', role: 'region', 'aria-label': '답변 브리핑',
@@ -2343,33 +2427,167 @@
     panel.appendChild(el('strong', {}, session.briefing.title || '답변 브리핑'));
     panel.appendChild(nav);
     panel.appendChild(el('p', {}, step.text));
-    if (session.preparing) panel.appendChild(el('p', { role: 'status' }, '이 브리핑이 선택한 고정 근거를 준비하고 있습니다.'));
+    const preparingNotice = el('p', { role: 'status' }, '이 브리핑이 선택한 고정 근거를 준비하고 있습니다.');
+    if (session.preparing) panel.appendChild(preparingNotice);
+    const evidenceRows = [];
     for (const target of resolved) {
-      if (target.status !== 'available') panel.appendChild(el('p', { role: 'status' }, target.reason || step.fallback || '대상을 확인할 수 없습니다.'));
+      const row = { target, status: el('p', { role: 'status' }), inspect: null, retry: null, end: document.createTextNode('') };
       if (target.reference) {
-        panel.appendChild(el('button', { data: { testid: 'briefing-inspect', sourceId: target.reference.sourceId },
-          onclick: () => state.codexBridge.inspectInput(session.threadId, target.reference, target.target.range || {}) }, '당시 입력 보기'));
-        if (target.status !== 'available' && !session.preparing) panel.appendChild(el('button', { data: { testid: 'briefing-show-evidence', sourceId: target.reference.sourceId },
-          onclick: async () => {
-            await state.codexBridge.openInputEvidence(session.threadId, { ...target.reference, presentationRange: target.target.range }, { isCurrent: () => state.codex.briefingSession === session });
-            if (state.codex.briefingSession !== session) return;
-            renderAnswerBriefing(); fitBriefingTargets(briefingResolvedTargets(session));
-          } }, '고정 근거 다시 열기'));
+        row.inspect = el('button', { data: { testid: 'briefing-inspect', sourceId: target.reference.sourceId },
+          onclick: () => state.codexBridge.inspectInput(session.threadId, target.reference, target.target.range || {}) }, '당시 입력 보기');
+        panel.appendChild(row.inspect);
       }
+      panel.appendChild(row.end); evidenceRows.push(row);
     }
-    const comment = el('textarea', { rows: '2', 'aria-label': '현재 브리핑 단계 의견', placeholder: '이 단계에 대한 의견', data: { testid: 'briefing-comment' } });
-    session.commentDrafts ||= {};
-    comment.value = session.commentDrafts[step.id] || '';
-    comment.addEventListener('input', () => { session.commentDrafts[step.id] = comment.value; });
-    panel.appendChild(comment);
-    panel.appendChild(el('button', { data: { testid: 'briefing-comment-attach' }, onclick: () => {
-      try { state.codexBridge.attachBriefingComment(session.threadId, BriefingState.briefingCommentDraft(session, comment.value, resolved), session.references); }
-      catch (error) { boardNotice(error.message); }
-    } }, '다음 Chat 초안에 포함'));
+    panel._briefingSession = session;
+    panel._refreshBriefingEvidence = () => {
+      if (!session.preparing) preparingNotice.remove();
+      const latest = briefingResolvedTargets(session);
+      for (const [index, row] of evidenceRows.entries()) {
+        const target = latest[index] || row.target;
+        if (target.status === 'available') row.status.remove();
+        else if (row.status.parentNode !== panel) panel.insertBefore(row.status, row.inspect || row.retry || row.end);
+        const text = target.reason || step.fallback || '대상을 확인할 수 없습니다.';
+        if (row.status.textContent !== text) row.status.textContent = text;
+        const retryVisible = !!target.reference && target.status !== 'available' && !session.preparing;
+        if (retryVisible && !row.retry) {
+          row.retry = el('button', { data: { testid: 'briefing-show-evidence', sourceId: target.reference.sourceId },
+            onclick: async () => {
+              await state.codexBridge.openInputEvidence(session.threadId, { ...target.reference, presentationRange: target.target.range }, { isCurrent: () => state.codex.briefingSession === session });
+              if (state.codex.briefingSession !== session) return;
+              renderAnswerBriefing(); fitBriefingTargets(briefingResolvedTargets(session));
+            } }, '고정 근거 다시 열기');
+          panel.insertBefore(row.retry, row.end);
+        }
+        if (!retryVisible && row.retry) { row.retry.remove(); row.retry = null; }
+      }
+    };
+    panel._refreshBriefingEvidence();
+    const mountComments = () => { session.commentEditor = mountBriefingComments(session, panel); };
     panel.appendChild(el('details', {}, el('summary', {}, '단계 목록'), ...session.briefing.steps.map((item, index) => el('button', {
       'aria-label': `${index + 1}단계로 이동`, onclick: () => go(index),
     }, `${index + 1}. ${item.text}`))));
     document.documentElement.appendChild(panel);
+    // Mount before the step index, without replacing this panel on GET/POST.
+    const steps = panel.lastElementChild;
+    mountComments();
+    if (steps) panel.appendChild(steps);
+  }
+
+  function createBriefingCommentScope(session, epochScope, fetchJson) {
+    const thread = getCodexThreadById(state.codex, session.threadId);
+    const route = ChatState.chatContextRequestScope(thread, state.codex);
+    if (route.engineId !== 'codex') throw new Error('이 엔진에서는 브리핑 의견 저장을 지원하지 않습니다.');
+    const account = ChatState.codexAccountKey(state.codex.authStatus);
+    if (!thread || !account || state.codex.codexAccountKey !== account || !ChatState.canResumeNativeThread(thread, state.codex.authStatus)
+        || !route.conversationId || route.conversationId !== session.briefing.conversationId
+        || ['conversationId', 'runId', 'answerId'].some(key => !session.identity?.[key] || session.identity[key] !== session.briefing[key])
+        || state.codex.activeThreadId !== session.threadId) throw new Error('의견을 저장할 원래 대화와 계정 연결을 확인하지 못했습니다.');
+    const binding = JSON.stringify(route), briefing = JSON.stringify(session.briefing), index = session.index;
+    const generation = state.codex.activityRoomGeneration || 0, presentation = session.presentationId;
+    const token = epochScope.begin(route.engineId, route.engineProfileId);
+    let disposed = false;
+    const dispose = () => { if (disposed) return; disposed = true; token.controller.abort(); epochScope.finish(token); };
+    const current = () => {
+      if (disposed) return false;
+      const latest = getCodexThreadById(state.codex, session.threadId), shown = state.codex.briefingSession;
+      let same = false;
+      try { same = !token.signal.aborted && epochScope.valid(token) && account === ChatState.codexAccountKey(state.codex.authStatus)
+        && state.codex.codexAccountKey === account && !!latest && ChatState.canResumeNativeThread(latest, state.codex.authStatus)
+        && JSON.stringify(ChatState.chatContextRequestScope(latest, state.codex)) === binding
+        && state.codex.activeThreadId === session.threadId && (state.codex.activityRoomGeneration || 0) === generation
+        && shown?.presentationId === presentation && shown.index === index && JSON.stringify(shown.briefing) === briefing; } catch {}
+      if (!same) dispose();
+      return same;
+    };
+    const query = Object.entries(route).map(([key, value]) => `${key}=${encodeURIComponent(value)}`).join('&');
+    const request = async (method, body) => {
+      if (!current()) throw new Error('브리핑 연결이 바뀌었습니다.');
+      const controller = new window.AbortController();
+      let timer, stop;
+      const cancelled = new Promise((resolve, reject) => { stop = () => { controller.abort(); reject(new Error('브리핑 요청이 취소되었습니다.')); }; });
+      token.signal.addEventListener('abort', stop, { once: true });
+      const timeout = new Promise((resolve, reject) => { timer = window.setTimeout(() => {
+        controller.abort(); reject(new Error('응답을 확인하지 못했습니다.'));
+      }, 10000); });
+      try {
+        const response = await Promise.race([fetchJson(`/context/briefings/${encodeURIComponent(session.briefing.id)}/comments?${query}`,
+          { method, signal: controller.signal, ...(method === 'POST' ? { body: JSON.stringify(body) } : {}) }), cancelled, timeout]);
+        if (!current()) throw new Error('브리핑 연결이 바뀌었습니다.');
+        return response;
+      } finally { window.clearTimeout(timer); token.signal.removeEventListener('abort', stop); }
+    };
+    return { current, dispose, request, key: JSON.stringify([account, route, session.briefing.id, session.briefing.steps[index].id]) };
+  }
+
+  function mountBriefingComments(session, panel) {
+    const comment = el('textarea', { rows: '2', 'aria-label': '현재 브리핑 단계 의견', placeholder: '이 단계에 대한 의견',
+      maxlength: String(BriefingState.BRIEFING_COMMENT_MAX), data: { testid: 'briefing-comment' } });
+    const save = el('button', { type: 'button', data: { testid: 'briefing-comment-attach' } }, '의견 저장 후 Chat 초안에 포함');
+    const statusMessage = el('p', { role: 'status', 'aria-live': 'polite', data: { testid: 'briefing-comment-status-message' } });
+    const originalBody = el('p', { data: { testid: 'briefing-comment-unconfirmed-body' }, style: { whiteSpace: 'pre-wrap', overflowWrap: 'anywhere' } });
+    const retry = el('button', { type: 'button', data: { testid: 'briefing-comment-retry' },
+      onmousedown: event => { if (event.button === 0 && !event.ctrlKey) event.preventDefault(); } }, '이전 의견 저장 재시도');
+    const original = el('section', { hidden: 'true', data: { testid: 'briefing-comment-unconfirmed' } }, el('strong', {}, '저장 미확정 의견'), originalBody, retry);
+    const status = el('section', { data: { testid: 'briefing-comment-status' } }, statusMessage, original);
+    const listStatus = el('p', { role: 'status', data: { testid: 'briefing-comment-list-status' } });
+    const list = el('div', { data: { testid: 'briefing-comment-list' } });
+    const refresh = el('button', { type: 'button', data: { testid: 'briefing-comment-refresh' } }, '저장된 의견 다시 확인');
+    panel.append(comment, save, status, el('strong', {}, '이 단계의 저장된 의견'), listStatus, list, refresh);
+    const rows = new Map();
+    let controller;
+    const paint = view => {
+      if (!panel.isConnected) return;
+      const top = panel.scrollTop, left = panel.scrollLeft;
+      const bounds = panel.getBoundingClientRect?.();
+      const anchor = bounds && [comment, ...[...rows.values()].map(row => row.root)].find(node => {
+        const rect = node.getBoundingClientRect?.(); return rect && rect.top >= bounds.top && rect.top < bounds.bottom;
+      });
+      const anchorTop = anchor?.getBoundingClientRect().top;
+      const text = (node, value) => { if (node.textContent !== value) node.textContent = value; };
+      status.dataset.state = view.phase; status.dataset.clientRequestId = view.clientRequestId; text(statusMessage, view.message);
+      original.hidden = view.originalText === null; text(originalBody, view.originalText || '');
+      retry.disabled = !view.canRetry || !!session.preparing; retry.dataset.clientRequestId = view.clientRequestId;
+      save.disabled = view.pending || !!session.preparing; text(save, view.unconfirmed ? '저장 여부 확인' : '의견 저장 후 Chat 초안에 포함');
+      refresh.disabled = view.listState === 'loading'; list.dataset.state = view.listState;
+      text(listStatus, view.listState === 'failed' ? '저장된 의견을 불러오지 못했습니다. 다시 확인해 주세요.'
+        : view.listState === 'loading' ? '저장된 의견을 확인하고 있습니다.'
+        : view.listState === 'ready' && !view.comments.length ? '이 단계에 저장된 의견이 없습니다.' : '');
+      for (const item of view.comments) {
+        let row = rows.get(item.id);
+        if (!row) {
+          const body = el('p', { style: { whiteSpace: 'pre-wrap', overflowWrap: 'anywhere' }, data: { testid: 'briefing-comment-body' } }, item.text);
+          const targets = BriefingState.briefingStepTargets(session.briefing.steps[session.index]).filter(target => item.sourceIds.includes(target.sourceId));
+          const target = el('p', { data: { testid: 'briefing-comment-target' }, style: { overflowWrap: 'anywhere' } },
+            targets.map((entry, index) => `${session.references.find(ref => ref.sourceId === entry.sourceId)?.localSource?.label || `근거 ${index + 1}`}${entry.range ? ` · ${entry.range.startLine}–${entry.range.endLine}행` : ''}`).join(' / ') || '이 단계의 설명');
+          const draftStatus = el('p', { data: { testid: 'briefing-comment-draft-status' } });
+          const button = el('button', { type: 'button', data: { testid: 'briefing-comment-include', commentId: item.id },
+            onclick: () => controller?.include(item.id) }, 'Chat 초안에 포함');
+          const root = el('section', { data: { testid: 'briefing-comment-row', commentId: item.id, commentSeq: String(item.seq), stepId: item.stepId, clientRequestId: item.clientRequestId || '' } },
+            el('strong', {}, `의견 #${item.seq}`), body, target, draftStatus, button);
+          const next = [...rows.values()].filter(existing => Number(existing.root.dataset.commentSeq) > item.seq)
+            .sort((a, b) => Number(a.root.dataset.commentSeq) - Number(b.root.dataset.commentSeq))[0];
+          row = { root, draftStatus, button }; rows.set(item.id, row);
+          if (next) list.insertBefore(root, next.root); else list.appendChild(root);
+        }
+        text(row.draftStatus, item.included ? 'Chat 초안에 포함됨 · 아직 전송하지 않음' : item.draftError || '저장됨 · 초안에 포함하지 않음');
+        row.button.disabled = item.included || !!session.preparing;
+      }
+      panel.scrollTop = top + (anchor ? anchor.getBoundingClientRect().top - anchorTop : 0); panel.scrollLeft = left;
+    };
+    try {
+      controller = state.codexBridge.createBriefingComments(session, paint);
+      comment.value = controller.view().text;
+      comment.addEventListener('input', () => controller.edit(comment.value));
+      save.addEventListener('click', () => { void controller.submit(comment.value); });
+      retry.addEventListener('click', () => { void controller.retry(); });
+      refresh.addEventListener('click', () => { void controller.refresh(); });
+      paint(controller.view()); void controller.refresh();
+    } catch (error) {
+      save.disabled = true; refresh.disabled = true; retry.disabled = true; status.dataset.state = 'unavailable'; statusMessage.textContent = error.message;
+      list.dataset.state = 'unavailable';
+    }
+    return { dispose: () => controller?.dispose(), notify: () => controller?.notify() };
   }
 
   function spawnInputEvidence(reference, stored = null, options = {}) {
@@ -2387,7 +2605,7 @@
     const shell = spawnDeskWindowShell({ id: `egd-input-evidence-${++cardSeq}`, kind: 'input-evidence', className: 'egd-input-evidence-card',
       sourceRef: { kind: 'context-snapshot', id: reference.sourceId, scope: 'immutable-input' },
       style: { left: `${placement.x}px`, top: `${placement.y}px`, width: `${placement.width}px`, height: `${placement.height}px` } });
-    if (!options.restore) revealPlacedCanvasCard(shell.root, placement);
+    if (!options.restore && options.reveal !== false) revealPlacedCanvasCard(shell.root, placement);
     shell.root._inputReference = cloneJson(reference);
     shell.root._inputEvidenceLoaded = !!evidenceSnapshot;
     shell.slots.identity.appendChild(el('strong', {}, '당시 입력 · 읽기 전용'));
@@ -6427,7 +6645,9 @@
         nextLeft = point.x - viewport.width / 2;
         nextTop = point.y - viewport.height / 2;
       }
+      const beforeX = state.panTarget.x, beforeY = state.panTarget.y;
       moveCanvasViewportToWorld(nextLeft, nextTop, { immediate: true });
+      if (state.panTarget.x !== beforeX || state.panTarget.y !== beforeY) state.canvasUserCameraRevision = (state.canvasUserCameraRevision || 0) + 1;
       refreshDeskMinimap();
     };
     // A press on Boards or Views that does not move is a pick (one target goes
@@ -8798,6 +9018,7 @@
     const confirmedLegacyImports = new Set();
     // Rooms with a /chat/fork request in flight (one branch at a time per room).
     const forkingThreads = new Set();
+    const briefingCommentRecords = new Map();
     // RT-05: the installed build, read once and sent with every /v1/state read.
     let overlayBuildRead = null;
     const bridgeStateHeaders = async () => overlayBuildHeaders(await (overlayBuildRead ||= readExpectedOverlayBuild()));
@@ -10817,7 +11038,8 @@
         const current = () => {
           if (token.signal.aborted || !epochScope.valid(token) || state.codex.activeThreadId !== activeRoom
               || (state.codex.activityRoomGeneration || 0) !== roomGeneration || state.codex.inputInspectNonce !== inspectNonce
-              || document.getElementById('egd-codex-input-panel') !== inputPanel) return false;
+              || document.getElementById('egd-codex-input-panel') !== inputPanel
+              || options.isCurrent && !options.isCurrent()) return false;
           try { return JSON.stringify(readContext()) === capturedContext; } catch { return false; }
         };
         const unsubscribe = this.subscribe(() => { if (!current()) token.controller.abort(); });
@@ -10837,12 +11059,39 @@
         } catch (error) { if (current()) boardNotice(`당시 입력을 열지 못했습니다: ${error.message}`); }
         finally { unsubscribe(); epochScope.finish(token); }
       },
+      createBriefingPreparationScope(threadId) {
+        const thread = getCodexThreadById(state.codex, threadId);
+        const route = ChatState.chatContextRequestScope(thread, state.codex);
+        const token = epochScope.begin(route.engineId, route.engineProfileId);
+        const identity = () => {
+          const latest = getCodexThreadById(state.codex, threadId);
+          return latest ? JSON.stringify([ChatState.chatContextRequestScope(latest, state.codex),
+            route.engineId === 'codex' ? [ChatState.codexAccountKey(state.codex.authStatus), state.codex.codexAccountKey,
+              latest.bindingAccountKey, latest.bindingState, latest.retainedNativeBinding] : null]) : null;
+        };
+        const original = identity();
+        let invalid = false, disposed = false;
+        // One epoch spans all source reads. A-B-A can never turn this token
+        // current again; observed identity changes are latched even without a
+        // reset. This only cancels presentation work, never grants authority.
+        const current = () => {
+          if (invalid || disposed) return false;
+          try { if (!token.signal.aborted && epochScope.valid(token) && identity() === original) return true; } catch {}
+          invalid = true;
+          return false;
+        };
+        const unsubscribe = this.subscribe(current);
+        return { current, dispose: () => {
+          if (disposed) return;
+          disposed = true; unsubscribe(); token.controller.abort(); epochScope.finish(token);
+        } };
+      },
       async openInputEvidence(threadId, reference, options = {}) {
         if (!getCodexThreadById(state.codex, threadId)) return null;
-        const stored = await this.readInput(reference, { ...reference.presentationRange, threadId });
+        const stored = await this.readInput(reference, { ...reference.presentationRange, threadId, isCurrent: options.isCurrent });
         if (options.isCurrent && !options.isCurrent()) return null;
         if (stored?.source.text === null) { boardNotice('이 고정 원문은 바이너리입니다. 당시 입력 inspector에서 형식·전달 기록을 확인할 수 있습니다.'); return null; }
-        return stored ? spawnInputEvidence(reference, stored) : null;
+        return stored ? spawnInputEvidence(reference, stored, { reveal: options.reveal }) : null;
       },
       removeBriefingInput(threadId, sourceId) {
         const thread = getCodexThreadById(state.codex, threadId);
@@ -10850,18 +11099,61 @@
         updateThreadById(threadId, item => ({ ...item, briefingInputs: (item.briefingInputs || []).filter(reference => reference.sourceId !== sourceId) }));
         emit();
       },
-      attachBriefingComment(threadId, comment, references) {
+      createBriefingComments(session, changed) {
+        const scope = createBriefingCommentScope(session, epochScope, fetchJson);
+        let record = briefingCommentRecords.get(scope.key);
+        if (!record) { record = { text: '', comments: [] }; briefingCommentRecords.set(scope.key, record); }
+        const references = cloneJson(session.references);
+        let unsubscribe;
+        const controller = BriefingState.createBriefingComments({ session, record, request: scope.request, current: scope.current,
+          makeId: () => chatBindingNonce(), changed,
+          included: row => {
+            const thread = getCodexThreadById(state.codex, session.threadId);
+            const ref = thread?.briefingCommentRefs?.find(item => item.commentId === row.id && item.briefingId === row.briefingId && item.stepId === row.stepId);
+            // Text only checks the presence of this already-identified draft
+            // insertion; it is never used to identify a server save.
+            return !!ref?.draftText && getCodexThreadDraft(state.codex, session.threadId).includes(ref.draftText);
+          },
+          include: (row, origin) => {
+            const targets = BriefingState.briefingStepTargets(origin.briefing.steps[origin.index]);
+            const selected = row.sourceIds.map(sourceId => {
+              const matches = references.filter(ref => ref.sourceId === sourceId);
+              if (matches.length !== 1 || !matches[0].hash || targets.filter(target => target.sourceId === sourceId).some(target => target.hash !== matches[0].hash)) {
+                throw new Error('저장된 의견의 고정 근거 연결을 확인하지 못했습니다.');
+              }
+              return matches[0];
+            });
+            const draft = BriefingState.briefingCommentDraft(origin, row.text, selected.map(reference => ({ reference })), row);
+            this.attachBriefingComment(session.threadId, draft, selected, scope.current);
+          } });
+        const dispose = controller.dispose;
+        controller.dispose = () => { dispose(); scope.dispose(); unsubscribe?.(); };
+        unsubscribe = this.subscribe(() => { if (!scope.current()) controller.dispose(); else controller.notify(); });
+        if (!scope.current()) unsubscribe();
+        return controller;
+      },
+      attachBriefingComment(threadId, comment, references, currentScope) {
         const thread = getCodexThreadById(state.codex, threadId);
-        if (!thread || thread.preparingInput || ChatState.nativeBindingHeld(thread)) return;
+        if (!currentScope?.() || state.codex.activeThreadId !== threadId || !thread || thread.preparingInput || ChatState.nativeBindingHeld(thread)) {
+          throw new Error('원래 대화가 입력을 준비 중이거나 연결이 바뀌었습니다.');
+        }
+        if (!comment.commentId) throw new Error('저장된 의견을 확인하지 못했습니다.');
         const current = getCodexThreadDraft(state.codex, threadId);
+        const prior = thread.briefingCommentRefs?.find(ref => ref.commentId === comment.commentId);
+        if (prior && ['commentSeq', 'briefingId', 'stepId'].some(key => prior[key] !== comment[key])) throw new Error('기존 초안의 의견 연결과 일치하지 않습니다.');
+        if (prior?.draftText && current.includes(prior.draftText)) return true;
+        const inputs = new Map((thread.briefingInputs || []).map(reference => [reference.sourceId, reference]));
+        for (const reference of references) {
+          if (!comment.contextSnapshotIds.includes(reference.sourceId)) continue;
+          if (inputs.has(reference.sourceId) && inputs.get(reference.sourceId).hash !== reference.hash) throw new Error('기존 초안의 근거 연결과 일치하지 않습니다.');
+          if (!inputs.has(reference.sourceId)) inputs.set(reference.sourceId, reference);
+        }
+        const refs = BriefingState.addBriefingCommentRef(thread.briefingCommentRefs, comment)
+          .map(ref => ref.commentId === comment.commentId ? { ...ref, draftText: comment.text } : ref);
+        updateThreadById(threadId, item => ({ ...item, briefingInputs: [...inputs.values()], briefingCommentRefs: refs }));
         this.setDraft(`${current ? `${current}\n\n` : ''}${comment.text}`, threadId);
-        updateThreadById(threadId, item => ({ ...item, briefingInputs: [...new Map([...(item.briefingInputs || []),
-          ...references.filter(reference => comment.contextSnapshotIds.includes(reference.sourceId))].map(reference => [reference.sourceId, reference])).values()] }));
-        state.codex.activeThreadId = threadId;
-        state.codex.hudView = 'conversation';
         emit();
-        if (!state.hudOpen && state.codex.chatDockMode !== 'canvas') toggleHUD('chat', '채팅');
-        boardNotice('단계 의견을 Chat 초안에 넣었습니다. 전송 전에는 새 업무를 시작하지 않습니다.');
+        return true;
       },
       threadRuntimeConfig(threadId = state.codex.activeThreadId) {
         const thread = getCodexThreadById(state.codex, threadId) || getActiveCodexThread(state.codex);
@@ -17608,8 +17900,10 @@
     state.setCanvasViewportTarget = setCanvasViewportTarget;
     const panCanvasByWheel = (ev) => {
       const unit = normalizeWheelDelta(ev);
+      const beforeX = state.panTarget.x, beforeY = state.panTarget.y;
       state.panTarget.x -= ev.deltaX * unit * WHEEL_PAN_SPEED;
       state.panTarget.y -= ev.deltaY * unit * WHEEL_PAN_SPEED;
+      if (state.panTarget.x !== beforeX || state.panTarget.y !== beforeY) state.canvasUserCameraRevision = (state.canvasUserCameraRevision || 0) + 1;
       scheduleAnimate();
     };
     state.panCanvasByWheel = panCanvasByWheel;
@@ -17668,6 +17962,14 @@
       }
     };
     const zoomCanvasByFactor = (factor, cx, cy) => {
+      // This private entry is used only by wheel, zoom buttons and zoom keys;
+      // automatic framing uses the setters, which never advance user history.
+      const before = { x: state.panTarget.x, y: state.panTarget.y, zoom: state.zoomTarget };
+      const recordChange = () => {
+        if (state.panTarget.x !== before.x || state.panTarget.y !== before.y || state.zoomTarget !== before.zoom) {
+          state.canvasUserCameraRevision = (state.canvasUserCameraRevision || 0) + 1;
+        }
+      };
       let prevZoom = state.zoomTarget;
       let nextZoom = Math.max(ZOOM_MIN, Math.min(ZOOM_MAX, prevZoom * factor));
       let anchorX = cx;
@@ -17685,11 +17987,12 @@
           anchorY = safe.top + safe.height / 2;
         }
       }
-      if (nextZoom === prevZoom) return;
+      if (nextZoom === prevZoom) { recordChange(); return; }
       const ratio = nextZoom / prevZoom;
       state.panTarget.x = anchorX - (anchorX - state.panTarget.x) * ratio;
       state.panTarget.y = anchorY - (anchorY - state.panTarget.y) * ratio;
       state.zoomTarget = nextZoom;
+      recordChange();
       if (state.cardFullscreen?.cardId) {
         if (frame) {
           window.cancelAnimationFrame(frame);
@@ -17715,11 +18018,18 @@
     zoomOutButton.addEventListener('click', () => zoomAtSafeCenter(1 / 1.2));
     zoomInButton.addEventListener('click', () => zoomAtSafeCenter(1.2));
     zoomFitButton.addEventListener('click', () => {
+      const before = { x: state.panTarget.x, y: state.panTarget.y, zoom: state.zoomTarget };
+      const recordChange = () => {
+        if (state.panTarget.x !== before.x || state.panTarget.y !== before.y || state.zoomTarget !== before.zoom) {
+          state.canvasUserCameraRevision = (state.canvasUserCameraRevision || 0) + 1;
+        }
+      };
       const cards = Array.from(layer.querySelectorAll(':scope > .egd-canvas-card'))
         .filter(card => card.isConnected && !card.hidden && card.getClientRects().length
           && window.getComputedStyle(card).visibility === 'visible');
       if (!cards.length) {
         setCanvasViewportTarget({ pan: { x: 0, y: 0 }, zoom: 1 });
+        recordChange();
         return;
       }
       const rects = cards.map(persistentEntityGeometry);
@@ -17731,6 +18041,7 @@
         { x: left, y: top, width: right - left, height: bottom - top },
         safeViewportRect({ margin: 32 }), 0.9,
       ));
+      recordChange();
     });
 
     const beginCanvasPan = (ev) => {
@@ -17809,8 +18120,10 @@
     });
     window.addEventListener('mousemove', (ev) => {
       if (pan) {
+        const beforeX = state.panTarget.x, beforeY = state.panTarget.y;
         state.panTarget.x = pan.px + (ev.clientX - pan.x);
         state.panTarget.y = pan.py + (ev.clientY - pan.y);
+        if (state.panTarget.x !== beforeX || state.panTarget.y !== beforeY) state.canvasUserCameraRevision = (state.canvasUserCameraRevision || 0) + 1;
         scheduleAnimate();
         return;
       }
@@ -17966,6 +18279,9 @@
         syncPanModeCursor();
       }
       if ((ev.ctrlKey || ev.metaKey) && ev.key === '0') {
+        if (state.panTarget.x !== 0 || state.panTarget.y !== 0 || state.zoomTarget !== 1) {
+          state.canvasUserCameraRevision = (state.canvasUserCameraRevision || 0) + 1;
+        }
         state.panTarget = { x: 0, y: 0 };
         state.zoomTarget = 1;
         scheduleAnimate();

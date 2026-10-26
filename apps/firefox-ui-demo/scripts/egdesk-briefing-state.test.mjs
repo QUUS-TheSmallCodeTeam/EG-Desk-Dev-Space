@@ -7,6 +7,7 @@ import * as InputContext from '../overlay/resources/EGDeskInputContext.sys.mjs';
 import { BRIEFING_COMMENT_MAX, BRIEFING_MAX_TARGETS } from '../helper/egdesk-context-runtime.mjs';
 
 const reference = (sourceId, hash = `hash-${sourceId}`) => ({ sourceId, hash, localSource: { sourceRef: { viewId: `live-${sourceId}` } } });
+const requestId = '10000000-0000-4000-8000-000000000001';
 const evidenceView = (ref, geometry, extra = {}) => ({ id: `card-${ref.sourceId}`, sourceId: ref.sourceId, hash: ref.hash,
   evidenceKey: InputContext.inputEvidenceKey(ref), sourceMatches: true, revisionMatches: true, geometry, ...extra });
 
@@ -127,9 +128,10 @@ test('the screen enters its briefing chrome mode only while a briefing is open',
 
 test('a step comment is saved first and the draft then points at it by number', () => {
   const session = Briefing.beginBriefing(multiBriefing(), { pan: { x: 0, y: 0 }, zoom: 1 });
-  assert.deepEqual(Briefing.briefingCommentRequest(session, '  합계를 비교해줘  '), { briefingId: 'brief-multi', body: { stepId: 'both', text: '합계를 비교해줘' } });
+  assert.deepEqual(Briefing.briefingCommentRequest(session, '  합계를 비교해줘  ', requestId), { briefingId: 'brief-multi', body: { stepId: 'both', text: '합계를 비교해줘', clientRequestId: requestId } });
   assert.throws(() => Briefing.briefingCommentRequest(session, '   '), /단계 의견/);
   assert.throws(() => Briefing.briefingCommentRequest(session, 'x'.repeat(2001)), /2000자/);
+  assert.throws(() => Briefing.briefingCommentRequest(session, 'valid'), /요청 ID/);
   const saved = { id: 'comment-1', briefingId: 'brief-multi', stepId: 'both', seq: 3, text: '합계를 비교해줘', resolved: false };
   const resolved = [{ reference: { sourceId: 'source-a' }, status: 'available' }, { reference: { sourceId: 'source-b' }, status: 'missing' }];
   const draft = Briefing.briefingCommentDraft(session, '합계를 비교해줘', resolved, saved);
@@ -174,4 +176,146 @@ test('saved comments load in number order and become per-step badge counts', () 
   assert.deepEqual(summary.map(row => [row.stepId, row.number, row.open, row.resolved, row.latestSeq]),
     [['both', 1, 1, 1, 2], ['only-b', 2, 1, 0, 3], ['old', 3, 0, 0, null]]);
   assert.deepEqual(Briefing.normalizeBriefingComments(null, 'brief-multi'), []);
+});
+
+const savedSession = () => Briefing.beginBriefing({ ...multiBriefing(), conversationId: 'native-a', runId: 'run-a', answerId: 'native-a/run-a' }, {});
+const savedRow = (extra = {}) => ({ id: '20000000-0000-4000-8000-000000000001', briefingId: 'brief-multi', stepId: 'both', stepIndex: 0,
+  seq: 1, text: '의견', resolved: false, sourceIds: ['source-a', 'source-b'], clientRequestId: requestId,
+  conversationId: 'native-a', runId: 'run-a', answerId: 'native-a/run-a', ...extra });
+const savedList = (...comments) => ({ briefingId: 'brief-multi', comments });
+const deferComment = () => { let resolve, reject; const promise = new Promise((yes, no) => { resolve = yes; reject = no; }); return { promise, resolve, reject }; };
+
+function commentsHarness({ record = {}, transport, includeError = null } = {}) {
+  let active = true, ids = 0;
+  const calls = [], inserted = [], updates = [];
+  const controller = Briefing.createBriefingComments({ session: savedSession(), record,
+    current: () => active, makeId: () => { ids++; return requestId; },
+    request: async (method, body) => { calls.push({ method, body }); return transport ? transport(method, body) : method === 'GET' ? savedList() : { comment: savedRow() }; },
+    included: row => inserted.some(item => item.id === row.id),
+    include: row => { if (includeError) throw includeError; inserted.push(row); }, changed: value => updates.push(value),
+  });
+  return { controller, calls, inserted, updates, record, idCount: () => ids, deactivate: () => { active = false; controller.dispose(); } };
+}
+
+test('saved comment receipt validates every original identity and the exact target set before draft use', () => {
+  const session = savedSession(), body = Briefing.briefingCommentRequest(session, '의견', requestId).body;
+  assert.deepEqual(Briefing.verifiedBriefingComment(savedRow(), session, body), savedRow());
+  for (const bad of [{ id: 'not-an-id' }, { seq: 0 }, { seq: 1.5 }, { briefingId: 'other' }, { stepId: 'only-b' }, { stepIndex: 1 },
+    { conversationId: 'other' }, { runId: 'other' }, { answerId: 'other' }, { sourceIds: ['other'] }, { sourceIds: ['source-a'] },
+    { sourceIds: ['source-a', 'source-a'] }, { clientRequestId: undefined }, { clientRequestId: '30000000-0000-4000-8000-000000000001' }, { text: '' }]) {
+    assert.throws(() => Briefing.verifiedBriefingComment(savedRow(bad), session, body), /연결/, JSON.stringify(bad));
+  }
+  const legacy = savedRow(); delete legacy.clientRequestId;
+  assert.equal(Briefing.verifiedBriefingComment(legacy, session).id, legacy.id, 'legacy record can be read, not matched to an unknown save');
+  assert.throws(() => Briefing.verifiedBriefingComment(legacy, session, body));
+});
+
+test('saved comments GET distinguishes verified empty, unavailable, wrong envelope and ambiguous identity', () => {
+  const session = savedSession();
+  assert.deepEqual(Briefing.verifiedBriefingComments(savedList(), session), []);
+  for (const value of [null, {}, [], { briefingId: 'other', comments: [] }, savedList(savedRow(), savedRow()),
+    savedList(savedRow(), savedRow({ id: '20000000-0000-4000-8000-000000000002', seq: 2 })),
+    savedList(savedRow(), savedRow({ id: '20000000-0000-4000-8000-000000000002', clientRequestId: undefined }))]) {
+    assert.throws(() => Briefing.verifiedBriefingComments(value, session));
+  }
+});
+
+test('saved comments controller creates a UUID only for save, blocks pending clicks and inserts a receipt once', async () => {
+  const pending = deferComment(), h = commentsHarness({ transport: method => method === 'POST' ? pending.promise : savedList() });
+  h.controller.edit('의견'); await h.controller.refresh(); assert.equal(h.idCount(), 0);
+  const saving = h.controller.submit('의견');
+  assert.equal(h.controller.view().pending, true); assert.equal(h.controller.view().clientRequestId, requestId);
+  await h.controller.submit('의견'); assert.equal(h.calls.filter(item => item.method === 'POST').length, 1);
+  pending.resolve({ comment: savedRow() }); await saving;
+  assert.equal(h.controller.view().phase, 'included'); assert.equal(h.inserted.length, 1);
+  await h.controller.submit('의견'); h.controller.include(savedRow().id);
+  assert.equal(h.calls.filter(item => item.method === 'POST').length, 1); assert.equal(h.inserted.length, 1); assert.equal(h.idCount(), 1);
+});
+
+test('lost POST recovery uses GET exact UUID only, never a same-text comment or a second POST', async () => {
+  let found = false;
+  const h = commentsHarness({ transport: method => {
+    if (method === 'POST') throw new Error('response lost');
+    const other = savedRow({ id: '20000000-0000-4000-8000-000000000002', seq: 2, clientRequestId: '30000000-0000-4000-8000-000000000001' });
+    return found ? savedList(savedRow(), other) : savedList(other);
+  } });
+  await h.controller.submit('의견');
+  assert.equal(h.controller.view().phase, 'unknown'); assert.equal(h.inserted.length, 0);
+  await h.controller.submit('new text');
+  assert.deepEqual(h.calls.map(item => item.method), ['POST', 'GET', 'GET']); assert.equal(h.idCount(), 1);
+  found = true; await h.controller.refresh();
+  assert.equal(h.controller.view().phase, 'saved'); assert.equal(h.inserted.length, 0, 'recovery does not silently modify a draft');
+  h.controller.include(savedRow().id); assert.equal(h.inserted.length, 1);
+});
+
+test('saved comment draft failure is separately retryable without posting again', async () => {
+  const record = {}, first = commentsHarness({ record, includeError: new Error('draft busy') });
+  await first.controller.submit('의견');
+  assert.equal(first.controller.view().phase, 'saved'); assert.match(first.controller.view().comments[0].draftError, /#1 저장됐지만 초안에 넣지 못함/);
+  first.deactivate();
+  const reopened = commentsHarness({ record, transport: () => savedList(savedRow()) });
+  await reopened.controller.refresh(); reopened.controller.include(savedRow().id);
+  assert.deepEqual(reopened.calls.map(item => item.method), ['GET']); assert.equal(reopened.inserted.length, 1);
+  assert.equal(reopened.controller.view().comments[0].draftError, null);
+});
+
+test('definitive rejection is failed, unknown post-commit authority/transport is unconfirmed, GET failure is not empty', async () => {
+  for (const error of [Object.assign(new Error('invalid'), { status: 400 }), Object.assign(new Error('conflict'), { status: 409, code: 'BRIEFING_COMMENT_CONFLICT' })]) {
+    const h = commentsHarness({ transport: () => { throw error; } }); await h.controller.submit('의견');
+    assert.equal(h.controller.view().phase, 'failed'); assert.deepEqual(h.calls.map(item => item.method), ['POST']);
+  }
+  const h = commentsHarness({ transport: () => { throw Object.assign(new Error('changed after write'), { status: 403, code: 'ACCOUNT_CHANGED' }); } });
+  await h.controller.submit('의견');
+  assert.equal(h.controller.view().unconfirmed, true); assert.equal(h.controller.view().listState, 'failed');
+  assert.equal(h.inserted.length, 0); assert.deepEqual(h.calls.map(item => item.method), ['POST', 'GET']);
+});
+
+test('late save resolve/reject cannot mutate retained receipts or UI after dispose; reopen retains UUID for GET', async () => {
+  for (const reject of [false, true]) {
+    const pending = deferComment(), record = {}, h = commentsHarness({ record, transport: () => pending.promise });
+    const saving = h.controller.submit('의견'); h.deactivate();
+    const before = JSON.stringify(record), updates = h.updates.length;
+    if (reject) pending.reject(new Error('late')); else pending.resolve({ comment: savedRow() });
+    await saving;
+    assert.equal(JSON.stringify(record), before); assert.equal(h.updates.length, updates); assert.equal(h.inserted.length, 0);
+    const fresh = commentsHarness({ record, transport: () => savedList(savedRow()) }); await fresh.controller.refresh();
+    assert.equal(fresh.controller.view().phase, 'saved'); assert.equal(fresh.controller.view().clientRequestId, requestId);
+    assert.deepEqual(fresh.calls.map(item => item.method), ['GET']); assert.equal(fresh.idCount(), 0);
+  }
+});
+
+test('late initial GET cannot erase a successfully saved receipt and failed GET retains readable history', async () => {
+  const pending = deferComment(), h = commentsHarness({ transport: method => method === 'GET' ? pending.promise : { comment: savedRow() } });
+  const reading = h.controller.refresh(); await h.controller.submit('의견'); pending.resolve(savedList()); await reading;
+  assert.equal(h.controller.view().comments.length, 1); assert.equal(h.controller.view().comments[0].included, true);
+  const failed = commentsHarness({ record: h.record, transport: () => { throw new Error('offline'); } }); await failed.controller.refresh();
+  assert.equal(failed.controller.view().comments.length, 1); assert.equal(failed.controller.view().listState, 'failed');
+});
+
+test('manual retry replays the captured request, saves only and leaves the edited new attempt for an explicit primary action', async () => {
+  let posts = 0;
+  const h = commentsHarness({ transport: (method, body) => {
+    if (method === 'GET') throw new Error('GET offline');
+    posts++; if (posts === 1) throw new Error('response lost');
+    return { comment: savedRow({ text: body.text, clientRequestId: body.clientRequestId }) };
+  } });
+  h.controller.edit('의견'); await h.controller.submit('의견'); const captured = JSON.stringify(h.record.attempt.body);
+  h.controller.edit('현재 다른 입력'); assert.equal(h.controller.view().originalText, '의견'); assert.equal(h.controller.view().canRetry, true);
+  await h.controller.retry();
+  assert.equal(JSON.stringify(h.calls.filter(call => call.method === 'POST')[1].body), captured);
+  assert.equal(h.controller.view().text, '현재 다른 입력'); assert.equal(h.controller.view().phase, 'saved'); assert.equal(h.inserted.length, 0);
+  assert.equal(h.controller.view().originalText, null); assert.equal(h.idCount(), 1);
+  h.controller.include(savedRow().id); assert.equal(h.inserted.length, 1); assert.equal(posts, 2);
+});
+
+test('a retained retry never borrows a newly presented step target even under the same briefing/step IDs', async () => {
+  const h = commentsHarness({ transport: () => { throw new Error('offline'); } });
+  await h.controller.submit('의견'); h.deactivate(); const before = JSON.stringify(h.record.attempt.body);
+  const session = savedSession(); session.briefing.steps[0].targets[0].hash = 'replacement-hash';
+  let requests = 0;
+  const changed = Briefing.createBriefingComments({ session, record: h.record, current: () => true,
+    makeId: () => { throw new Error('never allocate a new retry ID'); }, request: () => { requests++; },
+    include: () => { throw new Error('no draft write'); }, included: () => false });
+  assert.equal(changed.view().canRetry, false); assert.match(changed.view().message, /원래 단계·근거/);
+  await changed.retry(); assert.equal(requests, 0); assert.equal(JSON.stringify(h.record.attempt.body), before);
 });
