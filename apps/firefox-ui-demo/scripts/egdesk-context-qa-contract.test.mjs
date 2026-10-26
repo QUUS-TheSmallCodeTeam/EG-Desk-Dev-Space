@@ -6,7 +6,10 @@ import { assertBriefingTargets, assertContextCaptureBatch, assertContextEventIde
   assertFrozenFileReadAfterMutation, assertImmutableContextRead, captureContextReadEvidence,
   assertPublishedBriefing, assertStoredAgentDelivery, fingerprintQaBytes, observeQaFixtureFile, readContextInspectionPage,
   assertContextSourceChangeScope, contextSourceChangeResponse, assertContextSourceChangePanel,
-  assertContextSourceRequest, classifyContextSourceTerminal } from './egdesk-context-qa-contract.mjs';
+  assertContextSourceRequest, classifyContextSourceTerminal, assertBriefingCommentList,
+  assertBriefingCommentSaved, assertBriefingCommentDraft, assertBriefingCommentStore,
+  assertBriefingCommentReceipt, assertBriefingCommentGetDelta, summarizeBriefingCommentGetDelta,
+  assertBriefingPanelInvariant, planBriefingPanelWheel } from './egdesk-context-qa-contract.mjs';
 import { bootstrapQaProfile, canonicalTempRoot, LOADER_FILES } from './egdesk-chat-qa-profile.mjs';
 
 // Synthetic metadata tests QA oracles only, never production capture/tool handling.
@@ -385,4 +388,197 @@ test('multi-target Briefing steps: target equals targets[0] and every target pas
   assert.throws(() => assertBriefingTargets(withStep({ targets: 'source-A' }), { sourceIds: ['source-A'] }), /1–6 targets/);
   assert.throws(() => assertBriefingTargets(withStep({ emphasis: 'blink' }), { sourceIds: ['source-A', 'source-B'], viewIds: ['view-B'] }), /emphasis/);
   assert.throws(() => assertBriefingTargets(withStep({ description: 'legacy' }), { sourceIds: ['source-A', 'source-B'], viewIds: ['view-B'] }), /Legacy/);
+});
+
+function commentFixture() {
+  const uuid = n => `00000000-0000-4000-8000-${String(n).padStart(12, '0')}`;
+  const room = { engineId: 'codex', engineProfileId: 'codex-default', clientThreadId: 'local-A',
+    conversationId: 'native-A', runId: 'run-A', answerId: 'native-A/run-A' };
+  const briefing = { id: uuid(1), title: 'Stored briefing', steps: [{ id: 'step-A', sourceIds: ['source-A'] }, { id: 'step-B', sourceIds: ['source-B'] }] };
+  const request = { stepId: 'step-A', text: 'Keep this saved comment', clientRequestId: uuid(2) };
+  const saved = { id: uuid(3), briefingId: briefing.id, stepId: 'step-A', stepIndex: 0, seq: 1, text: request.text,
+    clientRequestId: request.clientRequestId, sourceIds: ['source-A'], resolved: false, resolvedAt: null,
+    conversationId: room.conversationId, runId: room.runId, answerId: room.answerId, createdAt: 100, updatedAt: 100 };
+  return { uuid, room, briefing, request, saved, response: { briefingId: briefing.id, comments: [saved] } };
+}
+
+test('Briefing comments oracle accepts exact stored UUID/number/scope and recovers by request UUID only', () => {
+  const f = commentFixture();
+  assert.deepEqual(assertBriefingCommentList(f.response, f), [f.saved]);
+  const actual = assertBriefingCommentSaved(f.response, f);
+  assert.deepEqual(actual, f.saved); assert.equal(Object.isFrozen(actual), true);
+  assert.throws(() => assertBriefingCommentSaved(f.response, { ...f, request: { ...f.request, clientRequestId: f.uuid(99) } }), /exact request UUID/);
+  assert.throws(() => assertBriefingCommentSaved(f.response, { ...f, request: { ...f.request, text: 'different' } }));
+  assert.throws(() => assertBriefingCommentSaved(f.response, { ...f, request: { ...f.request, sourceIds: [] } }), /exact request/);
+  assert.deepEqual(assertBriefingCommentList({ briefingId: f.briefing.id, comments: [] }, f), []);
+});
+
+test('Briefing comments oracle rejects mixed conversations, unknown steps/sources, duplicate identity and private authority', () => {
+  const f = commentFixture();
+  for (const patch of [{ conversationId: 'native-B' }, { runId: 'run-B' }, { answerId: 'native-A/run-B' },
+    { stepId: 'absent' }, { stepIndex: 1 }, { sourceIds: ['source-B'] }, { sourceIds: ['source-A', 'source-A'] },
+    { seq: 0 }, { clientRequestId: 'not-uuid' }, { ownerKey: 'private' }, { requestDigest: 'private' }]) {
+    assert.throws(() => assertBriefingCommentList({ ...f.response, comments: [{ ...f.saved, ...patch }] }, f));
+  }
+  for (const second of [f.saved, { ...f.saved, id: f.uuid(4), seq: 2 },
+    { ...f.saved, id: f.uuid(4), clientRequestId: f.uuid(5) }]) {
+    assert.throws(() => assertBriefingCommentList({ ...f.response, comments: [f.saved, second] }, f), /Duplicate|unique and ordered/);
+  }
+  assert.throws(() => assertBriefingCommentList(f.response, { ...f, room: { ...f.room, engineId: 'claude' } }), /fallback/);
+  assert.throws(() => assertBriefingCommentList({ ...f.response, briefingId: f.uuid(99) }, f), /crossed/);
+});
+
+test('Briefing comments QA retains the 16KiB/2000-character/6-source/200-row bounds', () => {
+  const f = commentFixture();
+  assert.doesNotThrow(() => assertBriefingCommentList({ ...f.response, comments: [{ ...f.saved, text: 'x'.repeat(2000) }] }, f));
+  assert.throws(() => assertBriefingCommentList({ ...f.response, comments: [{ ...f.saved, text: 'x'.repeat(2001) }] }, f), /bounded stored/);
+  assert.throws(() => assertBriefingCommentList({ ...f.response, comments: Array(201).fill(f.saved) }, f), /Bounded explicit/);
+  assert.throws(() => assertBriefingCommentList({ ...f.response, comments: [{ ...f.saved, sourceIds: Array.from({ length: 7 }, (_, i) => `source-${i}`) }] }, f), /source bound/);
+  assert.throws(() => assertBriefingCommentSaved(f.response, { ...f, request: { ...f.request, text: 'x'.repeat(16384) } }), /16KiB/);
+  assert.throws(() => assertBriefingCommentList({ briefingId: f.briefing.id }, f), /explicit/);
+});
+
+test('Briefing comment draft preserves existing text/attachments and rejects repeated or foreign insertion', () => {
+  const { briefing, saved, room } = commentFixture();
+  const before = { scope: { ...room, owner: 'fixture-owner' }, draft: 'Already typed draft',
+    inputSources: [{ id: 'prepared-selection', sourceId: 'preserved' }],
+    briefingInputs: [{ sourceId: 'preserved', hash: 'old-hash', sourceRef: { kind: 'file' } }], briefingCommentRefs: [] };
+  const draftText = '[Stored briefing · 1단계 · 의견 #1]\n의견: Keep this saved comment';
+  const after = { ...structuredClone(before), draft: `${before.draft}\n\n${draftText}`,
+    briefingInputs: [...structuredClone(before.briefingInputs), { sourceId: 'source-A', hash: 'capture-hash' }],
+    briefingCommentRefs: [{ commentId: saved.id, commentSeq: 1, briefingId: briefing.id, stepId: saved.stepId, draftText }] };
+  const expected = { briefing, saved, sourceHashes: { 'source-A': 'capture-hash' } };
+  assert.equal(assertBriefingCommentDraft(before, after, expected), true);
+  assert.equal(assertBriefingCommentDraft(after, structuredClone(after), expected), true);
+  assert.throws(() => assertBriefingCommentDraft(after, { ...after, draft: `${after.draft}\n${draftText}` }, expected), /duplicated/);
+  for (const mutate of [v => { v.scope.conversationId = 'native-B'; }, v => { v.inputSources = []; },
+    v => { v.briefingInputs[0].hash = 'changed'; }, v => { v.briefingInputs[1].hash = 'changed'; },
+    v => { v.briefingCommentRefs[0].commentId = 'other'; }, v => { v.draft = draftText; }]) {
+    const bad = structuredClone(after); mutate(bad); assert.throws(() => assertBriefingCommentDraft(before, bad, expected));
+  }
+});
+
+test('Briefing comment actual-store projection requires scoped complete records and independent text hashes', () => {
+  const f = commentFixture(), room = { ...f.room, briefing: f.briefing };
+  const row = { id: f.saved.id, clientRequestId: f.saved.clientRequestId, seq: 1, stepId: 'step-A', sourceIds: ['source-A'],
+    storedHash: fingerprintQaBytes(JSON.stringify(f.saved)).sha256, textHash: fingerprintQaBytes(f.saved.text).sha256 };
+  const state = { briefingComments: { version: 1, receiptLimit: 64, receipts: [], storeInspection: {
+    kind: 'qa-read-only-store', readAt: 100, briefings: [{ briefingId: f.briefing.id, conversationId: room.conversationId,
+      account: 'a', count: 1, truncated: false, comments: [row] }] } } };
+  assert.deepEqual(assertBriefingCommentStore(state, { room, account: 'a' }), [row]);
+  for (const mutate of [v => { v.briefingComments.storeInspection.kind = 'production'; },
+    v => { v.briefingComments.storeInspection.briefings[0].conversationId = 'native-B'; },
+    v => { v.briefingComments.storeInspection.briefings[0].account = 'b'; },
+    v => { v.briefingComments.storeInspection.briefings[0].truncated = true; },
+    v => { v.briefingComments.storeInspection.briefings[0].count = 2; },
+    v => { delete v.briefingComments.storeInspection.briefings[0].comments[0].textHash; },
+    v => { v.briefingComments.storeInspection.briefings[0].comments[0].sourceIds = ['foreign']; }]) {
+    const bad = structuredClone(state); mutate(bad);
+    assert.throws(() => assertBriefingCommentStore(bad, { room, account: 'a' }));
+  }
+});
+
+function commentTransportFixture() {
+  const f = commentFixture(), route = { engineId: f.room.engineId, engineProfileId: f.room.engineProfileId,
+    clientThreadId: f.room.clientThreadId, conversationId: f.room.conversationId, briefingId: f.briefing.id };
+  const post = { kind: 'production', method: 'POST', requestId: f.uuid(11), clientRequestId: f.request.clientRequestId,
+    R: route, account: 'a', epoch: 3, holdId: null, armedAt: null, receivedAt: 10, committedAt: 12,
+    commentId: f.saved.id, readCompletedAt: null, responseStatus: 201, writeAttempted: true, endReturnedAt: 14,
+    finishAt: 15, closeAt: 16, writableFinishedAtClose: true, releaseAttempts: 0, releaseAttemptAt: null,
+    terminalCause: 'finished', listed: [] };
+  const get = { ...post, method: 'GET', requestId: f.uuid(12), clientRequestId: null, commentId: null,
+    receivedAt: 20, committedAt: null, readCompletedAt: 22, responseStatus: 200,
+    endReturnedAt: 24, finishAt: 25, closeAt: 26, listed: [{ id: f.saved.id, clientRequestId: f.request.clientRequestId, seq: 1 }] };
+  return { ...f, route, post, get, expected: { route, account: 'a', epoch: 3 } };
+}
+
+test('Comment terminal oracle validates finished, lost and legitimate no-finish transport-aborted receipts', () => {
+  const { uuid, post, get, expected } = commentTransportFixture();
+  for (const row of [post, get]) assert.doesNotThrow(() => assertBriefingCommentReceipt(row, { ...expected, terminal: 'finished' }));
+  const lost = { ...post, holdId: uuid(20), armedAt: 5, endReturnedAt: null, finishAt: null,
+    writeAttempted: false, writableFinishedAtClose: false, terminalCause: 'committed-response-lost' };
+  assert.doesNotThrow(() => assertBriefingCommentReceipt(lost, { ...expected, terminal: 'committed-response-lost' }));
+  const cancelled = { ...lost, terminalCause: 'peer-close-before-finish', releaseAttempts: 1, releaseAttemptAt: 30 };
+  assert.doesNotThrow(() => assertBriefingCommentReceipt(cancelled, { ...expected, terminal: 'peer-close-before-finish' }));
+  const lostGet = { ...get, endReturnedAt: null, finishAt: null, writeAttempted: false,
+    writableFinishedAtClose: false, terminalCause: 'recovery-get-response-lost' };
+  assert.doesNotThrow(() => assertBriefingCommentReceipt(lostGet, { ...expected, terminal: 'recovery-get-response-lost' }));
+  for (const patch of [{ epoch: 9 }, { finishAt: null }, { finishAt: 19 }, { endReturnedAt: 21 },
+    { writeAttempted: false }, { closeAt: 23 }, { writableFinishedAtClose: false }, { readCompletedAt: null }]) {
+    assert.throws(() => assertBriefingCommentReceipt({ ...get, ...patch }, { ...expected, terminal: 'finished' }));
+  }
+  for (const patch of [{ closeAt: null }, { closeAt: 11 }, { endReturnedAt: 13 }, { finishAt: 15 },
+    { writeAttempted: true }, { writableFinishedAtClose: true }, { releaseAttemptAt: 11 }, { committedAt: null }]) {
+    assert.throws(() => assertBriefingCommentReceipt({ ...cancelled, ...patch }, { ...expected, terminal: 'peer-close-before-finish' }));
+  }
+});
+
+test('Comment GET delta audits all received requests before success/scope filters and ties recovery to the original POST epoch', () => {
+  const { uuid, post, get, expected } = commentTransportFixture(), options = { ...expected, count: 1, parent: post };
+  assert.deepEqual(assertBriefingCommentGetDelta([post], [post, get], options), [get]);
+  for (const extra of [{ ...get, requestId: uuid(13), responseStatus: 503, readCompletedAt: null, listed: [] },
+    { ...get, requestId: uuid(14), R: { ...get.R, conversationId: 'native-B' } },
+    { ...get, requestId: uuid(15), receivedAt: null }, { ...get, requestId: uuid(16), method: 'INVALID' }]) {
+    assert.throws(() => assertBriefingCommentGetDelta([post], [post, get, extra], options));
+  }
+  assert.throws(() => assertBriefingCommentGetDelta([post], [post, { ...get, epoch: 9 }], options), /epoch/);
+  assert.throws(() => assertBriefingCommentGetDelta([post], [post, { ...get, R: { ...get.R, conversationId: 'native-B' } }], options), /scope/);
+  assert.throws(() => assertBriefingCommentGetDelta([post], [post, get], { ...options, parent: { ...post, epoch: 9 } }), /original POST epoch/);
+  assert.throws(() => assertBriefingCommentGetDelta([post, get], [post], { ...options, count: 0 }), /disappeared/);
+  assert.throws(() => assertBriefingCommentGetDelta([post, get], [post, { ...get, method: 'POST' }], { ...options, count: 0 }));
+  assert.throws(() => assertBriefingCommentGetDelta([post], [post, get, get], options), /Duplicate/);
+});
+
+test('Comment GET diagnostics preserve actual delta/scope/timing, cap eight rows and omit secrets/text/payload', () => {
+  const { uuid, post, get } = commentTransportFixture();
+  const after = [post, get, ...Array.from({ length: 10 }, (_, i) => ({ ...get, requestId: uuid(100 + i), epoch: i,
+    R: { ...get.R, conversationId: `native-${i}`, auth: 'PRIVATE_AUTH', token: 'PRIVATE_TOKEN' },
+    secret: 'PRIVATE_SECRET', text: 'PRIVATE_TEXT', payload: 'PRIVATE_PAYLOAD', listed: [{ text: 'PRIVATE_LIST' }] }))];
+  const summary = summarizeBriefingCommentGetDelta([post, get], after, { action: 'open-briefing', expected: 1 });
+  assert.deepEqual([summary.action, summary.expected, summary.before, summary.after, summary.delta, summary.omitted],
+    ['open-briefing', 1, 1, 11, 10, 2]);
+  assert.equal(summary.receipts.length, 8); assert.equal(summary.receipts[0].requestId, uuid(100));
+  assert.equal(summary.receipts[0].R.conversationId, 'native-0'); assert.equal(summary.receipts[7].epoch, 7);
+  for (const key of ['receivedAt', 'readCompletedAt', 'endReturnedAt', 'finishAt', 'closeAt', 'responseStatus', 'terminalCause', 'writeAttempted']) {
+    assert.equal(summary.receipts[0][key], get[key]);
+  }
+  assert.doesNotMatch(JSON.stringify(summary), /PRIVATE/); assert.equal(Object.isFrozen(summary), true);
+  const malformed = summarizeBriefingCommentGetDelta([], [{ ...get, requestId: undefined, receivedAt: undefined,
+    R: { ...get.R, conversationId: 'x'.repeat(1024) } }], { action: 'test', expected: 1 });
+  assert.equal(malformed.delta, 1); assert.equal(malformed.receipts[0].malformedIdentityOrReceiveTime, true);
+  assert.equal(malformed.receipts[0].R.conversationId.length, 256); assert.equal(malformed.receipts[0].stringsTruncated, true);
+});
+
+test('Briefing wheel planner only scrolls the observed panel toward a clipped target with a nine-hit native point', () => {
+  const value = { exists: true, cameraSettled: true, viewport: { width: 800, height: 600 },
+    panel: { id: 'egd-answer-briefing', client: { left: 100, top: 100, right: 500, bottom: 400 },
+      clientHeight: 300, scrollTop: 0, scrollHeight: 1000 },
+    access: { count: 1, insidePanel: true, visible: true, rect: { left: 120, right: 450, top: 450, bottom: 550 },
+      wheelPoint: { x: 130, y: 200, hits: 9, scrollTarget: 'egd-answer-briefing' } } };
+  assert.deepEqual(planBriefingPanelWheel(value), { x: 130, y: 200, deltaX: 0, deltaY: 156 });
+  const up = structuredClone(value); up.panel.scrollTop = 400; up.access.rect.top = -20; up.access.rect.bottom = 80;
+  assert.equal(planBriefingPanelWheel(up).deltaY, -126);
+  for (const mutate of [v => { v.access.wheelPoint.scrollTarget = 'textarea'; }, v => { v.access.wheelPoint.hits = 8; },
+    v => { v.access.insidePanel = false; }, v => { v.access.count = 2; }, v => { v.access.wheelPoint.x = 10; },
+    v => { v.access.rect.top = 100; v.access.rect.bottom = 150; }, v => { v.access.rect.bottom = 900; },
+    v => { v.panel.scrollTop = 700; }, v => { v.cameraSettled = false; }]) {
+    const bad = structuredClone(value); mutate(bad); assert.throws(() => planBriefingPanelWheel(bad));
+  }
+});
+
+test('Briefing wheel invariant permits only internal vertical scroll, not scope/camera/draft/attachment/panel changes', () => {
+  const base = { exists: true, cameraSettled: true, alerts: [], activeThreadId: 'A', briefingId: 'briefing-A', stepId: 'one',
+    presentationId: 'presentation-A', roomGeneration: 1, camera: { zoom: 1, pan: { x: 0, y: 0 } }, viewport: { width: 800, height: 600 },
+    rooms: [{ id: 'A', scope: { owner: 'a', conversationId: 'native-A' }, draft: 'keep', briefingInputs: [{ sourceId: 's', hash: 'h' }] }],
+    inputText: 'opinion', originalText: '', status: 'included', clientRequestId: 'uuid', listState: 'ready', rows: [],
+    panel: { id: 'egd-answer-briefing', rect: {}, client: {}, clientHeight: 300, clientWidth: 400, scrollHeight: 900, scrollWidth: 400, scrollTop: 0, scrollLeft: 0 },
+    access: { selector: 'row', count: 1, identity: { commentId: 'c' }, insidePanel: true, rect: { top: 450 } } };
+  const scrolled = structuredClone(base); scrolled.panel.scrollTop = 100; scrolled.access.rect.top = 350;
+  assert.equal(assertBriefingPanelInvariant(base, scrolled), true);
+  for (const mutate of [v => { v.activeThreadId = 'B'; }, v => { v.camera.pan.x = 1; }, v => { v.rooms[0].draft += 'changed'; },
+    v => { v.rooms[0].briefingInputs[0].hash = 'changed'; }, v => { v.presentationId = 'new'; }, v => { v.viewport.height++; },
+    v => { v.panel.scrollLeft = 1; }, v => { v.panel.clientHeight++; }, v => { v.clientRequestId = 'new'; },
+    v => { v.access.identity.commentId = 'other'; }]) {
+    const bad = structuredClone(scrolled); mutate(bad); assert.throws(() => assertBriefingPanelInvariant(base, bad));
+  }
 });

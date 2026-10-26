@@ -433,3 +433,276 @@ export function assertPublishedBriefing(briefing, { identity, captures, artifact
   }
   return true;
 }
+
+const COMMENT_UUID = /^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i;
+
+export function assertBriefingCommentList(response, { room, briefing }) {
+  assertRunBinding(room);
+  assert.equal(room.engineId, 'codex', 'Comment QA must not infer a Codex fallback');
+  for (const key of ['engineProfileId', 'clientThreadId']) text(room[key], `Comment ${key}`);
+  assert.match(briefing.id, COMMENT_UUID);
+  assert.equal(response?.briefingId, briefing.id, 'Comment list crossed Briefing');
+  assert.ok(Array.isArray(response.comments) && response.comments.length <= 200, 'Bounded explicit comment list required');
+  const ids = new Set(), requests = new Set(); let previousSeq = 0;
+  for (const comment of response.comments) {
+    assert.match(comment.id, COMMENT_UUID); assert.match(comment.clientRequestId, COMMENT_UUID);
+    assert.ok(!ids.has(comment.id) && !requests.has(comment.clientRequestId.toLowerCase()), 'Duplicate comment identity/request UUID');
+    ids.add(comment.id); requests.add(comment.clientRequestId.toLowerCase());
+    assert.equal(comment.briefingId, briefing.id, 'Comment crossed Briefing');
+    for (const key of ['conversationId', 'runId', 'answerId']) assert.equal(comment[key], room[key], `Comment crossed ${key}`);
+    const index = briefing.steps.findIndex(step => step.id === comment.stepId);
+    assert.ok(index >= 0, 'Comment belongs to an unknown step'); assert.equal(comment.stepIndex, index);
+    assert.ok(Number.isSafeInteger(comment.seq) && comment.seq > previousSeq, 'Comment numbers must be unique and ordered');
+    previousSeq = comment.seq;
+    assert.ok(typeof comment.text === 'string' && comment.text.trim() === comment.text && comment.text.length > 0 && comment.text.length <= 2000,
+      'Comment text must retain its bounded stored value');
+    const sourceIds = uniqueKeys(comment.sourceIds, 'Comment sources');
+    assert.ok(sourceIds.length <= 6, 'Comment source bound exceeded');
+    const step = briefing.steps[index], allowed = step.sourceIds || stepTargetList(step).map(target => target.sourceId).filter(Boolean);
+    assert.ok(sourceIds.every(id => allowed.includes(id)), 'Comment references evidence outside its own step');
+    assert.equal(typeof comment.resolved, 'boolean'); timestamp(comment.createdAt); timestamp(comment.updatedAt);
+    for (const key of ['ownerKey', 'authority', 'requestDigest']) assert.equal(Object.hasOwn(comment, key), false, 'Private comment authority/digest leaked');
+  }
+  return frozenCopy(response.comments);
+}
+
+export function assertBriefingCommentSaved(response, { room, briefing, request }) {
+  assert.match(request.clientRequestId, COMMENT_UUID);
+  assert.ok(Buffer.byteLength(JSON.stringify(request)) <= 16 * 1024, 'Comment POST body exceeds 16KiB');
+  const rows = assertBriefingCommentList(response, { room, briefing });
+  const matches = rows.filter(row => row.clientRequestId === request.clientRequestId);
+  assert.equal(matches.length, 1, 'Save recovery needs the exact request UUID, never text/first-row fallback');
+  const saved = matches[0], index = briefing.steps.findIndex(step => step.id === request.stepId);
+  assert.ok(index >= 0); assert.equal(saved.stepId, request.stepId); assert.equal(saved.text, request.text.trim());
+  const step = briefing.steps[index], expected = request.sourceIds ?? step.sourceIds ?? stepTargetList(step).map(target => target.sourceId).filter(Boolean);
+  assert.deepEqual([...saved.sourceIds].sort(), [...new Set(expected)].sort(), 'Stored sources differ from this exact request');
+  return saved;
+}
+
+export function assertBriefingCommentStore(state, { room, account }) {
+  const evidence = state?.briefingComments;
+  assert.equal(evidence?.version, 1); assert.equal(evidence.receiptLimit, 64);
+  assert.ok(Array.isArray(evidence.receipts) && evidence.receipts.length <= 64);
+  assert.equal(evidence.storeInspection?.kind, 'qa-read-only-store', 'QA must not issue a production GET to prove recovery');
+  timestamp(evidence.storeInspection.readAt);
+  const records = evidence.storeInspection.briefings.filter(item => item.briefingId === room.briefing.id);
+  assert.equal(records.length, 1); const stored = records[0];
+  assert.equal(stored.account, account); assert.equal(stored.conversationId, room.conversationId);
+  assert.equal(stored.truncated, false); assert.equal(stored.count, stored.comments?.length);
+  assert.ok(stored.count <= 200);
+  const ids = new Set(), requests = new Set(); let seq = 0;
+  for (const row of stored.comments) {
+    assert.match(row.id, COMMENT_UUID); assert.match(row.clientRequestId, COMMENT_UUID);
+    assert.ok(!ids.has(row.id) && !requests.has(row.clientRequestId.toLowerCase()));
+    ids.add(row.id); requests.add(row.clientRequestId.toLowerCase());
+    assert.ok(Number.isSafeInteger(row.seq) && row.seq > seq); seq = row.seq;
+    const step = room.briefing.steps.find(step => step.id === row.stepId); assert.ok(step, 'Stored comment has unknown step');
+    assert.ok(uniqueKeys(row.sourceIds, 'Stored comment sources').length <= 6 && row.sourceIds.every(id => step.sourceIds.includes(id)));
+    for (const hash of ['storedHash', 'textHash']) assert.match(row[hash] || '', /^[0-9a-f]{64}$/, `Actual store ${hash} required`);
+  }
+  return frozenCopy(stored.comments);
+}
+
+// Server receipts establish transport facts only, never UI callback delivery.
+export function assertBriefingCommentReceipt(receipt, { account, epoch, route, terminal } = {}) {
+  record(receipt, 'Comment receipt');
+  assert.equal(receipt.kind, 'production'); assert.ok(['GET', 'POST'].includes(receipt.method));
+  if (account !== undefined) assert.equal(receipt.account, account, 'Comment receipt crossed account');
+  assert.ok(Number.isSafeInteger(receipt.epoch) && receipt.epoch >= 0);
+  if (epoch !== undefined) assert.equal(receipt.epoch, epoch, 'Comment receipt crossed captured epoch');
+  if (route !== undefined) assert.deepEqual(receipt.R, route, 'Comment receipt crossed exact request scope');
+  if (terminal !== undefined) assert.equal(receipt.terminalCause, terminal, 'Unexpected comment terminal kind');
+  const at = (key, floor = 0) => {
+    assert.ok(Number.isSafeInteger(receipt[key]) && receipt[key] > 0 && receipt[key] >= floor, `Invalid/nonmonotonic comment ${key}`);
+    return receipt[key];
+  };
+  const empty = keys => { for (const key of keys) assert.equal(receipt[key], null, `Unexpected comment ${key}`); };
+  assert.equal(typeof receipt.writeAttempted, 'boolean');
+  assert.ok(Number.isSafeInteger(receipt.releaseAttempts) && receipt.releaseAttempts >= 0 && receipt.releaseAttempts <= 1);
+  if (receipt.receivedAt === null) {
+    assert.equal(receipt.method, 'POST'); assert.match(receipt.holdId, COMMENT_UUID); at('armedAt');
+    empty(['requestId', 'committedAt', 'commentId', 'responseStatus', 'readCompletedAt', 'endReturnedAt', 'finishAt', 'closeAt', 'releaseAttemptAt', 'terminalCause']);
+    assert.equal(receipt.writeAttempted, false); assert.equal(receipt.releaseAttempts, 0);
+    assert.equal(receipt.writableFinishedAtClose, null); return receipt;
+  }
+  assert.match(receipt.requestId, COMMENT_UUID); const received = at('receivedAt');
+  if (receipt.armedAt !== null) { at('armedAt'); assert.ok(receipt.armedAt <= received); assert.match(receipt.holdId, COMMENT_UUID); }
+  if (receipt.releaseAttempts) { at('releaseAttemptAt', received); assert.match(receipt.holdId, COMMENT_UUID); }
+  else assert.equal(receipt.releaseAttemptAt, null);
+  let completed = received;
+  if (receipt.committedAt !== null) {
+    assert.equal(receipt.method, 'POST'); completed = at('committedAt', received);
+    assert.equal(receipt.responseStatus, 201); assert.match(receipt.commentId, COMMENT_UUID);
+  }
+  if (receipt.readCompletedAt !== null) {
+    assert.equal(receipt.method, 'GET'); completed = at('readCompletedAt', received);
+    assert.equal(receipt.responseStatus, 200);
+  }
+  if (receipt.releaseAttemptAt !== null) assert.ok(receipt.releaseAttemptAt >= completed, 'Release preceded actual store completion');
+  if (receipt.endReturnedAt !== null) { assert.equal(receipt.writeAttempted, true); at('endReturnedAt', Math.max(completed, receipt.releaseAttemptAt || 0)); }
+  if (receipt.finishAt !== null) at('finishAt', Math.max(completed, receipt.endReturnedAt || 0, receipt.releaseAttemptAt || 0));
+  if (receipt.closeAt !== null) {
+    at('closeAt', Math.max(completed, receipt.finishAt || 0)); assert.equal(typeof receipt.writableFinishedAtClose, 'boolean');
+  } else assert.equal(receipt.writableFinishedAtClose, null);
+  if (receipt.terminalCause === null) {
+    empty(['finishAt', 'closeAt']); return receipt; // In-flight or held, never final proof.
+  }
+  if (receipt.terminalCause === 'finished') {
+    assert.equal(receipt.writeAttempted, true); at('endReturnedAt', completed); at('finishAt', receipt.endReturnedAt);
+    assert.ok(Number.isSafeInteger(receipt.responseStatus) && receipt.responseStatus >= 200 && receipt.responseStatus <= 599);
+    if (receipt.closeAt !== null) assert.equal(receipt.writableFinishedAtClose, true);
+    if (receipt.method === 'GET' && receipt.responseStatus === 200) at('readCompletedAt', received);
+    if (receipt.method === 'POST' && receipt.responseStatus === 201) at('committedAt', received);
+  } else {
+    assert.ok(['committed-response-lost', 'recovery-get-response-lost', 'peer-close-before-finish'].includes(receipt.terminalCause),
+      'Unexpected destroyed comment response');
+    assert.equal(receipt.writeAttempted, false); empty(['endReturnedAt', 'finishAt']);
+    at('closeAt', completed); assert.equal(receipt.writableFinishedAtClose, false);
+    if (receipt.terminalCause === 'recovery-get-response-lost') {
+      assert.equal(receipt.method, 'GET'); assert.equal(receipt.responseStatus, 200); at('readCompletedAt', received);
+    } else {
+      assert.equal(receipt.method, 'POST'); assert.equal(receipt.responseStatus, 201); at('committedAt', received);
+    }
+  }
+  return receipt;
+}
+
+export function assertBriefingCommentGetDelta(before, after, { count, route, account, epoch, terminal = 'finished', parent } = {}) {
+  const index = values => {
+    assert.ok(Array.isArray(values) && values.length <= 64); const received = new Map();
+    for (const receipt of values) {
+      assertBriefingCommentReceipt(receipt, { account, epoch });
+      if (receipt.receivedAt === null) continue; // Only explicit POST arms have no request yet.
+      assert.ok(!received.has(receipt.requestId), 'Duplicate production request receipt'); received.set(receipt.requestId, receipt);
+    }
+    return received;
+  };
+  const prior = index(before), next = index(after);
+  for (const [id, receipt] of prior) {
+    const current = next.get(id); assert.ok(current, 'Production receipt disappeared from bounded action evidence');
+    for (const key of ['kind', 'method', 'requestId', 'receivedAt', 'R', 'account', 'epoch']) assert.deepEqual(current[key], receipt[key]);
+    if (receipt.terminalCause !== null) for (const key of ['terminalCause', 'responseStatus', 'finishAt', 'readCompletedAt', 'listed']) {
+      assert.deepEqual(current[key], receipt[key], 'Previously terminal receipt was rewritten');
+    }
+  }
+  // Count every received GET before applying scope/status expectations. Failed,
+  // foreign-room and malformed requests cannot vanish through a success filter.
+  const delta = [...next.values()].filter(receipt => receipt.method === 'GET' && !prior.has(receipt.requestId));
+  assert.equal(delta.length, count, 'Unexpected total received production GET delta');
+  for (const receipt of delta) {
+    assertBriefingCommentReceipt(receipt, { account, epoch, route, terminal });
+    assert.equal(receipt.responseStatus, 200);
+    if (parent) {
+      assert.equal(receipt.epoch, parent.epoch, 'Recovery GET crossed original POST epoch');
+      assert.equal(receipt.account, parent.account); assert.deepEqual(receipt.R, parent.R);
+      assert.ok(receipt.receivedAt >= parent.committedAt, 'Recovery GET preceded original POST commit');
+    }
+  }
+  return frozenCopy(delta);
+}
+
+// Diagnostic projection only: no assertion, IO, body/list/payload or authority
+// fields. Keep malformed GET candidates visible rather than success-filtering.
+export function summarizeBriefingCommentGetDelta(before, after, { action, expected } = {}) {
+  const prior = Array.isArray(before) ? before : [], current = Array.isArray(after) ? after : [];
+  const get = rows => rows.filter(row => row?.method === 'GET' && row.receivedAt !== null);
+  const ids = new Set(prior.filter(row => row?.receivedAt !== null && typeof row?.requestId === 'string').map(row => row.requestId));
+  const delta = get(current).filter(row => typeof row.requestId !== 'string' || !ids.has(row.requestId));
+  const string = value => typeof value === 'string' ? value.slice(0, 256) : null;
+  const number = value => Number.isFinite(value) ? value : null;
+  return frozenCopy({ action: string(action), expected: number(expected),
+    before: get(prior).length, after: get(current).length, delta: delta.length,
+    receipts: delta.slice(0, 8).map(row => ({ requestId: string(row.requestId), method: string(row.method),
+      R: Object.fromEntries(['engineId', 'engineProfileId', 'clientThreadId', 'conversationId', 'briefingId']
+        .map(key => [key, string(row.R?.[key])])), epoch: number(row.epoch), responseStatus: number(row.responseStatus),
+      terminalCause: string(row.terminalCause),
+      ...Object.fromEntries(['receivedAt', 'readCompletedAt', 'committedAt', 'releaseAttemptAt', 'endReturnedAt', 'finishAt', 'closeAt']
+        .map(key => [key, number(row[key])])),
+      writeAttempted: typeof row.writeAttempted === 'boolean' ? row.writeAttempted : null,
+      writableFinishedAtClose: typeof row.writableFinishedAtClose === 'boolean' ? row.writableFinishedAtClose : null,
+      malformedIdentityOrReceiveTime: typeof row.requestId !== 'string' || !Number.isFinite(row.receivedAt),
+      stringsTruncated: [row.requestId, row.terminalCause, ...['engineId', 'engineProfileId', 'clientThreadId', 'conversationId', 'briefingId']
+        .map(key => row.R?.[key])].some(value => typeof value === 'string' && value.length > 256),
+    })), omitted: Math.max(0, delta.length - 8) });
+}
+
+export function assertBriefingPanelExpected(value, { owner, route, stepId }) {
+  text(owner, 'Expected Briefing owner'); text(stepId, 'Expected Briefing step');
+  assert.equal(value.exists, true);
+  assert.equal(value.activeThreadId, route.clientThreadId, 'Briefing preflight crossed expected room');
+  assert.equal(value.sessionThreadId, route.clientThreadId, 'Briefing preflight crossed session room');
+  assert.equal(value.briefingId, route.briefingId, 'Briefing preflight crossed expected Briefing');
+  assert.equal(value.stepId, stepId, 'Briefing preflight crossed expected step');
+  const rooms = value.rooms.filter(room => room.id === route.clientThreadId); assert.equal(rooms.length, 1);
+  const expected = { owner, ...route }; delete expected.briefingId;
+  assert.deepEqual(rooms[0].scope, expected, 'Briefing preflight crossed expected owner/engine/profile/client/native scope');
+  return true;
+}
+
+export function assertBriefingPanelInvariant(before, after, { sameTarget = true } = {}) {
+  for (const key of ['activeThreadId', 'briefingId', 'stepId', 'presentationId', 'roomGeneration', 'camera', 'viewport',
+    'rooms', 'sessionThreadId', 'inputText', 'originalText', 'status', 'clientRequestId', 'listState']) {
+    assert.deepEqual(after[key], before[key], `Briefing wheel changed ${key}`);
+  }
+  assert.equal(after.exists, true); assert.equal(after.cameraSettled, true);
+  assert.deepEqual(after.alerts, [], 'Unexpected visible Briefing notice/alert');
+  for (const key of ['id', 'rect', 'client', 'clientHeight', 'clientWidth', 'scrollHeight', 'scrollWidth', 'scrollLeft']) {
+    assert.deepEqual(after.panel?.[key], before.panel?.[key], `Briefing wheel changed panel ${key}`);
+  }
+  const content = value => value.rows.map(row => Object.fromEntries(['id', 'seq', 'stepId', 'clientRequestId', 'text', 'target', 'draftStatus', 'included']
+    .map(key => [key, row[key]])));
+  assert.deepEqual(content(after), content(before), 'Briefing wheel changed saved comment content');
+  if (sameTarget) {
+    for (const key of ['selector', 'count', 'identity', 'insidePanel']) assert.deepEqual(after.access?.[key], before.access?.[key], `Briefing wheel changed target ${key}`);
+    assert.equal(after.access?.count, 1); assert.equal(after.access.insidePanel, true);
+  }
+  return true;
+}
+
+export function planBriefingPanelWheel(value) {
+  const { panel, access } = value;
+  assert.equal(value.exists, true); assert.equal(value.cameraSettled, true);
+  assert.equal(panel?.id, 'egd-answer-briefing'); assert.equal(access?.count, 1); assert.equal(access.insidePanel, true);
+  assert.equal(access.visible, true); const box = access.rect, client = panel.client, point = access.wheelPoint;
+  for (const r of [box, client]) for (const key of ['left', 'top', 'right', 'bottom']) assert.ok(Number.isFinite(r?.[key]));
+  assert.ok(box.right > box.left && box.bottom > box.top && box.bottom - box.top <= client.bottom - client.top - 12,
+    'Briefing target cannot fit the existing panel client bounds');
+  assert.ok(box.left >= client.left && box.right <= client.right, 'Briefing target is horizontally clipped');
+  assert.ok(point && point.hits === 9 && point.scrollTarget === panel.id, 'No fresh wheel point whose nearest scroll target is the Briefing panel');
+  assert.ok(Number.isSafeInteger(point.x) && Number.isSafeInteger(point.y)
+    && point.x > client.left && point.x < client.right && point.y > client.top && point.y < client.bottom
+    && point.x >= 0 && point.x < value.viewport.width && point.y >= 0 && point.y < value.viewport.height);
+  const distance = box.top < client.top + 6 ? box.top - client.top - 6 : box.bottom > client.bottom - 6 ? box.bottom - client.bottom + 6 : 0;
+  assert.notEqual(distance, 0, 'Briefing target is blocked inside its viewport; no wheel rescue');
+  const deltaY = Math.sign(distance) * Math.ceil(Math.min(Math.abs(distance), 240, panel.clientHeight * .65));
+  assert.ok(deltaY < 0 ? panel.scrollTop > 0 : panel.scrollTop + panel.clientHeight < panel.scrollHeight,
+    'Briefing panel has no remaining scroll range toward this target');
+  return { x: point.x, y: point.y, deltaX: 0, deltaY };
+}
+
+// Compare against the stored comment, not the first UI rendering. Existing
+// drafts/attachments are observations only; this helper never edits product state.
+export function assertBriefingCommentDraft(before, after, { briefing, saved, sourceHashes }) {
+  assert.deepEqual(after.scope, before.scope, 'Comment insertion crossed draft scope');
+  assert.equal(after.scope.conversationId, saved.conversationId);
+  assert.deepEqual(after.inputSources, before.inputSources, 'Comment replaced existing draft attachments');
+  const prior = before.briefingCommentRefs.find(ref => ref.commentId === saved.id);
+  if (prior) {
+    assert.ok(prior.draftText && before.draft.includes(prior.draftText), 'Prior comment reference must actually be in the draft');
+    assert.deepEqual(after, before, 'Reincluding a stored comment duplicated or changed the draft');
+    return true;
+  }
+  const draftText = `[${briefing.title || '답변 브리핑'} · ${saved.stepIndex + 1}단계 · 의견 #${saved.seq}]\n의견: ${saved.text}`;
+  assert.equal(after.draft, `${before.draft ? `${before.draft}\n\n` : ''}${draftText}`, 'Saved comment did not preserve and append to the existing draft');
+  assert.deepEqual(after.briefingCommentRefs, [...before.briefingCommentRefs,
+    { commentId: saved.id, commentSeq: saved.seq, briefingId: briefing.id, stepId: saved.stepId, draftText }]);
+  const expectedIds = new Set([...before.briefingInputs.map(ref => ref.sourceId), ...saved.sourceIds]);
+  assert.deepEqual([...uniqueKeys(after.briefingInputs.map(ref => ref.sourceId), 'Draft immutable inputs')].sort(), [...expectedIds].sort());
+  for (const reference of before.briefingInputs) assert.deepEqual(after.briefingInputs.find(ref => ref.sourceId === reference.sourceId), reference,
+    'Saved comment rewrote an existing immutable attachment');
+  for (const id of saved.sourceIds) {
+    text(sourceHashes[id], 'Stored capture hash');
+    assert.equal(after.briefingInputs.find(ref => ref.sourceId === id)?.hash, sourceHashes[id], 'Comment draft changed immutable source identity/hash');
+  }
+  return true;
+}

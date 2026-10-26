@@ -6,7 +6,8 @@ import childProcess from 'node:child_process';
 import vm from 'node:vm';
 import { parseContextQaCli, assertContextQaEnvironment, readContextBeforeDeadline, waitContextBeforeDeadline,
   contextQaJson, guardContextHarness, observeContextSourceChange, observeContextControl, clickContextControl,
-  assertSourceChangeSeed, verifyContextSourceChange, summarizeContextObservation, recordContextFailure, runCli } from './verify-firefox-mcp-context-briefing.mjs';
+  assertSourceChangeSeed, verifyContextSourceChange, summarizeContextObservation, recordContextFailure, runCli,
+  assertBriefingCommentsSeed, observeBriefingComments, verifyBriefingComments, reachBriefingPanelTarget } from './verify-firefox-mcp-context-briefing.mjs';
 import { fingerprintQaBytes } from './egdesk-context-qa-contract.mjs';
 
 const ENV = { EGDESK_QA_FIXTURE_TRANSPORT: '1', EGDESK_QA_STATE_FIXTURES: '1', EGDESK_QA_REAL_TURN: '0',
@@ -27,7 +28,7 @@ test('CTX04 verifier import is inert with no environment opt-in, CLI parsing or 
 test('CTX04 CLI requires exact future UTC deadline/profile and separates source-change from both retained legacy phases', async () => {
   const now = Date.parse('2026-10-26T18:00:00Z');
   const args = ['--profile', '/explicit/profile', '--deadline-utc', '2026-10-26T22:00:00Z'];
-  for (const phase of ['core', 'restored-range', 'source-change']) assert.deepEqual(parseContextQaCli([...args, '--phase', phase], now),
+  for (const phase of ['core', 'restored-range', 'source-change', 'comments']) assert.deepEqual(parseContextQaCli([...args, '--phase', phase], now),
     { profile: '/explicit/profile', deadlineMs: Date.parse(args[3]), phase });
   assert.equal(parseContextQaCli(args, now).phase, 'core');
   for (const invalid of [[], args.slice(0, 2), [...args, '--phase', 'guessed'], [...args, '--profile', 'another'],
@@ -174,7 +175,7 @@ test('CTX04 HTTP deadline aborts the real request signal, bounds body reads and 
 
 test('CTX04 status and control observers are read-only and input remains full-box/nine-hit with a fresh final scope guard', async () => {
   const sources = [], h = { evaluateChrome: async source => { sources.push(source); return {}; } };
-  await observeContextSourceChange(h); await observeContextControl(h, 'exact-target');
+  await observeContextSourceChange(h); await observeContextControl(h, 'exact-target'); await observeBriefingComments(h, ['room-A', 'room-B']);
   for (const source of sources) for (const forbidden of [/dispatchEvent/, /\.click\(/, /\.focus\(/, /\.value\s*=/,
     /scrollTop\s*=/, /scrollIntoView|scrollTo\(|scrollBy\(/, /innerHTML\s*=/, /addEventListener/]) assert.doesNotMatch(source, forbidden);
   let clicks = 0, reads = 0;
@@ -399,3 +400,460 @@ test('CTX04 a merely armed hold or generic NOT_HELD release cannot become late-r
   });
   await assert.rejects(sourceChangeModel({ releaseCode: 'QA_SOURCE_RESPONSE_NOT_HELD' }), /no guessed success/);
 });
+
+const commentId = n => `10000000-0000-4000-8000-${String(n).padStart(12, '0')}`;
+function commentsScene() {
+  const scene = sourceChangeScene();
+  scene.seed.storage = { comments: 'context-json-records', chat: 'sqlite' };
+  Object.assign(scene.seed.counts.seed, { briefings: 2, comments: 0 });
+  scene.seed.identities.forEach((room, index) => {
+    room.briefing = { id: commentId(index + 1), steps: [{ id: `step-${index}`, sourceIds: [room.sources[0].sourceId] }] };
+    room.preservation = { draftText: `Existing draft ${index}`, inputSources: [], briefingInputs: [{
+      sourceId: room.sources[0].sourceId, snapshotId: room.sources[0].snapshotId, hash: room.sources[0].captureHash,
+      sourceRef: { kind: room.sources[0].kind }, capturedAt: 100, packetId: room.sources[0].packetId }], briefingCommentRefs: [] };
+  });
+  return scene;
+}
+
+test('Briefing comments seed requires nonempty immutable briefingInputs, not nonempty inputSources', () => {
+  const { seed } = commentsScene(); assert.equal(assertBriefingCommentsSeed(seed), seed);
+  assert.ok(seed.identities.every(room => room.preservation.inputSources.length === 0));
+  for (const mutate of [s => { s.identities[0].preservation.briefingInputs = []; },
+    s => { s.identities[0].preservation.briefingInputs = [{}]; },
+    s => { s.identities[1].preservation.draftText = ''; }, s => { s.identities[0].preservation.briefingInputs[0].hash = 'wrong'; },
+    s => { s.identities[0].briefing.steps[0].sourceIds = ['foreign']; }, s => { s.storage.comments = 'mock-memory'; }]) {
+    const bad = structuredClone(seed); mutate(bad); assert.throws(() => assertBriefingCommentsSeed(bad));
+  }
+});
+
+async function commentsModel({ transport = 'peer-close', wrongStoredText = false, wrongRecoveryUuid = false,
+  autoRepost = false, malformedRepost = false, staleProof = false, lateInjection = false, badRelease = false,
+  missingRequest = false, mutateAttachment = false, retryNewUuid = false, retryRewritesEdited = false,
+  retryAutoIncludes = false, wrongOriginalDisplay = false, foreignKeyScope = false, receiptMutant = null,
+  extraRecoveryGet = null, splitReadability = false, bindingToast = false, extraOpenGet = false } = {}) {
+  // Sequence/contract model only: no actual product, Gecko input, storage or
+  // callback-delivery proof. Native and fixture implementations are Main QA.
+  const { seed, reads } = commentsScene(), actions = [], requests = [], checks = [], receipts = [], comments = [];
+  const R = room => Object.fromEntries(['engineId', 'engineProfileId', 'clientThreadId', 'conversationId'].map(key => [key, room[key]]).concat([['briefingId', room.briefing.id]]));
+  const drafts = seed.identities.map(room => ({ id: room.clientThreadId,
+    scope: { owner: seed.account.key, ...Object.fromEntries(['engineId', 'engineProfileId', 'clientThreadId', 'conversationId'].map(key => [key, room[key]])) },
+    draft: room.preservation.draftText, ...structuredClone({ inputSources: room.preservation.inputSources,
+      briefingInputs: room.preservation.briefingInputs, briefingCommentRefs: [] }) }));
+  let room = seed.identities[0], panel = null, status = 'idle', listState = 'ready', text = '', originalText = '',
+    uuid = '', armed = null, pending = null, next = 10;
+  const shownIds = new Set();
+  const receipt = (method = 'POST', armedOnly = false) => ({ kind: 'production', method, holdId: armedOnly ? commentId(next++) : null,
+    requestId: armedOnly ? null : commentId(next++), clientRequestId: null, R: R(room), account: 'a', epoch: 0,
+    armedAt: armedOnly ? Date.now() : null, readCompletedAt: null, endReturnedAt: null,
+    receivedAt: armedOnly ? null : Date.now(), committedAt: null, commentId: null, seq: null, storedHash: null,
+    responseStatus: null, listed: [], releaseAttemptAt: null, releaseAttempts: 0, writeAttempted: false,
+    finishAt: null, closeAt: null, writableFinishedAtClose: null, terminalCause: null });
+  const productGet = lostParent => {
+    const r = receipt('GET'); Object.assign(r, { responseStatus: 200, terminalCause: 'finished',
+      listed: comments.map(row => ({ id: row.id, clientRequestId: wrongRecoveryUuid && comments.length === 2 ? commentId(999) : row.clientRequestId, seq: row.seq })) });
+    r.readCompletedAt = Date.now();
+    if (lostParent) Object.assign(r, { terminalCause: 'recovery-get-response-lost', closeAt: Date.now(), writableFinishedAtClose: false, recoveryOf: {
+      holdId: lostParent.holdId, requestId: lostParent.requestId, clientRequestId: lostParent.clientRequestId } });
+    else {
+      r.writeAttempted = true; r.endReturnedAt = Date.now(); r.finishAt = Date.now();
+      for (const row of comments) shownIds.add(row.id); listState = 'ready';
+    }
+    receiptMutant?.(r, comments.length === 2 ? 'automatic-recovery' : lostParent ? 'lost-recovery' : 'open');
+    receipts.push(r);
+    if (comments.length === 0 && extraOpenGet) receipts.push({ ...structuredClone(r), requestId: commentId(next++) });
+    if (comments.length === 2 && extraRecoveryGet) {
+      const extra = structuredClone(r); extra.requestId = commentId(next++);
+      if (extraRecoveryGet === 'failed') { extra.responseStatus = 503; extra.readCompletedAt = null; extra.listed = []; }
+      if (extraRecoveryGet === 'other-room') extra.R = R(seed.identities[1]);
+      if (extraRecoveryGet === 'malformed') extra.receivedAt = undefined;
+      receipts.push(extra);
+    }
+  };
+  const stored = () => ({ version: 1, receiptLimit: 64, receipts: structuredClone(receipts), storeInspection: {
+    kind: 'qa-read-only-store', readAt: Date.now(), briefings: seed.identities.map(r => ({ briefingId: r.briefing.id,
+      conversationId: r.conversationId, account: 'a', count: r === seed.identities[0] ? comments.length : 0, truncated: false,
+      comments: r === seed.identities[0] ? comments.map(({ text: _text, ...row }) => row) : [] })) } });
+  const state = () => ({ briefingCommentsSeed: structuredClone(seed), briefingComments: stored(),
+    context: { captureBatches: 0, fileCaptureOperations: 0, deliveries: [] }, observed: { sends: [] } });
+  const included = row => drafts[0].briefingCommentRefs.some(ref => ref.commentId === row.id);
+  const include = row => {
+    shownIds.add(row.id);
+    if (!included(row)) {
+      const block = `[Synthetic briefing · 1단계 · 의견 #${row.seq}]\n의견: ${row.text}`;
+      drafts[0].draft += `\n\n${block}`;
+      drafts[0].briefingCommentRefs.push({ commentId: row.id, commentSeq: row.seq,
+        briefingId: seed.identities[0].briefing.id, stepId: row.stepId, draftText: block });
+      if (mutateAttachment) drafts[0].briefingInputs[0].hash = 'changed';
+    }
+    status = 'included';
+  };
+  const observe = async (_h, _ids, selector = null) => ({ observedAt: Date.now() - (staleProof && comments.length ? 125 : 0),
+    activeThreadId: room.clientThreadId, exists: !!panel, cameraSettled: true, preparing: false,
+    presentationId: 'synthetic-presentation', sessionThreadId: panel?.clientThreadId, roomGeneration: 1, camera: { zoom: 1, zoomTarget: 1, pan: { x: 0, y: 0 }, panTarget: { x: 0, y: 0 } },
+    viewport: { width: 1280, height: 800 }, panel: { id: 'egd-answer-briefing', rect: { left: 100, top: 100, right: 500, bottom: 500 },
+      client: { left: 101, top: 101, right: 499, bottom: 499 }, scrollTop: 0, scrollLeft: 0, clientHeight: 398, clientWidth: 398, scrollHeight: 1200, scrollWidth: 398 },
+    access: selector && { selector, count: 1, insidePanel: true, full: true, disabled: false, hits: 9, identity: { selector } },
+    alerts: bindingToast && panel ? [{ kind: 'board-notice', text: '복원된 대화와 고정 캡처의 원래 연결을 확인하지 못했습니다.' }] : [],
+    briefingId: panel?.briefing.id, stepId: panel?.briefing.steps[0].id, title: 'Synthetic briefing',
+    status, statusText: status === 'idle' ? '' : 'Status', statusReadable: status !== 'idle' && !(splitReadability && selector?.includes('briefing-comment-row')),
+    statusEvidence: { readable: true, rect: { left: 110, top: 110, right: 400, bottom: 140 } }, clientRequestId: uuid, listState,
+    inputText: text, originalText: wrongOriginalDisplay ? 'Edited input mislabeled as original' : originalText,
+    originalReadable: status === 'unknown', retryEnabled: status === 'unknown', retryClientRequestId: uuid,
+    rowCount: panel ? comments.filter(row => shownIds.has(row.id)).length : 0, rows: panel ? comments.filter(row => shownIds.has(row.id)).map(row => ({ id: row.id, seq: row.seq,
+      stepId: row.stepId, clientRequestId: row.clientRequestId, text: row.text, target: 'Immutable target', included: included(row),
+      readable: !splitReadability || !!selector?.includes('briefing-comment-row'),
+      draftStatus: included(row) ? 'Chat 초안에 포함됨 · 아직 전송하지 않음' : '저장됨 · 초안에 포함하지 않음' })) : [], rooms: structuredClone(drafts) });
+  const click = async (_h, selector) => {
+    actions.push(selector);
+    if (selector.includes('briefing-exit')) {
+      panel = null;
+      if (pending && transport === 'peer-close') Object.assign(pending, { terminalCause: 'peer-close-before-finish',
+        closeAt: Date.now(), writableFinishedAtClose: false });
+    } else if (selector.includes('briefing-open')) {
+      assert.ok(selector.includes(room.answerId)); panel = room; status = 'idle'; productGet();
+    } else if (selector.includes('briefing-comment-include')) {
+      const id = /data-comment-id="([^"]+)"/.exec(selector)?.[1]; const row = comments.find(row => row.id === id); assert.ok(row); include(row);
+    } else if (selector.includes('briefing-comment-retry')) {
+      assert.equal(status, 'unknown'); const saved = comments.find(row => row.clientRequestId === uuid); assert.ok(saved);
+      const r = receipt(); Object.assign(r, { clientRequestId: retryNewUuid ? commentId(next++) : uuid, committedAt: Date.now(),
+        commentId: saved.id, seq: saved.seq, storedHash: saved.storedHash, responseStatus: 201, writeAttempted: true,
+        endReturnedAt: Date.now(), finishAt: Date.now(), terminalCause: 'finished' });
+      receiptMutant?.(r, 'manual-retry');
+      receipts.push(r); shownIds.add(saved.id); status = 'saved';
+      if (retryRewritesEdited) text = saved.text;
+      if (retryAutoIncludes) include(saved);
+    } else if (selector.includes('briefing-comment-attach')) {
+      assert.ok(panel && room === seed.identities[0]);
+      const existing = comments.find(row => row.clientRequestId === uuid && row.text === text);
+      if (existing) { include(existing); return; }
+      uuid = commentId(next++); const r = armed?.receipt || receipt();
+      if (!armed) receipts.push(r);
+      if (missingRequest && armed?.mode === 'hold') { status = 'saving'; return; }
+      Object.assign(r, { requestId: commentId(next++), clientRequestId: uuid, receivedAt: Date.now() });
+      const row = { id: commentId(next++), clientRequestId: uuid, seq: comments.length + 1, stepId: room.briefing.steps[0].id,
+        sourceIds: [...room.briefing.steps[0].sourceIds], text, storedHash: fingerprintQaBytes(`actual record ${uuid}`).sha256,
+        textHash: fingerprintQaBytes(wrongStoredText ? 'wrong body, even when UI agrees' : text).sha256 };
+      comments.push(row); Object.assign(r, { committedAt: Date.now(), commentId: row.id, seq: row.seq, storedHash: row.storedHash, responseStatus: 201 });
+      if (armed?.mode === 'hold') { pending = r; status = 'saving'; }
+      else if (armed?.mode === 'committed-response-lost') {
+        r.terminalCause = 'committed-response-lost'; r.closeAt = Date.now(); r.writableFinishedAtClose = false;
+        productGet(armed.recoveryGetResponseLostOnce ? r : null);
+        status = armed.recoveryGetResponseLostOnce ? 'unknown' : 'saved';
+        if (armed.recoveryGetResponseLostOnce) { listState = 'failed'; originalText = text; }
+        if (autoRepost || malformedRepost) receipts.push({ ...receipt(), clientRequestId: autoRepost ? uuid : null,
+          responseStatus: malformedRepost ? 400 : 201, terminalCause: 'finished' });
+      } else { r.writeAttempted = true; r.endReturnedAt = Date.now(); r.finishAt = Date.now(); r.terminalCause = 'finished'; include(row); }
+      receiptMutant?.(r, armed?.mode || 'normal-save');
+      armed = null;
+    } else assert.fail(`Unexpected native input ${selector}`);
+  };
+  const request = async (url, options = {}) => {
+    requests.push([url, options.method || 'GET']);
+    if (url === '/__qa/state') return state();
+    if (url.startsWith('/context/captures/')) {
+      const parsed = new URL(url, 'http://fixture.invalid'), id = parsed.pathname.split('/').at(-1);
+      const owner = seed.identities.find(r => r.sources[0].sourceId === id);
+      for (const key of ['engineId', 'engineProfileId', 'clientThreadId', 'conversationId']) assert.equal(parsed.searchParams.get(key), owner[key]);
+      assert.equal(parsed.searchParams.get('packetId'), owner.sources[0].packetId); return structuredClone(reads.get(id));
+    }
+    assert.equal(options.method, 'POST');
+    for (const [key, value] of Object.entries(R(seed.identities[0]))) assert.equal(options.body[key], value);
+    if (url === '/__qa/briefing-comments/config') {
+      assert.equal(options.body.bindNextPost, true); assert.equal(options.body.clientRequestId, undefined);
+      if (options.body.mode === 'hold') assert.ok(options.body.deadlineAt > Date.now() && options.body.deadlineAt <= Date.now() + 9000);
+      else assert.equal(options.body.deadlineAt, undefined);
+      const r = receipt('POST', true); receipts.push(r); armed = { receipt: r, mode: options.body.mode,
+        recoveryGetResponseLostOnce: options.body.recoveryGetResponseLostOnce };
+      receiptMutant?.(r, 'armed');
+      return { ok: true, fixtureOnly: true, holdId: r.holdId, requestId: null, clientRequestId: null };
+    }
+    assert.equal(url, '/__qa/briefing-comments/release'); assert.equal(options.includeHttpStatus, true);
+    for (const key of ['holdId', 'requestId', 'clientRequestId']) assert.equal(options.body[key], pending[key]);
+    assert.equal(room, seed.identities[1]); assert.equal(panel, null);
+    pending.releaseAttemptAt = Date.now(); pending.releaseAttempts++;
+    if (badRelease) return { httpStatus: 409, body: { code: 'QA_COMMENT_RESPONSE_NOT_FOUND', receipt: structuredClone(pending) } };
+    if (lateInjection) drafts[1].draft += '\nFORBIDDEN LATE COMMENT';
+    if (transport === 'peer-close') {
+      receiptMutant?.(pending, 'held-cancel');
+      return { httpStatus: 409, body: { code: 'QA_COMMENT_ALREADY_CLOSED', receipt: structuredClone(pending) } };
+    }
+    Object.assign(pending, { terminalCause: 'finished', endReturnedAt: Date.now(), finishAt: Date.now(), writeAttempted: true });
+    receiptMutant?.(pending, 'held-release');
+    return { httpStatus: 200, body: { ok: true, receipt: structuredClone(pending) } };
+  };
+  const result = {};
+  try {
+    const harness = { evaluateChrome: async () => ({ observedAt: Date.now(), scope: { roomId: 'foreign', owner: seed.account.key,
+      engineId: 'codex', engineProfileId: 'codex-default' }, count: 1, visible: true, inside: true, disabled: false, clipped: false, hits: 9 }), press: noAction };
+    await verifyBriefingComments({ harness, deadlineMs: Date.now() + (missingRequest ? 200 : 3000), initial: state(), request, result,
+      check: (label, passed) => { assert.equal(passed, true); checks.push(label); }, capture: async name => actions.push(`capture:${name}`) }, {
+      observe, click, reach: async options => { const value = await options.read(); assert.ok(options.accept(value)); return value; },
+      select: async (_h, selected) => { actions.push(`select:${selected.id}`); assert.equal(panel, null);
+        room = seed.identities.find(r => r.clientThreadId === selected.id); assert.ok(room); },
+      replace: async (h, selector, value) => { assert.equal(selector, '[data-testid="briefing-comment"]'); actions.push(`type:${selector}`);
+        if (foreignKeyScope) await h.press('Control+a', selector);
+        text = value; },
+    });
+    return { result, checks, receipts, comments, requests, actions, drafts };
+  } catch (error) { error.modelEvidence = { result, checks, requests, receipts, comments, actions }; throw error; }
+}
+
+test('Briefing comments six-subset model preserves seeded attachments and distinguishes automatic recovery from one explicit retry', { timeout: 3000 }, async () => {
+  const { result, checks, requests, receipts, comments, actions, drafts } = await commentsModel();
+  assert.equal(checks.length, 11); assert.equal(comments.length, 4); assert.equal(result.comments.length, 4);
+  assert.equal(receipts.filter(row => row.method === 'POST' && row.receivedAt !== null).length, 5);
+  assert.equal(result.manualRetry.receivedPosts, 2); assert.equal(result.manualRetry.storedComments, 1);
+  assert.notEqual(result.manualRetry.originalTextHash, result.manualRetry.editedInputHash);
+  assert.equal(result.commentRequestScope.epoch, 0);
+  assert.ok(result.getAudits.length <= 64);
+  assert.deepEqual(result.getAudits.filter(row => row.count).map(row => [row.label, row.count]),
+    [['open-briefing:after', 1], ['open-briefing:after', 1], ['automatic-GET-recovery:after', 1],
+      ['open-briefing:after', 1], ['lost-recovery-GET:after', 1]]);
+  assert.equal(result.lateTransport.classification, 'transportAborted'); assert.equal(result.lateTransport.uiCallbackDeliveryProven, false);
+  assert.ok(result.lateSafety.observedWindowMs >= 240);
+  assert.deepEqual(result.runtime, { captures: 0, fileReads: 0, sends: 0, deliveries: 0 });
+  assert.ok(requests.every(([url]) => url === '/__qa/state' || url.startsWith('/context/captures/') || url.startsWith('/__qa/briefing-comments/')));
+  assert.equal(requests.filter(([url]) => url.startsWith('/context/briefings/')).length, 0);
+  assert.equal(actions.filter(action => action.includes('briefing-comment-include')).length, 2);
+  assert.equal(actions.filter(action => action.includes('briefing-comment-retry')).length, 1);
+  assert.equal(drafts[0].briefingCommentRefs.length, 3); assert.equal(drafts[1].briefingCommentRefs.length, 0);
+  assert.ok(drafts.every(draft => draft.inputSources.length === 0 && draft.briefingInputs.length === 1));
+});
+
+test('Briefing comments late proof can report server finish only, never UI callback delivery', async () => {
+  const { result } = await commentsModel({ transport: 'server-finish' });
+  assert.equal(result.lateTransport.classification, 'serverResponseFinished'); assert.equal(result.lateTransport.uiCallbackDeliveryProven, false);
+});
+
+test('Briefing comments rejects wrong actual text/attachments, stale UI and automatic or malformed extra POSTs', async () => {
+  for (const options of [{ wrongStoredText: true }, { mutateAttachment: true }, { staleProof: true }, { autoRepost: true }, { malformedRepost: true }]) {
+    await assert.rejects(commentsModel(options), error => {
+      assert.ok(error.modelEvidence.checks.length < 8); return true;
+    });
+  }
+});
+
+test('Briefing comments wrong recovery UUID cannot pass from matching text or a QA-generated GET', { timeout: 3000 }, async () => {
+  await assert.rejects(commentsModel({ wrongRecoveryUuid: true }), error => {
+    assert.equal(error.modelEvidence.checks.length, 4);
+    assert.ok(error.modelEvidence.requests.every(([url]) => !url.startsWith('/context/briefings/'))); return true;
+  });
+});
+
+test('Briefing comments rejects late draft injection, generic release success and an arm without actual request', { timeout: 2000 }, async () => {
+  for (const options of [{ lateInjection: true }, { badRelease: true }, { missingRequest: true }]) {
+    await assert.rejects(commentsModel(options), error => {
+      assert.ok(error.modelEvidence.checks.length < 8);
+      if (options.missingRequest) assert.equal(error.modelEvidence.requests.filter(([url]) => url.endsWith('/release')).length, 0);
+      return true;
+    });
+  }
+});
+
+test('Briefing comment manual retry rejects a new UUID, edited-input loss, implicit inclusion and mislabeled original body', { timeout: 15000 }, async () => {
+  for (const options of [{ retryNewUuid: true }, { retryRewritesEdited: true }, { retryAutoIncludes: true }, { wrongOriginalDisplay: true }]) {
+    await assert.rejects(commentsModel(options), error => {
+      assert.ok(error.modelEvidence.checks.length >= 8 && error.modelEvidence.checks.length < 11); return true;
+    });
+  }
+});
+
+test('Briefing comment field replacement checks room before native key dispatch', async () => {
+  await assert.rejects(commentsModel({ foreignKeyScope: true }), /native input crossed room/);
+});
+
+test('Comments flow accepts separately painted status and row only with unchanged UUID/scope, and never dismisses a binding toast', async () => {
+  const { result, checks } = await commentsModel({ splitReadability: true });
+  assert.equal(checks.length, 11); assert.equal(result.statusProofs.length, 5);
+  assert.ok(result.statusProofs.every(proof => proof.evidence.readable && proof.clientRequestId));
+  await assert.rejects(commentsModel({ bindingToast: true }), error => {
+    assert.match(error.message, /notice\/alert/); assert.equal(error.modelEvidence.checks.length, 1);
+    assert.equal(error.modelEvidence.result.visibleAlerts.length, 1);
+    assert.equal(error.modelEvidence.actions.some(action => action.includes('briefing-comment-attach')), false); return true;
+  });
+});
+
+const wheelExpected = { owner: 'owner-A', route: { engineId: 'codex', engineProfileId: 'codex-default',
+  clientThreadId: 'A', conversationId: 'native-A', briefingId: 'briefing-A' }, stepId: 'one' };
+function wheelObservation(scrollTop = 0, selector = 'row') {
+  return { observedAt: Date.now(), activeThreadId: 'A', sessionThreadId: 'A', briefingId: 'briefing-A', stepId: 'one', presentationId: 'p', roomGeneration: 1,
+    exists: true, cameraSettled: true, camera: { zoom: 1, zoomTarget: 1, pan: { x: 0, y: 0 }, panTarget: { x: 0, y: 0 } },
+    viewport: { width: 800, height: 600 }, rooms: [{ id: 'A', scope: { owner: 'owner-A', engineId: 'codex', engineProfileId: 'codex-default',
+      clientThreadId: 'A', conversationId: 'native-A' }, draft: 'keep', briefingInputs: [{ hash: 'unchanged' }] }],
+    inputText: 'saved', originalText: '', status: 'included', clientRequestId: 'request', listState: 'ready', alerts: [], rows: [],
+    panel: { id: 'egd-answer-briefing', rect: { left: 99, top: 99, right: 501, bottom: 401 },
+      client: { left: 100, top: 100, right: 500, bottom: 400 }, clientHeight: 300, clientWidth: 400,
+      scrollHeight: 1500, scrollWidth: 400, scrollTop, scrollLeft: 0 },
+    access: { selector, count: 1, identity: { commentId: 'c' }, insidePanel: true, visible: true,
+      rect: { left: 120, top: 450 - scrollTop, right: 450, bottom: 550 - scrollTop }, full: scrollTop >= 150 && scrollTop <= 350,
+      hits: 9, disabled: false, wheelPoint: { x: 130, y: 200, hits: 9, scrollTarget: 'egd-answer-briefing' } } };
+}
+
+test('Native Briefing wheel waits for actual scroll settlement and returns upward to input without extra clicks/keys', { timeout: 5000 }, async () => {
+  let top = 0, moving = 0, lastMotionAt = 0; const inputs = [], budget = { total: 0, records: [] }, requests = [];
+  const read = async () => {
+    if (moving) { top += moving; moving = Math.abs(moving) > 3 ? Math.trunc(moving / 2) : 0; lastMotionAt = Date.now(); }
+    return wheelObservation(top);
+  };
+  const options = { read, selector: 'row', expected: wheelExpected, deadlineMs: Date.now() + 4500, budget,
+    accept: v => v.access.full, beforeWheel: async () => { requests.push('before'); return 0; },
+    afterWheel: async before => { assert.equal(before, 0); requests.push('after'); return { delta: 0 }; },
+    wheel: async input => { inputs.push(input); moving = Math.trunc(input.deltaY / 2); } };
+  const reached = await reachBriefingPanelTarget(options);
+  assert.ok(reached.access.full); assert.ok(reached.observedAt - lastMotionAt >= 240);
+  assert.ok(inputs.length >= 1 && inputs.length <= 6); assert.ok(inputs.every(input => input.deltaX === 0 && input.deltaY > 0));
+  assert.equal(budget.records.length, inputs.length); assert.equal(requests.length, inputs.length * 2);
+  top = 400; moving = 0; options.accept = v => v.access.full;
+  await reachBriefingPanelTarget(options); assert.ok(inputs.at(-1).deltaY < 0); assert.ok(budget.total <= 32);
+});
+
+test('Briefing wheel rejects stale samples, changed scope, foreign scroll targets and blocked-inside geometry before input', { timeout: 3000 }, async () => {
+  for (const mutate of [v => { v.observedAt -= 125; }, v => { v.access.wheelPoint.scrollTarget = 'textarea'; },
+    v => { v.access.wheelPoint.hits = 8; }, v => { v.access.rect.top = 120; v.access.rect.bottom = 220; }]) {
+    await assert.rejects(reachBriefingPanelTarget({ selector: 'row', expected: wheelExpected, deadlineMs: Date.now() + 800, budget: { total: 0, records: [] },
+      read: async () => { const v = wheelObservation(); mutate(v); return v; }, accept: () => false, wheel: noAction,
+      beforeWheel: async () => 0, afterWheel: noAction }));
+  }
+  let reads = 0;
+  await assert.rejects(reachBriefingPanelTarget({ selector: 'row', expected: wheelExpected, deadlineMs: Date.now() + 800, budget: { total: 0, records: [] },
+    read: async () => { const v = wheelObservation(); if (++reads > 1) v.rooms[0].draft = 'changed'; return v; },
+    accept: () => false, wheel: noAction, beforeWheel: noAction, afterWheel: noAction }), /changed rooms/);
+});
+
+test('Briefing wheel applies six-per-access and 32-total caps, rejects HTTP delta and never retries native errors', { timeout: 5000 }, async () => {
+  let wheels = 0; const base = { selector: 'row', expected: wheelExpected, read: async () => wheelObservation(), accept: () => false,
+    beforeWheel: async () => 0, afterWheel: async () => ({ delta: 0 }), wheel: async () => { wheels++; } };
+  await assert.rejects(reachBriefingPanelTarget({ ...base, deadlineMs: Date.now() + 3000, budget: { total: 0, records: [] } }), /limit reached/);
+  assert.equal(wheels, 6);
+  await assert.rejects(reachBriefingPanelTarget({ ...base, deadlineMs: Date.now() + 800, budget: { total: 32, records: [] } }), /limit reached/);
+  assert.equal(wheels, 6);
+  await assert.rejects(reachBriefingPanelTarget({ ...base, deadlineMs: Date.now() + 800, budget: { total: 0, records: [] },
+    wheel: async () => { wheels++; throw new Error('native outcome unknown'); } }), /native outcome unknown/);
+  assert.equal(wheels, 7);
+  await assert.rejects(reachBriefingPanelTarget({ ...base, deadlineMs: Date.now() + 1000, budget: { total: 0, records: [] },
+    afterWheel: async () => { throw new Error('GET delta 1'); } }), /GET delta 1/);
+  assert.equal(wheels, 8);
+});
+
+test('Briefing wheel rechecks geometry after request snapshots and does not dispatch on a changed final hit', { timeout: 1000 }, async () => {
+  let changed = false;
+  await assert.rejects(reachBriefingPanelTarget({ selector: 'row', expected: wheelExpected, deadlineMs: Date.now() + 800, budget: { total: 0, records: [] },
+    read: async () => { const v = wheelObservation(); if (changed) v.access.wheelPoint.x++; return v; }, accept: () => false,
+    beforeWheel: async () => { changed = true; }, wheel: noAction, afterWheel: noAction }), /changed immediately before wheel/);
+});
+
+test('Briefing DOM wheel probe excludes textarea and foreign-card hits and retains only bounded part diagnostics', async () => {
+  const selector = '[data-testid="briefing-comment-attach"]';
+  const make = (name, box, parent = null) => ({ localName: name, id: '', dataset: {}, parentElement: parent, textContent: '',
+    disabled: false, clientLeft: 0, clientTop: 0, clientWidth: box.right - box.left, clientHeight: box.bottom - box.top,
+    scrollHeight: box.bottom - box.top, scrollWidth: box.right - box.left, scrollTop: 0, scrollLeft: 0,
+    getBoundingClientRect: () => ({ ...box, width: box.right - box.left, height: box.bottom - box.top }), getAttribute: () => null,
+    querySelector: () => null, querySelectorAll: () => [],
+    contains(node) { for (let p = node; p; p = p.parentElement) if (p === this) return true; return false; },
+    closest() { return name === 'textarea' ? this : null; } });
+  const root = make('section', { left: 100, top: 100, right: 300, bottom: 220 });
+  root.id = 'egd-answer-briefing'; root.dataset = { briefingId: 'briefing', stepId: 'step' }; root.scrollHeight = 500;
+  const textarea = make('textarea', { left: 100, top: 100, right: 300, bottom: 140 }, root);
+  const other = make('div', { left: 100, top: 140, right: 300, bottom: 180 });
+  const button = make('button', { left: 120, top: 260, right: 250, bottom: 290 }, root);
+  button.dataset = { testid: 'briefing-comment-attach' };
+  let onlyTextarea = false;
+  const document = { querySelector: () => root, querySelectorAll: value => value === selector ? [button] : [],
+    elementFromPoint: (_x, y) => onlyTextarea || y < 140 ? textarea : y < 180 ? other : root };
+  const state = { zoom: 1, zoomTarget: 1, pan: { x: 0, y: 0 }, panTarget: { x: 0, y: 0 }, codex: {
+    activeThreadId: 'A', threads: [], briefingSession: { briefing: { title: 'fixture' } } } };
+  const h = { evaluateChrome: async source => JSON.parse(JSON.stringify(await vm.runInNewContext(`(${source})()`, {
+    document, window: { __egdesk: { state } }, innerWidth: 800, innerHeight: 600, Date,
+    getComputedStyle: node => ({ display: 'block', visibility: 'visible', opacity: '1', overflowY: node === root ? 'auto' : 'visible' }),
+    ChromeUtils: { importESModule: () => ({}) },
+  }))) };
+  const value = await observeBriefingComments(h, [], selector);
+  assert.deepEqual(value.access.wheelPoint, { x: 116, y: 196, hits: 9, scrollTarget: root.id });
+  assert.equal(value.access.full, false); assert.equal(value.access.insidePanel, true);
+  onlyTextarea = true; assert.equal((await observeBriefingComments(h, [], selector)).access.wheelPoint, null);
+  const summary = summarizeContextObservation({ ...value, statusEvidence: { readable: false, rect: value.access.rect, text: 'PRIVATE' },
+    rows: Array.from({ length: 20 }, (_, i) => ({ id: `row-${i}`, text: 'PRIVATE', parts: Object.fromEntries(
+      ['body', 'target', 'draft-status'].map(name => [name, { readable: false, rect: value.access.rect, text: 'PRIVATE' }])) })) });
+  assert.equal(summary.rowParts.length, 2); assert.equal(summary.statusEvidence.readable, false);
+  assert.doesNotMatch(JSON.stringify(summary), /PRIVATE/);
+});
+
+test('Briefing delayed observation cannot turn delivery latency into settlement or dispatch after deadline', { timeout: 1000 }, async () => {
+  let clock = 1000, reads = 0;
+  await assert.rejects(reachBriefingPanelTarget({ selector: 'row', expected: wheelExpected, deadlineMs: 2000, now: () => clock, budget: { total: 0, records: [] },
+    read: async () => { const value = wheelObservation(); value.observedAt = clock; clock += ++reads === 3 ? 210 : 41; return value; },
+    accept: () => true, wheel: noAction, beforeWheel: noAction, afterWheel: noAction }), /stale/);
+  const start = Date.now(); let actions = 0;
+  await assert.rejects(reachBriefingPanelTarget({ selector: 'row', expected: wheelExpected, deadlineMs: start + 25, budget: { total: 0, records: [] },
+    read: async () => wheelObservation(), accept: () => false, wheel: async () => { actions++; }, beforeWheel: noAction, afterWheel: noAction }), /deadline/);
+  assert.equal(actions, 0);
+});
+
+test('Briefing wheel first-read preflight rejects foreign room/owner/engine/profile/native CID/Briefing/step with zero dispatch', async () => {
+  for (const mutate of [v => { v.activeThreadId = 'B'; }, v => { v.sessionThreadId = 'B'; },
+    v => { v.rooms[0].scope.owner = 'owner-B'; }, v => { v.rooms[0].scope.engineId = 'claude'; },
+    v => { v.rooms[0].scope.engineProfileId = 'foreign-profile'; }, v => { v.rooms[0].scope.clientThreadId = 'B'; },
+    v => { v.rooms[0].scope.conversationId = 'native-B'; }, v => { v.briefingId = 'briefing-B'; }, v => { v.stepId = 'two'; }]) {
+    const budget = { total: 0, records: [] }; let reads = 0;
+    await assert.rejects(reachBriefingPanelTarget({ selector: 'row', expected: wheelExpected, deadlineMs: Date.now() + 1000, budget,
+      read: async () => { reads++; const v = wheelObservation(); mutate(v); return v; }, accept: () => false,
+      wheel: noAction, beforeWheel: noAction, afterWheel: noAction }), /preflight/);
+    assert.equal(reads, 1); assert.equal(budget.total, 0); assert.equal(budget.records.length, 0);
+  }
+});
+
+test('R2 duplicate first-open GET still fails expected one and retains both existing received receipt summaries', async () => {
+  await assert.rejects(commentsModel({ extraOpenGet: true }), error => {
+    assert.equal(error.message, 'Unexpected total received production GET delta');
+    const { result, checks, receipts } = error.modelEvidence;
+    assert.equal(checks.length, 1); assert.equal(result.wheel.total, 0);
+    const failed = result.diagnostics.records.find(row => row.status === 'failed' && row.label === 'open-briefing-all-production-GETs');
+    assert.ok(failed); assert.deepEqual([failed.last.requests.action, failed.last.requests.expected,
+      failed.last.requests.before, failed.last.requests.after, failed.last.requests.delta, failed.last.requests.omitted],
+    ['open-briefing', 1, 0, 2, 2, 0]);
+    assert.deepEqual(failed.last.requests.receipts.map(row => row.requestId), receipts.map(row => row.requestId));
+    assert.ok(failed.last.requests.receipts.every(row => row.R.conversationId === 'conversation-0' && row.epoch === 0
+      && row.terminalCause === 'finished' && Number.isFinite(row.finishAt)));
+    return true;
+  });
+});
+
+test('Request summary uses the existing read only and cannot replace the original assertion when diagnostics fail', async () => {
+  let reads = 0, summaries = 0, accepts = 0; const diagnostics = {}, original = new Error('original action assertion');
+  await assert.rejects(waitContextBeforeDeadline(async () => { reads++; return {}; }, () => { accepts++; throw original; }, Date.now() + 1000,
+    { diagnostics, requestSummary: () => { summaries++; throw new Error('diagnostic-only error'); } }), error => error === original);
+  assert.deepEqual([reads, summaries, accepts], [1, 1, 1]); assert.equal(diagnostics.records.length, 1);
+  assert.equal(diagnostics.records[0].last.requestSummaryFailed, true);
+  assert.equal(diagnostics.records[0].error, original.message);
+});
+
+for (const extraRecoveryGet of ['failed', 'other-room', 'malformed']) {
+  test(`Comment action GET audit rejects an additional ${extraRecoveryGet} production GET`, async () => {
+    await assert.rejects(commentsModel({ extraRecoveryGet }), error => {
+      assert.equal(error.modelEvidence.checks.length, 4);
+      assert.equal(error.modelEvidence.receipts.filter(row => row.method === 'GET').length, 4); return true;
+    });
+  });
+}
+
+for (const [name, phase, mutate, transport = 'peer-close'] of [
+  ['recovery GET epoch 9', 'automatic-recovery', r => { r.epoch = 9; }],
+  ['recovery GET null finishAt', 'automatic-recovery', r => { r.finishAt = null; }],
+  ['recovery GET finish before receive', 'automatic-recovery', r => { r.finishAt = r.receivedAt - 1; }],
+  ['recovery GET end before read', 'automatic-recovery', r => { r.endReturnedAt = r.readCompletedAt - 1; }],
+  ['recovery GET no write', 'automatic-recovery', r => { r.writeAttempted = false; }],
+  ['recovery GET close before finish', 'automatic-recovery', r => { r.closeAt = r.finishAt - 1; r.writableFinishedAtClose = true; }],
+  ['lost GET crossed epoch', 'lost-recovery', r => { r.epoch = 9; }],
+  ['lost GET fake finish', 'lost-recovery', r => { r.finishAt = Date.now(); }],
+  ['normal POST missing finish', 'normal-save', r => { r.finishAt = null; }],
+  ['manual POST crossed epoch', 'manual-retry', r => { r.epoch = 9; }],
+  ['arm crossed captured epoch', 'armed', r => { r.epoch = 9; }],
+  ['held cancel missing close', 'held-cancel', r => { r.closeAt = null; }],
+  ['held release finish before release', 'held-release', r => { r.finishAt = r.releaseAttemptAt - 1; }, 'server-finish'],
+]) {
+  test(`Comment receipt regression rejects ${name}`, { timeout: 3000 }, async () => {
+    await assert.rejects(commentsModel({ transport, receiptMutant: (r, where) => { if (where === phase) mutate(r); } }), error => {
+      assert.ok(error.modelEvidence.checks.length < 11); return true;
+    });
+  });
+}
