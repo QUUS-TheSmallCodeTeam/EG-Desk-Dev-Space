@@ -1,6 +1,6 @@
 # EG-Desk 비전 Gap 원장
 
-**기준일**: 2026-10-26 (최초 조사 코드 기준 `bebe45c`, 상태 표 집계는 `5760981`까지. 그 이후 연결·검증은 아래 날짜별 체크포인트에 기록. 작업 브랜치 `claude/vision-gap-20261024`)
+**기준일**: 2026-10-27 (최초 조사 코드 기준 `bebe45c`, 상태 표 집계는 `5760981`까지. 그 이후 연결·검증은 아래 날짜별 체크포인트에 기록. 작업 브랜치 `claude/vision-gap-20261024`)
 
 **정본 백로그**: [EGDESK_PRODUCT_VISION_AND_DEV_TODO.md](./EGDESK_PRODUCT_VISION_AND_DEV_TODO.md)  
 **범위**: 비전 문서의 미체크 항목 + 2026-10-24 대표님 추가 목표(기능·UI/UX·디자인 전부, Codex+Claude 구독 지원, 브라우저 제어, 컴퓨터 사용, Agent 캐릭터 설정)
@@ -289,6 +289,18 @@ Git 전송 확인 범위는 기존 `ff9ae10`·`4b40588`까지다. B3 후속은 �
 - 수동 재시도 보완의 제품 동결본은 상태 778/778, 독립 41/41 및 추가 경합 8/8을 통과했다. 기존 두 UX 공백(미확정 GET 반복 정체, 복구 후 상단 버튼이 이전 의견을 포함하는 경로)은 해소됐다. 합본 `egdesk-qa-source-comments-final-20261027.AaCCzO`의 당시 scripts는 2,238 pass / 0 fail / 1 skip이며, 이후 시험 환경·검증기 수정은 별도 재검증 대상이다.
 - 시험 환경 독립 검토에서 POST 본문 대기 중 A→B→A 계정 전환을 하면 실제 helper와 달리 저장될 수 있음을 재현했다. 초기 account/epoch를 본문 수신 후 재검증하는 guard와 회귀를 추가해 두 전환 모두 403·저장 0·commit 표시 없음, 계정 불변 대조군은 201·저장 1을 확인했다. 독립 122/122 통과. fixture는 GET/add 댓글만 실제 helper에 연결하며 resolve는 404로 거부한다. 수정된 제품·fixture의 고정 사본 `egdesk-qa-source-comments-context-regression-20261027.x6MxMX`에서 기존 source-change native 18/18도 통과했다.
 - 의견 native 검증기의 독립 반례에서 추가 실패/다른 방 GET을 집계에서 놓치는 문제와 epoch·응답 종료 시각의 불충분한 검사 2건을 확인했다. 전체 수신 요청 차이와 원 요청의 귀속·전송 종료 종류별 시각을 검사하도록 보완 중이다. 이 검증기 수정과 의견 전용 native·시각 인수가 끝나기 전에는 해당 연결을 완료로 올리지 않는다.
+- `cfaa1d5`는 위 의견 저장 서버 보강, `994b40e`는 실제 Context 저장·응답 유실·계정 전환을 대조하는 격리 시험 환경의 로컬 체크포인트다. `02fb92e`는 의견 전용 native 검증기를 보존한다. 검증기는 실제 패널 내부 wheel만 접근당 6회·전체 32회·6분 이내로 사용하고, 첫 관찰의 예상 방·소유자·엔진/profile·native 대화·Briefing·단계를 확인한다. 잘못된 첫 패널은 입력 0회로 거절한다. 상태 문구는 스크롤 전, 의견 본문·대상·포함 상태는 스크롤 후 각각 관찰한다. 저자 81/81, 독립 기존 78/78 및 후속 진단 변경 8/8을 통과했다. 이는 실제 의견 흐름 전체 성공을 뜻하지 않는다. 휠 중 동일 관찰 owner/room·기존 요청 epoch·추가 댓글 GET/POST 0을 검사하며 현재 전역 account epoch 불변까지 주장하지 않는다.
+- 첫 의견 native 실행 `egdesk-comments-native-20261027.AMUj2m`은 실제 의견 저장·초안 포함 상태를 확인했지만, 패널 아래에 있는 의견 본문으로 스크롤하지 않아 첫 준비 검사 이후 실패했다. 별도로 나타난 원래 자료 연결 경고는 실제 제품 결함이었다. 서버 캡처와 저장된 UI 참조를 결합할 때 `contextScope`가 누락된 것을 확인해 정확한 source/snapshot/hash·원래 대화/엔진/profile·검증된 소유자 참조에서만 보존하도록 수정했다. 현재 방을 origin으로 추정하거나 기존 읽기 권한 검사를 완화하지 않는다.
+- 이 origin 수정의 독립 반례에서 혼합 엔진 상태의 계정 A→B→A 이후 첫 응답은 버리지만 준비 루프가 다음 근거 읽기를 재개하는 P2를 확인했다. 준비 전체의 engine/profile epoch와 계정·연결 변경을 영구 무효화하도록 보완해, 동일 반례에서 GET 1·근거 생성 0·최종 render/fit 0을 확인했다. 집중 회귀 7/7·독립 반례/대조 4/4와 제품 관련 785/785 통과. 다른 엔진/profile 변경의 정상 진행과 listener 정리도 확인했다. 고정 사본 `egdesk-qa-source-comments-origin-20261027.kUZdFO`의 기존 source-change native 18/18, scripts 2,234 pass / 0 fail / 1 skip을 통과했으며, 이 사본은 이후 의견 QA·편집기 보존 수정을 포함하지 않는다.
+- R2 `egdesk-comments-native-r2-20261027.dkVlOX`에서는 연결 경고가 없어지고 근거 카드가 생성됐지만, 첫 Briefing 열기에서 댓글 GET이 예상 1건보다 많아 준비 검사 1건 뒤 실패했다. wheel은 0회였다. 실제 함수 대조에서 준비 시작·완료 때 편집기를 각각 만들며 GET 1→2가 되는 경로를 재현했다. 일반 입력 이벤트로 입력한 문자열은 저장된 편집 상태에서 복원되지만, textarea·패널 교체로 선택·포커스·스크롤이 끊길 수 있다. 같은 presentation·단계의 준비 완료에서는 기존 편집기를 유지하는 수정을 진행한다. 당시 native 기록은 정확한 추가 요청 영수증을 보존하지 못했으므로, 이후 검증기에 기존 읽기 결과의 최대 8건 요약 진단을 추가했으며 기대 GET 수는 완화하지 않았다.
+- PM은 R2의 1366×768 화면에서 현재 단계 근거가 34% 축척의 추상 아이콘으로만 보여 본문을 읽을 수 없음을 확인해 시각 인수를 보류했다. 패널의 실제 좌표와 기존 fit/LOD 함수를 대조하면, 왼쪽 패널 위 약 161px 높이만 화면 전체의 가용 영역으로 취급해 640×480 근거를 약 215×161로 축소한다. 오른쪽의 빈 공간을 활용하는 기존 fit 계산 보정은 승인 범위지만 아직 실제 수정·native 시각 인수 전이다. 전역 LOD·카드 디자인·패널 배치 변경은 포함하지 않는다. 댓글 완료 전 Task 질문 제목 P2는 착수하지 않는다.
+
+- 후속 R3/R4에서 편집기 재생성은 해소됐고 일반 저장·중복 포함 방지·재진입까지 통과했다. 응답 유실 시험은 여전히 실패했으나, R4 실패 시점의 제한된 진단에서 첫 POST가 저장 후 응답 전 끊기고 같은 UUID의 두 번째 POST가 즉시 정상 응답한 사실을 확인했다. 두 요청은 같은 id/seq를 반환해 중복 저장은 없었다. 이는 제품의 자동 복구 GET 성공이 아니며, 특정 Gecko 내부 함수까지 추적한 결과도 아니다. 시험 환경을 헤더와 JSON 1바이트를 보낸 뒤 본문을 절단하는 방식으로 바꿔 애플리케이션에서 실제 응답 읽기 실패를 받도록 했다. 서버 write 기록과 UI 수신은 별개로 검증한다. `bd41a46`에 fixture·엄격한 영수증 검사·최대 750ms/1회 실패 진단을 보존했다. 저자 transport+portable 128/128, 독립 집중 23/23·QA 85/85 및 추가 경합 4건을 통과했다.
+- `7fe8f7d`에 의견 UI 연결과 편집기 보존·origin/준비 전체 epoch 보강·fit 보정을 보존했다. 준비 중에는 근거별 자동 reveal을 하지 않고, 패널의 실제 위치 주변에서 가장 크게 읽을 수 있는 빈 영역으로 마지막 fit을 한 번 수행한다. 준비 중 사용자가 wheel/drag/overview/단축키/minimap으로 실제 카메라를 바꾸면, 원래 위치로 돌아왔더라도 늦은 fit을 하지 않는다. 자동 이동·무이동·Chat 내부 스크롤은 사용자 이동으로 세지 않으며 이 revision은 저장하지 않는다. 기존 직접 근거 열기와 Briefing 종료 복귀는 유지한다. 제품 관련 798/798과 독립 actual-function 반례 검증을 통과했다.
+- 최종 고정 사본 `egdesk-qa-source-comments-native-r5-20261027.wBF6ky`(기준 `02fb92e` + 위 두 커밋과 동일한 10개 파일)에서 의견 전용 Firefox headless 11/11, 일반 UI 291/291, 기존 자료 변경·삭제 18/18, scripts 2,301 pass / 0 fail / 1 skip을 통과했다. 실제 Context 저장 4개에 POST 5회(사용자가 누른 동일 UUID 재시도 1회 포함), 자동 중복 POST·자동 초안 포함·모델 전송은 없었다. 작성 중 새 입력과 기존 초안·첨부·고정 원문은 보존됐다. 결과는 `/private/tmp/egdesk-comments-native-r5-20261027.Kh3oWF`에 있으며 임시 로컬 증거다. 실제 사용자 계정·provider·Windows·OS 전면 입력 검증은 포함하지 않는다.
+- Main과 PM은 R5의 재진입·다른 방·명시적 재시도 후 3개 캡처를 직접 확인했다. 1366×768의 85% 화면에서 오른쪽 고정 근거 본문과 왼쪽 의견 본문·대상·저장/초안 포함 상태가 읽히고 서로 겹치지 않는다. ‘아직 전송하지 않음’이 구별돼 기존 34% 가독성 문제의 한정 시각 인수를 승인했다. 이 승인은 세 관찰 상태에 한정하며 전체 크기·전체 제품 디자인 완성을 뜻하지 않는다.
+- 같은 사본의 후속 일반 Chat 72/72, Claude 첨부·큰 자료 Reader 합성 흐름 27/27도 통과했다. Claude는 Codex 미로그인 조건의 선택 엔진·원문/요약 구분·실패/취소·계정 변경 경계까지 확인했지만, 실제 Claude adapter·모델 읽기·OS 실행 증명은 아니다. 검증한 사본의 추적 앱 파일 전체와 `7fe8f7d` 작업 트리가 일치함을 대조했다. 사용자 프로필·실제 provider를 사용하지 않았으며, 이 회차에서 띄운 격리 Firefox·fixture는 각 실행 종료 후 정리했다.
+- 다음 재개점은 Task 질문 오류 요약행에서 질문 제목을 함께 보여주는 P2다. 기존 입력·오류·계속/취소는 동작하며, 제목만 스크롤 위로 벗어날 수 있다. PM은 06:43 재평가에서 마감까지 600/800 두 크기와 질문 전환·오류 해제의 수정/재검증 여유가 부족하므로 이번 회차 추가 구현을 보류했다. 실제 provider·Windows·OS 전면 검증 및 Briefing 다중 대상·annotation 등 남은 범위는 별도다. `main` 병합·원격 푸시는 하지 않았다.
 
 ## 이전 세션 인계 원본 (2026-10-24 마감)
 
@@ -529,8 +541,9 @@ Chat·Agent·캐릭터성 영역은 "고른 프로필을 실제 지침으로 보
 - 출처: EGDESK_PRODUCT_VISION_AND_DEV_TODO.md P0 L180; Contract §8 L816-855, §17.B 'Briefing·Step·Comment 계약' L1713-1725; Atlas AI-05 L1025, OBJ-038 L2416
 - 상태: 일부 · 크기 M
 - 근거: 핵심 구현·검증 흔적 있음: egdesk_publish_briefing 도구(helper/egdesk-context-runtime.mjs:10, 182-187), EGDeskBriefingState.sys.mjs(70줄), openAnswerBriefing/renderAnswerBriefing(eg-desk-surface.uc.js:860-945), 단계 의견→초안 attachBriefingComment(:6467-6479), 커밋 b135ef9·f370eab·4e920cd·824c632·1453889, scripts/verify-firefox-mcp-context-briefing.mjs.
-- 빠진 것: 단계당 대상 1개(resolveBriefingTargets가 [step.target]만 처리), visibility·dimming·emphasis 상태 없음, 대상이 sourceId/artifactId뿐(Canvas 도형·출력 불가), Comment가 독립 객체(commentId·revision)가 아니라 초안 텍스트로 바로 변환됨. 비전 문서 체크박스도 미갱신.
+- 최초 조사 시 빠진 것(2026-10-24, 이후 보완은 아래 진행 참고): 단계당 대상 1개(resolveBriefingTargets가 [step.target]만 처리), visibility·dimming·emphasis 상태 없음, 대상이 sourceId/artifactId뿐(Canvas 도형·출력 불가), Comment가 독립 객체(commentId·revision)가 아니라 초안 텍스트로 바로 변환됨. 비전 문서 체크박스도 미갱신.
 - 구현 스케치: briefing step schema를 targets[] + emphasis로 확장(egdesk-context-runtime.mjs tool schema, BriefingState.resolveBriefingTargets/briefingBounds), Canvas dimming 클래스 적용, Comment를 context store record로 저장 후 초안에 참조로 첨부(dedupe draftId+commentId).
+- 진행(2026-10-27): `cfaa1d5`·`7fe8f7d`로 단계 의견을 실제 Context record(id·seq·요청 UUID)에 저장하고 원래 방의 Chat 초안에 참조·본문을 중복 없이 포함하는 경로를 연결했다. 응답 유실 확인·명시적 동일 요청 재시도·방/계정 경계를 포함한 실제 headless UI 11/11과 한정 시각 인수를 통과했다. 자동 메시지 전송은 하지 않는다. 의견 수정·삭제·resolve UI와 전체 다중 대상·annotation 시각 계약의 완료를 뜻하지 않아 상태는 ‘일부’를 유지한다. 상세는 [2026-10-27 체크포인트](#2026-10-27-진행-중-체크포인트).
 
 ### CHAT-06 — 의존성 그래프·Task 상태 registry와 자동 하류 시작; 사용자 행동 대기를 dependency gate 한 종류로 모델링
 
