@@ -6,7 +6,7 @@ import { createHash } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import { chrome, loopbackJson, openChat, replaceFieldText, runUiFlow, sendFromComposer, waitUntil } from './egdesk-qa-ui-flow.mjs';
 import { assertQaFixtureManifest } from './egdesk-chat-qa-profile.mjs';
-import { parseCli, assertBeforeDeadline, observeGuard, waitFor } from './verify-firefox-mcp-headless-ui-regression.mjs';
+import { parseCli, assertBeforeDeadline, observeGuard, waitFor, resizeHeadless, waitStableViewport } from './verify-firefox-mcp-headless-ui-regression.mjs';
 import { prepareRunOutputDesk } from './verify-firefox-mcp-chat-run-outputs-flow.mjs';
 import { taskGateFixtureEnabled, TASK_GATE_SEED_MESSAGE, TASK_GATE_STATE_ROUTE, TASK_GATE_CONTROL_ROUTE } from './egdesk-task-gate-fixture.mjs';
 
@@ -22,6 +22,34 @@ const testid = value => `[data-testid=${JSON.stringify(value)}]`;
 const hash = value => createHash('sha256').update(value).digest('hex');
 const normalized = value => value.normalize('NFC').replace(/\r\n?/g, '\n').trim();
 const posts = state => state.requests.filter(row => row.method === 'POST' && row.path === '/tasks/continue');
+
+function taskGateViewport(value) {
+  assert.ok(value === '600x600' || value === '800x600', '--viewport must be exactly 600x600 or 800x600');
+  return Object.freeze({ width: Number(value.split('x')[0]), height: 600 });
+}
+export function parseTaskGateCli(argv, now = Date.now()) {
+  const remaining = []; let viewport;
+  for (let i = 0; i < argv.length; i += 2) {
+    if (argv[i] !== '--viewport') { remaining.push(argv[i], argv[i + 1]); continue; }
+    assert.equal(viewport, undefined, '--viewport cannot be repeated');
+    taskGateViewport(argv[i + 1]); viewport = argv[i + 1];
+  }
+  const options = parseCli(remaining, now);
+  return viewport === undefined ? options : { ...options, viewport };
+}
+export async function prepareTaskGateViewport(harness, viewport, deadlineMs,
+  { resize = resizeHeadless, settle = waitStableViewport } = {}) {
+  if (viewport === undefined) return null;
+  const requested = taskGateViewport(viewport);
+  assertBeforeDeadline(deadlineMs);
+  const resized = await resize(harness, requested, deadlineMs);
+  assertBeforeDeadline(deadlineMs);
+  const observed = await settle(harness, requested, deadlineMs, { timeoutMs: 5000 });
+  assertBeforeDeadline(deadlineMs);
+  const actual = { width: observed?.width, height: observed?.height };
+  assert.deepEqual(actual, requested, 'requested exact inner viewport must settle before native input');
+  return { requested, actual, resized };
+}
 
 export function taskGateRowSelector(identity) {
   for (const key of ['graphId', 'taskId', 'gateId']) assert.ok(typeof identity?.[key] === 'string' && identity[key].length > 0 && identity[key].length <= 256);
@@ -405,10 +433,12 @@ export async function observeTaskGateDesk(harness) {
   });
 }
 
-export async function runTaskGateFlow({ harness, result, check, capture, defer }, { profile, deadlineMs, env = process.env }) {
+export async function runTaskGateFlow({ harness, result, check, capture, defer }, { profile, deadlineMs, env = process.env, viewport }) {
+  if (viewport !== undefined) taskGateViewport(viewport);
   assertTaskGateEnvironment(env); assertQaFixtureManifest(profile); assertBeforeDeadline(deadlineMs);
   const guard = await observeGuard(harness);
   assert.ok(guard.headless && guard.mounted && guard.loggedIn && guard.accountBound, 'owned connected headless surface required');
+  if (viewport !== undefined) result.viewport = await prepareTaskGateViewport(harness, viewport, deadlineMs);
   const token = env.EGDESK_QA_FIXTURE_TOKEN;
   const state = () => { assertBeforeDeadline(deadlineMs); return loopbackJson(TASK_GATE_STATE_ROUTE, { token, env }); };
   const control = action => { assertBeforeDeadline(deadlineMs); return loopbackJson(TASK_GATE_CONTROL_ROUTE, { method: 'POST', body: { action }, token, env }); };
@@ -591,7 +621,7 @@ export async function runTaskGateFlow({ harness, result, check, capture, defer }
 }
 
 export async function runCli(argv = process.argv.slice(2), env = process.env) {
-  const options = parseCli(argv); assertTaskGateEnvironment(env);
+  const options = parseTaskGateCli(argv); assertTaskGateEnvironment(env);
   await runUiFlow('firefox-mcp-task-gate-flow', context => runTaskGateFlow(context, { ...options, env }));
 }
 if (process.argv[1] === fileURLToPath(import.meta.url)) {

@@ -11,6 +11,7 @@ import { TASK_GATE_SELECTORS, taskGateRowSelector, assertTaskGateEnvironment, as
   reconciledTaskGateRead, assertTaskGateStaleReconciled,
   observeTaskGate, observeTaskGateDesk, observeTaskGateTarget, observeTaskGateLimit, taskGateLimitReadable, assertTaskGateLimitPaint, readTaskGateLimit,
   observeTaskGateFailurePaint, assertTaskGateFailurePaint,
+  parseTaskGateCli, prepareTaskGateViewport,
   runTaskGateFlow, runCli } from './verify-firefox-mcp-task-gate-flow.mjs';
 
 const ENV = { EGDESK_QA_TASK_GATE_FIXTURE: '1', EGDESK_QA_FIXTURE_TRANSPORT: '1', EGDESK_QA_REAL_TURN: '0',
@@ -471,6 +472,61 @@ test('Task initial Desk refuses hidden non-focus, ineffective exit, identity rep
 test('CLI/environment/deadline refusals happen before any harness or UI action', async () => {
   await assert.rejects(runCli(['--profile', '/not-a-profile', '--deadline-utc', '2000-01-01T00:00:00Z'], ENV));
   await assert.rejects(runTaskGateFlow({}, { profile: '/not-a-profile', deadlineMs: Date.now() + 10000, env: {} }));
+});
+
+test('Task viewport CLI is optional, accepts only the two exact sizes and rejects duplicate or invalid options', () => {
+  const base = ['--profile', '/owned/profile', '--deadline-utc', '2026-10-26T01:00:00Z'], now = Date.parse('2026-10-26T00:00:00Z');
+  assert.deepEqual(parseTaskGateCli(base, now), { profile: '/owned/profile', deadlineMs: Date.parse(base[3]) });
+  for (const viewport of ['600x600', '800x600']) {
+    assert.equal(parseTaskGateCli([...base, '--viewport', viewport], now).viewport, viewport);
+    assert.equal(parseTaskGateCli(['--viewport', viewport, ...base], now).viewport, viewport);
+  }
+  for (const args of [['--viewport'], ['--viewport', '600X600'], ['--viewport', '600x601'], ['--viewport', '1366x768'],
+    ['--viewport', '600x600', '--viewport', '800x600'], ['--viewport', '600x600', '--viewport', '600x600'],
+    ['--viewport=600x600'], ['--unknown', '600x600']]) assert.throws(() => parseTaskGateCli([...base, ...args], now));
+});
+
+test('Task viewport setup resizes exactly once then verifies actual size; default performs no harness operation', async () => {
+  for (const viewport of [undefined, '600x600', '800x600']) {
+    const calls = [], deadlineMs = Date.now() + 10000;
+    const proof = await prepareTaskGateViewport({}, viewport, deadlineMs, {
+      resize: async (_h, size, deadline) => { calls.push('resize'); assert.equal(deadline, deadlineMs); return { requested: size }; },
+      settle: async (_h, size, deadline, options) => {
+        calls.push('settle'); assert.equal(deadline, deadlineMs); assert.equal(options.timeoutMs, 5000); return { ...size };
+      },
+    });
+    assert.deepEqual(calls, viewport === undefined ? [] : ['resize', 'settle']);
+    if (viewport === undefined) assert.equal(proof, null);
+    else assert.deepEqual(proof.actual, { width: Number(viewport.split('x')[0]), height: 600 });
+  }
+});
+
+test('Task viewport mismatch, timeout, invalid input and expiry stop without resize retry or native input', async () => {
+  for (const mode of ['mismatch', 'timeout', 'invalid', 'expired']) {
+    const calls = [], noInput = new Proxy({}, { get: () => assert.fail('no native input or recovery action') });
+    await assert.rejects(prepareTaskGateViewport(noInput, mode === 'invalid' ? '0x0' : '600x600', mode === 'expired' ? 1 : Date.now() + 10000, {
+      resize: async () => { calls.push('resize'); return {}; },
+      settle: async () => { calls.push('settle'); if (mode === 'timeout') throw new Error('settle timeout'); return { width: 601, height: 600 }; },
+    }));
+    assert.deepEqual(calls, ['invalid', 'expired'].includes(mode) ? [] : ['resize', 'settle']);
+  }
+});
+
+test('Task viewport setup is after the owned guard and before every existing native action, never in error proof', async () => {
+  for (const connected of [true, false]) {
+    const calls = [], result = {};
+    const promise = runCaptureSection('  const guard = await observeGuard(harness);', '  const token =', {
+      assert, harness: {}, result, viewport: '600x600', deadlineMs: 123,
+      observeGuard: async () => { calls.push('guard'); return { headless: connected, mounted: true, loggedIn: true, accountBound: true }; },
+      prepareTaskGateViewport: async () => { calls.push('resize-once-and-settle'); return { actual: { width: 600, height: 600 } }; },
+    });
+    if (connected) await promise; else await assert.rejects(promise);
+    assert.deepEqual(calls, connected ? ['guard', 'resize-once-and-settle'] : ['guard']);
+  }
+  const source = runTaskGateFlow.toString();
+  assert.equal(source.split('await prepareTaskGateViewport(').length - 1, 1);
+  assert.ok(source.indexOf('await prepareTaskGateViewport(') < source.indexOf('await prepareRunOutputDesk('));
+  assert.doesNotMatch(source.slice(source.indexOf('const rejectedUi ='), source.indexOf('// Change identity while')), /resize|scroll|focus|wheel|ready\(/i);
 });
 
 // Execute the actual checkpoint callsites with unit-only capture/input doubles.
