@@ -7,6 +7,7 @@ import { EventEmitter } from 'node:events';
 import test from 'node:test';
 import vm from 'node:vm';
 import net from 'node:net';
+import http from 'node:http';
 import { bootstrapQaProfile, canonicalTempRoot, LOADER_FILES } from './egdesk-chat-qa-profile.mjs';
 import { createQaFixtureTransport, CLAUDE_FIXTURE_QUESTIONS, CLAUDE_FIXTURE_TEXT } from './egdesk-chat-fixture-transport.mjs';
 import { chatRunOutputFixtureIds, CHAT_RUN_OUTPUT_MARKER, CHAT_RUN_DIFF_MARKER } from './egdesk-chat-run-outputs-fixture.mjs';
@@ -14,7 +15,8 @@ import { TASK_GATE_SEED_MESSAGE } from './egdesk-task-gate-fixture.mjs';
 import { CHAT_ORIGIN_FILE_SEED, CHAT_ORIGIN_FILE_TEXT, CHAT_ORIGIN_FILE_OUTPUT } from './egdesk-chat-origin-file-fixture.mjs';
 import { prepareQaFirefox } from './run-firefox-mcp-target.mjs';
 import { assertNativeTerminalExit, assertQaFixtureArtifact } from './egdesk-chat-qa-contract.sys.mjs';
-import { createChatProtocolState, mergeChatSnapshot, projectRunMessages, usableArtifact } from '../overlay/resources/EGDeskChatState.sys.mjs';
+import { createChatProtocolState, mergeChatSnapshot, projectRunMessages, usableArtifact,
+  normalizeLocalHistoryPage, hydrateLocalChatThread, mergeLocalChatMessages } from '../overlay/resources/EGDeskChatState.sys.mjs';
 import { createEGDeskFileServiceCallbacks, createEGDeskNativeFilePickers } from '../overlay/resources/EGDeskFileView.sys.mjs';
 import { assertPublishedBriefing, assertContextCaptureBatch, assertStoredAgentDelivery,
   captureContextReadEvidence, fingerprintQaBytes } from './egdesk-context-qa-contract.mjs';
@@ -22,7 +24,7 @@ import { assertPublishedBriefing, assertContextCaptureBatch, assertStoredAgentDe
 const TOKEN = 'unit-fixture-token-no-credentials';
 const FIXTURE_ENV = { EGDESK_QA_FIXTURE_TRANSPORT: '1', EGDESK_QA_FIXTURE_PORT: '49318' };
 
-function setup(t, { claude = false, reader = false, projectFile = false, runOutputs = false, portable = false, taskGate = false, originFile = false } = {}) {
+function setup(t, { claude = false, reader = false, projectFile = false, runOutputs = false, portable = false, taskGate = false, originFile = false, stateFixtures = false, sourceChangeSeed = false, fixturePort = FIXTURE_ENV.EGDESK_QA_FIXTURE_PORT } = {}) {
   const source = fs.mkdtempSync(path.join(canonicalTempRoot(), 'egdesk-loader-fixture-'));
   for (const name of LOADER_FILES) fs.writeFileSync(path.join(source, name), `unit fixture ${name}\n`);
   const { profile } = bootstrapQaProfile({ loaderSource: source });
@@ -35,7 +37,9 @@ function setup(t, { claude = false, reader = false, projectFile = false, runOutp
   });
   const fetchBefore = globalThis.fetch;
   const eventSourceBefore = globalThis.EventSource;
-  const fixtureEnv = { ...FIXTURE_ENV, ...(projectFile ? { EGDESK_QA_PROJECT_FILE_FIXTURE: '1', EGDESK_QA_REAL_TURN: '0' } : {}),
+  const fixtureEnv = { ...FIXTURE_ENV, EGDESK_QA_FIXTURE_PORT: String(fixturePort), ...(projectFile ? { EGDESK_QA_PROJECT_FILE_FIXTURE: '1', EGDESK_QA_REAL_TURN: '0' } : {}),
+    ...(stateFixtures || sourceChangeSeed ? { EGDESK_QA_STATE_FIXTURES: '1', EGDESK_QA_REAL_TURN: '0' } : {}),
+    ...(sourceChangeSeed ? { EGDESK_QA_CONTEXT_SOURCE_CHANGE_SEED: '1' } : {}),
     ...(runOutputs ? { EGDESK_QA_RUN_OUTPUTS_FIXTURE: '1', EGDESK_QA_REAL_TURN: '0' } : {}),
     ...(portable ? { EGDESK_QA_PORTABLE_TRANSFER_FIXTURE: '1', EGDESK_QA_REAL_TURN: '0' } : {}),
     ...(taskGate ? { EGDESK_QA_TASK_GATE_FIXTURE: '1', EGDESK_QA_REAL_TURN: '0' } : {}),
@@ -60,7 +64,10 @@ async function request(handler, method, url, body = null, token = null, onRespon
   const res = Object.assign(new EventEmitter(), {
     setHeader(name, value) { headers[name] = value; },
     writeHead(value, nextHeaders = {}) { status = value; headers = nextHeaders; },
-    end(value = '') { this.writableEnded = true; resolve({ status, body: value ? (/application\/json/.test(headers['Content-Type'] || '') ? JSON.parse(value) : value) : null }); this.emit('close'); },
+    end(value = '') { this.writableEnded = true;
+      resolve({ status, body: value ? (/application\/json/.test(headers['Content-Type'] || '') ? JSON.parse(value) : value) : null });
+      if (!this.deferFinish) { this.writableFinished = true; this.emit('finish'); }
+      if (!this.deferClose) this.emit('close'); },
     destroy() { this.destroyed = true; this.emit('close'); resolve({ status: 0, body: null }); },
     write() { return true; },
   });
@@ -1452,6 +1459,652 @@ test('Terminal fixture is explicit and missing-session output never becomes nati
 const attachment = (id, sourceRef, kind = 'file', text = '') => ({ id, kind, label: `QA ${id}`, sourceRef,
   capturedAt: 1700000000000, captureScope: { type: kind === 'file' ? 'file' : kind === 'browser' ? 'document-text' : 'board-selection' },
   ...(kind === 'file' ? {} : { content: { mime: 'text/plain', text, truncated: false } }) });
+
+const sourceRoute = (r, extra = {}, prefix = '/context/sources') => `${prefix}?${new URLSearchParams({
+  engineId: r.engineId, engineProfileId: r.engineProfileId, clientThreadId: r.clientThreadId,
+  conversationId: r.conversationId, ...extra })}`;
+const sourceControl = (handler, key, value) => request(handler, 'POST', '/__qa/context-config', { [key]: value }, TOKEN);
+const sourceRelease = async (handler, r, requestId = null) => {
+  // Test callers read the GET ID from bounded server evidence, never invent it
+  // from a route/hold ID or treat an armed control as a received request.
+  requestId ??= (await fixtureState(handler)).sourceStatus.receipts.findLast(receipt => receipt.requestId
+    && Object.keys(r).every(key => receipt.R[key] === r[key]))?.requestId;
+  return request(handler, 'POST', '/__qa/context-release', { phase: 'sources', ...r, requestId }, TOKEN);
+};
+async function sourceRoom(handler, clientThreadId, captures = null) {
+  if (!captures) captures = (await request(handler, 'POST', '/context/captures', { clientThreadId,
+    attachments: [attachment(`selection-${clientThreadId}`, { viewId: `view-${clientThreadId}` }, 'browser', 'Immutable CTX04 source')] })).body.captures;
+  const result = await request(handler, 'POST', '/chat/send', { message: 'EGDESK_QA_CONTEXT unit source status', profileEnabled: false,
+    clientThreadId, requestId: `request-${clientThreadId}`, contextSnapshotIds: captures.map(c => c.sourceId),
+    contextCapabilities: { read: true, reader: true, publishBriefing: true } });
+  assert.equal(result.status, 202, JSON.stringify(result.body));
+  return { r: { engineId: 'codex', engineProfileId: 'codex-default', clientThreadId,
+    conversationId: result.body.conversationId, sourceId: captures[0].sourceId }, captures, run: result.body };
+}
+
+test('CTX04 state fixture is opt-in; exact Codex capture routing preserves legacy GET and rejects query widening', async t => {
+  const { handler } = setup(t);
+  const { r, captures } = await sourceRoom(handler, 'source-route-A');
+  const capturePath = `/context/captures/${r.sourceId}`;
+  assert.equal((await request(handler, 'GET', capturePath)).status, 200);
+  assert.equal((await request(handler, 'GET', sourceRoute(r, {}, capturePath))).status, 200);
+  assert.equal((await request(handler, 'GET', sourceRoute(r))).status, 404);
+  assert.equal((await sourceControl(handler, 'sourceStatus', { ...r, state: 'active', reason: null, changedAt: null })).status, 403);
+  for (const extra of [{ unknown: '1' }, { ownerKey: 'a' }, { epoch: '0' }, { sourceId: r.sourceId },
+    { engineId: 'claude' }, { engineProfileId: 'other' }, { clientThreadId: 'wrong' }, { conversationId: 'wrong' },
+    { engineId: '' }, { packetId: '' }, { clientThreadId: '\0' }]) {
+    assert.ok((await request(handler, 'GET', sourceRoute(r, extra, capturePath))).status >= 400, JSON.stringify(extra));
+  }
+  assert.equal((await request(handler, 'GET', sourceRoute(r, {}, capturePath) + '&engineId=codex')).status, 400);
+  assert.equal((await request(handler, 'GET', capturePath + '/extra')).status, 404);
+  const preview = (await request(handler, 'POST', '/context/captures', { clientThreadId: r.clientThreadId,
+    attachments: [attachment('preview-only', { viewId: 'preview' }, 'browser', 'Unsent preview')] })).body.captures[0];
+  const unsent = await request(handler, 'GET', sourceRoute(r, {}, `/context/captures/${preview.sourceId}`));
+  assert.equal(unsent.status, 200, 'legacy same-client preview remains readable in an existing conversation before send');
+  assert.equal(unsent.body.delivered, null); assert.deepEqual(unsent.body.bindings, []);
+  assert.notEqual(captures[0].id, r.sourceId);
+});
+
+test('legacy opt-in-off Claude unsent capture remains readable in its same-client conversation without granting tracking or another owner', async t => {
+  const { handler } = setup(t, { claude: true });
+  const started = await claudeSend(handler, 'TEXT', CLAUDE_ROUTE);
+  assert.equal(started.status, 202);
+  const route = { ...CLAUDE_ROUTE, conversationId: started.body.conversationId };
+  const captured = await claudeCapture(handler, [attachment('unsent-claude', { viewId: 'unsent-view' }, 'browser', 'Immutable preview')], route);
+  assert.equal(captured.status, 200);
+  const sourceId = captured.body.captures[0].sourceId;
+  const read = overrides => request(handler, 'GET', contextRoute(sourceId, { ...route, ...overrides }));
+  const before = await read({});
+  assert.equal(before.status, 200, 'legacy 200 must not become a tracking-related read denial');
+  assert.equal(before.body.source.text, 'Immutable preview'); assert.equal(before.body.delivered, null);
+  assert.deepEqual(before.body.bindings, []);
+  for (const patch of [{ clientThreadId: 'other-client' }, { conversationId: 'other-room' },
+    { engineId: 'codex' }, { engineProfileId: 'codex-default' }]) assert.ok((await read(patch)).status >= 400);
+  await request(handler, 'POST', '/__qa/account-change', { variant: 'b', engineId: 'claude' }, TOKEN);
+  assert.ok((await read({})).status >= 400);
+});
+
+test('CTX04 same stored capture has independent per-conversation status and packets, with no recapture or redelivery', async t => {
+  const { handler } = setup(t, { stateFixtures: true });
+  const a = await sourceRoom(handler, 'status-A');
+  const b = await sourceRoom(handler, 'status-B', a.captures);
+  for (const value of [a, b]) assert.equal((await request(handler, 'POST', '/__qa/context-release', { phase: 'read', runId: value.run.runId }, TOKEN)).status, 200);
+  const read = r => request(handler, 'GET', sourceRoute(r, {}, `/context/captures/${r.sourceId}`));
+  const originalA = (await read(a.r)).body, originalB = (await read(b.r)).body;
+  assert.notEqual(originalA.delivered.packetId, originalB.delivered.packetId);
+  assert.equal(originalA.delivered.binding.conversationId, a.r.conversationId);
+  assert.equal(originalB.delivered.binding.conversationId, b.r.conversationId);
+  assert.equal((await request(handler, 'GET', sourceRoute(b.r, { packetId: originalA.delivered.packetId }, `/context/captures/${b.r.sourceId}`))).status, 404);
+  const before = await fixtureState(handler);
+  for (const reason of ['fileChanged', 'navigated', 'unknown']) {
+    assert.equal((await sourceControl(handler, 'sourceStatus', { ...a.r, state: 'stale', reason, changedAt: 1700000000123 })).status, 200);
+    const statusA = (await request(handler, 'GET', sourceRoute(a.r))).body;
+    const statusB = (await request(handler, 'GET', sourceRoute(b.r))).body;
+    assert.equal(statusA.conversationId, a.r.conversationId);
+    assert.deepEqual(statusA.sources, [{ sourceId: a.r.sourceId, kind: 'browser', viewId: 'view-status-A',
+      state: 'stale', reason, changedAt: 1700000000123, announcedAt: null }]);
+    assert.equal(statusB.sources[0].state, 'active'); assert.equal(statusB.sources[0].changedAt, null);
+    assert.deepEqual((await read(a.r)).body, originalA); assert.deepEqual((await read(b.r)).body, originalB);
+  }
+  assert.equal((await sourceControl(handler, 'sourceStatus', { ...a.r, state: 'active', reason: null, changedAt: null })).status, 200);
+  assert.equal((await sourceControl(handler, 'sourceStatus', { ...a.r, state: 'missing', reason: null, changedAt: null })).status, 200);
+  assert.deepEqual((await request(handler, 'GET', sourceRoute(a.r))).body.sources, []);
+  assert.equal((await request(handler, 'GET', sourceRoute(b.r))).body.sources.length, 1);
+  assert.deepEqual((await read(a.r)).body, originalA, 'missing status never destroys historical source/payload');
+  assert.equal((await sourceControl(handler, 'sourceStatus', { ...a.r, state: 'active', reason: null, changedAt: null })).status, 200, 'only an explicit control restores the still-tracked synthetic row');
+  const after = await fixtureState(handler);
+  assert.equal(after.context.captureBatches, before.context.captureBatches);
+  assert.equal(after.context.fileCaptureOperations, before.context.fileCaptureOperations);
+  assert.deepEqual(after.context.deliveries, before.context.deliveries);
+  assert.deepEqual(after.observed.sends, before.observed.sends);
+});
+
+test('CTX04 controls reject wrong account/engine/profile/room/selection and malformed reason/time without altering old capture flags', async t => {
+  const { handler } = setup(t, { stateFixtures: true });
+  const { r, captures } = await sourceRoom(handler, 'control-A');
+  const valid = { ...r, state: 'stale', reason: 'unknown', changedAt: 1700000000000 };
+  const prior = (await request(handler, 'GET', sourceRoute(r))).body;
+  for (const patch of [{ sourceId: captures[0].id }, { sourceId: '00000000-0000-0000-0000-000000000000' },
+    { conversationId: 'wrong' }, { clientThreadId: 'wrong' }, { engineId: 'claude' }, { engineProfileId: 'other' },
+    { ownerKey: 'a' }, { state: 'failed' }, { reason: 'latest' }, { changedAt: '1700000000000' },
+    { changedAt: -1 }, { changedAt: 1.5 }, { changedAt: null }, { state: 'active' }, { reason: null }]) {
+    assert.ok((await sourceControl(handler, 'sourceStatus', { ...valid, ...patch })).status >= 400, JSON.stringify(patch));
+  }
+  assert.deepEqual((await request(handler, 'GET', sourceRoute(r))).body, prior);
+  assert.equal((await request(handler, 'POST', '/__qa/context-config', { sourceStatus: valid })).status, 403);
+  assert.equal((await request(handler, 'POST', '/__qa/context-config', { sourceStatus: valid, failNextCapture: true }, TOKEN)).status, 400);
+  await request(handler, 'POST', '/__qa/context-config', { failNextCapture: true }, TOKEN);
+  assert.equal((await sourceControl(handler, 'sourceStatus', valid)).status, 200);
+  assert.equal((await request(handler, 'POST', '/context/captures', { clientThreadId: r.clientThreadId, attachments: [] })).status, 503);
+  for (const suffix of ['&ownerKey=a', '&conversationId=another', '&extra=1', '&engineId=codex']) {
+    assert.equal((await request(handler, 'GET', sourceRoute(r) + suffix)).status, 400);
+  }
+  for (const method of ['POST', 'PUT', 'DELETE']) assert.equal((await request(handler, method, sourceRoute(r), {})).status, 405);
+  await request(handler, 'POST', '/__qa/account-change', { variant: 'b' }, TOKEN);
+  assert.equal((await request(handler, 'GET', sourceRoute(r))).status, 403);
+  assert.equal((await sourceControl(handler, 'sourceStatus', valid)).status, 403);
+});
+
+test('CTX04 held response delivers original snapshot after room switch; failure/hold never blocks immutable payload', async t => {
+  const { handler } = setup(t, { stateFixtures: true });
+  const a = await sourceRoom(handler, 'late-A'), b = await sourceRoom(handler, 'late-B');
+  await request(handler, 'POST', '/__qa/context-release', { runId: a.run.runId, phase: 'read' }, TOKEN);
+  const capturePath = sourceRoute(a.r, {}, `/context/captures/${a.r.sourceId}`);
+  const original = (await request(handler, 'GET', capturePath)).body;
+  assert.equal((await sourceControl(handler, 'sourceStatusResponse', { ...a.r, mode: 'error' })).status, 200);
+  assert.equal((await request(handler, 'GET', sourceRoute(b.r))).status, 200);
+  assert.equal((await request(handler, 'GET', sourceRoute(a.r))).status, 503);
+  assert.deepEqual((await request(handler, 'GET', capturePath)).body, original);
+  assert.equal((await request(handler, 'GET', sourceRoute(a.r))).status, 200, 'error is one shot');
+  await sourceControl(handler, 'sourceStatusResponse', { ...a.r, mode: 'hold', deadlineAt: Date.now() + 20000 });
+  const pending = request(handler, 'GET', sourceRoute(a.r));
+  await new Promise(resolve => setImmediate(resolve));
+  assert.deepEqual((await request(handler, 'GET', capturePath)).body, original);
+  await sourceControl(handler, 'sourceStatus', { ...a.r, state: 'stale', reason: 'fileChanged', changedAt: 1700000000000 });
+  assert.equal((await request(handler, 'GET', sourceRoute(b.r))).body.conversationId, b.r.conversationId);
+  const originalRequestId = (await fixtureState(handler)).sourceStatus.responses.find(row => row.sourceId === a.r.sourceId).requestId;
+  assert.equal((await sourceRelease(handler, b.r, originalRequestId)).status, 409);
+  assert.equal((await sourceRelease(handler, a.r)).status, 200);
+  const late = await pending;
+  assert.equal(late.status, 200); assert.equal(late.body.conversationId, a.r.conversationId);
+  assert.equal(late.body.sources[0].state, 'active', 'actual old snapshot delivered; UI guard must discard it');
+  assert.equal((await request(handler, 'GET', sourceRoute(a.r))).body.sources[0].state, 'stale');
+  assert.equal((await sourceRelease(handler, a.r)).status, 409);
+});
+
+test('CTX04 hold deadline, closed client, dispose and account epoch all bound response lifetime', async t => {
+  const transport = setup(t, { stateFixtures: true }), { handler } = transport;
+  const { r } = await sourceRoom(handler, 'expiry-A');
+  for (const deadlineAt of [null, Date.now() - 1, Date.now() + 31000, 'later']) {
+    assert.equal((await sourceControl(handler, 'sourceStatusResponse', { ...r, mode: 'hold', deadlineAt })).status, 400);
+  }
+  const hold = () => sourceControl(handler, 'sourceStatusResponse', { ...r, mode: 'hold', deadlineAt: Date.now() + 20000 });
+  await sourceControl(handler, 'sourceStatusResponse', { ...r, mode: 'hold', deadlineAt: Date.now() + 60 });
+  const expired = request(handler, 'GET', sourceRoute(r));
+  await new Promise(resolve => setTimeout(resolve, 90));
+  assert.equal((await expired).status, 504); assert.equal((await sourceRelease(handler, r)).status, 409);
+  const expiryReceipt = (await fixtureState(handler)).sourceStatus.receipts.at(-1);
+  assert.equal(expiryReceipt.terminalCause, 'expiry'); assert.equal(expiryReceipt.responseStatus, 504);
+  assert.ok(expiryReceipt.finishAt); assert.equal(expiryReceipt.writableFinishedAtClose, true);
+  await hold(); assert.equal((await hold()).status, 409);
+  let response;
+  const closed = request(handler, 'GET', sourceRoute(r), null, null, res => { response = res; });
+  await new Promise(resolve => setImmediate(resolve)); response.destroy(); await closed;
+  assert.deepEqual((await fixtureState(handler)).sourceStatus.responses, []);
+  await hold(); const changed = request(handler, 'GET', sourceRoute(r));
+  await new Promise(resolve => setImmediate(resolve));
+  await request(handler, 'POST', '/__qa/account-change', { variant: 'b' }, TOKEN);
+  const changedResult = await changed;
+  assert.equal(changedResult.body.code, 'ACCOUNT_CHANGED');
+  assert.equal(changedResult.body.receipt.terminalCause, 'account-change');
+  await request(handler, 'POST', '/__qa/account-change', { variant: 'a' }, TOKEN);
+  assert.equal((await sourceRelease(handler, r)).status, 403, 'ABA cannot revive the old response');
+  await hold(); const disposed = request(handler, 'GET', sourceRoute(r));
+  await new Promise(resolve => setImmediate(resolve)); await transport.dispose();
+  const disposedResult = await disposed;
+  assert.equal(disposedResult.status, 503); assert.equal(disposedResult.body.receipt.terminalCause, 'server-close');
+});
+
+test('CTX04 terminal receipt separates armed, received, write attempt and finish; an old close cannot delete a rearmed same-route entry', async t => {
+  const { handler } = setup(t, { stateFixtures: true });
+  const { r } = await sourceRoom(handler, 'receipt-identity');
+  const original = (await request(handler, 'GET', sourceRoute(r))).body;
+  const realSetTimeout = globalThis.setTimeout, timerCallbacks = [];
+  t.mock.method(globalThis, 'setTimeout', (callback, delay, ...args) => {
+    timerCallbacks.push(callback); return realSetTimeout(callback, delay, ...args);
+  });
+  const hold = () => sourceControl(handler, 'sourceStatusResponse', { ...r, mode: 'hold', deadlineAt: Date.now() + 20000 });
+  const armed = await hold();
+  assert.equal(armed.body.requestId, null); assert.match(armed.body.holdId, /^[\da-f-]{36}$/);
+  let receipt = (await fixtureState(handler)).sourceStatus.receipts.at(-1);
+  assert.equal(receipt.holdId, armed.body.holdId); assert.equal(receipt.requestId, null);
+  assert.equal(receipt.receivedAt, null); assert.equal(receipt.snapshotHash, null);
+  assert.equal(receipt.writeAttempted, false); assert.deepEqual(receipt.R, r);
+  assert.equal(receipt.account, 'a'); assert.equal(receipt.epoch, 0); assert.equal(receipt.heldSourceId, r.sourceId);
+  assert.equal((await request(handler, 'POST', '/__qa/context-release', { phase: 'sources', ...r }, TOKEN)).status, 400);
+  assert.equal((await sourceRelease(handler, r, armed.body.holdId)).body.code, 'QA_SOURCE_RESPONSE_NOT_FOUND');
+  let oldResponse;
+  const pending = request(handler, 'GET', sourceRoute(r), null, null, res => {
+    oldResponse = res; res.deferFinish = true; res.deferClose = true;
+  });
+  await new Promise(resolve => setImmediate(resolve));
+  receipt = (await fixtureState(handler)).sourceStatus.receipts.at(-1);
+  const requestId = receipt.requestId;
+  assert.match(requestId, /^[\da-f-]{36}$/); assert.notEqual(requestId, receipt.holdId);
+  assert.ok(receipt.receivedAt >= receipt.armedAt);
+  assert.equal(receipt.snapshotHash, fingerprintQaBytes(JSON.stringify(original)).sha256);
+  assert.equal(receipt.finishAt, null);
+  await sourceControl(handler, 'sourceStatus', { ...r, state: 'stale', reason: 'unknown', changedAt: 1700000000000 });
+  assert.equal((await sourceRelease(handler, { ...r, sourceId: '00000000-0000-0000-0000-000000000000' }, requestId)).status, 404);
+  const released = await sourceRelease(handler, r, requestId);
+  assert.equal(released.status, 200); assert.equal(released.body.receipt.writeAttempted, true);
+  assert.ok(released.body.receipt.endReturnedAt); assert.equal(released.body.receipt.finishAt, null, '200 is not finish or browser callback proof');
+  assert.deepEqual((await pending).body, original, 'received snapshot never changes with later status controls');
+  const secondArm = await hold();
+  const next = request(handler, 'GET', sourceRoute(r));
+  await new Promise(resolve => setImmediate(resolve));
+  const nextReceipt = (await fixtureState(handler)).sourceStatus.receipts.at(-1);
+  assert.equal(nextReceipt.holdId, secondArm.body.holdId); assert.notEqual(nextReceipt.requestId, requestId);
+  timerCallbacks[0](); // Already-queued old expiry after clearTimeout/rearm.
+  // The old finish and close are intentionally delivered after same-key rearm.
+  oldResponse.writableFinished = true; oldResponse.emit('finish'); oldResponse.emit('close');
+  const afterOldClose = await fixtureState(handler);
+  assert.equal(afterOldClose.sourceStatus.responses.length, 1);
+  assert.equal(afterOldClose.sourceStatus.expired, 0);
+  assert.equal(afterOldClose.sourceStatus.responses[0].requestId, nextReceipt.requestId);
+  const oldReceipt = afterOldClose.sourceStatus.receipts.find(row => row.requestId === requestId);
+  assert.equal(oldReceipt.terminalCause, 'finished'); assert.ok(oldReceipt.finishAt); assert.ok(oldReceipt.closeAt);
+  assert.equal(oldReceipt.writableFinishedAtClose, true);
+  assert.equal((await sourceRelease(handler, r, requestId)).body.code, 'QA_SOURCE_RESPONSE_ALREADY_RELEASED');
+  assert.equal((await sourceRelease(handler, r, nextReceipt.requestId)).status, 200);
+  assert.equal((await next).body.sources[0].state, 'stale');
+});
+
+test('CTX04 peer cancellation is a retained exact-request terminal receipt, not NOT_HELD or expiry success', async t => {
+  const { handler } = setup(t, { stateFixtures: true });
+  const { r } = await sourceRoom(handler, 'receipt-cancel');
+  await sourceControl(handler, 'sourceStatusResponse', { ...r, mode: 'hold', deadlineAt: Date.now() + 140 });
+  let response;
+  const pending = request(handler, 'GET', sourceRoute(r), null, null, res => { response = res; });
+  await new Promise(resolve => setImmediate(resolve));
+  const received = (await fixtureState(handler)).sourceStatus.receipts.at(-1);
+  response.destroy(); assert.equal((await pending).status, 0);
+  await new Promise(resolve => setTimeout(resolve, 170));
+  const released = await sourceRelease(handler, r, received.requestId);
+  assert.equal(released.status, 409); assert.equal(released.body.code, 'QA_SOURCE_RESPONSE_ALREADY_CLOSED');
+  const receipt = released.body.receipt;
+  assert.equal(receipt.terminalCause, 'peer-close-before-finish'); assert.ok(receipt.closeAt);
+  assert.equal(receipt.writableFinishedAtClose, false); assert.equal(receipt.finishAt, null);
+  assert.equal(receipt.writeAttempted, false); assert.equal(receipt.endReturnedAt, null);
+  assert.equal(receipt.responseStatus, null); assert.equal(receipt.releaseAttempts, 1); assert.ok(receipt.releaseAttemptAt);
+  assert.equal(receipt.snapshotHash, received.snapshotHash);
+  assert.equal((await fixtureState(handler)).sourceStatus.expired, 0, 'peer-close clears its own expiry timer');
+});
+
+test('CTX04 expiry before GET stays armed-only evidence and a failed write never becomes finished delivery', async t => {
+  const { handler } = setup(t, { stateFixtures: true });
+  const { r } = await sourceRoom(handler, 'receipt-errors');
+  const armed = await sourceControl(handler, 'sourceStatusResponse', { ...r, mode: 'hold', deadlineAt: Date.now() + 60 });
+  await new Promise(resolve => setTimeout(resolve, 90));
+  const expired = (await fixtureState(handler)).sourceStatus.receipts.find(row => row.holdId === armed.body.holdId);
+  assert.equal(expired.terminalCause, 'expiry'); assert.equal(expired.requestId, null); assert.equal(expired.receivedAt, null);
+  assert.equal(expired.snapshotHash, null); assert.equal(expired.writeAttempted, false); assert.equal(expired.finishAt, null);
+  assert.equal((await sourceRelease(handler, r, armed.body.holdId)).body.code, 'QA_SOURCE_RESPONSE_NOT_FOUND');
+  await sourceControl(handler, 'sourceStatusResponse', { ...r, mode: 'hold', deadlineAt: Date.now() + 20000 });
+  const failed = request(handler, 'GET', sourceRoute(r), null, null, res => { res.writeHead = () => { throw new Error('Synthetic write failure'); }; });
+  await new Promise(resolve => setImmediate(resolve));
+  const received = (await fixtureState(handler)).sourceStatus.receipts.at(-1);
+  const released = await sourceRelease(handler, r, received.requestId);
+  assert.equal(released.status, 409); assert.equal(released.body.receipt.terminalCause, 'write-error');
+  assert.equal(released.body.receipt.writeAttempted, true); assert.equal(released.body.receipt.endReturnedAt, null);
+  assert.equal(released.body.receipt.finishAt, null); assert.equal(released.body.receipt.writableFinishedAtClose, false);
+  assert.equal((await failed).status, 0);
+});
+
+test('CTX04 account change after end but before finish keeps its cause and cannot remove a newer hold', async t => {
+  const { handler } = setup(t, { stateFixtures: true });
+  const { r } = await sourceRoom(handler, 'receipt-inflight');
+  await sourceControl(handler, 'sourceStatusResponse', { ...r, mode: 'hold', deadlineAt: Date.now() + 20000 });
+  let response;
+  const pending = request(handler, 'GET', sourceRoute(r), null, null, res => { response = res; res.deferFinish = true; res.deferClose = true; });
+  await new Promise(resolve => setImmediate(resolve));
+  const first = (await fixtureState(handler)).sourceStatus.receipts.at(-1);
+  assert.equal((await sourceRelease(handler, r, first.requestId)).status, 200); await pending;
+  await request(handler, 'POST', '/__qa/account-change', { variant: 'b' }, TOKEN);
+  let receipt = (await fixtureState(handler)).sourceStatus.receipts.find(row => row.requestId === first.requestId);
+  assert.equal(receipt.terminalCause, 'account-change'); assert.equal(receipt.responseStatus, 200); assert.equal(receipt.finishAt, null);
+  await request(handler, 'POST', '/__qa/account-change', { variant: 'a' }, TOKEN);
+  const second = await sourceControl(handler, 'sourceStatusResponse', { ...r, mode: 'hold', deadlineAt: Date.now() + 20000 });
+  response.writableFinished = true; response.emit('finish'); response.emit('close');
+  const state = await fixtureState(handler);
+  receipt = state.sourceStatus.receipts.find(row => row.requestId === first.requestId);
+  assert.equal(receipt.terminalCause, 'account-change'); assert.ok(receipt.finishAt); assert.ok(receipt.closeAt);
+  assert.equal(state.sourceStatus.responses[0].holdId, second.body.holdId);
+});
+
+test('CTX04 terminal receipts are bounded at 64 without evicting live holds or treating an evicted receipt as cancellation proof', async t => {
+  const { handler } = setup(t, { stateFixtures: true });
+  const a = await sourceRoom(handler, 'receipt-retained'), b = await sourceRoom(handler, 'receipt-bounded');
+  const hold = r => sourceControl(handler, 'sourceStatusResponse', { ...r, mode: 'hold', deadlineAt: Date.now() + 20000 });
+  await hold(a.r);
+  const retained = request(handler, 'GET', sourceRoute(a.r));
+  await new Promise(resolve => setImmediate(resolve));
+  const live = (await fixtureState(handler)).sourceStatus.receipts.at(-1);
+  let oldest;
+  for (let n = 0; n < 65; n++) {
+    await hold(b.r); let response;
+    const canceled = request(handler, 'GET', sourceRoute(b.r), null, null, res => { response = res; });
+    await new Promise(resolve => setImmediate(resolve));
+    if (!oldest) oldest = (await fixtureState(handler)).sourceStatus.receipts.at(-1).requestId;
+    response.destroy(); await canceled;
+  }
+  const state = await fixtureState(handler);
+  assert.equal(state.sourceStatus.receipts.length, 64);
+  assert.equal(new Set(state.sourceStatus.receipts.map(r => r.holdId)).size, 64);
+  assert.ok(state.sourceStatus.receipts.some(row => row.requestId === live.requestId && row.terminalCause === null));
+  assert.equal((await sourceRelease(handler, b.r, oldest)).body.code, 'QA_SOURCE_RESPONSE_NOT_FOUND');
+  assert.equal((await sourceRelease(handler, a.r, live.requestId)).status, 200); assert.equal((await retained).status, 200);
+});
+
+test('CTX04 ephemeral HTTP AbortController cancellation and successful server finish have different exact-request receipts', async t => {
+  let handler;
+  const server = http.createServer((req, res) => handler(req, res));
+  await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
+  t.after(() => new Promise(resolve => { server.close(resolve); server.closeAllConnections(); }));
+  const port = server.address().port;
+  const transport = setup(t, { stateFixtures: true, fixturePort: port }); handler = transport.handler;
+  const { r } = await sourceRoom(handler, 'receipt-http');
+  const origin = `http://127.0.0.1:${port}`;
+  const httpJson = async (route, body) => {
+    const response = await fetch(origin + route, { method: body === undefined ? 'GET' : 'POST',
+      headers: { 'x-egdesk-qa-token': TOKEN, ...(body === undefined ? {} : { 'content-type': 'application/json' }) },
+      ...(body === undefined ? {} : { body: JSON.stringify(body) }) });
+    return { status: response.status, body: await response.json() };
+  };
+  const state = async () => (await httpJson('/__qa/state')).body.sourceStatus;
+  const hold = () => httpJson('/__qa/context-config', { sourceStatusResponse: { ...r, mode: 'hold', deadlineAt: Date.now() + 20000 } });
+  const firstHold = await hold(), controller = new AbortController();
+  const canceled = fetch(origin + sourceRoute(r), { signal: controller.signal }).then(() => assert.fail('Aborted held GET must not complete'), error => error);
+  let first;
+  await waitFor(async () => { first = (await state()).receipts.find(row => row.holdId === firstHold.body.holdId); return first?.requestId; });
+  controller.abort(); assert.equal((await canceled).name, 'AbortError');
+  await waitFor(async () => (await state()).receipts.find(row => row.requestId === first.requestId)?.closeAt);
+  const release = requestId => httpJson('/__qa/context-release', { phase: 'sources', ...r, requestId });
+  const canceledRelease = await release(first.requestId);
+  assert.equal(canceledRelease.status, 409); assert.equal(canceledRelease.body.code, 'QA_SOURCE_RESPONSE_ALREADY_CLOSED');
+  assert.equal(canceledRelease.body.receipt.terminalCause, 'peer-close-before-finish');
+  assert.equal(canceledRelease.body.receipt.writeAttempted, false); assert.equal(canceledRelease.body.receipt.finishAt, null);
+  assert.equal(canceledRelease.body.receipt.writableFinishedAtClose, false);
+  const secondHold = await hold();
+  const received = fetch(origin + sourceRoute(r)).then(async response => ({ status: response.status, body: await response.json() }));
+  let second;
+  await waitFor(async () => { second = (await state()).receipts.find(row => row.holdId === secondHold.body.holdId); return second?.requestId; });
+  assert.notEqual(first.requestId, second.requestId); assert.notEqual(first.holdId, second.holdId);
+  assert.equal((await release(first.requestId)).status, 409, 'old closed GET cannot release the newer same-route hold');
+  assert.equal((await state()).responses[0].requestId, second.requestId);
+  assert.equal((await release(second.requestId)).status, 200);
+  const successful = await received;
+  assert.equal(successful.status, 200); assert.equal(successful.body.conversationId, r.conversationId);
+  await waitFor(async () => (await state()).receipts.find(row => row.requestId === second.requestId)?.finishAt);
+  const receipt = (await state()).receipts.find(row => row.requestId === second.requestId);
+  assert.equal(receipt.terminalCause, 'finished'); assert.equal(receipt.responseStatus, 200);
+  assert.equal(receipt.writeAttempted, true); assert.ok(receipt.endReturnedAt); assert.ok(receipt.finishAt);
+  assert.equal(receipt.snapshotHash, fingerprintQaBytes(JSON.stringify(successful.body)).sha256);
+  assert.equal(receipt.heldSourceId, r.sourceId); assert.deepEqual(receipt.R, r); assert.equal(receipt.account, 'a');
+  // This asserts this unit HTTP client's result only, not a product/UI callback.
+});
+
+test('CTX04 previews, unsupported selections and bounded tracking eviction stay missing instead of borrowing a first/latest row', async t => {
+  const { handler } = setup(t, { stateFixtures: true });
+  const original = await sourceRoom(handler, 'bounded-A');
+  const capture = async (id, kind = 'browser') => (await request(handler, 'POST', '/context/captures', {
+    clientThreadId: original.r.clientThreadId, attachments: [attachment(id, { viewId: id }, kind, 'bounded source')] })).body.captures[0];
+  const preview = await capture('never-sent');
+  assert.equal((await sourceControl(handler, 'sourceStatusResponse', { ...original.r, sourceId: preview.sourceId, mode: 'error' })).status, 403);
+  const board = await capture('untracked-board', 'board');
+  const bind = async captures => {
+    const result = await request(handler, 'POST', '/chat/send', { message: 'EGDESK_QA_CONTEXT bounded tracking', profileEnabled: false,
+      clientThreadId: original.r.clientThreadId, conversationId: original.r.conversationId, requestId: `bounded-${captures[0].sourceId}`,
+      contextSnapshotIds: captures.map(row => row.sourceId), contextCapabilities: { read: true, reader: true, publishBriefing: true } });
+    assert.equal(result.status, 202, JSON.stringify(result.body));
+  };
+  await bind([board]);
+  assert.equal((await sourceControl(handler, 'sourceStatus', { ...original.r, sourceId: board.sourceId, state: 'active', reason: null, changedAt: null })).status, 409);
+  assert.equal((await request(handler, 'GET', sourceRoute(original.r))).body.sources.length, 1);
+  for (let batch = 0; batch < 2; batch++) {
+    const captures = (await request(handler, 'POST', '/context/captures', { clientThreadId: original.r.clientThreadId,
+      attachments: Array.from({ length: 16 }, (_, n) => attachment(`bounded-${batch}-${n}`, { viewId: `bounded-${batch}-${n}` }, 'browser', 'Bounded data')) })).body.captures;
+    await bind(captures);
+  }
+  const rows = (await request(handler, 'GET', sourceRoute(original.r))).body.sources;
+  assert.equal(rows.length, 32); assert.ok(!rows.some(row => [original.r.sourceId, preview.sourceId, board.sourceId].includes(row.sourceId)));
+  assert.equal((await sourceControl(handler, 'sourceStatus', { ...original.r, state: 'active', reason: null, changedAt: null })).status, 409);
+  for (let index = 0; index < 64; index++) await sourceRoom(handler, `bounded-room-${index}`, original.captures);
+  assert.deepEqual((await request(handler, 'GET', sourceRoute(original.r))).body.sources, []);
+  assert.equal((await request(handler, 'GET', sourceRoute(original.r, {}, `/context/captures/${original.r.sourceId}`))).status, 200);
+});
+
+test('CTX04 seed gates refuse sidecars and non-fresh profiles without overwriting existing scene or prefs', async t => {
+  const { info } = setup(t);
+  const seedEnv = { ...FIXTURE_ENV, EGDESK_QA_STATE_FIXTURES: '1', EGDESK_QA_REAL_TURN: '0', EGDESK_QA_CONTEXT_SOURCE_CHANGE_SEED: '1' };
+  for (const patch of [{ EGDESK_QA_STATE_FIXTURES: '0' }, { EGDESK_QA_REAL_TURN: '1' }, { EGDESK_QA_CONTEXT_SOURCE_CHANGE_SEED: 'yes' },
+    { EGDESK_QA_CLAUDE_FIXTURE: '1' }, { EGDESK_QA_PORTABLE_TRANSFER_FIXTURE: '1' }, { EGDESK_QA_PROJECT_FILE_FIXTURE: '1' }]) {
+    assert.throws(() => createQaFixtureTransport({ profile: info.profile, token: TOKEN, env: { ...seedEnv, ...patch } }));
+  }
+  assert.equal(fs.existsSync(path.join(info.profile, 'qa-fixtures', 'source-change-seed')), false);
+  const prefsPath = path.join(info.profile, 'prefs.js');
+  fs.writeFileSync(prefsPath, '// already opened profile\n', { flag: 'wx' });
+  const seeded = createQaFixtureTransport({ profile: info.profile, token: TOKEN, env: seedEnv });
+  await assert.rejects(seeded.ready, /prefs-less/); await seeded.dispose();
+  assert.equal(fs.readFileSync(prefsPath, 'utf8'), '// already opened profile\n');
+});
+
+test('CTX04 seed resume alone defaults an omitted profile without changing the logged request or weakening exact account/room/Context scope', async t => {
+  const { handler, ready } = setup(t, { sourceChangeSeed: true });
+  await ready;
+  const initial = await fixtureState(handler), [a, b] = initial.sourceChangeSeed.identities;
+  const omitted = { engineId: a.engineId, clientThreadId: a.clientThreadId, conversationId: a.conversationId };
+  const explicit = { ...omitted, engineProfileId: a.engineProfileId };
+  const resume = body => request(handler, 'POST', '/chat/resume', body);
+  for (const body of [omitted, explicit]) {
+    const result = await resume(body);
+    assert.equal(result.status, 200); assert.equal(result.body.conversationId, a.conversationId);
+    assert.equal(result.body.runs[0].answerId, a.answerId);
+  }
+  const logs = (await fixtureState(handler)).observed.resumes;
+  assert.equal(logs.length, 2);
+  assert.deepEqual(logs[0].sourceChangeResume, { requestBody: omitted, engineProfileIdDefaulted: true,
+    validatedRoute: explicit });
+  assert.equal(Object.hasOwn(logs[0].sourceChangeResume.requestBody, 'engineProfileId'), false);
+  assert.deepEqual(logs[1].sourceChangeResume, { requestBody: explicit, engineProfileIdDefaulted: false,
+    validatedRoute: explicit });
+  for (const patch of [{ engineProfileId: null }, { engineProfileId: '' }, { engineProfileId: 'wrong' },
+    { engineId: 'claude' }, { conversationId: 'not-a-seeded-conversation' }]) {
+    assert.equal((await resume({ ...omitted, ...patch })).status, 403, JSON.stringify(patch));
+  }
+  for (const patch of [{ clientThreadId: b.clientThreadId }, { conversationId: b.conversationId },
+    { clientThreadId: `${a.clientThreadId}-binding-new-nonce` }]) {
+    const denied = await resume({ ...omitted, ...patch });
+    assert.equal(denied.status, 409); assert.equal(denied.body.code, 'NATIVE_BINDING_MISMATCH');
+  }
+  const scopeWithoutProfile = new URLSearchParams(omitted);
+  for (const route of ['/context/sources', `/context/captures/${a.sources[0].sourceId}`]) {
+    assert.equal((await request(handler, 'GET', `${route}?${scopeWithoutProfile}`)).status, 403, 'Context GET still requires the exact profile');
+  }
+  assert.equal((await sourceControl(handler, 'sourceStatus', { ...omitted, sourceId: a.sources[0].sourceId,
+    state: 'active', reason: null, changedAt: null })).status, 403, 'Context control still requires exact R');
+  await request(handler, 'POST', '/__qa/account-change', { variant: 'b' }, TOKEN);
+  assert.equal((await resume(omitted)).status, 403); assert.equal((await resume(explicit)).status, 403);
+  const after = await fixtureState(handler);
+  assert.deepEqual(after.observed.resumes, logs, 'denied requests create no accepted resume entry');
+  assert.deepEqual(after.sourceChangeSeed, initial.sourceChangeSeed);
+  assert.deepEqual(after.context, initial.context);
+  assert.deepEqual(after.observed.sends, []);
+});
+
+test('CTX04 seed rejects rotated or crossed client pairs with the real resume 409 before provider work', async t => {
+  const [{ CodexChatRuntime }, { createChatHttpHandler }] = await Promise.all([
+    import('../helper/codex-chat-runtime.mjs'), import('../helper/codex-bridge-http.mjs'),
+  ]);
+  const { handler, ready } = setup(t, { sourceChangeSeed: true });
+  await ready;
+  const initial = await fixtureState(handler), [a, b] = initial.sourceChangeSeed.identities;
+  const rows = [a, b].map(({ clientThreadId, conversationId }) => ({ clientThreadId, conversationId }));
+  const before = structuredClone(rows);
+  let providerCalls = 0, nativeFallbackReads = 0;
+  const forbiddenProvider = () => { providerCalls++; throw new Error('No provider work in resume pairing audit'); };
+  // The real handler/runtime checks these read-only stored pairs. No native
+  // provider, SQLite write, or fixture authority substitution is involved.
+  const runtime = new CodexChatRuntime({ requireStore: true,
+    store: { getConversation: id => rows.find(row => row.clientThreadId === id) || null,
+      getConversationByNative: () => { nativeFallbackReads++; throw new Error('Resume must not rebind by native ID'); } },
+    request: forbiddenProvider, respond: forbiddenProvider });
+  const actualHandler = createChatHttpHandler(runtime, async () => {});
+  const actual = (req, res) => actualHandler(req, res, new URL(req.url, 'http://fixture.invalid'));
+  for (const clientThreadId of [`${a.clientThreadId}-binding-new-nonce`, b.clientThreadId]) {
+    for (const profile of [{}, { engineProfileId: a.engineProfileId }]) {
+      const body = { engineId: a.engineId, clientThreadId, conversationId: a.conversationId, ...profile };
+      const real = await request(actual, 'POST', '/chat/resume', body, null, () => {}, { 'content-type': 'application/json' });
+      assert.equal(real.status, 409); assert.equal(real.body.code, 'NATIVE_BINDING_MISMATCH');
+      const fixture = await request(handler, 'POST', '/chat/resume', body);
+      assert.equal(fixture.status, real.status); assert.equal(fixture.body.code, real.body.code);
+    }
+  }
+  assert.equal(providerCalls, 0); assert.equal(nativeFallbackReads, 0); assert.deepEqual(rows, before);
+  const after = await fixtureState(handler);
+  assert.deepEqual(after.observed.resumes, []); assert.deepEqual(after.observed.sends, []);
+  assert.deepEqual(after.context, initial.context); assert.deepEqual(after.sourceChangeSeed, initial.sourceChangeSeed);
+});
+
+test('CTX04 seed-only prelaunch Chat layout fits 1280x800 and 1366x768 reserved chrome while unseeded scene prefs stay absent', async t => {
+  for (const options of [{}, { stateFixtures: true }, { sourceChangeSeed: true }]) {
+    const { handler, info, ready } = setup(t, options);
+    await ready;
+    const prefs = {};
+    const prefPath = path.join(info.profile, 'user.js'), before = fs.readFileSync(prefPath, 'utf8');
+    vm.runInNewContext(before, { user_pref: (key, value) => { prefs[key] = value; } });
+    const state = await fixtureState(handler);
+    if (!options.sourceChangeSeed) {
+      assert.equal(state.sourceChangeSeed, options.stateFixtures ? null : undefined);
+      assert.equal(prefs['egdesk.deskSession.v1'], undefined);
+      assert.equal(prefs['egdesk.surfaceLifecycle.v1'], undefined);
+      assert.equal(fs.existsSync(path.join(info.profile, 'qa-fixtures', 'source-change-seed')), false);
+    } else {
+      const desk = JSON.parse(prefs['egdesk.deskSession.v1']), g = desk.cards[0].geometry;
+      assert.deepEqual(g, { x: 160, y: 80, width: 1000, height: 620, zIndex: 1 });
+      assert.deepEqual(desk.desk.pan, { x: 0, y: 0 }); assert.equal(desk.desk.zoom, 1);
+      // QA layout bounds only, not rendered hit proof: 1280x800 is the
+      // proposed reference; 1366x768 is Main's observed failure viewport.
+      // Neither fixture changes the native window size. Reserve the current
+      // topbar (52), bag right edge (78), and Dock bottom band (46 + 12).
+      for (const viewport of [{ width: 1280, height: 800 }, { width: 1366, height: 768 }]) {
+        assert.ok(g.x >= 78 + 16, 'clear of the PresetBag');
+        assert.ok(g.y >= 52 + 16, 'below the topbar');
+        assert.ok(g.x + g.width <= viewport.width - 16, 'inside the viewport right edge');
+        assert.ok(viewport.height - 58 - (g.y + g.height) >= 10, 'at least 10px above the reserved Dock band');
+      }
+    }
+    assert.equal(fs.readFileSync(prefPath, 'utf8'), before, 'state reads cannot move the scene or rewrite prefs');
+    assert.equal(state.context.captureBatches, 0); assert.deepEqual(state.context.deliveries, []);
+    assert.deepEqual(state.observed.sends, []); assert.deepEqual(state.observed.resumes, []);
+  }
+});
+
+test('CTX04 optional prelaunch scene uses real immutable stores and SQLite history, distinct stored IDs, standard prefs, zero runtime work', async t => {
+  const fetchSpy = t.mock.method(globalThis, 'fetch', () => assert.fail('No external network'));
+  const listenSpy = t.mock.method(net.Server.prototype, 'listen', () => assert.fail('No listener'));
+  const transport = setup(t, { sourceChangeSeed: true }), { handler, info } = transport;
+  await transport.ready;
+  const state = await fixtureState(handler), seed = state.sourceChangeSeed;
+  assert.equal(seed.setupOnly, true); assert.equal(seed.synthetic, true); assert.equal(seed.ready, true);
+  assert.equal(seed.identities.length, 2);
+  assert.deepEqual(seed.counts.seed, { conversations: 2, captures: 2, bindings: 2, packets: 2, deliveryRecords: 2, historyRuns: 2, historyMessages: 4 });
+  assert.deepEqual(seed.counts.runtimeAtSetup, { captureBatches: 0, fileCaptureOperations: 0, sends: 0, deliveries: 0 });
+  assert.equal(state.context.captureBatches, 0); assert.deepEqual(state.context.deliveries, []);
+  assert.deepEqual(state.observed.sends, []); assert.deepEqual(state.runs, []);
+  const prefs = {};
+  vm.runInNewContext(fs.readFileSync(path.join(info.profile, 'user.js'), 'utf8'), { user_pref: (key, value) => { prefs[key] = value; } });
+  const desk = JSON.parse(prefs['egdesk.deskSession.v1']);
+  assert.equal(JSON.parse(prefs['egdesk.surfaceLifecycle.v1']).mode, 'desk');
+  assert.equal(desk.chat.threads.length, 2); assert.equal(desk.chat.activeThreadId, seed.initialState.activeThreadId);
+  assert.equal(desk.cards.length, 1); assert.equal(desk.cards[0].type, 'chat');
+  assert.equal(desk.cards[0].id, seed.initialState.chatCardId); assert.equal(seed.initialState.entryBypassed, true);
+  assert.equal(prefs['egdesk.agendaState.v1'], undefined, 'no Board seed');
+  const list = (await request(handler, 'GET', '/chat/history/threads')).body;
+  assert.equal(list.threads.length, 2);
+  for (const room of seed.identities) {
+    assert.equal(room.answerId, `${room.conversationId}/${room.runId}`);
+    const source = room.sources[0];
+    const r = { engineId: room.engineId, engineProfileId: room.engineProfileId, clientThreadId: room.clientThreadId,
+      conversationId: room.conversationId, sourceId: source.sourceId };
+    assert.notEqual(source.selectionId, source.sourceId); assert.equal(source.snapshotId, source.sourceId);
+    const history = (await request(handler, 'GET', `/chat/history?clientThreadId=${room.clientThreadId}`)).body;
+    assert.equal(history.runs.length, 1); assert.equal(history.messages.length, 2);
+    const reference = history.messages.find(m => m.role === 'user').inputReferences[0];
+    assert.equal(reference.localSource.id, source.selectionId); assert.equal(reference.sourceId, source.sourceId);
+    assert.equal(reference.snapshotId, source.snapshotId); assert.equal(reference.contextScope.conversationId, room.conversationId);
+    const readUrl = sourceRoute(r, { packetId: source.packetId }, `/context/captures/${source.sourceId}`);
+    const before = (await request(handler, 'GET', readUrl)).body;
+    assert.equal(before.source.hash, source.captureHash); assert.equal(before.delivered.hash, source.payloadHash);
+    assert.equal(before.delivered.binding.conversationId, room.conversationId);
+    assert.equal(before.delivered.binding.answerId, room.answerId);
+    assert.equal(history.runs[0].answerId, room.answerId);
+    assert.ok(history.messages.every(message => message.answerId === room.answerId));
+    if (source.path) fs.writeFileSync(source.path, 'Owned original changed after seed');
+    assert.equal((await sourceControl(handler, 'sourceStatus', { ...r, state: 'stale', reason: source.kind === 'file' ? 'fileChanged' : 'navigated', changedAt: 1700000000000 })).status, 200);
+    assert.deepEqual((await request(handler, 'GET', readUrl)).body, before);
+    assert.equal((await request(handler, 'GET', sourceRoute(r))).body.sources[0].sourceId, source.snapshotId);
+    assert.equal((await sourceControl(handler, 'sourceStatusResponse', { ...r, sourceId: source.selectionId, mode: 'error' })).status, 400);
+    const snapshot = (await request(handler, 'GET', `/chat/state?conversationId=${room.conversationId}`)).body;
+    assert.equal(snapshot.runs[0].runId, room.runId);
+    assert.equal((await request(handler, 'POST', '/chat/resume', r)).status, 200);
+  }
+  assert.equal((await request(handler, 'POST', '/chat/history/import', {})).status, 405);
+  for (const route of ['/context/captures', '/chat/send']) assert.equal((await request(handler, 'POST', route, {})).body.code, 'QA_SOURCE_CHANGE_READ_ONLY');
+  const final = await fixtureState(handler);
+  assert.equal(final.context.captureBatches, 0); assert.equal(final.context.fileCaptureOperations, 0);
+  assert.deepEqual(final.context.deliveries, []); assert.deepEqual(final.observed.sends, []);
+  assert.equal(fetchSpy.mock.callCount(), 0); assert.equal(listenSpy.mock.callCount(), 0);
+  const restart = createQaFixtureTransport({ profile: info.profile, token: TOKEN, env: { ...FIXTURE_ENV,
+    EGDESK_QA_CONTEXT_SOURCE_CHANGE_SEED: '1', EGDESK_QA_STATE_FIXTURES: '1', EGDESK_QA_REAL_TURN: '0' } });
+  await assert.rejects(restart.ready, /Existing scene|EEXIST/); await restart.dispose();
+  assert.equal((await request(handler, 'GET', '/chat/history/threads')).body.threads.length, 2, 'restart cannot duplicate seed');
+});
+
+test('CTX04 seeded native message identity keeps both rooms at two messages through history and repeated resume without changing source or sequence', async t => {
+  const { handler, info, ready } = setup(t, { sourceChangeSeed: true });
+  await ready;
+  const initial = await fixtureState(handler), prefs = {};
+  vm.runInNewContext(fs.readFileSync(path.join(info.profile, 'user.js'), 'utf8'), { user_pref: (key, value) => { prefs[key] = value; } });
+  const desk = JSON.parse(prefs['egdesk.deskSession.v1']);
+  const messageIdentity = messages => messages.map(message => Object.fromEntries(
+    ['id', 'localMessageId', 'requestId', 'conversationId', 'runId', 'answerId', 'role'].map(key => [key, message[key]])));
+  for (const room of initial.sourceChangeSeed.identities) {
+    const source = room.sources[0], thread = desk.chat.threads.find(row => row.id === room.clientThreadId);
+    assert.deepEqual(thread.messages, [], 'prelaunch prefs never duplicate stored messages');
+    const route = { engineId: room.engineId, engineProfileId: room.engineProfileId,
+      clientThreadId: room.clientThreadId, conversationId: room.conversationId };
+    const historyUrl = `/chat/history?clientThreadId=${room.clientThreadId}`;
+    const history = (await request(handler, 'GET', historyUrl)).body;
+    const readUrl = sourceRoute({ ...route, sourceId: source.sourceId }, { packetId: source.packetId }, `/context/captures/${source.sourceId}`);
+    const original = (await request(handler, 'GET', readUrl)).body;
+    assert.equal(original.source.hash, source.captureHash); assert.equal(original.delivered.hash, source.payloadHash);
+    let hydrated = hydrateLocalChatThread(thread, normalizeLocalHistoryPage(history, room.clientThreadId));
+    assert.equal(hydrated.messages.length, 2);
+    const identities = messageIdentity(hydrated.messages), protocol = createChatProtocolState();
+    const originalInput = structuredClone(hydrated.messages.find(message => message.role === 'user').inputReferences);
+    for (let pass = 0; pass < 2; pass++) {
+      const resumed = await request(handler, 'POST', '/chat/resume', route);
+      assert.equal(resumed.status, 200);
+      // Mirror the existing production history -> snapshot -> non-live sync
+      // path unchanged; do not deduplicate by text or add a fixture-only merge.
+      for (const run of mergeChatSnapshot(protocol, resumed.body, thread.clientBindingId)) {
+        hydrated.messages = mergeLocalChatMessages(hydrated.messages, projectRunMessages(hydrated.messages, run));
+      }
+      assert.equal(hydrated.messages.length, 2, `${room.title}: no extra assistant after resume ${pass + 1}`);
+      assert.equal(hydrated.messages.filter(message => message.role === 'assistant').length, 1);
+      assert.deepEqual(messageIdentity(hydrated.messages), identities);
+      const user = hydrated.messages.find(message => message.role === 'user');
+      const assistant = hydrated.messages.find(message => message.role === 'assistant');
+      assert.deepEqual(user.inputReferences, originalInput);
+      assert.equal(assistant.contextCaptures.length, 1); assert.equal(assistant.contextPackets.length, 1);
+      assert.equal(assistant.contextCaptures[0].sourceId, source.sourceId);
+      assert.equal(assistant.contextCaptures[0].hash, source.captureHash);
+      assert.equal(assistant.contextPackets[0].packetId, source.packetId);
+      assert.equal(assistant.contextPackets[0].hash, source.payloadHash);
+      assert.ok(hydrated.messages.every(message => message.providerItemId === message.messageId));
+    }
+    assert.ok(history.messages.every(message => message.messageId === message.id));
+    assert.ok(history.runs[0].messages.every(message => message.messageId === message.id));
+    assert.deepEqual((await request(handler, 'GET', historyUrl)).body, history, 'history rows, events and seq are unchanged');
+    assert.deepEqual((await request(handler, 'GET', readUrl)).body, original, 'immutable source and delivered payload are unchanged');
+  }
+  const final = await fixtureState(handler);
+  assert.deepEqual(final.sourceChangeSeed, initial.sourceChangeSeed);
+  assert.equal(final.context.captureBatches, 0); assert.equal(final.context.fileCaptureOperations, 0);
+  assert.deepEqual(final.context.deliveries, []); assert.deepEqual(final.observed.sends, []);
+  assert.equal(final.observed.resumes.length, 4);
+});
 
 test('short Browser fixture URL serves only the canonical document in this marked profile', async t => {
   const { handler, info } = setup(t);

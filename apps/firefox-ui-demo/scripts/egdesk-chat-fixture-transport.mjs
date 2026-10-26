@@ -6,10 +6,10 @@ import fs from 'node:fs';
 import http from 'node:http';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { createHmac, randomUUID } from 'node:crypto';
+import { createHash, createHmac, randomUUID } from 'node:crypto';
 import { assertQaFixtureManifest } from './egdesk-chat-qa-profile.mjs';
 import { assertOrdinarySend } from './egdesk-chat-qa-contract.sys.mjs';
-import { createQaContextFixture } from './egdesk-context-qa-fixture.mjs';
+import { createQaContextFixture, seedQaSourceChangeScene } from './egdesk-context-qa-fixture.mjs';
 import { observeQaFixtureFile } from './egdesk-context-qa-contract.mjs';
 import { qaBridgeConfig, validateQaFixtureIsolation } from './egdesk-qa-fixture-isolation.mjs';
 import { projectFileFixtureEnabled } from './egdesk-qa-fixture-isolation.mjs';
@@ -19,7 +19,7 @@ import { portableTransferFixtureEnabled, createPortableTransferFixture } from '.
 import { taskGateFixtureEnabled, createTaskGateFixture, assertQaEmptyProjectSend } from './egdesk-task-gate-fixture.mjs';
 import { chatOriginFileFixtureEnabled, createChatOriginFileFixture } from './egdesk-chat-origin-file-fixture.mjs';
 import { routePermissionRequest } from '../helper/claude-engine-permissions.mjs'; // Pure shape translation only.
-import { guardBridgeRequest } from '../helper/codex-bridge-http.mjs';
+import { guardBridgeRequest, createChatHttpHandler } from '../helper/codex-bridge-http.mjs';
 import { readEGDeskFileBody } from '../helper/egdesk-file-http.mjs';
 
 const SCENARIO = /^EGDESK_QA_(COMPLETE|TEXT_ONLY|STOP|APPROVAL|USER_INPUT|SUBAGENT|LOST|START_FAIL|REJECT|AMBIGUOUS|CONTEXT|CLAUDE_TEXT|CLAUDE_SESSION_APPROVAL|CLAUDE_APPROVAL_NO_SESSION|CLAUDE_MULTI_SELECT|CLAUDE_RATE_LIMIT|CLAUDE_CONTEXT|CLAUDE_CONTEXT_BLOCKED)\b/;
@@ -99,6 +99,12 @@ if ((taskGateEnabled || originFileEnabled) && env.EGDESK_QA_FIXTURE_TOKEN != nul
 }
 const fixture = assertQaFixtureManifest(profilePath);
 const profile = fixture.profile;
+if (env.EGDESK_QA_CONTEXT_SOURCE_CHANGE_SEED != null && !['0', '1'].includes(env.EGDESK_QA_CONTEXT_SOURCE_CHANGE_SEED)) throw new Error('Invalid source-change seed gate');
+const sourceChangeSeedEnabled = env.EGDESK_QA_CONTEXT_SOURCE_CHANGE_SEED === '1';
+if (sourceChangeSeedEnabled && (env.EGDESK_QA_STATE_FIXTURES !== '1' || env.EGDESK_QA_REAL_TURN !== '0'
+  || claudeFixture || runOutputsEnabled || taskGateEnabled || originFileEnabled || projectFileFixtureEnabled(env) || portableTransferFixtureEnabled(env))) {
+  throw new Error('Source-change seed requires the separate core state fixture and real-turn zero');
+}
 if (originFileEnabled && fs.lstatSync(path.join(profile, 'prefs.js'), { throwIfNoEntry: false })) {
   throw new Error('Origin File requires a fresh prefs-less owned QA profile');
 }
@@ -107,12 +113,27 @@ const projectFileFixture = projectFileFixtureEnabled(env)
 const portableTransferFixture = portableTransferFixtureEnabled(env)
   ? createPortableTransferFixture({ profile, token, env }) : null;
 const modelFreeFixture = !!(projectFileFixture || portableTransferFixture);
+const sourceStatusEnabled = env.EGDESK_QA_STATE_FIXTURES === '1' && !claudeFixture && !modelFreeFixture
+  && !runOutputsEnabled && !taskGateEnabled && !originFileEnabled;
+if (sourceStatusEnabled && env.EGDESK_QA_REAL_TURN !== '0') throw new Error('Source-state fixtures require explicit real-turn zero');
 const artifactRoot = fixture.root;
 const artifactPath = fixture.artifactPath;
 const context = createQaContextFixture(profile);
+let sourceChangeScene = null;
+let sourceChangeHistoryHandler = null, sourceChangeClosing = false;
+const sourceChangeReady = sourceChangeSeedEnabled ? seedQaSourceChangeScene(profile, context).then(scene => {
+  sourceChangeScene = scene;
+  sourceChangeHistoryHandler = createChatHttpHandler(scene.history, () => { throw new Error('No seed auth calls'); });
+  return scene;
+}) : null;
+if (sourceChangeReady) void sourceChangeReady.catch(() => {});
 let failNextCapture = false;
 let holdNextCapture = false;
 const heldCaptures = [];
+const sourceResponses = new Map();
+const sourceResponsesInFlight = new Set();
+const sourceReceipts = [];
+const sourceStatusEvidence = { reads: [], controls: [], releases: [], expired: 0 };
 
 const streamId = randomUUID();
 // Per-fixture lifetime expectation, not an owner grant or reusable credential.
@@ -123,6 +144,7 @@ let connection = claudeFixture || modelFreeFixture ? 'offline' : 'ready';
 let authLookupFails = false;
 let authLoggedIn = !claudeFixture && !modelFreeFixture;
 let accountVariant = 'a';
+let codexContextEpoch = 0;
 let claudeAccountVariant = 'a';
 let claudeEpoch = 0;
 let claudeContextAvailable = true;
@@ -164,6 +186,118 @@ const runConnection = run => run?.engineId === 'claude' ? 'ready' : connection;
 const activeRun = run => ['running', 'inProgress'].includes(run?.status);
 const contextError = (code, message, httpStatus = 409) => { throw Object.assign(new Error(message), { code, httpStatus }); };
 const claudeOwner = () => `claude:claude-default:qa-account-${claudeAccountVariant}`;
+const contextRoutingKeys = ['engineId', 'engineProfileId', 'clientThreadId', 'conversationId'];
+function exactContextQuery(url, extra = []) {
+  const keys = [...contextRoutingKeys, ...extra];
+  for (const [key, value] of url.searchParams) {
+    if (!keys.includes(key) || url.searchParams.getAll(key).length !== 1 || !value.trim() || value.includes('\0') || value.length > 512) {
+      contextError('INVALID_CONTEXT_ROUTING', 'Unknown, duplicate or empty context query field', 400);
+    }
+  }
+  return Object.fromEntries(url.searchParams);
+}
+function codexContextRouting(body, { requireConversation = false } = {}) {
+  if (!authLoggedIn) contextError('IDENTITY_REQUIRED', 'Fixture account is signed out', 403);
+  if (body.engineId !== 'codex' || body.engineProfileId !== 'codex-default') contextError('ENGINE_MISMATCH', 'Expected the selected Codex engine/profile', 403);
+  for (const key of ['clientThreadId', ...(requireConversation || Object.hasOwn(body, 'conversationId') ? ['conversationId'] : [])]) {
+    if (!bounded(body[key], 512) || !body[key].trim() || body[key].includes('\0')) contextError('INVALID_CONTEXT_ROUTING', `Explicit ${key} required`, 400);
+  }
+  if (body.conversationId && ![...runs.values(), ...(sourceChangeScene?.identities || [])].some(run =>
+    run.conversationId === body.conversationId && run.clientThreadId === body.clientThreadId
+    && (!run.engineId || run.engineId === 'codex') && run.fixtureOwner === accountVariant)) {
+    contextError('CONTEXT_THREAD_MISMATCH', 'Context route belongs to another conversation/account', 403);
+  }
+  return { engineId: 'codex', engineProfileId: 'codex-default', clientThreadId: body.clientThreadId,
+    ...(body.conversationId ? { conversationId: body.conversationId } : {}), owner: accountVariant, epoch: codexContextEpoch };
+}
+const sourceResponseKey = r => JSON.stringify([r.owner, r.epoch, ...contextRoutingKeys.map(k => r[k]), r.sourceId]);
+const sameSourceConversation = (a, b) => ['owner', 'epoch', ...contextRoutingKeys].every(k => a[k] === b[k]);
+const publicSourceRoute = r => Object.fromEntries([...contextRoutingKeys, 'sourceId'].map(key => [key, r[key]]));
+function forgetSourceResponse(entry) {
+  clearTimeout(entry.timer);
+  // A delayed close/finish from an old GET must never remove a later hold
+  // which happens to use the identical route key.
+  if (sourceResponses.get(entry.key) === entry) sourceResponses.delete(entry.key);
+}
+function createSourceReceipt(entry) {
+  if (sourceReceipts.length >= 64) {
+    const oldestTerminal = sourceReceipts.findIndex(receipt => receipt.terminalCause !== null);
+    if (oldestTerminal < 0) contextError('QA_SOURCE_RECEIPT_LIMIT', 'All bounded source receipts are still live', 429);
+    sourceReceipts.splice(oldestTerminal, 1);
+  }
+  const receipt = { holdId: randomUUID(), armedAt: Date.now(), deadlineAt: entry.deadlineAt,
+    requestId: null, R: publicSourceRoute(entry.route), account: entry.route.owner, epoch: entry.route.epoch,
+    heldSourceId: entry.route.sourceId, receivedAt: null, snapshotHash: null,
+    releaseAttemptAt: null, releaseAttempts: 0, writeAttempted: false, endReturnedAt: null,
+    responseStatus: null, finishAt: null, closeAt: null, writableFinishedAtClose: null, terminalCause: null };
+  sourceReceipts.push(receipt);
+  return receipt;
+}
+function receiveSourceResponse(entry, res, snapshot) {
+  const receipt = entry.receipt;
+  entry.res = res; entry.snapshot = structuredClone(snapshot);
+  sourceResponsesInFlight.add(entry);
+  receipt.requestId = randomUUID(); receipt.receivedAt = Date.now();
+  receipt.snapshotHash = createHash('sha256').update(JSON.stringify(entry.snapshot)).digest('hex');
+  res.once('finish', () => {
+    receipt.finishAt ??= Date.now();
+    receipt.terminalCause ??= 'finished';
+    sourceResponsesInFlight.delete(entry);
+    forgetSourceResponse(entry);
+  });
+  res.once('close', () => {
+    receipt.closeAt ??= Date.now();
+    receipt.writableFinishedAtClose ??= res.writableFinished === true;
+    // First observed terminal cause wins: a later close cannot turn an
+    // expired/account-invalidated/server-closed response into a peer cancel.
+    receipt.terminalCause ??= receipt.finishAt !== null ? 'finished' : 'peer-close-before-finish';
+    sourceResponsesInFlight.delete(entry);
+    forgetSourceResponse(entry);
+  });
+}
+function finishSourceResponse(entry, status, body, cause = null) {
+  const receipt = entry.receipt;
+  if (receipt?.terminalCause !== null && receipt?.terminalCause !== undefined) return false;
+  if (receipt && cause) receipt.terminalCause = cause;
+  forgetSourceResponse(entry);
+  if (!entry.res) return false;
+  if (entry.res.destroyed || entry.res.writableEnded) {
+    if (receipt) receipt.terminalCause ??= receipt.finishAt !== null ? 'finished' : 'peer-close-before-finish';
+    return false;
+  }
+  if (receipt) { receipt.writeAttempted = true; receipt.responseStatus = status; }
+  try {
+    json(entry.res, status, cause && receipt ? { ...body, receipt: structuredClone(receipt) } : body);
+    if (receipt) receipt.endReturnedAt = Date.now();
+    return true;
+  } catch {
+    if (receipt) receipt.terminalCause ??= 'write-error';
+    entry.res.destroy?.();
+    sourceResponsesInFlight.delete(entry);
+    return false;
+  }
+}
+function expireSourceResponse(entry) {
+  // A queued timer may outlive clearTimeout. It cannot expire an already
+  // released/canceled GET or a later same-route entry, even before close fires.
+  if (sourceResponses.get(entry.key) !== entry || entry.receipt.terminalCause !== null) return;
+  sourceStatusEvidence.expired++;
+  finishSourceResponse(entry, 504, { code: 'QA_SOURCE_STATUS_EXPIRED', error: 'Held source response expired' }, 'expiry');
+}
+function sourceControl(body, extra) {
+  if (!sourceStatusEnabled) contextError('QA_SOURCE_STATUS_DISABLED', 'Source status controls require the isolated state fixture', 403);
+  if (!body || typeof body !== 'object' || Array.isArray(body)
+    || Object.keys(body).some(k => ![...contextRoutingKeys, 'sourceId', ...extra].includes(k))) contextError('INVALID_CONTEXT_ROUTING', 'Exact source status control required', 400);
+  const authority = codexContextRouting(body, { requireConversation: true });
+  if (!/^[\da-f-]{36}$/i.test(body.sourceId || '')) contextError('INVALID_CONTEXT_ROUTING', 'Stored source ID required', 400);
+  const r = { ...authority, sourceId: body.sourceId };
+  context.assertSourceScope(r);
+  return r;
+}
+function sourceTrace(kind, value) {
+  if (sourceStatusEvidence[kind].length >= 512) contextError('QA_TRACE_LIMIT', 'Bounded source-status trace is full', 429);
+  sourceStatusEvidence[kind].push(value);
+}
 function claudeContextRouting(body) {
   if (!body || ['ownerKey', 'epoch', 'ownerScope', 'contextAuthority'].some(key => Object.hasOwn(body, key))) {
     contextError('INVALID_CONTEXT_ROUTING', 'UI cannot supply fixture context authority', 400);
@@ -369,6 +503,11 @@ function contextPhase(run, phase) {
 }
 
 function conversationState(conversationId) {
+  const seeded = sourceChangeScene?.snapshot(conversationId);
+  if (seeded) {
+    if (!authLoggedIn || accountVariant !== 'a') contextError('ACCOUNT_CHANGED', 'Seed conversation belongs to its original synthetic account', 403);
+    return { ...seeded, streamId, seq };
+  }
   const owned = [...runs.values()].find(run => run.conversationId === conversationId);
   return { streamId, seq, connection: runConnection(owned), conversationId,
     ...(owned?.engineId ? { engineId: owned.engineId } : {}),
@@ -650,6 +789,23 @@ const handler = async (req, res) => {
         || (req.socket?.remoteAddress && !['127.0.0.1', '::ffff:127.0.0.1'].includes(req.socket.remoteAddress))) {
       return json(res, 400, { error: 'Fixture accepts only its loopback origin' });
     }
+    if (sourceStatusEnabled && sourceChangeClosing) return json(res, 503, { code: 'QA_FIXTURE_CLOSED', error: 'Source-status fixture is closed' });
+    if (sourceChangeReady) {
+      if (sourceChangeClosing) return json(res, 503, { code: 'QA_FIXTURE_CLOSED', error: 'Source-change fixture is closed' });
+      await sourceChangeReady;
+      if (req.method === 'POST' && ['/context/captures', '/chat/send'].includes(url.pathname)) {
+        return json(res, 403, { code: 'QA_SOURCE_CHANGE_READ_ONLY', error: 'Source-change scene only inspects existing inputs; no runtime capture or send' });
+      }
+      if (url.pathname === '/chat/history' || url.pathname.startsWith('/chat/history/')) {
+        if (!authLoggedIn || accountVariant !== 'a') return json(res, 403, { code: 'ACCOUNT_CHANGED', error: 'Seed history belongs to its original synthetic account' });
+        const allowed = url.pathname === '/chat/history' ? ['clientThreadId', 'afterSeq', 'limit']
+          : url.pathname === '/chat/history/threads' ? ['cursor', 'limit'] : null;
+        if (!allowed || !['GET', 'OPTIONS'].includes(req.method)) return json(res, 405, { code: 'METHOD_NOT_ALLOWED', error: 'Seed history is read-only' });
+        if ([...url.searchParams.keys()].some(k => !allowed.includes(k) || url.searchParams.getAll(k).length !== 1)) return json(res, 400, { code: 'INVALID_HISTORY_QUERY' });
+        if (req.method === 'OPTIONS') return json(res, 204, {});
+        if (await sourceChangeHistoryHandler(req, res, url)) return;
+      }
+    }
     if (originFileReady) {
       if (originFileClosing) return json(res, 503, { code: 'QA_FIXTURE_CLOSED', error: 'Origin File fixture is closed' });
       try { await originFileReady; }
@@ -713,12 +869,13 @@ const handler = async (req, res) => {
       return;
     }
     if (req.method === 'OPTIONS') {
+      if (sourceStatusEnabled && url.pathname === '/context/sources') exactContextQuery(url);
       const paths = ['/health', '/v1/state', '/auth/status', '/events', '/chat/state', '/chat/resume',
         '/chat/send', '/chat/interrupt', '/chat/approval', '/chat/user-input', '/__qa/state', '/__qa/release',
         '/__qa/auth-refresh', '/__qa/reconnect', '/__qa/replay', '/auth/signout', '/__qa/hold-resume',
         '/__qa/release-resume', '/__qa/history', '/__qa/delta', '/__qa/auth-diagnostics', '/__qa/runtime-ready',
         '/__qa/account-change', '/__qa/terminal-mode', '/terminal/spawn', '/terminal/read', '/terminal/kill', '/terminal/resize',
-        '/context/captures', ...(claudeFixture ? ['/context/capabilities'] : []), '/__qa/context-config', '/__qa/context-release', '/__qa/hold-stop', '/__qa/release-stop'];
+        '/context/captures', ...(sourceStatusEnabled ? ['/context/sources'] : []), ...(claudeFixture ? ['/context/capabilities'] : []), '/__qa/context-config', '/__qa/context-release', '/__qa/hold-stop', '/__qa/release-stop'];
       return json(res, paths.includes(url.pathname) || /^\/context\/captures\/[\da-f-]{36}$/i.test(url.pathname) ? 204 : 404, {});
     }
     if (req.method === 'GET' && url.pathname === '/__qa/state') {
@@ -733,6 +890,11 @@ const handler = async (req, res) => {
         ...(taskGateFixture ? { taskGateFixture: true, providerTurns: 0, nativeProcessSpawns: 0, taskGate: taskGateFixture.snapshot() } : {}),
         ...(originFileFixture ? { chatOriginFileFixture: true, providerTurns: 0, nativeProcessSpawns: 0, chatOriginFile: originFileFixture.snapshot() } : {}),
         streamId, seq, clients: clients.size, observed, context: context.stats, pendingContextCaptures: heldCaptures.length,
+        ...(sourceStatusEnabled ? { sourceStatus: { ...sourceStatusEvidence,
+          receipts: sourceReceipts,
+          responses: [...sourceResponses.values()].map(({ route, mode, deadlineAt, res, receipt }) => ({ ...route, mode, deadlineAt,
+            holdId: receipt?.holdId || null, requestId: receipt?.requestId || null, phase: res ? 'pending' : 'armed' })) },
+          sourceChangeSeed: sourceChangeScene?.metadata || null } : {}),
         runs: [...runs.values()].map((run) => ({ ...runState(run), conversationId: run.conversationId,
           requestId: run.requestId, clientThreadId: run.clientThreadId, fixtureStage: run.fixtureStage || null,
           ...(run.fixtureApprovalOffer ? { fixtureApprovalOffer: run.fixtureApprovalOffer } : {}),
@@ -769,6 +931,63 @@ const handler = async (req, res) => {
     if (req.method === 'POST' && ['/__qa/context-config', '/__qa/context-release'].includes(url.pathname)) {
       if (req.headers['x-egdesk-qa-token'] !== token) return json(res, 403, { error: 'Fixture token required' });
       const body = await bodyJson(req);
+      if (url.pathname === '/__qa/context-config' && (Object.hasOwn(body, 'sourceStatus') || Object.hasOwn(body, 'sourceStatusResponse'))) {
+        if (url.search) contextError('INVALID_CONTEXT_ROUTING', 'Source controls accept no query', 400);
+        if (Object.keys(body).length !== 1) contextError('INVALID_CONTEXT_ROUTING', 'Source controls must be isolated from capture controls', 400);
+        if (body.sourceStatus) {
+          const value = body.sourceStatus, r = sourceControl(value, ['state', 'reason', 'changedAt']);
+          if (!['active', 'stale', 'missing'].includes(value.state)
+            || (value.state === 'stale' ? !['fileChanged', 'navigated', 'unknown'].includes(value.reason)
+              || !Number.isSafeInteger(value.changedAt) || value.changedAt < 0
+              : value.reason !== null || value.changedAt !== null)) contextError('INVALID_SOURCE_STATUS', 'Exact state, reason and epoch-millisecond time required', 400);
+          if (sourceStatusEvidence.controls.length >= 512) contextError('QA_TRACE_LIMIT', 'Bounded source-status trace is full', 429);
+          context.setSourceStatus({ ...r, state: value.state, reason: value.reason, changedAt: value.changedAt });
+          sourceTrace('controls', { ...r, state: value.state, reason: value.reason, changedAt: value.changedAt });
+        } else {
+          const value = body.sourceStatusResponse, r = sourceControl(value, ['mode', 'deadlineAt']);
+          if (!['error', 'hold'].includes(value.mode) || (value.mode === 'hold'
+            ? !Number.isSafeInteger(value.deadlineAt) || value.deadlineAt <= Date.now() || value.deadlineAt > Date.now() + 30000
+            : Object.hasOwn(value, 'deadlineAt'))) contextError('INVALID_SOURCE_RESPONSE', 'Hold needs a deadline within 30 seconds; error accepts none', 400);
+          if ([...sourceResponses.values()].some(entry => sameSourceConversation(entry.route, r))) contextError('QA_SOURCE_RESPONSE_PENDING', 'One response control per exact conversation at a time');
+          if (sourceResponses.size >= 32) contextError('QA_SOURCE_RESPONSE_LIMIT', 'Too many pending source responses', 429);
+          const key = sourceResponseKey(r), entry = { key, route: r, mode: value.mode, deadlineAt: value.deadlineAt ?? null };
+          if (entry.mode === 'hold') entry.receipt = createSourceReceipt(entry);
+          sourceResponses.set(key, entry);
+          if (entry.mode === 'hold') {
+            entry.timer = setTimeout(() => expireSourceResponse(entry), entry.deadlineAt - Date.now());
+            entry.timer.unref?.();
+          }
+          return json(res, 200, { ok: true, fixtureOnly: true,
+            ...(entry.receipt ? { holdId: entry.receipt.holdId, requestId: null } : {}) });
+        }
+        return json(res, 200, { ok: true, fixtureOnly: true });
+      }
+      if (url.pathname === '/__qa/context-release' && body.phase === 'sources') {
+        if (url.search) contextError('INVALID_CONTEXT_ROUTING', 'Source release accepts no query', 400);
+        const r = sourceControl(body, ['phase', 'requestId']);
+        if (typeof body.requestId !== 'string' || !/^[\da-f-]{36}$/i.test(body.requestId)) contextError('INVALID_SOURCE_REQUEST_ID', 'Exact received GET requestId required', 400);
+        const receipt = sourceReceipts.find(row => row.requestId === body.requestId);
+        if (!receipt) contextError('QA_SOURCE_RESPONSE_NOT_FOUND', 'No retained receipt for this received GET');
+        if (receipt.account !== r.owner || receipt.epoch !== r.epoch) contextError('ACCOUNT_CHANGED', 'Received GET belongs to another account epoch', 403);
+        if ([...contextRoutingKeys, 'sourceId'].some(key => receipt.R[key] !== r[key])) contextError('QA_SOURCE_RESPONSE_SCOPE_MISMATCH', 'requestId belongs to another exact source route');
+        sourceTrace('releases', { ...r, requestId: body.requestId });
+        receipt.releaseAttemptAt = Date.now(); receipt.releaseAttempts++;
+        if (receipt.terminalCause !== null || receipt.writeAttempted) {
+          return json(res, 409, { ok: false, code: receipt.terminalCause === 'finished' || receipt.writeAttempted && !receipt.terminalCause
+            ? 'QA_SOURCE_RESPONSE_ALREADY_RELEASED' : 'QA_SOURCE_RESPONSE_ALREADY_CLOSED', receipt: structuredClone(receipt) });
+        }
+        const key = sourceResponseKey(r), entry = sourceResponses.get(key);
+        if (!entry?.res || entry.receipt !== receipt) contextError('QA_SOURCE_RESPONSE_NOT_HELD', 'Exact original GET is no longer held');
+        if (entry.deadlineAt <= Date.now()) {
+          expireSourceResponse(entry);
+          return json(res, 409, { ok: false, code: 'QA_SOURCE_RESPONSE_ALREADY_CLOSED', receipt: structuredClone(receipt) });
+        }
+        // Deliver the original snapshot even when the UI has moved elsewhere.
+        // Only account epoch changes invalidate server authority, never UI state.
+        const written = finishSourceResponse(entry, 200, entry.snapshot);
+        return json(res, written ? 200 : 409, { ok: written, fixtureOnly: true,
+          ...(written ? {} : { code: 'QA_SOURCE_RESPONSE_ALREADY_CLOSED' }), receipt: structuredClone(receipt) });
+      }
       if (url.pathname === '/__qa/context-config') {
         failNextCapture = body.failNextCapture === true;
         holdNextCapture = body.holdNextCapture === true;
@@ -798,6 +1017,24 @@ const handler = async (req, res) => {
         contextPhase(run, body.phase);
       }
       return json(res, 200, { ok: true, fixtureOnly: true });
+    }
+    if (sourceStatusEnabled && url.pathname === '/context/sources') {
+      const query = exactContextQuery(url);
+      const r = codexContextRouting(query, { requireConversation: true });
+      if (req.method !== 'GET') return json(res, 405, { code: 'METHOD_NOT_ALLOWED', error: 'Use GET for source status' });
+      const snapshot = context.sourceStatus(r);
+      sourceTrace('reads', { ...r, response: structuredClone(snapshot) });
+      const pending = [...sourceResponses.entries()].find(([, entry]) => sameSourceConversation(entry.route, r) && !entry.res);
+      if (pending) {
+        const [key, entry] = pending;
+        if (entry.mode === 'error') { sourceResponses.delete(key); return json(res, 503, { code: 'QA_SOURCE_STATUS_FAILED', error: 'Explicit source status failure' }); }
+        receiveSourceResponse(entry, res, snapshot);
+        if (entry.deadlineAt <= Date.now()) {
+          expireSourceResponse(entry);
+        }
+        return;
+      }
+      return json(res, 200, snapshot);
     }
     if (req.method === 'GET' && url.pathname === '/context/capabilities' && claudeFixture) {
       if (!claudeContextAvailable) return json(res, 404, { code: 'CLAUDE_CONTEXT_UNSUPPORTED', error: 'B2 context capability unavailable' });
@@ -835,12 +1072,12 @@ const handler = async (req, res) => {
     const captureRoute = url.pathname.match(/^\/context\/captures\/([\da-f-]{36})$/i);
     if (req.method === 'GET' && captureRoute) {
       if (!claudeFixture && !authLoggedIn) return json(res, 403, { error: 'Fixture account is signed out' });
-      const routingKeys = claudeFixture ? ['engineId', 'engineProfileId', 'clientThreadId', 'conversationId'] : [];
-      if ([...url.searchParams.keys()].some(key => !['startLine', 'endLine', 'packetId', ...routingKeys].includes(key))) return json(res, 400, { error: 'Unknown inspector query field' });
-      const authority = claudeFixture ? claudeContextRouting(Object.fromEntries(url.searchParams)) : null;
+      const query = exactContextQuery(url, ['startLine', 'endLine', 'packetId']);
+      const authority = claudeFixture ? claudeContextRouting(query)
+        : contextRoutingKeys.some(key => url.searchParams.has(key)) ? codexContextRouting(query) : null;
       const options = Object.fromEntries(['startLine', 'endLine'].filter(key => url.searchParams.has(key)).map(key => [key, Number(url.searchParams.get(key))]));
       if (url.searchParams.has('packetId')) options.packetId = url.searchParams.get('packetId');
-      return json(res, 200, context.inspect(captureRoute[1], options, authority?.owner || accountVariant, authority?.clientThreadId, authority?.conversationId));
+      return json(res, 200, await context.inspect(captureRoute[1], options, authority?.owner || accountVariant, authority?.clientThreadId, authority?.conversationId));
     }
     if (req.method === 'POST' && url.pathname === '/__qa/release') {
       if (req.headers['x-egdesk-qa-token'] !== token) return json(res, 403, { error: 'Fixture token required' });
@@ -905,6 +1142,9 @@ const handler = async (req, res) => {
           claudeAccountVariant = body.variant; claudeEpoch++;
           broadcastFixtureEvent({ type: 'engine.status', v: 1, engines: engineRows(), ts: Date.now() });
         } else {
+          codexContextEpoch++;
+          for (const entry of new Set([...sourceResponses.values(), ...sourceResponsesInFlight])) finishSourceResponse(entry, 403,
+            { code: 'ACCOUNT_CHANGED', error: 'Fixture account epoch changed' }, 'account-change');
           accountVariant = body.variant;
           broadcastFixtureEvent({ type: 'auth.status', v: 1, provider: 'codex', status: authSnapshot() });
         }
@@ -976,13 +1216,33 @@ const handler = async (req, res) => {
     }
     if (req.method === 'POST' && url.pathname === '/chat/resume') {
       const body = await bodyJson(req);
+      let sourceChangeResume;
+      if (sourceChangeScene) {
+        const seed = sourceChangeScene.identities.find(row => row.conversationId === body.conversationId);
+        if (!seed) contextError('CONTEXT_THREAD_MISMATCH', 'Resume requires an exact seeded conversation', 403);
+        // The real Chat resume API permits an omitted profile. Default only
+        // this seed resume validation copy, never Context GET/control or the
+        // received request. Explicit null/wrong values remain invalid.
+        const engineProfileIdDefaulted = !Object.hasOwn(body, 'engineProfileId');
+        const validationBody = engineProfileIdDefaulted ? { ...body, engineProfileId: seed.engineProfileId } : body;
+        // Match the real durable resume boundary: a new client nonce cannot
+        // inherit an old native conversation. Never repair/rebind that pair.
+        // Malformed client IDs still go through the existing strict validator.
+        if (bounded(validationBody.clientThreadId, 512) && validationBody.clientThreadId.trim()
+          && !validationBody.clientThreadId.includes('\0') && validationBody.clientThreadId !== seed.clientThreadId) {
+          contextError('NATIVE_BINDING_MISMATCH', 'Native conversation is not bound to this local chat', 409);
+        }
+        const authority = codexContextRouting(validationBody, { requireConversation: true });
+        sourceChangeResume = { requestBody: structuredClone(body), engineProfileIdDefaulted,
+          validatedRoute: Object.fromEntries(contextRoutingKeys.map(key => [key, authority[key]])) };
+      }
       if (claudeFixture && (body.engineId !== 'claude' || ![...runs.values()].some(run =>
         run.engineId === 'claude' && run.conversationId === body.conversationId && run.clientThreadId === body.clientThreadId
         && (!run.fixtureOwner || run.fixtureOwner === claudeOwner())))) {
         return json(res, 409, { code: 'ENGINE_MISMATCH', error: 'Resume must preserve the owned Claude conversation and client binding' });
       }
       observed.resumes.push({ conversationId: body.conversationId, clientThreadId: body.clientThreadId || null,
-        ...(claudeFixture ? { engineId: body.engineId } : {}) });
+        ...(claudeFixture ? { engineId: body.engineId } : {}), ...(sourceChangeResume ? { sourceChangeResume } : {}) });
       const snapshot = conversationState(body.conversationId || '');
       const authority = [...runs.values()].find(run => run.conversationId === body.conversationId)?.fixtureContextAuthority;
       if (authority) assertClaudeContextCurrent(authority);
@@ -1203,6 +1463,10 @@ const handler = async (req, res) => {
   }
 };
 const dispose = () => {
+  sourceChangeClosing = true;
+  for (const entry of new Set([...sourceResponses.values(), ...sourceResponsesInFlight])) finishSourceResponse(entry, 503,
+    { code: 'QA_FIXTURE_CLOSED', error: 'Fixture disposed' }, 'server-close');
+  if (sourceChangeReady) return sourceChangeReady.then(scene => scene.dispose(), () => {});
   if (originFileReady) {
     originFileClosing = true;
     if (!originFileClosePromise) originFileClosePromise = originFileReady.then(value => value.dispose());
@@ -1218,7 +1482,7 @@ const dispose = () => {
   portableTransferFixture?.dispose();
   return projectFileFixture?.dispose();
 };
-return { handler, dispose, ...(taskGateReady || originFileReady ? { ready: taskGateReady || originFileReady } : {}), info: { kind: 'egdesk-qa-fixture-ready', host: HOST, port: PORT,
+return { handler, dispose, ...(taskGateReady || originFileReady || sourceChangeReady ? { ready: taskGateReady || originFileReady || sourceChangeReady } : {}), info: { kind: 'egdesk-qa-fixture-ready', host: HOST, port: PORT,
   ...(projectFileFixture ? projectFileFixture.info : {}),
   ...(claudeFixture ? { claudeFixture: true, claudeReaderFixture, providerTurns: 0 } : {}),
   ...(runOutputsFixture ? { runOutputsFixture: true, providerTurns: 0 } : {}),

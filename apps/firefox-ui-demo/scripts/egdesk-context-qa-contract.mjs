@@ -222,6 +222,124 @@ export function assertImmutableContextRead(before, after) {
   return true;
 }
 
+const SOURCE_CHANGE_LABELS = Object.freeze({
+  loading: '원본 변경 정보 확인 중', active: '추적 범위에서 감지된 변경 없음',
+  missing: '변경 추적 기록 없음 · 최신 여부 미확인', failed: '원본 변경 정보를 확인하지 못했습니다',
+  fileChanged: '캡처 후 파일 변경 감지', navigated: '캡처 후 브라우저 페이지 이동 감지', unknown: '캡처 후 원본 변경 감지',
+});
+
+export function assertContextSourceChangeScope(actual, expected) {
+  assert.equal(expected.engineId, 'codex', 'CTX04 never falls back from another engine to Codex');
+  for (const key of ['owner', 'engineId', 'engineProfileId', 'clientThreadId', 'conversationId', 'sourceId']) {
+    text(expected[key], `Expected source-status ${key}`);
+    assert.equal(actual?.[key], expected[key], `Source-status crossed ${key}`);
+  }
+  return true;
+}
+
+// Tracking is separate mutable metadata. No absent row, active row or failed
+// query can certify that an immutable capture is the latest original.
+export function contextSourceChangeResponse(response, scope) {
+  assertContextSourceChangeScope(scope, scope);
+  assert.equal(response?.conversationId, scope.conversationId, 'Source-status response crossed conversationId');
+  assert.ok(Array.isArray(response.sources), 'Source-status sources must be explicit');
+  const rows = response.sources.filter(row => row?.sourceId === scope.sourceId);
+  assert.ok(rows.length <= 1, 'Source-status needs exactly one matching source, not a first-row fallback');
+  if (!rows.length) return Object.freeze({ state: 'missing', reason: null, changedAt: null });
+  const row = rows[0];
+  assert.ok(['active', 'stale'].includes(row.state), 'Unknown source tracking state');
+  if (row.state === 'active') return Object.freeze({ state: 'active', reason: null, changedAt: null });
+  const reason = ['fileChanged', 'navigated'].includes(row.reason) ? row.reason : 'unknown';
+  const changedAt = Number.isFinite(row.changedAt) && row.changedAt >= 0 && Number.isFinite(new Date(row.changedAt).getTime())
+    ? row.changedAt : null;
+  return Object.freeze({ state: 'stale', reason, changedAt });
+}
+
+export function assertContextSourceChangePanel(panel, { scope, state, reason = null, changedAt = null, snapshot, before }) {
+  assertContextSourceChangeScope(panel?.scope, scope);
+  assert.ok(['loading', 'active', 'stale', 'missing', 'failed'].includes(state), 'Expected source-change state must be explicit');
+  assert.equal(panel.exists, true, 'Historical inspector must remain open');
+  assert.equal(panel.statusCount, 1, 'Exactly one source-change line');
+  assert.equal(panel.state, state, 'Source-change line has the wrong state');
+  assert.equal(panel.reason || null, state === 'stale' ? reason : null, 'Source-change reason differs');
+  assert.equal(panel.statusSourceId, scope.sourceId, 'Source-change line crossed immutable source');
+  assert.equal(panel.statusConversationId, scope.conversationId, 'Source-change line crossed native conversation');
+  assert.equal(panel.sourceId, scope.sourceId, 'Historical inspector changed its capture');
+  assert.equal(panel.placedBetweenSourceAndDelivery, true, 'Source-change metadata must follow source label and precede delivery');
+  assert.equal(panel.statusReadable, true, 'Source-change text must be painted, unclipped and unobscured');
+  const label = SOURCE_CHANGE_LABELS[state === 'stale' ? reason : state];
+  assert.ok(label, 'Unknown expected stale reason');
+  assert.equal(panel.statusText.split(' · 감지 시각 ')[0], label, 'Source tracking wording must not imply latest-source certainty');
+  assert.equal(panel.changedAt, state === 'stale' && changedAt !== null ? new Date(changedAt).toISOString() : null,
+    'Detection time is distinct from capture time');
+  const recorded = captureContextReadEvidence(snapshot);
+  assert.equal(recorded.capture.sourceId, scope.sourceId);
+  if (recorded.delivered) assert.equal(recorded.delivered.binding.conversationId, scope.conversationId,
+    'Historical packet binding cannot be mixed with another conversation status');
+  assert.equal(panel.sourceText, recorded.source.text, 'Status changed immutable source body/range');
+  const range = recorded.source.range;
+  assert.equal(panel.sourceLabel, `원문 캡처 · ${range.startLine}–${range.endLine} / ${range.totalLines}행${recorded.capture.truncated ? ' · 일부 캡처' : ''}`,
+    'Visible source range must match the actual stored range, not the first UI label');
+  assert.deepEqual(panel.sourceHashes, [recorded.capture.hash], 'Rendered whole-capture hash differs from the store');
+  assert.deepEqual(panel.rangeHashes, [recorded.source.rangeHash], 'Rendered range hash differs from the exact stored body');
+  assert.equal(panel.packetId, recorded.delivered?.packetId ?? null, 'Status changed stored packet identity');
+  assert.equal(panel.packetText, recorded.delivered?.text ?? null, 'Status changed exact stored payload');
+  assert.deepEqual(panel.packetMetadataValues, recorded.delivered ? [{ mode: recorded.delivered.mode,
+    packetId: recorded.delivered.packetId, hash: recorded.delivered.hash }] : [], 'Rendered delivery metadata differs from the stored payload hash/identity');
+  if (before) for (const key of ['sourceId', 'sourceText', 'sourceMetadata', 'sourceLabel', 'packetId', 'packetText', 'packetMetadata']) {
+    assert.deepEqual(panel[key], before[key], `Source-status update changed immutable inspector ${key}`);
+  }
+  return true;
+}
+
+export function assertContextSourceRequest(receipt, { route, account, holdId }) {
+  text(holdId, 'Exact armed holdId'); text(account, 'Expected fixture account');
+  assert.equal(receipt?.holdId, holdId, 'Source GET belongs to another hold');
+  assert.deepEqual(receipt.R, route, 'Source GET crossed the exact route');
+  assert.equal(receipt.account, account, 'Source GET crossed account');
+  assert.equal(receipt.heldSourceId, route.sourceId, 'Held source differs from requested capture');
+  text(receipt.requestId, 'Actually received source GET requestId');
+  assert.ok(Number.isSafeInteger(receipt.epoch) && receipt.epoch >= 0, 'Source GET needs an account epoch');
+  assert.ok(Number.isFinite(receipt.armedAt) && Number.isFinite(receipt.deadlineAt) && Number.isFinite(receipt.receivedAt)
+    && receipt.receivedAt >= receipt.armedAt && receipt.receivedAt < receipt.deadlineAt, 'Source GET was not received within its hold');
+  assert.match(receipt.snapshotHash || '', /^[0-9a-f]{64}$/, 'Held response snapshot hash is required');
+  assert.equal(receipt.terminalCause, null, 'Source request already terminated before the native action');
+  assert.equal(receipt.writeAttempted, false); assert.equal(receipt.releaseAttempts, 0);
+  return frozenCopy(receipt);
+}
+
+// These are server/transport facts only. Neither classification proves a UI
+// callback ran, and peer-close does not identify AbortController as its cause.
+export function classifyContextSourceTerminal(before, after, { actionStartedAt, actionFinishedAt, release }) {
+  for (const key of ['holdId', 'requestId', 'R', 'account', 'epoch', 'heldSourceId', 'armedAt', 'deadlineAt', 'receivedAt', 'snapshotHash']) {
+    assert.deepEqual(after?.[key], before[key], `Source terminal receipt changed ${key}`);
+    assert.deepEqual(release?.body?.receipt?.[key], before[key], `Release reply changed ${key}`);
+  }
+  assert.ok(Number.isFinite(actionStartedAt) && actionStartedAt >= before.receivedAt
+    && Number.isFinite(actionFinishedAt) && actionFinishedAt >= actionStartedAt, 'Source GET must precede the native action');
+  assert.ok(Number.isFinite(after.releaseAttemptAt) && after.releaseAttemptAt >= actionFinishedAt
+    && after.releaseAttemptAt < before.deadlineAt, 'Exact release must follow the native action within the hold budget');
+  assert.equal(after.releaseAttempts, 1, 'No repeated or guessed release attempts');
+  assert.equal(release.body.receipt.releaseAttemptAt, after.releaseAttemptAt);
+  assert.equal(release.body.receipt.releaseAttempts, 1);
+  if (after.terminalCause === 'peer-close-before-finish') {
+    assert.equal(release.httpStatus, 409); assert.equal(release.body.code, 'QA_SOURCE_RESPONSE_ALREADY_CLOSED');
+    assert.equal(release.body.receipt.terminalCause, 'peer-close-before-finish');
+    assert.equal(release.body.receipt.writeAttempted, false); assert.equal(after.writeAttempted, false);
+    assert.equal(after.finishAt, null); assert.equal(after.endReturnedAt, null); assert.equal(after.writableFinishedAtClose, false);
+    assert.ok(Number.isFinite(after.closeAt) && after.closeAt >= actionStartedAt && after.closeAt <= after.releaseAttemptAt,
+      'Peer close must follow the native action and precede the refused write');
+    return 'transportAborted';
+  }
+  assert.equal(after.terminalCause, 'finished', 'Expiry/server-close/account-change/write-error is not late-response proof');
+  assert.equal(release.httpStatus, 200); assert.equal(release.body.ok, true); assert.equal(release.body.receipt.writeAttempted, true);
+  assert.ok(release.body.receipt.terminalCause === null || release.body.receipt.terminalCause === 'finished');
+  assert.equal(after.writeAttempted, true); assert.equal(after.responseStatus, 200);
+  assert.ok(Number.isFinite(after.endReturnedAt) && after.endReturnedAt >= after.releaseAttemptAt
+    && Number.isFinite(after.finishAt) && after.finishAt >= after.releaseAttemptAt, 'Server response has not finished');
+  return 'serverResponseFinished';
+}
+
 // Verifies original file bytes and the exact requested stored source range.
 // A delivered tool packet is independent and is checked separately above.
 export function assertFrozenFileReadAfterMutation({ snapshotBefore, snapshotAfter, liveBefore, liveAfter, expectedSourceText }) {

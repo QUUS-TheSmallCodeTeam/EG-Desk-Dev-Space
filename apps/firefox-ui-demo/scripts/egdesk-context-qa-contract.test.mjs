@@ -4,7 +4,9 @@ import path from 'node:path';
 import test from 'node:test';
 import { assertBriefingTargets, assertContextCaptureBatch, assertContextEventIdentity, assertContextSendBindings,
   assertFrozenFileReadAfterMutation, assertImmutableContextRead, captureContextReadEvidence,
-  assertPublishedBriefing, assertStoredAgentDelivery, fingerprintQaBytes, observeQaFixtureFile, readContextInspectionPage } from './egdesk-context-qa-contract.mjs';
+  assertPublishedBriefing, assertStoredAgentDelivery, fingerprintQaBytes, observeQaFixtureFile, readContextInspectionPage,
+  assertContextSourceChangeScope, contextSourceChangeResponse, assertContextSourceChangePanel,
+  assertContextSourceRequest, classifyContextSourceTerminal } from './egdesk-context-qa-contract.mjs';
 import { bootstrapQaProfile, canonicalTempRoot, LOADER_FILES } from './egdesk-chat-qa-profile.mjs';
 
 // Synthetic metadata tests QA oracles only, never production capture/tool handling.
@@ -21,6 +23,126 @@ function inspection(capture, text, { startLine = 1, totalLines = text.split('\n'
 }
 
 const evidence = (capture, text) => captureContextReadEvidence(inspection(capture, text));
+
+const sourceScope = () => ({ owner: 'codex:fixture:owner-A', engineId: 'codex', engineProfileId: 'codex-default',
+  clientThreadId: 'wire-A', conversationId: 'conversation-A', sourceId: 'source-A' });
+
+function sourceChangeSample(state = 'active', reason = null, changedAt = null) {
+  const scope = sourceScope(), packetText = JSON.stringify({ fixtureOnly: true, selected: 'stored bounded excerpt' });
+  const binding = { conversationId: scope.conversationId, runId: 'run-A', answerId: `${scope.conversationId}/run-A` };
+  const packet = { role: 'agent_input', packetId: 'packet-A', mime: 'application/json', text: packetText,
+    hash: fingerprintQaBytes(packetText).sha256, mode: 'fixture-only', coverage: { sourceId: scope.sourceId },
+    deliveryStatus: 'sent-to-app-server', binding };
+  const snapshot = captureContextReadEvidence(inspection(metadata(), 'immutable source\nsecond line', {
+    delivered: packet, bindings: [{ bindingId: 'binding-A', ...binding }],
+  }));
+  const labels = { loading: '원본 변경 정보 확인 중', active: '추적 범위에서 감지된 변경 없음',
+    missing: '변경 추적 기록 없음 · 최신 여부 미확인', failed: '원본 변경 정보를 확인하지 못했습니다',
+    fileChanged: '캡처 후 파일 변경 감지', navigated: '캡처 후 브라우저 페이지 이동 감지', unknown: '캡처 후 원본 변경 감지' };
+  const panel = { exists: true, scope, sourceId: scope.sourceId, statusSourceId: scope.sourceId,
+    statusConversationId: scope.conversationId, state, reason, statusCount: 1, statusReadable: true,
+    placedBetweenSourceAndDelivery: true, statusText: labels[state === 'stale' ? reason : state]
+      + (changedAt === null ? '' : ' · 감지 시각 fixture-localized-time'),
+    changedAt: changedAt === null ? null : new Date(changedAt).toISOString(), sourceLabel: '원문 캡처 · 1–2 / 2행',
+    sourceText: snapshot.source.text, sourceMetadata: `캡처 hash: ${snapshot.capture.hash}`, packetId: packet.packetId,
+    sourceHashes: [snapshot.capture.hash], rangeHashes: [snapshot.source.rangeHash],
+    packetMetadataValues: [{ mode: packet.mode, packetId: packet.packetId, hash: packet.hash }],
+    packetText, packetMetadata: `hash ${packet.hash}` };
+  return { panel, expected: { scope, state, reason, changedAt, snapshot } };
+}
+
+test('CTX04 source status uses exact owner/engine/profile/thread/conversation/source, never another engine or first-row fallback', () => {
+  const scope = sourceScope();
+  assert.equal(assertContextSourceChangeScope({ ...scope }, scope), true);
+  for (const key of Object.keys(scope)) assert.throws(() => assertContextSourceChangeScope({ ...scope, [key]: 'foreign' }, scope), /crossed/);
+  assert.throws(() => assertContextSourceChangeScope({ ...scope, engineId: 'claude' }, { ...scope, engineId: 'claude' }), /never falls back/);
+  const response = { conversationId: scope.conversationId, sources: [
+    { sourceId: 'other', state: 'active', path: '/same/file', viewId: 'same-view' },
+    { sourceId: scope.sourceId, state: 'stale', reason: 'fileChanged', changedAt: 1700000000000 },
+  ] };
+  assert.deepEqual(contextSourceChangeResponse(response, scope), { state: 'stale', reason: 'fileChanged', changedAt: 1700000000000 });
+  assert.throws(() => contextSourceChangeResponse({ ...response, conversationId: 'conversation-B' }, scope), /crossed conversation/);
+  assert.throws(() => contextSourceChangeResponse({ ...response, sources: [...response.sources, response.sources[1]] }, scope), /exactly one/);
+});
+
+test('CTX04 the same capture can be stale in A and active in B; missing/evicted/restarted tracking never becomes freshness', () => {
+  const a = sourceScope(), b = { ...a, clientThreadId: 'wire-B', conversationId: 'conversation-B' };
+  assert.equal(contextSourceChangeResponse({ conversationId: a.conversationId,
+    sources: [{ sourceId: a.sourceId, state: 'stale', reason: 'navigated', changedAt: 1700000000000 }] }, a).state, 'stale');
+  assert.deepEqual(contextSourceChangeResponse({ conversationId: b.conversationId,
+    sources: [{ sourceId: a.sourceId, state: 'active' }] }, b), { state: 'active', reason: null, changedAt: null });
+  for (const sources of [[], [{ sourceId: 'foreign', state: 'active', viewId: 'same-view', path: '/same/file' }]]) {
+    assert.deepEqual(contextSourceChangeResponse({ conversationId: a.conversationId, sources }, a), { state: 'missing', reason: null, changedAt: null });
+  }
+  const unknown = contextSourceChangeResponse({ conversationId: a.conversationId,
+    sources: [{ sourceId: a.sourceId, state: 'stale', reason: 'unrecognized', changedAt: NaN }] }, a);
+  assert.deepEqual(unknown, { state: 'stale', reason: 'unknown', changedAt: null });
+});
+
+test('CTX04 loading/active/stale/missing/failed status is separate from immutable body/hash/range and exact stored payload', () => {
+  const before = sourceChangeSample('loading').panel;
+  for (const [state, reason, changedAt] of [['loading', null, null], ['active', null, null], ['missing', null, null], ['failed', null, null],
+    ['stale', 'fileChanged', 1700000000000], ['stale', 'navigated', 1700000001000], ['stale', 'unknown', null]]) {
+    const { panel, expected } = sourceChangeSample(state, reason, changedAt);
+    assert.equal(assertContextSourceChangePanel(panel, { ...expected, before }), true);
+  }
+  const { panel, expected } = sourceChangeSample();
+  for (const [key, value] of [['sourceText', 'new live body'], ['sourceMetadata', 'new hash'], ['packetText', '{}'],
+    ['packetId', 'new-packet'], ['sourceId', 'another-source'], ['sourceLabel', 'changed range'], ['packetMetadata', 'new delivery hash']]) {
+    assert.throws(() => assertContextSourceChangePanel({ ...panel, [key]: value }, { ...expected, before }));
+  }
+  assert.throws(() => assertContextSourceChangePanel({ ...panel, statusText: '최신 원본입니다' }, expected), /wording/);
+});
+
+test('CTX04 crossed packet binding, stale detection time, duplicate/unpainted or misplaced line is never accepted', () => {
+  const { panel, expected } = sourceChangeSample('stale', 'fileChanged', 1700000000000);
+  for (const change of [{ changedAt: new Date(1700000000001).toISOString() }, { statusCount: 2 }, { statusReadable: false },
+    { placedBetweenSourceAndDelivery: false }, { statusConversationId: 'conversation-B' }, { exists: false }]) {
+    assert.throws(() => assertContextSourceChangePanel({ ...panel, ...change }, expected));
+  }
+  const snapshot = structuredClone(expected.snapshot);
+  snapshot.delivered.binding = { ...snapshot.delivered.binding, conversationId: 'conversation-B', answerId: 'conversation-B/run-A' };
+  snapshot.bindings = [{ bindingId: 'binding-B', ...snapshot.delivered.binding }];
+  assert.throws(() => assertContextSourceChangePanel(panel, { ...expected, snapshot }), /packet binding/);
+  assert.throws(() => assertContextSourceChangePanel({ ...panel, scope: { ...panel.scope, conversationId: 'conversation-B' } }, expected), /crossed/);
+});
+
+test('review reproduction: an initially wrong range or delivery hash is rejected against the store, not frozen as the UI oracle', () => {
+  const { panel, expected } = sourceChangeSample();
+  for (const patch of [{ sourceLabel: '원문 캡처 · 201–240 / 610행' }, { sourceHashes: ['wrong'] }, { rangeHashes: ['wrong'] },
+    { packetMetadataValues: [{ ...panel.packetMetadataValues[0], hash: 'wrong-payload-hash' }] }]) {
+    const wrong = { ...panel, ...patch };
+    assert.throws(() => assertContextSourceChangePanel(wrong, { ...expected, before: wrong }), /range|hash|metadata/);
+  }
+});
+
+test('exact source terminal receipts distinguish peer-close from server finish, never UI callback delivery', () => {
+  const { owner, ...route } = sourceScope();
+  const before = { holdId: 'hold-A', requestId: 'request-A', R: route, account: 'a', epoch: 0, heldSourceId: route.sourceId,
+    armedAt: 10, deadlineAt: 9000, receivedAt: 20, snapshotHash: 'a'.repeat(64), releaseAttempts: 0,
+    writeAttempted: false, terminalCause: null, finishAt: null, closeAt: null, endReturnedAt: null, writableFinishedAtClose: null };
+  assert.deepEqual(assertContextSourceRequest(before, { route, account: 'a', holdId: 'hold-A' }), before);
+  const finished = { ...before, releaseAttemptAt: 60, releaseAttempts: 1, writeAttempted: true, responseStatus: 200,
+    endReturnedAt: 61, finishAt: 462, terminalCause: 'finished' };
+  const aborted = { ...before, releaseAttemptAt: 60, releaseAttempts: 1, closeAt: 40,
+    writableFinishedAtClose: false, terminalCause: 'peer-close-before-finish' };
+  const options = after => ({ actionStartedAt: 30, actionFinishedAt: 50, release: { httpStatus: after.writeAttempted ? 200 : 409,
+    body: { ok: after.writeAttempted, ...(after.writeAttempted ? {} : { code: 'QA_SOURCE_RESPONSE_ALREADY_CLOSED' }), receipt: structuredClone(after) } } });
+  assert.equal(classifyContextSourceTerminal(before, finished, options(finished)), 'serverResponseFinished');
+  assert.equal(classifyContextSourceTerminal(before, aborted, options(aborted)), 'transportAborted');
+  for (const change of [{ requestId: null }, { terminalCause: 'peer-close-before-finish' }, { receivedAt: null }, { snapshotHash: null }]) {
+    assert.throws(() => assertContextSourceRequest({ ...before, ...change }, { route, account: 'a', holdId: 'hold-A' }));
+  }
+  for (const patch of [{ finishAt: null }, { requestId: 'another' }, { account: 'b' }, { epoch: 1 }, { snapshotHash: 'b'.repeat(64) },
+    { R: { ...route, conversationId: 'foreign' } }, { terminalCause: 'expiry' }, { terminalCause: 'server-close' },
+    { terminalCause: 'account-change' }, { terminalCause: 'write-error' }]) {
+    assert.throws(() => classifyContextSourceTerminal(before, { ...finished, ...patch }, options({ ...finished, ...patch })));
+  }
+  assert.throws(() => classifyContextSourceTerminal(before, { ...aborted, writeAttempted: true }, options(aborted)));
+  assert.throws(() => classifyContextSourceTerminal(before, { ...aborted, closeAt: 25 }, options(aborted)));
+  const missing = options(aborted); missing.release.body.code = 'QA_SOURCE_RESPONSE_NOT_HELD';
+  assert.throws(() => classifyContextSourceTerminal(before, aborted, missing));
+});
 
 function fixture(t) {
   const source = fs.mkdtempSync(path.join(canonicalTempRoot(), 'egdesk-loader-fixture-'));
