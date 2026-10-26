@@ -5267,6 +5267,7 @@
 .egd-settings-detail-row dd { margin: 0; min-width: 0; overflow-wrap: anywhere; }
 .egd-settings-instructions { max-height: 160px; overflow: auto; white-space: pre-wrap; }
 .egd-settings-plain-list { margin: 0; padding-left: 16px; }
+.egd-settings-diff-values { white-space: pre-wrap; }
 .egd-settings-diff-values del { color: var(--egd-on-surface-variant); }
 .egd-settings-diff-values ins { text-decoration: none; font-weight: 600; }
 .egd-settings-version-row {
@@ -5283,6 +5284,12 @@
 
 /* --- Agent form --- */
 .egd-settings-agent-form { display: flex; flex-direction: column; gap: 12px; }
+.egd-settings-personality-editor { display: flex; flex-direction: column; gap: 10px; min-width: 0; }
+.egd-settings-personality-row { display: flex; flex-direction: column; gap: 6px; min-width: 0; padding-block: 6px; border-top: 1px solid var(--egd-outline-variant); }
+.egd-settings-personality-row-head,
+.egd-settings-personality-add { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.egd-settings-personality-list { margin: 0; padding-left: 18px; white-space: pre-wrap; overflow-wrap: anywhere; }
+.egd-settings-personality-list li + li { margin-top: 8px; }
 .egd-settings-field { display: flex; flex-direction: column; gap: 4px; }
 .egd-settings-form-label { font-size: 11.5px; font-weight: 650; color: var(--egd-on-surface-variant); }
 .egd-settings-form-input,
@@ -5381,11 +5388,12 @@
 .egd-settings-chip-remove:hover { color: var(--egd-on-surface); }
 .egd-settings-form-actions {
   position: sticky;
-  bottom: -18px;
+  bottom: 0;
+  z-index: 1;
   display: flex;
   justify-content: flex-end;
   gap: 8px;
-  padding: 10px 0 2px;
+  padding: 10px 0;
   background: var(--egd-surface-elevated);
   border-top: 1px solid var(--egd-outline-variant);
 }

@@ -5381,7 +5381,8 @@ function settingsFakeDocument() {
     removeEventListener(type, fn) { this.listeners[type] = (this.listeners[type] || []).filter(item => item !== fn); }
     get textContent() { return this.ownText + this.children.map(child => child.textContent).join(''); }
     set textContent(value) { this.children = []; this.ownText = String(value); }
-    focus() { doc.activeElement = this; }
+    focus(options) { doc.activeElement = this; this.focusOptions = options; }
+    setSelectionRange(start, end, direction) { Object.assign(this, { selectionStart: start, selectionEnd: end, selectionDirection: direction }); this.scrollTop = 0; }
     fire(type, extra = {}) { for (const fn of this.listeners[type] || []) fn({ stopPropagation() {}, preventDefault() {}, currentTarget: this, target: this, ...extra }); }
   }
   Object.assign(doc, {
@@ -14114,6 +14115,226 @@ test('Settings portable glue: saved draft is named as a draft, and unsaved form 
   assert.equal(h.part('settings-agent-transfer'), undefined, 'editing is not an exportable saved revision');
   h.emit(); assert.equal(h.part('settings-agent-form'), form, 'account/catalog notifications do not redraw the edit form');
   assert.equal(h.calls.filter(call => call.path.includes('/export?')).length, 0);
+});
+
+async function personalitySettingsHarness({ empty = false, conflict = false } = {}) {
+  const activeBody = normalizeProfileBody({ name: '사용 중 이름', role: '사용 중 역할',
+    personality: { examples: [{ user: '사용 중 질문', reply: '사용 중 답변' }], avoid: ['사용 중 금지 표현'] } });
+  const headBody = normalizeProfileBody({ name: '편집할 이름', role: '편집할 역할', instructions: '기존 지침',
+    personality: { tone: 'warm', traits: ['기존 특징'], speechNotes: '기존 말투 메모',
+      ...(empty ? {} : { examples: [{ user: '첫 질문', reply: '첫 답변\n둘째 줄' }, { user: '둘째 질문', reply: '둘째 답변' }], avoid: ['첫 표현', '둘째 표현'] }) },
+    expertise: ['기존 할 일'], toolPreferences: ['read'] });
+  const detail = { id: 'visible-agent', lifecycle: 'active', activeRevision: 2, headRevision: 3, hasDraft: true,
+    active: { revision: 2, body: activeBody }, head: { revision: 3, body: headBody } };
+  const puts = [];
+  const h = portableSettingsHarness({ initialDetail: detail, respond: (path, options) => {
+    if (path === '/profiles/visible-agent/draft' && options.method === 'PUT') {
+      const request = JSON.parse(options.body); puts.push(request);
+      if (conflict) {
+        detail.headRevision = 4; detail.head = { revision: 4, body: normalizeProfileBody({ name: '다른 곳의 초안',
+          personality: { examples: [{ user: '새 질문', reply: '새 답변' }], avoid: ['새 표현'] } }) };
+        throw Object.assign(new Error('conflict'), { status: 409, code: 'PROFILE_REVISION_CONFLICT' });
+      }
+      detail.headRevision++; detail.head = { revision: detail.headRevision, body: request.body };
+      return { id: detail.id, revision: detail.headRevision, unchanged: false, profile: structuredClone(detail) };
+    }
+    if (path.startsWith('/profiles/visible-agent/diff?')) return { from: 2, to: 3, changes: [
+      { field: 'personality.examples', before: activeBody.personality.examples, after: headBody.personality.examples },
+      { field: 'personality.avoid', before: activeBody.personality.avoid, after: headBody.personality.avoid },
+    ] };
+    return undefined;
+  } });
+  await settle();
+  const parts = id => settingsNodes(h.card, node => node.dataset.testid === id);
+  const at = (id, index = 0) => parts(id).find(node => node.dataset.index === String(index));
+  const field = name => h.document.getElementById(`${h.card.getAttribute('id')}-profile-${name}`);
+  const type = (node, value) => { node.value = value; node.fire('input'); return node; };
+  const edit = () => settingsButton(h.card, '편집').fire('click');
+  return { ...h, parts, at, field, type, edit, puts, activeBody, headBody };
+}
+
+test('Agent personality UI: active detail stays active, editing opens head rows directly, and diff shows both complete fields', async () => {
+  const h = await personalitySettingsHarness();
+  assert.match(h.part('settings-agent-detail-examples').textContent, /사용 중 질문.*사용 중 답변/);
+  assert.equal(h.part('settings-agent-detail-avoid').textContent, '사용 중 금지 표현');
+  settingsButton(h.card, '사용 중인 버전과 차이 보기').fire('click'); await settle();
+  const diff = h.parts('settings-agent-diff-row');
+  assert.deepEqual(diff.map(row => row.dataset.field), ['personality.examples', 'personality.avoid']);
+  assert.match(diff[0].textContent, /사용 중 질문[\s\S]*첫 질문[\s\S]*첫 답변\n둘째 줄[\s\S]*둘째 답변/);
+  assert.match(diff[1].textContent, /사용 중 금지 표현.*첫 표현, 둘째 표현/);
+  h.edit();
+  assert.deepEqual(h.parts('settings-agent-example-user').map(node => node.value), ['첫 질문', '둘째 질문']);
+  assert.deepEqual(h.parts('settings-agent-example-reply').map(node => node.value), ['첫 답변\n둘째 줄', '둘째 답변']);
+  assert.deepEqual(h.parts('settings-agent-avoid-text').map(node => node.value), ['첫 표현', '둘째 표현']);
+  const order = h.part('settings-agent-form').children.map(node => node.dataset.field).filter(Boolean);
+  assert.deepEqual(order.slice(order.indexOf('speechNotes'), order.indexOf('expertise') + 1),
+    ['speechNotes', 'personalityExamples', 'personalityAvoid', 'expertise']);
+  assert.equal(h.at('settings-agent-example-reply').getAttribute('rows'), '2');
+  assert.equal(h.at('settings-agent-example-user').getAttribute('maxlength'), null, 'retain pasted text for explicit validation, never silently truncate');
+  assert.equal(h.puts.length, 0);
+});
+
+test('Agent personality UI: empty lists do not open eleven blank rows; one Add opens one row and limits stop further adds', async () => {
+  const h = await personalitySettingsHarness({ empty: true }); h.edit();
+  assert.equal(h.parts('settings-agent-example-row').length, 0); assert.equal(h.parts('settings-agent-avoid-row').length, 0);
+  for (let index = 0; index < Chat.PROFILE_FORM_LIMITS.examples; index++) {
+    h.part('settings-agent-example-add').fire('click');
+    assert.equal(h.parts('settings-agent-example-row').length, index + 1);
+    assert.equal(h.document.activeElement, h.at('settings-agent-example-user', index));
+    h.type(h.at('settings-agent-example-user', index), `질문 ${index}`);
+    h.type(h.at('settings-agent-example-reply', index), `답변 ${index}`);
+  }
+  assert.equal(h.part('settings-agent-example-add').getAttribute('disabled'), 'true');
+  h.part('settings-agent-example-add').fire('click'); assert.equal(h.parts('settings-agent-example-row').length, 3);
+  for (let index = 0; index < Chat.PROFILE_FORM_LIMITS.avoid; index++) {
+    h.part('settings-agent-avoid-add').fire('click');
+    assert.equal(h.parts('settings-agent-avoid-row').length, index + 1);
+    h.type(h.at('settings-agent-avoid-text', index), `피할 표현 ${index}`);
+  }
+  assert.equal(h.part('settings-agent-avoid-add').getAttribute('disabled'), 'true');
+  h.part('settings-agent-avoid-add').fire('click'); assert.equal(h.parts('settings-agent-avoid-row').length, 8);
+  h.at('settings-agent-example-remove', 1).fire('click');
+  assert.deepEqual(h.parts('settings-agent-example-user').map(node => node.value), ['질문 0', '질문 2']);
+  assert.equal(h.part('settings-agent-example-add').getAttribute('disabled'), null);
+  h.at('settings-agent-avoid-remove', 1).fire('click');
+  assert.equal(h.parts('settings-agent-avoid-row').length, 7);
+  assert.equal(h.part('settings-agent-avoid-add').getAttribute('disabled'), null);
+});
+
+test('Agent personality UI: add/delete/tone redraws keep pending chips, unrelated fields, row identity, caret, focus and scroll', async () => {
+  const h = await personalitySettingsHarness(); h.edit();
+  const chips = { traits: '미추가 특징', expertise: '미추가 할 일', toolPreferences: 'browser' };
+  for (const [name, value] of Object.entries(chips)) h.type(h.field(name), value);
+  h.type(h.field('name'), '이름 유지'); h.type(h.field('role'), '역할 유지');
+  h.type(h.field('speechNotes'), '메모 유지'); h.type(h.field('instructions'), '지침 유지');
+  h.part('settings-agent-example-add').fire('click');
+  h.type(h.at('settings-agent-example-user', 2), '추가 질문'); h.type(h.at('settings-agent-example-reply', 2), '추가 답변');
+  h.part('settings-agent-avoid-add').fire('click'); h.type(h.at('settings-agent-avoid-text', 2), '추가 표현');
+  const input = h.at('settings-agent-example-reply', 1), inputId = input.getAttribute('id');
+  input.focus(); input.setSelectionRange(1, 4, 'backward'); input.scrollTop = 9; input.scrollLeft = 3;
+  const content = settingsNodes(h.card, node => node.className === 'egd-settings-content')[0];
+  content.scrollTop = 345; content.scrollLeft = 2;
+  h.at('settings-agent-example-remove', 0).fire('click');
+  settingsButton(h.card, '간결').fire('click');
+  h.at('settings-agent-avoid-remove', 0).fire('click');
+  const restored = h.at('settings-agent-example-reply', 0);
+  assert.equal(restored.getAttribute('id'), inputId, 'deleting a preceding row does not change this input identity');
+  assert.equal(h.document.activeElement, restored);
+  assert.deepEqual([restored.selectionStart, restored.selectionEnd, restored.selectionDirection, restored.scrollTop, restored.scrollLeft], [1, 4, 'backward', 9, 3]);
+  assert.deepEqual(restored.focusOptions, { preventScroll: true });
+  assert.deepEqual([content.scrollTop, content.scrollLeft], [345, 2]);
+  for (const [name, value] of Object.entries(chips)) assert.equal(h.field(name).value, value);
+  assert.deepEqual(['name', 'role', 'speechNotes', 'instructions'].map(name => h.field(name).value), ['이름 유지', '역할 유지', '메모 유지', '지침 유지']);
+  h.part('settings-agent-save').fire('click'); h.part('settings-agent-save').fire('click'); await settle();
+  assert.equal(h.puts.length, 1, 'only the existing draft save route writes once');
+  const request = h.puts[0];
+  assert.equal(request.expectedRevision, 3); assert.equal(request.body.personality.tone, 'concise');
+  assert.deepEqual(request.body.personality.traits, ['기존 특징', chips.traits]);
+  assert.deepEqual(request.body.expertise, ['기존 할 일', chips.expertise]);
+  assert.deepEqual(request.body.toolPreferences, ['read', chips.toolPreferences]);
+  assert.deepEqual(request.body.personality.examples, [{ user: '둘째 질문', reply: '둘째 답변' }, { user: '추가 질문', reply: '추가 답변' }]);
+  assert.deepEqual(request.body.personality.avoid, ['둘째 표현', '추가 표현']);
+  assert.equal(h.detail.activeRevision, 2); assert.deepEqual(h.detail.active.body, h.activeBody);
+  assert.equal(h.calls.some(call => call.path.includes('/activate')), false);
+});
+
+test('Agent personality UI: cancel writes nothing and reopening head has neither cancelled rows nor pending chips', async () => {
+  const h = await personalitySettingsHarness(); h.edit();
+  h.type(h.at('settings-agent-example-reply'), '취소할 답변'); h.type(h.at('settings-agent-avoid-text'), '취소할 표현');
+  h.type(h.field('traits'), '취소할 미추가 특징'); h.part('settings-agent-example-add').fire('click');
+  h.part('settings-agent-cancel').fire('click'); await settle();
+  assert.equal(h.puts.length, 0); assert.equal(h.calls.some(call => ['POST', 'PUT'].includes(call.method)), false);
+  h.edit();
+  assert.equal(h.parts('settings-agent-example-row').length, 2);
+  assert.equal(h.at('settings-agent-example-reply').value, '첫 답변\n둘째 줄');
+  assert.equal(h.at('settings-agent-avoid-text').value, '첫 표현'); assert.equal(h.field('traits').value, '');
+});
+
+test('Agent personality UI: all three full-size pairs and eight expressions save in one draft without changing active', async () => {
+  const h = await personalitySettingsHarness({ empty: true }); h.edit();
+  const limits = Chat.PROFILE_FORM_LIMITS, examples = [], avoid = [];
+  for (let index = 0; index < limits.examples; index++) {
+    const pair = { user: String(index) + '🙂'.repeat(limits.exampleUser - 1), reply: String(index) + '답'.repeat(limits.exampleReply - 1) };
+    examples.push(pair); h.part('settings-agent-example-add').fire('click');
+    h.type(h.at('settings-agent-example-user', index), pair.user); h.type(h.at('settings-agent-example-reply', index), pair.reply);
+  }
+  for (let index = 0; index < limits.avoid; index++) {
+    const item = String(index) + '가'.repeat(limits.avoidItem - 1);
+    avoid.push(item); h.part('settings-agent-avoid-add').fire('click'); h.type(h.at('settings-agent-avoid-text', index), item);
+  }
+  h.part('settings-agent-save').fire('click'); await settle();
+  assert.equal(h.puts.length, 1);
+  assert.deepEqual(h.puts[0].body.personality.examples, examples); assert.deepEqual(h.puts[0].body.personality.avoid, avoid);
+  assert.equal(h.detail.activeRevision, 2); assert.deepEqual(h.detail.active.body, h.activeBody);
+  assert.match(h.part('settings-agent-detail-examples').textContent, /사용 중 질문/, 'saving does not change the active detail meaning');
+  h.edit();
+  assert.deepEqual(h.parts('settings-agent-example-user').map(node => node.value), examples.map(pair => pair.user));
+  assert.deepEqual(h.parts('settings-agent-avoid-text').map(node => node.value), avoid);
+});
+
+test('Agent personality UI: explicitly deleting every row saves omitted body keys, not blank placeholder rows', async () => {
+  const h = await personalitySettingsHarness(); h.edit();
+  while (h.parts('settings-agent-example-remove').length) h.at('settings-agent-example-remove').fire('click');
+  while (h.parts('settings-agent-avoid-remove').length) h.at('settings-agent-avoid-remove').fire('click');
+  h.part('settings-agent-save').fire('click'); await settle();
+  assert.equal(h.puts.length, 1);
+  assert.equal(Object.hasOwn(h.puts[0].body.personality, 'examples'), false);
+  assert.equal(Object.hasOwn(h.puts[0].body.personality, 'avoid'), false);
+});
+
+test('Agent personality UI: invalid and over-limit rows stay visible and never save or silently truncate', async () => {
+  const h = await personalitySettingsHarness(); h.edit();
+  const user = '가'.repeat(Chat.PROFILE_FORM_LIMITS.exampleUser + 1), avoid = '나'.repeat(Chat.PROFILE_FORM_LIMITS.avoidItem + 1);
+  h.type(h.at('settings-agent-example-user'), user); h.type(h.at('settings-agent-avoid-text'), avoid);
+  h.part('settings-agent-save').fire('click'); await settle();
+  assert.equal(h.puts.length, 0);
+  assert.equal(h.at('settings-agent-example-user').value, user); assert.equal(h.at('settings-agent-avoid-text').value, avoid);
+  assert.match(h.part('settings-agent-errors').textContent, /말투 예시 1행.*100자/);
+  assert.match(h.part('settings-agent-errors').textContent, /피할 표현 1행.*80자/);
+  assert.equal(h.document.activeElement, h.part('settings-agent-examples'));
+  h.type(h.at('settings-agent-example-user'), '정상 질문'); h.type(h.at('settings-agent-avoid-text'), '정상 표현');
+  h.part('settings-agent-example-add').fire('click'); h.type(h.at('settings-agent-example-user', 2), '짝 없는 질문');
+  h.part('settings-agent-save').fire('click'); await settle();
+  assert.equal(h.puts.length, 0); assert.equal(h.parts('settings-agent-example-row').length, 3);
+  assert.match(h.part('settings-agent-errors').textContent, /말투 예시 3행의 답변/);
+  const reply = '다'.repeat(Chat.PROFILE_FORM_LIMITS.exampleReply + 1);
+  h.type(h.at('settings-agent-example-reply', 2), reply); h.part('settings-agent-save').fire('click'); await settle();
+  assert.equal(h.puts.length, 0); assert.equal(h.at('settings-agent-example-reply', 2).value, reply);
+  assert.match(h.part('settings-agent-errors').textContent, /말투 예시 3행.*280자/);
+});
+
+test('Agent personality UI: 409 shows latest head, retains the entire raw edit, and restoring it never resubmits', async () => {
+  const h = await personalitySettingsHarness({ conflict: true }); h.edit();
+  h.type(h.at('settings-agent-example-user'), '  내 질문  '); h.type(h.at('settings-agent-example-reply'), '내 답변\n둘째 줄');
+  h.type(h.at('settings-agent-avoid-text'), '  내 금지 표현  '); h.type(h.field('speechNotes'), '내 메모');
+  h.type(h.field('traits'), '미추가 특징'); h.type(h.field('expertise'), '미추가 할 일');
+  settingsButton(h.card, '간결').fire('click');
+  h.part('settings-agent-save').fire('click'); await settle();
+  assert.equal(h.puts.length, 1); assert.equal(h.field('name').value, '다른 곳의 초안');
+  assert.deepEqual(h.parts('settings-agent-example-user').map(node => node.value), ['새 질문']);
+  assert.deepEqual(h.parts('settings-agent-avoid-text').map(node => node.value), ['새 표현']);
+  assert.ok(h.part('settings-agent-restore-kept'));
+  h.part('settings-agent-restore-kept').fire('click'); await settle(); h.emit(); await settle();
+  assert.equal(h.puts.length, 1, 'restore is local only, with no automatic retry');
+  assert.equal(h.field('name').value, '편집할 이름'); assert.equal(h.field('speechNotes').value, '내 메모');
+  assert.equal(h.at('settings-agent-example-user').value, '  내 질문  ');
+  assert.equal(h.at('settings-agent-example-reply').value, '내 답변\n둘째 줄');
+  assert.equal(h.at('settings-agent-avoid-text').value, '  내 금지 표현  ');
+  assert.match(h.part('settings-agent-form').textContent, /미추가 특징.*미추가 할 일/);
+  assert.equal(settingsButton(h.card, '간결').getAttribute('aria-pressed'), 'true');
+  assert.equal(h.detail.activeRevision, 2);
+  assert.equal(h.calls.some(call => call.path.includes('/activate')), false);
+});
+
+test('Agent personality UI: long form keeps the existing inner scroller and visible sticky actions without reducing type size', () => {
+  assert.equal(cssDeclarationsFor(surfaceCss, '.egd-settings-content')['overflow-y'], 'auto');
+  assert.equal(cssDeclarationsFor(surfaceCss, '.egd-settings-content')['min-height'], '0');
+  const actions = cssDeclarationsFor(surfaceCss, '.egd-settings-form-actions');
+  assert.equal(actions.position, 'sticky'); assert.equal(actions.bottom, '0');
+  assert.equal(cssDeclarationsFor(surfaceCss, '.egd-settings-personality-editor')['min-width'], '0');
+  assert.equal(cssDeclarationsFor(surfaceCss, '.egd-settings-personality-list')['white-space'], 'pre-wrap');
+  assert.equal(cssDeclarationsFor(surfaceCss, '.egd-settings-diff-values')['white-space'], 'pre-wrap');
+  assert.match(surfaceCss, /font: 13px\/1\.45 var\(--egd-font\)/);
 });
 
 function productionTaskAnswerFactory() {

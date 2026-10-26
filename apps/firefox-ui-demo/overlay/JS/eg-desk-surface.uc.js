@@ -12801,6 +12801,12 @@
     const agents = { mode: 'list', profileId: null, detail: null, revisions: [], diff: null, form: null, baseRevision: null,
       errors: [], notice: null, keptForm: null, busy: false, showArchived: false, focusField: null };
     const chipInputs = new Map();
+    const agentFormViews = new WeakMap();
+    let renderedAgentForm = null, agentFormRowSequence = 0;
+    const formView = form => {
+      if (!agentFormViews.has(form)) agentFormViews.set(form, { chips: new Map(), rows: {} });
+      return agentFormViews.get(form);
+    };
     const fieldId = (field) => `${id}-profile-${field}`;
     const profilePath = (profileId, suffix = '') => `/profiles/${encodeURIComponent(profileId)}${suffix}`;
     const profileApi = (path, init) => {
@@ -13089,7 +13095,7 @@
       contentArea.replaceChildren(section);
     };
 
-    const detailRow = (label, value) => el('div', { class: 'egd-settings-detail-row' }, el('dt', {}, label), el('dd', {}, value));
+    const detailRow = (label, value, props = {}) => el('div', { class: 'egd-settings-detail-row', ...props }, el('dt', {}, label), el('dd', {}, value));
     const chipRow = (items, empty) => items.length
       ? el('span', { class: 'egd-settings-chip-row' }, ...items.map((item) => el('span', { class: 'egd-settings-chip' }, item))) : empty;
     const renderAgentDetail = () => {
@@ -13162,6 +13168,12 @@
           detailRow('말투', tone),
           detailRow('성격 특징', chipRow(body.personality?.traits || [], '없음')),
           detailRow('말투 메모', body.personality?.speechNotes || '없음'),
+          detailRow('말투 예시', el('div', { data: { testid: 'settings-agent-detail-examples' } }, body.personality?.examples?.length
+            ? el('ol', { class: 'egd-settings-personality-list' }, ...body.personality.examples.map(pair => el('li', {},
+              el('div', {}, el('span', { class: 'egd-settings-form-label' }, '질문 · '), pair.user),
+              el('div', {}, el('span', { class: 'egd-settings-form-label' }, '답변 · '), pair.reply)))) : '없음')),
+          detailRow('피할 표현', el('div', { data: { testid: 'settings-agent-detail-avoid' } }, body.personality?.avoid?.length
+            ? el('ul', { class: 'egd-settings-personality-list' }, ...body.personality.avoid.map(item => el('li', {}, item))) : '없음')),
           detailRow('맡길 일', (body.expertise || []).length ? el('ul', { class: 'egd-settings-plain-list' }, ...body.expertise.map((item) => el('li', {}, item))) : '없음'),
           detailRow('지침', body.instructions ? el('div', { class: 'egd-settings-instructions' }, body.instructions) : '없음'),
           detailRow('선호 도구 (표시용)', chipRow(body.toolPreferences || [], '없음')),
@@ -13174,7 +13186,8 @@
           el('div', { class: 'egd-settings-subtitle' }, `버전 ${agents.diff.from} → 버전 ${agents.diff.to} 바뀐 점`,
             el('button', { class: 'egd-settings-link', onclick: () => { agents.diff = null; renderAgentsTab(); } }, '닫기')),
           agents.diff.rows.length ? el('dl', { class: 'egd-settings-detail-list' }, ...agents.diff.rows.map((row) => detailRow(row.label,
-            el('span', { class: 'egd-settings-diff-values' }, el('del', {}, row.before), el('span', { 'aria-hidden': 'true' }, ' → '), el('ins', {}, row.after)))))
+            el('span', { class: 'egd-settings-diff-values' }, el('del', {}, row.before), el('span', { 'aria-hidden': 'true' }, ' → '), el('ins', {}, row.after)),
+            { data: { testid: 'settings-agent-diff-row', field: row.field } })))
             : el('p', { class: 'egd-settings-section-sub' }, '바뀐 내용이 없습니다.')));
       }
       const versions = el('div', { class: 'egd-settings-versions', data: { testid: 'settings-agent-versions' } },
@@ -13225,12 +13238,16 @@
       };
       const chipList = (key, max, itemMax, placeholder) => {
         const input = el('input', { class: 'egd-settings-form-input', type: 'text', id: fieldId(key), maxlength: String(itemMax), placeholder,
+          data: { testid: 'settings-agent-chip-input', field: key },
           'aria-invalid': errorFor(key) ? 'true' : null });
+        input.value = formView(form).chips.get(key) || '';
+        input.addEventListener('input', () => formView(form).chips.set(key, input.value));
         chipInputs.set(key, input);
         const add = () => {
           const value = input.value.trim();
           if (!value || form[key].includes(value) || form[key].length >= max) return;
           form[key] = [...form[key], value];
+          input.value = '';
           agents.focusField = key;
           renderAgentsTab();
         };
@@ -13246,6 +13263,62 @@
             el('button', { class: 'egd-settings-btn', disabled: form[key].length >= max ? 'true' : null, onclick: add }, '추가'),
             el('span', { class: 'egd-settings-form-count' }, `${form[key].length}/${max}`)));
       };
+      const personalityList = (key, kind, max, columns) => {
+        const items = Array.isArray(form[key]) ? form[key] : [];
+        const keys = formView(form).rows[key] ||= [];
+        while (keys.length < items.length) keys.push(`row-${++agentFormRowSequence}`);
+        const label = kind === 'example' ? '말투 예시' : '피할 표현';
+        const firstField = at => `${key}-${keys[at]}-${columns[0].name}`;
+        const group = el('div', { class: 'egd-settings-personality-editor', role: 'group', 'aria-label': label,
+          id: fieldId(key), tabindex: '-1', data: { testid: kind === 'example' ? 'settings-agent-examples' : 'settings-agent-avoid' } });
+        items.forEach((item, index) => {
+          const row = el('div', { class: 'egd-settings-personality-row', data: { testid: `settings-agent-${kind}-row`, index: String(index) } });
+          const remove = () => {
+            const removedFocus = row.contains(document.activeElement);
+            form[key] = items.filter((_, at) => at !== index); keys.splice(index, 1);
+            agents.focusField = removedFocus ? (keys.length ? firstField(Math.min(index, keys.length - 1)) : `${key}-add`) : null;
+            renderAgentsTab();
+          };
+          row.appendChild(el('div', { class: 'egd-settings-personality-row-head' },
+            el('span', { class: 'egd-settings-form-label' }, `${label} ${index + 1}`),
+            el('button', { class: 'egd-settings-link', type: 'button', 'aria-label': `${label} ${index + 1} 삭제`,
+              data: { testid: `settings-agent-${kind}-remove`, index: String(index) }, disabled: agents.busy ? 'true' : null, onclick: remove }, '삭제')));
+          for (const column of columns) {
+            const controlId = fieldId(`${key}-${keys[index]}-${column.name}`);
+            // Let validation report the full pasted value; maxlength would
+            // silently truncate it and counts UTF-16 rather than code points.
+            const control = el(column.multiline ? 'textarea' : 'input', {
+              class: column.multiline ? 'egd-settings-form-textarea' : 'egd-settings-form-input',
+              id: controlId, ...(column.multiline ? { rows: '2' } : { type: 'text' }),
+              'aria-invalid': errorFor(key) ? 'true' : null,
+              data: { testid: `settings-agent-${kind}-${column.name}`, index: String(index) },
+            });
+            const value = kind === 'example' ? item?.[column.name] : item;
+            control.value = typeof value === 'string' ? value : '';
+            const counter = el('div', { class: 'egd-settings-form-count' }, `${Array.from(control.value).length}/${column.limit}`);
+            control.addEventListener('input', () => {
+              if (kind === 'example') form[key][index] = { ...form[key][index], [column.name]: control.value };
+              else form[key][index] = control.value;
+              counter.textContent = `${Array.from(control.value).length}/${column.limit}`;
+            });
+            row.appendChild(el('div', { class: 'egd-settings-form-area' },
+              el('label', { class: 'egd-settings-form-label', for: controlId }, column.label), control, counter));
+          }
+          group.appendChild(row);
+        });
+        group.appendChild(el('div', { class: 'egd-settings-personality-add' },
+          el('button', { class: 'egd-settings-btn', type: 'button', id: fieldId(`${key}-add`),
+            data: { testid: `settings-agent-${kind}-add` }, disabled: agents.busy || items.length >= max ? 'true' : null,
+            onclick: () => {
+              if (agents.busy || items.length >= max) return;
+              form[key] = [...items, kind === 'example' ? { user: '', reply: '' } : ''];
+              keys.push(`row-${++agentFormRowSequence}`);
+              agents.focusField = firstField(items.length);
+              renderAgentsTab();
+            } }, kind === 'example' ? '예시 추가' : '피할 표현 추가'),
+          el('span', { class: 'egd-settings-form-count' }, `${items.length}/${max}`)));
+        return group;
+      };
       const preview = codexProfileAvatar(form.avatarValue ? { kind: form.avatarKind, value: form.avatarValue, color: form.avatarColor } : null,
         form.name || '?', 'egd-settings-detail-avatar');
       const avatarInput = el('input', { class: 'egd-settings-form-input egd-settings-avatar-input', type: 'text', id: fieldId('avatar'),
@@ -13259,6 +13332,7 @@
       avatarInput.addEventListener('input', () => { form.avatarValue = avatarInput.value; syncPreview(); });
       const segmented = (key, items, labelText) => el('div', { class: 'egd-settings-segmented', role: 'group', 'aria-label': labelText, id: fieldId(key), tabindex: '-1' },
         ...items.map((item) => el('button', {
+          id: fieldId(`${key}-${item.value}`),
           class: `egd-settings-segment${form[key] === item.value ? ' egd-settings-segment-active' : ''}`, 'aria-pressed': String(form[key] === item.value),
           onclick: () => { form[key] = item.value; agents.focusField = null; renderAgentsTab(); },
         }, item.label)));
@@ -13327,7 +13401,8 @@
           el('div', {}, '저장하지 못했습니다. 아래 항목을 확인해 주세요.'),
           el('ul', {}, ...agents.errors.map((error) => el('li', {}, el('button', { class: 'egd-settings-link', onclick: () => document.getElementById(fieldId(error.field))?.focus() }, error.message))))) : null,
         noticeLine(),
-        agents.keptForm ? el('button', { class: 'egd-settings-btn', onclick: () => { agents.form = agents.keptForm; agents.keptForm = null; agents.notice = null; renderAgentsTab(); } }, '내 수정 다시 넣기') : null,
+        agents.keptForm ? el('button', { class: 'egd-settings-btn', data: { testid: 'settings-agent-restore-kept' },
+          onclick: () => { agents.form = agents.keptForm; agents.keptForm = null; agents.notice = null; renderAgentsTab(); } }, '내 수정 다시 넣기') : null,
         field('name', '담당자 이름 (필수)', nameInput),
         field('avatar', '아바타', el('div', { class: 'egd-settings-avatar-editor' }, preview,
           el('div', { class: 'egd-settings-avatar-controls' },
@@ -13338,13 +13413,20 @@
         field('tone', '말투', segmented('tone', ChatState.PROFILE_TONE_OPTIONS, '말투')),
         field('traits', `성격 특징 (최대 ${limits.traits}개)`, chipList('traits', limits.traits, limits.traitLength, '예: 꼼꼼함')),
         field('speechNotes', '말투 메모', textArea('speechNotes', limits.speechNotes, '예: 결론을 먼저 말하고 근거는 짧게', 2)),
+        field('personalityExamples', `말투 예시 (최대 ${limits.examples}쌍)`, personalityList('personalityExamples', 'example', limits.examples, [
+          { name: 'user', label: '사용자가 이렇게 물으면', limit: limits.exampleUser },
+          { name: 'reply', label: '이렇게 답해 주세요', limit: limits.exampleReply, multiline: true },
+        ])),
+        field('personalityAvoid', `피할 표현 (최대 ${limits.avoid}개)`, personalityList('personalityAvoid', 'avoid', limits.avoid, [
+          { name: 'text', label: '쓰지 않을 표현', limit: limits.avoidItem },
+        ])),
         field('expertise', `맡길 일 (최대 ${limits.expertise}개)`, chipList('expertise', limits.expertise, limits.expertiseLength, '예: 주간 보고 초안 쓰기')),
         field('instructions', '지침', textArea('instructions', limits.instructions, '이 Agent가 늘 지켜야 할 내용을 적어 주세요.', 6)),
         field('toolPreferences', '선호 도구 (표시용)', chipList('toolPreferences', limits.toolPreferences, limits.toolLength, '예: browser'),
           '표시용입니다. 실제로 쓸 수 있는 도구는 아래에서 정합니다.'),
         ceilingSection,
         el('div', { class: 'egd-settings-form-actions' },
-          el('button', { class: 'egd-settings-btn', onclick: () => {
+          el('button', { class: 'egd-settings-btn', data: { testid: 'settings-agent-cancel' }, onclick: () => {
             if (agents.profileId) void openProfile(agents.profileId); else { agents.mode = 'list'; agents.notice = null; renderAgentsTab(); }
           } }, '취소'),
           el('button', { class: 'egd-settings-btn egd-settings-btn-primary', data: { testid: 'settings-agent-save' },
@@ -13355,15 +13437,42 @@
     const renderAgentsTab = () => {
       syncProfileDuplicate();
       if (activeTab !== 'agents') return;
+      const sameForm = agents.mode === 'edit' && renderedAgentForm === agents.form;
+      const focused = sameForm && contentArea.contains(document.activeElement) ? document.activeElement : null;
+      const focus = focused ? { id: focused.getAttribute('id'), start: focused.selectionStart, end: focused.selectionEnd,
+        direction: focused.selectionDirection, top: focused.scrollTop, left: focused.scrollLeft } : null;
+      const scroll = { top: contentArea.scrollTop, left: contentArea.scrollLeft };
+      // A chip is still an unfinished input until Add or Save. Retain it with
+      // its own form, including the kept form after a revision conflict.
+      if (renderedAgentForm) for (const [key, input] of chipInputs) formView(renderedAgentForm).chips.set(key, input.value);
       chipInputs.clear();
+      renderedAgentForm = agents.mode === 'edit' ? agents.form : null;
       if (agents.mode === 'edit' && agents.form) renderAgentForm();
       else if (agents.mode === 'detail') renderAgentDetail();
       else renderAgentList();
       if (agents.mode !== 'edit') profileTransfer.mount(contentArea);
       else profileTransfer.sync();
-      if (agents.focusField) {
-        document.getElementById(fieldId(agents.focusField))?.focus();
-        agents.focusField = null;
+      if (sameForm) { contentArea.scrollTop = scroll.top; contentArea.scrollLeft = scroll.left; }
+      const requestedFocus = agents.focusField;
+      agents.focusField = null;
+      const targetId = requestedFocus ? fieldId(requestedFocus) : focus?.id;
+      const target = targetId ? document.getElementById(targetId) : null;
+      if (target && contentArea.contains(target)) {
+        target.focus({ preventScroll: true });
+        if (!requestedFocus && focus) {
+          if (Number.isInteger(focus.start)) try { target.setSelectionRange(focus.start, focus.end, focus.direction); } catch {}
+          target.scrollTop = focus.top; target.scrollLeft = focus.left;
+        } else {
+          const rect = target.getBoundingClientRect?.(), clip = contentArea.getBoundingClientRect?.();
+          const scale = clip?.height / contentArea.offsetHeight;
+          if (rect && scale > 0) {
+            const footer = contentArea.querySelector('.egd-settings-form-actions')?.getBoundingClientRect();
+            const bottom = Math.min(clip.bottom, footer?.top ?? clip.bottom);
+            const delta = rect.top < clip.top || rect.height > bottom - clip.top
+              ? rect.top - clip.top : rect.bottom > bottom ? rect.bottom - bottom : 0;
+            contentArea.scrollTop += delta / scale;
+          }
+        }
       }
     };
 
