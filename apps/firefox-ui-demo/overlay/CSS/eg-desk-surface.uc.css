@@ -7215,6 +7215,18 @@ button.egd-task-board-summary:hover { background: var(--egd-hover); }
   overscroll-behavior: contain;
   scrollbar-width: thin;
 }
+/* An explicit answer failure may borrow only existing transcript space. The
+   list can still shrink on a later window resize; no control overlays another. */
+.egd-task-board[data-answer-space="true"] > .egd-task-board-list {
+  box-sizing: border-box;
+  height: var(--egd-task-answer-height);
+  max-height: max(220px, var(--egd-task-answer-height));
+}
+.egd-codex-conversation-pane[data-task-answer-space="true"] > .egd-codex-messages {
+  padding-block: 0;
+  min-height: var(--egd-task-answer-log-min);
+  overflow-anchor: none;
+}
 .egd-task-group-title { margin: 8px 0 0; font: 600 11px/1.4 var(--egd-font); color: var(--egd-on-surface-variant); }
 .egd-task-row { display: flex; flex-direction: column; gap: 4px; padding: 8px 0; border-bottom: 1px solid var(--egd-outline-variant); }
 .egd-task-group:last-child > .egd-task-row:last-child { border-bottom: 0; }
@@ -7266,7 +7278,7 @@ button.egd-task-confirm-go[aria-disabled="true"] { opacity: var(--egd-opacity-di
 }
 .egd-task-confirm > span { flex: 1 1 auto; min-width: 0; overflow-wrap: anywhere; }
 .egd-task-error { flex: 1 0 100%; margin: 2px 0 0; color: var(--egd-danger-ink); font-size: 11.5px; overflow-wrap: anywhere; }
-.egd-task-question { align-items: stretch; gap: 6px; padding-block: 6px; }
+.egd-task-question { align-items: stretch; gap: 4px; padding-block: 6px; }
 .egd-task-question-title { flex: 1 0 100%; min-width: 0; color: var(--egd-on-surface); white-space: pre-wrap; overflow-wrap: anywhere; }
 .egd-task-answer-note { flex: 1 0 100%; margin: 0; font-size: 11.5px; color: var(--egd-on-surface-variant); overflow-wrap: anywhere; }
 .egd-task-answer-fields { display: flex; flex-direction: column; gap: 6px; box-sizing: border-box; width: 100%; min-width: 0; margin: 0; padding: 0; border: 0; }
@@ -7274,9 +7286,10 @@ button.egd-task-confirm-go[aria-disabled="true"] { opacity: var(--egd-opacity-di
 .egd-task-answer-choice { display: flex; align-items: flex-start; gap: 6px; min-width: 0; color: var(--egd-on-surface); }
 .egd-task-answer-choice input { flex: none; margin: 3px 0 0; accent-color: var(--egd-primary); }
 .egd-task-answer-choice span { min-width: 0; white-space: normal; overflow-wrap: anywhere; }
-.egd-task-answer-text { box-sizing: border-box; width: 100%; min-width: 0; min-height: 66px; max-height: 180px; resize: vertical; padding: 6px 8px; border: 1px solid var(--egd-outline); border-radius: 6px; background: var(--egd-surface); color: var(--egd-on-surface); font: inherit; white-space: pre-wrap; overflow-wrap: anywhere; }
+.egd-task-answer-text { box-sizing: border-box; width: 100%; min-width: 0; min-height: 44px; max-height: 180px; resize: vertical; overflow-y: auto; padding: 3px 8px; border: 1px solid var(--egd-outline); border-radius: 6px; background: var(--egd-surface); color: var(--egd-on-surface); font: inherit; white-space: pre-wrap; overflow-wrap: anywhere; }
 .egd-task-answer-text[aria-invalid="true"] { border-color: var(--egd-danger-ink); }
 .egd-task-answer-actions { display: flex; flex-wrap: wrap; gap: 6px; width: 100%; }
+.egd-task-answer-actions > .egd-task-answer-counter { flex: 1 1 0; min-width: 0; align-self: center; }
 .egd-task-answer-text:focus-visible,
 .egd-task-answer-choice input:focus-visible,
 .egd-task-board-list:focus-visible { outline: var(--egd-focus-outline); outline-offset: var(--egd-focus-outline-offset); }

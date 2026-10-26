@@ -720,10 +720,49 @@
     return true;
   }
 
-  // Reveal one failed answer's entire input/error/action span, never just its
-  // error or button. No focus, camera, outer-scroll or persistent draft writes.
+  // A replacement textarea starts at zero before layout. Carry its intended
+  // viewport through another render, and never replay it over a newer gesture.
+  // Layout-only autosizing preserves that viewport; native edits keep their own
+  // caret scrolling and let the browser clamp a shortened value normally.
+  function createChatComposerViewport({ schedule = requestAnimationFrame } = {}) {
+    let pending = null;
+    const matches = (input, view) => input?.isConnected && view
+      && (input.dataset?.threadId || '') === view.threadId && input.value === view.value;
+    const apply = (input, view) => {
+      if (!matches(input, view)) return;
+      if (Number.isFinite(view.scrollTop)) input.scrollTop = view.scrollTop;
+      if (Number.isFinite(view.scrollLeft)) input.scrollLeft = view.scrollLeft;
+    };
+    return {
+      snapshot(input) {
+        const intended = pending?.input === input && matches(input, pending.view) ? pending.view : input;
+        return { threadId: input.dataset?.threadId || '', value: input.value,
+          scrollTop: intended.scrollTop, scrollLeft: intended.scrollLeft };
+      },
+      restore(input, view) {
+        pending = null;
+        if (!matches(input, view)) return;
+        const own = { input, view };
+        pending = own;
+        schedule(() => {
+          if (pending !== own) return;
+          apply(input, view);
+          pending = null;
+        });
+      },
+      resized: apply,
+      cancel(input) { if (pending?.input === input) pending = null; },
+      dispose() { pending = null; },
+    };
+  }
+
+  // Prefer the full failed answer's input/error/actions. If even the available
+  // transcript space cannot fit it, expose the complete error and both actions;
+  // the unchanged input remains in the same Task scroller. No focus, camera,
+  // outer-scroll or persistent draft writes.
   function createChatTaskAnswerReveal(body, { schedule = requestAnimationFrame } = {}) {
     let disposed = false, hadList = false, restoring = false, interaction = 0, pending = null;
+    let reservedSpace = null;
     let previous = new Map(), textareas = new Map();
     const submissions = new Map();
     const events = ['pointerdown', 'wheel', 'keydown', 'input', 'compositionstart', 'focusin'];
@@ -742,9 +781,56 @@
       submissions.set(keyOf(list, row), interaction);
     };
     body.addEventListener?.('click', submittedHere, true);
-    const reveal = (list, row) => {
-      const parts = ['.egd-task-answer-fields', '[data-testid="chat-task-error"]', '.egd-task-answer-actions']
-        .map(selector => row.querySelector(selector));
+    const formParts = row => ['.egd-task-answer-fields', '[data-testid="chat-task-error"]', '.egd-task-answer-actions']
+      .map(selector => row.querySelector(selector));
+    const applySpace = (list, space) => {
+      if (!Number.isFinite(space.height)) return;
+      const board = list.closest?.('.egd-task-board'), pane = list.closest?.('.egd-codex-conversation-pane');
+      if (!board || !pane) return;
+      board.dataset.answerSpace = 'true';
+      board.style.setProperty('--egd-task-answer-height', `${space.height}px`);
+      pane.dataset.taskAnswerSpace = 'true';
+      pane.style.setProperty('--egd-task-answer-log-min', `${space.logFloor}px`);
+      pane._taskAnswerSpace = { board, boardHeight: space.boardHeight, logReserve: space.logReserve };
+    };
+    const reserveSpace = (list, row, key, error) => {
+      const pane = list.closest?.('.egd-codex-conversation-pane'), log = pane?.querySelector?.('.egd-codex-messages');
+      const board = list.closest?.('.egd-task-board'), css = body.ownerDocument?.defaultView?.getComputedStyle;
+      if (!log || !board?.style || !pane?.style || !css || !(log.clientHeight > 0)) return false;
+      const rect = list.getBoundingClientRect(), scale = rect.height / list.offsetHeight;
+      const parts = formParts(row).map(part => part?.getBoundingClientRect());
+      if (!(scale > 0) || parts.some(part => !part || part.height <= 0 || part.width <= 0)) return false;
+      const required = Math.ceil((Math.max(...parts.map(part => part.bottom)) - Math.min(...parts.map(part => part.top))) / scale + 8);
+      // Remember a measured error even when no loan is needed or available;
+      // a later resize may change that budget without becoming a new failure.
+      reservedSpace = { key, error, bodyHeight: body.clientHeight, bodyWidth: body.clientWidth };
+      if (required <= list.clientHeight) return true;
+      const logStyle = css.call(body.ownerDocument.defaultView, log);
+      const logFloor = Math.ceil(Math.max(20, parseFloat(logStyle.lineHeight) || (parseFloat(logStyle.fontSize) || 13) * 1.5));
+      // Only borrow the existing transcript viewport. The footer, composer,
+      // header, status and summary keep their sizes; at least one log line stays.
+      const available = Math.floor(list.clientHeight + Math.max(0, log.clientHeight - logFloor));
+      const height = Math.min(required, available);
+      if (height <= list.clientHeight) return true;
+      const logRect = log.getBoundingClientRect(), top = log.scrollTop, left = log.scrollLeft;
+      const logScale = logRect.height / (log.offsetHeight || log.clientHeight);
+      if (!Number.isFinite(logScale) || logScale <= 0) return false;
+      const anchor = [...(log.querySelectorAll?.('[data-testid="chat-message"]') || [])]
+        .find(node => node.getBoundingClientRect().bottom > logRect.top);
+      const offset = anchor ? anchor.getBoundingClientRect().top - logRect.top : null;
+      reservedSpace = { ...reservedSpace, height: height + list.offsetHeight - list.clientHeight, logFloor,
+        boardHeight: board.offsetHeight,
+        logReserve: 80 + ['paddingTop', 'paddingBottom', 'borderTopWidth', 'borderBottomWidth']
+          .reduce((total, name) => total + (parseFloat(logStyle[name]) || 0), 0) };
+      applySpace(list, reservedSpace);
+      // Padding is reclaimed, not history. Keep the same visible message at
+      // the same offset instead of jumping to the newest message.
+      log.scrollTop = anchor ? log.scrollTop + (anchor.getBoundingClientRect().top - log.getBoundingClientRect().top - offset) / logScale : top;
+      log.scrollLeft = left;
+      return true;
+    };
+    const reveal = (list, row, allowActionsOnly = false) => {
+      const parts = formParts(row);
       if (parts.some(part => !part || !part.isConnected)) return;
       const rect = list.getBoundingClientRect(), scale = rect.height / list.offsetHeight;
       if (!Number.isFinite(scale) || scale <= 0 || list.clientHeight <= 0) return;
@@ -760,15 +846,38 @@
       top += 4 * scale; bottom -= 4 * scale;
       const rects = parts.map(part => part.getBoundingClientRect());
       if (rects.some(part => part.height <= 0 || part.width <= 0)) return;
-      const first = Math.min(...rects.map(part => part.top)), last = Math.max(...rects.map(part => part.bottom));
-      if (last - first > bottom - top) return; // oversized forms need a separate layout decision
+      let first = Math.min(...rects.map(part => part.top)), last = Math.max(...rects.map(part => part.bottom));
+      let result = 'full';
+      if (last - first > bottom - top && allowActionsOnly) {
+        first = Math.min(...rects.slice(1).map(part => part.top));
+        last = Math.max(...rects.slice(1).map(part => part.bottom));
+        result = 'actions'; // input remains in this same scrollable Task list
+      }
+      if (last - first > bottom - top) return;
       const delta = last > bottom ? last - bottom : first < top ? first - top : 0;
       const next = Math.max(0, Math.min(list.scrollHeight - list.clientHeight, list.scrollTop + delta / scale));
       const movement = (next - list.scrollTop) * scale;
       if (first - movement < top - 0.5 || last - movement > bottom + 0.5) return;
       if (next !== list.scrollTop) list.scrollTop = next;
+      if (row.dataset) row.dataset.answerReveal = result;
     };
     return {
+      restoreLayout() {
+        if (disposed || !reservedSpace) return;
+        const list = listNow();
+        const row = rowsOf(list).find(row => keyOf(list, row) === reservedSpace.key && row._taskAnswerReveal?.current()
+          && row._taskAnswerReveal.error() === reservedSpace.error);
+        if (!row) { reservedSpace = null; return; }
+        if (body.clientHeight !== reservedSpace.bodyHeight || body.clientWidth !== reservedSpace.bodyWidth) {
+          const { key, error } = reservedSpace;
+          reservedSpace = null;
+          // This is layout maintenance on the newly attached DOM, not another
+          // reveal. The renderer restores the user's current scroll afterward.
+          reserveSpace(list, row, key, error);
+          return;
+        }
+        applySpace(list, reservedSpace);
+      },
       beforeRender() {
         if (disposed) return;
         restoring = true;
@@ -781,7 +890,7 @@
         if (disposed) return;
         restoring = false;
         const list = listNow();
-        if (!list) { hadList = false; previous.clear(); submissions.clear(); pending = null; return; }
+        if (!list) { hadList = false; previous.clear(); submissions.clear(); pending = null; reservedSpace = null; return; }
         for (const input of inputsOf(list)) {
           const saved = textareas.get(input.dataset.focusKey);
           if (!saved) continue;
@@ -811,11 +920,12 @@
               || !own.list.isConnected || !own.row.isConnected || !own.row._taskAnswerReveal.current()
               || own.row._taskAnswerReveal.phase() !== 'error' || own.row._taskAnswerReveal.error() !== own.error) return;
           pending = null;
-          reveal(own.list, own.row);
+          const measuredSpace = reserveSpace(own.list, own.row, own.key, own.error);
+          reveal(own.list, own.row, measuredSpace);
         });
       },
       dispose() {
-        disposed = true; pending = null; previous.clear(); submissions.clear(); textareas.clear();
+        disposed = true; pending = null; reservedSpace = null; previous.clear(); submissions.clear(); textareas.clear();
         if (listening) for (const name of events) eventHost.removeEventListener(name, cancel, true);
         if (body.addEventListener) body.removeEventListener('click', submittedHere, true);
       },
@@ -1122,6 +1232,7 @@
     if (draft?.notice) row.appendChild(el('p', { class: 'egd-task-answer-note', role: 'status', data: { testid: 'chat-task-answer-changed' } }, draft.notice));
     const error = el('p', { class: 'egd-task-error', role: 'alert', data: { testid: 'chat-task-error' } }, draft?.error || condition.error || '');
     if (draft && !accepted) {
+      let counter = null;
       const controls = el('fieldset', { class: 'egd-task-answer-fields', disabled: sending ? 'true' : null, 'aria-label': question });
       const update = answer => {
         if (!live() || !actions.updateTaskAnswer(draft, answer)) return false;
@@ -1140,8 +1251,8 @@
       } else {
         const limit = condition.response.maxLength;
         const count = value => Array.from(value.normalize('NFC').replace(/\r\n?/g, '\n').trim()).length;
-        const counter = el('span', { class: 'egd-task-answer-note', data: { testid: 'chat-task-answer-limit', maxLength: String(limit) } });
-        const input = el('textarea', { class: 'egd-task-answer-text', rows: '3', disabled: sending ? 'true' : null,
+        counter = el('span', { class: 'egd-task-answer-note egd-task-answer-counter', data: { testid: 'chat-task-answer-limit', maxLength: String(limit) } });
+        const input = el('textarea', { class: 'egd-task-answer-text', rows: '2', disabled: sending ? 'true' : null,
           'aria-label': `${question} 답변, 최대 ${limit}자`, data: { testid: 'chat-task-answer-text', focusKey: key },
           oninput: ev => { if (update({ text: ev.currentTarget.value })) showCount(); },
           oncompositionend: ev => { if (update({ text: ev.currentTarget.value })) showCount(); },
@@ -1149,11 +1260,12 @@
         input.value = draft.answer?.text || '';
         const showCount = () => { const length = count(input.value); counter.textContent = `${length} / ${limit}자 · 입력 후 계속을 누르세요.`;
           counter.dataset.codePoints = String(length); input.setAttribute('aria-invalid', String(length > limit)); };
-        showCount(); controls.appendChild(input); controls.appendChild(counter);
+        showCount(); controls.appendChild(input);
       }
       row.appendChild(controls);
       row.appendChild(error);
       row.appendChild(el('div', { class: 'egd-task-answer-actions' },
+        counter,
         el('button', { type: 'button', class: 'egd-task-confirm-go', disabled: sending ? 'true' : null, 'aria-disabled': String(sending),
           data: { testid: 'chat-task-answer-continue', focusKey: `${key}:continue` },
           onclick: () => { if (live() && draft.phase !== 'sending') void actions.continueTaskGate(group.graphId, task.taskId, condition.gateId, draft.answer, condition.responseKey, draft); } }, sending ? '전달 중…' : '계속'),
@@ -7213,6 +7325,7 @@
     let compositionInProgress = false;
     let deferredCodex = null;
     let pendingMessageScroll = null;
+    const composerViewport = createChatComposerViewport();
     const taskAnswerReveal = createChatTaskAnswerReveal(body);
     let focusOpenedRoom = false;
     // A render that puts focus back on the composer is not a new look at it.
@@ -7241,6 +7354,13 @@
       // A deliberate log interaction wins over an unpainted automatic restore.
       pendingMessageScroll = null;
     };
+    const onComposerViewportGesture = (ev) => {
+      if (!(ev.target instanceof Element)) return;
+      const input = ev.target.closest('.egd-codex-input');
+      if (!input || !body.contains(input)) return;
+      if (ev.type === 'wheel' && (!ev.deltaY || ev.ctrlKey || ev.metaKey)) return;
+      composerViewport.cancel(input);
+    };
     const onDocumentMouseDown = (ev) => {
       const target = ev.target;
       if (!(target instanceof Element)) return;
@@ -7263,6 +7383,9 @@
     window.addEventListener('resize', onViewportMutate);
     body.addEventListener('keydown', onMessageScrollGesture, true);
     body.addEventListener('pointerdown', onMessageScrollGesture, true);
+    body.addEventListener('wheel', onComposerViewportGesture, { capture: true, passive: true });
+    body.addEventListener('keydown', onComposerViewportGesture, true);
+    body.addEventListener('pointerdown', onComposerViewportGesture, true);
 
     const render = (codex) => {
       if (compositionInProgress) {
@@ -7280,7 +7403,7 @@
         start: oldInput.selectionStart,
         end: oldInput.selectionEnd,
         direction: oldInput.selectionDirection,
-        scrollTop: oldInput.scrollTop,
+        ...composerViewport.snapshot(oldInput),
       } : null;
       // Repeated SSE renders can replace this log before its rAF restore runs.
       // Carry the intended viewport instead of sampling its temporary scrollTop=0.
@@ -8384,8 +8507,9 @@
               onclick: () => { if (!compositionInProgress) void codexBridge.sendMessage(); },
             }, el('span', { 'aria-hidden': 'true' }, '↑'));
             input.value = getCodexThreadDraft(codex, activeThread.id);
-            const resizeComposer = () => {
+            const resizeComposer = (preserveViewport = true) => {
               if (!input.isConnected) return;
+              const viewport = preserveViewport ? composerViewport.snapshot(input) : null;
               input.style.height = 'auto';
               const main = input.closest?.('.egd-codex-chat-main');
               const footer = input.closest?.('.egd-codex-footer');
@@ -8404,8 +8528,12 @@
                 // Reserve 80px of readable log content in addition to its padding
                 // and borders. The compact styles must apply before measuring.
                 const logStyle = messages.ownerDocument.defaultView.getComputedStyle(messages);
-                const logReserve = 80 + ['paddingTop', 'paddingBottom', 'borderTopWidth', 'borderBottomWidth']
+                let logReserve = 80 + ['paddingTop', 'paddingBottom', 'borderTopWidth', 'borderBottomWidth']
                   .reduce((total, key) => total + (parseFloat(logStyle[key]) || 0), 0);
+                // A Task error borrows log space, never composer space. Retain
+                // the pre-loan sizing budget through observer/SSE redraws.
+                const answerSpace = pane._taskAnswerSpace;
+                if (answerSpace) logReserve = Math.max(0, answerSpace.logReserve + answerSpace.boardHeight - answerSpace.board.offsetHeight);
                 const chromeHeight = otherChildrenHeight(main, [pane, footer])
                   + otherChildrenHeight(pane, [messages]) + outerHeight(footer) - input.offsetHeight;
                 heightLimit = Math.max(40, Math.min(heightLimit, Math.floor(main.clientHeight - chromeHeight - logReserve)));
@@ -8414,6 +8542,7 @@
               const height = Math.min(heightLimit, Math.max(40, input.scrollHeight));
               input.style.height = `${height}px`;
               input.style.overflowY = input.scrollHeight > height ? 'auto' : 'hidden';
+              if (viewport) composerViewport.resized(input, viewport);
               const readiness = ChatState.chatThreadReadiness(activeThread, codex);
               const nativeSendHeld = activeThread.conversationId && !ChatState.canResumeNativeThread(activeThread, codex.authStatus, codex);
               let invalidProject = false;
@@ -8424,8 +8553,9 @@
                 : invalidProject ? CHAT_REQUEST_PROJECT_INVALID : roomProjectBlock || readiness.reason || '보내기';
             };
             input.addEventListener('input', () => {
+              composerViewport.cancel(input);
               codexBridge.setDraft(input.value, activeThread.id);
-              resizeComposer();
+              resizeComposer(false);
             });
             input.addEventListener('keydown', (ev) => {
               if (ev.key !== 'Enter' || !(ev.metaKey || ev.ctrlKey) || ev.shiftKey || ev.altKey) return;
@@ -8433,11 +8563,12 @@
               ev.preventDefault();
               void codexBridge.sendMessage();
             });
-            input.addEventListener('compositionstart', () => { compositionInProgress = true; });
+            input.addEventListener('compositionstart', () => { composerViewport.cancel(input); compositionInProgress = true; });
             input.addEventListener('compositionend', () => {
               compositionInProgress = false;
+              composerViewport.cancel(input);
               codexBridge.setDraft(input.value, activeThread.id);
-              resizeComposer();
+              resizeComposer(false);
               if (deferredCodex) {
                 const next = deferredCodex;
                 deferredCodex = null;
@@ -8507,6 +8638,7 @@
         contentChildren.push(mainPane);
       }
       body.appendChild(el('div', { class: shellClasses }, ...contentChildren));
+      taskAnswerReveal.restoreLayout();
       // Rerender replaces the clicked chip. Anchor to this Chat surface's new
       // chip after attachment, when both Canvas/HUD geometry and menu size exist.
       positionChatEngineMenu(body.querySelector('.egd-codex-engine-panel'), body.querySelector('.egd-codex-engine-chip'));
@@ -8545,7 +8677,7 @@
         restoringComposerFocus = true;
         try { newInput.focus({ preventScroll: true }); } finally { restoringComposerFocus = false; }
         newInput.setSelectionRange(inputState.start, inputState.end, inputState.direction);
-        requestAnimationFrame(() => { if (newInput.isConnected) newInput.scrollTop = inputState.scrollTop; });
+        composerViewport.restore(newInput, inputState);
       }
       if (focusOpenedRoom) {
         const target = newInput && !newInput.disabled ? newInput : body.querySelector('.egd-codex-conversation-back');
@@ -8564,9 +8696,13 @@
       compositionInProgress = false;
       deferredCodex = null;
       pendingMessageScroll = null;
+      composerViewport.dispose();
       taskAnswerReveal.dispose();
       body.removeEventListener('keydown', onMessageScrollGesture, true);
       body.removeEventListener('pointerdown', onMessageScrollGesture, true);
+      body.removeEventListener('wheel', onComposerViewportGesture, true);
+      body.removeEventListener('keydown', onComposerViewportGesture, true);
+      body.removeEventListener('pointerdown', onComposerViewportGesture, true);
       document.removeEventListener('mousedown', onDocumentMouseDown, true);
       document.removeEventListener('wheel', onViewportMutate, true);
       window.removeEventListener('resize', onViewportMutate);

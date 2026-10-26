@@ -2242,9 +2242,9 @@ test('empty logged-in Chat uses plain first-message guidance while keeping title
 });
 
 test('Chat composer starts compact but expands and scrolls for long requests', () => {
-  const body = surfaceSource.match(/            const resizeComposer = \(\) => \{([\s\S]*?)\n            \};\n            input\.addEventListener\('input'/)?.[1];
+  const body = surfaceSource.match(/            const resizeComposer = \(preserveViewport = true\) => \{([\s\S]*?)\n            \};\n            input\.addEventListener\('input'/)?.[1];
   assert.ok(body);
-  const resize = compileFunction(`return function resizeComposer() {${body}\n            }`,
+  const resize = compileFunction(`${declaration('createChatComposerViewport')}\nconst composerViewport = createChatComposerViewport({ schedule() {} });\nreturn function resizeComposer(preserveViewport = true) {${body}\n            }`,
     ['input', 'activeThread', 'ChatState', 'codex', 'sendButton', 'chatRoomProjectSendBlock']);
   const input = { isConnected: true, scrollHeight: 30, style: {}, value: 'draft',
     ownerDocument: { defaultView: { getComputedStyle: () => ({ maxHeight: '144px' }) } } };
@@ -4132,6 +4132,9 @@ test('Chat pending scroll intent preserves the rendered viewport across SSE rere
 
   const bind = compileFunction([
     declaration,
+    surfaceSource.match(/  function createChatComposerViewport\([\s\S]*?\n  \}/)[0],
+    'const composerViewport = createChatComposerViewport();',
+    'const onComposerViewportGesture = () => {};',
     surfaceSource.match(/  function createChatTaskAnswerReveal\(body, \{ schedule = requestAnimationFrame \} = \{\}\) \{[\s\S]*?\n  \}/)[0],
     'const taskAnswerReveal = createChatTaskAnswerReveal(body);',
     'let activeThread = null;',
@@ -4259,24 +4262,143 @@ test('Chat pending scroll intent preserves the rendered viewport across SSE rere
     h.flush();
     assert.equal(h.log.scrollTop, 80);
     assert.deepEqual(h.removed.sort(), [
-      'body:keydown', 'body:pointerdown', 'document:mousedown', 'document:wheel', 'window:resize',
+      'body:keydown', 'body:keydown', 'body:pointerdown', 'body:pointerdown', 'body:wheel',
+      'document:mousedown', 'document:wheel', 'window:resize',
     ]);
   });
 });
 
+// Run the actual mount snapshot/restore, input handlers and autosizer with a
+// bounded frame queue. The textarea models layout clamping; this is not Firefox
+// evidence about which callback ran in a particular headless observation.
+function composerViewportHarness() {
+  const mount = declaration('mountCodexHUD');
+  const snapshot = mount.match(/      const oldInput = body\.querySelector\('\.egd-codex-input'\);[\s\S]*?\n      \} : null;/)?.[0];
+  const restore = mount.match(/      const newInput = body\.querySelector\('\.egd-codex-input'\);[\s\S]*?(?=\n      if \(focusOpenedRoom\))/)?.[0];
+  const resize = mount.match(/            const resizeComposer = [\s\S]*?\n            \};\n(?=            input\.addEventListener\('input')/)?.[0];
+  const inputEvents = mount.slice(mount.indexOf("            input.addEventListener('input'"), mount.indexOf('            let composerWidth = 0;'));
+  assert.ok(snapshot && restore && resize && inputEvents, 'test the production composer paths');
+  const frames = [], microtasks = [], geometryWrites = [];
+  const document = { activeElement: null };
+  const initialValue = 'EG-Desk headless QA draft — never send QA600';
+  const codex = { authStatus: { isLoggedIn: true }, connected: true, isSending: false, draft: initialValue };
+  const ownerDocument = { defaultView: { getComputedStyle: node => ({ maxHeight: '144px',
+    marginTop: '0px', marginBottom: '0px', paddingTop: node === messages ? '12px' : '0px',
+    paddingBottom: node === messages ? '12px' : '0px', borderTopWidth: '0px', borderBottomWidth: '0px' }) } };
+  const messages = { ownerDocument, offsetHeight: 104 };
+  const pane = { children: [{ ownerDocument, offsetHeight: 48 }, messages, { ownerDocument, offsetHeight: 44 },
+    { ownerDocument, offsetHeight: 26 }], querySelector: () => messages };
+  let input;
+  const footer = { ownerDocument, get offsetHeight() { return 106 + input.offsetHeight; } };
+  const main = { dataset: {}, clientHeight: 368, children: [pane, footer], querySelector: () => pane };
+  class ComposerElement {
+    constructor(value = initialValue, threadId = 'room-a') {
+      this.value = value; this.dataset = { threadId }; this.isConnected = true; this.ownerDocument = ownerDocument;
+      this.selectionStart = this.selectionEnd = value.length; this.selectionDirection = 'none';
+      this.clientWidth = 338; this._top = 0; this.scrollLeft = 0; this.listeners = new Map();
+      let height = '40px';
+      this.style = { get height() { return height; }, set height(next) {
+        height = next; geometryWrites.push(next);
+        if (next === 'auto') input._top = 0;
+      } };
+    }
+    get clientHeight() { return this.style.height === 'auto' ? 40 : parseFloat(this.style.height); }
+    get offsetHeight() { return this.clientHeight; }
+    get scrollHeight() { return this.value.length >= 44 ? 51 : 40; }
+    get scrollTop() { return this._top; }
+    set scrollTop(value) { this._top = Math.max(0, Math.min(value, this.scrollHeight - this.clientHeight)); }
+    closest(selector) { return selector === '.egd-codex-input' ? this : selector === '.egd-codex-chat-main' ? main
+      : selector === '.egd-codex-footer' ? footer : null; }
+    focus() { document.activeElement = this; }
+    setSelectionRange(start, end, direction) { this.selectionStart = Math.min(start, this.value.length);
+      this.selectionEnd = Math.min(end, this.value.length); this.selectionDirection = direction; }
+    addEventListener(name, fn) { this.listeners.set(name, fn); }
+    fire(name, event = {}) { this.listeners.get(name)?.({ target: this, ...event }); }
+  }
+  input = new ComposerElement(); input.scrollTop = 8.5; input.focus();
+  const body = { querySelector: selector => selector === '.egd-codex-input' ? input : null,
+    contains: target => target === input };
+  const viewportSource = declaration('createChatComposerViewport') || '';
+  const viewportDeclaration = mount.match(/    const composerViewport = createChatComposerViewport\(\);/)?.[0] || '';
+  const gesture = mount.match(/    const onComposerViewportGesture = \(ev\) => \{[\s\S]*?\n    \};/)?.[0] || 'const onComposerViewportGesture = () => {};';
+  const bind = compileFunction([
+    viewportSource, viewportDeclaration, gesture,
+    'let restoringComposerFocus = false, compositionInProgress = false, deferredCodex = null;',
+    'const attach = () => { const input = body.querySelector(".egd-codex-input");',
+    'const activeThread = { id: input.dataset.threadId, conversationId: null, preparingInput: false };',
+    'const sendButton = {};', resize, inputEvents,
+    'input.resize = resizeComposer; queueMicrotask(resizeComposer); };',
+    'const render = (value, threadId, focused) => {', snapshot,
+    'replace(value, threadId, focused); const activeThread = { id: threadId }; attach();', restore, '};',
+    'return { render, gesture: onComposerViewportGesture, dispose: () => {',
+    viewportDeclaration ? 'composerViewport.dispose();' : '', ' } };',
+  ].join('\n'), ['body', 'document', 'Element', 'requestAnimationFrame', 'queueMicrotask', 'replace', 'codexBridge', 'ChatState', 'codex', 'chatRoomProjectSendBlock']);
+  const api = bind(body, document, ComposerElement, fn => frames.push(fn), fn => microtasks.push(fn),
+    (value, threadId, focused) => { input.isConnected = false; input = new ComposerElement(value, threadId);
+      document.activeElement = focused ? null : { id: 'other-control' }; },
+    { setDraft: value => { codex.draft = value; }, sendMessage() { throw new Error('must not send'); } },
+    Chat, codex, () => null);
+  return { document, codex, geometryWrites, get input() { return input; },
+    render({ value = input.value, threadId = input.dataset.threadId, focused = true } = {}) {
+      if (!focused) document.activeElement = { id: 'other-control' };
+      api.render(value, threadId, focused);
+    },
+    microtask() { const batch = microtasks.splice(0); for (const fn of batch) fn(); },
+    frame() { const batch = frames.splice(0); for (const fn of batch) fn(); },
+    resize() { input.resize(); },
+    wheel(deltaY) { api.gesture({ type: 'wheel', target: input, deltaY }); input.scrollTop += deltaY; return input.scrollTop; },
+    backspace() { api.gesture({ type: 'keydown', target: input, key: 'Backspace' }); input.value = input.value.slice(0, -1);
+      input.scrollTop = input.scrollTop; input.selectionStart = input.selectionEnd = input.value.length; input.fire('input'); },
+    dispose: api.dispose,
+  };
+}
+
+test('Chat composer viewport: production replacement and autosize interleavings retain the viewport without changing the draft/caret/focus', async t => {
+  for (const [name, steps] of [
+    ['two replacements before a frame', ['render', 'render', 'microtask', 'frame']],
+    ['autosize after frame restore', ['render', 'frame', 'microtask']],
+    ['observer after microtask and frame', ['render', 'microtask', 'frame', 'resize']],
+    ['replacement between sizing and frame', ['render', 'microtask', 'render', 'frame', 'microtask', 'resize']],
+  ]) await t.test(name, () => {
+    const h = composerViewportHarness(), value = h.input.value;
+    for (const step of steps) h[step]();
+    assert.equal(h.input.scrollTop, 8.5);
+    assert.equal(h.input.value, value); assert.equal(h.codex.draft, value);
+    assert.equal(h.input.selectionStart, 44); assert.equal(h.input.selectionEnd, 44);
+    assert.equal(h.document.activeElement, h.input); assert.equal(h.input.clientHeight, 40);
+  });
+  for (const afterFrame of [false, true]) await t.test(`native wheel ${afterFrame ? 'after' : 'before'} restore wins over pending work`, () => {
+    const h = composerViewportHarness(); h.render(); h.microtask(); if (afterFrame) h.frame();
+    const wanted = h.wheel(2.5); h.frame(); h.resize();
+    assert.equal(h.input.scrollTop, wanted); assert.equal(wanted, 11);
+  });
+});
+
+test('Chat composer viewport: Backspace content shrink, changed rooms, unfocused fields and disposal do not revive old intent', () => {
+  const h = composerViewportHarness(); h.render(); h.microtask(); h.backspace(); h.frame(); h.resize();
+  assert.equal(h.input.scrollTop, 0); assert.equal(h.input.value.length, 43); assert.equal(h.codex.draft.length, 43);
+  h.render(); h.microtask(); h.frame(); assert.equal(h.input.scrollTop, 0);
+  const room = composerViewportHarness(); room.render(); room.render({ threadId: 'room-b' }); room.microtask(); room.frame();
+  assert.equal(room.input.scrollTop, 0);
+  const other = composerViewportHarness(); other.render({ focused: false }); other.microtask(); other.frame();
+  assert.equal(other.document.activeElement.id, 'other-control');
+  const closed = composerViewportHarness(); closed.render(); closed.dispose(); closed.input.isConnected = false;
+  closed.microtask(); closed.frame(); assert.equal(closed.input.scrollTop, 0);
+});
+
 test('Chat composer reserves title, status and log space on compact cards', async (t) => {
-  const resizeBody = surfaceSource.match(/            const resizeComposer = \(\) => \{([\s\S]*?)\n            \};\n            input\.addEventListener\('input'/)?.[1];
+  const resizeBody = surfaceSource.match(/            const resizeComposer = \(preserveViewport = true\) => \{([\s\S]*?)\n            \};\n            input\.addEventListener\('input'/)?.[1];
   const observerBody = surfaceSource.match(/            let composerWidth = 0;[\s\S]*?            composerObserver\.observe\(body\);/)?.[0];
   assert.ok(resizeBody && observerBody, 'production composer resizing remains directly testable');
-  const bindResize = compileFunction('return function resizeComposer() {' + resizeBody + '\n}', [
+  const bindResize = compileFunction(`${declaration('createChatComposerViewport')}\nconst composerViewport = createChatComposerViewport({ schedule() {} });\nreturn function resizeComposer(preserveViewport = true) {` + resizeBody + '\n}', [
     'input', 'activeThread', 'ChatState', 'codex', 'sendButton', 'chatRoomProjectSendBlock',
   ]);
-  const layout = ({ viewport = 385, notice = 26, noticeMargin = 0 } = {}) => {
+  const layout = ({ viewport = 385, notice = 26, noticeMargin = 0, taskHeight = 0 } = {}) => {
     const compact = () => main.dataset.compactComposer === 'true';
     const ownerDocument = { defaultView: { getComputedStyle: node => ({
       marginTop: String(node.marginTop || 0), marginBottom: String(node.marginBottom || 0),
-      paddingTop: node === messages ? (compact() ? '12px' : '24px') : '0px',
-      paddingBottom: node === messages ? (compact() ? '12px' : '28px') : '0px',
+      paddingTop: node === messages ? (pane._taskAnswerSpace ? '0px' : compact() ? '12px' : '24px') : '0px',
+      paddingBottom: node === messages ? (pane._taskAnswerSpace ? '0px' : compact() ? '12px' : '28px') : '0px',
       borderTopWidth: '0px', borderBottomWidth: '0px',
       maxHeight: node === input ? '144px' : 'none',
     }) } };
@@ -4289,7 +4411,8 @@ test('Chat composer reserves title, status and log space on compact cards', asyn
     const messages = box(0);
     const header = { ownerDocument, get offsetHeight() { return compact() ? 48 : 58; } }, status = box(44);
     const warning = box(notice, { marginTop: noticeMargin, marginBottom: noticeMargin });
-    const pane = box(0, { children: [header, messages, warning, status],
+    const task = box(taskHeight);
+    const pane = box(0, { children: [header, messages, warning, status, ...(taskHeight ? [task] : [])],
       querySelector: selector => selector === '.egd-codex-messages' ? messages : null });
     const footer = { ownerDocument, get offsetHeight() { return (compact() ? 106 : 128) + input.offsetHeight; } };
     const main = { dataset: {}, clientHeight: viewport, children: [pane, footer],
@@ -4297,7 +4420,7 @@ test('Chat composer reserves title, status and log space on compact cards', asyn
     const sendButton = { disabled: true, title: '' };
     const resize = bindResize(input, { conversationId: null, preparingInput: false },
       Chat, { authStatus: { isLoggedIn: true }, connected: true, isSending: false }, sendButton, actualProjectSendBlock());
-    return { input, main, resize, sendButton,
+    return { input, main, pane, task, resize, sendButton,
       remainingLogContentHeight: () => main.clientHeight - header.offsetHeight - 44 - notice
         - noticeMargin * 2 - (compact() ? 106 : 128) - input.offsetHeight - (compact() ? 24 : 52) };
   };
@@ -4346,6 +4469,18 @@ test('Chat composer reserves title, status and log space on compact cards', asyn
     h.input.style.height = '80px';
     h.resize();
     assert.equal(h.input.style.height, '80px');
+  });
+
+  await t.test('a real Task board borrowing transcript space leaves the typing composer sizing budget unchanged', () => {
+    const h = layout({ viewport: 625, taskHeight: 150 });
+    h.resize();
+    const before = h.input.style.height;
+    assert.equal(before, '87px');
+    h.pane._taskAnswerSpace = { board: h.task, boardHeight: 150, logReserve: 132 };
+    h.task.offsetHeight += 40;
+    h.resize(); h.resize();
+    assert.equal(h.input.style.height, before);
+    assert.equal(h.input.value, 'unsent draft');
   });
 
   await t.test('body-height changes resize the composer while input-only height changes do not loop', () => {
@@ -14028,7 +14163,7 @@ function taskQuestionHarness(graph = taskQuestionGraph(), { boardKnown = true } 
     post: () => requests.filter(request => request.method === 'POST'), frame: next => api.taskGraphFrame(next) };
 }
 
-function taskAnswerRevealHarness({ height = 220, scale = 1, spanTop = 100, spanHeight = 170, top = 0 } = {}) {
+function taskAnswerRevealHarness({ height = 220, scale = 1, spanTop = 100, spanHeight = 170, top = 0, layout = null } = {}) {
   const frames = [], listeners = new Map(), writes = [];
   const draft = { key: 'original-draft', phase: 'editing', error: null, current: true };
   const doc = { activeElement: { id: 'unchanged-focus' }, defaultView: { innerHeight: 1000 },
@@ -14040,25 +14175,53 @@ function taskAnswerRevealHarness({ height = 220, scale = 1, spanTop = 100, spanH
     removeEventListener(name, fn) { if (listeners.get(name) === fn) listeners.delete(name); },
     getBoundingClientRect: () => ({ top: 0, bottom: 1000, height: 1000 }),
   };
+  if (layout) {
+    Object.assign(body, { clientHeight: 387, clientWidth: 420,
+      getBoundingClientRect: () => ({ top: 108.77, bottom: 481.70, height: 372.93 }) });
+    doc.defaultView.innerHeight = 600; doc.defaultView.innerWidth = layout.width;
+    doc.defaultView.getComputedStyle = node => ({ lineHeight: '18.85px', fontSize: '13px',
+      paddingTop: node.padding || '0px', paddingBottom: node.padding || '0px', borderTopWidth: '0px', borderBottomWidth: '0px' });
+  }
   const makeList = ({ threadId = 'room-a', error = draft.error, current = () => draft.current } = {}) => {
-    let position = top;
+    let position = layout ? body.list?.scrollTop || top : top, listHeight = height;
+    const border = layout ? 1 : 0;
+    const listTop = () => layout ? 367.98333740234375 - (listHeight + border) * scale : 100;
     const input = { dataset: { focusKey: draft.key }, value: 'PRIVATE_ANSWER', selectionStart: 2, selectionEnd: 6, selectionDirection: 'backward', scrollTop: 19, scrollLeft: 3,
       setSelectionRange(start, end, direction) { Object.assign(this, { selectionStart: start, selectionEnd: end, selectionDirection: direction }); this.scrollTop = 0; } };
-    const list = { dataset: { threadId }, isConnected: true, clientTop: 0, clientHeight: height, offsetHeight: height, scrollHeight: 800,
-      get scrollTop() { return position; }, set scrollTop(value) { position = Math.max(0, Math.min(800 - height, value)); writes.push(position); },
-      getBoundingClientRect: () => ({ top: 100, bottom: 100 + height * scale, height: height * scale }),
+    const list = { dataset: { threadId }, isConnected: true, clientTop: border, scrollHeight: 800,
+      get clientHeight() { return listHeight; }, get offsetHeight() { return listHeight + border; },
+      get scrollTop() { return position; }, set scrollTop(value) { position = Math.max(0, Math.min(800 - listHeight, value)); writes.push(position); },
+      getBoundingClientRect: () => ({ top: listTop(), bottom: listTop() + (listHeight + border) * scale, height: (listHeight + border) * scale }),
       querySelectorAll: selector => selector.includes('chat-task-answer-text') ? [input] : [row],
       contains: node => node === row,
       closest: () => body,
     };
-    const part = (start, end) => ({ isConnected: true, getBoundingClientRect: () => ({ top: 100 + (start - position) * scale,
-      bottom: 100 + (end - position) * scale, height: (end - start) * scale, width: 340 * scale }) });
-    const parts = { '.egd-task-answer-fields': part(spanTop, spanTop + 90),
-      '[data-testid="chat-task-error"]': part(spanTop + 96, spanTop + spanHeight - 38),
+    let log, board, pane;
+    if (layout) {
+      const properties = {};
+      log = { padding: '12px', scrollTop: body.list?._log?.scrollTop ?? 247, scrollLeft: 3, scrollHeight: 1400,
+        content: ['old reply', 'completed task', 'current conversation'],
+        get clientHeight() { return layout.logHeight - (listHeight - height); },
+        getBoundingClientRect: () => ({ top: 156, bottom: 156 + log.clientHeight * scale, height: log.clientHeight * scale }),
+        querySelectorAll: () => [anchor] };
+      const anchor = { getBoundingClientRect: () => ({ top: 156 + (parseFloat(log.padding) + 260 - log.scrollTop) * scale,
+        bottom: 156 + (parseFloat(log.padding) + 284 - log.scrollTop) * scale }) };
+      board = { dataset: {}, get offsetHeight() { return listHeight + 35; },
+        style: { setProperty(name, value) { properties[name] = value; listHeight = parseFloat(value) - border; } } };
+      pane = { dataset: {}, style: { setProperty(name, value) { properties[name] = value; log.padding = '0px'; } },
+        querySelector: () => log, getBoundingClientRect: () => ({ top: 108.77, bottom: 374.73, height: 265.96 }) };
+      list.closest = selector => selector === '.egd-task-board' ? board : selector === '.egd-codex-conversation-pane' ? pane : null;
+      list._log = log;
+    }
+    const part = (start, end) => ({ isConnected: true, getBoundingClientRect: () => ({ top: listTop() + (border + start - position) * scale,
+      bottom: listTop() + (border + end - position) * scale, height: (end - start) * scale, width: 340 * scale }) });
+    const fieldsHeight = layout?.fieldHeight || 90;
+    const parts = { '.egd-task-answer-fields': part(spanTop, spanTop + fieldsHeight),
+      '[data-testid="chat-task-error"]': part(spanTop + (layout ? fieldsHeight + 6 : 96), spanTop + spanHeight - (layout ? 36 : 38)),
       '.egd-task-answer-actions': part(spanTop + spanHeight - 32, spanTop + spanHeight) };
-    const row = { isConnected: true, _taskAnswerReveal: { key: draft.key, current, phase: () => draft.phase, error: () => draft.error },
+    const row = { dataset: {}, isConnected: true, _taskAnswerReveal: { key: draft.key, current, phase: () => draft.phase, error: () => draft.error },
       querySelector: selector => parts[selector] };
-    return { list, row, input, parts, error };
+    return { list, row, input, parts, error, log, board, pane };
   };
   const factory = compileFunction(`${declaration('createChatTaskAnswerReveal')}\nreturn createChatTaskAnswerReveal;`, [])();
   const api = factory(body, { schedule: fn => frames.push(fn) });
@@ -14066,6 +14229,7 @@ function taskAnswerRevealHarness({ height = 220, scale = 1, spanTop = 100, spanH
   const render = options => {
     api.beforeRender(); shown.list.isConnected = false; shown.row.isConnected = false;
     shown = makeList(options); body.list = shown.list;
+    api.restoreLayout();
     // The real Chat renderer restores focus before afterRender; that is not a user gesture.
     listeners.get('focusin')?.({ type: 'focusin' }); api.afterRender(); return shown;
   };
@@ -14123,6 +14287,155 @@ test('Task new-error reveal: room/draft/currentness changes, detached views and 
     const h = taskAnswerRevealHarness(); h.sending(); h.failed(); change(h); h.flush(); assert.equal(h.writes.length, 0);
   }
   const h = taskAnswerRevealHarness(); h.api.dispose(); assert.equal(h.listeners.size, 0);
+});
+
+test('Task measured 600/800 layout: short answer/error/actions fit by borrowing only the needed transcript height', () => {
+  const inputCss = cssDeclarationsFor(surfaceCss, '.egd-task-answer-text');
+  const questionCss = cssDeclarationsFor(surfaceCss, '.egd-task-question');
+  const fieldHeight = parseFloat(inputCss['min-height']), gap = parseFloat(questionCss.gap);
+  // Runtime: list clientHeight 123, offsetHeight 124, scale .9620968; the
+  // transcript has 28 CSS px. Model real Task/header/footer space, not an
+  // absent Task board. Browser painting remains Main's serial QA.
+  const spanHeight = fieldHeight + gap * 2 + 2 + 34.5 + 32;
+  for (const width of [600, 800]) {
+    const h = taskAnswerRevealHarness({ height: 123, scale: 0.9620967988044985, spanHeight,
+      layout: { width, logHeight: 28, fieldHeight } });
+    const focus = h.doc.activeElement;
+    h.sending(); const rendered = h.failed();
+    const anchorBefore = rendered.log.querySelectorAll()[0].getBoundingClientRect().top;
+    h.flush();
+    assert.equal(rendered.row.dataset.answerReveal, 'full', `${width}: complete form, not only the buttons`);
+    assert.equal(rendered.list.clientHeight, Math.ceil(spanHeight + 8), 'borrow only the missing six CSS pixels');
+    assert.ok(rendered.log.clientHeight >= 20, 'transcript remains a native scroller with one visible line');
+    assert.deepEqual(rendered.log.content, ['old reply', 'completed task', 'current conversation']);
+    assert.ok(Math.abs(rendered.log.querySelectorAll()[0].getBoundingClientRect().top - anchorBefore) < 1e-9);
+    assert.equal(h.doc.activeElement, focus); assert.equal(rendered.input.value, 'PRIVATE_ANSWER');
+    const listRect = rendered.list.getBoundingClientRect(), scale = listRect.height / rendered.list.offsetHeight;
+    for (const part of Object.values(rendered.parts)) {
+      const rect = part.getBoundingClientRect();
+      assert.ok(rect.top >= listRect.top + (rendered.list.clientTop + 4) * scale - .01);
+      assert.ok(rect.bottom <= listRect.top + (rendered.list.clientTop + rendered.list.clientHeight - 4) * scale + .01);
+    }
+    const moved = h.writes.length, top = rendered.list.scrollTop;
+    h.render(); h.flush();
+    assert.equal(h.writes.length, moved, 'unchanged SSE restores layout but requests no new scroll');
+    assert.equal(h.shown().list.scrollTop, top);
+    assert.equal(h.shown().list.clientHeight, rendered.list.clientHeight);
+    h.render({ threadId: 'other-room' }); h.flush();
+    assert.equal(h.shown().board.dataset.answerSpace, undefined, 'space does not leak to another room');
+  }
+});
+
+test('Task measured layout: cancelled reveal does not allocate; impossible full forms expose complete error/actions with input still scrollable', () => {
+  for (const event of ['pointerdown', 'wheel', 'keydown', 'input', 'compositionstart', 'focusin']) {
+    const h = taskAnswerRevealHarness({ height: 123, scale: .9620968, spanHeight: 120.5,
+      layout: { width: 600, logHeight: 28, fieldHeight: 44 } });
+    h.sending(); h.failed(); h.interact(event); h.flush();
+    assert.equal(h.shown().board.dataset.answerSpace, undefined);
+    assert.equal(h.writes.length, 0);
+    h.body.clientWidth += 1; h.render(); h.flush();
+    assert.equal(h.shown().board.dataset.answerSpace, undefined, 'resize must not revive a user-cancelled reveal');
+    assert.equal(h.writes.length, 0);
+  }
+  const h = taskAnswerRevealHarness({ height: 123, scale: .9620968, spanHeight: 256.5,
+    layout: { width: 600, logHeight: 28, fieldHeight: 180 } });
+  h.sending(); const rendered = h.failed(); h.flush();
+  assert.equal(rendered.row.dataset.answerReveal, 'actions', 'not reported as full-form visibility');
+  assert.ok(rendered.list.scrollHeight > rendered.list.clientHeight);
+  assert.equal(rendered.input.value, 'PRIVATE_ANSWER');
+  const rect = rendered.list.getBoundingClientRect();
+  for (const part of Object.values(rendered.parts).slice(1)) {
+    const shown = part.getBoundingClientRect();
+    assert.ok(shown.top >= rect.top); assert.ok(shown.bottom <= rect.bottom);
+  }
+});
+
+test('Task resized error layout: the same error remeasures its six-pixel reservation without another reveal', () => {
+  for (const width of [600, 800]) for (const dimension of ['clientWidth', 'clientHeight']) {
+    const h = taskAnswerRevealHarness({ height: 123, scale: .9620968, spanHeight: 120.5,
+      layout: { width, logHeight: 28, fieldHeight: 44 } });
+    h.sending(); h.failed(); h.flush();
+    assert.equal(h.shown().list.clientHeight, 129);
+    assert.equal(h.shown().row.dataset.answerReveal, 'full');
+    const top = h.shown().list.scrollTop, writes = h.writes.length, focus = h.doc.activeElement;
+    h.body[dimension] += 1;
+    h.render();
+    assert.equal(h.frames.length, 0, 'a resize is not a new explicit failure');
+    h.flush();
+    const { list, parts, input, row } = h.shown();
+    assert.equal(list.clientHeight, Math.ceil(120.5 + 8), `${width}/${dimension}: retain the measured 129px budget`);
+    assert.equal(list.scrollTop, top); assert.equal(h.writes.length, writes);
+    assert.equal(row.dataset.answerReveal, undefined, 'layout maintenance must not call reveal');
+    const rect = list.getBoundingClientRect(), scale = rect.height / list.offsetHeight;
+    for (const part of Object.values(parts)) {
+      const shown = part.getBoundingClientRect();
+      assert.ok(shown.top >= rect.top + (list.clientTop + 4) * scale - .01);
+      assert.ok(shown.bottom <= rect.top + (list.clientTop + list.clientHeight - 4) * scale + .01);
+    }
+    assert.equal(h.doc.activeElement, focus); assert.equal(input.value, 'PRIVATE_ANSWER');
+    assert.deepEqual([input.selectionStart, input.selectionEnd, input.selectionDirection, input.scrollTop, input.scrollLeft],
+      [2, 6, 'backward', 19, 3]);
+    h.render(); h.flush();
+    assert.equal(h.shown().list.clientHeight, 129);
+    assert.equal(h.shown().list.scrollTop, top); assert.equal(h.writes.length, writes, 'same-error SSE remains motionless');
+  }
+});
+
+test('Task resized error layout: user scroll and other-input focus outrank the old error reveal', () => {
+  for (const event of ['pointerdown', 'wheel', 'keydown', 'input', 'compositionstart', 'focusin']) {
+    const h = taskAnswerRevealHarness({ height: 123, scale: .9620968, spanHeight: 120.5,
+      layout: { width: 600, logHeight: 28, fieldHeight: 44 } });
+    h.sending(); h.failed(); h.flush();
+    h.interact(event); h.shown().list.scrollTop = 17;
+    const focus = h.doc.activeElement = { id: 'other-input', value: 'KEEP', selectionStart: 2, selectionEnd: 2 };
+    const writes = h.writes.length;
+    h.body.clientWidth += 1;
+    h.render(); h.flush(); h.render(); h.flush();
+    assert.equal(h.shown().list.clientHeight, 129, event);
+    assert.equal(h.shown().list.scrollTop, 17, 'do not pull the user back to the old error');
+    assert.equal(h.writes.length, writes); assert.equal(h.frames.length, 0);
+    assert.equal(h.doc.activeElement, focus);
+    assert.deepEqual([focus.value, focus.selectionStart, focus.selectionEnd], ['KEEP', 2, 2]);
+    assert.equal(h.shown().row.dataset.answerReveal, undefined);
+  }
+});
+
+test('Task resized error layout: recompute the available budget, including no space now and space again later', () => {
+  const layout = { width: 600, logHeight: 28, fieldHeight: 44 };
+  const h = taskAnswerRevealHarness({ height: 123, scale: .9620968, spanHeight: 120.5, layout });
+  h.sending(); h.failed(); h.flush();
+  const top = h.shown().list.scrollTop, writes = h.writes.length;
+  for (const [logHeight, expectedHeight] of [[24, 127], [20, 123], [28, 129]]) {
+    layout.logHeight = logHeight; h.body.clientHeight += 1;
+    h.render(); h.flush();
+    assert.equal(h.shown().list.clientHeight, expectedHeight, 'do not blindly reuse the old reservation');
+    assert.ok(h.shown().log.clientHeight >= 20, 'the transcript floor survives the new budget');
+    assert.equal(h.shown().list.scrollTop, top); assert.equal(h.writes.length, writes);
+    assert.equal(h.frames.length, 0);
+    h.render(); h.flush();
+    assert.equal(h.shown().list.clientHeight, expectedHeight, 'same-size SSE retains the current budget');
+    assert.equal(h.writes.length, writes);
+  }
+  h.draft.phase = 'editing'; h.draft.error = null;
+  h.body.clientWidth += 1; h.render(); h.flush();
+  assert.equal(h.shown().board.dataset.answerSpace, undefined, 'an edited answer clears the old error budget');
+  assert.equal(h.writes.length, writes);
+});
+
+test('Task question compact controls: two readable lines and counter share existing actions without dropping instructions or changing composer CSS', () => {
+  const h = taskQuestionHarness(taskQuestionGraph({ response: { kind: 'text', maxLength: 20 } }));
+  h.type('KEEP');
+  assert.equal(h.part('chat-task-answer-text').getAttribute('rows'), '2');
+  const counter = h.part('chat-task-answer-limit');
+  assert.match(counter.textContent, /4 \/ 20자.*입력 후 계속/);
+  const actions = settingsNodes(h.root, node => node.className === 'egd-task-answer-actions')[0];
+  assert.ok(actions.children.includes(counter));
+  assert.equal(cssDeclarationsFor(surfaceCss, '.egd-task-answer-text')['overflow-y'], 'auto');
+  assert.equal(cssDeclarationsFor(surfaceCss, '.egd-task-answer-text')['min-height'], '44px');
+  assert.equal(cssDeclarationsFor(surfaceCss, '.egd-codex-input')['min-height'], '40px');
+  assert.equal(cssDeclarationsFor(surfaceCss, '.egd-codex-input')['font-size'], '15px');
+  const mount = declaration('mountCodexHUD');
+  assert.ok(mount.indexOf('taskAnswerReveal.restoreLayout();') < mount.indexOf('newTaskList.scrollTop = taskScroll.top'));
 });
 
 test('Task new-error reveal: actual question guard follows original live draft and mount keeps IME/focus restoration ahead of reveal', async () => {
