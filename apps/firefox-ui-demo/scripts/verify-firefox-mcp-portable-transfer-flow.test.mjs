@@ -9,6 +9,8 @@ import { createPrivateQaTempDirectory } from './egdesk-qa-platform.mjs';
 import { assertPortableEnvironment, assertPortableStoreInvariant, assertPortableImportedDraft,
   assertPortableExportFile, assertPortablePinnedExport, assertPortableNoReplay,
   assertPortableMissingHead, assertPortableAttachmentOmission,
+  assertPortableDuplicateReady, assertPortableDuplicateUi, assertPortableDuplicatedDraft,
+  assertPortableDuplicateNoReplay, runPortableDuplicateCase, PORTABLE_DUPLICATE_NOTICE,
   observePortableFirstUse, preparePortableInstructionEdge, observePortableSettingsNavigation, navigatePortableSettings,
   portableObservationSources, PORTABLE_OBSERVATION_BUDGET, portableTextVisible } from './verify-firefox-mcp-portable-transfer-flow.mjs';
 
@@ -461,4 +463,172 @@ test('missing-head proof requires actual Desk 404 and cannot stand in for a succ
   assert.equal(assertPortableMissingHead(before, fixture.snapshot(), boardId, ui), true);
   assert.throws(() => assertPortableMissingHead(before, before, boardId, ui), /actual Desk handler/);
   assert.throws(() => assertPortableMissingHead(before, fixture.snapshot(), before.seed.boardId, ui));
+});
+
+// Assertion/orchestration fixtures only. Their UI values never count as native
+// observation or paint evidence; the HTTP/store underneath is the real backend.
+async function duplicateFixture(t) {
+  const fixture = setup(t), initial = fixture.snapshot(), id = initial.seed.profileId;
+  const imported = { text: initial.seed.importText, filename: initial.seed.importFilename };
+  assert.equal((await request(fixture, 'POST', '/profiles/import', { ...imported, dryRun: true })).status, 200);
+  assert.equal((await request(fixture, 'POST', '/profiles/import', { ...imported, dryRun: false })).status, 201);
+  assert.equal((await request(fixture, 'POST', '/__qa/portable-transfer/control',
+    { operation: 'advance-profile-head', expectedHeadRevision: 2 })).status, 200);
+  for (const format of ['md', 'codex-toml']) {
+    assert.equal((await request(fixture, 'GET', `/profiles/${id}/export?format=${format}&revision=2`)).status, 200);
+  }
+  const before = fixture.snapshot();
+  const uiBefore = { detailCount: 1, detailId: id, detailRevision: '2', detailLifecycle: 'draft',
+    target: { profileId: id, revision: '2', source: 'draft', text: '내보낼 Agent: Owned QA portable profile · 초안 버전 2' },
+    duplicate: { count: 1, profileId: id, revision: '2', state: 'idle', disabled: false },
+    transferState: 'unknown', transferButtons: [{ id: 'settings-agent-export-md', disabled: true }],
+    agentNotice: '', activeThreadId: 'owned-room', roomAssignments: [
+      { id: 'owned-room', agentProfileId: null, profileEnabled: false, conversationId: null },
+      { id: 'retained-room', agentProfileId: 'retained-agent', profileEnabled: true, conversationId: 'retained-conversation' },
+    ] };
+  const commit = async (body = { revision: 2 }) => {
+    const packet = await request(fixture, 'POST', `/profiles/${id}/duplicate`, body);
+    assert.equal(packet.status, 201);
+    const copy = packet.value.profile, uiAfter = structuredClone(uiBefore);
+    Object.assign(uiAfter, { detailId: copy.id, detailRevision: '1', detailLifecycle: copy.lifecycle,
+      target: { profileId: copy.id, revision: '1', source: 'draft', text: `내보낼 Agent: ${copy.head.body.name} · 초안 버전 1` },
+      duplicate: { count: 1, profileId: copy.id, revision: '1', state: 'idle', disabled: false },
+      agentNotice: PORTABLE_DUPLICATE_NOTICE, transferState: 'idle', transferButtons: [{ disabled: false }] });
+    return { after: fixture.snapshot(), uiAfter, id: copy.id, packet };
+  };
+  return { fixture, initial, before, uiBefore, commit };
+}
+
+test('duplicate proof verifies real v2 request, source provenance and new inactive draft v1 while head stays v3', async t => {
+  const h = await duplicateFixture(t);
+  assert.equal(assertPortableDuplicateReady(h.before, h.uiBefore), true);
+  const { after, uiAfter, id } = await h.commit();
+  assert.equal(assertPortableDuplicatedDraft(h.before, after, h.uiBefore, uiAfter), id);
+  assert.equal(assertPortableStoreInvariant(h.initial, after, { imported: 1, headAdvanced: true, duplicated: 1 }), true);
+  assert.throws(() => assertPortableStoreInvariant(h.initial, after, { imported: 1, headAdvanced: true }),
+    'Original R7 invariant still refuses a duplicate without the explicit new stage');
+  assert.equal(assertPortableDuplicateNoReplay(after, Array.from({ length: 4 }, () => ({ state: after, ui: uiAfter })), h.uiBefore, id), true);
+});
+
+test('duplicate readiness rejects wrong or ambiguous displayed profile, pending/disabled command and pre-click effects', async t => {
+  const h = await duplicateFixture(t);
+  const variants = [x => { x.ui.detailCount = 2; }, x => { x.ui.detailId = 'other'; },
+    x => { x.ui.detailRevision = '3'; }, x => { x.ui.detailLifecycle = 'active'; },
+    x => { x.ui.target.revision = '3'; }, x => { x.ui.target.source = 'active'; },
+    x => { x.ui.duplicate.count = 2; }, x => { x.ui.duplicate.profileId = 'other'; },
+    x => { x.ui.duplicate.revision = '3'; }, x => { x.ui.duplicate.state = 'pending'; },
+    x => { x.ui.duplicate.disabled = true; }, x => { x.ui.transferState = 'saved'; },
+    x => { x.ui.transferButtons[0].disabled = false; }, x => { x.ui.transferButtons = []; },
+    x => { x.state.requests.push({ method: 'POST', path: `/profiles/${x.state.seed.profileId}/duplicate`, status: 403 }); },
+    x => { x.state.duplicateEvents.push({}); }, x => { x.state.headAdvances[0].revision = 2; }];
+  for (const alter of variants) {
+    const x = { state: structuredClone(h.before), ui: structuredClone(h.uiBefore) }; alter(x);
+    assert.throws(() => assertPortableDuplicateReady(x.state, x.ui));
+  }
+});
+
+test('duplicate validator rejects missing pin, head-v3 copy, extra fields, forged receipt and unrelated writes', async t => {
+  const h = await duplicateFixture(t), { after, uiAfter, id } = await h.commit();
+  const call = state => state.requests.find(row => row.path.endsWith('/duplicate'));
+  const variants = [state => { call(state).request = {}; }, state => { call(state).request.revision = 3; },
+    state => { call(state).request.name = 'replacement'; }, state => { call(state).requestSha256 = 'wrong'; },
+    state => { call(state).query = '?revision=2'; }, state => { call(state).delegated = false; },
+    state => { call(state).requestTruncated = true; }, state => { call(state).status = 200; },
+    state => { call(state).response.id = state.seed.profileId; },
+    state => { call(state).response.profile.activeRevision = 1; },
+    state => { call(state).response.profile.headRevision = 2; },
+    state => { state.duplicateEvents[0].sourceHash = 'head-3-hash'; },
+    state => { state.duplicateEvents[0].sourceRevision = 3; },
+    state => { state.persisted.profiles.records.find(row => row.id === id).active_revision = 1; },
+    state => { state.persisted.profiles.records.find(row => row.id === state.seed.profileId).updated_at++; },
+    state => { state.persisted.profiles.revisions.find(row => row.profile_id === id).body_json =
+      JSON.stringify(state.seed.revisions[0].body); },
+    state => { state.exports.push({ name: 'unexpected.md' }); },
+    state => { state.requests.push({ sequence: 999, method: 'POST', path: `/profiles/${id}/activate`, status: 403 }); }];
+  for (const alter of variants) {
+    const changed = structuredClone(after); alter(changed);
+    assert.throws(() => assertPortableDuplicatedDraft(h.before, changed, h.uiBefore, uiAfter));
+  }
+  // Actual backend defaults select head v3 when revision is absent: a real
+  // successful creation is not enough to satisfy the visible-v2 proof.
+  const other = await duplicateFixture(t), latest = await other.commit({});
+  assert.equal(latest.after.duplicateEvents[0].sourceRevision, 3);
+  assert.throws(() => assertPortableDuplicatedDraft(other.before, latest.after, other.uiBefore, latest.uiAfter));
+  await h.commit();
+  assert.throws(() => assertPortableDuplicatedDraft(h.before, h.fixture.snapshot(), h.uiBefore, uiAfter));
+});
+
+test('duplicate UI/no-replay proof refuses original detail, changed room, inaccurate notice and a later second request', async t => {
+  const h = await duplicateFixture(t), { after, uiAfter, id } = await h.commit();
+  for (const alter of [ui => { ui.detailId = h.before.seed.profileId; }, ui => { ui.detailCount = 2; },
+    ui => { ui.detailRevision = '2'; }, ui => { ui.detailLifecycle = 'active'; },
+    ui => { ui.target.revision = '2'; }, ui => { ui.target.text = ''; },
+    ui => { ui.duplicate.profileId = 'other'; }, ui => { ui.duplicate.state = 'pending'; },
+    ui => { ui.agentNotice = '완료'; }, ui => { ui.activeThreadId = 'other-room'; },
+    ui => { ui.roomAssignments[0].agentProfileId = id; }, ui => { ui.roomAssignments.pop(); }]) {
+    const changed = structuredClone(uiAfter); alter(changed);
+    assert.throws(() => assertPortableDuplicateUi(h.uiBefore, changed, id));
+  }
+  const sample = () => ({ state: structuredClone(after), ui: structuredClone(uiAfter) });
+  for (const alter of [x => { x.state.requests.push({ method: 'POST', path: '/profiles/other/duplicate' }); },
+    x => { x.state.requests.push({ method: 'POST', path: '/profiles/import' }); },
+    x => { x.state.duplicateEvents.push({}); }, x => { x.state.exports.push({}); },
+    x => { x.state.persisted.profiles.records[0].active_revision = 1; },
+    x => { x.ui.roomAssignments[0].profileEnabled = true; }]) {
+    const samples = [sample(), sample(), sample()]; alter(samples[2]);
+    assert.throws(() => assertPortableDuplicateNoReplay(after, samples, h.uiBefore, id));
+  }
+});
+
+async function duplicateStageFixture(t) {
+  const h = await duplicateFixture(t), actions = [], checks = [];
+  let ui = structuredClone(h.uiBefore), clicks = 0;
+  const options = { readState: async () => h.fixture.snapshot(), readUi: async () => structuredClone(ui),
+    reach: async selector => { actions.push(['reach', selector]); },
+    capture: async (stage, subjects) => { actions.push(['capture', stage, subjects]); },
+    check: (name, passed) => { assert.equal(passed, true, name); checks.push(name); },
+    click: async selector => {
+      assert.equal(h.fixture.snapshot().duplicateEvents.length, 0, 'No backend mutation before injected click');
+      clicks++; actions.push(['click', selector]); ui = (await h.commit()).uiAfter;
+    },
+    waitUi: async predicate => { assert.equal(predicate(ui), true); return structuredClone(ui); },
+    pause: async () => {}, assertDeadline() {} };
+  return { ...h, actions, checks, options, clicks: () => clicks, ui: () => ui };
+}
+
+test('duplicate stage preserves all earlier transfer checks, pins the native command once, and captures exact notices', async t => {
+  const h = await duplicateStageFixture(t), proof = await runPortableDuplicateCase(h.options);
+  assert.equal(h.clicks(), 1); assert.equal(proof.samples.length, 4); assert.equal(h.checks.length, 3);
+  const selector = `[data-testid="settings-agent-duplicate"][data-profile-id="${h.before.seed.profileId}"][data-revision="2"][data-state="idle"]`;
+  assert.deepEqual(h.actions.slice(0, 3), [['reach', selector],
+    ['capture', 'profile-duplicate-v2-command', [{ selector, text: '복제해서 새로 만들기' }]], ['click', selector]]);
+  assert.deepEqual(h.actions.slice(3).map(row => row.slice(0, 2)), [
+    ['reach', '[data-testid="settings-agent-notice"]'], ['capture', 'profile-duplicate-created-notice'],
+    ['reach', '[data-testid="transfer-export-target"]'], ['capture', 'profile-duplicate-draft-version-1'],
+  ]);
+  assert.equal(h.fixture.snapshot().duplicateEvents.length, 1);
+  const source = fs.readFileSync(new URL('./verify-firefox-mcp-portable-transfer-flow.mjs', import.meta.url), 'utf8');
+  const start = source.indexOf('proof.duplicate = await runPortableDuplicateCase');
+  assert.ok(start > source.indexOf("await noReplay('unknown')"));
+  assert.ok(start > source.indexOf("check('actual collision preserves the existing bytes'"));
+  const stage = source.slice(source.indexOf('export async function runPortableDuplicateCase'), source.indexOf('export async function runCli'));
+  assert.doesNotMatch(stage, /loopbackJson|fetch\(|profileRequest|\.click\(|\.focus\(|scrollIntoView/);
+});
+
+test('duplicate stage aborts stale bindings or deadline before click; ambiguous input is never replayed', async t => {
+  for (const alter of [h => { h.ui().detailRevision = '3'; }, h => { h.ui().duplicate.disabled = true; },
+    h => { h.ui().activeThreadId = 'changed-room'; }, h => { h.ui().roomAssignments[0].agentProfileId = 'another'; }]) {
+    const h = await duplicateStageFixture(t);
+    h.options.capture = async () => { alter(h); };
+    await assert.rejects(runPortableDuplicateCase(h.options));
+    assert.equal(h.clicks(), 0); assert.deepEqual(h.fixture.snapshot().duplicateEvents, []);
+  }
+  const expired = await duplicateStageFixture(t);
+  expired.options.assertDeadline = () => { throw new Error('deadline'); };
+  await assert.rejects(runPortableDuplicateCase(expired.options), /deadline/);
+  assert.equal(expired.clicks(), 0);
+  const ambiguous = await duplicateStageFixture(t), click = ambiguous.options.click;
+  ambiguous.options.click = async (...args) => { await click(...args); throw new Error('input receipt lost'); };
+  await assert.rejects(runPortableDuplicateCase(ambiguous.options), /input receipt lost/);
+  assert.equal(ambiguous.clicks(), 1); assert.equal(ambiguous.fixture.snapshot().duplicateEvents.length, 1);
 });

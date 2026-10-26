@@ -14,6 +14,8 @@ const testid = value => `[data-testid=${JSON.stringify(value)}]`;
 const sha256 = value => createHash('sha256').update(value).digest('hex');
 const profileImports = state => state.requests.filter(row => row.path === '/profiles/import' && row.delegated);
 const profileExports = state => state.requests.filter(row => /^\/profiles\/[^/]+\/export$/.test(row.path) && row.delegated);
+const profileDuplicates = state => state.requests.filter(row => row.method === 'POST' && /^\/profiles\/[^/]+\/duplicate$/.test(row.path));
+export const PORTABLE_DUPLICATE_NOTICE = '복제한 새 초안을 만들었습니다. 원본은 그대로이며, 아직 사용하거나 대화방에 배정하지 않았습니다.';
 export const PORTABLE_OBSERVATION_BUDGET = 12 * 1024;
 
 export function assertPortableEnvironment(env = process.env) {
@@ -23,24 +25,119 @@ export function assertPortableEnvironment(env = process.env) {
   return true;
 }
 
-export function assertPortableStoreInvariant(before, after, { imported = 0, headAdvanced = false } = {}) {
+export function assertPortableStoreInvariant(before, after, { imported = 0, headAdvanced = false, duplicated = 0 } = {}) {
+  assert.ok(duplicated === 0 || duplicated === 1);
   assert.equal(after.profile, before.profile); assert.equal(after.root, before.root);
   assert.deepEqual(after.catalogSeed, before.catalogSeed);
   assert.equal(after.catalogSeed.coherentBeforeLaunch, true); assert.equal(after.catalogSeed.setupOnly, true);
   assert.deepEqual(after.persisted.desk, before.persisted.desk, 'UI exports never save the current draft or alter saved Board/Desk revisions');
   assert.equal(after.currentImportSha256, before.seed.importSha256);
   const records = after.persisted.profiles.records;
-  assert.equal(records.length, before.persisted.profiles.records.length + imported);
+  assert.equal(records.length, before.persisted.profiles.records.length + imported + duplicated);
   assert.ok(records.every(row => row.active_revision === null && row.lifecycle === 'draft'), 'No activation or assignment');
   for (const row of before.persisted.profiles.revisions) {
     assert.deepEqual(after.persisted.profiles.revisions.find(next => next.profile_id === row.profile_id && next.revision === row.revision), row);
   }
-  assert.equal(after.persisted.profiles.revisions.length, before.persisted.profiles.revisions.length + imported + Number(headAdvanced));
+  const headDelta = Number(headAdvanced) - before.headAdvances.length;
+  assert.ok(headDelta === 0 || headDelta === 1);
+  assert.equal(after.persisted.profiles.revisions.length, before.persisted.profiles.revisions.length + imported + headDelta + duplicated);
+  assert.equal(profileDuplicates(after).length, duplicated);
+  assert.equal(after.duplicateEvents?.length || 0, duplicated);
   assert.equal(after.headAdvances.length, Number(headAdvanced));
   for (const key of ['providerTurns', 'nativePickerInvocations', 'nativeProcessSpawns']) assert.equal(after[key], 0);
   assert.ok(after.requests.every(row => !['/chat/send', '/terminal/write', '/terminal/init'].includes(row.path)), 'No provider or terminal attempt');
   assert.ok(after.requests.filter(row => row.method !== 'GET' && row.method !== 'OPTIONS' && !row.path.startsWith('/__qa/'))
-    .every(row => row.path === '/profiles/import' || row.status >= 400), 'No fake successful autosave or unrelated write');
+    .every(row => row.path === '/profiles/import' || row.status >= 400 || duplicated === 1 && row.method === 'POST' &&
+      row.path === `/profiles/${before.seed.profileId}/duplicate` && row.delegated && row.status === 201 &&
+      JSON.stringify(row.request) === JSON.stringify({ revision: 2 })), 'No fake successful autosave or unrelated write');
+  return true;
+}
+
+export function assertPortableDuplicateReady(state, ui) {
+  assert.equal(profileDuplicates(state).length, 0, 'No duplicate POST before the explicit native click');
+  assert.deepEqual(state.duplicateEvents, []);
+  const id = state.seed.profileId;
+  assert.equal(ui.detailCount, 1);
+  assert.equal(ui.detailId, id); assert.equal(ui.detailRevision, '2'); assert.equal(ui.detailLifecycle, 'draft');
+  assert.equal(ui.target.profileId, id); assert.equal(ui.target.revision, '2'); assert.equal(ui.target.source, 'draft');
+  assert.match(ui.target.text, /초안 버전 2/);
+  assert.deepEqual(ui.duplicate, { count: 1, profileId: id, revision: '2', state: 'idle', disabled: false });
+  assert.equal(ui.transferState, 'unknown', 'R7 unknown/no-replay remains completed before independent duplication');
+  assert.ok(ui.transferButtons.length > 0 && ui.transferButtons.every(button => button.disabled));
+  assert.ok(Array.isArray(ui.roomAssignments));
+  assert.equal(Math.max(...state.persisted.profiles.revisions.filter(row => row.profile_id === id).map(row => row.revision)), 3);
+  assert.equal(state.headAdvances.length, 1); assert.equal(state.headAdvances[0].revision, 3);
+  return true;
+}
+
+export function assertPortableDuplicateUi(before, after, id) {
+  assert.notEqual(id, before.detailId);
+  assert.equal(after.detailCount, 1);
+  assert.equal(after.detailId, id); assert.equal(after.detailRevision, '1'); assert.equal(after.detailLifecycle, 'draft');
+  assert.equal(after.target.profileId, id); assert.equal(after.target.revision, '1'); assert.equal(after.target.source, 'draft');
+  assert.match(after.target.text, /초안 버전 1/);
+  assert.equal(after.agentNotice, PORTABLE_DUPLICATE_NOTICE);
+  assert.equal(after.duplicate.count, 1); assert.equal(after.duplicate.profileId, id);
+  assert.equal(after.duplicate.revision, '1'); assert.equal(after.duplicate.state, 'idle');
+  assert.deepEqual(after.roomAssignments, before.roomAssignments, 'Creating a draft must not assign it to any room');
+  assert.equal(after.activeThreadId, before.activeThreadId);
+  return true;
+}
+
+export function assertPortableDuplicatedDraft(before, after, uiBefore, uiAfter) {
+  assertPortableDuplicateReady(before, uiBefore);
+  assertPortableStoreInvariant(before, after, { headAdvanced: true, duplicated: 1 });
+  const calls = profileDuplicates(after); assert.equal(calls.length, 1);
+  const call = calls[0], sourceId = before.seed.profileId, source = before.seed.revisions.find(row => row.revision === 2);
+  assert.equal(call.path, `/profiles/${sourceId}/duplicate`); assert.equal(call.query, '');
+  assert.equal(call.delegated, true); assert.equal(call.status, 201); assert.equal(call.requestTruncated, false);
+  assert.deepEqual(call.request, { revision: 2 });
+  assert.equal(call.requestSha256, sha256(JSON.stringify({ revision: 2 })));
+  assert.deepEqual(call.before, before.persisted); assert.deepEqual(call.after, after.persisted);
+  const posts = after.requests.slice(before.requests.length).filter(row => row.method !== 'GET' && !row.path.startsWith('/__qa/'));
+  assert.deepEqual(posts.map(row => row.sequence), [call.sequence], 'No activation, assignment or unrelated write accompanies duplication');
+  const original = before.persisted.profiles.records.find(row => row.id === sourceId);
+  for (const record of before.persisted.profiles.records) {
+    assert.deepEqual(after.persisted.profiles.records.find(row => row.id === record.id), record, 'Original/imported profiles stay unchanged');
+  }
+  const copies = after.persisted.profiles.records.filter(row => !before.persisted.profiles.records.some(old => old.id === row.id));
+  assert.equal(copies.length, 1); const copy = copies[0];
+  assert.equal(copy.lifecycle, 'draft'); assert.equal(copy.active_revision, null); assert.equal(copy.origin, 'user');
+  const revisions = after.persisted.profiles.revisions.filter(row => row.profile_id === copy.id);
+  assert.equal(revisions.length, 1); const revision = revisions[0];
+  assert.equal(revision.revision, 1); assert.equal(revision.parent_revision, null);
+  const body = JSON.parse(revision.body_json);
+  assert.deepEqual(body, { ...source.body, name: `${source.body.name} 사본` }, 'Copy the entire displayed v2 body, never head v3');
+  assert.equal(revision.hash, sha256(revision.body_json));
+  const provenance = JSON.parse(copy.source_json), entry = provenance.at(-1);
+  assert.deepEqual(provenance.slice(0, -1), JSON.parse(original.source_json));
+  assert.ok(Number.isSafeInteger(entry.at));
+  assert.deepEqual(entry, { kind: 'duplicate', origin: original.origin, profileId: sourceId,
+    revision: 2, hash: source.hash, name: source.body.name, at: entry.at });
+  const receipt = call.response;
+  assert.equal(receipt.id, copy.id); assert.equal(receipt.revision, 1); assert.equal(receipt.hash, revision.hash);
+  assert.equal(receipt.profile.id, copy.id); assert.equal(receipt.profile.lifecycle, 'draft');
+  assert.equal(receipt.profile.activeRevision, null); assert.equal(receipt.profile.active, null);
+  assert.equal(receipt.profile.headRevision, 1); assert.equal(receipt.profile.head.revision, 1);
+  assert.deepEqual(receipt.profile.head.body, body); assert.deepEqual(receipt.profile.source, provenance);
+  assert.deepEqual(after.duplicateEvents, [{ sequence: call.sequence, sourceProfileId: sourceId, sourceRevision: 2,
+    sourceHash: source.hash, profileId: copy.id, revision: 1, hash: revision.hash, name: body.name, lifecycle: 'draft', activeRevision: null }]);
+  for (const key of ['exports', 'pickerResults', 'headAdvances', 'forbiddenPosts']) assert.deepEqual(after[key], before[key]);
+  assertPortableDuplicateUi(uiBefore, uiAfter, copy.id);
+  return copy.id;
+}
+
+export function assertPortableDuplicateNoReplay(before, samples, uiBefore, id) {
+  assert.ok(samples.length >= 3);
+  for (const { state, ui } of samples) {
+    assert.deepEqual(state.persisted, before.persisted); assert.deepEqual(state.exports, before.exports);
+    assert.deepEqual(profileDuplicates(state), profileDuplicates(before));
+    assert.deepEqual(state.duplicateEvents, before.duplicateEvents);
+    assert.deepEqual(state.pickerResults, before.pickerResults); assert.deepEqual(state.forbiddenPosts, before.forbiddenPosts);
+    const writes = value => value.requests.filter(row => row.method !== 'GET' && !row.path.startsWith('/__qa/'));
+    assert.deepEqual(writes(state), writes(before), 'No additional duplicate, activation, import or assignment request');
+    assertPortableDuplicateUi(uiBefore, ui, id);
+  }
   return true;
 }
 
@@ -168,6 +265,7 @@ function portableUiDom() {
       scrollWidth: node.scrollWidth, clientWidth: node.clientWidth }; };
   const api = window.__egdesk, card = document.querySelector('.egd-settings-card'), target = q('transfer-export-target');
   const status = q('transfer-status'), bd = q('board-canvas-export');
+  const detail = q('settings-agent-detail'), duplicate = q('settings-agent-duplicate');
   return { width: innerWidth, height: innerHeight, settingsId: card?.id || null, settingsBox: box(card),
     settingsFullscreen: !!card && api?.state?.cardFullscreen?.cardId === card.id,
     settingsProxy: card?.querySelector('.egd-semantic-proxy') ? box(card.querySelector('.egd-semantic-proxy')) : null,
@@ -175,6 +273,16 @@ function portableUiDom() {
     target: { profileId: target?.dataset.profileId || null, revision: target?.dataset.revision || null,
       source: target?.dataset.source || null, text: text(target) },
     detailId: q('settings-agent-detail')?.dataset.profileId || null,
+    detailCount: document.querySelectorAll('[data-testid="settings-agent-detail"]').length,
+    detailRevision: detail?.dataset.revision || null, detailLifecycle: detail?.dataset.lifecycle || null,
+    agentNotice: text(q('settings-agent-notice')),
+    duplicate: { count: document.querySelectorAll('[data-testid="settings-agent-duplicate"]').length,
+      profileId: duplicate?.dataset.profileId || null, revision: duplicate?.dataset.revision || null,
+      state: duplicate?.dataset.state || null, disabled: duplicate?.disabled ?? true },
+    activeThreadId: api?.state?.codex?.activeThreadId || null,
+    roomAssignments: (api?.state?.codex?.threads || []).map(thread => ({ id: thread.id,
+      agentProfileId: thread.agentProfileId ?? null, profileEnabled: thread.profileEnabled ?? null,
+      conversationId: thread.conversationId ?? null })).sort((a, b) => a.id.localeCompare(b.id)),
     rows: [...document.querySelectorAll('[data-testid="settings-agent-row"]')].map(node => ({ id: node.dataset.profileId, text: text(node), lifecycle: node.dataset.lifecycle })),
     instructions: { text: text(q('import-instructions')), box: box(q('import-instructions')) },
     transferButtons: [...document.querySelectorAll('[data-testid="settings-agent-transfer"] button')].map(node => ({ id: node.dataset.testid, disabled: node.disabled })),
@@ -687,9 +795,57 @@ export async function runPortableTransferFlow({ harness, result, check }, { prof
   check('actual collision preserves the existing bytes', !!assertPortableExportFile(proof.final, 'owned-agent.md', proof.initial.seed.revisions[1].exports.md.text));
   const common = await loopbackJson('/__qa/state', { token, env });
   check('providerTurns 0; no send/auth/terminal attempts', common.providerTurns === 0 && common.observed.sends.length === 0 && common.observed.authWrites.length === 0 && common.runs.length === 0);
+  // Keep all R7 receipts/checks intact before this independent Settings action.
+  proof.transferFinal = proof.final;
+  proof.duplicate = await runPortableDuplicateCase({ readState: state, readUi: () => observePortableUi(harness),
+    reach, click, capture, check, waitUi, pause: () => new Promise(resolve => setTimeout(resolve, 250)),
+    assertDeadline: () => assertBeforeDeadline(deadlineMs) });
+  proof.final = await state();
+  check('final store permits only the original import, one head advance and one explicit duplicate',
+    assertPortableStoreInvariant(proof.initial, proof.final, { imported: 1, headAdvanced: true, duplicated: 1 }));
+  const afterDuplicate = await loopbackJson('/__qa/state', { token, env });
+  check('duplicate adds no provider/send/auth/terminal activity', afterDuplicate.providerTurns === 0 &&
+    afterDuplicate.observed.sends.length === 0 && afterDuplicate.observed.authWrites.length === 0 && afterDuplicate.runs.length === 0);
   result.providerTurns = 0; result.nativePickerInvocations = 0; result.nativeProcessSpawns = 0;
   result.actualUiAndOwnedStorageVerified = true;
+  result.profileDuplicateVerified = true;
   result.visualReview = 'pending-first-person-review';
+}
+
+// The caller supplies only the already-owned native/observation helpers. This
+// stage cannot POST a duplicate itself or replace any product state/receipt.
+export async function runPortableDuplicateCase({ readState, readUi, reach, click, capture, check, waitUi, pause, assertDeadline }) {
+  const before = await readState(), uiBefore = await readUi();
+  check('no duplicate request or draft before the explicit native click; displayed v2 remains independent of head v3',
+    assertPortableDuplicateReady(before, uiBefore));
+  const selector = `${testid('settings-agent-duplicate')}[data-profile-id=${JSON.stringify(before.seed.profileId)}][data-revision="2"][data-state="idle"]`;
+  await reach(selector);
+  await capture('profile-duplicate-v2-command', [{ selector, text: '복제해서 새로 만들기' }], await readUi());
+  const clickState = await readState(), clickUi = await readUi();
+  assertPortableDuplicateReady(clickState, clickUi);
+  assert.deepEqual(clickState.persisted, before.persisted);
+  assert.deepEqual(clickUi.target, uiBefore.target); assert.deepEqual(clickUi.roomAssignments, uiBefore.roomAssignments);
+  assert.equal(clickUi.activeThreadId, uiBefore.activeThreadId);
+  assertDeadline(); await click(selector, 'duplicate exactly the displayed saved version 2 into one inactive draft');
+  const uiAfter = await waitUi(value => value.detailId !== before.seed.profileId && value.detailRevision === '1' &&
+    value.detailLifecycle === 'draft' && value.agentNotice === PORTABLE_DUPLICATE_NOTICE);
+  const after = await readState(), id = assertPortableDuplicatedDraft(before, after, uiBefore, uiAfter);
+  check('one actual duplicate POST copies v2, not head v3, into one unassigned inactive draft v1', !!id);
+  for (const [stage, subject, expected] of [
+    ['profile-duplicate-created-notice', 'settings-agent-notice', PORTABLE_DUPLICATE_NOTICE],
+    ['profile-duplicate-draft-version-1', 'transfer-export-target', uiAfter.target.text],
+  ]) {
+    await reach(testid(subject)); const ui = await readUi();
+    assertPortableDuplicateUi(uiBefore, ui, id);
+    await capture(stage, [{ selector: testid(subject), text: expected }], ui);
+  }
+  const samples = [];
+  for (let sample = 0; sample < 4; sample++) {
+    assertDeadline(); await pause(); samples.push({ state: await readState(), ui: await readUi() });
+  }
+  check('duplicate completion does not replay, activate, assign, alter exports or replace original saved revisions',
+    assertPortableDuplicateNoReplay(after, samples, uiBefore, id));
+  return { before, uiBefore, clickState, clickUi, after, uiAfter, id, samples };
 }
 
 export async function runCli(argv = process.argv.slice(2), env = process.env) {
