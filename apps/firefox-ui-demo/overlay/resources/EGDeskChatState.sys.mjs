@@ -1427,6 +1427,9 @@ export function profileFormFromBody(body = null) {
     role: typeof body?.role === 'string' ? body.role : '', tone,
     traits: Array.isArray(body?.personality?.traits) ? body.personality.traits.filter(item => typeof item === 'string') : [],
     speechNotes: typeof body?.personality?.speechNotes === 'string' ? body.personality.speechNotes : '',
+    // Saved-only fields have no editor controls; retain just these two, without aliases.
+    ...(Object.hasOwn(body?.personality ?? {}, 'examples') ? { personalityExamples: copy(body.personality.examples) } : {}),
+    ...(Object.hasOwn(body?.personality ?? {}, 'avoid') ? { personalityAvoid: copy(body.personality.avoid) } : {}),
     expertise: Array.isArray(body?.expertise) ? body.expertise.filter(item => typeof item === 'string') : [],
     instructions: typeof body?.instructions === 'string' ? body.instructions : '',
     toolPreferences: Array.isArray(body?.toolPreferences) ? body.toolPreferences.filter(item => typeof item === 'string') : [],
@@ -1480,7 +1483,10 @@ export function validateProfileForm(form = {}) {
   if (errors.length) return { ok: false, errors, body: null };
   return { ok: true, errors, body: {
     name, avatar: avatarValue ? { kind, value: avatarValue, color } : null, role,
-    personality: { tone, traits, speechNotes }, expertise, instructions, toolPreferences,
+    personality: { tone, traits, speechNotes,
+      ...(Object.hasOwn(form, 'personalityExamples') ? { examples: copy(form.personalityExamples) } : {}),
+      ...(Object.hasOwn(form, 'personalityAvoid') ? { avoid: copy(form.personalityAvoid) } : {}),
+    }, expertise, instructions, toolPreferences,
     model: form.model && typeof form.model === 'object' ? copy(form.model) : null,
     toolCeiling,
   } };

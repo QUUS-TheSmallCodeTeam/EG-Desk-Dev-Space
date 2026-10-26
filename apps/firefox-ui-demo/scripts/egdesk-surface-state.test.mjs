@@ -4934,6 +4934,83 @@ test('the Agent form needs a name, keeps the approved six colors and the store l
   assert.deepEqual(Chat.validateProfileForm(Chat.profileFormFromBody(saved)).body, { ...saved, toolCeiling: null });
 });
 
+function personalityPreservationBody(personality = {
+  examples: [{ user: '검토해 주세요', reply: '근거부터 확인하겠습니다.\n불확실한 내용은 구분하겠습니다.' }],
+  avoid: ['확인 없이 단정하기', '원본 덮어쓰기'],
+}) {
+  return normalizeProfileBody({ name: '보존 검증', avatar: { kind: 'initial', value: 'V', color: '#252a26' }, role: '기존 역할',
+    personality: { tone: 'concise', traits: ['정확함'], speechNotes: '짧게', ...personality },
+    expertise: ['검토'], instructions: '원본을 보존하세요.', toolPreferences: ['browser'],
+    model: { engine: 'codex', modelId: 'gpt-5.5', effort: 'high' } });
+}
+function checkedPersonalityForm(form) {
+  const result = Chat.validateProfileForm(form);
+  assert.equal(result.ok, true, JSON.stringify(result.errors));
+  return result.body;
+}
+
+test('personality preservation: unchanged form retains examples/avoid and the canonical saved hash', () => {
+  const saved = personalityPreservationBody(), original = structuredClone(saved);
+  const result = checkedPersonalityForm(Chat.profileFormFromBody(saved));
+  assert.deepEqual(result, { ...saved, toolCeiling: null });
+  assert.deepEqual(normalizeProfileBody(result), saved);
+  assert.equal(profileHash(result), profileHash(saved));
+  assert.deepEqual(saved, original);
+});
+
+test('personality preservation: role-only edit changes no other saved field and leaves the original untouched', () => {
+  const saved = personalityPreservationBody(), original = structuredClone(saved), oldHash = profileHash(saved);
+  const form = Chat.profileFormFromBody(saved); form.role = '새 역할';
+  const result = checkedPersonalityForm(form);
+  assert.deepEqual(result, { ...original, role: '새 역할', toolCeiling: null });
+  assert.deepEqual(normalizeProfileBody(result), { ...original, role: '새 역할' });
+  assert.deepEqual(saved, original); assert.equal(profileHash(saved), oldHash);
+});
+
+test('personality preservation: body, internal form and emitted bodies share no arrays or nested example objects', () => {
+  const saved = personalityPreservationBody(), original = structuredClone(saved), form = Chat.profileFormFromBody(saved);
+  assert.notEqual(form.personalityExamples, saved.personality.examples);
+  assert.notEqual(form.personalityExamples[0], saved.personality.examples[0]);
+  assert.notEqual(form.personalityAvoid, saved.personality.avoid);
+  form.personalityExamples[0].reply = 'form-only reply'; form.personalityAvoid.push('form-only avoidance');
+  assert.deepEqual(saved, original);
+  const first = checkedPersonalityForm(form), second = checkedPersonalityForm(form), originalForm = structuredClone(form);
+  assert.notEqual(first.personality.examples, form.personalityExamples);
+  assert.notEqual(first.personality.examples[0], form.personalityExamples[0]);
+  assert.notEqual(first.personality.avoid, form.personalityAvoid);
+  first.personality.examples[0].user = 'output-only'; first.personality.avoid.push('output-only');
+  assert.deepEqual(form, originalForm); assert.deepEqual(second, checkedPersonalityForm(form));
+  assert.deepEqual(saved, original);
+});
+
+test('personality preservation: each absent key stays absent and old canonical hashes remain stable', () => {
+  const both = personalityPreservationBody().personality;
+  for (const supplied of [{}, { examples: both.examples }, { avoid: both.avoid },
+    { examples: both.examples, avoid: both.avoid }, { examples: [], avoid: [] }]) {
+    const saved = personalityPreservationBody(supplied), form = Chat.profileFormFromBody(saved), result = checkedPersonalityForm(form);
+    for (const [key, field] of [['examples', 'personalityExamples'], ['avoid', 'personalityAvoid']]) {
+      assert.equal(Object.hasOwn(form, field), Object.hasOwn(saved.personality, key));
+      assert.equal(Object.hasOwn(result.personality, key), Object.hasOwn(saved.personality, key));
+    }
+    assert.deepEqual(normalizeProfileBody(result), saved); assert.equal(profileHash(result), profileHash(saved));
+  }
+  const empty = Chat.profileFormFromBody(null);
+  assert.equal(Object.hasOwn(empty, 'personalityExamples'), false);
+  assert.equal(Object.hasOwn(empty, 'personalityAvoid'), false);
+});
+
+test('personality preservation: only examples/avoid carry through, without a blanket hidden-field merge', () => {
+  const saved = personalityPreservationBody(); saved.personality.unrelated = { doNotCarry: true };
+  const form = Chat.profileFormFromBody(saved);
+  form.personality = { unrelated: true, tone: 'formal' }; form.unrelated = true; form.tone = 'warm';
+  const result = checkedPersonalityForm(form);
+  assert.deepEqual(Object.keys(result.personality), ['tone', 'traits', 'speechNotes', 'examples', 'avoid']);
+  assert.equal(result.personality.tone, 'warm', 'the actual editable field remains authoritative');
+  assert.deepEqual(result.personality.examples, saved.personality.examples);
+  assert.deepEqual(result.personality.avoid, saved.personality.avoid);
+  assert.equal(Object.hasOwn(result.personality, 'unrelated'), false); assert.equal(Object.hasOwn(result, 'unrelated'), false);
+});
+
 test('profile catalog, status, avatars and diffs read as the 대표님 sees them', () => {
   const rows = Chat.normalizeProfileCatalog({ profiles: [...catalogRows, { id: 'Bad ID', lifecycle: 'active', headRevision: 1, name: 'x' },
     { id: 'no-name', lifecycle: 'active', headRevision: 1, name: '' }, { id: 'odd-state', lifecycle: 'running', headRevision: 1, name: 'y' }, catalogRows[0]] });
