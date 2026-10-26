@@ -257,6 +257,14 @@ export function createQaContextFixture(profile) {
 // Chat SQLite writes go through the existing stores. This is synthetic history,
 // never evidence that a provider received a turn. Runtime counters stay zero.
 export async function seedQaSourceChangeScene(profile, context) {
+  return seedQaContextHistoryScene(profile, context);
+}
+
+export async function seedQaBriefingCommentsScene(profile, context) {
+  return seedQaContextHistoryScene(profile, context, { briefingComments: true });
+}
+
+async function seedQaContextHistoryScene(profile, context, { briefingComments = false } = {}) {
   const fixture = assertQaFixtureManifest(profile);
   if (fs.lstatSync(path.join(profile, 'prefs.js'), { throwIfNoEntry: false })) fail('QA_SEED_NOT_FRESH', 'Seed requires a prefs-less, unopened owned profile', 409);
   const prefPath = path.join(profile, 'user.js');
@@ -264,7 +272,7 @@ export async function seedQaSourceChangeScene(profile, context) {
   if (!prefStat.isFile() || prefStat.isSymbolicLink()) fail('QA_SEED_NOT_FRESH', 'Owned regular user.js required', 409);
   const prefs = fs.readFileSync(prefPath, 'utf8');
   if (/egdesk\.(deskSession|surfaceLifecycle)\.v1/.test(prefs)) fail('QA_SEED_NOT_FRESH', 'Existing scene preferences cannot be overwritten', 409);
-  const dataDir = path.join(fixture.root, 'source-change-seed');
+  const dataDir = path.join(fixture.root, briefingComments ? 'briefing-comments-seed' : 'source-change-seed');
   // Atomic directory creation is also the restart guard. Even partial setup
   // is never replayed or silently repaired over an existing owned scene.
   fs.mkdirSync(dataDir, { mode: 0o700 });
@@ -279,7 +287,7 @@ export async function seedQaSourceChangeScene(profile, context) {
   try {
     const forbidden = () => fail('QA_PROVIDER_FORBIDDEN', 'Seed history cannot invoke an engine', 403);
     const chat = new CodexChatRuntime({ store: chatStore, requireStore: true, getOwnerKey: () => owner, request: forbidden, respond: forbidden });
-    const identities = [], threads = [];
+    const identities = [], threads = [], threadDrafts = {};
     const now = Date.now();
     for (const kind of ['file', 'browser']) {
       const clientThreadId = `qa-ctx04-room-${randomUUID()}`, conversationId = `qa-ctx04-conversation-${randomUUID()}`;
@@ -313,12 +321,21 @@ export async function seedQaSourceChangeScene(profile, context) {
       const packet = inspected.delivered;
       context.registerStored({ owner, manifest: capture, text, binding, packet, store });
       const reference = capturedInputReference(attachment, capture, route);
+      let briefing;
+      if (briefingComments) {
+        const id = randomUUID();
+        briefing = { id, title: `QA Briefing comments · ${kind}`, conversationId, runId, answerId, createdAt: now, presentationStatus: 'proposed',
+          steps: [0, 1].map(index => ({ id: `qa-step-${index + 1}`, text: `보관된 ${kind} 근거 ${index + 1}`,
+            target: { sourceId: capture.sourceId, hash: capture.hash, range: { startLine: index * 6 + 1, endLine: index * 6 + 6 } },
+            fallback: '보관 근거를 사용할 수 없습니다. 현재 원본으로 대체하지 않습니다.' })) };
+        await store.putRecord(owner, 'briefings', briefing, id);
+      }
       const requestId = `qa-ctx04-request-${randomUUID()}`;
       const messages = [
         { id: randomUUID(), role: 'user', status: 'completed', text: 'CTX04 초기 보관 입력 · 합성 시험 기록',
           ...run, requestId, createdAt: now, inputReferences: [reference] },
         { id: randomUUID(), role: 'assistant', status: 'completed', text: '원본과 전달 내용을 보관한 합성 기록입니다. 실제 모델 호출은 없었습니다.',
-          ...run, requestId, createdAt: now, contextCaptures: [capture], contextPackets: [packet] },
+          ...run, requestId, createdAt: now, contextCaptures: [capture], contextPackets: [packet], ...(briefing ? { briefing } : {}) },
       ];
       // Synthetic native history follows CodexChatRuntime's id/messageId
       // pair. Keep the existing IDs; id alone is not a native message binding.
@@ -326,39 +343,47 @@ export async function seedQaSourceChangeScene(profile, context) {
       const checkpoint = { ...run, requestId, status: 'completed', createdAt: now, messages,
         engine: { id: 'codex', engineProfileId: 'codex-default' },
         activities: [], artifacts: [], pendingApprovals: [], pendingUserInputs: [], subAgents: [],
-        context: { captures: [capture], packets: [packet], briefings: [] }, truncated: false, historyComplete: true };
+        context: { captures: [capture], packets: [packet], briefings: briefing ? [briefing] : [] }, truncated: false, historyComplete: true };
       chatStore.importConversationCopy({ clientThreadId, importId: `qa-source-change:${clientThreadId}`, title, createdAt: now,
         snapshot: { protocolVersion: 2, conversationId, runs: [checkpoint], truncated: false, historyComplete: true } });
       const saved = chatStore.getConversation(clientThreadId);
+      const preservation = briefingComments ? { draftText: `QA ${kind} 보존 초안`, inputSources: [],
+        briefingInputs: [copy(reference)], briefingCommentRefs: [] } : null;
+      if (preservation) threadDrafts[clientThreadId] = preservation.draftText;
       threads.push({ id: clientThreadId, clientBindingId: clientThreadId, conversationId, ...engine, type: 'dm', title,
         subtitle: '합성 보관 입력 · 실제 전송 없음', profileEnabled: false, agentProfileId: null,
         bindingAccountKey: account.key, bindingState: 'verified', localConversationId: saved.localConversationId,
-        createdAt: now, updatedAt: now, inputSources: [], briefingInputs: [], messages: [] });
-      identities.push({ ...run, title, sources: [{ selectionId, sourceId: capture.sourceId, snapshotId: capture.snapshotId,
+        createdAt: now, updatedAt: now, inputSources: [], briefingInputs: preservation?.briefingInputs || [],
+        ...(preservation ? { briefingCommentRefs: [] } : {}), messages: [] });
+      identities.push({ ...run, title, ...(preservation ? { preservation } : {}), ...(briefing ? { briefing: { id: briefing.id,
+        steps: briefing.steps.map(step => ({ id: step.id, sourceIds: [step.target.sourceId] })) } } : {}), sources: [{ selectionId, sourceId: capture.sourceId, snapshotId: capture.snapshotId,
         kind, ...(kind === 'file' ? { path: sourceRef.path } : { viewId }), packetId, captureHash: capture.hash, payloadHash: packet.hash }] });
     }
     const chatCardId = `qa-ctx04-chat-${randomUUID()}`, agendaId = `qa-ctx04-desk-${randomUUID()}`;
     const initialState = { surfaceMode: 'desk', activeThreadId: threads[0].id, chatCardId, entryBypassed: true };
     const desk = { version: 1, savedAt: now, desk: { pan: { x: 0, y: 0 }, zoom: 1, activeAgendaId: agendaId, activeCardId: chatCardId },
       agenda: { id: agendaId, title: 'CTX04', memberCardIds: [chatCardId], contextBindings: [] },
-      // SOURCE_CHANGE_SEED-only QA placement, not a product collision fix or
+      // Opt-in Context history seed QA placement, not a product collision fix or
       // window resize: reserve chrome at both 1280x800 and observed 1366x768.
       cards: [{ id: chatCardId, type: 'chat', geometry: { x: 160, y: 80, width: 1000, height: 620, zIndex: 1 } }], shapes: [],
       surface: { mode: 'desk', browserCardId: null, initialBrowserFocus: false, recoveryBackupKey: null, recoveryAcknowledged: false },
       boardProjections: { projections: {}, activeProjectionId: null },
       chat: { threads, activeThreadId: threads[0].id, codexAccountKey: account.key, unobservedPreviousRun: false,
-        threadDrafts: {}, hudView: 'conversation', recentEngineId: 'codex', localHistoryBackupKey: null } };
+        threadDrafts, hudView: 'conversation', recentEngineId: 'codex', localHistoryBackupKey: null } };
     const prefLine = (key, value) => `user_pref(${JSON.stringify(key)}, ${JSON.stringify(JSON.stringify(value))});\n`;
     fs.appendFileSync(prefPath, '\n' + prefLine('egdesk.deskSession.v1', desk)
       + prefLine('egdesk.surfaceLifecycle.v1', { version: 1, mode: 'desk', browserCardId: null }));
     const histories = identities.map(row => chat.getLocalHistory({ clientThreadId: row.clientThreadId }));
     const metadata = { version: 1, setupOnly: true, synthetic: true, ready: true, account, initialState, identities,
+      ...(briefingComments ? { storage: { chat: 'sqlite', comments: 'context-json-records', dataDir } } : {}),
       counts: { seed: { conversations: chatStore.listConversations().threads.length,
         captures: (await store.listRecords(owner, 'sources')).length, bindings: (await store.listRecords(owner, 'bindings')).length,
         packets: (await store.listRecords(owner, 'packets')).length, deliveryRecords: (await store.listRecords(owner, 'deliveries')).length,
-        historyRuns: histories.reduce((sum, h) => sum + h.runs.length, 0), historyMessages: histories.reduce((sum, h) => sum + h.messages.length, 0) },
+        historyRuns: histories.reduce((sum, h) => sum + h.runs.length, 0), historyMessages: histories.reduce((sum, h) => sum + h.messages.length, 0),
+        ...(briefingComments ? { briefings: (await store.listRecords(owner, 'briefings')).length,
+          comments: (await store.listRecords(owner, 'briefing-comments')).length } : {}) },
         runtimeAtSetup: { captureBatches: 0, fileCaptureOperations: 0, sends: 0, deliveries: 0 } } };
-    return { metadata, identities: identities.map(row => ({ ...row, fixtureOwner: owner })),
+    return { metadata, store, identities: identities.map(row => ({ ...row, fixtureOwner: owner })),
       history: chat, snapshot(conversationId) {
         const row = identities.find(r => r.conversationId === conversationId);
         if (!row) return null;

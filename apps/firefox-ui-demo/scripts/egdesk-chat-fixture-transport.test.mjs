@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
-import { createHmac } from 'node:crypto';
+import { createHmac, randomUUID, createHash } from 'node:crypto';
 import path from 'node:path';
 import { Readable } from 'node:stream';
 import { EventEmitter } from 'node:events';
@@ -24,7 +24,7 @@ import { assertPublishedBriefing, assertContextCaptureBatch, assertStoredAgentDe
 const TOKEN = 'unit-fixture-token-no-credentials';
 const FIXTURE_ENV = { EGDESK_QA_FIXTURE_TRANSPORT: '1', EGDESK_QA_FIXTURE_PORT: '49318' };
 
-function setup(t, { claude = false, reader = false, projectFile = false, runOutputs = false, portable = false, taskGate = false, originFile = false, stateFixtures = false, sourceChangeSeed = false, fixturePort = FIXTURE_ENV.EGDESK_QA_FIXTURE_PORT } = {}) {
+function setup(t, { claude = false, reader = false, projectFile = false, runOutputs = false, portable = false, taskGate = false, originFile = false, stateFixtures = false, sourceChangeSeed = false, briefingComments = false, fixturePort = FIXTURE_ENV.EGDESK_QA_FIXTURE_PORT } = {}) {
   const source = fs.mkdtempSync(path.join(canonicalTempRoot(), 'egdesk-loader-fixture-'));
   for (const name of LOADER_FILES) fs.writeFileSync(path.join(source, name), `unit fixture ${name}\n`);
   const { profile } = bootstrapQaProfile({ loaderSource: source });
@@ -38,8 +38,9 @@ function setup(t, { claude = false, reader = false, projectFile = false, runOutp
   const fetchBefore = globalThis.fetch;
   const eventSourceBefore = globalThis.EventSource;
   const fixtureEnv = { ...FIXTURE_ENV, EGDESK_QA_FIXTURE_PORT: String(fixturePort), ...(projectFile ? { EGDESK_QA_PROJECT_FILE_FIXTURE: '1', EGDESK_QA_REAL_TURN: '0' } : {}),
-    ...(stateFixtures || sourceChangeSeed ? { EGDESK_QA_STATE_FIXTURES: '1', EGDESK_QA_REAL_TURN: '0' } : {}),
+    ...(stateFixtures || sourceChangeSeed || briefingComments ? { EGDESK_QA_STATE_FIXTURES: '1', EGDESK_QA_REAL_TURN: '0' } : {}),
     ...(sourceChangeSeed ? { EGDESK_QA_CONTEXT_SOURCE_CHANGE_SEED: '1' } : {}),
+    ...(briefingComments ? { EGDESK_QA_BRIEFING_COMMENTS_SEED: '1' } : {}),
     ...(runOutputs ? { EGDESK_QA_RUN_OUTPUTS_FIXTURE: '1', EGDESK_QA_REAL_TURN: '0' } : {}),
     ...(portable ? { EGDESK_QA_PORTABLE_TRANSFER_FIXTURE: '1', EGDESK_QA_REAL_TURN: '0' } : {}),
     ...(taskGate ? { EGDESK_QA_TASK_GATE_FIXTURE: '1', EGDESK_QA_REAL_TURN: '0' } : {}),
@@ -81,6 +82,37 @@ const sendRunOutputs = (handler, scenario = 'RUN_OUTPUTS') => request(handler, '
   clientThreadId: `qa-output-${scenario}`, requestId: `qa-output-${scenario}` });
 const outputRoute = (path, run, itemId) => `${path}?${new URLSearchParams({ conversationId: run.conversationId, runId: run.runId,
   ...(itemId === undefined ? {} : { itemId }) })}`;
+
+const commentR = room => ({ engineId: room.engineId, engineProfileId: room.engineProfileId,
+  clientThreadId: room.clientThreadId, conversationId: room.conversationId, briefingId: room.briefing.id });
+const commentURL = (room, patch = {}) => {
+  const { briefingId, ...query } = { ...commentR(room), ...patch };
+  return `/context/briefings/${briefingId}/comments?${new URLSearchParams(query)}`;
+};
+const commentBody = (room, extra = {}) => ({ stepId: room.briefing.steps[0].id, text: 'QA saved comment', clientRequestId: randomUUID(), ...extra });
+async function setupComments(t, options = {}) {
+  const transport = setup(t, { briefingComments: true, ...options });
+  await transport.ready;
+  const headers = { host: `${transport.info.host}:${transport.info.port}`, 'content-type': 'application/json', origin: 'chrome://browser' };
+  const send = (method, url, body = null, control = false, onResponse = () => {}) => request(transport.handler,
+    method, url, body, control ? TOKEN : null, onResponse, headers);
+  const state = async () => (await send('GET', '/__qa/state', null, true)).body;
+  const seed = (await state()).briefingCommentsSeed;
+  return { ...transport, send, state, seed,
+    arm: (room, extra = {}) => send('POST', '/__qa/briefing-comments/config', { ...commentR(room), mode: 'hold',
+      bindNextPost: true, deadlineAt: Date.now() + 5000, ...extra }, true),
+    release: (room, receipt, extra = {}) => send('POST', '/__qa/briefing-comments/release', { ...commentR(room),
+      holdId: receipt.holdId, requestId: receipt.requestId, clientRequestId: receipt.clientRequestId, ...extra }, true) };
+}
+async function waitCommentReceipt(fixture, predicate) {
+  const deadline = Date.now() + 3000;
+  do {
+    const row = (await fixture.state()).briefingComments.receipts.find(predicate);
+    if (row) return row;
+    await new Promise(resolve => setTimeout(resolve, 2));
+  } while (Date.now() < deadline);
+  assert.fail('Expected bounded comment receipt did not arrive');
+}
 
 async function setupOriginMount(t) {
   const transport = setup(t, { originFile: true });
@@ -2104,6 +2136,433 @@ test('CTX04 seeded native message identity keeps both rooms at two messages thro
   assert.equal(final.context.captureBatches, 0); assert.equal(final.context.fileCaptureOperations, 0);
   assert.deepEqual(final.context.deliveries, []); assert.deepEqual(final.observed.sends, []);
   assert.equal(final.observed.resumes.length, 4);
+});
+
+test('Briefing comments seed is exclusive; default/source-change routes stay off and malformed flags cannot seed', async t => {
+  for (const options of [{}, { sourceChangeSeed: true }]) {
+    const ordinary = setup(t, options); await ordinary.ready;
+    const state = await fixtureState(ordinary.handler);
+    assert.equal(state.briefingCommentsSeed, undefined); assert.equal(state.briefingComments, undefined);
+    assert.equal((await request(ordinary.handler, 'GET', `/context/briefings/${randomUUID()}/comments`)).status, 404);
+  }
+  const { info } = setup(t);
+  const env = { ...FIXTURE_ENV, EGDESK_QA_BRIEFING_COMMENTS_SEED: '1', EGDESK_QA_STATE_FIXTURES: '1', EGDESK_QA_REAL_TURN: '0' };
+  for (const patch of [{ EGDESK_QA_BRIEFING_COMMENTS_SEED: 'yes' }, { EGDESK_QA_STATE_FIXTURES: '0' },
+    { EGDESK_QA_REAL_TURN: '1' }, { EGDESK_QA_CONTEXT_SOURCE_CHANGE_SEED: '1' }, { EGDESK_QA_CLAUDE_FIXTURE: '1' },
+    { EGDESK_QA_PORTABLE_TRANSFER_FIXTURE: '1' }, { EGDESK_QA_PROJECT_FILE_FIXTURE: '1' },
+    { EGDESK_QA_RUN_OUTPUTS_FIXTURE: '1' }, { EGDESK_QA_TASK_GATE_FIXTURE: '1' }]) {
+    assert.throws(() => createQaFixtureTransport({ profile: info.profile, token: TOKEN, env: { ...env, ...patch } }));
+  }
+  assert.equal(fs.existsSync(path.join(info.profile, 'qa-fixtures/briefing-comments-seed')), false);
+});
+
+test('Briefing comments seed uses real Context records and Chat SQLite with two drafts and one immutable attachment per room', async t => {
+  const fetchSpy = t.mock.method(globalThis, 'fetch', () => assert.fail('No network'));
+  const listenSpy = t.mock.method(net.Server.prototype, 'listen', () => assert.fail('No listener'));
+  const f = await setupComments(t), prefs = {};
+  const { ImmutableContextStore } = await import('../helper/egdesk-context-store.mjs');
+  const { DatabaseSync } = await import('node:sqlite');
+  const store = new ImmutableContextStore({ dataDir: f.seed.storage.dataDir });
+  assert.equal(f.seed.setupOnly, true); assert.equal(f.seed.synthetic, true);
+  assert.equal(f.seed.storage.comments, 'context-json-records'); assert.equal(f.seed.storage.chat, 'sqlite');
+  assert.equal((await f.state()).sourceChangeSeed, null);
+  assert.deepEqual(f.seed.counts.seed, { conversations: 2, captures: 2, bindings: 2, packets: 2, deliveryRecords: 2,
+    historyRuns: 2, historyMessages: 4, briefings: 2, comments: 0 });
+  vm.runInNewContext(fs.readFileSync(path.join(f.info.profile, 'user.js'), 'utf8'), { user_pref: (key, value) => { prefs[key] = value; } });
+  const desk = JSON.parse(prefs['egdesk.deskSession.v1']);
+  for (const room of f.seed.identities) {
+    assert.match(room.briefing.id, /^[0-9a-f-]{36}$/);
+    const thread = desk.chat.threads.find(row => row.id === room.clientThreadId);
+    assert.ok(room.preservation.draftText.length > 0);
+    assert.equal(desk.chat.threadDrafts[thread.id], room.preservation.draftText);
+    for (const key of ['inputSources', 'briefingInputs', 'briefingCommentRefs']) assert.deepEqual(thread[key], room.preservation[key]);
+    assert.equal(thread.briefingInputs.length, 1); assert.equal(thread.briefingInputs[0].sourceId, room.sources[0].sourceId);
+    assert.equal(thread.briefingInputs[0].hash, room.sources[0].captureHash);
+    assert.equal(thread.briefingInputs[0].contextScope.conversationId, room.conversationId);
+    const record = await store.getRecord('a', 'briefings', room.briefing.id);
+    assert.equal(record.conversationId, room.conversationId); assert.equal(record.answerId, room.answerId);
+    assert.deepEqual(record.steps.map(step => ({ id: step.id, sourceIds: [step.target.sourceId] })), room.briefing.steps);
+    const history = (await f.send('GET', `/chat/history?clientThreadId=${room.clientThreadId}`)).body;
+    assert.equal(history.messages.length, 2); assert.equal(history.runs[0].context.briefings[0].id, room.briefing.id);
+    assert.deepEqual((await f.send('GET', commentURL(room))).body, { briefingId: room.briefing.id, comments: [] });
+  }
+  const file = fs.readdirSync(f.seed.storage.dataDir).find(name => name.endsWith('.sqlite'));
+  const db = new DatabaseSync(path.join(f.seed.storage.dataDir, file), { readOnly: true });
+  try { assert.equal(db.prepare('SELECT COUNT(*) AS n FROM messages').get().n, 4); } finally { db.close(); }
+  const beforeReceipts = (await f.state()).briefingComments.receipts.length;
+  for (let n = 0; n < 3; n++) {
+    const state = await f.state();
+    assert.equal(state.briefingComments.receipts.length, beforeReceipts, 'QA inspection never fabricates a production GET');
+    assert.equal(state.briefingComments.storeInspection.kind, 'qa-read-only-store');
+    assert.equal(state.context.captureBatches, 0); assert.deepEqual(state.observed.sends, []);
+  }
+  assert.equal(fetchSpy.mock.callCount(), 0); assert.equal(listenSpy.mock.callCount(), 0);
+});
+
+test('Briefing comments real handler saves once, normalizes retries, conflicts on changed payload and reopens actual records', async t => {
+  const f = await setupComments(t), [a, b] = f.seed.identities, body = commentBody(a, { text: '  QA saved\ncomment  ' });
+  const saved = await f.send('POST', commentURL(a), body);
+  assert.equal(saved.status, 201); const comment = saved.body.comment;
+  assert.equal(comment.text, body.text.trim()); assert.equal(comment.seq, 1);
+  assert.equal(comment.clientRequestId, body.clientRequestId); assert.equal(comment.conversationId, a.conversationId);
+  assert.equal(comment.requestDigest, undefined); assert.equal(comment.ownerScope, undefined);
+  const repeated = await f.send('POST', commentURL(a), { ...body, text: body.text.trim(), sourceIds: [a.sources[0].sourceId, a.sources[0].sourceId] });
+  assert.equal(repeated.status, 201); assert.deepEqual(repeated.body.comment, comment);
+  const conflict = await f.send('POST', commentURL(a), { ...body, text: 'Different' });
+  assert.equal(conflict.status, 409); assert.equal(conflict.body.code, 'BRIEFING_COMMENT_CONFLICT');
+  assert.deepEqual((await f.send('GET', commentURL(a))).body.comments, [comment]);
+  assert.deepEqual((await f.send('GET', commentURL(b))).body.comments, []);
+  const inspection = (await f.state()).briefingComments.storeInspection.briefings.find(row => row.briefingId === a.briefing.id);
+  assert.equal(inspection.count, 1); assert.equal(inspection.truncated, false);
+  assert.equal(inspection.comments[0].textHash, createHash('sha256').update(comment.text).digest('hex'));
+  assert.equal(inspection.comments[0].text, undefined);
+  const [{ ImmutableContextStore }, { ContextRuntime }, { createContextHttpHandler }] = await Promise.all([
+    import('../helper/egdesk-context-store.mjs'), import('../helper/egdesk-context-runtime.mjs'), import('../helper/egdesk-context-http.mjs')]);
+  const store = new ImmutableContextStore({ dataDir: f.seed.storage.dataDir });
+  const disk = await store.getRecord('a', 'briefing-comments', comment.id);
+  assert.equal(inspection.comments[0].storedHash, createHash('sha256').update(JSON.stringify(disk)).digest('hex'));
+  const runtime = new ContextRuntime({ store, getAuthority: hints => ({ ...hints, ownerKey: 'a', epoch: 0 }) });
+  const actual = createContextHttpHandler(runtime, async () => {});
+  const opened = await request((req, res) => actual(req, res, new URL(req.url, `http://${f.info.host}:${f.info.port}`)), 'GET', commentURL(a));
+  assert.equal(opened.status, 200); assert.deepEqual(opened.body.comments, [comment]);
+  const final = await f.state();
+  assert.deepEqual(final.briefingCommentsSeed, f.seed); assert.deepEqual(final.observed.sends, []);
+  assert.equal(final.context.captureBatches, 0); assert.deepEqual(final.context.deliveries, []);
+});
+
+test('Briefing comments reject wrong scope, query aliases, other methods and unsupported mutations without a fallback', async t => {
+  const f = await setupComments(t), [a, b] = f.seed.identities, body = commentBody(a);
+  for (const patch of [{ engineId: 'claude' }, { engineProfileId: 'wrong' }, { clientThreadId: b.clientThreadId },
+    { conversationId: b.conversationId }, { ownerKey: 'a' }, { epoch: '0' }]) {
+    assert.ok([400, 403].includes((await f.send('POST', commentURL(a, patch), body)).status));
+  }
+  for (const url of [commentURL(a) + '&engineId=codex', commentURL(a) + '&other=x',
+    `/context/briefings/${a.briefing.id}/comments`, commentURL(a).replace('/comments?', '/comments/?'),
+    commentURL(a).replace('/comments?', '/%63omments?')]) assert.ok((await f.send('POST', url, body)).status >= 400);
+  assert.equal((await f.send('POST', commentURL(b, { briefingId: a.briefing.id }), body)).status, 403);
+  assert.equal((await f.send('POST', commentURL(a, { briefingId: randomUUID() }), body)).status, 404);
+  for (const method of ['PUT', 'DELETE', 'PATCH']) assert.equal((await f.send(method, commentURL(a), body)).status, 405);
+  assert.equal((await f.send('POST', `/context/briefing-comments/${randomUUID()}`, { resolved: true })).status, 404);
+  assert.equal((await f.send('OPTIONS', commentURL(a))).status, 204);
+  assert.equal((await request(f.handler, 'POST', commentURL(a), body, null, () => {}, {
+    host: `127.0.0.1:${f.info.port}`, 'content-type': 'application/json', origin: 'https://example.invalid' })).status, 403);
+  await f.send('POST', '/__qa/account-change', { variant: 'b' }, true);
+  assert.equal((await f.send('POST', commentURL(a), body)).status, 403);
+  assert.equal((await f.state()).briefingComments.storeInspection.briefings.every(row => row.count === 0), true);
+});
+
+for (const variants of [['b'], ['b', 'a']]) test(`Briefing comments reject account ${['a', ...variants].join('→')} during POST body receipt before any real save`, async t => {
+  const f = await setupComments(t), [a] = f.seed.identities, body = commentBody(a);
+  let bodyStarted;
+  const started = new Promise(resolve => { bodyStarted = resolve; });
+  const response = await request(async (req, res) => {
+    const heldBody = Object.assign(new Readable({ read() { bodyStarted(); } }), {
+      method: req.method, url: req.url, headers: req.headers, socket: req.socket });
+    const pending = f.handler(heldBody, res);
+    await started; // Initial authority is captured; the original body has not completed.
+    for (const variant of variants) assert.equal((await f.send('POST', '/__qa/account-change', { variant }, true)).status, 200);
+    heldBody.push(Buffer.from(JSON.stringify(body))); heldBody.push(null);
+    await pending;
+  }, 'POST', commentURL(a), null, null, () => {}, {
+    host: `${f.info.host}:${f.info.port}`, 'content-type': 'application/json', origin: 'chrome://browser' });
+  const state = await f.state();
+  assert.equal(state.briefingComments.storeInspection.briefings.every(row => row.count === 0), true, 'Stale original authority must never reach the real save');
+  const receipt = state.briefingComments.receipts.find(row => row.clientRequestId === body.clientRequestId);
+  assert.ok(receipt); assert.equal(receipt.committedAt, null); assert.equal(receipt.commentId, null); assert.equal(receipt.storedHash, null);
+  assert.equal(receipt.account, 'a'); assert.equal(receipt.epoch, 0); assert.deepEqual(receipt.R, commentR(a));
+  assert.equal(response.status, 403); assert.equal(response.body.code, 'ACCOUNT_CHANGED');
+  assert.equal(receipt.responseStatus, 403); assert.equal(receipt.terminalCause, 'account-change');
+  assert.equal(receipt.writeAttempted, true); assert.ok(receipt.finishAt);
+  assert.equal(state.context.captureBatches, 0); assert.deepEqual(state.context.deliveries, []); assert.deepEqual(state.observed.sends, []);
+});
+
+test('Briefing comments real caps reject oversized bytes, 2001 characters and 7 raw sources without truncation', async t => {
+  const f = await setupComments(t), [a] = f.seed.identities, sourceId = a.sources[0].sourceId;
+  const good = commentBody(a, { text: 'x'.repeat(2000), sourceIds: Array(6).fill(sourceId) });
+  const saved = await f.send('POST', commentURL(a), good);
+  assert.equal(saved.status, 201); assert.equal(saved.body.comment.text.length, 2000);
+  assert.deepEqual(saved.body.comment.sourceIds, [sourceId]);
+  for (const patch of [{ text: 'x'.repeat(2001) }, { text: '😀'.repeat(1001) }, { text: ' ' }, { text: 1 },
+    { sourceIds: Array(7).fill(sourceId) }, { sourceIds: [randomUUID()] }, { sourceIds: null },
+    { clientRequestId: 'not-a-uuid' }, { extra: true }]) {
+    assert.ok((await f.send('POST', commentURL(a), commentBody(a, patch))).status >= 400);
+  }
+  const tooLarge = await f.send('POST', commentURL(a), commentBody(a, { text: ' '.repeat(17 * 1024) + 'ok' }));
+  assert.equal(tooLarge.status, 413); assert.equal(tooLarge.body.code, 'BODY_TOO_LARGE');
+  const state = await f.state(), inspection = state.briefingComments.storeInspection.briefings[0];
+  assert.equal(inspection.count, 1); assert.deepEqual(state.observed.sends, []); assert.equal(state.context.captureBatches, 0);
+});
+
+test('Briefing comments 200-record cap is real, retains exact retry at the cap and bounds terminal receipts to 64', async t => {
+  const f = await setupComments(t), [a] = f.seed.identities, first = commentBody(a);
+  const original = await f.send('POST', commentURL(a), first); assert.equal(original.status, 201);
+  for (let n = 2; n <= 200; n++) {
+    const saved = await f.send('POST', commentURL(a), commentBody(a, { text: `QA comment ${n}` }));
+    assert.equal(saved.status, 201); assert.equal(saved.body.comment.seq, n);
+  }
+  const overflow = await f.send('POST', commentURL(a), commentBody(a));
+  assert.equal(overflow.status, 409); assert.equal(overflow.body.code, 'BRIEFING_COMMENT_LIMIT');
+  const repeat = await f.send('POST', commentURL(a), first);
+  assert.equal(repeat.status, 201); assert.deepEqual(repeat.body.comment, original.body.comment);
+  assert.equal((await f.send('POST', commentURL(a), { ...first, text: 'different' })).body.code, 'BRIEFING_COMMENT_CONFLICT');
+  const listed = await f.send('GET', commentURL(a)); assert.equal(listed.body.comments.length, 200);
+  const state = await f.state();
+  assert.equal(state.briefingComments.receipts.length, 64);
+  assert.equal(state.briefingComments.storeInspection.briefings[0].count, 200);
+  assert.equal(state.briefingComments.storeInspection.briefings[0].truncated, false);
+});
+
+test('Briefing comments next-POST hold binds once to exact room/Briefing and preserves its saved response across room B work', async t => {
+  const f = await setupComments(t), [a, b] = f.seed.identities;
+  const armed = await f.arm(a); assert.equal(armed.status, 200);
+  assert.equal(armed.body.requestId, null); assert.equal(armed.body.clientRequestId, null);
+  await f.send('GET', commentURL(a));
+  const bodyB = commentBody(b), savedB = await f.send('POST', commentURL(b), bodyB); assert.equal(savedB.status, 201);
+  let state = await f.state();
+  const pre = state.briefingComments.receipts.find(row => row.holdId === armed.body.holdId);
+  assert.equal(pre.receivedAt, null); assert.equal(pre.clientRequestId, null, 'GET and other room POST cannot consume next-POST arm');
+  const bodyA = commentBody(a), pending = f.send('POST', commentURL(a), bodyA);
+  const receipt = await waitCommentReceipt(f, row => row.holdId === armed.body.holdId && row.committedAt !== null);
+  assert.equal(receipt.clientRequestId, bodyA.clientRequestId); assert.match(receipt.requestId, /^[0-9a-f-]{36}$/);
+  assert.deepEqual(receipt.R, commentR(a)); assert.equal(receipt.account, 'a'); assert.equal(receipt.writeAttempted, false);
+  assert.equal(receipt.finishAt, null); assert.equal(receipt.responseStatus, 201);
+  state = await f.state();
+  const disk = state.briefingComments.storeInspection.briefings.find(row => row.briefingId === a.briefing.id).comments[0];
+  assert.equal(disk.id, receipt.commentId); assert.equal(disk.storedHash, receipt.storedHash);
+  assert.equal((await f.release(b, receipt)).status, 409);
+  assert.equal((await f.release(a, receipt, { clientRequestId: randomUUID() })).status, 409);
+  assert.equal((await f.release(a, receipt, { requestId: randomUUID() })).status, 409);
+  const release = await f.release(a, receipt); assert.equal(release.status, 200);
+  const delivered = await pending; assert.equal(delivered.status, 201); assert.equal(delivered.body.comment.id, disk.id);
+  state = await f.state(); const final = state.briefingComments.receipts.find(row => row.requestId === receipt.requestId);
+  assert.equal(final.terminalCause, 'finished'); assert.equal(final.writeAttempted, true); assert.ok(final.finishAt);
+  assert.deepEqual((await f.send('GET', commentURL(b))).body.comments, [savedB.body.comment]);
+  assert.equal((await f.release(a, receipt)).body.code, 'QA_COMMENT_ALREADY_RELEASED');
+});
+
+test('Briefing comments concurrent same-key POSTs save one row; an old close cannot delete a new same-scope arm', async t => {
+  const f = await setupComments(t), [a, b] = f.seed.identities, body = commentBody(a), concurrentBody = commentBody(b);
+  const simultaneous = await Promise.all([f.send('POST', commentURL(b), concurrentBody), f.send('POST', commentURL(b), concurrentBody)]);
+  assert.equal(simultaneous[0].status, 201); assert.equal(simultaneous[1].status, 201);
+  assert.deepEqual(simultaneous[0].body.comment, simultaneous[1].body.comment);
+  assert.equal((await f.state()).briefingComments.storeInspection.briefings[1].count, 1);
+  const armed = await f.send('POST', '/__qa/briefing-comments/config', { ...commentR(a), clientRequestId: body.clientRequestId,
+    mode: 'hold', deadlineAt: Date.now() + 5000 }, true);
+  assert.equal(armed.status, 200);
+  let oldRes;
+  const first = f.send('POST', commentURL(a), body, false, res => { oldRes = res; res.deferFinish = true; res.deferClose = true; });
+  const receipt = await waitCommentReceipt(f, row => row.holdId === armed.body.holdId && row.committedAt !== null);
+  const second = await f.send('POST', commentURL(a), body);
+  assert.equal(second.status, 201); assert.equal(second.body.comment.id, receipt.commentId); assert.equal(second.body.comment.seq, 1);
+  assert.equal((await f.state()).briefingComments.storeInspection.briefings[0].count, 1);
+  assert.equal((await f.release(a, receipt)).status, 200); assert.equal((await first).status, 201);
+  const next = await f.arm(a); assert.equal(next.status, 200);
+  oldRes.writableFinished = true; oldRes.emit('finish'); oldRes.emit('close');
+  assert.equal((await f.state()).briefingComments.armed[0].holdId, next.body.holdId);
+  const nextBody = commentBody(a), nextPending = f.send('POST', commentURL(a), nextBody);
+  const nextReceipt = await waitCommentReceipt(f, row => row.holdId === next.body.holdId && row.committedAt !== null);
+  assert.equal((await f.release(a, nextReceipt)).status, 200); assert.equal((await nextPending).status, 201);
+});
+
+test('Briefing comments committed-response-lost is saved before close; QA inspection is not product recovery GET', async t => {
+  const f = await setupComments(t), [a] = f.seed.identities;
+  const arm = await f.send('POST', '/__qa/briefing-comments/config', { ...commentR(a), bindNextPost: true, mode: 'committed-response-lost' }, true);
+  assert.equal(arm.status, 200);
+  const body = commentBody(a), lost = await f.send('POST', commentURL(a), body); assert.equal(lost.status, 0);
+  let state = await f.state(), receipt = state.briefingComments.receipts.find(row => row.holdId === arm.body.holdId);
+  assert.equal(receipt.terminalCause, 'committed-response-lost'); assert.ok(receipt.committedAt);
+  assert.equal(receipt.writeAttempted, false); assert.equal(receipt.finishAt, null); assert.ok(receipt.closeAt >= receipt.committedAt);
+  assert.equal(receipt.clientRequestId, body.clientRequestId); assert.equal(receipt.responseStatus, 201);
+  const record = state.briefingComments.storeInspection.briefings[0].comments[0];
+  assert.equal(record.id, receipt.commentId); assert.equal(record.storedHash, receipt.storedHash);
+  for (let n = 0; n < 3; n++) state = await f.state();
+  assert.equal(state.briefingComments.receipts.filter(row => row.method === 'GET').length, 0);
+  const recovered = await f.send('GET', commentURL(a)); assert.equal(recovered.status, 200);
+  assert.equal(recovered.body.comments[0].clientRequestId, body.clientRequestId);
+  state = await f.state();
+  assert.equal(state.briefingComments.receipts.filter(row => row.method === 'POST').length, 1, 'recovery performs no re-POST');
+  const reads = state.briefingComments.receipts.filter(row => row.method === 'GET'); assert.equal(reads.length, 1);
+  assert.deepEqual(reads[0].listed, [{ id: record.id, clientRequestId: body.clientRequestId, seq: record.seq }]);
+  assert.equal((await f.release(a, receipt)).body.code, 'QA_COMMENT_ALREADY_CLOSED');
+  assert.equal(state.context.captureBatches, 0); assert.deepEqual(state.context.deliveries, []); assert.deepEqual(state.observed.sends, []);
+});
+
+test('Briefing comments control refusal, expiry, peer close, account change and disposal retain distinct terminal receipts', async t => {
+  const f = await setupComments(t), [a, b] = f.seed.identities;
+  for (const patch of [{ bindNextPost: true, clientRequestId: randomUUID() }, { bindNextPost: false },
+    { mode: 'hold', deadlineAt: Date.now() + 31000 }, { mode: 'other' }, { account: 'a' }]) {
+    assert.equal((await f.arm(a, patch)).status, 400);
+  }
+  assert.equal((await f.arm(a, { conversationId: b.conversationId })).status, 403);
+  assert.equal((await f.send('POST', '/__qa/briefing-comments/config', { ...commentR(a), mode: 'hold', bindNextPost: true, deadlineAt: Date.now() + 1000 })).status, 403);
+  const expired = await f.arm(a, { deadlineAt: Date.now() + 30 }); assert.equal(expired.status, 200);
+  await new Promise(resolve => setTimeout(resolve, 60));
+  const expiry = (await f.state()).briefingComments.receipts.find(row => row.holdId === expired.body.holdId);
+  assert.equal(expiry.terminalCause, 'expiry'); assert.equal(expiry.requestId, null); assert.equal(expiry.committedAt, null);
+  await f.arm(a); let res;
+  const pending = f.send('POST', commentURL(a), commentBody(a), false, value => { res = value; });
+  const peer = await waitCommentReceipt(f, row => row.committedAt !== null && row.terminalCause === null);
+  res.destroy(); assert.equal((await pending).status, 0);
+  assert.equal((await f.release(a, peer)).body.receipt.terminalCause, 'peer-close-before-finish');
+  await f.arm(a); const accountPending = f.send('POST', commentURL(a), commentBody(a));
+  const account = await waitCommentReceipt(f, row => row.committedAt !== null && row.terminalCause === null);
+  await f.send('POST', '/__qa/account-change', { variant: 'b' }, true); assert.equal((await accountPending).status, 0);
+  await f.send('POST', '/__qa/account-change', { variant: 'a' }, true);
+  assert.equal((await f.release(a, account)).status, 403);
+  assert.equal((await f.state()).briefingComments.receipts.find(row => row.requestId === account.requestId).terminalCause, 'account-change');
+  await f.arm(a); const closing = f.send('POST', commentURL(a), commentBody(a));
+  await waitCommentReceipt(f, row => row.committedAt !== null && row.terminalCause === null);
+  await f.dispose(); assert.equal((await closing).status, 0);
+  assert.equal((await f.send('GET', commentURL(a))).status, 503);
+});
+
+test('Briefing comments optional recovery GET loss is exact-scoped and manual same-UUID retry deduplicates the saved body', async t => {
+  const f = await setupComments(t), [a, b] = f.seed.identities;
+  const config = { ...commentR(a), mode: 'committed-response-lost', bindNextPost: true, recoveryGetResponseLostOnce: true };
+  const armed = await f.send('POST', '/__qa/briefing-comments/config', config, true);
+  assert.equal(armed.status, 200);
+  assert.equal((await f.send('GET', commentURL(a))).status, 200, 'GET before committed POST cannot consume recovery loss');
+  const body = commentBody(a, { text: '수동 재시도 원문\nunchanged', sourceIds: [a.sources[0].sourceId] });
+  assert.equal((await f.send('POST', commentURL(a), body)).status, 0);
+  let state = await f.state();
+  const post = state.briefingComments.receipts.find(row => row.holdId === armed.body.holdId);
+  assert.ok(post.committedAt <= post.recoveryGet.armedAt);
+  assert.ok(post.recoveryGet.deadlineAt - post.recoveryGet.armedAt <= 30000);
+  assert.equal(post.recoveryGet.requestId, null);
+  const saved = state.briefingComments.storeInspection.briefings[0].comments[0];
+  assert.equal(saved.textHash, createHash('sha256').update(body.text, 'utf8').digest('hex'));
+  assert.equal((await f.send('POST', '/__qa/briefing-comments/config', config, true)).body.code, 'QA_COMMENT_ALREADY_ARMED');
+  assert.equal((await f.send('GET', commentURL(b))).status, 200);
+  assert.equal((await f.send('GET', commentURL(a, { clientThreadId: b.clientThreadId }))).status, 403);
+  for (let n = 0; n < 3; n++) state = await f.state();
+  assert.equal(state.briefingComments.receipts.find(row => row.requestId === post.requestId).recoveryGet.requestId, null);
+  assert.equal((await f.send('GET', commentURL(a))).status, 0);
+  state = await f.state();
+  const get = state.briefingComments.receipts.find(row => row.recoveryOf);
+  assert.deepEqual(get.R, commentR(a)); assert.equal(get.account, post.account); assert.equal(get.epoch, post.epoch);
+  assert.deepEqual(get.recoveryOf, { holdId: post.holdId, requestId: post.requestId, clientRequestId: body.clientRequestId });
+  assert.equal(get.responseStatus, 200); assert.ok(get.readCompletedAt);
+  assert.deepEqual(get.listed, [{ id: saved.id, clientRequestId: body.clientRequestId, seq: saved.seq }]);
+  assert.equal(get.terminalCause, 'recovery-get-response-lost'); assert.equal(get.writeAttempted, false);
+  assert.equal(get.finishAt, null); assert.ok(get.closeAt >= get.readCompletedAt);
+  const parent = state.briefingComments.receipts.find(row => row.requestId === post.requestId);
+  assert.equal(parent.recoveryGet.requestId, get.requestId); assert.equal(parent.recoveryGet.terminalCause, get.terminalCause);
+  assert.equal(state.briefingComments.receipts.filter(row => row.method === 'POST' && row.receivedAt !== null).length, 1, 'no automatic retry');
+  const retry = await f.send('POST', commentURL(a), body); assert.equal(retry.status, 201);
+  assert.equal(retry.body.comment.id, saved.id); assert.equal(retry.body.comment.seq, saved.seq);
+  assert.equal((await f.send('GET', commentURL(a))).status, 200, 'loss is one-shot');
+  state = await f.state();
+  assert.deepEqual(state.briefingComments.storeInspection.briefings[0].comments, [saved]);
+  assert.equal(state.briefingComments.storeInspection.briefings[1].count, 0);
+  assert.equal(state.briefingComments.receipts.filter(row => row.method === 'POST' && row.receivedAt !== null).length, 2);
+  assert.equal(state.context.captureBatches, 0); assert.deepEqual(state.context.deliveries, []); assert.deepEqual(state.observed.sends, []);
+});
+
+test('Briefing comments recovery GET option rejects invalid controls and requires a committed POST', async t => {
+  const f = await setupComments(t), [a] = f.seed.identities;
+  for (const value of [true, false, null, 'true', 1]) assert.equal((await f.arm(a, { recoveryGetResponseLostOnce: value })).status, 400);
+  const config = { ...commentR(a), mode: 'committed-response-lost', bindNextPost: true };
+  for (const value of [null, 'true', 1]) {
+    assert.equal((await f.send('POST', '/__qa/briefing-comments/config', { ...config, recoveryGetResponseLostOnce: value }, true)).status, 400);
+  }
+  await f.send('POST', '/__qa/briefing-comments/config', { ...config, recoveryGetResponseLostOnce: true }, true);
+  assert.equal((await f.send('POST', commentURL(a), commentBody(a, { text: '' }))).status, 400);
+  assert.equal((await f.send('GET', commentURL(a))).status, 200);
+  assert.equal((await f.state()).briefingComments.receipts.some(row => row.recoveryGet || row.recoveryOf), false);
+  await f.send('POST', '/__qa/briefing-comments/config', { ...config, recoveryGetResponseLostOnce: false }, true);
+  assert.equal((await f.send('POST', commentURL(a), commentBody(a))).status, 0);
+  assert.equal((await f.send('GET', commentURL(a))).status, 200, 'explicit false preserves original lost-POST-only behavior');
+});
+
+test('Briefing comments recovery GET is once-only under concurrent GETs and expires or cancels on account epoch change', async t => {
+  const f = await setupComments(t), [a] = f.seed.identities;
+  const arm = async () => {
+    const result = await f.send('POST', '/__qa/briefing-comments/config', { ...commentR(a), mode: 'committed-response-lost',
+      bindNextPost: true, recoveryGetResponseLostOnce: true }, true);
+    assert.equal(result.status, 200);
+    assert.equal((await f.send('POST', commentURL(a), commentBody(a))).status, 0);
+    return result.body.holdId;
+  };
+  await arm();
+  const concurrent = await Promise.all([f.send('GET', commentURL(a)), f.send('GET', commentURL(a))]);
+  assert.deepEqual(concurrent.map(result => result.status).sort(), [0, 200]);
+  const expiring = await arm(), future = Date.now() + 31000;
+  const clock = t.mock.method(Date, 'now', () => future);
+  try { assert.equal((await f.send('GET', commentURL(a))).status, 200); } finally { clock.mock.restore(); }
+  let state = await f.state();
+  const expired = state.briefingComments.receipts.find(row => row.holdId === expiring);
+  assert.equal(expired.recoveryGet.terminalCause, 'expiry'); assert.equal(expired.recoveryGet.requestId, null);
+  const changing = await arm();
+  await f.send('POST', '/__qa/account-change', { variant: 'b' }, true);
+  assert.equal((await f.send('GET', commentURL(a))).status, 403);
+  await f.send('POST', '/__qa/account-change', { variant: 'a' }, true);
+  assert.equal((await f.send('GET', commentURL(a))).status, 200);
+  state = await f.state();
+  const changed = state.briefingComments.receipts.find(row => row.holdId === changing);
+  assert.equal(changed.recoveryGet.terminalCause, 'account-change'); assert.equal(changed.recoveryGet.requestId, null);
+});
+
+test('Briefing comments ephemeral HTTP manual retry after both committed POST and recovery GET response loss keeps one stored record', async t => {
+  let handler;
+  const server = http.createServer((req, res) => handler(req, res));
+  await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
+  t.after(() => new Promise(resolve => { server.close(resolve); server.closeAllConnections(); }));
+  const f = await setupComments(t, { fixturePort: server.address().port }); handler = f.handler;
+  const [a] = f.seed.identities, base = `http://127.0.0.1:${server.address().port}`;
+  const qaHeaders = { 'content-type': 'application/json', 'x-egdesk-qa-token': TOKEN };
+  const config = await fetch(base + '/__qa/briefing-comments/config', { method: 'POST', headers: qaHeaders,
+    body: JSON.stringify({ ...commentR(a), mode: 'committed-response-lost', bindNextPost: true, recoveryGetResponseLostOnce: true }) });
+  assert.equal(config.status, 200); await config.json();
+  const body = commentBody(a), postOptions = { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) };
+  await assert.rejects(fetch(base + commentURL(a), postOptions));
+  const inspect = async () => (await fetch(base + '/__qa/state', { headers: qaHeaders })).json();
+  const before = await inspect(), saved = before.briefingComments.storeInspection.briefings[0].comments[0];
+  assert.equal(before.briefingComments.receipts.filter(row => row.method === 'GET').length, 0);
+  await assert.rejects(fetch(base + commentURL(a)));
+  const lost = await inspect(), get = lost.briefingComments.receipts.find(row => row.method === 'GET');
+  assert.equal(get.terminalCause, 'recovery-get-response-lost'); assert.ok(get.readCompletedAt);
+  assert.equal(get.responseStatus, 200); assert.equal(get.finishAt, null); assert.equal(get.writeAttempted, false);
+  assert.equal(lost.briefingComments.receipts.filter(row => row.method === 'POST' && row.receivedAt !== null).length, 1);
+  const manual = await fetch(base + commentURL(a), postOptions); assert.equal(manual.status, 201);
+  const value = await manual.json(); assert.equal(value.comment.id, saved.id); assert.equal(value.comment.seq, saved.seq);
+  const after = await inspect(); assert.deepEqual(after.briefingComments.storeInspection.briefings[0].comments, [saved]);
+  assert.equal(after.briefingComments.receipts.filter(row => row.method === 'POST' && row.receivedAt !== null).length, 2);
+  // Explicit unit client retry; no claim that the product callback or button ran.
+});
+
+test('Briefing comments ephemeral HTTP loses only the post-commit response and GET recovers the exact saved UUID without another POST', async t => {
+  let handler;
+  const server = http.createServer((req, res) => handler(req, res));
+  await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
+  t.after(() => new Promise(resolve => { server.close(resolve); server.closeAllConnections(); }));
+  const f = await setupComments(t, { fixturePort: server.address().port }); handler = f.handler;
+  const [a] = f.seed.identities, base = `http://127.0.0.1:${server.address().port}`;
+  const qaHeaders = { 'content-type': 'application/json', 'x-egdesk-qa-token': TOKEN };
+  const inspect = async () => {
+    const response = await fetch(`${base}/__qa/state`, { headers: qaHeaders });
+    assert.equal(response.status, 200); return response.json();
+  };
+  const config = await fetch(`${base}/__qa/briefing-comments/config`, { method: 'POST', headers: qaHeaders,
+    body: JSON.stringify({ ...commentR(a), bindNextPost: true, mode: 'committed-response-lost' }) });
+  assert.equal(config.status, 200); const armed = await config.json();
+  const body = commentBody(a, { text: 'Native HTTP saved bytes' });
+  await assert.rejects(fetch(base + commentURL(a), { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) }));
+  const before = await inspect(), receipt = before.briefingComments.receipts.find(row => row.holdId === armed.holdId);
+  assert.equal(receipt.terminalCause, 'committed-response-lost'); assert.ok(receipt.committedAt);
+  assert.equal(receipt.writeAttempted, false); assert.equal(receipt.finishAt, null);
+  assert.equal(before.briefingComments.receipts.filter(row => row.method === 'GET').length, 0);
+  const stored = before.briefingComments.storeInspection.briefings[0].comments[0];
+  assert.equal(stored.id, receipt.commentId); assert.equal(stored.clientRequestId, body.clientRequestId);
+  assert.equal(stored.textHash, createHash('sha256').update(body.text).digest('hex'));
+  const response = await fetch(base + commentURL(a)); assert.equal(response.status, 200);
+  assert.equal((await response.json()).comments[0].id, stored.id);
+  const after = await inspect();
+  assert.equal(after.briefingComments.receipts.filter(row => row.method === 'POST' && row.receivedAt !== null).length, 1);
+  const get = after.briefingComments.receipts.find(row => row.method === 'GET');
+  assert.deepEqual(get.listed, [{ id: stored.id, clientRequestId: body.clientRequestId, seq: 1 }]);
+  assert.equal(get.terminalCause, 'finished'); assert.ok(get.finishAt);
+  assert.equal(after.context.captureBatches, 0); assert.deepEqual(after.context.deliveries, []); assert.deepEqual(after.observed.sends, []);
+  // This is an ephemeral unit HTTP client, not proof of a product UI callback.
 });
 
 test('short Browser fixture URL serves only the canonical document in this marked profile', async t => {

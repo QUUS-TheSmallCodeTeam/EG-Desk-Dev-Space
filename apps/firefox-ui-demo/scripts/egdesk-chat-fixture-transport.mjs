@@ -7,9 +7,10 @@ import http from 'node:http';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createHash, createHmac, randomUUID } from 'node:crypto';
+import { Readable } from 'node:stream';
 import { assertQaFixtureManifest } from './egdesk-chat-qa-profile.mjs';
 import { assertOrdinarySend } from './egdesk-chat-qa-contract.sys.mjs';
-import { createQaContextFixture, seedQaSourceChangeScene } from './egdesk-context-qa-fixture.mjs';
+import { createQaContextFixture, seedQaSourceChangeScene, seedQaBriefingCommentsScene } from './egdesk-context-qa-fixture.mjs';
 import { observeQaFixtureFile } from './egdesk-context-qa-contract.mjs';
 import { qaBridgeConfig, validateQaFixtureIsolation } from './egdesk-qa-fixture-isolation.mjs';
 import { projectFileFixtureEnabled } from './egdesk-qa-fixture-isolation.mjs';
@@ -21,6 +22,8 @@ import { chatOriginFileFixtureEnabled, createChatOriginFileFixture } from './egd
 import { routePermissionRequest } from '../helper/claude-engine-permissions.mjs'; // Pure shape translation only.
 import { guardBridgeRequest, createChatHttpHandler } from '../helper/codex-bridge-http.mjs';
 import { readEGDeskFileBody } from '../helper/egdesk-file-http.mjs';
+import { ContextRuntime } from '../helper/egdesk-context-runtime.mjs';
+import { createContextHttpHandler } from '../helper/egdesk-context-http.mjs';
 
 const SCENARIO = /^EGDESK_QA_(COMPLETE|TEXT_ONLY|STOP|APPROVAL|USER_INPUT|SUBAGENT|LOST|START_FAIL|REJECT|AMBIGUOUS|CONTEXT|CLAUDE_TEXT|CLAUDE_SESSION_APPROVAL|CLAUDE_APPROVAL_NO_SESSION|CLAUDE_MULTI_SELECT|CLAUDE_RATE_LIMIT|CLAUDE_CONTEXT|CLAUDE_CONTEXT_BLOCKED)\b/;
 export const CLAUDE_CONTEXT_TOOLS = Object.freeze(['egdesk_list_context', 'egdesk_read_source']);
@@ -101,6 +104,12 @@ const fixture = assertQaFixtureManifest(profilePath);
 const profile = fixture.profile;
 if (env.EGDESK_QA_CONTEXT_SOURCE_CHANGE_SEED != null && !['0', '1'].includes(env.EGDESK_QA_CONTEXT_SOURCE_CHANGE_SEED)) throw new Error('Invalid source-change seed gate');
 const sourceChangeSeedEnabled = env.EGDESK_QA_CONTEXT_SOURCE_CHANGE_SEED === '1';
+if (env.EGDESK_QA_BRIEFING_COMMENTS_SEED != null && !['0', '1'].includes(env.EGDESK_QA_BRIEFING_COMMENTS_SEED)) throw new Error('Invalid Briefing comments seed gate');
+const briefingCommentsSeedEnabled = env.EGDESK_QA_BRIEFING_COMMENTS_SEED === '1';
+if (briefingCommentsSeedEnabled && (sourceChangeSeedEnabled || env.EGDESK_QA_STATE_FIXTURES !== '1' || env.EGDESK_QA_REAL_TURN !== '0'
+  || claudeFixture || runOutputsEnabled || taskGateEnabled || originFileEnabled || projectFileFixtureEnabled(env) || portableTransferFixtureEnabled(env))) {
+  throw new Error('Briefing comments seed requires its exclusive core state fixture and real-turn zero');
+}
 if (sourceChangeSeedEnabled && (env.EGDESK_QA_STATE_FIXTURES !== '1' || env.EGDESK_QA_REAL_TURN !== '0'
   || claudeFixture || runOutputsEnabled || taskGateEnabled || originFileEnabled || projectFileFixtureEnabled(env) || portableTransferFixtureEnabled(env))) {
   throw new Error('Source-change seed requires the separate core state fixture and real-turn zero');
@@ -121,9 +130,17 @@ const artifactPath = fixture.artifactPath;
 const context = createQaContextFixture(profile);
 let sourceChangeScene = null;
 let sourceChangeHistoryHandler = null, sourceChangeClosing = false;
-const sourceChangeReady = sourceChangeSeedEnabled ? seedQaSourceChangeScene(profile, context).then(scene => {
+let briefingCommentsHandler = null;
+const sourceChangeReady = sourceChangeSeedEnabled || briefingCommentsSeedEnabled
+  ? (briefingCommentsSeedEnabled ? seedQaBriefingCommentsScene : seedQaSourceChangeScene)(profile, context).then(scene => {
   sourceChangeScene = scene;
   sourceChangeHistoryHandler = createChatHttpHandler(scene.history, () => { throw new Error('No seed auth calls'); });
+  if (briefingCommentsSeedEnabled) {
+    const runtime = new ContextRuntime({ store: scene.store, getOwnerKey: () => accountVariant,
+      getAuthority: hints => { const r = codexContextRouting(hints, { requireConversation: true });
+        return { ...r, ownerKey: r.owner }; } });
+    briefingCommentsHandler = createContextHttpHandler(runtime, async () => {}, { port: PORT });
+  }
   return scene;
 }) : null;
 if (sourceChangeReady) void sourceChangeReady.catch(() => {});
@@ -134,6 +151,7 @@ const sourceResponses = new Map();
 const sourceResponsesInFlight = new Set();
 const sourceReceipts = [];
 const sourceStatusEvidence = { reads: [], controls: [], releases: [], expired: 0 };
+const commentArms = new Map(), commentPending = new Set(), commentReceipts = [], commentRecoveryGets = new Map();
 
 const streamId = randomUUID();
 // Per-fixture lifetime expectation, not an owner grant or reusable credential.
@@ -297,6 +315,208 @@ function sourceControl(body, extra) {
 function sourceTrace(kind, value) {
   if (sourceStatusEvidence[kind].length >= 512) contextError('QA_TRACE_LIMIT', 'Bounded source-status trace is full', 429);
   sourceStatusEvidence[kind].push(value);
+}
+
+const commentUUID = value => typeof value === 'string' && /^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i.test(value);
+const commentKeys = [...contextRoutingKeys, 'briefingId'];
+const commentKey = r => JSON.stringify([r.owner, r.epoch, ...commentKeys.map(key => r[key])]);
+const commentHash = value => createHash('sha256').update(value).digest('hex');
+function commentRoute(body, extra = []) {
+  if (!briefingCommentsSeedEnabled) contextError('QA_BRIEFING_COMMENTS_DISABLED', 'Dedicated Briefing comments seed required', 403);
+  if (!body || typeof body !== 'object' || Array.isArray(body)
+    || Object.keys(body).some(key => ![...commentKeys, ...extra].includes(key))) contextError('INVALID_CONTEXT_ROUTING', 'Exact Briefing route required', 400);
+  const r = { ...codexContextRouting(body, { requireConversation: true }), briefingId: body.briefingId };
+  if (!commentUUID(r.briefingId)) contextError('INVALID_CONTEXT_ROUTING', 'Briefing UUID required', 400);
+  return r;
+}
+function newCommentEntry(route, options = {}) {
+  if (commentReceipts.length >= 64) {
+    const terminal = commentReceipts.findIndex(row => row.terminalCause !== null && (!row.recoveryGet || row.recoveryGet.terminalCause !== null));
+    if (terminal < 0) contextError('QA_COMMENT_RECEIPT_LIMIT', 'All 64 comment receipts are still live', 429);
+    commentReceipts.splice(terminal, 1);
+  }
+  const receipt = { kind: 'production', method: options.method || 'POST', holdId: options.holdId || null,
+    requestId: null, clientRequestId: options.clientRequestId || null,
+    R: Object.fromEntries(commentKeys.map(key => [key, route[key]])), account: route.owner, epoch: route.epoch,
+    armedAt: options.holdId ? Date.now() : null, receivedAt: null, committedAt: null, commentId: null, seq: null,
+    storedHash: null, responseStatus: null, responseHash: null, listed: [], readCompletedAt: null,
+    releaseAttemptAt: null, releaseAttempts: 0, writeAttempted: false, endReturnedAt: null,
+    finishAt: null, closeAt: null, writableFinishedAtClose: null, terminalCause: null };
+  commentReceipts.push(receipt);
+  return { route, key: commentKey(route), receipt, ...options };
+}
+function forgetComment(entry) {
+  clearTimeout(entry.timer);
+  if (commentArms.get(entry.key) === entry) commentArms.delete(entry.key);
+  commentPending.delete(entry);
+  if (entry.recovery) entry.recovery.receipt.terminalCause ??= entry.receipt.terminalCause;
+}
+function cancelComment(entry, cause) {
+  entry.receipt.terminalCause ??= cause;
+  forgetComment(entry);
+  if (entry.res && !entry.res.destroyed) entry.res.destroy();
+}
+function receiveComment(entry, res) {
+  entry.res = res; entry.receipt.requestId = randomUUID(); entry.receipt.receivedAt = Date.now();
+  commentPending.add(entry);
+  res.once('finish', () => { entry.receipt.finishAt ??= Date.now(); entry.receipt.terminalCause ??= 'finished'; forgetComment(entry); });
+  res.once('close', () => {
+    entry.receipt.closeAt ??= Date.now(); entry.receipt.writableFinishedAtClose ??= res.writableFinished === true;
+    entry.receipt.terminalCause ??= entry.receipt.finishAt === null ? 'peer-close-before-finish' : 'finished';
+    forgetComment(entry);
+  });
+}
+function writeComment(entry) {
+  if (entry.receipt.terminalCause !== null) return false;
+  if (!entry.res || entry.res.destroyed || entry.res.writableEnded) { cancelComment(entry, 'peer-close-before-finish'); return false; }
+  try {
+    const current = codexContextRouting(entry.route, { requireConversation: true });
+    if (current.owner !== entry.route.owner || current.epoch !== entry.route.epoch) throw new Error('Account changed');
+  } catch { cancelComment(entry, 'account-change'); return false; }
+  clearTimeout(entry.timer);
+  if (commentArms.get(entry.key) === entry) commentArms.delete(entry.key);
+  entry.receipt.writeAttempted = true;
+  try {
+    entry.res.writeHead(entry.receipt.responseStatus, { ...entry.headers, 'Access-Control-Allow-Origin': '*' });
+    entry.res.end(entry.raw); entry.receipt.endReturnedAt = Date.now(); return true;
+  } catch { cancelComment(entry, 'write-error'); return false; }
+}
+function clearCommentRecovery(recovery, cause) {
+  clearTimeout(recovery.timer);
+  if (commentRecoveryGets.get(recovery.key) === recovery) commentRecoveryGets.delete(recovery.key);
+  if (cause) recovery.receipt.terminalCause ??= cause;
+}
+function armCommentRecovery(entry) {
+  const receipt = { armedAt: Date.now(), deadlineAt: Date.now() + 30000, requestId: null, terminalCause: null };
+  entry.receipt.recoveryGet = receipt;
+  const recovery = { key: entry.key, receipt, parent: entry.receipt };
+  commentRecoveryGets.set(entry.key, recovery);
+  recovery.timer = setTimeout(() => {
+    if (commentRecoveryGets.get(entry.key) === recovery) clearCommentRecovery(recovery, 'expiry');
+  }, receipt.deadlineAt - Date.now()); recovery.timer.unref?.();
+}
+async function inspectCommentStore() {
+  const briefings = [];
+  for (const room of sourceChangeScene.identities) {
+    const comments = (await sourceChangeScene.store.listRecords('a', 'briefing-comments', record => record.briefingId === room.briefing.id))
+      .sort((a, b) => a.seq - b.seq);
+    briefings.push({ briefingId: room.briefing.id, conversationId: room.conversationId, account: 'a', count: comments.length,
+      truncated: false, comments: comments.map(record => ({ id: record.id, clientRequestId: record.clientRequestId,
+        seq: record.seq, stepId: record.stepId, sourceIds: record.sourceIds, storedHash: commentHash(JSON.stringify(record)),
+        textHash: commentHash(record.text) })) });
+  }
+  return { kind: 'qa-read-only-store', readAt: Date.now(), briefings };
+}
+async function commentControl(req, res, url) {
+  if (req.method !== 'POST' || url.search || req.url !== url.pathname) contextError('INVALID_CONTEXT_ROUTING', 'Comment controls use exact POST paths without query', 400);
+  if (req.headers['x-egdesk-qa-token'] !== token) return json(res, 403, { error: 'Fixture token required' });
+  const body = await bodyJson(req), release = url.pathname.endsWith('/release');
+  const r = commentRoute(body, release ? ['holdId', 'requestId', 'clientRequestId'] : ['clientRequestId', 'bindNextPost', 'mode', 'deadlineAt', 'recoveryGetResponseLostOnce']);
+  if (!sourceChangeScene.identities.some(room => room.conversationId === r.conversationId && room.briefing.id === r.briefingId)) {
+    contextError('CONTEXT_THREAD_MISMATCH', 'Control requires the Briefing of this exact seeded room', 403);
+  }
+  if (!release) {
+    const next = body.bindNextPost === true;
+    if (next ? Object.hasOwn(body, 'clientRequestId') : Object.hasOwn(body, 'bindNextPost') || !commentUUID(body.clientRequestId)) {
+      contextError('INVALID_COMMENT_CONTROL', 'Choose one exact clientRequestId or bindNextPost:true', 400);
+    }
+    if (!['hold', 'committed-response-lost'].includes(body.mode) || (body.mode === 'hold'
+      ? !Number.isSafeInteger(body.deadlineAt) || body.deadlineAt <= Date.now() || body.deadlineAt > Date.now() + 30000
+      : Object.hasOwn(body, 'deadlineAt'))) contextError('INVALID_COMMENT_CONTROL', 'Hold needs a deadline within 30 seconds; lost accepts none', 400);
+    if (Object.hasOwn(body, 'recoveryGetResponseLostOnce') && (body.mode !== 'committed-response-lost'
+      || typeof body.recoveryGetResponseLostOnce !== 'boolean')) contextError('INVALID_COMMENT_CONTROL', 'Recovery GET response loss is boolean and only valid after committed-response-lost', 400);
+    if (commentArms.has(commentKey(r)) || commentRecoveryGets.has(commentKey(r))) contextError('QA_COMMENT_ALREADY_ARMED', 'One response arm per exact Briefing scope');
+    if (commentArms.size + commentRecoveryGets.size >= 32) contextError('QA_COMMENT_ARM_LIMIT', 'At most 32 scoped response arms', 429);
+    const entry = newCommentEntry(r, { holdId: randomUUID(), clientRequestId: body.clientRequestId || null,
+      bindNextPost: next, mode: body.mode, deadlineAt: body.deadlineAt || Date.now() + 30000,
+      recoveryGetResponseLostOnce: body.recoveryGetResponseLostOnce === true });
+    commentArms.set(entry.key, entry);
+    entry.timer = setTimeout(() => {
+      if (commentArms.get(entry.key) === entry && entry.receipt.terminalCause === null) cancelComment(entry, 'expiry');
+    }, entry.deadlineAt - Date.now()); entry.timer.unref?.();
+    return json(res, 200, { ok: true, fixtureOnly: true, holdId: entry.holdId, clientRequestId: entry.receipt.clientRequestId, requestId: null });
+  }
+  if (![body.holdId, body.requestId, body.clientRequestId].every(commentUUID)) contextError('INVALID_COMMENT_CONTROL', 'Release needs exact holdId, received requestId and clientRequestId', 400);
+  const receipt = commentReceipts.find(row => row.requestId === body.requestId);
+  if (!receipt) contextError('QA_COMMENT_RESPONSE_NOT_FOUND', 'No retained receipt for this request');
+  if (receipt.account !== r.owner || receipt.epoch !== r.epoch) contextError('ACCOUNT_CHANGED', 'Original comment account epoch changed', 403);
+  if (receipt.holdId !== body.holdId || receipt.clientRequestId !== body.clientRequestId || commentKeys.some(key => receipt.R[key] !== r[key])) contextError('QA_COMMENT_SCOPE_MISMATCH', 'Release does not match the original scoped request');
+  receipt.releaseAttemptAt = Date.now(); receipt.releaseAttempts++;
+  if (receipt.terminalCause || receipt.writeAttempted) return json(res, 409, { code: receipt.terminalCause === 'finished' ? 'QA_COMMENT_ALREADY_RELEASED' : 'QA_COMMENT_ALREADY_CLOSED', receipt });
+  const entry = commentArms.get(commentKey(r));
+  if (!entry || entry.receipt !== receipt || !entry.raw || receipt.committedAt === null) contextError('QA_COMMENT_NOT_COMMITTED', 'Original held response has not completed storage');
+  if (Date.now() >= entry.deadlineAt) cancelComment(entry, 'expiry');
+  const written = writeComment(entry);
+  return json(res, written ? 200 : 409, { ok: written, fixtureOnly: true, receipt });
+}
+async function handleCommentRequest(req, res, url, briefingId) {
+  const hints = exactContextQuery(url), r = commentRoute({ ...hints, briefingId });
+  if (!guardBridgeRequest(req, PORT)) return json(res, 403, { code: 'CONTEXT_LOOPBACK_REQUIRED', error: 'Trusted loopback origin required' });
+  if (req.method === 'OPTIONS') return json(res, 204, {});
+  if (!['GET', 'POST'].includes(req.method)) return json(res, 405, { code: 'METHOD_NOT_ALLOWED' });
+  let parsed, rawRequest = Buffer.alloc(0);
+  if (req.method === 'POST') {
+    const chunks = []; let bytes = 0;
+    for await (const chunk of req) {
+      const value = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk); bytes += value.length;
+      if (bytes > 16 * 1024) contextError('BODY_TOO_LARGE', 'Comment body exceeds 16384 bytes', 413);
+      chunks.push(value);
+    }
+    rawRequest = Buffer.concat(chunks);
+    try { parsed = JSON.parse(rawRequest.toString('utf8')); } catch {}
+  }
+  const arm = commentArms.get(commentKey(r));
+  const claims = req.method === 'POST' && commentUUID(parsed?.clientRequestId) && arm && !arm.receipt.requestId
+    && (arm.bindNextPost || arm.clientRequestId.toLowerCase() === parsed.clientRequestId.toLowerCase());
+  const entry = claims ? arm : newCommentEntry(r, { method: req.method });
+  if (req.method === 'POST' && commentUUID(parsed?.clientRequestId)) entry.receipt.clientRequestId = parsed.clientRequestId;
+  receiveComment(entry, res);
+  // Buffering precedes the real handler, so preserve the authority captured
+  // before body receipt. A→B→A must not become a fresh-authority save.
+  if (!authLoggedIn || accountVariant !== r.owner || codexContextEpoch !== r.epoch) {
+    const rejected = { code: 'ACCOUNT_CHANGED', error: 'Briefing comment account changed while receiving the request body' };
+    Object.assign(entry.receipt, { responseStatus: 403, responseHash: commentHash(JSON.stringify(rejected)),
+      terminalCause: 'account-change', writeAttempted: true });
+    json(res, 403, rejected); entry.receipt.endReturnedAt = Date.now();
+    return;
+  }
+  const recovery = req.method === 'GET' ? commentRecoveryGets.get(entry.key) : null;
+  if (recovery) {
+    clearCommentRecovery(recovery, Date.now() >= recovery.receipt.deadlineAt ? 'expiry' : null);
+    if (recovery.receipt.terminalCause === null) {
+      entry.recovery = recovery;
+      recovery.receipt.requestId = entry.receipt.requestId;
+      entry.receipt.recoveryOf = { holdId: recovery.parent.holdId, requestId: recovery.parent.requestId,
+        clientRequestId: recovery.parent.clientRequestId };
+    }
+  }
+  const replay = Object.assign(Readable.from(rawRequest.length ? [rawRequest] : []), { method: req.method, url: req.url, headers: req.headers, socket: req.socket });
+  const sink = { writeHead(status, headers) { entry.receipt.responseStatus = status; entry.headers = headers; },
+    end(value) { entry.raw = String(value); entry.receipt.responseHash = commentHash(entry.raw); } };
+  await briefingCommentsHandler(replay, sink, url);
+  const value = JSON.parse(entry.raw);
+  if (req.method === 'POST' && entry.receipt.responseStatus === 201) {
+    // This receipt is stamped only AFTER the real HTTP/runtime save has
+    // returned and its actual Context record is read back. Never fake a save.
+    const stored = await sourceChangeScene.store.getRecord(r.owner, 'briefing-comments', value.comment.id);
+    if (stored.briefingId !== briefingId || stored.conversationId !== r.conversationId || stored.seq !== value.comment.seq
+      || stored.clientRequestId.toLowerCase() !== parsed.clientRequestId.toLowerCase()) throw new Error('Comment store read-back mismatch');
+    Object.assign(entry.receipt, { committedAt: Date.now(), commentId: stored.id, seq: stored.seq, storedHash: commentHash(JSON.stringify(stored)) });
+  } else if (req.method === 'GET' && entry.receipt.responseStatus === 200) {
+    entry.receipt.readCompletedAt = Date.now();
+    entry.receipt.listed = value.comments.map(({ id, clientRequestId, seq }) => ({ id, clientRequestId, seq }));
+  }
+  if (entry.receipt.terminalCause) return;
+  if (entry.recovery) { cancelComment(entry, 'recovery-get-response-lost'); return; }
+  if (claims && entry.receipt.committedAt !== null) {
+    if (entry.mode === 'committed-response-lost') {
+      if (entry.recoveryGetResponseLostOnce) armCommentRecovery(entry);
+      cancelComment(entry, 'committed-response-lost');
+    }
+    // A held response retains the original body across a UI room switch.
+    return;
+  }
+  writeComment(entry);
 }
 function claudeContextRouting(body) {
   if (!body || ['ownerKey', 'epoch', 'ownerScope', 'contextAuthority'].some(key => Object.hasOwn(body, key))) {
@@ -485,7 +705,7 @@ function contextPhase(run, phase) {
     run.messages.set(messageId, { id: messageId, role: 'assistant', status: 'completed', text });
     envelope(run, 'message.started', { messageId, phase: 'answer' }, messageId);
     envelope(run, 'message.completed', { messageId, text, phase: 'answer' }, messageId);
-    run.briefing = { id: `qa-briefing-${run.runId}`, title: 'QA captured-input briefing',
+    run.briefing = { id: randomUUID(), title: 'QA captured-input briefing',
       conversationId: run.conversationId, runId: run.runId, answerId: run.answerId,
       createdAt: Date.now(), presentationStatus: 'proposed', steps: run.contextCaptures.slice(0, 2).map((capture, index) => ({
       id: `qa-step-${index + 1}`, text: `Captured input ${index + 1}; original version`,
@@ -794,7 +1014,7 @@ const handler = async (req, res) => {
       if (sourceChangeClosing) return json(res, 503, { code: 'QA_FIXTURE_CLOSED', error: 'Source-change fixture is closed' });
       await sourceChangeReady;
       if (req.method === 'POST' && ['/context/captures', '/chat/send'].includes(url.pathname)) {
-        return json(res, 403, { code: 'QA_SOURCE_CHANGE_READ_ONLY', error: 'Source-change scene only inspects existing inputs; no runtime capture or send' });
+        return json(res, 403, { code: briefingCommentsSeedEnabled ? 'QA_BRIEFING_COMMENTS_READ_ONLY' : 'QA_SOURCE_CHANGE_READ_ONLY', error: 'Seed scene only inspects existing inputs; no runtime capture or send' });
       }
       if (url.pathname === '/chat/history' || url.pathname.startsWith('/chat/history/')) {
         if (!authLoggedIn || accountVariant !== 'a') return json(res, 403, { code: 'ACCOUNT_CHANGED', error: 'Seed history belongs to its original synthetic account' });
@@ -804,6 +1024,17 @@ const handler = async (req, res) => {
         if ([...url.searchParams.keys()].some(k => !allowed.includes(k) || url.searchParams.getAll(k).length !== 1)) return json(res, 400, { code: 'INVALID_HISTORY_QUERY' });
         if (req.method === 'OPTIONS') return json(res, 204, {});
         if (await sourceChangeHistoryHandler(req, res, url)) return;
+      }
+    }
+    if (briefingCommentsSeedEnabled) {
+      if (['/__qa/briefing-comments/config', '/__qa/briefing-comments/release'].includes(url.pathname)) {
+        if (!guardBridgeRequest(req, PORT)) return json(res, 403, { code: 'CONTEXT_LOOPBACK_REQUIRED' });
+        return await commentControl(req, res, url);
+      }
+      const comments = url.pathname.match(/^\/context\/briefings\/([0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12})\/comments$/i);
+      if (comments && req.url.split('?')[0] === url.pathname) return await handleCommentRequest(req, res, url, comments[1]);
+      if (url.pathname.startsWith('/context/briefings') || url.pathname.startsWith('/context/briefing-comments')) {
+        return json(res, 404, { code: 'QA_COMMENT_ROUTE_REFUSED', error: 'Only exact seeded Briefing comments GET/POST are exposed' });
       }
     }
     if (originFileReady) {
@@ -894,7 +1125,14 @@ const handler = async (req, res) => {
           receipts: sourceReceipts,
           responses: [...sourceResponses.values()].map(({ route, mode, deadlineAt, res, receipt }) => ({ ...route, mode, deadlineAt,
             holdId: receipt?.holdId || null, requestId: receipt?.requestId || null, phase: res ? 'pending' : 'armed' })) },
-          sourceChangeSeed: sourceChangeScene?.metadata || null } : {}),
+          sourceChangeSeed: sourceChangeSeedEnabled ? sourceChangeScene?.metadata || null : null } : {}),
+        ...(briefingCommentsSeedEnabled ? { briefingCommentsSeed: sourceChangeScene.metadata,
+          briefingComments: { version: 1, receiptLimit: 64,
+            armed: [...commentArms.values()].map(entry => ({ holdId: entry.holdId, R: entry.receipt.R,
+              account: entry.route.owner, epoch: entry.route.epoch, mode: entry.mode, bindNextPost: entry.bindNextPost,
+              clientRequestId: entry.receipt.clientRequestId, deadlineAt: entry.deadlineAt,
+              ...(entry.recoveryGetResponseLostOnce ? { recoveryGetResponseLostOnce: true } : {}) })),
+            receipts: commentReceipts, storeInspection: await inspectCommentStore() } } : {}),
         runs: [...runs.values()].map((run) => ({ ...runState(run), conversationId: run.conversationId,
           requestId: run.requestId, clientThreadId: run.clientThreadId, fixtureStage: run.fixtureStage || null,
           ...(run.fixtureApprovalOffer ? { fixtureApprovalOffer: run.fixtureApprovalOffer } : {}),
@@ -1143,6 +1381,8 @@ const handler = async (req, res) => {
           broadcastFixtureEvent({ type: 'engine.status', v: 1, engines: engineRows(), ts: Date.now() });
         } else {
           codexContextEpoch++;
+          for (const recovery of commentRecoveryGets.values()) clearCommentRecovery(recovery, 'account-change');
+          for (const entry of new Set([...commentArms.values(), ...commentPending])) cancelComment(entry, 'account-change');
           for (const entry of new Set([...sourceResponses.values(), ...sourceResponsesInFlight])) finishSourceResponse(entry, 403,
             { code: 'ACCOUNT_CHANGED', error: 'Fixture account epoch changed' }, 'account-change');
           accountVariant = body.variant;
@@ -1464,6 +1704,8 @@ const handler = async (req, res) => {
 };
 const dispose = () => {
   sourceChangeClosing = true;
+  for (const recovery of commentRecoveryGets.values()) clearCommentRecovery(recovery, 'server-close');
+  for (const entry of new Set([...commentArms.values(), ...commentPending])) cancelComment(entry, 'server-close');
   for (const entry of new Set([...sourceResponses.values(), ...sourceResponsesInFlight])) finishSourceResponse(entry, 503,
     { code: 'QA_FIXTURE_CLOSED', error: 'Fixture disposed' }, 'server-close');
   if (sourceChangeReady) return sourceChangeReady.then(scene => scene.dispose(), () => {});
