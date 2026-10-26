@@ -10,6 +10,7 @@ import { TASK_GATE_SELECTORS, taskGateRowSelector, assertTaskGateEnvironment, as
   assertDraftRetained, assertNewQuestionCleared, assertCodePointLimit, assertOneAnswer, assertTaskGateEvidence,
   reconciledTaskGateRead, assertTaskGateStaleReconciled,
   observeTaskGate, observeTaskGateDesk, observeTaskGateTarget, observeTaskGateLimit, taskGateLimitReadable, assertTaskGateLimitPaint, readTaskGateLimit,
+  observeTaskGateFailurePaint, assertTaskGateFailurePaint,
   runTaskGateFlow, runCli } from './verify-firefox-mcp-task-gate-flow.mjs';
 
 const ENV = { EGDESK_QA_TASK_GATE_FIXTURE: '1', EGDESK_QA_FIXTURE_TRANSPORT: '1', EGDESK_QA_REAL_TURN: '0',
@@ -21,6 +22,12 @@ const ui = (extra = {}) => { const value = { count: 1, threadId: 'local-original
   limit: 20, counted: 2, limitText: '2 / 20자', continueDisabled: false, ...extra };
   return { ...value, responseKey: extra.responseKey ?? JSON.stringify(['userAction', value.label, value.response]) }; };
 const state = (extra = {}) => ({ requests: [], persisted: { answers: [] }, fakeProviderTurns: [], ...extra });
+const failurePaint = current => ({ ui: current,
+  notice: { count: 1, text: current.notice.trim(), styleVisible: true,
+    fragments: [{ inside: true, clipped: false, hitCount: 3, hits: Array.from({ length: 3 }, () => ({ owned: true })) }] },
+  ...Object.fromEntries(['continue', 'cancel'].map(key => [key, {
+    selector: `${taskGateRowSelector(current)} [data-testid=${JSON.stringify(TASK_GATE_SELECTORS[key])}]`,
+    count: 1, visible: true, inside: true, clipped: false, hits: 9, disabled: false }])) });
 const post = (ids, status = 200, extra = {}) => ({ sequence: 1, method: 'POST', path: '/tasks/continue',
   delegated: true, status, request: { graphId: ids.graphId, taskId: ids.taskId, gateId: ids.gateId,
     answer: ids.response?.kind === 'choice' ? { choice: 'kakao' } : { textCodePoints: 20 } }, response: {}, ...extra });
@@ -67,6 +74,7 @@ function evidence() {
       .map(stage => ({ stage, before: state(), after: state() })),
     choice: { identity: choice, before, after: chosen, ui: ui({ ...choice, question: choice.label, choice: 'kakao', value: '' }) },
     rejected: { identity: text, before, after: rejected, typed: rejectedTyped, ui: rejectedUi, refreshed: structuredClone(rejectedUi) },
+    errorPaint: { initial: failurePaint(rejectedUi), beforeCapture: failurePaint(rejectedUi) },
     text: { identity: text, before, after: written, ui: textUi, value },
     previousQuestion: rejectedUi, newQuestion: nextUi,
     stale: staleEvidence(next),
@@ -223,6 +231,8 @@ test('full validator rejects missing stages, lost drafts, wrong original thread,
     proof => { proof.duplicate.afterAttempt.requests.push(post(identity())); }, proof => { proof.duplicate.disabled = false; },
     proof => { proof.duplicate.whileHeld.held = null; proof.duplicate.afterAttempt.held = null; },
     proof => { proof.choice.ui.choice = 'email'; }, proof => { proof.choice.ui.responseKey = '["wrong-question"]'; },
+    proof => { delete proof.errorPaint; }, proof => { proof.errorPaint.initial.continue.clipped = true; },
+    proof => { proof.errorPaint.beforeCapture.cancel.hits = 8; }, proof => { proof.errorPaint.initial.notice.fragments = []; },
   ];
   for (const corrupt of corruptions) { const proof = evidence(); corrupt(proof); assert.throws(() => assertTaskGateEvidence(proof)); }
 });
@@ -233,11 +243,12 @@ test('observation is bounded read-only chrome source; no input or DOM/state muta
   await observeTaskGateDesk(harness);
   await observeTaskGateTarget(harness, '[data-testid="chat-task-answer-continue"]');
   await observeTaskGateLimit(harness, identity());
-  assert.equal(sources.length, 4);
+  await observeTaskGateFailurePaint(harness, identity());
+  assert.equal(sources.length, 5);
   for (const source of sources) {
     assert.ok(Buffer.byteLength(source) < 12000);
     for (const forbidden of [/dispatchEvent/, /new (?:InputEvent|KeyboardEvent|Event)\(/, /\.value\s*=/, /\.click\(/,
-      /innerHTML\s*=/, /__egdesk[^\n]*\s=\s/, /\.style\s*[.=]/]) assert.doesNotMatch(source, forbidden);
+      /innerHTML\s*=/, /__egdesk[^\n]*\s=\s/, /\.style\s*[.=]/, /scrollIntoView|scrollTo\(|scrollBy\(/]) assert.doesNotMatch(source, forbidden);
   }
 });
 
@@ -317,6 +328,81 @@ test('count text occlusion cannot be waived or fixed by blind scrolling, and exp
   const wait = async (_h, read, accept) => { assert.equal(accept(await read()), false); throw new Error('text still occluded'); };
   await assert.rejects(readTaskGateLimit(h, identity(), Date.now() + 10000, { read: async () => proof, wait }), /text still occluded/);
   await assert.rejects(readTaskGateLimit(h, identity(), 1, { read: () => assert.fail('expired observation') }));
+});
+
+function failurePaintDom({ clippedButton, clippedError = false, occludedError = false, hiddenError = false, missingCancel = false } = {}) {
+  const current = ui({ notice: '개인 정보가 포함되어 있습니다.\n해당 값을 빼고 다시 답해 주세요.' });
+  const calls = [], rect = (left, top, width, height) => ({ left, top, right: left + width, bottom: top + height, width, height });
+  const makeNode = (box, extra = {}) => ({ isConnected: true, parentElement: null,
+    offsetWidth: box.width, offsetHeight: box.height, clientWidth: box.width, clientHeight: box.height,
+    clientLeft: 0, clientTop: 0, closest: () => null, contains: () => false, getAttribute: () => null,
+    getBoundingClientRect: () => box, ...extra });
+  const list = makeNode(rect(0, 0, 800, 560));
+  const row = makeNode(rect(0, 0, 800, 560), { parentElement: list, dataset: current });
+  const parts = Object.fromEntries(['question', 'next', 'text', 'notice', 'continue', 'cancel'].map(key => {
+    const box = ['continue', 'cancel'].includes(key)
+      ? rect(key === 'continue' ? 100 : 220, clippedButton === key ? 543 : 500, 100, clippedButton === key ? 18 : 30)
+      : rect(100, 200, 400, 40);
+    return [key, makeNode(box, { parentElement: row, textContent: current[key] || '', value: key === 'text' ? current.value : undefined, disabled: false })];
+  }));
+  row.querySelectorAll = selector => {
+    const key = Object.keys(parts).find(key => selector === `[data-testid="${TASK_GATE_SELECTORS[key]}"]`);
+    return key && !(key === 'cancel' && missingCancel) ? [parts[key]] : [];
+  };
+  row.querySelector = () => null;
+  const lines = [rect(100, 202, 300, 14), rect(100, clippedError ? 554 : 218, 300, 14)];
+  const contains = (box, x, y) => x >= box.left && x <= box.right && y >= box.top && y <= box.bottom;
+  const context = { innerWidth: 800, innerHeight: 600, window: { __egdesk: { state: { codex: { activeThreadId: current.threadId } } } },
+    getComputedStyle: node => ({ display: 'block', visibility: 'visible', opacity: hiddenError && node === parts.notice ? '0' : '1',
+      overflowX: node === list ? 'auto' : 'visible', overflowY: node === list ? 'auto' : 'visible' }),
+    document: {
+      querySelectorAll: selector => { assert.equal(selector, taskGateRowSelector(identity())); return [row]; },
+      createRange: () => ({ selectNodeContents: node => { assert.equal(node, parts.notice); calls.push('full-error-range'); },
+        getClientRects: () => lines, detach() {} }),
+      elementFromPoint: (x, y) => {
+        if (y > 560 || x < 0 || x > 800) return list;
+        for (const key of ['continue', 'cancel']) if (contains(parts[key].getBoundingClientRect(), x, y)) return parts[key];
+        return !occludedError && lines.some(box => contains(box, x, y)) ? parts.notice : list;
+      },
+    } };
+  const noInput = () => assert.fail('post-error proof must never scroll, focus, click or replay input');
+  const h = { evaluateChrome: source => { calls.push('single-read'); return vm.runInNewContext(`(${source})()`, context); },
+    scrollWithKey: noInput, wheelAt: noInput, click: noInput, clickPoint: noInput, press: noInput };
+  return { h, current, typed: { ...current, notice: '' }, calls };
+}
+
+test('post-error proof reads full multiline error and both nine-hit buttons in one immutable observation', async () => {
+  const f = failurePaintDom(), proof = await observeTaskGateFailurePaint(f.h, identity());
+  assert.equal(assertTaskGateFailurePaint(proof, f.typed, f.current, identity(), f.current.threadId), true);
+  assert.equal(proof.notice.fragments.length, 2); assert.equal(proof.continue.hits, 9); assert.equal(proof.cancel.hits, 9);
+  assert.deepEqual(f.calls, ['single-read', 'full-error-range']);
+});
+
+test('R7 counterexample: full error visible and nine hits cannot excuse a clipped Continue or Cancel edge', async () => {
+  for (const clippedButton of ['continue', 'cancel']) {
+    const f = failurePaintDom({ clippedButton }), proof = await observeTaskGateFailurePaint(f.h, identity());
+    assert.equal(taskGateLimitReadable(proof.notice), true, 'full error is genuinely visible');
+    assert.equal(proof[clippedButton].inside, true, 'button is within the browser viewport');
+    assert.equal(proof[clippedButton].hits, 9, 'all sample points can hit despite one clipped edge');
+    assert.equal(proof[clippedButton].clipped, true, 'the containing form clips the full button box');
+    assert.throws(() => assertTaskGateFailurePaint(proof, f.typed, f.current, identity(), f.current.threadId), new RegExp(`${clippedButton}: FULL`));
+    assert.deepEqual(f.calls, ['single-read', 'full-error-range'], 'no second sample or recovery scroll');
+  }
+});
+
+test('post-error proof rejects a clipped last error line, occlusion, hidden text, missing control or changed draft/question', async () => {
+  for (const config of [{ clippedError: true }, { occludedError: true }, { hiddenError: true }, { missingCancel: true }]) {
+    const f = failurePaintDom(config), proof = await observeTaskGateFailurePaint(f.h, identity());
+    assert.throws(() => assertTaskGateFailurePaint(proof, f.typed, f.current, identity(), f.current.threadId));
+    assert.deepEqual(f.calls, ['single-read', 'full-error-range']);
+  }
+  const f = failurePaintDom(), proof = await observeTaskGateFailurePaint(f.h, identity());
+  for (const patch of [{ value: '' }, { notice: 'shortened error' }, { responseKey: 'other' }, { threadId: 'other' }]) {
+    assert.throws(() => assertTaskGateFailurePaint({ ...proof, ui: { ...proof.ui, ...patch } }, f.typed, f.current, identity(), f.current.threadId));
+  }
+  for (const key of ['continue', 'cancel']) for (const patch of [{ hits: 8 }, { disabled: true }, { visible: false }, { count: 2 }, { selector: 'unrelated' }]) {
+    assert.throws(() => assertTaskGateFailurePaint({ ...proof, [key]: { ...proof[key], ...patch } }, f.typed, f.current, identity(), f.current.threadId));
+  }
 });
 
 // Native sequencing unit doubles only; these are not actual UI acceptance evidence.
@@ -432,28 +518,58 @@ test('failed intermediate choice capture stops before hold/Continue with no retr
 });
 
 test('same-question failure screenshot follows required retained-draft/error assertions and exposes the retry state', async () => {
-  const proof = evidence().rejected, trace = [], captured = { captures: [] };
+  const proof = evidence().rejected, trace = [], captured = { captures: [], errorPaint: {} };
   const screenshot = { path: '/owned/unit-only/task-gate-same-question-text-failure.png', method: 'unit-double' };
   const context = {
     text: proof.identity, evidence: captured, rejectedBefore: proof.before, rejectedAfter: proof.after,
     typed: proof.typed, rejectedUi: proof.ui, refreshed: proof.refreshed,
+    harness: {}, local: { id: 'local-original' },
+    observeTaskGateFailurePaint: async () => { trace.push('observe-paint'); return failurePaint(proof.refreshed); },
+    assertTaskGateFailurePaint: (...args) => { trace.push('assert-paint'); return assertTaskGateFailurePaint(...args); },
     assertDraftRetained: (...args) => { trace.push('assert-retained'); return assertDraftRetained(...args); },
     check: (label, passed) => { trace.push('check'); assert.equal(passed, true); assert.match(label, /retain draft and explanation/); },
     capture: async stage => { trace.push(stage); return screenshot; },
   };
   await runCaptureSection('  evidence.rejected =', '  // Change identity while', context);
-  assert.deepEqual(trace, ['assert-retained', 'check', 'task-gate-same-question-text-failure']);
+  assert.deepEqual(trace, ['assert-retained', 'observe-paint', 'assert-paint', 'check', 'task-gate-same-question-text-failure']);
   const checkpoint = captured.captures[0];
   assert.equal(checkpoint.stage, 'same-question-text-failure'); assert.equal(checkpoint.identity, proof.identity);
   assert.equal(checkpoint.ui, proof.refreshed); assert.equal(checkpoint.ui.value, proof.typed.value);
   assert.ok(checkpoint.ui.notice); assert.equal(checkpoint.ui.continueDisabled, false);
   assert.equal(checkpoint.screenshot, screenshot); assert.equal(checkpoint.visualReview, 'pending');
+  assert.equal(captured.errorPaint.beforeCapture.ui, proof.refreshed);
   for (const patch of [{ value: '' }, { notice: '' }, { responseKey: 'other-question' }, { threadId: 'other-room' }]) {
     trace.length = 0;
     const invalid = { ...context, evidence: { captures: [] }, refreshed: { ...proof.refreshed, ...patch } };
     await assert.rejects(runCaptureSection('  evidence.rejected =', '  // Change identity while', invalid));
     assert.deepEqual(trace, ['assert-retained'], 'lost answer/error/identity cannot be captured as the preserved failure');
     assert.deepEqual(invalid.evidence.captures, []);
+  }
+  for (const key of ['continue', 'cancel']) {
+    trace.length = 0;
+    const clipped = failurePaint(proof.refreshed); clipped[key].clipped = true;
+    const invalid = { ...context, evidence: { captures: [], errorPaint: {} },
+      observeTaskGateFailurePaint: async () => { trace.push('observe-paint'); return clipped; } };
+    await assert.rejects(runCaptureSection('  evidence.rejected =', '  // Change identity while', invalid), new RegExp(`${key}: FULL`));
+    assert.deepEqual(trace, ['assert-retained', 'observe-paint', 'assert-paint']);
+    assert.equal(invalid.evidence.errorPaint.beforeCapture, clipped, 'failed paint evidence is retained');
+    assert.deepEqual(invalid.evidence.captures, [], 'clipped buttons never produce a passed-state screenshot');
+  }
+});
+
+test('first post-error clipped state fails before refresh or capture, with no wheel, scroll or input retry', async () => {
+  const proof = evidence().rejected;
+  for (const key of ['continue', 'cancel']) {
+    const clipped = failurePaint(proof.ui); clipped[key].clipped = true;
+    const captured = { errorPaint: {} }; let reads = 0;
+    await assert.rejects(runCaptureSection('  evidence.errorPaint.initial =', '  const refreshed =', {
+      evidence: captured, text: proof.identity, typed: proof.typed, rejectedUi: proof.ui, local: { id: 'local-original' },
+      harness: new Proxy({}, { get: () => assert.fail('no native action in error proof') }),
+      observeTaskGateFailurePaint: async () => { reads++; return clipped; }, assertTaskGateFailurePaint,
+      state: () => assert.fail('fail before later fixture reads'), refresh: () => assert.fail('no refresh repair'),
+      capture: () => assert.fail('no success capture'),
+    }), new RegExp(`${key}: FULL`));
+    assert.equal(reads, 1); assert.equal(captured.errorPaint.initial, clipped);
   }
 });
 
@@ -468,7 +584,9 @@ test('intermediate captures retain all existing flow assertions and the final ca
     "await capture('task-gate-initial-choice-before-continue')",
     "await control('hold-next'); await click(field(choice, 'continue'));",
     'assertOneAnswer(choiceBefore, choiceAfter, choice);',
+    'assertTaskGateFailurePaint(evidence.errorPaint.initial, typed, rejectedUi, text, local.id);',
     'assertDraftRetained(rejectedUi, refreshed, { notice: true });',
+    'assertTaskGateFailurePaint(evidence.errorPaint.beforeCapture, typed, refreshed, text, local.id);',
     "await capture('task-gate-same-question-text-failure')",
     "await control('next-question');",
     'assertNewQuestionCleared(evidence.previousQuestion, emptyNext);',

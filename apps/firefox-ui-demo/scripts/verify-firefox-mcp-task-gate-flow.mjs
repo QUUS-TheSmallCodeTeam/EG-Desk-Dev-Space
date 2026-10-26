@@ -165,6 +165,8 @@ export function assertTaskGateEvidence(evidence) {
   assert.equal(posts(evidence.rejected.after).at(-1).response.code, 'TASK_GATE_ANSWER_PRIVATE');
   assertDraftRetained(evidence.rejected.typed, evidence.rejected.ui);
   assertDraftRetained(evidence.rejected.ui, evidence.rejected.refreshed, { notice: true });
+  assertTaskGateFailurePaint(evidence.errorPaint?.initial, evidence.rejected.typed, evidence.rejected.ui, evidence.rejected.identity, evidence.threadId);
+  assertTaskGateFailurePaint(evidence.errorPaint?.beforeCapture, evidence.rejected.typed, evidence.rejected.refreshed, evidence.rejected.identity, evidence.threadId);
   assertOneAnswer(evidence.text.before, evidence.text.after, evidence.text.identity);
   assertCodePointLimit(evidence.text.ui, evidence.text.value, evidence.text.identity.response.maxLength);
   assert.ok(evidence.text.after.persisted.answers.some(row => row.graphId === evidence.text.identity.graphId
@@ -286,6 +288,87 @@ export function assertTaskGateLimitPaint(proof, ui, identity, raw) {
   return true;
 }
 
+// One synchronous, read-only paint sample of the whole failed-answer surface.
+// Never call ready()/readTaskGateLimit(): they may scroll away a product defect.
+export async function observeTaskGateFailurePaint(harness, identity) {
+  const selector = taskGateRowSelector(identity);
+  return chrome(harness, ({ selector, names }) => {
+    const rows = [...document.querySelectorAll(selector)], row = rows.length === 1 ? rows[0] : null;
+    const nodes = key => [...(row?.querySelectorAll(`[data-testid="${names[key]}"]`) || [])];
+    const one = key => nodes(key).length === 1 ? nodes(key)[0] : null;
+    const bounds = node => {
+      let styleVisible = !!node?.isConnected && !node.closest('[hidden],[inert],[aria-hidden="true"]');
+      const clip = { left: 0, top: 0, right: innerWidth, bottom: innerHeight };
+      for (let parent = node; parent; parent = parent.parentElement) {
+        const css = getComputedStyle(parent), r = parent.getBoundingClientRect();
+        if (css.display === 'none' || css.visibility !== 'visible' || Number(css.opacity) === 0 || css.contentVisibility === 'hidden') styleVisible = false;
+        if (css.display === 'inline' || css.display === 'contents') continue;
+        const sx = parent.offsetWidth ? r.width / parent.offsetWidth : 1, sy = parent.offsetHeight ? r.height / parent.offsetHeight : 1;
+        if (/(auto|scroll|hidden|clip)/.test(css.overflowX)) {
+          clip.left = Math.max(clip.left, r.left + parent.clientLeft * sx);
+          clip.right = Math.min(clip.right, r.left + (parent.clientLeft + parent.clientWidth) * sx);
+        }
+        if (/(auto|scroll|hidden|clip)/.test(css.overflowY)) {
+          clip.top = Math.max(clip.top, r.top + parent.clientTop * sy);
+          clip.bottom = Math.min(clip.bottom, r.top + (parent.clientTop + parent.clientHeight) * sy);
+        }
+      }
+      return { styleVisible, clip };
+    };
+    const inside = r => !!r && r.left >= 0 && r.top >= 0 && r.right <= innerWidth && r.bottom <= innerHeight;
+    const clipped = (r, clip) => !r || r.left < clip.left - .5 || r.top < clip.top - .5 || r.right > clip.right + .5 || r.bottom > clip.bottom + .5;
+    const rect = r => r && { left: r.left, top: r.top, right: r.right, bottom: r.bottom, width: r.width, height: r.height };
+    const notice = one('notice'), noticeBounds = bounds(notice), fragments = [];
+    if (notice) {
+      const range = document.createRange(); range.selectNodeContents(notice);
+      for (const r of range.getClientRects()) {
+        if (r.width <= 0 || r.height <= 0) continue;
+        const hits = [.2, .5, .8].map(x => {
+          const hit = document.elementFromPoint(r.left + r.width * x, r.top + r.height * .5);
+          return { owned: !!hit && (hit === notice || notice.contains(hit)) };
+        });
+        fragments.push({ rect: rect(r), inside: inside(r), clipped: clipped(r, noticeBounds.clip),
+          hits, hitCount: hits.filter(hit => hit.owned).length });
+      }
+      range.detach?.();
+    }
+    const button = key => {
+      const node = one(key), r = node?.getBoundingClientRect(), paint = bounds(node); let hits = 0;
+      if (r) for (const x of [.2, .5, .8]) for (const y of [.2, .5, .8]) {
+        const hit = document.elementFromPoint(r.left + r.width * x, r.top + r.height * y);
+        if (hit === node || node.contains(hit)) hits++;
+      }
+      return { selector: `${selector} [data-testid=${JSON.stringify(names[key])}]`, count: nodes(key).length,
+        rect: rect(r), visible: paint.styleVisible && !!r && r.width > 0 && r.height > 0,
+        inside: inside(r), clipped: clipped(r, paint.clip), hits,
+        disabled: !node || node.disabled === true || node.getAttribute('aria-disabled') === 'true' };
+    };
+    const checked = row?.querySelector(`[data-testid="${names.choice}"]:checked`);
+    return { ui: { count: rows.length, threadId: window.__egdesk?.state?.codex?.activeThreadId || null,
+      graphId: row?.dataset.graphId, taskId: row?.dataset.taskId, gateId: row?.dataset.gateId, responseKey: row?.dataset.responseKey,
+      question: one('question')?.textContent || '', next: one('next')?.textContent || '',
+      value: one('text')?.value ?? '', choice: checked?.dataset.choiceId ?? null, notice: notice?.textContent || '' },
+      notice: { count: nodes('notice').length, text: (notice?.textContent || '').trim(), ...noticeBounds, fragments },
+      continue: button('continue'), cancel: button('cancel') };
+  }, { selector, names: TASK_GATE_SELECTORS });
+}
+
+export function assertTaskGateFailurePaint(proof, typed, current, identity, threadId) {
+  assertQuestionIdentity(typed, identity, threadId); assertQuestionIdentity(current, identity, threadId);
+  assertDraftRetained(typed, current);
+  assertQuestionIdentity(proof?.ui, identity, threadId);
+  assertDraftRetained(current, proof.ui, { notice: true });
+  assert.ok(taskGateLimitReadable(proof.notice), 'FULL error text must be painted, unclipped and unoccluded without scrolling');
+  assert.equal(proof.notice.text, current.notice.trim(), 'all current error text, not a shortened substitute');
+  for (const key of ['continue', 'cancel']) {
+    const target = proof[key];
+    assert.equal(target?.selector, `${taskGateRowSelector(identity)} ${testid(TASK_GATE_SELECTORS[key])}`);
+    assert.ok(target.count === 1 && target.visible === true && target.inside === true && target.clipped === false
+      && target.hits === 9 && target.disabled === false, `${key}: FULL enabled button must be painted and hit at all nine points without scrolling`);
+  }
+  return true;
+}
+
 export async function readTaskGateLimit(harness, identity, deadlineMs,
   { read = observeTaskGateLimit, wait = waitFor } = {}) {
   const observations = [], scrolls = [];
@@ -356,7 +439,7 @@ export async function runTaskGateFlow({ harness, result, check, capture, defer }
     await control('replay'); await waitState(value => value.frames.some(frame => frame.type === 'task.native')); await control('refresh');
     await waitState(value => reads(value) > before);
   };
-  const evidence = { nativeInputs: true, domInjection: false, noPosts: [], limitPaint: [], captures: [] };
+  const evidence = { nativeInputs: true, domInjection: false, noPosts: [], limitPaint: [], errorPaint: {}, captures: [] };
   const readableLimit = async (identity, raw) => {
     const painted = await readTaskGateLimit(harness, identity, deadlineMs), current = await read(identity);
     assertTaskGateLimitPaint(painted.proof, current, identity, raw);
@@ -446,11 +529,15 @@ export async function runTaskGateFlow({ harness, result, check, capture, defer }
   await click(field(text, 'continue'));
   const rejectedAfter = await waitState(value => posts(value).at(-1)?.response?.code === 'TASK_GATE_ANSWER_PRIVATE');
   const rejectedUi = await waitFor(harness, () => read(text), value => !!value.notice, deadlineMs);
+  evidence.errorPaint.initial = await observeTaskGateFailurePaint(harness, text);
+  assertTaskGateFailurePaint(evidence.errorPaint.initial, typed, rejectedUi, text, local.id);
   const beforeRefresh = await state(); await refresh(text);
   const refreshed = await read(text), afterRefresh = await state();
   evidence.noPosts.push({ stage: 'same-question-refresh', before: beforeRefresh, after: afterRefresh });
   evidence.rejected = { identity: text, before: rejectedBefore, after: rejectedAfter, typed, ui: rejectedUi, refreshed };
   assertDraftRetained(rejectedUi, refreshed, { notice: true });
+  evidence.errorPaint.beforeCapture = await observeTaskGateFailurePaint(harness, text);
+  assertTaskGateFailurePaint(evidence.errorPaint.beforeCapture, typed, refreshed, text, local.id);
   check('Same-question private-answer rejection and refresh retain draft and explanation', true);
   // Capture the preserved failed answer/error and existing Continue action
   // before the fixture changes the question or any text is replaced.
