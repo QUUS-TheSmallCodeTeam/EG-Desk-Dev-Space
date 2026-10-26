@@ -720,6 +720,108 @@
     return true;
   }
 
+  // Reveal one failed answer's entire input/error/action span, never just its
+  // error or button. No focus, camera, outer-scroll or persistent draft writes.
+  function createChatTaskAnswerReveal(body, { schedule = requestAnimationFrame } = {}) {
+    let disposed = false, hadList = false, restoring = false, interaction = 0, pending = null;
+    let previous = new Map(), textareas = new Map();
+    const submissions = new Map();
+    const events = ['pointerdown', 'wheel', 'keydown', 'input', 'compositionstart', 'focusin'];
+    const cancel = event => { if (restoring && event.type === 'focusin') return; interaction++; pending = null; };
+    const eventHost = body.ownerDocument?.addEventListener ? body.ownerDocument : body;
+    const listening = typeof eventHost.addEventListener === 'function';
+    if (listening) for (const name of events) eventHost.addEventListener(name, cancel, true);
+    const listNow = () => body.querySelector('[data-testid="chat-task-list"]');
+    const rowsOf = list => [...(list?.querySelectorAll('[data-testid="chat-task-condition"]') || [])];
+    const inputsOf = list => [...(list?.querySelectorAll('[data-testid="chat-task-answer-text"]') || [])];
+    const keyOf = (list, row) => JSON.stringify([list.dataset.threadId, row._taskAnswerReveal?.key]);
+    const submittedHere = event => {
+      const control = event.target?.closest?.('[data-testid="chat-task-answer-continue"]');
+      const row = control?.closest?.('[data-testid="chat-task-condition"]'), list = listNow();
+      if (!control || control.disabled || !row?._taskAnswerReveal?.current() || !list?.contains(row)) return;
+      submissions.set(keyOf(list, row), interaction);
+    };
+    body.addEventListener?.('click', submittedHere, true);
+    const reveal = (list, row) => {
+      const parts = ['.egd-task-answer-fields', '[data-testid="chat-task-error"]', '.egd-task-answer-actions']
+        .map(selector => row.querySelector(selector));
+      if (parts.some(part => !part || !part.isConnected)) return;
+      const rect = list.getBoundingClientRect(), scale = rect.height / list.offsetHeight;
+      if (!Number.isFinite(scale) || scale <= 0 || list.clientHeight <= 0) return;
+      let top = rect.top + list.clientTop * scale, bottom = top + list.clientHeight * scale;
+      // Include actual ancestor clipping, rather than assuming the list's CSS
+      // maximum is all on screen. Never scroll an ancestor to manufacture room.
+      for (const host of [body, list.closest?.('.egd-codex-conversation-pane')]) {
+        const clip = host?.getBoundingClientRect?.();
+        if (clip?.height > 0) { top = Math.max(top, clip.top); bottom = Math.min(bottom, clip.bottom); }
+      }
+      const height = body.ownerDocument?.defaultView?.innerHeight;
+      if (Number.isFinite(height)) { top = Math.max(top, 0); bottom = Math.min(bottom, height); }
+      top += 4 * scale; bottom -= 4 * scale;
+      const rects = parts.map(part => part.getBoundingClientRect());
+      if (rects.some(part => part.height <= 0 || part.width <= 0)) return;
+      const first = Math.min(...rects.map(part => part.top)), last = Math.max(...rects.map(part => part.bottom));
+      if (last - first > bottom - top) return; // oversized forms need a separate layout decision
+      const delta = last > bottom ? last - bottom : first < top ? first - top : 0;
+      const next = Math.max(0, Math.min(list.scrollHeight - list.clientHeight, list.scrollTop + delta / scale));
+      const movement = (next - list.scrollTop) * scale;
+      if (first - movement < top - 0.5 || last - movement > bottom + 0.5) return;
+      if (next !== list.scrollTop) list.scrollTop = next;
+    };
+    return {
+      beforeRender() {
+        if (disposed) return;
+        restoring = true;
+        textareas = new Map(inputsOf(listNow()).map(input => [input.dataset.focusKey, {
+          start: input.selectionStart, end: input.selectionEnd, direction: input.selectionDirection,
+          top: input.scrollTop, left: input.scrollLeft,
+        }]));
+      },
+      afterRender() {
+        if (disposed) return;
+        restoring = false;
+        const list = listNow();
+        if (!list) { hadList = false; previous.clear(); submissions.clear(); pending = null; return; }
+        for (const input of inputsOf(list)) {
+          const saved = textareas.get(input.dataset.focusKey);
+          if (!saved) continue;
+          try { input.setSelectionRange(saved.start, saved.end, saved.direction); } catch {}
+          input.scrollTop = saved.top; input.scrollLeft = saved.left;
+        }
+        const next = new Map();
+        let candidate = null, retained = null;
+        for (const row of rowsOf(list)) {
+          const own = row._taskAnswerReveal;
+          if (!own || !own.current()) continue;
+          const key = keyOf(list, row), phase = own.phase(), error = own.error();
+          const old = previous.get(key);
+          next.set(key, { phase, error });
+          if (phase === 'error' && error) {
+            if (pending?.key === key && pending.error === error && pending.interaction === interaction) retained = { ...pending, list, row };
+            if (hadList && old?.error !== error && submissions.get(key) === interaction) candidate = { key, error, list, row, interaction };
+            submissions.delete(key);
+          } else if (phase !== 'sending') submissions.delete(key);
+        }
+        previous = next; hadList = true;
+        pending = retained || candidate;
+        if (!pending) return;
+        const own = pending;
+        schedule(() => {
+          if (disposed || pending !== own || own.interaction !== interaction || listNow() !== own.list
+              || !own.list.isConnected || !own.row.isConnected || !own.row._taskAnswerReveal.current()
+              || own.row._taskAnswerReveal.phase() !== 'error' || own.row._taskAnswerReveal.error() !== own.error) return;
+          pending = null;
+          reveal(own.list, own.row);
+        });
+      },
+      dispose() {
+        disposed = true; pending = null; previous.clear(); submissions.clear(); textareas.clear();
+        if (listening) for (const name of events) eventHost.removeEventListener(name, cancel, true);
+        if (body.addEventListener) body.removeEventListener('click', submittedHere, true);
+      },
+    };
+  }
+
   function codexThreadTypeLabel(type) {
     return codexThreadKindLabel(type);
   }
@@ -1013,6 +1115,7 @@
     const row = el('li', { class: 'egd-task-condition egd-task-question', data: { testid: 'chat-task-condition', state: condition.state,
       graphId: group.graphId, taskId: task.taskId, gateId: condition.gateId, responseKey: condition.responseKey || '' } });
     const live = () => row.isConnected && draft && actions.taskAnswerCurrent(draft);
+    if (draft) row._taskAnswerReveal = { key, current: live, phase: () => draft.phase, error: () => draft.error };
     row.appendChild(el('strong', { class: 'egd-task-question-title', data: { testid: 'chat-task-question' } }, question));
     if (accepted) onAccepted();
     else row.appendChild(el('p', { class: 'egd-task-answer-note' }, '이 작업은 답변을 기다리고 있습니다.'));
@@ -7110,6 +7213,7 @@
     let compositionInProgress = false;
     let deferredCodex = null;
     let pendingMessageScroll = null;
+    const taskAnswerReveal = createChatTaskAnswerReveal(body);
     let focusOpenedRoom = false;
     // A render that puts focus back on the composer is not a new look at it.
     let restoringComposerFocus = false;
@@ -7165,6 +7269,7 @@
         deferredCodex = codex;
         return;
       }
+      taskAnswerReveal.beforeRender();
       const oldInput = body.querySelector('.egd-codex-input');
       const oldMessages = body.querySelector('.egd-codex-messages');
       const oldTaskList = body.querySelector('[data-testid="chat-task-list"]');
@@ -8446,6 +8551,7 @@
         const target = newInput && !newInput.disabled ? newInput : body.querySelector('.egd-codex-conversation-back');
         target?.focus({ preventScroll: true });
       } else restoreChatFocus(body, focusState);
+      taskAnswerReveal.afterRender();
       // CHAT-04 '채팅에서 보기': once the scroll above has settled, the asked answer comes into view.
       if (msgEl && state.codex.revealMessage) requestAnimationFrame(() => revealRequestedMessage(msgEl));
     };
@@ -8458,6 +8564,7 @@
       compositionInProgress = false;
       deferredCodex = null;
       pendingMessageScroll = null;
+      taskAnswerReveal.dispose();
       body.removeEventListener('keydown', onMessageScrollGesture, true);
       body.removeEventListener('pointerdown', onMessageScrollGesture, true);
       document.removeEventListener('mousedown', onDocumentMouseDown, true);

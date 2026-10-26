@@ -4132,6 +4132,8 @@ test('Chat pending scroll intent preserves the rendered viewport across SSE rere
 
   const bind = compileFunction([
     declaration,
+    surfaceSource.match(/  function createChatTaskAnswerReveal\(body, \{ schedule = requestAnimationFrame \} = \{\}\) \{[\s\S]*?\n  \}/)[0],
+    'const taskAnswerReveal = createChatTaskAnswerReveal(body);',
     'let activeThread = null;',
     gesture,
     'const render = next => {',
@@ -13848,6 +13850,118 @@ function taskQuestionHarness(graph = taskQuestionGraph(), { boardKnown = true } 
   return { api, state, thread, root, document, epochScope, requests, replies, graphReceipts, draw, parts, part, question, draft, type, choose,
     post: () => requests.filter(request => request.method === 'POST'), frame: next => api.taskGraphFrame(next) };
 }
+
+function taskAnswerRevealHarness({ height = 220, scale = 1, spanTop = 100, spanHeight = 170, top = 0 } = {}) {
+  const frames = [], listeners = new Map(), writes = [];
+  const draft = { key: 'original-draft', phase: 'editing', error: null, current: true };
+  const doc = { activeElement: { id: 'unchanged-focus' }, defaultView: { innerHeight: 1000 },
+    addEventListener(name, fn) { listeners.set(name, fn); },
+    removeEventListener(name, fn) { if (listeners.get(name) === fn) listeners.delete(name); } };
+  const body = { ownerDocument: doc, list: null,
+    querySelector: () => body.list,
+    addEventListener(name, fn) { listeners.set(name, fn); },
+    removeEventListener(name, fn) { if (listeners.get(name) === fn) listeners.delete(name); },
+    getBoundingClientRect: () => ({ top: 0, bottom: 1000, height: 1000 }),
+  };
+  const makeList = ({ threadId = 'room-a', error = draft.error, current = () => draft.current } = {}) => {
+    let position = top;
+    const input = { dataset: { focusKey: draft.key }, value: 'PRIVATE_ANSWER', selectionStart: 2, selectionEnd: 6, selectionDirection: 'backward', scrollTop: 19, scrollLeft: 3,
+      setSelectionRange(start, end, direction) { Object.assign(this, { selectionStart: start, selectionEnd: end, selectionDirection: direction }); this.scrollTop = 0; } };
+    const list = { dataset: { threadId }, isConnected: true, clientTop: 0, clientHeight: height, offsetHeight: height, scrollHeight: 800,
+      get scrollTop() { return position; }, set scrollTop(value) { position = Math.max(0, Math.min(800 - height, value)); writes.push(position); },
+      getBoundingClientRect: () => ({ top: 100, bottom: 100 + height * scale, height: height * scale }),
+      querySelectorAll: selector => selector.includes('chat-task-answer-text') ? [input] : [row],
+      contains: node => node === row,
+      closest: () => body,
+    };
+    const part = (start, end) => ({ isConnected: true, getBoundingClientRect: () => ({ top: 100 + (start - position) * scale,
+      bottom: 100 + (end - position) * scale, height: (end - start) * scale, width: 340 * scale }) });
+    const parts = { '.egd-task-answer-fields': part(spanTop, spanTop + 90),
+      '[data-testid="chat-task-error"]': part(spanTop + 96, spanTop + spanHeight - 38),
+      '.egd-task-answer-actions': part(spanTop + spanHeight - 32, spanTop + spanHeight) };
+    const row = { isConnected: true, _taskAnswerReveal: { key: draft.key, current, phase: () => draft.phase, error: () => draft.error },
+      querySelector: selector => parts[selector] };
+    return { list, row, input, parts, error };
+  };
+  const factory = compileFunction(`${declaration('createChatTaskAnswerReveal')}\nreturn createChatTaskAnswerReveal;`, [])();
+  const api = factory(body, { schedule: fn => frames.push(fn) });
+  let shown = makeList(); body.list = shown.list; api.afterRender();
+  const render = options => {
+    api.beforeRender(); shown.list.isConnected = false; shown.row.isConnected = false;
+    shown = makeList(options); body.list = shown.list;
+    // The real Chat renderer restores focus before afterRender; that is not a user gesture.
+    listeners.get('focusin')?.({ type: 'focusin' }); api.afterRender(); return shown;
+  };
+  const sending = ({ explicit = true } = {}) => {
+    const control = { closest: selector => selector.includes('chat-task-condition') ? shown.row : control };
+    if (explicit) listeners.get('click')?.({ type: 'click', target: control });
+    draft.phase = 'sending'; draft.error = null; render();
+  };
+  const failed = () => { draft.phase = 'error'; draft.error = '전체 오류 이유와 해결 방법'; return render(); };
+  return { api, body, doc, draft, frames, writes, listeners, render, sending, failed, shown: () => shown,
+    interact: type => listeners.get(type)?.({ type, target: { outsideChat: true } }), flush: () => { while (frames.length) frames.shift()(); } };
+}
+
+test('Task new-error reveal: moves the full input/error/actions union by the minimum inner scroll without focus/caret/textarea changes', () => {
+  for (const scale of [1, 0.96, 1.5]) {
+    const h = taskAnswerRevealHarness({ scale }), focus = h.doc.activeElement;
+    h.sending(); const rendered = h.failed(); h.flush();
+    assert.ok(Math.abs(rendered.list.scrollTop - 54) < 1e-10, 'only floating-point transform precision differs');
+    assert.deepEqual(h.writes, [rendered.list.scrollTop]);
+    const rects = Object.values(rendered.parts).map(part => part.getBoundingClientRect());
+    assert.ok(Math.min(...rects.map(rect => rect.top)) >= 100 + 4 * scale - 1e-10);
+    assert.ok(Math.max(...rects.map(rect => rect.bottom)) <= 100 + 216 * scale + 1e-10);
+    assert.equal(h.doc.activeElement, focus); assert.equal(rendered.input.value, 'PRIVATE_ANSWER');
+    assert.deepEqual([rendered.input.selectionStart, rendered.input.selectionEnd, rendered.input.selectionDirection,
+      rendered.input.scrollTop, rendered.input.scrollLeft], [2, 6, 'backward', 19, 3]);
+  }
+});
+
+test('Task new-error reveal: same-error SSE retains one pending reveal, then never repeats; already-visible and oversized forms do not move', () => {
+  const h = taskAnswerRevealHarness(); h.sending(); h.failed(); h.render(); h.flush();
+  assert.equal(h.writes.length, 1, 'only the newest attached render moves');
+  h.render(); h.flush(); assert.equal(h.writes.length, 1, 'an unchanged error is not a new reveal');
+  for (const options of [{ spanTop: 20 }, { spanHeight: 260 }]) {
+    const fixed = taskAnswerRevealHarness(options); fixed.sending(); fixed.failed(); fixed.flush();
+    assert.equal(fixed.writes.length, 0, 'never reveal only the error/buttons when the complete form cannot fit');
+  }
+  const otherView = taskAnswerRevealHarness(); otherView.sending({ explicit: false }); otherView.failed(); otherView.flush();
+  assert.equal(otherView.writes.length, 0, 'a failure submitted in another view never moves this view');
+});
+
+test('Task new-error reveal: user interaction during the request or deferred frame cancels movement', () => {
+  for (const event of ['pointerdown', 'wheel', 'keydown', 'input', 'compositionstart', 'focusin']) for (const timing of ['request', 'frame']) {
+    const h = taskAnswerRevealHarness(); h.sending();
+    if (timing === 'request') h.interact(event);
+    h.failed(); if (timing === 'frame') h.interact(event);
+    h.flush(); assert.equal(h.writes.length, 0, `${event}/${timing}`);
+    h.render(); h.flush(); assert.equal(h.writes.length, 0, 'SSE does not revive a cancelled reveal');
+  }
+});
+
+test('Task new-error reveal: room/draft/currentness changes, detached views and disposal reject deferred work', () => {
+  for (const change of [h => h.render({ threadId: 'other-room' }), h => { h.draft.key = 'replacement'; h.render(); },
+    h => { h.draft.current = false; }, h => { h.draft.phase = 'editing'; h.draft.error = null; },
+    h => { h.body.list = null; h.api.afterRender(); }, h => { h.shown().list.isConnected = false; }, h => h.api.dispose()]) {
+    const h = taskAnswerRevealHarness(); h.sending(); h.failed(); change(h); h.flush(); assert.equal(h.writes.length, 0);
+  }
+  const h = taskAnswerRevealHarness(); h.api.dispose(); assert.equal(h.listeners.size, 0);
+});
+
+test('Task new-error reveal: actual question guard follows original live draft and mount keeps IME/focus restoration ahead of reveal', async () => {
+  const h = taskQuestionHarness(taskQuestionGraph({ response: { kind: 'text' } }));
+  h.type('KEEP'); h.replies.push(refusal(400, 'TASK_GATE_ANSWER_PRIVATE'));
+  h.part('chat-task-answer-continue').fire('click'); await settle();
+  const row = h.question(), guard = row._taskAnswerReveal;
+  assert.equal(guard.current(), true); assert.equal(guard.phase(), 'error'); assert.match(guard.error(), /비밀번호/);
+  h.type('corrected'); assert.equal(guard.phase(), 'editing'); assert.equal(guard.error(), null);
+  h.frame(taskQuestionGraph({ label: '다른 질문', response: { kind: 'text' } })); assert.equal(guard.current(), false);
+  const mount = declaration('mountCodexHUD');
+  assert.match(mount, /if \(compositionInProgress\) \{[\s\S]*?return;\n      \}\n      taskAnswerReveal\.beforeRender\(\)/);
+  assert.match(mount, /restoreChatFocus\(body, focusState\);\n      taskAnswerReveal\.afterRender\(\)/);
+  assert.match(mount, /taskAnswerReveal\.dispose\(\)/);
+  assert.doesNotMatch(declaration('createChatTaskAnswerReveal'), /\.focus\(|scrollIntoView|smooth|fetch|sendMessage/);
+});
 
 test('Task question UI: full question first, native choices/selection/Enter do not submit; explicit 계속 sends original scoped answer', async () => {
   const h = taskQuestionHarness(), row = h.question();
