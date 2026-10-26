@@ -98,15 +98,20 @@ export function createContextHttpHandler(context, ensureAuth, { port = 39218 } =
       // CHAT-05: step comments kept as records (list, add, resolve).
       const comments = url.pathname.match(/^\/context\/briefings\/([\da-f-]{36})\/comments$/i)
       if (comments) {
-        if (req.method === 'GET') sendJson(res, 200, await context.listBriefingComments(comments[1]))
-        else if (req.method === 'POST') sendJson(res, 201, { comment: await context.addBriefingComment(comments[1], await readJsonBody(req, { maxBytes: COMMENT_MAX_BYTES })) })
-        else sendJson(res, 405, { error: 'Use GET or POST for briefing comments', code: 'METHOD_NOT_ALLOWED' })
+        if (!['GET', 'POST'].includes(req.method)) { sendJson(res, 405, { error: 'Use GET or POST for briefing comments', code: 'METHOD_NOT_ALLOWED' }); return true }
+        const result = req.method === 'GET'
+          ? await context.listBriefingComments(comments[1], authority)
+          : { comment: await context.addBriefingComment(comments[1], await readJsonBody(req, { maxBytes: COMMENT_MAX_BYTES }), authority) }
+        context.assertBriefingCommentAuthority(authority)
+        sendJson(res, req.method === 'GET' ? 200 : 201, result)
         return true
       }
       const comment = url.pathname.match(/^\/context\/briefing-comments\/([\da-f-]{36})$/i)
       if (comment) {
         if (req.method !== 'POST') { sendJson(res, 405, { error: 'Use POST to change a comment state', code: 'METHOD_NOT_ALLOWED' }); return true }
-        sendJson(res, 200, { comment: await context.resolveBriefingComment(comment[1], await readJsonBody(req, { maxBytes: COMMENT_MAX_BYTES })) })
+        const result = await context.resolveBriefingComment(comment[1], await readJsonBody(req, { maxBytes: COMMENT_MAX_BYTES }), authority)
+        context.assertBriefingCommentAuthority(authority)
+        sendJson(res, 200, { comment: result })
         return true
       }
       const match = url.pathname.match(/^\/context\/(captures|packets|briefings)\/([\da-f-]{36})$/i)

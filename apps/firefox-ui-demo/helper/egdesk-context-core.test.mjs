@@ -4,22 +4,27 @@ import { mkdtemp, mkdir, writeFile, readFile, readdir, realpath, rm } from 'node
 import os from 'node:os'
 import path from 'node:path'
 import { Readable } from 'node:stream'
+import { randomUUID } from 'node:crypto'
 import { ImmutableContextStore, hashContent, appDataDirectory } from './egdesk-context-store.mjs'
 import { ContextRuntime, CONTEXT_TOOL_SPECS } from './egdesk-context-runtime.mjs'
 import { createContextHttpHandler } from './egdesk-context-http.mjs'
 import { CodexChatRuntime } from './codex-chat-runtime.mjs'
 import { NativeReaderClient } from './egdesk-native-reader.mjs'
 import { createEGDeskFileService } from './egdesk-file-service.mjs'
+import { openChatStore } from './egdesk-chat-store.mjs'
 
 async function harness(t, options = {}) {
   const dir = await mkdtemp(path.join(os.tmpdir(), 'egdesk-context-test-'))
-  t.after(() => rm(dir, { recursive: true, force: true }))
+  const chatStore = options.verifiedComments ? openChatStore({ dataDir: path.join(dir, 'chat'), ownerScope: 'comment-test' }) : null
+  t.after(async () => { chatStore?.close(); await rm(dir, { recursive: true, force: true }) })
   const cwd = path.join(dir, 'workspace'); await mkdir(cwd)
   let owner = 'email:a@example.com', nativeSeq = 0
   const store = new ImmutableContextStore({ dataDir: path.join(dir, 'state'), allowedRoots: [cwd], managedFileView: options.managedFileView })
-  const contexts = new ContextRuntime({ store, reader: options.reader || null, getOwnerKey: () => owner, schemaReady: () => options.schemaReady !== false })
+  const contexts = new ContextRuntime({ store, reader: options.reader || null, getOwnerKey: () => owner, schemaReady: () => options.schemaReady !== false,
+    ...(options.verifiedComments ? { getAuthority: hints => chat.contextAuthority(hints) } : {}) })
   const calls = [], replies = [], events = []
   const chat = new CodexChatRuntime({
+    ...(options.verifiedComments ? { store: chatStore, requireStore: true, getOwnerKey: () => owner } : {}),
     contexts, respond: (id, result, error) => { if (options.throwRespond) throw new Error('Socket disconnected'); replies.push({ id, result, error }) }, emit: e => events.push(e),
     request: async (method, params) => {
       calls.push({ method, params })
@@ -41,7 +46,7 @@ async function harness(t, options = {}) {
     await contexts.calls.get(`${run.answerId}/${id}`)
     return replies.find(reply => reply.id === id)
   }
-  return { dir, cwd, store, contexts, chat, calls, replies, events, capture, start, tool, changeOwner: value => { owner = value } }
+  return { dir, cwd, store, contexts, chat, chatStore, calls, replies, events, capture, start, tool, changeOwner: value => { owner = value } }
 }
 
 test('app data defaults do not use a repository cwd; explicit config must be absolute', () => {
@@ -666,7 +671,7 @@ test('multi-target briefing lights up several evidence targets per step and keep
 })
 
 test('briefing step comments are numbered records that survive closing and can be resolved', async t => {
-  const h = await harness(t)
+  const h = await harness(t, { verifiedComments: true })
   const a = await h.capture('Evidence A'), b = await h.capture('Evidence B', { id: 'b', sourceRef: { viewId: 'view-2', resourceId: 'page-2' } })
   const run = await h.start([a.sourceId, b.sourceId])
   const published = await h.tool(run, 'egdesk_publish_briefing_multi', { title: 'Compare', steps: [
@@ -675,8 +680,10 @@ test('briefing step comments are numbered records that survive closing and can b
   ] }, 'brief')
   const briefingId = toolJson(published).briefing.id
   const handler = createContextHttpHandler(h.contexts, async () => {})
-  const post = async (path, body) => { const res = httpResponse(); await handler(jsonRequest('POST', body), res, new URL(`http://localhost${path}`)); return res }
-  const get = async path => { const res = httpResponse(); await handler({ method: 'GET' }, res, new URL(`http://localhost${path}`)); return res }
+  const route = { engineId: 'codex', engineProfileId: 'codex-default', clientThreadId: 'ui', conversationId: run.conversationId }
+  const routed = path => new URL(`http://localhost${path}?${new URLSearchParams(route)}`)
+  const post = async (path, body) => { const res = httpResponse(); await handler(jsonRequest('POST', path.endsWith('/comments') ? { clientRequestId: randomUUID(), ...body } : body), res, routed(path)); return res }
+  const get = async path => { const res = httpResponse(); await handler({ method: 'GET' }, res, routed(path)); return res }
   const first = await post(`/context/briefings/${briefingId}/comments`, { stepId: 'both', text: '  Compare the totals  ' })
   assert.equal(first.status, 201)
   assert.equal(first.body.comment.seq, 1)
@@ -685,7 +692,7 @@ test('briefing step comments are numbered records that survive closing and can b
   assert.equal(first.body.comment.answerId, run.answerId)
   const second = await post(`/context/briefings/${briefingId}/comments`, { stepId: 'a-only', text: 'Why only A?', sourceIds: [a.sourceId] })
   assert.equal(second.body.comment.seq, 2)
-  const concurrent = await Promise.all([1, 2, 3].map(n => h.contexts.addBriefingComment(briefingId, { stepId: 'both', text: `Parallel ${n}` })))
+  const concurrent = await Promise.all([1, 2, 3].map(n => h.contexts.addBriefingComment(briefingId, { stepId: 'both', text: `Parallel ${n}`, clientRequestId: randomUUID() }, h.contexts.authority(route))))
   assert.deepEqual(concurrent.map(item => item.seq).sort(), [3, 4, 5], 'numbers are assigned one at a time')
   assert.equal((await post(`/context/briefings/${briefingId}/comments`, { stepId: 'a-only', text: 'B?', sourceIds: [b.sourceId] })).status, 403)
   assert.equal((await post(`/context/briefings/${briefingId}/comments`, { stepId: 'missing', text: 'x' })).status, 404)
@@ -710,8 +717,265 @@ test('briefing step comments are numbered records that survive closing and can b
 
   // Another account sees none of it.
   h.changeOwner('email:b@example.com')
-  assert.equal((await get(`/context/briefings/${briefingId}/comments`)).status, 404)
-  assert.equal((await post(`/context/briefing-comments/${first.body.comment.id}`, { resolved: true })).status, 404)
+  assert.equal((await get(`/context/briefings/${briefingId}/comments`)).status, 403, 'durable owner checkpoint rejects before lookup')
+  assert.equal((await post(`/context/briefing-comments/${first.body.comment.id}`, { resolved: true })).status, 403)
+})
+
+// Real Chat authority + SQLite native binding + JSON Context records. Native
+// replies are local test data; these tests open no server or provider connection.
+async function commentHarness(t) {
+  const h = await harness(t, { verifiedComments: true })
+  const a = await h.capture('Evidence A'), b = await h.capture('Evidence B', { id: 'b', sourceRef: { viewId: 'view-2', resourceId: 'page-2' } })
+  const run = await h.start([a.sourceId, b.sourceId])
+  const published = await h.tool(run, 'egdesk_publish_briefing_multi', { title: 'Compare', steps: [
+    { id: 'both', text: 'Both', targets: [{ sourceId: a.sourceId }, { sourceId: b.sourceId }], fallback: 'Open both' },
+    { id: 'a-only', text: 'A', targets: [{ sourceId: a.sourceId }], fallback: 'Open A' },
+  ] }, 'comment-briefing')
+  assert.equal(published.result.success, true)
+  const briefing = toolJson(published).briefing
+  const route = { engineId: 'codex', engineProfileId: 'codex-default', clientThreadId: 'ui', conversationId: run.conversationId }
+  const handler = createContextHttpHandler(h.contexts, async () => {})
+  const request = async (method, endpoint, body, hints = route, respond = httpResponse()) => {
+    await handler(jsonRequest(method, body), respond, new URL(`http://localhost${endpoint}?${new URLSearchParams(hints)}`))
+    return respond
+  }
+  const endpoint = `/context/briefings/${briefing.id}/comments`
+  const body = extra => ({ stepId: 'both', text: 'Compare totals', clientRequestId: randomUUID(), ...extra })
+  const authority = () => h.contexts.authority(route)
+  return { ...h, a, b, run, briefing, route, request, endpoint, body, authority }
+}
+
+test('comment request UUID serializes concurrent duplicates once; normalized retries preserve exact id, seq and request ID', async t => {
+  const h = await commentHarness(t), body = h.body({ text: '  Compare totals  ' })
+  const nativeCalls = h.calls.length
+  const results = await Promise.all(Array.from({ length: 8 }, () => h.request('POST', h.endpoint, body)))
+  assert.ok(results.every(result => result.status === 201))
+  const first = results[0].body.comment
+  for (const result of results) assert.deepEqual(result.body.comment, first)
+  assert.equal(first.seq, 1)
+  assert.equal(first.text, 'Compare totals')
+  assert.equal(first.clientRequestId, body.clientRequestId)
+  const equivalent = await h.request('POST', h.endpoint, { ...body, text: 'Compare totals', sourceIds: [h.b.sourceId, h.a.sourceId, h.a.sourceId], clientRequestId: body.clientRequestId.toUpperCase() })
+  assert.deepEqual(equivalent.body.comment, first, 'trimmed text, source sets and UUID casing normalize without rewriting the original result')
+  const listed = await h.request('GET', h.endpoint)
+  assert.deepEqual(listed.body.comments, [first])
+  assert.equal(Object.hasOwn(first, 'requestDigest'), false)
+  assert.equal(Object.hasOwn(first, 'ownerScope'), false)
+  assert.equal(h.calls.length, nativeCalls, 'comment requests never dispatch another native turn')
+})
+
+test('comment duplicate key conflicts on text, step or evidence, including distinct secrets with identical public redaction', async t => {
+  const h = await commentHarness(t), body = h.body()
+  const first = await h.request('POST', h.endpoint, body)
+  for (const changed of [{ text: 'Different' }, { stepId: 'a-only' }, { stepId: 'unknown' }, { sourceIds: [] }, { sourceIds: [h.a.sourceId] }, { sourceIds: ['foreign-source'] }]) {
+    const response = await h.request('POST', h.endpoint, { ...body, ...changed })
+    assert.equal(response.status, 409, JSON.stringify(changed))
+    assert.equal(response.body.code, 'BRIEFING_COMMENT_CONFLICT')
+  }
+  const racedBody = h.body()
+  const raced = await Promise.all([h.request('POST', h.endpoint, racedBody), h.request('POST', h.endpoint, { ...racedBody, text: 'Other payload' })])
+  assert.deepEqual(raced.map(result => result.status), [201, 409])
+  const secret = h.body({ text: 'api_key=sk-abcdefghijklmnop' })
+  assert.equal((await h.request('POST', h.endpoint, secret)).body.comment.text, 'api_key=[REDACTED]')
+  assert.equal((await h.request('POST', h.endpoint, { ...secret, text: 'api_key=sk-otherprivatevalue' })).status, 409)
+  const records = await h.store.listRecords('email:a@example.com', 'briefing-comments')
+  assert.equal(records.length, 3)
+  assert.equal(records.some(record => JSON.stringify(record).includes('sk-abcdefghijklmnop')), false)
+  assert.equal((await h.request('GET', h.endpoint)).body.comments[0].id, first.body.comment.id)
+})
+
+test('a lost POST response is recovered exactly by GET and retry after both Chat and Context restart', async t => {
+  const h = await commentHarness(t), body = h.body()
+  let dropped
+  await h.request('POST', h.endpoint, body, h.route, { writeHead() {}, end(value) { dropped = JSON.parse(value) } })
+  const chat = new CodexChatRuntime({ store: h.chatStore, requireStore: true, getOwnerKey: () => 'email:a@example.com',
+    request: () => assert.fail('restart recovery must not call a provider'), respond: () => assert.fail('no tool reply') })
+  const store = new ImmutableContextStore({ dataDir: path.join(h.dir, 'state'), allowedRoots: [h.cwd] })
+  const restarted = new ContextRuntime({ store, getAuthority: hints => chat.contextAuthority(hints), getOwnerKey: () => 'email:a@example.com' })
+  const handler = createContextHttpHandler(restarted, async () => {})
+  const response = httpResponse()
+  await handler(jsonRequest('POST', body), response, new URL(`http://localhost${h.endpoint}?${new URLSearchParams(h.route)}`))
+  assert.equal(response.status, 201)
+  assert.deepEqual(response.body, dropped)
+  const list = await restarted.listBriefingComments(h.briefing.id, restarted.authority(h.route))
+  assert.deepEqual(list.comments.filter(comment => comment.clientRequestId === body.clientRequestId), [dropped.comment])
+  assert.equal((await store.listRecords('email:a@example.com', 'briefing-comments')).length, 1)
+  const resolved = await restarted.resolveBriefingComment(dropped.comment.id, { resolved: true }, restarted.authority(h.route))
+  assert.equal(resolved.clientRequestId, body.clientRequestId)
+  assert.deepEqual(await restarted.addBriefingComment(h.briefing.id, body, restarted.authority(h.route)), resolved, 'retry cannot reopen or resequence a resolved comment')
+})
+
+test('comments require the verified room, reject absent/forged routing, and use the stored briefing CID for GET, POST and resolve', async t => {
+  const h = await commentHarness(t)
+  const first = (await h.request('POST', h.endpoint, h.body())).body.comment
+  const other = await h.start([], { clientThreadId: 'other-room', requestId: 'other-room-request' })
+  const otherRoute = { ...h.route, clientThreadId: 'other-room', conversationId: other.conversationId }
+  for (const [route, status] of [[{}, 403], [otherRoute, 403], [{ ...h.route, clientThreadId: 'other-room' }, 409], [{ ...h.route, conversationId: other.conversationId }, 409], [{ ...h.route, engineProfileId: 'another-profile' }, 403]]) {
+    for (const [method, endpoint, body] of [['GET', h.endpoint], ['POST', h.endpoint, h.body()], ['POST', `/context/briefing-comments/${first.id}`, { resolved: true }]]) {
+      const response = await h.request(method, endpoint, body, route)
+      assert.equal(response.status, status, JSON.stringify({ method, route }))
+    }
+  }
+  for (const forged of ['ownerKey', 'epoch', 'authority']) {
+    assert.equal((await h.request('GET', h.endpoint, undefined, { ...h.route, [forged]: 'forged' })).status, 400)
+    assert.equal((await h.request('POST', h.endpoint, h.body({ [forged]: 'forged' }))).status, 400)
+  }
+  await assert.rejects(h.contexts.listBriefingComments(h.briefing.id), { code: 'CONTEXT_THREAD_REQUIRED' })
+  const legacyAccountOnly = new ContextRuntime({ store: h.store, getOwnerKey: () => 'email:a@example.com' })
+  await assert.rejects(legacyAccountOnly.listBriefingComments(h.briefing.id, h.authority()), { code: 'CONTEXT_THREAD_REQUIRED' })
+  // Even an unchanged resolve must validate its parent briefing, not just the
+  // comment CID. This deliberately inconsistent record cannot grant access.
+  const foreignBriefingId = await h.store.putRecord('email:a@example.com', 'briefings', { ...h.briefing, conversationId: other.conversationId })
+  const malformed = await h.store.putRecord('email:a@example.com', 'briefing-comments', { ...first, briefingId: foreignBriefingId })
+  await assert.rejects(h.contexts.resolveBriefingComment(malformed, { resolved: false }, h.authority()), { code: 'CONTEXT_THREAD_MISMATCH' })
+  assert.equal((await h.request('GET', h.endpoint)).body.comments.length, 1)
+  assert.equal((await h.request('GET', h.endpoint)).body.comments[0].resolved, false)
+})
+
+test('comment limits reject without truncation; legacy records stay readable and idempotent replay precedes the 200-record cap', async t => {
+  const h = await commentHarness(t)
+  for (const bad of [{ clientRequestId: undefined }, { clientRequestId: 'not-a-uuid' }, { text: 'x'.repeat(2001) }, { text: ' ' }, { sourceIds: Array(7).fill(h.a.sourceId) }, { sourceIds: [3] }, { text: 5 }]) {
+    const response = await h.request('POST', h.endpoint, h.body(bad))
+    assert.equal(response.status, 400)
+  }
+  assert.equal((await h.request('POST', h.endpoint, h.body({ padding: 'x'.repeat(16 * 1024) }))).status, 413)
+  assert.equal((await h.request('POST', h.endpoint, h.body({ sourceIds: ['foreign-source'] }))).status, 403)
+  assert.equal((await h.request('POST', h.endpoint, h.body({ stepId: 'missing' }))).status, 404)
+  assert.deepEqual((await h.request('GET', h.endpoint)).body.comments, [])
+  const body = h.body({ text: '한'.repeat(2000) })
+  const first = (await h.request('POST', h.endpoint, body)).body.comment
+  assert.equal(first.text, body.text)
+  for (let seq = 2; seq <= 200; seq++) {
+    await h.store.putRecord('email:a@example.com', 'briefing-comments', { briefingId: h.briefing.id, conversationId: h.run.conversationId,
+      stepId: 'both', seq, text: `Legacy ${seq}`, sourceIds: [], resolved: false, resolvedAt: null })
+  }
+  const list = (await h.request('GET', h.endpoint)).body.comments
+  assert.equal(list.length, 200)
+  assert.equal(Object.hasOwn(list[1], 'clientRequestId'), false, 'legacy records do not get invented request keys')
+  assert.deepEqual((await h.request('POST', h.endpoint, body)).body.comment, first)
+  const conflict = await h.request('POST', h.endpoint, { ...body, text: 'Changed at cap' })
+  assert.equal(conflict.body.code, 'BRIEFING_COMMENT_CONFLICT')
+  const overflow = await h.request('POST', h.endpoint, h.body())
+  assert.equal(overflow.status, 409)
+  assert.equal(overflow.body.code, 'BRIEFING_COMMENT_LIMIT')
+  const legacyResolved = await h.contexts.resolveBriefingComment(list[1].id, { resolved: true }, h.authority())
+  assert.equal(legacyResolved.text, 'Legacy 2')
+  assert.equal(Object.hasOwn(legacyResolved, 'clientRequestId'), false)
+  assert.equal((await h.request('GET', h.endpoint)).body.comments.length, 200)
+})
+
+function changeCommentAuthority(h, change) {
+  if (change === 'account') h.changeOwner('email:b@example.com')
+  else if (change === 'epoch') h.chat.reset()
+  else if (change === 'profile') {
+    const record = h.chat.engineRecord.bind(h.chat)
+    h.chat.engineRecord = engine => ({ ...record(engine), engineProfileId: 'changed-profile' })
+  } else if (change === 'CID') {
+    const get = h.chatStore.getConversation.bind(h.chatStore)
+    h.chatStore.getConversation = client => { const value = get(client); return value && client === h.route.clientThreadId ? { ...value, conversationId: 'changed-native' } : value }
+  } else if (change === 'checkpoint') {
+    h.chatStore.appendEvent({ clientThreadId: h.route.clientThreadId, eventKey: randomUUID(), ts: Date.now(), event: 'native.thread.bound',
+      details: { conversationId: h.route.conversationId, ownerHash: hashContent('email:b@example.com'), engine: { id: 'codex', engineProfileId: 'codex-default' } } })
+  } else assert.fail(`Unknown authority change: ${change}`)
+}
+
+test('comment queue entry revalidates account, epoch, profile, CID and durable checkpoint, including duplicate and no-op resolve', async t => {
+  for (const change of ['account', 'epoch', 'profile', 'CID', 'checkpoint']) for (const operation of ['add', 'duplicate', 'resolve', 'resolve-noop']) await t.test(`${operation}/${change}`, { timeout: 5000 }, async t => {
+    const h = await commentHarness(t), body = h.body()
+    const first = await h.contexts.addBriefingComment(h.briefing.id, body, h.authority())
+    const authority = h.authority()
+    let release
+    h.contexts.commentQueue = new Promise(resolve => { release = resolve })
+    let reads = 0, writes = 0
+    const get = h.store.getRecord.bind(h.store), put = h.store.putRecord.bind(h.store), replace = h.store.replaceRecord.bind(h.store)
+    h.store.getRecord = (...args) => { reads++; return get(...args) }
+    h.store.putRecord = (...args) => { writes++; return put(...args) }
+    h.store.replaceRecord = (...args) => { writes++; return replace(...args) }
+    const pending = operation.startsWith('resolve')
+      ? h.contexts.resolveBriefingComment(first.id, { resolved: operation !== 'resolve-noop' }, authority)
+      : h.contexts.addBriefingComment(h.briefing.id, operation === 'duplicate' ? body : h.body(), authority)
+    const rejected = assert.rejects(pending, { code: 'ACCOUNT_CHANGED', httpStatus: 403 })
+    changeCommentAuthority(h, change)
+    release()
+    await rejected
+    assert.equal(reads, 0, 'stale queued work cannot read even an existing duplicate/no-op record')
+    assert.equal(writes, 0)
+  })
+})
+
+test('comment operations recheck authority after every awaited read or write and never deliver late records', async t => {
+  const stages = [
+    ['list', 'getRecord', 'briefings'], ['list', 'listRecords', 'briefing-comments'],
+    ['add', 'getRecord', 'briefings'], ['add', 'listRecords', 'briefing-comments'], ['add', 'putRecord', 'briefing-comments'],
+    ['duplicate', 'listRecords', 'briefing-comments'],
+    ['resolve', 'getRecord', 'briefing-comments'], ['resolve', 'getRecord', 'briefings'], ['resolve', 'replaceRecord', 'briefing-comments'],
+    ['resolve-noop', 'getRecord', 'briefings'],
+  ]
+  for (const [operation, method, kind] of stages) for (const change of ['account', 'epoch']) await t.test(`${operation}/${method}/${kind}/${change}`, { timeout: 5000 }, async t => {
+    const h = await commentHarness(t), body = h.body()
+    const first = await h.contexts.addBriefingComment(h.briefing.id, body, h.authority())
+    const authority = h.authority()
+    const original = h.store[method].bind(h.store)
+    let enter, release, blocked = false
+    const entered = new Promise(resolve => { enter = resolve }), released = new Promise(resolve => { release = resolve })
+    h.store[method] = async (...args) => {
+      const value = await original(...args)
+      if (!blocked && args[1] === kind) { blocked = true; enter(); await released }
+      return value
+    }
+    const pending = operation === 'list' ? h.contexts.listBriefingComments(h.briefing.id, authority)
+      : operation.startsWith('resolve') ? h.contexts.resolveBriefingComment(first.id, { resolved: operation !== 'resolve-noop' }, authority)
+        : h.contexts.addBriefingComment(h.briefing.id, operation === 'duplicate' ? body : h.body(), authority)
+    const rejected = assert.rejects(pending, { code: 'ACCOUNT_CHANGED', httpStatus: 403 })
+    try { await entered; changeCommentAuthority(h, change) } finally { release() }
+    await rejected
+    h.store[method] = original
+    const records = await h.store.listRecords('email:a@example.com', 'briefing-comments')
+    assert.equal(records.length, method === 'putRecord' ? 2 : 1, 'only an already-committed old-owner write may remain after a late refusal')
+    assert.equal(records.find(record => record.id === first.id).resolved, method === 'replaceRecord')
+    assert.deepEqual(await h.store.listRecords('email:b@example.com', 'briefing-comments'), [], 'no old request migrates into a new account')
+  })
+})
+
+test('HTTP comment responses and awaited request bodies retain their original authority fence', async t => {
+  for (const method of ['listBriefingComments', 'addBriefingComment', 'resolveBriefingComment']) await t.test(method, async t => {
+    const h = await commentHarness(t)
+    const first = await h.contexts.addBriefingComment(h.briefing.id, h.body(), h.authority())
+    const original = h.contexts[method].bind(h.contexts)
+    h.contexts[method] = async (...args) => { const result = await original(...args); h.chat.reset(); return result }
+    const endpoint = method === 'resolveBriefingComment' ? `/context/briefing-comments/${first.id}` : h.endpoint
+    const response = await h.request(method === 'listBriefingComments' ? 'GET' : 'POST', endpoint, method === 'resolveBriefingComment' ? { resolved: true } : h.body())
+    assert.equal(response.status, 403)
+    assert.equal(response.body.code, 'ACCOUNT_CHANGED')
+    assert.equal(Object.hasOwn(response.body, 'comment'), false)
+    assert.equal(Object.hasOwn(response.body, 'comments'), false)
+  })
+  await t.test('body read', { timeout: 5000 }, async t => {
+    const h = await commentHarness(t)
+    let enter, release
+    const entered = new Promise(resolve => { enter = resolve }), released = new Promise(resolve => { release = resolve })
+    const req = Readable.from((async function* () { enter(); await released; yield Buffer.from(JSON.stringify(h.body())) })())
+    req.method = 'POST'; req.headers = { 'content-type': 'application/json' }
+    const handler = createContextHttpHandler(h.contexts, async () => {}), response = httpResponse()
+    const pending = handler(req, response, new URL(`http://localhost${h.endpoint}?${new URLSearchParams(h.route)}`))
+    try { await entered; h.chat.reset() } finally { release() }
+    await pending
+    assert.equal(response.status, 403)
+    assert.deepEqual((await h.request('GET', h.endpoint)).body.comments, [])
+  })
+})
+
+test('request keys are scoped to owner and briefing, and stale captured authority cannot return after A to B to A', async t => {
+  const h = await commentHarness(t), body = h.body(), authority = h.authority()
+  const first = await h.contexts.addBriefingComment(h.briefing.id, body, authority)
+  const anotherId = await h.store.putRecord('email:a@example.com', 'briefings', h.briefing)
+  const second = await h.contexts.addBriefingComment(anotherId, body, authority)
+  assert.notEqual(first.id, second.id)
+  assert.equal(second.seq, 1)
+  h.changeOwner('email:b@example.com'); h.chat.reset()
+  h.changeOwner('email:a@example.com'); h.chat.reset()
+  await assert.rejects(h.contexts.listBriefingComments(h.briefing.id, authority), { code: 'ACCOUNT_CHANGED' })
+  assert.deepEqual(await h.contexts.addBriefingComment(h.briefing.id, body, h.authority()), first, 'current authority can recover the old committed request without incrementing')
 })
 
 test('only briefing comments are mutable; replacement is atomic and owner checked', async t => {

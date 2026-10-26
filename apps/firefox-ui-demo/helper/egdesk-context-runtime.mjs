@@ -40,6 +40,8 @@ const locatorOnly = value => /^(?:[a-z][a-z0-9+.-]*:\/\/\S*|file:\S*|~[\\/]\S*|\
 const titleLocator = value => /:\/\/|^\s*(?:~[\\/]|[a-z]:[\\/]|\\\\|\/)/i.test(value)
 const stepTargets = step => Array.isArray(step?.targets) && step.targets.length ? step.targets : step?.target ? [step.target] : []
 const withoutOwner = ({ ownerScope, ...record }) => record
+const publicComment = ({ ownerScope, requestDigest, ...record }) => record
+const commentRequestId = value => typeof value === 'string' && /^[\da-f]{8}-[\da-f]{4}-[\da-f]{4}-[\da-f]{4}-[\da-f]{12}$/i.test(value)
 const plainObject = value => Boolean(value) && typeof value === 'object' && !Array.isArray(value)
 const conversationOf = value => (typeof value === 'string' && value && value.length <= 512 ? value : null)
 const engineOf = authority => ({ engineId: authority.engineId, ...(authority.engineProfileId ? { engineProfileId: authority.engineProfileId } : {}) })
@@ -920,53 +922,88 @@ export class ContextRuntime {
   // briefing. Step anchor + per-briefing number + resolved state follow Penpot
   // comment threads (MPL-2.0, pattern only: backend/src/app/rpc/commands/
   // comments.clj create-comment-thread / update-comment-thread).
-  async addBriefingComment(briefingId, body) {
-    if (!body || typeof body !== 'object' || Array.isArray(body) || Object.keys(body).some(key => !['stepId', 'text', 'sourceIds'].includes(key))) reject('INVALID_BRIEFING_COMMENT', 'Unsupported briefing comment field', 400)
+  assertBriefingCommentAuthority(authority, briefing = null) {
+    // Unlike legacy account-only reads, comments require a server-verified
+    // native/local pair. The shared Chat authority rechecks its durable owner
+    // and profile checkpoint; neither UI owner/epoch nor a guessed CID grants it.
+    if (!this.getAuthority || authority?.engineId !== 'codex' || !conversationOf(authority.engineProfileId) || !conversationOf(authority.clientThreadId) || !conversationOf(authority.conversationId)) reject('CONTEXT_THREAD_REQUIRED', 'Briefing comments require a verified conversation route', 403)
+    let current
+    try { current = this.authority(authority) } catch { reject('ACCOUNT_CHANGED', 'Briefing comment account or conversation binding changed', 403) }
+    if (!sameAuthority(current, authority) || current.clientThreadId !== authority.clientThreadId || current.conversationId !== authority.conversationId) reject('ACCOUNT_CHANGED', 'Briefing comment account or conversation binding changed', 403)
+    if (briefing && (!briefing.conversationId || briefing.conversationId !== authority.conversationId)) reject('CONTEXT_THREAD_MISMATCH', 'This briefing belongs to another conversation', 403)
+    return authority.ownerKey
+  }
+
+  async addBriefingComment(briefingId, body, authority) {
+    if (!body || typeof body !== 'object' || Array.isArray(body) || Object.keys(body).some(key => !['stepId', 'text', 'sourceIds', 'clientRequestId'].includes(key))) reject('INVALID_BRIEFING_COMMENT', 'Unsupported briefing comment field', 400)
     const text = typeof body.text === 'string' ? body.text.trim() : ''
     if (!text || text.length > BRIEFING_COMMENT_MAX) reject('INVALID_BRIEFING_COMMENT', `A comment needs 1–${BRIEFING_COMMENT_MAX} characters`, 400)
     if (typeof body.stepId !== 'string' || !body.stepId) reject('INVALID_BRIEFING_COMMENT', 'stepId is required', 400)
+    if (!commentRequestId(body.clientRequestId)) reject('INVALID_BRIEFING_COMMENT', 'clientRequestId must be a UUID', 400)
     if (body.sourceIds !== undefined && (!Array.isArray(body.sourceIds) || body.sourceIds.length > BRIEFING_MAX_TARGETS || body.sourceIds.some(id => typeof id !== 'string'))) reject('INVALID_BRIEFING_COMMENT', `sourceIds must list at most ${BRIEFING_MAX_TARGETS} IDs`, 400)
-    const ownerKey = this.owner(), epoch = this.runtime?.epoch
-    const briefing = await this.store.getRecord(ownerKey, 'briefings', briefingId)
-    const stepIndex = briefing.steps.findIndex(step => step.id === body.stepId)
-    if (stepIndex < 0) reject('BRIEFING_STEP_UNKNOWN', 'This step is not part of the briefing', 404)
-    const stepSources = [...new Set(stepTargets(briefing.steps[stepIndex]).map(target => target.sourceId).filter(Boolean))]
-    const sourceIds = body.sourceIds === undefined ? stepSources : [...new Set(body.sourceIds)]
-    if (sourceIds.some(id => !stepSources.includes(id))) reject('INVALID_BRIEFING_COMMENT', 'A comment can only point at the evidence of its own step', 403)
+    // Snapshot caller-owned values before queuing; omitted sources mean all
+    // evidence of the step, and source order/duplicates do not change a request.
+    const { stepId, clientRequestId } = body
+    const requestedSources = body.sourceIds === undefined ? undefined : [...new Set(body.sourceIds)]
+    const ownerKey = this.assertBriefingCommentAuthority(authority)
     return this.serialize('commentQueue', async () => {
+      this.assertBriefingCommentAuthority(authority)
+      const briefing = await this.store.getRecord(ownerKey, 'briefings', briefingId)
+      this.assertBriefingCommentAuthority(authority, briefing)
       const existing = await this.store.listRecords(ownerKey, 'briefing-comments', record => record.briefingId === briefing.id)
+      this.assertBriefingCommentAuthority(authority, briefing)
+      const stepIndex = briefing.steps.findIndex(step => step.id === stepId)
+      const stepSources = [...new Set(stepTargets(briefing.steps[stepIndex]).map(target => target.sourceId).filter(Boolean))]
+      const sourceIds = requestedSources ?? stepSources
+      // Keep the digest private: distinct secrets that redact to the same
+      // public text are still different requests, without storing raw secrets.
+      const requestDigest = hashContent(JSON.stringify([stepId, text, [...sourceIds].sort()]))
+      const previous = existing.find(record => typeof record.clientRequestId === 'string' && record.clientRequestId.toLowerCase() === clientRequestId.toLowerCase())
+      if (previous) {
+        if (previous.requestDigest !== requestDigest) reject('BRIEFING_COMMENT_CONFLICT', 'clientRequestId was already used for a different comment', 409)
+        return publicComment(previous)
+      }
+      if (stepIndex < 0) reject('BRIEFING_STEP_UNKNOWN', 'This step is not part of the briefing', 404)
+      if (sourceIds.some(id => !stepSources.includes(id))) reject('INVALID_BRIEFING_COMMENT', 'A comment can only point at the evidence of its own step', 403)
       if (existing.length >= MAX_COMMENTS_PER_BRIEFING) reject('BRIEFING_COMMENT_LIMIT', `A briefing keeps at most ${MAX_COMMENTS_PER_BRIEFING} comments`, 409)
-      this.assertSameAuthority(ownerKey, epoch)
       const now = this.now()
       const comment = {
-        briefingId: briefing.id, stepId: body.stepId, stepIndex, seq: existing.reduce((max, record) => Math.max(max, record.seq || 0), 0) + 1,
+        briefingId: briefing.id, stepId, stepIndex, clientRequestId, requestDigest, seq: existing.reduce((max, record) => Math.max(max, record.seq || 0), 0) + 1,
         text: publicText(text, Infinity), sourceIds, resolved: false, resolvedAt: null, createdAt: now, updatedAt: now,
         conversationId: briefing.conversationId, runId: briefing.runId, answerId: briefing.answerId,
       }
+      this.assertBriefingCommentAuthority(authority, briefing)
       const id = await this.store.putRecord(ownerKey, 'briefing-comments', comment)
-      return { ...comment, id }
+      this.assertBriefingCommentAuthority(authority, briefing)
+      return publicComment({ ...comment, id })
     })
   }
 
-  async listBriefingComments(briefingId) {
-    const ownerKey = this.owner(), epoch = this.runtime?.epoch
+  async listBriefingComments(briefingId, authority) {
+    const ownerKey = this.assertBriefingCommentAuthority(authority)
     const briefing = await this.store.getRecord(ownerKey, 'briefings', briefingId)
-    const comments = (await this.store.listRecords(ownerKey, 'briefing-comments', record => record.briefingId === briefing.id)).map(withoutOwner).sort((a, b) => a.seq - b.seq)
-    this.assertSameAuthority(ownerKey, epoch)
+    this.assertBriefingCommentAuthority(authority, briefing)
+    const comments = (await this.store.listRecords(ownerKey, 'briefing-comments', record => record.briefingId === briefing.id)).map(publicComment).sort((a, b) => a.seq - b.seq)
+    this.assertBriefingCommentAuthority(authority, briefing)
     return { briefingId: briefing.id, comments }
   }
 
-  async resolveBriefingComment(commentId, body) {
+  async resolveBriefingComment(commentId, body, authority) {
     if (!body || typeof body !== 'object' || Array.isArray(body) || Object.keys(body).some(key => key !== 'resolved') || typeof body.resolved !== 'boolean') reject('INVALID_BRIEFING_COMMENT', 'Send { resolved: true } or { resolved: false }', 400)
-    const ownerKey = this.owner(), epoch = this.runtime?.epoch
+    const ownerKey = this.assertBriefingCommentAuthority(authority)
+    const { resolved } = body
     return this.serialize('commentQueue', async () => {
+      this.assertBriefingCommentAuthority(authority)
       const current = withoutOwner(await this.store.getRecord(ownerKey, 'briefing-comments', commentId))
-      if (current.resolved === body.resolved) return current
-      this.assertSameAuthority(ownerKey, epoch)
+      this.assertBriefingCommentAuthority(authority, current)
+      const briefing = await this.store.getRecord(ownerKey, 'briefings', current.briefingId)
+      this.assertBriefingCommentAuthority(authority, briefing)
+      if (current.resolved === resolved) return publicComment(current)
       const now = this.now()
-      const next = { ...current, resolved: body.resolved, resolvedAt: body.resolved ? now : null, updatedAt: now }
+      const next = { ...current, resolved, resolvedAt: resolved ? now : null, updatedAt: now }
       await this.store.replaceRecord(ownerKey, 'briefing-comments', commentId, next)
-      return next
+      this.assertBriefingCommentAuthority(authority, briefing)
+      return publicComment(next)
     })
   }
 
