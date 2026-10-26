@@ -562,6 +562,42 @@ export async function observeChatReachability(harness) {
     }
     const css = input && getComputedStyle(input), px = value => Number.parseFloat(value);
     const inputBox = bounds(input), send = root?.querySelector('[data-testid="chat-send"]');
+    let composerObservation;
+    try {
+      // QA-only metadata on the window, never on product state or DOM nodes.
+      // Weak keys survive controller reconnects without retaining removed nodes;
+      // a fresh scope/document is not evidence of a textarea replacement.
+      const qa = window.__egdeskQaComposerObservationV1 ||= {
+        scopeId: window.crypto?.randomUUID?.() || `${Date.now()}:${Math.random()}`,
+        nodeIds: new WeakMap(), nextNodeId: 0,
+      };
+      const idOf = node => {
+        if (!node) return null;
+        if (!qa.nodeIds.has(node)) qa.nodeIds.set(node, ++qa.nextNodeId);
+        return qa.nodeIds.get(node);
+      };
+      const short = value => String(value ?? '').slice(0, 160);
+      composerObservation = {
+        status: 'observed', scopeId: qa.scopeId, documentId: idOf(document),
+        nodeId: idOf(input), rootNodeId: idOf(root), parentNodeId: idOf(input?.parentElement),
+        connected: input?.isConnected ?? null, ownerDocumentMatches: input ? input.ownerDocument === document : null,
+        wallTimeMs: Date.now(), monotonicMs: window.performance?.now?.() ?? null,
+        timeOriginMs: window.performance?.timeOrigin ?? null,
+        dimensions: input && { clientWidth: input.clientWidth, clientHeight: input.clientHeight,
+          offsetWidth: input.offsetWidth, offsetHeight: input.offsetHeight,
+          scrollWidth: input.scrollWidth, scrollHeight: input.scrollHeight,
+          nativeScrollTopMax: inputBox.nativeScrollTopMax, rect: inputBox.rect },
+        inlineStyle: input && Object.fromEntries(['height', 'minHeight', 'maxHeight', 'width']
+          .map(key => [key, short(input.style?.[key])])),
+        computedStyle: css && Object.fromEntries(['height', 'minHeight', 'maxHeight', 'width', 'boxSizing',
+          'overflowX', 'overflowY', 'overflowAnchor', 'scrollBehavior', 'resize', 'whiteSpace', 'overflowWrap',
+          'lineHeight', 'fontSize', 'paddingTop', 'paddingBottom', 'borderTopWidth', 'borderBottomWidth', 'transform']
+          .map(key => [key, short(css[key])])),
+      };
+    } catch (error) {
+      // Diagnostic availability must not change the native QA policy.
+      composerObservation = { status: 'unavailable', error: String(error?.message || error).slice(0, 160) };
+    }
     return { mode: codex?.chatDockMode, rootId: root?.id || null, cardId: codex?.chatCardEntityId || null,
       activeEntityId: state?.activeEntityId || null, threadId: thread?.id || null, inputThreadId: input?.dataset.threadId || null,
       inputCount: inputs.length, messagesCount: logs.length,
@@ -575,9 +611,40 @@ export async function observeChatReachability(harness) {
         selectionStart: input.selectionStart, selectionEnd: input.selectionEnd,
         lineHeight: px(css.lineHeight), contentHeight: input.clientHeight - px(css.paddingTop) - px(css.paddingBottom),
         fontPx: px(css.fontSize), projectedFontPx: px(css.fontSize) * (input.offsetWidth ? inputBox.rect.width / input.offsetWidth : 1) },
+      composerObservation,
       messages: bounds(messages), login: { count: logins.length, text: login?.textContent.trim() || '',
         box: bounds(login), textFragments, missingTextRects } };
   });
+}
+
+// Compare individual existing poll returns, not just the final settled sample.
+// This describes observed changes only: no setter tracing or inferred cause.
+export function composerObservationChange(previous, current) {
+  const before = previous?.composerObservation, after = current.composerObservation;
+  const relation = after?.status !== 'observed' ? 'unavailable'
+    : !previous ? 'first-observation' : before?.status !== 'observed' ? 'previous-unavailable'
+    : before.scopeId !== after.scopeId ? 'identity-scope-reset'
+    : before.documentId !== after.documentId || before.timeOriginMs !== after.timeOriginMs ? 'document-changed'
+    : after.nodeId === null ? 'input-missing' : before.nodeId === null ? 'input-reappeared'
+    : before.nodeId === after.nodeId ? 'same-node' : 'replacement';
+  const sameNode = relation === 'same-node' ? true : relation === 'replacement' ? false : null;
+  const a = previous?.value?.input, b = current.value?.input;
+  const comparable = sameNode !== null && Number.isFinite(a?.scrollTop) && Number.isFinite(b?.scrollTop);
+  const equal = (left, right) => JSON.stringify(left) === JSON.stringify(right);
+  return { relation, sameNodeAsPrevious: sameNode, previousNodeId: before?.nodeId ?? null,
+    previousScopeId: before?.scopeId ?? null,
+    timeOriginChanged: Number.isFinite(before?.timeOriginMs) && Number.isFinite(after?.timeOriginMs)
+      ? before.timeOriginMs !== after.timeOriginMs : null,
+    scrollTopBefore: a?.scrollTop ?? null, scrollTopAfter: b?.scrollTop ?? null,
+    scrollDelta: comparable ? b.scrollTop - a.scrollTop : null,
+    scrollResetToZero: comparable ? a.scrollTop > 0 && 0 === b.scrollTop : null,
+    sameNodeState: sameNode && a && b ? { valueUnchanged: a.value === b.value,
+      draftUnchanged: previous.value.draft === current.value.draft,
+      selectionUnchanged: a.selectionStart === b.selectionStart && a.selectionEnd === b.selectionEnd,
+      focusUnchanged: a.focused === b.focused, dimensionsUnchanged: equal(before.dimensions, after.dimensions),
+      inlineStyleUnchanged: equal(before.inlineStyle, after.inlineStyle),
+      computedStyleUnchanged: equal(before.computedStyle, after.computedStyle),
+      cameraUnchanged: equal(previous.value.camera, current.value.camera) } : null };
 }
 
 export function chatLoginReachable(value) {
@@ -652,8 +719,13 @@ export async function verifyNarrowChatReachability(harness, size, deadlineMs, re
   let baseline = null, expectedDraft = DRAFT, transitionDraft = null;
   const sample = async label => {
     assertBeforeDeadline(deadlineMs, now());
-    const value = await read(harness);
-    proof.observations.push({ label, value });
+    const { composerObservation, ...value } = await read(harness);
+    const observation = { label, value };
+    if (composerObservation) observation.composerObservation = { ...composerObservation,
+      change: composerObservationChange(proof.observations.at(-1), { value, composerObservation }) };
+    // Keep diagnostic IDs/timestamps/styles out of the existing settlement
+    // signature and assertions. No extra reads, waits, actions or retries.
+    proof.observations.push(observation);
     if (proof.observations.length > 200) throw new Error('Bounded Chat reachability observation limit');
     assertBeforeDeadline(deadlineMs, now());
     if (baseline) assertChatReachabilityIdentity(baseline, value,

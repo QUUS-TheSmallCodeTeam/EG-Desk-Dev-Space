@@ -8,7 +8,7 @@ import {
   presentationRestoredOnWiderViewport, projectionGeometrySettled, resizeHeadless,
   sameWorldGeometry, screenshotOutcome, targetIssues, viewportSettled,
   waitFor, waitStableViewport,
-  observeChatReachability, chatLoginReachable, chatLastLineReachable, assertChatReachabilityIdentity,
+  observeChatReachability, composerObservationChange, chatLoginReachable, chatLastLineReachable, assertChatReachabilityIdentity,
   nextChatReachabilityWheel, chatDocumentEndKey, verifyNarrowChatReachability, NARROW_CHAT_SAMPLE, NARROW_CHAT_WHEEL_LIMIT,
   nextChatLoginWheel,
   observeReachabilityDockPoint, focusChatDockForReachability,
@@ -461,6 +461,133 @@ function unitReachability(width = 600) {
   return { state, calls, captures, harness, options, result: { checks: [] } };
 }
 
+// Frozen fake DOM/product objects: only the fixture driver changes readback.
+// A new evaluation realm per call models reconnects sharing the same window.
+function unitComposerObserver() {
+  const sample = reachabilitySample(), page = {}, data = { scrollTop: 8.5, height: '40px', connected: true };
+  const draft = sample.draft + NARROW_CHAT_SAMPLE;
+  const state = { ...sample.camera, activeEntityId: 'chat-1', codex: {
+    chatDockMode: 'canvas', chatCardEntityId: 'chat-1', activeThreadId: 'thread-1',
+    threads: [{ id: 'thread-1', messages: [] }], threadDrafts: { 'thread-1': draft },
+  } };
+  const productBefore = JSON.stringify(state);
+  let epoch = 0, ticks = 0;
+  const root = Object.freeze({ id: 'chat-1',
+    querySelectorAll: selector => selector.startsWith('textarea') ? (page.input ? [page.input] : []) : [messages],
+    querySelector: () => Object.freeze({ disabled: true }),
+  });
+  const node = () => ({ parentElement: null, disabled: false, readOnly: false,
+    clientWidth: 300, clientHeight: 40, offsetWidth: 300, offsetHeight: 40, scrollWidth: 300,
+    scrollHeight: 51, scrollTopMax: 11, closest: () => null, contains: () => false,
+    getBoundingClientRect: () => sample.input.rect,
+  });
+  const messages = Object.freeze({ ...node(), isConnected: true, scrollTop: 0,
+    dataset: Object.freeze({ threadId: 'thread-1' }), querySelectorAll: () => [] });
+  const newDocument = () => { page.document = Object.freeze({
+    get activeElement() { return page.input; }, getElementById: () => root,
+    elementFromPoint: () => page.input,
+  }); };
+  const newInput = () => {
+    page.input = Object.freeze({ ...node(), ownerDocument: page.document,
+      dataset: Object.freeze({ threadId: 'thread-1' }),
+      style: Object.freeze({ get height() { return data.height; } }),
+      value: draft, selectionStart: draft.length, selectionEnd: draft.length,
+      get isConnected() { return data.connected; }, get scrollTop() { return data.scrollTop; },
+    });
+  };
+  const newWindow = () => { page.window = { __egdesk: Object.freeze({ state }),
+    crypto: Object.freeze({ randomUUID: () => `unit-scope-${++epoch}` }),
+    performance: Object.freeze({ timeOrigin: epoch * 1000, now: () => ++ticks }),
+  }; };
+  newDocument(); newInput(); newWindow();
+  const getComputedStyle = () => ({ display: 'block', visibility: 'visible', opacity: '1',
+    height: data.height, minHeight: '40px', maxHeight: '120px', overflowY: 'auto',
+    boxSizing: 'border-box', lineHeight: '24px', fontSize: '15px', paddingTop: '1px', paddingBottom: '2px',
+  });
+  const harness = { evaluateChrome: source => vm.runInNewContext(source, {
+    window: page.window, document: page.document, getComputedStyle, innerWidth: 600, innerHeight: 600,
+  })() };
+  const read = async () => {
+    const { composerObservation, ...value } = structuredClone(await observeChatReachability(harness));
+    return { value, composerObservation };
+  };
+  return { data, page, harness, read, newInput, newDocument, newWindow,
+    assertProductUnchanged: () => assert.equal(JSON.stringify(state), productBefore) };
+}
+
+test('composer diagnostics retain same-node identity across individual polls and identify the 11-to-0 scroll reset', async () => {
+  const unit = unitComposerObserver(), samples = [];
+  const nodeKeys = Reflect.ownKeys(unit.page.input);
+  for (const scrollTop of [8.5, 11, 0, 0, 0]) {
+    unit.data.scrollTop = scrollTop; samples.push(await unit.read());
+  }
+  assert.equal(new Set(samples.map(row => row.composerObservation.nodeId)).size, 1);
+  assert.equal(new Set(samples.map(row => row.composerObservation.scopeId)).size, 1);
+  const change = composerObservationChange(samples[1], samples[2]);
+  assert.equal(change.relation, 'same-node'); assert.equal(change.sameNodeAsPrevious, true);
+  assert.equal(change.scrollDelta, -11); assert.equal(change.scrollResetToZero, true);
+  assert.ok(Object.values(change.sameNodeState).every(value => value === true));
+  const diagnostic = samples[2].composerObservation;
+  assert.equal(diagnostic.connected, true); assert.equal(diagnostic.ownerDocumentMatches, true);
+  assert.equal(diagnostic.dimensions.scrollHeight, 51); assert.equal(diagnostic.dimensions.clientHeight, 40);
+  assert.equal(diagnostic.computedStyle.height, '40px'); assert.equal(diagnostic.inlineStyle.height, '40px');
+  assert.equal(diagnostic.monotonicMs, samples[1].composerObservation.monotonicMs + 1);
+  assert.ok(Number.isFinite(diagnostic.wallTimeMs));
+  for (let i = 0; i < 32; i++) await unit.read();
+  assert.deepEqual(Object.keys(unit.page.window.__egdeskQaComposerObservationV1).sort(), ['nextNodeId', 'nodeIds', 'scopeId']);
+  assert.equal(unit.page.window.__egdeskQaComposerObservationV1.nextNodeId, 3, 'only weak document/input/root keys; no poll history');
+  assert.deepEqual(Reflect.ownKeys(unit.page.input), nodeKeys, 'no DOM expando or setter wrapper');
+  unit.assertProductUnchanged();
+});
+
+test('composer identity separates replacement, reattachment, controller reconnect and document/scope resets', async () => {
+  const unit = unitComposerObserver(), initial = await unit.read();
+  const reconnect = await unit.read(); // Same window/document through a new evaluation context.
+  assert.equal(composerObservationChange(initial, reconnect).relation, 'same-node');
+  unit.data.connected = false;
+  const disconnected = await unit.read(); unit.data.connected = true;
+  const reattached = await unit.read();
+  assert.equal(disconnected.composerObservation.connected, false);
+  assert.equal(composerObservationChange(disconnected, reattached).relation, 'same-node');
+  unit.newInput(); unit.data.scrollTop = 0;
+  const replacement = await unit.read(), changed = composerObservationChange(reattached, replacement);
+  assert.equal(changed.relation, 'replacement'); assert.equal(changed.sameNodeAsPrevious, false);
+  assert.equal(changed.scrollResetToZero, true); assert.equal(changed.sameNodeState, null);
+  assert.equal(replacement.composerObservation.rootNodeId, initial.composerObservation.rootNodeId);
+  unit.newDocument(); unit.newInput();
+  const newDocument = await unit.read();
+  assert.equal(composerObservationChange(replacement, newDocument).relation, 'document-changed');
+  unit.newWindow();
+  const newScope = await unit.read(), reset = composerObservationChange(newDocument, newScope);
+  assert.equal(reset.relation, 'identity-scope-reset'); assert.equal(reset.sameNodeAsPrevious, null);
+  assert.equal(reset.scrollResetToZero, null, 'numeric node IDs cannot be compared across observer lifetimes');
+  assert.equal(newScope.composerObservation.nodeId, initial.composerObservation.nodeId, 'local IDs may repeat after scope reset');
+  unit.page.input = null;
+  const missing = await unit.read();
+  assert.equal(composerObservationChange(newScope, missing).relation, 'input-missing');
+  unit.newInput();
+  assert.equal(composerObservationChange(missing, await unit.read()).relation, 'input-reappeared');
+  unit.assertProductUnchanged();
+});
+
+test('composer diagnostics bound style strings and report unavailable instrumentation without changing legacy readback', async () => {
+  const unit = unitComposerObserver(), before = await unit.read();
+  unit.data.height = 'x'.repeat(10000);
+  const changed = await unit.read();
+  assert.equal(changed.composerObservation.computedStyle.height.length, 160);
+  assert.equal(changed.composerObservation.inlineStyle.height.length, 160);
+  assert.ok(Buffer.byteLength(JSON.stringify(changed.composerObservation)) < 4000);
+  assert.equal(composerObservationChange(before, changed).sameNodeState.computedStyleUnchanged, false);
+  Object.defineProperty(unit.page.window, '__egdeskQaComposerObservationV1', {
+    get() { throw new Error('x'.repeat(10000)); },
+  });
+  const unavailable = await unit.read();
+  assert.equal(unavailable.composerObservation.status, 'unavailable');
+  assert.equal(unavailable.composerObservation.error.length, 160);
+  assert.deepEqual(unavailable.value, changed.value);
+  assert.equal(composerObservationChange(changed, unavailable).relation, 'unavailable');
+});
+
 test('narrow login requires whole control plus every text fragment; input-box hits alone cannot prove its last line', () => {
   const value = reachabilitySample();
   assert.equal(chatLoginReachable(value), false); assert.equal(chatLastLineReachable(value), false);
@@ -616,6 +743,84 @@ test('R1 raw endpoint remains a failure if measured wheel cannot move, and clean
   assert.equal(unit.result.narrowChatReachability[0].verified, false);
 });
 
+test('changing diagnostic IDs, timestamps and styles do not change native actions, waits, captures or checks', async () => {
+  for (const width of [600, 800]) {
+    const plain = unitReachability(width), instrumented = unitReachability(width);
+    for (const unit of [plain, instrumented]) {
+      const type = unit.harness.typeText;
+      unit.harness.typeText = async text => {
+        await type(text); Object.assign(unit.state.input, { scrollHeight: 51, clientHeight: 40, scrollTop: 8.5 });
+      };
+      unit.waits = [];
+      unit.options.pause = async ms => { unit.waits.push(ms); };
+    }
+    const read = instrumented.options.read; let ticks = 0;
+    instrumented.options.read = async () => ({ ...await read(), composerObservation: {
+      status: 'observed', scopeId: 'unit', documentId: 1, nodeId: ++ticks, wallTimeMs: ticks,
+      computedStyle: { height: `${ticks}px` },
+    } });
+    const base = await verifyNarrowChatReachability(plain.harness, { width, height: 600 }, deadline, plain.result, plain.options);
+    const proof = await verifyNarrowChatReachability(instrumented.harness, { width, height: 600 }, deadline, instrumented.result, instrumented.options);
+    assert.deepEqual(instrumented.calls, plain.calls); assert.deepEqual(instrumented.waits, plain.waits);
+    assert.deepEqual(instrumented.captures, plain.captures); assert.deepEqual(instrumented.result.checks, plain.result.checks);
+    assert.deepEqual(proof.observations.map(({ label, value }) => ({ label, value })), base.observations);
+    assert.equal(proof.observations[1].composerObservation.change.relation, 'replacement');
+    assert.equal(proof.verified, true);
+    if (width === 600) assert.ok(instrumented.calls.some(call => call.kind === 'wheel' && call.input.deltaY === 3));
+  }
+});
+
+test('R3 transient wheel motion then same-node reset remains a failure after one wheel and preserves all poll diagnostics', async () => {
+  const unit = unitReachability(), type = unit.harness.typeText, wheel = unit.harness.wheelAt, read = unit.options.read;
+  let appended = false, tops = [], wheelCount = 0, ticks = 0;
+  unit.harness.typeText = async text => {
+    await type(text); appended = true;
+    Object.assign(unit.state.input, { scrollHeight: 51, clientHeight: 40, scrollTop: 8.5 });
+  };
+  unit.harness.wheelAt = async input => {
+    await wheel(input);
+    if (appended) { wheelCount++; tops = [11, 0, 0, 0]; }
+  };
+  unit.options.read = async () => {
+    if (tops.length) unit.state.input.scrollTop = tops.shift();
+    return { ...await read(), composerObservation: {
+      status: 'observed', scopeId: 'unit', documentId: 1, nodeId: 2, wallTimeMs: ++ticks,
+      dimensions: { clientHeight: 40, scrollHeight: unit.state.input.scrollHeight }, computedStyle: { height: '40px' },
+    } };
+  };
+  await assert.rejects(verifyNarrowChatReachability(unit.harness, { width: 600, height: 600 }, deadline, unit.result, unit.options), /wheel must move/);
+  const proof = unit.result.narrowChatReachability[0];
+  const polls = proof.observations.filter(row => row.label === 'appended last-line viewport and caret reachable by native wheel:after-1');
+  assert.deepEqual(polls.map(row => row.value.input.scrollTop), [11, 0, 0, 0]);
+  assert.equal(polls[1].composerObservation.change.relation, 'same-node');
+  assert.equal(polls[1].composerObservation.change.scrollResetToZero, true);
+  assert.ok(Object.values(polls[1].composerObservation.change.sameNodeState).every(Boolean));
+  assert.equal(wheelCount, 1); assert.equal(proof.verified, false);
+  assert.equal(unit.calls.filter(call => call.kind === 'type').length, 1);
+  assert.equal(unit.calls.filter(call => call.key === 'meta+ArrowDown').length, 1);
+  assert.equal(unit.calls.some(call => call.key === 'Backspace'), false);
+  assert.ok(unit.state.draft.endsWith(NARROW_CHAT_SAMPLE));
+});
+
+test('diagnostics do not bypass the existing 30-poll settlement or 200-observation bounds', async () => {
+  for (const totalLimit of [false, true]) {
+    const unit = unitReachability(), read = unit.options.read; let count = 0;
+    unit.options.read = async () => {
+      const value = await read(), index = count++;
+      // Legacy evidence settles in 27 polls or never settles. Diagnostics churn independently.
+      value.probe = totalLimit ? Math.min(index % 27, 24) : index;
+      return { ...value, composerObservation: { status: 'unavailable', error: String(index) } };
+    };
+    await assert.rejects(verifyNarrowChatReachability(unit.harness, { width: 600, height: 600 }, deadline, unit.result, unit.options),
+      totalLimit ? /observation limit/ : /did not settle/);
+    const proof = unit.result.narrowChatReachability[0];
+    assert.equal(count, totalLimit ? 201 : 30); assert.equal(proof.observations.length, count);
+    assert.equal(proof.verified, false);
+    assert.equal(unit.calls.some(call => call.key === 'Backspace'), false, 'no automatic cleanup after bounds failure');
+    if (!totalLimit) assert.equal(unit.calls.length, 0);
+  }
+});
+
 test('deadline and unexpected camera movement stop bounded reachability without subsequent native input', async () => {
   const expired = unitReachability(); expired.options.now = () => deadline;
   await assert.rejects(verifyNarrowChatReachability(expired.harness, { width: 600, height: 600 }, deadline, expired.result, expired.options), /deadline/);
@@ -633,6 +838,8 @@ test('reachability observer stays bounded/read-only and native implementation pr
   assert.doesNotThrow(() => new vm.Script(`(${source})`));
   assert.ok(Buffer.byteLength(source) < 14000);
   assert.doesNotMatch(source, /\.focus\(|\.scrollTo\(|\.scrollIntoView\(|\.setSelectionRange\(|\.dispatchEvent\(|\.click\(|\.scrollTop\s*=/);
+  assert.doesNotMatch(source, /addEventListener|MutationObserver|requestAnimationFrame|setTimeout|Object\.defineProperty|__defineSetter__|\.prototype/);
+  assert.match(source, /nodeIds: new WeakMap\(\)/);
   assert.match(source, /createRange/); assert.match(source, /data-testid="chat-composer"/);
   assert.match(source, /\.egd-codex-empty-actions button\.egd-codex-chip-primary/);
   const script = readFileSync(new URL('./verify-firefox-mcp-headless-ui-regression.mjs', import.meta.url), 'utf8');

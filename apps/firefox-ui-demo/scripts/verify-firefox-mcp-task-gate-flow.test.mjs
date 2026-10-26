@@ -11,6 +11,7 @@ import { TASK_GATE_SELECTORS, taskGateRowSelector, assertTaskGateEnvironment, as
   reconciledTaskGateRead, assertTaskGateStaleReconciled,
   observeTaskGate, observeTaskGateDesk, observeTaskGateTarget, observeTaskGateLimit, taskGateLimitReadable, assertTaskGateLimitPaint, readTaskGateLimit,
   observeTaskGateFailurePaint, assertTaskGateFailurePaint,
+  TASK_GATE_DIAGNOSTIC_LIMITS, createTaskGateDiagnostics, readyTaskGateTarget,
   parseTaskGateCli, prepareTaskGateViewport,
   runTaskGateFlow, runCli } from './verify-firefox-mcp-task-gate-flow.mjs';
 
@@ -249,7 +250,229 @@ test('observation is bounded read-only chrome source; no input or DOM/state muta
   for (const source of sources) {
     assert.ok(Buffer.byteLength(source) < 12000);
     for (const forbidden of [/dispatchEvent/, /new (?:InputEvent|KeyboardEvent|Event)\(/, /\.value\s*=/, /\.click\(/,
-      /innerHTML\s*=/, /__egdesk[^\n]*\s=\s/, /\.style\s*[.=]/, /scrollIntoView|scrollTo\(|scrollBy\(/]) assert.doesNotMatch(source, forbidden);
+      /innerHTML\s*=/, /__egdesk[^\n]*\s=\s/, /\.style\s*[.=]/, /\.focus\(/, /scrollTop\s*=/,
+      /scrollIntoView|scrollTo\(|scrollBy\(/]) assert.doesNotMatch(source, forbidden);
+  }
+});
+
+function targetDiagnosticDom({ direction = 'PageUp', depth = 3, missing = false, ambiguous = false, foreignList = false,
+  outsideBoundClip = false, clientOnlyClip = false } = {}) {
+  const box = (left, top, width, height) => ({ x: left, y: top, left, top, right: left + width, bottom: top + height, width, height });
+  let active, commandFocused, scrollTop = 320;
+  const noInput = () => assert.fail('diagnostic DOM is observational only');
+  const make = (tag, testId, r, parentElement, extra = {}, attrs = {}) => Object.freeze({
+    localName: tag, parentElement, clientLeft: 0, clientTop: 0, clientWidth: r.width, clientHeight: r.height,
+    offsetWidth: r.width, offsetHeight: r.height, scrollTop: 0, scrollLeft: 0, scrollWidth: r.width, scrollHeight: r.height,
+    disabled: false, overflowX: 'visible', overflowY: 'visible',
+    getAttribute: key => ({ id: testId, 'data-testid': testId, ...attrs })[key] ?? null,
+    getBoundingClientRect: () => r,
+    contains(other) { for (let at = other; at; at = at.parentElement) if (at === this) return true; return false; },
+    closest(selector) { for (let at = this; at; at = at.parentElement) if (selector === `[data-testid="${at.getAttribute('data-testid')}"]`) return at; return null; },
+    focus: noInput, click: noInput, scrollIntoView: noInput, ...extra,
+  });
+  let outer = null;
+  for (let i = depth; i > 2; i--) outer = make('div', `ancestor-${i}`, box(0, 0, 800, outsideBoundClip && i === depth ? 200 : 600), outer,
+    { overflowY: outsideBoundClip && i === depth ? 'hidden' : 'visible' });
+  const listBox = box(100, 250, 300, 140);
+  const listBase = make('div', 'chat-task-list', listBox, outer,
+    { clientLeft: 4, clientTop: 6, clientWidth: 592, clientHeight: 260, offsetWidth: 600, offsetHeight: 280,
+      scrollHeight: 900, overflowY: 'auto' });
+  const list = Object.freeze(Object.defineProperty({ ...listBase }, 'scrollTop', { get: () => scrollTop }));
+  const row = make('section', 'chat-task-condition', box(100, 200, 600, 400), list, {}, {
+    'data-graph-id': 'graph-original', 'data-task-id': 'send', 'data-gate-id': 'how',
+    'data-response-key': '["userAction","original-question",{}]', class: 'x'.repeat(900),
+  });
+  const targetBox = clientOnlyClip ? box(158, 251, 14, 14) : direction === 'PageUp' ? box(158, 248, 14, 14) : box(263, 410, 352, 63);
+  const target = make(direction === 'PageUp' ? 'input' : 'textarea', direction === 'PageUp' ? 'chat-task-answer-choice' : 'chat-task-answer-text',
+    targetBox, row, {}, { type: 'radio', 'data-choice-id': 'email' });
+  const other = make('div', 'foreign-scroll-target', box(0, 0, 800, 600), null, { scrollTop: 7 });
+  active = target; commandFocused = other;
+  const context = { innerWidth: direction === 'PageUp' ? 600 : 800, innerHeight: 600,
+    getComputedStyle: element => ({ display: 'block', visibility: 'visible', overflowX: element.overflowX, overflowY: element.overflowY }),
+    document: Object.freeze({
+      get activeElement() { return active; },
+      commandDispatcher: Object.freeze({ get focusedElement() { return commandFocused; } }),
+      querySelectorAll: selector => selector === '[data-testid="chat-task-list"]' ? foreignList ? [other, list] : [list]
+        : missing ? [] : ambiguous ? [target, other] : [target],
+      elementFromPoint: () => direction === 'PageUp' ? target : other,
+    }) };
+  return { target, list, other, h: { evaluateChrome: source => vm.runInNewContext(`(${source})()`, context) },
+    advance() { scrollTop += direction === 'PageUp' ? -100 : 100; active = list; commandFocused = list; } };
+}
+
+test('ready diagnostics preserve 600/800 full-box failures and record exact identity, scaled client bounds, scroll and both focus sources', async () => {
+  for (const direction of ['PageUp', 'PageDown']) {
+    const f = targetDiagnosticDom({ direction }), proof = await observeTaskGateTarget(f.h, 'exact-original-target');
+    assert.equal(proof.scrollDirection, direction); assert.equal(proof.clipped, true); assert.equal(proof.inside, true);
+    assert.equal(proof.hits, direction === 'PageUp' ? 9 : 0);
+    assert.deepEqual(Object.keys(proof.rect).sort(), ['bottom', 'height', 'left', 'right', 'top', 'width', 'x', 'y']);
+    const d = proof.diagnostics, list = d.ancestors[1];
+    assert.equal(d.target.identity.choiceId, 'email'); assert.equal(d.rowIdentity.graphId, 'graph-original');
+    assert.equal(d.rowIdentity.taskId, 'send'); assert.equal(d.rowIdentity.gateId, 'how');
+    assert.equal(d.rowIdentity.responseKey, '["userAction","original-question",{}]');
+    assert.equal(d.rowIdentity.className.length, TASK_GATE_DIAGNOSTIC_LIMITS.identityChars);
+    assert.equal(d.rowIdentity.truncated[0], 'className');
+    assert.equal(list.identity.testId, 'chat-task-list'); assert.equal(list.overflowY, 'auto');
+    assert.equal(list.clipsTargetBorderY, true); assert.equal(list.clipsTargetClientY, true);
+    assert.deepEqual(JSON.parse(JSON.stringify(list.clientRect)), { left: 102, top: 253, right: 398, bottom: 383, width: 296, height: 130 });
+    assert.deepEqual([list.scrollTop, list.clientHeight, list.scrollHeight, list.scaleY], [320, 260, 900, .5]);
+    assert.equal(d.focusedElement.identity.testId, d.target.identity.testId);
+    assert.equal(d.commandFocusedElement.identity.testId, 'foreign-scroll-target');
+    assert.equal(d.scrollTarget.count, 1); assert.equal(d.scrollTarget.isClosestList, true);
+    assert.equal(d.scrollTarget.element.active, false); assert.equal(d.scrollTarget.element.containsActive, true);
+  }
+});
+
+test('client clipping is diagnostic only; bounded ancestor capture never truncates the existing clipping predicate', async () => {
+  const client = await observeTaskGateTarget(targetDiagnosticDom({ clientOnlyClip: true }).h, 'target');
+  assert.equal(client.clipped, false, 'do not introduce a product or acceptance fix');
+  assert.equal(client.diagnostics.ancestors[1].clipsTargetClientY, true);
+  const depth = TASK_GATE_DIAGNOSTIC_LIMITS.ancestors + 8;
+  const proof = await observeTaskGateTarget(targetDiagnosticDom({ depth, clientOnlyClip: true, outsideBoundClip: true }).h, 'target');
+  assert.equal(proof.clipped, true, 'outer clipping beyond the stored ancestor bound still fails');
+  assert.equal(proof.diagnostics.ancestorCount, depth);
+  assert.equal(proof.diagnostics.ancestors.length, TASK_GATE_DIAGNOSTIC_LIMITS.ancestors);
+  assert.equal(proof.diagnostics.ancestorsTruncated, true);
+  assert.ok(proof.diagnostics.ancestors.every(parent => !parent.clipsTargetBorderY));
+});
+
+test('diagnostics distinguish the actual first global scroll match, closest list, absent target and ambiguous target', async () => {
+  const foreign = await observeTaskGateTarget(targetDiagnosticDom({ foreignList: true }).h, 'target');
+  assert.equal(foreign.diagnostics.scrollTarget.count, 2); assert.equal(foreign.diagnostics.scrollTarget.isClosestList, false);
+  assert.equal(foreign.diagnostics.scrollTarget.element.identity.testId, 'foreign-scroll-target');
+  assert.equal(foreign.diagnostics.scrollTarget.element.scrollTop, 7);
+  assert.equal(foreign.diagnostics.closestList.identity.testId, 'chat-task-list');
+  for (const config of [{ missing: true }, { ambiguous: true }]) {
+    const proof = await observeTaskGateTarget(targetDiagnosticDom(config).h, 'target');
+    assert.equal(proof.count, config.missing ? 0 : 2); assert.equal(proof.visible, false);
+    assert.equal(proof.rect, null); assert.equal(proof.diagnostics.target, null);
+    assert.equal(proof.diagnostics.ancestorCount, 0); assert.equal(proof.diagnostics.scrollTarget.count, 1);
+    assert.ok(proof.diagnostics.focusedElement);
+  }
+});
+
+const readyTarget = (patch = {}) => ({ selector: 'exact-target', count: 1, visible: true, inside: true,
+  clipped: false, hits: 9, disabled: false, scrollDirection: null, ...patch });
+const unitWait = async (_h, read, accept) => {
+  for (let i = 0; i < 3; i++) { const value = await read(); if (accept(value)) return value; }
+  throw new Error('unchanged readiness timeout');
+};
+
+// Original ready() policy, retained here ONLY as an independent action oracle.
+async function originalReadyPolicy(harness, read, wait) {
+  for (let i = 0; i < 6; i++) {
+    const target = await wait(harness, read, value => value.count === 1 && value.visible);
+    if (target.inside && !target.clipped && target.hits === 9 && !target.disabled) return;
+    if (!target.scrollDirection) break;
+    await harness.scrollWithKey('[data-testid="chat-task-list"]', target.scrollDirection);
+  }
+  await wait(harness, read, value => value.count === 1 && value.visible && value.inside && !value.clipped && value.hits === 9 && !value.disabled);
+}
+
+test('instrumented ready retains original native action sequence, six-key ceiling, waits and strict fullbox+9hit acceptance', async () => {
+  const cases = [() => readyTarget(), ...[
+    { clipped: true, scrollDirection: 'PageUp' }, { clipped: true, hits: 0, scrollDirection: 'PageDown' },
+    { clipped: true }, { hits: 8 }, { inside: false }, { disabled: true }, { count: 2 }, { visible: false },
+  ].map(patch => () => readyTarget(patch)), keys => readyTarget(keys < 2 ? { clipped: true, scrollDirection: keys ? 'PageDown' : 'PageUp' } : {})];
+  for (const value of cases) {
+    const runs = [];
+    for (const instrumented of [false, true]) {
+      const keys = [], diagnostics = createTaskGateDiagnostics(); let reads = 0, waits = 0, afterReads = 0;
+      const h = { scrollWithKey: async (selector, key) => { keys.push([selector, key]); return { key, before: 20, after: 20, moved: false }; } };
+      const read = async () => { reads++; return value(keys.length); };
+      const wait = (...args) => { waits++; return unitWait(...args); };
+      let error = null;
+      try {
+        if (instrumented) await readyTaskGateTarget(h, 'exact-target', Date.now() + 10000, { read, wait, diagnostics,
+          keyRead: async () => { afterReads++; return readyTarget(); } });
+        else await originalReadyPolicy(h, read, wait);
+      } catch (caught) { error = caught.message; }
+      runs.push({ keys, reads, waits, error });
+      if (instrumented) {
+        assert.equal(afterReads, keys.length); assert.ok(keys.length <= 6);
+        assert.equal(diagnostics.records[0].status, error ? 'failed' : 'ready');
+        assert.equal(diagnostics.records[0].samples, reads);
+        assert.equal(diagnostics.records[0].keys.length, keys.length);
+      }
+    }
+    assert.deepEqual(runs[1], runs[0], 'extra diagnostic reads must not influence the action oracle');
+  }
+});
+
+test('existing native keys retain before/after full snapshots, focus and exact harness receipt; success does not bypass next policy read', async () => {
+  for (const direction of ['PageUp', 'PageDown']) {
+    const f = targetDiagnosticDom({ direction }), diagnostics = createTaskGateDiagnostics();
+    const before = await observeTaskGateTarget(f.h, 'exact-target');
+    let reads = 0;
+    const receipt = { key: direction, before: 320, after: direction === 'PageUp' ? 220 : 420, max: 640, moved: true, focused: true };
+    await readyTaskGateTarget({ scrollWithKey: async (selector, key) => {
+      assert.equal(selector, '[data-testid="chat-task-list"]'); assert.equal(key, direction); f.advance(); return receipt;
+    } }, 'exact-target', Date.now() + 10000, { diagnostics, wait: unitWait,
+      read: async () => ++reads === 1 ? before : readyTarget(), keyRead: () => observeTaskGateTarget(f.h, 'exact-target') });
+    const step = diagnostics.records[0].keys[0];
+    assert.equal(reads, 2); assert.equal(step.before, before); assert.equal(step.receipt, receipt);
+    assert.equal(step.boundary, 'scrollWithKey'); assert.equal(step.status, 'returned'); assert.equal(step.invoked, true);
+    assert.equal(step.before.diagnostics.focusedElement.identity.testId, before.diagnostics.target.identity.testId);
+    assert.equal(step.after.diagnostics.focusedElement.identity.testId, 'chat-task-list');
+    assert.equal(step.after.diagnostics.commandFocusedElement.identity.testId, 'chat-task-list');
+    assert.equal(step.after.diagnostics.scrollTarget.element.scrollTop, receipt.after);
+    assert.equal(step.after.diagnostics.scrollTarget.element.active, true);
+    assert.ok(step.startedAt <= step.returnedAt && step.returnedAt <= step.observedAfterAt);
+  }
+});
+
+test('diagnostic record count remains bounded through long timeout polling and repeated ready calls without losing the terminal failure or key pairs', async () => {
+  const diagnostics = createTaskGateDiagnostics(), limit = TASK_GATE_DIAGNOSTIC_LIMITS.records;
+  let keys = 0;
+  const h = { scrollWithKey: async () => { keys++; return { moved: false }; } };
+  for (let i = 0; i < limit + 5; i++) await readyTaskGateTarget(h, `ready-${i}`, Date.now() + 10000,
+    { diagnostics, read: async () => readyTarget(), wait: unitWait });
+  const clipped = readyTarget({ clipped: true, scrollDirection: 'PageUp' });
+  await assert.rejects(readyTaskGateTarget(h, 'terminal-failure', Date.now() + 10000, { diagnostics, read: async () => clipped,
+    keyRead: async () => clipped, wait: async (_h, read, accept) => {
+      for (let i = 0; i < 500; i++) { const value = await read(); if (accept(value)) return value; }
+      throw new Error('bounded terminal timeout');
+    } }), /bounded terminal timeout/);
+  assert.equal(diagnostics.records.length, limit); assert.equal(diagnostics.totalRecords, limit + 6);
+  assert.equal(diagnostics.droppedRecords, 6); assert.equal(diagnostics.records[0].sequence, 7);
+  const last = diagnostics.records.at(-1);
+  assert.equal(last.selector, 'terminal-failure'); assert.equal(last.status, 'failed'); assert.equal(last.last, clipped);
+  assert.equal(last.samples, 506); assert.equal(last.keys.length, 6); assert.equal(keys, 6);
+  assert.ok(last.keys.every(step => step.before === clipped && step.after === clipped));
+  assert.ok(JSON.stringify(diagnostics).length < 16000, 'polls do not append unbounded snapshots');
+});
+
+test('native key failure is rethrown unchanged; diagnostic failure, missing target and expiry never cause rescue input', async () => {
+  for (const failRead of [false, true]) {
+    const diagnostics = createTaskGateDiagnostics(), original = new Error('original native failure'); let keys = 0, afterReads = 0;
+    await assert.rejects(readyTaskGateTarget({ scrollWithKey: async () => { keys++; throw original; } }, 'target', Date.now() + 10000,
+      { diagnostics, wait: unitWait, read: async () => readyTarget({ clipped: true, scrollDirection: 'PageDown' }),
+        keyRead: async () => { afterReads++; if (failRead) throw new Error('diagnostic-only failure'); return readyTarget({ count: 0 }); } }), error => error === original);
+    const record = diagnostics.records[0];
+    assert.equal(keys, 1); assert.equal(afterReads, 1); assert.equal(record.keys[0].status, 'threw');
+    assert.equal(record.error, original.message);
+    if (failRead) assert.equal(record.keys[0].afterError, 'diagnostic-only failure');
+    else assert.equal(record.keys[0].after.count, 0);
+  }
+  const noAction = new Proxy({}, { get: () => assert.fail('expired operation performs no UI action') });
+  await assert.rejects(readyTaskGateTarget(noAction, 'target', 1,
+    { diagnostics: createTaskGateDiagnostics(), read: () => assert.fail('no expired read') }));
+});
+
+test('never-resolving after-key diagnostics are capped by remaining deadline and 250ms, preserving the exact native exception', { timeout: 2000 }, async () => {
+  for (const remainingMs of [10000, 40]) {
+    const diagnostics = createTaskGateDiagnostics(), original = new Error('native failure survives a stuck observer');
+    let keys = 0, diagnosticReads = 0;
+    await assert.rejects(readyTaskGateTarget({ scrollWithKey: async () => { keys++; throw original; } }, 'target', Date.now() + remainingMs,
+      { diagnostics, wait: unitWait, read: async () => readyTarget({ clipped: true, scrollDirection: 'PageDown' }),
+        keyRead: () => { diagnosticReads++; return new Promise(() => {}); } }), error => error === original);
+    const record = diagnostics.records[0], step = record.keys[0];
+    assert.equal(keys, 1); assert.equal(diagnosticReads, 1); assert.equal(record.keys.length, 1);
+    assert.equal(record.error, original.message); assert.equal(step.error, original.message);
+    assert.equal(step.after, null); assert.equal(step.afterTimedOut, true);
+    assert.match(step.afterError, /Diagnostic read timed out/);
+    assert.ok(step.afterTimeoutMs > 0 && step.afterTimeoutMs <= Math.min(remainingMs, TASK_GATE_DIAGNOSTIC_LIMITS.keyReadMs));
+    if (remainingMs === 10000) assert.equal(step.afterTimeoutMs, 250);
   }
 });
 
@@ -321,6 +544,63 @@ test('readable count metadata receives no native click or scroll; clipped text c
     ? { ...proof, fragments: [{ ...proof.fragments[0], clipped: true }], scrollDirection: 'PageDown' } : proof });
   assert.equal(scrolled.proof, proof);
   assert.deepEqual(keys, [['[data-testid="chat-task-list"]', 'PageDown']]);
+});
+
+test('existing counter PageUp/PageDown steps also retain bounded focus traces without using diagnostic paint to pass the counter', async () => {
+  const proof = await observeTaskGateLimit(limitPaintDom().h, identity());
+  for (const direction of ['PageUp', 'PageDown']) {
+    const diagnostics = createTaskGateDiagnostics(), calls = [], before = readyTarget({ clipped: true }), after = readyTarget();
+    let reads = 0, diagnosticReads = 0;
+    const receipt = { key: direction, moved: false };
+    const result = await readTaskGateLimit({ scrollWithKey: async (selector, key) => {
+      calls.push(['native-key', selector, key]); return receipt;
+    } }, identity(), Date.now() + 10000, { diagnostics,
+      read: async () => { calls.push(['counter-read']); return ++reads === 1
+        ? { ...proof, fragments: [{ ...proof.fragments[0], clipped: true }], scrollDirection: direction } : proof; },
+      keyRead: async (_h, selector) => { calls.push(['diagnostic-read', selector]); return ++diagnosticReads === 1 ? before : after; },
+    });
+    const selector = `${taskGateRowSelector(identity())} [data-testid="chat-task-answer-limit"]`;
+    assert.deepEqual(calls, [['counter-read'], ['diagnostic-read', selector], ['native-key', '[data-testid="chat-task-list"]', direction],
+      ['diagnostic-read', selector], ['counter-read']]);
+    assert.equal(result.proof, proof); assert.equal(result.scrolls[0], receipt);
+    const record = diagnostics.records[0], step = record.keys[0];
+    assert.equal(record.kind, 'limit'); assert.equal(record.status, 'readable'); assert.equal(record.samples, 2);
+    assert.equal(step.before, before); assert.equal(step.after, after); assert.equal(step.receipt, receipt);
+  }
+});
+
+test('never-resolving before-key counter diagnostics time out once without replacing policy reads or adding native actions', { timeout: 2000 }, async () => {
+  const proof = await observeTaskGateLimit(limitPaintDom().h, identity()), diagnostics = createTaskGateDiagnostics(), calls = [];
+  let reads = 0, diagnosticReads = 0;
+  const result = await readTaskGateLimit({ scrollWithKey: async (_selector, key) => {
+    calls.push(key); return { key, moved: false };
+  } }, identity(), Date.now() + 10000, { diagnostics,
+    read: async () => { calls.push('counter-read'); return ++reads === 1
+      ? { ...proof, fragments: [{ ...proof.fragments[0], clipped: true }], scrollDirection: 'PageDown' } : proof; },
+    keyRead: () => {
+      calls.push('diagnostic-read');
+      return ++diagnosticReads === 1 ? new Promise(() => {}) : Promise.resolve(readyTarget());
+    },
+  });
+  assert.deepEqual(calls, ['counter-read', 'diagnostic-read', 'PageDown', 'diagnostic-read', 'counter-read']);
+  assert.equal(result.proof, proof); assert.equal(result.scrolls.length, 1);
+  const record = diagnostics.records[0], step = record.keys[0];
+  assert.equal(record.status, 'readable'); assert.equal(record.keys.length, 1);
+  assert.equal(step.before, null); assert.equal(step.beforeTimedOut, true); assert.equal(step.beforeTimeoutMs, 250);
+  assert.match(step.beforeError, /Diagnostic read timed out/); assert.equal(step.after.hits, 9);
+  assert.equal(step.invoked, true); assert.equal(step.status, 'returned');
+});
+
+test('a before-key diagnostic that consumes the remaining deadline prevents native input and skips the after-read', { timeout: 2000 }, async () => {
+  const proof = await observeTaskGateLimit(limitPaintDom().h, identity()), diagnostics = createTaskGateDiagnostics();
+  let diagnosticReads = 0;
+  await assert.rejects(readTaskGateLimit({ scrollWithKey: () => assert.fail('no key after deadline') }, identity(), Date.now() + 40,
+    { diagnostics, read: async () => ({ ...proof, fragments: [{ ...proof.fragments[0], clipped: true }], scrollDirection: 'PageDown' }),
+      keyRead: () => { diagnosticReads++; return new Promise(() => {}); } }));
+  const record = diagnostics.records[0], step = record.keys[0];
+  assert.equal(diagnosticReads, 1); assert.equal(record.status, 'failed'); assert.equal(record.keys.length, 1);
+  assert.equal(step.beforeTimedOut, true); assert.ok(step.beforeTimeoutMs > 0 && step.beforeTimeoutMs <= 40);
+  assert.equal(step.invoked, false); assert.equal(step.afterSkipped, 'deadline reached'); assert.equal(step.after, null);
 });
 
 test('count text occlusion cannot be waived or fixed by blind scrolling, and expired reads do nothing', async () => {

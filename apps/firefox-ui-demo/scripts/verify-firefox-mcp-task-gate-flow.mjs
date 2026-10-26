@@ -22,6 +22,79 @@ const testid = value => `[data-testid=${JSON.stringify(value)}]`;
 const hash = value => createHash('sha256').update(value).digest('hex');
 const normalized = value => value.normalize('NFC').replace(/\r\n?/g, '\n').trim();
 const posts = state => state.requests.filter(row => row.method === 'POST' && row.path === '/tasks/continue');
+export const TASK_GATE_DIAGNOSTIC_LIMITS = Object.freeze({ records: 16, ancestors: 24, identityChars: 512, keyReadMs: 250 });
+const taskGateScrollSelector = '[data-testid="chat-task-list"]';
+
+export function createTaskGateDiagnostics() {
+  return { limits: TASK_GATE_DIAGNOSTIC_LIMITS, totalRecords: 0, droppedRecords: 0, records: [] };
+}
+function startTaskGateDiagnostic(diagnostics, kind, selector) {
+  if (!diagnostics) return null;
+  const record = { sequence: ++diagnostics.totalRecords, kind, selector, status: 'observing', samples: 0, last: null, keys: [] };
+  diagnostics.records.push(record);
+  if (diagnostics.records.length > TASK_GATE_DIAGNOSTIC_LIMITS.records) {
+    diagnostics.records.shift(); diagnostics.droppedRecords++;
+  }
+  return record;
+}
+const diagnosticError = error => String(error?.message || error).slice(0, 512);
+
+// A diagnostic must not hold a native result/exception hostage. The losing
+// read may finish later, but cannot update the trace or trigger another action.
+async function readTaskGateKeyDiagnostic(harness, selector, deadlineMs, step, phase, read) {
+  const timeoutMs = Math.max(0, Math.min(TASK_GATE_DIAGNOSTIC_LIMITS.keyReadMs, deadlineMs - Date.now()));
+  step[`${phase}TimeoutMs`] = timeoutMs;
+  if (timeoutMs === 0) {
+    step[`${phase}Skipped`] = 'deadline reached';
+    step[`${phase}Error`] = 'Diagnostic read skipped: deadline reached';
+    return;
+  }
+  let timer;
+  try {
+    step[phase] = await Promise.race([
+      Promise.resolve().then(() => read(harness, selector)),
+      new Promise((_, reject) => {
+        timer = setTimeout(() => reject(Object.assign(new Error(`Diagnostic read timed out after ${timeoutMs}ms`),
+          { code: 'TASK_GATE_DIAGNOSTIC_TIMEOUT' })), timeoutMs);
+      }),
+    ]);
+  } catch (error) {
+    step[`${phase}Error`] = diagnosticError(error);
+    if (error?.code === 'TASK_GATE_DIAGNOSTIC_TIMEOUT') step[`${phase}TimedOut`] = true;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+// Bracket ONLY the existing native scroll call. These extra reads never choose
+// an action or satisfy readiness. Preserve the native exception even if the
+// after-read also fails, and never attempt another input as diagnostic recovery.
+async function traceTaskGateKey(harness, selector, key, deadlineMs, record, before, read) {
+  if (!record) return harness.scrollWithKey(taskGateScrollSelector, key);
+  const step = { key, scrollSelector: taskGateScrollSelector, boundary: 'scrollWithKey',
+    before: before ?? null, after: null, receipt: null, status: 'pending', invoked: false };
+  record.keys.push(step);
+  try {
+    if (before === undefined) {
+      await readTaskGateKeyDiagnostic(harness, selector, deadlineMs, step, 'before', read);
+    }
+    assertBeforeDeadline(deadlineMs);
+    step.startedAt = Date.now(); step.invoked = true;
+    step.receipt = await harness.scrollWithKey(taskGateScrollSelector, key);
+    step.status = 'returned';
+    return step.receipt;
+  } catch (error) {
+    step.status = 'threw'; step.error = diagnosticError(error);
+    throw error;
+  } finally {
+    step.returnedAt = Date.now();
+    if (step.returnedAt >= deadlineMs) step.afterSkipped = 'deadline reached';
+    else {
+      await readTaskGateKeyDiagnostic(harness, selector, deadlineMs, step, 'after', read);
+      step.observedAfterAt = Date.now();
+    }
+  }
+}
 
 function taskGateViewport(value) {
   assert.ok(value === '600x600' || value === '800x600', '--viewport must be exactly 600x600 or 800x600');
@@ -232,24 +305,102 @@ export async function observeTaskGate(harness, identity) {
   }, { selector, names: TASK_GATE_SELECTORS });
 }
 export async function observeTaskGateTarget(harness, selector) {
-  return chrome(harness, selector => {
+  return chrome(harness, ({ selector, limits, scrollSelector }) => {
     const nodes = [...document.querySelectorAll(selector)], node = nodes.length === 1 ? nodes[0] : null;
+    const rect = r => r ? { x: r.x, y: r.y, left: r.left, top: r.top, right: r.right, bottom: r.bottom,
+      width: r.width, height: r.height } : null;
+    const identity = element => {
+      if (!element) return null;
+      const result = { tag: element.localName || null }, truncated = [];
+      for (const [key, attribute] of Object.entries({ id: 'id', testId: 'data-testid', className: 'class', type: 'type',
+        graphId: 'data-graph-id', taskId: 'data-task-id', gateId: 'data-gate-id', responseKey: 'data-response-key', choiceId: 'data-choice-id' })) {
+        const value = element.getAttribute(attribute);
+        result[key] = value === null ? null : value.slice(0, limits.identityChars);
+        if (value?.length > limits.identityChars) truncated.push(key);
+      }
+      return { ...result, truncated };
+    };
+    const describe = (element, box = element?.getBoundingClientRect()) => {
+      if (!element) return null;
+      const sx = element.offsetWidth ? box.width / element.offsetWidth : 1;
+      const sy = element.offsetHeight ? box.height / element.offsetHeight : 1;
+      const left = box.left + element.clientLeft * sx, top = box.top + element.clientTop * sy;
+      return { identity: identity(element), rect: rect(box),
+        clientRect: { left, top, right: left + element.clientWidth * sx, bottom: top + element.clientHeight * sy,
+          width: element.clientWidth * sx, height: element.clientHeight * sy },
+        clientLeft: element.clientLeft, clientTop: element.clientTop, clientWidth: element.clientWidth, clientHeight: element.clientHeight,
+        offsetWidth: element.offsetWidth, offsetHeight: element.offsetHeight, scaleX: sx, scaleY: sy,
+        scrollLeft: element.scrollLeft, scrollTop: element.scrollTop, scrollWidth: element.scrollWidth, scrollHeight: element.scrollHeight,
+        active: document.activeElement === element, containsActive: !!document.activeElement && element.contains(document.activeElement) };
+    };
     const r = node?.getBoundingClientRect(), css = node && getComputedStyle(node); let hits = 0, clipped = false;
+    const ancestors = []; let ancestorCount = 0;
     if (r) {
       for (const x of [.2, .5, .8]) for (const y of [.2, .5, .8]) { const hit = document.elementFromPoint(r.left + r.width * x, r.top + r.height * y); if (hit === node || node.contains(hit)) hits++; }
       for (let parent = node.parentElement; parent; parent = parent.parentElement) {
         const p = parent.getBoundingClientRect(), s = getComputedStyle(parent);
+        // Keep the existing border-box predicate exactly as-is. Client-box
+        // measurements below are evidence, not a new acceptance rule.
         if (/(auto|scroll|hidden|clip)/.test(s.overflowY) && (r.top < p.top || r.bottom > p.bottom)
           || /(auto|scroll|hidden|clip)/.test(s.overflowX) && (r.left < p.left || r.right > p.right)) clipped = true;
+        ancestorCount++;
+        if (ancestors.length < limits.ancestors) {
+          const detail = describe(parent, p), c = detail.clientRect;
+          const clipsX = /(auto|scroll|hidden|clip)/.test(s.overflowX), clipsY = /(auto|scroll|hidden|clip)/.test(s.overflowY);
+          ancestors.push({ depth: ancestorCount, ...detail, overflowX: s.overflowX, overflowY: s.overflowY,
+            display: s.display, visibility: s.visibility,
+            clipsX, clipsY,
+            clipsTargetBorderX: clipsX && (r.left < p.left || r.right > p.right),
+            clipsTargetBorderY: clipsY && (r.top < p.top || r.bottom > p.bottom),
+            clipsTargetClientX: clipsX && (r.left < c.left || r.right > c.right),
+            clipsTargetClientY: clipsY && (r.top < c.top || r.bottom > c.bottom) });
+        }
       }
     }
     const list = node?.closest('[data-testid="chat-task-list"]'), listBox = list?.getBoundingClientRect();
-    return { selector, count: nodes.length, rect: r && { x: r.x, y: r.y, width: r.width, height: r.height },
+    // scrollWithKey uses the first global list match, which need not be the
+    // target's closest list. Record both instead of assuming focus/routing.
+    const scrollTargets = document.querySelectorAll(scrollSelector), scrollTarget = scrollTargets[0];
+    return { selector, count: nodes.length, rect: rect(r),
       visible: !!r && r.width > 0 && r.height > 0 && css.display !== 'none' && css.visibility !== 'hidden',
       inside: !!r && r.left >= 0 && r.top >= 0 && r.right <= innerWidth && r.bottom <= innerHeight,
       hits, clipped, disabled: !node || node.disabled || node.getAttribute('aria-disabled') === 'true',
-      scrollDirection: listBox && r ? r.bottom > listBox.bottom ? 'PageDown' : r.top < listBox.top ? 'PageUp' : null : null };
-  }, selector);
+      scrollDirection: listBox && r ? r.bottom > listBox.bottom ? 'PageDown' : r.top < listBox.top ? 'PageUp' : null : null,
+      diagnostics: { observedAt: Date.now(), viewport: { width: innerWidth, height: innerHeight },
+        target: describe(node, r), rowIdentity: identity(node?.closest('[data-testid="chat-task-condition"]')),
+        ancestors, ancestorCount, ancestorsTruncated: ancestorCount > ancestors.length,
+        focusedElement: describe(document.activeElement), commandFocusedElement: describe(document.commandDispatcher?.focusedElement),
+        scrollTarget: { selector: scrollSelector, count: scrollTargets.length, element: describe(scrollTarget),
+          isClosestList: !!list && scrollTarget === list }, closestList: describe(list, listBox) } };
+  }, { selector, limits: TASK_GATE_DIAGNOSTIC_LIMITS, scrollSelector: taskGateScrollSelector });
+}
+
+export async function readyTaskGateTarget(harness, selector, deadlineMs,
+  { read = observeTaskGateTarget, wait = waitFor, diagnostics, keyRead = observeTaskGateTarget } = {}) {
+  const record = startTaskGateDiagnostic(diagnostics, 'ready', selector);
+  const sample = async () => {
+    const target = await read(harness, selector);
+    if (record) { record.samples++; record.last = target; }
+    return target;
+  };
+  try {
+    assertBeforeDeadline(deadlineMs);
+    for (let i = 0; i < 6; i++) {
+      const target = await wait(harness, sample, value => value.count === 1 && value.visible, deadlineMs);
+      if (target.inside && !target.clipped && target.hits === 9 && !target.disabled) {
+        if (record) record.status = 'ready';
+        return;
+      }
+      if (!target.scrollDirection) break;
+      assertBeforeDeadline(deadlineMs);
+      await traceTaskGateKey(harness, selector, target.scrollDirection, deadlineMs, record, target, keyRead);
+    }
+    await wait(harness, sample, value => value.count === 1 && value.visible && value.inside && !value.clipped && value.hits === 9 && !value.disabled, deadlineMs);
+    if (record) record.status = 'ready';
+  } catch (error) {
+    if (record) { record.status = 'failed'; record.error = diagnosticError(error); }
+    throw error;
+  }
 }
 
 // A noninteractive count label is not a click target. Inspect its actual text
@@ -398,24 +549,36 @@ export function assertTaskGateFailurePaint(proof, typed, current, identity, thre
 }
 
 export async function readTaskGateLimit(harness, identity, deadlineMs,
-  { read = observeTaskGateLimit, wait = waitFor } = {}) {
+  { read = observeTaskGateLimit, wait = waitFor, diagnostics, keyRead = observeTaskGateTarget } = {}) {
   const observations = [], scrolls = [];
+  const selector = `${taskGateRowSelector(identity)} ${testid(TASK_GATE_SELECTORS.limit)}`;
+  const record = startTaskGateDiagnostic(diagnostics, 'limit', selector);
   const sample = async () => {
     assertBeforeDeadline(deadlineMs);
     const proof = await read(harness, identity);
+    if (record) { record.samples++; record.last = proof; }
     observations.push(proof);
     if (observations.length > 3) observations.shift();
     return proof;
   };
-  for (let attempt = 0; attempt < 6; attempt++) {
-    const proof = await sample();
-    if (taskGateLimitReadable(proof)) return { proof, observations, scrolls };
-    if (!proof.scrollDirection) break;
-    assertBeforeDeadline(deadlineMs);
-    scrolls.push(await harness.scrollWithKey('[data-testid="chat-task-list"]', proof.scrollDirection));
+  try {
+    for (let attempt = 0; attempt < 6; attempt++) {
+      const proof = await sample();
+      if (taskGateLimitReadable(proof)) {
+        if (record) record.status = 'readable';
+        return { proof, observations, scrolls };
+      }
+      if (!proof.scrollDirection) break;
+      assertBeforeDeadline(deadlineMs);
+      scrolls.push(await traceTaskGateKey(harness, selector, proof.scrollDirection, deadlineMs, record, undefined, keyRead));
+    }
+    const proof = await wait(harness, sample, taskGateLimitReadable, deadlineMs);
+    if (record) record.status = 'readable';
+    return { proof, observations, scrolls };
+  } catch (error) {
+    if (record) { record.status = 'failed'; record.error = diagnosticError(error); }
+    throw error;
   }
-  const proof = await wait(harness, sample, taskGateLimitReadable, deadlineMs);
-  return { proof, observations, scrolls };
 }
 
 // Only the first-use fields needed by the established native Desk exit. A
@@ -445,17 +608,7 @@ export async function runTaskGateFlow({ harness, result, check, capture, defer }
   const waitState = accept => waitFor(harness, state, accept, deadlineMs);
   const read = identity => observeTaskGate(harness, identity);
   const field = (identity, name) => `${taskGateRowSelector(identity)} ${testid(TASK_GATE_SELECTORS[name])}`;
-  const ready = async selector => {
-    assertBeforeDeadline(deadlineMs);
-    for (let i = 0; i < 6; i++) {
-      const target = await waitFor(harness, () => observeTaskGateTarget(harness, selector), value => value.count === 1 && value.visible, deadlineMs);
-      if (target.inside && !target.clipped && target.hits === 9 && !target.disabled) return;
-      if (!target.scrollDirection) break;
-      assertBeforeDeadline(deadlineMs);
-      await harness.scrollWithKey('[data-testid="chat-task-list"]', target.scrollDirection);
-    }
-    await waitFor(harness, () => observeTaskGateTarget(harness, selector), value => value.count === 1 && value.visible && value.inside && !value.clipped && value.hits === 9 && !value.disabled, deadlineMs);
-  };
+  const ready = selector => readyTaskGateTarget(harness, selector, deadlineMs, { diagnostics: evidence.readyDiagnostics });
   const click = async selector => {
     await ready(selector);
     assertBeforeDeadline(deadlineMs);
@@ -469,9 +622,10 @@ export async function runTaskGateFlow({ harness, result, check, capture, defer }
     await control('replay'); await waitState(value => value.frames.some(frame => frame.type === 'task.native')); await control('refresh');
     await waitState(value => reads(value) > before);
   };
-  const evidence = { nativeInputs: true, domInjection: false, noPosts: [], limitPaint: [], errorPaint: {}, captures: [] };
+  const evidence = { nativeInputs: true, domInjection: false, noPosts: [], limitPaint: [], errorPaint: {}, captures: [],
+    readyDiagnostics: createTaskGateDiagnostics() };
   const readableLimit = async (identity, raw) => {
-    const painted = await readTaskGateLimit(harness, identity, deadlineMs), current = await read(identity);
+    const painted = await readTaskGateLimit(harness, identity, deadlineMs, { diagnostics: evidence.readyDiagnostics }), current = await read(identity);
     assertTaskGateLimitPaint(painted.proof, current, identity, raw);
     evidence.limitPaint.push({ identity, inputValue: current.value, ...painted });
   };
