@@ -12677,15 +12677,12 @@
     let profileDuplicate = null;
     const duplicateUnknownTargets = new Map();
     const duplicateUnknownNotice = '복제 결과를 확인하지 못했습니다. Agent 목록에서 사본을 확인해 주세요. 이 설정 창에서는 같은 버전을 다시 복제하지 않습니다. 자동으로 다시 시도하지 않습니다.';
-    const duplicateTargetKey = (detail, revision) => {
-      const account = ChatState.codexAccountKey(state.codex.authStatus);
-      return account ? JSON.stringify([account, detail?.id, revision]) : null;
-    };
-    const duplicateTargetUnknown = (detail, revision) => {
-      const key = duplicateTargetKey(detail, revision);
-      return key ? duplicateUnknownTargets.has(key)
-        : [...duplicateUnknownTargets.values()].some(target => target.profileId === detail?.id && target.revision === revision);
-    };
+    // The local Profile store is usable while explicitly logged out, not while
+    // login status/identity is unknown. AI account changes cannot reconcile a local write.
+    const duplicateIdentityReady = () => state.codex.authStatus?.isLoggedIn === false
+      || !!ChatState.codexAccountKey(state.codex.authStatus);
+    const duplicateTargetKey = (detail, revision) => JSON.stringify([detail?.id, revision]);
+    const duplicateTargetUnknown = (detail, revision) => duplicateUnknownTargets.has(duplicateTargetKey(detail, revision));
     const duplicateViewKey = () => {
       const codex = state.codex, thread = codex.threads?.find(item => item.id === codex.activeThreadId);
       return JSON.stringify([settingsProfileAccountKey(), activeTab, agents.mode, agents.profileId, profileReadSequence,
@@ -12754,7 +12751,7 @@
       const shown = detail?.active || detail?.head;
       const targetKey = duplicateTargetKey(detail, revision);
       if (agents.busy || profileDuplicate || !control?.isConnected || !card.isConnected || activeTab !== 'agents' || agents.mode !== 'detail'
-          || !targetKey || duplicateTargetUnknown(detail, revision)
+          || !duplicateIdentityReady() || duplicateTargetUnknown(detail, revision)
           || agents.detail !== detail || agents.profileId !== detail.id || agents.detailBinding !== account
           || agents.detailApi !== api || agents.detailRequest !== request || !api?.createProfileTransferScope
           || !ChatState.isProfileId(detail.id) || !Number.isSafeInteger(revision) || revision < 1 || shown?.revision !== revision) return;
@@ -12998,7 +12995,7 @@
         editable ? el('button', { class: 'egd-settings-btn', disabled: agents.busy ? 'true' : null, onclick: () => startEdit(detail) }, '편집') : null,
         detail.lifecycle !== 'deleted' ? el('button', { class: 'egd-settings-btn', type: 'button',
           data: { testid: 'settings-agent-duplicate', profileId: detail.id, revision: String(duplicateRevision || ''), state: duplicateUnknown ? 'unknown' : profileDuplicate ? 'pending' : 'idle' },
-          disabled: agents.busy || duplicateUnknown || !duplicateTargetKey(detail, duplicateRevision) || !Number.isSafeInteger(duplicateRevision) || !bridge()?.createProfileTransferScope ? 'true' : null,
+          disabled: agents.busy || duplicateUnknown || !duplicateIdentityReady() || !Number.isSafeInteger(duplicateRevision) || !bridge()?.createProfileTransferScope ? 'true' : null,
           onclick: ev => { void duplicateProfile(detail, duplicateRevision, ev.currentTarget); } }, profileDuplicate ? '복제 중…' : '복제해서 새로 만들기') : null,
         pendingDraft ? el('button', { class: 'egd-settings-btn egd-settings-btn-primary', data: { testid: 'settings-agent-activate' }, disabled: agents.busy ? 'true' : null,
           'aria-describedby': readiness?.countText ? readinessCountId : null,

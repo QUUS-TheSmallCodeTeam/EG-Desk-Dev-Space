@@ -13433,7 +13433,7 @@ function profileTransferBridgeMethods(fetchJson, epochScope) {
   return compileFunction(`return { ${method('async profileRequest(')}, ${method('createProfileTransferScope(')} };`, ['fetchJson', 'epochScope'])(fetchJson, epochScope);
 }
 
-function portableSettingsHarness({ respond, fullscreen = false, initialDetail = null } = {}) {
+function portableSettingsHarness({ respond, fullscreen = false, initialDetail = null, loggedOut = false } = {}) {
   const document = settingsFakeDocument(), native = nativeTextGlueHarness(), calls = [], listeners = new Set();
   if (fullscreen) {
     const decorate = node => {
@@ -13447,6 +13447,7 @@ function portableSettingsHarness({ respond, fullscreen = false, initialDetail = 
     const create = document.createElement; document.createElement = tag => decorate(create(tag)); decorate(document.documentElement);
   }
   const epoch = Chat.createChatEpochScope(), state = { codex: { connected: true, codexAccountKey: 'account-a', authStatus: { isLoggedIn: true, accountEmail: 'a@example.test' } } };
+  if (loggedOut) Object.assign(state.codex, { codexAccountKey: null, authStatus: { isLoggedIn: false } });
   const body = normalizeProfileBody({ name: '보이는 Agent', role: '검토', instructions: 'Visible revision instructions.' });
   const detail = initialDetail || { id: 'visible-agent', lifecycle: 'active', activeRevision: 2, headRevision: 3, hasDraft: true,
     active: { revision: 2, hash: profileHash(body), body }, head: { revision: 3, hash: 'b'.repeat(64), body: { ...body, name: '숨은 새 초안' } } };
@@ -13499,7 +13500,7 @@ function portableSettingsHarness({ respond, fullscreen = false, initialDetail = 
   return { card, state, detail, calls, native, part, emit, epoch, document, pickImport, refreshes: () => refreshes };
 }
 
-async function duplicateSettingsHarness(t, { reply, lifecycle = 'active' } = {}) {
+async function duplicateSettingsHarness(t, { reply, lifecycle = 'active', loggedOut = false } = {}) {
   const [{ openProfileStore }, { handleProfileHttp }, { createPrivateQaTempDirectory }] = await Promise.all([
     import('../helper/egdesk-profile-store.mjs'), import('../helper/egdesk-profile-http.mjs'), import('./egdesk-qa-platform.mjs')]);
   const dataDir = createPrivateQaTempDirectory('egdesk-settings-duplicate-');
@@ -13512,7 +13513,7 @@ async function duplicateSettingsHarness(t, { reply, lifecycle = 'active' } = {})
   store.saveDraft(sourceId, { ...created.profile.head.body, instructions: 'STORED_HEAD_THREE' }, 2);
   if (lifecycle === 'archived') store.lifecycle(sourceId, 'archive');
   const before = store.get(sourceId);
-  const h = portableSettingsHarness({ initialDetail: before, respond: async (path, options = {}) => {
+  const h = portableSettingsHarness({ initialDetail: before, loggedOut, respond: async (path, options = {}) => {
     const req = Readable.from(options.body === undefined ? [] : [Buffer.from(options.body)]);
     Object.assign(req, { method: options.method || 'GET', url: path, socket: { remoteAddress: '127.0.0.1' },
       headers: { host: '127.0.0.1:39218', ...(options.body === undefined ? {} : { 'content-type': 'application/json' }) } });
@@ -13659,9 +13660,88 @@ test('Settings duplicate: uncertain or malformed receipt locks re-click and dire
       assert.equal(h.posts().length, 1); assert.equal(h.store.list().profiles.length, 2);
     }
     h.state.codex.authStatus = { ...verifiedAuth, accountEmail: 'verified-other@example.test' }; h.emit(); await settle();
-    assert.equal(h.part('settings-agent-duplicate').dataset.state, 'idle', 'a different verified account is not the original operation');
+    assert.equal(h.part('settings-agent-duplicate').dataset.state, 'unknown', 'a different AI account cannot reconcile the same local Profile write');
+    h.part('settings-agent-duplicate').fire('click'); await settle();
+    assert.equal(h.posts().length, 1); assert.equal(h.store.list().profiles.length, 2);
     h.state.codex.authStatus = verifiedAuth; h.emit(); await settle();
     assert.equal(h.part('settings-agent-duplicate').dataset.state, 'unknown', 'returning to the original verified account keeps its lock');
+    h.part('settings-agent-duplicate').fire('click'); await settle();
+    assert.equal(h.posts().length, 1); assert.equal(h.store.list().profiles.length, 2);
+  });
+});
+
+test('Settings duplicate: explicit logout permits the first local copy, but unknown login status or identity does not', async t => {
+  for (const [name, auth] of Object.entries({ loggedOut: { isLoggedIn: false }, missing: null, unknownStatus: {},
+    unidentifiedLogin: { isLoggedIn: true }, unknownIdentity: { isLoggedIn: true, accountEmail: 'a@example.test', identityStatus: 'unknown' } })) {
+    await t.test(name, async t => {
+      const h = await duplicateSettingsHarness(t, { loggedOut: true });
+      h.state.codex.authStatus = auth; h.emit(); await settle();
+      assert.equal(Chat.codexAccountKey(h.state.codex.authStatus), null);
+      const allowed = name === 'loggedOut', control = h.part('settings-agent-duplicate');
+      assert.equal(control.dataset.state, 'idle');
+      assert.equal(control.getAttribute('disabled'), allowed ? null : 'true');
+      control.fire('click'); control.fire('click'); await settle();
+      assert.equal(h.posts().length, allowed ? 1 : 0);
+      assert.equal(h.store.list().profiles.length, allowed ? 2 : 1);
+      assert.deepEqual(h.store.get(h.sourceId), h.before);
+      if (allowed) {
+        assert.deepEqual(JSON.parse(h.posts()[0].body), { revision: 2 });
+        const copy = h.store.get(h.part('settings-agent-detail').dataset.profileId);
+        assert.notEqual(copy.id, h.sourceId); assert.equal(copy.lifecycle, 'draft'); assert.equal(copy.activeRevision, null);
+        assert.equal(copy.head.body.instructions, 'SHOWN_VERSION_TWO');
+        assert.equal(h.calls.some(call => /\/(activate|lifecycle|draft)$/.test(call.path)), false);
+      }
+    });
+  }
+});
+
+test('Settings duplicate: offline lost or malformed receipt locks the local source across login, logout, account and connection transitions', async t => {
+  for (const mode of ['lost-response', 'malformed']) await t.test(mode, async t => {
+    const h = await duplicateSettingsHarness(t, { loggedOut: true, reply: saved => {
+      if (mode === 'lost-response') throw new Error('connection lost after local write');
+      return { ...saved, profile: { ...saved.profile, activeRevision: 1 } };
+    } });
+    const original = h.part('settings-agent-duplicate'); original.fire('click'); await settle();
+    for (const [auth, connected] of [
+      [{ isLoggedIn: false }, true],
+      [{ isLoggedIn: true, accountEmail: 'a@example.test' }, true],
+      [{ isLoggedIn: true, accountEmail: 'a@example.test' }, false],
+      [{ isLoggedIn: true, accountEmail: 'b@example.test' }, true],
+      [{ isLoggedIn: false }, false], [null, true],
+      [{ isLoggedIn: true, accountEmail: 'b@example.test', identityStatus: 'unknown' }, true],
+      [{ isLoggedIn: false }, true],
+    ]) {
+      h.state.codex.authStatus = auth; h.state.codex.connected = connected; h.emit(); await settle();
+      h.card._settingsShowTab('account'); h.card._settingsShowTab('agents');
+      h.card._settingsOpenProfile(h.sourceId); await settle();
+      const blocked = h.part('settings-agent-duplicate');
+      assert.equal(blocked.dataset.state, 'unknown'); assert.equal(blocked.getAttribute('disabled'), 'true');
+      assert.match(h.part('settings-agent-notice').textContent, /결과를 확인하지 못했습니다/);
+      blocked.fire('click'); blocked.fire('click'); original.fire('click'); await settle();
+      assert.equal(h.posts().length, 1); assert.equal(h.store.list().profiles.length, 2);
+      assert.deepEqual(h.store.get(h.sourceId), h.before);
+    }
+  });
+});
+
+test('Settings duplicate: offline pending work still rejects late receipts after login or epoch change', async t => {
+  for (const change of ['login', 'epoch']) for (const failure of [false, true]) await t.test(`${change}-${failure}`, async t => {
+    let resolve, reject, receipt;
+    const h = await duplicateSettingsHarness(t, { loggedOut: true, reply: saved => {
+      receipt = saved; return new Promise((yes, no) => { resolve = yes; reject = no; });
+    } });
+    h.part('settings-agent-duplicate').fire('click'); await settle();
+    if (change === 'login') h.state.codex.authStatus = { isLoggedIn: true, accountEmail: 'a@example.test' };
+    else h.epoch.reset('codex');
+    h.emit(); await settle();
+    const visible = h.card.textContent, calls = h.calls.length;
+    if (failure) reject(new Error('late local duplicate failure')); else resolve(receipt);
+    await settle();
+    assert.equal(h.card.textContent, visible); assert.equal(h.calls.length, calls); assert.equal(h.refreshes(), 0);
+    assert.notEqual(h.part('settings-agent-detail')?.dataset.profileId, receipt.id);
+    assert.equal(h.posts()[0].signal.aborted, true);
+    h.card._settingsOpenProfile(h.sourceId); await settle();
+    assert.equal(h.part('settings-agent-duplicate').dataset.state, 'unknown');
     h.part('settings-agent-duplicate').fire('click'); await settle();
     assert.equal(h.posts().length, 1); assert.equal(h.store.list().profiles.length, 2);
   });
