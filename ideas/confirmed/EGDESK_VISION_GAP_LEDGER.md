@@ -301,6 +301,8 @@ Git 전송 확인 범위는 기존 `ff9ae10`·`4b40588`까지다. B3 후속은 �
 - Main과 PM은 R5의 재진입·다른 방·명시적 재시도 후 3개 캡처를 직접 확인했다. 1366×768의 85% 화면에서 오른쪽 고정 근거 본문과 왼쪽 의견 본문·대상·저장/초안 포함 상태가 읽히고 서로 겹치지 않는다. ‘아직 전송하지 않음’이 구별돼 기존 34% 가독성 문제의 한정 시각 인수를 승인했다. 이 승인은 세 관찰 상태에 한정하며 전체 크기·전체 제품 디자인 완성을 뜻하지 않는다.
 - 같은 사본의 후속 일반 Chat 72/72, Claude 첨부·큰 자료 Reader 합성 흐름 27/27도 통과했다. Claude는 Codex 미로그인 조건의 선택 엔진·원문/요약 구분·실패/취소·계정 변경 경계까지 확인했지만, 실제 Claude adapter·모델 읽기·OS 실행 증명은 아니다. 검증한 사본의 추적 앱 파일 전체와 `7fe8f7d` 작업 트리가 일치함을 대조했다. 사용자 프로필·실제 provider를 사용하지 않았으며, 이 회차에서 띄운 격리 Firefox·fixture는 각 실행 종료 후 정리했다.
 - 다음 재개점은 Task 질문 오류 요약행에서 질문 제목을 함께 보여주는 P2다. 기존 입력·오류·계속/취소는 동작하며, 제목만 스크롤 위로 벗어날 수 있다. PM은 06:43 재평가에서 마감까지 600/800 두 크기와 질문 전환·오류 해제의 수정/재검증 여유가 부족하므로 이번 회차 추가 구현을 보류했다. 실제 provider·Windows·OS 전면 검증 및 Briefing 다중 대상·annotation 등 남은 범위는 별도다. `main` 병합·원격 푸시는 하지 않았다.
+- 최종 사본에서 기존 Task 질문 흐름을 600×600과 800×600으로 다시 실행해 각 9/9를 통과했다. Main은 두 오류 화면의 입력·오류 설명·계속/취소 버튼을 직접 확인했다. 이는 위 제목 P2를 수정한 결과가 아니다. 실제 Task HTTP/SQLite와 시험용 입력을 사용했고 모델 호출은 없었다. 증거는 각각 `/private/tmp/egdesk-comments-final-task600-20261027.d8hvAF`, `/private/tmp/egdesk-comments-final-task800-20261027.ANBSvR`에 있다.
+- 같은 사본의 `browser-relay` 선택 검증도 통과했다(`selectedCasesVerified`·`browserRelayDomProbeProofVerified`: true). 범위는 격리된 로컬 페이지와 시험용 relay이며 `coverage: partial`, `realExecutionVerified`·`nativeModelOriginVerified`·`fullScenarioVerified`: false다. 실제 모델에서 시작한 브라우저·컴퓨터 제어 전체 검증으로 세지 않는다. 관련 모델 호출은 0회였고, 실행 후 이 회차의 2829/6001/39220/39221 시험용 listener가 남지 않음을 확인했다.
 
 ## 이전 세션 인계 원본 (2026-10-24 마감)
 
