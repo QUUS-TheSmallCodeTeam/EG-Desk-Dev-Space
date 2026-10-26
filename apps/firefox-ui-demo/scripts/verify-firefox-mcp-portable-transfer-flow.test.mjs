@@ -6,6 +6,7 @@ import test from 'node:test';
 import { createPortableTransferFixture } from './egdesk-portable-transfer-fixture.mjs';
 import { bootstrapQaProfile, canonicalTempRoot, LOADER_FILES } from './egdesk-chat-qa-profile.mjs';
 import { createPrivateQaTempDirectory } from './egdesk-qa-platform.mjs';
+import { profileFormFromBody, validateProfileForm } from '../overlay/resources/EGDeskChatState.sys.mjs';
 import { assertPortableEnvironment, assertPortableStoreInvariant, assertPortableImportedDraft,
   assertPortableExportFile, assertPortablePinnedExport, assertPortableNoReplay,
   assertPortableMissingHead, assertPortableAttachmentOmission,
@@ -13,17 +14,19 @@ import { assertPortableEnvironment, assertPortableStoreInvariant, assertPortable
   assertPortableDuplicateNoReplay, assertPortableRejectedDeskAutosaves, runPortableDuplicateCase, PORTABLE_DUPLICATE_NOTICE,
   assertPortableUnknownCreated, assertPortableUnknownUi, assertPortableUnknownNoReplay, runPortableDuplicateUnknownCase,
   probePortableDisabledDuplicate, PORTABLE_DUPLICATE_UNKNOWN_NOTICE,
+  assertPortableDraftGet, assertPortableDraftDelta, assertPortableDraftForm, assertPortableDraftFooter, portableDraftExpectedBody, PORTABLE_DRAFT_INPUT,
+  editPortableDraftInput, runPortableDraftEditCase, observePortableUi,
   observePortableFirstUse, preparePortableInstructionEdge, observePortableSettingsNavigation, navigatePortableSettings,
   portableObservationSources, PORTABLE_OBSERVATION_BUDGET, portableTextVisible } from './verify-firefox-mcp-portable-transfer-flow.mjs';
 
 const TOKEN = 'portable-verifier-unit-only-token';
 const ENV = { EGDESK_QA_PORTABLE_TRANSFER_FIXTURE: '1', EGDESK_QA_FIXTURE_TRANSPORT: '1',
   EGDESK_QA_REAL_TURN: '0', EGDESK_QA_FIXTURE_PORT: '49318', EGDESK_QA_FIXTURE_TOKEN: TOKEN };
-function setup(t) {
+function setup(t, overrides = {}) {
   const loader = createPrivateQaTempDirectory('egdesk-portable-verifier-loader-');
   for (const name of LOADER_FILES) fs.writeFileSync(path.join(loader, name), `unit loader ${name}\n`, { mode: 0o600 });
   const { profile } = bootstrapQaProfile({ loaderSource: loader });
-  const fixture = createPortableTransferFixture({ profile, token: TOKEN, env: ENV }), root = fixture.snapshot().root;
+  const fixture = createPortableTransferFixture({ profile, token: TOKEN, env: { ...ENV, ...overrides } }), root = fixture.snapshot().root;
   t.after(() => {
     fixture.dispose();
     for (const [directory, prefix] of [[root, 'egdesk-portable-transfer-'], [profile, 'egdesk-chat-test-'], [loader, 'egdesk-portable-verifier-loader-']]) {
@@ -38,7 +41,7 @@ async function request(fixture, method, route, body) {
   Object.assign(req, { method, url: route, socket: { remoteAddress: '127.0.0.1' },
     headers: { host: '127.0.0.1:49318', 'content-type': 'application/json', 'x-egdesk-qa-token': TOKEN } });
   let status, value;
-  const res = { setHeader() {}, writeHead(code) { status = code; }, end(text) { value = JSON.parse(text); } };
+  const res = { setHeader() {}, writeHead(code) { status = code; }, end(text) { value = text ? JSON.parse(text) : null; } };
   assert.equal(await fixture.handle(req, res), true);
   return { status, value };
 }
@@ -830,4 +833,448 @@ test('unknown stage selects original via clicks, arms exact displayed v3, create
   assert.equal(proof.after.duplicateEvents.length, 2, 'One earlier success plus one unknown-result creation');
   assert.ok(actions.some(row => row[0] === 'reach' && row[2]?.disabledDuplicate?.revision === 3));
   assert.match(proof.faultScope, /no network\/SSE fault/);
+});
+
+async function draftBackend(t, active = false) {
+  let fixture;
+  if (active) fixture = setup(t, { EGDESK_QA_PORTABLE_TRANSFER_PROFILE_VERSION: 'head3-active2' });
+  else {
+    const h = await unknownFixture(t); await h.arm(h.target); await h.commit(); fixture = h.fixture;
+  }
+  const id = fixture.snapshot().seed.profileId;
+  const readProfile = async () => {
+    const response = await request(fixture, 'GET', `/profiles/${id}`); assert.equal(response.status, 200); return response.value;
+  };
+  const profile = await readProfile(), before = fixture.snapshot();
+  return { fixture, id, profile, before, readProfile };
+}
+
+for (const active of [false, true]) test(`draft receipts bind actual GET/SQLite and distinguish changed PUT from unchanged revision (${active ? 'setup active2/head3' : 'full-flow inactive head3'})`, async t => {
+  const h = await draftBackend(t, active), body = portableDraftExpectedBody(h.profile), route = `/profiles/${h.id}/draft`;
+  assert.equal(assertPortableDraftGet(h.before, h.profile), true);
+  assert.equal(assertPortableDraftDelta(h.before, h.fixture.snapshot()), true);
+  assert.equal((await request(h.fixture, 'OPTIONS', route)).status, 204);
+  const payload = { body, expectedRevision: 3 }, changed = await request(h.fixture, 'PUT', route, payload);
+  assert.equal(changed.status, 200);
+  const profile = await h.readProfile(), after = h.fixture.snapshot();
+  assert.equal(assertPortableDraftDelta(h.before, after, { puts: 1, changed: true, body, profile, baseRevision: 3 }), true);
+  assert.deepEqual(profile.active, h.profile.active); assert.equal(profile.headRevision, 4);
+  assert.equal(profile.activeRevision, active ? 2 : null);
+  assert.deepEqual(profile.head.body.personality.examples, [
+    { user: 'QA draft question one', reply: 'QA draft answer one.\nKeep active unchanged.' },
+    { user: 'QA draft question two', reply: 'QA draft answer two.' },
+  ]);
+  assert.deepEqual(profile.head.body.personality.avoid, ['QA draft avoid one', 'QA draft avoid two']);
+  const noChange = await request(h.fixture, 'PUT', route, { body, expectedRevision: 4 });
+  assert.equal(noChange.value.unchanged, true);
+  const reopened = await h.readProfile(), unchanged = h.fixture.snapshot();
+  assert.equal(assertPortableDraftDelta(after, unchanged, { puts: 1, body, profile: reopened, baseRevision: 4 }), true);
+  assert.deepEqual(reopened, profile); assert.deepEqual(unchanged.persisted, after.persisted);
+  assert.throws(() => assertPortableDraftDelta(after, unchanged), /actual draft PUT/);
+  assert.throws(() => assertPortableDraftDelta(after, unchanged, { puts: 1, changed: true, body, profile: reopened, baseRevision: 4 }));
+  if (active) assert.throws(() => assertPortableStoreInvariant(h.before, h.before), /No activation/,
+    'The old inactive-only invariant is not weakened to admit a different setup seed');
+});
+
+test('draft delta rejects forged receipts, wrong base/ID/body, changed old/active rows and every unrelated mutation', async t => {
+  const h = await draftBackend(t, true), body = portableDraftExpectedBody(h.profile);
+  await request(h.fixture, 'PUT', `/profiles/${h.id}/draft`, { body, expectedRevision: 3 });
+  const profile = await h.readProfile(), after = h.fixture.snapshot();
+  const options = { puts: 1, changed: true, body, profile, baseRevision: 3 };
+  const put = state => state.requests.findLast(row => row.method === 'PUT');
+  const get = state => state.requests.findLast(row => row.method === 'GET');
+  for (const alter of [state => { put(state).request.expectedRevision = 2; }, state => { put(state).request.extra = true; },
+    state => { put(state).path = '/profiles/other/draft'; }, state => { put(state).query = '?alias=1'; },
+    state => { put(state).request.body.personality.examples.reverse(); }, state => { put(state).requestTruncated = true; },
+    state => { put(state).requestBytes++; }, state => { put(state).requestSha256 = 'wrong'; },
+    state => { put(state).response.unchanged = true; }, state => { put(state).responseSha256 = 'wrong'; },
+    state => { put(state).response.profile = null; }, state => { put(state).response.hash = 'wrong'; },
+    state => { put(state).before.profiles.records[0].lifecycle = 'draft'; }, state => { put(state).after.desk.boards = []; },
+    state => { get(state).response.head.body.personality.avoid = []; }, state => { get(state).delegated = false; },
+    state => { get(state).sequence = put(state).sequence - 1; }, state => { get(state).responseSha256 = 'wrong'; },
+    state => { state.persisted.profiles.records[0].active_revision = 4; },
+    state => { state.persisted.profiles.revisions[0].body_json = '{}'; },
+    state => { state.persisted.profiles.revisions.at(-1).parent_revision = 1; },
+    state => { state.exports.push({ name: 'unexpected' }); }, state => { state.providerTurns = 1; },
+    state => { state.requests[0].status = 404; }, state => { state.receiptFaults.push({}); }]) {
+    const changed = structuredClone(after); alter(changed);
+    assert.throws(() => assertPortableDraftDelta(h.before, changed, options));
+  }
+  for (const [method, path] of [['POST', '/profiles/import'], ['POST', `/profiles/${h.id}/duplicate`],
+    ['POST', `/profiles/${h.id}/activate`], ['POST', '/__qa/portable-transfer/control'], ['PATCH', '/rooms/owned-room'],
+    ['GET', '/provider/status'], ['PUT', '/v1/boards/other'], ['OPTIONS', '/profiles/other/draft']]) {
+    const changed = structuredClone(after);
+    changed.requests.push({ sequence: changed.requests.at(-1).sequence + 1, method, path, query: '', delegated: false, status: 403 });
+    assert.throws(() => assertPortableDraftDelta(h.before, changed, options), `${method} ${path}`);
+  }
+  const noRead = structuredClone(after); noRead.requests.pop();
+  assert.throws(() => assertPortableDraftDelta(h.before, noRead, options));
+});
+
+// A small UI action model only: no DOM/native/paint acceptance is claimed by
+// these tests. Form conversion/validation and HTTP/SQLite are the real product.
+async function draftStageFixture(t, active = false) {
+  const backend = await draftBackend(t, active), actions = [], checks = [];
+  const settingsId = 'settings-owned', assignments = [{ id: 'owned-room', agentProfileId: null, profileEnabled: false, conversationId: null }];
+  let profile = backend.profile, form = null, pending = {}, exampleKeys = [], avoidKeys = [], serial = 0;
+  let height = 800, focusedId = null, start = 0, end = 0;
+  const control = (id, testid, value, { index = null, field = null } = {}) => ({ id, testid, index, field, value, length: value.length,
+    truncated: false, disabled: false, readOnly: false, focused: focusedId === id, start: focusedId === id ? start : 0, end: focusedId === id ? end : 0 });
+  const ui = () => {
+    const shown = profile.active || profile.head;
+    const value = { width: 1280, height, settingsId, activeThreadId: 'owned-room', roomAssignments: structuredClone(assignments),
+      detailCount: form ? 0 : 1, detailId: form ? null : profile.id, detailRevision: form ? null : String(shown.revision),
+      detailLifecycle: form ? null : profile.lifecycle, editor: null,
+      target: form ? { profileId: null, revision: null, source: null, text: '' } :
+        { profileId: profile.id, revision: String(shown.revision), source: profile.active ? 'active' : 'draft', text: 'unit detail' },
+      detailPersonality: { examples: shown.body.personality?.examples || [], avoid: shown.body.personality?.avoid || [] },
+      active: { id: focusedId, testid: null, index: null, field: null } };
+    if (!form) return value;
+    value.editor = { count: 1, owned: true, profileId: null, baseRevision: null, busy: false, busySource: 'save.disabled', errors: '', fieldErrors: [],
+      examples: (form.personalityExamples || []).map((row, i) => ({ index: String(i),
+        user: control(`user-${exampleKeys[i]}`, 'settings-agent-example-user', row.user, { index: String(i) }),
+        reply: control(`reply-${exampleKeys[i]}`, 'settings-agent-example-reply', row.reply, { index: String(i) }) })),
+      avoid: (form.personalityAvoid || []).map((text, i) => ({ index: String(i), text: control(`avoid-${avoidKeys[i]}`, 'settings-agent-avoid-text', text, { index: String(i) }) })),
+      chips: Object.fromEntries(['traits', 'expertise', 'toolPreferences'].map(field => [field, {
+        input: control(`chip-${field}`, 'settings-agent-chip-input', pending[field] || '', { field }), values: [...form[field]],
+      }])), tone: `${settingsId}-profile-tone-${form.tone}`, actions: { position: 'sticky', box: { bottom: height - 67 },
+        contentViewport: { top: 200, bottom: height - 67, clientHeight: height - 267, scrollHeight: 2000, scrollTop: 400 } } };
+    value.editor.exampleCount = value.editor.examples.length; value.editor.avoidCount = value.editor.avoid.length;
+    const focused = controls(value).find(item => item.id === focusedId);
+    if (focused) value.active = { id: focused.id, testid: focused.testid, index: focused.index, field: focused.field };
+    return value;
+  };
+  const controls = value => value.editor ? [...value.editor.examples.flatMap(row => [row.user, row.reply]), ...value.editor.avoid.map(row => row.text),
+    ...Object.values(value.editor.chips).map(chip => chip.input)] : [];
+  const match = selector => {
+    const testid = selector.match(/data-testid="([^"]+)"/)?.[1], index = selector.match(/data-index="(\d+)"/)?.[1], field = selector.match(/data-field="([^"]+)"/)?.[1];
+    return controls(ui()).find(item => item.testid === testid && (index === undefined || item.index === index) && (field === undefined || item.field === field));
+  };
+  const focus = id => { focusedId = id; const current = controls(ui()).find(item => item.id === id); start = end = current?.value.length || 0; };
+  const readProfile = async () => backend.readProfile();
+  const options = { readState: async () => backend.fixture.snapshot(), readProfile, readUi: async () => structuredClone(ui()),
+    resize: async value => { actions.push(['resize', value]); height = value; },
+    reach: async (selector, extra) => { assert.equal(extra, undefined, 'No import-only focus path for editing'); actions.push(['reach', selector]); },
+    readTarget: async selector => ({ settingsId, count: 1, owned: true, targetReady: true, targetHits: Array(9).fill(true),
+      focused: !!match(selector)?.focused, testid: match(selector)?.testid || selector.match(/data-testid="([^"]+)"/)?.[1] }),
+    capture: async (phase, subjects) => { actions.push(['capture', phase, subjects]); },
+    check: (name, passed) => { assert.equal(passed, true, name); checks.push(name); },
+    waitUi: async predicate => { const value = ui(); assert.equal(predicate(value), true, 'unit action must meet the real wait predicate'); return structuredClone(value); },
+    pause: async () => {}, assertDeadline() {},
+    press: async (...args) => {
+      assert.equal(args.length, 1); actions.push(['press', ...args]);
+      const current = controls(ui()).find(item => item.focused); assert.ok(current);
+      assert.ok(['meta+a', 'Control+a'].includes(args[0])); start = 0; end = current.value.length;
+    },
+    typeText: async (...args) => {
+      assert.equal(args.length, 1); const text = args[0], current = controls(ui()).find(item => item.focused); assert.ok(current);
+      actions.push(['type', text]); assert.equal(start, 0); assert.equal(end, current.value.length);
+      if (current.field) pending[current.field] = text;
+      else if (current.testid === 'settings-agent-avoid-text') form.personalityAvoid[Number(current.index)] = text;
+      else form.personalityExamples[Number(current.index)][current.testid.endsWith('-user') ? 'user' : 'reply'] = text;
+      start = end = text.length;
+    },
+    click: async selector => {
+      actions.push(['click', selector]);
+      if (selector.includes('.egd-settings-detail-actions')) {
+        assert.equal(form, null); form = profileFormFromBody(profile.head.body); pending = {};
+        exampleKeys = (form.personalityExamples || []).map(() => ++serial); avoidKeys = (form.personalityAvoid || []).map(() => ++serial); focus(null); return;
+      }
+      if (selector.includes('settings-agent-cancel')) { assert.ok(form); form = null; profile = await readProfile(); focus(null); return; }
+      if (selector.includes('settings-agent-save')) {
+        for (const [field, text] of Object.entries(pending)) if (text && !form[field].includes(text)) form[field].push(text);
+        const checked = validateProfileForm(form); assert.equal(checked.ok, true, JSON.stringify(checked.errors));
+        assert.equal((await request(backend.fixture, 'OPTIONS', `/profiles/${profile.id}/draft`)).status, 204);
+        const saved = await request(backend.fixture, 'PUT', `/profiles/${profile.id}/draft`, { body: checked.body, expectedRevision: profile.headRevision });
+        assert.equal(saved.status, 200); profile = await readProfile(); form = null; focus(null); return;
+      }
+      for (const kind of ['example', 'avoid']) {
+        const key = kind === 'example' ? 'personalityExamples' : 'personalityAvoid', keys = kind === 'example' ? exampleKeys : avoidKeys;
+        if (selector.includes(`settings-agent-${kind}-add`)) {
+          (form[key] ||= []).push(kind === 'example' ? { user: '', reply: '' } : ''); keys.push(++serial);
+          focus(`${kind === 'example' ? 'user' : 'avoid'}-${keys.at(-1)}`); return;
+        }
+        if (selector.includes(`settings-agent-${kind}-remove`)) {
+          const index = Number(selector.match(/data-index="(\d+)"/)[1]); form[key].splice(index, 1); keys.splice(index, 1);
+          focus(`${kind === 'example' ? 'user' : 'avoid'}-${keys[Math.min(index, keys.length - 1)]}`); return;
+        }
+      }
+      if (selector.includes('profile-tone-')) { form.tone = PORTABLE_DRAFT_INPUT.tone; focus(`${settingsId}-profile-tone-${form.tone}`); return; }
+      const current = match(selector); assert.ok(current, `unexpected unit native selector: ${selector}`); focus(current.id);
+    },
+  };
+  return { ...backend, options, actions, checks, ui, controls, focus, pending: () => pending, form: () => form };
+}
+
+for (const active of [false, true]) test(`native draft stage contract: cancel600/save800/reopen600/unchanged800, real backend (${active ? 'active2 setup' : 'original flow'})`, async t => {
+  const h = await draftStageFixture(t, active), proof = await runPortableDraftEditCase(h.options);
+  assert.deepEqual(h.actions.filter(row => row[0] === 'resize').map(row => row[1]), [600, 800, 600, 800]);
+  assert.deepEqual(proof.buttons.map(row => row.height), [600, 800, 600, 800]); assert.equal(proof.samples.length, 4);
+  assert.equal(proof.toneDiagnostics.length, 4);
+  assert.equal(proof.footerDiagnostics.length, 4); assert.ok(proof.footerDiagnostics.every(row => row.bottomGap === 0));
+  assert.equal(proof.lastRowReach.length, 4);
+  assert.ok(proof.lastRowReach.every(row => row.target.targetReady && row.target.targetHits.length === 9 && row.target.targetHits.every(Boolean)));
+  assert.ok(proof.observations.length <= 24); assert.equal(proof.saved.profile.headRevision, 4);
+  assert.equal(proof.saved.profile.activeRevision, active ? 2 : null); assert.deepEqual(proof.saved.profile.active, proof.profileBefore.active);
+  assert.equal(proof.cancelled.state.requests.filter(row => row.method === 'PUT' && row.path.endsWith('/draft')).length, 0);
+  const puts = proof.unchanged.state.requests.filter(row => row.method === 'PUT' && row.path.endsWith('/draft'));
+  assert.equal(puts.length, 2); assert.deepEqual(puts.map(row => row.response.unchanged), [false, true]);
+  assert.deepEqual(proof.unchanged.state.persisted, proof.saved.state.persisted);
+  assert.deepEqual(proof.populatedCancelled.state.persisted, proof.saved.state.persisted);
+  assert.deepEqual(puts[0].request.body.personality.traits, ['QA careful']);
+  assert.deepEqual(puts[0].request.body.expertise, ['QA draft review']); assert.deepEqual(puts[0].request.body.toolPreferences, ['qa-readonly']);
+  assert.ok(h.actions.filter(row => row[0] === 'press').every(row => row.length === 2 && row[1] !== 'Enter'));
+  assert.equal(h.actions.filter(row => row[0] === 'click' && row[1].includes('settings-agent-save')).length, 2);
+  assert.deepEqual(proof.samples.at(-1).state.duplicateEvents, proof.before.duplicateEvents);
+  assert.ok(proof.observations.some(row => row.phase === 'populated-reopen-opened' && row.ui.editor.exampleCount === 2 && row.ui.editor.avoidCount === 2));
+  assert.match(proof.bindingEvidence, /private form.*unexposed/); assert.match(proof.conflict, /excluded/);
+});
+
+test('draft stage keeps exact rejected Desk autosaves separate from two explicit draft PUT and earlier POST', async t => {
+  const h = await draftStageFixture(t), original = h.options.click;
+  h.options.click = async selector => {
+    await original(selector);
+    assert.equal((await request(h.fixture, 'PUT', '/v1/desk/current', {})).status, 403);
+  };
+  h.options.pause = async () => { assert.equal((await request(h.fixture, 'PUT', '/v1/desk/current', {})).status, 403); };
+  const proof = await runPortableDraftEditCase(h.options), state = proof.samples.at(-1).state;
+  assert.ok(state.requests.filter(row => row.method === 'PUT' && row.path === '/v1/desk/current').length > 20);
+  assert.equal(state.requests.filter(row => row.method === 'PUT' && row.path.endsWith('/draft')).length, 2);
+  assert.deepEqual(state.requests.filter(row => row.method === 'POST'), proof.before.requests.filter(row => row.method === 'POST'));
+  assert.deepEqual(state.persisted.desk, proof.before.persisted.desk);
+});
+
+test('draft stage rejects lost pending values/retained focus and never replays ambiguous native save', async t => {
+  for (const failure of ['pending', 'focus', 'save-unknown']) {
+    const h = await draftStageFixture(t), original = h.options.click;
+    h.options.click = async selector => {
+      await original(selector);
+      if (failure === 'pending' && selector.includes('settings-agent-example-add')) h.pending().traits = '';
+      if (failure === 'focus' && selector.includes('settings-agent-example-remove')) h.focus(null);
+      if (failure === 'save-unknown' && selector.includes('settings-agent-save')) throw new Error('native result unknown');
+    };
+    await assert.rejects(runPortableDraftEditCase(h.options));
+    const writes = h.fixture.snapshot().requests.filter(row => row.method === 'PUT' && row.path.endsWith('/draft'));
+    assert.equal(writes.length, failure === 'save-unknown' ? 1 : 0);
+    assert.equal(h.actions.filter(row => row[0] === 'click' && row[1].includes('settings-agent-save')).length, failure === 'save-unknown' ? 1 : 0);
+  }
+});
+
+test('draft input refuses stale/foreign/covered/lost focus or selection before typing, with no retry/fallback', async t => {
+  for (const failure of ['deadline', 'foreign', 'covered', 'focus', 'selection', 'native-type']) {
+    const h = await draftStageFixture(t), context = h.ui();
+    await h.options.click('[data-testid="settings-agent-detail"] .egd-settings-detail-actions > button:first-child');
+    h.actions.length = 0;
+    const options = { ...h.options, selector: '[data-testid="settings-agent-chip-input"][data-field="traits"]', value: 'owned text',
+      validateUi: ui => assertPortableDraftForm(ui, h.profile, context) };
+    if (failure === 'deadline') options.assertDeadline = () => { throw new Error('deadline'); };
+    if (failure === 'foreign') options.readUi = async () => ({ ...h.ui(), settingsId: 'foreign-card' });
+    if (failure === 'covered' || failure === 'focus') options.readTarget = async selector => ({ ...await h.options.readTarget(selector),
+      ...(failure === 'covered' ? { targetReady: false } : { focused: false }) });
+    if (failure === 'selection') {
+      // Nonempty pending text requires a real select-all readback.
+      h.pending().traits = 'old text'; options.press = async () => {};
+    }
+    let types = 0;
+    options.typeText = async text => { types++; if (failure === 'native-type') throw new Error('uncertain native typing'); await h.options.typeText(text); };
+    await assert.rejects(editPortableDraftInput(options));
+    assert.equal(types, failure === 'native-type' ? 1 : 0);
+    assert.ok(h.actions.filter(row => row[0] === 'click').length <= 1);
+    assert.equal(h.fixture.snapshot().requests.filter(row => row.method === 'PUT' && row.path.endsWith('/draft')).length, 0);
+  }
+});
+
+test('draft form contract rejects ambiguous/oversized rows, errors/busy/changed binding and unavailable controls', async t => {
+  const h = await draftStageFixture(t, true), context = h.ui();
+  await h.options.click('[data-testid="settings-agent-detail"] .egd-settings-detail-actions > button:first-child');
+  const good = h.ui(); assert.equal(assertPortableDraftForm(good, h.profile, context), true);
+  for (const alter of [ui => { ui.editor.count = 2; }, ui => { ui.editor.owned = false; }, ui => { ui.editor.busy = true; },
+    ui => { ui.editor.errors = 'invalid examples'; }, ui => { ui.editor.fieldErrors = [{ field: 'personalityAvoid' }]; },
+    ui => { ui.editor.baseRevision = '2'; }, ui => { ui.editor.profileId = 'wrong'; }, ui => { ui.editor.exampleCount = 4; },
+    ui => { ui.editor.avoidCount = 9; }, ui => { ui.editor.examples[0].index = '1'; },
+    ui => { ui.editor.examples[0].reply.index = '1'; }, ui => { ui.editor.examples[0].user.truncated = true; },
+    ui => { ui.editor.examples[0].reply.length++; }, ui => { ui.editor.avoid[0].text.readOnly = true; },
+    ui => { ui.editor.chips.traits.input.disabled = true; }, ui => { ui.editor.actions.position = 'static'; },
+    ui => { ui.roomAssignments[0].agentProfileId = h.id; }]) {
+    const changed = structuredClone(good); alter(changed); assert.throws(() => assertPortableDraftForm(changed, h.profile, context));
+  }
+});
+
+test('sticky form footer reduces field reach viewport but not its own buttons or the original import view', async () => {
+  const h = settingsNavigationDomFixture(), original = await h.observe();
+  const footer = { style: { position: 'sticky' }, getBoundingClientRect: () => ({ left: 120, right: 1230, top: 650, bottom: 710, width: 1110, height: 60 }),
+    contains: () => false };
+  h.target.closest = selector => selector === '[data-testid="settings-agent-form"]' ? { querySelector: () => footer } : null;
+  h.target.bounds = { left: 220, top: 630, right: 1200, bottom: 670, width: 980, height: 40 };
+  const clipped = await h.observe(); assert.equal(clipped.viewport.bottom, 650); assert.equal(clipped.targetClip.bottom, 650);
+  assert.equal(clipped.targetReady, false); assert.ok(clipped.wheelPoint);
+  h.target.bounds.top = 600; h.target.bounds.bottom = 640; assert.equal((await h.observe()).targetReady, true);
+  footer.contains = () => true;
+  const button = await h.observe(); assert.equal(button.viewport.bottom, original.viewport.bottom); assert.equal(button.targetReady, true);
+  h.target.closest = () => null; assert.equal((await h.observe()).viewport.bottom, original.viewport.bottom);
+});
+
+test('draft observer reads live values/caret, bounded rows and unexposed binding without fabricating state', async () => {
+  const node = (extra = {}) => ({ dataset: {}, childNodes: [], children: [], scrollTop: 0, scrollHeight: 60, clientHeight: 60,
+    offsetHeight: 60, clientTop: 0,
+    scrollWidth: 300, clientWidth: 300, textContent: '', querySelector: () => null, querySelectorAll: () => [],
+    getBoundingClientRect: () => ({ left: 100, top: 200, right: 400, bottom: 260, width: 300, height: 60 }), ...extra });
+  const input = (id, testid, value, index = '0', field) => node({ id, dataset: { testid, index, ...(field ? { field } : {}) }, value,
+    textContent: 'stale initial text, not .value', selectionStart: value.length, selectionEnd: value.length });
+  const user = input('user-live', 'settings-agent-example-user', 'live question'), reply = input('reply-live', 'settings-agent-example-reply', 'live reply\nsecond line');
+  const avoid = input('avoid-live', 'settings-agent-avoid-text', 'live avoid');
+  const exampleRow = node({ dataset: { index: '0' }, querySelector: selector => selector.includes('-user') ? user : reply });
+  const avoidRow = node({ dataset: { index: '0' }, querySelector: () => avoid });
+  const chips = Object.fromEntries(['traits', 'expertise', 'toolPreferences'].map(field => [field, input(`chip-${field}`, 'settings-agent-chip-input', `pending-${field}`, undefined, field)]));
+  const content = node(), actions = node(), card = node({ id: 'settings-live', querySelector: selector => selector === '.egd-settings-content' ? content : null });
+  let exampleCount = 1, avoidCount = 1;
+  const form = node({ closest: () => card, querySelectorAll: selector => selector.includes('example-row') ? Array(exampleCount).fill(exampleRow)
+    : selector.includes('avoid-row') ? Array(avoidCount).fill(avoidRow) : [], querySelector: selector => {
+    if (selector === '.egd-settings-form-actions') return actions;
+    if (selector.includes('aria-pressed')) return { id: 'settings-live-profile-tone-warm' };
+    const field = selector.match(/data-field="([^"]+)"/)?.[1];
+    return selector.includes('settings-agent-chip-input') ? chips[field] : field ? node() : null;
+  } });
+  const save = node({ disabled: false }), cancel = node();
+  const byId = { 'settings-agent-form': form, 'settings-agent-save': save, 'settings-agent-cancel': cancel };
+  const document = { activeElement: reply, querySelector: selector => selector === '.egd-settings-card' ? card : byId[selector.match(/data-testid="([^"]+)"/)?.[1]] || null,
+    querySelectorAll: selector => selector === '[data-testid="settings-agent-form"]' ? [form] : [] };
+  const harness = { evaluateChrome: source => new Function('window', 'document', 'innerWidth', 'innerHeight', 'getComputedStyle', `return (${source})()`)(
+    { __egdesk: { state: {} } }, document, 1280, 600, value => ({ display: 'block', visibility: 'visible', position: value === actions ? 'sticky' : 'static' })) };
+  const observed = await observePortableUi(harness);
+  assert.equal(observed.editor.profileId, null); assert.equal(observed.editor.baseRevision, null); assert.equal(observed.editor.busy, false);
+  assert.equal(observed.editor.examples[0].user.value, 'live question'); assert.equal(observed.editor.examples[0].reply.value, 'live reply\nsecond line');
+  assert.equal(observed.editor.avoid[0].text.value, 'live avoid'); assert.equal(observed.editor.chips.traits.input.value, 'pending-traits');
+  assert.equal(observed.editor.examples[0].reply.focused, true); assert.equal(observed.editor.examples[0].reply.end, reply.value.length);
+  assert.equal(observed.active.id, 'reply-live'); assert.equal(observed.editor.actions.position, 'sticky');
+  assert.deepEqual(observed.editor.actions.contentViewport, { top: 200, bottom: 260, clientHeight: 60, scrollHeight: 60, scrollTop: 0 });
+  assert.equal(assertPortableDraftFooter(observed), true);
+  exampleCount = 100; avoidCount = 100; reply.value = 'x'.repeat(900);
+  const bounded = await observePortableUi(harness);
+  assert.equal(bounded.editor.examples.length, 4); assert.equal(bounded.editor.avoid.length, 9);
+  assert.equal(bounded.editor.exampleCount, 100); assert.equal(bounded.editor.avoidCount, 100);
+  assert.equal(bounded.editor.examples[0].reply.value.length, 512); assert.equal(bounded.editor.examples[0].reply.length, 900);
+  assert.equal(bounded.editor.examples[0].reply.truncated, true);
+});
+
+test('new draft stage follows every old receipt assertion and cannot submit PUT/POST or manipulate DOM itself', () => {
+  const source = fs.readFileSync(new URL('./verify-firefox-mcp-portable-transfer-flow.mjs', import.meta.url), 'utf8');
+  const start = source.indexOf('proof.draftEdit = {};');
+  assert.ok(start > source.indexOf("check('receipt fault adds no provider/send/auth/terminal activity'"));
+  assert.ok(start > source.indexOf('proof.duplicateUnknown = await runPortableDuplicateUnknownCase'));
+  assert.ok(start > source.indexOf("await noReplay('unknown')"));
+  assert.ok(source.indexOf('await runPortableDraftEditCase({ proof: proof.draftEdit') > start);
+  const stage = source.slice(source.indexOf('export async function runPortableDraftEditCase'), source.indexOf('export async function runCli'));
+  assert.doesNotMatch(stage, /loopbackJson|fetch\(|profileRequest|\.click\(|\.focus\(|scrollIntoView|dispatchEvent|setSelectionRange|armFault|operation:/);
+  assert.doesNotMatch(stage, /focus: true|\.value\s*=/);
+  assert.match(source, /readProfile: id => .*loopbackJson\(`\/profiles\/\$\{id\}`, \{ token, env \}\)/);
+  assert.match(source, /result\.providerTurns = afterDraft\.providerTurns/);
+  assert.match(source, /assert\.equal\(proof\.initial\.seed\.profileVersion, 'head2-draft'/);
+});
+
+test('failed retained-focus assertion preserves attached proof and bounded before/after removal evidence', async t => {
+  const h = await draftStageFixture(t), attached = { draftEdit: {} }, actionTrace = [], originalClick = h.options.click, originalReach = h.options.reach;
+  h.options.proof = attached.draftEdit; h.options.actionTrace = actionTrace;
+  h.options.readUi = async () => {
+    const value = h.ui(); value.settingsFullscreen = true;
+    value.active.tag = value.active.id?.startsWith('reply-') ? 'textarea' : value.active.id ? 'input' : 'body';
+    return value;
+  };
+  h.options.waitUi = async predicate => { const value = await h.options.readUi(); assert.equal(predicate(value), true); return value; };
+  h.options.reach = async selector => {
+    await originalReach(selector);
+    const snapshot = await h.options.readUi();
+    actionTrace.push({ kind: 'native-wheel-unit-only', selector, deltaY: -139, before: 967, after: 828 });
+    return { scrollTop: 828, targetReady: true, focused: false, activeTestid: snapshot.active.testid };
+  };
+  h.options.click = async selector => {
+    await originalClick(selector); actionTrace.push({ kind: 'native-click-unit-only', selector });
+    if (selector.includes('settings-agent-example-remove')) h.focus(null);
+  };
+  await assert.rejects(runPortableDraftEditCase(h.options), /Focus follows a retained input/);
+  const proof = attached.draftEdit;
+  assert.ok(proof.observations.length > 0); assert.equal(proof.removalDiagnostics.length, 2);
+  const [before, after] = proof.removalDiagnostics;
+  assert.equal(before.when, 'before-click-after-reach'); assert.equal(after.when, 'after-click-row-count-wait');
+  assert.deepEqual([before.width, before.height, before.settingsFullscreen], [1280, 600, true]);
+  assert.equal(before.active.tag, 'textarea'); assert.equal(before.active.index, '2');
+  assert.ok(before.retainedIds.includes(before.active.id)); assert.equal(before.selection.end, 'QA draft answer two.'.length);
+  assert.deepEqual(after.active, { tag: 'body', id: null, testid: null, index: null }); assert.equal(after.selection, null);
+  assert.deepEqual(before.retainedIds, after.retainedIds); assert.equal(before.rows.length, 3); assert.equal(after.rows.length, 2);
+  assert.equal(after.rows[1].index, '1'); assert.equal(after.rows[1].controls[1].id, before.retainedIds[1]);
+  assert.ok(after.rows[1].controls.every(control => Object.hasOwn(control, 'rowKeyFromInputId')));
+  assert.equal(before.reachAction.scrollTop, 828); assert.equal(before.reachAction.activeTestid, 'settings-agent-example-reply');
+  assert.equal(after.recentActions.length, 2); assert.equal(after.recentActions.at(-1).kind, 'native-click-unit-only');
+  assert.ok(proof.removalDiagnostics.every(value => !Object.hasOwn(value, 'ui')));
+  assert.equal(h.actions.filter(row => row[0] === 'click' && row[1].includes('settings-agent-example-remove')).length, 1);
+  assert.equal(h.fixture.snapshot().requests.filter(row => row.method === 'PUT' && row.path.endsWith('/draft')).length, 0);
+});
+
+test('failed tone-focus assertion preserves bounded existing-read evidence before rejection without another click', async t => {
+  const h = await draftStageFixture(t), proof = {}, actionTrace = [], originalClick = h.options.click, originalReach = h.options.reach;
+  const group = 'settings-owned-profile-tone', button = `${group}-warm`;
+  h.options.proof = proof; h.options.actionTrace = actionTrace;
+  h.options.readUi = async () => {
+    const value = h.ui(); value.settingsFullscreen = true;
+    value.active.tag = value.active.id === group ? 'div' : value.active.id?.startsWith('reply-') ? 'textarea' : value.active.id ? 'input' : 'body';
+    return value;
+  };
+  h.options.waitUi = async predicate => { const value = await h.options.readUi(); assert.equal(predicate(value), true); return value; };
+  h.options.reach = async selector => {
+    await originalReach(selector);
+    actionTrace.push({ kind: 'native-wheel-unit-only', selector, deltaY: -240 });
+    return { scrollTop: 400, targetReady: true, focused: false, activeTestid: h.ui().active.testid };
+  };
+  h.options.click = async selector => {
+    await originalClick(selector); actionTrace.push({ kind: 'native-click-unit-only', selector });
+    if (selector.includes('profile-tone-')) h.focus(group);
+  };
+  await assert.rejects(runPortableDraftEditCase(h.options), /Tone rerender keeps native button focus or the existing input focus/);
+  assert.equal(proof.toneDiagnostics.length, 2);
+  const [before, after] = proof.toneDiagnostics;
+  assert.equal(before.when, 'before-click-after-reach'); assert.equal(after.when, 'after-click-selected-tone-wait');
+  assert.deepEqual([before.width, before.height, before.settingsFullscreen], [1280, 600, true]);
+  assert.equal(before.active.tag, 'input'); assert.equal(before.active.testid, 'settings-agent-avoid-text'); assert.equal(before.active.index, '1');
+  assert.equal(before.active.id, before.previousInput.id); assert.deepEqual(before.selection, { start: 18, end: 18 });
+  assert.equal(before.selectedTone, `${group}-plain`); assert.equal(after.selectedTone, button);
+  assert.deepEqual(after.active, { tag: 'div', id: group, testid: null, index: null }); assert.equal(after.selection, null);
+  assert.equal(after.expectedButtonId, button); assert.deepEqual(after.previousInput, before.previousInput);
+  assert.equal(before.reachAction.targetReady, true); assert.equal(before.reachAction.activeTestid, 'settings-agent-avoid-text');
+  assert.equal(after.recentActions.length, 2); assert.equal(after.recentActions.at(-1).kind, 'native-click-unit-only');
+  assert.ok(proof.toneDiagnostics.every(value => !Object.hasOwn(value, 'ui')));
+  assert.equal(h.actions.filter(row => row[0] === 'click' && row[1].includes('profile-tone-')).length, 1);
+  assert.equal(h.fixture.snapshot().requests.filter(row => row.method === 'PUT' && row.path.endsWith('/draft')).length, 0);
+});
+
+test('footer geometry rejects the old 18px body strip in overflowing 600/800 forms, but permits short normal-flow forms', () => {
+  for (const height of [600, 800]) {
+    const bottom = height - 67, ui = { editor: { actions: { position: 'sticky', box: { bottom },
+      contentViewport: { top: 200, bottom, clientHeight: bottom - 200, scrollHeight: 2000, scrollTop: 400 } } } };
+    assert.equal(assertPortableDraftFooter(ui), true);
+    ui.editor.actions.box.bottom -= 18;
+    assert.throws(() => assertPortableDraftFooter(ui), /no exposed body strip/);
+    ui.editor.actions.contentViewport.scrollHeight = ui.editor.actions.contentViewport.clientHeight;
+    ui.editor.actions.box.bottom = 400;
+    assert.equal(assertPortableDraftFooter(ui), true, 'A short footer may remain in normal flow above the card bottom');
+    ui.editor.actions.contentViewport = null;
+    assert.throws(() => assertPortableDraftFooter(ui), /geometry/);
+  }
+});
+
+test('footer CSS removes bottom spacing only for the existing editor, retaining scroll/flow without a mask', () => {
+  const css = fs.readFileSync(new URL('../overlay/CSS/eg-desk-surface.uc.css', import.meta.url), 'utf8');
+  const rule = selector => {
+    const marker = `${selector} {`, start = css.indexOf(marker); assert.ok(start >= 0, selector);
+    return css.slice(start + marker.length, css.indexOf('}', start)).trim().replace(/\s+/g, ' ');
+  };
+  assert.equal(rule('.egd-settings-content:has(> .egd-settings-agent-form)'), 'padding-bottom: 0;');
+  assert.equal(rule('.egd-settings-content > .egd-settings-agent-form'), 'margin-bottom: 0;');
+  assert.match(rule('.egd-settings-content'), /overflow-y: auto;/);
+  assert.match(rule('.egd-settings-content'), /padding: 14px 16px 18px;/);
+  assert.equal(rule('.egd-settings-section'), 'margin-bottom: 18px;');
+  assert.equal(rule('.egd-settings-agent-form'), 'display: flex; flex-direction: column; gap: 12px;');
+  const footer = rule('.egd-settings-form-actions');
+  assert.match(footer, /position: sticky;/); assert.match(footer, /bottom: 0;/);
+  assert.doesNotMatch(footer, /overflow|clip|mask|height|position: (?:absolute|fixed)|margin-top: auto/);
+  assert.doesNotMatch(css, /\.egd-settings-form-actions::(?:before|after)/);
 });

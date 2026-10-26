@@ -5284,6 +5284,10 @@
 
 /* --- Agent form --- */
 .egd-settings-agent-form { display: flex; flex-direction: column; gap: 12px; }
+/* Keep the sticky actions flush with this form's scrollport; other Settings
+   sections retain their spacing, and short forms retain normal footer flow. */
+.egd-settings-content:has(> .egd-settings-agent-form) { padding-bottom: 0; }
+.egd-settings-content > .egd-settings-agent-form { margin-bottom: 0; }
 .egd-settings-personality-editor { display: flex; flex-direction: column; gap: 10px; min-width: 0; }
 .egd-settings-personality-row { display: flex; flex-direction: column; gap: 6px; min-width: 0; padding-block: 6px; border-top: 1px solid var(--egd-outline-variant); }
 .egd-settings-personality-row-head,
