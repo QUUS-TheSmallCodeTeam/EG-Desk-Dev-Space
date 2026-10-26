@@ -535,7 +535,8 @@ export async function observeChatReachability(harness) {
       return { shown, rect: rectOf(rect), clip, fullyVisible: shown && inside(rect), hitCount: hits, wheelPoint,
         scaleY: node.offsetHeight ? rect.height / node.offsetHeight : 1,
         disabled: !!node.disabled, readOnly: !!node.readOnly,
-        scrollTop: node.scrollTop, scrollHeight: node.scrollHeight, clientHeight: node.clientHeight };
+        scrollTop: node.scrollTop, scrollHeight: node.scrollHeight, clientHeight: node.clientHeight,
+        nativeScrollTopMax: Number.isFinite(node.scrollTopMax) ? node.scrollTopMax : null };
     };
     const textFragments = [];
     let missingTextRects = 0;
@@ -727,15 +728,29 @@ export async function verifyNarrowChatReachability(harness, size, deadlineMs, re
       transitionDraft = expectedDraft; expectedDraft = DRAFT + NARROW_CHAT_SAMPLE;
       await action('append', NARROW_CHAT_SAMPLE);
       proof.appended = await settle('600-native-sample-appended');
+      requireCheck(result, '600x600: native suffix and caret read back before explicit last-line review',
+        proof.appended.input.focused && proof.appended.input.selectionStart === expectedDraft.length &&
+        proof.appended.input.selectionEnd === expectedDraft.length, proof.appended.input);
+      await shot('chat-native-sample-before-reveal');
+      // Native caret exposure need not scroll all bottom padding into view.
+      // Preserve that observation; explicitly review the new overflow once via
+      // measured wheel steps. Never type the sample or move the caret again.
+      proof.appendedReached = await wheelTo('input', 1, value => chatLastLineReachable(value, { caret: true }),
+        'appended last-line viewport and caret reachable by native wheel');
       requireCheck(result, '600x600: native appended sample preserved at caret end without send',
-        chatLastLineReachable(proof.appended, { caret: true }), proof.appended.input);
+        chatLastLineReachable(proof.appendedReached, { caret: true }), proof.appendedReached.input);
       await shot('chat-native-sample-appended');
       for (let remaining = NARROW_CHAT_SAMPLE.length; remaining > 0; remaining--) {
         const before = await sample('suffix-removal-preflight');
         assert.ok(chatLastLineReachable(before, { caret: true }));
         assert.equal(before.input.value, DRAFT + NARROW_CHAT_SAMPLE.slice(0, remaining));
         transitionDraft = expectedDraft; expectedDraft = DRAFT + NARROW_CHAT_SAMPLE.slice(0, remaining - 1);
-        await action('key', 'Backspace'); await settle('remove-one-owned-suffix-character');
+        await action('key', 'Backspace');
+        const removed = await settle('remove-one-owned-suffix-character');
+        if (!chatLastLineReachable(removed, { caret: true })) {
+          await wheelTo('input', 1, value => chatLastLineReachable(value, { caret: true }),
+            `remaining owned suffix ${remaining - 1}: explicit last-line review`);
+        }
       }
     }
     proof.restored = await settle('original-draft-restored');

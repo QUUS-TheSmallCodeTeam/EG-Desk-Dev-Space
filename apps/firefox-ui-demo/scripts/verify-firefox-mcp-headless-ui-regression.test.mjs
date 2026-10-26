@@ -574,6 +574,48 @@ test('delayed native draft commit is observation-only; an unexpected suffix fail
   assert.ok(changed.captures.includes('600x600-chat-reachability-failure'));
 });
 
+test('R1 appended text/caret is preserved while 2.5px remaining scroll is explicitly reviewed, not waived or retyped', async () => {
+  const unit = unitReachability(), type = unit.harness.typeText, press = unit.harness.press;
+  unit.harness.typeText = async text => {
+    await type(text);
+    Object.assign(unit.state.input, { scrollHeight: 51, clientHeight: 40, scrollTop: 8.5, lineHeight: 24, contentHeight: 37 });
+  };
+  unit.harness.press = async key => {
+    await press(key);
+    if (key === 'Backspace' && unit.state.input.value.endsWith('QA60')) unit.state.input.scrollTop = 8.5;
+  };
+  const proof = await verifyNarrowChatReachability(unit.harness, { width: 600, height: 600 }, deadline, unit.result, unit.options);
+  assert.equal(chatLastLineReachable(proof.appended, { caret: true }), false, 'original strict endpoint rejects R1 raw state');
+  assert.equal(proof.appended.input.scrollTop, 8.5); assert.equal(proof.appended.input.selectionEnd, proof.appended.input.value.length);
+  assert.equal(proof.appendedReached.input.scrollTop, 11); assert.equal(chatLastLineReachable(proof.appendedReached, { caret: true }), true);
+  assert.equal(proof.appendedReached.draft, proof.appended.draft);
+  const typedAt = unit.calls.findIndex(call => call.kind === 'type');
+  assert.deepEqual(unit.calls[typedAt + 1], { kind: 'wheel', input: { x: 200, y: 420, deltaX: 0, deltaY: 3 } });
+  assert.equal(unit.calls.filter(call => call.kind === 'type').length, 1);
+  assert.equal(unit.calls.filter(call => call.key === 'meta+ArrowDown').length, 1, 'no End replay after typing');
+  assert.equal(unit.calls.filter(call => call.key === 'Backspace').length, NARROW_CHAT_SAMPLE.length);
+  assert.ok(unit.captures.includes('600x600-chat-native-sample-before-reveal'));
+  assert.equal(proof.restored.draft, proof.initial.draft); assert.equal(proof.verified, true);
+});
+
+test('R1 raw endpoint remains a failure if measured wheel cannot move, and cleanup never deletes the appended sample', async () => {
+  const unit = unitReachability(), type = unit.harness.typeText, wheel = unit.harness.wheelAt;
+  let appended = false, postAppendWheels = 0;
+  unit.harness.typeText = async text => {
+    await type(text); appended = true;
+    Object.assign(unit.state.input, { scrollHeight: 51, clientHeight: 40, scrollTop: 8.5, nativeScrollTopMax: 8.5 });
+  };
+  unit.harness.wheelAt = async input => {
+    if (appended) { postAppendWheels++; return; }
+    await wheel(input);
+  };
+  await assert.rejects(verifyNarrowChatReachability(unit.harness, { width: 600, height: 600 }, deadline, unit.result, unit.options), /must move/);
+  assert.equal(postAppendWheels, 1); assert.equal(unit.calls.filter(call => call.kind === 'type').length, 1);
+  assert.equal(unit.calls.some(call => call.key === 'Backspace'), false);
+  assert.ok(unit.state.draft.endsWith(NARROW_CHAT_SAMPLE));
+  assert.equal(unit.result.narrowChatReachability[0].verified, false);
+});
+
 test('deadline and unexpected camera movement stop bounded reachability without subsequent native input', async () => {
   const expired = unitReachability(); expired.options.now = () => deadline;
   await assert.rejects(verifyNarrowChatReachability(expired.harness, { width: 600, height: 600 }, deadline, expired.result, expired.options), /deadline/);
