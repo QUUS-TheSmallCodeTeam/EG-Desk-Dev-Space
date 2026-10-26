@@ -1263,6 +1263,7 @@ export const PROFILE_TONE_OPTIONS = [
   { value: 'formal', label: '격식' }, { value: 'playful', label: '유쾌' },
 ];
 export const PROFILE_FORM_LIMITS = { name: 40, role: 80, traits: 6, traitLength: 40, speechNotes: 500,
+  examples: 3, exampleUser: 100, exampleReply: 280, avoid: 8, avoidItem: 80,
   expertise: 8, expertiseLength: 80, instructions: 8000, toolPreferences: 20, toolLength: 64 };
 export const PROFILE_CONFLICT_TEXT = '다른 곳에서 바뀌었습니다. 최신 내용을 불러왔습니다.';
 const PROFILE_LIFECYCLE_LABELS = [['active', '사용 중'], ['draft', '초안'], ['disabled', '사용 중지'], ['archived', '보관됨'], ['deleted', '삭제됨']];
@@ -1417,6 +1418,80 @@ function formList(value) {
   return [...new Set(items)];
 }
 
+// Unlike JSON round-tripping, this retains invalid rows/extra undefined keys
+// for validation. Do not silently repair a saved/input field while copying it.
+function copyProfileFormField(value, seen = new Map()) {
+  if (!value || typeof value !== 'object') return value;
+  if (seen.has(value)) return seen.get(value);
+  const result = Array.isArray(value) ? new Array(value.length) : Object.create(Object.getPrototypeOf(value));
+  seen.set(value, result);
+  for (const key of Object.keys(value)) Object.defineProperty(result, key, {
+    value: copyProfileFormField(value[key], seen), enumerable: true, writable: true, configurable: true,
+  });
+  return result;
+}
+function profileExampleShape(value) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
+  const prototype = Object.getPrototypeOf(value);
+  // Saved JSON and editor objects can come from another JS realm. Recognize
+  // that realm's Object.prototype, not just this module's reference; a class
+  // or invented prototype must not pass, and constructor getters never run.
+  if (prototype !== null) {
+    const constructor = Object.getOwnPropertyDescriptor(prototype, 'constructor')?.value;
+    if (Object.getPrototypeOf(prototype) !== null || typeof constructor !== 'function'
+      || constructor.prototype !== prototype
+      || Function.prototype.toString.call(constructor) !== Function.prototype.toString.call(Object)) return false;
+  }
+  return Object.keys(value).every(key => key === 'user' || key === 'reply');
+}
+function formPersonalityText(value, field, label, max, multiline, add) {
+  if (typeof value !== 'string') { add(field, `${label}은 글자로 입력해 주세요.`); return null; }
+  const text = multiline ? formBlock(value) : formLine(value);
+  if (!text) { add(field, `${label}을 입력해 주세요.`); return null; }
+  if ((multiline ? MULTI_LINE_BAD : SINGLE_LINE_BAD).test(text)) {
+    add(field, multiline ? `${label}에 사용할 수 없는 제어 문자가 있습니다.` : `${label}은 한 줄로 입력해 주세요.`);
+    return null;
+  }
+  if (textLength(text) > max) { add(field, `${label}은 ${max}자 이하로 입력해 주세요.`); return null; }
+  return text;
+}
+function formPersonalityExamples(value, limits, add) {
+  const field = 'personalityExamples';
+  if (value === undefined || value === null) return [];
+  if (!Array.isArray(value)) { add(field, '말투 예시는 질문과 답변을 짝지은 목록으로 입력해 주세요.'); return []; }
+  if (value.length > limits.examples) {
+    add(field, `말투 예시는 ${limits.examples}쌍까지 넣을 수 있습니다. ${limits.examples + 1}행부터는 삭제해 주세요.`);
+    return [];
+  }
+  const pairs = new Map();
+  for (let index = 0; index < value.length; index++) {
+    const item = value[index], label = `말투 예시 ${index + 1}행`;
+    if (!profileExampleShape(item)) { add(field, `${label}에는 질문과 답변만 넣어 주세요.`); return []; }
+    const user = formPersonalityText(item.user, field, `${label}의 질문`, limits.exampleUser, false, add);
+    const reply = formPersonalityText(item.reply, field, `${label}의 답변`, limits.exampleReply, true, add);
+    if (user === null || reply === null) return [];
+    const pair = { user, reply }, key = JSON.stringify(pair);
+    if (!pairs.has(key)) pairs.set(key, pair);
+  }
+  return [...pairs.values()];
+}
+function formPersonalityAvoid(value, limits, add) {
+  const field = 'personalityAvoid';
+  if (value === undefined || value === null) return [];
+  if (!Array.isArray(value)) { add(field, '피할 표현은 문구 목록으로 입력해 주세요.'); return []; }
+  if (value.length > limits.avoid) {
+    add(field, `피할 표현은 ${limits.avoid}개까지 넣을 수 있습니다. ${limits.avoid + 1}행부터는 삭제해 주세요.`);
+    return [];
+  }
+  const items = new Set();
+  for (let index = 0; index < value.length; index++) {
+    const text = formPersonalityText(value[index], field, `피할 표현 ${index + 1}행`, limits.avoidItem, false, add);
+    if (text === null) return [];
+    items.add(text);
+  }
+  return [...items];
+}
+
 /** Editable form fields from a saved body (or an empty new Agent). */
 export function profileFormFromBody(body = null) {
   const avatar = publicProfileAvatar(body?.avatar);
@@ -1427,9 +1502,9 @@ export function profileFormFromBody(body = null) {
     role: typeof body?.role === 'string' ? body.role : '', tone,
     traits: Array.isArray(body?.personality?.traits) ? body.personality.traits.filter(item => typeof item === 'string') : [],
     speechNotes: typeof body?.personality?.speechNotes === 'string' ? body.personality.speechNotes : '',
-    // Saved-only fields have no editor controls; retain just these two, without aliases.
-    ...(Object.hasOwn(body?.personality ?? {}, 'examples') ? { personalityExamples: copy(body.personality.examples) } : {}),
-    ...(Object.hasOwn(body?.personality ?? {}, 'avoid') ? { personalityAvoid: copy(body.personality.avoid) } : {}),
+    // Preserve the established form keys, absence and every row for validation.
+    ...(Object.hasOwn(body?.personality ?? {}, 'examples') ? { personalityExamples: copyProfileFormField(body.personality.examples) } : {}),
+    ...(Object.hasOwn(body?.personality ?? {}, 'avoid') ? { personalityAvoid: copyProfileFormField(body.personality.avoid) } : {}),
     expertise: Array.isArray(body?.expertise) ? body.expertise.filter(item => typeof item === 'string') : [],
     instructions: typeof body?.instructions === 'string' ? body.instructions : '',
     toolPreferences: Array.isArray(body?.toolPreferences) ? body.toolPreferences.filter(item => typeof item === 'string') : [],
@@ -1469,6 +1544,8 @@ export function validateProfileForm(form = {}) {
   else if (traits.some(item => SINGLE_LINE_BAD.test(item) || textLength(item) > limits.traitLength)) add('traits', `성격 특징 하나는 한 줄, ${limits.traitLength}자 이하로 적어 주세요.`);
   const speechNotes = formBlock(form.speechNotes);
   if (MULTI_LINE_BAD.test(speechNotes) || textLength(speechNotes) > limits.speechNotes) add('speechNotes', `말투 메모는 ${limits.speechNotes}자 이하로 적어 주세요.`);
+  const examples = formPersonalityExamples(Object.hasOwn(form, 'personalityExamples') ? form.personalityExamples : undefined, limits, add);
+  const avoid = formPersonalityAvoid(Object.hasOwn(form, 'personalityAvoid') ? form.personalityAvoid : undefined, limits, add);
   const expertise = formList(form.expertise);
   if (expertise.length > limits.expertise) add('expertise', `맡길 일은 ${limits.expertise}개까지 넣을 수 있습니다.`);
   else if (expertise.some(item => SINGLE_LINE_BAD.test(item) || textLength(item) > limits.expertiseLength)) add('expertise', `맡길 일 하나는 한 줄, ${limits.expertiseLength}자 이하로 적어 주세요.`);
@@ -1484,8 +1561,8 @@ export function validateProfileForm(form = {}) {
   return { ok: true, errors, body: {
     name, avatar: avatarValue ? { kind, value: avatarValue, color } : null, role,
     personality: { tone, traits, speechNotes,
-      ...(Object.hasOwn(form, 'personalityExamples') ? { examples: copy(form.personalityExamples) } : {}),
-      ...(Object.hasOwn(form, 'personalityAvoid') ? { avoid: copy(form.personalityAvoid) } : {}),
+      ...(examples.length ? { examples } : {}),
+      ...(avoid.length ? { avoid } : {}),
     }, expertise, instructions, toolPreferences,
     model: form.model && typeof form.model === 'object' ? copy(form.model) : null,
     toolCeiling,
@@ -1560,11 +1637,21 @@ export function agentPeekView({ author = 'Codex', authorAvatar = null, profile =
 }
 
 const PROFILE_DIFF_LABELS = [['name', '담당자 이름'], ['avatar', '아바타'], ['role', '역할'], ['personality.tone', '말투'],
-  ['personality.traits', '성격 특징'], ['personality.speechNotes', '말투 메모'], ['expertise', '맡길 일'],
+  ['personality.traits', '성격 특징'], ['personality.speechNotes', '말투 메모'],
+  ['personality.examples', '말투 예시'], ['personality.avoid', '피할 표현'], ['expertise', '맡길 일'],
   ['instructions', '지침'], ['toolPreferences', '선호 도구'], ['model', '실행 모델'], ['toolCeiling', '쓸 수 있는 도구']];
 function diffValueText(field, value) {
   if (field === 'toolCeiling') return toolCeilingFullText(value);
   if (value === null || value === undefined) return '없음';
+  if (field === 'personality.examples') {
+    if (!Array.isArray(value)) return '확인 안 됨';
+    return value.length ? Array.from(value, (pair, index) => profileExampleShape(pair) && typeof pair.user === 'string' && typeof pair.reply === 'string'
+      ? `${index + 1}. 질문: ${pair.user}\n답변: ${pair.reply}` : `${index + 1}. 확인 안 됨`).join('\n\n') : '없음';
+  }
+  if (field === 'personality.avoid') {
+    if (!Array.isArray(value)) return '확인 안 됨';
+    return value.length ? Array.from(value, item => typeof item === 'string' ? item : '확인 안 됨').join(', ') : '없음';
+  }
   if (field === 'personality.tone') return PROFILE_TONE_OPTIONS.find(option => option.value === value)?.label || '확인 안 됨';
   if (field === 'avatar') return value?.kind === 'emoji' ? `이모지 ${value.value}` : `이니셜 ${value?.value ?? ''}`;
   if (field === 'model') return typeof value?.modelId === 'string' ? value.modelId : '확인 안 됨';
