@@ -13542,7 +13542,7 @@ test('Settings duplicate: account/card/profile/tab/engine/epoch changes reject l
   });
 });
 
-test('Settings duplicate: uncertain or malformed receipt never claims success or automatically retries a possibly-created draft', async t => {
+test('Settings duplicate: uncertain or malformed receipt locks re-click and direct events as well as automatic retry', async t => {
   for (const mode of ['lost-response', 'malformed']) await t.test(mode, async t => {
     const h = await duplicateSettingsHarness(t, { reply: saved => {
       if (mode === 'lost-response') throw new Error('connection lost after write');
@@ -13552,10 +13552,57 @@ test('Settings duplicate: uncertain or malformed receipt never claims success or
     assert.match(h.part('settings-agent-notice').textContent, /결과를 확인하지 못했습니다.*목록에서 사본.*자동으로 다시 시도하지 않습니다/);
     assert.equal(h.part('settings-agent-detail').dataset.profileId, h.sourceId);
     const calls = h.calls.length; h.emit(); await settle();
+    const blocked = h.part('settings-agent-duplicate');
+    assert.equal(blocked.dataset.state, 'unknown'); assert.equal(blocked.getAttribute('disabled'), 'true');
+    blocked.fire('click'); blocked.fire('click'); await settle();
     assert.equal(h.posts().length, 1); assert.equal(h.calls.length, calls); assert.equal(h.refreshes(), 0);
     assert.equal(h.store.list().profiles.length, 2, 'the lost response is not treated as a rolled-back server write');
     assert.deepEqual(h.store.get(h.sourceId), h.before);
+    h.card._settingsShowTab('account'); h.card._settingsShowTab('agents');
+    h.card._settingsOpenProfile(h.sourceId); await settle();
+    assert.equal(h.part('settings-agent-duplicate').dataset.state, 'unknown', 'view navigation and a source reload do not reconcile the write');
+    assert.match(h.part('settings-agent-notice').textContent, /이 설정 창에서는 같은 버전을 다시 복제하지 않습니다/);
+    h.part('settings-agent-duplicate').fire('click'); await settle();
+    assert.equal(h.posts().length, 1); assert.equal(h.store.list().profiles.length, 2);
+    h.state.codex.connected = false; h.emit(); await settle();
+    assert.equal(h.part('settings-agent-detail').dataset.profileId, h.sourceId, 'HTTP detail reload succeeds while SSE is disconnected');
+    assert.equal(h.part('settings-agent-duplicate').dataset.state, 'unknown');
+    assert.equal(h.part('settings-agent-duplicate').getAttribute('disabled'), 'true');
+    h.part('settings-agent-duplicate').fire('click'); await settle();
+    assert.equal(h.posts().length, 1); assert.equal(h.store.list().profiles.length, 2);
+    h.state.codex.connected = true; h.emit(); await settle();
+    const verifiedAuth = { ...h.state.codex.authStatus };
+    for (const auth of [{ ...verifiedAuth, identityStatus: 'unknown' }, { isLoggedIn: true }, { isLoggedIn: false }, null]) {
+      h.state.codex.authStatus = auth; h.emit(); await settle();
+      assert.equal(h.part('settings-agent-duplicate').dataset.state, 'unknown', 'missing/unverified identity never clears the original uncertain outcome');
+      assert.equal(h.part('settings-agent-duplicate').getAttribute('disabled'), 'true');
+      h.part('settings-agent-duplicate').fire('click'); await settle();
+      assert.equal(h.posts().length, 1); assert.equal(h.store.list().profiles.length, 2);
+    }
+    h.state.codex.authStatus = { ...verifiedAuth, accountEmail: 'verified-other@example.test' }; h.emit(); await settle();
+    assert.equal(h.part('settings-agent-duplicate').dataset.state, 'idle', 'a different verified account is not the original operation');
+    h.state.codex.authStatus = verifiedAuth; h.emit(); await settle();
+    assert.equal(h.part('settings-agent-duplicate').dataset.state, 'unknown', 'returning to the original verified account keeps its lock');
+    h.part('settings-agent-duplicate').fire('click'); await settle();
+    assert.equal(h.posts().length, 1); assert.equal(h.store.list().profiles.length, 2);
   });
+});
+
+test('Settings duplicate: abandoning an in-flight write locks only its original target; another profile is an explicit separate operation', async t => {
+  let resolve, receipt, held = true;
+  const h = await duplicateSettingsHarness(t, { reply: saved => held
+    ? (receipt = saved, new Promise(done => { resolve = done; })) : saved });
+  h.part('settings-agent-duplicate').fire('click'); await settle();
+  const other = h.store.createDraft({ name: '별도 원본', role: '다른 작업' });
+  h.card._settingsOpenProfile(other.id); await settle();
+  assert.equal(h.part('settings-agent-duplicate').dataset.state, 'idle');
+  resolve(receipt); await settle();
+  assert.equal(h.part('settings-agent-detail').dataset.profileId, other.id, 'late original success does not publish into the new selection');
+  held = false; h.part('settings-agent-duplicate').fire('click'); await settle();
+  assert.equal(h.posts().length, 2); assert.equal(h.posts()[1].path, `/profiles/${other.id}/duplicate`);
+  h.card._settingsOpenProfile(h.sourceId); await settle();
+  assert.equal(h.part('settings-agent-duplicate').dataset.state, 'unknown');
+  h.part('settings-agent-duplicate').fire('click'); await settle(); assert.equal(h.posts().length, 2);
 });
 
 test('Settings duplicate: definite lifecycle refusal retains the displayed original with an actionable notice and no retry', async t => {

@@ -12568,15 +12568,28 @@
     const refreshCatalog = () => Promise.resolve(bridge()?.loadProfiles?.()).catch(() => {});
     let profileReadSequence = 0;
     let profileDuplicate = null;
+    const duplicateUnknownTargets = new Map();
+    const duplicateUnknownNotice = '복제 결과를 확인하지 못했습니다. Agent 목록에서 사본을 확인해 주세요. 이 설정 창에서는 같은 버전을 다시 복제하지 않습니다. 자동으로 다시 시도하지 않습니다.';
+    const duplicateTargetKey = (detail, revision) => {
+      const account = ChatState.codexAccountKey(state.codex.authStatus);
+      return account ? JSON.stringify([account, detail?.id, revision]) : null;
+    };
+    const duplicateTargetUnknown = (detail, revision) => {
+      const key = duplicateTargetKey(detail, revision);
+      return key ? duplicateUnknownTargets.has(key)
+        : [...duplicateUnknownTargets.values()].some(target => target.profileId === detail?.id && target.revision === revision);
+    };
     const duplicateViewKey = () => {
       const codex = state.codex, thread = codex.threads?.find(item => item.id === codex.activeThreadId);
       return JSON.stringify([settingsProfileAccountKey(), activeTab, agents.mode, agents.profileId, profileReadSequence,
         ChatState.chatThreadEngineId(thread, codex), ChatState.chatThreadEngineProfileId(thread, codex)]);
     };
-    const cancelProfileDuplicate = () => {
+    const cancelProfileDuplicate = ({ confirmed = false } = {}) => {
       const own = profileDuplicate;
       if (!own) return;
       profileDuplicate = null;
+      // Aborting or leaving this view cannot undo a possibly accepted write.
+      if (own.dispatched && !confirmed) duplicateUnknownTargets.set(own.targetKey, { profileId: own.detail.id, revision: own.revision });
       own.scope.dispose();
       if (agents.detail === own.detail && profileReadSequence === own.sequence) agents.busy = false;
     };
@@ -12632,11 +12645,13 @@
     const duplicateProfile = async (detail, revision, control) => {
       const api = bridge(), request = api?.profileRequest, account = settingsProfileAccountKey();
       const shown = detail?.active || detail?.head;
+      const targetKey = duplicateTargetKey(detail, revision);
       if (agents.busy || profileDuplicate || !control?.isConnected || !card.isConnected || activeTab !== 'agents' || agents.mode !== 'detail'
+          || !targetKey || duplicateTargetUnknown(detail, revision)
           || agents.detail !== detail || agents.profileId !== detail.id || agents.detailBinding !== account
           || agents.detailApi !== api || agents.detailRequest !== request || !api?.createProfileTransferScope
           || !ChatState.isProfileId(detail.id) || !Number.isSafeInteger(revision) || revision < 1 || shown?.revision !== revision) return;
-      const own = { detail, sequence: profileReadSequence, key: duplicateViewKey(), scope: api.createProfileTransferScope(), hash: shown.hash };
+      const own = { detail, revision, targetKey, dispatched: false, sequence: profileReadSequence, key: duplicateViewKey(), scope: api.createProfileTransferScope(), hash: shown.hash };
       own.current = () => profileDuplicate === own && card.isConnected && own.scope.current() && own.key === duplicateViewKey()
         && api === bridge() && request === api.profileRequest && agents.detail === detail
         && (detail.active || detail.head)?.revision === revision && (detail.active || detail.head)?.hash === own.hash;
@@ -12646,13 +12661,14 @@
       try {
         if (!own.current()) return;
         // The displayed saved revision, not the latest head or a history comparison.
+        own.dispatched = true;
         const saved = await request.call(api, profilePath(detail.id, '/duplicate'), { method: 'POST', body: { revision }, signal: own.scope.signal });
         if (!own.current()) return;
         const copy = saved?.profile;
         if (!ChatState.isProfileId(saved?.id) || saved.id === detail.id || copy?.id !== saved.id || saved.revision !== 1
             || copy.lifecycle !== 'draft' || copy.activeRevision != null || copy.active != null || copy.headRevision !== 1
             || copy.head?.revision !== 1 || typeof copy.head?.body?.name !== 'string') throw new Error('Unconfirmed duplicate receipt');
-        cancelProfileDuplicate();
+        cancelProfileDuplicate({ confirmed: true });
         profileReadSequence++;
         Object.assign(agents, { mode: 'detail', profileId: copy.id, detail: copy, detailBinding: account, detailApi: api, detailRequest: request,
           revisions: [{ revision: 1, parentRevision: null, createdAt: copy.head.createdAt }], diff: null, busy: false, errors: [],
@@ -12661,13 +12677,14 @@
         void refreshCatalog();
       } catch (error) {
         if (!own.current()) return;
-        cancelProfileDuplicate();
         const status = error?.httpStatus ?? error?.status;
-        agents.notice = Number.isInteger(status) && status >= 400 && status < 500 && ![408, 499].includes(status)
+        const refused = Number.isInteger(status) && status >= 400 && status < 500 && ![408, 499].includes(status);
+        cancelProfileDuplicate({ confirmed: refused });
+        agents.notice = refused
           ? ['PROFILE_NOT_FOUND', 'PROFILE_REVISION_NOT_FOUND'].includes(error.code) ? '원본 Agent 또는 표시 중인 버전을 찾지 못했습니다. 목록에서 다시 확인해 주세요.'
             : error.code === 'PROFILE_LIFECYCLE_CONFLICT' ? '지금 상태에서는 이 Agent를 복제할 수 없습니다. 목록에서 다시 확인해 주세요.'
               : ChatState.profileRequestErrorText(error)
-          : '복제 결과를 확인하지 못했습니다. 다시 복제하기 전에 Agent 목록에서 사본을 확인해 주세요. 자동으로 다시 시도하지 않습니다.';
+          : duplicateUnknownNotice;
         renderAgentsTab();
       } finally {
         if (profileDuplicate === own) cancelProfileDuplicate();
@@ -12783,8 +12800,8 @@
       } catch (error) { await reloadAfter(error, detail.id); }
     };
 
-    const noticeLine = () => agents.notice
-      ? el('div', { class: 'egd-settings-notice', role: 'status', data: { testid: 'settings-agent-notice' } }, agents.notice) : null;
+    const noticeLine = (notice = agents.notice) => notice
+      ? el('div', { class: 'egd-settings-notice', role: 'status', data: { testid: 'settings-agent-notice' } }, notice) : null;
 
     const renderAgentList = () => {
       const reported = bridge()?.profileCatalog?.() || { status: 'unavailable', profiles: [] };
@@ -12846,6 +12863,7 @@
       const status = ChatState.profileStatusView(detail);
       const shownRevision = detail.active || detail.head;
       const duplicateRevision = shownRevision?.revision;
+      const duplicateUnknown = duplicateTargetUnknown(detail, duplicateRevision);
       const body = shownRevision?.body || {};
       const editable = ['draft', 'active', 'disabled'].includes(detail.lifecycle);
       const pendingDraft = editable && (detail.hasDraft || detail.lifecycle !== 'active');
@@ -12872,8 +12890,8 @@
       const actions = el('div', { class: 'egd-settings-detail-actions' },
         editable ? el('button', { class: 'egd-settings-btn', disabled: agents.busy ? 'true' : null, onclick: () => startEdit(detail) }, '편집') : null,
         detail.lifecycle !== 'deleted' ? el('button', { class: 'egd-settings-btn', type: 'button',
-          data: { testid: 'settings-agent-duplicate', profileId: detail.id, revision: String(duplicateRevision || ''), state: profileDuplicate ? 'pending' : 'idle' },
-          disabled: agents.busy || !Number.isSafeInteger(duplicateRevision) || !bridge()?.createProfileTransferScope ? 'true' : null,
+          data: { testid: 'settings-agent-duplicate', profileId: detail.id, revision: String(duplicateRevision || ''), state: duplicateUnknown ? 'unknown' : profileDuplicate ? 'pending' : 'idle' },
+          disabled: agents.busy || duplicateUnknown || !duplicateTargetKey(detail, duplicateRevision) || !Number.isSafeInteger(duplicateRevision) || !bridge()?.createProfileTransferScope ? 'true' : null,
           onclick: ev => { void duplicateProfile(detail, duplicateRevision, ev.currentTarget); } }, profileDuplicate ? '복제 중…' : '복제해서 새로 만들기') : null,
         pendingDraft ? el('button', { class: 'egd-settings-btn egd-settings-btn-primary', data: { testid: 'settings-agent-activate' }, disabled: agents.busy ? 'true' : null,
           'aria-describedby': readiness?.countText ? readinessCountId : null,
@@ -12893,7 +12911,7 @@
             el('div', { class: 'egd-settings-detail-name' }, body.name || 'Agent', status.example ? el('span', { class: 'egd-settings-badge' }, '예시') : null),
             el('div', { class: 'egd-settings-agent-desc' }, body.role || '역할 미설정'),
             el('div', { class: 'egd-settings-agent-status' }, status.detail ? `${status.label} · ${status.detail}` : status.label))),
-        noticeLine(),
+        noticeLine(duplicateUnknown ? duplicateUnknownNotice : agents.notice),
         readinessPanel,
         detail.hasDraft && detail.activeRevision ? el('div', { class: 'egd-settings-callout' },
           `저장했지만 아직 쓰지 않은 초안이 있습니다 (버전 ${detail.headRevision}).`,
