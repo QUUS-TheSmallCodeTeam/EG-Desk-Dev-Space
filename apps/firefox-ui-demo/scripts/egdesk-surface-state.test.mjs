@@ -8302,6 +8302,26 @@ test('await task list styles use approved tokens, stay small, and outrank the HU
     'the button rules come after the HUD reset with the same weight');
 });
 
+test('Task board height boundary: summary stays fixed while its capped list shrinks into the conversation remainder', () => {
+  const pane = cssDeclarationsFor(surfaceCss, '.egd-codex-conversation-pane');
+  assert.equal(pane.flex, '1');
+  assert.equal(pane['min-height'], '0'); assert.equal(pane.overflow, 'hidden');
+  assert.equal(cssDeclarationsFor(surfaceCss, '.egd-codex-footer')['flex-shrink'], '0');
+  const board = cssDeclarationsFor(surfaceCss, '.egd-task-board');
+  assert.equal(board.flex, '0 1 auto'); assert.equal(board['min-height'], '0');
+  assert.equal(board.display, 'flex'); assert.equal(board['flex-direction'], 'column');
+  const summary = cssDeclarationsFor(surfaceCss, 'button.egd-task-board-summary');
+  assert.equal(summary.flex, '0 0 auto'); assert.equal(summary['min-height'], '32px');
+  const list = cssDeclarationsFor(surfaceCss, '.egd-task-board-list');
+  assert.equal(list.flex, '0 1 auto'); assert.equal(list['min-height'], '0');
+  assert.equal(list['max-height'], '220px'); assert.equal(list['overflow-y'], 'auto');
+  assert.equal(list['overscroll-behavior'], 'contain');
+  for (const rule of [board, summary, list]) {
+    assert.equal(rule.position, undefined); assert.equal(rule['z-index'], undefined);
+    assert.equal(rule.overflow, undefined, 'do not hide the clipping or layer controls over adjacent content');
+  }
+});
+
 // CHAT-06 Await, finished: the plan approval card (helper contract: chat.event
 // 'plan.proposed', SSE task.plan, GET /tasks/plans[?planId=], POST
 // /tasks/plans/:planId/approve|reject {}), task approvals (POST /tasks/approval),
