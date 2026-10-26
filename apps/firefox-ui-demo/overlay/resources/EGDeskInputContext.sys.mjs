@@ -65,6 +65,48 @@ export function assertInputContextScope(reference, scope) {
   }
 }
 
+// Snapshot the read boundary, never remap a client ID or grant permission.
+// Restored rooms now use the same stable pair for reads, resume and new
+// captures. The helper still verifies its durable binding/account/profile.
+export function inputReadContext(reference, currentScope, { thread, accountKey = null, cachedAccountKey = null } = {}) {
+  const origin = reference?.contextScope, retained = thread?.retainedNativeBinding;
+  assertInputContextScope(reference, currentScope);
+  const restored = currentScope?.engineId === 'codex' && !!retained?.conversationId;
+  if (restored) {
+    if (origin?.engineId !== 'codex'
+        || !currentScope.engineProfileId || origin.engineProfileId !== currentScope.engineProfileId
+        || !currentScope.conversationId || thread?.conversationId !== currentScope.conversationId
+        || retained?.conversationId !== currentScope.conversationId
+        || !origin.clientThreadId || retained.clientThreadId !== origin.clientThreadId || currentScope.clientThreadId !== origin.clientThreadId
+        || origin.conversationId && origin.conversationId !== currentScope.conversationId
+        || !accountKey || thread.bindingState !== 'verified' || thread.bindingAccountKey !== accountKey
+        || retained.accountKey !== accountKey || cachedAccountKey && cachedAccountKey !== accountKey
+        || !reference.sourceId || reference.snapshotId !== reference.sourceId || !reference.hash) {
+      throw new Error('복원된 대화와 고정 캡처의 원래 연결을 확인하지 못했습니다.');
+    }
+  }
+  // Freeze copies of both current and retained scopes. Recomputing this value
+  // after an await detects mutation without rewriting the persisted reference.
+  return freeze({ scope: clone(currentScope), restored, fence: {
+    threadId: thread?.id || null, currentScope: clone(currentScope), accountKey, cachedAccountKey,
+    bindingAccountKey: thread?.bindingAccountKey || null, bindingState: thread?.bindingState || null,
+    retained: clone(retained || null), reference: clone({ sourceId: reference?.sourceId, snapshotId: reference?.snapshotId,
+      hash: reference?.hash, contextScope: origin || null }),
+  } });
+}
+
+export function assertRestoredInputCapture(snapshot, capture, reference, context) {
+  if (!context.restored) return;
+  const scope = context.scope, deliveredConversation = snapshot.delivered?.binding?.conversationId;
+  if (snapshot.id !== reference.sourceId || snapshot.id !== reference.snapshotId || snapshot.hash !== reference.hash
+      || capture?.sourceId !== snapshot.id || capture.hash !== snapshot.hash || capture.clientThreadId !== scope.clientThreadId
+      || capture.engine?.engineId !== scope.engineId || capture.engine?.engineProfileId !== scope.engineProfileId
+      || snapshot.delivered && deliveredConversation !== scope.conversationId
+      || !(deliveredConversation === scope.conversationId || snapshot.bindings?.some(binding => binding?.conversationId === scope.conversationId))) {
+    throw new Error('복원된 대화와 고정 캡처의 원래 연결을 확인하지 못했습니다.');
+  }
+}
+
 export function capturedInputReference(source, receipt, contextScope = null) {
   if (!receipt?.sourceId || receipt.snapshotId !== receipt.sourceId || !receipt.hash || !receipt.sourceRef
       || receipt.id !== source.id) throw new Error('캡처 저장 확인이 올바르지 않습니다.');
@@ -202,8 +244,72 @@ export const inputEvidenceKey = reference => {
   return JSON.stringify([reference.sourceId, reference.hash, range.startLine, range.endLine]);
 };
 
+// Tracking is separate from the immutable capture. Absence is not freshness,
+// and an active entry only describes the helper's declared tracking boundary.
+export function inputSourceTrackingConversation(snapshot, capture, referenceScope, scope) {
+  const conversationId = scope?.conversationId;
+  if (scope?.engineId !== 'codex' || !conversationId || capture?.sourceId !== snapshot.id || capture.hash !== snapshot.hash) return null;
+  const claims = [capture.engine, referenceScope].filter(Boolean);
+  if (!claims.length || claims.some(claim => claim.engineId !== scope.engineId || claim.engineProfileId !== scope.engineProfileId
+      || claim.clientThreadId && claim.clientThreadId !== scope.clientThreadId || claim.conversationId && claim.conversationId !== conversationId)) return null;
+  if (capture.clientThreadId && capture.clientThreadId !== scope.clientThreadId) return null;
+  const deliveredConversation = snapshot.delivered?.binding?.conversationId;
+  // One capture can be bound to A and B with different tracking states. Never
+  // label B's historical payload using A's state, even when the source matches.
+  if (snapshot.delivered && deliveredConversation !== conversationId) return null;
+  return deliveredConversation === conversationId || snapshot.bindings?.some(binding => binding?.conversationId === conversationId)
+    ? conversationId : null;
+}
+
+export function inputSourceChangeState(response, { conversationId, sourceId }) {
+  if (!conversationId || !sourceId || response?.conversationId !== conversationId || !Array.isArray(response.sources)) {
+    throw new Error('Source tracking response does not match this conversation');
+  }
+  const matches = response.sources.filter(source => source?.sourceId === sourceId);
+  if (!matches.length) return Object.freeze({ state: 'missing', conversationId, sourceId });
+  if (matches.length !== 1 || !['active', 'stale'].includes(matches[0].state)) throw new Error('Invalid source tracking state');
+  const source = matches[0];
+  const changedAt = source.state === 'stale' && Number.isFinite(source.changedAt) && source.changedAt >= 0
+    && Number.isFinite(new Date(source.changedAt).getTime()) ? source.changedAt : null;
+  return Object.freeze({ state: source.state, conversationId, sourceId, changedAt,
+    reason: source.state === 'stale' ? ['fileChanged', 'navigated'].includes(source.reason) ? source.reason : 'unknown' : null });
+}
+
+export function updateInputSourceChange(node, value, scrollBody = null) {
+  const messages = {
+    loading: '원본 변경 정보 확인 중', active: '추적 범위에서 감지된 변경 없음',
+    missing: '변경 추적 기록 없음 · 최신 여부 미확인', failed: '원본 변경 정보를 확인하지 못했습니다',
+  };
+  const text = value.state === 'stale' ? ({ fileChanged: '캡처 후 파일 변경 감지', navigated: '캡처 후 브라우저 페이지 이동 감지' })[value.reason]
+    || '캡처 후 원본 변경 감지' : messages[value.state] || messages.failed;
+  const before = scrollBody?.getBoundingClientRect?.(), top = scrollBody?.scrollTop, left = scrollBody?.scrollLeft;
+  const scale = before?.height / scrollBody?.offsetHeight;
+  const anchor = top > 0 && scale > 0 ? [...scrollBody.querySelectorAll('[data-testid="chat-input-delivery"], [data-testid="chat-input-source-details"], pre')]
+    .find(part => part.getBoundingClientRect().bottom > before.top) : null;
+  const offset = anchor ? anchor.getBoundingClientRect().top - before.top : null;
+  node.setAttribute('data-state', value.state);
+  node.setAttribute('data-source-id', value.sourceId);
+  node.setAttribute('data-conversation-id', value.conversationId || '');
+  node.setAttribute('data-reason', value.state === 'stale' ? value.reason : '');
+  // Only this line changes. The source, delivery, selection and focused input
+  // nodes are never replaced or focused by a tracking response.
+  node.textContent = text;
+  if (value.state === 'stale' && Number.isFinite(value.changedAt)) {
+    const time = node.ownerDocument.createElement('time');
+    time.setAttribute('data-testid', 'chat-input-change-detected-at');
+    time.setAttribute('datetime', new Date(value.changedAt).toISOString());
+    time.textContent = new Date(value.changedAt).toLocaleString();
+    node.appendChild(node.ownerDocument.createTextNode(' · 감지 시각 ')); node.appendChild(time);
+  }
+  if (scrollBody) {
+    const next = anchor ? scrollBody.scrollTop + (anchor.getBoundingClientRect().top - scrollBody.getBoundingClientRect().top - offset) / scale : top;
+    if (Number.isFinite(next) && scrollBody.scrollTop !== next) scrollBody.scrollTop = next;
+    if (Number.isFinite(left) && scrollBody.scrollLeft !== left) scrollBody.scrollLeft = left;
+  }
+}
+
 // Small DOM projections shared by the draft preview and historical inspector.
-export function inputSnapshotView(doc, snapshot, { includeDelivered = true } = {}) {
+export function inputSnapshotView(doc, snapshot, { includeDelivered = true, sourceChange = null } = {}) {
   const make = (tag, value, attributes = {}) => {
     const node = doc.createElement(tag);
     for (const [key, val] of Object.entries(attributes)) node.setAttribute(key, String(val));
@@ -215,6 +321,11 @@ export function inputSnapshotView(doc, snapshot, { includeDelivered = true } = {
   const range = snapshot.range ? ` · ${snapshot.range.startLine}–${snapshot.range.endLine} / ${snapshot.range.totalLines ?? '?'}행` : '';
   root.appendChild(make('p', `원문 캡처${range}${snapshot.content.truncated ? ' · 일부 캡처' : ''}${snapshot.binary ? ' · 텍스트 보기 없음' : ''}`,
     { role: 'status', class: 'egd-input-snapshot-status', 'data-testid': 'chat-input-source-label' }));
+  if (sourceChange) {
+    const change = make('p', null, { role: 'status', class: 'egd-input-snapshot-status', 'data-testid': 'chat-input-source-change' });
+    updateInputSourceChange(change, sourceChange);
+    root.appendChild(change);
+  }
   if (includeDelivered && snapshot.storedRole === 'source') {
     if (!snapshot.delivered) root.appendChild(make('p', '전달 기록 없음', { class: 'egd-input-snapshot-status', 'data-testid': 'chat-input-delivery-status' }));
     else {

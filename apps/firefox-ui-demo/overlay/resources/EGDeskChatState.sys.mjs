@@ -402,9 +402,13 @@ export function detachNativeThread(thread, savedAccountKey, nonce) {
   const accountKey = activeId || !prior
     ? (Object.hasOwn(thread, 'bindingAccountKey') ? thread.bindingAccountKey : savedAccountKey)
     : prior?.accountKey ?? null;
+  // An old reducer could restore the CID while leaving the isolation nonce
+  // active. Do not overwrite its intact original pair on another detach.
+  const sameRetainedPair = prior?.conversationId === conversationId && prior?.accountKey === accountKey
+    && typeof prior?.clientThreadId === 'string' && !!prior.clientThreadId.trim();
   const retained = conversationId || prior || thread.messages?.length ? {
     conversationId,
-    clientThreadId: activeId || !prior ? clientThreadBinding(thread) : prior.clientThreadId,
+    clientThreadId: sameRetainedPair ? prior.clientThreadId : activeId || !prior ? clientThreadBinding(thread) : prior.clientThreadId,
     accountKey: accountKey || null,
     reason: conversationId && knownCodexAccountKey(accountKey) ? 'awaiting-identity' : 'ownership-unverified',
   } : null;
@@ -421,10 +425,16 @@ export function reconcileNativeThread(thread, authStatus) {
   const key = codexAccountKey(authStatus);
   const retained = thread.retainedNativeBinding;
   if (!key || !retained || thread.conversationId) return thread;
-  if (typeof retained.conversationId === 'string' && retained.conversationId && knownCodexAccountKey(retained.accountKey) && retained.accountKey === key) {
-    return { ...thread, conversationId: retained.conversationId, bindingAccountKey: retained.accountKey, bindingState: 'verified' };
+  if (typeof retained.conversationId === 'string' && retained.conversationId.trim()
+      && typeof retained.clientThreadId === 'string' && retained.clientThreadId.trim()
+      && knownCodexAccountKey(retained.accountKey) && retained.accountKey === key) {
+    // Matching local identity only permits the helper's ownership check. Its
+    // durable resume contract requires the original client/native pair.
+    return { ...thread, conversationId: retained.conversationId, clientBindingId: retained.clientThreadId,
+      bindingAccountKey: retained.accountKey, bindingState: 'verified' };
   }
-  return { ...thread, bindingState: 'quarantined', retainedNativeBinding: { ...retained, reason: knownCodexAccountKey(retained.accountKey) ? 'identity-mismatch' : 'ownership-unverified' } };
+  return { ...thread, bindingState: 'quarantined', retainedNativeBinding: { ...retained,
+    reason: knownCodexAccountKey(retained.accountKey) && retained.accountKey !== key ? 'identity-mismatch' : 'ownership-unverified' } };
 }
 export const nativeBindingHeld = thread => !!thread?.retainedNativeBinding && !thread.conversationId;
 export function canResumeNativeThread(thread, authStatus, context = {}) {

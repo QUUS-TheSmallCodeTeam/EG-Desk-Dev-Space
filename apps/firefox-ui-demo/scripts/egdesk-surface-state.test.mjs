@@ -2,6 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { existsSync, readFileSync, rmSync } from 'node:fs';
 import { Readable } from 'node:stream';
+import { createHash } from 'node:crypto';
 import { compileFunction } from 'node:vm';
 import { readSurfaceSource } from './egdesk-surface-source.mjs';
 import { initialSurfaceMode, shouldFocusInitialBrowser, planBoardProjection, snapshotBoardProjection, remapMemberReferences, recoverDeskSnapshot, canPersistDeskSession, ownedProjectionMembers, missingProjectionMembers, fitSurfaceCamera, surfaceSemanticLevel, surfaceProximityClusters } from '../overlay/resources/EGDeskSurfaceState.sys.mjs';
@@ -32,6 +33,8 @@ import { publicModelRows } from '../helper/codex-model-catalog.mjs';
 import { gateMatchesEvent } from '../helper/egdesk-await-router.mjs';
 import { publicBrowserLocation } from '../helper/egdesk-event-bus.mjs';
 import { composeAwaitResume } from '../helper/egdesk-await-resume.mjs';
+import { CodexChatRuntime } from '../helper/codex-chat-runtime.mjs';
+import { createCodexEngineAdapter } from '../helper/codex-engine-adapter.mjs';
 import { contrastRatio, mediaApplies, readAvatarTones, readCssRules, readRootProperties, resolveColor } from '../overlay/resources/EGDeskDesignTokens.sys.mjs';
 
 // Resolve only the non-colour state tokens used by the CSS assertions below;
@@ -2543,6 +2546,7 @@ test('verified matching ownership resumes; a mismatch retains the record without
   const staged = Chat.detachNativeThread(savedNativeRoom(), Chat.codexAccountKey(authA), 'restore');
   const match = Chat.reconcileNativeThread(staged, authA);
   assert.equal(match.conversationId, 'native-a');
+  assert.equal(Chat.clientThreadBinding(match), staged.retainedNativeBinding.clientThreadId, 'verified restoration restores the stored client/native pair');
   assert.equal(Chat.canResumeNativeThread(match, authA), true);
   const mismatch = Chat.reconcileNativeThread(staged, authB);
   assert.equal(mismatch.conversationId, null);
@@ -2551,6 +2555,65 @@ test('verified matching ownership resumes; a mismatch retains the record without
   assert.deepEqual(mismatch.messages, savedNativeRoom().messages);
   const verifiedReturn = Chat.reconcileNativeThread(mismatch, authA);
   assert.equal(Chat.canResumeNativeThread(verifiedReturn, authA), true);
+});
+
+test('native restore root: three restarts use a temporary isolation nonce only until the same owner is verified', () => {
+  const key = Chat.codexAccountKey(authA);
+  let thread = { ...savedNativeRoom(), engineId: 'codex', clientBindingId: 'server-stable-client', bindingAccountKey: key };
+  const messages = structuredClone(thread.messages);
+  for (const nonce of ['first', 'second', 'third']) {
+    const held = Chat.detachNativeThread(thread, key, nonce);
+    assert.equal(held.conversationId, null); assert.equal(held.clientBindingId, `kept-local-room-binding-${nonce}`);
+    assert.equal(held.retainedNativeBinding.clientThreadId, 'server-stable-client');
+    const unknown = Chat.reconcileNativeThread(held, { ...authA, identityStatus: 'unknown' });
+    assert.equal(unknown.conversationId, null); assert.equal(unknown.clientBindingId, held.clientBindingId);
+    thread = Chat.reconcileNativeThread(unknown, authA);
+    assert.equal(thread.conversationId, 'native-a'); assert.equal(thread.clientBindingId, 'server-stable-client');
+    assert.deepEqual(thread.messages, messages);
+    assert.equal(Chat.chatContextRequestScope(thread).clientThreadId, 'server-stable-client', 'a new capture after restore uses the stable server binding too');
+    thread = JSON.parse(JSON.stringify(thread));
+  }
+});
+
+test('native restore root: repeated detach keeps an intact same-owner/CID pair but never borrows it for another owner or CID', () => {
+  const key = Chat.codexAccountKey(authA);
+  const original = { ...savedNativeRoom(), clientBindingId: 'server-stable-client', bindingAccountKey: key };
+  const held = Chat.detachNativeThread(original, key, 'first');
+  const heldAgain = Chat.detachNativeThread(held, key, 'second');
+  assert.equal(heldAgain.retainedNativeBinding.clientThreadId, 'server-stable-client');
+  // A snapshot made by the old reducer may still carry the intact original
+  // pair beside an active temporary nonce. Preserve that evidence, not a list.
+  const oldReducerState = { ...held, conversationId: 'native-a', bindingAccountKey: key, bindingState: 'verified' };
+  assert.equal(Chat.detachNativeThread(oldReducerState, key, 'third').retainedNativeBinding.clientThreadId, 'server-stable-client');
+  const otherCid = { ...oldReducerState, conversationId: 'native-b', clientBindingId: 'server-client-b' };
+  const otherOwner = { ...oldReducerState, clientBindingId: 'server-client-b', bindingAccountKey: Chat.codexAccountKey(authB) };
+  for (const thread of [otherCid, otherOwner]) {
+    const next = Chat.detachNativeThread(thread, key, 'next');
+    assert.equal(next.retainedNativeBinding.clientThreadId, 'server-client-b');
+    assert.equal(next.retainedNativeBinding.conversationId, thread.conversationId);
+    assert.equal(next.retainedNativeBinding.accountKey, thread.bindingAccountKey);
+  }
+});
+
+test('native restore root: A to B to A keeps B isolated and old epochs invalid even after the stable pair returns', () => {
+  const key = Chat.codexAccountKey(authA), epoch = Chat.createChatEpochScope(), old = epoch.begin('codex');
+  const original = { ...savedNativeRoom(), engineId: 'codex', clientBindingId: 'server-stable-client', bindingAccountKey: key };
+  epoch.reset('codex');
+  const b = Chat.reconcileNativeThread(Chat.detachNativeThread(original, key, 'B'), authB);
+  assert.equal(b.conversationId, null); assert.notEqual(b.clientBindingId, 'server-stable-client');
+  assert.equal(Chat.canResumeNativeThread(b, authB), false);
+  assert.equal(Chat.canAdmitChatEvent(Chat.createChatProtocolState(), [b], { conversationId: 'native-a', clientThreadId: 'server-stable-client' }), false);
+  assert.equal(b.retainedNativeBinding.accountKey, key);
+  const duringB = epoch.begin('codex'); epoch.reset('codex');
+  const a = Chat.reconcileNativeThread(Chat.detachNativeThread(JSON.parse(JSON.stringify(b)), Chat.codexAccountKey(authB), 'A'), authA);
+  assert.equal(a.clientBindingId, 'server-stable-client'); assert.equal(a.conversationId, 'native-a');
+  assert.equal(epoch.valid(old), false); assert.equal(epoch.valid(duringB), false);
+  for (const clientThreadId of [null, undefined, '', ' ']) {
+    const incomplete = { ...b, retainedNativeBinding: { ...b.retainedNativeBinding, clientThreadId } };
+    const denied = Chat.reconcileNativeThread(incomplete, authA);
+    assert.equal(denied.conversationId, null); assert.equal(denied.clientBindingId, b.clientBindingId);
+    assert.equal(Chat.canResumeNativeThread(denied, authA), false, 'a missing original client cannot be guessed from the UI room ID');
+  }
 });
 
 test('restore-before-auth and auth-before-restore require the same positive ownership match', () => {
@@ -3562,17 +3625,20 @@ test('backend run.context hydration restores fixed input/output captures, packet
 test('production immutable read omits a default endLine so short captures remain readable', async () => {
   const body = surfaceSource.match(/      async readInput\(reference, options = \{\}\) \{([\s\S]*?)\n      \},/)?.[1];
   assert.ok(body);
-  const run = compileFunction(`${declaration('getCodexThreadById')}\nreturn (async () => {${body}\n})();`, ['reference', 'options', 'epochScope', 'fetchJson', 'InputContext', 'boardNotice', 'state', 'ChatState']);
+  const run = compileFunction(`${declaration('getCodexThreadById')}\nreturn (async () => {${body}\n})();`, ['reference', 'options', 'epochScope', 'fetchJson', 'InputContext', 'boardNotice', 'state', 'ChatState', 'document']);
   const scope = Chat.createChatEpochScope();
   const state = { codex: { threads: [{ id: 'original-room', engineId: 'codex', clientBindingId: 'original-wire' }] } };
   const reference = { sourceId: 'fixed', hash: 'hash' };
   const response = { capture: { sourceId: 'fixed', hash: 'hash', sourceRef: {}, capturedAt: 100, captureScope: { type: 'file' } },
     source: { role: 'source', mime: 'text/plain', hash: 'hash', rangeHash: 'range', text: 'one line', range: { startLine: 1, endLine: 1, totalLines: 1 }, nextLine: null }, delivered: null, bindings: [] };
   const urls = [];
-  const returned = await run(reference, { threadId: 'original-room' }, scope, async url => { urls.push(url); return response; }, InputContext, () => assert.fail('short source should not error'), state, Chat);
+  const listeners = new Set(), bridge = { subscribe: fn => { listeners.add(fn); fn(state.codex); return () => listeners.delete(fn); } };
+  const returned = await run.call(bridge, reference, { threadId: 'original-room' }, scope, async url => { urls.push(url); return response; }, InputContext,
+    () => assert.fail('short source should not error'), state, Chat, { getElementById: () => null });
   assert.equal(urls[0], '/context/captures/fixed?startLine=1&engineId=codex&engineProfileId=codex-default&clientThreadId=original-wire');
   assert.equal(new URL(urls[0], 'http://local').searchParams.has('endLine'), false, 'short captures still omit a default endLine');
   assert.equal(returned.source.text, 'one line');
+  assert.equal(listeners.size, 0);
   const binary = InputContext.storedSnapshotForView({ ...response, source: { ...response.source, rangeHash: null, text: null, range: null, byteLength: 100 } }, reference);
   assert.equal(binary.binary, true);
   assert.equal(binary.content.text, null, 'binary source is not fabricated text');
@@ -4020,59 +4086,606 @@ test('snapshot inspector keeps concise source/delivery labels and folds paths, h
   assert.ok(rendered.all('pre').some(child => child.textContent === snapshot.delivered.text));
 });
 
-test('production inspector pagination is outside the sole scroll body and makes no camera or model request', async () => {
-  const code = surfaceSource.match(/      async inspectInput\(threadId, reference, options = \{\}\) \{([\s\S]*?)\n      \},/)?.[1];
-  assert.ok(code);
-  const inspect = compileFunction(`return (async () => {${code}\n})();`, ['threadId', 'reference', 'options', 'getCodexThreadById', 'state', 'InputContext', 'openChatInputPanel', 'el', 'document']);
-  const panel = markdownDOM(), body = panel.ownerDocument.createElement('div');
-  const doc = panel.ownerDocument;
-  const el = (tag, props = {}, ...children) => {
-    const node = doc.createElement(tag); node.focus = () => {};
-    for (const [key, value] of Object.entries(props)) {
-      if (key === 'data') for (const [name, val] of Object.entries(value)) node.setAttribute(`data-${name}`, val);
-      else if (key === 'onclick') node.addEventListener('click', value);
-      else if (value != null) node.setAttribute(key, value);
-    }
-    for (const child of children) if (child != null) node.appendChild(typeof child === 'string' ? doc.createTextNode(child) : child);
+function inputInspectorHarness({ engineId = 'codex', capture = null, beforeTracking = null, trackingTransform = null } = {}) {
+  const document = settingsFakeDocument(), calls = [], pending = [], listeners = new Set(), notices = [];
+  const timers = new Map(), trackingRuns = [];
+  let timerId = 0;
+  const window = {
+    setTimeout: (fn, ms) => { const id = ++timerId; timers.set(id, { fn, ms }); return id; },
+    clearTimeout: id => timers.delete(id),
+  };
+  const matches = (node, selector) => {
+    const part = selector.trim();
+    const attr = part.match(/^\[data-testid=["']([^"']+)["']\]$/);
+    return attr ? node.dataset.testid === attr[1] : part.startsWith('.') ? node.className.split(/\s+/).includes(part.slice(1))
+      : part.startsWith('#') ? node.getAttribute('id') === part.slice(1) : node.tagName.toLowerCase() === part.toLowerCase();
+  };
+  const decorate = node => {
+    node.ownerDocument = document; node.scrollTop = 0; node.scrollLeft = 0;
+    node.getBoundingClientRect = () => ({ top: 0, bottom: 0, height: 0 });
+    node.querySelectorAll = selector => settingsNodes({ children: node.children }, child => selector.split(',').some(part => matches(child, part)));
+    node.querySelector = selector => node.querySelectorAll(selector)[0] || null;
     return node;
   };
-  const response = { capture: { sourceId: 's', hash: 'h', capturedAt: 1, sourceRef: {}, captureScope: { type: 'file' } },
-    source: { role: 'source', hash: 'h', rangeHash: 'r', mime: 'text/plain', text: 'immutable', range: { startLine: 1, endLine: 200, totalLines: 610 }, nextLine: 201 }, delivered: null, bindings: [] };
-  let reads = 0;
-  await inspect.call({ readInput: async () => { reads++; return response; } }, 'thread', { sourceId: 's', snapshotId: 's', hash: 'h' }, {},
-    () => ({ id: 'thread' }), { codex: {} }, InputContext, () => panel.appendChild(body), el,
-    { getElementById: () => panel, querySelector: () => body });
-  assert.equal(reads, 1);
-  assert.equal(panel.children.filter(child => child.tag === 'nav').length, 1);
-  assert.equal(body.children.some(child => child.tag === 'nav'), false);
-  assert.equal(body.children[0].tag, 'details', 'advanced packet lookup is folded');
+  const create = document.createElement; document.createElement = tag => decorate(create(tag)); decorate(document.documentElement);
+  document.querySelector = selector => selector.startsWith('#egd-codex-input-panel ')
+    ? document.getElementById('egd-codex-input-panel')?.querySelector(selector.slice('#egd-codex-input-panel '.length))
+    : document.documentElement.querySelector(selector);
+  const authStatus = { isLoggedIn: true, accountEmail: 'owner@example.test', authMode: 'chatgpt', identityStatus: 'known' };
+  const thread = { id: 'room-a', engineId, engineProfileId: `${engineId}-slot`, clientBindingId: 'binding-a', conversationId: 'conversation-a', messages: [] };
+  const state = { codex: { threads: [thread], activeThreadId: thread.id, activityRoomGeneration: 0,
+    authStatus, codexAccountKey: Chat.codexAccountKey(authStatus) }, pan: { x: 12, y: 34 }, zoom: .8 };
+  const epochScope = Chat.createChatEpochScope();
+  const reference = { id: 'local-selection', sourceId: 'stored-capture', snapshotId: 'stored-capture', hash: 'capture-hash',
+    contextScope: Chat.chatContextRequestScope(thread, state.codex), localSource: { id: 'local-selection', label: '고정 원문' } };
+  const fetchJson = async (url, options = {}) => {
+    calls.push({ url, options });
+    assert.equal(options.method, undefined, 'inspector only uses GET, never capture/send/model routes');
+    const request = new URL(url, 'http://fixture.invalid');
+    if (request.pathname === '/context/sources') return new Promise((resolve, reject) => pending.push({ resolve, reject, url, signal: options.signal }));
+    assert.ok(request.pathname.startsWith('/context/captures/'), url);
+    const sourceId = decodeURIComponent(request.pathname.slice('/context/captures/'.length));
+    const startLine = Number(request.searchParams.get('startLine') || 1);
+    const endLine = Math.min(610, Number(request.searchParams.get('endLine') || startLine + 199));
+    const response = { capture: { sourceId, hash: 'capture-hash', capturedAt: 100, sourceRef: { path: '/fixture/original.txt' },
+      engine: { engineId, engineProfileId: `${engineId}-slot` }, clientThreadId: 'binding-a', captureScope: { type: 'file' } },
+      source: { role: 'source', hash: 'capture-hash', rangeHash: `range-${startLine}-${endLine}`, mime: 'text/plain',
+        text: Array.from({ length: endLine - startLine + 1 }, (_, i) => `exact line ${startLine + i}`).join('\n'),
+        range: { startLine, endLine, totalLines: 610 }, nextLine: endLine < 610 ? endLine + 1 : null },
+      delivered: { role: 'agent_input', packetId: request.searchParams.get('packetId') || 'packet-a', hash: 'payload-hash', text: '{"immutable":"payload"}',
+        deliveryStatus: 'sent-to-app-server', binding: { conversationId: 'conversation-a', runId: 'run-a', answerId: 'answer-a' } },
+      bindings: [{ conversationId: 'conversation-a', runId: 'run-a', answerId: 'answer-a' }] };
+    return capture ? capture(response, request) : response;
+  };
+  const method = signature => {
+    const start = surfaceSource.indexOf(`      ${signature}`), end = surfaceSource.indexOf('\n      },', start);
+    assert.ok(start >= 0 && end > start);
+    const code = surfaceSource.slice(start, end + 8);
+    return signature === 'async refreshInputSourceChange(' && trackingTransform ? trackingTransform(code) : code;
+  };
+  const deps = { document, window, state, ChatState: Chat, InputContext, epochScope, fetchJson, boardNotice: message => notices.push(message) };
+  const factory = compileFunction(`${declaration('el')}\n${declaration('getCodexThreadById')}\n${declaration('openChatInputPanel')}\nreturn {
+    openChatInputPanel, bridge: { ${['async inspectInput(', 'async refreshInputSourceChange(', 'async readInput('].map(method).join(',\n')} }
+  };`, Object.keys(deps))(...Object.values(deps));
+  const bridge = factory.bridge;
+  bridge.subscribe = fn => { listeners.add(fn); fn(state.codex); return () => listeners.delete(fn); };
+  const refresh = bridge.refreshInputSourceChange;
+  bridge.refreshInputSourceChange = (...args) => {
+    beforeTracking?.({ state, thread, reference, panel: args[4] });
+    const work = refresh.apply(bridge, args); trackingRuns.push(work); return work;
+  };
+  const part = id => document.documentElement.querySelector(`[data-testid="${id}"]`);
+  return { document, state, thread, reference, epochScope, calls, pending, listeners, notices, bridge, part, timers, trackingRuns,
+    expire: () => { for (const [id, timer] of [...timers]) { timers.delete(id); timer.fn(); } },
+    open: (options = {}, ref = reference) => bridge.inspectInput(thread.id, ref, options),
+    emit: () => { for (const fn of [...listeners]) fn(state.codex); },
+    close: () => settingsNodes(part('chat-input-panel'), node => node.tagName === 'BUTTON' && node.getAttribute('aria-label') === '첨부 패널 닫기')[0].fire('click'),
+    preview: snapshot => factory.openChatInputPanel(thread.id, { snapshots: [snapshot] }),
+    sourceResponse: (patch = {}) => ({ conversationId: thread.conversationId,
+      sources: [{ sourceId: reference.sourceId, state: 'stale', reason: 'fileChanged', changedAt: 1000, ...patch }] }),
+  };
+}
+
+function restoreInputInspector(h) {
+  h.thread.bindingAccountKey = h.state.codex.codexAccountKey; h.thread.bindingState = 'verified';
+  Object.assign(h.thread, Chat.reconcileNativeThread(Chat.detachNativeThread(h.thread, h.state.codex.codexAccountKey, 'restore'), h.state.codex.authStatus));
+  return h;
+}
+
+function inspectorServerAuthority({ binding = true, owner = 'owner-a', profile = 'codex-slot', conversation = 'conversation-a', resumeReply = null } = {}) {
+  const row = { clientThreadId: 'binding-a', conversationId: conversation, engineId: 'codex', engineProfileId: profile };
+  const store = {
+    getConversation: id => id === row.clientThreadId ? row : null,
+    getConversationByNative: id => id === row.conversationId ? row : null,
+    listEvents: () => ({ events: binding ? [{ event: 'native.thread.bound', details: {
+      conversationId: conversation, ownerHash: createHash('sha256').update(owner).digest('hex'),
+      engine: { id: 'codex', engineProfileId: profile },
+    } }] : [], hasMore: false }),
+  };
+  // Real helper methods with an in-memory durable-binding fixture. Only the
+  // resume-contract test supplies a fake native reply; no real RPC or port.
+  const calls = [];
+  const adapter = createCodexEngineAdapter({ request: (method, params) => {
+    calls.push({ method, params });
+    if (resumeReply) return resumeReply(method, params);
+    assert.fail('history scope checks must not call a provider');
+  }, respond: () => {},
+    describe: () => ({ profiles: [{ id: 'codex-slot', active: true }] }) });
+  const runtime = new CodexChatRuntime({ engines: [adapter], store, requireStore: true, getOwnerKey: () => 'owner-a' });
+  runtime.connection = 'ready';
+  return Object.assign(request => runtime.contextAuthority(Object.fromEntries(['engineId', 'engineProfileId', 'clientThreadId', 'conversationId']
+    .map(key => [key, request.searchParams.get(key)]).filter(([, value]) => value !== null))), { runtime, calls });
+}
+
+test('native restore root: actual helper resume accepts the stable pair and rejects unknown client/CID/account before any native call', async () => {
+  const resumeReply = (method, params) => {
+    assert.equal(method, 'thread/resume'); assert.equal(params.threadId, 'conversation-a');
+    return { thread: { id: 'conversation-a', turns: [] }, cwd: '/fixture/original' };
+  };
+  const h = restoreInputInspector(inputInspectorHarness()), helper = inspectorServerAuthority({ resumeReply });
+  const response = await helper.runtime.resume({ engineId: 'codex', conversationId: h.thread.conversationId, clientThreadId: Chat.clientThreadBinding(h.thread) });
+  assert.equal(response.conversationId, 'conversation-a'); assert.equal(response.historyComplete, true);
+  assert.equal(helper.calls.length, 1); assert.equal(helper.calls[0].method, 'thread/resume');
+  for (const [options, route, expected] of [
+    [{}, { clientThreadId: 'room-a-binding-unknown', conversationId: 'conversation-a' }, 'NATIVE_BINDING_MISMATCH'],
+    [{}, { clientThreadId: 'binding-a', conversationId: 'other-conversation' }, 'NATIVE_BINDING_MISMATCH'],
+    [{ owner: 'other-owner' }, { clientThreadId: 'binding-a', conversationId: 'conversation-a' }, 'NATIVE_ACCOUNT_MISMATCH'],
+    [{ binding: false }, { clientThreadId: 'binding-a', conversationId: 'conversation-a' }, 'NATIVE_ACCOUNT_UNVERIFIED'],
+  ]) {
+    const denied = inspectorServerAuthority({ ...options, resumeReply });
+    await assert.rejects(() => denied.runtime.resume({ engineId: 'codex', ...route }), error => error.code === expected);
+    assert.equal(denied.calls.length, 0, 'denial is before even the fake provider');
+  }
+});
+
+test('restored immutable input: the stable client/native pair is server verified without remapping reads or rewriting stored evidence', async () => {
+  const authorize = inspectorServerAuthority(), returned = [];
+  const h = restoreInputInspector(inputInspectorHarness({ capture: (response, request) => {
+    const authority = authorize(request);
+    assert.equal(authority.clientThreadId, 'binding-a'); assert.equal(authority.conversationId, 'conversation-a');
+    returned.push({ response, before: JSON.stringify(response) }); return response;
+  } }));
+  const referenceBefore = JSON.stringify(h.reference), threadBefore = JSON.stringify(h.thread);
+  await h.open();
+  assert.ok(h.part('chat-input-panel'), 'a verified restored room must still open its immutable source');
+  assert.equal(h.notices.length, 0); assert.equal(h.calls.length, 2);
+  assert.match(h.calls[0].url, /clientThreadId=binding-a&conversationId=conversation-a/);
+  assert.match(h.pending[0].url, /clientThreadId=binding-a&conversationId=conversation-a/);
+  h.pending[0].resolve(h.sourceResponse({ state: 'active' })); await Promise.all(h.trackingRuns);
+  assert.equal(h.part('chat-input-source-change').dataset.state, 'active');
+  await h.open({ startLine: 201, endLine: 240, packetId: 'packet-a' });
+  h.pending[1].resolve(h.sourceResponse()); await Promise.all(h.trackingRuns);
+  assert.match(h.part('chat-input-pagination').textContent, /201–240/);
+  const direct = await h.bridge.readInput(h.reference);
+  assert.ok(direct, 'the original scoped reference also identifies one restored evidence-card room');
+  assert.equal(h.thread.clientBindingId, 'binding-a');
+  assert.equal(JSON.stringify(h.thread), threadBefore); assert.equal(JSON.stringify(h.reference), referenceBefore);
+  for (const item of returned) assert.equal(JSON.stringify(item.response), item.before);
+  assert.doesNotThrow(() => InputContext.assertInputContextScope(h.reference, Chat.chatContextRequestScope(h.thread, h.state.codex)),
+    'verified restoration now uses the actual durable pair for ordinary operations too');
+  assert.throws(() => InputContext.assertInputContextScope({ ...h.reference, contextScope: { ...h.reference.contextScope, clientThreadId: 'old-unverified-nonce' } },
+    Chat.chatContextRequestScope(h.thread, h.state.codex)), 'the generic client guard is still exact');
+});
+
+test('restored immutable input: a new capture after the first restart and the original capture remain readable through the second and third', async () => {
+  const authorize = inspectorServerAuthority();
+  const h = restoreInputInspector(inputInspectorHarness({ capture: (value, request) => { authorize(request); return value; } }));
+  const scope = Chat.chatContextRequestScope(h.thread, h.state.codex);
+  assert.equal(scope.clientThreadId, 'binding-a');
+  const afterFirst = InputContext.capturedInputReference({ id: 'new-selection', label: '첫 복원 뒤 캡처' }, {
+    id: 'new-selection', sourceId: 'capture-after-first', snapshotId: 'capture-after-first', hash: 'capture-hash',
+    sourceRef: { path: '/fixture/after-first.txt' }, clientThreadId: scope.clientThreadId,
+    engine: { engineId: scope.engineId, engineProfileId: scope.engineProfileId },
+  }, scope);
+  h.thread.messages = [{ id: 'old', inputReferences: [h.reference] }, { id: 'new', inputReferences: [afterFirst] }];
+  const referencesBefore = JSON.stringify(h.thread.messages);
+  for (const nonce of ['second', 'third']) {
+    h.epochScope.reset('codex');
+    Object.assign(h.thread, Chat.reconcileNativeThread(Chat.detachNativeThread(JSON.parse(JSON.stringify(h.thread)), h.state.codex.codexAccountKey, nonce), h.state.codex.authStatus));
+    assert.equal(h.thread.clientBindingId, 'binding-a'); assert.equal(h.thread.retainedNativeBinding.clientThreadId, 'binding-a');
+    for (const reference of h.thread.messages.flatMap(message => message.inputReferences)) {
+      await h.open({}, reference);
+      assert.equal(h.part('chat-input-source-change').dataset.sourceId, reference.sourceId);
+      const request = h.pending.at(-1);
+      assert.equal(new URL(request.url, 'http://fixture.invalid').searchParams.get('clientThreadId'), 'binding-a');
+      request.resolve({ conversationId: 'conversation-a', sources: [{ sourceId: reference.sourceId, state: 'active' }] });
+      await Promise.all(h.trackingRuns);
+      assert.equal(h.part('chat-input-source-change').dataset.state, 'active');
+      assert.equal(h.part('chat-input-snapshot').dataset.snapshotId, reference.snapshotId);
+      assert.match(h.part('chat-input-snapshot').textContent, /exact line 1/);
+    }
+    assert.equal(JSON.stringify(h.thread.messages), referencesBefore, 'no reference/client/hash/payload migration');
+  }
+  assert.equal(authorize.calls.length, 0); assert.equal(h.notices.length, 0);
+});
+
+test('restored immutable input: legacy captures with a different or missing original client scope are not silently remapped', async () => {
+  for (const missing of [false, true]) {
+    const h = restoreInputInspector(inputInspectorHarness());
+    const legacy = { ...h.reference, ...(missing ? { contextScope: null }
+      : { contextScope: { ...h.reference.contextScope, clientThreadId: 'unverified-old-nonce' } }) };
+    h.thread.messages = [{ inputReferences: [legacy] }];
+    await h.open({}, legacy);
+    assert.equal(h.calls.length, 0); assert.equal(h.part('chat-input-panel'), null); assert.equal(h.notices.length, 1);
+    assert.equal(h.thread.clientBindingId, 'binding-a');
+    assert.equal(legacy.contextScope?.clientThreadId, missing ? undefined : 'unverified-old-nonce');
+  }
+});
+
+test('restored immutable input: local same-account eligibility cannot bypass missing or conflicting server ownership/binding/profile', async () => {
+  for (const options of [{ binding: false }, { owner: 'other-owner' }, { conversation: 'other-conversation' }, { profile: 'other-profile' }]) {
+    const authorize = inspectorServerAuthority(options); let serverChecks = 0;
+    const h = restoreInputInspector(inputInspectorHarness({ capture: (response, request) => { serverChecks++; authorize(request); return response; } }));
+    assert.equal(Chat.canResumeNativeThread(h.thread, h.state.codex.authStatus), true, 'local eligibility alone is deliberately positive');
+    await h.open(); assert.equal(serverChecks, 1);
+    assert.equal(h.part('chat-input-panel'), null); assert.equal(h.pending.length, 0); assert.equal(h.notices.length, 1);
+  }
+});
+
+test('restored immutable input: missing original conversation or mismatched capture provenance/payload is rejected after the server check', async () => {
+  for (const mutate of [
+    value => { value.delivered = null; value.bindings = []; },
+    value => { value.capture.clientThreadId = 'other-client'; },
+    value => { value.capture.engine.engineId = 'claude'; },
+    value => { value.capture.engine.engineProfileId = 'other-slot'; },
+    value => { delete value.capture.engine; },
+    value => { value.capture.hash = 'other-hash'; },
+    value => { value.delivered.binding.conversationId = 'other-conversation'; },
+  ]) {
+    const authorize = inspectorServerAuthority(); let serverChecks = 0;
+    const h = restoreInputInspector(inputInspectorHarness({ capture: (response, request) => { authorize(request); serverChecks++; mutate(response); return response; } }));
+    await h.open(); assert.equal(serverChecks, 1);
+    assert.equal(h.part('chat-input-panel'), null); assert.equal(h.pending.length, 0); assert.equal(h.notices.length, 1);
+  }
+});
+
+test('restored immutable input: account, engine, profile, retained identity and snapshot preflight reject without any GET', async () => {
+  for (const mutate of [
+    h => { h.state.codex.authStatus.accountEmail = 'other@example.test'; },
+    h => { h.state.codex.authStatus.identityStatus = 'unknown'; },
+    h => { h.state.codex.codexAccountKey = 'other-cache'; },
+    h => { h.thread.engineId = 'claude'; },
+    h => { h.thread.engineProfileId = 'other-slot'; },
+    h => { h.thread.conversationId = 'other-conversation'; },
+    h => { h.thread.bindingState = 'awaiting-identity'; },
+    h => { h.thread.retainedNativeBinding.accountKey = 'other-owner'; },
+    h => { h.thread.retainedNativeBinding.clientThreadId = 'other-client'; },
+    h => { h.thread.retainedNativeBinding.conversationId = 'other-conversation'; },
+    h => { h.reference.snapshotId = 'other-source'; },
+  ]) {
+    const h = restoreInputInspector(inputInspectorHarness()); mutate(h); await h.open();
+    assert.equal(h.calls.length, 0); assert.equal(h.part('chat-input-panel'), null);
+  }
+  const h = restoreInputInspector(inputInspectorHarness());
+  const context = InputContext.inputReadContext(h.reference, Chat.chatContextRequestScope(h.thread, h.state.codex), {
+    thread: h.thread, accountKey: Chat.codexAccountKey(h.state.codex.authStatus), cachedAccountKey: h.state.codex.codexAccountKey,
+  });
+  assert.equal(Object.isFrozen(context.fence.retained), true); assert.equal(Object.isFrozen(context.fence.currentScope), true);
+  h.thread.retainedNativeBinding.clientThreadId = 'changed'; h.reference.contextScope.clientThreadId = 'changed';
+  assert.equal(context.fence.retained.clientThreadId, 'binding-a'); assert.equal(context.fence.reference.contextScope.clientThreadId, 'binding-a');
+});
+
+test('restored immutable input: pending source responses cannot survive current/retained scope, account, epoch, room, close or panel replacement', async () => {
+  const changes = [
+    h => { h.state.codex.authStatus.accountEmail = 'other@example.test'; h.emit(); h.state.codex.authStatus.accountEmail = 'owner@example.test'; },
+    h => { h.thread.clientBindingId = 'changed'; h.emit(); h.thread.clientBindingId = 'binding-a'; },
+    h => { h.thread.retainedNativeBinding.clientThreadId = 'changed'; h.emit(); h.thread.retainedNativeBinding.clientThreadId = 'binding-a'; },
+    h => { h.thread.retainedNativeBinding.accountKey = 'changed'; h.emit(); h.thread.retainedNativeBinding.accountKey = h.state.codex.codexAccountKey; },
+    h => { h.thread.engineId = 'claude'; h.emit(); h.thread.engineId = 'codex'; },
+    h => { h.thread.engineProfileId = 'other-slot'; h.emit(); h.thread.engineProfileId = 'codex-slot'; },
+    h => { h.thread.conversationId = 'other-conversation'; h.emit(); h.thread.conversationId = 'conversation-a'; },
+    h => { h.reference.contextScope.clientThreadId = 'changed'; h.emit(); h.reference.contextScope.clientThreadId = 'binding-a'; },
+    h => { h.state.codex.activeThreadId = 'other-room'; h.state.codex.activityRoomGeneration++; h.emit(); h.state.codex.activeThreadId = h.thread.id; },
+    h => h.epochScope.reset(),
+    h => h.close(),
+    h => h.preview(InputContext.inputSnapshot({ id: 'new-preview', kind: 'file', label: '다른 캡처', sourceRef: { path: '/fixture/new' } }, { text: 'new preview' })),
+  ];
+  for (const change of changes) for (const rejectLate of [false, true]) {
+    let waiting = null, response = null;
+    const h = restoreInputInspector(inputInspectorHarness({ capture: value => { response = value; return waiting ? waiting.promise : value; } }));
+    await h.open(); h.pending[0].resolve(h.sourceResponse({ state: 'active' })); await Promise.all(h.trackingRuns);
+    waiting = requestProjectDeferred();
+    const opening = h.open({ startLine: 201, endLine: 240 });
+    assert.equal(h.calls.filter(call => call.url.startsWith('/context/captures/')).length, 2);
+    change(h);
+    const panel = h.part('chat-input-panel'), text = panel?.textContent, focused = h.document.activeElement;
+    if (rejectLate) waiting.reject(new Error('late private capture error'));
+    else waiting.resolve(response);
+    await opening;
+    assert.ok(h.part('chat-input-panel') === panel); assert.equal(panel?.textContent, text);
+    assert.ok(h.document.activeElement === focused); assert.equal(h.notices.length, 0);
+    assert.equal(h.listeners.size, 0); assert.equal(h.timers.size, 0);
+    assert.deepEqual(h.state.pan, { x: 12, y: 34 }); assert.equal(h.state.zoom, .8);
+  }
+});
+
+test('restored immutable input: A to B to A cannot revive an old source callback even when the stable pair matches again', async () => {
+  const pending = requestProjectDeferred(); let response = null;
+  const h = restoreInputInspector(inputInspectorHarness({ capture: value => { response = value; return pending.promise; } }));
+  const opening = h.open(), keyA = h.state.codex.codexAccountKey, auth = { ...h.state.codex.authStatus };
+  h.epochScope.reset('codex');
+  h.state.codex.authStatus = { ...auth, accountEmail: 'other@example.test' };
+  Object.assign(h.thread, Chat.reconcileNativeThread(Chat.detachNativeThread(h.thread, keyA, 'B'), h.state.codex.authStatus));
+  h.state.codex.codexAccountKey = Chat.codexAccountKey(h.state.codex.authStatus); h.emit();
+  assert.equal(h.thread.conversationId, null); assert.notEqual(h.thread.clientBindingId, 'binding-a');
+  h.epochScope.reset('codex');
+  h.state.codex.authStatus = auth;
+  Object.assign(h.thread, Chat.reconcileNativeThread(Chat.detachNativeThread(h.thread, h.state.codex.codexAccountKey, 'A'), auth));
+  h.state.codex.codexAccountKey = keyA; h.emit();
+  assert.equal(h.thread.clientBindingId, 'binding-a'); assert.equal(h.thread.conversationId, 'conversation-a');
+  pending.resolve(response); await opening;
+  assert.equal(h.part('chat-input-panel'), null); assert.equal(h.pending.length, 0); assert.equal(h.notices.length, 0);
+  assert.equal(h.calls[0].options.signal.aborted, true); assert.equal(h.listeners.size, 0);
+});
+
+test('production inspector pagination is outside the sole scroll body and makes no camera or model request', async () => {
+  const h = inputInspectorHarness(); await h.open();
+  let panel = h.part('chat-input-panel'), body = panel.querySelector('.egd-codex-input-panel-body');
+  assert.equal(h.calls.filter(call => call.url.startsWith('/context/captures/')).length, 1);
+  assert.equal(panel.children.filter(child => child.tagName === 'NAV').length, 1);
+  assert.equal(body.children.some(child => child.tagName === 'NAV'), false);
+  assert.equal(body.children.at(-1).tagName, 'DETAILS', 'advanced packet lookup is folded');
   const css = readFileSync(new URL('../overlay/CSS/eg-desk-surface.uc.css', import.meta.url), 'utf8');
   assert.match(css, /\.egd-codex-input-panel-footer \{[^}]*flex:\s*0 0 auto/);
   assert.match(css, /\.egd-input-snapshot pre \{[^}]*max-height:\s*none;\s*overflow:\s*visible/);
 
-  const requested = [];
-  const bridge = {
-    readInput: async (_reference, options) => {
-      requested.push({ startLine: options.startLine, endLine: options.endLine });
-      const startLine = options.startLine;
-      const endLine = options.endLine ?? startLine + 199;
-      return { ...response, source: { ...response.source,
-        range: { startLine, endLine, totalLines: 610 }, nextLine: endLine < 610 ? endLine + 1 : null } };
-    },
-    inspectInput(threadId, reference, options) {
-      return inspect.call(this, threadId, reference, options, () => ({ id: 'thread' }), { codex: {} }, InputContext,
-        () => { panel.children = []; body.children = []; panel.appendChild(body); }, el,
-        { getElementById: () => panel, querySelector: () => body });
-    },
-  };
-  const reference = { sourceId: 's', snapshotId: 's', hash: 'h' };
-  await bridge.inspectInput('thread', reference, { startLine: 201, endLine: 240 });
-  await panel.children.find(child => child.tag === 'nav').children[2].listeners.click[0]({});
-  await panel.children.find(child => child.tag === 'nav').children[0].listeners.click[0]({});
+  await h.open({ startLine: 201, endLine: 240 });
+  h.part('chat-input-next').fire('click'); await settle();
+  h.part('chat-input-previous').fire('click'); await settle();
+  const requested = h.calls.filter(call => call.url.startsWith('/context/captures/')).slice(1).map(call => {
+    const query = new URL(call.url, 'http://fixture.invalid').searchParams;
+    return { startLine: Number(query.get('startLine')), endLine: query.has('endLine') ? Number(query.get('endLine')) : undefined };
+  });
   assert.deepEqual(requested, [
     { startLine: 201, endLine: 240 }, { startLine: 241, endLine: undefined }, { startLine: 201, endLine: 240 },
   ], 'Previous must re-read the exact explicit range, not the default 200-line page');
-  assert.match(panel.children.find(child => child.tag === 'nav').textContent, /201–240/);
+  assert.match(h.part('chat-input-pagination').textContent, /201–240/);
+  assert.deepEqual(h.state.pan, { x: 12, y: 34 }); assert.equal(h.state.zoom, .8);
+  for (const request of h.pending) request.resolve(h.sourceResponse()); await settle();
+  assert.equal(h.listeners.size, 0);
+});
+
+test('CTX04 inspector: a nonblocking tracking line follows the source label and uses the stored key, not the local selection id', async () => {
+  const h = inputInspectorHarness(); await h.open();
+  const row = h.part('chat-input-source-change'), article = h.part('chat-input-snapshot');
+  assert.equal(row.textContent, '원본 변경 정보 확인 중'); assert.equal(row.dataset.sourceId, 'stored-capture');
+  assert.equal(article.children.indexOf(row), article.children.indexOf(h.part('chat-input-source-label')) + 1);
+  assert.ok(article.children.indexOf(row) < article.children.indexOf(h.part('chat-input-delivery')));
+  assert.equal(h.part('chat-input-next').getAttribute('disabled'), null);
+  assert.match(article.textContent, /exact line 1/);
+  assert.equal(settingsNodes(h.part('chat-input-delivery'), node => node.tagName === 'PRE')[0].textContent, '{"immutable":"payload"}');
+  const query = new URL(h.pending[0].url, 'http://fixture.invalid').searchParams;
+  assert.deepEqual(Object.fromEntries(query), { engineId: 'codex', engineProfileId: 'codex-slot', clientThreadId: 'binding-a', conversationId: 'conversation-a' });
+  h.pending[0].resolve({ conversationId: 'conversation-a', sources: [
+    { sourceId: 'local-selection', state: 'active' }, { sourceId: 'stored-capture', state: 'stale', reason: 'fileChanged', changedAt: 1000 },
+  ] }); await settle();
+  assert.equal(row.dataset.state, 'stale'); assert.match(row.textContent, /^캡처 후 파일 변경 감지 · 감지 시각 /);
+  assert.equal(h.part('chat-input-change-detected-at').getAttribute('datetime'), '1970-01-01T00:00:01.000Z');
+  assert.doesNotMatch(row.textContent, /수정 시각|최신입니다/); assert.equal(h.listeners.size, 0);
+});
+
+test('CTX04 inspector: active, missing, stale reasons and failure use bounded copy without inventing freshness or modification time', async () => {
+  const cases = [
+    [{ state: 'active', reason: null, changedAt: null }, 'active', '추적 범위에서 감지된 변경 없음'],
+    [{ state: 'stale', reason: 'navigated', changedAt: null }, 'stale', '캡처 후 브라우저 페이지 이동 감지'],
+    [{ state: 'stale', reason: '<untrusted reason>', changedAt: 'not-a-time' }, 'stale', '캡처 후 원본 변경 감지'],
+    [null, 'missing', '변경 추적 기록 없음 · 최신 여부 미확인'],
+    [new Error('private backend detail'), 'failed', '원본 변경 정보를 확인하지 못했습니다'],
+  ];
+  for (const [source, state, text] of cases) {
+    const h = inputInspectorHarness(); await h.open();
+    if (source instanceof Error) h.pending[0].reject(source);
+    else h.pending[0].resolve(source ? h.sourceResponse(source) : { conversationId: 'conversation-a', sources: [] });
+    await settle();
+    assert.equal(h.part('chat-input-source-change').dataset.state, state);
+    assert.equal(h.part('chat-input-source-change').textContent, text);
+    assert.equal(h.part('chat-input-change-detected-at'), null);
+    assert.equal(h.notices.length, 0, 'tracking failure does not become an immutable-source error');
+    assert.equal(h.part('chat-input-next').getAttribute('disabled'), null);
+  }
+});
+
+test('CTX04 inspector: early scope rejection settles only the current metadata line without a GET or listener', async () => {
+  for (const missingThread of [false, true]) {
+    const h = inputInspectorHarness({ beforeTracking: ({ reference, state }) => {
+      if (missingThread) state.codex.threads = [];
+      else reference.contextScope = { ...reference.contextScope, clientThreadId: 'different-binding' };
+    } });
+    await h.open(); await Promise.all(h.trackingRuns);
+    assert.equal(h.part('chat-input-source-change').dataset.state, 'failed');
+    assert.equal(h.part('chat-input-source-change').textContent, '원본 변경 정보를 확인하지 못했습니다');
+    assert.equal(h.pending.length, 0); assert.equal(h.listeners.size, 0); assert.equal(h.timers.size, 0);
+    assert.equal(h.notices.length, 0);
+    assert.match(h.part('chat-input-snapshot').textContent, /exact line 1/);
+    assert.equal(h.part('chat-input-next').getAttribute('disabled'), null);
+  }
+  const obsolete = inputInspectorHarness({ beforeTracking: ({ reference, state }) => {
+    reference.contextScope = { ...reference.contextScope, clientThreadId: 'different-binding' };
+    state.codex.inputInspectNonce++;
+  } });
+  await obsolete.open(); await Promise.all(obsolete.trackingRuns);
+  assert.equal(obsolete.part('chat-input-source-change').dataset.state, 'loading', 'an obsolete panel is not updated even on early rejection');
+  assert.equal(obsolete.pending.length, 0);
+});
+
+test('CTX04 inspector: a stalled tracking request expires without moving input or source, and late results stay ignored', async () => {
+  for (const lateFailure of [false, true]) {
+    const h = inputInspectorHarness(); await h.open();
+    assert.equal(h.timers.size, 1, 'optional metadata must have a finite request deadline');
+    assert.equal([...h.timers.values()][0].ms, 10000);
+    const panel = h.part('chat-input-panel'), row = h.part('chat-input-source-change');
+    const body = panel.querySelector('.egd-codex-input-panel-body'), packet = h.part('chat-input-packet-id');
+    const source = settingsNodes(panel, node => node.tagName === 'PRE' && node.getAttribute('aria-label') === '당시 캡처 본문')[0];
+    const sourceNode = source.children[0], delivered = h.part('chat-input-delivery'), text = delivered.textContent;
+    const selection = { anchorNode: sourceNode, anchorOffset: 2, focusNode: sourceNode, focusOffset: 10 };
+    h.document.selection = selection; packet.focus(); packet.selectionStart = 3; packet.selectionEnd = 5;
+    body.scrollTop = 233; body.scrollLeft = 7;
+    h.expire(); await Promise.all(h.trackingRuns);
+    assert.equal(row.dataset.state, 'failed'); assert.equal(row.textContent, '원본 변경 정보를 확인하지 못했습니다');
+    assert.equal(h.pending[0].signal.aborted, true);
+    assert.equal(h.timers.size, 0); assert.equal(h.listeners.size, 0);
+    assert.equal(panel._finishInputSourceChange, null);
+    assert.ok(h.document.activeElement === packet); assert.deepEqual([packet.selectionStart, packet.selectionEnd], [3, 5]);
+    assert.equal(h.document.selection, selection); assert.equal(source.children[0], sourceNode);
+    assert.equal(delivered.textContent, text); assert.equal(body.scrollTop, 233); assert.equal(body.scrollLeft, 7);
+    assert.deepEqual(h.state.pan, { x: 12, y: 34 }); assert.equal(h.state.zoom, .8);
+    assert.equal(h.part('chat-input-next').getAttribute('disabled'), null);
+    if (lateFailure) h.pending[0].reject(new Error('late private detail'));
+    else h.pending[0].resolve(h.sourceResponse({ state: 'active' }));
+    await settle(); assert.equal(row.dataset.state, 'failed'); assert.equal(h.notices.length, 0);
+  }
+});
+
+test('CTX04 inspector: response conversation and exactly one source id are required; no viewId/path/first-row fallback', async () => {
+  const scope = { conversationId: 'A', sourceId: 'stored-key' };
+  assert.throws(() => InputContext.inputSourceChangeState({ conversationId: 'B', sources: [{ sourceId: 'stored-key', state: 'active' }] }, scope));
+  assert.throws(() => InputContext.inputSourceChangeState({ conversationId: 'A', sources: [
+    { sourceId: 'stored-key', state: 'active' }, { sourceId: 'stored-key', state: 'stale' },
+  ] }, scope));
+  assert.equal(InputContext.inputSourceChangeState({ conversationId: 'A', sources: [
+    { sourceId: 'other', state: 'active', viewId: 'stored-key', path: 'stored-key' },
+  ] }, scope).state, 'missing');
+  assert.throws(() => InputContext.inputSourceChangeState({ conversationId: 'A', sources: [{ sourceId: 'stored-key', state: 'fresh' }] }, scope));
+  const h = inputInspectorHarness(); await h.open();
+  h.pending[0].resolve({ ...h.sourceResponse(), conversationId: 'other-room' }); await settle();
+  assert.equal(h.part('chat-input-source-change').dataset.state, 'failed');
+  assert.match(h.part('chat-input-snapshot').textContent, /exact line 1/);
+});
+
+test('CTX04 inspector: historical payload and capture provenance must identify this conversation, otherwise keep unknown without guessing', async () => {
+  for (const change of [
+    response => { response.delivered.binding.conversationId = 'conversation-b'; response.bindings.push({ conversationId: 'conversation-b' }); },
+    response => { delete response.delivered.binding.conversationId; },
+    response => { response.delivered = null; response.bindings = []; },
+    response => { response.capture.engine.engineProfileId = 'other-slot'; },
+    response => { response.capture.engine.engineId = 'claude'; },
+    response => { response.capture.clientThreadId = 'other-client'; },
+  ]) {
+    const h = inputInspectorHarness({ capture: response => { change(response); return response; } });
+    await h.open();
+    assert.equal(h.pending.length, 0);
+    assert.equal(h.part('chat-input-source-change').dataset.state, 'missing');
+    assert.match(h.part('chat-input-snapshot').textContent, /exact line 1/);
+  }
+  const unknown = inputInspectorHarness({ capture: response => { delete response.capture.engine; return response; } });
+  delete unknown.reference.contextScope; await unknown.open();
+  assert.equal(unknown.pending.length, 0); assert.equal(unknown.part('chat-input-source-change').dataset.state, 'missing');
+});
+
+test('CTX04 inspector: the same stored capture can display A stale and B active only through their matching bound conversations', async () => {
+  for (const [conversationId, state] of [['conversation-a', 'stale'], ['conversation-b', 'active']]) {
+    const h = inputInspectorHarness({ capture: (response, request) => {
+      response.delivered.binding.conversationId = request.searchParams.get('conversationId');
+      response.bindings.push({ conversationId: 'conversation-b' }); return response;
+    } });
+    h.thread.conversationId = conversationId; h.reference.contextScope.conversationId = conversationId;
+    await h.open();
+    assert.equal(new URL(h.pending[0].url, 'http://fixture.invalid').searchParams.get('conversationId'), conversationId);
+    h.pending[0].resolve({ conversationId, sources: [{ sourceId: 'stored-capture', state, reason: state === 'stale' ? 'fileChanged' : null, changedAt: null }] });
+    await settle(); assert.equal(h.part('chat-input-source-change').dataset.state, state);
+    assert.equal(h.part('chat-input-source-change').dataset.conversationId, conversationId);
+  }
+});
+
+test('CTX04 inspector: closing or changing account/engine/profile/room/epoch/source rejects late metadata, including change-and-back', async () => {
+  for (const change of [
+    h => h.close(),
+    h => { h.state.codex.activeThreadId = 'room-b'; h.state.codex.activityRoomGeneration++; h.emit(); h.state.codex.activeThreadId = 'room-a'; },
+    h => { h.state.codex.authStatus.accountEmail = 'other@example.test'; h.emit(); h.state.codex.authStatus.accountEmail = 'owner@example.test'; },
+    h => { h.thread.engineId = 'claude'; h.emit(); h.thread.engineId = 'codex'; },
+    h => { h.thread.engineProfileId = 'other-slot'; h.emit(); h.thread.engineProfileId = 'codex-slot'; },
+    h => { h.thread.clientBindingId = 'other-binding'; },
+    h => { h.thread.conversationId = 'other-conversation'; },
+    h => h.epochScope.reset(),
+    h => { h.reference.sourceId = 'other-source'; },
+    h => { h.reference.hash = 'other-hash'; },
+    h => { h.reference.snapshotId = 'other-snapshot'; },
+    h => { h.reference.contextScope.engineProfileId = 'other-slot'; },
+  ]) {
+    const h = inputInspectorHarness(); await h.open(); const row = h.part('chat-input-source-change');
+    change(h); h.pending[0].resolve(h.sourceResponse()); await settle();
+    assert.equal(row.dataset.state, 'loading', 'the late reply must not publish even an error into an obsolete view');
+    assert.equal(h.listeners.size, 0);
+    assert.equal(h.timers.size, 0);
+  }
+});
+
+test('CTX04 inspector: actual callbacks finish safely when an abort-ignoring transport resolves or rejects after close, replace or room change', async () => {
+  for (const change of [
+    h => h.close(),
+    h => h.preview(InputContext.inputSnapshot({ id: 'new-preview', kind: 'file', label: '다른 캡처', sourceRef: { path: '/fixture/new' } }, { text: 'new preview' })),
+    h => { h.state.codex.activeThreadId = 'other-room'; h.state.codex.activityRoomGeneration++; h.emit(); },
+  ]) for (const rejectLate of [false, true]) {
+    const h = inputInspectorHarness(); await h.open();
+    const old = h.part('chat-input-source-change'), oldText = old.textContent;
+    change(h);
+    const panel = h.part('chat-input-panel'), text = panel?.textContent, focus = h.document.activeElement;
+    assert.equal(h.pending[0].signal.aborted, true);
+    // The transport deliberately ignores abort. Resolve/reject the exact
+    // promise awaited by production, with no generation filter in the mock.
+    if (rejectLate) h.pending[0].reject(new Error('late private metadata error'));
+    else h.pending[0].resolve(h.sourceResponse());
+    await Promise.all(h.trackingRuns); await settle();
+    assert.equal(old.textContent, oldText); assert.equal(old.dataset.state, 'loading');
+    assert.ok(h.part('chat-input-panel') === panel); assert.equal(panel?.textContent, text);
+    assert.ok(h.document.activeElement === focus); assert.equal(h.listeners.size, 0); assert.equal(h.timers.size, 0);
+    assert.equal(h.notices.length, 0); assert.deepEqual(h.state.pan, { x: 12, y: 34 }); assert.equal(h.state.zoom, .8);
+  }
+  const normal = inputInspectorHarness(); await normal.open();
+  normal.pending[0].resolve(normal.sourceResponse({ state: 'active' })); await Promise.all(normal.trackingRuns);
+  assert.equal(normal.part('chat-input-source-change').dataset.state, 'active', 'the normal response is a positive control');
+  assert.equal(normal.timers.size, 0);
+});
+
+test('CTX04 inspector: removing the production panel guard makes the deferred room-change negative control fail', async () => {
+  const check = async trackingTransform => {
+    const h = inputInspectorHarness({ trackingTransform }); await h.open();
+    const row = h.part('chat-input-source-change');
+    h.state.codex.activeThreadId = 'other-room'; h.state.codex.activityRoomGeneration++; h.emit();
+    h.pending[0].resolve(h.sourceResponse()); await Promise.all(h.trackingRuns);
+    assert.equal(row.dataset.state, 'loading', 'obsolete metadata must not publish');
+  };
+  await check(null);
+  await assert.rejects(() => check(code => {
+    assert.ok(code.includes('|| !panelCurrent()'));
+    return code.replace('|| !panelCurrent()', '');
+  }), error => error.code === 'ERR_ASSERTION' && error.actual === 'stale' && error.expected === 'loading');
+});
+
+test('CTX04 inspector: another capture cancels the first request without letting its state or text replace the current capture', async () => {
+  const h = inputInspectorHarness(); await h.open(); const old = h.part('chat-input-source-change');
+  const other = { ...h.reference, sourceId: 'other-capture', snapshotId: 'other-capture' };
+  await h.open({}, other);
+  const row = h.part('chat-input-source-change'), source = h.part('chat-input-snapshot');
+  assert.equal(h.pending[0].signal.aborted, true);
+  h.pending[0].resolve(h.sourceResponse()); await settle();
+  assert.equal(old.dataset.state, 'loading'); assert.equal(row.dataset.state, 'loading');
+  h.pending[1].resolve({ conversationId: 'conversation-a', sources: [{ sourceId: 'other-capture', state: 'active' }] }); await settle();
+  assert.equal(row.dataset.state, 'active'); assert.equal(row.dataset.sourceId, 'other-capture');
+  assert.equal(h.part('chat-input-snapshot'), source);
+});
+
+test('CTX04 inspector: updating a wrapped status preserves reading anchor, selected source node, focus, payload, hashes and camera', async () => {
+  for (const scale of [.8, 1, 1.5]) {
+    const h = inputInspectorHarness(); await h.open();
+    const panel = h.part('chat-input-panel'), row = h.part('chat-input-source-change');
+    const body = panel.querySelector('.egd-codex-input-panel-body');
+    const source = settingsNodes(panel, node => node.tagName === 'PRE' && node.getAttribute('aria-label') === '당시 캡처 본문')[0];
+    const delivered = h.part('chat-input-delivery'), metadata = h.part('chat-input-source-details'), nav = h.part('chat-input-pagination');
+    const original = { source: source.textContent, delivered: delivered.textContent, metadata: metadata.textContent };
+    // Model a one-to-two-line status wrap at a transformed Canvas scale. This
+    // is deterministic layout arithmetic, not a browser measurement.
+    body.scrollTop = 200; body.scrollLeft = 7; body.offsetHeight = 300;
+    body.getBoundingClientRect = () => ({ top: 120, bottom: 120 + 300 * scale, height: 300 * scale });
+    source.getBoundingClientRect = () => {
+      const lineHeight = row.dataset.state === 'stale' ? 56 : 28;
+      const top = 120 + (180 + lineHeight - body.scrollTop) * scale;
+      return { top, bottom: top + 1200 * scale, height: 1200 * scale };
+    };
+    source.focus(); const selectedNode = source.children[0], selection = { anchorNode: selectedNode, anchorOffset: 2, focusNode: selectedNode, focusOffset: 10 };
+    h.document.selection = selection;
+    const position = source.getBoundingClientRect().top;
+    h.pending[0].resolve(h.sourceResponse()); await settle();
+    assert.ok(Math.abs(source.getBoundingClientRect().top - position) < 1e-8);
+    assert.equal(body.scrollTop, 228); assert.equal(body.scrollLeft, 7);
+    assert.equal(h.document.activeElement, source); assert.equal(h.document.selection, selection);
+    assert.equal(source.children[0], selectedNode);
+    assert.deepEqual({ source: source.textContent, delivered: delivered.textContent, metadata: metadata.textContent }, original);
+    assert.equal(h.part('chat-input-pagination'), nav); assert.equal(h.part('chat-input-panel'), panel);
+    assert.deepEqual(h.state.pan, { x: 12, y: 34 }); assert.equal(h.state.zoom, .8);
+  }
+});
+
+test('CTX04 inspector: preview and Claude never request tracking; corrupt source still fails independently before metadata', async () => {
+  const claude = inputInspectorHarness({ engineId: 'claude' }); await claude.open();
+  assert.equal(claude.pending.length, 0); assert.equal(claude.part('chat-input-source-change'), null);
+  assert.match(claude.calls[0].url, /engineId=claude&engineProfileId=claude-slot/);
+  const preview = inputInspectorHarness();
+  preview.preview(InputContext.inputSnapshot({ id: 'local-selection', kind: 'file', label: '미전송', sourceRef: { path: '/fixture/a' } }, { text: 'preview only' }));
+  assert.equal(preview.calls.length, 0); assert.equal(preview.part('chat-input-source-change'), null);
+  const corrupt = inputInspectorHarness({ capture: response => ({ ...response, capture: { ...response.capture, hash: 'different' } }) });
+  await corrupt.open(); assert.equal(corrupt.part('chat-input-panel'), null); assert.equal(corrupt.pending.length, 0);
+  assert.equal(corrupt.notices.length, 1);
 });
 
 test('unknown local history coverage is not presented as a failed history load', () => {
@@ -14248,6 +14861,92 @@ test('Agent personality UI: cancel writes nothing and reopening head has neither
   assert.equal(h.parts('settings-agent-example-row').length, 2);
   assert.equal(h.at('settings-agent-example-reply').value, '첫 답변\n둘째 줄');
   assert.equal(h.at('settings-agent-avoid-text').value, '첫 표현'); assert.equal(h.field('traits').value, '');
+});
+
+test('Agent personality native delete: primary mousedown must not transfer a retained textarea focus to the error-focus group', async () => {
+  const h = await personalitySettingsHarness(); h.edit();
+  h.part('settings-agent-example-add').fire('click');
+  h.type(h.at('settings-agent-example-user', 2), '남길 질문');
+  const reply = h.type(h.at('settings-agent-example-reply', 2), 'QA draft answer two.');
+  reply.focus(); reply.setSelectionRange(20, 20, 'none'); reply.scrollTop = 4;
+  const id = reply.getAttribute('id'), remove = h.at('settings-agent-example-remove', 1);
+  let prevented = false;
+  remove.fire('pointerdown', { button: 0, isPrimary: true });
+  remove.fire('mousedown', { button: 0, preventDefault() { prevented = true; } });
+  // Observed native boundary: the Mac click moved focus to this tabindex=-1
+  // group, not BODY/Canvas. Model that default action after mousedown unless
+  // the product handler prevents it; click then runs the actual delete code.
+  if (!prevented) h.part('settings-agent-examples').focus();
+  remove.fire('mouseup', { button: 0 }); remove.fire('click', { button: 0 });
+  const retained = h.at('settings-agent-example-reply', 1);
+  assert.ok(h.document.activeElement === retained, 'the retained input, not the error-focus group, must receive the restored focus');
+  assert.equal(retained.getAttribute('id'), id);
+  assert.deepEqual([retained.value, retained.selectionStart, retained.selectionEnd, retained.scrollTop], ['QA draft answer two.', 20, 20, 4]);
+  assert.equal(h.part('settings-agent-examples').getAttribute('tabindex'), '-1', 'validation can still focus the error group');
+});
+
+test('Agent personality native delete: deleted-row and keyboard focus go to the adjacent input, last-row focus goes to Add; non-primary presses remain native', async () => {
+  for (const kind of ['example', 'avoid']) for (const mode of ['primary', 'keyboard']) {
+    const h = await personalitySettingsHarness(); h.edit();
+    const inputKind = kind === 'example' ? 'reply' : 'text';
+    const remove = h.at(`settings-agent-${kind}-remove`, 0);
+    if (mode === 'primary') {
+      h.at(`settings-agent-${kind}-${inputKind}`, 0).focus();
+      let prevented = false;
+      remove.fire('pointerdown', { button: 0, isPrimary: true });
+      remove.fire('mousedown', { button: 0, preventDefault() { prevented = true; } });
+      if (!prevented) h.part(kind === 'example' ? 'settings-agent-examples' : 'settings-agent-avoid').focus();
+    } else remove.focus();
+    remove.fire('click', { button: 0 });
+    assert.ok(h.document.activeElement === h.at(`settings-agent-${kind}-${kind === 'example' ? 'user' : 'text'}`, 0), `${kind}/${mode}`);
+    const last = h.at(`settings-agent-${kind}-remove`, 0); last.focus(); last.fire('click');
+    assert.equal(h.document.activeElement, h.part(`settings-agent-${kind}-add`));
+  }
+  const h = await personalitySettingsHarness(); h.edit();
+  const input = h.at('settings-agent-example-reply'); input.focus(); input.setSelectionRange(1, 4, 'backward');
+  for (const press of [{ button: 1 }, { button: 2 }, { button: 0, ctrlKey: true }]) {
+    let prevented = false;
+    h.at('settings-agent-example-remove').fire('mousedown', { ...press, preventDefault() { prevented = true; } });
+    assert.equal(prevented, false, 'middle/right press and context-menu selection are not intercepted');
+    assert.equal(h.document.activeElement, input); assert.deepEqual([input.selectionStart, input.selectionEnd], [1, 4]);
+    assert.equal(h.parts('settings-agent-example-row').length, 2, 'mousedown itself never deletes');
+  }
+});
+
+test('Agent personality native tone: primary press retains the input, keyboard retains the button, and context-menu presses stay native', async () => {
+  const h = await personalitySettingsHarness(); h.edit(); h.field('tone-plain').fire('click');
+  h.type(h.field('traits'), '미추가 특징'); h.type(h.field('expertise'), '미추가 할 일');
+  const input = h.type(h.at('settings-agent-avoid-text', 1), 'QA retained avoid.');
+  input.focus(); input.setSelectionRange(18, 18, 'none'); input.scrollLeft = 5;
+  const id = input.getAttribute('id'), content = settingsNodes(h.card, node => node.className === 'egd-settings-content')[0];
+  content.scrollTop = 345; content.scrollLeft = 2;
+  const warm = h.field('tone-warm'); let prevented = false;
+  warm.fire('pointerdown', { button: 0, isPrimary: true });
+  warm.fire('mousedown', { button: 0, preventDefault() { prevented = true; } });
+  // The observed Firefox default focuses the tabindex=-1 tone group before
+  // click, just as with row deletion. Do not pre-filter it in the harness.
+  if (!prevented) h.field('tone').focus();
+  warm.fire('mouseup', { button: 0 }); warm.fire('click', { button: 0 });
+  const retained = h.document.getElementById(id);
+  assert.ok(h.document.activeElement === retained, 'tone selection must not strand focus on the group');
+  assert.deepEqual([retained.value, retained.selectionStart, retained.selectionEnd, retained.scrollLeft], ['QA retained avoid.', 18, 18, 5]);
+  assert.equal(h.field('tone-warm').getAttribute('aria-pressed'), 'true');
+  assert.equal(h.field('tone').getAttribute('tabindex'), '-1');
+  assert.deepEqual([content.scrollTop, content.scrollLeft], [345, 2]);
+  assert.deepEqual([h.field('traits').value, h.field('expertise').value], ['미추가 특징', '미추가 할 일']);
+  const keyboard = h.field('tone-plain'); keyboard.focus(); keyboard.fire('click', { detail: 0 });
+  assert.ok(h.document.activeElement === h.field('tone-plain'), 'keyboard button activation keeps its existing focus');
+  assert.equal(h.field('tone-plain').getAttribute('aria-pressed'), 'true');
+  h.at('settings-agent-avoid-text', 1).focus(); h.at('settings-agent-avoid-text', 1).setSelectionRange(1, 4, 'backward');
+  for (const press of [{ button: 1 }, { button: 2 }, { button: 0, ctrlKey: true }]) {
+    let blocked = false;
+    h.field('tone-warm').fire('mousedown', { ...press, preventDefault() { blocked = true; } });
+    assert.equal(blocked, false);
+    assert.ok(h.document.activeElement === h.at('settings-agent-avoid-text', 1));
+    assert.deepEqual([h.document.activeElement.selectionStart, h.document.activeElement.selectionEnd], [1, 4]);
+    assert.equal(h.field('tone-plain').getAttribute('aria-pressed'), 'true', 'a press alone never changes tone');
+  }
+  assert.equal(h.puts.length, 0);
 });
 
 test('Agent personality UI: all three full-size pairs and eight expressions save in one draft without changing active', async () => {

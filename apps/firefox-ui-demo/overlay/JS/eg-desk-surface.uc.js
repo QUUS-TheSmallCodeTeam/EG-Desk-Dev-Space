@@ -1530,14 +1530,18 @@
     return additions;
   }
 
-  function openChatInputPanel(threadId, { viewIds = null, snapshots = null } = {}) {
+  function openChatInputPanel(threadId, { viewIds = null, snapshots = null, sourceChange = null } = {}) {
     const thread = getCodexThreadById(state.codex, threadId);
     if (!thread) return;
     document.getElementById('egd-codex-input-panel')?._finishProjectScope?.();
+    document.getElementById('egd-codex-input-panel')?._finishInputSourceChange?.();
     document.getElementById('egd-codex-input-panel')?.remove();
     const panel = el('section', { id: 'egd-codex-input-panel', role: 'dialog', 'aria-label': snapshots ? '당시 입력 캡처' : 'Chat에 자료 첨부',
       data: { testid: 'chat-input-panel', threadId } });
-    const close = () => { state.codex.inputInspectNonce = (state.codex.inputInspectNonce || 0) + 1; panel.remove(); };
+    const close = () => {
+      state.codex.inputInspectNonce = (state.codex.inputInspectNonce || 0) + 1;
+      panel._finishInputSourceChange?.(); panel.remove();
+    };
     panel.addEventListener('mousedown', event => event.stopPropagation());
     panel.addEventListener('keydown', event => { if (event.key === 'Escape') { event.stopPropagation(); close(); } });
     panel.appendChild(el('header', {}, el('strong', {}, snapshots ? '당시 입력 캡처' : `${thread.title} · 자료 첨부`),
@@ -1545,7 +1549,7 @@
     const body = el('div', { class: 'egd-codex-input-panel-body' });
     panel.appendChild(body);
     if (snapshots) {
-      for (const snapshot of snapshots) body.appendChild(InputContext.inputSnapshotView(document, snapshot));
+      for (const snapshot of snapshots) body.appendChild(InputContext.inputSnapshotView(document, snapshot, { sourceChange }));
     } else {
       body.appendChild(el('p', {}, '선택한 자료만 다음 메시지에 첨부합니다. 선택만으로 전송하거나 실행하지 않습니다.'));
       const selected = new Set(viewIds || Array.from(document.querySelectorAll('.egd-entity-selected')).map(view => view.id));
@@ -1589,6 +1593,7 @@
     }
     document.documentElement.appendChild(panel);
     panel.querySelector('button')?.focus();
+    return panel;
   }
 
   const chatRequestProjectDisplays = new Map();
@@ -10687,10 +10692,16 @@
         const thread = getCodexThreadById(state.codex, threadId);
         if (!thread || !reference?.snapshotId) return;
         const nonce = state.codex.inputInspectNonce = (state.codex.inputInspectNonce || 0) + 1;
+        const activeRoom = state.codex.activeThreadId, roomGeneration = state.codex.activityRoomGeneration || 0;
+        const priorPanel = document.getElementById('egd-codex-input-panel');
         const stored = await this.readInput(reference, { ...options, threadId });
-        if (!stored || state.codex.inputInspectNonce !== nonce) return;
+        if (!stored || state.codex.inputInspectNonce !== nonce || state.codex.activeThreadId !== activeRoom
+            || (state.codex.activityRoomGeneration || 0) !== roomGeneration
+            || document.getElementById('egd-codex-input-panel') !== priorPanel) return;
         const snapshot = InputContext.storedSnapshotForView(stored, reference);
-        openChatInputPanel(threadId, { snapshots: [snapshot] });
+        const sourceChange = ChatState.chatThreadEngineId(thread, state.codex) === 'codex'
+          ? { state: 'loading', sourceId: snapshot.id, conversationId: thread.conversationId || '' } : null;
+        const panel = openChatInputPanel(threadId, { snapshots: [snapshot], sourceChange });
         const priorPages = options.pageRanges || [];
         const currentPage = snapshot.range ? { startLine: snapshot.range.startLine, endLine: snapshot.range.endLine } : null;
         const selectedPacketId = options.packetId || snapshot.delivered?.packetId;
@@ -10709,6 +10720,76 @@
             if (packet.value.trim()) void this.inspectInput(threadId, reference, { ...(currentPage || { startLine: 1 }), packetId: packet.value.trim() });
           } }, '전달본 조회')));
         if (options.pageRanges) nav.focus();
+        // This optional metadata request never gates immutable source reading
+        // or pagination and never rerenders the inspector when it settles.
+        if (sourceChange) void this.refreshInputSourceChange(threadId, reference, snapshot, stored.capture, panel, nonce);
+      },
+      async refreshInputSourceChange(threadId, reference, snapshot, capture, panel, nonce) {
+        const node = panel?.querySelector('[data-testid="chat-input-source-change"]');
+        if (!node) return;
+        // The tracked key is the validated stored capture, not the local
+        // attachment selection id used by a pre-send preview.
+        const sourceId = snapshot.id, hash = snapshot.hash;
+        const snapshotId = reference.snapshotId, referenceScope = JSON.stringify(reference.contextScope || null);
+        const activeRoom = state.codex.activeThreadId, roomGeneration = state.codex.activityRoomGeneration || 0;
+        const accountKey = () => JSON.stringify([state.codex.codexAccountKey, ChatState.codexAccountKey(state.codex.authStatus),
+          state.codex.authStatus?.isLoggedIn, state.codex.authStatus?.identityStatus]);
+        const account = accountKey();
+        const panelCurrent = () => accountKey() === account && state.codex.inputInspectNonce === nonce
+          && state.codex.activeThreadId === activeRoom && (state.codex.activityRoomGeneration || 0) === roomGeneration
+          && reference.sourceId === sourceId && reference.hash === hash && reference.snapshotId === snapshotId
+          && JSON.stringify(reference.contextScope || null) === referenceScope && panel.isConnected
+          && document.getElementById('egd-codex-input-panel') === panel
+          && panel.querySelector('[data-testid="chat-input-source-change"]') === node;
+        const readContext = () => {
+          const currentThread = getCodexThreadById(state.codex, threadId);
+          return InputContext.inputReadContext(reference, ChatState.chatContextRequestScope(currentThread, state.codex), {
+            thread: currentThread, accountKey: ChatState.codexAccountKey(state.codex.authStatus), cachedAccountKey: state.codex.codexAccountKey,
+          });
+        };
+        let scope, context;
+        const show = value => InputContext.updateInputSourceChange(node, { sourceId, conversationId: scope?.conversationId || '', ...value },
+          panel.querySelector('.egd-codex-input-panel-body'));
+        panel._finishInputSourceChange?.();
+        try {
+          context = readContext(); scope = context.scope;
+          InputContext.assertRestoredInputCapture(snapshot, capture, reference, context);
+        }
+        catch { if (panelCurrent()) show({ state: 'failed' }); return; }
+        if (scope.engineId !== 'codex') { if (panelCurrent()) show({ state: 'missing' }); return; }
+        const routeScope = JSON.stringify(context);
+        const token = epochScope.begin(scope.engineId, scope.engineProfileId);
+        let finished = false, unsubscribe = null, timer = null, settleStopped = null;
+        const current = () => {
+          if (finished || token.signal.aborted || !epochScope.valid(token) || !panelCurrent()) return false;
+          try { return JSON.stringify(readContext()) === routeScope; }
+          catch { return false; }
+        };
+        const finish = () => {
+          if (finished) return;
+          finished = true; token.controller.abort(); epochScope.finish(token); unsubscribe?.();
+          if (timer !== null) window.clearTimeout(timer);
+          settleStopped?.();
+          if (panel._finishInputSourceChange === finish) panel._finishInputSourceChange = null;
+        };
+        panel._finishInputSourceChange = finish;
+        unsubscribe = this.subscribe(() => { if (!current()) finish(); });
+        if (finished) unsubscribe();
+        try {
+          if (!current()) return;
+          if (!InputContext.inputSourceTrackingConversation(snapshot, capture, reference.contextScope, scope)) {
+            show({ state: 'missing' }); return;
+          }
+          const query = Object.entries(scope).map(([key, value]) => `${key}=${encodeURIComponent(value)}`).join('&');
+          // Settle even if a transport does not reject on abort. This optional
+          // metadata never keeps the inspector or a replaced panel waiting.
+          const stopped = new Promise(resolve => { settleStopped = resolve; });
+          timer = window.setTimeout(() => { if (current()) show({ state: 'failed' }); finish(); }, 10000);
+          const response = await Promise.race([fetchJson(`/context/sources?${query}`, { signal: token.signal }), stopped]);
+          if (current()) show(InputContext.inputSourceChangeState(response, { conversationId: scope.conversationId, sourceId }));
+        } catch {
+          if (current()) show({ state: 'failed' });
+        } finally { finish(); }
       },
       async readInput(reference, options = {}) {
         if (!reference?.sourceId) return null;
@@ -10719,23 +10800,42 @@
             : thread.messages?.some(message => message.inputReferences?.some(input => input.sourceId === reference.sourceId)));
         if (candidates.length !== 1) { boardNotice('이 고정 캡처의 원래 대화 연결을 확인하지 못했습니다.'); return null; }
         const thread = candidates[0];
-        let contextScope;
-        try { contextScope = ChatState.chatContextRequestScope(thread, state.codex); InputContext.assertInputContextScope(reference, contextScope); }
+        const readContext = () => {
+          const currentThread = getCodexThreadById(state.codex, thread.id);
+          return InputContext.inputReadContext(reference, ChatState.chatContextRequestScope(currentThread, state.codex), {
+            thread: currentThread, accountKey: ChatState.codexAccountKey(state.codex.authStatus), cachedAccountKey: state.codex.codexAccountKey,
+          });
+        };
+        let context;
+        try { context = readContext(); }
         catch (error) { boardNotice(error.message); return null; }
+        const contextScope = context.scope, capturedContext = JSON.stringify(context);
+        const activeRoom = state.codex.activeThreadId, roomGeneration = state.codex.activityRoomGeneration || 0;
+        const inspectNonce = state.codex.inputInspectNonce;
+        const inputPanel = document.getElementById('egd-codex-input-panel');
         const token = epochScope.begin(contextScope.engineId, contextScope.engineProfileId);
+        const current = () => {
+          if (token.signal.aborted || !epochScope.valid(token) || state.codex.activeThreadId !== activeRoom
+              || (state.codex.activityRoomGeneration || 0) !== roomGeneration || state.codex.inputInspectNonce !== inspectNonce
+              || document.getElementById('egd-codex-input-panel') !== inputPanel) return false;
+          try { return JSON.stringify(readContext()) === capturedContext; } catch { return false; }
+        };
+        const unsubscribe = this.subscribe(() => { if (!current()) token.controller.abort(); });
         try {
+          if (!current()) return;
           const { startLine, endLine } = InputContext.projectionRange({ startLine: options.startLine, endLine: options.endLine });
           const route = Object.entries(contextScope).map(([key, value]) => `${key}=${encodeURIComponent(value)}`).join('&');
           const query = `?startLine=${startLine}${options.endLine !== undefined ? `&endLine=${endLine}` : ''}${options.packetId ? `&packetId=${encodeURIComponent(options.packetId)}` : ''}&${route}`;
           const stored = await fetchJson(`/context/captures/${encodeURIComponent(reference.sourceId)}${query}`, { signal: token.signal });
-          if (!epochScope.valid(token) || JSON.stringify(ChatState.chatContextRequestScope(getCodexThreadById(state.codex, thread.id), state.codex)) !== JSON.stringify(contextScope)) return;
-          InputContext.storedSnapshotForView(stored, reference);
+          if (!current()) return;
+          const snapshot = InputContext.storedSnapshotForView(stored, reference);
+          InputContext.assertRestoredInputCapture(snapshot, stored.capture, reference, context);
           if (stored.source.range && (stored.source.range.startLine !== startLine
               || options.endLine !== undefined && stored.source.range.endLine !== endLine)) throw new Error('요청한 캡처 페이지 범위가 반환되지 않았습니다.');
           if (options.packetId && stored.delivered?.packetId !== options.packetId) throw new Error('지정한 과거 전달본이 반환되지 않았습니다.');
           return stored;
-        } catch (error) { if (epochScope.valid(token)) boardNotice(`당시 입력을 열지 못했습니다: ${error.message}`); }
-        finally { epochScope.finish(token); }
+        } catch (error) { if (current()) boardNotice(`당시 입력을 열지 못했습니다: ${error.message}`); }
+        finally { unsubscribe(); epochScope.finish(token); }
       },
       async openInputEvidence(threadId, reference, options = {}) {
         if (!getCodexThreadById(state.codex, threadId)) return null;
@@ -13282,6 +13382,10 @@
           row.appendChild(el('div', { class: 'egd-settings-personality-row-head' },
             el('span', { class: 'egd-settings-form-label' }, `${label} ${index + 1}`),
             el('button', { class: 'egd-settings-link', type: 'button', 'aria-label': `${label} ${index + 1} 삭제`,
+              // A native Mac press can focus the tabindex=-1 error group
+              // before click. Keep the input focus for the existing restore
+              // path; keyboard activation and context-menu presses stay native.
+              onmousedown: event => { if (event.button === 0 && !event.ctrlKey) event.preventDefault(); },
               data: { testid: `settings-agent-${kind}-remove`, index: String(index) }, disabled: agents.busy ? 'true' : null, onclick: remove }, '삭제')));
           for (const column of columns) {
             const controlId = fieldId(`${key}-${keys[index]}-${column.name}`);
@@ -13334,6 +13438,9 @@
         ...items.map((item) => el('button', {
           id: fieldId(`${key}-${item.value}`),
           class: `egd-settings-segment${form[key] === item.value ? ' egd-settings-segment-active' : ''}`, 'aria-pressed': String(form[key] === item.value),
+          // Tone's native Mac press otherwise focuses the error group before
+          // the redraw can retain the input. Other segments stay unchanged.
+          onmousedown: event => { if (key === 'tone' && event.button === 0 && !event.ctrlKey) event.preventDefault(); },
           onclick: () => { form[key] = item.value; agents.focusField = null; renderAgentsTab(); },
         }, item.label)));
       const swatches = el('div', { class: 'egd-settings-swatches', role: 'group', 'aria-label': '아바타 색', id: fieldId('avatarColor'), tabindex: '-1' },

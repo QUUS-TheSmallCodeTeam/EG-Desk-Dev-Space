@@ -67,6 +67,12 @@ function productionController(name, ...args) {
 // sendMessage and serializeDeskSnapshot share this production draft closure.
 // Instantiate its real map, constants and normalizer for each isolated surface.
 const requestProjectDraftSource = between('  const chatRequestProjectDisplays = ', '  function chatRequestProjectSelection(');
+const bridgeNormalizeSource = between('    const normalizeThreads = () => {', '    const emit = () => {');
+// Keep the production subscription/notification closure, without installing
+// Firefox rendering or persistence. emit's listener loop is not a copied bus.
+const bridgeNotifySource = between('      for (const listener of listeners) {', '      renderCodexActivityPanel();',
+  source.indexOf('    const emit = () => {'));
+const agentProfileSource = between('  const DEFAULT_CODEX_AGENT_PROFILE_ID = ', '  function codexThreadKindMeta(');
 
 class Node {
   constructor(tag, text = '') {
@@ -132,13 +138,12 @@ function surface({ run = null, thread = {}, auth = {}, fetchJson = async () => (
   const effects = { emits: 0, capture: [], requests: [], projectRequests: [], ready: 0, timers: 0, synced: [], logs: [], revoked: [] };
   const epochScope = ChatState.createChatEpochScope();
   const userInputDrafts = new Map();
-  const globals = { ChatState, ChatRunResult, ChatChangeReview, InputContext, document, state, protocol, userInputDrafts, epochScope,
+  const globals = { ChatState, ChatRunResult, ChatChangeReview, InputContext, document, state, protocol, userInputDrafts, epochScope, effects,
     window: { AbortController, setTimeout: () => 1, clearTimeout() {} }, queueMicrotask,
     captureChatInputs, captureManagedFileInput, boardNotice: text => effects.logs.push(text),
     SELF_MEMBER: 'self', cloneJson: clone, formatMessageTime: String, contextBoardTitle: () => '',
     openChatFileReference: () => assert.fail('unexpected file open'), currentViewportAgendaLabel: () => '',
     serializeCardState: () => assert.fail('unexpected card'), serializeShapeState: () => assert.fail('unexpected shape'),
-    emit: () => { effects.emits++; },
     updateThreadById: (id, updater) => { state.codex.threads = state.codex.threads.map(item => item.id === id ? updater(item) : item); },
     appendMessageToThread: (id, message) => { state.codex.threads.find(item => item.id === id).messages.push(message); },
     ensureNativeReadyForSend: async item => { effects.ready++; return ensureReady(item); },
@@ -159,6 +164,8 @@ function surface({ run = null, thread = {}, auth = {}, fetchJson = async () => (
     refreshing: new Map(), resumedNativeBindings: new Set(),
   };
   const definitions = ['el', 'getCodexThreadById', 'getActiveCodexThread', 'getCodexThreadDraft', 'createCodexMessage',
+    'uniqueNames', 'normalizeHudView', 'normalizeCodexAgentProfileId', 'codexServerAgentProfile', 'codexAgentProfile',
+    'buildThreadSubtitle', 'createCodexThread', 'defaultCodexThreads',
     'chatRequestProjectSelection', 'chatRoomProjectState', 'chatRoomProjectSendBlock',
     'createChatProjectScope', 'normalizeChatRoomProjectDefault', 'snapshotChatRoomProjectExpectation', 'chatRoomProjectExpectation', 'chatRoomProjectTargetsMatch',
     'codexRuns', 'codexRunLabel', 'codexUserInputBlock', 'pruneUserInputDrafts', 'contextResolverRecordSection',
@@ -167,15 +174,22 @@ function surface({ run = null, thread = {}, auth = {}, fetchJson = async () => (
     'codexAgentWorkingRow'].map(name => functionSource(name)).join('\n');
   if (nativeReady) delete globals.ensureNativeReadyForSend;
   if (realCapture) delete globals.captureThreadInputs;
-  const api = compile(`${requestProjectDraftSource}\n${definitions}\n${functionSource('threadBusy', '    ')}\n${functionSource('refreshConversation', '    ')}
+  const api = compile(`${requestProjectDraftSource}\n${agentProfileSource}\n${definitions}
+    ${source.match(/^  let codexProfileCatalog = .*;$/m)[0]}
+    ${source.match(/^  const TAG = .*;$/m)[0]}
+    ${functionSource('threadBusy', '    ')}\n${functionSource('refreshConversation', '    ')}
     ${functionSource('requireClaudeContext', '    ')}
     ${realCapture ? functionSource('captureThreadInputs', '    ') : ''}
     ${nativeReady ? functionSource('ensureNativeReadyForSend', '    ') : ''}
     let activityPanelComposing = false, activityPanelDeferred = false, activityDetailsGeneration = 0, activityDetailsView = null;
+    const listeners = new Set();
+    ${bridgeNormalizeSource}
+    const emit = () => { effects.emits++; ${bridgeNotifySource} };
     ${source.match(/^  const userInputDraftKey = .*;$/m)[0]}
-    const bridge = { ${['createActivityReadScope', 'createProjectScope', 'readRoomProjectDefault', 'prepareRoomProjectSend', 'replyApproval', 'replyUserInput', 'sendMessage', 'captureInputs', 'readInput', 'setThreadEngine', 'interrupt'].map(methodSource).join(',\n')} };
+    const bridge = { ${['subscribe', 'createActivityReadScope', 'createProjectScope', 'readRoomProjectDefault', 'prepareRoomProjectSend', 'replyApproval', 'replyUserInput', 'sendMessage', 'captureInputs', 'readInput', 'setThreadEngine', 'interrupt'].map(methodSource).join(',\n')} };
     return { ...bridge, render: renderCodexActivityPanel, question: codexUserInputBlock, serialize: serializeDeskSnapshot,
-      refresh: refreshConversation, workingRow: codexAgentWorkingRow, projectBlock: chatRoomProjectSendBlock, el };`, globals);
+      refresh: refreshConversation, workingRow: codexAgentWorkingRow, projectBlock: chatRoomProjectSendBlock,
+      notify: emit, listenerCount: () => listeners.size, el };`, globals);
   state.codexBridge = { ...api, refreshConversation: () => {} };
   return { ...api, state, protocol, effects, epochScope, drafts: userInputDrafts, document, root,
     thread: () => state.codex.threads[0], panel: () => document.getElementById('egd-codex-activity-panel') };
@@ -216,7 +230,7 @@ function accountLifecycle(ui) {
     epochScope: { ...ui.epochScope, reset: (scope, profile) => { effects.reset++; effects.resetScopes.push(scope); ui.epochScope.reset(scope, profile); } },
     clearBrowserToolTransport: () => effects.cleared++,
     resumedNativeBindings: new Set(), refreshing: new Map(), chatBindingNonce: () => 'new-codex-binding',
-    normalizeThreads: () => {}, emit: () => {}, scheduleReconnect: () => effects.reconnect++,
+    normalizeThreads: () => {}, emit: ui.notify, scheduleReconnect: () => effects.reconnect++,
     forgetContextSuggestions: () => assert.fail('Claude selections were cleared'),
   });
   return { ...api, effects };
@@ -625,6 +639,9 @@ test('immutable inspector uses recorded routing after UI restart/live change and
   for(let restart=0;restart<2;restart++){
     const ui=surface({thread:{messages:[{inputReferences:[clone(reference)]}]},realCapture:true,
       fetchJson:async()=>clone(stored),captureChatInputs:async()=>assert.fail('must not recapture changed live source')});
+    // subscribe normalizes real rooms; a dangling active ID would be repaired
+    // back to ui instead of representing another room after Desk restoration.
+    ui.state.codex.threads.push({id:'different',clientThreadId:'different',engineId:'claude',messages:[]});
     ui.state.codex.activeThreadId='different';
     const result=await ui.readInput(clone(reference),{threadId:'ui'});
     assert.equal(result.source.text,'ORIGINAL VERSION');assert.equal(result.source.rangeHash,'range-v1');
@@ -644,6 +661,78 @@ test('immutable inspector account/missing/manifest refusal never falls back to l
     const ui=surface({fetchJson:async()=>{throw Object.assign(new Error(code),{code,status:409});}});
     assert.equal(await ui.readInput({sourceId:'fixed',hash:'h'},{threadId:'ui'}),undefined);
     assert.equal(ui.effects.requests.length,1);assert.deepEqual(ui.effects.capture,[]);
+  }
+});
+
+test('production subscribe normalizes immediately, notifies through real lifecycle emits and isolates teardown per surface',()=>{
+  const a=surface({thread:{participants:['self','self','peer']}}), b=surface();
+  const seenA=[], seenB=[];
+  const stopA=a.subscribe(value=>seenA.push({state:value,connected:value.connected}));
+  const stopB=b.subscribe(value=>seenB.push(value));
+  assert.equal(seenA.length,1);assert.equal(seenA[0].state,a.state.codex);
+  assert.deepEqual(a.thread().participants,['self','peer'],'subscribe runs the production normalizer');
+  assert.equal(a.thread().participantRoles.self,'owner');
+  assert.equal(seenB.length,1);assert.equal(a.listenerCount(),1);assert.equal(b.listenerCount(),1);
+  accountLifecycle(a).update({connected:false});
+  assert.equal(seenA.at(-1).connected,false);assert.ok(seenA.length>1);
+  assert.equal(seenB.length,1,'another surface does not receive this lifecycle notification');
+  let throwOnNotify=false, afterThrow=0;
+  const stopThrow=a.subscribe(()=>{if(throwOnNotify)throw new Error('fixture listener failure');});
+  const stopAfter=a.subscribe(()=>afterThrow++);
+  throwOnNotify=true;a.notify();
+  assert.equal(afterThrow,2,'one failing listener must not swallow later subscribers');
+  assert.ok(a.effects.logs.some(row=>Array.isArray(row)&&row.includes('codex listener failed')));
+  stopThrow();stopAfter();
+  assert.equal(stopA(),true);assert.equal(stopA(),false,'unsubscribe is idempotent');
+  const countA=seenA.length;a.notify();b.notify();
+  assert.equal(seenA.length,countA);assert.equal(seenB.length,2);
+  stopB();assert.equal(a.listenerCount(),0);assert.equal(b.listenerCount(),0);
+  assert.deepEqual(a.effects.requests,[]);assert.deepEqual(b.effects.requests,[]);
+});
+
+test('real readInput subscription survives unrelated notifications and is removed on success or request failure',async()=>{
+  for(const outcome of ['success','failure']){
+    const reference={sourceId:'fixed',hash:'original-hash',contextScope:{engineId:'claude',engineProfileId:'claude-default',clientThreadId:'ui'}};
+    const stored={capture:{sourceId:'fixed',hash:'original-hash',sourceRef:{},captureScope:{type:'file'}},
+      source:{role:'source',hash:'original-hash',rangeHash:'range-v1',text:'ORIGINAL VERSION',mime:'text/plain',range:{startLine:1,endLine:1,totalLines:1}},delivered:null,bindings:[]};
+    let resolveRead,rejectRead,signal;
+    const ui=surface({fetchJson:(_path,options)=>{signal=options.signal;return new Promise((resolve,reject)=>{resolveRead=resolve;rejectRead=reject;});}});
+    const pending=ui.readInput(reference,{threadId:'ui'});
+    assert.equal(ui.listenerCount(),1);assert.equal(signal.aborted,false);
+    ui.notify();assert.equal(signal.aborted,false,'unchanged routing keeps the real read active');
+    if(outcome==='success')resolveRead(stored);else rejectRead(new Error('explicit fixture read failure'));
+    const result=await pending;
+    if(outcome==='success')assert.equal(result.source.text,'ORIGINAL VERSION');
+    else {assert.equal(result,undefined);assert.ok(ui.effects.logs.some(row=>typeof row==='string'&&row.includes('explicit fixture read failure')));}
+    assert.equal(ui.listenerCount(),0,'readInput finally removes its actual subscription');
+    ui.thread().clientBindingId='after-completion';ui.notify();
+    assert.equal(signal.aborted,false,'a finished read no longer receives state notifications');
+    assert.equal(ui.effects.requests.length,1);assert.deepEqual(ui.effects.capture,[]);
+  }
+});
+
+test('real notification aborts a rebound read before late transport settlement without cancelling another surface',async()=>{
+  for(const outcome of ['resolve','reject']){
+    const reference={sourceId:'fixed',hash:'original-hash',contextScope:{engineId:'claude',engineProfileId:'claude-default',clientThreadId:'ui'}};
+    const stored={capture:{sourceId:'fixed',hash:'original-hash',sourceRef:{},captureScope:{type:'file'}},
+      source:{role:'source',hash:'original-hash',rangeHash:'range-v1',text:'ORIGINAL VERSION',mime:'text/plain',range:{startLine:1,endLine:1,totalLines:1}},delivered:null,bindings:[]};
+    const pendingSurface=()=>{
+      let resolveRead,rejectRead,signal;
+      const ui=surface({fetchJson:(_path,options)=>{signal=options.signal;return new Promise((resolve,reject)=>{resolveRead=resolve;rejectRead=reject;});}});
+      const pending=ui.readInput(clone(reference),{threadId:'ui'});
+      return {ui,pending,signal,resolveRead,rejectRead};
+    };
+    const a=pendingSurface(), b=pendingSurface();
+    assert.equal(a.ui.listenerCount(),1);assert.equal(b.ui.listenerCount(),1);
+    a.ui.thread().clientBindingId='rebound';a.ui.notify();
+    assert.equal(a.signal.aborted,true,'notification must abort before the ignored-abort transport resolves');
+    assert.equal(b.signal.aborted,false,'subscription storage belongs to each surface');
+    if(outcome==='resolve')a.resolveRead(stored);else a.rejectRead(new Error('late obsolete failure'));
+    assert.equal(await a.pending,undefined);
+    assert.equal(a.ui.listenerCount(),0);assert.deepEqual(a.ui.effects.logs,[]);
+    b.resolveRead(stored);assert.equal((await b.pending).source.text,'ORIGINAL VERSION');
+    assert.equal(b.ui.listenerCount(),0);
+    for(const {ui} of [a,b]){assert.equal(ui.effects.requests.length,1);assert.deepEqual(ui.effects.capture,[]);}
   }
 });
 
