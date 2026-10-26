@@ -18,6 +18,8 @@ const DOCK_IDS = Object.freeze(['chat', 'shelf', 'ontology', 'browser', 'ide', '
   'create', 'pencil', 'hand', 'square', 'ellipse', 'line', 'arrow', 'label', 'highlight', 'select', 'trash']);
 const ZOOM_LABELS = Object.freeze(['Canvas 축소', 'Canvas 확대', '열린 창 전체 보기']);
 const DRAFT = 'EG-Desk headless QA draft — never send';
+export const NARROW_CHAT_SAMPLE = ' QA600';
+export const NARROW_CHAT_WHEEL_LIMIT = 4;
 const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
 
 export function parseDeadline(value, now = Date.now()) {
@@ -396,6 +398,77 @@ async function safeClick(harness, selector, label, size, deadlineMs, result) {
   return waitStableViewport(harness, size, deadlineMs);
 }
 
+// Only the new reachability phase uses this point-input path. The original
+// baseline keeps its existing UID actions and assertions unchanged.
+export async function observeReachabilityDockPoint(harness) {
+  return chrome(harness, () => [...document.querySelectorAll('#egd-dock .egd-dock-btn[data-id="chat"]')].map(node => {
+    const r = node.getBoundingClientRect(), point = { x: Math.floor(r.left + r.width / 2), y: Math.floor(r.top + r.height / 2) };
+    const clip = { left: 0, top: 0, right: innerWidth, bottom: innerHeight };
+    let visible = node.isConnected && !node.closest('[hidden],[inert],[aria-hidden="true"]');
+    for (let parent = node; parent; parent = parent.parentElement) {
+      const css = getComputedStyle(parent), p = parent.getBoundingClientRect();
+      if (css.display === 'none' || css.visibility !== 'visible' || Number(css.opacity) <= 0) visible = false;
+      if (parent === node || css.display === 'inline' || css.display === 'contents') continue;
+      const sx = parent.offsetWidth ? p.width / parent.offsetWidth : 1, sy = parent.offsetHeight ? p.height / parent.offsetHeight : 1;
+      if (/(auto|scroll|hidden|clip)/.test(css.overflowX)) {
+        clip.left = Math.max(clip.left, p.left + parent.clientLeft * sx);
+        clip.right = Math.min(clip.right, p.left + (parent.clientLeft + parent.clientWidth) * sx);
+      }
+      if (/(auto|scroll|hidden|clip)/.test(css.overflowY)) {
+        clip.top = Math.max(clip.top, p.top + parent.clientTop * sy);
+        clip.bottom = Math.min(clip.bottom, p.top + (parent.clientTop + parent.clientHeight) * sy);
+      }
+    }
+    const owned = (x, y) => { const hit = document.elementFromPoint(x, y); return !!hit && (hit === node || node.contains(hit)); };
+    let hitCount = 0;
+    for (const fy of [0.2, 0.5, 0.8]) for (const fx of [0.2, 0.5, 0.8]) if (owned(r.left + r.width * fx, r.top + r.height * fy)) hitCount++;
+    return { id: node.dataset.id, visible, disabled: !!node.disabled, readOnly: !!node.readOnly, hitCount,
+      inViewport: r.width > 0 && r.height > 0 && r.left >= 0 && r.top >= 0 && r.right <= innerWidth && r.bottom <= innerHeight,
+      clipped: r.left < clip.left - 0.5 || r.top < clip.top - 0.5 || r.right > clip.right + 0.5 || r.bottom > clip.bottom + 0.5,
+      rect: { x: r.x, y: r.y, width: r.width, height: r.height }, point, pointHit: owned(point.x, point.y),
+      viewport: { width: innerWidth, height: innerHeight } };
+  }));
+}
+
+export async function focusChatDockForReachability(harness, size, deadlineMs, result, {
+  read = observeReachabilityDockPoint, pause = sleep, now = Date.now, capture = captureHeadlessScreenshot,
+} = {}) {
+  const proof = { size, observations: [], dispatched: false, clickCount: 0 };
+  (result.reachabilityDockFocus ||= []).push(proof);
+  try {
+    for (let index = 0; index < 2; index++) {
+      assertBeforeDeadline(deadlineMs, now());
+      const targets = await read(harness); proof.observations.push(targets);
+      assertBeforeDeadline(deadlineMs, now());
+      const target = targets[0];
+      requireCheck(result, `${size.width}x${size.height}: reachability Dock point preflight ${index + 1}`,
+        targets.length === 1 && target?.id === 'chat' && targetIssues(target).length === 0 && target.clipped === false &&
+        target.pointHit === true && ['x', 'y'].every(key => Number.isSafeInteger(target.point?.[key])) &&
+        ['x', 'y', 'width', 'height'].every(key => Number.isFinite(target.rect?.[key])) &&
+        target.point.x === Math.floor(target.rect.x + target.rect.width / 2) &&
+        target.point.y === Math.floor(target.rect.y + target.rect.height / 2) &&
+        target.point.x >= 0 && target.point.y >= 0 && target.point.x < size.width && target.point.y < size.height &&
+        target.viewport?.width === size.width && target.viewport?.height === size.height, targets);
+      if (index === 0) await pause(120);
+    }
+    const [before, after] = proof.observations.map(targets => targets[0]);
+    requireCheck(result, `${size.width}x${size.height}: reachability Dock geometry and exact hit point stable`,
+      JSON.stringify(before.rect) === JSON.stringify(after.rect) && JSON.stringify(before.point) === JSON.stringify(after.point), { before, after });
+    assertBeforeDeadline(deadlineMs, now());
+    proof.dispatched = true; proof.clickCount = 1;
+    await harness.clickPoint(after.point); // Exactly once; no UID lookup, auto-scroll or input retry.
+    assertBeforeDeadline(deadlineMs, now());
+    proof.completed = true;
+    result.actions.push(`${size.width}x${size.height}: one stable native Chat Dock point click for reachability`);
+    return proof;
+  } catch (error) {
+    proof.error = error.message; proof.completed = false;
+    try { if (now() < deadlineMs) proof.failureCapture = await capture(harness, `${size.width}x${size.height}-chat-dock-point-failure`, deadlineMs, now); }
+    catch (captureError) { proof.captureError = captureError.message; }
+    throw error;
+  }
+}
+
 async function safeFill(harness, selector, value, size, deadlineMs, result) {
   assertBeforeDeadline(deadlineMs);
   await waitStableViewport(harness, size, deadlineMs);
@@ -407,6 +480,274 @@ async function safeFill(harness, selector, value, size, deadlineMs, result) {
   assertBeforeDeadline(deadlineMs);
   await harness.fill(selector, value);
   result.actions.push('fill offline Chat draft');
+}
+
+// Read-only witness, separate from the baseline observer so existing projection
+// checks remain unchanged. Textarea value is not a DOM text node: endpoint and
+// line-space evidence is automatic; final glyph legibility needs image review.
+export async function observeChatReachability(harness) {
+  return chrome(harness, () => {
+    const state = window.__egdesk?.state, codex = state?.codex;
+    const thread = codex?.threads?.find(item => item.id === codex.activeThreadId);
+    const root = codex?.chatDockMode === 'canvas' ? document.getElementById(codex.chatCardEntityId) : null;
+    const inputs = [...(root?.querySelectorAll('textarea.egd-codex-input[data-testid="chat-composer"]') || [])];
+    const logs = [...(root?.querySelectorAll('.egd-codex-messages') || [])];
+    const input = inputs.length === 1 ? inputs[0] : null, messages = logs.length === 1 ? logs[0] : null;
+    const logins = [...(messages?.querySelectorAll('.egd-codex-empty-actions button.egd-codex-chip-primary') || [])]
+      .filter(node => node.textContent.trim() === '로그인');
+    const login = logins.length === 1 ? logins[0] : null;
+    const rectOf = r => r && ({ left: r.left, top: r.top, right: r.right, bottom: r.bottom, width: r.width, height: r.height });
+    const bounds = node => {
+      if (!node) return null;
+      const rect = node.getBoundingClientRect();
+      const clip = { left: 0, top: 0, right: innerWidth, bottom: innerHeight };
+      let shown = node.isConnected && !node.closest('[hidden],[inert],[aria-hidden="true"]');
+      for (let parent = node; parent; parent = parent.parentElement) {
+        const css = getComputedStyle(parent), r = parent.getBoundingClientRect();
+        if (css.display === 'none' || css.visibility !== 'visible' || Number(css.opacity) <= 0) shown = false;
+        if (parent === node) continue; // Own borders are not ancestor clipping.
+        if (css.display === 'inline' || css.display === 'contents') continue;
+        const sx = parent.offsetWidth ? r.width / parent.offsetWidth : 1, sy = parent.offsetHeight ? r.height / parent.offsetHeight : 1;
+        if (/(auto|scroll|hidden|clip)/.test(css.overflowX)) {
+          clip.left = Math.max(clip.left, r.left + parent.clientLeft * sx);
+          clip.right = Math.min(clip.right, r.left + (parent.clientLeft + parent.clientWidth) * sx);
+        }
+        if (/(auto|scroll|hidden|clip)/.test(css.overflowY)) {
+          clip.top = Math.max(clip.top, r.top + parent.clientTop * sy);
+          clip.bottom = Math.min(clip.bottom, r.top + (parent.clientTop + parent.clientHeight) * sy);
+        }
+      }
+      const inside = r => r.width > 0 && r.height > 0 && r.left >= clip.left - 0.5 && r.top >= clip.top - 0.5 &&
+        r.right <= clip.right + 0.5 && r.bottom <= clip.bottom + 0.5;
+      let hits = 0;
+      for (const fy of [0.2, 0.5, 0.8]) for (const fx of [0.2, 0.5, 0.8]) {
+        const hit = document.elementFromPoint(rect.left + rect.width * fx, rect.top + rect.height * fy);
+        if (hit && (hit === node || node.contains(hit))) hits++;
+      }
+      let wheelPoint = null;
+      const left = Math.max(rect.left, clip.left), right = Math.min(rect.right, clip.right);
+      const top = Math.max(rect.top, clip.top), bottom = Math.min(rect.bottom, clip.bottom);
+      if (shown && right - left > 4 && bottom - top > 4) for (const fy of [0.5, 0.25, 0.75]) for (const fx of [0.5, 0.25, 0.75]) {
+        const x = Math.floor(left + (right - left) * fx), y = Math.floor(top + (bottom - top) * fy);
+        const hit = document.elementFromPoint(x, y);
+        if (!wheelPoint && hit && (hit === node || node.contains(hit))) wheelPoint = { x, y };
+      }
+      return { shown, rect: rectOf(rect), clip, fullyVisible: shown && inside(rect), hitCount: hits, wheelPoint,
+        scaleY: node.offsetHeight ? rect.height / node.offsetHeight : 1,
+        disabled: !!node.disabled, readOnly: !!node.readOnly,
+        scrollTop: node.scrollTop, scrollHeight: node.scrollHeight, clientHeight: node.clientHeight };
+    };
+    const textFragments = [];
+    let missingTextRects = 0;
+    if (login) {
+      const walker = document.createTreeWalker(login, NodeFilter.SHOW_TEXT);
+      for (let node = walker.nextNode(); node; node = walker.nextNode()) {
+        if (!node.data.trim()) continue;
+        const range = document.createRange(); range.selectNodeContents(node);
+        const rects = [...range.getClientRects()].filter(r => r.width > 0 && r.height > 0);
+        if (!rects.length) missingTextRects++;
+        for (const r of rects) {
+          const clip = bounds(login).clip;
+          let hitCount = 0;
+          for (const fraction of [0.2, 0.5, 0.8]) {
+            const hit = document.elementFromPoint(r.left + r.width * fraction, r.top + r.height / 2);
+            if (hit && (hit === login || login.contains(hit))) hitCount++;
+          }
+          textFragments.push({ text: node.data, rect: rectOf(r), hitCount,
+            inside: r.left >= clip.left - 0.5 && r.top >= clip.top - 0.5 && r.right <= clip.right + 0.5 && r.bottom <= clip.bottom + 0.5 });
+        }
+        range.detach?.();
+      }
+    }
+    const css = input && getComputedStyle(input), px = value => Number.parseFloat(value);
+    const inputBox = bounds(input), send = root?.querySelector('[data-testid="chat-send"]');
+    return { mode: codex?.chatDockMode, rootId: root?.id || null, cardId: codex?.chatCardEntityId || null,
+      activeEntityId: state?.activeEntityId || null, threadId: thread?.id || null, inputThreadId: input?.dataset.threadId || null,
+      inputCount: inputs.length, messagesCount: logs.length,
+      messagesThreadId: messages?.dataset.threadId || null, conversationId: thread?.conversationId || null,
+      messageCount: thread?.messages?.length ?? null, isSending: !!codex?.isSending, sendDisabled: send?.disabled ?? null,
+      loggedIn: !!codex?.authStatus?.isLoggedIn, loginInProgress: !!(codex?.isStartingLogin || codex?.authStatus?.loginInProgress),
+      accountBound: !!codex?.codexAccountKey, draft: codex?.threadDrafts?.[thread?.id] || '',
+      camera: { zoom: state?.zoom, zoomTarget: state?.zoomTarget, pan: { ...state?.pan }, panTarget: { ...state?.panTarget } },
+      viewport: { width: innerWidth, height: innerHeight },
+      input: inputBox && { ...inputBox, value: input.value, focused: document.activeElement === input,
+        selectionStart: input.selectionStart, selectionEnd: input.selectionEnd,
+        lineHeight: px(css.lineHeight), contentHeight: input.clientHeight - px(css.paddingTop) - px(css.paddingBottom),
+        fontPx: px(css.fontSize), projectedFontPx: px(css.fontSize) * (input.offsetWidth ? inputBox.rect.width / input.offsetWidth : 1) },
+      messages: bounds(messages), login: { count: logins.length, text: login?.textContent.trim() || '',
+        box: bounds(login), textFragments, missingTextRects } };
+  });
+}
+
+export function chatLoginReachable(value) {
+  const login = value?.login, box = login?.box;
+  return login?.count === 1 && login.text === '로그인' && box?.fullyVisible === true && box.hitCount === 9 && !box.disabled &&
+    login.missingTextRects === 0 && login.textFragments.length > 0 &&
+    login.textFragments.every(fragment => fragment.inside && fragment.hitCount === 3 && fragment.rect.width > 0 && fragment.rect.height > 0);
+}
+
+export function chatLastLineReachable(value, { caret = false } = {}) {
+  const input = value?.input;
+  return !!input && input.fullyVisible === true && input.hitCount === 9 && !input.disabled && !input.readOnly &&
+    Number.isFinite(input.lineHeight) && input.lineHeight > 0 && input.contentHeight >= input.lineHeight &&
+    Number.isFinite(input.projectedFontPx) && input.projectedFontPx >= 10.5 &&
+    Number.isFinite(input.scrollTop) && input.scrollTop >= 0 && input.scrollHeight >= input.clientHeight &&
+    Math.abs(input.scrollHeight - input.clientHeight - input.scrollTop) <= 1 &&
+    (!caret || input.focused && input.selectionStart === input.value.length && input.selectionEnd === input.value.length);
+}
+
+export function assertChatReachabilityIdentity(before, after, draft = before?.draft) {
+  assert.equal(before.mode, 'canvas'); assert.ok(before.threadId && before.rootId && before.cardId === before.rootId);
+  assert.equal(before.inputThreadId, before.threadId); assert.equal(before.messagesThreadId, before.threadId);
+  assert.equal(before.inputCount, 1); assert.equal(before.messagesCount, 1); assert.equal(before.sendDisabled, true);
+  for (const key of ['mode', 'rootId', 'cardId', 'activeEntityId', 'threadId', 'inputThreadId', 'messagesThreadId',
+    'inputCount', 'messagesCount', 'conversationId', 'messageCount', 'isSending', 'sendDisabled', 'loggedIn', 'loginInProgress', 'accountBound']) {
+    assert.deepEqual(after[key], before[key], `native reachability changed ${key}`);
+  }
+  assert.deepEqual([after.messageCount, after.isSending, after.loggedIn, after.loginInProgress, after.accountBound], [0, false, false, false, false]);
+  assert.deepEqual(after.camera, before.camera, 'inner scrolling must not pan/zoom the Canvas');
+  assert.deepEqual(after.viewport, before.viewport);
+  assert.equal(after.draft, draft); assert.equal(after.input.value, draft);
+  assert.equal(after.input.fullyVisible, true); assert.equal(after.input.hitCount, 9);
+  assert.equal(after.input.disabled, false); assert.equal(after.input.readOnly, false);
+  return true;
+}
+
+export function nextChatReachabilityWheel(value, region, direction) {
+  assert.ok(['messages', 'input'].includes(region) && [-1, 1].includes(direction));
+  const box = value?.[region], max = box?.scrollHeight - box?.clientHeight;
+  assert.ok(box?.shown && box.wheelPoint && Number.isFinite(max) && max >= 0, 'no observed owned wheel point');
+  assert.ok(Number.isFinite(box.scrollTop) && box.scrollTop >= 0 && box.scrollTop <= max + 1);
+  assert.ok(['x', 'y'].every(key => Number.isSafeInteger(box.wheelPoint[key]) && box.wheelPoint[key] >= 0));
+  const remaining = direction < 0 ? box.scrollTop : max - box.scrollTop;
+  if (remaining <= 1) return null; // Never wheel at an exhausted inner boundary.
+  return { ...box.wheelPoint, deltaX: 0, deltaY: direction * Math.min(80, Math.ceil(remaining)) };
+}
+
+export function chatDocumentEndKey(platform = process.platform) {
+  return platform === 'darwin' ? 'meta+ArrowDown' : 'Control+End';
+}
+
+export function nextChatLoginWheel(value) {
+  const box = value?.login?.box, scale = value?.messages?.scaleY;
+  assert.ok(box?.rect && box.clip && Number.isFinite(scale) && scale > 0, 'login scroll geometry missing');
+  if (box.rect.height > box.clip.bottom - box.clip.top + 0.5) return null;
+  const offset = box.rect.top < box.clip.top - 0.5 ? box.rect.top - box.clip.top
+    : box.rect.bottom > box.clip.bottom + 0.5 ? box.rect.bottom - box.clip.bottom : 0;
+  if (!offset) return null; // Occlusion/text clipping is not permission for blind scrolling.
+  const step = nextChatReachabilityWheel(value, 'messages', Math.sign(offset));
+  return step && { ...step, deltaY: Math.sign(offset) * Math.min(Math.abs(step.deltaY), Math.ceil(Math.abs(offset) / scale)) };
+}
+
+export async function verifyNarrowChatReachability(harness, size, deadlineMs, result, {
+  read = observeChatReachability, now = Date.now, pause = sleep,
+  capture = captureHeadlessScreenshot, platform = process.platform,
+} = {}) {
+  assert.ok(size.height === 600 && [600, 800].includes(size.width));
+  const proof = { size, platform, endKey: chatDocumentEndKey(platform), observations: [], actions: [], captures: [],
+    visualPass: null, lastLineRasterReview: 'pending-first-person-review', initialClipping: null,
+    phase: 'after all original viewport assertions and captures; native Dock focus before this witness' };
+  (result.narrowChatReachability ||= []).push(proof);
+  let baseline = null, expectedDraft = DRAFT, transitionDraft = null;
+  const sample = async label => {
+    assertBeforeDeadline(deadlineMs, now());
+    const value = await read(harness);
+    proof.observations.push({ label, value });
+    if (proof.observations.length > 200) throw new Error('Bounded Chat reachability observation limit');
+    assertBeforeDeadline(deadlineMs, now());
+    if (baseline) assertChatReachabilityIdentity(baseline, value,
+      transitionDraft !== null && value.draft === transitionDraft ? transitionDraft : expectedDraft);
+    return value;
+  };
+  const settle = async label => {
+    let previous, same = 0, last;
+    for (let i = 0; i < 30; i++) {
+      last = await sample(label);
+      const signature = JSON.stringify(last);
+      same = signature === previous && last.draft === expectedDraft ? same + 1 : 0; previous = signature;
+      if (same >= 2) { transitionDraft = null; return last; }
+      await pause(120);
+    }
+    throw new Error(`Chat reachability did not settle: ${label}; input=${JSON.stringify(last?.input)}; login=${JSON.stringify(last?.login)}`);
+  };
+  const shot = async label => {
+    const image = await capture(harness, `${size.width}x${size.height}-${label}`, deadlineMs, now);
+    proof.captures.push(image); assert.equal(image.status, 'captured', 'reachability requires an actual image');
+    return image;
+  };
+  const action = async (kind, input) => {
+    assertBeforeDeadline(deadlineMs, now());
+    const row = { kind, input, at: now(), dispatched: false }; proof.actions.push(row);
+    // No retries after ambiguous input. Native login/send input is absent.
+    row.dispatched = true;
+    if (kind === 'wheel') await harness.wheelAt(input);
+    else if (kind === 'composer-point-click') await harness.clickPoint(input);
+    else if (kind === 'key') {
+      assert.ok([proof.endKey, 'Backspace'].includes(input)); await harness.press(input);
+    } else if (kind === 'append') { assert.equal(input, NARROW_CHAT_SAMPLE); await harness.typeText(input); }
+    else throw new Error('Unsupported Chat reachability action');
+    assertBeforeDeadline(deadlineMs, now());
+  };
+  const wheelTo = async (region, direction, accept, label) => {
+    let value = await settle(`${label}:before`);
+    for (let count = 0; !accept(value) && count < NARROW_CHAT_WHEEL_LIMIT; count++) {
+      const input = region === 'messages' ? nextChatLoginWheel(value) : nextChatReachabilityWheel(value, region, direction);
+      if (!input) break;
+      const top = value[region].scrollTop;
+      await action('wheel', input); value = await settle(`${label}:after-${count + 1}`);
+      assert.ok(Math.sign(input.deltaY) * (value[region].scrollTop - top) > 0.5, `${label}: wheel must move the owned inner scroller`);
+    }
+    requireCheck(result, `${size.width}x${size.height}: ${label}`, accept(value), value);
+    return value;
+  };
+  try {
+    baseline = await settle('initial');
+    assert.equal(baseline.draft, DRAFT); assertChatReachabilityIdentity(baseline, baseline);
+    proof.initial = baseline;
+    proof.initialClipping = { loginFullyVisible: chatLoginReachable(baseline), lastLineViewportAvailable: chatLastLineReachable(baseline),
+      inputScrollTop: baseline.input.scrollTop, inputScrollHeight: baseline.input.scrollHeight, inputClientHeight: baseline.input.clientHeight };
+    await shot('chat-initial-clipping'); // Initial clipping is evidence, not an invented readability pass.
+    proof.loginReached = await wheelTo('messages', -1, chatLoginReachable, 'login full text and 9/9 hit reachable without clicking');
+    await shot('chat-login-reachable');
+    // Exercise internal input scrolling only when there is real scroll range.
+    if (baseline.input.scrollHeight - baseline.input.clientHeight > 1) {
+      await wheelTo('input', -1, value => value.input.scrollTop <= 1, 'composer start reachable by native wheel');
+    }
+    proof.lastLineReached = await wheelTo('input', 1, chatLastLineReachable, 'composer last-line viewport reachable by native wheel');
+    const beforeClick = await sample('composer-point-preflight');
+    assert.ok(beforeClick.input.wheelPoint && beforeClick.input.hitCount === 9 && beforeClick.input.fullyVisible);
+    await action('composer-point-click', beforeClick.input.wheelPoint);
+    assert.equal((await settle('composer-focused')).input.focused, true);
+    await action('key', proof.endKey);
+    proof.caretReached = await settle('composer-document-end');
+    requireCheck(result, `${size.width}x${size.height}: native caret reaches complete draft end`, chatLastLineReachable(proof.caretReached, { caret: true }), proof.caretReached.input);
+    await shot('chat-last-line-caret');
+    if (size.width === 600) {
+      // Explicit temporary edit; only the known appended suffix is removed.
+      transitionDraft = expectedDraft; expectedDraft = DRAFT + NARROW_CHAT_SAMPLE;
+      await action('append', NARROW_CHAT_SAMPLE);
+      proof.appended = await settle('600-native-sample-appended');
+      requireCheck(result, '600x600: native appended sample preserved at caret end without send',
+        chatLastLineReachable(proof.appended, { caret: true }), proof.appended.input);
+      await shot('chat-native-sample-appended');
+      for (let remaining = NARROW_CHAT_SAMPLE.length; remaining > 0; remaining--) {
+        const before = await sample('suffix-removal-preflight');
+        assert.ok(chatLastLineReachable(before, { caret: true }));
+        assert.equal(before.input.value, DRAFT + NARROW_CHAT_SAMPLE.slice(0, remaining));
+        transitionDraft = expectedDraft; expectedDraft = DRAFT + NARROW_CHAT_SAMPLE.slice(0, remaining - 1);
+        await action('key', 'Backspace'); await settle('remove-one-owned-suffix-character');
+      }
+    }
+    proof.restored = await settle('original-draft-restored');
+    requireCheck(result, `${size.width}x${size.height}: original draft/thread/camera/send/auth state preserved after reachability`,
+      assertChatReachabilityIdentity(baseline, proof.restored, DRAFT) && chatLastLineReachable(proof.restored, { caret: true }));
+    proof.verified = true;
+    return proof;
+  } catch (error) {
+    proof.error = error.message; proof.verified = false;
+    try { if (now() < deadlineMs) await shot('chat-reachability-failure'); } catch (captureError) { proof.captureError = captureError.message; }
+    throw error;
+  }
 }
 
 export function chatIssues(value, { mode, threadId, draft, messageCount }) {
@@ -654,6 +995,17 @@ export async function runRegression({ harness, profile, deadlineMs, viewports = 
       result.screenshot = { status: outcome.status, visualPass: null };
       if (outcome.status === 'error') throw error;
     }
+  }
+  // Complete the original four-size baseline (including all its captures)
+  // before changing inner scroll/focus or temporarily appending native text.
+  result.baselineChecksBeforeReachability = result.checks.length;
+  for (const size of viewports.filter(size => size.height === 600 && [600, 800].includes(size.width))) {
+    await resizeHeadless(harness, size, deadlineMs);
+    await waitStableViewport(harness, size, deadlineMs);
+    await focusChatDockForReachability(harness, size, deadlineMs, result);
+    await waitFor(harness, observeChat, value => chatIssues(value,
+      { mode: 'canvas', threadId, draft: DRAFT, messageCount: 0 }).length === 0, deadlineMs);
+    await verifyNarrowChatReachability(harness, size, deadlineMs, result);
   }
   const statuses = new Set(result.screenshots.map(item => item.status));
   result.screenshot = { status: statuses.size === 1 ? [...statuses][0] : 'mixed', visualPass: null };

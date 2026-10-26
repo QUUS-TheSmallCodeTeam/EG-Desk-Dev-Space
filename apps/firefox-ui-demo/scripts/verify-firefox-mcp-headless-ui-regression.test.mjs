@@ -8,6 +8,10 @@ import {
   presentationRestoredOnWiderViewport, projectionGeometrySettled, resizeHeadless,
   sameWorldGeometry, screenshotOutcome, targetIssues, viewportSettled,
   waitFor, waitStableViewport,
+  observeChatReachability, chatLoginReachable, chatLastLineReachable, assertChatReachabilityIdentity,
+  nextChatReachabilityWheel, chatDocumentEndKey, verifyNarrowChatReachability, NARROW_CHAT_SAMPLE, NARROW_CHAT_WHEEL_LIMIT,
+  nextChatLoginWheel,
+  observeReachabilityDockPoint, focusChatDockForReachability,
 } from './verify-firefox-mcp-headless-ui-regression.mjs';
 
 const roundDeadlineUtc = '2026-10-23T17:00:00Z';
@@ -399,4 +403,279 @@ test('runner contains no provider submit path or synthetic DOM action fallback',
   assert.match(source, /await harness\.fill\(selector, value\)/);
   assert.match(source, /await harness\.press\('meta\+-'\)/);
   assert.match(source, /await harness\?\.close\(\)/);
+});
+
+// Pure validator/orchestrator samples, not actual browser outcomes. Only Main's
+// native run can establish UI reachability and supply reviewable raster proof.
+function reachabilitySample(width = 600) {
+  const draft = 'EG-Desk headless QA draft — never send';
+  const rect = { left: 100, top: 400, right: 400, bottom: 440, width: 300, height: 40 };
+  const box = { shown: true, fullyVisible: true, hitCount: 9, disabled: false, readOnly: false, rect,
+    wheelPoint: { x: 200, y: 420 }, scrollTop: 0, scrollHeight: 64, clientHeight: 40 };
+  return { mode: 'canvas', rootId: 'chat-1', cardId: 'chat-1', activeEntityId: 'chat-1', threadId: 'thread-1',
+    inputThreadId: 'thread-1', messagesThreadId: 'thread-1', conversationId: null, messageCount: 0, isSending: false,
+    inputCount: 1, messagesCount: 1,
+    sendDisabled: true, loggedIn: false, loginInProgress: false, accountBound: false, draft,
+    viewport: { width, height: 600 }, camera: { zoom: 0.96, zoomTarget: 0.96, pan: { x: 100, y: 50 }, panTarget: { x: 100, y: 50 } },
+    input: { ...box, value: draft, focused: false, selectionStart: 0, selectionEnd: 0,
+      contentHeight: 24, lineHeight: 20, fontPx: 14, projectedFontPx: 13.44 },
+    messages: { ...box, scaleY: 1, wheelPoint: { x: 200, y: 180 }, scrollTop: 160, scrollHeight: 360, clientHeight: 200 },
+    login: { count: 1, text: '로그인', box: { ...box, fullyVisible: false, hitCount: 6,
+      rect: { left: 100, top: 144, right: 160, bottom: 174, width: 60, height: 30 },
+      clip: { left: 100, top: 150, right: 400, bottom: 230 } }, missingTextRects: 0,
+      textFragments: [{ text: '로그인', rect: { width: 36, height: 20 }, hitCount: 0, inside: false }] } };
+}
+
+function unitReachability(width = 600) {
+  const state = reachabilitySample(width), calls = [], captures = [];
+  const sync = () => {
+    const box = state.login.box;
+    box.rect.top = 304 - state.messages.scrollTop; box.rect.bottom = box.rect.top + box.rect.height;
+    const visible = box.rect.top >= box.clip.top && box.rect.bottom <= box.clip.bottom;
+    state.login.box.fullyVisible = visible; state.login.box.hitCount = visible ? 9 : 6;
+    state.login.textFragments[0].inside = visible; state.login.textFragments[0].hitCount = visible ? 3 : 0;
+  };
+  const end = () => {
+    state.input.selectionStart = state.input.selectionEnd = state.input.value.length;
+    state.input.scrollTop = state.input.scrollHeight - state.input.clientHeight;
+  };
+  const harness = {
+    async wheelAt(input) {
+      calls.push({ kind: 'wheel', input }); const box = input.y === 180 ? state.messages : state.input;
+      box.scrollTop = Math.max(0, Math.min(box.scrollHeight - box.clientHeight, box.scrollTop + input.deltaY)); sync();
+    },
+    async clickPoint(input) { calls.push({ kind: 'click', input }); assert.equal(input.y, 420); state.input.focused = true; },
+    async press(key) {
+      calls.push({ kind: 'key', key }); assert.ok(['meta+ArrowDown', 'Control+End', 'Backspace'].includes(key));
+      if (key === 'Backspace') { state.input.value = state.input.value.slice(0, -1); state.draft = state.input.value; }
+      end();
+    },
+    async typeText(text) {
+      calls.push({ kind: 'type', text }); assert.equal(text, NARROW_CHAT_SAMPLE);
+      state.input.value += text; state.draft = state.input.value; end();
+    },
+  };
+  const options = { now: () => beforeDeadline, pause: async () => {}, platform: 'darwin',
+    read: async () => { sync(); return structuredClone(state); },
+    capture: async (_harness, label) => { captures.push(label); return { status: 'captured', path: `/unit/${label}.png`, visualPass: null }; } };
+  return { state, calls, captures, harness, options, result: { checks: [] } };
+}
+
+test('narrow login requires whole control plus every text fragment; input-box hits alone cannot prove its last line', () => {
+  const value = reachabilitySample();
+  assert.equal(chatLoginReachable(value), false); assert.equal(chatLastLineReachable(value), false);
+  value.login.box.fullyVisible = true; value.login.box.hitCount = 9;
+  value.login.textFragments[0].inside = true; value.login.textFragments[0].hitCount = 3;
+  assert.equal(chatLoginReachable(value), true);
+  for (const corrupt of [v => { v.login.count = 2; }, v => { v.login.text = '로그인 중…'; },
+    v => { v.login.box.hitCount = 8; }, v => { v.login.box.disabled = true; },
+    v => { v.login.missingTextRects = 1; }, v => { v.login.textFragments[0].inside = false; },
+    v => { v.login.textFragments[0].hitCount = 2; }, v => { v.login.textFragments = []; }]) {
+    const changed = structuredClone(value); corrupt(changed); assert.equal(chatLoginReachable(changed), false);
+  }
+  value.input.scrollTop = 24; assert.equal(chatLastLineReachable(value), true);
+  assert.equal(chatLastLineReachable(value, { caret: true }), false);
+  value.input.focused = true; value.input.selectionStart = value.input.selectionEnd = value.input.value.length;
+  assert.equal(chatLastLineReachable(value, { caret: true }), true);
+  for (const corrupt of [v => { v.input.contentHeight = 19; }, v => { v.input.lineHeight = null; },
+    v => { v.input.scrollTop = 20; }, v => { v.input.projectedFontPx = 9; },
+    v => { v.input.selectionStart--; }, v => { v.input.hitCount = 8; }, v => { v.input.fullyVisible = false; }]) {
+    const changed = structuredClone(value); corrupt(changed); assert.equal(chatLastLineReachable(changed, { caret: true }), false);
+  }
+});
+
+test('reachability identity rejects draft/room/projection/camera/auth/send mutations without weakening original checks', () => {
+  const value = reachabilitySample(); assert.equal(assertChatReachabilityIdentity(value, structuredClone(value)), true);
+  for (const corrupt of [v => { v.cardId = 'ghost'; }, v => { v.threadId = 'foreign'; }, v => { v.messagesThreadId = 'foreign'; },
+    v => { v.inputThreadId = 'foreign'; }, v => { v.draft += 'x'; }, v => { v.input.value += 'x'; },
+    v => { v.inputCount = 2; }, v => { v.messagesCount = 0; },
+    v => { v.camera.pan.x++; }, v => { v.camera.zoom = 0.5; }, v => { v.viewport.height++; },
+    v => { v.messageCount++; }, v => { v.isSending = true; }, v => { v.sendDisabled = false; },
+    v => { v.loggedIn = true; }, v => { v.loginInProgress = true; }, v => { v.accountBound = true; }]) {
+    const changed = structuredClone(value); corrupt(changed); assert.throws(() => assertChatReachabilityIdentity(value, changed));
+  }
+  const append = structuredClone(value); append.draft += NARROW_CHAT_SAMPLE; append.input.value = append.draft;
+  assert.equal(assertChatReachabilityIdentity(value, append, append.draft), true, 'only explicitly expected temporary text differs');
+});
+
+test('wheel plans use observed owned points, bounded deltas, and never dispatch at exhausted scroll boundaries', () => {
+  const value = reachabilitySample();
+  assert.deepEqual(nextChatReachabilityWheel(value, 'messages', -1), { x: 200, y: 180, deltaX: 0, deltaY: -80 });
+  assert.equal(nextChatReachabilityWheel(value, 'input', -1), null);
+  assert.deepEqual(nextChatReachabilityWheel(value, 'input', 1), { x: 200, y: 420, deltaX: 0, deltaY: 24 });
+  assert.deepEqual(nextChatLoginWheel(value), { x: 200, y: 180, deltaX: 0, deltaY: -6 }, 'partly hidden button needs a measured small reveal, not blind scrolling to top');
+  const below = structuredClone(value); below.messages.scrollTop = 100; below.login.box.rect.top = 220; below.login.box.rect.bottom = 250;
+  assert.equal(nextChatLoginWheel(below).deltaY, 20, 'observed target below clip scrolls down');
+  const tooTall = structuredClone(value); tooTall.login.box.clip.bottom = 170;
+  assert.equal(nextChatLoginWheel(tooTall), null, 'a 30px button cannot be fully revealed in a 20px aperture');
+  const obscured = structuredClone(value); obscured.login.box.rect.top = 160; obscured.login.box.rect.bottom = 190;
+  assert.equal(nextChatLoginWheel(obscured), null, 'no blind wheel for non-geometric occlusion');
+  value.input.wheelPoint = null; assert.throws(() => nextChatReachabilityWheel(value, 'input', 1));
+  assert.throws(() => nextChatReachabilityWheel(value, 'login', -1));
+  assert.equal(chatDocumentEndKey('darwin'), 'meta+ArrowDown'); assert.equal(chatDocumentEndKey('win32'), 'Control+End');
+});
+
+test('600 native sequence records initial clipping, reaches login without click, appends/restores exact suffix and retains raster-review pending', async () => {
+  const unit = unitReachability();
+  const proof = await verifyNarrowChatReachability(unit.harness, { width: 600, height: 600 }, deadline, unit.result, unit.options);
+  assert.equal(proof.verified, true); assert.equal(proof.initialClipping.loginFullyVisible, false);
+  assert.equal(proof.initialClipping.lastLineViewportAvailable, false); assert.equal(proof.visualPass, null);
+  assert.equal(proof.lastLineRasterReview, 'pending-first-person-review');
+  assert.equal(proof.appended.draft, proof.initial.draft + NARROW_CHAT_SAMPLE);
+  assert.equal(proof.restored.draft, proof.initial.draft); assert.deepEqual(proof.restored.camera, proof.initial.camera);
+  assert.equal(unit.calls.filter(call => call.kind === 'click').length, 1);
+  assert.equal(unit.calls.find(call => call.kind === 'click').input.y, 420, 'only composer point clicked, never login');
+  assert.equal(unit.calls.filter(call => call.key === 'Backspace').length, NARROW_CHAT_SAMPLE.length);
+  assert.equal(unit.calls.filter(call => call.kind === 'type').length, 1);
+  assert.ok(unit.captures.includes('600x600-chat-initial-clipping') && unit.captures.includes('600x600-chat-native-sample-appended'));
+  assert.ok(unit.result.checks.every(row => row.passed));
+});
+
+test('800 sequence proves reachability without changing draft; missing movement or ambiguous wheel fails with one input and evidence', async () => {
+  const unit = unitReachability(800);
+  const proof = await verifyNarrowChatReachability(unit.harness, { width: 800, height: 600 }, deadline, unit.result, unit.options);
+  assert.equal(proof.verified, true); assert.equal(unit.calls.some(call => call.kind === 'type' || call.key === 'Backspace'), false);
+  for (const error of [null, new Error('ambiguous native timeout')]) {
+    const bad = unitReachability(800); let calls = 0;
+    bad.harness.wheelAt = async () => { calls++; if (error) throw error; };
+    await assert.rejects(verifyNarrowChatReachability(bad.harness, { width: 800, height: 600 }, deadline, bad.result, bad.options),
+      /must move|ambiguous native timeout/);
+    assert.equal(calls, 1); assert.equal(bad.result.narrowChatReachability[0].verified, false);
+    assert.ok(bad.captures.includes('800x600-chat-reachability-failure'));
+    assert.equal(bad.calls.length, 0, 'no subsequent click, key, append or recovery input');
+  }
+});
+
+test('login unreachable after bounded progress remains a failure, never waived as initial clipping', async () => {
+  const unit = unitReachability(800); unit.state.messages.scrollTop = 1000; unit.state.messages.scrollHeight = 1200;
+  await assert.rejects(verifyNarrowChatReachability(unit.harness, { width: 800, height: 600 }, deadline, unit.result, unit.options), /login full text/);
+  assert.equal(unit.calls.filter(call => call.kind === 'wheel').length, NARROW_CHAT_WHEEL_LIMIT);
+  assert.equal(unit.calls.some(call => call.kind === 'click'), false);
+});
+
+test('delayed native draft commit is observation-only; an unexpected suffix fails without destructive cleanup', async () => {
+  const delayed = unitReachability();
+  const type = delayed.harness.typeText;
+  let stale = null, remaining = 0;
+  delayed.harness.typeText = async text => {
+    stale = structuredClone(delayed.state); await type(text); remaining = 2;
+  };
+  const read = delayed.options.read;
+  delayed.options.read = async () => remaining-- > 0 ? structuredClone(stale) : read();
+  const proof = await verifyNarrowChatReachability(delayed.harness, { width: 600, height: 600 }, deadline, delayed.result, delayed.options);
+  assert.equal(proof.verified, true); assert.equal(delayed.calls.filter(call => call.kind === 'type').length, 1);
+  const changed = unitReachability();
+  changed.harness.typeText = async () => {
+    changed.state.input.value += ' NOT_THE_OWNED_SUFFIX'; changed.state.draft = changed.state.input.value;
+  };
+  await assert.rejects(verifyNarrowChatReachability(changed.harness, { width: 600, height: 600 }, deadline, changed.result, changed.options));
+  assert.equal(changed.calls.some(call => call.key === 'Backspace'), false);
+  assert.ok(changed.state.draft.endsWith(' NOT_THE_OWNED_SUFFIX'));
+  assert.ok(changed.captures.includes('600x600-chat-reachability-failure'));
+});
+
+test('deadline and unexpected camera movement stop bounded reachability without subsequent native input', async () => {
+  const expired = unitReachability(); expired.options.now = () => deadline;
+  await assert.rejects(verifyNarrowChatReachability(expired.harness, { width: 600, height: 600 }, deadline, expired.result, expired.options), /deadline/);
+  assert.equal(expired.calls.length, 0); assert.equal(expired.captures.length, 0);
+  const changed = unitReachability(), wheel = changed.harness.wheelAt;
+  changed.harness.wheelAt = async input => { await wheel(input); changed.state.camera.pan.x++; };
+  await assert.rejects(verifyNarrowChatReachability(changed.harness, { width: 600, height: 600 }, deadline, changed.result, changed.options), /pan\/zoom/);
+  assert.equal(changed.calls.length, 1); assert.equal(changed.calls[0].kind, 'wheel');
+  assert.ok(changed.captures.includes('600x600-chat-reachability-failure'));
+});
+
+test('reachability observer stays bounded/read-only and native implementation preserves original capture/roundtrip assertions', async () => {
+  let source;
+  await observeChatReachability({ evaluateChrome: value => { source = value; return null; } });
+  assert.doesNotThrow(() => new vm.Script(`(${source})`));
+  assert.ok(Buffer.byteLength(source) < 14000);
+  assert.doesNotMatch(source, /\.focus\(|\.scrollTo\(|\.scrollIntoView\(|\.setSelectionRange\(|\.dispatchEvent\(|\.click\(|\.scrollTop\s*=/);
+  assert.match(source, /createRange/); assert.match(source, /data-testid="chat-composer"/);
+  assert.match(source, /\.egd-codex-empty-actions button\.egd-codex-chip-primary/);
+  const script = readFileSync(new URL('./verify-firefox-mcp-headless-ui-regression.mjs', import.meta.url), 'utf8');
+  assert.match(script, /frame\.chat = await chatRoundTrip/);
+  assert.match(script, /size\.height === 600 && \[600, 800\]\.includes\(size\.width\)/);
+  assert.ok(script.indexOf('result.baselineChecksBeforeReachability = result.checks.length') >
+    script.indexOf('result.screenshots.push(await captureHeadlessScreenshot(harness, stage, deadlineMs))'));
+  assert.ok(script.indexOf('await verifyNarrowChatReachability(harness, size, deadlineMs, result)') >
+    script.indexOf('result.baselineChecksBeforeReachability = result.checks.length'));
+  assert.match(script, /await harness\.wheelAt\(input\)/); assert.match(script, /await harness\.clickPoint\(input\)/);
+  assert.doesNotMatch(script, /harness\.press\([^\n]*(?:Enter|Return)|startLogin\(|refreshAuthStatus\(|\.focus\(|\.scrollTop\s*=/);
+});
+
+function dockPointSample() {
+  return { id: 'chat', visible: true, disabled: false, readOnly: false, hitCount: 9, inViewport: true, clipped: false,
+    rect: { x: 10, y: 540, width: 32, height: 32 }, point: { x: 26, y: 556 }, pointHit: true, viewport: { width: 600, height: 600 } };
+}
+
+test('new Dock entry uses two stable 9-hit observations and one exact integer native point, never UID input', async () => {
+  const target = dockPointSample(), order = [], result = { checks: [], actions: [] };
+  const harness = { async clickPoint(point) { order.push(['point', point]); },
+    async click() { assert.fail('UID path forbidden in new reachability entry'); } };
+  const proof = await focusChatDockForReachability(harness, { width: 600, height: 600 }, deadline, result, {
+    now: () => beforeDeadline, pause: async ms => { order.push(['pause', ms]); },
+    read: async () => { order.push(['observe']); return [structuredClone(target)]; },
+  });
+  assert.deepEqual(order, [['observe'], ['pause', 120], ['observe'], ['point', target.point]]);
+  assert.equal(proof.completed, true); assert.equal(proof.clickCount, 1);
+  assert.ok(result.checks.every(row => row.passed));
+});
+
+test('moved, occluded, clipped or ambiguous Dock points fail before input; click errors never retry or re-observe to reclick', async () => {
+  const target = dockPointSample();
+  for (const mutate of [value => { value.rect.x += 0.1; }, value => { value.point.x++; },
+    value => { value.hitCount = 8; }, value => { value.pointHit = false; }, value => { value.clipped = true; },
+    value => { value.visible = false; }, value => { value.disabled = true; }, value => { value.viewport.width = 800; }]) {
+    const changed = structuredClone(target); mutate(changed);
+    const samples = [[structuredClone(target)], [changed]], result = { checks: [], actions: [] };
+    let clicks = 0, captures = 0;
+    await assert.rejects(focusChatDockForReachability({ async clickPoint() { clicks++; } },
+      { width: 600, height: 600 }, deadline, result, { now: () => beforeDeadline, pause: async () => {},
+        read: async () => samples.shift(), capture: async () => { captures++; return { status: 'captured', path: '/unit/failure.png' }; } }));
+    assert.equal(clicks, 0); assert.equal(captures, 1); assert.equal(result.reachabilityDockFocus[0].dispatched, false);
+  }
+  for (const failure of [new Error('ambiguous native timeout'), new Error('stale/invalid context')]) {
+    let reads = 0, clicks = 0, captures = 0; const result = { checks: [], actions: [] };
+    await assert.rejects(focusChatDockForReachability({ async clickPoint() { clicks++; throw failure; } },
+      { width: 600, height: 600 }, deadline, result, { now: () => beforeDeadline, pause: async () => {},
+        read: async () => { reads++; return [structuredClone(target)]; },
+        capture: async () => { captures++; return { status: 'captured', path: '/unit/failure.png' }; } }), error => error === failure);
+    assert.deepEqual({ reads, clicks, captures }, { reads: 2, clicks: 1, captures: 1 });
+    assert.equal(result.reachabilityDockFocus[0].completed, false); assert.equal(result.actions.length, 0);
+  }
+  await assert.rejects(focusChatDockForReachability({ clickPoint: () => assert.fail('no ambiguous input') },
+    { width: 600, height: 600 }, deadline, { checks: [], actions: [] }, { now: () => beforeDeadline,
+      read: async () => [target, target], capture: async () => ({ status: 'captured' }) }), /preflight/);
+});
+
+test('new Dock observation is read-only, tests the exact integer point, and baseline UID call sites remain separate', async () => {
+  let source;
+  await observeReachabilityDockPoint({ evaluateChrome: value => { source = value; return null; } });
+  assert.doesNotThrow(() => new vm.Script(`(${source})`));
+  assert.match(source, /pointHit: owned\(point\.x, point\.y\)/);
+  assert.doesNotMatch(source, /\.focus\(|\.click\(|\.scrollTo\(|\.scrollIntoView\(|\.dispatchEvent\(/);
+  assert.doesNotMatch(focusChatDockForReachability.toString(), /harness\.click\(|safeClick\(|uidFor|withFreshUid|\.focus\(/);
+  const script = readFileSync(new URL('./verify-firefox-mcp-headless-ui-regression.mjs', import.meta.url), 'utf8');
+  const newPhase = script.slice(script.indexOf('result.baselineChecksBeforeReachability = result.checks.length'));
+  assert.match(newPhase, /await focusChatDockForReachability\(harness, size, deadlineMs, result\)/);
+  assert.doesNotMatch(newPhase, /safeClick\(|harness\.click\(/);
+  assert.match(script, /await safeClick\(harness, '#egd-dock \.egd-dock-btn\[data-id="chat"\]', 'open\/focus Chat from Dock'/);
+});
+
+test('Dock observer detects occlusion at the rounded dispatch pixel even when all nine fractional grid points hit', async () => {
+  const r = { x: 10.4, y: 540.4, left: 10.4, top: 540.4, right: 41.4, bottom: 571.4, width: 31, height: 31 };
+  const point = { x: 25, y: 555 };
+  const node = { isConnected: true, dataset: { id: 'chat' }, disabled: false, readOnly: false, parentElement: null,
+    closest: () => null, contains: hit => hit === node, getBoundingClientRect: () => r };
+  let obstructPoint = false;
+  const document = { querySelectorAll: selector => { assert.equal(selector, '#egd-dock .egd-dock-btn[data-id="chat"]'); return [node]; },
+    elementFromPoint: (x, y) => obstructPoint && x === point.x && y === point.y ? {} : node };
+  const getComputedStyle = () => ({ display: 'block', visibility: 'visible', opacity: '1' });
+  const harness = { evaluateChrome: source => vm.runInNewContext(source, { document, getComputedStyle, innerWidth: 600, innerHeight: 600 })() };
+  const [clear] = await observeReachabilityDockPoint(harness);
+  assert.deepEqual(JSON.parse(JSON.stringify(clear.point)), point); assert.equal(clear.hitCount, 9); assert.equal(clear.pointHit, true);
+  obstructPoint = true;
+  const [occluded] = await observeReachabilityDockPoint(harness);
+  assert.equal(occluded.hitCount, 9); assert.equal(occluded.pointHit, false);
 });
