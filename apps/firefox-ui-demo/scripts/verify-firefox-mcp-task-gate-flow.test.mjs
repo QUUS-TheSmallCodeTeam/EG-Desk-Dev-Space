@@ -11,13 +11,17 @@ import { TASK_GATE_SELECTORS, taskGateRowSelector, assertTaskGateEnvironment, as
   reconciledTaskGateRead, assertTaskGateStaleReconciled,
   observeTaskGate, observeTaskGateDesk, observeTaskGateTarget, observeTaskGateLimit, taskGateLimitReadable, assertTaskGateLimitPaint, readTaskGateLimit,
   observeTaskGateFailurePaint, assertTaskGateFailurePaint,
-  TASK_GATE_DIAGNOSTIC_LIMITS, createTaskGateDiagnostics, readyTaskGateTarget,
+  TASK_GATE_DIAGNOSTIC_LIMITS, createTaskGateDiagnostics, readyTaskGateTarget, chooseTaskGateScrollKey,
+  TASK_GATE_SETTLEMENT, waitTaskGateTargetSettled, summarizeTaskGateFixture, waitTaskGateFixtureState,
+  guardTaskGateTargetBeforeInput, observeTaskGateCamera, waitTaskGateOpenChatCamera,
   parseTaskGateCli, prepareTaskGateViewport,
   runTaskGateFlow, runCli } from './verify-firefox-mcp-task-gate-flow.mjs';
 
 const ENV = { EGDESK_QA_TASK_GATE_FIXTURE: '1', EGDESK_QA_FIXTURE_TRANSPORT: '1', EGDESK_QA_REAL_TURN: '0',
   EGDESK_QA_FIXTURE_PORT: '49319', EGDESK_QA_FIXTURE_TOKEN: 'owned-task-gate-verifier-unit-token' };
 const sha = value => createHash('sha256').update(value).digest('hex');
+const cameraState = () => ({ zoom: 1, zoomTarget: 1, pan: { x: 0, y: 0 }, panTarget: { x: 0, y: 0 },
+  codex: { activeThreadId: 'local-original' } });
 const identity = (extra = {}) => ({ graphId: 'graph-original', taskId: 'note', gateId: 'memo', label: '덧붙일 말', response: { kind: 'text', maxLength: 20 }, ...extra });
 const ui = (extra = {}) => { const value = { count: 1, threadId: 'local-original', ...identity(),
   question: '덧붙일 말', next: '답변하면 메모를 반영합니다.', value: '답변', choice: null, notice: '',
@@ -246,7 +250,8 @@ test('observation is bounded read-only chrome source; no input or DOM/state muta
   await observeTaskGateTarget(harness, '[data-testid="chat-task-answer-continue"]');
   await observeTaskGateLimit(harness, identity());
   await observeTaskGateFailurePaint(harness, identity());
-  assert.equal(sources.length, 5);
+  await observeTaskGateCamera(harness);
+  assert.equal(sources.length, 6);
   for (const source of sources) {
     assert.ok(Buffer.byteLength(source) < 12000);
     for (const forbidden of [/dispatchEvent/, /new (?:InputEvent|KeyboardEvent|Event)\(/, /\.value\s*=/, /\.click\(/,
@@ -288,6 +293,7 @@ function targetDiagnosticDom({ direction = 'PageUp', depth = 3, missing = false,
   const other = make('div', 'foreign-scroll-target', box(0, 0, 800, 600), null, { scrollTop: 7 });
   active = target; commandFocused = other;
   const context = { innerWidth: direction === 'PageUp' ? 600 : 800, innerHeight: 600,
+    window: { __egdesk: { state: cameraState() } },
     getComputedStyle: element => ({ display: 'block', visibility: 'visible', overflowX: element.overflowX, overflowY: element.overflowY }),
     document: Object.freeze({
       get activeElement() { return active; },
@@ -357,6 +363,11 @@ const unitWait = async (_h, read, accept) => {
   for (let i = 0; i < 3; i++) { const value = await read(); if (accept(value)) return value; }
   throw new Error('unchanged readiness timeout');
 };
+// Isolate existing action/diagnostic contracts from settlement/final guards in
+// these unit tests. Real default paths and their ordering are exercised below.
+const unitSettle = (h, _selector, deadline, { read, wait, accept = () => true }) => wait(h, read, accept, deadline);
+const unitLimitSettled = async () => {};
+const unitGuard = async (_h, _selector, settled) => settled;
 
 // Original ready() policy, retained here ONLY as an independent action oracle.
 async function originalReadyPolicy(harness, read, wait) {
@@ -369,7 +380,7 @@ async function originalReadyPolicy(harness, read, wait) {
   await wait(harness, read, value => value.count === 1 && value.visible && value.inside && !value.clipped && value.hits === 9 && !value.disabled);
 }
 
-test('instrumented ready retains original native action sequence, six-key ceiling, waits and strict fullbox+9hit acceptance', async () => {
+test('without near-edge evidence, settled ready retains the coarse action sequence, six-key ceiling and strict fullbox+9hit acceptance', async () => {
   const cases = [() => readyTarget(), ...[
     { clipped: true, scrollDirection: 'PageUp' }, { clipped: true, hits: 0, scrollDirection: 'PageDown' },
     { clipped: true }, { hits: 8 }, { inside: false }, { disabled: true }, { count: 2 }, { visible: false },
@@ -383,7 +394,7 @@ test('instrumented ready retains original native action sequence, six-key ceilin
       const wait = (...args) => { waits++; return unitWait(...args); };
       let error = null;
       try {
-        if (instrumented) await readyTaskGateTarget(h, 'exact-target', Date.now() + 10000, { read, wait, diagnostics,
+        if (instrumented) await readyTaskGateTarget(h, 'exact-target', Date.now() + 10000, { read, wait, diagnostics, settle: unitSettle, finalGuard: unitGuard,
           keyRead: async () => { afterReads++; return readyTarget(); } });
         else await originalReadyPolicy(h, read, wait);
       } catch (caught) { error = caught.message; }
@@ -399,19 +410,23 @@ test('instrumented ready retains original native action sequence, six-key ceilin
   }
 });
 
-test('existing native keys retain before/after full snapshots, focus and exact harness receipt; success does not bypass next policy read', async () => {
+test('coarse and fine native keys retain before/after snapshots, list scope and exact receipt without bypassing the next policy read', async () => {
   for (const direction of ['PageUp', 'PageDown']) {
     const f = targetDiagnosticDom({ direction }), diagnostics = createTaskGateDiagnostics();
     const before = await observeTaskGateTarget(f.h, 'exact-target');
     let reads = 0;
-    const receipt = { key: direction, before: 320, after: direction === 'PageUp' ? 220 : 420, max: 640, moved: true, focused: true };
-    await readyTaskGateTarget({ scrollWithKey: async (selector, key) => {
-      assert.equal(selector, '[data-testid="chat-task-list"]'); assert.equal(key, direction); f.advance(); return receipt;
-    } }, 'exact-target', Date.now() + 10000, { diagnostics, wait: unitWait,
+    const expected = direction === 'PageUp' ? 'ArrowUp' : 'PageDown';
+    const receipt = { key: expected, before: 320, after: direction === 'PageUp' ? 220 : 420, max: 640, moved: true, focused: true };
+    const input = async (selector, key) => {
+      assert.equal(selector, '[data-testid="chat-task-list"]'); assert.equal(key, expected); f.advance(); return receipt;
+    };
+    await readyTaskGateTarget({ scrollWithKey: input, press: (key, selector) => input(selector, key) },
+      'exact-target', Date.now() + 10000, { diagnostics, wait: unitWait, settle: unitSettle, finalGuard: unitGuard,
       read: async () => ++reads === 1 ? before : readyTarget(), keyRead: () => observeTaskGateTarget(f.h, 'exact-target') });
     const step = diagnostics.records[0].keys[0];
     assert.equal(reads, 2); assert.equal(step.before, before); assert.equal(step.receipt, receipt);
-    assert.equal(step.boundary, 'scrollWithKey'); assert.equal(step.status, 'returned'); assert.equal(step.invoked, true);
+    assert.equal(step.boundary, direction === 'PageUp' ? 'press' : 'scrollWithKey');
+    assert.equal(step.status, 'returned'); assert.equal(step.invoked, true);
     assert.equal(step.before.diagnostics.focusedElement.identity.testId, before.diagnostics.target.identity.testId);
     assert.equal(step.after.diagnostics.focusedElement.identity.testId, 'chat-task-list');
     assert.equal(step.after.diagnostics.commandFocusedElement.identity.testId, 'chat-task-list');
@@ -426,9 +441,9 @@ test('diagnostic record count remains bounded through long timeout polling and r
   let keys = 0;
   const h = { scrollWithKey: async () => { keys++; return { moved: false }; } };
   for (let i = 0; i < limit + 5; i++) await readyTaskGateTarget(h, `ready-${i}`, Date.now() + 10000,
-    { diagnostics, read: async () => readyTarget(), wait: unitWait });
+    { diagnostics, read: async () => readyTarget(), wait: unitWait, settle: unitSettle, finalGuard: unitGuard });
   const clipped = readyTarget({ clipped: true, scrollDirection: 'PageUp' });
-  await assert.rejects(readyTaskGateTarget(h, 'terminal-failure', Date.now() + 10000, { diagnostics, read: async () => clipped,
+  await assert.rejects(readyTaskGateTarget(h, 'terminal-failure', Date.now() + 10000, { diagnostics, read: async () => clipped, settle: unitSettle, finalGuard: unitGuard,
     keyRead: async () => clipped, wait: async (_h, read, accept) => {
       for (let i = 0; i < 500; i++) { const value = await read(); if (accept(value)) return value; }
       throw new Error('bounded terminal timeout');
@@ -446,7 +461,7 @@ test('native key failure is rethrown unchanged; diagnostic failure, missing targ
   for (const failRead of [false, true]) {
     const diagnostics = createTaskGateDiagnostics(), original = new Error('original native failure'); let keys = 0, afterReads = 0;
     await assert.rejects(readyTaskGateTarget({ scrollWithKey: async () => { keys++; throw original; } }, 'target', Date.now() + 10000,
-      { diagnostics, wait: unitWait, read: async () => readyTarget({ clipped: true, scrollDirection: 'PageDown' }),
+      { diagnostics, wait: unitWait, settle: unitSettle, finalGuard: unitGuard, read: async () => readyTarget({ clipped: true, scrollDirection: 'PageDown' }),
         keyRead: async () => { afterReads++; if (failRead) throw new Error('diagnostic-only failure'); return readyTarget({ count: 0 }); } }), error => error === original);
     const record = diagnostics.records[0];
     assert.equal(keys, 1); assert.equal(afterReads, 1); assert.equal(record.keys[0].status, 'threw');
@@ -464,7 +479,7 @@ test('never-resolving after-key diagnostics are capped by remaining deadline and
     const diagnostics = createTaskGateDiagnostics(), original = new Error('native failure survives a stuck observer');
     let keys = 0, diagnosticReads = 0;
     await assert.rejects(readyTaskGateTarget({ scrollWithKey: async () => { keys++; throw original; } }, 'target', Date.now() + remainingMs,
-      { diagnostics, wait: unitWait, read: async () => readyTarget({ clipped: true, scrollDirection: 'PageDown' }),
+      { diagnostics, wait: unitWait, settle: unitSettle, finalGuard: unitGuard, read: async () => readyTarget({ clipped: true, scrollDirection: 'PageDown' }),
         keyRead: () => { diagnosticReads++; return new Promise(() => {}); } }), error => error === original);
     const record = diagnostics.records[0], step = record.keys[0];
     assert.equal(keys, 1); assert.equal(diagnosticReads, 1); assert.equal(record.keys.length, 1);
@@ -474,6 +489,465 @@ test('never-resolving after-key diagnostics are capped by remaining deadline and
     assert.ok(step.afterTimeoutMs > 0 && step.afterTimeoutMs <= Math.min(remainingMs, TASK_GATE_DIAGNOSTIC_LIMITS.keyReadMs));
     if (remainingMs === 10000) assert.equal(step.afterTimeoutMs, 250);
   }
+});
+
+function settlementClock() {
+  const start = Date.now(); let elapsed = 0;
+  return { now: () => start + elapsed, elapsed: () => elapsed,
+    wait: async (h, read, accept, deadline, options) => {
+      assert.equal(options.intervalMs, TASK_GATE_SETTLEMENT.intervalMs);
+      assert.equal(options.timeoutMs, TASK_GATE_SETTLEMENT.timeoutMs);
+      while (start + elapsed < deadline) {
+        const value = await read(h);
+        if (accept(value)) return value;
+        elapsed += options.intervalMs;
+      }
+      throw new Error('unit settlement window expired');
+    } };
+}
+async function settlementTarget(patch = {}) {
+  const target = await observeTaskGateTarget(targetDiagnosticDom({ clientOnlyClip: true }).h, 'exact-target');
+  return { ...JSON.parse(JSON.stringify(target)), ...patch };
+}
+function stampTarget(target, now = Date.now) {
+  const value = structuredClone(target); value.diagnostics.observedAt = now(); return value;
+}
+
+// Scalar geometry from the final R2 600 trace. This models observed bounds,
+// not Gecko key distance, focus routing or a verified product outcome.
+async function r2ScrollTarget() {
+  const base = await settlementTarget();
+  const box = (left, top, width, height) => ({ x: left, y: top, left, top, right: left + width, bottom: top + height, width, height });
+  const listBox = box(148.98333740234375, 244.8333282470703, 371.9666748046875, 123.15000915527344);
+  const client = { left: listBox.left, top: 245.7954376935959, right: listBox.right, bottom: listBox.bottom,
+    width: listBox.width, height: 122.18789970874786 };
+  const scale = (354.73333740234375 - 244.75) / (389.1333312988281 - 275);
+  return scrollTop => {
+    const value = structuredClone(base), d = value.diagnostics;
+    const r = box(158, 354.73333740234375 - (scrollTop - 275) * scale, 352, 42.399993896484375);
+    const list = { ...d.closestList, rect: listBox, clientRect: client, clientHeight: 127, scrollHeight: 642,
+      scrollTop, active: true, containsActive: true };
+    value.rect = r;
+    value.clipped = r.top < listBox.top || r.bottom > listBox.bottom;
+    value.hits = [.2, .5, .8].filter(y => r.top + r.height * y >= client.top && r.top + r.height * y <= client.bottom).length * 3;
+    value.scrollDirection = r.bottom > listBox.bottom ? 'PageDown' : r.top < listBox.top ? 'PageUp' : null;
+    d.target = { ...d.target, rect: r, clientRect: r, active: false, containsActive: false,
+      identity: { ...d.target.identity, tag: 'textarea', type: null, testId: 'chat-task-answer-text', choiceId: null } };
+    d.closestList = list; d.scrollTarget.element = list;
+    d.ancestors[1] = { ...d.ancestors[1], ...list,
+      clipsTargetBorderY: value.clipped, clipsTargetClientY: r.top < client.top || r.bottom > client.bottom };
+    d.focusedElement = list; d.commandFocusedElement = list;
+    return value;
+  };
+}
+
+test('R2 measured near-edge distance and client/target heights select fine keys without relaxing even a subpixel full-box clip', async () => {
+  const targetAt = await r2ScrollTarget();
+  for (const [scrollTop, key] of [[160.86666870117188, 'PageDown'], [275, 'ArrowDown'], [389.1333312988281, 'ArrowUp']]) {
+    const target = targetAt(scrollTop);
+    assert.equal(chooseTaskGateScrollKey(target), key);
+    assert.equal(target.clipped, true);
+  }
+  const top = targetAt(389.1333312988281);
+  assert.equal(top.rect.top, 244.75); assert.equal(top.hits, 9);
+  assert.ok(top.diagnostics.closestList.clientRect.top - top.rect.top > 1);
+  const near = targetAt(275);
+  near.diagnostics.closestList.clientRect.height = 60;
+  assert.equal(chooseTaskGateScrollKey(near), 'PageDown', 'less available fit travel changes the near-edge decision');
+  near.rect.height = 60;
+  assert.equal(chooseTaskGateScrollKey(near), 'PageDown', 'fine keys do not pretend an oversized target fits');
+  assert.equal(chooseTaskGateScrollKey({ ...top, scrollDirection: null, hits: 8 }), null, 'occlusion alone cannot authorize scrolling');
+});
+
+test('R2 fine adjustment targets only the Task list and waits through different simulated motion speeds before more keys or a click', async () => {
+  const targetAt = await r2ScrollTarget();
+  for (const [initial, duration, lineStep, expected] of [
+    [160.86666870117188, 80, 20, ['PageDown', 'ArrowDown', 'ArrowDown']],
+    [160.86666870117188, 200, 40, ['PageDown', 'ArrowDown']],
+    [160.86666870117188, 440, 60, ['PageDown', 'ArrowDown']],
+    [389.1333312988281, 320, 40, ['ArrowUp']],
+  ]) {
+    const clock = settlementClock(), diagnostics = createTaskGateDiagnostics(), actions = [];
+    let from = initial, to = initial, startedAt = 0;
+    const position = () => from + (to - from) * Math.min(1, (clock.elapsed() - startedAt) / duration);
+    const read = async () => stampTarget(targetAt(position()), clock.now);
+    const input = async (key, selector, boundary) => {
+      assert.equal(selector, '[data-testid="chat-task-list"]', 'never send Arrow to the textarea/caret');
+      assert.equal(position(), to);
+      assert.ok(clock.elapsed() >= (actions.length ? startedAt + duration : 0) + TASK_GATE_SETTLEMENT.windowMs);
+      from = to; to += key === 'PageDown' ? 275 - initial : key === 'ArrowDown' ? lineStep : -lineStep;
+      startedAt = clock.elapsed();
+      const receipt = { fixtureOnly: true, key, boundary };
+      actions.push({ key, boundary, receipt }); return receipt;
+    };
+    const h = { scrollWithKey: (selector, key) => input(key, selector, 'scrollWithKey'),
+      press: (key, selector) => input(key, selector, 'press') };
+    // Also exercise the no-diagnostics dispatch path on the last case.
+    await readyTaskGateTarget(h, 'exact-target', clock.now() + 20000,
+      { ...clock, ...(initial > 300 ? {} : { diagnostics }), read, keyRead: read });
+    assert.deepEqual(actions.map(a => a.key), expected);
+    assert.ok(clock.elapsed() >= startedAt + duration + TASK_GATE_SETTLEMENT.windowMs);
+    const final = targetAt(position());
+    assert.equal(final.clipped, false); assert.equal(final.hits, 9);
+    for (const [i, step] of (diagnostics.records[0]?.keys || []).entries()) {
+      assert.equal(step.boundary, actions[i].boundary); assert.equal(step.receipt, actions[i].receipt);
+      assert.equal(step.before.diagnostics.focusedElement.identity.testId, 'chat-task-list');
+      assert.equal(step.after.diagnostics.commandFocusedElement.identity.testId, 'chat-task-list');
+    }
+  }
+});
+
+test('coarse and ineffective fine keys share one six-adjustment budget with no rescue or transient-paint acceptance', async () => {
+  const targetAt = await r2ScrollTarget(), clock = settlementClock(), diagnostics = createTaskGateDiagnostics(), keys = [];
+  let scroll = 160.86666870117188;
+  const read = async () => stampTarget(targetAt(scroll), clock.now);
+  await assert.rejects(readyTaskGateTarget({
+    scrollWithKey: async (selector, key) => { assert.equal(selector, '[data-testid="chat-task-list"]'); keys.push(key); scroll = 275; },
+    press: async (key, selector) => { assert.equal(selector, '[data-testid="chat-task-list"]'); keys.push(key); },
+  }, 'exact-target', clock.now() + 20000, { ...clock, diagnostics, read, keyRead: read }), /did not settle before input/);
+  assert.deepEqual(keys, ['PageDown', 'ArrowDown', 'ArrowDown', 'ArrowDown', 'ArrowDown', 'ArrowDown']);
+  const record = diagnostics.records[0];
+  assert.equal(record.status, 'failed'); assert.equal(record.keys.length, 6); assert.equal(record.settlements.length, 7);
+  assert.equal(record.last.clipped, true);
+});
+
+test('fine-key final guard refuses foreign scope, scroll target, changed geometry and stale evidence before invoking press', async () => {
+  const targetAt = await r2ScrollTarget();
+  for (const change of [
+    v => { v.diagnostics.scope.roomId = 'foreign-room'; },
+    v => { v.diagnostics.scope.camera.pan.y++; },
+    v => { v.diagnostics.viewport.width++; },
+    v => { v.diagnostics.scrollTarget.isClosestList = false; },
+    v => { v.diagnostics.scrollTarget.element.scrollTop++; },
+    v => { v.diagnostics.rowIdentity.gateId = 'foreign-gate'; },
+    v => { v.diagnostics.observedAt -= TASK_GATE_SETTLEMENT.maxAgeMs + 1; },
+  ]) {
+    const clock = settlementClock(), diagnostics = createTaskGateDiagnostics(); let keys = 0;
+    await assert.rejects(readyTaskGateTarget({ press: async () => { keys++; }, scrollWithKey: async () => { keys++; } },
+      'exact-target', clock.now() + 10000, { ...clock, diagnostics, read: async () => stampTarget(targetAt(275), clock.now),
+        keyRead: async () => { const value = stampTarget(targetAt(275), clock.now); change(value); return value; },
+      }), /changed|scroll target must|stale/);
+    assert.equal(keys, 0); assert.equal(diagnostics.records[0].keys.length, 0);
+    assert.equal(diagnostics.records[0].finalGuard.status, 'failed');
+  }
+});
+
+test('fine-key native exception survives a never-resolving after-read with the same bounded diagnostic policy', { timeout: 1500 }, async () => {
+  const targetAt = await r2ScrollTarget(), clock = settlementClock(), diagnostics = createTaskGateDiagnostics();
+  const original = new Error('native Arrow failure'); let reads = 0, keys = 0;
+  await assert.rejects(readyTaskGateTarget({ press: async (key, selector) => {
+    assert.equal(key, 'ArrowDown'); assert.equal(selector, '[data-testid="chat-task-list"]'); keys++; throw original;
+  } }, 'exact-target', clock.now() + 10000, { ...clock, diagnostics,
+    read: async () => stampTarget(targetAt(275), clock.now),
+    keyRead: () => ++reads === 1 ? stampTarget(targetAt(275), clock.now) : new Promise(() => {}),
+  }), error => error === original);
+  const step = diagnostics.records[0].keys[0];
+  assert.equal(keys, 1); assert.equal(reads, 2); assert.equal(step.boundary, 'press');
+  assert.equal(step.afterTimedOut, true); assert.equal(step.afterTimeoutMs, TASK_GATE_DIAGNOSTIC_LIMITS.keyReadMs);
+});
+
+test('the counter uses the same guarded fine list key but still requires its own painted-text proof after settlement', async () => {
+  const targetAt = await r2ScrollTarget(), clock = settlementClock(), diagnostics = createTaskGateDiagnostics();
+  const proof = await observeTaskGateLimit(limitPaintDom().h, identity()); let scroll = 275, keys = 0, counterReads = 0;
+  const selector = `${taskGateRowSelector(identity())} [data-testid="chat-task-answer-limit"]`;
+  const targetRead = async () => stampTarget({ ...targetAt(scroll), selector }, clock.now);
+  const result = await readTaskGateLimit({ press: async (key, target) => {
+    assert.equal(key, 'ArrowDown'); assert.equal(target, '[data-testid="chat-task-list"]');
+    assert.equal(clock.elapsed(), 240); keys++; scroll += 40;
+  } }, identity(), clock.now() + 10000, { ...clock, diagnostics, targetRead, keyRead: targetRead,
+    read: async () => { counterReads++; return scroll === 275
+      ? { ...proof, fragments: [{ ...proof.fragments[0], clipped: true }], scrollDirection: 'PageDown' } : proof; },
+  });
+  assert.equal(result.proof, proof); assert.equal(keys, 1); assert.equal(counterReads, 2); assert.equal(clock.elapsed(), 480);
+  assert.equal(diagnostics.records[0].keys[0].boundary, 'press');
+});
+
+test('settlement requires a 240ms unchanged window and resets on every intermediate target, parent or scroll change', async () => {
+  for (const change of [
+    value => { value.rect.y += .01; },
+    value => { value.diagnostics.target.rect.bottom += .01; },
+    value => { value.diagnostics.ancestors[1].clientRect.bottom += .01; },
+    value => { value.diagnostics.ancestors[1].rect.top += .01; },
+    value => { value.diagnostics.scrollTarget.element.scrollTop += .01; },
+    value => { value.diagnostics.closestList.scrollHeight++; },
+  ]) {
+    const base = await settlementTarget(), clock = settlementClock(), record = {};
+    const result = await waitTaskGateTargetSettled({}, 'exact-target', clock.now() + 10000, { ...clock, record,
+      read: async () => { const value = stampTarget(base, clock.now); if (clock.elapsed() === 80) change(value); return value; } });
+    assert.deepEqual(result, stampTarget(base, clock.now));
+    assert.equal(clock.elapsed(), 360, 'returning to the initial geometry at 120ms must restart, not reuse the initial window');
+    assert.equal(record.settlements[0].resets, 2); assert.equal(record.settlements[0].stableMs, 240);
+    assert.equal(record.settlements[0].status, 'settled');
+  }
+});
+
+test('room/camera/viewport and exact target identity changes fail before input; incomplete geometry cannot be called stable', async () => {
+  for (const change of [
+    value => { value.diagnostics.scope.roomId = 'foreign-room'; },
+    value => { value.diagnostics.scope.camera.zoom += .01; },
+    value => { value.diagnostics.scope.camera.pan.x++; },
+    value => { value.diagnostics.viewport.width++; },
+    value => { value.diagnostics.rowIdentity.gateId = 'foreign-gate'; },
+    value => { value.diagnostics.target.identity.choiceId = 'other'; },
+    value => { value.selector = 'foreign-target'; },
+    value => { value.diagnostics.ancestorsTruncated = true; },
+    value => { value.diagnostics.target = null; },
+    value => { value.diagnostics.ancestors[0].clientRect.bottom = null; },
+    value => { value.diagnostics.scrollTarget.isClosestList = false; },
+  ]) {
+    const base = await settlementTarget(), clock = settlementClock();
+    await assert.rejects(readyTaskGateTarget(new Proxy({}, { get: () => assert.fail('no input on scope/evidence failure') }),
+      'exact-target', clock.now() + 10000, { ...clock, read: async () => {
+        const value = stampTarget(base, clock.now); if (clock.elapsed() >= 80) change(value); return value;
+      } }), /Task target did not settle before input/);
+    assert.equal(clock.elapsed(), 80);
+  }
+});
+
+test('continued motion, insufficient remaining window and a hung stability read fail clearly without native input', { timeout: 2000 }, async () => {
+  const base = await settlementTarget();
+  for (const remainingMs of [10000, 200]) {
+    const clock = settlementClock(), diagnostics = createTaskGateDiagnostics();
+    await assert.rejects(readyTaskGateTarget(new Proxy({}, { get: () => assert.fail('no action before settlement') }),
+      'exact-target', clock.now() + remainingMs, { ...clock, diagnostics, read: async () => {
+        const value = stampTarget(base, clock.now);
+        if (remainingMs === 10000) value.diagnostics.scrollTarget.element.scrollTop += clock.elapsed() / 1000;
+        return value;
+      } }), /Task target did not settle before input/);
+    assert.equal(clock.elapsed(), Math.min(remainingMs, TASK_GATE_SETTLEMENT.timeoutMs));
+    assert.equal(diagnostics.records[0].keys.length, 0);
+    assert.equal(diagnostics.records[0].settlements[0].status, 'failed');
+  }
+  await assert.rejects(waitTaskGateTargetSettled({}, 'exact-target', Date.now() + 30,
+    { read: () => new Promise(() => {}) }), /Task target did not settle before input.*observation timed out/);
+});
+
+test('late settlement read completion cannot overwrite a frozen timeout record or permit native input', { timeout: 2000 }, async () => {
+  const base = await settlementTarget(), diagnostics = createTaskGateDiagnostics(); let finishRead;
+  await assert.rejects(readyTaskGateTarget(new Proxy({}, { get: () => assert.fail('no late input') }), 'exact-target', Date.now() + 30,
+    { diagnostics, read: () => new Promise(resolve => { finishRead = resolve; }) }), /Task target did not settle before input/);
+  const frozen = JSON.stringify(diagnostics);
+  finishRead(base);
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(JSON.stringify(diagnostics), frozen);
+  assert.equal(diagnostics.records[0].samples, 0); assert.equal(diagnostics.records[0].keys.length, 0);
+});
+
+test('review reproduction: a third screen sample captured near 83ms but delivered 210ms later cannot turn delivery delay into a stable window', { timeout: 2000 }, async () => {
+  const base = await settlementTarget(), record = {}, capturedAt = []; let reads = 0;
+  await assert.rejects(waitTaskGateTargetSettled({}, 'exact-target', Date.now() + 1500, { record, read: async () => {
+    const sample = stampTarget(base); capturedAt.push(sample.diagnostics.observedAt); reads++;
+    if (reads === 3) await new Promise(resolve => setTimeout(resolve, 210)); // simulated transport, not a UI wait
+    return sample;
+  } }), /observation is stale/);
+  assert.equal(reads, 3); assert.ok(capturedAt[2] - capturedAt[0] < TASK_GATE_SETTLEMENT.windowMs);
+  assert.ok(record.settlements[0].stableMs < TASK_GATE_SETTLEMENT.windowMs);
+  assert.equal(record.settlements[0].status, 'failed');
+});
+
+test('screen-time coverage gaps reset the window even if every delivered frame is fresh and equal', async () => {
+  const base = await settlementTarget(), start = Date.now(); let elapsed = 0, reads = 0;
+  const record = {};
+  await waitTaskGateTargetSettled({}, 'exact-target', start + 2000, { record, now: () => start + elapsed,
+    read: async () => stampTarget(base, () => start + elapsed),
+    wait: async (_h, read, accept) => {
+      for (const time of [0, 40, 240, 280, 320, 360, 400, 440, 480]) {
+        elapsed = time; reads++; if (accept(await read())) return base;
+      }
+      assert.fail('continuous source-time window should eventually settle');
+    } });
+  assert.equal(elapsed, 480); assert.equal(reads, 9);
+  assert.equal(record.settlements[0].resets, 1); assert.equal(record.settlements[0].stableMs, 240);
+});
+
+test('review reproduction: room changed during counter read or only in before-key read is rejected before PageDown using real default waits/guards', { timeout: 3000 }, async () => {
+  const proof = await observeTaskGateLimit(limitPaintDom().h, identity());
+  for (const changeAt of ['counter', 'key-read']) {
+    const base = await settlementTarget(), diagnostics = createTaskGateDiagnostics();
+    base.selector = `${taskGateRowSelector(identity())} [data-testid="chat-task-answer-limit"]`;
+    let room = 'local-original', keys = 0, counterReads = 0, keyReads = 0;
+    await assert.rejects(readTaskGateLimit({ scrollWithKey: async () => { keys++; } }, identity(), Date.now() + 1500, {
+      diagnostics, targetRead: async () => stampTarget(base),
+      read: async () => {
+        counterReads++; if (changeAt === 'counter') room = 'foreign-room';
+        return { ...proof, fragments: [{ ...proof.fragments[0], clipped: true }], scrollDirection: 'PageDown' };
+      },
+      keyRead: async () => {
+        keyReads++; if (changeAt === 'key-read') room = 'foreign-room';
+        const sample = stampTarget(base); sample.diagnostics.scope.roomId = room; return sample;
+      },
+    }), /changed room, camera or viewport/);
+    assert.equal(keys, 0); assert.equal(counterReads, 1); assert.equal(keyReads, 1);
+    const record = diagnostics.records[0];
+    assert.equal(record.keys.length, 0); assert.equal(record.finalGuard.status, 'failed');
+    assert.equal(record.finalGuard.last.diagnostics.scope.roomId, 'foreign-room');
+  }
+});
+
+test('the final guard rejects new movement and a stale or deadline-expired sample without permitting a click or key', { timeout: 3000 }, async () => {
+  const base = await settlementTarget();
+  for (const mode of ['movement', 'stale']) {
+    let clicks = 0, keys = 0;
+    await assert.rejects((async () => {
+      await readyTaskGateTarget({ scrollWithKey: async () => { keys++; } }, 'exact-target', Date.now() + 1500, {
+        read: async () => stampTarget(base), keyRead: async () => {
+          const value = stampTarget(base);
+          if (mode === 'movement') value.diagnostics.target.rect.y++;
+          else value.diagnostics.observedAt -= 200;
+          return value;
+        },
+      });
+      clicks++;
+    })(), mode === 'movement' ? /changed after settlement/ : /observation is stale/);
+    assert.equal(clicks, 0); assert.equal(keys, 0);
+  }
+  await assert.rejects(guardTaskGateTargetBeforeInput({}, 'exact-target', stampTarget(base), Date.now() + 25,
+    { read: () => new Promise(() => {}) }), /observation timed out/);
+});
+
+test('default guarded path preserves native exceptions despite a hung after-read and refuses a hung before-key guard', { timeout: 3000 }, async () => {
+  const base = await settlementTarget({ clipped: true, scrollDirection: 'PageDown' });
+  for (const stuckBefore of [false, true]) {
+    const diagnostics = createTaskGateDiagnostics(), original = new Error('original native error'); let keys = 0, keyReads = 0;
+    const promise = readyTaskGateTarget({ scrollWithKey: async () => { keys++; throw original; } }, 'exact-target',
+      Date.now() + (stuckBefore ? 450 : 1500), { diagnostics, read: async () => stampTarget(base), keyRead: () => {
+        keyReads++;
+        return !stuckBefore && keyReads === 1 ? Promise.resolve(stampTarget(base)) : new Promise(() => {});
+      } });
+    if (stuckBefore) {
+      await assert.rejects(promise, /observation timed out/); assert.equal(keys, 0); assert.equal(keyReads, 1);
+      assert.equal(diagnostics.records[0].finalGuard.status, 'failed');
+    } else {
+      await assert.rejects(promise, error => error === original); assert.equal(keys, 1); assert.equal(keyReads, 2);
+      assert.equal(diagnostics.records[0].keys[0].afterTimedOut, true);
+    }
+  }
+});
+
+function cameraSample(camera, now = Date.now) {
+  return { observedAt: now(), roomId: 'thread-dm-suqlb75', viewport: { width: 600, height: 600 }, camera };
+}
+const openChatGoal = () => ({ zoomTarget: .9636363636363636, panTarget: { x: -405.1090909090909, y: -613 } });
+
+test('explicit openChat convergence from the actual 600 failure waits read-only for fixed-target rest before strict readiness starts', async () => {
+  const clock = settlementClock(), evidence = {}, goal = openChatGoal();
+  const before = cameraSample({ zoom: .5, zoomTarget: .5, pan: { x: 0, y: 0 }, panTarget: { x: 0, y: 0 } }, clock.now);
+  const cameras = [
+    { ...goal, zoom: .7304470630731107, pan: { x: -226.6716797216489, y: -347.7186947438335 } },
+    { ...goal, zoom: .8963105464885565, pan: { x: -359.86583249974035, y: -545.7372518744588 } },
+    { ...goal, zoom: goal.zoomTarget, pan: { ...goal.panTarget } },
+  ];
+  const final = await waitTaskGateOpenChatCamera(new Proxy({}, { get: () => assert.fail('camera wait has no native actions') }), before,
+    clock.now() + 10000, { ...clock, evidence, read: async () => cameraSample(cameras[Math.min(2, clock.elapsed() / 40)], clock.now) });
+  assert.equal(clock.elapsed(), 320); assert.deepEqual(final.camera, cameras[2]);
+  assert.equal(evidence.openChatCamera.stableMs, 240); assert.equal(evidence.openChatCamera.status, 'settled');
+  const source = runTaskGateFlow.toString();
+  assert.ok(source.indexOf('const beforeOpenChat =') < source.indexOf('await openChat(harness)'));
+  assert.ok(source.indexOf('await openChat(harness)') < source.indexOf('await waitTaskGateOpenChatCamera('));
+  assert.ok(source.indexOf('await waitTaskGateOpenChatCamera(') < source.indexOf("await click('.egd-codex-conversation-back')"));
+  assert.equal(source.split('await waitTaskGateOpenChatCamera(').length - 1, 1);
+  assert.doesNotMatch(source.slice(source.indexOf('const rejectedUi ='), source.indexOf('// Change identity while')), /waitTaskGateOpenChatCamera/);
+});
+
+test('openChat allowance rejects room/viewport changes, retargeting, reversal and overshoot instead of silently rebasing', async () => {
+  for (const change of [
+    value => { value.roomId = 'foreign-room'; }, value => { value.viewport.width = 800; },
+    value => { value.camera.zoomTarget = 1.5; }, value => { value.camera.panTarget.x = -900; },
+    value => { value.camera.pan.x = -100; }, value => { value.camera.pan.x = -450; },
+  ]) {
+    const clock = settlementClock(), evidence = {};
+    const camera = { ...openChatGoal(), zoom: .7, pan: { x: -200, y: -300 } };
+    const before = cameraSample(camera, clock.now);
+    await assert.rejects(waitTaskGateOpenChatCamera({}, before, clock.now() + 10000, { ...clock, evidence,
+      read: async () => { const value = cameraSample(structuredClone(camera), clock.now); if (clock.elapsed() >= 40) change(value); return value; },
+    }), /Explicit openChat camera did not settle/);
+    assert.equal(clock.elapsed(), 40); assert.equal(evidence.openChatCamera.status, 'failed');
+  }
+});
+
+test('near-target openChat motion still resets the observation window; a camera stalled away from its target times out', async () => {
+  for (const stalled of [false, true]) {
+    const clock = settlementClock(), goal = openChatGoal(), evidence = {};
+    const camera = { ...goal, zoom: goal.zoomTarget - .001, pan: { ...goal.panTarget } };
+    const promise = waitTaskGateOpenChatCamera({}, cameraSample(camera, clock.now), clock.now() + 10000, { ...clock, evidence,
+      read: async () => cameraSample({ ...camera, zoom: stalled ? .5 : goal.zoomTarget - [0.001, 0.0005, 0][Math.min(2, clock.elapsed() / 40)] }, clock.now),
+    });
+    if (stalled) { await assert.rejects(promise, /did not settle/); assert.equal(clock.elapsed(), 5000); }
+    else { await promise; assert.equal(clock.elapsed(), 320); assert.equal(evidence.openChatCamera.resets, 2); }
+  }
+});
+
+test('ready ignores momentarily fullbox/9hit paint after a key and settles before choosing the next key or permitting a click', async () => {
+  const base = await settlementTarget(), clock = settlementClock(), diagnostics = createTaskGateDiagnostics(), actions = [];
+  let phase = 0, keyAt = 0;
+  const input = async (selector, key) => {
+    assert.equal(selector, '[data-testid="chat-task-list"]');
+    actions.push([key, clock.elapsed()]); phase++; keyAt = clock.elapsed(); return { key, moved: true };
+  };
+  const h = { scrollWithKey: input, press: (key, selector) => input(selector, key) };
+  const read = async () => {
+    const value = stampTarget(base, clock.now);
+    if (phase === 0) Object.assign(value, { clipped: true, scrollDirection: 'PageDown' });
+    else if (phase === 1 && clock.elapsed() - keyAt >= 120) Object.assign(value, { clipped: true, scrollDirection: 'PageUp' });
+    return value;
+  };
+  await readyTaskGateTarget(h, 'exact-target', clock.now() + 10000,
+    { ...clock, diagnostics, read, keyRead: read });
+  actions.push(['click-permitted', clock.elapsed()]);
+  assert.deepEqual(actions, [['PageDown', 240], ['ArrowUp', 600], ['click-permitted', 840]]);
+  assert.deepEqual(diagnostics.records[0].settlements.map(value => value.stableMs), [240, 240, 240]);
+  assert.equal(diagnostics.records[0].settlements[1].resets, 1);
+});
+
+test('settlement spans native keys with the same room/camera binding and never exceeds six keys or relaxes fullbox+9hit', async () => {
+  const base = await settlementTarget();
+  for (const mode of ['six-keys', 'camera-after-key', 'clipped-nine', 'eight-hits', 'disabled', 'outside']) {
+    const clock = settlementClock(), diagnostics = createTaskGateDiagnostics(); let keys = 0;
+    const h = { scrollWithKey: async () => { keys++; return { moved: true }; } };
+    const read = async () => {
+        const value = stampTarget(base, clock.now);
+        if (mode === 'six-keys' || mode === 'camera-after-key') Object.assign(value, { clipped: true, scrollDirection: 'PageDown' });
+        if (mode === 'camera-after-key' && keys) value.diagnostics.scope.camera.pan.y++;
+        if (mode === 'clipped-nine') value.clipped = true;
+        if (mode === 'eight-hits') value.hits = 8;
+        if (mode === 'disabled') value.disabled = true;
+        if (mode === 'outside') value.inside = false;
+        return value;
+      };
+    await assert.rejects(readyTaskGateTarget(h, 'exact-target', clock.now() + 20000,
+      { ...clock, diagnostics, keyRead: read, read }), /Task target did not settle before input/);
+    assert.equal(keys, mode === 'six-keys' ? 6 : mode === 'camera-after-key' ? 1 : 0);
+    assert.ok(diagnostics.records[0].settlements.length <= 7);
+    if (mode === 'six-keys') assert.equal(diagnostics.records[0].settlements.length, 7);
+  }
+});
+
+test('fixture wait failure preserves the last bounded scalar snapshot without another read or response-body/answer leakage', async () => {
+  const original = new Error('fixture predicate timeout'), evidence = {}; let reads = 0;
+  const sensitive = 'DO-NOT-COPY-ANSWER';
+  const pending = state({ requests: [post(identity(), null, { delegated: false, request: { ...identity(), answer: { text: sensitive } } })],
+    fakeProviderTurns: [{ output: sensitive }, {}], persisted: { answers: [{ text: sensitive }] } });
+  await assert.rejects(waitTaskGateFixtureState({}, async () => { reads++; return pending; }, value => value.requests.at(-1)?.status === 200,
+    Date.now() + 10000, evidence, { wait: async (_h, read, accept) => {
+      for (let i = 0; i < 3; i++) assert.equal(accept(await read()), false);
+      throw original;
+    } }), error => error === original);
+  assert.equal(reads, 3); assert.equal(evidence.fixtureWaitFailure.samples, 3);
+  assert.equal(evidence.fixtureWaitFailure.last, evidence.lastFixtureState);
+  const last = evidence.lastFixtureState;
+  assert.equal(last.continuePostCount, 1); assert.equal(last.lastContinue.status, null);
+  assert.equal(last.lastContinue.delegated, false); assert.equal(last.answerCount, 1); assert.equal(last.fakeProviderTurnCount, 2);
+  assert.doesNotMatch(JSON.stringify(evidence), new RegExp(sensitive));
+  const absent = summarizeTaskGateFixture(state());
+  assert.equal(absent.continuePostCount, 0); assert.equal(absent.lastContinue, null);
+  const long = summarizeTaskGateFixture(state({ requests: [post(identity({ graphId: 'x'.repeat(10000) }), 400,
+    { response: { code: 'TASK_GATE_ANSWER_PRIVATE', message: sensitive }, sequence: 2 })] }));
+  assert.equal(long.lastContinue.status, 400); assert.equal(long.lastContinue.code, 'TASK_GATE_ANSWER_PRIVATE');
+  assert.equal(long.lastContinue.graphId.length, 256); assert.ok(JSON.stringify(long).length < 1000);
+  const noRead = {};
+  await assert.rejects(waitTaskGateFixtureState({}, () => assert.fail('no catch-phase fetch'), () => false, 1, noRead,
+    { wait: async () => { throw original; } }), error => error === original);
+  assert.equal(noRead.fixtureWaitFailure.last, null); assert.equal(noRead.fixtureWaitFailure.samples, 0);
 });
 
 function limitPaintDom({ clipped = false, occluded = false, hidden = false, missing = false, offscreen = false } = {}) {
@@ -488,6 +962,7 @@ function limitPaintDom({ clipped = false, occluded = false, hidden = false, miss
     getBoundingClientRect: () => rect(20, 20, 300, 60) };
   const rangeBox = rect(offscreen ? 790 : 20, 24, 280, 12);
   const context = { innerWidth: 800, innerHeight: 600,
+    window: { __egdesk: { state: cameraState() } },
     getComputedStyle: target => ({ display: 'block', visibility: hidden ? 'hidden' : 'visible', opacity: '1',
       overflowX: target === list ? 'auto' : 'visible', overflowY: target === list ? 'auto' : 'visible' }),
     document: {
@@ -538,9 +1013,9 @@ test('readable count metadata receives no native click or scroll; clipped text c
   const proof = await observeTaskGateLimit(limitPaintDom().h, identity());
   let calls = 0; const keys = [], h = { scrollWithKey: async (selector, key) => { keys.push([selector, key]); return { moved: true, key }; } };
   const deadlineMs = Date.now() + 10000;
-  const first = await readTaskGateLimit(h, identity(), deadlineMs, { read: async () => proof });
+  const first = await readTaskGateLimit(h, identity(), deadlineMs, { read: async () => proof, settle: unitLimitSettled, finalGuard: unitGuard });
   assert.equal(first.proof, proof); assert.deepEqual(keys, []);
-  const scrolled = await readTaskGateLimit(h, identity(), deadlineMs, { read: async () => ++calls === 1
+  const scrolled = await readTaskGateLimit(h, identity(), deadlineMs, { settle: unitLimitSettled, finalGuard: unitGuard, read: async () => ++calls === 1
     ? { ...proof, fragments: [{ ...proof.fragments[0], clipped: true }], scrollDirection: 'PageDown' } : proof });
   assert.equal(scrolled.proof, proof);
   assert.deepEqual(keys, [['[data-testid="chat-task-list"]', 'PageDown']]);
@@ -554,7 +1029,7 @@ test('existing counter PageUp/PageDown steps also retain bounded focus traces wi
     const receipt = { key: direction, moved: false };
     const result = await readTaskGateLimit({ scrollWithKey: async (selector, key) => {
       calls.push(['native-key', selector, key]); return receipt;
-    } }, identity(), Date.now() + 10000, { diagnostics,
+    } }, identity(), Date.now() + 10000, { diagnostics, settle: unitLimitSettled, finalGuard: unitGuard,
       read: async () => { calls.push(['counter-read']); return ++reads === 1
         ? { ...proof, fragments: [{ ...proof.fragments[0], clipped: true }], scrollDirection: direction } : proof; },
       keyRead: async (_h, selector) => { calls.push(['diagnostic-read', selector]); return ++diagnosticReads === 1 ? before : after; },
@@ -569,12 +1044,38 @@ test('existing counter PageUp/PageDown steps also retain bounded focus traces wi
   }
 });
 
+test('counter decisions wait for actual target/parent/scroll settlement before each existing key and re-read the counter afterward', async () => {
+  const proof = await observeTaskGateLimit(limitPaintDom().h, identity()), base = await settlementTarget();
+  const clock = settlementClock(), diagnostics = createTaskGateDiagnostics(), actions = [];
+  let keyAt = null;
+  const selector = `${taskGateRowSelector(identity())} [data-testid="chat-task-answer-limit"]`;
+  base.selector = selector;
+  const targetRead = async () => {
+      const value = stampTarget(base, clock.now);
+      if (keyAt !== null) value.diagnostics.scrollTarget.element.scrollTop += Math.min(clock.elapsed() - keyAt, 160);
+      return value;
+    };
+  const result = await readTaskGateLimit({ scrollWithKey: async (_selector, key) => {
+    actions.push([key, clock.elapsed()]); keyAt = clock.elapsed(); return { key, moved: true };
+  } }, identity(), clock.now() + 10000, { ...clock, diagnostics, targetRead,
+    read: async () => {
+      actions.push(['counter-read', clock.elapsed()]);
+      return keyAt === null ? { ...proof, fragments: [{ ...proof.fragments[0], clipped: true }], scrollDirection: 'PageDown' } : proof;
+    },
+    keyRead: targetRead,
+  });
+  assert.deepEqual(actions, [['counter-read', 240], ['PageDown', 240], ['counter-read', 640]]);
+  assert.equal(result.proof, proof); assert.equal(result.scrolls.length, 1);
+  assert.equal(diagnostics.records[0].settlements.length, 2);
+  assert.equal(diagnostics.records[0].settlements[1].resets, 4);
+});
+
 test('never-resolving before-key counter diagnostics time out once without replacing policy reads or adding native actions', { timeout: 2000 }, async () => {
   const proof = await observeTaskGateLimit(limitPaintDom().h, identity()), diagnostics = createTaskGateDiagnostics(), calls = [];
   let reads = 0, diagnosticReads = 0;
   const result = await readTaskGateLimit({ scrollWithKey: async (_selector, key) => {
     calls.push(key); return { key, moved: false };
-  } }, identity(), Date.now() + 10000, { diagnostics,
+  } }, identity(), Date.now() + 10000, { diagnostics, settle: unitLimitSettled, finalGuard: unitGuard,
     read: async () => { calls.push('counter-read'); return ++reads === 1
       ? { ...proof, fragments: [{ ...proof.fragments[0], clipped: true }], scrollDirection: 'PageDown' } : proof; },
     keyRead: () => {
@@ -595,7 +1096,7 @@ test('a before-key diagnostic that consumes the remaining deadline prevents nati
   const proof = await observeTaskGateLimit(limitPaintDom().h, identity()), diagnostics = createTaskGateDiagnostics();
   let diagnosticReads = 0;
   await assert.rejects(readTaskGateLimit({ scrollWithKey: () => assert.fail('no key after deadline') }, identity(), Date.now() + 40,
-    { diagnostics, read: async () => ({ ...proof, fragments: [{ ...proof.fragments[0], clipped: true }], scrollDirection: 'PageDown' }),
+    { diagnostics, settle: unitLimitSettled, finalGuard: unitGuard, read: async () => ({ ...proof, fragments: [{ ...proof.fragments[0], clipped: true }], scrollDirection: 'PageDown' }),
       keyRead: () => { diagnosticReads++; return new Promise(() => {}); } }));
   const record = diagnostics.records[0], step = record.keys[0];
   assert.equal(diagnosticReads, 1); assert.equal(record.status, 'failed'); assert.equal(record.keys.length, 1);
@@ -607,7 +1108,7 @@ test('count text occlusion cannot be waived or fixed by blind scrolling, and exp
   const proof = await observeTaskGateLimit(limitPaintDom({ occluded: true }).h, identity());
   const h = { scrollWithKey: () => assert.fail('no scroll direction was observed') };
   const wait = async (_h, read, accept) => { assert.equal(accept(await read()), false); throw new Error('text still occluded'); };
-  await assert.rejects(readTaskGateLimit(h, identity(), Date.now() + 10000, { read: async () => proof, wait }), /text still occluded/);
+  await assert.rejects(readTaskGateLimit(h, identity(), Date.now() + 10000, { read: async () => proof, wait, settle: unitLimitSettled, finalGuard: unitGuard }), /text still occluded/);
   await assert.rejects(readTaskGateLimit(h, identity(), 1, { read: () => assert.fail('expired observation') }));
 });
 
