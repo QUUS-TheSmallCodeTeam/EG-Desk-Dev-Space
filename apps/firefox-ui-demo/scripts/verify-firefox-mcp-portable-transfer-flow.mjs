@@ -15,6 +15,8 @@ const sha256 = value => createHash('sha256').update(value).digest('hex');
 const profileImports = state => state.requests.filter(row => row.path === '/profiles/import' && row.delegated);
 const profileExports = state => state.requests.filter(row => /^\/profiles\/[^/]+\/export$/.test(row.path) && row.delegated);
 const profileDuplicates = state => state.requests.filter(row => row.method === 'POST' && /^\/profiles\/[^/]+\/duplicate$/.test(row.path));
+const deskAutosave = row => row.method === 'PUT' && row.path === '/v1/desk/current';
+const nonDeskWrites = state => state.requests.filter(row => row.method !== 'GET' && !row.path.startsWith('/__qa/') && !deskAutosave(row));
 export const PORTABLE_DUPLICATE_NOTICE = '복제한 새 초안을 만들었습니다. 원본은 그대로이며, 아직 사용하거나 대화방에 배정하지 않았습니다.';
 export const PORTABLE_OBSERVATION_BUDGET = 12 * 1024;
 
@@ -84,6 +86,27 @@ export function assertPortableDuplicateUi(before, after, id) {
   return true;
 }
 
+export function assertPortableRejectedDeskAutosaves(before, after) {
+  assert.equal(after.profile, before.profile); assert.equal(after.root, before.root);
+  assert.deepEqual(after.persisted.desk, before.persisted.desk, 'Rejected Desk autosaves cannot change the stored Desk or Board');
+  // Settings rendering triggers the existing Desk MutationObserver. Exclude
+  // only its exact, non-delegated rejection, never every failed write. The
+  // fixture rejects this route before invoking a store or reading its body.
+  for (const state of [before, after]) for (const row of state.requests.filter(deskAutosave)) {
+    assert.ok(Number.isSafeInteger(row.sequence) && row.sequence > 0);
+    assert.deepEqual(row, { sequence: row.sequence, method: 'PUT', path: '/v1/desk/current', query: '',
+      delegated: false, status: 403, code: 'QA_PORTABLE_ROUTE_BLOCKED' }, 'Only the exact refused Desk autosave is separate from profile writes');
+  }
+  const previous = before.requests.filter(deskAutosave), current = after.requests.filter(deskAutosave);
+  assert.deepEqual(current.slice(0, previous.length), previous, 'Earlier rejected Desk attempts remain unchanged in the trace');
+  let sequence = Math.max(0, ...before.requests.map(row => row.sequence));
+  for (const row of current.slice(previous.length)) {
+    assert.ok(row.sequence > sequence, 'Extra rejected Desk attempts must be new ordered requests');
+    sequence = row.sequence;
+  }
+  return true;
+}
+
 export function assertPortableDuplicatedDraft(before, after, uiBefore, uiAfter) {
   assertPortableDuplicateReady(before, uiBefore);
   assertPortableStoreInvariant(before, after, { headAdvanced: true, duplicated: 1 });
@@ -94,8 +117,9 @@ export function assertPortableDuplicatedDraft(before, after, uiBefore, uiAfter) 
   assert.deepEqual(call.request, { revision: 2 });
   assert.equal(call.requestSha256, sha256(JSON.stringify({ revision: 2 })));
   assert.deepEqual(call.before, before.persisted); assert.deepEqual(call.after, after.persisted);
-  const posts = after.requests.slice(before.requests.length).filter(row => row.method !== 'GET' && !row.path.startsWith('/__qa/'));
-  assert.deepEqual(posts.map(row => row.sequence), [call.sequence], 'No activation, assignment or unrelated write accompanies duplication');
+  assertPortableRejectedDeskAutosaves(before, after);
+  assert.deepEqual(nonDeskWrites(after), [...nonDeskWrites(before), call],
+    'Only the explicit duplicate accompanies separately verified rejected Desk autosaves; no activation, assignment or other write');
   const original = before.persisted.profiles.records.find(row => row.id === sourceId);
   for (const record of before.persisted.profiles.records) {
     assert.deepEqual(after.persisted.profiles.records.find(row => row.id === record.id), record, 'Original/imported profiles stay unchanged');
@@ -134,8 +158,8 @@ export function assertPortableDuplicateNoReplay(before, samples, uiBefore, id) {
     assert.deepEqual(profileDuplicates(state), profileDuplicates(before));
     assert.deepEqual(state.duplicateEvents, before.duplicateEvents);
     assert.deepEqual(state.pickerResults, before.pickerResults); assert.deepEqual(state.forbiddenPosts, before.forbiddenPosts);
-    const writes = value => value.requests.filter(row => row.method !== 'GET' && !row.path.startsWith('/__qa/'));
-    assert.deepEqual(writes(state), writes(before), 'No additional duplicate, activation, import or assignment request');
+    assertPortableRejectedDeskAutosaves(before, state);
+    assert.deepEqual(nonDeskWrites(state), nonDeskWrites(before), 'No additional duplicate, activation, import, assignment or other write request');
     assertPortableDuplicateUi(uiBefore, ui, id);
   }
   return true;
@@ -845,6 +869,8 @@ export async function runPortableDuplicateCase({ readState, readUi, reach, click
   }
   check('duplicate completion does not replay, activate, assign, alter exports or replace original saved revisions',
     assertPortableDuplicateNoReplay(after, samples, uiBefore, id));
+  check('any intervening Desk autosave is exactly rejected before delegation and leaves Desk/Board SQLite unchanged',
+    assertPortableRejectedDeskAutosaves(before, samples.at(-1).state));
   return { before, uiBefore, clickState, clickUi, after, uiAfter, id, samples };
 }
 

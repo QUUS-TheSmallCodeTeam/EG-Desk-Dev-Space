@@ -10,7 +10,7 @@ import { assertPortableEnvironment, assertPortableStoreInvariant, assertPortable
   assertPortableExportFile, assertPortablePinnedExport, assertPortableNoReplay,
   assertPortableMissingHead, assertPortableAttachmentOmission,
   assertPortableDuplicateReady, assertPortableDuplicateUi, assertPortableDuplicatedDraft,
-  assertPortableDuplicateNoReplay, runPortableDuplicateCase, PORTABLE_DUPLICATE_NOTICE,
+  assertPortableDuplicateNoReplay, assertPortableRejectedDeskAutosaves, runPortableDuplicateCase, PORTABLE_DUPLICATE_NOTICE,
   observePortableFirstUse, preparePortableInstructionEdge, observePortableSettingsNavigation, navigatePortableSettings,
   portableObservationSources, PORTABLE_OBSERVATION_BUDGET, portableTextVisible } from './verify-firefox-mcp-portable-transfer-flow.mjs';
 
@@ -598,7 +598,7 @@ async function duplicateStageFixture(t) {
 
 test('duplicate stage preserves all earlier transfer checks, pins the native command once, and captures exact notices', async t => {
   const h = await duplicateStageFixture(t), proof = await runPortableDuplicateCase(h.options);
-  assert.equal(h.clicks(), 1); assert.equal(proof.samples.length, 4); assert.equal(h.checks.length, 3);
+  assert.equal(h.clicks(), 1); assert.equal(proof.samples.length, 4); assert.equal(h.checks.length, 4);
   const selector = `[data-testid="settings-agent-duplicate"][data-profile-id="${h.before.seed.profileId}"][data-revision="2"][data-state="idle"]`;
   assert.deepEqual(h.actions.slice(0, 3), [['reach', selector],
     ['capture', 'profile-duplicate-v2-command', [{ selector, text: '복제해서 새로 만들기' }]], ['click', selector]]);
@@ -631,4 +631,78 @@ test('duplicate stage aborts stale bindings or deadline before click; ambiguous 
   ambiguous.options.click = async (...args) => { await click(...args); throw new Error('input receipt lost'); };
   await assert.rejects(runPortableDuplicateCase(ambiguous.options), /input receipt lost/);
   assert.equal(ambiguous.clicks(), 1); assert.equal(ambiguous.fixture.snapshot().duplicateEvents.length, 1);
+});
+
+test('R8 exact blocked Desk autosaves can intervene before and after duplication without weakening profile write counts', async t => {
+  const h = await duplicateFixture(t);
+  const autosave = () => request(h.fixture, 'PUT', '/v1/desk/current', { state: { cards: ['must-not-save'] }, parentGeneration: 1 });
+  assert.equal((await autosave()).status, 403);
+  const { after, uiAfter, id } = await h.commit();
+  assert.equal(assertPortableDuplicatedDraft(h.before, after, h.uiBefore, uiAfter), id);
+  const samples = [];
+  for (let n = 0; n < 4; n++) {
+    assert.equal((await autosave()).status, 403);
+    samples.push({ state: h.fixture.snapshot(), ui: uiAfter });
+  }
+  assert.equal(assertPortableDuplicateNoReplay(after, samples, h.uiBefore, id), true);
+  assert.equal(assertPortableRejectedDeskAutosaves(h.before, samples.at(-1).state), true);
+  assert.deepEqual(samples.at(-1).state.persisted, after.persisted, 'The real rejected route cannot save anything');
+  assert.equal(samples.at(-1).state.duplicateEvents.length, 1);
+  assert.equal(samples.at(-1).state.requests.filter(row => row.path.endsWith('/duplicate')).length, 1);
+  for (const alter of [state => { state.requests = state.requests.filter(row => row.sequence !== after.requests.find(row => row.method === 'PUT').sequence); },
+    state => { state.requests.findLast(row => row.method === 'PUT').sequence = 1; }]) {
+    const changed = structuredClone(samples.at(-1).state); alter(changed);
+    assert.throws(() => assertPortableDuplicateNoReplay(after,
+      Array.from({ length: 3 }, () => ({ state: changed, ui: uiAfter })), h.uiBefore, id));
+  }
+  // A real denied activation is still an unwanted attempt, not another
+  // harmless autosave. This must fail even though SQLite stays unchanged.
+  assert.equal((await request(h.fixture, 'POST', `/profiles/${id}/activate`, { revision: 1 })).status, 403);
+  const activated = h.fixture.snapshot();
+  assert.deepEqual(activated.persisted, after.persisted);
+  assert.throws(() => assertPortableDuplicateNoReplay(after, [...samples, { state: activated, ui: uiAfter }], h.uiBefore, id));
+  assert.throws(() => assertPortableDuplicatedDraft(h.before, activated, h.uiBefore, uiAfter));
+});
+
+test('Desk autosave exception refuses successful, delegated, wrong-query, wrong-code or database-mutating requests', async t => {
+  const h = await duplicateFixture(t), { after, uiAfter, id } = await h.commit();
+  assert.equal((await request(h.fixture, 'PUT', '/v1/desk/current', {})).status, 403);
+  const blocked = h.fixture.snapshot();
+  const put = state => state.requests.find(row => row.method === 'PUT');
+  for (const alter of [state => { put(state).status = 200; }, state => { put(state).status = 500; },
+    state => { put(state).delegated = true; }, state => { put(state).query = '?overwrite=1'; },
+    state => { put(state).code = 'OTHER_ERROR'; }, state => { delete put(state).code; },
+    state => { put(state).response = { saved: true }; }, state => { put(state).sequence = 0; },
+    state => { state.persisted.desk.boards[0].head_revision++; },
+    state => { state.persisted.desk.generations[0].state_hash = 'changed'; },
+    state => { state.profile = 'other-profile'; }, state => { state.root = 'other-root'; }]) {
+    const changed = structuredClone(blocked); alter(changed);
+    assert.throws(() => assertPortableRejectedDeskAutosaves(after, changed));
+    assert.throws(() => assertPortableDuplicateNoReplay(after,
+      Array.from({ length: 3 }, () => ({ state: changed, ui: uiAfter })), h.uiBefore, id));
+  }
+  // Even a denied mutation with no forbiddenPosts receipt cannot disappear
+  // through a broad failed-request allowance. Only exact Desk PUT is excluded.
+  for (const [method, path] of [['POST', `/profiles/${id}/activate`], ['POST', '/profiles/import'],
+    ['POST', `/profiles/${id}/duplicate`], ['PATCH', '/rooms/owned-room'],
+    ['PUT', '/v1/desk/other'], ['POST', '/v1/desk/current'], ['PUT', '/v1/boards/other']]) {
+    const changed = structuredClone(blocked); Object.assign(put(changed), { method, path });
+    assert.throws(() => assertPortableDuplicateNoReplay(after,
+      Array.from({ length: 3 }, () => ({ state: changed, ui: uiAfter })), h.uiBefore, id));
+  }
+});
+
+test('duplicate stage tolerates only real rejected Desk PUT during post-click observation, not another click or write', async t => {
+  const h = await duplicateStageFixture(t);
+  let pauses = 0;
+  h.options.pause = async () => {
+    pauses++;
+    assert.equal((await request(h.fixture, 'PUT', '/v1/desk/current', { state: { cards: [] }, parentGeneration: 1 })).status, 403);
+  };
+  const proof = await runPortableDuplicateCase(h.options);
+  assert.equal(h.clicks(), 1); assert.equal(pauses, 4);
+  assert.equal(proof.samples.at(-1).state.requests.filter(row => row.method === 'PUT').length, 4);
+  assert.equal(proof.samples.at(-1).state.duplicateEvents.length, 1);
+  assert.deepEqual(proof.samples.at(-1).state.persisted, proof.after.persisted);
+  assert.match(h.checks.at(-1), /Desk autosave.*rejected.*SQLite unchanged/);
 });
