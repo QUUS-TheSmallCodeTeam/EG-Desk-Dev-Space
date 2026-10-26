@@ -55,6 +55,15 @@ function between(start, end, from = 0) {
 function compile(body, bindings) {
   return compileFunction(body, Object.keys(bindings), { filename: 'egdesk-surface-production.js' })(...Object.values(bindings));
 }
+// Extract the real controller and give each fixture its own animation-frame
+// queue. No Firefox bootstrap, shared pending state or replacement helper code.
+function productionController(name, ...args) {
+  const frames = [];
+  const create = compile(`${functionSource(name)}\nreturn ${name};`, {});
+  const instance = create(...args, { schedule: callback => { frames.push(callback); return frames.length; } });
+  return { instance, pendingFrames: () => frames.length,
+    flushFrame() { const ready = frames.splice(0); ready.forEach(callback => callback()); return ready.length; } };
+}
 // sendMessage and serializeDeskSnapshot share this production draft closure.
 // Instantiate its real map, constants and normalizer for each isolated surface.
 const requestProjectDraftSource = between('  const chatRequestProjectDisplays = ', '  function chatRequestProjectSelection(');
@@ -77,13 +86,21 @@ class Node {
   replaceWith(node) { const parent = this.parent; if (!parent) return; const index = parent.children.indexOf(this); node.remove(); parent.children[index] = node; node.parent = parent; this.parent = null; }
   contains(node) { return this === node || this.children.some(child => child.contains(node)); }
   remove() { if (this.parent) this.parent.children = this.parent.children.filter(node => node !== this); this.parent = null; }
-  querySelectorAll(selector) {
-    const matches = node => selector.split(',').some(part => { const selected = part.trim();
-      return selected.startsWith('.') ? node.className.split(' ').includes(selected.slice(1))
-        : selected.startsWith('#') ? node.getAttribute('id') === selected.slice(1)
-          : node.tag === selected; });
-    return this.children.flatMap(node => [...(matches(node) ? [node] : []), ...node.querySelectorAll(selector)]);
+  get parentElement() { return this.parent; }
+  matches(selector) {
+    return selector.split(',').some(part => {
+      const selected = part.trim(), attribute = selected.match(/^\[([\w-]+)(?:=["']([^"']*)["'])?\]$/);
+      if (attribute) {
+        const name = attribute[1], value = name.startsWith('data-')
+          ? this.dataset[name.slice(5).replace(/-([a-z])/g, (_, char) => char.toUpperCase())] : this.getAttribute(name);
+        return value != null && (attribute[2] === undefined || String(value) === attribute[2]);
+      }
+      return selected.startsWith('.') ? this.className.split(' ').includes(selected.slice(1))
+        : selected.startsWith('#') ? this.getAttribute('id') === selected.slice(1) : this.tag === selected;
+    });
   }
+  closest(selector) { for (let node = this; node; node = node.parentElement) if (node.matches(selector)) return node; return null; }
+  querySelectorAll(selector) { return this.children.flatMap(node => [...(node.matches(selector) ? [node] : []), ...node.querySelectorAll(selector)]); }
   querySelector(selector) { return this.querySelectorAll(selector)[0] || null; }
   get textContent() { return this.text + this.children.map(node => node.textContent).join(''); }
   set textContent(value) { this.replaceChildren(); this.text = String(value); }
@@ -165,14 +182,15 @@ function surface({ run = null, thread = {}, auth = {}, fetchJson = async () => (
 }
 
 function composer(ui) {
+  const viewport = ui.composerViewport ||= productionController('createChatComposerViewport');
   const block = between("            const input = el('textarea', {", "            input.addEventListener('input'");
   const controls = compile(`${functionSource('getCodexThreadDraft')}\n${block}\nreturn {input, sendButton, resizeComposer};`, {
     el: ui.el, ChatState, activeThread: ui.thread(), codex: ui.state.codex, codexBridge: ui,
-    chatRoomProjectSendBlock: ui.projectBlock,
+    chatRoomProjectSendBlock: ui.projectBlock, composerViewport: viewport.instance,
     compositionInProgress: false,
   });
   controls.resizeComposer();
-  return controls;
+  return { ...controls, viewport };
 }
 function emptyChat(ui) {
   const block = between('          const canStart = activeEngine.engineId', '        } else {\n          // Agent answers');
@@ -314,6 +332,51 @@ test('Claude engine.status downgrades immediately even while Codex login status 
   lifecycle.event({type:'engine.status', engines:[{id:'codex',status:'loginRequired'}, claudeRow({status:'offline'})]});
   assert.equal(ChatState.chatThreadReadiness(ui.thread(), ui.state.codex).ready, false);
   assert.equal(composer(ui).sendButton.disabled, true);
+});
+
+test('composer excerpt executes real viewport preservation and keeps pending restores isolated between surfaces', () => {
+  const ui = surface(), otherUi = surface(), first = composer(ui), second = composer(otherUi);
+  assert.notEqual(first.viewport.instance, second.viewport.instance);
+  assert.equal(composer(ui).viewport.instance, first.viewport.instance, 'one controller persists within one Chat surface');
+  const messages = ui.el('div', { class: 'egd-codex-messages' });
+  const pane = ui.el('div', { class: 'egd-codex-conversation-pane' }, messages);
+  const footer = ui.el('div', { class: 'egd-codex-footer' }, first.input, first.sendButton);
+  const main = ui.el('div', { class: 'egd-codex-chat-main' }, pane, footer);
+  ui.root.appendChild(main);
+  Object.assign(main, { clientHeight: 420, offsetHeight: 420 });
+  Object.assign(footer, { offsetHeight: 40 });
+  Object.assign(messages, { clientHeight: 300, offsetHeight: 300 });
+  Object.assign(first.input, { clientHeight: 40, offsetHeight: 40, scrollHeight: 400, scrollTop: 17, scrollLeft: 5 });
+  let height = first.input.style.height, autoResets = 0;
+  // Explicit DOM model: layout-only auto height can reset native scroll. The
+  // real resize/controller must restore it, not a fixture callback or stub.
+  Object.defineProperty(first.input.style, 'height', { configurable: true,
+    get: () => height, set(value) {
+      height = value;
+      first.input.clientHeight = first.input.offsetHeight = value === 'auto' ? 40 : Number.parseFloat(value);
+      if (value === 'auto') { autoResets++; first.input.scrollTop = 0; first.input.scrollLeft = 0; }
+    } });
+  first.resizeComposer();
+  assert.equal(autoResets, 1); assert.equal(main.dataset.compactComposer, 'true');
+  assert.equal(first.input.style.height, '80px'); assert.equal(first.input.style.overflowY, 'auto');
+  assert.deepEqual([first.input.scrollTop, first.input.scrollLeft], [17, 5]);
+  assert.equal(first.sendButton.disabled, false, 'real readiness remains part of the same resize');
+  first.resizeComposer(false);
+  assert.equal(autoResets, 2); assert.deepEqual([first.input.scrollTop, first.input.scrollLeft], [0, 0], 'native-edit resize does not replay layout scroll');
+  first.input.scrollTop = 19; second.input.scrollTop = 31;
+  for (const controls of [first, second]) {
+    const snapshot = controls.viewport.instance.snapshot(controls.input);
+    controls.input.scrollTop = 0;
+    controls.viewport.instance.restore(controls.input, snapshot);
+    assert.equal(controls.viewport.pendingFrames(), 1);
+    assert.equal(controls.viewport.instance.snapshot(controls.input).scrollTop, snapshot.scrollTop, 'pending intent survives before the frame');
+  }
+  first.viewport.instance.cancel(first.input);
+  assert.equal(first.viewport.flushFrame(), 1); assert.equal(first.input.scrollTop, 0);
+  assert.equal(second.viewport.pendingFrames(), 1, 'another surface cancellation cannot consume this frame');
+  assert.equal(second.viewport.flushFrame(), 1); assert.equal(second.input.scrollTop, 31);
+  first.viewport.instance.dispose(); second.viewport.instance.dispose();
+  assert.deepEqual(ui.effects.requests, []); assert.deepEqual(otherUi.effects.requests, []);
 });
 
 test('Claude does not schedule, request or display Codex Context suggestions', async () => {
@@ -951,8 +1014,10 @@ test('production engine popover reanchors to its fresh local chip across Canvas 
         right:left+menu.offsetWidth*scene.scale,bottom:top+menu.offsetHeight*scene.scale};
     };
     const body = ui.el('div'), before = clone(ui.state.codex.engineMenu);
+    const taskReveal = productionController('createChatTaskAnswerReveal', body);
+    assert.equal(body.events.wheel.length, 1); assert.equal(body.events.click.length, 1, 'real Task helper owns its scoped listeners');
     const attach = () => compile(attachmentSource, {body,el:ui.el,shellClasses:'egd-codex-chat-shell',
-      contentChildren:[freshChip,menu],positionChatEngineMenu:geometry.position});
+      contentChildren:[freshChip,menu],positionChatEngineMenu:geometry.position,taskAnswerReveal:taskReveal.instance});
     if (scene.name === 'translated Canvas at 96%') assert.ok(menu.getBoundingClientRect().left < 10, 'reproduce detached left-edge position before correction');
     attach();
     const check = () => {
@@ -967,6 +1032,10 @@ test('production engine popover reanchors to its fresh local chip across Canvas 
     body.replaceChildren(); attach(); check();
     assert.deepEqual(ui.state.codex.engineMenu,before,'positioning never mutates the Canvas or menu state');
     assert.equal(geometry.position(menu,{...freshChip,isConnected:false}),false,'detached click target is never reused');
+    assert.equal(body.querySelector('[data-testid="chat-task-list"]'), null, 'popover case intentionally has no Task answer');
+    assert.equal(taskReveal.pendingFrames(), 0, 'no Task reveal is fabricated for the independent popover case');
+    taskReveal.instance.dispose();
+    assert.ok(Object.values(body.events).every(listeners => listeners.length === 0), 'real helper releases listeners before the next scene');
   }
 });
 
