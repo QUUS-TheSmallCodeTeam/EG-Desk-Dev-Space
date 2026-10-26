@@ -6,7 +6,7 @@ import childProcess from 'node:child_process';
 import vm from 'node:vm';
 import { parseContextQaCli, assertContextQaEnvironment, readContextBeforeDeadline, waitContextBeforeDeadline,
   contextQaJson, guardContextHarness, observeContextSourceChange, observeContextControl, clickContextControl,
-  assertSourceChangeSeed, verifyContextSourceChange, summarizeContextObservation, recordContextFailure, runCli,
+  assertSourceChangeSeed, verifyContextSourceChange, summarizeContextObservation, recordContextFailure, recordBriefingFailureState, runCli,
   assertBriefingCommentsSeed, observeBriefingComments, verifyBriefingComments, reachBriefingPanelTarget } from './verify-firefox-mcp-context-briefing.mjs';
 import { fingerprintQaBytes } from './egdesk-context-qa-contract.mjs';
 
@@ -155,6 +155,67 @@ test('CTX04 failure screenshot is one bounded observation; failure, hang, expiry
   for (const [deadlineMs, eligible] of [[1, true], [Date.now() + 1000, false]]) {
     const skipped = result(); await recordContextFailure({ screenshot: noAction }, original, skipped, deadlineMs, { eligible });
     assert.equal(skipped.failureCapture.status, 'skipped'); assert.equal(skipped.error, original.message);
+  }
+});
+
+test('Comments failure state reads only the owned QA endpoint once and preserves the original error before IO', async () => {
+  const original = new Error('original saved-state assertion'), result = { automatedAssertionsPassed: false };
+  let calls = 0, signal;
+  const options = { eligible: true, profile: '/owned/profile', env: ENV, now: () => 100,
+    fetchImpl: async (url, init) => {
+      calls++; signal = init.signal;
+      assert.equal(result.error, original.message); assert.match(result.errorStack, /verify-firefox-mcp-context-briefing.test/);
+      assert.equal(url, 'http://127.0.0.1:39220/__qa/state'); assert.equal(init.method, 'GET'); assert.equal(init.body, undefined);
+      assert.equal(result.failureState.deadlineMs, 850); // Small cap, not the remaining 60 seconds.
+      return { ok: true, json: async () => ({ fixture: true, profile: '/owned/profile', auth: 'PRIVATE_AUTH',
+        briefingComments: { receipts: [{ method: 'POST', requestId: 'received-post', receivedAt: 50, terminalCause: 'committed-response-lost' }],
+          storeInspection: { kind: 'qa-read-only-store', readAt: 60, briefings: [{ count: 1, comments: [{ id: 'saved-id',
+            clientRequestId: 'same-uuid', storedHash: 'a'.repeat(64), textHash: 'b'.repeat(64), text: 'PRIVATE_BODY' }] }] } } }) };
+    } };
+  await recordBriefingFailureState(original, result, 60100, options);
+  assert.equal(calls, 1); assert.equal(signal.aborted, false); // Fully consumed HTTP detached its cancellation listener.
+  assert.equal(result.failureState.status, 'captured'); assert.equal(result.failureState.attempts, 1);
+  assert.equal(result.failureState.summary.receivedPOST, 1); assert.equal(result.failureState.summary.store.totalCount, 1);
+  assert.equal(result.automatedAssertionsPassed, false); assert.doesNotMatch(JSON.stringify(result), /PRIVATE/);
+  const frozen = structuredClone(result);
+  await recordBriefingFailureState(new Error('must not replace'), result, 60100, options);
+  assert.equal(calls, 1); assert.deepEqual(result, frozen);
+});
+
+test('Comments failure state skips unowned/expired reads and masks failed or foreign fixture responses', async () => {
+  const original = new Error('original strict failure');
+  for (const [eligible, profile, deadline] of [[false, '/owned', 500], [true, '', 500], [true, '/owned', 100]]) {
+    const result = {};
+    await recordBriefingFailureState(original, result, deadline, { eligible, profile, env: ENV, now: () => 100, fetchImpl: noAction });
+    assert.equal(result.error, original.message); assert.equal(result.failureState.status, 'skipped'); assert.equal(result.failureState.attempts, 0);
+  }
+  for (const response of [{ ok: false, json: async () => ({ error: 'PRIVATE_HTTP_BODY' }) },
+    { ok: true, json: async () => ({ fixture: true, profile: '/foreign', briefingComments: { text: 'PRIVATE_BODY' } }) }]) {
+    const result = {}; let calls = 0, signal;
+    await recordBriefingFailureState(original, result, Date.now() + 1000, { eligible: true, profile: '/owned', env: ENV,
+      fetchImpl: async (_url, options) => { calls++; signal = options.signal; return response; } });
+    assert.equal(result.error, original.message); assert.equal(result.failureState.status, 'failed'); assert.equal(calls, 1);
+    assert.equal(signal.aborted, false); assert.equal(result.failureState.summary, undefined); assert.doesNotMatch(JSON.stringify(result), /PRIVATE|foreign/);
+  }
+});
+
+test('Comments failure state aborts hung HTTP/body within remaining budget and discards every late result', { timeout: 1000 }, async () => {
+  for (const stage of ['fetch', 'body']) {
+    let release, signal, calls = 0, bodyReads = 0;
+    const original = new Error('original pending recovery failure'), result = {}, startedAt = Date.now();
+    await recordBriefingFailureState(original, result, startedAt + 25, { eligible: true, profile: '/owned', env: ENV,
+      fetchImpl: async (_url, options) => {
+        calls++; signal = options.signal;
+        if (stage === 'fetch') return new Promise(resolve => { release = resolve; }); // Intentionally ignores abort to test late disposal.
+        return { ok: true, json: () => { bodyReads++; return new Promise(resolve => { release = resolve; }); } };
+      } });
+    assert.ok(Date.now() - startedAt < 200); assert.equal(signal.aborted, true); assert.equal(calls, 1);
+    assert.equal(result.error, original.message); assert.equal(result.failureState.status, 'failed'); assert.equal(result.failureState.summary, undefined);
+    const frozen = structuredClone(result);
+    release(stage === 'fetch' ? { ok: true, json: () => { bodyReads++; return { fixture: true, profile: '/owned' }; } }
+      : { fixture: true, profile: '/owned', briefingComments: {} });
+    await new Promise(resolve => setImmediate(resolve));
+    assert.deepEqual(result, frozen); assert.equal(calls, 1); assert.equal(bodyReads, stage === 'body' ? 1 : 0);
   }
 });
 
@@ -447,13 +508,21 @@ async function commentsModel({ transport = 'peer-close', wrongStoredText = false
     armedAt: armedOnly ? Date.now() : null, readCompletedAt: null, endReturnedAt: null,
     receivedAt: armedOnly ? null : Date.now(), committedAt: null, commentId: null, seq: null, storedHash: null,
     responseStatus: null, listed: [], releaseAttemptAt: null, releaseAttempts: 0, writeAttempted: false,
-    finishAt: null, closeAt: null, writableFinishedAtClose: null, terminalCause: null });
+    finishAt: null, closeAt: null, writableFinishedAtClose: null, terminalCause: null, responseFault: null });
+  const partialLoss = r => {
+    const at = Date.now(); r.writeAttempted = true; r.closeAt = at; r.writableFinishedAtClose = false;
+    r.responseFault = { mode: 'partial-json', expectedBodyBytes: 100, attemptedBodyBytes: 1,
+      headersFlushedAt: at, writeCompletedAt: at, cutAt: at };
+  };
   const productGet = lostParent => {
     const r = receipt('GET'); Object.assign(r, { responseStatus: 200, terminalCause: 'finished',
       listed: comments.map(row => ({ id: row.id, clientRequestId: wrongRecoveryUuid && comments.length === 2 ? commentId(999) : row.clientRequestId, seq: row.seq })) });
     r.readCompletedAt = Date.now();
-    if (lostParent) Object.assign(r, { terminalCause: 'recovery-get-response-lost', closeAt: Date.now(), writableFinishedAtClose: false, recoveryOf: {
-      holdId: lostParent.holdId, requestId: lostParent.requestId, clientRequestId: lostParent.clientRequestId } });
+    if (lostParent) {
+      partialLoss(r);
+      Object.assign(r, { terminalCause: 'recovery-get-response-lost', recoveryOf: {
+        holdId: lostParent.holdId, requestId: lostParent.requestId, clientRequestId: lostParent.clientRequestId } });
+    }
     else {
       r.writeAttempted = true; r.endReturnedAt = Date.now(); r.finishAt = Date.now();
       for (const row of comments) shownIds.add(row.id); listState = 'ready';
@@ -536,7 +605,7 @@ async function commentsModel({ transport = 'peer-close', wrongStoredText = false
       comments.push(row); Object.assign(r, { committedAt: Date.now(), commentId: row.id, seq: row.seq, storedHash: row.storedHash, responseStatus: 201 });
       if (armed?.mode === 'hold') { pending = r; status = 'saving'; }
       else if (armed?.mode === 'committed-response-lost') {
-        r.terminalCause = 'committed-response-lost'; r.closeAt = Date.now(); r.writableFinishedAtClose = false;
+        r.terminalCause = 'committed-response-lost'; partialLoss(r);
         productGet(armed.recoveryGetResponseLostOnce ? r : null);
         status = armed.recoveryGetResponseLostOnce ? 'unknown' : 'saved';
         if (armed.recoveryGetResponseLostOnce) { listState = 'failed'; originalText = text; }

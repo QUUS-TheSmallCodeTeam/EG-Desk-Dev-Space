@@ -11,7 +11,7 @@ import { assertPublishedBriefing, assertContextSendBindings, assertFrozenFileRea
   assertStoredAgentDelivery, captureContextReadEvidence, fingerprintQaBytes, observeQaFixtureFile,
   assertContextSourceChangePanel, assertContextSourceChangeScope, assertContextSourceRequest,
   classifyContextSourceTerminal, assertBriefingCommentDraft, assertBriefingCommentStore,
-  assertBriefingCommentReceipt, assertBriefingCommentGetDelta, summarizeBriefingCommentGetDelta,
+  assertBriefingCommentReceipt, assertBriefingCommentGetDelta, summarizeBriefingCommentGetDelta, summarizeBriefingFailureState,
   assertBriefingPanelExpected, assertBriefingPanelInvariant, planBriefingPanelWheel } from './egdesk-context-qa-contract.mjs';
 import { attributeSelector, chrome, loopbackJson, newQaThread, runUiFlow,
   selectQaThread, selectorForId, sendFromComposer, visible, waitUntil, replaceFieldText } from './egdesk-qa-ui-flow.mjs';
@@ -138,21 +138,24 @@ export async function waitContextBeforeDeadline(read, accept, deadlineMs,
 }
 
 export async function contextQaJson(route, deadlineMs,
-  { method = 'GET', body, env = process.env, now = Date.now, fetchImpl = fetch, includeHttpStatus = false } = {}) {
+  { method = 'GET', body, env = process.env, now = Date.now, fetchImpl = fetch, includeHttpStatus = false, signal } = {}) {
   assertContextQaEnvironment(env); assertBeforeDeadline(deadlineMs, now());
   const controller = new AbortController(), end = Math.min(deadlineMs, now() + 5000);
+  const abort = () => controller.abort(signal.reason);
+  if (signal?.aborted) abort(); else signal?.addEventListener('abort', abort, { once: true });
   const timer = setTimeout(() => controller.abort(new Error('Context HTTP deadline reached')), end - now());
   try {
+    controller.signal.throwIfAborted();
     const response = await fetchImpl(qaBridgeUrl(route, env), { method, redirect: 'error', signal: controller.signal,
       headers: { 'X-EGDESK-QA-Token': env.EGDESK_QA_FIXTURE_TOKEN, ...(body ? { 'Content-Type': 'application/json' } : {}) },
       ...(body ? { body: JSON.stringify(body) } : {}) });
-    assertBeforeDeadline(end, now());
+    controller.signal.throwIfAborted(); assertBeforeDeadline(end, now());
     const value = await readContextBeforeDeadline(() => response.json(), end, { now, timeoutMs: 5000 });
-    assertBeforeDeadline(end, now());
+    controller.signal.throwIfAborted(); assertBeforeDeadline(end, now());
     if (includeHttpStatus) return { httpStatus: response.status, body: value };
     assert.ok(response.ok, `${route.split('?')[0]} failed (${response.status}): ${value.code || value.error || 'request failed'}`);
     return value;
-  } finally { clearTimeout(timer); }
+  } finally { clearTimeout(timer); signal?.removeEventListener('abort', abort); }
 }
 
 export function guardContextHarness(harness, deadlineMs, { now = Date.now, diagnostics } = {}) {
@@ -526,6 +529,36 @@ export async function verifyContextSourceChange({ harness, deadlineMs, initial, 
   assert.deepEqual(runtime(final), runtime(initial), 'Metadata inspection created a capture, file read, send or delivery');
   check('source-change UI inspection created no capture/send/provider delivery', true);
   result.runtime = runtime(final);
+}
+
+export async function recordBriefingFailureState(error, result, deadlineMs,
+  { eligible = false, profile, env = process.env, now = Date.now, fetchImpl = fetch } = {}) {
+  if (result.failureState) return; // Exactly one attempt; no retry after failure.
+  result.error = shortError(error); result.errorStack = shortStack(error);
+  const startedAt = now(), end = Math.min(deadlineMs, startedAt + 750);
+  const record = result.failureState = { status: 'skipped', startedAt, deadlineMs: end, attempts: 0 };
+  if (!eligible || typeof profile !== 'string' || !profile || startedAt >= end) {
+    record.reason = startedAt >= end ? 'No deadline budget' : 'Owned headless fixture not verified';
+    return;
+  }
+  const controller = new AbortController(); record.status = 'pending';
+  try {
+    const value = await readContextBeforeDeadline(() => {
+      record.attempts++;
+      return contextQaJson('/__qa/state', end, { env, now, fetchImpl, signal: controller.signal });
+    }, end, { now, timeoutMs: 750 });
+    assert.ok(value?.fixture === true && value.profile === profile, 'Failure diagnostic fixture ownership mismatch');
+    const summary = summarizeBriefingFailureState(value);
+    assertBeforeDeadline(end, now());
+    record.summary = summary; record.status = 'captured';
+  } catch {
+    record.status = 'failed';
+    record.reason = now() >= end ? 'Failure state deadline reached' : 'Failure state unavailable or unverified';
+    // Do not expose an HTTP error body or overwrite the original error/stack.
+  } finally {
+    controller.abort(); // Also abort HTTP when the independent read bound wins.
+    record.finishedAt = now();
+  }
 }
 
 export async function recordContextFailure(harness, error, result, deadlineMs,
@@ -1017,7 +1050,7 @@ export async function verifyBriefingComments({ harness, deadlineMs, initial, req
   shown = await ui(value => value.status === 'saved' && value.listState === 'ready', 'comment-auto-get-recovered');
   const lost = await commit(shown.clientRequestId, lostText, 2, 'committed-response-lost');
   assert.equal(lost.receipt.holdId, lostArm.holdId); assert.equal(lost.receipt.terminalCause, 'committed-response-lost');
-  assert.equal(lost.receipt.writeAttempted, false); assert.equal(lost.receipt.finishAt, null);
+  assert.equal(lost.receipt.writeAttempted, true); assert.equal(lost.receipt.finishAt, null);
   const recoveryBefore = structuredClone(getCheckpoint);
   const recoveredState = await afterGets('automatic-GET-recovery', 1, a, { parent: lost.receipt });
   const [recovered] = assertBriefingCommentGetDelta(recoveryBefore, receipts(recoveredState),
@@ -1087,7 +1120,7 @@ export async function verifyBriefingComments({ harness, deadlineMs, initial, req
   shown = await ui(value => value.status === 'unknown' && value.listState === 'failed', 'comment-recovery-get-lost');
   const uncertain = await commit(shown.clientRequestId, originalText, 4, 'committed-response-lost');
   assert.equal(uncertain.receipt.holdId, retryArm.holdId); assert.equal(uncertain.receipt.terminalCause, 'committed-response-lost');
-  assert.equal(uncertain.receipt.writeAttempted, false); assert.equal(uncertain.receipt.finishAt, null);
+  assert.equal(uncertain.receipt.writeAttempted, true); assert.equal(uncertain.receipt.finishAt, null);
   const failedBefore = structuredClone(getCheckpoint);
   const failedState = await afterGets('lost-recovery-GET', 1, a, { terminal: 'recovery-get-response-lost', parent: uncertain.receipt });
   const [failedGet] = assertBriefingCommentGetDelta(failedBefore, receipts(failedState), { count: 1, route: briefingRoute(a),
@@ -1095,7 +1128,7 @@ export async function verifyBriefingComments({ harness, deadlineMs, initial, req
   assert.deepEqual(failedGet.recoveryOf, { holdId: retryArm.holdId, requestId: uncertain.receipt.requestId,
     clientRequestId: uncertain.stored.clientRequestId });
   assert.equal(failedGet.terminalCause, 'recovery-get-response-lost'); assert.equal(failedGet.responseStatus, 200);
-  assert.equal(failedGet.writeAttempted, false); assert.equal(failedGet.finishAt, null);
+  assert.equal(failedGet.writeAttempted, true); assert.equal(failedGet.finishAt, null);
   assert.ok(failedGet.receivedAt >= uncertain.receipt.committedAt && failedGet.readCompletedAt >= failedGet.receivedAt);
   assert.deepEqual(failedGet.listed.filter(row => row.clientRequestId === uncertain.stored.clientRequestId),
     [{ id: uncertain.stored.id, clientRequestId: uncertain.stored.clientRequestId, seq: uncertain.stored.seq }]);
@@ -1174,7 +1207,10 @@ export async function runBriefingComments(options,
       async capture(name) { assertBeforeDeadline(deadlineMs); const file = await harness.screenshot(name, { allowHeadlessChromeFallback: true, deadlineMs });
         assertBeforeDeadline(deadlineMs); result.screenshots.push(file); } });
     assertBeforeDeadline(deadlineMs); result.automatedAssertionsPassed = true;
-  } catch (error) { await recordContextFailure(harness, error, result, deadlineMs, { eligible, screenshotName: 'comments-failure' }); }
+  } catch (error) {
+    await recordBriefingFailureState(error, result, deadlineMs, { eligible, profile, env });
+    await recordContextFailure(harness, error, result, deadlineMs, { eligible, screenshotName: 'comments-failure' });
+  }
   finally {
     try { await harness?.close(); } catch (error) { result.cleanupError = shortError(error); result.automatedAssertionsPassed = false; }
     if (harness?.evidenceDir) { result.evidenceFile = path.join(harness.evidenceDir, 'result.json');

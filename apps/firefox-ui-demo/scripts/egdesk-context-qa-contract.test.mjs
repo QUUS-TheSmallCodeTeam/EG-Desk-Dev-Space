@@ -8,7 +8,7 @@ import { assertBriefingTargets, assertContextCaptureBatch, assertContextEventIde
   assertContextSourceChangeScope, contextSourceChangeResponse, assertContextSourceChangePanel,
   assertContextSourceRequest, classifyContextSourceTerminal, assertBriefingCommentList,
   assertBriefingCommentSaved, assertBriefingCommentDraft, assertBriefingCommentStore,
-  assertBriefingCommentReceipt, assertBriefingCommentGetDelta, summarizeBriefingCommentGetDelta,
+  assertBriefingCommentReceipt, assertBriefingCommentGetDelta, summarizeBriefingCommentGetDelta, summarizeBriefingFailureState,
   assertBriefingPanelInvariant, planBriefingPanelWheel } from './egdesk-context-qa-contract.mjs';
 import { bootstrapQaProfile, canonicalTempRoot, LOADER_FILES } from './egdesk-chat-qa-profile.mjs';
 
@@ -485,7 +485,7 @@ function commentTransportFixture() {
     R: route, account: 'a', epoch: 3, holdId: null, armedAt: null, receivedAt: 10, committedAt: 12,
     commentId: f.saved.id, readCompletedAt: null, responseStatus: 201, writeAttempted: true, endReturnedAt: 14,
     finishAt: 15, closeAt: 16, writableFinishedAtClose: true, releaseAttempts: 0, releaseAttemptAt: null,
-    terminalCause: 'finished', listed: [] };
+    terminalCause: 'finished', responseFault: null, listed: [] };
   const get = { ...post, method: 'GET', requestId: f.uuid(12), clientRequestId: null, commentId: null,
     receivedAt: 20, committedAt: null, readCompletedAt: 22, responseStatus: 200,
     endReturnedAt: 24, finishAt: 25, closeAt: 26, listed: [{ id: f.saved.id, clientRequestId: f.request.clientRequestId, seq: 1 }] };
@@ -496,13 +496,30 @@ test('Comment terminal oracle validates finished, lost and legitimate no-finish 
   const { uuid, post, get, expected } = commentTransportFixture();
   for (const row of [post, get]) assert.doesNotThrow(() => assertBriefingCommentReceipt(row, { ...expected, terminal: 'finished' }));
   const lost = { ...post, holdId: uuid(20), armedAt: 5, endReturnedAt: null, finishAt: null,
-    writeAttempted: false, writableFinishedAtClose: false, terminalCause: 'committed-response-lost' };
+    writeAttempted: true, writableFinishedAtClose: false, terminalCause: 'committed-response-lost',
+    responseFault: { mode: 'partial-json', expectedBodyBytes: 100, attemptedBodyBytes: 1,
+      headersFlushedAt: 13, writeCompletedAt: 14, cutAt: 15 } };
   assert.doesNotThrow(() => assertBriefingCommentReceipt(lost, { ...expected, terminal: 'committed-response-lost' }));
-  const cancelled = { ...lost, terminalCause: 'peer-close-before-finish', releaseAttempts: 1, releaseAttemptAt: 30 };
+  const cancelled = { ...lost, terminalCause: 'peer-close-before-finish', releaseAttempts: 1, releaseAttemptAt: 30,
+    responseFault: null, writeAttempted: false };
   assert.doesNotThrow(() => assertBriefingCommentReceipt(cancelled, { ...expected, terminal: 'peer-close-before-finish' }));
-  const lostGet = { ...get, endReturnedAt: null, finishAt: null, writeAttempted: false,
-    writableFinishedAtClose: false, terminalCause: 'recovery-get-response-lost' };
+  const lostGet = { ...get, endReturnedAt: null, finishAt: null, writeAttempted: true,
+    writableFinishedAtClose: false, terminalCause: 'recovery-get-response-lost',
+    responseFault: { ...lost.responseFault, headersFlushedAt: 23, writeCompletedAt: 24, cutAt: 25 } };
   assert.doesNotThrow(() => assertBriefingCommentReceipt(lostGet, { ...expected, terminal: 'recovery-get-response-lost' }));
+  for (const original of [lost, lostGet]) for (const mutate of [
+    r => { r.responseFault = null; }, r => { r.writeAttempted = false; }, r => { r.endReturnedAt = r.closeAt; },
+    r => { r.finishAt = r.closeAt; }, r => { r.closeAt = null; }, r => { r.writableFinishedAtClose = true; },
+    r => { r.responseFault.mode = 'pre-header'; }, r => { r.responseFault.attemptedBodyBytes = 0; },
+    r => { r.responseFault.attemptedBodyBytes = 2; }, r => { r.responseFault.expectedBodyBytes = 1; },
+    r => { r.responseFault.headersFlushedAt = (r.committedAt ?? r.readCompletedAt) - 1; },
+    r => { r.responseFault.writeCompletedAt = r.responseFault.headersFlushedAt - 1; },
+    r => { r.responseFault.cutAt = r.responseFault.writeCompletedAt - 1; }, r => { r.responseFault.cutAt = null; },
+    r => { r.closeAt = r.responseFault.cutAt - 1; }, r => { r.terminalCause = 'write-error'; },
+  ]) {
+    const bad = structuredClone(original); mutate(bad); assert.throws(() => assertBriefingCommentReceipt(bad, expected));
+  }
+  assert.throws(() => assertBriefingCommentReceipt({ ...post, responseFault: lost.responseFault }, expected));
   for (const patch of [{ epoch: 9 }, { finishAt: null }, { finishAt: 19 }, { endReturnedAt: 21 },
     { writeAttempted: false }, { closeAt: 23 }, { writableFinishedAtClose: false }, { readCompletedAt: null }]) {
     assert.throws(() => assertBriefingCommentReceipt({ ...get, ...patch }, { ...expected, terminal: 'finished' }));
@@ -547,6 +564,41 @@ test('Comment GET diagnostics preserve actual delta/scope/timing, cap eight rows
     R: { ...get.R, conversationId: 'x'.repeat(1024) } }], { action: 'test', expected: 1 });
   assert.equal(malformed.delta, 1); assert.equal(malformed.receipts[0].malformedIdentityOrReceiveTime, true);
   assert.equal(malformed.receipts[0].R.conversationId.length, 256); assert.equal(malformed.receipts[0].stringsTruncated, true);
+});
+
+test('Comments failure state caps eight latest receipts and eight store rows without hiding total counts or retaining bodies/auth', () => {
+  const { post } = commentTransportFixture();
+  const receipts = Array.from({ length: 10 }, (_, i) => ({ ...post, requestId: `req-${i}`, method: i % 2 ? 'GET' : 'POST',
+    R: { ...post.R, conversationId: 'c'.repeat(300), auth: 'PRIVATE_AUTH' }, account: 'PRIVATE_ACCOUNT',
+    responseFault: { mode: 'partial-json', expectedBodyBytes: 100, attemptedBodyBytes: 1,
+      headersFlushedAt: 12, writeCompletedAt: 13, cutAt: 14, raw: 'PRIVATE_BODY', payload: 'PRIVATE_PAYLOAD', token: 'PRIVATE_TOKEN' },
+    body: 'PRIVATE_BODY', payload: 'PRIVATE_PAYLOAD', listed: [{ text: 'PRIVATE_LIST' }] }));
+  receipts.push({ ...post, receivedAt: null, requestId: null, terminalCause: null });
+  receipts.push({ method: 'POST', receivedAt: undefined, token: 'PRIVATE_TOKEN' });
+  const briefings = [5, 6, 2].map((count, index) => ({ briefingId: `briefing-${index}`, conversationId: `native-${index}`,
+    account: 'PRIVATE_ACCOUNT', count, truncated: false, comments: Array.from({ length: count }, (_, i) => ({
+      id: `comment-${index}-${i}`, clientRequestId: `uuid-${index}-${i}`, seq: i + 1,
+      storedHash: 'a'.repeat(64), textHash: 'b'.repeat(64), text: 'PRIVATE_TEXT', payload: 'PRIVATE_PAYLOAD',
+    })) }));
+  const summary = summarizeBriefingFailureState({ auth: 'PRIVATE_AUTH', briefingComments: { receipts,
+    storeInspection: { kind: 'qa-read-only-store', readAt: 100, briefings } } });
+  assert.deepEqual([summary.receiptCount, summary.receipts.length, summary.receiptsDropped, summary.receivedGET,
+    summary.receivedPOST, summary.receivedOther, summary.armedCount], [12, 8, 4, 5, 6, 0, 1]);
+  assert.equal(summary.receipts[0].requestId, 'req-4'); assert.equal(summary.receipts[0].R.conversationId.length, 256);
+  assert.deepEqual(summary.receipts[0].responseFault, { mode: 'partial-json', expectedBodyBytes: 100, attemptedBodyBytes: 1,
+    headersFlushedAt: 12, writeCompletedAt: 13, cutAt: 14 });
+  assert.equal(summary.receipts.at(-2).receivedAt, null); assert.equal(summary.receipts.at(-2).malformedIdentityOrReceiveTime, false);
+  assert.equal(summary.receipts.at(-1).malformedIdentityOrReceiveTime, true);
+  assert.deepEqual([summary.store.totalCount, summary.store.returnedRows, summary.store.rowsDropped,
+    summary.store.briefingCount, summary.store.briefingsDropped], [13, 13, 5, 3, 1]);
+  assert.deepEqual(summary.store.briefings.map(row => [row.comments.length, row.count, row.dropped]), [[5, 5, 0], [3, 6, 3]]);
+  assert.equal(summary.store.briefings[1].comments[0].id, 'comment-1-3');
+  assert.equal(summary.store.briefings[0].comments[0].storedHash, 'a'.repeat(64));
+  assert.equal(summary.store.briefings[0].comments[0].textHash, 'b'.repeat(64));
+  assert.equal(Object.isFrozen(summary), true); assert.doesNotMatch(JSON.stringify(summary), /PRIVATE/);
+  assert.equal(summarizeBriefingFailureState({}).receiptCount, null);
+  assert.equal(summarizeBriefingFailureState({ briefingComments: { receipts: [],
+    storeInspection: { kind: 'qa-read-only-store', briefings: [] } } }).store.totalCount, 0);
 });
 
 test('Briefing wheel planner only scrolls the observed panel toward a clipped target with a nine-hit native point', () => {

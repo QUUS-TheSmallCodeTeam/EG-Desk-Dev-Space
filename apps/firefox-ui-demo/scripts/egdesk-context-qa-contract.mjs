@@ -523,7 +523,7 @@ export function assertBriefingCommentReceipt(receipt, { account, epoch, route, t
     assert.equal(receipt.method, 'POST'); assert.match(receipt.holdId, COMMENT_UUID); at('armedAt');
     empty(['requestId', 'committedAt', 'commentId', 'responseStatus', 'readCompletedAt', 'endReturnedAt', 'finishAt', 'closeAt', 'releaseAttemptAt', 'terminalCause']);
     assert.equal(receipt.writeAttempted, false); assert.equal(receipt.releaseAttempts, 0);
-    assert.equal(receipt.writableFinishedAtClose, null); return receipt;
+    assert.equal(receipt.writableFinishedAtClose, null); assert.equal(receipt.responseFault, null); return receipt;
   }
   assert.match(receipt.requestId, COMMENT_UUID); const received = at('receivedAt');
   if (receipt.armedAt !== null) { at('armedAt'); assert.ok(receipt.armedAt <= received); assert.match(receipt.holdId, COMMENT_UUID); }
@@ -548,6 +548,7 @@ export function assertBriefingCommentReceipt(receipt, { account, epoch, route, t
     empty(['finishAt', 'closeAt']); return receipt; // In-flight or held, never final proof.
   }
   if (receipt.terminalCause === 'finished') {
+    assert.equal(receipt.responseFault, null, 'Normal response cannot carry a partial-response fault');
     assert.equal(receipt.writeAttempted, true); at('endReturnedAt', completed); at('finishAt', receipt.endReturnedAt);
     assert.ok(Number.isSafeInteger(receipt.responseStatus) && receipt.responseStatus >= 200 && receipt.responseStatus <= 599);
     if (receipt.closeAt !== null) assert.equal(receipt.writableFinishedAtClose, true);
@@ -556,8 +557,24 @@ export function assertBriefingCommentReceipt(receipt, { account, epoch, route, t
   } else {
     assert.ok(['committed-response-lost', 'recovery-get-response-lost', 'peer-close-before-finish'].includes(receipt.terminalCause),
       'Unexpected destroyed comment response');
-    assert.equal(receipt.writeAttempted, false); empty(['endReturnedAt', 'finishAt']);
+    empty(['endReturnedAt', 'finishAt']);
     at('closeAt', completed); assert.equal(receipt.writableFinishedAtClose, false);
+    if (receipt.terminalCause === 'peer-close-before-finish') {
+      assert.equal(receipt.writeAttempted, false); // Existing held-request cancellation boundary.
+    } else {
+      assert.equal(receipt.writeAttempted, true, 'Loss proof requires an attempted incomplete response, not a pre-header disconnect');
+      const fault = receipt.responseFault; record(fault, 'Comment partial-response fault');
+      assert.equal(fault.mode, 'partial-json');
+      assert.equal(fault.attemptedBodyBytes, 1);
+      assert.ok(Number.isSafeInteger(fault.expectedBodyBytes) && fault.expectedBodyBytes > fault.attemptedBodyBytes,
+        'Loss proof must cut before the declared full response body');
+      let previous = completed;
+      for (const key of ['headersFlushedAt', 'writeCompletedAt', 'cutAt']) {
+        assert.ok(Number.isSafeInteger(fault[key]) && fault[key] >= previous, `Invalid/nonmonotonic response fault ${key}`);
+        previous = fault[key];
+      }
+      assert.ok(receipt.closeAt >= previous, 'Response close preceded its deliberate partial-body cut');
+    }
     if (receipt.terminalCause === 'recovery-get-response-lost') {
       assert.equal(receipt.method, 'GET'); assert.equal(receipt.responseStatus, 200); at('readCompletedAt', received);
     } else {
@@ -603,6 +620,13 @@ export function assertBriefingCommentGetDelta(before, after, { count, route, acc
 
 // Diagnostic projection only: no assertion, IO, body/list/payload or authority
 // fields. Keep malformed GET candidates visible rather than success-filtering.
+function summarizeBriefingResponseFault(fault) {
+  if (fault == null) return null;
+  return { mode: typeof fault.mode === 'string' ? fault.mode.slice(0, 32) : null,
+    ...Object.fromEntries(['expectedBodyBytes', 'attemptedBodyBytes', 'headersFlushedAt', 'writeCompletedAt', 'cutAt']
+      .map(key => [key, Number.isFinite(fault[key]) ? fault[key] : null])) };
+}
+
 export function summarizeBriefingCommentGetDelta(before, after, { action, expected } = {}) {
   const prior = Array.isArray(before) ? before : [], current = Array.isArray(after) ? after : [];
   const get = rows => rows.filter(row => row?.method === 'GET' && row.receivedAt !== null);
@@ -616,6 +640,7 @@ export function summarizeBriefingCommentGetDelta(before, after, { action, expect
       R: Object.fromEntries(['engineId', 'engineProfileId', 'clientThreadId', 'conversationId', 'briefingId']
         .map(key => [key, string(row.R?.[key])])), epoch: number(row.epoch), responseStatus: number(row.responseStatus),
       terminalCause: string(row.terminalCause),
+      responseFault: summarizeBriefingResponseFault(row.responseFault),
       ...Object.fromEntries(['receivedAt', 'readCompletedAt', 'committedAt', 'releaseAttemptAt', 'endReturnedAt', 'finishAt', 'closeAt']
         .map(key => [key, number(row[key])])),
       writeAttempted: typeof row.writeAttempted === 'boolean' ? row.writeAttempted : null,
@@ -624,6 +649,51 @@ export function summarizeBriefingCommentGetDelta(before, after, { action, expect
       stringsTruncated: [row.requestId, row.terminalCause, ...['engineId', 'engineProfileId', 'clientThreadId', 'conversationId', 'briefingId']
         .map(key => row.R?.[key])].some(value => typeof value === 'string' && value.length > 256),
     })), omitted: Math.max(0, delta.length - 8) });
+}
+
+export function summarizeBriefingFailureState(state) {
+  const value = state?.briefingComments, all = Array.isArray(value?.receipts) ? value.receipts : [];
+  const string = v => typeof v === 'string' ? v.slice(0, 256) : null;
+  const number = v => Number.isFinite(v) ? v : null;
+  const hash = v => typeof v === 'string' && /^[0-9a-f]{64}$/i.test(v) ? v : null;
+  const received = all.filter(row => row?.receivedAt !== null);
+  // Keep all receipt kinds, including armed and malformed rows. This is only
+  // a bounded diagnostic projection, never a replacement for receipt proofs.
+  const receipts = all.slice(-8).map(row => ({
+    responseFault: summarizeBriefingResponseFault(row?.responseFault),
+    ...Object.fromEntries(['kind', 'method', 'requestId', 'holdId', 'clientRequestId', 'commentId', 'terminalCause']
+      .map(key => [key, string(row?.[key])])),
+    R: Object.fromEntries(['engineId', 'engineProfileId', 'clientThreadId', 'conversationId', 'briefingId']
+      .map(key => [key, string(row?.R?.[key])])),
+    ...Object.fromEntries(['epoch', 'seq', 'responseStatus', 'armedAt', 'receivedAt', 'readCompletedAt', 'committedAt',
+      'releaseAttemptAt', 'endReturnedAt', 'finishAt', 'closeAt'].map(key => [key, number(row?.[key])])),
+    writeAttempted: typeof row?.writeAttempted === 'boolean' ? row.writeAttempted : null,
+    writableFinishedAtClose: typeof row?.writableFinishedAtClose === 'boolean' ? row.writableFinishedAtClose : null,
+    malformedIdentityOrReceiveTime: row?.receivedAt !== null
+      && (typeof row?.requestId !== 'string' || !Number.isFinite(row?.receivedAt)),
+  }));
+  const inspection = value?.storeInspection, allBriefings = Array.isArray(inspection?.briefings) ? inspection.briefings : [];
+  let remaining = 8;
+  const briefings = allBriefings.slice(0, 2).map(row => {
+    const allComments = Array.isArray(row?.comments) ? row.comments : [], selected = remaining ? allComments.slice(-remaining) : [];
+    remaining -= selected.length;
+    return { briefingId: string(row?.briefingId), conversationId: string(row?.conversationId), count: number(row?.count),
+      truncated: typeof row?.truncated === 'boolean' ? row.truncated : null,
+      returnedRows: allComments.length, dropped: allComments.length - selected.length,
+      comments: selected.map(comment => ({ id: string(comment?.id), clientRequestId: string(comment?.clientRequestId),
+        seq: number(comment?.seq), storedHash: hash(comment?.storedHash), textHash: hash(comment?.textHash) })) };
+  });
+  const returnedRows = allBriefings.reduce((sum, row) => sum + (Array.isArray(row?.comments) ? row.comments.length : 0), 0);
+  return frozenCopy({ version: 1, receiptsAvailable: Array.isArray(value?.receipts),
+    receiptCount: Array.isArray(value?.receipts) ? all.length : null,
+    receivedGET: received.filter(row => row?.method === 'GET').length, receivedPOST: received.filter(row => row?.method === 'POST').length,
+    receivedOther: received.filter(row => !['GET', 'POST'].includes(row?.method)).length,
+    armedCount: all.filter(row => row?.receivedAt === null).length, receipts, receiptsDropped: Math.max(0, all.length - 8),
+    store: { available: inspection?.kind === 'qa-read-only-store' && Array.isArray(inspection.briefings),
+      readAt: number(inspection?.readAt), briefingCount: Array.isArray(inspection?.briefings) ? allBriefings.length : null,
+      totalCount: Array.isArray(inspection?.briefings) && allBriefings.every(row => Number.isFinite(row?.count))
+        ? allBriefings.reduce((sum, row) => sum + row.count, 0) : null,
+      returnedRows, rowsDropped: returnedRows - (8 - remaining), briefingsDropped: Math.max(0, allBriefings.length - 2), briefings } });
 }
 
 export function assertBriefingPanelExpected(value, { owner, route, stepId }) {

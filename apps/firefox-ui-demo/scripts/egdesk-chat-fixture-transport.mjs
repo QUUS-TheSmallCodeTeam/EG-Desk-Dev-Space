@@ -341,12 +341,13 @@ function newCommentEntry(route, options = {}) {
     armedAt: options.holdId ? Date.now() : null, receivedAt: null, committedAt: null, commentId: null, seq: null,
     storedHash: null, responseStatus: null, responseHash: null, listed: [], readCompletedAt: null,
     releaseAttemptAt: null, releaseAttempts: 0, writeAttempted: false, endReturnedAt: null,
-    finishAt: null, closeAt: null, writableFinishedAtClose: null, terminalCause: null };
+    finishAt: null, closeAt: null, writableFinishedAtClose: null, terminalCause: null, responseFault: null };
   commentReceipts.push(receipt);
   return { route, key: commentKey(route), receipt, ...options };
 }
 function forgetComment(entry) {
   clearTimeout(entry.timer);
+  clearTimeout(entry.faultTimer);
   if (commentArms.get(entry.key) === entry) commentArms.delete(entry.key);
   commentPending.delete(entry);
   if (entry.recovery) entry.recovery.receipt.terminalCause ??= entry.receipt.terminalCause;
@@ -380,6 +381,40 @@ function writeComment(entry) {
     entry.res.writeHead(entry.receipt.responseStatus, { ...entry.headers, 'Access-Control-Allow-Origin': '*' });
     entry.res.end(entry.raw); entry.receipt.endReturnedAt = Date.now(); return true;
   } catch { cancelComment(entry, 'write-error'); return false; }
+}
+function truncateCommentResponse(entry, cause) {
+  if (entry.receipt.terminalCause !== null) return;
+  if (!entry.res || entry.res.destroyed || entry.res.writableEnded) { cancelComment(entry, 'peer-close-before-finish'); return; }
+  try {
+    const current = codexContextRouting(entry.route, { requireConversation: true });
+    if (current.owner !== entry.route.owner || current.epoch !== entry.route.epoch) throw new Error('Account changed');
+  } catch { cancelComment(entry, 'account-change'); return; }
+  // A pre-header reset can be transparently replayed by an HTTP client. Start
+  // a real response, but never deliver a complete JSON receipt or call end().
+  // These are server-write observations, not proof of a browser callback.
+  const fault = entry.receipt.responseFault = { mode: 'partial-json',
+    expectedBodyBytes: Buffer.byteLength(entry.raw), attemptedBodyBytes: 0,
+    headersFlushedAt: null, writeCompletedAt: null, cutAt: null };
+  const headers = Object.fromEntries(Object.entries(entry.headers || {})
+    .filter(([key]) => !['content-length', 'transfer-encoding', 'connection'].includes(key.toLowerCase())));
+  clearTimeout(entry.timer);
+  entry.receipt.writeAttempted = true;
+  entry.faultTimer = setTimeout(() => cancelComment(entry, 'write-error'), 250);
+  try {
+    entry.res.writeHead(entry.receipt.responseStatus, { ...headers, 'Access-Control-Allow-Origin': '*',
+      'Content-Length': String(fault.expectedBodyBytes), Connection: 'close' });
+    entry.res.flushHeaders(); fault.headersFlushedAt = Date.now();
+    fault.attemptedBodyBytes = 1;
+    entry.res.write('{', error => {
+      if (entry.receipt.terminalCause !== null) return;
+      if (error) { cancelComment(entry, 'write-error'); return; }
+      fault.writeCompletedAt = Date.now();
+      clearTimeout(entry.faultTimer);
+      entry.faultTimer = setTimeout(() => {
+        fault.cutAt = Date.now(); cancelComment(entry, cause);
+      }, 25);
+    });
+  } catch { cancelComment(entry, 'write-error'); }
 }
 function clearCommentRecovery(recovery, cause) {
   clearTimeout(recovery.timer);
@@ -507,11 +542,11 @@ async function handleCommentRequest(req, res, url, briefingId) {
     entry.receipt.listed = value.comments.map(({ id, clientRequestId, seq }) => ({ id, clientRequestId, seq }));
   }
   if (entry.receipt.terminalCause) return;
-  if (entry.recovery) { cancelComment(entry, 'recovery-get-response-lost'); return; }
+  if (entry.recovery) { truncateCommentResponse(entry, 'recovery-get-response-lost'); return; }
   if (claims && entry.receipt.committedAt !== null) {
     if (entry.mode === 'committed-response-lost') {
       if (entry.recoveryGetResponseLostOnce) armCommentRecovery(entry);
-      cancelComment(entry, 'committed-response-lost');
+      truncateCommentResponse(entry, 'committed-response-lost');
     }
     // A held response retains the original body across a UI room switch.
     return;

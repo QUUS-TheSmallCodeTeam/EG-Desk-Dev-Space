@@ -8,6 +8,7 @@ import test from 'node:test';
 import vm from 'node:vm';
 import net from 'node:net';
 import http from 'node:http';
+import * as BriefingState from '../overlay/resources/EGDeskBriefingState.sys.mjs';
 import { bootstrapQaProfile, canonicalTempRoot, LOADER_FILES } from './egdesk-chat-qa-profile.mjs';
 import { createQaFixtureTransport, CLAUDE_FIXTURE_QUESTIONS, CLAUDE_FIXTURE_TEXT } from './egdesk-chat-fixture-transport.mjs';
 import { chatRunOutputFixtureIds, CHAT_RUN_OUTPUT_MARKER, CHAT_RUN_DIFF_MARKER } from './egdesk-chat-run-outputs-fixture.mjs';
@@ -70,7 +71,8 @@ async function request(handler, method, url, body = null, token = null, onRespon
       if (!this.deferFinish) { this.writableFinished = true; this.emit('finish'); }
       if (!this.deferClose) this.emit('close'); },
     destroy() { this.destroyed = true; this.emit('close'); resolve({ status: 0, body: null }); },
-    write() { return true; },
+    flushHeaders() { this.headersSent = true; },
+    write(value, callback) { callback?.(); return true; },
   });
   onResponse(res);
   await handler(req, res);
@@ -112,6 +114,19 @@ async function waitCommentReceipt(fixture, predicate) {
     await new Promise(resolve => setTimeout(resolve, 2));
   } while (Date.now() < deadline);
   assert.fail('Expected bounded comment receipt did not arrive');
+}
+
+function assertPartialCommentResponse(receipt, completedAt) {
+  assert.equal(receipt.writeAttempted, true);
+  assert.equal(receipt.endReturnedAt, null); assert.equal(receipt.finishAt, null);
+  assert.equal(receipt.writableFinishedAtClose, false);
+  const fault = receipt.responseFault;
+  assert.equal(fault.mode, 'partial-json'); assert.equal(fault.attemptedBodyBytes, 1);
+  assert.ok(fault.expectedBodyBytes > fault.attemptedBodyBytes);
+  assert.ok(fault.headersFlushedAt >= completedAt);
+  assert.ok(fault.writeCompletedAt >= fault.headersFlushedAt);
+  assert.ok(fault.cutAt >= fault.writeCompletedAt);
+  assert.ok(receipt.closeAt >= fault.cutAt);
 }
 
 async function setupOriginMount(t) {
@@ -2325,6 +2340,7 @@ test('Briefing comments next-POST hold binds once to exact room/Briefing and pre
   const receipt = await waitCommentReceipt(f, row => row.holdId === armed.body.holdId && row.committedAt !== null);
   assert.equal(receipt.clientRequestId, bodyA.clientRequestId); assert.match(receipt.requestId, /^[0-9a-f-]{36}$/);
   assert.deepEqual(receipt.R, commentR(a)); assert.equal(receipt.account, 'a'); assert.equal(receipt.writeAttempted, false);
+  assert.equal(receipt.responseFault, null);
   assert.equal(receipt.finishAt, null); assert.equal(receipt.responseStatus, 201);
   state = await f.state();
   const disk = state.briefingComments.storeInspection.briefings.find(row => row.briefingId === a.briefing.id).comments[0];
@@ -2336,6 +2352,7 @@ test('Briefing comments next-POST hold binds once to exact room/Briefing and pre
   const delivered = await pending; assert.equal(delivered.status, 201); assert.equal(delivered.body.comment.id, disk.id);
   state = await f.state(); const final = state.briefingComments.receipts.find(row => row.requestId === receipt.requestId);
   assert.equal(final.terminalCause, 'finished'); assert.equal(final.writeAttempted, true); assert.ok(final.finishAt);
+  assert.equal(final.responseFault, null);
   assert.deepEqual((await f.send('GET', commentURL(b))).body.comments, [savedB.body.comment]);
   assert.equal((await f.release(a, receipt)).body.code, 'QA_COMMENT_ALREADY_RELEASED');
 });
@@ -2371,7 +2388,7 @@ test('Briefing comments committed-response-lost is saved before close; QA inspec
   const body = commentBody(a), lost = await f.send('POST', commentURL(a), body); assert.equal(lost.status, 0);
   let state = await f.state(), receipt = state.briefingComments.receipts.find(row => row.holdId === arm.body.holdId);
   assert.equal(receipt.terminalCause, 'committed-response-lost'); assert.ok(receipt.committedAt);
-  assert.equal(receipt.writeAttempted, false); assert.equal(receipt.finishAt, null); assert.ok(receipt.closeAt >= receipt.committedAt);
+  assertPartialCommentResponse(receipt, receipt.committedAt);
   assert.equal(receipt.clientRequestId, body.clientRequestId); assert.equal(receipt.responseStatus, 201);
   const record = state.briefingComments.storeInspection.briefings[0].comments[0];
   assert.equal(record.id, receipt.commentId); assert.equal(record.storedHash, receipt.storedHash);
@@ -2386,6 +2403,37 @@ test('Briefing comments committed-response-lost is saved before close; QA inspec
   assert.equal((await f.release(a, receipt)).body.code, 'QA_COMMENT_ALREADY_CLOSED');
   assert.equal(state.context.captureBatches, 0); assert.deepEqual(state.context.deliveries, []); assert.deepEqual(state.observed.sends, []);
 });
+
+for (const mode of ['callback-error', 'callback-timeout', 'peer-close', 'account-change']) {
+  test(`Briefing comments partial response ${mode} records the actual terminal cause without a false completed cut`, async t => {
+    const f = await setupComments(t), [a] = f.seed.identities;
+    const arm = await f.send('POST', '/__qa/briefing-comments/config',
+      { ...commentR(a), bindNextPost: true, mode: 'committed-response-lost' }, true);
+    let callback, response;
+    const pending = f.send('POST', commentURL(a), commentBody(a), false, res => {
+      response = res;
+      res.write = (value, done) => { callback = done;
+        if (mode === 'callback-error') done(new Error('unit write failed'));
+        return true; };
+    });
+    await waitCommentReceipt(f, row => row.holdId === arm.body.holdId && Number.isFinite(row.responseFault?.headersFlushedAt));
+    if (mode === 'peer-close') response.destroy();
+    if (mode === 'account-change') await f.send('POST', '/__qa/account-change', { variant: 'b' }, true);
+    await pending;
+    if (mode === 'peer-close' || mode === 'account-change') {
+      callback(); // A late write callback cannot revive a canceled entry.
+      await new Promise(resolve => setTimeout(resolve, 35));
+    }
+    const state = await f.state(), receipt = state.briefingComments.receipts.find(row => row.holdId === arm.body.holdId);
+    assert.equal(receipt.terminalCause, mode === 'peer-close' ? 'peer-close-before-finish'
+      : mode === 'account-change' ? 'account-change' : 'write-error');
+    assert.ok(receipt.committedAt); assert.equal(receipt.writeAttempted, true);
+    assert.equal(receipt.responseFault.writeCompletedAt, null); assert.equal(receipt.responseFault.cutAt, null);
+    assert.equal(receipt.endReturnedAt, null); assert.equal(receipt.finishAt, null);
+    assert.equal(receipt.writableFinishedAtClose, false);
+    assert.equal(state.briefingComments.storeInspection.briefings[0].count, 1);
+  });
+}
 
 test('Briefing comments control refusal, expiry, peer close, account change and disposal retain distinct terminal receipts', async t => {
   const f = await setupComments(t), [a, b] = f.seed.identities;
@@ -2443,8 +2491,7 @@ test('Briefing comments optional recovery GET loss is exact-scoped and manual sa
   assert.deepEqual(get.recoveryOf, { holdId: post.holdId, requestId: post.requestId, clientRequestId: body.clientRequestId });
   assert.equal(get.responseStatus, 200); assert.ok(get.readCompletedAt);
   assert.deepEqual(get.listed, [{ id: saved.id, clientRequestId: body.clientRequestId, seq: saved.seq }]);
-  assert.equal(get.terminalCause, 'recovery-get-response-lost'); assert.equal(get.writeAttempted, false);
-  assert.equal(get.finishAt, null); assert.ok(get.closeAt >= get.readCompletedAt);
+  assert.equal(get.terminalCause, 'recovery-get-response-lost'); assertPartialCommentResponse(get, get.readCompletedAt);
   const parent = state.briefingComments.receipts.find(row => row.requestId === post.requestId);
   assert.equal(parent.recoveryGet.requestId, get.requestId); assert.equal(parent.recoveryGet.terminalCause, get.terminalCause);
   assert.equal(state.briefingComments.receipts.filter(row => row.method === 'POST' && row.receivedAt !== null).length, 1, 'no automatic retry');
@@ -2514,14 +2561,18 @@ test('Briefing comments ephemeral HTTP manual retry after both committed POST an
     body: JSON.stringify({ ...commentR(a), mode: 'committed-response-lost', bindNextPost: true, recoveryGetResponseLostOnce: true }) });
   assert.equal(config.status, 200); await config.json();
   const body = commentBody(a), postOptions = { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) };
-  await assert.rejects(fetch(base + commentURL(a), postOptions));
+  const lostPost = await fetch(base + commentURL(a), postOptions);
+  assert.equal(lostPost.status, 201); await assert.rejects(lostPost.json());
   const inspect = async () => (await fetch(base + '/__qa/state', { headers: qaHeaders })).json();
   const before = await inspect(), saved = before.briefingComments.storeInspection.briefings[0].comments[0];
   assert.equal(before.briefingComments.receipts.filter(row => row.method === 'GET').length, 0);
-  await assert.rejects(fetch(base + commentURL(a)));
+  const lostGet = await fetch(base + commentURL(a));
+  assert.equal(lostGet.status, 200); await assert.rejects(lostGet.json());
   const lost = await inspect(), get = lost.briefingComments.receipts.find(row => row.method === 'GET');
   assert.equal(get.terminalCause, 'recovery-get-response-lost'); assert.ok(get.readCompletedAt);
-  assert.equal(get.responseStatus, 200); assert.equal(get.finishAt, null); assert.equal(get.writeAttempted, false);
+  assert.equal(get.responseStatus, 200); assertPartialCommentResponse(get, get.readCompletedAt);
+  const post = lost.briefingComments.receipts.find(row => row.method === 'POST');
+  assertPartialCommentResponse(post, post.committedAt);
   assert.equal(lost.briefingComments.receipts.filter(row => row.method === 'POST' && row.receivedAt !== null).length, 1);
   const manual = await fetch(base + commentURL(a), postOptions); assert.equal(manual.status, 201);
   const value = await manual.json(); assert.equal(value.comment.id, saved.id); assert.equal(value.comment.seq, saved.seq);
@@ -2546,10 +2597,15 @@ test('Briefing comments ephemeral HTTP loses only the post-commit response and G
     body: JSON.stringify({ ...commentR(a), bindNextPost: true, mode: 'committed-response-lost' }) });
   assert.equal(config.status, 200); const armed = await config.json();
   const body = commentBody(a, { text: 'Native HTTP saved bytes' });
-  await assert.rejects(fetch(base + commentURL(a), { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) }));
+  const lostResponse = await fetch(base + commentURL(a), { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) });
+  assert.equal(lostResponse.status, 201);
+  const reader = lostResponse.body.getReader(), prefix = await reader.read();
+  assert.equal(Buffer.from(prefix.value).toString(), '{');
+  assert.ok(Number(lostResponse.headers.get('content-length')) > prefix.value.byteLength);
+  await assert.rejects(reader.read());
   const before = await inspect(), receipt = before.briefingComments.receipts.find(row => row.holdId === armed.holdId);
   assert.equal(receipt.terminalCause, 'committed-response-lost'); assert.ok(receipt.committedAt);
-  assert.equal(receipt.writeAttempted, false); assert.equal(receipt.finishAt, null);
+  assertPartialCommentResponse(receipt, receipt.committedAt);
   assert.equal(before.briefingComments.receipts.filter(row => row.method === 'GET').length, 0);
   const stored = before.briefingComments.storeInspection.briefings[0].comments[0];
   assert.equal(stored.id, receipt.commentId); assert.equal(stored.clientRequestId, body.clientRequestId);
@@ -2564,6 +2620,44 @@ test('Briefing comments ephemeral HTTP loses only the post-commit response and G
   assert.equal(after.context.captureBatches, 0); assert.deepEqual(after.context.deliveries, []); assert.deepEqual(after.observed.sends, []);
   // This is an ephemeral unit HTTP client, not proof of a product UI callback.
 });
+
+for (const recoveryGetResponseLostOnce of [false, true]) {
+  test(`Briefing comments real controller sees incomplete HTTP JSON (recovery loss ${recoveryGetResponseLostOnce}) without automatic inclusion or rePOST`, async t => {
+    let handler;
+    const server = http.createServer((req, res) => handler(req, res));
+    await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
+    t.after(() => new Promise(resolve => { server.close(resolve); server.closeAllConnections(); }));
+    const f = await setupComments(t, { fixturePort: server.address().port }); handler = f.handler;
+    const [a] = f.seed.identities, base = `http://127.0.0.1:${server.address().port}`;
+    await f.send('POST', '/__qa/briefing-comments/config', { ...commentR(a), bindNextPost: true,
+      mode: 'committed-response-lost', recoveryGetResponseLostOnce }, true);
+    const storedBriefing = JSON.parse(fs.readFileSync(path.join(f.seed.storage.dataDir, 'context',
+      createHash('sha256').update('a').digest('hex'), 'briefings', `${a.briefing.id}.json`), 'utf8'));
+    const calls = []; let includes = 0;
+    const controller = BriefingState.createBriefingComments({ session: BriefingState.beginBriefing(storedBriefing, {}),
+      record: {}, current: () => true, makeId: randomUUID, included: () => false, include: () => { includes++; },
+      request: async (method, body) => {
+        calls.push(method);
+        const response = await fetch(base + commentURL(a), { method, headers: { 'content-type': 'application/json' },
+          ...(body ? { body: JSON.stringify(body) } : {}) });
+        assert.equal(response.status, method === 'POST' ? 201 : 200);
+        return response.json(); // The failure must reach the application body reader.
+      } });
+    await controller.submit('실제 JSON 읽기 실패 후 저장 복구');
+    assert.deepEqual(calls, ['POST', 'GET']); assert.equal(includes, 0);
+    assert.equal(controller.view().phase, recoveryGetResponseLostOnce ? 'unknown' : 'saved');
+    const before = await f.state(), records = before.briefingComments.storeInspection.briefings[0].comments;
+    assert.equal(records.length, 1);
+    assert.equal(before.briefingComments.receipts.filter(row => row.method === 'POST' && row.receivedAt !== null).length, 1);
+    if (recoveryGetResponseLostOnce) {
+      await controller.retry();
+      assert.deepEqual(calls, ['POST', 'GET', 'POST']); assert.equal(controller.view().phase, 'saved');
+      assert.equal(includes, 0);
+      assert.deepEqual((await f.state()).briefingComments.storeInspection.briefings[0].comments, records);
+    }
+    controller.dispose();
+  });
+}
 
 test('short Browser fixture URL serves only the canonical document in this marked profile', async t => {
   const { handler, info } = setup(t);
