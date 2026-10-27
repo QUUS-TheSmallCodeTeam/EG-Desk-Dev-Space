@@ -694,7 +694,7 @@ test('bridge hashes its source once at start, backs off app-server reconnects an
   const open = source.slice(at('socket.onopen = async () => {'), at('socket.onmessage = event => {'))
   assert.ok(open.indexOf('appServerReady = true') < open.indexOf('appServerBackoff.reset()'))
   assert.equal(source.split('appServerBackoff.reset()').length, 2)
-  at("'Access-Control-Allow-Headers': 'Content-Type, X-EGDesk-Overlay-Build',")
+  at("'Access-Control-Allow-Headers': 'Content-Type, X-EGDesk-Overlay-Build, X-EGDesk-Ontology-Profile, X-EGDesk-Ontology-Token',")
 })
 
 test('run changes and command output are read from bridge memory without an account call, with exact query checks', async () => {

@@ -2,7 +2,7 @@
 id: egdesk.ontology.index
 type: index
 layer: ontology
-summary: Entry point for the EG-Desk ontology source of truth.
+summary: Entry point for the preserved EG-Desk ontology seed and modeling contracts.
 relations:
   defines:
     - egdesk.world
@@ -54,9 +54,14 @@ relations:
 
 # EG-Desk Ontology
 
-This folder is the source-of-truth seed for EG-Desk's ontology-aware operating world.
+This folder is the preserved authoring and migration seed for EG-Desk's ontology-aware operating world.
 
-The ontology should be readable as Markdown, linkable like Obsidian, and parseable by a local web UI. The web UI can render graphs, timelines, and detail panels, but it should not become the source of truth.
+For each initialized Firefox profile, SQLite is the operational source of
+truth. Markdown remains readable and linkable authoring material; generated
+graphs and the web UI do not overwrite that database. There is no automatic
+seed refresh or reverse synchronization. See
+[Ontology SQLite Storage](../apps/firefox-ui-demo/docs/ONTOLOGY_SQLITE_STORAGE.md)
+for import, preservation, and verification operations.
 
 ## Core Sentence
 

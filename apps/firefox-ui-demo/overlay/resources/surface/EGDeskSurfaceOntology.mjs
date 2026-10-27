@@ -364,7 +364,7 @@ export function createOntologyZone(deps) {
       'stroke-width': options.root ? '2.3' : options.side ? '1.2' : '1.7',
     }));
     if (expandedRoot) {
-      const labelWidth = Math.min(spec.w * 0.40, Math.max(0.105, model.labelFor(occurrence).length * 0.013));
+      const labelWidth = Math.min(spec.w * 0.60, Math.max(0.105, model.labelFor(occurrence).length * 0.013) * (options.labelScale || 1));
       const gapStartU = spec.u + 0.035;
       const gapEndU = gapStartU + labelWidth;
       const topLeft = geometry.point(spec.u, spec.v);
@@ -469,6 +469,13 @@ export function createOntologyZone(deps) {
     const height = 760;
     const aspect = stageRect?.height > 100 ? stageRect.width / stageRect.height : 1.65;
     const width = Math.max(1120, Math.min(1580, Math.round(height * aspect)));
+    // SVG user units shrink with the stage. Keep labels readable at the
+    // window's minimum size without changing the projected plane geometry.
+    const screenScale = stageRect?.width > 0 && stageRect?.height > 0
+      ? Math.min(stageRect.width / width, stageRect.height / height)
+      : 1;
+    const textScale = Math.max(1, Math.min(2, 1 / screenScale));
+    stage.style.setProperty('--egd-ontology-text-scale', String(textScale));
     const paneBounds = {};
     const timeShares = localState.activePane === 'past'
       ? [0.18, 0.82, 0.91, 1]
@@ -578,6 +585,7 @@ export function createOntologyZone(deps) {
     const cameraOverlayGroup = svgEl('g', { class: 'egd-ontology-v2-camera-overlays' });
     const overlayGroup = svgEl('g', { class: 'egd-ontology-v2-overlays' });
     const layerControlGroup = svgEl('g', { class: 'egd-ontology-v2-layer-controls' });
+    const timeAxisGroup = svgEl('g', { class: 'egd-ontology-v2-time-axis-controls' });
     const placements = new Map();
     const sideInventories = new Map();
 
@@ -599,24 +607,46 @@ export function createOntologyZone(deps) {
         if (related) selectOntologyOccurrence(localState, model, related.refId, { keepLayer: true });
         rerender();
       };
-      pane.appendChild(svgEl('path', {
+      const activateTime = (ev) => {
+        ev.preventDefault();
+        ev.stopPropagation();
+        activateOntologyPane(localState, model, phase, selected?.conceptId || null);
+        rerender();
+      };
+      const labelV = active ? 0.035 : 0.08;
+      const centerPoint = geometry.point(0.5, labelV);
+      const centerAlongU = geometry.point(0.51, labelV);
+      const visibleWidth = stageRect?.width > 0 ? stageRect.width / screenScale : width;
+      const visibleLeft = (width - visibleWidth) / 2;
+      const safeLabelX = Math.max(visibleLeft + 22 / screenScale, Math.min(visibleLeft + visibleWidth - 22 / screenScale, centerPoint.x));
+      const labelU = Math.max(0.05, Math.min(0.95, 0.5 + (safeLabelX - centerPoint.x) * 0.01 / (centerAlongU.x - centerPoint.x || 1)));
+      const labelPoint = geometry.point(labelU, labelV);
+      const alongU = geometry.point(labelU + 0.01, labelV);
+      const alongV = geometry.point(labelU, labelV + 0.01);
+      const pixelsPerU = Math.max(1, Math.hypot(alongU.x - labelPoint.x, alongU.y - labelPoint.y) * screenScale / 0.01);
+      const pixelsPerV = Math.max(1, Math.hypot(alongV.x - labelPoint.x, alongV.y - labelPoint.y) * screenScale / 0.01);
+      const hitHalfU = Math.min(0.38, 24 / pixelsPerU);
+      const hitHalfV = Math.min(0.08, 12 / pixelsPerV);
+      timeAxisGroup.appendChild(svgEl('path', {
         class: `egd-ontology-pane-hit egd-ontology-v2-time-axis-hit egd-ontology-v2-pane-hit-${phase}`,
-        d: geometry.rectPath(0.22, 0.0, 0.56, 0.085),
+        d: geometry.rectPath(labelU - hitHalfU, labelV - hitHalfV - 4 / pixelsPerV, hitHalfU * 2, hitHalfV * 2),
         fill: 'transparent',
         stroke: 'transparent',
-        onclick: (ev) => {
-          ev.preventDefault();
-          ev.stopPropagation();
-          activateOntologyPane(localState, model, phase, selected?.conceptId || null);
-          rerender();
+        role: 'button',
+        tabindex: '0',
+        'aria-label': `${ONTOLOGY_TIME_PANE_LABELS[phase]} 시점으로 이동`,
+        onclick: activateTime,
+        onkeydown: (ev) => {
+          if (ev.key === 'Enter' || ev.key === ' ') activateTime(ev);
         },
       }));
-      drawOntologyText(pane, geometry, 0.50, active ? 0.035 : 0.08, ONTOLOGY_TIME_PANE_LABELS[phase], {
+      const timeLabel = drawOntologyText(timeAxisGroup, geometry, labelU, labelV, ONTOLOGY_TIME_PANE_LABELS[phase], {
         class: 'egd-ontology-v2-time-coordinate-label',
         fill: active ? 'rgba(39, 48, 56, 0.82)' : 'rgba(59, 66, 73, 0.58)',
         'font-size': active ? '15' : '13',
         'font-weight': '900',
       });
+      if (active) timeLabel.classList.add('egd-ontology-v2-time-coordinate-label-active');
       const strutGroup = svgEl('g', {
         class: `egd-ontology-v2-layer-struts${active ? ' egd-ontology-v2-layer-struts-active' : ''}`,
         data: { phase },
@@ -834,8 +864,9 @@ export function createOntologyZone(deps) {
       ...directChildren.filter((child) => child.layer !== localState.activeLayer).map((child) => child.refId),
     ]);
     if (parent) {
-      const parentLabelWidth = Math.max(0.14, Math.min(0.23, model.labelFor(parent).length * 0.016));
-      const tabSpec = { u: rootSpec.u + 0.025, v: rootSpec.v - 0.078, w: parentLabelWidth, h: 0.052 };
+      const labelScale = textScale / camera.zoom;
+      const parentLabelWidth = Math.max(0.14, Math.min(0.30, model.labelFor(parent).length * 0.016 * labelScale));
+      const tabSpec = { u: rootSpec.u + 0.025, v: rootSpec.v - 0.115, w: parentLabelWidth, h: 0.062 };
       const tab = svgEl('g', {
         class: 'egd-ontology-v2-breadcrumb',
         data: { refId: parent.refId },
@@ -882,14 +913,19 @@ export function createOntologyZone(deps) {
         stroke: localState.activeLayer === 'virtual' ? 'rgba(103, 67, 166, 0.34)' : 'rgba(35, 76, 106, 0.36)',
         'stroke-width': '1.4',
       }));
-      drawOntologyText(emptyState, activeCameraGeometry, 0.43, 0.343, '이 시점에는 snapshot이 없습니다', {
+      const emptyTitleV = 0.343;
+      const emptyTitlePoint = activeCameraGeometry.point(0.43, emptyTitleV);
+      const emptyBelowPoint = activeCameraGeometry.point(0.43, emptyTitleV + 0.01);
+      const emptyPixelsPerV = Math.hypot(emptyBelowPoint.x - emptyTitlePoint.x, emptyBelowPoint.y - emptyTitlePoint.y) * screenScale / 0.01;
+      const emptyHelpV = emptyTitleV + Math.max(0.043, 15 / Math.max(1, emptyPixelsPerV));
+      drawOntologyText(emptyState, activeCameraGeometry, 0.43, emptyTitleV, '이 시점에는 snapshot이 없습니다', {
         class: 'egd-ontology-v2-empty-state-title',
         anchor: 'start',
         fill: 'rgba(47, 55, 63, 0.68)',
         'font-size': '12',
         'font-weight': '850',
       });
-      drawOntologyText(emptyState, activeCameraGeometry, 0.43, 0.386, '상단 시간축에서 다른 시점을 선택할 수 있습니다', {
+      drawOntologyText(emptyState, activeCameraGeometry, 0.43, emptyHelpV, '상단 시간축에서 다른 시점을 선택할 수 있습니다', {
         class: 'egd-ontology-v2-empty-state-help',
         anchor: 'start',
         fill: 'rgba(76, 83, 90, 0.46)',
@@ -1321,6 +1357,7 @@ export function createOntologyZone(deps) {
     if (selected && rootSpec) drawOntologyOccurrenceBox(activeNodeGroup, model, activeCameraGeometry, rootSpec, selected, {
       root: true,
       expanded: mainChildren.length > 0,
+      labelScale: textScale / camera.zoom,
     });
     childSpecs.forEach(({ occurrence, spec }) => {
       drawOntologyOccurrenceBox(activeNodeGroup, model, activeCameraGeometry, spec, occurrence, {
@@ -1388,6 +1425,7 @@ export function createOntologyZone(deps) {
     svg.appendChild(overlayGroup);
     // Interaction controls stay above visual occlusion and shading layers.
     svg.appendChild(layerControlGroup);
+    svg.appendChild(timeAxisGroup);
     stage.appendChild(svg);
     stage.appendChild(el('div', {
       class: 'egd-ontology-stage-hint',
@@ -1515,7 +1553,7 @@ export function createOntologyZone(deps) {
       id: minimapSummaryId,
       class: 'egd-ontology-minimap-context',
     },
-      el('span', { class: 'egd-ontology-minimap-context-title' },
+      el('span', { class: 'egd-ontology-minimap-context-title', title: selected ? `${model.labelFor(selected)} 주변` : '선택된 개념 없음' },
         selected ? `${model.labelFor(selected)} 주변` : '선택된 개념 없음'),
       el('span', { class: 'egd-ontology-minimap-context-coordinate' },
         `${ONTOLOGY_TIME_PANE_LABELS[localState.activePane]} · ${localState.activeLayer === 'virtual' ? '가상' : '물리'}`,
@@ -1551,9 +1589,33 @@ export function createOntologyZone(deps) {
   }
 
   async function loadOntologyGraph() {
-    const response = await fetch(ONTOLOGY_GRAPH_URL, { cache: 'no-store' });
-    if (!response.ok) throw new Error(`Ontology graph load failed: ${response.status}`);
-    return validateOntologyGraph(await response.json());
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 8000);
+    try {
+      // This private, launcher-created marker belongs to this Firefox profile;
+      // it is never used as a path or copied into a bridge response.
+      const markerResponse = await fetch('chrome://userchrome/content/egdesk-ontology-binding.json', {
+        cache: 'no-store', signal: controller.signal,
+      });
+      if (!markerResponse.ok) throw Object.assign(new Error('Profile binding unavailable'), { code: 'ONTOLOGY_PROFILE_UNAVAILABLE' });
+      const marker = await markerResponse.json();
+      if (marker?.version !== 1 || !/^[a-f0-9]{64}$/.test(marker.profileId || '') || !/^[a-f0-9]{64}$/.test(marker.token || '')) {
+        throw Object.assign(new Error('Invalid profile binding'), { code: 'ONTOLOGY_PROFILE_UNAVAILABLE' });
+      }
+      const response = await fetch('http://127.0.0.1:39218/ontology/graph', {
+        cache: 'no-store', credentials: 'omit', signal: controller.signal,
+        headers: { 'X-EGDesk-Ontology-Profile': marker.profileId, 'X-EGDesk-Ontology-Token': marker.token },
+      });
+      if (!response.ok) {
+        let payload = null;
+        try { payload = await response.json(); } catch {}
+        throw Object.assign(new Error('Ontology storage unavailable'), { code: payload?.code || 'ONTOLOGY_STORE_UNAVAILABLE' });
+      }
+      if (response.headers.get('X-EGDesk-Ontology-Profile') !== marker.profileId) {
+        throw Object.assign(new Error('Ontology response profile mismatch'), { code: 'ONTOLOGY_PROFILE_MISMATCH' });
+      }
+      return validateOntologyGraph(await response.json());
+    } finally { clearTimeout(timer); }
   }
 
   function spawnOntologyMapCard(initialState = {}) {
@@ -1654,6 +1716,7 @@ export function createOntologyZone(deps) {
       el('div', { class: 'egd-ontology-loading' }, '온톨로지 그래프를 불러오는 중...'),
     );
     const body = deskWindow.slots.content;
+    body.style.position = 'relative';
     body.appendChild(stage);
     deskWindow.onResize(() => {
       if (card._ontologyGraph) renderOntologyMap(stage, card._ontologyGraph, localState);
@@ -1661,20 +1724,16 @@ export function createOntologyZone(deps) {
 
     let viewDrag = null;
     const beginViewPan = (ev) => {
-      if (ev.button !== 0 || ev.target.closest('.egd-ontology-v2-breadcrumb, .egd-ontology-v2-layer-label-control, .egd-ontology-v2-layer-switch-hit, .egd-ontology-minimap, .egd-ontology-stage-mini-tools, .egd-ontology-stage-zoom-label')) return;
+      if (ev.button !== 0 || ev.target.closest('.egd-ontology-v2-breadcrumb, .egd-ontology-v2-time-axis-hit, .egd-ontology-v2-layer-label-control, .egd-ontology-v2-layer-switch-hit, .egd-ontology-minimap, .egd-ontology-stage-mini-tools, .egd-ontology-stage-zoom-label')) return;
       const conceptBox = ev.target.closest('.egd-ontology-v2-box');
       if (conceptBox && !conceptBox.classList.contains('egd-ontology-v2-box-root')) return;
-      const paneHit = ev.target.closest('.egd-ontology-v2-pane-hit');
+      const paneHit = ev.target.closest('.egd-ontology-time-coordinate');
       if (paneHit && paneHit.dataset.phase !== localState.activePane) return;
       if (viewDrag) return;
       focusCanvasCard(card);
       try { stage.focus({ preventScroll: true }); } catch { stage.focus(); }
       const camera = getOntologyCamera(localState);
       viewDrag = { x: ev.clientX, y: ev.clientY, panX: camera.x, panY: camera.y, moved: false, pointerId: ev.pointerId ?? null };
-      if (ev.pointerId != null) {
-        try { stage.setPointerCapture(ev.pointerId); } catch {}
-      }
-      stage.classList.add('egd-ontology-stage-panning');
       ev.preventDefault();
     };
     stage.addEventListener('pointerdown', beginViewPan, { capture: true });
@@ -1713,7 +1772,13 @@ export function createOntologyZone(deps) {
     const onMove = (ev) => {
       if (viewDrag) {
         const distance = Math.hypot(ev.clientX - viewDrag.x, ev.clientY - viewDrag.y);
-        if (distance > 3) viewDrag.moved = true;
+        if (!viewDrag.moved) {
+          if (distance <= 3) return;
+          viewDrag.moved = true;
+          if (viewDrag.pointerId != null) {
+            try { stage.setPointerCapture(viewDrag.pointerId); } catch {}
+          }
+        }
         const camera = getOntologyCamera(localState);
         camera.x = viewDrag.panX + (ev.clientX - viewDrag.x);
         camera.y = viewDrag.panY + (ev.clientY - viewDrag.y);
@@ -1750,15 +1815,46 @@ export function createOntologyZone(deps) {
       stage.removeEventListener('pointerup', onUp, { capture: true });
     });
 
-    loadOntologyGraph()
-      .then((graph) => {
+    let notice = null;
+    let loadGeneration = 0;
+    let disposed = false;
+    const loadGraph = async () => {
+      const generation = ++loadGeneration;
+      try {
+        const graph = await loadOntologyGraph();
+        if (disposed || generation !== loadGeneration) return;
+        const previous = card._ontologyGraph;
+        try { renderOntologyMap(stage, graph, localState); }
+        catch (error) {
+          if (previous) {
+            try { renderOntologyMap(stage, previous, localState); } catch {}
+          }
+          throw error;
+        }
         card._ontologyGraph = graph;
-        renderOntologyMap(stage, graph, localState);
-      })
-      .catch((error) => {
-        stage.textContent = '';
-        stage.appendChild(el('div', { class: 'egd-ontology-error' }, `온톨로지 그래프 로드 실패: ${error.message || String(error)}`));
-      });
+        notice?.remove();
+        notice = null;
+      } catch (error) {
+        if (disposed || generation !== loadGeneration) return;
+        if (!card._ontologyGraph) stage.textContent = '';
+        notice?.remove();
+        const message = error?.code === 'ONTOLOGY_PROFILE_MISMATCH'
+          ? '다른 Firefox 프로필의 브리지가 실행 중입니다. 해당 연결을 확인해 주세요.'
+          : error?.code === 'ONTOLOGY_TOKEN_REQUIRED' || error?.code === 'ONTOLOGY_PROFILE_UNAVAILABLE'
+            ? '이 Firefox 프로필의 온톨로지 연결을 확인할 수 없습니다.'
+            : '온톨로지 저장소를 불러오지 못했습니다. 저장소와 브리지를 확인해 주세요.';
+        notice = el('div', {
+          class: 'egd-ontology-error', role: 'alert',
+          style: { position: 'absolute', inset: 'auto', top: '12px', left: '50%', transform: 'translateX(-50%)', zIndex: '20',
+            display: 'flex', gap: '10px', alignItems: 'center', maxWidth: 'min(90%, 620px)', padding: '10px 14px',
+            borderRadius: '8px', background: '#fff8f5', boxShadow: '0 2px 12px rgba(30, 38, 45, 0.18)' },
+        }, el('span', {}, message), el('button', { type: 'button', onclick: () => { void loadGraph(); } }, '다시 시도'));
+        body.appendChild(notice);
+      }
+    };
+    card._ontologyReload = loadGraph;
+    deskWindow.registerCleanup(() => { disposed = true; loadGeneration += 1; });
+    void loadGraph();
 
     return card;
   }

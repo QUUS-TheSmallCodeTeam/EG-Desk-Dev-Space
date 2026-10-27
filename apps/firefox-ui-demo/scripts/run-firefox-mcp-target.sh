@@ -44,6 +44,12 @@ REPO_ROOT="$(dirname "$SCRIPT_DIR")"
 # Validate before the writer, overlay copy, or startup-cache cleanup can touch
 # any profile. The writer repeats this check for direct invocations.
 PROFILE="$(node "$SCRIPT_DIR/validate-firefox-profile.mjs" "$PROFILE")"
+# Refuse an old, unbound or differently bound existing bridge before any
+# profile/overlay write. This is read-only and never stops another process.
+node "$REPO_ROOT/helper/egdesk-ontology-http.mjs" --check-existing-bridge "$PROFILE" > /dev/null
+# Bind the validated profile and preserve its existing ontology graph before
+# installing overlay resources. Failure stops before that graph can be copied over.
+node "$REPO_ROOT/helper/egdesk-ontology-http.mjs" --prepare-profile "$PROFILE"
 EGDESK_FIREFOX_PROFILE="$PROFILE" EGDESK_FIREFOX_MODE="$LAUNCH_MODE" \
 EGDESK_FIREFOX_MARIONETTE_PORT="$MARIONETTE_PORT" \
 EGDESK_FIREFOX_REMOTE_AGENT_PORT="$REMOTE_AGENT_PORT" \
@@ -83,12 +89,16 @@ rm -rf "$PROFILE/startupCache"
 
 # codex-bridge(:39218 — 터미널 PTY + codex chat/auth 백엔드) 미기동 시 자동 기동.
 # 브리지가 없으면 overlay의 터미널 카드와 채팅 로그인이 전부 "오프라인"이 된다.
-if ! nc -z 127.0.0.1 39218 2>/dev/null; then
+BRIDGE_STATE="$(node "$REPO_ROOT/helper/egdesk-ontology-http.mjs" --check-existing-bridge "$PROFILE")"
+if [[ "$BRIDGE_STATE" == absent ]]; then
   BRIDGE_LOG="${TMPDIR:-/tmp}/egdesk-codex-bridge.log"
   echo "[info] codex-bridge not running — starting in background (log: $BRIDGE_LOG)"
-  nohup "$SCRIPT_DIR/run-codex-bridge.sh" >> "$BRIDGE_LOG" 2>&1 &
-else
+  EGDESK_FIREFOX_PROFILE="$PROFILE" nohup "$SCRIPT_DIR/run-codex-bridge.sh" >> "$BRIDGE_LOG" 2>&1 &
+elif [[ "$BRIDGE_STATE" == compatible ]]; then
   echo "[info] codex-bridge already running on :39218"
+else
+  echo "[ERROR] Existing bridge status could not be verified; no process was stopped" >&2
+  exit 1
 fi
 
 echo "[info] Firefox: $FIREFOX"

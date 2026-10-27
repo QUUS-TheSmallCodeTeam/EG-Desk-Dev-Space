@@ -24,13 +24,18 @@ vocabulary during the remaining persistence/API migration; they are not the
 product name. The rendered Ontology surface already mounts through
 `spawnDeskWindowShell()`.
 
-Markdown remains canonical. The Firefox resource is generated:
+For an initialized Firefox profile, SQLite is operational canonical.
+Markdown and the generated Firefox resource are preserved import seeds, not
+automatic replacements for that database. See
+[Ontology SQLite Storage](./ONTOLOGY_SQLITE_STORAGE.md) for the profile,
+one-time import, preservation, and verification boundary.
 
 ```text
 ontology/**/*.md
   -> apps/firefox-ui-demo/scripts/generate-ontology-graph.mjs
   -> overlay/resources/ontology/graph.json (schemaVersion 3)
-  -> Ontology Desk Window
+  -> preserved profile seed -> one-time SQLite import
+  -> profile-bound graph read -> Ontology Desk Window
 ```
 
 The Firefox-hosted Ontology Window accepts schema version 3 and renders `snapshots`,

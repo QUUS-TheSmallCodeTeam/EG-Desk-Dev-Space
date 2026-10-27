@@ -138,6 +138,7 @@ const ENDPOINT_RULES = Object.freeze({
     "'http://127.0.0.1:39218/events?chatProtocol=2'",
   ],
   'resources/surface/EGDeskSurfaceFileCard.mjs': ['`http://127.0.0.1:39218${path}`'],
+  'resources/surface/EGDeskSurfaceOntology.mjs': ["'http://127.0.0.1:39218/ontology/graph'"],
 });
 const CONSTANT_RULES = Object.freeze({
   'JS/eg-desk-surface.uc.js': ['const EGDESK_HELPER_PORT = 39218;'],

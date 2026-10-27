@@ -21,15 +21,24 @@ export function fitSurfaceCamera(rect, available, maxZoom = 0.85) {
 
 // Inputs are projected CSS pixels, not world dimensions. Only presentation
 // changes at these boundaries; the View and its runtime keep their identity.
+// Existing callers supply 240x180 reference dimensions. Detail now enters at
+// 42% of those dimensions (100.8x75.6) and 3.3px font; it stays to 88% of the
+// entry dimensions and 2.9px font. A 320x420 Chat enters at 31.5% and stays
+// to 27.72%; a 448x343 Browser with 11px UI enters at 30% and stays to 26.36%.
+// The exit width (88.704px) remains above outline entry (88px), so gradual
+// zoom-out still visits outline before marker. These are visibility, NOT
+// reading/action thresholds. Larger cards/fonts can stay detailed deeper.
 export function surfaceSemanticLevel({
   width, height, fontPx, previous = null,
   detailWidth = 240, detailHeight = 180,
   outlineWidth = 88, outlineHeight = 52,
 } = {}) {
   if (![width, height, fontPx].every(value => Number.isFinite(value) && value > 0)) return 'marker';
-  const detailEnter = fontPx >= 10.5 && width >= detailWidth && height >= detailHeight;
-  const detailStay = previous === 'detail' && fontPx >= 9
-    && width >= detailWidth * 0.88 && height >= detailHeight * 0.88;
+  const detailEnterWidth = detailWidth * 0.42;
+  const detailEnterHeight = detailHeight * 0.42;
+  const detailEnter = fontPx >= 3.3 && width >= detailEnterWidth && height >= detailEnterHeight;
+  const detailStay = previous === 'detail' && fontPx >= 2.9
+    && width >= detailEnterWidth * 0.88 && height >= detailEnterHeight * 0.88;
   if (detailEnter || detailStay) return 'detail';
   const outlineEnter = width >= outlineWidth && height >= outlineHeight;
   const outlineStay = previous === 'outline' && width >= outlineWidth * 0.88

@@ -5,6 +5,27 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(dirname "$SCRIPT_DIR")"
 BRIDGE_ENTRY="$REPO_ROOT/helper/codex-bridge-server.mjs"
 
+# Use the same project-local Node for every store hosted by this bridge. Never
+# fall back to PATH: a Node 24 build can still contain a vulnerable SQLite.
+NODE_VERSION="$(<"$REPO_ROOT/.node-version")"
+[[ "$NODE_VERSION" =~ ^24\.[0-9]+\.[0-9]+$ ]] || { echo "[egdesk-codex-bridge] invalid Node version pin" >&2; exit 1; }
+case "$(uname -s)" in Darwin) NODE_OS=darwin ;; Linux) NODE_OS=linux ;; *) echo "[egdesk-codex-bridge] unsupported OS" >&2; exit 1 ;; esac
+case "$(uname -m)" in arm64|aarch64) NODE_ARCH=arm64 ;; x86_64|amd64) NODE_ARCH=x64 ;; *) echo "[egdesk-codex-bridge] unsupported CPU" >&2; exit 1 ;; esac
+NODE_RUNTIME="$REPO_ROOT/.tmp/node-runtime/node-v${NODE_VERSION}-${NODE_OS}-${NODE_ARCH}/bin/node"
+if [[ ! -x "$NODE_RUNTIME" ]]; then
+  echo "[egdesk-codex-bridge] pinned Node missing; run: node \"$SCRIPT_DIR/install-egdesk-node.mjs\"" >&2
+  exit 1
+fi
+if ! "$NODE_RUNTIME" --input-type=module -e '
+  import { pathToFileURL } from "node:url";
+  const { assertPatchedSqliteRuntime } = await import(pathToFileURL(process.argv[1]).href);
+  const runtime = assertPatchedSqliteRuntime();
+  if (runtime.nodeVersion !== process.argv[2]) throw new Error("Node version does not match the project pin");
+' "$REPO_ROOT/helper/egdesk-sqlite-runtime.mjs" "$NODE_VERSION"; then
+  echo "[egdesk-codex-bridge] pinned Node/SQLite runtime verification failed" >&2
+  exit 1
+fi
+
 # Starts the bridge and starts it again when it dies unexpectedly.
 # - Exit 0 is the bridge's own clean stop (SIGINT/SIGTERM shutdown, or another
 #   bridge already owns :39218), so the loop ends there.
@@ -32,7 +53,7 @@ log() { echo "[egdesk-codex-bridge] supervisor: $*" >&2; }
 failures=0
 while :; do
   started=$SECONDS
-  node "$BRIDGE_ENTRY" &
+  "$NODE_RUNTIME" "$BRIDGE_ENTRY" &
   child=$!
   status=0
   wait "$child" || status=$?

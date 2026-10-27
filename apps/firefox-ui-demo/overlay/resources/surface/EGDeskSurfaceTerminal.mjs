@@ -23,6 +23,18 @@ export function createTerminalZone(deps) {
     state,
   } = deps;
 
+  function routeTerminalFrameWheel(state, card, frame, event) {
+    // Main may provide the same gesture-session policy used by the outer canvas.
+    if (typeof state.routeTerminalFrameWheel === 'function') {
+      return state.routeTerminalFrameWheel(card, frame, event) === true;
+    }
+    // Until that bridge is available, preserve the basic active/inactive rule.
+    if (event.ctrlKey || event.metaKey || state.activeEntityId === card.id
+        || typeof state.panCanvasByWheel !== 'function') return false;
+    state.panCanvasByWheel(event);
+    return true;
+  }
+
   // ============ Terminal Canvas Card ============
   const EGDESK_HELPER_PORT = 39218;
   const TERMINAL_HTML_URL = 'chrome://userchrome/content/terminal.html';
@@ -101,6 +113,21 @@ export function createTerminalZone(deps) {
       src: TERMINAL_HTML_URL + (query.length ? '?' + query.join('&') : ''),
       style: { width: '100%', height: '100%', border: '0', background: '#1a1a2e', display: 'block' },
     });
+    let disposeCloseShortcut = null;
+    const onTerminalFrameLoad = () => {
+      disposeCloseShortcut?.();
+      disposeCloseShortcut = null;
+      try {
+        const frameWindow = termBrowser.contentWindow;
+        if (frameWindow && typeof state.registerDeskCloseShortcutTarget === 'function') {
+          const dispose = state.registerDeskCloseShortcutTarget(frameWindow);
+          if (typeof dispose === 'function') disposeCloseShortcut = dispose;
+        }
+      } catch (error) {
+        console.warn(TAG, 'terminal close shortcut bridge unavailable:', error);
+      }
+    };
+    termBrowser.addEventListener('load', onTerminalFrameLoad);
     body.appendChild(termBrowser);
     // ---- Card interactions ----
     const activateCard = () => {
@@ -139,15 +166,27 @@ export function createTerminalZone(deps) {
     // 최초 연결 완료 시 자동 포커스 (terminal.html이 terminal-ready postMessage 발송)
     const onTerminalReady = (ev) => {
       if (ev.source !== termBrowser.contentWindow) return;
+      if (ev.data?.type === 'terminal-activate') {
+        if (state.activeEntityId !== card.id) activateCard();
+        return;
+      }
       if (ev.data?.type === 'terminal-new-session') {
         const shellId = ev.data.shellId;
         if (typeof shellId === 'string' && /^[a-z][a-z0-9-]{0,31}$/.test(shellId)) spawnTerminalCard({ shellId });
         return;
       }
+      if (ev.data?.type === 'terminal-api-ready' || ev.data?.type === 'terminal-ready') {
+        try {
+          termBrowser.contentWindow?.terminalAPI?.setWheelHandler?.(
+            event => routeTerminalFrameWheel(state, card, termBrowser, event));
+        } catch (error) {
+          console.warn(TAG, 'terminal wheel bridge unavailable:', error);
+        }
+      }
       if (ev.data?.type === 'terminal-ready') {
         const label = ev.data.shellLabel;
         if (typeof label === 'string' && label.length <= 80) header.querySelector('.egd-terminal-title').textContent = '>_ ' + label;
-        if (activate) focusTerminal();
+        if (activate && state.activeEntityId === card.id) focusTerminal();
       }
       if (['terminal-ready', 'terminal-exit-confirmed', 'terminal-no-session'].includes(ev.data?.type)
           && boardCloseRequests.has(card.dataset.projectionId)) {
@@ -230,6 +269,9 @@ export function createTerminalZone(deps) {
       document.removeEventListener('mousemove', onMouseMove);
       document.removeEventListener('mouseup', onMouseUp);
       window.removeEventListener('message', onTerminalReady);
+      termBrowser.removeEventListener('load', onTerminalFrameLoad);
+      disposeCloseShortcut?.();
+      disposeCloseShortcut = null;
       // Kill PTY session via the browser's terminalAPI
       try {
         const contentWin = termBrowser.contentWindow || termBrowser.contentDocument?.defaultView;

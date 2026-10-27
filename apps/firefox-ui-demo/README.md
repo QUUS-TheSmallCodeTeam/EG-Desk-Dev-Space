@@ -43,6 +43,27 @@ apps/firefox-ui-demo/
     └── CODEX_HUD_DESIGN_V1.md Codex Chat HUD 상세 UX/기능 설계
 ```
 
+## 브리지용 프로젝트 Node 런타임
+
+EG-Desk 브리지는 프로젝트의 `.node-version`에 고정된 Node 24.22.1을 사용한다.
+한 번만 아래 명령을 실행하면 공식 Node 배포본을 내려받아 SHA-256을 확인하고
+`apps/firefox-ui-demo/.tmp/node-runtime/`에 설치한다. 기존에 설치된 Node는 바꾸지 않는다.
+부트스트랩에는 기존 Node 24 이상 및 `tar`가 필요하다 (Windows에서는 기본 제공 `tar.exe`).
+
+```bash
+cd apps/firefox-ui-demo
+node scripts/install-egdesk-node.mjs
+```
+
+지원 배포본은 macOS/Linux의 x64·arm64와 Windows의 x64·arm64이다. macOS/Linux의
+`scripts/run-codex-bridge.sh`는 고정 런타임만 사용한다. Windows의
+`scripts/run-egdesk-windows.mjs`는 다른 Node로 실행되어도 고정 런타임으로 다시 실행된다.
+고정 런타임이 없거나 실제 `sqlite_version()`이 WAL-reset 수정 버전이 아니면 시작을
+거부한다. 이는 새 프로세스에만 적용되며 이미 실행 중인 브리지를 교체하거나 종료하지 않는다.
+캐시가 지워졌다면 위 설치 명령을 다시 실행한다.
+캐시가 이미 있으면 아카이브 해시를 다시 확인하는 대신 실제 Node와 SQLite 버전을 검사하며,
+검사에 실패한 기존 디렉터리를 자동으로 덮어쓰거나 삭제하지 않는다.
+
 ## 실행 방법 (Windows)
 
 **사전 준비**: Firefox Desktop 설치 (Stable 110+ 또는 ESR). 관리자 권한 필요 (인스톨 디렉터리에 bootstrap 파일을 복사하므로).

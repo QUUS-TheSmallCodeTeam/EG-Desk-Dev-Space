@@ -1,14 +1,18 @@
 import { execFile } from 'node:child_process'
-import { statfs } from 'node:fs/promises'
+import { readFile, readdir, statfs } from 'node:fs/promises'
 import os from 'node:os'
 import { performance } from 'node:perf_hooks'
 import { promisify } from 'node:util'
 
 const execFileAsync = promisify(execFile)
-const SAMPLE_INTERVAL_MS = 5_000
+// Requests drive sampling; there is no background timer. This limit coalesces
+// clients without making a one-second UI poll reuse the previous measurement.
+const SAMPLE_INTERVAL_MS = 750
+const STORAGE_INTERVAL_MS = 30_000
 const MAX_COUNTER_GAP_MS = 30_000
 const MIN_COUNTER_INTERVAL_MS = 250
 const DISK_TIMEOUT_MS = 1_000
+const COUNTER_TIMEOUT_MS = 900
 const MAX_PENDING_DISK_READS = 2
 const MAX_SAFE_BIGINT = BigInt(Number.MAX_SAFE_INTEGER)
 const CPU_TIME_KEYS = ['user', 'nice', 'sys', 'idle', 'irq']
@@ -17,6 +21,7 @@ const percent = (part, whole) => Math.round(part / whole * 1_000) / 10
 const emptyCpu = status => ({ status, percent: null, basis: 'all-logical-cores', intervalMs: null })
 const emptyMemory = status => ({ status, usedBytes: null, totalBytes: null, percent: null, basis: 'total-minus-os-free' })
 const emptyDisk = status => ({ status, usedBytes: null, totalBytes: null, percent: null, target: 'profile-volume', basis: 'volume-blocks-minus-free-blocks' })
+const emptyDiskIo = status => ({ status, readBytesPerSecond: null, writeBytesPerSecond: null, intervalMs: null, basis: 'reported-whole-block-devices' })
 const emptyNetwork = (status, interfaceName = null) => ({ status, interface: interfaceName, rxBytesPerSecond: null, txBytesPerSecond: null, intervalMs: null })
 
 function cpuTotals(entries) {
@@ -76,15 +81,105 @@ export function parseMacNetworkCounters(output, interfaceName) {
 }
 
 async function readMacNetworkCounters({ signal } = {}) {
-  const { stdout: route } = await execFileAsync('/sbin/route', ['-n', 'get', 'default'], {
-    encoding: 'utf8', timeout: 1_500, maxBuffer: 16 * 1024, signal, windowsHide: true,
-  })
+  const [routeResult, countersResult] = await Promise.all([
+    execFileAsync('/sbin/route', ['-n', 'get', 'default'], {
+      encoding: 'utf8', timeout: COUNTER_TIMEOUT_MS, maxBuffer: 16 * 1024, signal, windowsHide: true,
+    }),
+    execFileAsync('/usr/sbin/netstat', ['-ibn'], {
+      encoding: 'utf8', timeout: COUNTER_TIMEOUT_MS, maxBuffer: 256 * 1024, signal, windowsHide: true,
+    }),
+  ])
+  const route = routeResult.stdout
   const interfaceName = parseMacDefaultInterface(route)
   if (!interfaceName) return null
-  const { stdout: counters } = await execFileAsync('/usr/sbin/netstat', ['-ibn'], {
-    encoding: 'utf8', timeout: 1_500, maxBuffer: 256 * 1024, signal, windowsHide: true,
+  return parseMacNetworkCounters(countersResult.stdout, interfaceName)
+}
+
+// IOKit reports cumulative byte counts per block-storage driver. Registry IDs
+// remain internal and let us reject a sample if devices appear or disappear.
+export function parseMacDiskCounters(output) {
+  if (typeof output !== 'string') return null
+  const devices = []
+  let id = null
+  for (const line of output.split(/\r?\n/)) {
+    const header = /^\s*\+-o .*<class IOBlockStorageDriver, id (0x[0-9a-f]+),/i.exec(line)
+    if (header) {
+      if (id) return null // A reported driver without byte counters is not zero.
+      id = header[1]
+      continue
+    }
+    if (!id || !/^\s*"Statistics"\s*=/.test(line)) continue
+    const read = /"Bytes \(Read\)"=(\d+)/.exec(line)
+    const write = /"Bytes \(Write\)"=(\d+)/.exec(line)
+    if (!read || !write || devices.some(device => device.id === id)) return null
+    devices.push({ id, readBytes: BigInt(read[1]), writeBytes: BigInt(write[1]) })
+    id = null
+  }
+  return devices.length && !id ? devices : null
+}
+
+async function readMacDiskCounters({ signal } = {}) {
+  const { stdout } = await execFileAsync('/usr/sbin/ioreg', ['-r', '-c', 'IOBlockStorageDriver', '-d', '1', '-w', '0'], {
+    encoding: 'utf8', timeout: COUNTER_TIMEOUT_MS, maxBuffer: 512 * 1024, signal, windowsHide: true,
   })
-  return parseMacNetworkCounters(counters, interfaceName)
+  return parseMacDiskCounters(stdout)
+}
+
+export function parseLinuxDefaultInterface(output) {
+  if (typeof output !== 'string') return null
+  let best = null
+  for (const line of output.split(/\r?\n/)) {
+    const fields = line.trim().split(/\s+/)
+    if (fields.length < 8 || !/^[a-zA-Z0-9_.-]+$/.test(fields[0]) || fields[1] !== '00000000' || fields[7] !== '00000000' || !/^[0-9a-f]+$/i.test(fields[3]) || !/^\d+$/.test(fields[6])) continue
+    const flags = parseInt(fields[3], 16), metric = Number(fields[6])
+    if ((flags & 1) && Number.isSafeInteger(metric) && (!best || metric < best.metric)) best = { interface: fields[0], metric }
+  }
+  return best?.interface ?? null
+}
+
+export function parseLinuxNetworkCounters(output, interfaceName) {
+  if (typeof output !== 'string' || !/^[a-zA-Z0-9_.-]+$/.test(interfaceName || '')) return null
+  for (const line of output.split(/\r?\n/)) {
+    const separator = line.lastIndexOf(':')
+    if (separator < 0 || line.slice(0, separator).trim() !== interfaceName) continue
+    const fields = line.slice(separator + 1).trim().split(/\s+/)
+    if (fields.length < 16 || !/^\d+$/.test(fields[0]) || !/^\d+$/.test(fields[8])) return null
+    return { interface: interfaceName, rxBytes: BigInt(fields[0]), txBytes: BigInt(fields[8]) }
+  }
+  return null
+}
+
+async function readLinuxNetworkCounters({ signal } = {}) {
+  const [route, counters] = await Promise.all([
+    readFile('/proc/net/route', { encoding: 'utf8', signal }),
+    readFile('/proc/net/dev', { encoding: 'utf8', signal }),
+  ])
+  return parseLinuxNetworkCounters(counters, parseLinuxDefaultInterface(route))
+}
+
+// Include whole disks only, excluding partitions, loop devices and stacked
+// dm/md devices so their backing disks are not counted twice. Linux reports
+// sectors in fixed 512-byte units, irrespective of device block size.
+export function parseLinuxDiskCounters(output, blockNames) {
+  if (typeof output !== 'string' || !Array.isArray(blockNames)) return null
+  const allowed = new Set(blockNames.filter(name => /^(?:sd[a-z]+|vd[a-z]+|xvd[a-z]+|hd[a-z]+|dasd[a-z]+|nvme\d+n\d+|mmcblk\d+)$/.test(name)))
+  if (!allowed.size) return null
+  const devices = []
+  for (const line of output.split(/\r?\n/)) {
+    const fields = line.trim().split(/\s+/)
+    if (!allowed.has(fields[2])) continue
+    if (fields.length < 10 || !/^\d+$/.test(fields[5]) || !/^\d+$/.test(fields[9]) || devices.some(device => device.id === fields[2])) return null
+    devices.push({ id: fields[2], readBytes: BigInt(fields[5]) * 512n, writeBytes: BigInt(fields[9]) * 512n })
+  }
+  return devices.length === allowed.size ? devices : null
+}
+
+async function readLinuxDiskCounters({ signal } = {}) {
+  const [stats, names] = await Promise.all([
+    readFile('/proc/diskstats', { encoding: 'utf8', signal }),
+    readdir('/sys/block'),
+  ])
+  return parseLinuxDiskCounters(stats, names)
 }
 
 export function createSystemResourceMonitor({
@@ -94,7 +189,8 @@ export function createSystemResourceMonitor({
   readTotalMemory = () => os.totalmem(),
   readFreeMemory = () => os.freemem(),
   readDisk = path => statfs(path, { bigint: true }),
-  readNetwork = readMacNetworkCounters,
+  readNetwork = platform === 'darwin' ? readMacNetworkCounters : readLinuxNetworkCounters,
+  readDiskIo = platform === 'darwin' ? readMacDiskCounters : readLinuxDiskCounters,
   now = () => Date.now(),
   monotonicNow = () => performance.now(),
   minIntervalMs = SAMPLE_INTERVAL_MS,
@@ -104,12 +200,48 @@ export function createSystemResourceMonitor({
   if (typeof profilePath !== 'string' || !profilePath) throw new TypeError('profilePath is required')
   if (!Number.isSafeInteger(diskTimeoutMs) || diskTimeoutMs < 1 || diskTimeoutMs > 10_000) throw new TypeError('diskTimeoutMs must be between 1 and 10000')
 
-  let previousCpu = null, previousNetwork = null
+  let previousCpu = null, previousNetwork = null, previousDiskIo = null
   let cached = null, cachedAt = -Infinity, inFlight = null, closed = false
+  let cachedDisk = null, cachedDiskAt = -Infinity
   let pendingDiskReads = 0
   const abort = new AbortController()
+  const countersSupported = platform === 'darwin' || platform === 'linux'
+
+  // A timed-out or non-cooperative reader cannot accumulate concurrent work.
+  // The timestamp belongs to the counter read, not a slower storage statfs.
+  function boundedCounterReader(reader) {
+    let pending = false
+    return () => {
+      if (closed || pending) return Promise.resolve(null)
+      pending = true
+      const controller = new AbortController()
+      const onClose = () => controller.abort()
+      abort.signal.addEventListener('abort', onClose, { once: true })
+      return new Promise(resolve => {
+        let finished = false
+        const finish = value => {
+          if (finished) return
+          finished = true
+          clearTimeout(timer)
+          resolve(value)
+        }
+        const timer = setTimeout(() => { controller.abort(); finish(null) }, COUNTER_TIMEOUT_MS)
+        Promise.resolve().then(() => closed ? null : reader({ signal: controller.signal })).then(
+          counters => {
+            pending = false
+            abort.signal.removeEventListener('abort', onClose)
+            finish(counters === null ? null : { counters, at: monotonicNow() })
+          },
+          () => { pending = false; abort.signal.removeEventListener('abort', onClose); finish(null) },
+        )
+      })
+    }
+  }
+  const sampleNetwork = boundedCounterReader(readNetwork)
+  const sampleDiskIo = boundedCounterReader(readDiskIo)
 
   function sampleDisk() {
+    if (cachedDisk && monotonicNow() - cachedDiskAt < STORAGE_INTERVAL_MS) return Promise.resolve(cachedDisk)
     // statfs has no cancellation API. Time out the response, but keep at most
     // two underlying reads: one stuck read cannot prevent the next recovery
     // attempt, while repeated stalls cannot grow without bound.
@@ -121,6 +253,8 @@ export function createSystemResourceMonitor({
         if (finished) return // A result arriving after timeout never changes a sample.
         finished = true
         clearTimeout(timer)
+        if (value.status === 'ok') value = { ...value, sampledAt: new Date(now()).toISOString() }
+        if (value.status === 'ok' && !closed) { cachedDisk = value; cachedDiskAt = monotonicNow() }
         resolve(value)
       }
       const timer = setTimeout(() => finish(emptyDisk('unavailable')), diskTimeoutMs)
@@ -155,14 +289,12 @@ export function createSystemResourceMonitor({
     try { memory = memorySnapshot(readTotalMemory(), readFreeMemory()) } catch {}
 
     const diskPromise = sampleDisk()
-    const networkPromise = platform === 'darwin'
-      ? Promise.resolve().then(() => closed ? null : readNetwork({ signal: abort.signal }))
-        .then(counters => ({ counters, at: monotonicNow() })).catch(() => null)
-      : Promise.resolve(null)
-    const [disk, networkReading] = await Promise.all([diskPromise, networkPromise])
+    const networkPromise = countersSupported ? sampleNetwork() : Promise.resolve(null)
+    const diskIoPromise = countersSupported ? sampleDiskIo() : Promise.resolve(null)
+    const [disk, networkReading, diskIoReading] = await Promise.all([diskPromise, networkPromise, diskIoPromise])
 
-    let network = emptyNetwork(platform === 'darwin' ? 'unavailable' : 'unsupported')
-    if (platform === 'darwin') {
+    let network = emptyNetwork(countersSupported ? 'unavailable' : 'unsupported')
+    if (countersSupported) {
       try {
         const counters = networkReading?.counters
         const at = networkReading?.at
@@ -188,7 +320,47 @@ export function createSystemResourceMonitor({
       } catch { previousNetwork = null }
     }
 
-    return { version: 1, sampledAt: new Date(now()).toISOString(), host: 'local-computer', scope: 'host', cpu, memory, disk, network }
+    let diskIo = emptyDiskIo(countersSupported ? 'unavailable' : 'unsupported')
+    if (countersSupported) {
+      try {
+        const devices = diskIoReading?.counters
+        const at = diskIoReading?.at
+        if (Array.isArray(devices) && devices.length && Number.isFinite(at)) {
+          const current = new Map()
+          for (const device of devices) {
+            if (typeof device.id !== 'string' || !device.id || current.has(device.id) ||
+                typeof device.readBytes !== 'bigint' || typeof device.writeBytes !== 'bigint' ||
+                device.readBytes < 0n || device.writeBytes < 0n) throw new Error('invalid counters')
+            current.set(device.id, device)
+          }
+          diskIo = emptyDiskIo('warming')
+          if (previousDiskIo && previousDiskIo.devices.size === current.size &&
+              [...current.keys()].every(id => previousDiskIo.devices.has(id))) {
+            const intervalMs = at - previousDiskIo.at
+            let readDelta = 0n, writeDelta = 0n, valid = true
+            for (const [id, device] of current) {
+              const previous = previousDiskIo.devices.get(id)
+              const read = device.readBytes - previous.readBytes
+              const write = device.writeBytes - previous.writeBytes
+              if (read < 0n || write < 0n) valid = false
+              readDelta += read; writeDelta += write
+            }
+            if (valid && intervalMs >= MIN_COUNTER_INTERVAL_MS && intervalMs <= maxCounterGapMs &&
+                readDelta <= MAX_SAFE_BIGINT && writeDelta <= MAX_SAFE_BIGINT) {
+              const readBytesPerSecond = Math.round(Number(readDelta) * 1_000 / intervalMs)
+              const writeBytesPerSecond = Math.round(Number(writeDelta) * 1_000 / intervalMs)
+              if (Number.isSafeInteger(readBytesPerSecond) && Number.isSafeInteger(writeBytesPerSecond)) diskIo = {
+                status: 'ok', readBytesPerSecond, writeBytesPerSecond,
+                intervalMs: Math.round(intervalMs), basis: 'reported-whole-block-devices',
+              }
+            }
+          }
+          previousDiskIo = { devices: current, at }
+        } else previousDiskIo = null
+      } catch { previousDiskIo = null }
+    }
+
+    return { version: 1, sampledAt: new Date(now()).toISOString(), host: 'local-computer', scope: 'host', cpu, memory, disk, diskIo, network }
   }
 
   return {
@@ -197,8 +369,7 @@ export function createSystemResourceMonitor({
       if (cached && monotonicNow() - cachedAt < minIntervalMs) return Promise.resolve(cached)
       if (inFlight) return inFlight
       inFlight = collect().then(value => {
-        cached = value
-        cachedAt = monotonicNow()
+        if (!closed) { cached = value; cachedAt = monotonicNow() }
         return value
       }).finally(() => { inFlight = null })
       return inFlight
@@ -207,8 +378,10 @@ export function createSystemResourceMonitor({
       closed = true
       abort.abort()
       cached = null
+      cachedDisk = null
       previousCpu = null
       previousNetwork = null
+      previousDiskIo = null
     },
   }
 }

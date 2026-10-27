@@ -109,6 +109,50 @@ export function createTerminalWriteQueue({ write, onError = () => {} }) {
   };
 }
 
+// xterm can emit once from keydown and again from a following keypress/input
+// when the embedding browser delivers both despite the cancelled keydown. Only
+// suppress the later DOM event belonging to that very same physical key; a new
+// keydown (including auto-repeat), composition, or paste starts a new action.
+export function createTerminalKeyEventGuard() {
+  let keydown = null;
+  const reset = () => { keydown = null; };
+  const sameKey = event => keydown && event.key === keydown.key
+    && (!event.code || !keydown.code || event.code === keydown.code)
+    && (event.location || 0) === keydown.location
+    && !!event.shiftKey === keydown.shiftKey
+    && !event.ctrlKey && !event.altKey && !event.metaKey && !event.isComposing;
+  return {
+    keyEvent(event) {
+      if (event.type === 'keydown' || event.type === 'keyup') {
+        reset();
+        return true;
+      }
+      if (event.type === 'keypress' && sameKey(event) && !keydown.keypressSuppressed) {
+        keydown.keypressSuppressed = true;
+        event.preventDefault();
+        return false;
+      }
+      return true;
+    },
+    onKey({ key, domEvent: event }) {
+      if (event?.type !== 'keydown' || event.isComposing || event.keyCode === 229
+          || event.ctrlKey || event.altKey || event.metaKey || typeof event.key !== 'string'
+          || Array.from(event.key).length !== 1 || key !== event.key) return;
+      keydown = { key, code: event.code, location: event.location || 0,
+        shiftKey: !!event.shiftKey, keypressSuppressed: false, inputSuppressed: false };
+    },
+    input(event) {
+      if (!keydown || keydown.inputSuppressed || event.isComposing
+          || event.inputType !== 'insertText' || event.data !== keydown.key) return;
+      keydown.inputSuppressed = true;
+      // input is already applied by the browser and is usually not cancelable.
+      // Stop only xterm's second input path, not the original keydown or IME.
+      event.stopPropagation();
+    },
+    reset,
+  };
+}
+
 // xterm owns native composition. The fallback retains the privileged-frame
 // compatibility path only when that composition produced no onData at all.
 // Tokens expire at real input boundaries or a session change; equal text in a

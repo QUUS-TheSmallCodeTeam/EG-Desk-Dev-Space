@@ -523,6 +523,7 @@ test('actual Terminal Card background options keep Canvas representation without
   const { createTerminalZone } = await import(new URL('resources/surface/EGDeskSurfaceTerminal.mjs', overlay));
   for (const options of [{}, { activate: false, reveal: false }, { activate: false }, { reveal: false }]) {
     const events = [], messages = new Map();
+    const state = { activeEntityId: 'previous-active-card' };
     const node = (tag, props = {}, ...children) => {
       const value = { tag, ...props, className: props.class || '', style: props.style || {}, dataset: props.data || {}, children: [], listeners: new Map(),
         appendChild(child) { this.children.push(child); child.parent = this; return child; },
@@ -540,8 +541,9 @@ test('actual Terminal Card background options keep Canvas representation without
     const deps = Object.fromEntries(factoryDeps(read('resources/surface/EGDeskSurfaceTerminal.mjs')).map(name => [name, () => {}]));
     Object.assign(deps, { TAG: 'unit', allocCardSeq: () => 1, el: node, raiseCardZ: () => 2,
       makeSourceRef: (kind, details) => ({ kind, ...details }), resolveCanvasCardPlacement: () => ({ x: 1, y: 2, width: 400, height: 300 }),
-      setActiveEntity: () => events.push('activate'), revealPlacedCanvasCard: () => events.push('reveal'),
-      markAgendaDirty: () => events.push('persist-card'), boardCloseRequests: new Set(), state: {} });
+      setActiveEntity: card => { events.push('activate'); state.activeEntityId = card.id; },
+      revealPlacedCanvasCard: () => events.push('reveal'),
+      markAgendaDirty: () => events.push('persist-card'), boardCloseRequests: new Set(), state });
     const globals = { document: { getElementById: () => host, addEventListener() {}, removeEventListener() {} },
       window: { addEventListener: (type, callback) => messages.set(type, callback), removeEventListener() {} }, console: { warn() {} } };
     const saved = new Map(Object.keys(globals).map(key => [key, Object.getOwnPropertyDescriptor(globalThis, key)]));
@@ -551,6 +553,7 @@ test('actual Terminal Card background options keep Canvas representation without
       assert.equal(host.children.includes(card), true, 'background execution remains a real Canvas Card');
       assert.equal(events.filter(event => event === 'persist-card').length, 1);
       assert.equal(events.includes('activate'), options.activate !== false);
+      assert.equal(state.activeEntityId, options.activate !== false ? card.id : 'previous-active-card');
       assert.equal(events.includes('reveal'), options.reveal !== false);
       assert.equal(new URL(card._termBrowser.src).searchParams.get('autofocus'), options.activate === false ? '0' : null);
       messages.get('message')({ source: {}, data: { type: 'terminal-ready' } });
@@ -558,6 +561,17 @@ test('actual Terminal Card background options keep Canvas representation without
       messages.get('message')({ source: card._termBrowser.contentWindow, data: { type: 'terminal-ready', shellLabel: 'zsh' } });
       assert.equal(events.includes('frame-focus'), options.activate !== false);
       assert.equal(events.includes('terminal-focus'), options.activate !== false);
+      const focusCount = events.filter(event => event.endsWith('-focus')).length;
+      state.activeEntityId = 'different-card';
+      messages.get('message')({ source: card._termBrowser.contentWindow, data: { type: 'terminal-ready' } });
+      assert.equal(events.filter(event => event.endsWith('-focus')).length, focusCount,
+        'late ready cannot steal focus from another active Card');
+      if (options.activate === false) {
+        state.activeEntityId = card.id;
+        messages.get('message')({ source: card._termBrowser.contentWindow, data: { type: 'terminal-ready' } });
+        assert.equal(events.filter(event => event.endsWith('-focus')).length, 0,
+          'background creation never requests ready focus, even if selected later');
+      }
     } finally {
       for (const [key, descriptor] of saved) { if (descriptor) Object.defineProperty(globalThis, key, descriptor); else delete globalThis[key]; }
     }

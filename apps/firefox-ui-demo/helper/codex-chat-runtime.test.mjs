@@ -128,8 +128,8 @@ test('ordinary Chat does not apply QA MCP or plugin overrides to its native thre
   assert.deepEqual(h.calls.find(call => call.method === 'thread/start').params.config, { features: { default_mode_request_user_input: true } })
 })
 
-test('actual ContextRuntime attachment capture and dynamic read specs remain available under the validated 0.160.1 gate', async () => {
-  const native = inspectNativeCapabilities({ executable: '/native/codex', run: () => ({ status: 0, stdout: 'codex-cli 0.160.1\n' }),
+for (const version of ['0.160.1', '0.162.1']) test(`ContextRuntime fixture honors the separate context and QA gates for ${version}`, async () => {
+  const native = inspectNativeCapabilities({ executable: '/native/codex', run: () => ({ status: 0, stdout: `codex-cli ${version}\n` }),
     probe: () => ({ contextContract: true, qaContract: true, schemaFingerprint: 'a'.repeat(64) }), fingerprint: () => 'b'.repeat(64) })
   const captured = { sourceId: 'fixture-source', hash: 'fixture-hash', label: 'Public fixture', captureScope: 'full', truncated: false, shape: { kind: 'text' } }
   const observations = []
@@ -148,17 +148,96 @@ test('actual ContextRuntime attachment capture and dynamic read specs remain ava
     },
     bind: async (owner, run, ids, capabilities, readerConfiguration) => {
       observations.push(['bound', owner, run.runId, ids])
-      return { bindingId: 'binding-1', capabilities, readerConfiguration, captures: [captured] }
+      return { bindingId: 'binding-1', capabilities, readerConfiguration, captures: ids.length ? [captured] : [] }
     },
   }
   const contexts = new ContextRuntime({ store, reader: null, getOwnerKey: () => 'qa-account', schemaReady: () => native.schemaMatch })
-  const h = qaHarness({ contexts, getOwnerKey: () => 'qa-account' })
-  const accepted = await h.chat.send({ message: 'Read the attached public fixture', clientThreadId: 'fixture-chat', attachments: [{ kind: 'public-fixture' }], contextCapabilities: { read: true }, executionPolicy: { mode: 'readOnlyQa' } })
+  const h = qaHarness({ contexts, getOwnerKey: () => 'qa-account', qaReady: () => native.qaReadOnly })
+  if (!native.qaReadOnly) {
+    for (const mode of ['readOnlyQa', 'browserBounded', 'fixtureBrowserQa']) {
+      await assert.rejects(h.chat.send({ message: 'QA fixture', clientThreadId: 'fixture-qa', executionPolicy: { mode } }),
+        { code: 'QA_POLICY_UNAVAILABLE' })
+    }
+    assert.deepEqual(h.calls, [], 'an unverified QA contract must not reach native setup or turn dispatch')
+  }
+  const accepted = await h.chat.send({ message: 'Read the attached public fixture', clientThreadId: 'fixture-chat', attachments: [{ kind: 'public-fixture' }], contextCapabilities: { read: true },
+    ...(native.qaReadOnly ? { executionPolicy: { mode: 'readOnlyQa' } } : {}) })
   assert.deepEqual(observations.map(row => row[0]), ['capture', 'registered', 'manifest-checked', 'bound'])
-  assert.deepEqual(h.calls.find(call => call.method === 'thread/start').params.dynamicTools.map(tool => tool.name), ['egdesk_list_context', 'egdesk_read_source'])
+  const names = h.calls.find(call => call.method === 'thread/start').params.dynamicTools.map(tool => tool.name)
+  if (native.qaReadOnly) assert.deepEqual(names, ['egdesk_list_context', 'egdesk_read_source'])
+  else assert.ok(names.includes('egdesk_list_context') && names.includes('egdesk_read_source'))
   const context = JSON.parse(h.calls.find(call => call.method === 'turn/start').params.additionalContext.egdesk_context.value)
   assert.equal(context.captures[0].sourceId, captured.sourceId)
-  assert.equal(accepted.executionPolicy.mode, 'readOnlyQa')
+  assert.equal(accepted.executionPolicy?.mode ?? null, native.qaReadOnly ? 'readOnlyQa' : null)
+  const plain = await h.chat.send({ message: 'Plain fixture', clientThreadId: 'fixture-plain', contextSnapshotIds: [],
+    contextCapabilities: { read: true, reader: true, publishBriefing: true } })
+  assert.equal(plain.accepted, true)
+  const plainStart = h.calls.filter(call => call.method === 'thread/start').at(-1).params
+  const plainTurn = h.calls.filter(call => call.method === 'turn/start').at(-1).params
+  assert.ok(plainStart.dynamicTools.some(tool => tool.name === 'egdesk_list_context'))
+  assert.deepEqual(JSON.parse(plainTurn.additionalContext.egdesk_context.value).captures, [])
+})
+
+test('Codex schema refusal is saved and replayed without dropping implicit or explicitly selected context', async t => {
+  for (const explicit of [false, true]) await t.test(explicit ? 'selected attachment' : 'implicit context capabilities', async t => {
+    const dataDir = createPrivateQaTempDirectory('egdesk-codex-schema-refusal-')
+    let store = openChatStore({ dataDir, ownerScope: 'schema-refusal-fixture' })
+    t.after(async () => { store.close(); await rm(dataDir, { recursive: true, force: true }) })
+    const make = () => {
+      const contexts = new ContextRuntime({ store: {}, reader: null, getOwnerKey: () => 'fixture-owner', schemaReady: () => false })
+      return harness({ store, contexts, getOwnerKey: () => 'fixture-owner' })
+    }
+    const body = { message: 'Fixture only', requestId: 'request-1', clientThreadId: 'room-1', engineId: 'codex',
+      contextSnapshotIds: explicit ? ['selected-source'] : [], contextCapabilities: { read: true, reader: true, publishBriefing: true } }
+    const h = make()
+    await assert.rejects(h.chat.send(body), { code: 'NATIVE_SCHEMA_MISMATCH', httpStatus: 409,
+      dispatchStatus: 'rejected', resumeRequired: false, saved: true, durable: true })
+    assert.deepEqual(h.calls, [], 'the Context refusal never reaches the native thread or turn')
+    const saved = store.getRequest({ clientThreadId: body.clientThreadId, requestId: body.requestId })
+    assert.deepEqual([saved.outcome?.accepted, saved.outcome?.dispatchStatus, saved.outcome?.code, saved.outcome?.error?.code],
+      [false, 'rejected', 'NATIVE_SCHEMA_MISMATCH', 'NATIVE_SCHEMA_MISMATCH'])
+    assert.equal(saved.outcome.error.message, 'Context access was rejected or unavailable; its raw diagnostic was withheld.')
+    assert.equal(JSON.stringify(saved.outcome).includes('selected-source'), false)
+    store.close()
+    store = openChatStore({ dataDir, ownerScope: 'schema-refusal-fixture' })
+    const reopened = make()
+    assert.equal(reopened.chat.recoverInterruptedRuns(), 0)
+    const replay = await reopened.chat.send(body)
+    assert.deepEqual([replay.duplicate, replay.accepted, replay.dispatchStatus, replay.code, replay.resumeRequired],
+      [true, false, 'rejected', 'NATIVE_SCHEMA_MISMATCH', false])
+    assert.deepEqual(reopened.calls, [], 'a durable duplicate never invokes a native provider')
+  })
+})
+
+test('a schema-named failure after turn dispatch remains unknown, not a durable prestart refusal', async t => {
+  const dataDir = createPrivateQaTempDirectory('egdesk-schema-unknown-outcome-')
+  const store = openChatStore({ dataDir, ownerScope: 'schema-unknown-fixture' })
+  t.after(async () => { store.close(); await rm(dataDir, { recursive: true, force: true }) })
+  const h = harness({ store, getOwnerKey: () => 'fixture-owner', request: async (method, params, chat, defaults) => {
+    if (method === 'turn/start') throw Object.assign(new Error('fixture response lost'), { code: 'NATIVE_SCHEMA_MISMATCH' })
+    return defaults(method, params)
+  } })
+  const body = { message: 'Fixture only', requestId: 'request-unknown', clientThreadId: 'room-unknown', engineId: 'codex' }
+  await assert.rejects(h.chat.send(body), { code: 'NATIVE_SCHEMA_MISMATCH', dispatchStatus: 'unknown', resumeRequired: true })
+  const saved = store.getRequest({ clientThreadId: body.clientThreadId, requestId: body.requestId })
+  assert.equal(saved.outcome?.dispatchStatus, 'unknown')
+  assert.notEqual(saved.outcome?.code, 'NATIVE_SCHEMA_MISMATCH')
+})
+
+test('a prior uncertain native turn is not cleared by a later context schema refusal', async t => {
+  const dataDir = createPrivateQaTempDirectory('egdesk-schema-prior-uncertain-')
+  const store = openChatStore({ dataDir, ownerScope: 'schema-unknown-fixture' })
+  t.after(async () => { store.close(); await rm(dataDir, { recursive: true, force: true }) })
+  const contexts = new ContextRuntime({ store: {}, reader: null, getOwnerKey: () => 'fixture-owner', schemaReady: () => false })
+  const h = harness({ store, contexts, getOwnerKey: () => 'fixture-owner' })
+  const first = await h.chat.send({ message: 'Fixture first turn', requestId: 'first', clientThreadId: 'room', engineId: 'codex' })
+  await h.finish(first)
+  h.chat.uncertainThreads.add(first.conversationId)
+  const next = { message: 'Fixture next turn', requestId: 'second', clientThreadId: 'room', engineId: 'codex',
+    conversationId: first.conversationId, contextCapabilities: { read: true, reader: true, publishBriefing: true } }
+  await assert.rejects(h.chat.send(next), { code: 'NATIVE_SCHEMA_MISMATCH', dispatchStatus: 'unknown', resumeRequired: true })
+  assert.notEqual(store.getRequest({ clientThreadId: 'room', requestId: 'second' }).outcome?.dispatchStatus, 'rejected')
+  assert.equal(h.calls.filter(call => call.method === 'turn/start').length, 1)
 })
 
 test('ordinary Browser attachment keeps immutable Context read without live Browser binding or native policy changes', async () => {

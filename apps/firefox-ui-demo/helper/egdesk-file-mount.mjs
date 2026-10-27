@@ -3,21 +3,24 @@ import path from 'node:path'
 import { createEGDeskFileHttpAdapter } from './egdesk-file-http.mjs'
 import { createEGDeskNativeCreateOnlyAdapter } from './egdesk-file-native.mjs'
 import { FileSurfaceError } from './egdesk-file-service.mjs'
+import { PINNED_NODE_VERSION } from './egdesk-node-runtime.mjs'
+import { assertPatchedSqliteRuntime } from './egdesk-sqlite-runtime.mjs'
 
 export const MINIMUM_NODE_VERSION = '24.0.0'
-export const INTEGRATION_NODE_VERSION = '24.11.1'
+export const INTEGRATION_NODE_VERSION = PINNED_NODE_VERSION
 
 // Check before opening SQLite, creating a data directory, or starting Codex.
-// The baseline is evidence from integration, not a claim about every newer Node.
+// The pinned version is the project runtime, not a claim about every newer Node.
 export function requireEGDeskNodeRuntime({ version = process.versions.node, hasSqlite = isBuiltin('node:sqlite') } = {}) {
   const match = typeof version === 'string' && version.match(/^(\d+)\.(\d+)\.(\d+)$/)
   if (!match || Number(match[1]) < 24) {
-    throw Object.assign(new Error(`EG-Desk requires Node.js ${MINIMUM_NODE_VERSION} or newer for managed file drafts (node:sqlite); detected ${version || 'unknown'}. Integration baseline: Node.js ${INTEGRATION_NODE_VERSION}. Use a supported Node executable to start the bridge.`), { code: 'EGDESK_NODE_VERSION_REQUIRED' })
+    throw Object.assign(new Error(`EG-Desk requires Node.js ${MINIMUM_NODE_VERSION} or newer for managed file drafts (node:sqlite); detected ${version || 'unknown'}. Project pin: Node.js ${INTEGRATION_NODE_VERSION}. Use a supported Node executable to start the bridge.`), { code: 'EGDESK_NODE_VERSION_REQUIRED' })
   }
   if (!hasSqlite) {
-    throw Object.assign(new Error(`Node.js ${version} does not provide node:sqlite. EG-Desk managed file drafts require a Node.js 24+ build with this builtin; integration baseline: ${INTEGRATION_NODE_VERSION}.`), { code: 'EGDESK_SQLITE_REQUIRED' })
+    throw Object.assign(new Error(`Node.js ${version} does not provide node:sqlite. EG-Desk managed file drafts require a Node.js 24+ build with this builtin; project pin: ${INTEGRATION_NODE_VERSION}.`), { code: 'EGDESK_SQLITE_REQUIRED' })
   }
-  return Object.freeze({ version, minimumVersion: MINIMUM_NODE_VERSION, integrationBaseline: INTEGRATION_NODE_VERSION, sqliteBuiltin: true })
+  const sqliteRuntime = assertPatchedSqliteRuntime()
+  return Object.freeze({ version, minimumVersion: MINIMUM_NODE_VERSION, integrationBaseline: INTEGRATION_NODE_VERSION, sqliteBuiltin: true, sqliteVersion: sqliteRuntime.sqliteVersion })
 }
 
 // Product-local file authority is intentionally not derived from Codex auth,

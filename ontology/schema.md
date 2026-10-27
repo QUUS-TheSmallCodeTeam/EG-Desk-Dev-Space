@@ -13,6 +13,11 @@ relations:
 
 Each ontology file is a graph node. Markdown body is for human reading. Frontmatter is for parsers and LLM context selection.
 
+This is the preserved Markdown/graph **seed schema**. Once a profile is
+initialized, its SQLite store is operational canonical; these files do not
+automatically refresh or overwrite it. See
+[Ontology SQLite Storage](../apps/firefox-ui-demo/docs/ONTOLOGY_SQLITE_STORAGE.md).
+
 The ontology is not meant to become a Wikipedia clone. Basic object pages such as `terminal`, `cpu`, or `disk` can be thin handles. EG-Desk product concepts such as `egdesk.desk`, `egdesk.agenda`, or `egdesk.card` should keep short definitions because their meaning is custom to EG-Desk. The most important authored units for context-specific hierarchy are relation maps: notes that declare how objects are assembled for a specific work context.
 
 ## Required Frontmatter
@@ -289,7 +294,10 @@ index.md
 
 ## Web UI Rule
 
-The web UI may cache parsed nodes and edges, but generated caches are secondary. The canonical source remains Markdown frontmatter and links.
+The web UI renders the profile-bound SQLite graph. Markdown frontmatter and
+links define the preserved authoring seed, and generated graph files remain
+secondary seed artifacts. Neither a changed seed nor a UI cache replaces an
+initialized operational database automatically.
 
 The current composite-lens renderer draws reference occurrences as its primary
 screen objects. It preserves canonical identity through `concept_id`, while

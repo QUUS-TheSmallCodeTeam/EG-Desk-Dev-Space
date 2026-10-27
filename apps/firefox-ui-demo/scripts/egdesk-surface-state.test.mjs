@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { existsSync, readFileSync, rmSync } from 'node:fs';
 import { Readable } from 'node:stream';
 import { createHash } from 'node:crypto';
-import { compileFunction } from 'node:vm';
+import { compileFunction, runInNewContext } from 'node:vm';
 import { readSurfaceSource } from './egdesk-surface-source.mjs';
 import { initialSurfaceMode, shouldFocusInitialBrowser, planBoardProjection, snapshotBoardProjection, remapMemberReferences, recoverDeskSnapshot, canPersistDeskSession, ownedProjectionMembers, missingProjectionMembers, fitSurfaceCamera, surfaceSemanticLevel, surfaceProximityClusters } from '../overlay/resources/EGDeskSurfaceState.sys.mjs';
 import * as Surface from '../overlay/resources/EGDeskSurfaceState.sys.mjs';
@@ -1404,7 +1404,7 @@ test('first-use Browser restore fits its saved world rect below Desk chrome with
   assert.equal(state.surface.initialBrowserFocus, false);
 });
 
-test('first Browser zoom-out keeps the fitted Desk camera and later zoom remains pointer-anchored', () => {
+test('first Browser zoom-out reveals the Desk continuously without a restore-fit camera jump', () => {
   const exitBody = surfaceSource.match(/  function exitCardFullscreen\(card = null, options = \{\}\) \{([\s\S]*?)\n  \}/)?.[1];
   const enterBody = surfaceSource.match(/  function enterLocalDesk\(\) \{([\s\S]*?)\n  \}/)?.[1];
   const safeBody = surfaceSource.match(/  function safeViewportRect\(options = \{\}\) \{([\s\S]*?)\n  \}/)?.[1];
@@ -1448,22 +1448,15 @@ test('first Browser zoom-out keeps the fitted Desk camera and later zoom remains
     ['state', 'exitCardFullscreen', 'document', 'scheduleDeskSessionSave'])(
     state, exitFullscreen, document, () => {});
   const zoomByFactor = compileFunction(`return (factor, cx, cy) => {${factorBody}\n    }`,
-    ['state', 'ZOOM_MIN', 'ZOOM_MAX', 'enterLocalDesk', 'frame', 'window', 'apply', 'scheduleAnimate', 'safeViewportRect'])(
-    state, .01, 4, enterDesk, 0, window, () => { applied++; }, () => { animated++; }, safeViewportRect);
-  const fitted = fitSurfaceCamera({ x: 0, y: 0, width: 1280, height: 776 }, safe);
-  const screen = () => ({ left: state.panTarget.x, top: state.panTarget.y,
-    right: state.panTarget.x + 1280 * state.zoomTarget,
-    bottom: state.panTarget.y + 776 * state.zoomTarget });
+    ['state', 'ZOOM_MIN', 'ZOOM_MAX', 'enterLocalDesk', 'frame', 'window', 'apply', 'scheduleAnimate', 'safeViewportRect', 'exitCardFullscreen'])(
+    state, .01, 4, enterDesk, 0, window, () => { applied++; }, () => { animated++; }, safeViewportRect, exitFullscreen);
   zoomByFactor(.99, 1270, 760); // first tiny outward gesture near the viewport corner
   assert.equal(state.surface.initialBrowserFocus, false);
   assert.equal(state.cardFullscreen, null);
-  assert.ok(screen().left >= safe.left - .001 && screen().right <= safe.right + .001,
-    'the Browser remains inside the Desk horizontally after the whole zoom input');
-  assert.ok(screen().top >= safe.top - .001 && screen().bottom <= safe.bottom + .001,
-    'the Browser title and controls remain below the topbar and above the Dock');
-  assert.ok(Math.abs(state.zoomTarget - fitted.zoom * .99) < 1e-9,
-    'the first user zoom factor still applies to the newly fitted Desk camera');
-  assert.equal(applied, 1, 'the real immediate viewport setter applied the exit fit');
+  assert.equal(state.zoomTarget, .99, 'first outward gesture uses exactly its factor, not a Desk refit');
+  assert.ok(Math.abs(state.panTarget.x - 12.7) < 1e-9);
+  assert.ok(Math.abs(state.panTarget.y - 7.6) < 1e-9, 'the original pointer anchor is preserved');
+  assert.equal(applied, 0, 'clearing Focus does not install an intermediate camera');
   assert.equal(animated, 1, 'the first user zoom was not suppressed');
   assert.deepEqual(browser.style, worldRect);
   assert.equal(browser._browserState, browserState);
@@ -1482,27 +1475,83 @@ test('semantic zoom uses the canonical 1–400% camera range without changing Ca
   const card = { id: 'qa-browser', type: 'browser', geometry: { x: 40, y: 80, width: 720, height: 500 },
     sourceRef: { kind: 'browser-url', uri: 'about:blank' }, runtimeState: { uri: 'about:blank' } };
   const before = structuredClone(card);
-  for (const zoom of [1, .7, .6, .07, .01, 4]) {
+  for (const zoom of [1, .69, .5, .4, .3, .07, .01, 4]) {
     surfaceSemanticLevel({ width: card.geometry.width * zoom,
       height: card.geometry.height * zoom, fontPx: 14 * zoom });
   }
   assert.deepEqual(card, before, 'LOD decisions must not edit identity, world geometry, or persisted data');
 });
 
-test('semantic zoom uses per-Card projected geometry and font with stable hysteresis', () => {
-  const projected = (zoom, previous) => surfaceSemanticLevel({
-    width: 720 * zoom, height: 500 * zoom, fontPx: 14 * zoom, previous,
+test('semantic zoom restores ordinary Chat and Browser detail from outline through 35%', () => {
+  const project = (width, height, fontPx, zoom, previous = 'outline') => surfaceSemanticLevel({
+    width: width * zoom, height: height * zoom, fontPx: fontPx * zoom, previous,
+    // The production caller supplies these reference sizes explicitly.
+    detailWidth: 240, detailHeight: 180,
   });
-  assert.equal(projected(1), 'detail');
-  assert.equal(projected(.7, 'detail'), 'detail', '100→70 holds readable detail');
-  assert.equal(projected(.6, 'detail'), 'outline');
-  assert.equal(projected(.7, 'outline'), 'outline', '60→70 stays compact');
-  assert.equal(projected(.8, 'outline'), 'detail');
+  for (const zoom of [.69, .5, .35]) {
+    assert.equal(project(320, 420, 13, zoom), 'detail', `minimum Chat at ${zoom}`);
+    assert.equal(project(320, 420, 10, zoom), 'detail', `minimum Chat with 10px font at ${zoom}`);
+    assert.equal(project(720, 500, 11, zoom), 'detail', `normal Browser at ${zoom}`);
+    assert.equal(project(720, 500, 16, zoom), 'detail', `measured Browser at ${zoom}`);
+  }
+});
+
+test('semantic zoom delays abstraction on zoom-out and keeps a stable detail hysteresis band', () => {
+  const projected = (width, height, fontPx, zoom, previous) => surfaceSemanticLevel({
+    width: width * zoom, height: height * zoom, fontPx: fontPx * zoom, previous,
+    detailWidth: 240, detailHeight: 180,
+  });
+  assert.equal(projected(320, 420, 13, 1), 'detail');
+  assert.equal(projected(320, 420, 13, .5, 'detail'), 'detail');
+  assert.equal(projected(320, 420, 13, .3, 'detail'), 'detail');
+  assert.equal(projected(320, 420, 13, .2772, 'detail'), 'detail');
+  assert.equal(projected(320, 420, 13, .277, 'detail'), 'outline', 'minimum Chat leaves detail just below 27.72%');
+  assert.equal(projected(320, 420, 13, .25, 'outline'), 'outline', 'gradual zoom-out keeps the existing outline hysteresis');
+  assert.equal(projected(320, 420, 13, .24, 'outline'), 'marker', 'the original 77.44px outline exit remains intact');
+  assert.equal(projected(320, 420, 13, .30, 'outline'), 'outline', 'zoom-in holds outline below the 31.5% entry');
+  assert.equal(projected(320, 420, 13, .315, 'outline'), 'detail');
+  assert.equal(projected(448, 343, 11, .3, 'outline'), 'detail');
+  assert.equal(projected(448, 343, 11, .264, 'detail'), 'detail');
+  assert.equal(projected(448, 343, 11, .263, 'detail'), 'outline', 'native Browser leaves detail near 26.36%');
+  assert.equal(projected(448, 343, 11, .25, 'outline'), 'outline');
+  assert.equal(projected(448, 343, 11, .20, 'outline'), 'outline');
+  assert.equal(projected(720, 500, 14, .21, 'detail'), 'detail');
+  assert.equal(projected(720, 500, 14, .20, 'detail'), 'outline');
+  assert.equal(projected(720, 500, 14, .23, 'outline'), 'outline');
+  assert.equal(projected(720, 500, 14, .24, 'outline'), 'detail');
+});
+
+test('semantic zoom uses all projected pixel thresholds for small and large Cards', () => {
+  const entered = { width: 100.8, height: 75.6, fontPx: 3.3, previous: 'outline' };
+  assert.equal(surfaceSemanticLevel(entered), 'detail', 'all entry thresholds are inclusive');
+  for (const [field, value] of [['width', 100.79], ['height', 75.59], ['fontPx', 3.29]]) {
+    assert.equal(surfaceSemanticLevel({ ...entered, [field]: value }), 'outline', `${field} independently gates entry`);
+  }
+  const staying = { width: 240 * .42 * .88, height: 180 * .42 * .88, fontPx: 2.9, previous: 'detail' };
+  assert.equal(surfaceSemanticLevel(staying), 'detail', 'all exit thresholds are inclusive');
+  for (const [field, value] of [['width', staying.width - .01], ['height', staying.height - .01], ['fontPx', 2.89]]) {
+    assert.equal(surfaceSemanticLevel({ ...staying, [field]: value }), 'outline', `${field} independently gates retention`);
+  }
+  assert.equal(surfaceSemanticLevel({ ...staying, previous: 'outline' }), 'outline', 'the same projection remains in the hysteresis gap');
+  assert.equal(surfaceSemanticLevel({ width: 200, height: 140, fontPx: 14 }), 'detail');
+  assert.equal(surfaceSemanticLevel({ width: 200 * .5, height: 140 * .5, fontPx: 14 * .5 }), 'outline',
+    'a small Card abstracts when its projected dimensions are too small');
+  const large = (zoom, previous) => surfaceSemanticLevel({ width: 1600 * zoom, height: 900 * zoom, fontPx: 16 * zoom, previous });
+  assert.equal(large(.21, 'outline'), 'detail');
+  assert.equal(large(.20, 'outline'), 'outline', 'a large Card still needs enough projected font');
+  assert.equal(large(.19, 'detail'), 'detail');
+  assert.equal(large(.18, 'detail'), 'outline');
+  assert.equal(surfaceSemanticLevel({ width: 126, height: 84, fontPx: 3.3, previous: 'outline', detailWidth: 300, detailHeight: 200 }), 'detail');
+  assert.equal(surfaceSemanticLevel({ width: 125.99, height: 84, fontPx: 3.3, previous: 'outline', detailWidth: 300, detailHeight: 200 }), 'outline',
+    'caller-supplied reference dimensions scale the same way');
+});
+
+test('semantic zoom preserves outline-to-marker thresholds and hysteresis', () => {
   assert.equal(surfaceSemanticLevel({ width: 1600 * .07, height: 900 * .07, fontPx: 14 * .07 }), 'outline');
   assert.equal(surfaceSemanticLevel({ width: 720 * .07, height: 500 * .07, fontPx: 14 * .07 }), 'marker');
-  assert.equal(surfaceSemanticLevel({ width: 720, height: 500, fontPx: 14 }), 'detail');
-  assert.equal(surfaceSemanticLevel({ width: 200, height: 140, fontPx: 14 }), 'outline',
-    'same-camera foreground Detail and background compact View can coexist');
+  assert.equal(surfaceSemanticLevel({ width: 88, height: 52, fontPx: .1 }), 'outline');
+  assert.equal(surfaceSemanticLevel({ width: 87.99, height: 52, fontPx: .1 }), 'marker');
+  assert.equal(surfaceSemanticLevel({ width: 88, height: 51.99, fontPx: .1 }), 'marker');
   assert.equal(surfaceSemanticLevel({ width: 78, height: 46, fontPx: 1, previous: 'outline' }), 'outline');
   assert.equal(surfaceSemanticLevel({ width: 70, height: 40, fontPx: 1, previous: 'outline' }), 'marker');
 });
@@ -1724,6 +1773,30 @@ test('Chat Zoom clearance caps only presentation height and recovers on wider vi
   card.classList.contains = name => name === 'egd-chat-card' || name === 'egd-card-fullscreen';
   fit(card, safeFor(600, 600), 11);
   assert.equal(card.style.maxHeight, '', 'fullscreen is never held to the temporary Chat cap');
+});
+
+test('Chat Dock action keeps its readable focus target even when 50% is semantic detail', () => {
+  const compactBody = surfaceSource.match(/    const focusChatDockIfCompact = card => \{([\s\S]*?)\n    \};/)?.[1];
+  assert.ok(compactBody);
+  const card = { id: 'chat', isConnected: true, classList: { contains: name => name === 'egd-chat-card' } };
+  const entry = { card, kind: 'chat', bodyFontPx: 13, level: 'outline' };
+  const world = { x: 200, y: 200, width: 640, height: 420 };
+  const rect = { x: 100, y: 100, width: 320, height: 210, world, visualWorld: world };
+  const state = { panModifier: false, zoom: .5, zoomTarget: .5, pan: { x: 0, y: 0 }, panTarget: { x: 0, y: 0 } };
+  const safe = { left: 0, top: 0, right: 1000, bottom: 700 };
+  let focused = 0;
+  const focus = compileFunction(`let cancelPendingChatComposerFocus = () => {};\nreturn card => {${compactBody}\n    };`,
+    ['state', 'syncEntries', 'entries', 'authorVisible', 'screenRect', 'SurfaceState', 'detailWidth', 'detailHeight',
+      'safeViewportRect', 'fitCodexChatCardToReadableViewport', 'focusProjection', 'window', 'document', 'viewport',
+      'visibleChatZoomRect', 'parsePxNumber', 'CHAT_ZOOM_GAP', 'ZOOM_MAX'])(
+    state, () => {}, new Map([[card, entry]]), () => true, () => rect, Surface, 240, 180, () => safe, () => false,
+    () => { focused += 1; state.zoomTarget = Math.max(.76, 10.6 / entry.bodyFontPx); },
+    { requestAnimationFrame: () => 1, cancelAnimationFrame() {} }, { activeElement: null, addEventListener() {}, removeEventListener() {} },
+    {}, () => null, Number.parseFloat, 8, 4);
+  assert.equal(surfaceSemanticLevel({ width: rect.width, height: rect.height, fontPx: entry.bodyFontPx * .5, previous: entry.level }), 'detail');
+  assert.equal(focus(card), true, 'a visible but tiny Chat still needs a readable action target');
+  assert.equal(focused, 1);
+  assert.ok(state.zoomTarget >= 10.6 / entry.bodyFontPx);
 });
 
 test('human Chat Dock open after initial Browser focus and zoom-out focuses only a compact Chat to readable detail', () => {
@@ -1963,14 +2036,14 @@ test('human Chat Dock open after initial Browser focus and zoom-out focuses only
   }
 });
 
-test('production fullscreen layout fills the actual Canvas viewport and keeps the prior Card rect for Desk', () => {
+test('production Focus frames the unchanged world Card and does not pin it during later camera frames', () => {
   const enterBody = surfaceSource.match(/  function enterCardFullscreen\(card\) \{([\s\S]*?)\n  \}/)?.[1];
-  const layoutBody = surfaceSource.match(/  function syncCardFullscreenLayout\(\) \{([\s\S]*?)\n  \}/)?.[1];
+  const layoutBody = surfaceSource.match(/  function syncCardFullscreenLayout\(\{ reframe = false \} = \{\}\) \{([\s\S]*?)\n  \}/)?.[1];
   assert.ok(enterBody && layoutBody);
   const enter = compileFunction(`return function enterCardFullscreen(card) {${enterBody}\n  }`,
     ['state', 'exitCardFullscreen', 'isCardFullscreen', 'document', 'getCardRect', 'cardZ', 'setActiveEntity', 'setHudPresentationHidden', 'closeDeskMinimap', 'syncCardFullscreenLayout', 'syncViewportAgendaRail']);
-  const layout = compileFunction(`return function syncCardFullscreenLayout() {${layoutBody}\n  }`,
-    ['state', 'document', 'canvasZoom', 'safeViewportRect', 'syncViewportAgendaRail']);
+  const layout = compileFunction(`return function syncCardFullscreenLayout({ reframe = false } = {}) {${layoutBody}\n  }`,
+    ['state', 'document', 'safeViewportRect', 'syncViewportAgendaRail', 'parsePxNumber', 'SurfaceState', 'ZOOM_MAX']);
   const target = { uri: 'https://example.test/', session: {} };
   const card = { id: 'browser-view-a', isConnected: true, _xulBrowser: target,
     style: { left: '45px', top: '60px', width: '900px', height: '620px', zIndex: '41000' },
@@ -1983,12 +2056,12 @@ test('production fullscreen layout fills the actual Canvas viewport and keeps th
   const document = { documentElement: { classList: { add: name => rootClasses.add(name) } },
     getElementById: id => id === card.id ? card : null };
   const state = { surface: { initialBrowserFocus: true }, cardFullscreen: null,
-    pan: { x: 0, y: 0 }, zoom: 1 };
+    pan: { x: 0, y: 0 }, zoom: 1, setCanvasViewportTarget(camera) { this.camera = camera; } };
   let safeOptions = null, activated = null;
-  const syncLayout = layout(state, document, () => 1, options => {
+  const syncLayout = layout(state, document, options => {
     safeOptions = options;
     return { left: 0, top: 0, width: 1600, height: 960 };
-  }, () => {});
+  }, () => {}, Number.parseFloat, Surface, 4);
   const enterFullscreen = enter(state, () => assert.fail('no previous fullscreen Card'), () => false,
     document, current => structuredClone(current.style), 42000, current => { activated = current; },
     () => {}, () => assert.fail('no minimap is open'), syncLayout, () => {});
@@ -1996,7 +2069,13 @@ test('production fullscreen layout fills the actual Canvas viewport and keeps th
   assert.equal(activated, card);
   assert.equal(state.cardFullscreen.cardId, card.id);
   assert.deepEqual(state.cardFullscreen.rect, prior);
-  assert.deepEqual(card.style, { left: '0px', top: '0px', width: '1600px', height: '960px', zIndex: '42001' });
+  assert.deepEqual(card.style, { ...prior, zIndex: '42001' });
+  assert.deepEqual(state.camera, fitSurfaceCamera({ x: 45, y: 60, width: 900, height: 620 },
+    { left: 0, top: 0, width: 1600, height: 960 }, 4));
+  state.camera = null; state.zoom = .2; state.pan = { x: 300, y: 200 };
+  syncLayout();
+  assert.equal(state.camera, null, 'ordinary camera apply cannot reframe Focus');
+  assert.deepEqual(card.style, { ...prior, zIndex: '42001' });
   assert.deepEqual(safeOptions, { avoidHud: false, margin: 0 });
   assert.ok(rootClasses.has('egd-card-fullscreen-active'));
   assert.ok(rootClasses.has('egd-browser-fullscreen-active'));
@@ -2038,18 +2117,24 @@ function createFullscreenHarness({ hudInitiallyHidden = false, minimapInitiallyO
         : cards.get(id) || null,
   };
   const state = { surface: { initialBrowserFocus: false, browserCardId: 'browser-view-a' },
-    cardFullscreen: null, activeEntityId: null, pan: { x: 100, y: 50 }, zoom: 2 };
+    cardFullscreen: null, activeEntityId: null, pan: { x: 100, y: 50 }, zoom: 2,
+    panTarget: { x: 100, y: 50 }, zoomTarget: 2,
+    setCanvasViewportTarget(camera) {
+      this.pan = { ...camera.pan }; this.panTarget = { ...camera.pan };
+      this.zoom = camera.zoom; this.zoomTarget = camera.zoom;
+    } };
   const safeCalls = [];
   const safe = compile('safeViewportRect(options = {})', ['window', 'document'])(viewport, document);
   const setHud = compile('setHudPresentationHidden(hidden)', ['document', 'syncHudViewportFit'])(document, () => { hudFitCount++; });
   const getRect = compile('getCardRect(card)', [])();
   const applyRect = compile('applyCardRect(card, rect)', [])();
   const isFullscreen = compile('isCardFullscreen(card)', ['state'])(state);
-  const layout = compile('syncCardFullscreenLayout()', ['state', 'document', 'canvasZoom', 'safeViewportRect', 'syncViewportAgendaRail'])(
-    state, document, () => Math.max(0.001, state.zoom || 1), options => {
+  const layout = compile('syncCardFullscreenLayout({ reframe = false } = {})',
+    ['state', 'document', 'safeViewportRect', 'syncViewportAgendaRail', 'parsePxNumber', 'SurfaceState', 'ZOOM_MAX'])(
+    state, document, options => {
       safeCalls.push(options);
       return safe(options);
-    }, () => {});
+    }, () => {}, Number.parseFloat, Surface, 4);
   const exit = compile('exitCardFullscreen(card = null, options = {})',
     ['state', 'document', 'applyCardRect', 'setHudPresentationHidden', 'toggleDeskMinimap', 'setActiveEntity', 'syncViewportAgendaRail', 'scheduleDeskSessionSave'])(
     state, document, applyRect, setHud, () => {
@@ -2082,18 +2167,345 @@ function createFullscreenHarness({ hudInitiallyHidden = false, minimapInitiallyO
     get saved() { return saved; } };
 }
 
-test('ordinary Browser fullscreen uses the viewport edges, hides Desk chrome, and restores prior geometry', () => {
+test('normal Browser and Chat Focus keep zoom-in focused and unfold only zoom-out without a camera jump', () => {
+  const factorBody = surfaceSource.match(/    const zoomCanvasByFactor = \(factor, cx, cy\) => \{([\s\S]*?)\n    \};\n    const zoomCanvasByWheel/)?.[1];
+  assert.ok(factorBody);
+  for (const kind of ['browser', 'chat']) {
+    const h = createFullscreenHarness(), card = h[kind];
+    const geometry = { ...card.style }, runtime = Object.freeze({ url: 'https://example.test/', viewport: [1440, 900], fullZoom: 1.25 });
+    card._browser = runtime;
+    h.enter(card);
+    let animated = 0;
+    const zoom = compileFunction(`return (factor, cx, cy) => {${factorBody}}`,
+      ['state', 'ZOOM_MIN', 'ZOOM_MAX', 'exitCardFullscreen', 'enterLocalDesk', 'frame', 'window', 'apply', 'scheduleAnimate'])(
+      h.state, .01, 4, h.exit, () => assert.fail('ordinary Focus is not first-use mode'), 0,
+      { cancelAnimationFrame() {} }, h.layout, () => { animated++; });
+    const originalZoom = h.state.zoom;
+    zoom(1.1, 320, 250);
+    assert.equal(h.state.cardFullscreen.cardId, card.id, 'zoom-in must KEEP Focus');
+    assert.equal(h.state.zoom, originalZoom * 1.1);
+    assert.ok(h.rootClasses.has('egd-card-fullscreen-active'));
+    const before = { zoom: h.state.zoom, pan: { ...h.state.pan } };
+    const oldScreen = { x: Number.parseFloat(geometry.left) * before.zoom + before.pan.x,
+      y: Number.parseFloat(geometry.top) * before.zoom + before.pan.y };
+    zoom(.99, 930, 640);
+    assert.equal(h.state.cardFullscreen, null);
+    assert.equal(h.rootClasses.has('egd-card-fullscreen-active'), false);
+    assert.equal(h.state.zoom, before.zoom, 'release changes no rendered camera before the next animation frame');
+    assert.deepEqual(h.state.pan, before.pan);
+    assert.equal(h.state.zoomTarget, before.zoom * .99);
+    assert.ok(Math.abs(h.state.panTarget.x - (930 - (930 - before.pan.x) * .99)) < 1e-9);
+    assert.ok(Math.abs(h.state.panTarget.y - (640 - (640 - before.pan.y) * .99)) < 1e-9);
+    const nextScreen = { x: Number.parseFloat(geometry.left) * h.state.zoomTarget + h.state.panTarget.x,
+      y: Number.parseFloat(geometry.top) * h.state.zoomTarget + h.state.panTarget.y };
+    assert.ok(Math.abs(nextScreen.x - (930 + (oldScreen.x - 930) * .99)) < 1e-9);
+    assert.ok(Math.abs(nextScreen.y - (640 + (oldScreen.y - 640) * .99)) < 1e-9);
+    assert.equal(animated, 1);
+    assert.deepEqual(card.style, geometry, 'no original-size restoration jump: dimensions never changed');
+    assert.equal(card._browser, runtime);
+    assert.equal(h.state.canvasUserCameraRevision, 2);
+  }
+});
+
+function terminalFrameWheelHarness() {
+  // Execute the production camera functions and shared session, not a second
+  // implementation of the routing policy. Only DOM/animation are stand-ins.
+  const binding = name => {
+    const start = surfaceSource.indexOf(`    ${name} = `);
+    const end = surfaceSource.indexOf('\n    };', start);
+    assert.ok(start > 0 && end > start, name);
+    return surfaceSource.slice(start, end + '\n    };'.length);
+  };
+  const constant = name => Number(surfaceSource.match(new RegExp(`const ${name} = ([\\d.]+);`))[1]);
+  class Element {
+    constructor() { this.isConnected = true; this.hidden = false; }
+    closest(selector) { return this.hud && selector.includes('#egd-hud') ? this : null; }
+  }
+  const state = { activeEntityId: 'terminal-a', pan: { x: 50, y: -20 }, panTarget: { x: 50, y: -20 },
+    zoom: .5, zoomTarget: .5, surface: {}, cardFullscreen: null };
+  const frame = new Element(), body = new Element(), card = new Element(), outside = new Element();
+  const runtime = {};
+  Object.assign(frame, { localName: 'iframe', offsetWidth: 800, offsetHeight: 600, clientLeft: 2, clientTop: 3, contentWindow: runtime,
+    getBoundingClientRect: () => ({ left: 580 * state.zoom + state.pan.x, top: 460 * state.zoom + state.pan.y,
+      width: frame.offsetWidth * state.zoom, height: frame.offsetHeight * state.zoom }) });
+  body.contains = target => target === frame;
+  Object.assign(card, { id: 'terminal-a', _termBrowser: frame, contains: target => target === frame || target === body,
+    querySelector: selector => selector === '.egd-card-body' ? body : null });
+  const listeners = {}, effects = { animated: 0, applied: 0, exits: 0 };
+  const document = { getElementById: id => id === card.id ? card : null,
+    addEventListener(type, fn, options) {
+      assert.deepEqual(options, { passive: false, capture: true }); listeners[type] = fn;
+    } };
+  frame.ownerDocument = document;
+  frame.contentDocument = { defaultView: { frameElement: frame } };
+  const closest = frame.closest;
+  frame.closest = selector => selector === '.egd-terminal-card' ? card : closest.call(frame, selector);
+  let now = 100;
+  const start = surfaceSource.indexOf('    // Global wheel capture:');
+  const end = surfaceSource.indexOf('\n    // Canvas zoom uses the same camera', start);
+  assert.ok(start > 0 && end > start);
+  const source = ['const normalizeWheelDelta', 'const panCanvasByWheel', 'const shouldAllowActiveEntityScroll',
+    'const shouldAllowHudScroll', 'const wheelSession', 'const resetWheelSession', 'const resolveWheelSessionOwner',
+    'state.nativeGestureHook', 'const zoomCanvasByFactor', 'const zoomCanvasByWheel'].map(binding).join('\n');
+  const controls = compileFunction(`let frame = 0;\n${source}\n${surfaceSource.slice(start, end)}\nreturn { wheelSession, resetWheelSession };`,
+    ['state', 'document', 'window', 'Element', 'performance', 'WheelEvent', 'WHEEL_PAN_SPEED', 'WHEEL_ZOOM_SPEED',
+      'WHEEL_SESSION_IDLE_MS', 'ZOOM_MIN', 'ZOOM_MAX', 'scheduleAnimate', 'apply', 'exitCardFullscreen', 'enterLocalDesk'])(
+    state, document, { innerHeight: 900 }, Element, { now: () => now }, { DOM_DELTA_LINE: 1, DOM_DELTA_PAGE: 2 },
+    constant('WHEEL_PAN_SPEED'), constant('WHEEL_ZOOM_SPEED'), constant('WHEEL_SESSION_IDLE_MS'), constant('ZOOM_MIN'), constant('ZOOM_MAX'),
+    () => { effects.animated++; }, () => { effects.applied++; }, (_card, options) => {
+      assert.deepEqual(options, { preserveCamera: true }); state.cardFullscreen = null; effects.exits++;
+    }, () => { state.surface.initialBrowserFocus = false; });
+  const event = (patch = {}) => ({ target: {}, deltaX: 4, deltaY: 10, deltaMode: 0, clientX: 200, clientY: 120,
+    ctrlKey: false, metaKey: false, preventDefault() { this.prevented = true; }, stopPropagation() { this.stopped = true; }, ...patch });
+  return { ...controls, state, frame, card, body, outside, effects, listeners, runtime, event,
+    advance: ms => { now += ms; }, idleMs: constant('WHEEL_SESSION_IDLE_MS'),
+    panSpeed: constant('WHEEL_PAN_SPEED'), zoomSpeed: constant('WHEEL_ZOOM_SPEED'),
+    route(ev = event()) {
+      assert.equal(typeof state.routeTerminalFrameWheel, 'function', 'the Terminal iframe must use the common wheel router');
+      return state.routeTerminalFrameWheel(card, frame, ev);
+    } };
+}
+
+test('Terminal frame wheel keeps active native scroll and pans inactive hover without activation', () => {
+  const h = terminalFrameWheelHarness();
+  assert.equal(h.route(), false);
+  assert.deepEqual(h.state.panTarget, { x: 50, y: -20 });
+  assert.equal(h.effects.animated, 0);
+  assert.equal(h.state.activeEntityId, h.card.id);
+  for (const activeEntityId of ['browser-b', null]) {
+    for (const [deltaMode, unit] of [[0, 1], [1, 16], [2, 900]]) {
+      h.resetWheelSession(); h.state.activeEntityId = activeEntityId;
+      const before = { ...h.state.panTarget }, ev = h.event({ deltaMode });
+      assert.equal(h.route(ev), true);
+      assert.deepEqual(h.state.panTarget, { x: before.x - 4 * unit * h.panSpeed, y: before.y - 10 * unit * h.panSpeed });
+      assert.equal(h.state.activeEntityId, activeEntityId, 'hover never selects/focuses Terminal');
+      assert.equal(ev.prevented, undefined, 'the child listener consumes the original event from the returned boolean');
+    }
+  }
+  assert.equal(h.card._termBrowser, h.frame);
+  assert.equal(h.frame.contentWindow, h.runtime);
+});
+
+test('Terminal frame wheel maps the rendered iframe anchor through camera scale for common modifier zoom', () => {
+  for (const zoom of [.35, .5, 1.7]) {
+    const h = terminalFrameWheelHarness();
+    h.state.zoom = zoom;
+    // While animation is in flight, use the displayed frame rect for the event
+    // anchor, but the same target-camera math as an outer-document wheel.
+    h.state.zoomTarget = zoom * 1.1;
+    h.state.panTarget = { x: 75, y: -40 };
+    const ev = h.event({ ctrlKey: true, deltaY: -10 });
+    const rect = h.frame.getBoundingClientRect();
+    const anchor = { x: rect.left + (ev.clientX + h.frame.clientLeft) * zoom,
+      y: rect.top + (ev.clientY + h.frame.clientTop) * zoom };
+    const before = { pan: { ...h.state.panTarget }, zoom: h.state.zoomTarget };
+    const factor = Math.exp(10 * h.zoomSpeed);
+    assert.equal(h.route(ev), true);
+    assert.ok(Math.abs(h.state.zoomTarget - before.zoom * factor) < 1e-12);
+    for (const axis of ['x', 'y']) {
+      const world = (anchor[axis] - before.pan[axis]) / before.zoom;
+      assert.ok(Math.abs(world * h.state.zoomTarget + h.state.panTarget[axis] - anchor[axis]) < 1e-9,
+        `${axis}: iframe content CSS coordinates must become chrome viewport coordinates`);
+    }
+    assert.equal(h.state.activeEntityId, h.card.id);
+    assert.equal(h.effects.animated, 1);
+    assert.equal(h.effects.applied, 0);
+  }
+  const h = terminalFrameWheelHarness();
+  assert.equal(h.route(h.event({ metaKey: true })), true, 'normal Cmd-wheel remains common Canvas pan');
+  assert.equal(h.state.zoomTarget, .5);
+  assert.deepEqual(h.state.panTarget, { x: 50 - 4 * h.panSpeed, y: -20 - 10 * h.panSpeed });
+});
+
+test('Terminal frame wheel preserves Focus on zoom-in and reveals Canvas only on zoom-out', () => {
+  for (const modifier of ['ctrlKey', 'metaKey']) {
+    const h = terminalFrameWheelHarness();
+    h.state.cardFullscreen = { cardId: h.card.id };
+    assert.equal(h.route(h.event({ [modifier]: true, deltaY: -10 })), true);
+    assert.equal(h.state.cardFullscreen.cardId, h.card.id);
+    assert.equal(h.effects.exits, 0);
+    assert.equal(h.effects.applied, 1);
+    const displayed = { pan: { ...h.state.pan }, zoom: h.state.zoom };
+    const ev = h.event({ [modifier]: true, deltaY: 10 });
+    const rect = h.frame.getBoundingClientRect();
+    const factor = Math.exp(-10 * h.zoomSpeed);
+    assert.equal(h.route(ev), true);
+    assert.equal(h.state.cardFullscreen, null);
+    assert.equal(h.effects.exits, 1);
+    assert.equal(h.effects.animated, 1);
+    assert.deepEqual(h.state.pan, displayed.pan, 'no saved-camera jump before animation');
+    assert.equal(h.state.zoom, displayed.zoom);
+    assert.ok(Math.abs(h.state.zoomTarget - displayed.zoom * factor) < 1e-12);
+    const anchorX = rect.left + (ev.clientX + h.frame.clientLeft) * displayed.zoom;
+    assert.ok(Math.abs(h.state.panTarget.x - (anchorX - (anchorX - displayed.pan.x) * factor)) < 1e-9);
+    assert.equal(h.card._termBrowser, h.frame);
+    assert.equal(h.frame.contentWindow, h.runtime);
+    assert.equal(h.state.activeEntityId, h.card.id);
+  }
+});
+
+test('Terminal frame wheel shares outer-document gesture ownership and native begin/end boundaries', () => {
+  const h = terminalFrameWheelHarness();
+  assert.equal(h.route(), false);
+  const outsideEvent = h.event({ target: h.outside });
+  h.listeners.wheel(outsideEvent);
+  assert.equal(outsideEvent.prevented, true);
+  assert.equal(outsideEvent.stopped, true);
+  assert.equal(h.effects.animated, 0, 'entity-owned gesture cannot become Canvas pan at a frame boundary');
+  h.state.activeEntityId = 'browser-b';
+  assert.equal(h.route(), true);
+  assert.equal(h.effects.animated, 0, 'losing selection does not steal an in-flight entity gesture');
+  h.advance(h.idleMs + 1);
+  assert.equal(h.route(), true);
+  assert.equal(h.effects.animated, 1, 'the next inactive hover gesture pans');
+
+  h.state.nativeGestureHook({ kind: 'gestureScrollBegin' });
+  h.listeners.wheel(h.event({ target: h.outside }));
+  const before = h.effects.animated;
+  h.state.activeEntityId = h.card.id;
+  h.advance(h.idleMs * 2);
+  assert.equal(h.route(), true, 'Canvas-owned native gesture remains Canvas-owned across the iframe');
+  assert.equal(h.effects.animated, before + 1);
+  h.state.nativeGestureHook({ kind: 'gestureScrollEnd' });
+  assert.equal(h.route(), false, 'the next gesture on active Terminal returns to native scroll');
+  const hudEvent = h.event({ target: Object.assign(h.outside, { hud: true }) });
+  h.listeners.wheel(hudEvent);
+  assert.equal(hudEvent.prevented, undefined);
+  assert.equal(h.wheelSession.owner, null, 'HUD retains its existing reset/native policy');
+});
+
+test('Terminal frame wheel ignores stale owners and invalid projections without changing the camera', () => {
+  const mutations = [h => { h.card.isConnected = false; }, h => { h.frame.isConnected = false; },
+    h => { h.card._termBrowser = {}; }, h => { h.card.contains = () => false; },
+    h => { h.frame.offsetWidth = 0; }, h => { h.frame.getBoundingClientRect = () => ({ left: NaN, top: 0, width: 100, height: 100 }); }];
+  for (const mutate of mutations) {
+    const h = terminalFrameWheelHarness(); mutate(h);
+    assert.equal(h.route(h.event({ ctrlKey: true })), false);
+    assert.deepEqual(h.state.panTarget, { x: 50, y: -20 });
+    assert.equal(h.state.zoomTarget, .5);
+    assert.equal(h.wheelSession.owner, null);
+    assert.equal(h.effects.animated + h.effects.applied, 0);
+  }
+});
+
+test('Terminal frame wheel chrome capture normalizes a child-realm target and caches the native-scroll result', () => {
+  const h = terminalFrameWheelHarness();
+  // Gecko chrome capture sees a foreign-document target and frame-local client
+  // coordinates BEFORE the Terminal window listener. A foreign realm Element
+  // is not an instanceof chrome Element; the owned iframe in the path is.
+  class ChildElement { constructor() { this.ownerDocument = h.frame.contentDocument; } }
+  const target = new ChildElement();
+  const ev = h.event({ target, composedPath: () => [target, h.frame.contentDocument, h.frame, h.body, h.card] });
+  h.listeners.wheel(ev);
+  assert.equal(ev.prevented, undefined);
+  assert.equal(ev.stopped, undefined);
+  assert.equal(h.effects.animated, 0);
+  assert.equal(h.wheelSession.owner, 'entity', 'parent capture uses the mapped iframe for ownership');
+  const routedAt = h.wheelSession.lastTs;
+  h.advance(h.idleMs + 1);
+  assert.equal(h.route(ev), false);
+  assert.equal(h.wheelSession.lastTs, routedAt, 'child hook reuses the same event result without routing again');
+  assert.deepEqual(h.state.panTarget, { x: 50, y: -20 });
+  assert.equal(h.state.activeEntityId, h.card.id);
+});
+
+test('Terminal frame wheel chrome capture does not double-pan or zoom at untranslated child coordinates', () => {
+  for (const zoom of [.35, .5, 1.7]) for (const ctrlKey of [false, true]) {
+    const h = terminalFrameWheelHarness();
+    h.state.activeEntityId = 'browser-b';
+    h.state.zoom = h.state.zoomTarget = zoom;
+    const target = { ownerDocument: h.frame.contentDocument };
+    const ev = h.event({ target, composedPath: () => [target, h.frame.contentDocument, h.frame, h.body, h.card], ctrlKey, deltaY: -18 });
+    const rect = h.frame.getBoundingClientRect(), before = { ...h.state.panTarget };
+    h.listeners.wheel(ev);
+    assert.equal(ev.prevented, true);
+    assert.equal(ev.stopped, true, 'parent consumes the Canvas-owned child event before native Terminal scroll');
+    assert.equal(h.effects.animated, 1);
+    assert.equal(h.route(ev), true);
+    assert.equal(h.effects.animated, 1, 'exactly one camera mutation per native event');
+    if (ctrlKey) {
+      const factor = Math.exp(18 * h.zoomSpeed);
+      const anchorX = rect.left + (ev.clientX + h.frame.clientLeft) * zoom;
+      const anchorY = rect.top + (ev.clientY + h.frame.clientTop) * zoom;
+      assert.ok(Math.abs(h.state.panTarget.x - (anchorX - (anchorX - before.x) * factor)) < 1e-9);
+      assert.ok(Math.abs(h.state.panTarget.y - (anchorY - (anchorY - before.y) * factor)) < 1e-9);
+    } else {
+      assert.deepEqual(h.state.panTarget, { x: before.x - ev.deltaX * h.panSpeed, y: before.y - ev.deltaY * h.panSpeed });
+    }
+    assert.equal(h.state.activeEntityId, 'browser-b', 'hover routing must not select the Terminal');
+  }
+  const h = terminalFrameWheelHarness();
+  h.card._termBrowser = {}; // Not an owned Terminal iframe: preserve the existing outer policy.
+  const ev = h.event({ target: { ownerDocument: h.frame.contentDocument }, composedPath: () => [h.frame] });
+  h.listeners.wheel(ev);
+  assert.equal(ev.prevented, true); assert.equal(ev.stopped, true);
+  assert.equal(h.effects.animated, 1);
+});
+
+test('Terminal frame wheel origin checks preserve Browser remote and already-chrome coordinate routes', () => {
+  for (const kind of ['different-child-document', 'unowned-frame', 'browser-remote', 'chrome-frame-target']) {
+    const h = terminalFrameWheelHarness();
+    const ev = h.event({ ctrlKey: true, deltaY: -18, target: { ownerDocument: h.frame.contentDocument },
+      composedPath: () => [h.frame] });
+    if (kind === 'different-child-document') ev.target.ownerDocument = {};
+    if (kind === 'unowned-frame') h.card._termBrowser = {};
+    if (kind === 'browser-remote') h.frame.localName = 'browser';
+    if (kind === 'chrome-frame-target') ev.target = h.frame;
+    h.state.routeTerminalFrameWheel = () => assert.fail(`${kind}: must not enter the Terminal child-coordinate route`);
+    h.listeners.wheel(ev);
+    const factor = Math.exp(18 * h.zoomSpeed);
+    assert.equal(ev.prevented, true); assert.equal(ev.stopped, true);
+    assert.ok(Math.abs(h.state.panTarget.x - (ev.clientX - (ev.clientX - 50) * factor)) < 1e-9);
+    assert.ok(Math.abs(h.state.panTarget.y - (ev.clientY - (ev.clientY + 20) * factor)) < 1e-9);
+    assert.equal(h.effects.animated, 1);
+  }
+});
+
+test('Focus wheel routing consumes directional camera zoom but leaves active body scroll native', () => {
+  const start = surfaceSource.indexOf('    // Global wheel capture:');
+  const end = surfaceSource.indexOf('\n    }, { passive: false, capture: true });', start);
+  assert.ok(start > 0 && end > start);
+  const listeners = {}, wheelSession = { owner: null, nativeActive: false, lastTs: 0 };
+  class Element { closest() { return null; } }
+  const state = { cardFullscreen: { cardId: 'browser-a' }, activeEntityId: 'browser-a' };
+  const factors = []; let pan = 0;
+  const source = surfaceSource.slice(start, end + '\n    }, { passive: false, capture: true });'.length);
+  compileFunction(source, ['document', 'state', 'Element', 'performance', 'wheelSession', 'WHEEL_SESSION_IDLE_MS',
+    'resolveWheelSessionOwner', 'zoomCanvasByWheel', 'panCanvasByWheel', 'shouldAllowHudScroll', 'resetWheelSession', 'shouldAllowActiveEntityScroll'])(
+    { addEventListener(type, fn, options) { assert.equal(options.capture, true); assert.equal(options.passive, false); listeners[type] = fn; } },
+    state, Element, { now: () => 100 }, wheelSession, 250,
+    () => { wheelSession.owner = 'entity'; wheelSession.entityId = 'browser-a'; },
+    ev => factors.push(ev.deltaY), () => { pan++; }, () => false, () => {}, () => true);
+  for (const deltaY of [-10, 10]) {
+    const event = { target: new Element(), ctrlKey: true, deltaY,
+      preventDefault() { this.prevented = true; }, stopPropagation() { this.stopped = true; } };
+    listeners.wheel(event);
+    assert.equal(event.prevented, true, 'pinch/ctrl-wheel cannot leak to Browser page zoom');
+    assert.equal(event.stopped, true);
+  }
+  assert.deepEqual(factors, [-10, 10]);
+  wheelSession.owner = 'entity'; wheelSession.entityId = 'browser-a';
+  const scroll = { target: new Element(), deltaY: 20,
+    preventDefault() { assert.fail('normal active body scroll stays native'); }, stopPropagation() { assert.fail('normal scroll'); } };
+  listeners.wheel(scroll);
+  assert.equal(pan, 0);
+});
+
+test('ordinary Browser Focus changes only the camera and chrome, and explicit restore restores the camera', () => {
   const h = createFullscreenHarness();
   h.enter(h.browser);
   assert.equal(h.state.cardFullscreen.cardId, h.browser.id);
   assert.deepEqual(h.safeCalls.at(-1), { avoidHud: false, margin: 0 });
-  assert.deepEqual(h.browser.style, { left: '-50px', top: '-25px', width: '640px', height: '387px', zIndex: '40001' });
+  assert.deepEqual(h.browser.style, { ...h.browserRect, zIndex: '40001' });
+  assert.equal(h.state.zoom, 774 / 620);
   assert.ok(h.rootClasses.has('egd-browser-fullscreen-active'));
   assert.ok(h.rootClasses.has('egd-card-fullscreen-active'));
   assert.ok(h.hudClasses.has('egd-hud-hidden'));
   assert.equal(h.minimapOpen, false);
   assert.equal(h.exit(h.browser), true);
   assert.deepEqual(h.browser.style, h.browserRect);
+  assert.equal(h.state.zoom, 2);
+  assert.deepEqual(h.state.pan, { x: 100, y: 50 });
   assert.ok(!h.rootClasses.has('egd-browser-fullscreen-active'));
   assert.ok(!h.rootClasses.has('egd-card-fullscreen-active'));
   assert.ok(!h.hudClasses.has('egd-hud-hidden'));
@@ -2117,7 +2529,7 @@ test('switching from Browser to non-Browser fullscreen clears Browser chrome mod
   assert.ok(!h.rootClasses.has('egd-browser-fullscreen-active'));
   assert.ok(h.rootClasses.has('egd-card-fullscreen-active'));
   assert.deepEqual(h.safeCalls.at(-1), { avoidHud: false, margin: 10 });
-  assert.deepEqual(h.chat.style, { left: '-45px', top: '-20px', width: '630px', height: '377px', zIndex: '40002' });
+  assert.deepEqual(h.chat.style, { ...h.chatRect, zIndex: '40002' });
   assert.ok(h.hudClasses.has('egd-hud-hidden'));
   assert.equal(h.minimapOpen, false);
   assert.equal(h.exit(h.chat), true);
@@ -2145,7 +2557,7 @@ test('closing a fullscreen Browser clears presentation state without restoring a
   assert.ok(!h.rootClasses.has('egd-card-fullscreen-active'));
   assert.ok(!h.hudClasses.has('egd-hud-hidden'));
   assert.equal(h.minimapOpen, true);
-  assert.equal(h.browser.style.width, '640px', 'close must not rewrite geometry before removal');
+  assert.equal(h.browser.style.width, '900px', 'close must not rewrite geometry before removal');
 });
 
 test('missing fullscreen Browser removes both root presentation classes on layout sync', () => {
@@ -2302,7 +2714,7 @@ test('600×600 narrow HUD clears every zoom hit point and the Dock while larger 
     'the narrow rule changes only HUD clearance, not its actions or horizontal topology');
 });
 
-test('wheel or focused-URL keyboard zoom exits actual fullscreen and restores the same live Browser Card', () => {
+test('wheel or focused-URL keyboard zoom-out reveals the same live Browser Card without geometry restoration', () => {
   const exitBody = surfaceSource.match(/  function exitCardFullscreen\(card = null, options = \{\}\) \{([\s\S]*?)\n  \}/)?.[1];
   const enterBody = surfaceSource.match(/  function enterLocalDesk\(\) \{([\s\S]*?)\n  \}/)?.[1];
   const factorBody = surfaceSource.match(/    const zoomCanvasByFactor = \(factor, cx, cy\) => \{([\s\S]*?)\n    \};\n    const zoomCanvasByWheel/)?.[1];
@@ -2315,7 +2727,7 @@ test('wheel or focused-URL keyboard zoom exits actual fullscreen and restores th
   const enter = compileFunction(`return function enterLocalDesk() {${enterBody}\n  }`,
     ['state', 'exitCardFullscreen', 'document', 'scheduleDeskSessionSave']);
   const zoomFactor = compileFunction(`return function zoomCanvasByFactor(factor, cx, cy) {${factorBody}\n    }`,
-    ['state', 'ZOOM_MIN', 'ZOOM_MAX', 'enterLocalDesk', 'frame', 'window', 'apply', 'scheduleAnimate', 'safeViewportRect']);
+    ['state', 'ZOOM_MIN', 'ZOOM_MAX', 'enterLocalDesk', 'frame', 'window', 'apply', 'scheduleAnimate', 'safeViewportRect', 'exitCardFullscreen']);
   const zoom = compileFunction(`return function zoomCanvasByWheel(ev) {${wheelBody}\n    }`,
     ['normalizeWheelDelta', 'zoomCanvasByFactor', 'WHEEL_ZOOM_SPEED']);
   const keydown = compileFunction(`return function handleCanvasZoomKeydown(ev) {${keyBody}\n    }`,
@@ -2323,7 +2735,7 @@ test('wheel or focused-URL keyboard zoom exits actual fullscreen and restores th
   const nativeBrowser = { uri: 'https://example.test/page', session: {} };
   const rect = { left: '45px', top: '60px', width: '900px', height: '620px', zIndex: '41000' };
   const browser = { id: 'browser-view-a', isConnected: true, _xulBrowser: nativeBrowser,
-    style: { left: '0px', top: '0px', width: '1600px', height: '960px', zIndex: '42000' },
+    style: { ...rect, zIndex: '42000' },
     classList: { remove: name => { assert.equal(name, 'egd-card-fullscreen'); } } };
   const classes = new Set(['egd-initial-browser-focus', 'egd-card-fullscreen-active']);
   const document = { documentElement: { classList: { remove: name => classes.delete(name) } },
@@ -2338,7 +2750,7 @@ test('wheel or focused-URL keyboard zoom exits actual fullscreen and restores th
   const enterDesk = enter(state, exitFullscreen, document, () => { saved++; });
   const applyFactor = zoomFactor(state, .01, 4, enterDesk, 0,
     { cancelAnimationFrame() {} }, () => {}, () => { animated++; },
-    () => ({ left: 0, top: 0, width: 1600, height: 960 }));
+    () => ({ left: 0, top: 0, width: 1600, height: 960 }), exitFullscreen);
   const zoomOut = zoom(() => 1, applyFactor, .0044);
   zoomOut({ deltaY: 100, clientX: 800, clientY: 480 });
   assert.equal(state.surface.initialBrowserFocus, false);
@@ -2372,7 +2784,7 @@ test('wheel or focused-URL keyboard zoom exits actual fullscreen and restores th
   state.zoom = state.zoomTarget = 1;
   state.pan = { x: 0, y: 0 };
   state.panTarget = { x: 0, y: 0 };
-  Object.assign(browser.style, { left: '0px', top: '0px', width: '1600px', height: '960px', zIndex: '42000' });
+  Object.assign(browser.style, { ...rect, zIndex: '42000' });
   classes.add('egd-initial-browser-focus');
   classes.add('egd-card-fullscreen-active');
   const handleKey = keydown(state, () => {}, applyFactor, { innerWidth: 1600, innerHeight: 960 }, () => { animated++; });
@@ -4142,6 +4554,133 @@ test('rehydration matches a legacy assistant with no native or request ID by its
   assert.equal(twice.conversationId, null);
 });
 
+function reimportedHistoryFixture() {
+  const current = { id: 'reimport-room', localConversationId: 'previous-store-id', conversationId: null,
+    clientBindingId: 'isolated-binding', bindingState: 'quarantined', bindingAccountKey: null,
+    retainedNativeBinding: { conversationId: 'native-before', clientThreadId: 'original-binding', accountKey: null },
+    inputSources: [{ id: 'keep-attachment' }], messages: [
+      { id: 'old-user', localMessageId: 'old-local-user', localRunId: 'old-run', localSeq: 900,
+        role: 'user', content: 'Saved question', status: 'complete' },
+      { id: 'old-answer', localMessageId: 'old-local-answer', localRunId: 'old-run', localSeq: 901,
+        role: 'assistant', content: 'Saved answer', status: 'complete' },
+    ] };
+  const [record] = Chat.extractLegacyChatRecords({ chat: { threads: [current] } });
+  const snapshot = Chat.legacyPublicChatSnapshot(record);
+  const page = { protocolVersion: 1, thread: { clientThreadId: current.id, localConversationId: 'new-store-id',
+    conversationId: snapshot.conversationId }, messages: snapshot.runs.flatMap(run => run.messages), runs: snapshot.runs,
+    events: [{ seq: 1, event: 'history.imported', details: { importId: record.importId,
+      runCount: snapshot.runs.length, truncated: snapshot.truncated, historyComplete: snapshot.historyComplete } },
+    ...snapshot.runs.map((run, i) => ({ seq: i + 2, event: 'run.imported', localRunId: run.localRunId,
+      runId: run.runId, details: { run } }))], hasMore: false, nextCursor: null };
+  return { current, record, page };
+}
+
+test('exact immutable legacy import proof reconciles only local identities without duplicating saved messages', () => {
+  const { current, record, page } = reimportedHistoryFixture();
+  const before = structuredClone({ current, record, page });
+  // JSON from another realm is still primitive identity data, not an object-coercion shortcut.
+  const foreignPage = runInNewContext('JSON.parse(payload)', { payload: JSON.stringify(page) });
+  const next = Chat.reconcileImportedLocalHistoryThread(current, foreignPage, record);
+  assert.equal(next.localConversationId, 'new-store-id');
+  const hydrated = Chat.hydrateLocalChatThread(next, Chat.normalizeLocalHistoryPage(page, current.id));
+  assert.equal(hydrated.messages.length, 2);
+  assert.deepEqual(hydrated.messages.map(message => message.id), ['old-user', 'old-answer']);
+  assert.deepEqual(hydrated.messages.map(message => message.content), ['Saved question', 'Saved answer']);
+  assert.ok(next.messages.every(message => !Object.hasOwn(message, 'localSeq')), 'old-store sequence numbers cannot order the new store');
+  for (const key of ['conversationId', 'clientBindingId', 'bindingAccountKey', 'bindingState', 'retainedNativeBinding', 'inputSources']) {
+    assert.deepEqual(next[key], current[key], `${key} is never promoted or replaced by history proof`);
+  }
+  assert.deepEqual({ current, record, page }, before, 'proof is read-only');
+  assert.equal(Chat.reconcileImportedLocalHistoryThread(next, page, record), next, 'already-bound rooms are unchanged');
+});
+
+test('local identity reconciliation fails closed for incomplete, changed, foreign, or unproven imports', () => {
+  const cases = [
+    value => { value.page.events = []; },
+    value => { value.page.events.pop(); value.page.hasMore = true; },
+    value => { value.page.events[0].details.importId = 'other-import'; },
+    value => { value.page.events[0].details.runCount++; },
+    value => { value.page.events[0].details.historyComplete = true; },
+    value => { value.page.events[1].details.run.messages[0].text = 'Different original'; },
+    value => { value.page.events[1].localRunId = 'different-run'; },
+    value => { value.page.events.push(structuredClone(value.page.events[1])); },
+    value => { value.page.thread.clientThreadId = 'other-room'; },
+    value => { value.page.thread.conversationId = 'other-native-thread'; },
+    value => { value.page.thread.localConversationId = new String('new-store-id'); },
+    value => { value.record.threadSnapshot.localConversationId = 'unrelated-old-store'; },
+    value => { value.record.importId = 'other-import'; },
+    value => { value.current.messages[0].content = 'Newer live content'; },
+    value => { value.current.localRuns = [{ localRunId: 'already-hydrated' }]; },
+  ];
+  for (const [index, change] of cases.entries()) {
+    const value = structuredClone(reimportedHistoryFixture());
+    change(value);
+    const before = structuredClone(value.current);
+    assert.equal(Chat.reconcileImportedLocalHistoryThread(value.current, value.page, value.record), value.current, `case ${index}`);
+    assert.deepEqual(value.current, before);
+  }
+});
+
+function localHistoryThreadLoaderHarness(state, records, fetchJson) {
+  const start = surfaceSource.indexOf('    async function listLocalHistoryThreads()');
+  const end = surfaceSource.indexOf('    function queueLocalHistoryRetry()', start);
+  assert.ok(start > 0 && end > start);
+  const factory = compileFunction(`
+    const initialDefaultThreadId = null;
+    const getCodexThreadById = (codex, id) => codex.threads.find(thread => thread.id === id);
+    const updateThreadById = (id, update) => { state.codex.threads = state.codex.threads.map(thread => thread.id === id ? update(thread) : thread); };
+    const emit = () => {};
+    ${surfaceSource.slice(start, end)}
+    return { list: listLocalHistoryThreads, read: loadLocalHistoryThread };
+  `, ['state', 'legacyHistoryRecords', 'ChatState', 'fetchJson']);
+  return factory(state, records, Chat, fetchJson);
+}
+
+test('production history loader recovers persisted old-store IDs from actual SQLite import receipts with no native calls', async t => {
+  const [{ openChatStore }, { createPrivateQaTempDirectory }] = await Promise.all([
+    import('../helper/egdesk-chat-store.mjs'), import('./egdesk-qa-platform.mjs'),
+  ]);
+  const dataDir = createPrivateQaTempDirectory('egdesk-history-identity-');
+  let store = openChatStore({ dataDir, ownerScope: 'history-identity-test' });
+  t.after(() => { store.close(); rmSync(dataDir, { recursive: true, force: true }); });
+  const { current, record } = reimportedHistoryFixture();
+  store.importSnapshot({ clientThreadId: record.clientThreadId, importId: record.importId,
+    snapshot: Chat.legacyPublicChatSnapshot(record) });
+  store.createConversation({ clientThreadId: 'healthy-room', localConversationId: 'healthy-local' });
+  store.close();
+  store = openChatStore({ dataDir, ownerScope: 'history-identity-test' });
+  const runtime = new CodexChatRuntime({ store, request: async () => assert.fail('no native calls'), respond: () => assert.fail('no native calls') });
+  const state = { codex: { localHistoryBootReady: true, localHistoryStatus: 'error', localHistoryError: 'previous failure',
+    legacyChatBackupKey: 'verified-backup', legacyChatBackupRequired: true, liveRevision: 0,
+    threads: [current, { id: 'healthy-room', localConversationId: 'healthy-local', messages: [] }],
+    threadDrafts: { [current.id]: 'Keep unsent draft' } } };
+  const requests = [];
+  const reader = localHistoryThreadLoaderHarness(state, [record], async (route, options) => {
+    assert.equal(options, undefined, 'only GETs are used');
+    requests.push(route.split('?')[0]);
+    const url = new URL(route, 'http://fixture.invalid');
+    if (url.pathname === '/chat/history/threads') return runtime.listLocalThreads();
+    assert.equal(url.pathname, '/chat/history');
+    return runtime.getLocalHistory({ clientThreadId: url.searchParams.get('clientThreadId'), afterSeq: Number(url.searchParams.get('afterSeq')) });
+  });
+  const loader = localHistoryLoaderHarness({ state, records: [record], list: reader.list, read: reader.read,
+    post: () => assert.fail('existing imports must not be posted again') });
+  assert.equal(await loader.loadLocalHistory([], { force: true }), true);
+  assert.equal(state.codex.localHistoryStatus, 'ready');
+  assert.equal(state.codex.localHistoryError, null);
+  assert.equal(state.codex.threads[0].localConversationId, store.getConversation(current.id).localConversationId);
+  assert.equal(state.codex.threads[0].messages.length, 2);
+  assert.deepEqual(state.codex.threads[0].messages.map(message => message.id), ['old-user', 'old-answer']);
+  assert.equal(state.codex.threadDrafts[current.id], 'Keep unsent draft');
+  assert.deepEqual(state.codex.threads[0].retainedNativeBinding, current.retainedNativeBinding);
+  assert.equal(requests.filter(path => path === '/chat/history').length, 2, 'all rooms are loaded');
+  state.codex.threads[0].localConversationId = 'unproven-other-store';
+  await assert.rejects(reader.read(store.getConversation(current.id)), /로컬 기록의 채팅방 식별자가 바뀌었습니다/);
+  assert.equal(await loader.loadLocalHistory([], { force: true }), false);
+  assert.equal(state.codex.localHistoryStatus, 'error', 'unproven conflicts still surface the real warning');
+  assert.ok(state.codex.localHistoryError);
+});
+
 function localHistoryLoaderHarness({ state, list, post, read = async () => {}, records = [] }) {
   const retryBody = surfaceSource.match(/    function queueLocalHistoryRetry\(\) \{([\s\S]*?)\n    \}\n\n    async function loadLocalHistory/)?.[1];
   const loadBody = surfaceSource.match(/    async function loadLocalHistory\(legacyRecords = \[\], \{ force = false \} = \{\}\) \{([\s\S]*?)\n    \}\n\n    const scheduleReconnect/)?.[1];
@@ -4503,6 +5042,173 @@ test('File close synchronous failures also release the gate for a working retry'
   assert.equal(await gate.requestClose(), false);
   fail = false;
   assert.equal(await gate.requestClose(), true);
+});
+
+function deskCloseShortcutHarness(os = 'Darwin') {
+  const makeTarget = () => {
+    const listeners = new Map();
+    return { listeners,
+      addEventListener(type, fn, capture) { assert.equal(capture, true); listeners.set(type, fn); },
+      removeEventListener(type, fn, capture) { assert.equal(capture, true); if (listeners.get(type) === fn) listeners.delete(type); },
+      fire(type, changed = {}) {
+        const ev = { type, target: this, currentTarget: this, key: 'w', code: 'KeyW',
+          metaKey: os === 'Darwin', ctrlKey: os !== 'Darwin', altKey: false, shiftKey: false, repeat: false,
+          preventDefault() { this.prevented = true; }, stopImmediatePropagation() { this.stopped = true; }, ...changed };
+        listeners.get(type)?.(ev); return ev;
+      } };
+  };
+  const window = makeTarget(), cards = new Map(), notices = [], cleaned = [], removed = [], unregistered = [];
+  const state = { activeEntityId: null, hudOpen: false, pan: { x: 50, y: -10 }, zoom: .25, cardFullscreen: null };
+  const hud = { contains: node => node?.inHud === true, classList: { contains: () => !state.hudOpen } };
+  const document = { activeElement: null, getElementById: id => id === 'egd-hud' ? hud : cards.get(id) || null };
+  let hudClosed = 0;
+  const close = compileFunction(`${declaration('closeCanvasCard')}\nreturn closeCanvasCard;`,
+    ['state', 'isCardFullscreen', 'exitCardFullscreen', 'unregisterSourceRefCard', 'setActiveEntity',
+      'syncOntologyPresentationState', 'markAgendaDirty', 'boardNotice', 'console', 'TAG'])(
+    state, card => state.cardFullscreen?.cardId === card.id,
+    (_card, options) => { assert.deepEqual(options, { restoreRect: false }); state.cardFullscreen = null; },
+    card => unregistered.push(card.id), card => { state.activeEntityId = card?.id || null; },
+    () => {}, () => {}, message => notices.push(message), { warn() {} }, 'test');
+  const source = surfaceSource.match(/  function installDeskCloseShortcut\(\) \{[^]*?\n  }/)?.[0];
+  assert.ok(source, 'production Desk close-shortcut installer must exist');
+  const dispose = compileFunction(`${source}; return installDeskCloseShortcut;`,
+    ['window', 'document', 'state', 'servicesRef', 'closeCanvasCard', 'toggleHUD'])(
+    window, document, state, () => ({ appinfo: { OS: os } }), close,
+    app => { assert.equal(app, null); hudClosed++; state.hudOpen = false; document.activeElement = null; })();
+  const addCard = (kind, { shell = false, beforeClose } = {}) => {
+    const card = { id: `${kind}-${cards.size}`, isConnected: true, hidden: false,
+      classList: { contains: name => name === 'egd-canvas-card' }, _beforeClose: beforeClose,
+      _cleanup: () => cleaned.push(card.id), remove() { this.isConnected = false; removed.push(this.id); } };
+    if (shell) {
+      const start = surfaceSource.indexOf('    const requestClose = () => {', surfaceSource.indexOf('  function spawnDeskWindowShell'));
+      const end = surfaceSource.indexOf('\n    };', start) + 7;
+      const requestClose = compileFunction(`let closing = false; ${surfaceSource.slice(start, end)}; return requestClose;`,
+        ['root', 'closeCanvasCard'])(card, close);
+      card._deskWindowShell = { requestClose };
+    }
+    cards.set(card.id, card); state.activeEntityId = card.id; return card;
+  };
+  return { window, document, state, notices, cleaned, removed, unregistered, addCard, makeTarget, dispose,
+    get hudClosed() { return hudClosed; }, flush: async () => { for (let i = 0; i < 12; i++) await Promise.resolve(); } };
+}
+
+test('Desk close shortcut: platform accelerator closes only the selected Browser/Chat/File/Terminal through shared lifecycle', async () => {
+  for (const os of ['Darwin', 'WINNT', 'Linux']) for (const kind of ['browser', 'chat', 'file', 'terminal']) {
+    const h = deskCloseShortcutHarness(os);
+    const other = h.addCard('unselected');
+    const card = h.addCard(kind, { shell: ['browser', 'file'].includes(kind), beforeClose: async () => true });
+    const camera = JSON.stringify([h.state.pan, h.state.zoom]);
+    h.document.activeElement = { tagName: kind === 'browser' ? 'INPUT' : 'TEXTAREA' };
+    if (kind === 'browser') h.state.cardFullscreen = { cardId: card.id };
+    if (kind === 'file') card.dataset = { egdSemanticLevel: 'outline' };
+    const key = h.window.fire('keydown', { target: h.document.activeElement });
+    assert.equal(key.prevented, true); assert.equal(key.stopped, true, 'consume before native window-close default');
+    await h.flush();
+    assert.deepEqual(h.removed, [card.id]); assert.deepEqual(h.cleaned, [card.id]); assert.deepEqual(h.unregistered, [card.id]);
+    assert.equal(other.isConnected, true); assert.equal(h.state.activeEntityId, null);
+    assert.equal(h.state.cardFullscreen, null); assert.equal(JSON.stringify([h.state.pan, h.state.zoom]), camera);
+    h.dispose(); assert.equal(h.window.listeners.size, 0);
+  }
+  assert.match(surfaceSource, /installDeskCloseShortcut\(\);/, 'boot installs the route');
+});
+
+test('Desk close shortcut: no selection/stale selection/shapes consume no-op and focused HUD never closes an old Card', () => {
+  const h = deskCloseShortcutHarness(), old = h.addCard('browser');
+  for (const id of [null, 'missing', 'shape', 'disconnected']) {
+    if (id === 'shape') { const card = h.addCard('shape'); card.classList.contains = () => false; h.state.activeEntityId = card.id; }
+    else if (id === 'disconnected') { const card = h.addCard('disconnected'); card.isConnected = false; h.state.activeEntityId = card.id; }
+    else h.state.activeEntityId = id;
+    const ev = h.window.fire('keydown'); assert.equal(ev.prevented, true); assert.equal(ev.stopped, true);
+    h.window.fire('keyup'); assert.deepEqual(h.removed, []);
+  }
+  h.state.activeEntityId = old.id; h.state.hudOpen = true; h.document.activeElement = { inHud: true };
+  h.window.fire('keydown'); assert.equal(h.hudClosed, 1); assert.equal(old.isConnected, true);
+  h.window.fire('keydown', { repeat: true }); assert.equal(h.hudClosed, 1); assert.equal(old.isConnected, true);
+});
+
+test('Desk close shortcut: held key cannot cascade after removal, selection change, focus movement or iframe handoff', () => {
+  const h = deskCloseShortcutHarness(), first = h.addCard('browser'), next = h.addCard('chat');
+  h.state.activeEntityId = first.id;
+  const frame = h.makeTarget(), release = h.state.registerDeskCloseShortcutTarget(frame);
+  frame.fire('keydown'); assert.deepEqual(h.removed, [first.id]);
+  h.state.activeEntityId = next.id;
+  h.window.fire('blur', { target: { tagName: 'INPUT' } });
+  for (let i = 0; i < 3; i++) assert.equal(h.window.fire('keydown', { repeat: true }).prevented, true);
+  assert.equal(next.isConnected, true, 'one physical press never reaches a second Card');
+  frame.fire('keyup'); h.window.fire('keydown'); assert.deepEqual(h.removed, [first.id, next.id]);
+  release(); assert.equal(frame.listeners.size, 0); h.dispose(); assert.equal(h.window.listeners.size, 0);
+});
+
+test('Desk close shortcut: missing keyup after Chat or iframe removal cannot swallow the next physical press', async () => {
+  for (const os of ['Darwin', 'WINNT', 'Linux']) for (const removedFrame of [false, true]) {
+    const h = deskCloseShortcutHarness(os), first = h.addCard(removedFrame ? 'terminal' : 'chat');
+    const frame = h.makeTarget(), release = h.state.registerDeskCloseShortcutTarget(frame);
+    const sender = removedFrame ? frame : h.window;
+    sender.fire('keydown', { repeat: false }); assert.deepEqual(h.removed, [first.id]);
+    if (removedFrame) release(); // Its keyup target/listeners no longer exist.
+    let attempts = 0, resolve;
+    const next = h.addCard('file', { shell: true, beforeClose: () => {
+      attempts++; return new Promise(done => { resolve = done; });
+    } });
+    h.window.fire('keydown', { repeat: true });
+    await h.flush(); assert.equal(attempts, 0, 'held W cannot cascade into the newly selected File');
+    // Deliberately deliver neither W nor accelerator keyup. Native repeat=false
+    // is a new physical press even if the previous target swallowed the release.
+    const fresh = h.window.fire('keydown', { repeat: false });
+    assert.equal(fresh.prevented, true); assert.equal(fresh.stopped, true);
+    await h.flush(); assert.equal(attempts, 1);
+    for (let i = 0; i < 3; i++) h.window.fire('keydown', { repeat: true });
+    await h.flush(); assert.equal(attempts, 1, 'one native press invokes the async lifecycle guard once');
+    resolve(false); await h.flush();
+    h.window.fire('keydown', { repeat: true }); await h.flush(); assert.equal(attempts, 1);
+    h.window.fire('keydown', { repeat: false }); await h.flush(); assert.equal(attempts, 2);
+    resolve(true); await h.flush(); assert.deepEqual(h.removed, [first.id, next.id]);
+  }
+});
+
+test('Desk close shortcut: accelerator-only release recovers a missing W keyup without allowing repeat cascade', () => {
+  for (const os of ['Darwin', 'WINNT', 'Linux']) {
+    const h = deskCloseShortcutHarness(os), first = h.addCard('chat');
+    h.window.fire('keydown'); assert.deepEqual(h.removed, [first.id]);
+    const next = h.addCard('file');
+    h.window.fire('keyup', { key: os === 'Darwin' ? 'Meta' : 'Control',
+      code: os === 'Darwin' ? 'MetaLeft' : 'ControlLeft', metaKey: false, ctrlKey: false });
+    assert.equal(h.window.fire('keydown', { repeat: true }).prevented, true);
+    assert.equal(next.isConnected, true);
+    h.window.fire('keydown', { repeat: false });
+    assert.deepEqual(h.removed, [first.id, next.id]);
+  }
+});
+
+test('Desk close shortcut: File/Terminal refusal or failure retains selection and async guards do not run twice', async () => {
+  for (const shell of [false, true]) {
+    const h = deskCloseShortcutHarness(); let attempts = 0, resolve;
+    const card = h.addCard(shell ? 'file' : 'terminal', { shell,
+      beforeClose: () => { attempts++; return new Promise(done => { resolve = done; }); } });
+    h.window.fire('keydown'); await h.flush();
+    h.window.fire('keyup'); h.window.fire('keydown'); await h.flush();
+    assert.equal(attempts, 1); assert.equal(card.isConnected, true);
+    resolve(false); await h.flush(); assert.equal(h.state.activeEntityId, card.id); assert.deepEqual(h.cleaned, []);
+    h.window.fire('keyup'); h.window.fire('keydown'); await h.flush(); assert.equal(attempts, 2);
+    resolve(true); await h.flush(); assert.deepEqual(h.removed, [card.id]); assert.deepEqual(h.cleaned, [card.id]);
+  }
+  const h = deskCloseShortcutHarness(); const card = h.addCard('terminal', { beforeClose: () => { throw new Error('blocked'); } });
+  h.window.fire('keydown'); await h.flush(); assert.equal(card.isConnected, true); assert.equal(h.state.activeEntityId, card.id);
+  assert.equal(h.notices.length, 1); assert.deepEqual(h.removed, []);
+});
+
+test('Desk close shortcut: only unshifted platform W is owned; quit, close-window, text editing and IME are untouched', () => {
+  for (const os of ['Darwin', 'WINNT', 'Linux']) {
+    const h = deskCloseShortcutHarness(os), card = h.addCard('browser');
+    for (const change of [{ shiftKey: true }, { altKey: true }, { key: 'q', code: 'KeyQ' },
+      { metaKey: false, ctrlKey: false }, { metaKey: os !== 'Darwin', ctrlKey: os === 'Darwin' },
+      { isComposing: true }, { keyCode: 229 }]) {
+      assert.equal(h.window.fire('keydown', change).prevented, undefined, `${os}: ${JSON.stringify(change)}`);
+      assert.equal(card.isConnected, true);
+    }
+    assert.equal(h.window.fire('keydown', { key: 'ㅈ', code: 'KeyW' }).prevented, true, 'physical W works with Korean layout');
+    assert.deepEqual(h.removed, [card.id]);
+  }
 });
 
 test('actual outer Card close leaves the window and cleanup intact until file flush succeeds', async () => {
@@ -5995,10 +6701,10 @@ test('Chat composer reserves title, status and log space on compact cards', asyn
     const css = readFileSync(new URL('../overlay/CSS/eg-desk-surface.uc.css', import.meta.url), 'utf8');
     assert.match(css, /\.egd-codex-conversation-pane > p\.egd-codex-run-status \{[^}]*min-height: 0;[^}]*padding: 4px 16px;/);
     assert.match(css, /\[data-compact-composer="true"\] \.egd-codex-messages \{ padding: 12px 16px; \}/);
-    assert.match(css, /\[data-compact-composer="true"\] \.egd-codex-footer \{ padding: 0 12px 12px; \}/);
+    assert.match(css, /\[data-compact-composer="true"\] \.egd-codex-footer \{ padding: 4px 11px 10px; \}/);
     assert.match(css, /\[data-compact-composer="true"\] \.egd-codex-input-row \{ padding: 8px 10px; gap: 4px; \}/);
     assert.match(css, /\.egd-codex-run-status \{[^}]*flex: 0 0 auto;[^}]*min-height: 44px;/);
-    assert.match(css, /\.egd-codex-send \{ width: 32px; height: 32px;/);
+    assert.match(css, /\.egd-codex-send \{ width: 34px; height: 34px; min-width: 34px; min-height: 34px;/);
   });
 });
 
@@ -7055,11 +7761,17 @@ test('Dock tool ids keep the selection pointer apart from the arrow mark', () =>
 });
 
 test('the 18-button Dock fits a 600px window without scrolling any tool away', () => {
-  const narrow = surfaceCss.match(/@media \(max-width: 700px\) \{([\s\S]*?)\n\}/)?.[1] || '';
-  const px = (body, property) => Number.parseFloat(body.match(new RegExp(`(?:^|[\\s;{])${property}:\\s*(\\d+)px`))?.[1]);
-  const dock = narrow.match(/#egd-dock \{([^}]+)\}/)?.[1] || '';
-  const group = narrow.match(/\.egd-dock-group \{([^}]+)\}/)?.[1] || '';
-  const button = narrow.match(/\.egd-dock-btn \{([^}]+)\}/)?.[1] || '';
+  // The breakpoint can be split across Focus and Dock blocks. Cascade only
+  // the exact Dock selectors, in source order, across all matching blocks.
+  const narrow = readCssRules(surfaceCss).filter(rule => rule.media.length === 1 && rule.media[0] === '(max-width: 700px)');
+  const declarations = selector => Object.fromEntries(narrow.filter(rule => rule.selectors.includes(selector)).flatMap(rule => rule.declarations));
+  const px = (body, property) => {
+    assert.match(body[property] || '', /^\d+px$/, `${property} keeps an explicit pixel size`);
+    return Number.parseFloat(body[property]);
+  };
+  const dock = declarations('#egd-dock');
+  const group = declarations('.egd-dock-group');
+  const button = declarations('.egd-dock-btn');
   const counts = [8, productionDockCenter().length, 1];
   const width = counts.reduce((sum, count) => sum + count * px(button, 'width') + (count - 1) * px(group, 'gap'), 0)
     + 2 /* dividers */ + 4 * px(dock, 'gap') + 2 * px(dock, 'padding-inline') + 2 /* border */;
@@ -7736,7 +8448,7 @@ test('dark scheme maps every approved light-dark pair onto the --egd-* tokens', 
   // Rule-level pairs retain the avatar, region line and desk veil; the active
   // edge is resolved from CSS and must meet contrast on its field surfaces.
   for (const [token, lightValue, darkValue] of [['avatar-bg', '#DCE5DA', '#536552'],
-    ['region-line', 'rgba(102, 91, 69, .21)', 'rgba(204, 198, 180, .19)'], ['wood-veil', 'rgba(245, 243, 239, .68)', 'rgba(36, 42, 40, .82)']]) {
+    ['region-line', 'rgba(102, 91, 69, .21)', 'rgba(204, 198, 180, .19)'], ['wood-veil', 'rgba(245, 243, 239, .73)', 'rgba(36, 42, 40, .82)']]) {
     assert.deepEqual([lightTokens.get(`--egd-${token}`), darkTokens.get(`--egd-${token}`)], [lightValue, darkValue], token);
   }
   for (const scheme of ['light', 'dark']) {
@@ -7846,8 +8558,12 @@ test('main rows and buttons keep a minimum height instead of a fixed one, and th
   assert.match(rules('.egd-desk-window-identity')[0], /align-self: stretch;/);
   assert.doesNotMatch(rules('.egd-desk-window-identity')[0], /height: 100%/);
   assert.match(surfaceCss, /\.egd-chat-card-header,\n\.egd-chat-card\.egd-entity-active \.egd-chat-card-header \{\n  min-height: 32px;/);
-  const narrow = surfaceCss.match(/@media \(max-width: 700px\) \{([\s\S]*?)\n\}/)?.[1] || '';
-  assert.match(narrow, /\.egd-dock-btn \{ width: 29px; min-height: 30px; flex: none; \}/);
+  const narrowButton = Object.fromEntries(readCssRules(surfaceCss)
+    .filter(rule => rule.media.length === 1 && rule.media[0] === '(max-width: 700px)' && rule.selectors.includes('.egd-dock-btn'))
+    .flatMap(rule => rule.declarations));
+  assert.equal(narrowButton.width, '29px');
+  assert.equal(narrowButton['min-height'], '30px');
+  assert.equal(narrowButton.flex, 'none');
   const composer = rules('.egd-codex-input');
   for (const body of composer) assert.doesNotMatch(body, /line-height: \d+px/, 'composer line height is relative');
   assert.match(composer.at(-1), /max-height: 9\.6em;[^}]*font-size: 15px; line-height: 1\.6;/, '6 × 24px = 144px at 15px');
@@ -8400,7 +9116,15 @@ test('engine controls: header chip, new-room choices, locked-room panel and effo
   for (const pattern of [/renderEngineChip\(activeThread\),\n            codexUsageRing\(codex\.authStatus\),/g]) {
     assert.equal(surfaceSource.match(pattern)?.length, 2, 'both Chat heads show the engine chip next to the usage meter');
   }
-  assert.match(surfaceSource, /buildCodexSessionBadge\(thread, codexBridge\),\n                    renderEngineBadge\(thread\),/);
+  assert.match(surfaceSource, /showSession \? buildCodexSessionBadge\(thread, codexBridge\) : null,\s*showEngine \? renderEngineBadge\(thread\) : null,/);
+  const identityStart = surfaceSource.indexOf('          const labelKey = value =>', end);
+  const identityEnd = surfaceSource.indexOf('          const avatarInitial =', identityStart);
+  assert.ok(identityStart > end && identityEnd > identityStart, 'room badge decisions remain directly testable');
+  const roomBadges = compileFunction(`${surfaceSource.slice(identityStart, identityEnd)}\nreturn { profileLabel, showEngine, showSession };`, ['thread', 'profile', 'engine', 'codexThreadSessionKey']);
+  assert.deepEqual(roomBadges({ title: 'Codex', profileEnabled: false }, { label: 'Codex' }, { engineId: 'codex', label: 'Codex' }, () => 'resumed'),
+    { profileLabel: null, showEngine: false, showSession: false }, 'a plain room does not grow redundant badges');
+  assert.deepEqual(roomBadges({ title: '회의', profileEnabled: true }, { label: 'Rio' }, { engineId: 'claude', label: 'Claude' }, () => 'local'),
+    { profileLabel: 'Rio', showEngine: true, showSession: true }, 'different Agent, engine and held-local identities remain visible');
   assert.match(surfaceSource, /if \(\(canStart \|\| ChatState\.chatEngineChoices\(codex\.engines\)\.some\(choice => choice\.id === 'claude' && choice\.selectable\)\)\s*&& !ChatState\.chatThreadEngineLocked\(activeThread\)\) \{\n            messages\.appendChild\(el\('div', \{ class: 'egd-codex-engine-start'/);
 });
 
@@ -14084,6 +14808,13 @@ test('File-only compact focus uses the real existing camera transition, retainin
   const focus = compileFunction('return card => {' + fileBody + '};',
     ['state', 'syncEntries', 'entries', 'authorVisible', 'screenRect', 'SurfaceState', 'detailWidth', 'detailHeight', 'isCardFullscreen', 'focusProjection'])(
     state, () => {}, entries, authorVisible, screenRect, Surface, 240, 180, () => false, focusProjection);
+  state.zoomTarget = .5;
+  assert.equal(focus(card), true, 'the File Dock action still requests readable focus at 50% even while the Card is detailed');
+  assert.ok(state.zoomTarget >= 10.6 / 13, 'the action retains its readable font target');
+  cameraTargets.length = 0;
+  focused.length = 0;
+  state.zoomTarget = previousCamera.zoom;
+  state.panTarget = { ...previousCamera.pan };
   assert.equal(focus(card), true);
   assert.equal(cameraTargets.length, 1);
   assert.deepEqual(focused, [card], 'the same File View is focused');
@@ -15146,8 +15877,9 @@ function portableSettingsHarness({ respond, fullscreen = false, initialDetail = 
     codexProfileAvatar, document, window: { setTimeout: () => 0, confirm: () => false }, bindCardSourceRef() {}, markAgendaDirty() {}, setActiveEntity() {},
     isCardFullscreen: () => false, focusCanvasCard() {}, installCardHeaderFullscreenToggle() {}, canvasZoom: () => 1, ...settingsTransferDeps(document, state, native.adapter) };
   if (fullscreen) {
-    Object.assign(state, { cardFullscreen: null, surface: { initialBrowserFocus: false }, pan: { x: 0, y: 0 } });
-    const fullDeps = { state, document, cardZ: 0, canvasZoom: () => 1,
+    Object.assign(state, { cardFullscreen: null, surface: { initialBrowserFocus: false }, pan: { x: 0, y: 0 }, zoom: 1,
+      setCanvasViewportTarget(camera) { this.pan = { ...camera.pan }; this.zoom = camera.zoom; } });
+    const fullDeps = { state, document, cardZ: 0, canvasZoom: () => 1, parsePxNumber: Number.parseFloat, SurfaceState: Surface, ZOOM_MAX: 4,
       safeViewportRect: () => ({ left: 10, top: 10, width: 980, height: 680 }),
       setActiveEntity: card => { state.activeEntityId = card?.id; }, syncViewportAgendaRail() {}, syncHudViewportFit() {},
       closeDeskMinimap() {}, toggleDeskMinimap() {}, scheduleDeskSessionSave() {} };
@@ -15444,7 +16176,7 @@ test('Settings duplicate: definite lifecycle refusal retains the displayed origi
   assert.equal(h.refreshes(), 0); assert.equal(h.store.list().profiles.length, 0);
 });
 
-test('Settings green control: click, Enter and Space use actual shared fullscreen geometry and restore only this card', () => {
+test('Settings green control: click, Enter and Space use shared camera Focus and restore only this card', () => {
   const h = portableSettingsHarness({ fullscreen: true });
   const control = settingsNodes(h.card, node => node.className.split(' ').includes('egd-card-dot-max'))[0];
   const other = h.document.createElement('div'); other.setAttribute('id', 'another-card');
@@ -15459,10 +16191,16 @@ test('Settings green control: click, Enter and Space use actual shared fullscree
     activate();
     assert.equal(h.state.cardFullscreen.cardId, h.card.id); assert.equal(h.state.activeEntityId, h.card.id);
     assert.equal(h.card.classList.contains('egd-card-fullscreen'), true);
-    assert.deepEqual([h.card.style.left, h.card.style.top, h.card.style.width, h.card.style.height], ['10px', '10px', '980px', '680px']);
+    assert.deepEqual([h.card.style.left, h.card.style.top, h.card.style.width, h.card.style.height],
+      [original.left, original.top, original.width, original.height]);
+    const world = { x: Number.parseFloat(original.left), y: Number.parseFloat(original.top),
+      width: Number.parseFloat(original.width), height: Number.parseFloat(original.height) };
+    const camera = fitSurfaceCamera(world, { left: 10, top: 10, width: 980, height: 680 }, 4);
+    assert.equal(h.state.zoom, camera.zoom); assert.deepEqual(h.state.pan, camera.pan);
     assert.equal(other.classList.contains('egd-card-fullscreen'), false); assert.deepEqual(other.style, untouched);
     activate(); assert.equal(h.state.cardFullscreen, null); assert.equal(h.card.classList.contains('egd-card-fullscreen'), false);
     assert.deepEqual(h.card.style, original); assert.deepEqual(other.style, untouched);
+    assert.equal(h.state.zoom, 1); assert.deepEqual(h.state.pan, { x: 0, y: 0 });
     assert.equal(prevented, key === null ? 0 : 2);
   }
   control.fire('keydown', { key: 'ArrowDown' }); assert.equal(h.state.cardFullscreen, null);

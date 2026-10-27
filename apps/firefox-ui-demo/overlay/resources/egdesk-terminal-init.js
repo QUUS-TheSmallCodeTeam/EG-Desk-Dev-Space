@@ -1,6 +1,6 @@
 'use strict';
 (async () => {
-  const { createTerminalCloseController, createTerminalWriteQueue, createTerminalCompositionGate, createTerminalScriptRun, terminalExitEvidence, terminalResponsePacket } = await import('chrome://userchrome/content/EGDeskTerminalState.sys.mjs');
+  const { createTerminalCloseController, createTerminalWriteQueue, createTerminalKeyEventGuard, createTerminalCompositionGate, createTerminalScriptRun, terminalExitEvidence, terminalResponsePacket } = await import('chrome://userchrome/content/EGDeskTerminalState.sys.mjs');
   const HELPER_PORT = 39218;
   const HELPER_ORIGIN = `http://127.0.0.1:${HELPER_PORT}`;
   const statusEl = document.getElementById('status-overlay');
@@ -69,6 +69,7 @@
   let shellCatalog = null, sessionInfo = null;
   let activeScript = null;
   let inputRevision = 0;
+  let frameWheelHandler = null;
   let spawnPhase = 'idle', noSessionClosed = false;
   const definiteSpawnRejection = error => [
     'WINDOWS_PTY_UNAVAILABLE', 'WINDOWS_CONPTY_UNSUPPORTED', 'INVALID_TERMINAL_SHELL',
@@ -353,6 +354,10 @@
       focus: () => {
         term.focus();
       },
+      setWheelHandler: handler => {
+        if (handler !== null && typeof handler !== 'function') throw new TypeError('Wheel handler must be a function');
+        frameWheelHandler = handler;
+      },
       paste: (data) => {
         composition.boundary();
         term.paste(String(data ?? ''));
@@ -512,7 +517,9 @@
           shellId: sessionInfo?.shellId, shellLabel: sessionInfo?.shellLabel }, '*');
         readTimer = setInterval(readTerminalOutput, 80);
         void readTerminalOutput();
-        if (autoFocus) term.focus();
+        // An embedded terminal must not steal focus from a different card while
+        // its asynchronous connection is opening. The owning card focuses it.
+        if (autoFocus && window.parent === window) term.focus();
         return true;
       } catch (error) {
         if (spawnPhase === 'pending') spawnPhase = definiteSpawnRejection(error) ? 'rejected' : 'unknown';
@@ -548,6 +555,9 @@
 
   // ---- Terminal input -> PTY ----
   let dataEvents = 0; // 진단용: xterm이 사용자 입력을 인식한 횟수
+  const keyGuard = createTerminalKeyEventGuard();
+  term.attachCustomKeyEventHandler(event => keyGuard.keyEvent(event));
+  term.onKey(event => keyGuard.onKey(event));
   term.onData((data) => {
     dataEvents += 1;
     void composition.data(data).catch(reportAsyncError);
@@ -555,20 +565,40 @@
 
   // 프레임 내부 어디를 클릭해도 xterm으로 포커스 복귀
   // (chrome host의 프레임 포커스 핸드오프는 부모(eg-desk-surface)가 담당)
+  const activateTerminalCard = () => {
+    if (!unloaded) window.parent.postMessage({ type: 'terminal-activate' }, '*');
+  };
   window.addEventListener('mousedown', event => {
+    activateTerminalCard();
     if (event.target?.closest?.('#terminal-toolbar, #status-overlay button')) return;
     setTimeout(() => { if (!unloaded) term.focus(); }, 0);
   });
+  window.addEventListener('wheel', event => {
+    if (frameWheelHandler?.(event) !== true) return;
+    event.preventDefault();
+    event.stopPropagation();
+  }, { capture: true, passive: false });
 
   // xterm's target listener schedules native composition output at timer(0).
   // Observe at bubble phase and retain a delayed, session-bound fallback for
   // privileged frames where native onData was previously absent.
-  containerEl.addEventListener('compositionstart', () => composition.start(), true);
+  containerEl.addEventListener('compositionstart', () => {
+    keyGuard.reset();
+    activateTerminalCard();
+    composition.start();
+  }, true);
   containerEl.addEventListener('compositionend', event => composition.end(event.data));
   containerEl.addEventListener('keydown', event => {
+    activateTerminalCard();
     if (!event.isComposing && event.keyCode !== 229) composition.boundary();
   }, true);
-  containerEl.addEventListener('paste', () => composition.boundary(), true);
+  containerEl.addEventListener('input', event => keyGuard.input(event), true);
+  containerEl.addEventListener('paste', () => {
+    keyGuard.reset();
+    activateTerminalCard();
+    composition.boundary();
+  }, true);
+  window.addEventListener('blur', () => keyGuard.reset());
 
   // ---- Resize handling ----
   let resizeTimeout = null;
@@ -587,8 +617,11 @@
 
   // ---- Cleanup on unload ----
   exposeTerminalApi();
+  window.parent.postMessage({ type: 'terminal-api-ready' }, '*');
   window.addEventListener('unload', () => {
     unloaded = true;
+    frameWheelHandler = null;
+    keyGuard.reset();
     invalidateScriptRun();
     connected = false;
     term.options.disableStdin = true;

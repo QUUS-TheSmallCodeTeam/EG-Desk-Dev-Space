@@ -124,6 +124,7 @@ function surface({ run = null, thread = {}, auth = {}, fetchJson = async () => (
   const root = new Node('root');
   const document = { documentElement: root, activeElement: null, defaultView: { getComputedStyle: () => ({ maxHeight: '240' }) },
     createElement: tag => Object.assign(new Node(tag), { ownerDocument: document }),
+    createElementNS: (namespaceURI, tag) => Object.assign(new Node(tag), { ownerDocument: document, namespaceURI }),
     createTextNode: text => new Node('#text', text), getElementById: id => root.querySelector(`#${id}`),
     querySelectorAll: selector => root.querySelectorAll(selector) };
   const initial = { id: 'ui', clientThreadId: 'ui', engineId: 'claude', messages: [], inputSources: [], briefingInputs: [], ...thread };
@@ -198,8 +199,11 @@ function surface({ run = null, thread = {}, auth = {}, fetchJson = async () => (
 function composer(ui) {
   const viewport = ui.composerViewport ||= productionController('createChatComposerViewport');
   const block = between("            const input = el('textarea', {", "            input.addEventListener('input'");
-  const controls = compile(`${functionSource('getCodexThreadDraft')}\n${block}\nreturn {input, sendButton, resizeComposer};`, {
-    el: ui.el, ChatState, activeThread: ui.thread(), codex: ui.state.codex, codexBridge: ui,
+  // Keep the real icon helper, its SVG builder and source shapes in the same
+  // VM scope as the extracted production composer, just as in the app.
+  const icons = `${functionSource('svgEl')}\n${between('  const DESK_ICON_SHAPES = {', '  function normalizeSourcePart(')}`;
+  const controls = compile(`${functionSource('getCodexThreadDraft')}\n${icons}\n${block}\nreturn {input, sendButton, resizeComposer};`, {
+    document: ui.document, el: ui.el, ChatState, activeThread: ui.thread(), codex: ui.state.codex, codexBridge: ui,
     chatRoomProjectSendBlock: ui.projectBlock, composerViewport: viewport.instance,
     compositionInProgress: false,
   });
@@ -243,6 +247,13 @@ test('real send button and empty-chat content use Claude readiness with Codex of
   const controls = composer(ui);
   assert.equal(controls.sendButton.disabled, false);
   assert.equal(controls.sendButton.title, '보내기');
+  const sendIcon = controls.sendButton.querySelector('svg');
+  assert.ok(sendIcon, 'the real send icon is rendered');
+  assert.equal(sendIcon.namespaceURI, 'http://www.w3.org/2000/svg');
+  assert.equal(sendIcon.getAttribute('aria-hidden'), 'true');
+  assert.equal(sendIcon.getAttribute('viewBox'), '0 0 24 24');
+  assert.equal(sendIcon.querySelector('path')?.getAttribute('d'), 'M12 19V5m-5 5 5-5 5 5');
+  assert.equal(sendIcon.querySelector('rect'), null, 'the fallback square is not the send icon');
   const empty = emptyChat(ui);
   assert.match(empty.textContent, /어떤 일을 함께할까요/);
   assert.doesNotMatch(empty.textContent, /Codex 연결|로그인 필요/);

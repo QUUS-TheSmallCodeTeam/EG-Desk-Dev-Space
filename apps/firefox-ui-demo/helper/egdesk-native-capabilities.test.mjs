@@ -68,17 +68,38 @@ test('only the schema-verified Windows prerelease can expose native QA tools', (
     qaContract: false, schemaFingerprint: 'a'.repeat(64) }) }).qaReadOnly, false)
 })
 
-test('installed 0.160.1 generated experimental schema has the exact native contracts used by context, Reader and read-only QA', async t => {
-  const cli = spawnSync('codex', ['--version'], { encoding: 'utf8', timeout: 5000 })
-  if (cli.status !== 0 || cli.stdout.trim() !== 'codex-cli 0.160.1') return t.skip('Codex 0.160.1 CLI is not installed on this test host')
+test('0.162.1 requires the selected executable fingerprint and context schema, but does not authorize QA', () => {
+  const run = () => ({ status: 0, stdout: 'codex-cli 0.162.1\n' })
+  const full = { contextContract: true, qaContract: true, schemaFingerprint: 'a'.repeat(64) }
+  const inspect = (proof, fingerprint = () => 'b'.repeat(64)) => inspectNativeCapabilities({
+    executable: '/selected/native', run, probe: () => proof, fingerprint,
+  })
+  assert.deepEqual([inspect(full).schemaMatch, inspect(full).qaReadOnly], [true, false])
+  assert.deepEqual([inspect(null).schemaMatch, inspect(null).qaReadOnly], [false, false])
+  assert.deepEqual([inspect({ ...full, contextContract: false }).schemaMatch, inspect({ ...full, contextContract: false }).qaReadOnly], [false, false])
+  assert.deepEqual([inspect({ ...full, qaContract: false }).schemaMatch, inspect({ ...full, qaContract: false }).qaReadOnly], [true, false])
+  assert.deepEqual([inspect({ ...full, schemaFingerprint: 'bad' }).schemaMatch, inspect({ ...full, schemaFingerprint: 'bad' }).qaReadOnly], [false, false])
+  assert.deepEqual([inspect(full, () => 'bad').schemaMatch, inspect(full, () => 'bad').qaReadOnly], [false, false])
+  let probes = 0
+  const unknown = inspectNativeCapabilities({ executable: '/selected/native', run: () => ({ status: 0, stdout: 'codex-cli 0.162.2\n' }),
+    probe: () => { probes++; return full }, fingerprint: () => 'b'.repeat(64) })
+  assert.deepEqual([unknown.schemaMatch, unknown.qaReadOnly], [false, false])
+  assert.equal(probes, 0, 'an unknown version is not accepted on generated shape alone')
+})
+
+test('installed 0.160.1 or 0.162.1 generated experimental schema is checked without expanding QA authorization', async t => {
+  let executable
+  try { executable = resolveCodexExecutable() } catch { return t.skip('No configured Codex CLI is available on this test host') }
+  const cli = spawnSync(executable, ['--version'], { encoding: 'utf8', timeout: 5000 })
+  if (cli.status !== 0 || !['codex-cli 0.160.1', 'codex-cli 0.162.1'].includes(cli.stdout.trim())) return t.skip('A checked Codex CLI is not installed on this test host')
   const dir = await mkdtemp(path.join(os.tmpdir(), 'egdesk-app-server-schema-'))
   try {
-    const generated = spawnSync('codex', ['app-server', 'generate-json-schema', '--experimental', '--out', dir], { encoding: 'utf8', timeout: 10000 })
+    const generated = spawnSync(executable, ['app-server', 'generate-json-schema', '--experimental', '--out', dir], { encoding: 'utf8', timeout: 10000 })
     assert.equal(generated.status, 0, generated.stderr)
     assert.deepEqual({ contextContract: verifyNativeSchemaDirectory(dir)?.contextContract, qaContract: verifyNativeSchemaDirectory(dir)?.qaContract }, { contextContract: true, qaContract: true })
-    const actual = inspectNativeCapabilities({ executable: resolveCodexExecutable() })
+    const actual = inspectNativeCapabilities({ executable })
     assert.equal(actual.schemaMatch, true)
-    assert.equal(actual.qaReadOnly, true)
+    assert.equal(actual.qaReadOnly, cli.stdout.trim() === 'codex-cli 0.160.1')
     assert.match(actual.contractFingerprint, /^[a-f0-9]{64}$/)
     const schema = async name => JSON.parse(await readFile(path.join(dir, name), 'utf8'))
     const start = await schema('v2/ThreadStartParams.json')
@@ -281,12 +302,12 @@ test('Chat version range: checked versions are supported, newer ones untested, o
   for (const version of [null, undefined, '', 'codex-cli 0.162.1', '0.162', 'v0.162.1', '/usr/local/bin/codex', 162, `0.162.1-${'x'.repeat(90)}`]) assert.equal(status(version), null, String(version))
   assert.equal(engineVersionStatus('2.1.300', { verified: [], minimum: 'bad' }), 'untested', 'no usable minimum: never invented as unsupported')
   assert.equal(engineVersionStatus('2.1.300', null), 'untested')
-  // The PATH codex 0.162.1 is no longer reported as unknown for Chat, while
-  // its Context/QA contract still needs the exact schema proof.
+  // A supported banner is not enough: Context/QA still needs proof from the
+  // exact executable and its generated schema, and unknown versions stay shut.
   const inspect = version => inspectNativeCapabilities({ executable: '/selected/native', run: () => ({ status: 0, stdout: `codex-cli ${version}\n` }),
     probe: () => ({ contextContract: true, qaContract: true, schemaFingerprint: 'a'.repeat(64) }), fingerprint: () => 'b'.repeat(64) })
   const daily = inspect('0.162.1')
-  assert.deepEqual([daily.versionStatus, daily.schemaMatch, daily.qaReadOnly], ['supported', false, false])
+  assert.deepEqual([daily.versionStatus, daily.schemaMatch, daily.qaReadOnly], ['supported', true, false])
   const pinned = inspect('0.160.1')
   assert.deepEqual([pinned.versionStatus, pinned.schemaMatch, pinned.qaReadOnly], ['supported', true, true])
   assert.deepEqual([inspect('0.165.0').versionStatus, inspect('0.165.0').schemaMatch], ['untested', false])

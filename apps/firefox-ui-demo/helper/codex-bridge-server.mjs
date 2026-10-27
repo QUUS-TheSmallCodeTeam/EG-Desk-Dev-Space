@@ -42,6 +42,9 @@ import { createEGDeskFileMount, requireEGDeskNodeRuntime } from './egdesk-file-m
 import { createSystemResourceMonitor } from './system-resource-monitor.mjs'
 import { openWorkflowRuntime } from './egdesk-workflow-runtime.mjs'
 import { createPlanToolProvider } from './egdesk-plan-tool-provider.mjs'
+import { openOntologyStore } from './egdesk-ontology-store.mjs'
+import { createOntologyHttpHandler, ontologyHealth, openBoundOntologyStore, readOntologyProfileBinding } from './egdesk-ontology-http.mjs'
+import { inspectSqliteRuntime } from './egdesk-sqlite-runtime.mjs'
 
 const nodeRuntime = requireEGDeskNodeRuntime()
 
@@ -131,6 +134,25 @@ const nativeRespond = (id, result, error) => {
   rpc.respond(id, result, error)
 }
 const dataDir = appDataDirectory()
+const sqliteRuntime = inspectSqliteRuntime()
+let ontologyBinding = null
+let ontologyStore = null
+try { ontologyBinding = readOntologyProfileBinding(process.env.EGDESK_FIREFOX_PROFILE) }
+catch { console.error('[egdesk-codex-bridge] ontology profile binding unavailable') }
+
+// Only the launcher's verified Firefox profile can select this local DB. A
+// failed first migration leaves the baseline and imported data intact for retry.
+// An already initialized DB never reads or imports the seed again.
+function ensureOntologyStore() {
+  if (!ontologyBinding || ontologyStore) return ontologyStore
+  try {
+    ontologyStore = openBoundOntologyStore({ binding: ontologyBinding, dataDir, openStore: openOntologyStore })
+  } catch {
+    console.error('[egdesk-codex-bridge] ontology storage unavailable; original data retained')
+  }
+  return ontologyStore
+}
+ensureOntologyStore()
 const systemResourceMonitor = createSystemResourceMonitor({ profilePath: dataDir })
 let chatStore = null
 let chatStoreError = null
@@ -331,6 +353,7 @@ const inheritedMcp = createInheritedMcpSync({
 const ensureChatAuth = createChatEngineAuth({ chat, refreshCodexAccount: refreshAccountState, getCodexAuth: () => authState })
 const handleChatHttp = createChatHttpHandler(chat, ensureChatAuth)
 const handleComputerControlHttp = createComputerControlHttpHandler(chat, { port: BRIDGE_PORT })
+const handleOntologyHttp = createOntologyHttpHandler({ binding: () => ontologyBinding, store: ensureOntologyStore, runtime: sqliteRuntime, port: BRIDGE_PORT })
 const handleContextHttp = createContextHttpHandler(contexts, ensureChatAuth, { port: BRIDGE_PORT })
 // Like /chat/history, profiles stay editable while Codex is signed out.
 const handleProfileHttp = createProfileHttpHandler({ store: () => profileStore, port: BRIDGE_PORT })
@@ -753,12 +776,15 @@ const bridgeServer = createServer(async (req, res) => {
 
   if (req.method === 'OPTIONS') {
     res.writeHead(204, {
-      'Access-Control-Allow-Headers': 'Content-Type, X-EGDesk-Overlay-Build',
+      'Access-Control-Allow-Headers': 'Content-Type, X-EGDesk-Overlay-Build, X-EGDesk-Ontology-Profile, X-EGDesk-Ontology-Token',
       'Access-Control-Allow-Methods': 'GET,POST,PUT,OPTIONS'
     })
     res.end()
     return
   }
+
+  // Profile-bound local ontology; no provider login or account identity needed.
+  if (await handleOntologyHttp(req, res, url)) return
 
   // File routes have their own bounded 18 MiB draft reader and local owner.
   // Dispatch before any generic body reader or Codex/account authentication.
@@ -796,7 +822,10 @@ const bridgeServer = createServer(async (req, res) => {
   }
 
   if (req.method === 'GET' && route === '/health') {
-    sendJson(res, 200, { ok: true, port: BRIDGE_PORT, appServerReady, chatStorageReady: Boolean(chatStore && chat.storeHealthy), chatStorageError: chatStoreError, profileStorageReady: Boolean(profileStore), profileStorageError: profileStoreError, deskStorageReady: Boolean(deskStore), deskStorageError: deskStoreError, native: nativeCapabilities, engineConfiguration: nativePreflight, memoryIsolation, node: nodeRuntime })
+    // The unauthenticated bridge probe identifies the bound profile, not its
+    // graph metadata. Full migration health requires the profile token below.
+    const { profileId, ready, sqlite } = await ontologyHealth({ binding: ontologyBinding, store: ontologyStore, runtime: sqliteRuntime })
+    sendJson(res, 200, { ok: true, port: BRIDGE_PORT, appServerReady, chatStorageReady: Boolean(chatStore && chat.storeHealthy), chatStorageError: chatStoreError, profileStorageReady: Boolean(profileStore), profileStorageError: profileStoreError, deskStorageReady: Boolean(deskStore), deskStorageError: deskStoreError, native: nativeCapabilities, engineConfiguration: nativePreflight, memoryIsolation, node: nodeRuntime, bridge: { buildHash: bridgeBuild.buildHash }, ontology: { profileId, ready, sqlite } })
     return
   }
 
@@ -1036,6 +1065,8 @@ async function shutdown() {
   catch { console.error('[egdesk-codex-bridge] local profile store did not close cleanly') }
   try { deskStore?.close() }
   catch { console.error('[egdesk-codex-bridge] local Desk store did not close cleanly') }
+  try { ontologyStore?.close() }
+  catch { console.error('[egdesk-codex-bridge] ontology store did not close cleanly') }
   process.exit(0)
 }
 process.on('SIGINT', shutdown)

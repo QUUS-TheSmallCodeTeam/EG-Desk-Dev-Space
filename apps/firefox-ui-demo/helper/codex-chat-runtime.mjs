@@ -51,6 +51,10 @@ const CLAUDE_CONTEXT_PRESTART_REFUSALS = new Set([
   'CLAUDE_CONTEXT_READER_UNSUPPORTED', 'CONTEXT_SCOPE_CHANGED', 'UNSUPPORTED_SOURCE_FORMAT',
   'CONTEXT_FORBIDDEN', 'CONTEXT_TOOLS_UNAVAILABLE',
 ])
+// The Context provider rejects this before any Codex turn can be started.
+// Keep its reviewed, sanitized code durable; other failures retain their
+// existing unknown/definite handling.
+const CODEX_CONTEXT_PRESTART_REFUSALS = new Set(['NATIVE_SCHEMA_MISMATCH'])
 const PROJECT_PRESTART_REFUSALS = new Set([
   'PROJECT_RECONNECT_REQUIRED', 'PROJECT_WORKSPACE_UNAVAILABLE', 'PROJECT_WORKSPACE_UNVERIFIED', 'PROJECT_WORKSPACE_CHANGED',
   'PROJECT_TARGET_CHANGED', 'PROJECT_INHERITANCE_UNAVAILABLE', 'PROJECT_ASSOCIATION_BROKEN',
@@ -1579,7 +1583,9 @@ export class CodexChatRuntime {
     const record = { fingerprint, settled: false, promise: null, engineId: context.engine.id }
     record.promise = this.startTurn(body, context).catch(error => {
       const failure = error instanceof Error ? error : new Error('Codex request failed')
-      const contextRefusal = context.engine.id === 'claude' && CLAUDE_CONTEXT_PRESTART_REFUSALS.has(failure.code)
+      const contextRefusal = (context.engine.id === 'claude' && CLAUDE_CONTEXT_PRESTART_REFUSALS.has(failure.code))
+        || (context.engine.id === 'codex' && CODEX_CONTEXT_PRESTART_REFUSALS.has(failure.code)
+          && !(context.conversationId && this.uncertainThreads.has(context.conversationId)))
       const prestartRefusal = contextRefusal || PROJECT_PRESTART_REFUSALS.has(failure.code)
       if (this.store && acceptedLocal && !context.turnStartAttempted && (contextRefusal || failure.definite === true || [
         'QA_POLICY_UNVERIFIED', 'QA_TOOL_ISOLATION_UNVERIFIED', 'QA_POLICY_UNAVAILABLE',

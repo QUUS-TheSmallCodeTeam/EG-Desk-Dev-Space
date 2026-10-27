@@ -25,13 +25,14 @@ test('Windows starts managed files without advertising the unavailable POSIX Sav
 
 test('unsupported Node and missing SQLite fail clearly before adapter or storage construction', () => {
   for (const version of ['18.20.8', '20.19.0', '22.19.0', 'unknown']) {
-    assert.throws(() => createEGDeskFileMount({ dataDir: '/unused', nodeRuntime: { version, hasSqlite: true }, createNativeAdapter: () => assert.fail('native adapter must not be created') }), e => e.code === 'EGDESK_NODE_VERSION_REQUIRED' && e.message.includes('24.11.1'))
+    assert.throws(() => createEGDeskFileMount({ dataDir: '/unused', nodeRuntime: { version, hasSqlite: true }, createNativeAdapter: () => assert.fail('native adapter must not be created') }), e => e.code === 'EGDESK_NODE_VERSION_REQUIRED' && e.message.includes('24.22.1'))
   }
   assert.throws(() => requireEGDeskNodeRuntime({ version: '24.11.1', hasSqlite: false }), e => e.code === 'EGDESK_SQLITE_REQUIRED')
-  const actual = requireEGDeskNodeRuntime({ version: '26.7.0', hasSqlite: true })
-  assert.equal(actual.version, '26.7.0')
-  assert.equal(actual.integrationBaseline, '24.11.1')
-  assert.equal(requireEGDeskNodeRuntime({ version: '24.11.1', hasSqlite: true }).minimumVersion, '24.0.0')
+  const actual = requireEGDeskNodeRuntime()
+  assert.equal(actual.version, process.versions.node)
+  assert.equal(actual.integrationBaseline, '24.22.1')
+  assert.equal(actual.sqliteVersion, process.versions.sqlite)
+  assert.equal(actual.minimumVersion, '24.0.0')
 })
 
 test('production mount uses fixed local ownership and adapter-owned request reading, never an AI account', async () => {

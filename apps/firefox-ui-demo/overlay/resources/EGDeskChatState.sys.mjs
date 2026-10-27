@@ -127,6 +127,48 @@ export function legacyPublicChatSnapshot(record) {
     runs: [...runs.values()] };
 }
 
+// A legacy import into a new store allocates a new local conversation ID.
+// The room ID alone is not proof: require the original pref snapshot plus
+// the store's immutable import receipt and every exact imported checkpoint.
+// Missing/paged-out proof leaves the normal identity guard in force.
+export function reconcileImportedLocalHistoryThread(current, page, record) {
+  const clientThreadId = localClientThreadId(current);
+  const localConversationId = page?.thread?.localConversationId;
+  if (!clientThreadId || typeof current.localConversationId !== 'string' || !current.localConversationId
+      || typeof localConversationId !== 'string' || !localConversationId || current.localConversationId === localConversationId
+      || page?.protocolVersion !== 1 || page.thread.clientThreadId !== clientThreadId
+      || record?.clientThreadId !== clientThreadId || record.importId !== `firefox-pref:egdesk.deskSession.v1:${clientThreadId}`
+      || record.threadSnapshot?.id !== clientThreadId || record.threadSnapshot.localConversationId !== current.localConversationId
+      || current.localRuns != null && (!Array.isArray(current.localRuns) || current.localRuns.length)) return current;
+  const expected = legacyPublicChatSnapshot(record);
+  if (!expected || page.thread.conversationId !== expected.conversationId
+      || JSON.stringify(legacyPublicChatSnapshot({ ...record, threadSnapshot: current })) !== JSON.stringify(expected)) return current;
+  const events = Array.isArray(page.events) ? page.events : [];
+  const receipts = events.filter(event => event.event === 'history.imported');
+  const receipt = receipts[0];
+  if (receipts.length !== 1 || receipt.seq !== 1 || receipt.details?.importId !== record.importId
+      || receipt.details.runCount !== expected.runs.length || receipt.details.truncated !== expected.truncated
+      || receipt.details.historyComplete !== expected.historyComplete) return current;
+  const imported = events.filter(event => event.event === 'run.imported');
+  if (imported.length !== expected.runs.length || imported.some((event, index) =>
+    !Number.isSafeInteger(event.seq) || event.seq <= (index ? imported[index - 1].seq : receipt.seq)
+    || event.localRunId !== expected.runs[index].localRunId || event.runId !== expected.runs[index].runId
+    || JSON.stringify(event.details?.run) !== JSON.stringify(expected.runs[index]))) return current;
+  const importedMessages = new Map(expected.runs.flatMap(run => run.messages).map(message => [message.localMessageId, message]));
+  return {
+    ...current, localConversationId,
+    messages: current.messages.map((message, index) => {
+      const imported = importedMessages.get(legacyLocalId('message', clientThreadId,
+        typeof message?.id === 'string' && message.id ? message.id : `ordinal-${index}`));
+      if (!imported || imported.role !== message?.role) return message;
+      // Keep the UI/native identity and content; only the proven local-store
+      // identities change. Old-store sequences must not order the new store.
+      const { localSeq, ...saved } = message;
+      return { ...saved, localMessageId: imported.localMessageId, localRunId: imported.localRunId };
+    }),
+  };
+}
+
 function sameLocalMessage(a, b) {
   if (!a || !b || (a.role || 'assistant') !== (b.role || 'assistant')) return false;
   for (const field of ['conversationId', 'runId']) {
@@ -2093,6 +2135,15 @@ export function runErrorNotice(error, usage = null, now = Date.now()) {
   const computerControl = computerControlSendErrorText(error.code);
   if (computerControl) return { kind, text: computerControl, action: null };
   return { kind, text: error.message || error.code || '실행 오류', action: null };
+}
+
+/** Compact conversation copy; the original remains available as detail/activity. */
+export function chatOperationalNotice(value, { run = false } = {}) {
+  const detail = typeof value === 'string' ? value : '';
+  if (!detail.trim()) return null;
+  const conciseKorean = detail.length <= 90 && !/[\r\n]/.test(detail) && /[가-힣]/.test(detail);
+  if (conciseKorean) return { text: detail, detail: null };
+  return { text: run ? '실행을 마치지 못했습니다. 활동에서 확인해 주세요.' : '문제가 발생했습니다. 자세히를 확인해 주세요.', detail };
 }
 
 // CHAT-09 one-time and branched conversations (helper contract: /chat/history

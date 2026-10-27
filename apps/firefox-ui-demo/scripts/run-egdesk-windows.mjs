@@ -4,13 +4,15 @@ import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
 import net from 'node:net';
-import { isBuiltin } from 'node:module';
 import { spawn, execFileSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { resolveCodexExecutable } from '../helper/egdesk-native-capabilities.mjs';
 import { isOwnedAndPrivate } from '../helper/egdesk-private-files.mjs';
 import { backoffDelayMs } from '../helper/codex-bridge-http.mjs';
 import { computeBridgeBuildHash } from '../helper/egdesk-bridge-build.mjs';
+import { pinnedNodeExecutable, PINNED_NODE_VERSION } from '../helper/egdesk-node-runtime.mjs';
+import { assertPatchedSqliteRuntime, isPatchedSqliteVersion } from '../helper/egdesk-sqlite-runtime.mjs';
+import { prepareOntologyProfileBinding, readOntologyProfileBinding } from '../helper/egdesk-ontology-http.mjs';
 
 const repoRoot = fileURLToPath(new URL('../../../', import.meta.url));
 const appRoot = fileURLToPath(new URL('../', import.meta.url));
@@ -21,6 +23,7 @@ const info = target => { try { return fs.lstatSync(target); } catch (e) { if (e.
 const within = (root, target) => target === root || target.startsWith(root + path.sep);
 const samePath = (a, b) => typeof a === 'string' && typeof b === 'string'
   && path.resolve(a).toLowerCase() === path.resolve(b).toLowerCase();
+export const shouldRelaunchWithPinnedNode = (current, pinned) => !samePath(current, pinned);
 
 export function normalFirefoxPreferences() {
   return new Map([
@@ -47,10 +50,11 @@ export function mergeNormalPreferences(original) {
     .map(([key, value]) => 'user_pref(' + JSON.stringify(key) + ', ' + JSON.stringify(value) + ');').join('\n') + '\n';
 }
 
-export function normalChildEnvironment(env, { dataDir, codex, root }) {
+export function normalChildEnvironment(env, { dataDir, codex, root, profile }) {
+  if (typeof profile !== 'string' || !path.isAbsolute(profile)) throw new Error('A validated absolute Firefox profile is required');
   const clean = Object.fromEntries(Object.entries(env).filter(([key]) =>
-    !/^(?:EGDESK_QA_|EGDESK_BROWSER_FIXTURE_QA(?:_|$)|MOZ_REMOTE_ALLOW_SYSTEM_ACCESS$|MOZ_MARIONETTE$|EGDESK_MARIONETTE_PORT$|EGDESK_FIREFOX_PROFILE$|EGDESK_DATA_DIR$|EGDESK_CONTEXT_ROOTS$|EGDESK_CODEX_BIN$|EGDESK_CODEX_MODEL$|EGDESK_CODEX_EFFORT$|EGDESK_CODEX_DISABLE_MEMORIES$)/i.test(key)));
-  return { ...clean, EGDESK_DATA_DIR: dataDir, EGDESK_CONTEXT_ROOTS: root,
+    !/^(?:EGDESK_QA_|EGDESK_BROWSER_FIXTURE_QA(?:_|$)|MOZ_REMOTE_ALLOW_SYSTEM_ACCESS$|MOZ_MARIONETTE$|EGDESK_MARIONETTE_PORT$|EGDESK_FIREFOX_PROFILE$|EGDESK_ONTOLOGY_PROFILE_PATH$|EGDESK_DATA_DIR$|EGDESK_CONTEXT_ROOTS$|EGDESK_CODEX_BIN$|EGDESK_CODEX_MODEL$|EGDESK_CODEX_EFFORT$|EGDESK_CODEX_DISABLE_MEMORIES$)/i.test(key)));
+  return { ...clean, EGDESK_DATA_DIR: dataDir, EGDESK_CONTEXT_ROOTS: root, EGDESK_FIREFOX_PROFILE: profile,
     EGDESK_CODEX_BIN: codex, EGDESK_CODEX_DISABLE_MEMORIES: '1' };
 }
 
@@ -195,7 +199,12 @@ export function synchronizeProfile(profile, { locked = profileIsRunning, overlay
   return true;
 }
 
-export function assertHealthyBridge(health, state) {
+function safeBridgeSqlite(runtime) {
+  return runtime?.nodeVersion === PINNED_NODE_VERSION && runtime.patched === true && runtime.supported === true
+    && runtime.error === null && isPatchedSqliteVersion(runtime.sqliteVersion);
+}
+
+export function assertHealthyBridge(health, state, expectedOntologyProfileId, expectedBuildHash) {
   if (!health || health.ok !== true || health.fixture === true || health.port !== 39218
       || health.appServerReady !== true || health.chatStorageReady !== true
       || health.native?.schemaMatch !== true || health.native?.qaReadOnly !== true
@@ -206,14 +215,26 @@ export function assertHealthyBridge(health, state) {
       || !/^[a-f0-9]{64}$/.test(health.native.contractFingerprint || '')) {
     throw new Error('Port 39218 does not expose a ready compatible EG-Desk production bridge');
   }
+  if (!/^[a-f0-9]{64}$/.test(expectedOntologyProfileId || '')
+      || health.ontology?.profileId !== expectedOntologyProfileId || typeof health.ontology?.ready !== 'boolean') {
+    throw new Error('Port 39218 does not expose ontology bound to the expected Firefox profile');
+  }
+  if (!/^[a-f0-9]{64}$/.test(expectedBuildHash || '') || state.bridge?.buildHash !== expectedBuildHash
+      || state.bridge?.sourceMismatch === true) {
+    throw new Error('Port 39218 belongs to a different or unknown EG-Desk bridge build');
+  }
+  if (!safeBridgeSqlite(health.ontology.sqlite) || health.node?.version !== PINNED_NODE_VERSION
+      || health.node?.sqliteBuiltin !== true || health.node?.sqliteVersion !== health.ontology.sqlite.sqliteVersion) {
+    throw new Error('Port 39218 uses an unsafe or unverifiable Node/SQLite runtime');
+  }
   return true;
 }
 
-export function validateBridgeReceipt(receipt, identity, { root, dataDir, node, entry = bridgeEntry }) {
-  return receipt?.kind === 'egdesk-normal-windows-bridge-v1' && Number.isInteger(receipt.pid)
+export function validateBridgeReceipt(receipt, identity, { root, dataDir, node, profile, entry = bridgeEntry }) {
+  return receipt?.kind === 'egdesk-normal-windows-bridge-v2' && Number.isInteger(receipt.pid)
     && identity?.pid === receipt.pid && typeof receipt.startTime === 'string'
     && identity.startTime === receipt.startTime && samePath(receipt.repoRoot, root)
-    && samePath(receipt.dataDir, dataDir) && samePath(receipt.node, node)
+    && samePath(receipt.dataDir, dataDir) && samePath(receipt.node, node) && samePath(receipt.firefoxProfile, profile)
     && samePath(identity.executable, node) && typeof identity.commandLine === 'string'
     && identity.commandLine.toLowerCase().includes(entry.toLowerCase());
 }
@@ -228,26 +249,53 @@ function windowsProcessIdentity(pid = null) {
   return JSON.parse(powershell(script, pid == null ? {} : { EGDESK_NORMAL_PID: String(pid) }));
 }
 
-async function readBridge(fetchImpl = fetch) {
-  const get = async route => {
+export async function readBridge({ expectedOntologyProfileId, ontologyToken, expectedBuildHash }, { fetchImpl = fetch } = {}) {
+  const get = async (route, headers = {}) => {
     const response = await fetchImpl('http://127.0.0.1:39218' + route,
-      { redirect: 'error', signal: AbortSignal.timeout(1800) });
-    if (!response.ok) throw new Error('Unexpected bridge HTTP status');
+      { redirect: 'error', signal: AbortSignal.timeout(1800), headers });
     const text = await response.text();
     if (text.length > 1024 * 1024) throw new Error('Bridge metadata exceeded its bound');
-    return JSON.parse(text);
+    let body;
+    try { body = JSON.parse(text); } catch { throw new Error('Bridge metadata is invalid'); }
+    if (!response.ok && !(route === '/ontology/health' && response.status === 503
+        && body?.code === 'ONTOLOGY_STORE_UNAVAILABLE')) {
+      throw new Error(route === '/ontology/health' ? 'Ontology profile authentication failed' : 'Unexpected bridge HTTP status');
+    }
+    return body;
   };
   const [health, state] = await Promise.all([get('/health'), get('/v1/state')]);
-  assertHealthyBridge(health, state);
-  return { health, state };
+  // Do not send the profile token until the public identity, build and actual
+  // SQLite version have been checked for the receipt-verified port owner.
+  assertHealthyBridge(health, state, expectedOntologyProfileId, expectedBuildHash);
+  const ontology = await get('/ontology/health', {
+    'x-egdesk-ontology-profile': expectedOntologyProfileId, 'x-egdesk-ontology-token': ontologyToken,
+  });
+  const unavailable = ontology?.code === 'ONTOLOGY_STORE_UNAVAILABLE';
+  if (!unavailable && (ontology?.profileId !== expectedOntologyProfileId || typeof ontology?.ready !== 'boolean'
+      || !safeBridgeSqlite(ontology.sqlite) || ontology.sqlite.sqliteVersion !== health.ontology.sqlite.sqliteVersion)) {
+    throw new Error('Authenticated ontology profile or runtime did not match the bridge');
+  }
+  return { health, state, ontologyAuthenticated: true, ontologyReady: !unavailable && ontology.ready };
 }
 
-export async function waitForHealthyBridge({ read = readBridge, now = Date.now,
+export async function waitForHealthyBridge({ binding, expectedBuildHash, verifyOwner, read = readBridge, now = Date.now,
   pause = ms => new Promise(resolve => setTimeout(resolve, ms)), timeoutMs = 45000 } = {}) {
+  if (!/^[a-f0-9]{64}$/.test(binding?.profileId || '') || !/^[a-f0-9]{64}$/.test(binding?.token || '')) {
+    throw new Error('Expected ontology profile binding is required');
+  }
+  if (!/^[a-f0-9]{64}$/.test(expectedBuildHash || '') || typeof verifyOwner !== 'function') {
+    throw new Error('Expected bridge build and owner verification are required');
+  }
   const deadline = now() + timeoutMs;
   let lastError;
   do {
-    try { return await read(); } catch (error) { lastError = error; }
+    try {
+      if (await verifyOwner() !== true) throw new Error('Bridge owner verification failed');
+      const result = await read({ expectedOntologyProfileId: binding.profileId, ontologyToken: binding.token, expectedBuildHash });
+      assertHealthyBridge(result.health, result.state, binding.profileId, expectedBuildHash);
+      if (result.ontologyAuthenticated !== true) throw new Error('Ontology profile authentication was not verified');
+      return result;
+    } catch (error) { lastError = error; }
     if (now() >= deadline) break;
     await pause(Math.min(600, deadline - now()));
   } while (now() < deadline);
@@ -357,6 +405,10 @@ export function superviseBridge({ start, maxRestarts = 8, stableMs = 60000, now 
 // the next launch can still prove it owns the running bridge.
 export async function superviseWindowsBridge() {
   if (process.platform !== 'win32') throw new Error('The EG-Desk bridge supervisor runs only under the Windows launcher');
+  assertPinnedWindowsRuntime();
+  const profile = assertPersistentProfile(requestedNormalProfile([]));
+  if (process.env.EGDESK_FIREFOX_PROFILE !== profile) throw new Error('The bridge supervisor requires the validated Firefox profile');
+  readOntologyProfileBinding(profile);
   const dataDir = ensureStorage(path.join(process.env.LOCALAPPDATA || path.join(os.homedir(), 'AppData', 'Local'), 'EG-Desk'));
   const logs = ensureStorage(path.join(dataDir, 'logs'));
   const logPath = path.join(logs, 'windows-launcher.log');
@@ -378,8 +430,8 @@ export async function superviseWindowsBridge() {
       try {
         const identity = windowsProcessIdentity(child.pid);
         if (!identity?.startTime) throw new Error('Started bridge identity is unavailable');
-        writeManaged(receiptPath, JSON.stringify({ kind: 'egdesk-normal-windows-bridge-v1',
-          pid: child.pid, startTime: identity.startTime, repoRoot: root, dataDir, node }) + '\n', dataDir);
+        writeManaged(receiptPath, JSON.stringify({ kind: 'egdesk-normal-windows-bridge-v2',
+          pid: child.pid, startTime: identity.startTime, repoRoot: root, dataDir, node, firefoxProfile: profile }) + '\n', dataDir);
         log('bridge-started');
       } catch (error) { log('bridge-receipt-failed', error.message); }
     });
@@ -396,9 +448,8 @@ export async function superviseWindowsBridge() {
 }
 
 export async function launchNormalWindows({ args = process.argv.slice(2) } = {}) {
-  if (process.platform !== 'win32' || Number(process.versions.node.split('.')[0]) < 24 || !isBuiltin('node:sqlite')) {
-    throw new Error('This EG-Desk launcher requires Windows and Node.js 24+ with node:sqlite');
-  }
+  if (process.platform !== 'win32') throw new Error('This EG-Desk launcher requires Windows');
+  assertPinnedWindowsRuntime();
   const dataDir = ensureStorage(path.join(process.env.LOCALAPPDATA || path.join(os.homedir(), 'AppData', 'Local'), 'EG-Desk'));
   const logs = ensureStorage(path.join(dataDir, 'logs'));
   const logPath = path.join(logs, 'windows-launcher.log');
@@ -431,27 +482,41 @@ export async function launchNormalWindows({ args = process.argv.slice(2) } = {})
     }
     const root = fs.realpathSync.native(repoRoot);
     const codex = resolveInstalledCodex(process.env);
-    const env = normalChildEnvironment(process.env, { dataDir, codex, root });
+    const env = normalChildEnvironment(process.env, { dataDir, codex, root, profile });
     const receiptPath = path.join(logs, 'windows-bridge-receipt.json');
     safeDestination(receiptPath, dataDir);
-    const expected = { root, dataDir, node: fs.realpathSync.native(process.execPath) };
+    const expected = { root, dataDir, node: fs.realpathSync.native(process.execPath), profile };
     const owner = windowsProcessIdentity();
     if (owner) {
       const receipt = info(receiptPath) ? JSON.parse(fs.readFileSync(receiptPath, 'utf8')) : null;
       if (!validateBridgeReceipt(receipt, owner, expected)) throw new Error('An existing bridge is not owned by this persistent launcher; close it separately before launching EG-Desk');
-      await waitForHealthyBridge();
-      log('reused-owned-bridge');
     } else {
       await Promise.all([requireFreePort(39218), requireFreePort(39219)]);
+    }
+    if (profileIsRunning(profile)) { log('already-running'); return { status: 'already-running', profile }; }
+    // Capture the profile's graph and binding before starting the bridge or
+    // synchronizing overlay resources; never log the binding token.
+    const ontologyBinding = prepareOntologyProfileBinding({ profilePath: profile, dataDir });
+    const expectedBuildHash = computeBridgeBuildHash();
+    const verifyOwner = () => {
+      const receipt = info(receiptPath) ? JSON.parse(fs.readFileSync(receiptPath, 'utf8')) : null;
+      if (!validateBridgeReceipt(receipt, windowsProcessIdentity(), expected)) throw new Error('Bridge port is not owned by this persistent launcher');
+      return true;
+    };
+    if (profileIsRunning(profile)) { log('already-running'); return { status: 'already-running', profile }; }
+    if (owner) {
+      const bridge = await waitForHealthyBridge({ binding: ontologyBinding, expectedBuildHash, verifyOwner });
+      if (!bridge.ontologyReady) log('ontology-unavailable', 'browser launch continues');
+      log('reused-owned-bridge');
+    } else {
       const output = path.join(logs, 'codex-bridge.log');
       safeDestination(output, dataDir);
       // The supervisor starts the bridge, writes its receipt and starts it
       // again after an unexpected exit.
       const pid = await detached(process.execPath, [fileURLToPath(import.meta.url), SUPERVISE_BRIDGE_FLAG], env, root, output);
       if (!windowsProcessIdentity(pid)?.startTime) throw new Error('Started bridge supervisor is unavailable; inspect codex-bridge.log');
-      await waitForHealthyBridge();
-      const receipt = JSON.parse(fs.readFileSync(receiptPath, 'utf8'));
-      if (!validateBridgeReceipt(receipt, windowsProcessIdentity(), expected)) throw new Error('Ready bridge port belongs to another process');
+      const bridge = await waitForHealthyBridge({ binding: ontologyBinding, expectedBuildHash, verifyOwner });
+      if (!bridge.ontologyReady) log('ontology-unavailable', 'browser launch continues');
       log('started-owned-bridge');
     }
     if (profileIsRunning(profile) || !synchronizeProfile(profile, { warn: message => log('bridge-build-marker-failed', message) })) {
@@ -472,8 +537,34 @@ export async function launchNormalWindows({ args = process.argv.slice(2) } = {})
   }
 }
 
+function assertPinnedWindowsRuntime() {
+  const expected = pinnedNodeExecutable({ platform: 'win32' });
+  if (!fs.existsSync(expected) || !samePath(fs.realpathSync.native(expected), fs.realpathSync.native(process.execPath))) {
+    throw new Error('Start the Windows launcher with the pinned project Node runtime');
+  }
+  const runtime = assertPatchedSqliteRuntime();
+  if (runtime.nodeVersion !== PINNED_NODE_VERSION) throw new Error('Node version does not match the project pin');
+}
+
+async function windowsEntrypoint() {
+  if (process.platform === 'win32') {
+    const expected = pinnedNodeExecutable({ platform: 'win32' });
+    if (!fs.existsSync(expected)) throw new Error(`Pinned project Node is missing; run node "${path.join(appRoot, 'scripts', 'install-egdesk-node.mjs')}" first`);
+    if (shouldRelaunchWithPinnedNode(fs.realpathSync.native(process.execPath), fs.realpathSync.native(expected))) {
+      const child = spawn(expected, [fileURLToPath(import.meta.url), ...process.argv.slice(2)],
+        { stdio: 'inherit', windowsHide: true, shell: false });
+      const status = await new Promise((resolve, reject) => {
+        child.once('error', reject);
+        child.once('exit', (code, signal) => resolve(signal ? 1 : code));
+      });
+      process.exitCode = status ?? 1;
+      return;
+    }
+  }
+  const result = await (process.argv[2] === SUPERVISE_BRIDGE_FLAG ? superviseWindowsBridge() : launchNormalWindows());
+  process.stdout.write(JSON.stringify(result) + '\n');
+}
+
 if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
-  (process.argv[2] === SUPERVISE_BRIDGE_FLAG ? superviseWindowsBridge() : launchNormalWindows())
-    .then(result => process.stdout.write(JSON.stringify(result) + '\n'))
-    .catch(error => { console.error(error.message); process.exitCode = 1; });
+  windowsEntrypoint().catch(error => { console.error(error.message); process.exitCode = 1; });
 }

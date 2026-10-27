@@ -4,13 +4,14 @@ import { createHash } from 'node:crypto'
 import path from 'node:path'
 import { fingerprintNativeExecutable, probeGeneratedNativeSchema } from './codex-native-schema-probe.mjs'
 
-// 0.157.1 is the existing pinned Context/Reader baseline. 0.160.1 was checked
-// against this CLI's generated experimental schemas and the public App Server
-// contract. Unknown versions remain closed until their protocol is reviewed.
+// These exact versions were checked against their generated experimental
+// schemas and the public App Server contract. Each selected binary must still
+// pass the schema probe and executable fingerprint. Unknown versions stay shut.
 export const NATIVE_SCHEMA_VERSION = '0.160.1'
 // This exact Windows app build was checked against its generated experimental
 // schema as well. Prerelease banners never authorize an unverified build.
-const CONTEXT_CONTRACT_VERSIONS = new Set(['0.157.1', '0.160.1', '0.163.0-alpha.10.2'])
+const CONTEXT_CONTRACT_VERSIONS = new Set(['0.157.1', '0.160.1', '0.162.1', '0.163.0-alpha.10.2'])
+// Generated schema shape alone does not verify effective isolation for QA.
 const QA_POLICY_CONTRACT_VERSIONS = new Set(['0.160.1', '0.163.0-alpha.10.2'])
 
 // SUB-13: ordinary Chat follows a version range instead of the exact sets
@@ -28,7 +29,7 @@ export const ENGINE_VERSION_STATUSES = Object.freeze(['supported', 'untested', '
 // 0.162.1 is the schema the Chat usage, model list and account code was
 // written against (codex-account-usage.mjs, codex-auth-state.mjs).
 export const CODEX_CHAT_VERSION_POLICY = Object.freeze({
-  verified: Object.freeze([...CONTEXT_CONTRACT_VERSIONS, '0.162.1']),
+  verified: Object.freeze([...CONTEXT_CONTRACT_VERSIONS]),
   minimum: '0.157.0',
 })
 

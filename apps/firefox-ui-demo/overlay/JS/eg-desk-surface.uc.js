@@ -3361,9 +3361,9 @@
   // Local, original 24-unit outline geometry shared by Desk chrome, live
   // windows, and semantic projections. No remote icon font or copied asset.
   const DESK_ICON_SHAPES = {
-    chat: [['path', { d: 'M5 4.5h14a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2H10l-5 3v-3H5a2 2 0 0 1-2-2v-9a2 2 0 0 1 2-2Z' }]],
-    file: [['path', { d: 'M6 2.5h8l4 4v15H6a2 2 0 0 1-2-2v-15a2 2 0 0 1 2-2Z' }], ['path', { d: 'M14 2.5v4h4M8 11h8M8 15h8' }]],
-    folder: [['path', { d: 'M3 7a2 2 0 0 1 2-2h5l2 2h7a2 2 0 0 1 2 2v10a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2Z' }]],
+    chat: [['path', { d: 'M20.5 11.5c0 4.1-3.8 7.4-8.5 7.4-1.2 0-2.4-.2-3.5-.7L4 20l1.3-4.2a7 7 0 0 1-1.8-4.3C3.5 7.4 7.3 4 12 4s8.5 3.4 8.5 7.5Z' }]],
+    file: [['path', { d: 'M6 3.5h8l4.5 4.5v11a1.5 1.5 0 0 1-1.5 1.5H6A1.5 1.5 0 0 1 4.5 19V5A1.5 1.5 0 0 1 6 3.5Z' }], ['path', { d: 'M14 3.5V8h4.5M8 12h7.5M8 15.5h7.5' }]],
+    folder: [['path', { d: 'M3.5 7a2 2 0 0 1 2-2h4.3l2 2H18.5a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2h-13a2 2 0 0 1-2-2Z' }]],
     ontology: [['circle', { cx: '12', cy: '4', r: '2' }], ['circle', { cx: '5', cy: '18', r: '2' }], ['circle', { cx: '19', cy: '18', r: '2' }], ['path', { d: 'm11 6-5 10m7-10 5 10M7 18h10' }]],
     browser: [['circle', { cx: '12', cy: '12', r: '9' }], ['path', { d: 'M3 12h18M12 3c-2.7 2.5-4 5.5-4 9s1.3 6.5 4 9c2.7-2.5 4-5.5 4-9s-1.3-6.5-4-9Z' }]],
     ide: [['path', { d: 'm8 6-5 6 5 6m8-12 5 6-5 6m-3-13-2 14' }]],
@@ -3379,7 +3379,7 @@
     text: [['path', { d: 'M5 6V4h14v2M12 4v16m-3 0h6' }]],
     highlight: [['rect', { x: '3', y: '7', width: '18', height: '10', rx: '1.5' }], ['path', { d: 'm7 17 6-10m-1 10 6-10' }]],
     board: [['rect', { x: '3', y: '4', width: '18', height: '16', rx: '2' }], ['path', { d: 'M9 4v16' }]],
-    pointer: [['path', { d: 'M4 3v17l5-5 3.3 6 2.4-1.3-3.3-6L19 12 4 3Z' }]],
+    pointer: [['path', { d: 'M5 3.5 19 12l-7.2 1.5 2.7 5.7-2.4 1.1-2.7-5.7L5 19Z' }]],
     trash: [['path', { d: 'M4 6h16M9 6V4h6v2m-9 0 1 15h10l1-15M10 10v7m4-7v7' }]],
     desk: [['rect', { x: '3', y: '3', width: '18', height: '18', rx: '2' }], ['path', { d: 'M12 3v18M3 12h18' }]],
     users: [['circle', { cx: '9', cy: '8', r: '3' }], ['path', { d: 'M3.5 20v-2a5.5 5.5 0 0 1 11 0v2M16 5a3 3 0 0 1 0 6m1 4a5 5 0 0 1 3.5 5' }]],
@@ -3390,8 +3390,8 @@
     stop: [['rect', { x: '5', y: '5', width: '14', height: '14', rx: '1.5' }]],
     home: [['path', { d: 'm3 11 9-8 9 8M5 10v11h14V10m-10 11v-7h6v7' }]],
     duplicate: [['rect', { x: '8', y: '8', width: '12', height: '12', rx: '1' }], ['path', { d: 'M16 8V4H4v12h4' }]],
-    menu: [['circle', { cx: '5', cy: '12', r: '1' }], ['circle', { cx: '12', cy: '12', r: '1' }], ['circle', { cx: '19', cy: '12', r: '1' }]],
-    grip: [['circle', { cx: '8', cy: '6', r: '1' }], ['circle', { cx: '16', cy: '6', r: '1' }], ['circle', { cx: '8', cy: '12', r: '1' }], ['circle', { cx: '16', cy: '12', r: '1' }], ['circle', { cx: '8', cy: '18', r: '1' }], ['circle', { cx: '16', cy: '18', r: '1' }]],
+    menu: [['circle', { cx: '5', cy: '12', r: '1.4', fill: 'currentColor', stroke: 'none' }], ['circle', { cx: '12', cy: '12', r: '1.4', fill: 'currentColor', stroke: 'none' }], ['circle', { cx: '19', cy: '12', r: '1.4', fill: 'currentColor', stroke: 'none' }]],
+    grip: [['circle', { cx: '8', cy: '6', r: '1.4', fill: 'currentColor', stroke: 'none' }], ['circle', { cx: '16', cy: '6', r: '1.4', fill: 'currentColor', stroke: 'none' }], ['circle', { cx: '8', cy: '12', r: '1.4', fill: 'currentColor', stroke: 'none' }], ['circle', { cx: '16', cy: '12', r: '1.4', fill: 'currentColor', stroke: 'none' }], ['circle', { cx: '8', cy: '18', r: '1.4', fill: 'currentColor', stroke: 'none' }], ['circle', { cx: '16', cy: '18', r: '1.4', fill: 'currentColor', stroke: 'none' }]],
     lock: [['rect', { x: '5', y: '10', width: '14', height: '11', rx: '2' }], ['path', { d: 'M8 10V7a4 4 0 0 1 8 0v3' }]],
     close: [['path', { d: 'M5 5 19 19M19 5 5 19' }]],
     minimize: [['path', { d: 'M5 12h14' }]],
@@ -3401,6 +3401,8 @@
     recovery: [['path', { d: 'M4 7v5h5m-5 0a8 8 0 1 1 2 6' }]],
     minimap: [['rect', { x: '3', y: '4', width: '18', height: '16', rx: '2' }], ['path', { d: 'M7 8h6v5H7zM15 15h3' }]],
     check: [['path', { d: 'm4 12 5 5L20 6' }]],
+    send: [['path', { d: 'M12 19V5m-5 5 5-5 5 5' }]],
+    detach: [['path', { d: 'M13 4.5h6.5V11M19.5 4.5 10 14' }], ['path', { d: 'M19.5 14.5V18a1.5 1.5 0 0 1-1.5 1.5H6A1.5 1.5 0 0 1 4.5 18V6A1.5 1.5 0 0 1 6 4.5h3.5' }]],
     result: [['rect', { x: '5', y: '3', width: '14', height: '18', rx: '2' }], ['path', { d: 'M9 8h6M9 12h6M9 16h3' }]],
     account: [['circle', { cx: '12', cy: '8', r: '3' }], ['path', { d: 'M5.5 20a6.5 6.5 0 0 1 13 0' }]],
     computer: [['rect', { x: '3', y: '4', width: '18', height: '12', rx: '2' }], ['path', { d: 'M8 20h8M12 16v4' }]],
@@ -3411,7 +3413,7 @@
   function deskIcon(name, className = 'egd-ui-icon') {
     const icon = svgEl('svg', {
       class: className, viewBox: '0 0 24 24', width: '18', height: '18',
-      fill: 'none', stroke: 'currentColor', 'stroke-width': '1.7',
+      fill: 'none', stroke: 'currentColor', 'stroke-width': '1.8',
       'stroke-linecap': 'round', 'stroke-linejoin': 'round',
       'aria-hidden': 'true', focusable: 'false',
     });
@@ -6753,14 +6755,14 @@
     );
   }
 
-  // Four quiet host-resource marks live in viewport chrome, never in Canvas or Chat.
+  // Four compact host-resource readouts live in viewport chrome, never in Canvas or Chat.
   // Values come only from the protected local bridge; unavailable is not zero.
   let resourceGadget = null;
   function buildResourceGadget() {
     if (resourceGadget) return resourceGadget;
     const specs = [
-      { id: 'cpu', label: 'CPU' },
-      { id: 'memory', label: '메모리' },
+      { id: 'cpu', label: 'CPU', shortLabel: 'CPU' },
+      { id: 'memory', label: '메모리', shortLabel: 'RAM' },
       { id: 'disk', label: '디스크' },
       { id: 'network', label: '네트워크' },
     ];
@@ -6776,10 +6778,11 @@
     let timer = null;
     let disposed = false;
     let refreshOnResume = false;
-    const pollMs = 5000;
-    const staleMs = 15000;
-    const requestTimeoutMs = 4000;
+    const pollMs = 1000;
+    const staleMs = 4000;
+    const requestTimeoutMs = 2500;
     const buttons = new Map();
+    const readouts = new Map();
     const metricReady = (metric) => metric?.status === 'ok';
     const numeric = (value) => typeof value === 'number' && Number.isFinite(value) && value >= 0;
     const size = (bytes) => {
@@ -6790,11 +6793,38 @@
       return `${Math.round(bytes / 1024)} KiB`;
     };
     const rate = (bytes) => numeric(bytes) ? `${size(bytes)}/s` : '—';
+    // Tight readouts use binary K/M/G; the tooltip and detail spell out KiB/MiB/GiB.
+    const compactRate = (bytes) => {
+      if (!numeric(bytes)) return '—';
+      if (bytes >= 1024 ** 3) return `${Number((bytes / 1024 ** 3).toFixed(1))}G/s`;
+      if (bytes >= 1024 ** 2) return `${Number((bytes / 1024 ** 2).toFixed(1))}M/s`;
+      if (bytes >= 1024) return `${Math.round(bytes / 1024)}K/s`;
+      return `${Math.round(bytes)}B/s`;
+    };
     const percent = (metric) => metricReady(metric) && numeric(metric.percent)
       ? `${Math.round(metric.percent)}%` : '—';
+    const metricStatus = (metric) => {
+      if (metric?.status === 'unsupported') return '이 환경에서는 지원하지 않음';
+      if (metric?.status === 'warming' || (!metric && (pending || refreshOnResume || document.hidden))) return '측정 준비 중';
+      return '측정할 수 없음';
+    };
     const title = (id) => id === 'memory' ? '메모리 사용(캐시 포함)' : specs.find(spec => spec.id === id)?.label || id;
     const rows = (id, metric) => {
-      if (!metricReady(metric)) return [['상태', metric?.status === 'warming' ? '측정 준비 중' : '측정할 수 없음']];
+      if (id === 'disk') {
+        const io = snapshot?.diskIo;
+        return [
+          ['읽기', metricReady(io) ? rate(io.readBytesPerSecond) : metricStatus(io)],
+          ['쓰기', metricReady(io) ? rate(io.writeBytesPerSecond) : metricStatus(io)],
+          ['속도 측정 구간', metricReady(io) && numeric(io.intervalMs) ? `${Math.round(io.intervalMs)} ms` : '—'],
+          ['속도 대상', 'OS가 보고한 블록 장치'],
+          ['저장 공간', metricReady(metric) ? `${size(metric.usedBytes)} / ${size(metric.totalBytes)}` : metricStatus(metric)],
+          ['저장 공간 사용률', percent(metric)],
+          ['저장 공간 측정 시각', metricReady(metric) && Number.isFinite(Date.parse(metric.sampledAt))
+            ? new Date(metric.sampledAt).toLocaleTimeString('ko-KR') : '미확인'],
+          ['저장 공간 대상', metric?.target === 'profile-volume' ? 'EG-Desk 데이터 저장 볼륨' : '대상 미확인'],
+        ];
+      }
+      if (!metricReady(metric)) return [['상태', metricStatus(metric)]];
       if (id === 'cpu') return [
         ['사용률', percent(metric)],
         ['기준', metric.basis === 'all-logical-cores' ? '전체 논리 코어' : '기준 미확인'],
@@ -6805,11 +6835,6 @@
         ['전체', size(metric.totalBytes)],
         ['사용률', percent(metric)],
         ['기준', metric.basis === 'total-minus-os-free' ? '전체 − OS 여유 메모리 (캐시 포함)' : '기준 미확인'],
-      ];
-      if (id === 'disk') return [
-        ['저장 공간', `${size(metric.usedBytes)} / ${size(metric.totalBytes)}`],
-        ['사용률', percent(metric)],
-        ['대상', metric.target === 'profile-volume' ? 'EG-Desk 데이터 저장 볼륨' : '대상 미확인'],
       ];
       return [
         ['수신', rate(metric.rxBytesPerSecond)],
@@ -6841,18 +6866,33 @@
       for (const spec of specs) {
         const button = buttons.get(spec.id);
         const metric = snapshot?.[spec.id];
-        const value = spec.id === 'network'
-          ? metricReady(metric) ? `수신 ${rate(metric.rxBytesPerSecond)}, 송신 ${rate(metric.txBytesPerSecond)}` : '측정 대기'
+        const throughput = spec.id === 'disk' ? snapshot?.diskIo : metric;
+        const isRate = spec.id === 'disk' || spec.id === 'network';
+        const firstRate = spec.id === 'disk' ? throughput?.readBytesPerSecond : throughput?.rxBytesPerSecond;
+        const secondRate = spec.id === 'disk' ? throughput?.writeBytesPerSecond : throughput?.txBytesPerSecond;
+        const firstLabel = spec.id === 'disk' ? '읽기' : '수신';
+        const secondLabel = spec.id === 'disk' ? '쓰기' : '송신';
+        const value = isRate
+          ? metricReady(throughput) ? `${firstLabel} ${rate(firstRate)}, ${secondLabel} ${rate(secondRate)}` : metricStatus(throughput)
           : percent(metric);
         const label = spec.id === 'memory' ? '메모리 사용(캐시 포함)' : spec.label;
         button.setAttribute('aria-label', `${label} ${value}, 상세 보기`);
         button.title = `${label} · ${value}`;
+        const readout = readouts.get(spec.id);
+        readout.first.textContent = isRate
+          ? `${spec.id === 'disk' ? 'R' : '↓'} ${metricReady(throughput) ? compactRate(firstRate) : '—'}`
+          : `${spec.shortLabel} ${value}`;
+        readout.second.textContent = isRate
+          ? `${spec.id === 'disk' ? 'W' : '↑'} ${metricReady(throughput) ? compactRate(secondRate) : '—'}` : '';
         const ring = button.querySelector('.egd-resource-ring');
-        if (spec.id !== 'network') {
+        if (!isRate) {
           const measured = metricReady(metric) && numeric(metric.percent);
           ring.style.setProperty('--egd-resource-fill', measured ? `${Math.min(100, metric.percent)}%` : '0%');
           ring.classList.toggle('egd-resource-unmeasured', !measured);
-        } else ring.classList.toggle('egd-resource-unmeasured', !metricReady(metric));
+        } else {
+          // Disk throughput has no utilization percentage: never paint a capacity arc.
+          ring.classList.toggle('egd-resource-unmeasured', spec.id === 'disk' || !metricReady(throughput));
+        }
       }
       renderDetail();
     };
@@ -6867,8 +6907,12 @@
     for (const spec of specs) {
       const ring = el('span', { class: `egd-resource-ring egd-resource-${spec.id} egd-resource-unmeasured`, 'aria-hidden': 'true' },
         spec.id === 'network' ? '↕' : null);
+      const first = el('span', { class: 'egd-resource-value egd-resource-value-primary' }, '—');
+      const second = el('span', { class: 'egd-resource-value egd-resource-value-secondary' });
+      const readout = el('span', { class: 'egd-resource-readout', 'aria-hidden': 'true' }, first, second);
+      readouts.set(spec.id, { first, second });
       const button = el('button', {
-        type: 'button', class: 'egd-resource-button', title: `${title(spec.id)} · 측정 대기`,
+        type: 'button', class: `egd-resource-button egd-resource-button-${spec.id}`, title: `${title(spec.id)} · 측정 대기`,
         'aria-label': `${title(spec.id)} 측정 대기, 상세 보기`,
         'aria-controls': 'egd-resource-detail', 'aria-expanded': 'false',
         onclick: (event) => {
@@ -6879,7 +6923,7 @@
           for (const [id, control] of buttons) control.setAttribute('aria-expanded', String(id === opened));
           render();
         },
-      }, ring);
+      }, ring, readout);
       buttons.set(spec.id, button);
       gadget.appendChild(button);
     }
@@ -6890,6 +6934,7 @@
     document.addEventListener('keydown', onKeydown, true);
     const refresh = async () => {
       if (disposed || document.hidden || pending) return;
+      const startedAt = performance.now();
       const controller = new AbortController();
       pending = controller;
       const timeout = window.setTimeout(() => controller.abort(), requestTimeoutMs);
@@ -6901,14 +6946,16 @@
         const payload = await response.json();
         snapshot = payload?.version === 1 && payload.scope === 'host' ? payload : null;
       } catch {
-        if (!disposed) snapshot = null;
+        // An intentional visibility abort is a pause, not a collector error.
+        if (!disposed && !refreshOnResume) snapshot = null;
       } finally {
         window.clearTimeout(timeout);
         if (pending === controller) pending = null;
         if (!disposed) {
           render();
           if (!document.hidden) {
-            timer = window.setTimeout(refresh, refreshOnResume ? 0 : pollMs);
+            const delay = refreshOnResume ? 0 : Math.max(0, pollMs - (performance.now() - startedAt));
+            timer = window.setTimeout(refresh, delay);
             refreshOnResume = false;
           }
         }
@@ -6919,19 +6966,17 @@
       if (document.hidden) {
         if (timer) window.clearTimeout(timer);
         timer = null;
-        if (pending) {
-          refreshOnResume = true;
-          pending.abort();
-        }
+        refreshOnResume = true;
+        pending?.abort();
         return;
       }
-      render();
       if (!pending) {
         if (timer) window.clearTimeout(timer);
         timer = null;
         refreshOnResume = false;
         void refresh();
       }
+      render();
     };
     document.addEventListener('visibilitychange', onWake);
     window.addEventListener('focus', onWake);
@@ -7167,22 +7212,27 @@
     const pinButton = el('button', {
       class: 'egd-hud-pin',
       title: '캔버스로 이동',
+      'aria-label': '캔버스로 이동',
       onclick: (ev) => {
         ev.stopPropagation();
         if (state.hudApp !== 'chat') return;
         detachCodexChatFromHud();
       },
-    }, '⇲');
+    }, deskIcon('detach'));
 
     const header = el('div', { class: 'egd-hud-header' },
-      el('span', { class: 'egd-hud-title' }, '채팅'),
+      el('div', { class: 'egd-hud-title-group' },
+        el('span', { class: 'egd-hud-chat-identity', 'aria-hidden': 'true' },
+          deskIcon('grip'), deskIcon('chat')),
+        el('span', { class: 'egd-hud-title' }, '채팅')),
       el('div', { class: 'egd-hud-header-actions' },
         pinButton,
         el('button', {
           class: 'egd-hud-close',
           title: '닫기',
+          'aria-label': '닫기',
           onclick: () => toggleHUD(null),
-        }, '×'),
+        }, deskIcon('close')),
       ),
     );
 
@@ -7550,6 +7600,7 @@
     let compositionInProgress = false;
     let deferredCodex = null;
     let pendingMessageScroll = null;
+    let sendNoticeDetailsThreadId = null;
     const composerViewport = createChatComposerViewport();
     const taskAnswerReveal = createChatTaskAnswerReveal(body);
     let focusOpenedRoom = false;
@@ -7621,6 +7672,8 @@
       const oldInput = body.querySelector('.egd-codex-input');
       const oldMessages = body.querySelector('.egd-codex-messages');
       const oldTaskList = body.querySelector('[data-testid="chat-task-list"]');
+      const oldNotices = body.querySelector('[data-testid="chat-notices"]');
+      const noticeScroll = oldNotices ? { threadId: oldNotices.dataset.threadId, top: oldNotices.scrollTop } : null;
       const taskScroll = oldTaskList ? { threadId: oldTaskList.dataset.threadId, top: oldTaskList.scrollTop } : null;
       const inputState = oldInput ? {
         threadId: oldInput.dataset.threadId,
@@ -7668,10 +7721,9 @@
       // While the bridge is not online the connection notice says the state;
       // the chip row then carries only the account.
       const bridgeNotice = codexBridgeNotice(codex);
-      const statusBridge = bridgeNotice.state !== 'online'
-        ? null
-        : activeEngine.engineId !== 'codex' ? (activeEngine.ready ? 'Claude 연결됨' : activeEngine.reason)
-          : (codex.error ? 'Codex 점검 필요' : 'Codex 연결됨');
+      const statusBridge = bridgeNotice.state !== 'online' ? null
+        : activeEngine.engineId !== 'codex' ? (!activeEngine.ready ? activeEngine.reason : null)
+          : (codex.error ? 'Codex 점검 필요' : null);
       const statusAccount = activeEngine.engineId !== 'codex' ? (activeEngine.ready ? '사용 가능' : activeEngine.reason) : codex.authStatus.isLoggedIn
         ? '로그인됨'
         : ((codex.isStartingLogin || codex.authStatus.loginInProgress) ? '로그인 중…' : '로그인 필요');
@@ -7694,16 +7746,18 @@
           onclick: () => codexBridge.refreshAuthStatus(),
         }, '새로고침'));
       }
-      const chromeRow = el('div', { class: 'egd-codex-chrome-row' },
+      // Healthy account details live in Settings; keep actionable states here.
+      const showChromeRow = chromeActions.length > 0 || (activeEngine.engineId !== 'codex' && !activeEngine.ready);
+      const chromeRow = showChromeRow ? el('div', { class: 'egd-codex-chrome-row' },
         el('div', { class: 'egd-codex-chrome-main' },
           el('span', { class: `egd-codex-chrome-indicator egd-codex-chrome-indicator-${indicatorState}` }),
           el('div', { class: 'egd-codex-chrome-status' },
             statusBridge ? el('span', { class: `egd-codex-system-chip egd-codex-system-chip-${indicatorState}` }, statusBridge) : null,
-            el('span', { class: `egd-codex-system-chip${codex.authStatus.isLoggedIn ? ' egd-codex-system-chip-ok' : ''}` }, statusAccount),
+            statusAccount !== statusBridge ? el('span', { class: `egd-codex-system-chip${codex.authStatus.isLoggedIn ? ' egd-codex-system-chip-ok' : ''}` }, statusAccount) : null,
           ),
         ),
         el('div', { class: 'egd-codex-chrome-actions' }, ...chromeActions),
-      );
+      ) : null;
 
       const authCardNeeded = activeEngine.engineId === 'codex' && !codex.authStatus.isLoggedIn && (
         codex.isStartingLogin
@@ -7766,7 +7820,6 @@
       });
 
       if (isHudListView) {
-        const unreadCountTotal = codex.threads.reduce((sum, thread) => sum + (thread.unreadCount || 0), 0);
         threadTop.appendChild(el('div', { class: 'egd-codex-thread-home-head' },
           el('div', { class: 'egd-codex-thread-home-title-row' },
             el('div', { class: 'egd-codex-thread-home-title' }, 'Chat'),
@@ -7775,13 +7828,6 @@
               title: '새 Codex 대화',
               onclick: () => codexBridge.createThread('dm', { openConversation: true }),
             }, '+'),
-          ),
-          el('div', { class: 'egd-codex-thread-home-sub' }, 'Codex · 선택한 Agent'),
-          el('div', { class: 'egd-codex-thread-home-status' }, `${codexBridgeSummary(codex)} · ${codexAuthSummary(codex)}`),
-          el('div', { class: 'egd-codex-thread-session-summary' },
-            el('div', { class: 'egd-codex-thread-session-pill' }, `Agent ${dmThreads.length}`),
-            el('div', { class: 'egd-codex-thread-session-pill' }, `Board ${groupThreads.length}`),
-            el('div', { class: 'egd-codex-thread-session-pill' }, `안 읽음 ${unreadCountTotal}`),
           ),
         ));
       }
@@ -7817,7 +7863,7 @@
       const filterRow = el('div', { class: 'egd-codex-thread-filter-row' });
       const filterDefs = [
         { key: 'all', label: '전체' },
-        { key: 'dm', label: 'Agent' },
+        { key: 'dm', label: '대화' },
         { key: 'group', label: 'Board' },
       ];
       for (const filterDef of filterDefs) {
@@ -8122,6 +8168,12 @@
           const lastTime = lastMsg && lastMsg.createdAt ? formatRelativeTime(lastMsg.createdAt) : '';
           const kindMeta = codexThreadKindMeta(thread.type);
           const profile = codexThreadAgentProfile(thread);
+          const engine = ChatState.chatEngineChipView(thread, engineContext);
+          const labelKey = value => String(value || '').trim().toLocaleLowerCase();
+          const titleKey = labelKey(thread.title);
+          const profileLabel = thread.profileEnabled === true && labelKey(profile.label) !== titleKey ? profile.label : null;
+          const showEngine = engine.engineId !== 'codex' && labelKey(engine.label) !== titleKey && labelKey(engine.label) !== labelKey(profileLabel);
+          const showSession = ['local', 'forked', 'stateless'].includes(codexThreadSessionKey(thread));
           const avatarInitial = (thread.title || '?')[0].toUpperCase();
           const avatarColors = ['#2D5A7B','#7B2D5A','#5A7B2D','#2D7B5A','#7B5A2D','#5A2D7B','#3D6B8B','#8B3D6B'];
           const avatarColor = avatarColors[Math.abs(thread.id.split('').reduce((a,c) => a + c.charCodeAt(0), 0)) % avatarColors.length];
@@ -8132,12 +8184,6 @@
                   el('div', { class: 'egd-codex-thread-item-top' },
                     el('div', { class: 'egd-codex-thread-title' }, thread.title),
                     el('div', { class: 'egd-codex-thread-time' }, lastTime),
-                  ),
-                  el('div', { class: 'egd-codex-thread-meta-row' },
-                    el('span', { class: `egd-codex-thread-kind egd-codex-thread-kind-${thread.type}` }, kindMeta.label),
-                    buildCodexSessionBadge(thread, codexBridge),
-                    renderEngineBadge(thread),
-                    el('span', { class: 'egd-codex-agent-profile-chip', title: profile.name }, profile.label),
                   ),
                   el('div', { class: 'egd-codex-thread-item-bottom' },
                     el('div', { class: 'egd-codex-thread-preview' }, stripMarkdown(codexThreadPreview(thread))),
@@ -8156,6 +8202,12 @@
                     }, '⋯'),
                   ),
                 ),
+                  thread.type === 'group' || profileLabel || showEngine || showSession ? el('div', { class: 'egd-codex-thread-meta-row' },
+                    thread.type === 'group' ? el('span', { class: 'egd-codex-thread-kind egd-codex-thread-kind-group' }, kindMeta.label) : null,
+                    showSession ? buildCodexSessionBadge(thread, codexBridge) : null,
+                    showEngine ? renderEngineBadge(thread) : null,
+                    profileLabel ? el('span', { class: 'egd-codex-agent-profile-chip', title: profile.name }, profileLabel) : null,
+                  ) : null,
               ),
             ),
           );
@@ -8605,7 +8657,8 @@
           el('button', { class: 'egd-codex-chip', onclick: (ev) => { ev.stopPropagation(); codexBridge.toggleThreadMenu(activeThread.id, ev.currentTarget); } }, '다른 Agent 고르기')));
         }
         const run = codexCurrentRun(activeThread);
-        const pending = Object.values(codex.chatProtocol.requests).find(request => ChatState.requestBelongsToThread(request, activeThread) && ['submitting', 'unconfirmed'].includes(request.status));
+        const threadRequests = Object.values(codex.chatProtocol.requests).filter(request => ChatState.requestBelongsToThread(request, activeThread));
+        const pending = threadRequests.find(request => ['submitting', 'unconfirmed'].includes(request.status));
         const status = activeThread.preparingInput ? 'preparing-input' : activeThread.resuming ? 'restoring' : pending?.status || run?.status || 'ready';
         const statusText = bindingHeld ? '로컬 기록 · 연결 확인 필요' : activeThread.preparingInput ? '첨부 캡처 준비 중 · 아직 전송하지 않음' : activeThread.resuming ? '대화 상태 확인 중' : pending ? (pending.status === 'unconfirmed' ? '접수 상태 확인 필요' : '요청 보내는 중')
           : !run && codex.chatProtocol.unobservedPreviousRun ? '이전 연결의 실행 상태 미확인' : codexRunLabel(run);
@@ -8636,7 +8689,7 @@
         if (runError) conversation.appendChild(el('div', {
           class: `egd-codex-error egd-codex-run-error egd-codex-run-error-${runError.kind}`, role: 'alert',
           data: { testid: 'chat-run-error', kind: runError.kind },
-        }, el('span', {}, runError.text),
+        }, el('span', {}, ChatState.chatOperationalNotice(runError.text, { run: true })?.text || '실행을 마치지 못했습니다. 활동에서 확인해 주세요.'),
         runError.action === 'login' && ChatState.chatThreadEngineId(activeThread, codex) === 'codex' ? el('button', {
           class: 'egd-codex-chip egd-codex-chip-primary', data: { testid: 'chat-run-error-login' },
           disabled: (codex.isStartingLogin || codex.authStatus.loginInProgress) ? 'true' : null,
@@ -8650,7 +8703,29 @@
           class: 'egd-codex-chip', 'aria-label': '요청 접수 상태 다시 확인', data: { testid: 'chat-reconcile' },
           onclick: () => codexBridge.reconcileRequest(activeThread.id),
         }, '접수 상태 다시 확인'));
-        if (activeThread.sendError) conversation.appendChild(el('p', { class: 'egd-codex-error', role: 'alert' }, activeThread.sendError));
+        if (activeThread.sendError) {
+          const notice = ChatState.chatOperationalNotice(activeThread.sendError);
+          if (notice) conversation.appendChild(el('div', { class: 'egd-codex-error egd-codex-send-notice', role: 'alert', data: { testid: 'chat-send-notice' } },
+            el('span', {}, notice.text),
+            notice.detail ? el('details', {
+              class: 'egd-codex-notice-details',
+              open: sendNoticeDetailsThreadId === activeThread.id ? '' : null,
+              ontoggle: (ev) => { sendNoticeDetailsThreadId = ev.currentTarget.open ? activeThread.id : null; },
+            },
+              el('summary', {}, '자세히'), el('p', {}, notice.detail)) : null));
+        }
+        const noticeIds = new Set(['chat-local-history-coverage', 'chat-local-history-error', 'chat-binding-held',
+          'chat-agent-unavailable', 'chat-run-rate-limit', 'chat-run-error', 'chat-reconcile', 'chat-send-notice']);
+        const notices = Array.from(conversation.children).filter(node => noticeIds.has(node.dataset.testid));
+        if (notices.length) {
+          const region = el('div', {
+            class: 'egd-codex-notices', role: 'region', tabindex: '0',
+            'aria-label': `대화 알림 ${notices.length}개 · 스크롤하여 확인`,
+            data: { testid: 'chat-notices', threadId: activeThread.id, focusKey: 'chat-notices' },
+          }, notices.length > 1 ? el('div', { class: 'egd-codex-notices-label', 'aria-hidden': 'true' }, `알림 ${notices.length}개 · 스크롤해 확인`) : null);
+          notices.forEach(notice => region.appendChild(notice));
+          conversation.appendChild(region);
+        }
         if (!activeThread.messages.some(message => message.role === 'assistant' && message.runId === run?.runId)) {
           const chips = buildCodexResultChips(null, activeThread, run?.artifacts);
           if (chips) conversation.appendChild(chips);
@@ -8730,7 +8805,7 @@
               title: '보내기',
               data: { testid: 'chat-send' },
               onclick: () => { if (!compositionInProgress) void codexBridge.sendMessage(); },
-            }, el('span', { 'aria-hidden': 'true' }, '↑'));
+            }, deskIcon('send'));
             input.value = getCodexThreadDraft(codex, activeThread.id);
             const resizeComposer = (preserveViewport = true) => {
               if (!input.isConnected) return;
@@ -8863,6 +8938,8 @@
         contentChildren.push(mainPane);
       }
       body.appendChild(el('div', { class: shellClasses }, ...contentChildren));
+      const currentNotices = body.querySelector('[data-testid="chat-notices"]');
+      if (currentNotices && noticeScroll?.threadId === currentNotices.dataset.threadId) currentNotices.scrollTop = noticeScroll.top;
       taskAnswerReveal.restoreLayout();
       // Rerender replaces the clicked chip. Anchor to this Chat surface's new
       // chip after attachment, when both Canvas/HUD geometry and menu size exist.
@@ -9688,9 +9765,13 @@
           ...(coverage.reasons || []), knownGap ? 'local-event-gap' : 'pagination-in-progress',
         ] };
         ensureLocalHistoryThread(summary, normalized.threadSnapshot);
-        const current = getCodexThreadById(state.codex, clientThreadId);
+        let current = getCodexThreadById(state.codex, clientThreadId);
+        if (current?.localConversationId && current.localConversationId !== normalized.localConversationId) {
+          current = ChatState.reconcileImportedLocalHistoryThread(current, page,
+            legacyHistoryRecords.find(record => record.clientThreadId === clientThreadId));
+        }
         if (current?.localConversationId && current.localConversationId !== normalized.localConversationId) throw new Error('로컬 기록의 채팅방 식별자가 바뀌었습니다.');
-        updateThreadById(clientThreadId, current => ChatState.hydrateLocalChatThread(current, normalized, { liveFenceRevision }));
+        updateThreadById(clientThreadId, () => ChatState.hydrateLocalChatThread(current, normalized, { liveFenceRevision }));
         emit();
         if (!normalized.hasMore) return;
         const nextSeq = Number(normalized.nextCursor);
@@ -12264,7 +12345,7 @@
     if (!hidden) syncHudViewportFit();
   }
 
-  function syncCardFullscreenLayout() {
+  function syncCardFullscreenLayout({ reframe = false } = {}) {
     const fullscreen = state.cardFullscreen;
     if (!fullscreen) return;
     const card = document.getElementById(fullscreen.cardId);
@@ -12279,14 +12360,16 @@
       syncViewportAgendaRail();
       return;
     }
-    const zoom = canvasZoom();
+    // Focus is a camera pose on the unchanged world Card, never a rectangle
+    // pinned to the viewport by inverse zoom. Ordinary camera frames must not
+    // undo the user's zoom (including zoom-in while Focus remains active).
+    if (!reframe) return;
     const isBrowserFullscreen = card.classList.contains('egd-browser-card');
     const safe = safeViewportRect({ avoidHud: false, margin: (state.surface.initialBrowserFocus || isBrowserFullscreen) ? 0 : 10 });
-    card.style.left = ((safe.left - state.pan.x) / zoom) + 'px';
-    card.style.top = ((safe.top - state.pan.y) / zoom) + 'px';
-    card.style.width = (safe.width / zoom) + 'px';
-    card.style.height = (safe.height / zoom) + 'px';
-    card.style.zIndex = String(fullscreen.zIndex);
+    const rect = fullscreen.rect;
+    const world = { x: parsePxNumber(rect.left), y: parsePxNumber(rect.top),
+      width: parsePxNumber(rect.width), height: parsePxNumber(rect.height) };
+    state.setCanvasViewportTarget?.(SurfaceState.fitSurfaceCamera(world, safe, ZOOM_MAX), { immediate: true });
     syncViewportAgendaRail();
   }
 
@@ -12302,11 +12385,13 @@
     state.cardFullscreen = {
       cardId: card.id,
       rect: getCardRect(card),
+      previousCamera: { pan: { ...state.pan }, zoom: state.zoom },
       previousHudHidden,
       previousMinimapOpen,
       zIndex: ++cardZ,
     };
     setActiveEntity(card);
+    card.style.zIndex = String(state.cardFullscreen.zIndex);
     card.classList.add('egd-card-fullscreen');
     document.documentElement.classList.add('egd-card-fullscreen-active');
     // Browser cards go Chrome-like: hide Desk chrome, edge-to-edge browser area.
@@ -12315,7 +12400,7 @@
     }
     setHudPresentationHidden(true);
     if (previousMinimapOpen) closeDeskMinimap();
-    syncCardFullscreenLayout();
+    syncCardFullscreenLayout({ reframe: true });
     syncViewportAgendaRail();
   }
 
@@ -12338,13 +12423,15 @@
     state.cardFullscreen = null;
     setHudPresentationHidden(fullscreen.previousHudHidden);
     if (fullscreen.previousMinimapOpen) toggleDeskMinimap();
-    if (initialBrowserFocus && fullscreenCard?.isConnected && options.restoreRect !== false
+    if (!options.preserveCamera && initialBrowserFocus && fullscreenCard?.isConnected && options.restoreRect !== false
         && typeof state.setCanvasViewportTarget === 'function') {
       // The first Browser's restoreRect may be the full initial viewport at
       // world (0, 0). Fit the camera into Desk chrome; never rewrite that rect.
       const camera = SurfaceState.fitSurfaceCamera(
         persistentEntityGeometry(fullscreenCard), safeViewportRect({ avoidHud: false }));
       state.setCanvasViewportTarget(camera, { immediate: true });
+    } else if (!options.preserveCamera && options.restoreRect !== false && fullscreen.previousCamera) {
+      state.setCanvasViewportTarget?.(fullscreen.previousCamera, { immediate: true });
     }
     if (fullscreenCard?.isConnected) setActiveEntity(fullscreenCard);
     syncViewportAgendaRail();
@@ -12390,6 +12477,70 @@
     syncOntologyPresentationState();
     markAgendaDirty('close-card', card);
     return true;
+  }
+
+  function installDeskCloseShortcut() {
+    const isMac = servicesRef().appinfo.OS === 'Darwin';
+    const pending = new WeakSet();
+    const targets = new Map();
+    let held = false;
+    const isCloseKey = ev => ev.code === 'KeyW' || ev.key?.toLowerCase?.() === 'w';
+    const onKeyDown = ev => {
+      const accelerator = isMac ? ev.metaKey && !ev.ctrlKey : ev.ctrlKey && !ev.metaKey;
+      if (!accelerator || !isCloseKey(ev) || ev.shiftKey || ev.altKey || ev.isComposing || ev.keyCode === 229) return;
+      // Desk owns this command even with no selection. Consume it BEFORE
+      // lifecycle guards await: Firefox must never close its native window.
+      ev.preventDefault();
+      ev.stopImmediatePropagation();
+      // Closing a focused Card/frame can discard its W keyup. A native
+      // repeat=false keydown is a new physical press, not the lost release's
+      // continuation. Always reject repeats, including after focus changes.
+      if (ev.repeat || (held && ev.repeat !== false)) return;
+      held = true;
+      const hud = document.getElementById('egd-hud');
+      if (hud && (hud.contains(document.activeElement) || hud.contains(ev.target))) {
+        if (state.hudOpen && !hud.classList.contains('egd-hud-hidden')) toggleHUD(null);
+        return;
+      }
+      const card = state.activeEntityId ? document.getElementById(state.activeEntityId) : null;
+      if (!card?.isConnected || !card.classList?.contains('egd-canvas-card') || card.hidden || pending.has(card)) return;
+      pending.add(card);
+      try {
+        // Reuse the close control's shell gate when present. Other Cards
+        // share closeCanvasCard's _beforeClose and _cleanup lifecycle.
+        const result = card._deskWindowShell?.requestClose
+          ? card._deskWindowShell.requestClose() : closeCanvasCard(card);
+        if (result?.then) void Promise.resolve(result).then(() => pending.delete(card), () => pending.delete(card));
+        else pending.delete(card);
+      } catch (error) { pending.delete(card); throw error; }
+    };
+    const onKeyUp = ev => {
+      if (isCloseKey(ev) || ev.key === (isMac ? 'Meta' : 'Control')) held = false;
+    };
+    const onBlur = ev => { if (ev.target === window) held = false; };
+    // Privileged iframe keys do not reliably bubble into the chrome window.
+    // Terminal's owner registers its content window and disposes on teardown;
+    // all targets share the same held-key and in-flight close guards.
+    const register = targetWindow => {
+      if (targets.has(targetWindow)) return targets.get(targetWindow);
+      targetWindow.addEventListener('keydown', onKeyDown, true);
+      targetWindow.addEventListener('keyup', onKeyUp, true);
+      targetWindow.addEventListener('blur', onBlur, true);
+      const dispose = () => {
+        targetWindow.removeEventListener('keydown', onKeyDown, true);
+        targetWindow.removeEventListener('keyup', onKeyUp, true);
+        targetWindow.removeEventListener('blur', onBlur, true);
+        targets.delete(targetWindow);
+      };
+      targets.set(targetWindow, dispose);
+      return dispose;
+    };
+    state.registerDeskCloseShortcutTarget = register;
+    register(window);
+    return () => {
+      for (const dispose of [...targets.values()]) dispose();
+      if (state.registerDeskCloseShortcutTarget === register) delete state.registerDeskCloseShortcutTarget;
+    };
   }
 
   function installCardHeaderFullscreenToggle(card, header) {
@@ -17033,6 +17184,16 @@
       if (wrap.style.left !== left) wrap.style.left = left;
     };
     presentation.layout = updateFitScale;
+    // Explicit focus must not treat the compact toolbar's extra height as the
+    // page's nominal fit. Reuse real metrics and the uninflated Card body;
+    // this read-only projection never resizes the page or changes browser zoom.
+    presentation.nominalWorldFont = () => {
+      if (!nominalHeaderHeight || !logicalHeight) return null;
+      const fit = browserPresentationFit({ width: body.clientWidth,
+        height: card.clientHeight - nominalHeaderHeight - bodyFrameHeight,
+        logicalWidth: CARD_LOGICAL_W, logicalHeight });
+      return browserPresentationFont(presentation.read(), CARD_LOGICAL_W * fit.scale);
+    };
     deskWindow.onResize(updateFitScale);
 
     const cleanupCard = () => {
@@ -17158,6 +17319,15 @@
     return Number.isFinite(projected) && projected > 0 ? projected : null;
   }
 
+  function browserPresentationMayNeedMetrics({ width, height, detailWidth, detailHeight }) {
+    // Measure when the common semantic policy could show detail, including its
+    // exit band. A large finite font isolates geometry without duplicating that
+    // policy's dimensions here; unavailable measurements remain a UI fallback.
+    return SurfaceState.surfaceSemanticLevel({
+      width, height, fontPx: Number.MAX_VALUE, previous: 'detail', detailWidth, detailHeight,
+    }) === 'detail';
+  }
+
   function createBrowserPresentationCache({ card, browser, query, changed,
     now = () => Date.now(), setTimer = (fn, ms) => window.setTimeout(fn, ms),
     clearTimer = id => window.clearTimeout(id) }) {
@@ -17241,6 +17411,87 @@
     return { scale, left: Math.max(0, (width - logicalWidth * scale) / 2) };
   }
 
+  function installSemanticOutlineDrag(entry, { focusProjection, request }) {
+    const { card, proxy } = entry;
+    let drag = null;
+    let suppressClick = false;
+    const onClick = ev => {
+      ev.stopPropagation();
+      if (suppressClick && ev.detail !== 0) { ev.preventDefault(); return; }
+      focusProjection(entry);
+    };
+    const finish = ev => {
+      // Capture also observes blur from descendants (e.g. proxy -> viewport
+      // focus). Only losing this window's focus cancels the active gesture.
+      if (ev.type === 'blur' && ev.target !== window) return;
+      if (!drag || (ev.pointerId != null && ev.pointerId !== drag.pointerId)) return;
+      const finished = drag;
+      drag = null;
+      suppressClick = finished.moved || !['pointerup', 'mouseup'].includes(ev.type);
+      window.removeEventListener('pointermove', onMove, true);
+      window.removeEventListener('pointerup', finish, true);
+      window.removeEventListener('mouseup', finish, true);
+      window.removeEventListener('pointercancel', finish, true);
+      window.removeEventListener('blur', finish, true);
+      proxy.removeEventListener('lostpointercapture', finish);
+      try {
+        if (proxy.hasPointerCapture?.(finished.pointerId)) proxy.releasePointerCapture(finished.pointerId);
+      } catch {}
+      // Match normal Card movement: save once on release/cancel, never change
+      // resource identity or the camera. Cancellation keeps the last position.
+      if (finished.moved && card.isConnected) markAgendaDirty('move-outline-card', card);
+    };
+    const onMove = ev => {
+      if (!drag || ev.pointerId !== drag.pointerId) return;
+      if (!card.isConnected || entry.level !== 'outline' || state.panModifier || isCardFullscreen(card)) {
+        finish({ type: 'pointercancel' }); return;
+      }
+      if (ev.buttons === 0) { finish({ type: 'pointercancel' }); return; }
+      // 4 screen CSS pixels, independent of zoom. Use the current inverse
+      // camera transform so a changing pan/zoom never compounds screen delta.
+      if (!drag.moved && Math.hypot(ev.clientX - drag.x, ev.clientY - drag.y) < 4) return;
+      const zoom = state.zoom;
+      if (!Number.isFinite(zoom) || zoom <= 0) { finish({ type: 'pointercancel' }); return; }
+      if (!drag.moved) focusCanvasCard(card);
+      drag.moved = true;
+      suppressClick = true;
+      card.style.left = ((ev.clientX - state.pan.x) / zoom - drag.grabX) + 'px';
+      card.style.top = ((ev.clientY - state.pan.y) / zoom - drag.grabY) + 'px';
+      request();
+      ev.preventDefault();
+      ev.stopPropagation();
+    };
+    const onDown = ev => {
+      if (ev.button !== 0 || ev.isPrimary === false || state.panModifier || entry.level !== 'outline'
+          || isCardFullscreen(card) || !card.isConnected || drag) return;
+      const zoom = state.zoom;
+      if (!Number.isFinite(zoom) || zoom <= 0) return;
+      suppressClick = false;
+      drag = { pointerId: ev.pointerId, x: ev.clientX, y: ev.clientY, moved: false,
+        grabX: (ev.clientX - state.pan.x) / zoom - parsePxNumber(card.style.left, card.offsetLeft),
+        grabY: (ev.clientY - state.pan.y) / zoom - parsePxNumber(card.style.top, card.offsetTop) };
+      window.addEventListener('pointermove', onMove, true);
+      window.addEventListener('pointerup', finish, true);
+      window.addEventListener('mouseup', finish, true);
+      window.addEventListener('pointercancel', finish, true);
+      window.addEventListener('blur', finish, true);
+      proxy.addEventListener('lostpointercapture', finish);
+      // Keep the gesture on the proxy even above another live Browser's body.
+      try { proxy.setPointerCapture?.(ev.pointerId); } catch {}
+      // Avoid the button's native selection/compatibility mousedown path.
+      // Its click (and keyboard activation) still owns explicit readable focus.
+      ev.preventDefault();
+      ev.stopPropagation();
+    };
+    proxy.addEventListener('pointerdown', onDown);
+    proxy.addEventListener('click', onClick);
+    return () => {
+      finish({ type: 'pointercancel' });
+      proxy.removeEventListener('pointerdown', onDown);
+      proxy.removeEventListener('click', onClick);
+    };
+  }
+
   // ============ Canvas Pan / Zoom ============
   function installSemanticZoom(viewport, layer) {
     // A projection stays inside its original View's stacking context. The
@@ -17320,19 +17571,27 @@
       entry.visibilityDirty = true;
       if (!authorVisible(entry)) return;
       const world = screenRect(entry.card, state.zoom, state.pan).visualWorld;
+      // Browser's width cap includes its frame so both toolbar edges remain
+      // reachable; other View focus geometry and reading policies stay intact.
+      const focusWidth = entry.kind === 'browser' ? Math.max(world.width, entry.card.offsetWidth || 0) : world.width;
+      const focusHeight = entry.kind === 'browser' ? Math.max(world.height, entry.card.offsetHeight || 0) : world.height;
       let safe = safeViewportRect();
       const zoomFor = region => {
         const fitted = SurfaceState.fitSurfaceCamera(world, region, 0.85);
         const measured = entry.kind === 'browser' ? entry.card._browserPresentation?.font() : null;
-        const measuredWorldFont = Number.isFinite(measured) && measured > 0 ? measured / state.zoom : null;
-        // An unusually large View can be cropped, but must become readable
-        // without changing its saved dimensions or internal Browser viewport.
-        return Math.min(ZOOM_MAX, Math.max(
+        const nominal = entry.kind === 'browser' ? entry.card._browserPresentation?.nominalWorldFont?.() : null;
+        const measuredWorldFont = Number.isFinite(nominal) && nominal > 0 ? nominal
+          : Number.isFinite(measured) && measured > 0 ? measured / state.zoom : null;
+        // Aim for real page readability without feeding compact-toolbar fit
+        // back into the target. Browser toolbar access takes precedence when
+        // the available width cannot also achieve the 10.6px reading target.
+        const readableZoom = Math.min(ZOOM_MAX, Math.max(
           measuredWorldFont ? 0 : entry.kind === 'browser' ? 0.83 : 0.76,
           10.6 / (measuredWorldFont || entry.bodyFontPx),
           (detailWidth + 1) / world.width, (detailHeight + 1) / world.height,
           fitted.zoom,
         ));
+        return entry.kind === 'browser' ? Math.min(readableZoom, region.width / focusWidth) : readableZoom;
       };
       let zoom = zoomFor(safe);
       let chatFrameHeight = 0;
@@ -17355,14 +17614,15 @@
           }
         }
       }
-      const centeredY = safe.top + (safe.height - world.height * zoom) / 2 - world.y * zoom;
+      const centeredY = safe.top + (safe.height - focusHeight * zoom) / 2 - world.y * zoom;
       const topPanY = safe.top - world.y * zoom;
+      const browserCropped = entry.kind === 'browser' && focusHeight * zoom > safe.height;
       const pan = {
-        x: safe.left + (safe.width - world.width * zoom) / 2 - world.x * zoom,
+        x: safe.left + (browserCropped ? 0 : (safe.width - focusWidth * zoom) / 2) - world.x * zoom,
         y: chatZoomSafe
           ? Math.max(topPanY, Math.min(centeredY,
             safe.bottom - (world.height + chatFrameHeight) * zoom - world.y * zoom))
-          : revealHeader ? Math.max(centeredY, topPanY) : centeredY,
+          : revealHeader || entry.kind === 'browser' ? Math.max(centeredY, topPanY) : centeredY,
       };
       focusCanvasCard(entry.card);
       state.setCanvasViewportTarget?.({ pan, zoom });
@@ -17495,7 +17755,6 @@
       );
       const proxy = el('button', {
         type: 'button', class: 'egd-semantic-proxy', data: { kind, lod: 'outline', viewId: card.id },
-        onclick: ev => { ev.stopPropagation(); focusProjection(entries.get(card)); },
       }, center);
       proxy.hidden = true;
       proxy.style.position = 'absolute';
@@ -17510,6 +17769,7 @@
         authorVisible: true, visibilityDirty: true, compact: false,
         visualStyle: [card.style.display, card.style.visibility, card.style.opacity].join('|'),
       };
+      entry.disposeOutlineDrag = installSemanticOutlineDrag(entry, { focusProjection, request });
       const geometryObserver = new MutationObserver(records => {
         const visualStyle = [card.style.display, card.style.visibility, card.style.opacity].join('|');
         if (records.some(record => record.attributeName === 'class' || record.attributeName === 'hidden'
@@ -17531,6 +17791,7 @@
     const remove = card => {
       const entry = entries.get(card);
       if (!entry) return;
+      entry.disposeOutlineDrag();
       entry.geometryObserver.disconnect();
       entry.titleObserver?.disconnect();
       restoreProjectionAccessibility(entry);
@@ -17577,7 +17838,14 @@
       const fullyInSafe = rect.x >= safe.left - 0.5 && rect.y >= safe.top - 0.5 &&
         rect.x + rect.width <= safe.right + 0.5 &&
         chatOuterBottom <= chatSafeBottom + 0.5;
-      if (level === 'detail' && fullyInSafe && !resized) return false;
+      // Detail can remain visible while too small to read. An explicit Dock
+      // open still uses focusProjection's stronger reading target.
+      const epsilon = 0.000001;
+      const readableAtAction = state.cardFullscreen?.cardId === card.id || (
+        zoom + epsilon >= 0.76 && entry.bodyFontPx * zoom + epsilon >= 10.6 &&
+        rect.width + epsilon >= detailWidth + 1 && rect.height + epsilon >= detailHeight + 1
+      );
+      if (level === 'detail' && readableAtAction && fullyInSafe && !resized) return false;
       focusProjection(entry, { revealHeader: true });
       const target = { zoom: state.zoomTarget, pan: { ...state.panTarget } };
       const initialFocus = document.activeElement;
@@ -17636,7 +17904,10 @@
       const rect = screenRect(card, zoom, state.panTarget || state.pan);
       const level = SurfaceState.surfaceSemanticLevel({ width: rect.width, height: rect.height,
         fontPx: entry.bodyFontPx * zoom, previous: entry.level, detailWidth, detailHeight });
-      if (level === 'detail' || isCardFullscreen(card)) return false;
+      const epsilon = 0.000001;
+      const readableAtAction = zoom + epsilon >= 0.76 && entry.bodyFontPx * zoom + epsilon >= 10.6 &&
+        rect.width + epsilon >= detailWidth + 1 && rect.height + epsilon >= detailHeight + 1;
+      if ((level === 'detail' && readableAtAction) || isCardFullscreen(card)) return false;
       focusProjection(entry, { revealHeader: true });
       return true;
     };
@@ -17674,25 +17945,21 @@
         const rect = screenRect(card, zoom, pan);
         entry.rect = rect;
         if (entry.kind === 'browser' && !card._browserState?.loading &&
-            rect.width >= detailWidth * .88 && rect.height >= detailHeight * .88 &&
+            browserPresentationMayNeedMetrics({ ...rect, detailWidth, detailHeight }) &&
             rect.x + rect.width > 0 && rect.y + rect.height > 0 &&
             rect.x < window.innerWidth && rect.y < window.innerHeight) card._browserPresentation?.ensure();
         const projectedFont = entry.kind === 'browser' ? card._browserPresentation?.font() : null;
         const measuredFont = Number.isFinite(projectedFont) && projectedFont > 0;
-        let level = isCardFullscreen(card) ? 'detail' : SurfaceState.surfaceSemanticLevel({
-          width: rect.width, height: rect.height, fontPx: measuredFont ? projectedFont : entry.bodyFontPx * zoom, previous: entry.level,
+        // LOD describes the Card, not whether its fixed-width page fit is readable.
+        // Tiny fitted page text must not hide an otherwise usable Browser Card.
+        // This nominal UI floor is LOD-only; focusProjection still uses the raw
+        // measured page font for the explicit focus reading target.
+        const nominalFont = entry.bodyFontPx * zoom;
+        const semanticFont = measuredFont ? Math.max(projectedFont, nominalFont) : nominalFont;
+        const level = isCardFullscreen(card) ? 'detail' : SurfaceState.surfaceSemanticLevel({
+          width: rect.width, height: rect.height, fontPx: semanticFont, previous: entry.level,
           detailWidth, detailHeight,
         });
-        // Browser's two control rows need a tighter readable band than a
-        // generic View; keep a small enter/exit gap rather than flickering.
-        if (entry.kind === 'browser' && !measuredFont && !isCardFullscreen(card) && level === 'detail'
-          && zoom < (entry.level === 'detail' ? 0.76 : 0.82)) {
-          level = SurfaceState.surfaceSemanticLevel({
-            width: rect.width, height: rect.height, fontPx: 0.1,
-            previous: entry.level === 'outline' ? 'outline' : null,
-            detailWidth, detailHeight,
-          });
-        }
         if (level !== entry.level) {
           entry.level = level;
           card.dataset.egdSemanticLevel = level;
@@ -17974,18 +18241,12 @@
       let nextZoom = Math.max(ZOOM_MIN, Math.min(ZOOM_MAX, prevZoom * factor));
       let anchorX = cx;
       let anchorY = cy;
-      if (state.surface.initialBrowserFocus && factor < 1) {
-        const restoringBrowser = state.cardFullscreen?.cardId === state.surface.browserCardId;
+      if (factor < 1 && state.cardFullscreen?.cardId) {
+        // Only outward gestures reveal the surrounding Desk. Do not fit/reset
+        // the camera here: the same Card shrinks continuously at this anchor.
+        exitCardFullscreen(null, { preserveCamera: true });
+      } else if (factor < 1 && state.surface.initialBrowserFocus) {
         enterLocalDesk();
-        if (restoringBrowser) {
-          // Fullscreen exit fits the saved Browser rect into the Desk. Apply
-          // this gesture to that new camera, not the stale fullscreen pose.
-          prevZoom = state.zoomTarget;
-          nextZoom = Math.max(ZOOM_MIN, Math.min(ZOOM_MAX, prevZoom * factor));
-          const safe = safeViewportRect({ avoidHud: false });
-          anchorX = safe.left + safe.width / 2;
-          anchorY = safe.top + safe.height / 2;
-        }
       }
       if (nextZoom === prevZoom) { recordChange(); return; }
       const ratio = nextZoom / prevZoom;
@@ -18207,10 +18468,12 @@
     // - gesture start on active card body: native page scroll for that session
     // - gesture start anywhere else: desk pan for that session
     // - normal mode cmd+wheel pans; ctrl/pinch zooms
-    // - card fullscreen mode cmd/ctrl+wheel zooms immediately
-    document.addEventListener('wheel', (ev) => {
+    // - Focus cmd/ctrl+wheel zooms the camera; only zoom-out reveals the Desk
+    // Both chrome and Terminal frames share this session. The caller consumes
+    // the original event only when true; false leaves its native scroll alone.
+    const routeCanvasWheel = (ev) => {
       if (ev.target instanceof Element && ev.target.closest('.egd-ontology-stage')) {
-        return;
+        return false;
       }
       const now = performance.now();
       const sessionExpired = !wheelSession.nativeActive
@@ -18223,40 +18486,78 @@
         wheelSession.owner = 'canvas';
         wheelSession.entityId = null;
         zoomCanvasByWheel(ev);
-        ev.preventDefault();
-        ev.stopPropagation();
-        return;
+        return true;
       }
       if (ev.metaKey && !ev.ctrlKey) {
         wheelSession.owner = 'canvas';
         wheelSession.entityId = null;
         panCanvasByWheel(ev);
-        ev.preventDefault();
-        ev.stopPropagation();
-        return;
+        return true;
       }
       if (ev.ctrlKey) {
         wheelSession.owner = 'canvas';
         wheelSession.entityId = null;
         zoomCanvasByWheel(ev);
-        ev.preventDefault();
-        ev.stopPropagation();
-        return;
+        return true;
       }
       if (shouldAllowHudScroll(ev.target)) {
         resetWheelSession();
-        return;
+        return false;
       }
       if (wheelSession.owner === 'entity') {
         const sessionEntityActive = wheelSession.entityId && wheelSession.entityId === state.activeEntityId;
-        if (sessionEntityActive && shouldAllowActiveEntityScroll(ev.target)) return;
+        if (sessionEntityActive && shouldAllowActiveEntityScroll(ev.target)) return false;
         // If the gesture started inside the active browser card, do not suddenly
         // switch to canvas pan mid-flight when the pointer grazes another overlay.
-        ev.preventDefault();
-        ev.stopPropagation();
-        return;
+        return true;
       }
       panCanvasByWheel(ev);
+      return true;
+    };
+    const terminalFrameWheelResults = new WeakMap();
+    state.routeTerminalFrameWheel = (card, terminalFrame, ev) => {
+      if (!card?.isConnected || !terminalFrame?.isConnected || card._termBrowser !== terminalFrame
+          || !card.contains(terminalFrame) || !ev) return false;
+      // Chrome capture and the child listener may see the same native event.
+      // Reuse its ownership result; never project its coordinates or pan twice.
+      if (terminalFrameWheelResults.has(ev)) return terminalFrameWheelResults.get(ev);
+      // Frame events use untransformed content CSS pixels. Map their anchor to
+      // the displayed chrome rect (not zoomTarget, which may still be animating).
+      // Pan deltas remain screen units, just like the outer wheel listener.
+      const rect = terminalFrame.getBoundingClientRect();
+      const scaleX = rect.width / terminalFrame.offsetWidth;
+      const scaleY = rect.height / terminalFrame.offsetHeight;
+      const clientX = rect.left + (terminalFrame.clientLeft + ev.clientX) * scaleX;
+      const clientY = rect.top + (terminalFrame.clientTop + ev.clientY) * scaleY;
+      if (!(scaleX > 0 && scaleY > 0)
+          || ![scaleX, scaleY, clientX, clientY, ev.deltaX, ev.deltaY].every(Number.isFinite)) return false;
+      const consumed = routeCanvasWheel({
+        target: terminalFrame, clientX, clientY,
+        deltaX: ev.deltaX, deltaY: ev.deltaY, deltaMode: ev.deltaMode,
+        ctrlKey: ev.ctrlKey, metaKey: ev.metaKey,
+      });
+      terminalFrameWheelResults.set(ev, consumed);
+      return consumed;
+    };
+    document.addEventListener('wheel', (ev) => {
+      // Gecko chrome capture can see a privileged iframe's child target and
+      // local coordinates before its window listener. Only normalize an owned
+      // Terminal iframe whose content document is this event's actual origin;
+      // Browser remote events and ordinary chrome targets keep their old route.
+      const targetDocument = ev.target?.ownerDocument;
+      if (targetDocument && targetDocument !== document) {
+        const terminalFrame = ev.composedPath?.().find(node => node?.localName === 'iframe'
+          && node.ownerDocument === document && node.contentDocument === targetDocument
+          && node.closest?.('.egd-terminal-card')?._termBrowser === node);
+        if (terminalFrame) {
+          if (state.routeTerminalFrameWheel(terminalFrame.closest('.egd-terminal-card'), terminalFrame, ev)) {
+            ev.preventDefault();
+            ev.stopPropagation();
+          }
+          return;
+        }
+      }
+      if (!routeCanvasWheel(ev)) return;
       ev.preventDefault();
       ev.stopPropagation();
     }, { passive: false, capture: true });
@@ -18305,7 +18606,7 @@
       syncPanModeCursor();
     });
     window.addEventListener('resize', () => {
-      syncCardFullscreenLayout();
+      syncCardFullscreenLayout({ reframe: true });
       state.refreshSemanticProjections?.();
     });
   }
@@ -19213,8 +19514,8 @@
 
   function focusInitialBrowserCard(card, { persist = false } = {}) {
     if (!card) return false;
-    // Use the existing Card fullscreen presentation on the real Canvas. Its
-    // saved rect is restored on zoom-out; the live Browser target is not moved.
+    // Focus the existing world Card with the camera. Zoom-out reveals its
+    // surroundings without changing its geometry or live Browser target.
     state.surface.browserCardId = card.id;
     setSurfaceMode('desk');
     card.classList.remove('egd-first-use-browser');
@@ -19304,6 +19605,7 @@
       host.appendChild(canvasViewport);
       const semantic = installSemanticZoom(canvasViewport, canvasLayer);
       installCanvasPanZoom(canvasViewport, canvasLayer);
+      installDeskCloseShortcut();
       installNativeGestureHelperBridge();
       state.codexBridge = installCodexBridge(legacyChatRecords);
       window.__egdesk = {

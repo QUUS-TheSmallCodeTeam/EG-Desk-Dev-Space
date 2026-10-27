@@ -8,8 +8,83 @@ import * as TerminalState from '../overlay/resources/EGDeskTerminalState.sys.mjs
 
 const resources = new URL('../overlay/resources/', import.meta.url);
 const initializer = readFileSync(new URL('egdesk-terminal-init.js', resources), 'utf8');
+// Exercise the exact private helper without adding a test-only module export.
+const terminalSurface = readFileSync(new URL('surface/EGDeskSurfaceTerminal.mjs', resources), 'utf8');
+const wheelRouteSource = terminalSurface.match(/^  function routeTerminalFrameWheel\(state, card, frame, event\) \{[\s\S]*?^  \}/m)?.[0];
+assert.ok(wheelRouteSource, 'the wheel helper stays inside the Terminal factory');
+const routeTerminalFrameWheel = compileFunction(`${wheelRouteSource}\nreturn routeTerminalFrameWheel;`)();
 const settle = async () => { for (let count = 0; count < 12; count++) await Promise.resolve(); };
 const deferred = () => { let resolve, reject; const promise = new Promise((yes, no) => { resolve = yes; reject = no; }); return { promise, resolve, reject }; };
+
+function actualXtermKeyboard({ guard = false } = {}) {
+  const source = readFileSync(new URL('vendor/xterm.min.js', resources), 'utf8');
+  const module = { exports: {} };
+  compileFunction(source, ['module', 'exports'])(module, module.exports);
+  const term = new module.exports.Terminal({ allowProposedApi: true });
+  const core = term._core, sent = [];
+  core.browser = { isMac: true, isWindows: false };
+  core._compositionHelper = { keydown: () => true };
+  core.textarea = { value: '' };
+  core.updateCursorStyle = () => {};
+  core._showCursor = () => {};
+  core.focus = () => {};
+  term.onData(data => sent.push(data));
+  const keyGuard = guard ? TerminalState.createTerminalKeyEventGuard() : null;
+  if (keyGuard) {
+    term.attachCustomKeyEventHandler(event => keyGuard.keyEvent(event));
+    term.onKey(event => keyGuard.onKey(event));
+  }
+  const event = (type, key, extra = {}) => ({ type, key, code: 'Key' + key.toUpperCase(),
+    keyCode: key.toUpperCase().charCodeAt(0), which: key.charCodeAt(0),
+    charCode: type === 'keypress' ? key.charCodeAt(0) : 0, location: 0,
+    ctrlKey: false, altKey: false, metaKey: false, shiftKey: false, isComposing: false,
+    getModifierState: () => false,
+    preventDefault() { this.defaultPrevented = true; },
+    stopPropagation() { this.propagationStopped = true; }, ...extra });
+  const keydown = (key, extra) => { const e = event('keydown', key, extra); core._keyDown(e); return e; };
+  const keypress = (key, extra) => { const e = event('keypress', key, extra); core._keyPress(e); return e; };
+  const keyup = (key, extra) => { const e = event('keyup', key, extra); core._keyUp(e); return e; };
+  const input = (data, extra = {}) => {
+    const e = event('input', data, { data, inputType: 'insertText', composed: false, ...extra });
+    keyGuard?.input(e);
+    if (!e.propagationStopped) core._inputEvent(e);
+    return e;
+  };
+  return { sent, term, keyGuard, keydown, keypress, keyup, input };
+}
+
+test('bundled xterm reproduces a delivered keydown plus keypress as llss; guard uses the physical key boundary', () => {
+  for (const [guard, expected] of [[false, 'llss'], [true, 'ls']]) {
+    const h = actualXtermKeyboard({ guard });
+    for (const key of 'ls') {
+      assert.equal(h.keydown(key).defaultPrevented, true);
+      h.keypress(key); h.keyup(key);
+    }
+    assert.equal(h.sent.join(''), expected);
+  }
+  const repeated = actualXtermKeyboard({ guard: true });
+  for (const key of 'll') { repeated.keydown(key); repeated.keypress(key); repeated.keyup(key); }
+  assert.equal(repeated.sent.join(''), 'll', 'separate physical presses are not de-duplicated');
+  const held = actualXtermKeyboard({ guard: true });
+  for (let i = 0; i < 3; i++) { held.keydown('l', { repeat: i > 0 }); held.keypress('l'); }
+  held.keyup('l');
+  assert.equal(held.sent.join(''), 'lll', 'auto-repeat remains three keydown actions');
+});
+
+test('only the matching insertText input in the same physical key is stopped', () => {
+  const h = actualXtermKeyboard({ guard: true });
+  h.keydown('l');
+  assert.equal(h.input('l').propagationStopped, true);
+  h.keyup('l');
+  assert.equal(h.input('l').propagationStopped, undefined, 'input without a matching physical key remains valid');
+  assert.equal(h.sent.join(''), 'll');
+  const ime = actualXtermKeyboard({ guard: true });
+  ime.keydown('a');
+  assert.equal(ime.input('a', { isComposing: true, inputType: 'insertCompositionText' }).propagationStopped, undefined);
+  assert.equal(ime.input('a', { inputType: 'insertFromPaste' }).propagationStopped, undefined);
+  ime.keyGuard.reset();
+  assert.equal(ime.input('a').propagationStopped, undefined, 'composition or paste resets the key action');
+});
 
 test('terminal writes preserve text, backspace and paste order exactly once', async () => {
   const first = deferred(), calls = [];
@@ -152,6 +227,8 @@ async function uiFixture({ search = '', platform = 'win32', transport = 'conpty'
     constructor() { term = this; this.cols = 80; this.rows = 24; this.options = {}; this.focusCalls = 0; this.output = []; this.buffer = { active: { length: 0, getLine() {} } }; }
     open(container) { container.textarea = new Element('textarea'); }
     loadAddon() {}
+    attachCustomKeyEventHandler(fn) { this.keyHandler = fn; }
+    onKey(fn) { this.keyListener = fn; }
     onData(fn) { this.send = fn; }
     write(data) { this.output.push(data); }
     focus() { this.focusCalls++; }
@@ -285,6 +362,49 @@ test('initializer defers IME fallback and preserves API paste as the next input 
   assert.deepEqual(h.requests.filter(item => item.route === '/terminal/write').map(item => item.body.data), ['한글', '가', '가']);
 });
 
+test('actual typing activates the owning card without activating on programmatic focus or an untouched frame', async () => {
+  const h = await uiFixture({ search: '?autofocus=0' }); await h.boot();
+  const activations = () => h.messages.filter(message => message.type === 'terminal-activate').length;
+  assert.equal(activations(), 0);
+  h.api.focus(); assert.equal(activations(), 0);
+  h.event('mousedown', { target: { closest: () => null } });
+  h.elements['terminal-container'].dispatch('keydown', { key: 'l', isComposing: false, keyCode: 76 });
+  h.elements['terminal-container'].dispatch('compositionstart');
+  h.elements['terminal-container'].dispatch('paste');
+  assert.equal(activations(), 4);
+  const other = await uiFixture(); await other.boot();
+  assert.equal(other.term.focusCalls, 0, 'embedded startup leaves focus to the currently active card');
+});
+
+test('frame wheel bridge stops handled canvas events and leaves active terminal wheel events native', async () => {
+  const h = await uiFixture(); await h.boot();
+  assert.equal(h.messages.some(message => message.type === 'terminal-api-ready'), true);
+  const event = () => ({ preventDefault() { this.prevented = true; }, stopPropagation() { this.stopped = true; } });
+  let received;
+  h.api.setWheelHandler(e => { received = e; return true; });
+  const inactive = event(); h.event('wheel', inactive);
+  assert.equal(received, inactive); assert.equal(inactive.prevented, true); assert.equal(inactive.stopped, true);
+  h.api.setWheelHandler(() => false);
+  const active = event(); h.event('wheel', active);
+  assert.equal(active.prevented, undefined); assert.equal(active.stopped, undefined);
+  assert.throws(() => h.api.setWheelHandler('invalid'), TypeError);
+});
+
+test('terminal frame routes inactive plain wheels to canvas and delegates gesture policy to Main when available', () => {
+  const card = { id: 'terminal' }, frame = {}, panned = [];
+  const state = { activeEntityId: 'other', panCanvasByWheel: event => panned.push(event) };
+  const wheel = { deltaX: 0, deltaY: 20, ctrlKey: false, metaKey: false };
+  assert.equal(routeTerminalFrameWheel(state, card, frame, wheel), true);
+  assert.deepEqual(panned, [wheel]);
+  state.activeEntityId = card.id;
+  assert.equal(routeTerminalFrameWheel(state, card, frame, wheel), false);
+  state.activeEntityId = 'other';
+  assert.equal(routeTerminalFrameWheel(state, card, frame, { ...wheel, ctrlKey: true }), false);
+  state.routeTerminalFrameWheel = (...args) => { assert.deepEqual(args, [card, frame, wheel]); return true; };
+  assert.equal(routeTerminalFrameWheel(state, card, frame, wheel), true);
+  assert.equal(panned.length, 1, 'the injected policy is the only owner when present');
+});
+
 test('unload fences pending input before closing the same owned PTY', async () => {
   const writing = deferred();
   const h = await uiFixture({ respond: async (route, body, defaults) => {
@@ -328,12 +448,16 @@ test('production Card routes a shell request to a separate Card and rejects othe
   const surfaceSource = readSurfaceSource();
   const body = surfaceSource.match(/    const onTerminalReady = \(ev\) => \{([\s\S]*?)\n    \};/)?.[1];
   assert.ok(body, 'exercise the production iframe-message boundary');
-  const ownFrame = {}, opened = [], title = { textContent: '' };
+  let wheelHandler;
+  const ownFrame = { terminalAPI: { setWheelHandler: handler => { wheelHandler = handler; } } }, opened = [], title = { textContent: '' };
+  const card = { id: 'terminal', dataset: {} }, state = { activeEntityId: card.id, panModifier: false };
   let focused = 0;
   const handler = compileFunction('return ev => {' + body + '\n};',
-    ['termBrowser', 'spawnTerminalCard', 'header', 'focusTerminal', 'boardCloseRequests', 'card', 'completeAgendaClose', 'activate'])(
+    ['termBrowser', 'spawnTerminalCard', 'header', 'focusTerminal', 'boardCloseRequests', 'card', 'completeAgendaClose', 'activate',
+      'state', 'activateCard', 'routeTerminalFrameWheel', 'TAG'])(
     { contentWindow: ownFrame }, options => opened.push(options), { querySelector: () => title },
-    () => focused++, new Set(), { dataset: {} }, () => assert.fail('no Board close is pending'), true);
+    () => focused++, new Set(), card, () => assert.fail('no Board close is pending'), true,
+    state, () => { if (!state.panModifier) state.activeEntityId = card.id; }, routeTerminalFrameWheel, 'test');
   handler({ source: {}, data: { type: 'terminal-new-session', shellId: 'cmd' } });
   handler({ source: ownFrame, data: { type: 'terminal-new-session', shellId: '/bin/zsh' } });
   assert.deepEqual(opened, []);
@@ -342,6 +466,17 @@ test('production Card routes a shell request to a separate Card and rejects othe
   assert.equal(focused, 0);
   handler({ source: ownFrame, data: { type: 'terminal-ready', shellLabel: 'CMD' } });
   assert.equal(title.textContent, '>_ CMD'); assert.equal(focused, 1);
+  assert.equal(typeof wheelHandler, 'function');
+  state.activeEntityId = 'different-card';
+  handler({ source: ownFrame, data: { type: 'terminal-ready', shellLabel: 'CMD' } });
+  assert.equal(focused, 1, 'late terminal ready cannot steal focus from another card');
+  handler({ source: {}, data: { type: 'terminal-activate' } });
+  assert.equal(state.activeEntityId, 'different-card', 'another iframe cannot activate this card');
+  handler({ source: ownFrame, data: { type: 'terminal-activate' } });
+  assert.equal(state.activeEntityId, card.id);
+  state.activeEntityId = 'different-card'; state.panModifier = true;
+  handler({ source: ownFrame, data: { type: 'terminal-activate' } });
+  assert.equal(state.activeEntityId, 'different-card', 'pan modifier does not activate');
 });
 
 test('Windows worker exit requires native IPC plus clean observed worker close for the same session', () => {

@@ -1,6 +1,8 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
+import { compileFunction } from 'node:vm';
+import * as SurfaceState from '../overlay/resources/EGDeskSurfaceState.sys.mjs';
 import {
   CONTRAST_RATIOS, CONTRAST_REQUIREMENTS, MORE_CONTRAST_REQUIREMENTS, STATE_TOKEN_TABLE, SYSTEM_COLOR_KEYWORDS,
   auditCssScale, checkSurfaceContrast, compositeOver, contrastRatio, formatHex, hasRootOverrides, mediaApplies,
@@ -11,6 +13,7 @@ import {
 // The surface stylesheet is read, never written: it is the source of truth
 // (D-G5 (가)) and this file holds it to the contrast table.
 const surfaceCss = readFileSync(new URL('../overlay/CSS/eg-desk-surface.uc.css', import.meta.url), 'utf8').replace(/\r\n/g, '\n');
+const surfaceScript = readFileSync(new URL('../overlay/JS/eg-desk-surface.uc.js', import.meta.url), 'utf8').replace(/\r\n/g, '\n');
 const surfaceRules = readCssRules(surfaceCss);
 
 const describeRows = rows => rows.map(r => `${r.scheme} ${r.pair}: ${r.ratio ?? r.reason} < ${r.minimum}`).join('\n');
@@ -428,6 +431,7 @@ const insetFocusSelectors = [
   '.egd-browser-agent-timeline .egd-browser-agent-timeline-close:focus-visible',
   '.egd-minimap-stack-row:focus-visible',
   '.egd-codex-thread-item:focus-visible',
+  '.egd-codex-notices:focus-visible',
   '.egd-context-suggest-row:focus-within',
   '.egd-ontology-stage-mini-tool:focus-visible',
 ];
@@ -454,7 +458,8 @@ const focusSelectors = [
   '.egd-codex-computer-use:focus-visible', 'button.egd-codex-answer-fold-card:focus-visible',
   'button.egd-codex-answer-fold-toggle:focus-visible', 'button.egd-result-card-back:focus-visible',
   '.egd-context-suggest button:focus-visible', '.egd-codex-activity-focus',
-  '.egd-ontology-minimap-layer-pane:focus-visible', '.egd-ontology-minimap-node:focus-visible',
+  // Minimap marks are SVG under the stylesheet's HTML default namespace.
+  '*|*.egd-ontology-minimap-layer-pane:focus-visible', '*|*.egd-ontology-minimap-node:focus-visible',
 ];
 
 test('DSN-03 all existing focus selectors consume the canonical outline and offset', () => {
@@ -688,4 +693,156 @@ test('D-G3 ordinary input edges become stronger through more/forced media, witho
       }
     }
   }
+});
+
+test('approved Chat refinement keeps accessible composer and real HUD actions', () => {
+  const input = declarationsFor('.egd-codex-input', { scheme: 'light' });
+  assert.equal(input['min-height'], '40px');
+  assert.equal(input['max-height'], '9.6em');
+  assert.equal(input['font-size'], '15px');
+  assert.equal(input['line-height'], '1.6');
+  const send = declarationsFor('.egd-codex-send', { scheme: 'light' });
+  assert.equal(send['min-width'], '34px');
+  assert.equal(send['min-height'], '34px');
+  assert.match(surfaceScript, /data: \{ testid: 'chat-send' \},\s*onclick: \(\) => \{ if \(!compositionInProgress\) void codexBridge\.sendMessage\(\); \},\s*\}, deskIcon\('send'\)/);
+  assert.match(surfaceScript, /class: 'egd-hud-pin',[^]*?'aria-label': '캔버스로 이동'[^]*?detachCodexChatFromHud\(\)[^]*?deskIcon\('detach'\)/);
+  assert.match(surfaceScript, /class: 'egd-hud-close',[^]*?'aria-label': '닫기'[^]*?toggleHUD\(null\)[^]*?deskIcon\('close'\)/);
+  assert.match(surfaceScript, /data: \{ testid: 'chat-attach-open' \}/);
+  assert.match(surfaceScript, /renderEngineChip\(activeThread\)/);
+  assert.match(surfaceScript, /codexUsageRing\(codex\.authStatus\)/);
+});
+
+test('Desk chrome keeps its existing geometry and legible local outline glyphs', () => {
+  const rail = declarationsFor('#egd-desk-rail', { scheme: 'light' });
+  assert.equal(rail.height, '52px');
+  assert.equal(rail.width, '100%');
+  assert.equal(rail['border-radius'], '0');
+  assert.equal(declarationsFor('#egd-preset-bag', { scheme: 'light' }).width, '64px');
+  assert.equal(declarationsFor('#egd-dock', { scheme: 'light' })['min-height'], '46px');
+  const dockButton = declarationsFor('.egd-dock-btn', { scheme: 'light' });
+  assert.equal(dockButton.width, '32px');
+  assert.equal(dockButton['min-height'], '32px');
+  const start = surfaceScript.indexOf('  const DESK_ICON_SHAPES = {');
+  const end = surfaceScript.indexOf('\n\n  function deskIcon(', start);
+  const iconFunction = surfaceScript.match(/^  function deskIcon\([^]*?^  \}/m)?.[0];
+  assert.ok(start > 0 && end > start && iconFunction, 'the real local icon renderer');
+  const svgEl = (tag, attrs) => ({ tag, attrs, children: [], appendChild(child) { this.children.push(child); } });
+  const makeIcon = compileFunction(`${surfaceScript.slice(start, end)}\n${iconFunction}\nreturn deskIcon;`, ['svgEl'])(svgEl);
+  for (const name of ['chat', 'file', 'folder', 'pointer', 'grip', 'send', 'detach', 'close']) {
+    const icon = makeIcon(name);
+    assert.equal(icon.tag, 'svg');
+    assert.equal(icon.attrs.viewBox, '0 0 24 24');
+    assert.equal(icon.attrs.stroke, 'currentColor');
+    assert.equal(icon.attrs['stroke-width'], '1.8');
+    assert.equal(icon.attrs['aria-hidden'], 'true');
+    assert.ok(icon.children.length, name);
+  }
+});
+
+test('Browser semantic presentation uses the shared detail policy at 69% and 50%', () => {
+  const start = surfaceScript.indexOf('        const projectedFont =', surfaceScript.indexOf('    const render = () => {', surfaceScript.indexOf('function installSemanticZoom')));
+  const end = surfaceScript.indexOf('        if (level !== entry.level)', start);
+  assert.ok(start > 0 && end > start, 'read the real semantic render branch');
+  const renderLevel = compileFunction(`${surfaceScript.slice(start, end)}\nreturn level;`,
+    ['entry', 'card', 'rect', 'zoom', 'SurfaceState', 'isCardFullscreen', 'detailWidth', 'detailHeight']);
+  const level = ({ zoom, measured = null, previous = 'outline', width = 720, height = 500, fullscreen = false }) => renderLevel(
+    { kind: 'browser', bodyFontPx: 11, level: previous },
+    { _browserPresentation: { font: () => measured } },
+    { width: width * zoom, height: height * zoom }, zoom, SurfaceState, () => fullscreen, 240, 180);
+  for (const zoom of [.69, .5]) {
+    assert.equal(level({ zoom }), 'detail', `unmeasured Browser at ${zoom}`);
+    assert.equal(level({ zoom, measured: 10 * zoom }), 'detail', `measured Browser at ${zoom}`);
+    assert.equal(level({ zoom, width: 320, height: 420 }), 'detail', `minimum View at ${zoom}`);
+  }
+  for (const previous of ['outline', 'detail']) {
+    for (const zoom of [1, .69, .5]) {
+      assert.equal(level({ zoom, previous, width: 448, height: 343, measured: 4.02594 * zoom }), 'detail',
+        'tiny internally fitted page text must not blank a usable native Browser card');
+    }
+  }
+  assert.equal(level({ zoom: .5, measured: 4.7 }), 'detail', 'nominal card font is an LOD-only floor');
+  assert.equal(level({ zoom: .28, measured: 3.1 }), 'outline', 'the common 3.3px entry floor is retained below nominal readability');
+  assert.equal(level({ zoom: .28, measured: 3.1, previous: 'detail' }), 'detail', 'the common 2.9px exit band is retained');
+  assert.equal(level({ zoom: .3 }), 'detail', 'nominal Browser detail now enters at 30%');
+  assert.equal(level({ zoom: .25 }), 'outline', 'genuinely small content can still abstract');
+  assert.equal(level({ zoom: .01, fullscreen: true }), 'detail', 'fullscreen retains its existing exception');
+});
+
+test('Browser measurement candidate follows the shared projected-size policy; focus remains readable', () => {
+  const helper = surfaceScript.match(/^  function browserPresentationMayNeedMetrics\([^]*?^  \}/m)?.[0];
+  assert.ok(helper, 'production measurement candidate');
+  const mayMeasure = compileFunction(`${helper}\nreturn browserPresentationMayNeedMetrics;`, ['SurfaceState'])(SurfaceState);
+  const candidate = (width, height) => mayMeasure({ width, height, detailWidth: 240, detailHeight: 180 });
+  assert.equal(candidate(320 * .5, 420 * .5), true, 'a small View at 50% can acquire real metrics');
+  assert.equal(candidate(100, 80), true, 'projections inside the new retention band can acquire metrics');
+  assert.equal(candidate(88, 66), false, 'projections below the 88.704x66.528px retention band do not request metrics');
+  assert.equal(candidate(0, 210), false);
+  assert.match(surfaceScript, /!card\._browserState\?\.loading &&\s*browserPresentationMayNeedMetrics\(\{ \.\.\.rect, detailWidth, detailHeight \}\)/);
+  const focus = surfaceScript.match(/    const focusProjection = \(entry, \{ revealHeader = false \} = \{\}\) => \{([^]*?)\n    \};/)?.[1];
+  assert.ok(focus, 'production focus-to-readable path');
+  assert.match(focus, /measuredWorldFont \? 0 : entry\.kind === 'browser' \? 0\.83 : 0\.76/);
+  assert.match(focus, /10\.6 \/ \(measuredWorldFont \|\| entry\.bodyFontPx\)/);
+  assert.match(focus, /\(detailWidth \+ 1\) \/ world\.width, \(detailHeight \+ 1\) \/ world\.height/);
+});
+
+test('active and selected cards keep a blue selection edge across zoom and compact views', () => {
+  const selectors = ['.egd-canvas-card.egd-entity-active', '.egd-canvas-card.egd-entity-selected:not(.egd-entity-active)',
+    '.egd-browser-card.egd-entity-active', '.egd-browser-card.egd-entity-selected:not(.egd-entity-active)', '.egd-chat-card.egd-entity-active'];
+  for (const scheme of ['light', 'dark']) {
+    const env = { scheme };
+    for (const selector of selectors) assert.equal(declarationsFor(selector, env)['border-color'], 'var(--egd-card-selection)', selector);
+    for (const selector of selectors.slice(0, 2)) assert.equal(declarationsFor(selector, env).outline,
+      'calc(2px / var(--egd-camera-zoom, 1)) solid var(--egd-card-selection)', selector);
+    const root = readRootProperties(surfaceCss, env);
+    const selection = resolveColor('var(--egd-card-selection)', root);
+    for (const background of ['--egd-surface-elevated', '--egd-wood']) {
+      assert.ok(contrastRatio(selection, resolveColor(`var(${background})`, root)) >= 4.5, `${scheme} ${background}`);
+    }
+  }
+  const proxy = declarationsFor('.egd-canvas-card:is(.egd-entity-active, .egd-entity-selected) > .egd-semantic-proxy');
+  assert.equal(proxy['border-width'], '2px');
+  assert.equal(proxy['border-color'], 'var(--egd-card-selection)');
+  assert.equal(readRootProperties(surfaceCss, { forcedColors: true })['--egd-card-selection'], 'Highlight');
+});
+
+test('resource strip keeps readable compact values and a neutral disk glyph', () => {
+  const env = { scheme: 'light' };
+  const gadget = declarationsFor('.egd-resource-gadget', env);
+  const button = declarationsFor('.egd-resource-gadget .egd-resource-button', env);
+  const readout = declarationsFor('.egd-resource-readout', env);
+  const disk = declarationsFor('.egd-resource-disk.egd-resource-unmeasured', env);
+  assert.equal(gadget.width, 'max-content');
+  assert.equal(button.display, 'inline-flex');
+  assert.equal(readout['flex-direction'], 'column');
+  assert.equal(disk.background, 'transparent');
+  assert.match(disk.border, /solid var\(--egd-on-surface-variant\)/);
+  assert.match(surfaceCss, /\.egd-rail-right \.egd-resource-gadget \{ display: grid; grid-template-columns: repeat\(2, max-content\)/);
+  assert.match(surfaceCss, /\.egd-rail-right \{ flex: 0 1 auto; min-width: 0; overflow-x: auto;/);
+});
+
+test('Focus resource layout reserves unscaled space and keeps its details inside the viewport', () => {
+  const focus = '.egd-browser-card.egd-card-fullscreen';
+  assert.equal(declarationsFor(`${focus} .egd-resource-gadget`).zoom, 'calc(1 / var(--egd-camera-zoom, 1))');
+  assert.equal(declarationsFor('.egd-resource-gadget').zoom, undefined, 'normal rail must not change scale');
+  assert.equal(declarationsFor('.egd-browser-card .egd-desk-window-toolbar .egd-resource-button').font,
+    '600 10px/1.05 var(--egd-font)', 'toolbar inheritance must not enlarge resource text');
+  const detail = declarationsFor(`${focus} .egd-resource-detail`);
+  assert.equal(detail['max-height'], 'max(100px, calc(100vh - 180px))');
+  assert.equal(detail['overflow-y'], 'auto');
+  assert.equal(detail['overscroll-behavior'], 'contain');
+  const narrowToolbar = rulesFor(`${focus} .egd-desk-window-toolbar`).find(rule => rule.media.includes('(max-width: 700px)'));
+  assert.ok(narrowToolbar, 'narrow Focus needs its own toolbar layout');
+  assert.equal(new Map(narrowToolbar.declarations).get('grid-template-columns'), 'auto minmax(0, 1fr) auto auto');
+  assert.equal(new Map(narrowToolbar.declarations).get('height'), 'auto');
+  const narrowGadget = rulesFor(`${focus} .egd-resource-gadget`).find(rule => rule.media.includes('(max-width: 700px)'));
+  assert.equal(new Map(narrowGadget.declarations).get('grid-column'), '1 / -1');
+  assert.equal(new Map(narrowGadget.declarations).get('grid-row'), '2');
+  const edge = declarationsFor(`${focus}:is(.egd-entity-active, .egd-entity-selected)`);
+  assert.equal(edge['outline-offset'], 'calc(-2px / var(--egd-camera-zoom, 1))');
+  assert.deepEqual(Object.keys(edge), ['outline-offset'], 'inset paint must not change world geometry');
+  const paint = declarationsFor(`${focus}:is(.egd-entity-active, .egd-entity-selected)::after`);
+  assert.equal(paint.border, 'calc(2px / var(--egd-camera-zoom, 1)) solid var(--egd-card-selection)');
+  assert.equal(paint.inset, '0');
+  assert.equal(paint.position, 'absolute');
+  assert.equal(paint['pointer-events'], 'none', 'selection paint must not intercept toolbar or page input');
 });
