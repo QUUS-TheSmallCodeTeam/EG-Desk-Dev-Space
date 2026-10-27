@@ -7895,6 +7895,37 @@ test('View sizes follow the type table, shrink to the visible room and never pas
   assert.ok(Object.isFrozen(Surface.CANVAS_VIEW_SIZES) && Object.isFrozen(Surface.CANVAS_VIEW_SIZES.browser));
 });
 
+test('Chat placement and outer CSS box honor 320px while saved widths round-trip unchanged', () => {
+  const minimum = Surface.CANVAS_VIEW_SIZES.chat.minWidth;
+  const chatCss = cssDeclarationsFor(surfaceCss, '.egd-chat-card');
+  assert.equal(minimum, 320, 'retain the Chat sizing contract');
+  assert.equal(chatCss['min-width'], `${minimum}px`);
+  assert.equal(chatCss['min-height'], `${Surface.CANVAS_VIEW_SIZES.chat.minHeight}px`);
+  assert.equal(chatCss['box-sizing'], 'border-box', 'placement measures the same outer box that is rendered');
+
+  for (const [room, expected] of [[200, 320], [319, 320], [320, 320], [330, 330], [340, 340], [359, 359], [360, 360], [380, 380], [420, 420], [600, 420]]) {
+    const size = Surface.canvasViewSize('chat', { width: room, height: 600 });
+    const placed = Surface.placeCanvasView({ size, safe: { left: 0, top: 0, right: room, bottom: 600 } });
+    assert.equal(size.width, expected, `calculated width with ${room}px of room`);
+    assert.equal(placed.width, expected, `placed width with ${room}px of room`);
+    assert.equal(placed.inView, room >= expected, `whether Chat fits in ${room}px of room`);
+  }
+
+  const geometryFunctions = compileFunction(`let cardZ = 0;\n${declaration('parsePxNumber')}\n${declaration('applyPersistentEntityGeometry')}\n${declaration('persistentEntityGeometry')}\nreturn { apply: applyPersistentEntityGeometry, read: persistentEntityGeometry };`, ['state'])({ cardFullscreen: null });
+  const entity = isChat => ({ style: {}, classList: { contains: name => isChat && name === 'egd-chat-card' } });
+  for (const width of [319, 320, 330, 340, 359, 360, 405]) {
+    const card = entity(true);
+    const saved = { x: 12, y: 34, width, height: 500, zIndex: 7 };
+    geometryFunctions.apply(card, saved);
+    assert.deepEqual(saved, { x: 12, y: 34, width, height: 500, zIndex: 7 }, 'restore does not mutate the saved record');
+    assert.equal(card.style.width, `${width}px`, `restored ${width}px width is not enlarged`);
+    assert.deepEqual(geometryFunctions.read(card), saved, `restored ${width}px geometry round-trips unchanged`);
+  }
+  const other = entity(false);
+  geometryFunctions.apply(other, { width: 330 });
+  assert.equal(other.style.width, '330px', 'non-Chat geometry is unchanged');
+});
+
 test('the empty-spot search keeps 24px from every View and stays inside the bounds it is given', () => {
   const card = { x: 0, y: 0, width: 200, height: 100 };
   assert.deepEqual(Surface.nearestFreeCanvasSpot({ width: 100, height: 50, target: { x: 100.4, y: 50 } }), { x: 100, y: 50 });
@@ -13917,7 +13948,7 @@ test('실행 프로젝트 chip reserves a one-line short label instead of the in
   const otherCharacters = button.textContent.length - fullWidthCharacters;
   const conservativeTextWidth = (fullWidthCharacters + otherCharacters / 2) * font;
   assert.ok(buttonMinimum - padding >= conservativeTextWidth, 'the six Korean glyphs plus a space fit at the actual 12px font');
-  for (const chatWidth of [360, 405]) {
+  for (const chatWidth of [320, 330, 340, 359, 360, 405]) {
     const composerWidth = chatWidth - 48;
     assert.ok(54 + 6 + buttonMinimum + 2 <= composerWidth, 'attach + gap + one-line project opener fit at Chat width ' + chatWidth);
   }

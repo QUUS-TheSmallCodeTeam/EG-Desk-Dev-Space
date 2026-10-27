@@ -30,9 +30,20 @@ export const QA_CHAT_ORIGIN_FILE_SOURCE_FILES = Object.freeze([
   'scripts/verify-firefox-mcp-chat-origin-file-flow.mjs', 'scripts/verify-firefox-mcp-chat-origin-file-flow.test.mjs',
 ]);
 const OVERLAY = fileURLToPath(new URL('../overlay/', import.meta.url));
-const APP_ROOT = fileURLToPath(new URL('../', import.meta.url)).replace(/\/$/, '');
+const APP_ROOT = path.resolve(fileURLToPath(new URL('../', import.meta.url)));
 const sha256 = bytes => createHash('sha256').update(bytes).digest('hex');
 const fail = message => { throw new Error(`QA fixture isolation: ${message}`); };
+
+// The fixture and its Firefox copy are created on the same host. Generate a
+// native-path check without relying on a privileged Gecko global. On Windows,
+// a root-relative path is not fully qualified, and device paths are not picker
+// results. The fixture server still selects and owns the actual target.
+function pickerAbsolutePathCheck(value) {
+  const absolute = process.platform === 'win32'
+    ? String.raw`/^(?:[A-Za-z]:[\\/]|(?:\\\\|\/\/)(?![?.](?:[\\/]|$))(?!(?:\.{1,2})(?:[\\/]|$))[^\\/]+[\\/](?!\.{1,2}(?:[\\/]|$))[^\\/]+(?:[\\/]|$))/.test(${value})`
+    : `${value}.startsWith('/')`;
+  return `typeof ${value} === 'string' && !/[\\u0000-\\u001f\\u007f]/.test(${value}) && ${absolute}`;
+}
 
 // Bootstrap validation only. The actual factory repeats its authoritative
 // gate on creation. It imports isolation, so importing it here would cycle.
@@ -171,7 +182,7 @@ export function transformProjectPickerResult(original, port) {
       const packet = await response.json();
       if (!response.ok || packet?.kind !== 'egdesk-project-file-picker-result'
           || packet.synthetic !== true || !(packet.selection === null
-          || (typeof packet.selection === 'string' && packet.selection.startsWith('/')))) {
+          || (${pickerAbsolutePathCheck('packet.selection')}))) {
         throw new Error('Owned QA picker result is unavailable; native picker is never a fallback');
       }
       return packet.selection;
@@ -223,8 +234,7 @@ export function transformRoomProjectPickerResult(original, port) {
       const packet = await response.json();
       if (!response.ok || packet?.kind !== 'egdesk-project-file-picker-result'
           || packet.synthetic !== true || !(packet.selection === null
-          || (typeof packet.selection === 'string' && packet.selection.startsWith('/')
-              && !/[\\u0000-\\u001f\\u007f]/.test(packet.selection)))) {
+          || (${pickerAbsolutePathCheck('packet.selection')}))) {
         throw new Error('Owned QA room picker result unavailable; no native fallback');
       }
       return packet.selection;
@@ -263,6 +273,7 @@ export function transformPortablePickerResults(original, port) {
       fail(`portable picker is not the reviewed native-result-only boundary: ${name}`);
     }
     const request = kind === 'open' ? "{ kind: 'open', accept }" : "{ kind: 'save', fileName, contentType }";
+    const basename = process.platform === 'win32' ? String.raw`chosen.path.split(/[\\/]/).at(-1)` : "chosen.path.split('/').at(-1)";
     const replacement = `    // Owned QA copy: only the native picker result is synthetic.
     if (signal?.aborted) return Promise.resolve({ cancelled: true });
     return fetch('http://127.0.0.1:${port}/__qa/portable-transfer/picker', {
@@ -280,8 +291,9 @@ export function transformPortablePickerResults(original, port) {
       const chosen = packet.result;
       if (!packet.error && chosen?.cancelled === true && Object.keys(chosen).length === 1) return { cancelled: true };
       if (!packet.error && chosen && Object.keys(chosen).length === 2 &&
-          typeof chosen.path === 'string' && chosen.path.startsWith('/') &&
-          typeof chosen.filename === 'string' && chosen.path.split('/').at(-1) === chosen.filename) {
+          ${pickerAbsolutePathCheck('chosen.path')} &&
+          typeof chosen.filename === 'string' && chosen.filename.length > 0 &&
+          chosen.filename !== '.' && chosen.filename !== '..' && ${basename} === chosen.filename) {
         return { path: chosen.path, filename: chosen.filename };
       }
       throw new Error('Invalid owned QA picker result; no native fallback');

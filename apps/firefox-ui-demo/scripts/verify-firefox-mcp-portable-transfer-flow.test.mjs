@@ -22,20 +22,121 @@ import { assertPortableEnvironment, assertPortableStoreInvariant, assertPortable
 const TOKEN = 'portable-verifier-unit-only-token';
 const ENV = { EGDESK_QA_PORTABLE_TRANSFER_FIXTURE: '1', EGDESK_QA_FIXTURE_TRANSPORT: '1',
   EGDESK_QA_REAL_TURN: '0', EGDESK_QA_FIXTURE_PORT: '49318', EGDESK_QA_FIXTURE_TOKEN: TOKEN };
-function setup(t, overrides = {}) {
-  const loader = createPrivateQaTempDirectory('egdesk-portable-verifier-loader-');
-  for (const name of LOADER_FILES) fs.writeFileSync(path.join(loader, name), `unit loader ${name}\n`, { mode: 0o600 });
-  const { profile } = bootstrapQaProfile({ loaderSource: loader });
-  const fixture = createPortableTransferFixture({ profile, token: TOKEN, env: { ...ENV, ...overrides } }), root = fixture.snapshot().root;
+const fixtureTest = (name, fn) => test(name,
+  { skip: process.platform === 'win32' ? 'portable fixture is not enabled on Windows' : false }, fn);
+function setup(t, overrides = {}, { makeFixture = createPortableTransferFixture, onDirectory = () => {} } = {}) {
+  const tempRoot = canonicalTempRoot(), directories = [];
+  const prefixes = new Set(['egdesk-portable-verifier-loader-', 'egdesk-chat-test-', 'egdesk-portable-transfer-']);
+  let fixture;
+  const track = (directory, prefix) => {
+    if (directories.some(item => item.directory === directory)) return;
+    assert.equal(path.dirname(directory), tempRoot);
+    assert.ok(path.basename(directory).startsWith(prefix));
+    const info = fs.lstatSync(directory);
+    assert.ok(info.isDirectory() && !info.isSymbolicLink());
+    directories.push({ directory, prefix, dev: info.dev, ino: info.ino });
+    onDirectory(directory, prefix);
+  };
+  // Register before any allocation, including ones whose constructors throw.
   t.after(() => {
-    fixture.dispose();
-    for (const [directory, prefix] of [[root, 'egdesk-portable-transfer-'], [profile, 'egdesk-chat-test-'], [loader, 'egdesk-portable-verifier-loader-']]) {
-      assert.equal(path.dirname(directory), canonicalTempRoot()); assert.equal(fs.realpathSync.native(directory), directory);
-      assert.ok(path.basename(directory).startsWith(prefix)); fs.rmSync(directory, { recursive: true });
+    try { fixture?.dispose(); } finally {
+      for (const { directory, prefix, dev, ino } of directories.slice().reverse()) {
+        const info = fs.lstatSync(directory, { throwIfNoEntry: false });
+        if (!info) continue;
+        assert.equal(path.dirname(directory), tempRoot);
+        assert.ok(path.basename(directory).startsWith(prefix));
+        assert.ok(info.isDirectory() && !info.isSymbolicLink() && info.dev === dev && info.ino === ino);
+        assert.equal(fs.realpathSync.native(directory), directory);
+        fs.rmSync(directory, { recursive: true });
+      }
     }
   });
-  return fixture;
+  // POSIX temp creation can succeed inside a constructor that later throws.
+  const mkdtemp = fs.mkdtempSync;
+  const capture = t.mock.method(fs, 'mkdtempSync', function(prefix, ...options) {
+    const directory = mkdtemp.call(fs, prefix, ...options);
+    if (typeof prefix === 'string' && path.dirname(prefix) === tempRoot && prefixes.has(path.basename(prefix))) {
+      track(directory, path.basename(prefix));
+    }
+    return directory;
+  });
+  try {
+    const loader = createPrivateQaTempDirectory('egdesk-portable-verifier-loader-');
+    track(loader, 'egdesk-portable-verifier-loader-');
+    for (const name of LOADER_FILES) fs.writeFileSync(path.join(loader, name), `unit loader ${name}\n`, { mode: 0o600 });
+    const { profile } = bootstrapQaProfile({ loaderSource: loader });
+    track(profile, 'egdesk-chat-test-');
+    fixture = makeFixture({ profile, token: TOKEN, env: { ...ENV, ...overrides } });
+    track(fixture.snapshot().root, 'egdesk-portable-transfer-');
+    return fixture;
+  } finally { capture.mock.restore(); }
 }
+
+fixtureTest('verifier setup cleans only owned temp directories after failures at every allocation stage', t => {
+  for (const [stage, expected] of [['loader-write', 1], ['profile-write', 2], ['fixture-validation', 2],
+    ['fixture-mkdir', 3], ['snapshot', 3]]) {
+    const cleanup = [], directories = [];
+    const context = { after: callback => cleanup.push(callback), mock: t.mock };
+    const options = { onDirectory: directory => directories.push(directory) };
+    let injected, disposed = 0;
+    if (stage === 'loader-write' || stage === 'profile-write') {
+      const write = fs.writeFileSync;
+      injected = t.mock.method(fs, 'writeFileSync', function(file, ...args) {
+        if (stage === 'loader-write' && directories[0] && path.dirname(file) === directories[0]
+            || stage === 'profile-write' && path.basename(file) === '.egdesk-dedicated-firefox-profile') {
+          throw new Error(`injected ${stage}`);
+        }
+        return write.call(fs, file, ...args);
+      });
+    } else if (stage === 'fixture-mkdir') {
+      const mkdir = fs.mkdirSync;
+      injected = t.mock.method(fs, 'mkdirSync', function(directory, ...args) {
+        if (path.basename(directory) === 'store' && path.basename(path.dirname(directory)).startsWith('egdesk-portable-transfer-')) {
+          throw new Error(`injected ${stage}`);
+        }
+        return mkdir.call(fs, directory, ...args);
+      });
+    } else if (stage === 'snapshot') {
+      options.makeFixture = args => {
+        const real = createPortableTransferFixture(args);
+        return { ...real, snapshot() { throw new Error('injected snapshot'); },
+          dispose() { disposed++; real.dispose(); } };
+      };
+    }
+    try {
+      const env = stage === 'fixture-validation' ? { EGDESK_QA_FIXTURE_PORT: '39218' } : {};
+      assert.throws(() => setup(context, env, options), stage === 'fixture-validation' ? /FIXTURE_PORT/ : /injected/);
+    } finally {
+      injected?.mock.restore();
+      assert.equal(cleanup.length, 1);
+      for (const callback of cleanup) callback();
+    }
+    assert.equal(directories.length, expected, stage);
+    for (const directory of directories) assert.equal(fs.existsSync(directory), false, stage);
+    if (stage === 'snapshot') assert.equal(disposed, 1);
+  }
+});
+
+fixtureTest('verifier cleanup refuses a replaced directory until its original identity is restored', t => {
+  const cleanup = [], directories = [];
+  const context = { after: callback => cleanup.push(callback), mock: t.mock };
+  setup(context, {}, { onDirectory: directory => directories.push(directory) });
+  const root = directories.at(-1), lstat = fs.lstatSync;
+  const changed = t.mock.method(fs, 'lstatSync', function(directory, ...args) {
+    const info = lstat.call(fs, directory, ...args);
+    return directory === root ? { ...info, ino: info.ino + 1,
+      isDirectory: () => info.isDirectory(), isSymbolicLink: () => info.isSymbolicLink() } : info;
+  });
+  try {
+    assert.throws(() => cleanup[0]());
+    assert.equal(fs.existsSync(root), true);
+  } finally {
+    changed.mock.restore();
+    cleanup[0]();
+  }
+  for (const directory of directories) assert.equal(fs.existsSync(directory), false);
+});
+
 async function request(fixture, method, route, body) {
   const req = Readable.from(body === undefined ? [] : [Buffer.from(JSON.stringify(body))]);
   Object.assign(req, { method, url: route, socket: { remoteAddress: '127.0.0.1' },
@@ -349,7 +450,7 @@ test('Settings notice captures reveal the exact subject rather than its adjacent
   assert.match(source, /await captureStatus\('profile-write-unknown-no-retry'\)/);
 });
 
-test('store receipt assertions reject changed Board head, unexpected activation, provider or output injection', t => {
+fixtureTest('store receipt assertions reject changed Board head, unexpected activation, provider or output injection', t => {
   const fixture = setup(t), before = fixture.snapshot();
   assert.equal(assertPortableStoreInvariant(before, before), true);
   const variants = [state => state.persisted.desk.boards[0].head_revision++,
@@ -373,7 +474,7 @@ async function attachmentExport(t) {
   return { state, converted, ui };
 }
 
-test('real saved-head converter excludes attachment records on the named node with an empty omission report', async t => {
+fixtureTest('real saved-head converter excludes attachment records on the named node with an empty omission report', async t => {
   const { state, converted, ui } = await attachmentExport(t);
   assert.deepEqual(converted.response.report.omitted, []);
   assert.deepEqual(converted.response.canvas.nodes.find(node => node.id === 'qa-file').egdesk,
@@ -381,7 +482,7 @@ test('real saved-head converter excludes attachment records on the named node wi
   assert.equal(assertPortableAttachmentOmission(state, converted, ui), true);
 });
 
-test('attachment proof rejects wrong or absent original node; unrelated report entries cannot substitute', async t => {
+fixtureTest('attachment proof rejects wrong or absent original node; unrelated report entries cannot substitute', async t => {
   const { state, converted, ui } = await attachmentExport(t);
   const variants = [row => { row.delegated = false; }, row => { row.method = 'POST'; },
     row => { row.path = '/v1/boards/another-board/export'; }, row => { row.status = 404; },
@@ -400,7 +501,7 @@ test('attachment proof rejects wrong or absent original node; unrelated report e
   }
 });
 
-test('attachment proof rejects original path or text leaks and missing or inaccurate exclusion notice', async t => {
+fixtureTest('attachment proof rejects original path or text leaks and missing or inaccurate exclusion notice', async t => {
   const { state, converted, ui } = await attachmentExport(t);
   const variants = [row => { row.response.canvas.nodes.find(node => node.id === 'qa-file').egdesk.sourceRef = { path: state.seed.importPath }; },
     row => { row.response.canvas.nodes.find(node => node.id === 'qa-file').runtimeState = { text: state.seed.importText }; },
@@ -417,7 +518,7 @@ test('attachment proof rejects original path or text leaks and missing or inaccu
   }
 });
 
-test('import proof reads real preview and confirmed SQLite draft with exact original Markdown', async t => {
+fixtureTest('import proof reads real preview and confirmed SQLite draft with exact original Markdown', async t => {
   const fixture = setup(t), before = fixture.snapshot();
   const body = { text: before.seed.importText, filename: before.seed.importFilename };
   const preview = await request(fixture, 'POST', '/profiles/import', { ...body, dryRun: true });
@@ -433,7 +534,7 @@ test('import proof reads real preview and confirmed SQLite draft with exact orig
   assert.throws(() => assertPortableImportedDraft(before, fixture.snapshot()), /strictly equal|exactly|profiles/);
 });
 
-test('pinned-export validator checks actual new head and exact old revision bytes; unit files are not UI proof', async t => {
+fixtureTest('pinned-export validator checks actual new head and exact old revision bytes; unit files are not UI proof', async t => {
   const fixture = setup(t), before = fixture.snapshot();
   const target = { profileId: before.seed.profileId, revision: '2', source: 'draft', text: '내보낼 Agent: Owned QA portable profile · 초안 버전 2' };
   assert.equal((await request(fixture, 'POST', '/__qa/portable-transfer/control', { operation: 'advance-profile-head', expectedHeadRevision: 2 })).status, 200);
@@ -447,7 +548,7 @@ test('pinned-export validator checks actual new head and exact old revision byte
   assert.throws(() => assertPortableExportFile(after, 'owned-pinned-v2.md', `${packet.value.text}changed`));
 });
 
-test('unknown/no-replay receipt validator rejects repeat export, file change and reenabled action', t => {
+fixtureTest('unknown/no-replay receipt validator rejects repeat export, file change and reenabled action', t => {
   const fixture = setup(t), before = fixture.snapshot();
   const sample = () => ({ state: structuredClone(before), ui: { transferState: 'unknown', transferButtons: [{ disabled: true }] } });
   assert.equal(assertPortableNoReplay(before, [sample(), sample(), sample()], 'unknown'), true);
@@ -460,7 +561,7 @@ test('unknown/no-replay receipt validator rejects repeat export, file change and
   }
 });
 
-test('missing-head proof requires actual Desk 404 and cannot stand in for a successful UI capture', async t => {
+fixtureTest('missing-head proof requires actual Desk 404 and cannot stand in for a successful UI capture', async t => {
   const fixture = setup(t), before = fixture.snapshot(), boardId = 'owned-native-ui-no-saved-head';
   const read = await request(fixture, 'GET', `/v1/boards/${boardId}`);
   assert.equal(read.status, 404);
@@ -504,7 +605,7 @@ async function duplicateFixture(t) {
   return { fixture, initial, before, uiBefore, commit };
 }
 
-test('duplicate proof verifies real v2 request, source provenance and new inactive draft v1 while head stays v3', async t => {
+fixtureTest('duplicate proof verifies real v2 request, source provenance and new inactive draft v1 while head stays v3', async t => {
   const h = await duplicateFixture(t);
   assert.equal(assertPortableDuplicateReady(h.before, h.uiBefore), true);
   const { after, uiAfter, id } = await h.commit();
@@ -515,7 +616,7 @@ test('duplicate proof verifies real v2 request, source provenance and new inacti
   assert.equal(assertPortableDuplicateNoReplay(after, Array.from({ length: 4 }, () => ({ state: after, ui: uiAfter })), h.uiBefore, id), true);
 });
 
-test('duplicate readiness rejects wrong or ambiguous displayed profile, pending/disabled command and pre-click effects', async t => {
+fixtureTest('duplicate readiness rejects wrong or ambiguous displayed profile, pending/disabled command and pre-click effects', async t => {
   const h = await duplicateFixture(t);
   const variants = [x => { x.ui.detailCount = 2; }, x => { x.ui.detailId = 'other'; },
     x => { x.ui.detailRevision = '3'; }, x => { x.ui.detailLifecycle = 'active'; },
@@ -532,7 +633,7 @@ test('duplicate readiness rejects wrong or ambiguous displayed profile, pending/
   }
 });
 
-test('duplicate validator rejects missing pin, head-v3 copy, extra fields, forged receipt and unrelated writes', async t => {
+fixtureTest('duplicate validator rejects missing pin, head-v3 copy, extra fields, forged receipt and unrelated writes', async t => {
   const h = await duplicateFixture(t), { after, uiAfter, id } = await h.commit();
   const call = state => state.requests.find(row => row.path.endsWith('/duplicate'));
   const variants = [state => { call(state).request = {}; }, state => { call(state).request.revision = 3; },
@@ -563,7 +664,7 @@ test('duplicate validator rejects missing pin, head-v3 copy, extra fields, forge
   assert.throws(() => assertPortableDuplicatedDraft(h.before, h.fixture.snapshot(), h.uiBefore, uiAfter));
 });
 
-test('duplicate UI/no-replay proof refuses original detail, changed room, inaccurate notice and a later second request', async t => {
+fixtureTest('duplicate UI/no-replay proof refuses original detail, changed room, inaccurate notice and a later second request', async t => {
   const h = await duplicateFixture(t), { after, uiAfter, id } = await h.commit();
   for (const alter of [ui => { ui.detailId = h.before.seed.profileId; }, ui => { ui.detailCount = 2; },
     ui => { ui.detailRevision = '2'; }, ui => { ui.detailLifecycle = 'active'; },
@@ -601,7 +702,7 @@ async function duplicateStageFixture(t) {
   return { ...h, actions, checks, options, clicks: () => clicks, ui: () => ui };
 }
 
-test('duplicate stage preserves all earlier transfer checks, pins the native command once, and captures exact notices', async t => {
+fixtureTest('duplicate stage preserves all earlier transfer checks, pins the native command once, and captures exact notices', async t => {
   const h = await duplicateStageFixture(t), proof = await runPortableDuplicateCase(h.options);
   assert.equal(h.clicks(), 1); assert.equal(proof.samples.length, 4); assert.equal(h.checks.length, 4);
   const selector = `[data-testid="settings-agent-duplicate"][data-profile-id="${h.before.seed.profileId}"][data-revision="2"][data-state="idle"]`;
@@ -620,7 +721,7 @@ test('duplicate stage preserves all earlier transfer checks, pins the native com
   assert.doesNotMatch(stage, /loopbackJson|fetch\(|profileRequest|\.click\(|\.focus\(|scrollIntoView/);
 });
 
-test('duplicate stage aborts stale bindings or deadline before click; ambiguous input is never replayed', async t => {
+fixtureTest('duplicate stage aborts stale bindings or deadline before click; ambiguous input is never replayed', async t => {
   for (const alter of [h => { h.ui().detailRevision = '3'; }, h => { h.ui().duplicate.disabled = true; },
     h => { h.ui().activeThreadId = 'changed-room'; }, h => { h.ui().roomAssignments[0].agentProfileId = 'another'; }]) {
     const h = await duplicateStageFixture(t);
@@ -638,7 +739,7 @@ test('duplicate stage aborts stale bindings or deadline before click; ambiguous 
   assert.equal(ambiguous.clicks(), 1); assert.equal(ambiguous.fixture.snapshot().duplicateEvents.length, 1);
 });
 
-test('R8 exact blocked Desk autosaves can intervene before and after duplication without weakening profile write counts', async t => {
+fixtureTest('R8 exact blocked Desk autosaves can intervene before and after duplication without weakening profile write counts', async t => {
   const h = await duplicateFixture(t);
   const autosave = () => request(h.fixture, 'PUT', '/v1/desk/current', { state: { cards: ['must-not-save'] }, parentGeneration: 1 });
   assert.equal((await autosave()).status, 403);
@@ -669,7 +770,7 @@ test('R8 exact blocked Desk autosaves can intervene before and after duplication
   assert.throws(() => assertPortableDuplicatedDraft(h.before, activated, h.uiBefore, uiAfter));
 });
 
-test('Desk autosave exception refuses successful, delegated, wrong-query, wrong-code or database-mutating requests', async t => {
+fixtureTest('Desk autosave exception refuses successful, delegated, wrong-query, wrong-code or database-mutating requests', async t => {
   const h = await duplicateFixture(t), { after, uiAfter, id } = await h.commit();
   assert.equal((await request(h.fixture, 'PUT', '/v1/desk/current', {})).status, 403);
   const blocked = h.fixture.snapshot();
@@ -697,7 +798,7 @@ test('Desk autosave exception refuses successful, delegated, wrong-query, wrong-
   }
 });
 
-test('duplicate stage tolerates only real rejected Desk PUT during post-click observation, not another click or write', async t => {
+fixtureTest('duplicate stage tolerates only real rejected Desk PUT during post-click observation, not another click or write', async t => {
   const h = await duplicateStageFixture(t);
   let pauses = 0;
   h.options.pause = async () => {
@@ -734,7 +835,7 @@ async function unknownFixture(t) {
   return { ...h, success, before, target, uiBefore, arm, commit };
 }
 
-test('unknown receipt proof requires real creation, exact synthetic provenance and original displayed v3 identity', async t => {
+fixtureTest('unknown receipt proof requires real creation, exact synthetic provenance and original displayed v3 identity', async t => {
   const h = await unknownFixture(t); await h.arm(h.target);
   const { after, uiAfter, id } = await h.commit();
   assert.equal(assertPortableUnknownCreated(h.before, after, h.uiBefore, uiAfter, h.target), id);
@@ -810,7 +911,7 @@ test('disabled-only navigation never relaxes ordinary target or wrong-profile sa
   assert.deepEqual(wrong.wheels, []);
 });
 
-test('unknown stage selects original via clicks, arms exact displayed v3, creates once, and probes disabled without a POST', async t => {
+fixtureTest('unknown stage selects original via clicks, arms exact displayed v3, creates once, and probes disabled without a POST', async t => {
   const h = await unknownFixture(t), actions = [], checks = [];
   let ui = { ...h.success.uiAfter, settingsId: h.uiBefore.settingsId }, posts = 0, probes = 0;
   const options = { readState: async () => h.fixture.snapshot(), readUi: async () => structuredClone(ui),
@@ -849,7 +950,7 @@ async function draftBackend(t, active = false) {
   return { fixture, id, profile, before, readProfile };
 }
 
-for (const active of [false, true]) test(`draft receipts bind actual GET/SQLite and distinguish changed PUT from unchanged revision (${active ? 'setup active2/head3' : 'full-flow inactive head3'})`, async t => {
+for (const active of [false, true]) fixtureTest(`draft receipts bind actual GET/SQLite and distinguish changed PUT from unchanged revision (${active ? 'setup active2/head3' : 'full-flow inactive head3'})`, async t => {
   const h = await draftBackend(t, active), body = portableDraftExpectedBody(h.profile), route = `/profiles/${h.id}/draft`;
   assert.equal(assertPortableDraftGet(h.before, h.profile), true);
   assert.equal(assertPortableDraftDelta(h.before, h.fixture.snapshot()), true);
@@ -876,7 +977,7 @@ for (const active of [false, true]) test(`draft receipts bind actual GET/SQLite 
     'The old inactive-only invariant is not weakened to admit a different setup seed');
 });
 
-test('draft delta rejects forged receipts, wrong base/ID/body, changed old/active rows and every unrelated mutation', async t => {
+fixtureTest('draft delta rejects forged receipts, wrong base/ID/body, changed old/active rows and every unrelated mutation', async t => {
   const h = await draftBackend(t, true), body = portableDraftExpectedBody(h.profile);
   await request(h.fixture, 'PUT', `/profiles/${h.id}/draft`, { body, expectedRevision: 3 });
   const profile = await h.readProfile(), after = h.fixture.snapshot();
@@ -1006,7 +1107,7 @@ async function draftStageFixture(t, active = false) {
   return { ...backend, options, actions, checks, ui, controls, focus, pending: () => pending, form: () => form };
 }
 
-for (const active of [false, true]) test(`native draft stage contract: cancel600/save800/reopen600/unchanged800, real backend (${active ? 'active2 setup' : 'original flow'})`, async t => {
+for (const active of [false, true]) fixtureTest(`native draft stage contract: cancel600/save800/reopen600/unchanged800, real backend (${active ? 'active2 setup' : 'original flow'})`, async t => {
   const h = await draftStageFixture(t, active), proof = await runPortableDraftEditCase(h.options);
   assert.deepEqual(h.actions.filter(row => row[0] === 'resize').map(row => row[1]), [600, 800, 600, 800]);
   assert.deepEqual(proof.buttons.map(row => row.height), [600, 800, 600, 800]); assert.equal(proof.samples.length, 4);
@@ -1030,7 +1131,7 @@ for (const active of [false, true]) test(`native draft stage contract: cancel600
   assert.match(proof.bindingEvidence, /private form.*unexposed/); assert.match(proof.conflict, /excluded/);
 });
 
-test('draft stage keeps exact rejected Desk autosaves separate from two explicit draft PUT and earlier POST', async t => {
+fixtureTest('draft stage keeps exact rejected Desk autosaves separate from two explicit draft PUT and earlier POST', async t => {
   const h = await draftStageFixture(t), original = h.options.click;
   h.options.click = async selector => {
     await original(selector);
@@ -1044,7 +1145,7 @@ test('draft stage keeps exact rejected Desk autosaves separate from two explicit
   assert.deepEqual(state.persisted.desk, proof.before.persisted.desk);
 });
 
-test('draft stage rejects lost pending values/retained focus and never replays ambiguous native save', async t => {
+fixtureTest('draft stage rejects lost pending values/retained focus and never replays ambiguous native save', async t => {
   for (const failure of ['pending', 'focus', 'save-unknown']) {
     const h = await draftStageFixture(t), original = h.options.click;
     h.options.click = async selector => {
@@ -1060,7 +1161,7 @@ test('draft stage rejects lost pending values/retained focus and never replays a
   }
 });
 
-test('draft input refuses stale/foreign/covered/lost focus or selection before typing, with no retry/fallback', async t => {
+fixtureTest('draft input refuses stale/foreign/covered/lost focus or selection before typing, with no retry/fallback', async t => {
   for (const failure of ['deadline', 'foreign', 'covered', 'focus', 'selection', 'native-type']) {
     const h = await draftStageFixture(t), context = h.ui();
     await h.options.click('[data-testid="settings-agent-detail"] .egd-settings-detail-actions > button:first-child');
@@ -1084,7 +1185,7 @@ test('draft input refuses stale/foreign/covered/lost focus or selection before t
   }
 });
 
-test('draft form contract rejects ambiguous/oversized rows, errors/busy/changed binding and unavailable controls', async t => {
+fixtureTest('draft form contract rejects ambiguous/oversized rows, errors/busy/changed binding and unavailable controls', async t => {
   const h = await draftStageFixture(t, true), context = h.ui();
   await h.options.click('[data-testid="settings-agent-detail"] .egd-settings-detail-actions > button:first-child');
   const good = h.ui(); assert.equal(assertPortableDraftForm(good, h.profile, context), true);
@@ -1172,7 +1273,7 @@ test('new draft stage follows every old receipt assertion and cannot submit PUT/
   assert.match(source, /assert\.equal\(proof\.initial\.seed\.profileVersion, 'head2-draft'/);
 });
 
-test('failed retained-focus assertion preserves attached proof and bounded before/after removal evidence', async t => {
+fixtureTest('failed retained-focus assertion preserves attached proof and bounded before/after removal evidence', async t => {
   const h = await draftStageFixture(t), attached = { draftEdit: {} }, actionTrace = [], originalClick = h.options.click, originalReach = h.options.reach;
   h.options.proof = attached.draftEdit; h.options.actionTrace = actionTrace;
   h.options.readUi = async () => {
@@ -1210,7 +1311,7 @@ test('failed retained-focus assertion preserves attached proof and bounded befor
   assert.equal(h.fixture.snapshot().requests.filter(row => row.method === 'PUT' && row.path.endsWith('/draft')).length, 0);
 });
 
-test('failed tone-focus assertion preserves bounded existing-read evidence before rejection without another click', async t => {
+fixtureTest('failed tone-focus assertion preserves bounded existing-read evidence before rejection without another click', async t => {
   const h = await draftStageFixture(t), proof = {}, actionTrace = [], originalClick = h.options.click, originalReach = h.options.reach;
   const group = 'settings-owned-profile-tone', button = `${group}-warm`;
   h.options.proof = proof; h.options.actionTrace = actionTrace;

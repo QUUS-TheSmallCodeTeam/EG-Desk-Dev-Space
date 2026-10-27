@@ -55,6 +55,26 @@ test('fixture config is explicit, loopback only, never 39218; real-provider defa
   }
 });
 
+test('task and origin source root has no trailing separator for Windows drive and UNC module URLs', () => {
+  // Evaluate the actual root initializer with Windows URL/path semantics;
+  // this does not access either simulated Windows filesystem location.
+  const source = fs.readFileSync(new URL('./egdesk-qa-fixture-isolation.mjs', import.meta.url), 'utf8');
+  const initializer = source.match(/^const APP_ROOT = (.+);$/m)?.[1];
+  assert.ok(initializer);
+  const evaluate = new Function('path', 'fileURLToPath', 'moduleUrl',
+    `return ${initializer.replaceAll('import.meta.url', 'moduleUrl')};`);
+  for (const [moduleUrl, expectedRoot] of [
+    ['file:///C:/repo/EG%20Desk/apps/firefox-ui-demo/scripts/egdesk-qa-fixture-isolation.mjs',
+      String.raw`C:\repo\EG Desk\apps\firefox-ui-demo`],
+    ['file://server/share/repo/apps/firefox-ui-demo/scripts/egdesk-qa-fixture-isolation.mjs',
+      String.raw`\\server\share\repo\apps\firefox-ui-demo`],
+  ]) {
+    const root = evaluate(path.win32, url => fileURLToPath(url, { windows: true }), moduleUrl);
+    assert.equal(root, expectedRoot);
+    assert.ok(path.win32.join(root, 'scripts', 'egdesk-task-gate-fixture.mjs').startsWith(root + path.win32.sep));
+  }
+});
+
 test('Task opt-in binds four unchanged QA sources and existing real runtime fingerprints without injecting those sources', t => {
   assert.deepEqual(QA_TASK_GATE_SOURCE_FILES, ['scripts/egdesk-task-gate-fixture.mjs', 'scripts/egdesk-task-gate-fixture.test.mjs',
     'scripts/verify-firefox-mcp-task-gate-flow.mjs', 'scripts/verify-firefox-mcp-task-gate-flow.test.mjs']);
@@ -256,6 +276,24 @@ function roomPickerParts(source) {
     functionSource: source.slice(start, to + '\n  }'.length) };
 }
 
+// Only source generation is simulated. The generated picker runs after the
+// real process.platform has been restored and does not touch the filesystem.
+function transformOnPlatform(platform, transform, source) {
+  const descriptor = Object.getOwnPropertyDescriptor(process, 'platform');
+  try {
+    Object.defineProperty(process, 'platform', { ...descriptor, value: platform });
+    return transform(source, 39220);
+  } finally {
+    Object.defineProperty(process, 'platform', descriptor);
+  }
+}
+
+function transformedPicker(source, name, response) {
+  const match = source.match(new RegExp(`  (?:async )?function ${name}\\([^\\n]*\\) \\{[\\s\\S]*?\\n  \\}`));
+  assert.ok(match, `transformed ${name} must exist`);
+  return new Function('fetch', `return (${match[0]});`)(async () => response);
+}
+
 test('room picker transform replaces exactly one reviewed OS-result body and leaves all surrounding real flows byte-identical', () => {
   const original = fs.readFileSync(path.join(overlay, QA_ROOM_PROJECT_PICKER_FILE), 'utf8');
   const ordinary = transformQaFixtureSource(QA_ROOM_PROJECT_PICKER_FILE, original, 39220);
@@ -298,6 +336,34 @@ test('room picker body returns only string/null and rejects errors or malformed 
       calls++; if (response instanceof Error) throw response; return response;
     });
     await assert.rejects(picker()); assert.equal(calls, 1, 'no retry, fallback or alternate input path');
+  }
+});
+
+test('project and room picker results use the generating platform absolute-path rules', async () => {
+  const project = fs.readFileSync(path.join(overlay, QA_PROJECT_PICKER_FILE), 'utf8');
+  const room = fs.readFileSync(path.join(overlay, QA_ROOM_PROJECT_PICKER_FILE), 'utf8');
+  const variants = [
+    ['darwin', ['/owned/qa/방 전용 폴더'], ['relative', String.raw`C:\owned\qa`, String.raw`\\server\share\qa`]],
+    ['win32', [String.raw`C:\owned\qa`, 'C:/owned/qa', String.raw`\\server\share\qa`, '//server/share/qa'],
+      ['relative', '/root-relative', String.raw`\root-relative`, String.raw`C:relative`, String.raw`\\server`,
+        String.raw`\\server` + String.fromCharCode(92), String.raw`\\?\C:\owned`,
+        String.raw`\\.\pipe\owned`, String.raw`\\server\..\owned`]],
+  ];
+  for (const [platform, accepted, rejected] of variants) {
+    for (const [source, transform, name] of [[project, transformProjectPickerResult, 'pickNativeFileDirectory'],
+      [room, transformRoomProjectPickerResult, 'pickNativeRoomProjectDirectory']]) {
+      const text = transformOnPlatform(platform, transform, source).text;
+      for (const selection of [null, ...accepted]) {
+        const picker = transformedPicker(text, name, { ok: true, json: async () =>
+          ({ kind: 'egdesk-project-file-picker-result', synthetic: true, selection }) });
+        assert.equal(await picker(), selection, `${platform} ${name} accepts ${selection}`);
+      }
+      for (const selection of [...rejected, '/owned/\nqa']) {
+        const picker = transformedPicker(text, name, { ok: true, json: async () =>
+          ({ kind: 'egdesk-project-file-picker-result', synthetic: true, selection }) });
+        await assert.rejects(picker(), undefined, `${platform} ${name} rejects ${selection}`);
+      }
+    }
   }
 });
 
@@ -457,6 +523,59 @@ test('portable picker source transform replaces exactly two native-result bodies
   assert.equal(transformQaFixtureSource(QA_PORTABLE_PICKER_FILE, portablePickerSpecimen, 39220).text, portablePickerSpecimen);
   assert.equal(transformQaFixtureSource(QA_PORTABLE_PICKER_FILE, portablePickerSpecimen, 39220,
     { portableTransferFixture: true }).replacements.osPickerResultBoundaries, 2);
+});
+
+test('portable open/save picker results validate absolute paths and filenames for each generating platform', async () => {
+  const actualSource = fs.readFileSync(path.join(overlay, QA_PORTABLE_PICKER_FILE), 'utf8');
+  const variants = [
+    ['darwin', [['/owned/input.md', 'input.md']],
+      [['relative/input.md', 'input.md'], [String.raw`C:\owned\input.md`, 'input.md']]],
+    ['win32', [[String.raw`C:\owned\input.md`, 'input.md'], ['C:/owned/input.md', 'input.md'],
+      [String.raw`\\server\share\owned\input.md`, 'input.md'], ['//server/share/owned/input.md', 'input.md']],
+    [['/root-relative/input.md', 'input.md'], [String.raw`C:relative\input.md`, 'input.md'],
+      [String.raw`\root-relative\input.md`, 'input.md'], [String.raw`\\server`, 'server'],
+      [String.raw`\\?\C:\owned\input.md`, 'input.md'], [String.raw`\\.\pipe\input.md`, 'input.md']]],
+  ];
+  for (const source of [portablePickerSpecimen, actualSource]) {
+    for (const [platform, accepted, rejected] of variants) {
+      const text = transformOnPlatform(platform, transformPortablePickerResults, source).text;
+      for (const [name, operation, args] of [['pickNativeTextOpenFile', 'open', { accept: '.md' }],
+        ['pickNativeTextSaveFile', 'save', { fileName: 'input.md', contentType: 'text/markdown; charset=utf-8' }]]) {
+        const make = result => transformedPicker(text, name, { ok: true, json: async () =>
+          ({ kind: 'egdesk-portable-picker-result', operation, synthetic: true, result }) });
+        assert.deepEqual(await make({ cancelled: true })(args), { cancelled: true });
+        for (const [chosenPath, filename] of accepted) {
+          assert.deepEqual(await make({ path: chosenPath, filename })(args), { path: chosenPath, filename },
+            `${platform} ${name} accepts ${chosenPath}`);
+        }
+        for (const [chosenPath, filename] of [...rejected, ...accepted.map(([chosenPath]) => [chosenPath, 'other.md']),
+          ['/owned/\ninput.md', 'input.md'], ['', ''], ['/owned/', ''], ['/owned/..', '..']]) {
+          await assert.rejects(make({ path: chosenPath, filename })(args), undefined,
+            `${platform} ${name} rejects ${chosenPath}`);
+        }
+        await assert.rejects(make({ path: accepted[0][0], filename: accepted[0][1], extra: true })(args));
+        await assert.rejects(make({ cancelled: true, path: accepted[0][0] })(args));
+        const valid = { kind: 'egdesk-portable-picker-result', operation, synthetic: true,
+          result: { path: accepted[0][0], filename: accepted[0][1] } };
+        for (const packet of [{ ...valid, kind: 'untrusted' }, { ...valid, operation: operation === 'open' ? 'save' : 'open' },
+          { ...valid, synthetic: false }, { ...valid, error: 'unexpected' }]) {
+          const picker = transformedPicker(text, name, { ok: true, json: async () => packet });
+          await assert.rejects(picker(args));
+        }
+        const refused = transformedPicker(text, name, { ok: false, json: async () => valid });
+        await assert.rejects(refused(args));
+        const exists = transformedPicker(text, name, { ok: true, json: async () =>
+          ({ kind: 'egdesk-portable-picker-result', operation, synthetic: true, error: 'EEXIST' }) });
+        if (operation === 'save') await assert.rejects(exists(args), { code: 'EEXIST' });
+        else await assert.rejects(exists(args));
+        let calls = 0;
+        const match = text.match(new RegExp(`  (?:async )?function ${name}\\([^\\n]*\\) \\{[\\s\\S]*?\\n  \\}`));
+        const cancelled = new Function('fetch', `return (${match[0]});`)(() => { calls++; throw new Error('unexpected fetch'); });
+        assert.deepEqual(await cancelled({ ...args, signal: { aborted: true } }), { cancelled: true });
+        assert.equal(calls, 0);
+      }
+    }
+  }
 });
 
 test('portable picker source missing/duplicate/changed boundaries fail instead of installing fake product glue', () => {

@@ -7,7 +7,7 @@ import childProcess from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { DatabaseSync } from 'node:sqlite';
 import { Readable } from 'node:stream';
-import test from 'node:test';
+import nodeTest from 'node:test';
 import { createPortableTransferFixture, portableTransferFixtureEnabled, assertPortableBoardCatalogSeed } from './egdesk-portable-transfer-fixture.mjs';
 import { bootstrapQaProfile, canonicalTempRoot, LOADER_FILES } from './egdesk-chat-qa-profile.mjs';
 import { createPrivateQaTempDirectory } from './egdesk-qa-platform.mjs';
@@ -19,24 +19,122 @@ const ENV = { EGDESK_QA_PORTABLE_TRANSFER_FIXTURE: '1', EGDESK_QA_FIXTURE_TRANSP
   EGDESK_QA_REAL_TURN: '0', EGDESK_QA_FIXTURE_PORT: '49318' };
 const sha256 = value => createHash('sha256').update(value).digest('hex');
 const ACTIVE_DRAFT = { EGDESK_QA_PORTABLE_TRANSFER_PROFILE_VERSION: 'head3-active2' };
+// Apart from the explicit Windows guard, tests here need the unsupported fixture.
+const test = (name, fn) => nodeTest(name,
+  { skip: process.platform === 'win32' ? 'portable fixture is not enabled on Windows' : false }, fn);
 
-function setup(t, env = {}) {
-  const loader = createPrivateQaTempDirectory('egdesk-portable-loader-');
-  for (const name of LOADER_FILES) fs.writeFileSync(path.join(loader, name), `unit loader ${name}\n`, { mode: 0o600 });
-  const { profile } = bootstrapQaProfile({ loaderSource: loader });
-  const fixture = createPortableTransferFixture({ profile, token: TOKEN, env: { ...ENV, ...env } });
-  const root = fixture.snapshot().root;
+function setup(t, env = {}, { makeFixture = createPortableTransferFixture, onDirectory = () => {} } = {}) {
+  const tempRoot = canonicalTempRoot(), directories = [];
+  const prefixes = new Set(['egdesk-portable-loader-', 'egdesk-chat-test-', 'egdesk-portable-transfer-']);
+  let fixture;
+  const track = (directory, prefix) => {
+    if (directories.some(item => item.directory === directory)) return;
+    assert.equal(path.dirname(directory), tempRoot);
+    assert.ok(path.basename(directory).startsWith(prefix));
+    const info = fs.lstatSync(directory);
+    assert.ok(info.isDirectory() && !info.isSymbolicLink());
+    directories.push({ directory, prefix, dev: info.dev, ino: info.ino });
+    onDirectory(directory, prefix);
+  };
+  // Register before any allocation, including ones whose constructors throw.
   t.after(() => {
-    fixture.dispose();
-    for (const [directory, prefix] of [[root, 'egdesk-portable-transfer-'], [profile, 'egdesk-chat-test-'], [loader, 'egdesk-portable-loader-']]) {
-      assert.equal(path.dirname(directory), canonicalTempRoot());
-      assert.equal(fs.realpathSync.native(directory), directory);
-      assert.ok(path.basename(directory).startsWith(prefix));
-      fs.rmSync(directory, { recursive: true });
+    try { fixture?.dispose(); } finally {
+      for (const { directory, prefix, dev, ino } of directories.slice().reverse()) {
+        const info = fs.lstatSync(directory, { throwIfNoEntry: false });
+        if (!info) continue;
+        assert.equal(path.dirname(directory), tempRoot);
+        assert.ok(path.basename(directory).startsWith(prefix));
+        assert.ok(info.isDirectory() && !info.isSymbolicLink() && info.dev === dev && info.ino === ino);
+        assert.equal(fs.realpathSync.native(directory), directory);
+        fs.rmSync(directory, { recursive: true });
+      }
     }
   });
-  return fixture;
+  // POSIX temp creation can succeed inside a constructor that later throws.
+  const mkdtemp = fs.mkdtempSync;
+  const capture = t.mock.method(fs, 'mkdtempSync', function(prefix, ...options) {
+    const directory = mkdtemp.call(fs, prefix, ...options);
+    if (typeof prefix === 'string' && path.dirname(prefix) === tempRoot && prefixes.has(path.basename(prefix))) {
+      track(directory, path.basename(prefix));
+    }
+    return directory;
+  });
+  try {
+    const loader = createPrivateQaTempDirectory('egdesk-portable-loader-');
+    track(loader, 'egdesk-portable-loader-');
+    for (const name of LOADER_FILES) fs.writeFileSync(path.join(loader, name), `unit loader ${name}\n`, { mode: 0o600 });
+    const { profile } = bootstrapQaProfile({ loaderSource: loader });
+    track(profile, 'egdesk-chat-test-');
+    fixture = makeFixture({ profile, token: TOKEN, env: { ...ENV, ...env } });
+    track(fixture.snapshot().root, 'egdesk-portable-transfer-');
+    return fixture;
+  } finally { capture.mock.restore(); }
 }
+
+test('setup cleans only owned temp directories after failures at every allocation stage', t => {
+  for (const [stage, expected] of [['loader-write', 1], ['profile-write', 2], ['fixture-validation', 2],
+    ['fixture-mkdir', 3], ['snapshot', 3]]) {
+    const cleanup = [], directories = [];
+    const context = { after: callback => cleanup.push(callback), mock: t.mock };
+    const options = { onDirectory: directory => directories.push(directory) };
+    let injected, disposed = 0;
+    if (stage === 'loader-write' || stage === 'profile-write') {
+      const write = fs.writeFileSync;
+      injected = t.mock.method(fs, 'writeFileSync', function(file, ...args) {
+        if (stage === 'loader-write' && directories[0] && path.dirname(file) === directories[0]
+            || stage === 'profile-write' && path.basename(file) === '.egdesk-dedicated-firefox-profile') {
+          throw new Error(`injected ${stage}`);
+        }
+        return write.call(fs, file, ...args);
+      });
+    } else if (stage === 'fixture-mkdir') {
+      const mkdir = fs.mkdirSync;
+      injected = t.mock.method(fs, 'mkdirSync', function(directory, ...args) {
+        if (path.basename(directory) === 'store' && path.basename(path.dirname(directory)).startsWith('egdesk-portable-transfer-')) {
+          throw new Error(`injected ${stage}`);
+        }
+        return mkdir.call(fs, directory, ...args);
+      });
+    } else if (stage === 'snapshot') {
+      options.makeFixture = args => {
+        const real = createPortableTransferFixture(args);
+        return { ...real, snapshot() { throw new Error('injected snapshot'); },
+          dispose() { disposed++; real.dispose(); } };
+      };
+    }
+    try {
+      const env = stage === 'fixture-validation' ? { EGDESK_QA_FIXTURE_PORT: '39218' } : {};
+      assert.throws(() => setup(context, env, options), stage === 'fixture-validation' ? /FIXTURE_PORT/ : /injected/);
+    } finally {
+      injected?.mock.restore();
+      assert.equal(cleanup.length, 1);
+      for (const callback of cleanup) callback();
+    }
+    assert.equal(directories.length, expected, stage);
+    for (const directory of directories) assert.equal(fs.existsSync(directory), false, stage);
+    if (stage === 'snapshot') assert.equal(disposed, 1);
+  }
+});
+
+test('cleanup refuses a replaced directory and removes the original only after its identity is restored', t => {
+  const cleanup = [], directories = [];
+  const context = { after: callback => cleanup.push(callback), mock: t.mock };
+  setup(context, {}, { onDirectory: directory => directories.push(directory) });
+  const root = directories.at(-1), lstat = fs.lstatSync;
+  const changed = t.mock.method(fs, 'lstatSync', function(directory, ...args) {
+    const info = lstat.call(fs, directory, ...args);
+    return directory === root ? { ...info, ino: info.ino + 1,
+      isDirectory: () => info.isDirectory(), isSymbolicLink: () => info.isSymbolicLink() } : info;
+  });
+  try {
+    assert.throws(() => cleanup[0]());
+    assert.equal(fs.existsSync(root), true);
+  } finally {
+    changed.mock.restore();
+    cleanup[0]();
+  }
+  for (const directory of directories) assert.equal(fs.existsSync(directory), false);
+});
 
 // In-memory HTTP request/response streams only: never a server or socket.
 async function request(fixture, method, route, body, options = {}) {
@@ -74,6 +172,29 @@ function assertDraftTrace(trace, payload, response, before, after) {
   assert.deepEqual(trace.response, response.body); assert.equal(trace.responseSha256, sha256(response.text));
   assert.deepEqual(trace.before, before.persisted); assert.deepEqual(trace.after, after.persisted);
 }
+
+nodeTest('Windows keeps the no-process portable fixture lane disabled before export evidence',
+  { skip: process.platform !== 'win32' }, t => {
+    assert.equal(process.getuid, undefined);
+    const loader = createPrivateQaTempDirectory('egdesk-portable-loader-');
+    t.after(() => {
+      assert.equal(path.dirname(loader), canonicalTempRoot());
+      assert.equal(fs.realpathSync.native(loader), loader);
+      fs.rmSync(loader, { recursive: true });
+    });
+    for (const name of LOADER_FILES) fs.writeFileSync(path.join(loader, name), `unit loader ${name}\n`, { mode: 0o600 });
+    const { profile } = bootstrapQaProfile({ loaderSource: loader });
+    t.after(() => {
+      assert.equal(path.dirname(profile), canonicalTempRoot());
+      assert.equal(fs.realpathSync.native(profile), profile);
+      fs.rmSync(profile, { recursive: true });
+    });
+    const prefs = path.join(profile, 'prefs.js');
+    assert.equal(fs.existsSync(prefs), false);
+    assert.throws(() => createPortableTransferFixture({ profile, token: TOKEN, env: ENV }),
+      /Portable fixture no-process lane is not enabled on Windows/);
+    assert.equal(fs.existsSync(prefs), false);
+  });
 
 test('explicit exclusive opt-in, canonical marked profile and token are checked before new fixture writes', t => {
   const fixture = setup(t), profile = fixture.snapshot().profile;
