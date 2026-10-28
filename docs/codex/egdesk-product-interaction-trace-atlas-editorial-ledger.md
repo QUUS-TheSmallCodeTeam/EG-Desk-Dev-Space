@@ -199,6 +199,8 @@ HUM-DESK-001과 HUM-AGENT-001은 결정됐고 HUM-READ-001은 별도 사용자 �
 <a id="hum-code-001"></a>
 #### HUM-CODE-001 — 사람 대상 코딩 UX와 검증 완료 기준
 
+- **원본 저장의 임시 지원 방식 — 확인 필요(2026-10-29)**: [10월 24일 D-X1·D-X2](../references/reference-adoption-map.md)는 사용자가 누르는 원본 저장·변경 되돌리기를 허용한다. 기존 [파일 저장 안전 계약](../../ideas/confirmed/EGDESK_INTERACTION_AND_ORCHESTRATION_CONTRACT.md#impl-files)은 외부 쓰기와의 경합까지 보호할 수 없는 경우 작업사본·새 파일 저장으로 제한한다. 현재 일반 로컬 파일 경로는 저장 직전에 내용을 비교하지만 비교와 파일 교체 사이에 다른 앱이 쓰는 경우까지 배제하지 못한다. 실제 사용자 파일 손실이 발생했다는 뜻은 아니다.
+- **추가 질문**: 강한 경합 보호가 검증되기 전에도 일반 편집기처럼 저장 직전 비교를 거친 원본 저장·되돌리기를 제공할 것인가, 아니면 그동안은 작업사본과 새 파일 저장만 제공할 것인가? 앞의 선택은 아주 짧은 동시 쓰기 경합의 잔여 위험을 수용하고, 뒤의 선택은 기존에 승인한 원본 편집 사용성을 제한한다. 이번 점검에서는 둘 중 하나로 자동 결정하거나 기존 원본 저장을 제거하지 않았다. 구현의 추가 보호와 합성 파일 경합 시험은 별도로 계속할 수 있다.
 - **추천·대안**: [파일 형식별 출시 지원 비교](../references/design-synthesis/egdesk-ux-realization-proposals.md#decision-files)
 - **질문**: 각 파일 형식의 보기·AI 판독·직접 편집·Snapshot에서 첫 지원으로 약속할 결과는 무엇인가? 최종 편집 경험에서 외부 앱 연결로 충족 가능한 형식과 Desk 안에서 편집이 완결되어야 하는 형식은 무엇인가? 첫 지원 순서와 최종 기능 범위는 별개다.
 - **관련 후보**: [파일 형식별 보기·판독·편집·Snapshot 지원](../references/design-synthesis/egdesk-capability-scenario-connected-agent-work.md#needs-file-support). 일반 문서·표·이미지의 지원 범위도 함께 정하며 모든 형식 편집을 전제하지 않는다.

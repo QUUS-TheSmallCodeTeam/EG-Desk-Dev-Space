@@ -1,17 +1,20 @@
 # EG-Desk 비전 Gap 원장
 
-**기준일**: 2026-10-27 (최초 조사 코드 기준 `bebe45c`, 상태 표 집계는 `5760981`까지. 그 이후 연결·검증은 아래 날짜별 체크포인트에 기록. 작업 브랜치 `claude/vision-gap-20261024`)
+**기준일**: 2026-10-29 (최초 조사 코드 기준 `bebe45c`, 상태 표는 `5760981` 집계에 `d18ece0`의 CODE-07 일부 전환을 반영. 나머지 후속 연결·검증은 아래 날짜별 체크포인트에 기록. 작업 브랜치 `claude/vision-gap-20261024`)
 
 **정본 백로그**: [EGDESK_PRODUCT_VISION_AND_DEV_TODO.md](./EGDESK_PRODUCT_VISION_AND_DEV_TODO.md)  
 **범위**: 비전 문서의 미체크 항목 + 2026-10-24 대표님 추가 목표(기능·UI/UX·디자인 전부, Codex+Claude 구독 지원, 브라우저 제어, 컴퓨터 사용, Agent 캐릭터 설정)
 
-총 95개 항목 — 없음 12 · 일부 52 · 완료 31 · 미확인 0 (아래 영역 표의 상태 열을 2026-10-24 `5760981`까지의 진행 기록 반영 뒤 다시 센 값. `d7aac51` 기준은 없음 17 · 일부 47 · 완료 31. 그 뒤 CHAT-03·CHAT-10·CU-01·CU-03·CODE-02가 helper·모듈만으로 없음 → 일부가 됐고, 완료로 바뀐 항목은 없다. 최초 조사 때는 없음 45 · 일부 47 · 완료 2 · 미확인 1).
+총 95개 항목 — 없음 11 · 일부 53 · 완료 31 · 미확인 0 (영역 표의 상태 열 집계. `5760981` 때 없음 12 · 일부 52 · 완료 31이었으며, 이번에 CODE-07의 프로젝트 File 진입을 연결·격리 검증해 일부로 바꿨다. 나머지 항목 전체를 재검증한 수치는 아니다. 최초 조사 때는 없음 45 · 일부 47 · 완료 2 · 미확인 1).
 상태는 처음에 코드·git 기록과 대조해 판별했다(읽기 전용 조사, 테스트·Firefox 미실행). 그 뒤 바뀐 것은 진행 기록에 근거를 남겼다. 체크박스가 아니라 이 원장의 상태 열이 현재 판단이다. '일부(helper·모듈)'는 helper나 순수 모듈만 있고 화면 연결 전이라는 뜻이다.
 
 ## 진행 기록
 
 | 날짜 | 항목 | 상태 변화 | 근거 |
 |---|---|---|---|
+| 2026-10-29 | CODE-07 IDE 프로젝트 File 진입·File 입력 보존 | 없음 → 일부 | `d18ece0`. 선택 Board의 프로젝트를 확인해 File을 열거나 같은 연결의 File을 재사용한다. 지연 응답·Board 전환·카드 선택 A→B→A가 최신 화면을 덮지 않도록 검사한다. Firefox 모듈의 전역 타이머 부재로 편집한 작업사본이 갱신되지 않던 오류도 수정했다. 관련 중앙 검사 944/944, 격리 Firefox에서 실제 키 입력 뒤 작업사본 갱신 HTTP 200·revision 1, 화면 밖 File 재진입 후 제목 9/9 지점 표시와 텍스트·선택 유지, 합성 원본 해시 불변을 확인했다. 폴더 선택은 합성 경계이며 실제 OS 선택기·사용자 원본 저장·provider 실행은 미검증이다. Terminal·검사·Agent 요청은 IDE 클릭만으로 시작하지 않는다. |
+| 2026-10-29 | Browser의 Firefox 자료 가져오기·북마크·방문 기록 진입 | 화면 연결 및 격리 검증 | `6263e88`. Browser `[더보기]`에서 Firefox 가져오기 창과 자료 창을 연다. 자료 창의 주소 선택은 Desk 카드로 연결하고 URL fragment를 보존한다. 집중 중인 같은 카드의 카메라는 유지하고, 뒤에서 여는 카드는 현재 화면을 이동시키지 않는다. 중앙 집중 검사 51/51과 합성 자료를 쓴 headless Firefox 핵심·창 소유권·파일 열기 차단 3개 시나리오 통과. 가져오기 마법사는 합성 migrator만 확인했다. 실제 Chrome 개인 자료·로그인 세션 이전, 전면 OS 동작 및 Windows·Linux 실행은 미검증이다. `.egdesk`는 별도 경로이며 이번 시험은 그 경로를 호출하지 않는지만 확인했다. headless 버튼 모양의 CSS 차이는 디자인 승인과 구분해 추가 확인 중이다. |
+| 2026-10-29 | AGENT-02 이미지 아바타 보존, SUB-05 Claude 상태 표시, 최초 Codex 로그인 복귀 | 보존·표시 수정 및 시험 보강 | `8c2048d`는 다른 Profile 설정을 저장할 때 기존 이미지 아바타 참조를 유지한다. `32bb53a`는 고정된 Claude 준비 중 문구 대신 브리지가 마지막으로 보고한 설치·버전·로그인 상태를 표시하며, 미확인·연결 끊김을 구별한다. 새 로그인이나 provider 실행을 시작하지 않는다. `13b6994`는 합성 최초 Codex 로그인 취소·성공 후 같은 방의 초안을 유지하고 명시적 전송 전 POST가 없음을 검증한다. 이 회차에 실제 계정 로그인이나 모델 응답을 새로 확인한 것은 아니다. |
 | 2026-10-24 | CHAT-12 Agent 질문 응답 | 없음 → 완료 | `2480174`. helper 단위(질문 수신·답변·건너뛰기·비밀 답 미저장·같은 run 이어가기) + 중앙 회귀 596/598(skip 2는 BRW 화면 연결 대기) + headless 렌더링 fixture 72/72 중 질문 구간 17건 통과(`63a7592`). 실제 Codex 계정·모델로는 미실행 |
 | 2026-10-24 | CHAT-13 하위 Agent 진행·막힘 | 없음 → 완료 | `2480174`. 같은 검증 + headless 렌더링 fixture 하위 Agent 구간 10건 통과. 실제 multi-agent 실행은 미실행 |
 | 2026-10-24 | AGENT-01 Profile 저장소 | 없음 → 일부(핵심부) | `cfa2344`. 저장소·HTTP·캐릭터 필드·합성 함수 + 단위 14건. 브리지·화면 연결은 3묶음 진행 중 |
@@ -1239,18 +1242,9 @@ Canvas·Viewport·UI/UX·디자인 영역은 바탕이 이미 깔려 있다. 의
 
 ## Context · 코딩 화면 · 런타임/패키징
 
-Context, Recovery, Coding UX and Runtime/Packaging. The underlying pieces are mostly built; the screens and connections users would touch are still largely missing. Already in place: immutable context snapshots, Reader and packets with explicit attachment chips and an inspector; Desk auto-save with backup and retry when the saved Desk can't be read; storage and lifecycle separation between saved Boards and the Desk; a File Card (folder connect, tree, filename search, textarea working copy, line diff, create-only Save As, durable drafts on SQLite); SQLite with WAL/FULL for chat and drafts; automatic app-server respawn and SSE reconnect. Missing:
-- Automatic context resolver (best-matching Board, visible resources, signal record)
-- Board revision history and conflict handling, and a Desk generation journal
-- Diff view of agent changes, and command output / test result cards
-- Project folder binding (agent cwd = File Card root); the IDE Dock entry is a placeholder
-- Saving to the original file (currently `originalUpdated:false`)
-- Watcher/event bus
-- Wiring the .egdesk bundle into the app
-- App packaging and a production move to the Rust helper
-- A one-command clean-profile gate
+맥락 자료·복구·코딩 화면·실행 및 배포 기반을 다룬다. 고정 원문과 Reader, 첨부 자료 확인, File 작업사본과 변경 비교, 프로젝트 연결, 명령 결과, SQLite 보존, 이벤트 전달과 재연결에는 이미 구현·화면 연결된 부분이 있다. 각 항목은 아래 근거에 따라 구분하며, 모듈의 존재나 합성 자료 시험을 실제 계정·사용자 파일·다른 운영체제까지 검증한 것으로 보지 않는다.
 
-The SQLite-first persistence choice is already adopted in the CONTRACT (L79-80, L1343). Only the vision checkbox and the move of Desk/Board/recovery off Firefox prefs remain. None of this duplicates the scheduled (A) requestUserInput and (B) subAgent work. CODE-05 attaches to the existing fileChange approval card.
+남은 범위에는 맥락 후보의 선택 흐름, 복구·병합의 연결 및 검증, 편집기 품질, 원본 저장의 강한 충돌 보호, 실제 엔진·프로젝트 왕복, 묶음 파일 교환과 설치·배포 검증이 있다. IDE 진입과 원본 저장 등의 현재 상태는 CODE-07·CODE-04를 따른다. 작업사본 저장 응답의 `originalUpdated: false`만으로 별도 원본 저장 기능이 없다고 판정하지 않는다. CODE-05는 기존 파일 변경 승인 항목에 연결되며, 별도의 자동 승인 경로를 뜻하지 않는다.
 
 | ID | 상태 | 크기 | 대표님 화면에서 달라지는 점 | 결정 | 환경 제약 |
 |---|---|---|---|---|---|
@@ -1258,7 +1252,7 @@ The SQLite-first persistence choice is already adopted in the CONTRACT (L79-80, 
 | CODE-02 | 일부 | M | 채팅방이나 Board마다 '프로젝트 폴더'를 고르면 에이전트 작업 위치와 파일 창 폴더가 같아지고, 화면 위에 어떤 프로젝트인지 늘 보인다. | 결정됨(D-X3) |  |
 | CODE-05 | 일부 | L | 에이전트가 파일을 고치면 무엇이 바뀌었는지 줄 단위 비교로 보고, 승인 전에 내용을 확인할 수 있다. | 결정됨(D-X2·X4) |  |
 | CODE-06 | 일부 | L | 에이전트가 테스트나 빌드를 돌리면 통과/실패 수와 실패 위치가 결과 카드로 보이고, 눌러서 해당 파일 줄로 이동한다. | 결정됨(D-X6) |  |
-| CODE-07 | 없음 | S | Dock의 IDE 버튼을 누르면 프로젝트 파일·편집·변경 비교·테스트 결과가 한 번에 열린다. |  |  |
+| CODE-07 | 일부 | S | IDE에서 선택한 Board의 프로젝트 File을 열거나 연결한다. Board가 없으면 선택을 안내한다. 변경 비교·검사는 필요할 때 각각 연다. |  |  |
 | CODE-01 | 완료 | M | (바로 보이는 변화는 없음) 이후 편집기·변경 비교 화면이 검증된 부품으로 만들어져 끊김이 적다. |  |  |
 | CODE-04 | 일부 | L | 코드가 색과 줄번호로 보이고, 고친 내용을 원래 파일에 안전하게 저장할 수 있다(외부에서 바뀌었으면 충돌 안내). | 일부 결정(D-X1 정함, D-X5 남음) |  |
 | CODE-03 | 일부 | M | 파일 이름뿐 아니라 내용으로도 찾고, 바뀐 파일 표시와 새로 생긴 파일이 자동으로 트리에 보인다. |  |  |
@@ -1308,13 +1302,13 @@ The SQLite-first persistence choice is already adopted in the CONTRACT (L79-80, 
 - 빠진 것: 당시 실행 프로젝트를 검증한 Chat 결과의 파일 줄 이동, 실제 사용자 셸·엔진 왕복 검증. 결과 모듈 존재나 시험용 출력만으로 완료로 올리지 않는다.
 - 연결 원칙: 저장과 실행을 구분하고, 결과 열기는 재실행하지 않는다. 출력 소실·시간 초과·사용자 입력 경합을 성공으로 표시하거나 명령을 자동 재전송하지 않는다. 결과와 Terminal은 각각 읽을 수 있는 배율로 확인한다.
 
-### CODE-07 — Make the IDE Dock entry a real entry into the coding workspace
+### CODE-07 — IDE에서 선택한 Board의 프로젝트 File 열기
 
 - 출처: Vision P1 Coding UX item 5 (user-facing coding surface); Dock definition in the code
-- 상태: 없음 · 크기 S · 선행: CODE-02
-- 근거: overlay/JS/eg-desk-surface.uc.js:68 declares the Dock item { id: 'ide' }. In the click handler (:4216-4236) there is no ide branch, so it falls through to toggleHUD(item.id, item.label), a placeholder.
-- 빠진 것: Pressing IDE opens nothing meaningful. It should open the project, File Card and result surfaces together.
-- 구현 스케치: Add an item.id === 'ide' branch in eg-desk-surface.uc.js:4216. Have it call spawnFileCard with the current project root and optionally place the result card and terminal next to it. Add a headless-regression case to the existing DOCK_IDS check.
+- 상태: 일부 · 크기 S · 선행: CODE-02
+- 근거: `d18ece0`에서 Dock의 IDE를 선택 Board의 실제 프로젝트 연결과 File 화면에 연결했다. 같은 Board·프로젝트·현재 폴더의 File만 재사용하고, 연결이 없거나 재연결이 필요하면 기존 폴더 선택 흐름으로 이어진다. 작업사본·현재 입력·최신 카메라 상태를 보존한다. 격리 Firefox의 재진입과 작업사본 갱신을 확인했으며 실제 계정·사용자 폴더로 검증한 것은 아니다.
+- 사용 흐름: [Atlas CODE-01](./EGDESK_PRODUCT_INTERACTION_TRACE_ATLAS.md#atlas-code-01). Board가 없으면 제목 버튼으로 선택하도록 안내한다. 새로운 Board·별도 workspace를 자동 생성하지 않는다. IDE 진입은 File 진입이며 Terminal·명령·테스트·Agent 실행을 겸하지 않는다.
+- 남은 범위: 코딩 화면 전체의 편집기 품질·결과·변경 검토는 CODE-04·05·06의 범위를 따른다. 실제 OS 폴더 선택과 Windows·Linux 동일 흐름 검증도 남아 있다.
 
 ### CODE-01 — Research current project/file/editor/diff/test-result frameworks and active implementations, then choose the coding-surface integration path
 
@@ -1328,10 +1322,10 @@ The SQLite-first persistence choice is already adopted in the CONTRACT (L79-80, 
 
 - 출처: Vision P1 Coding UX item 5 (editor/viewer); CONTRACT §6, §17.D 파일 adapter·조건부 저장
 - 상태: 일부 · 크기 L · 선행: CODE-01
-- 근거: Done: textarea working copy, IME composition handling and 250ms flush (EGDeskFileView.sys.mjs:400-404), durable drafts (helper/egdesk-managed-drafts.mjs:30 SQLite CAS), restore across restarts (EGDeskFileCardState.restoreFileCard, commit d40ad5c), create-only Save As (commit 25baa03). Saving writes only the managed working copy: helper/egdesk-file-service.mjs:299 returns `originalUpdated: false`.
-- 빠진 것: No syntax highlighting, line numbers, in-file search or go-to-line. No conditional write-back to the original file (expectedHead/hash CAS); the only option is Save As to a new file, so a project cannot really be edited and saved in place.
-- 결정: Whether EG-Desk may overwrite original project files: never / only on user Save / also through agent approval. Also the conflict rule when the file changed externally.
-- 구현 스케치: Swap the textarea in EGDeskFileView for the selected editor, keeping composition handling. Add an original-save mode (sourceHash CAS, operationId idempotency) to egdesk-file-service.saveDraft. Reuse posix-file-helper descriptor semantics. Change the UI button wording to separate 'working copy' from 'original'.
+- 근거: 텍스트 작업사본·IME 처리·SQLite 초안 보존·재진입과 새 파일로 저장 경로가 있으며, `8580896`부터 명시적 원본 저장 경로도 있다. 원본 저장은 작업사본 revision과 원본 hash를 확인하고, 변경을 감지하면 비교 화면에서 원본 유지 또는 명시적 덮어쓰기를 고른다. 이미 같은 내용이면 다시 쓰지 않는다. 일반 작업사본 저장의 `originalUpdated: false`는 이 별도 원본 저장 경로가 없다는 뜻이 아니다.
+- 결정: D-X1은 결정됨. 원본 쓰기는 사용자 저장·검토 중 되돌리기 경로이며 외부 변경은 비교 화면에서 다룬다. 편집기 기준·설치 D-X5는 별도 미결 상태다.
+- 검증 범위: 기존 `8580896` 진행 기록은 helper·모듈 구현을 기록했으나 시험 수치를 제시하지 않았고 당시 실제 Firefox 창은 미확인이다. 이번 원장 정정은 현재 코드 경로와 기존 기록의 대조이며, 원본 저장에 대한 새로운 실환경 검증은 아니다.
+- 남음: 코드 색·줄번호 등 편집 품질, 외부 writer에 대한 강한 조건부 교체 보장 및 환경별 검증. hash 재검사 뒤 일반 rename하는 현재 경로만으로 그 사이의 비협조적 외부 쓰기를 배제했다고 주장하지 않는다. [원본 저장의 기술 경계](./EGDESK_INTERACTION_AND_ORCHESTRATION_CONTRACT.md#impl-files)를 유지한다.
 
 ### CODE-03 — File tree and search
 
