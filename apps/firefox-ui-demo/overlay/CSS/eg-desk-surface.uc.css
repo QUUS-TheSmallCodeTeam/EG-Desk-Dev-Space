@@ -2714,6 +2714,11 @@
   right: 72px;
   z-index: 99996;
   width: 246px;
+  /* Keep the list above the fixed zoom control and dock in short windows. */
+  max-width: calc(100vw - 160px);
+  max-height: calc(100vh - 184px);
+  display: flex;
+  flex-direction: column;
   padding: 9px;
   border-radius: 12px;
   border: 1px solid var(--egd-line-strong);
@@ -2750,6 +2755,10 @@
 .egd-minimap-map {
   position: relative;
   height: 104px;
+  min-height: 48px;
+  /* Search results must not resize the map after its coordinates are built. */
+  max-height: max(48px, calc(100vh - 478px));
+  flex-shrink: 0;
   border-radius: 9px;
   border: 1px solid color-mix(in srgb, var(--egd-primary) 16%, transparent);
   background:
@@ -2861,11 +2870,56 @@
   color: var(--egd-on-surface-variant);
 }
 
+.egd-minimap-search {
+  box-sizing: border-box;
+  width: 100%;
+  margin-top: 7px;
+  padding: 5px 7px;
+  border: 1px solid var(--egd-outline);
+  border-radius: 7px;
+  background: var(--egd-surface-elevated);
+  color: var(--egd-on-surface);
+  font: 11px var(--egd-font, system-ui);
+}
+.egd-minimap-search:focus-visible,
+.egd-minimap-row:focus-visible {
+  outline: var(--egd-focus-outline);
+  outline-offset: var(--egd-focus-outline-offset);
+}
+.egd-minimap-search-status {
+  margin-top: 5px;
+  font-size: 10px;
+  color: var(--egd-on-surface-variant);
+}
+
 .egd-minimap-list {
   display: flex;
   flex-direction: column;
   gap: 4px;
-  margin-top: 7px;
+  min-height: 0;
+  max-height: 168px;
+  margin-top: 5px;
+  /* Reserve the canonical outline on both sides of the scrollport. */
+  padding: calc(var(--egd-focus-outline-width) + var(--egd-focus-outline-offset));
+  padding-inline-end: calc(var(--egd-focus-outline-width) + var(--egd-focus-outline-offset) + 8px);
+  scrollbar-width: thin;
+  scroll-padding-block: calc(var(--egd-focus-outline-width) + var(--egd-focus-outline-offset));
+  scroll-snap-type: y proximity;
+  overflow-y: auto;
+}
+
+/* Let a keyboard-focused row snap inside either edge without trapping wheel scrolling. */
+.egd-minimap-list > .egd-minimap-row:focus-visible {
+  position: relative;
+  scroll-snap-align: start;
+}
+
+.egd-minimap-list > .egd-minimap-row:focus-visible::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  scroll-snap-align: end;
 }
 
 .egd-minimap-row {
@@ -2922,9 +2976,15 @@
   display: flex;
   flex-direction: column;
   gap: 2px;
-  min-width: 168px;
-  max-width: 220px;
+  box-sizing: border-box;
+  min-width: min(168px, calc(100vw - 12px));
+  max-width: min(220px, calc(100vw - 12px));
+  max-height: calc(100vh - 12px);
   padding: 6px;
+  padding-inline-end: 14px;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  scrollbar-width: thin;
   border-radius: 10px;
   border: 1px solid var(--egd-outline);
   background: var(--egd-surface-elevated);

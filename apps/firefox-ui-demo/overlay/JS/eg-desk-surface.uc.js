@@ -6321,7 +6321,9 @@
 
   function closeDeskMinimap() {
     closeMinimapStack();
-    document.getElementById('egd-desk-minimap')?.remove();
+    const panel = document.getElementById('egd-desk-minimap');
+    panel?._disposeMinimapPan?.();
+    panel?.remove();
   }
 
   function viewportWorldRect() {
@@ -6345,17 +6347,35 @@
     return { left, top, right: left + width, bottom: top + height, width, height };
   }
 
+  const MinimapLayout = ChromeUtils.importESModule('chrome://userchrome/content/EGDeskCanvasLayout.sys.mjs');
+  const MINIMAP_SEARCH_PAGE_SIZE = 24;
+  const MINIMAP_IME_COMMIT_GUARD_MS = 80;
+
+  // The minimap may only name or navigate objects that are still mounted and
+  // visible to this surface. Never resolve a saved Board or an object's body.
+  function minimapTargetAvailable(node) {
+    if (!node?.isConnected || !node.id || node.hidden || node.inert
+        || node.closest?.('[hidden], [inert], [aria-hidden="true"]')) return false;
+    if (node.dataset?.codexRole === 'auth' || node.classList?.contains('egd-board-missing')) return false;
+    if (node.style?.display === 'none' || node.style?.visibility === 'hidden') return false;
+    const visibility = window.getComputedStyle?.(node)?.visibility;
+    if (visibility === 'hidden' || visibility === 'collapse') return false;
+    return !node.getClientRects || node.getClientRects().length > 0;
+  }
+
   // Each open Board's region in world px, for the minimap.
   function boardRegionWorldRects() {
     return Object.values(state.boards.projections).map((projection) => {
       const region = document.getElementById(projection.id);
-      return region ? { id: projection.id, title: projection.title, rect: entityWorldRect(region) } : null;
+      return minimapTargetAvailable(region)
+        ? { id: projection.id, title: projection.title, rect: entityWorldRect(region) } : null;
     }).filter(Boolean);
   }
 
   function minimapDeskBounds() {
     const viewport = viewportWorldRect();
     const entities = Array.from(document.querySelectorAll('.egd-canvas-card, .egd-canvas-shape'))
+      .filter(minimapTargetAvailable)
       .map((entity) => ({ entity, rect: entityWorldRect(entity) }))
       .filter((item) => item.rect);
     const regions = boardRegionWorldRects();
@@ -6473,9 +6493,16 @@
   }
 
   function minimapEntityTitle(entity) {
-    return entity.classList.contains('egd-canvas-card')
-      ? cardLabelForViewportRail(entity)
-      : CANVAS_SHAPE_TITLES[entity.dataset.shapeType] || '도형';
+    if (!entity.classList.contains('egd-canvas-card')) return CANVAS_SHAPE_TITLES[entity.dataset.shapeType] || '도형';
+    // Read only a View's visible name in its header, never its body or source.
+    const selectors = ['.egd-card-page-title', '.egd-chat-card-title', '.egdesk-file-title',
+      '.egd-file-card-title', '.egd-terminal-title', '.egd-settings-title', '.egd-ontology-title',
+      '.egd-desk-window-identity strong', '.egd-result-card-title'];
+    for (const selector of selectors) {
+      const title = entity.querySelector(selector)?.textContent?.trim();
+      if (title) return title;
+    }
+    return cardLabelForViewportRail(entity);
   }
 
   // Presses on the map are read from its model (minimapTargetsAt), so markers
@@ -6504,7 +6531,7 @@
       data: { projectionId: board.id, compact: String(!board.showLabel), testid: 'minimap-board-go' },
       onclick: (ev) => {
         ev.stopPropagation();
-        focusBoardFromMinimap(board.id);
+        goToMinimapTarget({ kind: 'board', id: board.id });
       },
     }, board.showLabel ? board.title : ''));
   }
@@ -6513,6 +6540,16 @@
     const map = panel?.querySelector('.egd-minimap-map');
     if (!map) return null;
     const model = minimapWorldModel(map);
+    const signature = JSON.stringify([model.bounds, model.viewport, model.mapWidth, model.mapHeight,
+      state.boards.activeProjectionId, state.activeEntityId, state.zoomTarget || state.zoom || 1,
+      model.regions, model.entities.map(({ entity, rect }) => [entity.id, rect, entity.style.zIndex,
+        entity.dataset.projectionId, minimapEntityTitle(entity)])]);
+    map._egdeskMinimapModel = model;
+    if (map._egdeskMinimapSignature === signature) return model;
+    map._egdeskMinimapSignature = signature;
+    const active = document.activeElement;
+    const focusedBoardId = map.contains?.(active) && active?.dataset?.testid === 'minimap-board-go'
+      ? active.dataset.projectionId : null;
     map.textContent = '';
     const boards = SurfaceState.minimapBoardRegions({
       regions: model.regions, model, activeId: state.boards.activeProjectionId,
@@ -6526,7 +6563,6 @@
     for (const board of boards) map.appendChild(buildMinimapBoardRegion(board));
     for (const marker of entityMarkers) map.appendChild(marker);
     map.appendChild(viewportMarker);
-    map._egdeskMinimapModel = model;
     // Boards first, then Views from the top of the stack down: the order the
     // '이 위치의 N개' list reads in.
     const views = model.entities
@@ -6540,43 +6576,67 @@
       ...boards.map((board) => ({ kind: 'board', id: board.id, title: board.title, box: board })),
       ...views,
     ];
+    if (focusedBoardId) {
+      const replacement = Array.from(map.querySelectorAll('.egd-minimap-board-label'))
+        .find((node) => node.dataset.projectionId === focusedBoardId);
+      (replacement || panel.querySelector('.egd-minimap-search'))?.focus({ preventScroll: true });
+    }
     return model;
   }
 
-  // A Board picked on the minimap becomes the current Board, and the camera
-  // fits its region into the safe area without zooming past 100%.
+  // Minimap navigation changes only the Canvas camera. It must not select a
+  // Board, activate a View, modify a Browser viewport, or start work.
+  function moveCameraToMinimapNode(node) {
+    const rect = persistentEntityGeometry(node);
+    const safe = safeViewportRect();
+    const currentZoom = state.zoomTarget || state.zoom || 1;
+    // Do not change zoom: semantic zoom can otherwise transfer keyboard focus
+    // out of a currently active View during a pointer-only navigation.
+    const pan = SurfaceState.revealRectPan(rect, safe, { pan: state.panTarget, zoom: currentZoom });
+    if (pan && typeof state.setCanvasPanTarget === 'function'
+        && (pan.x !== state.panTarget.x || pan.y !== state.panTarget.y)) {
+      state.canvasUserCameraRevision = (state.canvasUserCameraRevision || 0) + 1;
+      state.setCanvasPanTarget(pan);
+    }
+  }
+
   function focusBoardFromMinimap(projectionId) {
     const region = document.getElementById(projectionId);
-    if (!region || !state.boards.projections[projectionId]) return false;
+    if (!minimapTargetAvailable(region) || !state.boards.projections[projectionId]
+        || !region.classList.contains('egd-board-region')) return false;
     closeMinimapStack();
-    selectBoardProjection(projectionId);
-    state.setCanvasViewportTarget?.(SurfaceState.fitSurfaceCamera(persistentEntityGeometry(region), safeViewportRect(), 1));
+    moveCameraToMinimapNode(region);
     refreshDeskMinimap();
     return true;
   }
 
-  // A View picked on the minimap: the camera moves just enough to show it
-  // (its bar first when it is larger than the view) and it comes to the front.
   function focusEntityFromMinimap(entityId) {
     const entity = document.getElementById(entityId);
-    if (!entity?.isConnected) return false;
+    if (!minimapTargetAvailable(entity) || (!entity.classList.contains('egd-canvas-card')
+        && !entity.classList.contains('egd-canvas-shape'))) return false;
     closeMinimapStack();
-    state.setCanvasPanTarget?.(SurfaceState.revealRectPan(persistentEntityGeometry(entity), safeViewportRect(),
-      { pan: state.panTarget, zoom: state.zoomTarget }));
-    focusCanvasCard(entity);
+    moveCameraToMinimapNode(entity);
     refreshDeskMinimap();
     return true;
   }
 
   function goToMinimapTarget(target) {
-    return target?.kind === 'board' ? focusBoardFromMinimap(target.id) : focusEntityFromMinimap(target?.id);
+    const found = target?.kind === 'board' ? focusBoardFromMinimap(target.id)
+      : target?.kind === 'view' ? focusEntityFromMinimap(target.id) : false;
+    const panel = document.getElementById('egd-desk-minimap');
+    if (panel?._minimapSearch) panel._minimapSearch.notice = found ? '' : '대상이 더 이상 열려 있지 않거나 접근할 수 없습니다.';
+    if (!found) closeMinimapStack();
+    refreshDeskMinimap();
+    return found;
   }
 
   function closeMinimapStack() {
     const stack = document.querySelector('#egd-desk-minimap .egd-minimap-stack');
     if (!stack) return;
+    const wasFocused = stack.contains(document.activeElement);
     stack._dispose?.();
     stack.remove();
+    if (wasFocused) document.querySelector('#egd-desk-minimap .egd-minimap-search')?.focus({ preventScroll: true });
   }
 
   // One target under the press goes straight there; several open the
@@ -6604,6 +6664,18 @@
     ));
     const stack = el('div', { class: 'egd-minimap-stack', role: 'menu', 'aria-label': title, data: { testid: 'minimap-stack' } },
       el('div', { class: 'egd-minimap-stack-title' }, title), ...rows);
+    const stackRowGutter = (row) => {
+      const outline = window.getComputedStyle?.(row);
+      return Math.max(0, (parseFloat(outline?.outlineWidth) || 0) + (parseFloat(outline?.outlineOffset) || 0));
+    };
+    const revealStackRow = (row) => {
+      const menuRect = stack.getBoundingClientRect(), rowRect = row.getBoundingClientRect();
+      const gutter = stackRowGutter(row);
+      const top = menuRect.top + stack.clientTop + gutter;
+      const bottom = Math.min(menuRect.bottom, menuRect.top + stack.clientTop + stack.clientHeight) - gutter;
+      if (rowRect.top < top) stack.scrollTop -= Math.ceil(top - rowRect.top);
+      else if (rowRect.bottom > bottom) stack.scrollTop += Math.ceil(rowRect.bottom - bottom);
+    };
     const onKeydown = (ev) => {
       if (ev.key === 'Escape') {
         ev.preventDefault();
@@ -6613,10 +6685,12 @@
       }
       const current = rows.indexOf(document.activeElement);
       const next = ev.key === 'ArrowDown' ? (current + 1) % rows.length
-        : ev.key === 'ArrowUp' ? (current - 1 + rows.length) % rows.length : -1;
+        : ev.key === 'ArrowUp' ? (current < 0 ? rows.length - 1 : (current - 1 + rows.length) % rows.length) : -1;
       if (next < 0) return;
       ev.preventDefault();
-      rows[next].focus();
+      const row = rows[next];
+      row.focus({ preventScroll: true });
+      revealStackRow(row);
     };
     const onOutside = (ev) => {
       if (!stack.isConnected) { stack._dispose(); return; }
@@ -6626,45 +6700,112 @@
     window.addEventListener('mousedown', onOutside, true);
     stack._dispose = () => window.removeEventListener('mousedown', onOutside, true);
     panel.appendChild(stack);
-    const maxLeft = Math.max(6, panel.clientWidth - stack.offsetWidth - 6);
-    stack.style.left = Math.round(clampNumber((map?.offsetLeft || 0) + point.x - 12, 6, maxLeft)) + 'px';
-    stack.style.top = Math.round((map?.offsetTop || 0) + point.y + 8) + 'px';
-    rows[0].focus();
+    let previousClientHeight = null;
+    stack._reposition = () => {
+      const safe = safeViewportRect({ margin: 6, avoidHud: false });
+      const zoom = document.getElementById('egd-zoom-indicator')?.getBoundingClientRect();
+      const bottom = zoom?.height > 0 && zoom.top > safe.top
+        ? Math.min(safe.bottom, zoom.top - 6) : safe.bottom;
+      const width = Math.max(1, Math.floor(safe.right - safe.left));
+      stack.style.maxHeight = Math.max(1, Math.floor(bottom - safe.top)) + 'px';
+      stack.style.minWidth = '';
+      stack.style.maxWidth = '';
+      if (stack.offsetWidth > width) {
+        stack.style.minWidth = '0px';
+        stack.style.maxWidth = width + 'px';
+      }
+      const panelRect = panel.getBoundingClientRect();
+      const x = panelRect.left + (map?.offsetLeft || 0) + clampNumber(point.x, 0, map?.clientWidth || point.x) - 12;
+      const y = panelRect.top + (map?.offsetTop || 0) + clampNumber(point.y, 0, map?.clientHeight || point.y) + 8;
+      stack.style.left = Math.round(clampNumber(x, safe.left, Math.max(safe.left, safe.right - stack.offsetWidth)) - panelRect.left) + 'px';
+      stack.style.top = Math.round(clampNumber(y, safe.top, Math.max(safe.top, bottom - stack.offsetHeight)) - panelRect.top) + 'px';
+      const clientHeight = stack.clientHeight;
+      if (previousClientHeight !== null && clientHeight < previousClientHeight) {
+        const focused = rows.find((row) => row === document.activeElement);
+        if (focused) {
+          // Compare against the previous scrollport height: layout may already
+          // be smaller when the resize callback runs. A row scrolled out by
+          // the user must not pull the menu back to stale keyboard focus.
+          const menuRect = stack.getBoundingClientRect(), rowRect = focused.getBoundingClientRect();
+          const gutter = stackRowGutter(focused);
+          const top = menuRect.top + stack.clientTop + gutter;
+          const bottom = menuRect.top + stack.clientTop + previousClientHeight - gutter;
+          if (rowRect.top >= top && rowRect.bottom <= bottom) revealStackRow(focused);
+        }
+      }
+      // Do not undo a user's wheel scroll on ordinary refreshes.
+      previousClientHeight = clientHeight;
+    };
+    stack._reposition();
     return stack;
   }
 
-  function buildDeskMinimapEntityRows() {
-    const entities = Array.from(document.querySelectorAll('.egd-canvas-card, .egd-canvas-shape')).slice(0, 8);
-    if (entities.length === 0) {
-      return [el('div', { class: 'egd-minimap-empty' }, '현재 캔버스에 표시된 카드가 없습니다.')];
-    }
-    return entities.map((entity) => {
-      const isActive = entity.id && entity.id === state.activeEntityId;
-      const kind = entity.classList.contains('egd-canvas-card')
-        ? cardLabelForViewportRail(entity)
-        : CANVAS_SHAPE_TITLES[entity.dataset.shapeType] || '도형';
+  function buildDeskMinimapEntityRows(panel, model) {
+    const search = panel._minimapSearch;
+    const list = panel.querySelector('.egd-minimap-list');
+    const status = panel.querySelector('.egd-minimap-search-status');
+    if (!search || !list || !status || !model) return;
+    const boards = model.regions;
+    const views = model.entities.filter(({ entity }) => entity.classList.contains('egd-canvas-card')).map(({ entity, rect }) => ({
+      id: entity.id, title: minimapEntityTitle(entity), kind: entity.dataset.deskWindowKind || 'view',
+      projectionId: entity.dataset.projectionId || null, rect,
+    }));
+    const signature = JSON.stringify([search.query, search.visibleLimit, search.notice, model.viewport,
+      state.activeEntityId, state.boards.activeProjectionId, boards, views]);
+    if (search.signature === signature) return;
+    search.signature = signature;
+    // Explicitly lift the helper's default 200-row cap; the UI itself renders
+    // bounded pages and shows the total, so every open result remains reachable.
+    const result = MinimapLayout.minimapSearchRows({ query: search.query, boards, views, viewport: model.viewport,
+      activeId: state.activeEntityId, limit: Math.max(1, boards.length + views.length) });
+    const shown = result.rows.slice(0, search.visibleLimit);
+    search.rows = shown;
+    search.focusIndex = result.focusIndex >= 0 && result.focusIndex < shown.length ? result.focusIndex : 0;
+    const active = document.activeElement;
+    const focusedRow = list.contains(active) && active?.dataset?.testid === 'minimap-search-row'
+      ? { kind: active.dataset.kind, id: active.dataset.targetId } : null;
+    const focusedMore = list.contains(active) && active?.dataset?.testid === 'minimap-search-more';
+    const previouslyShown = search.shown || 0;
+    const scrollTop = list.scrollTop;
+    const rows = shown.map((row) => {
+      const current = row.kind === 'board' ? row.id === state.boards.activeProjectionId : row.id === state.activeEntityId;
       return el('button', {
-        class: 'egd-minimap-row' + (isActive ? ' egd-minimap-row-active' : ''),
-        title: `${kind} 보기`,
-        'aria-current': isActive ? 'true' : null,
-        onclick: () => {
-          focusEntityFromMinimap(entity.id);
-          closeDeskMinimap();
-        },
+        type: 'button', class: 'egd-minimap-row' + (current ? ' egd-minimap-row-active' : ''),
+        title: `${row.title} 위치로 이동`, 'aria-current': current ? 'true' : null,
+        data: { testid: 'minimap-search-row', kind: row.kind, targetId: row.id },
+        onclick: (ev) => { ev.stopPropagation(); goToMinimapTarget(row); },
       },
         el('span', { class: 'egd-minimap-row-dot', 'aria-hidden': 'true' }),
-        el('span', { class: 'egd-minimap-row-label' }, kind),
-        isActive ? el('span', { class: 'egd-minimap-row-current' }, '현재') : null,
+        el('span', { class: 'egd-minimap-row-label' }, row.title),
+        el('span', { class: 'egd-minimap-row-kind' }, current
+          ? (row.kind === 'board' ? '현재 Board' : '활성 화면') : (row.kind === 'board' ? 'Board' : '화면')),
       );
     });
+    if (!rows.length) rows.push(el('div', { class: 'egd-minimap-empty' }, search.query.trim()
+      ? '검색 결과가 없습니다.' : '열린 Board나 화면이 없습니다.'));
+    if (shown.length < result.total) rows.push(el('button', {
+      type: 'button', class: 'egd-minimap-row egd-minimap-search-more', data: { testid: 'minimap-search-more' },
+      onclick: (ev) => { ev.stopPropagation(); search.visibleLimit += MINIMAP_SEARCH_PAGE_SIZE; refreshDeskMinimap(); },
+    }, `더 보기 (${result.total - shown.length}개 남음)`));
+    list.replaceChildren(...rows);
+    list.scrollTop = scrollTop;
+    search.shown = shown.length;
+    status.textContent = search.notice || `${search.query.trim() ? '검색 결과' : '열린 Board와 화면'} ${result.total}개 · ${shown.length}개 표시`;
+    if (focusedRow || focusedMore) {
+      const buttons = Array.from(list.querySelectorAll('[data-testid="minimap-search-row"]'));
+      const replacement = focusedMore
+        ? (shown.length > previouslyShown ? buttons[previouslyShown] : list.querySelector('[data-testid="minimap-search-more"]'))
+        : buttons.find((node) => node.dataset.kind === focusedRow.kind && node.dataset.targetId === focusedRow.id);
+      (replacement || panel.querySelector('.egd-minimap-search'))?.focus({ preventScroll: true });
+    }
   }
 
   function refreshDeskMinimap() {
     const panel = document.getElementById('egd-desk-minimap');
     if (!panel) return;
-    renderDeskMinimapWorld(panel);
-    const list = panel.querySelector('.egd-minimap-list');
-    if (list) list.replaceChildren(...buildDeskMinimapEntityRows());
+    const model = renderDeskMinimapWorld(panel);
+    buildDeskMinimapEntityRows(panel, model);
+    panel.querySelector('.egd-minimap-stack')?._reposition?.();
   }
 
   function deskMinimapSnapshot() {
@@ -6713,7 +6854,6 @@
     const map = panel.querySelector('.egd-minimap-map');
     if (!map) return;
     let drag = null;
-    let viewDrag = null;
     const setFromEvent = (ev) => {
       const model = minimapWorldModel(map);
       const point = minimapPointToWorld(ev.clientX, ev.clientY, map, model);
@@ -6734,7 +6874,7 @@
     };
     // A press on Boards or Views that does not move is a pick (one target goes
     // there, several open the list); once it moves it pans like empty map.
-    map.addEventListener('mousedown', (ev) => {
+    const onMouseDown = (ev) => {
       if (ev.button !== 0) return;
       if (ev.target?.closest?.('.egd-minimap-board-label')) return;
       closeMinimapStack();
@@ -6756,16 +6896,16 @@
       map.classList.add('egd-minimap-dragging');
       ev.preventDefault();
       ev.stopPropagation();
-    });
-    window.addEventListener('mousemove', (ev) => {
+    };
+    const onMouseMove = (ev) => {
       if (!drag) return;
       if (!drag.moved && Math.hypot(ev.clientX - drag.startX, ev.clientY - drag.startY) < MINIMAP_PICK_SLOP) return;
       drag.moved = true;
       setFromEvent(ev);
       ev.preventDefault();
       ev.stopPropagation();
-    }, true);
-    window.addEventListener('mouseup', (ev) => {
+    };
+    const onMouseUp = (ev) => {
       if (!drag) return;
       const press = drag;
       drag = null;
@@ -6773,7 +6913,18 @@
       ev.preventDefault();
       ev.stopPropagation();
       if (!press.moved) openMinimapTargets(panel, press.targets, press.local);
-    }, true);
+    };
+    map.addEventListener('mousedown', onMouseDown);
+    window.addEventListener('mousemove', onMouseMove, true);
+    window.addEventListener('mouseup', onMouseUp, true);
+    panel._disposeMinimapPan = () => {
+      drag = null;
+      map.classList.remove('egd-minimap-dragging');
+      map.removeEventListener('mousedown', onMouseDown);
+      window.removeEventListener('mousemove', onMouseMove, true);
+      window.removeEventListener('mouseup', onMouseUp, true);
+      delete panel._disposeMinimapPan;
+    };
   }
 
   function toggleDeskMinimap() {
@@ -6783,15 +6934,77 @@
       closeDeskMinimap();
       return;
     }
-    const panel = el('div', { id: 'egd-desk-minimap', class: 'egd-edge egd-frosted' },
+    const input = el('input', { type: 'search', class: 'egd-minimap-search', maxlength: String(MinimapLayout.MINIMAP_QUERY_MAX),
+      'aria-label': '열린 Board와 화면 이름 검색', 'aria-controls': 'egd-minimap-search-results',
+      'aria-describedby': 'egd-minimap-search-status', placeholder: '열린 Board와 화면 검색',
+      data: { testid: 'minimap-search' } });
+    const panel = el('div', { id: 'egd-desk-minimap', class: 'egd-edge egd-frosted',
+      onmousedown: (ev) => { if (ev.target?.closest?.('button')) ev.preventDefault(); } },
       el('div', { class: 'egd-minimap-header' },
         el('div', { class: 'egd-minimap-title' }, '미니맵'),
         el('button', { class: 'egd-minimap-close', title: '닫기', onclick: closeDeskMinimap }, '×'),
       ),
       el('div', { class: 'egd-minimap-map' }),
       el('div', { class: 'egd-minimap-caption' }, SurfaceState.deskMinimapCaption(1, 0)),
-      el('div', { class: 'egd-minimap-list' }, ...buildDeskMinimapEntityRows()),
+      input,
+      el('div', { id: 'egd-minimap-search-status', class: 'egd-minimap-search-status', role: 'status', 'aria-live': 'polite' }),
+      el('div', { id: 'egd-minimap-search-results', class: 'egd-minimap-list', 'aria-label': '열린 Board와 화면 목록' }),
     );
+    const search = panel._minimapSearch = { query: '', visibleLimit: MINIMAP_SEARCH_PAGE_SIZE,
+      composing: false, imeEnterDown: false, imeEndedAt: 0, notice: '', rows: [], signature: '' };
+    const updateQuery = () => {
+      if (search.query !== input.value) search.visibleLimit = MINIMAP_SEARCH_PAGE_SIZE;
+      search.query = input.value;
+      search.notice = '';
+      refreshDeskMinimap();
+    };
+    input.addEventListener('compositionstart', () => { search.composing = true; });
+    input.addEventListener('compositionend', () => { search.composing = false; search.imeEndedAt = Date.now(); updateQuery(); });
+    input.addEventListener('input', (ev) => { if (!search.composing && !ev.isComposing) updateQuery(); });
+    input.addEventListener('keydown', (ev) => {
+      ev.stopPropagation();
+      if (search.composing || ev.isComposing || ev.keyCode === 229) {
+        if (ev.key === 'Enter' || ev.code === 'Enter' || ev.code === 'NumpadEnter') search.imeEnterDown = true;
+        return;
+      }
+      if (ev.key === 'Enter') {
+        // Gecko may deliver compositionend before the committing keydown.
+        // Guard that short boundary, then keep the guard until its keyup.
+        if (search.imeEnterDown || (search.imeEndedAt && Date.now() - search.imeEndedAt < MINIMAP_IME_COMMIT_GUARD_MS)) {
+          search.imeEnterDown = true;
+          return;
+        }
+        ev.preventDefault();
+        const target = search.rows[search.focusIndex];
+        if (target) goToMinimapTarget(target);
+      } else if (ev.key === 'ArrowDown' && search.rows.length) {
+        ev.preventDefault();
+        const row = panel.querySelectorAll('[data-testid="minimap-search-row"]')[search.focusIndex];
+        const list = panel.querySelector('.egd-minimap-list');
+        if (row && list) {
+          row.focus({ preventScroll: true });
+          const rowRect = row.getBoundingClientRect(), listRect = list.getBoundingClientRect();
+          const top = listRect.top + list.clientTop, bottom = top + list.clientHeight;
+          if (rowRect.top < top) list.scrollTop -= top - rowRect.top;
+          else if (rowRect.bottom > bottom) list.scrollTop += rowRect.bottom - bottom;
+        }
+      } else if (ev.key === 'Escape') {
+        ev.preventDefault();
+        if (input.value) { input.value = ''; updateQuery(); }
+        else closeDeskMinimap();
+      }
+    });
+    input.addEventListener('keyup', (ev) => {
+      if (ev.key === 'Enter' || ev.code === 'Enter' || ev.code === 'NumpadEnter' || ev.keyCode === 13) {
+        search.imeEnterDown = false;
+        search.imeEndedAt = 0;
+      }
+    });
+    panel.addEventListener('keydown', (ev) => {
+      if (ev.key !== 'Escape' || ev.isComposing || search.composing || ev.target === input) return;
+      ev.preventDefault(); ev.stopPropagation();
+      input.focus({ preventScroll: true });
+    });
     document.documentElement.appendChild(panel);
     installDeskMinimapPan(panel);
     refreshDeskMinimap();
@@ -18669,7 +18882,7 @@
     };
     const shouldAllowHudScroll = (target) => {
       if (!(target instanceof Element)) return false;
-      return !!target.closest('#egd-hud, #egd-codex-activity-panel, #egd-codex-input-panel, #egd-answer-briefing, #egd-zoom-indicator, #egd-dock, #egd-preset-bag, #egd-desk-rail');
+      return !!target.closest('#egd-hud, #egd-codex-activity-panel, #egd-codex-input-panel, #egd-answer-briefing, #egd-zoom-indicator, #egd-dock, #egd-preset-bag, #egd-desk-rail, #egd-desk-minimap');
     };
     const wheelSession = {
       owner: null,
@@ -19086,6 +19299,7 @@
     window.addEventListener('resize', () => {
       syncCardFullscreenLayout({ reframe: true });
       state.refreshSemanticProjections?.();
+      refreshDeskMinimap();
     });
   }
 

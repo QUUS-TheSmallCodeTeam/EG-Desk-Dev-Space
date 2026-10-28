@@ -7,6 +7,7 @@ import { compileFunction, runInNewContext } from 'node:vm';
 import { readSurfaceSource } from './egdesk-surface-source.mjs';
 import { initialSurfaceMode, shouldFocusInitialBrowser, planBoardProjection, snapshotBoardProjection, remapMemberReferences, recoverDeskSnapshot, canPersistDeskSession, ownedProjectionMembers, missingProjectionMembers, fitSurfaceCamera, surfaceSemanticLevel, surfaceProximityClusters } from '../overlay/resources/EGDeskSurfaceState.sys.mjs';
 import * as Surface from '../overlay/resources/EGDeskSurfaceState.sys.mjs';
+import * as MinimapLayout from '../overlay/resources/EGDeskCanvasLayout.sys.mjs';
 import * as Chat from '../overlay/resources/EGDeskChatState.sys.mjs';
 import * as ChatRunResult from '../overlay/resources/EGDeskChatRunResult.sys.mjs';
 import * as ChatChangeReview from '../overlay/resources/EGDeskChatChangeReview.sys.mjs';
@@ -9789,7 +9790,7 @@ test('minimap Board regions map to the minimap frame with their names, active Bo
   // The production minimap draws each Board region and lists Boards before Views, topmost View first.
   const render = compileFunction(`${declaration('renderDeskMinimapWorld')}\nreturn renderDeskMinimapWorld;`,
     ['minimapWorldModel', 'SurfaceState', 'state', 'buildMinimapEntityMarker', 'buildMinimapBoardRegion', 'el', 'worldRectToMinimapStyle',
-      'parsePxNumber', 'minimapEntityTitle']);
+      'parsePxNumber', 'minimapEntityTitle', 'document']);
   const children = [];
   const map = { set textContent(value) { children.length = 0; }, appendChild: child => children.push(child) };
   const rect = { left: 0, top: 0, width: 100, height: 100 };
@@ -9799,7 +9800,7 @@ test('minimap Board regions map to the minimap frame with their names, active Bo
       { entity: { id: 'high', style: { zIndex: '9' }, dataset: {} }, rect }] }),
   Surface, { boards: { activeProjectionId: 'egd-board-7' } }, item => ({ marker: item.entity.id }),
   board => { drawn.push(board); return { board: board.id }; }, (tag, props) => ({ viewport: props.class }), () => ({}),
-  (value, fallback = 0) => Number.parseFloat(value) || fallback, entity => `title ${entity.id}`)({ querySelector: () => map });
+  (value, fallback = 0) => Number.parseFloat(value) || fallback, entity => `title ${entity.id}`, { activeElement: null })({ querySelector: () => map });
   assert.deepEqual(drawn, [{ id: 'egd-board-7', title: '주간 보고', left: 25, top: 23, width: 64, height: 30, active: true, showLabel: true }]);
   assert.deepEqual(children.map(child => child.board || child.marker || child.viewport), ['egd-board-7', 'low', 'high', 'egd-minimap-viewport'],
     'regions sit under the View markers and the viewport box');
@@ -9858,33 +9859,37 @@ test('a still press on the minimap picks what is under it; a moving press pans',
 });
 
 test('minimap picks go to the Board or View, and several targets open "이 위치의 N개"', () => {
-  const selected = [];
-  const viewports = [];
+  const moved = [];
   let refreshed = 0;
-  const region = { id: 'egd-board-7', geometry: { x: 1000, y: 500, width: 400, height: 300 } };
+  const region = { id: 'egd-board-7', isConnected: true, classList: { contains: name => name === 'egd-board-region' } };
   const focus = compileFunction(`${declaration('focusBoardFromMinimap')}\nreturn focusBoardFromMinimap;`,
-    ['document', 'state', 'closeMinimapStack', 'selectBoardProjection', 'SurfaceState', 'persistentEntityGeometry', 'safeViewportRect', 'refreshDeskMinimap'])(
+    ['document', 'state', 'minimapTargetAvailable', 'closeMinimapStack', 'moveCameraToMinimapNode', 'refreshDeskMinimap'])(
     { getElementById: id => (id === region.id ? region : null) },
-    { boards: { projections: { 'egd-board-7': { id: 'egd-board-7' } } }, setCanvasViewportTarget: camera => viewports.push(camera) },
-    () => {}, id => selected.push(id), Surface, node => node.geometry, () => ({ left: 24, top: 76, width: 1232, height: 624 }), () => { refreshed += 1; });
+    { boards: { activeProjectionId: 'other', projections: { 'egd-board-7': { id: 'egd-board-7' } } } },
+    node => !!node?.isConnected, () => {}, node => moved.push(node.id), () => { refreshed += 1; });
   assert.equal(focus('egd-board-gone'), false);
   assert.equal(focus('egd-board-7'), true);
-  assert.deepEqual(selected, ['egd-board-7'], 'the picked Board becomes the current Board');
-  assert.deepEqual(viewports, [{ zoom: 1, pan: { x: -560, y: -262 } }], 'its region is fitted into the safe area at no more than 100%');
+  assert.deepEqual(moved, ['egd-board-7'], 'the picked Board is passed to camera navigation only');
   assert.equal(refreshed, 1);
 
   const document = settingsFakeDocument();
   const createElement = document.createElement;
-  document.createElement = tag => Object.assign(createElement(tag), { offsetWidth: 180, contains: () => false });
+  document.createElement = tag => Object.assign(createElement(tag), {
+    offsetWidth: 180, offsetHeight: 80, clientTop: 0, clientHeight: 80, scrollTop: 0,
+    getBoundingClientRect: () => ({ left: 0, top: 0, right: 180, bottom: 80, width: 180, height: 80 }),
+    contains: () => false,
+  });
   const { el, clampNumber } = compileFunction(`${declaration('el')}\n${declaration('clampNumber')}\nreturn { el, clampNumber };`, ['document'])(document);
   const went = [];
   let stackClosed = 0;
   const windowListeners = [];
   const open = compileFunction(`${declaration('openMinimapTargets')}\nreturn openMinimapTargets;`,
-    ['closeMinimapStack', 'goToMinimapTarget', 'SurfaceState', 'el', 'document', 'window', 'clampNumber'])(
+    ['closeMinimapStack', 'goToMinimapTarget', 'SurfaceState', 'el', 'document', 'window', 'clampNumber', 'safeViewportRect'])(
     () => { stackClosed += 1; }, target => went.push(target.id), Surface, el, document,
-    { addEventListener: (type) => windowListeners.push(type), removeEventListener() {} }, clampNumber);
-  const panel = Object.assign(document.createElement('div'), { clientWidth: 300, querySelector: () => ({ offsetLeft: 9, offsetTop: 30 }) });
+    { innerWidth: 1000, innerHeight: 800, addEventListener: (type) => windowListeners.push(type), removeEventListener() {} },
+    clampNumber, () => ({ left: 0, top: 0, right: 1000, bottom: 800 }));
+  const panel = Object.assign(document.createElement('div'), { clientWidth: 300,
+    querySelector: () => ({ offsetLeft: 9, offsetTop: 30, clientWidth: 300, clientHeight: 160 }) });
   const board = { kind: 'board', id: 'egd-board-7', title: '주간 보고' };
   const view = { kind: 'view', id: 'egd-browser-card-3', title: 'Browser' };
   assert.equal(open(panel, [view], { x: 40, y: 25 }), null);
@@ -9898,7 +9903,8 @@ test('minimap picks go to the Board or View, and several targets open "이 위�
   assert.deepEqual(windowListeners, ['mousedown'], 'a press elsewhere closes the list');
   const rows = settingsNodes(stack, node => node.tagName === 'BUTTON');
   assert.deepEqual(rows.map(row => [row.dataset.kind, row.dataset.targetId]), [['board', 'egd-board-7'], ['view', 'egd-browser-card-3']]);
-  assert.equal(document.activeElement, rows[0], 'the first row takes focus');
+  assert.equal(document.activeElement, null, 'a pointer-opened stack does not steal content focus');
+  rows[0].focus();
   stack.fire('keydown', { key: 'ArrowDown' });
   assert.equal(document.activeElement, rows[1]);
   rows[1].fire('click');
@@ -9915,6 +9921,642 @@ test('minimap picks go to the Board or View, and several targets open "이 위�
     assert.doesNotMatch(rule(selector), /#[0-9a-f]{3,8}\b|rgba?\(/i, `${selector} uses approved tokens only`);
   }
   assert.equal(surfaceCss.includes('.egd-minimap-agenda'), false, 'the single whole-Desk box is gone');
+});
+
+// Production minimap handlers over a small DOM and the real Canvas layout math.
+// The camera setter is the test boundary; no Browser or Agent is launched.
+function minimapUiHarness() {
+  const document = settingsFakeDocument();
+  const byId = document.getElementById;
+  const create = document.createElement;
+  const matches = (node, selector) => {
+    if (!node?.tagName) return false;
+    if (selector === 'button') return node.tagName === 'BUTTON';
+    if (selector === '[hidden]') return !!node.hidden || node.getAttribute('hidden') != null;
+    if (selector === '[inert]') return !!node.inert || node.getAttribute('inert') != null;
+    if (selector === '[aria-hidden="true"]') return node.getAttribute('aria-hidden') === 'true';
+    if (selector.startsWith('#')) return node.id === selector.slice(1);
+    if (selector.startsWith('.')) return node.className.split(/\s+/).includes(selector.slice(1));
+    const testid = selector.match(/^\[data-testid="([^"]+)"\]$/);
+    return !!testid && node.dataset.testid === testid[1];
+  };
+  const select = (root, selector) => settingsNodes(root, node => selector.split(',').some(part => {
+    const pieces = part.trim().split(/\s+/);
+    if (!matches(node, pieces.pop())) return false;
+    let ancestor = node.parentNode;
+    while (pieces.length) {
+      const piece = pieces.pop();
+      while (ancestor && !matches(ancestor, piece)) ancestor = ancestor.parentNode;
+      if (!ancestor) return false;
+      ancestor = ancestor.parentNode;
+    }
+    return true;
+  }));
+  document.createElement = tag => {
+    const node = create(tag);
+    const setAttribute = node.setAttribute.bind(node);
+    node.setAttribute = (key, value) => { setAttribute(key, value); if (key === 'id') node.id = String(value); };
+    node.classList = {
+      contains: name => node.className.split(/\s+/).includes(name),
+      add: name => { if (!node.classList.contains(name)) node.className += ` ${name}`; },
+      remove: name => { node.className = node.className.split(/\s+/).filter(item => item !== name).join(' '); },
+    };
+    node.querySelectorAll = selector => select(node, selector).filter(item => item !== node);
+    node.querySelector = selector => node.querySelectorAll(selector)[0] || null;
+    node.closest = selector => {
+      for (let current = node; current; current = current.parentNode) {
+        if (selector.split(',').some(part => matches(current, part.trim()))) return current;
+      }
+      return null;
+    };
+    Object.assign(node, { clientWidth: 300, clientHeight: 160, clientTop: 0, offsetWidth: 180, offsetHeight: 100, offsetLeft: 9, offsetTop: 30, scrollTop: 0 });
+    node.getBoundingClientRect = () => node.testRect || ({ left: 0, top: 0, bottom: node.clientHeight, width: node.clientWidth, height: node.clientHeight });
+    return node;
+  };
+  document.getElementById = id => { const node = byId(id); return node?.isConnected ? node : null; };
+  document.querySelectorAll = selector => select(document.documentElement, selector);
+  document.querySelector = selector => document.querySelectorAll(selector)[0] || null;
+  const listeners = {};
+  const window = { innerWidth: 1000, innerHeight: 800,
+    getComputedStyle: node => ({ visibility: node.testVisibility || 'visible' }),
+    addEventListener: (type, fn) => (listeners[type] ||= []).push(fn),
+    removeEventListener: (type, fn) => { listeners[type] = (listeners[type] || []).filter(item => item !== fn); } };
+  const emitWindow = (type, event) => { for (const listener of [...(listeners[type] || [])]) listener(event); };
+  const cameras = [];
+  const state = { zoom: 1, zoomTarget: 1, panTarget: { x: 0, y: 0 }, pan: { x: 0, y: 0 },
+    activeEntityId: 'active-view', boards: { activeProjectionId: 'active-board', projections: {} },
+    agenda: { activeId: 'saved-board' }, codex: { activeThreadId: 'unchanged-run-target' }, cardFullscreen: null };
+  state.setCanvasViewportTarget = () => assert.fail('minimap navigation must not change zoom');
+  state.setCanvasPanTarget = pan => { cameras.push({ pan: { ...pan }, zoom: state.zoomTarget }); state.panTarget = { ...pan }; };
+  const names = ['el', 'clampNumber', 'parsePxNumber', 'persistentEntityGeometry', 'viewportWorldRect', 'entityWorldRect',
+    'minimapTargetAvailable', 'boardRegionWorldRects', 'minimapDeskBounds', 'minimapDimensionsForBounds',
+    'applyMinimapDynamicSizing', 'minimapWorldModel', 'worldRectToMinimapStyle', 'minimapPointToWorld',
+    'moveCanvasViewportToWorld', 'minimapEntityTitle', 'buildMinimapEntityMarker', 'buildMinimapBoardRegion',
+    'renderDeskMinimapWorld', 'moveCameraToMinimapNode', 'focusBoardFromMinimap', 'focusEntityFromMinimap',
+    'goToMinimapTarget', 'closeMinimapStack', 'openMinimapTargets', 'buildDeskMinimapEntityRows', 'refreshDeskMinimap',
+    'closeDeskMinimap', 'installDeskMinimapPan', 'toggleDeskMinimap'];
+  let safeRect = { left: 0, top: 0, right: 1000, bottom: 800, width: 1000, height: 800 };
+  const actual = compileFunction(`const MINIMAP_SEARCH_PAGE_SIZE = 24, MINIMAP_PICK_SLOP = 4, MINIMAP_IME_COMMIT_GUARD_MS = 80;\n${names.map(declaration).join('\n')}\nreturn { toggleDeskMinimap, refreshDeskMinimap, openMinimapTargets };`,
+    ['document', 'window', 'state', 'SurfaceState', 'MinimapLayout', 'CANVAS_SHAPE_TITLES', 'cardLabelForViewportRail', 'safeViewportRect'])(
+    document, window, state, Surface, MinimapLayout, { rect: '사각형' }, () => '이름 없는 화면',
+    () => safeRect);
+  const make = (id, title, x, y, kind = 'view') => {
+    const node = document.createElement('div');
+    node.setAttribute('id', id);
+    node.className = kind === 'board' ? 'egd-board-region' : 'egd-canvas-card egd-browser-card';
+    Object.assign(node.style, { left: `${x}px`, top: `${y}px`, width: '400px', height: '300px', zIndex: '1' });
+    if (kind === 'board') state.boards.projections[id] = { id, title };
+    else {
+      node.dataset.deskWindowKind = 'browser';
+      const header = document.createElement('div'); header.className = 'egd-card-page-title'; header.textContent = title;
+      const body = document.createElement('div'); body.className = 'egd-card-body'; body.textContent = '비밀 본문만 검색되면 안 됨';
+      node.appendChild(header); node.appendChild(body);
+      node.browserViewport = { x: 31, y: 47 };
+    }
+    document.documentElement.appendChild(node);
+    return node;
+  };
+  const part = testid => document.querySelector(`[data-testid="${testid}"]`);
+  const rows = () => document.querySelectorAll('[data-testid="minimap-search-row"]');
+  const search = value => { const input = part('minimap-search'); input.value = value; input.fire('input'); return input; };
+  const event = (x, y, target) => ({ button: 0, clientX: x, clientY: y, target, preventDefault() {}, stopPropagation() {} });
+  const clickMap = (target, beforeRelease = () => {}) => {
+    const map = document.querySelector('.egd-minimap-map');
+    const x = target.box.left + target.box.width / 2, y = target.box.top + target.box.height / 2;
+    map.fire('mousedown', event(x, y, map));
+    beforeRelease();
+    emitWindow('mouseup', event(x, y, map));
+  };
+  return { document, window, state, cameras, make, part, rows, search, clickMap, emitWindow, setSafeRect: value => { safeRect = value; },
+    listenerCount: type => (listeners[type] || []).length, ...actual };
+}
+
+test('a dense minimap overlap menu clamps to the viewport and scrolls only itself for keyboard focus', () => {
+  const h = minimapUiHarness();
+  h.make('active-board', '기존 Board', 0, 0, 'board');
+  h.make('active-view', '기존 화면', 10, 10);
+  const targets = Array.from({ length: 30 }, (_, index) => {
+    const id = `dense-${index}`, title = `긴 화면 이름 ${index} ${'가나다'.repeat(60)}`;
+    h.make(id, title, 4000 + index * 100, 3000);
+    return { kind: 'view', id, title };
+  });
+  h.toggleDeskMinimap();
+  const panel = h.document.getElementById('egd-desk-minimap'), map = panel.querySelector('.egd-minimap-map');
+  panel.testRect = { left: 88, top: 70, right: 428, bottom: 306, width: 340, height: 236 };
+  map.offsetLeft = 10; map.offsetTop = 39; map.clientWidth = 318; map.clientHeight = 48;
+  const zoom = h.document.createElement('div'); zoom.setAttribute('id', 'egd-zoom-indicator');
+  zoom.testRect = { left: 88, top: 311, right: 240, bottom: 352, width: 152, height: 41 };
+  h.document.documentElement.appendChild(zoom);
+  h.window.innerWidth = 500; h.window.innerHeight = 420;
+  h.window.scrollTo = () => assert.fail('menu keyboard navigation must not scroll the window');
+  h.setSafeRect({ left: 74, top: 58, right: 494, bottom: 356, width: 420, height: 298 });
+  const content = h.document.createElement('textarea'); h.document.documentElement.appendChild(content); content.focus();
+  const stack = h.openMinimapTargets(panel, targets, { x: 140, y: 2 });
+  stack.offsetWidth = 220; stack.offsetHeight = 247; stack.clientTop = 1; stack.clientHeight = 245;
+  stack._reposition();
+  assert.equal(stack.style.maxHeight, '247px');
+  assert.ok(panel.testRect.left + parseFloat(stack.style.left) >= 74);
+  assert.ok(panel.testRect.left + parseFloat(stack.style.left) + stack.offsetWidth <= 494);
+  assert.ok(panel.testRect.top + parseFloat(stack.style.top) + stack.offsetHeight <= zoom.testRect.top - 6);
+  assert.equal(h.document.activeElement, content, 'pointer-opened menu retains content focus');
+  const rows = h.document.querySelectorAll('[data-testid="minimap-stack-row"]');
+  assert.equal(rows.length, 30);
+  assert.ok(rows[29].textContent.includes(targets[29].title), 'long titles are retained, not truncated in the data');
+
+  zoom.testRect.top = 280; stack.offsetHeight = 216; stack.clientHeight = 214;
+  h.refreshDeskMinimap();
+  assert.equal(stack.style.maxHeight, '216px', 'an open menu reclamps when available height changes');
+  assert.ok(panel.testRect.top + parseFloat(stack.style.top) + stack.offsetHeight <= zoom.testRect.top - 6);
+  stack.testRect = { left: 225, top: 58, right: 445, bottom: 274, width: 220, height: 216 };
+  const focusOptions = [];
+  for (const row of [rows[0], rows[29]]) {
+    const focus = row.focus.bind(row);
+    row.focus = options => { focusOptions.push(options); focus(); };
+  }
+  stack.focus(); stack.scrollTop = 0;
+  rows[29].testRect = { left: 230, top: 800, right: 420, bottom: 824, width: 190, height: 24 };
+  stack.fire('keydown', { key: 'ArrowUp' });
+  assert.equal(h.document.activeElement, rows[29], 'ArrowUp from the focusable scroller enters its last row');
+  assert.equal(stack.scrollTop, 551, 'wrapping to the last row scrolls the menu only');
+  rows[0].testRect = { left: 230, top: 0, right: 420, bottom: 24, width: 190, height: 24 };
+  stack.fire('keydown', { key: 'ArrowDown' });
+  assert.equal(h.document.activeElement, rows[0]);
+  assert.equal(stack.scrollTop, 492, 'wrapping to the first row scrolls the menu back');
+  assert.equal(focusOptions.at(-1).preventScroll, true);
+  assert.equal(focusOptions.at(-2).preventScroll, true);
+  assert.equal(h.cameras.length, 0, 'Arrow keys do not select a target or move the camera');
+  assert.deepEqual([h.state.activeEntityId, h.state.boards.activeProjectionId, h.state.codex.activeThreadId],
+    ['active-view', 'active-board', 'unchanged-run-target']);
+  rows[29].fire('click');
+  assert.equal(h.cameras.length, 1, 'explicit selection still moves the camera');
+  assert.deepEqual([h.state.activeEntityId, h.state.boards.activeProjectionId, h.state.codex.activeThreadId],
+    ['active-view', 'active-board', 'unchanged-run-target']);
+
+  const menuCss = cssDeclarationsFor(surfaceCss, '.egd-minimap-stack');
+  assert.equal(menuCss['overflow-y'], 'auto');
+  assert.equal(menuCss['overscroll-behavior'], 'contain');
+  assert.equal(menuCss['scrollbar-width'], 'thin');
+  const labelCss = cssDeclarationsFor(surfaceCss, '.egd-minimap-row-label');
+  assert.equal(labelCss['white-space'], 'nowrap'); assert.equal(labelCss['text-overflow'], 'ellipsis');
+  const focusCss = cssDeclarationsFor(surfaceCss, '.egd-minimap-stack-row:focus-visible');
+  assert.equal(focusCss.outline, 'var(--egd-focus-outline)');
+  assert.equal(focusCss['outline-offset'], 'var(--egd-focus-outline-offset)');
+});
+
+test('the real resize callback keeps a focused dense-overlap edge row visible without moving focus or the canvas', () => {
+  for (const index of [0, 29]) {
+    for (const outlineOffset of [-2, 2]) {
+      const h = minimapUiHarness();
+      h.make('active-board', '기존 Board', 0, 0, 'board');
+      h.make('active-view', '기존 화면', 10, 10);
+      const targets = Array.from({ length: 30 }, (_, i) => {
+        const id = `resize-overlap-${i}`;
+        h.make(id, `화면 ${i}`, 4000 + i * 100, 3000);
+        return { kind: 'view', id, title: `화면 ${i}` };
+      });
+      h.toggleDeskMinimap();
+      const panel = h.document.getElementById('egd-desk-minimap'), map = panel.querySelector('.egd-minimap-map');
+      panel.testRect = { left: 88, top: 70, right: 428, bottom: 306, width: 340, height: 236 };
+      map.offsetLeft = 10; map.offsetTop = 39; map.clientWidth = 318; map.clientHeight = 48;
+      const zoom = h.document.createElement('div'); zoom.setAttribute('id', 'egd-zoom-indicator');
+      zoom.testRect = { left: 88, top: 311, right: 240, bottom: 352, width: 152, height: 41 };
+      h.document.documentElement.appendChild(zoom);
+      h.setSafeRect({ left: 74, top: 58, right: 494, bottom: 356, width: 420, height: 298 });
+      const stack = h.openMinimapTargets(panel, targets, { x: 140, y: 2 });
+      stack.offsetWidth = 220; stack.clientTop = 1;
+      Object.defineProperty(stack, 'offsetHeight', { get: () => Math.min(247, parseFloat(stack.style.maxHeight) || 247) });
+      Object.defineProperty(stack, 'clientHeight', { get: () => stack.offsetHeight - 2 });
+      stack.getBoundingClientRect = () => {
+        const top = panel.testRect.top + parseFloat(stack.style.top || '0');
+        return { left: 225, top, right: 445, bottom: top + stack.offsetHeight, width: 220, height: stack.offsetHeight };
+      };
+      stack._reposition();
+      const row = h.document.querySelectorAll('[data-testid="minimap-stack-row"]')[index];
+      const contentTop = 32 + index * 26;
+      row.getBoundingClientRect = () => {
+        const top = stack.getBoundingClientRect().top + stack.clientTop + contentTop - stack.scrollTop;
+        return { left: 230, top, right: 420, bottom: top + 24, width: 190, height: 24 };
+      };
+      const computed = h.window.getComputedStyle;
+      h.window.getComputedStyle = node => node === row
+        ? { ...computed(node), outlineWidth: '2px', outlineOffset: `${outlineOffset}px` } : computed(node);
+      const gutter = Math.max(0, 2 + outlineOffset);
+      stack.scrollTop = Math.max(0, contentTop + 24 - (stack.clientHeight - 8));
+      row.focus({ preventScroll: true });
+      row.focus = () => assert.fail('resizing must not move or reset keyboard focus');
+      const inBounds = () => {
+        const menu = stack.getBoundingClientRect(), rect = row.getBoundingClientRect();
+        return rect.top >= menu.top + stack.clientTop + gutter
+          && rect.bottom <= menu.top + stack.clientTop + stack.clientHeight - gutter;
+      };
+      assert.ok(inBounds(), 'the selected row starts fully visible');
+      h.window.scrollTo = () => assert.fail('resize must not scroll the window');
+      h.window.scrollX = 11; h.window.scrollY = 17;
+      h.document.documentElement.scrollTop = 123;
+      const registered = declaration('installCanvasPanZoom')?.match(/window\.addEventListener\('resize', \(\) => \{[\s\S]*?\n    \}\);/)?.[0];
+      assert.ok(registered);
+      h.state.refreshSemanticProjections = () => {};
+      compileFunction(registered, ['window', 'syncCardFullscreenLayout', 'state', 'refreshDeskMinimap'])(
+        h.window, () => {}, h.state, h.refreshDeskMinimap);
+      zoom.testRect.top = 104; // Only 40px remain for the actual overlap menu.
+      h.emitWindow('resize');
+      assert.equal(stack.style.maxHeight, '40px');
+      assert.ok(inBounds(), `row ${index} and its focus outline stay inside the resized scrollport`);
+      assert.equal(h.document.activeElement, row);
+      assert.equal(h.cameras.length, 0);
+      assert.deepEqual([h.state.activeEntityId, h.state.boards.activeProjectionId, h.state.codex.activeThreadId],
+        ['active-view', 'active-board', 'unchanged-run-target']);
+      assert.deepEqual([h.window.scrollX, h.window.scrollY, h.document.documentElement.scrollTop], [11, 17, 123]);
+      stack.scrollTop += 10; // A later wheel scroll must not be undone on an ordinary refresh.
+      const userScroll = stack.scrollTop;
+      h.refreshDeskMinimap();
+      assert.equal(stack.scrollTop, userScroll, 'unchanged menu height preserves manual scrolling');
+    }
+  }
+});
+
+test('a resize respects a later manual overlap scroll but continues to reveal keyboard focus', () => {
+  for (const scenario of [
+    { edge: 'last', scrollTop: 20, input: 'wheel' },
+    { edge: 'first', scrollTop: 300, input: 'scrollbar' },
+    { edge: 'last', scrollTop: 'partly-visible', input: 'wheel' },
+  ]) {
+    const h = minimapUiHarness();
+    h.make('active-board', '기존 Board', 0, 0, 'board');
+    const view = h.make('active-view', '기존 화면', 10, 10);
+    const targets = Array.from({ length: 30 }, (_, index) => {
+      const id = `wheel-overlap-${index}`;
+      h.make(id, `화면 ${index}`, 4000 + index * 100, 3000);
+      return { kind: 'view', id, title: `화면 ${index}` };
+    });
+    h.toggleDeskMinimap();
+    const panel = h.document.getElementById('egd-desk-minimap'), map = panel.querySelector('.egd-minimap-map');
+    panel.testRect = { left: 88, top: 70, right: 428, bottom: 306, width: 340, height: 236 };
+    map.offsetLeft = 10; map.offsetTop = 39; map.clientWidth = 318; map.clientHeight = 48;
+    const zoom = h.document.createElement('div'); zoom.setAttribute('id', 'egd-zoom-indicator');
+    zoom.testRect = { left: 88, top: 311, right: 240, bottom: 352, width: 152, height: 41 };
+    h.document.documentElement.appendChild(zoom);
+    h.setSafeRect({ left: 74, top: 58, right: 494, bottom: 356, width: 420, height: 298 });
+    const stack = h.openMinimapTargets(panel, targets, { x: 140, y: 2 });
+    stack.offsetWidth = 220; stack.clientTop = 1;
+    Object.defineProperty(stack, 'offsetHeight', { get: () => Math.min(247, parseFloat(stack.style.maxHeight) || 247) });
+    Object.defineProperty(stack, 'clientHeight', { get: () => stack.offsetHeight - 2 });
+    stack.getBoundingClientRect = () => {
+      const top = panel.testRect.top + parseFloat(stack.style.top || '0');
+      return { left: 225, top, right: 445, bottom: top + stack.offsetHeight, width: 220, height: stack.offsetHeight };
+    };
+    stack._reposition();
+    const rows = h.document.querySelectorAll('[data-testid="minimap-stack-row"]');
+    for (const [index, row] of rows.entries()) row.getBoundingClientRect = () => {
+      const top = stack.getBoundingClientRect().top + stack.clientTop + 32 + index * 26 - stack.scrollTop;
+      return { left: 230, top, right: 420, bottom: top + 24, width: 190, height: 24 };
+    };
+    const computed = h.window.getComputedStyle;
+    h.window.getComputedStyle = node => ({ ...computed(node), outlineWidth: '2px', outlineOffset: '-2px' });
+    const inBounds = row => {
+      const menu = stack.getBoundingClientRect(), rect = row.getBoundingClientRect();
+      return rect.top >= menu.top + stack.clientTop && rect.bottom <= menu.top + stack.clientTop + stack.clientHeight;
+    };
+    h.window.scrollTo = () => assert.fail('overlap scrolling must never move the window');
+    h.window.scrollX = 11; h.window.scrollY = 17; h.document.documentElement.scrollTop = 123;
+    const registered = declaration('installCanvasPanZoom')?.match(/window\.addEventListener\('resize', \(\) => \{[\s\S]*?\n    \}\);/)?.[0];
+    assert.ok(registered);
+    h.state.refreshSemanticProjections = () => {};
+    compileFunction(registered, ['window', 'syncCardFullscreenLayout', 'state', 'refreshDeskMinimap'])(
+      h.window, () => {}, h.state, h.refreshDeskMinimap);
+    stack.focus();
+    stack.fire('keydown', { key: 'ArrowDown' });
+    assert.equal(h.document.activeElement, rows[0]); assert.ok(inBounds(rows[0]));
+    if (scenario.edge === 'last') stack.fire('keydown', { key: 'ArrowUp' });
+    const focused = scenario.edge === 'last' ? rows[29] : rows[0];
+    assert.equal(h.document.activeElement, focused); assert.ok(inBounds(focused));
+    if (scenario.input === 'wheel') stack.fire('wheel', { deltaY: -600 });
+    // Fake DOM has no default wheel/scrollbar action; move its scroll offset and
+    // deliver the actual scroll event. Row geometry is derived from scrollTop.
+    const userScroll = scenario.scrollTop === 'partly-visible' ? stack.scrollTop - 3 : scenario.scrollTop;
+    stack.scrollTop = userScroll;
+    stack.fire('scroll');
+    assert.equal(inBounds(focused), false, 'the later user scroll hid or clipped the focused row');
+    h.refreshDeskMinimap();
+    assert.equal(stack.scrollTop, userScroll, 'ordinary refresh preserves manual scroll');
+    const focus = focused.focus.bind(focused); let refocuses = 0;
+    focused.focus = options => { refocuses++; focus(options); };
+    zoom.testRect.top = 104;
+    h.emitWindow('resize');
+    assert.equal(stack.style.maxHeight, '40px');
+    assert.equal(stack.scrollTop, userScroll, 'resize retains the later manual scroll');
+    assert.equal(h.document.activeElement, focused); assert.equal(refocuses, 0);
+    assert.equal(h.cameras.length, 0);
+    assert.deepEqual([h.state.activeEntityId, h.state.boards.activeProjectionId, h.state.codex.activeThreadId],
+      ['active-view', 'active-board', 'unchanged-run-target']);
+    assert.deepEqual([h.window.scrollX, h.window.scrollY, h.document.documentElement.scrollTop], [11, 17, 123]);
+    assert.deepEqual(view.browserViewport, { x: 31, y: 47 });
+
+    // A new Arrow key is a fresh explicit focus navigation: reveal it now,
+    // and after growing then shrinking the menu reveal it again if necessary.
+    zoom.testRect.top = 311; h.emitWindow('resize');
+    if (h.document.activeElement === rows[0]) {
+      stack.fire('keydown', { key: 'ArrowDown' });
+      stack.fire('keydown', { key: 'ArrowUp' });
+    }
+    if (h.document.activeElement !== rows[0]) stack.fire('keydown', { key: 'ArrowDown' });
+    assert.equal(h.document.activeElement, rows[0]); assert.ok(inBounds(rows[0]));
+    stack.fire('keydown', { key: 'ArrowUp' });
+    assert.equal(h.document.activeElement, rows[29]); assert.ok(inBounds(rows[29]));
+    const keyboardScroll = stack.scrollTop;
+    stack.fire('wheel', { deltaY: 4 });
+    stack.scrollTop += 4; stack.fire('scroll');
+    assert.ok(inBounds(rows[29]), 'a small manual scroll still leaves the focus ring visible');
+    zoom.testRect.top = 104; h.emitWindow('resize');
+    assert.ok(stack.scrollTop > keyboardScroll + 4, 'a previously visible focus row is revealed on shrink');
+    assert.ok(inBounds(rows[29])); assert.equal(h.document.activeElement, rows[29]);
+    stack.fire('keydown', { key: 'ArrowDown' });
+    assert.equal(h.document.activeElement, rows[0]); assert.ok(inBounds(rows[0]));
+    assert.equal(h.cameras.length, 0, 'Arrow navigation never selects a target');
+  }
+});
+
+test('minimap result scroller reserves the canonical focus outline at both scroll edges', () => {
+  const list = cssDeclarationsFor(surfaceCss, '.egd-minimap-list');
+  const gutter = 'calc(var(--egd-focus-outline-width) + var(--egd-focus-outline-offset))';
+  assert.equal(list.padding, gutter);
+  assert.equal(list['padding-inline-end'], 'calc(var(--egd-focus-outline-width) + var(--egd-focus-outline-offset) + 8px)');
+  assert.equal(list['scrollbar-width'], 'thin');
+  assert.equal(list['scroll-padding-block'], gutter);
+  assert.equal(list['scroll-snap-type'], 'y proximity');
+  assert.equal(list['overflow-y'], 'auto');
+  assert.equal(list['max-height'], '168px');
+  const start = cssDeclarationsFor(surfaceCss, '.egd-minimap-list > .egd-minimap-row:focus-visible');
+  const end = cssDeclarationsFor(surfaceCss, '.egd-minimap-list > .egd-minimap-row:focus-visible::after');
+  assert.equal(start['scroll-snap-align'], 'start');
+  assert.equal(start.position, 'relative');
+  assert.equal(end['scroll-snap-align'], 'end');
+  assert.equal(end.position, 'absolute');
+  assert.equal(end.inset, '0');
+  assert.equal(end['pointer-events'], 'none');
+  const row = cssDeclarationsFor(surfaceCss, '.egd-minimap-row:focus-visible');
+  assert.equal(row.outline, 'var(--egd-focus-outline)');
+  assert.equal(row['outline-offset'], 'var(--egd-focus-outline-offset)');
+});
+
+test('the real canvas resize callback refreshes an open minimap without losing search focus or changing targets', () => {
+  const h = minimapUiHarness();
+  h.make('active-board', '원래 Board', 0, 0, 'board');
+  h.make('active-view', '현재 View', 120, 100);
+  h.make('far-view', '먼 View', 4000, 3000);
+  h.toggleDeskMinimap();
+  const input = h.search('View');
+  input.focus(); input.setSelectionRange(1, 3, 'forward');
+  const map = h.document.querySelector('.egd-minimap-map');
+  h.window.innerWidth = 800; h.window.innerHeight = 800; map.clientHeight = 242;
+  h.refreshDeskMinimap();
+  const beforeBox = { ...map._egdeskMinimapTargets.find(target => target.id === 'far-view').box };
+  const beforeViewport = h.document.querySelector('.egd-minimap-viewport').style.height;
+  const registered = declaration('installCanvasPanZoom')?.match(/window\.addEventListener\('resize', \(\) => \{[\s\S]*?\n    \}\);/)?.[0];
+  assert.ok(registered, 'use the resize callback registered by the production canvas installer');
+  const calls = [];
+  h.state.refreshSemanticProjections = () => calls.push('semantic');
+  compileFunction(registered, ['window', 'syncCardFullscreenLayout', 'state', 'refreshDeskMinimap'])(
+    h.window, options => { assert.equal(options.reframe, true); calls.push('fullscreen'); }, h.state, h.refreshDeskMinimap);
+  h.window.innerWidth = 640; h.window.innerHeight = 480; map.clientHeight = 48;
+  h.emitWindow('resize');
+  const model = map._egdeskMinimapModel;
+  const actualBox = map._egdeskMinimapTargets.find(target => target.id === 'far-view').box;
+  assert.deepEqual(calls, ['fullscreen', 'semantic']);
+  assert.equal(model.mapHeight, 48, 'projection uses the resized rendered map, without a second refresh');
+  assert.notDeepEqual(actualBox, beforeBox);
+  assert.deepEqual(actualBox, Surface.minimapBox({ left: 4000, top: 3000, right: 4400, bottom: 3300,
+    width: 400, height: 300 }, model));
+  assert.notEqual(h.document.querySelector('.egd-minimap-viewport').style.height, beforeViewport);
+  assert.equal(h.document.activeElement, input);
+  assert.deepEqual([input.value, input.selectionStart, input.selectionEnd], ['View', 1, 3]);
+  assert.deepEqual([h.state.activeEntityId, h.state.boards.activeProjectionId, h.state.codex.activeThreadId],
+    ['active-view', 'active-board', 'unchanged-run-target']);
+  assert.equal(h.cameras.length, 0);
+  h.toggleDeskMinimap();
+  h.emitWindow('resize');
+  assert.deepEqual(calls, ['fullscreen', 'semantic', 'fullscreen', 'semantic'], 'closing the map leaves resize safe');
+  assert.equal(h.cameras.length, 0);
+});
+
+test('minimap refresh retains More focus, while loading a page focuses its first new row', () => {
+  const h = minimapUiHarness();
+  for (let i = 0; i < 50; i++) h.make(`view-${i}`, `View ${String(i).padStart(3, '0')}`, 1000, 1000 + i * 100);
+  h.toggleDeskMinimap();
+  const more = h.part('minimap-search-more');
+  assert.ok(more); more.focus();
+  h.state.panTarget = { x: -500, y: -400 };
+  h.refreshDeskMinimap();
+  const refreshedMore = h.part('minimap-search-more');
+  assert.notEqual(refreshedMore, more, 'this exercises an actual list rebuild');
+  assert.equal(h.document.activeElement, refreshedMore, 'ordinary viewport refresh preserves More focus');
+  refreshedMore.fire('click');
+  assert.equal(h.rows().length, 48);
+  assert.equal(h.document.activeElement, h.rows()[24], 'explicit pagination focuses the first newly revealed result');
+  assert.equal(h.state.activeEntityId, 'active-view');
+  assert.equal(h.state.boards.activeProjectionId, 'active-board');
+});
+
+test('minimap ArrowDown brings its chosen row into view by scrolling only the result list', () => {
+  const h = minimapUiHarness();
+  for (let i = 0; i < 30; i++) {
+    const y = i < 21 ? -3000 + i * 100 : i === 21 ? 100 : 1000 + i * 100;
+    h.make(`match-${i}`, `Match ${String(i).padStart(2, '0')}`, 10, y);
+  }
+  h.toggleDeskMinimap();
+  const input = h.search('match');
+  const panel = h.document.getElementById('egd-desk-minimap');
+  const list = h.document.querySelector('.egd-minimap-list');
+  assert.equal(panel._minimapSearch.focusIndex, 21, 'the first visible match is below the initial list viewport');
+  list.testRect = { top: 100, bottom: 260 }; list.clientHeight = 160; list.clientTop = 0;
+  const row = h.rows()[21]; row.testRect = { top: 500, bottom: 524 };
+  input.focus(); input.fire('keydown', { key: 'ArrowDown' });
+  assert.equal(h.document.activeElement, row);
+  assert.equal(list.scrollTop, 264, 'only the list scrolls down until the row is visible');
+  assert.equal(h.cameras.length, 0, 'keyboard list navigation does not move the Canvas camera');
+  list.scrollTop = 300; row.testRect = { top: 60, bottom: 84 };
+  input.focus(); input.fire('keydown', { key: 'ArrowDown' });
+  assert.equal(list.scrollTop, 260, 'the same handler scrolls upward when necessary');
+  assert.equal(h.state.activeEntityId, 'active-view');
+});
+
+test('minimap open and close disposes real window drag handlers, including an interrupted drag', () => {
+  const h = minimapUiHarness();
+  for (let i = 0; i < 5; i++) {
+    h.toggleDeskMinimap();
+    assert.deepEqual([h.listenerCount('mousemove'), h.listenerCount('mouseup')], [1, 1]);
+    if (i === 4) {
+      const map = h.document.querySelector('.egd-minimap-map');
+      map.fire('mousedown', { button: 0, clientX: 30, clientY: 40, target: map });
+    }
+    h.toggleDeskMinimap();
+    assert.deepEqual([h.listenerCount('mousemove'), h.listenerCount('mouseup')], [0, 0]);
+  }
+  const before = h.cameras.length;
+  h.emitWindow('mousemove', { clientX: 70, clientY: 80, preventDefault() {}, stopPropagation() {} });
+  h.emitWindow('mouseup', { clientX: 70, clientY: 80, preventDefault() {}, stopPropagation() {} });
+  assert.equal(h.cameras.length, before, 'closing mid-drag leaves no live callback');
+  assert.equal(h.document.getElementById('egd-desk-minimap'), null);
+});
+
+test('minimap search uses open visible names, pages past 200 and preserves typing through refresh', () => {
+  const h = minimapUiHarness();
+  h.make('active-board', 'Café 계획', 0, 0, 'board');
+  const active = h.make('active-view', '기존 작업', 30, 30);
+  const hidden = h.make('hidden-view', '숨겨진 제목', 3000, 50); hidden.hidden = true;
+  const hiddenByStyle = h.make('css-hidden-view', '숨긴 CSS 제목', 3000, 50); hiddenByStyle.testVisibility = 'hidden';
+  const auth = h.make('auth-view', '인증 화면 제목', 3000, 50); auth.dataset.codexRole = 'auth';
+  const missing = h.make('missing-view', '연결 안 된 화면 제목', 3000, 50); missing.className += ' egd-board-missing';
+  for (let i = 0; i < 230; i++) h.make(`view-${i}`, `View ${String(i).padStart(3, '0')}`, 2000 + i * 20, 1000 + i * 10);
+  const contentFocus = h.document.createElement('textarea'); h.document.documentElement.appendChild(contentFocus); contentFocus.focus();
+  h.toggleDeskMinimap();
+  assert.equal(h.document.activeElement, contentFocus, 'opening does not focus the Canvas or search');
+  assert.equal(h.rows().length, 24);
+  assert.match(h.document.querySelector('.egd-minimap-search-status').textContent, /232개 · 24개 표시/);
+  for (let i = 0; i < 9; i++) { const more = h.part('minimap-search-more'); assert.ok(more); more.fire('click'); }
+  assert.equal(h.rows().length, 232);
+  assert.ok(h.rows().some(row => row.dataset.targetId === 'view-229'), 'the helper default cap did not drop later Views');
+  assert.equal(h.part('minimap-search-more'), null);
+  let input = h.search('CAFE\u0301');
+  assert.deepEqual(h.rows().map(row => row.dataset.targetId), ['active-board'], 'NFC and case folding');
+  h.search('비밀 본문');
+  assert.equal(h.rows().length, 0, 'body content is not searched');
+  assert.match(h.document.querySelector('.egd-minimap-list').textContent, /검색 결과가 없습니다/);
+  h.search('숨겨진 제목');
+  assert.equal(h.rows().length, 0, 'hidden Views are not named');
+  h.search('숨긴 CSS 제목');
+  assert.equal(h.rows().length, 0, 'inherited CSS visibility is also checked');
+  h.search('인증 화면 제목');
+  assert.equal(h.rows().length, 0, 'the private authentication surface is not a searchable View');
+  h.search('연결 안 된 화면 제목');
+  assert.equal(h.rows().length, 0, 'a missing-member placeholder is not an accessible View');
+  input = h.search('VIEW 229'); input.focus(); input.setSelectionRange(2, 5, 'forward');
+  const map = h.document.querySelector('.egd-minimap-map');
+  const mapChildren = [...map.children];
+  for (let i = 0; i < 5; i++) h.refreshDeskMinimap();
+  assert.equal(h.part('minimap-search'), input);
+  assert.equal(h.document.activeElement, input);
+  assert.deepEqual([input.value, input.selectionStart, input.selectionEnd], ['VIEW 229', 2, 5]);
+  assert.deepEqual(map.children, mapChildren, 'unchanged camera frames do not rebuild the map');
+  active.querySelector('.egd-card-page-title').textContent = '이름이 바뀐 기존 작업';
+  h.refreshDeskMinimap();
+  assert.equal(h.part('minimap-search'), input, 'a changed View refresh still keeps the input node');
+  assert.equal(h.document.activeElement, input);
+  assert.deepEqual([input.value, input.selectionStart, input.selectionEnd], ['VIEW 229', 2, 5]);
+  const before = structuredClone({ active: h.state.activeEntityId, board: h.state.boards.activeProjectionId,
+    agenda: h.state.agenda, run: h.state.codex, browser: active.browserViewport });
+  input.fire('keydown', { key: 'Enter' });
+  assert.equal(h.cameras.length, 1, 'the actual Enter handler moves the camera');
+  assert.deepEqual({ active: h.state.activeEntityId, board: h.state.boards.activeProjectionId,
+    agenda: h.state.agenda, run: h.state.codex, browser: active.browserViewport }, before);
+  assert.equal(h.document.activeElement, input);
+  h.search('View 000');
+  h.rows()[0].fire('click');
+  assert.equal(h.cameras.length, 2, 'the actual search-result click moves the camera too');
+  assert.deepEqual([h.state.activeEntityId, h.state.boards.activeProjectionId, h.state.zoomTarget], ['active-view', 'active-board', 1]);
+  h.search('View 227');
+  input.fire('keydown', { key: 'ArrowDown' });
+  assert.equal(h.document.activeElement, h.rows()[0], 'keyboard navigation explicitly moves focus to the result');
+});
+
+test('an empty minimap explains that no Boards or Views are open without moving focus or camera', () => {
+  const h = minimapUiHarness();
+  const content = h.document.createElement('textarea'); h.document.documentElement.appendChild(content); content.focus();
+  h.toggleDeskMinimap();
+  assert.match(h.document.querySelector('.egd-minimap-list').textContent, /열린 Board나 화면이 없습니다/);
+  assert.match(h.document.querySelector('.egd-minimap-search-status').textContent, /0개 · 0개 표시/);
+  assert.equal(h.document.activeElement, content);
+  assert.equal(h.cameras.length, 0);
+});
+
+test('minimap IME commit, Escape, and a disappeared result are handled without changing the active target', () => {
+  const h = minimapUiHarness();
+  h.make('active-board', '원래 Board', 0, 0, 'board');
+  const active = h.make('active-view', '원래 화면', 10, 10);
+  const target = h.make('korean-view', '한글 문서', 4000, 3000);
+  h.toggleDeskMinimap();
+  const input = h.part('minimap-search'); input.focus();
+  input.fire('compositionstart'); input.value = 'ㅎ'; input.fire('input', { isComposing: true });
+  input.fire('keydown', { key: 'Enter', code: 'Enter', isComposing: true });
+  input.fire('keydown', { key: 'Escape', isComposing: true });
+  assert.equal(input.value, 'ㅎ');
+  input.value = '한'; input.fire('compositionend');
+  assert.deepEqual(h.rows().map(row => row.dataset.targetId), ['korean-view']);
+  input.fire('keydown', { key: 'Enter', code: 'Enter' });
+  assert.equal(h.cameras.length, 0, 'the key that committed IME cannot also navigate');
+  input.fire('keyup', { key: 'Enter', code: 'Enter' });
+  input.fire('keydown', { key: 'Enter', code: 'Enter' });
+  assert.equal(h.cameras.length, 1, 'a later Enter navigates after the composing key is released');
+  h.state.panTarget = { x: 0, y: 0 };
+  input.fire('compositionstart'); input.value = '한글'; input.fire('compositionend');
+  input.fire('keydown', { key: 'Enter', code: 'Enter', isComposing: false });
+  assert.equal(h.cameras.length, 1, 'compositionend before Enter keydown is guarded too');
+  input.fire('keyup', { key: 'Enter', code: 'Enter' });
+  input.fire('keydown', { key: 'Enter', code: 'Enter' });
+  assert.equal(h.cameras.length, 2);
+  const staleRow = h.rows()[0]; target.remove();
+  staleRow.fire('click');
+  assert.equal(h.cameras.length, 2);
+  assert.match(h.document.querySelector('.egd-minimap-search-status').textContent, /더 이상 열려 있지 않거나/);
+  assert.equal(input.value, '한글');
+  assert.equal(h.document.activeElement, input);
+  assert.deepEqual([h.state.activeEntityId, h.state.boards.activeProjectionId, h.state.codex.activeThreadId],
+    ['active-view', 'active-board', 'unchanged-run-target']);
+  assert.deepEqual(active.browserViewport, { x: 31, y: 47 });
+  assert.equal(h.state.zoomTarget, 1, 'navigation does not trigger semantic-zoom focus transfer');
+  input.fire('keydown', { key: 'Escape' });
+  assert.equal(input.value, '', 'first Escape clears the query');
+  input.fire('keydown', { key: 'Escape' });
+  assert.equal(h.document.getElementById('egd-desk-minimap'), null, 'second Escape closes the minimap');
+});
+
+test('direct minimap presses and overlap selection move only the camera, and pointer opening keeps content focus', () => {
+  const h = minimapUiHarness();
+  h.make('active-board', '기존 Board', 0, 0, 'board');
+  const active = h.make('active-view', '원래 화면', 10, 10);
+  h.make('other-board', '다른 Board', 4000, 3000, 'board');
+  const contentFocus = h.document.createElement('textarea'); h.document.documentElement.appendChild(contentFocus); contentFocus.focus();
+  h.toggleDeskMinimap();
+  let map = h.document.querySelector('.egd-minimap-map');
+  h.clickMap(map._egdeskMinimapTargets.find(target => target.id === 'other-board'));
+  assert.equal(h.cameras.length, 1);
+  assert.equal(h.document.activeElement, contentFocus);
+  assert.deepEqual([h.state.boards.activeProjectionId, h.state.activeEntityId, h.state.codex.activeThreadId],
+    ['active-board', 'active-view', 'unchanged-run-target']);
+  h.make('overlap-board', '겹친 Board', 4000, 3000, 'board');
+  h.state.panTarget = { x: 0, y: 0 }; h.refreshDeskMinimap();
+  map = h.document.querySelector('.egd-minimap-map');
+  h.clickMap(map._egdeskMinimapTargets.find(target => target.id === 'overlap-board'));
+  const stack = h.part('minimap-stack'); assert.ok(stack);
+  assert.equal(h.document.activeElement, contentFocus, 'opening an overlap list by pointer does not steal content focus');
+  const row = h.document.querySelectorAll('[data-testid="minimap-stack-row"]').find(item => item.dataset.targetId === 'overlap-board');
+  assert.ok(row); row.fire('click');
+  assert.equal(h.cameras.length, 2);
+  assert.deepEqual([h.state.boards.activeProjectionId, h.state.activeEntityId, h.state.codex.activeThreadId],
+    ['active-board', 'active-view', 'unchanged-run-target']);
+  assert.deepEqual(active.browserViewport, { x: 31, y: 47 });
+  h.state.panTarget = { x: 0, y: 0 }; h.refreshDeskMinimap();
+  const label = h.document.querySelectorAll('[data-testid="minimap-board-go"]').find(node => node.dataset.projectionId === 'other-board');
+  let prevented = false;
+  h.document.getElementById('egd-desk-minimap').fire('mousedown', { target: label, preventDefault: () => { prevented = true; } });
+  assert.equal(prevented, true, 'pointer button presses preserve the existing content focus');
+  assert.ok(label); label.fire('click');
+  assert.equal(h.cameras.length, 3, 'the Board label uses the same camera-only handler');
+  assert.deepEqual([h.state.boards.activeProjectionId, h.state.activeEntityId, h.state.zoomTarget], ['active-board', 'active-view', 1]);
+  const farView = h.make('far-view', '다른 열린 화면', 8000, 6000);
+  h.state.panTarget = { x: 0, y: 0 }; h.refreshDeskMinimap();
+  map = h.document.querySelector('.egd-minimap-map');
+  h.clickMap(map._egdeskMinimapTargets.find(target => target.id === 'far-view'));
+  assert.equal(h.cameras.length, 4, 'a direct View marker also moves only the camera');
+  assert.deepEqual(farView.browserViewport, { x: 31, y: 47 });
+  h.state.panTarget = { x: 0, y: 0 }; h.refreshDeskMinimap();
+  map = h.document.querySelector('.egd-minimap-map');
+  h.clickMap(map._egdeskMinimapTargets.find(target => target.id === 'far-view'), () => farView.remove());
+  assert.equal(h.cameras.length, 4, 'a View removed between press and release is not navigated');
+  assert.match(h.document.querySelector('.egd-minimap-search-status').textContent, /더 이상 열려 있지 않거나/);
+  assert.deepEqual([h.state.boards.activeProjectionId, h.state.activeEntityId, h.state.codex.activeThreadId],
+    ['active-board', 'active-view', 'unchanged-run-target']);
+  assert.equal(h.state.canvasUserCameraRevision, 4);
 });
 
 // AI engine selection (SUB-07, engine layer stage 7). Rows follow the bridge's
