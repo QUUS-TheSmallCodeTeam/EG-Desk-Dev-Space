@@ -44,8 +44,8 @@ function refuseLockedProfile(profile) {
 
 export function qaAutomationPorts(marionette = 2828, remote = 6000) {
   const valid = value => /^[1-9][0-9]{0,4}$/.test(String(value)) && Number(value) <= 65535;
-  if (![2828, 2829].includes(Number(marionette)) || !valid(remote) || Number(remote) === Number(marionette)) {
-    throw new Error('QA requires Marionette 2828/2829 and a distinct valid remote-agent port');
+  if (![2828, 2829, 28831, 28832].includes(Number(marionette)) || !valid(remote) || Number(remote) === Number(marionette)) {
+    throw new Error('QA requires Marionette 2828/2829/28831/28832 and a distinct valid remote-agent port');
   }
   return { marionette: Number(marionette), remote: Number(remote) };
 }

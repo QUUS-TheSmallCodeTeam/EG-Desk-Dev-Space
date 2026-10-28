@@ -59,6 +59,38 @@ test('normal mode disables automation and port selection cannot alias the QA cha
   assert.throws(() => qaAutomationPorts(2828, '6000;exit'), /valid/);
 });
 
+test('explicit 28831 and 28832 QA targets stay allowlisted and cannot alias remote channels', () => {
+  assert.deepEqual(qaAutomationPorts(28831, 60831), { marionette: 28831, remote: 60831 });
+  assert.deepEqual(qaAutomationPorts('28831', '60831'), { marionette: 28831, remote: 60831 });
+  assert.deepEqual(qaAutomationPorts(28832, 60832), { marionette: 28832, remote: 60832 });
+  assert.deepEqual(qaAutomationPorts('28832', '60832'), { marionette: 28832, remote: 60832 });
+  assert.throws(() => qaAutomationPorts(28832, 28832), /distinct/);
+  assert.throws(() => qaAutomationPorts(28831, 28831), /distinct/);
+  assert.throws(() => qaAutomationPorts(28833, 60832), /2828/);
+  assert.throws(() => qaAutomationPorts(28832, '60832;exit'), /valid/);
+});
+
+test('28831 and 28832 fixture preparation refuses port collisions before any profile writes', t => {
+  const source = createPrivateQaTempDirectory('egdesk-loader-launcher-');
+  t.after(() => remove(source, 'egdesk-loader-launcher-'));
+  for (const name of LOADER_FILES) fs.writeFileSync(path.join(source, name), `public fixture: ${name}`);
+  const { profile } = bootstrapQaProfile({ loaderSource: source });
+  t.after(() => remove(profile, 'egdesk-chat-test-'));
+  const env = { EGDESK_QA_FIXTURE_TRANSPORT: '1', EGDESK_QA_FIXTURE_PORT: '48832' };
+  for (const [marionette, remote, fixturePort] of [[28831, 60831, '28831'], [28831, 60831, '60831'],
+    [28832, 60832, '28832'], [28832, 60832, '60832']]) {
+    assert.throws(() => prepareQaFirefox(profile, { env: { ...env, EGDESK_QA_FIXTURE_PORT: fixturePort },
+      marionette, remote }), /distinct/);
+    assert.equal(fs.existsSync(path.join(profile, 'user.js')), false);
+    assert.equal(fs.existsSync(path.join(profile, QA_ISOLATION_MANIFEST)), false);
+  }
+  prepareQaFirefox(profile, { env, marionette: 28832, remote: 60832 });
+  const prefs = fs.readFileSync(path.join(profile, 'user.js'), 'utf8');
+  assert.match(prefs, /user_pref\("marionette.port", 28832\)/);
+  assert.match(prefs, /user_pref\("devtools.debugger.remote-port", 60832\)/);
+  assert.equal(validateQaFixtureIsolation(profile, { env }).port, 48832);
+});
+
 test('fixture preparation fails before writes for bad ports, and normal QA remains the original overlay', t => {
   const source = createPrivateQaTempDirectory('egdesk-loader-launcher-');
   t.after(() => remove(source, 'egdesk-loader-launcher-'));
