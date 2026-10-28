@@ -1482,7 +1482,7 @@ function copyProfileFormField(value, seen = new Map()) {
   });
   return result;
 }
-function profileExampleShape(value) {
+function profileRecordShape(value, keys) {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
   const prototype = Object.getPrototypeOf(value);
   // Saved JSON and editor objects can come from another JS realm. Recognize
@@ -1494,7 +1494,18 @@ function profileExampleShape(value) {
       || constructor.prototype !== prototype
       || Function.prototype.toString.call(constructor) !== Function.prototype.toString.call(Object)) return false;
   }
-  return Object.keys(value).every(key => key === 'user' || key === 'reply');
+  return Object.keys(value).every(key => keys.includes(key));
+}
+function profileExampleShape(value) { return profileRecordShape(value, ['user', 'reply']); }
+// Match the store's existing image-reference rules; image bytes are never
+// accepted here, and the store still checks that the asset actually exists.
+function profileImageReference(value) {
+  if (!profileRecordShape(value, ['kind', 'value', 'color', 'assetId']) || value.kind !== 'image'
+    || typeof value.value !== 'string' || typeof value.assetId !== 'string' || !/^img-[0-9a-f]{64}$/.test(value.assetId)) return null;
+  const text = formLine(value.value);
+  const color = value.color === undefined ? PROFILE_AVATAR_PALETTE[0] : typeof value.color === 'string' ? value.color.toLowerCase() : null;
+  if (!isInitial(text) || !PROFILE_AVATAR_PALETTE.includes(color)) return null;
+  return { kind: 'image', value: text, color, assetId: value.assetId };
 }
 function formPersonalityText(value, field, label, max, multiline, add) {
   if (typeof value !== 'string') { add(field, `${label}은 글자로 입력해 주세요.`); return null; }
@@ -1546,11 +1557,17 @@ function formPersonalityAvoid(value, limits, add) {
 
 /** Editable form fields from a saved body (or an empty new Agent). */
 export function profileFormFromBody(body = null) {
-  const avatar = publicProfileAvatar(body?.avatar);
+  // The editor can select initials or emoji but not photos. Keep the original
+  // image reference separately so unrelated edits cannot replace it.
+  const image = body?.avatar?.kind === 'image' ? copyProfileFormField(body.avatar) : null;
+  const avatar = image ? null : publicProfileAvatar(body?.avatar);
   const tone = PROFILE_TONE_OPTIONS.some(option => option.value === body?.personality?.tone) ? body.personality.tone : 'plain';
   return {
     name: typeof body?.name === 'string' ? body.name : '',
-    avatarKind: avatar?.kind || 'initial', avatarValue: avatar?.value || '', avatarColor: avatar?.color || PROFILE_AVATAR_PALETTE[0],
+    avatarKind: image ? 'image' : avatar?.kind || 'initial',
+    avatarValue: image ? (typeof image.value === 'string' ? image.value : '') : avatar?.value || '',
+    avatarColor: image ? (image.color === undefined ? PROFILE_AVATAR_PALETTE[0] : image.color) : avatar?.color || PROFILE_AVATAR_PALETTE[0],
+    ...(image ? { avatarImage: image } : {}),
     role: typeof body?.role === 'string' ? body.role : '', tone,
     traits: Array.isArray(body?.personality?.traits) ? body.personality.traits.filter(item => typeof item === 'string') : [],
     speechNotes: typeof body?.personality?.speechNotes === 'string' ? body.personality.speechNotes : '',
@@ -1577,14 +1594,19 @@ export function validateProfileForm(form = {}) {
   if (!name) add('name', '담당자 이름을 입력해 주세요.');
   else if (SINGLE_LINE_BAD.test(name)) add('name', '담당자 이름은 한 줄로 입력해 주세요.');
   else if (textLength(name) > limits.name) add('name', `담당자 이름은 ${limits.name}자 이하로 입력해 주세요.`);
-  const kind = form.avatarKind === 'emoji' ? 'emoji' : 'initial';
+  const image = form.avatarKind === 'image' ? profileImageReference(form.avatarImage) : null;
+  if (form.avatarKind === 'image' && !image) add('avatar', '저장된 아바타 사진을 확인할 수 없습니다. 다시 선택해 주세요.');
+  if (form.avatarKind === 'image' && typeof form.avatarValue !== 'string') add('avatar', '이니셜은 글자나 숫자 1~2자로 넣어 주세요.');
+  // Editing the photo's fallback initial or color does not replace the photo.
+  // Only an explicit selection of the initial or emoji kind does so.
+  const kind = form.avatarKind === 'emoji' ? 'emoji' : form.avatarKind === 'image' ? 'image' : 'initial';
   let avatarValue = formLine(form.avatarValue);
-  if (!avatarValue && kind === 'initial' && name) {
+  if (!avatarValue && (kind === 'initial' || kind === 'image') && name) {
     const first = graphemesOf(name)[0] || '';
     avatarValue = isInitial(first) ? first.toUpperCase() : '';
   }
   if (avatarValue && kind === 'emoji' && !isOneEmoji(avatarValue)) add('avatar', '아바타 이모지는 하나만 넣어 주세요.');
-  if (avatarValue && kind === 'initial' && !isInitial(avatarValue)) add('avatar', '이니셜은 글자나 숫자 1~2자로 넣어 주세요.');
+  if ((kind === 'image' || (kind === 'initial' && avatarValue)) && !isInitial(avatarValue)) add('avatar', '이니셜은 글자나 숫자 1~2자로 넣어 주세요.');
   const color = typeof form.avatarColor === 'string' ? form.avatarColor.toLowerCase() : '';
   if (!PROFILE_AVATAR_PALETTE.includes(color)) add('avatarColor', '아바타 색은 준비된 6가지 중에서 골라 주세요.');
   const role = formLine(form.role);
@@ -1611,7 +1633,7 @@ export function validateProfileForm(form = {}) {
   if (form.toolCeilingOn === true && !toolCeiling) add('toolCeiling', '쓸 수 있는 도구를 다시 골라 주세요.');
   if (errors.length) return { ok: false, errors, body: null };
   return { ok: true, errors, body: {
-    name, avatar: avatarValue ? { kind, value: avatarValue, color } : null, role,
+    name, avatar: avatarValue ? { kind, value: avatarValue, color, ...(kind === 'image' ? { assetId: image.assetId } : {}) } : null, role,
     personality: { tone, traits, speechNotes,
       ...(examples.length ? { examples } : {}),
       ...(avoid.length ? { avoid } : {}),

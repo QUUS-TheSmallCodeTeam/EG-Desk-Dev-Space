@@ -1,12 +1,20 @@
 import assert from 'node:assert/strict';
+import { readFileSync, rmSync } from 'node:fs';
+import { Readable } from 'node:stream';
 import test from 'node:test';
-import { runInNewContext } from 'node:vm';
+import { compileFunction, runInNewContext } from 'node:vm';
+import * as ChatState from '../overlay/resources/EGDeskChatState.sys.mjs';
+import * as ProfileTransfer from '../overlay/resources/EGDeskProfileTransfer.sys.mjs';
+import * as ProfileTransferView from '../overlay/resources/EGDeskProfileTransferView.sys.mjs';
 import {
   PROFILE_FORM_LIMITS, profileFormFromBody, validateProfileForm, profileDiffRows,
 } from '../overlay/resources/EGDeskChatState.sys.mjs';
 import {
-  PERSONALITY_LIMITS, normalizeProfileBody, profileHash, diffProfileBodies,
+  PERSONALITY_LIMITS, normalizeProfileBody, openProfileStore, profileHash, diffProfileBodies,
 } from '../helper/egdesk-profile-store.mjs';
+import { handleProfileHttp } from '../helper/egdesk-profile-http.mjs';
+import { createPrivateQaTempDirectory } from './egdesk-qa-platform.mjs';
+import { readSurfaceSource } from './egdesk-surface-source.mjs';
 
 const fields = [['personalityExamples', 'examples'], ['personalityAvoid', 'avoid']];
 const voice = {
@@ -43,6 +51,34 @@ function freeze(value) {
   return value;
 }
 
+// Reuse the existing Settings fake DOM and real production handlers without
+// changing that shared test file or launching a browser or provider.
+function imageSettingsHarness() {
+  const testSource = readFileSync(new URL('./egdesk-surface-state.test.mjs', import.meta.url), 'utf8');
+  const between = (start, end) => {
+    const first = testSource.indexOf(start), last = testSource.indexOf(end, first + start.length);
+    assert.ok(first >= 0 && last > first, `Settings fixture section missing: ${start}`);
+    return testSource.slice(first, last);
+  };
+  const surfaceSource = readSurfaceSource();
+  const declaration = name => {
+    const first = surfaceSource.indexOf(`  function ${name}(`), last = surfaceSource.indexOf('\n  }\n', first);
+    assert.ok(first >= 0 && last > first, `Settings handler missing: ${name}`);
+    return surfaceSource.slice(first, last + 4);
+  };
+  const nativeTextGlueHarness = () => ({ files: new Map(), pickers: [],
+    adapter: { readText: async () => ({ cancelled: true }), saveText: async () => ({ cancelled: true }) } });
+  return compileFunction([
+    between('function settingsFakeDocument()', "test('production Settings card"),
+    between('function profileTransferBridgeMethods(', 'function portableSettingsHarness('),
+    between('function portableSettingsHarness(', 'async function duplicateSettingsHarness('),
+    'return { portableSettingsHarness, settingsButton, settingsNodes, settle };',
+  ].join('\n'), ['surfaceSource', 'declaration', 'assert', 'compileFunction', 'Chat', 'ProfileTransfer', 'ProfileTransferView',
+    'nativeTextGlueHarness', 'normalizeProfileBody', 'profileHash', 'Surface'])(
+    surfaceSource, declaration, assert, compileFunction, ChatState, ProfileTransfer, ProfileTransferView,
+    nativeTextGlueHarness, normalizeProfileBody, profileHash, null);
+}
+
 test('form limits expose the exact backend personality limits without changing the established limits', () => {
   assert.deepEqual(Object.fromEntries(Object.keys(PERSONALITY_LIMITS).map(key => [key, PROFILE_FORM_LIMITS[key]])),
     { examples: 3, exampleUser: 100, exampleReply: 280, avoid: 8, avoidItem: 80 });
@@ -70,6 +106,180 @@ test('unchanged and role-only forms preserve every other canonical field and the
       assert.deepEqual(saved, original); assert.equal(profileHash(saved), oldHash);
     }
   }
+});
+
+test('an existing image reference survives an unchanged form and unrelated personality or model edits', () => {
+  const avatar = { kind: 'image', value: '보', color: '#252a26', assetId: `img-${'a'.repeat(64)}` };
+  const saved = freeze(savedBody(voice, { avatar })), original = structuredClone(saved);
+  const edits = [
+    () => {},
+    form => { form.role = '새 역할'; },
+    form => { form.tone = 'warm'; form.traits = ['신중함']; },
+    form => { form.model = { ...form.model, effort: 'low' }; },
+  ];
+  for (const edit of edits) {
+    const form = profileFormFromBody(saved);
+    edit(form);
+    const result = checked(form), normalized = normalizeProfileBody(result);
+    assert.deepEqual(result.avatar, avatar);
+    assert.deepEqual(normalized.avatar, avatar);
+    const expected = structuredClone(original);
+    if (form.role !== original.role) expected.role = form.role;
+    if (form.tone !== original.personality.tone) expected.personality.tone = form.tone;
+    if (JSON.stringify(form.traits) !== JSON.stringify(original.personality.traits)) expected.personality.traits = form.traits;
+    expected.model = form.model;
+    assert.deepEqual(normalized, expected);
+    assert.equal(profileHash(result), profileHash(expected));
+    assert.deepEqual(saved, original);
+  }
+});
+
+test('an explicit change from an image to an initial or emoji replaces the image reference', () => {
+  const avatar = { kind: 'image', value: '보', color: '#252a26', assetId: `img-${'b'.repeat(64)}` };
+  const saved = freeze(savedBody(voice, { avatar }));
+  for (const change of [
+    { kind: 'initial', value: '보', color: '#252a26' },
+    { kind: 'initial', value: '새', color: '#49634f' },
+    { kind: 'emoji', value: '🧭', color: '#a9c5a9' },
+  ]) {
+    const form = profileFormFromBody(saved);
+    form.avatarKind = change.kind; form.avatarValue = change.value; form.avatarColor = change.color;
+    const result = checked(form);
+    assert.deepEqual(result.avatar, change);
+    assert.deepEqual(normalizeProfileBody(result).avatar, change);
+    assert.equal(Object.hasOwn(result.avatar, 'assetId'), false);
+  }
+  assert.deepEqual(saved.avatar, avatar);
+});
+
+test('editing the image fallback initial or color preserves the photo reference', () => {
+  const avatar = { kind: 'image', value: '보', color: '#252a26', assetId: `img-${'d'.repeat(64)}` };
+  const saved = freeze(savedBody(voice, { avatar }));
+  for (const [field, value, expected] of [
+    ['avatarValue', '새', { ...avatar, value: '새' }],
+    ['avatarColor', '#49634f', { ...avatar, color: '#49634f' }],
+    ['avatarValue', '', avatar],
+  ]) {
+    const form = profileFormFromBody(saved);
+    form[field] = value;
+    const result = checked(form);
+    assert.deepEqual(result.avatar, expected);
+    assert.deepEqual(normalizeProfileBody(result).avatar, expected);
+  }
+});
+
+test('a cross-realm image reference stays independent of the source and emitted bodies', () => {
+  const avatar = { kind: 'image', value: '보', color: '#252a26', assetId: `img-${'e'.repeat(64)}` };
+  const saved = savedBody(voice, { avatar }), json = JSON.stringify(saved);
+  const foreign = freeze(runInNewContext('JSON.parse(json)', { json }));
+  const form = profileFormFromBody(foreign);
+  form.tone = 'warm';
+  const first = checked(form), second = checked(form);
+  assert.deepEqual(first.avatar, avatar);
+  assert.deepEqual(second.avatar, avatar);
+  assert.notEqual(first.avatar, second.avatar);
+  first.avatar.assetId = `img-${'f'.repeat(64)}`;
+  assert.deepEqual(second.avatar, avatar);
+  assert.equal(JSON.stringify(foreign), json);
+});
+
+test('Settings handlers and a private store preserve the photo across personality and fallback-color edits', async t => {
+  const dataDir = createPrivateQaTempDirectory('egdesk-avatar-form-');
+  const store = openProfileStore({ dataDir, ownerHash: 'synthetic-avatar-form-test' });
+  t.after(() => { store.close(); rmSync(dataDir, { recursive: true, force: true }); });
+  // Synthetic 1x1 PNG, accepted by the existing image validator in this test store only.
+  const imageBase64 = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADElEQVR4nGPQiKoAAAGoAPuznd66AAAAAElFTkSuQmCC';
+  const asset = store.putAvatarImage({ mediaType: 'image/png', imageBase64 });
+  const avatar = { kind: 'image', value: '보', color: '#252a26', assetId: asset.assetId };
+  const created = store.createDraft(savedBody(voice, { avatar }));
+  store.activate(created.id, created.revision, null);
+  const originalBytes = store.getAvatarImage(asset.assetId).bytes;
+  const { portableSettingsHarness, settingsButton, settingsNodes, settle } = imageSettingsHarness();
+  const h = portableSettingsHarness({ initialDetail: store.get(created.id), respond: async (path, options = {}) => {
+    const req = Readable.from(options.body === undefined ? [] : [Buffer.from(options.body)]);
+    Object.assign(req, { method: options.method || 'GET', url: path, socket: { remoteAddress: '127.0.0.1' },
+      headers: { host: '127.0.0.1:39218', ...(options.body === undefined ? {} : { 'content-type': 'application/json' }) } });
+    let response;
+    assert.equal(await handleProfileHttp(req, new URL(path, 'http://127.0.0.1:39218'), { store,
+      send: (status, body) => { response = { status, body }; } }), true);
+    if (response.status >= 400) throw Object.assign(new Error('Profile request refused'), { status: response.status, ...response.body });
+    return response.body;
+  } });
+  const field = name => h.document.getElementById(`${h.card.getAttribute('id')}-profile-${name}`);
+  const edit = async () => { settingsButton(h.card, '편집').fire('click'); await settle(); };
+  const save = async () => { h.part('settings-agent-save').fire('click'); await settle(); };
+  await settle(); await edit();
+  assert.equal(field('avatarKind-initial').getAttribute('aria-pressed'), 'false');
+  assert.equal(field('avatarKind-emoji').getAttribute('aria-pressed'), 'false');
+  h.emit();
+  field('tone-warm').fire('click'); // Production click handler re-renders the edit form.
+  assert.equal(field('avatarKind-initial').getAttribute('aria-pressed'), 'false');
+  assert.equal(field('avatarKind-emoji').getAttribute('aria-pressed'), 'false');
+  await save();
+  let head = store.get(created.id).head;
+  assert.equal(head.profileId, created.id);
+  assert.equal(head.parentRevision, created.revision);
+  assert.equal(head.body.personality.tone, 'warm');
+  assert.deepEqual(head.body.avatar, avatar);
+  assert.deepEqual(head.body.model, created.profile.head.body.model);
+  assert.deepEqual(store.getAvatarImage(asset.assetId).bytes, originalBytes);
+
+  await edit();
+  const swatch = settingsNodes(h.card, node => node.getAttribute('aria-label') === '색 1')[0];
+  assert.ok(swatch); swatch.fire('click'); await save();
+  head = store.get(created.id).head;
+  assert.deepEqual(head.body.avatar, { ...avatar, color: '#49634f' });
+  assert.deepEqual(store.getAvatarImage(asset.assetId).bytes, originalBytes);
+
+  const missing = profileFormFromBody(head.body);
+  missing.avatarImage.assetId = `img-${'f'.repeat(64)}`; missing.role = 'missing synthetic asset';
+  assert.throws(() => store.saveDraft(created.id, checked(missing), head.revision), { code: 'PROFILE_ASSET_NOT_FOUND' });
+  assert.equal(store.get(created.id).headRevision, head.revision);
+  assert.throws(() => store.putAvatarImage({ mediaType: 'image/png', imageBase64: 'AAAA' }), { code: 'INVALID_PROFILE_IMAGE' });
+
+  await edit(); field('avatarKind-initial').fire('click'); await save();
+  assert.deepEqual(store.get(created.id).head.body.avatar, { kind: 'initial', value: '보', color: '#49634f' });
+  assert.deepEqual(store.getAvatarImage(asset.assetId).bytes, originalBytes);
+
+  await edit(); field('avatarKind-emoji').fire('click');
+  const avatarInput = field('avatar'); avatarInput.value = '🧭'; avatarInput.fire('input');
+  await save();
+  assert.deepEqual(store.get(created.id).head.body.avatar, { kind: 'emoji', value: '🧭', color: '#49634f' });
+  assert.equal(store.list().profiles.length, 1, 'the same profile is edited, not replaced');
+});
+
+test('unsupported image references and extra avatar fields remain invalid instead of being silently repaired', () => {
+  const avatar = { kind: 'image', value: '보', color: '#252a26', assetId: `img-${'c'.repeat(64)}` };
+  const invalid = [
+    { ...avatar, assetId: 'data:image/png;base64,AAAA' },
+    { ...avatar, assetId: '../profile.png' },
+    { ...avatar, assetId: `img-${'A'.repeat(64)}` },
+    { ...avatar, assetId: `img-${'c'.repeat(63)}` },
+    { ...avatar, assetId: null },
+    { ...avatar, value: null },
+    { ...avatar, value: 'not-an-initial' },
+    { ...avatar, color: null },
+    { ...avatar, color: '#123456' },
+    { ...avatar, extra: undefined },
+    Object.assign([], avatar),
+    Object.assign(new Date(0), avatar),
+    Object.assign(Object.create({ unsupported: true }), avatar),
+  ];
+  for (const bad of invalid) {
+    const saved = { ...savedBody(), avatar: bad };
+    assert.throws(() => normalizeProfileBody(saved), { code: 'INVALID_PROFILE' });
+    const form = profileFormFromBody(saved);
+    form.role = '다른 설정만 수정';
+    const result = validateProfileForm(form);
+    assert.equal(result.ok, false, JSON.stringify(bad));
+    assert.equal(result.body, null);
+    assert.ok(result.errors.some(error => error.field === 'avatar' || error.field === 'avatarColor'));
+  }
+  const noReference = { ...profileFormFromBody(savedBody()), avatarKind: 'image' };
+  assert.equal(validateProfileForm(noReference).ok, false);
+  const badEditorValue = profileFormFromBody(savedBody(voice, { avatar }));
+  badEditorValue.avatarValue = 12;
+  assert.equal(validateProfileForm(badEditorValue).ok, false);
 });
 
 test('cross-realm saved JSON opens and saves unchanged or role-only without losing the canonical hash or sharing example rows', () => {
