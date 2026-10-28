@@ -2,10 +2,13 @@
 // UI, picker grants, File service/SQLite and ScriptRun collector are real;
 // only the OS directory result and terminal HTTP shell I/O are synthetic.
 import assert from 'node:assert/strict';
+import fs from 'node:fs';
 import { createHash } from 'node:crypto';
+import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { chrome, loopbackJson, runUiFlow, selectorForId, selectQaThread } from './egdesk-qa-ui-flow.mjs';
-import { projectFileFixtureEnabled, validateQaFixtureIsolation, QA_PROJECT_PICKER_FILE } from './egdesk-qa-fixture-isolation.mjs';
+import { projectFileFixtureEnabled, validateQaFixtureIsolation, qaBridgeConfig, qaBridgeUrl, QA_PROJECT_PICKER_FILE } from './egdesk-qa-fixture-isolation.mjs';
+import { FirefoxMcpChatHarness } from './firefox-mcp-chat-harness.mjs';
 import { parseCli, assertBeforeDeadline, observeGuard, observeFirstUse, resizeHeadless,
   waitStableViewport, waitFor, observeTargets, targetIssues, captureHeadlessScreenshot } from './verify-firefox-mcp-headless-ui-regression.mjs';
 import { parseProjectTerminalWrite } from './egdesk-project-file-fixture.mjs';
@@ -646,6 +649,85 @@ export function assertProjectEnvironment(env = process.env) {
   assert.ok(typeof env.EGDESK_QA_FIXTURE_TOKEN === 'string' && env.EGDESK_QA_FIXTURE_TOKEN.length >= 16,
     'EGDESK_QA_FIXTURE_TOKEN for the owned fixture is required');
   assert.equal(env.EGDESK_QA_REAL_TURN, '0');
+  return true;
+}
+
+// The watcher flow attaches only to a separately launched, explicit owned
+// profile/port pair. It never launches Firefox or discovers a personal profile.
+export function assertProjectWatchEnvironment(env = process.env) {
+  assertProjectEnvironment(env);
+  assert.equal(env.EGDESK_QA_PROJECT_FILE_WATCH, '1', 'watcher fixture must be explicitly enabled');
+  for (const key of ['EGDESK_MARIONETTE_PORT', 'EGDESK_QA_FIXTURE_PORT']) {
+    assert.match(env[key] || '', /^[1-9]\d{0,4}$/, `${key} must be explicit`);
+    assert.ok(Number(env[key]) <= 65535, `${key} must be a valid port`);
+  }
+  assert.notEqual(env.EGDESK_MARIONETTE_PORT, env.EGDESK_QA_FIXTURE_PORT);
+  qaBridgeConfig(env); // Also rejects the production bridge port before attach.
+  for (const key of ['EGDESK_QA_MCP_ENTRY', 'EGDESK_QA_GECKODRIVER']) {
+    assert.ok(typeof env[key] === 'string' && path.isAbsolute(env[key]), `${key} must be an explicit absolute path`);
+  }
+  assert.equal(process.platform, 'darwin', 'recursive native watcher QA is macOS-only');
+  return true;
+}
+
+// Receipt validation is deliberately separate: passing this with synthetic
+// objects is a unit test, never a native acceptance result.
+export function assertProjectWatchEvidence(proof) {
+  const { before, after, fixtureBefore, fixtureAfter, bridgeBefore, bridgeAfter, event, broadcast, screenshots, visibleTarget } = proof;
+  assert.ok(before.cardId && before.snapshot?.rootId && before.snapshot?.draftId);
+  assert.equal(before.snapshot.sourceConnection, 'connected');
+  assert.equal(before.snapshot.projectId, null, 'ordinary picked root, not an inferred Board');
+  assert.ok(fixtureBefore.watchEnabled && fixtureBefore.watchRoots.some(row => row.rootId === before.snapshot.rootId && row.watching));
+  assert.equal(fixtureBefore.watchWrites.length, 0);
+  assert.equal(before.folderExpanded, true);
+  assert.equal(before.createdCount, 0);
+  assert.equal(before.editor.focused, true);
+  assert.ok(before.editor.value.length > 0);
+  assert.equal(before.editor.selectionStart, 0);
+  assert.equal(before.editor.selectionEnd, before.editor.value.length);
+  assert.ok(bridgeBefore.clients > 0);
+  assert.equal(event.topic, 'file.changed');
+  assert.equal(event.payload?.rootId, before.snapshot.rootId);
+  assert.equal(event.payload?.relativePath, 'qa-expanded/qa-watch-created.txt');
+  assert.ok(['rename', 'change'].includes(event.payload?.change));
+  assert.ok(event.id && fixtureAfter.watchEvents.some(row => row.id === event.id));
+  assert.equal(broadcast.eventId, event.id);
+  assert.ok(broadcast.clients > 0, 'actual SSE clients were present at broadcast');
+  assert.ok(bridgeAfter.observed.projectFileWatchBroadcasts.some(row => row.eventId === event.id && row.clients > 0));
+  assert.deepEqual(fixtureAfter.watchWrites.map(row => [row.relativePath, row.operation]),
+    [['qa-expanded/qa-watch-created.txt', 'create-only']]);
+  const initialFolder = operations(fixtureBefore, 'listDirectory').find(row => row.status === 200 &&
+    row.response?.result?.entries?.some(entry => entry.name === 'qa-existing.txt'));
+  assert.ok(initialFolder?.request?.directoryId, 'the expanded fixture folder was actually listed before the change');
+  assert.ok(operations(fixtureAfter, 'listDirectory').some(row => row.status === 200 && row.sequence > event.sequence &&
+    row.request?.directoryId === initialFolder.request.directoryId &&
+    row.response?.result?.entries?.some(entry => entry.name === 'qa-watch-created.txt')),
+  'the real File service re-listed the same folder after the filesystem event');
+  assert.equal(after.cardId, before.cardId);
+  assert.equal(after.folderExpanded, true);
+  assert.equal(after.createdCount, 1);
+  assert.equal(after.createdVisible, true);
+  assert.deepEqual(targetIssues(visibleTarget), [], 'created item is an unobstructed, in-viewport target');
+  assert.deepEqual(after.editor, before.editor, 'working copy, selection, and focus are unchanged');
+  for (const key of ['rootId', 'projectId', 'fileId', 'draftId', 'sourceRevision', 'sourceConnection', 'bufferRevision', 'savedRevision', 'dirty', 'originalDirty']) {
+    assert.equal(after.snapshot[key], before.snapshot[key], `${key} changed during watcher refresh`);
+  }
+  assert.equal(fixtureAfter.currentOriginalSha256, fixtureBefore.originalSha256);
+  assert.equal(fixtureBefore.currentOriginalSha256, fixtureBefore.originalSha256);
+  assert.equal(fixtureAfter.terminalRequests.length, 0);
+  assert.equal(operations(fixtureAfter, 'saveOriginal').length, 0);
+  assert.equal(fixtureAfter.blockedRoutes.some(row => row.route.includes('save-original')), false);
+  for (const bridge of [bridgeBefore, bridgeAfter]) {
+    assert.equal(bridge.observed.sends.length, 0);
+    assert.equal(bridge.observed.authWrites.length, 0);
+    assert.equal(bridge.runs.length, 0);
+  }
+  for (const stage of ['watch-before', 'watch-after']) {
+    const capture = screenshots.find(row => row.viewport === stage);
+    assert.equal(capture?.status, 'captured');
+    assert.equal(capture.visualPass, null);
+    assert.ok(typeof capture.path === 'string' && capture.path.startsWith('/'));
+  }
   return true;
 }
 
@@ -1779,9 +1861,270 @@ export async function runProjectFileFlow({ harness, result, check }, { profile, 
     'Provider send/frozen request execution (not exercised)', 'No-replay observed for bounded post-loss interval only'];
 }
 
+export function projectWatchScope() {
+  return { planned: ['headless native input', 'File picker channel/grant and HTTP adapter',
+    'connected-root filesystem watcher', 'workflow bus and SSE', 'FileView tree refresh'],
+  synthetic: ['OS directory result only', 'fixture bridge transport'],
+  excluded: ['foreground input', 'native OS picker', 'original save', 'Agent start', 'provider calls'],
+  providerCalls: 'not-measured', providerBoundary: 'model-free fixture with real turns disabled',
+  outerIsolation: 'independent launcher must verify OS policy and listener ownership' };
+}
+
+// A late MCP result must not unlock another action after cancellation/deadline.
+export function guardProjectWatchHarness(harness, assertCurrent) {
+  return new Proxy(harness, { get(target, key) {
+    const value = Reflect.get(target, key, target);
+    if (typeof value !== 'function') return value;
+    return (...args) => {
+      assertCurrent();
+      return Promise.resolve(value.apply(target, args)).then(result => { assertCurrent(); return result; });
+    };
+  } });
+}
+
+// Aborting a sent POST does not prove whether the fixture applied it. The
+// caller retains an unknown receipt and never retries an ambiguous mutation.
+export async function projectWatchJson(route, { method = 'GET', body, token, env = process.env, signal,
+  deadlineMs, assertCurrent = () => assertBeforeDeadline(deadlineMs), operations = [], fetchImpl = globalThis.fetch } = {}) {
+  assertCurrent();
+  const record = method === 'POST' ? { route, status: 'pending', dispatched: false } : null;
+  if (record) operations.push(record);
+  try {
+    const timeout = Math.max(1, Math.min(10000, deadlineMs - Date.now()));
+    const signals = [AbortSignal.timeout(timeout), ...(signal ? [signal] : [])];
+    if (record) record.dispatched = true;
+    const response = await fetchImpl(qaBridgeUrl(route, env), { method, redirect: 'error', signal: AbortSignal.any(signals),
+      headers: { ...(body ? { 'Content-Type': 'application/json' } : {}), ...(token ? { 'X-EGDESK-QA-Token': token } : {}) },
+      ...(body ? { body: JSON.stringify(body) } : {}) });
+    assertCurrent();
+    const value = await response.json();
+    assertCurrent();
+    if (record) { record.status = response.ok ? 'completed' : 'responded-error'; record.httpStatus = response.status; }
+    if (!response.ok) throw new Error(`${route.split('?')[0]} failed (${response.status}): ${value.code || value.error?.code || value.error || 'request failed'}`);
+    return value;
+  } catch (error) {
+    if (record?.status === 'pending') record.status = record.dispatched ? 'unknown' : 'not-dispatched';
+    throw error;
+  }
+}
+
+async function observeWatchUi(harness) {
+  return chrome(harness, () => {
+    const cards = [...document.querySelectorAll('[data-testid="file-card"]')];
+    const card = cards.length === 1 ? cards[0] : null;
+    const editor = card?.querySelector('[data-testid="file-editor"]');
+    const folder = card?.querySelector('[role="treeitem"][data-relative-path="qa-expanded"]');
+    const created = [...(card?.querySelectorAll('[role="treeitem"][data-relative-path="qa-expanded/qa-watch-created.txt"]') || [])];
+    const item = created.length === 1 ? created[0] : null;
+    const rect = item?.getBoundingClientRect(), style = item && getComputedStyle(item);
+    const visible = !!rect && rect.width > 0 && rect.height > 0 && rect.left >= 0 && rect.top >= 0 &&
+      rect.right <= innerWidth && rect.bottom <= innerHeight && style.display !== 'none' &&
+      style.visibility === 'visible' && !item.closest('[hidden], [inert], [aria-hidden="true"]');
+    return { count: cards.length, cardId: card?.id || null, snapshot: card?._fileView?.snapshot?.() || null,
+      folderExpanded: folder?.getAttribute('aria-expanded') === 'true', createdCount: created.length, createdVisible: visible,
+      editor: editor ? { value: editor.value, selectionStart: editor.selectionStart, selectionEnd: editor.selectionEnd,
+        focused: document.activeElement === editor } : null };
+  });
+}
+
+export async function waitWatcherFileUi(harness, predicate, deadlineMs, { observe = observeProjectUi, wait = waitFor } = {}) {
+  return wait(harness, async () => {
+    try { return await observe(harness); }
+    catch (error) {
+      if (error.code === 'QA_PROJECT_OBSERVATION_UNSTABLE') return null;
+      throw error;
+    }
+  }, value => !!value && predicate(value), deadlineMs);
+}
+
+export async function runProjectFileWatcherFlow({ harness, result, check }, { profile, deadlineMs, env = process.env,
+  signal, assertCurrent = () => assertBeforeDeadline(deadlineMs), fixtureOperations = [] }) {
+  assertProjectWatchEnvironment(env);
+  assertBeforeDeadline(deadlineMs);
+  const isolation = validateQaFixtureIsolation(profile, { env });
+  const picker = isolation.files[QA_PROJECT_PICKER_FILE]?.projectPickerTransform;
+  check('profile has the reviewed picker-result-only transform and real FileView source',
+    picker?.kind === 'project-file-os-directory-result-v1' && !!isolation.files['resources/EGDeskFileView.sys.mjs']);
+  result.sourceProof = isolation.files;
+  result.scope = projectWatchScope();
+  result.observedStages = [];
+  result.actions = [];
+  const proof = result.watcherProof = { screenshots: [] };
+  const token = env.EGDESK_QA_FIXTURE_TOKEN;
+  const request = (route, options = {}) => projectWatchJson(route, { ...options, token, env, signal, deadlineMs,
+    assertCurrent, operations: fixtureOperations });
+  const state = () => request('/__qa/project-file/state');
+  const bridge = () => request('/__qa/state');
+  const post = (route, body = {}) => request(route, { method: 'POST', body });
+  assertBeforeDeadline(deadlineMs);
+  const guard = await observeGuard(harness);
+  check('only the explicit owned profile and port, headless Firefox, without an account',
+    harness.profile === profile && harness.marionettePort === Number(env.EGDESK_MARIONETTE_PORT) &&
+    guard.documentURI === 'chrome://browser/content/browser.xhtml' && guard.headless && guard.mounted && !guard.loggedIn && !guard.accountBound, guard);
+  result.observedStages.push('headless profile and account guard');
+  const initial = await state();
+  check('fresh owned watcher fixture before native input', initial.profile === profile && initial.watchEnabled &&
+    initial.fileRequests.length === 0 && initial.watchWrites.length === 0 && initial.terminalRequests.length === 0);
+  proof.initial = initial;
+  const size = PROJECT_VIEWPORTS[0];
+  assertBeforeDeadline(deadlineMs);
+  await resizeHeadless(harness, size, deadlineMs); await waitStableViewport(harness, size, deadlineMs);
+  const first = await observeFirstUse(harness);
+  if (first.initialBrowserFocus || first.fullscreen) {
+    assertBeforeDeadline(deadlineMs); await harness.press('meta+-');
+    result.actions.push({ label: 'native first-use zoom-out', kind: 'native-key' });
+    await waitFor(harness, observeFirstUse, value => !value.initialBrowserFocus && !value.fullscreen, deadlineMs);
+  }
+  const click = async (selector, label) => {
+    assertBeforeDeadline(deadlineMs);
+    const targets = await observeTargets(harness, selector);
+    check(`one unobstructed native target: ${label}`, targets.length === 1 && targetIssues(targets[0]).length === 0,
+      { count: targets.length, issues: targetIssues(targets[0]), rect: targets[0]?.rect });
+    assertBeforeDeadline(deadlineMs);
+    await harness.click(selector); result.actions.push({ label, selector, kind: 'native-click' });
+    if (!result.observedStages.includes('native headless input')) result.observedStages.push('native headless input');
+  };
+  await click('#egd-dock .egd-dock-btn[data-id="shelf"]', 'open File');
+  // Data-ready does not mean that the native canvas camera has settled.
+  // Observe the motion; never replay the opening click or alter camera state.
+  await waitStableViewport(harness, size, deadlineMs);
+  let ui = await waitStableProjectUi(harness, deadlineMs);
+  if (ui.count !== 1 || fileDetailAction(ui) === 'wait') {
+    ui = await waitWatcherFileUi(harness, value => value.count === 1 && fileDetailAction(value) !== 'wait', deadlineMs);
+  }
+  check('File is not author-hidden', fileDetailAction(ui) !== 'author-hidden');
+  if (fileDetailAction(ui) === 'native-proxy') {
+    await click(`${selectorForId(ui.cardId)} > .egd-semantic-proxy[data-kind="file"]`, 'reveal File');
+    await waitStableViewport(harness, size, deadlineMs);
+    ui = await waitWatcherFileUi(harness, value => value.cardId === ui.cardId && fileDetailAction(value) === 'detail', deadlineMs);
+  }
+  const card = selectorForId(ui.cardId);
+  const rootTarget = `${card} ${testid('file-connect-root')}`;
+  await waitFor(harness, () => observeTargets(harness, rootTarget),
+    targets => targets.length === 1 && targetIssues(targets[0]).length === 0, deadlineMs, { timeoutMs: 5000 });
+  await post('/__qa/project-file/config', { pickerResults: ['select-owned'] });
+  await click(rootTarget, 'select owned folder through real picker grant');
+  await waitFor(harness, observeWatchUi, value => !!value.snapshot?.rootId && value.snapshot.sourceConnection === 'connected', deadlineMs);
+  const rootState = await waitFor(harness, state, value => value.watchRoots.some(row => row.watching && row.rootKind === 'workspace'), deadlineMs);
+  check('the selected root was registered with the real watcher', rootState.fileRequests.some(row => row.operation === 'registerRoot' && row.status === 200));
+  result.observedStages.push('fixture picker grant and root registration');
+  await click(`${card} [role="treeitem"][data-relative-path="qa-expanded"]`, 'expand owned nested folder');
+  await waitFor(harness, observeWatchUi, value => value.folderExpanded, deadlineMs);
+  await click(`${card} [role="treeitem"][data-relative-path="qa-project.txt"]`, 'open owned working copy');
+  await waitFor(harness, observeWatchUi, value => !!value.snapshot?.draftId, deadlineMs);
+  const editor = `${card} ${testid('file-editor')}`;
+  const text = 'Owned watcher QA: unsaved working copy stays selected.';
+  await click(editor, 'focus working copy');
+  assertBeforeDeadline(deadlineMs); await harness.press('meta+a', editor);
+  assertBeforeDeadline(deadlineMs); await harness.typeText(text, { selector: editor });
+  result.actions.push({ label: 'type fixture-only working copy', kind: 'native-input' });
+  await waitFor(harness, state, value => operations(value, 'updateDraft').some(row => row.status === 200 && row.request.text === text), deadlineMs);
+  assertBeforeDeadline(deadlineMs); await harness.press('meta+a', editor);
+  proof.before = await waitFor(harness, observeWatchUi, value => value.editor?.value === text && value.editor.focused &&
+    value.editor.selectionStart === 0 && value.editor.selectionEnd === text.length, deadlineMs);
+  proof.fixtureBefore = await state();
+  proof.bridgeBefore = await waitFor(harness, bridge, value => value.clients > 0, deadlineMs);
+  const beforeShot = await captureHeadlessScreenshot(harness, 'watch-before', deadlineMs);
+  proof.screenshots.push(beforeShot); result.screenshots.push(beforeShot);
+  check('create-only fixture operation has a selected watched root and an SSE client',
+    proof.fixtureBefore.watchRoots.some(row => row.rootId === proof.before.snapshot.rootId && row.watching) && proof.bridgeBefore.clients > 0);
+  await post('/__qa/project-file/watch-create');
+  proof.after = await waitFor(harness, observeWatchUi, value => value.createdCount === 1 && value.createdVisible, deadlineMs);
+  const createdTargets = await observeTargets(harness, `${card} [role="treeitem"][data-relative-path="qa-expanded/qa-watch-created.txt"]`);
+  check('the new tree row is actually visible and unobstructed', createdTargets.length === 1 && targetIssues(createdTargets[0]).length === 0);
+  proof.visibleTarget = createdTargets[0];
+  proof.fixtureAfter = await state(); proof.bridgeAfter = await bridge();
+  proof.event = proof.fixtureAfter.watchEvents.find(row => row.topic === 'file.changed' && row.payload?.rootId === proof.before.snapshot.rootId &&
+    row.payload?.relativePath === 'qa-expanded/qa-watch-created.txt' &&
+    proof.bridgeAfter.observed.projectFileWatchBroadcasts?.some(sent => sent.eventId === row.id && sent.clients > 0));
+  proof.broadcast = proof.bridgeAfter.observed.projectFileWatchBroadcasts?.find(row => row.eventId === proof.event?.id && row.clients > 0);
+  const afterShot = await captureHeadlessScreenshot(harness, 'watch-after', deadlineMs);
+  proof.screenshots.push(afterShot); result.screenshots.push(afterShot);
+  check('real watcher event reached SSE and refreshed the visible File tree without disturbing the editor', assertProjectWatchEvidence(proof));
+  result.observedStages.push('fixture filesystem watcher event', 'fixture SSE broadcast attempted with connected client',
+    'FileView tree refreshed after watcher event');
+  result.unverified = ['Screenshot visual review', 'hardware foreground behavior', 'actual native OS picker', 'provider call count'];
+}
+
+export async function awaitProjectWatchDeadline(work, deadlineMs, now = Date.now) {
+  assertBeforeDeadline(deadlineMs, now());
+  let timer;
+  try {
+    const value = await Promise.race([
+      Promise.resolve().then(() => { assertBeforeDeadline(deadlineMs, now()); return work(); }),
+      new Promise((_, reject) => { timer = setTimeout(() => reject(new Error('QA deadline reached; no further actions')), Math.max(1, deadlineMs - now())); }),
+    ]);
+    assertBeforeDeadline(deadlineMs, now());
+    return value;
+  } finally { clearTimeout(timer); }
+}
+
+// Unlike the legacy runner, this watcher entry never begins a failure capture
+// after the deadline. Main owns Firefox/fixture; this wrapper only attaches to
+// the explicit QA profile and closes its own MCP connection on every outcome.
+export async function runProjectWatcherCli(options, { env = process.env, now = Date.now,
+  validateEnvironment = assertProjectWatchEnvironment, validateIsolation = validateQaFixtureIsolation,
+  createHarness = value => new FirefoxMcpChatHarness(value), scenario = runProjectFileWatcherFlow } = {}) {
+  validateEnvironment(env); assertBeforeDeadline(options.deadlineMs, now());
+  const isolation = validateIsolation(options.profile, { env });
+  const result = { kind: 'firefox-mcp-project-file-watcher-flow', automatedAssertionsPassed: false,
+    visualReview: 'pending', providerCalls: 'not-measured', checks: [], screenshots: [], fixtureIsolation: isolation };
+  const controller = new AbortController(), fixtureOperations = [];
+  let harness, receipt, active = true;
+  const assertCurrent = () => {
+    if (!active || controller.signal.aborted) throw new Error('Watcher QA is no longer current');
+    assertBeforeDeadline(options.deadlineMs, now());
+  };
+  try {
+    assertCurrent();
+    harness = createHarness({ profile: options.profile, marionettePort: Number(env.EGDESK_MARIONETTE_PORT) });
+    assertCurrent();
+    await awaitProjectWatchDeadline(() => harness.connect(), options.deadlineMs, now);
+    const guarded = guardProjectWatchHarness(harness, assertCurrent);
+    await awaitProjectWatchDeadline(() => scenario({ harness: guarded, result, check(label, condition, details = undefined) {
+      assertCurrent();
+      result.checks.push({ label, passed: Boolean(condition), ...(details === undefined ? {} : { details }) });
+      assert.ok(condition, label);
+    } }, { ...options, env, signal: controller.signal, assertCurrent, fixtureOperations }), options.deadlineMs, now);
+    assertCurrent();
+    result.automatedAssertionsPassed = true;
+  } catch (error) {
+    result.error = String(error?.message || error);
+    result.failureScreenshot = 'not-attempted';
+  } finally {
+    active = false;
+    controller.abort();
+    for (const operation of fixtureOperations) if (operation.status === 'pending') {
+      operation.status = operation.dispatched ? 'unknown' : 'not-dispatched';
+    }
+    // Freeze the scenario's evidence before awaiting cleanup: a continuation
+    // that was already in flight can still hold its original result object.
+    receipt = structuredClone(result);
+    receipt.fixtureOperations = structuredClone(fixtureOperations);
+    try { await harness?.close(); }
+    catch (error) { receipt.cleanupError = String(error?.message || error); receipt.automatedAssertionsPassed = false; }
+    if (harness?.evidenceDir) {
+      try {
+        receipt.evidenceFile = path.join(harness.evidenceDir, 'result.json');
+        fs.writeFileSync(receipt.evidenceFile, `${JSON.stringify(receipt, null, 2)}\n`, { flag: 'wx', mode: 0o600 });
+      } catch (error) { receipt.evidenceWriteError = String(error?.message || error); receipt.automatedAssertionsPassed = false; }
+    }
+  }
+  // A late scenario continuation cannot mutate the returned or saved receipt.
+  return receipt;
+}
+
 export async function runCli(argv = process.argv.slice(2), env = process.env) {
   const options = parseCli(argv);
   assertProjectEnvironment(env);
+  if (env.EGDESK_QA_PROJECT_FILE_WATCH === '1') {
+    assertProjectWatchEnvironment(env);
+    const result = await runProjectWatcherCli(options, { env });
+    process.stdout.write(`${JSON.stringify(result)}\n`);
+    if (!result.automatedAssertionsPassed) process.exitCode = 1;
+    return result;
+  }
+  assert.ok(env.EGDESK_QA_PROJECT_FILE_WATCH == null || env.EGDESK_QA_PROJECT_FILE_WATCH === '0', 'invalid watcher fixture opt-in');
   // runUiFlow performs only profile-bound attach, never process launch.
   await runUiFlow('firefox-mcp-project-file-flow', context => runProjectFileFlow(context, { ...options, env }));
 }

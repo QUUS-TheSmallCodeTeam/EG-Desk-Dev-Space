@@ -41,8 +41,11 @@ const clearTransportBody = between('    const clearBrowserToolTransport = ({ rev
   .slice('    const clearBrowserToolTransport = ({ revoke = false } = {}) => {'.length)
 const rootSseReadyBody = between('    const rootSseReady = () => {', '    };\n\n    function threadBusy(')
   .slice('    const rootSseReady = () => {'.length)
-const readyTransportBody = between("      connectionSource.addEventListener('ready', (event) => {", '      });\n\n      const receive =')
+const readyTransportBody = between("      connectionSource.addEventListener('ready', (event) => {", '      });\n\n      const fileEventStreamCurrent =')
   .slice("      connectionSource.addEventListener('ready', (event) => {".length)
+assert.equal(source.split("      connectionSource.addEventListener('ready', (event) => {").length, 2, 'exactly one actual ready callback')
+assert.match(readyTransportBody, /attachBrowserToolTransport/)
+assert.match(readyTransportBody, /streamReady = true/)
 const errorTransportBody = between('      connectionSource.onerror = () => {', '      };\n      } finally')
   .slice('      connectionSource.onerror = () => {'.length)
 

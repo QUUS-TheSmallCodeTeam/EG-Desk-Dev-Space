@@ -62,7 +62,7 @@ const FIELDS = Object.freeze({
   revertReviewed: ['fileId', 'expectedSha256', 'text', 'operationId'],
   deleteCreated: ['fileId', 'expectedSha256', 'operationId'],
   attachProject: ['boardId', 'roomId', 'selectionId', 'title'],
-  openProject: ['boardId', 'roomId'],
+  openProject: ['boardId', 'roomId', 'expectedProjectId', 'expectedRootId'],
   inheritRoomProject: ['roomId'],
   readRoomProjectDefault: ['roomId'],
   saveRoomProjectDefault: ['roomId', 'boardId', 'expectedProjectId', 'expectedRootId'],
@@ -296,9 +296,39 @@ export function createEGDeskFileHttpAdapter({ draftDirectory, projectDirectory, 
       return projectView(project, body.roomId != null ? 'room' : 'board', { status: 'connected', root })
     }
     if (operation === 'openProject') {
+      const expected = Object.hasOwn(body, 'expectedProjectId') || Object.hasOwn(body, 'expectedRootId')
+      const validId = value => typeof value === 'string' && !!value.trim() && value.length <= 512 && !/[\u0000-\u001f\u007f]/.test(value)
+      const validOpaque = value => validId(value) && !/[\\/]/.test(value)
+      if (expected && (!validId(body.boardId) || body.roomId != null || !validOpaque(body.expectedProjectId) || !validOpaque(body.expectedRootId))) {
+        throw error('INVALID_PROJECT_TARGET', 'A Board and both expected opaque project/root IDs are required', 400)
+      }
       const { project, source } = await store.effective({ boardId: body.boardId ?? null, roomId: body.roomId ?? null })
-      if (!project) return { project: null, source: null }
-      return { project: projectView(project, source, await connectProject(service, projects, project)), source }
+      if (!project) {
+        if (expected) throw error('PROJECT_WORKSPACE_CHANGED', 'Board project is no longer attached', 409)
+        return { project: null, source: null }
+      }
+      if (expected && (source !== 'board' || project.id !== body.expectedProjectId)) {
+        throw error('PROJECT_WORKSPACE_CHANGED', 'Board project changed before verification', 409)
+      }
+      let connection
+      if (expected) {
+        // Event-time validation cannot reconnect a stored path or authorize a
+        // replacement root. It may inspect only the exact already-live root.
+        const cached = projects.roots.get(project.id)
+        if (!cached || cached.rootId !== body.expectedRootId) throw error('PROJECT_WORKSPACE_CHANGED', 'Board root is no longer connected', 409)
+        const described = await service.describeRoot(cached.rootId).catch(() => null)
+        if (!described || !sameFolder(described, project)) throw error('PROJECT_WORKSPACE_CHANGED', 'Board root changed', 409)
+        connection = { status: 'connected', root: cached }
+      } else connection = await connectProject(service, projects, project)
+      // A Board/room may be rebound while filesystem verification yields.
+      // Never return the old folder as the canonical current association.
+      const latest = store.effective({ boardId: body.boardId ?? null, roomId: body.roomId ?? null })
+      if (latest.project?.id !== project.id || latest.source !== source ||
+          !sameFolder({ absolutePath: project.workspaceRoot, identity: project.identity }, latest.project) ||
+          (connection.status === 'connected' && projects.roots.get(project.id)?.rootId !== connection.root.rootId)) {
+        throw error('PROJECT_WORKSPACE_CHANGED', 'Project binding changed during verification; read it again', 409)
+      }
+      return { project: projectView(project, source, connection), source }
     }
     if (operation === 'inheritRoomProject') return { roomId: body.roomId, inherited: true, removed: await store.inheritRoom({ roomId: body.roomId }) }
     if (operation === 'detachProject') return { boardId: body.boardId, removed: await store.detachBoard({ boardId: body.boardId }) }
@@ -486,10 +516,31 @@ export function createEGDeskFileHttpAdapter({ draftDirectory, projectDirectory, 
     const { service } = await entryForOwner(owner)
     const projects = await projectsForOwner(owner)
     assertActive()
+    // A different Board may still hold the same project/root after the run's
+    // own Board or room changes. Its grant cannot substitute for this origin.
+    // Missing scope is unknown, never a reason to infer it from a saved path.
+    const validScope = value => typeof value === 'string' && !!value.trim() && value.length <= 512 && !value.includes('\0')
+    const sameScope = candidate => {
+      try {
+        let selected
+        if (p.source === 'request' || p.source === 'board') {
+          if (!validScope(p.boardId) || p.roomId != null && !validScope(p.roomId)) return false
+          // Room defaults select a new run, not the authority of an already
+          // accepted run. Check the original Board's own binding directly.
+          selected = projects.store.forBoard(p.boardId)
+        } else if (p.source === 'room') {
+          if (!validScope(p.roomId) || p.boardId != null && !validScope(p.boardId)) return false
+          selected = projects.store.forRoom(p.roomId)
+        } else return false
+        return selected?.id === candidate?.id && selected.workspaceRoot === p.startCwd &&
+          selected.identity?.dev === p.fsIdentity?.dev && selected.identity?.ino === p.fsIdentity?.ino
+      } catch { return false }
+    }
     const candidates = projects.store.list().filter(project => project.workspaceRoot === p.startCwd)
     let changed = false
     for (const project of candidates) {
       if (project.identity.dev !== p.fsIdentity?.dev || project.identity.ino !== p.fsIdentity?.ino) { changed = true; continue }
+      if (!sameScope(project)) continue
       const connection = projects.roots.get(project.id)
       if (!connection) continue
       // Snapshot only public fields from this already-authorized live handle.
@@ -505,7 +556,7 @@ export function createEGDeskFileHttpAdapter({ draftDirectory, projectDirectory, 
       // rebound project must not release an old cached handle.
       const current = projects.store.get(project.id)
       const currentConnection = projects.roots.get(project.id)
-      if (!current || !sameFolder(described, current) || currentConnection !== connection ||
+      if (!current || !sameScope(current) || !sameFolder(described, current) || currentConnection !== connection ||
           Object.keys(publicRoot).some(key => currentConnection[key] !== publicRoot[key]) || publicRoot.displayPath !== described.absolutePath) continue
       return { status: 'verified', verified: true, projectId: p.projectId, source: p.source,
         rootId: publicRoot.rootId, directoryId: publicRoot.directoryId, displayPath: publicRoot.displayPath }

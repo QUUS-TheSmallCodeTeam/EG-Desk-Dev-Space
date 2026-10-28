@@ -99,6 +99,9 @@ export function createChatRunResultView({ document, run, activity, fetchJson, is
   element.append(button, notice, body)
   let generation = 0, disposed = false, loading = false, controller = null
   let fileController = null, openingFile = false
+  // Completed File openings remain scoped to this exact result generation;
+  // refreshing/disposal revokes all of them, not just an in-flight click.
+  let fileScopeController = new AbortController()
 
   const current = ticket => {
     if (disposed || ticket !== generation || element.isConnected !== true) return false
@@ -119,6 +122,7 @@ export function createChatRunResultView({ document, run, activity, fetchJson, is
     if (!current(generation)) return 'stale'
     if (loading) return 'loading'
     fileController?.abort(); fileController = null; openingFile = false
+    fileScopeController.abort(); fileScopeController = new AbortController()
     const ticket = ++generation
     loading = true
     controller = new AbortController()
@@ -184,19 +188,25 @@ export function createChatRunResultView({ document, run, activity, fetchJson, is
           return
         }
         const opening = new AbortController()
+        const signal = AbortSignal.any([opening.signal, fileScopeController.signal])
+        let completedOpening = false
         fileController = opening; openingFile = true
-        const stillCurrent = target => current(ticket) && fileController === opening && !opening.signal.aborted
+        const stillCurrent = target => current(ticket) && (fileController === opening || completedOpening) && !signal.aborted
           && ID_FIELDS.every(key => target?.[key] === identity[key])
         notice.textContent = '이 실행의 연결을 다시 확인하고 현재 파일을 여는 중입니다.'
         try {
           const opened = await onOpenVerifiedFile({ target: identity, location: selected, readOrigin,
-            isCurrent: stillCurrent, signal: opening.signal })
+            isCurrent: stillCurrent, signal })
           if (!stillCurrent(identity)) return
+          completedOpening = opened?.status === 'opened'
           notice.textContent = opened?.status === 'opened'
             ? '별도 파일 창에서 현재 파일을 열었습니다. 아래 보관된 출력은 당시 기록입니다.'
             : '현재 파일을 열지 못했습니다. 보관된 출력은 유지됩니다. 실행의 현재 연결을 확인해 주세요.'
         } catch { failed() }
-        finally { if (fileController === opening) { openingFile = false; fileController = null } }
+        finally {
+          if (fileController === opening) { openingFile = false; fileController = null }
+          if (!completedOpening) opening.abort()
+        }
       } : undefined
       const card = renderRunResultCard({ document, result, onOpenLocation: openLocation })
       if (wantsOrigin && canOpen) {
@@ -239,7 +249,7 @@ export function createChatRunResultView({ document, run, activity, fetchJson, is
     disposed = true
     generation++
     controller?.abort()
-    fileController?.abort(); fileController = null; openingFile = false
+    fileController?.abort(); fileController = null; openingFile = false; fileScopeController.abort()
     button.disabled = true
     button.removeEventListener('click', clicked)
     body.replaceChildren()

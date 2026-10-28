@@ -531,10 +531,20 @@ export function createEGDeskFileView({ document, service, chooseRoot, chooseProj
   let changesToken = 0
   let diffToken = 0
   let fileChangeTimer = null
-  const pendingFolders = new Set()
+  // Retain the stream guard with each pending folder. A newer stream may
+  // refresh the same folder while a now-stale stream's event is still queued.
+  const pendingFolders = new Map()
+  const unscopedFileChange = () => true
+  const unscopedFileAuthority = async () => true
+  const fileChangeCurrent = guard => { try { return guard() === true } catch { return false } }
+  const fileChangeAuthorized = async (authorize, current) => {
+    if (!fileChangeCurrent(current)) return false
+    try { return await authorize() === true && fileChangeCurrent(current) } catch { return false }
+  }
   // NFC folder path ('' = root) → the loaded tree group, for onFileChanged.
   const loadedGroups = new Map()
   const itemHandles = new WeakMap()
+  const itemAuthorities = new WeakMap()
   const itemBadges = new WeakMap()
   const draftsByFile = new Map()
   const token = () => ++operation
@@ -676,19 +686,53 @@ export function createEGDeskFileView({ document, service, chooseRoot, chooseProj
 
   function moreRow(directoryId, group, nextCursor, generation, parentPath) {
     const holder = el('li', 'egdesk-file-tree-more-row')
-    const more = button('더 보기', 'egdesk-file-tree-more', () => act(async () => { holder.remove(); await appendDirectory(directoryId, group, nextCursor, generation, parentPath) }))
+    let loading = false
+    const more = button('더 보기', 'egdesk-file-tree-more', () => act(async () => {
+      if (loading || disposed || generation !== treeGeneration) return
+      const loaded = loadedGroups.get(keyOf(parentPath))
+      if (!loaded || loaded.group !== group) return
+      loading = true; more.disabled = true
+      try {
+        // Parent listings reissue opaque IDs even for the same directory.
+        // Use the live handle, keeping this exact cursor and the button until
+        // the requested page has actually arrived. If a handle is reissued
+        // during the request, retry once with the same cursor on this click.
+        let directoryId = loaded.directoryId
+        for (let attempt = 0; attempt < 2; attempt++) {
+          if (await appendDirectory(directoryId, group, nextCursor, generation, parentPath, null, false)) { holder.remove(); break }
+          if (disposed || generation !== treeGeneration || loadedGroups.get(keyOf(parentPath)) !== loaded ||
+              loaded.group !== group || !loaded.directoryId || loaded.directoryId === directoryId) break
+          directoryId = loaded.directoryId
+        }
+      } finally { loading = false; more.disabled = false }
+    }))
     more.addEventListener('click', event => event.stopPropagation())
     holder.append(more)
     return holder
   }
 
-  async function appendDirectory(directoryId, group, cursor = 0, generation = treeGeneration, parentPath = '', opening = null) {
-    const current = () => !disposed && generation === treeGeneration && (!opening || openCurrent(opening.generation, opening.rootId, opening.scope))
-    if (!current()) return false
+  async function appendDirectory(directoryId, group, cursor = 0, generation = treeGeneration, parentPath = '', opening = null, retryOnRebound = true) {
+    const ownerItem = parentPath ? group.parentElement?.closest?.('[role="treeitem"]') : null
+    const treeCurrent = () => !disposed && generation === treeGeneration && (!opening || openCurrent(opening.generation, opening.rootId, opening.scope))
+    const groupCurrent = () => !parentPath || !!ownerItem && ownerItem.isConnected !== false && ownerItem.contains(group)
+    const current = () => treeCurrent() && groupCurrent() && (!ownerItem || itemHandles.get(ownerItem) === directoryId)
+    const retryRebound = () => {
+      if (!parentPath || !treeCurrent() || !groupCurrent()) return
+      const replacementId = itemHandles.get(ownerItem)
+      if (!replacementId || replacementId === directoryId) return
+      const key = keyOf(parentPath)
+      let loaded = loadedGroups.get(key)
+      if (loaded && loaded.group !== group) return
+      if (!loaded) { loaded = { group, directoryId: replacementId, parentPath, loaded: 0 }; loadedGroups.set(key, loaded) }
+      else loaded.directoryId = replacementId
+      queueFileChange(key, () => treeCurrent() && groupCurrent() && loadedGroups.get(key) === loaded, false,
+        itemAuthorities.get(ownerItem) || unscopedFileAuthority)
+    }
+    if (!current()) { if (retryOnRebound) retryRebound(); return false }
     let result
     try { result = await service.listDirectory({ directoryId, cursor, limit: 100 }) }
-    catch (cause) { if (!current()) return false; throw cause }
-    if (!current()) return false
+    catch (cause) { if (!current()) { if (retryOnRebound) retryRebound(); return false } throw cause }
+    if (!current()) { if (retryOnRebound) retryRebound(); return false }
     const key = keyOf(parentPath)
     if (cursor === 0) loadedGroups.set(key, { group, directoryId, parentPath, loaded: 0 })
     const registered = loadedGroups.get(key)
@@ -711,24 +755,42 @@ export function createEGDeskFileView({ document, service, chooseRoot, chooseProj
   // Re-list one loaded folder and reconcile by name: kept items (and their
   // expanded subtrees) stay, new names are added in listing order, gone names
   // are removed. Handles are refreshed from the new listing.
-  async function reconcileFolder(folderKey, generation) {
+  async function reconcileFolder(folderKey, generation, isCurrent = unscopedFileChange, isAuthorized = unscopedFileAuthority) {
+    if (!await fileChangeAuthorized(isAuthorized, isCurrent)) return
     const loaded = loadedGroups.get(folderKey)
     if (!loaded) return
+    const refreshSequence = (loaded.refreshSequence || 0) + 1
+    loaded.refreshSequence = refreshSequence
+    const directoryId = loaded.directoryId
+    const sameRefresh = () => !disposed && generation === treeGeneration && loadedGroups.get(folderKey) === loaded &&
+      loaded.refreshSequence === refreshSequence && fileChangeCurrent(isCurrent)
+    const current = () => sameRefresh() && loaded.directoryId === directoryId
+    const retryRebound = () => {
+      // Opaque child IDs are reissued by a parent listing. Never apply a
+      // response from the prior ID, even if the same name stayed expanded.
+      // Debounce a fresh listing without guessing a rename or recursing here.
+      if (sameRefresh() && loaded.directoryId !== directoryId) queueFileChange(folderKey, isCurrent, false, isAuthorized)
+    }
+    if (!current()) return
     const wanted = Math.max(loaded.loaded, 1)
     const listed = []
     let cursor = 0
     let nextCursor = null
     try {
       do {
-        const page = await service.listDirectory({ directoryId: loaded.directoryId, cursor, limit: Math.min(200, Math.max(100, wanted - listed.length)) })
-        if (disposed || generation !== treeGeneration || loadedGroups.get(folderKey) !== loaded) return
+        const page = await service.listDirectory({ directoryId, cursor, limit: Math.min(200, Math.max(100, wanted - listed.length)) })
+        if (!current()) { retryRebound(); return }
+        if (!await fileChangeAuthorized(isAuthorized, current)) { if (!current()) retryRebound(); return }
         listed.push(...page.entries)
         nextCursor = page.nextCursor
         cursor = nextCursor ?? cursor
       } while (nextCursor != null && listed.length < wanted)
     } catch {
       // The folder itself is gone or replaced; its parent's reconcile removes it.
-      if (folderKey) forgetLoaded(folderKey)
+      // A failed old request is also not authority to forget current state.
+      if (!await fileChangeAuthorized(isAuthorized, current)) { if (!current()) retryRebound(); return }
+      if (folderKey && current()) forgetLoaded(folderKey)
+      else retryRebound()
       return
     }
     const currentItems = [...loaded.group.children].filter(node => node.getAttribute?.('role') === 'treeitem')
@@ -739,7 +801,7 @@ export function createEGDeskFileView({ document, service, chooseRoot, chooseProj
       const kept = existing.get(entry.name)
       if (kept && kept.dataset.kind === entry.kind) {
         existing.delete(entry.name)
-        if (entry.id) itemHandles.set(kept, entry.id)
+        if (entry.id) { itemHandles.set(kept, entry.id); itemAuthorities.set(kept, isAuthorized) }
         if (entry.kind === 'directory') { const child = loadedGroups.get(keyOf(kept.dataset.relativePath)); if (child) child.directoryId = entry.id }
         decorateItem(kept)
         items.push(kept)
@@ -759,14 +821,15 @@ export function createEGDeskFileView({ document, service, chooseRoot, chooseProj
     ensureRovingTabStop()
   }
 
-  async function refreshGitStatus() {
-    if (!activeRoot || typeof service.gitStatus !== 'function') return null
+  async function refreshGitStatus(isCurrent = unscopedFileChange, isAuthorized = unscopedFileAuthority) {
+    if (!await fileChangeAuthorized(isAuthorized, isCurrent) || !activeRoot || typeof service.gitStatus !== 'function') return null
     const currentToken = ++statusToken
     const generation = treeGeneration
+    const current = () => !disposed && generation === treeGeneration && currentToken === statusToken && fileChangeCurrent(isCurrent)
     let result
     try { result = await service.gitStatus({ rootId: activeRoot.rootId }) }
     catch { return null }
-    if (disposed || generation !== treeGeneration || currentToken !== statusToken) return null
+    if (!await fileChangeAuthorized(isAuthorized, current)) return null
     gitIndex = createEGDeskGitStateIndex(result?.available && result?.isRepo ? result.entries : [])
     for (const item of tree.querySelectorAll('[role="treeitem"]')) decorateItem(item)
     return result
@@ -849,15 +912,16 @@ export function createEGDeskFileView({ document, service, chooseRoot, chooseProj
     })
   }
 
-  async function refreshChanges() {
-    if (!hasGitChanges) return null
+  async function refreshChanges(isCurrent = unscopedFileChange, isAuthorized = unscopedFileAuthority) {
+    if (!await fileChangeAuthorized(isAuthorized, isCurrent) || !hasGitChanges) return null
     if (!activeRoot) { changeList.replaceChildren(); changesSummary.textContent = '먼저 폴더를 연결하세요.'; return null }
     const currentToken = ++changesToken
     const generation = treeGeneration
+    const current = () => !disposed && generation === treeGeneration && currentToken === changesToken && fileChangeCurrent(isCurrent)
     changesPanel.setAttribute('aria-busy', 'true')
     try {
       const result = await service.gitChanges({ rootId: activeRoot.rootId, scope: 'uncommitted' })
-      if (disposed || generation !== treeGeneration || currentToken !== changesToken) return null
+      if (!await fileChangeAuthorized(isAuthorized, current)) return null
       renderChanges(result)
       return result
     } finally { if (currentToken === changesToken) changesPanel.setAttribute('aria-busy', 'false') }
@@ -908,26 +972,53 @@ export function createEGDeskFileView({ document, service, chooseRoot, chooseProj
   // collected for fileChangeDelayMs (trailing, not reset by later events),
   // then only the affected loaded folders are re-listed — the changed-paths-only
   // refresh of vibe-kanban diff_stream.rs:379-420 (Apache-2.0), pattern only.
-  function onFileChanged(event) {
-    const change = normalizeFileChangedEvent(event)
-    if (disposed || !change || !activeRoot || change.rootId !== activeRoot.rootId) return false
-    markCheckStale()
-    pendingFolders.add(keyOf(parentFolderOf(change.relativePath)))
+  function queueFileChange(folder, isCurrent, refreshGit, isAuthorized = unscopedFileAuthority) {
+    let scopes = pendingFolders.get(folder)
+    if (!scopes) { scopes = new Map(); pendingFolders.set(folder, scopes) }
+    scopes.set(isCurrent, { refreshGit: scopes.get(isCurrent)?.refreshGit === true || refreshGit !== false, isAuthorized })
     if (!fileChangeTimer) fileChangeTimer = timers.setTimeout(() => { fileChangeTimer = null; flushFileChanges().catch(() => {}) }, fileChangeDelayMs)
+  }
+
+  function onFileChanged(event, { isCurrent = unscopedFileChange, isAuthorized = unscopedFileAuthority, refreshGit = true } = {}) {
+    const change = normalizeFileChangedEvent(event)
+    if (typeof isCurrent !== 'function' || typeof isAuthorized !== 'function' || !fileChangeCurrent(isCurrent) || disposed || !change || !activeRoot || change.rootId !== activeRoot.rootId) return false
+    markCheckStale()
+    const folder = keyOf(parentFolderOf(change.relativePath))
+    queueFileChange(folder, isCurrent, refreshGit, isAuthorized)
+    if (change.change === 'rename') {
+      const childKey = keyOf(change.relativePath), child = loadedGroups.get(childKey)
+      const item = child?.group.parentElement?.closest?.('[role="treeitem"]')
+      // A rename event on an expanded directory says only that this path
+      // changed. Re-list that path after its parent; infer no old/new pair.
+      if (item?.getAttribute('aria-expanded') === 'true') queueFileChange(childKey, isCurrent, false, isAuthorized)
+    }
     return true
   }
 
   async function flushFileChanges() {
     if (fileChangeTimer) { timers.clearTimeout(fileChangeTimer); fileChangeTimer = null }
     const generation = treeGeneration
-    const folders = [...pendingFolders].sort((a, b) => a.split('/').length - b.split('/').length)
+    const depth = key => key ? key.split('/').length : 0
+    const folders = [...pendingFolders].sort(([a], [b]) => depth(a) - depth(b))
     pendingFolders.clear()
-    for (const folder of folders) {
+    for (const [folder, scopes] of folders) {
       if (disposed || generation !== treeGeneration) return
-      await reconcileFolder(folder, generation)
+      const current = () => [...scopes.keys()].some(fileChangeCurrent)
+      const authorized = async () => {
+        for (const [guard, scope] of scopes) if (await fileChangeAuthorized(scope.isAuthorized, guard)) return true
+        return false
+      }
+      if (current()) await reconcileFolder(folder, generation, current, authorized)
     }
     if (disposed || generation !== treeGeneration) return
-    await Promise.all([refreshGitStatus(), activeTab === 'changes' ? refreshChanges().catch(() => null) : null])
+    const gitCurrent = () => folders.some(([, scopes]) => [...scopes].some(([guard, scope]) => scope.refreshGit && fileChangeCurrent(guard)))
+    const gitAuthorized = async () => {
+      for (const [, scopes] of folders) for (const [guard, scope] of scopes) {
+        if (scope.refreshGit && await fileChangeAuthorized(scope.isAuthorized, guard)) return true
+      }
+      return false
+    }
+    if (gitCurrent()) await Promise.all([refreshGitStatus(gitCurrent, gitAuthorized), activeTab === 'changes' ? refreshChanges(gitCurrent, gitAuthorized).catch(() => null) : null])
   }
 
   // Move the caret to a 1-based line of the open working copy (content search

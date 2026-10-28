@@ -644,7 +644,7 @@ test('headless Chrome snapshot callback guards real root context and closes bitm
   }
 });
 
-test('QA port policy retains 2829 by default and permits only explicit 2828, 2829, 28831 or 28832', () => {
+test('QA port policy retains 2829 by default and permits only explicit 2828, 2829, 28831, 28832 or 28833', () => {
   assert.equal(resolveQaMarionettePort(2829), 2829);
   assert.equal(resolveQaMarionettePort('2829'), 2829);
   assert.equal(resolveQaMarionettePort(2828), 2828);
@@ -653,7 +653,9 @@ test('QA port policy retains 2829 by default and permits only explicit 2828, 282
   assert.equal(resolveQaMarionettePort('28831'), 28831);
   assert.equal(resolveQaMarionettePort(28832), 28832);
   assert.equal(resolveQaMarionettePort('28832'), 28832);
-  for (const value of [0, 6000, 2830, 28833, '28832;exit', '028832', '2828;exit', '02828', null, NaN]) {
+  assert.equal(resolveQaMarionettePort(28833), 28833);
+  assert.equal(resolveQaMarionettePort('28833'), 28833);
+  for (const value of [0, 6000, 2830, 28834, '28833;exit', '028833', '28832;exit', '028832', '2828;exit', '02828', null, NaN]) {
     assert.throws(() => resolveQaMarionettePort(value), /refuses Marionette port/);
   }
 });

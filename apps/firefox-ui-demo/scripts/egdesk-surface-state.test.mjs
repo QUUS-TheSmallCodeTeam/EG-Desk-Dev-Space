@@ -599,6 +599,40 @@ function assertFocusTokens(css, selectors, { inset = false } = {}) {
 // Firefox overlay bootstrap, DOM handlers, bridge requests, or runtime code.
 // Source-body boundaries are identical for LF and Windows CRLF checkouts.
 const surfaceSource = readSurfaceSource();
+
+test('workflow File frames stay bound to the ready current SSE and do not change other event routing', () => {
+  const start = surfaceSource.indexOf('      const fileEventStreamCurrent = () =>');
+  const end = surfaceSource.indexOf("      source.addEventListener('codex', receive);", start);
+  assert.ok(start > 0 && end > start, 'production SSE listener remains directly testable');
+  const frames = [], others = [], identity = { valid: true }, connection = { readyState: 1 };
+  const zones = { fileCard: { onWorkflowEvent: (frame, current) => frames.push({ frame, current, accepted: current() }) } };
+  const factory = compileFunction(`
+    let source = connection, streamReady = true;
+    const connectionSource = connection, streamEpoch = 1;
+    const epochScope = { valid: value => value === streamEpoch && identity.valid };
+    const window = { EventSource: { OPEN: 1 } };
+    const surfaceZones = zones, TAG = 'qa';
+    const handleEvent = event => others.push(event);
+    const console = { warn() {} };
+    ${surfaceSource.slice(start, end)}
+    return { receive, setSource: value => { source = value; }, setReady: value => { streamReady = value; } };
+  `, ['connection', 'identity', 'zones', 'others']);
+  const bridge = factory(connection, identity, zones, others);
+  const frame = { type: 'workflow.event', v: 1, event: { topic: 'file.changed' } };
+  bridge.receive({ data: JSON.stringify(frame) });
+  assert.equal(frames.length, 1); assert.equal(frames[0].accepted, true);
+  connection.readyState = 0;
+  assert.equal(frames[0].current(), false, 'a disconnected source invalidates a queued refresh');
+  bridge.receive({ data: JSON.stringify(frame) }); assert.equal(frames[1].accepted, false);
+  connection.readyState = 1; bridge.setReady(false); assert.equal(frames[0].current(), false);
+  bridge.setReady(true); bridge.receive({ data: JSON.stringify({ type: 'task.native' }) });
+  assert.equal(others.length, 1); assert.equal(others[0].type, 'task.native');
+  bridge.setSource({ readyState: 1 }); bridge.receive({ data: JSON.stringify(frame) });
+  assert.equal(frames.length, 2, 'an old EventSource cannot deliver after replacement');
+  assert.equal(frames[0].current(), false);
+  bridge.setSource(connection); identity.valid = false; bridge.receive({ data: JSON.stringify(frame) });
+  assert.equal(frames.length, 2, 'an invalidated epoch cannot deliver');
+});
 const runtimeConfigBody = surfaceSource.match(/  function codexThreadRuntimeConfig\(thread\) \{([\s\S]*?)\n  \}/)?.[1];
 assert.ok(runtimeConfigBody, 'production codexThreadRuntimeConfig must remain directly testable');
 const productionRuntimeConfig = compileFunction(runtimeConfigBody, ['thread', 'codexThreadAgentProfile', 'codexThreadToolMode', 'codexThreadSystemPrompt']);

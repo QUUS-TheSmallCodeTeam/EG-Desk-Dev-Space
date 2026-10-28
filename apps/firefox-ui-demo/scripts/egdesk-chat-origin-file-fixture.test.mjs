@@ -122,6 +122,9 @@ test('origin fixture: real accepted send writes private origin; state/history/ou
   const stored = state.persisted.origins[0];
   assert.equal(stored.conversationId, accepted.body.conversationId); assert.equal(stored.runId, accepted.body.runId);
   assert.equal(stored.project.projectId, state.projects.original.projectId); assert.equal(stored.project.startCwd, state.folders.original);
+  assert.equal(stored.project.source, 'board'); assert.equal(stored.project.boardId, state.boards.original);
+  assert.equal(stored.project.roomId, state.original.clientThreadId);
+  assert.ok(['dev', 'ino'].every(key => /^\d+$/.test(stored.project.fsIdentity[key])), 'actual accepted-origin writer persisted the filesystem identity');
   assert.deepEqual(state.fakeRpc.map(value => value.method), ['thread/start', 'turn/start']);
   assert.ok(frames.some(frame => frame.event === 'run.started' && frame.runId === stored.runId));
   assert.ok(frames.some(frame => frame.event === 'activity.completed' && frame.itemId === state.original.itemId));

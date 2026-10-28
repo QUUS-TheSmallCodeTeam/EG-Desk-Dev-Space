@@ -1020,6 +1020,72 @@ test('onFileChanged collects events, re-lists only loaded affected folders, keep
   assert.equal(view.onFileChanged({ rootId: 'root', relativePath: 'NEW.txt' }), false)
 })
 
+test('FileView ignores an old-root listing rejection after a same-named new-root expansion', { timeout: 6000 }, async () => {
+  let releaseOld, enteredOld
+  const started = new Promise(resolve => { enteredOld = resolve })
+  const oldResponse = new Promise((_, reject) => { releaseOld = reject })
+  let holdOld = false
+  const newEntries = [{ id: 'b-old', name: 'old-b.js', kind: 'file' }]
+  const service = treeService({ listDirectory: async ({ directoryId }) => {
+    if (directoryId === 'src-a' && holdOld) { enteredOld(); return oldResponse }
+    if (directoryId === 'dir-a' || directoryId === 'dir-b') {
+      return { entries: [{ id: directoryId === 'dir-a' ? 'src-a' : 'src-b', name: 'src', kind: 'directory' }], nextCursor: null }
+    }
+    return { entries: directoryId === 'src-b' ? structuredClone(newEntries) : [], nextCursor: null }
+  } })
+  const document = fakeDocument(), view = createEGDeskFileView({ document, service })
+  document.body.append(view.element)
+  await view.openRoot({ rootId: 'root-a', directoryId: 'dir-a', name: 'A' })
+  treeItemNamed(view.element, 'src').click(); await settle(); holdOld = true
+  view.onFileChanged({ rootId: 'root-a', relativePath: 'src/old.txt', change: 'rename' })
+  const old = view.flushFileChanges(); await started
+  await view.openRoot({ rootId: 'root-b', directoryId: 'dir-b', name: 'B' })
+  const current = treeItemNamed(view.element, 'src'); current.click(); await settle()
+  releaseOld(new Error('old root listing failed')); await old
+  newEntries.push({ id: 'b-new', name: 'new-b.js', kind: 'file' })
+  view.onFileChanged({ rootId: 'root-b', relativePath: 'src/new-b.js', change: 'rename' })
+  await view.flushFileChanges()
+  assert.equal(current.getAttribute('aria-expanded'), 'true')
+  assert.ok(treeItemNamed(current, 'new-b.js'), 'new B folder remains tracked after old A failure')
+  await view.close()
+})
+
+test('FileView applies the newest concurrent same-folder listing and ignores an older failure', { timeout: 6000 }, async () => {
+  const requests = []
+  let hold = false
+  const entries = [{ id: 'existing', name: 'existing.js', kind: 'file' }]
+  const service = treeService({ listDirectory: async ({ directoryId }) => {
+    if (directoryId === 'root-dir') return { entries: [{ id: 'src', name: 'src', kind: 'directory' }], nextCursor: null }
+    if (directoryId === 'src' && hold) {
+      let resolve, reject
+      const promise = new Promise((yes, no) => { resolve = yes; reject = no })
+      requests.push({ resolve, reject }); return promise
+    }
+    return { entries: structuredClone(entries), nextCursor: null }
+  } })
+  const document = fakeDocument(), view = createEGDeskFileView({ document, service })
+  document.body.append(view.element)
+  await view.openRoot({ rootId: 'root', directoryId: 'root-dir', name: 'Root' })
+  const folder = treeItemNamed(view.element, 'src'); folder.click(); await settle(); hold = true
+  const event = { rootId: 'root', relativePath: 'src/new.js', change: 'rename' }
+  view.onFileChanged(event); const old = view.flushFileChanges(); await settle()
+  view.onFileChanged(event); const latest = view.flushFileChanges(); await settle()
+  assert.equal(requests.length, 2)
+  entries.push({ id: 'new', name: 'new.js', kind: 'file' })
+  requests[1].resolve({ entries: structuredClone(entries), nextCursor: null }); await latest
+  requests[0].resolve({ entries: [{ id: 'existing', name: 'existing.js', kind: 'file' }], nextCursor: null }); await old
+  assert.ok(treeItemNamed(folder, 'new.js'), 'an older success cannot overwrite a newer refresh')
+  view.onFileChanged(event); const failing = view.flushFileChanges(); await settle()
+  view.onFileChanged(event); const newest = view.flushFileChanges(); await settle()
+  requests[3].resolve({ entries: structuredClone(entries), nextCursor: null }); await newest
+  requests[2].reject(new Error('older listing failed')); await failing
+  hold = false; entries.push({ id: 'after', name: 'after.js', kind: 'file' })
+  view.onFileChanged({ ...event, relativePath: 'src/after.js' }); await view.flushFileChanges()
+  assert.ok(treeItemNamed(folder, 'after.js'), 'an older failure cannot untrack the folder')
+  assert.equal(folder.getAttribute('aria-expanded'), 'true')
+  await view.close()
+})
+
 // ---- 2-X: original save (D-X1), review writes (D-X2), resolve, line diff ----
 
 const sha = value => createHash('sha256').update(value).digest('hex')

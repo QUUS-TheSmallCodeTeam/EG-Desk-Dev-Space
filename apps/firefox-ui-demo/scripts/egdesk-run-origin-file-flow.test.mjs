@@ -65,6 +65,11 @@ class Element {
   }
 }
 const deferred = () => Promise.withResolvers();
+const until = async predicate => {
+  const end = Date.now() + 3000;
+  while (!predicate() && Date.now() < end) await new Promise(resolve => setTimeout(resolve, 2));
+  assert.ok(predicate(), 'bounded fixture UI state was not reached');
+};
 const target = Object.freeze({ conversationId: 'origin-conversation', runId: 'origin-run', itemId: 'origin-command' });
 
 async function harness(t) {
@@ -76,11 +81,24 @@ async function harness(t) {
   }
   const source = path.join(roots[0], 'source.test.js'), registrations = [], requests = [], originRequests = [];
   const effects = { boardReads: 0, pickers: 0, terminals: 0, network: 0, git: 0, provider: 0 };
-  const hooks = { beforeFile: async () => {}, afterFile: async () => {}, beforeOrigin: async () => {}, origin: value => value };
+  const hooks = { beforeFile: async () => {}, afterFile: async () => {}, beforeOrigin: async () => {}, origin: value => value,
+    chooseRoot: null, allowFakeGit: false, fakeGitReads: 0, fakeGitChangeReads: 0,
+    beforeGitStatus: async () => {}, beforeGitChanges: async () => {},
+    gitStatus: { isRepo: false, branch: null, truncated: false, entries: [] },
+    gitChanges: { isRepo: false, branch: null, truncated: false, files: [] } };
   const makeAdapter = () => createEGDeskFileHttpAdapter({ draftDirectory: path.join(temp, 'drafts'), localOwnerScope: 'origin-local',
     resolveRootSelection: async ({ selectionId }) => roots[selectionId === 'pick-original' ? 0 : 1],
     onRootRegistered: value => registrations.push(value),
-    gitReview: { status: async () => { effects.git++; assert.fail('origin open must not start git'); } } });
+    gitReview: {
+      status: async () => {
+        if (hooks.allowFakeGit) { hooks.fakeGitReads++; await hooks.beforeGitStatus(); return structuredClone(hooks.gitStatus); }
+        effects.git++; assert.fail('origin open must not start git');
+      },
+      changes: async () => {
+        if (hooks.allowFakeGit) { hooks.fakeGitChangeReads++; await hooks.beforeGitChanges(); return structuredClone(hooks.gitChanges); }
+        effects.git++; assert.fail('origin open must not start git');
+      },
+    } });
   let adapter = makeAdapter();
   const dispatch = async (name, body) => {
     const result = await adapter.dispatch({ method: 'POST', pathname: EGDESK_FILE_ENDPOINTS[name], body, ownerScope: 'origin-local' });
@@ -89,7 +107,7 @@ async function harness(t) {
   const projects = [await dispatch('attachProject', { boardId: 'a', selectionId: 'pick-original' }),
     await dispatch('attachProject', { boardId: 'b', selectionId: 'pick-other' })];
   const workspace = await adapter.resolveProjectWorkspace({ ownerScope: 'origin-local', boardId: 'a' });
-  const privateOrigin = { project: { projectId: workspace.projectId, source: 'board', fileOwnerScope: 'origin-local',
+  const privateOrigin = { project: { projectId: workspace.projectId, source: 'board', boardId: workspace.boardId, roomId: workspace.roomId, fileOwnerScope: 'origin-local',
     startCwd: workspace.absolutePath, fsIdentity: workspace.identity } };
   const handler = createChatHttpHandler({ async runProjectOrigin(query) {
     if (query.conversationId !== target.conversationId || query.runId !== target.runId) return { protocolVersion: 1, ...query, status: 'unknown', verified: false };
@@ -111,6 +129,7 @@ async function harness(t) {
   };
   const document = { createElement: tag => new Element(document, tag), activeElement: null };
   document.body = document.createElement('body'); document.querySelector = selector => document.body.querySelector(selector);
+  document.querySelectorAll = selector => document.body.querySelectorAll(selector);
   const createService = () => FileView.createEGDeskFileServiceCallbacks({ request: async (pathname, body) => {
     const name = Object.keys(EGDESK_FILE_ENDPOINTS).find(key => EGDESK_FILE_ENDPOINTS[key] === pathname);
     const request = { name, body: structuredClone(body) }; requests.push(request);
@@ -134,7 +153,11 @@ async function harness(t) {
   };
   const globals = { document, window: { AbortController, setTimeout, clearTimeout },
     ChromeUtils: { importESModule: () => ({ ...FileView, createEGDeskFileServiceCallbacks: createService,
-      createEGDeskNativeFilePickers: () => ({ chooseRoot() { effects.pickers++; assert.fail('no picker'); } }) }) },
+      createEGDeskNativeFilePickers: () => ({ chooseRoot() {
+        effects.pickers++;
+        if (hooks.chooseRoot) return hooks.chooseRoot();
+        assert.fail('no picker');
+      } }) }) },
     fetch: () => { effects.network++; assert.fail('no network listener or fetch'); } };
   const saved = new Map(Object.keys(globals).map(key => [key, Object.getOwnPropertyDescriptor(globalThis, key)]));
   for (const [key, value] of Object.entries(globals)) Object.defineProperty(globalThis, key, { configurable: true, writable: true, value });
@@ -170,6 +193,238 @@ function assertReadEffects(h, { drafts = 0, boardReads = 0 } = {}) {
   assert.equal(h.requests.filter(request => request.name === 'createDraft').length, drafts, 'managed working-copy creation is counted separately');
   assert.ok(h.originRequests.every(request => request.method === 'GET' && JSON.stringify(request.query) === JSON.stringify({ conversationId: target.conversationId, runId: target.runId })));
 }
+
+const fileFrame = (rootId, relativePath) => ({ type: 'workflow.event', v: 1,
+  event: { topic: 'file.changed', source: 'file', payload: { rootId, relativePath, change: 'rename' } } });
+
+async function openFromActualRunResult(t, h) {
+  const retained = 'FAIL source.test.js\n  ● past failing test\n\n    Expected: old\n    Received: different\n\n      at fixture (source.test.js:2:3)\n\nTests: 1 failed, 1 total\n';
+  const chat = createChatRunResultView({ document: h.document, run: target,
+    activity: { id: target.itemId, kind: 'commandExecution', status: 'failed', detail: { command: 'npm test', cwd: h.roots[0], exitCode: 1 } },
+    fetchJson: async () => ({ protocolVersion: 1, ...target, head: '', tail: retained, totalBytes: retained.length, omittedBytes: 0, complete: true }),
+    isCurrent: h.current(), readOrigin: h.readOrigin, onOpenVerifiedFile: h.zone.openVerifiedRunFile });
+  h.document.body.append(chat.element); t.after(() => chat.dispose());
+  await chat.element.querySelector('button').click();
+  const link = chat.element.querySelector('.egdesk-run-result-location'); assert.ok(link);
+  await link.click();
+  const card = h.cards().at(-1); assert.ok(card); assert.equal(card._fileView.snapshot().rootId, h.projects[0].rootId);
+  return { chat, card, link };
+}
+
+test('actual completed result-button opening retains a verified run watcher without implicit Git', { timeout: 6000 }, async t => {
+  const h = await harness(t), { card } = await openFromActualRunResult(t, h);
+  const rootA = h.projects[0].rootId, initialReads = h.originRequests.length;
+  await fs.writeFile(path.join(h.roots[0], 'owned-new.txt'), 'temporary fixture\n');
+  assert.equal(await h.zone.onWorkflowEvent(fileFrame(rootA, 'owned-new.txt'), () => true), 1);
+  await card._fileView.flushFileChanges();
+  assert.ok(card.querySelectorAll('[role="treeitem"]').some(node => node.dataset.name === 'owned-new.txt'));
+  assert.ok(h.originRequests.length > initialReads, 'each event revalidates the real origin resolver');
+  assert.equal(h.effects.git, 0); assert.equal(h.effects.network, 0); assert.equal(h.effects.provider, 0);
+  assert.equal(h.effects.pickers, 0); assert.equal(h.requests.some(request => request.name === 'saveOriginal'), false);
+});
+
+test('two explicit File openings retain separate grants until their shared result scope is disposed', { timeout: 6000 }, async t => {
+  const h = await harness(t), { card, chat, link } = await openFromActualRunResult(t, h), rootA = h.projects[0].rootId;
+  await link.click();
+  const other = h.cards().at(-1); assert.notEqual(other, card);
+  assert.equal(await h.zone.onWorkflowEvent(fileFrame(rootA, 'source.test.js'), () => true), 2);
+  await Promise.all([card._fileView.flushFileChanges(), other._fileView.flushFileChanges()]);
+  chat.dispose();
+  assert.equal(await h.zone.onWorkflowEvent(fileFrame(rootA, 'source.test.js'), () => true), 0);
+  assert.equal(h.effects.git, 0); assert.equal(h.effects.network, 0); assert.equal(h.effects.provider, 0);
+});
+
+for (const mode of ['account-aba', 'board-detached', 'board-replaced', 'run-changed', 'result-disposed', 'result-refreshed']) {
+  test('actual completed result watcher rejects ' + mode + ' authority', { timeout: 6000 }, async t => {
+    const h = await harness(t), { card, chat } = await openFromActualRunResult(t, h), rootA = h.projects[0].rootId;
+    assert.equal(await h.zone.onWorkflowEvent(fileFrame(rootA, 'source.test.js'), () => true), 1);
+    await card._fileView.flushFileChanges();
+    if (mode === 'account-aba') { h.changeEpoch(); h.changeEpoch(); }
+    if (mode === 'board-detached') await h.dispatch('detachProject', { boardId: 'a' });
+    if (mode === 'board-replaced') await h.dispatch('attachProject', { boardId: 'a', selectionId: 'pick-other' });
+    if (mode === 'run-changed') h.hooks.origin = value => ({ ...value, runId: 'different-run' });
+    if (mode === 'result-disposed') chat.dispose();
+    if (mode === 'result-refreshed') await chat.element.querySelector('button').click();
+    const before = h.requests.filter(row => row.name === 'listDirectory').length;
+    assert.equal(await h.zone.onWorkflowEvent(fileFrame(rootA, 'source.test.js'), () => true), 0);
+    await card._fileView.flushFileChanges();
+    assert.equal(h.requests.filter(row => row.name === 'listDirectory').length, before);
+    assert.equal(h.effects.network, 0); assert.equal(h.effects.provider, 0); assert.equal(h.effects.git, 0);
+  });
+}
+
+test('detaching the origin Board rejects its watcher even when another Board still uses the folder', { timeout: 6000 }, async t => {
+  const h = await harness(t);
+  const shared = await h.dispatch('attachProject', { boardId: 'c', selectionId: 'pick-original' });
+  h.projects[0] = shared;
+  const { card } = await openFromActualRunResult(t, h), rootA = shared.rootId;
+  assert.equal(await h.zone.onWorkflowEvent(fileFrame(rootA, 'source.test.js'), () => true), 1);
+  await card._fileView.flushFileChanges();
+  await h.dispatch('detachProject', { boardId: 'a' });
+  const count = h.requests.filter(row => row.name === 'listDirectory').length;
+  assert.equal(await h.zone.onWorkflowEvent(fileFrame(rootA, 'source.test.js'), () => true), 0);
+  await card._fileView.flushFileChanges();
+  assert.equal(h.requests.filter(row => row.name === 'listDirectory').length, count);
+  assert.equal((await h.dispatch('openProject', { boardId: 'c' })).project.status, 'connected', 'the other Board stays valid');
+});
+
+test('an actual result watcher rejects a late origin reply after the account epoch changes', { timeout: 6000 }, async t => {
+  const h = await harness(t), { card } = await openFromActualRunResult(t, h), entered = deferred(), release = deferred();
+  h.hooks.beforeOrigin = async () => { entered.resolve(); await release.promise; };
+  const lists = h.requests.filter(row => row.name === 'listDirectory').length;
+  const pending = h.zone.onWorkflowEvent(fileFrame(h.projects[0].rootId, 'source.test.js'), () => true);
+  await entered.promise; h.changeEpoch(); h.changeEpoch(); release.resolve();
+  assert.equal(await pending, 0); await card._fileView.flushFileChanges();
+  assert.equal(h.requests.filter(row => row.name === 'listDirectory').length, lists);
+  assert.equal(h.effects.git, 0); assert.equal(h.effects.network, 0); assert.equal(h.effects.provider, 0);
+});
+
+test('an actual result watcher drops a delayed listing after Board detachment', { timeout: 6000 }, async t => {
+  const h = await harness(t), { card } = await openFromActualRunResult(t, h), entered = deferred(), release = deferred();
+  const rootA = h.projects[0].rootId;
+  await fs.writeFile(path.join(h.roots[0], 'late-owned.txt'), 'temporary fixture\n');
+  assert.equal(await h.zone.onWorkflowEvent(fileFrame(rootA, 'late-owned.txt'), () => true), 1);
+  h.hooks.afterFile = async request => { if (request.name === 'listDirectory') { entered.resolve(); await release.promise; } };
+  const pending = card._fileView.flushFileChanges(); await entered.promise;
+  await h.dispatch('detachProject', { boardId: 'a' }); release.resolve(); await pending;
+  assert.equal(card.querySelectorAll('[role="treeitem"]').some(node => node.dataset.name === 'late-owned.txt'), false);
+  assert.equal(h.effects.git, 0); assert.equal(h.effects.network, 0); assert.equal(h.effects.provider, 0);
+});
+
+test('an explicit ordinary-root selection releases the run epoch but never admits the old in-flight event', { timeout: 6000 }, async t => {
+  const h = await harness(t), entered = deferred(), release = deferred();
+  const { card } = await openFromActualRunResult(t, h), oldRoot = h.projects[0].rootId;
+  const rootB = await h.dispatch('registerRoot', { selectionId: 'pick-other' });
+  h.hooks.chooseRoot = async () => rootB;
+  h.hooks.allowFakeGit = true; // no subprocess; ordinary File otherwise requests status in the background.
+  let block = true;
+  h.hooks.beforeOrigin = async () => { if (block) { entered.resolve(); await release.promise; } };
+  const old = h.zone.onWorkflowEvent(fileFrame(oldRoot, 'source.test.js'), () => true);
+  await entered.promise;
+  await card.querySelector('.egdesk-file-connect').click();
+  assert.equal(card._fileView.snapshot().rootId, rootB.rootId);
+  release.resolve(); assert.equal(await old, 0, 'an A response cannot adopt the selected B binding');
+  await new Promise(resolve => setImmediate(resolve));
+  block = false; const originsBefore = h.originRequests.length, gitBefore = h.hooks.fakeGitReads;
+  assert.equal(await h.zone.onWorkflowEvent(fileFrame(rootB.rootId, 'source.test.js'), () => true), 1);
+  h.changeEpoch();
+  await fs.writeFile(path.join(h.roots[1], 'selected-new.txt'), 'owned fixture only\n');
+  assert.equal(await h.zone.onWorkflowEvent(fileFrame(rootB.rootId, 'selected-new.txt'), () => true), 1);
+  await card._fileView.flushFileChanges();
+  assert.ok(card.querySelectorAll('[role="treeitem"]').some(node => node.dataset.name === 'selected-new.txt'));
+  assert.equal(h.hooks.fakeGitReads, gitBefore + 1, 'an explicitly selected ordinary folder refreshes Git once');
+  assert.equal(h.originRequests.length, originsBefore, 'ordinary B never depends on the prior run origin');
+  assert.equal(await h.zone.onWorkflowEvent(fileFrame(oldRoot, 'source.test.js'), () => true), 0);
+  let streamCurrent = true;
+  await fs.writeFile(path.join(h.roots[1], 'stale-stream.txt'), 'owned fixture only\n');
+  assert.equal(await h.zone.onWorkflowEvent(fileFrame(rootB.rootId, 'stale-stream.txt'), () => streamCurrent), 1);
+  streamCurrent = false; await card._fileView.flushFileChanges();
+  assert.equal(card.querySelectorAll('[role="treeitem"]').some(node => node.dataset.name === 'stale-stream.txt'), false);
+  assert.equal(h.hooks.fakeGitReads, gitBefore + 1, 'a stale stream cannot trigger Git');
+  assert.equal(await h.zone.onWorkflowEvent(fileFrame(rootB.rootId, 'stale-stream.txt'), () => true), 1);
+  await card._fileView.flushFileChanges();
+  assert.ok(card.querySelectorAll('[role="treeitem"]').some(node => node.dataset.name === 'stale-stream.txt'));
+  assert.equal(h.hooks.fakeGitReads, gitBefore + 2);
+  assert.equal(h.effects.pickers, 1);
+  assert.equal(h.effects.network, 0); assert.equal(h.effects.provider, 0); assert.equal(h.effects.terminals, 0); assert.equal(h.effects.git, 0);
+  assert.equal(h.requests.some(request => request.name === 'saveOriginal'), false);
+});
+
+test('ordinary folder chosen from a run refreshes the same Git badges and open Changes as an ordinary File', { timeout: 6000 }, async t => {
+  const h = await harness(t), { card, chat } = await openFromActualRunResult(t, h), rootA = h.projects[0].rootId;
+  assert.equal(await h.zone.onWorkflowEvent(fileFrame(rootA, 'source.test.js'), () => true), 1);
+  await card._fileView.flushFileChanges();
+  assert.equal(h.effects.git, 0, 'the still-run-bound File never invokes Git');
+  const rootB = await h.dispatch('registerRoot', { selectionId: 'pick-other' });
+  h.hooks.chooseRoot = async () => rootB;
+  h.hooks.allowFakeGit = true;
+  h.hooks.gitStatus = { isRepo: true, branch: 'fixture', truncated: false, entries: [] };
+  h.hooks.gitChanges = { isRepo: true, branch: 'fixture', truncated: false, files: [] };
+  await card.querySelector('.egdesk-file-connect').click();
+  const other = h.zone.spawnFileCard({ openMode: 'new' }); await other._fileReady;
+  await other.querySelector('.egdesk-file-connect').click();
+  await until(() => h.hooks.fakeGitReads >= 2);
+  assert.equal(card._fileView.snapshot().rootId, rootB.rootId);
+  assert.equal(other._fileView.snapshot().rootId, rootB.rootId);
+  const item = targetCard => targetCard.querySelectorAll('[role="treeitem"]').find(node => node.dataset.name === 'source.test.js');
+  const originalItem = item(card), ordinaryItem = item(other);
+  assert.ok(originalItem && ordinaryItem);
+  await originalItem.click();
+  await until(() => !!card._fileView.snapshot().draftId && !card.querySelector('.egdesk-file-editor-label').hidden);
+  const editor = card.querySelector('.egdesk-file-editor');
+  editor.value = 'owned unsaved draft'; await editor.fire('input'); await card._fileView.flush();
+  editor.selectionStart = 2; editor.selectionEnd = 8; editor.focus();
+  const before = card._fileView.snapshot();
+  for (const targetCard of [card, other]) {
+    const tab = targetCard.querySelectorAll('.egdesk-file-tab').find(node => node.dataset.tab === 'changes');
+    assert.ok(tab && !tab.disabled); await tab.click();
+  }
+  await until(() => h.hooks.fakeGitChangeReads >= 2 &&
+    [card, other].every(targetCard => targetCard.querySelector('.egdesk-file-changes').getAttribute('aria-busy') === 'false'));
+  const statusBefore = h.hooks.fakeGitReads, changesBefore = h.hooks.fakeGitChangeReads;
+  h.hooks.gitStatus.entries = [{ relativePath: 'source.test.js', state: 'modified', staged: false, unstaged: true, directory: false }];
+  h.hooks.gitChanges.files = [{ relativePath: 'source.test.js', previousPath: null, status: 'modified', additions: 2, deletions: 1, binary: false }];
+  h.changeEpoch(); chat.dispose();
+  assert.equal(await h.zone.onWorkflowEvent(fileFrame(rootB.rootId, 'source.test.js'), () => true), 2);
+  await Promise.all([card._fileView.flushFileChanges(), other._fileView.flushFileChanges()]);
+  assert.equal(h.hooks.fakeGitReads, statusBefore + 2);
+  assert.equal(h.hooks.fakeGitChangeReads, changesBefore + 2);
+  for (const targetCard of [card, other]) {
+    const currentItem = item(targetCard), badge = currentItem.querySelector('.egdesk-file-tree-state');
+    assert.equal(currentItem.dataset.gitState, 'modified'); assert.equal(badge.hidden, false); assert.equal(badge.textContent, 'M');
+    assert.equal(targetCard.querySelector('.egdesk-file-changes').hidden, false);
+    assert.equal(targetCard.querySelector('.egdesk-file-change-path').textContent, 'source.test.js');
+  }
+  const after = card._fileView.snapshot();
+  for (const key of ['rootId', 'fileId', 'draftId', 'bufferRevision', 'savedRevision', 'dirty', 'originalDirty']) assert.equal(after[key], before[key], key);
+  assert.deepEqual([editor.value, editor.selectionStart, editor.selectionEnd, h.document.activeElement], ['owned unsaved draft', 2, 8, editor]);
+  assert.equal(h.effects.git, 0); assert.equal(h.effects.network, 0); assert.equal(h.effects.provider, 0); assert.equal(h.effects.terminals, 0);
+  assert.equal(h.requests.some(request => request.name === 'saveOriginal'), false);
+});
+
+test('ordinary transition drops late Git status and Changes replies from an obsolete stream', { timeout: 6000 }, async t => {
+  const h = await harness(t), { card } = await openFromActualRunResult(t, h);
+  const rootB = await h.dispatch('registerRoot', { selectionId: 'pick-other' });
+  h.hooks.chooseRoot = async () => rootB; h.hooks.allowFakeGit = true;
+  h.hooks.gitStatus = { isRepo: true, branch: 'fixture', truncated: false, entries: [] };
+  h.hooks.gitChanges = { isRepo: true, branch: 'fixture', truncated: false, files: [] };
+  await card.querySelector('.egdesk-file-connect').click();
+  await until(() => h.hooks.fakeGitReads >= 1);
+  const tab = card.querySelectorAll('.egdesk-file-tab').find(node => node.dataset.tab === 'changes');
+  await tab.click();
+  await until(() => h.hooks.fakeGitChangeReads >= 1 && card.querySelector('.egdesk-file-changes').getAttribute('aria-busy') === 'false');
+  const item = card.querySelectorAll('[role="treeitem"]').find(node => node.dataset.name === 'source.test.js');
+  const statusEntered = deferred(), changeEntered = deferred(), release = deferred();
+  h.hooks.beforeGitStatus = async () => { statusEntered.resolve(); await release.promise; };
+  h.hooks.beforeGitChanges = async () => { changeEntered.resolve(); await release.promise; };
+  h.hooks.gitStatus.entries = [{ relativePath: 'source.test.js', state: 'modified', staged: false, unstaged: true, directory: false }];
+  h.hooks.gitChanges.files = [{ relativePath: 'source.test.js', previousPath: null, status: 'modified', additions: 1, deletions: 0, binary: false }];
+  let streamCurrent = true;
+  assert.equal(await h.zone.onWorkflowEvent(fileFrame(rootB.rootId, 'source.test.js'), () => streamCurrent), 1);
+  const pending = card._fileView.flushFileChanges();
+  await Promise.all([statusEntered.promise, changeEntered.promise]);
+  streamCurrent = false; release.resolve(); await pending;
+  assert.equal(item.querySelector('.egdesk-file-tree-state').hidden, true);
+  assert.equal(card.querySelector('.egdesk-file-change-path'), null);
+  h.hooks.beforeGitStatus = async () => {}; h.hooks.beforeGitChanges = async () => {};
+  assert.equal(await h.zone.onWorkflowEvent(fileFrame(rootB.rootId, 'source.test.js'), () => true), 1);
+  await card._fileView.flushFileChanges();
+  assert.equal(item.querySelector('.egdesk-file-tree-state').textContent, 'M');
+  assert.equal(card.querySelector('.egdesk-file-change-path').textContent, 'source.test.js');
+  assert.equal(h.effects.git, 0); assert.equal(h.effects.network, 0); assert.equal(h.effects.provider, 0);
+  assert.equal(h.requests.some(request => request.name === 'saveOriginal'), false);
+});
+
+test('a cancelled ordinary-root selection keeps the original run authorization', { timeout: 6000 }, async t => {
+  const h = await harness(t), { card } = await openFromActualRunResult(t, h), rootA = h.projects[0].rootId;
+  h.hooks.chooseRoot = async () => null;
+  await card.querySelector('.egdesk-file-connect').click();
+  assert.equal(card._fileView.snapshot().rootId, rootA);
+  assert.equal(await h.zone.onWorkflowEvent(fileFrame(rootA, 'source.test.js'), () => true), 1);
+  h.changeEpoch();
+  assert.equal(await h.zone.onWorkflowEvent(fileFrame(rootA, 'source.test.js'), () => true), 0);
+  assert.equal(h.effects.pickers, 1); assert.equal(h.effects.network, 0); assert.equal(h.effects.provider, 0);
+});
 
 test('retained command -> explicit current file -> a separate production File Card through real origin and File services', async t => {
   const h = await harness(t), existing = h.zone.spawnFileCard();

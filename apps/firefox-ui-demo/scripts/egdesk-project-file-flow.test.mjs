@@ -3,12 +3,18 @@ import assert from 'node:assert/strict';
 import * as fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
+import vm from 'node:vm';
+import { EventEmitter } from 'node:events';
+import { Readable } from 'node:stream';
 import * as FileView from '../overlay/resources/EGDeskFileView.sys.mjs';
 import * as FileCardState from '../overlay/resources/EGDeskFileCardState.sys.mjs';
 import * as RunResult from '../overlay/resources/EGDeskRunResult.sys.mjs';
 import { createFileCardZone } from '../overlay/resources/surface/EGDeskSurfaceFileCard.mjs';
 import { normalizeProjectScripts } from '../helper/egdesk-project-store.mjs';
 import { createEGDeskFileHttpAdapter } from '../helper/egdesk-file-http.mjs';
+import { bootstrapQaProfile, canonicalTempRoot, LOADER_FILES } from './egdesk-chat-qa-profile.mjs';
+import { prepareQaFirefox } from './run-firefox-mcp-target.mjs';
+import { createQaFixtureTransport } from './egdesk-chat-fixture-transport.mjs';
 
 // Unit DOM dispatches the real production listeners. No copied click logic or
 // browser/provider/OS process is involved; Main owns actual headless acceptance.
@@ -502,9 +508,637 @@ async function cardFixture(t, { service = null } = {}) {
     state: { codex: {} },
   });
   return { ...h, document, runs, terminalOptions, terminalApis, notices, focused, presentations, openIde: () => zone.openBoardProjectFile(),
+    dispatchWorkflow: (event, current) => zone.onWorkflowEvent(event, current),
     runStatus: value => { runStatus = value; }, setTarget: value => { target = value; }, pick: value => { nextPick = value; }, pickerCalls: () => pickerCalls,
-    spawn: async options => { const card = zone.spawnFileCard(options); await card._fileReady; assert.ok(card._fileView, card.textContent); return card; } };
+    spawn: async options => {
+      if (options?.project && options?.projectTarget?.boardId && !h.projects.has(options.projectTarget.boardId)) {
+        h.projects.set(options.projectTarget.boardId, structuredClone(options.project));
+      }
+      const card = zone.spawnFileCard(options); await card._fileReady; assert.ok(card._fileView, card.textContent); return card;
+    } };
 }
+
+const fileChangedFrame = (rootId, relativePath, change = 'rename') => ({ type: 'workflow.event', v: 1,
+  event: { topic: 'file.changed', source: 'file', payload: { rootId, relativePath, change } } });
+
+test('workflow File events refresh only matching live roots and preserve draft, selection and expanded folders', { timeout: 6000 }, async t => {
+  const h = await cardFixture(t), lists = [], roots = {
+    'dir-a': [{ id: 'file-dir-a', name: 'source.txt', kind: 'file' }, { id: 'nested-a', name: 'src', kind: 'directory' }],
+    'nested-a': [{ id: 'nested-file', name: 'inside.txt', kind: 'file' }],
+    'dir-b': [{ id: 'file-dir-b', name: 'source.txt', kind: 'file' }],
+  };
+  h.service.listDirectory = async ({ directoryId }) => { lists.push(directoryId); return { entries: structuredClone(roots[directoryId] || []), nextCursor: null }; };
+  let gitReads = 0; h.service.gitStatus = async () => { gitReads++; return { available: false }; };
+  const a = await h.spawn({ openMode: 'new', project: project('a'), projectTarget: { boardId: 'board-a', title: 'A' } });
+  const b = await h.spawn({ openMode: 'new', project: project('b'), projectTarget: { boardId: 'board-b', title: 'B' } });
+  await a._fileView.openFile('file-dir-a');
+  const editor = a.querySelector('.egdesk-file-editor');
+  editor.value = '작업 중인 초안'; editor.fire('input'); await a._fileView.flush();
+  editor.selectionStart = 2; editor.selectionEnd = 5; editor.focus();
+  const folder = a.querySelectorAll('[role="treeitem"]').find(node => node.dataset.name === 'src');
+  folder.click(); await settle(); editor.focus();
+  assert.equal(folder.getAttribute('aria-expanded'), 'true');
+  roots['dir-a'].push({ id: 'new-a', name: '새파일.txt', kind: 'file' });
+  lists.length = 0; gitReads = 0; const writes = h.writes.length;
+  const active = () => true;
+  assert.equal(await h.dispatchWorkflow(fileChangedFrame('root-a', '새파일.txt'), active), 1);
+  await a._fileView.flushFileChanges(); await settle();
+  assert.deepEqual(lists, ['dir-a']); assert.equal(gitReads, 1);
+  assert.ok(a.querySelectorAll('[role="treeitem"]').some(node => node.dataset.name === '새파일.txt'));
+  assert.equal(a.querySelectorAll('[role="treeitem"]').find(node => node.dataset.name === 'src'), folder);
+  assert.equal(folder.getAttribute('aria-expanded'), 'true');
+  assert.equal(h.document.activeElement, editor); assert.deepEqual([editor.value, editor.selectionStart, editor.selectionEnd], ['작업 중인 초안', 2, 5]);
+  assert.equal(h.writes.length, writes); assert.equal(b._fileView.snapshot().rootId, 'root-b');
+  assert.deepEqual(h.runs, []); assert.deepEqual(h.terminalOptions, []);
+  roots['dir-b'].push({ id: 'new-b', name: '다른보드.txt', kind: 'file' }); lists.length = 0;
+  assert.equal(await h.dispatchWorkflow(fileChangedFrame('root-b', '다른보드.txt'), active), 1);
+  await b._fileView.flushFileChanges();
+  assert.ok(b.querySelectorAll('[role="treeitem"]').some(node => node.dataset.name === '다른보드.txt'));
+  assert.equal(h.document.activeElement, editor, 'a valid inactive Board File does not steal focus');
+  assert.deepEqual(lists, ['dir-b']);
+  assert.equal(await h.dispatchWorkflow(fileChangedFrame('other', 'other.txt'), active), 0);
+  assert.equal(await h.dispatchWorkflow(fileChangedFrame('root-a', '../outside'), active), 0);
+  assert.equal(await h.dispatchWorkflow({ ...fileChangedFrame('root-a', 'x'), v: 2 }, active), 0);
+  assert.equal(await h.dispatchWorkflow(fileChangedFrame('root-a', 'x', 'unexpected'), active), 0);
+  a.dataset.closeState = 'closing';
+  assert.equal(await h.dispatchWorkflow(fileChangedFrame('root-a', 'x'), active), 0);
+  a.dataset.closeState = 'blocked';
+  assert.equal(await h.dispatchWorkflow(fileChangedFrame('root-a', 'x'), active), 1, 'a blocked close leaves the live File usable');
+  await a._fileView.flushFileChanges();
+  assert.equal(await a._beforeClose(), true); a.remove();
+  assert.equal(await h.dispatchWorkflow(fileChangedFrame('root-a', 'x'), active), 0);
+});
+
+test('watcher rejects an externally rebound or detached Board but keeps other Board and ordinary roots live', { timeout: 6000 }, async t => {
+  const h = await cardFixture(t), lists = [];
+  h.service.listDirectory = async ({ directoryId }) => {
+    lists.push(directoryId); return { entries: [{ id: `file-${directoryId}`, name: 'source.txt', kind: 'file' }], nextCursor: null };
+  };
+  const a = await h.spawn({ openMode: 'new', project: project('a'), projectTarget: { boardId: 'board-a', title: 'A' } });
+  const b = await h.spawn({ openMode: 'new', project: project('b'), projectTarget: { boardId: 'board-b', title: 'B' } });
+  const ordinary = await h.spawn({ openMode: 'new' });
+  h.pick('/ordinary'); ordinary.querySelector('.egdesk-file-connect').click();
+  await until(() => ordinary._fileView.snapshot().rootId === 'ordinary');
+  h.projects.set('board-a', project('replacement')); lists.length = 0;
+  assert.equal(await h.dispatchWorkflow(fileChangedFrame('root-a', 'old.txt'), () => true), 0);
+  await a._fileView.flushFileChanges(); assert.deepEqual(lists, []);
+  assert.equal(await h.dispatchWorkflow(fileChangedFrame('root-b', 'ok.txt'), () => true), 1);
+  await b._fileView.flushFileChanges(); assert.ok(lists.includes('dir-b'));
+  lists.length = 0;
+  assert.equal(await h.dispatchWorkflow(fileChangedFrame('ordinary', 'ok.txt'), () => true), 1);
+  await ordinary._fileView.flushFileChanges(); assert.ok(lists.includes('ordinary-dir'));
+  h.projects.delete('board-a'); lists.length = 0;
+  assert.equal(await h.dispatchWorkflow(fileChangedFrame('root-a', 'old.txt'), () => true), 0);
+  assert.deepEqual(lists, []);
+});
+
+test('canonical Board binding is checked again before and after a delayed watcher listing', { timeout: 6000 }, async t => {
+  const h = await cardFixture(t), entered = deferred(), release = deferred(), lists = [];
+  let delayed = false, gitReads = 0;
+  h.service.listDirectory = async ({ directoryId }) => {
+    lists.push(directoryId);
+    if (delayed) { entered.resolve(); return release.promise; }
+    return { entries: [{ id: 'original', name: 'source.txt', kind: 'file' }], nextCursor: null };
+  };
+  h.service.gitStatus = async () => { gitReads++; return { available: false }; };
+  const card = await h.spawn({ openMode: 'new', project: project('a'), projectTarget: { boardId: 'board-a', title: 'A' } });
+  await settle();
+  lists.length = 0; gitReads = 0;
+  assert.equal(await h.dispatchWorkflow(fileChangedFrame('root-a', 'one.txt'), () => true), 1);
+  h.projects.set('board-a', project('replacement'));
+  await card._fileView.flushFileChanges(); assert.deepEqual(lists, []); assert.equal(gitReads, 0);
+  h.projects.set('board-a', project('a')); delayed = true;
+  assert.equal(await h.dispatchWorkflow(fileChangedFrame('root-a', 'two.txt'), () => true), 1);
+  const pending = card._fileView.flushFileChanges(); await entered.promise;
+  h.projects.set('board-a', project('replacement'));
+  release.resolve({ entries: [{ id: 'stale', name: 'stale.txt', kind: 'file' }], nextCursor: null });
+  await pending;
+  assert.equal(card.querySelectorAll('[role="treeitem"]').some(node => node.dataset.name === 'stale.txt'), false);
+  assert.equal(gitReads, 0, 'a stale Board binding cannot trigger Git refresh');
+});
+
+test('closing a File while its Board authorization is pending drops the event', { timeout: 6000 }, async t => {
+  const h = await cardFixture(t), entered = deferred(), release = deferred(), lists = [];
+  const open = h.service.openProject;
+  h.service.openProject = async request => {
+    if (request.expectedProjectId) { entered.resolve(); await release.promise; }
+    return open(request);
+  };
+  h.service.listDirectory = async ({ directoryId }) => { lists.push(directoryId); return { entries: [], nextCursor: null }; };
+  const card = await h.spawn({ openMode: 'new', project: project('a'), projectTarget: { boardId: 'board-a', title: 'A' } });
+  lists.length = 0;
+  const pending = h.dispatchWorkflow(fileChangedFrame('root-a', 'new.txt'), () => true);
+  await entered.promise; card.dataset.closeState = 'closing'; release.resolve();
+  assert.equal(await pending, 0);
+  await card._fileView.flushFileChanges(); assert.deepEqual(lists, []);
+});
+
+test('a failed listing after Board rebind cannot forget a still-expanded folder', { timeout: 6000 }, async t => {
+  const h = await cardFixture(t), entered = deferred();
+  let rejectListing, failChild = false, updated = false;
+  h.service.listDirectory = async ({ directoryId }) => {
+    if (directoryId === 'dir-a') return { entries: [{ id: 'src', name: 'src', kind: 'directory' }], nextCursor: null };
+    if (failChild) { entered.resolve(); return new Promise((_, reject) => { rejectListing = reject; }); }
+    return { entries: [{ id: updated ? 'new' : 'old', name: updated ? 'new.txt' : 'old.txt', kind: 'file' }], nextCursor: null };
+  };
+  const card = await h.spawn({ openMode: 'new', project: project('a'), projectTarget: { boardId: 'board-a', title: 'A' } });
+  const folder = card.querySelectorAll('[role="treeitem"]').find(node => node.dataset.name === 'src');
+  folder.click(); await settle();
+  failChild = true;
+  assert.equal(await h.dispatchWorkflow(fileChangedFrame('root-a', 'src/old.txt', 'change'), () => true), 1);
+  const pending = card._fileView.flushFileChanges(); await entered.promise;
+  h.projects.set('board-a', project('replacement')); rejectListing(new Error('old response failed')); await pending;
+  h.projects.set('board-a', project('a')); failChild = false; updated = true;
+  assert.equal(await h.dispatchWorkflow(fileChangedFrame('root-a', 'src/new.txt', 'change'), () => true), 1);
+  await card._fileView.flushFileChanges();
+  assert.equal(folder.getAttribute('aria-expanded'), 'true');
+  assert.ok(folder.querySelectorAll('[role="treeitem"]').some(node => node.dataset.name === 'new.txt'));
+});
+
+test('a slow stale Board verification cannot block a different valid Board sharing the root', { timeout: 6000 }, async t => {
+  const h = await cardFixture(t), entered = deferred(), release = deferred();
+  let includeNew = false;
+  const open = h.service.openProject;
+  h.service.openProject = async request => {
+    if (request.boardId === 'board-a') { entered.resolve(); await release.promise; return { source: 'board', project: project('replacement') }; }
+    return open(request);
+  };
+  h.service.listDirectory = async ({ directoryId }) => ({ entries: [
+    { id: `file-${directoryId}`, name: 'source.txt', kind: 'file' }, ...(includeNew ? [{ id: 'new', name: 'new.txt', kind: 'file' }] : []),
+  ], nextCursor: null });
+  await h.spawn({ openMode: 'new', project: project('a'), projectTarget: { boardId: 'board-a', title: 'A' } });
+  const b = await h.spawn({ openMode: 'new', project: project('a'), projectTarget: { boardId: 'board-b', title: 'B' } });
+  let bReceived = false;
+  const original = b._fileView.onFileChanged;
+  b._fileView.onFileChanged = (...args) => { bReceived = true; return original(...args); };
+  includeNew = true;
+  const dispatch = h.dispatchWorkflow(fileChangedFrame('root-a', 'new.txt'), () => true);
+  await entered.promise; await until(() => bReceived);
+  await b._fileView.flushFileChanges();
+  assert.ok(b.querySelectorAll('[role="treeitem"]').some(node => node.dataset.name === 'new.txt'));
+  release.resolve(); assert.equal(await dispatch, 1);
+});
+
+test('owned watcher wire reaches real FileCard and FileView in a no-port DOM integration', { timeout: 10000 }, async t => {
+  if (process.platform !== 'darwin') return t.skip('owned recursive filesystem watcher requires macOS');
+  const root = canonicalTempRoot();
+  const loader = await fs.mkdtemp(path.join(root, 'egdesk-watch-loader-'));
+  let profile = null, transport = null, ownedCard = null;
+  t.after(async () => {
+    try { if (ownedCard) await ownedCard._fileView.close(); }
+    finally {
+      await transport?.dispose();
+      for (const [target, prefix] of [[profile, 'egdesk-chat-test-'], [loader, 'egdesk-watch-loader-']]) {
+        if (!target) continue;
+        assert.equal(path.dirname(target), root); assert.ok(path.basename(target).startsWith(prefix));
+        assert.equal(await fs.realpath(target), target);
+        await fs.rm(target, { recursive: true });
+      }
+    }
+  });
+  for (const name of LOADER_FILES) await fs.writeFile(path.join(loader, name), `owned test loader ${name}\n`);
+  profile = bootstrapQaProfile({ loaderSource: loader }).profile;
+  const token = 'unit-watcher-integration-token-only';
+  const env = { EGDESK_QA_FIXTURE_TRANSPORT: '1', EGDESK_QA_PROJECT_FILE_FIXTURE: '1',
+    EGDESK_QA_PROJECT_FILE_WATCH: '1', EGDESK_QA_REAL_TURN: '0', EGDESK_QA_FIXTURE_PORT: '49318', EGDESK_QA_FIXTURE_TOKEN: token };
+  prepareQaFirefox(profile, { env });
+  transport = createQaFixtureTransport({ profile, token, env });
+  const fetchSpy = t.mock.method(globalThis, 'fetch', () => { throw new Error('No network/provider access'); });
+  const headers = { host: '127.0.0.1:49318', 'content-type': 'application/json' };
+  async function request(method, route, body = null, { control = false, moreHeaders = {} } = {}) {
+    const req = Readable.from(body === null ? [] : [JSON.stringify(body)]);
+    Object.assign(req, { method, url: route, headers: { ...headers, ...(control ? { 'x-egdesk-qa-token': token } : {}),
+      ...Object.fromEntries(Object.entries(moreHeaders).map(([key, value]) => [key.toLowerCase(), value])) },
+    socket: { remoteAddress: '127.0.0.1' } });
+    let status, packet;
+    await transport.handler(req, { writeHead(value) { status = value; }, end(value) { packet = value ? JSON.parse(value) : null; } });
+    return { status, body: packet };
+  }
+  const state = async () => (await request('GET', '/__qa/project-file/state', null, { control: true })).body;
+  const service = FileView.createEGDeskFileServiceCallbacks({ request: async (route, body, options) =>
+    (await request('POST', route, body, { moreHeaders: options?.headers })).body });
+  assert.equal((await request('POST', '/__qa/project-file/config', { pickerResults: ['select-owned'] }, { control: true })).status, 200);
+  const picker = FileView.createEGDeskNativeFilePickers({ service, pickDirectory: async () =>
+    (await request('POST', '/__qa/project-file/picker', {})).body.selection });
+  const project = await picker.chooseProjectFolder({ boardId: 'watch-integration-board', title: 'Owned watcher board' });
+  const h = await cardFixture(t, { service });
+  const card = await h.spawn({ openMode: 'new', project, projectTarget: { boardId: 'watch-integration-board', title: 'Owned watcher board' } });
+  ownedCard = card;
+  const folder = card.querySelectorAll('[role="treeitem"]').find(node => node.dataset.name === 'qa-expanded');
+  folder.click(); await until(() => !!folder.querySelectorAll('[role="treeitem"]').find(node => node.dataset.name === 'qa-existing.txt'));
+  card.querySelectorAll('[role="treeitem"]').find(node => node.dataset.name === 'qa-project.txt').click();
+  await until(() => !!card._fileView.snapshot().draftId);
+  const editor = card.querySelector('.egdesk-file-editor');
+  editor.value = 'owned unsaved fixture draft'; editor.fire('input'); await card._fileView.flush();
+  editor.selectionStart = 2; editor.selectionEnd = 7; editor.focus();
+  const before = card._fileView.snapshot(), prior = await state(), frames = [], others = [];
+  const source = await fs.readFile(new URL('../overlay/JS/eg-desk-surface.uc.js', import.meta.url), 'utf8');
+  const start = source.indexOf('      const fileEventStreamCurrent = () =>');
+  const end = source.indexOf("      source.addEventListener('codex', receive);", start);
+  assert.ok(start > 0 && end > start);
+  const receive = vm.compileFunction(`
+    let source = connection, streamReady = true;
+    const connectionSource = connection, streamEpoch = 1;
+    const epochScope = { valid: value => value === streamEpoch };
+    const window = { EventSource: { OPEN: 1 } };
+    const surfaceZones = { fileCard: { onWorkflowEvent: dispatch } }, TAG = 'watch-test';
+    const handleEvent = event => others.push(event), console = { warn() {} };
+    ${source.slice(start, end)}
+    return receive;
+  `, ['connection', 'dispatch', 'others'])({ readyState: 1 }, h.dispatchWorkflow, others);
+  const stream = Object.assign(new EventEmitter(), { method: 'GET', url: '/events?chatProtocol=2', headers });
+  const response = { writeHead(status) { assert.equal(status, 200); }, write(wire) {
+    if (wire.startsWith('event: codex\n')) {
+      const data = wire.split('\ndata: ')[1].trim(); frames.push(JSON.parse(data)); receive({ data });
+    }
+    return true;
+  } };
+  await transport.handler(stream, response);
+  const created = await request('POST', '/__qa/project-file/watch-create', {}, { control: true });
+  assert.equal(created.status, 200);
+  await until(() => !!folder.querySelectorAll('[role="treeitem"]').find(node => node.dataset.name === 'qa-watch-created.txt'));
+  const after = await state(), event = frames.find(frame => frame.type === 'workflow.event' &&
+    frame.event?.payload?.relativePath === 'qa-expanded/qa-watch-created.txt');
+  assert.equal(event?.event?.payload?.rootId, project.rootId);
+  assert.ok(after.watchEvents.some(row => row.id === event.event.id));
+  assert.equal(folder.getAttribute('aria-expanded'), 'true');
+  assert.equal(h.document.activeElement, editor);
+  assert.deepEqual([editor.value, editor.selectionStart, editor.selectionEnd], ['owned unsaved fixture draft', 2, 7]);
+  assert.deepEqual(card._fileView.snapshot(), before);
+  assert.equal(after.currentOriginalSha256, prior.originalSha256);
+  assert.equal(after.terminalRequests.length, 0);
+  assert.equal(after.fileRequests.some(row => row.operation === 'saveOriginal'), false);
+  assert.deepEqual(others, []); assert.equal(fetchSpy.mock.callCount(), 0);
+  stream.emit('close'); assert.equal(await card._beforeClose(), true);
+});
+
+
+test('stale File event epochs do not refresh and a new epoch for the same folder still does', { timeout: 6000 }, async t => {
+  const h = await cardFixture(t), lists = [];
+  let pending = null, delayed = false;
+  h.service.listDirectory = async ({ directoryId }) => {
+    lists.push(directoryId);
+    if (delayed) { pending = deferred(); return pending.promise; }
+    return { entries: [{ id: 'file-dir-a', name: 'source.txt', kind: 'file' }], nextCursor: null };
+  };
+  let gitReads = 0; h.service.gitStatus = async () => { gitReads++; return { available: false }; };
+  const card = await h.spawn({ openMode: 'new', project: project('a'), projectTarget: { boardId: 'board-a', title: 'A' } });
+  let old = true, fresh = true;
+  const oldEpoch = () => old, newEpoch = () => fresh, event = fileChangedFrame('root-a', 'added.txt');
+  lists.length = 0; gitReads = 0;
+  assert.equal(await h.dispatchWorkflow(event, oldEpoch), 1); old = false;
+  await card._fileView.flushFileChanges(); assert.deepEqual(lists, []); assert.equal(gitReads, 0);
+  assert.equal(await h.dispatchWorkflow(event, oldEpoch), 0);
+  old = true; assert.equal(await h.dispatchWorkflow(event, oldEpoch), 1); old = false;
+  assert.equal(await h.dispatchWorkflow(event, newEpoch), 1);
+  await card._fileView.flushFileChanges(); assert.deepEqual(lists, ['dir-a']); assert.equal(gitReads, 1);
+  lists.length = 0; gitReads = 0; delayed = true;
+  assert.equal(await h.dispatchWorkflow(event, newEpoch), 1);
+  const flushing = card._fileView.flushFileChanges(); await until(() => !!pending);
+  fresh = false;
+  pending.resolve({ entries: [{ id: 'late', name: '늦은파일.txt', kind: 'file' }], nextCursor: null });
+  await flushing; assert.equal(gitReads, 0);
+  assert.equal(card.querySelectorAll('[role="treeitem"]').some(node => node.dataset.name === '늦은파일.txt'), false);
+});
+
+test('a delayed old-root refresh cannot update an A to B to A rebound FileView', { timeout: 6000 }, async t => {
+  const h = await cardFixture(t), waiting = deferred(), release = deferred();
+  let hold = false;
+  h.service.listDirectory = async ({ directoryId }) => {
+    if (hold && directoryId === 'dir-a') { hold = false; waiting.resolve(); return release.promise; }
+    return { entries: [{ id: `file-${directoryId}`, name: 'source.txt', kind: 'file' }], nextCursor: null };
+  };
+  const card = await h.spawn({ openMode: 'new', project: project('a'), projectTarget: { boardId: 'board-a', title: 'A' } });
+  hold = true;
+  assert.equal(await h.dispatchWorkflow(fileChangedFrame('root-a', 'late.txt'), () => true), 1);
+  const oldRefresh = card._fileView.flushFileChanges(); await waiting.promise;
+  await card._fileView.openRoot({ rootId: 'root-b', directoryId: 'dir-b', name: 'B' });
+  await card._fileView.openRoot({ rootId: 'root-a', directoryId: 'dir-a', name: 'A' });
+  release.resolve({ entries: [{ id: 'stale', name: '이전파일.txt', kind: 'file' }], nextCursor: null });
+  await oldRefresh;
+  assert.equal(card._fileView.snapshot().rootId, 'root-a');
+  assert.equal(card.querySelectorAll('[role="treeitem"]').some(node => node.dataset.name === '이전파일.txt'), false);
+});
+
+test('a received watcher update cannot paint while the card is closing or after it closes', { timeout: 6000 }, async t => {
+  const h = await cardFixture(t), listingStarted = deferred(), releaseList = deferred(),
+    saveStarted = deferred(), releaseSave = deferred();
+  let holdList = false;
+  h.service.listDirectory = async ({ directoryId }) => {
+    if (holdList && directoryId === 'dir-a') { listingStarted.resolve(); return releaseList.promise; }
+    return { entries: [{ id: 'file-dir-a', name: 'source.txt', kind: 'file' }], nextCursor: null };
+  };
+  const originalUpdate = h.service.updateDraft;
+  h.service.updateDraft = async request => { saveStarted.resolve(); await releaseSave.promise; return originalUpdate(request); };
+  const card = await h.spawn({ openMode: 'new', project: project('a'), projectTarget: { boardId: 'board-a', title: 'A' } });
+  await card._fileView.openFile('file-dir-a');
+  const editor = card.querySelector('.egdesk-file-editor'); editor.value = 'pending on close'; editor.fire('input');
+  holdList = true;
+  assert.equal(await h.dispatchWorkflow(fileChangedFrame('root-a', 'late.txt'), () => true), 1);
+  const pendingRefresh = card._fileView.flushFileChanges(); await listingStarted.promise;
+  const closing = card._beforeClose(); await saveStarted.promise;
+  assert.equal(card.dataset.closeState, 'closing');
+  releaseList.resolve({ entries: [{ id: 'late', name: 'late.txt', kind: 'file' }], nextCursor: null });
+  await pendingRefresh;
+  assert.equal(card.querySelectorAll('[role="treeitem"]').some(node => node.dataset.name === 'late.txt'), false);
+  assert.equal(editor.value, 'pending on close');
+  releaseSave.resolve(); assert.equal(await closing, true);
+  assert.equal(await h.dispatchWorkflow(fileChangedFrame('root-a', 'after-close.txt'), () => true), 0);
+});
+
+test('a rejected old-root folder listing cannot forget the new root same-named expanded folder', { timeout: 6000 }, async t => {
+  const h = viewFixture(t), entered = deferred(), calls = [];
+  let rejectOld, hold = false, newEntries = [{ id: 'b-old', name: 'old-b.js', kind: 'file' }];
+  const oldResponse = new Promise((_, reject) => { rejectOld = reject; });
+  h.service.listDirectory = async ({ directoryId }) => {
+    calls.push(directoryId);
+    if (directoryId === 'src-a' && hold) { entered.resolve(); return oldResponse; }
+    if (directoryId === 'dir-a') return { entries: [{ id: 'src-a', name: 'src', kind: 'directory' }], nextCursor: null };
+    if (directoryId === 'dir-b') return { entries: [{ id: 'src-b', name: 'src', kind: 'directory' }], nextCursor: null };
+    if (directoryId === 'src-b') return { entries: structuredClone(newEntries), nextCursor: null };
+    return { entries: [], nextCursor: null };
+  };
+  await h.view.openRoot({ rootId: 'root-a', directoryId: 'dir-a', name: 'A' });
+  const first = h.view.element.querySelectorAll('[role="treeitem"]').find(node => node.dataset.name === 'src');
+  first.click(); await settle(); hold = true;
+  assert.equal(h.view.onFileChanged({ rootId: 'root-a', relativePath: 'src/old.txt' }), true);
+  const oldRefresh = h.view.flushFileChanges(); await entered.promise;
+  await h.view.openRoot({ rootId: 'root-b', directoryId: 'dir-b', name: 'B' });
+  const second = h.view.element.querySelectorAll('[role="treeitem"]').find(node => node.dataset.name === 'src');
+  second.click(); await settle();
+  rejectOld(new Error('old A listing failed')); await oldRefresh;
+  newEntries.push({ id: 'b-new', name: 'new-b.js', kind: 'file' }); calls.length = 0;
+  assert.equal(h.view.onFileChanged({ rootId: 'root-b', relativePath: 'src/new-b.js' }), true);
+  await h.view.flushFileChanges();
+  assert.deepEqual(calls, ['src-b']);
+  assert.equal(second.getAttribute('aria-expanded'), 'true');
+  assert.ok(second.querySelectorAll('[role="treeitem"]').some(node => node.dataset.name === 'new-b.js'));
+});
+
+test('same-folder refresh applies only the newest response and ignores an older failure', { timeout: 6000 }, async t => {
+  const h = viewFixture(t), requests = [];
+  let deferChildren = false, entries = [{ id: 'existing', name: 'existing.js', kind: 'file' }];
+  h.service.listDirectory = async ({ directoryId }) => {
+    if (directoryId === 'dir-a') return { entries: [{ id: 'src-a', name: 'src', kind: 'directory' }], nextCursor: null };
+    if (directoryId === 'src-a' && deferChildren) {
+      let resolve, reject; const promise = new Promise((yes, no) => { resolve = yes; reject = no; });
+      requests.push({ resolve, reject }); return promise;
+    }
+    return { entries: structuredClone(entries), nextCursor: null };
+  };
+  await h.view.openRoot({ rootId: 'root-a', directoryId: 'dir-a', name: 'A' });
+  const folder = h.view.element.querySelectorAll('[role="treeitem"]').find(node => node.dataset.name === 'src');
+  folder.click(); await settle(); deferChildren = true;
+  const event = { rootId: 'root-a', relativePath: 'src/new.js', change: 'rename' };
+  h.view.onFileChanged(event); const older = h.view.flushFileChanges(); await until(() => requests.length === 1);
+  h.view.onFileChanged(event); const newer = h.view.flushFileChanges(); await until(() => requests.length === 2);
+  entries.push({ id: 'new', name: 'new.js', kind: 'file' });
+  requests[1].resolve({ entries: structuredClone(entries), nextCursor: null }); await newer;
+  assert.ok(folder.querySelectorAll('[role="treeitem"]').some(node => node.dataset.name === 'new.js'));
+  requests[0].resolve({ entries: [{ id: 'existing', name: 'existing.js', kind: 'file' }], nextCursor: null }); await older;
+  assert.ok(folder.querySelectorAll('[role="treeitem"]').some(node => node.dataset.name === 'new.js'));
+  h.view.onFileChanged(event); const oldFailure = h.view.flushFileChanges(); await until(() => requests.length === 3);
+  h.view.onFileChanged(event); const newest = h.view.flushFileChanges(); await until(() => requests.length === 4);
+  requests[3].resolve({ entries: structuredClone(entries), nextCursor: null }); await newest;
+  requests[2].reject(new Error('older request failed')); await oldFailure;
+  deferChildren = false; entries.push({ id: 'after', name: 'after.js', kind: 'file' });
+  h.view.onFileChanged({ ...event, relativePath: 'src/after.js' }); await h.view.flushFileChanges();
+  assert.ok(folder.querySelectorAll('[role="treeitem"]').some(node => node.dataset.name === 'after.js'));
+  assert.equal(folder.getAttribute('aria-expanded'), 'true');
+});
+
+test('a parent re-list cannot complete an old in-flight folder expansion with a replaced handle', { timeout: 6000 }, async t => {
+  for (const outcome of ['success', 'failure']) {
+    const h = viewFixture(t), started = deferred();
+    let childId = 'src-old', resolveOld, rejectOld;
+    const oldResponse = new Promise((resolve, reject) => { resolveOld = resolve; rejectOld = reject; });
+    h.service.listDirectory = async ({ directoryId }) => {
+      if (directoryId === 'dir-a') return { entries: [{ id: childId, name: 'src', kind: 'directory' }], nextCursor: null };
+      if (directoryId === 'src-old') { started.resolve(); return oldResponse; }
+      return { entries: [{ id: 'new', name: 'new.js', kind: 'file' }], nextCursor: null };
+    };
+    await h.view.openRoot({ rootId: 'root-a', directoryId: 'dir-a', name: 'A' });
+    const folder = h.view.element.querySelectorAll('[role="treeitem"]').find(node => node.dataset.name === 'src');
+    folder.click(); await started.promise; childId = 'src-new';
+    h.view.onFileChanged({ rootId: 'root-a', relativePath: 'src', change: 'rename' });
+    await h.view.flushFileChanges();
+    if (outcome === 'failure') rejectOld(new Error('old expansion failed'));
+    else resolveOld({ entries: [{ id: 'stale', name: 'stale.js', kind: 'file' }], nextCursor: null });
+    await settle();
+    assert.equal(folder.querySelectorAll('[role="treeitem"]').some(node => node.dataset.name === 'stale.js'), false);
+    await until(() => folder.querySelectorAll('[role="treeitem"]').some(node => node.dataset.name === 'new.js'));
+    assert.equal(folder.getAttribute('aria-expanded'), 'true');
+    assert.equal(h.find('.egdesk-file-error').hidden, true, 'old expansion failure is not shown as a new-root error');
+  }
+});
+
+test('a rejected old expansion cannot retry after its root changes or the view closes', { timeout: 6000 }, async t => {
+  for (const transition of ['root-change', 'close']) {
+    const h = viewFixture(t), started = deferred(), calls = [];
+    let childId = 'src-old', rejectOld;
+    const oldResponse = new Promise((_, reject) => { rejectOld = reject; });
+    h.service.listDirectory = async ({ directoryId }) => {
+      calls.push(directoryId);
+      if (directoryId === 'dir-a') return { entries: [{ id: childId, name: 'src', kind: 'directory' }], nextCursor: null };
+      if (directoryId === 'src-old') { started.resolve(); return oldResponse; }
+      return { entries: [], nextCursor: null };
+    };
+    await h.view.openRoot({ rootId: 'root-a', directoryId: 'dir-a', name: 'A' });
+    const folder = h.view.element.querySelectorAll('[role="treeitem"]').find(node => node.dataset.name === 'src');
+    folder.click(); await started.promise; childId = 'src-new';
+    h.view.onFileChanged({ rootId: 'root-a', relativePath: 'src', change: 'rename' });
+    await h.view.flushFileChanges();
+    if (transition === 'close') await h.view.close();
+    else await h.view.openRoot({ rootId: 'root-b', directoryId: 'dir-b', name: 'B' });
+    rejectOld(new Error('old expansion failed')); await settle();
+    await new Promise(resolve => setTimeout(resolve, 300));
+    assert.equal(calls.includes('src-new'), false, `${transition} must stop the old expansion retry`);
+  }
+});
+
+test('a parent re-list cannot apply an old child listing after its directory handle changes', { timeout: 6000 }, async t => {
+  const h = viewFixture(t), started = deferred(), release = deferred(), calls = [];
+  let childId = 'src-old', holdOld = false;
+  h.service.listDirectory = async ({ directoryId }) => {
+    calls.push(directoryId);
+    if (directoryId === 'dir-a') return { entries: [{ id: childId, name: 'src', kind: 'directory' }], nextCursor: null };
+    if (directoryId === 'src-old' && holdOld) { started.resolve(); return release.promise; }
+    if (directoryId === 'src-new') return { entries: [{ id: 'new', name: 'new.js', kind: 'file' }], nextCursor: null };
+    return { entries: [{ id: 'old', name: 'old.js', kind: 'file' }], nextCursor: null };
+  };
+  await h.view.openRoot({ rootId: 'root-a', directoryId: 'dir-a', name: 'A' });
+  const folder = h.view.element.querySelectorAll('[role="treeitem"]').find(node => node.dataset.name === 'src');
+  folder.click(); await settle(); holdOld = true;
+  h.view.onFileChanged({ rootId: 'root-a', relativePath: 'src/change.js', change: 'change' });
+  const old = h.view.flushFileChanges(); await started.promise;
+  childId = 'src-new';
+  h.view.onFileChanged({ rootId: 'root-a', relativePath: 'src', change: 'rename' });
+  await h.view.flushFileChanges();
+  release.resolve({ entries: [{ id: 'stale', name: 'stale.js', kind: 'file' }], nextCursor: null });
+  await old;
+  assert.equal(folder.querySelectorAll('[role="treeitem"]').some(node => node.dataset.name === 'stale.js'), false);
+  await until(() => folder.querySelectorAll('[role="treeitem"]').some(node => node.dataset.name === 'new.js'));
+  assert.equal(folder.getAttribute('aria-expanded'), 'true');
+  assert.ok(calls.includes('src-new'), 'a fresh listing runs under the new opaque handle');
+});
+
+test('a rejected replaced child listing retries only while its original stream is current', { timeout: 6000 }, async t => {
+  for (const stale of [false, true]) {
+    const h = viewFixture(t), started = deferred(), calls = [];
+    let childId = 'src-old', holdOld = false, rejectOld, current = true;
+    const oldResponse = new Promise((_, reject) => { rejectOld = reject; });
+    h.service.listDirectory = async ({ directoryId }) => {
+      calls.push(directoryId);
+      if (directoryId === 'dir-a') return { entries: [{ id: childId, name: 'src', kind: 'directory' }], nextCursor: null };
+      if (directoryId === 'src-old' && holdOld) { started.resolve(); return oldResponse; }
+      return { entries: [{ id: 'item', name: directoryId === 'src-new' ? 'new.js' : 'old.js', kind: 'file' }], nextCursor: null };
+    };
+    await h.view.openRoot({ rootId: 'root-a', directoryId: 'dir-a', name: 'A' });
+    const folder = h.view.element.querySelectorAll('[role="treeitem"]').find(node => node.dataset.name === 'src');
+    folder.click(); await settle(); holdOld = true;
+    h.view.onFileChanged({ rootId: 'root-a', relativePath: 'src/change.js' }, { isCurrent: () => current });
+    const old = h.view.flushFileChanges(); await started.promise;
+    childId = 'src-new';
+    h.view.onFileChanged({ rootId: 'root-a', relativePath: 'unrelated.txt', change: 'rename' });
+    await h.view.flushFileChanges(); if (stale) current = false;
+    rejectOld(new Error('old folder request failed')); await old;
+    if (stale) await new Promise(resolve => setTimeout(resolve, 300));
+    else await until(() => folder.querySelectorAll('[role="treeitem"]').some(node => node.dataset.name === 'new.js'));
+    assert.equal(calls.includes('src-new'), !stale, 'an expired stream cannot cause delayed retry I/O');
+    assert.equal(folder.getAttribute('aria-expanded'), 'true');
+  }
+});
+
+test('a directory rename refreshes the same expanded path without inferring an old/new pair', { timeout: 6000 }, async t => {
+  const h = viewFixture(t), calls = [];
+  let childId = 'src-old';
+  h.service.listDirectory = async ({ directoryId }) => {
+    calls.push(directoryId);
+    if (directoryId === 'dir-a') return { entries: [{ id: childId, name: 'src', kind: 'directory' }], nextCursor: null };
+    return { entries: [{ id: directoryId, name: directoryId === 'src-old' ? 'old.txt' : 'new.txt', kind: 'file' }], nextCursor: null };
+  };
+  await h.view.openRoot({ rootId: 'root-a', directoryId: 'dir-a', name: 'A' });
+  const folder = h.view.element.querySelectorAll('[role="treeitem"]').find(node => node.dataset.name === 'src');
+  folder.click(); await settle();
+  assert.ok(folder.querySelectorAll('[role="treeitem"]').some(node => node.dataset.name === 'old.txt'));
+  childId = 'src-new'; calls.length = 0;
+  h.view.onFileChanged({ rootId: 'root-a', relativePath: 'src', change: 'rename' });
+  await h.view.flushFileChanges();
+  assert.deepEqual(calls, ['dir-a', 'src-new']);
+  assert.equal(folder.getAttribute('aria-expanded'), 'true');
+  assert.equal(folder.querySelectorAll('[role="treeitem"]').some(node => node.dataset.name === 'old.txt'), false);
+  assert.ok(folder.querySelectorAll('[role="treeitem"]').some(node => node.dataset.name === 'new.txt'));
+});
+
+test('a queued root rename reconciles before an earlier nested change', { timeout: 6000 }, async t => {
+  const h = viewFixture(t), calls = [];
+  let childId = 'src-old';
+  h.service.listDirectory = async ({ directoryId }) => {
+    calls.push(directoryId);
+    if (directoryId === 'dir-a') return { entries: [{ id: childId, name: 'src', kind: 'directory' }], nextCursor: null };
+    return { entries: [{ id: directoryId, name: directoryId === 'src-old' ? 'old.txt' : 'new.txt', kind: 'file' }], nextCursor: null };
+  };
+  await h.view.openRoot({ rootId: 'root-a', directoryId: 'dir-a', name: 'A' });
+  const folder = h.view.element.querySelectorAll('[role="treeitem"]').find(node => node.dataset.name === 'src');
+  folder.click(); await settle(); childId = 'src-new'; calls.length = 0;
+  h.view.onFileChanged({ rootId: 'root-a', relativePath: 'src/old.txt', change: 'change' });
+  h.view.onFileChanged({ rootId: 'root-a', relativePath: 'src', change: 'rename' });
+  await h.view.flushFileChanges();
+  assert.deepEqual(calls, ['dir-a', 'src-new']);
+  assert.ok(folder.querySelectorAll('[role="treeitem"]').some(node => node.dataset.name === 'new.txt'));
+});
+
+test('More uses the latest opaque folder handle and the original cursor on the first click', { timeout: 6000 }, async t => {
+  const h = viewFixture(t), calls = [];
+  let childId = 'src-old';
+  const entries = Array.from({ length: 101 }, (_, index) => ({ id: `file-${index}`, name: `file-${index}.txt`, kind: 'file' }));
+  h.service.listDirectory = async ({ directoryId, cursor = 0 }) => {
+    calls.push({ directoryId, cursor });
+    if (directoryId === 'dir-a') return { entries: [{ id: childId, name: 'src', kind: 'directory' }], nextCursor: null };
+    return { entries: entries.slice(cursor, cursor + 100), nextCursor: cursor + 100 < entries.length ? cursor + 100 : null };
+  };
+  await h.view.openRoot({ rootId: 'root-a', directoryId: 'dir-a', name: 'A' });
+  const folder = h.view.element.querySelectorAll('[role="treeitem"]').find(node => node.dataset.name === 'src');
+  folder.click(); await settle();
+  const more = folder.querySelector('.egdesk-file-tree-more'); assert.ok(more);
+  childId = 'src-new';
+  h.view.onFileChanged({ rootId: 'root-a', relativePath: 'unrelated.txt', change: 'rename' });
+  await h.view.flushFileChanges(); calls.length = 0;
+  more.click(); await until(() => folder.querySelectorAll('[role="treeitem"]').some(node => node.dataset.name === 'file-100.txt'));
+  assert.deepEqual(calls, [{ directoryId: 'src-new', cursor: 100 }]);
+  assert.equal(folder.querySelector('.egdesk-file-tree-more'), null);
+  assert.equal(folder.getAttribute('aria-expanded'), 'true');
+});
+
+test('More retains its cursor when a folder handle changes during the request', { timeout: 6000 }, async t => {
+  const h = viewFixture(t), calls = [], entered = deferred(), release = deferred();
+  let childId = 'src-old';
+  const entries = Array.from({ length: 101 }, (_, index) => ({ id: `file-${index}`, name: `file-${index}.txt`, kind: 'file' }));
+  h.service.listDirectory = async ({ directoryId, cursor = 0 }) => {
+    calls.push({ directoryId, cursor });
+    if (directoryId === 'dir-a') return { entries: [{ id: childId, name: 'src', kind: 'directory' }], nextCursor: null };
+    if (directoryId === 'src-old' && cursor === 100) { entered.resolve(); await release.promise; }
+    return { entries: entries.slice(cursor, cursor + 100), nextCursor: cursor + 100 < entries.length ? cursor + 100 : null };
+  };
+  await h.view.openRoot({ rootId: 'root-a', directoryId: 'dir-a', name: 'A' });
+  const folder = h.view.element.querySelectorAll('[role="treeitem"]').find(node => node.dataset.name === 'src');
+  folder.click(); await settle(); calls.length = 0;
+  folder.querySelector('.egdesk-file-tree-more').click(); await entered.promise;
+  childId = 'src-new';
+  h.view.onFileChanged({ rootId: 'root-a', relativePath: 'unrelated.txt', change: 'rename' });
+  await h.view.flushFileChanges(); release.resolve();
+  await until(() => folder.querySelectorAll('[role="treeitem"]').some(node => node.dataset.name === 'file-100.txt'));
+  assert.deepEqual(calls, [{ directoryId: 'src-old', cursor: 100 }, { directoryId: 'dir-a', cursor: 0 }, { directoryId: 'src-new', cursor: 100 }]);
+  assert.equal(folder.querySelector('.egdesk-file-tree-more'), null);
+});
+
+test('a rename does not infer folder identity or disturb another expanded folder and editor selection', { timeout: 6000 }, async t => {
+  const h = viewFixture(t), entries = {
+    'dir-a': [{ id: 'file-dir-a', name: 'source.txt', kind: 'file' },
+      { id: 'docs', name: 'docs', kind: 'directory' }, { id: 'old', name: 'old', kind: 'directory' }],
+    docs: [{ id: 'd', name: 'readme.md', kind: 'file' }], old: [{ id: 'o', name: 'item.txt', kind: 'file' }],
+  };
+  h.service.listDirectory = async ({ directoryId }) => ({ entries: structuredClone(entries[directoryId] || []), nextCursor: null });
+  await h.view.openProject(project('a')); await h.view.openFile('file-dir-a');
+  const editor = h.find('.egdesk-file-editor'); editor.value = '보존된 작업사본'; editor.fire('input'); await h.view.flush();
+  editor.selectionStart = 1; editor.selectionEnd = 4;
+  const item = name => h.view.element.querySelectorAll('[role="treeitem"]').find(node => node.dataset.name === name);
+  const docs = item('docs'), old = item('old'); docs.click(); old.click(); await settle(); editor.focus();
+  entries['dir-a'] = entries['dir-a'].filter(entry => entry.name !== 'old').concat([{ id: 'new', name: 'new', kind: 'directory' }]);
+  assert.equal(h.view.onFileChanged({ rootId: 'root-a', relativePath: 'new', change: 'rename' }), true);
+  await h.view.flushFileChanges();
+  assert.equal(item('docs'), docs); assert.equal(docs.getAttribute('aria-expanded'), 'true');
+  assert.equal(item('old'), undefined); assert.ok(item('new')); assert.notEqual(item('new'), old);
+  assert.equal(item('new').getAttribute('aria-expanded'), 'false');
+  assert.equal(h.document.activeElement, editor); assert.deepEqual([editor.value, editor.selectionStart, editor.selectionEnd], ['보존된 작업사본', 1, 4]);
+});
+
+test('a scoped File refresh can update the tree without an implicit Git query', { timeout: 6000 }, async t => {
+  const h = viewFixture(t), calls = [];
+  h.service.listDirectory = async ({ directoryId }) => { calls.push(['list', directoryId]); return { entries: [], nextCursor: null }; };
+  h.service.gitStatus = async () => { calls.push(['git']); return { available: false }; };
+  await h.view.openProject(project('a')); await settle(); calls.length = 0;
+  assert.equal(h.view.onFileChanged({ rootId: 'root-a', relativePath: 'x.txt', change: 'rename' },
+    { isCurrent: () => true, refreshGit: false }), true);
+  await h.view.flushFileChanges();
+  assert.deepEqual(calls, [['list', 'dir-a']]);
+});
+
+test('a directly selected ordinary root receives its own event without a Board or Agent', { timeout: 6000 }, async t => {
+  const h = await cardFixture(t); h.setTarget(null);
+  let entries = []; h.service.listDirectory = async () => ({ entries: structuredClone(entries), nextCursor: null });
+  const card = await h.spawn({ openMode: 'new' }); h.pick('/synthetic-picker-result');
+  card.querySelector('.egdesk-file-connect').click();
+  await until(() => card._fileView.snapshot().rootId === 'ordinary');
+  assert.ok(h.calls.some(call => call[0] === 'begin'));
+  assert.ok(h.calls.some(call => call[0] === 'complete'));
+  assert.ok(h.calls.some(call => call[0] === 'root'));
+  entries = [{ id: 'new', name: 'ordinary.txt', kind: 'file' }];
+  assert.equal(await h.dispatchWorkflow(fileChangedFrame('ordinary', 'ordinary.txt'), () => true), 1);
+  await card._fileView.flushFileChanges();
+  assert.ok(card.querySelectorAll('[role="treeitem"]').some(node => node.dataset.name === 'ordinary.txt'));
+  assert.deepEqual(h.runs, []); assert.deepEqual(h.terminalOptions, []);
+});
 
 test('IDE entry verifies the selected Board project and opens a File without commands, Terminal or provider work', async t => {
   const h = await cardFixture(t); h.projects.set('board-a', project('a', [typed]));
@@ -878,6 +1512,11 @@ test('File Card reopens its stored Board association with dirty content and refu
     assert.equal(mismatched.querySelector('.egdesk-file-editor').value, 'keep on reopen');
     assert.match(mismatched.querySelector('.egd-file-card-notice').textContent, /연결 확인 필요|새 파일 카드/);
     assert.equal(mismatched.querySelector('.egdesk-file-project-check').hidden, true);
+    let mismatchCalls = 0; const original = mismatched._fileView.onFileChanged;
+    mismatched._fileView.onFileChanged = (...args) => { mismatchCalls++; return original(...args); };
+    await h.dispatchWorkflow(fileChangedFrame(record.root.rootId, 'changed.txt'), () => true);
+    assert.equal(mismatchCalls, 0, 'a failed or replaced saved binding never receives watcher events');
+    await restored._fileView.flushFileChanges();
   }
   h.projects.set('board-a', project('a', [typed]));
   h.drafts.get(record.draftId).rootId = 'foreign-root';

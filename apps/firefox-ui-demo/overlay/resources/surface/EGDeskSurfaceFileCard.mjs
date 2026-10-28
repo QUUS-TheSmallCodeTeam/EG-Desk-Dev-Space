@@ -21,6 +21,24 @@ export function createFileCardZone(deps) {
     spawnTerminalCard,
     state,
   } = deps;
+  // Only cards created by this zone can receive a watcher event. Weak keys
+  // avoid retaining a closed File or its prior root binding.
+  const fileWatchHandlers = new WeakMap();
+
+  async function onWorkflowEvent(frame, streamCurrent) {
+    if (frame?.type !== 'workflow.event' || frame.v !== 1 || frame.event?.topic !== 'file.changed' ||
+        frame.event.source !== 'file' || !['rename', 'change'].includes(frame.event.payload?.change) ||
+        typeof streamCurrent !== 'function') return 0;
+    const current = () => { try { return streamCurrent() === true; } catch { return false; } };
+    if (!current()) return 0;
+    const pending = [];
+    for (const card of document.querySelectorAll('.egd-file-card')) {
+      if (!current()) break;
+      const handler = fileWatchHandlers.get(card);
+      if (handler) pending.push(Promise.resolve().then(() => handler(frame.event, current)).catch(() => false));
+    }
+    return (await Promise.all(pending)).filter(Boolean).length;
+  }
 
   async function requestLocalFilePacket(path, body, requestOptions = {}) {
     if (!/^\/v1\/files\//.test(path)) throw new Error('허용되지 않은 파일 서비스 경로입니다.');
@@ -296,6 +314,10 @@ export function createFileCardZone(deps) {
     shell.slots.content.append(notice, mount);
     let rootHandle = options.record?.root || null;
     let view = null;
+    let fileService = null;
+    // The retained-run grant belongs to the root opened from that run, not
+    // to a different folder later chosen explicitly in this same File Card.
+    let watcherRunBinding = runFile;
     let restoring = !!options.record || !!runFile;
     let openingCancelled = false, originOpened = false, runFileOrigin = null;
     let preserveRestoreRecord = false;
@@ -305,6 +327,41 @@ export function createFileCardZone(deps) {
     let projectReference = FileCardState.fileCardRecord(null, {}, options.record?.project).project || null;
     let ownedRunner = null;
     card._fileRecord = cloneJson(options.record || FileCardState.fileCardRecord(null));
+    fileWatchHandlers.set(card, async (change, streamCurrent) => {
+      const binding = rootHandle, boundProject = projectConnection, boundTarget = projectTarget,
+        boundReference = projectReference, boundView = view, service = fileService, boundRun = watcherRunBinding;
+      if (!binding?.rootId || change?.payload?.rootId !== binding.rootId || !boundView) return false;
+      const current = () => {
+        try {
+          if (!streamCurrent() || (boundRun && !boundRun.current()) || watcherRunBinding !== boundRun ||
+              !card.isConnected || ['closing', 'closed'].includes(card.dataset.closeState) ||
+              view !== boundView || rootHandle !== binding || projectConnection !== boundProject || projectTarget !== boundTarget ||
+              projectReference !== boundReference || fileService !== service || rootNeedsReconnect ||
+              !boundView.element?.isConnected || boundView.element.inert || boundView.element.getAttribute('aria-busy') === 'true') return false;
+          const snapshot = boundView.snapshot();
+          return snapshot?.rootId === binding.rootId && snapshot.sourceConnection === 'connected' &&
+            (!boundProject || (snapshot.projectId === boundProject.projectId && snapshot.rootId === boundProject.rootId));
+        } catch { return false; }
+      };
+      if (!current()) return false;
+      const authorized = async () => {
+        if (!current()) return false;
+        try {
+          if (boundRun) { await boundRun.verify(); return current(); }
+          if (!boundProject) return !boundReference && current(); // Explicit ordinary picker root.
+          if (!boundTarget?.boardId || !service?.openProject) return false;
+          const latest = await service.openProject({ boardId: boundTarget.boardId,
+            expectedProjectId: boundProject.projectId, expectedRootId: boundProject.rootId });
+          return current() && latest?.source === 'board' && latest.project?.status === 'connected' &&
+            latest.project.projectId === boundProject.projectId && latest.project.rootId === boundProject.rootId &&
+            latest.project.displayPath === boundProject.displayPath;
+        } catch { return false; }
+      };
+      if (!await authorized()) return false;
+      // A live run-origin binding never authorizes implicit Git. After an
+      // explicit ordinary-folder selection, use normal File refresh behavior.
+      return boundView.onFileChanged(change, { isCurrent: current, isAuthorized: authorized, refreshGit: !boundRun }) === true;
+    });
     const publish = snapshot => {
       if (!card.isConnected || restoring) return;
       const failedOriginal = preserveRestoreRecord && (!snapshot.fileId || (snapshot.fileId === options.record?.fileId && options.record?.draftId && !snapshot.draftId));
@@ -330,6 +387,7 @@ export function createFileCardZone(deps) {
       try {
         const fileModule = ChromeUtils.importESModule('chrome://userchrome/content/EGDeskFileView.sys.mjs');
         const service = { ...fileModule.createEGDeskFileServiceCallbacks({ request: requestLocalFilePacket }) };
+        fileService = service;
         if (runFile) {
           // File handles alone can outlive a project detach. Revalidate the
           // pinned origin after each service await before releasing its result
@@ -418,7 +476,7 @@ export function createFileCardZone(deps) {
         view = fileModule.createEGDeskFileView({ document, service,
           chooseRoot: async () => {
             const selected = await pickers.chooseRoot();
-            if (selected) { rootHandle = selected; projectTarget = null; projectConnection = null; projectReference = null; rootNeedsReconnect = false; notice.hidden = true; }
+            if (selected) { watcherRunBinding = null; rootHandle = selected; projectTarget = null; projectConnection = null; projectReference = null; rootNeedsReconnect = false; notice.hidden = true; }
             return selected;
           },
           getProjectTarget: runFile ? undefined : getProjectTarget,
@@ -546,5 +604,5 @@ export function createFileCardZone(deps) {
     return card;
   }
 
-  return { spawnFileCard, openVerifiedRunFile, openBoardProjectFile };
+  return { spawnFileCard, openVerifiedRunFile, openBoardProjectFile, onWorkflowEvent };
 }

@@ -172,8 +172,9 @@ async function install(script, namespaces, { transformNamespace = (_, namespace)
             const api = target[name](strictDeps);
             const expected = factoryDeps(read(modulePath(zone)));
             assert.deepEqual(sorted(reads), expected, `${zone.file}: actual factory reads exactly its declared deps`);
-            assert.deepEqual(Object.keys(api), zone.key === 'fileCard' ? [zone.method, 'openVerifiedRunFile', 'openBoardProjectFile'] : [zone.method], `${zone.file}: actual returned interface`);
+            assert.deepEqual(Object.keys(api), zone.key === 'fileCard' ? [zone.method, 'openVerifiedRunFile', 'openBoardProjectFile', 'onWorkflowEvent'] : [zone.method], `${zone.file}: actual returned interface`);
             assert.equal(typeof api[zone.method], 'function');
+            if (zone.key === 'fileCard') assert.equal(typeof api.onWorkflowEvent, 'function', 'File watcher receiver is callable');
             received.push({ zone, deps, api, reads });
             return api;
           };
@@ -399,6 +400,48 @@ test('every actual surfaceForward resolves late and preserves arguments, results
     const error = new Error(`forwarded-${zone.key}`);
     replacement[zone.method] = () => { throw error; };
     assert.throws(() => installed.forwards[zone.method](), caught => caught === error);
+  }
+});
+
+test('the real SSE receiver reaches the installed FileCard zone only for the current workflow frame', async () => {
+  const installed = await install(core, await importModules());
+  const fileCard = installed.surfaceZones.fileCard, queries = [], forwarded = [], other = [];
+  const priorDocument = Object.getOwnPropertyDescriptor(globalThis, 'document');
+  Object.defineProperty(globalThis, 'document', { configurable: true, value: { querySelectorAll(selector) { queries.push(selector); return []; } } });
+  try {
+    const start = core.indexOf('      const fileEventStreamCurrent = () =>');
+    const end = core.indexOf("      source.addEventListener('codex', receive);", start);
+    assert.ok(start > 0 && end > start, 'actual File workflow receiver boundary');
+    const connection = { readyState: 1 }, epoch = { live: true };
+    const zones = { fileCard: { onWorkflowEvent(frame, current) {
+      forwarded.push({ frame, current }); return fileCard.onWorkflowEvent(frame, current);
+    } } };
+    const receiver = runInNewContext(`
+      let source = connection, streamReady = true;
+      const connectionSource = connection, streamEpoch = 1;
+      const epochScope = { valid: value => value === streamEpoch && epoch.live };
+      const window = { EventSource: { OPEN: 1 } }, surfaceZones = zones, TAG = 'test';
+      const handleEvent = event => other.push(event), console = { warn() {} };
+      ${core.slice(start, end)}
+      ({ receive, setSource: value => { source = value; } });
+    `, { connection, epoch, zones, other });
+    const frame = { type: 'workflow.event', v: 1, event: { topic: 'file.changed', source: 'file',
+      payload: { rootId: 'root', relativePath: 'file.txt', change: 'change' } } };
+    receiver.receive({ data: JSON.stringify(frame) });
+    assert.equal(forwarded.length, 1); assert.equal(forwarded[0].current(), true);
+    assert.deepEqual(queries, ['.egd-file-card'], 'the actual installed zone receives the current frame');
+    connection.readyState = 0;
+    assert.equal(forwarded[0].current(), false, 'the same delayed guard sees a closed stream');
+    receiver.receive({ data: JSON.stringify(frame) }); assert.equal(queries.length, 1);
+    connection.readyState = 1; receiver.setSource({ readyState: 1 });
+    receiver.receive({ data: JSON.stringify(frame) }); assert.equal(forwarded.length, 2, 'old source cannot forward');
+    receiver.setSource(connection); epoch.live = false;
+    receiver.receive({ data: JSON.stringify(frame) }); assert.equal(forwarded.length, 2, 'old epoch cannot forward');
+    epoch.live = true; receiver.receive({ data: JSON.stringify({ type: 'task.native' }) });
+    assert.equal(other.length, 1); assert.equal(other[0].type, 'task.native');
+  } finally {
+    if (priorDocument) Object.defineProperty(globalThis, 'document', priorDocument);
+    else delete globalThis.document;
   }
 });
 

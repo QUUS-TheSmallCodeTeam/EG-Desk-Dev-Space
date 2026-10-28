@@ -10541,10 +10541,18 @@
         } else void loadLocalHistory();
       });
 
+      const fileEventStreamCurrent = () => epochScope.valid(streamEpoch) && source === connectionSource && streamReady &&
+        connectionSource.readyState === (window.EventSource?.OPEN ?? 1);
       const receive = (message) => {
         if (!epochScope.valid(streamEpoch) || source !== connectionSource) return;
         try {
-          handleEvent(JSON.parse(message.data));
+          const event = JSON.parse(message.data);
+          if (event?.type === 'workflow.event') {
+            const pending = surfaceZones.fileCard?.onWorkflowEvent?.(event, fileEventStreamCurrent);
+            pending?.catch?.(error => console.warn(TAG, 'file watcher dispatch failed', error));
+            return;
+          }
+          handleEvent(event);
         } catch (error) {
           console.warn(TAG, 'codex event parse failed', error);
         }

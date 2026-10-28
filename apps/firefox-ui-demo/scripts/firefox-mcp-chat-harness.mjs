@@ -55,11 +55,11 @@ export function serializeQaNativeInput(kind, input, { context, width, height } =
 }
 
 // 2829 remains the chat QA default. Main may explicitly select the separately
-// launched 2828 or isolated 28831/28832 targets; arbitrary ports are never accepted.
+// launched 2828 or isolated 28831/28832/28833 targets; arbitrary ports are never accepted.
 export function resolveQaMarionettePort(value = process.env.EGDESK_MARIONETTE_PORT || QA_MARIONETTE_PORT) {
-  if (value !== 2828 && value !== 2829 && value !== 28831 && value !== 28832
-      && value !== '2828' && value !== '2829' && value !== '28831' && value !== '28832') {
-    throw new Error(`QA harness refuses Marionette port ${value}; expected 2828, 2829, 28831 or 28832`);
+  if (value !== 2828 && value !== 2829 && value !== 28831 && value !== 28832 && value !== 28833
+      && value !== '2828' && value !== '2829' && value !== '28831' && value !== '28832' && value !== '28833') {
+    throw new Error(`QA harness refuses Marionette port ${value}; expected 2828, 2829, 28831, 28832 or 28833`);
   }
   return Number(value);
 }

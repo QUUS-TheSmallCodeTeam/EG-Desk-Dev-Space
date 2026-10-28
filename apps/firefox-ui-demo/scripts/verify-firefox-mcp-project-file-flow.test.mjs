@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
+import path from 'node:path';
 import test from 'node:test';
 import { assertProjectEnvironment, assertProjectFlowEvidence, PROJECT_VIEWPORTS, PROJECT_CAPTURE_STAGES,
   boardPrimarySelector, boardRowFitIssues, fileDetailAction, fileViewportAction, assertFileUiIdentity,
@@ -11,12 +12,189 @@ import { assertProjectEnvironment, assertProjectFlowEvidence, PROJECT_VIEWPORTS,
   PROJECT_OBSERVATION_SOURCE_BUDGET, mergeProjectUiObservations, observeProjectUi, waitStableProjectUi,
   chatProjectFooterVisible, chatProjectReviewReady, chatProjectWaitDiagnostic,
   assertChatProjectReviewScroll, assertChatRoomReadReceipt, roomFolderPreviewVisible,
-  assertRoomFolderResponse, assertRoomFolderUiEvidence } from './verify-firefox-mcp-project-file-flow.mjs';
+  assertRoomFolderResponse, assertRoomFolderUiEvidence, assertProjectWatchEnvironment,
+  assertProjectWatchEvidence, awaitProjectWatchDeadline, runProjectWatcherCli, projectWatchScope,
+  guardProjectWatchHarness, projectWatchJson, waitWatcherFileUi } from './verify-firefox-mcp-project-file-flow.mjs';
 import { parseCli } from './verify-firefox-mcp-headless-ui-regression.mjs';
 import { terminalScriptLine } from '../overlay/resources/EGDeskTerminalState.sys.mjs';
 
 const ENV = { EGDESK_QA_PROJECT_FILE_FIXTURE: '1', EGDESK_QA_FIXTURE_TRANSPORT: '1',
   EGDESK_QA_REAL_TURN: '0', EGDESK_QA_FIXTURE_TOKEN: 'unit-project-token-no-credentials' };
+
+test('watcher acceptance requires explicit isolated ports and fails closed on missing opt-in', () => {
+  const env = { ...ENV, EGDESK_QA_PROJECT_FILE_WATCH: '1', EGDESK_MARIONETTE_PORT: '2829', EGDESK_QA_FIXTURE_PORT: '49318',
+    EGDESK_QA_MCP_ENTRY: path.resolve('qa-mcp-entry.mjs'), EGDESK_QA_GECKODRIVER: path.resolve('geckodriver') };
+  if (process.platform === 'darwin') assert.equal(assertProjectWatchEnvironment(env), true);
+  else assert.throws(() => assertProjectWatchEnvironment(env), /macOS-only/);
+  for (const invalid of [
+    { ...env, EGDESK_QA_PROJECT_FILE_WATCH: '0' },
+    { ...env, EGDESK_MARIONETTE_PORT: '' },
+    { ...env, EGDESK_QA_FIXTURE_PORT: '' },
+    { ...env, EGDESK_MARIONETTE_PORT: env.EGDESK_QA_FIXTURE_PORT },
+    { ...env, EGDESK_QA_FIXTURE_PORT: '65536' },
+    { ...env, EGDESK_QA_FIXTURE_PORT: '39218' },
+    { ...env, EGDESK_QA_MCP_ENTRY: undefined },
+    { ...env, EGDESK_QA_GECKODRIVER: 'relative-driver' },
+    { ...env, EGDESK_QA_REAL_TURN: '1' },
+  ]) assert.throws(() => assertProjectWatchEnvironment(invalid));
+});
+
+test('watcher CLI never starts a new scenario or failure screenshot after the deadline', { timeout: 1000 }, async () => {
+  let connectResolved, scenarioCalls = 0, closeCalls = 0, shots = 0;
+  const connect = new Promise(resolve => { connectResolved = resolve; });
+  const fake = { evidenceDir: null, connect: () => connect, close: async () => { closeCalls++; }, screenshot: () => { shots++; } };
+  const options = { profile: '/fixture-only', deadlineMs: Date.now() + 60 };
+  const result = await runProjectWatcherCli(options, { env: { EGDESK_MARIONETTE_PORT: '2829' },
+    validateEnvironment() {}, validateIsolation: () => ({ fixture: true }), createHarness: () => fake,
+    scenario: async () => { scenarioCalls++; } });
+  assert.equal(result.automatedAssertionsPassed, false);
+  assert.match(result.error, /deadline/);
+  assert.equal(result.failureScreenshot, 'not-attempted');
+  assert.equal(closeCalls, 1); assert.equal(shots, 0); assert.equal(scenarioCalls, 0);
+  connectResolved(); await new Promise(resolve => setImmediate(resolve));
+  assert.equal(scenarioCalls, 0, 'late MCP connect cannot start the scenario');
+  let ran = false;
+  await assert.rejects(awaitProjectWatchDeadline(() => { ran = true; }, Date.now() - 1), /deadline/);
+  assert.equal(ran, false);
+});
+
+test('watcher CLI preserves the original error while independently recording MCP cleanup failure', { timeout: 1000 }, async () => {
+  let calls = 0;
+  const fake = { evidenceDir: null, connect: async () => {}, close: async () => { calls++; throw new Error('cleanup failed'); } };
+  const result = await runProjectWatcherCli({ profile: '/fixture-only', deadlineMs: Date.now() + 500 }, {
+    env: { EGDESK_MARIONETTE_PORT: '2829' }, validateEnvironment() {}, validateIsolation: () => ({ fixture: true }),
+    createHarness: () => fake, scenario: async () => { throw new Error('scenario failed'); } });
+  assert.equal(result.error, 'scenario failed'); assert.equal(result.cleanupError, 'cleanup failed');
+  assert.equal(result.automatedAssertionsPassed, false); assert.equal(calls, 1);
+});
+
+test('watcher scope describes planned stages and never labels them observed before execution', () => {
+  const scope = projectWatchScope();
+  assert.ok(scope.planned.includes('connected-root filesystem watcher'));
+  assert.equal(Object.hasOwn(scope, 'actual'), false);
+  assert.equal(scope.providerCalls, 'not-measured');
+  assert.match(scope.outerIsolation, /independent launcher/);
+});
+
+test('watcher retries only incoherent observations, never input, and preserves fatal failures', async () => {
+  let reads = 0, predicateCalls = 0;
+  const harness = { click() { assert.fail('no native click replay'); }, press() { assert.fail('no native key replay'); } };
+  const ready = { count: 1, cardId: 'file-1' };
+  const wait = async (_harness, read, accept, deadline) => {
+    assert.equal(deadline, 1000);
+    const transient = await read(); assert.equal(transient, null); assert.equal(accept(transient), false);
+    const observed = await read(); assert.equal(accept(observed), true); return observed;
+  };
+  const observed = await waitWatcherFileUi(harness, value => { predicateCalls++; return value.count === 1; }, 1000,
+    { wait, observe: async () => {
+      if (++reads === 1) throw Object.assign(new Error('moving camera'), { code: 'QA_PROJECT_OBSERVATION_UNSTABLE' });
+      return ready;
+    } });
+  assert.equal(observed, ready); assert.equal(reads, 2); assert.equal(predicateCalls, 1);
+  await assert.rejects(waitWatcherFileUi(harness, () => true, 1000,
+    { wait: async (_h, read) => read(), observe: async () => { throw new Error('MCP unavailable'); } }), /MCP unavailable/);
+});
+
+test('watcher opens once, waits for coherent camera and an unobstructed target before picker input', () => {
+  const source = fs.readFileSync(new URL('./verify-firefox-mcp-project-file-flow.mjs', import.meta.url), 'utf8');
+  const start = source.indexOf('export async function runProjectFileWatcherFlow(');
+  const open = source.indexOf("await click('#egd-dock .egd-dock-btn[data-id=", start);
+  const viewport = source.indexOf('await waitStableViewport(harness, size, deadlineMs)', open);
+  const stable = source.indexOf('await waitStableProjectUi(harness, deadlineMs)', viewport);
+  const targetWait = source.indexOf('targets.length === 1 && targetIssues(targets[0]).length === 0', stable);
+  const picker = source.indexOf("await click(rootTarget, 'select owned folder through real picker grant')", targetWait);
+  assert.ok(start > 0 && open > start && viewport > open && stable > viewport && targetWait > stable && picker > targetWait);
+  assert.equal((source.slice(open, picker).match(/await click\('#egd-dock/g) || []).length, 1);
+});
+
+test('watcher deadline aborts the scope and a late scenario cannot mutate the returned receipt', { timeout: 1000 }, async () => {
+  let release, closing = 0, capturedSignal;
+  const pending = new Promise(resolve => { release = resolve; });
+  const fake = { evidenceDir: null, connect: async () => {}, close: async () => { closing++; } };
+  const result = await runProjectWatcherCli({ profile: '/fixture-only', deadlineMs: Date.now() + 60 }, {
+    env: { EGDESK_MARIONETTE_PORT: '2829' }, validateEnvironment() {}, validateIsolation: () => ({ fixture: true }),
+    createHarness: () => fake, scenario: async ({ check }, { signal, fixtureOperations }) => {
+      capturedSignal = signal;
+      fixtureOperations.push({ route: '/__qa/project-file/watch-create', status: 'pending', dispatched: true });
+      await pending; check('late', true);
+    } });
+  assert.match(result.error, /deadline/); assert.equal(closing, 1); assert.equal(capturedSignal.aborted, true);
+  assert.deepEqual(result.checks, []); assert.equal(result.fixtureOperations[0].status, 'unknown');
+  release(); await new Promise(resolve => setImmediate(resolve));
+  assert.deepEqual(result.checks, [], 'a late callback cannot alter the already returned receipt');
+  assert.equal(result.fixtureOperations[0].status, 'unknown');
+});
+
+test('a late scenario cannot change checks while cleanup is still awaiting', { timeout: 1000 }, async () => {
+  let releaseScenario, cleanupStarted, finishCleanup;
+  const scenarioWait = new Promise(resolve => { releaseScenario = resolve; });
+  const cleanupEntered = new Promise(resolve => { cleanupStarted = resolve; });
+  const cleanupWait = new Promise(resolve => { finishCleanup = resolve; });
+  const fake = { evidenceDir: null, connect: async () => {}, close: async () => { cleanupStarted(); await cleanupWait; } };
+  const running = runProjectWatcherCli({ profile: '/fixture-only', deadlineMs: Date.now() + 60 }, {
+    env: { EGDESK_MARIONETTE_PORT: '2829' }, validateEnvironment() {}, validateIsolation: () => ({ fixture: true }),
+    createHarness: () => fake, scenario: async ({ result }) => {
+      await scenarioWait; result.checks.push({ label: 'late direct write', passed: true });
+    } });
+  await cleanupEntered; releaseScenario(); await new Promise(resolve => setImmediate(resolve)); finishCleanup();
+  const result = await running;
+  assert.match(result.error, /deadline/); assert.deepEqual(result.checks, []);
+});
+
+test('late MCP results are rejected and a cancelled fixture POST remains unknown', { timeout: 1000 }, async () => {
+  let active = true, release, called = 0;
+  const pending = new Promise(resolve => { release = resolve; });
+  const guarded = guardProjectWatchHarness({ click() { called++; return pending; } }, () => {
+    if (!active) throw new Error('expired');
+  });
+  const action = guarded.click(); active = false; release('late');
+  await assert.rejects(action, /expired/); assert.equal(called, 1);
+  assert.throws(() => guarded.click(), /expired/); assert.equal(called, 1);
+  const controller = new AbortController(), operations = [];
+  const env = { ...ENV, EGDESK_QA_FIXTURE_PORT: '49318' };
+  let requestSignal;
+  const request = projectWatchJson('/__qa/project-file/watch-create', { method: 'POST', body: {}, token: ENV.EGDESK_QA_FIXTURE_TOKEN,
+    env, signal: controller.signal, deadlineMs: Date.now() + 500, operations,
+    fetchImpl: async (_url, options) => { requestSignal = options.signal; return new Promise((_, reject) => {
+      options.signal.addEventListener('abort', () => reject(new Error('aborted')), { once: true });
+    }); } });
+  controller.abort(); await assert.rejects(request, /aborted/);
+  assert.equal(requestSignal.aborted, true); assert.equal(operations[0].status, 'unknown');
+});
+
+test('watcher receipt requires correlated real event, SSE client, same folder re-list and undisturbed editor', () => {
+  const snapshot = { rootId: 'root', projectId: null, fileId: 'file', draftId: 'draft', sourceRevision: 'rev',
+    sourceConnection: 'connected', bufferRevision: 1, savedRevision: 0, dirty: false, originalDirty: true };
+  const editor = { value: 'draft', selectionStart: 0, selectionEnd: 5, focused: true };
+  const before = { cardId: 'card', snapshot, folderExpanded: true, createdCount: 0, createdVisible: false, editor };
+  const after = { ...structuredClone(before), createdCount: 1, createdVisible: true };
+  const event = { id: 'event', sequence: 10, topic: 'file.changed', payload: { rootId: 'root',
+    relativePath: 'qa-expanded/qa-watch-created.txt', change: 'rename' } };
+  const list = { operation: 'listDirectory', status: 200, sequence: 5, request: { directoryId: 'folder' },
+    response: { result: { entries: [{ name: 'qa-existing.txt' }] } } };
+  const refresh = { ...structuredClone(list), sequence: 11,
+    response: { result: { entries: [{ name: 'qa-existing.txt' }, { name: 'qa-watch-created.txt' }] } } };
+  const fixtureBefore = { watchEnabled: true, watchRoots: [{ rootId: 'root', watching: true }], watchWrites: [],
+    originalSha256: 'hash', currentOriginalSha256: 'hash', fileRequests: [list] };
+  const fixtureAfter = { ...structuredClone(fixtureBefore), watchEvents: [event], fileRequests: [list, refresh],
+    watchWrites: [{ relativePath: event.payload.relativePath, operation: 'create-only' }], terminalRequests: [], blockedRoutes: [] };
+  const broadcast = { eventId: 'event', clients: 1 };
+  const bridgeBefore = { clients: 1, observed: { sends: [], authWrites: [] }, runs: [] };
+  const bridgeAfter = { ...structuredClone(bridgeBefore), observed: { sends: [], authWrites: [], projectFileWatchBroadcasts: [broadcast] } };
+  const screenshots = ['watch-before', 'watch-after'].map(viewport => ({ viewport, status: 'captured', path: `/tmp/${viewport}.png`, visualPass: null }));
+  const visibleTarget = { visible: true, inViewport: true, hitCount: 9, disabled: false, readOnly: false };
+  const proof = { before, after, fixtureBefore, fixtureAfter, bridgeBefore, bridgeAfter, event, broadcast, screenshots, visibleTarget };
+  assert.equal(assertProjectWatchEvidence(proof), true);
+  for (const corrupt of [
+    p => p.event.payload.rootId = 'other', p => p.broadcast.clients = 0,
+    p => p.fixtureAfter.watchEvents = [], p => p.fixtureAfter.fileRequests[1].status = 403,
+    p => p.fixtureAfter.fileRequests[1].sequence = 9, p => p.fixtureAfter.fileRequests[1].request.directoryId = 'other',
+    p => p.after.createdVisible = false, p => p.visibleTarget.hitCount = 0, p => p.after.folderExpanded = false,
+    p => p.after.editor.focused = false, p => p.after.editor.selectionEnd = 0,
+    p => p.after.snapshot.draftId = 'different', p => p.fixtureAfter.currentOriginalSha256 = 'changed',
+    p => p.bridgeAfter.runs.push({}), p => p.screenshots[0].visualPass = true,
+  ]) { const invalid = structuredClone(proof); corrupt(invalid); assert.throws(() => assertProjectWatchEvidence(invalid)); }
+});
 
 test('data-ready FileView at compact semantic zoom requires native projection focus, never unhiding DOM', () => {
   const ui = { count: 1, cardId: 'file-1', snapshot: {}, connect: { disabled: false, ownHidden: false },

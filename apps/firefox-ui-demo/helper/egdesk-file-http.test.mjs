@@ -410,6 +410,58 @@ const observedRoomProject = view => ({ roomId: view.roomId, status: view.status,
   boardId: view.source === 'board' ? view.inheritance.boardId : null,
   projectId: view.project?.projectId ?? null, rootId: view.project?.rootId ?? null })
 
+test('watcher Board verification requires the exact already-connected root and never reconnects a replacement', { timeout: 6000 }, async t => {
+  const registrations = []
+  const h = await projectFixture(t, { onRootRegistered: root => registrations.push(root.rootId) })
+  const first = (await h.call('attachProject', { boardId: 'a', selectionId: 'pick-shop' })).body.result
+  const expected = { boardId: 'a', expectedProjectId: first.projectId, expectedRootId: first.rootId }
+  assert.equal((await h.call('openProject', expected)).status, 200)
+  assert.equal(registrations.length, 1)
+  for (const invalid of [{ boardId: 'a', expectedProjectId: first.projectId }, { ...expected, roomId: 'r' },
+    { ...expected, expectedRootId: '/absolute/path' }, { ...expected, expectedProjectId: '' }]) {
+    const response = await h.call('openProject', invalid)
+    assert.notEqual(response.status, 200)
+  }
+  const replacement = (await h.call('attachProject', { boardId: 'a', selectionId: 'pick-blog' })).body.result
+  const count = registrations.length
+  assert.equal((await h.call('openProject', expected)).status, 409)
+  assert.equal(registrations.length, count, 'a stale event never opens the new Board root')
+  await h.restart()
+  const staleRoot = await h.call('openProject', { boardId: 'a', expectedProjectId: replacement.projectId, expectedRootId: replacement.rootId })
+  assert.equal(staleRoot.status, 409)
+  assert.equal(registrations.length, count, 'event-time verification never reconnects a stored folder')
+})
+
+test('openProject refuses a Board binding replaced while the previous folder is being verified', { timeout: 6000 }, async t => {
+  let h, armed = false, replacementIdentity
+  const projectStoreForOwner = async ownerScope => {
+    const store = await openEGDeskProjectStore({ directory: h.draftDirectory, ownerScope })
+    return new Proxy(store, { get(target, name) {
+      if (name !== 'effective') return target[name]
+      return args => {
+        const captured = target.effective(args)
+        if (armed && args.boardId === 'a') {
+          armed = false
+          target.attachToBoard({ boardId: 'a', workspaceRoot: h.folders.blog, identity: replacementIdentity, title: 'replacement' })
+        }
+        return captured
+      }
+    } })
+  }
+  h = await projectFixture(t, { projectStoreForOwner })
+  const first = await h.call('attachProject', { boardId: 'a', selectionId: 'pick-shop' })
+  assert.equal(first.status, 200)
+  const stat = await fs.stat(h.folders.blog, { bigint: true })
+  replacementIdentity = { dev: String(stat.dev), ino: String(stat.ino) }
+  armed = true
+  const stale = await h.call('openProject', { boardId: 'a' })
+  assert.deepEqual([stale.status, stale.body.code], [409, 'PROJECT_WORKSPACE_CHANGED'])
+  const current = await h.call('openProject', { boardId: 'a' })
+  assert.equal(current.status, 200)
+  assert.notEqual(current.body.result.project.projectId, first.body.result.projectId)
+  assert.equal(current.body.result.project.displayPath, h.folders.blog)
+})
+
 test('expected room project: adapter validates and snapshots only identity before any await', async t => {
   const calls = []
   const adapter = createEGDeskFileHttpAdapter({ storeForOwner: async () => { calls.push('drafts'); throw new Error('must not open') },
@@ -662,7 +714,7 @@ test('run origin resolver: only current authorized connections qualify, never a 
   const h = await projectFixture(t, { onRootRegistered: value => registrations.push(value) })
   const initial = (await h.call('attachProject', { boardId: 'a', selectionId: 'pick-shop' })).body.result
   const workspace = await h.adapter().resolveProjectWorkspace({ ownerScope: 'owner-p', boardId: 'a', roomId: 'r' })
-  const origin = { project: { fileOwnerScope: 'owner-p', projectId: workspace.projectId, source: 'board', startCwd: workspace.absolutePath, fsIdentity: workspace.identity } }
+  const origin = { project: { fileOwnerScope: 'owner-p', projectId: workspace.projectId, source: 'board', boardId: workspace.boardId, roomId: workspace.roomId, startCwd: workspace.absolutePath, fsIdentity: workspace.identity } }
   const read = async () => {
     const count = registrations.length
     const result = await h.adapter().resolveRunProjectOrigin({ ownerScope: 'owner-p', origin })
@@ -704,10 +756,11 @@ test('run origin resolver: detach after the filesystem await cannot release curr
   const registrations = []
   const h = await projectFixture(t, { onRootRegistered: value => registrations.push(value) })
   const selected = (await h.call('attachProject', { boardId: 'a', selectionId: 'pick-shop' })).body.result
+  await h.call('attachProject', { boardId: 'c', selectionId: 'pick-shop' })
   const store = await openEGDeskProjectStore({ directory: h.draftDirectory, ownerScope: 'owner-p' })
   t.after(() => store.close())
   const project = store.forBoard('a')
-  const origin = { project: { fileOwnerScope: 'owner-p', projectId: selected.projectId, source: 'board', startCwd: project.workspaceRoot, fsIdentity: project.identity } }
+  const origin = { project: { fileOwnerScope: 'owner-p', projectId: selected.projectId, source: 'board', boardId: 'a', roomId: null, startCwd: project.workspaceRoot, fsIdentity: project.identity } }
   let checks = 0
   const count = registrations.length
   const result = await h.adapter().resolveRunProjectOrigin({ ownerScope: 'owner-p', origin, assertActive() {
@@ -717,6 +770,59 @@ test('run origin resolver: detach after the filesystem await cannot release curr
   assert.equal(checks, 3)
   assert.deepEqual(result, { status: 'unavailable', verified: false, reason: 'connection-required' })
   assert.equal(registrations.length - count, 0)
+  assert.equal((await h.call('openProject', { boardId: 'c' })).body.result.project.status, 'connected',
+    'another Board retaining the same project does not keep the detached origin Board authorized')
+})
+
+test('request origin never substitutes another Board sharing the same folder, but accepts explicit same-inode reattachment', async t => {
+  const h = await projectFixture(t)
+  await h.call('attachProject', { boardId: 'a', selectionId: 'pick-shop' })
+  await h.call('attachProject', { boardId: 'c', selectionId: 'pick-shop' })
+  const selected = (await h.call('openProject', { boardId: 'a' })).body.result.project
+  const workspace = await h.adapter().resolveProjectWorkspace({ ownerScope: 'owner-p', roomId: 'r',
+    projectTarget: { boardId: 'a', projectId: selected.projectId, rootId: selected.rootId } })
+  const origin = { project: { fileOwnerScope: 'owner-p', projectId: workspace.projectId, source: workspace.source,
+    boardId: workspace.boardId, roomId: workspace.roomId, startCwd: workspace.absolutePath, fsIdentity: workspace.identity } }
+  const read = () => h.adapter().resolveRunProjectOrigin({ ownerScope: 'owner-p', origin })
+  assert.equal((await read()).verified, true)
+  await h.call('detachProject', { boardId: 'a' })
+  assert.equal((await read()).verified, false)
+  assert.equal((await h.call('openProject', { boardId: 'c' })).body.result.project.status, 'connected')
+  const reattached = (await h.call('attachProject', { boardId: 'a', selectionId: 'pick-shop' })).body.result
+  const verified = await read()
+  assert.equal(verified.verified, true); assert.equal(verified.projectId, workspace.projectId)
+  assert.equal(verified.rootId, reattached.rootId)
+})
+
+test('run origin scope follows the actual Board or room and never substitutes a different binding', async t => {
+  for (const scenario of ['missing-board', 'missing-room', 'room-to-board', 'board-to-room', 'room-kept-board-detached', 'request-ignores-room']) await t.test(scenario, async t => {
+    const h = await projectFixture(t)
+    const board = (await h.call('attachProject', { boardId: 'a', selectionId: 'pick-shop' })).body.result
+    if (['room-to-board', 'missing-room', 'room-kept-board-detached'].includes(scenario)) await h.call('attachProject', { roomId: 'r', boardId: 'a', selectionId: 'pick-shop' })
+    const request = scenario === 'request-ignores-room'
+    const workspace = await h.adapter().resolveProjectWorkspace({ ownerScope: 'owner-p', boardId: 'a', roomId: 'r',
+      ...(request ? { projectTarget: { boardId: 'a', projectId: board.projectId, rootId: board.rootId } } : {}) })
+    const origin = { project: { fileOwnerScope: 'owner-p', projectId: workspace.projectId, source: workspace.source,
+      boardId: workspace.boardId, roomId: workspace.roomId, startCwd: workspace.absolutePath, fsIdentity: workspace.identity } }
+    const read = () => h.adapter().resolveRunProjectOrigin({ ownerScope: 'owner-p', origin })
+    assert.equal((await read()).verified, true)
+    if (scenario === 'missing-board') origin.project.boardId = null
+    if (scenario === 'missing-room') origin.project.roomId = null
+    if (scenario === 'room-to-board') await h.call('inheritRoomProject', { roomId: 'r' })
+    if (scenario === 'board-to-room' || request) await h.call('attachProject', { roomId: 'r', boardId: 'a', selectionId: 'pick-blog' })
+    if (scenario === 'room-kept-board-detached') await h.call('detachProject', { boardId: 'a' })
+    assert.equal((await read()).verified, request || scenario === 'board-to-room' || scenario === 'room-kept-board-detached',
+      'a later unrelated default does not replace the original Board/room authority')
+    if (request || scenario === 'board-to-room') {
+      await h.call('detachProject', { boardId: 'a' })
+      assert.equal((await read()).verified, false)
+      assert.equal((await h.call('openProject', { roomId: 'r' })).body.result.project.status, 'connected')
+    }
+    if (scenario === 'room-kept-board-detached') {
+      await h.call('inheritRoomProject', { roomId: 'r' })
+      assert.equal((await read()).verified, false, 'removing the actual room binding revokes a room-origin grant')
+    }
+  })
 })
 
 test('run origin resolver: production connection snapshot rejects metadata mismatch and replacement across its await', async t => {
@@ -727,12 +833,12 @@ test('run origin resolver: production connection snapshot rejects metadata misma
   const end = source.indexOf('\n  async function close()', start)
   const sameFolder = source.match(/^  const sameFolder = .*$/m)?.[0]
   assert.ok(start >= 0 && end > start && sameFolder)
-  for (const scenario of ['current', 'display-path-mismatch', 'connection-replaced', 'root-mutated', 'directory-mutated', 'display-mutated', 'authorization-removed']) await t.test(scenario, async () => {
+  for (const scenario of ['current', 'display-path-mismatch', 'connection-replaced', 'root-mutated', 'directory-mutated', 'display-mutated', 'authorization-removed', 'scope-removed']) await t.test(scenario, async () => {
     const entered = Promise.withResolvers(), release = Promise.withResolvers()
     const project = { id: 'project', workspaceRoot: '/authorized/current', identity: { dev: '1', ino: '2' } }
     const connection = { rootId: 'root-current', directoryId: 'directory-current', displayPath: project.workspaceRoot, capability: 'not-a-public-origin-field' }
     if (scenario === 'display-path-mismatch') connection.displayPath = '/different/authorized-looking-path'
-    let current = project, registrations = 0
+    let current = project, scope = project, registrations = 0
     const roots = new Map([[project.id, connection]])
     const service = {
       async describeRoot(rootId) {
@@ -742,18 +848,19 @@ test('run origin resolver: production connection snapshot rejects metadata misma
       },
       registerRoot() { registrations++; assert.fail('origin must never create authorization') },
     }
-    const projects = { roots, store: { list: () => [project], get: () => current } }
+    const projects = { roots, store: { list: () => [project], get: () => current, forRoom: () => scope } }
     const resolve = vm.runInNewContext(`${sameFolder};\n(${source.slice(start, end)})`, {
       path, boundOwner: owner => owner, error: (code, message) => Object.assign(new Error(message), { code }),
       entryForOwner: async () => ({ service }), projectsForOwner: async () => projects,
     })
-    const pending = resolve({ ownerScope: 'owner-p', origin: { project: { fileOwnerScope: 'owner-p', projectId: 'historic-project', source: 'room', startCwd: project.workspaceRoot, fsIdentity: project.identity } } })
+    const pending = resolve({ ownerScope: 'owner-p', origin: { project: { fileOwnerScope: 'owner-p', projectId: 'historic-project', source: 'room', boardId: null, roomId: 'r', startCwd: project.workspaceRoot, fsIdentity: project.identity } } })
     await entered.promise
     if (scenario === 'connection-replaced') roots.set(project.id, { ...connection })
     if (scenario === 'root-mutated') connection.rootId = 'root-new'
     if (scenario === 'directory-mutated') connection.directoryId = 'directory-new'
     if (scenario === 'display-mutated') connection.displayPath = '/new/path'
     if (scenario === 'authorization-removed') current = null
+    if (scenario === 'scope-removed') scope = null
     release.resolve()
     const result = structuredClone(await pending)
     assert.deepEqual(result, scenario === 'current'
