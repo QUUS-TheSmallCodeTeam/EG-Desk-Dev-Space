@@ -114,20 +114,25 @@ function productRoomControls(source = readSurfaceSource()) {
   const method = source.match(/^      createThread\([^]*?^      \},/m); assert.ok(method);
   const api = compileFunction(functions.map(declaration).join('\n') + `\nreturn { el, buildChatInputTray, bridge: { ${method[0].slice(0, -1)} } };`,
     Object.keys(deps))(...Object.values(deps));
-  const start = source.indexOf('      if (isHudListView) {\n        const unreadCountTotal');
-  const end = source.indexOf('\n      const threadSearch = ', start); assert.ok(start >= 0 && end > start);
-  const top = new Element('div');
-  compileFunction(source.slice(start, end), ['isHudListView', 'codex', 'threadTop', 'el', 'codexBridge', 'codexBridgeSummary', 'codexAuthSummary', 'dmThreads', 'groupThreads'])(
-    true, state.codex, top, api.el, api.bridge, () => '', () => '', [], []);
-  return { state, opened, top, tray: () => api.buildChatInputTray(state.codex.threads[0], { ensureRoomProjectDefault() {} }) };
+  const start = source.indexOf('      if (isHudListView) {\n        threadTop.appendChild');
+  const end = source.indexOf('\n      const threadSearch = ', start);
+  assert.ok(start >= 0 && end > start, 'missing the product HUD list header');
+  const renderTop = compileFunction(source.slice(start, end), ['isHudListView', 'threadTop', 'el', 'codexBridge']);
+  const top = new Element('div'), hiddenTop = new Element('div');
+  renderTop(true, top, api.el, api.bridge);
+  renderTop(false, hiddenTop, api.el, api.bridge);
+  return { state, opened, top, hiddenTop, tray: () => api.buildChatInputTray(state.codex.threads[0], { ensureRoomProjectDefault() {} }) };
 }
 
 test('origin verifier: real product new-room handler and real tray DOM own the exact selectors and active-room binding', () => {
   const verify = source => {
     const product = productRoomControls(source), buttons = product.top.querySelectorAll('.egd-codex-thread-home-new');
-    assert.equal(buttons.length, 1); buttons[0].events.click();
+    assert.equal(buttons.length, 1); assert.equal(product.hiddenTop.querySelectorAll('.egd-codex-thread-home-new').length, 0);
+    buttons[0].events.click();
     assert.equal(product.state.codex.hudView, 'conversation'); assert.equal(product.state.codex.threads.length, 1);
     const thread = product.state.codex.threads[0], tray = product.tray();
+    assert.equal(product.state.codex.activeThreadId, thread.id); assert.equal(thread.type, 'dm');
+    assert.equal(thread.profileEnabled, false); assert.equal(thread.conversationId, null);
     assert.equal(tray.dataset.testid, 'chat-attachments'); assert.equal(tray.dataset.threadId, thread.id);
     const openers = tray.querySelectorAll('[data-testid="chat-project-open"]'); assert.equal(openers.length, 1);
     assert.equal(tray.querySelectorAll('[data-testid="chat-project-target"]').length, 1);
@@ -136,6 +141,14 @@ test('origin verifier: real product new-room handler and real tray DOM own the e
   const source = readSurfaceSource(); verify(source);
   assert.throws(() => verify(source.replace("testid: 'chat-project-open'", "testid: 'renamed-project-open'")), /0 !== 1/);
   assert.throws(() => verify(source.replace("class: 'egd-codex-thread-home-new'", "class: 'renamed-new-room'")), /0 !== 1/);
+  const openHandler = "onclick: () => codexBridge.createThread('dm', { openConversation: true }),";
+  assert.ok(source.includes(openHandler));
+  assert.throws(() => verify(source.replace(openHandler, openHandler.replace('openConversation: true', 'openConversation: false'))),
+    error => error instanceof assert.AssertionError && error.actual === 'list' && error.expected === 'conversation');
+  const activeBinding = 'state.codex.threads = [thread, ...state.codex.threads];\n        state.codex.activeThreadId = thread.id;';
+  assert.ok(source.includes(activeBinding));
+  assert.throws(() => verify(source.replace(activeBinding, activeBinding.replace('activeThreadId = thread.id', 'activeThreadId = null'))),
+    error => error instanceof assert.AssertionError && error.actual === null && /^thread-dm-/.test(error.expected));
   const reference = readFileSync(new URL('./verify-firefox-mcp-project-file-flow.mjs', import.meta.url), 'utf8');
   assert.match(reference, /newRoomAction = await click\('\.egd-codex-thread-home-new'/);
   assert.match(reference, /openerCount === 1 && value\.composerBox\?\.visible && value\.composerThreadId === value\.threadId/);

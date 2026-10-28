@@ -33,7 +33,8 @@ assert.ok(resolverExpression, 'the production Chat constructor must inject the f
 const originResolverExpression = source.match(/^  resolveRunProjectOrigin: (request => localFiles\.resolveRunProjectOrigin\(request\)),\s*$/m)?.[1]
 assert.ok(originResolverExpression, 'the production Chat constructor must inject the read-only origin resolver')
 
-async function harness(t, { constructionRoots = false, failingUnsubscribe = false, unavailableTasks = false, durable = false } = {}) {
+async function harness(t, { constructionRoots = false, failingUnsubscribe = false, unavailableTasks = false,
+  unavailableOntology = false, failingOntologyClose = false, durable = false } = {}) {
   const temp = await realpath(await mkdtemp(path.join(os.tmpdir(), 'egdesk-bridge-services-')))
   const root = path.join(temp, 'project'), otherRoot = path.join(temp, 'room-project')
   const dataDir = path.join(temp, 'state')
@@ -82,6 +83,10 @@ async function harness(t, { constructionRoots = false, failingUnsubscribe = fals
     claudeEngine: { dispose: async () => lifecycle.push('engine.dispose') },
     chatStore: { close: () => lifecycle.push('chat.close') },
     profileStore: { close: () => lifecycle.push('profiles.close') },
+    ontologyStore: unavailableOntology ? null : { close() {
+      lifecycle.push('ontology.close')
+      if (failingOntologyClose) throw new Error('test ontology close failure')
+    } },
     process: { exit: code => lifecycle.push(`exit:${code}`) },
   })
   t.after(async () => {
@@ -350,7 +355,7 @@ test('service integration: context subscription works when task storage is unava
   await h.workflow.bus.flush()
   assert.equal(tracked(h, capture.sourceId).state, 'stale')
   await h.shutdown()
-  assert.deepEqual(h.lifecycle, ['context.detach', 'server.close', 'monitor.close', 'engine.dispose', 'workflow.close', 'files.close', 'chat.close', 'profiles.close', 'desk.close', 'exit:0'])
+  assert.deepEqual(h.lifecycle, ['context.detach', 'server.close', 'monitor.close', 'engine.dispose', 'workflow.close', 'files.close', 'chat.close', 'profiles.close', 'desk.close', 'ontology.close', 'exit:0'])
   const count = h.contexts.roots.size
   h.onRootRegistered({ rootId: 'after-close', absolutePath: h.root })
   assert.equal(h.contexts.roots.size, count, 'late file callbacks cannot restart tracking')
@@ -365,10 +370,33 @@ test('service integration: context subscription works when task storage is unava
 test('service integration: a throwing unsubscribe is reported and does not prevent server, workflow or local-store cleanup', async t => {
   const h = await harness(t, { constructionRoots: true, failingUnsubscribe: true })
   await h.shutdown()
-  assert.deepEqual(h.lifecycle, ['context.detach', 'server.close', 'monitor.close', 'engine.dispose', 'workflow.close', 'files.close', 'chat.close', 'profiles.close', 'desk.close', 'exit:0'])
+  assert.deepEqual(h.lifecycle, ['context.detach', 'server.close', 'monitor.close', 'engine.dispose', 'workflow.close', 'files.close', 'chat.close', 'profiles.close', 'desk.close', 'ontology.close', 'exit:0'])
   assert.deepEqual(h.warnings, ['[egdesk-codex-bridge] context services did not detach cleanly'])
   assert.ok([...h.watchers.values()].every(watcher => watcher.closed))
   assert.equal(h.workflow.bus.stats().subscribers, 0)
   await h.shutdown()
   assert.equal(h.warnings.length, 1, 'shutdown and its exact detach function are idempotent')
+})
+
+test('service integration: absent ontology storage does not produce a shutdown warning', async t => {
+  const h = await harness(t, { unavailableOntology: true })
+  await h.shutdown()
+  assert.deepEqual(h.lifecycle, ['context.detach', 'server.close', 'monitor.close', 'engine.dispose', 'workflow.close', 'files.close', 'chat.close', 'profiles.close', 'desk.close', 'exit:0'])
+  assert.deepEqual(h.warnings, [])
+  await h.shutdown()
+  assert.equal(h.lifecycle.filter(item => item === 'exit:0').length, 1)
+})
+
+test('service integration: ontology close failure is reported without preventing shutdown', async t => {
+  const h = await harness(t, { failingUnsubscribe: true, failingOntologyClose: true })
+  await h.shutdown()
+  assert.deepEqual(h.lifecycle, ['context.detach', 'server.close', 'monitor.close', 'engine.dispose', 'workflow.close', 'files.close', 'chat.close', 'profiles.close', 'desk.close', 'ontology.close', 'exit:0'])
+  assert.deepEqual(h.warnings, [
+    '[egdesk-codex-bridge] context services did not detach cleanly',
+    '[egdesk-codex-bridge] ontology store did not close cleanly',
+  ])
+  assert.equal(h.workflow.bus.stats().subscribers, 0)
+  await h.shutdown()
+  assert.equal(h.lifecycle.filter(item => item === 'ontology.close').length, 1)
+  assert.equal(h.warnings.length, 2)
 })
