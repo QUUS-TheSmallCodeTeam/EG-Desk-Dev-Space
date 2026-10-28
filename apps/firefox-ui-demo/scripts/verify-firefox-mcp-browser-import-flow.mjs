@@ -11,46 +11,52 @@ import net from 'node:net';
 import http from 'node:http';
 import os from 'node:os';
 import path from 'node:path';
-import { createHash } from 'node:crypto';
+import { createHash, randomInt } from 'node:crypto';
 import { spawn, execFileSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { assertQaFixtureManifest, assertQaProfile, bootstrapQaProfile,
   canonicalTempRoot, LOADER_FILES } from './egdesk-chat-qa-profile.mjs';
 import { materializeQaFixtureIsolation } from './egdesk-qa-fixture-isolation.mjs';
+import { FX_AUTOCONFIG_PIN, inspectFirefoxInstall, inspectLoaderDirectory } from './verify-clean-profile-boot.mjs';
 
-export const MARIONETTE_PORT = 28831;
-export const REMOTE_PORT = 60831;
+export const MARIONETTE_PORT = 28833;
+export const REMOTE_PORT = 60833;
+const EXCLUDED_PORTS = Object.freeze([28831, 60831, 28832, 60832, 39217, 39218]);
 const OVERLAY = fileURLToPath(new URL('../overlay/', import.meta.url));
+const APP_ROOT = fileURLToPath(new URL('../', import.meta.url));
 const sha256 = value => createHash('sha256').update(value).digest('hex');
 const pause = ms => new Promise(resolve => setTimeout(resolve, ms));
 const issuedLoaders = new Set();
 const issuedProfiles = new WeakSet();
+const ownedChildren = new WeakSet();
 
 export function parseCli(argv, now = Date.now()) {
   const values = new Map();
   for (let i = 0; i < argv.length; i += 2) {
     const key = argv[i];
-    assert.ok(['--evidence-root', '--deadline-utc', '--firefox', '--mcp-entry', '--geckodriver',
+    assert.ok(['--evidence-root', '--deadline-utc', '--firefox', '--mcp-entry', '--geckodriver', '--loader-source',
       '--expected-surface-sha256', '--scenario'].includes(key)
       && !values.has(key) && argv[i + 1],
-    'usage: --evidence-root ABSOLUTE_TEMP_DIRECTORY --deadline-utc YYYY-MM-DDTHH:mm:ssZ --firefox ABSOLUTE_BINARY --mcp-entry ABSOLUTE_ENTRY --geckodriver ABSOLUTE_BINARY [--expected-surface-sha256 SHA256] [--scenario core|ownership|open-file]');
+    'usage: --evidence-root ABSOLUTE_TEMP_DIRECTORY --deadline-utc YYYY-MM-DDTHH:mm:ssZ --firefox ABSOLUTE_BINARY --mcp-entry ABSOLUTE_ENTRY --geckodriver ABSOLUTE_BINARY --loader-source PINNED_UTILS_DIR [--expected-surface-sha256 SHA256] [--scenario core|ownership|open-file|style-parity]');
     values.set(key, argv[i + 1]);
   }
-  assert.ok(['--evidence-root', '--deadline-utc', '--firefox', '--mcp-entry', '--geckodriver']
-    .every(key => values.has(key)), 'evidence root, deadline and all three explicit runtime paths are required');
+  assert.ok(['--evidence-root', '--deadline-utc', '--firefox', '--mcp-entry', '--geckodriver', '--loader-source']
+    .every(key => values.has(key)), 'evidence root, deadline and all explicit runtime and pinned-loader paths are required');
   const raw = values.get('--deadline-utc');
   assert.match(raw, /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$/, 'deadline must be unambiguous UTC');
   const deadlineMs = Date.parse(raw);
   assert.ok(Number.isFinite(deadlineMs) && new Date(deadlineMs).toISOString() === raw.replace('Z', '.000Z')
     && deadlineMs > now + 30000, 'deadline must be a valid future UTC timestamp');
   const scenario = values.get('--scenario') || 'core';
-  assert.ok(['core', 'ownership', 'open-file'].includes(scenario), 'scenario must be core, ownership or open-file');
+  assert.ok(['core', 'ownership', 'open-file', 'style-parity'].includes(scenario), 'unknown QA scenario');
   const runtimes = { firefox: values.get('--firefox'), mcpEntry: values.get('--mcp-entry'),
     geckodriver: values.get('--geckodriver') };
   for (const value of Object.values(runtimes)) assertRuntimePathSyntax(value);
+  const loaderSource = values.get('--loader-source');
+  assertRuntimePathSyntax(loaderSource);
   const expectedSurfaceSha256 = values.get('--expected-surface-sha256') || null;
   if (expectedSurfaceSha256 !== null) assert.match(expectedSurfaceSha256, /^[0-9a-f]{64}$/, 'expected surface SHA256 must be lowercase hexadecimal');
-  return { evidenceRoot: values.get('--evidence-root'), deadlineMs, scenario, runtimes, expectedSurfaceSha256 };
+  return { evidenceRoot: values.get('--evidence-root'), deadlineMs, scenario, runtimes, loaderSource, expectedSurfaceSha256 };
 }
 
 export function assertSupportedPlatform(platform = process.platform) {
@@ -130,9 +136,9 @@ export function sandboxPolicy({ home, firefoxApp, nodeDir, mcpDir, geckoDir, fix
     assert.ok(path.isAbsolute(p) && !/["\n\r\\]/.test(p), 'unsafe sandbox path');
   }
   assert.ok(Number.isInteger(fixturePort) && fixturePort > 0 && fixturePort <= 65535
-    && ![MARIONETTE_PORT, REMOTE_PORT, 39217, 39218].includes(fixturePort), 'unsafe sandbox fixture port');
+    && ![MARIONETTE_PORT, REMOTE_PORT, ...EXCLUDED_PORTS].includes(fixturePort), 'unsafe sandbox fixture port');
   if (driverPort != null) assert.ok(Number.isInteger(driverPort) && driverPort > 0 && driverPort <= 65535
-    && ![MARIONETTE_PORT, REMOTE_PORT, 39217, 39218, fixturePort].includes(driverPort), 'unsafe sandbox driver port');
+    && ![MARIONETTE_PORT, REMOTE_PORT, ...EXCLUDED_PORTS, fixturePort].includes(driverPort), 'unsafe sandbox driver port');
   const ancestors = new Set();
   for (const item of [firefoxApp, nodeDir, mcpDir, geckoDir]) {
     for (let current = path.dirname(item); current !== home && current.startsWith(home + '/'); current = path.dirname(current)) {
@@ -190,9 +196,9 @@ function saveScreenshot(target, value) {
   return { file: target, width: value.width, height: value.height, sha256: sha256(bytes) };
 }
 
-// This test-only loader is created as fixture data, not copied from any user
-// profile. Firefox's installed autoconfig reads only these files in the fresh
-// profile. No generic userChrome scripts are discovered or run.
+// Historical user-only loader description, retained solely to identify the
+// comparison baseline. Production-parity runs use the explicitly supplied,
+// hash-verified fx-autoconfig loader instead; this source is never launched.
 export function loaderSources() {
   return {
     'chrome.manifest': 'content userchromejs ./\ncontent userchrome ../resources/\ncontent egdeskqa ../\n',
@@ -213,30 +219,65 @@ obs.addObserver({ observe(subject) { boot(subject); } }, 'browser-delayed-startu
   };
 }
 
-export function createLoader(runDir) {
+export function assertPinnedLoaderBoundary(source, evidenceRoot) {
+  assertRuntimePathSyntax(source);
+  assertRuntimePathSyntax(evidenceRoot);
+  const within = root => source.startsWith(path.resolve(root) + path.sep);
+  assert.ok(within(APP_ROOT) || within(evidenceRoot), 'pinned loader must be inside the repository or owned evidence root');
+  assert.ok(!source.split(path.sep).some(part => /^egdesk-chat-test-/i.test(part)),
+    'loader source must not be a Firefox profile');
+}
+
+export function inspectPinnedLoader(source, evidenceRoot) {
+  assertPinnedLoaderBoundary(source, evidenceRoot); // reject private paths before any read
+  const info = fs.lstatSync(source);
+  assert.ok(info.isDirectory() && !info.isSymbolicLink() && fs.realpathSync.native(source) === source,
+    'pinned loader source must be a canonical directory');
+  const report = inspectLoaderDirectory(source);
+  assert.ok(report.matchesPin, `pinned loader mismatch: ${report.mismatches.join(', ')} ${report.extra.join(', ')}`);
+  return report;
+}
+
+export function createLoader(runDir, source) {
   assertPrivateDirectory(runDir);
   const parent = path.dirname(runDir), root = path.dirname(parent);
   assertEvidenceRoot(root);
   assertPrivateDirectory(parent, root);
   assert.equal(path.basename(parent), 'browser-import', 'loader must be under browser-import evidence');
   assert.match(path.basename(runDir), /^run-[A-Za-z0-9]+$/, 'loader requires a unique owned run');
-  const loader = path.join(runDir, 'independent-loader');
+  const sourceReport = inspectPinnedLoader(source, root);
+  const loader = path.join(runDir, 'pinned-loader');
   fs.mkdirSync(loader, { mode: 0o700 });
-  const sources = loaderSources();
-  assert.deepEqual(Object.keys(sources).sort(), [...LOADER_FILES].sort());
-  for (const [name, contents] of Object.entries(sources)) {
-    fs.writeFileSync(path.join(loader, name), contents, { flag: 'wx', mode: 0o600 });
+  for (const name of LOADER_FILES) {
+    fs.copyFileSync(path.join(source, name), path.join(loader, name), fs.constants.COPYFILE_EXCL);
+    fs.chmodSync(path.join(loader, name), 0o600);
   }
   const canonical = assertPrivateDirectory(loader, runDir);
+  const copiedReport = inspectLoaderDirectory(canonical);
+  assert.ok(copiedReport.matchesPin, 'copied pinned loader changed during preparation');
   issuedLoaders.add(canonical);
-  return canonical;
+  return { path: canonical, commit: FX_AUTOCONFIG_PIN.commit, files: copiedReport.files,
+    sourceCanonicalSha256: sha256(source), sourceMatchesPin: sourceReport.matchesPin, copiedMatchesPin: copiedReport.matchesPin };
+}
+
+// Match the complete, case-insensitive filename selection in the pinned
+// fx-autoconfig boot.sys.mjs; any other executable/registered candidate is
+// refused before the private profile is started.
+export function assertReviewedOverlayCandidates(scriptNames, styleNames) {
+  assert.ok(Array.isArray(scriptNames) && Array.isArray(styleNames), 'overlay candidate lists are required');
+  const scripts = scriptNames.filter(name => /^[A-Za-z0-9]+.*(\.uc\.js|\.uc\.mjs|\.sys\.mjs)$/i.test(name)).sort();
+  const styles = styleNames.filter(name => /^[A-Za-z0-9]+.*\.uc\.css$/i.test(name)).sort();
+  assert.deepEqual(scripts, ['eg-desk-surface.uc.js'], 'pinned loader may execute only the reviewed EG-Desk surface script');
+  assert.deepEqual(styles, ['eg-desk-surface.uc.css'], 'pinned loader may register only the reviewed EG-Desk surface stylesheet');
+  return { scripts, styles };
 }
 
 export function prepareProfile({ loader, fixturePort }) {
   assert.ok(Number.isInteger(fixturePort) && fixturePort > 0 && fixturePort <= 65535
-    && ![MARIONETTE_PORT, REMOTE_PORT, 39217, 39218].includes(fixturePort), 'unsafe fixture port');
+    && ![MARIONETTE_PORT, REMOTE_PORT, ...EXCLUDED_PORTS].includes(fixturePort), 'unsafe fixture port');
   assert.ok(issuedLoaders.has(loader), 'loader must be created by this isolated run');
   issuedLoaders.delete(loader);
+  assertReviewedOverlayCandidates(fs.readdirSync(path.join(OVERLAY, 'JS')), fs.readdirSync(path.join(OVERLAY, 'CSS')));
   const { profile } = bootstrapQaProfile({ loaderSource: loader }); // never use its default
   assertQaFixtureManifest(profile);
   const chrome = path.join(profile, 'chrome');
@@ -244,7 +285,8 @@ export function prepareProfile({ loader, fixturePort }) {
     fs.cpSync(path.join(OVERLAY, name), path.join(chrome, name), { recursive: true,
       filter(source) { assert.ok(!fs.lstatSync(source).isSymbolicLink(), 'linked overlay source refused'); return true; } });
   }
-  const css = fs.readdirSync(path.join(chrome, 'CSS')).filter(name => name.endsWith('.uc.css')).sort();
+  const { styles: css } = assertReviewedOverlayCandidates(fs.readdirSync(path.join(chrome, 'JS')),
+    fs.readdirSync(path.join(chrome, 'CSS')));
   fs.writeFileSync(path.join(chrome, 'userChrome.css'),
     css.map(name => `@import url(${JSON.stringify(`CSS/${name}`)});`).join('\n') + '\n', { flag: 'wx', mode: 0o600 });
   const isolationEnv = { EGDESK_QA_FIXTURE_TRANSPORT: '1', EGDESK_QA_REAL_TURN: '0',
@@ -285,12 +327,30 @@ export async function assertPortFree(port) {
   });
 }
 
+export async function listenOwnedFixturePort(server, excluded = []) {
+  // Never let the OS choose Popper's reserved 60831, even briefly.
+  // These local-only candidates are outside both workers' fixed port pairs.
+  for (let attempt = 0; attempt < 20; attempt++) {
+    const port = 41000 + randomInt(4000);
+    if ([MARIONETTE_PORT, REMOTE_PORT, ...EXCLUDED_PORTS, ...excluded].includes(port)) continue;
+    try {
+      await new Promise((resolve, reject) => {
+        const fail = error => { server.off('listening', ready); reject(error); };
+        const ready = () => { server.off('error', fail); resolve(); };
+        server.once('error', fail); server.once('listening', ready);
+        server.listen({ port, host: '127.0.0.1', exclusive: true });
+      });
+      return port;
+    } catch (error) { if (error.code !== 'EADDRINUSE') throw error; }
+  }
+  throw new Error('No exclusive fixture port available; no existing process was touched');
+}
+
 async function chooseDriverPort(fixturePort) {
   const server = net.createServer();
-  await new Promise((resolve, reject) => { server.once('error', reject); server.listen(0, '127.0.0.1', resolve); });
-  const port = server.address().port;
+  const port = await listenOwnedFixturePort(server, [fixturePort]);
   await new Promise(resolve => server.close(resolve));
-  assert.ok(![MARIONETTE_PORT, REMOTE_PORT, 39217, 39218, fixturePort].includes(port), 'driver port collided');
+  assert.ok(![MARIONETTE_PORT, REMOTE_PORT, ...EXCLUDED_PORTS, fixturePort].includes(port), 'driver port collided');
   return port;
 }
 
@@ -342,9 +402,8 @@ async function startFixtureServer() {
     } else { res.writeHead(503, { 'content-type': 'application/json' }); res.end('{"error":"fixture only"}'); }
   });
   server.on('connect', (req, socket) => { requests.push({ method: 'CONNECT', path: 'blocked' }); socket.destroy(); });
-  await new Promise((resolve, reject) => { server.once('error', reject); server.listen(0, '127.0.0.1', resolve); });
-  const port = server.address().port;
-  if ([MARIONETTE_PORT, REMOTE_PORT, 39217, 39218].includes(port)) { await new Promise(r => server.close(r)); throw new Error('Fixture port collided'); }
+  const port = await listenOwnedFixturePort(server);
+  if ([MARIONETTE_PORT, REMOTE_PORT, ...EXCLUDED_PORTS].includes(port)) { await new Promise(r => server.close(r)); throw new Error('Fixture port collided'); }
   return { server, port, requests };
 }
 
@@ -475,6 +534,7 @@ export class IsolatedMcp {
       '--connectExisting', '--marionettePort', String(MARIONETTE_PORT), '--enablePrivilegedContext', '--enableScript'],
     { env: childEnvironment(this.paths.geckodriver, { entry: this.paths.mcpEntry, driverPort: this.driverPort }),
       cwd: this.profile, stdio: ['pipe', 'pipe', 'pipe'] });
+    ownedChildren.add(this.proc);
     this.proc.stdout.on('data', chunk => {
       this.buffer += chunk; let end;
       while ((end = this.buffer.indexOf('\n')) >= 0) {
@@ -640,20 +700,18 @@ async function waitForMount(mcp, deadlineMs) {
   throw new Error('EG-Desk surface did not mount');
 }
 
-async function mountIndependentLoader(mcp) {
+async function observePinnedLoader(mcp) {
   return mcp.evaluate(() => {
-    if (window.__egdesk && document.querySelector('#egd-dock')) return { method: 'fixture-observer', alreadyMounted: true };
-    if (window.__egdeskQaLoaderRan || window.__egdesk || document.querySelector('#egd-dock')) {
-      throw new Error('Partial loader state; refusing to remount: ' + JSON.stringify({
-        loaderRan: !!window.__egdeskQaLoaderRan, api: !!window.__egdesk, dock: !!document.querySelector('#egd-dock'),
-        error: window.__egdeskQaLoaderError || null }));
+    const node = document.querySelector('.egd-card-nav-btn');
+    const inspector = globalThis.InspectorUtils || window.InspectorUtils;
+    if (!window.__egdesk || !document.querySelector('#egd-dock') || !node || !inspector?.getMatchingCSSRules) {
+      throw new Error('Pinned loader or stylesheet inspector did not mount; no fallback is permitted');
     }
-    const base = Services.dirsvc.get('UChrm', Ci.nsIFile);
-    const manifest = base.clone(); manifest.append('utils'); manifest.append('chrome.manifest');
-    Components.manager.QueryInterface(Ci.nsIComponentRegistrar).autoRegister(manifest);
-    window.__egdeskQaLoaderRan = true;
-    Services.scriptloader.loadSubScript('chrome://egdeskqa/content/JS/eg-desk-surface.uc.js', window, 'UTF-8');
-    return { method: 'fixture-explicit-loader', alreadyMounted: false };
+    const rules = Array.from(inspector.getMatchingCSSRules(node, null));
+    const modes = [...new Set(rules.filter(rule => (rule.parentStyleSheet?.href || '').includes('eg-desk-surface.uc.css'))
+      .map(rule => rule.parentStyleSheet.parsingMode))].sort();
+    return { method: 'pinned-fx-autoconfig', alreadyMounted: true, stylesheetModes: modes,
+      nativeStyleUri: 'chrome://userstyles/skin/eg-desk-surface.uc.css', exactCssOnly: true };
   });
 }
 
@@ -669,7 +727,7 @@ export async function observeBaseline(mcp) {
     const snap = api?.surface?.snapshot?.();
     return { matches, cards: [...document.querySelectorAll('.egd-browser-card')].map(card => ({ id: card.id,
       hidden: card.hidden, width: card.getBoundingClientRect().width, height: card.getBoundingClientRect().height })),
-    surface: snap || null, loaderRan: window.__egdeskQaLoaderRan === true };
+    surface: snap || null, loaderRan: !!window.__egdesk && !!document.querySelector('#egd-dock') };
   });
 }
 
@@ -727,7 +785,7 @@ async function browserStyleDiagnostics(mcp) {
   return mcp.evaluate(() => {
     const profile = Services.dirsvc.get('ProfD', Ci.nsIFile);
     const clean = value => value == null ? null : String(value).replaceAll(profile.path, '<owned-qa-profile>').slice(0, 800);
-    const cssUrl = 'chrome://egdeskqa/content/CSS/eg-desk-surface.uc.css';
+    const cssUrl = 'chrome://userstyles/skin/eg-desk-surface.uc.css';
     const expectedCss = profile.clone(); expectedCss.append('chrome'); expectedCss.append('CSS');
     expectedCss.append('eg-desk-surface.uc.css');
     const userChrome = profile.clone(); userChrome.append('chrome'); userChrome.append('userChrome.css');
@@ -749,10 +807,12 @@ async function browserStyleDiagnostics(mcp) {
       const node = document.querySelector(selector);
       if (!node) return null;
       const style = getComputedStyle(node);
-      return { namespace: node.namespaceURI, localName: node.localName, appearance: style.appearance,
+      return { namespace: node.namespaceURI, localName: node.localName, className: node.className,
+        disabled: !!node.disabled, appearance: style.appearance,
         background: style.backgroundColor, borderStyle: style.borderStyle, borderWidth: style.borderWidth,
-        minHeight: style.minHeight, width: style.width, padding: style.padding, fontSize: style.fontSize,
-        fontWeight: style.fontWeight, textAlign: style.textAlign };
+        minHeight: style.minHeight, width: style.width, height: style.height, padding: style.padding,
+        font: style.font, fontFamily: style.fontFamily, fontSize: style.fontSize, fontWeight: style.fontWeight,
+        fontStyle: style.fontStyle, lineHeight: style.lineHeight, textAlign: style.textAlign };
     };
     let matchedRules = null, inspectorError = null, inspectorMethod = null;
     try {
@@ -785,6 +845,134 @@ async function browserStyleDiagnostics(mcp) {
       menuItem: computed('.egd-browser-menu-item'), navButton: computed('.egd-card-nav-btn'),
       dockButton: computed('.egd-dock-btn') };
   });
+}
+
+export function styleOriginModes(diagnostics) {
+  return [...new Set((diagnostics?.matchedRules || [])
+    .filter(rule => rule.selector === '.egd-browser-menu-item' &&
+      typeof rule.href === 'string' && rule.href.includes('eg-desk-surface.uc.css'))
+    .map(rule => rule.parsingMode).filter(Boolean))].sort();
+}
+
+export function sameStyleFixtureState(before, after) {
+  return !!before && !!after && JSON.stringify(before) === JSON.stringify(after);
+}
+
+async function observeStyleFixtureState(mcp, cardId) {
+  return mcp.evaluate(id => {
+    const card = document.getElementById(id), menu = document.querySelector('.egd-browser-menu');
+    const state = window.__egdesk?.state, browser = window.__egdesk?.browserRuntime?.state(card);
+    if (!card || !menu || !state || !browser) throw new Error('Style comparison state is unavailable');
+    const active = document.activeElement;
+    return { documentUri: document.documentURI, cardId: card.id, uri: browser.uri,
+      nativeUri: card._xulBrowser?.currentURI?.spec || null, activeCardId: state.activeEntityId,
+      fullscreenCardId: state.cardFullscreen?.cardId || null, pan: { ...state.pan }, panTarget: { ...state.panTarget },
+      zoom: state.zoom, zoomTarget: state.zoomTarget, viewport: { width: innerWidth, height: innerHeight, dpr: devicePixelRatio },
+      focus: { tag: active?.localName || null, id: active?.id || null, className: active?.className || null },
+      menu: [...menu.querySelectorAll('[role="menuitem"]')].map(node => ({ text: node.textContent.trim(), disabled: !!node.disabled })) };
+  }, cardId);
+}
+
+async function changePinnedAuthorSheet(mcp, operation) {
+  assert.ok(['remove', 'restore'].includes(operation), 'unsupported author-sheet operation');
+  return mcp.evaluate(action => {
+    const uri = Services.io.newURI('chrome://userstyles/skin/eg-desk-surface.uc.css');
+    const inspector = globalThis.InspectorUtils || window.InspectorUtils;
+    const node = document.querySelector('.egd-browser-menu-item');
+    if (!node || !inspector?.getMatchingCSSRules) throw new Error('Cannot inspect the exact author stylesheet');
+    const count = () => Array.from(inspector.getMatchingCSSRules(node, null)).filter(rule =>
+      rule.selectorText === '.egd-browser-menu-item' && rule.parentStyleSheet?.href === uri.spec
+        && rule.parentStyleSheet.parsingMode === 'author').length;
+    const before = count();
+    if (action === 'remove') {
+      if (before !== 1) throw new Error('Expected exactly one pinned author rule before removal');
+      window.windowUtils.removeSheet(uri, Ci.nsIDOMWindowUtils.AUTHOR_SHEET);
+    } else {
+      if (before !== 0) throw new Error('Refusing to add a duplicate pinned author sheet');
+      const service = Cc['@mozilla.org/content/style-sheet-service;1'].getService(Ci.nsIStyleSheetService);
+      const sheet = service.preloadSheet(uri, service.AUTHOR_SHEET);
+      window.windowUtils.addSheet(sheet, Ci.nsIDOMWindowUtils.AUTHOR_SHEET);
+    }
+    return { operation: action, uri: uri.spec, before, after: count(), sheetType: 'AUTHOR_SHEET' };
+  }, operation);
+}
+
+async function observeStyleParity(mcp, result, fixturePort, deadlineMs) {
+  result.actions = [];
+  const original = `http://127.0.0.1:${fixturePort}/egdesk-browser-import/original`;
+  result.actions.push(await mcp.fillAndEnter('[data-testid="first-use-address"]', original));
+  let initial;
+  for (let i = 0; i < 80; i++) {
+    assertBeforeDeadline(deadlineMs);
+    const cards = await observeBrowserCards(mcp);
+    initial = cards.find(card => card.uri === original && card.nativeUri === original && !card.loading);
+    if (initial) break;
+    await pause(150);
+  }
+  assert.ok(initial && /^[A-Za-z0-9_-]+$/.test(initial.id), 'Style comparison requires the loaded synthetic Browser');
+  result.actions.push(await mcp.click(`#${initial.id} .egd-card-dot-max`));
+  let ready = false;
+  for (let i = 0; i < 60; i++) {
+    assertBeforeDeadline(deadlineMs);
+    ready = await mcp.evaluate(id => {
+      const card = document.getElementById(id), dock = document.querySelector('#egd-dock');
+      const box = dock?.getBoundingClientRect(), css = dock && getComputedStyle(dock);
+      return !!card && !window.__egdesk.state.cardFullscreen && !!box && box.width > 0 && box.height > 0
+        && css.display !== 'none' && css.visibility !== 'hidden';
+    }, initial.id);
+    if (ready) break;
+    await pause(150);
+  }
+  assert.ok(ready, 'Style comparison requires the visible Desk dock');
+  result.actions.push(await mcp.click(`#${initial.id} [data-testid="browser-menu"]`));
+  let beforeState = null, stableSamples = 0;
+  for (let i = 0; i < 40 && stableSamples < 2; i++) {
+    assertBeforeDeadline(deadlineMs);
+    const nextState = await observeStyleFixtureState(mcp, initial.id);
+    stableSamples = sameStyleFixtureState(beforeState, nextState) ? stableSamples + 1 : 0;
+    beforeState = nextState;
+    if (stableSamples < 2) await pause(150);
+  }
+  assert.equal(stableSamples, 2, 'Style comparison window and camera must settle before capture');
+  const authorBefore = await browserStyleDiagnostics(mcp);
+  const authorBeforeScreenshot = await takeScreenshot(mcp, path.join(result.runDir, 'style-author-before.png'));
+  result.screenshots.push(authorBeforeScreenshot);
+  assert.deepEqual(styleOriginModes(authorBefore), ['author', 'user'], 'Pinned loader did not register both stylesheet origins');
+  let removal, userOnly, userState, userScreenshot, restored = false, restoration;
+  try {
+    removal = await changePinnedAuthorSheet(mcp, 'remove');
+    assert.equal(removal.after, 0, 'Pinned author stylesheet was not removed');
+    await pause(250);
+    userState = await observeStyleFixtureState(mcp, initial.id);
+    userOnly = await browserStyleDiagnostics(mcp);
+    userScreenshot = await takeScreenshot(mcp, path.join(result.runDir, 'style-user-only.png'));
+    result.screenshots.push(userScreenshot);
+    assert.deepEqual(styleOriginModes(userOnly), ['user'], 'User-only baseline still has an author stylesheet');
+  } finally {
+    if (removal?.operation === 'remove') {
+      restoration = await changePinnedAuthorSheet(mcp, 'restore');
+      restored = restoration.after === 1;
+    }
+  }
+  assert.ok(restored, 'Pinned author stylesheet was not restored');
+  await pause(250);
+  const afterState = await observeStyleFixtureState(mcp, initial.id);
+  const authorAfter = await browserStyleDiagnostics(mcp);
+  const authorAfterScreenshot = await takeScreenshot(mcp, path.join(result.runDir, 'style-author-restored.png'));
+  result.screenshots.push(authorAfterScreenshot);
+  const stateUnchanged = sameStyleFixtureState(beforeState, userState) && sameStyleFixtureState(beforeState, afterState);
+  const restoredComputed = ['menuItem', 'navButton', 'dockButton']
+    .every(key => !!authorBefore[key] && JSON.stringify(authorBefore[key]) === JSON.stringify(authorAfter[key]));
+  const originParity = JSON.stringify(styleOriginModes(authorAfter)) === JSON.stringify(['author', 'user']);
+  result.styleParity = { method: 'single-window-identical-state-remove-and-restore-exact-pinned-author-sheet',
+    sameWindowContext: mcp.context, stateUnchanged, restoredComputed, originParity, removal, restoration,
+    beforeState, userState, afterState,
+    authorBefore: { diagnostics: authorBefore, screenshot: authorBeforeScreenshot },
+    userOnly: { diagnostics: userOnly, screenshot: userScreenshot },
+    authorRestored: { diagnostics: authorAfter, screenshot: authorAfterScreenshot } };
+  result.checks.push({ name: 'pinned author sheet is removed and restored without changing the window or Desk state',
+    passed: stateUnchanged && restored && originParity });
+  result.checks.push({ name: 'restored author sheet reproduces menu, dock and navigation computed styles', passed: restoredComputed });
 }
 
 async function nativeTabEvidence(mcp) {
@@ -1717,9 +1905,105 @@ async function observeMigrationWizard(mcp, result, deadlineMs, fixture) {
 
 async function stopOwned(child) {
   if (!child || child.exitCode != null || child.signalCode != null) return;
+  assert.ok(ownedChildren.has(child), 'Refusing to stop a process not spawned by this verifier');
   child.kill('SIGTERM');
   await waitForExit(child, 10000);
   if (child.exitCode == null && child.signalCode == null) throw new Error(`Owned process ${child.pid} did not terminate`);
+}
+
+// Each operation is attempted even if an earlier close or stop fails. The
+// production caller supplies only its own ChildProcess handles, never PIDs.
+export async function cleanupOwnedResources({ mcp, firefox, fixtureServer, stopChild = stopOwned }) {
+  const errors = [];
+  const attempt = async (step, action) => {
+    try { await action(); } catch (error) { errors.push({ step, message: error?.message || String(error) }); }
+  };
+  await attempt('mcp.close', async () => { if (mcp) await mcp.close(); });
+  await attempt('mcp.stop', async () => { if (mcp?.proc) await stopChild(mcp.proc); });
+  await attempt('firefox.stop', async () => { if (firefox) await stopChild(firefox); });
+  await attempt('fixture.close', async () => {
+    if (!fixtureServer?.listening) return;
+    await new Promise((resolve, reject) => {
+      let settled = false;
+      const finish = error => {
+        if (settled) return;
+        settled = true; clearTimeout(timer);
+        if (error) reject(error); else resolve();
+      };
+      const timer = setTimeout(() => finish(new Error('Owned fixture server did not close in time')), 5000);
+      try { fixtureServer.close(finish); } catch (error) { finish(error); }
+    });
+  });
+  return { firefoxExited: !firefox || firefox.exitCode != null || firefox.signalCode != null,
+    mcpExited: !mcp?.proc || mcp.proc.exitCode != null || mcp.proc.signalCode != null,
+    fixtureServerClosed: !fixtureServer?.listening, errors };
+}
+
+// Read-only diagnostics. A port with an unrelated or unknown listener is
+// reported as occupied/unknown, never terminated or attributed to this run.
+export function inspectPortListeners(port, run = execFileSync) {
+  assert.ok(Number.isInteger(port) && port > 0 && port <= 65535 && !EXCLUDED_PORTS.includes(port),
+    'unsafe diagnostic port');
+  try {
+    const output = String(run('/usr/sbin/lsof', ['-nP', `-iTCP:${port}`, '-sTCP:LISTEN', '-t'],
+      { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] })).trim();
+    if (!output) return { state: 'free', pids: [] };
+    const parts = output.split(/\s+/);
+    if (parts.some(part => !/^[1-9]\d*$/.test(part) || !Number.isSafeInteger(Number(part)))) {
+      return { state: 'unknown', pids: [] };
+    }
+    return { state: 'listening', pids: [...new Set(parts.map(Number))].sort((a, b) => a - b) };
+  } catch (error) {
+    if (error?.status === 1 && !String(error.stdout || '').trim() && !String(error.stderr || '').trim()) {
+      return { state: 'free', pids: [] };
+    }
+    return { state: 'unknown', pids: [] };
+  }
+}
+
+function processSnapshot(pid, run) {
+  if (!Number.isSafeInteger(pid) || pid <= 1) return { state: 'unknown' };
+  try {
+    const field = name => String(run('/bin/ps', ['-p', String(pid), '-o', `${name}=`],
+      { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] })).trim();
+    const start = field('lstart'), parent = field('ppid'), executable = field('comm'), end = field('lstart');
+    if (!start || start !== end || !/^[1-9]\d*$/.test(parent) || !executable) return { state: 'unknown' };
+    return { state: 'present', parentPid: Number(parent), executableName: path.basename(executable),
+      identitySha256: sha256(`${start}\0${executable}`) };
+  } catch (error) {
+    if (error?.status === 1 && !String(error.stdout || '').trim() && !String(error.stderr || '').trim()) {
+      return { state: 'absent' };
+    }
+    return { state: 'unknown' };
+  }
+}
+
+export function inspectGeckodriverBeforeCleanup({ driverPort, mcpChild, executable, run = execFileSync }) {
+  if (!driverPort || !mcpChild || !Number.isSafeInteger(mcpChild.pid) || mcpChild.exitCode != null || mcpChild.signalCode != null) {
+    return { state: 'not-verified', reason: 'owned MCP process unavailable' };
+  }
+  const listener = inspectPortListeners(driverPort, run);
+  if (listener.state !== 'listening' || listener.pids.length !== 1) {
+    return { state: 'not-verified', reason: 'driver listener is absent, ambiguous or unreadable', listenerState: listener.state };
+  }
+  const pid = listener.pids[0], snapshot = processSnapshot(pid, run);
+  if (snapshot.state !== 'present' || snapshot.parentPid !== mcpChild.pid ||
+      snapshot.executableName !== path.basename(executable)) {
+    return { state: 'not-verified', reason: 'driver listener is not a verified direct MCP child' };
+  }
+  return { state: 'verified-mcp-child-listener', pid, parentPid: mcpChild.pid,
+    executableName: snapshot.executableName, identitySha256: snapshot.identitySha256 };
+}
+
+export function inspectGeckodriverAfterCleanup(before, run = execFileSync) {
+  if (before?.state !== 'verified-mcp-child-listener') return { state: 'not-measured' };
+  const snapshot = processSnapshot(before.pid, run);
+  if (snapshot.state === 'absent') return { state: 'exited' };
+  if (snapshot.state !== 'present') return { state: 'unknown' };
+  if (snapshot.identitySha256 !== before.identitySha256 || snapshot.executableName !== before.executableName) {
+    return { state: 'identity-changed' };
+  }
+  return { state: 'still-running' };
 }
 
 function waitForExit(child, timeout) {
@@ -1743,13 +2027,16 @@ function assertOwnedListener(port, child) {
 
 export async function runCli(argv = process.argv.slice(2)) {
   assertSupportedPlatform();
-  const { evidenceRoot, deadlineMs, scenario, runtimes, expectedSurfaceSha256 } = parseCli(argv);
+  const { evidenceRoot, deadlineMs, scenario, runtimes, loaderSource, expectedSurfaceSha256 } = parseCli(argv);
   assert.equal(process.version, 'v24.22.1', 'use the project Node 24.22.1 runtime');
   const paths = validateRuntimePaths(runtimes);
   const accountHome = fs.realpathSync.native(os.userInfo().homedir);
   assert.equal(fs.realpathSync.native(process.env.HOME), accountHome, 'refusing a changed account HOME');
   assertSafeRuntimeAllowlist(accountHome, paths);
   assertEvidenceRoot(evidenceRoot);
+  inspectPinnedLoader(loaderSource, evidenceRoot);
+  const install = inspectFirefoxInstall(paths.firefox);
+  assert.ok(install.bootstrap?.matchesPin, 'Firefox autoconfig bootstrap does not match the pinned loader');
   await Promise.all([assertPortFree(MARIONETTE_PORT), assertPortFree(REMOTE_PORT)]);
   assertBeforeDeadline(deadlineMs);
   const parent = path.join(evidenceRoot, 'browser-import');
@@ -1760,7 +2047,9 @@ export async function runCli(argv = process.argv.slice(2)) {
   const result = { kind: 'egdesk-browser-import-headless-qa', scenario, ok: false, ...providerBoundaryEvidence(),
     runtimeEvidence: { platform: process.platform, nodeVersion: process.version, explicitPathsValidated: true,
       firefoxPathSha256: sha256(paths.firefox), mcpEntryPathSha256: sha256(paths.mcpEntry),
-      geckodriverPathSha256: sha256(paths.geckodriver), nodePathSha256: sha256(paths.node) },
+      geckodriverPathSha256: sha256(paths.geckodriver), nodePathSha256: sha256(paths.node),
+      firefoxVersion: install.version, bootstrapMatchesPin: install.bootstrap.matchesPin,
+      bootstrapSha256: install.bootstrap.sha256 },
     wizard: 'not-run', checks: [], screenshots: [], runDir };
   let fixture, firefox, mcp, preparedProfile = null, firefoxLog = '', firefoxLogHead = '';
   const interruption = new AbortController();
@@ -1771,9 +2060,11 @@ export async function runCli(argv = process.argv.slice(2)) {
     assertRunning(deadlineMs, interruption.signal);
     fixture = await startFixtureServer();
     assertRunning(deadlineMs, interruption.signal);
-    const loader = createLoader(runDir);
+    const loader = createLoader(runDir, loaderSource);
+    result.pinnedLoader = { commit: loader.commit, files: loader.files, sourceCanonicalSha256: loader.sourceCanonicalSha256,
+      sourceMatchesPin: loader.sourceMatchesPin, copiedMatchesPin: loader.copiedMatchesPin };
     assertRunning(deadlineMs, interruption.signal);
-    const prepared = prepareProfile({ loader, fixturePort: fixture.port });
+    const prepared = prepareProfile({ loader: loader.path, fixturePort: fixture.port });
     preparedProfile = prepared.profile;
     result.profileEvidence = { exists: fs.existsSync(prepared.profile), canonicalSha256: sha256(prepared.profile),
       fixtureManifestVerified: true };
@@ -1800,6 +2091,7 @@ export async function runCli(argv = process.argv.slice(2)) {
     firefox = spawn('/usr/bin/sandbox-exec', ['-p', policy, paths.firefox, '-profile', prepared.profile, '--no-remote',
       '--marionette', '--remote-debugging-port', String(REMOTE_PORT), '--remote-allow-hosts', 'localhost', 'about:blank'],
     { env: childEnvironment(paths.geckodriver), cwd: prepared.profile, stdio: ['ignore', 'pipe', 'pipe'] });
+    ownedChildren.add(firefox);
     const captureLog = chunk => { firefoxLogHead = (firefoxLogHead + chunk).slice(0, 10000);
       firefoxLog = (firefoxLog + chunk).slice(-10000); };
     firefox.stdout.on('data', captureLog);
@@ -1819,9 +2111,13 @@ export async function runCli(argv = process.argv.slice(2)) {
     mcp = new IsolatedMcp({ prepared, firefox, policy, paths, preload: preload.file, driverPort,
       deadlineMs, signal: interruption.signal });
     result.contextGuard = await mcp.connect();
+    result.geckodriverBeforeCleanup = inspectGeckodriverBeforeCleanup({ driverPort, mcpChild: mcp.proc,
+      executable: paths.geckodriver });
     assertBeforeDeadline(deadlineMs);
-    result.loader = await mountIndependentLoader(mcp);
     await waitForMount(mcp, deadlineMs);
+    result.loader = await observePinnedLoader(mcp);
+    assert.ok(result.loader.stylesheetModes.includes('user') && result.loader.stylesheetModes.includes('author'),
+      'Pinned stylesheet must be present in both user and author origins');
     result.baseline = await observeBaseline(mcp);
     result.screenshots.push(await takeScreenshot(mcp, path.join(runDir, 'baseline.png')));
     result.checks.push({ name: 'headless mounted surface', passed: result.baseline.loaderRan });
@@ -1836,6 +2132,7 @@ export async function runCli(argv = process.argv.slice(2)) {
           passed: fixture.requests.some(request => request.method === 'GET' && request.path === route) });
       }
     } else if (scenario === 'ownership') await observeMultiWindowOwnership(mcp, result, fixture.port, deadlineMs);
+    else if (scenario === 'style-parity') await observeStyleParity(mcp, result, fixture.port, deadlineMs);
     else await observeOpenFileCommand(mcp, result, fixture, deadlineMs);
     // The core scenario never opens a wizard before its enumeration is fully
     // replaced. The ownership scenario never opens a migration wizard at all.
@@ -1843,11 +2140,14 @@ export async function runCli(argv = process.argv.slice(2)) {
     result.acceptance = 'scoped-fixture-only';
     result.ok = result.checks.every(check => check.passed) && (scenario === 'core'
       ? result.wizard === 'synthetic-only-guarded' : scenario === 'ownership'
-        ? result.ownershipSteps.length === 4 : result.openFileGuardRestored === true);
+        ? result.ownershipSteps.length === 4 : scenario === 'style-parity'
+          ? result.styleParity?.originParity === true && result.styleParity?.restoredComputed === true
+          : result.openFileGuardRestored === true);
     result.notCovered = ['real Chrome data', 'personal accounts', 'real provider', '.egdesk transfer',
       ...(scenario === 'core' ? ['multi-window routing', 'native Open File command']
         : scenario === 'ownership' ? ['migration wizard', 'new-card preference', 'history navigation']
-          : ['migration wizard', 'multi-window routing', 'actual file picker', 'file contents'])];
+          : scenario === 'style-parity' ? ['migration wizard', 'multi-window routing', 'real-user visual approval']
+            : ['migration wizard', 'multi-window routing', 'actual file picker', 'file contents'])];
     result.firefoxLogTail = firefoxLog;
     result.firefoxLogHead = firefoxLogHead;
   } catch (error) {
@@ -1863,12 +2163,25 @@ export async function runCli(argv = process.argv.slice(2)) {
     if (result.error) result.error = redactProfile(result.error);
     if (result.mcpLogTail) result.mcpLogTail = redactProfile(result.mcpLogTail);
     result.fixtureRequests = fixture?.requests || [];
-    try { await mcp?.close(); await stopOwned(mcp?.proc); await stopOwned(firefox); }
-    catch (error) { result.ok = false; result.cleanupError = error.message; }
-    if (fixture?.server) await new Promise(resolve => fixture.server.close(resolve));
-    result.cleanup = { firefoxExited: !firefox || firefox.exitCode != null || firefox.signalCode != null,
-      mcpExited: !mcp?.proc || mcp.proc.exitCode != null || mcp.proc.signalCode != null,
-      fixtureServerClosed: !fixture?.server?.listening };
+    const driverBefore = result.geckodriverBeforeCleanup || inspectGeckodriverBeforeCleanup({
+      driverPort: result.driverPort, mcpChild: mcp?.proc, executable: paths.geckodriver });
+    result.cleanup = await cleanupOwnedResources({ mcp, firefox, fixtureServer: fixture?.server });
+    result.cleanup.errors = result.cleanup.errors.map(error => ({ ...error, message: redactProfile(error.message) }));
+    const ports = [
+      ...(firefox ? [['marionette', MARIONETTE_PORT], ['remote', REMOTE_PORT]] : []),
+      ...(result.driverPort ? [['geckodriver', result.driverPort]] : []),
+      ...(fixture?.port ? [['fixture', fixture.port]] : []),
+    ];
+    result.cleanup.portListenersAfter = Object.fromEntries(ports.map(([name, port]) => {
+      const probe = inspectPortListeners(port);
+      return [name, { port, state: probe.state, listenerCount: probe.state === 'unknown' ? null : probe.pids.length }];
+    }));
+    result.cleanup.allObservedPortsFree = ports.every(([name]) => result.cleanup.portListenersAfter[name].state === 'free');
+    result.cleanup.geckodriver = { before: driverBefore, after: inspectGeckodriverAfterCleanup(driverBefore),
+      directSignalSent: false, observation: 'read-only process identity and listener checks' };
+    const driverExitUnverified = !!result.contextGuard && result.cleanup.geckodriver.after.state !== 'exited';
+    if (result.cleanup.errors.length || !result.cleanup.firefoxExited || !result.cleanup.mcpExited ||
+        !result.cleanup.fixtureServerClosed || !result.cleanup.allObservedPortsFree || driverExitUnverified) result.ok = false;
     fs.writeFileSync(path.join(runDir, 'result.json'), JSON.stringify(result, null, 2) + '\n', { flag: 'wx', mode: 0o600 });
     process.removeListener('SIGINT', onSigint); process.removeListener('SIGTERM', onSigterm);
   }

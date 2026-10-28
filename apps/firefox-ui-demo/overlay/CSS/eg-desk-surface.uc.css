@@ -1757,6 +1757,11 @@
   text-align: left;
 }
 
+.egd-edge .egd-browser-menu-item {
+  box-sizing: border-box;
+  padding: 0 9px;
+}
+
 .egd-browser-menu-item:hover {
   background: var(--egd-card-hover-bg);
   color: var(--egd-primary);
