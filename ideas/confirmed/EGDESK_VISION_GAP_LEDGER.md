@@ -10,8 +10,17 @@
 
 ## 진행 기록
 
+**2026-10-29 검증 환경**: UI 검사는 사용자 프로필과 분리한 임시 프로필·합성 자료·headless Firefox로 수행했다. 실제 계정 로그인·provider 호출·전면 OS 입력·Windows/Linux 실행을 확인한 것은 아니다. 외부 OS 격리에서 개인 자료와 외부 네트워크를 차단했으나, 일부 선행 Firefox 시험은 중첩 실행을 위해 내부 content/RDD/socket/GMP sandbox를 비활성화한 조건이었다. 이는 설치된 사용자 앱의 설정 변경이나 기본 보안 설정에서의 제품 검증을 뜻하지 않는다. 마지막 Browser 제목줄 후보는 내부 보호를 유지한 채 재시도했으나 화면 측정 전 `sandbox_init() failed`·자식 `signal 11`·browsing context 소실로 종료됐다. 정확한 원인은 확정하지 않았으며 이 실행을 화면 통과로 집계하지 않는다. 소유 Firefox·fixture는 2026-10-29 06:49:52 KST에 종료했고 사용자 앱은 변경하지 않았다.
+
+**최종 중앙 회귀 — `c4944fd` 코드 기준**: helper·scripts 전체 4,249건 중 4,235 통과·실패 0·제외 14. 제외에는 별도 native 바이너리, opt-in 실환경 관찰, 특정 설치된 Codex 스키마, Windows 및 다운로드 경로 등이 포함된다. 제외 항목을 통과로 집계하지 않는다. 테스트 의존성 연결 보완 뒤 재실행한 수치이며, 아래 UI 인수 범위를 대체하지 않는다.
+
 | 날짜 | 항목 | 상태 변화 | 근거 |
 |---|---|---|---|
+| 2026-10-29 | CNV-03 실제 Board 소속 표시·복원 ID 충돌 방어 | 일부 유지, 최종 축소 화면 인수 보류 | `c4944fd`. 제목줄은 저장된 고유 소유 관계만 표시하며 활성 Board·공간상의 위치로 소속을 추정하지 않는다. 소속 충돌은 임의로 고르지 않고, 이름 변경은 저장 성공 뒤 공개한다. 복원 시 dormant ID·기존 View·같은 Board·단일 Chat의 충돌을 검사하고 실제 복원한 구성원 참조만 다시 연결한다. 이 경계는 독립 함수 검사와 이전 소스의 격리 Firefox 일부 흐름에서 확인했다. 축소 Browser의 새 Board 이름이 Agent 조작을 덮는 문제에는 실제 사각형 충돌 시 시각적 이름만 생략하는 보정을 추가했고, 같은 폭에서 페이지 상태 문구가 바뀌면 다음 레이아웃 호출에서 다시 판정한다. 캐시 변경 자체가 새로운 호출을 예약하지는 않는다. 마지막 보정본의 Firefox 화면·실제 접근성 트리는 위 부팅 실패로 미검증이다. CSS의 이름 있는 note 보존 의도와 실제 보조기기 노출을 구분한다. 기존 50%·35%의 Agent 버튼 접근 실패, 전반적인 작은 카드 가독성, 동일 텍스트·배율에서 외부 글꼴만 바뀌는 경우와 성능 영향은 미완료/미검증이다. 새 LOD 기준은 도입하지 않았다. |
+| 2026-10-29 | CHAT-06 질문 오류의 가독성과 입력 배치 보존 | 일부 유지, 600×600 한정 화면 인수 | `9d9b573`. 실패한 답변과 같은 질문의 전체 오류·계속·취소가 함께 보이도록 필요한 공간을 측정한다. 긴 질문은 두 줄 영역에서 키보드로 끝까지 읽을 수 있다. 좁은 Chat에서 비어 있고 첨부 없는 작성기만 일시적으로 한 줄 배치하며, 명시적 입력 진입 때 복귀하고 이후 SSE가 배치를 다시 바꾸지 않게 했다. 당시 통합 v4 사본의 headless Firefox 600×600에서 답변·질문 제목·전체 오류·두 버튼·Chat 작성기 및 첨부·프로젝트의 가시성과 9점 hit를 확인했다. 실제 Chat 입력 뒤 SSE에서도 목록 120→120, footer 114→114 CSS px와 커서 5→5가 유지됐다. 이후 pointercancel 보완은 합성 회귀만 확인했다. 수정 후 800×600·물리 IME·붙여넣기는 native 미검증이다. Chat 입력으로 돌아간 뒤 Task 동작 버튼은 목록 스크롤이 필요할 수 있고, 초안·첨부가 있는 경우의 전체 동시 표시는 보장하지 않는다. 전송 아이콘 색이 갱신 전후 달랐으나 native disabled 상태는 계측하지 않아 원인은 미확인이다. 별도 실제 입력 핸들러·상태 함수의 fake-DOM 검사에서는 준비된 방에서 전송 가능 조건을 충족한 입력 직후 SSE 없이 활성화됐고 관련 17건이 통과했다. 이 소스 검사는 해당 캡처의 원인을 확정하지 않는다. 실제 provider는 사용하지 않았다. |
+| 2026-10-29 | CHAT-05 다중 고정 근거·범위 표시·키보드 진입·재열기 | 일부 유지, 연결 및 입력 보존 검증 | `0d18018`·`662585d`·`952ab63`. 한 단계의 여러 고정 근거를 준비하고 자료 이름·행 범위·상태와 개별 재시도를 연결했다. 해시 불일치와 잘못된 저장 범위를 성공처럼 표시하지 않는다. 최초 키보드·보조기술 활성화는 단계 탐색으로 진입하며, 재열기 자체나 늦은 준비 완료는 사용자가 옮긴 카메라·선택·입력을 다시 맞추지 않는다. 명시적인 단계·전체 보기와 종료는 별도 동작이다. 독립 함수 검사와 당시 통합 사본(surface SHA `d80c8710…`)의 합성 자료를 쓴 실제 headless Firefox에서 보류한 GET·새 입력·재열기, 720×600 첫 Space 진입 등 최종 4개 흐름을 확인했다. 실행본은 QA 로컬 주소만 치환했으며 `openAnswerBriefing` 함수 해시는 공유 사본과 동일한 `ea3a6452…`다. 커밋 단독 전체 파일이나 실제 물리 키보드·보조기술·provider 실행을 검증한 것은 아니다. 다중 근거 전체의 작은 화면 가독성은 인수하지 않았으며 [별도 사용자 선택](#briefing-small-screen-reading)이 남았다. |
+| 2026-10-29 | UX-02 열린 화면 이름 검색·겹침 목록 | 일부 유지, 화면 연결·격리 검증 | `5ac3e42`. 미니맵에 열린 Board·View 이름 검색과 24개씩 더 보기를 연결했다. 화면 밖 대상도 찾되 저장만 된 Board·본문은 검색하지 않고, 선택은 카메라만 이동한다. 실제 headless Firefox에서 합성 View 210개를 포함한 대상 218개, 겹침 목록·검색·창 크기 변경·키보드 포커스를 확인했다. 별도 실제 휠 시험은 사용자가 목록을 스크롤한 뒤 창을 줄일 때 그 위치를 보존하고, 새 방향키 입력 때만 포커스 행을 다시 드러냄을 확인했다. 500×213은 포커스 경계 스트레스 시험이며 화면 전체 배치 승인으로 보지 않는다. 합성 210개 View를 쓴 것이지 live Browser 210개의 성능을 검증한 것은 아니다. OS 한글 입력기·Briefing 마커는 미검증/미완료다. |
+| 2026-10-29 | CODE-03 파일 변경 통지와 열린 File 트리 연결 | 일부 유지, 화면 연결·격리 검증 | `8bdafe3`. 현재 연결의 변경 통지를 File에 전달하고 바뀐 폴더를 다시 조회하되 작업사본·선택·포커스를 보존한다. 과거 Run의 출처 권한은 현재 방의 기본 폴더와 분리한다. 정식 검증기를 쓴 headless Firefox에서 실제 시험 파일 생성 → watcher 이벤트 → 연결된 SSE 클라이언트에 브로드캐스트 시도 → 폴더 재조회·새 행 표시와 선택 0–54 보존을 확인했다. SSE 수신 함수 자체는 별도 계측하지 않았다. 이전 소스 사본과 임시 관찰 드라이버를 쓴 별도 실행에서는 caret 3 보존도 확인했다. QA 집중 검사 42/42 통과. 원본 해시 불변·터미널 실행 없음이며 OS 폴더 선택 결과는 합성이다. provider 호출 수는 미측정으로, 실제 계정 검증을 뜻하지 않는다. 놓친 이벤트 복구·원본 저장 충돌 보장은 별도다. |
 | 2026-10-29 | CODE-07 IDE 프로젝트 File 진입·File 입력 보존 | 없음 → 일부 | `d18ece0`. 선택 Board의 프로젝트를 확인해 File을 열거나 같은 연결의 File을 재사용한다. 지연 응답·Board 전환·카드 선택 A→B→A가 최신 화면을 덮지 않도록 검사한다. Firefox 모듈의 전역 타이머 부재로 편집한 작업사본이 갱신되지 않던 오류도 수정했다. 관련 중앙 검사 944/944, 격리 Firefox에서 실제 키 입력 뒤 작업사본 갱신 HTTP 200·revision 1, 화면 밖 File 재진입 후 제목 9/9 지점 표시와 텍스트·선택 유지, 합성 원본 해시 불변을 확인했다. 폴더 선택은 합성 경계이며 실제 OS 선택기·사용자 원본 저장·provider 실행은 미검증이다. Terminal·검사·Agent 요청은 IDE 클릭만으로 시작하지 않는다. |
 | 2026-10-29 | Browser의 Firefox 자료 가져오기·북마크·방문 기록 진입 | 화면 연결 및 격리 검증 | `6263e88`·`83baacf`. Browser `[더보기]`에서 Firefox 가져오기 창과 자료 창을 연다. 자료 창의 주소 선택은 Desk 카드로 연결하고 URL fragment를 보존한다. 집중 중인 같은 카드의 카메라는 유지하고, 뒤에서 여는 카드는 현재 화면을 이동시키지 않는다. 중앙 집중 검사 51/51, 검증기 26/26 및 합성 자료를 쓴 headless Firefox 핵심·창 소유권·파일 열기 차단을 확인했다. 핀 로더의 user·author 스타일을 모두 적용해 핵심 20/20을 재확인했고, 별도 메뉴 검사 6/6에서 긴 한글 문구·가로 넘침 없음·키보드 포커스·Enter 전 미실행을 확인했다. 처음의 버튼 모양 차이는 시험 로더의 author 스타일 누락이었으며, 실제 메뉴 여백도 별도로 보완했다. 최신 핵심 시험의 소유 Firefox·MCP·fixture·geckodriver 종료와 포트 해제를 관찰했다. 가져오기 마법사는 합성 migrator만 확인했다. 실제 Chrome 개인 자료·로그인 세션 이전, 전면 OS 동작 및 Windows·Linux 실행은 미검증이다. `.egdesk`는 별도 경로이며 이번 시험은 그 경로를 호출하지 않는지만 확인했다. |
 | 2026-10-29 | 고정 근거의 행 범위 구별·잘못된 종료 행 거절 | 경계 오류 수정 | `afb0f30`·`8d6451f`. 끝 행 생략과 명시 범위를 다른 화면 식별자로 구별해 짧은 캡처가 더 긴 명시 범위를 충족한 것처럼 표시되지 않게 했다. 저장된 범위로 복원 시 식별자를 재계산한다. 명시한 종료 행이 null·비정수이면 브리핑 게시 전에 거절하며 기존 고정 원문은 바꾸지 않는다. 상태 검사 25/25, helper 107/107 통과. 생략 범위 시험은 로컬 dispatch·조회 의미를 확인한 것이며, 종료 행을 요구하는 기존 공개 도구 스키마는 변경하지 않았다. 과거 잘못 저장된 대상의 마이그레이션이나, 다른 유효한 산출물 대상이 먼저 연결된 뒤 후속 대상이 거절되는 경우의 전체 트랜잭션 처리는 이번 수정 범위가 아니다. |
@@ -550,6 +559,13 @@ Chat·Agent·캐릭터성 영역은 "고른 프로필을 실제 지침으로 보
 - 최초 조사 시 빠진 것(2026-10-24, 이후 보완은 아래 진행 참고): 단계당 대상 1개(resolveBriefingTargets가 [step.target]만 처리), visibility·dimming·emphasis 상태 없음, 대상이 sourceId/artifactId뿐(Canvas 도형·출력 불가), Comment가 독립 객체(commentId·revision)가 아니라 초안 텍스트로 바로 변환됨. 비전 문서 체크박스도 미갱신.
 - 구현 스케치: briefing step schema를 targets[] + emphasis로 확장(egdesk-context-runtime.mjs tool schema, BriefingState.resolveBriefingTargets/briefingBounds), Canvas dimming 클래스 적용, Comment를 context store record로 저장 후 초안에 참조로 첨부(dedupe draftId+commentId).
 - 진행(2026-10-27): `cfaa1d5`·`7fe8f7d`로 단계 의견을 실제 Context record(id·seq·요청 UUID)에 저장하고 원래 방의 Chat 초안에 참조·본문을 중복 없이 포함하는 경로를 연결했다. 응답 유실 확인·명시적 동일 요청 재시도·방/계정 경계를 포함한 실제 headless UI 11/11과 한정 시각 인수를 통과했다. 자동 메시지 전송은 하지 않는다. 의견 수정·삭제·resolve UI와 전체 다중 대상·annotation 시각 계약의 완료를 뜻하지 않아 상태는 ‘일부’를 유지한다. 상세는 [2026-10-27 체크포인트](#2026-10-27-진행-중-체크포인트).
+
+<a id="briefing-small-screen-reading"></a>
+#### 다중 근거의 작은 화면 가독성 — 2026-10-29
+
+- 720×600 격리 Firefox 화면에서 넓게 떨어진 여러 근거를 함께 맞추면 본문 대신 축소된 묶음 표식이 보였다. 키보드로 단계·댓글에 도달하는 기능 검사가 통과해도 근거를 읽기 좋은 화면이라는 뜻은 아니다.
+- 원래 카드 위치와 크기를 유지하면서 전체 개요를 우선할지, 한 근거의 가독성과 목록 탐색을 우선할지는 [HUM-BRIEF-002](../../docs/codex/egdesk-product-interaction-trace-atlas-editorial-ledger.md#hum-brief-002)에 사용자 결정으로 남겼다. 답변 전에는 카드 재배치나 표시 방식 변경을 확정하지 않는다.
+- 현재 5% 배율이 계산 오류로 불필요하게 낮아졌는지는 대상의 실제 좌표와 선택한 맞춤 영역을 추가로 계측해야 한다. 화면 크기의 제약과 계산 오류를 혼동하지 않는다.
 
 ### CHAT-06 — 의존성 그래프·Task 상태 registry와 자동 하류 시작; 사용자 행동 대기를 dependency gate 한 종류로 모델링
 
@@ -1103,13 +1119,13 @@ Canvas·Viewport·UI/UX·디자인 영역은 바탕이 이미 깔려 있다. 의
 - 빠진 것: Browser, File, Terminal, Settings, Ontology 카드에 빈자리 탐색이 적용되지 않는다. 특히 File 카드는 카메라가 다른 곳을 보고 있으면 화면 밖에 열린다. Board 다시 열기 배치가 '가장 가까운 빈 위치·24px 간격'이 아니다. 유형별 기본·최소 크기 표준이 없다(Browser는 720폭).
 - 구현 스케치: uc.js의 resolveCanvasCardPlacement를 공통 배치 함수로 승격하고, 모든 spawn*Card(9606, 10575, 12397, 9709, 9317)가 이 함수를 통해 위치를 잡게 한다. 기존 Board 다시 열기(1777)도 occupied rect 기준 최근접 빈 위치 탐색으로 바꾼다. 유형별 기본·최소 크기 표는 EGDeskSurfaceState.sys.mjs에 순수 함수로 두고 scripts/egdesk-surface-state.test.mjs로 단위 검증한다.
 
-### CNV-03 — Board 소속 편집과 표시: 열린 Board에 화면을 추가하거나 제외할 수 있어야 한다. View bar 오른쪽에 소속 Board 이름을 보이고, 여러 Board에 속하면 '+1'로 표시한다. 새 View를 활성 Board에 넣는 정책도 필요하다.
+### CNV-03 — Board 소속 편집과 표시: 열린 Board에 화면을 추가하거나 제외하고, View bar에 실제 소속 Board 이름을 보인다. 한 View는 한 Board에 속하며 새 View를 자동으로 넣지 않는다.
 
 - 출처: 비전 P1 'active Board placement'; proposals.md:1505-1507(다중 소속 표시), 1525-1529(제외 메뉴); approved-desktop-style.html .eg-win-meta(창 제목줄 오른쪽 Board 이름)
-- 상태: 없음 · 크기 M · 선행: CNV-01
-- 근거: 구성원은 Board를 만들 때 고정된다. serializeAgendaSnapshot(uc.js:1656-1680)은 projection.members만 저장하고, members에 추가·제거하는 코드는 grep 'members.push\|addBoardMember\|Board에서 제외' 0건이다. 창 제목줄(uc.js:7470-7477)은 신호등 점·grip·identity·actions뿐이고 소속 Board 표시가 없다.
-- 빠진 것: 기존 Board에 화면을 추가·제외하는 조작과 상태 변경이 없다. 창 bar에 소속 Board 표시가 없고, 같은 View가 여러 Board에 속할 때의 표시도 없다. 활성 Board가 있을 때 새 View를 어떻게 다룰지에 대한 정책도 없다.
-- 결정: true: 활성 Board가 있을 때 새로 연 View를 그 Board에 자동으로 넣을지, 사용자가 [Board에 추가]로 명시할 때만 넣을지 정해야 한다. proposals.md는 '묵시적으로 포함하지 않는다'와 '경계를 넘겨도 소속 자동 변경 없음'을 적고 있고, 비전은 'active Board placement'를 적고 있어 서로 엇갈린다.
+- 상태: 일부 · 크기 M · 선행: CNV-01
+- 최초 조사 근거: 당시 serializeAgendaSnapshot은 projection.members를 저장했으나 소속 편집 UI와 창 제목줄의 Board 표시는 없었다. 이후 `f2058a6`의 소속 처리 모듈은 위 진행 표에 기록돼 있으며, 이 절의 옛 ‘없음’ 표기는 영역 표의 ‘일부’와 불일치해 정정했다. 모듈의 존재만으로 화면 연결이나 실제 조작 검증이 완료된 것은 아니다.
+- 최초 조사 시 빠진 것: 기존 Board에 화면을 추가·제외하는 조작과 상태 변경, 창 제목줄의 실제 소속 Board 표시.
+- 결정됨(2026-10-24, D-V1~D-V3): 한 View는 최대 한 Board에 속한다. 새 View를 활성 Board에 자동으로 넣지 않으며 영역 안에서 열거나 끌어 놓으면 소속을 제안한다. 위 출처의 과거 다중 소속 `+1` 제안은 이 결정으로 대체한다. 제목줄은 저장된 구성원 연결을 표시하고 활성 Board나 화면의 위치로 소속을 추정하지 않는다.
 - 구현 스케치: EGDeskSurfaceState.sys.mjs에 addProjectionMember/removeProjectionMember 순수 함수와 테스트를 추가한다. uc.js에서는 창 [⋯]에 'Board에 추가/○○에서 제외' 메뉴를 붙이고 markAgendaDirty로 dirty 처리한다. spawnDeskWindowShell의 identity 옆에 .egd-window-board-meta를 두고 dataset.boardId와 projection 제목으로 갱신한다.
 
 ### CNV-04 — 캔버스 도형 도구를 완성한다. 화살표, 펜(자유선), 레이블(텍스트), 하이라이트(반투명 사각형)를 기존 사각형·원·선과 같은 편집·선택·삭제·Board 저장 경로로 제공한다.
@@ -1163,13 +1179,13 @@ Canvas·Viewport·UI/UX·디자인 영역은 바탕이 이미 깔려 있다. 의
 - 빠진 것: 카메라 이동에 따른 Board 판별, 순위 규칙, 여러 Board가 보일 때의 표시, Board가 없을 때의 표시가 없다.
 - 구현 스케치: EGDeskSurfaceState.sys.mjs에 resolveViewportBoard(viewportWorldRect, regions, activeId, activeEntityBoard, recent) 순수 함수와 테스트를 추가한다. uc.js의 카메라 apply()(13353대)와 refreshBoardRegion 뒤에 throttle된 갱신을 걸고, currentViewportAgendaLabel이 결과와 '+N'을 반환하게 한다.
 
-### UX-02 — 미니맵에서 대상을 찾게 한다. Board별 영역을 표시하고, 영역을 누르면 그 Board로 카메라가 이동한다. 겹친 지점은 '이 위치의 N개' 목록으로 고르고, 전체 화면 목록을 검색할 수 있게 하며, 한국어 라벨과 Briefing 대상 표시를 넣는다.
+### UX-02 — 미니맵에서 열린 대상을 찾는다. Board 영역·겹친 화면은 지도와 목록에서 고르고, 화면 밖 대상도 이름으로 검색해 카메라를 이동한다. Briefing 대상 표시는 남아 있다.
 
 - 출처: VIEWPORT 문서 'Desk Minimap'(Board regions, click Board region → pan/zoom, focusTarget); proposals.md:1659-1664 ux-detail-minimap-targets
 - 상태: 일부 · 크기 M · 선행: CNV-01
-- 근거: 완료된 부분은 미니맵 viewport 박스 드래그(scripts/verify-firefox-mcp-minimap-drag.mjs)와 희소도 기반 크기(uc.js:3629-3643)다. 남은 부분: renderDeskMinimapWorld(uc.js:3705-3725)는 전체 bounds 하나만 'egd-minimap-agenda'로 그리고 현재 라벨을 붙인다(Board별 영역 없음). 목록은 처음 8개로 잘린다(3728 slice(0,8)). 영어 라벨이 남아 있다: 'Desk Minimap'(3854), '0 objects · 1x spread'(3641·3858), 'Rect/Ellipse/Line'(3736-3738).
-- 빠진 것: Board별 영역 표시와 그 영역으로 이동하는 동작, 겹친 대상 선택, 8개를 넘는 대상 검색, Briefing 대상 마커가 없고 라벨이 영어다.
-- 구현 스케치: uc.js renderDeskMinimapWorld에서 state.boards.projections를 돌며 각 영역 rect를 그리고 onclick에 setCanvasPanTarget을 단다. buildDeskMinimapEntityRows를 검색 input과 전체 목록으로 바꾼다. 같은 지점 클릭이면 egd-minimap-stack 팝업을 띄운다. 문구를 한국어로 바꾼다. verify-firefox-mcp-minimap-drag.mjs에 Board 영역 클릭 단언을 추가한다.
+- 최초 조사 근거: 당시에는 viewport 박스 드래그·희소도 기반 크기만 확인했고 Board별 영역·겹침 목록·이름 검색이 없었다. 이는 현재 상태가 아니며 `dca10a3`·`f2058a6`과 아래 진행으로 보완됐다.
+- 진행(2026-10-29): `5ac3e42` — 열린 Board·View 이름 검색, 24개씩 추가 표시, 화면 밖 대상 찾기, 겹침 목록의 내부 스크롤과 키보드·창 크기 변경 처리를 화면에 연결했다. 대상을 고르면 배율·활성 화면·선택 Board·실행 대상을 바꾸지 않고 카메라만 이동한다. 합성 View 210개를 포함한 218개 대상과 별도 실제 휠 입력을 사용한 headless 검증은 위 진행 표의 범위로 인수했다.
+- 남은 것: Briefing 단계·화면 밖 근거 마커의 지도 연결, 실제 OS 한글 입력기 확인, 다수 live Browser의 부하 검증. 작은 창의 모든 HUD 조합이 승인된 것은 아니다.
 
 ### UX-03 — 제품 용어와 문구를 정리한다. 화면에 보이는 'Agenda'를 'Board'로 바꾸고(채팅 'Agenda Thread'는 'Board Thread'), 영어 상태 문구('Unsaved', 'Agenda saved', 'Desk Minimap', 검색 구역 'Canvas/History/Files/Web', 'Search "q"', 'Browser card')를 한국어 제품 문구로 바꾼다.
 
@@ -1333,10 +1349,11 @@ Canvas·Viewport·UI/UX·디자인 영역은 바탕이 이미 깔려 있다. 의
 - 출처: Vision P1 Coding UX item 5 (file tree/search)
 - 상태: 일부 · 크기 M · 선행: RT-06
 - 근거: overlay/resources/EGDeskFileView.sys.mjs:113-127 (tree role=tree, filename search); helper/egdesk-file-service.mjs:7-11 (MAX_LIST 200, MAX_SEARCH 100, depth 12); helper/egdesk-file-service.test.mjs (21 tests); commits c5d25c4, d40ad5c.
-- 빠진 것: Filename search only, no content search. No git status marks. The tree does not refresh automatically on external changes (no watcher, see RT-06). (정정 2026-10-24: 이전 판의 'No paging beyond 200 entries'는 사실이 아니다. `d40ad5c`(2026-09-27)부터 listDirectory가 cursor·nextCursor로 나눠 주고 파일 창 트리에 '더 보기' 행이 있다.)
-- 구현 스케치: Add a limited content search to egdesk-file-service.mjs (size, binary and depth caps). Add an optional git status query. Have FileView subscribe to file.changed events. (cursor는 이미 있음)
+- 최초 조사 시 빠진 것: 내용 검색·git 상태 표시·외부 파일 변경의 화면 자동 반영. 내용 검색과 git 상태 모듈은 아래 `4ae184d` 진행으로 보완됐으므로 이를 현재도 없는 기능으로 읽지 않는다. (정정 2026-10-24: 이전 판의 'No paging beyond 200 entries'는 사실이 아니다. `d40ad5c`부터 listDirectory가 cursor·nextCursor로 나눠 주고 파일 창 트리에 '더 보기' 행이 있다.)
+- 연결 과제: 파일 변경 통지를 열린 File View까지 전달하고, 변경된 폴더만 갱신하면서 편집 초안·포커스·펼친 위치를 보존한다. 현재 연결과 과거 실행의 출처 권한을 구분하며, 소켓 재연결만으로 놓친 변경을 복구했다고 간주하지 않는다.
 - 진행(2026-10-24): `4ae184d` — 내용 검색(/v1/files/search/contents), git 상태·변경 읽기(/v1/files/git/*), 이름 검색이 .git·node_modules·빌드 폴더를 건너뛰고 .gitignore를 따름, 파일 창 모듈에 이름/내용 검색 전환·트리 git 상태 글자·onFileChanged. 상태 일부 유지.
 - 남은 것(2026-10-24): 외부 변경 자동 갱신의 uc.js 이벤트 연결(S3). 실제 Firefox 창 미확인.
+- 진행(2026-10-29): `8bdafe3`로 위 S3 연결을 보완했다. 현재 연결이 유효한 통지만 받아 바뀐 폴더를 다시 조회하며, 실행 출처로 연 File의 권한 수명은 완료된 최초 열기 요청과 분리한다. 격리 Firefox의 실제 파일 생성·트리 새 행·편집 초안과 선택/포커스 보존을 확인했다. 원본 파일 본문을 자동으로 작업사본에 덮어쓰거나 Agent를 시작하지 않는다. 소켓 재연결 시 놓친 변경을 모두 복구한다는 보장은 추가하지 않았다.
 
 ### RT-01 — Clean-profile boot verification gate
 

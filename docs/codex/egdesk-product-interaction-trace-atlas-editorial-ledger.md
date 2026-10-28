@@ -11,7 +11,7 @@
 
 ## 0. 제품 소유자 확인 목록
 
-현재 선택이 남은 정책 주제는 `OPEN`인 15개다. 하나의 주제 안에서도 각 선택은 독립적이다.
+현재 선택이 남은 정책 주제는 `OPEN`인 16개다. 하나의 주제 안에서도 각 선택은 독립적이다.
 HUM-DESK-001과 HUM-AGENT-001은 결정됐고 HUM-READ-001은 별도 사용자 선택 없이 설계로 해소했다.
 세 항목의 앵커·이력은 기존 문서 연결을 위해 남긴다. 기본 Codex를 먼저 제공한다는 결정은
 가입·계정 통합, 도구 권한, 기억·공유 정책까지 일괄 승인한 뜻이 아니다.
@@ -123,6 +123,17 @@ HUM-DESK-001과 HUM-AGENT-001은 결정됐고 HUM-READ-001은 별도 사용자 �
 - **영향**: [Atlas AI-05](../../ideas/confirmed/EGDESK_PRODUCT_INTERACTION_TRACE_ATLAS.md#atlas-ai-05), [Contract §8](../../ideas/confirmed/EGDESK_INTERACTION_AND_ORCHESTRATION_CONTRACT.md#tech-answer-briefing)
 - **계속 가능한 작업**: [단계 이동·편집·댓글·원본 복귀](../references/design-synthesis/egdesk-ux-realization-proposals.md#ux-detail-briefing-comment)의 설계를 바탕으로 선택할 편집 정책별 구현과 주석·재진입 검사를 진행할 수 있다.
 - **상태**: `OPEN`
+
+<a id="hum-brief-002"></a>
+#### HUM-BRIEF-002 — 작은 화면에서 여러 근거를 보여주는 기본 방식
+
+- **질문**: 한 단계의 여러 근거를 동시에 읽을 크기로 담을 수 없을 때, 모든 근거의 위치를 작게 보여주는 개요를 우선할 것인가, 한 근거를 읽을 크기로 보여주고 목록에서 다른 근거를 고르는 방식을 우선할 것인가?
+- **발견된 상황 — 2026-10-29**: 720×600 격리 화면의 다중 근거 단계에서 본문 대신 축소된 묶음 표식이 보였다. 단계 버튼·댓글에 키보드로 도달하는 것과 근거를 읽고 이해하는 것은 별개의 수용 기준이다. 현재 배율 계산의 불필요한 과축소 여부는 추가 계측이 필요하지만, 넓게 떨어진 여러 자료를 원래 위치 그대로 동시에 읽을 크기로 담는 데에는 화면 크기의 한계도 있다.
+- **확정된 경계**: 이 선택만으로 기존 카드의 위치를 바꾸거나 프레젠테이션용 사본을 새로 만들지 않는다. 사용자가 이동·선택·입력을 시작한 뒤 늦게 준비된 근거가 그 작업을 덮지 않는다.
+- **왜 사용자 결정인가**: 같은 단계에서 전체 맥락과 개별 근거의 가독성 중 무엇을 먼저 보여줄지, 다음 근거를 확인하는 사용 흐름이 달라진다. 편집·지속·공유 권한인 HUM-BRIEF-001과는 다른 선택이다.
+- **영향**: [Atlas AI-05](../../ideas/confirmed/EGDESK_PRODUCT_INTERACTION_TRACE_ATLAS.md#atlas-ai-05), [Contract §8](../../ideas/confirmed/EGDESK_INTERACTION_AND_ORCHESTRATION_CONTRACT.md#tech-answer-briefing), [다중 근거 가독성 점검](../../ideas/confirmed/EGDESK_VISION_GAP_LEDGER.md#briefing-small-screen-reading).
+- **계속 가능한 작업**: 동일 대상을 유지한 카메라 맞춤의 좌표·가림 계산을 계측하고, 계산 오류가 확인된 부분만 보정한다. 근거의 정확한 범위·부분 재시도·키보드 진입·댓글 보존 검사는 선택과 독립적으로 진행한다.
+- **상태**: `OPEN` — 2026-10-29 사용자에게 질문했으며 답변 전에는 어느 쪽도 확정하지 않는다.
 
 <a id="hum-read-001"></a>
 #### HUM-READ-001 — Smart Read 가시성과 사용자 개입 시점
