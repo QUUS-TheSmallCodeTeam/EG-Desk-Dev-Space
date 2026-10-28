@@ -1781,6 +1781,42 @@ const ENGINE_STATUS_TEXT = [['ready', '사용 가능'], ['starting', '준비 중
   ['versionUnsupported', '지원하지 않는 버전'], ['loginRequired', '로그인 필요'], ['decisionPending', '연결 방식 결정 대기'], ['disabled', '사용 중지됨']];
 const RUNNABLE_ENGINE_STATUSES = ['ready', 'starting', 'offline', 'loginRequired'];
 
+/**
+ * Settings is a passive projection of the bridge's public engines[] snapshot.
+ * Authentication, engine availability and bridge connectivity are separate:
+ * no status implies a subscription, quota, successful chat or Reader readiness.
+ * Public rows do not contain a check time, so even a connected snapshot is
+ * described as the last report, not as a freshly verified current account.
+ */
+export function claudeSettingsView(engines, { connected = false } = {}) {
+  const rows = engineRows(engines).filter(row => row.id === 'claude');
+  const row = rows.length === 1 ? rows[0] : null;
+  const profiles = (Array.isArray(row?.profiles) ? row.profiles : []).filter(profile => profile?.active === true);
+  const reportedAuth = row?.installed === false || row?.status === 'notInstalled' || profiles.length !== 1
+    ? null : profiles[0]?.auth?.status;
+  const authStatus = reportedAuth === 'signedIn' || reportedAuth === 'signedOut' ? reportedAuth : 'unknown';
+  // The existing first line introduces the source for the whole status block.
+  const source = row ? '연결 프로그램의 마지막 보고 기준' : '연결 프로그램의 보고 확인 안 됨';
+  const authLabel = authStatus === 'signedIn' ? '인증됨' : authStatus === 'signedOut' ? '인증 안 됨' : '확인 안 됨';
+  const authText = `${source} · 인증: ${authLabel}`;
+
+  const statuses = {
+    ready: '준비됨', starting: '준비 중', offline: '사용 상태 확인 안 됨',
+    notInstalled: '설치되지 않음', versionUnsupported: '사용할 수 없음',
+    loginRequired: '사용 전 인증 확인 필요', decisionPending: '연결 방식 확인 필요', disabled: '사용 중지됨',
+  };
+  let engineStatus = row?.installed === false ? 'notInstalled'
+    : Object.hasOwn(statuses, row?.status) ? row.status : 'unknown';
+  if (engineStatus === 'ready' && row?.statusReason) engineStatus = 'attention';
+  const engineLabel = engineStatus === 'attention' ? '사용 전 확인 필요' : statuses[engineStatus];
+  const engineText = `엔진: ${engineLabel || '확인 안 됨'}`;
+  const connectionText = connected === true ? null : 'EG-Desk에 연결되지 않아 현재 상태는 확인할 수 없습니다.';
+  const version = row?.installed !== false && row?.status !== 'notInstalled' && typeof row?.version === 'string'
+    && /^\d{1,9}\.\d{1,9}\.\d{1,9}(?:[-+][0-9A-Za-z.-]{1,40})?$/.test(row.version) ? row.version : null;
+  return { authStatus, authText, engineStatus, engineText, connectionText,
+    versionText: version ? `버전 ${version}` : null };
+}
+
 /** Engines whose chat events this screen admits: the bridge's engines[] and always Codex. */
 export function knownChatEngineIds(engines) {
   return [...new Set([DEFAULT_CHAT_ENGINE_ID, ...engineRows(engines).map(row => row.id)])];

@@ -13248,9 +13248,14 @@
           ring.stale ? el('div', { class: 'egd-settings-usage-note' }, '확인한 지 오래되어 실제와 다를 수 있습니다.') : null,
           ring.level === 'limit' ? el('div', { class: 'egd-settings-usage-note egd-settings-usage-note-strong' }, '한도에 도달했습니다. 초기화 전까지는 새 요청이 거절될 수 있습니다.') : null)));
       }
+      const claude = ChatState.claudeSettingsView(codex.engines, { connected: codex.connected });
       contentArea.replaceChildren(section, renderComputerControl(), renderConnectedTools(), el('section', { class: 'egd-settings-section', 'aria-label': 'Claude' },
         el('div', { class: 'egd-settings-section-title' }, 'Claude'),
-        el('div', { class: 'egd-settings-pending-line', data: { testid: 'settings-claude' } }, '준비 중 — 연결 방식 결정 대기')));
+        el('div', { class: 'egd-settings-pending-line', data: { testid: 'settings-claude', auth: claude.authStatus, state: claude.engineStatus } },
+          el('div', { data: { testid: 'settings-claude-auth' } }, claude.authText),
+          el('div', { data: { testid: 'settings-claude-engine' } }, claude.engineText),
+          claude.connectionText ? el('div', { data: { testid: 'settings-claude-connection' } }, claude.connectionText) : null,
+          claude.versionText ? el('div', { data: { testid: 'settings-claude-version' } }, claude.versionText) : null)));
     };
 
     // --- 컴퓨터 조작 (CU-01 stage 1): whether ordinary EG-Desk chats keep the
@@ -14087,7 +14092,7 @@
       }
       if (duplicateInvalidated && activeTab === 'agents') renderAgentsTab();
       const signature = JSON.stringify([codex.connected, codex.isStartingLogin, auth.isLoggedIn, auth.loginInProgress, auth.accountEmail,
-        auth.planType, auth.usage, auth.rateLimits, catalog?.status, catalog?.profiles, codex.inheritedMcp, codex.computerControl]);
+        auth.planType, auth.usage, auth.rateLimits, catalog?.status, catalog?.profiles, codex.inheritedMcp, codex.computerControl, codex.engines]);
       if (signature === lastCodexSignature) return;
       lastCodexSignature = signature;
       if (activeTab === 'account') renderAccountTab();

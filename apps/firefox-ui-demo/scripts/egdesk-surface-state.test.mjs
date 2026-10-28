@@ -36,6 +36,7 @@ import { composeAwaitResume } from '../helper/egdesk-await-resume.mjs';
 import { CodexChatRuntime } from '../helper/codex-chat-runtime.mjs';
 import { ContextRuntime } from '../helper/egdesk-context-runtime.mjs';
 import { createCodexEngineAdapter } from '../helper/codex-engine-adapter.mjs';
+import { describeClaudeEngine, publicEngineRow } from '../helper/engine-registry.mjs';
 import { contrastRatio, mediaApplies, readAvatarTones, readCssRules, readRootProperties, resolveColor } from '../overlay/resources/EGDeskDesignTokens.sys.mjs';
 
 // Briefing opinions exercise the real scope, bridge methods, controller and
@@ -7168,6 +7169,69 @@ const catalogRows = [
   { id: 'prof-draft', lifecycle: 'draft', origin: 'user', activeRevision: null, headRevision: 1, hasDraft: true, name: '만드는 중', role: '', avatar: { kind: 'emoji', value: '🦉', color: '#a9c5a9' } },
 ];
 
+// Use the same allow-listed public shape as /v1/state, without a CLI probe.
+const claudeSettingsFixture = (patch = {}) => publicEngineRow(describeClaudeEngine({
+  installed: true, version: '2.1.300', versionStatus: 'untested',
+  auth: { status: 'signedIn', method: 'claudeai', label: 'Claude', account: 'fixture@example.test', planType: null },
+  ...patch,
+}, { minVersion: '2.1.205' }));
+
+test('Claude Settings projects only the public authentication and engine states', () => {
+  const view = row => Chat.claudeSettingsView([row], { connected: true });
+  const signedIn = claudeSettingsFixture();
+  assert.deepEqual([view(signedIn).authStatus, view(signedIn).engineStatus], ['signedIn', 'ready']);
+  assert.equal(view(signedIn).versionText, '버전 2.1.300');
+  assert.equal(view(signedIn).authText, '연결 프로그램의 마지막 보고 기준 · 인증: 인증됨');
+  assert.equal(view(signedIn).engineText, '엔진: 준비됨');
+  for (const method of ['claudeai', 'apiKey', 'gateway', 'external', null]) {
+    const reported = claudeSettingsFixture({ auth: { status: 'signedIn', method } });
+    assert.equal(view(reported).authText, '연결 프로그램의 마지막 보고 기준 · 인증: 인증됨', 'authentication does not imply a subscription');
+  }
+
+  const signedOut = claudeSettingsFixture({ auth: { status: 'signedOut' } });
+  assert.deepEqual([view(signedOut).authStatus, view(signedOut).engineStatus], ['signedOut', 'loginRequired']);
+  const unknown = claudeSettingsFixture({ auth: { status: 'unknown' } });
+  assert.deepEqual([view(unknown).authStatus, view(unknown).engineStatus], ['unknown', 'offline']);
+  const notInstalled = claudeSettingsFixture({ installed: false, version: null, auth: null });
+  assert.deepEqual([view(notInstalled).authStatus, view(notInstalled).engineStatus, view(notInstalled).versionText], ['unknown', 'notInstalled', null]);
+  const unsupported = claudeSettingsFixture({ version: '2.1.204', versionStatus: 'unsupported' });
+  assert.deepEqual([view(unsupported).authStatus, view(unsupported).engineStatus], ['signedIn', 'versionUnsupported']);
+  assert.match(view(unsupported).engineText, /사용할 수 없음/);
+
+  // A gate, an offline engine and the bridge connection are not auth results.
+  const gated = view({ ...signedIn, statusReason: 'CLAUDE_API_KEY_DETECTED' });
+  assert.equal(gated.engineStatus, 'attention');
+  assert.equal(gated.authStatus, 'signedIn');
+  const offlineEngine = view({ ...signedIn, status: 'offline' });
+  assert.deepEqual([offlineEngine.authStatus, offlineEngine.engineStatus, offlineEngine.connectionText], ['signedIn', 'offline', null]);
+  const offlineBridge = Chat.claudeSettingsView([signedIn], { connected: false });
+  assert.equal(offlineBridge.authStatus, 'signedIn');
+  assert.match(offlineBridge.authText, /마지막 보고/);
+  assert.match(offlineBridge.connectionText, /현재 상태는 확인할 수 없습니다/);
+  assert.equal(view(signedIn).connectionText, null, 'connection restoration removes only the connection warning');
+  assert.doesNotMatch(JSON.stringify(view(signedIn)), /fixture@example|요금제|구독|한도|Reader|대화 성공/);
+});
+
+test('Claude Settings treats absent, ambiguous or unverified public data as unknown', () => {
+  const signedIn = claudeSettingsFixture();
+  for (const engines of [null, [], [{ id: 'codex', status: 'ready' }], [signedIn, signedIn],
+    [{ ...signedIn, profiles: [] }], [{ ...signedIn, profiles: [{ active: true, auth: null }] }],
+    [{ ...signedIn, profiles: [{ active: true, auth: { status: 'signingIn' } }] }],
+    [{ ...signedIn, profiles: [signedIn.profiles[0], signedIn.profiles[0]] }],
+    [{ ...signedIn, installed: false }]]) {
+    assert.equal(Chat.claudeSettingsView(engines, { connected: true }).authStatus, 'unknown');
+  }
+  const noRow = Chat.claudeSettingsView([], { connected: true });
+  assert.deepEqual([noRow.authStatus, noRow.engineStatus, noRow.versionText], ['unknown', 'unknown', null]);
+  assert.equal(noRow.authText, '연결 프로그램의 보고 확인 안 됨 · 인증: 확인 안 됨');
+  assert.equal(noRow.engineText, '엔진: 확인 안 됨');
+  assert.doesNotMatch(noRow.authText, /마지막 보고/, 'an absent row is not presented as a previous report');
+  assert.equal(Chat.claudeSettingsView([{ ...signedIn, status: 'mystery' }], { connected: true }).engineStatus, 'unknown');
+  for (const version of [null, '2.1', '/private/claude', '2.1.300 (Claude Code)', '']) {
+    assert.equal(Chat.claudeSettingsView([{ ...signedIn, version }], { connected: true }).versionText, null);
+  }
+});
+
 test('Settings has no sample account, provider, model or Agent data left', () => {
   assert.ok(settingsSource.length > 1000);
   for (const sample of ['SETTINGS_MODELS', 'CODEX_ACCOUNT', 'SETTINGS_PROVIDERS', 'SETTINGS_AGENTS', 'm8chaa@gmail.com', 'Minsoo Cha',
@@ -7180,7 +7244,8 @@ test('Settings has no sample account, provider, model or Agent data left', () =>
   assert.match(settingsSource, /ChatState\.usageRingView\(auth\)/);
   assert.match(settingsSource, /bridge\(\)\?\.startLogin\(\)/, 'login reuses the actual auth flow');
   assert.match(settingsSource, /bridge\(\)\?\.signOut\(\)/, 'sign-out reuses the actual auth flow');
-  assert.ok(settingsSource.includes("'준비 중 — 연결 방식 결정 대기'"), 'Claude is one pending line, not a fake connection');
+  assert.match(settingsSource, /ChatState\.claudeSettingsView\(codex\.engines, \{ connected: codex\.connected \}\)/);
+  assert.doesNotMatch(settingsSource, /'준비 중 — 연결 방식 결정 대기'/);
   assert.doesNotMatch(settingsSource, /#[0-9a-fA-F]{3,8}\b/, 'Settings colors come from CSS tokens');
 });
 
@@ -7603,7 +7668,8 @@ test('production Settings card renders the reported account and drives Agent edi
   const calls = [];
   const now = Date.now();
   const limits = normalizeRateLimits({ rateLimits: { primary: { usedPercent: 42, windowDurationMins: 300, resetsAt: Math.floor((now + 3600_000) / 1000) } } }, now);
-  const state = { codex: { connected: false, isStartingLogin: false, authStatus: { isLoggedIn: false } } };
+  const state = { codex: { connected: false, isStartingLogin: false, authStatus: { isLoggedIn: false },
+    recentEngineId: 'codex', threads: [{ id: 'fixture-room', engineId: 'codex' }] } };
   let catalog = { status: 'ready', profiles: Chat.normalizeProfileCatalog({ profiles: catalogRows }) };
   const verifier = { id: 'review-verifier', lifecycle: 'active', origin: 'template', activeRevision: 2, headRevision: 3, hasDraft: true,
     active: { revision: 2, body: normalizeProfileBody({ name: '검증 담당', role: '버그와 회귀를 먼저 봅니다', avatar: { kind: 'initial', value: 'V', color: '#252a26' } }) },
@@ -7612,6 +7678,7 @@ test('production Settings card renders the reported account and drives Agent edi
   state.codexBridge = {
     subscribe(listener) { listeners.add(listener); listener(state.codex); return () => listeners.delete(listener); },
     startLogin() { calls.push(['login']); }, signOut() { calls.push(['signOut']); }, refreshAuthStatus() { calls.push(['refresh']); },
+    sendMessage() { calls.push(['sendMessage']); }, setThreadEngine() { calls.push(['setThreadEngine']); },
     profileCatalog: () => catalog, loadProfiles() { calls.push(['loadProfiles']); return Promise.resolve(); },
     async profileRequest(path, init = {}) {
       calls.push([init.method || 'GET', path, init.body]);
@@ -7628,17 +7695,73 @@ test('production Settings card renders the reported account and drives Agent edi
   const spawn = compileFunction(`${spawnSource}\nreturn spawnSettingsCard;`, ['singletonSourceRef', 'focusOpenSourceCard', 'cardSeq', 'resolveCanvasCardPlacement',
     'revealPlacedCanvasCard', 'el', 'cardZ',
     'closeCanvasCard', 'state', 'ChatState', 'codexProfileAvatar', 'document', 'window', 'bindCardSourceRef', 'markAgendaDirty', 'setActiveEntity',
-    'isCardFullscreen', 'focusCanvasCard', 'installCardHeaderFullscreenToggle', 'canvasZoom', 'settingsProfileAccountKey', 'createSettingsProfileTransfer'])(
+    'isCardFullscreen', 'focusCanvasCard', 'installCardHeaderFullscreenToggle', 'canvasZoom', 'settingsProfileAccountKey', 'createSettingsProfileTransfer',
+    'fetch', 'fetchJson', 'spawnTerminalCard'])(
     () => ({ kind: 'settings-card' }), () => null, 0, kind => { placements.push(kind); return { x: 10, y: 20, width: 600, height: 600, inView: true }; },
     () => {}, el, 0, () => {}, state, Chat, codexProfileAvatar, document, windowStub,
-    () => {}, () => {}, () => {}, () => false, () => {}, () => {}, () => 1, ...Object.values(settingsTransferDeps(document, state)));
+    () => {}, () => {}, () => {}, () => false, () => {}, () => {}, () => 1, ...Object.values(settingsTransferDeps(document, state)),
+    (...args) => { calls.push(['fetch', ...args]); }, (...args) => { calls.push(['fetchJson', ...args]); },
+    (...args) => { calls.push(['terminal', ...args]); });
   const card = spawn();
   assert.deepEqual(placements, ['settings'], 'Settings opens through the shared placement policy');
   assert.deepEqual([card.style.left, card.style.top, card.style.width, card.style.height], ['10px', '20px', '600px', '600px']);
   const text = () => card.textContent;
   assert.match(text(), /코덱스에 연결되지 않았습니다/);
-  assert.match(text(), /준비 중 — 연결 방식 결정 대기/);
+  const claude = () => settingsNodes(card, node => node.dataset.testid === 'settings-claude')[0];
+  assert.equal(claude().dataset.auth, 'unknown');
+  assert.equal(claude().dataset.state, 'unknown');
+  assert.match(claude().textContent, /현재 상태는 확인할 수 없습니다/);
   assert.doesNotMatch(text(), /AI 모델|Provider|GPT-4/);
+
+  // Opening Settings and receiving engine updates is passive: no login,
+  // refresh, profile request, terminal command, message or engine selection.
+  assert.deepEqual(calls, []);
+  state.codex.connected = true;
+  state.codex.engines = [claudeSettingsFixture()];
+  emit();
+  assert.equal(claude().dataset.auth, 'signedIn');
+  assert.match(claude().textContent, /연결 프로그램의 마지막 보고 기준 · 인증: 인증됨/);
+  assert.match(claude().textContent, /엔진: 준비됨/);
+  assert.match(claude().textContent, /버전 2\.1\.300/);
+  assert.equal((claude().textContent.match(/마지막 보고/g) || []).length, 1, 'one provenance for all reported fields');
+  state.codex.engines = [claudeSettingsFixture({ auth: { status: 'signedOut' } })];
+  emit();
+  assert.equal(claude().dataset.auth, 'signedOut', 'an engine-only change re-renders the account tab');
+  state.codex.engines = [claudeSettingsFixture({ auth: { status: 'unknown' } })];
+  emit();
+  assert.deepEqual([claude().dataset.auth, claude().dataset.state], ['unknown', 'offline']);
+  state.codex.engines = [claudeSettingsFixture({ installed: false, version: null, auth: null })];
+  emit();
+  assert.deepEqual([claude().dataset.auth, claude().dataset.state], ['unknown', 'notInstalled']);
+  assert.match(claude().textContent, /설치되지 않음/);
+  assert.equal(settingsNodes(claude(), node => node.dataset.testid === 'settings-claude-version').length, 0);
+  state.codex.engines = [claudeSettingsFixture({ version: '2.1.204', versionStatus: 'unsupported' })];
+  emit();
+  assert.deepEqual([claude().dataset.auth, claude().dataset.state], ['signedIn', 'versionUnsupported']);
+  assert.match(claude().textContent, /사용할 수 없음/);
+  state.codex.engines = [];
+  emit();
+  assert.deepEqual([claude().dataset.auth, claude().dataset.state], ['unknown', 'unknown']);
+  assert.match(claude().textContent, /연결 프로그램의 보고 확인 안 됨 · 인증: 확인 안 됨/);
+  assert.doesNotMatch(claude().textContent, /마지막 보고/);
+  state.codex.engines = [claudeSettingsFixture({ auth: { status: 'signedOut' } })];
+  emit();
+  state.codex.connected = false;
+  emit();
+  assert.equal(claude().dataset.auth, 'signedOut', 'disconnect does not turn an old sign-out into a new auth result');
+  assert.match(claude().textContent, /연결 프로그램의 마지막 보고 기준 · 인증: 인증 안 됨/);
+  assert.equal((claude().textContent.match(/마지막 보고/g) || []).length, 1);
+  assert.match(claude().textContent, /현재 상태는 확인할 수 없습니다/);
+  state.codex.connected = true;
+  state.codex.engines = [claudeSettingsFixture()];
+  emit();
+  assert.equal(claude().dataset.auth, 'signedIn');
+  assert.doesNotMatch(claude().textContent, /현재 상태는 확인할 수 없습니다/);
+  assert.equal(settingsNodes(claude(), node => node.tagName === 'BUTTON').length, 0);
+  assert.equal(state.codex.recentEngineId, 'codex');
+  assert.equal(state.codex.threads[0].engineId, 'codex', 'Claude status never switches a room engine');
+  assert.equal(state.codex.authStatus.isLoggedIn, false, 'Claude authentication is not a Codex login');
+  assert.deepEqual(calls, [], 'opening and re-rendering sends no request, login, command or message');
 
   Object.assign(state.codex, { connected: true, authStatus: { isLoggedIn: false } });
   emit();
@@ -12375,9 +12498,7 @@ test('컴퓨터 조작 bridge call: POST /settings/computer-control with { polic
   assert.match(surfaceSource, /case 'computer\.control':\n          update\(\{ computerControl: ChatState\.normalizeComputerControl\(event\.computerControl\) \}\);\n          return;/,
     'the SSE codex event replaces the value');
   assert.match(surfaceSource, /      computerControl: ChatState\.normalizeComputerControl\(bridgeState\?\.computerControl\),\n/);
-  const settings = declaration('spawnSettingsCard') || '';
-  assert.match(settings, /auth\.planType, auth\.usage, auth\.rateLimits, catalog\?\.status, catalog\?\.profiles, codex\.inheritedMcp, codex\.computerControl\]\);/,
-    'a stream change redraws the row');
+  // The Settings-card test above checks that a stream-only change actually redraws the row.
 });
 
 // ============ CHAT-04/08 result cards and long answers ============
