@@ -4876,11 +4876,30 @@
   width: min(440px, calc(100vw - 150px)); max-height: 48vh; overflow: auto;
   padding: 14px; border-radius: 14px; border: 1px solid color-mix(in srgb, var(--egd-on-surface) 22%, transparent);
   background: var(--egd-surface); color: var(--egd-on-surface);
-  box-shadow: 0 8px 28px rgba(20, 30, 20, .16); font: 13px/1.5 sans-serif;
+  box-shadow: 0 8px 28px rgba(20, 30, 20, .16); font: 13px/1.5 var(--egd-font, system-ui);
 }
-#egd-answer-briefing nav { display: flex; align-items: center; gap: 8px; margin-top: 8px; }
-#egd-answer-briefing button { font: inherit; margin: 3px; padding: 4px 8px; cursor: pointer; }
-#egd-answer-briefing textarea { width: 100%; box-sizing: border-box; font: inherit; margin-top: 8px; }
+#egd-answer-briefing nav { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin-top: 8px; }
+#egd-answer-briefing button {
+  appearance: none; -moz-appearance: none; min-height: 30px; margin: 2px; padding: 4px 9px;
+  border: 1px solid var(--egd-outline); border-radius: 7px; background: var(--egd-surface-elevated);
+  color: var(--egd-on-surface); font: 600 12px/1.35 var(--egd-font, system-ui); cursor: pointer;
+}
+#egd-answer-briefing button:hover:not(:disabled) { background: var(--egd-hover); }
+#egd-answer-briefing button:disabled { opacity: var(--egd-opacity-disabled); cursor: default; }
+#egd-answer-briefing :is(button, textarea):focus-visible { outline: var(--egd-focus-outline); outline-offset: var(--egd-focus-outline-offset); }
+#egd-answer-briefing > .egd-briefing-evidence-row {
+  display: flex; align-items: center; justify-content: space-between; gap: 8px; width: 100%; box-sizing: border-box;
+  min-width: 0; min-height: 34px; margin: 0; padding: 6px 2px; border: 0; border-bottom: 1px solid var(--egd-outline-variant);
+  border-radius: 0; background: transparent; color: inherit; text-align: left; font: inherit;
+}
+#egd-answer-briefing .egd-briefing-evidence-identity { display: flex; flex-wrap: wrap; align-items: baseline; gap: 2px 8px; min-width: 0; }
+#egd-answer-briefing .egd-briefing-evidence-name { font-weight: 600; overflow-wrap: anywhere; }
+#egd-answer-briefing :is(.egd-briefing-evidence-range, .egd-briefing-evidence-state) { color: var(--egd-on-surface-variant); font-size: 11px; }
+#egd-answer-briefing .egd-briefing-evidence-action { flex: 0 0 auto; color: var(--egd-primary); font-size: 11px; }
+#egd-answer-briefing .egd-briefing-evidence-reason { margin: 4px 0; color: var(--egd-on-surface-variant); font-size: 11px; overflow-wrap: anywhere; }
+#egd-answer-briefing .egd-briefing-evidence-retry { margin: 2px 0 6px; }
+#egd-answer-briefing textarea { width: 100%; box-sizing: border-box; margin-top: 8px; padding: 8px;
+  border: 1px solid var(--egd-outline); border-radius: 7px; background: var(--egd-surface-elevated); color: var(--egd-on-surface); font: inherit; }
 #egd-answer-briefing details button { display: block; }
 .egd-input-evidence-card .egd-card-body { overflow: auto; padding: 12px; box-sizing: border-box; }
 
