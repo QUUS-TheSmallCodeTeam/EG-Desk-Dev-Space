@@ -298,9 +298,11 @@ test('native small Browser focus at 35% uses uninflated fit, keeps toolbar reach
   const presentation = { read: () => evidence, invalidate() {}, font: () => .773680665757921 };
   card._browserPresentation = presentation;
   const update = compileFunction(`${overlay.slice(fitStart, fitEnd)}; return updateFitScale;`,
-    ['body', 'card', 'header', 'wrap', 'options', 'presentation', 'agentProjection', 'CARD_LOGICAL_W', 'canvasZoom', 'browserPresentationFit', 'browserPresentationFont'])(
+    ['body', 'card', 'header', 'wrap', 'options', 'presentation', 'agentProjection', 'CARD_LOGICAL_W', 'canvasZoom', 'browserPresentationFit', 'browserPresentationFont',
+      'syncBrowserBoardCollision', 'deskWindow', 'pageTitle', 'agentBadge', 'agentHandButton'])(
     body, card, header, wrap, {}, presentation, { invalidate() {} }, 1440, () => zoom,
-    production('browserPresentationFit'), production('browserPresentationFont'));
+    production('browserPresentationFit'), production('browserPresentationFont'),
+    () => {}, { slots: { topbar: {} }, boardMetadata: {} }, {}, {}, {});
   update();
   assert.equal(wrap.style.height, '888px', 'the existing real-size layout establishes the logical page height');
   const nominal = presentation.nominalWorldFont();
@@ -523,8 +525,10 @@ test('production fit/layout preserves page viewport through all camera levels an
   const presentation = { invalidate() { invalidations += 1; } };
   const agentProjection = { invalidate() { targetInvalidations += 1; } };
   const update = compileFunction(`${overlay.slice(start, end)}; return updateFitScale;`,
-    ['body', 'card', 'header', 'wrap', 'options', 'presentation', 'agentProjection', 'CARD_LOGICAL_W', 'canvasZoom', 'browserPresentationFit'])(
-    body, card, header, wrap, {}, presentation, agentProjection, 1440, () => zoom, production('browserPresentationFit'));
+    ['body', 'card', 'header', 'wrap', 'options', 'presentation', 'agentProjection', 'CARD_LOGICAL_W', 'canvasZoom', 'browserPresentationFit',
+      'syncBrowserBoardCollision', 'deskWindow', 'pageTitle', 'agentBadge', 'agentHandButton'])(
+    body, card, header, wrap, {}, presentation, agentProjection, 1440, () => zoom, production('browserPresentationFit'),
+    () => {}, { slots: { topbar: {} }, boardMetadata: {} }, {}, {}, {});
   update();
   assert.equal(targetInvalidations, 1, 'initial Card layout invalidates old target display');
   const initialViewport = wrap.style.height;

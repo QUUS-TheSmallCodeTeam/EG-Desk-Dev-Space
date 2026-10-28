@@ -1374,6 +1374,23 @@
   flex: 1;
 }
 
+/* Browser also gives identity the page-meta class; title wins over Board metadata. */
+.egd-desk-window-titlebar > .egd-desk-window-identity { flex: 1 1 auto; }
+
+.egd-desk-window-board {
+  flex: 0 999 auto;
+  /* Keep a small hover target even when the View title is long. */
+  min-width: min(3em, 25%);
+  max-width: min(120px, 25%);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--egd-on-surface-variant);
+  font-size: 11px;
+  text-align: right;
+}
+.egd-desk-window-board[hidden] { display: none; }
+
 .egd-desk-window-actions {
   display: inline-flex;
   align-items: center;
@@ -1576,6 +1593,8 @@
 
 .egd-browser-card .egd-card-header {
   border-bottom-color: var(--egd-outline-variant);
+  container-name: egd-browser-title;
+  container-type: inline-size;
 }
 
 .egd-browser-card .egd-desk-window-titlebar {
@@ -1849,6 +1868,52 @@
   font-size: calc(11px * var(--egd-browser-ui-scale));
 }
 .egd-browser-card[data-egd-browser-presentation] .egd-browser-agent-badge { max-width: calc(160px * var(--egd-browser-ui-scale)); }
+
+/* Keep the named note in the accessibility tree while it yields its visual
+   space to a colliding Agent control. The owner data itself is unchanged. */
+.egd-browser-card[data-egd-board-visual-hidden="true"] .egd-desk-window-board:not([hidden]) {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  min-width: 0;
+  max-width: none;
+  overflow: hidden;
+  clip-path: inset(50%);
+  pointer-events: none;
+}
+
+/* Keep the Browser body unchanged while compact Agent controls remain
+   distinguishable; their full meaning stays in the button name and title. */
+@container egd-browser-title (max-width: 480px) {
+  .egd-browser-card:is([data-egd-agent-control="operating"], [data-egd-agent-control="user"]) .egd-card-page-status { display: none; }
+  .egd-browser-card:is([data-egd-agent-control="operating"], [data-egd-agent-control="user"]) .egd-desk-window-titlebar {
+    gap: calc(2px * var(--egd-browser-ui-scale, 1));
+    padding-inline: calc(6px * var(--egd-browser-ui-scale, 1));
+  }
+  .egd-browser-card:is([data-egd-agent-control="operating"], [data-egd-agent-control="user"]) .egd-desk-window-titlebar > .egd-window-grip,
+  .egd-browser-card:is([data-egd-agent-control="operating"], [data-egd-agent-control="user"]) *|*.egd-window-kind-icon,
+  .egd-browser-card:is([data-egd-agent-control="operating"], [data-egd-agent-control="user"]) .egd-desk-window-actions:empty { display: none; }
+  .egd-browser-card:is([data-egd-agent-control="operating"], [data-egd-agent-control="user"]) .egd-desk-window-identity { gap: calc(2px * var(--egd-browser-ui-scale, 1)); }
+  .egd-browser-card:is([data-egd-agent-control="operating"], [data-egd-agent-control="user"]) .egd-card-page-title { min-width: 1.5em; }
+  .egd-browser-card:is([data-egd-agent-control="operating"], [data-egd-agent-control="user"]) .egd-desk-window-board { font-size: calc(11px * var(--egd-browser-ui-scale, 1)); }
+  .egd-browser-card:is([data-egd-agent-control="operating"], [data-egd-agent-control="user"]) .egd-browser-agent-status { flex: 0 0 auto; }
+  .egd-browser-card:is([data-egd-agent-control="operating"], [data-egd-agent-control="user"]) .egd-browser-agent-badge {
+    font-size: 0;
+    padding-inline: calc(1px * var(--egd-browser-ui-scale, 1));
+  }
+  .egd-browser-card:is([data-egd-agent-control="operating"], [data-egd-agent-control="user"]) .egd-browser-agent-badge::before { display: none; }
+  .egd-browser-card:is([data-egd-agent-control="operating"], [data-egd-agent-control="user"]) .egd-browser-agent-badge::after {
+    content: attr(data-compact-label);
+    font: 600 calc(11px * var(--egd-browser-ui-scale, 1))/1 var(--egd-font);
+  }
+  .egd-browser-card:is([data-egd-agent-control="operating"], [data-egd-agent-control="user"]) .egd-browser-agent-hand {
+    width: calc(24px * var(--egd-browser-ui-scale, 1));
+    padding: 0;
+    font-size: 0;
+  }
+  .egd-browser-card:is([data-egd-agent-control="operating"], [data-egd-agent-control="user"]) .egd-browser-agent-hand[data-action="pause"]::after { content: "Ⅱ"; font: 600 calc(14px * var(--egd-browser-ui-scale, 1))/1 var(--egd-font); }
+  .egd-browser-card:is([data-egd-agent-control="operating"], [data-egd-agent-control="user"]) .egd-browser-agent-hand[data-action="handback"]::after { content: "↩"; font: 600 calc(14px * var(--egd-browser-ui-scale, 1))/1 var(--egd-font); }
+}
 
 .egd-browser-agent-timeline {
   position: fixed;

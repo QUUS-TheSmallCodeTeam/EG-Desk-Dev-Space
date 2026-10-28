@@ -705,13 +705,24 @@ const rebuildProjections = (projections, replaced) => {
 
 const hasMember = (projection, id) => Array.isArray(projection?.members) && projection.members.some(member => member?.viewId === id);
 
-// View id -> projection id, from the projections' member lists (the same
-// object shape as state.boards.projections, or an array of projections).
+// View id -> unambiguous projection id, from recorded member lists only.
+// Conflicting legacy records are left untouched and have no displayed owner.
 export function owningProjectionByView(projections) {
+  const list = projectionList(projections);
   const owners = new Map();
-  for (const projection of projectionList(projections)) {
+  const conflicts = new Set();
+  const projectionIds = new Map();
+  for (const projection of list) {
+    projectionIds.set(projection.id, (projectionIds.get(projection.id) || 0) + 1);
+  }
+  for (const projection of list) {
     for (const member of Array.isArray(projection.members) ? projection.members : []) {
-      if (member?.viewId != null && !owners.has(member.viewId)) owners.set(member.viewId, projection.id);
+      const id = member?.viewId;
+      if (typeof id !== 'string' || !id || typeof projection.id !== 'string' || !projection.id) continue;
+      if (projectionIds.get(projection.id) > 1 || (owners.has(id) && owners.get(id) !== projection.id)) {
+        owners.delete(id);
+        conflicts.add(id);
+      } else if (!conflicts.has(id)) owners.set(id, projection.id);
     }
   }
   return owners;

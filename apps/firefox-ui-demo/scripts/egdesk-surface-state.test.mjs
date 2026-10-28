@@ -9184,6 +9184,662 @@ test('production Settings card renders the reported account and drives Agent edi
 
 // ============ Canvas marks, Board regions and the Board in view ============
 const surfaceCss = readFileSync(new URL('../overlay/CSS/eg-desk-surface.uc.css', import.meta.url), 'utf8');
+
+function windowBoardMetadataHarness() {
+  const document = settingsFakeDocument(), create = document.createElement;
+  document.getElementById = id => settingsNodes(document.documentElement, node => node.id === id)[0] || null;
+  document.createElement = tag => {
+    const node = create(tag);
+    Object.defineProperty(node, 'id', { get: () => node.getAttribute('id') || '', set: value => node.setAttribute('id', value) });
+    node.removeAttribute = key => { delete node.attributes[key]; };
+    node.closest = () => null;
+    node.prepend = child => { node.appendChild(child); node.children.unshift(node.children.pop()); };
+    node.classList = { contains: name => node.className.split(/\s+/).includes(name) };
+    node.querySelector = () => null;
+    return node;
+  };
+  document.querySelectorAll = selector => settingsNodes(document.documentElement, node => {
+    const classes = node.className.split(/\s+/);
+    if (selector === '.egd-desk-window') return classes.includes('egd-desk-window');
+    if (selector === '.egd-canvas-card, .egd-canvas-shape') return classes.includes('egd-canvas-card') || classes.includes('egd-canvas-shape');
+    return false;
+  });
+  document.querySelector = selector => document.querySelectorAll(selector)[0] || null;
+  const listeners = new Map(), effects = { focus: 0, fullscreen: 0, dirty: 0, saved: 0, failWrite: false, deskSaves: 0, activations: [] };
+  const window = { addEventListener: (type, fn) => listeners.set(type, fn), removeEventListener() {} };
+  class ResizeObserver { observe() {} disconnect() {} }
+  const a = { id: 'board-a', boardId: 'logical-a', title: '같은 이름', members: [{ viewId: 'owned' }, { viewId: 'restored-real' }] };
+  const b = { id: 'board-b', boardId: 'logical-b', title: '같은 이름', members: [] };
+  const state = { boards: { projections: { [a.id]: a, [b.id]: b }, activeProjectionId: b.id },
+    activeEntityId: 'existing-selection', agenda: { activeAgendaId: b.boardId }, codex: { activeThreadId: 'existing-run' },
+    pan: { x: 13, y: 14 }, zoom: 0.8, surface: { restoring: false }, sourceRefs: { cardsByKey: {} } };
+  const store = { agendas: {}, meta: {} };
+  let api, spawned = 0;
+  const deps = { document, window, state, MinimapLayout, ResizeObserver, DESK_WINDOW_RESIZE_HITS: [], cardSeq: 0, queueMicrotask, console, TAG: 'test',
+    deskIcon: () => document.createElement('i'),
+    markAgendaDirty: () => effects.dirty++, setActiveEntity: view => { effects.activations.push(view); state.activeEntityId = view?.id || null; },
+    focusCanvasCard: () => effects.focus++, toggleCardFullscreen: () => effects.fullscreen++, closeCanvasCard: () => {},
+    isCardFullscreen: () => false, canvasZoom: () => 1, syncBoardRegionMarks: () => {}, scheduleViewportBoardSync: () => {},
+    persistentEntityGeometry: () => ({ x: 0, y: 0, width: 300, height: 200 }),
+    SurfaceState: { ...Surface, boardRegionRect: () => ({ x: 0, y: 0, width: 400, height: 300 }), placeCanvasView: () => ({ x: 0, y: 0 }) },
+    coerceAgendaStore: () => store, writeAgendaStoreAndSync: next => {
+      effects.saved++; if (effects.failWrite) return false; Object.assign(store, next); return true;
+    }, syncViewportAgendaRail: () => {}, cloneJson: value => structuredClone(value),
+    spawnBrowserCard: () => { const view = api.spawnDeskWindowShell({ id: `spawned-${++spawned}`, kind: 'browser', activate: false }).root;
+      view._xulBrowser = { live: true }; return view; },
+    applyPersistentEntityGeometry: (view, geometry) => { view.geometry = geometry; },
+    selectBoardProjection: () => {}, scheduleDeskSessionSave: () => effects.deskSaves++, safeViewportWorldRect: () => ({}),
+    boardNotice: () => {}, RecoveryState: Recovery, refreshDeskMinimap: () => {}, activeBoardProjection: () => null };
+  const names = ['el', 'normalizeSourcePart', 'sourceRefKey', 'registerSourceRefCard', 'unregisterSourceRefCard', 'bindCardSourceRef',
+    'deskWindowBoardIndex', 'syncDeskWindowBoardMetadata', 'syncAllDeskWindowBoardMetadata',
+    'refreshBoardRegion', 'retargetRestoredEntityId', 'installCardHeaderFullscreenToggle', 'spawnDeskWindowShell',
+    'normalizeAgendaTitle', 'renameAgenda', 'allocateRestoredEntityId', 'canRemapRestoredBoardMember',
+    'remapRestoredBoardMember', 'remapRestoredProjectionIds', 'mountBoardMember', 'openBoardSnapshot',
+    'canRestoreDeskSnapshotIdentity', 'restoreDeskSession'];
+  const source = names.map(declaration);
+  assert.ok(source.every(Boolean));
+  api = compileFunction(`${source.join('\n')}\nreturn { bindCardSourceRef, spawnDeskWindowShell, refreshBoardRegion, retargetRestoredEntityId, renameAgenda, remapRestoredBoardMember, mountBoardMember, openBoardSnapshot, canRestoreDeskSnapshotIdentity, restoreDeskSession };`,
+    Object.keys(deps))(...Object.values(deps));
+  const canvas = document.createElement('div'); canvas.id = 'egd-canvas-layer'; document.documentElement.appendChild(canvas);
+  for (const projection of [a, b]) {
+    const region = document.createElement('section'); region.id = projection.id; document.documentElement.appendChild(region);
+  }
+  return { ...api, document, window, listeners, effects, state, store, a, b };
+}
+
+test('window Board metadata follows recorded IDs across rename, membership and restore without changing selection', () => {
+  const h = windowBoardMetadataHarness();
+  const focus = h.document.createElement('textarea'); h.document.documentElement.appendChild(focus); focus.focus();
+  const owned = h.spawnDeskWindowShell({ id: 'owned', kind: 'browser', activate: false });
+  const unowned = h.spawnDeskWindowShell({ id: 'unowned', kind: 'file', activate: false });
+  owned.root.dataset.projectionId = h.b.id; owned.root.style.left = '600px';
+  assert.equal(owned.boardMetadata.textContent, '같은 이름');
+  assert.equal(unowned.boardMetadata.hidden, true, 'the active or nearby Board does not own an unrecorded View');
+  assert.equal(owned.boardMetadata.getAttribute('role'), 'note');
+  assert.equal(owned.boardMetadata.getAttribute('aria-label'), '소속 Board: 같은 이름');
+  assert.equal(owned.boardMetadata.getAttribute('tabindex'), null);
+  assert.equal(owned.boardMetadata.title, '같은 이름');
+  assert.equal(owned.slots.topbar.children.indexOf(owned.boardMetadata), owned.slots.topbar.children.indexOf(owned.slots.identity) + 1);
+  h.effects.dirty = 0;
+  h.renameAgenda(h.b.boardId, '다른 B');
+  assert.equal(owned.boardMetadata.textContent, '같은 이름', 'duplicate titles do not determine ownership');
+  h.renameAgenda(h.a.boardId, '긴 Board 이름 '.repeat(30));
+  assert.equal(owned.boardMetadata.textContent, h.a.title);
+  assert.equal(owned.boardMetadata.title, h.a.title, 'the full name remains available on hover');
+  h.a.members = h.a.members.filter(member => member.viewId !== 'owned');
+  h.b.members.push({ viewId: 'owned' }); h.refreshBoardRegion(h.a);
+  assert.equal(owned.boardMetadata.textContent, '다른 B', 'a membership update refreshes the same View');
+  h.a.members.push({ viewId: 'owned' }); h.refreshBoardRegion(h.a);
+  assert.equal(owned.boardMetadata.hidden, true, 'conflicting legacy membership is never guessed');
+  const restored = h.spawnDeskWindowShell({ id: 'temporary', kind: 'file', activate: false });
+  assert.equal(restored.boardMetadata.hidden, true);
+  h.retargetRestoredEntityId(restored.root, 'restored-real');
+  assert.equal(restored.root.id, 'restored-real');
+  assert.equal(restored.boardMetadata.textContent, h.a.title, 'restore resolves only after the final View ID');
+  assert.equal(h.document.activeElement, focus);
+  assert.deepEqual([h.state.activeEntityId, h.state.boards.activeProjectionId, h.state.codex.activeThreadId],
+    ['existing-selection', 'board-b', 'existing-run']);
+  assert.deepEqual([h.state.pan, h.state.zoom], [{ x: 13, y: 14 }, 0.8]);
+  assert.equal(h.effects.focus, 0); assert.equal(h.effects.fullscreen, 0);
+  assert.deepEqual(h.effects.activations, [], 'metadata never activates a View');
+  assert.equal(h.effects.dirty, 1, 'only the explicitly created restore shell marked dirty');
+  assert.equal(h.effects.saved, 2, 'only the two explicit Board renames write their store');
+});
+
+test('window Board metadata yields space and preserves header drag and double-click', () => {
+  const h = windowBoardMetadataHarness(), shell = h.spawnDeskWindowShell({ id: 'owned', activate: false });
+  const title = h.document.createElement('strong'); title.textContent = '긴 창 제목 '.repeat(60); shell.slots.identity.appendChild(title);
+  shell.root.offsetLeft = 10; shell.root.offsetTop = 20;
+  shell.slots.header.fire('mousedown', { button: 0, target: shell.boardMetadata, clientX: 0, clientY: 0 });
+  h.listeners.get('mousemove')({ clientX: 20, clientY: 15 });
+  assert.deepEqual([shell.root.style.left, shell.root.style.top], ['30px', '35px']);
+  shell.slots.topbar.fire('dblclick', { button: 0, target: shell.boardMetadata });
+  assert.equal(h.effects.fullscreen, 1);
+  const meta = cssDeclarationsFor(surfaceCss, '.egd-desk-window-board');
+  assert.equal(meta.flex, '0 999 auto'); assert.equal(meta['max-width'], 'min(120px, 25%)');
+  assert.equal(meta.overflow, 'hidden'); assert.equal(meta['text-overflow'], 'ellipsis');
+  assert.equal(cssDeclarationsFor(surfaceCss, '.egd-desk-window-titlebar > .egd-desk-window-identity').flex, '1 1 auto');
+  assert.equal(cssDeclarationsFor(surfaceCss, '.egd-desk-window-board[hidden]').display, 'none');
+});
+
+test('Board metadata reserves hoverable ellipsis space without replacing the View title or controls', () => {
+  const h = windowBoardMetadataHarness();
+  const shell = h.spawnDeskWindowShell({ id: 'owned', kind: 'browser', activate: false });
+  const viewTitle = h.document.createElement('strong');
+  viewTitle.className = 'egd-card-page-title'; viewTitle.textContent = '긴 View 제목 '.repeat(40);
+  shell.slots.identity.appendChild(viewTitle);
+  h.a.title = '긴 Board 이름 '.repeat(40);
+  h.refreshBoardRegion(h.a);
+  const meta = cssDeclarationsFor(surfaceCss, '.egd-desk-window-board');
+  assert.equal(meta['min-width'], 'min(3em, 25%)',
+    'min-width:0 previously allowed a long View title to collapse the Board label to 0px');
+  assert.equal(meta['max-width'], 'min(120px, 25%)');
+  assert.equal(meta.flex, '0 999 auto', 'Board remains secondary to the View title');
+  assert.equal(meta.overflow, 'hidden'); assert.equal(meta['text-overflow'], 'ellipsis');
+  assert.equal(meta['white-space'], 'nowrap');
+  assert.equal(meta.background, undefined, 'the existing text label is not changed into a chip');
+  assert.equal(meta.border, undefined);
+  assert.equal(cssDeclarationsFor(surfaceCss, '.egd-desk-window-titlebar > .egd-desk-window-identity').flex, '1 1 auto');
+  assert.equal(shell.boardMetadata.tagName, 'SPAN');
+  assert.equal(shell.boardMetadata.textContent, h.a.title);
+  assert.equal(shell.boardMetadata.title, h.a.title);
+  assert.equal(shell.boardMetadata.getAttribute('aria-label'), `소속 Board: ${h.a.title}`);
+  assert.equal(shell.boardMetadata.getAttribute('tabindex'), null);
+  const controls = settingsNodes(shell.slots.topbar, node => node.className.split(/\s+/).includes('egd-desk-window-control'));
+  assert.equal(controls.length, 3, 'the existing window controls remain unchanged');
+  assert.equal(shell.slots.identity.children.includes(viewTitle), true);
+  assert.deepEqual([h.state.activeEntityId, h.state.boards.activeProjectionId, h.state.codex.activeThreadId],
+    ['existing-selection', 'board-b', 'existing-run']);
+});
+
+test('compact Browser Agent header keeps its height and exposes short status and labelled actions', () => {
+  const header = cssDeclarationsFor(surfaceCss, '.egd-browser-card .egd-card-header');
+  assert.equal(header['container-name'], 'egd-browser-title');
+  assert.equal(header['container-type'], 'inline-size');
+  const compact = surfaceCss.match(/@container egd-browser-title \(max-width: 480px\)\s*\{([\s\S]*?)\n\}/)?.[1];
+  assert.ok(compact, 'the compact rule is limited to the Browser titlebar width');
+  assert.equal(cssDeclarationsFor(surfaceCss, '.egd-browser-agent-status').flex, '0 1 auto',
+    'ordinary and recent status keep their original flex behavior');
+  for (const mode of ['operating', 'user']) assert.ok(compact.includes(`[data-egd-agent-control="${mode}"]`));
+  assert.match(compact, /\.egd-card-page-status\s*\{\s*display:\s*none;/,
+    'the non-action page status yields when the Agent controls need room');
+  assert.match(compact, /\.egd-window-kind-icon,[^}]*\.egd-desk-window-actions:empty\s*\{\s*display:\s*none;/,
+    'only decorative kind/grip icons and an empty action slot yield');
+  assert.ok(compact.includes('*|*.egd-window-kind-icon,'), 'compact hiding must match the SVG namespace, not only XHTML');
+  assert.match(compact, /\.egd-desk-window-titlebar\s*\{[^}]*gap:\s*calc\(2px/);
+  assert.doesNotMatch(compact, /height:\s*calc\(60px/, 'a status-only change does not expand the Browser header');
+  assert.match(compact, /\.egd-card-page-title\s*\{\s*min-width:\s*1\.5em;/);
+  assert.match(compact, /\.egd-browser-agent-status\s*\{\s*flex:\s*0 0 auto;/);
+  assert.match(compact, /\.egd-browser-agent-badge::after\s*\{[^}]*content:\s*attr\(data-compact-label\)/);
+  assert.match(compact, /\.egd-browser-agent-hand\[data-action="pause"\]::after\s*\{\s*content:\s*"Ⅱ"/);
+  assert.match(compact, /\.egd-browser-agent-hand\[data-action="handback"\]::after\s*\{\s*content:\s*"↩"/);
+  assert.match(compact, /\.egd-desk-window-board\s*\{\s*font-size:\s*calc\(11px/);
+  assert.doesNotMatch(compact, /flex:\s*0 0 24px/, 'a dot-only badge cannot preserve the status text');
+  assert.doesNotMatch(compact, /(?:\.egd-desk-window-board|\.egd-browser-agent-badge|\.egd-browser-agent-hand)\s*\{[^}]*display:\s*none/,
+    'Board and Agent actions are never hidden to make space');
+});
+
+test('Browser Board note yields only on actual Agent or title collision and is restored on resize', () => {
+  const body = surfaceSource.match(/  function syncBrowserBoardCollision\(\{ card, bar, board, title, badge, hand, zoom \}\) \{([\s\S]*?)\n  \}/)?.[1];
+  assert.ok(body, 'exercise the production collision handler');
+  const sync = compileFunction('return function({card,bar,board,title,badge,hand,zoom}) {' + body + '}', [])();
+  let width = 220.8, x = 131.78;
+  const rect = (left, right) => ({ left, right, top: 0, bottom: 20, width: right - left, height: 20 });
+  const card = { dataset: { egdAgentControl: 'operating' } };
+  const bar = { getBoundingClientRect: () => rect(x, x + width) };
+  const board = { hidden: false, textContent: '소속 Board', getBoundingClientRect: () =>
+    width === 220.8 ? rect(313.56, 346.58) : width === 160 ? rect(216.5, 249.5) : rect(293.56, 318.56) };
+  const title = { hidden: false, textContent: '긴 제목', getBoundingClientRect: () =>
+    width === 220.8 ? rect(239.28, 257.7) : width === 160 ? rect(202.5, 219) : rect(293.56, 310.06) };
+  const badge = { hidden: false, textContent: 'Agent 조작 중', getBoundingClientRect: () =>
+    width === 220.8 ? rect(259.7, 285.58) : width === 160 ? rect(221, 245.53) : rect(312.06, 335.53) };
+  const hand = { hidden: false, textContent: '일시중지', getBoundingClientRect: () =>
+    width === 220.8 ? rect(287.58, 311.58) : width === 160 ? rect(247.53, 271.53) : rect(337.53, 361.53) };
+  const run = zoom => sync({ card, bar, board, title, badge, hand, zoom });
+  run(.69); assert.equal(card.dataset.egdBoardVisualHidden, undefined);
+  width = 160; x = 95.5; run(.5); assert.equal(card.dataset.egdBoardVisualHidden, 'true');
+  assert.equal(board.hidden, false); assert.equal(board.textContent, '소속 Board');
+  run(.5); assert.equal(card.dataset.egdBoardVisualHidden, 'true', 'unchanged layout does not oscillate');
+  width = 112; x = 186.85; run(.35); assert.equal(card.dataset.egdBoardVisualHidden, 'true');
+  width = 220.8; x = 131.78; run(.69); assert.equal(card.dataset.egdBoardVisualHidden, undefined);
+  width = 160; x = 95.5; card.dataset.egdAgentControl = 'user'; run(.5);
+  assert.equal(card.dataset.egdBoardVisualHidden, 'true');
+  card.dataset.egdAgentControl = 'recent'; run(.5); assert.equal(card.dataset.egdBoardVisualHidden, undefined);
+  const hidden = cssDeclarationsFor(surfaceCss, '.egd-browser-card[data-egd-board-visual-hidden="true"] .egd-desk-window-board:not([hidden])');
+  assert.equal(hidden.position, 'absolute'); assert.equal(hidden['clip-path'], 'inset(50%)');
+  assert.notEqual(hidden.display, 'none'); assert.notEqual(hidden.visibility, 'hidden');
+  assert.equal(hidden['pointer-events'], 'none');
+});
+
+test('Browser Board collision cache rechecks same-width page status and stays stable', () => {
+  const body = surfaceSource.match(/  function syncBrowserBoardCollision\(\{ card, bar, board, title, badge, hand, zoom \}\) \{([\s\S]*?)\n  \}/)?.[1];
+  assert.ok(body);
+  const sync = compileFunction('return function({card,bar,board,title,badge,hand,zoom}) {' + body + '}', [])();
+  const rect = (left, right) => ({ left, right, top: 0, bottom: 20, width: right - left, height: 20 });
+  let status = 'Loading', scale = '1', reads = 0;
+  const pageStatus = { hidden: false };
+  const card = { dataset: { egdAgentControl: 'operating' } };
+  const bar = { get textContent() { return `Title ${status} Agent Pause Board`; },
+    parentElement: { style: { getPropertyValue: () => scale } },
+    querySelector: selector => selector === '.egd-card-page-status' ? pageStatus : null,
+    getBoundingClientRect: () => rect(0, 500) };
+  const board = { hidden: false, textContent: 'Board', getBoundingClientRect: () => rect(430, 465) };
+  const title = { hidden: false, textContent: 'Title', getBoundingClientRect: () => rect(60, 200) };
+  const badge = { hidden: false, textContent: 'Agent', getBoundingClientRect: () => rect(350, 380) };
+  const hand = { hidden: false, textContent: 'Pause', getBoundingClientRect: () => {
+    reads++; return status === 'Loading' ? rect(385, 425) : rect(393, 433);
+  } };
+  const run = () => sync({ card, bar, board, title, badge, hand, zoom: 1 });
+  run(); assert.equal(card.dataset.egdBoardVisualHidden, undefined);
+  status = 'Secure'; run(); assert.equal(card.dataset.egdBoardVisualHidden, 'true');
+  const afterCollision = reads;
+  run(); assert.equal(reads, afterCollision, 'unchanged inputs must not repeat collision measurements');
+  assert.equal(card.dataset.egdBoardVisualHidden, 'true');
+  status = 'Loading'; run(); assert.equal(card.dataset.egdBoardVisualHidden, undefined);
+  const afterRecovery = reads;
+  scale = '1.1'; run(); assert.ok(reads > afterRecovery, 'changed titlebar scale invalidates the cache');
+  const afterScale = reads;
+  pageStatus.hidden = true; run(); assert.ok(reads > afterScale, 'page status visibility invalidates the cache');
+});
+
+test('Board open ID collision rebinds the actual restored member, never an existing View', () => {
+  for (const type of ['browser', 'unavailable']) {
+    const h = windowBoardMetadataHarness();
+    delete h.state.boards.projections[h.b.id];
+    const collision = 'egd-board-1-member-0';
+    const original = h.spawnDeskWindowShell({ id: collision, kind: 'browser', activate: false });
+    const nativeBrowser = original.root._xulBrowser = { identity: 'existing-browser' };
+    original.root.dataset.projectionId = h.a.id; original.root.dataset.memberId = 'owned-source';
+    h.a.title = '원래 Board';
+    h.a.members.push({ sourceId: 'owned-source', viewId: collision });
+    h.a.idMap = { 'owned-source': collision };
+    h.refreshBoardRegion(h.a);
+    assert.equal(original.boardMetadata.textContent, '원래 Board');
+    const snapshot = { agenda: { id: 'new-board', title: '복원 Board', memberCardIds: ['source'],
+      contextBindings: [{ viewId: 'source', resourceId: collision, url: `file:///qa/${collision}` }] },
+      cards: [{ id: 'source', type, geometry: { x: 10, y: 20, width: 400, height: 300 },
+        runtimeState: { uri: 'about:blank' }, sourceRef: { uri: 'about:blank' } }], shapes: [] };
+    const projection = h.openBoardSnapshot(snapshot, { focus: false });
+    const member = projection.members[0], restored = h.document.getElementById(member.viewId);
+    assert.notEqual(member.viewId, collision);
+    assert.equal(projection.idMap.source, member.viewId);
+    assert.equal(projection.bindings[0].viewId, member.viewId);
+    assert.equal(projection.bindings[0].resourceId, collision, 'opaque resource IDs are not rewritten');
+    assert.equal(projection.bindings[0].url, `file:///qa/${collision}`);
+    assert.ok(restored && restored !== original.root);
+    assert.equal(restored.dataset.projectionId, projection.id);
+    assert.equal(h.document.getElementById(collision), original.root);
+    assert.equal(original.root._xulBrowser, nativeBrowser);
+    assert.deepEqual([original.root.dataset.projectionId, original.root.dataset.memberId], [h.a.id, 'owned-source']);
+    assert.equal(original.boardMetadata.textContent, '원래 Board', 'the real existing owner is not hidden or reassigned');
+    if (type === 'browser') assert.equal(restored._deskWindowShell.boardMetadata.textContent, '복원 Board');
+    else assert.equal(restored.dataset.testid, 'board-missing-member');
+    const saved = Surface.snapshotBoardProjection(projection, {}, 1);
+    assert.equal(saved.agenda.contextBindings[0].viewId, 'source', 'saving maps the restored ID back to its source');
+    assert.equal(saved.agenda.contextBindings[0].resourceId, collision);
+    assert.equal(h.effects.deskSaves, 1, 'rebinding adds no extra save');
+  }
+});
+
+test('an ambiguous legacy member collision stops before spawning or repairing records', () => {
+  const h = windowBoardMetadataHarness(), original = h.spawnDeskWindowShell({ id: 'taken', activate: false });
+  const member = { sourceId: 'one', viewId: 'taken', kind: 'card', record: { type: 'browser', runtimeState: { uri: 'about:blank' } } };
+  h.b.members = [member, { sourceId: 'two', viewId: 'taken', kind: 'card', record: member.record }];
+  h.b.idMap = { one: 'taken', two: 'taken' };
+  const before = structuredClone(h.b), count = h.document.querySelectorAll('.egd-canvas-card, .egd-canvas-shape').length;
+  assert.equal(h.mountBoardMember(h.b, member), null);
+  assert.equal(h.document.querySelectorAll('.egd-canvas-card, .egd-canvas-shape').length, count);
+  assert.equal(h.document.getElementById('taken'), original.root);
+  assert.deepEqual(h.b, before);
+});
+
+test('restored member ID remapping leaves unrelated prototype-like view references intact', () => {
+  const h = windowBoardMetadataHarness(), member = { sourceId: 's', viewId: 'old' };
+  h.a.members = [member]; h.a.idMap = { s: 'old' };
+  h.a.bindings = [{ viewId: 'old' }, { viewId: 'constructor' }, { viewId: '__proto__' }, { resourceId: 'old' }];
+  assert.equal(h.remapRestoredBoardMember(h.a, member, 'new'), true);
+  assert.deepEqual(h.a.bindings, [{ viewId: 'new' }, { viewId: 'constructor' }, { viewId: '__proto__' }, { resourceId: 'old' }]);
+});
+
+test('Board rename does not publish or mutate the old store when preference writing fails', () => {
+  const h = windowBoardMetadataHarness();
+  const owned = h.spawnDeskWindowShell({ id: 'owned', kind: 'browser', activate: false });
+  const oldSnapshot = { agenda: { id: h.a.boardId, title: h.a.title }, cards: [{ id: 'source', type: 'browser' }], savedAt: 42 };
+  h.store.meta[h.a.boardId] = { id: h.a.boardId, title: h.a.title, createdAt: 1, updatedAt: 2 };
+  h.store.agendas[h.a.boardId] = oldSnapshot;
+  h.state.agenda.activeAgendaId = h.a.boardId; h.state.agenda.activeTitle = h.a.title;
+  const before = structuredClone(h.store), originalRegion = h.document.getElementById(h.a.id);
+  h.effects.failWrite = true;
+  assert.equal(h.renameAgenda(h.a.boardId, '저장 실패 이름'), false);
+  assert.deepEqual(h.store, before, 'the prior store and nested snapshot are not changed');
+  assert.equal(h.state.agenda.activeTitle, h.a.title);
+  assert.equal(h.a.title, '같은 이름');
+  assert.equal(owned.boardMetadata.textContent, '같은 이름');
+  assert.equal(h.document.getElementById(h.a.id), originalRegion);
+  assert.deepEqual([h.effects.focus, h.effects.fullscreen, h.effects.deskSaves], [0, 0, 0]);
+  h.effects.failWrite = false;
+  assert.equal(h.renameAgenda(h.a.boardId, '저장 성공 이름'), '저장 성공 이름');
+  assert.equal(h.a.title, '저장 성공 이름');
+  assert.equal(owned.boardMetadata.textContent, '저장 성공 이름');
+  assert.equal(h.store.agendas[h.a.boardId].agenda.title, '저장 성공 이름');
+  assert.equal(oldSnapshot.agenda.title, '같은 이름', 'the original snapshot object was not modified');
+});
+
+test('Desk restore remaps only its newly restored View when a non-View already holds the saved ID', () => {
+  const h = windowBoardMetadataHarness(), collision = 'existing-control';
+  const existing = h.document.createElement('button'); existing.id = collision; h.document.documentElement.appendChild(existing);
+  const record = { id: collision, type: 'browser', geometry: { x: 0, y: 0, width: 400, height: 300 },
+    runtimeState: { uri: 'about:blank' }, sourceRef: { uri: 'about:blank' } };
+  const projection = { id: 'restored-board', boardId: 'restored-agenda', title: '복원 Board', offset: { x: 0, y: 0 },
+    members: [{ sourceId: 'source', viewId: collision, kind: 'card', record }], idMap: { source: collision },
+    bindings: [{ viewId: collision, resourceId: collision }], source: { agenda: { id: 'restored-agenda' } } };
+  const snapshot = { agenda: { id: 'restored-agenda', title: '복원 Board' }, cards: [record], shapes: [], desk: { activeCardId: collision },
+    boardProjections: { projections: { [projection.id]: projection }, activeProjectionId: projection.id } };
+  const before = structuredClone(snapshot);
+  assert.equal(h.restoreDeskSession(snapshot), true);
+  const restored = h.state.boards.projections[projection.id], member = restored.members[0];
+  assert.notEqual(member.viewId, collision);
+  assert.equal(restored.idMap.source, member.viewId);
+  assert.equal(restored.bindings[0].viewId, member.viewId);
+  assert.equal(restored.bindings[0].resourceId, collision);
+  assert.equal(h.document.getElementById(collision), existing);
+  assert.equal(h.document.getElementById(member.viewId)._deskWindowShell.boardMetadata.textContent, '복원 Board');
+  assert.equal(h.state.activeEntityId, member.viewId, 'explicit restore selects the restored View, not the unrelated collision');
+  assert.deepEqual(h.effects.activations, [h.document.getElementById(member.viewId)]);
+  assert.deepEqual(snapshot, before, 'the original recovery record is never rewritten');
+});
+
+test('Desk merge refuses an unproven collision without changing the existing Board or its View', () => {
+  const h = windowBoardMetadataHarness();
+  const view = h.spawnDeskWindowShell({ id: 'existing-member', kind: 'browser', activate: false });
+  const resource = view.root._xulBrowser = { identity: 'keep' };
+  h.a.members.push({ sourceId: 'actual', viewId: view.root.id }); h.a.idMap = { actual: view.root.id };
+  h.a.title = '기존 Board'; h.refreshBoardRegion(h.a);
+  const incoming = { id: 'incoming', boardId: 'incoming-board', title: '다른 Board',
+    members: [{ sourceId: 'source', viewId: view.root.id, record: { type: 'browser' } }], idMap: { source: view.root.id } };
+  const snapshot = { agenda: { id: 'incoming-board' }, cards: [], shapes: [], boardProjections: { projections: { incoming } } };
+  assert.equal(h.restoreDeskSession(snapshot, { merge: true }), false);
+  assert.equal(h.document.getElementById(view.root.id), view.root);
+  assert.equal(view.root._xulBrowser, resource);
+  assert.equal(view.boardMetadata.textContent, '기존 Board');
+  assert.equal(h.state.boards.projections.incoming, undefined);
+  assert.equal(h.a.members.at(-1).viewId, view.root.id);
+  assert.deepEqual([h.effects.focus, h.effects.fullscreen, h.effects.deskSaves], [0, 0, 0]);
+  assert.deepEqual(h.effects.activations, []);
+});
+
+test('Desk restore retains conflicting legacy Board records without assigning a winner', () => {
+  const h = windowBoardMetadataHarness();
+  const record = { id: 'shared-view', type: 'browser', geometry: { x: 0, y: 0, width: 400, height: 300 },
+    runtimeState: { uri: 'about:blank' } };
+  const projection = id => ({ id, boardId: `${id}-board`, title: id, members: [{ sourceId: 'source', viewId: record.id, record }],
+    idMap: { source: record.id }, bindings: [], source: { agenda: { id: `${id}-board` } } });
+  const snapshot = { agenda: { id: 'desk' }, cards: [record], shapes: [],
+    boardProjections: { projections: { a: projection('a'), b: projection('b') }, activeProjectionId: null } };
+  const before = structuredClone(snapshot);
+  assert.equal(h.restoreDeskSession(snapshot), true);
+  const view = h.document.getElementById(record.id);
+  assert.equal(view._deskWindowShell.boardMetadata.hidden, true);
+  assert.equal(view.dataset.projectionId, '', 'a conflicting record does not silently win global ownership');
+  assert.deepEqual(snapshot, before, 'conflicting legacy records are not repaired');
+  assert.equal(h.state.boards.projections.a.members[0].viewId, record.id);
+  assert.equal(h.state.boards.projections.b.members[0].viewId, record.id);
+});
+
+test('the real merge entry stops before activation or persistence on a conflicting View ID', async () => {
+  const h = windowBoardMetadataHarness(), view = h.spawnDeskWindowShell({ id: 'live', activate: false });
+  const snapshot = { agenda: { id: 'incoming' }, cards: [{ id: 'other', type: 'browser' }], shapes: [],
+    boardProjections: { projections: { incoming: { id: 'incoming', boardId: 'incoming', members: [{ viewId: view.root.id }] } } } };
+  const deskHistory = { busy: false, record: { generation: 1, state: snapshot } }, notices = [];
+  const merge = compileFunction(`${storeDeclaration('mergeDeskGeneration')}\nreturn mergeDeskGeneration;`,
+    ['deskHistory', 'renderDeskHistoryPanel', 'canRestoreDeskSnapshotIdentity', 'boardNotice', 'document'])(
+    deskHistory, () => {}, h.canRestoreDeskSnapshotIdentity, notice => notices.push(notice), h.document);
+  assert.equal(await merge(1), false);
+  assert.equal(deskHistory.busy, false);
+  assert.equal(notices.length, 1);
+  assert.deepEqual(h.effects.activations, []);
+  assert.equal(h.effects.deskSaves, 0);
+  assert.equal(h.document.getElementById('live'), view.root);
+});
+
+test('Board opening reserves another projection\'s dormant member ID', () => {
+  const h = windowBoardMetadataHarness(), reserved = 'egd-board-1-member-0';
+  delete h.state.boards.projections[h.b.id];
+  const keep = h.spawnDeskWindowShell({ id: 'keep-browser', kind: 'browser', activate: false });
+  const native = keep.root._xulBrowser = { identity: 'keep' };
+  h.bindCardSourceRef(keep.root, { kind: 'browser-url', uri: 'https://keep.test/' });
+  const ref = keep.root._sourceRef, keepKey = keep.root.dataset.sourceKey;
+  h.a.members = [{ sourceId: 'old-source', viewId: reserved, kind: 'card',
+    record: { id: 'old-source', type: 'browser', runtimeState: { uri: 'about:blank' } } }];
+  h.a.idMap = { 'old-source': reserved }; h.a.bindings = []; h.a.source = { agenda: { id: h.a.boardId } };
+  const snapshot = { agenda: { id: 'new-board', title: '새 Board', memberCardIds: ['source'], contextBindings: [{ viewId: 'source' }] },
+    cards: [{ id: 'source', type: 'browser', geometry: { x: 10, y: 20, width: 400, height: 300 },
+      runtimeState: { uri: 'about:blank' }, sourceRef: { kind: 'browser-url', uri: 'https://new.test/' } }], shapes: [] };
+  assert.equal(h.document.getElementById(reserved), null);
+  const opened = h.openBoardSnapshot(snapshot, { focus: false }), member = opened.members[0];
+  assert.notEqual(member.viewId, reserved, 'a dormant member reserves its ID even without a DOM node');
+  assert.equal(h.a.members[0].viewId, reserved); assert.equal(opened.idMap.source, member.viewId);
+  assert.equal(opened.bindings[0].viewId, member.viewId);
+  const openedView = h.document.getElementById(member.viewId);
+  assert.equal(h.state.sourceRefs.cardsByKey[openedView.dataset.sourceKey], member.viewId, 'the new source registry uses the final remapped ID');
+  const beforeReopen = h.document.querySelectorAll('.egd-canvas-card, .egd-canvas-shape').length;
+  h.openBoardSnapshot({ agenda: { id: h.a.boardId } }, { focus: false });
+  assert.equal(h.document.querySelectorAll('.egd-canvas-card, .egd-canvas-shape').length, beforeReopen + 1);
+  assert.notEqual(h.document.getElementById(reserved), h.document.getElementById(member.viewId));
+  assert.equal(keep.root._xulBrowser, native); assert.equal(keep.root._sourceRef, ref);
+  assert.equal(h.state.sourceRefs.cardsByKey[keepKey], keep.root.id, 'the unrelated Browser source registry remains intact');
+});
+
+test('Board opening does not replace a dormant projection whose region is absent', () => {
+  const h = windowBoardMetadataHarness(), previousId = h.a.id;
+  h.document.getElementById(previousId).remove(); delete h.state.boards.projections[previousId];
+  h.a.id = 'egd-board-1'; h.state.boards.projections[h.a.id] = h.a;
+  const opened = h.openBoardSnapshot({ agenda: { id: 'new-board', title: 'New', memberCardIds: [] }, cards: [], shapes: [] }, { focus: false });
+  assert.notEqual(opened.id, h.a.id);
+  assert.equal(h.state.boards.projections[h.a.id], h.a);
+  assert.equal(h.state.boards.projections[opened.id], opened);
+});
+
+function recoveredLegacyProjectionHarness() {
+  const h = windowBoardMetadataHarness();
+  const browserRecord = id => ({ id, type: 'browser', geometry: { x: 0, y: 0, width: 400, height: 300 }, runtimeState: { uri: 'about:blank' } });
+  const legacy = { id: 'egd-board-1', boardId: 'legacy-board', title: '기존 Board',
+    members: [{ sourceId: 'legacy-source', viewId: 'legacy-view', kind: 'card', record: browserRecord('legacy-source') }],
+    idMap: { 'legacy-source': 'legacy-view' }, bindings: [], source: { agenda: { id: 'legacy-board' } }, offset: { x: 0, y: 0 } };
+  const snapshot = { agenda: { id: 'desk' }, cards: [browserRecord('legacy-view')], shapes: [],
+    boardProjections: { projections: { 'legacy-key': legacy }, activeProjectionId: null } };
+  assert.equal(Surface.recoverDeskSnapshot(snapshot, h.restoreDeskSession).restored, true, 'the real recovery validator accepts this legacy key');
+  const view = h.document.getElementById('legacy-view'), owner = view._deskWindowShell.boardMetadata;
+  assert.equal(owner.textContent, legacy.title); assert.equal(owner.getAttribute('aria-label'), `소속 Board: ${legacy.title}`);
+  return { h, legacy, view, owner, browserRecord };
+}
+
+test('Board opening reserves a dormant legacy projection internal ID as well as its stored key', () => {
+  const { h, legacy, view, owner } = recoveredLegacyProjectionHarness();
+  const native = view._xulBrowser, stateBefore = structuredClone(h.state), legacyBefore = structuredClone(legacy);
+  h.document.getElementById(legacy.id).remove();
+  const opened = h.openBoardSnapshot({ agenda: { id: 'new-board', title: '새 Board', memberCardIds: [] }, cards: [], shapes: [] }, { focus: false });
+  assert.notEqual(opened.id, legacy.id);
+  assert.equal(h.state.boards.projections['legacy-key'], legacy); assert.deepEqual(legacy, legacyBefore);
+  const stateAfter = structuredClone(h.state); delete stateAfter.boards.projections[opened.id];
+  assert.deepEqual(stateAfter, stateBefore);
+  assert.equal(h.document.getElementById('legacy-view'), view); assert.equal(view._xulBrowser, native);
+  assert.equal(MinimapLayout.owningProjectionByView(h.state.boards.projections).get(view.id), legacy.id);
+  assert.equal(owner.textContent, legacy.title); assert.equal(owner.getAttribute('aria-label'), `소속 Board: ${legacy.title}`);
+});
+
+test('Desk merge rejects a legacy stored-key or internal-ID collision before mutation', async t => {
+  for (const collision of ['internal-id', 'stored-key']) await t.test(collision, async () => {
+    const { h, legacy, view, owner, browserRecord } = recoveredLegacyProjectionHarness(), native = view._xulBrowser;
+    const incoming = collision === 'internal-id'
+      ? { id: legacy.id, boardId: 'other-board', title: '다른 Board', members: [], idMap: {}, bindings: [], source: { agenda: { id: 'other-board' } } }
+      : { ...structuredClone(legacy), id: 'legacy-key' };
+    const snapshot = { agenda: { id: 'desk' }, cards: [browserRecord('new-view')], shapes: [],
+      boardProjections: { projections: { [incoming.id]: incoming } } };
+    const stateBefore = structuredClone(h.state), snapshotBefore = structuredClone(snapshot);
+    const beforeCount = h.document.querySelectorAll('.egd-canvas-card, .egd-canvas-shape').length;
+    const deskHistory = { busy: false, record: { generation: 1, state: snapshot } }, notices = [];
+    const merge = compileFunction(`${storeDeclaration('mergeDeskGeneration')}\nreturn mergeDeskGeneration;`,
+      ['deskHistory', 'renderDeskHistoryPanel', 'canRestoreDeskSnapshotIdentity', 'boardNotice', 'document'])(
+      deskHistory, () => {}, h.canRestoreDeskSnapshotIdentity, notice => notices.push(notice), h.document);
+    assert.equal(h.canRestoreDeskSnapshotIdentity(snapshot, { merge: true }), false);
+    assert.equal(await merge(1), false); assert.equal(deskHistory.busy, false); assert.equal(notices.length, 1);
+    assert.equal(h.restoreDeskSession(snapshot, { merge: true }), false);
+    assert.deepEqual(h.state, stateBefore); assert.deepEqual(snapshot, snapshotBefore);
+    assert.equal(h.document.querySelectorAll('.egd-canvas-card, .egd-canvas-shape').length, beforeCount);
+    assert.equal(h.document.getElementById('new-view'), null); assert.equal(h.document.getElementById('legacy-view'), view);
+    assert.equal(view._xulBrowser, native); assert.equal(h.state.boards.projections['legacy-key'], legacy);
+    assert.equal(MinimapLayout.owningProjectionByView(h.state.boards.projections).get(view.id), legacy.id);
+    assert.equal(owner.textContent, legacy.title); assert.equal(owner.getAttribute('aria-label'), `소속 Board: ${legacy.title}`);
+    assert.equal(h.effects.deskSaves, 0); assert.deepEqual(h.effects.activations, []);
+  });
+});
+
+test('Board reopening rejects ambiguous dormant members before opening any other missing View', () => {
+  const h = windowBoardMetadataHarness();
+  const member = (sourceId, viewId) => ({ sourceId, viewId, kind: 'card',
+    record: { id: sourceId, type: 'browser', geometry: { x: 0, y: 0, width: 400, height: 300 }, runtimeState: { uri: 'about:blank' } } });
+  h.a.members = [member('good', 'good-view'), member('first', 'duplicate-view'), member('second', 'duplicate-view')];
+  h.a.idMap = { good: 'good-view', first: 'duplicate-view', second: 'duplicate-view' };
+  h.a.bindings = []; h.a.source = { agenda: { id: h.a.boardId } };
+  const snapshot = { agenda: { id: h.a.boardId } }, beforeState = structuredClone(h.state), beforeSnapshot = structuredClone(snapshot);
+  assert.equal(h.openBoardSnapshot(snapshot, { focus: false }), false);
+  assert.deepEqual(h.state, beforeState); assert.deepEqual(snapshot, beforeSnapshot);
+  assert.equal(h.document.getElementById('good-view'), null); assert.equal(h.document.getElementById('duplicate-view'), null);
+  assert.deepEqual([h.effects.deskSaves, h.effects.focus, h.effects.fullscreen], [0, 0, 0]);
+});
+
+test('Desk merge rejects a same-Board or projection-ID collision with incompatible membership before mutation', async t => {
+  for (const collision of ['same-board', 'same-projection-id', 'same-board-kind', 'same-board-type']) await t.test(collision, async () => {
+    const h = windowBoardMetadataHarness(), existing = h.spawnDeskWindowShell({ id: 'live-view', kind: 'browser', activate: false });
+    const native = existing.root._xulBrowser = { identity: 'keep' }, ref = existing.root._sourceRef = { uri: 'about:blank' };
+    h.a.members = [{ sourceId: 'actual-source', viewId: 'live-view', kind: 'card', record: { id: 'actual-source', type: 'browser' } }];
+    h.a.idMap = { 'actual-source': 'live-view' };
+    const record = (id, uri) => ({ id, type: 'browser', geometry: { x: 0, y: 0, width: 400, height: 300 }, runtimeState: { uri } });
+    const sourceId = collision.startsWith('same-board-') ? 'actual-source' : 'different-source';
+    const incoming = { id: collision === 'same-projection-id' ? h.a.id : 'alternate-projection',
+      boardId: collision === 'same-projection-id' ? 'different-board' : h.a.boardId, title: '다른 기록',
+      members: [{ sourceId, viewId: 'live-view', kind: collision === 'same-board-kind' ? 'shape' : 'card',
+        record: { ...record(sourceId, 'about:blank'), type: collision === 'same-board-type' ? 'file' : 'browser' } },
+        { sourceId: 'new-source', viewId: 'missing-view', kind: 'card', record: record('new-source', 'about:blank') }],
+      idMap: { [sourceId]: 'live-view', 'new-source': 'missing-view' }, bindings: [], source: { agenda: { id: 'old' } } };
+    const snapshot = { agenda: { id: incoming.boardId }, cards: [record('live-view', 'about:blank'), record('missing-view', 'about:blank')],
+      shapes: [], boardProjections: { projections: { [incoming.id]: incoming } } };
+    const beforeState = structuredClone(h.state), beforeSnapshot = structuredClone(snapshot);
+    const beforeCount = h.document.querySelectorAll('.egd-canvas-card, .egd-canvas-shape').length;
+    const deskHistory = { busy: false, record: { generation: 1, state: snapshot } }, notices = [];
+    const merge = compileFunction(`${storeDeclaration('mergeDeskGeneration')}\nreturn mergeDeskGeneration;`,
+      ['deskHistory', 'renderDeskHistoryPanel', 'canRestoreDeskSnapshotIdentity', 'boardNotice', 'document'])(
+      deskHistory, () => {}, h.canRestoreDeskSnapshotIdentity, notice => notices.push(notice), h.document);
+    assert.equal(h.canRestoreDeskSnapshotIdentity(snapshot, { merge: true }), false);
+    assert.equal(await merge(1), false); assert.equal(deskHistory.busy, false); assert.equal(notices.length, 1);
+    assert.equal(h.restoreDeskSession(snapshot, { merge: true }), false);
+    assert.deepEqual(h.state, beforeState); assert.deepEqual(snapshot, beforeSnapshot);
+    assert.equal(h.document.querySelectorAll('.egd-canvas-card, .egd-canvas-shape').length, beforeCount);
+    assert.equal(h.document.getElementById('missing-view'), null); assert.equal(existing.root._xulBrowser, native);
+    assert.equal(existing.root._sourceRef, ref);
+    assert.deepEqual([h.effects.deskSaves, h.effects.focus, h.effects.fullscreen], [0, 0, 0]);
+    assert.deepEqual(h.effects.activations, []);
+  });
+});
+
+test('Desk merge rejects a dormant Board member ID even when the saved View has no Board', () => {
+  const h = windowBoardMetadataHarness(), reserved = 'dormant-id';
+  h.a.members = [{ sourceId: 'original', viewId: reserved, kind: 'card', record: { id: 'original', type: 'browser' } }];
+  h.a.idMap = { original: reserved };
+  const record = id => ({ id, type: 'browser', geometry: { x: 0, y: 0, width: 400, height: 300 }, runtimeState: { uri: 'about:blank' } });
+  const snapshot = { agenda: { id: 'desk' }, cards: [record(reserved), record('another')], shapes: [] };
+  const beforeState = structuredClone(h.state), beforeSnapshot = structuredClone(snapshot);
+  assert.equal(h.document.getElementById(reserved), null);
+  assert.equal(h.restoreDeskSession(snapshot, { merge: true }), false);
+  assert.deepEqual(h.state, beforeState); assert.deepEqual(snapshot, beforeSnapshot);
+  assert.equal(h.document.getElementById(reserved), null); assert.equal(h.document.getElementById('another'), null);
+  assert.deepEqual([h.effects.deskSaves, h.effects.focus, h.effects.fullscreen], [0, 0, 0]);
+});
+
+test('Desk merge rejects another Board claiming a dormant member before creating any View', () => {
+  const h = windowBoardMetadataHarness(), reserved = 'dormant-id';
+  h.a.members = [{ sourceId: 'original', viewId: reserved, kind: 'card', record: { id: 'original', type: 'browser' } }];
+  h.a.idMap = { original: reserved };
+  const record = id => ({ id, type: 'browser', geometry: { x: 0, y: 0, width: 400, height: 300 }, runtimeState: { uri: 'about:blank' } });
+  const incoming = { id: 'incoming-projection', boardId: 'new-board', members: [
+    { sourceId: 'other', viewId: reserved, kind: 'card', record: record('other') }],
+    idMap: { other: reserved }, bindings: [], source: { agenda: { id: 'new-board' } } };
+  const snapshot = { agenda: { id: 'desk' }, cards: [record(reserved), record('another')], shapes: [],
+    boardProjections: { projections: { [incoming.id]: incoming } } };
+  const beforeState = structuredClone(h.state), beforeSnapshot = structuredClone(snapshot);
+  assert.equal(h.restoreDeskSession(snapshot, { merge: true }), false);
+  assert.deepEqual(h.state, beforeState); assert.deepEqual(snapshot, beforeSnapshot);
+  assert.equal(h.document.getElementById(reserved), null); assert.equal(h.document.getElementById('another'), null);
+  assert.equal(h.state.boards.projections[incoming.id], undefined);
+});
+
+test('Desk merge refuses an unproven Board Chat singleton before adding any other View', async () => {
+  const h = windowBoardMetadataHarness(), chatView = h.spawnDeskWindowShell({ id: 'open-chat', kind: 'chat', activate: false });
+  h.state.codex.chatCardEntityId = chatView.root.id;
+  const record = (id, type) => ({ id, type, geometry: { x: 0, y: 0, width: 400, height: 300 },
+    ...(type === 'browser' ? { runtimeState: { uri: 'about:blank' } } : {}) });
+  const chat = record('saved-chat', 'chat'), browser = record('saved-browser', 'browser');
+  const incoming = { id: 'incoming-projection', boardId: 'new-board', title: 'New', members: [
+    { sourceId: 'source-chat', viewId: chat.id, kind: 'card', record: { ...chat, id: 'source-chat' } },
+    { sourceId: 'source-browser', viewId: browser.id, kind: 'card', record: { ...browser, id: 'source-browser' } }],
+    idMap: { 'source-chat': chat.id, 'source-browser': browser.id }, bindings: [], source: { agenda: { id: 'new-board' } } };
+  const snapshot = { agenda: { id: 'new-board' }, cards: [chat, browser], shapes: [], boardProjections: { projections: { [incoming.id]: incoming } } };
+  const beforeState = structuredClone(h.state), beforeSnapshot = structuredClone(snapshot);
+  const beforeCount = h.document.querySelectorAll('.egd-canvas-card, .egd-canvas-shape').length;
+  const deskHistory = { busy: false, record: { generation: 1, state: snapshot } }, notices = [];
+  const merge = compileFunction(`${storeDeclaration('mergeDeskGeneration')}\nreturn mergeDeskGeneration;`,
+    ['deskHistory', 'renderDeskHistoryPanel', 'canRestoreDeskSnapshotIdentity', 'boardNotice', 'document'])(
+    deskHistory, () => {}, h.canRestoreDeskSnapshotIdentity, notice => notices.push(notice), h.document);
+  assert.equal(h.canRestoreDeskSnapshotIdentity(snapshot, { merge: true }), false);
+  assert.equal(await merge(1), false); assert.equal(deskHistory.busy, false); assert.equal(notices.length, 1);
+  assert.equal(h.restoreDeskSession(snapshot, { merge: true }), false);
+  assert.deepEqual(h.state, beforeState); assert.deepEqual(snapshot, beforeSnapshot);
+  assert.equal(h.document.querySelectorAll('.egd-canvas-card, .egd-canvas-shape').length, beforeCount);
+  assert.equal(h.document.getElementById('open-chat'), chatView.root);
+  assert.equal(h.document.getElementById('saved-browser'), null);
+  assert.equal(h.state.boards.projections[incoming.id], undefined);
+  assert.deepEqual(h.effects.activations, []); assert.equal(h.effects.deskSaves, 0);
+});
+
+test('Desk merge rejects a projected Chat singleton even if its saved card record is absent', () => {
+  const h = windowBoardMetadataHarness(), chatView = h.spawnDeskWindowShell({ id: 'open-chat', kind: 'chat', activate: false });
+  h.state.codex.chatCardEntityId = chatView.root.id;
+  const browser = { id: 'other-view', type: 'browser', geometry: { x: 0, y: 0, width: 400, height: 300 }, runtimeState: { uri: 'about:blank' } };
+  const incoming = { id: 'incoming-projection', boardId: 'new-board', members: [
+    { sourceId: 'source-chat', viewId: 'saved-chat', kind: 'card', record: { id: 'source-chat', type: 'chat' } }],
+    idMap: { 'source-chat': 'saved-chat' }, bindings: [], source: { agenda: { id: 'new-board' } } };
+  const snapshot = { agenda: { id: 'desk' }, cards: [browser], shapes: [], boardProjections: { projections: { [incoming.id]: incoming } } };
+  const beforeState = structuredClone(h.state), beforeSnapshot = structuredClone(snapshot);
+  assert.equal(h.restoreDeskSession(snapshot, { merge: true }), false);
+  assert.deepEqual(h.state, beforeState); assert.deepEqual(snapshot, beforeSnapshot);
+  assert.equal(h.document.getElementById('open-chat'), chatView.root); assert.equal(h.document.getElementById('other-view'), null);
+});
+
+test('Desk merge keeps compatible existing Board ownership and restores an unrelated missing View', () => {
+  const h = windowBoardMetadataHarness(), existing = h.spawnDeskWindowShell({ id: 'live-view', kind: 'browser', activate: false });
+  h.a.members = [{ sourceId: 'original', viewId: 'live-view', kind: 'card', record: { id: 'original', type: 'browser' } }];
+  h.a.idMap = { original: 'live-view' };
+  const record = id => ({ id, type: 'browser', geometry: { x: 0, y: 0, width: 400, height: 300 }, runtimeState: { uri: 'about:blank' } });
+  const incoming = { id: 'alternate-projection', boardId: h.a.boardId, members: structuredClone(h.a.members), idMap: { ...h.a.idMap },
+    bindings: [], source: { agenda: { id: h.a.boardId } } };
+  const snapshot = { agenda: { id: h.a.boardId }, cards: [record('live-view'), record('other-view')], shapes: [],
+    boardProjections: { projections: { [incoming.id]: incoming } } };
+  assert.equal(h.canRestoreDeskSnapshotIdentity(snapshot, { merge: true }), true);
+  assert.equal(h.restoreDeskSession(snapshot, { merge: true }), true);
+  assert.equal(h.document.getElementById('live-view'), existing.root);
+  assert.ok(h.document.getElementById('other-view')); assert.equal(h.state.boards.projections[incoming.id], undefined);
+  assert.equal(h.a.members[0].viewId, 'live-view');
+});
+
+test('Desk merge restores a noncolliding Board and View without changing the existing Browser', () => {
+  const h = windowBoardMetadataHarness(), existing = h.spawnDeskWindowShell({ id: 'keep', kind: 'browser', activate: false });
+  const native = existing.root._xulBrowser = { identity: 'keep' }, ref = existing.root._sourceRef = { uri: 'about:blank' };
+  const record = { id: 'new-view', type: 'browser', geometry: { x: 10, y: 20, width: 400, height: 300 }, runtimeState: { uri: 'about:blank' } };
+  const incoming = { id: 'new-projection', boardId: 'new-board', title: '새 Board', members: [
+    { sourceId: 'new-source', viewId: record.id, kind: 'card', record: { ...record, id: 'new-source' } }],
+    idMap: { 'new-source': record.id }, bindings: [], source: { agenda: { id: 'new-board' } } };
+  const snapshot = { agenda: { id: 'desk' }, cards: [record], shapes: [], boardProjections: { projections: { [incoming.id]: incoming } } };
+  const before = structuredClone(snapshot);
+  assert.equal(h.canRestoreDeskSnapshotIdentity(snapshot, { merge: true }), true);
+  assert.equal(h.restoreDeskSession(snapshot, { merge: true }), true);
+  const restored = h.document.getElementById(record.id);
+  assert.ok(restored); assert.equal(restored.dataset.projectionId, incoming.id);
+  assert.equal(h.state.boards.projections[incoming.id].idMap['new-source'], record.id);
+  assert.equal(existing.root._xulBrowser, native); assert.equal(existing.root._sourceRef, ref);
+  assert.deepEqual(snapshot, before);
+});
+
+test('duplicate Desk View IDs are rejected before a restore can clear existing work', async () => {
+  const h = windowBoardMetadataHarness(), snapshot = { agenda: { id: 'a' },
+    cards: [{ id: 'duplicate', type: 'browser' }], shapes: [{ id: 'duplicate', type: 'rect' }] };
+  let clears = 0;
+  const redraw = compileFunction(`${storeDeclaration('redrawDeskFromState')}\nreturn redrawDeskFromState;`,
+    ['canRestoreDeskSnapshotIdentity', 'clearCanvasEntitiesForRestore'])(h.canRestoreDeskSnapshotIdentity, () => { clears++; return true; });
+  assert.equal(await redraw(snapshot), false);
+  assert.equal(clears, 0);
+});
+
 const topLevelFunction = name => surfaceSource.match(new RegExp(`  function ${name}\\([^]*?\\n  }\\n`))?.[0];
 const productionDockCenter = () => {
   const literal = surfaceSource.match(/  const DOCK_CENTER = (\[[\s\S]*?\n  \]);/)?.[1];
@@ -9540,10 +10196,10 @@ test('production Board region shows icon and name, the current Board edge, unsav
   const calls = [];
   const build = compileFunction(`${marks}\n${refresh}\nreturn { syncBoardRegionMarks, refreshBoardRegion };`,
     ['state', 'document', 'el', 'deskIcon', 'selectBoardProjection', 'toggleBoardRegionMenu',
-      'persistentEntityGeometry', 'SurfaceState', 'scheduleViewportBoardSync'])(
+      'persistentEntityGeometry', 'SurfaceState', 'scheduleViewportBoardSync', 'syncAllDeskWindowBoardMetadata'])(
     state, dom.document, dom.el, name => dom.el('svg', { class: `icon-${name}` }),
     id => calls.push(['select', id]), (id, anchor) => calls.push(['menu', id, anchor.dataset.testid]),
-    view => members[view.id], Surface, () => calls.push(['sync']));
+    view => members[view.id], Surface, () => calls.push(['sync']), () => {});
   const region = build.refreshBoardRegion(projection);
   assert.equal(region.tag, 'section');
   assert.equal(region.className, 'egd-board-region');
@@ -13763,6 +14419,31 @@ function browserAgentControlHarness() {
   return { ...maps, block, transport, dispatch: transport.browserToolDispatch, req, select, calls, card, agentBadge, agentHandButton,
     menuButton, document, history, revokes, menus, notices, timers };
 }
+
+test('compact Browser Agent status preserves reading, acting and user-control meanings in the actual renderer', () => {
+  const h = browserAgentControlHarness();
+  h.runBindings.set('synthetic-binding', { binding: { cardId: h.card.id }, permission: 'observe' });
+  h.block.agentControl.inFlight = 1;
+  h.block.refreshAgentControl();
+  assert.equal(h.agentBadge.dataset.compactLabel, '읽기');
+  assert.equal(h.agentBadge.textContent, 'Agent 읽는 중');
+  assert.match(h.agentBadge.getAttribute('aria-label'), /Agent 읽는 중/);
+  assert.match(h.agentBadge.title, /Agent 활동 기록 보기/);
+  h.runBindings.get('synthetic-binding').permission = 'interact';
+  h.block.refreshAgentControl();
+  assert.equal(h.agentBadge.dataset.compactLabel, '조작');
+  assert.equal(h.agentBadge.textContent, 'Agent 조작 중');
+  assert.match(h.agentBadge.getAttribute('aria-label'), /Agent 조작 중/);
+  assert.match(h.agentHandButton.getAttribute('aria-label'), /일시중지/);
+  assert.match(h.agentHandButton.title, /조작 권한을 거두고 직접 조작/);
+  h.block.pauseAgentControl();
+  assert.equal(h.agentBadge.dataset.compactLabel, '직접');
+  assert.equal(h.agentBadge.textContent, '대표님이 직접 조작 중');
+  assert.match(h.agentBadge.getAttribute('aria-label'), /대표님이 직접 조작 중/);
+  assert.match(h.agentHandButton.getAttribute('aria-label'), /돌려주기/);
+  assert.match(h.agentHandButton.title, /자동으로 돌아가지 않고/);
+  assert.deepEqual(h.revokes, [h.card.id], 'compact text adds no authority operation');
+});
 
 test('[일시중지] revokes the Card lease through the Stop path, refuses the next Agent request with zero dispatch, and tells Chat once', async () => {
   const h = browserAgentControlHarness();

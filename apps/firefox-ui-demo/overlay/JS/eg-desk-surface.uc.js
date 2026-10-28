@@ -4189,7 +4189,57 @@
     };
   }
 
+  function allocateRestoredEntityId(additionalReserved = null) {
+    const reserved = new Set(Object.values(state.boards.projections).flatMap(projection =>
+      (Array.isArray(projection?.members) ? projection.members : []).map(member => member?.viewId)));
+    for (const id of additionalReserved || []) reserved.add(id);
+    let id;
+    do { id = `egd-restored-${++cardSeq}`; } while (document.getElementById(id) || reserved.has(id));
+    return id;
+  }
+
+  // Rebind only the member actually restored, and only when its saved mapping
+  // is unambiguous. Other live Views and their Board records are untouched.
+  function canRemapRestoredBoardMember(projection, member) {
+    return Array.isArray(projection?.members) && projection.members.includes(member)
+      && projection.members.filter(item => item?.viewId === member.viewId).length === 1
+      && projection.members.filter(item => item?.sourceId === member.sourceId).length === 1
+      && projection.idMap?.[member.sourceId] === member.viewId;
+  }
+
+  function remapRestoredBoardMember(projection, member, nextId) {
+    if (member.viewId === nextId) return true;
+    if (!nextId || !canRemapRestoredBoardMember(projection, member)
+        || projection.members.some(item => item !== member && item?.viewId === nextId)) return false;
+    const previousId = member.viewId;
+    const translations = Object.assign(Object.create(null), { [previousId]: nextId });
+    const nextBindings = SurfaceState.remapMemberReferences(projection.bindings, translations);
+    projection.idMap = { ...projection.idMap, [member.sourceId]: nextId };
+    member.viewId = nextId;
+    projection.bindings = nextBindings;
+    return true;
+  }
+
+  function remapRestoredProjectionIds(projection, restoredIds) {
+    if (!restoredIds.size) return;
+    const ids = Object.assign(Object.create(null), Object.fromEntries(restoredIds));
+    for (const member of projection.members || []) {
+      if (restoredIds.has(member.viewId)) member.viewId = restoredIds.get(member.viewId);
+    }
+    if (projection.idMap) projection.idMap = Object.fromEntries(Object.entries(projection.idMap)
+      .map(([source, viewId]) => [source, restoredIds.get(viewId) || viewId]));
+    projection.bindings = SurfaceState.remapMemberReferences(projection.bindings, ids);
+  }
+
   function mountBoardMember(projection, member, options = {}) {
+    const registered = projection?.id && state.boards.projections[projection.id] === projection;
+    const reservedByOtherMember = id => Object.values(state.boards.projections).some(current =>
+      Array.isArray(current?.members) && current.members.some(item => item !== member && item?.viewId === id));
+    if (registered && (document.getElementById(member.viewId) || reservedByOtherMember(member.viewId))
+        && !canRemapRestoredBoardMember(projection, member)) {
+      boardNotice('Board 구성원 ID가 충돌하여 안전하게 복원할 수 없습니다.');
+      return null;
+    }
     const record = cloneJson(member.record);
     const geometry = { ...(record.geometry || { x: 40, y: 80, width: 340, height: 180 }) };
     geometry.x = (geometry.x || 0) + (projection.offset?.x || 0);
@@ -4197,7 +4247,7 @@
     let view = null;
     let reason = '이 구성원은 연결 상태를 확인한 뒤 열 수 있습니다.';
     try {
-      if (member.kind === 'shape') view = restoreShapeFromState({ ...record, id: member.viewId, geometry });
+      if (member.kind === 'shape') view = restoreShapeFromState({ ...record, id: member.viewId, geometry }, { reservedIds: options.reservedIds });
       else if (record.type === 'browser') {
         const uri = record.runtimeState?.uri || record.sourceRef?.uri;
         if (!uri) throw new Error('저장된 주소가 없습니다.');
@@ -4217,7 +4267,7 @@
       const terminal = record.type === 'terminal';
       if (terminal) reason = '저장된 터미널 배치입니다. 이전 PTY 연결은 확인되지 않았습니다. 새 세션을 직접 열 수 있으며 이전 명령은 재실행하지 않습니다.';
       view = el('div', {
-        id: member.viewId, class: 'egd-canvas-card egd-board-missing', role: 'region',
+        id: allocateRestoredEntityId(options.reservedIds), class: 'egd-canvas-card egd-board-missing', role: 'region',
         'aria-label': 'Board 구성원 연결 확인', data: { testid: 'board-missing-member' },
       }, el('strong', {}, record.sourceRef?.path || record.sourceRef?.uri || record.type || '구성원'),
       el('p', {}, reason),
@@ -4231,7 +4281,13 @@
       view._savedBoardMember = record;
       document.getElementById('egd-canvas-layer').appendChild(view);
     }
-    retargetRestoredEntityId(view, member.viewId);
+    retargetRestoredEntityId(view, member.viewId, options.reservedIds);
+    if (registered && reservedByOtherMember(view.id)) {
+      view.id = allocateRestoredEntityId(options.reservedIds);
+    }
+    if (registered && !remapRestoredBoardMember(projection, member, view.id)) {
+      throw new Error('Board 구성원 ID를 안전하게 연결하지 못했습니다.');
+    }
     if (record.sourceRef && !options.newTerminal) bindCardSourceRef(view, record.sourceRef);
     if (options.newTerminal) { view.dataset.runtimeContinuity = 'new-session'; registerSourceRefCard(view); }
     applyPersistentEntityGeometry(view, geometry);
@@ -4239,6 +4295,7 @@
     view.dataset.projectionId = projection.id;
     view.dataset.memberId = member.sourceId;
     view.addEventListener('mousedown', () => selectBoardProjection(projection.id), true);
+    if (registered) syncDeskWindowBoardMetadata(view);
     return view;
   }
 
@@ -4280,6 +4337,38 @@
     }
   }
 
+  // A titlebar only names a uniquely recorded owner; neither the active Board
+  // nor the position of the window establishes membership.
+  function deskWindowBoardIndex() {
+    const projections = Object.values(state.boards?.projections || {});
+    return {
+      owners: MinimapLayout.owningProjectionByView(projections),
+      projections: new Map(projections.filter(projection => projection?.id != null).map(projection => [projection.id, projection])),
+    };
+  }
+
+  function syncDeskWindowBoardMetadata(view, index = deskWindowBoardIndex()) {
+    const label = view?._deskWindowShell?.boardMetadata;
+    if (!label) return;
+    const ownerId = index.owners.get(view.id);
+    const projection = ownerId == null ? null : index.projections.get(ownerId);
+    const title = typeof projection?.title === 'string' && projection.title.trim() ? projection.title : '';
+    const accessibleName = title ? `소속 Board: ${title}` : null;
+    if (label.hidden !== !title) label.hidden = !title;
+    if (label.textContent !== title) label.textContent = title;
+    if (label.title !== title) label.title = title;
+    if (label.getAttribute('aria-label') !== accessibleName) {
+      if (accessibleName) label.setAttribute('aria-label', accessibleName);
+      else label.removeAttribute('aria-label');
+    }
+    view._browserPresentation?.layout?.();
+  }
+
+  function syncAllDeskWindowBoardMetadata() {
+    const index = deskWindowBoardIndex();
+    for (const view of document.querySelectorAll('.egd-desk-window')) syncDeskWindowBoardMetadata(view, index);
+  }
+
   function refreshBoardRegion(projection) {
     let region = document.getElementById(projection.id);
     if (!region) {
@@ -4310,6 +4399,7 @@
     const rect = SurfaceState.boardRegionRect(rects, { fallback: projection.offset });
     Object.assign(region.style, { left: `${rect.x}px`, top: `${rect.y}px`, width: `${rect.width}px`, height: `${rect.height}px` });
     scheduleViewportBoardSync();
+    syncAllDeskWindowBoardMetadata();
     return region;
   }
 
@@ -4647,7 +4737,9 @@
     let projection = Object.values(state.boards.projections).find(p => p.boardId === snapshot.agenda.id);
     if (!projection) {
       let projectionId;
-      do { projectionId = `egd-board-${++cardSeq}`; } while (document.getElementById(projectionId));
+      do { projectionId = `egd-board-${++cardSeq}`; }
+      while (document.getElementById(projectionId) || Object.hasOwn(state.boards.projections, projectionId)
+        || Object.values(state.boards.projections).some(projection => projection?.id === projectionId));
       projection = SurfaceState.planBoardProjection(snapshot, projectionId);
       // The whole Board region keeps its saved layout and takes the closest
       // empty spot of the view, 24px clear of open Views and Boards.
@@ -4662,6 +4754,10 @@
       finally { state.agenda.suppressDirty = false; }
     } else {
       const missing = SurfaceState.missingProjectionMembers(projection, projection.members.map(member => document.getElementById(member.viewId)?.id).filter(Boolean));
+      const unsafe = missing.some(member => Object.values(state.boards.projections).some(current =>
+        Array.isArray(current?.members) && current.members.some(item => item !== member && item?.viewId === member.viewId))
+        && !canRemapRestoredBoardMember(projection, member));
+      if (unsafe) { boardNotice('Board 구성원 ID가 충돌하여 안전하게 복원할 수 없습니다.'); return false; }
       state.agenda.suppressDirty = true;
       try { for (const member of missing) mountBoardMember(projection, member); }
       finally { state.agenda.suppressDirty = false; }
@@ -4677,15 +4773,22 @@
     return projection;
   }
 
-  function retargetRestoredEntityId(entity, savedId) {
+  function retargetRestoredEntityId(entity, savedId, reservedIds = null) {
     if (!entity || !savedId) return;
     unregisterSourceRefCard(entity);
-    if (!document.getElementById(savedId) || entity.id === savedId) {
+    const occupant = document.getElementById(savedId);
+    if (!occupant || occupant === entity) {
       entity.id = savedId;
+    } else {
+      const temporaryOccupant = entity.id && document.getElementById(entity.id);
+      if (!entity.id || entity.id === savedId || reservedIds?.has(entity.id) || (temporaryOccupant && temporaryOccupant !== entity)) {
+        entity.id = allocateRestoredEntityId(reservedIds);
+      }
     }
     const suffix = String(entity.id || '').match(/-(\d+)$/);
     if (suffix) cardSeq = Math.max(cardSeq, Number(suffix[1]));
     if (entity.classList.contains('egd-chat-card')) state.codex.chatCardEntityId = entity.id;
+    syncDeskWindowBoardMetadata(entity);
   }
 
   async function clearCanvasEntitiesForRestore() {
@@ -4744,10 +4847,10 @@
     return card;
   }
 
-  function restoreShapeFromState(shapeState) {
+  function restoreShapeFromState(shapeState, options = {}) {
     const restored = SurfaceState.restoreCanvasShape(shapeState);
     const shape = createCanvasShape(restored.type);
-    retargetRestoredEntityId(shape, shapeState?.id);
+    retargetRestoredEntityId(shape, shapeState?.id, options.reservedIds);
     if (shapeState?.sourceRef) shape._sourceRef = shapeState.sourceRef;
     applyPersistentEntityGeometry(shape, shapeState?.geometry);
     if (restored.transform) shape.style.transform = restored.transform;
@@ -4774,8 +4877,51 @@
     return openBoardSnapshot(snapshot, options);
   }
 
+  function canRestoreDeskSnapshotIdentity(snapshot, { merge = false } = {}) {
+    const savedIds = [...(snapshot.cards || []), ...(snapshot.shapes || [])].map(item => item?.id).filter(Boolean);
+    if (new Set(savedIds).size !== savedIds.length) return false;
+    if (!merge) return true;
+    const liveIds = new Set(Array.from(document.querySelectorAll('.egd-canvas-card, .egd-canvas-shape')).map(view => view.id));
+    const current = state.boards.projections;
+    const currentProjections = Object.values(current);
+    const incomingOwners = new Set(), incomingBoards = new Set();
+    const differentChatIds = new Set((snapshot.cards || []).filter(card => card?.type === 'chat' && state.codex.chatCardEntityId
+      && card.id !== state.codex.chatCardEntityId).map(card => card.id));
+    for (const [id, projection] of Object.entries(snapshot.boardProjections?.projections || {})) {
+      if (!projection || projection.id !== id || !projection.boardId || incomingBoards.has(projection.boardId)
+          || !Array.isArray(projection.members)) return false;
+      incomingBoards.add(projection.boardId);
+      const byId = Object.hasOwn(current, id) ? current[id] : null;
+      if ((byId && byId.id !== id) || Object.entries(current).some(([key, item]) => key !== id && item?.id === id)) return false;
+      const byBoard = currentProjections.filter(item => item?.boardId === projection.boardId);
+      if ((byId && byId.boardId !== projection.boardId) || byBoard.length > 1) return false;
+      const existing = byId || byBoard[0] || null;
+      if (existing && !Array.isArray(existing.members)) return false;
+      for (const member of projection.members) {
+        if (!member?.viewId || !member?.sourceId || !member.record || projection.idMap?.[member.sourceId] !== member.viewId
+            || incomingOwners.has(member.viewId) || differentChatIds.has(member.viewId) ||
+            (state.codex.chatCardEntityId && member.record?.type === 'chat' && member.viewId !== state.codex.chatCardEntityId)) return false;
+        incomingOwners.add(member.viewId);
+        const owners = currentProjections.filter(item => Array.isArray(item?.members) && item.members.some(row => row?.viewId === member.viewId));
+        if (owners.length > 1 || (owners.length && owners[0] !== existing) || (liveIds.has(member.viewId) && !owners.length)) return false;
+        if (existing) {
+          const prior = existing.members.filter(row => row?.viewId === member.viewId);
+          if (prior.length !== 1 || prior[0].sourceId !== member.sourceId ||
+              existing.idMap?.[member.sourceId] !== member.viewId || prior[0].kind !== member.kind
+              || prior[0].record?.type !== member.record?.type) return false;
+        }
+      }
+    }
+    for (const id of savedIds) {
+      if (!liveIds.has(id) && !incomingOwners.has(id) && currentProjections.some(projection =>
+        Array.isArray(projection?.members) && projection.members.some(member => member?.viewId === id))) return false;
+    }
+    return true;
+  }
+
   function restoreDeskSession(snapshot, options = {}) {
     if (!snapshot?.agenda?.id) return false;
+    if (!canRestoreDeskSnapshotIdentity(snapshot, options)) return false;
     if (!options.merge && document.querySelector('.egd-canvas-card, .egd-canvas-shape')) return false;
     state.agenda.restoreInProgress = true;
     state.agenda.suppressDirty = true;
@@ -4793,30 +4939,44 @@
       }
       const records = options.merge ? RecoveryState.missingDeskRecoveryViews(snapshot,
         Array.from(document.querySelectorAll('.egd-canvas-card, .egd-canvas-shape')).map(view => view.id)) : snapshot;
+      const restoredIds = new Map();
+      const rememberRestoredId = (savedId, view) => { if (view?.id && view.id !== savedId) restoredIds.set(savedId, view.id); };
       const boardMemberIds = new Set(Object.values(snapshot.boardProjections?.projections || {}).flatMap(projection => projection.members.map(member => member.viewId)));
+      const reservedIds = new Set([...boardMemberIds, ...(snapshot.cards || []).map(card => card.id), ...(snapshot.shapes || []).map(shape => shape.id)]);
       for (const cardState of records.cards || []) {
         if (options.merge && cardState.type === 'chat' && state.codex.chatCardEntityId) continue;
         if (cardState.type === 'chat' && !boardMemberIds.has(cardState.id)) {
           const card = spawnCodexChatCard();
-          retargetRestoredEntityId(card, cardState.id);
+          retargetRestoredEntityId(card, cardState.id, reservedIds);
+          rememberRestoredId(cardState.id, card);
           applyPersistentEntityGeometry(card, cardState.geometry);
           continue;
         }
         const projection = { id: '', boardId: '', offset: { x: 0, y: 0 } };
-        mountBoardMember(projection, { sourceId: cardState.id, viewId: cardState.id, kind: 'card', record: cardState });
+        const view = mountBoardMember(projection, { sourceId: cardState.id, viewId: cardState.id, kind: 'card', record: cardState }, { reservedIds });
+        rememberRestoredId(cardState.id, view);
       }
-      for (const shapeState of records.shapes || []) restoreShapeFromState(shapeState);
-      if (!options.merge) state.boards = snapshot.boardProjections || { projections: {}, activeProjectionId: null };
+      for (const shapeState of records.shapes || []) rememberRestoredId(shapeState.id, restoreShapeFromState(shapeState, { reservedIds }));
+      if (!options.merge) {
+        state.boards = snapshot.boardProjections
+          ? (restoredIds.size ? cloneJson(snapshot.boardProjections) : snapshot.boardProjections)
+          : { projections: {}, activeProjectionId: null };
+        for (const projection of Object.values(state.boards.projections)) remapRestoredProjectionIds(projection, restoredIds);
+      }
       else {
         for (const [id, projection] of Object.entries(snapshot.boardProjections?.projections || {})) {
           if (!state.boards.projections[id] && !Object.values(state.boards.projections).some(current => current.boardId === projection.boardId)) {
-            state.boards.projections[id] = cloneJson(projection);
+            const restored = cloneJson(projection);
+            remapRestoredProjectionIds(restored, restoredIds);
+            state.boards.projections[id] = restored;
           }
         }
       }
+      const owners = MinimapLayout.owningProjectionByView(state.boards.projections);
       for (const projection of Object.values(state.boards.projections)) {
         refreshBoardRegion(projection);
         for (const member of projection.members) {
+          if (owners.get(member.viewId) !== projection.id) continue;
           const view = document.getElementById(member.viewId);
           if (!view) continue;
           view.dataset.boardId = projection.boardId;
@@ -4839,7 +4999,8 @@
           zoom: Number.isFinite(snapshot.desk.zoom) ? snapshot.desk.zoom : state.zoomTarget,
         }, { immediate: true });
       }
-      const active = snapshot.desk?.activeCardId ? document.getElementById(snapshot.desk.activeCardId) : null;
+      const activeId = snapshot.desk?.activeCardId;
+      const active = activeId ? document.getElementById(restoredIds.get(activeId) || activeId) : null;
       if (active && !options.merge) setActiveEntity(active);
       if (!options.merge) {
         state.agenda.dirty = !!activeBoardProjection()?.dirty;
@@ -4965,6 +5126,7 @@
     document.getElementById(projection.id)?._disposeBoardCanvasExport?.();
     document.getElementById(projection.id)?.remove();
     delete state.boards.projections[projection.id];
+    syncAllDeskWindowBoardMetadata();
     boardCloseRequests.delete(projection.id);
     markAgendaClosed(projection.boardId);
     if (state.boards.activeProjectionId === projection.id) {
@@ -5097,22 +5259,20 @@
 
   function renameAgenda(agendaId, nextTitle) {
     if (!agendaId) return false;
-    const store = coerceAgendaStore();
-    const snapshot = store.agendas?.[agendaId] || null;
-    const fallbackTitle = snapshot?.agenda?.title || store.meta?.[agendaId]?.title || 'Board';
+    const current = coerceAgendaStore();
+    const snapshot = current.agendas?.[agendaId] || null;
+    const fallbackTitle = snapshot?.agenda?.title || current.meta?.[agendaId]?.title || 'Board';
     const title = normalizeAgendaTitle(nextTitle, fallbackTitle);
-    store.meta[agendaId] = {
-      ...(store.meta[agendaId] || {}),
+    const meta = {
+      ...(current.meta[agendaId] || {}),
       id: agendaId,
       title,
-      createdAt: store.meta[agendaId]?.createdAt || snapshot?.savedAt || Date.now(),
+      createdAt: current.meta[agendaId]?.createdAt || snapshot?.savedAt || Date.now(),
       updatedAt: Date.now(),
     };
-    if (snapshot?.agenda) {
-      snapshot.agenda.title = title;
-      snapshot.savedAt = Date.now();
-      store.agendas[agendaId] = snapshot;
-    }
+    const store = { ...current, meta: { ...current.meta, [agendaId]: meta }, agendas: { ...current.agendas } };
+    if (snapshot?.agenda) store.agendas[agendaId] = { ...snapshot, agenda: { ...snapshot.agenda, title }, savedAt: Date.now() };
+    if (!writeAgendaStoreAndSync(store)) return false;
     if (agendaId === state.agenda.activeAgendaId) state.agenda.activeTitle = title;
     for (const projection of Object.values(state.boards.projections)) {
       if (projection.boardId !== agendaId) continue;
@@ -5120,9 +5280,8 @@
       document.getElementById(projection.id)?.remove();
       refreshBoardRegion(projection);
     }
-    const ok = writeAgendaStoreAndSync(store);
     syncViewportAgendaRail();
-    return ok ? title : false;
+    return title;
   }
 
   function renameAgendaWithPrompt(agendaId) {
@@ -13220,6 +13379,7 @@
 
     const identity = el('div', { class: 'egd-desk-window-identity' });
     identity.appendChild(deskIcon({ browser: 'browser', ontology: 'ontology', file: 'file', 'input-evidence': 'file', result: 'result' }[kind] || 'square', 'egd-ui-icon egd-window-kind-icon'));
+    const boardMetadata = el('span', { class: 'egd-desk-window-board', role: 'note', hidden: true, data: { testid: 'window-board' } });
     const actions = el('div', { class: 'egd-desk-window-actions' });
     const topbar = el('div', { class: 'egd-card-topbar egd-desk-window-titlebar' },
       el('div', { class: 'egd-card-dots-shell' },
@@ -13227,6 +13387,7 @@
       ),
       el('span', { class: 'egd-window-grip', 'aria-hidden': 'true' }, deskIcon('grip')),
       identity,
+      boardMetadata,
       actions,
     );
     const header = el('div', {
@@ -13378,6 +13539,7 @@
 
     const shell = {
       root,
+      boardMetadata,
       slots: { header, topbar, identity, actions, toolbar, progress, content: body },
       resizeHits,
       focus,
@@ -13402,6 +13564,7 @@
     };
     root._cleanup = runCleanup;
     root._deskWindowShell = shell;
+    syncDeskWindowBoardMetadata(root);
     return shell;
   }
 
@@ -17506,6 +17669,11 @@
       agentBadge.dataset.mode = view.mode;
       // The status region speaks when the label changes, never on a re-render.
       if (agentBadge.textContent !== view.label) agentBadge.textContent = view.label;
+      agentBadge.dataset.compactLabel = view.mode === 'user' ? '직접'
+        : view.mode === 'operating' ? (view.label === 'Agent 읽는 중' ? '읽기' : '조작') : '';
+      const badgeName = view.label ? `${view.label} · Agent 활동 기록 보기` : 'Agent 활동 기록 보기';
+      if (agentBadge.title !== badgeName) agentBadge.title = badgeName;
+      if (agentBadge.getAttribute('aria-label') !== badgeName) agentBadge.setAttribute('aria-label', badgeName);
       agentHandButton.hidden = !view.control;
       agentHandButton.dataset.action = view.control || '';
       if (view.control) {
@@ -17516,6 +17684,7 @@
         agentHandButton.title = handback
           ? '직접 조작을 끝냅니다. 조작 권한은 자동으로 돌아가지 않고, 이어서 여는 메뉴에서 다시 허용할 수 있습니다.'
           : 'Agent의 이 Browser 조작 권한을 거두고 직접 조작합니다';
+        agentHandButton.setAttribute('aria-label', `${text} · ${agentHandButton.title}`);
       }
       if (agentBadge.hidden) closeAgentTimeline({ restoreFocus: !!agentControl.popover?.contains(focused) });
       // Pausing keeps focus on the same button, now [돌려주기]; a control that goes away hands focus on.
@@ -17525,6 +17694,7 @@
       if (view.recheckMs > 0 && card.isConnected) {
         agentControl.timer = window.setTimeout(() => { agentControl.timer = 0; refreshAgentControl(); }, view.recheckMs);
       }
+      card._browserPresentation?.layout?.();
       return view;
     };
     const renderAgentTimeline = () => {
@@ -18086,6 +18256,8 @@
       if (wrap.style.transform !== transform) wrap.style.transform = transform;
       const left = fit.left + 'px';
       if (wrap.style.left !== left) wrap.style.left = left;
+      syncBrowserBoardCollision({ card, bar: deskWindow.slots.topbar, board: deskWindow.boardMetadata,
+        title: pageTitle, badge: agentBadge, hand: agentHandButton, zoom });
     };
     presentation.layout = updateFitScale;
     // Explicit focus must not treat the compact toolbar's extra height as the
@@ -18308,6 +18480,29 @@
         if (flight) clearTimer(flight.timer);
       },
     };
+  }
+
+  function syncBrowserBoardCollision({ card, bar, board, title, badge, hand, zoom }) {
+    const active = card.dataset.egdAgentControl === 'operating' || card.dataset.egdAgentControl === 'user';
+    const barRect = bar.getBoundingClientRect();
+    const key = JSON.stringify([active, card.dataset.egdAgentControl, barRect.width, zoom,
+      bar.textContent, bar.querySelector?.('.egd-card-page-status')?.hidden,
+      bar.parentElement?.style?.getPropertyValue('--egd-browser-ui-scale'),
+      board.hidden, board.textContent, title.textContent, badge.hidden, badge.textContent,
+      badge.dataset?.compactLabel, hand.hidden, hand.textContent, hand.dataset?.action]);
+    if (card._egdBoardCollisionKey === key) return;
+    card._egdBoardCollisionKey = key;
+    delete card.dataset.egdBoardVisualHidden;
+    if (!active || board.hidden || barRect.width <= 0) return;
+    const label = board.getBoundingClientRect();
+    const overlaps = node => {
+      if (node.hidden) return false;
+      const rect = node.getBoundingClientRect();
+      return rect.width > 0 && rect.height > 0 && label.left < rect.right && label.right > rect.left
+        && label.top < rect.bottom && label.bottom > rect.top;
+    };
+    if (label.width > 0 && (label.left < barRect.left || label.right > barRect.right ||
+        [title, badge, hand].some(overlaps))) card.dataset.egdBoardVisualHidden = 'true';
   }
 
   function browserPresentationFit({ width, height, logicalWidth, logicalHeight }) {
@@ -20248,7 +20443,7 @@
 
   // Draw a saved Desk in place of the current one. Chat rooms stay as they are now.
   async function redrawDeskFromState(snapshot) {
-    if (!snapshot?.agenda?.id) return false;
+    if (!snapshot?.agenda?.id || !canRestoreDeskSnapshotIdentity(snapshot)) return false;
     if (!(await clearCanvasEntitiesForRestore())) return false;
     closeBoardRegionMenu();
     for (const region of Array.from(document.querySelectorAll('.egd-board-region'))) {
@@ -20301,6 +20496,10 @@
       const record = deskHistory.record?.generation === generation && deskHistory.record.state
         ? deskHistory.record : await deskStoreSync().generation(generation);
       if (!record?.state) { boardNotice('이 시점을 불러오지 못했습니다. 지금 작업은 그대로입니다.'); return false; }
+      if (!canRestoreDeskSnapshotIdentity(record.state, { merge: true })) {
+        boardNotice('겹치는 화면 ID를 안전하게 확인할 수 없어 합치지 않았습니다. 지금 작업은 그대로입니다.');
+        return false;
+      }
       const existing = Array.from(document.querySelectorAll('.egd-canvas-card, .egd-canvas-shape')).map(view => view.id);
       const missing = RecoveryState.missingDeskRecoveryViews(record.state, existing);
       const count = missing.cards.filter(card => !(card.type === 'chat' && state.codex.chatCardEntityId)).length + missing.shapes.length;

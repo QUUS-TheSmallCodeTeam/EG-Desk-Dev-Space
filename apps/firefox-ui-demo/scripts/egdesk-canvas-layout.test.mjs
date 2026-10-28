@@ -355,6 +355,18 @@ test('membership: an open View joins a Board with its own id, no copy, and leave
   assert.equal(again.projections, added.projections);
 });
 
+test('membership labels omit ambiguous View or projection IDs without changing legacy records', () => {
+  const projections = [
+    { id: 'a', title: '같은 이름', members: [{ viewId: 'shared' }, { viewId: 'only-a' }, { viewId: 'only-a' }] },
+    { id: 'b', title: '같은 이름', members: [{ viewId: 'shared' }, { viewId: 'only-b' }] },
+    { id: 'duplicate', title: '처음', members: [{ viewId: 'duplicate-owner' }] },
+    { id: 'duplicate', title: '나중', members: [] },
+  ];
+  const before = structuredClone(projections);
+  assert.deepEqual(owningProjectionByView(projections), new Map([['only-a', 'a'], ['only-b', 'b']]));
+  assert.deepEqual(projections, before, 'resolving display metadata never repairs or mutates records');
+});
+
 test('membership: geometry is stored relative to the Board offset and the Board saves the View under its id', () => {
   const state = boardState();
   const added = addProjectionMember(state, {
