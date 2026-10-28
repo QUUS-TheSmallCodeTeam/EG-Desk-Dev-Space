@@ -3427,7 +3427,7 @@
     return encodeURIComponent(String(value ?? '').trim());
   }
 
-  function normalizeBrowserUri(rawUrl = 'https://duckduckgo.com') {
+  function normalizeBrowserUri(rawUrl = 'https://duckduckgo.com', { preserveFragment = false } = {}) {
     let url = String(rawUrl || '').trim() || 'https://duckduckgo.com';
     if (!/^[a-z][a-z0-9+.-]*:/i.test(url)) {
       url = /^[\w-]+(\.[\w-]+)+/.test(url)
@@ -3440,11 +3440,17 @@
       if ((parsed.protocol === 'https:' && parsed.port === '443') || (parsed.protocol === 'http:' && parsed.port === '80')) {
         parsed.port = '';
       }
-      parsed.hash = '';
+      if (!preserveFragment) parsed.hash = '';
       return parsed.toString();
     } catch {
       return url;
     }
+  }
+
+  // A source key may identify the same page without its fragment, but a
+  // navigation must retain the exact address selected by the user.
+  function normalizeBrowserNavigationUri(rawUrl) {
+    return normalizeBrowserUri(rawUrl, { preserveFragment: true });
   }
 
   function browserDisplayHost(url) {
@@ -3780,7 +3786,7 @@
     if (type === 'result') return cloneJson(card._resultRecord || null);
     if (type === 'browser') {
       return {
-        uri: normalizeBrowserUri(card._browserState?.uri || card.querySelector('.egd-card-url')?.value || card._sourceRef?.uri || 'https://duckduckgo.com'),
+        uri: normalizeBrowserNavigationUri(card._browserState?.uri || card.querySelector('.egd-card-url')?.value || card._sourceRef?.uri || 'https://duckduckgo.com'),
         title: card._browserState?.title || '',
         firstUseBrowser: false,
         fixedLogicalHeight: card._fixedLogicalHeight || null,
@@ -14200,7 +14206,7 @@
     if (typeof card._browserControls?.getState === 'function') {
       return card._browserControls.getState();
     }
-    const uri = normalizeBrowserUri(card.querySelector('.egd-card-url')?.value || card._sourceRef?.uri || 'https://duckduckgo.com');
+    const uri = normalizeBrowserNavigationUri(card.querySelector('.egd-card-url')?.value || card._sourceRef?.uri || 'https://duckduckgo.com');
     return {
       cardId: card.id,
       uri,
@@ -15004,9 +15010,314 @@
     return () => source.removeEventListener('browser-tool-request', onRequest);
   }
 
+  // Firefox Library is a separate native window. Its two shared Places entry
+  // points are guarded by Library-window identity; all other windows retain
+  // their native behavior. gBrowser itself is never intercepted.
+  function browserLibraryCanRoute(url, where, params = {}) {
+    if (typeof url !== 'string' || !url || url.length > 2048 || /[\u0000-\u0020\u007f]/.test(url) ||
+        !params || typeof params !== 'object' ||
+        !['current', 'tab', 'tabshifted'].includes(where)) return false;
+    let parsed;
+    try { parsed = new URL(url); } catch { return false; }
+    if (!['http:', 'https:'].includes(parsed.protocol) || parsed.username || parsed.password) return false;
+    if (params.private || (params.userContextId != null && params.userContextId !== 0) ||
+        params.allowPopups || params.allowInheritPrincipal) return false;
+    const allowed = new Set(['private', 'userContextId', 'allowPopups', 'allowInheritPrincipal',
+      'inBackground', 'forceForeground', 'eventDetail', 'resolveOnContentBrowserCreated']);
+    return Object.entries(params).every(([key, value]) => allowed.has(key) || value == null || value === false);
+  }
+
+  function createBrowserLibraryRouting({ library, opener, openCard, navigateCard, revealCard,
+    contextAllowed, cardIsEmpty, showImport, showIssue }) {
+    // Transfer ownership of the same organizer before reading its originals.
+    // Distinct organizers can nevertheless share the process-wide Places
+    // object, so never capture another Library's wrappers as native methods.
+    const ownerKey = Symbol.for('egdesk.firefox.library.routing.v1');
+    const placesOwnerKey = Symbol.for('egdesk.firefox.library.places-owner.v1');
+    const nativePlaces = library.PlacesUIUtils;
+    const previousOwner = library[ownerKey];
+    const placesOwner = nativePlaces?.[placesOwnerKey];
+    if (placesOwner && placesOwner !== previousOwner) {
+      throw new Error('Firefox Places routing is already owned by another Library');
+    }
+    if (previousOwner) {
+      if (placesOwner !== previousOwner || typeof previousOwner.isInstalled !== 'function' || !previousOwner.isInstalled()) {
+        throw new Error('Firefox Library routing was changed outside its owner');
+      }
+      previousOwner.dispose();
+      if (library[ownerKey] || nativePlaces?.[placesOwnerKey]) throw new Error('Firefox Library ownership transfer failed');
+    }
+    const nativeOpen = library.openTrustedLinkIn;
+    const nativePreferences = library.openPreferences;
+    const nativeNodeWithEvent = nativePlaces?.openNodeWithEvent;
+    const nativeTabset = nativePlaces?.openTabset;
+    const openFileCommand = library.document?.getElementById('Browser:OpenFile');
+    if (typeof nativeOpen !== 'function' || typeof nativePreferences !== 'function' ||
+        typeof nativeNodeWithEvent !== 'function' || typeof nativeTabset !== 'function' ||
+        typeof openFileCommand?.addEventListener !== 'function' || typeof openFileCommand?.removeEventListener !== 'function') {
+      throw new Error('Firefox Library routing unavailable');
+    }
+    let sourceCard = opener, disposed = false, committed = false, session = null, fileCommandGuardInstalled = false;
+    const issue = () => showIssue('요청한 열기 방식과 보안 컨텍스트를 유지할 수 없어 이 항목을 열지 못했습니다.');
+    const route = (url, where, params = {}) => {
+      if (disposed || !browserLibraryCanRoute(url, where, params) || !contextAllowed(sourceCard)) {
+        issue(); return null;
+      }
+      let background;
+      try { background = library.BrowserUtils.willLoadInBackground(where, params); }
+      catch { issue(); return null; }
+      let target;
+      try {
+        target = where === 'current' ? navigateCard(sourceCard, url) : openCard(url, { background });
+        if (!target) throw new Error('Browser card unavailable');
+      } catch (error) {
+        console.warn(TAG, 'Firefox Library open failed', error);
+        showIssue('Browser에서 선택한 주소를 열지 못했습니다.');
+        return null;
+      }
+      // The navigation has already begun. A Firefox bookkeeping callback must
+      // not turn its failure into a false claim that no navigation happened.
+      if (typeof params.resolveOnContentBrowserCreated === 'function' && target._xulBrowser) {
+        try { params.resolveOnContentBrowserCreated(target._xulBrowser); }
+        catch (error) { console.warn(TAG, 'Firefox Library visit callback failed', error); }
+      }
+      if (!background) revealCard(target);
+      return target;
+    };
+    const routedOpen = (url, where, params = {}) => {
+      // Save is not a Browser navigation; keep Firefox's own behavior.
+      if (where === 'save') return nativeOpen.call(library, url, where, params);
+      if (!isInstalled()) { issue(); return null; }
+      // Match Firefox's trusted UI opener default without overriding explicit
+      // inBackground/forceForeground values or tabshifted inversion.
+      if (params && typeof params === 'object') params.forceForeground ??= true;
+      return route(url, where, params);
+    };
+    const blockOpenFile = event => {
+      // Only this Library command: Firefox otherwise redirects its file picker
+      // to a browser window and loads the file into that window's hidden tab.
+      // OrganizerCommand_import/export keep their native HTML picker behavior.
+      event.preventDefault();
+      event.stopImmediatePropagation();
+      showIssue('로컬 파일은 Desk의 File 카드에서 열어 주세요.');
+    };
+    const routedPreferences = (pane, ...args) => {
+      if (pane === 'general-migrate' || pane === 'general-migrate-autoclose') return showImport();
+      return nativePreferences.call(library, pane, ...args);
+    };
+    const routedNodeWithEvent = function (node, event) {
+      if (event?.target?.documentGlobal !== library) {
+        return nativeNodeWithEvent.call(this, node, event);
+      }
+      if (!isInstalled()) { issue(); return; }
+      let where = library.BrowserUtils.whereToOpenLink(event, false, true);
+      if (this.loadBookmarksInTabs && library.PlacesUtils.nodeIsBookmark(node)) {
+        if (where === 'current' && !node.uri.startsWith('javascript:')) where = 'tab';
+        // Firefox normally checks gBrowser.selectedTab.isEmpty here. That tab
+        // is hidden in EG-Desk; only the actual source Card may be reused.
+        if (where === 'tab' && cardIsEmpty(sourceCard)) where = 'current';
+      }
+      // Keep Firefox's own URL security checks, visit marking, and parameters.
+      return nativePlaces._openNodeIn.call(this, node, where, library);
+    };
+    const routedTabset = function (items, event, owner) {
+      if (owner !== library) return nativeTabset.call(this, items, event, owner);
+      if (!isInstalled()) { issue(); return; }
+      let where, background;
+      try {
+        where = library.BrowserUtils.whereToOpenLink(event, false, true);
+        if (!['current', 'tab', 'tabshifted'].includes(where)) { issue(); return; }
+        // Firefox's folder open supplies inBackground=false before applying
+        // the tabshifted inversion; it does not use the ordinary tab pref.
+        background = library.BrowserUtils.willLoadInBackground(where, { inBackground: false });
+      } catch { issue(); return; }
+      const rows = Array.isArray(items) ? items : [];
+      const allowedRows = rows.filter(item => browserLibraryCanRoute(item?.uri, 'tab', {}));
+      if (allowedRows.length !== rows.length) issue();
+      for (const [index, item] of allowedRows.entries()) {
+        if (!contextAllowed(sourceCard)) { issue(); return; }
+        // Match Firefox's own Places transition marking for a folder open.
+        try {
+          if (item.isBookmark) nativePlaces.markPageAsFollowedBookmark(item.uri);
+          else nativePlaces.markPageAsTyped(item.uri);
+        } catch (error) { console.warn(TAG, 'Firefox Library visit marking failed', error); }
+        route(item.uri, 'tab', { inBackground: background || index < allowedRows.length - 1 });
+      }
+    };
+    // Read-only, non-content diagnostics for the isolated Firefox QA. Each
+    // value is an identity check; no URL, profile or user data is returned.
+    const installationChecks = () => ({
+      active: !disposed,
+      owner: library[ownerKey] === session,
+      placesOwner: nativePlaces[placesOwnerKey] === session,
+      trustedOpen: library.openTrustedLinkIn === routedOpen,
+      preferences: library.openPreferences === routedPreferences,
+      places: library.PlacesUIUtils === nativePlaces,
+      node: nativePlaces.openNodeWithEvent === routedNodeWithEvent,
+      tabset: nativePlaces.openTabset === routedTabset,
+      openFileCommand: fileCommandGuardInstalled && library.document.getElementById('Browser:OpenFile') === openFileCommand,
+    });
+    const isInstalled = () => Object.values(installationChecks()).every(Boolean);
+    const dispose = () => {
+      if (disposed) return;
+      const ownsLibrary = library[ownerKey] === session;
+      const safeToRelease = ownsLibrary && (!committed || isInstalled());
+      disposed = true;
+      if (fileCommandGuardInstalled) {
+        openFileCommand.removeEventListener('command', blockOpenFile, true);
+        fileCommandGuardInstalled = false;
+      }
+      if (ownsLibrary) {
+        if (library.openTrustedLinkIn === routedOpen) library.openTrustedLinkIn = nativeOpen;
+        if (library.openPreferences === routedPreferences) library.openPreferences = nativePreferences;
+        if (nativePlaces.openNodeWithEvent === routedNodeWithEvent) nativePlaces.openNodeWithEvent = nativeNodeWithEvent;
+        if (nativePlaces.openTabset === routedTabset) nativePlaces.openTabset = nativeTabset;
+        // A changed wrapper stays marked as unsafe; another Desk must not
+        // capture it as Firefox's genuine original.
+        if (safeToRelease) {
+          delete library[ownerKey];
+          if (nativePlaces[placesOwnerKey] === session) delete nativePlaces[placesOwnerKey];
+        }
+      }
+      library.removeEventListener('unload', dispose);
+    };
+    session = { library, isInstalled, isActive: isInstalled, installationChecks,
+      setOpener(card) { sourceCard = card; }, dispose };
+    try {
+      Object.defineProperty(library, ownerKey, { value: session, configurable: true });
+      Object.defineProperty(nativePlaces, placesOwnerKey, { value: session, configurable: true });
+      library.openTrustedLinkIn = routedOpen;
+      library.openPreferences = routedPreferences;
+      nativePlaces.openNodeWithEvent = routedNodeWithEvent;
+      nativePlaces.openTabset = routedTabset;
+      openFileCommand.addEventListener('command', blockOpenFile, true);
+      fileCommandGuardInstalled = true;
+      if (!isInstalled()) throw new Error('Firefox Library routing could not be installed');
+      committed = true;
+      library.addEventListener('unload', dispose, { once: true });
+    } catch (error) { dispose(); throw error; }
+    return session;
+  }
+
+  function browserLibraryContextAllowed(card) {
+    if (!card?.isConnected || !card._xulBrowser || card.dataset?.codexRole === 'auth') return false;
+    try {
+      const { PrivateBrowsingUtils } = ChromeUtils.importESModule('resource://gre/modules/PrivateBrowsingUtils.sys.mjs');
+      if (PrivateBrowsingUtils.isWindowPrivate(window)) return false;
+      const browser = card._xulBrowser;
+      const attrs = browser.browsingContext?.originAttributes || browser.contentPrincipal?.originAttributes;
+      return !!attrs && attrs.userContextId === 0 && attrs.privateBrowsingId === 0 &&
+        Object.values(attrs).every(value => value == null || value === '' || value === 0 || value === false);
+    } catch { return false; }
+  }
+
+  function browserLibraryCardIsEmpty(card) {
+    if (!browserLibraryContextAllowed(card)) return false;
+    try {
+      const browser = card._xulBrowser;
+      const requested = browser.getAttribute('src') || browser.src || '';
+      return card._browserState?.uri === 'about:blank' && browser.currentURI?.spec === 'about:blank' &&
+        (!requested || requested === 'about:blank');
+    } catch { return false; }
+  }
+
+  function browserImportAllowed() {
+    try { return servicesRef().policies?.isAllowed('profileImport') === true; }
+    catch { return false; }
+  }
+
+  function openFirefoxBrowserImport() {
+    if (!browserImportAllowed()) {
+      boardNotice('이 Firefox에서는 브라우저 자료 가져오기가 허용되지 않습니다.');
+      return false;
+    }
+    try {
+      const { MigrationUtils } = ChromeUtils.importESModule('resource:///modules/MigrationUtils.sys.mjs');
+      // Passing a browser/Library opener would route general-migrate to a
+      // hidden gBrowser preferences tab. Null asks Firefox for its native dialog.
+      const opened = MigrationUtils.showMigrationWizard(null, { entrypoint: MigrationUtils.MIGRATION_ENTRYPOINTS.PLACES });
+      Promise.resolve(opened).catch(error => {
+        console.warn(TAG, 'Firefox import dialog failed', error);
+        boardNotice('Firefox 가져오기 창을 열지 못했습니다.');
+      });
+      return true;
+    } catch (error) {
+      console.warn(TAG, 'Firefox import dialog failed', error);
+      boardNotice('Firefox 가져오기 창을 열지 못했습니다.');
+      return false;
+    }
+  }
+
+  let browserLibrarySession = null;
+  let browserLibraryUnloadInstalled = false;
+  function openFirefoxBrowserLibrary(section, opener) {
+    try {
+      let library = servicesRef().wm.getMostRecentWindow('Places:Organizer');
+      const existing = !!library && !library.closed;
+      if (!existing) library = window.openDialog('chrome://browser/content/places/places.xhtml', '',
+        'chrome,toolbar=yes,dialog=no,resizable', section);
+      if (!library) throw new Error('Firefox Library window unavailable');
+      const ready = () => {
+        if (library.closed) return;
+        try {
+          if (browserLibrarySession?.library !== library || !browserLibrarySession.isActive()) {
+            const previousSession = browserLibrarySession;
+            const nextSession = createBrowserLibraryRouting({
+              library, opener,
+              contextAllowed: browserLibraryContextAllowed,
+              cardIsEmpty: browserLibraryCardIsEmpty,
+              openCard: (url, { background }) => {
+                if (!background && state.cardFullscreen) exitCardFullscreen(null, { preserveCamera: true });
+                return spawnBrowserCard(url, { openMode: 'new', background });
+              },
+              navigateCard: (card, url) => browserCardControl(card, 'navigate', url) ? card : null,
+              revealCard: card => {
+                // A Library opened from one card can outlive a later focus on
+                // another fullscreen card. Reveal the selected card rather
+                // than leaving that fullscreen presentation covering it.
+                const sameFullscreen = state.cardFullscreen?.cardId === card.id;
+                if (state.cardFullscreen && !sameFullscreen) {
+                  exitCardFullscreen(null, { preserveCamera: true });
+                }
+                focusCanvasCard(card);
+                if (!sameFullscreen) revealOpenCanvasCard(card, { kind: 'browser' });
+                window.focus();
+              },
+              showImport: openFirefoxBrowserImport,
+              showIssue: message => { boardNotice(message); window.focus(); },
+            });
+            browserLibrarySession = nextSession;
+            previousSession?.dispose();
+          } else browserLibrarySession.setOpener(opener);
+          if (existing) library.PlacesOrganizer.selectLeftPaneContainerByHierarchy(section);
+          if (existing) library.focus();
+        } catch (error) {
+          console.warn(TAG, 'Firefox Library setup failed', error);
+          if (!existing) {
+            try { library.close(); } catch {}
+          }
+          boardNotice('Firefox 자료 창을 연결하지 못했습니다. 해당 창에서 주소 열기를 사용하지 말고 다시 시도해 주세요.');
+          window.focus();
+        }
+      };
+      if (library.document?.documentURI === 'chrome://browser/content/places/places.xhtml' &&
+          library.document.readyState === 'complete') ready();
+      else library.addEventListener('load', ready, { once: true });
+      if (!browserLibraryUnloadInstalled) {
+        browserLibraryUnloadInstalled = true;
+        window.addEventListener('unload', () => browserLibrarySession?.dispose(), { once: true });
+      }
+      return true;
+    } catch (error) {
+      console.warn(TAG, 'Firefox Library open failed', error);
+      boardNotice('Firefox 자료 창을 열지 못했습니다.');
+      return false;
+    }
+  }
+
 
   function spawnBrowserCard(initialUrl = 'https://duckduckgo.com', options = {}) {
-    const normalizedUrl = normalizeBrowserUri(initialUrl);
+    const normalizedUrl = normalizeBrowserNavigationUri(initialUrl);
     const sourceRef = browserSourceRef(normalizedUrl, options.sourceRef || {});
     const openMode = normalizeOpenMode(options.openMode, 'new');
     if (openMode === 'focus-existing') {
@@ -15027,6 +15338,7 @@
       sourceRef,
       toolbar: true,
       progress: true,
+      activate: !options.background,
       minWidth: 320,
       minHeight: 250,
       createDirtyReason: 'create-browser-card',
@@ -15041,7 +15353,7 @@
       },
     });
     const card = deskWindow.root;
-    revealPlacedCanvasCard(card, placement, { kind: 'browser', opener: options.opener });
+    if (!options.background) revealPlacedCanvasCard(card, placement, { kind: 'browser', opener: options.opener });
 
     const urlInput = el('input', {
       type: 'text',
@@ -15078,7 +15390,7 @@
       canGoBack: false,
       canGoForward: false,
       security: browserSecurityLabel(normalizedUrl),
-      homeUrl: normalizeBrowserUri(options.homeUrl || 'https://duckduckgo.com'),
+      homeUrl: normalizeBrowserNavigationUri(options.homeUrl || 'https://duckduckgo.com'),
       history: [normalizedUrl],
       historyIndex: 0,
     };
@@ -15169,6 +15481,7 @@
       'aria-label': '더보기',
       'aria-haspopup': 'menu',
       'aria-expanded': 'false',
+      data: { testid: 'browser-menu' },
       onclick: (ev) => {
         ev.stopPropagation();
         browserCardControl(card, 'menu', menuButton, { focusFirst: ev.detail === 0 });
@@ -15252,7 +15565,7 @@
       browserState.canGoForward = browserState.historyIndex < browserState.history.length - 1 || nativeHistory.canGoForward;
     };
     const pushBrowserHistory = (url, options = {}) => {
-      const normalized = normalizeBrowserUri(url);
+      const normalized = normalizeBrowserNavigationUri(url);
       if (!normalized) return;
       if (!Array.isArray(browserState.history) || browserState.history.length === 0) {
         browserState.history = [normalized];
@@ -15284,7 +15597,7 @@
     const readRequestedBrowserUri = () => {
       try {
         const uri = xulBrowser?.getAttribute?.('src') || xulBrowser?.src;
-        if (uri) return normalizeBrowserUri(uri);
+        if (uri) return normalizeBrowserNavigationUri(uri);
       } catch {}
       return '';
     };
@@ -16324,7 +16637,7 @@
     const syncBrowserStateFromBrowser = (options = {}) => {
       reportBrowserLocation(readArrivedBrowserUri());
       const previousUri = browserState.uri;
-      const nextUri = normalizeBrowserUri(readBrowserUri());
+      const nextUri = normalizeBrowserNavigationUri(readBrowserUri());
       const requestedUri = readRequestedBrowserUri();
       const isTransientInitialBlank = nextUri === 'about:blank'
         && previousUri
@@ -16355,7 +16668,7 @@
     };
     const navigateBrowser = (rawUrl, navOptions = {}) => {
       agentProjection.invalidate();
-      const url = normalizeBrowserUri(rawUrl || browserState.uri || browserState.homeUrl);
+      const url = normalizeBrowserNavigationUri(rawUrl || browserState.uri || browserState.homeUrl);
       browserState.uri = url;
       browserState.security = browserSecurityLabel(url);
       browserState.title = browserDisplayHost(url);
@@ -16487,11 +16800,12 @@
         return null;
       }
       const anchorRect = anchor.getBoundingClientRect();
-      const pos = resolveFloatingMenuPlacement(anchorRect, 166, 224);
-      const item = (label, title, action) => el('button', {
+      const item = (label, title, action, { testid = null, nativeWindow = false, disabled = false } = {}) => el('button', {
         class: 'egd-browser-menu-item',
         role: 'menuitem',
         title,
+        disabled,
+        data: testid ? { testid } : null,
         onmousedown: (ev) => {
           if (ev.button !== 0) return;
           // macOS can blur to BODY on button mousedown, closing the menu before
@@ -16504,7 +16818,7 @@
           closeBrowserMenu();
           const result = action();
           const focused = document.activeElement;
-          if (!focused?.isConnected || focused === document.body || focused === document.documentElement) {
+          if (!nativeWindow && (!focused?.isConnected || focused === document.body || focused === document.documentElement)) {
             focusBrowserMenuReturn(anchor, result);
           }
         },
@@ -16521,7 +16835,16 @@
         item('홈', browserState.homeUrl, () => navigateBrowser(browserState.homeUrl)),
         item(browserState.loading ? '중지' : '새로고침', browserState.loading ? '로드 중지' : '현재 페이지 새로고침', () => (browserState.loading ? stopBrowser() : reloadBrowser())),
         item(isCardFullscreen(card) ? '창 복귀' : '최대화', 'Desk Window 최대화 전환', () => toggleCardFullscreen(card)),
+        item('북마크 관리…', 'Firefox 북마크 관리', () => openFirefoxBrowserLibrary('AllBookmarks', card),
+          { testid: 'browser-library-bookmarks', nativeWindow: true }),
+        item('방문 기록…', 'Firefox 방문 기록', () => openFirefoxBrowserLibrary('History', card),
+          { testid: 'browser-library-history', nativeWindow: true }),
+        item('다른 브라우저에서 가져오기…', 'Firefox 가져오기 창 열기', () => openFirefoxBrowserImport(),
+          { testid: 'browser-library-import', nativeWindow: true }),
       ];
+      const enabledItems = items.filter(node => !node.disabled);
+      const maxMenuHeight = Math.max(96, (window.innerHeight || 720) - 16);
+      const pos = resolveFloatingMenuPlacement(anchorRect, 166, Math.min(maxMenuHeight, items.length * 30 + 12));
       browserMenuPanel = el('div', {
         class: 'egd-browser-menu egd-edge egd-frosted',
         role: 'menu',
@@ -16529,6 +16852,8 @@
         style: {
           left: Math.round(pos.left) + 'px',
           top: Math.round(pos.top) + 'px',
+          maxHeight: `${maxMenuHeight}px`,
+          overflowY: 'auto',
         },
       }, ...items);
       const panel = browserMenuPanel;
@@ -16541,16 +16866,16 @@
           closeBrowserMenu({ restoreFocus: true });
           return;
         }
-        const current = items.indexOf(document.activeElement);
+        const current = enabledItems.indexOf(document.activeElement);
         let next = -1;
-        if (ev.key === 'ArrowDown') next = current < 0 ? 0 : (current + 1) % items.length;
-        else if (ev.key === 'ArrowUp') next = current < 0 ? items.length - 1 : (current - 1 + items.length) % items.length;
+        if (ev.key === 'ArrowDown') next = current < 0 ? 0 : (current + 1) % enabledItems.length;
+        else if (ev.key === 'ArrowUp') next = current < 0 ? enabledItems.length - 1 : (current - 1 + enabledItems.length) % enabledItems.length;
         else if (ev.key === 'Home') next = 0;
-        else if (ev.key === 'End') next = items.length - 1;
+        else if (ev.key === 'End') next = enabledItems.length - 1;
         if (next < 0) return;
         ev.preventDefault();
         ev.stopPropagation();
-        items[next].focus();
+        enabledItems[next].focus();
       };
       panel._focusoutHandler = (ev) => {
         if (browserMenuPanel !== panel) return;
@@ -16575,7 +16900,7 @@
       document.documentElement.appendChild(panel);
       anchor.setAttribute('aria-expanded', 'true');
       if (regrant) interactItem.focus();
-      else if (focusFirst || document.activeElement !== anchor) items[0]?.focus();
+      else if (focusFirst || document.activeElement !== anchor) enabledItems[0]?.focus();
       window.setTimeout(() => {
         if (browserMenuPanel === panel && panel._outsideHandler) {
           window.addEventListener('mousedown', panel._outsideHandler, true);
