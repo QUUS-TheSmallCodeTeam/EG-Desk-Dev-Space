@@ -2304,6 +2304,7 @@
   function closeAnswerBriefing(options = {}) {
     const session = state.codex.briefingSession;
     session?.commentEditor?.dispose();
+    session?.interaction?.dispose?.();
     session?.preparationScope?.dispose();
     state.codex.briefingSession = null;
     document.getElementById('egd-answer-briefing')?.remove();
@@ -2350,42 +2351,71 @@
     if (['conversationId', 'runId', 'answerId'].some(key => message.briefing[key] !== message[key])) {
       boardNotice('이 답변에 속하는 브리핑 연결을 확인하지 못했습니다.'); return;
     }
+    if (state.codex.activeThreadId !== thread.id) return;
     if (state.codex.briefingSession) closeAnswerBriefing();
     const session = state.codex.briefingSession = {
       ...BriefingState.beginBriefing(message.briefing, { pan: { ...state.panTarget }, zoom: state.zoomTarget, activeEntityId: state.activeEntityId }),
       threadId: thread.id, identity: { conversationId: message.conversationId, runId: message.runId, answerId: message.answerId },
       references: briefingInputReferences(thread, message),
       artifacts: message.artifacts || [],
-      presentationId: chatBindingNonce(), preparing: true,
+      presentationId: chatBindingNonce(), preparing: true, interaction: { revision: 0 },
     };
-    const preparationScope = session.preparationScope = state.codexBridge.createBriefingPreparationScope(thread.id);
-    const activeRoom = state.codex.activeThreadId, roomGeneration = state.codex.activityRoomGeneration || 0;
+    const preparationScope = session.preparationScope = state.codexBridge.createBriefingPreparationScope(thread.id, () => {
+      // Losing the original room/account closes only the presentation. The
+      // comment controller retains its in-memory draft; never restore a camera
+      // into a different room or a newer user-selected view.
+      if (state.codex.briefingSession?.presentationId === session.presentationId) closeAnswerBriefing({ restore: false });
+    });
+    if (state.codex.briefingSession !== session) { preparationScope.dispose(); return; }
+    // Per-presentation intent only. Never read or record the input value; a
+    // later fit must not blur a field the user has focused or edited elsewhere.
+    const intentEvents = ['focusin', 'keydown', 'beforeinput', 'input', 'compositionstart', 'compositionupdate'];
+    const markIntent = () => { session.interaction.revision++; };
+    for (const type of intentEvents) document.addEventListener(type, markIntent, true);
+    session.interaction.dispose = () => { for (const type of intentEvents) document.removeEventListener(type, markIntent, true); };
+    const roomGeneration = state.codex.activityRoomGeneration || 0;
     const isCurrent = () => state.codex.briefingSession?.presentationId === session.presentationId
-      && state.codex.activeThreadId === activeRoom && (state.codex.activityRoomGeneration || 0) === roomGeneration
       && preparationScope.current();
-    const cameraRevision = state.canvasUserCameraRevision || 0;
+    const cameraRevision = state.canvasUserCameraRevision || 0, selectionRevision = state.canvasSelectionRevision || 0;
+    const interactionRevision = session.interaction.revision;
+    const activeEntityId = state.activeEntityId, focusedElement = document.activeElement;
     try {
       renderAnswerBriefing();
       const materialized = new Set();
       for (const step of session.briefing.steps) {
-        if (!isCurrent()) return;
-        const reference = session.references.find(item => item.sourceId === step.target?.sourceId);
-        if (!reference) continue;
-        if (step.target.hash && step.target.hash !== reference.hash) continue;
-        try {
-          const ranged = { ...reference, presentationRange: step.target.range };
-          const key = InputContext.inputEvidenceKey(ranged);
-          if (materialized.has(key)) continue;
-          materialized.add(key);
-          await state.codexBridge.openInputEvidence(thread.id, ranged, { isCurrent, reveal: false });
-        } catch (error) { if (isCurrent()) boardNotice(error.message); }
+        for (const target of BriefingState.briefingStepTargets(step)) {
+          if (!isCurrent()) return;
+          if (!target.sourceId) continue;
+          const reference = session.references.find(item => item.sourceId === target.sourceId);
+          if (!reference) continue;
+          if (target.hash && target.hash !== reference.hash) continue;
+          try {
+            const ranged = { ...reference, presentationRange: target.range };
+            const key = InputContext.inputEvidenceKey(ranged);
+            if (materialized.has(key)) continue;
+            materialized.add(key);
+            await state.codexBridge.openInputEvidence(thread.id, ranged, { isCurrent, reveal: false, briefingScope: preparationScope });
+          } catch (error) { if (isCurrent()) boardNotice(error.message); }
+        }
       }
       if (!isCurrent()) return;
       state.codex.briefingSession.preparing = false;
       renderAnswerBriefing();
-      if ((state.canvasUserCameraRevision || 0) === cameraRevision) fitBriefingTargets(briefingResolvedTargets(state.codex.briefingSession));
+      // A fit also selects the first evidence card. The shared selection
+      // revision preserves intervening Canvas intent even after A -> B -> A.
+      if ((state.canvasUserCameraRevision || 0) === cameraRevision
+          && (state.canvasSelectionRevision || 0) === selectionRevision && state.activeEntityId === activeEntityId
+          && document.activeElement === focusedElement
+          && (state.codex.activityRoomGeneration || 0) === roomGeneration
+          && session.interaction.revision === interactionRevision) {
+        fitBriefingTargets(briefingResolvedTargets(state.codex.briefingSession));
+      }
     } finally {
-      preparationScope.dispose();
+      // The originating room/account fence also owns retries after initial
+      // preparation; closeAnswerBriefing disposes it with the presentation.
+      if (state.codex.briefingSession?.presentationId !== session.presentationId || !preparationScope.current()) {
+        session.interaction.dispose?.(); preparationScope.dispose();
+      }
     }
   }
 
@@ -2409,7 +2439,11 @@
     const panel = el('section', { id: 'egd-answer-briefing', role: 'region', 'aria-label': '답변 브리핑',
       data: { testid: 'answer-briefing', briefingId: session.briefing.id, stepId: step.id } });
     panel.addEventListener('mousedown', event => event.stopPropagation());
+    const noteInteraction = () => { if (session.interaction) session.interaction.revision++; };
+    const sessionCurrent = () => state.codex.briefingSession === session && session.preparationScope?.current() === true;
     const go = index => {
+      if (!sessionCurrent()) return;
+      noteInteraction();
       state.codex.briefingSession = BriefingState.selectBriefingStep(session, index);
       renderAnswerBriefing();
       fitBriefingTargets(briefingResolvedTargets(state.codex.briefingSession));
@@ -2418,7 +2452,7 @@
     const nav = el('nav', { tabindex: '0', 'aria-label': '브리핑 단계 탐색' },
       el('button', { disabled: session.index === 0 ? 'true' : null, data: { testid: 'briefing-previous' }, onclick: () => go(session.index - 1) }, '이전'),
       el('span', { 'aria-live': 'polite' }, `${session.index + 1} / ${session.briefing.steps.length}`),
-      el('button', { data: { testid: 'briefing-overview' }, onclick: () => fitBriefingTargets(session.briefing.steps.flatMap(item => briefingResolvedTargets(session, item))) }, '전체 보기'),
+      el('button', { data: { testid: 'briefing-overview' }, onclick: () => { if (!sessionCurrent()) return; noteInteraction(); fitBriefingTargets(session.briefing.steps.flatMap(item => briefingResolvedTargets(session, item))); } }, '전체 보기'),
       el('button', { disabled: session.index === session.briefing.steps.length - 1 ? 'true' : null, data: { testid: 'briefing-next' }, onclick: () => go(session.index + 1) }, '다음'),
       el('button', { 'aria-label': '브리핑 종료하고 이전 보기로 복귀', data: { testid: 'briefing-exit' }, onclick: closeAnswerBriefing }, '종료'));
     nav.addEventListener('keydown', event => {
@@ -2434,7 +2468,16 @@
       const row = { target, status: el('p', { role: 'status' }), inspect: null, retry: null, end: document.createTextNode('') };
       if (target.reference) {
         row.inspect = el('button', { data: { testid: 'briefing-inspect', sourceId: target.reference.sourceId },
-          onclick: () => state.codexBridge.inspectInput(session.threadId, target.reference, target.target.range || {}) }, '당시 입력 보기');
+          onclick: () => {
+            if (!sessionCurrent()) return;
+            noteInteraction();
+            const interactionRevision = session.interaction?.revision || 0, focusedElement = document.activeElement;
+            // The original-reference inspector is explicit, but a late result
+            // must not cover or blur work started after this request.
+            const isCurrent = () => sessionCurrent() && (session.interaction?.revision || 0) === interactionRevision
+              && document.activeElement === focusedElement;
+            state.codexBridge.inspectInput(session.threadId, target.reference, { ...target.target.range, isCurrent });
+          } }, '당시 입력 보기');
         panel.appendChild(row.inspect);
       }
       panel.appendChild(row.end); evidenceRows.push(row);
@@ -2449,13 +2492,30 @@
         else if (row.status.parentNode !== panel) panel.insertBefore(row.status, row.inspect || row.retry || row.end);
         const text = target.reason || step.fallback || '대상을 확인할 수 없습니다.';
         if (row.status.textContent !== text) row.status.textContent = text;
-        const retryVisible = !!target.reference && target.status !== 'available' && !session.preparing;
+        // The saved answer reference can exist while this target requests a
+        // different hash. Retrying it must not materialize that other capture.
+        const hashMatches = !!target.reference && (!target.target.hash || target.target.hash === target.reference.hash);
+        const retryVisible = hashMatches && target.status !== 'available' && !session.preparing;
         if (retryVisible && !row.retry) {
           row.retry = el('button', { data: { testid: 'briefing-show-evidence', sourceId: target.reference.sourceId },
             onclick: async () => {
-              await state.codexBridge.openInputEvidence(session.threadId, { ...target.reference, presentationRange: target.target.range }, { isCurrent: () => state.codex.briefingSession === session });
-              if (state.codex.briefingSession !== session) return;
-              renderAnswerBriefing(); fitBriefingTargets(briefingResolvedTargets(session));
+              const isCurrent = sessionCurrent;
+              if (!isCurrent() || (target.target.hash && target.target.hash !== target.reference.hash)) return;
+              noteInteraction();
+              const cameraRevision = state.canvasUserCameraRevision || 0, selectionRevision = state.canvasSelectionRevision || 0;
+              const roomGeneration = state.codex.activityRoomGeneration || 0;
+              const activeEntityId = state.activeEntityId, focusedElement = document.activeElement, interactionRevision = session.interaction?.revision || 0;
+              try {
+                const opened = await state.codexBridge.openInputEvidence(session.threadId, { ...target.reference, presentationRange: target.target.range },
+                  { isCurrent, reveal: false, briefingScope: session.preparationScope });
+                if (!isCurrent()) return;
+                renderAnswerBriefing();
+                if (opened && (state.canvasUserCameraRevision || 0) === cameraRevision
+                    && (state.canvasSelectionRevision || 0) === selectionRevision && state.activeEntityId === activeEntityId
+                    && document.activeElement === focusedElement
+                    && (state.codex.activityRoomGeneration || 0) === roomGeneration
+                    && (session.interaction?.revision || 0) === interactionRevision) fitBriefingTargets(briefingResolvedTargets(session));
+              } catch (error) { if (isCurrent()) boardNotice(error.message); }
             } }, '고정 근거 다시 열기');
           panel.insertBefore(row.retry, row.end);
         }
@@ -2484,6 +2544,8 @@
         || ['conversationId', 'runId', 'answerId'].some(key => !session.identity?.[key] || session.identity[key] !== session.briefing[key])
         || state.codex.activeThreadId !== session.threadId) throw new Error('의견을 저장할 원래 대화와 계정 연결을 확인하지 못했습니다.');
     const binding = JSON.stringify(route), briefing = JSON.stringify(session.briefing), index = session.index;
+    // A briefing's long-lived scope latches actual room changes. The activity
+    // generation also changes when this same room's activity panel is opened.
     const generation = state.codex.activityRoomGeneration || 0, presentation = session.presentationId;
     const token = epochScope.begin(route.engineId, route.engineProfileId);
     let disposed = false;
@@ -2495,7 +2557,8 @@
       try { same = !token.signal.aborted && epochScope.valid(token) && account === ChatState.codexAccountKey(state.codex.authStatus)
         && state.codex.codexAccountKey === account && !!latest && ChatState.canResumeNativeThread(latest, state.codex.authStatus)
         && JSON.stringify(ChatState.chatContextRequestScope(latest, state.codex)) === binding
-        && state.codex.activeThreadId === session.threadId && (state.codex.activityRoomGeneration || 0) === generation
+        && state.codex.activeThreadId === session.threadId
+        && (session.preparationScope ? session.preparationScope.current() : (state.codex.activityRoomGeneration || 0) === generation)
         && shown?.presentationId === presentation && shown.index === index && JSON.stringify(shown.briefing) === briefing; } catch {}
       if (!same) dispose();
       return same;
@@ -2536,6 +2599,9 @@
     panel.append(comment, save, status, el('strong', {}, '이 단계의 저장된 의견'), listStatus, list, refresh);
     const rows = new Map();
     let controller;
+    const noteInteraction = () => { if (session.interaction) session.interaction.revision++; };
+    for (const event of ['focus', 'keydown', 'compositionstart', 'compositionupdate', 'beforeinput', 'select']) comment.addEventListener(event, noteInteraction);
+    comment.addEventListener('input', () => { noteInteraction(); controller?.edit(comment.value); });
     const paint = view => {
       if (!panel.isConnected) return;
       const top = panel.scrollTop, left = panel.scrollLeft;
@@ -2578,7 +2644,6 @@
     try {
       controller = state.codexBridge.createBriefingComments(session, paint);
       comment.value = controller.view().text;
-      comment.addEventListener('input', () => controller.edit(comment.value));
       save.addEventListener('click', () => { void controller.submit(comment.value); });
       retry.addEventListener('click', () => { void controller.retry(); });
       refresh.addEventListener('click', () => { void controller.refresh(); });
@@ -2587,7 +2652,7 @@
       save.disabled = true; refresh.disabled = true; retry.disabled = true; status.dataset.state = 'unavailable'; statusMessage.textContent = error.message;
       list.dataset.state = 'unavailable';
     }
-    return { dispose: () => controller?.dispose(), notify: () => controller?.notify() };
+    return { dispose: () => { controller?.captureClosingText?.(comment.value); controller?.dispose(); }, notify: () => controller?.notify() };
   }
 
   function spawnInputEvidence(reference, stored = null, options = {}) {
@@ -2604,6 +2669,7 @@
     const placement = resolveCanvasCardPlacement('input-evidence');
     const shell = spawnDeskWindowShell({ id: `egd-input-evidence-${++cardSeq}`, kind: 'input-evidence', className: 'egd-input-evidence-card',
       sourceRef: { kind: 'context-snapshot', id: reference.sourceId, scope: 'immutable-input' },
+      activate: options.reveal !== false,
       style: { left: `${placement.x}px`, top: `${placement.y}px`, width: `${placement.width}px`, height: `${placement.height}px` } });
     if (!options.restore && options.reveal !== false) revealPlacedCanvasCard(shell.root, placement);
     shell.root._inputReference = cloneJson(reference);
@@ -11051,12 +11117,12 @@
       },
       async inspectInput(threadId, reference, options = {}) {
         const thread = getCodexThreadById(state.codex, threadId);
-        if (!thread || !reference?.snapshotId) return;
+        if (!thread || !reference?.snapshotId || (options.isCurrent && !options.isCurrent())) return;
         const nonce = state.codex.inputInspectNonce = (state.codex.inputInspectNonce || 0) + 1;
         const activeRoom = state.codex.activeThreadId, roomGeneration = state.codex.activityRoomGeneration || 0;
         const priorPanel = document.getElementById('egd-codex-input-panel');
         const stored = await this.readInput(reference, { ...options, threadId });
-        if (!stored || state.codex.inputInspectNonce !== nonce || state.codex.activeThreadId !== activeRoom
+        if (!stored || (options.isCurrent && !options.isCurrent()) || state.codex.inputInspectNonce !== nonce || state.codex.activeThreadId !== activeRoom
             || (state.codex.activityRoomGeneration || 0) !== roomGeneration
             || document.getElementById('egd-codex-input-panel') !== priorPanel) return;
         const snapshot = InputContext.storedSnapshotForView(stored, reference);
@@ -11153,7 +11219,7 @@
         } finally { finish(); }
       },
       async readInput(reference, options = {}) {
-        if (!reference?.sourceId) return null;
+        if (!reference?.sourceId || (options.isCurrent && !options.isCurrent())) return null;
         // A restored evidence card uses its recorded room, never whichever room
         // happens to be active. Legacy references must have one identifiable home.
         const candidates = state.codex.threads.filter(thread => options.threadId ? thread.id === options.threadId
@@ -11175,11 +11241,20 @@
         const inspectNonce = state.codex.inputInspectNonce;
         const inputPanel = document.getElementById('egd-codex-input-panel');
         const token = epochScope.begin(contextScope.engineId, contextScope.engineProfileId);
+        // Only a live, exact Briefing presentation can replace the activity
+        // panel generation check with its latched room/account scope. Every
+        // other reader retains the existing activity-generation fence.
+        const roomCurrent = () => !options.briefingScope
+          ? (state.codex.activityRoomGeneration || 0) === roomGeneration
+          : typeof options.isCurrent === 'function' && options.isCurrent()
+            && state.codex.briefingSession?.threadId === thread.id
+            && state.codex.briefingSession.preparationScope === options.briefingScope
+            && options.briefingScope.current();
         const current = () => {
           if (token.signal.aborted || !epochScope.valid(token) || state.codex.activeThreadId !== activeRoom
-              || (state.codex.activityRoomGeneration || 0) !== roomGeneration || state.codex.inputInspectNonce !== inspectNonce
-              || document.getElementById('egd-codex-input-panel') !== inputPanel
-              || options.isCurrent && !options.isCurrent()) return false;
+              || !roomCurrent() || (!options.briefingScope && (state.codex.inputInspectNonce !== inspectNonce
+                || document.getElementById('egd-codex-input-panel') !== inputPanel))
+              || (options.isCurrent && !options.isCurrent())) return false;
           try { return JSON.stringify(readContext()) === capturedContext; } catch { return false; }
         };
         const unsubscribe = this.subscribe(() => { if (!current()) token.controller.abort(); });
@@ -11199,7 +11274,7 @@
         } catch (error) { if (current()) boardNotice(`당시 입력을 열지 못했습니다: ${error.message}`); }
         finally { unsubscribe(); epochScope.finish(token); }
       },
-      createBriefingPreparationScope(threadId) {
+      createBriefingPreparationScope(threadId, onInvalid = null) {
         const thread = getCodexThreadById(state.codex, threadId);
         const route = ChatState.chatContextRequestScope(thread, state.codex);
         const token = epochScope.begin(route.engineId, route.engineProfileId);
@@ -11211,24 +11286,31 @@
         };
         const original = identity();
         let invalid = false, disposed = false;
-        // One epoch spans all source reads. A-B-A can never turn this token
-        // current again; observed identity changes are latched even without a
-        // reset. This only cancels presentation work, never grants authority.
+        // One epoch spans all source reads. Each bridge notification latches
+        // actual room and identity changes, so an observed A-B-A cannot revive
+        // this presentation. Activity-panel opens alone are not room changes.
         const current = () => {
           if (invalid || disposed) return false;
-          try { if (!token.signal.aborted && epochScope.valid(token) && identity() === original) return true; } catch {}
+          try { if (!token.signal.aborted && epochScope.valid(token) && identity() === original
+              && state.codex.activeThreadId === threadId) return true; } catch {}
           invalid = true;
+          onInvalid?.();
           return false;
         };
         const unsubscribe = this.subscribe(current);
+        const onAbort = () => current();
+        if (invalid) { disposed = true; unsubscribe(); token.controller.abort(); epochScope.finish(token); }
+        else token.signal.addEventListener('abort', onAbort);
         return { current, dispose: () => {
           if (disposed) return;
-          disposed = true; unsubscribe(); token.controller.abort(); epochScope.finish(token);
+          disposed = true; unsubscribe(); token.signal.removeEventListener('abort', onAbort);
+          token.controller.abort(); epochScope.finish(token);
         } };
       },
       async openInputEvidence(threadId, reference, options = {}) {
         if (!getCodexThreadById(state.codex, threadId)) return null;
-        const stored = await this.readInput(reference, { ...reference.presentationRange, threadId, isCurrent: options.isCurrent });
+        const stored = await this.readInput(reference, { ...reference.presentationRange, threadId,
+          isCurrent: options.isCurrent, briefingScope: options.briefingScope });
         if (options.isCurrent && !options.isCurrent()) return null;
         if (stored?.source.text === null) { boardNotice('이 고정 원문은 바이너리입니다. 당시 입력 inspector에서 형식·전달 기록을 확인할 수 있습니다.'); return null; }
         return stored ? spawnInputEvidence(reference, stored, { reveal: options.reveal }) : null;
@@ -11266,6 +11348,14 @@
             const draft = BriefingState.briefingCommentDraft(origin, row.text, selected.map(reference => ({ reference })), row);
             this.attachBriefingComment(session.threadId, draft, selected, scope.current);
           } });
+        // The record is already keyed to this original account/route/step.
+        // Preserve the textarea's currently visible text at teardown, even if
+        // the authorization fence has just invalidated during composition.
+        // This is local draft state only: it never saves or attaches a comment.
+        controller.captureClosingText = value => {
+          const text = String(value ?? '');
+          if (record.text !== text) { record.text = text; record.editRevision = (record.editRevision || 0) + 1; }
+        };
         const dispose = controller.dispose;
         controller.dispose = () => { dispose(); scope.dispose(); unsubscribe?.(); };
         unsubscribe = this.subscribe(() => { if (!scope.current()) controller.dispose(); else controller.notify(); });

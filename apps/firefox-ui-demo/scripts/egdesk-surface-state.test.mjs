@@ -41,7 +41,7 @@ import { contrastRatio, mediaApplies, readAvatarTones, readCssRules, readRootPro
 
 // Briefing opinions exercise the real scope, bridge methods, controller and
 // DOM mount. The deferred transport deliberately does not filter on abort.
-function savedBriefingUiHarness({ respond, engineId = 'codex', verified = true, prepareEvidence = null } = {}) {
+function savedBriefingUiHarness({ respond, engineId = 'codex', verified = true, prepareEvidence = null, fitEvidence = null } = {}) {
   const document = settingsFakeDocument(), listeners = new Set(), requests = [], timers = new Map(), records = new Map();
   const create = document.createElement;
   document.createElement = tag => {
@@ -82,13 +82,16 @@ function savedBriefingUiHarness({ respond, engineId = 'codex', verified = true, 
   const emit = () => { for (const listener of [...listeners]) listener(state.codex); };
   const updateThreadById = (id, fn) => { const index = state.codex.threads.findIndex(item => item.id === id); if (index < 0) return null; return state.codex.threads[index] = fn(state.codex.threads[index]); };
   const method = signature => { const start = surfaceSource.indexOf(`      ${signature}`), end = surfaceSource.indexOf('\n      },', start); assert.ok(start >= 0 && end > start); return surfaceSource.slice(start, end + 8); };
-  const fits = [], prepared = new Set();
+  const fits = [], prepared = new Set(), evidenceCalls = [];
   const deps = { state, document, window, ChatState: Chat, BriefingState: Briefing, InputContext, epochScope, fetchJson, briefingCommentRecords: records,
     briefingResolvedTargets: shown => prepareEvidence ? Briefing.resolveBriefingTargets(Briefing.currentBriefingStep(shown), {
       references: shown.references, views: shown.briefing.steps.flatMap(step => Briefing.briefingStepTargets(step)).filter(target => prepared.has(target.sourceId))
         .map(target => ({ sourceId: target.sourceId, hash: target.hash, evidenceKey: InputContext.inputEvidenceKey({ ...target, presentationRange: target.range }),
           sourceMatches: true, revisionMatches: true, geometry: { x: 0, y: 0, width: 640, height: 480 } })),
-    }) : [], fitBriefingTargets: () => { if (prepareEvidence) fits.push('fit'); else throw new Error('comment refresh must not move camera'); },
+    }) : [], fitBriefingTargets: resolved => {
+      if (!prepareEvidence) throw new Error('comment refresh must not move camera');
+      fits.push('fit'); return fitEvidence?.({ state, document, resolved });
+    },
     boardNotice: message => assert.fail(message),
     setActiveEntity: () => { throw new Error('comment refresh must not activate a Canvas object'); },
     cloneJson: value => JSON.parse(JSON.stringify(value)), updateThreadById, emit, scheduleDeskSessionSave: () => { saves++; } };
@@ -101,8 +104,10 @@ function savedBriefingUiHarness({ respond, engineId = 'codex', verified = true, 
   // Only source materialization is deferred by this adapter. The opener,
   // renderer, comment HTTP scope, bridge and controller are production code.
   bridge.openInputEvidence = async (threadId, reference, options) => {
+    evidenceCalls.push({ threadId, reference, options });
     const result = await prepareEvidence?.(reference);
-    if (result !== false && options.isCurrent()) prepared.add(reference.sourceId);
+    if (result !== false && options.isCurrent()) { prepared.add(reference.sourceId); return { reference }; }
+    return null;
   };
   const open = () => {
     state.panTarget = { ...state.pan }; state.zoomTarget = state.zoom;
@@ -120,7 +125,7 @@ function savedBriefingUiHarness({ respond, engineId = 'codex', verified = true, 
   const part = id => settingsNodes(panel, node => node.dataset.testid === id)[0];
   const close = () => { actual.closeAnswerBriefing({ restore: false }); panel?.remove(); };
   const reopen = () => { close(); session = makeSession(); session.presentationId = 'presentation-reopened'; state.codex.briefingSession = session; return mount(); };
-  return { state, document, window, bridge, records, requests, epochScope, timers, row, list, emit, part, mount, close, reopen, open, fits,
+  return { state, document, window, bridge, records, requests, epochScope, timers, row, list, emit, part, mount, close, reopen, open, fits, briefing, evidenceCalls,
     render: () => { actual.renderAnswerBriefing(); session = state.codex.briefingSession; panel = document.getElementById('egd-answer-briefing'); editor = session.commentEditor; },
     panel: () => panel, session: () => session, thread: () => state.codex.threads.find(item => item.id === 'room-a'), uuidCount: () => uuidCount,
     saves: () => saves, type: text => { const node = part('briefing-comment'); node.value = text; node.fire('input'); },
@@ -151,7 +156,7 @@ test('Briefing editor preparation: actual opener completes without another comme
     assert.equal(h.part('briefing-comment-attach').disabled, false); assert.equal(h.requests[0].options.signal.aborted, false);
     assert.doesNotMatch(panel.textContent, /선택한 고정 근거를 준비/);
     assert.equal(JSON.stringify([h.state.codex.threadDrafts, h.thread().inputSources, h.thread().briefingInputs]), draft);
-    assert.equal(h.fits.length, 1, 'the existing fit call is deliberately unchanged');
+    assert.equal(h.fits.length, 0, 'typing during preparation prevents a late camera/selection change');
     if (pendingList) { list.resolve(listBody); await settle(); }
     assert.equal(h.part('briefing-comment-list').dataset.state, 'ready'); assert.equal(h.part('briefing-comment'), input);
     h.close();
@@ -1272,6 +1277,7 @@ test('Briefing delayed fit: actual wheel pan and zoom targets cancel only the la
     Number(surfaceSource.match(/const ZOOM_MIN = ([\d.]+);/)[1]), Number(surfaceSource.match(/const ZOOM_MAX = ([\d.]+);/)[1]));
   for (const action of ['pan', 'zoom', 'pan-ABA', 'zoom-ABA', 'zero', 'automatic-target', 'animation-only']) {
     const pending = requestProjectDeferred(), h = savedBriefingUiHarness({ prepareEvidence: () => pending.promise }); h.close();
+    if (action.endsWith('ABA')) h.briefing.steps[0].targets.push({ sourceId: 'source-b', hash: 'hash-b' });
     h.state.surface = { initialBrowserFocus: false }; const opening = h.open(); await settle();
     const original = structuredClone(h.session().previousView), controls = move(h.state);
     if (action === 'pan') controls.panCanvasByWheel({ deltaX: 25, deltaY: -12 });
@@ -5548,7 +5554,7 @@ function restoreInputInspector(h) {
 
 // The real Briefing opener feeds the real evidence/read bridge. Only the final
 // Canvas renderer is observed here; this is not a browser or native-input test.
-function briefingOriginHarness({ capture = null, location = 'briefingInputs', twoRanges = false } = {}) {
+function briefingOriginHarness({ capture = null, location = 'briefingInputs', twoRanges = false, createEvidence = null } = {}) {
   const h = restoreInputInspector(inputInspectorHarness({ capture }));
   const source = { id: 'local-selection', kind: 'file', label: '고정 원문', sourceRef: { path: '/fixture/original.txt' } };
   const receipt = { id: source.id, sourceId: 'stored-capture', snapshotId: 'stored-capture', hash: 'capture-hash',
@@ -5575,7 +5581,10 @@ function briefingOriginHarness({ capture = null, location = 'briefingInputs', tw
     cloneJson: copy, chatBindingNonce: () => `briefing-${++nonce}`, boardNotice: text => h.notices.push(text),
     renderAnswerBriefing: () => renders.push(h.state.codex.briefingSession?.presentationId),
     briefingResolvedTargets: () => [], fitBriefingTargets: () => fits.push('fit'),
-    spawnInputEvidence: (ref, stored, options) => { const snapshot = InputContext.inputEvidenceSnapshot(stored, ref); evidence.push({ ref, snapshot, options }); return snapshot; },
+    spawnInputEvidence: (ref, stored, options) => {
+      const snapshot = InputContext.inputEvidenceSnapshot(stored, ref); evidence.push({ ref, snapshot, options });
+      return createEvidence ? createEvidence(ref, stored, options) : snapshot;
+    },
     setActiveEntity: () => assert.fail('a non-restoring close must not change focus') };
   const actual = compileFunction(`${declaration('getCodexThreadById')}\n${declaration('briefingInputReferences') || ''}\n${declaration('closeAnswerBriefing')}
     ${surfaceSource.slice(start, end + 4)}\nreturn { openAnswerBriefing, closeAnswerBriefing, bridge: { ${scopeMethod} ${surfaceSource.slice(methodStart, methodEnd + 8)} } };`,
@@ -5674,6 +5683,823 @@ test('Briefing original scope: closed, replaced and A-B-A presentations discard 
   }
 });
 
+test('Briefing actual evidence shell: three fresh batch cards do not suppress ordinary autofit', async () => {
+  let actualSpawn;
+  const h = briefingOriginHarness({ createEvidence: (...args) => actualSpawn(...args) });
+  const document = h.document, create = document.createElement;
+  document.createElement = tag => {
+    const node = create(tag);
+    Object.defineProperty(node, 'id', { get() { return this.getAttribute('id'); }, set(value) { this.setAttribute('id', value); } });
+    const classes = new Set();
+    node.classList = { add: (...values) => values.forEach(value => classes.add(value)),
+      remove: (...values) => values.forEach(value => classes.delete(value)), contains: value => classes.has(value) };
+    return node;
+  };
+  document.querySelectorAll = selector => settingsNodes(document.documentElement, node => selector === '.egd-input-evidence-card'
+    ? node.className.split(/\s+/).includes('egd-input-evidence-card')
+    : selector === '.egd-entity-active, .egd-entity-selected'
+      && (node.classList?.contains('egd-entity-active') || node.classList?.contains('egd-entity-selected')));
+  const window = { addEventListener() {}, removeEventListener() {} }, activations = [], reveals = [];
+  let selected = 'original-card';
+  Object.defineProperty(h.state, 'activeEntityId', { configurable: true, enumerable: true, get: () => selected,
+    set: value => { selected = value; if (value !== 'original-card') activations.push(value); } });
+  class ResizeObserver { observe() {} disconnect() {} }
+  const deps = { document, window, ResizeObserver, state: h.state, InputContext, cloneJson: value => structuredClone(value), cardSeq: 0,
+    DESK_WINDOW_RESIZE_HITS: [], resolveCanvasCardPlacement: () => ({ x: 20, y: 30, width: 640, height: 480, inView: false }),
+    deskIcon: () => document.createElement('span'), bindCardSourceRef: () => {}, markAgendaDirty: () => {},
+    syncViewportAgendaRail: () => {},
+    revealPlacedCanvasCard: card => reveals.push(card.id), focusCanvasCard: () => {},
+    installCardHeaderFullscreenToggle: () => {}, canvasZoom: () => 1, isCardFullscreen: () => false,
+    closeCanvasCard: () => {}, toggleCardFullscreen: () => {}, queueMicrotask, console, TAG: 'qa' };
+  actualSpawn = compileFunction(`${declaration('el')}\n${declaration('setActiveEntity')}\n${declaration('spawnDeskWindowShell')}\n${declaration('spawnInputEvidence')}\nreturn spawnInputEvidence;`,
+    Object.keys(deps))(...Object.values(deps));
+  const step = h.message.briefing.steps[0], first = step.target, secondSource = 'stored-capture-b';
+  h.thread.briefingInputs.push({ ...h.original, sourceId: secondSource, snapshotId: secondSource });
+  h.message.contextCaptures.push({ ...h.message.contextCaptures[0], sourceId: secondSource, snapshotId: secondSource });
+  step.targets = [first, { ...first, range: { startLine: 5, endLine: 8 } }, { ...first, sourceId: secondSource }];
+  h.message.briefing.steps.push({ id: 'duplicate', text: '다시 언급', target: { ...first } });
+  h.state.activeEntityId = 'original-card';
+  await h.openBriefing();
+  assert.equal(h.evidence.length, 3); assert.equal(h.notices.length, 0);
+  assert.equal(document.querySelectorAll('.egd-input-evidence-card').length, 3);
+  assert.equal(h.state.canvasSelectionRevision || 0, 0, 'background materialization is not a selection action');
+  assert.equal(h.fits.length, 1, `ordinary fit was suppressed after shell activations: ${activations.join(', ')}`);
+  assert.equal(h.state.activeEntityId, 'original-card', 'batch card materialization must not claim the user selection');
+  assert.deepEqual(activations, []); assert.deepEqual(reveals, []);
+  const direct = actualSpawn({ sourceId: 'direct', hash: 'hash-direct' }, null, {});
+  assert.equal(h.state.activeEntityId, direct.id); assert.deepEqual(reveals, [direct.id]);
+  const restored = actualSpawn({ sourceId: 'restore', hash: 'hash-restore' }, null, { restore: true });
+  assert.equal(h.state.activeEntityId, restored.id); assert.deepEqual(reveals, [direct.id]);
+});
+
+test('Briefing multi-target preparation: one step opens each immutable range once across duplicates and steps', async () => {
+  const h = briefingOriginHarness();
+  const step = h.message.briefing.steps[0], first = step.target;
+  const second = { ...first, range: { startLine: 5, endLine: 8 } };
+  const secondSource = 'stored-capture-b';
+  h.thread.briefingInputs.push({ ...h.original, sourceId: secondSource, snapshotId: secondSource });
+  h.message.contextCaptures.push({ ...h.message.contextCaptures[0], sourceId: secondSource, snapshotId: secondSource });
+  step.targets = [first, second, { ...first, sourceId: secondSource }, { ...first }, { ...second, hash: undefined }];
+  h.message.briefing.steps.push({ id: 'duplicate', text: '다시 언급', target: { ...first } });
+  const original = JSON.stringify([h.thread, h.message]);
+  await h.openBriefing();
+  assert.deepEqual(h.calls.map(call => {
+    const url = new URL(call.url, 'http://fixture.invalid');
+    return [url.pathname, url.searchParams.get('startLine'), url.searchParams.get('endLine')];
+  }), [['/context/captures/stored-capture', '1', '4'], ['/context/captures/stored-capture', '5', '8'],
+    ['/context/captures/stored-capture-b', '1', '4']]);
+  assert.deepEqual(h.evidence.map(item => item.ref.presentationRange), [first.range, second.range, first.range]);
+  assert.ok(h.evidence.every(item => item.options.reveal === false));
+  const views = h.evidence.map((item, index) => ({ sourceId: item.ref.sourceId, hash: item.ref.hash,
+    evidenceKey: InputContext.inputEvidenceKey(item.ref), sourceMatches: true, revisionMatches: true,
+    geometry: { x: index * 200, y: 0, width: 100, height: 80 } }));
+  const resolved = Briefing.resolveBriefingTargets(step, { references: h.state.codex.briefingSession.references, views });
+  assert.deepEqual(resolved.map(item => item.status), ['available', 'available', 'available', 'available', 'available']);
+  assert.deepEqual(Briefing.briefingBounds(resolved), { x: 0, y: 0, width: 500, height: 80 });
+  assert.equal(h.state.codex.briefingSession.preparing, false); assert.equal(h.fits.length, 1);
+  assert.equal(h.renders.length, 2); assert.equal(h.listeners.size, 1); assert.equal(h.notices.length, 0);
+  assert.equal(JSON.stringify([h.thread, h.message]), original);
+  assert.ok(h.calls.every(call => call.options.method === undefined && call.url.startsWith('/context/captures/')),
+    'preparation only reads fixed evidence; no send, turn, or provider call');
+  h.closeBriefing(); assert.equal(h.listeners.size, 0);
+});
+
+test('Briefing multi-target preparation: missing, hash-stale or denied B stays partial with A intact and no live fallback', async () => {
+  for (const mode of ['missing', 'hash', 'permission']) {
+    const secondSource = 'stored-capture-b';
+    const h = briefingOriginHarness({ capture: (value, request) => {
+      if (mode === 'permission' && request.pathname.endsWith(`/${secondSource}`)) throw new Error('fixture permission denied');
+      return value;
+    } });
+    if (mode !== 'missing') {
+      h.thread.briefingInputs.push({ ...h.original, sourceId: secondSource, snapshotId: secondSource });
+      h.message.contextCaptures.push({ ...h.message.contextCaptures[0], sourceId: secondSource, snapshotId: secondSource });
+    }
+    const step = h.message.briefing.steps[0], first = step.target;
+    step.targets = [first, { ...first, sourceId: secondSource, hash: mode === 'hash' ? 'different-hash' : first.hash }];
+    const original = JSON.stringify([h.thread, h.message]);
+    await h.openBriefing();
+    assert.deepEqual(h.evidence.map(item => item.ref.sourceId), ['stored-capture'], mode);
+    const views = h.evidence.map(item => ({ sourceId: item.ref.sourceId, hash: item.ref.hash,
+      evidenceKey: InputContext.inputEvidenceKey(item.ref), sourceMatches: true, revisionMatches: true,
+      geometry: { x: 0, y: 0, width: 100, height: 80 } }));
+    const session = h.state.codex.briefingSession;
+    const resolved = Briefing.resolveBriefingTargets(step, { references: session.references, views });
+    assert.deepEqual(resolved.map(item => item.status), ['available', mode === 'hash' ? 'stale' : 'missing']);
+    const mark = Briefing.briefingStepMarks(session, [resolved])[0];
+    assert.equal(mark.status, 'partial'); assert.equal(mark.availableCount, 1); assert.equal(mark.targetCount, 2);
+    assert.equal(h.calls.length, mode === 'permission' ? 2 : 1);
+    assert.ok(h.calls.every(call => call.options.method === undefined && call.url.startsWith('/context/captures/')),
+      'never substitute a live source or execute/send a turn');
+    assert.equal(h.notices.length, mode === 'permission' ? 1 : 0); assert.equal(h.fits.length, 1);
+    assert.equal(session.preparing, false); assert.equal(h.listeners.size, 1);
+    assert.equal(JSON.stringify([h.thread, h.message]), original);
+    h.closeBriefing(); assert.equal(h.listeners.size, 0);
+  }
+});
+
+test('Briefing multi-target preparation: artifact targets do not invent fixed-source reads or claim availability', async () => {
+  const h = briefingOriginHarness(), step = h.message.briefing.steps[0];
+  step.targets = [step.target, { artifactId: 'artifact-not-materialized' }];
+  h.message.contextCaptures.push({ hash: 'invalid-capture-with-no-source' });
+  const openEvidence = h.bridge.openInputEvidence, opened = [];
+  h.bridge.openInputEvidence = function (...args) { opened.push(args[1]); return openEvidence.apply(this, args); };
+  await h.openBriefing();
+  assert.equal(h.calls.length, 1); assert.equal(h.evidence.length, 1); assert.equal(opened.length, 1);
+  assert.ok(h.calls.every(call => call.options.method === undefined && call.url.startsWith('/context/captures/')));
+  const item = h.evidence[0], session = h.state.codex.briefingSession;
+  const views = [{ sourceId: item.ref.sourceId, hash: item.ref.hash, evidenceKey: InputContext.inputEvidenceKey(item.ref),
+    sourceMatches: true, revisionMatches: true, geometry: { x: 0, y: 0, width: 100, height: 80 } }];
+  const resolved = Briefing.resolveBriefingTargets(step, { references: session.references, artifacts: session.artifacts, views, identity: session.identity });
+  assert.deepEqual(resolved.map(target => target.status), ['available', 'missing']);
+  assert.equal(Briefing.briefingStepMarks(session, [resolved])[0].status, 'partial');
+});
+
+test('Briefing multi-target preparation: missing, stale, malformed and failed targets do not block later valid evidence', async () => {
+  const h = briefingOriginHarness({ capture: (value, request) => {
+    if (request.searchParams.get('startLine') === '5') throw new Error('fixture read failure');
+    return value;
+  } });
+  const secondSource = 'stored-capture-b';
+  h.thread.briefingInputs.push({ ...h.original, sourceId: secondSource, snapshotId: secondSource });
+  h.message.contextCaptures.push({ ...h.message.contextCaptures[0], sourceId: secondSource, snapshotId: secondSource });
+  const step = h.message.briefing.steps[0], first = step.target;
+  const failed = { ...first, range: { startLine: 5, endLine: 8 } };
+  step.targets = [first, { sourceId: 'missing-source' }, { ...failed, hash: 'stale-hash' },
+    { ...first, range: { startLine: 9, endLine: 8 } }, failed, { ...first, sourceId: secondSource }];
+  h.message.briefing.steps.push({ id: 'failed-duplicate', text: '실패 중복', target: { ...failed } });
+  const original = JSON.stringify([h.thread, h.message]);
+  await h.openBriefing();
+  assert.deepEqual(h.calls.map(call => {
+    const url = new URL(call.url, 'http://fixture.invalid');
+    return [url.pathname, url.searchParams.get('startLine')];
+  }), [['/context/captures/stored-capture', '1'], ['/context/captures/stored-capture', '5'],
+    ['/context/captures/stored-capture-b', '1']]);
+  assert.deepEqual(h.evidence.map(item => item.ref.sourceId), ['stored-capture', secondSource]);
+  assert.ok(h.evidence.every(item => item.options.reveal === false));
+  assert.equal(h.notices.length, 2, 'unsupported range and failed read are reported without an automatic retry');
+  const views = h.evidence.map(item => ({ sourceId: item.ref.sourceId, hash: item.ref.hash,
+    evidenceKey: InputContext.inputEvidenceKey(item.ref), sourceMatches: true, revisionMatches: true,
+    geometry: { x: 0, y: 0, width: 100, height: 80 } }));
+  assert.deepEqual(Briefing.resolveBriefingTargets(step, { references: h.state.codex.briefingSession.references, views })
+    .map(item => item.status), ['available', 'missing', 'stale', 'unsupported', 'missing', 'available']);
+  assert.equal(h.state.codex.briefingSession.preparing, false); assert.equal(h.fits.length, 1);
+  assert.equal(h.listeners.size, 1); assert.equal(JSON.stringify([h.thread, h.message]), original);
+  assert.ok(h.calls.every(call => call.options.method === undefined && call.url.startsWith('/context/captures/')));
+  h.closeBriefing(); assert.equal(h.listeners.size, 0);
+});
+
+test('Briefing multi-target preparation: late account, engine, room and presentation changes stop subsequent targets', async () => {
+  const changes = [
+    h => { const auth = h.state.codex.authStatus; h.state.codex.authStatus = { ...auth, accountEmail: 'other@example.test' }; h.emit(); h.state.codex.authStatus = auth; h.emit(); },
+    h => { h.thread.engineProfileId = 'other-slot'; h.emit(); h.thread.engineProfileId = 'codex-slot'; h.emit(); },
+    h => { h.thread.engineId = 'claude'; h.emit(); h.thread.engineId = 'codex'; h.emit(); },
+    h => { h.state.codex.activeThreadId = 'room-b'; h.state.codex.activityRoomGeneration++; h.emit();
+      h.state.codex.activeThreadId = h.thread.id; h.state.codex.activityRoomGeneration++; h.emit(); },
+    h => { h.state.codex.briefingSession = { ...h.state.codex.briefingSession, presentationId: 'replacement' }; },
+    h => h.closeBriefing(),
+  ];
+  for (const change of changes) for (const rejectLate of [false, true]) {
+    const pending = requestProjectDeferred(); let response;
+    const h = briefingOriginHarness({ capture: value => {
+      if (value.source.range.startLine === 5) { response = value; return pending.promise; }
+      return value;
+    } });
+    const step = h.message.briefing.steps[0], first = step.target;
+    step.targets = [first, { ...first, range: { startLine: 5, endLine: 8 } }, { ...first, range: { startLine: 9, endLine: 12 } }];
+    const opening = h.openBriefing(); await settle();
+    assert.equal(h.calls.length, 2); assert.equal(h.evidence.length, 1);
+    change(h); const before = JSON.stringify([h.state, h.renders, h.fits, h.notices]);
+    if (rejectLate) pending.reject(new Error('late private capture error')); else pending.resolve(response);
+    await opening;
+    assert.equal(h.calls.length, 2, 'a stale preparation must not read the next target');
+    assert.equal(h.evidence.length, 1); assert.equal(JSON.stringify([h.state, h.renders, h.fits, h.notices]), before);
+    assert.equal(h.listeners.size, 0);
+  }
+});
+
+test('Briefing room fence: real createThread/deleteThread ABA closes the old presentation without a camera restore', async () => {
+  const pending = requestProjectDeferred(); let response, count = 0, cameraRestores = 0;
+  const h = briefingOriginHarness({ twoRanges: true, capture: value => {
+    if (++count === 1) { response = value; return pending.promise; }
+    return value;
+  } });
+  Object.assign(h.state.codex, { threadNonce: 0, threadDrafts: { [h.thread.id]: 'existing draft' }, messageThreadMap: {} });
+  h.state.setCanvasViewportTarget = () => { cameraRestores++; };
+  const method = signature => { const start = surfaceSource.indexOf(`      ${signature}`), end = surfaceSource.indexOf('\n      },', start);
+    assert.ok(start >= 0 && end > start); return surfaceSource.slice(start, end + 8); };
+  const deps = { state: h.state, window: { confirm: () => true }, SELF_MEMBER: 'self', emit: h.emit,
+    createCodexThread: (type, title) => ({ id: 'new-room', type, title, messages: [] }),
+    getCodexThreadById: (codex, id) => codex.threads.find(thread => thread.id === id) || null,
+    getActiveCodexThread: codex => codex.threads.find(thread => thread.id === codex.activeThreadId) || codex.threads[0] || null,
+    getCodexThreadDraft: (codex, id) => codex.threadDrafts?.[id] || '', update: () => assert.fail('unexpected update') };
+  const methods = compileFunction(`return { ${method('createThread(')}, ${method('deleteThread(')} };`, Object.keys(deps))(...Object.values(deps));
+  const opening = h.openBriefing(); await settle(); assert.equal(h.calls.length, 1);
+  const generation = h.state.codex.activityRoomGeneration;
+  methods.createThread(); assert.equal(h.state.codex.activeThreadId, 'new-room');
+  assert.equal(h.state.codex.briefingSession, null, 'room change closes the original presentation immediately');
+  methods.deleteThread('new-room'); assert.equal(h.state.codex.activeThreadId, h.thread.id);
+  assert.equal(h.state.codex.activityRoomGeneration, generation, 'actual create/delete do not increment this generation');
+  const afterReturn = JSON.stringify([h.state, h.renders, h.fits, h.notices]);
+  pending.resolve(response); await opening;
+  assert.equal(h.calls.length, 1); assert.equal(h.evidence.length, 0); assert.equal(cameraRestores, 0);
+  assert.equal(JSON.stringify([h.state, h.renders, h.fits, h.notices]), afterReturn); assert.equal(h.listeners.size, 0);
+  await h.openBriefing(); assert.equal(h.state.codex.briefingSession.preparing, false);
+  assert.equal(h.evidence.length, 2, 'explicit reopening starts a fresh, working preparation');
+  h.closeBriefing(); assert.equal(h.listeners.size, 0);
+});
+
+test('Briefing same-room activity: the actual activity opener does not close the panel or lose comment editing', async () => {
+  const h = savedBriefingUiHarness({ prepareEvidence: async () => false }); h.close(); await h.open(); await settle();
+  const activity = compileFunction(`${declaration('openCodexActivityPanel')} return openCodexActivityPanel;`,
+    ['state', 'renderCodexActivityPanel'])(h.state, () => {});
+  h.type('활동 기록을 보며 쓰는 의견'); const panel = h.panel(), input = h.part('briefing-comment');
+  input.focus(); input.setSelectionRange(2, 5); activity('room-a'); h.emit();
+  assert.equal(h.state.codex.activityRoomGeneration, 1); assert.equal(h.panel(), panel);
+  assert.equal(h.document.activeElement, input); assert.equal(input.selectionStart, 2); assert.equal(input.selectionEnd, 5);
+  h.type('활동 기록을 연 뒤 이어 쓴 의견');
+  h.click('briefing-next'); h.click('briefing-previous'); await settle();
+  assert.equal(h.part('briefing-comment').value, '활동 기록을 연 뒤 이어 쓴 의견');
+  assert.equal(h.state.codex.threadDrafts['room-a'], '기존 초안');
+  assert.equal(h.requests.filter(call => call.options.method === 'POST').length, 0); h.close();
+});
+
+test('Briefing same-room activity during a real read retains every valid target and suppresses late fit', async () => {
+  const pending = requestProjectDeferred(); let response, count = 0;
+  const h = briefingOriginHarness({ capture: value => {
+    if (++count === 1) { response = value; return pending.promise; }
+    return value;
+  } });
+  const step = h.message.briefing.steps[0], first = step.target, secondSource = 'stored-capture-b';
+  h.thread.briefingInputs.push({ ...h.original, sourceId: secondSource, snapshotId: secondSource });
+  h.message.contextCaptures.push({ ...h.message.contextCaptures[0], sourceId: secondSource, snapshotId: secondSource });
+  step.targets = [first, { ...first, range: { startLine: 5, endLine: 8 } }, { ...first, sourceId: secondSource }];
+  h.message.briefing.steps.push({ id: 'duplicate', text: '다시 언급', target: { ...first } });
+  const activity = compileFunction(`${declaration('openCodexActivityPanel')} return openCodexActivityPanel;`,
+    ['state', 'renderCodexActivityPanel'])(h.state, () => {});
+  const opening = h.openBriefing(); await settle(); activity(h.thread.id); h.emit();
+  assert.equal(h.calls[0].options.signal.aborted, false, 'same-room activity must not abort the fixed capture read');
+  pending.resolve(response); await opening;
+  assert.equal(h.state.codex.briefingSession.preparing, false);
+  assert.deepEqual(h.evidence.map(item => [item.ref.sourceId, item.ref.presentationRange.startLine, item.ref.presentationRange.endLine]),
+    [['stored-capture', 1, 4], ['stored-capture', 5, 8], [secondSource, 1, 4]]);
+  assert.equal(h.calls.length, 3, 'the later duplicate does not issue another GET');
+  assert.equal(h.fits.length, 0); assert.equal(h.notices.length, 0); h.closeBriefing();
+});
+
+test('Briefing scope exception does not weaken ordinary input reads or accept a foreign scope', async () => {
+  const pending = requestProjectDeferred(); let response;
+  const h = briefingOriginHarness({ capture: value => { response = value; return pending.promise; } });
+  const ordinary = h.bridge.readInput(h.original, { threadId: h.thread.id }); await settle();
+  h.state.codex.activityRoomGeneration++; h.emit(); pending.resolve(response);
+  assert.equal(await ordinary, undefined, 'the existing generic activity-generation fence stays in force');
+  assert.equal(h.calls.length, 1);
+  const foreign = await h.bridge.readInput(h.original, { threadId: h.thread.id, isCurrent: () => true,
+    briefingScope: { current: () => true } });
+  assert.equal(foreign, undefined); assert.equal(h.calls.length, 1, 'a fabricated scope never starts a GET');
+});
+
+test('Briefing fixed reads survive an independently opened original-input inspector in the same room', async () => {
+  const pending = requestProjectDeferred(); let response, count = 0;
+  const h = briefingOriginHarness({ capture: value => {
+    if (++count === 1) { response = value; return pending.promise; }
+    return value;
+  } });
+  const step = h.message.briefing.steps[0], first = step.target, secondSource = 'stored-capture-b';
+  h.thread.briefingInputs.push({ ...h.original, sourceId: secondSource, snapshotId: secondSource });
+  h.message.contextCaptures.push({ ...h.message.contextCaptures[0], sourceId: secondSource, snapshotId: secondSource });
+  step.targets = [first, { ...first, range: { startLine: 5, endLine: 8 } }, { ...first, sourceId: secondSource }];
+  const opening = h.openBriefing(); await settle();
+  await h.bridge.inspectInput(h.thread.id, h.original, { startLine: 1, endLine: 4 });
+  assert.ok(h.part('chat-input-panel')?.isConnected); const focused = h.document.activeElement;
+  pending.resolve(response); await opening;
+  assert.deepEqual(h.evidence.map(item => [item.ref.sourceId, item.ref.presentationRange.startLine]),
+    [['stored-capture', 1], ['stored-capture', 5], [secondSource, 1]]);
+  assert.equal(h.fits.length, 0, 'background materialization must not steal inspector focus');
+  assert.equal(h.document.activeElement, focused); assert.equal(h.state.codex.briefingSession.preparing, false);
+  if (h.pending.length) h.pending[0].resolve(h.sourceResponse()); await Promise.all(h.trackingRuns);
+  h.close(); h.closeBriefing(); assert.equal(h.listeners.size, 0);
+});
+
+test('Briefing actual retry read survives same-room activity without a late fit', async () => {
+  const pending = requestProjectDeferred(); let ready = false, response, retryWork;
+  const h = briefingOriginHarness({ capture: value => {
+    if (!ready) throw new Error('fixture unavailable');
+    response = value; return pending.promise;
+  } });
+  await h.openBriefing(); assert.equal(h.evidence.length, 0); h.notices.length = 0;
+  const document = h.document, create = document.createElement;
+  document.createElement = tag => {
+    const node = create(tag);
+    node.insertBefore = (child, next) => { child.remove?.(); node.children.splice(node.children.indexOf(next), 0, child);
+      child.parentNode = node; child._connect(node.isConnected); return child; };
+    return node;
+  };
+  const resolve = session => Briefing.resolveBriefingTargets(Briefing.currentBriefingStep(session), { references: session.references,
+    views: h.evidence.map((item, index) => ({ id: `view-${index}`, sourceId: item.ref.sourceId, hash: item.ref.hash,
+      evidenceKey: InputContext.inputEvidenceKey(item.ref), sourceMatches: true, revisionMatches: true,
+      geometry: { x: 0, y: 0, width: 100, height: 100 } })) });
+  const deps = { state: h.state, document, BriefingState: Briefing, briefingResolvedTargets: resolve,
+    fitBriefingTargets: () => h.fits.push('retry-fit'), closeAnswerBriefing: () => h.closeBriefing(),
+    mountBriefingComments: () => ({ dispose() {}, notify() {} }), boardNotice: text => h.notices.push(text) };
+  compileFunction(`${declaration('el')}\n${declaration('renderAnswerBriefing')}\nreturn renderAnswerBriefing;`,
+    Object.keys(deps))(...Object.values(deps))();
+  const originalOpen = h.bridge.openInputEvidence;
+  h.bridge.openInputEvidence = function (...args) { retryWork = originalOpen.apply(this, args); return retryWork; };
+  const panel = document.getElementById('egd-answer-briefing');
+  const button = settingsNodes(panel, node => node.dataset.testid === 'briefing-show-evidence')[0];
+  ready = true; const beforeFits = h.fits.length; button.fire('click'); await settle();
+  const activity = compileFunction(`${declaration('openCodexActivityPanel')} return openCodexActivityPanel;`,
+    ['state', 'renderCodexActivityPanel'])(h.state, () => {});
+  activity(h.thread.id); h.emit(); assert.equal(h.calls.at(-1).options.signal.aborted, false);
+  pending.resolve(response); await retryWork; await settle();
+  assert.equal(h.evidence.length, 1); assert.equal(h.evidence[0].options.reveal, false);
+  assert.equal(h.fits.length, beforeFits); assert.deepEqual(h.notices, []); h.closeBriefing();
+});
+
+test('Briefing scope handles synchronous invalidation during subscribe without leaking or poisoning a fresh reopen', async () => {
+  const h = briefingOriginHarness(), subscribe = h.bridge.subscribe; let first = true;
+  const intent = new Set();
+  h.document.addEventListener = (_type, listener) => intent.add(listener);
+  h.document.removeEventListener = (_type, listener) => intent.delete(listener);
+  h.bridge.subscribe = listener => {
+    if (first) { first = false; h.state.codex.activeThreadId = 'room-b'; }
+    return subscribe(listener);
+  };
+  await h.openBriefing();
+  assert.equal(h.state.codex.briefingSession, null); assert.equal(h.calls.length, 0); assert.equal(h.listeners.size, 0); assert.equal(intent.size, 0);
+  h.state.codex.activeThreadId = h.thread.id; h.bridge.subscribe = subscribe;
+  await h.openBriefing(); assert.equal(h.state.codex.briefingSession.preparing, false);
+  assert.equal(h.evidence.length, 1); assert.equal(intent.size, 1); h.closeBriefing();
+  assert.equal(h.listeners.size, 0); assert.equal(intent.size, 0);
+});
+
+test('Briefing original-input inspector retains the presentation fence through the actual pending read', async () => {
+  for (const action of ['current', 'close', 'replace', 'step', 'room', 'account']) for (const rejected of [false, true]) {
+    if (action === 'current' && rejected) continue;
+    const pending = requestProjectDeferred(); let response, count = 0, inspectWork;
+    const h = briefingOriginHarness({ capture: value => {
+      if (++count === 2) { response = value; return pending.promise; }
+      return value;
+    } });
+    await h.openBriefing();
+    const inspect = h.bridge.inspectInput;
+    h.bridge.inspectInput = function (...args) { inspectWork = inspect.apply(this, args); return inspectWork; };
+    const deps = { state: h.state, document: h.document, BriefingState: Briefing,
+      briefingResolvedTargets: session => [{ target: Briefing.currentBriefingStep(session).target,
+        reference: session.references[0], status: 'available' }],
+      fitBriefingTargets: () => {}, closeAnswerBriefing: () => h.closeBriefing(),
+      mountBriefingComments: () => ({ dispose() {}, notify() {} }), boardNotice: text => h.notices.push(text) };
+    compileFunction(`${declaration('el')}\n${declaration('renderAnswerBriefing')}\nreturn renderAnswerBriefing;`,
+      Object.keys(deps))(...Object.values(deps))();
+    const panel = h.document.getElementById('egd-answer-briefing');
+    const button = settingsNodes(panel, node => node.dataset.testid === 'briefing-inspect')[0];
+    const focus = h.document.createElement('input'); h.document.documentElement.appendChild(focus); focus.focus();
+    button.fire('click'); await settle(); assert.equal(h.calls.length, 2);
+    if (action === 'close') h.closeBriefing();
+    if (action === 'replace') h.state.codex.briefingSession = { ...h.state.codex.briefingSession, presentationId: 'replacement' };
+    if (action === 'step') h.state.codex.briefingSession = { ...h.state.codex.briefingSession, index: 1 };
+    if (action === 'room') { h.state.codex.activeThreadId = 'room-b'; h.emit(); h.state.codex.activeThreadId = h.thread.id; h.emit(); }
+    if (action === 'account') { h.state.codex.authStatus.accountEmail = 'other@example.test'; h.emit(); }
+    if (rejected) pending.reject(new Error('late old inspector error')); else pending.resolve(response);
+    await inspectWork; await settle();
+    if (action === 'current') {
+      assert.ok(h.part('chat-input-panel')?.isConnected); assert.match(h.part('chat-input-panel').textContent, /exact line 1/);
+      if (h.pending.length) h.pending[0].resolve(h.sourceResponse()); await Promise.all(h.trackingRuns);
+      h.close(); h.closeBriefing();
+    } else {
+      assert.ok(!h.part('chat-input-panel'), `${action}/${rejected}`);
+      assert.equal(h.document.activeElement, focus, `${action}/${rejected}`);
+      assert.deepEqual(h.notices, [], `${action}/${rejected}`);
+      h.closeBriefing();
+    }
+    assert.equal(h.listeners.size, 0);
+  }
+});
+
+test('Briefing original-input inspector does not open over newer focused or typed work', async () => {
+  for (const action of ['none', 'focus', 'focus-aba', 'focus-without-event', 'typing-same']) for (const rejected of [false, true]) {
+    if (action === 'none' && rejected) continue;
+    const pending = requestProjectDeferred(), listeners = new Map(); let response, count = 0, inspectWork;
+    const h = briefingOriginHarness({ capture: value => {
+      if (++count === 2) { response = value; return pending.promise; }
+      return value;
+    } });
+    h.document.addEventListener = (type, listener) => { if (!listeners.has(type)) listeners.set(type, new Set()); listeners.get(type).add(listener); };
+    h.document.removeEventListener = (type, listener) => listeners.get(type)?.delete(listener);
+    const fire = type => { for (const listener of listeners.get(type) || []) listener({ type }); };
+    h.state.codex.threadDrafts = { [h.thread.id]: 'existing Chat draft' };
+    const original = h.document.createElement('textarea'), newer = h.document.createElement('textarea');
+    h.document.documentElement.append(original, newer); original.value = 'original focus'; newer.value = 'newer work';
+    original.focus(); original.setSelectionRange(2, 5, 'backward');
+    await h.openBriefing();
+    const inspect = h.bridge.inspectInput;
+    h.bridge.inspectInput = function (...args) { inspectWork = inspect.apply(this, args); return inspectWork; };
+    const deps = { state: h.state, document: h.document, BriefingState: Briefing,
+      briefingResolvedTargets: session => [{ target: Briefing.currentBriefingStep(session).target,
+        reference: session.references[0], status: 'available' }],
+      fitBriefingTargets: () => {}, closeAnswerBriefing: () => h.closeBriefing(),
+      mountBriefingComments: () => ({ dispose() {}, notify() {} }), boardNotice: text => h.notices.push(text) };
+    compileFunction(`${declaration('el')}\n${declaration('renderAnswerBriefing')}\nreturn renderAnswerBriefing;`,
+      Object.keys(deps))(...Object.values(deps))();
+    const panel = h.document.getElementById('egd-answer-briefing');
+    settingsNodes(panel, node => node.dataset.testid === 'briefing-inspect')[0].fire('click'); await settle();
+    assert.equal(h.calls.length, 2);
+    if (['focus', 'focus-aba', 'focus-without-event'].includes(action)) {
+      newer.focus(); if (action !== 'focus-without-event') fire('focusin');
+      newer.value = 'newer work typed'; newer.setSelectionRange(3, 8, 'backward');
+      if (action === 'focus') fire('input');
+    }
+    if (action === 'focus-aba') { original.focus(); fire('focusin'); }
+    if (action === 'typing-same') { original.value = 'original focus typed'; original.setSelectionRange(1, 6); fire('keydown'); fire('input'); }
+    const currentFocus = h.document.activeElement, text = [original.value, newer.value],
+      selection = [currentFocus.selectionStart, currentFocus.selectionEnd, currentFocus.selectionDirection];
+    if (rejected) pending.reject(new Error('late inspector read failure')); else pending.resolve(response);
+    await inspectWork; await settle();
+    if (action === 'none') {
+      assert.ok(h.part('chat-input-panel')?.isConnected, 'unchanged explicit inspector still opens');
+      assert.match(h.part('chat-input-panel').textContent, /exact line 1/);
+      if (h.pending.length) h.pending[0].resolve(h.sourceResponse()); await Promise.all(h.trackingRuns); h.close();
+    } else {
+      assert.ok(!h.part('chat-input-panel'), `${action}/${rejected}: no late panel`);
+      assert.equal(h.document.activeElement, currentFocus, `${action}/${rejected}`);
+      assert.deepEqual([original.value, newer.value], text); assert.deepEqual(
+        [currentFocus.selectionStart, currentFocus.selectionEnd, currentFocus.selectionDirection], selection);
+      assert.deepEqual(h.notices, []); assert.equal(h.state.codex.threadDrafts[h.thread.id], 'existing Chat draft');
+    }
+    h.closeBriefing(); assert.equal(h.listeners.size, 0);
+    assert.ok([...listeners.values()].every(value => value.size === 0));
+  }
+});
+
+test('Briefing stale scope invalidation cannot close a replacement presentation', async () => {
+  const pending = requestProjectDeferred(); let response;
+  const h = briefingOriginHarness({ capture: value => { response = value; return pending.promise; } });
+  const intent = new Set();
+  h.document.addEventListener = (_type, listener) => intent.add(listener);
+  h.document.removeEventListener = (_type, listener) => intent.delete(listener);
+  const opening = h.openBriefing(); await settle();
+  assert.equal(intent.size, 1);
+  const replacement = { ...h.state.codex.briefingSession, presentationId: 'replacement', preparationScope: null, interaction: { revision: 0 } };
+  h.state.codex.briefingSession = replacement; h.state.codex.activeThreadId = 'room-b'; h.emit();
+  assert.equal(h.state.codex.briefingSession, replacement);
+  pending.resolve(response); await opening;
+  assert.equal(h.state.codex.briefingSession, replacement); assert.equal(h.evidence.length, 0);
+  assert.equal(h.listeners.size, 0); assert.equal(intent.size, 0, 'the old presentation releases its intent listener');
+});
+
+test('Briefing canceled preparation: return and explicit reopen preserve the comment and Chat drafts', async () => {
+  const pending = requestProjectDeferred(), restores = [];
+  const h = savedBriefingUiHarness({ prepareEvidence: () => pending.promise }); h.close();
+  h.state.setCanvasViewportTarget = (...args) => restores.push(args);
+  const opening = h.open(); await settle(); h.type('원래 방에서 작성하던 의견');
+  const panel = h.panel(), initialDraft = h.state.codex.threadDrafts['room-a'];
+  h.state.codex.activeThreadId = 'room-b'; h.emit();
+  assert.equal(h.state.codex.briefingSession, null); assert.equal(panel.isConnected, false);
+  h.state.codex.activeThreadId = 'room-a'; h.emit();
+  pending.resolve(); await opening; await settle();
+  assert.equal(h.state.codex.briefingSession, null); assert.equal(restores.length, 0); assert.equal(h.fits.length, 0);
+  await h.open(); await settle();
+  assert.equal(h.part('briefing-comment').value, '원래 방에서 작성하던 의견');
+  assert.equal(h.state.codex.threadDrafts['room-a'], initialDraft); assert.equal(h.session().preparing, false);
+  assert.equal(h.requests.filter(call => call.options.method === 'POST').length, 0); assert.equal(h.saves(), 0); h.close();
+});
+
+test('Briefing auto-close retains the current IME-visible textarea in the original record without saving it', async () => {
+  const pending = requestProjectDeferred(), h = savedBriefingUiHarness({ prepareEvidence: () => pending.promise });
+  h.close(); const opening = h.open(); await settle();
+  h.type('확정된 글'); const input = h.part('briefing-comment');
+  input.fire('compositionstart'); input.value = '확정된 글과 조합 중인 글'; // Current DOM value, before a final input event.
+  h.state.codex.activeThreadId = 'room-b'; h.emit(); assert.equal(h.state.codex.briefingSession, null);
+  h.state.codex.activeThreadId = 'room-a'; h.emit(); pending.resolve(); await opening; await settle();
+  await h.open(); await settle();
+  assert.equal(h.part('briefing-comment').value, '확정된 글과 조합 중인 글');
+  assert.equal(h.state.codex.threadDrafts['room-a'], '기존 초안');
+  assert.equal(h.requests.filter(call => call.options.method === 'POST').length, 0); assert.equal(h.saves(), 0); h.close();
+});
+
+test('Briefing auto-close while POST is pending retains unknown UUID and never auto-includes on recovery', async () => {
+  const pending = requestProjectDeferred(); let committed;
+  const h = savedBriefingUiHarness({ prepareEvidence: async () => true, respond: (call, { row, list }) => {
+    if (call.options.method === 'GET') return Promise.resolve(committed ? list(committed) : list());
+    committed = row({ clientRequestId: call.body.clientRequestId, text: call.body.text });
+    return pending.promise;
+  } });
+  h.close(); await h.open(); await settle(); h.type('원래 방에서 저장을 요청한 의견');
+  const draft = h.state.codex.threadDrafts['room-a']; h.click('briefing-comment-attach');
+  const id = h.part('briefing-comment-status').dataset.clientRequestId;
+  assert.ok(id); assert.equal(h.requests.filter(call => call.options.method === 'POST').length, 1);
+  h.state.codex.activeThreadId = 'room-b'; h.emit(); assert.equal(h.state.codex.briefingSession, null);
+  const record = [...h.records.values()][0]; assert.equal(record.attempt.phase, 'unknown');
+  assert.equal(record.attempt.body.clientRequestId, id);
+  h.state.codex.activeThreadId = 'room-a'; h.emit(); await h.open(); await settle();
+  assert.equal(h.part('briefing-comment-status').dataset.clientRequestId, id);
+  assert.equal(h.part('briefing-comment-status').dataset.state, 'saved');
+  assert.equal(h.state.codex.threadDrafts['room-a'], draft);
+  assert.equal(h.requests.filter(call => call.options.method === 'POST').length, 1);
+  pending.resolve({ comment: committed }); await settle();
+  assert.equal(h.state.codex.threadDrafts['room-a'], draft); assert.equal(h.requests.filter(call => call.options.method === 'POST').length, 1); h.close();
+});
+
+test('Briefing retry refuses a mismatched target hash without touching valid A or the Chat draft', async () => {
+  const h = savedBriefingUiHarness({ prepareEvidence: async ref => ref.sourceId === 'source-a' }); h.close();
+  h.briefing.steps[0].targets = [
+    { sourceId: 'source-a', hash: 'hash-a', range: { startLine: 1, endLine: 4 } },
+    { sourceId: 'source-b', hash: 'other-hash', range: { startLine: 1, endLine: 4 } },
+  ];
+  h.briefing.steps[1].target = { ...h.briefing.steps[0].targets[0] };
+  await h.open(); await settle();
+  assert.deepEqual(h.evidenceCalls.map(call => call.reference.sourceId), ['source-a']);
+  assert.match(h.panel().textContent, /고정 원문 hash와 일치하지 않습니다/);
+  assert.equal(settingsNodes(h.panel(), node => node.dataset.testid === 'briefing-show-evidence' && node.dataset.sourceId === 'source-b').length, 0);
+  assert.equal(h.state.codex.threadDrafts['room-a'], '기존 초안');
+  assert.equal(h.requests.filter(call => call.options.method === 'POST').length, 0); h.close();
+});
+
+test('Briefing stale retry callback rechecks the target hash before any read', async () => {
+  const h = savedBriefingUiHarness({ prepareEvidence: async () => false }); h.close(); await h.open(); await settle();
+  const retry = h.part('briefing-show-evidence'), before = h.evidenceCalls.length;
+  assert.ok(retry); h.session().briefing.steps[0].targets[0].hash = 'changed-hash';
+  retry.fire('click'); await settle();
+  assert.equal(h.evidenceCalls.length, before); assert.equal(h.state.codex.threadDrafts['room-a'], '기존 초안');
+  assert.equal(h.requests.filter(call => call.options.method === 'POST').length, 0); h.close();
+});
+
+test('Briefing retry preflight rejects old-panel room, account and presentation before any new evidence read', async () => {
+  for (const change of [
+    h => { h.state.codex.activeThreadId = 'room-b'; },
+    h => { h.state.codex.authStatus = { ...h.state.codex.authStatus, accountEmail: 'other@example.test' }; },
+    h => { h.state.codex.briefingSession = { ...h.session(), presentationId: 'replacement' }; },
+  ]) {
+    const h = savedBriefingUiHarness({ prepareEvidence: async () => false }); h.close(); await h.open(); await settle();
+    const retry = h.part('briefing-show-evidence'), calls = h.evidenceCalls.length, fits = h.fits.length;
+    assert.ok(retry); change(h); retry.fire('click'); await settle();
+    assert.equal(h.evidenceCalls.length, calls); assert.equal(h.fits.length, fits);
+    assert.equal(h.requests.filter(call => call.options.method === 'POST').length, 0); h.close();
+  }
+});
+
+test('Briefing partial panel closes on real room notification and can retry only after explicit reopening in its origin', async () => {
+  let ready = false;
+  const h = savedBriefingUiHarness({ prepareEvidence: async () => ready }); h.close(); await h.open(); await settle();
+  h.type('부분 근거를 보며 쓴 의견');
+  const retry = h.part('briefing-show-evidence'), panel = h.panel(), calls = h.evidenceCalls.length, fits = h.fits.length;
+  assert.ok(retry); assert.equal(h.session().preparing, false);
+  h.state.codex.activeThreadId = 'room-b'; h.emit();
+  assert.equal(h.state.codex.briefingSession, null); assert.equal(panel.isConnected, false);
+  retry.fire('click'); await settle(); assert.equal(h.evidenceCalls.length, calls); assert.equal(h.fits.length, fits);
+  h.state.codex.activeThreadId = 'room-a'; h.emit();
+  await h.open(); await settle();
+  assert.equal(h.part('briefing-comment').value, '부분 근거를 보며 쓴 의견');
+  assert.equal(h.session().preparing, false); assert.ok(h.part('briefing-show-evidence'));
+  const beforeRetry = h.evidenceCalls.length, beforeFit = h.fits.length;
+  ready = true; h.click('briefing-show-evidence'); await settle();
+  assert.equal(h.evidenceCalls.length, beforeRetry + 1); assert.equal(h.evidenceCalls.at(-1).threadId, 'room-a');
+  assert.equal(h.evidenceCalls.at(-1).options.reveal, false); assert.equal(h.fits.length, beforeFit + 1);
+  assert.equal(h.requests.filter(call => call.options.method === 'POST').length, 0); h.close();
+});
+
+test('Briefing retry uses background materialization and respects later pan, selection, typing, IME, room and account', async () => {
+  for (const action of ['none', 'failed', 'pan', 'selection-aba', 'typing', 'composition', 'room', 'account', 'step']) {
+    const pending = requestProjectDeferred(); let retrying = false;
+    const h = savedBriefingUiHarness({ prepareEvidence: () => retrying ? pending.promise : Promise.resolve(false) });
+    h.close(); await h.open(); await settle(); retrying = true;
+    const initialFits = h.fits.length; h.click('briefing-show-evidence'); await settle();
+    const request = h.evidenceCalls.at(-1); assert.equal(request.options.reveal, false);
+    assert.equal(request.options.isCurrent(), true);
+    if (action === 'pan') h.state.canvasUserCameraRevision = 1;
+    if (action === 'selection-aba') h.state.canvasSelectionRevision = 2;
+    if (action === 'typing') h.type('근거 재시도 중 작성');
+    if (action === 'composition') h.part('briefing-comment').fire('compositionstart');
+    if (action === 'room') { h.state.codex.activeThreadId = 'room-b'; h.emit(); }
+    if (action === 'account') { h.state.codex.authStatus = { ...h.state.codex.authStatus, accountEmail: 'other@example.test' }; h.emit(); }
+    if (action === 'step') { h.click('briefing-next'); await settle(); }
+    const fitsAfterAction = h.fits.length;
+    const chatDraft = h.state.codex.threadDrafts['room-a'];
+    pending.resolve(action !== 'failed'); await settle();
+    assert.equal(h.fits.length, action === 'none' ? initialFits + 1 : fitsAfterAction, action);
+    assert.equal(h.state.codex.threadDrafts['room-a'], chatDraft); assert.equal(h.saves(), 0);
+    assert.equal(h.requests.filter(call => call.options.method === 'POST').length, 0);
+    if (action === 'typing') assert.equal(h.part('briefing-comment').value, '근거 재시도 중 작성');
+    if (action === 'room' || action === 'account') assert.equal(h.state.codex.briefingSession, null);
+    h.close();
+  }
+});
+
+test('Briefing old retry cannot revive after actual step A to B to A within the same presentation', async () => {
+  const pending = requestProjectDeferred(); let retrying = false;
+  const h = savedBriefingUiHarness({ prepareEvidence: () => retrying ? pending.promise : Promise.resolve(false) });
+  h.close(); await h.open(); await settle(); h.type('첫 단계의 미저장 의견');
+  retrying = true; h.click('briefing-show-evidence'); await settle();
+  const original = h.session(), request = h.evidenceCalls.at(-1);
+  h.click('briefing-next'); await settle(); h.click('briefing-previous'); await settle();
+  assert.equal(h.session().presentationId, original.presentationId); assert.equal(h.session().index, original.index);
+  assert.notEqual(h.session(), original); assert.equal(request.options.isCurrent(), false);
+  const fits = h.fits.length, panel = h.panel(), input = h.part('briefing-comment');
+  assert.equal(input.value, '첫 단계의 미저장 의견');
+  pending.resolve(true); await settle();
+  assert.equal(h.fits.length, fits); assert.equal(h.panel(), panel); assert.equal(h.part('briefing-comment'), input);
+  assert.equal(input.value, '첫 단계의 미저장 의견'); assert.equal(h.requests.filter(call => call.options.method === 'POST').length, 0); h.close();
+});
+
+test('Briefing multi-target preparation: late completion keeps a live comment draft, selection, focus and user camera', async () => {
+  const pending = requestProjectDeferred(), reads = [];
+  const h = savedBriefingUiHarness({ prepareEvidence: reference => {
+    reads.push(reference); return reference.sourceId === 'source-b' ? pending.promise : Promise.resolve();
+  } });
+  h.close();
+  const step = h.briefing.steps[0];
+  step.targets = [step.target, { sourceId: 'source-b', hash: 'hash-b', range: { startLine: 5, endLine: 8 } }];
+  h.briefing.steps.splice(1);
+  const opening = h.open(); await settle();
+  assert.deepEqual(reads.map(reference => reference.sourceId), ['source-a', 'source-b']);
+  const panel = h.panel(), input = h.part('briefing-comment'), editor = h.session().commentEditor;
+  h.type('두 근거를 준비하는 동안 작성'); input.focus(); input.setSelectionRange(2, 7, 'backward');
+  input.scrollTop = 11; panel.scrollTop = 31; h.state.canvasUserCameraRevision = 1;
+  const draft = JSON.stringify([h.state.codex.threadDrafts, h.thread().inputSources, h.thread().briefingInputs]);
+  pending.resolve(); await opening; await settle();
+  assert.equal(h.panel(), panel); assert.equal(h.part('briefing-comment'), input); assert.equal(h.session().commentEditor, editor);
+  assert.equal(h.document.activeElement, input);
+  assert.deepEqual([input.value, input.selectionStart, input.selectionEnd, input.selectionDirection, input.scrollTop, panel.scrollTop],
+    ['두 근거를 준비하는 동안 작성', 2, 7, 'backward', 11, 31]);
+  assert.equal(JSON.stringify([h.state.codex.threadDrafts, h.thread().inputSources, h.thread().briefingInputs]), draft);
+  assert.equal(h.fits.length, 0); assert.equal(h.session().preparing, false);
+  assert.equal(h.requests.length, 1); assert.ok(h.requests.every(call => call.options.method === 'GET'));
+  assert.equal(h.saves(), 0);
+  h.close();
+});
+
+test('Briefing comment typing prevents late actual fit and preserves focus and selection without user camera movement', async () => {
+  const pending = requestProjectDeferred(), cameras = [];
+  let fitActual;
+  const h = savedBriefingUiHarness({ prepareEvidence: reference => reference.sourceId === 'source-b' ? pending.promise : Promise.resolve(),
+    fitEvidence: args => fitActual(args) });
+  h.close();
+  const document = h.document, nodes = [], create = document.createElement;
+  const card = id => {
+    const node = create('div'), classes = new Set(); node.id = id; node.setAttribute('id', id);
+    node.classList = { add: (...values) => values.forEach(value => classes.add(value)),
+      remove: (...values) => values.forEach(value => classes.delete(value)), contains: value => classes.has(value) };
+    nodes.push(node); document.documentElement.appendChild(node); return node;
+  };
+  const previous = card('before-evidence'), evidence = card('evidence-first');
+  document.querySelectorAll = selector => selector === '.egd-entity-active, .egd-entity-selected' ? nodes : [];
+  h.state.activeEntityId = previous.id; h.state.setCanvasViewportTarget = camera => cameras.push(camera);
+  const deps = { document, state: h.state, BriefingState: Briefing, SurfaceState: Surface, ZOOM_MIN: .01, cardZ: 0,
+    syncViewportAgendaRail: () => {}, isCardFullscreen: () => false,
+    safeViewportRect: () => ({ left: 0, top: 0, right: 1200, bottom: 800, width: 1200, height: 800 }) };
+  const actual = compileFunction(`${declaration('setActiveEntity')}\n${declaration('focusCanvasCard')}\n${declaration('briefingFitCamera')}
+    ${declaration('fitBriefingTargets')}\nreturn fitBriefingTargets;`, Object.keys(deps))(...Object.values(deps));
+  fitActual = ({ resolved }) => actual(resolved.map(item => item.view ? { ...item, view: { ...item.view, id: evidence.id } } : item));
+  const step = h.briefing.steps[0];
+  step.targets = [step.target, { sourceId: 'source-b', hash: 'hash-b', range: { startLine: 5, endLine: 8 } }];
+  h.briefing.steps.splice(1);
+  const opening = h.open(); await settle();
+  const panel = h.panel(), input = h.part('briefing-comment');
+  panel.getBoundingClientRect = () => null;
+  h.type('카메라를 움직이지 않고 의견 작성'); input.focus(); input.setSelectionRange(2, 7, 'backward');
+  input.blur = () => { document.activeElement = null; }; input.scrollTop = 12; panel.scrollTop = 21;
+  const chatDraft = h.state.codex.threadDrafts['room-a'];
+  pending.resolve(); await opening; await settle();
+  assert.equal(h.fits.length, 0); assert.equal(cameras.length, 0); assert.equal(h.state.activeEntityId, previous.id);
+  assert.equal(h.state.canvasUserCameraRevision || 0, 0); assert.equal(document.activeElement, input);
+  assert.deepEqual([input.value, input.selectionStart, input.selectionEnd, input.selectionDirection, input.scrollTop, panel.scrollTop],
+    ['카메라를 움직이지 않고 의견 작성', 2, 7, 'backward', 12, 21]);
+  assert.equal(h.state.codex.threadDrafts['room-a'], chatDraft); assert.equal(h.saves(), 0);
+  assert.equal(h.requests.length, 1); assert.ok(h.requests.every(call => call.options.method === 'GET')); h.close();
+});
+
+test('Briefing actual fit respects outside-field focus and input intent during preparation and retry', async () => {
+  for (const phase of ['preparation', 'retry']) for (const action of ['none', 'focus', 'focus-aba', 'typing-same']) {
+    const pending = requestProjectDeferred(), cameras = [], events = new Map(); let retrying = false, fitActual;
+    const h = savedBriefingUiHarness({ prepareEvidence: reference => phase === 'retry'
+      ? retrying ? pending.promise : Promise.resolve(false)
+      : reference.sourceId === 'source-b' ? pending.promise : Promise.resolve(), fitEvidence: args => fitActual(args) });
+    h.close();
+    const document = h.document, nodes = [], create = document.createElement;
+    document.addEventListener = (type, listener) => { if (!events.has(type)) events.set(type, new Set()); events.get(type).add(listener); };
+    document.removeEventListener = (type, listener) => events.get(type)?.delete(listener);
+    const fire = type => { for (const listener of events.get(type) || []) listener({ type }); };
+    const card = id => {
+      const node = create('div'), classes = new Set(); node.id = id; node.setAttribute('id', id);
+      node.classList = { add: (...values) => values.forEach(value => classes.add(value)),
+        remove: (...values) => values.forEach(value => classes.delete(value)), contains: value => classes.has(value) };
+      nodes.push(node); document.documentElement.appendChild(node); return node;
+    };
+    const previous = card('before-evidence'), evidence = card('evidence-first');
+    const input = create('textarea'), prior = create('button'); previous.append(input, prior);
+    input.value = 'outside input'; input.setSelectionRange(2, 6, 'backward');
+    input.blur = () => { document.activeElement = null; }; prior.blur = () => { document.activeElement = null; };
+    document.querySelectorAll = selector => selector === '.egd-entity-active, .egd-entity-selected' ? nodes : [];
+    h.state.activeEntityId = previous.id; h.state.setCanvasViewportTarget = camera => cameras.push(camera);
+    const deps = { document, state: h.state, BriefingState: Briefing, SurfaceState: Surface, ZOOM_MIN: .01, cardZ: 0,
+      syncViewportAgendaRail: () => {}, isCardFullscreen: () => false,
+      safeViewportRect: () => ({ left: 0, top: 0, right: 1200, bottom: 800, width: 1200, height: 800 }) };
+    const actual = compileFunction(`${declaration('setActiveEntity')}\n${declaration('focusCanvasCard')}\n${declaration('briefingFitCamera')}
+      ${declaration('fitBriefingTargets')}\nreturn fitBriefingTargets;`, Object.keys(deps))(...Object.values(deps));
+    fitActual = ({ resolved }) => actual(resolved.map(item => item.view ? { ...item, view: { ...item.view, id: evidence.id } } : item));
+    const step = h.briefing.steps[0]; step.targets = [step.target, { sourceId: 'source-b', hash: 'hash-b', range: { startLine: 5, endLine: 8 } }];
+    h.briefing.steps.splice(1);
+    if (action === 'focus' || action === 'focus-aba') prior.focus(); else input.focus();
+    let opening;
+    if (phase === 'preparation') { opening = h.open(); await settle(); }
+    else { await h.open(); await settle(); retrying = true; h.click('briefing-show-evidence'); await settle(); }
+    h.panel().getBoundingClientRect = () => null;
+    if (action === 'focus' || action === 'focus-aba') { input.focus(); fire('focusin'); }
+    if (action === 'focus-aba') { prior.focus(); fire('focusin'); }
+    if (action === 'typing-same') { fire('keydown'); input.value = 'outside input edited'; fire('input'); }
+    const userFocus = document.activeElement, draft = h.state.codex.threadDrafts['room-a'];
+    pending.resolve(true); if (opening) await opening; await settle();
+    assert.equal(cameras.length, action === 'none' ? 1 : 0, `${phase}/${action}`);
+    assert.equal(h.state.activeEntityId, action === 'none' ? evidence.id : previous.id, `${phase}/${action}`);
+    if (action !== 'none') assert.equal(document.activeElement, userFocus, `${phase}/${action}`);
+    assert.equal(h.state.codex.threadDrafts['room-a'], draft); assert.equal(h.saves(), 0);
+    assert.equal(h.requests.filter(call => call.options.method === 'POST').length, 0);
+    assert.equal(h.session().preparing, false); h.close();
+    assert.ok([...events.values()].every(listeners => listeners.size === 0), 'presentation intent listeners are removed on close');
+  }
+});
+
+test('Briefing selection revision: actual Canvas selection ABA, same-card focus and marquee suppress only the late fit', async () => {
+  for (const action of ['none', 'aba', 'same', 'marquee']) {
+    const pending = requestProjectDeferred(); let response;
+    const h = briefingOriginHarness({ capture: value => {
+      if (value.source.range.startLine === 5) { response = value; return pending.promise; }
+      return value;
+    } });
+    const document = h.document, nodes = [];
+    document.querySelectorAll = selector => selector === '.egd-entity-active, .egd-entity-selected' ? nodes : [];
+    const card = id => {
+      const node = document.createElement('div'), classes = new Set();
+      node.id = id; node.classList = { add: (...values) => values.forEach(value => classes.add(value)),
+        remove: (...values) => values.forEach(value => classes.delete(value)), contains: value => classes.has(value) };
+      nodes.push(node); return node;
+    };
+    const a = card('canvas-a'), b = card('canvas-b');
+    document.getElementById = id => nodes.find(node => node.id === id) || null;
+    const controls = compileFunction(`${declaration('setActiveEntity')}\n${declaration('setSelectedEntities')}\n${declaration('focusCanvasCard')}
+      return { focusCanvasCard, setSelectedEntities };`, ['state', 'document', 'syncViewportAgendaRail', 'isCardFullscreen', 'cardZ'])
+      (h.state, document, () => {}, () => false, 0);
+    const step = h.message.briefing.steps[0], first = step.target;
+    step.targets = [first, { ...first, range: { startLine: 5, endLine: 8 } }];
+    h.state.activeEntityId = a.id;
+    const opening = h.openBriefing(); await settle();
+    assert.equal(h.evidence.length, 1); assert.equal(h.state.canvasSelectionRevision || 0, 0);
+    if (action === 'aba') { controls.focusCanvasCard(b); controls.focusCanvasCard(a); }
+    if (action === 'same') controls.focusCanvasCard(a);
+    if (action === 'marquee') { controls.setSelectedEntities([b], b); controls.setSelectedEntities([a], a); }
+    assert.equal(h.state.activeEntityId, a.id);
+    assert.equal(h.state.canvasSelectionRevision || 0, action === 'none' ? 0 : action === 'same' ? 1 : 2);
+    pending.resolve(response); await opening;
+    assert.equal(h.evidence.length, 2); assert.equal(h.fits.length, action === 'none' ? 1 : 0, action);
+    assert.equal(h.state.codex.briefingSession.preparing, false); assert.equal(h.listeners.size, 1);
+    h.closeBriefing(); assert.equal(h.listeners.size, 0);
+  }
+});
+
+test('Briefing multi-target preparation: selecting another Canvas entity during a read prevents a late focus takeover', async () => {
+  const pending = requestProjectDeferred(); let response;
+  const h = briefingOriginHarness({ capture: value => {
+    if (value.source.range.startLine === 5) { response = value; return pending.promise; }
+    return value;
+  } });
+  const step = h.message.briefing.steps[0], first = step.target;
+  step.targets = [first, { ...first, range: { startLine: 5, endLine: 8 } }];
+  h.state.activeEntityId = 'initial-card';
+  const opening = h.openBriefing(); await settle();
+  assert.equal(h.evidence.length, 1); h.state.activeEntityId = 'chosen-card';
+  pending.resolve(response); await opening;
+  assert.equal(h.evidence.length, 2); assert.equal(h.state.activeEntityId, 'chosen-card');
+  assert.equal(h.fits.length, 0, 'automatic fit also changes the active Canvas entity');
+  assert.equal(h.state.codex.briefingSession.preparing, false);
+});
+
+test('Briefing multi-target preparation: finishing after explicit navigation does not bounce the current step or save drafts', async () => {
+  const pending = requestProjectDeferred(), reads = [];
+  const h = savedBriefingUiHarness({ prepareEvidence: reference => {
+    reads.push(reference); return reference.sourceId === 'source-b' ? pending.promise : Promise.resolve();
+  } });
+  h.close();
+  const first = h.briefing.steps[0], second = h.briefing.steps[1];
+  first.targets = [first.target, { sourceId: 'source-b', hash: 'hash-b', range: { startLine: 5, endLine: 8 } }];
+  second.target = { ...first.targets[1] };
+  const opening = h.open(); await settle();
+  assert.deepEqual(reads.map(reference => reference.sourceId), ['source-a', 'source-b']);
+  h.click('briefing-next'); await settle(); assert.equal(h.session().index, 1);
+  h.type('다음 단계에서 쓰는 중');
+  const panel = h.panel(), input = h.part('briefing-comment'), editor = h.session().commentEditor;
+  input.focus(); input.setSelectionRange(2, 5, 'forward'); panel.scrollTop = 22;
+  const draft = JSON.stringify([h.state.codex.threadDrafts, h.thread().inputSources, h.thread().briefingInputs]);
+  pending.resolve(); await opening; await settle();
+  assert.equal(h.session().index, 1); assert.equal(h.panel(), panel); assert.equal(h.part('briefing-comment'), input);
+  assert.equal(h.session().commentEditor, editor); assert.equal(h.document.activeElement, input);
+  assert.deepEqual([input.value, input.selectionStart, input.selectionEnd, panel.scrollTop], ['다음 단계에서 쓰는 중', 2, 5, 22]);
+  assert.equal(JSON.stringify([h.state.codex.threadDrafts, h.thread().inputSources, h.thread().briefingInputs]), draft);
+  assert.equal(h.requests.length, 2); assert.ok(h.requests.every(call => call.options.method === 'GET'));
+  assert.equal(h.saves(), 0); assert.equal(reads.length, 2, 'the same B range on the next step is not re-opened');
+  h.close();
+});
+
 test('Briefing preparation scope: two source ranges complete normally and unrelated engine/profile epochs do not cancel them', async () => {
   for (const reset of [() => {}, h => h.epochScope.reset('claude'), h => h.epochScope.reset('codex', 'unrelated-slot')]) {
     const pending = requestProjectDeferred(); let response, count = 0;
@@ -5681,7 +6507,8 @@ test('Briefing preparation scope: two source ranges complete normally and unrela
     const opening = h.openBriefing(); assert.equal(h.calls.length, 1); reset(h); pending.resolve(response); await opening;
     assert.deepEqual(h.calls.map(call => new URL(call.url, 'http://fixture.invalid').searchParams.get('startLine')), ['1', '5']);
     assert.equal(h.evidence.length, 2); assert.equal(h.renders.length, 2); assert.equal(h.fits.length, 1);
-    assert.equal(h.notices.length, 0); assert.equal(h.listeners.size, 0);
+    assert.equal(h.notices.length, 0); assert.equal(h.listeners.size, 1);
+    h.closeBriefing(); assert.equal(h.listeners.size, 0);
   }
 });
 
@@ -5707,7 +6534,7 @@ test('Briefing preparation scope: mixed-engine account A-B-A permanently stops t
     h.state.codex.threads.push({ id: 'claude-room', engineId: 'claude', engineProfileId: 'claude-slot', clientBindingId: 'claude-binding', conversationId: 'claude-conversation' });
     const originalAuth = { ...h.state.codex.authStatus }, ownerA = h.state.codex.codexAccountKey;
     const opening = h.openBriefing(); assert.equal(h.calls.length, 1);
-    const presentation = h.state.codex.briefingSession.presentationId, generation = h.state.codex.activityRoomGeneration;
+    const generation = h.state.codex.activityRoomGeneration;
     // Recreate the mixed reset branch's core transition with actual reducers
     // and epochs; this is not a call to the full account-reset closure.
     h.epochScope.reset('codex');
@@ -5718,7 +6545,7 @@ test('Briefing preparation scope: mixed-engine account A-B-A permanently stops t
     h.state.codex.authStatus = originalAuth; h.state.codex.codexAccountKey = ownerA;
     Object.assign(h.thread, Chat.reconcileNativeThread(h.thread, originalAuth)); h.emit();
     assert.equal(h.thread.clientBindingId, 'binding-a'); assert.equal(h.thread.conversationId, 'conversation-a');
-    assert.equal(h.state.codex.briefingSession.presentationId, presentation);
+    assert.equal(h.state.codex.briefingSession, null, 'account reset closes the stale presentation without restoring the camera');
     assert.equal(h.state.codex.activityRoomGeneration, generation); assert.equal(h.state.codex.activeThreadId, h.thread.id);
     const before = JSON.stringify([h.state, h.renders, h.fits, h.notices]);
     if (rejectLate) pending.reject(new Error('late old-account read')); else pending.resolve(response);
