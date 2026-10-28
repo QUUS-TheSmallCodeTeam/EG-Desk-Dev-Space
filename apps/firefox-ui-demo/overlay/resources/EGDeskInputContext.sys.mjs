@@ -240,8 +240,13 @@ export function inputEvidenceSnapshot(stored, reference) {
   return snapshot;
 }
 export const inputEvidenceKey = reference => {
-  const range = projectionRange(reference.presentationRange);
-  return JSON.stringify([reference.sourceId, reference.hash, range.startLine, range.endLine]);
+  const requested = reference.presentationRange;
+  const range = projectionRange(requested);
+  // An omitted end can be clipped to the capture length, while an explicitly
+  // requested end must be returned exactly. Keep explicit keys unchanged,
+  // including a present null end, which the reader normalizes as explicit.
+  const endKey = requested?.endLine === undefined ? null : range.endLine;
+  return JSON.stringify([reference.sourceId, reference.hash, range.startLine, endKey]);
 };
 
 // Tracking is separate from the immutable capture. Absence is not freshness,

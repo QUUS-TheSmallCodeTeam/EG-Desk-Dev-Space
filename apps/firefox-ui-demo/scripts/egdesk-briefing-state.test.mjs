@@ -62,6 +62,83 @@ test('every target of the current step resolves on its own; missing evidence nev
   assert.equal(stale[1].status, 'stale');
 });
 
+test('evidence identity distinguishes an omitted end from an explicit default without changing explicit keys', () => {
+  const ref = reference('source-a');
+  const key = range => InputContext.inputEvidenceKey({ ...ref, presentationRange: range });
+  assert.equal(key({ startLine: 500, endLine: 699 }), JSON.stringify([ref.sourceId, ref.hash, 500, 699]));
+  assert.notEqual(key({ startLine: 500 }), key({ startLine: 500, endLine: 699 }));
+  assert.notEqual(key(undefined), key({ startLine: 1, endLine: 200 }));
+  assert.equal(key(undefined), key({}));
+  assert.equal(key({ startLine: 500 }), key({ startLine: 500, endLine: undefined }));
+  assert.equal(key({ startLine: 500, endLine: null }), key({ startLine: 500, endLine: 699 }),
+    'the reader treats a present null end as an explicit normalized end');
+  assert.notEqual(key({ startLine: 1, endLine: 4 }), key({ startLine: 5, endLine: 8 }));
+  assert.notEqual(key({ startLine: 1, endLine: 4 }), InputContext.inputEvidenceKey({
+    ...reference('source-b'), presentationRange: { startLine: 1, endLine: 4 },
+  }));
+  for (const range of [{ startLine: 0 }, { startLine: 9, endLine: 8 }, { startLine: 1, endLine: 501 }, { page: 1 }]) {
+    assert.throws(() => key(range), /지원하지 않는 캡처 행 범위/);
+  }
+  const persisted = JSON.parse(JSON.stringify({ reference: { ...ref, presentationRange: { startLine: 500 } } }));
+  assert.equal(InputContext.inputEvidenceKey(persisted.reference), key({ startLine: 500 }),
+    'a restored reference recomputes its own intent, rather than migrating an ambiguous old key');
+});
+
+test('short captures do not satisfy a distinct explicit range in either multi-target order', () => {
+  const ref = reference('source-a'), geometry = { x: 0, y: 0, width: 100, height: 80 };
+  const open = { sourceId: ref.sourceId, range: { startLine: 500 } };
+  const explicit = { sourceId: ref.sourceId, range: { startLine: 500, endLine: 699 } };
+  const page = { capture: { sourceId: ref.sourceId, hash: ref.hash, capturedAt: 1 },
+    source: { role: 'source', hash: ref.hash, rangeHash: 'range-500-610', mime: 'text/plain',
+      text: Array.from({ length: 111 }, (_, index) => `fixed line ${500 + index}`).join('\n'),
+      range: { startLine: 500, endLine: 610, totalLines: 610 } } };
+  const ranged = target => ({ ...ref, presentationRange: target.range });
+  const shortSnapshot = InputContext.inputEvidenceSnapshot(page, ranged(open));
+  assert.deepEqual(shortSnapshot.range, { startLine: 500, endLine: 610, totalLines: 610 });
+  assert.equal(shortSnapshot.content.text.split('\n').length, 111);
+  assert.throws(() => InputContext.inputEvidenceSnapshot(page, ranged(explicit)), /요청 행 범위/);
+  assert.throws(() => InputContext.inputEvidenceSnapshot(page, ranged({ ...open, range: { startLine: 500, endLine: null } })), /요청 행 범위/);
+  const fullPage = { ...page, source: { ...page.source, rangeHash: 'range-500-699',
+    text: Array.from({ length: 200 }, (_, index) => `fixed line ${500 + index}`).join('\n'),
+    range: { startLine: 500, endLine: 699, totalLines: 700 } } };
+  assert.equal(InputContext.inputEvidenceSnapshot(fullPage, ranged(explicit)).content.text.split('\n').length, 200);
+  for (const targets of [[open, explicit, open], [explicit, open, explicit]]) {
+    const keys = targets.map(target => InputContext.inputEvidenceKey(ranged(target)));
+    assert.equal(new Set(keys).size, 2, 'only exact duplicate requests share a materialization');
+    const seen = new Set(), attempts = [], views = [];
+    for (const target of targets) {
+      const requested = ranged(target), key = InputContext.inputEvidenceKey(requested);
+      if (seen.has(key)) continue;
+      seen.add(key); attempts.push(target);
+      try {
+        InputContext.inputEvidenceSnapshot(page, requested);
+        views.push(evidenceView(requested, geometry));
+      } catch (error) { assert.match(error.message, /요청 행 범위/); }
+    }
+    assert.deepEqual(attempts, targets.slice(0, 2), 'a failed first explicit read must not suppress the later open read');
+    assert.equal(views.length, 1);
+    const step = { id: 's', text: 'T', targets };
+    const resolved = Briefing.resolveBriefingTargets(step, { references: [ref], views });
+    assert.deepEqual(resolved.map(item => item.status), targets.map(target => target === open ? 'available' : 'missing'));
+    assert.ok(resolved.filter(item => item.status === 'available').every(item => item.view === views[0]));
+  }
+  const explicitlyLoaded = evidenceView(ranged(explicit), geometry);
+  const reversed = Briefing.resolveBriefingTargets({ id: 's', text: 'T', targets: [open, explicit] },
+    { references: [ref], views: [explicitlyLoaded] });
+  assert.deepEqual(reversed.map(item => item.status), ['missing', 'available'],
+    'an explicit view is not substituted for an omitted-end request either');
+});
+
+test('exact duplicate evidence ranges deduplicate while separate sources and ranges retain distinct keys', () => {
+  const a = reference('source-a'), b = reference('source-b');
+  const a1 = { ...a, presentationRange: { startLine: 1, endLine: 4 } };
+  const a5 = { ...a, presentationRange: { startLine: 5, endLine: 8 } };
+  const b1 = { ...b, presentationRange: { startLine: 1, endLine: 4 } };
+  const keys = [a1, a5, b1, { ...a1 }, { ...a5 }, { ...b1 }].map(InputContext.inputEvidenceKey);
+  assert.equal(new Set(keys).size, 3);
+  assert.deepEqual(keys.slice(0, 3), keys.slice(3));
+});
+
 test('Canvas geometry maps to viewport pixels with the layer camera', () => {
   const a = reference('source-a');
   const resolved = Briefing.resolveBriefingTargets({ id: 's', text: 'T', target: { sourceId: 'source-a' } },
