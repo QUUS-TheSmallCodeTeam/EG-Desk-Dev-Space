@@ -809,6 +809,9 @@ export class ContextRuntime {
 
   async briefingTarget(run, binding, target, assertActive) {
     if (!target || typeof target !== 'object' || Object.keys(target).some(key => !TARGET_KEYS.includes(key))) reject('INVALID_BRIEFING_TARGET', 'Briefing targets must use validated IDs, not paths or URLs', 400)
+    if (target.range != null && Object.hasOwn(target.range, 'endLine') && !Number.isInteger(target.range.endLine)) {
+      reject('INVALID_BRIEFING_TARGET', 'A supplied briefing endLine must be an integer', 400)
+    }
     let sourceId = target.sourceId
     if (target.artifactId) sourceId = (await this.pinOutput(run, target.artifactId, assertActive)).sourceId
     if (!sourceId && target.viewId) sourceId = binding.captures.find(capture => capture.sourceRef.viewId === target.viewId)?.sourceId

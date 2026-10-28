@@ -670,6 +670,69 @@ test('multi-target briefing lights up several evidence targets per step and keep
   assert.equal(h.events.filter(e => e.event === 'briefing.published').length, 2)
 })
 
+test('briefing dispatch refuses supplied noninteger end lines while omitted ends retain bounded source semantics', async t => {
+  const h = await harness(t)
+  const owner = 'email:a@example.com'
+  const source = Array.from({ length: 610 }, (_, index) => `captured line ${index + 1}`).join('\n')
+  const capture = await h.capture(source)
+  const run = await h.start([capture.sourceId])
+  const live = h.chat.runs.get(run.answerId)
+  const sourceBytes = await h.store.readBlob(owner, capture.hash)
+  assert.equal(sourceBytes.toString('utf8'), source)
+  assert.equal(capture.hash, hashContent(source))
+  const clipped = await h.store.inspect(owner, capture.sourceId, { startLine: 500 })
+  assert.deepEqual(clipped.source.range, { startLine: 500, endLine: 610, totalLines: 610 })
+  assert.equal(clipped.source.nextLine, null)
+
+  const state = async () => ({
+    stored: (await h.store.listRecords(owner, 'briefings')).map(row => row.id).sort(),
+    run: live.context.briefings.map(row => row.id).sort(),
+    published: h.events.filter(event => event.event === 'briefing.published').length,
+    nativeCalls: h.calls.length,
+  })
+  const step = (range, multi) => ({ id: 'bounded', text: 'Bounded evidence', fallback: 'Open the fixed source',
+    ...(multi ? { targets: [{ sourceId: capture.sourceId, range }] } : { target: { sourceId: capture.sourceId, range } }) })
+  const invalidEnds = [null, '610', 610.5, false, {}, undefined]
+  for (const multi of [false, true]) {
+    const name = multi ? 'egdesk_publish_briefing_multi' : 'egdesk_publish_briefing'
+    for (const [index, endLine] of invalidEnds.entries()) {
+      const before = await state()
+      const reply = await h.tool(run, name, { title: 'Invalid end', steps: [step({ startLine: 500, endLine }, multi)] }, `${name}-bad-${index}`)
+      assert.equal(reply.result.success, false, `${name}: supplied end ${String(endLine)} must fail`)
+      assert.equal(toolJson(reply).error.code, 'INVALID_BRIEFING_TARGET')
+      assert.deepEqual(await state(), before, 'invalid targets cannot persist or emit a partial briefing')
+    }
+
+    const beforeOutOfBounds = await state()
+    const outOfBounds = await h.tool(run, name, { title: 'Out of bounds', steps: [step({ startLine: 500, endLine: 699 }, multi)] }, `${name}-699`)
+    assert.equal(outOfBounds.result.success, false)
+    assert.equal(toolJson(outOfBounds).error.code, 'TOOL_PROVIDER_FAILED', 'existing public tool policy sanitizes the store error')
+    await assert.rejects(h.store.inspect(owner, capture.sourceId, { startLine: 500, endLine: 699 }), error => error.code === 'INVALID_RANGE')
+    assert.deepEqual(await state(), beforeOutOfBounds)
+
+    const omitted = await h.tool(run, name, { title: 'Omitted end', steps: [step({ startLine: 500 }, multi)] }, `${name}-omitted`)
+    assert.equal(omitted.result.success, true)
+    assert.deepEqual(toolJson(omitted).briefing.steps[0].target.range, { startLine: 500 })
+    const exact = await h.tool(run, name, { title: 'Exact end', steps: [step({ startLine: 500, endLine: 610 }, multi)] }, `${name}-610`)
+    assert.equal(exact.result.success, true)
+    assert.deepEqual(toolJson(exact).briefing.steps[0].target.range, { startLine: 500, endLine: 610 })
+  }
+
+  const beforePartial = await state()
+  const mixed = await h.tool(run, 'egdesk_publish_briefing_multi', { title: 'No partial result', steps: [{
+    id: 'mixed', text: 'Two targets', fallback: 'Open the fixed source', targets: [
+      { sourceId: capture.sourceId, range: { startLine: 500 } },
+      { sourceId: capture.sourceId, range: { startLine: 500, endLine: null } },
+    ],
+  }] }, 'mixed-invalid-end')
+  assert.equal(mixed.result.success, false)
+  assert.equal(toolJson(mixed).error.code, 'INVALID_BRIEFING_TARGET')
+  assert.deepEqual(await state(), beforePartial, 'an earlier valid target cannot become a partial published briefing')
+  assert.deepEqual(await h.store.readBlob(owner, capture.hash), sourceBytes)
+  assert.equal((await h.store.getCapture(owner, capture.sourceId)).hash, capture.hash)
+  assert.deepEqual((await h.store.inspect(owner, capture.sourceId, { startLine: 500 })).source.range, clipped.source.range)
+})
+
 test('briefing step comments are numbered records that survive closing and can be resolved', async t => {
   const h = await harness(t, { verifiedComments: true })
   const a = await h.capture('Evidence A'), b = await h.capture('Evidence B', { id: 'b', sourceRef: { viewId: 'view-2', resourceId: 'page-2' } })
