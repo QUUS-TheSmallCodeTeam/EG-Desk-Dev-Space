@@ -258,6 +258,10 @@ export function createEGDeskFileView({ document, service, chooseRoot, chooseProj
   if (!document?.createElement || !service || !['listDirectory', 'search', 'readFile', 'createDraft', 'updateDraft', 'saveDraft', 'saveAs', 'diffDraft'].every(name => typeof service[name] === 'function')) {
     throw new Error('File view requires a document and file-service callbacks')
   }
+  // Privileged Firefox modules do not expose timers on their global; the
+  // document's window does. Node/fake documents use their normal globals.
+  const timers = typeof document.defaultView?.setTimeout === 'function' && typeof document.defaultView?.clearTimeout === 'function'
+    ? document.defaultView : globalThis
   const el = (tag, className, text) => {
     const node = document.createElement(tag)
     if (className) node.className = className
@@ -789,7 +793,7 @@ export function createEGDeskFileView({ document, service, chooseRoot, chooseProj
     activeRoot = rootHandle
     if (!preserveDraft) { activeFileId = null; draft = null; readReceipt = null; sourceDisconnected = false; pendingReconnect = false }
     loadedGroups.clear(); pendingFolders.clear(); gitIndex = createEGDeskGitStateIndex([])
-    if (fileChangeTimer) { clearTimeout(fileChangeTimer); fileChangeTimer = null }
+    if (fileChangeTimer) { timers.clearTimeout(fileChangeTimer); fileChangeTimer = null }
     tree.replaceChildren()
     searchResults.replaceChildren()
     changeList.replaceChildren(); changesSummary.textContent = ''; changeDiffPanel.hidden = true
@@ -909,12 +913,12 @@ export function createEGDeskFileView({ document, service, chooseRoot, chooseProj
     if (disposed || !change || !activeRoot || change.rootId !== activeRoot.rootId) return false
     markCheckStale()
     pendingFolders.add(keyOf(parentFolderOf(change.relativePath)))
-    if (!fileChangeTimer) fileChangeTimer = setTimeout(() => { fileChangeTimer = null; flushFileChanges().catch(() => {}) }, fileChangeDelayMs)
+    if (!fileChangeTimer) fileChangeTimer = timers.setTimeout(() => { fileChangeTimer = null; flushFileChanges().catch(() => {}) }, fileChangeDelayMs)
     return true
   }
 
   async function flushFileChanges() {
-    if (fileChangeTimer) { clearTimeout(fileChangeTimer); fileChangeTimer = null }
+    if (fileChangeTimer) { timers.clearTimeout(fileChangeTimer); fileChangeTimer = null }
     const generation = treeGeneration
     const folders = [...pendingFolders].sort((a, b) => a.split('/').length - b.split('/').length)
     pendingFolders.clear()
@@ -996,7 +1000,7 @@ export function createEGDeskFileView({ document, service, chooseRoot, chooseProj
     // Reopening the same draft must use the freshly preserved revision, not the
     // candidate read before the user's intervening input.
     if (nextDraft && draft?.id === nextDraft.id) nextDraft = draft
-    if (timer) { clearTimeout(timer); timer = null }
+    if (timer) { timers.clearTimeout(timer); timer = null }
 
     // No asynchronous work occurs between changing the identity/title and its
     // visible buffer. A failed load or preservation write leaves A intact.
@@ -1077,7 +1081,7 @@ export function createEGDeskFileView({ document, service, chooseRoot, chooseProj
   editor.addEventListener('compositionstart', () => { composing = true })
   editor.addEventListener('compositionend', () => { composing = false; compositionEndedAt = Date.now(); scheduleFlush() })
   editor.addEventListener('input', () => { localRevision++; markCheckStale(); announce('저장되지 않은 변경이 있습니다.'); if (!composing) scheduleFlush() })
-  function scheduleFlush() { if (timer) clearTimeout(timer); timer = setTimeout(() => { timer = null; act(flush) }, 250) }
+  function scheduleFlush() { if (timer) timers.clearTimeout(timer); timer = timers.setTimeout(() => { timer = null; act(flush) }, 250) }
 
   // Working copy vs the original it was opened from. With EGDeskDiffView the
   // −/+ line view (3.2 adjust: 'CodeMirror 전엔 EGDeskDiffView'); without it,
@@ -1549,10 +1553,10 @@ export function createEGDeskFileView({ document, service, chooseRoot, chooseProj
   async function close() {
     if (disposed) return true
     if (composing) { announce('입력을 마친 후 닫아 주세요.'); return false }
-    if (timer) { clearTimeout(timer); timer = null }
+    if (timer) { timers.clearTimeout(timer); timer = null }
     try { await flush() }
     catch (cause) { showError(cause); return false }
-    if (fileChangeTimer) { clearTimeout(fileChangeTimer); fileChangeTimer = null }
+    if (fileChangeTimer) { timers.clearTimeout(fileChangeTimer); fileChangeTimer = null }
     pendingFolders.clear()
     disposed = true; token(); treeGeneration++; root.remove(); return true
   }

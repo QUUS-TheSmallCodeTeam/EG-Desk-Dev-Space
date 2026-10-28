@@ -62,17 +62,19 @@ function fakeDocument() {
   const document = { createElement: tag => new Element(document, tag), activeElement: null };
   document.body = document.createElement('body');
   document.querySelector = selector => document.body.querySelector(selector);
+  document.querySelectorAll = selector => document.body.querySelectorAll(selector);
   return document;
 }
 const settle = async (turns = 3) => { for (let index = 0; index < turns; index++) await new Promise(resolve => setImmediate(resolve)); };
 const until = async predicate => { const end = Date.now() + 3000; while (!predicate() && Date.now() < end) await new Promise(resolve => setTimeout(resolve, 2)); assert.ok(predicate(), 'bounded UI operation completed'); };
 const deferred = () => { let resolve; const promise = new Promise(yes => { resolve = yes; }); return { promise, resolve }; };
 const project = (suffix = 'a', scripts = []) => ({ projectId: `project-${suffix}`, rootId: `root-${suffix}`, directoryId: `dir-${suffix}`,
-  title: `보드 ${suffix}`, status: 'connected', displayPath: `/verified/${suffix}`, scripts: structuredClone(scripts), saveAsAvailable: true });
+  title: `보드 ${suffix}`, name: suffix, source: 'board', status: 'connected', displayPath: `/verified/${suffix}`,
+  scripts: structuredClone(scripts), saveAsAvailable: true, capability: 'read-and-create-only' });
 const typed = { id: 'test', name: '직접 검사', command: 'npm test', kind: 'test' };
 
 function fakeService() {
-  const projects = new Map(), drafts = new Map(), calls = [];
+  const projects = new Map(), drafts = new Map(), calls = [], writes = [];
   let revision = 0;
   const service = {
     listDirectory: async ({ directoryId }) => ({ entries: [{ id: `file-${directoryId}`, name: 'source.txt', kind: 'file' }], nextCursor: null }),
@@ -85,10 +87,10 @@ function fakeService() {
       return { ...drafts.get(id) };
     },
     readDraft: async ({ draftId }) => ({ ...drafts.get(draftId) }),
-    updateDraft: async ({ draftId, text }) => { const draft = { ...drafts.get(draftId), text, head: `h${++revision}`, bufferRevision: revision }; drafts.set(draftId, draft); return { ...draft }; },
-    saveDraft: async ({ draftId }) => { const draft = drafts.get(draftId); draft.savedRevision = draft.bufferRevision; return { draft: { ...draft }, receipt: { savedRevision: draft.savedRevision } }; },
-    saveAs: async () => ({}), diffDraft: async () => ({ hunks: [] }),
-    openProject: async ({ boardId }) => { calls.push(['open', boardId]); return { project: structuredClone(projects.get(boardId) || null) }; },
+    updateDraft: async ({ draftId, text }) => { writes.push('updateDraft'); const draft = { ...drafts.get(draftId), text, head: `h${++revision}`, bufferRevision: revision }; drafts.set(draftId, draft); return { ...draft }; },
+    saveDraft: async ({ draftId }) => { writes.push('saveDraft'); const draft = drafts.get(draftId); draft.savedRevision = draft.bufferRevision; return { draft: { ...draft }, receipt: { savedRevision: draft.savedRevision } }; },
+    saveAs: async () => { writes.push('saveAs'); return {}; }, diffDraft: async () => ({ hunks: [] }),
+    openProject: async ({ boardId }) => { calls.push(['open', boardId]); return { project: structuredClone(projects.get(boardId) || null), source: projects.has(boardId) ? 'board' : null }; },
     setProjectScripts: async ({ projectId, scripts }) => {
       calls.push(['scripts', projectId, structuredClone(scripts)]);
       const stored = [...projects.values()].find(item => item.projectId === projectId);
@@ -101,7 +103,7 @@ function fakeService() {
     registerRoot: async () => { calls.push(['root']); return { rootId: 'ordinary', directoryId: 'ordinary-dir', name: '일반 폴더', displayPath: '/ordinary' }; },
     attachProject: async ({ boardId, title }) => { calls.push(['attach', boardId, title]); const value = { ...project(boardId.at(-1)), title }; projects.set(boardId, value); return value; },
   };
-  return { service, projects, calls, drafts };
+  return { service, projects, calls, drafts, writes };
 }
 function viewFixture(t, options = {}) {
   const h = fakeService(), document = fakeDocument();
@@ -453,6 +455,7 @@ test('ambiguous run failure stays unknown and command settings cannot change the
 
 async function cardFixture(t, { service = null } = {}) {
   const h = fakeService(), document = fakeDocument(), runs = [], terminalOptions = [], terminalApis = [];
+  const notices = [], focused = [], presentations = [];
   if (service) h.service = service;
   let runStatus = 'completed';
   let target = { boardId: 'board-a', title: 'A 보드' }, nextPick = null, pickerCalls = 0, sequence = 0;
@@ -481,11 +484,13 @@ async function cardFixture(t, { service = null } = {}) {
     for (const card of document.body.querySelectorAll('.egd-file-card')) await card._fileView?.close();
     for (const [key, descriptor] of saved) { if (descriptor) Object.defineProperty(globalThis, key, descriptor); else delete globalThis[key]; }
   });
-  const zone = createFileCardZone({ FileCardState, allocCardSeq: () => ++sequence, boardNotice() {}, chatBindingNonce: () => String(sequence),
-    chatInputSourceForView() {}, cloneJson: structuredClone, el, focusCanvasCard() {}, getCodexThreadById() {}, getProjectTarget: () => target,
-    markAgendaDirty() {}, openChatInputPanel() {}, resolveCanvasCardPlacement: () => ({ x: 0, y: 0, width: 600, height: 400 }), revealPlacedCanvasCard() {},
+  const zone = createFileCardZone({ FileCardState, allocCardSeq: () => ++sequence, boardNotice: message => notices.push(message), chatBindingNonce: () => String(sequence),
+    chatInputSourceForView() {}, cloneJson: structuredClone, el, focusCanvasCard: card => focused.push(card), getCodexThreadById() {}, getProjectTarget: () => target,
+    markAgendaDirty() {}, openChatInputPanel() {}, resolveCanvasCardPlacement: () => ({ x: 0, y: 0, width: 600, height: 400 }),
+    revealPlacedCanvasCard: card => presentations.push({ type: 'reveal', cardId: card.id }),
     spawnDeskWindowShell: options => {
       const root = el('article', { class: options.className, id: options.id }), identity = el('header'), actions = el('nav'), content = el('main');
+      presentations.push({ type: 'spawn', cardId: options.id, activate: options.activate });
       root.append(identity, actions, content); document.body.append(root); return { root, slots: { identity, actions, content } };
     },
     spawnTerminalCard: options => { terminalOptions.push(options); const card = el('article', { class: 'egd-terminal-card' }); document.body.append(card);
@@ -496,9 +501,305 @@ async function cardFixture(t, { service = null } = {}) {
       terminalApis.push(api); card._termBrowser = { contentWindow: { terminalAPI: api } }; return card; },
     state: { codex: {} },
   });
-  return { ...h, document, runs, terminalOptions, terminalApis, runStatus: value => { runStatus = value; }, setTarget: value => { target = value; }, pick: value => { nextPick = value; }, pickerCalls: () => pickerCalls,
+  return { ...h, document, runs, terminalOptions, terminalApis, notices, focused, presentations, openIde: () => zone.openBoardProjectFile(),
+    runStatus: value => { runStatus = value; }, setTarget: value => { target = value; }, pick: value => { nextPick = value; }, pickerCalls: () => pickerCalls,
     spawn: async options => { const card = zone.spawnFileCard(options); await card._fileReady; assert.ok(card._fileView, card.textContent); return card; } };
 }
+
+test('IDE entry verifies the selected Board project and opens a File without commands, Terminal or provider work', async t => {
+  const h = await cardFixture(t); h.projects.set('board-a', project('a', [typed]));
+  const result = await h.openIde();
+  assert.equal(result.status, 'opened'); assert.equal(result.reused, false);
+  const card = h.document.body.querySelector('.egd-file-card');
+  assert.equal(result.cardId, card.id);
+  assert.deepEqual(card._fileRecord.project, { boardId: 'board-a', projectId: 'project-a' });
+  assert.equal(card._fileView.snapshot().rootId, 'root-a');
+  assert.equal(card.getAttribute('aria-label'), '파일 작업 창');
+  assert.deepEqual(h.calls.filter(call => call[0] === 'open'), [['open', 'board-a'], ['open', 'board-a']],
+    'the same Board is verified before and after the new view is ready');
+  assert.equal(h.pickerCalls(), 0); assert.deepEqual(h.runs, []); assert.deepEqual(h.terminalOptions, []);
+  assert.deepEqual(h.presentations, [{ type: 'spawn', cardId: card.id, activate: false }], 'the guarded IDE caller owns activation and camera reveal');
+  assert.equal(card.querySelector('.egdesk-file-check-result').hidden, true, 'no result is not a successful check');
+});
+
+test('IDE reclick reuses only the exact Board/project/root card and never flushes its dirty draft or the other project', async t => {
+  const h = await cardFixture(t); h.projects.set('board-a', project());
+  const other = await h.spawn({ openMode: 'new', project: project('b'), projectTarget: { boardId: 'board-b', title: 'B' } });
+  await other._fileView.openFile('file-dir-b');
+  other.querySelector('.egdesk-file-editor').value = 'OTHER DIRTY'; other.querySelector('.egdesk-file-editor').fire('input');
+  await other._fileView.flush();
+  const opened = await h.openIde(), card = h.document.body.querySelectorAll('.egd-file-card').find(value => value.id === opened.cardId);
+  await card._fileView.openFile('file-dir-a');
+  const editor = card.querySelector('.egdesk-file-editor'); editor.value = 'SELECTED DIRTY'; editor.fire('input');
+  await card._fileView.flush(); editor.selectionStart = 3; editor.selectionEnd = 7; editor.focus();
+  const before = [structuredClone(card._fileRecord), card._fileView.snapshot(), structuredClone(other._fileRecord), other._fileView.snapshot(), structuredClone([...h.drafts])];
+  const writesBeforeReuse = h.writes.length;
+  for (let index = 0; index < 2; index++) {
+    const result = await h.openIde();
+    assert.equal(result.status, 'opened'); assert.equal(result.reused, true); assert.equal(result.cardId, card.id);
+  }
+  assert.equal(h.document.body.querySelectorAll('.egd-file-card').length, 2);
+  assert.deepEqual([card._fileRecord, card._fileView.snapshot(), other._fileRecord, other._fileView.snapshot(), [...h.drafts]], before);
+  assert.deepEqual([editor.value, editor.selectionStart, editor.selectionEnd], ['SELECTED DIRTY', 3, 7]);
+  assert.equal(other.querySelector('.egdesk-file-editor').value, 'OTHER DIRTY');
+  assert.equal(h.writes.length, writesBeforeReuse, 'reusing the existing view performs no draft or original save');
+  assert.deepEqual(h.focused, [], 'the guarded IDE caller owns focus after a verified reuse');
+  assert.deepEqual(h.runs, []); assert.deepEqual(h.terminalOptions, []);
+});
+
+test('IDE missing-project picker cancellation changes no Board, card or draft; an explicit choice uses the existing verified attachment', async t => {
+  const h = await cardFixture(t), other = await h.spawn({ openMode: 'new', project: project('b'), projectTarget: { boardId: 'board-b', title: 'B' } });
+  await other._fileView.openFile('file-dir-b');
+  other.querySelector('.egdesk-file-editor').value = 'KEEP OTHER'; other.querySelector('.egdesk-file-editor').fire('input'); await other._fileView.flush();
+  const before = [structuredClone(other._fileRecord), other._fileView.snapshot(), structuredClone([...h.drafts]), structuredClone([...h.projects])];
+  const cancelled = await h.openIde();
+  assert.equal(cancelled.status, 'cancelled'); assert.equal(h.pickerCalls(), 1);
+  assert.equal(h.document.body.querySelectorAll('.egd-file-card').length, 1);
+  assert.deepEqual([other._fileRecord, other._fileView.snapshot(), [...h.drafts], [...h.projects]], before);
+  assert.equal(h.calls.some(call => ['attach', 'root'].includes(call[0])), false);
+  h.pick('/explicitly/picked/a');
+  const opened = await h.openIde();
+  assert.equal(opened.status, 'opened'); assert.equal(opened.reused, false);
+  assert.equal(h.document.body.querySelectorAll('.egd-file-card').length, 2);
+  assert.deepEqual(h.calls.filter(call => call[0] === 'attach'), [['attach', 'board-a', 'A 보드']]);
+  assert.deepEqual(other._fileRecord, before[0]); assert.deepEqual(other._fileView.snapshot(), before[1]);
+  assert.equal(other.querySelector('.egdesk-file-editor').value, 'KEEP OTHER');
+  assert.deepEqual(h.runs, []); assert.deepEqual(h.terminalOptions, []);
+});
+
+test('IDE reconnect-required uses the existing picker and does not change the Board on cancellation', async t => {
+  const h = await cardFixture(t);
+  h.projects.set('board-a', { projectId: 'project-a', title: 'A', name: 'a', source: 'board',
+    status: 'reconnect-required', reason: 'identity-changed', scripts: [] });
+  const before = structuredClone([...h.projects]);
+  assert.equal((await h.openIde()).status, 'cancelled');
+  assert.deepEqual([...h.projects], before); assert.equal(h.document.body.children.length, 0);
+  assert.equal(h.calls.some(call => call[0] === 'attach'), false);
+  h.pick('/selected/a');
+  assert.equal((await h.openIde()).status, 'opened');
+  assert.equal(h.document.body.querySelector('.egd-file-card')._fileView.snapshot().projectId, 'project-a');
+  assert.deepEqual(h.runs, []); assert.deepEqual(h.terminalOptions, []);
+});
+
+test('IDE does not create a card when attachment cannot be read back as the same Board project', async t => {
+  const h = await cardFixture(t); let reads = 0;
+  h.service.openProject = async () => ++reads === 1 ? { project: null, source: null } : { project: project('b'), source: 'board' };
+  h.pick('/selected/a');
+  assert.equal((await h.openIde()).status, 'unavailable');
+  assert.equal(h.calls.filter(call => call[0] === 'attach').length, 1, 'the explicit selection may already have attached');
+  assert.equal(h.document.body.children.length, 0);
+  assert.deepEqual(h.runs, []); assert.deepEqual(h.terminalOptions, []);
+});
+
+test('IDE with no selected Board only gives the existing notice and creates or connects nothing', async t => {
+  const h = await cardFixture(t); h.setTarget(null);
+  assert.deepEqual(await h.openIde(), { status: 'no-board' });
+  assert.deepEqual(h.notices, ['프로젝트를 연결할 보드를 먼저 선택하세요.']);
+  assert.deepEqual(h.calls, []); assert.equal(h.pickerCalls(), 0); assert.equal(h.document.body.children.length, 0);
+  assert.deepEqual(h.runs, []); assert.deepEqual(h.terminalOptions, []);
+});
+
+test('IDE missing or failed verification never falls back to the first File or launches a picker', async t => {
+  const h = await cardFixture(t), other = await h.spawn({ openMode: 'new', project: project('b'), projectTarget: { boardId: 'board-b', title: 'B' } });
+  const original = structuredClone(other._fileRecord);
+  for (const response of [undefined, {}, { project: undefined }, { project: { ...project(), source: 'room' }, source: 'room' },
+    { project: { ...project(), rootId: '' }, source: 'board' }, { project: { ...project(), status: 'unknown' }, source: 'board' }]) {
+    h.service.openProject = async () => response;
+    assert.equal((await h.openIde()).status, 'unavailable');
+  }
+  h.service.openProject = async () => { throw new Error('offline'); };
+  assert.equal((await h.openIde()).status, 'unavailable');
+  assert.equal(h.document.body.querySelectorAll('.egd-file-card').length, 1); assert.deepEqual(other._fileRecord, original);
+  assert.deepEqual(h.focused, []); assert.equal(h.pickerCalls(), 0); assert.deepEqual(h.runs, []); assert.deepEqual(h.terminalOptions, []);
+});
+
+test('IDE coalesces same Board clicks but honors a newer different Board while the first lookup is pending', async t => {
+  const h = await cardFixture(t), pending = deferred(); let reads = 0;
+  h.service.openProject = async ({ boardId }) => {
+    reads++;
+    return boardId === 'board-a' ? pending.promise : { project: project('b'), source: 'board' };
+  };
+  const first = h.openIde(), repeated = h.openIde();
+  assert.equal(first, repeated); assert.equal(reads, 1);
+  h.setTarget({ boardId: 'board-b', title: 'B' });
+  const latest = await h.openIde();
+  pending.resolve({ project: project(), source: 'board' });
+  assert.equal((await first).status, 'stale');
+  assert.equal(latest.status, 'opened'); assert.equal(latest.reused, false);
+  const card = h.document.body.querySelector('.egd-file-card');
+  assert.equal(card._fileRecord.project.boardId, 'board-b');
+  assert.equal(card._fileView.snapshot().projectId, 'project-b');
+  assert.equal(h.document.body.querySelectorAll('.egd-file-card').length, 1); assert.equal(h.pickerCalls(), 0);
+  assert.deepEqual(h.runs, []); assert.deepEqual(h.terminalOptions, []);
+});
+
+test('IDE never reports opened if the Board binding changed while the new File was becoming ready', async t => {
+  for (const replacement of [project('b'), { ...project(), rootId: 'new-root', directoryId: 'new-directory' }]) {
+    await t.test(replacement.projectId + ':' + replacement.rootId, async t => {
+      const h = await cardFixture(t), entered = deferred(), release = deferred();
+      h.projects.set('board-a', project());
+      const list = h.service.listDirectory;
+      h.service.listDirectory = async request => {
+        if (request.directoryId === 'dir-a') { entered.resolve(); await release.promise; }
+        return list(request);
+      };
+      const opening = h.openIde(); await entered.promise;
+      h.projects.set('board-a', replacement); release.resolve();
+      const result = await opening;
+      assert.notEqual(result.status, 'opened');
+      assert.equal(h.calls.filter(call => call[0] === 'open').length, 2, 'the Board binding is re-read after readiness');
+      const card = h.document.body.querySelector('.egd-file-card');
+      assert.equal(card._fileView.snapshot().projectId, 'project-a', 'the already-created card is not relabelled');
+      assert.deepEqual(h.focused, []); assert.deepEqual(h.runs, []); assert.deepEqual(h.terminalOptions, []);
+    });
+  }
+});
+
+test('IDE does not reuse an old card when the first Board reply was stale before it arrived', async t => {
+  for (const replacement of [project('b'), { ...project(), rootId: 'new-root', directoryId: 'new-directory' }]) {
+    await t.test(replacement.projectId + ':' + replacement.rootId, async t => {
+      const h = await cardFixture(t), pending = deferred(); let reads = 0;
+      h.projects.set('board-a', project());
+      const card = await h.spawn({ openMode: 'new', project: project(), projectTarget: { boardId: 'board-a', title: 'A' } });
+      await card._fileView.openFile('file-dir-a');
+      const editor = card.querySelector('.egdesk-file-editor'); editor.value = 'KEEP'; editor.fire('input'); await card._fileView.flush();
+      const before = [structuredClone(card._fileRecord), card._fileView.snapshot(), h.writes.length];
+      h.service.openProject = async () => {
+        reads++;
+        return reads === 1 ? pending.promise : { project: structuredClone(h.projects.get('board-a')), source: 'board' };
+      };
+      const opening = h.openIde();
+      h.projects.set('board-a', replacement);
+      pending.resolve({ project: project(), source: 'board' });
+      const result = await opening;
+      assert.notEqual(result.status, 'opened');
+      assert.equal(reads, 2, 'the Board binding is re-read before reusing the card');
+      assert.deepEqual([card._fileRecord, card._fileView.snapshot(), h.writes.length], before);
+      assert.equal(editor.value, 'KEEP'); assert.deepEqual(h.focused, []);
+    });
+  }
+});
+
+test('IDE does not report a reused card after it closes during the final Board recheck', async t => {
+  const h = await cardFixture(t), pending = deferred(); let reads = 0;
+  const card = await h.spawn({ openMode: 'new', project: project(), projectTarget: { boardId: 'board-a', title: 'A' } });
+  h.service.openProject = async () => {
+    reads++;
+    if (reads === 1) return { project: project(), source: 'board' };
+    return pending.promise;
+  };
+  const opening = h.openIde(); await until(() => reads === 2);
+  card.remove(); pending.resolve({ project: project(), source: 'board' });
+  assert.notEqual((await opening).status, 'opened');
+  assert.deepEqual(h.focused, []);
+});
+
+test('IDE request generations reject A to B to A lookups while honoring the last explicit A click', async t => {
+  const h = await cardFixture(t), delayed = deferred(); let firstA = true;
+  h.service.openProject = async ({ boardId }) => {
+    if (boardId === 'board-a' && firstA) { firstA = false; return delayed.promise; }
+    return { project: project(boardId.endsWith('a') ? 'a' : 'b'), source: 'board' };
+  };
+  const oldest = h.openIde();
+  h.setTarget({ boardId: 'board-b', title: 'B' }); const middle = h.openIde();
+  h.setTarget({ boardId: 'board-a', title: 'A' }); const newest = h.openIde();
+  delayed.resolve({ project: project(), source: 'board' }); const result = await newest;
+  assert.equal((await oldest).status, 'stale'); assert.equal((await middle).status, 'stale');
+  assert.equal(result.status, 'opened');
+  const card = h.document.body.querySelector('.egd-file-card');
+  assert.equal(card._fileRecord.project.boardId, 'board-a');
+  assert.equal(h.document.body.querySelectorAll('.egd-file-card').length, 1);
+});
+
+test('IDE lookup rejects a Board selection A to B to A even without a second IDE click', async t => {
+  const h = await cardFixture(t), pending = deferred();
+  h.setTarget({ boardId: 'board-a', title: 'A', projectionId: 'projection-a', selectionRevision: 1 });
+  h.service.openProject = async () => pending.promise;
+  const opening = h.openIde();
+  h.setTarget({ boardId: 'board-a', title: 'A', projectionId: 'projection-a', selectionRevision: 3 });
+  pending.resolve({ project: project(), source: 'board' });
+  assert.equal((await opening).status, 'stale');
+  assert.equal(h.document.body.querySelectorAll('.egd-file-card').length, 0);
+});
+
+test('IDE no-Board click invalidates the earlier request even if that Board later becomes selected again', async t => {
+  const h = await cardFixture(t), pending = deferred();
+  h.service.openProject = async () => pending.promise;
+  const opening = h.openIde();
+  h.setTarget(null); assert.equal((await h.openIde()).status, 'no-board');
+  h.setTarget({ boardId: 'board-a', title: 'A 보드' });
+  pending.resolve({ project: project(), source: 'board' });
+  assert.equal((await opening).status, 'stale');
+  assert.equal(h.document.body.querySelectorAll('.egd-file-card').length, 0);
+});
+
+test('IDE picker cannot attach after the selected Board changes while the picker is open', async t => {
+  const h = await cardFixture(t), pending = deferred();
+  h.pick(pending.promise);
+  const opening = h.openIde();
+  await until(() => h.pickerCalls() === 1);
+  h.setTarget({ boardId: 'board-b', title: 'B 보드' });
+  pending.resolve('/selected/for/a');
+  assert.equal((await opening).status, 'stale');
+  assert.equal(h.calls.some(call => call[0] === 'attach'), false);
+  assert.equal(h.projects.size, 0); assert.equal(h.document.body.children.length, 0);
+  assert.deepEqual(h.runs, []); assert.deepEqual(h.terminalOptions, []);
+});
+
+test('IDE keeps native folder selections serial while the latest Board request replaces a stale picker', async t => {
+  const h = await cardFixture(t), previousPick = deferred();
+  h.pick(previousPick.promise);
+  const first = h.openIde(); await until(() => h.pickerCalls() === 1);
+  h.setTarget({ boardId: 'board-b', title: 'B 보드' }); h.pick('/selected/for/b');
+  const latest = h.openIde();
+  await settle();
+  assert.equal(h.pickerCalls(), 1, 'another native picker is not opened while the first is pending');
+  previousPick.resolve('/selected/for/a');
+  assert.equal((await first).status, 'stale');
+  assert.equal((await latest).status, 'opened');
+  assert.equal(h.pickerCalls(), 2);
+  assert.deepEqual(h.calls.filter(call => call[0] === 'attach'), [['attach', 'board-b', 'B 보드']]);
+  assert.equal(h.document.body.querySelector('.egd-file-card')._fileRecord.project.boardId, 'board-b');
+  assert.deepEqual(h.runs, []); assert.deepEqual(h.terminalOptions, []);
+});
+
+test('IDE rechecks the newer Board after an older picker finishes before deciding to pick a folder', async t => {
+  const h = await cardFixture(t), previousPick = deferred();
+  h.pick(previousPick.promise);
+  const first = h.openIde(); await until(() => h.pickerCalls() === 1);
+  h.setTarget({ boardId: 'board-b', title: 'B 보드' });
+  const latest = h.openIde(); await settle();
+  h.projects.set('board-b', project('b'));
+  previousPick.resolve('/selected/for/a');
+  assert.equal((await first).status, 'stale');
+  assert.equal((await latest).status, 'opened');
+  assert.equal(h.pickerCalls(), 1, 'the newly verified connection requires no second picker');
+  assert.equal(h.calls.some(call => call[0] === 'attach'), false);
+  assert.equal(h.document.body.querySelector('.egd-file-card')._fileRecord.project.boardId, 'board-b');
+});
+
+test('IDE never reuses a card from another Board even when project and root IDs match', async t => {
+  const h = await cardFixture(t), shared = project('a');
+  h.projects.set('board-a', shared);
+  const other = await h.spawn({ openMode: 'new', project: shared, projectTarget: { boardId: 'board-b', title: 'B' } });
+  await other._fileView.openFile('file-dir-a');
+  const editor = other.querySelector('.egdesk-file-editor'); editor.value = 'OTHER BOARD'; editor.fire('input');
+  await other._fileView.flush();
+  const before = [structuredClone(other._fileRecord), other._fileView.snapshot(), h.writes.length];
+  const opened = await h.openIde();
+  assert.equal(opened.status, 'opened'); assert.equal(opened.reused, false); assert.notEqual(opened.cardId, other.id);
+  assert.equal(h.document.body.querySelectorAll('.egd-file-card').length, 2);
+  assert.deepEqual([other._fileRecord, other._fileView.snapshot(), h.writes.length], before);
+  assert.equal(editor.value, 'OTHER BOARD'); assert.deepEqual(h.focused, []);
+  assert.deepEqual(h.runs, []); assert.deepEqual(h.terminalOptions, []);
+});
+
+test('ordinary File spawn still activates and reveals a new card and focuses its existing card', async t => {
+  const h = await cardFixture(t), card = await h.spawn();
+  assert.deepEqual(h.presentations, [{ type: 'spawn', cardId: card.id, activate: true }, { type: 'reveal', cardId: card.id }]);
+  assert.equal(await h.spawn(), card);
+  assert.deepEqual(h.focused, [card]);
+});
 
 test('File Card header gives long titles only the remaining width and keeps its status label and controls intact', async t => {
   const css = await fs.readFile(new URL('../overlay/CSS/eg-desk-surface.uc.css', import.meta.url), 'utf8');
@@ -583,6 +884,48 @@ test('File Card reopens its stored Board association with dirty content and refu
   const foreignDraft = await h.spawn({ restore: true, record });
   assert.equal(foreignDraft._fileView.snapshot().projectId, null, 'a valid Board/root cannot relabel another root\'s managed draft');
   assert.equal(foreignDraft.querySelector('.egdesk-file-editor').value, 'keep on reopen');
+});
+
+test('IDE uses the real helper Board project contract, preserving a dirty working copy without executing or saving the original', async t => {
+  const temp = await fs.mkdtemp(path.join(os.tmpdir(), 'egdesk-ide-project-flow-'));
+  const rootPath = path.join(temp, 'project'), draftDirectory = path.join(temp, 'drafts');
+  await fs.mkdir(rootPath); await fs.writeFile(path.join(rootPath, 'source.txt'), 'fixture original\n');
+  const adapter = createEGDeskFileHttpAdapter({ draftDirectory, localOwnerScope: 'egdesk-local',
+    gitReview: { status: async () => ({ available: false, isRepo: false, entries: [] }) } });
+  const requests = [];
+  const service = FileView.createEGDeskFileServiceCallbacks({ request: async (pathname, body, options = {}) => {
+    requests.push({ pathname, body });
+    const headers = { host: '127.0.0.1:39218', 'content-type': 'application/json',
+      ...Object.fromEntries(Object.entries(options.headers || {}).map(([key, value]) => [key.toLowerCase(), value])) };
+    return (await adapter.dispatch({ method: 'POST', pathname, body,
+      request: { method: 'POST', url: pathname, headers, socket: { remoteAddress: '127.0.0.1' } } })).body;
+  } });
+  const h = await cardFixture(t, { service });
+  t.after(async () => { await adapter.close(); await fs.rm(temp, { recursive: true, force: true }); });
+  assert.deepEqual(await service.openProject({ boardId: 'board-a' }), { project: null, source: null });
+  h.pick(rootPath);
+  const opened = await h.openIde();
+  assert.equal(opened.status, 'opened'); assert.equal(opened.reused, false);
+  const confirmed = await service.openProject({ boardId: 'board-a' });
+  assert.equal(confirmed.source, 'board'); assert.equal(confirmed.project.source, 'board');
+  assert.equal(confirmed.project.status, 'connected');
+  const card = h.document.body.querySelector('.egd-file-card');
+  assert.deepEqual(card._fileRecord.project, { boardId: 'board-a', projectId: confirmed.project.projectId });
+  assert.equal(card._fileView.snapshot().rootId, confirmed.project.rootId);
+  const listing = await service.listDirectory({ directoryId: confirmed.project.directoryId });
+  await card._fileView.openFile(listing.entries.find(entry => entry.name === 'source.txt').id);
+  const editor = card.querySelector('.egdesk-file-editor'); editor.value = 'fixture working copy'; editor.fire('input');
+  await card._fileView.flush(); editor.selectionStart = 2; editor.selectionEnd = 6; editor.focus();
+  const before = card._fileView.snapshot(), requestIndex = requests.length;
+  const reused = await h.openIde();
+  assert.equal(reused.status, 'opened'); assert.equal(reused.reused, true); assert.equal(reused.cardId, card.id);
+  assert.deepEqual(card._fileView.snapshot(), before);
+  assert.deepEqual([editor.value, editor.selectionStart, editor.selectionEnd], ['fixture working copy', 2, 6]);
+  assert.deepEqual(requests.slice(requestIndex).map(request => request.pathname),
+    ['/v1/files/projects/open', '/v1/files/projects/open'], 'reuse verifies the Board binding again before success');
+  assert.equal(await fs.readFile(path.join(rootPath, 'source.txt'), 'utf8'), 'fixture original\n');
+  assert.equal(requests.some(request => /\/(?:save-original|scripts|script-suggestions|run|terminal)$/.test(request.pathname)), false);
+  assert.deepEqual(h.runs, []); assert.deepEqual(h.terminalOptions, []);
 });
 
 test('real helper restart opens the verified project with fresh handles while retaining the old dirty draft separately', async t => {

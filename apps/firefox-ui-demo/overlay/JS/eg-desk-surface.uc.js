@@ -3978,6 +3978,7 @@
   function selectBoardProjection(projectionId) {
     const projection = state.boards.projections[projectionId];
     if (!projection) return false;
+    if (state.boards.activeProjectionId !== projection.id) state.boardSelectionRevision = (state.boardSelectionRevision || 0) + 1;
     state.boards.activeProjectionId = projection.id;
     state.agenda.activeAgendaId = projection.boardId;
     state.agenda.activeTitle = projection.title;
@@ -5874,6 +5875,8 @@
 
   function setActiveEntity(entity) {
     const previous = state.activeEntityId ? document.getElementById(state.activeEntityId) : null;
+    const nextId = entity?.isConnected ? entity.id || null : null;
+    if ((state.activeEntityId || null) !== nextId) state.canvasSelectionRevision = (state.canvasSelectionRevision || 0) + 1;
     if (previous !== entity) state.resetWheelSession?.();
     if (previous && previous !== entity && previous.contains(document.activeElement)) {
       document.activeElement?.blur?.();
@@ -5898,6 +5901,8 @@
     const valid = entities.filter((entity) => entity && entity.isConnected);
     for (const entity of valid) entity.classList.add('egd-entity-selected');
     const active = activeEntity && valid.includes(activeEntity) ? activeEntity : valid[0] || null;
+    // This path is the explicit Canvas marquee selection.
+    state.canvasSelectionRevision = (state.canvasSelectionRevision || 0) + 1;
     if (!active) {
       state.activeEntityId = null;
       syncViewportAgendaRail();
@@ -6010,6 +6015,9 @@
     const camera = { x: state.panTarget.x, y: state.panTarget.y, zoom: state.zoomTarget };
     window.setTimeout(() => {
       if (!card.isConnected || state.agenda.restoreInProgress || state.surface.restoring) return;
+      if (typeof options.isCurrent === 'function') {
+        try { if (options.isCurrent() !== true) return; } catch { return; }
+      }
       if (state.panTarget.x !== camera.x || state.panTarget.y !== camera.y || state.zoomTarget !== camera.zoom) return;
       const rect = persistentEntityGeometry(card);
       if (rect.x !== Math.round(placement.x) || rect.y !== Math.round(placement.y)) return;
@@ -7115,6 +7123,49 @@
     return card;
   }
 
+
+  let ideProjectIntent = 0;
+  function openIdeFromUserAction() {
+    // An explicit IDE click owns only its own asynchronous presentation.
+    const intent = ++ideProjectIntent;
+    const camera = { zoom: state.zoomTarget, pan: { ...state.panTarget } };
+    const cameraRevision = state.canvasUserCameraRevision || 0;
+    const boardRevision = state.boardSelectionRevision || 0;
+    const selectionRevision = state.canvasSelectionRevision || 0;
+    const initialFocus = document.activeElement;
+    const initialEntityId = state.activeEntityId;
+    const initialFullscreenId = state.cardFullscreen?.cardId || null;
+    void Promise.resolve(openBoardProjectFile()).then(result => {
+      if (result?.status !== 'opened' || intent !== ideProjectIntent) return;
+      const card = document.getElementById(result.cardId);
+      if (!card?.isConnected || !card.classList.contains('egd-file-card') || card.dataset.closeState
+          || state.panModifier || state.surface.restoring || state.agenda.restoreInProgress) return;
+      if (state.activeEntityId !== initialEntityId || (state.cardFullscreen?.cardId || null) !== initialFullscreenId
+          || (state.canvasUserCameraRevision || 0) !== cameraRevision
+          || (state.boardSelectionRevision || 0) !== boardRevision
+          || (state.canvasSelectionRevision || 0) !== selectionRevision) return;
+      if (state.zoomTarget !== camera.zoom || state.panTarget.x !== camera.pan.x || state.panTarget.y !== camera.pan.y) return;
+      if (document.activeElement && document.activeElement !== initialFocus && !card.contains(document.activeElement)) return;
+      if (state.cardFullscreen && !isCardFullscreen(card)) exitCardFullscreen(null, { preserveCamera: true });
+      focusCanvasCard(card);
+      if (!isCardFullscreen(card) && !state.focusFileDockIfCompact?.(card)) {
+        const revealFocus = document.activeElement;
+        const revealFullscreenId = state.cardFullscreen?.cardId || null;
+        const revealSelectionRevision = state.canvasSelectionRevision || 0;
+        // The ordinary reveal defers camera movement. Fence that actual
+        // callback as well, without changing other card reveal behavior.
+        revealOpenCanvasCard(card, { isCurrent: () => intent === ideProjectIntent && card.isConnected
+          && !card.dataset.closeState && state.activeEntityId === card.id && !state.panModifier
+          && !state.surface.restoring && !state.agenda.restoreInProgress
+          && (state.cardFullscreen?.cardId || null) === revealFullscreenId
+          && (state.canvasUserCameraRevision || 0) === cameraRevision
+          && (state.boardSelectionRevision || 0) === boardRevision
+          && (state.canvasSelectionRevision || 0) === revealSelectionRevision
+          && (!document.activeElement || document.activeElement === revealFocus || card.contains(document.activeElement)) });
+      }
+    }).catch(() => {}); // The project entry reports connection failures itself.
+  }
+
   // ============ Bottom: Dock ============
   function buildDock() {
     const dock = el('div', {
@@ -7130,7 +7181,7 @@
       for (const item of items) {
         const btn = el('button', {
           class: 'egd-dock-btn' + (kind === 'center' && state.activeTool === item.id ? ' egd-dock-btn-active' : ''),
-          title: item.label,
+          title: item.id === 'ide' ? '현재 보드의 프로젝트 파일 열기' : item.label,
           data: { id: item.id, kind, ...(item.id === 'shelf' ? { testid: 'file-dock-open' } : {}) },
           'aria-label': item.label,
           // The chosen tool is also said as a pressed state, not only by its tint.
@@ -7152,6 +7203,8 @@
                 spawnSettingsCard();
               } else if (item.id === 'shelf') {
                 openFileFromUserAction();
+              } else if (item.id === 'ide') {
+                openIdeFromUserAction();
               } else if (item.id === 'ontology') {
                 spawnOntologyMapCard();
               } else if (item.id === 'chat') {
@@ -12452,6 +12505,9 @@
 
   function focusCanvasCard(card) {
     if (!card || !card.isConnected || state.panModifier) return;
+    // A direct focus on the already-active card is still an intervening
+    // selection action; native picker focus restoration does not enter here.
+    if (state.activeEntityId === card.id) state.canvasSelectionRevision = (state.canvasSelectionRevision || 0) + 1;
     setActiveEntity(card);
     if (!isCardFullscreen(card)) card.style.zIndex = String(++cardZ);
   }
@@ -13058,14 +13114,16 @@
   const spawnOntologyMapCard = surfaceForward('ontology', 'spawnOntologyMapCard');
 
   const spawnFileCard = surfaceForward('fileCard', 'spawnFileCard');
+  const openBoardProjectFile = surfaceForward('fileCard', 'openBoardProjectFile');
   const openVerifiedRunFile = surfaceForward('fileCard', 'openVerifiedRunFile');
 
   function getProjectTarget() {
-    // Resolve only when the user chooses File's Board project connection.
+    // Resolve only on an explicit File Board connection or IDE entry.
     // This is not a Chat room association or a draft execution target.
     const projection = activeBoardProjection();
     if (!projection || typeof projection.boardId !== 'string' || !projection.boardId) return null;
-    return { boardId: projection.boardId, title: projection.title };
+    return { boardId: projection.boardId, title: projection.title, projectionId: projection.id,
+      selectionRevision: state.boardSelectionRevision || 0 };
   }
 
   // ============ Settings Canvas Card ============

@@ -14881,6 +14881,182 @@ test('explicit Files Dock/sidebar open waits for successful new-card readiness o
   assert.doesNotMatch(declaration('restoreCardFromState'), /openFileFromUserAction/);
 });
 
+
+test('IDE Dock routes only to the Board project entry and retains the IDE identity', () => {
+  const start = surfaceSource.indexOf('  function buildDock() {');
+  const dockSource = surfaceSource.slice(start, surfaceSource.indexOf('    const divider =', start));
+  const dockBody = dockSource.match(/onclick: \(\) => \{([\s\S]*?)\n\s*\},\n\s*\}, el\('span', \{ class: 'egd-dock-icon' \}/)?.[1];
+  assert.ok(dockBody);
+  let ideCalls = 0, fileCalls = 0, hudCalls = 0;
+  compileFunction('return () => {' + dockBody + '};',
+    ['kind', 'item', 'openIdeFromUserAction', 'openFileFromUserAction', 'toggleHUD'])(
+    'left', { id: 'ide', label: 'IDE' }, () => { ideCalls++; }, () => { fileCalls++; }, () => { hudCalls++; })();
+  assert.deepEqual([ideCalls, fileCalls, hudCalls], [1, 0, 0]);
+  assert.ok(surfaceSource.includes("const openBoardProjectFile = surfaceForward('fileCard', 'openBoardProjectFile');"));
+  assert.ok(dockSource.includes("title: item.id === 'ide' ? '현재 보드의 프로젝트 파일 열기' : item.label"));
+  assert.ok(dockSource.includes("'aria-label': item.label"));
+});
+
+function ideProjectOpenHarness({ compact = false, fullscreen = null } = {}) {
+  const pending = requestProjectDeferred(), calls = [];
+  const card = { id: 'project-file', isConnected: true, dataset: {}, classList: { contains: value => value === 'egd-file-card' },
+    contains: value => value?.insideFile === true };
+  const initialFocus = { id: 'ide-button' };
+  const document = { activeElement: initialFocus, getElementById: id => id === card.id ? card : null };
+  const state = { activeEntityId: 'previous', zoomTarget: 0.71, panTarget: { x: 10, y: 20 }, panModifier: false,
+    surface: { restoring: false }, agenda: { restoreInProgress: false }, cardFullscreen: fullscreen ? { cardId: fullscreen } : null,
+    focusFileDockIfCompact: value => { calls.push(['compact', value.id]); return compact; } };
+  const focus = value => { calls.push(['focus', value.id]); state.activeEntityId = value.id; };
+  const isFullscreen = value => state.cardFullscreen?.cardId === value.id;
+  const exit = (_card, options) => { calls.push(['exit-fullscreen', options.preserveCamera]); state.cardFullscreen = null; };
+  let revealOptions = null;
+  const reveal = (value, options) => { calls.push(['reveal', value.id]); revealOptions = options; };
+  const open = compileFunction('let ideProjectIntent = 0;\n' + declaration('openIdeFromUserAction') + '\nreturn openIdeFromUserAction;',
+    ['state', 'document', 'openBoardProjectFile', 'focusCanvasCard', 'isCardFullscreen', 'exitCardFullscreen', 'revealOpenCanvasCard'])(
+    state, document, () => pending.promise, focus, isFullscreen, exit, reveal);
+  return { pending, card, document, state, calls, open, revealOptions: () => revealOptions };
+}
+
+test('explicit IDE opens and reuses a readable or offscreen File through its existing presentation paths', async () => {
+  for (const reused of [false, true]) {
+    const h = ideProjectOpenHarness(); h.open();
+    h.pending.resolve({ status: 'opened', reused, cardId: h.card.id }); await settle();
+    assert.deepEqual(h.calls, [['focus', h.card.id], ['compact', h.card.id], ['reveal', h.card.id]]);
+  }
+  const compact = ideProjectOpenHarness({ compact: true }); compact.open();
+  compact.pending.resolve({ status: 'opened', reused: true, cardId: compact.card.id }); await settle();
+  assert.deepEqual(compact.calls, [['focus', compact.card.id], ['compact', compact.card.id]]);
+  const otherFullscreen = ideProjectOpenHarness({ fullscreen: 'other' }); otherFullscreen.open();
+  otherFullscreen.pending.resolve({ status: 'opened', reused: true, cardId: otherFullscreen.card.id }); await settle();
+  assert.deepEqual(otherFullscreen.calls, [['exit-fullscreen', true], ['focus', otherFullscreen.card.id],
+    ['compact', otherFullscreen.card.id], ['reveal', otherFullscreen.card.id]]);
+  const sameFullscreen = ideProjectOpenHarness({ fullscreen: 'project-file' }); sameFullscreen.open();
+  sameFullscreen.pending.resolve({ status: 'opened', reused: true, cardId: sameFullscreen.card.id }); await settle();
+  assert.deepEqual(sameFullscreen.calls, [['focus', sameFullscreen.card.id]]);
+});
+
+test('pending IDE open cannot override a newer camera, selection, focus, close, restore or fullscreen action', async t => {
+  const changes = {
+    selectionABA: h => { h.state.canvasSelectionRevision = 2; },
+    cameraABA: h => { h.state.canvasUserCameraRevision = 2; },
+    boardABA: h => { h.state.boardSelectionRevision = 2; },
+    zoom: h => { h.state.zoomTarget = 0.9; },
+    pan: h => { h.state.panTarget = { x: 88, y: 99 }; },
+    selection: h => { h.state.activeEntityId = 'another-card'; },
+    keyboardFocus: h => { h.document.activeElement = { id: 'another-input' }; },
+    close: h => { h.card.isConnected = false; },
+    panModifier: h => { h.state.panModifier = true; },
+    deskRestore: h => { h.state.surface.restoring = true; },
+    boardRestore: h => { h.state.agenda.restoreInProgress = true; },
+    fullscreen: h => { h.state.cardFullscreen = { cardId: 'another-card' }; },
+  };
+  for (const [name, change] of Object.entries(changes)) await t.test(name, async () => {
+    const h = ideProjectOpenHarness(); h.open(); change(h);
+    const camera = structuredClone({ zoom: h.state.zoomTarget, pan: h.state.panTarget });
+    h.pending.resolve({ status: 'opened', reused: true, cardId: h.card.id }); await settle();
+    assert.deepEqual(h.calls, []);
+    assert.deepEqual({ zoom: h.state.zoomTarget, pan: h.state.panTarget }, camera);
+  });
+  for (const status of ['cancelled', 'no-board', 'stale', 'unavailable']) {
+    const h = ideProjectOpenHarness(); h.open(); h.pending.resolve({ status, cardId: h.card.id }); await settle();
+    assert.deepEqual(h.calls, []);
+  }
+});
+
+test('IDE latest click owns presentation and earlier coalesced callbacks do not duplicate it', async () => {
+  const h = ideProjectOpenHarness(); h.open(); h.open();
+  h.pending.resolve({ status: 'opened', reused: true, cardId: h.card.id }); await settle();
+  assert.deepEqual(h.calls, [['focus', h.card.id], ['compact', h.card.id], ['reveal', h.card.id]]);
+});
+
+test('Board selection revision detects A to B to A without changing same-Board selections', () => {
+  const state = { boards: { activeProjectionId: null, projections: {
+    a: { id: 'a', boardId: 'board-a', title: 'A' }, b: { id: 'b', boardId: 'board-b', title: 'B' },
+  } }, agenda: {} };
+  const select = compileFunction(declaration('selectBoardProjection') + '\nreturn selectBoardProjection;',
+    ['state', 'coerceAgendaStore', 'recentBoardProjectionIds', 'syncViewportAgendaRail'])(
+    state, () => ({ agendas: {} }), [], () => {});
+  const getTarget = compileFunction(declaration('getProjectTarget') + '\nreturn getProjectTarget;',
+    ['state', 'activeBoardProjection'])(state, () => state.boards.projections[state.boards.activeProjectionId] || null);
+  select('a'); select('b'); select('a');
+  assert.deepEqual(getTarget(), { boardId: 'board-a', title: 'A', projectionId: 'a', selectionRevision: 3 });
+  select('a'); assert.equal(getTarget().selectionRevision, 3);
+});
+
+test('IDE deferred reveal checks current intent at the actual camera callback without changing ordinary reveals', async t => {
+  async function queued() {
+    const h = ideProjectOpenHarness(); h.open();
+    h.pending.resolve({ status: 'opened', reused: true, cardId: h.card.id }); await settle();
+    const options = h.revealOptions(); assert.equal(typeof options?.isCurrent, 'function');
+    const timers = [], pans = [];
+    h.state.setCanvasPanTarget = value => pans.push(value);
+    const reveal = compileFunction(declaration('revealPlacedCanvasCard') + '\nreturn revealPlacedCanvasCard;',
+      ['state', 'window', 'persistentEntityGeometry', 'safeViewportRect', 'SurfaceState', 'chatOpenerView', 'showChatReturnCue'])(
+      h.state, { setTimeout: fn => { timers.push(fn); } }, () => ({ x: 500, y: 0, width: 100, height: 100 }),
+      () => ({ left: 0, top: 0, right: 600, bottom: 500 }), { revealRectPan: () => ({ x: 7, y: 9 }) }, () => null, () => {});
+    reveal(h.card, { x: 500, y: 0, width: 100, height: 100, inView: false }, options);
+    assert.equal(timers.length, 1);
+    return { h, timers, pans, reveal };
+  }
+  const unchanged = await queued(); unchanged.timers.shift()();
+  assert.deepEqual(unchanged.pans, [{ x: 7, y: 9 }]);
+  const changes = {
+    selectionABA: h => { h.state.canvasSelectionRevision = 2; },
+    otherCard: h => { h.state.activeEntityId = 'another-card'; },
+    keyboardFocus: h => { h.document.activeElement = { id: 'another-input' }; },
+    cameraABA: h => { h.state.canvasUserCameraRevision = 2; },
+    boardABA: h => { h.state.boardSelectionRevision = 2; },
+    newerIdeClick: h => { h.open(); },
+    close: h => { h.card.isConnected = false; },
+  };
+  for (const [name, change] of Object.entries(changes)) await t.test(name, async () => {
+    const item = await queued(); change(item.h); item.timers.shift()();
+    assert.deepEqual(item.pans, []);
+  });
+  const ordinary = await queued(); ordinary.timers.length = 0;
+  ordinary.h.state.activeEntityId = 'another-card';
+  ordinary.reveal(ordinary.h.card, { x: 500, y: 0, width: 100, height: 100, inView: false });
+  ordinary.timers.shift()();
+  assert.deepEqual(ordinary.pans, [{ x: 7, y: 9 }], 'without the IDE guard the established reveal behavior is unchanged');
+});
+
+test('IDE selection revision prevents actual A to B to A focus from stealing the restored input', async () => {
+  const document = { activeElement: null, getElementById: id => cards[id] || null, querySelectorAll: () => [] };
+  const original = { id: 'previous-input', blur() { document.activeElement = null; } };
+  const otherInput = { id: 'other-input', blur() { document.activeElement = null; } };
+  const makeCard = (id, input) => ({ id, isConnected: true, dataset: {}, style: {},
+    classList: { contains: name => name === 'egd-file-card' && id === 'file', add() {}, remove() {} },
+    contains: node => node === input });
+  const cards = { previous: makeCard('previous', original), other: makeCard('other', otherInput), file: makeCard('file', null) };
+  document.activeElement = original;
+  const state = { zoomTarget: 1, panTarget: { x: 0, y: 0 }, canvasUserCameraRevision: 0, boardSelectionRevision: 1,
+    canvasSelectionRevision: 0, activeEntityId: 'previous', panModifier: false, surface: { restoring: false },
+    agenda: { restoreInProgress: false }, cardFullscreen: null, focusFileDockIfCompact: () => false };
+  const pending = requestProjectDeferred(), reveals = [];
+  const body = 'let cardZ = 0, ideProjectIntent = 0;\n' + declaration('setActiveEntity') + '\n' +
+    declaration('focusCanvasCard') + '\n' + declaration('openIdeFromUserAction') +
+    '\nreturn { openIdeFromUserAction, focusCanvasCard };';
+  const api = compileFunction(body, ['state', 'document', 'openBoardProjectFile', 'isCardFullscreen',
+    'exitCardFullscreen', 'revealOpenCanvasCard', 'syncViewportAgendaRail'])(
+    state, document, () => pending.promise, () => false, () => {}, card => reveals.push(card.id), () => {});
+  api.openIdeFromUserAction();
+  api.focusCanvasCard(cards.other); document.activeElement = otherInput;
+  api.focusCanvasCard(cards.previous); document.activeElement = original;
+  assert.equal(state.canvasSelectionRevision, 2);
+  pending.resolve({ status: 'opened', cardId: 'file' }); await settle();
+  assert.equal(state.activeEntityId, 'previous'); assert.equal(document.activeElement, original);
+  assert.deepEqual(reveals, []);
+});
+
+test('IDE does not treat transient native-picker focus restoration alone as a new Desk selection', async () => {
+  const h = ideProjectOpenHarness(), originalFocus = h.document.activeElement;
+  h.open();
+  h.document.activeElement = null;
+  h.document.activeElement = originalFocus;
+  h.pending.resolve({ status: 'opened', reused: false, cardId: h.card.id }); await settle();
+  assert.deepEqual(h.calls, [['focus', h.card.id], ['compact', h.card.id], ['reveal', h.card.id]]);
+});
+
 test('pending explicit Files open never overrides a newer camera, focus, close, or restore', async t => {
   const changes = {
     zoom: h => { h.state.zoomTarget = 0.9; },

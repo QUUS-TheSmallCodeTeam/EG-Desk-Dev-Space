@@ -136,6 +136,134 @@ export function createFileCardZone(deps) {
     return ready === true && card._fileOpenStatus === 'opened' ? { status: 'opened', cardId: card.id } : { status: 'unavailable' };
   }
 
+  let boardProjectOpening = null, boardProjectRequest = 0, boardProjectPicker = null;
+  const validProjectId = value => typeof value === 'string' && !!value.trim() && value.length <= 512 && !/[\u0000-\u001f\u007f]/.test(value);
+  const sameProjectSelection = (left, right) => left?.boardId === right?.boardId
+    && (left?.projectionId ?? null) === (right?.projectionId ?? null)
+    && (left?.selectionRevision ?? null) === (right?.selectionRevision ?? null);
+
+  // IDE is a Board-project entry, not the generic File action. Resolve the
+  // actual Board binding before looking at existing cards or creating one.
+  function openBoardProjectFile() {
+    let selected;
+    try { selected = getProjectTarget?.(); } catch { selected = null; }
+    if (!validProjectId(selected?.boardId)) {
+      boardProjectRequest++; boardProjectOpening = null;
+      boardNotice('프로젝트를 연결할 보드를 먼저 선택하세요.');
+      return Promise.resolve({ status: 'no-board' });
+    }
+    const target = Object.freeze({ boardId: selected.boardId, title: selected.title,
+      projectionId: selected.projectionId ?? null, selectionRevision: selected.selectionRevision ?? null });
+    if (boardProjectOpening && sameProjectSelection(boardProjectOpening.target, target)) return boardProjectOpening.promise;
+    const request = ++boardProjectRequest;
+    const current = () => {
+      try { return boardProjectRequest === request && sameProjectSelection(getProjectTarget?.(), target); } catch { return false; }
+    };
+    const validConnected = project => project?.source === 'board' && project.status === 'connected'
+      && ['projectId', 'rootId', 'directoryId'].every(key => validProjectId(project[key]));
+    const needsPicker = response => response?.project === null && response?.source === null
+      || response?.source === 'board' && response?.project?.source === 'board'
+        && validProjectId(response.project.projectId) && response.project.status === 'reconnect-required';
+    const unavailable = () => {
+      boardNotice('보드 프로젝트 연결을 확인하지 못했습니다. 보드의 연결 상태를 확인해 주세요.');
+      return { status: 'unavailable' };
+    };
+    const open = (async () => {
+      try {
+        const fileModule = ChromeUtils.importESModule('chrome://userchrome/content/EGDeskFileView.sys.mjs');
+        const service = { ...fileModule.createEGDeskFileServiceCallbacks({ request: requestLocalFilePacket }) };
+        // A picker can remain open while the active Board changes. Keep the
+        // existing picker flow, but do not dispatch its attachment to a stale
+        // Board. An already-dispatched attachment is not claimed rolled back.
+        const attachProject = service.attachProject;
+        service.attachProject = (...args) => {
+          if (!current()) throw Object.assign(new Error('선택한 보드가 바뀌었습니다.'), { code: 'BOARD_PROJECT_STALE' });
+          return attachProject(...args);
+        };
+        let response = await service.openProject({ boardId: target.boardId });
+        if (!current()) return { status: 'stale' };
+        let project = response?.project;
+        // A native picker already shown for an older intent must finish before
+        // another opens. The newer Board is re-read after the wait, so a
+        // connection made in the meantime is never replaced by a stale pick.
+        if (needsPicker(response) && boardProjectPicker) {
+          await boardProjectPicker;
+          if (!current()) return { status: 'stale' };
+          response = await service.openProject({ boardId: target.boardId });
+          if (!current()) return { status: 'stale' };
+          project = response?.project;
+        }
+        if (needsPicker(response)) {
+          const pickers = fileModule.createEGDeskNativeFilePickers({ service, pickDirectory: pickNativeFileDirectory, pickSaveFile: pickNativeFileSaveFile });
+          const picked = pickers.chooseProjectFolder(target);
+          const settled = picked.then(() => {}, () => {});
+          boardProjectPicker = settled;
+          let attached;
+          try { attached = await picked; }
+          finally { if (boardProjectPicker === settled) boardProjectPicker = null; }
+          if (!current()) return { status: 'stale' };
+          if (!attached) return { status: 'cancelled' };
+          if (!validConnected(attached)) return unavailable();
+          // The picker reply alone does not establish that this Board still
+          // points to the same live project/root after attachment.
+          const verified = await service.openProject({ boardId: target.boardId });
+          if (!current()) return { status: 'stale' };
+          project = verified?.project;
+          if (verified?.source !== 'board' || !validConnected(project)
+              || project.projectId !== attached.projectId || project.rootId !== attached.rootId
+              || project.directoryId !== attached.directoryId) return unavailable();
+        } else if (response?.source !== 'board' || !validConnected(project)) return unavailable();
+
+        // Never reconnect or relabel an existing card. A reused card must have
+        // both its saved Board reference and its live view on this exact root.
+        const matchesCard = card => {
+          const reference = card._fileRecord?.project;
+          if (!card.isConnected || card.dataset.closeState || reference?.boardId !== target.boardId
+              || reference.projectId !== project.projectId || card._fileRecord?.root?.rootId !== project.rootId) return false;
+          try {
+            const snapshot = card._fileView?.snapshot();
+            return snapshot?.projectId === project.projectId && snapshot.rootId === project.rootId
+              && snapshot.sourceConnection !== 'reconnect-required';
+          } catch { return false; }
+        };
+        const verifyBinding = async () => {
+          const latest = await service.openProject({ boardId: target.boardId });
+          if (!current()) return 'stale';
+          return latest?.source === 'board' && validConnected(latest.project)
+            && latest.project.projectId === project.projectId && latest.project.rootId === project.rootId
+            && latest.project.directoryId === project.directoryId ? 'verified' : 'unavailable';
+        };
+        const existing = [...document.querySelectorAll('.egd-file-card')].find(matchesCard);
+        if (existing) {
+          const verification = await verifyBinding();
+          if (verification === 'stale') return { status: 'stale' };
+          if (verification !== 'verified' || !matchesCard(existing)) return unavailable();
+          return { status: 'opened', reused: true, cardId: existing.id };
+        }
+        // The explicit IDE caller presents the card after its user-intent
+        // guard; service latency must not override a newer camera or focus.
+        const card = spawnFileCard({ openMode: 'new', project, projectTarget: target, deferPresentation: true });
+        const ready = await card._fileReady;
+        if (!current()) return { status: 'stale' };
+        if (!ready || !card.isConnected || card.dataset.closeState) return unavailable();
+        // Read the live Board binding again after the view's asynchronous
+        // initialization; the first lookup is not a lease on that binding.
+        const verification = await verifyBinding();
+        if (verification === 'stale') return { status: 'stale' };
+        if (!card.isConnected || card.dataset.closeState || verification !== 'verified') return unavailable();
+        const snapshot = card._fileView?.snapshot();
+        if (snapshot?.projectId !== project.projectId || snapshot.rootId !== project.rootId) return unavailable();
+        return { status: 'opened', reused: false, cardId: card.id };
+      } catch (error) {
+        if (!current() || error?.code === 'BOARD_PROJECT_STALE') return { status: 'stale' };
+        return unavailable();
+      }
+    })();
+    boardProjectOpening = { target, promise: open };
+    void open.then(() => { if (boardProjectOpening?.promise === open) boardProjectOpening = null; });
+    return open;
+  }
+
   function spawnFileCard(options = {}) {
     const runFile = options.verifiedRunOpen || null;
     if (runFile && !verifiedRunOpens.delete(runFile)) throw new Error('확인된 실행 파일 요청이 필요합니다.');
@@ -145,10 +273,10 @@ export function createFileCardZone(deps) {
     }
     const placement = resolveCanvasCardPlacement('file');
     const shell = spawnDeskWindowShell({ id: `egd-file-card-${allocCardSeq()}`, kind: 'file', className: 'egd-file-card',
-      activate: !options.restore, sourceRef: { kind: 'file-surface', id: `file-view-${chatBindingNonce()}`, scope: 'local-files' },
+      activate: !options.restore && !options.deferPresentation, sourceRef: { kind: 'file-surface', id: `file-view-${chatBindingNonce()}`, scope: 'local-files' },
       style: { left: `${placement.x}px`, top: `${placement.y}px`, width: `${placement.width}px`, height: `${placement.height}px` } });
     const card = shell.root;
-    if (!options.restore) revealPlacedCanvasCard(card, placement);
+    if (!options.restore && !options.deferPresentation) revealPlacedCanvasCard(card, placement);
     card.dataset.testid = 'file-card';
     card.setAttribute('aria-label', '파일 작업 창');
     const title = el('strong', { class: 'egd-file-card-title', title: '파일' }, '파일');
@@ -418,5 +546,5 @@ export function createFileCardZone(deps) {
     return card;
   }
 
-  return { spawnFileCard, openVerifiedRunFile };
+  return { spawnFileCard, openVerifiedRunFile, openBoardProjectFile };
 }

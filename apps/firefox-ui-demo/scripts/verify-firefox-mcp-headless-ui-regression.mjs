@@ -4,7 +4,7 @@
 // observes state, except for the explicitly bounded headless window resize.
 import assert from 'node:assert/strict';
 import { fileURLToPath } from 'node:url';
-import { FirefoxMcpChatHarness } from './firefox-mcp-chat-harness.mjs';
+import { FirefoxMcpChatHarness, captureQaScreenshot } from './firefox-mcp-chat-harness.mjs';
 import { assertQaFixtureManifest } from './egdesk-chat-qa-profile.mjs';
 import { chrome } from './egdesk-qa-ui-flow.mjs';
 
@@ -70,12 +70,28 @@ export function screenshotOutcome(pathOrError) {
 
 export async function captureHeadlessScreenshot(harness, stage, deadlineMs, now = Date.now) {
   assertBeforeDeadline(deadlineMs, now());
-  const captured = await harness.screenshot(`headless-${stage}`, {
-    allowHeadlessChromeFallback: true, deadlineMs,
-  });
+  let captured, metadata;
+  try {
+    captured = await harness.screenshot(`headless-${stage}`, {
+      allowHeadlessChromeFallback: true, deadlineMs,
+    });
+    metadata = harness.lastScreenshotMetadata;
+  } catch (error) {
+    // Firefox 158 may append this exact explanation to the same unsupported
+    // privileged-scope screenshot response. Normalize only that observed
+    // response into the existing bounded, headless-only drawSnapshot fallback.
+    if (error?.message !== 'screenshot_page: Error: BiDi error: "unsupported operation": The command does not support browsing contexts in privileged scope') throw error;
+    metadata = await captureQaScreenshot({
+      name: `headless-${stage}`, evidenceDir: harness.evidenceDir,
+      assertRemoteProfile: () => harness.assertRemoteProfile(),
+      screenshotPage: async () => { throw new Error('screenshot_page: Error: BiDi error: "unsupported operation"'); },
+      evaluateChrome: source => harness.evaluateChrome(source), allowHeadlessChromeFallback: true, deadlineMs,
+    });
+    captured = metadata.path;
+  }
   assertBeforeDeadline(deadlineMs, now());
   const outcome = screenshotOutcome(captured);
-  const metadata = outcome.status === 'captured' ? harness.lastScreenshotMetadata : null;
+  if (outcome.status !== 'captured') metadata = null;
   return { viewport: stage, ...outcome, route: metadata?.route ?? null,
     width: metadata?.width ?? null, height: metadata?.height ?? null };
 }
@@ -236,6 +252,7 @@ export async function observeTargets(harness, selector) {
       if (hit && (hit === node || node.contains(hit))) hitCount++;
     }
     return { id: node.dataset.id || node.getAttribute('aria-label') || node.title || node.id || null,
+      title: node.title || '', ariaLabel: node.getAttribute('aria-label') || '',
       visible: !!visible, disabled: !!node.disabled, readOnly: !!node.readOnly,
       inViewport, hitCount, rect: { x: rect.x, y: rect.y, width: rect.width, height: rect.height } };
   }), { selector });
@@ -899,7 +916,96 @@ async function scanControls(harness, size, deadlineMs, result, stage) {
         { issues: targetIssues(items[0]), rect: items[0]?.rect });
     }
   }
+  const ide = dock.find(item => item.id === 'ide');
+  record(result, `${stage}: IDE keeps its label and describes the Board project File entry`,
+    ide?.ariaLabel === 'IDE' && ide.title === '현재 보드의 프로젝트 파일 열기',
+    { ariaLabel: ide?.ariaLabel, title: ide?.title });
   return { dock, zoom };
+}
+
+// Fixture-only readback for an existing Board project File. The card's actual
+// header must be painted and hit-testable; a semantic proxy or active ID alone
+// is not evidence that the File Card is visible.
+export async function observeIdeProjectCard(harness, cardId) {
+  return chrome(harness, ({ cardId: id }) => {
+    const state = window.__egdesk?.state;
+    const projection = state?.boards?.projections?.[state?.boards?.activeProjectionId];
+    const card = document.getElementById(id), title = card?.querySelector('.egd-file-card-title');
+    const editor = card?.querySelector('.egdesk-file-editor');
+    const rect = title?.getBoundingClientRect();
+    const viewport = document.getElementById('egd-canvas-viewport')?.getBoundingClientRect();
+    const inside = !!rect && !!viewport && rect.width > 0 && rect.height > 0 &&
+      rect.left >= Math.max(0, viewport.left) && rect.top >= Math.max(0, viewport.top) &&
+      rect.right <= Math.min(innerWidth, viewport.right) && rect.bottom <= Math.min(innerHeight, viewport.bottom);
+    let shown = !!card?.isConnected && !!title && !title.closest('[hidden], [inert], [aria-hidden="true"]');
+    for (let node = title; shown && node; node = node.parentElement) {
+      const style = getComputedStyle(node);
+      if (style.display === 'none' || style.visibility !== 'visible' || Number(style.opacity) <= 0) shown = false;
+    }
+    let hits = 0;
+    if (inside && shown) for (const fy of [0.2, 0.5, 0.8]) for (const fx of [0.2, 0.5, 0.8]) {
+      const hit = document.elementFromPoint(rect.left + rect.width * fx, rect.top + rect.height * fy);
+      if (hit && (hit === title || title.contains(hit))) hits++;
+    }
+    return { cardId: card?.id || null, boardId: projection?.boardId || null,
+      reference: card?._fileRecord?.project || null, snapshot: card?._fileView?.snapshot() || null,
+      activeEntityId: state?.activeEntityId || null, fileCount: document.querySelectorAll('.egd-file-card').length,
+      terminalCount: document.querySelectorAll('.egd-terminal-card').length,
+      editor: editor ? { value: editor.value, start: editor.selectionStart, end: editor.selectionEnd } : null,
+      title: { inside, shown, hits, rect: rect && { left: rect.left, top: rect.top, right: rect.right, bottom: rect.bottom } } };
+  }, { cardId });
+}
+
+// The caller supplies the existing isolated project-file fixture's read-only
+// state reader. Setup (including moving the already-connected Card offscreen)
+// remains with that fixture; this path issues exactly one native Dock click.
+export async function verifyIdeProjectCardVisible({ harness, size, deadlineMs, result, expected, readFixtureState }) {
+  assertBeforeDeadline(deadlineMs);
+  assertQaFixtureManifest(harness.profile);
+  const guard = await observeGuard(harness);
+  requireCheck(result, 'IDE visibility: owned headless Desk without an account',
+    guard.documentURI === 'chrome://browser/content/browser.xhtml' && guard.headless && guard.mounted && !guard.loggedIn && !guard.accountBound);
+  assert.equal(typeof readFixtureState, 'function', 'an isolated project fixture state reader is required');
+  assert.ok(expected?.cardId && expected.boardId && expected.projectId && expected.rootId, 'exact fixture identity required');
+  const storeBefore = await readFixtureState();
+  result.ideEvidenceBoundary = {
+    providerAndNativeProcess: 'fixture metadata only; not whole-process or provider-call instrumentation',
+    terminal: 'only observed fixture terminal spawn/write routes are checked',
+  };
+  requireCheck(result, 'IDE visibility: owned synthetic fixture and declared structural metadata',
+    storeBefore?.kind === 'egdesk-project-file-fixture' && storeBefore.fixture === true &&
+    storeBefore.providerTurns === 0 && storeBefore.nativePickerInvocations === 0 && storeBefore.nativeProcessSpawns === 0);
+  const before = await observeIdeProjectCard(harness, expected.cardId);
+  const matches = value => value.cardId === expected.cardId && value.boardId === expected.boardId &&
+    value.reference?.boardId === expected.boardId && value.reference?.projectId === expected.projectId &&
+    value.snapshot?.projectId === expected.projectId && value.snapshot?.rootId === expected.rootId;
+  requireCheck(result, 'IDE visibility: exact connected fixture card starts offscreen or obscured',
+    matches(before) && !(before.title.shown && before.title.inside && before.title.hits === 9), before);
+  await safeClick(harness, '#egd-dock .egd-dock-btn[data-id="ide"]', 'IDE visibility: native Dock click', size, deadlineMs, result);
+  const after = await waitFor(harness, value => observeIdeProjectCard(value, expected.cardId),
+    value => matches(value) && value.activeEntityId === expected.cardId && value.title.shown &&
+      value.title.inside && value.title.hits === 9, deadlineMs);
+  const storeAfter = await readFixtureState();
+  const addedFiles = storeAfter.fileRequests.slice(storeBefore.fileRequests.length);
+  const addedTerminals = storeAfter.terminalRequests.slice(storeBefore.terminalRequests.length);
+  const projectRead = addedFiles.find(request => request.operation === 'openProject' && request.status === 200 && request.response?.ok === true);
+  const response = projectRead?.response?.result;
+  const forbidden = new Set(['attachProject', 'registerRoot', 'beginPicker', 'completePicker', 'updateDraft',
+    'saveDraft', 'saveOriginal', 'saveAs', 'setProjectScripts', 'suggestProjectScripts']);
+  requireCheck(result, 'IDE visibility: same File and working copy; no recorded fixture picker, attach, terminal spawn or write',
+    after.fileCount === before.fileCount && after.terminalCount === before.terminalCount &&
+    JSON.stringify(after.snapshot) === JSON.stringify(before.snapshot) &&
+    JSON.stringify(after.editor) === JSON.stringify(before.editor) &&
+    projectRead?.request?.boardId === expected.boardId && response?.source === 'board' &&
+    response.project?.source === 'board' && response.project.status === 'connected' &&
+    response.project.projectId === expected.projectId && response.project.rootId === expected.rootId &&
+    typeof response.project.directoryId === 'string' && !!response.project.directoryId &&
+    !addedFiles.some(request => forbidden.has(request.operation)) &&
+    !addedTerminals.some(request => ['/terminal/spawn', '/terminal/write'].includes(request.route)) &&
+    storeAfter.currentOriginalSha256 === storeBefore.currentOriginalSha256 &&
+    storeAfter.providerTurns === 0 && storeAfter.nativePickerInvocations === 0 && storeAfter.nativeProcessSpawns === 0,
+    { before, after, projectResponse: response, addedOperations: addedFiles.map(request => request.operation) });
+  return { before, after, projectResponse: response };
 }
 
 async function chatRoundTrip(harness, size, deadlineMs, result, priorThreadId) {

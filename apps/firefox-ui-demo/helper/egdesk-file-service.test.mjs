@@ -3,6 +3,7 @@ import assert from 'node:assert/strict'
 import * as fs from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
+import vm from 'node:vm'
 import { createHash } from 'node:crypto'
 import { execFileSync } from 'node:child_process'
 import { createEGDeskFileService, DEFAULT_SEARCH_IGNORES, lineDiff } from './egdesk-file-service.mjs'
@@ -263,7 +264,7 @@ const fakeDocument = () => {
   return document
 }
 const nextTurn = () => new Promise(resolve => setImmediate(resolve))
-function uiFixture(overrides = {}, viewOptions = {}) {
+function uiFixture(overrides = {}, viewOptions = {}, { document = fakeDocument(), createView = createEGDeskFileView } = {}) {
   let current = { id: 'draft', fileId: 'file', name: 'source.txt', head: 'h0', text: 'start', baseText: 'start', bufferRevision: 0, savedRevision: 0, sourceHash: 'a'.repeat(64), sourceRevision: 'source-0' }
   const writes = []
   const service = {
@@ -275,11 +276,59 @@ function uiFixture(overrides = {}, viewOptions = {}) {
     saveDraft: async () => ({ draft: { ...current, savedRevision: current.bufferRevision }, receipt: { savedRevision: current.bufferRevision } }),
     saveAs: async () => ({}), diffDraft: async () => ({ bufferRevision: current.bufferRevision, hunks: [] }), ...overrides,
   }
-  const document = fakeDocument()
-  const view = createEGDeskFileView({ document, service, ...viewOptions })
+  const view = createView({ document, service, ...viewOptions })
   document.body.append(view.element)
   return { view, document, writes }
 }
+
+test('FileView uses document timers without module-global timers, preserving debounce, IME, watcher, and close', async () => {
+  // Privileged Firefox modules have no timer globals. Exercise the real view
+  // and its listeners in that environment with a document-owned timer pair.
+  const source = await fs.readFile(new URL('../overlay/resources/EGDeskFileView.sys.mjs', import.meta.url), 'utf8')
+  const context = vm.createContext({})
+  assert.equal(vm.runInContext('typeof setTimeout + "/" + typeof clearTimeout', context), 'undefined/undefined')
+  const implementation = source.replace(/^export /gm, '').replaceAll('import.meta.url', JSON.stringify('file:///EGDeskFileView.sys.mjs'))
+  const createView = new vm.Script(`${implementation}\n;createEGDeskFileView`).runInContext(context)
+  const pending = new Map(), cleared = []
+  let nextId = 0
+  const clock = {
+    setTimeout(callback, delay) { assert.equal(this, clock); const id = ++nextId; pending.set(id, { callback, delay }); return id },
+    clearTimeout(id) { assert.equal(this, clock); cleared.push(id); pending.delete(id) },
+  }
+  const fireTimer = () => { const [id, item] = pending.entries().next().value; pending.delete(id); item.callback() }
+  const document = fakeDocument()
+  document.defaultView = clock
+  const { view, writes } = uiFixture({}, { fileChangeDelayMs: 73, parts: { runResult: RunResult } }, { document, createView })
+  await view.openRoot({ rootId: 'root', directoryId: 'root-dir', name: 'Project' })
+  await view.openFile('file')
+  const editor = view.element.querySelector('textarea')
+  editor.value = 'first'; editor.fire('input')
+  editor.value = 'latest'; editor.fire('input')
+  assert.deepEqual(cleared, [1])
+  assert.equal(pending.size, 1); assert.equal([...pending.values()][0].delay, 250)
+  fireTimer(); await nextTurn()
+  assert.deepEqual(writes, ['latest'])
+  assert.equal(view.snapshot().bufferRevision, 1)
+
+  editor.fire('compositionstart'); editor.value = '한글 조합'; editor.fire('input')
+  assert.equal(pending.size, 0); assert.deepEqual(writes, ['latest'])
+  editor.fire('compositionend')
+  assert.equal(pending.size, 1); assert.equal([...pending.values()][0].delay, 250)
+  fireTimer(); await nextTurn()
+  assert.deepEqual(writes, ['latest', '한글 조합'])
+  assert.equal(view.snapshot().bufferRevision, 2)
+
+  assert.equal(view.onFileChanged({ rootId: 'root', relativePath: 'source.txt', change: 'change' }), true)
+  assert.equal(view.onFileChanged({ rootId: 'root', relativePath: 'another.txt', change: 'change' }), true)
+  assert.equal(pending.size, 1); assert.equal([...pending.values()][0].delay, 73)
+  await view.flushFileChanges()
+  assert.equal(pending.size, 0, 'watcher timer is cancelled on an explicit refresh')
+
+  editor.value = 'last on close'; editor.fire('input')
+  assert.equal(await view.close(), true)
+  assert.equal(pending.size, 0, 'close cancels the pending debounce')
+  assert.deepEqual(writes, ['latest', '한글 조합', 'last on close'])
+})
 
 test('nested FileView click opens file without toggling ancestor directory', async () => {
   const { view, document } = uiFixture()
