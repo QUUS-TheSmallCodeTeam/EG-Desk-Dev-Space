@@ -83,6 +83,26 @@ function assertSubAgentRow(row) {
 // Importing this factory starts no service. Unit tests invoke the handler with
 // in-memory requests; only the explicit CLI below is allowed to listen.
 export function createQaFixtureTransport({ profile: profilePath, token, env = process.env }) {
+if (env.EGDESK_QA_FIRST_CODEX_AUTH_FIXTURE != null && !['0', '1'].includes(env.EGDESK_QA_FIRST_CODEX_AUTH_FIXTURE)) {
+  throw new Error('Invalid first Codex auth fixture gate');
+}
+const firstCodexAuthFixture = env.EGDESK_QA_FIRST_CODEX_AUTH_FIXTURE === '1';
+// This describes the first-auth fixture's design, not measured process or
+// network activity. OS isolation is supplied and checked by the caller.
+const firstCodexAuthBoundary = Object.freeze({ kind: 'first-codex-auth-fixture-boundary-v1',
+  auth: 'synthetic-fixture', chat: 'synthetic-fixture', providerIntegration: 'none-configured-for-first-auth',
+  providerTurnObservation: 'not-instrumented', nativeProcessSpawnObservation: 'not-instrumented' });
+if (firstCodexAuthFixture) {
+  if (env.EGDESK_QA_FIXTURE_TRANSPORT !== '1' || env.EGDESK_QA_REAL_TURN !== '0') {
+    throw new Error('First Codex auth fixture requires isolated transport and explicit real-turn zero');
+  }
+  const conflict = Object.entries(env).find(([key, value]) => key !== 'EGDESK_QA_FIRST_CODEX_AUTH_FIXTURE'
+    && (/^EGDESK_QA_.*_FIXTURE$/.test(key) || ['EGDESK_QA_STATE_FIXTURES',
+      'EGDESK_QA_CONTEXT_SOURCE_CHANGE_SEED', 'EGDESK_QA_BRIEFING_COMMENTS_SEED',
+      'EGDESK_QA_BROWSER_NEGATIVE', 'EGDESK_QA_BROWSER_RELAY'].includes(key))
+    && value != null && value !== '' && value !== '0');
+  if (conflict) throw new Error(`First Codex auth fixture is exclusive; conflicts with ${conflict[0]}`);
+}
 const config = qaBridgeConfig(env);
 const isolation = validateQaFixtureIsolation(profilePath, { env, requireFresh: true });
 const { port: PORT, host: HOST, origin } = config;
@@ -160,7 +180,8 @@ let seq = 0;
 let turnCounter = 0;
 let connection = claudeFixture || modelFreeFixture ? 'offline' : 'ready';
 let authLookupFails = false;
-let authLoggedIn = !claudeFixture && !modelFreeFixture;
+let authLoggedIn = !claudeFixture && !modelFreeFixture && !firstCodexAuthFixture;
+let authLoginId = null;
 let accountVariant = 'a';
 let codexContextEpoch = 0;
 let claudeAccountVariant = 'a';
@@ -180,6 +201,8 @@ const runs = new Map();
 const runOutputsFixture = runOutputsEnabled ? createChatRunOutputsFixture({ runs, envelope, env }) : null;
 const failedStarts = new Map();
 const observed = { sends: [], interrupts: [], resumes: [], approvals: [], userInputs: [], authWrites: [], events: [], reconnects: 0, replays: 0, heldResumes: 0, releasedResumes: 0, contextCaptureFailures: 0 };
+if (firstCodexAuthFixture) Object.assign(observed, { authBlockedSends: 0, authResults: [],
+  chatSendPostAttempts: { total: 0, signedOut: 0, signedIn: 0 } });
 if (claudeFixture) Object.assign(observed, { blockedContexts: [], captures: [], contextRefusals: [] });
 if (runOutputsFixture) observed.approvalPostAttempts = 0;
 let taskGateFixture = null, taskGateClosing = false, taskGateClosePromise = null;
@@ -644,6 +667,11 @@ function authSnapshot() {
   if (modelFreeFixture) return { isLoggedIn: false, loginInProgress: false,
     statusText: portableTransferFixture ? 'Portable transfer QA: no provider' : 'Project QA: no provider',
     requiresOpenaiAuth: true, accountId: null, authMode: null, accountEmail: null };
+  if (firstCodexAuthFixture) return { isLoggedIn: authLoggedIn, loginInProgress: !!authLoginId,
+    statusText: authLoggedIn ? 'Synthetic QA account' : authLoginId ? 'Synthetic QA login pending' : 'Synthetic QA login required',
+    requiresOpenaiAuth: !authLoggedIn, accountId: authLoggedIn ? 'chatgpt' : null,
+    authMode: authLoggedIn ? 'chatgpt' : null, accountEmail: authLoggedIn ? 'qa-first-codex@egdesk.invalid' : null,
+    authSessionId: authLoginId };
   return { isLoggedIn: authLoggedIn, loginInProgress: false, statusText: 'QA fixture only',
     requiresOpenaiAuth: !authLoggedIn, accountId: 'chatgpt', authMode: 'chatgpt',
     accountEmail: `qa-account-${accountVariant}@egdesk.invalid` };
@@ -1039,6 +1067,13 @@ function refuseClaudeContext(res, route) {
 const handler = async (req, res) => {
   try {
     const url = new URL(req.url, origin);
+    // Count at route entry, before origin, auth, body or scenario validation.
+    // No body or credential data is captured by this counter.
+    if (firstCodexAuthFixture && req.method === 'POST' && url.pathname === '/chat/send') {
+      const attempts = observed.chatSendPostAttempts;
+      attempts.total++;
+      attempts[authLoggedIn ? 'signedIn' : 'signedOut']++;
+    }
     if (url.origin !== origin || url.username || url.password
         || (req.headers.host && req.headers.host !== `${HOST}:${PORT}`)
         || (req.socket?.remoteAddress && !['127.0.0.1', '::ffff:127.0.0.1'].includes(req.socket.remoteAddress))) {
@@ -1138,6 +1173,7 @@ const handler = async (req, res) => {
       if (sourceStatusEnabled && url.pathname === '/context/sources') exactContextQuery(url);
       const paths = ['/health', '/v1/state', '/auth/status', '/events', '/chat/state', '/chat/resume',
         '/chat/send', '/chat/interrupt', '/chat/approval', '/chat/user-input', '/__qa/state', '/__qa/release',
+        ...(firstCodexAuthFixture ? ['/auth/start', '/auth/cancel', '/__qa/auth-result'] : []),
         '/__qa/auth-refresh', '/__qa/reconnect', '/__qa/replay', '/auth/signout', '/__qa/hold-resume',
         '/__qa/release-resume', '/__qa/history', '/__qa/delta', '/__qa/auth-diagnostics', '/__qa/runtime-ready',
         '/__qa/account-change', '/__qa/terminal-mode', '/terminal/spawn', '/terminal/read', '/terminal/kill', '/terminal/resize',
@@ -1147,6 +1183,7 @@ const handler = async (req, res) => {
     if (req.method === 'GET' && url.pathname === '/__qa/state') {
       if (req.headers['x-egdesk-qa-token'] !== token) return json(res, 403, { error: 'Fixture token required' });
       return json(res, 200, { fixture: true, profile, host: HOST, port: PORT, origin, artifactRoot, artifactPath,
+        ...(firstCodexAuthFixture ? { firstCodexAuthFixture: true, firstCodexAuthBoundary } : {}),
         ...(projectFileFixture ? { projectFileFixture: true, providerTurns: 0,
           nativePickerInvocations: 0, nativeProcessSpawns: 0 } : {}),
         ...(claudeFixture ? { claudeFixture: true, claudeReaderFixture, providerTurns: 0 } : {}),
@@ -1464,10 +1501,46 @@ const handler = async (req, res) => {
         capabilities: { auth: ['status'], chat: ['send', 'stream', 'interrupt', 'resume', 'user-input', 'subagent-status'] },
       });
     }
+    if (firstCodexAuthFixture && req.method === 'POST' && url.pathname === '/auth/start') {
+      const body = await bodyJson(req);
+      if (!body || typeof body !== 'object' || Array.isArray(body)
+          || Object.keys(body).some(key => key !== 'mode') || (body.mode != null && body.mode !== 'browser')) {
+        return json(res, 400, { started: false, code: 'INVALID_QA_AUTH_MODE', message: 'Only synthetic browser login is supported' });
+      }
+      if (authLoggedIn) return json(res, 200, { started: false, alreadyLoggedIn: true });
+      if (authLoginId) return json(res, 200, { started: false, loginInProgress: true, loginId: authLoginId, mode: 'browser' });
+      authLoginId = `qa-auth-${randomUUID()}`;
+      observed.authWrites.push({ route: '/auth/start', at: Date.now() });
+      broadcastFixtureEvent({ type: 'auth.status', v: 1, provider: 'codex', status: authSnapshot() });
+      return json(res, 200, { started: true, mode: 'browser', loginId: authLoginId, authUrl: null });
+    }
+    if (firstCodexAuthFixture && req.method === 'POST' && url.pathname === '/auth/cancel') {
+      if (!authLoginId) return json(res, 200, { status: 'notFound' });
+      authLoginId = null;
+      observed.authWrites.push({ route: '/auth/cancel', at: Date.now() });
+      broadcastFixtureEvent({ type: 'auth.status', v: 1, provider: 'codex', status: authSnapshot() });
+      return json(res, 200, { status: 'cancelled' });
+    }
+    if (firstCodexAuthFixture && req.method === 'POST' && url.pathname === '/__qa/auth-result') {
+      if (req.headers['x-egdesk-qa-token'] !== token) return json(res, 403, { error: 'Fixture token required' });
+      const body = await bodyJson(req);
+      if (!body || typeof body !== 'object' || Array.isArray(body)
+          || Object.keys(body).length !== 2 || !['success', 'cancel'].includes(body.outcome)
+          || typeof body.loginId !== 'string') {
+        return json(res, 400, { code: 'INVALID_QA_AUTH_RESULT', error: 'Exact synthetic auth result required' });
+      }
+      if (!authLoginId || body.loginId !== authLoginId) return json(res, 409, { code: 'STALE_QA_AUTH_SESSION', error: 'No matching pending synthetic login' });
+      authLoginId = null;
+      authLoggedIn = body.outcome === 'success';
+      observed.authResults.push({ outcome: body.outcome, at: Date.now() });
+      broadcastFixtureEvent({ type: 'auth.status', v: 1, provider: 'codex', status: authSnapshot() });
+      return json(res, 200, { ok: true, status: authSnapshot() });
+    }
     if (req.method === 'POST' && url.pathname === '/auth/signout') {
       // Explicit fixture implementation only. There is no real bridge/client to
       // forward to, and this module never imports a Codex runtime or credentials.
       authLoggedIn = false;
+      if (firstCodexAuthFixture) authLoginId = null;
       observed.authWrites.push({ route: '/auth/signout', at: Date.now() });
       const status = authSnapshot();
       broadcastFixtureEvent({ type: 'auth.status', v: 1, provider: 'codex', status });
@@ -1525,8 +1598,15 @@ const handler = async (req, res) => {
       return json(res, 200, snapshot);
     }
     if (req.method === 'POST' && url.pathname === '/chat/send') {
+      if (firstCodexAuthFixture && !authLoggedIn) {
+        observed.authBlockedSends++;
+        return json(res, 403, { accepted: false, code: 'AUTH_REQUIRED', error: 'Synthetic fixture account is signed out' });
+      }
       const body = await bodyJson(req);
       assertOrdinarySend(body);
+      if (firstCodexAuthFixture && body.profileEnabled !== false) {
+        return json(res, 400, { accepted: false, code: 'QA_PROFILE_DISABLED_REQUIRED', error: 'First Codex QA requires no Agent profile' });
+      }
       // Origin/Task real handlers already ran above. Ordinary synthetic modes
       // have no project authority: validate the exact observed-none identity,
       // never silently discard expectedRoomProject or accept a connected target.
@@ -1760,6 +1840,7 @@ const dispose = () => {
   return projectFileFixture?.dispose();
 };
 return { handler, dispose, ...(taskGateReady || originFileReady || sourceChangeReady ? { ready: taskGateReady || originFileReady || sourceChangeReady } : {}), info: { kind: 'egdesk-qa-fixture-ready', host: HOST, port: PORT,
+  ...(firstCodexAuthFixture ? { firstCodexAuthFixture: true, firstCodexAuthBoundary } : {}),
   ...(projectFileFixture ? projectFileFixture.info : {}),
   ...(claudeFixture ? { claudeFixture: true, claudeReaderFixture, providerTurns: 0 } : {}),
   ...(runOutputsFixture ? { runOutputsFixture: true, providerTurns: 0 } : {}),

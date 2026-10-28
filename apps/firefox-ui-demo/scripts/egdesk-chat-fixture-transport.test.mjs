@@ -25,7 +25,7 @@ import { assertPublishedBriefing, assertContextCaptureBatch, assertStoredAgentDe
 const TOKEN = 'unit-fixture-token-no-credentials';
 const FIXTURE_ENV = { EGDESK_QA_FIXTURE_TRANSPORT: '1', EGDESK_QA_FIXTURE_PORT: '49318' };
 
-function setup(t, { claude = false, reader = false, projectFile = false, runOutputs = false, portable = false, taskGate = false, originFile = false, stateFixtures = false, sourceChangeSeed = false, briefingComments = false, fixturePort = FIXTURE_ENV.EGDESK_QA_FIXTURE_PORT } = {}) {
+function setup(t, { claude = false, reader = false, projectFile = false, runOutputs = false, portable = false, taskGate = false, originFile = false, stateFixtures = false, sourceChangeSeed = false, briefingComments = false, firstAuth = false, fixturePort = FIXTURE_ENV.EGDESK_QA_FIXTURE_PORT } = {}) {
   const source = fs.mkdtempSync(path.join(canonicalTempRoot(), 'egdesk-loader-fixture-'));
   for (const name of LOADER_FILES) fs.writeFileSync(path.join(source, name), `unit fixture ${name}\n`);
   const { profile } = bootstrapQaProfile({ loaderSource: source });
@@ -39,6 +39,7 @@ function setup(t, { claude = false, reader = false, projectFile = false, runOutp
   const fetchBefore = globalThis.fetch;
   const eventSourceBefore = globalThis.EventSource;
   const fixtureEnv = { ...FIXTURE_ENV, EGDESK_QA_FIXTURE_PORT: String(fixturePort), ...(projectFile ? { EGDESK_QA_PROJECT_FILE_FIXTURE: '1', EGDESK_QA_REAL_TURN: '0' } : {}),
+    ...(firstAuth ? { EGDESK_QA_FIRST_CODEX_AUTH_FIXTURE: '1', EGDESK_QA_REAL_TURN: '0' } : {}),
     ...(stateFixtures || sourceChangeSeed || briefingComments ? { EGDESK_QA_STATE_FIXTURES: '1', EGDESK_QA_REAL_TURN: '0' } : {}),
     ...(sourceChangeSeed ? { EGDESK_QA_CONTEXT_SOURCE_CHANGE_SEED: '1' } : {}),
     ...(briefingComments ? { EGDESK_QA_BRIEFING_COMMENTS_SEED: '1' } : {}),
@@ -56,8 +57,8 @@ function setup(t, { claude = false, reader = false, projectFile = false, runOutp
   return transport;
 }
 
-async function request(handler, method, url, body = null, token = null, onResponse = () => {}, extraHeaders = {}) {
-  const req = Readable.from(body === null ? [] : [Buffer.from(JSON.stringify(body))]);
+async function request(handler, method, url, body = null, token = null, onResponse = () => {}, extraHeaders = {}, rawBody) {
+  const req = Readable.from(rawBody !== undefined ? [Buffer.from(rawBody)] : body === null ? [] : [Buffer.from(JSON.stringify(body))]);
   Object.assign(req, { method, url, headers: { ...(token ? { 'x-egdesk-qa-token': token } : {}), ...extraHeaders } });
   let status;
   let headers = {};
@@ -698,6 +699,194 @@ test('fixture rejects unknown bridge/auth/send/approval URLs without forwarding 
   fetchSpy.mock.restore();
   assert.equal(globalThis.fetch, fetchBefore);
   assert.equal(globalThis.EventSource, eventSourceBefore);
+});
+
+test('first Codex auth fixture is exclusive, opt-in and requires explicit real-turn zero', async t => {
+  const original = setup(t);
+  const create = extra => createQaFixtureTransport({ profile: original.info.profile, token: TOKEN,
+    env: { ...FIXTURE_ENV, ...extra } });
+  assert.throws(() => create({ EGDESK_QA_FIRST_CODEX_AUTH_FIXTURE: 'yes', EGDESK_QA_REAL_TURN: '0' }), /first Codex auth/i);
+  assert.throws(() => create({ EGDESK_QA_FIRST_CODEX_AUTH_FIXTURE: '1' }), /real-turn zero/i);
+  assert.throws(() => create({ EGDESK_QA_FIRST_CODEX_AUTH_FIXTURE: '1', EGDESK_QA_REAL_TURN: '1' }), /real-turn zero/i);
+  for (const conflicting of ['EGDESK_QA_CLAUDE_FIXTURE', 'EGDESK_QA_PROJECT_FILE_FIXTURE',
+    'EGDESK_QA_RUN_OUTPUTS_FIXTURE', 'EGDESK_QA_PORTABLE_TRANSFER_FIXTURE',
+    'EGDESK_QA_TASK_GATE_FIXTURE', 'EGDESK_QA_CHAT_ORIGIN_FILE_FIXTURE', 'EGDESK_QA_STATE_FIXTURES']) {
+    assert.throws(() => create({ EGDESK_QA_FIRST_CODEX_AUTH_FIXTURE: '1', EGDESK_QA_REAL_TURN: '0',
+      [conflicting]: '1' }), /exclus|separate|conflict/i, conflicting);
+  }
+  assert.equal((await request(original.handler, 'OPTIONS', '/auth/start')).status, 404);
+  assert.equal((await request(original.handler, 'POST', '/__qa/auth-result', { outcome: 'success' }, TOKEN)).status, 404);
+});
+
+test('first Codex auth fixture has pending, cancelled and completed sessions with no real provider', async t => {
+  const fetchSpy = t.mock.method(globalThis, 'fetch', () => { throw new Error('Fixture must not call a provider'); });
+  const listenSpy = t.mock.method(http.Server.prototype, 'listen', () => { throw new Error('Factory must not start a listener'); });
+  const { handler } = setup(t, { firstAuth: true });
+  const status = async () => (await request(handler, 'GET', '/auth/status')).body;
+  const state = async () => (await request(handler, 'GET', '/__qa/state', null, TOKEN)).body;
+  const send = { message: 'EGDESK_QA_TEXT_ONLY first-auth', clientThreadId: 'first-auth-room',
+    requestId: 'first-auth-request', profileEnabled: false };
+  assert.equal((await status()).isLoggedIn, false);
+  assert.equal((await status()).accountEmail, null);
+  assert.equal((await request(handler, 'POST', '/chat/send', send)).body.code, 'AUTH_REQUIRED');
+  assert.equal((await request(handler, 'POST', '/chat/send', {})).body.code, 'AUTH_REQUIRED');
+  assert.equal((await state()).observed.sends.length, 0);
+  assert.equal((await state()).observed.authBlockedSends, 2, 'even malformed pre-auth POSTs are counted');
+  assert.equal((await request(handler, 'OPTIONS', '/auth/start')).status, 204);
+  assert.equal((await request(handler, 'POST', '/auth/start', { mode: 'device' })).status, 400);
+
+  const first = await request(handler, 'POST', '/auth/start', {});
+  assert.equal(first.status, 200); assert.equal(first.body.started, true);
+  assert.match(first.body.loginId, /^qa-auth-/);
+  assert.equal(first.body.authUrl, null, 'never return a real provider or browser URL');
+  assert.equal((await status()).loginInProgress, true);
+  assert.equal((await request(handler, 'POST', '/auth/start', {})).body.loginInProgress, true);
+  assert.equal((await request(handler, 'POST', '/__qa/auth-result', { outcome: 'cancel', loginId: first.body.loginId })).status, 403);
+  assert.equal((await request(handler, 'POST', '/__qa/auth-result', { outcome: 'success', loginId: 'qa-auth-wrong' }, TOKEN)).status, 409);
+  assert.equal((await request(handler, 'POST', '/__qa/auth-result', { outcome: 'cancel', loginId: first.body.loginId }, TOKEN)).status, 200);
+  assert.equal((await status()).isLoggedIn, false); assert.equal((await status()).loginInProgress, false);
+  assert.equal((await request(handler, 'POST', '/__qa/auth-result', { outcome: 'success', loginId: first.body.loginId }, TOKEN)).status, 409);
+  assert.equal((await state()).observed.sends.length, 0);
+
+  const second = await request(handler, 'POST', '/auth/start', {});
+  assert.notEqual(second.body.loginId, first.body.loginId);
+  assert.equal((await request(handler, 'POST', '/__qa/auth-result', { outcome: 'success', loginId: second.body.loginId }, TOKEN)).status, 200);
+  assert.equal((await status()).isLoggedIn, true);
+  assert.match((await status()).accountEmail, /@egdesk\.invalid$/);
+  assert.equal((await state()).observed.sends.length, 0, 'auth completion must never submit the draft');
+  assert.equal((await request(handler, 'POST', '/chat/send', { ...send, profileEnabled: true })).body.code, 'QA_PROFILE_DISABLED_REQUIRED');
+  const accepted = await request(handler, 'POST', '/chat/send', send);
+  assert.equal(accepted.status, 202);
+  const final = await state();
+  assert.equal(Object.hasOwn(final, 'providerTurns'), false);
+  assert.equal(Object.hasOwn(final, 'nativeProcessSpawns'), false);
+  assert.deepEqual(final.firstCodexAuthBoundary, {
+    kind: 'first-codex-auth-fixture-boundary-v1', auth: 'synthetic-fixture', chat: 'synthetic-fixture',
+    providerIntegration: 'none-configured-for-first-auth', providerTurnObservation: 'not-instrumented',
+    nativeProcessSpawnObservation: 'not-instrumented',
+  });
+  assert.equal(final.observed.sends.length, 1);
+  assert.equal(final.observed.sends[0].profileEnabled, false);
+  assert.equal(final.observed.sends[0].clientThreadId, send.clientThreadId);
+  assert.deepEqual(final.observed.authWrites.map(item => item.route), ['/auth/start', '/auth/start']);
+  assert.equal(fetchSpy.mock.callCount(), 0); assert.equal(listenSpy.mock.callCount(), 0);
+});
+
+test('first Codex auth counts every send POST at entry, including malformed and rejected attempts', async t => {
+  const { handler } = setup(t, { firstAuth: true });
+  const state = async () => (await request(handler, 'GET', '/__qa/state', null, TOKEN)).body;
+  const send = { message: 'EGDESK_QA_TEXT_ONLY counted', clientThreadId: 'counted-room',
+    requestId: 'counted-request', profileEnabled: false };
+  assert.deepEqual((await state()).observed.chatSendPostAttempts, { total: 0, signedOut: 0, signedIn: 0 });
+  assert.equal((await request(handler, 'OPTIONS', '/chat/send')).status, 204);
+  assert.equal((await request(handler, 'POST', '/chat/send/unknown', {})).status, 404);
+  assert.equal((await request(handler, 'POST', '/chat/send', send, null, () => {}, { host: 'not-the-fixture' })).status, 400);
+  assert.equal((await request(handler, 'POST', '/chat/send', null, null, () => {}, {}, '{invalid json')).body.code, 'AUTH_REQUIRED');
+  assert.deepEqual((await state()).observed.chatSendPostAttempts, { total: 2, signedOut: 2, signedIn: 0 });
+  const auth = await request(handler, 'POST', '/auth/start', {});
+  assert.equal((await request(handler, 'POST', '/__qa/auth-result', { outcome: 'success', loginId: auth.body.loginId }, TOKEN)).status, 200);
+  assert.equal((await request(handler, 'POST', '/chat/send', null, null, () => {}, {}, '{invalid json')).status, 400);
+  assert.equal((await request(handler, 'POST', '/chat/send', {})).status, 400);
+  assert.equal((await request(handler, 'POST', '/chat/send', { ...send, profileEnabled: true })).body.code, 'QA_PROFILE_DISABLED_REQUIRED');
+  assert.equal((await request(handler, 'POST', '/chat/send', { ...send, message: 'not a QA scenario' })).status, 400);
+  let snapshot = await state();
+  assert.deepEqual(snapshot.observed.chatSendPostAttempts, { total: 6, signedOut: 2, signedIn: 4 });
+  assert.equal(snapshot.observed.sends.length, 0, 'rejected POSTs are not accepted sends');
+  assert.equal((await request(handler, 'POST', '/chat/send', send)).status, 202);
+  snapshot = await state();
+  assert.deepEqual(snapshot.observed.chatSendPostAttempts, { total: 7, signedOut: 2, signedIn: 5 });
+  assert.equal(snapshot.observed.sends.length, 1);
+});
+
+test('first Codex auth fixture cancellation endpoint invalidates its session without signing in', async t => {
+  const { handler } = setup(t, { firstAuth: true });
+  const first = (await request(handler, 'POST', '/auth/start', {})).body;
+  assert.equal((await request(handler, 'POST', '/auth/cancel', {})).body.status, 'cancelled');
+  assert.equal((await request(handler, 'GET', '/auth/status')).body.isLoggedIn, false);
+  assert.equal((await request(handler, 'GET', '/auth/status')).body.loginInProgress, false);
+  assert.equal((await request(handler, 'POST', '/__qa/auth-result', { outcome: 'success', loginId: first.loginId }, TOKEN)).status, 409);
+  assert.equal((await request(handler, 'POST', '/auth/cancel', {})).body.status, 'notFound');
+});
+
+test('first Codex auth fixture broadcasts each synthetic status without a verification URL', async t => {
+  const { handler } = setup(t, { firstAuth: true });
+  const frames = [], req = Object.assign(new EventEmitter(), { method: 'GET', url: '/events?chatProtocol=2', headers: {} });
+  const res = { writeHead(status) { assert.equal(status, 200); }, write(frame) { frames.push(frame); return true; } };
+  await handler(req, res); t.after(() => req.emit('close'));
+  const first = (await request(handler, 'POST', '/auth/start', {})).body;
+  await request(handler, 'POST', '/__qa/auth-result', { outcome: 'cancel', loginId: first.loginId }, TOKEN);
+  const second = (await request(handler, 'POST', '/auth/start', {})).body;
+  await request(handler, 'POST', '/__qa/auth-result', { outcome: 'success', loginId: second.loginId }, TOKEN);
+  const statuses = frames.filter(frame => frame.startsWith('event: codex\n'))
+    .map(frame => JSON.parse(frame.split('\ndata: ')[1]));
+  assert.deepEqual(statuses.map(frame => [frame.type, frame.status.isLoggedIn, frame.status.loginInProgress]), [
+    ['auth.status', false, true], ['auth.status', false, false],
+    ['auth.status', false, true], ['auth.status', true, false],
+  ]);
+  assert.ok(statuses.every(frame => frame.provider === 'codex' && !frame.status.authUrl && !frame.status.verificationUrl));
+});
+
+test('first Codex auth fixture serves loopback HTTP and SSE through an origin-restricted test fetch', async t => {
+  const server = http.createServer();
+  await new Promise((resolve, reject) => { server.once('error', reject); server.listen(0, '127.0.0.1', resolve); });
+  const port = server.address().port, base = `http://127.0.0.1:${port}`;
+  const { handler } = setup(t, { firstAuth: true, fixturePort: port });
+  server.on('request', handler);
+  const nativeFetch = globalThis.fetch;
+  const fetchSpy = t.mock.method(globalThis, 'fetch', (url, options) => {
+    assert.equal(new URL(url).origin, base, 'the only allowed network destination is this owned fixture');
+    return nativeFetch(url, options);
+  });
+  const controller = new AbortController();
+  t.after(async () => {
+    controller.abort();
+    await new Promise((resolve, reject) => server.close(error => error ? reject(error) : resolve()));
+  });
+  const call = async (route, { method = 'GET', body, control = false } = {}) => {
+    const response = await fetch(`${base}${route}`, { method, redirect: 'error',
+      headers: { Origin: 'chrome://browser', ...(body ? { 'Content-Type': 'application/json' } : {}),
+        ...(control ? { 'X-EGDESK-QA-Token': TOKEN } : {}) }, ...(body ? { body: JSON.stringify(body) } : {}) });
+    return { status: response.status, headers: response.headers, body: response.status === 204 ? null : await response.json() };
+  };
+  const preflight = await call('/auth/start', { method: 'OPTIONS' });
+  assert.equal(preflight.status, 204); assert.equal(preflight.headers.get('access-control-allow-origin'), '*');
+  const response = await fetch(`${base}/events?chatProtocol=2`, { signal: controller.signal });
+  assert.equal(response.status, 200);
+  const reader = response.body.getReader(), decoder = new TextDecoder();
+  let buffered = '';
+  const nextFrame = async () => {
+    while (!buffered.includes('\n\n')) {
+      let timer;
+      const chunk = await Promise.race([reader.read(), new Promise((_, reject) => {
+        timer = setTimeout(() => reject(new Error('Timed out waiting for fixture SSE')), 3000);
+      })]).finally(() => clearTimeout(timer));
+      assert.equal(chunk.done, false); buffered += decoder.decode(chunk.value, { stream: true });
+    }
+    const boundary = buffered.indexOf('\n\n'), frame = buffered.slice(0, boundary);
+    buffered = buffered.slice(boundary + 2);
+    return frame;
+  };
+  assert.match(await nextFrame(), /^event: ready/);
+  const start = (await call('/auth/start', { method: 'POST', body: {} })).body;
+  assert.equal(JSON.parse((await nextFrame()).split('\ndata: ')[1]).status.loginInProgress, true);
+  assert.equal((await call('/__qa/auth-result', { method: 'POST', body: { loginId: start.loginId, outcome: 'cancel' }, control: true })).status, 200);
+  assert.equal(JSON.parse((await nextFrame()).split('\ndata: ')[1]).status.isLoggedIn, false);
+  const retry = (await call('/auth/start', { method: 'POST', body: {} })).body;
+  assert.equal(JSON.parse((await nextFrame()).split('\ndata: ')[1]).status.loginInProgress, true);
+  assert.equal((await call('/__qa/auth-result', { method: 'POST', body: { loginId: retry.loginId, outcome: 'success' }, control: true })).status, 200);
+  assert.equal(JSON.parse((await nextFrame()).split('\ndata: ')[1]).status.isLoggedIn, true);
+  const before = (await call('/__qa/state', { control: true })).body;
+  assert.equal(before.observed.sends.length, 0);
+  assert.deepEqual(before.observed.chatSendPostAttempts, { total: 0, signedOut: 0, signedIn: 0 });
+  assert.equal(before.firstCodexAuthBoundary.providerTurnObservation, 'not-instrumented');
+  const sent = await call('/chat/send', { method: 'POST', body: { message: 'EGDESK_QA_TEXT_ONLY HTTP',
+    clientThreadId: 'http-first-room', requestId: 'http-first-request', profileEnabled: false } });
+  assert.equal(sent.status, 202);
+  const after = (await call('/__qa/state', { control: true })).body;
+  assert.equal(after.observed.sends.length, 1);
+  assert.deepEqual(after.observed.chatSendPostAttempts, { total: 1, signedOut: 0, signedIn: 1 });
+  assert.equal(after.firstCodexAuthBoundary.nativeProcessSpawnObservation, 'not-instrumented');
+  assert.ok(fetchSpy.mock.callCount() >= 8);
 });
 
 const claudeSend = async (handler, scenario, extra = {}) => request(handler, 'POST', '/chat/send', {
