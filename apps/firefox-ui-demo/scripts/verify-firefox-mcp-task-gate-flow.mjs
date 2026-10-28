@@ -8,7 +8,8 @@ import { chrome, loopbackJson, openChat, replaceFieldText, runUiFlow, sendFromCo
 import { assertQaFixtureManifest } from './egdesk-chat-qa-profile.mjs';
 import { parseCli, assertBeforeDeadline, observeGuard, waitFor, resizeHeadless, waitStableViewport } from './verify-firefox-mcp-headless-ui-regression.mjs';
 import { prepareRunOutputDesk } from './verify-firefox-mcp-chat-run-outputs-flow.mjs';
-import { taskGateFixtureEnabled, TASK_GATE_SEED_MESSAGE, TASK_GATE_STATE_ROUTE, TASK_GATE_CONTROL_ROUTE } from './egdesk-task-gate-fixture.mjs';
+import { taskGateFixtureEnabled, TASK_GATE_SEED_MESSAGE, TASK_GATE_STATE_ROUTE, TASK_GATE_CONTROL_ROUTE,
+  TASK_GATE_QA_LONG_QUESTION } from './egdesk-task-gate-fixture.mjs';
 
 // Proposed Harvey contract; no production selectors are added by this file.
 // Rows carry exact IDs/key as metadata, never as human-facing text. Choice is
@@ -17,7 +18,8 @@ import { taskGateFixtureEnabled, TASK_GATE_SEED_MESSAGE, TASK_GATE_STATE_ROUTE, 
 // The existing chat-task-list is keyboard-focusable for native scroll keys.
 export const TASK_GATE_SELECTORS = Object.freeze({ row: 'chat-task-condition', choice: 'chat-task-answer-choice',
   text: 'chat-task-answer-text', limit: 'chat-task-answer-limit', continue: 'chat-task-answer-continue',
-  cancel: 'chat-task-answer-cancel', notice: 'chat-task-error', question: 'chat-task-question', next: 'chat-task-answer-next' });
+  cancel: 'chat-task-answer-cancel', notice: 'chat-task-error', question: 'chat-task-question',
+  errorQuestion: 'chat-task-error-question', next: 'chat-task-answer-next' });
 const testid = value => `[data-testid=${JSON.stringify(value)}]`;
 const hash = value => createHash('sha256').update(value).digest('hex');
 const normalized = value => value.normalize('NFC').replace(/\r\n?/g, '\n').trim();
@@ -476,6 +478,17 @@ export function assertTaskGateEvidence(evidence) {
   assertDraftRetained(evidence.rejected.ui, evidence.rejected.refreshed, { notice: true });
   assertTaskGateFailurePaint(evidence.errorPaint?.initial, evidence.rejected.typed, evidence.rejected.ui, evidence.rejected.identity, evidence.threadId);
   assertTaskGateFailurePaint(evidence.errorPaint?.beforeCapture, evidence.rejected.typed, evidence.rejected.refreshed, evidence.rejected.identity, evidence.threadId);
+  if (evidence.titleKeyboard) {
+    const title = evidence.titleKeyboard;
+    assert.equal(title.identity.label, TASK_GATE_QA_LONG_QUESTION);
+    assert.deepEqual(title.identity, evidence.rejected.identity);
+    assert.ok(evidence.errorPaint.firstScreenshot && title.focusedScreenshot && title.endScreenshot);
+    assert.ok(title.titleFocused?.focused && title.titleFocused.focusVisible && taskGateTitleAtEnd(title.titleEnd));
+    assert.ok(title.titleScroll?.focused && title.titleScroll.moved && title.titleEnd.scrollTop > title.titleBefore.scrollTop);
+    assertTaskGateTitleEndPaint(title.endPaint, title.identity);
+    const noPost = evidence.noPosts.find(item => item.stage === 'title-keyboard');
+    assert.ok(noPost); assertNoContinue(noPost.before, noPost.after, 'title-keyboard');
+  }
   assertOneAnswer(evidence.text.before, evidence.text.after, evidence.text.identity);
   assertCodePointLimit(evidence.text.ui, evidence.text.value, evidence.text.identity.response.maxLength);
   assert.ok(evidence.text.after.persisted.answers.some(row => row.graphId === evidence.text.identity.graphId
@@ -729,24 +742,55 @@ export async function observeTaskGateFailurePaint(harness, identity) {
       }
       range.detach?.();
     }
-    const button = key => {
-      const node = one(key), r = node?.getBoundingClientRect(), paint = bounds(node); let hits = 0;
+    // The title may be longer than its bounded scroller. Verify the exact text
+    // and at least one actually painted line; do not pretend hidden lines are visible.
+    const questionTitle = one('errorQuestion'), questionBounds = bounds(questionTitle);
+    const questionParentBounds = bounds(questionTitle?.parentElement), questionRect = questionTitle?.getBoundingClientRect();
+    const questionFragments = [];
+    if (questionTitle) {
+      const range = document.createRange(); range.selectNodeContents(questionTitle);
+      for (const r of range.getClientRects()) {
+        if (r.width <= 0 || r.height <= 0) continue;
+        const visible = inside(r) && !clipped(r, questionBounds.clip);
+        const hits = visible ? [.2, .5, .8].map(x => {
+          const hit = document.elementFromPoint(r.left + r.width * x, r.top + r.height * .5);
+          return { owned: !!hit && (hit === questionTitle || questionTitle.contains(hit)) };
+        }) : [];
+        questionFragments.push({ rect: rect(r), visible, hits, hitCount: hits.filter(hit => hit.owned).length });
+      }
+      range.detach?.();
+    }
+    const target = (node, count, selector) => {
+      const r = node?.getBoundingClientRect(), paint = bounds(node), ancestorPaint = bounds(node?.parentElement); let hits = 0;
       if (r) for (const x of [.2, .5, .8]) for (const y of [.2, .5, .8]) {
         const hit = document.elementFromPoint(r.left + r.width * x, r.top + r.height * y);
         if (hit === node || node.contains(hit)) hits++;
       }
-      return { selector: `${selector} [data-testid=${JSON.stringify(names[key])}]`, count: nodes(key).length,
+      return { selector, count,
         rect: rect(r), visible: paint.styleVisible && !!r && r.width > 0 && r.height > 0,
-        inside: inside(r), clipped: clipped(r, paint.clip), hits,
+        // A control's own overflow clips its contents, not its border box.
+        // Check the full control against ancestor clips only.
+        inside: inside(r), clipped: clipped(r, ancestorPaint.clip), hits,
         disabled: !node || node.disabled === true || node.getAttribute('aria-disabled') === 'true' };
     };
+    const button = key => target(one(key), nodes(key).length, `${selector} [data-testid=${JSON.stringify(names[key])}]`);
+    const main = row?.closest('.egd-codex-chat-main');
+    const composers = [...(main?.querySelectorAll('[data-testid="chat-composer"]') || [])];
+    const composer = composers.length === 1 ? composers[0] : null;
     const checked = row?.querySelector(`[data-testid="${names.choice}"]:checked`);
     return { ui: { count: rows.length, threadId: window.__egdesk?.state?.codex?.activeThreadId || null,
       graphId: row?.dataset.graphId, taskId: row?.dataset.taskId, gateId: row?.dataset.gateId, responseKey: row?.dataset.responseKey,
       question: one('question')?.textContent || '', next: one('next')?.textContent || '',
       value: one('text')?.value ?? '', choice: checked?.dataset.choiceId ?? null, notice: notice?.textContent || '' },
-      notice: { count: nodes('notice').length, text: (notice?.textContent || '').trim(), ...noticeBounds, fragments },
-      continue: button('continue'), cancel: button('cancel') };
+      notice: { count: nodes('notice').length, text: (notice?.textContent || '').trim(),
+        accessibleLabel: notice?.getAttribute('aria-label') || '', ...noticeBounds, fragments },
+      errorQuestion: { count: nodes('errorQuestion').length, text: (questionTitle?.textContent || '').trim(),
+        title: questionTitle?.getAttribute('title') || '', tabIndex: questionTitle?.getAttribute('tabindex'),
+        styleVisible: questionBounds.styleVisible, rect: rect(questionRect), inside: inside(questionRect),
+        clipped: clipped(questionRect, questionParentBounds.clip), fragments: questionFragments,
+        clientHeight: questionTitle?.clientHeight ?? null, scrollHeight: questionTitle?.scrollHeight ?? null },
+      text: button('text'), continue: button('continue'), cancel: button('cancel'),
+      composer: { ...target(composer, composers.length, '[data-testid="chat-composer"]'), threadId: composer?.dataset.threadId || null } };
   }, { selector, names: TASK_GATE_SELECTORS });
 }
 
@@ -757,13 +801,43 @@ export function assertTaskGateFailurePaint(proof, typed, current, identity, thre
   assertDraftRetained(current, proof.ui, { notice: true });
   assert.ok(taskGateLimitReadable(proof.notice), 'FULL error text must be painted, unclipped and unoccluded without scrolling');
   assert.equal(proof.notice.text, current.notice.trim(), 'all current error text, not a shortened substitute');
-  for (const key of ['continue', 'cancel']) {
+  assert.equal(proof.notice.accessibleLabel, `${identity.label.trim()} · ${current.notice.trim()}`,
+    'the alert associates the original question and full error');
+  const question = proof.errorQuestion;
+  assert.ok(question?.count === 1 && question.styleVisible && question.inside && !question.clipped,
+    'the question title beside the error must be visible and unclipped');
+  assert.equal(question.text, identity.label.trim(), 'the displayed title is the actual question');
+  assert.equal(question.title, identity.label.trim(), 'the full question is available on the bounded title');
+  assert.equal(question.tabIndex, '0', 'the full title can be reached and scrolled with the keyboard');
+  assert.ok(question.fragments?.some(part => part.visible && part.hitCount === 3
+    && part.hits.length === 3 && part.hits.every(hit => hit.owned)),
+  'at least one real title line must be painted and unoccluded');
+  for (const key of ['text', 'continue', 'cancel']) {
     const target = proof[key];
     assert.equal(target?.selector, `${taskGateRowSelector(identity)} ${testid(TASK_GATE_SELECTORS[key])}`);
     assert.ok(target.count === 1 && target.visible === true && target.inside === true && target.clipped === false
-      && target.hits === 9 && target.disabled === false, `${key}: FULL enabled button must be painted and hit at all nine points without scrolling`);
+      && target.hits === 9 && target.disabled === false, `${key}: FULL enabled control must be painted and hit at all nine points without scrolling`);
   }
+  assert.equal(proof.composer?.selector, '[data-testid="chat-composer"]');
+  assert.ok(proof.composer.count === 1 && proof.composer.visible && proof.composer.inside && !proof.composer.clipped
+    && proof.composer.hits === 9 && !proof.composer.disabled && proof.composer.threadId === threadId,
+  'the same room composer must remain fully reachable in the very same unscrolled paint');
   return true;
+}
+
+export function assertTaskGateTitleEndPaint(proof, identity) {
+  const question = proof?.errorQuestion;
+  assert.equal(question?.text, identity.label.trim(), 'the title is the original full question');
+  const last = question.fragments?.at(-1);
+  assert.ok(last?.visible === true && last.hitCount === 3 && last.hits.length === 3 && last.hits.every(hit => hit.owned),
+    'the final actual title line must be fully painted and unoccluded');
+  return true;
+}
+
+export function taskGateTitleAtEnd(title) {
+  return title?.focused === true && [title.scrollTop, title.scrollHeight, title.clientHeight].every(Number.isFinite)
+    && title.scrollHeight > title.clientHeight + 1 && title.scrollTop >= 0
+    && title.scrollHeight - title.clientHeight - title.scrollTop <= 1;
 }
 
 export async function readTaskGateLimit(harness, identity, deadlineMs,
@@ -943,6 +1017,9 @@ export async function runTaskGateFlow({ harness, result, check, capture, defer }
   const rejectedUi = await waitFor(harness, () => read(text), value => !!value.notice, deadlineMs);
   evidence.errorPaint.initial = await observeTaskGateFailurePaint(harness, text);
   assertTaskGateFailurePaint(evidence.errorPaint.initial, typed, rejectedUi, text, local.id);
+  if (env.EGDESK_QA_TASK_GATE_LONG_TITLE === '1') {
+    evidence.errorPaint.firstScreenshot = await capture('task-gate-first-error-all-visible');
+  }
   const beforeRefresh = await state(); await refresh(text);
   const refreshed = await read(text), afterRefresh = await state();
   evidence.noPosts.push({ stage: 'same-question-refresh', before: beforeRefresh, after: afterRefresh });
@@ -957,6 +1034,48 @@ export async function runTaskGateFlow({ harness, result, check, capture, defer }
     screenshot: await capture('task-gate-same-question-text-failure'), visualReview: 'pending' });
   // Change identity while an actual failed draft and notice are still present,
   // not after a successful answer has already cleared them.
+  if (env.EGDESK_QA_TASK_GATE_LONG_TITLE === '1') {
+    // All first-error assertions and capture above precede any title navigation.
+    const titleSelector = field(text, 'errorQuestion');
+    const readTitle = () => chrome(harness, selector => {
+      const nodes = [...document.querySelectorAll(selector)], node = nodes.length === 1 ? nodes[0] : null;
+      const css = node && getComputedStyle(node);
+      return { count: nodes.length, text: node?.textContent || '', focused: document.activeElement === node,
+        focusVisible: !!node?.matches(':focus-visible'), outlineStyle: css?.outlineStyle || '',
+        outlineWidth: css?.outlineWidth || '', outlineColor: css?.outlineColor || '',
+        scrollTop: node?.scrollTop ?? null, scrollHeight: node?.scrollHeight ?? null, clientHeight: node?.clientHeight ?? null };
+    }, titleSelector);
+    const titleBefore = await readTitle(), before = await state();
+    evidence.titleKeyboard = { identity: text, titleBefore };
+    assert.equal(text.label, TASK_GATE_QA_LONG_QUESTION);
+    assert.equal(titleBefore.text, text.label);
+    assert.ok(titleBefore.scrollHeight > titleBefore.clientHeight + 1, 'the actual question overflows its bounded title');
+    await ready(field(text, 'continue')); await press('shift+Tab', field(text, 'continue'));
+    const titleFocused = await readTitle();
+    evidence.titleKeyboard.titleFocused = titleFocused;
+    evidence.titleKeyboard.focusedScreenshot = await capture('task-gate-long-question-focus');
+    assert.ok(titleFocused.focused && titleFocused.focusVisible, 'native keyboard reaches the visibly focused title');
+    const color = titleFocused.outlineColor.replaceAll(' ', '');
+    assert.ok(titleFocused.outlineStyle !== 'none' && parseFloat(titleFocused.outlineWidth) > 0
+      && color !== 'transparent' && color !== 'rgba(0,0,0,0)', 'the focus ring is painted');
+    assertBeforeDeadline(deadlineMs);
+    const titleScroll = await harness.scrollWithKey(titleSelector, 'End');
+    assert.ok(titleScroll.focused && titleScroll.moved, 'native End actually scrolls the focused title');
+    evidence.titleKeyboard.titleScroll = titleScroll;
+    let previousTop = null;
+    const titleEnd = await waitFor(harness, () => readTitle(), value => {
+      const stable = taskGateTitleAtEnd(value) && previousTop !== null && Math.abs(value.scrollTop - previousTop) <= .25;
+      previousTop = value?.scrollTop; return stable;
+    }, deadlineMs, { timeoutMs: 3000, intervalMs: 80 });
+    evidence.titleKeyboard.titleEnd = titleEnd;
+    evidence.titleKeyboard.endPaint = await observeTaskGateFailurePaint(harness, text);
+    evidence.titleKeyboard.endScreenshot = await capture('task-gate-long-question-end');
+    assert.ok(titleEnd.scrollTop > titleBefore.scrollTop && taskGateTitleAtEnd(titleEnd));
+    assertTaskGateTitleEndPaint(evidence.titleKeyboard.endPaint, text);
+    assertDraftRetained(rejectedUi, await read(text), { notice: true });
+    const after = await state(); assertNoContinue(before, after, 'title-keyboard');
+    evidence.noPosts.push({ stage: 'title-keyboard', before, after });
+  }
   evidence.previousQuestion = await read(text);
   await control('next-question'); fixture = await state();
   const next = identify(fixture.plans[1], fixture.plans[1].questions[0]);

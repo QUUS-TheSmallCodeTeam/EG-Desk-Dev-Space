@@ -17,6 +17,12 @@ import { createPrivateQaTempDirectory, isOwnedAndPrivate } from './egdesk-qa-pla
 export const TASK_GATE_SEED_MESSAGE = 'EGDESK_QA_TASK_GATE';
 export const TASK_GATE_STATE_ROUTE = '/__qa/task-gate/state';
 export const TASK_GATE_CONTROL_ROUTE = '/__qa/task-gate/control';
+// Explicit fixture-only option: this 200-character question goes through the
+// real synthetic plan/graph path, never into the product DOM directly.
+const questionBeginning = '전달할 메모의 내용을 검토하고 확인해 주세요. ';
+const questionEnding = '질문의 마지막 부분까지 확인해 주세요.';
+export const TASK_GATE_QA_LONG_QUESTION = questionBeginning.repeat(20).slice(0, 200 - questionEnding.length) + questionEnding;
+assert.equal(TASK_GATE_QA_LONG_QUESTION.length, 200);
 const hash = value => createHash('sha256').update(value).digest('hex');
 const failure = (code, message, httpStatus = 403) => Object.assign(new Error(message), { code, httpStatus });
 const bounded = (values, item, max = 512) => { if (values.length >= max) throw failure('QA_TRACE_LIMIT', 'Bounded QA evidence is full', 429); values.push(item); return item; };
@@ -24,6 +30,11 @@ const deferred = () => { let resolve; const promise = new Promise(yes => { resol
 
 export function taskGateFixtureEnabled(env = process.env) {
   const flag = env.EGDESK_QA_TASK_GATE_FIXTURE;
+  const longTitle = env.EGDESK_QA_TASK_GATE_LONG_TITLE;
+  if (longTitle != null && longTitle !== '0' && longTitle !== '1') {
+    throw failure('QA_TASK_GATE_OPT_IN', 'Long-title QA must be explicitly 0 or 1');
+  }
+  if (longTitle === '1' && flag !== '1') throw failure('QA_TASK_GATE_OPT_IN', 'Long-title QA requires the Task fixture');
   if (flag == null || flag === '0') return false;
   if (flag !== '1' || env.EGDESK_QA_FIXTURE_TRANSPORT !== '1' || env.EGDESK_QA_REAL_TURN !== '0') {
     throw failure('QA_TASK_GATE_OPT_IN', 'Task gate QA requires explicit fixture transport and REAL_TURN=0');
@@ -41,7 +52,8 @@ function configuration(env) {
   const port = env.EGDESK_QA_FIXTURE_PORT;
   assert.ok(typeof port === 'string' && /^[1-9][0-9]{0,4}$/.test(port) && Number(port) <= 65535 && Number(port) !== 39218,
     'An explicit nonproduction fixture port is required (this module never listens)');
-  return { host: '127.0.0.1', port: Number(port), origin: `http://127.0.0.1:${port}` };
+  return { host: '127.0.0.1', port: Number(port), origin: `http://127.0.0.1:${port}`,
+    longTitle: env.EGDESK_QA_TASK_GATE_LONG_TITLE === '1' };
 }
 
 const answerTrace = answer => answer && typeof answer === 'object' && !Array.isArray(answer)
@@ -165,7 +177,7 @@ export async function createTaskGateFixture({ profile, token, env = process.env,
         gates: [{ gateId: 'how', kind: 'userAction', label: '어떻게 보낼까요?', response: { kind: 'choice',
           options: [{ id: 'email', label: '메일로' }, { id: 'kakao', label: '카카오톡으로' }] } }] },
       { taskId: 'note', title: '메모 반영', instructions: 'Use the written answer in the original QA conversation.', dependsOn: ['send'],
-        gates: [{ gateId: 'memo', kind: 'userAction', label: '덧붙일 말', response: { kind: 'text', maxLength: 20 } }] }];
+        gates: [{ gateId: 'memo', kind: 'userAction', label: config.longTitle ? TASK_GATE_QA_LONG_QUESTION : '덧붙일 말', response: { kind: 'text', maxLength: 20 } }] }];
     const run = chat.snapshot(original.conversationId).runs.find(value => value.runId === original.runId);
     const plan = await runtime.plans.propose({ run, args: { title: next ? '새 질문 확인' : '질문 답변 확인', tasks } });
     const approved = await runtime.plans.approve(plan.planId);

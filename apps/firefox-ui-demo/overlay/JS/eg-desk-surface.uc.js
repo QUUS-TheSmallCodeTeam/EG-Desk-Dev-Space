@@ -765,30 +765,114 @@
   function createChatTaskAnswerReveal(body, { schedule = requestAnimationFrame } = {}) {
     let disposed = false, hadList = false, restoring = false, interaction = 0, pending = null;
     let reservedSpace = null;
-    let previous = new Map(), textareas = new Map();
+    let previous = new Map(), textareas = new Map(), errorTitles = new Map();
     const submissions = new Map();
-    const events = ['pointerdown', 'wheel', 'keydown', 'input', 'compositionstart', 'focusin'];
-    const cancel = event => { if (restoring && event.type === 'focusin') return; interaction++; pending = null; };
+    const events = ['pointerdown', 'pointercancel', 'wheel', 'keydown', 'beforeinput', 'paste', 'input', 'change', 'compositionstart', 'focusin'];
+    let pressedEditor = null;
+    const editorFor = target => target?.closest?.('[data-testid="chat-composer"], [data-testid="chat-task-answer-text"], [data-testid="chat-task-answer-choice"]');
+    const pointerEditorFor = target => editorFor(target)
+      || target?.closest?.('label.egd-task-answer-choice')?.querySelector?.('[data-testid="chat-task-answer-choice"]');
+    const local = target => !!target && !!body.contains?.(target);
+    const cancel = event => {
+      if (restoring && event.type === 'focusin') return;
+      interaction++; pending = null;
+      const editor = editorFor(event.target), own = local(editor);
+      if (event.type === 'pointerdown') {
+        const pointerEditor = pointerEditorFor(event.target);
+        pressedEditor = local(pointerEditor) ? pointerEditor : null; return;
+      }
+      if (event.type === 'pointercancel') {
+        const cancelled = pointerEditorFor(event.target);
+        if (pressedEditor && cancelled === pressedEditor && local(pressedEditor)
+            && body.ownerDocument?.activeElement === pressedEditor) {
+          endReservation('pointercancel', true);
+        }
+        pressedEditor = null; return;
+      }
+      if (!reservedSpace || !own) return;
+      // Keyboard focus restores the ordinary layout before editing. For a
+      // pointer focus, wait for the same click so the focused control cannot
+      // move out from under the still-depressed pointer. Input/IME/paste are
+      // bounded fallbacks if no click is delivered.
+      if (event.type === 'focusin' && editor !== pressedEditor
+          || ['beforeinput', 'paste', 'input', 'change', 'compositionstart'].includes(event.type)) {
+        endReservation(event.type, event.isComposing === true);
+        pressedEditor = null;
+      }
+    };
     const eventHost = body.ownerDocument?.addEventListener ? body.ownerDocument : body;
     const listening = typeof eventHost.addEventListener === 'function';
     if (listening) for (const name of events) eventHost.addEventListener(name, cancel, true);
     const listNow = () => body.querySelector('[data-testid="chat-task-list"]');
     const rowsOf = list => [...(list?.querySelectorAll('[data-testid="chat-task-condition"]') || [])];
     const inputsOf = list => [...(list?.querySelectorAll('[data-testid="chat-task-answer-text"]') || [])];
+    const errorTitlesOf = list => [...(list?.querySelectorAll('[data-testid="chat-task-error-question"]') || [])];
     const keyOf = (list, row) => JSON.stringify([list.dataset.threadId, row._taskAnswerReveal?.key]);
+    function endReservation(eventType, composing = false) {
+      if (!reservedSpace) return;
+      const list = listNow(), board = list?.closest?.('.egd-task-board'), pane = list?.closest?.('.egd-codex-conversation-pane');
+      reservedSpace = null;
+      if (!list || !board || !pane) return;
+      const doc = body.ownerDocument, active = doc?.activeElement;
+      const editable = editorFor(active), preserve = editable === active && local(active);
+      const view = preserve ? { value: active.value, start: active.selectionStart, end: active.selectionEnd,
+        direction: active.selectionDirection, top: active.scrollTop, left: active.scrollLeft } : null;
+      const listTop = list.scrollTop, listLeft = list.scrollLeft;
+      const log = pane.querySelector?.('.egd-codex-messages'), logRect = log?.getBoundingClientRect?.();
+      const logTop = log?.scrollTop, logLeft = log?.scrollLeft;
+      const logScale = logRect?.height / (log?.offsetHeight || log?.clientHeight);
+      const anchor = log && logRect ? [...(log.querySelectorAll?.('[data-testid="chat-message"]') || [])]
+        .find(node => node.getBoundingClientRect().bottom > logRect.top) : null;
+      const offset = anchor ? anchor.getBoundingClientRect().top - logRect.top : null;
+      delete board.dataset.answerSpace; board.style?.removeProperty?.('--egd-task-answer-height');
+      delete pane.dataset.taskAnswerSpace; delete pane.dataset.taskAnswerCompact;
+      pane.style?.removeProperty?.('--egd-task-answer-log-min'); delete pane._taskAnswerSpace;
+      // Resolve this gesture's reflow now, not in an SSE callback or frame.
+      list.getBoundingClientRect();
+      if (listNow() === list && list.isConnected) {
+        if (list.scrollTop !== listTop) list.scrollTop = listTop;
+        if (list.scrollLeft !== listLeft) list.scrollLeft = listLeft;
+      }
+      if (log && Number.isFinite(logScale) && logScale > 0) {
+        log.scrollTop = anchor ? log.scrollTop + (anchor.getBoundingClientRect().top - log.getBoundingClientRect().top - offset) / logScale : logTop;
+        log.scrollLeft = logLeft;
+      }
+      if (view && active === doc.activeElement && active.isConnected && active.value === view.value) {
+        if (!composing && eventType !== 'compositionstart' && Number.isInteger(view.start) && Number.isInteger(view.end)
+            && (active.selectionStart !== view.start || active.selectionEnd !== view.end || active.selectionDirection !== view.direction)) {
+          try { active.setSelectionRange(view.start, view.end, view.direction); } catch {}
+        }
+        active.scrollTop = view.top; active.scrollLeft = view.left;
+      }
+    }
     const submittedHere = event => {
+      const editor = pointerEditorFor(event.target);
+      const action = event.target?.closest?.('[data-testid="chat-task-answer-continue"], [data-testid="chat-task-answer-cancel"], [data-testid="chat-attach-open"], [data-testid="chat-project-open"]');
+      if (reservedSpace && (local(editor) && editor === pressedEditor || local(action))) endReservation('click');
+      pressedEditor = null;
       const control = event.target?.closest?.('[data-testid="chat-task-answer-continue"]');
       const row = control?.closest?.('[data-testid="chat-task-condition"]'), list = listNow();
       if (!control || control.disabled || !row?._taskAnswerReveal?.current() || !list?.contains(row)) return;
       submissions.set(keyOf(list, row), interaction);
     };
     body.addEventListener?.('click', submittedHere, true);
-    const formParts = row => ['.egd-task-answer-fields', '[data-testid="chat-task-error"]', '.egd-task-answer-actions']
+    const formParts = row => ['.egd-task-answer-fields', '[data-testid="chat-task-error-summary"]', '.egd-task-answer-actions']
       .map(selector => row.querySelector(selector));
+    const compactRow = pane => {
+      const main = pane?.parentElement, footer = main?.querySelector?.('.egd-codex-footer');
+      const inputRow = footer?.querySelector?.('.egd-codex-input-row');
+      const composer = inputRow?.querySelector?.('[data-testid="chat-composer"]');
+      return inputRow?.clientWidth >= 330 && composer?.value === ''
+        && inputRow.querySelector('[data-testid="chat-project-target"]')
+        && !inputRow.querySelector('[data-testid="chat-attachment"], [data-testid="chat-briefing-input"]')
+        ? { main, footer } : null;
+    };
     const applySpace = (list, space) => {
       if (!Number.isFinite(space.height)) return;
       const board = list.closest?.('.egd-task-board'), pane = list.closest?.('.egd-codex-conversation-pane');
       if (!board || !pane) return;
+      if (space.compact && compactRow(pane)) pane.dataset.taskAnswerCompact = 'true';
+      else { delete pane.dataset.taskAnswerCompact; space.compact = false; }
       board.dataset.answerSpace = 'true';
       board.style.setProperty('--egd-task-answer-height', `${space.height}px`);
       pane.dataset.taskAnswerSpace = 'true';
@@ -809,18 +893,33 @@
       if (required <= list.clientHeight) return true;
       const logStyle = css.call(body.ownerDocument.defaultView, log);
       const logFloor = Math.ceil(Math.max(20, parseFloat(logStyle.lineHeight) || (parseFloat(logStyle.fontSize) || 13) * 1.5));
-      // Only borrow the existing transcript viewport. The footer, composer,
-      // header, status and summary keep their sizes; at least one log line stays.
-      const available = Math.floor(list.clientHeight + Math.max(0, log.clientHeight - logFloor));
-      const height = Math.min(required, available);
-      if (height <= list.clientHeight) return true;
+      // Capture the transcript anchor before any temporary layout change.
       const logRect = log.getBoundingClientRect(), top = log.scrollTop, left = log.scrollLeft;
       const logScale = logRect.height / (log.offsetHeight || log.clientHeight);
       if (!Number.isFinite(logScale) || logScale <= 0) return false;
       const anchor = [...(log.querySelectorAll?.('[data-testid="chat-message"]') || [])]
         .find(node => node.getBoundingClientRect().bottom > logRect.top);
       const offset = anchor ? anchor.getBoundingClientRect().top - logRect.top : null;
-      reservedSpace = { ...reservedSpace, height: height + list.offsetHeight - list.clientHeight, logFloor,
+      let available = Math.floor(list.clientHeight + Math.max(0, log.clientHeight - logFloor));
+      let compact = false;
+      // On a short Chat with an empty composer and no attached inputs, the
+      // existing project/attachment controls can share its row. Measure the
+      // actual released footer space: do not assume that CSS had an effect.
+      const composerRow = compactRow(pane);
+      if (required > available && composerRow?.main?.dataset?.compactComposer === 'true') {
+        const oldHeight = composerRow.footer.getBoundingClientRect().height;
+        pane.dataset.taskAnswerCompact = 'true';
+        const newHeight = composerRow.footer.getBoundingClientRect().height;
+        const compactAvailable = Math.floor(list.clientHeight + Math.max(0, log.clientHeight - logFloor));
+        if (newHeight < oldHeight && compactAvailable > available) { compact = true; available = compactAvailable; }
+        else delete pane.dataset.taskAnswerCompact;
+      }
+      // Header, status, summary, input and its actions remain; at least one
+      // transcript line stays. Attached inputs or a composer draft are not
+      // compacted to manufacture room.
+      const height = Math.min(required, available);
+      if (height <= list.clientHeight && !compact) return true;
+      reservedSpace = { ...reservedSpace, compact, height: Math.max(height, list.clientHeight) + list.offsetHeight - list.clientHeight, logFloor,
         boardHeight: board.offsetHeight,
         logReserve: 80 + ['paddingTop', 'paddingBottom', 'borderTopWidth', 'borderBottomWidth']
           .reduce((total, name) => total + (parseFloat(logStyle[name]) || 0), 0) };
@@ -887,6 +986,7 @@
           start: input.selectionStart, end: input.selectionEnd, direction: input.selectionDirection,
           top: input.scrollTop, left: input.scrollLeft,
         }]));
+        errorTitles = new Map(errorTitlesOf(listNow()).map(title => [title.dataset.focusKey, { top: title.scrollTop, left: title.scrollLeft }]));
       },
       afterRender() {
         if (disposed) return;
@@ -898,6 +998,10 @@
           if (!saved) continue;
           try { input.setSelectionRange(saved.start, saved.end, saved.direction); } catch {}
           input.scrollTop = saved.top; input.scrollLeft = saved.left;
+        }
+        for (const title of errorTitlesOf(list)) {
+          const saved = errorTitles.get(title.dataset.focusKey);
+          if (saved) { title.scrollTop = saved.top; title.scrollLeft = saved.left; }
         }
         const next = new Map();
         let candidate = null, retained = null;
@@ -922,12 +1026,15 @@
               || !own.list.isConnected || !own.row.isConnected || !own.row._taskAnswerReveal.current()
               || own.row._taskAnswerReveal.phase() !== 'error' || own.row._taskAnswerReveal.error() !== own.error) return;
           pending = null;
+          // A restored editor focus may not emit a user focus event while the
+          // renderer is replacing DOM. Never compact or scroll under it.
+          if (local(editorFor(body.ownerDocument?.activeElement))) return;
           const measuredSpace = reserveSpace(own.list, own.row, own.key, own.error);
           reveal(own.list, own.row, measuredSpace);
         });
       },
       dispose() {
-        disposed = true; pending = null; reservedSpace = null; previous.clear(); submissions.clear(); textareas.clear();
+        disposed = true; pending = null; reservedSpace = null; pressedEditor = null; previous.clear(); submissions.clear(); textareas.clear(); errorTitles.clear();
         if (listening) for (const name of events) eventHost.removeEventListener(name, cancel, true);
         if (body.addEventListener) body.removeEventListener('click', submittedHere, true);
       },
@@ -1232,13 +1339,21 @@
     if (accepted) onAccepted();
     else row.appendChild(el('p', { class: 'egd-task-answer-note' }, '이 작업은 답변을 기다리고 있습니다.'));
     if (draft?.notice) row.appendChild(el('p', { class: 'egd-task-answer-note', role: 'status', data: { testid: 'chat-task-answer-changed' } }, draft.notice));
-    const error = el('p', { class: 'egd-task-error', role: 'alert', data: { testid: 'chat-task-error' } }, draft?.error || condition.error || '');
+    const reason = draft?.error || condition.error || '';
+    const errorTitle = reason ? el('p', { class: 'egd-task-answer-note', tabindex: '0', title: question,
+      style: { maxHeight: '2.8em', lineHeight: '1.4', overflowY: 'auto', whiteSpace: 'pre-wrap', scrollbarWidth: 'thin' },
+      data: { testid: 'chat-task-error-question', focusKey: JSON.stringify(['task-error-question', codex.activeThreadId || '',
+        group.graphId, task.taskId, condition.gateId, draft?.id ?? null, condition.responseKey || question]) } }, question) : null;
+    const error = el('p', { class: 'egd-task-error', role: 'alert', 'aria-label': reason ? `${question} · ${reason}` : null,
+      data: { testid: 'chat-task-error' } }, reason);
+    const errorSummary = el('div', { style: { flex: '1 0 100%', minWidth: '0' },
+      data: { testid: 'chat-task-error-summary' } }, errorTitle, error);
     if (draft && !accepted) {
       let counter = null;
       const controls = el('fieldset', { class: 'egd-task-answer-fields', disabled: sending ? 'true' : null, 'aria-label': question });
       const update = answer => {
         if (!live() || !actions.updateTaskAnswer(draft, answer)) return false;
-        error.textContent = ''; return true;
+        error.textContent = ''; error.setAttribute('aria-label', ''); errorTitle?.remove(); return true;
       };
       if (condition.response.kind === 'choice') {
         controls.appendChild(el('legend', { class: 'egd-task-answer-note' }, '한 항목을 선택하세요. 선택만으로는 전달되지 않습니다.'));
@@ -1265,7 +1380,7 @@
         showCount(); controls.appendChild(input);
       }
       row.appendChild(controls);
-      row.appendChild(error);
+      row.appendChild(errorSummary);
       row.appendChild(el('div', { class: 'egd-task-answer-actions' },
         counter,
         el('button', { type: 'button', class: 'egd-task-confirm-go', disabled: sending ? 'true' : null, 'aria-disabled': String(sending),
@@ -1274,7 +1389,7 @@
         el('button', { type: 'button', class: 'egd-task-confirm-cancel', disabled: sending ? 'true' : null,
           data: { testid: 'chat-task-answer-cancel', focusKey: `${key}:cancel` },
           onclick: () => { if (live()) actions.cancelTaskAnswer(draft); } }, '취소')));
-    } else row.appendChild(error);
+    } else row.appendChild(errorSummary);
     row.appendChild(el('p', { class: 'egd-task-answer-note', data: { testid: 'chat-task-answer-next' } }, accepted
       ? '답변 전달됨' : condition.responseInvalid ? '질문 내용을 다시 불러온 뒤 답해 주세요.'
         : '계속을 누르면 답변만 전달합니다. 다른 대기 항목은 그대로 유지됩니다.'));

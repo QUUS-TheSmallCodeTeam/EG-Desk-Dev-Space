@@ -11,6 +11,7 @@ import { TASK_GATE_SELECTORS, taskGateRowSelector, assertTaskGateEnvironment, as
   reconciledTaskGateRead, assertTaskGateStaleReconciled,
   observeTaskGate, observeTaskGateDesk, observeTaskGateTarget, observeTaskGateLimit, taskGateLimitReadable, assertTaskGateLimitPaint, readTaskGateLimit,
   observeTaskGateFailurePaint, assertTaskGateFailurePaint,
+  assertTaskGateTitleEndPaint, taskGateTitleAtEnd,
   TASK_GATE_DIAGNOSTIC_LIMITS, createTaskGateDiagnostics, readyTaskGateTarget, chooseTaskGateScrollKey,
   TASK_GATE_SETTLEMENT, waitTaskGateTargetSettled, summarizeTaskGateFixture, waitTaskGateFixtureState,
   guardTaskGateTargetBeforeInput, observeTaskGateCamera, waitTaskGateOpenChatCamera,
@@ -29,11 +30,16 @@ const ui = (extra = {}) => { const value = { count: 1, threadId: 'local-original
   return { ...value, responseKey: extra.responseKey ?? JSON.stringify(['userAction', value.label, value.response]) }; };
 const state = (extra = {}) => ({ requests: [], persisted: { answers: [] }, fakeProviderTurns: [], ...extra });
 const failurePaint = current => ({ ui: current,
-  notice: { count: 1, text: current.notice.trim(), styleVisible: true,
+  notice: { count: 1, text: current.notice.trim(), accessibleLabel: `${current.question} · ${current.notice.trim()}`, styleVisible: true,
     fragments: [{ inside: true, clipped: false, hitCount: 3, hits: Array.from({ length: 3 }, () => ({ owned: true })) }] },
-  ...Object.fromEntries(['continue', 'cancel'].map(key => [key, {
+  errorQuestion: { count: 1, text: current.question, title: current.question, tabIndex: '0',
+    styleVisible: true, inside: true, clipped: false,
+    fragments: [{ visible: true, hitCount: 3, hits: Array.from({ length: 3 }, () => ({ owned: true })) }] },
+  ...Object.fromEntries(['text', 'continue', 'cancel'].map(key => [key, {
     selector: `${taskGateRowSelector(current)} [data-testid=${JSON.stringify(TASK_GATE_SELECTORS[key])}]`,
-    count: 1, visible: true, inside: true, clipped: false, hits: 9, disabled: false }])) });
+    count: 1, visible: true, inside: true, clipped: false, hits: 9, disabled: false }])),
+  composer: { selector: '[data-testid="chat-composer"]', count: 1, visible: true, inside: true,
+    clipped: false, hits: 9, disabled: false, threadId: current.threadId } });
 const post = (ids, status = 200, extra = {}) => ({ sequence: 1, method: 'POST', path: '/tasks/continue',
   delegated: true, status, request: { graphId: ids.graphId, taskId: ids.taskId, gateId: ids.gateId,
     answer: ids.response?.kind === 'choice' ? { choice: 'kakao' } : { textCodePoints: 20 } }, response: {}, ...extra });
@@ -239,6 +245,8 @@ test('full validator rejects missing stages, lost drafts, wrong original thread,
     proof => { proof.choice.ui.choice = 'email'; }, proof => { proof.choice.ui.responseKey = '["wrong-question"]'; },
     proof => { delete proof.errorPaint; }, proof => { proof.errorPaint.initial.continue.clipped = true; },
     proof => { proof.errorPaint.beforeCapture.cancel.hits = 8; }, proof => { proof.errorPaint.initial.notice.fragments = []; },
+    proof => { proof.errorPaint.initial.errorQuestion.text = '다른 질문'; },
+    proof => { proof.errorPaint.beforeCapture.notice.accessibleLabel = '질문이 빠진 오류'; },
   ];
   for (const corrupt of corruptions) { const proof = evidence(); corrupt(proof); assert.throws(() => assertTaskGateEvidence(proof)); }
 });
@@ -1112,38 +1120,56 @@ test('count text occlusion cannot be waived or fixed by blind scrolling, and exp
   await assert.rejects(readTaskGateLimit(h, identity(), 1, { read: () => assert.fail('expired observation') }));
 });
 
-function failurePaintDom({ clippedButton, clippedError = false, occludedError = false, hiddenError = false, missingCancel = false } = {}) {
+function failurePaintDom({ clippedButton, clippedText = false, ownTextScroll = false, clippedError = false, occludedError = false, hiddenError = false, missingCancel = false,
+  missingQuestion = false, wrongQuestion = false, clippedQuestion = false, occludedQuestion = false, hiddenQuestion = false } = {}) {
   const current = ui({ notice: '개인 정보가 포함되어 있습니다.\n해당 값을 빼고 다시 답해 주세요.' });
   const calls = [], rect = (left, top, width, height) => ({ left, top, right: left + width, bottom: top + height, width, height });
   const makeNode = (box, extra = {}) => ({ isConnected: true, parentElement: null,
     offsetWidth: box.width, offsetHeight: box.height, clientWidth: box.width, clientHeight: box.height,
     clientLeft: 0, clientTop: 0, closest: () => null, contains: () => false, getAttribute: () => null,
     getBoundingClientRect: () => box, ...extra });
-  const list = makeNode(rect(0, 0, 800, 560));
-  const row = makeNode(rect(0, 0, 800, 560), { parentElement: list, dataset: current });
-  const parts = Object.fromEntries(['question', 'next', 'text', 'notice', 'continue', 'cancel'].map(key => {
+  const main = makeNode(rect(0, 0, 800, 600));
+  const composer = makeNode(rect(100, 565, 400, 30), { parentElement: main, dataset: { threadId: current.threadId }, disabled: false });
+  main.querySelectorAll = selector => selector === '[data-testid="chat-composer"]' ? [composer] : [];
+  const list = makeNode(rect(0, 0, 800, 560), { parentElement: main });
+  const row = makeNode(rect(0, 0, 800, 560), { parentElement: list, dataset: current,
+    closest: selector => selector === '.egd-codex-chat-main' ? main : null });
+  const parts = Object.fromEntries(['question', 'next', 'text', 'notice', 'errorQuestion', 'continue', 'cancel'].map(key => {
     const box = ['continue', 'cancel'].includes(key)
       ? rect(key === 'continue' ? 100 : 220, clippedButton === key ? 543 : 500, 100, clippedButton === key ? 18 : 30)
+      : key === 'errorQuestion' ? rect(100, clippedQuestion ? 543 : 160, 400, 24)
+      : key === 'text' ? rect(100, clippedText ? 535 : 80, 400, clippedText ? 28 : 40)
       : rect(100, 200, 400, 40);
-    return [key, makeNode(box, { parentElement: row, textContent: current[key] || '', value: key === 'text' ? current.value : undefined, disabled: false })];
+    const text = key === 'errorQuestion' ? (wrongQuestion ? '다른 질문' : current.question) : current[key] || '';
+    return [key, makeNode(box, { parentElement: row, textContent: text, value: key === 'text' ? current.value : undefined, disabled: false,
+      ...(key === 'text' && ownTextScroll ? { clientLeft: 1, clientTop: 1, clientWidth: box.width - 2, clientHeight: box.height - 2 } : {}),
+      getAttribute: name => key === 'errorQuestion' && name === 'title' ? text : key === 'errorQuestion' && name === 'tabindex' ? '0'
+        : key === 'notice' && name === 'aria-label' ? `${current.question} · ${current.notice}` : null })];
   }));
   row.querySelectorAll = selector => {
     const key = Object.keys(parts).find(key => selector === `[data-testid="${TASK_GATE_SELECTORS[key]}"]`);
-    return key && !(key === 'cancel' && missingCancel) ? [parts[key]] : [];
+    return key && !(key === 'cancel' && missingCancel) && !(key === 'errorQuestion' && missingQuestion) ? [parts[key]] : [];
   };
   row.querySelector = () => null;
   const lines = [rect(100, 202, 300, 14), rect(100, clippedError ? 554 : 218, 300, 14)];
+  const questionLine = rect(100, clippedQuestion ? 545 : 162, 250, 14);
   const contains = (box, x, y) => x >= box.left && x <= box.right && y >= box.top && y <= box.bottom;
   const context = { innerWidth: 800, innerHeight: 600, window: { __egdesk: { state: { codex: { activeThreadId: current.threadId } } } },
-    getComputedStyle: node => ({ display: 'block', visibility: 'visible', opacity: hiddenError && node === parts.notice ? '0' : '1',
-      overflowX: node === list ? 'auto' : 'visible', overflowY: node === list ? 'auto' : 'visible' }),
+    getComputedStyle: node => ({ display: 'block', visibility: 'visible',
+      opacity: hiddenError && node === parts.notice || hiddenQuestion && node === parts.errorQuestion ? '0' : '1',
+      overflowX: node === list || ownTextScroll && node === parts.text ? 'auto' : 'visible',
+      overflowY: node === list || ownTextScroll && node === parts.text ? 'auto' : 'visible' }),
     document: {
       querySelectorAll: selector => { assert.equal(selector, taskGateRowSelector(identity())); return [row]; },
-      createRange: () => ({ selectNodeContents: node => { assert.equal(node, parts.notice); calls.push('full-error-range'); },
-        getClientRects: () => lines, detach() {} }),
+      createRange: () => { let selected; return { selectNodeContents: node => {
+        assert.ok(node === parts.notice || node === parts.errorQuestion); selected = node;
+        calls.push(node === parts.notice ? 'full-error-range' : 'question-range');
+      }, getClientRects: () => selected === parts.notice ? lines : [questionLine], detach() {} }; },
       elementFromPoint: (x, y) => {
+        if (contains(composer.getBoundingClientRect(), x, y)) return composer;
         if (y > 560 || x < 0 || x > 800) return list;
-        for (const key of ['continue', 'cancel']) if (contains(parts[key].getBoundingClientRect(), x, y)) return parts[key];
+        for (const key of ['text', 'continue', 'cancel']) if (contains(parts[key].getBoundingClientRect(), x, y)) return parts[key];
+        if (!occludedQuestion && contains(questionLine, x, y)) return parts.errorQuestion;
         return !occludedError && lines.some(box => contains(box, x, y)) ? parts.notice : list;
       },
     } };
@@ -1157,7 +1183,8 @@ test('post-error proof reads full multiline error and both nine-hit buttons in o
   const f = failurePaintDom(), proof = await observeTaskGateFailurePaint(f.h, identity());
   assert.equal(assertTaskGateFailurePaint(proof, f.typed, f.current, identity(), f.current.threadId), true);
   assert.equal(proof.notice.fragments.length, 2); assert.equal(proof.continue.hits, 9); assert.equal(proof.cancel.hits, 9);
-  assert.deepEqual(f.calls, ['single-read', 'full-error-range']);
+  assert.equal(proof.errorQuestion.text, identity().label); assert.equal(proof.errorQuestion.fragments[0].hitCount, 3);
+  assert.deepEqual(f.calls, ['single-read', 'full-error-range', 'question-range']);
 });
 
 test('R7 counterexample: full error visible and nine hits cannot excuse a clipped Continue or Cancel edge', async () => {
@@ -1168,15 +1195,34 @@ test('R7 counterexample: full error visible and nine hits cannot excuse a clippe
     assert.equal(proof[clippedButton].hits, 9, 'all sample points can hit despite one clipped edge');
     assert.equal(proof[clippedButton].clipped, true, 'the containing form clips the full button box');
     assert.throws(() => assertTaskGateFailurePaint(proof, f.typed, f.current, identity(), f.current.threadId), new RegExp(`${clippedButton}: FULL`));
-    assert.deepEqual(f.calls, ['single-read', 'full-error-range'], 'no second sample or recovery scroll');
+    assert.deepEqual(f.calls, ['single-read', 'full-error-range', 'question-range'], 'no second sample or recovery scroll');
   }
+});
+
+test('R6 counterexample: a visible error and actions do not excuse the clipped answer on the first paint', async () => {
+  const f = failurePaintDom({ clippedText: true }), proof = await observeTaskGateFailurePaint(f.h, identity());
+  assert.equal(taskGateLimitReadable(proof.notice), true);
+  assert.equal(proof.continue.hits, 9); assert.equal(proof.cancel.hits, 9);
+  assert.equal(proof.text.hits, 9); assert.equal(proof.text.clipped, true);
+  assert.throws(() => assertTaskGateFailurePaint(proof, f.typed, f.current, identity(), f.current.threadId), /text: FULL/);
+  assert.deepEqual(f.calls, ['single-read', 'full-error-range', 'question-range'], 'no recovery scroll before the assertion');
+});
+
+test('a textarea scrolls inside its own border without falsely clipping its fully visible outer box', async () => {
+  const f = failurePaintDom({ ownTextScroll: true }), proof = await observeTaskGateFailurePaint(f.h, identity());
+  assert.equal(proof.text.clipped, false); assert.equal(proof.text.hits, 9);
+  assert.equal(assertTaskGateFailurePaint(proof, f.typed, f.current, identity(), f.current.threadId), true);
+  const clipped = failurePaintDom({ ownTextScroll: true, clippedText: true });
+  const rejected = await observeTaskGateFailurePaint(clipped.h, identity());
+  assert.equal(rejected.text.clipped, true, 'the list ancestor still clips the actual border box');
+  assert.throws(() => assertTaskGateFailurePaint(rejected, clipped.typed, clipped.current, identity(), clipped.current.threadId), /text: FULL/);
 });
 
 test('post-error proof rejects a clipped last error line, occlusion, hidden text, missing control or changed draft/question', async () => {
   for (const config of [{ clippedError: true }, { occludedError: true }, { hiddenError: true }, { missingCancel: true }]) {
     const f = failurePaintDom(config), proof = await observeTaskGateFailurePaint(f.h, identity());
     assert.throws(() => assertTaskGateFailurePaint(proof, f.typed, f.current, identity(), f.current.threadId));
-    assert.deepEqual(f.calls, ['single-read', 'full-error-range']);
+    assert.deepEqual(f.calls, ['single-read', 'full-error-range', 'question-range']);
   }
   const f = failurePaintDom(), proof = await observeTaskGateFailurePaint(f.h, identity());
   for (const patch of [{ value: '' }, { notice: 'shortened error' }, { responseKey: 'other' }, { threadId: 'other' }]) {
@@ -1184,6 +1230,33 @@ test('post-error proof rejects a clipped last error line, occlusion, hidden text
   }
   for (const key of ['continue', 'cancel']) for (const patch of [{ hits: 8 }, { disabled: true }, { visible: false }, { count: 2 }, { selector: 'unrelated' }]) {
     assert.throws(() => assertTaskGateFailurePaint({ ...proof, [key]: { ...proof[key], ...patch } }, f.typed, f.current, identity(), f.current.threadId));
+  }
+});
+
+test('post-error proof rejects a missing, wrong, clipped, hidden or occluded question title', async () => {
+  for (const config of [{ missingQuestion: true }, { wrongQuestion: true }, { clippedQuestion: true }, { hiddenQuestion: true }, { occludedQuestion: true }]) {
+    const f = failurePaintDom(config), proof = await observeTaskGateFailurePaint(f.h, identity());
+    assert.throws(() => assertTaskGateFailurePaint(proof, f.typed, f.current, identity(), f.current.threadId));
+    assert.equal(f.calls[0], 'single-read', 'no input or additional sample');
+  }
+  const f = failurePaintDom(), proof = await observeTaskGateFailurePaint(f.h, identity());
+  assert.throws(() => assertTaskGateFailurePaint({ ...proof, notice: { ...proof.notice, accessibleLabel: f.current.notice } },
+    f.typed, f.current, identity(), f.current.threadId));
+  assert.throws(() => assertTaskGateFailurePaint({ ...proof, errorQuestion: { ...proof.errorQuestion, tabIndex: null } },
+    f.typed, f.current, identity(), f.current.threadId));
+});
+
+test('long-title keyboard proof requires the actual last line painted and a focused scroller at its end', async () => {
+  const f = failurePaintDom(), proof = await observeTaskGateFailurePaint(f.h, identity());
+  assert.equal(assertTaskGateTitleEndPaint(proof, identity()), true);
+  const clippedTail = structuredClone(proof);
+  clippedTail.errorQuestion.fragments.push({ visible: false, hits: [], hitCount: 0 });
+  assert.throws(() => assertTaskGateTitleEndPaint(clippedTail, identity()), /final actual title line/);
+  assert.throws(() => assertTaskGateTitleEndPaint(proof, identity({ label: 'another title' })));
+  const atEnd = { focused: true, scrollHeight: 200, clientHeight: 40, scrollTop: 160 };
+  assert.equal(taskGateTitleAtEnd(atEnd), true);
+  for (const patch of [{ focused: false }, { scrollTop: 100 }, { scrollHeight: 40 }, { scrollTop: null }]) {
+    assert.equal(taskGateTitleAtEnd({ ...atEnd, ...patch }), false);
   }
 });
 
@@ -1413,7 +1486,8 @@ test('first post-error clipped state fails before refresh or capture, with no wh
 test('intermediate captures retain all existing flow assertions and the final capture in their original order', () => {
   const source = fs.readFileSync(new URL('./verify-firefox-mcp-task-gate-flow.mjs', import.meta.url), 'utf8');
   assert.deepEqual([...source.matchAll(/await capture\('([^']+)'\)/g)].map(match => match[1]), [
-    'task-gate-initial-choice-before-continue', 'task-gate-same-question-text-failure', 'task-gate-answer-flow',
+    'task-gate-initial-choice-before-continue', 'task-gate-first-error-all-visible', 'task-gate-same-question-text-failure',
+    'task-gate-long-question-focus', 'task-gate-long-question-end', 'task-gate-answer-flow',
   ]);
   let previous = -1;
   for (const required of [

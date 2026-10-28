@@ -19003,12 +19003,13 @@ function taskQuestionHarness(graph = taskQuestionGraph(), { boardKnown = true } 
 
 function taskAnswerRevealHarness({ height = 220, scale = 1, spanTop = 100, spanHeight = 170, top = 0, layout = null } = {}) {
   const frames = [], listeners = new Map(), writes = [];
-  const draft = { key: 'original-draft', phase: 'editing', error: null, current: true };
+  const draft = { key: 'original-draft', phase: 'editing', error: null, current: true, value: 'PRIVATE_ANSWER' };
   const doc = { activeElement: { id: 'unchanged-focus' }, defaultView: { innerHeight: 1000 },
     addEventListener(name, fn) { listeners.set(name, fn); },
     removeEventListener(name, fn) { if (listeners.get(name) === fn) listeners.delete(name); } };
   const body = { ownerDocument: doc, list: null,
     querySelector: () => body.list,
+    contains: node => node?._body === body,
     addEventListener(name, fn) { listeners.set(name, fn); },
     removeEventListener(name, fn) { if (listeners.get(name) === fn) listeners.delete(name); },
     getBoundingClientRect: () => ({ top: 0, bottom: 1000, height: 1000 }),
@@ -19024,29 +19025,47 @@ function taskAnswerRevealHarness({ height = 220, scale = 1, spanTop = 100, spanH
     let position = layout ? body.list?.scrollTop || top : top, listHeight = height;
     const border = layout ? 1 : 0;
     const listTop = () => layout ? 367.98333740234375 - (listHeight + border) * scale : 100;
-    const input = { dataset: { focusKey: draft.key }, value: 'PRIVATE_ANSWER', selectionStart: 2, selectionEnd: 6, selectionDirection: 'backward', scrollTop: 19, scrollLeft: 3,
+    const input = { _body: body, isConnected: true, dataset: { focusKey: draft.key }, value: draft.value, selectionStart: 2, selectionEnd: 6, selectionDirection: 'backward', scrollTop: 19, scrollLeft: 3,
+      closest: selector => selector.includes('chat-task-condition') ? row : selector.includes('chat-composer') && selector.includes('chat-task-answer-text') ? input : null,
       setSelectionRange(start, end, direction) { Object.assign(this, { selectionStart: start, selectionEnd: end, selectionDirection: direction }); this.scrollTop = 0; } };
-    const list = { dataset: { threadId }, isConnected: true, clientTop: border, scrollHeight: 800,
+    const errorTitle = { dataset: { focusKey: `${draft.key}:error-question` }, scrollTop: 0, scrollLeft: 0 };
+    const list = { dataset: { threadId }, isConnected: true, clientTop: border, scrollHeight: 800, scrollLeft: 0,
       get clientHeight() { return listHeight; }, get offsetHeight() { return listHeight + border; },
       get scrollTop() { return position; }, set scrollTop(value) { position = Math.max(0, Math.min(800 - listHeight, value)); writes.push(position); },
       getBoundingClientRect: () => ({ top: listTop(), bottom: listTop() + (listHeight + border) * scale, height: (listHeight + border) * scale }),
-      querySelectorAll: selector => selector.includes('chat-task-answer-text') ? [input] : [row],
+      querySelectorAll: selector => selector.includes('chat-task-answer-text') ? [input]
+        : selector.includes('chat-task-error-question') ? [errorTitle] : [row],
       contains: node => node === row,
       closest: () => body,
     };
-    let log, board, pane;
+    let log, board, pane, composer, footer;
     if (layout) {
       const properties = {};
       log = { padding: '12px', scrollTop: body.list?._log?.scrollTop ?? 247, scrollLeft: 3, scrollHeight: 1400,
         content: ['old reply', 'completed task', 'current conversation'],
-        get clientHeight() { return layout.logHeight - (listHeight - height); },
+        get clientHeight() { return layout.logHeight + (pane?.dataset.taskAnswerCompact ? layout.compactGain || 0 : 0) - (listHeight - height); },
         getBoundingClientRect: () => ({ top: 156, bottom: 156 + log.clientHeight * scale, height: log.clientHeight * scale }),
         querySelectorAll: () => [anchor] };
       const anchor = { getBoundingClientRect: () => ({ top: 156 + (parseFloat(log.padding) + 260 - log.scrollTop) * scale,
         bottom: 156 + (parseFloat(log.padding) + 284 - log.scrollTop) * scale }) };
       board = { dataset: {}, get offsetHeight() { return listHeight + 35; },
-        style: { setProperty(name, value) { properties[name] = value; listHeight = parseFloat(value) - border; } } };
-      pane = { dataset: {}, style: { setProperty(name, value) { properties[name] = value; log.padding = '0px'; } },
+        style: { setProperty(name, value) { properties[name] = value; listHeight = parseFloat(value) - border; },
+          removeProperty(name) { delete properties[name]; listHeight = height; } } };
+      composer = { _body: body, isConnected: true, value: layout.composerDraft || '', selectionStart: 0, selectionEnd: 0,
+        selectionDirection: 'none', scrollTop: 2, scrollLeft: 3,
+        closest: selector => selector.includes('chat-composer') && selector.includes('chat-task-answer-text') ? composer : null,
+        setSelectionRange(start, end, direction) { Object.assign(this, { selectionStart: start, selectionEnd: end, selectionDirection: direction }); } };
+      const inputRow = { clientWidth: layout.composerWidth ?? 380, querySelector(selector) {
+        if (selector.includes('chat-composer')) return composer;
+        if (selector.includes('chat-project-target')) return {};
+        if (selector.includes('chat-attachment') || selector.includes('chat-briefing-input')) return layout.attached ? {} : null;
+        return null;
+      } };
+      footer = { querySelector: () => inputRow, getBoundingClientRect: () => ({
+        height: 100 - (pane?.dataset.taskAnswerCompact ? layout.compactGain || 0 : 0) }) };
+      const main = { dataset: { compactComposer: 'true' }, querySelector: () => layout.compactGain ? footer : null };
+      pane = { dataset: {}, parentElement: main, style: { setProperty(name, value) { properties[name] = value; log.padding = '0px'; },
+        removeProperty(name) { delete properties[name]; log.padding = '12px'; } },
         querySelector: () => log, getBoundingClientRect: () => ({ top: 108.77, bottom: 374.73, height: 265.96 }) };
       list.closest = selector => selector === '.egd-task-board' ? board : selector === '.egd-codex-conversation-pane' ? pane : null;
       list._log = log;
@@ -19055,21 +19074,31 @@ function taskAnswerRevealHarness({ height = 220, scale = 1, spanTop = 100, spanH
       bottom: listTop() + (border + end - position) * scale, height: (end - start) * scale, width: 340 * scale }) });
     const fieldsHeight = layout?.fieldHeight || 90;
     const parts = { '.egd-task-answer-fields': part(spanTop, spanTop + fieldsHeight),
-      '[data-testid="chat-task-error"]': part(spanTop + (layout ? fieldsHeight + 6 : 96), spanTop + spanHeight - (layout ? 36 : 38)),
+      '[data-testid="chat-task-error-summary"]': part(spanTop + (layout ? fieldsHeight + 6 : 96), spanTop + spanHeight - (layout ? 36 : 38)),
       '.egd-task-answer-actions': part(spanTop + spanHeight - 32, spanTop + spanHeight) };
     const row = { dataset: {}, isConnected: true, _taskAnswerReveal: { key: draft.key, current, phase: () => draft.phase, error: () => draft.error },
       querySelector: selector => parts[selector] };
-    return { list, row, input, parts, error, log, board, pane };
+    return { list, row, input, errorTitle, parts, error, log, board, pane, composer, footer };
   };
   const factory = compileFunction(`${declaration('createChatTaskAnswerReveal')}\nreturn createChatTaskAnswerReveal;`, [])();
   const api = factory(body, { schedule: fn => frames.push(fn) });
   let shown = makeList(); body.list = shown.list; api.afterRender();
   const render = options => {
+    const focusedInput = doc.activeElement === shown.input;
+    const focusedComposer = shown.composer && doc.activeElement === shown.composer;
+    const composerView = focusedComposer ? { start: shown.composer.selectionStart, end: shown.composer.selectionEnd,
+      direction: shown.composer.selectionDirection, top: shown.composer.scrollTop, left: shown.composer.scrollLeft } : null;
     api.beforeRender(); shown.list.isConnected = false; shown.row.isConnected = false;
     shown = makeList(options); body.list = shown.list;
     api.restoreLayout();
     // The real Chat renderer restores focus before afterRender; that is not a user gesture.
-    listeners.get('focusin')?.({ type: 'focusin' }); api.afterRender(); return shown;
+    if (focusedInput) doc.activeElement = shown.input;
+    if (focusedComposer) {
+      doc.activeElement = shown.composer;
+      shown.composer.setSelectionRange(composerView.start, composerView.end, composerView.direction);
+      shown.composer.scrollTop = composerView.top; shown.composer.scrollLeft = composerView.left;
+    }
+    listeners.get('focusin')?.({ type: 'focusin', target: doc.activeElement }); api.afterRender(); return shown;
   };
   const sending = ({ explicit = true } = {}) => {
     const control = { closest: selector => selector.includes('chat-task-condition') ? shown.row : control };
@@ -19078,7 +19107,8 @@ function taskAnswerRevealHarness({ height = 220, scale = 1, spanTop = 100, spanH
   };
   const failed = () => { draft.phase = 'error'; draft.error = '전체 오류 이유와 해결 방법'; return render(); };
   return { api, body, doc, draft, frames, writes, listeners, render, sending, failed, shown: () => shown,
-    interact: type => listeners.get(type)?.({ type, target: { outsideChat: true } }), flush: () => { while (frames.length) frames.shift()(); } };
+    interact: (type, target = { outsideChat: true }, extra = {}) => listeners.get(type)?.({ type, target, ...extra }),
+    flush: () => { while (frames.length) frames.shift()(); } };
 }
 
 test('Task new-error reveal: moves the full input/error/actions union by the minimum inner scroll without focus/caret/textarea changes', () => {
@@ -19188,6 +19218,281 @@ test('Task measured layout: cancelled reveal does not allocate; impossible full 
   }
 });
 
+test('Task measured 600/800 layout: a taller question/error summary remains with the actions when the full form cannot fit', () => {
+  for (const width of [600, 800]) {
+    const h = taskAnswerRevealHarness({ height: 123, scale: .9620968, spanHeight: 150.5,
+      layout: { width, logHeight: 28, fieldHeight: 44 } });
+    const focus = h.doc.activeElement;
+    h.sending(); const rendered = h.failed(); h.flush();
+    assert.equal(rendered.row.dataset.answerReveal, 'actions', 'the title and error stay together, not a false full-form claim');
+    const rect = rendered.list.getBoundingClientRect(), scale = rect.height / rendered.list.offsetHeight;
+    for (const selector of ['[data-testid="chat-task-error-summary"]', '.egd-task-answer-actions']) {
+      const shown = rendered.parts[selector].getBoundingClientRect();
+      assert.ok(shown.top >= rect.top + (rendered.list.clientTop + 4) * scale - .01, width);
+      assert.ok(shown.bottom <= rect.top + (rendered.list.clientTop + rendered.list.clientHeight - 4) * scale + .01, width);
+    }
+    assert.equal(h.doc.activeElement, focus); assert.equal(rendered.input.value, 'PRIVATE_ANSWER');
+    assert.deepEqual([rendered.input.selectionStart, rendered.input.selectionEnd, rendered.input.selectionDirection,
+      rendered.input.scrollTop, rendered.input.scrollLeft], [2, 6, 'backward', 19, 3]);
+  }
+});
+
+test('Task measured 600/800 long-title first error: borrow the actually released empty-composer row for the whole form', () => {
+  // R6 receipt: 124px list, 44px answer, roughly 153px answer/title/error/actions
+  // union; compacting the existing two composer rows frees about 40 CSS px.
+  for (const width of [600, 800]) {
+    const h = taskAnswerRevealHarness({ height: 124, scale: .9621334, spanHeight: 152.5,
+      layout: { width, logHeight: 24, fieldHeight: 44, compactGain: 40 } });
+    const focus = h.doc.activeElement;
+    h.sending(); const rendered = h.failed(); h.flush();
+    assert.equal(rendered.pane.dataset.taskAnswerCompact, 'true');
+    assert.equal(rendered.row.dataset.answerReveal, 'full');
+    assert.ok(rendered.list.clientHeight >= 161);
+    const box = rendered.list.getBoundingClientRect(), scale = box.height / rendered.list.offsetHeight;
+    for (const [name, part] of Object.entries(rendered.parts)) {
+      const shown = part.getBoundingClientRect();
+      assert.ok(shown.top >= box.top + (rendered.list.clientTop + 4) * scale - .01, `${width}: ${name} top`);
+      assert.ok(shown.bottom <= box.top + (rendered.list.clientTop + rendered.list.clientHeight - 4) * scale + .01, `${width}: ${name} bottom`);
+    }
+    assert.equal(rendered.input.value, 'PRIVATE_ANSWER');
+    assert.equal(h.doc.activeElement, focus);
+    assert.ok(rendered.log.clientHeight >= 20);
+    const scroll = rendered.list.scrollTop, writes = h.writes.length;
+    h.render(); h.flush();
+    assert.equal(h.shown().pane.dataset.taskAnswerCompact, 'true');
+    assert.equal(h.shown().list.scrollTop, scroll);
+    assert.equal(h.writes.length, writes, 'same failure redraw cannot re-reveal');
+  }
+});
+
+test('Task long-title compact space never moves a composer draft or attached items into the narrow row', () => {
+  for (const change of [{ attached: true }, { composerDraft: 'unsent draft' }, { composerWidth: 329 }]) {
+    const h = taskAnswerRevealHarness({ height: 124, scale: .9621334, spanHeight: 152.5,
+      layout: { width: 600, logHeight: 24, fieldHeight: 44, compactGain: 40, ...change } });
+    h.sending(); const shown = h.failed(); h.flush();
+    assert.equal(shown.pane.dataset.taskAnswerCompact, undefined);
+    assert.equal(shown.row.dataset.answerReveal, 'actions');
+    assert.equal(shown.input.value, 'PRIVATE_ANSWER');
+  }
+  for (const change of [{ attached: true }, { composerDraft: 'later draft' }]) {
+    const layout = { width: 600, logHeight: 24, fieldHeight: 44, compactGain: 40 };
+    const h = taskAnswerRevealHarness({ height: 124, scale: .9621334, spanHeight: 152.5, layout });
+    h.sending(); h.failed(); h.flush();
+    assert.equal(h.shown().pane.dataset.taskAnswerCompact, 'true');
+    Object.assign(layout, change);
+    const writes = h.writes.length; h.render(); h.flush();
+    assert.equal(h.shown().pane.dataset.taskAnswerCompact, undefined, 'redraw rechecks newly changed composer inputs');
+    assert.equal(h.writes.length, writes, 'eligibility change cannot replay reveal');
+  }
+});
+
+test('Task compact loan ends on explicit keyboard focus before composer or answer typing, never on later SSE', () => {
+  for (const kind of ['composer', 'answer']) {
+    const layout = { width: 600, logHeight: 24, fieldHeight: 44, compactGain: 40 };
+    const h = taskAnswerRevealHarness({ height: 124, scale: .9621334, spanHeight: 152.5, layout });
+    h.sending(); h.failed(); h.flush();
+    const initial = h.shown(), editor = kind === 'composer' ? initial.composer : initial.input;
+    assert.equal(initial.pane.dataset.taskAnswerCompact, 'true');
+    assert.equal(initial.footer.getBoundingClientRect().height, 60);
+    const listTop = initial.list.scrollTop, view = [editor.selectionStart, editor.selectionEnd,
+      editor.selectionDirection, editor.scrollTop, editor.scrollLeft];
+    const anchorBefore = initial.log.querySelectorAll()[0].getBoundingClientRect().top - initial.log.getBoundingClientRect().top;
+    const logLeft = initial.log.scrollLeft;
+    h.doc.activeElement = editor; h.interact('focusin', editor);
+    assert.equal(initial.pane.dataset.taskAnswerCompact, undefined, 'focus, not a later render, releases the compact row');
+    assert.equal(initial.footer.getBoundingClientRect().height, 100);
+    assert.equal(initial.list.clientHeight, 124);
+    assert.equal(h.doc.activeElement, editor); assert.equal(initial.list.scrollTop, listTop);
+    assert.deepEqual([editor.selectionStart, editor.selectionEnd, editor.selectionDirection, editor.scrollTop, editor.scrollLeft], view);
+    const anchorAfter = initial.log.querySelectorAll()[0].getBoundingClientRect().top - initial.log.getBoundingClientRect().top;
+    assert.ok(Math.abs(anchorAfter - anchorBefore) < 1e-9, 'the visible message anchor is preserved');
+    assert.equal(initial.log.scrollLeft, logLeft);
+    if (kind === 'composer') { editor.value = 'typing'; layout.composerDraft = 'typing'; }
+    else { editor.value = 'PRIVATE_ANSWER revised'; h.draft.value = editor.value; h.draft.error = null; h.draft.phase = 'editing'; }
+    h.interact('input', editor);
+    const scrollWrites = h.writes.length; h.render(); h.flush();
+    assert.equal(h.shown().pane.dataset.taskAnswerCompact, undefined);
+    assert.equal(h.shown().footer.getBoundingClientRect().height, 100);
+    assert.equal(h.shown().list.clientHeight, 124);
+    assert.equal(h.writes.length, scrollWrites, 'SSE never re-reveals');
+    assert.equal(h.doc.activeElement, kind === 'composer' ? h.shown().composer : h.shown().input);
+    assert.equal(h.doc.activeElement.value, kind === 'composer' ? 'typing' : 'PRIVATE_ANSWER revised');
+    assert.deepEqual([h.doc.activeElement.selectionStart, h.doc.activeElement.selectionEnd,
+      h.doc.activeElement.selectionDirection, h.doc.activeElement.scrollTop, h.doc.activeElement.scrollLeft], view);
+  }
+});
+
+test('Task delayed error cannot compact or reveal under an already focused restored editor', () => {
+  for (const kind of ['composer', 'answer']) {
+    const h = taskAnswerRevealHarness({ height: 124, scale: .9621334, spanHeight: 152.5,
+      layout: { width: 600, logHeight: 24, fieldHeight: 44, compactGain: 40 } });
+    h.sending(); const shown = h.failed();
+    h.doc.activeElement = kind === 'composer' ? shown.composer : shown.input;
+    h.flush();
+    assert.equal(shown.pane.dataset.taskAnswerCompact, undefined);
+    assert.equal(shown.board.dataset.answerSpace, undefined);
+    assert.equal(h.writes.length, 0);
+  }
+});
+
+test('Task compact loan waits for the same pointer click, then ends before editing without moving the focused control mid-press', () => {
+  for (const kind of ['composer', 'answer']) {
+    const h = taskAnswerRevealHarness({ height: 124, scale: .9621334, spanHeight: 152.5,
+      layout: { width: 600, logHeight: 24, fieldHeight: 44, compactGain: 40 } });
+    h.sending(); h.failed(); h.flush();
+    const shown = h.shown(), editor = kind === 'composer' ? shown.composer : shown.input;
+    const view = [editor.value, editor.selectionStart, editor.selectionEnd, editor.selectionDirection, editor.scrollTop, editor.scrollLeft];
+    h.interact('pointerdown', editor); h.doc.activeElement = editor; h.interact('focusin', editor);
+    assert.equal(shown.footer.getBoundingClientRect().height, 60, 'no reflow between pointerdown and focus');
+    h.interact('click', editor);
+    assert.equal(shown.footer.getBoundingClientRect().height, 100, 'the explicit click ends the loan');
+    assert.equal(h.doc.activeElement, editor);
+    assert.deepEqual([editor.value, editor.selectionStart, editor.selectionEnd, editor.selectionDirection, editor.scrollTop, editor.scrollLeft], view);
+    const writes = h.writes.length; h.render(); h.flush();
+    assert.equal(h.shown().footer.getBoundingClientRect().height, 100);
+    assert.equal(h.shown().list.clientHeight, 124); assert.equal(h.writes.length, writes);
+  }
+});
+
+test('Task pointercancel releases only the same local focused editor before its next input', () => {
+  for (const kind of ['composer', 'answer']) {
+    const h = taskAnswerRevealHarness({ height: 124, scale: .9621334, spanHeight: 152.5,
+      layout: { width: 600, logHeight: 24, fieldHeight: 44, compactGain: 40 } });
+    h.sending(); h.failed(); h.flush();
+    const shown = h.shown(), editor = kind === 'composer' ? shown.composer : shown.input;
+    const view = [editor.value, editor.selectionStart, editor.selectionEnd, editor.selectionDirection, editor.scrollTop, editor.scrollLeft];
+    let selections = 0; const setSelection = editor.setSelectionRange;
+    editor.setSelectionRange = (...args) => { selections++; return setSelection(...args); };
+    h.interact('pointerdown', editor); h.doc.activeElement = editor; h.interact('focusin', editor);
+    assert.equal(shown.footer.getBoundingClientRect().height, 60, 'do not move during the press');
+    h.interact('pointercancel', editor);
+    assert.equal(shown.pane.dataset.taskAnswerCompact, undefined); assert.equal(shown.board.dataset.answerSpace, undefined);
+    assert.equal(shown.footer.getBoundingClientRect().height, 100); assert.equal(shown.list.clientHeight, 124);
+    assert.equal(h.doc.activeElement, editor); assert.equal(selections, 0, 'cancel never resets a possible IME selection');
+    assert.deepEqual([editor.value, editor.selectionStart, editor.selectionEnd, editor.selectionDirection, editor.scrollTop, editor.scrollLeft], view);
+    const writes = h.writes.length; h.interact('beforeinput', editor, { isComposing: true });
+    assert.equal(shown.footer.getBoundingClientRect().height, 100); assert.equal(h.writes.length, writes);
+    h.render(); h.flush(); assert.equal(h.shown().footer.getBoundingClientRect().height, 100);
+    assert.equal(h.shown().list.clientHeight, 124); assert.equal(h.writes.length, writes);
+  }
+});
+
+test('Task pointercancel ignores a stale press on another active editor or another target', () => {
+  for (const situation of ['other-active', 'other-target', 'outside-target']) {
+    const h = taskAnswerRevealHarness({ height: 124, scale: .9621334, spanHeight: 152.5,
+      layout: { width: 600, logHeight: 24, fieldHeight: 44, compactGain: 40 } });
+    h.sending(); h.failed(); h.flush();
+    const shown = h.shown(), editor = shown.composer;
+    h.interact('pointerdown', editor); h.doc.activeElement = editor; h.interact('focusin', editor);
+    const outside = { _body: {}, closest: () => null };
+    if (situation === 'other-active') { h.doc.activeElement = outside; h.interact('focusin', outside); }
+    const writes = h.writes.length;
+    h.interact('pointercancel', situation === 'other-target' ? shown.input : situation === 'outside-target' ? outside : editor);
+    assert.equal(shown.pane.dataset.taskAnswerCompact, 'true'); assert.equal(shown.board.dataset.answerSpace, 'true');
+    assert.equal(shown.footer.getBoundingClientRect().height, 60); assert.equal(shown.list.clientHeight, 161);
+    assert.equal(h.writes.length, writes, 'another target cannot move this layout');
+  }
+});
+
+test('Task choice label press retains layout until its click targets the actual radio input', () => {
+  const h = taskAnswerRevealHarness({ height: 124, scale: .9621334, spanHeight: 152.5,
+    layout: { width: 600, logHeight: 24, fieldHeight: 44, compactGain: 40 } });
+  h.sending(); h.failed(); h.flush();
+  const shown = h.shown(), radio = { _body: h.body, isConnected: true, value: 'option', scrollTop: 0, scrollLeft: 0,
+    closest: selector => selector.includes('chat-composer') && selector.includes('chat-task-answer-choice') ? radio : null };
+  const label = { closest: selector => selector === 'label.egd-task-answer-choice' ? label : null,
+    querySelector: selector => selector.includes('chat-task-answer-choice') ? radio : null };
+  h.interact('pointerdown', label); h.doc.activeElement = radio; h.interact('focusin', radio);
+  assert.equal(shown.footer.getBoundingClientRect().height, 60);
+  h.interact('click', label);
+  assert.equal(shown.footer.getBoundingClientRect().height, 100);
+  assert.equal(h.doc.activeElement, radio);
+});
+
+test('Task Continue and Cancel do not release layout between pointerdown and click', () => {
+  for (const name of ['chat-task-answer-continue', 'chat-task-answer-cancel']) {
+    const h = taskAnswerRevealHarness({ height: 124, scale: .9621334, spanHeight: 152.5,
+      layout: { width: 600, logHeight: 24, fieldHeight: 44, compactGain: 40 } });
+    h.sending(); h.failed(); h.flush();
+    const shown = h.shown(), action = { _body: h.body, disabled: false, closest(selector) {
+      if (selector.includes('chat-composer')) return null;
+      if (selector.includes('chat-task-condition')) return shown.row;
+      if (selector.includes('chat-attach-open') && selector.includes(name)) return action;
+      return selector === '[data-testid="chat-task-answer-continue"]' && name === 'chat-task-answer-continue' ? action : null;
+    } };
+    h.interact('pointerdown', action); h.interact('focusin', action);
+    assert.equal(shown.footer.getBoundingClientRect().height, 60, 'the button cannot move before click');
+    h.interact('click', action);
+    assert.equal(shown.footer.getBoundingClientRect().height, 100, 'the explicit click ends the loan');
+    if (name === 'chat-task-answer-continue') {
+      h.draft.phase = 'sending'; h.draft.error = null; h.render();
+      h.draft.phase = 'error'; h.draft.error = 'new refusal'; h.render(); h.flush();
+      assert.equal(h.shown().row.dataset.answerReveal, 'full', 'the same explicit Continue can reveal its new failure once');
+    }
+  }
+});
+
+test('Task IME fallback never resets selection while an input event is composing', () => {
+  const h = taskAnswerRevealHarness({ height: 124, scale: .9621334, spanHeight: 152.5,
+    layout: { width: 600, logHeight: 24, fieldHeight: 44, compactGain: 40 } });
+  h.sending(); h.failed(); h.flush();
+  const shown = h.shown(), input = shown.input; let selectionCalls = 0;
+  h.doc.activeElement = input;
+  input.setSelectionRange = () => { selectionCalls++; };
+  const remove = shown.board.style.removeProperty;
+  shown.board.style.removeProperty = name => { remove(name); input.selectionStart = 1; };
+  h.interact('input', input, { isComposing: true });
+  assert.equal(selectionCalls, 0, 'the composing input owns its selection');
+  assert.equal(h.doc.activeElement, input); assert.equal(input.value, 'PRIVATE_ANSWER');
+});
+
+test('Task compact loan also ends on paste, beforeinput, IME start or native input when focus arrived without a click', () => {
+  for (const kind of ['composer', 'answer']) for (const type of ['beforeinput', 'paste', 'compositionstart', 'input', 'change']) {
+    const layout = { width: 600, logHeight: 24, fieldHeight: 44, compactGain: 40 };
+    const h = taskAnswerRevealHarness({ height: 124, scale: .9621334, spanHeight: 152.5,
+      layout });
+    h.sending(); h.failed(); h.flush();
+    const shown = h.shown(), editor = kind === 'composer' ? shown.composer : shown.input;
+    h.doc.activeElement = editor; h.interact(type, editor);
+    assert.equal(shown.footer.getBoundingClientRect().height, 100, `${kind}/${type}`);
+    assert.equal(shown.list.clientHeight, 124); assert.equal(h.doc.activeElement, editor);
+    assert.equal(editor.scrollTop, kind === 'composer' ? 2 : 19); assert.equal(editor.scrollLeft, 3);
+    if (kind === 'answer') { h.draft.error = null; h.draft.phase = 'editing'; }
+    else { editor.value = 'input'; layout.composerDraft = 'input'; }
+    const writes = h.writes.length; h.render(); h.flush();
+    assert.equal(h.shown().footer.getBoundingClientRect().height, 100);
+    assert.equal(h.shown().list.clientHeight, 124); assert.equal(h.writes.length, writes);
+    assert.equal(h.doc.activeElement.value, kind === 'composer' ? 'input' : 'PRIVATE_ANSWER');
+  }
+});
+
+test('Task compact loan ends at an explicit attachment/project action, but not on another surface focus', () => {
+  for (const name of ['chat-attach-open', 'chat-project-open']) {
+    const layout = { width: 600, logHeight: 24, fieldHeight: 44, compactGain: 40 };
+    const h = taskAnswerRevealHarness({ height: 124, scale: .9621334, spanHeight: 152.5, layout });
+    h.sending(); h.failed(); h.flush();
+    const shown = h.shown();
+    h.interact('focusin', { closest: () => ({ _body: {} }) });
+    assert.equal(shown.footer.getBoundingClientRect().height, 60, 'unrelated focus cannot alter this Chat');
+    const action = { _body: h.body, closest: selector => selector.includes(name) && selector.includes('chat-attach-open') ? action : null };
+    h.interact('click', action);
+    assert.equal(shown.footer.getBoundingClientRect().height, 100);
+    if (name === 'chat-attach-open') layout.attached = true;
+    const writes = h.writes.length; h.render(); h.flush();
+    assert.equal(h.shown().footer.getBoundingClientRect().height, 100);
+    assert.equal(h.shown().list.clientHeight, 124); assert.equal(h.writes.length, writes);
+  }
+});
+
+test('Task error question viewport: a same-question rerender keeps the title scroll, but a replacement cannot inherit it', () => {
+  const h = taskAnswerRevealHarness(); h.sending(); h.failed(); h.flush();
+  h.shown().errorTitle.scrollTop = 37; h.shown().errorTitle.scrollLeft = 3;
+  h.render(); assert.deepEqual([h.shown().errorTitle.scrollTop, h.shown().errorTitle.scrollLeft], [37, 3]);
+  h.draft.key = 'different-question'; h.render();
+  assert.deepEqual([h.shown().errorTitle.scrollTop, h.shown().errorTitle.scrollLeft], [0, 0]);
+  h.api.dispose();
+});
+
 test('Task resized error layout: the same error remeasures its six-pixel reservation without another reveal', () => {
   for (const width of [600, 800]) for (const dimension of ['clientWidth', 'clientHeight']) {
     const h = taskAnswerRevealHarness({ height: 123, scale: .9620968, spanHeight: 120.5,
@@ -19289,6 +19594,31 @@ test('Task new-error reveal: actual question guard follows original live draft a
   assert.match(mount, /restoreChatFocus\(body, focusState\);\n      taskAnswerReveal\.afterRender\(\)/);
   assert.match(mount, /taskAnswerReveal\.dispose\(\)/);
   assert.doesNotMatch(declaration('createChatTaskAnswerReveal'), /\.focus\(|scrollIntoView|smooth|fetch|sendMessage/);
+});
+
+test('Task first-error loan release stays stable when the actual question input clears its real draft error', async () => {
+  const question = taskQuestionHarness(taskQuestionGraph({ response: { kind: 'text' } }));
+  question.type('KEEP'); question.replies.push(refusal(400, 'TASK_GATE_ANSWER_PRIVATE'));
+  question.part('chat-task-answer-continue').fire('click'); await settle();
+  const guard = question.question()._taskAnswerReveal;
+  assert.equal(guard.phase(), 'error'); assert.ok(guard.error());
+  const h = taskAnswerRevealHarness({ height: 124, scale: .9621334, spanHeight: 152.5,
+    layout: { width: 600, logHeight: 24, fieldHeight: 44, compactGain: 40 } });
+  h.sending(); h.draft.phase = 'error'; h.draft.error = guard.error();
+  const shown = h.render();
+  shown.row._taskAnswerReveal = { ...guard, key: h.draft.key };
+  h.flush(); assert.equal(shown.footer.getBoundingClientRect().height, 60);
+  h.doc.activeElement = shown.input; h.interact('focusin', shown.input);
+  assert.equal(shown.footer.getBoundingClientRect().height, 100);
+  const realInput = question.part('chat-task-answer-text'); realInput.focus(); realInput.setSelectionRange(1, 3, 'backward');
+  question.type('corrected');
+  assert.equal(guard.phase(), 'editing'); assert.equal(guard.error(), null);
+  assert.equal(question.document.activeElement, realInput); assert.equal(realInput.value, 'corrected');
+  h.draft.phase = guard.phase(); h.draft.error = guard.error(); h.draft.value = realInput.value;
+  const writes = h.writes.length; h.render(); h.flush();
+  assert.equal(h.shown().footer.getBoundingClientRect().height, 100);
+  assert.equal(h.shown().list.clientHeight, 124); assert.equal(h.writes.length, writes);
+  assert.equal(h.shown().input.value, 'corrected');
 });
 
 test('Task question UI: full question first, native choices/selection/Enter do not submit; explicit 계속 sends original scoped answer', async () => {
@@ -19421,6 +19751,8 @@ test('Task question UI: failures retain the same answer, Cancel clears only loca
   h.part('chat-task-answer-continue').fire('click'); await settle();
   assert.equal(h.part('chat-task-answer-text').value, 'PRIVATE_DRAFT'); assert.match(h.part('chat-task-error').textContent, /비밀번호·키·인증번호/);
   const nodes = settingsNodes(h.question(), () => true), error = h.part('chat-task-error');
+  assert.equal(h.part('chat-task-error-question').textContent, '어떤 방법으로 전달할까요?');
+  assert.equal(error.getAttribute('aria-label'), `어떤 방법으로 전달할까요? · ${error.textContent}`);
   assert.ok(nodes.indexOf(h.part('chat-task-answer-text')) < nodes.indexOf(error), 'reason and remedy follow the answer input');
   assert.ok(nodes.indexOf(error) < nodes.indexOf(h.part('chat-task-answer-continue')), 'the full remedy precedes the action buttons');
   assert.equal(error.textContent, Chat.taskContinueErrorText({ code: 'TASK_GATE_ANSWER_PRIVATE' }));
@@ -19431,12 +19763,141 @@ test('Task question UI: failures retain the same answer, Cancel clears only loca
   assert.equal(response.ui().label, '응답 완료');
   assert.equal(Chat.taskBoardEntry(h.state.codex.taskBoard, 'graph-a').graph.tasks[0].status, 'waiting-on-dependency');
   h.frame(structuredClone(graph)); assert.equal(h.part('chat-task-answer-text').value, 'PRIVATE_DRAFT');
+  assert.equal(h.part('chat-task-error-question').textContent, '어떤 방법으로 전달할까요?');
   assert.equal(JSON.stringify(h.state.codex).includes('PRIVATE_DRAFT'), false);
   h.type('corrected answer'); h.frame(structuredClone(graph));
   assert.equal(h.part('chat-task-answer-text').value, 'corrected answer'); assert.equal(h.part('chat-task-error').textContent, '');
+  assert.equal(h.part('chat-task-error-question'), undefined);
   const calls = h.requests.length; h.part('chat-task-answer-cancel').fire('click');
   assert.equal(h.part('chat-task-answer-text').value, ''); assert.equal(h.requests.length, calls); assert.equal(h.state.codex.taskContinue, null);
 });
+
+test('Task question UI: the actual long question stays beside its error and clears on editing without moving focus', async () => {
+  const label = `${'긴 질문의 실제 내용 '.repeat(12)}마지막 부분`;
+  assert.ok(label.length <= 200, 'the long question remains within the actual helper label limit');
+  const graph = taskQuestionGraph({ label, response: { kind: 'text', maxLength: 20 } }), h = taskQuestionHarness(graph);
+  assert.equal(h.part('chat-task-error-question'), undefined, 'there is no repeated title before an error');
+  h.part('chat-task-answer-continue').fire('click'); await settle();
+  const title = h.part('chat-task-error-question'), error = h.part('chat-task-error'), summary = h.part('chat-task-error-summary');
+  assert.equal(h.post().length, 0); assert.ok(title && error && summary);
+  assert.equal(title.textContent, label); assert.equal(title.getAttribute('title'), label);
+  assert.equal(title.getAttribute('tabindex'), '0', 'the bounded full title can be scrolled with the keyboard');
+  assert.ok(title.dataset.focusKey, 'same-question refresh can restore keyboard focus on the title');
+  assert.equal(title.style.maxHeight, '2.8em'); assert.equal(title.style.lineHeight, '1.4'); assert.equal(title.style.overflowY, 'auto');
+  assert.equal(title.style.whiteSpace, 'pre-wrap'); assert.equal(title.style.scrollbarWidth, 'thin');
+  assert.equal(title.parentNode, summary); assert.equal(error.parentNode, summary);
+  assert.equal(error.getAttribute('role'), 'alert');
+  assert.equal(error.getAttribute('aria-label'), `${label} · ${error.textContent}`);
+  assert.match(error.textContent, /답변을 확인/);
+  const nodes = settingsNodes(h.question(), () => true);
+  assert.ok(nodes.indexOf(h.part('chat-task-answer-text')) < nodes.indexOf(summary));
+  assert.ok(nodes.indexOf(summary) < nodes.indexOf(h.part('chat-task-answer-continue')));
+  title.focus();
+  const snapshot = compileFunction(`${declaration('chatFocusSnapshot')}\nreturn chatFocusSnapshot;`, ['document'])(h.document)(h.root, title);
+  h.frame(structuredClone(graph)); await settle();
+  assert.equal(h.part('chat-task-error-question').textContent, label, 'same-question refresh retains the correct title');
+  h.root.querySelectorAll = () => settingsNodes(h.root, node => !!node.dataset.focusKey);
+  const restore = compileFunction(`${declaration('restoreChatFocus')}\nreturn restoreChatFocus;`, [])();
+  assert.equal(restore(h.root, snapshot), true); assert.equal(h.document.activeElement, h.part('chat-task-error-question'));
+  const input = h.part('chat-task-answer-text'); input.focus(); input.value = '초안 유지'; input.setSelectionRange(1, 3, 'backward');
+  input.fire('input');
+  assert.equal(h.document.activeElement, input); assert.equal(input.value, '초안 유지');
+  assert.deepEqual([input.selectionStart, input.selectionEnd, input.selectionDirection], [1, 3, 'backward']);
+  assert.equal(h.part('chat-task-error-question'), undefined); assert.equal(h.part('chat-task-error').textContent, '');
+  assert.equal(h.part('chat-task-error').getAttribute('aria-label'), '');
+  assert.equal(h.post().length, 0);
+});
+
+test('Task question UI: each error keeps its own question and a changed question never inherits the old title', async () => {
+  const graph = taskQuestionGraph({ label: '첫 번째 실제 질문', response: { kind: 'text' } });
+  const second = structuredClone(graph.tasks[0].gates[0]); second.gateId = 'second-question'; second.label = '두 번째 실제 질문';
+  graph.tasks[0].gates.splice(1, 0, second);
+  const h = taskQuestionHarness(graph);
+  const row = gateId => h.parts('chat-task-condition').find(item => item.dataset.gateId === gateId);
+  const part = (target, name) => settingsNodes(target, item => item.dataset.testid === name)[0];
+  part(row('question'), 'chat-task-answer-continue').fire('click'); await settle();
+  assert.equal(part(row('question'), 'chat-task-error-question').textContent, '첫 번째 실제 질문');
+  assert.equal(part(row('second-question'), 'chat-task-error-question'), undefined);
+  part(row('second-question'), 'chat-task-answer-continue').fire('click'); await settle();
+  assert.equal(part(row('question'), 'chat-task-error-question').textContent, '첫 번째 실제 질문');
+  assert.equal(part(row('second-question'), 'chat-task-error-question').textContent, '두 번째 실제 질문');
+  const stale = part(row('second-question'), 'chat-task-answer-continue');
+  const changed = structuredClone(graph); changed.tasks[0].gates[1].label = '바뀐 실제 질문';
+  h.frame(changed); stale.fire('click'); await settle();
+  assert.equal(part(row('question'), 'chat-task-error-question').textContent, '첫 번째 실제 질문');
+  assert.equal(part(row('second-question'), 'chat-task-error-question'), undefined);
+  assert.equal(part(row('second-question'), 'chat-task-question').textContent, '바뀐 실제 질문');
+  assert.equal(h.post().length, 0);
+});
+
+test('Task question UI: malformed question descriptors show their own title with the existing error, never an answer action', () => {
+  const label = '확인이 필요한 실제 질문', h = taskQuestionHarness(taskQuestionGraph({ label, response: { kind: 'choice', options: [] } }));
+  const title = h.part('chat-task-error-question'), error = h.part('chat-task-error');
+  assert.equal(title.textContent, label); assert.match(error.textContent, /질문 내용을 확인하지/);
+  assert.equal(error.getAttribute('aria-label'), `${label} · ${error.textContent}`);
+  assert.equal(h.part('chat-task-answer-continue'), undefined); assert.equal(h.post().length, 0);
+  const oldKey = title.dataset.focusKey; h.state.codex.activeThreadId = 'room-b'; h.draw();
+  assert.notEqual(h.part('chat-task-error-question').dataset.focusKey, oldKey, 'a different room cannot inherit the old title focus or scroll');
+});
+
+for (const [boundary, pair] of [
+  ['graph/task', [{ graph: 'g:a', task: 'b', gate: 'q' }, { graph: 'g', task: 'a:b', gate: 'q' }]],
+  ['task/gate', [{ graph: 'g', task: 'a:b', gate: 'q' }, { graph: 'g', task: 'a', gate: 'b:q' }]],
+]) {
+  test(`Task error question identity keeps ${boundary} boundaries, focus, scroll and another draft independent`, () => {
+    const label = '같은 질문';
+    const malformed = (taskId, gateId) => ({ taskId, status: 'waiting-on-dependency', gates: [
+      { gateId, kind: 'userAction', status: 'waiting', label, response: { kind: 'choice', options: [] } },
+    ] });
+    const [first, second] = pair;
+    const graph = taskQuestionGraph({ graphId: first.graph, response: { kind: 'text', maxLength: 100 } });
+    graph.tasks.push(malformed(first.task, first.gate));
+    if (first.graph === second.graph) graph.tasks.push(malformed(second.task, second.gate));
+    const h = taskQuestionHarness(graph);
+    if (first.graph !== second.graph) {
+      const other = awaitGraph({ graphId: second.graph, tasks: [malformed(second.task, second.gate)] });
+      h.state.codex.taskBoard = Chat.taskBoardWithState(h.state.codex.taskBoard, awaitState(other));
+      h.draw();
+    }
+    const input = h.type('보존할 초안'), draft = h.draft();
+    input.setSelectionRange(1, 4, 'backward'); input.scrollTop = 11; input.scrollLeft = 2;
+    const title = identity => {
+      const row = h.parts('chat-task-condition').find(node => node.dataset.graphId === identity.graph
+        && node.dataset.taskId === identity.task && node.dataset.gateId === identity.gate);
+      return settingsNodes(row, node => node.dataset.testid === 'chat-task-error-question')[0];
+    };
+    const oldFirst = title(first), oldSecond = title(second);
+    assert.ok(oldFirst && oldSecond);
+    assert.notEqual(oldFirst.dataset.focusKey, oldSecond.dataset.focusKey);
+    oldFirst.scrollTop = 7; oldFirst.scrollLeft = 1; oldSecond.scrollTop = 37; oldSecond.scrollLeft = 3;
+    oldSecond.focus();
+    const snapshot = compileFunction(`${declaration('chatFocusSnapshot')}\nreturn chatFocusSnapshot;`, ['document'])(h.document)(h.root, oldSecond);
+    h.root.querySelector = selector => selector === '[data-testid="chat-task-list"]' ? h.part('chat-task-list') : null;
+    h.root.querySelectorAll = () => settingsNodes(h.root, node => !!node.dataset.focusKey);
+    const prepareList = () => {
+      const list = h.part('chat-task-list');
+      list.querySelectorAll = selector => {
+        const testid = selector.match(/data-testid="([^"]+)"/)?.[1];
+        return settingsNodes(list, node => node.dataset.testid === testid);
+      };
+      return list;
+    };
+    prepareList();
+    const reveal = compileFunction(`${declaration('createChatTaskAnswerReveal')}\nreturn createChatTaskAnswerReveal;`, [])()(h.root, { schedule: () => {} });
+    reveal.beforeRender(); h.draw(); prepareList();
+    const restore = compileFunction(`${declaration('restoreChatFocus')}\nreturn restoreChatFocus;`, [])();
+    assert.equal(restore(h.root, snapshot), true); reveal.afterRender();
+    assert.equal(h.document.activeElement, title(second));
+    assert.deepEqual([title(first).scrollTop, title(first).scrollLeft, title(second).scrollTop, title(second).scrollLeft], [7, 1, 37, 3]);
+    const retained = h.part('chat-task-answer-text');
+    assert.equal(retained.value, '보존할 초안');
+    assert.equal(h.draft(), draft, 'the valid question keeps the same draft identity');
+    assert.deepEqual(draft.answer, { text: '보존할 초안' });
+    assert.deepEqual([retained.selectionStart, retained.selectionEnd, retained.selectionDirection, retained.scrollTop, retained.scrollLeft], [1, 4, 'backward', 11, 2]);
+    assert.equal(h.post().length, 0);
+    reveal.dispose();
+  });
+}
 
 test('Task question UI: duplicate Continue is locked; edits and Cancel cannot retarget an in-flight answer', async () => {
   const h = taskQuestionHarness(); h.choose('email'); const original = h.draft();

@@ -7,7 +7,8 @@ import childProcess from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { Readable } from 'node:stream';
 import { DatabaseSync } from 'node:sqlite';
-import { createTaskGateFixture, taskGateFixtureEnabled, TASK_GATE_SEED_MESSAGE, TASK_GATE_STATE_ROUTE, TASK_GATE_CONTROL_ROUTE } from './egdesk-task-gate-fixture.mjs';
+import { createTaskGateFixture, taskGateFixtureEnabled, TASK_GATE_SEED_MESSAGE, TASK_GATE_STATE_ROUTE, TASK_GATE_CONTROL_ROUTE,
+  TASK_GATE_QA_LONG_QUESTION } from './egdesk-task-gate-fixture.mjs';
 import { bootstrapQaProfile, canonicalTempRoot, LOADER_FILES } from './egdesk-chat-qa-profile.mjs';
 import { createPrivateQaTempDirectory } from './egdesk-qa-platform.mjs';
 
@@ -19,12 +20,12 @@ async function until(read, predicate, label) {
   for (let i = 0; i < 100; i++) { const value = read(); if (predicate(value)) return value; await settle(); }
   assert.fail(label);
 }
-async function setup(t) {
+async function setup(t, env = ENV) {
   const loader = createPrivateQaTempDirectory('egdesk-task-loader-');
   for (const name of LOADER_FILES) fs.writeFileSync(path.join(loader, name), `unit loader ${name}\n`, { mode: 0o600 });
   const { profile } = bootstrapQaProfile({ loaderSource: loader });
   const forwarded = [];
-  const fixture = await createTaskGateFixture({ profile, token: TOKEN, env: ENV, broadcast: frame => forwarded.push(structuredClone(frame)) });
+  const fixture = await createTaskGateFixture({ profile, token: TOKEN, env, broadcast: frame => forwarded.push(structuredClone(frame)) });
   const root = fixture.snapshot().root;
   t.after(async () => {
     await fixture.dispose();
@@ -112,6 +113,7 @@ test('native seed route delegates real Chat and seeds a real approved plan waiti
   assert.equal(state.original.conversationId, result.body.conversationId); assert.equal(state.original.runId, result.body.runId);
   assert.equal(state.original.clientThreadId, 'qa-original-local-binding');
   assert.equal(state.plans.length, 1); assert.equal(state.plans[0].origin.conversationId, state.original.conversationId);
+  assert.equal(state.plans[0].questions.find(question => question.gateId === 'memo').label, '덧붙일 말', 'the default fixture remains unchanged');
   assert.equal(state.fakeProviderTurns.length, 1); assert.equal(state.fakeProviderTurns[0].completed, true);
   assert.ok(state.persisted.journalCount > 0); assert.ok(state.persisted.records.some(row => row.kind === 'plan' && row.count === 1));
   const response = await request(fixture, 'GET', `/tasks/state?graphId=${state.plans[0].graphId}`);
@@ -121,6 +123,19 @@ test('native seed route delegates real Chat and seeds a real approved plan waiti
   assert.ok(forwarded.some(frame => frame.type === 'task.graph' && frame.graphId === state.plans[0].graphId));
   assert.ok(forwarded.some(frame => frame.type === 'chat.event' && frame.clientThreadId === state.original.clientThreadId));
   assert.equal((await seed(fixture)).status, 403, 'no accidental second original room');
+});
+
+test('explicit long-title option alone seeds the exact synthetic 200-character question through the real graph', async t => {
+  for (const bad of ['true', '', '2']) assert.throws(() => taskGateFixtureEnabled({ ...ENV, EGDESK_QA_TASK_GATE_LONG_TITLE: bad }));
+  assert.throws(() => taskGateFixtureEnabled({ EGDESK_QA_TASK_GATE_LONG_TITLE: '1' }));
+  assert.throws(() => taskGateFixtureEnabled({ ...ENV, EGDESK_QA_REAL_TURN: '1', EGDESK_QA_TASK_GATE_LONG_TITLE: '1' }));
+  const { fixture } = await setup(t, { ...ENV, EGDESK_QA_TASK_GATE_LONG_TITLE: '1' });
+  assert.equal((await seed(fixture)).status, 202);
+  const state = fixture.snapshot(), question = state.plans[0].questions.find(item => item.gateId === 'memo');
+  assert.equal(question.label, TASK_GATE_QA_LONG_QUESTION); assert.equal(Array.from(question.label).length, 200);
+  const result = await request(fixture, 'GET', `/tasks/state?graphId=${state.plans[0].graphId}`);
+  assert.equal(result.body.graph.tasks.find(task => task.taskId === 'note').gates.find(gate => gate.gateId === 'memo').label, question.label);
+  assert.equal(state.providerTurns, 0); assert.equal(state.nativeProcessSpawns, 0);
 });
 
 test('HOST expected-none uses the actual Chat runtime with exact client binding and no connected workspace/provider', async t => {

@@ -7482,6 +7482,18 @@ button.egd-task-board-summary:hover { background: var(--egd-hover); }
   min-height: var(--egd-task-answer-log-min);
   overflow-anchor: none;
 }
+/* Only a measured short-Chat Task error may place the existing empty-composer
+   controls beside its input. Attached items keep the ordinary two-row layout. */
+.egd-codex-chat-main:has(> .egd-codex-conversation-pane[data-task-answer-compact="true"])
+  .egd-codex-input-row:not(:has([data-testid="chat-attachment"], [data-testid="chat-briefing-input"])) {
+  grid-template-areas: "attachments draft actions";
+  grid-template-columns: minmax(0, 45%) minmax(0, 1fr) auto;
+  padding-block: 6px;
+}
+.egd-codex-chat-main:has(> .egd-codex-conversation-pane[data-task-answer-compact="true"])
+  .egd-codex-input-row:not(:has([data-testid="chat-attachment"], [data-testid="chat-briefing-input"])) .egd-chat-input-tray {
+  flex-wrap: nowrap;
+}
 .egd-task-group-title { margin: 8px 0 0; font: 600 11px/1.4 var(--egd-font); color: var(--egd-on-surface-variant); }
 .egd-task-row { display: flex; flex-direction: column; gap: 4px; padding: 8px 0; border-bottom: 1px solid var(--egd-outline-variant); }
 .egd-task-group:last-child > .egd-task-row:last-child { border-bottom: 0; }
