@@ -25,7 +25,7 @@ import { assertPublishedBriefing, assertContextCaptureBatch, assertStoredAgentDe
 const TOKEN = 'unit-fixture-token-no-credentials';
 const FIXTURE_ENV = { EGDESK_QA_FIXTURE_TRANSPORT: '1', EGDESK_QA_FIXTURE_PORT: '49318' };
 
-function setup(t, { claude = false, reader = false, projectFile = false, runOutputs = false, portable = false, taskGate = false, originFile = false, stateFixtures = false, sourceChangeSeed = false, briefingComments = false, firstAuth = false, fixturePort = FIXTURE_ENV.EGDESK_QA_FIXTURE_PORT } = {}) {
+function setup(t, { claude = false, reader = false, projectFile = false, watch = false, runOutputs = false, portable = false, taskGate = false, originFile = false, stateFixtures = false, sourceChangeSeed = false, briefingComments = false, briefingMultiTarget = false, firstAuth = false, fixturePort = FIXTURE_ENV.EGDESK_QA_FIXTURE_PORT } = {}) {
   const source = fs.mkdtempSync(path.join(canonicalTempRoot(), 'egdesk-loader-fixture-'));
   for (const name of LOADER_FILES) fs.writeFileSync(path.join(source, name), `unit fixture ${name}\n`);
   const { profile } = bootstrapQaProfile({ loaderSource: source });
@@ -39,10 +39,12 @@ function setup(t, { claude = false, reader = false, projectFile = false, runOutp
   const fetchBefore = globalThis.fetch;
   const eventSourceBefore = globalThis.EventSource;
   const fixtureEnv = { ...FIXTURE_ENV, EGDESK_QA_FIXTURE_PORT: String(fixturePort), ...(projectFile ? { EGDESK_QA_PROJECT_FILE_FIXTURE: '1', EGDESK_QA_REAL_TURN: '0' } : {}),
+    ...(watch ? { EGDESK_QA_PROJECT_FILE_WATCH: '1' } : {}),
     ...(firstAuth ? { EGDESK_QA_FIRST_CODEX_AUTH_FIXTURE: '1', EGDESK_QA_REAL_TURN: '0' } : {}),
     ...(stateFixtures || sourceChangeSeed || briefingComments ? { EGDESK_QA_STATE_FIXTURES: '1', EGDESK_QA_REAL_TURN: '0' } : {}),
     ...(sourceChangeSeed ? { EGDESK_QA_CONTEXT_SOURCE_CHANGE_SEED: '1' } : {}),
     ...(briefingComments ? { EGDESK_QA_BRIEFING_COMMENTS_SEED: '1' } : {}),
+    ...(briefingMultiTarget ? { EGDESK_QA_BRIEFING_MULTI_TARGET: '1' } : {}),
     ...(runOutputs ? { EGDESK_QA_RUN_OUTPUTS_FIXTURE: '1', EGDESK_QA_REAL_TURN: '0' } : {}),
     ...(portable ? { EGDESK_QA_PORTABLE_TRANSFER_FIXTURE: '1', EGDESK_QA_REAL_TURN: '0' } : {}),
     ...(taskGate ? { EGDESK_QA_TASK_GATE_FIXTURE: '1', EGDESK_QA_REAL_TURN: '0' } : {}),
@@ -647,6 +649,42 @@ test('RunOutputs HTTP routing rejects crossed identities, writes and injection r
   const disposed = await state();
   assert.equal(disposed.runOutputs.disposed, true); assert.equal(disposed.runOutputs.retainedBytes, 0);
   assert.deepEqual(disposed.runs, beforeDispose.runs, 'disposal cannot resolve an approval or erase another run');
+});
+
+test('owned real watcher reaches an in-memory SSE client without a listener or provider forwarding', { timeout: 6000 }, async t => {
+  if (process.platform !== 'darwin') return t.skip('owned recursive filesystem watcher requires macOS');
+  const fetchSpy = t.mock.method(globalThis, 'fetch', () => { throw new Error('No network or provider forwarding'); });
+  const fixture = setup(t, { projectFile: true, watch: true }), { handler } = fixture;
+  const headers = { host: '127.0.0.1:49318', 'content-type': 'application/json' };
+  const frames = [], req = Object.assign(new EventEmitter(), { method: 'GET', url: '/events?chatProtocol=2', headers });
+  const res = { writeHead(status) { assert.equal(status, 200); }, write(wire) { frames.push(wire); return true; } };
+  await handler(req, res);
+  const send = (route, body, more = {}) => request(handler, 'POST', route, body, more.token ? TOKEN : null,
+    () => {}, { ...headers, ...Object.fromEntries(Object.entries(more.headers || {}).map(([key, value]) => [key.toLowerCase(), value])) });
+  assert.equal((await send('/__qa/project-file/config', { pickerResults: ['select-owned'] }, { token: true })).status, 200);
+  const service = createEGDeskFileServiceCallbacks({ request: async (route, body, options) =>
+    (await send(route, body, { headers: options?.headers })).body });
+  const picker = createEGDeskNativeFilePickers({ service, pickDirectory: async () =>
+    (await send('/__qa/project-file/picker', {})).body.selection });
+  const root = await picker.chooseRoot();
+  const created = await send('/__qa/project-file/watch-create', {}, { token: true });
+  assert.equal(created.status, 200);
+  const deadline = Date.now() + 4000;
+  let events = [];
+  while (Date.now() < deadline) {
+    events = frames.filter(wire => wire.startsWith('event: codex\n')).map(wire => JSON.parse(wire.split('\ndata: ')[1]));
+    if (events.some(frame => frame.event?.payload?.relativePath === created.body.relativePath)) break;
+    await new Promise(resolve => setTimeout(resolve, 25));
+  }
+  const frame = events.find(value => value.event?.payload?.relativePath === created.body.relativePath);
+  assert.equal(frame?.type, 'workflow.event'); assert.equal(frame?.v, 1);
+  assert.equal(frame?.event?.topic, 'file.changed'); assert.equal(frame?.event?.source, 'file');
+  assert.equal(frame?.event?.payload?.rootId, root.rootId);
+  const state = (await request(handler, 'GET', '/__qa/state', null, TOKEN)).body;
+  assert.ok(state.observed.projectFileWatchBroadcasts.some(row => row.eventId === frame.event.id && row.clients === 1));
+  assert.deepEqual(state.runs, []); assert.deepEqual(state.observed.sends, []); assert.deepEqual(state.observed.authWrites, []);
+  assert.equal(fetchSpy.mock.callCount(), 0);
+  req.emit('close'); await fixture.dispose();
 });
 
 test('project File adapter and synthetic shell are strict opt-in; existing unknown-terminal behavior stays unchanged', async t => {
@@ -1717,6 +1755,294 @@ async function sourceRoom(handler, clientThreadId, captures = null) {
   return { r: { engineId: 'codex', engineProfileId: 'codex-default', clientThreadId,
     conversationId: result.body.conversationId, sourceId: captures[0].sourceId }, captures, run: result.body };
 }
+
+const captureGetScope = (room, source, startLine, endLine) => ({ engineId: room.engineId, engineProfileId: room.engineProfileId,
+  clientThreadId: room.clientThreadId, conversationId: room.conversationId, sourceId: source.sourceId, startLine, endLine });
+const captureGetUrl = scope => {
+  const { sourceId, ...query } = scope;
+  return `/context/captures/${encodeURIComponent(sourceId)}?${new URLSearchParams(query)}`;
+};
+const captureGetArm = (fixture, scope, mode = 'hold', deadlineAt = Date.now() + 5000) => fixture.send('POST', '/__qa/context-config',
+  { captureGetResponse: { ...scope, mode, deadlineAt } }, true);
+const captureGetRelease = (fixture, scope, requestId) => fixture.send('POST', '/__qa/context-release',
+  { phase: 'capture-get', ...scope, requestId }, true);
+async function waitCaptureGetReceipt(fixture, holdId) {
+  const deadline = Date.now() + 3000;
+  do {
+    const row = (await fixture.state()).captureGet.receipts.find(item => item.holdId === holdId && item.requestId && item.snapshotHash);
+    if (row) return row;
+    await new Promise(resolve => setTimeout(resolve, 2));
+  } while (Date.now() < deadline);
+  assert.fail('Expected exact received capture GET did not arrive');
+}
+
+test('Briefing multi-target seed and held capture GET preserve CTX04 and exact room/source/range identity', async t => {
+  const fixture = await setupComments(t, { briefingMultiTarget: true }), [a, b] = fixture.seed.identities, [sourceA, sourceB] = a.sources;
+  assert.equal(fixture.seed.scenario, 'briefing-multi-target');
+  assert.deepEqual(a.briefing.steps.map(step => step.sourceIds), [[sourceA.sourceId, sourceA.sourceId, sourceB.sourceId], [sourceA.sourceId]]);
+  const steps = (await fixture.ready).snapshot(a.conversationId).runs[0].context.briefings[0].steps;
+  const target = (source, startLine, endLine) => ({ sourceId: source.sourceId, hash: source.captureHash, range: { startLine, endLine } });
+  assert.deepEqual(steps[0].targets, [target(sourceA, 1, 4), target(sourceA, 5, 8), target(sourceB, 1, 4)]);
+  assert.deepEqual(steps[1].target, target(sourceA, 1, 4)); assert.equal(Object.hasOwn(steps[1], 'targets'), false);
+  assert.equal(fixture.seed.counts.runtimeAtSetup.captureBatches, 0);
+  const held = captureGetScope(a, sourceA, 5, 8), first = captureGetScope(a, sourceA, 1, 4), other = captureGetScope(a, sourceB, 1, 4);
+  const body = { captureGetResponse: { ...held, mode: 'hold', deadlineAt: Date.now() + 5000 } };
+  assert.equal((await fixture.send('POST', '/__qa/context-config', body)).status, 403, 'owned token required');
+  const armed = await fixture.send('POST', '/__qa/context-config', body, true);
+  assert.equal(armed.status, 200); assert.equal(armed.body.requestId, null);
+  assert.equal((await fixture.send('GET', captureGetUrl(first))).status, 200, 'another range must not consume the hold');
+  assert.equal((await fixture.send('GET', captureGetUrl(other))).status, 200, 'another source must not consume the hold');
+  const statusUrl = sourceRoute(held);
+  assert.equal((await fixture.send('GET', statusUrl)).status, 200, 'source-status GET is independent of a capture hold');
+  const pending = fixture.send('GET', captureGetUrl(held));
+  const receipt = await waitCaptureGetReceipt(fixture, armed.body.holdId);
+  assert.equal((await fixture.send('GET', captureGetUrl(held))).status, 200, 'the arm applies to one request, not all identical GETs');
+  assert.equal(receipt.kind, 'capture-get'); assert.deepEqual(receipt.R, held);
+  assert.equal(receipt.account, 'a'); assert.equal(receipt.epoch, 0); assert.ok(receipt.snapshotHash);
+  assert.equal((await captureGetRelease(fixture, { ...held, startLine: 1, endLine: 4 }, receipt.requestId)).status, 409);
+  assert.equal((await captureGetRelease(fixture, { ...held, sourceId: sourceB.sourceId }, receipt.requestId)).status, 409);
+  assert.ok((await captureGetRelease(fixture, { ...held, clientThreadId: b.clientThreadId, conversationId: b.conversationId }, receipt.requestId)).status >= 400);
+  assert.equal((await captureGetRelease(fixture, held, armed.body.holdId)).status, 409, 'an arm ID is not a received GET ID');
+  const released = await captureGetRelease(fixture, held, receipt.requestId); assert.equal(released.status, 200);
+  const actual = await pending; assert.equal(actual.status, 200);
+  assert.deepEqual(actual.body.source.range, { startLine: 5, endLine: 8, totalLines: 12 });
+  assert.equal(actual.body.capture.hash, sourceA.captureHash);
+  assert.equal(released.body.receipt.snapshotHash, fingerprintQaBytes(JSON.stringify(actual.body)).sha256);
+  const state = await fixture.state();
+  assert.equal(state.sourceStatus.receipts.length, 0, 'capture receipts never pollute CTX04 state');
+  assert.equal(state.captureGet.receipts.length, 1); assert.equal(state.captureGet.responses.length, 0);
+  assert.equal(state.observed.sends.length, 0); assert.equal(state.context.captureBatches, 0); assert.equal(state.context.deliveries.length, 0);
+});
+
+test('Briefing capture receipts cannot evict retained CTX04 status receipts', async t => {
+  const fixture = await setupComments(t, { briefingMultiTarget: true }), [room] = fixture.seed.identities, source = room.sources[0];
+  const scope = captureGetScope(room, source, 1, 4), { startLine, endLine, ...statusScope } = scope;
+  const statusArm = await fixture.send('POST', '/__qa/context-config', { sourceStatusResponse: { ...statusScope,
+    mode: 'hold', deadlineAt: Date.now() + 5000 } }, true);
+  const statusPending = fixture.send('GET', sourceRoute(statusScope));
+  let statusReceipt;
+  for (let i = 0; i < 100 && !statusReceipt; i++) {
+    statusReceipt = (await fixture.state()).sourceStatus.receipts.find(row => row.holdId === statusArm.body.holdId && row.requestId);
+    if (!statusReceipt) await new Promise(resolve => setTimeout(resolve, 2));
+  }
+  assert.ok(statusReceipt);
+  await fixture.send('POST', '/__qa/context-release', { phase: 'sources', ...statusScope, requestId: statusReceipt.requestId }, true);
+  assert.equal((await statusPending).status, 200);
+  for (let i = 0; i < 65; i++) {
+    assert.equal((await captureGetArm(fixture, scope, 'deny')).status, 200);
+    assert.equal((await fixture.send('GET', captureGetUrl(scope))).status, 403);
+  }
+  const state = await fixture.state();
+  assert.equal(state.sourceStatus.receipts.length, 1); assert.equal(state.sourceStatus.receipts[0].holdId, statusArm.body.holdId);
+  assert.equal(state.captureGet.receipts.length, 64, 'capture receipts remain bounded independently');
+});
+
+test('Briefing capture hold capacity cannot consume the existing CTX04 status hold capacity', async t => {
+  const fixture = await setupComments(t, { briefingMultiTarget: true }), [room] = fixture.seed.identities, source = room.sources[0];
+  const ranges = [];
+  for (let startLine = 1; startLine <= 12 && ranges.length < 33; startLine++) {
+    for (let endLine = startLine; endLine <= 12 && ranges.length < 33; endLine++) ranges.push([startLine, endLine]);
+  }
+  for (const [startLine, endLine] of ranges.slice(0, 32)) {
+    assert.equal((await captureGetArm(fixture, captureGetScope(room, source, startLine, endLine))).status, 200);
+  }
+  assert.equal((await captureGetArm(fixture, captureGetScope(room, source, ...ranges[32]))).status, 429);
+  const { startLine, endLine, ...statusScope } = captureGetScope(room, source, 1, 4);
+  const status = await fixture.send('POST', '/__qa/context-config', { sourceStatusResponse: { ...statusScope,
+    mode: 'hold', deadlineAt: Date.now() + 5000 } }, true);
+  assert.equal(status.status, 200, 'a saturated capture queue cannot prevent a valid existing CTX04 hold');
+  const state = await fixture.state(); assert.equal(state.captureGet.responses.length, 32);
+  assert.equal(state.sourceStatus.responses.length, 1);
+});
+
+test('Briefing multi-target counts even rejected send, capture and comment POST attempts without bodies', async t => {
+  const fixture = await setupComments(t, { briefingMultiTarget: true });
+  assert.deepEqual((await fixture.state()).briefingMultiTargetAttempts, { sendPosts: 0, capturePosts: 0, commentPosts: 0 });
+  for (const route of ['/chat/send', '/context/captures', '/context/briefings/not-a-uuid/comments']) {
+    assert.ok((await fixture.send('POST', route, { privateBody: 'not-retained' })).status >= 400);
+  }
+  const attempts = (await fixture.state()).briefingMultiTargetAttempts;
+  assert.deepEqual(attempts, { sendPosts: 1, capturePosts: 1, commentPosts: 1 });
+  assert.doesNotMatch(JSON.stringify(attempts), /not-retained/);
+});
+
+test('Briefing capture GET control is opt-in, bounded, exact and has one-shot denial/failure', async t => {
+  assert.throws(() => setup(t, { stateFixtures: true, briefingMultiTarget: true }), /requires the isolated Briefing comments seed/);
+  const fixture = await setupComments(t, { briefingMultiTarget: true }), [room] = fixture.seed.identities, source = room.sources[0];
+  const scope = captureGetScope(room, source, 1, 4), now = Date.now();
+  for (const patch of [{ startLine: 0 }, { endLine: 0 }, { startLine: 5, endLine: 4 }, { startLine: 1.5 },
+    { endLine: 13 }, { endLine: 501 }, { deadlineAt: null }, { deadlineAt: now - 1 }, { deadlineAt: now + 31000 },
+    { deadlineAt: 'later' }, { mode: 'other' }, { packetId: 'widening' }, { engineProfileId: 'wrong' },
+    { sourceId: '00000000-0000-0000-0000-000000000000' }]) {
+    assert.ok((await captureGetArm(fixture, { ...scope, ...patch }, patch.mode || 'hold',
+      Object.hasOwn(patch, 'deadlineAt') ? patch.deadlineAt : now + 5000)).status >= 400, JSON.stringify(patch));
+  }
+  assert.equal((await fixture.send('POST', '/__qa/context-config', { captureGetResponse: { ...scope, mode: 'hold', deadlineAt: now + 5000 },
+    failNextCapture: true }, true)).status, 400, 'control bodies cannot combine modes');
+  for (const [mode, status, code] of [['deny', 403, 'QA_CAPTURE_GET_DENIED'], ['error', 503, 'QA_CAPTURE_GET_FAILED']]) {
+    const armed = await captureGetArm(fixture, scope, mode); assert.equal(armed.status, 200);
+    const first = await fixture.send('GET', captureGetUrl(scope)); assert.equal(first.status, status); assert.equal(first.body.code, code);
+    const row = (await fixture.state()).captureGet.receipts.find(item => item.holdId === armed.body.holdId);
+    assert.equal(row.terminalCause, `fixture-${mode}`); assert.equal(row.responseStatus, status); assert.ok(row.requestId);
+    assert.equal((await fixture.send('GET', captureGetUrl(scope))).status, 200, 'failure applies to exactly one GET');
+  }
+  const state = await fixture.state(); assert.equal(state.sourceStatus.receipts.length, 0);
+  assert.equal(state.captureGet.responses.length, 0); assert.equal(state.observed.sends.length, 0);
+});
+
+test('Briefing capture GET and CTX04 status holds coexist and release only their own receipt kind', async t => {
+  const fixture = await setupComments(t, { briefingMultiTarget: true }), [room] = fixture.seed.identities, source = room.sources[0];
+  const scope = captureGetScope(room, source, 5, 8), { startLine, endLine, ...statusScope } = scope;
+  const statusArm = await fixture.send('POST', '/__qa/context-config', { sourceStatusResponse: { ...statusScope,
+    mode: 'hold', deadlineAt: Date.now() + 5000 } }, true);
+  const captureArm = await captureGetArm(fixture, scope); assert.equal(statusArm.status, 200); assert.equal(captureArm.status, 200);
+  const statusPending = fixture.send('GET', sourceRoute(statusScope)), capturePending = fixture.send('GET', captureGetUrl(scope));
+  const captureReceipt = await waitCaptureGetReceipt(fixture, captureArm.body.holdId);
+  await waitFor(async () => (await fixture.state()).sourceStatus.receipts.some(row => row.holdId === statusArm.body.holdId && row.requestId));
+  const statusReceipt = (await fixture.state()).sourceStatus.receipts.find(row => row.holdId === statusArm.body.holdId);
+  assert.equal((await fixture.send('POST', '/__qa/context-release', { phase: 'sources', ...statusScope,
+    requestId: captureReceipt.requestId }, true)).status, 409);
+  assert.equal((await captureGetRelease(fixture, scope, statusReceipt.requestId)).status, 409);
+  assert.equal((await captureGetRelease(fixture, scope, captureReceipt.requestId)).status, 200);
+  assert.equal((await capturePending).status, 200);
+  assert.equal((await fixture.state()).sourceStatus.responses.length, 1, 'capture release cannot release status hold');
+  assert.equal((await fixture.send('POST', '/__qa/context-release', { phase: 'sources', ...statusScope,
+    requestId: statusReceipt.requestId }, true)).status, 200);
+  assert.equal((await statusPending).status, 200);
+  const state = await fixture.state(); assert.equal(state.sourceStatus.receipts.length, 1); assert.equal(state.captureGet.receipts.length, 1);
+  assert.equal(state.sourceStatus.expired, 0); assert.equal(state.captureGet.expired, 0);
+});
+
+test('Briefing capture one-shot is claimed by the first matching GET before an asynchronous store read', async t => {
+  const fixture = await setupComments(t, { briefingMultiTarget: true }), [room] = fixture.seed.identities;
+  const scope = captureGetScope(room, room.sources[0], 1, 4), store = (await fixture.ready).store, original = store.inspect.bind(store);
+  let signalRead, resume, calls = 0;
+  const started = new Promise(resolve => { signalRead = resolve; }), gate = new Promise(resolve => { resume = resolve; });
+  t.after(() => resume());
+  t.mock.method(store, 'inspect', async (...args) => { if (++calls === 1) { signalRead(); await gate; } return original(...args); });
+  const armed = await captureGetArm(fixture, scope), first = fixture.send('GET', captureGetUrl(scope));
+  await started;
+  const second = await fixture.send('GET', captureGetUrl(scope)); assert.equal(second.status, 200);
+  const reading = (await fixture.state()).captureGet.receipts.find(row => row.holdId === armed.body.holdId);
+  assert.ok(reading.requestId); assert.equal(reading.snapshotHash, null);
+  resume(); const receipt = await waitCaptureGetReceipt(fixture, armed.body.holdId);
+  assert.equal((await captureGetRelease(fixture, scope, receipt.requestId)).status, 200);
+  assert.equal((await first).status, 200); assert.equal(calls, 2);
+});
+
+test('Briefing capture store failure consumes its arm and account ABA cannot release an in-flight store read', async t => {
+  const fixture = await setupComments(t, { briefingMultiTarget: true }), [room] = fixture.seed.identities;
+  const scope = captureGetScope(room, room.sources[0], 1, 4), store = (await fixture.ready).store, original = store.inspect.bind(store);
+  let behavior = 'fail', signalRead, resume;
+  const started = new Promise(resolve => { signalRead = resolve; }), gate = new Promise(resolve => { resume = resolve; });
+  t.after(() => resume());
+  t.mock.method(store, 'inspect', async (...args) => {
+    if (behavior === 'fail') { behavior = 'normal'; throw new Error('QA synthetic store read failed'); }
+    if (behavior === 'wait') { signalRead(); await gate; }
+    return original(...args);
+  });
+  const failedArm = await captureGetArm(fixture, scope);
+  assert.equal((await fixture.send('GET', captureGetUrl(scope))).status, 400);
+  let state = await fixture.state();
+  assert.equal(state.captureGet.receipts.find(row => row.holdId === failedArm.body.holdId).terminalCause, 'capture-read-error');
+  assert.equal(state.captureGet.responses.length, 0); assert.equal((await fixture.send('GET', captureGetUrl(scope))).status, 200);
+  behavior = 'wait'; const heldArm = await captureGetArm(fixture, scope), pending = fixture.send('GET', captureGetUrl(scope));
+  await started;
+  await fixture.send('POST', '/__qa/account-change', { variant: 'b' }, true);
+  await fixture.send('POST', '/__qa/account-change', { variant: 'a' }, true);
+  resume(); const response = await pending; assert.equal(response.status, 403); assert.equal(response.body.code, 'ACCOUNT_CHANGED');
+  state = await fixture.state();
+  assert.equal(state.captureGet.receipts.find(row => row.holdId === heldArm.body.holdId).terminalCause, 'account-change');
+  assert.equal(state.captureGet.responses.length, 0);
+});
+
+for (const terminal of ['expiry', 'peer-close', 'account-change', 'server-close']) {
+  test(`Briefing capture paused store read settles ${terminal} before the read resumes`, { timeout: 5000 }, async t => {
+    let handler, handlerDone, endCalls = 0;
+    const server = http.createServer((req, res) => {
+      if (req.method === 'GET' && req.url.startsWith('/context/captures/')) {
+        const end = res.end.bind(res); res.end = (...args) => { endCalls++; return end(...args); };
+        handlerDone = Promise.resolve(handler(req, res));
+      } else void handler(req, res);
+    });
+    await new Promise((resolve, reject) => { server.once('error', reject); server.listen(0, '127.0.0.1', resolve); });
+    t.after(() => { server.closeAllConnections(); server.close(); });
+    const port = server.address().port; assert.notEqual(port, 39218);
+    const fixture = await setupComments(t, { briefingMultiTarget: true, fixturePort: port }); handler = fixture.handler;
+    const [room] = fixture.seed.identities, scope = captureGetScope(room, room.sources[0], 1, 4);
+    const store = (await fixture.ready).store, original = store.inspect.bind(store);
+    let signalRead, resume;
+    const started = new Promise(resolve => { signalRead = resolve; }), gate = new Promise(resolve => { resume = resolve; });
+    t.after(() => resume());
+    t.mock.method(store, 'inspect', async (...args) => { signalRead(); await gate; return original(...args); });
+    const armed = await captureGetArm(fixture, scope, 'hold', Date.now() + (terminal === 'expiry' ? 300 : 5000));
+    const controller = new AbortController();
+    const pending = fetch(`http://127.0.0.1:${port}${captureGetUrl(scope)}`, { signal: controller.signal })
+      .then(async response => ({ status: response.status, body: await response.json() }), error => ({ error: error.name }));
+    const within = async promise => { let timer; try { return await Promise.race([promise,
+      new Promise((_, reject) => { timer = setTimeout(() => reject(new Error('HTTP response remained blocked by paused store read')), 1500); })]);
+    } finally { clearTimeout(timer); } };
+    await within(started);
+    let state = await fixture.state(), receipt = state.captureGet.receipts.find(row => row.holdId === armed.body.holdId);
+    assert.ok(receipt.requestId); assert.equal(receipt.snapshotHash, null);
+    assert.equal(state.captureGet.responses[0].phase, 'reading');
+    if (terminal === 'expiry') {
+      const early = await captureGetRelease(fixture, scope, receipt.requestId);
+      assert.equal(early.status, 409); assert.equal(early.body.code, 'QA_SOURCE_RESPONSE_NOT_HELD');
+    } else if (terminal === 'peer-close') controller.abort();
+    else if (terminal === 'account-change') await fixture.send('POST', '/__qa/account-change', { variant: 'b' }, true);
+    else await fixture.dispose();
+    const response = await within(pending);
+    if (terminal === 'peer-close') assert.equal(response.error, 'AbortError');
+    else {
+      assert.equal(response.status, { expiry: 504, 'account-change': 403, 'server-close': 503 }[terminal]);
+      assert.equal(response.body.code, { expiry: 'QA_CAPTURE_GET_EXPIRED', 'account-change': 'ACCOUNT_CHANGED', 'server-close': 'QA_FIXTURE_CLOSED' }[terminal]);
+      assert.equal(response.body.receipt.terminalCause, terminal);
+    }
+    if (terminal === 'account-change') {
+      await fixture.send('POST', '/__qa/account-change', { variant: 'a' }, true);
+      assert.equal((await captureGetRelease(fixture, scope, receipt.requestId)).status, 403,
+        'returning to the original account cannot release the previous read epoch');
+    }
+    if (terminal !== 'server-close') {
+      const until = Date.now() + 1000;
+      do {
+        state = await fixture.state(); receipt = state.captureGet.receipts.find(row => row.holdId === armed.body.holdId);
+        if (receipt.terminalCause) break;
+        await new Promise(resolve => setTimeout(resolve, 5));
+      } while (Date.now() < until);
+      assert.equal(receipt.terminalCause, terminal === 'peer-close' ? 'peer-close-before-finish' : terminal);
+      assert.equal(receipt.snapshotHash, null);
+    }
+    const endedBeforeResume = endCalls; assert.equal(endedBeforeResume, terminal === 'peer-close' ? 0 : 1);
+    resume(); await within(handlerDone);
+    assert.equal(endCalls, endedBeforeResume, 'late store completion cannot write a second response or change its terminal cause');
+  });
+}
+
+test('Briefing capture GET expiry, peer close, account ABA and disposal settle the original bounded hold', async t => {
+  const fixture = await setupComments(t, { briefingMultiTarget: true }), [room] = fixture.seed.identities;
+  const scope = captureGetScope(room, room.sources[0], 1, 4);
+  let armed = await captureGetArm(fixture, scope, 'hold', Date.now() + 60);
+  let pending = fixture.send('GET', captureGetUrl(scope)); let receipt = await waitCaptureGetReceipt(fixture, armed.body.holdId);
+  const expired = await pending; assert.equal(expired.status, 504); assert.equal(expired.body.code, 'QA_CAPTURE_GET_EXPIRED');
+  assert.equal(expired.body.receipt.terminalCause, 'expiry'); assert.equal((await captureGetRelease(fixture, scope, receipt.requestId)).status, 409);
+  let state = await fixture.state(); assert.equal(state.captureGet.expired, 1); assert.equal(state.sourceStatus.expired, 0);
+  armed = await captureGetArm(fixture, scope); let response;
+  pending = fixture.send('GET', captureGetUrl(scope), null, false, res => { response = res; });
+  receipt = await waitCaptureGetReceipt(fixture, armed.body.holdId); response.destroy(); assert.equal((await pending).status, 0);
+  const closed = await captureGetRelease(fixture, scope, receipt.requestId); assert.equal(closed.status, 409);
+  assert.equal(closed.body.receipt.terminalCause, 'peer-close-before-finish'); assert.equal(closed.body.receipt.writeAttempted, false);
+  armed = await captureGetArm(fixture, scope); pending = fixture.send('GET', captureGetUrl(scope));
+  receipt = await waitCaptureGetReceipt(fixture, armed.body.holdId);
+  await fixture.send('POST', '/__qa/account-change', { variant: 'b' }, true);
+  const changed = await pending; assert.equal(changed.status, 403); assert.equal(changed.body.receipt.terminalCause, 'account-change');
+  await fixture.send('POST', '/__qa/account-change', { variant: 'a' }, true);
+  assert.equal((await captureGetRelease(fixture, scope, receipt.requestId)).status, 403, 'account ABA cannot revive a held GET');
+  armed = await captureGetArm(fixture, scope); pending = fixture.send('GET', captureGetUrl(scope));
+  await waitCaptureGetReceipt(fixture, armed.body.holdId); await fixture.dispose();
+  const disposed = await pending; assert.equal(disposed.status, 503); assert.equal(disposed.body.receipt.terminalCause, 'server-close');
+});
 
 test('CTX04 state fixture is opt-in; exact Codex capture routing preserves legacy GET and rejects query widening', async t => {
   const { handler } = setup(t);

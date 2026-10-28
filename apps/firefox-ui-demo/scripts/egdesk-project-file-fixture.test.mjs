@@ -13,11 +13,12 @@ const TOKEN = 'unit-project-fixture-control-token';
 const ENV = { EGDESK_QA_PROJECT_FILE_FIXTURE: '1', EGDESK_QA_FIXTURE_TRANSPORT: '1',
   EGDESK_QA_REAL_TURN: '0', EGDESK_QA_FIXTURE_PORT: '49318' };
 
-function setup(t) {
+function setup(t, { watch = false, broadcast = null } = {}) {
   const source = fs.mkdtempSync(path.join(canonicalTempRoot(), 'egdesk-project-loader-'));
   for (const name of LOADER_FILES) fs.writeFileSync(path.join(source, name), `unit loader ${name}\n`);
   const { profile } = bootstrapQaProfile({ loaderSource: source });
-  const fixture = createProjectFileFixture({ profile, token: TOKEN, env: ENV });
+  const fixture = createProjectFileFixture({ profile, token: TOKEN,
+    env: watch ? { ...ENV, EGDESK_QA_PROJECT_FILE_WATCH: '1' } : ENV, broadcast });
   t.after(async () => {
     await fixture.dispose();
     for (const [directory, prefix] of [[profile, 'egdesk-chat-test-'], [source, 'egdesk-project-loader-']]) {
@@ -55,12 +56,57 @@ function client(fixture) {
 
 test('opt-in is mandatory; import/factory starts no listener and owns only a temp workspace', t => {
   assert.throws(() => createProjectFileFixture({ env: {}, token: TOKEN }), /opt-in/);
+  assert.throws(() => createProjectFileFixture({ env: { ...ENV, EGDESK_QA_PROJECT_FILE_WATCH: '1' }, token: TOKEN }), /broadcaster/);
+  assert.throws(() => createProjectFileFixture({ env: { ...ENV, EGDESK_QA_PROJECT_FILE_WATCH: 'invalid' }, token: TOKEN }), /watcher opt-in/);
   const fixture = setup(t), state = fixture.snapshot();
   assert.equal(state.kind, 'egdesk-project-file-fixture');
   assert.ok(state.workspace.startsWith(`${state.profile}${path.sep}`));
   assert.equal(state.currentOriginalSha256, state.originalSha256);
   assert.deepEqual(state.persisted, { projects: [], bindings: [] });
   assert.deepEqual([state.providerTurns, state.nativePickerInvocations, state.nativeProcessSpawns], [0, 0, 0]);
+});
+
+test('owned watcher emits the real file.changed frame after an authorized create-only fixture write', { timeout: 6000 }, async t => {
+  if (process.platform !== 'darwin') return t.skip('owned recursive filesystem watcher requires macOS');
+  const frames = [], fixture = setup(t, { watch: true, broadcast: frame => frames.push(frame) });
+  const route = '/__qa/project-file/watch-create';
+  assert.equal((await request(fixture, route)).status, 403, 'a control token is mandatory');
+  assert.equal((await request(fixture, route, {}, { token: true })).status, 409, 'no write before a watched root');
+  assert.equal((await request(fixture, route, { path: '../outside' }, { token: true })).status, 400);
+  await configure(fixture, { pickerResults: ['select-owned'] });
+  const selected = await client(fixture).pickers.chooseProjectFolder({ boardId: 'watch-board', title: 'Owned watcher' });
+  assert.ok(fixture.snapshot().watchRoots.some(row => row.rootId === selected.rootId && row.watching && row.rootKind === 'workspace'));
+  const changed = await request(fixture, route, {}, { token: true });
+  assert.equal(changed.status, 200); assert.equal(changed.body.relativePath, 'qa-expanded/qa-watch-created.txt');
+  const deadline = Date.now() + 4000;
+  while (!frames.some(frame => frame.event?.payload?.relativePath === changed.body.relativePath) && Date.now() < deadline) {
+    await new Promise(resolve => setTimeout(resolve, 25));
+  }
+  const frame = frames.find(value => value.event?.payload?.relativePath === changed.body.relativePath);
+  assert.equal(frame?.type, 'workflow.event'); assert.equal(frame?.v, 1);
+  assert.equal(frame?.event?.topic, 'file.changed'); assert.equal(frame?.event?.source, 'file');
+  assert.equal(frame?.event?.payload?.rootId, selected.rootId);
+  assert.ok(['rename', 'change'].includes(frame?.event?.payload?.change));
+  const receipt = fixture.snapshot();
+  assert.ok(receipt.watchEvents.some(event => event.id === frame.event.id));
+  assert.deepEqual(receipt.watchWrites.map(row => [row.relativePath, row.operation]), [['qa-expanded/qa-watch-created.txt', 'create-only']]);
+  assert.equal(receipt.currentOriginalSha256, receipt.originalSha256);
+  assert.notEqual((await request(fixture, route, {}, { token: true })).status, 200, 'create-only target is never overwritten');
+});
+
+test('ordinary root registration requires watcher opt-in and the actual one-use picker grant', async t => {
+  const disabled = setup(t);
+  assert.equal((await request(disabled, '/v1/files/roots', { selectionId: 'not-a-grant' })).status, 403);
+  const fixture = setup(t, { watch: true, broadcast: () => {} });
+  assert.notEqual((await request(fixture, '/v1/files/roots', { selectionId: 'not-a-grant' })).status, 200);
+  await configure(fixture, { pickerResults: ['select-owned'] });
+  const root = await client(fixture).pickers.chooseRoot();
+  const state = fixture.snapshot();
+  assert.ok(root?.rootId && root?.directoryId);
+  assert.ok(state.watchRoots.some(row => row.rootId === root.rootId && row.rootKind === 'workspace'));
+  assert.deepEqual(state.persisted, { projects: [], bindings: [] });
+  assert.equal(state.fileRequests.filter(row => row.operation === 'registerRoot' && row.status === 200).length, 1);
+  assert.equal(state.fileRequests.some(row => row.operation === 'attachProject'), false);
 });
 
 test('real picker channel/begin/cancel then selection/complete/attach persist and reopen a real project', async t => {

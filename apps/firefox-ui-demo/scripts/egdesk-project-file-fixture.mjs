@@ -6,6 +6,8 @@ import path from 'node:path';
 import { createHash, randomBytes, randomUUID } from 'node:crypto';
 import { createRequire } from 'node:module';
 import { createEGDeskFileHttpAdapter, EGDESK_FILE_ENDPOINTS, readEGDeskFileBody } from '../helper/egdesk-file-http.mjs';
+import { createWorkflowEventBus } from '../helper/egdesk-event-bus.mjs';
+import { createConnectedRootWatcher } from '../helper/egdesk-file-watch.mjs';
 import { guardBridgeRequest, sendJson } from '../helper/codex-bridge-http.mjs';
 import { terminalScriptLine } from '../overlay/resources/EGDeskTerminalState.sys.mjs';
 import { assertQaFixtureManifest } from './egdesk-chat-qa-profile.mjs';
@@ -20,7 +22,8 @@ const FILE_OPERATIONS = new Set(['openPickerChannel', 'beginPicker', 'completePi
   'diffDraft', 'sourceStatus', 'resolvePath']);
 const TERMINAL_ROUTES = new Set(['/terminal/shells', '/terminal/spawn', '/terminal/write', '/terminal/read',
   '/terminal/resize', '/terminal/kill']);
-const CONTROL_ROUTES = new Set(['/__qa/project-file/state', '/__qa/project-file/config', '/__qa/project-file/picker']);
+const CONTROL_ROUTES = new Set(['/__qa/project-file/state', '/__qa/project-file/config', '/__qa/project-file/picker',
+  '/__qa/project-file/watch-create']);
 const error = (code, message, httpStatus = 400) => Object.assign(new Error(message), { code, httpStatus });
 const plain = value => value && typeof value === 'object' && !Array.isArray(value);
 const fields = (body, allowed) => {
@@ -67,9 +70,13 @@ export function assertProjectTerminalResponse(route, response, sessionId = null)
   return true;
 }
 
-export function createProjectFileFixture({ profile: profilePath, token, env = process.env }) {
+export function createProjectFileFixture({ profile: profilePath, token, env = process.env, broadcast = null }) {
   assert.equal(projectFileFixtureEnabled(env), true, 'Explicit project File fixture opt-in is required');
   assert.ok(typeof token === 'string' && token.length >= 16, 'Project fixture control token is required');
+  assert.ok(env.EGDESK_QA_PROJECT_FILE_WATCH == null || ['0', '1'].includes(env.EGDESK_QA_PROJECT_FILE_WATCH),
+    'Invalid project File watcher opt-in');
+  const watchEnabled = env.EGDESK_QA_PROJECT_FILE_WATCH === '1';
+  if (watchEnabled) assert.equal(typeof broadcast, 'function', 'Watcher QA requires an explicit event broadcaster');
   const config = qaBridgeConfig(env), manifest = assertQaFixtureManifest(profilePath);
   assert.ok(manifest.backendDataDir, 'Owned QA backend data directory is required');
   const root = fs.mkdtempSync(path.join(manifest.backendDataDir, 'project-file-qa-'));
@@ -81,12 +88,16 @@ export function createProjectFileFixture({ profile: profilePath, token, env = pr
   const originalText = `Owned project FileView fixture\n${outputMarker}\n`;
   const originalPath = path.join(workspace, 'qa-project.txt');
   fs.writeFileSync(originalPath, originalText, { flag: 'wx', mode: 0o600 });
+  const watchDirectory = path.join(workspace, 'qa-expanded');
+  if (watchEnabled) {
+    fs.mkdirSync(watchDirectory, { mode: 0o700 });
+    fs.writeFileSync(path.join(watchDirectory, 'qa-existing.txt'), 'owned expanded folder\n', { flag: 'wx', mode: 0o600 });
+  }
   const command = `printf '${outputMarker}\\n'`;
   const owner = `qa-project-file:${randomUUID()}`;
   const databasePath = path.join(store, `projects-${hash(owner)}.sqlite`);
-  const adapter = createEGDeskFileHttpAdapter({ draftDirectory: store, projectDirectory: store,
-    localOwnerScope: owner, port: config.port });
   const evidence = { fileRequests: [], blockedRoutes: [], pickerResults: [], terminalRequests: [],
+    watchRoots: [], watchEvents: [], watchWrites: [],
     providerTurns: 0, nativePickerInvocations: 0, nativeProcessSpawns: 0 };
   const sessions = new Map(), pendingPickers = new Map(), usedNonces = new Set();
   let pickerResults = [], nextTerminalOutcome = 'complete', writeArmed = true, sequence = 0, disposed = false;
@@ -95,6 +106,23 @@ export function createProjectFileFixture({ profile: profilePath, token, env = pr
     const item = { sequence: ++sequence, at: Date.now(), ...value };
     list.push(item); return item;
   };
+  const allowedWatchRoots = new Set([fs.realpathSync.native(workspace), fs.realpathSync.native(roomWorkspace)]);
+  const watchBus = watchEnabled ? createWorkflowEventBus() : null;
+  const watcher = watchEnabled ? createConnectedRootWatcher({ bus: watchBus, owner }) : null;
+  const unsubscribeWatch = watchEnabled ? watchBus.subscribe({ owner, topics: ['file.changed'] }, event => {
+    record(evidence.watchEvents, { id: event.id, seq: event.seq, topic: event.topic, payload: event.payload });
+    broadcast({ type: 'workflow.event', v: 1, event, ts: Date.now() });
+  }) : null;
+  const onRootRegistered = watchEnabled ? value => {
+    // No test control can cause this watcher to examine an unowned folder.
+    let real;
+    try { real = fs.realpathSync.native(value.absolutePath); } catch { return; }
+    if (!allowedWatchRoots.has(real)) return;
+    const watching = watcher.watchRoot({ rootId: value.rootId, absolutePath: real });
+    record(evidence.watchRoots, { rootId: value.rootId, watching, rootKind: real === workspace ? 'workspace' : 'room' });
+  } : null;
+  const adapter = createEGDeskFileHttpAdapter({ draftDirectory: store, projectDirectory: store,
+    localOwnerScope: owner, port: config.port, onRootRegistered });
   const persisted = () => {
     if (!fs.existsSync(databasePath)) return { projects: [], bindings: [] };
     const { DatabaseSync } = require('node:sqlite');
@@ -115,7 +143,8 @@ export function createProjectFileFixture({ profile: profilePath, token, env = pr
     root, workspace, roomWorkspace, store, originalPath, originalText, originalSha256: hash(originalText),
     currentOriginalSha256: hash(fs.readFileSync(originalPath)), command, outputMarker,
     synthetic: { picker: 'OS-directory-result-only', shell: 'terminal-http-io-only' },
-    realComponents: ['File HTTP adapter', 'managed drafts', 'project SQLite store'],
+    realComponents: ['File HTTP adapter', 'managed drafts', 'project SQLite store', ...(watchEnabled ? ['connected-root watcher', 'workflow event bus'] : [])],
+    watchEnabled, watchState: watcher?.snapshot() || null,
     queuedPickerResults: pickerResults.length, nextTerminalOutcome, writeArmed,
     ...structuredClone(evidence), persisted: persisted(), roomDefaults: roomDefaults(),
     sessions: [...sessions.values()].map(({ chunks, ...session }) => ({ ...session, unreadChunks: chunks.length })) });
@@ -138,6 +167,25 @@ export function createProjectFileFixture({ profile: profilePath, token, env = pr
       if (CONTROL_ROUTES.has(route) && route !== '/__qa/project-file/picker') {
         if (req.headers['x-egdesk-qa-token'] !== token) throw error('QA_TOKEN_REQUIRED', 'Fixture control token required', 403);
         if (route.endsWith('/state') && req.method === 'GET') { sendJson(res, 200, snapshot()); return true; }
+        if (route.endsWith('/watch-create')) {
+          if (!watchEnabled || req.method !== 'POST') throw error('QA_WATCH_DISABLED', 'Owned watcher QA is not enabled', 403);
+          fields(await jsonBody(req), []);
+          const directory = fs.lstatSync(workspace);
+          if (!directory.isDirectory() || directory.isSymbolicLink() || fs.realpathSync.native(workspace) !== workspace ||
+              !allowedWatchRoots.has(workspace) || watcher.snapshot().watchedRoots < 1 ||
+              !evidence.watchRoots.some(item => item.watching && item.rootKind === 'workspace')) {
+            throw error('QA_WATCH_ROOT', 'The selected owned workspace must be watched before mutation', 409);
+          }
+          const watchInfo = fs.lstatSync(watchDirectory);
+          if (!watchInfo.isDirectory() || watchInfo.isSymbolicLink() || fs.realpathSync.native(watchDirectory) !== watchDirectory) {
+            throw error('QA_WATCH_ROOT', 'The owned expanded folder must remain canonical', 409);
+          }
+          const relativePath = 'qa-expanded/qa-watch-created.txt';
+          const target = path.join(watchDirectory, 'qa-watch-created.txt');
+          fs.writeFileSync(target, 'owned watcher fixture\n', { flag: 'wx', mode: 0o600 });
+          record(evidence.watchWrites, { relativePath, operation: 'create-only' });
+          sendJson(res, 200, { ok: true, relativePath }); return true;
+        }
         if (!route.endsWith('/config') || req.method !== 'POST') throw error('QA_METHOD', 'Invalid control method', 405);
         const body = await jsonBody(req);
         fields(body, ['pickerResults', 'nextTerminalOutcome']);
@@ -169,7 +217,10 @@ export function createProjectFileFixture({ profile: profilePath, token, env = pr
       }
       if (route.startsWith('/v1/files/')) {
         const operation = OPERATIONS.get(route);
-        if (req.method !== 'POST' || !FILE_OPERATIONS.has(operation)) {
+        // Watcher QA also covers an ordinary explicitly picked root without a
+        // Board. The real adapter still requires the one-use picker grant.
+        const allowed = FILE_OPERATIONS.has(operation) || (watchEnabled && operation === 'registerRoot');
+        if (req.method !== 'POST' || !allowed) {
           record(evidence.blockedRoutes, { route, reason: 'out-of-scope-no-native-process-or-original-write' });
           throw error('QA_FILE_OPERATION_DISABLED', 'This QA fixture does not enable Git, original writes, or unrelated file operations', 403);
         }
@@ -259,7 +310,9 @@ export function createProjectFileFixture({ profile: profilePath, token, env = pr
       return true;
     }
   }
-  return { handle, snapshot, async dispose() { disposed = true; await adapter.close(); },
+  return { handle, snapshot, async dispose() {
+    disposed = true; watcher?.close(); unsubscribeWatch?.(); watchBus?.close(); await adapter.close();
+  },
     info: { projectFileFixture: true, root, workspace, providerTurns: 0, nativePickerInvocations: 0,
       nativeProcessSpawns: 0, synthetic: { picker: 'OS-directory-result-only', shell: 'terminal-http-io-only' } } };
 }

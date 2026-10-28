@@ -126,6 +126,9 @@ if (env.EGDESK_QA_CONTEXT_SOURCE_CHANGE_SEED != null && !['0', '1'].includes(env
 const sourceChangeSeedEnabled = env.EGDESK_QA_CONTEXT_SOURCE_CHANGE_SEED === '1';
 if (env.EGDESK_QA_BRIEFING_COMMENTS_SEED != null && !['0', '1'].includes(env.EGDESK_QA_BRIEFING_COMMENTS_SEED)) throw new Error('Invalid Briefing comments seed gate');
 const briefingCommentsSeedEnabled = env.EGDESK_QA_BRIEFING_COMMENTS_SEED === '1';
+if (env.EGDESK_QA_BRIEFING_MULTI_TARGET != null && !['0', '1'].includes(env.EGDESK_QA_BRIEFING_MULTI_TARGET)) throw new Error('Invalid Briefing multi-target seed gate');
+const briefingMultiTargetEnabled = env.EGDESK_QA_BRIEFING_MULTI_TARGET === '1';
+if (briefingMultiTargetEnabled && !briefingCommentsSeedEnabled) throw new Error('Briefing multi-target seed requires the isolated Briefing comments seed');
 if (briefingCommentsSeedEnabled && (sourceChangeSeedEnabled || env.EGDESK_QA_STATE_FIXTURES !== '1' || env.EGDESK_QA_REAL_TURN !== '0'
   || claudeFixture || runOutputsEnabled || taskGateEnabled || originFileEnabled || projectFileFixtureEnabled(env) || portableTransferFixtureEnabled(env))) {
   throw new Error('Briefing comments seed requires its exclusive core state fixture and real-turn zero');
@@ -137,8 +140,19 @@ if (sourceChangeSeedEnabled && (env.EGDESK_QA_STATE_FIXTURES !== '1' || env.EGDE
 if (originFileEnabled && fs.lstatSync(path.join(profile, 'prefs.js'), { throwIfNoEntry: false })) {
   throw new Error('Origin File requires a fresh prefs-less owned QA profile');
 }
+if (env.EGDESK_QA_PROJECT_FILE_WATCH != null && !['0', '1'].includes(env.EGDESK_QA_PROJECT_FILE_WATCH)) {
+  throw new Error('Invalid project File watcher opt-in');
+}
+if (env.EGDESK_QA_PROJECT_FILE_WATCH === '1' && !projectFileFixtureEnabled(env)) {
+  throw new Error('Project File watcher requires its exclusive model-free fixture');
+}
 const projectFileFixture = projectFileFixtureEnabled(env)
-  ? createProjectFileFixture({ profile, token, env }) : null;
+  ? createProjectFileFixture({ profile, token, env, broadcast: frame => {
+    observed.projectFileWatchBroadcasts ||= [];
+    if (observed.projectFileWatchBroadcasts.length >= 128) throw new Error('Project watcher broadcast trace limit');
+    observed.projectFileWatchBroadcasts.push({ eventId: frame?.event?.id || null, clients: clients.size });
+    broadcastFixtureEvent(frame);
+  } }) : null;
 const portableTransferFixture = portableTransferFixtureEnabled(env)
   ? createPortableTransferFixture({ profile, token, env }) : null;
 const modelFreeFixture = !!(projectFileFixture || portableTransferFixture);
@@ -152,7 +166,8 @@ let sourceChangeScene = null;
 let sourceChangeHistoryHandler = null, sourceChangeClosing = false;
 let briefingCommentsHandler = null;
 const sourceChangeReady = sourceChangeSeedEnabled || briefingCommentsSeedEnabled
-  ? (briefingCommentsSeedEnabled ? seedQaBriefingCommentsScene : seedQaSourceChangeScene)(profile, context).then(scene => {
+  ? (briefingCommentsSeedEnabled ? seedQaBriefingCommentsScene(profile, context, { multiTarget: briefingMultiTargetEnabled })
+    : seedQaSourceChangeScene(profile, context)).then(scene => {
   sourceChangeScene = scene;
   sourceChangeHistoryHandler = createChatHttpHandler(scene.history, () => { throw new Error('No seed auth calls'); });
   if (briefingCommentsSeedEnabled) {
@@ -171,6 +186,10 @@ const sourceResponses = new Map();
 const sourceResponsesInFlight = new Set();
 const sourceReceipts = [];
 const sourceStatusEvidence = { reads: [], controls: [], releases: [], expired: 0 };
+const captureGetEvidence = { releases: [], expired: 0 };
+// Count only route-entry attempts in this opt-in synthetic scenario, including
+// refused requests. No request bodies, drafts or credentials are retained.
+const briefingMultiTargetAttempts = { sendPosts: 0, capturePosts: 0, commentPosts: 0 };
 const commentArms = new Map(), commentPending = new Set(), commentReceipts = [], commentRecoveryGets = new Map();
 
 const streamId = randomUUID();
@@ -252,6 +271,10 @@ function codexContextRouting(body, { requireConversation = false } = {}) {
     ...(body.conversationId ? { conversationId: body.conversationId } : {}), owner: accountVariant, epoch: codexContextEpoch };
 }
 const sourceResponseKey = r => JSON.stringify([r.owner, r.epoch, ...contextRoutingKeys.map(k => r[k]), r.sourceId]);
+const captureResponseKey = r => JSON.stringify(['capture-get', r.owner, r.epoch, ...contextRoutingKeys.map(k => r[k]),
+  r.sourceId, r.startLine, r.endLine]);
+const sourceResponseCount = captureGet => [...sourceResponses.values()]
+  .filter(entry => (entry.kind === 'capture-get') === captureGet).length;
 const sameSourceConversation = (a, b) => ['owner', 'epoch', ...contextRoutingKeys].every(k => a[k] === b[k]);
 const publicSourceRoute = r => Object.fromEntries([...contextRoutingKeys, 'sourceId'].map(key => [key, r[key]]));
 function forgetSourceResponse(entry) {
@@ -261,25 +284,34 @@ function forgetSourceResponse(entry) {
   if (sourceResponses.get(entry.key) === entry) sourceResponses.delete(entry.key);
 }
 function createSourceReceipt(entry) {
-  if (sourceReceipts.length >= 64) {
-    const oldestTerminal = sourceReceipts.findIndex(receipt => receipt.terminalCause !== null);
+  // Keep the existing CTX04 retention bound independent of the new capture
+  // receipts, while retaining one shared lifecycle and a bounded total.
+  const sameKind = receipt => (receipt.kind === 'capture-get') === (entry.kind === 'capture-get');
+  if (sourceReceipts.filter(sameKind).length >= 64) {
+    const oldestTerminal = sourceReceipts.findIndex(receipt => sameKind(receipt) && receipt.terminalCause !== null);
     if (oldestTerminal < 0) contextError('QA_SOURCE_RECEIPT_LIMIT', 'All bounded source receipts are still live', 429);
     sourceReceipts.splice(oldestTerminal, 1);
   }
   const receipt = { holdId: randomUUID(), armedAt: Date.now(), deadlineAt: entry.deadlineAt,
-    requestId: null, R: publicSourceRoute(entry.route), account: entry.route.owner, epoch: entry.route.epoch,
+    requestId: null, R: { ...publicSourceRoute(entry.route), ...(entry.kind === 'capture-get'
+      ? { startLine: entry.route.startLine, endLine: entry.route.endLine } : {}) },
+    ...(entry.kind === 'capture-get' ? { kind: entry.kind } : {}), account: entry.route.owner, epoch: entry.route.epoch,
     heldSourceId: entry.route.sourceId, receivedAt: null, snapshotHash: null,
     releaseAttemptAt: null, releaseAttempts: 0, writeAttempted: false, endReturnedAt: null,
     responseStatus: null, finishAt: null, closeAt: null, writableFinishedAtClose: null, terminalCause: null };
   sourceReceipts.push(receipt);
   return receipt;
 }
+function recordSourceResponseSnapshot(entry, snapshot) {
+  entry.snapshot = structuredClone(snapshot);
+  entry.receipt.snapshotHash = createHash('sha256').update(JSON.stringify(entry.snapshot)).digest('hex');
+}
 function receiveSourceResponse(entry, res, snapshot) {
   const receipt = entry.receipt;
-  entry.res = res; entry.snapshot = structuredClone(snapshot);
+  entry.res = res;
   sourceResponsesInFlight.add(entry);
   receipt.requestId = randomUUID(); receipt.receivedAt = Date.now();
-  receipt.snapshotHash = createHash('sha256').update(JSON.stringify(entry.snapshot)).digest('hex');
+  if (snapshot !== undefined) recordSourceResponseSnapshot(entry, snapshot);
   res.once('finish', () => {
     receipt.finishAt ??= Date.now();
     receipt.terminalCause ??= 'finished';
@@ -322,8 +354,9 @@ function expireSourceResponse(entry) {
   // A queued timer may outlive clearTimeout. It cannot expire an already
   // released/canceled GET or a later same-route entry, even before close fires.
   if (sourceResponses.get(entry.key) !== entry || entry.receipt.terminalCause !== null) return;
-  sourceStatusEvidence.expired++;
-  finishSourceResponse(entry, 504, { code: 'QA_SOURCE_STATUS_EXPIRED', error: 'Held source response expired' }, 'expiry');
+  if (entry.kind === 'capture-get') captureGetEvidence.expired++; else sourceStatusEvidence.expired++;
+  finishSourceResponse(entry, 504, { code: entry.kind === 'capture-get' ? 'QA_CAPTURE_GET_EXPIRED' : 'QA_SOURCE_STATUS_EXPIRED',
+    error: entry.kind === 'capture-get' ? 'Held capture response expired' : 'Held source response expired' }, 'expiry');
 }
 function sourceControl(body, extra) {
   if (!sourceStatusEnabled) contextError('QA_SOURCE_STATUS_DISABLED', 'Source status controls require the isolated state fixture', 403);
@@ -1067,6 +1100,11 @@ function refuseClaudeContext(res, route) {
 const handler = async (req, res) => {
   try {
     const url = new URL(req.url, origin);
+    if (briefingMultiTargetEnabled && req.method === 'POST') {
+      if (url.pathname === '/chat/send') briefingMultiTargetAttempts.sendPosts++;
+      else if (url.pathname === '/context/captures') briefingMultiTargetAttempts.capturePosts++;
+      else if (url.pathname.startsWith('/context/briefings') || url.pathname.startsWith('/context/briefing-comments')) briefingMultiTargetAttempts.commentPosts++;
+    }
     // Count at route entry, before origin, auth, body or scenario validation.
     // No body or credential data is captured by this counter.
     if (firstCodexAuthFixture && req.method === 'POST' && url.pathname === '/chat/send') {
@@ -1194,10 +1232,15 @@ const handler = async (req, res) => {
         ...(originFileFixture ? { chatOriginFileFixture: true, providerTurns: 0, nativeProcessSpawns: 0, chatOriginFile: originFileFixture.snapshot() } : {}),
         streamId, seq, clients: clients.size, observed, context: context.stats, pendingContextCaptures: heldCaptures.length,
         ...(sourceStatusEnabled ? { sourceStatus: { ...sourceStatusEvidence,
-          receipts: sourceReceipts,
-          responses: [...sourceResponses.values()].map(({ route, mode, deadlineAt, res, receipt }) => ({ ...route, mode, deadlineAt,
+          receipts: sourceReceipts.filter(receipt => receipt.kind !== 'capture-get'),
+          responses: [...sourceResponses.values()].filter(entry => entry.kind !== 'capture-get').map(({ route, mode, deadlineAt, res, receipt }) => ({ ...route, mode, deadlineAt,
             holdId: receipt?.holdId || null, requestId: receipt?.requestId || null, phase: res ? 'pending' : 'armed' })) },
+          captureGet: { ...captureGetEvidence, receipts: sourceReceipts.filter(receipt => receipt.kind === 'capture-get'),
+            responses: [...sourceResponses.values()].filter(entry => entry.kind === 'capture-get').map(({ route, mode, deadlineAt, res, receipt }) =>
+              ({ ...route, mode, deadlineAt, holdId: receipt?.holdId || null, requestId: receipt?.requestId || null,
+                phase: !res ? 'armed' : receipt?.snapshotHash ? 'pending' : 'reading' })) },
           sourceChangeSeed: sourceChangeSeedEnabled ? sourceChangeScene?.metadata || null : null } : {}),
+        ...(briefingMultiTargetEnabled ? { briefingMultiTargetAttempts } : {}),
         ...(briefingCommentsSeedEnabled ? { briefingCommentsSeed: sourceChangeScene.metadata,
           briefingComments: { version: 1, receiptLimit: 64,
             armed: [...commentArms.values()].map(entry => ({ holdId: entry.holdId, R: entry.receipt.R,
@@ -1241,7 +1284,8 @@ const handler = async (req, res) => {
     if (req.method === 'POST' && ['/__qa/context-config', '/__qa/context-release'].includes(url.pathname)) {
       if (req.headers['x-egdesk-qa-token'] !== token) return json(res, 403, { error: 'Fixture token required' });
       const body = await bodyJson(req);
-      if (url.pathname === '/__qa/context-config' && (Object.hasOwn(body, 'sourceStatus') || Object.hasOwn(body, 'sourceStatusResponse'))) {
+      if (url.pathname === '/__qa/context-config' && (Object.hasOwn(body, 'sourceStatus') || Object.hasOwn(body, 'sourceStatusResponse')
+          || Object.hasOwn(body, 'captureGetResponse'))) {
         if (url.search) contextError('INVALID_CONTEXT_ROUTING', 'Source controls accept no query', 400);
         if (Object.keys(body).length !== 1) contextError('INVALID_CONTEXT_ROUTING', 'Source controls must be isolated from capture controls', 400);
         if (body.sourceStatus) {
@@ -1253,13 +1297,30 @@ const handler = async (req, res) => {
           if (sourceStatusEvidence.controls.length >= 512) contextError('QA_TRACE_LIMIT', 'Bounded source-status trace is full', 429);
           context.setSourceStatus({ ...r, state: value.state, reason: value.reason, changedAt: value.changedAt });
           sourceTrace('controls', { ...r, state: value.state, reason: value.reason, changedAt: value.changedAt });
+        } else if (Object.hasOwn(body, 'captureGetResponse')) {
+          const value = body.captureGetResponse, origin = sourceControl(value, ['startLine', 'endLine', 'mode', 'deadlineAt']);
+          const source = context.assertSourceScope(origin);
+          if (!Number.isSafeInteger(value.startLine) || !Number.isSafeInteger(value.endLine) || value.startLine < 1
+              || value.endLine < value.startLine || value.endLine - value.startLine >= 500
+              || !Number.isSafeInteger(source.manifest.shape?.lineCount) || value.endLine > source.manifest.shape.lineCount
+              || !['hold', 'error', 'deny'].includes(value.mode) || !Number.isSafeInteger(value.deadlineAt)
+              || value.deadlineAt <= Date.now() || value.deadlineAt > Date.now() + 30000) {
+            contextError('INVALID_CAPTURE_GET_RESPONSE', 'Exact bounded range, mode and deadline within 30 seconds required', 400);
+          }
+          const r = { ...origin, startLine: value.startLine, endLine: value.endLine }, key = captureResponseKey(r);
+          if (sourceResponses.has(key)) contextError('QA_CAPTURE_GET_PENDING', 'A response is already armed for this exact capture range');
+          if (sourceResponseCount(true) >= 32) contextError('QA_SOURCE_RESPONSE_LIMIT', 'Too many pending capture responses', 429);
+          const entry = { kind: 'capture-get', key, route: r, mode: value.mode, deadlineAt: value.deadlineAt };
+          entry.receipt = createSourceReceipt(entry); sourceResponses.set(key, entry);
+          entry.timer = setTimeout(() => expireSourceResponse(entry), entry.deadlineAt - Date.now()); entry.timer.unref?.();
+          return json(res, 200, { ok: true, fixtureOnly: true, holdId: entry.receipt.holdId, requestId: null });
         } else {
           const value = body.sourceStatusResponse, r = sourceControl(value, ['mode', 'deadlineAt']);
           if (!['error', 'hold'].includes(value.mode) || (value.mode === 'hold'
             ? !Number.isSafeInteger(value.deadlineAt) || value.deadlineAt <= Date.now() || value.deadlineAt > Date.now() + 30000
             : Object.hasOwn(value, 'deadlineAt'))) contextError('INVALID_SOURCE_RESPONSE', 'Hold needs a deadline within 30 seconds; error accepts none', 400);
-          if ([...sourceResponses.values()].some(entry => sameSourceConversation(entry.route, r))) contextError('QA_SOURCE_RESPONSE_PENDING', 'One response control per exact conversation at a time');
-          if (sourceResponses.size >= 32) contextError('QA_SOURCE_RESPONSE_LIMIT', 'Too many pending source responses', 429);
+          if ([...sourceResponses.values()].some(entry => entry.kind !== 'capture-get' && sameSourceConversation(entry.route, r))) contextError('QA_SOURCE_RESPONSE_PENDING', 'One response control per exact conversation at a time');
+          if (sourceResponseCount(false) >= 32) contextError('QA_SOURCE_RESPONSE_LIMIT', 'Too many pending source responses', 429);
           const key = sourceResponseKey(r), entry = { key, route: r, mode: value.mode, deadlineAt: value.deadlineAt ?? null };
           if (entry.mode === 'hold') entry.receipt = createSourceReceipt(entry);
           sourceResponses.set(key, entry);
@@ -1272,22 +1333,33 @@ const handler = async (req, res) => {
         }
         return json(res, 200, { ok: true, fixtureOnly: true });
       }
-      if (url.pathname === '/__qa/context-release' && body.phase === 'sources') {
+      if (url.pathname === '/__qa/context-release' && ['sources', 'capture-get'].includes(body.phase)) {
         if (url.search) contextError('INVALID_CONTEXT_ROUTING', 'Source release accepts no query', 400);
-        const r = sourceControl(body, ['phase', 'requestId']);
+        const captureGet = body.phase === 'capture-get';
+        const origin = sourceControl(body, ['phase', 'requestId', ...(captureGet ? ['startLine', 'endLine'] : [])]);
+        if (captureGet && (!Number.isSafeInteger(body.startLine) || !Number.isSafeInteger(body.endLine)
+            || body.startLine < 1 || body.endLine < body.startLine || body.endLine - body.startLine >= 500)) {
+          contextError('INVALID_CONTEXT_ROUTING', 'Exact bounded capture range required', 400);
+        }
+        const r = captureGet ? { ...origin, startLine: body.startLine, endLine: body.endLine } : origin;
         if (typeof body.requestId !== 'string' || !/^[\da-f-]{36}$/i.test(body.requestId)) contextError('INVALID_SOURCE_REQUEST_ID', 'Exact received GET requestId required', 400);
         const receipt = sourceReceipts.find(row => row.requestId === body.requestId);
         if (!receipt) contextError('QA_SOURCE_RESPONSE_NOT_FOUND', 'No retained receipt for this received GET');
         if (receipt.account !== r.owner || receipt.epoch !== r.epoch) contextError('ACCOUNT_CHANGED', 'Received GET belongs to another account epoch', 403);
-        if ([...contextRoutingKeys, 'sourceId'].some(key => receipt.R[key] !== r[key])) contextError('QA_SOURCE_RESPONSE_SCOPE_MISMATCH', 'requestId belongs to another exact source route');
-        sourceTrace('releases', { ...r, requestId: body.requestId });
+        if ((receipt.kind === 'capture-get') !== captureGet || [...contextRoutingKeys, 'sourceId', ...(captureGet ? ['startLine', 'endLine'] : [])]
+          .some(key => receipt.R[key] !== r[key])) contextError('QA_SOURCE_RESPONSE_SCOPE_MISMATCH', 'requestId belongs to another exact source route');
+        if (captureGet) {
+          if (captureGetEvidence.releases.length >= 512) contextError('QA_TRACE_LIMIT', 'Bounded capture-release trace is full', 429);
+          captureGetEvidence.releases.push({ ...r, requestId: body.requestId });
+        } else sourceTrace('releases', { ...r, requestId: body.requestId });
         receipt.releaseAttemptAt = Date.now(); receipt.releaseAttempts++;
         if (receipt.terminalCause !== null || receipt.writeAttempted) {
           return json(res, 409, { ok: false, code: receipt.terminalCause === 'finished' || receipt.writeAttempted && !receipt.terminalCause
             ? 'QA_SOURCE_RESPONSE_ALREADY_RELEASED' : 'QA_SOURCE_RESPONSE_ALREADY_CLOSED', receipt: structuredClone(receipt) });
         }
-        const key = sourceResponseKey(r), entry = sourceResponses.get(key);
+        const key = captureGet ? captureResponseKey(r) : sourceResponseKey(r), entry = sourceResponses.get(key);
         if (!entry?.res || entry.receipt !== receipt) contextError('QA_SOURCE_RESPONSE_NOT_HELD', 'Exact original GET is no longer held');
+        if (captureGet && entry.snapshot === undefined) contextError('QA_SOURCE_RESPONSE_NOT_HELD', 'Exact capture snapshot is not yet held');
         if (entry.deadlineAt <= Date.now()) {
           expireSourceResponse(entry);
           return json(res, 409, { ok: false, code: 'QA_SOURCE_RESPONSE_ALREADY_CLOSED', receipt: structuredClone(receipt) });
@@ -1334,7 +1406,7 @@ const handler = async (req, res) => {
       if (req.method !== 'GET') return json(res, 405, { code: 'METHOD_NOT_ALLOWED', error: 'Use GET for source status' });
       const snapshot = context.sourceStatus(r);
       sourceTrace('reads', { ...r, response: structuredClone(snapshot) });
-      const pending = [...sourceResponses.entries()].find(([, entry]) => sameSourceConversation(entry.route, r) && !entry.res);
+      const pending = [...sourceResponses.entries()].find(([, entry]) => entry.kind !== 'capture-get' && sameSourceConversation(entry.route, r) && !entry.res);
       if (pending) {
         const [key, entry] = pending;
         if (entry.mode === 'error') { sourceResponses.delete(key); return json(res, 503, { code: 'QA_SOURCE_STATUS_FAILED', error: 'Explicit source status failure' }); }
@@ -1387,7 +1459,49 @@ const handler = async (req, res) => {
         : contextRoutingKeys.some(key => url.searchParams.has(key)) ? codexContextRouting(query) : null;
       const options = Object.fromEntries(['startLine', 'endLine'].filter(key => url.searchParams.has(key)).map(key => [key, Number(url.searchParams.get(key))]));
       if (url.searchParams.has('packetId')) options.packetId = url.searchParams.get('packetId');
-      return json(res, 200, await context.inspect(captureRoute[1], options, authority?.owner || accountVariant, authority?.clientThreadId, authority?.conversationId));
+      const r = sourceStatusEnabled && authority && !options.packetId && Number.isSafeInteger(options.startLine) && Number.isSafeInteger(options.endLine)
+        ? { ...authority, sourceId: captureRoute[1], startLine: options.startLine, endLine: options.endLine } : null;
+      const pending = r && sourceResponses.get(captureResponseKey(r));
+      // Claim synchronously before the store read yields. A second matching
+      // GET must not overtake the first and steal its one-shot arm.
+      const entry = pending && !pending.claimed ? pending : null;
+      if (entry) {
+        entry.claimed = true;
+        // Own the response before awaiting the store. Expiry, disconnect,
+        // account change and disposal must terminate even a stalled read.
+        receiveSourceResponse(entry, res);
+        if (res.destroyed || res.writableEnded) {
+          entry.receipt.terminalCause ??= 'peer-close-before-finish'; entry.receipt.closeAt ??= Date.now();
+          entry.receipt.writableFinishedAtClose = res.writableFinished === true;
+          sourceResponsesInFlight.delete(entry); forgetSourceResponse(entry); return;
+        }
+      }
+      let snapshot;
+      try {
+        snapshot = await context.inspect(captureRoute[1], options, authority?.owner || accountVariant, authority?.clientThreadId, authority?.conversationId);
+      } catch (error) {
+        if (entry) {
+          if (entry.receipt.terminalCause === null) finishSourceResponse(entry, error.httpStatus || 400,
+            { error: error.message, ...(error.code ? { code: error.code } : {}) }, 'capture-read-error');
+          return;
+        }
+        throw error;
+      }
+      if (!entry) return json(res, 200, snapshot);
+      // Account changes/expiry may occur while the immutable store read awaits.
+      // Never deliver that old snapshot under a newer or expired authority.
+      if (entry.receipt.terminalCause !== null || res.destroyed || res.writableEnded) return;
+      if (sourceResponses.get(entry.key) !== entry || entry.route.epoch !== codexContextEpoch || entry.route.owner !== accountVariant) {
+        finishSourceResponse(entry, 403, { code: 'ACCOUNT_CHANGED', error: 'Fixture capture control is no longer current' }, 'account-change');
+        return;
+      }
+      if (entry.deadlineAt <= Date.now()) { expireSourceResponse(entry); return; }
+      recordSourceResponseSnapshot(entry, snapshot);
+      if (entry.mode === 'hold') return;
+      const denied = entry.mode === 'deny';
+      finishSourceResponse(entry, denied ? 403 : 503, { code: denied ? 'QA_CAPTURE_GET_DENIED' : 'QA_CAPTURE_GET_FAILED',
+        error: denied ? 'Explicit fixture capture permission denial' : 'Explicit fixture capture failure' }, denied ? 'fixture-deny' : 'fixture-error');
+      return;
     }
     if (req.method === 'POST' && url.pathname === '/__qa/release') {
       if (req.headers['x-egdesk-qa-token'] !== token) return json(res, 403, { error: 'Fixture token required' });

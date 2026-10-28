@@ -260,11 +260,12 @@ export async function seedQaSourceChangeScene(profile, context) {
   return seedQaContextHistoryScene(profile, context);
 }
 
-export async function seedQaBriefingCommentsScene(profile, context) {
-  return seedQaContextHistoryScene(profile, context, { briefingComments: true });
+export async function seedQaBriefingCommentsScene(profile, context, { multiTarget = false } = {}) {
+  if (typeof multiTarget !== 'boolean') fail('QA_MULTI_TARGET_GATE', 'A boolean multi-target fixture gate is required', 400);
+  return seedQaContextHistoryScene(profile, context, { briefingComments: true, multiTarget });
 }
 
-async function seedQaContextHistoryScene(profile, context, { briefingComments = false } = {}) {
+async function seedQaContextHistoryScene(profile, context, { briefingComments = false, multiTarget = false } = {}) {
   const fixture = assertQaFixtureManifest(profile);
   if (fs.lstatSync(path.join(profile, 'prefs.js'), { throwIfNoEntry: false })) fail('QA_SEED_NOT_FRESH', 'Seed requires a prefs-less, unopened owned profile', 409);
   const prefPath = path.join(profile, 'user.js');
@@ -305,37 +306,61 @@ async function seedQaContextHistoryScene(profile, context, { briefingComments = 
       const attachment = { id: selectionId, kind, label: title, sourceRef, capturedAt: now,
         captureScope: { type: kind === 'file' ? 'file' : 'document-text' },
         ...(kind === 'browser' ? { content: { mime: 'text/plain', text, truncated: false } } : {}) };
-      const [capture] = await store.captureAttachments(owner, { clientThreadId, attachments: [attachment] }, { engine });
-      const storedBinding = await store.bind(owner, run, [capture.sourceId], { read: true }, null, undefined, engine);
+      const items = [{ attachment, text, kind, selectionId, sourceRef, viewId }];
+      if (multiTarget && kind === 'file') {
+        const otherText = Array.from({ length: 12 }, (_, i) => `Briefing synthetic B original line ${i + 1}`).join('\n');
+        const otherPath = path.join(dataDir, 'original-b.txt'), otherId = `qa-briefing-selection-${randomUUID()}`;
+        fs.writeFileSync(otherPath, otherText, { flag: 'wx', mode: 0o600 });
+        const otherRef = { path: otherPath };
+        items.push({ kind: 'file', text: otherText, selectionId: otherId, sourceRef: otherRef,
+          attachment: { id: otherId, kind: 'file', label: '합성 고정 근거 B', sourceRef: otherRef,
+            capturedAt: now, captureScope: { type: 'file' } } });
+      }
+      const captures = await store.captureAttachments(owner, { clientThreadId, attachments: items.map(item => item.attachment) }, { engine });
+      const [capture] = captures;
+      const storedBinding = await store.bind(owner, run, captures.map(item => item.sourceId), { read: true }, null, undefined, engine);
       const binding = { bindingId: storedBinding.bindingId, ...run };
-      const coverage = { sourceId: capture.sourceId, range: { startLine: 1, endLine: 12 }, totalLines: 12, complete: true };
-      const packetValue = { fixtureOnly: true, setupOnly: true, synthetic: true, tool: 'egdesk_read_source',
-        sourceId: capture.sourceId, snapshotId: capture.snapshotId, sourceHash: capture.hash, text, coverage };
-      const deliveryText = JSON.stringify(packetValue), deliveryHash = fingerprintQaBytes(deliveryText).sha256;
-      const packetId = await store.putRecord(owner, 'packets', { setupOnly: true, synthetic: true,
-        packet: { ...packetValue, mode: 'qa-source-change-seed' }, deliveryText, deliveryHash,
-        binding: { conversationId, runId, answerId } });
-      await store.putRecord(owner, 'deliveries', { setupOnly: true, synthetic: true, sourceId: capture.sourceId,
-        packetId, deliveryStatus: 'sent-to-app-server', sentAt: now, providerInvoked: false });
-      const inspected = await store.inspect(owner, capture.sourceId, { packetId });
-      const packet = inspected.delivered;
-      context.registerStored({ owner, manifest: capture, text, binding, packet, store });
-      const reference = capturedInputReference(attachment, capture, route);
+      const packets = [], references = [], sources = [];
+      for (const [index, captured] of captures.entries()) {
+        const item = items[index];
+        const coverage = { sourceId: captured.sourceId, range: { startLine: 1, endLine: 12 }, totalLines: 12, complete: true };
+        const packetValue = { fixtureOnly: true, setupOnly: true, synthetic: true, tool: 'egdesk_read_source',
+          sourceId: captured.sourceId, snapshotId: captured.snapshotId, sourceHash: captured.hash, text: item.text, coverage };
+        const deliveryText = JSON.stringify(packetValue), deliveryHash = fingerprintQaBytes(deliveryText).sha256;
+        const packetId = await store.putRecord(owner, 'packets', { setupOnly: true, synthetic: true,
+          packet: { ...packetValue, mode: 'qa-source-change-seed' }, deliveryText, deliveryHash,
+          binding: { conversationId, runId, answerId } });
+        await store.putRecord(owner, 'deliveries', { setupOnly: true, synthetic: true, sourceId: captured.sourceId,
+          packetId, deliveryStatus: 'sent-to-app-server', sentAt: now, providerInvoked: false });
+        const packet = (await store.inspect(owner, captured.sourceId, { packetId })).delivered;
+        context.registerStored({ owner, manifest: captured, text: item.text, binding, packet, store });
+        packets.push(packet); references.push(capturedInputReference(item.attachment, captured, route));
+        sources.push({ selectionId: item.selectionId, sourceId: captured.sourceId, snapshotId: captured.snapshotId,
+          kind: item.kind, ...(item.kind === 'file' ? { path: item.sourceRef.path } : { viewId: item.viewId }),
+          packetId, captureHash: captured.hash, payloadHash: packet.hash });
+      }
       let briefing;
       if (briefingComments) {
         const id = randomUUID();
-        briefing = { id, title: `QA Briefing comments · ${kind}`, conversationId, runId, answerId, createdAt: now, presentationStatus: 'proposed',
-          steps: [0, 1].map(index => ({ id: `qa-step-${index + 1}`, text: `보관된 ${kind} 근거 ${index + 1}`,
+        const ordinarySteps = [0, 1].map(index => ({ id: `qa-step-${index + 1}`, text: `보관된 ${kind} 근거 ${index + 1}`,
             target: { sourceId: capture.sourceId, hash: capture.hash, range: { startLine: index * 6 + 1, endLine: index * 6 + 6 } },
-            fallback: '보관 근거를 사용할 수 없습니다. 현재 원본으로 대체하지 않습니다.' })) };
+            fallback: '보관 근거를 사용할 수 없습니다. 현재 원본으로 대체하지 않습니다.' }));
+        if (multiTarget && kind === 'file') {
+          const a1 = { sourceId: capture.sourceId, hash: capture.hash, range: { startLine: 1, endLine: 4 } };
+          const a2 = { ...a1, range: { startLine: 5, endLine: 8 } };
+          const b1 = { sourceId: captures[1].sourceId, hash: captures[1].hash, range: { startLine: 1, endLine: 4 } };
+          ordinarySteps[0].target = a1; ordinarySteps[0].targets = [a1, a2, b1]; ordinarySteps[1].target = copy(a1);
+        }
+        briefing = { id, title: `QA Briefing comments · ${kind}`, conversationId, runId, answerId, createdAt: now,
+          presentationStatus: 'proposed', steps: ordinarySteps };
         await store.putRecord(owner, 'briefings', briefing, id);
       }
       const requestId = `qa-ctx04-request-${randomUUID()}`;
       const messages = [
         { id: randomUUID(), role: 'user', status: 'completed', text: 'CTX04 초기 보관 입력 · 합성 시험 기록',
-          ...run, requestId, createdAt: now, inputReferences: [reference] },
+          ...run, requestId, createdAt: now, inputReferences: references },
         { id: randomUUID(), role: 'assistant', status: 'completed', text: '원본과 전달 내용을 보관한 합성 기록입니다. 실제 모델 호출은 없었습니다.',
-          ...run, requestId, createdAt: now, contextCaptures: [capture], contextPackets: [packet], ...(briefing ? { briefing } : {}) },
+          ...run, requestId, createdAt: now, contextCaptures: captures, contextPackets: packets, ...(briefing ? { briefing } : {}) },
       ];
       // Synthetic native history follows CodexChatRuntime's id/messageId
       // pair. Keep the existing IDs; id alone is not a native message binding.
@@ -343,12 +368,12 @@ async function seedQaContextHistoryScene(profile, context, { briefingComments = 
       const checkpoint = { ...run, requestId, status: 'completed', createdAt: now, messages,
         engine: { id: 'codex', engineProfileId: 'codex-default' },
         activities: [], artifacts: [], pendingApprovals: [], pendingUserInputs: [], subAgents: [],
-        context: { captures: [capture], packets: [packet], briefings: briefing ? [briefing] : [] }, truncated: false, historyComplete: true };
+        context: { captures, packets, briefings: briefing ? [briefing] : [] }, truncated: false, historyComplete: true };
       chatStore.importConversationCopy({ clientThreadId, importId: `qa-source-change:${clientThreadId}`, title, createdAt: now,
         snapshot: { protocolVersion: 2, conversationId, runs: [checkpoint], truncated: false, historyComplete: true } });
       const saved = chatStore.getConversation(clientThreadId);
       const preservation = briefingComments ? { draftText: `QA ${kind} 보존 초안`, inputSources: [],
-        briefingInputs: [copy(reference)], briefingCommentRefs: [] } : null;
+        briefingInputs: copy(references), briefingCommentRefs: [] } : null;
       if (preservation) threadDrafts[clientThreadId] = preservation.draftText;
       threads.push({ id: clientThreadId, clientBindingId: clientThreadId, conversationId, ...engine, type: 'dm', title,
         subtitle: '합성 보관 입력 · 실제 전송 없음', profileEnabled: false, agentProfileId: null,
@@ -356,8 +381,7 @@ async function seedQaContextHistoryScene(profile, context, { briefingComments = 
         createdAt: now, updatedAt: now, inputSources: [], briefingInputs: preservation?.briefingInputs || [],
         ...(preservation ? { briefingCommentRefs: [] } : {}), messages: [] });
       identities.push({ ...run, title, ...(preservation ? { preservation } : {}), ...(briefing ? { briefing: { id: briefing.id,
-        steps: briefing.steps.map(step => ({ id: step.id, sourceIds: [step.target.sourceId] })) } } : {}), sources: [{ selectionId, sourceId: capture.sourceId, snapshotId: capture.snapshotId,
-        kind, ...(kind === 'file' ? { path: sourceRef.path } : { viewId }), packetId, captureHash: capture.hash, payloadHash: packet.hash }] });
+        steps: briefing.steps.map(step => ({ id: step.id, sourceIds: (step.targets || [step.target]).map(target => target.sourceId) })) } } : {}), sources });
     }
     const chatCardId = `qa-ctx04-chat-${randomUUID()}`, agendaId = `qa-ctx04-desk-${randomUUID()}`;
     const initialState = { surfaceMode: 'desk', activeThreadId: threads[0].id, chatCardId, entryBypassed: true };
@@ -375,6 +399,7 @@ async function seedQaContextHistoryScene(profile, context, { briefingComments = 
       + prefLine('egdesk.surfaceLifecycle.v1', { version: 1, mode: 'desk', browserCardId: null }));
     const histories = identities.map(row => chat.getLocalHistory({ clientThreadId: row.clientThreadId }));
     const metadata = { version: 1, setupOnly: true, synthetic: true, ready: true, account, initialState, identities,
+      ...(multiTarget ? { scenario: 'briefing-multi-target' } : {}),
       ...(briefingComments ? { storage: { chat: 'sqlite', comments: 'context-json-records', dataDir } } : {}),
       counts: { seed: { conversations: chatStore.listConversations().threads.length,
         captures: (await store.listRecords(owner, 'sources')).length, bindings: (await store.listRecords(owner, 'bindings')).length,
