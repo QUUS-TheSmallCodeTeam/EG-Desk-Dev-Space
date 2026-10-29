@@ -9,7 +9,7 @@ const EPOCH = 11644473600000000n;
 const PASSWORD = 'synthetic-passphrase';
 const future = ms => String(EPOCH + BigInt(ms) * 1000n + 321n);
 const row = (changes = {}) => ({
-  host_key: '.example.test', top_frame_site_key: '', has_cross_site_ancestor: 0,
+  host_key: '.example.test', top_frame_site_key: '', has_cross_site_ancestor: 1,
   name: 'synthetic-name', value: 'synthetic-value', encrypted_value: new Uint8Array(),
   path: '/', expires_utc: future(NOW + 86400000), is_secure: 1, is_httponly: 1,
   has_expires: 1, is_persistent: 1, samesite: 2, source_scheme: 2, source_port: 443,
@@ -31,7 +31,8 @@ async function ciphertext(host, value, version = 24, password = PASSWORD) {
 }
 
 function fixture(rows = [], version = 24) {
-  const state = { rows, version, jars: new Map(), identities: [7], calls: [], allowed: true, next: 80 };
+  const state = { rows, version, jars: new Map(), identities: [7], calls: [], allowed: true, next: 80,
+    baseCount: 0, maxCookies: 3000, scopeBindings: undefined };
   const adapter = {
     platform: 'macosx', crypto: webcrypto, randomUUID, now: () => NOW,
     checkAccess: () => state.allowed,
@@ -42,10 +43,12 @@ function fixture(rows = [], version = 24) {
     ]; },
     async readSqlite(directory, limits) {
       state.calls.push(['sqlite', directory, limits]);
-      return { version: state.version, rows: state.rows, totalRows: state.rows.length };
+      return { version: state.version, rows: state.rows, totalRows: state.rows.length, scopeBindings: state.scopeBindings };
     },
     async getKeychainPassword() { state.calls.push('keychain'); return PASSWORD; },
     getIdentityIds() { return [...state.identities]; },
+    getCookieCapacity() { return { current: state.baseCount + [...state.jars.values()].reduce((n, jar) => n + jar.length, 0),
+      max: state.maxCookies }; },
     createIdentity(name) {
       const id = state.next++; state.identities.push(id); state.calls.push(['create', id]);
       return { userContextId: id, name };
@@ -81,7 +84,7 @@ async function selected(importer) {
 
 test('requires explicit policy, non-private context, user request, consent and enumerated opaque id', async () => {
   const f = fixture([row()]);
-  assert.deepEqual(f.importer.availability(), { supported: true });
+  assert.deepEqual(f.importer.availability(), { supported: true, scopeModes: ['preserve', 'standard-web'] });
   assert.equal((await f.importer.listProfiles()).reason, 'explicit-user-request-required');
   assert.deepEqual(f.state.calls, []);
   assert.equal((await f.importer.importProfile({ profileId: 'Default', explicitUserConsent: true })).reason, 'profile-not-enumerated');
@@ -157,7 +160,7 @@ test('partition, unrepresentable scopes, unknown encryption and duplicates fail 
   const f = fixture([
     row({ name: 'ok' }),
     row({ name: 'partition', top_frame_site_key: 'https://partition.example.test' }),
-    row({ name: 'ancestor', has_cross_site_ancestor: 1 }),
+    row({ name: 'ancestor', has_cross_site_ancestor: 2 }),
     row({ host_key: 'host.example.test', name: 'port-bound', source_port: 443 }),
     row({ name: 'scheme-bound', is_secure: 0, source_scheme: 2 }),
     row({ name: 'nonsecure-scheme', source_scheme: 1 }),
@@ -188,6 +191,58 @@ test('unsupported schemas, oversized results and no importable data never create
   const empty = fixture([]), id = await selected(empty.importer);
   assert.equal((await empty.importer.importProfile({ profileId: id, explicitUserConsent: true })).status, 'empty');
   assert.deepEqual(empty.state.identities, [7]);
+});
+
+test('standard-web scope compatibility requires explicit consent and keeps partitioning intact', async () => {
+  const rows = [
+    row({ host_key: 'host.example.test', name: '__Host-test', source_port: 443 }),
+    row({ name: 'http', is_secure: 0, source_scheme: 1 }),
+    row({ name: 'https-source', is_secure: 0, source_scheme: 2 }),
+    row({ name: 'no-partition-0', has_cross_site_ancestor: 0 }),
+    row({ name: 'partition', top_frame_site_key: 'https://partition.example.test' }),
+  ];
+  const f = fixture(rows), id = await selected(f.importer);
+  const denied = await f.importer.importProfile({ profileId: id, explicitUserConsent: true, scopeMode: 'standard-web' });
+  assert.equal(denied.reason, 'scope-compatibility-consent-required');
+  assert.equal(f.state.calls.some(call => Array.isArray(call) && call[0] === 'sqlite'), false);
+  assert.equal((await f.importer.importProfile({ profileId: id, explicitUserConsent: true, scopeMode: 'unexpected' })).reason,
+    'scope-mode-unsupported');
+  const compatible = await f.importer.importProfile({ profileId: id, explicitUserConsent: true,
+    scopeMode: 'standard-web', explicitScopeCompatibilityConsent: true });
+  assert.equal(compatible.status, 'partial');
+  assert.deepEqual(compatible.counts, { imported: 4, skipped: 0, unsupported: 1, failed: 0 });
+  const jar = f.state.jars.get(80);
+  assert.equal(jar[0].host, 'host.example.test');
+  assert.equal(jar[0].isSecure, true);
+  assert.equal(jar[1].schemeMap, 1);
+  assert.equal(jar[2].schemeMap, 2);
+  assert.ok(jar.every(cookie => cookie.isPartitioned === false));
+
+  const g = fixture(rows), otherId = await selected(g.importer);
+  g.state.scopeBindings = { port: true, scheme: true };
+  const bound = await g.importer.importProfile({ profileId: otherId, explicitUserConsent: true,
+    scopeMode: 'standard-web', explicitScopeCompatibilityConsent: true });
+  assert.deepEqual(bound.counts, { imported: 1, skipped: 0, unsupported: 4, failed: 0 });
+});
+
+test('quota is checked before container creation and immediately before every add', async () => {
+  const f = fixture([row({ name: 'first' }), row({ name: 'second' })]);
+  const id = await selected(f.importer);
+  f.state.baseCount = 2999;
+  const preflight = await f.importer.importProfile({ profileId: id, explicitUserConsent: true });
+  assert.equal(preflight.reason, 'cookie-capacity-exceeded');
+  assert.deepEqual(f.state.identities, [7]);
+
+  f.state.baseCount = 0;
+  const add = f.adapter.cookies.add;
+  f.adapter.cookies.add = (cookie, attrs) => {
+    const result = add(cookie, attrs); f.state.baseCount = 3000; return result;
+  };
+  const changed = await f.importer.importProfile({ profileId: id, explicitUserConsent: true });
+  assert.equal(changed.reason, 'cookie-capacity-exceeded');
+  assert.deepEqual(f.state.identities, [7]);
+  assert.equal(f.state.jars.has(80), false);
+  assert.equal(f.state.calls.filter(call => Array.isArray(call) && call[0] === 'add').length, 1);
 });
 
 test('Keychain failures are distinguished when known, and errors never escape', async () => {
@@ -276,11 +331,13 @@ test('permission errors and cancellation during a pending source read do not cre
 // Fake Gecko globals exercise the production adapter's path, policy, Sqlite,
 // Keychain, cookie and identity glue. Every path/data item below is synthetic.
 function fakeGecko({ platform = 'macosx', geckoVersion = '158.0.1', failedImports = [], noLoader = false,
-  missingCookieValidation = false } = {}) {
+  missingCookieValidation = false, timerDelay } = {}) {
   const base = '/Users/synthetic/Library/Application Support/Google/Chrome';
   const state = { files: new Map(), opened: [], closed: 0, transactionTypes: [], keychainCalls: 0,
     identities: [7], jars: new Map(), policy: true, logging: false, envLogging: false,
-    sqlFailure: false, rows: [row()], version: 24, imports: [] };
+    sqlFailure: false, pauseSql: false, pendingSqlReject: null, interruptions: 0, nativeMax: 3000,
+    expiryRejected: false,
+    rows: [row()], version: 24, imports: [] };
   for (const path of ['/Users/synthetic', '/Users/synthetic/Library',
     '/Users/synthetic/Library/Application Support', '/Users/synthetic/Library/Application Support/Google',
     base, `${base}/Default`]) state.files.set(path, { type: 'directory' });
@@ -311,8 +368,12 @@ function fakeGecko({ platform = 'macosx', geckoVersion = '158.0.1', failedImport
       return {
         TRANSACTION_DEFERRED: 'DEFERRED',
         async executeTransaction(callback, type) { state.transactionTypes.push(type); return callback(this); },
+        interrupt() { state.interruptions++; state.pendingSqlReject?.(new Error('synthetic interrupted')); },
         async execute(sql) {
           if (state.sqlFailure && sql.startsWith('PRAGMA table_xinfo')) throw new Error('synthetic-secret');
+          if (state.pauseSql && sql.startsWith('PRAGMA table_xinfo')) {
+            return new Promise((_resolve, reject) => { state.pendingSqlReject = reject; });
+          }
           if (sql.startsWith('SELECT name FROM sqlite_master')) return [asRow({ name: 'meta' }), asRow({ name: 'cookies' })];
           if (sql.startsWith('SELECT COUNT(*)')) return [asRow({ n: state.rows.length })];
           if (sql.startsWith('SELECT CAST(value')) return [asRow({ v: String(state.version) })];
@@ -337,9 +398,12 @@ function fakeGecko({ platform = 'macosx', geckoVersion = '158.0.1', failedImport
     appinfo: { platformVersion: geckoVersion },
     policies: { isAllowed: feature => feature === 'profileImport' && state.policy },
     env: { get: () => state.envLogging ? 'cookie:5' : '' },
-    prefs: { getBoolPref: () => true, getChildList: () => state.logging ? ['logging.cookie'] : [] },
+    prefs: { getBoolPref: () => true, getIntPref: () => state.nativeMax,
+      getChildList: () => state.logging ? ['logging.cookie'] : [] },
     cookies: {
+      get cookies() { return [...state.jars.values()].flat(); },
       add(host, path, name, value, isSecure, isHttpOnly, isSession, expiry, attrs, sameSite, schemeMap, isPartitioned) {
+        if (state.expiryRejected) return { result: 42 };
         const jar = state.jars.get(attrs.userContextId) || [];
         jar.push({ host, path, name, value, isSecure, isHttpOnly, isSession, expiry, sameSite,
           schemeMap, isPartitioned, originAttributes: { ...attrs } });
@@ -351,7 +415,7 @@ function fakeGecko({ platform = 'macosx', geckoVersion = '158.0.1', failedImport
   };
   const globals = {
     crypto: webcrypto, Services: services, Ci: { nsIFile: {},
-      nsICookieValidation: missingCookieValidation ? undefined : { eOK: 0 }, nsIKeychainMigrationUtils: {} },
+      nsICookieValidation: missingCookieValidation ? undefined : { eOK: 0, eRejectedAttributeExpiryOversize: 42 }, nsIKeychainMigrationUtils: {} },
     Cc: { '@mozilla.org/profile/migrator/keychainmigrationutils;1': { getService: () => ({
       getGenericPassword(service, account) {
         assert.equal(service, 'Chrome Safe Storage'); assert.equal(account, 'Chrome'); state.keychainCalls++; return PASSWORD;
@@ -368,6 +432,9 @@ function fakeGecko({ platform = 'macosx', geckoVersion = '158.0.1', failedImport
       }
       if (url === 'resource://gre/modules/ContextualIdentityService.sys.mjs') return { ContextualIdentityService: identities };
       if (url === 'resource://gre/modules/Sqlite.sys.mjs') return { Sqlite: sqlite };
+      if (url === 'resource://gre/modules/Timer.sys.mjs') return {
+        setTimeout: (callback, delay) => setTimeout(callback, timerDelay ?? delay), clearTimeout,
+      };
       throw new Error('unexpected import');
     } },
   };
@@ -392,7 +459,8 @@ test('native adapter uses readonly locked deferred transaction, closes, prompts 
     const result = await f.importer.importProfile({ profileId: id, explicitUserConsent: true });
     assert.equal(result.status, 'imported');
     assert.equal(f.state.keychainCalls, 1);
-    assert.deepEqual(f.state.opened, [{ path: `${f.base}/Default/Cookies`, readOnly: true, ignoreLockingMode: false }]);
+    assert.deepEqual(f.state.opened, [{ path: `${f.base}/Default/Cookies`, readOnly: true, ignoreLockingMode: false,
+      sharedMemoryCache: false, openNotExclusive: true }]);
     assert.deepEqual(f.state.transactionTypes, ['DEFERRED']);
     assert.equal(f.state.closed, 1);
     assert.equal(f.state.jars.get(80)[0].value, 'only synthetic');
@@ -406,7 +474,7 @@ test('native adapter uses the legacy identity URI only if the modern URI fails',
   const legacy = 'resource://gre/modules/ContextualIdentityService.sys.mjs';
   const f = fakeGecko({ failedImports: [modern] });
   try {
-    assert.deepEqual(f.importer.availability(), { supported: true });
+    assert.deepEqual(f.importer.availability(), { supported: true, scopeModes: ['preserve', 'standard-web'] });
     assert.ok(f.state.imports.indexOf(modern) < f.state.imports.indexOf(legacy));
   } finally { f.restore(); }
 });
@@ -458,22 +526,66 @@ test('native adapter rechecks enterprise policy, window privacy and rejects syml
   } finally { f.restore(); }
 });
 
-test('native adapter fails closed before SQLite open on WAL and active rollback journal', async () => {
+test('native adapter recognizes explicit positive source binding flags but does not infer disabled state', async () => {
+  const f = fakeGecko();
+  try {
+    const stateText = JSON.stringify({ browser: { enabled_labs_experiments: ['bind-cookies-to-port@1'] },
+      profile: { info_cache: { Default: { name: 'Synthetic Profile' } } } });
+    f.state.files.get(`${f.base}/Local State`).bytes = encoder.encode(stateText);
+    f.state.rows = [row({ host_key: 'host.example.test', name: '__Host-test', source_port: 443 }),
+      row({ name: 'normal-domain' })];
+    const id = (await f.importer.listProfiles({ explicitUserRequest: true })).profiles[0].id;
+    const result = await f.importer.importProfile({ profileId: id, explicitUserConsent: true,
+      scopeMode: 'standard-web', explicitScopeCompatibilityConsent: true });
+    assert.equal(result.status, 'partial');
+    assert.deepEqual(result.counts, { imported: 1, skipped: 0, unsupported: 1, failed: 0 });
+  } finally { f.restore(); }
+});
+
+test('native quota and expiry cap fail safely without removing existing cookies', async () => {
+  for (const mode of ['capacity', 'future-version', 'expiry']) {
+    const f = fakeGecko(mode === 'future-version' ? { geckoVersion: '159.0' } : {});
+    try {
+      f.state.jars.set(7, [{ value: 'unrelated synthetic cookie' }]);
+      if (mode === 'capacity') f.state.nativeMax = 1;
+      if (mode === 'expiry') f.state.expiryRejected = true;
+      const id = (await f.importer.listProfiles({ explicitUserRequest: true })).profiles[0].id;
+      const result = await f.importer.importProfile({ profileId: id, explicitUserConsent: true });
+      assert.equal(result.status, 'failed');
+      assert.equal(result.reason, mode === 'capacity' ? 'cookie-capacity-exceeded' :
+        mode === 'future-version' ? 'cookie-capacity-unverified' : 'cookie-expiry-cap-exceeded');
+      assert.equal(f.state.jars.get(7)[0].value, 'unrelated synthetic cookie');
+      assert.deepEqual(f.state.identities, [7]);
+      assert.equal(JSON.stringify(result).includes('unrelated synthetic cookie'), false);
+    } finally { f.restore(); }
+  }
+});
+
+test('native adapter reads WAL with normal locks and rejects active rollback journal or symlink', async () => {
   for (const mode of ['header-wal', 'sidecar-wal', 'active-journal', 'sidecar-symlink']) {
     const f = fakeGecko();
     try {
       const id = (await f.importer.listProfiles({ explicitUserRequest: true })).profiles[0].id;
-      if (mode === 'header-wal') f.state.files.get(`${f.base}/Default/Cookies`).bytes[18] = 2;
+      if (mode === 'header-wal') {
+        f.state.files.get(`${f.base}/Default/Cookies`).bytes[18] = 2;
+        f.state.files.get(`${f.base}/Default/Cookies`).bytes[19] = 2;
+      }
       if (mode === 'sidecar-wal') f.state.files.set(`${f.base}/Default/Cookies-wal`, { type: 'file', bytes: new Uint8Array() });
       if (mode === 'active-journal') f.state.files.set(`${f.base}/Default/Cookies-journal`, { type: 'file', bytes: new Uint8Array([1]) });
       if (mode === 'sidecar-symlink') f.state.files.set(`${f.base}/Default/Cookies-wal`, { type: 'symlink' });
       const result = await f.importer.importProfile({ profileId: id, explicitUserConsent: true });
-      assert.equal(result.status, 'failed');
-      assert.equal(result.reason, mode === 'active-journal' ? 'source-busy' :
-        mode === 'sidecar-symlink' ? 'unsafe-path' : 'source-wal-unsupported');
-      assert.equal(f.state.opened.length, 0);
+      if (mode === 'header-wal' || mode === 'sidecar-wal') {
+        assert.equal(result.status, 'imported');
+        assert.equal(f.state.opened.length, 1);
+        assert.equal(f.state.closed, 1);
+        assert.deepEqual(f.state.transactionTypes, ['DEFERRED']);
+      } else {
+        assert.equal(result.status, 'failed');
+        assert.equal(result.reason, mode === 'active-journal' ? 'source-busy' : 'unsafe-path');
+        assert.equal(f.state.opened.length, 0);
+        assert.deepEqual(f.state.identities, [7]);
+      }
       assert.equal(f.state.keychainCalls, 0);
-      assert.deepEqual(f.state.identities, [7]);
     } finally { f.restore(); }
   }
 });
@@ -489,4 +601,24 @@ test('native adapter closes a failed transaction without exposing its error', as
     assert.equal(JSON.stringify(result).includes('synthetic-secret'), false);
     assert.deepEqual(f.state.identities, [7]);
   } finally { f.restore(); }
+});
+
+test('native pending queries are interrupted on cancellation or time limit and connection closes', async () => {
+  for (const timed of [false, true]) {
+    const f = fakeGecko(timed ? { timerDelay: 20 } : {});
+    try {
+      const id = (await f.importer.listProfiles({ explicitUserRequest: true })).profiles[0].id;
+      f.state.pauseSql = true;
+      const controller = new AbortController();
+      const pending = f.importer.importProfile({ profileId: id, explicitUserConsent: true, signal: controller.signal });
+      while (!f.state.pendingSqlReject) await new Promise(resolve => setImmediate(resolve));
+      if (!timed) controller.abort();
+      const result = await pending;
+      assert.equal(result.status, timed ? 'failed' : 'cancelled');
+      if (timed) assert.equal(result.reason, 'source-timeout');
+      assert.equal(f.state.interruptions, 1);
+      assert.equal(f.state.closed, 1);
+      assert.deepEqual(f.state.identities, [7]);
+    } finally { f.restore(); }
+  }
 });

@@ -17,6 +17,7 @@ const MAX_DB_BYTES = 512 * 1024 * 1024;
 const MAX_STATE_BYTES = 4 * 1024 * 1024;
 const MAX_PROFILES = 100;
 const MAX_FIELD_BYTES = 16384;
+const MAX_READ_MS = 15000;
 const WINDOWS_EPOCH_MICROS = 11644473600000000n;
 const MAX_SAFE_BIGINT = BigInt(Number.MAX_SAFE_INTEGER);
 const DIRECTORY = /^(?:Default|Profile [1-9][0-9]{0,5})$/;
@@ -64,7 +65,8 @@ function safeEmail(value) {
 function safeReason(error, fallback = 'unavailable') {
   const allowed = new Set(['permission-denied', 'unavailable', 'source-busy', 'unsafe-path',
     'source-wal-unsupported', 'resource-limit', 'unsupported-schema', 'keychain-unavailable-or-denied',
-    'keychain-permission-denied', 'cancelled']);
+    'keychain-permission-denied', 'cookie-capacity-exceeded', 'cookie-capacity-unverified',
+    'cookie-validation-failed', 'cookie-expiry-cap-exceeded', 'cookie-readback-mismatch', 'source-timeout', 'cancelled']);
   if (error instanceof ImportFailure && allowed.has(error.code)) return error.code;
   if (error?.code === 'permission-denied' || error?.name === 'NotAllowedError' ||
       error?.name === 'SecurityError') return 'permission-denied';
@@ -85,7 +87,7 @@ function fileError(error) {
   if (error instanceof ImportFailure) throw error;
   const result = error?.result;
   if (typeof result === 'number' && globalThis.Cr && (result === Cr.NS_ERROR_FILE_ACCESS_DENIED ||
-      result === Cr.NS_ERROR_FILE_IS_LOCKED)) fail(result === Cr.NS_ERROR_FILE_ACCESS_DENIED ?
+      result === Cr.NS_ERROR_FILE_IS_LOCKED || result === Cr.NS_ERROR_STORAGE_BUSY)) fail(result === Cr.NS_ERROR_FILE_ACCESS_DENIED ?
     'permission-denied' : 'source-busy');
   fail(safeReason(error));
 }
@@ -107,7 +109,8 @@ function geckoAdapter(browserWindow) {
     failure = 'native-version-unavailable';
     const version = services.appinfo?.platformVersion;
     if (typeof version !== 'string' || !/^\d{1,3}(?:[.ab]|$)/i.test(version)) throw new Error();
-    if (Number.parseInt(version, 10) < 142) return { [NATIVE_INIT_FAILURE]: 'gecko-version-unsupported' };
+    const majorVersion = Number.parseInt(version, 10);
+    if (majorVersion < 142) return { [NATIVE_INIT_FAILURE]: 'gecko-version-unsupported' };
     failure = 'native-private-browsing-unavailable';
     const { PrivateBrowsingUtils } = importer('resource://gre/modules/PrivateBrowsingUtils.sys.mjs');
     if (typeof PrivateBrowsingUtils?.isWindowPrivate !== 'function') throw new Error();
@@ -224,8 +227,19 @@ function geckoAdapter(browserWindow) {
         if (localState.fileSize > MAX_STATE_BYTES) fail('resource-limit');
         const bytes = await io.read(localState.path, { maxBytes: MAX_STATE_BYTES + 1 });
         if (bytes.byteLength > MAX_STATE_BYTES) fail('resource-limit');
-        const cache = JSON.parse(textDecoder.decode(bytes))?.profile?.info_cache;
+        const state = JSON.parse(textDecoder.decode(bytes));
+        const cache = state?.profile?.info_cache;
         if (!cache || typeof cache !== 'object' || Array.isArray(cache)) fail('unavailable');
+        const labs = state?.browser?.enabled_labs_experiments;
+        if (labs !== undefined && (!Array.isArray(labs) || labs.length > 10000)) fail('resource-limit');
+        // Recognize positive about:flags evidence only. Missing flags do not
+        // prove the runtime features, command line or enterprise state is off.
+        const scopeBindings = {
+          port: Array.isArray(labs) && (labs.includes('bind-cookies-to-port@1') ||
+            labs.includes('bind-cookies-to-port')) ? true : undefined,
+          scheme: Array.isArray(labs) && (labs.includes('bind-cookies-to-scheme@1') ||
+            labs.includes('bind-cookies-to-scheme')) ? true : undefined,
+        };
         const entries = Object.entries(cache);
         if (entries.length > MAX_PROFILES) fail('resource-limit');
         const profiles = [];
@@ -235,7 +249,7 @@ function geckoAdapter(browserWindow) {
           // never interpreted as, or concatenated into, a filesystem path.
           const dir = appendChecked(base, directory, 'directory', true);
           if (!dir) continue;
-          profiles.push({ directory, name: safeName(meta.name), email: safeEmail(meta.user_name) });
+          profiles.push({ directory, name: safeName(meta.name), email: safeEmail(meta.user_name), scopeBindings });
         }
         return profiles;
       } catch (error) { return fileError(error); }
@@ -253,39 +267,61 @@ function geckoAdapter(browserWindow) {
       const wal = appendChecked(parent, 'Cookies-wal', 'file', true);
       const shm = appendChecked(parent, 'Cookies-shm', 'file', true);
       const journal = appendChecked(parent, 'Cookies-journal', 'file', true);
-      // A read-only WAL connection may create or update a shared-memory file.
-      // Never do that to a source profile, even if both sidecars already exist.
-      if (wal || shm) fail('source-wal-unsupported');
       if (journal && journal.fileSize > 0) fail('source-busy');
-      if (file.fileSize > MAX_DB_BYTES) fail('resource-limit');
+      const sizes = [file.fileSize, wal?.fileSize ?? 0, shm?.fileSize ?? 0];
+      if (sizes.some(size => !Number.isSafeInteger(size) || size < 0) ||
+          sizes.reduce((sum, size) => sum + size, 0) > MAX_DB_BYTES) fail('resource-limit');
       return file;
     }
 
-    async function readSqlite(directory, { maxRows, maxBytes }) {
-      const file = cookieFile(directory);
-      let connection;
+    async function readSqlite(directory, { maxRows, maxBytes, signal }) {
+      let connection, timer, timedOut = false;
+      const { setTimeout: startTimer, clearTimeout: stopTimer } = importer('resource://gre/modules/Timer.sys.mjs');
+      if (typeof startTimer !== 'function' || typeof stopTimer !== 'function') fail('unavailable');
+      function interrupt() { try { connection?.interrupt(); } catch { /* open or close may still be pending */ } }
+      function check() {
+        interrupted(signal);
+        if (timedOut) fail('source-timeout');
+      }
+      const onAbort = () => interrupt();
       try {
+        timer = startTimer(() => { timedOut = true; interrupt(); }, MAX_READ_MS);
+        signal?.addEventListener('abort', onAbort, { once: true });
+        check();
+        // Refresh only narrow profile/experiment metadata after consent.
+        const source = (await readRoot()).find(item => item.directory === directory);
+        check();
+        if (!source) fail('unavailable');
+        const file = cookieFile(directory);
         const header = await io.read(file.path, { maxBytes: 20 });
+        check();
         const signature = byteEncoder.encode('SQLite format 3\u0000');
         if (header.length < 20 || signature.some((byte, index) => header[index] !== byte)) fail('unsupported-schema');
-        if (header[18] === 2 || header[19] === 2) fail('source-wal-unsupported');
-        if (header[18] !== 1 || header[19] !== 1) fail('unsupported-schema');
+        if (header[18] !== header[19] || ![1, 2].includes(header[18])) fail('unsupported-schema');
         if (cookieFile(directory).path !== file.path) fail('unsafe-path');
+        // Gecko's storage initialization sets connection PRAGMAs internally;
+        // this importer issues no source-data/schema writes or checkpoint.
         connection = await Sqlite.openConnection({ path: file.path, readOnly: true,
-          ignoreLockingMode: false });
-        return await connection.executeTransaction(async db => {
+          ignoreLockingMode: false, sharedMemoryCache: false, openNotExclusive: true });
+        check();
+        const snapshot = await connection.executeTransaction(async db => {
+          check();
           const tables = await db.execute("SELECT name FROM sqlite_master WHERE type = 'table' AND name IN ('meta','cookies')");
+          check();
           const tableNames = new Set(tables.map(item => item.getResultByName('name')));
           if (!tableNames.has('cookies')) return { version: 0, rows: [], totalRows: 0, schemaSupported: false };
           const countRows = await db.execute('SELECT COUNT(*) AS n FROM (SELECT 1 FROM cookies LIMIT :limit)',
             { limit: maxRows + 1 });
+          check();
           const totalRows = countRows[0].getResultByName('n');
           if (!Number.isSafeInteger(totalRows) || totalRows > maxRows) fail('resource-limit');
           if (!tableNames.has('meta')) return { version: 0, rows: [], totalRows, schemaSupported: false };
           const meta = await db.execute("SELECT CAST(value AS TEXT) AS v FROM meta WHERE key = 'version' LIMIT 2");
+          check();
           const versionText = meta.length === 1 ? meta[0].getResultByName('v') : '';
           const version = /^[0-9]+$/.test(versionText) ? Number(versionText) : 0;
           const info = await db.execute('PRAGMA table_xinfo(cookies)');
+          check();
           const columnsByName = new Map(info.map(row => [row.getResultByName('name'), row]));
           const supported = (version === 23 || version === 24) &&
             info.length === COOKIE_COLUMNS.length &&
@@ -299,16 +335,26 @@ function geckoAdapter(browserWindow) {
           const sizeTerms = ['host_key', 'top_frame_site_key', 'name', 'value', 'encrypted_value', 'path']
             .map(name => `COALESCE(length(CAST(${name} AS BLOB)),0)`).join(' + ');
           const sizeRows = await db.execute(`SELECT CAST(COALESCE(SUM(${sizeTerms}),0) AS TEXT) AS n FROM cookies`);
+          check();
           const sizeText = sizeRows[0].getResultByName('n');
           if (!/^[0-9]+$/.test(sizeText) || BigInt(sizeText) > BigInt(maxBytes)) fail('resource-limit');
           const columns = READ_COLUMNS.map(name => name === 'expires_utc' ?
             "CASE WHEN typeof(expires_utc) = 'integer' THEN CAST(expires_utc AS TEXT) ELSE NULL END AS expires_utc" : `${name} AS ${name}`);
           const result = await db.execute(`SELECT ${columns.join(', ')} FROM cookies`);
+          check();
           return { version, totalRows, rows: result.map(row => Object.fromEntries(
             READ_COLUMNS.map(name => [name, row.getResultByName(name)]))) };
         }, connection.TRANSACTION_DEFERRED);
-      } catch (error) { return fileError(error); }
-      finally { if (connection) await connection.close(); }
+        check();
+        return { ...snapshot, scopeBindings: source.scopeBindings };
+      } catch (error) {
+        check();
+        return fileError(error);
+      } finally {
+        signal?.removeEventListener('abort', onAbort);
+        if (timer !== undefined) stopTimer(timer);
+        if (connection) await connection.close();
+      }
     }
 
     return {
@@ -323,6 +369,19 @@ function geckoAdapter(browserWindow) {
         } catch { fail('keychain-unavailable-or-denied'); }
       },
       getIdentityIds: () => identities.getPublicIdentities().map(identity => identity.userContextId),
+      getCookieCapacity() {
+        // Firefox 142-158 GetCookies includes expired in-memory entries, so
+        // this length matches the persistent storage's mCookieCount. Later
+        // Gecko versions changed that contract; don't guess a safe count.
+        try {
+          if (majorVersion > 158) fail('cookie-capacity-unverified');
+          const all = services.cookies.cookies;
+          if (!Array.isArray(all)) fail('cookie-capacity-unverified');
+          const configured = services.prefs.getIntPref('network.cookie.maxNumber', 3000);
+          const max = Number.isInteger(configured) && configured >= 1 && configured <= 65535 ? configured : 3000;
+          return { current: all.length, max };
+        } catch { fail('cookie-capacity-unverified'); }
+      },
       createIdentity: name => identities.create(name, 'fingerprint', 'blue'),
       removeIdentity: id => identities.remove(id),
       cookies: {
@@ -330,6 +389,8 @@ function geckoAdapter(browserWindow) {
           const result = services.cookies.add(cookie.host, cookie.path, cookie.name, cookie.value,
             cookie.isSecure, cookie.isHttpOnly, cookie.isSession, cookie.expiry, attrs,
             cookie.sameSite, cookie.schemeMap, false);
+          if (typeof ci.nsICookieValidation.eRejectedAttributeExpiryOversize === 'number' &&
+              result?.result === ci.nsICookieValidation.eRejectedAttributeExpiryOversize) return 'cookie-expiry-cap-exceeded';
           return result?.result === ci.nsICookieValidation.eOK;
         },
         list: attrs => services.cookies.getCookiesWithOriginAttributes(JSON.stringify(attrs)),
@@ -357,7 +418,7 @@ function asBytes(value) {
   return null;
 }
 
-function classify(row, now) {
+function classify(row, now, scopeMode, scopeBindings) {
   if (!row || typeof row !== 'object') return { category: 'failed' };
   const { host_key: host, name, path, value, top_frame_site_key: partition,
     has_cross_site_ancestor: ancestor, is_secure: secure, is_httponly: httpOnly,
@@ -368,15 +429,19 @@ function classify(row, now) {
       typeof value !== 'string' || typeof partition !== 'string' || !encrypted ||
       [host, name, path, value, partition].some(s => sizeOf(s) > MAX_FIELD_BYTES) ||
       encrypted.byteLength > MAX_FIELD_BYTES) return { category: 'failed' };
-  if (partition !== '' || ancestor !== 0) return { category: 'unsupported' };
+  if (partition !== '' || !isBooleanInteger(ancestor)) return { category: 'unsupported' };
   if (!isBooleanInteger(secure) || !isBooleanInteger(httpOnly) || !isBooleanInteger(hasExpires) ||
       !isBooleanInteger(persistent) || (persistent && !hasExpires) ||
       ![-1, 0, 1, 2, 3].includes(samesite) || ![0, 1, 2].includes(scheme) ||
       !Number.isInteger(port) || port < -1 || port > 65535) return { category: 'unsupported' };
   // Gecko has no equivalent port scope or enforced source-scheme scope.
   // Domain cookies are not port-bound in Chromium; secure cookies already
-  // enforce a secure source scheme. Never broaden an unrepresentable scope.
-  if ((!host.startsWith('.') && port !== -1) || scheme === 1 || (scheme === 2 && !secure)) {
+  // enforce a secure source scheme. An unrepresentable scope can only use
+  // standard web semantics after separate explicit compatibility consent.
+  const boundPort = !host.startsWith('.') && port !== -1;
+  const boundScheme = scheme === 1 || (scheme === 2 && !secure);
+  if ((boundPort && (scopeMode === 'preserve' || scopeBindings?.port === true)) ||
+      (boundScheme && (scopeMode === 'preserve' || scopeBindings?.scheme === true))) {
     return { category: 'unsupported' };
   }
   if (!/^\.?[a-z0-9](?:[a-z0-9.-]{0,251}[a-z0-9])?$/u.test(host) ||
@@ -399,7 +464,7 @@ function classify(row, now) {
   }
   return { encrypted, cookie: { host, name, path, value, isSecure: !!secure, isHttpOnly: !!httpOnly,
     isSession: !persistent, expiry: expiryMs, sameSite: samesite === -1 || samesite === 3 ? 256 : samesite,
-    schemeMap: scheme === 2 ? 2 : 0 } };
+    schemeMap: scheme === 2 ? 2 : scheme === 1 ? 1 : 0 } };
 }
 
 async function deriveKey(crypt, password) {
@@ -445,9 +510,11 @@ function sameCookie(expected, actual, id) {
 /**
  * The injected adapter is a privileged test seam, not a public IPC API. It has
  * platform, crypto, randomUUID(), now(), checkAccess(), readRoot(),
- * readSqlite(directory,{maxRows,maxBytes}), getKeychainPassword(),
- * getIdentityIds(), createIdentity(name), removeIdentity(id), and cookies
- * {add(cookie,attrs), list(attrs), removeAll(attrs)}. Adapters must use only
+ * readSqlite(directory,{maxRows,maxBytes,signal?}), getKeychainPassword(),
+ * getIdentityIds(), getCookieCapacity(), createIdentity(name), removeIdentity(id), and cookies
+ * {add(cookie,attrs), list(attrs), removeAll(attrs)}. getCookieCapacity and add
+ * are synchronous; the latter returns true or a fixed validation reason.
+ * Adapters must use only
  * synthetic data in tests. Native access and policy are independently checked
  * in Gecko; there are no native-path or native-Keychain overrides.
  */
@@ -465,7 +532,8 @@ export function createBrowserCookieImporter(options = {}) {
     if (!adapter.crypto?.subtle || typeof adapter.randomUUID !== 'function' || typeof adapter.now !== 'function' ||
         typeof adapter.checkAccess !== 'function' || typeof adapter.readRoot !== 'function' ||
         typeof adapter.readSqlite !== 'function' || typeof adapter.getKeychainPassword !== 'function' ||
-        typeof adapter.getIdentityIds !== 'function' || typeof adapter.createIdentity !== 'function' ||
+        typeof adapter.getIdentityIds !== 'function' || typeof adapter.getCookieCapacity !== 'function' ||
+        typeof adapter.createIdentity !== 'function' ||
         typeof adapter.removeIdentity !== 'function' || typeof adapter.cookies?.add !== 'function' ||
         typeof adapter.cookies?.list !== 'function' || typeof adapter.cookies?.removeAll !== 'function') {
       return { supported: false, reason: 'unavailable' };
@@ -476,7 +544,7 @@ export function createBrowserCookieImporter(options = {}) {
         'policy-unavailable', 'private-context-unverified', 'containers-disabled', 'permission-denied',
         'logging-enabled', 'logging-unverified'].includes(access) ? access : 'unavailable' };
     } catch { return { supported: false, reason: 'unavailable' }; }
-    return { supported: true };
+    return { supported: true, scopeModes: ['preserve', 'standard-web'] };
   }
 
   async function listProfiles({ explicitUserRequest = false } = {}) {
@@ -529,13 +597,18 @@ export function createBrowserCookieImporter(options = {}) {
     return false;
   }
 
-  async function importProfile({ profileId, explicitUserConsent = false, signal } = {}) {
+  async function importProfile({ profileId, explicitUserConsent = false, scopeMode = 'preserve',
+    explicitScopeCompatibilityConsent = false, signal } = {}) {
     const counts = counts0();
     const receipt = (status, reason, extra = {}) => ({ status, counts: { ...counts },
       ...(reason ? { reason } : {}), ...extra });
     const available = availability();
     if (!available.supported) return receipt('unsupported', available.reason);
     if (explicitUserConsent !== true) return receipt('failed', 'explicit-user-consent-required');
+    if (!['preserve', 'standard-web'].includes(scopeMode)) return receipt('failed', 'scope-mode-unsupported');
+    if (scopeMode === 'standard-web' && explicitScopeCompatibilityConsent !== true) {
+      return receipt('failed', 'scope-compatibility-consent-required');
+    }
     if (!validSignal(signal)) return receipt('failed', 'invalid-signal');
     if (signal?.aborted) return receipt('cancelled');
     const profile = typeof profileId === 'string' ? profiles.get(profileId) : null;
@@ -545,7 +618,8 @@ export function createBrowserCookieImporter(options = {}) {
     let ownedId = null, containerName = null, emptyBeforeWrites = false;
     const prepared = [];
     try {
-      const data = await adapter.readSqlite(profile.directory, { maxRows: MAX_ROWS, maxBytes: MAX_BYTES });
+      const data = await adapter.readSqlite(profile.directory, { maxRows: MAX_ROWS, maxBytes: MAX_BYTES,
+        ...(signal ? { signal } : {}) });
       interrupted(signal);
       if (!availability().supported) fail('unavailable');
       if (!data || !Array.isArray(data.rows) || data.rows.length > MAX_ROWS ||
@@ -575,7 +649,7 @@ export function createBrowserCookieImporter(options = {}) {
       for (const row of data.rows) {
         interrupted(signal);
         if (duplicates.get(rowIdentity(row)) > 1) { counts.unsupported++; continue; }
-        const result = classify(row, now);
+        const result = classify(row, now, scopeMode, data.scopeBindings);
         if (result.category) { counts[result.category]++; continue; }
         if (result.encrypted.length) {
           if (!key) {
@@ -601,6 +675,15 @@ export function createBrowserCookieImporter(options = {}) {
         return receipt('empty');
       }
       if (!availability().supported) fail('unavailable');
+      function requireCapacity(remaining) {
+        const capacity = adapter.getCookieCapacity();
+        if (!capacity || capacity.then || !Number.isSafeInteger(capacity.current) || capacity.current < 0 ||
+            !Number.isSafeInteger(capacity.max) || capacity.max < 1 || capacity.max > 65535) {
+          fail('cookie-capacity-unverified');
+        }
+        if (capacity.current + remaining > capacity.max) fail('cookie-capacity-exceeded');
+      }
+      requireCapacity(prepared.length);
       const existing = adapter.getIdentityIds();
       if (!Array.isArray(existing) || existing.some(id => !validId(id))) fail('unavailable');
       containerName = `Chrome - ${profile.name}`;
@@ -622,20 +705,26 @@ export function createBrowserCookieImporter(options = {}) {
         return receipt('failed', 'container-not-empty', { userContextId: id, containerName });
       }
       emptyBeforeWrites = true;
-      for (const cookie of prepared) {
+      for (let index = 0; index < prepared.length; index++) {
+        const cookie = prepared[index];
         interrupted(signal);
         if (!availability().supported) fail('unavailable');
-        if (await adapter.cookies.add(cookie, attrs) !== true) fail('unavailable');
+        // No await between the quota check and native add: the old cookies in
+        // other contexts must not be evicted by a global quota-triggered purge.
+        requireCapacity(prepared.length - index);
+        const added = adapter.cookies.add(cookie, attrs);
+        if (added === 'cookie-expiry-cap-exceeded') fail('cookie-expiry-cap-exceeded');
+        if (added !== true) fail('cookie-validation-failed');
       }
       interrupted(signal);
       if (!availability().supported) fail('unavailable');
       const actual = await adapter.cookies.list(attrs);
       interrupted(signal);
       if (!availability().supported) fail('unavailable');
-      if (!Array.isArray(actual) || actual.length !== prepared.length) fail('unavailable');
+      if (!Array.isArray(actual) || actual.length !== prepared.length) fail('cookie-readback-mismatch');
       const byKey = new Map(actual.map(cookie => [JSON.stringify([cookie.host, cookie.name, cookie.path]), cookie]));
       if (byKey.size !== prepared.length || prepared.some(cookie =>
-        !sameCookie(cookie, byKey.get(JSON.stringify([cookie.host, cookie.name, cookie.path])), ownedId))) fail('unavailable');
+        !sameCookie(cookie, byKey.get(JSON.stringify([cookie.host, cookie.name, cookie.path])), ownedId))) fail('cookie-readback-mismatch');
       counts.imported = prepared.length;
       const status = counts.skipped || counts.unsupported || counts.failed ? 'partial' : 'imported';
       return receipt(status, undefined, { userContextId: ownedId, containerName });
