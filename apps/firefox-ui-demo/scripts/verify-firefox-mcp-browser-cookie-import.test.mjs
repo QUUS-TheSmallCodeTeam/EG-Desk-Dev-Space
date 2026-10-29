@@ -17,8 +17,8 @@ import {
   assertEvidenceOnlyNumbers, cookieHeaderEvidence, syntheticEncryptedValue, syntheticCryptoFixture,
   createChromeFixture, createCookieFixtureServer, writeEvidence, stopOwnedChild, installFixtureIdentityGuard, installImporterFixture,
   observeNativeAvailability, inspectNativeCapabilities, installUiSyntheticFactory,
-  restoreUiSyntheticFactory, observeSyntheticWizard, createBrowserDiagnostics, inspectPopupPoint, inspectPopupCards,
-  installPopupMethodProbe, restorePopupMethodProbe,
+  restoreUiSyntheticFactory, observeSyntheticWizard, createBrowserDiagnostics, inspectPopupPoint, inspectPopupCards, inspectPopupTarget,
+  transformPopupCounterSource, readPopupMethodCounters,
   observeBrowserLifecycle, runCli,
 } from './verify-firefox-mcp-browser-cookie-import.mjs';
 
@@ -305,7 +305,7 @@ test('cookie header checks reject missing, wrong, duplicate and unrelated cookie
 });
 
 test('loopback handler reports counts only, rejects unknown routes and never forwards', () => {
-  const { server, counts } = createCookieFixtureServer();
+  const { server, counts, telemetry } = createCookieFixtureServer();
   const call = (url, cookie, method = 'GET') => {
     const response = { status: null, body: '', writeHead(status) { this.status = status; }, end(body = '') { this.body = body; } };
     server.emit('request', { method, url, headers: cookie ? { cookie } : {} }, response);
@@ -323,10 +323,14 @@ test('loopback handler reports counts only, rejects unknown routes and never for
     exactDuplicate: 0, exactPopup: 0, exactRestore: 0, exactWizard: 0 });
   assertEvidenceOnlyNumbers(counts);
   assert.doesNotMatch(JSON.stringify(counts), /synthetic_v24_only/);
+  assert.equal(call('/qa/popup-evidence?g=10000,10000,190000,50000,300000,240000').status, 204);
+  assert.equal(call('/qa/popup-evidence?p=11').status, 204);
+  assert.equal(telemetry.geometrySeen, true); assert.equal(telemetry.trustedOnLink, 1);
 });
 
 test('popup point observation checks viewport and chrome hit without storing page content', () => {
-  const browser = { getBoundingClientRect: () => ({ left: 10, top: 20, width: 150, height: 120 }), contains: () => false };
+  const browser = { clientWidth: 300, clientHeight: 240,
+    getBoundingClientRect: () => ({ left: 10, top: 20, width: 150, height: 120 }), contains: () => false };
   const qa = { cards: { v24: 'synthetic-card' } }, win = { __egdeskCookieQa: qa, innerWidth: 200, innerHeight: 200 };
   const doc = { getElementById: () => ({ _xulBrowser: browser }),
     querySelectorAll: () => [{ id: 'synthetic-card' }], elementFromPoint: () => browser };
@@ -334,6 +338,7 @@ test('popup point observation checks viewport and chrome hit without storing pag
   const inspect = vm.runInContext(`(${inspectPopupPoint.toString()})`, context);
   const point = inspect();
   assert.equal(point.inViewport, true); assert.equal(point.hitsBrowser, true);
+  assert.equal(point.scaleXMilli, 500); assert.equal(point.scaleYMilli, 500);
   win.innerWidth = 20;
   const outside = inspect();
   assert.equal(outside.inViewport, false); assert.equal(outside.hitsBrowser, false);
@@ -355,11 +360,11 @@ function syntheticLifecycle({ point = { x: 40, y: 50, inViewport: true, hitsBrow
   requests = 0, matching = 0, clickThrows = false, popupCard = false } = {}) {
   const fixture = { port: 44001, counts: { v24: 0, exactV24: 0, popup: 0, exactPopup: 0,
     duplicate: 0, exactDuplicate: 0 } };
-  let evaluations = 0;
+  let evaluations = 0; const clicks = [];
   const mcp = {
     async evaluate(fn) {
-      if (fn === installPopupMethodProbe) return true;
-      if (fn === restorePopupMethodProbe) return { restored: true, methods: {} };
+      if (fn === readPopupMethodCounters) return { createContentWindow: 0, createContentWindowInFrame: 0, openURI: 0, openURIInFrame: 0 };
+      if (fn === inspectPopupTarget) return true;
       if (fn === inspectPopupCards) return { available: true, addedCards: Number(popupCard),
         connectedCards: Number(popupCard), originAvailable: popupCard, originMatches: popupCard };
       evaluations++;
@@ -370,49 +375,23 @@ function syntheticLifecycle({ point = { x: 40, y: 50, inViewport: true, hitsBrow
       if (evaluations === 5) return false; // popup context
       throw new Error('fixture stops at duplicate');
     },
-    async clickPoint() {
+    async clickPoint(value) {
       if (clickThrows) throw new Error('raw exception must never be recorded');
+      clicks.push(value);
       fixture.counts.popup += requests; fixture.counts.exactPopup += matching;
     },
   };
-  return { fixture, mcp, diagnostics: createBrowserDiagnostics(), checks: {} };
+  return { fixture, mcp, diagnostics: createBrowserDiagnostics(), checks: {}, clicks };
 }
 
-test('temporary popup probe forwards all native calls and restores the original interface', () => {
-  const attrs = { userContextId: 17, privateBrowsingId: 0 }, result = { originAttributes: attrs }, sentinel = {}, thrown = new Error('private');
-  const names = ['createContentWindow', 'createContentWindowInFrame', 'openURI', 'openURIInFrame'];
-  const original = { QueryInterface() {}, isTabContentWindow() { return this === original; },
-    canClose() { return this === original; }, tabCount: 7 };
-  for (const name of names) original[name] = function (...args) {
-    assert.equal(this, original); assert.equal(args[0], sentinel);
-    if (name === 'openURIInFrame') throw thrown;
-    return name.endsWith('InFrame') ? { browsingContext: result } : result;
-  };
-  const runDir = '/private/tmp/egdesk-round-unit/browser-import/run-test';
-  const win = { __egdeskCookieQa: { fixtureRoot: `${runDir}/synthetic-chrome`, cards: { v24: 'card' } }, browserDOMWindow: original };
-  const context = vm.createContext({ window: win,
-    document: { documentURI: 'chrome://browser/content/browser.xhtml', getElementById: () => ({ _xulBrowser: { browsingContext: result } }) },
-    Services: { dirsvc: { get: () => ({ path: `${runDir}/tmp/egdesk-chat-test-fake` }) } },
-    Cc: { '@mozilla.org/gfx/info;1': { getService: () => ({ isHeadless: true }) } }, Ci: { nsIFile: {}, nsIGfxInfo: {} },
-    ChromeUtils: { generateQI: () => function () { return this; } },
-  });
-  const install = vm.runInContext(`(${installPopupMethodProbe.toString()})`, context);
-  const restore = vm.runInContext(`(${restorePopupMethodProbe.toString()})`, context);
-  assert.equal(install(), true);
-  const probe = win.browserDOMWindow, info = { parent: result };
-  assert.equal(probe.QueryInterface(), probe); assert.equal(probe.canClose(), true); assert.equal(probe.isTabContentWindow(), true);
-  assert.equal(probe.tabCount, 7);
-  assert.equal(probe.createContentWindow(sentinel, info), result);
-  assert.equal(probe.createContentWindowInFrame(sentinel, { openWindowInfo: info }).browsingContext, result);
-  assert.equal(probe.openURI(sentinel, info), result);
-  assert.throws(() => probe.openURIInFrame(sentinel, { openWindowInfo: info }), error => error === thrown);
-  const observed = restore();
-  assert.equal(observed.restored, true); assert.equal(win.browserDOMWindow, original);
-  for (const name of names) assert.equal(observed.methods[name].calls, 1);
-  assert.equal(observed.methods.createContentWindow.parentContextPresent, true);
-  assert.equal(observed.methods.createContentWindow.targetAttributesMatch, true);
-  assert.equal(observed.methods.openURIInFrame.threw, true);
-  assert.doesNotMatch(JSON.stringify(observed), /private/);
+test('owned popup counter transform requires each exact method once and preserves dispatch', () => {
+  const source = fs.readFileSync(new URL('../overlay/JS/eg-desk-surface.uc.js', import.meta.url), 'utf8');
+  const transformed = transformPopupCounterSource(source);
+  assert.equal((transformed.match(/window\.__egdeskCookieQa\?\.popupMethodCounts/g) || []).length, 4);
+  assert.throws(() => transformPopupCounterSource(transformed));
+  const anchor = 'createContentWindow(aURI, aOpenWindowInfo, aWhere, aFlags, aTriggeringPrincipal, aCsp) {';
+  assert.throws(() => transformPopupCounterSource(source.replace(anchor, '')));
+  assert.throws(() => transformPopupCounterSource(source + anchor));
 });
 
 test('popup diagnostics distinguish unavailable point, failed click and request timeout', async () => {
@@ -456,6 +435,20 @@ test('popup diagnostics distinguish unavailable point, failed click and request 
   assert.equal(blankPopup.diagnostics.popup.addedCards, 1);
   assert.equal(blankPopup.diagnostics.popup.connectedCards, 1);
   assert.equal(blankPopup.diagnostics.popup.originMatches, true);
+});
+
+test('trusted click uses reported synthetic link bounds under canvas scaling', async () => {
+  const run = syntheticLifecycle({ point: { x: 40, y: 50, rectLeft: 10, rectTop: 20, rawRectWidth: 150, rawRectHeight: 120,
+    clientWidth: 300, clientHeight: 240, scaleXMilli: 500, scaleYMilli: 500, inViewport: true, hitsBrowser: true } });
+  run.fixture.telemetry = { geometrySeen: true, geometry: [10000, 10000, 190000, 50000, 300000, 240000],
+    trustedOnLink: 1, trustedElsewhere: 0 };
+  const shots = [];
+  await assert.rejects(observeBrowserLifecycle(run.mcp, run.fixture, run.checks, Date.now() + 3000,
+    new AbortController().signal, run.diagnostics, 10, async name => shots.push(name)));
+  assert.deepEqual(shots, ['popup-ready']); assert.deepEqual(run.clicks, [{ x: 60, y: 35 }]);
+  assert.equal(run.diagnostics.popup.fixedPointInsideAnchor, false);
+  assert.equal(run.diagnostics.popup.projectedPointInsideAnchor, true);
+  assert.equal(run.diagnostics.popup.trustedPointerOnAnchor, 1);
 });
 
 test('popup request with wrong header stays a failed check and is distinguishable from timeout', async () => {

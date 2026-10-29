@@ -151,6 +151,7 @@ export function createCookieFixtureServer() {
   const counts = { requests: 0, state: 0, v23: 0, v24: 0, default: 0, unexpected: 0,
     duplicate: 0, popup: 0, restore: 0, wizard: 0, exactV23: 0, exactV24: 0, exactDefault: 0,
     exactDuplicate: 0, exactPopup: 0, exactRestore: 0, exactWizard: 0 };
+  const telemetry = { geometrySeen: false, geometry: [], trustedOnLink: 0, trustedElsewhere: 0 };
   const routes = new Map([['/cookie/v23', ['v23', 23]], ['/cookie/v24', ['v24', 24]],
     ['/cookie/default', ['default', 0]], ['/cookie/duplicate', ['duplicate', 24]],
     ['/cookie/popup', ['popup', 24]], ['/cookie/restore', ['restore', 24]], ['/cookie/wizard', ['wizard', 24]]]);
@@ -162,6 +163,14 @@ export function createCookieFixtureServer() {
       response.end(JSON.stringify(syntheticBridgeState()));
       return;
     }
+    if (request.method === 'GET' && typeof request.url === 'string' && request.url.startsWith('/qa/popup-evidence?') && request.url.length <= 200) {
+      const params = new URL(request.url, 'http://127.0.0.1').searchParams, geometry = params.get('g'), pointer = params.get('p');
+      if (geometry && /^\d{1,9}(,\d{1,9}){5}$/.test(geometry)) {
+        telemetry.geometry = geometry.split(',').map(Number); telemetry.geometrySeen = true;
+      } else if (pointer === '11') telemetry.trustedOnLink++;
+      else if (pointer === '10') telemetry.trustedElsewhere++;
+      response.writeHead(204, { 'cache-control': 'no-store' }); response.end(); return;
+    }
     const route = request.method === 'GET' ? routes.get(request.url) : undefined;
     if (route === undefined) {
       counts.unexpected++;
@@ -172,10 +181,15 @@ export function createCookieFixtureServer() {
     counts[key]++;
     if (match.onlyExpected) counts[`exact${key[0].toUpperCase()}${key.slice(1)}`]++;
     response.writeHead(200, { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store' });
-    response.end('<!doctype html><title>Owned synthetic cookie QA</title><style>body{margin:0}a{position:fixed;top:10px;left:10px;padding:20px;font:20px sans-serif}</style><a id="popup" href="/cookie/popup" target="_blank">Open synthetic popup</a>');
+    const telemetryScript = key === 'v24' ? `<script>(()=>{const a=document.getElementById('popup');
+      const send=s=>fetch('/qa/popup-evidence?'+s,{cache:'no-store'}).catch(()=>{}),r=a.getBoundingClientRect();
+      send('g='+[r.left,r.top,r.right,r.bottom,innerWidth,innerHeight].map(v=>Math.round(v*1000)).join(','));
+      document.addEventListener('pointerdown',e=>send('p='+(e.isTrusted?'1':'0')+(a.contains(e.target)?'1':'0')));
+    })()</script>` : '';
+    response.end('<!doctype html><title>Owned synthetic cookie QA</title><style>body{margin:0}a{position:fixed;top:10px;left:10px;padding:20px;font:20px sans-serif}</style><a id="popup" href="/cookie/popup" target="_blank">Open synthetic popup</a>' + telemetryScript);
   });
   server.on('connect', (_request, socket) => { counts.unexpected++; socket.destroy(); });
-  return { server, counts };
+  return { server, counts, telemetry };
 }
 
 export async function listenCookieFixture() {
@@ -443,6 +457,7 @@ export async function installImporterFixture(config) {
 
   Object.freeze(nativeCookies); Object.freeze(adapter);
   const qa = { checks, counts: counters, identities: {}, cards: {}, snapshot: null,
+    popupMethodCounts: { createContentWindow: 0, createContentWindowInFrame: 0, openURI: 0, openURIInFrame: 0 },
     fixtureRoot: root, syntheticAdapter: adapter, createImporter: createBrowserCookieImporter };
   if (checks.distinctContainers) {
     // This is fixture setup for the existing production card runtime, not a
@@ -514,21 +529,20 @@ const BROWSER_DIAGNOSTIC_STEPS = Object.freeze(['baseline', 'v24', 'popupPoint',
   'popupContext', 'duplicate', 'duplicateRoute', 'duplicateContext', 'restoreNavigation', 'restoreSetupRoute',
   'restoreCard', 'restoreRoute', 'restoreContext', 'identityChecks', 'v23', 'default', 'placement']);
 const POPUP_PROBE_METHODS = Object.freeze(['createContentWindow', 'createContentWindowInFrame', 'openURI', 'openURIInFrame']);
-const POPUP_PROBE_FLAGS = Object.freeze(['hasOpenWindowInfo', 'parentContextPresent', 'openerBrowserPresent',
-  'sourceAttributesAvailable', 'sourceAttributesMatch', 'returnedNonNull', 'returnedNull', 'threw',
-  'targetAttributesAvailable', 'targetAttributesMatch']);
 
 // Fixed labels and boolean/count-only values keep failure evidence free of
 // exception text, URLs, DOM content, and even synthetic cookie values.
 export function createBrowserDiagnostics() {
   return { steps: Object.fromEntries(BROWSER_DIAGNOSTIC_STEPS.map(name => [name, { started: false, completed: false }])),
     popup: { pointAvailable: false, pointInViewport: false, pointHitsBrowser: false,
+      clientWidth: 0, clientHeight: 0, rectWidth: 0, rectHeight: 0, scaleXMilli: 0, scaleYMilli: 0,
+      anchorGeometryAvailable: false, fixedPointInsideAnchor: false, projectedPointInsideAnchor: false,
+      targetFromGeometry: false, targetFromScale: false, targetHitsBrowser: false, trustedPointerOnAnchor: 0, trustedPointerOutsideAnchor: 0,
       routeTimedOut: false, requests: 0, matchingHeaders: 0,
       observationStarted: false, observationCompleted: false, observationAvailable: false,
       addedCards: 0, connectedCards: 0, originAvailable: false, originMatches: false,
-      probeAttempted: false, probeInstalled: false, probeRestoreAttempted: false, probeRestored: false,
-      methods: Object.fromEntries(POPUP_PROBE_METHODS.map(name => [name, { calls: 0,
-        ...Object.fromEntries(POPUP_PROBE_FLAGS.map(flag => [flag, false])) }])) } };
+      counterCopyApplied: false, counterReadBefore: false, counterReadAfter: false,
+      methods: Object.fromEntries(POPUP_PROBE_METHODS.map(name => [name, { calls: 0 }])) } };
 }
 
 async function browserDiagnosticStep(diagnostics, name, action) {
@@ -550,12 +564,17 @@ async function browserDiagnosticStep(diagnostics, name, action) {
 export function inspectPopupPoint() {
   const qa = window.__egdeskCookieQa, card = document.getElementById(qa.cards.v24);
   const browser = card?._xulBrowser, rect = browser?.getBoundingClientRect();
-  if (!rect || rect.width < 80 || rect.height < 80) return null;
+  if (!rect || !Number.isFinite(rect.width) || !Number.isFinite(rect.height) || rect.width < 80 || rect.height < 80) return null;
   qa.beforePopup = [...document.querySelectorAll('.egd-browser-card')].map(item => item.id);
   const x = Math.round(rect.left + 30), y = Math.round(rect.top + 30);
   const inViewport = x >= 0 && y >= 0 && x < window.innerWidth && y < window.innerHeight;
   const hit = inViewport ? document.elementFromPoint(x, y) : null;
-  return { x, y, inViewport, hitsBrowser: hit === browser || !!(hit && browser.contains(hit)) };
+  const safe = value => Number.isFinite(value) && value >= 0 && value <= 1000000 ? Math.round(value) : 0;
+  const clientWidth = safe(browser.clientWidth), clientHeight = safe(browser.clientHeight);
+  return { x, y, rectLeft: rect.left, rectTop: rect.top, rawRectWidth: rect.width, rawRectHeight: rect.height,
+    inViewport, hitsBrowser: hit === browser || !!(hit && browser.contains(hit)), clientWidth, clientHeight,
+    rectWidth: safe(rect.width), rectHeight: safe(rect.height), scaleXMilli: clientWidth ? safe(rect.width / clientWidth * 1000) : 0,
+    scaleYMilli: clientHeight ? safe(rect.height / clientHeight * 1000) : 0 };
 }
 
 // Read only synthetic card counts and origin-attribute equality; no IDs,
@@ -573,60 +592,55 @@ export function inspectPopupCards() {
       attrs.privateBrowsingId === 0 };
 }
 
-// Temporary interposition is limited to this owned, headless synthetic window.
-// Original arguments, return objects and exceptions are forwarded unchanged.
-export function installPopupMethodProbe() {
-  const qa = window.__egdeskCookieQa, root = qa?.fixtureRoot, suffix = '/synthetic-chrome';
-  const services = globalThis.Services || ChromeUtils.importESModule('resource://gre/modules/Services.sys.mjs').Services;
-  const runDir = root?.endsWith(suffix) ? root.slice(0, -suffix.length) : '';
-  if (!root?.startsWith('/private/tmp/egdesk-round-') || !runDir || qa.popupProbe ||
-      !services.dirsvc.get('ProfD', Ci.nsIFile).path.startsWith(`${runDir}/tmp/egdesk-chat-test-`) ||
-      Cc['@mozilla.org/gfx/info;1'].getService(Ci.nsIGfxInfo).isHeadless !== true ||
-      document.documentURI !== 'chrome://browser/content/browser.xhtml') return false;
-  const original = window.browserDOMWindow, names = ['createContentWindow', 'createContentWindowInFrame', 'openURI', 'openURIInFrame'];
-  if (!original || typeof original.QueryInterface !== 'function' ||
-      ![...names, 'isTabContentWindow', 'canClose'].every(name => typeof original[name] === 'function')) return false;
-  const methods = Object.fromEntries(names.map(name => [name, { calls: 0, hasOpenWindowInfo: false,
-    parentContextPresent: false, openerBrowserPresent: false, sourceAttributesAvailable: false, sourceAttributesMatch: false,
-    returnedNonNull: false, returnedNull: false, threw: false, targetAttributesAvailable: false, targetAttributesMatch: false }]));
-  const probe = { QueryInterface: ChromeUtils.generateQI(['nsIBrowserDOMWindow']),
-    isTabContentWindow(...args) { return Reflect.apply(original.isTabContentWindow, original, args); },
-    canClose(...args) { return Reflect.apply(original.canClose, original, args); }, get tabCount() { return original.tabCount; } };
-  for (const name of names) probe[name] = function (...args) {
-    const data = methods[name]; data.calls++;
-    try {
-      const frame = name.endsWith('InFrame'), params = frame ? args[1] : null, info = frame ? params?.openWindowInfo : args[1];
-      data.hasOpenWindowInfo ||= !!info; data.parentContextPresent ||= !!info?.parent; data.openerBrowserPresent ||= !!params?.openerBrowser;
-      const source = info?.parent?.originAttributes || params?.openerBrowser?.browsingContext?.originAttributes;
-      const expected = document.getElementById(qa.cards.v24)?._xulBrowser?.browsingContext?.originAttributes;
-      if (source && expected) { data.sourceAttributesAvailable = true; data.sourceAttributesMatch ||= source.userContextId === expected.userContextId && source.privateBrowsingId === expected.privateBrowsingId; }
-    } catch { /* metadata must never affect native dispatch */ }
-    let result;
-    try { result = Reflect.apply(original[name], original, args); } catch (error) { data.threw = true; throw error; }
-    data.returnedNonNull ||= result != null; data.returnedNull ||= result == null;
-    try {
-      const target = (name.endsWith('InFrame') ? result?.browsingContext : result)?.originAttributes;
-      const expected = document.getElementById(qa.cards.v24)?._xulBrowser?.browsingContext?.originAttributes;
-      if (target && expected) { data.targetAttributesAvailable = true; data.targetAttributesMatch ||= target.userContextId === expected.userContextId && target.privateBrowsingId === expected.privateBrowsingId; }
-    } catch { /* metadata must never affect native dispatch */ }
-    return result;
-  };
-  qa.popupProbe = { original, probe, methods };
-  try { window.browserDOMWindow = probe; if (window.browserDOMWindow === probe) return true; } catch {}
-  try { window.browserDOMWindow = original; if (window.browserDOMWindow === original) delete qa.popupProbe; } catch {}
-  return false;
+export function inspectPopupTarget({ x, y }) {
+  const qa = window.__egdeskCookieQa, browser = document.getElementById(qa.cards.v24)?._xulBrowser;
+  const hit = document.elementFromPoint(x, y);
+  return !!browser && (hit === browser || !!(hit && browser.contains(hit)));
 }
 
-export function restorePopupMethodProbe() {
-  const qa = window.__egdeskCookieQa, state = qa?.popupProbe;
-  if (!state) return { restored: false, methods: {} };
-  let restored = false;
+// Inject only fixed counters into the exact four known method bodies. The
+// result is used solely for this run's already-isolated overlay copy.
+export function transformPopupCounterSource(source) {
+  const signatures = {
+    createContentWindow: 'createContentWindow(aURI, aOpenWindowInfo, aWhere, aFlags, aTriggeringPrincipal, aCsp) {',
+    createContentWindowInFrame: 'createContentWindowInFrame(aURI, aParams, aWhere, aFlags, aName) {',
+    openURI: 'openURI(aURI, aOpenWindowInfo, aWhere, aFlags, aTriggeringPrincipal, aCsp) {',
+    openURIInFrame: 'openURIInFrame(aURI, aParams, aWhere, aFlags, aName) {',
+  };
+  assert.equal(typeof source, 'string');
+  assert.ok(!source.includes('window.__egdeskCookieQa?.popupMethodCounts'), 'popup counters already present');
+  for (const [name, anchor] of Object.entries(signatures)) {
+    const index = source.indexOf(anchor);
+    assert.ok(index >= 0 && index === source.lastIndexOf(anchor), 'popup method anchor missing or duplicated');
+    source = source.replace(anchor, `${anchor}\n        try { const counts = window.__egdeskCookieQa?.popupMethodCounts; if (counts) counts.${name}++; } catch {}`);
+  }
+  return source;
+}
+
+export function instrumentOwnedPopupCounters(prepared, runDir) {
+  const temp = assertPrivateDirectory(path.join(runDir, 'tmp'), runDir);
+  const profile = assertPrivateDirectory(prepared.profile, temp);
+  assert.match(path.basename(profile), /^egdesk-chat-test-/);
+  const file = path.join(profile, 'chrome/JS/eg-desk-surface.uc.js'), info = fs.lstatSync(file);
+  assert.ok(info.isFile() && !info.isSymbolicLink() && info.uid === process.getuid() && info.nlink === 1 &&
+    fs.realpathSync.native(file) === file && info.size < OVERLAY_MAX_BYTES, 'unsafe QA overlay copy');
+  const original = fs.readFileSync(file, 'utf8'), sha = value => createHash('sha256').update(value).digest('hex');
+  assert.equal(sha(original), prepared.sourceHash, 'QA overlay changed before counter instrumentation');
+  assert.equal(sha(original), prepared.isolation.files['JS/eg-desk-surface.uc.js'].transformedSha256);
+  const transformed = transformPopupCounterSource(original), fd = fs.openSync(file, fs.constants.O_WRONLY | fs.constants.O_NOFOLLOW);
   try {
-    if (window.browserDOMWindow === state.probe) window.browserDOMWindow = state.original;
-    restored = window.browserDOMWindow === state.original;
-    if (restored) delete qa.popupProbe;
-  } catch {}
-  return { restored, methods: state.methods };
+    const current = fs.fstatSync(fd);
+    assert.ok(current.isFile() && current.dev === info.dev && current.ino === info.ino && current.nlink === 1);
+    fs.writeFileSync(fd, transformed, 'utf8'); fs.ftruncateSync(fd, Buffer.byteLength(transformed));
+  } finally { fs.closeSync(fd); }
+  assert.equal(sha(fs.readFileSync(file)), sha(transformed), 'QA overlay counter write did not verify');
+}
+
+export function readPopupMethodCounters() {
+  const counts = window.__egdeskCookieQa?.popupMethodCounts;
+  if (!counts) return null;
+  return { createContentWindow: counts.createContentWindow, createContentWindowInFrame: counts.createContentWindowInFrame,
+    openURI: counts.openURI, openURIInFrame: counts.openURIInFrame };
 }
 
 async function openFixtureCard(mcp, fixture, version, checks, deadlineMs, signal, routeWaitMs = 30000) {
@@ -652,7 +666,7 @@ async function openFixtureCard(mcp, fixture, version, checks, deadlineMs, signal
   }, { route, version });
 }
 
-export async function observeBrowserLifecycle(mcp, fixture, checks, deadlineMs, signal, diagnostics, routeWaitMs = 30000) {
+export async function observeBrowserLifecycle(mcp, fixture, checks, deadlineMs, signal, diagnostics, routeWaitMs = 30000, capture = null) {
   assert.ok(Number.isSafeInteger(routeWaitMs) && routeWaitMs > 0 && routeWaitMs <= 30000);
   const baseline = await browserDiagnosticStep(diagnostics, 'baseline', () => mcp.evaluate(() => {
     const qa = window.__egdeskCookieQa, desk = window.__egdesk;
@@ -672,17 +686,41 @@ export async function observeBrowserLifecycle(mcp, fixture, checks, deadlineMs, 
   await browserDiagnosticStep(diagnostics, 'v24', () => openFixtureCard(mcp, fixture, 24, checks, deadlineMs, signal, routeWaitMs));
 
   const popupBefore = snapshotRoute(fixture, 'popup');
+  let methodCountsBefore, popupPoint, fixedPoint;
   try {
     const point = await browserDiagnosticStep(diagnostics, 'popupPoint', () => mcp.evaluate(inspectPopupPoint));
+    fixedPoint = { ...point }; popupPoint = point;
     diagnostics.popup.pointAvailable = !!point;
     diagnostics.popup.pointInViewport = point?.inViewport === true;
     diagnostics.popup.pointHitsBrowser = point?.hitsBrowser === true;
     if (!point) throw new Error('popup link unavailable');
-    diagnostics.popup.probeAttempted = true;
-    diagnostics.popup.probeInstalled = await mcp.evaluate(installPopupMethodProbe) === true;
-    if (!diagnostics.popup.probeInstalled) throw new Error('popup probe unavailable');
+    for (const name of ['clientWidth', 'clientHeight', 'rectWidth', 'rectHeight', 'scaleXMilli', 'scaleYMilli']) {
+      diagnostics.popup[name] = Number.isSafeInteger(point[name]) && point[name] >= 0 ? point[name] : 0;
+    }
+    if (capture) { try { await capture('popup-ready'); } catch {} }
+    if (fixture.telemetry && !fixture.telemetry.geometrySeen) {
+      try { await waitFor(() => fixture.telemetry.geometrySeen, deadlineMs, signal, 1000); } catch {}
+    }
+    const geometry = fixture.telemetry?.geometrySeen ? fixture.telemetry.geometry : null;
+    if (geometry?.[4] > 0 && geometry?.[5] > 0 && point.rawRectWidth > 0 && point.rawRectHeight > 0) {
+      popupPoint = { ...point, x: Math.round(point.rectLeft + ((geometry[0] + geometry[2]) / 2 / geometry[4]) * point.rawRectWidth),
+        y: Math.round(point.rectTop + ((geometry[1] + geometry[3]) / 2 / geometry[5]) * point.rawRectHeight) };
+      diagnostics.popup.targetFromGeometry = true;
+    } else if (point.scaleXMilli > 0 && point.scaleYMilli > 0) {
+      popupPoint = { ...point, x: Math.round(point.rectLeft + 20 * point.scaleXMilli / 1000),
+        y: Math.round(point.rectTop + 20 * point.scaleYMilli / 1000) };
+      diagnostics.popup.targetFromScale = true;
+    }
+    diagnostics.popup.targetHitsBrowser = await mcp.evaluate(inspectPopupTarget, { x: popupPoint.x, y: popupPoint.y }) === true;
+    if (!diagnostics.popup.targetHitsBrowser) throw new Error('popup target outside owned browser');
+    try {
+      const counts = await mcp.evaluate(readPopupMethodCounters);
+      if (POPUP_PROBE_METHODS.every(name => Number.isSafeInteger(counts?.[name]) && counts[name] >= 0)) {
+        methodCountsBefore = counts; diagnostics.popup.counterReadBefore = true;
+      }
+    } catch { /* missing diagnostics must not block the trusted click */ }
     // The local page's anchor is activated with trusted native WebDriver input.
-    await browserDiagnosticStep(diagnostics, 'popupClick', () => mcp.clickPoint({ x: point.x, y: point.y }));
+    await browserDiagnosticStep(diagnostics, 'popupClick', () => mcp.clickPoint({ x: popupPoint.x, y: popupPoint.y }));
     checks.headerPopup = await browserDiagnosticStep(diagnostics, 'popupRoute',
       () => requireRoute(fixture, 'popup', popupBefore, deadlineMs, signal, routeWaitMs));
     checks.contextPopup = await browserDiagnosticStep(diagnostics, 'popupContext', () => mcp.evaluate(() => {
@@ -694,17 +732,14 @@ export async function observeBrowserLifecycle(mcp, fixture, checks, deadlineMs, 
       return attrs?.userContextId === expected && attrs.privateBrowsingId === 0;
     }));
   } finally {
-    if (diagnostics.popup.probeAttempted) {
-      diagnostics.popup.probeRestoreAttempted = true;
+    if (methodCountsBefore) {
       try {
-        const observed = await mcp.evaluate(restorePopupMethodProbe);
-        diagnostics.popup.probeRestored = observed?.restored === true;
-        for (const name of POPUP_PROBE_METHODS) {
-          const source = observed?.methods?.[name], target = diagnostics.popup.methods[name];
-          target.calls = Number.isSafeInteger(source?.calls) && source.calls >= 0 ? source.calls : 0;
-          for (const flag of POPUP_PROBE_FLAGS) target[flag] = source?.[flag] === true;
+        const after = await mcp.evaluate(readPopupMethodCounters);
+        if (POPUP_PROBE_METHODS.every(name => Number.isSafeInteger(after?.[name]) && after[name] >= methodCountsBefore[name])) {
+          diagnostics.popup.counterReadAfter = true;
+          for (const name of POPUP_PROBE_METHODS) diagnostics.popup.methods[name].calls = after[name] - methodCountsBefore[name];
         }
-      } catch { /* owned Firefox cleanup still proceeds */ }
+      } catch { /* optional counter read must not replace the original failure */ }
     }
     if (diagnostics.steps.popupClick.completed && !signal?.aborted && Date.now() < deadlineMs) {
       diagnostics.popup.observationStarted = true;
@@ -721,7 +756,19 @@ export async function observeBrowserLifecycle(mcp, fixture, checks, deadlineMs, 
     const popupAfter = snapshotRoute(fixture, 'popup');
     diagnostics.popup.requests = popupAfter.requests - popupBefore.requests;
     diagnostics.popup.matchingHeaders = popupAfter.exact - popupBefore.exact;
-    if (diagnostics.popup.probeInstalled && !diagnostics.popup.probeRestored) throw new Error('popup probe restore failed');
+    const telemetry = fixture.telemetry;
+    if (telemetry?.geometrySeen && popupPoint?.rawRectWidth > 0 && popupPoint?.rawRectHeight > 0) {
+      const [left, top, right, bottom, width, height] = telemetry.geometry;
+      const x = (popupPoint.x - popupPoint.rectLeft) * width / popupPoint.rawRectWidth;
+      const y = (popupPoint.y - popupPoint.rectTop) * height / popupPoint.rawRectHeight;
+      const fx = (fixedPoint.x - fixedPoint.rectLeft) * width / fixedPoint.rawRectWidth;
+      const fy = (fixedPoint.y - fixedPoint.rectTop) * height / fixedPoint.rawRectHeight;
+      diagnostics.popup.anchorGeometryAvailable = width > 0 && height > 0;
+      diagnostics.popup.projectedPointInsideAnchor = diagnostics.popup.anchorGeometryAvailable && x >= left && x < right && y >= top && y < bottom;
+      diagnostics.popup.fixedPointInsideAnchor = diagnostics.popup.anchorGeometryAvailable && fx >= left && fx < right && fy >= top && fy < bottom;
+    }
+    diagnostics.popup.trustedPointerOnAnchor = telemetry?.trustedOnLink || 0;
+    diagnostics.popup.trustedPointerOutsideAnchor = telemetry?.trustedElsewhere || 0;
   }
 
   const duplicateBefore = snapshotRoute(fixture, 'duplicate');
@@ -1247,7 +1294,7 @@ export async function runCli(argv = process.argv.slice(2)) {
     nativeAvailability: { supported: false, platform: false, policy: false, privateContext: false,
       containers: false, logging: false, unavailable: false },
     nativeDiagnostics: {}, browserDiagnostics: createBrowserDiagnostics(),
-    screenshots: { menu: false, dialog: false, wizardChoice: false, wizardResult: false },
+    screenshots: { menu: false, dialog: false, wizardChoice: false, wizardResult: false, popupReady: false },
     counts: { fixtureBytes: 0, overlayBytes, artifactBytes: 0, fixtureRequests: 0, unexpectedRequests: 0,
       syntheticPasswordCalls: 0, nativeWrites: 0 }, failures: { fixture: false, profile: false, sandbox: false,
       firefox: false, mcp: false, native: false, importer: false, wizard: false, browser: false, interrupted: false, artifactLimit: false },
@@ -1275,6 +1322,8 @@ export async function runCli(argv = process.argv.slice(2)) {
       '\nuser_pref("browser.cache.disk.enable", false);\nuser_pref("privacy.userContext.enabled", true);\n', { encoding: 'utf8' });
     if (options.expectedSurfaceSha256) assert.equal(prepared.isolation.files['JS/eg-desk-surface.uc.js']?.originalSha256,
       options.expectedSurfaceSha256, 'surface source does not match requested revision');
+    instrumentOwnedPopupCounters(prepared, runDir);
+    evidence.browserDiagnostics.popup.counterCopyApplied = true;
     evidence.stages.profile = true;
     monitor = setInterval(() => {
       try {
@@ -1316,8 +1365,9 @@ export async function runCli(argv = process.argv.slice(2)) {
     evidence.stages.mcp = true;
     stage = 'native'; assertRunning(options.deadlineMs, interruption.signal);
     const capture = async name => {
-      assert.ok(['menu', 'dialog', 'wizard-choice', 'wizard-result'].includes(name));
+      assert.ok(['menu', 'dialog', 'wizard-choice', 'wizard-result', 'popup-ready'].includes(name));
       await takeScreenshot(mcp, path.join(runDir, `cookie-${name}.png`));
+      if (name === 'popup-ready') evidence.screenshots.popupReady = true;
     };
     await observeNativeAvailability(mcp, evidence, options.deadlineMs, interruption.signal, capture);
     evidence.stages.native = true;
@@ -1334,7 +1384,7 @@ export async function runCli(argv = process.argv.slice(2)) {
     await observeSyntheticWizard(mcp, fixture, evidence, options.deadlineMs, interruption.signal, capture);
     evidence.stages.wizard = true;
     stage = 'browser'; assertRunning(options.deadlineMs, interruption.signal);
-    await observeBrowserLifecycle(mcp, fixture, evidence.checks, options.deadlineMs, interruption.signal, evidence.browserDiagnostics);
+    await observeBrowserLifecycle(mcp, fixture, evidence.checks, options.deadlineMs, interruption.signal, evidence.browserDiagnostics, 30000, capture);
     evidence.stages.browser = true;
   } catch {
     if (Object.hasOwn(evidence.failures, stage)) evidence.failures[stage] = true;
