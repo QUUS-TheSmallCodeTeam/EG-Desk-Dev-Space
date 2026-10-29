@@ -147,11 +147,11 @@ export function createChromeFixture(runDir, now = Date.now()) {
 
 export function createCookieFixtureServer() {
   const counts = { requests: 0, state: 0, v23: 0, v24: 0, default: 0, unexpected: 0,
-    duplicate: 0, popup: 0, restore: 0, exactV23: 0, exactV24: 0, exactDefault: 0,
-    exactDuplicate: 0, exactPopup: 0, exactRestore: 0 };
+    duplicate: 0, popup: 0, restore: 0, wizard: 0, exactV23: 0, exactV24: 0, exactDefault: 0,
+    exactDuplicate: 0, exactPopup: 0, exactRestore: 0, exactWizard: 0 };
   const routes = new Map([['/cookie/v23', ['v23', 23]], ['/cookie/v24', ['v24', 24]],
     ['/cookie/default', ['default', 0]], ['/cookie/duplicate', ['duplicate', 24]],
-    ['/cookie/popup', ['popup', 24]], ['/cookie/restore', ['restore', 24]]]);
+    ['/cookie/popup', ['popup', 24]], ['/cookie/restore', ['restore', 24]], ['/cookie/wizard', ['wizard', 24]]]);
   const server = http.createServer((request, response) => {
     counts.requests++;
     if (request.method === 'GET' && request.url === '/v1/state') {
@@ -283,6 +283,20 @@ export async function installImporterFixture(config) {
     getIdentityIds: () => identities.getPublicIdentities().map(item => item.userContextId),
     createIdentity: name => identities.create(name, 'fingerprint', 'blue'),
     removeIdentity: id => identities.remove(id),
+    getCookieCapacity() {
+      // Mirror the native Firefox 142-158 capacity adapter in the disposable
+      // profile, including its all-container cookie count and preference cap.
+      const version = services.appinfo?.platformVersion;
+      if (typeof version !== 'string' || !/^\d{1,3}(?:[.ab]|$)/i.test(version) ||
+          Number.parseInt(version, 10) < 142 || Number.parseInt(version, 10) > 158) {
+        throw new Error('fixture cookie capacity unsupported');
+      }
+      const all = services.cookies.cookies;
+      const configured = services.prefs.getIntPref('network.cookie.maxNumber', 3000);
+      const max = Number.isInteger(configured) && configured >= 1 && configured <= 65535 ? configured : 3000;
+      if (!Array.isArray(all)) throw new Error('fixture cookie capacity unavailable');
+      return { current: all.length, max };
+    },
     cookies: nativeCookies,
   };
   const options = { adapter, profileImportPolicy: 'allow', privateBrowsingId: 0 };
@@ -345,7 +359,9 @@ export async function installImporterFixture(config) {
   checks.defaultReadback = ownCookie(0, defaultValue);
   checks.syntheticPasswordOnly = counters.keychainFixtureCalls >= 2;
 
-  const qa = { checks, counts: counters, identities: {}, cards: {}, snapshot: null };
+  Object.freeze(nativeCookies); Object.freeze(adapter);
+  const qa = { checks, counts: counters, identities: {}, cards: {}, snapshot: null,
+    fixtureRoot: root, syntheticAdapter: adapter, createImporter: createBrowserCookieImporter };
   if (checks.distinctContainers) {
     // This is fixture setup for the existing production card runtime, not a
     // claim that the trusted-click import wizard has been exercised.
@@ -647,6 +663,85 @@ export function inspectNativeCapabilities() {
       containersEnabled, loggingEnvGet: callable(read(services, 'env'), 'get'), prefsChildList: callable(prefs, 'getChildList') } };
 }
 
+// QA-window-only factory substitution. This is never part of the product or
+// its persisted profile source. If the exact method cannot be replaced and
+// verified, the caller must not press "find profiles". The substitute can
+// only construct the already-created, frozen synthetic adapter; it has no
+// production discovery/Keychain fallback.
+export function installUiSyntheticFactory() {
+  const qa = window.__egdeskCookieQa, api = window.ChromeUtils;
+  const uri = 'chrome://userchrome/content/EGDeskBrowserCookieImport.sys.mjs';
+  if (!qa || !qa.fixtureRoot?.startsWith('/private/tmp/egdesk-round-') ||
+      !Object.isFrozen(qa.syntheticAdapter) || typeof qa.createImporter !== 'function' ||
+      typeof qa.syntheticAdapter.getCookieCapacity !== 'function' || typeof qa.syntheticAdapter.cookies?.add !== 'function' ||
+      !api || typeof api.importESModule !== 'function' || qa.uiHook) return false;
+  try {
+    const suffix = '/synthetic-chrome';
+    if (!qa.fixtureRoot.endsWith(suffix)) return false;
+    const runDir = qa.fixtureRoot.slice(0, -suffix.length);
+    const profile = Services.dirsvc.get('ProfD', Ci.nsIFile).path;
+    const prefix = `${runDir}/tmp/egdesk-chat-test-`;
+    if (!profile.startsWith(prefix) || profile.slice(prefix.length).includes('/') ||
+        window.document?.documentURI !== 'chrome://browser/content/browser.xhtml' ||
+        Cc['@mozilla.org/gfx/info;1'].getService(Ci.nsIGfxInfo).isHeadless !== true) return false;
+  } catch { return false; }
+  const descriptor = Object.getOwnPropertyDescriptor(api, 'importESModule');
+  if (descriptor && !descriptor.configurable && (!Object.hasOwn(descriptor, 'value') || !descriptor.writable)) return false;
+  if (!descriptor && !Object.isExtensible(api)) return false;
+  const original = api.importESModule;
+  const ui = { factoryCalls: 0, listCalls: 0, importCalls: 0, consentPassed: false,
+    resultImported: false, importedCount: 0, userContextId: 0 };
+  const syntheticModule = Object.freeze({ createBrowserCookieImporter(options = {}) {
+    if (options.browserWindow !== window || options.profileImportPolicy !== 'allow' || options.privateBrowsingId !== 0) {
+      throw new Error('unsafe QA factory request');
+    }
+    ui.factoryCalls++;
+    const importer = qa.createImporter({ ...options, adapter: qa.syntheticAdapter });
+    return Object.freeze({
+      availability: () => importer.availability(),
+      listProfiles(args) { ui.listCalls++; return importer.listProfiles(args); },
+      async importProfile(args) {
+        ui.importCalls++;
+        ui.consentPassed = args?.explicitUserConsent === true;
+        const result = await importer.importProfile(args);
+        ui.resultImported = result?.status === 'imported';
+        ui.importedCount = Number.isSafeInteger(result?.counts?.imported) ? result.counts.imported : 0;
+        ui.userContextId = Number.isSafeInteger(result?.userContextId) ? result.userContextId : 0;
+        return result;
+      },
+    });
+  } });
+  const hook = function(specifier, ...rest) {
+    if (specifier === uri) return syntheticModule;
+    return Reflect.apply(original, api, [specifier, ...rest]);
+  };
+  const restore = () => {
+    try {
+      if (api.importESModule !== hook) return false;
+      if (descriptor) Object.defineProperty(api, 'importESModule', descriptor);
+      else delete api.importESModule;
+      return api.importESModule === original;
+    } catch { return false; }
+  };
+  try {
+    const next = descriptor ? { configurable: descriptor.configurable, enumerable: descriptor.enumerable,
+      writable: true, value: hook } : { configurable: true, enumerable: false, writable: true, value: hook };
+    Object.defineProperty(api, 'importESModule', next);
+    if (api.importESModule !== hook || api.importESModule(uri) !== syntheticModule) { restore(); return false; }
+    qa.ui = ui;
+    qa.uiHook = { api, hook, restore };
+    return true;
+  } catch { restore(); return false; }
+}
+
+export function restoreUiSyntheticFactory() {
+  const qa = window.__egdeskCookieQa, owned = qa?.uiHook;
+  if (!owned || owned.api.importESModule !== owned.hook) return false;
+  const restored = owned.restore();
+  if (restored) delete qa.uiHook;
+  return restored;
+}
+
 export async function observeNativeAvailability(mcp, evidence, deadlineMs, signal, capture) {
   // Availability is the only production-adapter call in this verifier. It
   // checks native services and policy but never enumerates profiles, reads a
@@ -731,6 +826,133 @@ export async function observeNativeAvailability(mcp, evidence, deadlineMs, signa
   }
 }
 
+async function nativeClickTestId(mcp, testId) {
+  assert.match(testId, /^browser-(?:menu|cookie-import|cookie-find|cookie-profile|cookie-consent|cookie-confirm|cookie-close)$/);
+  const point = await mcp.evaluate(id => {
+    const nodes = document.querySelectorAll(`[data-testid="${id}"]`);
+    if (nodes.length !== 1 || nodes[0].disabled) return null;
+    nodes[0].scrollIntoView({ block: 'nearest', inline: 'nearest' });
+    const rect = nodes[0].getBoundingClientRect();
+    if (rect.width <= 0 || rect.height <= 0) return null;
+    return { x: Math.round((rect.left + rect.right) / 2), y: Math.round((rect.top + rect.bottom) / 2) };
+  }, testId);
+  if (!point) throw new Error('owned wizard control unavailable');
+  await mcp.clickPoint(point);
+}
+
+export async function observeSyntheticWizard(mcp, fixture, evidence, deadlineMs, signal, capture) {
+  const checks = evidence.checks;
+  const baseline = await mcp.evaluate(() => {
+    const qa = window.__egdeskCookieQa, desk = window.__egdesk;
+    const canvas = document.getElementById('egd-canvas-layer');
+    if (!qa || !desk?.agenda?.readStore || !canvas) return false;
+    const windows = Services.wm.getEnumerator('navigator:browser');
+    let windowCount = 0;
+    while (windows.hasMoreElements()) { windows.getNext(); windowCount++; }
+    qa.uiBaseline = { canvas, agendaId: desk.state.agenda.activeAgendaId,
+      boardIds: Object.keys(desk.state.boards.projections).sort(),
+      savedBoardIds: Object.keys(desk.agenda.readStore().agendas).sort(),
+      activeProjectionId: desk.state.boards.activeProjectionId,
+      cards: [...document.querySelectorAll('.egd-browser-card')].map(card => card.id),
+      windowCount, reads: qa.counts.reads, passwords: qa.counts.keychainFixtureCalls };
+    return true;
+  });
+  if (!baseline) throw new Error('wizard baseline unavailable');
+  checks.uiInjectionInstalled = await mcp.evaluate(installUiSyntheticFactory);
+  if (!checks.uiInjectionInstalled) throw new Error('synthetic factory could not be isolated');
+  try {
+    await nativeClickTestId(mcp, 'browser-menu');
+    await waitFor(() => mcp.evaluate(() => !!document.querySelector('[data-testid="browser-cookie-import"]')),
+      deadlineMs, signal);
+    const menuFactoryCalls = await mcp.evaluate(() => {
+      const qa = window.__egdeskCookieQa, node = document.querySelector('[data-testid="browser-cookie-import"]');
+      return qa?.uiHook?.api.importESModule === qa.uiHook.hook && !node?.disabled ? qa.ui.factoryCalls : 0;
+    });
+    if (menuFactoryCalls < 1) throw new Error('menu did not capture synthetic factory');
+    await nativeClickTestId(mcp, 'browser-cookie-import');
+    await waitFor(() => mcp.evaluate(() => !!document.querySelector('[data-testid="browser-cookie-find"]')),
+      deadlineMs, signal);
+    checks.uiFactoryCaptured = await mcp.evaluate(previous => {
+      const qa = window.__egdeskCookieQa;
+      return qa?.uiHook?.api.importESModule === qa.uiHook.hook && qa.ui.factoryCalls > previous &&
+        qa.ui.listCalls === 0 && qa.counts.reads === qa.uiBaseline.reads &&
+        qa.counts.keychainFixtureCalls === qa.uiBaseline.passwords;
+    }, menuFactoryCalls);
+    // This is the only step that starts profile enumeration. Never press it
+    // unless the opened UI demonstrably obtained our locked synthetic factory.
+    if (!checks.uiFactoryCaptured) throw new Error('wizard did not capture synthetic factory');
+    await nativeClickTestId(mcp, 'browser-cookie-find');
+    await waitFor(() => mcp.evaluate(() => !!document.querySelector('[data-testid="browser-cookie-profile"]')),
+      deadlineMs, signal);
+    const listed = await mcp.evaluate(() => {
+      const qa = window.__egdeskCookieQa, select = document.querySelector('[data-testid="browser-cookie-profile"]');
+      return { syntheticReader: qa?.uiHook?.api.importESModule === qa.uiHook.hook && qa.ui.listCalls === 1 &&
+          qa.counts.reads === qa.uiBaseline.reads + 1 && qa.counts.keychainFixtureCalls === qa.uiBaseline.passwords,
+        expectedOption: !!select && select.options.length === 3 && select.options[1].textContent.includes('Synthetic v24') };
+    });
+    checks.uiSyntheticReader = listed.syntheticReader && listed.expectedOption;
+    if (!checks.uiSyntheticReader) throw new Error('synthetic profile listing not verified');
+    await nativeClickTestId(mcp, 'browser-cookie-profile');
+    await mcp.nativeInput([{ type: 'key', id: 'egdesk_cookie_qa_select', actions: [
+      { type: 'keyDown', value: '\uE011' }, { type: 'keyUp', value: '\uE011' },
+      { type: 'keyDown', value: '\uE015' }, { type: 'keyUp', value: '\uE015' },
+      { type: 'keyDown', value: '\uE007' }, { type: 'keyUp', value: '\uE007' },
+    ] }]);
+    await waitFor(() => mcp.evaluate(() => document.querySelector('[data-testid="browser-cookie-profile"]')?.selectedIndex === 1),
+      deadlineMs, signal);
+    checks.uiProfileSelected = true;
+    await nativeClickTestId(mcp, 'browser-cookie-consent');
+    checks.uiConsentEnabledConfirm = await mcp.evaluate(() => {
+      const consent = document.querySelector('[data-testid="browser-cookie-consent"]');
+      const confirm = document.querySelector('[data-testid="browser-cookie-confirm"]');
+      const qa = window.__egdeskCookieQa;
+      return consent?.checked === true && confirm?.disabled === false && qa?.uiHook?.api.importESModule === qa.uiHook.hook;
+    });
+    if (!checks.uiConsentEnabledConfirm) throw new Error('synthetic consent not verified');
+    await capture('wizard-choice'); evidence.screenshots.wizardChoice = true;
+    await nativeClickTestId(mcp, 'browser-cookie-confirm'); // no retry after this action
+    await waitFor(() => mcp.evaluate(() => !!document.querySelector('[data-testid="browser-cookie-result"]')),
+      deadlineMs, signal);
+    const outcome = await mcp.evaluate(() => {
+      const qa = window.__egdeskCookieQa, desk = window.__egdesk, before = qa.uiBaseline;
+      const added = [...document.querySelectorAll('.egd-browser-card')].filter(card => !before.cards.includes(card.id));
+      const match = added.filter(card => card._browserIdentity?.userContextId === qa.ui.userContextId);
+      if (match.length === 1) qa.cards.wizard = match[0].id;
+      const attrs = match[0]?._xulBrowser?.browsingContext?.originAttributes;
+      const windows = Services.wm.getEnumerator('navigator:browser');
+      let windowCount = 0; while (windows.hasMoreElements()) { windows.getNext(); windowCount++; }
+      return {
+        imported: qa.ui.importCalls === 1 && qa.ui.consentPassed && qa.ui.resultImported && qa.ui.importedCount === 1 &&
+          qa.ui.userContextId > 0 && qa.counts.keychainFixtureCalls === before.passwords + 1,
+        newCard: match.length === 1 && attrs?.userContextId === qa.ui.userContextId && attrs.privateBrowsingId === 0 &&
+          match[0]._sourceRef?.browserIdentityRequired === true && !!match[0]._sourceRef?.browserIdentityKey,
+        sameCanvas: !!match[0] && before.canvas === document.getElementById('egd-canvas-layer') && before.canvas.contains(match[0]),
+        sameDesk: before.agendaId === desk.state.agenda.activeAgendaId,
+        noNewBoard: JSON.stringify(before.boardIds) === JSON.stringify(Object.keys(desk.state.boards.projections).sort()) &&
+          JSON.stringify(before.savedBoardIds) === JSON.stringify(Object.keys(desk.agenda.readStore().agendas).sort()) &&
+          before.activeProjectionId === desk.state.boards.activeProjectionId,
+        noNewWindow: before.windowCount === windowCount,
+      };
+    });
+    checks.uiImportResult = outcome.imported;
+    checks.uiNewCard = outcome.newCard;
+    checks.uiSameCanvas = outcome.sameCanvas && outcome.sameDesk && outcome.noNewBoard && outcome.noNewWindow;
+    await capture('wizard-result'); evidence.screenshots.wizardResult = true;
+    await nativeClickTestId(mcp, 'browser-cookie-close');
+    await waitFor(() => mcp.evaluate(() => !document.querySelector('[data-testid="browser-cookie-import-dialog"]')),
+      deadlineMs, signal);
+    if (!checks.uiImportResult || !checks.uiNewCard || !checks.uiSameCanvas) throw new Error('synthetic wizard result incomplete');
+  } finally {
+    try { checks.uiInjectionRestored = await mcp.evaluate(restoreUiSyntheticFactory); } catch { checks.uiInjectionRestored = false; }
+  }
+  if (!checks.uiInjectionRestored) throw new Error('synthetic factory restoration unverified');
+  const before = snapshotRoute(fixture, 'wizard');
+  const navigated = await mcp.evaluate(({ port }) => window.__egdesk.browserRuntime.navigate(
+    window.__egdeskCookieQa.cards.wizard, `http://127.0.0.1:${port}/cookie/wizard`), { port: fixture.port });
+  if (!navigated) throw new Error('synthetic wizard Browser navigation failed');
+  checks.uiHeader = await requireRoute(fixture, 'wizard', before, deadlineMs, signal);
+}
+
 export async function stopOwnedChild(child, owned) {
   assert.ok(owned.includes(child), 'refusing to signal an unowned process');
   if (child.exitCode != null || child.signalCode != null) return;
@@ -770,18 +992,20 @@ export async function runCli(argv = process.argv.slice(2)) {
     'readErrorHandled', 'schemaDenied', 'cancelAfterWriteCleaned', 'importedV24', 'importedV23',
     'distinctContainers', 'nativeReadbackV24', 'nativeReadbackV23', 'defaultReadback', 'syntheticPasswordOnly'];
   const checkNames = ['nativeAvailability', 'nativeMenuEnabled', 'nativeDialogIntro', 'nativeDialogClosed', ...importerCheckNames,
+    'uiInjectionInstalled', 'uiFactoryCaptured', 'uiSyntheticReader', 'uiProfileSelected', 'uiConsentEnabledConfirm',
+    'uiImportResult', 'uiNewCard', 'uiSameCanvas', 'uiInjectionRestored', 'uiHeader',
     'headerV24', 'contextV24', 'headerV23', 'contextV23', 'headerDefault', 'contextDefault',
     'headerPopup', 'contextPopup', 'headerDuplicate', 'contextDuplicate', 'headerRestore', 'contextRestore',
     'foreignIdentityRejected', 'portableIdentityRejected', 'missingIdentityRejected',
     'sameCanvas', 'sameDesk', 'noNewBoard', 'noNewBrowserWindow'];
   const evidence = { ok: false, stages: { fixture: false, profile: false, sandbox: false, firefox: false,
-    mcp: false, native: false, importer: false, browser: false }, checks: Object.fromEntries(checkNames.map(name => [name, false])),
+    mcp: false, native: false, importer: false, wizard: false, browser: false }, checks: Object.fromEntries(checkNames.map(name => [name, false])),
     nativeAvailability: { supported: false, platform: false, policy: false, privateContext: false,
       containers: false, logging: false, unavailable: false },
-    nativeDiagnostics: {}, screenshots: { menu: false, dialog: false },
+    nativeDiagnostics: {}, screenshots: { menu: false, dialog: false, wizardChoice: false, wizardResult: false },
     counts: { fixtureBytes: 0, overlayBytes, artifactBytes: 0, fixtureRequests: 0, unexpectedRequests: 0,
       syntheticPasswordCalls: 0, nativeWrites: 0 }, failures: { fixture: false, profile: false, sandbox: false,
-      firefox: false, mcp: false, native: false, importer: false, browser: false, interrupted: false, artifactLimit: false },
+      firefox: false, mcp: false, native: false, importer: false, wizard: false, browser: false, interrupted: false, artifactLimit: false },
     cleanup: { firefoxExited: false, mcpExited: false, fixtureClosed: false, driverExitVerified: false,
       portsFree: false, errorCount: 0 } };
   let stage = 'fixture', fixture, firefox, mcp, driverPort, driverBefore, monitor;
@@ -846,10 +1070,11 @@ export async function runCli(argv = process.argv.slice(2)) {
       options.deadlineMs, interruption.signal);
     evidence.stages.mcp = true;
     stage = 'native'; assertRunning(options.deadlineMs, interruption.signal);
-    await observeNativeAvailability(mcp, evidence, options.deadlineMs, interruption.signal, async name => {
-      assert.ok(['menu', 'dialog'].includes(name));
+    const capture = async name => {
+      assert.ok(['menu', 'dialog', 'wizard-choice', 'wizard-result'].includes(name));
       await takeScreenshot(mcp, path.join(runDir, `cookie-${name}.png`));
-    });
+    };
+    await observeNativeAvailability(mcp, evidence, options.deadlineMs, interruption.signal, capture);
     evidence.stages.native = true;
     stage = 'importer'; assertRunning(options.deadlineMs, interruption.signal);
     const observed = await mcp.evaluate(installImporterFixture, { root: chromeFixture.root, runDir,
@@ -859,6 +1084,9 @@ export async function runCli(argv = process.argv.slice(2)) {
     evidence.counts.nativeWrites = observed.counts.nativeWrites;
     evidence.stages.importer = true;
     assert.ok(importerCheckNames.every(name => evidence.checks[name]), 'synthetic importer acceptance failed');
+    stage = 'wizard'; assertRunning(options.deadlineMs, interruption.signal);
+    await observeSyntheticWizard(mcp, fixture, evidence, options.deadlineMs, interruption.signal, capture);
+    evidence.stages.wizard = true;
     stage = 'browser'; assertRunning(options.deadlineMs, interruption.signal);
     await observeBrowserLifecycle(mcp, fixture, evidence.checks, options.deadlineMs, interruption.signal);
     evidence.stages.browser = true;

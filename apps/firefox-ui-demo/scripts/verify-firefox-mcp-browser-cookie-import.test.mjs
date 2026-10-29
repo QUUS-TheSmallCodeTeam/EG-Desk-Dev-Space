@@ -16,7 +16,8 @@ import {
   COOKIE_NAME, ARTIFACT_STOP_BYTES, OVERLAY_MAX_BYTES, parseCli, treeUsageBytes,
   assertEvidenceOnlyNumbers, cookieHeaderEvidence, syntheticEncryptedValue, syntheticCryptoFixture,
   createChromeFixture, createCookieFixtureServer, writeEvidence, stopOwnedChild, installImporterFixture,
-  observeNativeAvailability, inspectNativeCapabilities, runCli,
+  observeNativeAvailability, inspectNativeCapabilities, installUiSyntheticFactory,
+  restoreUiSyntheticFactory, observeSyntheticWizard, runCli,
 } from './verify-firefox-mcp-browser-cookie-import.mjs';
 
 function temporaryDirectory(t) {
@@ -106,6 +107,7 @@ test('committed Core accepts both real synthetic SQLite rows with an injected in
     },
     getKeychainPassword() { passwordCalls++; return syntheticCryptoFixture().password; },
     getIdentityIds: () => [...ids],
+    getCookieCapacity: () => ({ current: [...jars.values()].reduce((sum, list) => sum + list.length, 0), max: 3000 }),
     createIdentity(name) { const userContextId = nextId++; ids.push(userContextId); return { userContextId, name }; },
     removeIdentity(id) { const index = ids.indexOf(id); if (index < 0) return false; ids.splice(index, 1); return true; },
     cookies: {
@@ -137,19 +139,40 @@ test('committed Core accepts both real synthetic SQLite rows with an injected in
   assert.equal(jars.has(0), false);
   // The current Core contract conservatively refuses port-scoped host cookies;
   // the realistic secure 443 row must be classified, not silently imported.
+  let secureReads = 0;
   const secureAdapter = { ...adapter, async readSqlite(directory) {
+    secureReads++;
     const data = await adapter.readSqlite(directory);
     return { ...data, rows: data.rows.map(row => ({ ...row, is_secure: 1, source_scheme: 2, source_port: 443 })) };
   } };
   const secureImporter = createBrowserCookieImporter({ ...options, adapter: secureAdapter });
   const secureList = await secureImporter.listProfiles({ explicitUserRequest: true });
   const beforeSecurePasswords = passwordCalls, beforeSecureIds = [...ids];
+  const noCompatibilityConsent = await secureImporter.importProfile({ profileId: secureList.profiles[0].id,
+    explicitUserConsent: true, scopeMode: 'standard-web' });
+  assert.equal(noCompatibilityConsent.status, 'failed');
+  assert.equal(secureReads, 0);
   const secureResult = await secureImporter.importProfile({ profileId: secureList.profiles[0].id, explicitUserConsent: true });
   assert.equal(secureResult.status, 'failed');
   assert.equal(secureResult.counts.unsupported, 1);
   assert.equal(passwordCalls, beforeSecurePasswords);
   assert.deepEqual(ids, beforeSecureIds);
+  const compatible = await secureImporter.importProfile({ profileId: secureList.profiles[0].id,
+    explicitUserConsent: true, scopeMode: 'standard-web', explicitScopeCompatibilityConsent: true });
+  assert.equal(compatible.status, 'imported');
+  assert.equal(compatible.counts.imported, 1);
+  assert.equal(jars.get(compatible.userContextId)[0].isSecure, true);
+  const knownBoundAdapter = { ...secureAdapter, async readSqlite(directory) {
+    return { ...await secureAdapter.readSqlite(directory), scopeBindings: { port: true } };
+  } };
+  const knownBoundImporter = createBrowserCookieImporter({ ...options, adapter: knownBoundAdapter });
+  const knownBoundList = await knownBoundImporter.listProfiles({ explicitUserRequest: true });
+  const knownBound = await knownBoundImporter.importProfile({ profileId: knownBoundList.profiles[0].id,
+    explicitUserConsent: true, scopeMode: 'standard-web', explicitScopeCompatibilityConsent: true });
+  assert.equal(knownBound.status, 'failed');
+  assert.equal(knownBound.counts.unsupported, 1);
   const beforeIds = [...ids], controller = new AbortController();
+  const beforeJars = jars.size;
   const cancelAdapter = { ...adapter, cookies: { ...adapter.cookies, add(cookie, attrs) {
     const result = adapter.cookies.add(cookie, attrs); controller.abort(); return result;
   } } };
@@ -159,7 +182,7 @@ test('committed Core accepts both real synthetic SQLite rows with an injected in
     explicitUserConsent: true, signal: controller.signal });
   assert.equal(cancel.status, 'cancelled');
   assert.deepEqual(ids, beforeIds);
-  assert.equal(jars.size, 2);
+  assert.equal(jars.size, beforeJars);
 });
 
 test('disk accounting never follows links and is bounded by an entry ceiling', t => {
@@ -199,8 +222,8 @@ test('loopback handler reports counts only, rejects unknown routes and never for
   server.emit('connect', {}, { destroy() { destroyed = true; } });
   assert.equal(destroyed, true);
   assert.deepEqual(counts, { requests: 4, state: 1, v23: 0, v24: 1, default: 1, unexpected: 2,
-    duplicate: 0, popup: 0, restore: 0, exactV23: 0, exactV24: 1, exactDefault: 0,
-    exactDuplicate: 0, exactPopup: 0, exactRestore: 0 });
+    duplicate: 0, popup: 0, restore: 0, wizard: 0, exactV23: 0, exactV24: 1, exactDefault: 0,
+    exactDuplicate: 0, exactPopup: 0, exactRestore: 0, exactWizard: 0 });
   assertEvidenceOnlyNumbers(counts);
   assert.doesNotMatch(JSON.stringify(counts), /synthetic_v24_only/);
 });
@@ -222,7 +245,7 @@ test('only explicitly owned process handles can be signalled', async () => {
 
 test('privileged importer fixture fits the isolated MCP script limit', () => {
   const source = installImporterFixture.toString();
-  assert.ok(Buffer.byteLength(source) < 12000);
+  assert.ok(Buffer.byteLength(source) < 13000); // leaves >3 KiB for the MCP profile guard and arguments
   assert.match(source, /getKeychainPassword\(\) \{ counters\.keychainFixtureCalls\+\+; return password; \}/);
   assert.doesNotMatch(source, /getGenericPassword|Chrome Safe Storage/);
   assert.doesNotMatch(source, /createBrowserCookieImporter\(\s*\)/);
@@ -264,6 +287,80 @@ test('native diagnostics resolve the factory global and report only bounded bool
   assert.doesNotMatch(JSON.stringify(result), /SECRET_NATIVE_ERROR/);
   assert.ok(calls.some(uri => uri.startsWith('moz-src:')));
   assert.ok(Buffer.byteLength(inspectNativeCapabilities.toString()) < 12000);
+});
+
+test('UI factory injection is temporary, synthetic-only and rejects unsafe fallback', async () => {
+  const original = () => ({ original: true }), api = { importESModule: original }, calls = [];
+  const adapter = Object.freeze({ synthetic: true, getCookieCapacity: () => ({ current: 0, max: 3000 }),
+    cookies: Object.freeze({ add: () => true }) });
+  const qa = { fixtureRoot: '/private/tmp/egdesk-round-unit/synthetic-chrome', syntheticAdapter: adapter,
+    createImporter(options) {
+      calls.push(options);
+      return { availability: () => ({ supported: true }), listProfiles: async () => ({ supported: true, profiles: [] }),
+        importProfile: async () => ({ status: 'imported', counts: { imported: 1 }, userContextId: 7 }) };
+    } };
+  const win = { ChromeUtils: api, __egdeskCookieQa: qa,
+    document: { documentURI: 'chrome://browser/content/browser.xhtml' } };
+  const globals = { Services: { dirsvc: { get: () => ({ path: '/private/tmp/egdesk-round-unit/tmp/egdesk-chat-test-fake' }) } },
+    Ci: { nsIFile: {}, nsIGfxInfo: {} }, Cc: { '@mozilla.org/gfx/info;1': { getService: () => ({ isHeadless: true }) } } };
+  const context = vm.createContext({ window: win, ...globals });
+  assert.equal(vm.runInContext(`(${installUiSyntheticFactory.toString()})()`, context), true);
+  const importer = api.importESModule('chrome://userchrome/content/EGDeskBrowserCookieImport.sys.mjs');
+  assert.throws(() => importer.createBrowserCookieImporter({}), /unsafe QA factory/);
+  const wrapped = importer.createBrowserCookieImporter({ browserWindow: win, profileImportPolicy: 'allow', privateBrowsingId: 0,
+    adapter: { unsafe: true } });
+  assert.equal(calls[0].adapter, adapter);
+  assert.equal((await wrapped.listProfiles({ explicitUserRequest: true })).supported, true);
+  assert.equal((await wrapped.importProfile({ explicitUserConsent: true })).status, 'imported');
+  assert.equal(qa.ui.listCalls, 1); assert.equal(qa.ui.importCalls, 1);
+  assert.equal(api.importESModule('other').original, true);
+  assert.equal(vm.runInContext(`(${restoreUiSyntheticFactory.toString()})()`, context), true);
+  assert.equal(api.importESModule, original);
+  const locked = {};
+  Object.defineProperty(locked, 'importESModule', { value: original, writable: false, configurable: false });
+  const lockedContext = vm.createContext({ window: { ChromeUtils: locked, __egdeskCookieQa: qa, document: win.document }, ...globals });
+  assert.equal(vm.runInContext(`(${installUiSyntheticFactory.toString()})()`, lockedContext), false);
+  assert.equal(locked.importESModule, original);
+  const foreground = vm.createContext({ window: win, ...globals,
+    Cc: { '@mozilla.org/gfx/info;1': { getService: () => ({ isHeadless: false }) } } });
+  assert.equal(vm.runInContext(`(${installUiSyntheticFactory.toString()})()`, foreground), false);
+  assert.equal(api.importESModule, original);
+});
+
+test('wizard never clicks Find when the synthetic factory was not captured', async () => {
+  const point = { x: 20, y: 20 };
+  const values = [true, true, point, true, 1, point, true, false, true];
+  let clicks = 0;
+  const mcp = { async evaluate() { return values.shift(); }, async clickPoint() { clicks++; } };
+  const evidence = { checks: {}, screenshots: {} };
+  await assert.rejects(observeSyntheticWizard(mcp, {}, evidence, Date.now() + 3000,
+    new AbortController().signal, async () => assert.fail('must not reach screenshots')));
+  assert.equal(clicks, 2); // menu + intro; no Find, consent, or import
+  assert.equal(evidence.checks.uiFactoryCaptured, false);
+  assert.equal(evidence.checks.uiInjectionRestored, true);
+});
+
+test('wizard orchestration requires selection, consent, new same-canvas card and matching local header', async () => {
+  const point = { x: 20, y: 20 }, clicks = [], captures = [];
+  const values = [true, true, point, true, 1, point, true, true, point, true,
+    { syntheticReader: true, expectedOption: true }, point, true, point, true, point, true,
+    { imported: true, newCard: true, sameCanvas: true, sameDesk: true, noNewBoard: true, noNewWindow: true },
+    point, true, true, true];
+  const fixture = { counts: { wizard: 0, exactWizard: 0 }, port: 44001 };
+  const mcp = { async evaluate(fn) {
+    if (fn.toString().includes('browserRuntime.navigate')) { fixture.counts.wizard++; fixture.counts.exactWizard++; }
+    return values.shift();
+  }, async clickPoint(value) { clicks.push(value); }, async nativeInput() {} };
+  const evidence = { checks: {}, screenshots: {} };
+  await observeSyntheticWizard(mcp, fixture, evidence, Date.now() + 3000, new AbortController().signal,
+    async name => captures.push(name));
+  assert.equal(values.length, 0);
+  assert.equal(clicks.length, 7);
+  assert.deepEqual(captures, ['wizard-choice', 'wizard-result']);
+  for (const check of ['uiInjectionInstalled', 'uiFactoryCaptured', 'uiSyntheticReader', 'uiProfileSelected',
+    'uiConsentEnabledConfirm', 'uiImportResult', 'uiNewCard', 'uiSameCanvas', 'uiInjectionRestored', 'uiHeader']) {
+    assert.equal(evidence.checks[check], true);
+  }
 });
 
 test('native availability, trusted menu and intro capture precede synthetic adapter installation', async () => {
