@@ -35,6 +35,7 @@ const READ_COLUMNS = [
 ];
 const byteEncoder = new TextEncoder();
 const textDecoder = new TextDecoder('utf-8', { fatal: true, ignoreBOM: true });
+const NATIVE_INIT_FAILURE = Symbol('native-init-failure');
 
 class ImportFailure extends Error {
   constructor(code) { super(code); this.code = code; }
@@ -92,19 +93,55 @@ function fileError(error) {
 /* Constructed only in Gecko. There is deliberately no production path, root,
  * profile, Keychain-service, or environment override. */
 function geckoAdapter(browserWindow) {
+  let failure = 'native-module-loader-unavailable';
   try {
-    if (typeof globalThis.ChromeUtils?.importESModule !== 'function') return null;
+    if (typeof globalThis.ChromeUtils?.importESModule !== 'function') throw new Error();
     const importer = url => globalThis.ChromeUtils.importESModule(url);
+    failure = 'native-platform-unavailable';
     const { AppConstants } = importer('resource://gre/modules/AppConstants.sys.mjs');
-    const { PrivateBrowsingUtils } = importer('resource://gre/modules/PrivateBrowsingUtils.sys.mjs');
-    const { ContextualIdentityService: identities } =
-      importer('resource://gre/modules/ContextualIdentityService.sys.mjs');
-    const { Sqlite } = importer('resource://gre/modules/Sqlite.sys.mjs');
+    if (typeof AppConstants?.platform !== 'string' || !AppConstants.platform) throw new Error();
+    if (AppConstants.platform !== 'macosx') return { platform: AppConstants.platform };
+    failure = 'native-services-unavailable';
     const services = globalThis.Services;
-    const ci = globalThis.Ci;
-    const cc = globalThis.Cc;
+    if (!services) throw new Error();
+    failure = 'native-version-unavailable';
+    const version = services.appinfo?.platformVersion;
+    if (typeof version !== 'string' || !/^\d{1,3}(?:[.ab]|$)/i.test(version)) throw new Error();
+    if (Number.parseInt(version, 10) < 142) return { [NATIVE_INIT_FAILURE]: 'gecko-version-unsupported' };
+    failure = 'native-private-browsing-unavailable';
+    const { PrivateBrowsingUtils } = importer('resource://gre/modules/PrivateBrowsingUtils.sys.mjs');
+    if (typeof PrivateBrowsingUtils?.isWindowPrivate !== 'function') throw new Error();
+    failure = 'native-contextual-identity-unavailable';
+    let identities;
+    try {
+      identities = importer('moz-src:///toolkit/components/contextualidentity/ContextualIdentityService.sys.mjs')
+        .ContextualIdentityService;
+      if (!identities) throw new Error();
+    } catch {
+      // Firefox versions before the moz-src migration used this module URI.
+      identities = importer('resource://gre/modules/ContextualIdentityService.sys.mjs')
+        .ContextualIdentityService;
+    }
+    if (typeof identities?.create !== 'function' || typeof identities?.remove !== 'function' ||
+        typeof identities?.getPublicIdentities !== 'function') throw new Error();
+    failure = 'native-sqlite-unavailable';
+    const { Sqlite } = importer('resource://gre/modules/Sqlite.sys.mjs');
+    if (typeof Sqlite?.openConnection !== 'function') throw new Error();
+    failure = 'native-components-unavailable';
+    const ci = globalThis.Ci ?? globalThis.Components?.interfaces;
+    const cc = globalThis.Cc ?? globalThis.Components?.classes;
+    if (!ci || !cc) throw new Error();
+    failure = 'native-cookie-api-unavailable';
+    if (typeof ci.nsICookieValidation?.eOK !== 'number' ||
+        typeof services.cookies?.add !== 'function' ||
+        typeof services.cookies?.getCookiesWithOriginAttributes !== 'function' ||
+        typeof services.cookies?.removeCookiesWithOriginAttributes !== 'function') throw new Error();
+    failure = 'native-io-unavailable';
     const io = globalThis.IOUtils;
+    if (!io || typeof io.read !== 'function') throw new Error();
+    failure = 'native-crypto-unavailable';
     const crypt = globalThis.crypto;
+    if (!crypt?.subtle || typeof crypt.randomUUID !== 'function') throw new Error();
 
     function checkAccess() {
       try {
@@ -299,7 +336,7 @@ function geckoAdapter(browserWindow) {
         removeAll: attrs => services.cookies.removeCookiesWithOriginAttributes(JSON.stringify(attrs)),
       },
     };
-  } catch { return null; }
+  } catch { return { [NATIVE_INIT_FAILURE]: failure }; }
 }
 
 function rowIdentity(row) {
@@ -422,7 +459,9 @@ export function createBrowserCookieImporter(options = {}) {
   function availability() {
     if (options.profileImportPolicy !== 'allow') return { supported: false, reason: 'policy-unverified' };
     if (options.privateBrowsingId !== 0) return { supported: false, reason: 'private-context-unverified' };
-    if (!adapter || adapter.platform !== 'macosx') return { supported: false, reason: 'platform-unsupported' };
+    if (adapter?.[NATIVE_INIT_FAILURE]) return { supported: false, reason: adapter[NATIVE_INIT_FAILURE] };
+    if (!adapter || typeof adapter.platform !== 'string' || !adapter.platform) return { supported: false, reason: 'unavailable' };
+    if (adapter.platform !== 'macosx') return { supported: false, reason: 'platform-unsupported' };
     if (!adapter.crypto?.subtle || typeof adapter.randomUUID !== 'function' || typeof adapter.now !== 'function' ||
         typeof adapter.checkAccess !== 'function' || typeof adapter.readRoot !== 'function' ||
         typeof adapter.readSqlite !== 'function' || typeof adapter.getKeychainPassword !== 'function' ||

@@ -275,11 +275,12 @@ test('permission errors and cancellation during a pending source read do not cre
 
 // Fake Gecko globals exercise the production adapter's path, policy, Sqlite,
 // Keychain, cookie and identity glue. Every path/data item below is synthetic.
-function fakeGecko() {
+function fakeGecko({ platform = 'macosx', geckoVersion = '158.0.1', failedImports = [], noLoader = false,
+  missingCookieValidation = false } = {}) {
   const base = '/Users/synthetic/Library/Application Support/Google/Chrome';
   const state = { files: new Map(), opened: [], closed: 0, transactionTypes: [], keychainCalls: 0,
     identities: [7], jars: new Map(), policy: true, logging: false, envLogging: false,
-    sqlFailure: false, rows: [row()], version: 24 };
+    sqlFailure: false, rows: [row()], version: 24, imports: [] };
   for (const path of ['/Users/synthetic', '/Users/synthetic/Library',
     '/Users/synthetic/Library/Application Support', '/Users/synthetic/Library/Application Support/Google',
     base, `${base}/Default`]) state.files.set(path, { type: 'directory' });
@@ -333,6 +334,7 @@ function fakeGecko() {
   };
   const services = {
     dirsvc: { get: () => new FakeFile('/Users/synthetic') },
+    appinfo: { platformVersion: geckoVersion },
     policies: { isAllowed: feature => feature === 'profileImport' && state.policy },
     env: { get: () => state.envLogging ? 'cookie:5' : '' },
     prefs: { getBoolPref: () => true, getChildList: () => state.logging ? ['logging.cookie'] : [] },
@@ -348,18 +350,24 @@ function fakeGecko() {
     },
   };
   const globals = {
-    crypto: webcrypto, Services: services, Ci: { nsIFile: {}, nsICookieValidation: { eOK: 0 }, nsIKeychainMigrationUtils: {} },
+    crypto: webcrypto, Services: services, Ci: { nsIFile: {},
+      nsICookieValidation: missingCookieValidation ? undefined : { eOK: 0 }, nsIKeychainMigrationUtils: {} },
     Cc: { '@mozilla.org/profile/migrator/keychainmigrationutils;1': { getService: () => ({
       getGenericPassword(service, account) {
         assert.equal(service, 'Chrome Safe Storage'); assert.equal(account, 'Chrome'); state.keychainCalls++; return PASSWORD;
       },
     }) } },
     IOUtils: { async read(path, { maxBytes }) { return state.files.get(path).bytes.slice(0, maxBytes); } },
-    ChromeUtils: { importESModule(url) {
-      if (url.endsWith('AppConstants.sys.mjs')) return { AppConstants: { platform: 'macosx' } };
-      if (url.endsWith('PrivateBrowsingUtils.sys.mjs')) return { PrivateBrowsingUtils: { isWindowPrivate: win => win.isPrivate } };
-      if (url.endsWith('ContextualIdentityService.sys.mjs')) return { ContextualIdentityService: identities };
-      if (url.endsWith('Sqlite.sys.mjs')) return { Sqlite: sqlite };
+    ChromeUtils: noLoader ? {} : { importESModule(url) {
+      state.imports.push(url);
+      if (failedImports.includes(url)) throw new Error('synthetic-sensitive-error');
+      if (url === 'resource://gre/modules/AppConstants.sys.mjs') return { AppConstants: { platform } };
+      if (url === 'resource://gre/modules/PrivateBrowsingUtils.sys.mjs') return { PrivateBrowsingUtils: { isWindowPrivate: win => win.isPrivate } };
+      if (url === 'moz-src:///toolkit/components/contextualidentity/ContextualIdentityService.sys.mjs') {
+        return { ContextualIdentityService: identities };
+      }
+      if (url === 'resource://gre/modules/ContextualIdentityService.sys.mjs') return { ContextualIdentityService: identities };
+      if (url === 'resource://gre/modules/Sqlite.sys.mjs') return { Sqlite: sqlite };
       throw new Error('unexpected import');
     } },
   };
@@ -388,7 +396,45 @@ test('native adapter uses readonly locked deferred transaction, closes, prompts 
     assert.deepEqual(f.state.transactionTypes, ['DEFERRED']);
     assert.equal(f.state.closed, 1);
     assert.equal(f.state.jars.get(80)[0].value, 'only synthetic');
+    assert.ok(f.state.imports.includes('moz-src:///toolkit/components/contextualidentity/ContextualIdentityService.sys.mjs'));
+    assert.equal(f.state.imports.includes('resource://gre/modules/ContextualIdentityService.sys.mjs'), false);
   } finally { f.restore(); }
+});
+
+test('native adapter uses the legacy identity URI only if the modern URI fails', () => {
+  const modern = 'moz-src:///toolkit/components/contextualidentity/ContextualIdentityService.sys.mjs';
+  const legacy = 'resource://gre/modules/ContextualIdentityService.sys.mjs';
+  const f = fakeGecko({ failedImports: [modern] });
+  try {
+    assert.deepEqual(f.importer.availability(), { supported: true });
+    assert.ok(f.state.imports.indexOf(modern) < f.state.imports.indexOf(legacy));
+  } finally { f.restore(); }
+});
+
+test('native failures and old Gecko are not misreported as an unsupported OS', () => {
+  const modern = 'moz-src:///toolkit/components/contextualidentity/ContextualIdentityService.sys.mjs';
+  const legacy = 'resource://gre/modules/ContextualIdentityService.sys.mjs';
+  const cases = [
+    [{ noLoader: true }, 'native-module-loader-unavailable'],
+    [{ failedImports: ['resource://gre/modules/AppConstants.sys.mjs'] }, 'native-platform-unavailable'],
+    [{ platform: 'win' }, 'platform-unsupported'],
+    [{ geckoVersion: '141.0' }, 'gecko-version-unsupported'],
+    [{ geckoVersion: 'unknown' }, 'native-version-unavailable'],
+    [{ failedImports: ['resource://gre/modules/PrivateBrowsingUtils.sys.mjs'] }, 'native-private-browsing-unavailable'],
+    [{ failedImports: [modern, legacy] }, 'native-contextual-identity-unavailable'],
+    [{ failedImports: ['resource://gre/modules/Sqlite.sys.mjs'] }, 'native-sqlite-unavailable'],
+    [{ missingCookieValidation: true }, 'native-cookie-api-unavailable'],
+  ];
+  for (const [options, reason] of cases) {
+    const f = fakeGecko(options);
+    try {
+      const result = f.importer.availability();
+      assert.deepEqual(result, { supported: false, reason });
+      assert.equal(JSON.stringify(result).includes('synthetic-sensitive-error'), false);
+      assert.equal(f.state.keychainCalls, 0);
+      assert.equal(f.state.opened.length, 0);
+    } finally { f.restore(); }
+  }
 });
 
 test('native adapter rechecks enterprise policy, window privacy and rejects symlink paths', async () => {
