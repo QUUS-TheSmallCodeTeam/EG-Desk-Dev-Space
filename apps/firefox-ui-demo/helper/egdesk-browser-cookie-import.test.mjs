@@ -1,0 +1,446 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import { randomUUID, webcrypto } from 'node:crypto';
+import { createBrowserCookieImporter } from '../overlay/resources/EGDeskBrowserCookieImport.sys.mjs';
+
+const encoder = new TextEncoder();
+const NOW = 1_900_000_000_123;
+const EPOCH = 11644473600000000n;
+const PASSWORD = 'synthetic-passphrase';
+const future = ms => String(EPOCH + BigInt(ms) * 1000n + 321n);
+const row = (changes = {}) => ({
+  host_key: '.example.test', top_frame_site_key: '', has_cross_site_ancestor: 0,
+  name: 'synthetic-name', value: 'synthetic-value', encrypted_value: new Uint8Array(),
+  path: '/', expires_utc: future(NOW + 86400000), is_secure: 1, is_httponly: 1,
+  has_expires: 1, is_persistent: 1, samesite: 2, source_scheme: 2, source_port: 443,
+  ...changes,
+});
+
+async function ciphertext(host, value, version = 24, password = PASSWORD) {
+  const material = await webcrypto.subtle.importKey('raw', encoder.encode(password), 'PBKDF2', false, ['deriveKey']);
+  const key = await webcrypto.subtle.deriveKey({ name: 'PBKDF2', salt: encoder.encode('saltysalt'),
+    iterations: 1003, hash: 'SHA-1' }, material, { name: 'AES-CBC', length: 128 }, false, ['encrypt']);
+  const valueBytes = encoder.encode(value);
+  const digest = version === 24 ? new Uint8Array(await webcrypto.subtle.digest('SHA-256', encoder.encode(host))) : new Uint8Array();
+  const plain = new Uint8Array(digest.length + valueBytes.length);
+  plain.set(digest); plain.set(valueBytes, digest.length);
+  const cipher = new Uint8Array(await webcrypto.subtle.encrypt({ name: 'AES-CBC', iv: new Uint8Array(16).fill(32) }, key, plain));
+  const bytes = new Uint8Array(3 + cipher.length);
+  bytes.set([0x76, 0x31, 0x30]); bytes.set(cipher, 3);
+  return bytes;
+}
+
+function fixture(rows = [], version = 24) {
+  const state = { rows, version, jars: new Map(), identities: [7], calls: [], allowed: true, next: 80 };
+  const adapter = {
+    platform: 'macosx', crypto: webcrypto, randomUUID, now: () => NOW,
+    checkAccess: () => state.allowed,
+    async readRoot() { state.calls.push('root'); return [
+      { directory: 'Default', name: 'Synthetic Profile', email: 'fixture@example.test' },
+      { directory: '../escape', name: 'bad' },
+      { directory: 'Profile 2', name: 'Second' },
+    ]; },
+    async readSqlite(directory, limits) {
+      state.calls.push(['sqlite', directory, limits]);
+      return { version: state.version, rows: state.rows, totalRows: state.rows.length };
+    },
+    async getKeychainPassword() { state.calls.push('keychain'); return PASSWORD; },
+    getIdentityIds() { return [...state.identities]; },
+    createIdentity(name) {
+      const id = state.next++; state.identities.push(id); state.calls.push(['create', id]);
+      return { userContextId: id, name };
+    },
+    removeIdentity(id) {
+      state.calls.push(['remove', id]);
+      const index = state.identities.indexOf(id);
+      if (index < 0) return false;
+      state.identities.splice(index, 1); return true;
+    },
+    cookies: {
+      add(cookie, attrs) {
+        state.calls.push(['add', attrs.userContextId]);
+        const jar = state.jars.get(attrs.userContextId) || [];
+        jar.push({ ...cookie, isPartitioned: false, originAttributes: { ...attrs } });
+        state.jars.set(attrs.userContextId, jar); return true;
+      },
+      list(attrs) { return (state.jars.get(attrs.userContextId) || []).map(cookie => ({ ...cookie })); },
+      removeAll(attrs) { state.calls.push(['wipe', attrs.userContextId]); state.jars.delete(attrs.userContextId); },
+    },
+  };
+  return { state, adapter, importer: createBrowserCookieImporter({ profileImportPolicy: 'allow',
+    privateBrowsingId: 0, adapter }) };
+}
+
+async function selected(importer) {
+  const result = await importer.listProfiles({ explicitUserRequest: true });
+  assert.equal(result.supported, true);
+  assert.equal(result.profiles.length, 2);
+  assert.notEqual(result.profiles[0].id, 'Default');
+  return result.profiles[0].id;
+}
+
+test('requires explicit policy, non-private context, user request, consent and enumerated opaque id', async () => {
+  const f = fixture([row()]);
+  assert.deepEqual(f.importer.availability(), { supported: true });
+  assert.equal((await f.importer.listProfiles()).reason, 'explicit-user-request-required');
+  assert.deepEqual(f.state.calls, []);
+  assert.equal((await f.importer.importProfile({ profileId: 'Default', explicitUserConsent: true })).reason, 'profile-not-enumerated');
+  const id = await selected(f.importer);
+  assert.equal((await f.importer.importProfile({ profileId: id })).reason, 'explicit-user-consent-required');
+  assert.equal(f.state.calls.includes('keychain'), false);
+  for (const options of [
+    { profileImportPolicy: 'deny', privateBrowsingId: 0 },
+    { profileImportPolicy: 'allow', privateBrowsingId: 1 },
+    { profileImportPolicy: 'allow' },
+  ]) {
+    const blocked = createBrowserCookieImporter({ ...options, adapter: f.adapter });
+    assert.equal(blocked.availability().supported, false);
+    assert.equal((await blocked.listProfiles({ explicitUserRequest: true })).supported, false);
+  }
+  f.state.allowed = 'policy-denied';
+  assert.equal(f.importer.availability().reason, 'policy-denied');
+  f.adapter.platform = 'win';
+  assert.equal(f.importer.availability().reason, 'platform-unsupported');
+});
+
+test('v24 decrypts binary host hash, preserves flags, host, session and exact millisecond expiry', async () => {
+  const host = '.example.test';
+  const encrypted = await ciphertext(host, 'synthetic-encrypted-secret');
+  const f = fixture([
+    row({ name: 'enc', value: '', encrypted_value: encrypted, samesite: -1 }),
+    row({ host_key: 'host.example.test', name: 'host-only', is_secure: 0, is_httponly: 0,
+      source_scheme: 0, source_port: -1, has_expires: 0, is_persistent: 0, samesite: 3 }),
+    row({ name: 'session-expiry', has_expires: 1, is_persistent: 0 }),
+  ]);
+  const id = await selected(f.importer);
+  const result = await f.importer.importProfile({ profileId: id, explicitUserConsent: true });
+  assert.deepEqual(result.counts, { imported: 3, skipped: 0, unsupported: 0, failed: 0 });
+  assert.equal(result.status, 'imported');
+  assert.equal(result.userContextId, 80);
+  assert.equal(result.containerName, 'Chrome - Synthetic Profile');
+  assert.equal(JSON.stringify(result).includes('synthetic-encrypted-secret'), false);
+  assert.equal(JSON.stringify(result).includes('example.test'), false);
+  const jar = f.state.jars.get(80);
+  assert.equal(jar[0].host, host);
+  assert.equal(jar[0].value, 'synthetic-encrypted-secret');
+  assert.equal(jar[0].expiry, NOW + 86400000);
+  assert.equal(jar[0].sameSite, 256);
+  assert.equal(jar[1].host, 'host.example.test');
+  assert.equal(jar[1].isSession, true);
+  assert.equal(jar[1].expiry, Number.MAX_SAFE_INTEGER);
+  assert.equal(jar[1].sameSite, 256);
+  assert.equal(jar[2].isSession, true);
+  assert.equal(jar[2].expiry, NOW + 86400000);
+  assert.deepEqual(jar[0].originAttributes, { userContextId: 80, privateBrowsingId: 0 });
+  assert.equal(f.state.calls.filter(call => call === 'keychain').length, 1);
+  const sql = f.state.calls.find(call => Array.isArray(call) && call[0] === 'sqlite');
+  assert.deepEqual(sql.slice(1), ['Default', { maxRows: 20000, maxBytes: 33554432 }]);
+});
+
+test('v23 plaintext bytes have no v24 prefix; wrong host hash and malformed crypto never create a secret', async () => {
+  const encrypted23 = await ciphertext('.example.test', 'v23 synthetic secret', 23);
+  const f = fixture([row({ value: '', encrypted_value: encrypted23 })], 23);
+  const id = await selected(f.importer);
+  assert.equal((await f.importer.importProfile({ profileId: id, explicitUserConsent: true })).status, 'imported');
+  assert.equal(f.state.jars.get(80)[0].value, 'v23 synthetic secret');
+
+  const wrongHost = await ciphertext('.other.test', 'synthetic secret');
+  const bad = fixture([row({ value: '', encrypted_value: wrongHost })]);
+  const badId = await selected(bad.importer);
+  const result = await bad.importer.importProfile({ profileId: badId, explicitUserConsent: true });
+  assert.equal(result.status, 'failed');
+  assert.equal(result.counts.failed, 1);
+  assert.deepEqual(bad.state.identities, [7]);
+});
+
+test('partition, unrepresentable scopes, unknown encryption and duplicates fail closed and count', async () => {
+  const f = fixture([
+    row({ name: 'ok' }),
+    row({ name: 'partition', top_frame_site_key: 'https://partition.example.test' }),
+    row({ name: 'ancestor', has_cross_site_ancestor: 1 }),
+    row({ host_key: 'host.example.test', name: 'port-bound', source_port: 443 }),
+    row({ name: 'scheme-bound', is_secure: 0, source_scheme: 2 }),
+    row({ name: 'nonsecure-scheme', source_scheme: 1 }),
+    row({ name: 'unknown', value: '', encrypted_value: Uint8Array.from([0x76, 0x32, 0x30, ...new Array(16).fill(1)]) }),
+    row({ name: 'duplicate', source_port: 443 }), row({ name: 'duplicate', source_port: 80 }),
+    row({ name: 'expired', expires_utc: future(NOW - 1) }),
+  ]);
+  const id = await selected(f.importer);
+  const result = await f.importer.importProfile({ profileId: id, explicitUserConsent: true });
+  assert.equal(result.status, 'partial');
+  assert.deepEqual(result.counts, { imported: 1, skipped: 1, unsupported: 8, failed: 0 });
+  assert.equal(f.state.jars.get(80).length, 1);
+  assert.equal(f.state.calls.includes('keychain'), false);
+});
+
+test('unsupported schemas, oversized results and no importable data never create a container', async () => {
+  for (const [rows, version, reason] of [
+    [[row()], 25, 'unsupported-schema'],
+    [[row({ top_frame_site_key: 'https://partition.example.test' })], 24, 'no-importable-cookies'],
+    [Array.from({ length: 20001 }, () => row()), 24, 'resource-limit'],
+  ]) {
+    const f = fixture(rows, version), id = await selected(f.importer);
+    const result = await f.importer.importProfile({ profileId: id, explicitUserConsent: true });
+    assert.equal(result.status, 'failed');
+    assert.equal(result.reason, reason);
+    assert.deepEqual(f.state.identities, [7]);
+  }
+  const empty = fixture([]), id = await selected(empty.importer);
+  assert.equal((await empty.importer.importProfile({ profileId: id, explicitUserConsent: true })).status, 'empty');
+  assert.deepEqual(empty.state.identities, [7]);
+});
+
+test('Keychain failures are distinguished when known, and errors never escape', async () => {
+  const encrypted = await ciphertext('.example.test', 'synthetic secret');
+  for (const [thrown, expected] of [
+    [{ code: 'permission-denied', message: 'synthetic secret' }, 'keychain-permission-denied'],
+    [new Error('synthetic secret'), 'keychain-unavailable-or-denied'],
+  ]) {
+    const f = fixture([row({ value: '', encrypted_value: encrypted })]);
+    f.adapter.getKeychainPassword = () => { throw thrown; };
+    const id = await selected(f.importer);
+    const result = await f.importer.importProfile({ profileId: id, explicitUserConsent: true });
+    assert.equal(result.reason, expected);
+    assert.equal(JSON.stringify(result).includes('synthetic secret'), false);
+    assert.deepEqual(f.state.identities, [7]);
+  }
+});
+
+test('add, readback, access revocation and cancellation clean only the newly owned container', async () => {
+  for (const kind of ['add', 'readback', 'revoked', 'abort']) {
+    const f = fixture([row(), row({ name: 'second' })]);
+    const id = await selected(f.importer), controller = new AbortController();
+    const add = f.adapter.cookies.add, list = f.adapter.cookies.list;
+    f.adapter.cookies.add = (cookie, attrs) => {
+      const result = add(cookie, attrs);
+      if (kind === 'add') throw new Error('synthetic-secret');
+      if (kind === 'revoked') f.state.allowed = 'policy-denied';
+      if (kind === 'abort') controller.abort();
+      return result;
+    };
+    if (kind === 'readback') f.adapter.cookies.list = attrs => {
+      const result = list(attrs);
+      return result.length ? [{ ...result[0], value: 'mismatch' }] : result;
+    };
+    const result = await f.importer.importProfile({ profileId: id, explicitUserConsent: true, signal: controller.signal });
+    assert.equal(result.status, kind === 'abort' ? 'cancelled' : 'failed');
+    assert.equal(result.counts.imported, 0);
+    assert.deepEqual(f.state.identities, [7]);
+    assert.equal(f.state.jars.has(80), false);
+    assert.ok(f.state.calls.some(call => Array.isArray(call) && call[0] === 'wipe' && call[1] === 80));
+    assert.ok(f.state.calls.some(call => Array.isArray(call) && call[0] === 'remove' && call[1] === 80));
+    assert.equal(JSON.stringify(result).includes('synthetic-secret'), false);
+  }
+});
+
+test('unconfirmed cleanup retains the owned identity and reports its id without secrets', async () => {
+  const f = fixture([row()]), id = await selected(f.importer), add = f.adapter.cookies.add;
+  f.adapter.cookies.add = (cookie, attrs) => { add(cookie, attrs); throw new Error('secret'); };
+  f.adapter.cookies.removeAll = () => { throw new Error('secret'); };
+  const result = await f.importer.importProfile({ profileId: id, explicitUserConsent: true });
+  assert.equal(result.status, 'failed');
+  assert.equal(result.reason, 'cleanup-incomplete');
+  assert.equal(result.userContextId, 80);
+  assert.deepEqual(f.state.identities, [7, 80]);
+  assert.equal(f.state.jars.get(80).length, 1);
+  assert.equal(JSON.stringify(result).includes('synthetic-value'), false);
+  assert.equal(f.state.calls.some(call => Array.isArray(call) && call[0] === 'remove'), false);
+});
+
+test('never clears preexisting data on unexpected nonempty container', async () => {
+  const f = fixture([row()]), id = await selected(f.importer);
+  f.state.jars.set(80, [{ value: 'preexisting' }]);
+  const result = await f.importer.importProfile({ profileId: id, explicitUserConsent: true });
+  assert.equal(result.reason, 'container-not-empty');
+  assert.equal(result.userContextId, 80);
+  assert.equal(f.state.jars.get(80)[0].value, 'preexisting');
+  assert.equal(f.state.calls.some(call => Array.isArray(call) && ['wipe', 'remove'].includes(call[0])), false);
+});
+
+test('permission errors and cancellation during a pending source read do not create containers', async () => {
+  const f = fixture([row()]), id = await selected(f.importer);
+  f.adapter.readSqlite = () => { throw { code: 'permission-denied', message: 'secret' }; };
+  const denied = await f.importer.importProfile({ profileId: id, explicitUserConsent: true });
+  assert.equal(denied.reason, 'permission-denied');
+  assert.equal(JSON.stringify(denied).includes('secret'), false);
+  let finish;
+  f.adapter.readSqlite = () => new Promise(resolve => { finish = resolve; });
+  const controller = new AbortController();
+  const pending = f.importer.importProfile({ profileId: id, explicitUserConsent: true, signal: controller.signal });
+  controller.abort();
+  finish({ version: 24, rows: [row()], totalRows: 1 });
+  assert.equal((await pending).status, 'cancelled');
+  assert.deepEqual(f.state.identities, [7]);
+});
+
+// Fake Gecko globals exercise the production adapter's path, policy, Sqlite,
+// Keychain, cookie and identity glue. Every path/data item below is synthetic.
+function fakeGecko() {
+  const base = '/Users/synthetic/Library/Application Support/Google/Chrome';
+  const state = { files: new Map(), opened: [], closed: 0, transactionTypes: [], keychainCalls: 0,
+    identities: [7], jars: new Map(), policy: true, logging: false, envLogging: false,
+    sqlFailure: false, rows: [row()], version: 24 };
+  for (const path of ['/Users/synthetic', '/Users/synthetic/Library',
+    '/Users/synthetic/Library/Application Support', '/Users/synthetic/Library/Application Support/Google',
+    base, `${base}/Default`]) state.files.set(path, { type: 'directory' });
+  const stateText = JSON.stringify({ profile: { info_cache: { Default: { name: 'Synthetic Profile' } } } });
+  state.files.set(`${base}/Local State`, { type: 'file', bytes: encoder.encode(stateText) });
+  const dbHeader = new Uint8Array(50);
+  dbHeader.set(encoder.encode('SQLite format 3\u0000')); dbHeader[18] = dbHeader[19] = 1;
+  state.files.set(`${base}/Default/Cookies`, { type: 'file', bytes: dbHeader });
+  class FakeFile {
+    constructor(path) { this.path = path; }
+    clone() { return new FakeFile(this.path); }
+    append(leaf) { this.path += `/${leaf}`; }
+    normalize() { if (state.files.get(this.path)?.resolvedPath) this.path = state.files.get(this.path).resolvedPath; }
+    exists() { return state.files.has(this.path); }
+    isSymlink() { return state.files.get(this.path)?.type === 'symlink'; }
+    isDirectory() { return state.files.get(this.path)?.type === 'directory'; }
+    isFile() { return state.files.get(this.path)?.type === 'file'; }
+    isReadable() { return state.files.get(this.path)?.readable !== false; }
+    get fileSize() { return state.files.get(this.path)?.bytes?.length || 0; }
+  }
+  const asRow = data => ({ getResultByName: name => data[name] });
+  const columns = ['creation_utc', 'host_key', 'top_frame_site_key', 'name', 'value', 'encrypted_value',
+    'path', 'expires_utc', 'is_secure', 'is_httponly', 'last_access_utc', 'has_expires', 'is_persistent',
+    'priority', 'samesite', 'source_scheme', 'source_port', 'last_update_utc', 'source_type', 'has_cross_site_ancestor'];
+  const sqlite = {
+    async openConnection(options) {
+      state.opened.push(options);
+      return {
+        TRANSACTION_DEFERRED: 'DEFERRED',
+        async executeTransaction(callback, type) { state.transactionTypes.push(type); return callback(this); },
+        async execute(sql) {
+          if (state.sqlFailure && sql.startsWith('PRAGMA table_xinfo')) throw new Error('synthetic-secret');
+          if (sql.startsWith('SELECT name FROM sqlite_master')) return [asRow({ name: 'meta' }), asRow({ name: 'cookies' })];
+          if (sql.startsWith('SELECT COUNT(*)')) return [asRow({ n: state.rows.length })];
+          if (sql.startsWith('SELECT CAST(value')) return [asRow({ v: String(state.version) })];
+          if (sql.startsWith('PRAGMA table_xinfo')) return columns.map(name => asRow({ name,
+            type: name === 'encrypted_value' ? 'BLOB' : ['host_key', 'top_frame_site_key', 'name', 'value', 'path'].includes(name) ? 'TEXT' : 'INTEGER',
+            notnull: 1, hidden: 0 }));
+          if (sql.startsWith('SELECT CAST(COALESCE')) return [asRow({ n: '1000' })];
+          if (sql.startsWith('SELECT ') && sql.endsWith(' FROM cookies')) return state.rows.map(asRow);
+          throw new Error('unexpected query');
+        },
+        async close() { state.closed++; },
+      };
+    },
+  };
+  const identities = {
+    getPublicIdentities: () => state.identities.map(userContextId => ({ userContextId })),
+    create: name => { state.identities.push(80); return { userContextId: 80, name }; },
+    remove: id => { state.identities = state.identities.filter(n => n !== id); return true; },
+  };
+  const services = {
+    dirsvc: { get: () => new FakeFile('/Users/synthetic') },
+    policies: { isAllowed: feature => feature === 'profileImport' && state.policy },
+    env: { get: () => state.envLogging ? 'cookie:5' : '' },
+    prefs: { getBoolPref: () => true, getChildList: () => state.logging ? ['logging.cookie'] : [] },
+    cookies: {
+      add(host, path, name, value, isSecure, isHttpOnly, isSession, expiry, attrs, sameSite, schemeMap, isPartitioned) {
+        const jar = state.jars.get(attrs.userContextId) || [];
+        jar.push({ host, path, name, value, isSecure, isHttpOnly, isSession, expiry, sameSite,
+          schemeMap, isPartitioned, originAttributes: { ...attrs } });
+        state.jars.set(attrs.userContextId, jar); return { result: 0 };
+      },
+      getCookiesWithOriginAttributes: pattern => state.jars.get(JSON.parse(pattern).userContextId) || [],
+      removeCookiesWithOriginAttributes: pattern => state.jars.delete(JSON.parse(pattern).userContextId),
+    },
+  };
+  const globals = {
+    crypto: webcrypto, Services: services, Ci: { nsIFile: {}, nsICookieValidation: { eOK: 0 }, nsIKeychainMigrationUtils: {} },
+    Cc: { '@mozilla.org/profile/migrator/keychainmigrationutils;1': { getService: () => ({
+      getGenericPassword(service, account) {
+        assert.equal(service, 'Chrome Safe Storage'); assert.equal(account, 'Chrome'); state.keychainCalls++; return PASSWORD;
+      },
+    }) } },
+    IOUtils: { async read(path, { maxBytes }) { return state.files.get(path).bytes.slice(0, maxBytes); } },
+    ChromeUtils: { importESModule(url) {
+      if (url.endsWith('AppConstants.sys.mjs')) return { AppConstants: { platform: 'macosx' } };
+      if (url.endsWith('PrivateBrowsingUtils.sys.mjs')) return { PrivateBrowsingUtils: { isWindowPrivate: win => win.isPrivate } };
+      if (url.endsWith('ContextualIdentityService.sys.mjs')) return { ContextualIdentityService: identities };
+      if (url.endsWith('Sqlite.sys.mjs')) return { Sqlite: sqlite };
+      throw new Error('unexpected import');
+    } },
+  };
+  const descriptors = Object.fromEntries(Object.keys(globals).map(key => [key, Object.getOwnPropertyDescriptor(globalThis, key)]));
+  for (const [key, value] of Object.entries(globals)) Object.defineProperty(globalThis, key, { configurable: true, writable: true, value });
+  const restore = () => { for (const [key, descriptor] of Object.entries(descriptors)) {
+    if (descriptor) Object.defineProperty(globalThis, key, descriptor); else delete globalThis[key];
+  } };
+  const browserWindow = { closed: false, isChromeWindow: true, isPrivate: false, docShell: {},
+    document: { nodePrincipal: { isSystemPrincipal: true } } };
+  const importer = createBrowserCookieImporter({ browserWindow, profileImportPolicy: 'allow', privateBrowsingId: 0 });
+  return { state, importer, restore, browserWindow, base };
+}
+
+test('native adapter uses readonly locked deferred transaction, closes, prompts only after consent', async () => {
+  const f = fakeGecko();
+  try {
+    f.state.rows = [row({ value: '', encrypted_value: await ciphertext('.example.test', 'only synthetic') })];
+    const list = await f.importer.listProfiles({ explicitUserRequest: true });
+    const id = list.profiles[0].id;
+    assert.equal(f.state.keychainCalls, 0);
+    const result = await f.importer.importProfile({ profileId: id, explicitUserConsent: true });
+    assert.equal(result.status, 'imported');
+    assert.equal(f.state.keychainCalls, 1);
+    assert.deepEqual(f.state.opened, [{ path: `${f.base}/Default/Cookies`, readOnly: true, ignoreLockingMode: false }]);
+    assert.deepEqual(f.state.transactionTypes, ['DEFERRED']);
+    assert.equal(f.state.closed, 1);
+    assert.equal(f.state.jars.get(80)[0].value, 'only synthetic');
+  } finally { f.restore(); }
+});
+
+test('native adapter rechecks enterprise policy, window privacy and rejects symlink paths', async () => {
+  const f = fakeGecko();
+  try {
+    f.state.policy = false;
+    assert.equal(f.importer.availability().reason, 'policy-denied');
+    f.state.policy = true; f.browserWindow.isPrivate = true;
+    assert.equal(f.importer.availability().reason, 'private-context-unverified');
+    f.browserWindow.isPrivate = false;
+    f.state.logging = true;
+    assert.equal(f.importer.availability().reason, 'logging-enabled');
+    f.state.logging = false; f.state.envLogging = true;
+    assert.equal(f.importer.availability().reason, 'logging-enabled');
+    f.state.envLogging = false;
+    f.state.files.set(`${f.base}/Default`, { type: 'symlink' });
+    const result = await f.importer.listProfiles({ explicitUserRequest: true });
+    assert.equal(result.supported, false);
+    assert.equal(result.reason, 'unsafe-path');
+    assert.equal(f.state.opened.length, 0);
+  } finally { f.restore(); }
+});
+
+test('native adapter fails closed before SQLite open on WAL and active rollback journal', async () => {
+  for (const mode of ['header-wal', 'sidecar-wal', 'active-journal', 'sidecar-symlink']) {
+    const f = fakeGecko();
+    try {
+      const id = (await f.importer.listProfiles({ explicitUserRequest: true })).profiles[0].id;
+      if (mode === 'header-wal') f.state.files.get(`${f.base}/Default/Cookies`).bytes[18] = 2;
+      if (mode === 'sidecar-wal') f.state.files.set(`${f.base}/Default/Cookies-wal`, { type: 'file', bytes: new Uint8Array() });
+      if (mode === 'active-journal') f.state.files.set(`${f.base}/Default/Cookies-journal`, { type: 'file', bytes: new Uint8Array([1]) });
+      if (mode === 'sidecar-symlink') f.state.files.set(`${f.base}/Default/Cookies-wal`, { type: 'symlink' });
+      const result = await f.importer.importProfile({ profileId: id, explicitUserConsent: true });
+      assert.equal(result.status, 'failed');
+      assert.equal(result.reason, mode === 'active-journal' ? 'source-busy' :
+        mode === 'sidecar-symlink' ? 'unsafe-path' : 'source-wal-unsupported');
+      assert.equal(f.state.opened.length, 0);
+      assert.equal(f.state.keychainCalls, 0);
+      assert.deepEqual(f.state.identities, [7]);
+    } finally { f.restore(); }
+  }
+});
+
+test('native adapter closes a failed transaction without exposing its error', async () => {
+  const f = fakeGecko();
+  try {
+    const id = (await f.importer.listProfiles({ explicitUserRequest: true })).profiles[0].id;
+    f.state.sqlFailure = true;
+    const result = await f.importer.importProfile({ profileId: id, explicitUserConsent: true });
+    assert.equal(result.status, 'failed');
+    assert.equal(f.state.closed, 1);
+    assert.equal(JSON.stringify(result).includes('synthetic-secret'), false);
+    assert.deepEqual(f.state.identities, [7]);
+  } finally { f.restore(); }
+});
