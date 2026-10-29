@@ -10,12 +10,13 @@ import { createDecipheriv, createHash, pbkdf2Sync, randomUUID, webcrypto } from 
 import { DatabaseSync } from 'node:sqlite';
 import { EventEmitter } from 'node:events';
 import { syncBuiltinESMExports } from 'node:module';
+import vm from 'node:vm';
 import { createBrowserCookieImporter } from '../overlay/resources/EGDeskBrowserCookieImport.sys.mjs';
 import {
   COOKIE_NAME, ARTIFACT_STOP_BYTES, OVERLAY_MAX_BYTES, parseCli, treeUsageBytes,
   assertEvidenceOnlyNumbers, cookieHeaderEvidence, syntheticEncryptedValue, syntheticCryptoFixture,
   createChromeFixture, createCookieFixtureServer, writeEvidence, stopOwnedChild, installImporterFixture,
-  observeNativeAvailability, runCli,
+  observeNativeAvailability, inspectNativeCapabilities, runCli,
 } from './verify-firefox-mcp-browser-cookie-import.mjs';
 
 function temporaryDirectory(t) {
@@ -76,7 +77,7 @@ test('fresh, bounded Chrome source contains only synthetic DB v23/v24 rows', t =
       assert.equal(rows[0].host_key, '127.0.0.1');
       assert.equal(rows[0].name, COOKIE_NAME);
       assert.equal(rows[0].value, '');
-      assert.equal(rows[0].has_cross_site_ancestor, 0);
+      assert.equal(rows[0].has_cross_site_ancestor, 1);
       assert.equal(rows[0].source_scheme, 0);
       assert.equal(rows[0].source_port, -1);
       assert.ok(Buffer.from(rows[0].encrypted_value).equals(syntheticEncryptedValue(version)));
@@ -134,6 +135,20 @@ test('committed Core accepts both real synthetic SQLite rows with an injected in
   assert.equal(cookieHeaderEvidence(`${COOKIE_NAME}=${jars.get(v23.userContextId)[0].value}`, 23).onlyExpected, true);
   assert.equal(passwordCalls, 2);
   assert.equal(jars.has(0), false);
+  // The current Core contract conservatively refuses port-scoped host cookies;
+  // the realistic secure 443 row must be classified, not silently imported.
+  const secureAdapter = { ...adapter, async readSqlite(directory) {
+    const data = await adapter.readSqlite(directory);
+    return { ...data, rows: data.rows.map(row => ({ ...row, is_secure: 1, source_scheme: 2, source_port: 443 })) };
+  } };
+  const secureImporter = createBrowserCookieImporter({ ...options, adapter: secureAdapter });
+  const secureList = await secureImporter.listProfiles({ explicitUserRequest: true });
+  const beforeSecurePasswords = passwordCalls, beforeSecureIds = [...ids];
+  const secureResult = await secureImporter.importProfile({ profileId: secureList.profiles[0].id, explicitUserConsent: true });
+  assert.equal(secureResult.status, 'failed');
+  assert.equal(secureResult.counts.unsupported, 1);
+  assert.equal(passwordCalls, beforeSecurePasswords);
+  assert.deepEqual(ids, beforeSecureIds);
   const beforeIds = [...ids], controller = new AbortController();
   const cancelAdapter = { ...adapter, cookies: { ...adapter.cookies, add(cookie, attrs) {
     const result = adapter.cookies.add(cookie, attrs); controller.abort(); return result;
@@ -216,27 +231,72 @@ test('privileged importer fixture fits the isolated MCP script limit', () => {
   assert.match(source, /Sqlite\.openConnection/);
 });
 
-test('native availability and trusted menu check precede synthetic adapter installation', async () => {
+test('native diagnostics resolve the factory global and report only bounded booleans', () => {
+  const calls = [], factory = () => assert.fail('diagnostic must not invoke the importer');
+  const makeRealm = () => {
+    const realm = { Cc: {}, Ci: {}, IOUtils: {}, crypto: { subtle: {}, randomUUID() {} },
+      Services: { cookies: { add() {}, getCookiesWithOriginAttributes() {}, removeCookiesWithOriginAttributes() {} },
+        policies: { isAllowed: () => true }, prefs: { getBoolPref: () => true, getChildList: () => [] }, env: { get() {} } } };
+    realm.ChromeUtils = { importESModule(uri) {
+      calls.push(uri);
+      if (uri.includes('EGDeskBrowserCookieImport')) return { createBrowserCookieImporter: factory };
+      if (uri.includes('AppConstants')) return { AppConstants: { platform: 'macosx' } };
+      if (uri.includes('PrivateBrowsingUtils')) return { PrivateBrowsingUtils: { isWindowPrivate() {} } };
+      if (uri.includes('moz-src:')) return { ContextualIdentityService: { create() {}, remove() {}, getPublicIdentities() {} } };
+      if (uri.includes('ContextualIdentityService')) throw new Error('SECRET_NATIVE_ERROR_MUST_NOT_ESCAPE');
+      if (uri.includes('Sqlite')) return { Sqlite: { openConnection() {} } };
+      throw new Error('unknown');
+    } };
+    return realm;
+  };
+  const moduleRealm = makeRealm(), browserRealm = makeRealm();
+  browserRealm.Components = { utils: { getGlobalForObject: value => value === factory ? moduleRealm : null } };
+  browserRealm.window = { isChromeWindow: true, closed: false, docShell: {} };
+  browserRealm.document = { nodePrincipal: { isSystemPrincipal: true } };
+  const result = vm.runInNewContext(`(${inspectNativeCapabilities.toString()})()`, browserRealm);
+  assert.equal(result.coreImportSucceeded, true);
+  assert.equal(result.moduleGlobalResolved, true);
+  assert.equal(result.moduleGlobals.importESModule, true);
+  assert.equal(result.moduleModules.appPlatformMacosx, true);
+  assert.equal(result.moduleModules.contextualIdentityModern.imported, true);
+  assert.equal(result.moduleModules.contextualIdentityLegacy.imported, false);
+  assert.equal(result.browserWindow.policyAllowed, true);
+  assert.doesNotMatch(JSON.stringify(result), /SECRET_NATIVE_ERROR/);
+  assert.ok(calls.some(uri => uri.startsWith('moz-src:')));
+  assert.ok(Buffer.byteLength(inspectNativeCapabilities.toString()) < 12000);
+});
+
+test('native availability, trusted menu and intro capture precede synthetic adapter installation', async () => {
   const order = [], values = [
+    { coreImportSucceeded: true },
     { supported: true, platform: false, policy: false, privateContext: false, containers: false, logging: false, unavailable: false },
-    { x: 20, y: 20 }, true, true, true,
+    { x: 20, y: 20 }, true, true, { x: 30, y: 30 }, true, { x: 40, y: 40 }, true,
   ];
   const mcp = {
     async evaluate() { order.push('evaluate'); return values.shift(); },
     async clickPoint() { order.push('native-click'); },
     async nativeInput() { order.push('native-escape'); },
   };
-  const evidence = { checks: {} };
-  await observeNativeAvailability(mcp, evidence, Date.now() + 3000, new AbortController().signal);
+  const evidence = { checks: {}, screenshots: {} };
+  await observeNativeAvailability(mcp, evidence, Date.now() + 3000, new AbortController().signal,
+    async name => order.push(`capture-${name}`));
   assert.equal(evidence.checks.nativeAvailability, true);
   assert.equal(evidence.checks.nativeMenuEnabled, true);
-  assert.deepEqual(order, ['evaluate', 'evaluate', 'native-click', 'evaluate', 'evaluate', 'native-escape', 'evaluate']);
+  assert.equal(evidence.checks.nativeDialogIntro, true);
+  assert.equal(evidence.checks.nativeDialogClosed, true);
+  assert.deepEqual(evidence.screenshots, { menu: true, dialog: true });
+  assert.deepEqual(order, ['evaluate', 'evaluate', 'evaluate', 'native-click', 'evaluate', 'evaluate', 'capture-menu',
+    'evaluate', 'native-click', 'evaluate', 'capture-dialog', 'evaluate', 'native-click', 'evaluate']);
   const source = runCli.toString();
   assert.ok(source.indexOf('observeNativeAvailability') < source.indexOf('mcp.evaluate(installImporterFixture'));
-  let clicked = false;
-  await assert.rejects(observeNativeAvailability({ async evaluate() { return { supported: false, policy: true }; },
-    async clickPoint() { clicked = true; } }, { checks: {} }, Date.now() + 3000, new AbortController().signal));
-  assert.equal(clicked, false);
+  const disabledValues = [{ coreImportSucceeded: true }, { supported: false, policy: true }, { x: 20, y: 20 }, true, false, true];
+  let clicks = 0; const captures = [], disabledEvidence = { checks: {}, screenshots: {} };
+  await assert.rejects(observeNativeAvailability({ async evaluate() { return disabledValues.shift(); },
+    async clickPoint() { clicks++; }, async nativeInput() {} }, disabledEvidence, Date.now() + 3000,
+  new AbortController().signal, async name => captures.push(name)));
+  assert.equal(clicks, 1);
+  assert.deepEqual(captures, ['menu']);
+  assert.equal(disabledEvidence.screenshots.menu, true);
 });
 
 test('result writer allows only boolean and count evidence and refuses overwrite', t => {

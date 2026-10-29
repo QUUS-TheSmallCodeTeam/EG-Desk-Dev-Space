@@ -17,7 +17,7 @@ import {
   assertEvidenceRoot, assertPrivateDirectory, assertRunning, assertSafeRuntimeAllowlist,
   assertSupportedPlatform, assertPortFree, childEnvironment, cleanupOwnedResources, createLoader,
   inspectGeckodriverAfterCleanup, inspectGeckodriverBeforeCleanup, inspectPinnedLoader,
-  inspectPortListeners, IsolatedMcp, listenOwnedFixturePort, MARIONETTE_PORT,
+  inspectPortListeners, IsolatedMcp, listenOwnedFixturePort, MARIONETTE_PORT, takeScreenshot,
   mcpDriverPortPreload, parseCli as parseImportFlowCli, prepareProfile, REMOTE_PORT, sandboxPolicy,
   syntheticBridgeState, validateRuntimePaths,
 } from './verify-firefox-mcp-browser-import-flow.mjs';
@@ -134,7 +134,6 @@ export function createChromeFixture(runDir, now = Date.now()) {
         is_secure,is_httponly,last_access_utc,has_expires,is_persistent,samesite,source_scheme,source_port)
         VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`).run(stamp, FIXTURE_HOST, COOKIE_NAME, '',
         syntheticEncryptedValue(profile.version), '/', stamp + 3600n * 1000000n, 0, 1, stamp, 1, 1, -1, 0, -1);
-      db.exec('UPDATE cookies SET has_cross_site_ancestor = 0');
     } finally { db.close(); }
     fs.chmodSync(dbPath, 0o600);
     assert.ok(fs.statSync(dbPath).size < 1024 * 1024, 'fixture database unexpectedly large');
@@ -212,7 +211,12 @@ export async function installImporterFixture(config) {
   if (root !== `${runDir}/synthetic-chrome` || !root.startsWith('/private/tmp/egdesk-round-')) throw new Error('fixture boundary');
   const services = globalThis.Services || ChromeUtils.importESModule('resource://gre/modules/Services.sys.mjs').Services;
   const { Sqlite } = ChromeUtils.importESModule('resource://gre/modules/Sqlite.sys.mjs');
-  const { ContextualIdentityService: identities } = ChromeUtils.importESModule('resource://gre/modules/ContextualIdentityService.sys.mjs');
+  let identities;
+  try {
+    ({ ContextualIdentityService: identities } = ChromeUtils.importESModule('moz-src:///toolkit/components/contextualidentity/ContextualIdentityService.sys.mjs'));
+  } catch {
+    ({ ContextualIdentityService: identities } = ChromeUtils.importESModule('resource://gre/modules/ContextualIdentityService.sys.mjs'));
+  }
   const { createBrowserCookieImporter } = ChromeUtils.importESModule('chrome://userchrome/content/EGDeskBrowserCookieImport.sys.mjs');
   const fixtureRoot = Cc['@mozilla.org/file/local;1'].createInstance(Ci.nsIFile);
   fixtureRoot.initWithPath(root);
@@ -554,22 +558,125 @@ async function observeBrowserLifecycle(mcp, fixture, checks, deadlineMs, signal)
   for (const key of ['sameCanvas', 'sameDesk', 'noNewBoard', 'noNewBrowserWindow']) checks[key] = placement[key] === true;
 }
 
-export async function observeNativeAvailability(mcp, evidence, deadlineMs, signal) {
+// Imported factory's actual global is obtained via Cu, not by changing or
+// substituting the production module. All output is boolean; neither native
+// exception text nor an nsresult/path is returned or persisted.
+export function inspectNativeCapabilities() {
+  const read = (value, key) => { try { return value?.[key]; } catch { return undefined; } };
+  const callable = (value, key) => typeof read(value, key) === 'function';
+  const evaluationGlobal = globalThis, windowGlobal = window;
+  const utils = read(evaluationGlobal, 'Cu') || read(read(evaluationGlobal, 'Components'), 'utils') ||
+    read(windowGlobal, 'Cu') || read(read(windowGlobal, 'Components'), 'utils');
+  const chrome = read(evaluationGlobal, 'ChromeUtils') || read(windowGlobal, 'ChromeUtils');
+  let factory = null, moduleGlobal = null, coreImportSucceeded = false;
+  try {
+    const module = chrome.importESModule('chrome://userchrome/content/EGDeskBrowserCookieImport.sys.mjs');
+    coreImportSucceeded = true;
+    factory = read(module, 'createBrowserCookieImporter');
+  } catch { /* recorded as a boolean */ }
+  try { if (typeof factory === 'function' && callable(utils, 'getGlobalForObject')) moduleGlobal = utils.getGlobalForObject(factory); }
+  catch { /* no raw exception */ }
+  const globals = root => {
+    const c = read(root, 'ChromeUtils'), crypto = read(root, 'crypto'), services = read(root, 'Services');
+    const policies = read(services, 'policies'), prefs = read(services, 'prefs'), env = read(services, 'env');
+    const cookies = read(services, 'cookies');
+    const components = read(root, 'Components'), ci = read(root, 'Ci') || read(components, 'interfaces');
+    const cc = read(root, 'Cc') || read(components, 'classes'), io = read(root, 'IOUtils');
+    const version = read(read(services, 'appinfo'), 'platformVersion');
+    const versionKnown = typeof version === 'string' && /^\d{1,3}(?:[.ab]|$)/i.test(version);
+    return { chromeUtils: !!c, importESModule: callable(c, 'importESModule'), services: !!services,
+      cc: !!read(root, 'Cc'), ci: !!read(root, 'Ci'), ccOrComponents: !!cc, ciOrComponents: !!ci,
+      cookieValidationEok: typeof read(read(ci, 'nsICookieValidation'), 'eOK') === 'number',
+      ioUtils: !!io, ioRead: callable(io, 'read'), crypto: !!crypto,
+      cryptoSubtle: !!read(crypto, 'subtle'), cryptoRandomUUID: callable(crypto, 'randomUUID'),
+      platformVersionKnown: versionKnown, platformVersionAtLeast142: versionKnown && Number.parseInt(version, 10) >= 142,
+      policyApi: callable(policies, 'isAllowed'), prefsGetBool: callable(prefs, 'getBoolPref'),
+      prefsChildList: callable(prefs, 'getChildList'), loggingEnvGet: callable(env, 'get'),
+      cookies: !!cookies, cookieAdd: callable(cookies, 'add'), cookieList: callable(cookies, 'getCookiesWithOriginAttributes'),
+      cookieRemove: callable(cookies, 'removeCookiesWithOriginAttributes') };
+  };
+  const importProbe = (root, uri, exportName) => {
+    const loader = read(root, 'ChromeUtils');
+    const status = { attempted: false, imported: false, exportPresent: false, typeError: false,
+      hasNsResult: false, nsNotAvailable: false, nsFileNotFound: false, nsFailure: false };
+    let value = null;
+    if (!callable(loader, 'importESModule')) return { status, value };
+    status.attempted = true;
+    try { const module = loader.importESModule(uri); status.imported = true; value = read(module, exportName); status.exportPresent = !!value; }
+    catch (error) {
+      status.typeError = read(error, 'name') === 'TypeError';
+      const result = read(error, 'result'), cr = read(root, 'Cr') || read(evaluationGlobal, 'Cr') || read(windowGlobal, 'Cr');
+      status.hasNsResult = typeof result === 'number';
+      status.nsNotAvailable = status.hasNsResult && typeof read(cr, 'NS_ERROR_NOT_AVAILABLE') === 'number' && result === cr.NS_ERROR_NOT_AVAILABLE;
+      status.nsFileNotFound = status.hasNsResult && typeof read(cr, 'NS_ERROR_FILE_NOT_FOUND') === 'number' && result === cr.NS_ERROR_FILE_NOT_FOUND;
+      status.nsFailure = status.hasNsResult && typeof read(cr, 'NS_ERROR_FAILURE') === 'number' && result === cr.NS_ERROR_FAILURE;
+    }
+    return { status, value };
+  };
+  const modules = root => {
+    const app = importProbe(root, 'resource://gre/modules/AppConstants.sys.mjs', 'AppConstants');
+    const priv = importProbe(root, 'resource://gre/modules/PrivateBrowsingUtils.sys.mjs', 'PrivateBrowsingUtils');
+    const modern = importProbe(root, 'moz-src:///toolkit/components/contextualidentity/ContextualIdentityService.sys.mjs', 'ContextualIdentityService');
+    const legacy = importProbe(root, 'resource://gre/modules/ContextualIdentityService.sys.mjs', 'ContextualIdentityService');
+    const sqlite = importProbe(root, 'resource://gre/modules/Sqlite.sys.mjs', 'Sqlite');
+    const platform = read(app.value, 'platform'), ids = modern.value || legacy.value;
+    return { appConstants: app.status, privateBrowsing: priv.status, contextualIdentityModern: modern.status,
+      contextualIdentityLegacy: legacy.status, sqlite: sqlite.status,
+      appPlatformKnown: typeof platform === 'string', appPlatformMacosx: platform === 'macosx',
+      appPlatformDarwin: platform === 'darwin', appPlatformMac: platform === 'mac',
+      privateWindowCheck: callable(priv.value, 'isWindowPrivate'), identityCreate: callable(ids, 'create'),
+      identityRemove: callable(ids, 'remove'), identityList: callable(ids, 'getPublicIdentities'),
+      sqliteOpen: callable(sqlite.value, 'openConnection') };
+  };
+  const services = read(windowGlobal, 'Services') || read(evaluationGlobal, 'Services');
+  const policies = read(services, 'policies'), prefs = read(services, 'prefs');
+  let policyAllowed = false, containersEnabled = false;
+  try { policyAllowed = policies?.isAllowed('profileImport') === true; } catch {}
+  try { containersEnabled = prefs?.getBoolPref('privacy.userContext.enabled', false) === true; } catch {}
+  return { coreImportSucceeded, coreFactoryCallable: typeof factory === 'function',
+    getGlobalForObjectAvailable: callable(utils, 'getGlobalForObject'), moduleGlobalResolved: !!moduleGlobal,
+    moduleGlobalIsWindow: !!moduleGlobal && moduleGlobal === windowGlobal,
+    moduleGlobalIsEvaluation: !!moduleGlobal && moduleGlobal === evaluationGlobal,
+    evaluationGlobalIsWindow: evaluationGlobal === windowGlobal,
+    evaluationGlobals: globals(evaluationGlobal),
+    windowGlobals: globals(windowGlobal), moduleGlobals: globals(moduleGlobal),
+    windowModules: modules(windowGlobal), moduleModules: modules(moduleGlobal),
+    browserWindow: { isChromeWindow: window.isChromeWindow === true, notClosed: window.closed === false,
+      docShell: !!window.docShell, systemPrincipal: document.nodePrincipal?.isSystemPrincipal === true,
+      policyApi: callable(policies, 'isAllowed'), policyAllowed, prefsGetBool: callable(prefs, 'getBoolPref'),
+      containersEnabled, loggingEnvGet: callable(read(services, 'env'), 'get'), prefsChildList: callable(prefs, 'getChildList') } };
+}
+
+export async function observeNativeAvailability(mcp, evidence, deadlineMs, signal, capture) {
   // Availability is the only production-adapter call in this verifier. It
   // checks native services and policy but never enumerates profiles, reads a
   // database, obtains a Keychain item, or performs an import.
+  evidence.nativeDiagnostics = await mcp.evaluate(inspectNativeCapabilities);
   const availability = await mcp.evaluate(() => {
-    const { createBrowserCookieImporter } = ChromeUtils.importESModule('chrome://userchrome/content/EGDeskBrowserCookieImport.sys.mjs');
-    const result = createBrowserCookieImporter({ browserWindow: window, profileImportPolicy: 'allow', privateBrowsingId: 0 }).availability();
+    let result = null, threw = false;
+    try {
+      const { createBrowserCookieImporter } = ChromeUtils.importESModule('chrome://userchrome/content/EGDeskBrowserCookieImport.sys.mjs');
+      result = createBrowserCookieImporter({ browserWindow: window, profileImportPolicy: 'allow', privateBrowsingId: 0 }).availability();
+    } catch { threw = true; }
+    result ||= {};
     return { supported: result.supported === true, platform: result.reason === 'platform-unsupported',
       policy: result.reason === 'policy-denied' || result.reason === 'policy-unavailable' || result.reason === 'policy-unverified',
       privateContext: result.reason === 'private-context-unverified', containers: result.reason === 'containers-disabled',
       logging: result.reason === 'logging-enabled' || result.reason === 'logging-unverified',
-      unavailable: result.reason === 'unavailable' };
+      unavailable: result.reason === 'unavailable',
+      nativeModuleLoader: result.reason === 'native-module-loader-unavailable',
+      nativePlatform: result.reason === 'native-platform-unavailable',
+      nativeServices: result.reason === 'native-services-unavailable',
+      nativeVersion: result.reason === 'native-version-unavailable' || result.reason === 'gecko-version-unsupported',
+      nativePrivateBrowsing: result.reason === 'native-private-browsing-unavailable',
+      nativeIdentity: result.reason === 'native-contextual-identity-unavailable',
+      nativeSqlite: result.reason === 'native-sqlite-unavailable',
+      nativeComponents: result.reason === 'native-components-unavailable',
+      nativeCookieApi: result.reason === 'native-cookie-api-unavailable',
+      nativeIo: result.reason === 'native-io-unavailable', nativeCrypto: result.reason === 'native-crypto-unavailable', threw };
   });
   evidence.checks.nativeAvailability = availability.supported;
   evidence.nativeAvailability = { ...availability };
-  if (!availability.supported) throw new Error('native availability failed');
   let point = null;
   await waitFor(async () => {
     point = await mcp.evaluate(() => {
@@ -581,19 +688,47 @@ export async function observeNativeAvailability(mcp, evidence, deadlineMs, signa
     });
     return !!point;
   }, deadlineMs, signal);
-  await mcp.clickPoint(point); // native WebDriver input; do not open the importer
+  await mcp.clickPoint(point);
   await waitFor(() => mcp.evaluate(() => document.querySelectorAll('[data-testid="browser-cookie-import"]').length === 1),
     deadlineMs, signal);
   evidence.checks.nativeMenuEnabled = await mcp.evaluate(() => {
     const nodes = document.querySelectorAll('[data-testid="browser-cookie-import"]');
     return nodes.length === 1 && nodes[0].disabled === false && nodes[0].getAttribute('aria-disabled') !== 'true';
   });
-  await mcp.nativeInput([{ type: 'key', id: 'egdesk_cookie_qa_escape', actions: [
-    { type: 'keyDown', value: '\uE00C' }, { type: 'keyUp', value: '\uE00C' },
-  ] }]);
-  await waitFor(() => mcp.evaluate(() => !document.querySelector('[data-testid="browser-cookie-import"]')),
-    deadlineMs, signal);
-  if (!evidence.checks.nativeMenuEnabled) throw new Error('native menu is disabled');
+  await capture('menu'); evidence.screenshots.menu = true;
+  if (availability.supported && evidence.checks.nativeMenuEnabled) {
+    const item = await mcp.evaluate(() => {
+      const node = document.querySelector('[data-testid="browser-cookie-import"]');
+      if (!node || node.disabled) return null;
+      node.scrollIntoView({ block: 'nearest', inline: 'nearest' });
+      const rect = node.getBoundingClientRect();
+      return { x: Math.round((rect.left + rect.right) / 2), y: Math.round((rect.top + rect.bottom) / 2) };
+    });
+    if (!item) throw new Error('native menu entry unavailable');
+    await mcp.clickPoint(item); // Opens only the intro; never clicks Find or consent.
+    await waitFor(() => mcp.evaluate(() => !!document.querySelector('[data-testid="browser-cookie-import-dialog"]') &&
+      !!document.querySelector('[data-testid="browser-cookie-find"]')), deadlineMs, signal);
+    evidence.checks.nativeDialogIntro = true;
+    await capture('dialog'); evidence.screenshots.dialog = true;
+    const close = await mcp.evaluate(() => {
+      const node = document.querySelector('[data-testid="browser-cookie-close"]');
+      if (!node) return null;
+      const rect = node.getBoundingClientRect();
+      return { x: Math.round((rect.left + rect.right) / 2), y: Math.round((rect.top + rect.bottom) / 2) };
+    });
+    if (!close) throw new Error('native intro close unavailable');
+    await mcp.clickPoint(close);
+    await waitFor(() => mcp.evaluate(() => !document.querySelector('[data-testid="browser-cookie-import-dialog"]')),
+      deadlineMs, signal);
+    evidence.checks.nativeDialogClosed = true;
+  } else {
+    await mcp.nativeInput([{ type: 'key', id: 'egdesk_cookie_qa_escape', actions: [
+      { type: 'keyDown', value: '\uE00C' }, { type: 'keyUp', value: '\uE00C' },
+    ] }]);
+    await waitFor(() => mcp.evaluate(() => !document.querySelector('[data-testid="browser-cookie-import"]')),
+      deadlineMs, signal);
+    throw new Error('native availability or menu is disabled');
+  }
 }
 
 export async function stopOwnedChild(child, owned) {
@@ -634,7 +769,7 @@ export async function runCli(argv = process.argv.slice(2)) {
     'explicitListRequired', 'fixtureProfilesListed', 'consentRequired', 'cancelBeforeRead',
     'readErrorHandled', 'schemaDenied', 'cancelAfterWriteCleaned', 'importedV24', 'importedV23',
     'distinctContainers', 'nativeReadbackV24', 'nativeReadbackV23', 'defaultReadback', 'syntheticPasswordOnly'];
-  const checkNames = ['nativeAvailability', 'nativeMenuEnabled', ...importerCheckNames,
+  const checkNames = ['nativeAvailability', 'nativeMenuEnabled', 'nativeDialogIntro', 'nativeDialogClosed', ...importerCheckNames,
     'headerV24', 'contextV24', 'headerV23', 'contextV23', 'headerDefault', 'contextDefault',
     'headerPopup', 'contextPopup', 'headerDuplicate', 'contextDuplicate', 'headerRestore', 'contextRestore',
     'foreignIdentityRejected', 'portableIdentityRejected', 'missingIdentityRejected',
@@ -643,6 +778,7 @@ export async function runCli(argv = process.argv.slice(2)) {
     mcp: false, native: false, importer: false, browser: false }, checks: Object.fromEntries(checkNames.map(name => [name, false])),
     nativeAvailability: { supported: false, platform: false, policy: false, privateContext: false,
       containers: false, logging: false, unavailable: false },
+    nativeDiagnostics: {}, screenshots: { menu: false, dialog: false },
     counts: { fixtureBytes: 0, overlayBytes, artifactBytes: 0, fixtureRequests: 0, unexpectedRequests: 0,
       syntheticPasswordCalls: 0, nativeWrites: 0 }, failures: { fixture: false, profile: false, sandbox: false,
       firefox: false, mcp: false, native: false, importer: false, browser: false, interrupted: false, artifactLimit: false },
@@ -710,7 +846,10 @@ export async function runCli(argv = process.argv.slice(2)) {
       options.deadlineMs, interruption.signal);
     evidence.stages.mcp = true;
     stage = 'native'; assertRunning(options.deadlineMs, interruption.signal);
-    await observeNativeAvailability(mcp, evidence, options.deadlineMs, interruption.signal);
+    await observeNativeAvailability(mcp, evidence, options.deadlineMs, interruption.signal, async name => {
+      assert.ok(['menu', 'dialog'].includes(name));
+      await takeScreenshot(mcp, path.join(runDir, `cookie-${name}.png`));
+    });
     evidence.stages.native = true;
     stage = 'importer'; assertRunning(options.deadlineMs, interruption.signal);
     const observed = await mcp.evaluate(installImporterFixture, { root: chromeFixture.root, runDir,
