@@ -15,9 +15,10 @@ import { createBrowserCookieImporter } from '../overlay/resources/EGDeskBrowserC
 import {
   COOKIE_NAME, ARTIFACT_STOP_BYTES, OVERLAY_MAX_BYTES, parseCli, treeUsageBytes,
   assertEvidenceOnlyNumbers, cookieHeaderEvidence, syntheticEncryptedValue, syntheticCryptoFixture,
-  createChromeFixture, createCookieFixtureServer, writeEvidence, stopOwnedChild, installImporterFixture,
+  createChromeFixture, createCookieFixtureServer, writeEvidence, stopOwnedChild, installFixtureIdentityGuard, installImporterFixture,
   observeNativeAvailability, inspectNativeCapabilities, installUiSyntheticFactory,
-  restoreUiSyntheticFactory, observeSyntheticWizard, runCli,
+  restoreUiSyntheticFactory, observeSyntheticWizard, createBrowserDiagnostics, inspectPopupPoint, inspectPopupCards,
+  observeBrowserLifecycle, runCli,
 } from './verify-firefox-mcp-browser-cookie-import.mjs';
 
 function temporaryDirectory(t) {
@@ -94,7 +95,7 @@ test('fresh, bounded Chrome source contains only synthetic DB v23/v24 rows', t =
 
 test('committed Core accepts both real synthetic SQLite rows with an injected in-memory writer', async t => {
   const runDir = temporaryDirectory(t), fixture = createChromeFixture(runDir);
-  const ids = [], jars = new Map(), identities = new Map(), watchers = new Map();
+  const ids = [], jars = new Map(), identities = new Map(), watchers = new Map(), adoptedIds = new Set();
   let nextId = 1, passwordCalls = 0;
   const adapter = {
     platform: 'macosx', crypto: webcrypto, randomUUID, now: Date.now, checkAccess: () => true,
@@ -113,7 +114,7 @@ test('committed Core accepts both real synthetic SQLite rows with an injected in
     getKeychainPassword() { passwordCalls++; return syntheticCryptoFixture().password; },
     getIdentityIds: () => [...ids],
     getIdentity: id => identities.get(id) ?? null,
-    identityInUse: () => true,
+    identityInUse: id => identities.has(id) ? adoptedIds.has(id) : null,
     watchIdentity(id, invalidate) {
       if (!watchers.has(id)) watchers.set(id, new Set());
       watchers.get(id).add(invalidate);
@@ -153,6 +154,13 @@ test('committed Core accepts both real synthetic SQLite rows with an injected in
   assert.equal(v24.status, 'imported'); assert.equal(v23.status, 'imported');
   assert.equal(v24.counts.imported, 1); assert.equal(v23.counts.imported, 1);
   assert.notEqual(v24.userContextId, v23.userContextId);
+  assert.equal(adapter.identityInUse(v24.userContextId), false);
+  adoptedIds.add(v24.userContextId); // The synthetic Browser adopted this identity.
+  assert.equal(adapter.identityInUse(v24.userContextId), true);
+  const refused = await importer.discardImport({ userContextId: v24.userContextId });
+  assert.equal(refused.status, 'cleanup-required');
+  assert.equal(identities.has(v24.userContextId), true);
+  assert.equal(jars.has(v24.userContextId), true);
   assert.equal(cookieHeaderEvidence(`${COOKIE_NAME}=${jars.get(v24.userContextId)[0].value}`, 24).onlyExpected, true);
   assert.equal(cookieHeaderEvidence(`${COOKIE_NAME}=${jars.get(v23.userContextId)[0].value}`, 23).onlyExpected, true);
   assert.equal(jars.get(v24.userContextId)[0].isSession, false);
@@ -220,6 +228,71 @@ test('disk accounting never follows links and is bounded by an entry ceiling', t
   assert.ok(OVERLAY_MAX_BYTES < ARTIFACT_STOP_BYTES && ARTIFACT_STOP_BYTES < 500 * 1024 * 1024);
 });
 
+test('isolated Gecko fixture only cleans its own unused, never-adopted identities', async () => {
+  let captured, nextId = 1, removed = 0, cleared = 0, tabs = 0, scanFails = false;
+  const runDir = '/private/tmp/egdesk-round-unit/browser-import/run-test';
+  const bindings = [], observers = new Map();
+  const identities = {
+    create: name => ({ userContextId: nextId++, name }),
+    remove: () => { removed++; return true; },
+    countContainerTabs: () => { if (scanFails) throw new Error('unavailable'); return tabs; },
+  };
+  const services = {
+    cookies: { removeCookiesWithOriginAttributes() { cleared++; } },
+    dirsvc: { get: () => ({ path: `${runDir}/tmp/egdesk-chat-test-fake` }) },
+    wm: { getEnumerator: () => [{ closed: false, document: { querySelectorAll: () => bindings } }] },
+    obs: {
+      addObserver(observer, topic) { observers.set(topic, observer); },
+      removeObserver(_observer, topic) { observers.delete(topic); },
+    },
+  };
+  const localFile = { path: '', initWithPath(value) { this.path = value; }, exists: () => true,
+    isDirectory: () => true, isSymlink: () => false };
+  const context = vm.createContext({ window: { crypto: webcrypto }, Services: services,
+    document: { documentURI: 'chrome://browser/content/browser.xhtml' },
+    Cc: { '@mozilla.org/file/local;1': { createInstance: () => localFile },
+      '@mozilla.org/gfx/info;1': { getService: () => ({ isHeadless: true }) } }, Ci: { nsIFile: {}, nsIGfxInfo: {} },
+    ChromeUtils: { importESModule(uri) {
+      if (uri.includes('Sqlite')) return { Sqlite: {} };
+      if (uri.includes('ContextualIdentityService')) return { ContextualIdentityService: identities };
+      if (uri.includes('EGDeskBrowserCookieImport')) return { createBrowserCookieImporter(options) {
+        captured = options.adapter; throw new Error('fixture adapter captured');
+      } };
+      throw new Error('unexpected import');
+    } },
+  });
+  const guard = vm.runInContext(`(${installFixtureIdentityGuard.toString()})`, context);
+  assert.equal(guard({ root: '/unsafe', runDir }), false);
+  assert.equal(guard({ root: `${runDir}/synthetic-chrome`, runDir }), true);
+  assert.equal(guard({ root: `${runDir}/synthetic-chrome`, runDir }), false);
+  const install = vm.runInContext(`(${installImporterFixture.toString()})`, context);
+  await assert.rejects(install({ root: `${runDir}/synthetic-chrome`, runDir }), /fixture adapter captured/);
+  assert.equal(captured.identityInUse(99), null);
+  assert.throws(() => captured.removeIdentity(99));
+  const first = captured.createIdentity('Synthetic').userContextId;
+  assert.equal(captured.identityInUse(first), false);
+  captured.cookies.removeAll({ userContextId: first, privateBrowsingId: 0 });
+  assert.equal(cleared, 1);
+  bindings.push({ browsingContext: { originAttributes: { userContextId: first } } });
+  assert.equal(captured.identityInUse(first), true);
+  bindings.length = 0;
+  assert.equal(captured.identityInUse(first), true); // Adoption remains sticky after close.
+  assert.throws(() => captured.cookies.removeAll({ userContextId: first, privateBrowsingId: 0 }));
+  assert.throws(() => captured.removeIdentity(first));
+  const second = captured.createIdentity('Synthetic').userContextId;
+  let invalidated = 0;
+  const unwatch = captured.watchIdentity(second, () => invalidated++);
+  observers.get('browsing-context-attached').observe({ originAttributes: { userContextId: second } }, 'browsing-context-attached');
+  assert.equal(invalidated, 1);
+  assert.equal(captured.identityInUse(second), true);
+  unwatch();
+  const third = captured.createIdentity('Synthetic').userContextId;
+  scanFails = true;
+  assert.equal(captured.identityInUse(third), null);
+  assert.throws(() => captured.removeIdentity(third));
+  assert.equal(removed, 0);
+});
+
 test('cookie header checks reject missing, wrong, duplicate and unrelated cookies without storing values', () => {
   assert.deepEqual(cookieHeaderEvidence(undefined, 24), { count: 0, onlyExpected: false });
   assert.equal(cookieHeaderEvidence(`${COOKIE_NAME}=synthetic_v24_only`, 24).onlyExpected, true);
@@ -249,6 +322,118 @@ test('loopback handler reports counts only, rejects unknown routes and never for
     exactDuplicate: 0, exactPopup: 0, exactRestore: 0, exactWizard: 0 });
   assertEvidenceOnlyNumbers(counts);
   assert.doesNotMatch(JSON.stringify(counts), /synthetic_v24_only/);
+});
+
+test('popup point observation checks viewport and chrome hit without storing page content', () => {
+  const browser = { getBoundingClientRect: () => ({ left: 10, top: 20, width: 150, height: 120 }), contains: () => false };
+  const qa = { cards: { v24: 'synthetic-card' } }, win = { __egdeskCookieQa: qa, innerWidth: 200, innerHeight: 200 };
+  const doc = { getElementById: () => ({ _xulBrowser: browser }),
+    querySelectorAll: () => [{ id: 'synthetic-card' }], elementFromPoint: () => browser };
+  const context = vm.createContext({ window: win, document: doc });
+  const inspect = vm.runInContext(`(${inspectPopupPoint.toString()})`, context);
+  const point = inspect();
+  assert.equal(point.inViewport, true); assert.equal(point.hitsBrowser, true);
+  win.innerWidth = 20;
+  const outside = inspect();
+  assert.equal(outside.inViewport, false); assert.equal(outside.hitsBrowser, false);
+});
+
+test('popup observation reports only added card counts and origin equality', () => {
+  const qa = { beforePopup: ['existing'], identities: { 24: { userContextId: 17 } } };
+  const cards = [{ id: 'existing', isConnected: true }, { id: 'synthetic-popup', isConnected: true,
+    _xulBrowser: { browsingContext: { originAttributes: { userContextId: 17, privateBrowsingId: 0 } } } }];
+  const context = vm.createContext({ window: { __egdeskCookieQa: qa }, document: { querySelectorAll: () => cards } });
+  const observe = vm.runInContext(`(${inspectPopupCards.toString()})`, context);
+  const result = observe();
+  assert.equal(result.available, true); assert.equal(result.addedCards, 1); assert.equal(result.connectedCards, 1);
+  assert.equal(result.originAvailable, true); assert.equal(result.originMatches, true);
+  assert.doesNotMatch(JSON.stringify(result), /synthetic-popup|existing/);
+});
+
+function syntheticLifecycle({ point = { x: 40, y: 50, inViewport: true, hitsBrowser: true },
+  requests = 0, matching = 0, clickThrows = false, popupCard = false } = {}) {
+  const fixture = { port: 44001, counts: { v24: 0, exactV24: 0, popup: 0, exactPopup: 0,
+    duplicate: 0, exactDuplicate: 0 } };
+  let evaluations = 0;
+  const mcp = {
+    async evaluate(fn) {
+      if (fn === inspectPopupCards) return { available: true, addedCards: Number(popupCard),
+        connectedCards: Number(popupCard), originAvailable: popupCard, originMatches: popupCard };
+      evaluations++;
+      if (evaluations === 1) return true; // baseline
+      if (evaluations === 2) { fixture.counts.v24++; fixture.counts.exactV24++; return true; }
+      if (evaluations === 3) return true; // v24 context
+      if (evaluations === 4) return point;
+      if (evaluations === 5) return false; // popup context
+      throw new Error('fixture stops at duplicate');
+    },
+    async clickPoint() {
+      if (clickThrows) throw new Error('raw exception must never be recorded');
+      fixture.counts.popup += requests; fixture.counts.exactPopup += matching;
+    },
+  };
+  return { fixture, mcp, diagnostics: createBrowserDiagnostics(), checks: {} };
+}
+
+test('popup diagnostics distinguish unavailable point, failed click and request timeout', async () => {
+  const signal = new AbortController().signal;
+  const unavailable = syntheticLifecycle({ point: null });
+  await assert.rejects(observeBrowserLifecycle(unavailable.mcp, unavailable.fixture, unavailable.checks,
+    Date.now() + 3000, signal, unavailable.diagnostics, 10));
+  assert.equal(unavailable.diagnostics.steps.v24.completed, true);
+  assert.equal(unavailable.diagnostics.steps.popupPoint.completed, true);
+  assert.equal(unavailable.diagnostics.popup.pointAvailable, false);
+  assert.equal(unavailable.diagnostics.steps.popupClick.started, false);
+
+  const click = syntheticLifecycle({ clickThrows: true });
+  await assert.rejects(observeBrowserLifecycle(click.mcp, click.fixture, click.checks,
+    Date.now() + 3000, signal, click.diagnostics, 10));
+  assert.equal(click.diagnostics.popup.pointInViewport, true);
+  assert.equal(click.diagnostics.popup.pointHitsBrowser, true);
+  assert.equal(click.diagnostics.steps.popupClick.started, true);
+  assert.equal(click.diagnostics.steps.popupClick.completed, false);
+  assert.equal(click.diagnostics.steps.popupRoute.started, false);
+  assert.doesNotMatch(JSON.stringify(click.diagnostics), /raw exception/);
+
+  const timeout = syntheticLifecycle();
+  await assert.rejects(observeBrowserLifecycle(timeout.mcp, timeout.fixture, timeout.checks,
+    Date.now() + 3000, signal, timeout.diagnostics, 10));
+  assert.equal(timeout.diagnostics.steps.popupClick.completed, true);
+  assert.equal(timeout.diagnostics.steps.popupRoute.started, true);
+  assert.equal(timeout.diagnostics.steps.popupRoute.completed, false);
+  assert.equal(timeout.diagnostics.popup.routeTimedOut, true);
+  assert.equal(timeout.diagnostics.popup.requests, 0);
+  assert.equal(timeout.diagnostics.steps.popupContext.started, false);
+  assert.equal(timeout.diagnostics.popup.observationCompleted, true);
+  assert.equal(timeout.diagnostics.popup.addedCards, 0);
+  assertEvidenceOnlyNumbers(timeout.diagnostics);
+
+  const blankPopup = syntheticLifecycle({ popupCard: true });
+  await assert.rejects(observeBrowserLifecycle(blankPopup.mcp, blankPopup.fixture, blankPopup.checks,
+    Date.now() + 3000, signal, blankPopup.diagnostics, 10));
+  assert.equal(blankPopup.diagnostics.popup.routeTimedOut, true);
+  assert.equal(blankPopup.diagnostics.popup.requests, 0);
+  assert.equal(blankPopup.diagnostics.popup.addedCards, 1);
+  assert.equal(blankPopup.diagnostics.popup.connectedCards, 1);
+  assert.equal(blankPopup.diagnostics.popup.originMatches, true);
+});
+
+test('popup request with wrong header stays a failed check and is distinguishable from timeout', async () => {
+  for (const matching of [0, 1]) {
+    const run = syntheticLifecycle({ requests: 1, matching });
+    await assert.rejects(observeBrowserLifecycle(run.mcp, run.fixture, run.checks,
+      Date.now() + 3000, new AbortController().signal, run.diagnostics, 10), /fixture stops at duplicate/);
+    assert.equal(run.diagnostics.steps.popupRoute.completed, true);
+    assert.equal(run.diagnostics.popup.routeTimedOut, false);
+    assert.equal(run.diagnostics.popup.requests, 1);
+    assert.equal(run.diagnostics.popup.matchingHeaders, matching);
+    assert.equal(run.checks.headerPopup, matching === 1);
+    assert.equal(run.diagnostics.steps.popupContext.completed, true);
+    assert.equal(run.checks.contextPopup, false);
+    assert.equal(run.diagnostics.steps.duplicate.started, true);
+    assert.equal(run.diagnostics.steps.duplicate.completed, false);
+    assertEvidenceOnlyNumbers(run.diagnostics);
+  }
 });
 
 test('only explicitly owned process handles can be signalled', async () => {
@@ -283,6 +468,7 @@ test('privileged importer fixture fits the isolated MCP script limit', () => {
       catch (e) { return JSON.stringify({ ok: false, error: e.message || String(e) }); }
     }`;
   assert.ok(Buffer.byteLength(wrapped) < 16384);
+  assert.ok(Buffer.byteLength(wrapped.replace(source, installFixtureIdentityGuard.toString())) < 16384);
   assert.match(source, /getKeychainPassword\(\) \{ counters\.keychainFixtureCalls\+\+; return password; \}/);
   assert.doesNotMatch(source, /getGenericPassword|Chrome Safe Storage/);
   assert.doesNotMatch(source, /createBrowserCookieImporter\(\s*\)/);

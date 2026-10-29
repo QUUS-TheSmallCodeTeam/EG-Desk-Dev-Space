@@ -204,6 +204,62 @@ export function writeEvidence(runDir, evidence) {
     { flag: 'wx', mode: 0o600 });
 }
 
+// Installed only in the already-guarded, disposable headless QA chrome window.
+// Isolating this small setup keeps each MCP script below its size limit.
+export function installFixtureIdentityGuard({ root, runDir }) {
+  const services = globalThis.Services || ChromeUtils.importESModule('resource://gre/modules/Services.sys.mjs').Services;
+  if (root !== `${runDir}/synthetic-chrome` || !root.startsWith('/private/tmp/egdesk-round-') ||
+      !services.dirsvc.get('ProfD', Ci.nsIFile).path.startsWith(`${runDir}/tmp/egdesk-chat-test-`) ||
+      Cc['@mozilla.org/gfx/info;1'].getService(Ci.nsIGfxInfo).isHeadless !== true ||
+      document.documentURI !== 'chrome://browser/content/browser.xhtml' || window.__egdeskFixtureIdentityGuard) return false;
+  let identities;
+  try {
+    ({ ContextualIdentityService: identities } = ChromeUtils.importESModule('moz-src:///toolkit/components/contextualidentity/ContextualIdentityService.sys.mjs'));
+  } catch {
+    ({ ContextualIdentityService: identities } = ChromeUtils.importESModule('resource://gre/modules/ContextualIdentityService.sys.mjs'));
+  }
+  const owned = new Set(), adopted = new Set();
+  const guard = {
+    owns: id => owned.has(id),
+    adopt(id) { if (owned.has(id)) adopted.add(id); },
+    inUse(id) {
+      if (!owned.has(id)) return null;
+      if (adopted.has(id)) return true;
+      try {
+        if (typeof identities.countContainerTabs !== 'function' || typeof services.wm?.getEnumerator !== 'function') return null;
+        const tabs = identities.countContainerTabs(id);
+        if (!Number.isSafeInteger(tabs) || tabs < 0) return null;
+        if (tabs > 0) { adopted.add(id); return true; }
+        let windows = 0, elements = 0;
+        for (const win of services.wm.getEnumerator(null)) {
+          if (++windows > 100) return null;
+          if (win.closed) continue;
+          if (typeof win.document?.querySelectorAll !== 'function') return null;
+          for (const browser of win.document.querySelectorAll('browser, iframe')) {
+            if (++elements > 50000) return null;
+            if (browser.browsingContext?.originAttributes?.userContextId === id ||
+                browser.getAttribute?.('usercontextid') === String(id)) { adopted.add(id); return true; }
+          }
+        }
+        return false;
+      } catch { return null; }
+    },
+    create(name) {
+      const identity = identities.create(name, 'fingerprint', 'blue');
+      if (Number.isSafeInteger(identity?.userContextId) && identity.userContextId > 0) owned.add(identity.userContextId);
+      return identity;
+    },
+    remove(id) {
+      if (!owned.has(id) || guard.inUse(id) !== false) throw new Error('cleanup identity boundary');
+      const removed = identities.remove(id);
+      if (removed === true) owned.delete(id);
+      return removed;
+    },
+  };
+  window.__egdeskFixtureIdentityGuard = Object.freeze(guard);
+  return true;
+}
+
 // Executed only through IsolatedMcp.evaluate in a newly-created headless
 // Firefox profile. The adapter uses Gecko SQLite, WebCrypto, identities and
 // Services.cookies; its only filesystem source and password are synthetic.
@@ -220,6 +276,8 @@ export async function installImporterFixture(config) {
     ({ ContextualIdentityService: identities } = ChromeUtils.importESModule('resource://gre/modules/ContextualIdentityService.sys.mjs'));
   }
   const { createBrowserCookieImporter } = ChromeUtils.importESModule('chrome://userchrome/content/EGDeskBrowserCookieImport.sys.mjs');
+  const identityGuard = window.__egdeskFixtureIdentityGuard;
+  if (!identityGuard || !Object.isFrozen(identityGuard)) throw new Error('fixture identity guard');
   const fixtureRoot = Cc['@mozilla.org/file/local;1'].createInstance(Ci.nsIFile);
   fixtureRoot.initWithPath(root);
   if (!fixtureRoot.exists() || !fixtureRoot.isDirectory() || fixtureRoot.isSymlink() || fixtureRoot.path !== root) throw new Error('fixture root');
@@ -248,7 +306,8 @@ export async function installImporterFixture(config) {
     },
     list(attrs) { return services.cookies.getCookiesWithOriginAttributes(JSON.stringify(attrs)); },
     removeAll(attrs) {
-      if (!Number.isSafeInteger(attrs?.userContextId) || attrs.userContextId <= 0 || attrs.privateBrowsingId !== 0) throw new Error('cleanup boundary');
+      if (!Number.isSafeInteger(attrs?.userContextId) || attrs.userContextId <= 0 || attrs.privateBrowsingId !== 0 ||
+          !identityGuard.owns(attrs.userContextId) || identityGuard.inUse(attrs.userContextId) !== false) throw new Error('cleanup boundary');
       return services.cookies.removeCookiesWithOriginAttributes(JSON.stringify(attrs));
     },
   };
@@ -284,9 +343,7 @@ export async function installImporterFixture(config) {
     getKeychainPassword() { counters.keychainFixtureCalls++; return password; },
     getIdentityIds: () => identities.getPublicIdentities().map(item => item.userContextId),
     getIdentity: id => identities.getPublicIdentityFromId(id) ?? null,
-    // This scenario never requests post-success deletion. Refuse it rather
-    // than claim an exhaustive absence of browsing contexts in the fixture.
-    identityInUse: () => true,
+    identityInUse: id => identityGuard.inUse(id),
     watchIdentity(id, invalidate) {
       const topics = ['contextual-identity-updated', 'contextual-identity-deleted', 'browsing-context-attached'];
       const attached = [];
@@ -294,6 +351,7 @@ export async function installImporterFixture(config) {
         try {
           const context = topic === 'browsing-context-attached' ? (subject?.QueryInterface?.(Ci.nsILoadContext) ?? subject) : null;
           const changed = context ? context.originAttributes?.userContextId : subject?.wrappedJSObject?.userContextId;
+          if (context && changed === id) identityGuard.adopt(id);
           if (changed !== 0 && (!Number.isSafeInteger(changed) || changed <= 0 || changed === id)) invalidate();
         } catch { invalidate(); }
       } };
@@ -302,8 +360,8 @@ export async function installImporterFixture(config) {
       let active = true;
       return () => { if (active) { active = false; for (const topic of attached) { try { services.obs.removeObserver(observer, topic); } catch {} } } };
     },
-    createIdentity: name => identities.create(name, 'fingerprint', 'blue'),
-    removeIdentity: id => identities.remove(id),
+    createIdentity: name => identityGuard.create(name),
+    removeIdentity: id => identityGuard.remove(id),
     getCookieCapacity() {
       // Mirror the native Firefox 142-158 capacity adapter in the disposable
       // profile, including its all-container cookie count and preference cap.
@@ -404,6 +462,8 @@ export async function installImporterFixture(config) {
 
 const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
 
+class OwnedQaConditionTimeout extends Error {}
+
 async function waitFor(condition, deadlineMs, signal, limitMs = 30000) {
   const end = Math.min(deadlineMs, Date.now() + limitMs);
   while (Date.now() < end) {
@@ -411,7 +471,7 @@ async function waitFor(condition, deadlineMs, signal, limitMs = 30000) {
     if (await condition()) return;
     await sleep(Math.min(150, end - Date.now()));
   }
-  throw new Error('owned QA condition timed out');
+  throw new OwnedQaConditionTimeout('owned QA condition timed out');
 }
 
 async function waitForOwnedListener(port, child, deadlineMs, signal) {
@@ -444,13 +504,69 @@ function snapshotRoute(fixture, route) {
   return { requests: fixture.counts[route], exact: fixture.counts[exactKey] };
 }
 
-async function requireRoute(fixture, route, before, deadlineMs, signal) {
-  await waitFor(() => fixture.counts[route] > before.requests, deadlineMs, signal);
+async function requireRoute(fixture, route, before, deadlineMs, signal, limitMs = 30000) {
+  await waitFor(() => fixture.counts[route] > before.requests, deadlineMs, signal, limitMs);
   const after = snapshotRoute(fixture, route);
   return after.requests - before.requests === after.exact - before.exact;
 }
 
-async function openFixtureCard(mcp, fixture, version, checks, deadlineMs, signal) {
+const BROWSER_DIAGNOSTIC_STEPS = Object.freeze(['baseline', 'v24', 'popupPoint', 'popupClick', 'popupRoute',
+  'popupContext', 'duplicate', 'duplicateRoute', 'duplicateContext', 'restoreNavigation', 'restoreSetupRoute',
+  'restoreCard', 'restoreRoute', 'restoreContext', 'identityChecks', 'v23', 'default', 'placement']);
+
+// Fixed labels and boolean/count-only values keep failure evidence free of
+// exception text, URLs, DOM content, and even synthetic cookie values.
+export function createBrowserDiagnostics() {
+  return { steps: Object.fromEntries(BROWSER_DIAGNOSTIC_STEPS.map(name => [name, { started: false, completed: false }])),
+    popup: { pointAvailable: false, pointInViewport: false, pointHitsBrowser: false,
+      routeTimedOut: false, requests: 0, matchingHeaders: 0,
+      observationStarted: false, observationCompleted: false, observationAvailable: false,
+      addedCards: 0, connectedCards: 0, originAvailable: false, originMatches: false } };
+}
+
+async function browserDiagnosticStep(diagnostics, name, action) {
+  const step = diagnostics.steps[name];
+  assert.ok(step && !step.started, 'invalid browser diagnostic step');
+  step.started = true;
+  try {
+    const result = await action();
+    step.completed = true;
+    return result;
+  } catch (error) {
+    if (name === 'popupRoute' && error instanceof OwnedQaConditionTimeout) diagnostics.popup.routeTimedOut = true;
+    throw error;
+  }
+}
+
+// This runs only inside the isolated QA chrome context. Do not persist the
+// returned coordinates; they are used solely for the trusted synthetic click.
+export function inspectPopupPoint() {
+  const qa = window.__egdeskCookieQa, card = document.getElementById(qa.cards.v24);
+  const browser = card?._xulBrowser, rect = browser?.getBoundingClientRect();
+  if (!rect || rect.width < 80 || rect.height < 80) return null;
+  qa.beforePopup = [...document.querySelectorAll('.egd-browser-card')].map(item => item.id);
+  const x = Math.round(rect.left + 30), y = Math.round(rect.top + 30);
+  const inViewport = x >= 0 && y >= 0 && x < window.innerWidth && y < window.innerHeight;
+  const hit = inViewport ? document.elementFromPoint(x, y) : null;
+  return { x, y, inViewport, hitsBrowser: hit === browser || !!(hit && browser.contains(hit)) };
+}
+
+// Read only synthetic card counts and origin-attribute equality; no IDs,
+// addresses, document contents, cookie values, or exception text are returned.
+export function inspectPopupCards() {
+  const qa = window.__egdeskCookieQa;
+  const empty = { available: false, addedCards: 0, connectedCards: 0, originAvailable: false, originMatches: false };
+  if (!Array.isArray(qa?.beforePopup)) return empty;
+  const cards = document.querySelectorAll('.egd-browser-card');
+  if (cards.length > 1000) return empty;
+  const added = [...cards].filter(card => !qa.beforePopup.includes(card.id));
+  const attrs = added.length === 1 ? added[0]._xulBrowser?.browsingContext?.originAttributes : null;
+  return { available: true, addedCards: added.length, connectedCards: added.filter(card => card.isConnected).length,
+    originAvailable: !!attrs, originMatches: !!attrs && attrs.userContextId === qa.identities[24].userContextId &&
+      attrs.privateBrowsingId === 0 };
+}
+
+async function openFixtureCard(mcp, fixture, version, checks, deadlineMs, signal, routeWaitMs = 30000) {
   const route = version === 0 ? 'default' : `v${version}`;
   const before = snapshotRoute(fixture, route);
   const created = await mcp.evaluate(({ route, version, port }) => {
@@ -464,7 +580,7 @@ async function openFixtureCard(mcp, fixture, version, checks, deadlineMs, signal
     return true;
   }, { route, version, port: fixture.port });
   if (!created) throw new Error('fixture Browser card not created');
-  checks[`header${route[0].toUpperCase()}${route.slice(1)}`] = await requireRoute(fixture, route, before, deadlineMs, signal);
+  checks[`header${route[0].toUpperCase()}${route.slice(1)}`] = await requireRoute(fixture, route, before, deadlineMs, signal, routeWaitMs);
   checks[`context${route[0].toUpperCase()}${route.slice(1)}`] = await mcp.evaluate(({ route, version }) => {
     const qa = window.__egdeskCookieQa, card = document.getElementById(qa.cards[route]);
     const attrs = card?._xulBrowser?.browsingContext?.originAttributes;
@@ -473,8 +589,9 @@ async function openFixtureCard(mcp, fixture, version, checks, deadlineMs, signal
   }, { route, version });
 }
 
-async function observeBrowserLifecycle(mcp, fixture, checks, deadlineMs, signal) {
-  const baseline = await mcp.evaluate(() => {
+export async function observeBrowserLifecycle(mcp, fixture, checks, deadlineMs, signal, diagnostics, routeWaitMs = 30000) {
+  assert.ok(Number.isSafeInteger(routeWaitMs) && routeWaitMs > 0 && routeWaitMs <= 30000);
+  const baseline = await browserDiagnosticStep(diagnostics, 'baseline', () => mcp.evaluate(() => {
     const qa = window.__egdeskCookieQa, desk = window.__egdesk;
     const canvas = document.getElementById('egd-canvas-layer');
     const viewport = document.getElementById('egd-canvas-viewport');
@@ -487,53 +604,72 @@ async function observeBrowserLifecycle(mcp, fixture, checks, deadlineMs, signal)
       savedBoardIds: Object.keys(desk.agenda.readStore().agendas).sort(),
       activeProjectionId: desk.state.boards.activeProjectionId, windowCount };
     return true;
-  });
+  }));
   if (!baseline) throw new Error('current Desk canvas unavailable');
-  await openFixtureCard(mcp, fixture, 24, checks, deadlineMs, signal);
+  await browserDiagnosticStep(diagnostics, 'v24', () => openFixtureCard(mcp, fixture, 24, checks, deadlineMs, signal, routeWaitMs));
 
   const popupBefore = snapshotRoute(fixture, 'popup');
-  const point = await mcp.evaluate(() => {
-    const qa = window.__egdeskCookieQa, card = document.getElementById(qa.cards.v24);
-    const browser = card?._xulBrowser, rect = browser?.getBoundingClientRect();
-    if (!rect || rect.width < 80 || rect.height < 80) return null;
-    qa.beforePopup = [...document.querySelectorAll('.egd-browser-card')].map(item => item.id);
-    return { x: Math.round(rect.left + 30), y: Math.round(rect.top + 30) };
-  });
-  if (!point) throw new Error('popup link unavailable');
-  // The local page's anchor is activated with trusted native WebDriver input.
-  await mcp.clickPoint(point);
-  checks.headerPopup = await requireRoute(fixture, 'popup', popupBefore, deadlineMs, signal);
-  checks.contextPopup = await mcp.evaluate(() => {
-    const qa = window.__egdeskCookieQa, expected = qa.identities[24].userContextId;
-    const added = [...document.querySelectorAll('.egd-browser-card')].filter(card => !qa.beforePopup.includes(card.id));
-    if (added.length !== 1) return false;
-    qa.cards.popup = added[0].id;
-    const attrs = added[0]._xulBrowser?.browsingContext?.originAttributes;
-    return attrs?.userContextId === expected && attrs.privateBrowsingId === 0;
-  });
+  try {
+    const point = await browserDiagnosticStep(diagnostics, 'popupPoint', () => mcp.evaluate(inspectPopupPoint));
+    diagnostics.popup.pointAvailable = !!point;
+    diagnostics.popup.pointInViewport = point?.inViewport === true;
+    diagnostics.popup.pointHitsBrowser = point?.hitsBrowser === true;
+    if (!point) throw new Error('popup link unavailable');
+    // The local page's anchor is activated with trusted native WebDriver input.
+    await browserDiagnosticStep(diagnostics, 'popupClick', () => mcp.clickPoint({ x: point.x, y: point.y }));
+    checks.headerPopup = await browserDiagnosticStep(diagnostics, 'popupRoute',
+      () => requireRoute(fixture, 'popup', popupBefore, deadlineMs, signal, routeWaitMs));
+    checks.contextPopup = await browserDiagnosticStep(diagnostics, 'popupContext', () => mcp.evaluate(() => {
+      const qa = window.__egdeskCookieQa, expected = qa.identities[24].userContextId;
+      const added = [...document.querySelectorAll('.egd-browser-card')].filter(card => !qa.beforePopup.includes(card.id));
+      if (added.length !== 1) return false;
+      qa.cards.popup = added[0].id;
+      const attrs = added[0]._xulBrowser?.browsingContext?.originAttributes;
+      return attrs?.userContextId === expected && attrs.privateBrowsingId === 0;
+    }));
+  } finally {
+    if (diagnostics.steps.popupClick.completed && !signal?.aborted && Date.now() < deadlineMs) {
+      diagnostics.popup.observationStarted = true;
+      try {
+        const observed = await mcp.evaluate(inspectPopupCards);
+        diagnostics.popup.observationCompleted = true;
+        diagnostics.popup.observationAvailable = observed?.available === true;
+        diagnostics.popup.addedCards = Number.isSafeInteger(observed?.addedCards) && observed.addedCards >= 0 ? observed.addedCards : 0;
+        diagnostics.popup.connectedCards = Number.isSafeInteger(observed?.connectedCards) && observed.connectedCards >= 0 ? observed.connectedCards : 0;
+        diagnostics.popup.originAvailable = observed?.originAvailable === true;
+        diagnostics.popup.originMatches = observed?.originMatches === true;
+      } catch { /* optional read-only diagnostics never replace the original failure */ }
+    }
+    const popupAfter = snapshotRoute(fixture, 'popup');
+    diagnostics.popup.requests = popupAfter.requests - popupBefore.requests;
+    diagnostics.popup.matchingHeaders = popupAfter.exact - popupBefore.exact;
+  }
 
   const duplicateBefore = snapshotRoute(fixture, 'duplicate');
-  const duplicated = await mcp.evaluate(({ port }) => {
+  const duplicated = await browserDiagnosticStep(diagnostics, 'duplicate', () => mcp.evaluate(({ port }) => {
     const qa = window.__egdeskCookieQa;
     const copy = window.__egdesk.browserRuntime.duplicate(qa.cards.v24);
     if (!copy?._xulBrowser) return false;
     qa.cards.duplicate = copy.id;
     return !!window.__egdesk.browserRuntime.navigate(copy, `http://127.0.0.1:${port}/cookie/duplicate`);
-  }, { port: fixture.port });
+  }, { port: fixture.port }));
   if (!duplicated) throw new Error('duplicate Browser card unavailable');
-  checks.headerDuplicate = await requireRoute(fixture, 'duplicate', duplicateBefore, deadlineMs, signal);
-  checks.contextDuplicate = await mcp.evaluate(() => {
+  checks.headerDuplicate = await browserDiagnosticStep(diagnostics, 'duplicateRoute',
+    () => requireRoute(fixture, 'duplicate', duplicateBefore, deadlineMs, signal, routeWaitMs));
+  checks.contextDuplicate = await browserDiagnosticStep(diagnostics, 'duplicateContext', () => mcp.evaluate(() => {
     const qa = window.__egdeskCookieQa, card = document.getElementById(qa.cards.duplicate);
     const attrs = card?._xulBrowser?.browsingContext?.originAttributes;
     return attrs?.userContextId === qa.identities[24].userContextId && attrs.privateBrowsingId === 0;
-  });
+  }));
 
   const restoreNavigation = snapshotRoute(fixture, 'restore');
-  const navigated = await mcp.evaluate(({ port }) => window.__egdesk.browserRuntime.navigate(
-    window.__egdeskCookieQa.cards.v24, `http://127.0.0.1:${port}/cookie/restore`), { port: fixture.port });
-  if (!navigated || !await requireRoute(fixture, 'restore', restoreNavigation, deadlineMs, signal)) throw new Error('restore setup failed');
+  const navigated = await browserDiagnosticStep(diagnostics, 'restoreNavigation', () => mcp.evaluate(({ port }) =>
+    window.__egdesk.browserRuntime.navigate(window.__egdeskCookieQa.cards.v24,
+      `http://127.0.0.1:${port}/cookie/restore`), { port: fixture.port }));
+  if (!navigated || !await browserDiagnosticStep(diagnostics, 'restoreSetupRoute',
+    () => requireRoute(fixture, 'restore', restoreNavigation, deadlineMs, signal, routeWaitMs))) throw new Error('restore setup failed');
   const restoreBefore = snapshotRoute(fixture, 'restore');
-  const restored = await mcp.evaluate(async () => {
+  const restored = await browserDiagnosticStep(diagnostics, 'restoreCard', () => mcp.evaluate(async () => {
     const qa = window.__egdeskCookieQa, runtime = window.__egdesk;
     const snapshot = runtime.deskSession.serialize(), id = qa.cards.v24;
     const record = snapshot.cards.find(item => item.id === id);
@@ -544,19 +680,20 @@ async function observeBrowserLifecycle(mcp, fixture, checks, deadlineMs, signal)
     qa.snapshot = JSON.parse(JSON.stringify(snapshot));
     const closed = await runtime.cardRuntime.closeCard(document.getElementById(id));
     return closed === true && runtime.deskSession.restore(snapshot, { merge: true }) === true && !!document.getElementById(id);
-  });
+  }));
   if (!restored) throw new Error('Browser card restoration failed');
-  checks.headerRestore = await requireRoute(fixture, 'restore', restoreBefore, deadlineMs, signal);
-  checks.contextRestore = await mcp.evaluate(() => {
+  checks.headerRestore = await browserDiagnosticStep(diagnostics, 'restoreRoute',
+    () => requireRoute(fixture, 'restore', restoreBefore, deadlineMs, signal, routeWaitMs));
+  checks.contextRestore = await browserDiagnosticStep(diagnostics, 'restoreContext', () => mcp.evaluate(() => {
     const qa = window.__egdeskCookieQa, card = document.getElementById(qa.cards.v24);
     const attrs = card?._xulBrowser?.browsingContext?.originAttributes;
     return attrs?.userContextId === qa.identities[24].userContextId && attrs.privateBrowsingId === 0;
-  });
+  }));
 
   // Test a different profile's token with the same numeric container and a
   // required identity with missing metadata. A rejection must not mount a
   // default-container Browser or initiate the fixture navigation.
-  for (const mode of ['foreign', 'portable', 'missing']) {
+  await browserDiagnosticStep(diagnostics, 'identityChecks', async () => { for (const mode of ['foreign', 'portable', 'missing']) {
     const before = snapshotRoute(fixture, 'restore');
     const blocked = await mcp.evaluate(({ mode }) => {
       const qa = window.__egdeskCookieQa, snapshot = JSON.parse(JSON.stringify(qa.snapshot));
@@ -576,10 +713,10 @@ async function observeBrowserLifecycle(mcp, fixture, checks, deadlineMs, signal)
     await sleep(300);
     checks[mode === 'foreign' ? 'foreignIdentityRejected' : mode === 'portable' ? 'portableIdentityRejected' : 'missingIdentityRejected'] =
       blocked && snapshotRoute(fixture, 'restore').requests === before.requests;
-  }
-  await openFixtureCard(mcp, fixture, 23, checks, deadlineMs, signal);
-  await openFixtureCard(mcp, fixture, 0, checks, deadlineMs, signal);
-  const placement = await mcp.evaluate(() => {
+  } });
+  await browserDiagnosticStep(diagnostics, 'v23', () => openFixtureCard(mcp, fixture, 23, checks, deadlineMs, signal, routeWaitMs));
+  await browserDiagnosticStep(diagnostics, 'default', () => openFixtureCard(mcp, fixture, 0, checks, deadlineMs, signal, routeWaitMs));
+  const placement = await browserDiagnosticStep(diagnostics, 'placement', () => mcp.evaluate(() => {
     const qa = window.__egdeskCookieQa, desk = window.__egdesk, before = qa.canvasBaseline;
     const windows = Services.wm.getEnumerator('navigator:browser');
     let windowCount = 0;
@@ -594,7 +731,7 @@ async function observeBrowserLifecycle(mcp, fixture, checks, deadlineMs, signal)
         before.activeProjectionId === desk.state.boards.activeProjectionId,
       noNewBrowserWindow: before.windowCount === windowCount,
     };
-  });
+  }));
   for (const key of ['sameCanvas', 'sameDesk', 'noNewBoard', 'noNewBrowserWindow']) checks[key] = placement[key] === true;
 }
 
@@ -1030,7 +1167,8 @@ export async function runCli(argv = process.argv.slice(2)) {
     mcp: false, native: false, importer: false, wizard: false, browser: false }, checks: Object.fromEntries(checkNames.map(name => [name, false])),
     nativeAvailability: { supported: false, platform: false, policy: false, privateContext: false,
       containers: false, logging: false, unavailable: false },
-    nativeDiagnostics: {}, screenshots: { menu: false, dialog: false, wizardChoice: false, wizardResult: false },
+    nativeDiagnostics: {}, browserDiagnostics: createBrowserDiagnostics(),
+    screenshots: { menu: false, dialog: false, wizardChoice: false, wizardResult: false },
     counts: { fixtureBytes: 0, overlayBytes, artifactBytes: 0, fixtureRequests: 0, unexpectedRequests: 0,
       syntheticPasswordCalls: 0, nativeWrites: 0 }, failures: { fixture: false, profile: false, sandbox: false,
       firefox: false, mcp: false, native: false, importer: false, wizard: false, browser: false, interrupted: false, artifactLimit: false },
@@ -1105,6 +1243,7 @@ export async function runCli(argv = process.argv.slice(2)) {
     await observeNativeAvailability(mcp, evidence, options.deadlineMs, interruption.signal, capture);
     evidence.stages.native = true;
     stage = 'importer'; assertRunning(options.deadlineMs, interruption.signal);
+    assert.equal(await mcp.evaluate(installFixtureIdentityGuard, { root: chromeFixture.root, runDir }), true);
     const observed = await mcp.evaluate(installImporterFixture, { root: chromeFixture.root, runDir,
       password: FIXTURE_PASSWORD, cookieName: COOKIE_NAME, v23Value: VALUES[23], v24Value: VALUES[24], defaultValue: VALUES[0] });
     for (const key of Object.keys(observed.checks)) if (Object.hasOwn(evidence.checks, key)) evidence.checks[key] = observed.checks[key] === true;
@@ -1116,7 +1255,7 @@ export async function runCli(argv = process.argv.slice(2)) {
     await observeSyntheticWizard(mcp, fixture, evidence, options.deadlineMs, interruption.signal, capture);
     evidence.stages.wizard = true;
     stage = 'browser'; assertRunning(options.deadlineMs, interruption.signal);
-    await observeBrowserLifecycle(mcp, fixture, evidence.checks, options.deadlineMs, interruption.signal);
+    await observeBrowserLifecycle(mcp, fixture, evidence.checks, options.deadlineMs, interruption.signal, evidence.browserDiagnostics);
     evidence.stages.browser = true;
   } catch {
     if (Object.hasOwn(evidence.failures, stage)) evidence.failures[stage] = true;
