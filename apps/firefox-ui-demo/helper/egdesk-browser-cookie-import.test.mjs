@@ -549,11 +549,18 @@ test('native quota and expiry cap fail safely without removing existing cookies'
       f.state.jars.set(7, [{ value: 'unrelated synthetic cookie' }]);
       if (mode === 'capacity') f.state.nativeMax = 1;
       if (mode === 'expiry') f.state.expiryRejected = true;
+      if (mode === 'future-version') {
+        assert.deepEqual(f.importer.availability(), { supported: false, reason: 'cookie-capacity-unverified' });
+        assert.equal((await f.importer.listProfiles({ explicitUserRequest: true })).supported, false);
+        assert.equal(f.state.opened.length, 0);
+        assert.equal(f.state.keychainCalls, 0);
+        continue;
+      }
       const id = (await f.importer.listProfiles({ explicitUserRequest: true })).profiles[0].id;
       const result = await f.importer.importProfile({ profileId: id, explicitUserConsent: true });
       assert.equal(result.status, 'failed');
       assert.equal(result.reason, mode === 'capacity' ? 'cookie-capacity-exceeded' :
-        mode === 'future-version' ? 'cookie-capacity-unverified' : 'cookie-expiry-cap-exceeded');
+        'cookie-expiry-cap-exceeded');
       assert.equal(f.state.jars.get(7)[0].value, 'unrelated synthetic cookie');
       assert.deepEqual(f.state.identities, [7]);
       assert.equal(JSON.stringify(result).includes('unrelated synthetic cookie'), false);

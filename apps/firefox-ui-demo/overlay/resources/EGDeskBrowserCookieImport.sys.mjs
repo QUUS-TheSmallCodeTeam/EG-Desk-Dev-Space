@@ -149,6 +149,9 @@ function geckoAdapter(browserWindow) {
     function checkAccess() {
       try {
         if (AppConstants.platform !== 'macosx') return 'platform-unsupported';
+        // Newer Gecko excludes expired entries from its public cookie getter;
+        // its total in-memory quota count cannot be proven from that getter.
+        if (majorVersion > 158) return 'cookie-capacity-unverified';
         if (!browserWindow || browserWindow.closed !== false || browserWindow.isChromeWindow !== true ||
             !browserWindow.docShell || browserWindow.document?.nodePrincipal?.isSystemPrincipal !== true ||
             PrivateBrowsingUtils.isWindowPrivate(browserWindow) !== false) return 'private-context-unverified';
@@ -542,7 +545,7 @@ export function createBrowserCookieImporter(options = {}) {
       const access = adapter.checkAccess();
       if (access !== true) return { supported: false, reason: ['platform-unsupported', 'policy-denied',
         'policy-unavailable', 'private-context-unverified', 'containers-disabled', 'permission-denied',
-        'logging-enabled', 'logging-unverified'].includes(access) ? access : 'unavailable' };
+        'logging-enabled', 'logging-unverified', 'cookie-capacity-unverified'].includes(access) ? access : 'unavailable' };
     } catch { return { supported: false, reason: 'unavailable' }; }
     return { supported: true, scopeModes: ['preserve', 'standard-web'] };
   }
