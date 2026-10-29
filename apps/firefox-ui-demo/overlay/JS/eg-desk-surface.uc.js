@@ -15841,8 +15841,10 @@
 
   function browserIdentityContainerIds() {
     try {
-      const { ContextualIdentityService } = ChromeUtils.importESModule('resource://gre/modules/ContextualIdentityService.sys.mjs');
-      const listed = browserIdentityModule().createBrowserIdentityAdapter({ identityService: ContextualIdentityService, services: servicesRef() }).listContainers();
+      const identity = browserIdentityModule();
+      const identityService = identity.resolveContextualIdentityService(uri => ChromeUtils.importESModule(uri));
+      if (!identityService) return null;
+      const listed = identity.createBrowserIdentityAdapter({ identityService, services: servicesRef() }).listContainers();
       if (listed?.supported !== true || !Array.isArray(listed.containers)) return null;
       return new Set(listed.containers.filter(item => item.kind === 'container').map(item => item.userContextId));
     } catch { return null; }

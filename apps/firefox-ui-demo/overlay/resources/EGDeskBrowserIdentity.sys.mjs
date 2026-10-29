@@ -29,17 +29,24 @@ function safeHttpUrl(value) {
   }
 }
 
-function nativeParts() {
-  try {
-    if (typeof globalThis.ChromeUtils?.importESModule !== 'function') return {};
-    return {
-      identityService: globalThis.ChromeUtils.importESModule('resource://gre/modules/ContextualIdentityService.sys.mjs')
-        .ContextualIdentityService,
-      services: globalThis.Services,
-    };
-  } catch {
-    return {};
+/** Resolve Firefox's current native module first, with the older path as fallback. */
+export function resolveContextualIdentityService(importModule = uri => globalThis.ChromeUtils.importESModule(uri)) {
+  for (const uri of [
+    'moz-src:///toolkit/components/contextualidentity/ContextualIdentityService.sys.mjs',
+    'resource://gre/modules/ContextualIdentityService.sys.mjs',
+  ]) {
+    try {
+      const service = importModule(uri)?.ContextualIdentityService;
+      if (service) return service;
+    } catch { /* The path can be absent on this Firefox version. */ }
   }
+  return null;
+}
+
+function nativeParts() {
+  if (typeof globalThis.ChromeUtils?.importESModule !== 'function') return {};
+  const identityService = resolveContextualIdentityService();
+  return identityService ? { identityService, services: globalThis.Services } : {};
 }
 
 /** Set the container on a new XUL browser before it is appended to the DOM. */

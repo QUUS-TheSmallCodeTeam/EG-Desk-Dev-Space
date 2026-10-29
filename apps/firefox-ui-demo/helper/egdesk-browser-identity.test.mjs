@@ -1,10 +1,13 @@
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
 import { test } from 'node:test';
+import { runInNewContext } from 'node:vm';
 import {
   browserUserContextId,
   configureBrowser,
   createBrowserIdentityAdapter,
   popupContextOptions,
+  resolveContextualIdentityService,
 } from '../overlay/resources/EGDeskBrowserIdentity.sys.mjs';
 
 function fakeBrowser(url, userContextId, connected = true) {
@@ -342,7 +345,7 @@ test('Gecko entry point imports the native service through a fake host boundary'
     globalThis.Services = native.services;
     const adapter = createBrowserIdentityAdapter();
     assert.equal(adapter.start().mode, 'gecko-native');
-    assert.deepEqual(imports, ['resource://gre/modules/ContextualIdentityService.sys.mjs']);
+    assert.deepEqual(imports, ['moz-src:///toolkit/components/contextualidentity/ContextualIdentityService.sys.mjs']);
     await adapter.stop();
     assert.equal(native.observerTopics.size, 0);
   } finally {
@@ -350,6 +353,71 @@ test('Gecko entry point imports the native service through a fake host boundary'
     else globalThis.ChromeUtils = savedChrome;
     if (savedServices === undefined) delete globalThis.Services;
     else globalThis.Services = savedServices;
+  }
+});
+
+test('native service prefers Firefox 158 path, falls back for older Firefox, and fails closed', async () => {
+  const modern = 'moz-src:///toolkit/components/contextualidentity/ContextualIdentityService.sys.mjs';
+  const legacy = 'resource://gre/modules/ContextualIdentityService.sys.mjs';
+  for (const scenario of ['modern', 'legacy', 'missing-export', 'unavailable']) {
+    const native = nativeFixture(), calls = [];
+    const importer = uri => {
+      calls.push(uri);
+      if (uri === modern && scenario === 'missing-export') return {};
+      if ((uri === modern && scenario === 'modern') ||
+          (uri === legacy && ['legacy', 'missing-export'].includes(scenario))) {
+        return { ContextualIdentityService: native.identityService };
+      }
+      throw new Error('synthetic module not installed');
+    };
+    const resolved = resolveContextualIdentityService(importer);
+    assert.equal(resolved, scenario === 'unavailable' ? null : native.identityService, scenario);
+    assert.deepEqual(calls, scenario === 'modern' ? [modern] : [modern, legacy]);
+    const savedChrome = globalThis.ChromeUtils, savedServices = globalThis.Services;
+    try {
+      calls.length = 0;
+      globalThis.ChromeUtils = { importESModule: importer };
+      globalThis.Services = native.services;
+      const adapter = createBrowserIdentityAdapter();
+      const status = adapter.start();
+      assert.equal(status.supported, scenario !== 'unavailable', scenario);
+      assert.equal(status.mode, scenario === 'unavailable' ? 'unavailable' : 'gecko-native', scenario);
+      assert.deepEqual(calls, scenario === 'modern' ? [modern] : [modern, legacy]);
+      await adapter.stop();
+    } finally {
+      if (savedChrome === undefined) delete globalThis.ChromeUtils;
+      else globalThis.ChromeUtils = savedChrome;
+      if (savedServices === undefined) delete globalThis.Services;
+      else globalThis.Services = savedServices;
+    }
+  }
+});
+
+test('the Browser UI uses the same native-module resolver and never falls back to a default identity', () => {
+  const source = readFileSync(new URL('../overlay/JS/eg-desk-surface.uc.js', import.meta.url), 'utf8');
+  const start = source.indexOf('  function browserIdentityContainerIds() {');
+  const end = source.indexOf('\n  function browserIdentityContainerExists(', start);
+  assert.ok(start >= 0 && end > start);
+  const modern = 'moz-src:///toolkit/components/contextualidentity/ContextualIdentityService.sys.mjs';
+  const legacy = 'resource://gre/modules/ContextualIdentityService.sys.mjs';
+  for (const scenario of ['modern', 'legacy', 'unavailable']) {
+    const native = nativeFixture(), calls = [];
+    const context = {
+      browserIdentityModule: () => ({ resolveContextualIdentityService, createBrowserIdentityAdapter }),
+      servicesRef: () => native.services,
+      ChromeUtils: { importESModule(uri) {
+        calls.push(uri);
+        if ((scenario === 'modern' && uri === modern) || (scenario === 'legacy' && uri === legacy)) {
+          return { ContextualIdentityService: native.identityService };
+        }
+        throw new Error('synthetic module not installed');
+      } },
+    };
+    const lookup = runInNewContext(`${source.slice(start, end)}\n browserIdentityContainerIds`, context);
+    const ids = lookup();
+    assert.deepEqual(calls, scenario === 'modern' ? [modern] : [modern, legacy]);
+    if (scenario === 'unavailable') assert.equal(ids, null);
+    else assert.deepEqual([...ids], [1, 2]);
   }
 });
 
