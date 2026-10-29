@@ -130,10 +130,12 @@ export function createChromeFixture(runDir, now = Date.now()) {
       meta.run('version', String(profile.version));
       meta.run('last_compatible_version', String(profile.version));
       const stamp = BigInt(now) * 1000n + EPOCH_OFFSET_US;
+      const persistent = profile.version === 24;
       db.prepare(`INSERT INTO cookies (creation_utc,host_key,name,value,encrypted_value,path,expires_utc,
         is_secure,is_httponly,last_access_utc,has_expires,is_persistent,samesite,source_scheme,source_port)
         VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`).run(stamp, FIXTURE_HOST, COOKIE_NAME, '',
-        syntheticEncryptedValue(profile.version), '/', stamp + 3600n * 1000000n, 0, 1, stamp, 1, 1, -1, 0, -1);
+        syntheticEncryptedValue(profile.version), '/', persistent ? stamp + 3600n * 1000000n : 0n,
+        0, 1, stamp, Number(persistent), Number(persistent), -1, 0, -1);
     } finally { db.close(); }
     fs.chmodSync(dbPath, 0o600);
     assert.ok(fs.statSync(dbPath).size < 1024 * 1024, 'fixture database unexpectedly large');
@@ -347,13 +349,16 @@ export async function installImporterFixture(config) {
   checks.importedV24 = v24.status === 'imported' && v24.counts?.imported === 1 && v24.userContextId > 0;
   checks.importedV23 = v23.status === 'imported' && v23.counts?.imported === 1 && v23.userContextId > 0;
   checks.distinctContainers = checks.importedV24 && checks.importedV23 && v24.userContextId !== v23.userContextId;
-  const ownCookie = (id, value) => {
+  const ownCookie = (id, value, expectedSession = null) => {
     const cookies = nativeCookies.list({ userContextId: id, privateBrowsingId: 0 });
     return Array.isArray(cookies) && cookies.length === 1 && cookies[0].host === '127.0.0.1' &&
-      cookies[0].name === cookieName && cookies[0].value === value && cookies[0].originAttributes?.userContextId === id;
+      cookies[0].name === cookieName && cookies[0].value === value && cookies[0].originAttributes?.userContextId === id &&
+      (expectedSession === null || cookies[0].isSession === expectedSession);
   };
   checks.nativeReadbackV24 = checks.importedV24 && ownCookie(v24.userContextId, v24Value);
   checks.nativeReadbackV23 = checks.importedV23 && ownCookie(v23.userContextId, v23Value);
+  checks.nativePersistentV24 = checks.importedV24 && ownCookie(v24.userContextId, v24Value, false);
+  checks.nativeSessionV23 = checks.importedV23 && ownCookie(v23.userContextId, v23Value, true);
   services.cookies.add('127.0.0.1', '/', cookieName, defaultValue, false, true, false,
     Date.now() + 3600 * 1000, { userContextId: 0, privateBrowsingId: 0 }, 256, 0, false);
   checks.defaultReadback = ownCookie(0, defaultValue);
@@ -990,7 +995,8 @@ export async function runCli(argv = process.argv.slice(2)) {
   const importerCheckNames = ['privateDenied', 'policyDenied', 'platformDenied', 'accessDenied',
     'explicitListRequired', 'fixtureProfilesListed', 'consentRequired', 'cancelBeforeRead',
     'readErrorHandled', 'schemaDenied', 'cancelAfterWriteCleaned', 'importedV24', 'importedV23',
-    'distinctContainers', 'nativeReadbackV24', 'nativeReadbackV23', 'defaultReadback', 'syntheticPasswordOnly'];
+    'distinctContainers', 'nativeReadbackV24', 'nativeReadbackV23', 'nativePersistentV24', 'nativeSessionV23',
+    'defaultReadback', 'syntheticPasswordOnly'];
   const checkNames = ['nativeAvailability', 'nativeMenuEnabled', 'nativeDialogIntro', 'nativeDialogClosed', ...importerCheckNames,
     'uiInjectionInstalled', 'uiFactoryCaptured', 'uiSyntheticReader', 'uiProfileSelected', 'uiConsentEnabledConfirm',
     'uiImportResult', 'uiNewCard', 'uiSameCanvas', 'uiInjectionRestored', 'uiHeader',

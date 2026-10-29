@@ -73,7 +73,8 @@ test('fresh, bounded Chrome source contains only synthetic DB v23/v24 rows', t =
     const db = new DatabaseSync(path.join(fixture.root, directory, 'Cookies'), { readOnly: true });
     try {
       assert.equal(Number(db.prepare("SELECT value FROM meta WHERE key='version'").get().value), version);
-      const rows = db.prepare('SELECT host_key, name, value, encrypted_value, has_cross_site_ancestor, source_scheme, source_port FROM cookies').all();
+      const rows = db.prepare(`SELECT host_key, name, value, encrypted_value, has_cross_site_ancestor, source_scheme, source_port,
+        CAST(expires_utc AS TEXT) AS expires_utc, has_expires, is_persistent FROM cookies`).all();
       assert.equal(rows.length, 1);
       assert.equal(rows[0].host_key, '127.0.0.1');
       assert.equal(rows[0].name, COOKIE_NAME);
@@ -81,6 +82,10 @@ test('fresh, bounded Chrome source contains only synthetic DB v23/v24 rows', t =
       assert.equal(rows[0].has_cross_site_ancestor, 1);
       assert.equal(rows[0].source_scheme, 0);
       assert.equal(rows[0].source_port, -1);
+      assert.equal(rows[0].has_expires, version === 24 ? 1 : 0);
+      assert.equal(rows[0].is_persistent, version === 24 ? 1 : 0);
+      assert.equal(rows[0].expires_utc, version === 24
+        ? (1793232000000n * 1000n + 11644473600000000n + 3600n * 1000000n).toString() : '0');
       assert.ok(Buffer.from(rows[0].encrypted_value).equals(syntheticEncryptedValue(version)));
     } finally { db.close(); }
   }
@@ -135,6 +140,9 @@ test('committed Core accepts both real synthetic SQLite rows with an injected in
   assert.notEqual(v24.userContextId, v23.userContextId);
   assert.equal(cookieHeaderEvidence(`${COOKIE_NAME}=${jars.get(v24.userContextId)[0].value}`, 24).onlyExpected, true);
   assert.equal(cookieHeaderEvidence(`${COOKIE_NAME}=${jars.get(v23.userContextId)[0].value}`, 23).onlyExpected, true);
+  assert.equal(jars.get(v24.userContextId)[0].isSession, false);
+  assert.equal(jars.get(v23.userContextId)[0].isSession, true);
+  assert.equal(jars.get(v23.userContextId)[0].expiry, Number.MAX_SAFE_INTEGER);
   assert.equal(passwordCalls, 2);
   assert.equal(jars.has(0), false);
   // The current Core contract conservatively refuses port-scoped host cookies;
