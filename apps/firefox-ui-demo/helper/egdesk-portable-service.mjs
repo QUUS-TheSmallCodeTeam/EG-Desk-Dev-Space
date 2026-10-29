@@ -42,7 +42,7 @@ const BOARD_ID = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/
 const MACHINE_PATH = /(?:^|[\s("'])(?:\/[^\s]|~\/|[A-Za-z]:[\\/]|file:\/\/|\\\\[^\s])/i
 
 // Account identifiers never leave this machine; they become null.
-const ACCOUNT_KEYS = new Set(['accountidentity', 'accountid', 'accountemail', 'accountkey', 'codexaccountkey', 'bindingaccountkey', 'retainednativebinding', 'ownerhash', 'ownerkey', 'ownerscope', 'engineprofileid', 'authidentitykey', 'identitykey'])
+const ACCOUNT_KEYS = new Set(['accountidentity', 'accountid', 'accountemail', 'accountkey', 'codexaccountkey', 'bindingaccountkey', 'retainednativebinding', 'ownerhash', 'ownerkey', 'ownerscope', 'engineprofileid', 'authidentitykey', 'identitykey', 'profilescopeid', 'browseridentitykey'])
 // Native engine bindings and machine folders inside chat records; also null.
 const NATIVE_KEYS = new Set(['conversationid', 'nativeconversationid', 'localconversationid', 'runid', 'messageid', 'cwd', 'cwdpublic'])
 // Names of this machine's preference backups inside a Desk state.
@@ -78,6 +78,14 @@ function sanitizeTree(value, { nulls, maskText }, counts, depth = 0) {
   if (value === null || typeof value !== 'object') return value
   if (Array.isArray(value)) return value.map(item => sanitizeTree(item, { nulls, maskText }, counts, depth + 1))
   const copy = {}
+  // A portable Browser may describe an imported environment, but it cannot
+  // carry this Firefox profile's authority to bind its numeric container ID.
+  // Preserve the required marker even for an incomplete older record whose
+  // sole identity signal is about to be redacted.
+  const browserIdentityRequired = value.type === 'browser' && (
+    (plain(value.runtimeState) && Object.hasOwn(value.runtimeState, 'browserIdentity')) ||
+    (plain(value.sourceRef) && (value.sourceRef.browserIdentityRequired === true ||
+      Object.hasOwn(value.sourceRef, 'browserIdentityKey'))))
   for (const [key, child] of Object.entries(value)) {
     const name = keyName(key)
     if (PRIVATE_KEYS.has(name)) { counts.privateFields++; continue }
@@ -87,6 +95,10 @@ function sanitizeTree(value, { nulls, maskText }, counts, depth = 0) {
       continue
     }
     define(copy, key, sanitizeTree(child, { nulls, maskText }, counts, depth + 1))
+  }
+  if (browserIdentityRequired) {
+    if (!plain(copy.sourceRef)) define(copy, 'sourceRef', {})
+    define(copy.sourceRef, 'browserIdentityRequired', true)
   }
   return copy
 }
