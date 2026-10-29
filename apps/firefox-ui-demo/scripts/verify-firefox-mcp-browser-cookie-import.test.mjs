@@ -18,6 +18,7 @@ import {
   createChromeFixture, createCookieFixtureServer, writeEvidence, stopOwnedChild, installFixtureIdentityGuard, installImporterFixture,
   observeNativeAvailability, inspectNativeCapabilities, installUiSyntheticFactory,
   restoreUiSyntheticFactory, observeSyntheticWizard, createBrowserDiagnostics, inspectPopupPoint, inspectPopupCards,
+  installPopupMethodProbe, restorePopupMethodProbe,
   observeBrowserLifecycle, runCli,
 } from './verify-firefox-mcp-browser-cookie-import.mjs';
 
@@ -357,6 +358,8 @@ function syntheticLifecycle({ point = { x: 40, y: 50, inViewport: true, hitsBrow
   let evaluations = 0;
   const mcp = {
     async evaluate(fn) {
+      if (fn === installPopupMethodProbe) return true;
+      if (fn === restorePopupMethodProbe) return { restored: true, methods: {} };
       if (fn === inspectPopupCards) return { available: true, addedCards: Number(popupCard),
         connectedCards: Number(popupCard), originAvailable: popupCard, originMatches: popupCard };
       evaluations++;
@@ -374,6 +377,43 @@ function syntheticLifecycle({ point = { x: 40, y: 50, inViewport: true, hitsBrow
   };
   return { fixture, mcp, diagnostics: createBrowserDiagnostics(), checks: {} };
 }
+
+test('temporary popup probe forwards all native calls and restores the original interface', () => {
+  const attrs = { userContextId: 17, privateBrowsingId: 0 }, result = { originAttributes: attrs }, sentinel = {}, thrown = new Error('private');
+  const names = ['createContentWindow', 'createContentWindowInFrame', 'openURI', 'openURIInFrame'];
+  const original = { QueryInterface() {}, isTabContentWindow() { return this === original; },
+    canClose() { return this === original; }, tabCount: 7 };
+  for (const name of names) original[name] = function (...args) {
+    assert.equal(this, original); assert.equal(args[0], sentinel);
+    if (name === 'openURIInFrame') throw thrown;
+    return name.endsWith('InFrame') ? { browsingContext: result } : result;
+  };
+  const runDir = '/private/tmp/egdesk-round-unit/browser-import/run-test';
+  const win = { __egdeskCookieQa: { fixtureRoot: `${runDir}/synthetic-chrome`, cards: { v24: 'card' } }, browserDOMWindow: original };
+  const context = vm.createContext({ window: win,
+    document: { documentURI: 'chrome://browser/content/browser.xhtml', getElementById: () => ({ _xulBrowser: { browsingContext: result } }) },
+    Services: { dirsvc: { get: () => ({ path: `${runDir}/tmp/egdesk-chat-test-fake` }) } },
+    Cc: { '@mozilla.org/gfx/info;1': { getService: () => ({ isHeadless: true }) } }, Ci: { nsIFile: {}, nsIGfxInfo: {} },
+    ChromeUtils: { generateQI: () => function () { return this; } },
+  });
+  const install = vm.runInContext(`(${installPopupMethodProbe.toString()})`, context);
+  const restore = vm.runInContext(`(${restorePopupMethodProbe.toString()})`, context);
+  assert.equal(install(), true);
+  const probe = win.browserDOMWindow, info = { parent: result };
+  assert.equal(probe.QueryInterface(), probe); assert.equal(probe.canClose(), true); assert.equal(probe.isTabContentWindow(), true);
+  assert.equal(probe.tabCount, 7);
+  assert.equal(probe.createContentWindow(sentinel, info), result);
+  assert.equal(probe.createContentWindowInFrame(sentinel, { openWindowInfo: info }).browsingContext, result);
+  assert.equal(probe.openURI(sentinel, info), result);
+  assert.throws(() => probe.openURIInFrame(sentinel, { openWindowInfo: info }), error => error === thrown);
+  const observed = restore();
+  assert.equal(observed.restored, true); assert.equal(win.browserDOMWindow, original);
+  for (const name of names) assert.equal(observed.methods[name].calls, 1);
+  assert.equal(observed.methods.createContentWindow.parentContextPresent, true);
+  assert.equal(observed.methods.createContentWindow.targetAttributesMatch, true);
+  assert.equal(observed.methods.openURIInFrame.threw, true);
+  assert.doesNotMatch(JSON.stringify(observed), /private/);
+});
 
 test('popup diagnostics distinguish unavailable point, failed click and request timeout', async () => {
   const signal = new AbortController().signal;

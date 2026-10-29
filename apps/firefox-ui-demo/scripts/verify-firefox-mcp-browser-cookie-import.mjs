@@ -513,6 +513,10 @@ async function requireRoute(fixture, route, before, deadlineMs, signal, limitMs 
 const BROWSER_DIAGNOSTIC_STEPS = Object.freeze(['baseline', 'v24', 'popupPoint', 'popupClick', 'popupRoute',
   'popupContext', 'duplicate', 'duplicateRoute', 'duplicateContext', 'restoreNavigation', 'restoreSetupRoute',
   'restoreCard', 'restoreRoute', 'restoreContext', 'identityChecks', 'v23', 'default', 'placement']);
+const POPUP_PROBE_METHODS = Object.freeze(['createContentWindow', 'createContentWindowInFrame', 'openURI', 'openURIInFrame']);
+const POPUP_PROBE_FLAGS = Object.freeze(['hasOpenWindowInfo', 'parentContextPresent', 'openerBrowserPresent',
+  'sourceAttributesAvailable', 'sourceAttributesMatch', 'returnedNonNull', 'returnedNull', 'threw',
+  'targetAttributesAvailable', 'targetAttributesMatch']);
 
 // Fixed labels and boolean/count-only values keep failure evidence free of
 // exception text, URLs, DOM content, and even synthetic cookie values.
@@ -521,7 +525,10 @@ export function createBrowserDiagnostics() {
     popup: { pointAvailable: false, pointInViewport: false, pointHitsBrowser: false,
       routeTimedOut: false, requests: 0, matchingHeaders: 0,
       observationStarted: false, observationCompleted: false, observationAvailable: false,
-      addedCards: 0, connectedCards: 0, originAvailable: false, originMatches: false } };
+      addedCards: 0, connectedCards: 0, originAvailable: false, originMatches: false,
+      probeAttempted: false, probeInstalled: false, probeRestoreAttempted: false, probeRestored: false,
+      methods: Object.fromEntries(POPUP_PROBE_METHODS.map(name => [name, { calls: 0,
+        ...Object.fromEntries(POPUP_PROBE_FLAGS.map(flag => [flag, false])) }])) } };
 }
 
 async function browserDiagnosticStep(diagnostics, name, action) {
@@ -564,6 +571,62 @@ export function inspectPopupCards() {
   return { available: true, addedCards: added.length, connectedCards: added.filter(card => card.isConnected).length,
     originAvailable: !!attrs, originMatches: !!attrs && attrs.userContextId === qa.identities[24].userContextId &&
       attrs.privateBrowsingId === 0 };
+}
+
+// Temporary interposition is limited to this owned, headless synthetic window.
+// Original arguments, return objects and exceptions are forwarded unchanged.
+export function installPopupMethodProbe() {
+  const qa = window.__egdeskCookieQa, root = qa?.fixtureRoot, suffix = '/synthetic-chrome';
+  const services = globalThis.Services || ChromeUtils.importESModule('resource://gre/modules/Services.sys.mjs').Services;
+  const runDir = root?.endsWith(suffix) ? root.slice(0, -suffix.length) : '';
+  if (!root?.startsWith('/private/tmp/egdesk-round-') || !runDir || qa.popupProbe ||
+      !services.dirsvc.get('ProfD', Ci.nsIFile).path.startsWith(`${runDir}/tmp/egdesk-chat-test-`) ||
+      Cc['@mozilla.org/gfx/info;1'].getService(Ci.nsIGfxInfo).isHeadless !== true ||
+      document.documentURI !== 'chrome://browser/content/browser.xhtml') return false;
+  const original = window.browserDOMWindow, names = ['createContentWindow', 'createContentWindowInFrame', 'openURI', 'openURIInFrame'];
+  if (!original || typeof original.QueryInterface !== 'function' ||
+      ![...names, 'isTabContentWindow', 'canClose'].every(name => typeof original[name] === 'function')) return false;
+  const methods = Object.fromEntries(names.map(name => [name, { calls: 0, hasOpenWindowInfo: false,
+    parentContextPresent: false, openerBrowserPresent: false, sourceAttributesAvailable: false, sourceAttributesMatch: false,
+    returnedNonNull: false, returnedNull: false, threw: false, targetAttributesAvailable: false, targetAttributesMatch: false }]));
+  const probe = { QueryInterface: ChromeUtils.generateQI(['nsIBrowserDOMWindow']),
+    isTabContentWindow(...args) { return Reflect.apply(original.isTabContentWindow, original, args); },
+    canClose(...args) { return Reflect.apply(original.canClose, original, args); }, get tabCount() { return original.tabCount; } };
+  for (const name of names) probe[name] = function (...args) {
+    const data = methods[name]; data.calls++;
+    try {
+      const frame = name.endsWith('InFrame'), params = frame ? args[1] : null, info = frame ? params?.openWindowInfo : args[1];
+      data.hasOpenWindowInfo ||= !!info; data.parentContextPresent ||= !!info?.parent; data.openerBrowserPresent ||= !!params?.openerBrowser;
+      const source = info?.parent?.originAttributes || params?.openerBrowser?.browsingContext?.originAttributes;
+      const expected = document.getElementById(qa.cards.v24)?._xulBrowser?.browsingContext?.originAttributes;
+      if (source && expected) { data.sourceAttributesAvailable = true; data.sourceAttributesMatch ||= source.userContextId === expected.userContextId && source.privateBrowsingId === expected.privateBrowsingId; }
+    } catch { /* metadata must never affect native dispatch */ }
+    let result;
+    try { result = Reflect.apply(original[name], original, args); } catch (error) { data.threw = true; throw error; }
+    data.returnedNonNull ||= result != null; data.returnedNull ||= result == null;
+    try {
+      const target = (name.endsWith('InFrame') ? result?.browsingContext : result)?.originAttributes;
+      const expected = document.getElementById(qa.cards.v24)?._xulBrowser?.browsingContext?.originAttributes;
+      if (target && expected) { data.targetAttributesAvailable = true; data.targetAttributesMatch ||= target.userContextId === expected.userContextId && target.privateBrowsingId === expected.privateBrowsingId; }
+    } catch { /* metadata must never affect native dispatch */ }
+    return result;
+  };
+  qa.popupProbe = { original, probe, methods };
+  try { window.browserDOMWindow = probe; if (window.browserDOMWindow === probe) return true; } catch {}
+  try { window.browserDOMWindow = original; if (window.browserDOMWindow === original) delete qa.popupProbe; } catch {}
+  return false;
+}
+
+export function restorePopupMethodProbe() {
+  const qa = window.__egdeskCookieQa, state = qa?.popupProbe;
+  if (!state) return { restored: false, methods: {} };
+  let restored = false;
+  try {
+    if (window.browserDOMWindow === state.probe) window.browserDOMWindow = state.original;
+    restored = window.browserDOMWindow === state.original;
+    if (restored) delete qa.popupProbe;
+  } catch {}
+  return { restored, methods: state.methods };
 }
 
 async function openFixtureCard(mcp, fixture, version, checks, deadlineMs, signal, routeWaitMs = 30000) {
@@ -615,6 +678,9 @@ export async function observeBrowserLifecycle(mcp, fixture, checks, deadlineMs, 
     diagnostics.popup.pointInViewport = point?.inViewport === true;
     diagnostics.popup.pointHitsBrowser = point?.hitsBrowser === true;
     if (!point) throw new Error('popup link unavailable');
+    diagnostics.popup.probeAttempted = true;
+    diagnostics.popup.probeInstalled = await mcp.evaluate(installPopupMethodProbe) === true;
+    if (!diagnostics.popup.probeInstalled) throw new Error('popup probe unavailable');
     // The local page's anchor is activated with trusted native WebDriver input.
     await browserDiagnosticStep(diagnostics, 'popupClick', () => mcp.clickPoint({ x: point.x, y: point.y }));
     checks.headerPopup = await browserDiagnosticStep(diagnostics, 'popupRoute',
@@ -628,6 +694,18 @@ export async function observeBrowserLifecycle(mcp, fixture, checks, deadlineMs, 
       return attrs?.userContextId === expected && attrs.privateBrowsingId === 0;
     }));
   } finally {
+    if (diagnostics.popup.probeAttempted) {
+      diagnostics.popup.probeRestoreAttempted = true;
+      try {
+        const observed = await mcp.evaluate(restorePopupMethodProbe);
+        diagnostics.popup.probeRestored = observed?.restored === true;
+        for (const name of POPUP_PROBE_METHODS) {
+          const source = observed?.methods?.[name], target = diagnostics.popup.methods[name];
+          target.calls = Number.isSafeInteger(source?.calls) && source.calls >= 0 ? source.calls : 0;
+          for (const flag of POPUP_PROBE_FLAGS) target[flag] = source?.[flag] === true;
+        }
+      } catch { /* owned Firefox cleanup still proceeds */ }
+    }
     if (diagnostics.steps.popupClick.completed && !signal?.aborted && Date.now() < deadlineMs) {
       diagnostics.popup.observationStarted = true;
       try {
@@ -643,6 +721,7 @@ export async function observeBrowserLifecycle(mcp, fixture, checks, deadlineMs, 
     const popupAfter = snapshotRoute(fixture, 'popup');
     diagnostics.popup.requests = popupAfter.requests - popupBefore.requests;
     diagnostics.popup.matchingHeaders = popupAfter.exact - popupBefore.exact;
+    if (diagnostics.popup.probeInstalled && !diagnostics.popup.probeRestored) throw new Error('popup probe restore failed');
   }
 
   const duplicateBefore = snapshotRoute(fixture, 'duplicate');
