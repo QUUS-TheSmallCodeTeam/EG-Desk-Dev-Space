@@ -64,14 +64,17 @@ function fakeDocument() {
   return document;
 }
 
-function uiFixture({ supported = true } = {}) {
+function uiFixture({ supported = true, availabilityReason = 'platform-unsupported', scopeModes = ['preserve', 'standard-web'], spawnFailures = 0 } = {}) {
   const document = fakeDocument(), prefs = new Map(), events = [], cards = [], notices = [];
-  let policy = true, privateWindow = false, containersEnabled = true, profilePath = '/synthetic/profile-a', uuid = 0;
+  let policy = true, privateWindow = false, containersEnabled = true, failPrefs = false, profilePath = '/synthetic/profile-a', uuid = 0;
+  let spawnAttempts = 0;
   const containers = new Set([3]);
   const observerTopics = new Map(), prefObservers = new Set();
   const services = {
     policies: { isAllowed: () => policy },
-    prefs: { getStringPref: (key, fallback) => prefs.get(key) ?? fallback, setStringPref: (key, value) => prefs.set(key, value),
+    prefs: { getStringPref: (key, fallback) => prefs.get(key) ?? fallback, setStringPref: (key, value) => {
+      if (failPrefs) throw new Error('synthetic preference failure'); prefs.set(key, value);
+    },
       getBoolPref: () => containersEnabled, addObserver: (_, observer) => prefObservers.add(observer),
       removeObserver: (_, observer) => prefObservers.delete(observer) },
     obs: { addObserver: (observer, topic) => { if (!observerTopics.has(topic)) observerTopics.set(topic, new Set()); observerTopics.get(topic).add(observer); },
@@ -82,7 +85,7 @@ function uiFixture({ supported = true } = {}) {
     containers: [...containers].map(userContextId => ({ userContextId, kind: 'container' })) }) }) };
   const listed = deferred(), imported = deferred();
   const importer = {
-    availability: () => ({ supported }),
+    availability: () => supported ? { supported: true, ...(scopeModes ? { scopeModes } : {}) } : { supported: false, reason: availabilityReason },
     listProfiles(args) { events.push(['list', args]); return listed.promise; },
     importProfile(args) { events.push(['import', args]); return imported.promise; },
   };
@@ -108,6 +111,8 @@ function uiFixture({ supported = true } = {}) {
       throw new Error('unexpected module');
     } },
     spawnBrowserCard(url, options) {
+      spawnAttempts++;
+      if (spawnAttempts <= spawnFailures) throw new Error('synthetic browser failure');
       const node = document.createElement('div'), address = document.createElement('input');
       document.body.appendChild(node); node.appendChild(address);
       node.querySelector = selector => selector === '.egd-card-url' ? address : null;
@@ -120,10 +125,11 @@ function uiFixture({ supported = true } = {}) {
     section('  const BROWSER_IDENTITY_REGISTRY_PREF', '\n  // Firefox Library is a separate native window.') +
     section('  let browserCookieImportSession = null;', '\n  let browserLibrarySession = null;');
   const api = runInNewContext(`${code}\n({ browserIdentityUsable, registerImportedBrowserIdentity, browserCookieImportSourceAllowed,
-    browserCookieImportSupport, openBrowserCookieImport, closeBrowserCookieImportForCard })`, context);
+    browserCookieImportReasonMessage, browserCookieImportSupport, openBrowserCookieImport, closeBrowserCookieImportForCard })`, context);
   const part = id => document.documentElement.querySelector(`[data-testid="${id}"]`);
   return { api, context, document, card, browser, opener, events, cards, notices, prefs, containers, listed, imported, part,
     setPolicy: value => { policy = value; }, setPrivate: value => { privateWindow = value; },
+    setFailPrefs: value => { failPrefs = value; }, getSpawnAttempts: () => spawnAttempts,
     setProfilePath: value => { profilePath = value; },
     notifyIdentity: (topic, id) => { for (const observer of observerTopics.get(topic) || []) observer.observe({ wrappedJSObject: { userContextId: id } }, topic); },
     disableContainers: () => { containersEnabled = false; for (const observer of prefObservers) observer.observe(null, 'nsPref:changed'); } };
@@ -162,7 +168,116 @@ test('profile enumeration requires a real explicit action; private, auth, policy
     assert.equal(f.api.browserCookieImportSupport(f.card).supported, false);
     assert.equal(f.api.openBrowserCookieImport(f.card, f.opener, { isTrusted: true }), null);
   }
-  assert.equal(uiFixture({ supported: false }).api.browserCookieImportSupport(uiFixture().card).supported, false);
+  const unsupported = uiFixture({ supported: false });
+  const support = unsupported.api.browserCookieImportSupport(unsupported.card);
+  assert.equal(support.supported, false);
+  assert.equal(support.reason, 'platform-unsupported');
+  assert.equal(unsupported.api.openBrowserCookieImport(unsupported.card, unsupported.opener, { isTrusted: true }), null);
+  assert.match(unsupported.notices[0], /macOS에서만/);
+});
+
+test('only reviewed reason codes map to actionable fixed messages; unknown values are never echoed', () => {
+  const f = uiFixture();
+  for (const [reason, expected] of [
+    ['source-busy', /Chrome을 완전히 종료한 뒤 다시 시도/],
+    ['keychain-permission-denied', /키체인 접근이 거부.*권한/],
+    ['keychain-unavailable-or-denied', /키체인.*읽지 못했습니다.*권한/],
+    ['unsupported-schema', /Chrome 데이터 형식.*지원되지 않습니다/],
+    ['platform-unsupported', /macOS에서만/],
+    ['gecko-version-unsupported', /Firefox 버전.*업데이트/],
+    ['native-contextual-identity-unavailable', /분리 환경 기능/],
+    ['source-wal-unsupported', /데이터 저장 방식.*지원되지 않습니다/],
+    ['cookie-capacity-unverified', /쿠키 저장 한도를 확인할 수 없어/],
+    ['cookie-capacity-exceeded', /쿠키 저장 한도를 넘어/],
+    ['containers-disabled', /설정 또는 조직 정책/],
+    ['policy-denied', /정책/],
+  ]) assert.match(f.api.browserCookieImportReasonMessage(reason), expected, reason);
+  for (const reason of ['COOKIE_SECRET_DO_NOT_SHOW', '__proto__', { message: 'COOKIE_SECRET_DO_NOT_SHOW' }, null]) {
+    const text = f.api.browserCookieImportReasonMessage(reason);
+    assert.doesNotMatch(text, /COOKIE_SECRET_DO_NOT_SHOW|__proto__/);
+    assert.match(text, /사용할 수 없습니다/);
+  }
+});
+
+test('the unavailable platform reason appears on the disabled Browser menu entry', () => {
+  const f = uiFixture(), document = f.document;
+  const anchor = f.opener; anchor.getBoundingClientRect = () => ({ right: 100, bottom: 100, top: 80 });
+  f.card._sourceRef = {};
+  document.activeElement = anchor;
+  const context = { document, menuButton: anchor, card: f.card, browserState: { uri: 'https://example.test/', homeUrl: 'https://example.test/' },
+    window: { innerHeight: 800, setTimeout() {}, addEventListener() {}, removeEventListener() {} },
+    resolveFloatingMenuPlacement: () => ({ left: 0, top: 0 }),
+    browserCookieImportSupport: () => ({ supported: false, reason: 'platform-unsupported' }),
+    browserCookieImportReasonMessage: f.api.browserCookieImportReasonMessage,
+    spawnBrowserCard() {}, copyTextToClipboard() {}, navigateBrowser() {}, stopBrowser() {}, reloadBrowser() {},
+    isCardFullscreen: () => false, toggleCardFullscreen() {}, endAgentHold() {}, openFirefoxBrowserLibrary() {}, openFirefoxBrowserImport() {} };
+  const code = section('  function el(', '\n  function svgEl(') +
+    section('    const duplicateBrowser = () => spawnBrowserCard(', '    const selectBrowserForChat =') +
+    '\n    const selectBrowserForChat = () => {};\n' + section('    const showBrowserMenu =', '\n    card._browserState =');
+  const api = runInNewContext(`let browserMenuPanel = null;\n${code}\n({ showBrowserMenu })`, context);
+  const panel = api.showBrowserMenu(anchor);
+  const entry = panel.querySelector('[data-testid="browser-cookie-import"]');
+  assert.equal(entry.disabled, true);
+  assert.match(entry.textContent, /macOS 전용/);
+  assert.match(entry.getAttribute('title'), /macOS에서만/);
+  assert.ok(panel.querySelector('[data-testid="browser-library-import"]'), 'native Firefox import remains available');
+});
+
+test('profile listing failures use a fixed actionable message and do not display raw reasons', async () => {
+  for (const [reason, expected] of [['source-busy', /Chrome을 완전히 종료/],
+    ['unsupported-schema', /Chrome 데이터 형식/], ['COOKIE_SECRET_DO_NOT_SHOW', /사용할 수 없습니다/]]) {
+    const f = uiFixture();
+    f.api.openBrowserCookieImport(f.card, f.opener, { isTrusted: true });
+    f.part('browser-cookie-find').fire('click', { isTrusted: true });
+    f.listed.resolve({ supported: false, profiles: [], reason });
+    await tick();
+    assert.match(f.part('browser-cookie-result').textContent, expected);
+    assert.doesNotMatch(f.document.documentElement.textContent, /COOKIE_SECRET_DO_NOT_SHOW/);
+    assert.equal(f.document.activeElement, f.part('browser-cookie-close'));
+    assert.equal(f.events.filter(item => item[0] === 'import').length, 0);
+  }
+});
+
+test('import failures surface actionable allowlisted causes without leaking raw details or suggesting login success', async () => {
+  for (const [reason, expected] of [['source-busy', /Chrome을 완전히 종료/],
+    ['keychain-permission-denied', /키체인 접근이 거부/],
+    ['keychain-unavailable-or-denied', /키체인.*읽지 못했습니다/],
+    ['unsupported-schema', /Chrome 데이터 형식/],
+    ['COOKIE_SECRET_DO_NOT_SHOW', /사용할 수 없습니다/]]) {
+    const f = uiFixture(); await choose(f);
+    const select = f.part('browser-cookie-profile'), consent = f.part('browser-cookie-consent');
+    select.value = 'source-a'; select.fire('change', { isTrusted: true });
+    consent.checked = true; consent.fire('change', { isTrusted: true });
+    f.part('browser-cookie-confirm').fire('click', { isTrusted: true });
+    f.imported.resolve({ status: 'failed', reason, counts: { imported: 0, skipped: 0, unsupported: 0, failed: 1 },
+      cookie: 'COOKIE_SECRET_DO_NOT_SHOW' });
+    await tick();
+    assert.match(f.part('browser-cookie-result').textContent, expected);
+    assert.doesNotMatch(f.document.documentElement.textContent, /COOKIE_SECRET_DO_NOT_SHOW|로그인 상태를 확인하세요/);
+    assert.equal(f.cards.length, 0);
+    assert.equal(f.document.activeElement, f.part('browser-cookie-close'));
+  }
+});
+
+test('only a cleanup-incomplete receipt adds the residual-environment warning', async () => {
+  const f = uiFixture(); await choose(f);
+  const select = f.part('browser-cookie-profile'), consent = f.part('browser-cookie-consent');
+  select.value = 'source-a'; select.fire('change', { isTrusted: true });
+  consent.checked = true; consent.fire('change', { isTrusted: true });
+  f.part('browser-cookie-confirm').fire('click', { isTrusted: true });
+  f.imported.resolve({ status: 'failed', reason: 'cleanup-incomplete', counts: { imported: 0, skipped: 0, unsupported: 0, failed: 1 } });
+  await tick();
+  assert.match(f.part('browser-cookie-result').textContent, /완료하지 못했습니다/);
+  assert.match(f.document.documentElement.textContent, /정리되지 않은 분리 환경이 남았을 수 있습니다/);
+  assert.doesNotMatch(f.document.documentElement.textContent, /cleanup-incomplete/);
+});
+
+test('the UI never overrides the Firefox container preference or policy', () => {
+  const identityAndImport = section('  const BROWSER_IDENTITY_REGISTRY_PREF', '\n  // Firefox Library is a separate native window.');
+  const dialog = section('  let browserCookieImportSession = null;', '\n  let browserLibrarySession = null;');
+  assert.doesNotMatch(identityAndImport + dialog, /setBoolPref\s*\(/);
+  assert.doesNotMatch(identityAndImport + dialog, /setStringPref\s*\(\s*['"]privacy\.userContext\.enabled/);
+  assert.doesNotMatch(identityAndImport + dialog, /policies\s*\.[\w]+\s*=/);
 });
 
 test('explicit source and cookie consent gate exactly one import, and only counts and a bound new target are displayed', async () => {
@@ -184,6 +299,8 @@ test('explicit source and cookie consent gate exactly one import, and only count
   assert.equal(calls.length, 1);
   assert.equal(calls[0][1].profileId, 'source-b');
   assert.equal(calls[0][1].explicitUserConsent, true);
+  assert.equal(calls[0][1].scopeMode, 'preserve');
+  assert.equal(Object.hasOwn(calls[0][1], 'explicitScopeCompatibilityConsent'), false);
   assert.equal(calls[0][1].signal.aborted, false);
   assert.ok(f.document.documentElement.textContent.includes('비밀번호·북마크·방문 기록은 가져오지 않습니다'));
   assert.ok(f.document.documentElement.textContent.includes('기존 Browser와 분리된 새 Browser'));
@@ -201,6 +318,57 @@ test('explicit source and cookie consent gate exactly one import, and only count
   assert.doesNotMatch(f.document.documentElement.textContent, /PRIVATE-COOKIE-DO-NOT-SHOW/);
   f.part('browser-cookie-open-result').fire('click', { isTrusted: true });
   assert.equal(f.document.activeElement, f.cards[0].node.querySelector('.egd-card-url'));
+});
+
+test('standard-web compatibility is separately opted in and warns of port/scheme scope changes', async () => {
+  const f = uiFixture(); await choose(f);
+  const select = f.part('browser-cookie-profile'), consent = f.part('browser-cookie-consent');
+  const compatibility = f.part('browser-cookie-standard-web');
+  assert.equal(compatibility.checked, false);
+  assert.equal(compatibility.disabled, false);
+  assert.match(f.document.documentElement.textContent, /실험적 포트·스킴 제한이 유지되지 않을 수 있습니다/);
+  select.value = 'source-a'; select.fire('change', { isTrusted: true });
+  consent.checked = true; consent.fire('change', { isTrusted: true });
+  compatibility.checked = true; compatibility.fire('change');
+  assert.equal(compatibility.checked, false, 'a synthetic change cannot select the compatibility mode');
+  compatibility.checked = true; compatibility.fire('change', { isTrusted: true });
+  f.part('browser-cookie-confirm').fire('click', { isTrusted: true });
+  const call = f.events.find(item => item[0] === 'import')[1];
+  assert.equal(call.scopeMode, 'standard-web');
+  assert.equal(call.explicitScopeCompatibilityConsent, true);
+  f.imported.resolve({ status: 'cancelled', counts: { imported: 0, skipped: 0, unsupported: 0, failed: 0 } });
+  await tick();
+});
+
+test('an older core without the scope capability keeps compatibility unavailable and uses preserve', async () => {
+  const f = uiFixture({ scopeModes: null }); await choose(f);
+  const select = f.part('browser-cookie-profile'), consent = f.part('browser-cookie-consent');
+  const compatibility = f.part('browser-cookie-standard-web');
+  assert.equal(compatibility.disabled, true);
+  assert.equal(compatibility.checked, false);
+  select.value = 'source-a'; select.fire('change', { isTrusted: true });
+  consent.checked = true; consent.fire('change', { isTrusted: true });
+  compatibility.checked = true; compatibility.fire('change', { isTrusted: true });
+  assert.equal(compatibility.checked, false);
+  f.part('browser-cookie-confirm').fire('click', { isTrusted: true });
+  const call = f.events.find(item => item[0] === 'import')[1];
+  assert.equal(call.scopeMode, 'preserve');
+  assert.equal(Object.hasOwn(call, 'explicitScopeCompatibilityConsent'), false);
+  f.imported.resolve({ status: 'cancelled', counts: { imported: 0, skipped: 0, unsupported: 0, failed: 0 } });
+  await tick();
+});
+
+test('a compatibility capability revoked before confirmation prevents the import', async () => {
+  const modes = ['preserve', 'standard-web'], f = uiFixture({ scopeModes: modes }); await choose(f);
+  const select = f.part('browser-cookie-profile'), consent = f.part('browser-cookie-consent');
+  const compatibility = f.part('browser-cookie-standard-web');
+  select.value = 'source-a'; select.fire('change', { isTrusted: true });
+  consent.checked = true; consent.fire('change', { isTrusted: true });
+  compatibility.checked = true; compatibility.fire('change', { isTrusted: true });
+  modes.splice(1, 1);
+  f.part('browser-cookie-confirm').fire('click', { isTrusted: true });
+  assert.equal(f.events.filter(event => event[0] === 'import').length, 0);
+  assert.match(f.part('browser-cookie-result').textContent, /호환성 모드를 사용할 수 없습니다/);
 });
 
 test('cancel aborts work, ignores late results, and never focuses a closed opener', async () => {
@@ -256,9 +424,11 @@ test('a late cleanup-incomplete receipt warns without reviving a closed dialog o
     counts: { imported: 0, failed: 1 }, cookie: 'PRIVATE-COOKIE-DO-NOT-SHOW' });
   await tick();
   assert.equal(f.cards.length, 0);
-  assert.equal(f.notices.length, 2);
-  assert.match(f.notices[1], /정리되지 않은 분리 환경/);
-  assert.doesNotMatch(f.notices[1], /PRIVATE-COOKIE-DO-NOT-SHOW/);
+  assert.equal(f.notices.length, 1, 'the pending-import gate is the only transient notice');
+  const receipt = f.part('browser-cookie-receipt');
+  assert.ok(receipt);
+  assert.match(receipt.textContent, /정리도 확인하지 못했습니다/);
+  assert.doesNotMatch(receipt.textContent, /PRIVATE-COOKIE-DO-NOT-SHOW/);
   assert.notEqual(f.document.activeElement, f.opener);
 });
 
@@ -290,6 +460,73 @@ test('a normal close restores the opener, but an existing native container may n
   f.part('browser-cookie-close').fire('click', { isTrusted: true });
   assert.equal(f.document.activeElement, f.opener);
   assert.equal(f.prefs.size, 0, 'no existing ID was registered or overwritten');
+});
+
+test('a successfully registered environment can be retried without reimporting or changing its binding', async () => {
+  const f = uiFixture({ spawnFailures: 1 }); await choose(f);
+  const select = f.part('browser-cookie-profile'), consent = f.part('browser-cookie-consent');
+  select.value = 'source-a'; select.fire('change', { isTrusted: true });
+  consent.checked = true; consent.fire('change', { isTrusted: true });
+  f.part('browser-cookie-confirm').fire('click', { isTrusted: true });
+  f.containers.add(19);
+  f.imported.resolve({ status: 'imported', userContextId: 19, containerName: 'Chrome - A',
+    counts: { imported: 2, skipped: 0, unsupported: 0, failed: 0 } });
+  await tick();
+  assert.equal(f.getSpawnAttempts(), 1);
+  assert.equal(f.cards.length, 0);
+  assert.match(f.document.documentElement.textContent, /컨테이너 설정에서 해당 환경을 확인/);
+  const registry = [...f.prefs.values()][0];
+  f.part('browser-cookie-retry-open').fire('click');
+  assert.equal(f.getSpawnAttempts(), 1, 'a synthetic retry is ignored');
+  f.part('browser-cookie-retry-open').fire('click', { isTrusted: true });
+  assert.equal(f.getSpawnAttempts(), 2);
+  assert.equal(f.cards.length, 1);
+  assert.equal(f.events.filter(event => event[0] === 'import').length, 1);
+  assert.equal([...f.prefs.values()][0], registry, 'retry uses the same identity token');
+  assert.equal(f.part('browser-cookie-receipt'), null);
+});
+
+test('a failed identity registration produces an explicit receipt instead of an unsafe retry or deletion', async () => {
+  const f = uiFixture(); await choose(f);
+  const select = f.part('browser-cookie-profile'), consent = f.part('browser-cookie-consent');
+  select.value = 'source-a'; select.fire('change', { isTrusted: true });
+  consent.checked = true; consent.fire('change', { isTrusted: true });
+  f.part('browser-cookie-confirm').fire('click', { isTrusted: true });
+  f.containers.add(19); f.setFailPrefs(true);
+  f.imported.resolve({ status: 'imported', userContextId: 19, containerName: 'Chrome - A',
+    counts: { imported: 2, skipped: 0, unsupported: 0, failed: 0 }, cookie: 'PRIVATE-COOKIE-DO-NOT-SHOW' });
+  await tick();
+  assert.equal(f.cards.length, 0);
+  assert.equal(f.part('browser-cookie-retry-open'), null);
+  f.part('browser-cookie-close').fire('click', { isTrusted: true });
+  const receipt = f.part('browser-cookie-receipt');
+  assert.ok(receipt);
+  assert.match(receipt.textContent, /Chrome - A.*ID 19/);
+  assert.match(receipt.textContent, /자동으로 삭제하지 않았습니다/);
+  assert.doesNotMatch(receipt.textContent, /PRIVATE-COOKIE-DO-NOT-SHOW/);
+  assert.ok(f.containers.has(19), 'an unverified context is never automatically removed');
+  f.part('browser-cookie-receipt-close').fire('click', { isTrusted: true });
+  assert.equal(f.part('browser-cookie-receipt'), null);
+});
+
+test('success arriving after its dialog and source close leaves a visible, nonsensitive receipt', async () => {
+  const f = uiFixture(); await choose(f);
+  const select = f.part('browser-cookie-profile'), consent = f.part('browser-cookie-consent');
+  select.value = 'source-a'; select.fire('change', { isTrusted: true });
+  consent.checked = true; consent.fire('change', { isTrusted: true });
+  f.part('browser-cookie-confirm').fire('click', { isTrusted: true });
+  f.card.remove(); f.api.closeBrowserCookieImportForCard(f.card);
+  f.containers.add(20);
+  f.imported.resolve({ status: 'partial', userContextId: 20, containerName: 'Chrome - A',
+    counts: { imported: 3 }, cookie: 'PRIVATE-COOKIE-DO-NOT-SHOW' });
+  await tick();
+  const receipt = f.part('browser-cookie-receipt');
+  assert.ok(receipt);
+  assert.match(receipt.textContent, /Chrome - A.*ID 20/);
+  assert.match(receipt.textContent, /가져온 쿠키: 3/);
+  assert.doesNotMatch(receipt.textContent, /PRIVATE-COOKIE-DO-NOT-SHOW/);
+  assert.equal(f.cards.length, 0);
+  assert.notEqual(f.document.activeElement, f.opener);
 });
 
 test('profile namespace plus per-container key are required even when a numeric ID or display name matches', () => {
@@ -325,19 +562,20 @@ test('native deletion, recreation, and container reset revoke stale keys before 
   assert.equal(f.api.browserIdentityUsable(replacement), false, 'disabling containers clears every binding');
 });
 
-test('native XUL is configured before append and an isolated failure never falls back to an iframe', () => {
+test('native XUL is configured before append, create-only defers src, and an isolated failure never falls back to an iframe', () => {
   const code = section("    try {\n      xulBrowser = document.createXULElement('browser');", '\n    const agentTargetMarker');
-  const run = ({ mismatch = false, fail = false, identity = { userContextId: 7 } } = {}) => {
+  const run = ({ mismatch = false, fail = false, identity = { userContextId: 7 }, deferInitialLoad = false, requireDefaultContext = false,
+    expectedOriginAttributes = null } = {}) => {
     const order = [], frame = { isConnected: false, browsingContext: null, attrs: {}, style: {},
       setAttribute(key, value) { this.attrs[key] = String(value); if (key === 'src') order.push('src'); },
       getAttribute(key) { return this.attrs[key] ?? null; }, removeAttribute(key) { delete this.attrs[key]; }, remove() { this.isConnected = false; } };
-    const context = { browserIdentity: identity, options: {}, normalizedUrl: 'about:blank',
+    const context = { browserIdentity: identity, options: { deferInitialLoad, requireDefaultContext, expectedOriginAttributes }, normalizedUrl: 'about:blank',
       document: { createXULElement: () => frame }, browserIdentityModule: () => ({
         configureBrowser(browser, id) { order.push('configure'); return Identity.configureBrowser(browser, id); },
         browserUserContextId: Identity.browserUserContextId,
       }), ensureBrowserAgentActor() {}, wrap: { appendChild(browser) {
         order.push('append'); if (fail) throw new Error('synthetic failure');
-        browser.isConnected = true; browser.browsingContext = { originAttributes: { userContextId: mismatch ? 0 : 7 } };
+        browser.isConnected = true; browser.browsingContext = { originAttributes: { userContextId: mismatch ? 0 : 7, privateBrowsingId: 0 } };
       } }, deskWindow: { requestClose: () => order.push('close') }, el: () => { order.push('iframe'); return {}; },
       console, TAG: '[test]' };
     const invoke = () => runInNewContext(`(() => { let xulBrowser = null; ${code}; return xulBrowser; })()`, context);
@@ -345,12 +583,22 @@ test('native XUL is configured before append and an isolated failure never falls
   };
   const ok = run(); assert.equal(ok.invoke(), ok.frame);
   assert.deepEqual(ok.order, ['configure', 'append', 'src']);
+  const createOnly = run({ deferInitialLoad: true }); assert.equal(createOnly.invoke(), createOnly.frame);
+  assert.deepEqual(createOnly.order, ['configure', 'append'], 'create-only never initiates a navigation');
   for (const option of [{ mismatch: true }, { fail: true }]) {
     const broken = run(option);
     assert.throws(broken.invoke, /기본 환경으로 전환하지 않았습니다/);
     assert.equal(broken.order.includes('iframe'), false);
     assert.equal(broken.order.includes('close'), true);
   }
+  const wrongDefault = run({ identity: null, requireDefaultContext: true });
+  wrongDefault.frame.browsingContext = null;
+  assert.throws(wrongDefault.invoke, /기본 환경으로 전환하지 않았습니다/);
+  assert.equal(wrongDefault.order.includes('src'), false, 'the default context is verified before a load');
+  assert.equal(wrongDefault.order.includes('iframe'), false);
+  const wrongPopup = run({ identity: null, expectedOriginAttributes: { userContextId: 0, privateBrowsingId: 0 } });
+  assert.throws(wrongPopup.invoke, /기본 환경으로 전환하지 않았습니다/);
+  assert.equal(wrongPopup.order.includes('src'), false, 'the popup context is verified before a load');
 });
 
 test('popup routes only a live verified opener and preserves identity; unknown or mismatched contexts are blocked', () => {
@@ -369,6 +617,8 @@ test('popup routes only a live verified opener and preserves identity; unknown o
   assert.equal(calls[0].options.browserIdentity, identity);
   assert.equal(calls[0].options.openWindowInfo, openWindowInfo);
   assert.equal(calls[0].options.requireNativeBrowser, true);
+  assert.equal(calls[0].options.expectedOriginAttributes.userContextId, 7);
+  assert.equal(calls[0].options.expectedOriginAttributes.privateBrowsingId, 0);
   assert.equal(api.spawnBrowserPopup(null, null), null);
   assert.equal(api.spawnBrowserPopup(null, { ...openWindowInfo, originAttributes: { userContextId: 0, privateBrowsingId: 0 } }), null);
   assert.equal(api.spawnBrowserPopup(null, openWindowInfo, { openerBrowser: {}, isPrivate: false }), null);
@@ -378,19 +628,87 @@ test('popup routes only a live verified opener and preserves identity; unknown o
   assert.equal(notices.length, 4);
 });
 
-test('the production source dedupe key separates identical URLs in different environments', () => {
+test('create-only popup calls never load src and openURI uses the verified opener context', () => {
+  const f = uiFixture(); f.containers.add(7);
+  const identity = f.api.registerImportedBrowserIdentity(7, 'Chrome · 원본');
+  f.card._browserIdentity = identity; f.browser.setAttribute('usercontextid', '7');
+  f.browser.browsingContext.originAttributes.userContextId = 7;
+  const calls = [], info = { parent: { top: f.browser.browsingContext }, originAttributes: { userContextId: 7, privateBrowsingId: 0 } };
+  const window = {}, createdContext = { id: 'new-context' };
+  const context = { window, document: { querySelectorAll: () => [f.card] }, console: { warn() {}, error() {} }, TAG: 'test',
+    ChromeUtils: { generateQI: () => () => {} }, browserIdentityModule: () => Identity, browserIdentityUsable: f.api.browserIdentityUsable,
+    boardNotice() {}, spawnBrowserCard(url, options) { calls.push({ url, options }); return { _xulBrowser: { browsingContext: createdContext } }; } };
+  const code = section('  function browserPopupSource(', '\n  // ============ Firefox chrome 정리');
+  runInNewContext(`${code}\ninstallPopupCapture();`, context);
+  const uri = { spec: 'https://example.test/popup' };
+  assert.equal(window.browserDOMWindow.createContentWindow(uri, info, 0, 0, null, null), createdContext);
+  assert.equal(calls[0].url, 'about:blank'); assert.equal(calls[0].options.deferInitialLoad, true);
+  assert.equal(calls[0].options.browserIdentity, identity);
+  const params = { openWindowInfo: info, openerBrowser: f.browser, isPrivate: false };
+  assert.equal(window.browserDOMWindow.createContentWindowInFrame(uri, params, 0, 0, '').browsingContext, createdContext);
+  assert.equal(calls[1].url, 'about:blank'); assert.equal(calls[1].options.deferInitialLoad, true);
+  assert.equal(window.browserDOMWindow.openURI(uri, info, 0, 0, null, null), createdContext);
+  assert.equal(calls[2].url, uri.spec); assert.equal(calls[2].options.deferInitialLoad, undefined);
+  assert.equal(window.browserDOMWindow.openURIInFrame(uri, params, 0, 0, '').browsingContext, createdContext);
+  assert.equal(calls[3].url, uri.spec); assert.equal(calls[3].options.deferInitialLoad, undefined);
+});
+
+test('only an explicit external default-context HTTP request may open without an opener', () => {
+  const calls = [], notices = [];
+  let isPrivate = false;
+  const attrs = { userContextId: 0, privateBrowsingId: 0 };
+  const principal = { isSystemPrincipal: true, originAttributes: attrs };
+  const constants = { OPEN_DEFAULTWINDOW: 0, OPEN_EXTERNAL: 1, OPEN_NO_OPENER: 4, OPEN_NO_REFERRER: 8 };
+  const context = { document: { querySelectorAll: () => [] }, window: {}, Ci: { nsIBrowserDOMWindow: constants }, URL,
+    ChromeUtils: { importESModule: () => ({ PrivateBrowsingUtils: { isWindowPrivate: () => isPrivate } }) },
+    boardNotice: message => notices.push(message), spawnBrowserCard: (url, options) => { calls.push({ url, options }); return {}; } };
+  const api = runInNewContext(`${section('  function browserPopupSource(', '\n  function installPopupCapture()')}\n({ spawnBrowserPopup })`, context);
+  const uri = { spec: 'https://example.test/' }, externalRequest = { where: 0, flags: 1, principal, csp: null };
+  assert.ok(api.spawnBrowserPopup(uri, null, null, { externalRequest }));
+  assert.equal(calls[0].options.requireDefaultContext, true);
+  assert.equal(calls[0].options.requireNativeBrowser, true);
+  const denied = [
+    [uri, null, { ...externalRequest, flags: 0 }],
+    [uri, null, { ...externalRequest, where: 3 }],
+    [uri, null, { ...externalRequest, flags: 17 }],
+    [uri, null, { ...externalRequest, principal: { ...principal, originAttributes: { ...attrs, userContextId: 7 } } }],
+    [uri, null, { ...externalRequest, principal: { ...principal, originAttributes: { ...attrs, partitionKey: '(https,example.test)' } } }],
+    [uri, { originAttributes: { userContextId: 7, privateBrowsingId: 0 } }, externalRequest],
+    [{ spec: 'javascript:alert(1)' }, null, externalRequest],
+    [{ spec: 'https://user:pass@example.test/' }, null, externalRequest],
+  ];
+  for (const [url, info, request] of denied) assert.equal(api.spawnBrowserPopup(url, info, null, { externalRequest: request }), null);
+  isPrivate = true;
+  assert.equal(api.spawnBrowserPopup(uri, null, null, { externalRequest }), null);
+  assert.equal(calls.length, 1);
+  assert.equal(notices.length, denied.length + 1);
+});
+
+test('source keys retain the old format and separate only valid Browser environments', () => {
   const code = section('  function sourceRefKey(', '\n  function singletonSourceRef(');
   const context = { state: { agenda: { activeAgendaId: 'agenda' }, sourceRefs: { defaultProfileId: 'default' } },
-    normalizeSourcePart: value => String(value), normalizeBrowserUri: url => url.split('#')[0] };
+    normalizeSourcePart: value => encodeURIComponent(String(value ?? '').trim()), normalizeBrowserUri: url => url.split('#')[0] };
   const api = runInNewContext(`${code}\n({ sourceRefKey, browserSourceRef })`, context);
   const url = 'https://example.test/page#one';
   const ordinary = api.browserSourceRef(url);
-  const a = api.browserSourceRef(url, { browserIdentityRequired: true, browserIdentityKey: 'environment-a' });
-  const b = api.browserSourceRef(url, { browserIdentityRequired: true, browserIdentityKey: 'environment-b' });
+  const keyA = '00000000-0000-4000-8000-000000000001';
+  const keyB = '00000000-0000-4000-8000-000000000002';
+  const a = api.browserSourceRef(url, { browserIdentityRequired: true, browserIdentityKey: keyA });
+  const b = api.browserSourceRef(url, { browserIdentityRequired: true, browserIdentityKey: keyB });
+  assert.equal(api.sourceRefKey(ordinary), 'browser-url|browser-content|default||https%3A%2F%2Fexample.test%2Fpage');
+  assert.equal(api.sourceRefKey({ kind: 'file', scope: 'work', path: '/tmp/a.txt' }), 'file|work|||%2Ftmp%2Fa.txt');
+  assert.equal(api.sourceRefKey({ kind: 'chat', scope: 'codex', id: 'thread-a' }), 'chat|codex|||thread-a');
+  assert.equal(api.sourceRefKey({ kind: 'file', scope: 'work', path: '/tmp/a.txt', browserIdentityKey: keyA }), 'file|work|||%2Ftmp%2Fa.txt');
   assert.notEqual(api.sourceRefKey(ordinary), api.sourceRefKey(a));
   assert.notEqual(api.sourceRefKey(a), api.sourceRefKey(b));
   assert.equal(api.sourceRefKey(a), api.sourceRefKey(api.browserSourceRef('https://example.test/page#two',
-    { browserIdentityRequired: true, browserIdentityKey: 'environment-a' })));
+    { browserIdentityRequired: true, browserIdentityKey: keyA })));
+  assert.equal(api.sourceRefKey(api.browserSourceRef(url, { browserIdentityRequired: true, browserIdentityKey: 'invalid' })), '',
+    'an invalid required identity cannot deduplicate to the default Browser');
+  assert.equal(api.sourceRefKey(api.browserSourceRef(url, { browserIdentityKey: 'invalid' })), '',
+    'an invalid explicit identity cannot deduplicate to the default Browser even without the marker');
+  assert.equal(api.sourceRefKey(api.browserSourceRef(url, { browserIdentityRequired: true })), '',
+    'a portable rebind marker cannot deduplicate to the default Browser');
   assert.equal(a.browserIdentityRequired, true);
 });
 
