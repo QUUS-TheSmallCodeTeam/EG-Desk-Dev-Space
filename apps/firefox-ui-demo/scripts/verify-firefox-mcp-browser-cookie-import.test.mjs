@@ -94,7 +94,7 @@ test('fresh, bounded Chrome source contains only synthetic DB v23/v24 rows', t =
 
 test('committed Core accepts both real synthetic SQLite rows with an injected in-memory writer', async t => {
   const runDir = temporaryDirectory(t), fixture = createChromeFixture(runDir);
-  const ids = [], jars = new Map();
+  const ids = [], jars = new Map(), identities = new Map(), watchers = new Map();
   let nextId = 1, passwordCalls = 0;
   const adapter = {
     platform: 'macosx', crypto: webcrypto, randomUUID, now: Date.now, checkAccess: () => true,
@@ -112,9 +112,24 @@ test('committed Core accepts both real synthetic SQLite rows with an injected in
     },
     getKeychainPassword() { passwordCalls++; return syntheticCryptoFixture().password; },
     getIdentityIds: () => [...ids],
+    getIdentity: id => identities.get(id) ?? null,
+    identityInUse: () => true,
+    watchIdentity(id, invalidate) {
+      if (!watchers.has(id)) watchers.set(id, new Set());
+      watchers.get(id).add(invalidate);
+      return () => watchers.get(id)?.delete(invalidate);
+    },
     getCookieCapacity: () => ({ current: [...jars.values()].reduce((sum, list) => sum + list.length, 0), max: 3000 }),
-    createIdentity(name) { const userContextId = nextId++; ids.push(userContextId); return { userContextId, name }; },
-    removeIdentity(id) { const index = ids.indexOf(id); if (index < 0) return false; ids.splice(index, 1); return true; },
+    createIdentity(name) {
+      const userContextId = nextId++, identity = { userContextId, name, icon: 'fingerprint', color: 'blue', public: true };
+      ids.push(userContextId); identities.set(userContextId, identity); return identity;
+    },
+    removeIdentity(id) {
+      const index = ids.indexOf(id); if (index < 0) return false;
+      ids.splice(index, 1); identities.delete(id);
+      for (const invalidate of watchers.get(id) || []) invalidate();
+      return true;
+    },
     cookies: {
       add(cookie, attrs) {
         jars.set(attrs.userContextId, [{ ...cookie, isPartitioned: false, originAttributes: { ...attrs } }]);
@@ -253,7 +268,21 @@ test('only explicitly owned process handles can be signalled', async () => {
 
 test('privileged importer fixture fits the isolated MCP script limit', () => {
   const source = installImporterFixture.toString();
-  assert.ok(Buffer.byteLength(source) < 13000); // leaves >3 KiB for the MCP profile guard and arguments
+  const runDir = `/private/tmp/egdesk-round-${'a'.repeat(200)}/browser-import/run-ABC123`;
+  const profile = `${runDir}/tmp/egdesk-chat-test-ABC123`;
+  const args = { root: `${runDir}/synthetic-chrome`, runDir, password: syntheticCryptoFixture().password,
+    cookieName: COOKIE_NAME, v23Value: 'synthetic_v23_only', v24Value: 'synthetic_v24_only', defaultValue: 'synthetic_default_only' };
+  // Match IsolatedMcp.evaluate's wrapper, including a long but valid owned
+  // run/profile path, not merely the bare function's source length.
+  const wrapped = `async () => {
+      const Services = globalThis.Services || ChromeUtils.importESModule('resource://gre/modules/Services.sys.mjs').Services;
+      if (Services.dirsvc.get('ProfD', Ci.nsIFile).path !== ${JSON.stringify(profile)} ||
+          Cc['@mozilla.org/gfx/info;1'].getService(Ci.nsIGfxInfo).isHeadless !== true ||
+          document.documentURI !== ${JSON.stringify('chrome://browser/content/browser.xhtml')}) throw new Error('Refusing non-owned or non-headless context');
+      try { return JSON.stringify({ ok: true, value: await (${source})(${JSON.stringify(args)}) }); }
+      catch (e) { return JSON.stringify({ ok: false, error: e.message || String(e) }); }
+    }`;
+  assert.ok(Buffer.byteLength(wrapped) < 16384);
   assert.match(source, /getKeychainPassword\(\) \{ counters\.keychainFixtureCalls\+\+; return password; \}/);
   assert.doesNotMatch(source, /getGenericPassword|Chrome Safe Storage/);
   assert.doesNotMatch(source, /createBrowserCookieImporter\(\s*\)/);
@@ -300,6 +329,7 @@ test('native diagnostics resolve the factory global and report only bounded bool
 test('UI factory injection is temporary, synthetic-only and rejects unsafe fallback', async () => {
   const original = () => ({ original: true }), api = { importESModule: original }, calls = [];
   const adapter = Object.freeze({ synthetic: true, getCookieCapacity: () => ({ current: 0, max: 3000 }),
+    getIdentity: () => null, identityInUse: () => true, watchIdentity: () => () => {},
     cookies: Object.freeze({ add: () => true }) });
   const qa = { fixtureRoot: '/private/tmp/egdesk-round-unit/synthetic-chrome', syntheticAdapter: adapter,
     createImporter(options) {

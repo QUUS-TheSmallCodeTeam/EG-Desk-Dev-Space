@@ -283,6 +283,25 @@ export async function installImporterFixture(config) {
     },
     getKeychainPassword() { counters.keychainFixtureCalls++; return password; },
     getIdentityIds: () => identities.getPublicIdentities().map(item => item.userContextId),
+    getIdentity: id => identities.getPublicIdentityFromId(id) ?? null,
+    // This scenario never requests post-success deletion. Refuse it rather
+    // than claim an exhaustive absence of browsing contexts in the fixture.
+    identityInUse: () => true,
+    watchIdentity(id, invalidate) {
+      const topics = ['contextual-identity-updated', 'contextual-identity-deleted', 'browsing-context-attached'];
+      const attached = [];
+      const observer = { observe(subject, topic) {
+        try {
+          const context = topic === 'browsing-context-attached' ? (subject?.QueryInterface?.(Ci.nsILoadContext) ?? subject) : null;
+          const changed = context ? context.originAttributes?.userContextId : subject?.wrappedJSObject?.userContextId;
+          if (changed !== 0 && (!Number.isSafeInteger(changed) || changed <= 0 || changed === id)) invalidate();
+        } catch { invalidate(); }
+      } };
+      try { for (const topic of topics) { services.obs.addObserver(observer, topic); attached.push(topic); } }
+      catch (error) { for (const topic of attached) { try { services.obs.removeObserver(observer, topic); } catch {} } throw error; }
+      let active = true;
+      return () => { if (active) { active = false; for (const topic of attached) { try { services.obs.removeObserver(observer, topic); } catch {} } } };
+    },
     createIdentity: name => identities.create(name, 'fingerprint', 'blue'),
     removeIdentity: id => identities.remove(id),
     getCookieCapacity() {
@@ -679,6 +698,8 @@ export function installUiSyntheticFactory() {
   if (!qa || !qa.fixtureRoot?.startsWith('/private/tmp/egdesk-round-') ||
       !Object.isFrozen(qa.syntheticAdapter) || typeof qa.createImporter !== 'function' ||
       typeof qa.syntheticAdapter.getCookieCapacity !== 'function' || typeof qa.syntheticAdapter.cookies?.add !== 'function' ||
+      typeof qa.syntheticAdapter.getIdentity !== 'function' || typeof qa.syntheticAdapter.watchIdentity !== 'function' ||
+      typeof qa.syntheticAdapter.identityInUse !== 'function' ||
       !api || typeof api.importESModule !== 'function' || qa.uiHook) return false;
   try {
     const suffix = '/synthetic-chrome';
@@ -705,6 +726,7 @@ export function installUiSyntheticFactory() {
     return Object.freeze({
       availability: () => importer.availability(),
       listProfiles(args) { ui.listCalls++; return importer.listProfiles(args); },
+      ...(typeof importer.discardImport === 'function' ? { discardImport: args => importer.discardImport(args) } : {}),
       async importProfile(args) {
         ui.importCalls++;
         ui.consentPassed = args?.explicitUserConsent === true;
