@@ -23,7 +23,7 @@ function fakeDocument() {
   let document;
   class Node {
     constructor(tag, text = '') {
-      this.tagName = tag.toUpperCase(); this._text = text; this.children = []; this.parentNode = null;
+      this.tagName = tag.toUpperCase(); this._text = text; this.children = []; this.parentNode = null; this.className = '';
       this.attributes = {}; this.dataset = {}; this.style = {}; this.listeners = {};
       this.disabled = false; this.checked = false; this.value = '';
     }
@@ -57,6 +57,14 @@ function fakeDocument() {
   document = {
     createElement: tag => new Node(tag), createTextNode: value => new Node('#text', value),
     querySelector: () => document.dock || null,
+    querySelectorAll: selector => {
+      if (selector !== '.egd-browser-card') return [];
+      const found = [], walk = node => {
+        if (node.isConnected && node.className.split(/\s+/).includes('egd-browser-card')) found.push(node);
+        for (const child of node.children) walk(child);
+      };
+      walk(document.documentElement); return found;
+    },
   };
   document.documentElement = new Node('html');
   document.body = new Node('body'); document.documentElement.appendChild(document.body);
@@ -64,7 +72,8 @@ function fakeDocument() {
   return document;
 }
 
-function uiFixture({ supported = true, availabilityReason = 'platform-unsupported', scopeModes = ['preserve', 'standard-web'], spawnFailures = 0 } = {}) {
+function uiFixture({ supported = true, availabilityReason = 'platform-unsupported', scopeModes = ['preserve', 'standard-web'],
+  spawnFailures = 0, spawnFailureLeavesCard = false, discard = null } = {}) {
   const document = fakeDocument(), prefs = new Map(), events = [], cards = [], notices = [];
   let policy = true, privateWindow = false, containersEnabled = true, failPrefs = false, profilePath = '/synthetic/profile-a', uuid = 0;
   let spawnAttempts = 0;
@@ -89,11 +98,12 @@ function uiFixture({ supported = true, availabilityReason = 'platform-unsupporte
     listProfiles(args) { events.push(['list', args]); return listed.promise; },
     importProfile(args) { events.push(['import', args]); return imported.promise; },
   };
+  if (discard) importer.discardImport = args => { events.push(['discard', args]); return discard(args); };
   const listeners = new Map();
   const window = { AbortController, crypto: { randomUUID: () => `00000000-0000-4000-8000-${String(++uuid).padStart(12, '0')}` },
     addEventListener: (type, handler) => { if (!listeners.has(type)) listeners.set(type, new Set()); listeners.get(type).add(handler); },
     removeEventListener: (type, handler) => listeners.get(type)?.delete(handler) };
-  const card = document.createElement('div'), opener = document.createElement('button');
+  const card = document.createElement('div'), opener = document.createElement('button'); card.className = 'egd-browser-card';
   document.body.appendChild(card); card.appendChild(opener);
   const browser = card._xulBrowser = document.createElement('browser'); card.appendChild(browser);
   browser.browsingContext = { originAttributes: { userContextId: 0, privateBrowsingId: 0 } };
@@ -112,8 +122,12 @@ function uiFixture({ supported = true, availabilityReason = 'platform-unsupporte
     } },
     spawnBrowserCard(url, options) {
       spawnAttempts++;
-      if (spawnAttempts <= spawnFailures) throw new Error('synthetic browser failure');
+      if (spawnAttempts <= spawnFailures) {
+        if (spawnFailureLeavesCard) { const partial = document.createElement('div'); partial.className = 'egd-browser-card'; document.body.appendChild(partial); }
+        throw new Error('synthetic browser failure');
+      }
       const node = document.createElement('div'), address = document.createElement('input');
+      node.className = 'egd-browser-card';
       document.body.appendChild(node); node.appendChild(address);
       node.querySelector = selector => selector === '.egd-card-url' ? address : null;
       cards.push({ node, url, options }); return node;
@@ -315,6 +329,8 @@ test('explicit source and cookie consent gate exactly one import, and only count
   assert.equal(f.api.browserIdentityUsable(f.cards[0].options.browserIdentity), true);
   assert.match(f.part('browser-cookie-counts').textContent, /가져옴 5.*건너뜀 2.*지원하지 않음 1.*실패 1/);
   assert.match(f.document.documentElement.textContent, /사이트를 열어 로그인 상태를 확인하세요/);
+  assert.doesNotMatch(f.document.documentElement.textContent, /현재 화면에 새 Browser 카드가 열렸습니다/,
+    'the result does not claim a card behind the dialog is already visible');
   assert.doesNotMatch(f.document.documentElement.textContent, /PRIVATE-COOKIE-DO-NOT-SHOW/);
   f.part('browser-cookie-open-result').fire('click', { isTrusted: true });
   assert.equal(f.document.activeElement, f.cards[0].node.querySelector('.egd-card-url'));
@@ -527,6 +543,101 @@ test('success arriving after its dialog and source close leaves a visible, nonse
   assert.doesNotMatch(receipt.textContent, /PRIVATE-COOKIE-DO-NOT-SHOW/);
   assert.equal(f.cards.length, 0);
   assert.notEqual(f.document.activeElement, f.opener);
+});
+
+test('an owned unopened environment is discarded after attachment fails', async () => {
+  const f = uiFixture({ spawnFailures: 1, discard: async () => ({ status: 'discarded' }) }); await choose(f);
+  const select = f.part('browser-cookie-profile'), consent = f.part('browser-cookie-consent');
+  select.value = 'source-a'; select.fire('change', { isTrusted: true });
+  consent.checked = true; consent.fire('change', { isTrusted: true });
+  f.part('browser-cookie-confirm').fire('click', { isTrusted: true });
+  f.containers.add(25);
+  f.imported.resolve({ status: 'imported', userContextId: 25, containerName: 'Chrome - A', counts: { imported: 2 } });
+  await tick();
+  const discards = f.events.filter(event => event[0] === 'discard');
+  assert.equal(discards.length, 1); assert.equal(discards[0][1].userContextId, 25);
+  assert.match(f.part('browser-cookie-result').textContent, /가져온 쿠키를 정리했습니다/);
+  assert.equal(f.part('browser-cookie-counts'), null, 'discarded cookies are not shown as currently imported');
+  assert.equal(f.part('browser-cookie-retry-open'), null);
+  f.part('browser-cookie-close').fire('click', { isTrusted: true });
+  assert.equal(f.part('browser-cookie-receipt'), null);
+});
+
+test('unconfirmed cleanup after the dialog closes leaves a receipt and never retries the changed environment', async () => {
+  const cleanup = deferred(), f = uiFixture({ spawnFailures: 1, discard: () => cleanup.promise }); await choose(f);
+  const select = f.part('browser-cookie-profile'), consent = f.part('browser-cookie-consent');
+  select.value = 'source-a'; select.fire('change', { isTrusted: true });
+  consent.checked = true; consent.fire('change', { isTrusted: true });
+  f.part('browser-cookie-confirm').fire('click', { isTrusted: true });
+  f.containers.add(25);
+  f.imported.resolve({ status: 'partial', userContextId: 25, containerName: 'Chrome - A', counts: { imported: 2 } });
+  await tick();
+  assert.match(f.document.documentElement.textContent, /환경을 정리하는 중/);
+  f.part('browser-cookie-close').fire('click', { isTrusted: true });
+  assert.ok(f.part('browser-cookie-import-dialog'), 'user close waits for cleanup');
+  f.card.remove(); f.api.closeBrowserCookieImportForCard(f.card);
+  assert.equal(f.part('browser-cookie-receipt'), null, 'do not announce failure before cleanup settles');
+  cleanup.resolve({ status: 'cleanup-required', reason: 'COOKIE_SECRET_DO_NOT_SHOW' });
+  await tick();
+  const receipt = f.part('browser-cookie-receipt');
+  assert.ok(receipt);
+  assert.match(receipt.textContent, /자동 정리를 확인하지 못했습니다/);
+  assert.doesNotMatch(receipt.textContent, /COOKIE_SECRET_DO_NOT_SHOW/);
+  assert.equal(f.cards.length, 0);
+});
+
+test('late success is discarded by the same importer before a receipt is needed', async () => {
+  const f = uiFixture({ discard: async () => ({ status: 'discarded' }) }); await choose(f);
+  const select = f.part('browser-cookie-profile'), consent = f.part('browser-cookie-consent');
+  select.value = 'source-a'; select.fire('change', { isTrusted: true });
+  consent.checked = true; consent.fire('change', { isTrusted: true });
+  f.part('browser-cookie-confirm').fire('click', { isTrusted: true });
+  f.card.remove(); f.api.closeBrowserCookieImportForCard(f.card);
+  f.containers.add(27);
+  f.imported.resolve({ status: 'imported', userContextId: 27, containerName: 'Chrome - A', counts: { imported: 1 } });
+  await tick();
+  const discards = f.events.filter(event => event[0] === 'discard');
+  assert.equal(discards.length, 1); assert.equal(discards[0][1].userContextId, 27);
+  assert.equal(f.part('browser-cookie-receipt'), null);
+  assert.equal(f.cards.length, 0);
+});
+
+test('cleanup is never attempted for a previously existing ID or a possibly opened card', async () => {
+  for (const option of [
+    { spawnFailures: 0, spawnFailureLeavesCard: false, returnedId: 3 },
+    { spawnFailures: 1, spawnFailureLeavesCard: true, returnedId: 28 },
+  ]) {
+    const f = uiFixture({ ...option, discard: async () => ({ status: 'discarded' }) }); await choose(f);
+    const select = f.part('browser-cookie-profile'), consent = f.part('browser-cookie-consent');
+    select.value = 'source-a'; select.fire('change', { isTrusted: true });
+    consent.checked = true; consent.fire('change', { isTrusted: true });
+    f.part('browser-cookie-confirm').fire('click', { isTrusted: true });
+    f.containers.add(option.returnedId);
+    f.imported.resolve({ status: 'imported', userContextId: option.returnedId, containerName: 'Chrome - A', counts: { imported: 1 } });
+    await tick();
+    assert.equal(f.events.filter(event => event[0] === 'discard').length, 0);
+    assert.equal(f.part('browser-cookie-retry-open'), null);
+    assert.match(f.document.documentElement.textContent, /Browser를 열지 않았습니다/);
+  }
+});
+
+test('unknown or rejected discard results show an unconfirmed cleanup receipt without exposing details', async () => {
+  for (const discard of [async () => ({ status: 'not-owned', reason: 'PRIVATE-COOKIE-DO-NOT-SHOW' }),
+    async () => { throw new Error('PRIVATE-COOKIE-DO-NOT-SHOW'); }]) {
+    const f = uiFixture({ spawnFailures: 1, discard }); await choose(f);
+    const select = f.part('browser-cookie-profile'), consent = f.part('browser-cookie-consent');
+    select.value = 'source-a'; select.fire('change', { isTrusted: true });
+    consent.checked = true; consent.fire('change', { isTrusted: true });
+    f.part('browser-cookie-confirm').fire('click', { isTrusted: true });
+    f.containers.add(29);
+    f.imported.resolve({ status: 'imported', userContextId: 29, containerName: 'Chrome - A', counts: { imported: 1 } });
+    await tick();
+    assert.match(f.document.documentElement.textContent, /자동 정리도 확인하지 못했습니다/);
+    assert.equal(f.part('browser-cookie-retry-open'), null);
+    f.part('browser-cookie-close').fire('click', { isTrusted: true });
+    assert.ok(f.part('browser-cookie-receipt'));
+    assert.doesNotMatch(f.document.documentElement.textContent, /PRIVATE-COOKIE-DO-NOT-SHOW/);
+  }
 });
 
 test('profile namespace plus per-container key are required even when a numeric ID or display name matches', () => {
