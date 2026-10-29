@@ -356,23 +356,26 @@ test('popup observation reports only added card counts and origin equality', () 
   assert.doesNotMatch(JSON.stringify(result), /synthetic-popup|existing/);
 });
 
-function syntheticLifecycle({ point = { x: 40, y: 50, inViewport: true, hitsBrowser: true },
-  requests = 0, matching = 0, clickThrows = false, popupCard = false } = {}) {
+function syntheticLifecycle({ point = { x: 40, y: 50, rectLeft: 10, rectTop: 20, rawRectWidth: 150, rawRectHeight: 120,
+  inViewport: true, hitsBrowser: true },
+  requests = 0, matching = 0, clickThrows = false, popupCard = false, targetHits = true } = {}) {
   const fixture = { port: 44001, counts: { v24: 0, exactV24: 0, popup: 0, exactPopup: 0,
     duplicate: 0, exactDuplicate: 0 } };
-  let evaluations = 0; const clicks = [];
+  let evaluations = 0, targetChecks = 0; const clicks = [];
   const mcp = {
     async evaluate(fn) {
       if (fn === readPopupMethodCounters) return { createContentWindow: 0, createContentWindowInFrame: 0, openURI: 0, openURIInFrame: 0 };
-      if (fn === inspectPopupTarget) return true;
+      if (fn === inspectPopupTarget) return ++targetChecks === 1 ? targetHits : true;
+      if (fn === inspectPopupPoint) return point;
       if (fn === inspectPopupCards) return { available: true, addedCards: Number(popupCard),
         connectedCards: Number(popupCard), originAvailable: popupCard, originMatches: popupCard };
       evaluations++;
       if (evaluations === 1) return true; // baseline
-      if (evaluations === 2) { fixture.counts.v24++; fixture.counts.exactV24++; return true; }
+      if (evaluations === 2) { fixture.counts.v24++; fixture.counts.exactV24++;
+        if (fixture.telemetry?.geometry?.length === 6) fixture.telemetry.geometrySeen = true;
+        return true; }
       if (evaluations === 3) return true; // v24 context
-      if (evaluations === 4) return point;
-      if (evaluations === 5) return false; // popup context
+      if (evaluations === 4) return false; // popup context
       throw new Error('fixture stops at duplicate');
     },
     async clickPoint(value) {
@@ -449,6 +452,14 @@ test('trusted click uses reported synthetic link bounds under canvas scaling', a
   assert.equal(run.diagnostics.popup.fixedPointInsideAnchor, false);
   assert.equal(run.diagnostics.popup.projectedPointInsideAnchor, true);
   assert.equal(run.diagnostics.popup.trustedPointerOnAnchor, 1);
+  const fallback = syntheticLifecycle({ targetHits: false });
+  await assert.rejects(observeBrowserLifecycle(fallback.mcp, fallback.fixture, fallback.checks,
+    Date.now() + 3000, new AbortController().signal, fallback.diagnostics, 10));
+  assert.deepEqual(fallback.clicks, [{ x: 40, y: 50 }]);
+  assert.equal(fallback.diagnostics.popup.usedFixedPointFallback, true);
+  assert.equal(fallback.diagnostics.popup.pointStable, true);
+  assert.equal(fallback.diagnostics.popup.fixedFallbackVerified, true);
+  assert.equal(fallback.diagnostics.popup.counterReadBefore, true);
 });
 
 test('popup request with wrong header stays a failed check and is distinguishable from timeout', async () => {

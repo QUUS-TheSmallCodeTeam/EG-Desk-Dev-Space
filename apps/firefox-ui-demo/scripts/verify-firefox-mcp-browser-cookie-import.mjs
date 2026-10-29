@@ -534,10 +534,11 @@ const POPUP_PROBE_METHODS = Object.freeze(['createContentWindow', 'createContent
 // exception text, URLs, DOM content, and even synthetic cookie values.
 export function createBrowserDiagnostics() {
   return { steps: Object.fromEntries(BROWSER_DIAGNOSTIC_STEPS.map(name => [name, { started: false, completed: false }])),
-    popup: { pointAvailable: false, pointInViewport: false, pointHitsBrowser: false,
+    popup: { pointAvailable: false, pointStable: false, pointInViewport: false, pointHitsBrowser: false,
       clientWidth: 0, clientHeight: 0, rectWidth: 0, rectHeight: 0, scaleXMilli: 0, scaleYMilli: 0,
       anchorGeometryAvailable: false, fixedPointInsideAnchor: false, projectedPointInsideAnchor: false,
-      targetFromGeometry: false, targetFromScale: false, targetHitsBrowser: false, trustedPointerOnAnchor: 0, trustedPointerOutsideAnchor: 0,
+      targetFromGeometry: false, targetFromScale: false, targetHitsBrowser: false, usedFixedPointFallback: false, fixedFallbackVerified: false,
+      trustedPointerOnAnchor: 0, trustedPointerOutsideAnchor: 0,
       routeTimedOut: false, requests: 0, matchingHeaders: 0,
       observationStarted: false, observationCompleted: false, observationAvailable: false,
       addedCards: 0, connectedCards: 0, originAvailable: false, originMatches: false,
@@ -575,6 +576,20 @@ export function inspectPopupPoint() {
     inViewport, hitsBrowser: hit === browser || !!(hit && browser.contains(hit)), clientWidth, clientHeight,
     rectWidth: safe(rect.width), rectHeight: safe(rect.height), scaleXMilli: clientWidth ? safe(rect.width / clientWidth * 1000) : 0,
     scaleYMilli: clientHeight ? safe(rect.height / clientHeight * 1000) : 0 };
+}
+
+async function stablePopupPoint(mcp, deadlineMs, signal) {
+  const end = Math.min(deadlineMs, Date.now() + 2000), keys = ['rectLeft', 'rectTop', 'rawRectWidth', 'rawRectHeight'];
+  let previous = null;
+  while (Date.now() < end) {
+    assertRunning(deadlineMs, signal);
+    const point = await mcp.evaluate(inspectPopupPoint);
+    if (point && previous && keys.every(key => Number.isFinite(point[key]) && Number.isFinite(previous[key]) &&
+        Math.abs(point[key] - previous[key]) <= 0.5)) return point;
+    previous = point;
+    await sleep(Math.min(100, Math.max(0, end - Date.now())));
+  }
+  throw new Error('popup geometry did not stabilize');
 }
 
 // Read only synthetic card counts and origin-attribute equality; no IDs,
@@ -683,23 +698,26 @@ export async function observeBrowserLifecycle(mcp, fixture, checks, deadlineMs, 
     return true;
   }));
   if (!baseline) throw new Error('current Desk canvas unavailable');
+  if (fixture.telemetry) fixture.telemetry.geometrySeen = false;
   await browserDiagnosticStep(diagnostics, 'v24', () => openFixtureCard(mcp, fixture, 24, checks, deadlineMs, signal, routeWaitMs));
 
   const popupBefore = snapshotRoute(fixture, 'popup');
   let methodCountsBefore, popupPoint, fixedPoint;
   try {
-    const point = await browserDiagnosticStep(diagnostics, 'popupPoint', () => mcp.evaluate(inspectPopupPoint));
-    fixedPoint = { ...point }; popupPoint = point;
-    diagnostics.popup.pointAvailable = !!point;
-    diagnostics.popup.pointInViewport = point?.inViewport === true;
-    diagnostics.popup.pointHitsBrowser = point?.hitsBrowser === true;
-    if (!point) throw new Error('popup link unavailable');
-    for (const name of ['clientWidth', 'clientHeight', 'rectWidth', 'rectHeight', 'scaleXMilli', 'scaleYMilli']) {
-      diagnostics.popup[name] = Number.isSafeInteger(point[name]) && point[name] >= 0 ? point[name] : 0;
-    }
+    const initialPoint = await browserDiagnosticStep(diagnostics, 'popupPoint', () => mcp.evaluate(inspectPopupPoint));
+    diagnostics.popup.pointAvailable = !!initialPoint;
+    if (!initialPoint) throw new Error('popup link unavailable');
     if (capture) { try { await capture('popup-ready'); } catch {} }
     if (fixture.telemetry && !fixture.telemetry.geometrySeen) {
       try { await waitFor(() => fixture.telemetry.geometrySeen, deadlineMs, signal, 1000); } catch {}
+    }
+    const point = await stablePopupPoint(mcp, deadlineMs, signal);
+    diagnostics.popup.pointStable = true;
+    fixedPoint = { ...point }; popupPoint = point;
+    diagnostics.popup.pointInViewport = point.inViewport === true;
+    diagnostics.popup.pointHitsBrowser = point.hitsBrowser === true;
+    for (const name of ['clientWidth', 'clientHeight', 'rectWidth', 'rectHeight', 'scaleXMilli', 'scaleYMilli']) {
+      diagnostics.popup[name] = Number.isSafeInteger(point[name]) && point[name] >= 0 ? point[name] : 0;
     }
     const geometry = fixture.telemetry?.geometrySeen ? fixture.telemetry.geometry : null;
     if (geometry?.[4] > 0 && geometry?.[5] > 0 && point.rawRectWidth > 0 && point.rawRectHeight > 0) {
@@ -711,8 +729,13 @@ export async function observeBrowserLifecycle(mcp, fixture, checks, deadlineMs, 
         y: Math.round(point.rectTop + 20 * point.scaleYMilli / 1000) };
       diagnostics.popup.targetFromScale = true;
     }
-    diagnostics.popup.targetHitsBrowser = await mcp.evaluate(inspectPopupTarget, { x: popupPoint.x, y: popupPoint.y }) === true;
-    if (!diagnostics.popup.targetHitsBrowser) throw new Error('popup target outside owned browser');
+    try { diagnostics.popup.targetHitsBrowser = await mcp.evaluate(inspectPopupTarget, { x: popupPoint.x, y: popupPoint.y }) === true; } catch {}
+    if (!diagnostics.popup.targetHitsBrowser) {
+      try { diagnostics.popup.fixedFallbackVerified = point.inViewport === true &&
+        await mcp.evaluate(inspectPopupTarget, { x: point.x, y: point.y }) === true; } catch {}
+      if (!diagnostics.popup.fixedFallbackVerified) throw new Error('popup target outside owned browser');
+      popupPoint = fixedPoint; diagnostics.popup.usedFixedPointFallback = true;
+    }
     try {
       const counts = await mcp.evaluate(readPopupMethodCounters);
       if (POPUP_PROBE_METHODS.every(name => Number.isSafeInteger(counts?.[name]) && counts[name] >= 0)) {
