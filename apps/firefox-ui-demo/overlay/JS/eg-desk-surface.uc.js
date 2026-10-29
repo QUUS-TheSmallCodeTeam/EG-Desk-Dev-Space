@@ -3783,6 +3783,7 @@
       sourceRef.scope || '',
       sourceRef.profileId || '',
       sourceRef.accountId || '',
+      sourceRef.browserIdentityKey || '',
       sourceRef.uri || sourceRef.path || sourceRef.id || '',
     ];
     return parts.map(normalizeSourcePart).join('|');
@@ -3802,6 +3803,8 @@
       profileId: fields.profileId || state.sourceRefs.defaultProfileId,
       accountId: fields.accountId || '',
       scope: fields.scope || 'browser-content',
+      ...(fields.browserIdentityRequired === true ? { browserIdentityRequired: true } : {}),
+      ...(fields.browserIdentityKey ? { browserIdentityKey: fields.browserIdentityKey } : {}),
     });
   }
 
@@ -4060,6 +4063,7 @@
         title: card._browserState?.title || '',
         firstUseBrowser: false,
         fixedLogicalHeight: card._fixedLogicalHeight || null,
+        ...(card._browserIdentity ? { browserIdentity: cloneJson(card._browserIdentity) } : {}),
       };
     }
     if (type === 'chat') {
@@ -4255,7 +4259,12 @@
           const file = servicesRef().io.newURI(uri).QueryInterface(Ci.nsIFileURL).file;
           if (!file.exists()) throw new Error('파일을 찾을 수 없습니다. 원래 위치에 복구한 뒤 다시 확인하세요.');
         }
-        view = spawnBrowserCard(uri, { openMode: 'new', sourceRef: record.sourceRef || {}, firstUse: !!record.runtimeState?.firstUseBrowser && state.surface.restoring, fixedLogicalHeight: record.runtimeState?.fixedLogicalHeight });
+        const runtime = record.runtimeState || {};
+        if ((record.sourceRef?.browserIdentityRequired === true || record.sourceRef?.browserIdentityKey) && !Object.hasOwn(runtime, 'browserIdentity')) {
+          throw new Error('저장된 분리 환경의 연결 정보가 없어 안전하게 열 수 없습니다.');
+        }
+        view = spawnBrowserCard(uri, { openMode: 'new', sourceRef: record.sourceRef || {}, firstUse: !!runtime.firstUseBrowser && state.surface.restoring, fixedLogicalHeight: runtime.fixedLogicalHeight,
+          ...(Object.hasOwn(runtime, 'browserIdentity') ? { browserIdentity: runtime.browserIdentity } : {}) });
       } else if (record.type === 'ontology') view = spawnOntologyMapCard(record.runtimeState || {});
       else if (record.type === 'input-evidence' && record.runtimeState?.reference) view = spawnInputEvidence(record.runtimeState.reference, null, { restore: true });
       else if (record.type === 'result') view = spawnResultCard({ restore: true, record: record.runtimeState });
@@ -4288,7 +4297,8 @@
     if (registered && !remapRestoredBoardMember(projection, member, view.id)) {
       throw new Error('Board 구성원 ID를 안전하게 연결하지 못했습니다.');
     }
-    if (record.sourceRef && !options.newTerminal) bindCardSourceRef(view, record.sourceRef);
+    if (record.sourceRef && !options.newTerminal) bindCardSourceRef(view,
+      record.type === 'browser' && view._sourceRef ? view._sourceRef : record.sourceRef);
     if (options.newTerminal) { view.dataset.runtimeContinuity = 'new-session'; registerSourceRefCard(view); }
     applyPersistentEntityGeometry(view, geometry);
     view.dataset.boardId = projection.boardId;
@@ -4825,9 +4835,13 @@
     let card = null;
     const runtime = cardState.runtimeState || {};
     if (cardState.type === 'browser') {
+      if ((cardState.sourceRef?.browserIdentityRequired === true || cardState.sourceRef?.browserIdentityKey) && !Object.hasOwn(runtime, 'browserIdentity')) {
+        throw new Error('저장된 분리 환경의 연결 정보가 없어 안전하게 열 수 없습니다.');
+      }
       card = spawnBrowserCard(runtime.uri || cardState.sourceRef?.uri || 'https://duckduckgo.com', {
         openMode: 'new',
         sourceRef: cardState.sourceRef || {},
+        ...(Object.hasOwn(runtime, 'browserIdentity') ? { browserIdentity: runtime.browserIdentity } : {}),
       });
     } else if (cardState.type === 'settings') {
       card = spawnSettingsCard();
@@ -4842,7 +4856,8 @@
     }
     if (!card) return null;
     retargetRestoredEntityId(card, cardState.id);
-    if (cardState.sourceRef) bindCardSourceRef(card, cardState.sourceRef);
+    if (cardState.sourceRef) bindCardSourceRef(card,
+      cardState.type === 'browser' && card._sourceRef ? card._sourceRef : cardState.sourceRef);
     applyPersistentEntityGeometry(card, cardState.geometry);
     return card;
   }
@@ -15747,6 +15762,155 @@
     return () => source.removeEventListener('browser-tool-request', onRequest);
   }
 
+  // These bindings are local to one Firefox profile. A portable Desk carries
+  // an explicit required marker, never authority to use the same numeric ID
+  // in another profile. Neither profile labels nor container names prove login.
+  const BROWSER_IDENTITY_REGISTRY_PREF = 'egdesk.browser.identity.registry.v1';
+  const BROWSER_IDENTITY_UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+  let browserIdentityObserver = null;
+  let browserIdentityObserverUnsafe = false;
+
+  function browserIdentityModule() {
+    return ChromeUtils.importESModule('chrome://userchrome/content/EGDeskBrowserIdentity.sys.mjs');
+  }
+
+  function browserIdentityRegistry() {
+    try {
+      const services = servicesRef();
+      const path = services.dirsvc.get('ProfD', Ci.nsIFile).path;
+      const registry = JSON.parse(services.prefs.getStringPref(BROWSER_IDENTITY_REGISTRY_PREF, ''));
+      if (!path || registry?.version !== 1 || registry.profilePath !== path ||
+          !BROWSER_IDENTITY_UUID.test(registry.profileScopeId) || !registry.entries ||
+          typeof registry.entries !== 'object' || Array.isArray(registry.entries)) return null;
+      return registry;
+    } catch { return null; }
+  }
+
+  function invalidateBrowserIdentity(userContextId = null) {
+    const registry = browserIdentityRegistry();
+    if (!registry) return;
+    if (userContextId === null) registry.entries = {};
+    else {
+      const key = String(userContextId);
+      if (!Object.hasOwn(registry.entries, key)) return;
+      delete registry.entries[key];
+    }
+    try { servicesRef().prefs.setStringPref(BROWSER_IDENTITY_REGISTRY_PREF, JSON.stringify(registry)); }
+    catch { browserIdentityObserverUnsafe = true; }
+  }
+
+  function ensureBrowserIdentityObserver() {
+    if (browserIdentityObserverUnsafe) return false;
+    if (browserIdentityObserver) return true;
+    let services, observer;
+    const topics = ['contextual-identity-deleted', 'contextual-identity-created'];
+    const attached = [];
+    let prefAttached = false;
+    try {
+      services = servicesRef();
+      if (typeof services.obs?.addObserver !== 'function' || typeof services.obs?.removeObserver !== 'function' ||
+          typeof services.prefs?.addObserver !== 'function' || typeof services.prefs?.removeObserver !== 'function') return false;
+      observer = { observe(subject, topic) {
+        if (topic === 'nsPref:changed') {
+          try { if (services.prefs.getBoolPref('privacy.userContext.enabled', false) !== true) invalidateBrowserIdentity(); }
+          catch { browserIdentityObserverUnsafe = true; }
+          return;
+        }
+        if (!topics.includes(topic)) return;
+        let id = null;
+        try { id = subject?.wrappedJSObject?.userContextId; } catch {}
+        invalidateBrowserIdentity(Number.isSafeInteger(id) && id > 0 ? id : null);
+      } };
+      for (const topic of topics) { services.obs.addObserver(observer, topic); attached.push(topic); }
+      services.prefs.addObserver('privacy.userContext.enabled', observer);
+      prefAttached = true;
+      browserIdentityObserver = observer;
+      window.addEventListener('unload', () => {
+        for (const topic of topics) { try { services.obs.removeObserver(observer, topic); } catch {} }
+        try { services.prefs.removeObserver('privacy.userContext.enabled', observer); } catch {}
+        if (browserIdentityObserver === observer) browserIdentityObserver = null;
+      }, { once: true });
+      return true;
+    } catch {
+      for (const topic of attached) { try { services.obs.removeObserver(observer, topic); } catch {} }
+      if (prefAttached) { try { services.prefs.removeObserver('privacy.userContext.enabled', observer); } catch {} }
+      browserIdentityObserver = null;
+      return false;
+    }
+  }
+
+  function browserIdentityContainerIds() {
+    try {
+      const { ContextualIdentityService } = ChromeUtils.importESModule('resource://gre/modules/ContextualIdentityService.sys.mjs');
+      const listed = browserIdentityModule().createBrowserIdentityAdapter({ identityService: ContextualIdentityService, services: servicesRef() }).listContainers();
+      if (listed?.supported !== true || !Array.isArray(listed.containers)) return null;
+      return new Set(listed.containers.filter(item => item.kind === 'container').map(item => item.userContextId));
+    } catch { return null; }
+  }
+
+  function browserIdentityContainerExists(userContextId) {
+    return browserIdentityContainerIds()?.has(userContextId) === true;
+  }
+
+  function browserIdentityUsable(identity) {
+    if (!ensureBrowserIdentityObserver() || !identity || identity.version !== 1 || !Number.isSafeInteger(identity.userContextId) ||
+        identity.userContextId <= 0 || identity.userContextId >= 0xffffffff ||
+        !BROWSER_IDENTITY_UUID.test(identity.profileScopeId || '') ||
+        !BROWSER_IDENTITY_UUID.test(identity.browserIdentityKey || '')) return false;
+    const registry = browserIdentityRegistry();
+    if (!registry || registry.profileScopeId !== identity.profileScopeId ||
+        registry.entries[String(identity.userContextId)] !== identity.browserIdentityKey) return false;
+    const ids = browserIdentityContainerIds();
+    if (ids && !ids.has(identity.userContextId)) invalidateBrowserIdentity(identity.userContextId);
+    return ids?.has(identity.userContextId) === true;
+  }
+
+  // Only called after the user confirmed an import and the core reports a
+  // newly created native container. A reused numeric ID gets a fresh token.
+  function registerImportedBrowserIdentity(userContextId, containerName) {
+    if (!ensureBrowserIdentityObserver() || !Number.isSafeInteger(userContextId) || userContextId <= 0 || userContextId >= 0xffffffff ||
+        !browserIdentityContainerExists(userContextId)) throw new Error('분리 환경을 확인할 수 없습니다.');
+    const services = servicesRef();
+    const path = services.dirsvc.get('ProfD', Ci.nsIFile).path;
+    if (!path || typeof window.crypto?.randomUUID !== 'function') throw new Error('로컬 환경 식별자를 만들 수 없습니다.');
+    const registry = browserIdentityRegistry() || { version: 1, profilePath: path,
+      profileScopeId: window.crypto.randomUUID(), entries: {} };
+    const browserIdentityKey = window.crypto.randomUUID();
+    if (!BROWSER_IDENTITY_UUID.test(registry.profileScopeId) || !BROWSER_IDENTITY_UUID.test(browserIdentityKey)) {
+      throw new Error('로컬 환경 식별자를 만들 수 없습니다.');
+    }
+    registry.entries[String(userContextId)] = browserIdentityKey;
+    services.prefs.setStringPref(BROWSER_IDENTITY_REGISTRY_PREF, JSON.stringify(registry));
+    const name = typeof containerName === 'string'
+      ? containerName.replace(/[\u0000-\u001f\u007f\u2028\u2029]/g, ' ').trim().slice(0, 100) : '';
+    const identity = { version: 1, userContextId, profileScopeId: registry.profileScopeId,
+      browserIdentityKey, containerName: name || 'Chrome 분리 환경' };
+    if (!browserIdentityUsable(identity)) throw new Error('분리 환경 연결을 확인할 수 없습니다.');
+    return identity;
+  }
+
+  function browserCookieImportSourceAllowed(card) {
+    if (!card?.isConnected || card.dataset?.codexRole === 'auth' || !card._xulBrowser?.isConnected || !browserImportAllowed()) return false;
+    try {
+      const { PrivateBrowsingUtils } = ChromeUtils.importESModule('resource://gre/modules/PrivateBrowsingUtils.sys.mjs');
+      if (PrivateBrowsingUtils.isWindowPrivate(window)) return false;
+      const browser = card._xulBrowser;
+      const attrs = browser.browsingContext?.originAttributes;
+      const id = browserIdentityModule().browserUserContextId(browser);
+      if (!attrs || attrs.privateBrowsingId !== 0 || id === null || attrs.userContextId !== id) return false;
+      return id === 0 ? !card._browserIdentity : card._browserIdentity?.userContextId === id && browserIdentityUsable(card._browserIdentity);
+    } catch { return false; }
+  }
+
+  function browserCookieImportSupport(card) {
+    if (!ensureBrowserIdentityObserver() || !browserCookieImportSourceAllowed(card)) return { supported: false };
+    try {
+      const { createBrowserCookieImporter } = ChromeUtils.importESModule('chrome://userchrome/content/EGDeskBrowserCookieImport.sys.mjs');
+      const importer = createBrowserCookieImporter({ browserWindow: window, profileImportPolicy: 'allow', privateBrowsingId: 0 });
+      return importer?.availability?.().supported === true ? { supported: true, importer } : { supported: false };
+    } catch { return { supported: false }; }
+  }
+
   // Firefox Library is a separate native window. Its two shared Places entry
   // points are guarded by Library-window identity; all other windows retain
   // their native behavior. gBrowser itself is never intercepted.
@@ -15985,6 +16149,171 @@
     }
   }
 
+  let browserCookieImportSession = null;
+  let browserCookieImportInFlight = false;
+  function closeBrowserCookieImportForCard(card) {
+    if (browserCookieImportSession?.card === card) browserCookieImportSession.close(false);
+  }
+
+  function openBrowserCookieImport(card, opener, event) {
+    // Neither the menu nor the confirm action is a browser/AI tool. Firefox
+    // marks real mouse and keyboard activations as trusted; script clicks do
+    // not authorize profile enumeration or access to the OS keychain.
+    if (event?.isTrusted !== true) return null;
+    if (browserCookieImportInFlight) { boardNotice('이전 가져오기가 중단·정리되는 동안 기다려 주세요.'); return null; }
+    const support = browserCookieImportSupport(card);
+    if (!support.supported) { boardNotice('이 환경에서는 Chrome 로그인 가져오기를 사용할 수 없습니다.'); return null; }
+    browserCookieImportSession?.close(false);
+    const importer = support.importer;
+    const panel = el('section', { id: 'egd-browser-cookie-import', class: 'egd-store-panel', role: 'dialog',
+      'aria-label': 'Chrome 로그인 가져오기', data: { testid: 'browser-cookie-import-dialog' } });
+    let phase = 'intro', busy = false, profiles = [], selected = '', consent = false;
+    let controller = null, result = null, resultCard = null, environmentError = false;
+    const isCurrent = () => browserCookieImportSession?.panel === panel && panel.isConnected && card.isConnected;
+    const close = (restoreFocus = true) => {
+      if (browserCookieImportSession?.panel !== panel) return;
+      browserCookieImportSession = null;
+      controller?.abort();
+      window.removeEventListener('unload', onUnload);
+      panel.remove();
+      if (!restoreFocus) return;
+      const target = card.isConnected && opener?.isConnected && !opener.disabled ? opener
+        : document.querySelector('#egd-dock .egd-dock-btn[data-id="browser"]');
+      if (target?.isConnected && !target.disabled) target.focus?.();
+    };
+    const onUnload = () => close(false);
+    const requestClose = () => {
+      if (busy && controller) {
+        if (!controller.signal.aborted) controller.abort();
+        phase = 'cancelling';
+        render('browser-cookie-close');
+        return;
+      }
+      close(true);
+    };
+    const safeLabel = (value, fallback = '') => typeof value === 'string'
+      ? value.replace(/[\u0000-\u001f\u007f\u2028\u2029]/g, ' ').trim().slice(0, 160) || fallback : fallback;
+    const count = key => Number.isSafeInteger(result?.counts?.[key]) && result.counts[key] >= 0 ? result.counts[key] : '확인 안 됨';
+    const cleanupWarning = '정리되지 않은 분리 환경이 남았을 수 있습니다. Firefox에서 해당 환경과 사이트 데이터를 확인해 주세요.';
+
+    const render = focusId => {
+      const nodes = [el('div', { class: 'egd-store-panel-head' }, el('strong', {}, 'Chrome 로그인 가져오기'),
+        el('button', { type: 'button', class: 'egd-store-panel-close', 'aria-label': '닫기',
+          data: { testid: 'browser-cookie-close' }, onclick: requestClose }, '×'))];
+      if (phase === 'intro' || phase === 'listing') {
+        nodes.push(el('p', { class: 'egd-store-panel-copy' }, '이 Mac의 Chrome 프로필을 찾아 선택하세요.'));
+        if (phase === 'listing') nodes.push(el('p', { role: 'status' }, '프로필을 찾는 중…'));
+        nodes.push(el('div', { class: 'egd-store-actions' },
+          el('button', { type: 'button', class: 'egd-store-primary', disabled: busy,
+            data: { testid: 'browser-cookie-find' }, onclick: ev => void findProfiles(ev) }, '프로필 찾기'),
+          el('button', { type: 'button', data: { testid: 'browser-cookie-cancel' }, onclick: requestClose }, '취소')));
+      } else if (phase === 'choose' || phase === 'importing' || phase === 'cancelling') {
+        const select = el('select', { class: 'egd-browser-cookie-select', 'aria-label': '가져올 Chrome 프로필', disabled: busy,
+          data: { testid: 'browser-cookie-profile' }, onchange: ev => {
+            if (ev.isTrusted !== true) return;
+            selected = profiles.some(profile => profile.id === ev.currentTarget.value) ? ev.currentTarget.value : '';
+            updateConfirm();
+          } }, el('option', { value: '' }, '프로필 선택'), ...profiles.map(profile =>
+          el('option', { value: profile.id }, safeLabel(profile.name, '이름 없는 프로필') + (profile.email ? ` · ${safeLabel(profile.email)}` : ''))));
+        select.value = selected;
+        const check = el('input', { type: 'checkbox', disabled: busy, data: { testid: 'browser-cookie-consent' },
+          onchange: ev => { if (ev.isTrusted === true) consent = ev.currentTarget.checked === true; updateConfirm(); } });
+        check.checked = consent;
+        const confirm = el('button', { type: 'button', class: 'egd-store-primary', disabled: true,
+          data: { testid: 'browser-cookie-confirm' }, onclick: ev => void importSelected(ev) }, '가져오기');
+        const updateConfirm = () => { confirm.disabled = busy || !selected || !consent; };
+        updateConfirm();
+        nodes.push(el('label', { class: 'egd-browser-cookie-field' }, el('strong', {}, '원본 Chrome 프로필'), select));
+        nodes.push(el('p', { class: 'egd-browser-cookie-note' }, '프로필 표시는 실제 로그인 계정과 다를 수 있습니다.'));
+        nodes.push(el('p', { class: 'egd-portable-effect' }, '선택한 프로필의 쿠키를 기존 Browser와 분리된 새 Browser로 가져옵니다. 쿠키에는 로그인 세션이 포함될 수 있습니다. 비밀번호·북마크·방문 기록은 가져오지 않습니다. 사이트에 따라 다시 로그인해야 할 수 있습니다. macOS가 키체인 권한을 요청할 수 있습니다.'));
+        nodes.push(el('label', { class: 'egd-browser-cookie-consent' }, check,
+          el('span', {}, '쿠키 가져오기에 동의합니다.')));
+        if (busy) nodes.push(el('p', { role: 'status' }, phase === 'cancelling' ? '중단하는 중…' : '가져오는 중…'));
+        nodes.push(el('div', { class: 'egd-store-actions' }, confirm,
+          el('button', { type: 'button', disabled: phase === 'cancelling', data: { testid: 'browser-cookie-cancel' }, onclick: requestClose }, busy ? '중단' : '취소')));
+      } else {
+        const messages = {
+          imported: '쿠키 가져오기를 마쳤습니다.', partial: '일부 쿠키를 가져왔습니다.', empty: '가져올 쿠키가 없습니다.',
+          cancelled: '가져오기를 취소했습니다.',
+          failed: '가져오기를 완료하지 못했습니다.',
+          unsupported: '이 환경에서는 가져오기를 사용할 수 없습니다.', noProfiles: '사용 가능한 Chrome 프로필을 찾지 못했습니다.',
+        };
+        nodes.push(el('p', { class: 'egd-store-panel-status', role: 'status', data: { testid: 'browser-cookie-result' } }, messages[phase] || messages.failed));
+        if (result) nodes.push(el('p', { class: 'egd-browser-cookie-counts', data: { testid: 'browser-cookie-counts' } },
+          `가져옴 ${count('imported')} · 건너뜀 ${count('skipped')} · 지원하지 않음 ${count('unsupported')} · 실패 ${count('failed')}`));
+        if (result) nodes.push(el('p', { class: 'egd-browser-cookie-note' }, '사이트를 열어 로그인 상태를 확인하세요.'));
+        if (result?.cleanupIncomplete) nodes.push(el('p', { class: 'egd-portable-warning', role: 'alert' }, cleanupWarning));
+        if (environmentError) nodes.push(el('p', { class: 'egd-portable-warning', role: 'alert' }, '분리 환경을 안전하게 연결하지 못해 새 Browser를 열지 않았습니다.'));
+        if (resultCard?.isConnected) nodes.push(el('p', { class: 'egd-browser-cookie-note' }, '현재 화면에 새 Browser 카드가 열렸습니다.'));
+        nodes.push(el('div', { class: 'egd-store-actions' }, resultCard?.isConnected ? el('button', {
+          type: 'button', class: 'egd-store-primary', data: { testid: 'browser-cookie-open-result' }, onclick: () => {
+            const target = resultCard;
+            close(false);
+            if (target?.isConnected) { focusCanvasCard(target); revealOpenCanvasCard(target, { kind: 'browser' }); target.querySelector('.egd-card-url')?.focus(); }
+          },
+        }, '새 Browser 카드로 이동') : null, el('button', { type: 'button', onclick: () => close(true) }, '닫기')));
+      }
+      panel.replaceChildren(...nodes);
+      if (focusId) panel.querySelector(`[data-testid="${focusId}"]`)?.focus();
+    };
+    const findProfiles = async ev => {
+      if (ev?.isTrusted !== true || busy || !isCurrent() || !browserCookieImportSourceAllowed(card)) return;
+      busy = true; phase = 'listing'; render('browser-cookie-cancel');
+      try {
+        const listed = await importer.listProfiles({ explicitUserRequest: true });
+        if (!isCurrent()) return;
+        if (!browserCookieImportSourceAllowed(card)) { phase = 'unsupported'; return; }
+        profiles = listed?.supported === true && Array.isArray(listed.profiles)
+          ? listed.profiles.filter(profile => typeof profile?.id === 'string' && profile.id.length > 0 && profile.id.length <= 512)
+            .map(profile => ({ id: profile.id, name: safeLabel(profile.name, '이름 없는 프로필'), email: safeLabel(profile.email) })) : [];
+        phase = listed?.supported !== true ? 'unsupported' : profiles.length ? 'choose' : 'noProfiles';
+      } catch { if (isCurrent()) phase = 'failed'; }
+      finally { if (isCurrent()) { busy = false; render(phase === 'choose' ? 'browser-cookie-profile' : null); } }
+    };
+    const importSelected = async ev => {
+      if (ev?.isTrusted !== true || busy || browserCookieImportInFlight || !isCurrent() || !browserCookieImportSourceAllowed(card) ||
+          !consent || !profiles.some(profile => profile.id === selected)) return;
+      const existingContainers = browserIdentityContainerIds();
+      if (!existingContainers) { phase = 'unsupported'; render(); return; }
+      try { controller = new window.AbortController(); }
+      catch { phase = 'failed'; render('browser-cookie-close'); return; }
+      busy = true; browserCookieImportInFlight = true; phase = 'importing';
+      try {
+        render('browser-cookie-cancel');
+        const response = await importer.importProfile({ profileId: selected, explicitUserConsent: true, signal: controller.signal });
+        if (!isCurrent()) {
+          if (response?.status === 'failed' && response.reason === 'cleanup-incomplete') boardNotice(cleanupWarning);
+          return;
+        }
+        result = response && typeof response === 'object'
+          ? { counts: response.counts, cleanupIncomplete: response.reason === 'cleanup-incomplete' } : null;
+        phase = ['imported', 'partial', 'empty', 'cancelled', 'failed', 'unsupported'].includes(response?.status) ? response.status : 'failed';
+        if (['imported', 'partial', 'empty'].includes(phase) && response?.userContextId != null) {
+          try {
+            if (!browserCookieImportSourceAllowed(card)) throw new Error('source unavailable');
+            if (existingContainers.has(response.userContextId)) throw new Error('container is not new');
+            const profileName = profiles.find(profile => profile.id === selected)?.name || 'Chrome 프로필';
+            const identity = registerImportedBrowserIdentity(response.userContextId, response.containerName || `Chrome · ${profileName}`);
+            resultCard = spawnBrowserCard('about:blank', { openMode: 'new', browserIdentity: identity });
+            if (!resultCard) throw new Error('environment unavailable');
+          } catch { environmentError = true; }
+        } else if (['imported', 'partial'].includes(phase)) environmentError = true;
+      } catch { if (isCurrent()) phase = controller.signal.aborted ? 'cancelled' : 'failed'; }
+      finally {
+        browserCookieImportInFlight = false;
+        if (isCurrent()) { busy = false; controller = null; render(resultCard?.isConnected ? 'browser-cookie-open-result' : 'browser-cookie-close'); }
+      }
+    };
+    panel.addEventListener('keydown', ev => {
+      if (ev.key === 'Escape') { ev.preventDefault(); ev.stopPropagation(); requestClose(); }
+    });
+    browserCookieImportSession = { card, panel, close };
+    window.addEventListener('unload', onUnload, { once: true });
+    document.documentElement.appendChild(panel);
+    render('browser-cookie-find');
+    return panel;
+  }
+
   let browserLibrarySession = null;
   let browserLibraryUnloadInstalled = false;
   function openFirefoxBrowserLibrary(section, opener) {
@@ -16055,7 +16384,14 @@
 
   function spawnBrowserCard(initialUrl = 'https://duckduckgo.com', options = {}) {
     const normalizedUrl = normalizeBrowserNavigationUri(initialUrl);
-    const sourceRef = browserSourceRef(normalizedUrl, options.sourceRef || {});
+    const identityRequired = Object.hasOwn(options, 'browserIdentity') || options.sourceRef?.browserIdentityRequired === true || !!options.sourceRef?.browserIdentityKey;
+    const browserIdentity = identityRequired ? options.browserIdentity : null;
+    if (identityRequired && !browserIdentityUsable(browserIdentity)) {
+      throw new Error('저장된 분리 환경을 확인할 수 없어 기본 환경으로 열지 않았습니다.');
+    }
+    const sourceForBrowser = (url, fields = {}) => browserSourceRef(url, { ...(options.sourceRef || {}), ...fields,
+      ...(browserIdentity ? { browserIdentityRequired: true, browserIdentityKey: browserIdentity.browserIdentityKey } : {}) });
+    const sourceRef = sourceForBrowser(normalizedUrl);
     const openMode = normalizeOpenMode(options.openMode, 'new');
     if (openMode === 'focus-existing') {
       const existing = focusOpenSourceCard(sourceRef);
@@ -16090,6 +16426,7 @@
       },
     });
     const card = deskWindow.root;
+    if (browserIdentity) card._browserIdentity = cloneJson(browserIdentity);
     if (!options.background) revealPlacedCanvasCard(card, placement, { kind: 'browser', opener: options.opener });
 
     const urlInput = el('input', {
@@ -16134,6 +16471,9 @@
 
     const pageTitle = el('div', { class: 'egd-card-page-title' }, browserState.title);
     const pageStatus = el('div', { class: 'egd-card-page-status' }, 'Loading');
+    const environmentBadge = browserIdentity ? el('span', { class: 'egd-browser-environment',
+      title: '분리 환경 이름입니다. 사이트 로그인 여부는 별도로 확인해야 합니다.',
+      data: { testid: 'browser-environment' } }, browserIdentity.containerName || 'Chrome 분리 환경') : null;
     // A passing note; the persistent Agent badge below is the Card's only status region.
     const agentActivity = el('span', { class: 'egd-browser-agent-activity',
       style: { fontSize: '11px', opacity: '0.8', whiteSpace: 'nowrap', maxWidth: '140px',
@@ -16228,6 +16568,7 @@
     const header = deskWindow.slots.header;
     deskWindow.slots.identity.classList.add('egd-card-page-meta');
     deskWindow.slots.identity.append(pageTitle, pageStatus, agentActivity, agentBadgeStatus, agentHandButton);
+    if (environmentBadge) deskWindow.slots.identity.insertBefore(environmentBadge, agentActivity);
     deskWindow.slots.toolbar.append(
       el('div', { class: 'egd-card-nav' },
         backButton,
@@ -16255,16 +16596,28 @@
 
     try {
       xulBrowser = document.createXULElement('browser');
-      xulBrowser.setAttribute('type', 'content');
+      if (browserIdentity) browserIdentityModule().configureBrowser(xulBrowser, browserIdentity.userContextId);
+      else xulBrowser.setAttribute('type', 'content');
       xulBrowser.setAttribute('remote', 'true');
       xulBrowser.setAttribute('maychangeremoteness', 'true');
       xulBrowser.setAttribute('disableglobalhistory', 'true');
       xulBrowser.setAttribute('flex', '1');
+      if (options.openWindowInfo) xulBrowser.openWindowInfo = options.openWindowInfo;
       ensureBrowserAgentActor();
       xulBrowser.style.cssText = 'width:100%; height:100%; background:#fff; display:block;';
       wrap.appendChild(xulBrowser);
+      if (browserIdentity && (!xulBrowser.browsingContext ||
+          xulBrowser.browsingContext.originAttributes?.userContextId !== browserIdentity.userContextId ||
+          browserIdentityModule().browserUserContextId(xulBrowser) !== browserIdentity.userContextId)) {
+        throw new Error('분리 환경의 Browser 컨텍스트를 확인할 수 없습니다.');
+      }
       xulBrowser.setAttribute('src', normalizedUrl);
     } catch (e) {
+      if (browserIdentity || options.openWindowInfo || options.requireNativeBrowser) {
+        try { xulBrowser?.remove(); } catch {}
+        try { deskWindow.requestClose(); } catch {}
+        throw new Error('분리 환경을 안전하게 열 수 없어 기본 환경으로 전환하지 않았습니다.');
+      }
       console.error(TAG, 'XUL browser create failed, falling back to iframe', e);
       const frame = el('iframe', { src: normalizedUrl, style: { width: '100%', height: '100%', border: '0' } });
       wrap.appendChild(frame);
@@ -17386,15 +17739,24 @@
       browserState.title = readBrowserTitle();
       if (browserState.uri !== previousUri) {
         pushBrowserHistory(browserState.uri, { replace: options.replaceHistory });
-        bindCardSourceRef(card, browserSourceRef(browserState.uri, options.sourceRef || {}));
+        bindCardSourceRef(card, sourceForBrowser(browserState.uri));
         if (options.markDirtyOnLocationChange) markAgendaDirty('browser-location-change', card);
       }
       updateHistoryFlags();
       syncBrowserChrome();
       return getBrowserStateSnapshot();
     };
+    const browserContextUsable = () => !browserIdentity || (browserIdentityUsable(browserIdentity) &&
+      browserIdentityModule().browserUserContextId(xulBrowser) === browserIdentity.userContextId &&
+      xulBrowser?.browsingContext?.originAttributes?.userContextId === browserIdentity.userContextId);
+    const requireBrowserContext = () => {
+      try { if (browserContextUsable()) return true; } catch {}
+      boardNotice('분리 환경 연결을 확인할 수 없어 주소를 열지 않았습니다.');
+      return false;
+    };
     const loadBrowserUri = (url) => {
       try {
+        if (!requireBrowserContext()) return false;
         xulBrowser?.setAttribute?.('src', url);
         if ('src' in xulBrowser) xulBrowser.src = url;
         return true;
@@ -17404,6 +17766,7 @@
       }
     };
     const navigateBrowser = (rawUrl, navOptions = {}) => {
+      if (!requireBrowserContext()) return null;
       agentProjection.invalidate();
       const url = normalizeBrowserNavigationUri(rawUrl || browserState.uri || browserState.homeUrl);
       browserState.uri = url;
@@ -17411,7 +17774,7 @@
       browserState.title = browserDisplayHost(url);
       urlInput.value = browserVisibleAddress(url);
       pushBrowserHistory(url, { replace: navOptions.replaceHistory });
-      bindCardSourceRef(card, browserSourceRef(url, navOptions.sourceRef || {}));
+      bindCardSourceRef(card, sourceForBrowser(url, navOptions.sourceRef || {}));
       setBrowserLoading(true);
       const loaded = loadBrowserUri(url);
       if (navOptions.markDirty !== false) markAgendaDirty('navigate-browser-card', card);
@@ -17419,6 +17782,7 @@
       return loaded ? getBrowserStateSnapshot() : null;
     };
     const goBrowserBack = () => {
+      if (!requireBrowserContext()) return false;
       agentProjection.invalidate();
       if (browserState.historyIndex > 0) {
         browserState.historyIndex -= 1;
@@ -17427,7 +17791,7 @@
         browserState.security = browserSecurityLabel(url);
         browserState.title = browserDisplayHost(url);
         urlInput.value = browserVisibleAddress(url);
-        bindCardSourceRef(card, browserSourceRef(url));
+        bindCardSourceRef(card, sourceForBrowser(url));
         setBrowserLoading(true);
         loadBrowserUri(url);
         markAgendaDirty('browser-back', card);
@@ -17445,6 +17809,7 @@
       }
     };
     const goBrowserForward = () => {
+      if (!requireBrowserContext()) return false;
       agentProjection.invalidate();
       if (browserState.historyIndex < browserState.history.length - 1) {
         browserState.historyIndex += 1;
@@ -17453,7 +17818,7 @@
         browserState.security = browserSecurityLabel(url);
         browserState.title = browserDisplayHost(url);
         urlInput.value = browserVisibleAddress(url);
-        bindCardSourceRef(card, browserSourceRef(url));
+        bindCardSourceRef(card, sourceForBrowser(url));
         setBrowserLoading(true);
         loadBrowserUri(url);
         markAgendaDirty('browser-forward', card);
@@ -17471,6 +17836,7 @@
       }
     };
     const reloadBrowser = () => {
+      if (typeof requireBrowserContext === 'function' && !requireBrowserContext()) return false;
       try {
         agentProjection.invalidate();
         setBrowserLoading(true);
@@ -17490,7 +17856,12 @@
       setBrowserLoading(false);
       return true;
     };
-    const duplicateBrowser = () => spawnBrowserCard(browserState.uri, { openMode: 'new' });
+    const duplicateBrowser = () => spawnBrowserCard(browserState.uri, { openMode: 'new', sourceRef: card._sourceRef,
+      ...(card._browserIdentity ? { browserIdentity: card._browserIdentity } : {}) });
+    const safeDuplicateBrowser = () => {
+      try { return duplicateBrowser(); }
+      catch { boardNotice('분리 환경을 확인할 수 없어 복제하지 않았습니다.'); return null; }
+    };
     const focusBrowserMenuReturn = (anchor, actionResult = null) => {
       const target = [
         actionResult?.querySelector?.('.egd-card-url'),
@@ -17537,6 +17908,7 @@
         return null;
       }
       const anchorRect = anchor.getBoundingClientRect();
+      const cookieImportSupported = typeof browserCookieImportSupport === 'function' && browserCookieImportSupport(card).supported;
       const item = (label, title, action, { testid = null, nativeWindow = false, disabled = false } = {}) => el('button', {
         class: 'egd-browser-menu-item',
         role: 'menuitem',
@@ -17553,7 +17925,7 @@
         onclick: (ev) => {
           ev.stopPropagation();
           closeBrowserMenu();
-          const result = action();
+          const result = action(ev);
           const focused = document.activeElement;
           if (!nativeWindow && (!focused?.isConnected || focused === document.body || focused === document.documentElement)) {
             focusBrowserMenuReturn(anchor, result);
@@ -17564,7 +17936,7 @@
       const interactItem = item(regrant ? '다시 조작 허용' : 'Chat 조작 허용', `이 Browser만 이번 Chat 실행의 관찰·조작 대상으로 선택합니다. 사이트 계정: ${card._sourceRef?.accountId || '미확인'}(선택 메타데이터, 로그인 증거 아님). 외부 효과는 별도 확인이 필요합니다.`,
         () => { endAgentHold(); return selectBrowserForChat('interact'); });
       const items = [
-        item('복제', '현재 URL을 새 Desk Window로 열기', duplicateBrowser),
+        item('복제', '현재 URL을 새 Desk Window로 열기', safeDuplicateBrowser),
         item('URL 복사', browserState.uri, () => copyTextToClipboard(browserState.uri)),
         item('Chat에 읽기 첨부', '현재 Browser의 읽기 자료만 다음 Chat에 선택합니다. 기존 조작 허용이 있으면 읽기 전용으로 바뀝니다.',
           () => { endAgentHold(); return selectBrowserForChat('observe'); }),
@@ -17576,6 +17948,9 @@
           { testid: 'browser-library-bookmarks', nativeWindow: true }),
         item('방문 기록…', 'Firefox 방문 기록', () => openFirefoxBrowserLibrary('History', card),
           { testid: 'browser-library-history', nativeWindow: true }),
+        item('Chrome 로그인 가져오기…', cookieImportSupported ? 'Chrome 프로필을 선택해 쿠키를 새 분리 환경으로 가져옵니다.' : '이 기기, 개인 창 또는 조직 정책에서는 사용할 수 없습니다.',
+          ev => openBrowserCookieImport(card, anchor, ev),
+          { testid: 'browser-cookie-import', disabled: !cookieImportSupported }),
         item('다른 브라우저에서 가져오기…', 'Firefox 가져오기 창 열기', () => openFirefoxBrowserImport(),
           { testid: 'browser-library-import', nativeWindow: true }),
       ];
@@ -18080,7 +18455,7 @@
       reload: reloadBrowser,
       stop: stopBrowser,
       home: () => navigateBrowser(browserState.homeUrl),
-      duplicate: duplicateBrowser,
+      duplicate: safeDuplicateBrowser,
       copyUrl: () => copyTextToClipboard(browserState.uri),
       menu: showBrowserMenu,
       closeMenu: closeBrowserMenu,
@@ -18274,6 +18649,7 @@
 
     const cleanupCard = () => {
       try { unregisterBrowserAuthorizer?.(); } catch {}
+      closeBrowserCookieImportForCard(card);
       disposeToolWindowGlobalWaits();
       toolDialogs.dispose();
       agentProjection.dispose();
@@ -18311,6 +18687,46 @@
 
 
   // ============ Popup capture (window.open / target=_blank → card) ============
+  function browserPopupSource(openWindowInfo, params = null) {
+    try {
+      const parent = openWindowInfo?.parent;
+      const top = parent ? (parent.top || parent) : null;
+      const openerBrowser = params?.openerBrowser || null;
+      if (!top && !openerBrowser) return null;
+      const cards = Array.from(document.querySelectorAll('.egd-browser-card')).filter(card => card.isConnected && card._xulBrowser?.isConnected);
+      const matches = cards.filter(card => (!top || card._xulBrowser.browsingContext === top) &&
+        (!openerBrowser || card._xulBrowser === openerBrowser));
+      if (matches.length !== 1) return null;
+      const card = matches[0], browser = card._xulBrowser;
+      const native = browser.browsingContext?.originAttributes;
+      const id = browserIdentityModule().browserUserContextId(browser);
+      if (!native || id === null || native.userContextId !== id) return null;
+      for (const attrs of [openWindowInfo?.originAttributes, params?.openerOriginAttributes]) {
+        if (attrs && (attrs.userContextId !== id || attrs.privateBrowsingId !== native.privateBrowsingId)) return null;
+      }
+      if (params && typeof params.isPrivate === 'boolean' && params.isPrivate !== (native.privateBrowsingId === 1)) return null;
+      if (id === 0 ? !!card._browserIdentity : card._browserIdentity?.userContextId !== id || !browserIdentityUsable(card._browserIdentity)) return null;
+      return card;
+    } catch { return null; }
+  }
+
+  function spawnBrowserPopup(uri, openWindowInfo, params = null) {
+    const source = browserPopupSource(openWindowInfo, params);
+    if (!source) {
+      try { openWindowInfo?.cancel?.(); } catch {}
+      boardNotice('팝업의 원래 Browser 환경을 확인할 수 없어 열지 않았습니다.'); return null;
+    }
+    try {
+      return spawnBrowserCard(uri ? uri.spec : 'about:blank', { openMode: 'new', requireNativeBrowser: true, sourceRef: source._sourceRef,
+        ...(source._browserIdentity ? { browserIdentity: source._browserIdentity } : {}),
+        ...(openWindowInfo ? { openWindowInfo } : {}) });
+    } catch {
+      try { openWindowInfo?.cancel?.(); } catch {}
+      boardNotice('팝업의 분리 환경을 안전하게 열지 못했습니다.');
+      return null;
+    }
+  }
+
   function installPopupCapture() {
     const BDW = {
       QueryInterface: ChromeUtils.generateQI(['nsIBrowserDOMWindow']),
@@ -18322,33 +18738,23 @@
       },
 
       createContentWindow(aURI, aOpenWindowInfo, aWhere, aFlags, aTriggeringPrincipal, aCsp) {
-        const url = aURI ? aURI.spec : 'about:blank';
-        console.warn(TAG, 'BDW.createContentWindow →', url);
-        const card = spawnBrowserCard(url);
-        try { return card._xulBrowser.contentWindow; }
-        catch (e) { console.warn(TAG, 'contentWindow not ready', e); return null; }
+        const card = spawnBrowserPopup(aURI, aOpenWindowInfo);
+        return card?._xulBrowser?.browsingContext || null;
       },
 
       openURI(aURI, aOpenWindowInfo, aWhere, aFlags, aTriggeringPrincipal, aCsp) {
-        const url = aURI ? aURI.spec : 'about:blank';
-        console.warn(TAG, 'BDW.openURI →', url);
-        const card = spawnBrowserCard(url);
-        try { return card._xulBrowser.contentWindow; }
-        catch (e) { return null; }
+        const card = spawnBrowserPopup(aURI, aOpenWindowInfo);
+        return card?._xulBrowser?.browsingContext || null;
       },
 
       createContentWindowInFrame(aURI, aParams, aWhere, aFlags, aName) {
-        const url = aURI ? aURI.spec : 'about:blank';
-        console.warn(TAG, 'BDW.createContentWindowInFrame →', url, 'name=', aName);
-        const card = spawnBrowserCard(url);
-        return card._xulBrowser;
+        const card = spawnBrowserPopup(aURI, aParams?.openWindowInfo, aParams);
+        return card?._xulBrowser || null;
       },
 
       openURIInFrame(aURI, aParams, aWhere, aFlags, aName) {
-        const url = aURI ? aURI.spec : 'about:blank';
-        console.warn(TAG, 'BDW.openURIInFrame →', url, 'name=', aName);
-        const card = spawnBrowserCard(url);
-        return card._xulBrowser;
+        const card = spawnBrowserPopup(aURI, aParams?.openWindowInfo, aParams);
+        return card?._xulBrowser || null;
       },
     };
 
@@ -20695,6 +21101,7 @@
   function boot() {
     try {
       if (document.getElementById('egd-desk-rail')) return;
+      ensureBrowserIdentityObserver();
       const lifecycle = readSurfacePref(SURFACE_LIFECYCLE_PREF);
       const deskSession = readSurfacePref(DESK_SESSION_PREF);
       const legacyChatRecords = prepareLegacyChatBackup(deskSession, rawDeskRecord());

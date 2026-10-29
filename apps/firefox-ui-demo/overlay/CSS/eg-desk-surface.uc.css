@@ -765,6 +765,33 @@
 .egd-store-confirm { display: flex; flex-direction: column; gap: 8px; margin-top: 4px; }
 .egd-store-confirm p { margin: 0; }
 .egd-store-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 6px; }
+#egd-browser-cookie-import {
+  left: 50%;
+  top: 64px;
+  transform: translateX(-50%);
+  width: min(500px, calc(100vw - 32px));
+  max-height: calc(100vh - 96px);
+}
+.egd-browser-cookie-field { display: flex; flex-direction: column; gap: 5px; }
+.egd-browser-cookie-select {
+  box-sizing: border-box;
+  width: 100%;
+  min-height: 34px;
+  padding: 4px 8px;
+  border: 1px solid var(--egd-outline);
+  border-radius: 8px;
+  background: var(--egd-surface);
+  color: var(--egd-on-surface);
+  font: 13px/1.4 var(--egd-font);
+}
+.egd-browser-cookie-select:focus-visible, .egd-browser-cookie-consent input:focus-visible {
+  outline: var(--egd-focus-outline);
+  outline-offset: var(--egd-focus-outline-offset);
+}
+.egd-browser-cookie-consent { display: grid; grid-template-columns: auto 1fr; align-items: start; gap: 8px; }
+.egd-browser-cookie-consent input { margin-top: 4px; }
+.egd-browser-cookie-note { margin: 0; color: var(--egd-on-surface-variant); font-size: 12px; }
+.egd-browser-cookie-counts { margin: 0; font-variant-numeric: tabular-nums; }
 /* RT-03 '내보내기' / '가져오기' (.egdesk): the same store panel, with a
    passphrase field, the plain-file warning and the check before importing. */
 #egd-portable-dialog {
@@ -1625,6 +1652,23 @@
 }
 
 .egd-browser-card .egd-card-page-status { font-size: 11px; }
+.egd-browser-card .egd-browser-environment {
+  flex: 0 1 auto;
+  max-width: 155px;
+  overflow: hidden;
+  padding: 1px 6px;
+  border-radius: 8px;
+  background: var(--egd-primary-container);
+  color: var(--egd-primary-strong);
+  font-size: 10px;
+  font-weight: 700;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.egd-browser-card[data-egd-browser-presentation] .egd-browser-environment {
+  max-width: calc(155px * var(--egd-browser-ui-scale, 1));
+  font-size: calc(10px * var(--egd-browser-ui-scale, 1));
+}
 
 .egd-browser-card .egd-desk-window-toolbar {
   height: 35px;
