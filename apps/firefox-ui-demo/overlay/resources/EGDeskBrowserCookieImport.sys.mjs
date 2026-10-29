@@ -699,23 +699,52 @@ export function createBrowserCookieImporter(options = {}) {
     } finally { busy = false; }
   }
 
-  async function cleanup(id) {
-    const attrs = { userContextId: id, privateBrowsingId: 0 };
-    let wiped = false;
-    for (let attempt = 0; attempt < 2 && !wiped; attempt++) {
-      try {
-        await adapter.cookies.removeAll(attrs);
-        const remaining = await adapter.cookies.list(attrs);
-        wiped = Array.isArray(remaining) && remaining.length === 0;
-      } catch { /* Never include native errors or cookie details in receipts. */ }
-    }
-    // Keep the new identity visible if its cookie cleanup is unconfirmed, so
-    // there is no invisible orphan of potentially live authentication data.
-    if (!wiped) return false;
-    for (let attempt = 0; attempt < 2; attempt++) {
-      try { if (await adapter.removeIdentity(id) === true) return true; } catch { /* retry */ }
-    }
-    return false;
+  function cleanup(owner, attempted) {
+    if (!owner) return false;
+    const id = owner.id, attrs = { userContextId: id, privateBrowsingId: 0 };
+    // Native operations are synchronous: no event-loop gap may separate the
+    // final ownership, use and contents checks from either destructive action.
+    const ownedAndUnused = () => !owner.invalidated &&
+      identitySnapshot(adapter.getIdentity(id), id, owner.name) === owner.fingerprint &&
+      adapter.identityInUse(id) === false && !owner.invalidated;
+    const readAttempted = () => {
+      const cookies = adapter.cookies.list(attrs);
+      if (!Array.isArray(cookies) || cookies.length > MAX_ROWS) fail('unavailable');
+      cookieSnapshot(cookies, id); // Validate bounded fields and origin attributes.
+      const current = new Set();
+      for (const cookie of cookies) {
+        const key = JSON.stringify([cookie?.host, cookie?.name, cookie?.path]);
+        const expected = attempted.get(key);
+        if (!expected || current.has(key) || !sameCookie(expected, cookie, id)) fail('unavailable');
+        // The import writes only the default, non-partitioned origin scope.
+        const origin = cookie.originAttributes;
+        for (const name of Object.keys(origin)) {
+          if (name !== 'userContextId' && name !== 'privateBrowsingId' &&
+              origin[name] !== '' && origin[name] !== 0 && origin[name] !== false) fail('unavailable');
+        }
+        current.add(key);
+      }
+      return cookies;
+    };
+    try {
+      if (!ownedAndUnused()) return false;
+      const before = readAttempted();
+      if (before.length) {
+        if (!ownedAndUnused()) return false;
+        const removed = adapter.cookies.removeAll(attrs);
+        if (removed === false || removed?.then) return false;
+      }
+      if (!ownedAndUnused()) return false;
+      const after = adapter.cookies.list(attrs);
+      if (!Array.isArray(after) || after.length || !ownedAndUnused()) return false;
+      // An observer can reinsert an identical cookie during a wipe. Even an
+      // apparently unchanged snapshot cannot justify a retry. Keep the
+      // identity visible on any unconfirmed operation; neither deletion is
+      // retried after a potentially reentrant native call.
+      if (adapter.removeIdentity(id) !== true || adapter.getIdentity(id) != null) return false;
+      const remaining = adapter.cookies.list(attrs);
+      return Array.isArray(remaining) && remaining.length === 0;
+    } catch { return false; }
   }
 
   async function importProfile({ profileId, explicitUserConsent = false, scopeMode = 'preserve',
@@ -738,7 +767,7 @@ export function createBrowserCookieImporter(options = {}) {
     if (ownedImports.size >= MAX_OWNED_IMPORTS) return receipt('failed', 'import-receipt-limit');
     busy = true;
     let ownedId = null, containerName = null, emptyBeforeWrites = false, owner = null, published = false;
-    const prepared = [];
+    const prepared = [], attempted = new Map();
     try {
       const data = await adapter.readSqlite(profile.directory, { maxRows: MAX_ROWS, maxBytes: MAX_BYTES,
         ...(signal ? { signal } : {}) });
@@ -846,6 +875,9 @@ export function createBrowserCookieImporter(options = {}) {
         // No await between the quota check and native add: the old cookies in
         // other contexts must not be evicted by a global quota-triggered purge.
         requireCapacity(prepared.length - index);
+        // Native add can write a cookie and then throw via a synchronous
+        // observer, so record the exact attempted value before invoking it.
+        attempted.set(JSON.stringify([cookie.host, cookie.name, cookie.path]), cookie);
         const added = adapter.cookies.add(cookie, attrs);
         if (added === 'cookie-expiry-cap-exceeded') fail('cookie-expiry-cap-exceeded');
         if (added !== true) fail('cookie-validation-failed');
@@ -888,7 +920,7 @@ export function createBrowserCookieImporter(options = {}) {
         if (!emptyBeforeWrites || owner?.invalidated || !identityStillOwned) {
           return receipt('failed', 'cleanup-incomplete', { userContextId: ownedId, containerName });
         }
-        const clean = await cleanup(ownedId);
+        const clean = cleanup(owner, attempted);
         if (!clean) return receipt('failed', 'cleanup-incomplete', { userContextId: ownedId, containerName });
       }
       if (cancelled) return receipt('cancelled');

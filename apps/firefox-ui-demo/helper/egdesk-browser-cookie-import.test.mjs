@@ -271,7 +271,7 @@ test('Keychain failures are distinguished when known, and errors never escape', 
   }
 });
 
-test('add, readback, access revocation and cancellation clean only the newly owned container', async () => {
+test('failed imports clean only unchanged, unused newly owned containers', async () => {
   for (const kind of ['add', 'readback', 'revoked', 'abort']) {
     const f = fixture([row(), row({ name: 'second' })]);
     const id = await selected(f.importer), controller = new AbortController();
@@ -290,12 +290,98 @@ test('add, readback, access revocation and cancellation clean only the newly own
     const result = await f.importer.importProfile({ profileId: id, explicitUserConsent: true, signal: controller.signal });
     assert.equal(result.status, kind === 'abort' ? 'cancelled' : 'failed');
     assert.equal(result.counts.imported, 0);
-    assert.deepEqual(f.state.identities, [7]);
-    assert.equal(f.state.jars.has(80), false);
-    assert.ok(f.state.calls.some(call => Array.isArray(call) && call[0] === 'wipe' && call[1] === 80));
-    assert.ok(f.state.calls.some(call => Array.isArray(call) && call[0] === 'remove' && call[1] === 80));
+    if (kind === 'readback') {
+      assert.equal(result.reason, 'cleanup-incomplete');
+      assert.deepEqual(f.state.identities, [7, 80]);
+      assert.equal(f.state.jars.get(80).length, 2);
+      assert.equal(f.state.calls.some(call => Array.isArray(call) && ['wipe', 'remove'].includes(call[0])), false);
+    } else {
+      assert.deepEqual(f.state.identities, [7]);
+      assert.equal(f.state.jars.has(80), false);
+      assert.ok(f.state.calls.some(call => Array.isArray(call) && call[0] === 'wipe' && call[1] === 80));
+      assert.ok(f.state.calls.some(call => Array.isArray(call) && call[0] === 'remove' && call[1] === 80));
+    }
     assert.equal(JSON.stringify(result).includes('synthetic-secret'), false);
   }
+});
+
+test('rollback stops after a wipe observer invalidates, adopts or changes the container', async () => {
+  for (const kind of ['invalidated', 'renamed', 'adopted', 'new-cookie', 'same-cookie-readded', 'changed-cookie', 'new-scope']) {
+    const f = fixture([row()]), id = await selected(f.importer);
+    const add = f.adapter.cookies.add, wipe = f.adapter.cookies.removeAll;
+    f.adapter.cookies.add = (cookie, attrs) => { add(cookie, attrs); throw new Error('private synthetic error'); };
+    f.adapter.cookies.removeAll = attrs => {
+      if (kind === 'new-cookie' || kind === 'same-cookie-readded') {
+        const original = f.state.jars.get(80)[0];
+        wipe(attrs);
+        f.state.jars.set(80, [kind === 'new-cookie' ?
+          { ...original, name: 'observer-cookie', value: 'observer-secret' } : { ...original }]);
+        return;
+      }
+      f.state.calls.push(['wipe', attrs.userContextId]);
+      if (kind === 'invalidated') f.state.invalidate(80);
+      if (kind === 'renamed') f.state.identityRecords.get(80).name = 'Adopted';
+      if (kind === 'adopted') f.state.inUse.add(80);
+      if (kind === 'changed-cookie') f.state.jars.get(80)[0].value = 'observer-secret';
+      if (kind === 'new-scope') f.state.jars.get(80)[0].originAttributes.firstPartyDomain = 'observer.test';
+      return;
+    };
+    const result = await f.importer.importProfile({ profileId: id, explicitUserConsent: true });
+    assert.equal(result.status, 'failed', kind);
+    assert.equal(result.reason, 'cleanup-incomplete', kind);
+    assert.equal(result.userContextId, 80, kind);
+    assert.deepEqual(f.state.identities, [7, 80], kind);
+    assert.equal(f.state.jars.get(80).length, 1, kind);
+    assert.equal(f.state.calls.filter(call => Array.isArray(call) && call[0] === 'wipe').length, 1, kind);
+    assert.equal(f.state.calls.some(call => Array.isArray(call) && call[0] === 'remove'), false, kind);
+    assert.equal(JSON.stringify(result).includes('secret'), false, kind);
+  }
+});
+
+test('rollback checks use before first wipe and again after the final cookie read', async () => {
+  for (const phase of ['before-wipe', 'after-wipe']) {
+    const f = fixture([row()]), id = await selected(f.importer);
+    const add = f.adapter.cookies.add, list = f.adapter.cookies.list;
+    f.adapter.cookies.add = (cookie, attrs) => {
+      add(cookie, attrs);
+      if (phase === 'before-wipe') f.state.inUse.add(80);
+      throw new Error('synthetic error');
+    };
+    if (phase === 'after-wipe') {
+      let reads = 0;
+      f.adapter.cookies.list = attrs => {
+        const result = list(attrs);
+        if (++reads === 3) f.state.inUse.add(80);
+        return result;
+      };
+    }
+    const result = await f.importer.importProfile({ profileId: id, explicitUserConsent: true });
+    assert.equal(result.reason, 'cleanup-incomplete', phase);
+    assert.equal(result.userContextId, 80, phase);
+    assert.equal(f.state.identities.includes(80), true, phase);
+    assert.equal(f.state.calls.some(call => Array.isArray(call) && call[0] === 'remove'), false, phase);
+    assert.equal(f.state.calls.filter(call => Array.isArray(call) && call[0] === 'wipe').length,
+      phase === 'before-wipe' ? 0 : 1, phase);
+  }
+});
+
+test('rollback never retries a failed wipe even if ownership, use and contents appear unchanged', async () => {
+  const f = fixture([row()]), id = await selected(f.importer);
+  const add = f.adapter.cookies.add, wipe = f.adapter.cookies.removeAll;
+  f.adapter.cookies.add = (cookie, attrs) => { add(cookie, attrs); throw new Error('synthetic error'); };
+  let attempts = 0;
+  f.adapter.cookies.removeAll = attrs => {
+    if (++attempts === 1) { f.state.calls.push(['wipe', attrs.userContextId]); throw new Error('synthetic error'); }
+    return wipe(attrs);
+  };
+  const result = await f.importer.importProfile({ profileId: id, explicitUserConsent: true });
+  assert.equal(result.status, 'failed');
+  assert.equal(result.reason, 'cleanup-incomplete');
+  assert.equal(result.userContextId, 80);
+  assert.equal(attempts, 1);
+  assert.deepEqual(f.state.identities, [7, 80]);
+  assert.equal(f.state.jars.get(80).length, 1);
+  assert.equal(f.state.calls.some(call => Array.isArray(call) && call[0] === 'remove'), false);
 });
 
 test('unconfirmed cleanup retains the owned identity and reports its id without secrets', async () => {
