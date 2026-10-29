@@ -32,7 +32,10 @@ async function ciphertext(host, value, version = 24, password = PASSWORD) {
 
 function fixture(rows = [], version = 24) {
   const state = { rows, version, jars: new Map(), identities: [7], calls: [], allowed: true, next: 80,
-    baseCount: 0, maxCookies: 3000, scopeBindings: undefined };
+    baseCount: 0, maxCookies: 3000, scopeBindings: undefined, identityRecords: new Map(),
+    watchers: new Map(), inUse: new Set() };
+  state.identityRecords.set(7, { userContextId: 7, name: 'Existing', icon: 'fingerprint', color: 'blue', public: true });
+  state.invalidate = id => { for (const callback of state.watchers.get(id) || []) callback(); };
   const adapter = {
     platform: 'macosx', crypto: webcrypto, randomUUID, now: () => NOW,
     checkAccess: () => state.allowed,
@@ -47,17 +50,24 @@ function fixture(rows = [], version = 24) {
     },
     async getKeychainPassword() { state.calls.push('keychain'); return PASSWORD; },
     getIdentityIds() { return [...state.identities]; },
+    getIdentity(id) { return state.identityRecords.get(id) ?? null; },
+    identityInUse(id) { return state.inUse.has(id); },
+    watchIdentity(id, callback) {
+      const watchers = state.watchers.get(id) || new Set(); watchers.add(callback); state.watchers.set(id, watchers);
+      return () => watchers.delete(callback);
+    },
     getCookieCapacity() { return { current: state.baseCount + [...state.jars.values()].reduce((n, jar) => n + jar.length, 0),
       max: state.maxCookies }; },
     createIdentity(name) {
       const id = state.next++; state.identities.push(id); state.calls.push(['create', id]);
-      return { userContextId: id, name };
+      const identity = { userContextId: id, name, icon: 'fingerprint', color: 'blue', public: true };
+      state.identityRecords.set(id, identity); return { ...identity };
     },
     removeIdentity(id) {
       state.calls.push(['remove', id]);
       const index = state.identities.indexOf(id);
       if (index < 0) return false;
-      state.identities.splice(index, 1); return true;
+      state.invalidate(id); state.identityRecords.delete(id); state.identities.splice(index, 1); return true;
     },
     cookies: {
       add(cookie, attrs) {
@@ -312,6 +322,95 @@ test('never clears preexisting data on unexpected nonempty container', async () 
   assert.equal(f.state.calls.some(call => Array.isArray(call) && ['wipe', 'remove'].includes(call[0])), false);
 });
 
+test('discard rejects arbitrary, preexisting and other-instance ids; owned success is idempotent', async () => {
+  const f = fixture([row()]), id = await selected(f.importer);
+  assert.deepEqual(await f.importer.discardImport(null), { status: 'not-owned' });
+  assert.deepEqual(await f.importer.discardImport({ userContextId: 7 }), { status: 'not-owned' });
+  assert.deepEqual(await f.importer.discardImport({ userContextId: 999 }), { status: 'not-owned' });
+  const imported = await f.importer.importProfile({ profileId: id, explicitUserConsent: true });
+  assert.equal(imported.status, 'imported');
+  const another = createBrowserCookieImporter({ profileImportPolicy: 'allow', privateBrowsingId: 0, adapter: f.adapter });
+  assert.deepEqual(await another.discardImport({ userContextId: imported.userContextId }), { status: 'not-owned' });
+  assert.deepEqual(await f.importer.discardImport({ userContextId: imported.userContextId }), { status: 'discarded' });
+  assert.deepEqual(f.state.identities, [7]);
+  assert.equal(f.state.jars.has(80), false);
+  const calls = f.state.calls.length;
+  assert.deepEqual(await f.importer.discardImport({ userContextId: imported.userContextId }), { status: 'discarded' });
+  assert.equal(f.state.calls.length, calls);
+});
+
+test('discard refuses changed cookies, identity mutation, recreation and known use', async () => {
+  for (const mode of ['cookie', 'identity', 'recreated', 'used', 'unknown-use']) {
+    const f = fixture([row()]), id = await selected(f.importer);
+    const imported = await f.importer.importProfile({ profileId: id, explicitUserConsent: true });
+    assert.equal(imported.status, 'imported');
+    if (mode === 'cookie') f.state.jars.get(80)[0].value = 'changed synthetic value';
+    if (mode === 'identity') f.state.identityRecords.get(80).name = 'Changed';
+    if (mode === 'recreated') f.state.invalidate(80); // even if same ID/name is later presented
+    if (mode === 'used') f.state.inUse.add(80);
+    if (mode === 'unknown-use') f.adapter.identityInUse = () => null;
+    const before = f.state.calls.length;
+    const result = await f.importer.discardImport({ userContextId: 80 });
+    assert.equal(result.status, 'cleanup-required');
+    assert.equal(result.reason, mode === 'cookie' ? 'import-changed' :
+      ['used', 'unknown-use'].includes(mode) ? 'identity-in-use-or-unverified' : 'ownership-unverified');
+    assert.equal(f.state.jars.has(80), true);
+    assert.equal(f.state.identities.includes(80), true);
+    assert.equal(f.state.calls.slice(before).some(call => Array.isArray(call) && ['wipe', 'remove'].includes(call[0])), false);
+    assert.equal(JSON.stringify(result).includes('synthetic'), false);
+    if (mode === 'used') {
+      f.state.inUse.delete(80);
+      assert.equal((await f.importer.discardImport({ userContextId: 80 })).status, 'cleanup-required');
+    }
+  }
+});
+
+test('discard does not delete a cookie changed while the commitment is being checked', async () => {
+  const f = fixture([row()]), id = await selected(f.importer);
+  let mutate = false;
+  f.adapter.crypto = {
+    getRandomValues: bytes => webcrypto.getRandomValues(bytes),
+    subtle: { importKey: webcrypto.subtle.importKey.bind(webcrypto.subtle),
+      deriveKey: webcrypto.subtle.deriveKey.bind(webcrypto.subtle), decrypt: webcrypto.subtle.decrypt.bind(webcrypto.subtle),
+      async digest(...args) {
+        const digest = await webcrypto.subtle.digest(...args);
+        if (mutate) f.state.jars.get(80)[0].value = 'changed synthetic value';
+        return digest;
+      } },
+  };
+  await f.importer.importProfile({ profileId: id, explicitUserConsent: true });
+  mutate = true;
+  const result = await f.importer.discardImport({ userContextId: 80 });
+  assert.deepEqual(result, { status: 'cleanup-required', reason: 'import-changed' });
+  assert.equal(f.state.jars.has(80), true);
+  assert.equal(f.state.identities.includes(80), true);
+});
+
+test('discard cleanup failure remains visible and never removes an unconfirmed container', async () => {
+  const f = fixture([row()]), id = await selected(f.importer);
+  await f.importer.importProfile({ profileId: id, explicitUserConsent: true });
+  f.adapter.cookies.removeAll = () => { throw new Error('synthetic secret'); };
+  const result = await f.importer.discardImport({ userContextId: 80 });
+  assert.deepEqual(result, { status: 'cleanup-required', reason: 'cleanup-unconfirmed' });
+  assert.equal(f.state.jars.has(80), true);
+  assert.equal(f.state.identities.includes(80), true);
+  assert.equal(f.state.calls.some(call => Array.isArray(call) && call[0] === 'remove'), false);
+  assert.equal(JSON.stringify(result).includes('synthetic secret'), false);
+});
+
+test('identity invalidated during import stops further writes and reports manual cleanup', async () => {
+  const f = fixture([row({ name: 'one' }), row({ name: 'two' })]), id = await selected(f.importer);
+  const add = f.adapter.cookies.add;
+  f.adapter.cookies.add = (cookie, attrs) => { const result = add(cookie, attrs); f.state.invalidate(80); return result; };
+  const result = await f.importer.importProfile({ profileId: id, explicitUserConsent: true });
+  assert.equal(result.status, 'failed');
+  assert.equal(result.reason, 'cleanup-incomplete');
+  assert.equal(result.userContextId, 80);
+  assert.equal(f.state.jars.get(80).length, 1);
+  assert.equal(f.state.calls.filter(call => Array.isArray(call) && call[0] === 'add').length, 1);
+  assert.equal(f.state.calls.some(call => Array.isArray(call) && ['wipe', 'remove'].includes(call[0])), false);
+});
+
 test('permission errors and cancellation during a pending source read do not create containers', async () => {
   const f = fixture([row()]), id = await selected(f.importer);
   f.adapter.readSqlite = () => { throw { code: 'permission-denied', message: 'secret' }; };
@@ -336,7 +435,8 @@ function fakeGecko({ platform = 'macosx', geckoVersion = '158.0.1', failedImport
   const state = { files: new Map(), opened: [], closed: 0, transactionTypes: [], keychainCalls: 0,
     identities: [7], jars: new Map(), policy: true, logging: false, envLogging: false,
     sqlFailure: false, pauseSql: false, pendingSqlReject: null, interruptions: 0, nativeMax: 3000,
-    expiryRejected: false,
+    expiryRejected: false, nativeIdentityRecords: new Map(), observers: new Map(),
+    windows: [], nativeTabIds: new Set(),
     rows: [row()], version: 24, imports: [] };
   for (const path of ['/Users/synthetic', '/Users/synthetic/Library',
     '/Users/synthetic/Library/Application Support', '/Users/synthetic/Library/Application Support/Google',
@@ -388,14 +488,23 @@ function fakeGecko({ platform = 'macosx', geckoVersion = '158.0.1', failedImport
       };
     },
   };
+  state.nativeIdentityRecords.set(7, { userContextId: 7, name: 'Existing', icon: 'fingerprint', color: 'blue', public: true });
   const identities = {
-    getPublicIdentities: () => state.identities.map(userContextId => ({ userContextId })),
-    create: name => { state.identities.push(80); return { userContextId: 80, name }; },
-    remove: id => { state.identities = state.identities.filter(n => n !== id); return true; },
+    getPublicIdentities: () => state.identities.map(userContextId => state.nativeIdentityRecords.get(userContextId)),
+    getPublicIdentityFromId: id => state.nativeIdentityRecords.get(id),
+    countContainerTabs: id => state.nativeTabIds.has(id) ? 1 : 0,
+    create: name => { const identity = { userContextId: 80, name, icon: 'fingerprint', color: 'blue', public: true };
+      state.identities.push(80); state.nativeIdentityRecords.set(80, identity); return { ...identity }; },
+    remove: id => { state.nativeIdentityRecords.delete(id); state.identities = state.identities.filter(n => n !== id); return true; },
   };
   const services = {
     dirsvc: { get: () => new FakeFile('/Users/synthetic') },
     appinfo: { platformVersion: geckoVersion },
+    obs: {
+      addObserver(observer, topic) { const set = state.observers.get(topic) || new Set(); set.add(observer); state.observers.set(topic, set); },
+      removeObserver(observer, topic) { state.observers.get(topic)?.delete(observer); },
+    },
+    wm: { getEnumerator: () => state.windows },
     policies: { isAllowed: feature => feature === 'profileImport' && state.policy },
     env: { get: () => state.envLogging ? 'cookie:5' : '' },
     prefs: { getBoolPref: () => true, getIntPref: () => state.nativeMax,
@@ -466,7 +575,39 @@ test('native adapter uses readonly locked deferred transaction, closes, prompts 
     assert.equal(f.state.jars.get(80)[0].value, 'only synthetic');
     assert.ok(f.state.imports.includes('moz-src:///toolkit/components/contextualidentity/ContextualIdentityService.sys.mjs'));
     assert.equal(f.state.imports.includes('resource://gre/modules/ContextualIdentityService.sys.mjs'), false);
+    assert.deepEqual(await f.importer.discardImport({ userContextId: 80 }), { status: 'discarded' });
+    assert.deepEqual(f.state.identities, [7]);
+    assert.equal(f.state.jars.has(80), false);
+    assert.ok([...f.state.observers.values()].every(set => set.size === 0));
   } finally { f.restore(); }
+});
+
+test('native cleanup refuses visible native use and observed context or identity adoption', async () => {
+  for (const mode of ['tab', 'embedded-browser', 'context-attached', 'identity-deleted']) {
+    const f = fakeGecko();
+    try {
+      const id = (await f.importer.listProfiles({ explicitUserRequest: true })).profiles[0].id;
+      assert.equal((await f.importer.importProfile({ profileId: id, explicitUserConsent: true })).status, 'imported');
+      if (mode === 'tab') f.state.nativeTabIds.add(80);
+      if (mode === 'embedded-browser') f.state.windows.push({ closed: false, document: {
+        querySelectorAll: () => [{ browsingContext: { originAttributes: { userContextId: 80 } }, getAttribute: () => null }],
+      } });
+      if (mode === 'context-attached') {
+        for (const observer of f.state.observers.get('browsing-context-attached')) {
+          observer.observe({ QueryInterface: () => ({ originAttributes: { userContextId: 80 } }) }, 'browsing-context-attached');
+        }
+      }
+      if (mode === 'identity-deleted') {
+        for (const observer of f.state.observers.get('contextual-identity-deleted')) {
+          observer.observe({ wrappedJSObject: { userContextId: 80 } }, 'contextual-identity-deleted');
+        }
+      }
+      const result = await f.importer.discardImport({ userContextId: 80 });
+      assert.equal(result.status, 'cleanup-required');
+      assert.equal(f.state.identities.includes(80), true);
+      assert.equal(f.state.jars.has(80), true);
+    } finally { f.restore(); }
+  }
 });
 
 test('native adapter uses the legacy identity URI only if the modern URI fails', () => {

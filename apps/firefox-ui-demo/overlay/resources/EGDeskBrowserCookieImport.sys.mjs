@@ -18,6 +18,7 @@ const MAX_STATE_BYTES = 4 * 1024 * 1024;
 const MAX_PROFILES = 100;
 const MAX_FIELD_BYTES = 16384;
 const MAX_READ_MS = 15000;
+const MAX_OWNED_IMPORTS = 1024;
 const WINDOWS_EPOCH_MICROS = 11644473600000000n;
 const MAX_SAFE_BIGINT = BigInt(Number.MAX_SAFE_INTEGER);
 const DIRECTORY = /^(?:Default|Profile [1-9][0-9]{0,5})$/;
@@ -126,7 +127,8 @@ function geckoAdapter(browserWindow) {
         .ContextualIdentityService;
     }
     if (typeof identities?.create !== 'function' || typeof identities?.remove !== 'function' ||
-        typeof identities?.getPublicIdentities !== 'function') throw new Error();
+        typeof identities?.getPublicIdentities !== 'function' ||
+        typeof identities?.getPublicIdentityFromId !== 'function') throw new Error();
     failure = 'native-sqlite-unavailable';
     const { Sqlite } = importer('resource://gre/modules/Sqlite.sys.mjs');
     if (typeof Sqlite?.openConnection !== 'function') throw new Error();
@@ -372,6 +374,54 @@ function geckoAdapter(browserWindow) {
         } catch { fail('keychain-unavailable-or-denied'); }
       },
       getIdentityIds: () => identities.getPublicIdentities().map(identity => identity.userContextId),
+      getIdentity: id => identities.getPublicIdentityFromId(id) ?? null,
+      identityInUse(id) {
+        try {
+          if (typeof identities.countContainerTabs !== 'function' ||
+              typeof services.wm?.getEnumerator !== 'function') return null;
+          if (identities.countContainerTabs(id) !== 0) return true;
+          let windows = 0, elements = 0;
+          for (const win of services.wm.getEnumerator(null)) {
+            if (++windows > 100) return null;
+            if (win.closed) continue;
+            if (typeof win.document?.querySelectorAll !== 'function') return null;
+            for (const browser of win.document.querySelectorAll('browser, iframe')) {
+              if (++elements > 50000) return null;
+              if (browser.browsingContext?.originAttributes?.userContextId === id ||
+                  browser.getAttribute?.('usercontextid') === String(id)) return true;
+            }
+          }
+          return false;
+        } catch { return null; }
+      },
+      watchIdentity(id, onInvalidated) {
+        const topics = ['contextual-identity-updated', 'contextual-identity-deleted', 'browsing-context-attached'];
+        if (typeof services.obs?.addObserver !== 'function' || typeof services.obs?.removeObserver !== 'function') {
+          fail('unavailable');
+        }
+        const attached = [];
+        const observer = { observe(subject, topic) {
+          try {
+            const context = topic === 'browsing-context-attached' ?
+              (subject?.QueryInterface?.(ci.nsILoadContext) ?? subject) : null;
+            const changed = context ? context.originAttributes?.userContextId : subject?.wrappedJSObject?.userContextId;
+            if (changed === 0) return;
+            if (!validId(changed) || changed === id) onInvalidated();
+          } catch { onInvalidated(); }
+        } };
+        try {
+          for (const topic of topics) { services.obs.addObserver(observer, topic); attached.push(topic); }
+        } catch (error) {
+          for (const topic of attached) { try { services.obs.removeObserver(observer, topic); } catch {} }
+          throw error;
+        }
+        let active = true;
+        return () => {
+          if (!active) return;
+          active = false;
+          for (const topic of attached) { try { services.obs.removeObserver(observer, topic); } catch {} }
+        };
+      },
       getCookieCapacity() {
         // Firefox 142-158 GetCookies includes expired in-memory entries, so
         // this length matches the persistent storage's mCookieCount. Later
@@ -510,13 +560,74 @@ function sameCookie(expected, actual, id) {
     actual?.originAttributes?.userContextId === id && actual?.originAttributes?.privateBrowsingId === 0;
 }
 
+function identitySnapshot(identity, id, name) {
+  if (!identity || identity.then || identity.userContextId !== id || identity.public !== true ||
+      identity.name !== name || identity.icon !== 'fingerprint' || identity.color !== 'blue') return null;
+  return JSON.stringify([identity.userContextId, identity.name, identity.icon, identity.color, identity.public]);
+}
+
+// This string is transient and stays in privileged memory only. The retained
+// ownership record contains just a random salt and a digest, never cookie data.
+function cookieSnapshot(cookies, id) {
+  if (!Array.isArray(cookies) || cookies.length > MAX_ROWS) fail('unavailable');
+  let total = 0;
+  const entries = cookies.map(cookie => {
+    if (!cookie || typeof cookie !== 'object') fail('unavailable');
+    const strings = [cookie.host, cookie.name, cookie.path, cookie.value];
+    if (strings.some(value => typeof value !== 'string' || sizeOf(value) > MAX_FIELD_BYTES) ||
+        typeof cookie.isSecure !== 'boolean' || typeof cookie.isHttpOnly !== 'boolean' ||
+        typeof cookie.isSession !== 'boolean' || typeof cookie.isPartitioned !== 'boolean' ||
+        !Number.isSafeInteger(cookie.expiry) || !Number.isInteger(cookie.sameSite) ||
+        !Number.isInteger(cookie.schemeMap)) fail('unavailable');
+    const attrs = cookie.originAttributes;
+    if (!attrs || attrs.userContextId !== id || attrs.privateBrowsingId !== 0) fail('unavailable');
+    const keys = Object.keys(attrs).sort();
+    if (keys.length > 32) fail('unavailable');
+    const origin = keys.map(key => {
+      const value = attrs[key];
+      if (key.length > 128 || !['string', 'number', 'boolean'].includes(typeof value) ||
+          (typeof value === 'string' && sizeOf(value) > MAX_FIELD_BYTES) ||
+          (typeof value === 'number' && !Number.isSafeInteger(value))) fail('unavailable');
+      return [key, value];
+    });
+    const entry = JSON.stringify([...strings, cookie.isSecure, cookie.isHttpOnly, cookie.isSession,
+      cookie.expiry, cookie.sameSite, cookie.schemeMap, cookie.isPartitioned, origin]);
+    total += entry.length;
+    if (total > MAX_BYTES * 3) fail('resource-limit');
+    return entry;
+  });
+  entries.sort();
+  return `[${entries.join(',')}]`;
+}
+
+async function cookieCommitment(crypt, salt, snapshot) {
+  const text = byteEncoder.encode(snapshot);
+  const bytes = new Uint8Array(salt.length + text.length);
+  bytes.set(salt); bytes.set(text, salt.length);
+  try { return new Uint8Array(await crypt.subtle.digest('SHA-256', bytes)); }
+  finally { text.fill(0); bytes.fill(0); }
+}
+
+function sameBytes(left, right) {
+  if (!(left instanceof Uint8Array) || !(right instanceof Uint8Array) || left.length !== right.length) return false;
+  let difference = 0;
+  for (let i = 0; i < left.length; i++) difference |= left[i] ^ right[i];
+  return difference === 0;
+}
+
+function ownerInvalidator(record) {
+  // Capture only the small owner record, not the import's transient cookies.
+  return () => { record.invalidated = true; };
+}
+
 /**
  * The injected adapter is a privileged test seam, not a public IPC API. It has
  * platform, crypto, randomUUID(), now(), checkAccess(), readRoot(),
  * readSqlite(directory,{maxRows,maxBytes,signal?}), getKeychainPassword(),
- * getIdentityIds(), getCookieCapacity(), createIdentity(name), removeIdentity(id), and cookies
- * {add(cookie,attrs), list(attrs), removeAll(attrs)}. getCookieCapacity and add
- * are synchronous; the latter returns true or a fixed validation reason.
+ * getIdentityIds(), getIdentity(id), identityInUse(id), watchIdentity(id,onInvalidated),
+ * getCookieCapacity(), createIdentity(name), removeIdentity(id), and cookies
+ * {add(cookie,attrs), list(attrs), removeAll(attrs)}. These identity and cookie
+ * operations are synchronous. watchIdentity returns a synchronous unsubscribe.
  * Adapters must use only
  * synthetic data in tests. Native access and policy are independently checked
  * in Gecko; there are no native-path or native-Keychain overrides.
@@ -524,6 +635,7 @@ function sameCookie(expected, actual, id) {
 export function createBrowserCookieImporter(options = {}) {
   const adapter = options.adapter === undefined ? geckoAdapter(options.browserWindow) : options.adapter;
   const profiles = new Map();
+  const ownedImports = new Map();
   let busy = false;
 
   function availability() {
@@ -532,10 +644,13 @@ export function createBrowserCookieImporter(options = {}) {
     if (adapter?.[NATIVE_INIT_FAILURE]) return { supported: false, reason: adapter[NATIVE_INIT_FAILURE] };
     if (!adapter || typeof adapter.platform !== 'string' || !adapter.platform) return { supported: false, reason: 'unavailable' };
     if (adapter.platform !== 'macosx') return { supported: false, reason: 'platform-unsupported' };
-    if (!adapter.crypto?.subtle || typeof adapter.randomUUID !== 'function' || typeof adapter.now !== 'function' ||
+    if (!adapter.crypto?.subtle || typeof adapter.crypto.getRandomValues !== 'function' ||
+        typeof adapter.randomUUID !== 'function' || typeof adapter.now !== 'function' ||
         typeof adapter.checkAccess !== 'function' || typeof adapter.readRoot !== 'function' ||
         typeof adapter.readSqlite !== 'function' || typeof adapter.getKeychainPassword !== 'function' ||
-        typeof adapter.getIdentityIds !== 'function' || typeof adapter.getCookieCapacity !== 'function' ||
+        typeof adapter.getIdentityIds !== 'function' || typeof adapter.getIdentity !== 'function' ||
+        typeof adapter.identityInUse !== 'function' || typeof adapter.watchIdentity !== 'function' ||
+        typeof adapter.getCookieCapacity !== 'function' ||
         typeof adapter.createIdentity !== 'function' ||
         typeof adapter.removeIdentity !== 'function' || typeof adapter.cookies?.add !== 'function' ||
         typeof adapter.cookies?.list !== 'function' || typeof adapter.cookies?.removeAll !== 'function') {
@@ -617,8 +732,9 @@ export function createBrowserCookieImporter(options = {}) {
     const profile = typeof profileId === 'string' ? profiles.get(profileId) : null;
     if (!profile) return receipt('failed', 'profile-not-enumerated');
     if (busy) return receipt('failed', 'busy');
+    if (ownedImports.size >= MAX_OWNED_IMPORTS) return receipt('failed', 'import-receipt-limit');
     busy = true;
-    let ownedId = null, containerName = null, emptyBeforeWrites = false;
+    let ownedId = null, containerName = null, emptyBeforeWrites = false, owner = null, published = false;
     const prepared = [];
     try {
       const data = await adapter.readSqlite(profile.directory, { maxRows: MAX_ROWS, maxBytes: MAX_BYTES,
@@ -694,10 +810,18 @@ export function createBrowserCookieImporter(options = {}) {
       if (!availability().supported) fail('unavailable');
       // Synchronous to avoid an ownership gap between create and receipt.
       const identity = adapter.createIdentity(containerName);
-      if (!identity || identity.then || !validId(identity.userContextId) || existing.includes(identity.userContextId)) {
+      if (!identity || identity.then || !validId(identity.userContextId) || existing.includes(identity.userContextId) ||
+          ownedImports.has(identity.userContextId)) {
         fail('unavailable');
       }
       ownedId = identity.userContextId;
+      const fingerprint = identitySnapshot(identity, ownedId, containerName);
+      if (!fingerprint) fail('unavailable');
+      owner = { id: ownedId, name: containerName, fingerprint, invalidated: false, unwatch: null,
+        salt: null, commitment: null, discarded: false };
+      owner.unwatch = adapter.watchIdentity(ownedId, ownerInvalidator(owner));
+      if (typeof owner.unwatch !== 'function' || owner.invalidated ||
+          identitySnapshot(adapter.getIdentity(ownedId), ownedId, containerName) !== fingerprint) fail('unavailable');
       const idsAfter = adapter.getIdentityIds();
       if (!Array.isArray(idsAfter) || !idsAfter.includes(ownedId)) fail('unavailable');
       const attrs = { userContextId: ownedId, privateBrowsingId: 0 };
@@ -712,6 +836,10 @@ export function createBrowserCookieImporter(options = {}) {
         const cookie = prepared[index];
         interrupted(signal);
         if (!availability().supported) fail('unavailable');
+        if (owner.invalidated || identitySnapshot(adapter.getIdentity(ownedId), ownedId, containerName) !== fingerprint) {
+          owner.invalidated = true;
+          fail('unavailable');
+        }
         // No await between the quota check and native add: the old cookies in
         // other contexts must not be evicted by a global quota-triggered purge.
         requireCapacity(prepared.length - index);
@@ -728,13 +856,35 @@ export function createBrowserCookieImporter(options = {}) {
       const byKey = new Map(actual.map(cookie => [JSON.stringify([cookie.host, cookie.name, cookie.path]), cookie]));
       if (byKey.size !== prepared.length || prepared.some(cookie =>
         !sameCookie(cookie, byKey.get(JSON.stringify([cookie.host, cookie.name, cookie.path])), ownedId))) fail('cookie-readback-mismatch');
+      const snapshot = cookieSnapshot(actual, ownedId);
+      const salt = new Uint8Array(32);
+      adapter.crypto.getRandomValues(salt);
+      const commitment = await cookieCommitment(adapter.crypto, salt, snapshot);
+      interrupted(signal);
+      if (!availability().supported) fail('unavailable');
+      const current = adapter.cookies.list(attrs);
+      if (current?.then || owner.invalidated ||
+          identitySnapshot(adapter.getIdentity(ownedId), ownedId, containerName) !== fingerprint ||
+          cookieSnapshot(current, ownedId) !== snapshot) {
+        owner.invalidated = true;
+        fail('unavailable');
+      }
+      owner.salt = salt;
+      owner.commitment = commitment;
+      ownedImports.set(ownedId, owner);
+      published = true;
       counts.imported = prepared.length;
       const status = counts.skipped || counts.unsupported || counts.failed ? 'partial' : 'imported';
       return receipt(status, undefined, { userContextId: ownedId, containerName });
     } catch (error) {
       const cancelled = signal?.aborted || error?.code === 'cancelled';
       if (ownedId !== null) {
-        if (!emptyBeforeWrites) return receipt('failed', 'cleanup-incomplete', { userContextId: ownedId, containerName });
+        let identityStillOwned = !owner;
+        try { if (owner) identityStillOwned = identitySnapshot(adapter.getIdentity(ownedId), ownedId, containerName) === owner.fingerprint; }
+        catch { identityStillOwned = false; }
+        if (!emptyBeforeWrites || owner?.invalidated || !identityStillOwned) {
+          return receipt('failed', 'cleanup-incomplete', { userContextId: ownedId, containerName });
+        }
         const clean = await cleanup(ownedId);
         if (!clean) return receipt('failed', 'cleanup-incomplete', { userContextId: ownedId, containerName });
       }
@@ -742,10 +892,68 @@ export function createBrowserCookieImporter(options = {}) {
       counts.failed++;
       return receipt('failed', safeReason(error, 'import-failed'));
     } finally {
+      if (!published && typeof owner?.unwatch === 'function') { try { owner.unwatch(); } catch {} }
       for (const cookie of prepared) cookie.value = '';
       busy = false;
     }
   }
 
-  return Object.freeze({ availability, listProfiles, importProfile });
+  async function discardImport(options = {}) {
+    let userContextId;
+    try { userContextId = options?.userContextId; } catch { return { status: 'not-owned' }; }
+    const owner = validId(userContextId) ? ownedImports.get(userContextId) : null;
+    if (!owner) return { status: 'not-owned' };
+    if (owner.discarded) return { status: 'discarded' };
+    if (busy) return { status: 'cleanup-required', reason: 'busy' };
+    busy = true;
+    let removalStarted = false;
+    try {
+      const attrs = { userContextId, privateBrowsingId: 0 };
+      const verifiedIdentity = () => !owner.invalidated &&
+        identitySnapshot(adapter.getIdentity(userContextId), userContextId, owner.name) === owner.fingerprint;
+      const unused = () => {
+        const inUse = adapter.identityInUse(userContextId);
+        if (inUse === true) owner.invalidated = true;
+        return inUse === false;
+      };
+      if (!verifiedIdentity()) return { status: 'cleanup-required', reason: 'ownership-unverified' };
+      if (!unused()) return { status: 'cleanup-required', reason: 'identity-in-use-or-unverified' };
+      const before = adapter.cookies.list(attrs);
+      if (before?.then) return { status: 'cleanup-required', reason: 'cleanup-unverified' };
+      const snapshot = cookieSnapshot(before, userContextId);
+      const digest = await cookieCommitment(adapter.crypto, owner.salt, snapshot);
+      const same = sameBytes(digest, owner.commitment);
+      digest.fill(0);
+      if (!same) { owner.invalidated = true; return { status: 'cleanup-required', reason: 'import-changed' }; }
+      if (!verifiedIdentity()) return { status: 'cleanup-required', reason: 'ownership-unverified' };
+      if (!unused()) return { status: 'cleanup-required', reason: 'identity-in-use-or-unverified' };
+      const current = adapter.cookies.list(attrs);
+      if (current?.then || cookieSnapshot(current, userContextId) !== snapshot) {
+        owner.invalidated = true;
+        return { status: 'cleanup-required', reason: 'import-changed' };
+      }
+      // No await from the final checks through deletion. A partly failed wipe
+      // remains visible for manual cleanup; never delete a changed identity.
+      removalStarted = true;
+      const removed = adapter.cookies.removeAll(attrs);
+      if (removed === false || removed?.then) fail('unavailable');
+      const remaining = adapter.cookies.list(attrs);
+      if (!Array.isArray(remaining) || remaining.length || !verifiedIdentity()) fail('unavailable');
+      if (!unused()) fail('unavailable');
+      owner.unwatch();
+      owner.unwatch = null;
+      if (adapter.removeIdentity(userContextId) !== true || adapter.getIdentity(userContextId) != null) fail('unavailable');
+      const after = adapter.cookies.list(attrs);
+      if (!Array.isArray(after) || after.length) fail('unavailable');
+      owner.discarded = true;
+      owner.salt.fill(0); owner.commitment.fill(0);
+      owner.salt = null; owner.commitment = null;
+      return { status: 'discarded' };
+    } catch {
+      if (removalStarted) owner.invalidated = true;
+      return { status: 'cleanup-required', reason: 'cleanup-unconfirmed' };
+    } finally { busy = false; }
+  }
+
+  return Object.freeze({ availability, listProfiles, importProfile, discardImport });
 }
