@@ -515,8 +515,11 @@ function classify(row, now, scopeMode, scopeBindings) {
     expiryMs = Number(unixMs);
     if (expiryMs <= now) return { category: 'skipped' };
   }
+  // Chromium treats deprecated 3 like unspecified (-1). Import both as an
+  // explicit Lax: Gecko's UNSET can grant a fresh Lax+POST grace period or
+  // become unrestricted when lax-by-default is disabled. This is narrower.
   return { encrypted, cookie: { host, name, path, value, isSecure: !!secure, isHttpOnly: !!httpOnly,
-    isSession: !persistent, expiry: expiryMs, sameSite: samesite === -1 || samesite === 3 ? 256 : samesite,
+    isSession: !persistent, expiry: expiryMs, sameSite: samesite === -1 || samesite === 3 ? 1 : samesite,
     schemeMap: scheme === 2 ? 2 : scheme === 1 ? 1 : 0 } };
 }
 

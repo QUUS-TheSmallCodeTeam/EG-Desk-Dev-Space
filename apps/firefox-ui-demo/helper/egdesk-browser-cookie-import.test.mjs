@@ -137,11 +137,11 @@ test('v24 decrypts binary host hash, preserves flags, host, session and exact mi
   assert.equal(jar[0].host, host);
   assert.equal(jar[0].value, 'synthetic-encrypted-secret');
   assert.equal(jar[0].expiry, NOW + 86400000);
-  assert.equal(jar[0].sameSite, 256);
+  assert.equal(jar[0].sameSite, 1);
   assert.equal(jar[1].host, 'host.example.test');
   assert.equal(jar[1].isSession, true);
   assert.equal(jar[1].expiry, Number.MAX_SAFE_INTEGER);
-  assert.equal(jar[1].sameSite, 256);
+  assert.equal(jar[1].sameSite, 1);
   assert.equal(jar[2].isSession, true);
   assert.equal(jar[2].expiry, NOW + 86400000);
   assert.deepEqual(jar[0].originAttributes, { userContextId: 80, privateBrowsingId: 0 });
@@ -580,6 +580,21 @@ test('native adapter uses readonly locked deferred transaction, closes, prompts 
     assert.equal(f.state.jars.has(80), false);
     assert.ok([...f.state.observers.values()].every(set => set.size === 0));
   } finally { f.restore(); }
+});
+
+test('native SameSite uses explicit Lax for unspecified and deprecated values in both scope modes', async () => {
+  for (const mode of ['preserve', 'standard-web']) {
+    const f = fakeGecko();
+    try {
+      f.state.rows = [-1, 3, 0, 1, 2].map(samesite => row({ name: `samesite-${samesite}`, samesite }));
+      const id = (await f.importer.listProfiles({ explicitUserRequest: true })).profiles[0].id;
+      const result = await f.importer.importProfile({ profileId: id, explicitUserConsent: true, scopeMode: mode,
+        ...(mode === 'standard-web' ? { explicitScopeCompatibilityConsent: true } : {}) });
+      assert.equal(result.status, 'imported');
+      assert.deepEqual(f.state.jars.get(80).map(cookie => cookie.sameSite), [1, 1, 0, 1, 2]);
+      assert.equal(f.state.jars.get(80).some(cookie => cookie.sameSite === 256), false);
+    } finally { f.restore(); }
+  }
 });
 
 test('native cleanup refuses visible native use and observed context or identity adoption', async () => {
