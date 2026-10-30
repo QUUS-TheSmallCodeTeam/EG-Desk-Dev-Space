@@ -5701,7 +5701,9 @@
     return Array.from(document.querySelectorAll('.egd-canvas-card'))
       .map((card) => {
         const title = cardLabelForViewportRail(card);
-        const subtitle = cardSubtitleForRailSearch(card);
+        // The Board a card belongs to is named (and searchable) only while that Board is open.
+        const boardTitle = card.dataset.projectionId ? state.boards.projections[card.dataset.projectionId]?.title || '' : '';
+        const subtitle = [cardSubtitleForRailSearch(card), boardTitle ? `${boardTitle} Board` : ''].filter(Boolean).join(' · ');
         const sourceRef = card._sourceRef || {};
         return { card, title, subtitle, sourceRef };
       })
@@ -5723,7 +5725,12 @@
         title,
         subtitle,
         active: card.id === state.activeEntityId,
-        execute: () => focusCanvasCard(card),
+        // A chosen card that sits off screen is also brought into view: the
+        // camera pans only (the minimap rule), zoom and Board stay as they are.
+        execute: () => {
+          focusCanvasCard(card);
+          if (!isCardFullscreen(card)) moveCameraToMinimapNode(card);
+        },
       }));
   }
 
