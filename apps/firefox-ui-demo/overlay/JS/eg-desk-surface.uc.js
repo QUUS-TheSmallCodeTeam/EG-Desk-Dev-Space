@@ -20962,7 +20962,7 @@
     return null;
   }
 
-  const deskHistory = { rows: [], page: null, selected: null, record: null, confirming: false, busy: false, message: null, failed: false };
+  const deskHistory = { rows: [], generations: [], page: null, selected: null, record: null, confirming: false, busy: false, message: null, failed: false };
 
   function closeDeskHistoryPanel({ restoreFocus = false } = {}) {
     const panel = document.getElementById('egd-desk-history');
@@ -20973,7 +20973,7 @@
 
   async function openDeskHistoryPanel() {
     closeDeskHistoryPanel();
-    Object.assign(deskHistory, { rows: [], page: null, selected: null, record: null, confirming: false, busy: false,
+    Object.assign(deskHistory, { rows: [], generations: [], page: null, selected: null, record: null, confirming: false, busy: false,
       message: '복구 기록을 불러오는 중입니다…', failed: false });
     const panel = el('section', { id: 'egd-desk-history', class: 'egd-store-panel', role: 'dialog', 'aria-label': '복구 기록', data: { testid: 'desk-history' } });
     panel.addEventListener('keydown', (ev) => {
@@ -20994,8 +20994,10 @@
     if (page.unavailable || page.error) {
       Object.assign(deskHistory, { message: '복구 기록을 불러오지 못했습니다. 연결을 확인한 뒤 다시 시도해 주세요.', failed: true });
     } else {
-      const rows = more ? [...deskHistory.rows, ...page.rows] : page.rows;
-      Object.assign(deskHistory, { rows, page, failed: false, message: rows.length ? null : '아직 남은 기록이 없습니다. Desk가 저장되면 여기에 시점이 쌓입니다.' });
+      // Pages are joined before the rows are made, so the last row of a page compares its changes with the first of the next.
+      const generations = more ? [...deskHistory.generations, ...(page.generations || [])] : (page.generations || []);
+      const rows = RecoveryState.deskGenerationRows({ ...page, generations });
+      Object.assign(deskHistory, { rows, generations, page, failed: false, message: rows.length ? null : '아직 남은 기록이 없습니다. Desk가 저장되면 여기에 시점이 쌓입니다.' });
     }
     renderDeskHistoryPanel(focusFirst && deskHistory.rows.length ? `generation-${deskHistory.rows[0].generation}` : undefined);
   }
