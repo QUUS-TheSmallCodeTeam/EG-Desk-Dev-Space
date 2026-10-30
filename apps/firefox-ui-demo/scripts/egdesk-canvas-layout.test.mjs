@@ -10,7 +10,9 @@ const {
   edgeIndicatorPoint, edgeIndicators, minimapSearchRows, minimapFocusCamera, minimapViewBox,
   normalizeCollapsedIds, setCollapsedId, isCollapsedId, displayRect, clampViewRect, innermostRegionAt,
   regionDropSuggestion, regionRecheckInterval, owningProjectionByView, addProjectionMember, removeProjectionMember,
-  toWorldRect, unionRect,
+  toWorldRect, unionRect, snapGuideScreenBoxes, arrangeInVisibleArea, normalizeCanvasGroups, canvasGroupOf,
+  expandCanvasGroupSelection, createCanvasGroup, dissolveCanvasGroups, pruneCanvasGroups, remapCanvasGroups,
+  canvasGroupFrames, parsePlacementInput,
 } = Layout;
 
 const rect = (x, y, width, height, id) => (id ? { id, x, y, width, height } : { x, y, width, height });
@@ -95,6 +97,19 @@ test('snap: resizing moves only the dragged edge and never goes below the minimu
   assert.equal(snapCanvasRect({ rect: null }), null);
 });
 
+test('snap guides: lines and gap bars become screen boxes with the camera, 1px thick at any zoom', () => {
+  const other = rect(100, 400, 300, 200, 'other');
+  const aligned = snapCanvasRect({ rect: rect(98, 0, 200, 150), candidates: [other], enableGrid: false });
+  const boxes = snapGuideScreenBoxes(aligned.guides, { pan: { x: 10, y: 20 }, zoom: 0.5 });
+  assert.deepEqual(boxes, [{ kind: 'v', reason: 'edge', left: 59.5, top: 20, width: 1, height: 300 }]);
+  const docked = snapCanvasRect({ rect: rect(170, 120, 310, 200), candidates: [rect(500, 100, 300, 300, 'n')], enableGrid: false });
+  const gap = snapGuideScreenBoxes(docked.guides, { pan: { x: 0, y: 0 }, zoom: 2 });
+  assert.equal(gap[0].kind, 'gap');
+  assert.deepEqual([gap[0].left, gap[0].width, gap[0].height], [952, 48, 1], 'the bar spans the 24px gap at 200%');
+  assert.deepEqual(snapGuideScreenBoxes(aligned.guides, { pan: null, zoom: 1 }), []);
+  assert.deepEqual(snapGuideScreenBoxes([{ kind: 'v' }, null], { pan: { x: 0, y: 0 }, zoom: 1 }), []);
+});
+
 test('Board title drag moves the region and every member by the same snapped delta', () => {
   const moved = moveRegionWithMembers({
     region: rect(0, 0, 500, 400), dx: 29, dy: 50,
@@ -160,6 +175,23 @@ test('layout undo: labels are fixed tokens, the limit drops the oldest, and clos
   assert.equal(sanitized.record({ items: [{ id: 'not a view id!', before: rect(0, 0, 1, 1), after: rect(1, 0, 1, 1) }] }), false);
 });
 
+test('layout undo: grouping is a step of its own that hands back the group list, and a no-op records nothing', () => {
+  const history = createLayoutHistory();
+  const before = [];
+  const after = [{ id: 'egd-group-1', viewIds: ['a', 'b'] }];
+  assert.equal(history.record({ label: 'group', items: [], groups: { before, after } }), true);
+  assert.equal(history.record({ label: 'group', items: [], groups: { before: after, after } }), false, 'same groups, no step');
+  const undone = history.undo(() => null);
+  assert.equal(undone.status, 'undone');
+  assert.deepEqual(undone.rects, []);
+  assert.deepEqual(undone.groups, []);
+  const redone = history.redo(() => null);
+  assert.deepEqual(redone.groups, after);
+  assert.notEqual(redone.groups[0], after[0], 'a copy, not the recorded object');
+  history.record({ label: 'move', items: [{ id: 'a', before: rect(0, 0, 1, 1), after: rect(2, 0, 1, 1) }] });
+  assert.equal(history.undo(() => rect(2, 0, 1, 1)).groups, null, 'a plain move carries no group list');
+});
+
 // ---------------------------------------------------------------- arrange
 
 test('arrange: chosen Views keep their sizes and reading order and never overlap', () => {
@@ -192,6 +224,28 @@ test('arrange: a block that would cover another View moves as a whole; duplicate
   assert.deepEqual(arrangeWithoutOverlap({ items: [null, { id: 'x' }] }), { placements: [], bounds: null, changed: false });
   const wrapped = arrangeWithoutOverlap({ items: [rect(0, 0, 300, 100, 'p'), rect(0, 200, 300, 100, 'q'), rect(0, 400, 300, 100, 'r')], wrapWidth: 640 });
   assert.deepEqual(wrapped.placements.map(item => [item.x, item.y]), [[0, 0], [324, 0], [0, 124]]);
+});
+
+test('arrange in view: the block starts inside the visible area, wraps at its right edge, and a group moves as one block', () => {
+  const visible = { left: 1000, top: 1000, right: 1700, bottom: 1600 };
+  const items = [rect(-500, -500, 300, 200, 'a'), rect(-100, -500, 300, 200, 'b'), rect(-500, -200, 300, 200, 'c')];
+  const result = arrangeInVisibleArea({ items, visible });
+  assert.deepEqual(result.start, { x: 1032, y: 1032 }, 'grid-aligned, a gap inside the visible top-left');
+  assert.equal(result.wrapWidth, 1700 - 24 - 1032);
+  assert.deepEqual(result.placements.map(item => [item.id, item.x, item.y]), [['a', 1032, 1032], ['b', 1356, 1032], ['c', 1032, 1256]]);
+  for (const item of result.placements) assert.ok(item.x + item.width <= 1700 && item.y + item.height <= 1600, `${item.id} stays in view`);
+  const inside = arrangeInVisibleArea({ items: [rect(1210, 1105, 100, 100, 'p'), rect(1230, 1120, 100, 100, 'q')], visible });
+  assert.deepEqual(inside.start, { x: 1200, y: 1104 }, 'a selection already in view keeps its own top-left');
+  const groups = [{ id: 'g', viewIds: ['b', 'c'] }];
+  const grouped = arrangeInVisibleArea({ items, groups, visible, obstacles: [] });
+  const b = grouped.placements.find(item => item.id === 'b');
+  const c = grouped.placements.find(item => item.id === 'c');
+  assert.deepEqual([c.x - b.x, c.y - b.y], [-400, 300], 'the group keeps its inner layout');
+  assert.equal(grouped.placements.length, 3);
+  assert.deepEqual(arrangeInVisibleArea({ items: [] }).placements, []);
+  const blocked = arrangeInVisibleArea({ items: [rect(0, 0, 100, 100, 'x')], visible: { left: 0, top: 0, right: 500, bottom: 500 },
+    obstacles: [rect(0, 0, 400, 400, 'wall')] });
+  assert.equal(overlaps(blocked.placements[0], rect(0, 0, 400, 400), 23.999), false, 'a View not chosen is an obstacle');
 });
 
 // ---------------------------------------------------------------- beside opener
@@ -501,6 +555,57 @@ test('Escape layers: pointer-down outside closes only a top layer that asked for
 });
 
 // ---------------------------------------------------------------- module hygiene
+
+// ---------------------------------------------------------------- groups and numeric input
+
+test('groups: a clean list of two-or-more Views, one group per View, and selection expands to the whole group', () => {
+  const groups = normalizeCanvasGroups([
+    { id: 'g1', viewIds: ['a', 'b', 'a'] }, { id: 'g2', viewIds: ['b', 'c'] }, { id: 'g1', viewIds: ['x', 'y'] },
+    { id: 'bad id!', viewIds: ['m', 'n'] }, { id: 'g3', viewIds: ['c', 'd'] }, null,
+  ]);
+  assert.deepEqual(groups, [{ id: 'g1', viewIds: ['a', 'b'] }, { id: 'g3', viewIds: ['c', 'd'] }], 'g2 is left with one View and dissolves');
+  assert.equal(canvasGroupOf(groups, 'd').id, 'g3');
+  assert.equal(canvasGroupOf(groups, 'zzz'), null);
+  assert.deepEqual(expandCanvasGroupSelection(groups, ['d', 'e', 'a']), ['d', 'c', 'e', 'a', 'b']);
+  assert.deepEqual(normalizeCanvasGroups({ id: 'g' }), []);
+});
+
+test('groups: [그룹으로 묶기] takes Views out of their old groups, [그룹 해제] dissolves, closed Views prune', () => {
+  const start = [{ id: 'egd-group-1', viewIds: ['a', 'b', 'c'] }];
+  const made = createCanvasGroup(start, ['c', 'd', 'd']);
+  assert.equal(made.changed, true);
+  assert.deepEqual(made.groups, [{ id: 'egd-group-1', viewIds: ['a', 'b'] }, { id: 'egd-group-2', viewIds: ['c', 'd'] }]);
+  const collapsed = createCanvasGroup([{ id: 'egd-group-1', viewIds: ['a', 'b'] }], ['b', 'z']);
+  assert.deepEqual(collapsed.groups, [{ id: 'egd-group-2', viewIds: ['b', 'z'] }], 'a group left with one View dissolves; ids are not reused');
+  assert.equal(createCanvasGroup(start, ['only']).changed, false);
+  const dissolved = dissolveCanvasGroups(made.groups, ['a', 'nobody']);
+  assert.deepEqual(dissolved, { groups: [{ id: 'egd-group-2', viewIds: ['c', 'd'] }], dissolved: ['egd-group-1'], changed: true });
+  assert.equal(dissolveCanvasGroups(made.groups, ['nobody']).changed, false);
+  const pruned = pruneCanvasGroups(made.groups, ['a', 'b', 'c']);
+  assert.deepEqual(pruned, { groups: [{ id: 'egd-group-1', viewIds: ['a', 'b'] }], changed: true });
+  assert.equal(pruneCanvasGroups(pruned.groups, ['a', 'b']).changed, false);
+  const remapped = remapCanvasGroups(made.groups, new Map([['a', 'a-2']]));
+  assert.deepEqual(remapped[0].viewIds, ['a-2', 'b']);
+  assert.deepEqual(remapCanvasGroups(made.groups, { c: 'c-9' })[1].viewIds, ['c-9', 'd']);
+});
+
+test('groups: the frame is the members\' union plus padding, and skips groups with fewer than two Views on the Canvas', () => {
+  const groups = [{ id: 'g', viewIds: ['a', 'b'] }, { id: 'h', viewIds: ['c', 'gone'] }];
+  const rects = new Map([['a', rect(100, 100, 200, 100)], ['b', rect(400, 150, 100, 300)], ['c', rect(0, 0, 10, 10)]]);
+  assert.deepEqual(canvasGroupFrames(groups, rects), [{ id: 'g', count: 2, x: 92, y: 92, width: 416, height: 366 }]);
+  assert.deepEqual(canvasGroupFrames(groups, id => rects.get(id), { padding: 0 })[0], { id: 'g', count: 2, x: 100, y: 100, width: 400, height: 350 });
+  assert.deepEqual(canvasGroupFrames(groups, { a: rect(0, 0, 1, 1) }), []);
+});
+
+test('numeric input: integers as typed, empty fields keep their value, sizes never go below the minimum', () => {
+  assert.deepEqual(parsePlacementInput({ x: '48', y: ' -24 ' }), { ok: true, field: null, rect: { x: 48, y: -24 } });
+  assert.deepEqual(parsePlacementInput({ width: '100', height: '' }, { minWidth: 320, minHeight: 250 }), { ok: true, field: null, rect: { width: 320 } });
+  assert.deepEqual(parsePlacementInput({ x: '12.6', y: 7 }), { ok: true, field: null, rect: { x: 13, y: 7 } });
+  assert.deepEqual(parsePlacementInput({ x: '10', y: 'abc' }), { ok: false, field: 'y', rect: null });
+  assert.deepEqual(parsePlacementInput({ x: '1e3' }), { ok: false, field: 'x', rect: null });
+  assert.deepEqual(parsePlacementInput({}), { ok: false, field: null, rect: null });
+  assert.deepEqual(parsePlacementInput({ width: '5', height: '5' }).rect, { width: 5, height: 5 }, 'the default minimum is 1');
+});
 
 test('both modules stay pure and carry the MIT notices of the code they adapt', () => {
   const layout = readFileSync(new URL('../overlay/resources/EGDeskCanvasLayout.sys.mjs', import.meta.url), 'utf8');
