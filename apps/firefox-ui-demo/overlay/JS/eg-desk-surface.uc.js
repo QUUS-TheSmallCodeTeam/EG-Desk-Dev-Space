@@ -6951,10 +6951,16 @@
     const views = model.entities
       .map((item) => ({ item, z: parsePxNumber(item.entity.style.zIndex, 0) }))
       .sort((a, b) => b.z - a.z)
-      .map(({ item }) => ({
-        kind: 'view', id: item.entity.id, title: minimapEntityTitle(item.entity),
-        projectionId: item.entity.dataset.projectionId || null, box: SurfaceState.minimapBox(item.rect, model),
-      }));
+      .map(({ item }) => {
+        const projectionId = item.entity.dataset.projectionId || null;
+        return {
+          kind: 'view', id: item.entity.id, title: minimapEntityTitle(item.entity), projectionId,
+          // Kind and Board name feed the '이 위치의 N개' rows; a Board is named only while open.
+          viewKind: item.entity.dataset.deskWindowKind || (item.entity.classList?.contains?.('egd-canvas-shape') ? 'shape' : null),
+          boardTitle: projectionId ? boards.find((board) => board.id === projectionId)?.title ?? null : null,
+          box: SurfaceState.minimapBox(item.rect, model),
+        };
+      });
     map._egdeskMinimapTargets = [
       ...boards.map((board) => ({ kind: 'board', id: board.id, title: board.title, box: board })),
       ...views,
@@ -7043,7 +7049,9 @@
     },
       el('span', { class: 'egd-minimap-row-dot', 'aria-hidden': 'true' }),
       el('span', { class: 'egd-minimap-row-label' }, target.title),
-      target.kind === 'board' ? el('span', { class: 'egd-minimap-row-kind' }, 'Board') : null,
+      target.boardTitle ? el('span', { class: 'egd-minimap-row-board', title: `${target.boardTitle} Board에 속함` }, target.boardTitle) : null,
+      target.kind === 'board' ? el('span', { class: 'egd-minimap-row-kind' }, 'Board')
+        : target.viewKind ? el('span', { class: 'egd-minimap-row-kind' }, MinimapLayout.minimapRowKindLabel(target)) : null,
     ));
     const stack = el('div', { class: 'egd-minimap-stack', role: 'menu', 'aria-label': title, data: { testid: 'minimap-stack' } },
       el('div', { class: 'egd-minimap-stack-title' }, title), ...rows);
@@ -7130,7 +7138,10 @@
     if (!search || !list || !status || !model) return;
     const boards = model.regions;
     const views = model.entities.filter(({ entity }) => entity.classList.contains('egd-canvas-card')).map(({ entity, rect }) => ({
-      id: entity.id, title: minimapEntityTitle(entity), kind: entity.dataset.deskWindowKind || 'view',
+      id: entity.id, title: minimapEntityTitle(entity),
+      kind: entity.dataset.deskWindowKind || (entity.classList.contains('egd-chat-card') ? 'chat'
+        : entity.classList.contains('egd-terminal-card') ? 'terminal'
+          : entity.classList.contains('egd-settings-card') ? 'settings' : null),
       projectionId: entity.dataset.projectionId || null, rect,
     }));
     const signature = JSON.stringify([search.query, search.visibleLimit, search.notice, model.viewport,
@@ -7160,8 +7171,10 @@
       },
         el('span', { class: 'egd-minimap-row-dot', 'aria-hidden': 'true' }),
         el('span', { class: 'egd-minimap-row-label' }, row.title),
-        el('span', { class: 'egd-minimap-row-kind' }, current
-          ? (row.kind === 'board' ? '현재 Board' : '활성 화면') : (row.kind === 'board' ? 'Board' : '화면')),
+        // The row says what it is and which open Board it belongs to, so a
+        // search for 'Browser' can be told apart by its Board.
+        row.boardTitle ? el('span', { class: 'egd-minimap-row-board', title: `${row.boardTitle} Board에 속함` }, row.boardTitle) : null,
+        el('span', { class: 'egd-minimap-row-kind' }, MinimapLayout.minimapRowKindLabel({ kind: row.kind, viewKind: row.viewKind, current })),
       );
     });
     if (!rows.length) rows.push(el('div', { class: 'egd-minimap-empty' }, search.query.trim()
