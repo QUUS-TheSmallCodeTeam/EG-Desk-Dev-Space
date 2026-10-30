@@ -193,7 +193,20 @@ drag viewport rectangle
 
 click active card marker
   -> focus active card
+
+type a name in the minimap search
+  -> open Boards and Views whose name matches, off screen included
+  -> each row names its kind (Board / 브라우저 / 대화 / 파일 / 터미널 …) and,
+     for a View, the open Board it belongs to
+  -> choosing a row pans the camera only (no zoom, Board or run target change)
+
+several targets under one press
+  -> '이 위치의 N개' list, rows named the same way
 ```
+
+Rail search Canvas results follow the same rule: a chosen card is activated and,
+when it sits off screen, the camera pans to reveal it; its subtitle names the
+open Board it belongs to.
 
 The minimap should use Desk/canvas world coordinates and should not change saved card geometry.
 
