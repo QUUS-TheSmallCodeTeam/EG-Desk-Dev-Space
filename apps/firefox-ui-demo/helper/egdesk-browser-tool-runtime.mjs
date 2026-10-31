@@ -32,6 +32,11 @@ const WAIT_RESPONSE_MARGIN_MS = 2000
 // egdesk_browser_wait_text: a short visible text to appear or disappear.
 const MAX_WAIT_TEXT = 200
 const OBSERVE_TEXT_LIMIT = 60
+// BRW-09 egdesk_browser_screenshot: an observe request that also carries a
+// masked capture. The image never replaces the Card's fresh observation.
+const SCREENSHOT_BUDGET_CHARS = 150000
+const SCREENSHOT_OBSERVE_OPTIONS = Object.freeze({ textLimit: 1, elementLimit: 1,
+  screenshot: Object.freeze({ maxEdge: 1280, budgetChars: SCREENSHOT_BUDGET_CHARS, format: 'jpeg', quality: 0.7 }) })
 // BRW-12: one read-only reconcile question after a lost act response, on a
 // short budget of its own. Never a retry of the action (REA EG-01).
 const RECONCILE_TIMEOUT_MS = 3000
@@ -74,12 +79,15 @@ export const BROWSER_TOOL_SPECS = [
   spec('egdesk_browser_wait_text', 'Wait up to timeoutMs (100 to 10000) until the visible page text of one selected Browser Card contains text, or no longer contains textGone (give exactly one, up to 200 characters), then return a fresh observation. Matching is case-sensitive after collapsing whitespace, on visible page text only: field values, editors, sensitive fields and hidden text are never read. Read-only and allowed with an observe grant; it never acts on the page. wait-timeout means the condition was not seen in time; a replaced document or lost response is an unknown outcome.',
     { cardId: base.cardId, text: { type: 'string' }, textGone: { type: 'string' }, timeoutMs: { type: 'integer' } },
     ['cardId', 'timeoutMs']),
+  // BRW-09 (D-B6): appended; read-only, allowed with an observe grant.
+  spec('egdesk_browser_screenshot', 'Capture the visible viewport of one selected Browser Card as an image (JPEG, longest edge up to 1280 pixels) for pictures, charts and layout that text observation cannot show. Password and other sensitive fields, payment autocomplete fields, other-site or unreadable frames and embedded objects are painted over before the image leaves the browser, and maskedRegions lists each covered box in Browser surface-local CSS pixels (image pixel = CSS pixel x imageScale). When a box cannot be trusted or the page changed during capture, no image is sent and reason says why; observe and try again. Image pixels are never input coordinates: observe again and use element refs before any action. Read-only; never acts on the page.',
+    { cardId: base.cardId }, ['cardId']),
 ]
 const SPEC_BY_NAME = new Map(BROWSER_TOOL_SPECS.map(item => [item.name, item]))
 // Tool classes for the runtime and provider (1-R imports these instead of
 // keeping its own copy). Read tools never take an action lease and work
 // with an observe grant; interaction tools need an interact grant.
-export const BROWSER_READ_TOOL_NAMES = Object.freeze(['egdesk_browser_observe', 'egdesk_browser_wait_text'])
+export const BROWSER_READ_TOOL_NAMES = Object.freeze(['egdesk_browser_observe', 'egdesk_browser_wait_text', 'egdesk_browser_screenshot'])
 export const BROWSER_INTERACTION_TOOL_NAMES = Object.freeze(['egdesk_browser_navigate', 'egdesk_browser_click',
   'egdesk_browser_fill', 'egdesk_browser_scroll', 'egdesk_browser_press', 'egdesk_browser_wait'])
 const READ_TOOLS = new Set(BROWSER_READ_TOOL_NAMES)
@@ -206,7 +214,7 @@ function validateArgs(tool, args) {
   if (Object.keys(args).some(key => !Object.hasOwn(schema.properties, key)) ||
       schema.required.some(key => !Object.hasOwn(args, key))) reject('INVALID_BROWSER_TOOL', 'Invalid Browser tool arguments')
   if (!short(args.cardId, 160)) reject('INVALID_BROWSER_TOOL', 'cardId is required')
-  if (tool === 'egdesk_browser_observe') return
+  if (tool === 'egdesk_browser_observe' || tool === 'egdesk_browser_screenshot') return
   if (tool === 'egdesk_browser_wait_text') {
     const wanted = Object.hasOwn(args, 'text') ? args.text : args.textGone
     if (Object.hasOwn(args, 'text') === Object.hasOwn(args, 'textGone') || !waitNeedle(wanted) ||
@@ -277,6 +285,19 @@ function observationFrom(response, cardId) {
     reject('BROWSER_OBSERVATION_UNAVAILABLE', 'The selected Browser did not return a verifiable observation')
   }
   return snapshot
+}
+// The actor's screenshot field: a withheld capture with its reason, or a
+// bounded JPEG/PNG data URL with its size, scale and covered boxes.
+function validScreenshot(value) {
+  if (!record(value)) return false
+  if (value.send === false) return short(value.reason, 80)
+  const box = bounds => record(bounds) && ['x', 'y', 'width', 'height'].every(key => Number.isSafeInteger(bounds[key]) && bounds[key] >= 0)
+  return value.send === true && typeof value.imageUrl === 'string' && value.imageUrl.length <= SCREENSHOT_BUDGET_CHARS &&
+    /^data:image\/(?:jpeg|png);base64,[A-Za-z0-9+/]+=*$/.test(value.imageUrl) &&
+    ['jpeg', 'png'].includes(value.format) && Number.isSafeInteger(value.width) && value.width > 0 &&
+    Number.isSafeInteger(value.height) && value.height > 0 && Number.isFinite(value.imageScale) && value.imageScale > 0 &&
+    Array.isArray(value.maskedRegions) && value.maskedRegions.length <= 400 &&
+    value.maskedRegions.every(region => record(region) && short(region.kind, 40) && short(region.reason, 40) && box(region.bounds))
 }
 function checkPostcondition(condition, snapshot, ref) {
   if (!snapshot || !condition) return false
@@ -620,6 +641,20 @@ export function createBrowserToolService({ sendToUi, getOwnerKey, timeoutMs = 15
       const recovery = recordObservation(card, snapshot)
       return { status: 'observed', cardId: card.cardId, observationId: card.observation.id,
         snapshot, ...recovery, timing: { ...trace }, externalEffectVerified: false }
+    }
+    if (tool === 'egdesk_browser_screenshot') {
+      // Observe with options.screenshot; the Firefox parent actor captures and
+      // covers, the child measures. Not recorded as the Card's observation:
+      // pixels never become input coordinates (REA 웹6).
+      const trace = {}
+      const response = await observeRequest(run, binding, card, SCREENSHOT_OBSERVE_OPTIONS, trace)
+      if (binding.closed || binding.ownerKey !== getOwnerKey()) reject('BROWSER_RUN_ENDED', 'Browser run ended during observation')
+      const snapshot = observationFrom(response, card.cardId)
+      if (!validScreenshot(snapshot.screenshot)) reject('BROWSER_OBSERVATION_UNAVAILABLE', 'The selected Browser did not return a verifiable screenshot')
+      const { send, ...screenshot } = snapshot.screenshot
+      return { status: send ? 'screenshot-observed' : 'screenshot-withheld', cardId: card.cardId,
+        documentId: snapshot.documentId, revision: snapshot.revision, url: snapshot.url, viewport: snapshot.viewport,
+        screenshot, timing: { ...trace }, externalEffectVerified: false }
     }
     if (tool === 'egdesk_browser_wait') return waitForCondition(run, binding, card, args)
     if (tool === 'egdesk_browser_wait_text') return waitForText(run, binding, card, args)

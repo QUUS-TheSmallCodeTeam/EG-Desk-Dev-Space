@@ -43,7 +43,7 @@ test('QA Browser preparation requires an original observe selection and a live U
   assert.equal(prepared.selection.selectedSources[0].browserToolPermission, 'observe')
   assert.equal(prepared.selection.selectedSources[0].id, 'source-1')
   assert.equal(prepared.selection.selectedSources[0].browserToolSelection.token, 'one-time-token')
-  assert.equal(f.provider.specs().length, 8)
+  assert.equal(f.provider.specs().length, 9)
   assert.throws(() => f.provider.requireThread('old-native', prepared), error => error.code === 'BROWSER_TOOLS_UNAVAILABLE')
   f.provider.registerThread('new-native')
   f.provider.requireThread('new-native', prepared)
