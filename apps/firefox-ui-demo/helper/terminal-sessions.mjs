@@ -13,8 +13,10 @@ const metadata = entry => ({
 export class TerminalSessionRegistry {
   // onExit({ sessionId, exitCode, signal, exitSource }) is told once per
   // confirmed exit (RT-06 terminal.exit); it never changes the receipt.
-  constructor({ now = Date.now, maxExitReceipts = 128, exitReceiptTtlMs = 10 * 60 * 1000, maxOutputBytes = 256 * 1024, onExit = null } = {}) {
-    Object.assign(this, { now, maxExitReceipts, exitReceiptTtlMs, maxOutputBytes, onExit })
+  // runWatch (CODE-06, egdesk-terminal-run-watch.mjs) reads output and typed
+  // lines to prepare a test/build result that read() hands out once.
+  constructor({ now = Date.now, maxExitReceipts = 128, exitReceiptTtlMs = 10 * 60 * 1000, maxOutputBytes = 256 * 1024, onExit = null, runWatch = null } = {}) {
+    Object.assign(this, { now, maxExitReceipts, exitReceiptTtlMs, maxOutputBytes, onExit, runWatch })
     this.active = new Map()
     this.exitReceipts = new Map()
   }
@@ -92,6 +94,7 @@ export class TerminalSessionRegistry {
     if (!entry) return
     if (entry.process?.outputTruncated) entry.outputTruncated = true
     const incoming = Buffer.isBuffer(data) ? data : Buffer.from(String(data))
+    this.runWatch?.observeOutput?.(id, incoming)
     if (entry.output.length + incoming.length > this.maxOutputBytes) entry.outputTruncated = true
     const next = Buffer.concat([entry.output, incoming.subarray(Math.max(0, incoming.length - this.maxOutputBytes))])
     // Copy the retained suffix so a small receipt cannot keep a huge backing
@@ -158,7 +161,8 @@ export class TerminalSessionRegistry {
     const entry = this.active.get(id) || this.exitReceipts.get(id)
     const data = entry?.output.toString('utf8') || ''
     if (entry) entry.output = Buffer.alloc(0)
-    return { ...state, data }
+    const runResult = this.runWatch?.take?.(id) ?? null
+    return { ...state, data, ...(runResult ? { runResult } : {}) }
   }
 
   kill(id) {
@@ -205,6 +209,7 @@ export class TerminalSessionRegistry {
       return { ...current, ok: true }
     }
     try {
+      this.runWatch?.observeInput?.(id, data)
       const result = entry.usePty ? entry.process.write(data) : entry.process.stdin.write(data)
       return result?.then ? Promise.resolve(result).then(accepted).catch(failed) : accepted()
     } catch (error) { return failed(error) }
