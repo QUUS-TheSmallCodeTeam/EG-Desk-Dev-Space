@@ -3,7 +3,7 @@ import assert from 'node:assert/strict'
 import { Readable } from 'node:stream'
 import { rm } from 'node:fs/promises'
 import { readFile } from 'node:fs/promises'
-import { backoffDelayMs, createChatHttpHandler, createRateLimitSync, createReconnectBackoff, guardBridgeRequest, readJsonBody, setBridgeCors } from './codex-bridge-http.mjs'
+import { backoffDelayMs, createAccountAccessTracker, createChatHttpHandler, createRateLimitSync, createReconnectBackoff, guardBridgeRequest, readJsonBody, setBridgeCors } from './codex-bridge-http.mjs'
 import { CodexChatRuntime } from './codex-chat-runtime.mjs'
 import { createChatEngineAuth } from './codex-bridge-engine-auth.mjs'
 import { createCodexEngineAdapter } from './codex-engine-adapter.mjs'
@@ -610,6 +610,58 @@ test('sparse usage notifications merge into the signed-in identity only', async 
   const before = u.updates.length
   assert.equal(u.sync.notify({ method: 'account/rateLimits/updated', params: { rateLimits: { primary: { usedPercent: 90 } } } }), false)
   assert.equal(u.updates.length, before)
+})
+
+// SUB-14: the auth/quota/permission failure a Codex turn leaves on the auth state.
+function accessFixture() {
+  const state = { isLoggedIn: true, accountEmail: 'owner@example.test', accountId: null, accessFailure: null }
+  const updates = []
+  let clock = 2_000_000
+  const tracker = createAccountAccessTracker({ auth: () => state, now: () => clock, update: patch => { updates.push(patch); Object.assign(state, patch) } })
+  return { state, updates, tracker, tick: ms => { clock += ms } }
+}
+
+test('access tracker records auth, quota and permission turn rejections for the signed-in identity, with allowlisted causes only', () => {
+  const a = accessFixture()
+  assert.equal(a.tracker.notify({ method: 'error', params: { error: { message: 'Reconnecting', codexErrorInfo: { responseStreamDisconnected: { httpStatusCode: 401 } } }, willRetry: true } }), false, 'the app-server retries itself')
+  assert.equal(a.state.accessFailure, null)
+  assert.equal(a.tracker.notify({ method: 'turn/completed', params: { turn: { id: 't1', status: 'failed', error: { message: 'You have hit your usage limit.', codexErrorInfo: 'usageLimitExceeded' } } } }), true)
+  assert.deepEqual(a.state.accessFailure, { kind: 'quota', cause: 'usageLimitExceeded', at: 2_000_000, identity: 'email:owner@example.test' })
+  a.tick(10)
+  assert.equal(a.tracker.notify({ method: 'error', params: { error: { message: 'Unauthorized', codexErrorInfo: 'unauthorized' } } }), true)
+  assert.deepEqual([a.state.accessFailure.kind, a.state.accessFailure.at], ['auth', 2_000_010])
+  assert.equal(a.tracker.notify({ method: 'error', params: { error: { message: 'boom', codexErrorInfo: 'internalServerError' } } }), false, 'network/model errors are not account states')
+  assert.equal(a.state.accessFailure.kind, 'auth')
+  assert.equal(a.tracker.notify({ method: 'turn/completed', params: { turn: { id: 't2', status: 'failed', error: { message: 'denied', codexErrorInfo: { unknownVariant: 1 } } } } }), false)
+  assert.equal(JSON.stringify(a.state).includes('unknownVariant'), false)
+  assert.equal(a.tracker.notify({ method: 'turn/completed', params: { turn: { status: 'failed', error: { message: 'Permission denied by policy' } } } }), true, 'a message without a structured cause still classifies')
+  assert.deepEqual([a.state.accessFailure.kind, a.state.accessFailure.cause], ['permission', null])
+  assert.equal(a.tracker.notify({ method: 'account/rateLimits/updated', params: {} }), false)
+})
+
+test('access tracker clears on a completed turn or a finished sign-in; a turn-scoped cause clears when the next turn starts', () => {
+  const a = accessFixture()
+  a.tracker.notify({ method: 'turn/completed', params: { turn: { status: 'failed', error: { message: 'policy', codexErrorInfo: 'sandboxError' } } } })
+  assert.deepEqual(a.state.accessFailure, { kind: 'permission', cause: 'sandboxError', at: 2_000_000, identity: 'email:owner@example.test' })
+  a.tracker.notify({ method: 'turn/started', params: {} })
+  assert.equal(a.state.accessFailure, null)
+  a.tracker.notify({ method: 'turn/completed', params: { turn: { status: 'failed', error: { message: 'x', codexErrorInfo: { responseTooManyFailedAttempts: { httpStatusCode: 403 } } } } } })
+  assert.equal(a.state.accessFailure.cause, 'http403')
+  a.tracker.notify({ method: 'turn/started', params: {} })
+  assert.equal(a.state.accessFailure.cause, 'http403', 'an account-level cause survives a new turn')
+  const before = a.updates.length
+  a.tracker.notify({ method: 'turn/completed', params: { turn: { status: 'completed', error: null } } })
+  assert.equal(a.state.accessFailure, null)
+  a.tracker.notify({ method: 'turn/completed', params: { turn: { status: 'completed' } } })
+  assert.equal(a.updates.length, before + 1, 'no update without a change')
+  a.tracker.notify({ method: 'error', params: { error: { message: 'Unauthorized', codexErrorInfo: 'unauthorized' } } })
+  a.tracker.notify({ method: 'account/login/completed', params: { success: false, error: 'cancelled' } })
+  assert.equal(a.state.accessFailure.kind, 'auth')
+  a.tracker.notify({ method: 'account/login/completed', params: { success: true } })
+  assert.equal(a.state.accessFailure, null)
+  a.state.accountEmail = null
+  a.tracker.notify({ method: 'error', params: { error: { message: 'Unauthorized', codexErrorInfo: 'unauthorized' } } })
+  assert.equal(a.state.accessFailure.identity, null, 'an unknown identity records no invented key')
 })
 
 test('bridge mounts Agent profiles, plan usage and PUT preflight in the documented order', async () => {

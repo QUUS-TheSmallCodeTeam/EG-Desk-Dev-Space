@@ -436,6 +436,15 @@ Raw log 는 diagnostics 로 내려간다.
 }
 ```
 
+SUB-14 (2026-10-31): 같은 객체가 `/v1/state.auth`와 SSE `auth.status`에도 실리며, 이제 `access` 행이 붙는다.
+`access = { state, label, detail, recovery, cause, failedAt, resetsAt, resetPassed }`.
+`state`는 `ok | loginRequired | loginInProgress | authFailed | quotaExhausted | permissionDenied` 중 하나로,
+로그인 안 됨 / 인증 만료(turn이 401·`unauthorized`로 거절됨) / 사용 한도 도달(초기화 시각 포함) / 권한 부족(403·정책·샌드박스)을 구별한다.
+`label`은 Chat 상단 chip 문구(예 `한도 도달 · 오후 3:10에 초기화`, `인증 만료 · 다시 로그인 필요`, `권한 부족 · 접근 거부`),
+`recovery`는 사용자가 고를 수 있는 선택지(`login | reauth | switchAccount | wait | refresh`)다. 브리지는 어느 것도 대신 실행하지 않고,
+한도 초기화 뒤에도 자동으로 이어가지 않는다(D-S5). 판정 근거인 마지막 turn 거절은 `accessFailure = { kind, cause, at, identity }`로 같이 실린다
+(`helper/codex-auth-state.mjs accountAccessState`, `helper/codex-bridge-http.mjs createAccountAccessTracker`).
+
 ### 9.2 `codex` SSE event
 
 ```json

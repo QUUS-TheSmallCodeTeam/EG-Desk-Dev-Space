@@ -8361,6 +8361,58 @@
       codexBridge.closeMessageMenu?.();
       codexBridge.closeAgentPeek?.();
     };
+    // SUB-14 account access chip. The bridge's `access` row (auth.status and
+    // /v1/state) tells '로그인 필요', '인증 만료', '한도 도달 · 초기화 시각' and
+    // '권한 부족 · 원인' apart; an older bridge without one reads as before.
+    const ACCESS_STATE_VALUES = ['ok', 'loginRequired', 'loginInProgress', 'authFailed', 'quotaExhausted', 'permissionDenied'];
+    const ACCESS_RECOVERY_VALUES = ['login', 'reauth', 'switchAccount', 'wait', 'refresh'];
+    const codexAccessRow = (codex) => {
+      const auth = codex.authStatus || {};
+      const busy = Boolean(codex.isStartingLogin || auth.loginInProgress);
+      const row = auth.access && typeof auth.access === 'object' && ACCESS_STATE_VALUES.includes(auth.access.state) ? auth.access : null;
+      if (!row) {
+        if (!auth.isLoggedIn) return busy ? { state: 'loginInProgress', label: '로그인 중…', detail: null, recovery: [], resetsAt: null, resetPassed: false, failedAt: null }
+          : { state: 'loginRequired', label: '로그인 필요', detail: null, recovery: ['login'], resetsAt: null, resetPassed: false, failedAt: null };
+        return auth.usage?.level === 'limit'
+          ? { state: 'quotaExhausted', label: `한도 도달 · ${auth.usage.resetLabel || '초기화 시각 미확인'}`, detail: null, recovery: ['wait', 'switchAccount'], resetsAt: Number.isFinite(auth.usage.resetsAt) ? auth.usage.resetsAt : null, resetPassed: false, failedAt: null }
+          : { state: 'ok', label: '로그인됨', detail: null, recovery: [], resetsAt: null, resetPassed: false, failedAt: null };
+      }
+      // A sign-in the overlay just started is in progress before the bridge says so.
+      if (busy && !auth.isLoggedIn && row.state === 'loginRequired') return { state: 'loginInProgress', label: '로그인 중…', detail: null, recovery: [], resetsAt: null, resetPassed: false, failedAt: null };
+      return {
+        state: row.state,
+        label: typeof row.label === 'string' && row.label ? row.label : '상태 확인 안 됨',
+        detail: typeof row.detail === 'string' && row.detail ? row.detail : null,
+        recovery: (Array.isArray(row.recovery) ? row.recovery : []).filter((id) => ACCESS_RECOVERY_VALUES.includes(id)),
+        resetsAt: Number.isFinite(row.resetsAt) ? row.resetsAt : null,
+        resetPassed: row.resetPassed === true,
+        failedAt: Number.isFinite(row.failedAt) ? row.failedAt : null,
+      };
+    };
+    // Recovery is the user's pick (Contract: a Run is never moved to another
+    // account quietly; D-S5: no automatic continuation after a reset).
+    // '다시 로그인' and '다른 계정' end the current sign-in first so the ChatGPT
+    // page lets the user choose the account; '초기화까지 대기' only folds the
+    // buttons for this reset; '다시 확인' re-reads the state (usage included).
+    let accessWaitKey = null;
+    const accessKey = (access) => `${access.state}:${access.failedAt ?? ''}:${access.resetsAt ?? ''}`;
+    const reauthenticateCodex = async () => { await codexBridge.signOut(); await codexBridge.startLogin(); };
+    const codexAccessActions = (access, codex) => {
+      const busy = Boolean(codex.isStartingLogin || codex.authStatus.loginInProgress);
+      if (access.recovery.includes('wait') && accessWaitKey === accessKey(access)) return [];
+      const chip = (label, onclick, { primary = false, disabled = false, testid, title = null } = {}) => el('button', {
+        class: `egd-codex-chip${primary ? ' egd-codex-chip-primary' : ' egd-codex-chip-subtle'}`,
+        disabled: disabled ? 'true' : null, title, data: { testid }, onclick,
+      }, label);
+      return access.recovery.map((id) => {
+        if (id === 'login') return chip(busy ? '로그인 중…' : '로그인', () => codexBridge.startLogin(), { primary: true, disabled: busy, testid: 'chat-access-login' });
+        if (id === 'reauth') return chip(busy ? '로그인 중…' : '다시 로그인', reauthenticateCodex, { primary: true, disabled: busy, testid: 'chat-access-reauth', title: '현재 로그인을 끝내고 같은 계정으로 다시 로그인합니다.' });
+        if (id === 'switchAccount') return chip('다른 계정', reauthenticateCodex, { disabled: busy, testid: 'chat-access-switch', title: '현재 로그인을 끝내고 다른 ChatGPT 계정으로 로그인합니다. 진행 중이던 대화는 옮겨지지 않습니다.' });
+        if (id === 'wait') return chip('초기화까지 대기', () => { accessWaitKey = accessKey(access); codexBridge.refreshAuthStatus(); }, { testid: 'chat-access-wait', title: '초기화 시각까지 기다립니다. 초기화 뒤에도 자동으로 이어가지 않습니다.' });
+        if (id === 'refresh') return chip('다시 확인', () => codexBridge.refreshAuthStatus(), { testid: 'chat-access-refresh' });
+        return null;
+      }).filter(Boolean);
+    };
     const onMessageScrollGesture = (ev) => {
       const target = ev.target;
       if (!(target instanceof Element)) return;
@@ -8465,22 +8517,18 @@
       const statusBridge = bridgeNotice.state !== 'online' ? null
         : activeEngine.engineId !== 'codex' ? (!activeEngine.ready ? activeEngine.reason : null)
           : (codex.error ? 'Codex 점검 필요' : null);
-      const statusAccount = activeEngine.engineId !== 'codex' ? (activeEngine.ready ? '사용 가능' : activeEngine.reason) : codex.authStatus.isLoggedIn
-        ? '로그인됨'
-        : ((codex.isStartingLogin || codex.authStatus.loginInProgress) ? '로그인 중…' : '로그인 필요');
+      const access = codexAccessRow(codex);
+      const statusAccount = activeEngine.engineId !== 'codex' ? (activeEngine.ready ? '사용 가능' : activeEngine.reason) : access.label;
+      const accountChipTone = activeEngine.engineId !== 'codex' ? (codex.authStatus.isLoggedIn ? 'ok' : null)
+        : access.state === 'ok' ? 'ok' : access.state === 'loginInProgress' || access.resetPassed ? 'idle'
+          : access.state === 'quotaExhausted' ? 'limit' : 'error';
       const indicatorState = bridgeNotice.state === 'reconnecting'
         ? 'idle'
         : (bridgeNotice.state !== 'online' || codex.error ? 'error' : 'ok');
       const connectionNotice = buildCodexBridgeNotice(codex, codexBridge);
 
       const chromeActions = [];
-      if (activeEngine.engineId === 'codex' && !codex.authStatus.isLoggedIn) {
-        chromeActions.push(el('button', {
-          class: 'egd-codex-chip egd-codex-chip-primary',
-          disabled: (codex.isStartingLogin || codex.authStatus.loginInProgress) ? 'true' : null,
-          onclick: () => codexBridge.startLogin(),
-        }, (codex.isStartingLogin || codex.authStatus.loginInProgress) ? '로그인 중…' : '로그인'));
-      }
+      if (activeEngine.engineId === 'codex') chromeActions.push(...codexAccessActions(access, codex));
       if (codex.error && codex.connected) {
         chromeActions.push(el('button', {
           class: 'egd-codex-chip egd-codex-chip-subtle',
@@ -8488,13 +8536,18 @@
         }, '새로고침'));
       }
       // Healthy account details live in Settings; keep actionable states here.
-      const showChromeRow = chromeActions.length > 0 || (activeEngine.engineId !== 'codex' && !activeEngine.ready);
+      const showChromeRow = chromeActions.length > 0 || (activeEngine.engineId !== 'codex' && !activeEngine.ready)
+        || (activeEngine.engineId === 'codex' && access.state !== 'ok');
       const chromeRow = showChromeRow ? el('div', { class: 'egd-codex-chrome-row' },
         el('div', { class: 'egd-codex-chrome-main' },
           el('span', { class: `egd-codex-chrome-indicator egd-codex-chrome-indicator-${indicatorState}` }),
           el('div', { class: 'egd-codex-chrome-status' },
             statusBridge ? el('span', { class: `egd-codex-system-chip egd-codex-system-chip-${indicatorState}` }, statusBridge) : null,
-            statusAccount !== statusBridge ? el('span', { class: `egd-codex-system-chip${codex.authStatus.isLoggedIn ? ' egd-codex-system-chip-ok' : ''}` }, statusAccount) : null,
+            statusAccount !== statusBridge ? el('span', {
+              class: `egd-codex-system-chip${accountChipTone ? ` egd-codex-system-chip-${accountChipTone}` : ''}`,
+              title: activeEngine.engineId === 'codex' ? access.detail : null,
+              data: { testid: 'chat-account-access', state: activeEngine.engineId === 'codex' ? access.state : 'engine' },
+            }, statusAccount) : null,
           ),
         ),
         el('div', { class: 'egd-codex-chrome-actions' }, ...chromeActions),

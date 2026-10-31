@@ -4093,6 +4093,13 @@
   border-color: color-mix(in srgb, var(--egd-on-surface-variant) 20%, transparent);
 }
 
+/* SUB-14: a reached usage limit is a wait state, not an error. */
+.egd-codex-system-chip-limit {
+  background: color-mix(in srgb, var(--egd-warning-ink) 12%, transparent);
+  border-color: color-mix(in srgb, var(--egd-warning-ink) 24%, transparent);
+  color: var(--egd-warning-ink);
+}
+
 .egd-codex-chrome-actions {
   display: flex;
   align-items: center;
