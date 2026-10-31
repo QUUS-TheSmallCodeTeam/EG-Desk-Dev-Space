@@ -301,6 +301,8 @@ Rationale:
 | Click result chip | Open/create linked canvas card |
 | Click agent avatar | Open agent profile |
 | Click run indicator | Open run bubble / plan bubble |
+| Click `[···] Agent 작업 중` bubble (AGENT-05) | Open the activity record at that run; one bubble per Agent at work, named when several share a room |
+| Look at a Card header while an Agent uses it (AGENT-05) | Small face + name of that Agent beside the BRW-13 badge; gone when the work ends |
 | Click profile settings | Open agent config card on canvas |
 | Click canvas result card provenance | Jump back to source chat bubble/run |
 
