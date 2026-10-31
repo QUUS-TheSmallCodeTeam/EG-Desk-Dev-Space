@@ -3801,6 +3801,23 @@
   line-height: 1;
 }
 
+/* CHAT-03 (D-M2): a Board Thread row where an Agent called the person by name */
+.egd-codex-thread-mention {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 18px;
+  min-height: 18px;
+  padding: 0 5px;
+  border-radius: 999px;
+  border: 1px solid color-mix(in srgb, var(--egd-primary) 24%, transparent);
+  background: color-mix(in srgb, var(--egd-primary) 14%, transparent);
+  color: var(--egd-primary);
+  font-size: 10px;
+  font-weight: 700;
+  line-height: 1;
+}
+
 .egd-codex-thread-menu-trigger {
   display: inline-flex;
   align-items: center;
@@ -7574,6 +7591,35 @@ button.egd-codex-session-badge-link:focus-visible { outline: var(--egd-focus-out
   background: var(--egd-chat-layer-elevated);
   color: var(--egd-on-surface);
 }
+/* CHAT-03 (D-M3): choosing DM bubbles, the target picker, and the copies shown in the Board Thread */
+.egd-codex-select-bar { display: flex; align-items: center; gap: 8px; flex-shrink: 0; padding: 6px 12px; border-bottom: 1px solid var(--egd-chat-outline-soft); background: var(--egd-chat-layer-elevated); color: var(--egd-on-surface-variant); font: 12px/1.4 var(--egd-font); }
+.egd-codex-select-bar-text { flex: 1 1 auto; min-width: 0; }
+.egd-codex-message-select { flex: none; align-self: center; width: 16px; height: 16px; margin: 0 2px; accent-color: var(--egd-primary); }
+.egd-codex-sent-chip .egd-codex-result-label::before { content: '↗ '; }
+.egd-codex-board-move { min-width: 260px; }
+.egd-codex-return-dm { flex: none; }
+.egd-codex-shared-block {
+  box-sizing: border-box;
+  flex-shrink: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  width: min(100%, 760px);
+  margin-inline: auto;
+  padding: 8px 12px;
+  border: 1px dashed var(--egd-chat-outline-soft);
+  border-radius: 10px;
+  background: color-mix(in srgb, var(--egd-chat-layer-elevated) 70%, transparent);
+}
+.egd-codex-shared-block-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.egd-codex-shared-block-title { color: var(--egd-on-surface); font: 600 12px/1.4 var(--egd-font); }
+.egd-codex-shared-copy { display: grid; grid-template-columns: auto 1fr; gap: 8px; padding: 4px 6px; border-radius: 6px; color: var(--egd-on-surface); font: 12px/1.5 var(--egd-font); white-space: pre-wrap; overflow-wrap: anywhere; }
+.egd-codex-shared-copy-user { background: color-mix(in srgb, var(--egd-primary) 8%, transparent); }
+.egd-codex-shared-copy-author { font-weight: 650; color: var(--egd-on-surface-variant); }
+.egd-codex-shared-block-note { color: var(--egd-on-surface-variant); font: 11px/1.4 var(--egd-font); }
+.egd-codex-mention-row { display: flex; flex-wrap: wrap; gap: 4px; padding: 0 2px; }
+.egd-codex-mention-chip { display: inline-flex; align-items: center; min-height: 16px; padding: 0 6px; border-radius: 999px; background: color-mix(in srgb, var(--egd-on-surface-variant) 10%, transparent); color: var(--egd-on-surface-variant); font-size: 10px; font-weight: 650; line-height: 1; white-space: nowrap; }
+.egd-codex-mention-chip-user { background: color-mix(in srgb, var(--egd-primary) 14%, transparent); color: var(--egd-primary); }
 .egd-codex-stateless-start { display: flex; flex-direction: column; flex-shrink: 0; align-self: flex-start; gap: 5px; width: 100%; max-width: 300px; margin-top: 10px; }
 button.egd-codex-stateless-toggle {
   display: inline-flex;

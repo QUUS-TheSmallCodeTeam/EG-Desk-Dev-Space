@@ -9,6 +9,7 @@ import { initialSurfaceMode, shouldFocusInitialBrowser, planBoardProjection, sna
 import * as Surface from '../overlay/resources/EGDeskSurfaceState.sys.mjs';
 import * as MinimapLayout from '../overlay/resources/EGDeskCanvasLayout.sys.mjs';
 import * as Chat from '../overlay/resources/EGDeskChatState.sys.mjs';
+import * as ThreadRouting from '../overlay/resources/EGDeskThreadRouting.sys.mjs';
 import * as ChatRunResult from '../overlay/resources/EGDeskChatRunResult.sys.mjs';
 import * as ChatChangeReview from '../overlay/resources/EGDeskChatChangeReview.sys.mjs';
 import * as Markdown from '../overlay/resources/EGDeskMarkdown.sys.mjs';
@@ -4934,8 +4935,8 @@ function localHistoryThreadLoaderHarness(state, records, fetchJson) {
     const emit = () => {};
     ${surfaceSource.slice(start, end)}
     return { list: listLocalHistoryThreads, read: loadLocalHistoryThread };
-  `, ['state', 'legacyHistoryRecords', 'ChatState', 'fetchJson']);
-  return factory(state, records, Chat, fetchJson);
+  `, ['state', 'legacyHistoryRecords', 'ChatState', 'ThreadRouting', 'fetchJson']);
+  return factory(state, records, Chat, ThreadRouting, fetchJson);
 }
 
 test('production history loader recovers persisted old-store IDs from actual SQLite import receipts with no native calls', async t => {
@@ -12922,7 +12923,7 @@ test('branch menus and the 기록 없이 시작 switch: disabled with the reason
     setThreadStateless: (...args) => calls.push(['setThreadStateless', ...args]),
   };
   const renderers = codex => compileFunction(`${surfaceSource.slice(start, end)}\nreturn { renderForkMenuItems, renderMessageMenu, renderMessageMenuTrigger, renderStatelessStart };`,
-    ['codex', 'ChatState', 'el', 'codexBridge'])(codex, Chat, el, bridge);
+    ['codex', 'ChatState', 'ThreadRouting', 'el', 'codexBridge'])(codex, Chat, ThreadRouting, el, bridge);
   const ui = renderers({ messageMenu: { threadId: 'room-a', messageId: 'm2', left: 40, top: 60 }, chatCapabilities: ['send', 'stateless', 'fork'] });
 
   const [roomItem, roomNote] = ui.renderForkMenuItems(sessionSource, null, '대화 분기', '지금까지의 대화를 새 대화방으로 이어 갑니다.');
@@ -12944,8 +12945,11 @@ test('branch menus and the 기록 없이 시작 switch: disabled with the reason
   const menu = ui.renderMessageMenu(sessionSource, answer);
   assert.deepEqual([menu.getAttribute('role'), menu.getAttribute('aria-label'), menu.style.left, menu.style.top, menu.dataset.messageId], ['group', '메시지 메뉴', '40px', '60px', 'm2']);
   assert.match(menu.className, /egd-codex-thread-menu egd-codex-message-menu/, 'the shared menu class keeps clicks inside it from closing it');
-  const [forkItem, note, close] = menu.children;
+  // CHAT-03 adds the Board Thread move items between the branch note and 닫기.
+  const [forkItem, note] = menu.children;
+  const close = menu.children[menu.children.length - 1];
   assert.deepEqual([forkItem.textContent, note.textContent, close.textContent], ['이 지점에서 분기', '이 응답까지의 대화를 새 대화방으로 이어 갑니다.', '닫기']);
+  assert.deepEqual(menu.children.slice(2, 4).map(item => item.textContent), ['Board Thread로 옮기기', '여러 메시지 골라 옮기기']);
   forkItem.fire('click');
   close.fire('click');
   assert.deepEqual(calls.splice(0), [['forkAvailability', 'room-a', 'r2'], ['forkThread', 'room-a', { fromTurnId: 'r2' }], ['closeMessageMenu']]);

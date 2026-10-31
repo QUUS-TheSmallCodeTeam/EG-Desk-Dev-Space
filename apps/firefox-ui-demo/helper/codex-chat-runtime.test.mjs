@@ -3955,6 +3955,14 @@ test('D-M3: shared messages are copied with a line on both sides and reach the r
     const restartedBlock = restarted.calls.find(call => call.method === 'turn/start').params.additionalContext.egdesk_shared_messages.value
     assert.equal((restartedBlock.match(/^--- /gm) || []).length, 1, 'only the share not attached yet')
     assert.equal(again.shareId, 'share-second')
+
+    // CHAT-03: a Board Thread that has not spoken yet takes the copies; the room is created for them.
+    assert.equal(store.getConversation('fresh-room'), null)
+    const fresh = restarted.chat.shareMessages({ fromClientThreadId: 'personal', toClientThreadId: 'fresh-room', localMessageIds: picked.slice(1) })
+    assert.deepEqual([fresh.accepted, fresh.messageCount, fresh.toClientThreadId], [true, 1, 'fresh-room'])
+    assert.ok(store.getConversation('fresh-room'))
+    assert.equal(store.listEvents('fresh-room').events.find(event => event.event === 'messages.shared.in').details.link.clientThreadId, 'personal')
+    assert.throws(() => restarted.chat.shareMessages({ fromClientThreadId: 'never-spoke', toClientThreadId: 'fresh-room', localMessageIds: picked.slice(1) }), error => error.code === 'CONVERSATION_NOT_FOUND')
   } finally {
     try { store?.close() } catch {}
     await rm(dataDir, { recursive: true, force: true })

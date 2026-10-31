@@ -2683,7 +2683,9 @@ export class CodexChatRuntime {
       throw chatError('INVALID_SHARE', `Choose 1 to ${MAX_SHARED_MESSAGES} different messages`, 400)
     }
     if (body.shareId !== undefined && !idText(body.shareId)?.trim()) throw chatError('INVALID_SHARE', 'Invalid shareId', 400)
-    if (!store.getConversation(from) || !store.getConversation(to)) throw chatError('CONVERSATION_NOT_FOUND', 'Both conversations must exist', 404)
+    if (!store.getConversation(from)) throw chatError('CONVERSATION_NOT_FOUND', 'The sending conversation must exist', 404)
+    // CHAT-03: a Board Thread that has not spoken yet is created here; its first turn reads the copies.
+    if (!store.getConversation(to)) store.createConversation({ clientThreadId: to, createdAt: this.now() })
     const wanted = new Set(ids), found = new Map()
     let cursor = 0
     for (let page = 0; page < 1000 && found.size < wanted.size; page++) {

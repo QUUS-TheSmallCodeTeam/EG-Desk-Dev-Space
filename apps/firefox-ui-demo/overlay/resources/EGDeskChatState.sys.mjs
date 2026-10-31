@@ -840,7 +840,7 @@ function ensureRun(state, identity) {
   };
   if (engineId !== undefined) run.engineId = engineId;
   if (engineProfileId !== undefined) run.engineProfileId = engineProfileId;
-  for (const field of ['requestId', 'clientThreadId', 'localThreadId', 'answerId', 'authorName', 'authorAvatar']) {
+  for (const field of ['requestId', 'clientThreadId', 'localThreadId', 'localMessageId', 'answerId', 'authorName', 'authorAvatar']) {
     if (identity[field] || request?.[field]) run[field] = identity[field] || request[field];
   }
   if (request && !run.submissionOwnerCaptured) {
@@ -930,6 +930,8 @@ export function reduceChatEvent(state, event, engineIds = [DEFAULT_CHAT_ENGINE_I
     if (!id) return run;
     let message = run.messages.find(item => item.id === id);
     if (!message) { message = { id, role: 'assistant', content: '', status: 'streaming', createdAt: event.ts }; run.messages.push(message); }
+    // CHAT-03: the store's name for this bubble rides on the event, so a live answer can be moved without a reload.
+    if (typeof event.localMessageId === 'string' && event.localMessageId && !message.localMessageId) message.localMessageId = event.localMessageId;
     if (event.event === 'message.started' && !message.content && typeof details.text === 'string') message.content = details.text;
     if (details.phase) message.phase = details.phase;
     if (event.event === 'message.delta' && message.completionConfirmed !== true) {
@@ -1265,7 +1267,8 @@ export function projectRunMessages(existing, run, now = Date.now()) {
   const priorAnswer = existing.findLast(message => message.role === 'assistant'
     && message.runId === run.runId && message.conversationId === run.conversationId);
   const messages = existing.map(message => run.requestId && message.requestId === run.requestId && message.role === 'user'
-    ? { ...message, status: 'complete', conversationId: run.conversationId, runId: run.runId, answerId: run.answerId }
+    ? { ...message, status: 'complete', conversationId: run.conversationId, runId: run.runId, answerId: run.answerId,
+      ...(run.localMessageId && !message.localMessageId ? { localMessageId: run.localMessageId } : {}) }
     : { ...message });
   const ordinal = { user: 0, assistant: 0 };
   for (const incoming of run.messages || []) {
