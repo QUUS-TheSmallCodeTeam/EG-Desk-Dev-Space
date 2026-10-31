@@ -13,6 +13,8 @@ const BRIDGE_URL = 'http://127.0.0.1:39218';
 const CHECKPOINT_KIND = 'egdesk-production-chat-history-restart-v1';
 const PROJECTION_KIND = 'egdesk-chat-history-qa-projection-v1';
 const QA_MARKER = 'EGDESK_QA_HISTORY_';
+// CHAT-01: the Agent profile ID the seed phase records for the imported room.
+const QA_ROOM_AGENT_ID = 'qa-room-agent-chat-01';
 const scriptPath = fileURLToPath(import.meta.url);
 
 function object(value, label) {
@@ -93,6 +95,16 @@ export function createProductionHistoryHttp(fetchImpl = globalThis.fetch) {
       return get('/chat/history', { clientThreadId, afterSeq, limit });
     },
     importHistoryOutcome,
+    // CHAT-01: record the room's Agent without a send — the same store write a
+    // send makes through recordRoomAgent. The probe never sends.
+    async setRoomAgent({ clientThreadId, profileId, revision = null }) {
+      nonempty(clientThreadId, 'clientThreadId');
+      const response = await fetchImpl(`${BRIDGE_URL}/chat/rooms/agent`, { method: 'POST',
+        headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ clientThreadId, profileId, revision }),
+        redirect: 'error', signal: AbortSignal.timeout(10000) });
+      if (!response.ok) throw new Error(`/chat/rooms/agent returned HTTP ${response.status}`);
+      return response.json();
+    },
     async importHistory(importRequest) {
       const outcome = await importHistoryOutcome(importRequest);
       if (outcome.status < 200 || outcome.status >= 300) {
@@ -213,7 +225,13 @@ export async function seedHistoryRestart({ http, adapter, dataDir, bridgePid, pa
   assert.equal(typeof adapter.assertImported, 'function', 'shape adapter needs assertImported');
   const importRequest = assertImportRequest(object(await adapter.makeSeed(), 'QA seed').importRequest);
   const receipt = await http.importHistory(importRequest);
+  // CHAT-01: the room's Agent is recorded before the first read, so every later
+  // read — and the restart — must report it on both routes.
+  const recorded = object(await http.setRoomAgent({ clientThreadId: importRequest.clientThreadId, profileId: QA_ROOM_AGENT_ID }), 'room Agent receipt');
+  assert.equal(recorded.agent?.profileId, QA_ROOM_AGENT_ID, 'bridge did not record the room Agent');
   const observed = await observeThroughBothRoutes(http, adapter, importRequest.clientThreadId);
+  assert.deepStrictEqual(assertRoomAgent(observed), recorded.agent,
+    'CHAT-01: /chat/history/threads and /chat/history must both report the recorded room Agent');
   await adapter.assertImported({ importRequest, receipt, observed });
   const repeated = await http.importHistory(importRequest);
   assert.equal(repeated?.alreadyImported, true, 'same importId and payload must be an idempotent no-op');
