@@ -15321,6 +15321,111 @@ test('결과 카드: a stored record is checked on restore, names its source in 
   assert.equal(Chat.findResultCardMessage(null, record.source), null);
 });
 
+// ============ CHAT-08 published results (D-K4: chips only, a revision is 버전 2) ============
+const outputFixture = (extra = {}) => ({ id: '50000000-0000-4000-8000-000000000001', outputKey: 'q3-report', version: 1, title: '3분기 보고서', format: 'markdown',
+  charCount: 1200, createdAt: 1_700_000_000_500, previousId: null, conversationId: 'conversation-a', runId: 'turn-a', answerId: 'conversation-a/turn-a', hash: 'h1', byteLength: 1200, ...extra });
+const outputV2 = (extra = {}) => outputFixture({ id: '50000000-0000-4000-8000-000000000002', version: 2, previousId: '50000000-0000-4000-8000-000000000001',
+  charCount: 1300, createdAt: 1_700_000_001_000, title: '3분기 보고서 (수정)', ...extra });
+const outputOther = () => outputFixture({ id: '50000000-0000-4000-8000-000000000003', outputKey: 'output-ab12cd34', title: '별도 결과', createdAt: 1_700_000_002_000 });
+
+test('게시 결과: output.published folds into one chip entry per outputKey; a revision becomes 버전 2 and the versions stay', () => {
+  const state = Chat.createChatProtocolState();
+  Chat.registerChatRequest(state, { requestId: 'request-a', clientThreadId: 'ui-a' });
+  const run = Chat.reduceChatEvent(state, envelope('run.started', 1));
+  Chat.reduceChatEvent(state, envelope('message.completed', 2, { messageId: 'assistant-a', text: '보고서를 게시했습니다.', phase: 'final_answer' }));
+  Chat.reduceChatEvent(state, envelope('output.published', 3, { output: outputFixture() }));
+  assert.equal(run.outputs.length, 1);
+  assert.equal(run.outputs[0].version, 1);
+  assert.deepEqual(run.outputs[0].versions.map(item => item.version), [1]);
+  assert.equal(run.outputs[0].hash, undefined, 'chip fields only, nothing of the blob');
+  Chat.reduceChatEvent(state, envelope('output.published', 4, { output: outputV2() }));
+  assert.equal(run.outputs.length, 1, 'the same key stays one chip');
+  assert.equal(run.outputs[0].id, outputV2().id);
+  assert.equal(run.outputs[0].version, 2);
+  assert.equal(run.outputs[0].title, '3분기 보고서 (수정)');
+  assert.deepEqual(run.outputs[0].versions.map(item => [item.version, item.id]), [[1, outputFixture().id], [2, outputV2().id]]);
+  Chat.reduceChatEvent(state, envelope('output.published', 5, { output: outputOther() }));
+  assert.deepEqual(run.outputs.map(item => item.outputKey), ['q3-report', 'output-ab12cd34'], 'another key is another chip, in publish order');
+  Chat.reduceChatEvent(state, envelope('output.published', 6, { output: { id: 'not-a-uuid', outputKey: 'bad key', version: 0, title: '' } }));
+  Chat.reduceChatEvent(state, envelope('output.published', 7, { output: outputV2() }));
+  assert.equal(run.outputs.length, 2, 'a broken payload or the same version again changes nothing');
+  assert.deepEqual(run.outputs[0].versions.map(item => item.version), [1, 2]);
+  const answer = Chat.projectRunMessages([], run).findLast(message => message.role === 'assistant');
+  assert.deepEqual(answer.outputs.map(item => [item.outputKey, item.version]), [['q3-report', 2], ['output-ab12cd34', 1]], 'the final answer carries the chips');
+  assert.notEqual(answer.outputs, run.outputs, 'a copy, not the run array');
+  assert.deepEqual(Chat.publishedOutputs([outputV2(), outputFixture()]).map(item => item.version), [2], 'an older version arriving later never demotes the chip');
+  assert.deepEqual(Chat.publishedOutputs(run.outputs), run.outputs, 'saved entries fold back to themselves');
+});
+
+test('게시 결과: a bridge snapshot lists every stored version and the screen keeps one entry per key; local history and legacy records carry it too', () => {
+  const state = Chat.createChatProtocolState();
+  const [run] = Chat.mergeChatSnapshot(state, { streamId: 'stream', seq: 1, conversationId: 'conversation-a', connection: 'ready', runs: [{ runId: 'turn-a', answerId: 'conversation-a/turn-a', status: 'completed',
+    messages: [{ id: 'assistant-a', role: 'assistant', text: '게시했습니다.', status: 'complete' }], context: { captures: [], packets: [], briefings: [], outputs: [outputFixture(), outputV2(), outputOther()] } }] }, 'wire');
+  assert.deepEqual(run.outputs.map(item => [item.outputKey, item.version, item.versions.length]), [['q3-report', 2, 2], ['output-ab12cd34', 1, 1]]);
+  assert.deepEqual(Chat.projectRunMessages([], run)[0].outputs, run.outputs);
+  Chat.mergeChatSnapshot(state, { streamId: 'stream', seq: 2, conversationId: 'conversation-a', connection: 'ready', runs: [{ runId: 'turn-a', answerId: 'conversation-a/turn-a', status: 'completed',
+    messages: [], context: { captures: [], packets: [], briefings: [], outputs: [] } }] }, 'wire');
+  assert.equal(run.outputs.length, 2, 'a snapshot without the list leaves what the events built');
+
+  // Local history pages (bridge run checkpoints) keep run.context.outputs; the final answer gets the chips by run identity.
+  const thread = { clientThreadId: 'room', localConversationId: 'local-room' };
+  const localRunId = 'local-run-o';
+  const messagePage = Chat.normalizeLocalHistoryPage({ protocolVersion: 1, thread, runs: [], events: [],
+    messages: [{ localMessageId: 'local-user-o', localRunId, role: 'user', content: '보고서 정리해 줘' },
+      { localMessageId: 'local-answer-o', localRunId, role: 'assistant', phase: 'final_answer', content: '게시했습니다.' }],
+    coverage: { scope: 'egdesk-local', status: 'partial', reasons: [], nativeHistoryComplete: null }, hasMore: true, nextCursor: 1, projectionTruncated: false }, 'room');
+  const runPage = Chat.normalizeLocalHistoryPage({ protocolVersion: 1, thread, messages: [], events: [],
+    runs: [{ localRunId, conversationId: 'conversation-a', runId: 'turn-a', answerId: 'conversation-a/turn-a', status: 'completed', messages: [],
+      context: { captures: [], packets: [], briefings: [], outputs: [outputFixture(), outputV2()] } }],
+    coverage: { scope: 'egdesk-local', status: 'complete', reasons: [], nativeHistoryComplete: null }, hasMore: false, nextCursor: null, projectionTruncated: false }, 'room');
+  const restored = Chat.hydrateLocalChatThread(Chat.hydrateLocalChatThread({ id: 'room', conversationId: null, messages: [] }, messagePage), runPage);
+  const answer = restored.messages.at(-1);
+  assert.deepEqual(answer.outputs.map(item => item.version), [2]);
+  assert.equal(answer.briefing, undefined, 'no Briefing is invented for a result-only run');
+  assert.equal(answer.answerId, 'conversation-a/turn-a');
+  assert.equal(restored.messages[0].outputs, undefined, 'only the final answer');
+
+  // A Desk record saved with chips restores the same chips; one saved before has none.
+  const legacy = Chat.legacyPublicChatSnapshot({ clientThreadId: 'room', threadSnapshot: { id: 'room', conversationId: 'conversation-a', messages: [
+    { id: 'u', providerItemId: 'native-u', role: 'user', conversationId: 'conversation-a', runId: 'turn-a', content: 'q' },
+    { id: 'a', providerItemId: 'native-a', role: 'assistant', conversationId: 'conversation-a', runId: 'turn-a', answerId: 'conversation-a/turn-a', content: '게시했습니다.',
+      outputs: Chat.publishedOutputs([outputFixture(), outputV2()]) },
+  ] } });
+  assert.deepEqual(legacy.runs[0].context.outputs.map(item => [item.outputKey, item.version]), [['q3-report', 2]]);
+  assert.deepEqual(legacy.runs[0].messages[1].outputs[0].versions.map(item => item.version), [1, 2]);
+  const [again] = Chat.mergeChatSnapshot(Chat.createChatProtocolState(), { ...legacy, streamId: 'legacy', seq: 0, connection: 'ready' }, 'room');
+  assert.deepEqual(again.outputs, legacy.runs[0].messages[1].outputs, 'the saved chips come back unchanged');
+});
+
+test("게시 결과 카드: the record read from the bridge keeps its result identity, one card per key, and leads back to the answer", () => {
+  const thread = resultThread({ conversationId: 'conversation-a' });
+  const message = resultMessage({ conversationId: 'conversation-a', runId: 'turn-a', answerId: 'conversation-a/turn-a', content: '보고서를 게시했습니다.' });
+  const markdown = '# 3분기 보고서\n\n' + '발견 사항 한 줄\n'.repeat(40);
+  const record = Chat.publishedOutputCardRecord(thread, message, outputV2(), markdown, { author: '분석 담당', now: 7 });
+  assert.equal(record.title, '3분기 보고서 (수정)');
+  assert.equal(record.text, markdown);
+  assert.deepEqual(record.artifacts, []);
+  assert.deepEqual([record.source.outputId, record.source.outputKey, record.source.outputVersion], [outputV2().id, 'q3-report', 2]);
+  assert.equal(record.source.answerId, 'conversation-a/turn-a');
+  assert.equal(record.source.messageId, 'msg-a1');
+  assert.equal(record.source.answeredAt, outputV2().createdAt, 'the moment it was published');
+  assert.equal(Chat.resultCardKey(record), 'conversation-a/output/q3-report');
+  assert.equal(Chat.resultCardKey(Chat.publishedOutputCardRecord(thread, message, outputFixture(), markdown)), 'conversation-a/output/q3-report', '버전 1 and 2 share the card');
+  assert.notEqual(Chat.resultCardKey(record), Chat.resultCardKey(Chat.resultCardRecord(thread, message)), 'not the answer card');
+  assert.deepEqual(Chat.restoreResultCardRecord(JSON.parse(JSON.stringify(record))), record, 'a saved Board member restores as it was');
+  const plain = Chat.restoreResultCardRecord({ ...record, source: { ...record.source, outputVersion: 'two' } });
+  assert.equal(plain.source.outputId, undefined, 'a broken result identity falls back to a plain answer card');
+  assert.equal(Chat.resultCardKey(plain), 'conversation-a/conversation-a/turn-a');
+  assert.equal(Chat.resultCardSourceView(record, { formatTime: () => '오후 3:12' }).line, '출처 · 분기 매출 정리 대화 · 분석 담당의 답변 · 게시한 결과 · 버전 2 · 오후 3:12');
+  assert.equal(Chat.publishedOutputCardRecord(thread, message, outputV2(), '   '), null, 'no body, no card');
+  assert.equal(Chat.publishedOutputCardRecord(thread, message, { id: 'x' }, markdown), null);
+  const long = 'a'.repeat(Chat.RESULT_CARD_TEXT_LIMIT + 5);
+  const cut = Chat.publishedOutputCardRecord(thread, message, outputFixture(), long);
+  assert.deepEqual([cut.text.length, cut.totalChars, cut.truncated], [Chat.RESULT_CARD_TEXT_LIMIT, long.length, true]);
+  const room = resultThread({ conversationId: 'conversation-a', messages: [message] });
+  assert.deepEqual(Chat.findResultCardMessage([room], record.source), { thread: room, message }, "'채팅에서 보기' finds the answer that published it");
+});
+
 test('긴 답변: a very long finished answer folds to a preview; the whole text stays and nothing folds by itself early', () => {
   assert.equal(Chat.longAnswerView('짧은 답변').long, false);
   assert.equal(Chat.longAnswerView(null).long, false);
