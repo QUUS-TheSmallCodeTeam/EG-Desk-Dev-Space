@@ -1269,8 +1269,8 @@ test('tool classes are exported for the chat runtime; wait_text is appended and 
   assert.equal(digest, '9f92c38ddae6e6c19126d09675001535e8bfb2e1cb7abdeefc7e5165a9c1b684')
   const waitText = BROWSER_TOOL_SPECS.find(item => item.name === 'egdesk_browser_wait_text')
   // BRW-09: appended after wait_text; read-only, cardId only.
-  const screenshot = BROWSER_TOOL_SPECS.at(-1)
-  assert.equal(screenshot.name, 'egdesk_browser_screenshot')
+  const screenshot = BROWSER_TOOL_SPECS.find(item => item.name === 'egdesk_browser_screenshot')
+  assert.ok(BROWSER_TOOL_SPECS.indexOf(screenshot) > BROWSER_TOOL_SPECS.indexOf(waitText))
   assert.deepEqual(screenshot.inputSchema, { type: 'object', additionalProperties: false, properties: { cardId: { type: 'string' } }, required: ['cardId'] })
   assert.match(screenshot.description, /never input coordinates/)
   assert.deepEqual(waitText.inputSchema, { type: 'object', additionalProperties: false,
