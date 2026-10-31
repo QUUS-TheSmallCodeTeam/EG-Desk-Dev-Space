@@ -22,6 +22,7 @@
   const BoardExport = ChromeUtils.importESModule('chrome://userchrome/content/EGDeskBoardExport.sys.mjs');
   const ProfileTransfer = ChromeUtils.importESModule('chrome://userchrome/content/EGDeskProfileTransfer.sys.mjs');
   const ProfileTransferView = ChromeUtils.importESModule('chrome://userchrome/content/EGDeskProfileTransferView.sys.mjs');
+  const AgentIdentityView = ChromeUtils.importESModule('chrome://userchrome/content/EGDeskAgentIdentityView.sys.mjs');
   const BROWSER_AGENT_ACTOR_NAME = 'EGDeskBrowserAgentRuntime';
   const BROWSER_AGENT_HISTORY_LIMIT = 100;
   // Time a Browser tool reply needs after a wait or settle, before the
@@ -242,17 +243,31 @@
     return CODEX_AGENT_PROFILES[DEFAULT_CODEX_AGENT_PROFILE_ID];
   }
 
-  // Agent avatar: the saved emoji/initial on one of the six approved palette tones.
+  // Agent avatar: the saved emoji/initial on one of the six approved palette
+  // tones, or the saved photo (D-A3) once the bridge has read it.
   function codexProfileAvatar(avatar, name, className = '') {
     const view = ChatState.profileAvatarView(avatar, name);
-    return el('span', { class: `egd-profile-avatar egd-profile-avatar-tone-${view.tone}${className ? ` ${className}` : ''}`, 'aria-hidden': 'true' }, view.text);
+    const photo = typeof codexAvatarPhotoSource === 'function' ? codexAvatarPhotoSource(view) : null;
+    return el('span', { class: `egd-profile-avatar egd-profile-avatar-tone-${view.tone}${photo ? ' egd-profile-avatar-photo' : ''}${className ? ` ${className}` : ''}`, 'aria-hidden': 'true' },
+      photo ? el('img', { class: 'egd-profile-avatar-image', src: photo, alt: '', draggable: 'false' }) : view.text);
   }
 
-  // Chat author face: a saved emoji/initial on its palette tone, else the
-  // name's first letter on the plain chat avatar colour.
+  // AGENT-05 / D-A3: the photo bytes arrive later through the bridge (one read
+  // per asset, GET /profiles/avatar-images/:id). Until then — and wherever a
+  // face is drawn without the surface, as the tests compile the face helpers
+  // alone — the saved initial on its tone stands in.
+  function codexAvatarPhotoSource(view) {
+    const assetId = view?.assetId;
+    return typeof assetId === 'string' && assetId ? state.codexBridge?.avatarImage?.(assetId) || null : null;
+  }
+
+  // Chat author face: a saved emoji/initial/photo on its palette tone, else
+  // the name's first letter on the plain chat avatar colour.
   function codexMessageAvatarFace(avatar, name) {
     const view = ChatState.profileAvatarView(avatar, name);
-    return { text: view.saved ? view.text : String(name || '?').slice(0, 1), toneClass: view.saved ? ` egd-profile-avatar-tone-${view.tone}` : '' };
+    const photo = typeof codexAvatarPhotoSource === 'function' ? codexAvatarPhotoSource(view) : null;
+    return { text: view.saved ? view.text : String(name || '?').slice(0, 1), tone: view.tone, photo,
+      toneClass: `${view.saved ? ` egd-profile-avatar-tone-${view.tone}` : ''}${photo ? ' egd-profile-avatar-photo' : ''}` };
   }
 
   // CHAT-07: the small profile peek an Agent answer's face or name opens
@@ -269,7 +284,8 @@
       onclick: (ev) => ev.stopPropagation(),
     },
     el('div', { class: 'egd-codex-agent-peek-head' },
-      el('span', { class: `egd-codex-message-avatar egd-codex-agent-peek-avatar${face.toneClass}`, 'aria-hidden': 'true' }, face.text),
+      el('span', { class: `egd-codex-message-avatar egd-codex-agent-peek-avatar${face.toneClass}`, 'aria-hidden': 'true' },
+        face.photo ? el('img', { class: 'egd-profile-avatar-image', src: face.photo, alt: '', draggable: 'false' }) : face.text),
       el('div', { class: 'egd-codex-agent-peek-identity' },
         el('div', { class: 'egd-codex-agent-peek-name' }, view.name),
         el('div', { class: 'egd-codex-agent-peek-role' }, view.role))),
@@ -295,20 +311,59 @@
   }
 
   // AGENT-05: '[···] Agent 작업 중' beside the Agent's face at the end of the
-  // conversation (view from ChatState.agentWorkingView). Pressing it opens the
-  // activity record; it never shows thought text.
-  function codexAgentWorkingRow(working, { runId = '', name = 'Codex', avatar = null, onOpen } = {}) {
+  // conversation (rows from AgentIdentityView.agentWorkingRows). Pressing it
+  // opens the activity record at that run; it never shows thought text. With
+  // several Agents at work in one room, `showName` puts the Agent's name above
+  // its bubble, outside it, as an answer's name sits.
+  function codexAgentWorkingRow(working, { runId = '', name = 'Codex', avatar = null, showName = false, onOpen } = {}) {
     const face = codexMessageAvatarFace(avatar, name);
     return el('div', { class: 'egd-codex-working-row', data: { testid: 'chat-agent-working', runId, state: working.state } },
-      el('span', { class: `egd-codex-message-avatar${face.toneClass}`, 'aria-hidden': 'true' }, face.text),
-      el('button', {
-        class: 'egd-codex-working-bubble', type: 'button', title: '활동 기록 열기',
-        'aria-label': `${name} · ${working.text} · 활동 기록 열기`,
-        data: { testid: 'chat-agent-working-open', focusKey: `agent-working-${runId}` },
-        onclick: (ev) => { ev.stopPropagation(); onOpen?.(); },
-      },
-      el('span', { class: 'egd-codex-typing-dots', 'aria-hidden': 'true' }, el('span'), el('span'), el('span')),
-      el('span', { class: 'egd-codex-working-text' }, working.text)));
+      el('span', { class: `egd-codex-message-avatar${face.toneClass}`, 'aria-hidden': 'true' },
+        face.photo ? el('img', { class: 'egd-profile-avatar-image', src: face.photo, alt: '', draggable: 'false' }) : face.text),
+      el('div', { class: 'egd-codex-working-stack' },
+        showName ? el('div', { class: 'egd-codex-message-role egd-codex-working-name', data: { testid: 'chat-agent-working-name' } }, name) : null,
+        el('button', {
+          class: 'egd-codex-working-bubble', type: 'button', title: '활동 기록 열기',
+          'aria-label': `${name} · ${working.text} · 활동 기록 열기`,
+          data: { testid: 'chat-agent-working-open', focusKey: `agent-working-${runId}` },
+          onclick: (ev) => { ev.stopPropagation(); onOpen?.(); },
+        },
+        el('span', { class: 'egd-codex-typing-dots', 'aria-hidden': 'true' }, el('span'), el('span'), el('span')),
+        el('span', { class: 'egd-codex-working-text' }, working.text))));
+  }
+
+  // AGENT-05: which Agent holds this Browser Card right now, read from the
+  // BRW-13 run bindings (the records browserToolCardPermission reads). Display
+  // only — nothing here grants or refuses anything.
+  function codexCardAgentIdentity(cardId) {
+    const entries = [];
+    for (const [key, bound] of browserToolRunBindings) {
+      if (bound?.binding?.cardId !== cardId || browserToolCancelledRuns.has(key)) continue;
+      entries.push({ runId: key.split('\u0000')[0], clientThreadId: bound.clientThreadId, permission: bound.permission });
+    }
+    return AgentIdentityView.resolveCardAgentIdentity(entries, {
+      threadFor: clientThreadId => state.codex.threads.find(thread => ChatState.clientThreadBinding(thread) === clientThreadId) || null,
+      runsFor: codexRuns,
+      roomProfileFor: thread => thread.profileEnabled === true ? codexThreadAgentProfile(thread) : null,
+    });
+  }
+
+  // The Card header chip beside the BRW-13 badge: the Agent's small face and
+  // name while it works on the Card. Redrawn only when the shown Agent changes,
+  // so the status region never re-announces on a timer refresh.
+  function codexCardAgentIdentityRender(chip, badgeView, control, cardId) {
+    const view = AgentIdentityView.cardAgentIdentityView(badgeView, codexCardAgentIdentity(cardId), control.agentIdentity || null);
+    control.agentIdentity = view.remember;
+    const face = view.shown ? codexMessageAvatarFace(view.avatar, view.name) : null;
+    const signature = view.shown ? [view.name, face.photo || face.text, face.toneClass].join('\u0000') : '';
+    if (chip.dataset.agentSignature === signature) return;
+    chip.dataset.agentSignature = signature;
+    chip.hidden = !view.shown;
+    chip.title = view.shown ? `${view.name} · 이 카드에서 작업 중` : '';
+    chip.replaceChildren(...(view.shown ? [
+      el('span', { class: `egd-profile-avatar egd-browser-agent-face egd-profile-avatar-tone-${face.tone}${face.photo ? ' egd-profile-avatar-photo' : ''}`, 'aria-hidden': 'true' },
+        face.photo ? el('img', { class: 'egd-profile-avatar-image', src: face.photo, alt: '', draggable: 'false' }) : face.text),
+      el('span', { class: 'egd-browser-agent-name' }, view.name)] : []));
   }
 
   // ChatGPT usage in the resource-monitor ring shape. Nothing reported shows a
@@ -9263,6 +9318,17 @@
           for (const message of activeThread.messages) {
             if (message.role === 'assistant' && message.runId && !(message.status === 'streaming' && !message.content)) lastAnswerOfRun.set(message.runId, message.id);
           }
+          // AGENT-05: every busy run of this room gets its own bubble, so a Board
+          // with several Agents at work shows each of them. The current run keeps
+          // the bubble below; the other runs' bubbles follow it, and their
+          // streaming answers drop the dots inside the bubble the same way.
+          const workingRows = AgentIdentityView.agentWorkingRows(roomRuns, {
+            connected: activeEngine.engineId === 'claude' ? activeEngine.ready : codex.connected, held: ChatState.nativeBindingHeld(activeThread),
+            roomName: roomProfile?.name || 'Codex', roomAvatar: roomProfile?.avatar || null, group: activeThread.type === 'group',
+          });
+          const currentWorkingRow = working ? workingRows.find(row => row.runId === (workingRun?.runId || '')) || null : null;
+          const otherWorkingRows = workingRows.filter(row => row.runId && row.runId !== (workingRun?.runId || ''));
+          const otherWorkingRunIds = new Set(otherWorkingRows.map(row => row.runId));
           const computerUseLine = (run) => {
             const view = run ? ChatState.computerUseView(run, { formatTime: formatMessageTime }) : null;
             if (!view) return null;
@@ -9358,6 +9424,7 @@
               bubble.appendChild(el('span', { class: 'egd-codex-message-time', role: 'status' }, ({ submitting: '보내는 중', unconfirmed: '접수 미확인', failed: '전송 거절됨' })[message.status]));
             }
             if (message.status === 'streaming' && message.role === 'assistant' && activeThread.profileEnabled === true && !ChatState.nativeBindingHeld(activeThread)
+              && !(message.runId && otherWorkingRunIds.has(message.runId))
               && !(working && message.runId && message.runId === workingRun?.runId)) {
               bubble.appendChild(el('div', {
                 class: 'egd-codex-streaming',
@@ -9382,11 +9449,10 @@
               class: 'egd-codex-result-chip', data: { testid: 'chat-message-inputs', requestId: message.requestId || '' },
               onclick: () => openCodexActivityPanel(activeThread.id),
             }, `첨부 입력 ${message.inputReferences.length}개 · 기록 보기`));
-            const authorAvatar = message.role === 'assistant'
-              ? message.authorAvatar || (roomProfile?.avatar && roomProfile.name === author ? roomProfile.avatar : null) : null;
-            const avatarView = ChatState.profileAvatarView(authorAvatar, author);
-            const avatarClass = `egd-codex-message-avatar${groupedWithPrevious ? ' egd-codex-message-avatar-spacer' : ''}${avatarView.saved ? ` egd-profile-avatar-tone-${avatarView.tone}` : ''}`;
-            const avatarText = groupedWithPrevious ? '' : avatarView.saved ? avatarView.text : author.slice(0, 1);
+            // AGENT-05: the face is the photo (D-A3) once read, else the saved emoji/initial on its tone.
+            const face = codexMessageAvatarFace(AgentIdentityView.messageAuthorAvatar(message, author, roomProfile), author);
+            const avatarClass = `egd-codex-message-avatar${groupedWithPrevious ? ' egd-codex-message-avatar-spacer' : ''}${face.toneClass}`;
+            const avatarText = groupedWithPrevious ? '' : face.photo ? el('img', { class: 'egd-profile-avatar-image', src: face.photo, alt: '', draggable: 'false' }) : face.text;
             const avatar = message.role === 'assistant' && !groupedWithPrevious
               ? el('button', peekTriggerProps(message, author, avatarClass, `agent-peek-face-${message.id}`), avatarText)
               : message.role !== 'user' ? el('div', { class: avatarClass, 'aria-hidden': 'true' }, avatarText) : null;
@@ -9405,8 +9471,15 @@
           if (working) {
             messages.appendChild(codexAgentWorkingRow(working, {
               runId: workingRun.runId || '', name: workingRun.authorName || roomProfile?.name || 'Codex',
-              avatar: workingRun.authorAvatar || roomProfile?.avatar || null,
-              onOpen: () => codexBridge.openActivity(activeThread.id),
+              avatar: workingRun.authorAvatar || roomProfile?.avatar || null, showName: !!currentWorkingRow?.showName,
+              // The record opens on this run's head (CHAT-07 activity record, AGENT-05).
+              onOpen: () => codexBridge.openActivity(activeThread.id, { runId: workingRun.runId || null }),
+            }));
+          }
+          for (const row of otherWorkingRows) {
+            messages.appendChild(codexAgentWorkingRow(row, {
+              runId: row.runId, name: row.name, avatar: row.avatar, showName: row.showName,
+              onOpen: () => codexBridge.openActivity(activeThread.id, { runId: row.runId }),
             }));
           }
           // A run with no answer shown yet keeps its count at the end of the conversation.
@@ -10477,6 +10550,19 @@
     let profileCatalogLoad = null;
     // CHAT-07 peek: GET /profiles/:id per Agent, keyed by the active revision asked for.
     const agentProfileDetails = new Map();
+    // AGENT-05 / D-A3: avatar photos by asset id, each read once per session from
+    // GET /profiles/avatar-images/:id. Null until (or unless) the bytes arrive —
+    // a photo that cannot be read leaves the initial standing; it is not retried.
+    const avatarImages = new Map();
+    const avatarImage = (assetId) => {
+      if (!AgentIdentityView.isAvatarAssetId(assetId)) return null;
+      if (avatarImages.has(assetId)) return avatarImages.get(assetId);
+      avatarImages.set(assetId, null);
+      fetchJson(`/profiles/avatar-images/${encodeURIComponent(assetId)}`)
+        .then((payload) => { avatarImages.set(assetId, AgentIdentityView.agentAvatarImageSource(payload, assetId)); emit(); })
+        .catch(() => {});
+      return null;
+    };
     const loadProfileCatalog = () => {
       if (profileCatalogLoad) return profileCatalogLoad;
       if (codexProfileCatalog.status !== 'ready') codexProfileCatalog = { status: 'loading', profiles: [] };
@@ -11289,6 +11375,8 @@
         return createCodexActivityReadScope(threadId, epochScope, fetchJson, onInvalidate);
       },
       openActivity(threadId = state.codex.activeThreadId, focus = null) { openCodexActivityPanel(threadId, focus); },
+      // AGENT-05 / D-A3: the data: URL of a saved avatar photo once read, else null (and the read starts).
+      avatarImage,
       async replyApproval({ approvalId, conversationId, runId, decision }) {
         const run = protocol.runs[ChatState.runKey(conversationId, runId)];
         const approval = run?.pendingApprovals.find(item => (item.approvalId || item.id) === approvalId);
@@ -16747,6 +16835,9 @@
       onclick: (ev) => { ev.stopPropagation(); toggleAgentTimeline(); },
     });
     const agentBadgeStatus = el('span', { class: 'egd-browser-agent-status', role: 'status' }, agentBadge);
+    // AGENT-05: the Agent's face and name beside the badge while it works on this Card.
+    const agentIdentityChip = el('span', { class: 'egd-browser-agent-identity', hidden: true, data: { testid: 'browser-agent-identity' } });
+    agentBadgeStatus.prepend(agentIdentityChip);
     const agentHandButton = el('button', {
       type: 'button', class: 'egd-browser-agent-hand', hidden: true, data: { testid: 'browser-agent-pause', action: '' },
       onclick: (ev) => {
@@ -18317,6 +18408,8 @@
       agentBadge.dataset.mode = view.mode;
       // The status region speaks when the label changes, never on a re-render.
       if (agentBadge.textContent !== view.label) agentBadge.textContent = view.label;
+      // AGENT-05: the Agent chip beside the badge (absent where this block runs alone, as in tests).
+      if (typeof codexCardAgentIdentityRender === 'function') codexCardAgentIdentityRender(agentIdentityChip, view, agentControl, card.id);
       agentBadge.dataset.compactLabel = view.mode === 'user' ? '직접'
         : view.mode === 'operating' ? (view.label === 'Agent 읽는 중' ? '읽기' : '조작') : '';
       const badgeName = view.label ? `${view.label} · Agent 활동 기록 보기` : 'Agent 활동 기록 보기';

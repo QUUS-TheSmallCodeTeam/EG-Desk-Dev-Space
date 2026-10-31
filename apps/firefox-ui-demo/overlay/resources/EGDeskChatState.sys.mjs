@@ -1284,7 +1284,7 @@ export function projectRunMessages(existing, run, now = Date.now()) {
       ...previous, ...incoming, role, id: previous?.id || incoming.id,
       providerItemId: incoming.id, content: incoming.content ?? incoming.text ?? '',
       authorName: role === 'assistant' ? previous?.authorName || run.authorName || 'Codex' : previous?.authorName,
-      ...(role === 'assistant' ? { authorAvatar: publicProfileAvatar(previous?.authorAvatar || run.authorAvatar) } : {}),
+      ...(role === 'assistant' ? { authorAvatar: displayProfileAvatar(previous?.authorAvatar || run.authorAvatar) } : {}),
       createdAt: previous?.createdAt || incoming.createdAt || now,
       conversationId: run.conversationId, runId: run.runId, answerId: run.answerId, artifacts: [], briefing: null, contextCaptures: [], contextEvents: [], contextPackets: [],
     };
@@ -1341,11 +1341,16 @@ export function publicProfileAvatar(value) {
   return { kind: value.kind, value: text, color: PROFILE_AVATAR_PALETTE.includes(color) ? color : PROFILE_AVATAR_PALETTE[0] };
 }
 
-/** Avatar to draw: the saved emoji/initial, else the name's first letter; tone indexes the palette. */
+// AGENT-05 / D-A3: the avatar as the Chat draws it — a public emoji/initial, or
+// a saved photo reference (its initial stands in until the bytes arrive).
+export const displayProfileAvatar = value => publicProfileAvatar(value) || profileImageReference(value);
+
+/** Avatar to draw: the saved emoji/initial, else the name's first letter; tone indexes the palette. A photo adds `assetId`. */
 export function profileAvatarView(avatar, name = '') {
-  const saved = publicProfileAvatar(avatar);
+  const saved = displayProfileAvatar(avatar);
   const first = graphemesOf(typeof name === 'string' ? name.trim() : '')[0] || '?';
-  return { kind: saved?.kind || 'initial', text: saved?.value || first.toUpperCase(), tone: saved ? PROFILE_AVATAR_PALETTE.indexOf(saved.color) : 0, saved: !!saved };
+  return { kind: saved?.kind || 'initial', text: saved?.value || first.toUpperCase(), tone: saved ? PROFILE_AVATAR_PALETTE.indexOf(saved.color) : 0, saved: !!saved,
+    ...(saved?.kind === 'image' ? { assetId: saved.assetId } : {}) };
 }
 
 /** Catalog rows from GET /profiles; malformed rows are dropped, never repaired into another identity. */
@@ -1360,7 +1365,7 @@ export function normalizeProfileCatalog(payload) {
     return [{ id: row.id, lifecycle: row.lifecycle, origin: PROFILE_ORIGINS.includes(row.origin) ? row.origin : 'user',
       activeRevision: revision(row.activeRevision), headRevision: revision(row.headRevision), hasDraft: row.hasDraft === true,
       name: row.name.trim().slice(0, 40), role: typeof row.role === 'string' ? row.role.trim().slice(0, 80) : '',
-      avatar: publicProfileAvatar(row.avatar), updatedAt: Number.isFinite(row.updatedAt) ? row.updatedAt : null }];
+      avatar: displayProfileAvatar(row.avatar), updatedAt: Number.isFinite(row.updatedAt) ? row.updatedAt : null }];
   });
 }
 export const profileRunnable = profile => !!profile && profile.lifecycle === 'active' && Number.isSafeInteger(profile.activeRevision);
@@ -1689,20 +1694,20 @@ export function agentPeekView({ author = 'Codex', authorAvatar = null, profile =
   const board = `${boardTitle || 'EG-Desk'}${threadType === 'group' ? ' · Board Thread' : ' · 지금 열린 Board'}`;
   const base = { model: modelText || '확인 안 됨', board, profileId: null, loading: false, note: null, expertiseEmpty: '정하지 않음' };
   if (!profile) {
-    return { ...base, name: author || 'Codex', avatar: publicProfileAvatar(authorAvatar), role: '기본 Codex 대화 · 따로 정한 Agent 없음',
+    return { ...base, name: author || 'Codex', avatar: displayProfileAvatar(authorAvatar), role: '기본 Codex 대화 · 따로 정한 Agent 없음',
       tone: '정하지 않음', expertise: [], tools: '제한 없음' };
   }
   const name = profile.name || author || 'Agent';
   const note = author && author !== name ? `이 답변을 보낸 당시 이름: ${author}` : null;
   if (profile.server !== true) {
-    return { ...base, name, avatar: publicProfileAvatar(profile.avatar) || publicProfileAvatar(authorAvatar), role: profile.summary || profile.role || '역할 미설정',
+    return { ...base, name, avatar: displayProfileAvatar(profile.avatar) || displayProfileAvatar(authorAvatar), role: profile.summary || profile.role || '역할 미설정',
       tone: '정하지 않음', expertise: [], tools: '제한 없음', note };
   }
   const body = detail?.active?.body || null;
   const pending = !body && detailStatus === 'loading' ? '불러오는 중…' : !body ? '확인하지 못했습니다' : null;
   const tone = body ? PROFILE_TONE_OPTIONS.find(option => option.value === body.personality?.tone)?.label || '담백' : null;
   const traits = body ? formList(body.personality?.traits).slice(0, 3) : [];
-  return { ...base, name, avatar: publicProfileAvatar(body?.avatar) || publicProfileAvatar(profile.avatar) || publicProfileAvatar(authorAvatar),
+  return { ...base, name, avatar: displayProfileAvatar(body?.avatar) || displayProfileAvatar(profile.avatar) || displayProfileAvatar(authorAvatar),
     role: formLine(body?.role) || profile.role || '역할 미설정', profileId: profile.id, loading: !!pending && detailStatus === 'loading', note,
     tone: pending || [tone, traits.join(', ')].filter(Boolean).join(' · '),
     expertise: body ? formList(body.expertise) : [],

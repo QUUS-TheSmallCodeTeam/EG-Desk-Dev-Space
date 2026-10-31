@@ -14971,7 +14971,9 @@ test('chat wiring: faces and names open the peek, the 작업 중 bubble closes t
   // The bubble follows the last line, replaces the dots inside its run's answer, and opens the record; the status line stays.
   assert.match(surfaceSource, /const working = ChatState\.nativeBindingHeld\(activeThread\) \? null : ChatState\.agentWorkingView\(workingRun,\s*\{ connected: activeEngine\.engineId === 'claude' \? activeEngine\.ready : codex\.connected \}\);/);
   assert.match(surfaceSource, /          appendControlNotices\(\);\n          if \(working\) \{\n            messages\.appendChild\(codexAgentWorkingRow\(working, \{/);
-  assert.match(surfaceSource, /onOpen: \(\) => codexBridge\.openActivity\(activeThread\.id\)/);
+  // AGENT-05: the bubble opens the record at its own run, not just the room.
+  assert.match(surfaceSource, /onOpen: \(\) => codexBridge\.openActivity\(activeThread\.id, \{ runId: workingRun\.runId \|\| null \}\)/);
+  assert.match(surfaceSource, /for \(const row of otherWorkingRows\) \{\n            messages\.appendChild\(codexAgentWorkingRow\(row, \{/, 'every other busy run gets its own bubble');
   assert.match(surfaceSource, /&& !\(working && message\.runId && message\.runId === workingRun\?\.runId\)\) \{/);
   assert.match(surfaceSource, /data: \{ testid: 'chat-run-status', status, runId: run\?\.runId \|\| ''/);
   // The activity record.
