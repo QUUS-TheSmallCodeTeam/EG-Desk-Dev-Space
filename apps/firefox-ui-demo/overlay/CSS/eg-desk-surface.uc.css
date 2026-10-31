@@ -1910,6 +1910,32 @@
 }
 .egd-browser-card .egd-browser-agent-badge[hidden],
 .egd-browser-card .egd-browser-agent-hand[hidden] { display: none; }
+/* AGENT-05: the Agent at work on this Card — its small face and name beside the badge. */
+.egd-browser-card .egd-browser-agent-status { gap: 4px; }
+.egd-browser-card .egd-browser-agent-identity {
+  display: inline-flex;
+  align-items: center;
+  flex: 0 1 auto;
+  gap: 5px;
+  min-width: 0;
+  max-width: 140px;
+  height: 20px;
+  padding: 0 7px 0 3px;
+  border: 1px solid var(--egd-outline);
+  border-radius: 999px;
+  background: var(--egd-surface-elevated);
+  color: var(--egd-on-surface);
+  font: 600 11px/1 var(--egd-font);
+  white-space: nowrap;
+}
+.egd-browser-card .egd-browser-agent-identity[hidden] { display: none; }
+.egd-browser-card .egd-browser-agent-face { width: 14px; height: 14px; font-size: 8px; }
+.egd-browser-card .egd-browser-agent-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.egd-browser-card[data-egd-browser-presentation] .egd-browser-agent-identity {
+  height: calc(20px * var(--egd-browser-ui-scale));
+  max-width: calc(140px * var(--egd-browser-ui-scale));
+  font-size: calc(11px * var(--egd-browser-ui-scale));
+}
 /* The persistent badge says it; the passing note would only repeat it. */
 .egd-browser-card:is([data-egd-agent-control="operating"], [data-egd-agent-control="user"]) .egd-browser-agent-activity { display: none; }
 /* Readable at any Desk zoom, like the rest of the attached Browser bar. */
@@ -7202,6 +7228,10 @@
 .egd-codex-message-avatar.egd-profile-avatar-tone-4 { background: color-mix(in srgb, var(--egd-avatar-ink) 15%, var(--egd-avatar-paper)); color: var(--egd-avatar-ink); }
 .egd-profile-avatar-tone-5,
 .egd-codex-message-avatar.egd-profile-avatar-tone-5 { background: var(--egd-avatar-note); color: var(--egd-avatar-ink); box-shadow: inset 0 0 0 1px var(--egd-outline); }
+/* AGENT-05 / D-A3: a saved photo fills the face once read; the tone shows only until then. */
+.egd-profile-avatar-photo,
+button.egd-codex-message-avatar.egd-profile-avatar-photo { padding: 0; background: var(--egd-avatar-paper); box-shadow: inset 0 0 0 1px var(--egd-outline); }
+.egd-profile-avatar-image { display: block; width: 100%; height: 100%; object-fit: cover; border-radius: inherit; pointer-events: none; }
 .egd-codex-thread-menu-avatar { width: 18px; height: 18px; font-size: 9px; }
 .egd-codex-thread-menu-note {
   padding: 4px 8px;
@@ -8042,6 +8072,10 @@ button.egd-codex-working-bubble:focus-visible { outline: var(--egd-focus-outline
 .egd-codex-working-bubble .egd-codex-typing-dots { margin-right: 0; }
 .egd-codex-working-row[data-state="approval"] .egd-codex-working-bubble,
 .egd-codex-working-row[data-state="question"] .egd-codex-working-bubble { border-color: var(--egd-note-line); background: var(--egd-note-soft); color: var(--egd-warning-ink); }
+/* Several Agents at work in one room: each bubble under its own name, rows a breath apart. */
+.egd-codex-working-stack { display: flex; flex-direction: column; align-items: flex-start; gap: 3px; min-width: 0; }
+.egd-codex-working-name { padding-left: 2px; }
+.egd-codex-working-row + .egd-codex-working-row { margin-top: 4px; }
 
 /* AGENT-04 in the activity record: the run's ceiling under its head, and the
    notes a ceiling row carries. */
