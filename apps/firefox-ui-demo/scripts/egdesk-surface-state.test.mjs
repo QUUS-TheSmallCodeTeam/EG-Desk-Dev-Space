@@ -4756,6 +4756,37 @@ test('CHAT-01: a room restored from the store alone answers as the Agent recorde
   assert.deepEqual(Chat.restoredRoomAgentFields({ profileEnabled: false }, {}), {});
 });
 
+test('CHAT-01: picking an Agent from the ⋯ menu writes the room Agent to the store (null for plain Codex); a room never sent (404) is left to its first send', async () => {
+  const start = surfaceSource.indexOf('      setThreadAgentProfile(threadId, profileId) {');
+  const end = surfaceSource.indexOf('      cycleThreadAgentProfile(threadId) {', start);
+  assert.ok(start > 0 && end > start);
+  const posts = [];
+  let answer = () => Promise.resolve();
+  const state = { codex: { threads: [{ id: 'room-1', profileEnabled: false, agentProfileId: null, toolMode: null, systemPrompt: null }], threadMenu: {}, memberMenu: {} } };
+  const choices = [{ id: 'code-reviewer', server: true, revision: 4, toolMode: 'review', systemPrompt: 'Review.' }];
+  const bridge = compileFunction(`return { ${surfaceSource.slice(start, end)} };`,
+    ['state', 'updateThreadById', 'emit', 'codexAgentProfileChoices', 'normalizeCodexAgentProfileId', 'codexAgentProfile', 'getCodexThreadById', 'ChatState', 'fetchJson'])(
+    state, (id, update) => { state.codex.threads = state.codex.threads.map(thread => thread.id === id ? update(thread) : thread); }, () => {},
+    () => choices, id => id, id => choices.find(choice => choice.id === id) || { id, toolMode: null, systemPrompt: null },
+    (codex, id) => codex.threads.find(thread => thread.id === id), Chat,
+    (path, options) => { posts.push([path, options.method, JSON.parse(options.body)]); return answer(); });
+  const settle = () => new Promise(resolve => setTimeout(resolve, 0));
+  answer = () => Promise.resolve({ clientThreadId: 'room-1', agent: { profileId: 'code-reviewer', revision: 4, setAt: 99 } });
+  bridge.setThreadAgentProfile('room-1', 'code-reviewer');
+  await settle();
+  assert.deepEqual(posts.at(-1), ['/chat/rooms/agent', 'POST', { clientThreadId: 'room-1', profileId: 'code-reviewer', revision: 4 }], 'the revision travels as a send would send it');
+  assert.deepEqual([state.codex.threads[0].profileEnabled, state.codex.threads[0].agentProfileId, state.codex.threads[0].agent],
+    [true, 'code-reviewer', { profileId: 'code-reviewer', revision: 4, setAt: 99 }]);
+  answer = () => Promise.reject(Object.assign(new Error('That conversation has not been saved yet'), { status: 404, code: 'CONVERSATION_NOT_FOUND' }));
+  bridge.setThreadAgentProfile('room-1', null);
+  await settle();
+  assert.deepEqual(posts.at(-1), ['/chat/rooms/agent', 'POST', { clientThreadId: 'room-1', profileId: null, revision: null }]);
+  assert.deepEqual([state.codex.threads[0].profileEnabled, state.codex.threads[0].agentProfileId], [false, null], 'the screen keeps its pick when the store has no such room yet');
+  bridge.setThreadAgentProfile('room-1', 'unknown-choice');
+  await settle();
+  assert.equal(posts.length, 2, 'an Agent outside the catalog is not picked or written');
+});
+
 test('canonical final history supersedes an old pref partial, but a live update after the read fence wins', () => {
   const oldPref = { id: 'optimistic-a', role: 'assistant', providerItemId: 'native-a', conversationId: 'c', runId: 'r',
     content: 'old partial', status: 'streaming', createdAt: 10 };

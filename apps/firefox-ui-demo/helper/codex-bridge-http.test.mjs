@@ -822,3 +822,29 @@ test('2-R routes: Board send, message sharing and sub-Agent hand-back reach thei
   await bare(request(JSON.stringify({ clientThreadId: 'room-1', message: 'hi' }), {}, '/chat/board/send'), res, new URL('http://localhost/chat/board/send'))
   assert.deepEqual([res.status, res.body.code, res.body.accepted], [501, 'CHAT_ACTION_UNAVAILABLE', false])
 })
+
+test('CHAT-01: POST /chat/rooms/agent reaches setRoomAgent without an engine account check; a room never sent answers 404; a bridge without it answers 501', async () => {
+  const seen = []
+  let auth = 0
+  const chat = {
+    setRoomAgent: body => {
+      seen.push(body)
+      if (body.clientThreadId === 'never-sent') throw Object.assign(new Error('That conversation has not been saved yet'), { code: 'CONVERSATION_NOT_FOUND', httpStatus: 404 })
+      return { accepted: true, clientThreadId: body.clientThreadId, agent: body.profileId === null ? null : { profileId: body.profileId, revision: body.revision ?? null, setAt: 7 } }
+    },
+  }
+  const handler = createChatHttpHandler(chat, async () => { auth += 1; throw Object.assign(new Error('Codex ChatGPT login is required'), { code: 'LOGIN_REQUIRED', httpStatus: 401 }) })
+  const post = async body => { const res = response(); assert.equal(await handler(request(JSON.stringify(body), {}, '/chat/rooms/agent'), res, new URL('http://localhost/chat/rooms/agent')), true); return res }
+  const picked = await post({ clientThreadId: 'room-1', profileId: 'code-reviewer', revision: 3 })
+  assert.deepEqual([picked.status, picked.body], [200, { accepted: true, clientThreadId: 'room-1', agent: { profileId: 'code-reviewer', revision: 3, setAt: 7 } }])
+  const cleared = await post({ clientThreadId: 'room-1', profileId: null, revision: null })
+  assert.deepEqual([cleared.status, cleared.body.agent], [200, null])
+  const unsent = await post({ clientThreadId: 'never-sent', profileId: 'code-reviewer' })
+  assert.deepEqual([unsent.status, unsent.body.code, unsent.body.accepted], [404, 'CONVERSATION_NOT_FOUND', false])
+  assert.equal(auth, 0, 'a signed-out pick is still written: the room Agent is a local-store record, not a turn')
+  assert.deepEqual(seen.map(body => [body.clientThreadId, body.profileId]), [['room-1', 'code-reviewer'], ['room-1', null], ['never-sent', 'code-reviewer']])
+  const bare = createChatHttpHandler({}, async () => {})
+  const res = response()
+  await bare(request(JSON.stringify({ clientThreadId: 'room-1', profileId: 'code-reviewer' }), {}, '/chat/rooms/agent'), res, new URL('http://localhost/chat/rooms/agent'))
+  assert.deepEqual([res.status, res.body.code], [501, 'CHAT_ACTION_UNAVAILABLE'])
+})

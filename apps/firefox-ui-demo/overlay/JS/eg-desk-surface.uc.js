@@ -12809,6 +12809,22 @@
         state.codex.threadMenu = null;
         state.codex.memberMenu = null;
         emit();
+        // CHAT-01: the store remembers the pick too (null = back to plain Codex),
+        // so a restart without the Desk pref restores it — and does not revive
+        // an older pick. The revision travels as a send would send it (the
+        // catalog's active revision for a saved Agent); it is kept, not applied.
+        // A room that has not been sent yet is not in the store (404) and its
+        // first send records it; any other failure leaves the screen's pick alone.
+        const clientThreadId = ChatState.clientThreadBinding(getCodexThreadById(state.codex, threadId));
+        if (!clientThreadId) return;
+        const revision = profileId && profile.server === true && Number.isSafeInteger(profile.revision) ? profile.revision : null;
+        fetchJson('/chat/rooms/agent', { method: 'POST', body: JSON.stringify({ clientThreadId, profileId: profileId ? normalizedProfileId : null, revision }) })
+          .then((result) => {
+            if (result?.clientThreadId !== clientThreadId) return;
+            // thread.agent is the store's record of the room Agent (ChatState.restoredRoomAgentFields).
+            updateThreadById(threadId, (current) => ({ ...current, agent: ChatState.roomAgentRecord(result.agent) }));
+          })
+          .catch(() => {});
       },
       cycleThreadAgentProfile(threadId) {
         const thread = getCodexThreadById(state.codex, threadId);
