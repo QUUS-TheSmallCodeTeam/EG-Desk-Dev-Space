@@ -10,6 +10,7 @@
   const SurfaceState = ChromeUtils.importESModule('chrome://userchrome/content/EGDeskSurfaceState.sys.mjs');
   const RecoveryState = ChromeUtils.importESModule('chrome://userchrome/content/EGDeskRecoveryState.sys.mjs');
   const ChatState = ChromeUtils.importESModule('chrome://userchrome/content/EGDeskChatState.sys.mjs');
+  const ThreadRouting = ChromeUtils.importESModule('chrome://userchrome/content/EGDeskThreadRouting.sys.mjs');
   const ChatRunResult = ChromeUtils.importESModule('chrome://userchrome/content/EGDeskChatRunResult.sys.mjs');
   const ChatChangeReview = ChromeUtils.importESModule('chrome://userchrome/content/EGDeskChatChangeReview.sys.mjs');
   const Markdown = ChromeUtils.importESModule('chrome://userchrome/content/EGDeskMarkdown.sys.mjs');
@@ -627,6 +628,10 @@
       // CHAT-04 '채팅에서 보기': the answer to bring into view once { threadId, messageId }.
       revealMessage: null,
       messageMenu: null,
+      // CHAT-03: the DM bubbles being chosen for a Board Thread { threadId, ids }, and the
+      // open target picker { threadId, ids, busy, error, left, top }.
+      messageSelect: null,
+      boardMove: null,
       localHistoryStatus: 'idle',
       localHistoryError: null,
       localHistoryBootReady: false,
@@ -8809,6 +8814,14 @@
           el('div', { class: 'egd-codex-thread-menu-note', role: 'note' }, fork.available ? hint : fork.reason),
         ];
       };
+      // CHAT-03 (D-M3): a DM bubble goes to a Board Thread as a copy; several can be chosen first.
+      const renderMoveMenuItems = (thread, message) => thread.type !== 'dm' || !ThreadRouting.shareableMessage(message) ? [] : [
+        el('button', { class: 'egd-codex-thread-menu-item', data: { testid: 'chat-move-to-board' },
+          onclick: (ev) => codexBridge.openBoardMove(thread.id, [message.id], ev.currentTarget) }, ThreadRouting.MOVE_TO_BOARD_LABEL),
+        el('button', { class: 'egd-codex-thread-menu-item', data: { testid: 'chat-pick-messages' },
+          onclick: () => codexBridge.startMessageSelect(thread.id, message.id) }, ThreadRouting.PICK_MESSAGES_LABEL),
+        el('div', { class: 'egd-codex-thread-menu-note', role: 'note' }, '복사본이 가고 원래 대화는 그대로 남습니다. 받는 Agent는 다음 메시지에서 함께 읽습니다.'),
+      ];
       const renderMessageMenu = (thread, message) => el('div', {
         class: 'egd-codex-thread-menu egd-codex-message-menu', role: 'group', 'aria-label': '메시지 메뉴',
         data: { testid: 'chat-message-menu', messageId: message.id },
@@ -8818,11 +8831,14 @@
         },
         onclick: (ev) => ev.stopPropagation(),
       },
-      ...renderForkMenuItems(thread, message.runId, '이 지점에서 분기', message.role === 'user'
-        ? '이 요청과 그 응답까지의 대화를 새 대화방으로 이어 갑니다.' : '이 응답까지의 대화를 새 대화방으로 이어 갑니다.'),
+      ...(ChatState.chatMessageForkPoint(thread, message) ? renderForkMenuItems(thread, message.runId, '이 지점에서 분기', message.role === 'user'
+        ? '이 요청과 그 응답까지의 대화를 새 대화방으로 이어 갑니다.' : '이 응답까지의 대화를 새 대화방으로 이어 갑니다.') : []),
+      ...renderMoveMenuItems(thread, message),
       el('button', { class: 'egd-codex-thread-menu-item', onclick: () => codexBridge.closeMessageMenu() }, '닫기'));
+      const messageMenuAvailable = (thread, message) => ChatState.chatMessageForkPoint(thread, message)
+        || (thread.type === 'dm' && ThreadRouting.shareableMessage(message));
       const renderMessageMenuTrigger = (thread, message) => {
-        if (!ChatState.chatMessageForkPoint(thread, message)) return null;
+        if (!messageMenuAvailable(thread, message)) return null;
         const open = codex.messageMenu?.threadId === thread.id && codex.messageMenu.messageId === message.id;
         return el('button', {
           class: `egd-codex-message-menu-trigger${open ? ' egd-codex-message-menu-trigger-active' : ''}`,
@@ -8834,6 +8850,74 @@
             codexBridge.toggleMessageMenu(thread.id, message.id, ev.currentTarget);
           },
         }, '⋯');
+      };
+      // CHAT-03: where the chosen bubbles go — an existing Board Thread or a new one.
+      const renderBoardMovePicker = (thread) => {
+        const move = codex.boardMove;
+        const choices = ThreadRouting.boardThreadChoices(codex.threads, thread);
+        return el('div', {
+          class: 'egd-codex-thread-menu egd-codex-board-move', role: 'dialog', 'aria-label': ThreadRouting.PICK_TARGET_TITLE,
+          data: { testid: 'chat-board-move', count: String(move.ids.length) },
+          style: { left: `${Math.round(move.left ?? 12)}px`, top: `${Math.round(move.top ?? 12)}px` },
+          onclick: (ev) => ev.stopPropagation(),
+        },
+        el('div', { class: 'egd-codex-thread-menu-label' }, `${ThreadRouting.PICK_TARGET_TITLE} · 메시지 ${move.ids.length}개`),
+        ...choices.map(choice => el('button', {
+          class: 'egd-codex-thread-menu-item', disabled: move.busy ? 'true' : null,
+          data: { testid: 'chat-board-move-target', threadId: choice.id, focusKey: `board-move-${choice.id}` },
+          onclick: () => { void codexBridge.moveMessagesToBoardThread(thread.id, move.ids, { toThreadId: choice.id }); },
+        }, `${choice.title} · 멤버 ${choice.memberCount}명`)),
+        el('button', {
+          class: 'egd-codex-thread-menu-item', disabled: move.busy ? 'true' : null,
+          data: { testid: 'chat-board-move-new', focusKey: 'board-move-new' },
+          onclick: () => { void codexBridge.moveMessagesToBoardThread(thread.id, move.ids, { create: true }); },
+        }, ThreadRouting.NEW_BOARD_THREAD_LABEL),
+        move.error ? el('div', { class: 'egd-codex-thread-menu-note egd-codex-error', role: 'alert' }, move.error) : null,
+        el('div', { class: 'egd-codex-thread-menu-note', role: 'note' }, move.busy ? '옮기는 중…' : ThreadRouting.SHARED_BLOCK_NOTE),
+        el('button', { class: 'egd-codex-thread-menu-item', onclick: () => codexBridge.closeBoardMove() }, '닫기'));
+      };
+      // CHAT-03 (D-M3): copies brought here from a DM; each block links back to the original.
+      const renderSharedBlock = (thread, share) => {
+        const origin = ThreadRouting.sharedOriginTarget(share, codex.threads);
+        return el('div', {
+          class: 'egd-codex-shared-block', role: 'group', 'aria-label': ThreadRouting.sharedBlockTitle(share),
+          data: { testid: 'chat-shared-block', shareId: share.shareId, count: String(share.messages.length) },
+        },
+        el('div', { class: 'egd-codex-shared-block-head' },
+          el('span', { class: 'egd-codex-shared-block-title' }, ThreadRouting.sharedBlockTitle(share)),
+          el('button', {
+            class: 'egd-codex-result-chip', type: 'button', disabled: origin ? null : 'true',
+            title: origin ? '원래 대화방을 열어 그 메시지로 갑니다' : '원래 대화를 이 기기에서 찾지 못했습니다',
+            data: { testid: 'chat-shared-origin', threadId: origin?.threadId || '' },
+            onclick: () => codexBridge.openSharedOrigin(thread.id, share.shareId),
+          }, el('span', { class: 'egd-codex-result-label' }, ThreadRouting.VIEW_ORIGIN_LABEL))),
+        ...share.messages.map(message => el('div', { class: `egd-codex-shared-copy egd-codex-shared-copy-${message.role}` },
+          el('span', { class: 'egd-codex-shared-copy-author' }, ThreadRouting.sharedCopyAuthor(message)),
+          el('span', { class: 'egd-codex-shared-copy-text' }, message.text))),
+        el('div', { class: 'egd-codex-shared-block-note' }, ThreadRouting.SHARED_BLOCK_NOTE));
+      };
+      // D-M2: @이름 chips under a Board Thread bubble. Only the Agents named answer; a call
+      // to the person is what the room list's '@' badge counts.
+      const renderMentionRow = (thread, message) => {
+        if (thread.type !== 'group') return null;
+        const spans = ThreadRouting.mentionSpans(message.content, { agentNames: ThreadRouting.threadAgentNames(thread, SELF_MEMBER) });
+        if (!spans.length) return null;
+        const seen = new Set();
+        return el('div', { class: 'egd-codex-mention-row', data: { testid: 'chat-mentions' } },
+          ...spans.filter(span => !seen.has(`${span.kind}:${span.name}`) && seen.add(`${span.kind}:${span.name}`)).map(span => el('span', {
+            class: `egd-codex-mention-chip egd-codex-mention-chip-${span.kind}`,
+            title: span.kind === 'user' ? '대표님을 불렀습니다' : `${span.name}에게 한 말입니다. 부른 Agent만 답합니다.`,
+          }, `@${span.kind === 'user' ? SELF_MEMBER : span.name}`)));
+      };
+      // CHAT-03: a Board Thread that received DM copies can go back to that DM.
+      const renderReturnToDm = (thread) => {
+        const target = ThreadRouting.returnToDmTarget(thread, codex.threads);
+        if (!target) return null;
+        return el('button', {
+          class: 'egd-codex-chip egd-codex-chip-subtle egd-codex-return-dm', type: 'button', title: `‘${target.title}’ 대화로 돌아갑니다`,
+          data: { testid: 'chat-return-dm', threadId: target.id, focusKey: 'return-dm' },
+          onclick: () => codexBridge.returnToDm(thread.id),
+        }, ThreadRouting.RETURN_TO_DM_LABEL);
       };
       const renderStatelessStart = (thread) => {
         const view = ChatState.chatStatelessStartView(thread, codex.chatCapabilities);
@@ -8909,6 +8993,9 @@
                   el('div', { class: 'egd-codex-thread-item-bottom' },
                     el('div', { class: 'egd-codex-thread-preview' }, stripMarkdown(codexThreadPreview(thread))),
                   el('div', { class: 'egd-codex-thread-item-actions' },
+                    ThreadRouting.userMentionBadge(thread) > 0
+                      ? el('span', { class: 'egd-codex-thread-mention', title: '대표님을 부른 메시지가 있습니다', 'aria-label': '나를 부른 메시지' }, '@')
+                      : null,
                     thread.unreadCount > 0
                       ? el('span', { class: 'egd-codex-thread-unread' }, String(thread.unreadCount))
                       : null,
@@ -9088,6 +9175,7 @@
             }, deskIcon('back')),
             el('div', { class: 'egd-codex-thread-active-title' }, activeThread.title,
               buildCodexSessionBadge(activeThread, codexBridge)),
+            renderReturnToDm(activeThread),
             renderEngineChip(activeThread),
             codexUsageRing(codex.authStatus),
             el('button', {
@@ -9212,6 +9300,12 @@
               el('span', { class: 'egd-codex-message-time' }, formatMessageTime(notice.at))));
             }
           };
+          // CHAT-03: copied blocks from a DM sit where the store saved them; while
+          // choosing, every finished bubble gets a box.
+          const sharedPlacement = ThreadRouting.sharedBlockPlacement(activeThread.routing, activeThread.messages);
+          const appendSharedBlocks = (shares) => { for (const share of shares || []) messages.appendChild(renderSharedBlock(activeThread, share)); };
+          appendSharedBlocks(sharedPlacement.leading);
+          const selecting = codex.messageSelect?.threadId === activeThread.id ? codex.messageSelect : null;
           activeThread.messages.forEach((message, index) => {
             if (Number.isFinite(message.createdAt)) appendControlNotices(message.createdAt);
             if (message.role === 'assistant' && message.status === 'streaming' && !message.content) return;
@@ -9298,13 +9392,27 @@
                 : author)
               : null;
             const meta = codexMessageTimeMeta(message, activeThread);
+            // CHAT-03: a bubble already copied to a Board Thread says so and opens it.
+            const sentMark = ThreadRouting.sharedOutMark(activeThread.routing, message);
+            const sentChip = sentMark ? el('button', {
+              class: 'egd-codex-result-chip egd-codex-sent-chip', type: 'button', title: '옮긴 Board Thread를 엽니다',
+              data: { testid: 'chat-sent-to-thread', threadId: sentMark.toClientThreadId || '' },
+              onclick: () => codexBridge.openSharedTarget(sentMark.toClientThreadId),
+            }, el('span', { class: 'egd-codex-result-label' }, ThreadRouting.SENT_TO_THREAD_TEXT)) : null;
+            const mentionRow = renderMentionRow(activeThread, message);
+            const selectBox = selecting && ThreadRouting.shareableMessage(message) ? el('input', {
+              type: 'checkbox', class: 'egd-codex-message-select', 'aria-label': '이 메시지를 옮길 목록에 넣기',
+              checked: selecting.ids.includes(message.id) ? 'true' : null,
+              data: { testid: 'chat-message-select', messageId: message.id, focusKey: `message-select-${message.id}` },
+              onchange: () => codexBridge.toggleMessageSelect(activeThread.id, message.id),
+            }) : null;
             // The message menu sits on the open side of the bubble.
             const menuTrigger = renderMessageMenuTrigger(activeThread, message);
             const messageLine = el('div', { class: 'egd-codex-message-line' },
-              message.role === 'user' ? menuTrigger : null, bubble, message.role === 'user' ? null : menuTrigger);
+              selectBox, message.role === 'user' ? menuTrigger : null, bubble, message.role === 'user' ? null : menuTrigger);
             const computerLine = message.role === 'assistant' && message.runId && lastAnswerOfRun.get(message.runId) === message.id
               ? computerUseLine(roomRuns.findLast(run => run.runId === message.runId)) : null;
-            const messageStack = el('div', { class: 'egd-codex-message-stack' }, roleLabel, messageLine, answerFold, computerLine, resultRow, briefingControl, meta);
+            const messageStack = el('div', { class: 'egd-codex-message-stack' }, roleLabel, messageLine, mentionRow, answerFold, computerLine, resultRow, briefingControl, sentChip, meta);
             if (message.inputReferences?.length) messageStack.appendChild(el('button', {
               class: 'egd-codex-result-chip', data: { testid: 'chat-message-inputs', requestId: message.requestId || '' },
               onclick: () => openCodexActivityPanel(activeThread.id),
@@ -9326,8 +9434,10 @@
               ].filter(Boolean).join(' '),
             }, avatar, messageStack));
             appendPlanCards(planPlacement.byMessageId.get(message.id));
+            appendSharedBlocks(sharedPlacement.byMessageId.get(message.id));
           });
           appendPlanCards(planPlacement.trailing);
+          appendSharedBlocks(sharedPlacement.trailing);
           appendControlNotices();
           if (working) {
             messages.appendChild(codexAgentWorkingRow(working, {
@@ -9340,14 +9450,26 @@
           const unansweredLine = workingRun?.runId && !lastAnswerOfRun.has(workingRun.runId) ? computerUseLine(workingRun) : null;
           if (unansweredLine) messages.appendChild(el('div', { class: 'egd-codex-computer-use-row' }, unansweredLine));
         }
+        // CHAT-03: while choosing, the count and the way out sit above the log.
+        if (codex.messageSelect?.threadId === activeThread.id) conversation.appendChild(el('div', {
+          class: 'egd-codex-select-bar', role: 'toolbar', 'aria-label': '옮길 메시지 고르기',
+          data: { testid: 'chat-select-bar', count: String(codex.messageSelect.ids.length) },
+        }, el('span', { class: 'egd-codex-select-bar-text' }, `메시지 ${codex.messageSelect.ids.length}개 고름 · 최대 ${ThreadRouting.MAX_SHARED_MESSAGES}개`),
+        el('button', {
+          class: 'egd-codex-chip egd-codex-chip-primary', type: 'button', disabled: codex.messageSelect.ids.length ? null : 'true',
+          data: { testid: 'chat-select-move', focusKey: 'select-move' },
+          onclick: (ev) => codexBridge.openBoardMove(activeThread.id, codex.messageSelect.ids, ev.currentTarget),
+        }, ThreadRouting.MOVE_TO_BOARD_LABEL),
+        el('button', { class: 'egd-codex-chip', type: 'button', data: { testid: 'chat-select-cancel' }, onclick: () => codexBridge.cancelMessageSelect() }, '취소')));
         conversation.appendChild(messages);
         if (codex.agentPeek?.threadId === activeThread.id) {
           const peekMessage = activeThread.messages.find((message) => message.id === codex.agentPeek.messageId && message.role === 'assistant');
           if (peekMessage) conversation.appendChild(renderAgentPeek(activeThread, peekMessage));
         }
         const menuMessage = codex.messageMenu?.threadId === activeThread.id
-          ? activeThread.messages.find((message) => message.id === codex.messageMenu.messageId && ChatState.chatMessageForkPoint(activeThread, message)) : null;
+          ? activeThread.messages.find((message) => message.id === codex.messageMenu.messageId && messageMenuAvailable(activeThread, message)) : null;
         if (menuMessage) conversation.appendChild(renderMessageMenu(activeThread, menuMessage));
+        if (codex.boardMove?.threadId === activeThread.id) conversation.appendChild(renderBoardMovePicker(activeThread));
         if (activeThread.localHistoryCoverage && activeThread.localHistoryCoverage.status !== 'complete') conversation.appendChild(el('p', {
           class: 'egd-codex-run-status', role: 'status', data: { testid: 'chat-local-history-coverage' },
         }, activeThread.localHistoryCoverage.status === 'unknown' && !activeThread.localHistoryCoverage.reasons?.length
@@ -10493,7 +10615,8 @@
             legacyHistoryRecords.find(record => record.clientThreadId === clientThreadId));
         }
         if (current?.localConversationId && current.localConversationId !== normalized.localConversationId) throw new Error('로컬 기록의 채팅방 식별자가 바뀌었습니다.');
-        updateThreadById(clientThreadId, () => ChatState.hydrateLocalChatThread(current, normalized, { liveFenceRevision }));
+        updateThreadById(clientThreadId, () => ({ ...ChatState.hydrateLocalChatThread(current, normalized, { liveFenceRevision }),
+          routing: ThreadRouting.routingWithEvents(current?.routing, normalized.events) }));
         emit();
         if (!normalized.hasMore) return;
         const nextSeq = Number(normalized.nextCursor);
@@ -10501,6 +10624,19 @@
         afterSeq = nextSeq;
         seenCursors.add(String(afterSeq));
       }
+    }
+
+    // CHAT-03: one room's saved history read again, so live bubbles carry the store's
+    // names (localMessageId) before they are moved. Quiet when the bridge has none.
+    async function refreshLocalHistoryForThread(thread) {
+      const clientThreadId = ChatState.clientThreadBinding(thread);
+      if (!clientThreadId || clientThreadId !== thread?.id) return false;
+      try {
+        const head = await fetchJson(`/chat/history?clientThreadId=${encodeURIComponent(clientThreadId)}&afterSeq=0&limit=1`);
+        if (!head?.thread?.localConversationId) return false;
+        await loadLocalHistoryThread({ ...head.thread, clientThreadId });
+        return true;
+      } catch { return false; }
     }
 
     function queueLocalHistoryRetry() {
@@ -12225,6 +12361,111 @@
         if (!state.codex.messageMenu) return;
         state.codex.messageMenu = null;
         emit();
+      },
+      // CHAT-03 (D-M3): choosing DM bubbles and moving their copies into a Board Thread.
+      startMessageSelect(threadId, messageId = null) {
+        const thread = getCodexThreadById(state.codex, threadId);
+        if (!thread || thread.type !== 'dm') return;
+        const ids = messageId && thread.messages.some(message => message.id === messageId && ThreadRouting.shareableMessage(message)) ? [messageId] : [];
+        state.codex.messageSelect = { threadId, ids };
+        state.codex.messageMenu = null;
+        state.codex.boardMove = null;
+        emit();
+      },
+      toggleMessageSelect(threadId, messageId) {
+        const select = state.codex.messageSelect;
+        if (!select || select.threadId !== threadId || !messageId) return;
+        if (select.ids.includes(messageId)) state.codex.messageSelect = { ...select, ids: select.ids.filter(id => id !== messageId) };
+        else if (select.ids.length < ThreadRouting.MAX_SHARED_MESSAGES) state.codex.messageSelect = { ...select, ids: [...select.ids, messageId] };
+        else boardNotice(`한 번에 ${ThreadRouting.MAX_SHARED_MESSAGES}개까지 옮길 수 있습니다.`);
+        emit();
+      },
+      cancelMessageSelect() {
+        if (!state.codex.messageSelect && !state.codex.boardMove) return;
+        state.codex.messageSelect = null;
+        state.codex.boardMove = null;
+        emit();
+      },
+      openBoardMove(threadId, ids, anchorEl = null) {
+        const thread = getCodexThreadById(state.codex, threadId);
+        const chosen = (Array.isArray(ids) ? ids : []).filter(id => thread?.messages.some(message => message.id === id));
+        if (!thread || thread.type !== 'dm' || !chosen.length) return;
+        const rect = anchorEl?.getBoundingClientRect?.();
+        state.codex.boardMove = { threadId, ids: chosen, busy: false, error: null, ...(rect ? resolveFloatingMenuPlacement(rect, 260, 240) : { left: 12, top: 12 }) };
+        state.codex.messageMenu = null;
+        state.codex.threadMenu = null;
+        emit();
+      },
+      closeBoardMove() {
+        if (!state.codex.boardMove) return;
+        state.codex.boardMove = null;
+        emit();
+      },
+      // The copies go through POST /chat/share: the bridge writes a line on both sides and
+      // hands the block to the receiving Agent's next turn. A bubble the store has not
+      // named yet is read again from local history first.
+      async moveMessagesToBoardThread(threadId, ids, { toThreadId = null, create = false } = {}) {
+        const from = getCodexThreadById(state.codex, threadId);
+        if (!from || from.type !== 'dm' || !state.codex.boardMove || state.codex.boardMove.busy) return false;
+        state.codex.boardMove = { ...state.codex.boardMove, busy: true, error: null };
+        emit();
+        const fail = (message) => {
+          if (state.codex.boardMove?.threadId === threadId) state.codex.boardMove = { ...state.codex.boardMove, busy: false, error: message };
+          emit();
+          return false;
+        };
+        try {
+          let picked = ThreadRouting.resolveShareMessages(from, ids);
+          if (picked.missing.length) {
+            await refreshLocalHistoryForThread(from);
+            picked = ThreadRouting.resolveShareMessages(getCodexThreadById(state.codex, threadId) || from, ids);
+          }
+          if (!picked.localMessageIds.length || picked.missing.length) return fail(ThreadRouting.shareErrorText('MESSAGE_NOT_FOUND'));
+          let target = toThreadId ? getCodexThreadById(state.codex, toThreadId) : null;
+          if (!target && create) {
+            // The new Board Thread starts with the DM's Agent as its Lead; the DM stays open.
+            this.createThread('group', { openConversation: false, profileEnabled: from.profileEnabled === true, agentProfileId: from.agentProfileId });
+            target = getActiveCodexThread(state.codex);
+            this.selectThread(from.id, { openConversation: true });
+          }
+          if (!target || target.type !== 'group') return fail(ThreadRouting.shareErrorText('CONVERSATION_NOT_FOUND'));
+          const result = await fetchJson('/chat/share', { method: 'POST', body: JSON.stringify(ThreadRouting.buildShareRequest(from, target, picked.localMessageIds)) });
+          if (result?.accepted !== true) return fail(ThreadRouting.shareErrorText(result?.code));
+          const now = Date.now();
+          updateThreadById(from.id, current => ({ ...current, routing: ThreadRouting.routingAfterSend(current.routing, result, picked.localMessageIds, now) }));
+          updateThreadById(target.id, current => ({ ...current, routing: ThreadRouting.routingAfterReceive(current.routing, result, picked.messages, now) }));
+          state.codex.boardMove = null;
+          state.codex.messageSelect = null;
+          boardNotice(ThreadRouting.moveDoneText(picked.localMessageIds.length, target.title));
+          this.selectThread(target.id, { openConversation: true });
+          return true;
+        } catch (error) {
+          return fail(ThreadRouting.shareErrorText(error));
+        }
+      },
+      // '원래 대화 보기' on a copied block: the DM opens on the first copied bubble.
+      openSharedOrigin(threadId, shareId) {
+        const thread = getCodexThreadById(state.codex, threadId);
+        const share = (thread?.routing?.sharedIn || []).find(entry => entry.shareId === shareId);
+        const target = share ? ThreadRouting.sharedOriginTarget(share, state.codex.threads) : null;
+        if (!target) { boardNotice('원래 대화를 이 기기에서 찾지 못했습니다.'); return false; }
+        state.codex.revealMessage = target.messageId ? { threadId: target.threadId, messageId: target.messageId } : null;
+        this.selectThread(target.threadId, { openConversation: true });
+        return true;
+      },
+      // '스레드로 보냄' on a DM bubble opens the Board Thread it went to.
+      openSharedTarget(clientThreadId) {
+        const target = ThreadRouting.threadByClientId(state.codex.threads, clientThreadId);
+        if (!target) { boardNotice('옮긴 Board Thread를 이 기기에서 찾지 못했습니다.'); return false; }
+        this.selectThread(target.id, { openConversation: true });
+        return true;
+      },
+      // [DM으로 돌아오기]: the DM that last sent copies here.
+      returnToDm(threadId) {
+        const target = ThreadRouting.returnToDmTarget(getCodexThreadById(state.codex, threadId), state.codex.threads);
+        if (!target) { boardNotice('돌아갈 DM을 이 기기에서 찾지 못했습니다.'); return false; }
+        this.selectThread(target.id, { openConversation: true });
+        return true;
       },
       // CHAT-07: one peek at a time, opened beside the face or name that was pressed.
       toggleAgentPeek(threadId, messageId, anchorEl = null) {
