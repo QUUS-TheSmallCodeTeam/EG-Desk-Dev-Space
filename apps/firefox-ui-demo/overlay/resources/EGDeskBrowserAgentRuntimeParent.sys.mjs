@@ -96,6 +96,9 @@ export function browserToolDispatchReceiptFields(actionType, diagnostics) {
 // so the parent mints a one-time ticket there and the child must hand it
 // back. A content process cannot start a capture on its own.
 const SCREENSHOT_TICKET_MS = 60000;
+// Covered boxes listed in a result; the count is always complete. Keeps the
+// UI response inside the transport bound beside a 150000-character image.
+const MAX_LISTED_MASKS = 60;
 const XHTML_NS = "http://www.w3.org/1999/xhtml";
 function screenshotFormat(value) { return value === "png" ? { mime: "image/png", format: "png" } : { mime: "image/jpeg", format: "jpeg" }; }
 
@@ -156,6 +159,8 @@ export class EGDeskBrowserAgentRuntimeParent extends JSWindowActorParent {
     if (windowGlobal.isClosed === true || windowGlobal.isCurrentGlobal === false) return { send: false, reason: "document-changed" };
     const budgetChars = Number.isSafeInteger(data.budgetChars) && data.budgetChars > 0
       ? Math.min(data.budgetChars, SCREENSHOT_DEFAULTS.budgetChars) : SCREENSHOT_DEFAULTS.budgetChars;
+    const maxEdge = Number.isSafeInteger(data.maxEdge) && data.maxEdge > 0
+      ? Math.min(data.maxEdge, SCREENSHOT_DEFAULTS.maxEdge) : SCREENSHOT_DEFAULTS.maxEdge;
     const { mime, format } = screenshotFormat(data.format);
     let before;
     try { before = await this.sendQuery("screenshotMask", {}); } catch { return { send: false, reason: "mask-unavailable" }; }
@@ -173,7 +178,7 @@ export class EGDeskBrowserAgentRuntimeParent extends JSWindowActorParent {
       const decision = screenshotDecision({ before, after, image: capture });
       if (!decision.send) return { send: false, reason: decision.reason };
       const canvas = ownerDocument.createElementNS(XHTML_NS, "canvas");
-      for (const attempt of encodeAttempts({ ...capture, maxEdge: data.maxEdge, quality: data.quality })) {
+      for (const attempt of encodeAttempts({ ...capture, maxEdge, quality: data.quality })) {
         const masks = scaleMasks(decision.masks, capture, attempt);
         if (!masks) return { send: false, reason: "mask-unavailable" };
         canvas.width = attempt.width;
@@ -188,7 +193,8 @@ export class EGDeskBrowserAgentRuntimeParent extends JSWindowActorParent {
         return { send: true, imageUrl: dataUrl, format, width: attempt.width, height: attempt.height,
           // CSS pixel = image pixel / imageScale. Pixels are never input coordinates.
           imageScale: Math.round(decision.imageScale * attempt.factor * 1000) / 1000,
-          maskedRegions: decision.maskedRegions, maskCount: decision.maskedRegions.length,
+          maskedRegions: decision.maskedRegions.slice(0, MAX_LISTED_MASKS), maskCount: decision.maskedRegions.length,
+          ...(decision.maskedRegions.length > MAX_LISTED_MASKS ? { maskedRegionsTruncated: true } : {}),
           documentId: decision.documentId, revision: decision.revision,
           ...(Object.hasOwn(decision, "innerWindowId") ? { innerWindowId: decision.innerWindowId } : {}) };
       }

@@ -296,7 +296,9 @@ function validScreenshot(value) {
     /^data:image\/(?:jpeg|png);base64,[A-Za-z0-9+/]+=*$/.test(value.imageUrl) &&
     ['jpeg', 'png'].includes(value.format) && Number.isSafeInteger(value.width) && value.width > 0 &&
     Number.isSafeInteger(value.height) && value.height > 0 && Number.isFinite(value.imageScale) && value.imageScale > 0 &&
-    Array.isArray(value.maskedRegions) && value.maskedRegions.length <= 400 &&
+    Array.isArray(value.maskedRegions) && value.maskedRegions.length <= 60 &&
+    Number.isSafeInteger(value.maskCount) && value.maskCount >= value.maskedRegions.length &&
+    (!Object.hasOwn(value, 'maskedRegionsTruncated') || value.maskedRegionsTruncated === true) &&
     value.maskedRegions.every(region => record(region) && short(region.kind, 40) && short(region.reason, 40) && box(region.bounds))
 }
 function checkPostcondition(condition, snapshot, ref) {

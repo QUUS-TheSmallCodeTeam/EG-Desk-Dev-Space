@@ -348,8 +348,9 @@ test('helper reports a withheld screenshot with its reason and refuses an image 
   const withheld = await boundDispatch(helperFixture('observe', { send: false, reason: 'mask-moved' }), 'egdesk_browser_screenshot', { cardId: 'browser-1' }, 'call-shot-2')
   assert.equal(withheld.status, 'screenshot-withheld')
   assert.deepEqual(withheld.screenshot, { reason: 'mask-moved' })
-  for (const bad of [undefined, { send: true, imageUrl: 'https://example.test/shot.jpg', format: 'jpeg', width: 720, height: 480, imageScale: 1, maskedRegions: [] },
-    { send: true, imageUrl: 'data:image/jpeg;base64,QUJD', format: 'jpeg', width: 720, height: 480, imageScale: 1, maskedRegions: [{ kind: 'x' }] },
+  for (const bad of [undefined, { send: true, imageUrl: 'https://example.test/shot.jpg', format: 'jpeg', width: 720, height: 480, imageScale: 1, maskedRegions: [], maskCount: 0 },
+    { send: true, imageUrl: 'data:image/jpeg;base64,QUJD', format: 'jpeg', width: 720, height: 480, imageScale: 1, maskedRegions: [{ kind: 'x' }], maskCount: 1 },
+    { ...sentCapture, maskCount: 0 }, { ...sentCapture, maskedRegions: Array.from({ length: 61 }, () => sentCapture.maskedRegions[0]), maskCount: 61 },
     { send: false }]) {
     await assert.rejects(boundDispatch(helperFixture('observe', bad), 'egdesk_browser_screenshot', { cardId: 'browser-1' }, 'call-shot-3'),
       error => error.code === 'BROWSER_OBSERVATION_UNAVAILABLE')
