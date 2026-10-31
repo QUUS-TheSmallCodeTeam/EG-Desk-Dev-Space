@@ -652,6 +652,9 @@
 .egd-board-menu-item:hover,
 .egd-board-menu-item:focus-visible { background: var(--egd-hover); }
 .egd-board-menu-item:focus-visible { --egd-focus-outline-offset: var(--egd-focus-outline-inset); outline: var(--egd-focus-outline); outline-offset: var(--egd-focus-outline-offset); }
+/* CNV-03: the View bar's Board menu names Boards, which can be long. */
+.egd-board-menu-view .egd-board-menu-item { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.egd-board-menu-view .egd-board-menu-item[aria-disabled="true"] { color: var(--egd-on-surface-variant); cursor: default; }
 .egd-board-missing { box-sizing: border-box; padding: 18px; overflow: auto; background: var(--egd-note-soft); color: var(--egd-on-surface); font: 13px/1.5 var(--egd-font); }
 .egd-board-missing strong { overflow-wrap: anywhere; }
 .egd-board-missing button { padding: 5px 12px; border: 1px solid var(--egd-line-strong); border-radius: 5px; }
@@ -1425,6 +1428,65 @@
   text-align: right;
 }
 .egd-desk-window-board[hidden] { display: none; }
+
+/* CNV-03: the Board control after the Board name. Owned: a chevron; without a
+   recorded owner it reads '소속 없음' so the bar never implies a Board. */
+.egd-desk-window-board-menu {
+  appearance: none;
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  flex: 0 0 auto;
+  height: 20px;
+  padding: 0 4px;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--egd-on-surface-variant);
+  font: 500 11px/1 var(--egd-font);
+  white-space: nowrap;
+  cursor: pointer;
+}
+.egd-desk-window-board-menu .egd-ui-icon { width: 12px; height: 12px; }
+.egd-desk-window-board-menu-text:empty { display: none; }
+.egd-desk-window-board-menu:hover,
+.egd-desk-window-board-menu[aria-expanded="true"] { background: var(--egd-hover); color: var(--egd-on-surface); }
+.egd-desk-window-board-menu:focus-visible { outline: var(--egd-focus-outline); outline-offset: var(--egd-focus-outline-offset); }
+/* A compact Browser bar that already yields the Board name keeps only the chevron. */
+.egd-browser-card[data-egd-board-visual-hidden="true"] .egd-desk-window-board-menu-text { display: none; }
+@container egd-browser-title (max-width: 360px) {
+  .egd-desk-window-board-menu-text { display: none; }
+}
+
+/* CNV-03: '○○에 넣을까요?' under the View bar (D-V2, D-V3). It is part of the
+   header, so it moves with the View and never covers the page. */
+.egd-board-suggest {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 8px;
+  border-top: 1px solid var(--egd-outline);
+  background: var(--egd-primary-container);
+  color: var(--egd-on-surface);
+  font: 500 11px/1.3 var(--egd-font);
+  cursor: default;
+}
+.egd-board-suggest > .egd-ui-icon { flex: none; width: 13px; height: 13px; color: var(--egd-primary); }
+.egd-board-suggest-text { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.egd-board-suggest button {
+  appearance: none;
+  flex: none;
+  padding: 2px 9px;
+  border: 1px solid var(--egd-outline);
+  border-radius: 999px;
+  background: var(--egd-surface-elevated);
+  color: var(--egd-on-surface);
+  font: 600 11px/1.3 var(--egd-font);
+  cursor: pointer;
+}
+.egd-board-suggest-accept { border-color: var(--egd-primary); color: var(--egd-primary); }
+.egd-board-suggest button:hover { background: var(--egd-hover); }
+.egd-board-suggest button:focus-visible { outline: var(--egd-focus-outline); outline-offset: var(--egd-focus-outline-offset); }
 
 .egd-desk-window-actions {
   display: inline-flex;
