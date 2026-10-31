@@ -14909,7 +14909,7 @@
     const memo = root?._memoRecord;
     if (!memo || !root.isConnected) return;
     const position = MemoState.memoPosition(memo, memoAnchorCandidates());
-    const anchorState = memo.anchor.kind !== 'card' ? 'free' : position?.missing ? 'missing' : 'attached';
+    const anchorState = memo.anchor.kind !== 'card' ? 'free' : !position || position.missing ? 'missing' : 'attached';
     root.dataset.memoAnchor = anchorState;
     if (position && anchorState === 'attached') {
       const left = `${Math.round(position.x)}px`, top = `${Math.round(position.y)}px`;
@@ -14979,9 +14979,8 @@
     const chatCard = spawnCodexChatCard();
     dismissChatReturnCue();
     state.codex.hudView = 'conversation';
-    bridge.selectThread(thread.id, { openConversation: true });
     state.codex.threadDrafts = { ...(state.codex.threadDrafts || {}), [thread.id]: draft.text };
-    state.codex.draft = draft.text;
+    bridge.selectThread(thread.id, { openConversation: true });   // reads the draft back into the composer
     const requestsBefore = new Set(Object.keys(state.codex.chatProtocol?.requests || {}));
     root.dataset.memoAsking = 'true';
     renderMemoCard(root);
@@ -15082,12 +15081,12 @@
     const askStatus = root.querySelector('.egd-memo-ask-status');
     if (askStatus) {
       const sending = root.dataset.memoAsking === 'true';
-      askStatus.replaceChildren(
-        sending ? el('span', { class: 'egd-memo-ask-pending', data: { testid: 'memo-ask-sending' } }, '보내는 중…') : null,
-        ...pending.map((ask, index) => el('span', { class: 'egd-memo-ask-pending', data: { testid: 'memo-ask-pending', askId: ask.askId, agentId: ask.agentId } },
-          `${pendingNames[index]} 답 기다리는 중`,
-          el('button', { type: 'button', class: 'egd-memo-ask-cancel', title: '이 질문 기다리기를 멈춥니다. Chat의 대화는 남습니다.',
-            onclick: (ev) => { ev.stopPropagation(); updateMemoRecord(root, MemoState.cancelMemoAsk(root._memoRecord, ask.askId), 'memo-ask-cancel'); } }, '기다리지 않기'))));
+      const rows = pending.map((ask, index) => el('span', { class: 'egd-memo-ask-pending', data: { testid: 'memo-ask-pending', askId: ask.askId, agentId: ask.agentId } },
+        `${pendingNames[index]} 답 기다리는 중`,
+        el('button', { type: 'button', class: 'egd-memo-ask-cancel', title: '이 질문 기다리기를 멈춥니다. Chat의 대화는 남습니다.',
+          onclick: (ev) => { ev.stopPropagation(); updateMemoRecord(root, MemoState.cancelMemoAsk(root._memoRecord, ask.askId), 'memo-ask-cancel'); } }, '기다리지 않기')));
+      if (sending) rows.unshift(el('span', { class: 'egd-memo-ask-pending', data: { testid: 'memo-ask-sending' } }, '보내는 중…'));
+      askStatus.replaceChildren(...rows);
       askStatus.hidden = !sending && !pending.length;
     }
     const askButton = root.querySelector('.egd-memo-ask-send');
@@ -15126,7 +15125,7 @@
       throw error;
     }
     const frame = MemoState.memoFrame(memo);
-    const position = MemoState.memoPosition(memo, cards) || { x: memo.anchor.x || 0, y: memo.anchor.y || 0 };
+    const position = MemoState.memoPosition(memo, cards) || { x: 0, y: 0 };
     const shell = spawnDeskWindowShell({
       id: `egd-memo-card-${++cardSeq}`, kind: 'memo', className: 'egd-memo-card', bodyClassName: 'egd-memo-card-body',
       minWidth: frame.width, minHeight: frame.height, activate: !options.restore,
