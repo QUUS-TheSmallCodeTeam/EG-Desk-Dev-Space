@@ -5076,12 +5076,12 @@
 .egdesk-run-result-location { max-width: 100%; box-sizing: border-box; white-space: normal; overflow-wrap: anywhere; }
 .egdesk-run-result-output { min-width: 0; max-width: 100%; margin-top: 8px; }
 /* CODE-06: a typed Terminal command's result above the terminal, and its chip in the header. */
-.egd-terminal-run-result { flex: 0 0 auto; max-height: 45%; overflow: auto; box-sizing: border-box; padding: 8px 12px 10px; font-size: 13px; line-height: 1.45; color: var(--egd-ink, #1f2328); background: var(--egd-surface-elevated, #f6f7f9); border-bottom: 1px solid rgba(0, 0, 0, 0.18); }
+.egd-terminal-run-result { flex: 0 0 auto; max-height: 45%; overflow: auto; box-sizing: border-box; padding: 8px 12px 10px; font-size: 13px; line-height: 1.45; color: var(--egd-on-surface); background: var(--egd-surface-elevated); border-bottom: 1px solid var(--egd-outline); }
 .egd-terminal-run-result[hidden] { display: none; }
 .egd-terminal-run-result-bar { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 10px; margin-bottom: 6px; }
 .egd-terminal-run-result-title { font-weight: 600; }
-.egd-terminal-run-result-note { flex: 1 1 auto; min-width: 0; font-size: 11px; color: var(--egd-ink-muted, #5b6470); }
-.egd-terminal-run-result-close { flex: 0 0 auto; font: inherit; font-size: 11px; padding: 1px 8px; border-radius: 6px; border: 1px solid var(--egd-outline, rgba(0, 0, 0, 0.2)); background: transparent; color: inherit; cursor: pointer; }
+.egd-terminal-run-result-note { flex: 1 1 auto; min-width: 0; font-size: 11px; color: var(--egd-on-surface-variant); }
+.egd-terminal-run-result-close { flex: 0 0 auto; font: inherit; font-size: 11px; padding: 1px 8px; border-radius: 6px; border: 1px solid var(--egd-outline); background: transparent; color: inherit; cursor: pointer; }
 .egd-terminal-run-result .egdesk-run-result-tail { max-height: 10rem; }
 .egd-terminal-run-chip { flex: 0 1 auto; margin-left: auto; max-width: 42%; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font: inherit; font-size: 11px; line-height: 1.4; padding: 1px 9px; border-radius: 999px; border: 1px solid rgba(255, 255, 255, 0.18); background: rgba(255, 255, 255, 0.08); color: #B9C3CC; cursor: pointer; }
 .egd-terminal-run-chip[hidden] { display: none; }
