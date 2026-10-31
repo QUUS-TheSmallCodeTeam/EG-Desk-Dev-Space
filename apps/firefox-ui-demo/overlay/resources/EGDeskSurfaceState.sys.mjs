@@ -929,11 +929,11 @@ export function missingProjectionMembers(projection, existingIds) {
   const present = new Set(existingIds);
   return projection.members.filter(member => !present.has(member.viewId));
 }
-// These are view-reference fields in the Board binding payload. Resource identity,
+// These are view-reference fields in Board payloads. Resource identity,
 // labels, URLs and arbitrary object keys are opaque, even when they equal a view ID.
 const VIEW_FIELDS = new Set(['cardId', 'sourceCardId', 'targetCardId', 'viewId', 'sourceViewId', 'targetViewId', 'entityId', 'cardIds', 'viewIds', 'memberCardIds']);
 export function remapMemberReferences(value, ids, field = '') {
-  if (typeof value === 'string') return VIEW_FIELDS.has(field) ? ids[value] || value : value;
+  if (typeof value === 'string') return VIEW_FIELDS.has(field) && Object.hasOwn(ids, value) ? ids[value] : value;
   if (Array.isArray(value)) return value.map(item => remapMemberReferences(item, ids, field));
   if (!value || typeof value !== 'object') return value;
   return Object.fromEntries(Object.entries(value).map(([key, item]) => [key, remapMemberReferences(item, ids, key)]));
@@ -983,6 +983,12 @@ export function planBoardProjection(snapshot, projectionId) {
   const shapes = snapshot.shapes || [];
   const ids = [...new Set([...(snapshot.agenda.memberCardIds || []), ...cards.map(x => x.id), ...shapes.map(x => x.id)].filter(Boolean))];
   const idMap = Object.fromEntries(ids.map((id, index) => [id, `${projectionId}-member-${index}`]));
+  // An anchor outside the saved membership stays missing in this opening,
+  // even if another Board has a live card with that old ID. Keep its inverse
+  // mapping for the next save, but never invent a target member to mount.
+  const absentAnchors = [...new Set(cards.filter(card => card.type === 'memo' && card.runtimeState?.anchor?.kind === 'card')
+    .map(card => card.runtimeState.anchor.cardId).filter(id => typeof id === 'string' && id && !Object.hasOwn(idMap, id)))];
+  for (const [index, id] of absentAnchors.entries()) idMap[id] = `${projectionId}-missing-anchor-${index}`;
   const project = boardProjectReference(snapshot.agenda.project);
   return {
     id: projectionId, boardId: snapshot.agenda.id, title: snapshot.agenda.title || 'Board',
@@ -1005,7 +1011,11 @@ export function snapshotBoardProjection(projection, records, now = Date.now()) {
   snapshot.cards = [];
   snapshot.shapes = [];
   for (const member of projection.members) {
-    const record = copy(records[member.viewId] || member.record);
+    const live = records[member.viewId];
+    const record = copy(live || member.record);
+    // Fallback records already use saved source IDs; only live memo records
+    // need the inverse translation. Text, reply IDs and source refs are opaque.
+    if (live && record.type === 'memo') record.runtimeState = remapMemberReferences(record.runtimeState, inverse);
     record.id = member.sourceId;
     (member.kind === 'shape' ? snapshot.shapes : snapshot.cards).push(record);
   }

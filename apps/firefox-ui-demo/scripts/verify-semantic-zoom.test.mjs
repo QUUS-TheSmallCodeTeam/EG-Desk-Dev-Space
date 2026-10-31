@@ -4,10 +4,13 @@ import test from 'node:test';
 import { compileFunction } from 'node:vm';
 import { readSurfaceSource } from './egdesk-surface-source.mjs';
 import * as SurfaceState from '../overlay/resources/EGDeskSurfaceState.sys.mjs';
+import * as BriefingState from '../overlay/resources/EGDeskBriefingState.sys.mjs';
+import * as InputContext from '../overlay/resources/EGDeskInputContext.sys.mjs';
+import * as ChatState from '../overlay/resources/EGDeskChatState.sys.mjs';
 import { OBSERVE } from './verify-semantic-zoom.mjs';
 
 const overlay = readSurfaceSource();
-const functionSource = name => overlay.match(new RegExp(`  function ${name}\\([^]*?\\n  }`))?.[0];
+const functionSource = name => overlay.match(new RegExp(`  (?:async )?function ${name}\\([^]*?\\n  }`))?.[0];
 const production = (name, dependencies = {}) => {
   const source = functionSource(name);
   assert.ok(source, `production ${name} exists`);
@@ -28,6 +31,977 @@ function renderedLevel({ width = 1150.4, zoom = .8, previous = 'outline', metric
 }
 const metric = Object.freeze({ version: 1, complete: true, fontPx: 16,
   viewportWidth: 1440, viewportHeight: 573, sampleCount: 8 });
+
+// HUM-BRIEF-002: the measured six-View world layout at 720x600 / 4.6717%.
+// Only a DOM/observer adapter is synthetic; resolution, rendering, proxies,
+// navigation and close use the production functions. No Firefox or provider.
+function briefingSemanticHarness({ width = 720, height = 600, zoom = .04671717171717172,
+  pan = { x: 368.1666666666667, y: 98.78030303030303 }, realComments = false, bodyFontPx = 14, onCardFocus = null, immediateCamera = false } = {}) {
+  const frames = new Map(), focus = [], fits = [], pending = [], observers = new Set(), resizeObservers = new Set(), windowListeners = new Map(), mediaQueries = [];
+  const comments = { mounts: 0, disposals: 0, notifications: 0 };
+  let nextFrame = 0, nonce = 0, failResolution = false, deferred = false, failedPreparation = null, useActualFit = false, actualFit;
+  const document = { activeElement: null, addEventListener() {}, removeEventListener() {} };
+  const walk = (root, match) => root.children.flatMap(child => child.nodeType === 1 ? [...(match(child) ? [child] : []), ...walk(child, match)] : []);
+  const matches = (node, selector) => selector.split(',').some(part => {
+    const last = part.trim().split(/\s+/).at(-1);
+    if (last.startsWith('.')) return node.className.split(/\s+/).includes(last.slice(1));
+    if (last.startsWith('#')) return node.id === last.slice(1);
+    if (last.startsWith('[')) {
+      const attribute = last.match(/^\[([^=\]]+)(?:=["']?([^"'\]]+)["']?)?\]$/);
+      return !!attribute && node.hasAttribute(attribute[1]) && (attribute[2] === undefined || node.getAttribute(attribute[1]) === attribute[2]);
+    }
+    return node.tagName === last.split('[')[0].toUpperCase();
+  });
+  class Element {
+    constructor(tag) { Object.assign(this, { nodeType: 1, tagName: tag.toUpperCase(), children: [], attributes: {}, dataset: {}, style: {},
+      className: '', hidden: false, isConnected: false, listeners: new Map(), ownText: '', scrollTop: 0, scrollLeft: 0 });
+      const style = this.style, priorities = new Map(), key = name => name.replace(/-([a-z])/g, (_all, letter) => letter.toUpperCase());
+      const cssName = name => name.replace(/[A-Z]/g, letter => `-${letter.toLowerCase()}`);
+      Object.defineProperties(style, {
+        length: { get: () => Object.keys(style).filter(name => style[name] !== '').length },
+        cssText: { get: () => Object.keys(style).filter(name => style[name] !== '').map(name => `${cssName(name)}: ${style[name]}${priorities.get(cssName(name)) ? ' !important' : ''};`).join(' ') },
+        getPropertyValue: { value: name => style[key(name)] || '' },
+        getPropertyPriority: { value: name => priorities.get(name) || '' },
+        setProperty: { value: (name, value, priority = '') => { style[key(name)] = String(value); priorities.set(name, priority); this.attributes.style = style.cssText; } },
+        removeProperty: { value: name => { const previous = style[key(name)] || ''; delete style[key(name)]; priorities.delete(name); this.attributes.style = style.cssText; return previous; } },
+      });
+    }
+    get id() { return this.attributes.id || ''; } set id(value) { this.attributes.id = value; }
+    get inert() { return this.hasAttribute('inert'); } set inert(value) { if (value) this.setAttribute('inert', ''); else this.removeAttribute('inert'); }
+    get classList() { return { contains: name => this.className.split(/\s+/).includes(name) }; }
+    get firstChild() { return this.children[0] || null; } get lastElementChild() { return this.children.filter(child => child.nodeType === 1).at(-1) || null; }
+    get textContent() { return this.ownText + this.children.map(child => child.textContent).join(''); }
+    set textContent(value) { this.children = []; this.ownText = String(value); }
+    replaceChildren(...children) { for (const child of [...this.children]) child.remove?.(); this.children = []; this.ownText = ''; children.forEach(child => this.appendChild(child)); }
+    connect(value) { this.isConnected = value; for (const child of this.children) child.connect?.(value); }
+    append(...children) { children.forEach(child => this.appendChild(child)); }
+    appendChild(child) { child.remove?.(); this.children.push(child); child.parentNode = this; child.connect?.(this.isConnected); return child; }
+    insertBefore(child, next) { child.remove?.(); this.children.splice(this.children.indexOf(next), 0, child); child.parentNode = this; child.connect?.(this.isConnected); return child; }
+    remove() { if (this.parentNode) this.parentNode.children = this.parentNode.children.filter(child => child !== this); this.parentNode = null; this.connect(false); }
+    contains(node) { return this === node || this.children.some(child => child === node || child.contains?.(node)); }
+    querySelectorAll(selector) { return walk(this, node => matches(node, selector)); }
+    querySelector(selector) { return this.querySelectorAll(selector)[0] || null; }
+    setAttribute(key, value) { this.attributes[key] = String(value); if (key === 'hidden') this.hidden = true; }
+    getAttribute(key) { return this.attributes[key] ?? null; } hasAttribute(key) { return Object.hasOwn(this.attributes, key); }
+    removeAttribute(key) { delete this.attributes[key]; }
+    getClientRects() { return this.isConnected ? [{}] : []; }
+    getBoundingClientRect() {
+      if (this.id === 'egd-answer-briefing' && this.dataset.compact === 'true') {
+        const left = Number.parseFloat(this.style.left), bottom = window.innerHeight - Number.parseFloat(this.style.bottom);
+        const width = Number.parseFloat(this.style.width), height = this.dataset.expanded === 'true' ? 280 : 64;
+        return { left, right: left + width, bottom, top: bottom - height, width, height };
+      }
+      return { left: 90, top: 180, right: 690, bottom: 550, width: 600, height: 370 };
+    }
+    addEventListener(type, fn) { const list = this.listeners.get(type) || []; list.push(fn); this.listeners.set(type, list); }
+    removeEventListener(type, fn) { this.listeners.set(type, (this.listeners.get(type) || []).filter(item => item !== fn)); }
+    fire(type, extra = {}) {
+      let stopped = false;
+      const event = { type, target: this, detail: 1, stopPropagation() { stopped = true; }, preventDefault() {}, ...extra };
+      for (let node = this; node; node = stopped ? null : node.parentNode) {
+        event.currentTarget = node; for (const fn of node.listeners?.get(type) || []) fn(event);
+      }
+    }
+    focus() { document.activeElement = this; }
+    setSelectionRange(start, end, direction = 'none') { this.selectionStart = start; this.selectionEnd = end; this.selectionDirection = direction; }
+    closest(selector) { return matches(this, selector) ? this : this.parentNode?.closest?.(selector) || null; }
+  }
+  document.createElement = tag => new Element(tag);
+  document.createTextNode = text => ({ nodeType: 3, textContent: String(text) });
+  document.documentElement = new Element('html'); document.documentElement.connect(true);
+  document.getElementById = id => walk(document.documentElement, node => node.id === id)[0] || null;
+  document.querySelectorAll = selector => document.documentElement.querySelectorAll(selector);
+  document.querySelector = selector => selector === '#egd-answer-briefing nav'
+    ? document.getElementById('egd-answer-briefing')?.querySelector('nav') : document.documentElement.querySelector(selector);
+  const window = { innerWidth: width, innerHeight: height, matchMedia: query => {
+    const listeners = new Set(), media = { get matches() { return query === '(max-width: 56rem)' && window.innerWidth <= 56 * 16; },
+      addEventListener: (_type, fn) => listeners.add(fn), removeEventListener: (_type, fn) => listeners.delete(fn), listeners };
+    mediaQueries.push(media); return media;
+  },
+    getComputedStyle: node => ({ display: node.hidden ? 'none' : 'block', visibility: 'visible', opacity: '1', rowGap: '8px',
+      fontSize: `${node.classList.contains('egd-input-evidence-card') || node.classList.contains('egd-card-body') ? bodyFontPx : 14}px`, boxSizing: 'border-box' }),
+    requestAnimationFrame: fn => { frames.set(++nextFrame, fn); return nextFrame; }, cancelAnimationFrame: id => frames.delete(id),
+    addEventListener: (type, fn) => { if (!windowListeners.has(type)) windowListeners.set(type, new Set()); windowListeners.get(type).add(fn); },
+    removeEventListener: (type, fn) => windowListeners.get(type)?.delete(fn) };
+  class MutationObserver {
+    constructor(callback) { this.callback = callback; }
+    observe(root, options) { this.root = root; this.options = options; observers.add(this); }
+    disconnect() { observers.delete(this); }
+  }
+  window.ResizeObserver = class {
+    constructor(callback) { this.callback = callback; this.nodes = new Set(); }
+    observe(node) { this.nodes.add(node); resizeObservers.add(this); }
+    disconnect() { this.nodes.clear(); resizeObservers.delete(this); }
+  };
+  const el = production('el', { document });
+  const viewport = el('div'), layer = el('div'); viewport.appendChild(layer); document.documentElement.appendChild(viewport); viewport.focus();
+  const state = { zoom, zoomTarget: zoom, pan: { ...pan }, panTarget: { ...pan }, codex: { activeThreadId: 'room-a' },
+    setCanvasViewportTarget: camera => {
+      fits.push(camera);
+      if (immediateCamera) {
+        state.zoom = state.zoomTarget = camera.zoom; state.pan = { ...camera.pan }; state.panTarget = { ...camera.pan };
+        state.renderSemanticProjections?.();
+      }
+    }, activeEntityId: 'existing-selection' };
+  const geometry = card => Object.fromEntries(['x', 'y', 'width', 'height'].map((key, index) =>
+    [key, Number.parseFloat(card.style[['left', 'top', 'width', 'height'][index]])]));
+  const createCard = (id, kind, rect) => {
+    const card = el('div', { id, class: `egd-canvas-card ${kind === 'input-evidence' ? 'egd-input-evidence-card' : 'egd-chat-card'}`,
+      data: { deskWindowKind: kind }, style: { left: `${rect.x}px`, top: `${rect.y}px`, width: `${rect.width}px`, height: `${rect.height}px` } },
+    el('strong', {}, '같은 제목'));
+    card.resource = Object.freeze({ id: `original-resource-${id}` }); layer.appendChild(card); return card;
+  };
+  const positions = [[352, -402], [352, 724], [-288, -402], [992, -402], [-480, 80], [1184, 80]];
+  const references = positions.map((_point, index) => ({ sourceId: `source-${index}`, hash: `hash-${index}`, localSource: { label: '같은 제목' } }));
+  const cards = positions.map(([x, y], index) => {
+    const card = createCard(`evidence-${index}`, 'input-evidence', { x, y, width: 616, height: 458 });
+    card._inputReference = { ...references[index] }; card._inputEvidenceLoaded = true; return card;
+  });
+  const chat = createCard('ordinary-chat', 'chat', { x: 160, y: 80, width: 1000, height: 458 });
+  const identity = { conversationId: 'conversation-a', runId: 'run-a', answerId: 'answer-a' };
+  const target = index => ({ sourceId: references[index].sourceId, hash: references[index].hash });
+  const briefing = { id: 'brief-a', ...identity, steps: [
+    { id: 'six', text: '여섯 근거', targets: cards.map((_card, index) => target(index)) },
+    { id: 'single', text: '한 근거', target: target(0) }, { id: 'three', text: '세 근거', targets: [3, 4, 5].map(target) }] };
+  const scopeFor = presentationId => { let live = true; return {
+    current: () => live && state.codex.activeThreadId === 'room-a' && state.codex.briefingSession?.presentationId === presentationId,
+    dispose: () => { live = false; },
+  }; };
+  state.codex.briefingSession = { ...BriefingState.beginBriefing(briefing, { zoom, pan, activeEntityId: 'existing-selection' }),
+    identity, references, artifacts: [], threadId: 'room-a', presentationId: 'initial', interaction: { revision: 0 },
+    preparationScope: scopeFor('initial') };
+  const briefingRangeIssue = production('briefingRangeIssue', { InputContext });
+  const resolve = production('briefingResolvedTargets', { document, BriefingState, InputContext, briefingRangeIssue, persistentEntityGeometry: geometry });
+  const briefingResolvedTargets = (...args) => {
+    if (failResolution === true || failResolution === args[1]?.id) throw new Error('synthetic resolution failure');
+    return resolve(...args);
+  };
+  const deps = { document, window, state, el, SurfaceState, BriefingState, InputContext, ChatState,
+    getCodexThreadById: production('getCodexThreadById'), briefingRangeIssue, briefingResolvedTargets,
+    ZOOM_MIN: .01, ZOOM_MAX: 4, CHAT_ZOOM_GAP: 10, MutationObserver, Node: { ELEMENT_NODE: 1 },
+    parsePxNumber: (value, fallback = 0) => Number.parseFloat(value) || fallback,
+    safeViewportRect: production('safeViewportRect', { window, document }),
+    deskIcon: () => el('i'), isCardFullscreen: () => false, visibleChatZoomRect: () => null,
+    focusCanvasCard: card => { focus.push(card); onCardFocus?.({ card, document, viewport }); }, setActiveEntity: node => state.onSelectionRestore?.(node),
+    fitCodexChatCardToReadableViewport: () => false, browserPresentationMayNeedMetrics: () => false, browserDisplayHost: () => '',
+    markAgendaDirty: () => assert.fail('presentation cannot move or save a View'),
+    fitBriefingTargets: resolved => useActualFit ? actualFit(resolved) : fits.push(resolved),
+    mountBriefingComments: (_session, panel) => {
+      comments.mounts++;
+      let editor;
+      if (realComments) editor = production('mountBriefingComments', deps)(_session, panel);
+      else panel.appendChild(el('textarea', { data: { testid: 'briefing-comment' } }));
+      return { dispose() { comments.disposals++; editor?.dispose(); }, notify() { comments.notifications++; editor?.notify(); } };
+    },
+    briefingInputReferences: () => references, chatBindingNonce: () => `presentation-${++nonce}`, boardNotice: () => {},
+  };
+  const code = ['installSemanticOutlineDrag', 'installSemanticZoom', 'renderAnswerBriefing', 'closeAnswerBriefing', 'openAnswerBriefing'].map(functionSource);
+  assert.ok(code.every(Boolean));
+  const api = compileFunction(`${code.join('\n')}\nreturn { installSemanticZoom, renderAnswerBriefing, closeAnswerBriefing, openAnswerBriefing };`,
+    Object.keys(deps))(...Object.values(deps));
+  actualFit = production('fitBriefingTargets', { ...deps, briefingFitCamera: production('briefingFitCamera', deps) });
+  const semantic = api.installSemanticZoom(viewport, layer);
+  state.codexBridge = {
+    createBriefingComments: (_session, paint) => {
+      const view = { phase: 'editing', message: '', text: '', originalText: null, canRetry: false,
+        pending: false, unconfirmed: false, listState: 'ready', comments: [] };
+      return { view: () => view, edit: text => { view.text = comments.text = text; }, dispose() {},
+        notify: () => paint(view), refresh: () => paint(view), submit: () => assert.fail('folding cannot submit a comment'),
+        captureClosingText: text => { comments.closedText = text; } };
+    },
+    createBriefingPreparationScope: () => scopeFor(state.codex.briefingSession.presentationId),
+    openInputEvidence: (_threadId, reference, options) => {
+      if (reference.sourceId === failedPreparation) return Promise.reject(new Error('synthetic preparation failure'));
+      const complete = () => { const card = cards.find(card => card._inputReference.sourceId === reference.sourceId);
+        if (options.isCurrent() && card) card._inputEvidenceLoaded = true; return card; };
+      if (!deferred) return Promise.resolve(complete());
+      return new Promise(resolve => pending.push(() => resolve(complete())));
+    },
+  };
+  const render = () => state.renderSemanticProjections();
+  const flush = () => { for (const [id, fn] of [...frames]) { frames.delete(id); fn(); } };
+  const click = id => { const button = walk(document.documentElement, node => node.dataset.testid === id)[0]; assert.ok(button, id); button.fire('click'); flush(); };
+  const proxies = () => cards.map(card => card.querySelector('.egd-semantic-proxy'));
+  const mutation = record => { for (const observer of [...observers]) {
+    if (!observer.root.contains(record.target) || (record.type === 'attributes'
+      && observer.options.attributeFilter && !observer.options.attributeFilter.includes(record.attributeName))) continue;
+    observer.callback([{ addedNodes: [], removedNodes: [], ...record }]);
+  } };
+  const resize = (nextWidth, nextHeight) => {
+    window.innerWidth = nextWidth; window.innerHeight = nextHeight;
+    mediaQueries.forEach(media => media.listeners.forEach(fn => fn({ matches: media.matches })));
+    windowListeners.get('resize')?.forEach(fn => fn());
+  };
+  const applyCamera = () => {
+    const camera = fits.at(-1); assert.ok(camera?.pan && Number.isFinite(camera.zoom));
+    state.zoom = state.zoomTarget = camera.zoom; state.pan = { ...camera.pan }; state.panTarget = { ...camera.pan }; render();
+  };
+  const notifyResize = node => { for (const observer of [...resizeObservers]) if (observer.nodes.has(node)) observer.callback([{ target: node }]); };
+  return { state, cards, chat, semantic, focus, fits, pending, frames, render, flush, click, proxies, geometry, createCard, el, document, viewport, mutation, comments, windowListeners, resize, applyCamera, notifyResize, resizeObservers,
+    useActualFit: () => { useActualFit = true; },
+    mount: () => api.renderAnswerBriefing(), close: (options = { restore: false }) => api.closeAnswerBriefing(options),
+    open: (nextBriefing, options = {}) => api.openAnswerBriefing({ id: 'room-a' }, { ...identity, briefing: nextBriefing || briefing }, options), briefing,
+    failResolution: value => { failResolution = value; }, failPreparation: value => { failedPreparation = value; },
+    defer: value => { deferred = value; } };
+}
+
+// Only the receiving Chat and a document event adapter are fixtures here.
+// Open/step/Exit/ESC/close and their async preparation are production code.
+function briefingReturnFocusHarness() {
+  const h = briefingSemanticHarness(), document = h.document, handlers = new Map(), scopes = new Set(); h.close();
+  const auth = { isLoggedIn: true, accountEmail: 'focus-owner@example.test', authMode: 'chatgpt', identityStatus: 'known' };
+  h.state.codex.authStatus = auth; h.state.codex.codexAccountKey = ChatState.codexAccountKey(auth);
+  h.state.codex.threads = [{ id: 'room-a', engineId: 'codex', engineProfileId: 'fixture-codex', conversationId: 'conversation-a',
+    clientBindingId: 'fixture-binding', bindingState: 'verified', bindingAccountKey: h.state.codex.codexAccountKey }];
+  const binding = () => JSON.stringify([h.state.codex.activeThreadId, ChatState.codexAccountKey(h.state.codex.authStatus),
+    h.state.codex.codexAccountKey, h.state.codex.threads[0].engineProfileId, h.state.codex.threads[0].conversationId]);
+  h.state.codexBridge.createBriefingPreparationScope = (_threadId, onInvalid) => {
+    const original = binding(); let disposed = false, invalid = false;
+    const current = () => {
+      if (disposed || invalid) return false;
+      if (original === binding()) return true;
+      invalid = true; onInvalid?.(); return false;
+    };
+    scopes.add(current); return { current, dispose() { disposed = true; scopes.delete(current); } };
+  };
+  document.addEventListener = (type, fn) => { if (!handlers.has(type)) handlers.set(type, new Set()); handlers.get(type).add(fn); };
+  document.removeEventListener = (type, fn) => handlers.get(type)?.delete(fn);
+  document.body = h.el('body'); document.documentElement.appendChild(document.body);
+  const create = document.createElement;
+  document.createElement = tag => {
+    const node = create(tag), remove = node.remove.bind(node);
+    node.remove = () => { const held = node.contains(document.activeElement); remove(); if (held && !node.isConnected) document.body.focus(); };
+    return node;
+  };
+  const surface = h.el('section', { class: 'egd-chat-card', 'aria-label': '원래 대화' });
+  const opener = h.el('button', { data: { testid: 'briefing-open', answerId: 'answer-a' } }, '브리핑 보기');
+  const composer = h.el('textarea', { class: 'egd-codex-input', data: { testid: 'chat-composer', threadId: 'room-a' } });
+  surface.append(opener, composer); document.body.appendChild(surface);
+  const key = (target, key = 'Escape', extra = {}) => {
+    const event = { type: 'keydown', key, target, currentTarget: document, defaultPrevented: false,
+      preventDefault() { this.defaultPrevented = true; }, stopPropagation() {}, ...extra };
+    for (const fn of [...(handlers.get('keydown') || [])]) fn(event);
+    return event;
+  };
+  return { ...h, surface, opener, composer, key, handlers, emit: () => [...scopes].forEach(current => current()),
+    enter: async (element = opener, options = {}) => { element.focus(); await h.open(undefined, { opener: element, trustedZeroDetail: true, ...options }); h.flush(); },
+    exit: () => h.click('briefing-exit') };
+}
+
+test('HUM-BRIEF-002 return: explicit Exit after real step/overview/viewport transitions returns to the first receiving element', async () => {
+  const h = briefingReturnFocusHarness(); await h.enter();
+  h.click('briefing-next'); h.click('briefing-overview'); h.resize(1280, 800); h.click('briefing-next'); h.resize(720, 600);
+  const exit = h.document.getElementById('egd-answer-briefing').querySelectorAll('button').find(node => node.dataset.testid === 'briefing-exit');
+  exit.focus(); h.exit();
+  assert.equal(h.document.activeElement, h.opener); assert.equal(h.state.codex.briefingSession, null);
+  assert.equal(h.document.getElementById('egd-answer-briefing'), null);
+  assert.equal(h.handlers.get('keydown').size, 0, 'return and entry-intent listeners have the same presentation lifetime');
+});
+
+test('HUM-BRIEF-002 return: scoped ESC restores its receiving button; IME, prevented events and another input do not close or steal focus', async () => {
+  const h = briefingReturnFocusHarness(); await h.enter();
+  const nav = h.document.getElementById('egd-answer-briefing').querySelector('nav'); nav.focus();
+  h.key(nav, 'Escape', { isComposing: true }); assert.ok(h.state.codex.briefingSession);
+  h.key(nav, 'Escape', { defaultPrevented: true }); assert.ok(h.state.codex.briefingSession);
+  const other = h.el('textarea'); h.document.body.appendChild(other); other.focus(); other.value = '다른 입력';
+  h.key(other); assert.ok(h.state.codex.briefingSession); assert.equal(h.document.activeElement, other);
+  nav.focus(); h.key(nav); assert.equal(h.state.codex.briefingSession, null); assert.equal(h.document.activeElement, h.opener);
+  assert.equal(other.value, '다른 입력');
+});
+
+test('HUM-BRIEF-002 return: auto-close, account/room/profile loss, programmatic restore and another focused input never return focus', async () => {
+  for (const mode of ['restore-false', 'programmatic', 'room', 'account', 'profile', 'other-input', 'evidence-input']) {
+    const h = briefingReturnFocusHarness(); await h.enter();
+    const other = h.el('textarea'); (mode === 'evidence-input' ? h.cards[0] : h.document.body).appendChild(other); other.focus(); other.value = '보존';
+    if (mode === 'restore-false') h.close({ restore: false });
+    else if (mode === 'programmatic') h.close({ restore: true });
+    else if (mode === 'room') { h.state.codex.activeThreadId = 'room-b'; h.emit(); }
+    else if (mode === 'account') { h.state.codex.authStatus = { ...h.state.codex.authStatus, accountEmail: 'other@example.test' }; h.emit(); }
+    else if (mode === 'profile') { h.state.codex.threads[0].engineProfileId = 'another-profile'; h.emit(); }
+    else h.exit();
+    assert.equal(h.document.activeElement, other, mode); assert.equal(other.value, '보존'); assert.equal(h.state.codex.briefingSession, null, mode);
+  }
+});
+
+test('HUM-BRIEF-002 return: fallback stays in the original surface and never guesses another same-title button or destructive control', async () => {
+  for (const mode of ['replaced-button', 'composer', 'hidden', 'disabled', 'surface-gone']) {
+    const h = briefingReturnFocusHarness(); await h.enter();
+    const wrong = h.el('button', { data: { testid: 'briefing-open', answerId: 'other-answer' } }, '브리핑 보기'); h.surface.appendChild(wrong);
+    let expected = h.composer;
+    if (mode === 'replaced-button') {
+      h.opener.remove(); expected = h.el('button', { data: { testid: 'briefing-open', answerId: 'answer-a' } }, '브리핑 보기'); h.surface.appendChild(expected);
+    } else if (mode === 'composer') h.opener.remove();
+    else if (mode === 'hidden') h.opener.setAttribute('hidden', '');
+    else if (mode === 'disabled') h.opener.setAttribute('disabled', '');
+    else { h.surface.remove(); expected = h.document.body; }
+    const exit = h.document.getElementById('egd-answer-briefing').querySelectorAll('button').find(node => node.dataset.testid === 'briefing-exit');
+    exit.focus(); h.exit(); assert.equal(h.document.activeElement, expected, mode); assert.notEqual(h.document.activeElement, wrong);
+  }
+});
+
+test('HUM-BRIEF-002 return: stale old-step/old-presentation Exit and delayed preparation cannot close or refocus a newer presentation', async () => {
+  const h = briefingReturnFocusHarness(); await h.enter();
+  const old = h.document.getElementById('egd-answer-briefing').querySelectorAll('button').find(node => node.dataset.testid === 'briefing-exit');
+  h.click('briefing-next'); const samePresentation = h.state.codex.briefingSession; old.fire('click');
+  assert.equal(h.state.codex.briefingSession, samePresentation);
+  const newOpener = h.el('button', { data: { testid: 'briefing-open', answerId: 'answer-a' } }, '새 진입'); h.surface.appendChild(newOpener);
+  await h.enter(newOpener); const newer = h.state.codex.briefingSession; old.fire('click'); assert.equal(h.state.codex.briefingSession, newer);
+  h.document.getElementById('egd-answer-briefing').querySelector('nav').focus(); h.exit(); assert.equal(h.document.activeElement, newOpener);
+  h.defer(true); const opening = h.enter(); await Promise.resolve();
+  h.document.getElementById('egd-answer-briefing').querySelector('nav').focus(); h.exit();
+  const other = h.el('textarea'); h.document.body.appendChild(other); other.focus();
+  h.pending.at(-1)(); await opening; h.flush(); assert.equal(h.document.activeElement, other); assert.equal(h.state.codex.briefingSession, null);
+});
+
+test('HUM-BRIEF-002 return: focus/connection changed by teardown or selection restoration is not overwritten', async () => {
+  for (const mode of ['new-focus', 'account', 'room-aba', 'new-session', 'selection-new-focus', 'selection-room-aba']) {
+    const h = briefingReturnFocusHarness(); await h.enter();
+    const other = h.el('textarea'); h.document.body.appendChild(other);
+    const session = h.state.codex.briefingSession, dispose = session.commentEditor.dispose;
+    session.commentEditor.dispose = () => {
+      dispose();
+      if (mode === 'new-focus') other.focus();
+      else if (mode === 'account') h.state.codex.authStatus = { ...h.state.codex.authStatus, accountEmail: 'other@example.test' };
+      else if (mode === 'room-aba') { h.state.codex.activeThreadId = 'room-b'; h.emit(); h.state.codex.activeThreadId = 'room-a'; }
+      else if (mode === 'new-session') h.state.codex.briefingSession = { ...session, presentationId: 'newer-presentation' };
+    };
+    h.state.onSelectionRestore = () => {
+      if (mode === 'selection-new-focus') other.focus();
+      else if (mode === 'selection-room-aba') { h.state.codex.activeThreadId = 'room-b'; h.emit(); h.state.codex.activeThreadId = 'room-a'; }
+    };
+    h.document.getElementById('egd-answer-briefing').querySelector('nav').focus(); h.exit();
+    assert.notEqual(h.document.activeElement, h.opener, mode);
+    if (mode === 'new-focus' || mode === 'selection-new-focus') assert.equal(h.document.activeElement, other);
+    if (mode === 'new-session') assert.equal(h.state.codex.briefingSession?.presentationId, 'newer-presentation');
+  }
+});
+
+test('HUM-BRIEF-002: measured 720x600 keeps all six verified targets at their own semantic proxy positions', () => {
+  const h = briefingSemanticHarness(), before = h.cards.map(card => ({ style: { ...card.style }, resource: card.resource }));
+  h.render();
+  assert.equal(h.proxies().filter(proxy => !proxy.hidden).length, 6);
+  assert.deepEqual(h.semantic.snapshot().clusters, [], 'ordinary Chat cannot absorb the six protected targets');
+  for (const [index, proxy] of h.proxies().entries()) {
+    const card = h.cards[index], rect = h.geometry(card), inverse = 1 / h.state.zoom;
+    assert.equal(proxy.dataset.viewId, card.id);
+    assert.equal(proxy.dataset.lod, 'marker');
+    assert.ok(Math.abs(Number.parseFloat(proxy.style.left) - (rect.width / 2 - 18 * inverse)) < 1e-9);
+    assert.ok(Math.abs(Number.parseFloat(proxy.style.top) - (rect.height / 2 - 18 * inverse)) < 1e-9);
+    assert.deepEqual(card.style, before[index].style);
+    assert.equal(card.resource, before[index].resource);
+  }
+  assert.equal(h.state.zoom, .04671717171717172, 'no zoom floor, fit or permanent layout change');
+});
+
+test('HUM-BRIEF-002: the normal 1280x800 projection is unchanged by the Briefing exception', () => {
+  const h = briefingSemanticHarness({ width: 1280, height: 800, zoom: .2824561403508772,
+    pan: { x: 743.578947368421, y: 286.8421052631579 } });
+  const session = h.state.codex.briefingSession;
+  h.state.codex.briefingSession = null; h.render();
+  const normal = h.semantic.snapshot(), styles = h.proxies().map(proxy => ({ ...proxy.style }));
+  h.state.codex.briefingSession = session; h.render();
+  assert.deepEqual(h.semantic.snapshot(), normal);
+  assert.deepEqual(h.proxies().map(proxy => ({ ...proxy.style })), styles);
+  assert.deepEqual(normal.clusters, []);
+});
+
+test('HUM-BRIEF-002: actual step/overview/exit controls replace and discard the temporary exclusions', () => {
+  const h = briefingSemanticHarness(); h.mount(); h.render();
+  h.click('briefing-next'); h.render();
+  assert.equal(h.proxies().filter(proxy => !proxy.hidden).length, 1);
+  assert.equal(h.proxies()[0].hidden, false);
+  h.click('briefing-overview'); h.render();
+  assert.equal(h.proxies().filter(proxy => !proxy.hidden).length, 6);
+  h.click('briefing-next'); h.render();
+  for (const index of [3, 4, 5]) assert.equal(h.proxies()[index].hidden, false);
+  assert.ok(h.semantic.snapshot().clusters.every(cluster => cluster.memberIds.every(id => !['evidence-3', 'evidence-4', 'evidence-5'].includes(id))));
+  h.click('briefing-exit'); h.render();
+  assert.equal(h.state.codex.briefingSession, null);
+  assert.equal(h.semantic.snapshot().clusters[0].count, 7, 'normal clustering returns after exit');
+});
+
+test('HUM-BRIEF-002: stale/hash/range failures and room loss never protect an unverified same-title View', () => {
+  const h = briefingSemanticHarness();
+  const assertFirstUnprotected = () => {
+    h.render(); assert.equal(h.proxies()[0].hidden, true);
+    assert.ok(h.semantic.snapshot().clusters.some(cluster => cluster.memberIds.includes('evidence-0') && cluster.memberIds.includes('ordinary-chat')));
+  };
+  h.cards[0]._inputEvidenceLoaded = false; assertFirstUnprotected();
+  h.cards[0]._inputEvidenceLoaded = true; h.cards[0]._inputReference.hash = 'wrong'; assertFirstUnprotected();
+  h.cards[0]._inputReference.hash = 'hash-0';
+  h.state.codex.briefingSession.briefing.steps[0].targets[0].range = { startLine: null }; assertFirstUnprotected();
+  delete h.state.codex.briefingSession.briefing.steps[0].targets[0].range;
+  h.render(); assert.equal(h.proxies().filter(proxy => !proxy.hidden).length, 6);
+  h.failResolution(true); h.render(); assert.equal(h.semantic.snapshot().clusters[0].count, 7);
+  h.failResolution(false); h.mount(); h.click('briefing-overview');
+  h.failResolution('single'); h.render();
+  assert.equal(h.semantic.snapshot().clusters[0].count, 7, 'overview resolution failure discards even the earlier verified step ids');
+  h.failResolution(false); h.state.codex.activeThreadId = 'another-room'; h.render();
+  assert.equal(h.semantic.snapshot().clusters[0].count, 7);
+  h.state.codex.briefingSession.preparationScope.dispose(); h.state.codex.activeThreadId = 'room-a'; h.render();
+  assert.equal(h.semantic.snapshot().clusters[0].count, 7, 'returning to the room cannot revive a disposed presentation');
+});
+
+test('HUM-BRIEF-002: ordinary Chat clusters and existing pointer/keyboard focus remain intact', () => {
+  const h = briefingSemanticHarness(); h.createCard('second-chat', 'chat', { x: 175, y: 80, width: 1000, height: 458 }); h.render();
+  assert.deepEqual(h.semantic.snapshot().clusters.map(cluster => cluster.memberIds.sort()), [['ordinary-chat', 'second-chat']]);
+  h.proxies()[0].fire('click'); assert.equal(h.focus.at(-1), h.cards[0]);
+  h.render(); h.proxies()[1].fire('click', { detail: 0 }); assert.equal(h.focus.at(-1), h.cards[1]);
+  h.close(); h.render(); assert.equal(h.semantic.snapshot().clusters[0].count, 8);
+});
+
+test('HUM-BRIEF-002: late preparation cannot restore exclusions after close or overwrite a new presentation', async () => {
+  const h = briefingSemanticHarness(); h.close(); h.cards.forEach(card => { card._inputEvidenceLoaded = false; }); h.defer(true);
+  const old = h.open(); assert.equal(h.pending.length, 1); h.close();
+  h.defer(false);
+  const next = { ...h.briefing, id: 'brief-next', steps: [{ id: 'new-target', text: '새 대상', target: { sourceId: 'source-5', hash: 'hash-5' } }] };
+  await h.open(next); h.render();
+  assert.equal(h.proxies()[5].hidden, false);
+  const presentation = h.state.codex.briefingSession;
+  h.pending[0](); await old; h.flush(); h.render();
+  assert.equal(h.state.codex.briefingSession, presentation);
+  assert.equal(h.proxies()[5].hidden, false);
+  assert.ok(h.semantic.snapshot().clusters.every(cluster => !cluster.memberIds.includes('evidence-5')));
+  assert.equal(h.cards[0]._inputEvidenceLoaded, false, 'old preparation has no authority to make its target available');
+});
+
+test('HUM-BRIEF-002: a preparation failure protects only available targets and a current refresh can recover', async () => {
+  const h = briefingSemanticHarness(); h.close(); h.cards.forEach(card => { card._inputEvidenceLoaded = false; });
+  h.failPreparation('source-0'); await h.open(); h.flush(); h.render();
+  assert.equal(h.cards[0]._inputEvidenceLoaded, false);
+  assert.equal(h.proxies()[0].hidden, true);
+  assert.equal(h.proxies().filter(proxy => !proxy.hidden).length, 5);
+  assert.ok(h.semantic.snapshot().clusters.some(cluster => cluster.memberIds.includes('evidence-0')));
+  h.cards[0]._inputEvidenceLoaded = true; h.mount();
+  assert.ok(h.frames.size, 'current preparation/evidence refresh schedules a semantic update');
+  h.flush(); assert.equal(h.proxies().filter(proxy => !proxy.hidden).length, 6);
+});
+
+test('HUM-BRIEF-002 identity: six visible numbers pair actual View IDs with panel rows and named ranges, never same-title Chat or another range', () => {
+  const h = briefingSemanticHarness(), targets = h.state.codex.briefingSession.briefing.steps[0].targets;
+  targets[0].range = { startLine: 1, endLine: 4 };
+  targets[1] = { ...targets[0], range: { startLine: 5, endLine: 8 } };
+  h.cards[0]._inputReference.presentationRange = targets[0].range;
+  h.cards[1]._inputReference = { ...h.cards[0]._inputReference, presentationRange: targets[1].range };
+  const other = h.createCard('same-name-other-range', 'input-evidence', { x: 352, y: -402, width: 616, height: 458 });
+  other._inputReference = { ...h.cards[0]._inputReference, presentationRange: { startLine: 9, endLine: 12 } }; other._inputEvidenceLoaded = true;
+  const before = h.cards.map(h.geometry), resources = h.cards.map(card => card.resource);
+  h.mount(); h.render();
+  const rows = h.document.getElementById('egd-answer-briefing').querySelectorAll('.egd-briefing-evidence-row');
+  for (const [index, proxy] of h.proxies().entries()) {
+    const range = index === 0 ? '1–4행' : index === 1 ? '5–8행' : '범위 미지정';
+    assert.equal(proxy.querySelector('.egd-semantic-icon').textContent, String(index + 1), 'visible marker number, not six identical file glyphs');
+    assert.equal(rows[index].querySelector('.egd-briefing-evidence-name').textContent, `${index + 1}. 같은 제목`);
+    const identity = `근거 ${index + 1} · 같은 제목 · ${range}`;
+    assert.ok(proxy.getAttribute('aria-label').startsWith(identity));
+    assert.ok(rows[index].getAttribute('aria-label').startsWith(identity));
+    assert.equal(proxy.dataset.viewId, h.cards[index].id);
+  }
+  for (const card of [other, h.chat]) {
+    assert.doesNotMatch(card.querySelector('.egd-semantic-proxy').getAttribute('aria-label'), /^근거 \d/);
+    assert.doesNotMatch(card.querySelector('.egd-semantic-icon').textContent, /^\d+$/);
+  }
+  assert.deepEqual(h.cards.map(h.geometry), before); assert.deepEqual(h.cards.map(card => card.resource), resources);
+  assert.equal(h.state.zoom, .04671717171717172); assert.equal(h.focus.length, 0, 'labelling cannot focus, move or fit a card');
+});
+
+test('HUM-BRIEF-002 identity: actual step/overview/exit controls discard old labels and keep panel/proxy numbers paired', () => {
+  const h = briefingSemanticHarness(); h.mount();
+  const glyphs = h.proxies().map(proxy => proxy.querySelector('.egd-semantic-icon').firstChild);
+  h.render();
+  const oldRow = h.document.getElementById('egd-answer-briefing').querySelector('.egd-briefing-evidence-name');
+  h.click('briefing-next'); h.render();
+  assert.equal(oldRow.textContent, '같은 제목', 'detached previous panel is restored');
+  assert.equal(h.proxies()[0].querySelector('.egd-semantic-icon').textContent, '1');
+  assert.ok(h.proxies().slice(1).every(proxy => !/^\d+$/.test(proxy.querySelector('.egd-semantic-icon').textContent)));
+  h.click('briefing-next'); h.render();
+  for (const [index, proxy] of h.proxies().slice(3).entries()) assert.equal(proxy.querySelector('.egd-semantic-icon').textContent, String(index + 1));
+  h.click('briefing-overview'); h.render();
+  const row = h.document.getElementById('egd-answer-briefing').querySelector('.egd-briefing-evidence-name');
+  assert.equal(row.textContent, '1. 같은 제목');
+  assert.equal(h.proxies()[3].querySelector('.egd-semantic-icon').textContent, '1', 'overview keeps current-step correspondence');
+  assert.equal(new Set(h.proxies().map(proxy => proxy.querySelector('.egd-semantic-icon').textContent)).size, 6);
+  h.click('briefing-exit'); h.render();
+  assert.equal(row.textContent, '같은 제목');
+  assert.ok(h.proxies().every(proxy => !/^\d+$/.test(proxy.querySelector('.egd-semantic-icon').textContent)));
+  h.proxies().forEach((proxy, index) => assert.equal(proxy.querySelector('.egd-semantic-icon').firstChild, glyphs[index], 'restore the original glyph node, not a cloned card or replacement'));
+});
+
+test('HUM-BRIEF-002 identity: failed/missing/late targets and room loss clear labels, while an active wide Briefing keeps its correspondence', () => {
+  const h = briefingSemanticHarness(); h.cards[0]._inputEvidenceLoaded = false; h.mount(); h.render();
+  const panel = h.document.getElementById('egd-answer-briefing'), firstName = panel.querySelector('.egd-briefing-evidence-name');
+  assert.equal(firstName.textContent, '같은 제목');
+  assert.equal(h.proxies()[1].querySelector('.egd-semantic-icon').textContent, '2', 'unavailable rows keep their reserved position');
+  h.cards[0]._inputEvidenceLoaded = true; h.mount(); h.flush();
+  assert.equal(firstName.textContent, '1. 같은 제목');
+  h.cards[0].remove(); h.render(); assert.equal(firstName.textContent, '같은 제목');
+  h.failResolution(true); h.render();
+  assert.ok(panel.querySelectorAll('.egd-briefing-evidence-name').every(name => name.textContent === '같은 제목'));
+  h.failResolution(false); h.render(); h.state.codex.activeThreadId = 'another-room'; h.render();
+  assert.ok(h.proxies().slice(1).every(proxy => !/^\d+$/.test(proxy.querySelector('.egd-semantic-icon').textContent)));
+  const normal = briefingSemanticHarness({ width: 1280, height: 800, zoom: .2824561403508772,
+    pan: { x: 743.578947368421, y: 286.8421052631579 } });
+  normal.mount(); normal.render();
+  assert.deepEqual(normal.document.querySelectorAll('.egd-briefing-evidence-name').map(name => name.textContent),
+    [1, 2, 3, 4, 5, 6].map(number => `${number}. 같은 제목`));
+  assert.deepEqual(normal.proxies().map(proxy => proxy.querySelector('.egd-semantic-icon').textContent), ['1', '2', '3', '4', '5', '6']);
+  normal.close(); normal.render();
+  assert.ok(normal.proxies().every(proxy => !/^\d+$/.test(proxy.querySelector('.egd-semantic-icon').textContent)));
+});
+
+test('HUM-BRIEF-002 identity: a newly available live View rebinds its row on semantic refresh without relying on cached IDs', () => {
+  const h = briefingSemanticHarness(); h.mount(); h.render();
+  const row = h.document.getElementById('egd-answer-briefing').querySelector('.egd-briefing-evidence-row');
+  const original = h.cards[0], card = h.createCard('reopened-evidence-0', 'input-evidence', h.geometry(original));
+  original.remove(); card._inputReference = { ...original._inputReference }; card._inputEvidenceLoaded = false;
+  h.render(); assert.equal(row.querySelector('.egd-briefing-evidence-name').textContent, '같은 제목');
+  card._inputEvidenceLoaded = true; h.render();
+  assert.equal(card.querySelector('.egd-semantic-proxy').querySelector('.egd-semantic-icon').textContent, '1');
+  assert.equal(row.querySelector('.egd-briefing-evidence-name').textContent, '1. 같은 제목');
+  assert.equal(row.getAttribute('aria-label').split(' · ').slice(0, 3).join(' · '), '근거 1 · 같은 제목 · 범위 미지정');
+});
+
+test('HUM-BRIEF-002 keyboard: native summary and nested original controls are barred only while replaced, with exact inert/tabindex restoration', () => {
+  const h = briefingSemanticHarness(), previousInert = [null, '', 'preserve-value', null, '', 'other-value'];
+  const originals = h.cards.map((card, index) => {
+    const summary = h.el('summary', {}, '원본 요약'), button = h.el('button', { tabindex: '2' }, '원본 작업');
+    const link = h.el('a', { href: '#synthetic', tabindex: '0' }, '원본 링크');
+    const details = h.el('details', { 'aria-hidden': 'false' }, summary, button, link);
+    if (previousInert[index] !== null) details.setAttribute('inert', previousInert[index]);
+    card.appendChild(details); return { details, summary, button, link };
+  });
+  const outsideFocus = h.document.activeElement; h.mount(); h.render();
+  for (const { details, summary, button, link } of originals) {
+    assert.equal(details.inert, true, 'all hidden original subtrees are inert, not just aria-hidden');
+    assert.equal(summary.getAttribute('tabindex'), '-1', 'native summary must not remain a 0.75px Tab destination');
+    assert.equal(button.getAttribute('tabindex'), '-1'); assert.equal(link.getAttribute('tabindex'), '-1');
+  }
+  assert.ok(h.proxies().every(proxy => !proxy.closest('[inert]')), 'replacement buttons remain keyboard candidates');
+  assert.ok(h.proxies().every(proxy => !proxy.hidden && proxy.getAttribute('tabindex') !== '-1'));
+  assert.equal(h.document.activeElement, outsideFocus, 'no focus is stolen while changing the representations');
+  h.close(); h.state.zoom = 1; h.render();
+  for (const [index, { details, summary, button, link }] of originals.entries()) {
+    assert.equal(details.getAttribute('inert'), previousInert[index]);
+    assert.equal(details.getAttribute('aria-hidden'), 'false');
+    assert.equal(summary.getAttribute('tabindex'), null); assert.equal(button.getAttribute('tabindex'), '2'); assert.equal(link.getAttribute('tabindex'), '0');
+  }
+  h.state.zoom = .04671717171717172; h.render(); h.cards[0].remove(); h.render();
+  assert.equal(originals[0].details.getAttribute('inert'), null);
+  assert.equal(originals[0].summary.getAttribute('tabindex'), null, 'removing a compact card releases the original Tab environment');
+  assert.equal(originals[0].button.getAttribute('tabindex'), '2');
+});
+
+test('HUM-BRIEF-002 keyboard: late original children and author changes are restored without changing global keys or focus', () => {
+  const h = briefingSemanticHarness(); h.mount(); h.render();
+  const child = h.el('details', {}, h.el('summary', {}, '나중 요약'), h.el('button', { tabindex: '3' }, '나중 작업'));
+  h.cards[0].appendChild(child); h.mutation({ type: 'childList', target: h.cards[0], addedNodes: [child] }); h.flush();
+  assert.equal(child.inert, true); assert.equal(child.firstChild.getAttribute('tabindex'), '-1');
+  const button = child.querySelector('button'); button.setAttribute('tabindex', '4');
+  h.mutation({ type: 'attributes', target: button, attributeName: 'tabindex' });
+  child.setAttribute('inert', 'author-value'); h.mutation({ type: 'attributes', target: child, attributeName: 'inert' }); h.flush();
+  assert.equal(button.getAttribute('tabindex'), '-1');
+  h.close(); h.state.zoom = 1; h.render();
+  assert.equal(button.getAttribute('tabindex'), '4'); assert.equal(child.getAttribute('inert'), 'author-value');
+  assert.equal(child.firstChild.getAttribute('tabindex'), null);
+  assert.equal(h.focus.length, 0);
+});
+
+test('HUM-BRIEF-002 fold: narrow viewport starts with only its existing title/navigation row, above actual dock and zoom bounds', () => {
+  for (const [width, height, zoomTop] of [[720, 600, 480], [390, 680, 551], [820, 540, 402]]) {
+    const h = briefingSemanticHarness({ width, height });
+    for (const [id, top, bottom] of [['egd-dock', height - 66, height - 12], ['egd-zoom-indicator', zoomTop, zoomTop + 39]]) {
+      const node = h.el('div', { id }); node.getBoundingClientRect = () => ({ left: 88, right: width - 12, top, bottom, width: width - 100, height: bottom - top });
+      h.document.documentElement.appendChild(node);
+    }
+    h.mount(); h.render();
+    const panel = h.document.getElementById('egd-answer-briefing'), body = panel.querySelector('.egd-briefing-body');
+    assert.equal(panel.dataset.compact, 'true'); assert.equal(panel.dataset.expanded, 'false');
+    assert.ok(body?.hidden, 'explanation, ranges and comment editor begin folded, not a central occluder');
+    const header = panel.querySelector('.egd-briefing-header'); assert.ok(header);
+    for (const id of ['briefing-previous', 'briefing-next', 'briefing-overview', 'briefing-exit', 'briefing-toggle'])
+      assert.ok(header.querySelectorAll('button').some(node => node.dataset.testid === id), id);
+    assert.match(header.textContent, /답변 브리핑/); assert.match(header.textContent, /1 \/ 3/);
+    assert.ok(panel.getBoundingClientRect().bottom < zoomTop && panel.getBoundingClientRect().bottom < height - 66);
+    if (width >= 720) assert.equal(h.proxies().filter(proxy => !proxy.hidden).length, 6);
+    assert.deepEqual(h.proxies().map(proxy => proxy.querySelector('.egd-semantic-icon').textContent), ['1', '2', '3', '4', '5', '6']);
+    assert.equal(h.fits.length, 0, 'fold initialization is not a camera action');
+  }
+});
+
+test('HUM-BRIEF-002 fold: toggling preserves the same comment DOM, draft, cursor, editor and internal scroll without fitting the camera', () => {
+  const h = briefingSemanticHarness({ realComments: true }); h.mount(); h.render();
+  const panel = h.document.getElementById('egd-answer-briefing'), editor = h.state.codex.briefingSession.commentEditor;
+  const before = JSON.stringify([h.state.zoom, h.state.pan, h.state.activeEntityId, h.cards.map(h.geometry)]);
+  const toggle = panel.querySelectorAll('button').find(node => node.dataset.testid === 'briefing-toggle'); assert.ok(toggle);
+  h.click('briefing-toggle');
+  const body = panel.querySelector('.egd-briefing-body'), input = body.querySelector('textarea');
+  input.value = '저장하지 않은 한글 의견'; input.fire('input'); input.setSelectionRange(2, 6, 'backward'); input.scrollTop = 11; body.scrollTop = 97;
+  h.click('briefing-toggle'); assert.equal(body.hidden, true);
+  h.click('briefing-toggle'); assert.equal(body.hidden, false);
+  assert.equal(h.document.getElementById('egd-answer-briefing'), panel); assert.equal(body.querySelector('textarea'), input);
+  assert.equal(h.state.codex.briefingSession.commentEditor, editor); assert.equal(h.comments.mounts, 1); assert.equal(h.comments.disposals, 0);
+  assert.equal(h.comments.text, '저장하지 않은 한글 의견');
+  assert.deepEqual([input.value, input.selectionStart, input.selectionEnd, input.selectionDirection, input.scrollTop, body.scrollTop],
+    ['저장하지 않은 한글 의견', 2, 6, 'backward', 11, 97]);
+  assert.equal(toggle.getAttribute('aria-controls'), body.id); assert.equal(toggle.getAttribute('aria-expanded'), 'true');
+  assert.equal(h.fits.length, 0); assert.equal(h.focus.length, 0);
+  assert.equal(JSON.stringify([h.state.zoom, h.state.pan, h.state.activeEntityId, h.cards.map(h.geometry)]), before);
+});
+
+test('HUM-BRIEF-002 fold: collapse waits for live IME and focus to leave the editor instead of hiding or replacing it', () => {
+  const h = briefingSemanticHarness({ realComments: true }); h.mount(); h.click('briefing-toggle');
+  const panel = h.document.getElementById('egd-answer-briefing'), body = panel.querySelector('.egd-briefing-body'), input = body.querySelector('textarea');
+  input.focus(); input.value = '아직 조합 중'; input.setSelectionRange(3, 5); input.fire('compositionstart');
+  let prevented = false;
+  const toggle = panel.querySelectorAll('button').find(node => node.dataset.testid === 'briefing-toggle');
+  toggle.fire('mousedown', { button: 0, preventDefault() { prevented = true; } }); toggle.fire('click');
+  assert.equal(prevented, true); assert.equal(body.hidden, false); assert.equal(h.document.activeElement, input);
+  input.fire('compositionend'); assert.equal(body.hidden, false, 'compositionend must not race its final input event');
+  input.value += ' 최종'; input.fire('input'); h.viewport.focus(); input.fire('focusout', { relatedTarget: h.viewport });
+  assert.equal(body.hidden, true); h.click('briefing-toggle');
+  assert.equal(body.querySelector('textarea'), input); assert.equal(input.value, '아직 조합 중 최종');
+  assert.deepEqual([input.selectionStart, input.selectionEnd], [3, 5]); assert.equal(h.comments.disposals, 0);
+  assert.equal(h.fits.length, 0);
+});
+
+test('HUM-BRIEF-002 fold: late preparation after a fold interaction keeps the same panel/editor and cannot refit the camera', async () => {
+  const h = briefingSemanticHarness({ realComments: true }); h.close(); h.cards.forEach(card => { card._inputEvidenceLoaded = false; }); h.defer(true);
+  const opening = h.open(), panel = h.document.getElementById('egd-answer-briefing');
+  h.click('briefing-toggle');
+  const input = panel.querySelector('textarea'), editor = h.state.codex.briefingSession.commentEditor;
+  input.value = '준비 중 보존할 초안'; input.fire('input'); input.setSelectionRange(1, 5, 'backward');
+  h.defer(false); h.pending[0](); await opening; h.flush();
+  assert.equal(h.document.getElementById('egd-answer-briefing'), panel); assert.equal(panel.querySelector('textarea'), input);
+  assert.equal(h.state.codex.briefingSession.commentEditor, editor);
+  assert.equal(panel.dataset.expanded, 'true'); assert.equal(input.value, '준비 중 보존할 초안');
+  assert.deepEqual([input.selectionStart, input.selectionEnd, input.selectionDirection], [1, 5, 'backward']);
+  assert.equal(h.fits.length, 0, 'the existing preparation intent guard observes the fold action');
+});
+
+test('HUM-BRIEF-002 fold: explicit overview/step fitting measures the real folded panel, while resize/toggle does not fit', () => {
+  const h = briefingSemanticHarness(); h.mount(); h.render(); h.useActualFit(); h.click('briefing-toggle');
+  const before = h.cards.map(h.geometry), zoom = h.state.zoom;
+  h.document.getElementById('egd-answer-briefing').querySelector('.egd-briefing-body').querySelector('button').focus();
+  h.click('briefing-overview');
+  const panel = h.document.getElementById('egd-answer-briefing'); assert.equal(panel.dataset.expanded, 'false');
+  const rect = panel.getBoundingClientRect(), camera = h.fits.at(-1); assert.ok(camera?.pan);
+  for (const card of h.cards) {
+    const world = h.geometry(card), left = world.x * camera.zoom + camera.pan.x, top = world.y * camera.zoom + camera.pan.y;
+    assert.ok(left + world.width * camera.zoom <= rect.left || left >= rect.right
+      || top + world.height * camera.zoom <= rect.top || top >= rect.bottom, 'each target remains outside the measured folded panel');
+  }
+  assert.equal(h.fits.length, 1); h.resize(700, 640); assert.equal(h.fits.length, 1);
+  h.click('briefing-next'); assert.equal(h.fits.length, 2);
+  assert.equal(h.state.zoom, zoom, 'the shared target setter, not global zoom or world coordinates, owns explicit camera changes');
+  assert.deepEqual(h.cards.map(h.geometry), before);
+});
+
+test('HUM-BRIEF-002 fold: wide layout stays open and resize/step/exit dispose old layout listeners without losing the live editor', () => {
+  const h = briefingSemanticHarness({ width: 1280, height: 800 });
+  const initial = h.windowListeners.get('resize')?.size || 0; h.mount();
+  const panel = h.document.getElementById('egd-answer-briefing'), body = panel.querySelector('.egd-briefing-body'); assert.ok(body);
+  const input = body.querySelector('textarea'); input.value = '크기 변경 중 의견'; input.setSelectionRange(1, 4);
+  assert.equal(panel.dataset.compact, 'false'); assert.equal(body.hidden, false);
+  assert.equal(panel.querySelectorAll('button').find(node => node.dataset.testid === 'briefing-toggle').hidden, true);
+  assert.ok(!panel.style.left && !panel.style.bottom && !panel.style.width, 'desktop CSS keeps its original placement');
+  h.resize(720, 600); assert.equal(body.hidden, true); h.click('briefing-toggle');
+  h.resize(1280, 800); assert.equal(body.hidden, false); assert.ok(!panel.style.left && !panel.style.bottom);
+  h.resize(720, 600); assert.equal(body.hidden, false, 'remember the explicit expand choice within this panel');
+  assert.equal(body.querySelector('textarea'), input); assert.equal(input.value, '크기 변경 중 의견');
+  assert.deepEqual([input.selectionStart, input.selectionEnd], [1, 4]); assert.equal(h.comments.mounts, 1);
+  assert.equal(h.windowListeners.get('resize').size, initial + 1);
+  h.click('briefing-next'); assert.equal(h.windowListeners.get('resize').size, initial + 1);
+  h.close(); assert.equal(h.windowListeners.get('resize').size, initial);
+});
+
+test('HUM-BRIEF-002 fold: scoped responsive CSS keeps desktop geometry and existing dark/high-contrast focus tokens', () => {
+  const css = readFileSync(new URL('../overlay/CSS/eg-desk-surface.uc.css', import.meta.url), 'utf8');
+  assert.match(css, /#egd-answer-briefing\s*\{[^}]*bottom:\s*108px;\s*left:\s*118px/s);
+  assert.match(css, /@media\s*\(max-width:\s*56rem\)[\s\S]*#egd-answer-briefing\[data-compact="true"\]/);
+  assert.match(css, /\.egd-briefing-body\s*\{[^}]*order:\s*-1[^}]*overflow-y:\s*auto/s);
+  assert.match(css, /#egd-answer-briefing :is\(button, textarea\):focus-visible[^}]*var\(--egd-focus-outline\)/s);
+  assert.match(css, /\.egd-briefing-header[^}]*flex-wrap:\s*wrap/s);
+});
+
+test('HUM-BRIEF-002 entry: verified row/card identity survives marker, measured outline and wide detail LOD without matching Chat titles', () => {
+  const h = briefingSemanticHarness({ width: 1280, height: 800, pan: { x: 743.578947368421, y: 286.8421052631579 } });
+  h.mount();
+  const before = h.cards.map(h.geometry);
+  const rows = h.document.getElementById('egd-answer-briefing').querySelectorAll('.egd-briefing-evidence-row');
+  for (const [zoom, level] of [[.04671717171717172, 'marker'], [.21148989898989898, 'outline'], [.2824561403508772, 'detail']]) {
+    h.state.zoom = zoom; h.render();
+    for (const [index, proxy] of h.proxies().entries()) {
+      assert.equal(proxy.dataset.lod, level);
+      assert.equal(proxy.querySelector('.egd-semantic-icon').textContent, String(index + 1));
+      assert.ok(proxy.querySelector('.egd-semantic-label').textContent.includes('같은 제목'));
+      assert.equal(rows[index].querySelector('.egd-briefing-evidence-name').textContent, `${index + 1}. 같은 제목`);
+      assert.ok(proxy.getAttribute('aria-label').startsWith(`근거 ${index + 1} · 같은 제목 · 범위 미지정`));
+    }
+    assert.doesNotMatch(h.chat.querySelector('.egd-semantic-proxy').getAttribute('aria-label'), /^근거 \d/);
+  }
+  assert.deepEqual(h.cards.map(h.geometry), before);
+  h.close(); h.render();
+  assert.ok(h.proxies().every(proxy => !/^\d+$/.test(proxy.querySelector('.egd-semantic-icon').textContent)));
+});
+
+test('HUM-BRIEF-002 entry: wide detail Tab enters a visible card-sized gate, Enter reads safely, and original close/control behavior returns', () => {
+  const h = briefingSemanticHarness({ width: 1280, height: 800, zoom: .2824561403508772,
+    pan: { x: 743.578947368421, y: 286.8421052631579 } });
+  let closes = 0;
+  const originals = h.cards.map(card => {
+    card.offsetWidth = h.geometry(card).width + 2; card.offsetHeight = h.geometry(card).height + 2;
+    const close = h.el('span', { role: 'button', tabindex: '0', onclick: () => { closes++; } }, '닫기');
+    const header = h.el('div', { class: 'egd-card-header' }, close);
+    const body = h.el('div', { class: 'egd-card-body' }, h.el('details', {}, h.el('summary', {}, '출처 및 캡처 정보')));
+    const proxy = card.querySelector('.egd-semantic-proxy'); card.insertBefore(header, proxy); card.insertBefore(body, proxy);
+    return { close, header, body };
+  });
+  h.mount(); h.render();
+  for (const [index, proxy] of h.proxies().entries()) {
+    assert.equal(proxy.hidden, false, 'detail retains an unscaled card-level keyboard entry');
+    assert.equal(proxy.dataset.briefingMode, 'navigation');
+    assert.ok(Number.parseFloat(proxy.style.width) > 100 && Number.parseFloat(proxy.style.height) > 75);
+    assert.equal(Number.parseFloat(proxy.style.width), h.cards[index].offsetWidth * h.state.zoom);
+    assert.equal(originals[index].close.getAttribute('tabindex'), '-1'); assert.equal(originals[index].header.inert, true);
+  }
+  const proxy = h.proxies()[0]; proxy.focus(); proxy.fire('click', { detail: 0 });
+  assert.equal(closes, 0, 'Enter on the card unit must never invoke the first close control');
+  h.applyCamera();
+  assert.equal(h.document.activeElement, originals[0].body, 'explicit entry focuses reading content, not a destructive header control');
+  assert.equal(proxy.dataset.briefingMode, 'reading'); assert.equal(originals[0].header.inert, false);
+  assert.equal(originals[0].close.getAttribute('tabindex'), '0');
+  originals[0].close.fire('click'); assert.equal(closes, 1, 'close remains available after explicit entry');
+  originals[0].body.fire('keydown', { key: 'Escape' }); h.flush();
+  assert.equal(h.document.activeElement, proxy); assert.equal(proxy.dataset.briefingMode, 'navigation');
+  assert.equal(originals[0].body.getAttribute('tabindex'), null);
+  h.close(); h.state.zoom = 1; h.render();
+  for (const { close, header, body } of originals) {
+    assert.equal(close.getAttribute('tabindex'), '0'); assert.equal(header.inert, false); assert.equal(body.getAttribute('tabindex'), null);
+  }
+});
+
+test('HUM-BRIEF-002 entry: safe reading fits measured free space at unchanged readable zoom when the actual bounds permit it', () => {
+  const h = briefingSemanticHarness({ width: 1000, height: 900, zoom: .21148989898989898 }); h.mount(); h.render();
+  const panel = h.document.getElementById('egd-answer-briefing');
+  panel.getBoundingClientRect = () => ({ left: 8, top: 580, right: 992, bottom: 628, width: 984, height: 48 });
+  const zoomChrome = h.el('div', { id: 'egd-zoom-indicator' });
+  zoomChrome.getBoundingClientRect = () => ({ left: 88, top: 760, right: 240, bottom: 800, width: 152, height: 40 }); h.document.documentElement.appendChild(zoomChrome);
+  const before = h.cards.map(h.geometry), proxy = h.proxies()[0]; proxy.focus(); proxy.fire('click', { detail: 0 });
+  const camera = h.fits.at(-1), card = h.geometry(h.cards[0]), safe = production('safeViewportRect', { document: h.document,
+    window: { innerWidth: 1000, innerHeight: 900 } })();
+  const originalZoom = Math.min(4, Math.max(.76, 10.6 / 14, 241 / card.width, 181 / card.height,
+    SurfaceState.fitSurfaceCamera(card, safe, .85).zoom));
+  assert.equal(camera.zoom, originalZoom, 'free-space placement may not silently reduce the reading policy');
+  assert.ok(card.y * camera.zoom + camera.pan.y + card.height * camera.zoom < 580, 'readable outer bounds avoid the measured panel when room exists');
+  h.applyCamera(); assert.equal(proxy.dataset.briefingExposure, 'bounds-fit');
+  h.resize(720, 600);
+  panel.getBoundingClientRect = () => ({ left: 86, top: 435, right: 712, bottom: 483, width: 626, height: 48 });
+  zoomChrome.getBoundingClientRect = () => ({ left: 88, top: 491, right: 240, bottom: 531, width: 152, height: 40 });
+  h.state.zoom = .21148989898989898; h.render(); proxy.focus(); proxy.fire('click', { detail: 0 }); h.applyCamera();
+  assert.ok(h.fits.at(-1).zoom >= .76 && h.fits.at(-1).zoom * 14 >= 10.6);
+  assert.equal(proxy.dataset.briefingExposure, 'bounds-fit', JSON.stringify({ camera: h.fits.at(-1), panel: panel.getBoundingClientRect(), zoom: zoomChrome.getBoundingClientRect() }));
+  assert.ok(card.y * h.fits.at(-1).zoom + h.fits.at(-1).pan.y + card.height * h.fits.at(-1).zoom < 435);
+  assert.deepEqual(h.cards.map(h.geometry), before);
+});
+
+test('HUM-BRIEF-002 entry: a delayed readable transition cannot take focus from newer typing or revive after a step/room/exit', () => {
+  const h = briefingSemanticHarness({ zoom: .2824561403508772 });
+  const body = h.el('div', { class: 'egd-card-body' }, h.el('summary', {}, '원문')); h.cards[0].appendChild(body);
+  h.mount(); h.render(); const proxy = h.proxies()[0]; proxy.focus(); proxy.fire('click', { detail: 0 });
+  const other = h.el('textarea'); h.document.documentElement.appendChild(other); other.focus(); other.value = '새 입력';
+  h.applyCamera(); assert.equal(h.document.activeElement, other); assert.equal(other.value, '새 입력');
+  assert.notEqual(proxy.dataset.briefingMode, 'reading');
+  h.click('briefing-next'); h.render(); assert.equal(body.getAttribute('tabindex'), null);
+  h.state.codex.activeThreadId = 'other-room'; h.render(); assert.ok(!proxy.dataset.briefingActive);
+  h.close(); h.render(); assert.equal(body.getAttribute('aria-label'), null);
+  const sameField = briefingSemanticHarness({ zoom: .21148989898989898 }); sameField.mount(); sameField.render();
+  const continuing = sameField.el('textarea'); sameField.document.documentElement.appendChild(continuing); continuing.focus();
+  sameField.proxies()[0].fire('click', { detail: 0 });
+  continuing.value = '같은 필드에서 시작한 새 입력'; sameField.state.codex.briefingSession.interaction.revision++;
+  sameField.applyCamera();
+  assert.equal(sameField.document.activeElement, continuing, 'input intent in the same focused field is not a licence for late focus takeover');
+  assert.notEqual(sameField.proxies()[0].dataset.briefingMode, 'reading');
+  const detached = briefingSemanticHarness({ zoom: .21148989898989898 }); detached.mount(); detached.render();
+  const detachedProxy = detached.proxies()[0]; detachedProxy.focus(); detachedProxy.fire('click', { detail: 0 });
+  detached.document.getElementById('egd-answer-briefing').remove(); detached.applyCamera();
+  assert.ok(!detachedProxy.dataset.briefingActive); assert.equal(detached.cards[0].getAttribute('role'), null);
+  assert.notEqual(detachedProxy.dataset.briefingMode, 'reading', 'a lost panel cannot retain or complete an old reading request');
+});
+
+test('HUM-BRIEF-002 entry: own synchronous card-selection blur does not cancel explicit reading, but later external focus still does', () => {
+  const h = briefingSemanticHarness({ zoom: .21148989898989898, onCardFocus: ({ viewport }) => viewport.focus() });
+  const body = h.el('div', { class: 'egd-card-body' }, '원문'); h.cards[0].insertBefore(body, h.proxies()[0]); h.mount(); h.render();
+  const previous = h.el('textarea'); h.document.documentElement.appendChild(previous); previous.focus(); previous.value = '기존 다른 초안';
+  h.proxies()[0].fire('click'); h.applyCamera();
+  assert.equal(h.document.activeElement, body); assert.equal(previous.value, '기존 다른 초안');
+  assert.equal(h.proxies()[0].dataset.briefingMode, 'reading');
+});
+
+test('HUM-BRIEF-002 entry: immediate/reduced-motion camera application enters the same safe content without waiting for another activation', () => {
+  const h = briefingSemanticHarness({ zoom: .21148989898989898, immediateCamera: true });
+  const body = h.el('div', { class: 'egd-card-body' }, '원문'); h.cards[0].insertBefore(body, h.proxies()[0]); h.mount(); h.render();
+  const proxy = h.proxies()[0]; proxy.focus(); proxy.fire('click', { detail: 0 });
+  assert.equal(proxy.dataset.briefingMode, 'reading'); assert.equal(h.document.activeElement, body);
+});
+
+test('HUM-BRIEF-002 entry: measured 720 chrome retains the 10.6px reading target and exposes the physically impossible remainder as partial', () => {
+  const h = briefingSemanticHarness({ bodyFontPx: 11, zoom: .21148989898989898 });
+  const rects = {
+    'egd-desk-rail': { left: 0, top: 0, right: 720, bottom: 51 },
+    'egd-preset-bag': { left: 14, top: 80, right: 78, bottom: 473 },
+    'egd-dock': { left: 18, top: 543, right: 702, bottom: 588 },
+    'egd-zoom-indicator': { left: 88, top: 491, right: 239, bottom: 531 },
+  };
+  for (const [id, rect] of Object.entries(rects)) {
+    const chrome = h.el('div', { id }); chrome.getBoundingClientRect = () => ({ ...rect, width: rect.right - rect.left, height: rect.bottom - rect.top });
+    h.document.documentElement.appendChild(chrome);
+  }
+  h.mount(); h.render();
+  const panel = h.document.getElementById('egd-answer-briefing');
+  panel.getBoundingClientRect = () => ({ left: 86, top: 435, right: 712, bottom: 483, width: 626, height: 48 });
+  const proxy = h.proxies()[0]; proxy.focus(); proxy.fire('click', { detail: 0 });
+  const camera = h.fits.at(-1); assert.equal(camera.zoom, 10.6 / 11);
+  h.applyCamera(); assert.equal(proxy.dataset.briefingMode, 'reading'); assert.equal(proxy.dataset.briefingExposure, 'partial');
+  assert.match(proxy.getAttribute('aria-label'), /일부 영역은 이동해 확인/);
+  const world = h.geometry(h.cards[0]);
+  assert.ok(world.y * camera.zoom + camera.pan.y >= 75, 'the source begins below the measured rail, not above the viewport to fake a fit');
+  assert.ok(world.y * camera.zoom + camera.pan.y + Number.parseFloat(proxy.style.top) * camera.zoom >= 51,
+    'the identity badge uses the existing chrome gap rather than covering the source or rail');
+});
+
+test('HUM-BRIEF-002 entry: local reading attrs restore exactly on Escape, zoom-out and removal without trapping normal input Escape', () => {
+  const h = briefingSemanticHarness({ zoom: .2824561403508772 });
+  const body = h.el('div', { class: 'egd-card-body', tabindex: '3', role: 'article', 'aria-label': '원래 영역' }, h.el('input', {}));
+  h.cards[0].appendChild(body); h.mount(); h.render(); const proxy = h.proxies()[0];
+  const enter = () => { proxy.focus(); proxy.fire('click', { detail: 0 }); h.applyCamera(); };
+  const assertRestored = () => assert.deepEqual([body.getAttribute('tabindex'), body.getAttribute('role'), body.getAttribute('aria-label')], ['3', 'article', '원래 영역']);
+  enter(); enter();
+  const input = body.querySelector('input'); input.focus(); input.fire('keydown', { key: 'Escape' }); h.flush();
+  assert.equal(proxy.dataset.briefingMode, 'reading', 'input/menu Escape is not a global navigation shortcut');
+  body.focus(); body.fire('keydown', { key: 'Escape' }); h.flush();
+  assert.equal(body.getAttribute('role'), 'article'); assert.equal(body.getAttribute('aria-label'), '원래 영역');
+  enter(); h.state.zoom = .04671717171717172; h.render();
+  assert.equal(proxy.dataset.briefingMode, 'navigation'); assert.equal(body.getAttribute('role'), 'article');
+  h.close(); h.state.zoom = 1; h.render(); assertRestored();
+  const removed = briefingSemanticHarness({ zoom: .2824561403508772 });
+  const removedBody = removed.el('div', { class: 'egd-card-body', tabindex: '3', role: 'article', 'aria-label': '원래 영역' });
+  removed.cards[0].insertBefore(removedBody, removed.proxies()[0]); removed.mount(); removed.render();
+  const removedProxy = removed.proxies()[0]; removedProxy.focus(); removedProxy.fire('click', { detail: 0 }); removed.applyCamera();
+  assert.equal(removedProxy.dataset.briefingMode, 'reading'); removed.cards[0].remove(); removed.render();
+  assert.deepEqual([removedBody.getAttribute('tabindex'), removedBody.getAttribute('role'), removedBody.getAttribute('aria-label')], ['3', 'article', '원래 영역']);
+});
+
+function briefingReadingScrollHarness({ width = 720, authoredMax = '', authoredPriority = '' } = {}) {
+  const h = briefingSemanticHarness({ width, height: width > 896 ? 800 : 600, bodyFontPx: 11, zoom: .21148989898989898 });
+  const source = Array.from({ length: 100 }, (_value, index) => `QA-LONG ${String(index + 1).padStart(3, '0')} | immutable synthetic source line${index === 99 ? ' FINAL' : ''}`).join('\n');
+  const body = h.el('div', { class: 'egd-card-body' }, h.el('pre', {}, source));
+  let top = 0;
+  Object.defineProperties(body, {
+    clientHeight: { get: () => Math.min(424, body.style.maxHeight ? Math.max(0, Number.parseFloat(body.style.maxHeight) - 1) : 424) },
+    offsetHeight: { get: () => body.clientHeight + 1 },
+    scrollHeight: { get: () => 1544 },
+    scrollTop: { get: () => top = Math.min(top, body.scrollHeight - body.clientHeight), set: value => { top = Math.max(0, Math.min(value, body.scrollHeight - body.clientHeight)); } },
+  });
+  if (authoredMax) body.style.setProperty('max-height', authoredMax, authoredPriority);
+  h.cards[0].offsetWidth = 618; h.cards[0].offsetHeight = 460;
+  h.cards[0].insertBefore(body, h.proxies()[0]);
+  body.getBoundingClientRect = () => {
+    const world = h.geometry(h.cards[0]), left = (world.x + 1) * h.state.zoom + h.state.pan.x;
+    const y = (world.y + 35) * h.state.zoom + h.state.pan.y;
+    return { left, right: left + 616 * h.state.zoom, top: y, bottom: y + body.offsetHeight * h.state.zoom,
+      width: 616 * h.state.zoom, height: body.offsetHeight * h.state.zoom };
+  };
+  const chrome = {}, rects = {
+    'egd-desk-rail': { left: 0, top: 0, right: width, bottom: 51 },
+    'egd-preset-bag': { left: 14, top: 80, right: 78, bottom: 473 },
+    'egd-dock': { left: 18, top: width > 896 ? 743 : 543, right: width - 18, bottom: width > 896 ? 788 : 588 },
+    'egd-zoom-indicator': { left: 88, top: 491, right: 239, bottom: 531 },
+  };
+  for (const [id, rect] of Object.entries(rects)) {
+    const node = h.el('div', { id }); node.getBoundingClientRect = () => ({ ...rects[id], width: rects[id].right - rects[id].left, height: rects[id].bottom - rects[id].top });
+    h.document.documentElement.appendChild(node); chrome[id] = node;
+  }
+  h.mount(); const panel = h.document.getElementById('egd-answer-briefing');
+  let panelRect = width > 896 ? { left: 118, top: 278, right: 586, bottom: 692 } : { left: 86, top: 435, right: 712, bottom: 483 };
+  panel.getBoundingClientRect = () => ({ ...panelRect, width: panelRect.right - panelRect.left, height: panelRect.bottom - panelRect.top });
+  h.state.codex.threadDrafts = { 'room-a': 'Chat draft canary' }; h.render();
+  const enter = () => { h.proxies()[0].focus(); h.proxies()[0].fire('click', { detail: 0 }); h.applyCamera(); };
+  const line = () => { const bottom = body.getBoundingClientRect().top + (1504 - body.scrollTop) * h.state.zoom; return { top: bottom - 14 * h.state.zoom, bottom }; };
+  return { ...h, body, panel, chrome, rects, source, enter, line, end: () => { body.scrollTop = body.scrollHeight; },
+    setPanel: rect => { panelRect = { ...panelRect, ...rect }; h.notifyResize(panel); h.flush(); } };
+}
+
+test('HUM-BRIEF-002 scroll: 100th line is naturally reachable at End above measured 720 occlusion without padding, zoom or world changes', () => {
+  const h = briefingReadingScrollHarness(), geometry = h.cards.map(h.geometry), ids = h.cards.map(card => card.id); h.enter();
+  const camera = JSON.stringify([h.state.zoom, h.state.pan, h.state.zoomTarget, h.state.panTarget]);
+  h.end();
+  assert.ok(h.line().bottom < h.panel.getBoundingClientRect().top, 'terminal line cannot stay behind the panel at genuine scroll end');
+  assert.ok(h.body.clientHeight < 424); assert.ok(h.body.scrollTop > 1120, 'real scroll viewport, not a fake End state or blank padding');
+  assert.equal(h.body.scrollHeight, 1544); assert.equal(h.body.textContent, h.source);
+  assert.equal(h.state.zoom, 10.6 / 11); assert.equal(JSON.stringify([h.state.zoom, h.state.pan, h.state.zoomTarget, h.state.panTarget]), camera);
+  assert.deepEqual(h.cards.map(h.geometry), geometry); assert.deepEqual(h.cards.map(card => card.id), ids);
+  assert.equal(h.state.codex.threadDrafts['room-a'], 'Chat draft canary');
+  assert.equal(h.proxies()[0].dataset.briefingMode, 'reading'); assert.equal(h.proxies()[0].querySelector('.egd-semantic-icon').textContent, '1');
+});
+
+test('HUM-BRIEF-002 scroll: measured panel/zoom geometry, fold and resize update the viewport while preserving End and user progress', () => {
+  const h = briefingReadingScrollHarness(); h.enter(); h.end();
+  const camera = JSON.stringify([h.state.zoom, h.state.pan]);
+  h.setPanel({ top: 400 }); assert.ok(h.line().bottom < 400); assert.equal(h.body.scrollTop, h.body.scrollHeight - h.body.clientHeight);
+  const small = h.body.clientHeight; h.setPanel({ top: 480 }); assert.ok(h.body.clientHeight > small);
+  h.rects['egd-zoom-indicator'].top = 350; h.rects['egd-zoom-indicator'].bottom = 390;
+  h.notifyResize(h.chrome['egd-zoom-indicator']); h.flush(); assert.ok(h.line().bottom < 350, 'zoom is a real occluder, not only panel height');
+  h.rects['egd-zoom-indicator'].top = 491; h.rects['egd-zoom-indicator'].bottom = 531;
+  h.click('briefing-toggle'); h.setPanel({ top: 50 });
+  assert.equal(h.body.style.maxHeight || '', '', 'no fake one-pixel viewport when expanded chrome leaves no reading aperture');
+  h.click('briefing-toggle'); h.setPanel({ top: 435 }); assert.ok(h.line().bottom < 435);
+  h.body.scrollTop = 500; h.setPanel({ top: 400 }); assert.equal(h.body.scrollTop, 500, 'nonterminal user scroll position is not reset');
+  h.resize(1280, 800); h.flush(); assert.equal(h.body.style.maxHeight || '', ''); assert.equal(h.body.hasAttribute('data-egd-briefing-scroll-viewport'), false);
+  h.resize(720, 600); h.flush(); h.end(); assert.ok(h.line().bottom < 400);
+  assert.equal(JSON.stringify([h.state.zoom, h.state.pan]), camera);
+});
+
+test('HUM-BRIEF-002 scroll: temporary viewport attrs/styles restore on Escape, step, room loss, LOD, removal and exit without leaking to Chat', () => {
+  for (const mode of ['escape', 'step', 'room', 'lod', 'remove', 'exit']) {
+    const h = briefingReadingScrollHarness({ authoredMax: '480px', authoredPriority: 'important' });
+    const otherBody = h.el('div', { class: 'egd-chat-card-body' }, 'ordinary Chat'); h.chat.appendChild(otherBody);
+    h.enter(); assert.equal(h.body.getAttribute('data-egd-briefing-scroll-viewport'), 'true');
+    h.body.style.setProperty('color', 'blue');
+    if (mode === 'escape') { h.body.fire('keydown', { key: 'Escape' }); h.flush(); }
+    else if (mode === 'step') h.click('briefing-next');
+    else if (mode === 'room') { h.state.codex.activeThreadId = 'other-room'; h.render(); }
+    else if (mode === 'lod') { h.state.zoom = .04671717171717172; h.render(); }
+    else if (mode === 'remove') { h.cards[0].remove(); h.render(); }
+    else { h.close(); h.render(); }
+    assert.equal(h.body.getAttribute('data-egd-briefing-scroll-viewport'), null, mode);
+    assert.equal(h.body.style.maxHeight, '480px', mode); assert.equal(h.body.style.getPropertyPriority('max-height'), 'important', mode);
+    assert.equal(h.body.style.color, 'blue', mode); assert.equal(otherBody.getAttribute('data-egd-briefing-scroll-viewport'), null);
+    assert.ok([...h.resizeObservers].every(observer => !observer.nodes.has(h.body)), 'no observer holds a released reader');
+  }
+});
+
+test('HUM-BRIEF-002 scroll: wide and non-reading documents keep original viewport, and repeated render/scroll does not churn own layout', () => {
+  const wide = briefingReadingScrollHarness({ width: 1280 }); wide.enter();
+  assert.equal(wide.body.clientHeight, 424); assert.equal(wide.body.getAttribute('data-egd-briefing-scroll-viewport'), null);
+  const h = briefingReadingScrollHarness(); assert.equal(h.body.clientHeight, 424); h.enter();
+  const style = h.body.getAttribute('style'), height = h.body.clientHeight;
+  for (let index = 0; index < 8; index++) { h.body.scrollTop = index * 50; h.render(); }
+  assert.equal(h.body.getAttribute('style'), style); assert.equal(h.body.clientHeight, height);
+  h.close(); h.render(); assert.equal(h.body.getAttribute('style'), null, 'no empty inline-style artifact after the temporary max-height');
+});
+
+test('HUM-BRIEF-002 scroll: viewport CSS is scoped to the active original evidence body, not global documents or Chat', () => {
+  const css = readFileSync(new URL('../overlay/CSS/eg-desk-surface.uc.css', import.meta.url), 'utf8');
+  assert.match(css, /\.egd-input-evidence-card \.egd-card-body\[data-egd-briefing-scroll-viewport="true"\][^}]*overflow:\s*auto/s);
+});
+
+test('HUM-BRIEF-002 entry: card navigation/focus and reading identity CSS is unscaled and token-based, not a global LOD threshold override', () => {
+  const css = readFileSync(new URL('../overlay/CSS/eg-desk-surface.uc.css', import.meta.url), 'utf8');
+  assert.match(css, /\.egd-semantic-proxy\[data-briefing-active="true"\]\[data-lod="detail"\]/);
+  assert.match(css, /\[data-briefing-mode="reading"\][^}]*\{[^}]*border-radius/s);
+  assert.match(css, /\.egd-semantic-proxy:focus-visible[^}]*var\(--egd-focus-outline\)/s);
+  assert.match(css, /\.egd-canvas-card:focus-within > \.egd-semantic-proxy\[data-briefing-mode="reading"\][^}]*var\(--egd-focus-outline\)/s);
+});
 
 function outlineDragHarness({ zoom = .25, pan = { x: 110, y: -65 }, level = 'outline', blurOnActivate = false } = {}) {
   const target = () => {

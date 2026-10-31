@@ -7,6 +7,8 @@ import { compileFunction, runInNewContext } from 'node:vm';
 import { readSurfaceSource } from './egdesk-surface-source.mjs';
 import { initialSurfaceMode, shouldFocusInitialBrowser, planBoardProjection, snapshotBoardProjection, remapMemberReferences, recoverDeskSnapshot, canPersistDeskSession, ownedProjectionMembers, missingProjectionMembers, fitSurfaceCamera, surfaceSemanticLevel, surfaceProximityClusters } from '../overlay/resources/EGDeskSurfaceState.sys.mjs';
 import * as Surface from '../overlay/resources/EGDeskSurfaceState.sys.mjs';
+import * as Memo from '../overlay/resources/EGDeskMemoState.sys.mjs';
+import * as BoardMembership from '../overlay/resources/EGDeskBoardMembership.sys.mjs';
 import * as MinimapLayout from '../overlay/resources/EGDeskCanvasLayout.sys.mjs';
 import * as Chat from '../overlay/resources/EGDeskChatState.sys.mjs';
 import * as ThreadRouting from '../overlay/resources/EGDeskThreadRouting.sys.mjs';
@@ -603,6 +605,110 @@ test('Briefing saved UI: refreshed rows stay in sequence order without replacing
   assert.equal(h.part('briefing-comment-list').children[1], original); assert.equal(h.document.selection.anchorNode, selected);
   assert.equal(h.document.activeElement, input); assert.equal(input.selectionStart, 2); assert.equal(input.selectionEnd, 4); assert.equal(panel.scrollTop, 99);
   const before = panel.textContent; h.emit(); h.emit(); assert.equal(panel.textContent, before); assert.equal(h.document.selection.anchorNode, selected); h.close();
+});
+
+// Local focus model for the native disabled-button boundary confirmed in the
+// isolated Firefox fixture. It does not change the shared fake DOM or harness.
+function briefingRefreshFocusFixture(options = {}) {
+  const h = savedBriefingUiHarness(options), create = h.document.createElement;
+  const body = create('body'), focusCalls = [], disabledFocusLoss = [];
+  h.document.body = body; h.document.documentElement.appendChild(body);
+  h.document.createElement = tag => {
+    const node = create(tag), focus = node.focus.bind(node);
+    node.focus = (...args) => { focusCalls.push(node); return focus(...args); };
+    if (tag === 'button') {
+      let disabled = false;
+      Object.defineProperty(node, 'disabled', { get: () => disabled, set: value => {
+        disabled = !!value;
+        if (disabled && h.document.activeElement === node) { disabledFocusLoss.push(node); h.document.activeElement = body; }
+      } });
+    }
+    return node;
+  };
+  const createController = h.bridge.createBriefingComments;
+  let refreshCalls = 0;
+  h.bridge.createBriefingComments = (...args) => {
+    const controller = createController.apply(h.bridge, args), refresh = controller.refresh;
+    controller.refresh = (...values) => { refreshCalls++; return refresh(...values); };
+    return controller;
+  };
+  return { ...h, focusCalls, disabledFocusLoss, refreshCalls: () => refreshCalls };
+}
+
+test('Briefing refresh: loading retains the focused button, exposes busy state and blocks repeat activation', async () => {
+  let release, gets = 0;
+  const h = briefingRefreshFocusFixture({ respond: (call, { row, list }) => {
+    assert.equal(call.options.method, 'GET');
+    return ++gets === 1 ? Promise.resolve(list(row())) : new Promise(resolve => { release = resolve; });
+  } });
+  h.mount(); await settle(); h.type('초안 유지');
+  const refresh = h.part('briefing-comment-refresh'), existingRow = h.part('briefing-comment-row');
+  refresh.focus(); h.focusCalls.length = 0;
+  h.click('briefing-comment-refresh');
+  assert.equal(h.document.activeElement, refresh, 'loading must not reproduce native disabled -> body focus loss');
+  assert.equal(h.disabledFocusLoss.length, 0); assert.equal(!!refresh.disabled, false);
+  assert.equal(refresh.getAttribute('aria-busy'), 'true'); assert.equal(refresh.getAttribute('aria-disabled'), 'true');
+  h.click('briefing-comment-refresh'); h.click('briefing-comment-refresh');
+  assert.equal(h.refreshCalls(), 2, 'one initial refresh plus one explicit activation; busy clicks do not activate again');
+  assert.equal(gets, 2); assert.equal(h.requests.length, 2);
+  release(h.list(h.row())); await settle();
+  assert.equal(h.part('briefing-comment-refresh'), refresh); assert.equal(h.document.activeElement, refresh);
+  assert.equal(refresh.getAttribute('aria-busy'), 'false'); assert.equal(refresh.getAttribute('aria-disabled'), 'false');
+  assert.equal(h.part('briefing-comment-row'), existingRow); assert.equal(h.part('briefing-comment').value, '초안 유지');
+  assert.equal(h.focusCalls.length, 0, 'completion needs no focus restoration'); h.close();
+});
+
+test('Briefing refresh: initial and explicit late success/failure never take focus from another input', async t => {
+  for (const initial of [true, false]) for (const failed of [false, true]) await t.test(`${initial ? 'initial' : 'explicit'}-${failed ? 'failure' : 'success'}`, async () => {
+    let resolve, reject, gets = 0;
+    const h = briefingRefreshFocusFixture({ respond: (call, { list }) => {
+      assert.equal(call.options.method, 'GET');
+      if (!initial && ++gets === 1) return Promise.resolve(list());
+      return new Promise((yes, no) => { resolve = yes; reject = no; });
+    } });
+    const outside = h.document.createElement('textarea'); h.document.documentElement.appendChild(outside);
+    outside.focus(); h.focusCalls.length = 0; h.mount();
+    if (!initial) { await settle(); h.part('briefing-comment-refresh').focus(); h.click('briefing-comment-refresh'); }
+    outside.focus(); outside.value = '다른 입력의 최신 초안'; outside.setSelectionRange(2, 5); h.focusCalls.length = 0;
+    const refresh = h.part('briefing-comment-refresh');
+    assert.equal(refresh.getAttribute('aria-busy'), 'true');
+    if (failed) reject(new Error('offline')); else resolve(h.list(h.row()));
+    await settle();
+    assert.equal(h.document.activeElement, outside); assert.equal(h.focusCalls.length, 0);
+    assert.equal(outside.value, '다른 입력의 최신 초안'); assert.equal(outside.selectionStart, 2); assert.equal(outside.selectionEnd, 5);
+    assert.equal(h.part('briefing-comment-list').dataset.state, failed ? 'failed' : 'ready');
+    assert.equal(!!refresh.disabled, false); assert.equal(refresh.getAttribute('aria-busy'), 'false');
+    assert.equal(refresh.getAttribute('aria-disabled'), 'false');
+    assert.equal(h.state.codex.threadDrafts['room-a'], '기존 초안'); h.close();
+  });
+});
+
+test('Briefing refresh: unavailable scope stays natively disabled and cannot issue a GET', () => {
+  const h = briefingRefreshFocusFixture({ engineId: 'claude' });
+  const outside = h.document.createElement('textarea'); h.document.documentElement.appendChild(outside); outside.focus(); h.focusCalls.length = 0;
+  h.mount(); const refresh = h.part('briefing-comment-refresh');
+  assert.equal(refresh.disabled, true); assert.equal(refresh.getAttribute('aria-disabled'), 'true');
+  assert.equal(refresh.getAttribute('aria-busy'), 'false');
+  refresh.fire('click'); assert.equal(h.requests.length, 0); assert.equal(h.document.activeElement, outside);
+  assert.equal(h.part('briefing-comment-list').dataset.state, 'unavailable'); assert.equal(h.focusCalls.length, 0); h.close();
+});
+
+test('Briefing refresh: closed, room-ABA and account-stale responses cannot publish or move focus', async t => {
+  for (const action of ['close', 'room', 'account']) for (const failed of [false, true]) await t.test(`${action}-${failed ? 'failure' : 'success'}`, async () => {
+    let resolve, reject, gets = 0;
+    const h = briefingRefreshFocusFixture({ respond: (call, { list }) => ++gets === 1 ? Promise.resolve(list())
+      : new Promise((yes, no) => { resolve = yes; reject = no; }) });
+    h.mount(); await settle(); h.click('briefing-comment-refresh');
+    const outside = h.document.createElement('textarea'); h.document.documentElement.appendChild(outside); outside.focus(); h.focusCalls.length = 0;
+    if (action === 'close') h.close();
+    if (action === 'room') { h.state.codex.activeThreadId = 'room-b'; h.state.codex.activityRoomGeneration++; h.emit(); h.state.codex.activeThreadId = 'room-a'; h.state.codex.activityRoomGeneration++; h.emit(); }
+    if (action === 'account') { h.state.codex.authStatus.accountEmail = 'other@example.test'; h.emit(); }
+    const before = JSON.stringify({ records: [...h.records], draft: h.state.codex.threadDrafts, ui: h.panel().textContent });
+    if (failed) reject(new Error('late offline')); else resolve(h.list(h.row()));
+    await settle();
+    assert.equal(JSON.stringify({ records: [...h.records], draft: h.state.codex.threadDrafts, ui: h.panel().textContent }), before);
+    assert.equal(h.document.activeElement, outside); assert.equal(h.focusCalls.length, 0); assert.equal(h.requests.length, 2); h.close();
+  });
 });
 
 test('Briefing saved UI: retained unknown UUID survives close and reopen; new GET fails honestly without repost', async () => {
@@ -9343,11 +9449,13 @@ function windowBoardMetadataHarness() {
     node.prepend = child => { node.appendChild(child); node.children.unshift(node.children.pop()); };
     node.classList = { contains: name => node.className.split(/\s+/).includes(name) };
     node.querySelector = () => null;
+    node.getBoundingClientRect = () => ({ left: 0, top: 0, right: 24, bottom: 24, width: 24, height: 24 });
     return node;
   };
   document.querySelectorAll = selector => settingsNodes(document.documentElement, node => {
     const classes = node.className.split(/\s+/);
     if (selector === '.egd-desk-window') return classes.includes('egd-desk-window');
+    if (selector === '.egd-memo-card') return classes.includes('egd-memo-card');
     if (selector === '.egd-canvas-card, .egd-canvas-shape') return classes.includes('egd-canvas-card') || classes.includes('egd-canvas-shape');
     return false;
   });
@@ -9368,32 +9476,66 @@ function windowBoardMetadataHarness() {
     focusCanvasCard: () => effects.focus++, toggleCardFullscreen: () => effects.fullscreen++, closeCanvasCard: () => {},
     isCardFullscreen: () => false, canvasZoom: () => 1, syncBoardRegionMarks: () => {}, scheduleViewportBoardSync: () => {},
     buildBoardRegionProjectChip: () => document.createElement('button'), syncBoardRegionProject: () => {},
-    persistentEntityGeometry: () => ({ x: 0, y: 0, width: 300, height: 200 }),
+    persistentEntityGeometry: view => view?.geometry || ({ x: 0, y: 0, width: 300, height: 200 }),
+    MemoState: Memo, BoardMembership, cardLabelForViewportRail: view => view.title || view.id,
+    normalizeBrowserNavigationUri: value => value, resolveFloatingMenuPlacement: () => ({ left: 0, top: 24 }),
     SurfaceState: { ...Surface, boardRegionRect: () => ({ x: 0, y: 0, width: 400, height: 300 }), placeCanvasView: () => ({ x: 0, y: 0 }) },
     coerceAgendaStore: () => store, writeAgendaStoreAndSync: next => {
       effects.saved++; if (effects.failWrite) return false; Object.assign(store, next); return true;
     }, syncViewportAgendaRail: () => {}, cloneJson: value => structuredClone(value),
-    spawnBrowserCard: () => { const view = api.spawnDeskWindowShell({ id: `spawned-${++spawned}`, kind: 'browser', activate: false }).root;
+    spawnBrowserCard: () => { const view = api.spawnDeskWindowShell({ id: `spawned-${++spawned}`, kind: 'browser', className: 'egd-browser-card', activate: false }).root;
       view._xulBrowser = { live: true }; return view; },
-    applyPersistentEntityGeometry: (view, geometry) => { view.geometry = geometry; },
+    spawnMemoCard: ({ record }) => {
+      const view = api.spawnDeskWindowShell({ id: `spawned-${++spawned}`, kind: 'memo', className: 'egd-memo-card', activate: false }).root;
+      view._memoRecord = Memo.normalizeMemoRecord(record, { now: 1 });
+      const badge = document.createElement('span'); badge.className = 'egd-memo-anchor'; view.appendChild(badge);
+      view.querySelector = selector => selector === '.egd-memo-anchor' ? badge : null;
+      api.syncMemoCardPosition(view);
+      return view;
+    },
+    applyPersistentEntityGeometry: (view, geometry) => {
+      view.geometry = geometry;
+      if (Number.isFinite(geometry?.x)) view.style.left = `${geometry.x}px`;
+      if (Number.isFinite(geometry?.y)) view.style.top = `${geometry.y}px`;
+    },
     selectBoardProjection: () => {}, scheduleDeskSessionSave: () => effects.deskSaves++, safeViewportWorldRect: () => ({}),
     boardNotice: () => {}, RecoveryState: Recovery, refreshDeskMinimap: () => {}, activeBoardProjection: () => null };
   const names = ['el', 'normalizeSourcePart', 'sourceRefKey', 'registerSourceRefCard', 'unregisterSourceRefCard', 'bindCardSourceRef',
     'deskWindowBoardIndex', 'syncDeskWindowBoardMetadata', 'syncAllDeskWindowBoardMetadata',
     'refreshBoardRegion', 'retargetRestoredEntityId', 'installCardHeaderFullscreenToggle', 'spawnDeskWindowShell',
     'normalizeAgendaTitle', 'renameAgenda', 'allocateRestoredEntityId', 'canRemapRestoredBoardMember',
-    'remapRestoredBoardMember', 'remapRestoredProjectionIds', 'mountBoardMember', 'openBoardSnapshot',
+    'syncRestoredMemoReferences', 'remapRestoredBoardMember', 'remapRestoredProjectionIds', 'mountBoardMember', 'openBoardSnapshot',
+    'memoCards', 'memoAnchorCandidates', 'memoTargetLabel', 'syncMemoCardPosition',
+    'cleanSourceRef', 'cardKindForPersistence', 'runtimeStateForCard', 'serializeCardState',
+    'applyBoardMembershipPatches', 'bindViewToBoard', 'unbindViewFromBoard', 'markBoardMembershipDirty', 'viewBoardRecord',
+    'addViewToBoard', 'removeViewFromBoard', 'dismissBoardMembershipSuggestion', 'closeBoardRegionMenu', 'toggleViewBoardMenu',
     'canRestoreDeskSnapshotIdentity', 'restoreDeskSession'];
   const source = names.map(declaration);
   assert.ok(source.every(Boolean));
-  api = compileFunction(`${source.join('\n')}\nreturn { bindCardSourceRef, spawnDeskWindowShell, refreshBoardRegion, retargetRestoredEntityId, renameAgenda, remapRestoredBoardMember, mountBoardMember, openBoardSnapshot, canRestoreDeskSnapshotIdentity, restoreDeskSession };`,
+  api = compileFunction(`let boardRegionMenu = null; const recentBoardProjectionIds = [];\n${source.join('\n')}\nreturn { bindCardSourceRef, spawnDeskWindowShell, refreshBoardRegion, retargetRestoredEntityId, renameAgenda, remapRestoredBoardMember, mountBoardMember, openBoardSnapshot, canRestoreDeskSnapshotIdentity, restoreDeskSession, syncMemoCardPosition, toggleViewBoardMenu, serializeCardState };`,
     Object.keys(deps))(...Object.values(deps));
+  // Runtime wiring stays callable without becoming fixture snapshot data.
+  Object.defineProperty(state, 'toggleViewBoardMenu', {
+    value: api.toggleViewBoardMenu, writable: true, configurable: true, enumerable: false,
+  });
   const canvas = document.createElement('div'); canvas.id = 'egd-canvas-layer'; document.documentElement.appendChild(canvas);
   for (const projection of [a, b]) {
     const region = document.createElement('section'); region.id = projection.id; document.documentElement.appendChild(region);
   }
   return { ...api, document, window, listeners, effects, state, store, a, b };
 }
+
+test('window Board harness keeps runtime menu wiring callable without polluting state snapshots', () => {
+  const h = windowBoardMetadataHarness();
+  assert.equal(typeof h.state.toggleViewBoardMenu, 'function');
+  assert.equal(h.state.toggleViewBoardMenu, h.toggleViewBoardMenu);
+  assert.equal(Object.prototype.propertyIsEnumerable.call(h.state, 'toggleViewBoardMenu'), false);
+  const snapshot = structuredClone(h.state);
+  assert.deepEqual(h.state, snapshot);
+  h.a.title = 'changed Board';
+  assert.notDeepEqual(h.state, snapshot, 'full-state comparisons still detect enumerable data changes');
+  assert.equal(snapshot.boards.projections[h.a.id].title, '같은 이름');
+});
 
 test('window Board metadata follows recorded IDs across rename, membership and restore without changing selection', () => {
   const h = windowBoardMetadataHarness();
@@ -9627,6 +9769,226 @@ test('restored member ID remapping leaves unrelated prototype-like view referenc
   h.a.bindings = [{ viewId: 'old' }, { viewId: 'constructor' }, { viewId: '__proto__' }, { resourceId: 'old' }];
   assert.equal(h.remapRestoredBoardMember(h.a, member, 'new'), true);
   assert.deepEqual(h.a.bindings, [{ viewId: 'new' }, { viewId: 'constructor' }, { viewId: '__proto__' }, { resourceId: 'old' }]);
+});
+
+const memoBoardSnapshot = ({ memoFirst = false, target = 'target', missing = false } = {}) => {
+  const note = { id: 'note', type: 'memo', geometry: { x: 120, y: 130, width: 240, height: 160 },
+    runtimeState: Memo.normalizeMemoRecord({ id: 'memo-original', text: target,
+      anchor: { kind: 'card', cardId: target, x: 0.5, y: 0.25, at: { x: 120, y: 130 } },
+      replies: [{ id: 'reply-1', text: '기존 답글', author: { kind: 'user' } }] }, { now: 1 }) };
+  const card = { id: target, type: 'browser', title: '같은 카드', geometry: { x: 20, y: 30, width: 400, height: 200 },
+    runtimeState: { uri: 'about:blank' }, sourceRef: { uri: 'about:blank' } };
+  const lookalike = { ...structuredClone(card), id: 'lookalike', geometry: { x: 900, y: 900, width: 400, height: 200 } };
+  const cards = missing ? [note] : [...(memoFirst ? [note, card] : [card, note]), lookalike];
+  return { agenda: { id: 'memo-board', title: '같은 이름', memberCardIds: cards.map(card => card.id) }, cards, shapes: [] };
+};
+const liveMemoFor = (h, projection) => h.document.getElementById(projection.members.find(member => member.sourceId === 'note').viewId);
+const memoLiveRecords = (h, projection) => Object.fromEntries(projection.members.map(member => {
+  const view = h.document.getElementById(member.viewId);
+  return [member.viewId, { ...structuredClone(member.record), id: member.viewId,
+    ...(view?._memoRecord ? { runtimeState: structuredClone(view._memoRecord) } : {}) }];
+}));
+
+function memoMembershipFixture() {
+  const h = windowBoardMetadataHarness();
+  const a = h.openBoardSnapshot(memoBoardSnapshot(), { focus: false });
+  const bSnapshot = memoBoardSnapshot(); bSnapshot.agenda.id = 'destination-board';
+  bSnapshot.cards = bSnapshot.cards.filter(card => card.type !== 'memo');
+  bSnapshot.agenda.memberCardIds = bSnapshot.cards.map(card => card.id);
+  const b = h.openBoardSnapshot(bSnapshot, { focus: false });
+  const memo = liveMemoFor(h, a), target = h.document.getElementById(a.idMap.target);
+  const lookalike = h.document.getElementById(b.idMap.target);
+  target.title = lookalike.title = '같은 카드';
+  const choose = (view, projectionId) => {
+    // Press the production View bar control, then its real membership menu
+    // item. Tests never patch membership, scope, anchor or geometry directly.
+    const control = view._deskWindowShell.boardMenu;
+    control.fire('click');
+    const menu = settingsNodes(h.document.documentElement, node => node.className.split(/\s+/).includes('egd-board-menu-view'))[0];
+    assert.ok(menu, 'the View bar opens the production membership menu');
+    const item = menu.children.find(node => node.dataset.testid === 'window-board-add' && node.dataset.projectionId === projectionId);
+    assert.ok(item, 'select the exact Board id despite duplicate labels');
+    item.fire('click');
+    assert.equal(menu.isConnected, false);
+    assert.equal(view.dataset.projectionId, projectionId);
+  };
+  return { h, a, b, memo, target, lookalike, choose };
+}
+
+for (const memoFirst of [false, true]) {
+  test(`memo Board membership menu restores the original anchor after both move (${memoFirst ? 'memo' : 'target'} first)`, () => {
+    const { h, a, b, memo, target, lookalike, choose } = memoMembershipFixture();
+    const original = structuredClone(memo._memoRecord), originalId = target.id;
+    const camera = structuredClone(h.state.pan), effects = { ...h.effects };
+    assert.equal(memo.dataset.memoAnchor, 'attached');
+    for (const view of memoFirst ? [memo, target] : [target, memo]) choose(view, b.id);
+    assert.equal(memo.dataset.projectionId, b.id);
+    assert.equal(target.dataset.projectionId, b.id);
+    // The production anchor observer uses this same display refresh. It must
+    // not turn the two explicitly co-owned Views into a missing target.
+    h.syncMemoCardPosition(memo);
+    assert.equal(memo.dataset.memoAnchor, 'attached');
+    assert.equal(memo._memoAnchorProjectionId, b.id);
+    assert.equal(memo._memoRecord.anchor.cardId, originalId);
+    assert.notEqual(memo._memoRecord.anchor.cardId, lookalike.id);
+    assert.deepEqual(memo._memoRecord, original, 'membership is not a new anchor or a content edit');
+    assert.equal(a.members.some(member => member.viewId === target.id || member.viewId === memo.id), false);
+    assert.equal(b.members.filter(member => member.viewId === target.id || member.viewId === memo.id).length, 2);
+    assert.deepEqual(h.state.pan, camera);
+    assert.equal(h.effects.focus, effects.focus);
+    assert.equal(h.effects.fullscreen, effects.fullscreen);
+    assert.equal(h.effects.saved, effects.saved, 'the display refresh adds no Board save');
+    const records = Object.fromEntries(b.members.map(member => [member.viewId, h.serializeCardState(h.document.getElementById(member.viewId))]));
+    const saved = Surface.snapshotBoardProjection(b, records, 2);
+    const memoSource = b.members.find(member => member.viewId === memo.id).sourceId;
+    const targetSource = b.members.find(member => member.viewId === target.id).sourceId;
+    const next = windowBoardMetadataHarness(), reopened = next.openBoardSnapshot(saved, { focus: false });
+    const restoredMemo = next.document.getElementById(reopened.idMap[memoSource]);
+    assert.equal(restoredMemo._memoRecord.anchor.cardId, reopened.idMap[targetSource]);
+    assert.notEqual(restoredMemo._memoRecord.anchor.cardId, reopened.idMap.target, 'the destination Board\'s original same-title card is not substituted on reopen');
+    assert.equal(restoredMemo.dataset.memoAnchor, 'attached');
+  });
+
+  test(`memo Board membership menu never substitutes a same-title target after only ${memoFirst ? 'memo' : 'target'} moves`, () => {
+    const { h, a, b, memo, target, lookalike, choose } = memoMembershipFixture();
+    const original = structuredClone(memo._memoRecord);
+    const lastPosition = [memo.style.left, memo.style.top];
+    choose(memoFirst ? memo : target, b.id);
+    assert.equal(memo.dataset.projectionId, memoFirst ? b.id : a.id);
+    assert.equal(target.dataset.projectionId, memoFirst ? a.id : b.id);
+    assert.equal(memo.dataset.memoAnchor, 'missing', 'the menu immediately refreshes the affected memo, without a drag');
+    assert.equal(memo.querySelector('.egd-memo-anchor').textContent, '대상 없음');
+    assert.deepEqual(memo._memoRecord, original, 'no target search or ownership inference');
+    assert.notEqual(memo._memoRecord.anchor.cardId, lookalike.id);
+    assert.deepEqual([memo.style.left, memo.style.top], lastPosition);
+    assert.equal(lookalike.dataset.projectionId, b.id);
+    assert.equal(target.id, original.anchor.cardId);
+  });
+}
+
+test('memo Board reopen restores the exact target in either member order and survives a second save/open', () => {
+  for (const memoFirst of [false, true]) {
+    const h = windowBoardMetadataHarness(), snapshot = memoBoardSnapshot({ memoFirst });
+    const original = h.spawnDeskWindowShell({ id: 'target', kind: 'browser', activate: false }).root;
+    original.title = '같은 카드';
+    original.dataset.projectionId = h.a.id;
+    h.a.members.push({ sourceId: 'other-target', viewId: original.id });
+    const before = structuredClone(snapshot);
+    const projection = h.openBoardSnapshot(snapshot, { focus: false }), memo = liveMemoFor(h, projection);
+    assert.equal(memo._memoRecord.anchor.cardId, projection.idMap.target);
+    assert.notEqual(memo._memoRecord.anchor.cardId, projection.idMap.lookalike, 'same-title members are not interchangeable');
+    assert.notEqual(memo._memoRecord.anchor.cardId, original.id, 'neither source-id reuse nor equal titles identify the target');
+    assert.equal(memo.dataset.memoAnchor, 'attached');
+    assert.deepEqual([memo.style.left, memo.style.top], ['220px', '80px']);
+    assert.equal(memo._memoRecord.text, 'target');
+    assert.deepEqual(memo._memoRecord.replies, snapshot.cards.find(card => card.type === 'memo').runtimeState.replies);
+    const otherSnapshot = structuredClone(snapshot); otherSnapshot.agenda.id = 'other-memo-board';
+    const otherProjection = h.openBoardSnapshot(otherSnapshot, { focus: false });
+    assert.notEqual(otherProjection.idMap.target, projection.idMap.target);
+    assert.equal(liveMemoFor(h, otherProjection)._memoRecord.anchor.cardId, otherProjection.idMap.target);
+    assert.equal(memo._memoRecord.anchor.cardId, projection.idMap.target, 'another same-title Board cannot retarget this memo');
+    const saved = Surface.snapshotBoardProjection(projection, memoLiveRecords(h, projection), 2);
+    assert.equal(saved.cards.find(card => card.type === 'memo').runtimeState.anchor.cardId, 'target');
+    const next = windowBoardMetadataHarness();
+    const occupied = next.document.createElement('button'); occupied.id = 'egd-board-1'; next.document.documentElement.appendChild(occupied);
+    const reopened = next.openBoardSnapshot(saved, { focus: false });
+    assert.notEqual(reopened.idMap.target, projection.idMap.target, 'the next opening really allocates different live ids');
+    assert.equal(liveMemoFor(next, reopened)._memoRecord.anchor.cardId, reopened.idMap.target);
+    assert.equal(liveMemoFor(next, reopened).dataset.memoAnchor, 'attached');
+    assert.deepEqual(snapshot, before);
+    assert.equal(h.document.getElementById('target'), original);
+  }
+});
+
+test('memo Board ID collisions update already-mounted memos only in the restoring Board', () => {
+  for (const memoFirst of [false, true]) {
+    const h = windowBoardMetadataHarness(), snapshot = memoBoardSnapshot({ memoFirst });
+    const collision = `egd-board-1-member-${memoFirst ? 1 : 0}`;
+    const existing = h.spawnDeskWindowShell({ id: collision, kind: 'browser', activate: false }).root;
+    existing.dataset.projectionId = h.a.id;
+    h.a.members.push({ sourceId: 'other-target', viewId: collision });
+    const otherMemo = h.spawnDeskWindowShell({ id: 'other-note', kind: 'memo', className: 'egd-memo-card', activate: false }).root;
+    otherMemo.dataset.projectionId = h.a.id;
+    otherMemo._memoRecord = Memo.normalizeMemoRecord({ id: 'other-memo', anchor: { kind: 'card', cardId: collision, x: 0, y: 0 } }, { now: 1 });
+    h.a.members.push({ sourceId: 'other-note', viewId: otherMemo.id });
+    const priorOtherMemo = structuredClone(otherMemo._memoRecord);
+    const projection = h.openBoardSnapshot(snapshot, { focus: false }), memo = liveMemoFor(h, projection);
+    assert.notEqual(projection.idMap.target, collision);
+    assert.equal(memo._memoRecord.anchor.cardId, projection.idMap.target);
+    assert.equal(memo.dataset.memoAnchor, 'attached');
+    assert.deepEqual(otherMemo._memoRecord, priorOtherMemo, 'the existing Board and its live anchor are untouched');
+    assert.equal(h.document.getElementById(collision), existing);
+    const saved = Surface.snapshotBoardProjection(projection, memoLiveRecords(h, projection), 3);
+    assert.equal(saved.cards.find(card => card.type === 'memo').runtimeState.anchor.cardId, 'target');
+  }
+});
+
+test('memo Board reopen keeps an absent target missing despite an unrelated live card with the same id', () => {
+  for (const target of ['target', 'egd-board-1-member-0']) {
+    const h = windowBoardMetadataHarness(), snapshot = memoBoardSnapshot({ target, missing: true });
+    const unrelated = h.spawnDeskWindowShell({ id: target, kind: 'browser', activate: false }).root;
+    unrelated.title = '같은 카드'; unrelated.dataset.projectionId = h.a.id;
+    h.a.members.push({ sourceId: 'other-target', viewId: target });
+    const aliasCollision = h.spawnDeskWindowShell({ id: 'egd-board-1-missing-anchor-0', kind: 'browser', activate: false }).root;
+    aliasCollision.dataset.projectionId = h.a.id;
+    h.a.members.push({ sourceId: 'unrelated-alias', viewId: aliasCollision.id });
+    const projection = h.openBoardSnapshot(snapshot, { focus: false }), memo = liveMemoFor(h, projection);
+    assert.equal(memo._memoRecord.anchor.kind, 'card', 'an absent target never becomes a free-canvas memo');
+    assert.notEqual(memo._memoRecord.anchor.cardId, target);
+    assert.equal(memo.dataset.memoAnchor, 'missing');
+    assert.equal(memo.querySelector('.egd-memo-anchor').textContent, '대상 없음');
+    assert.deepEqual([memo.style.left, memo.style.top], ['120px', '130px']);
+    const saved = Surface.snapshotBoardProjection(projection, memoLiveRecords(h, projection), 3);
+    assert.equal(saved.cards[0].runtimeState.anchor.cardId, target, 'saving preserves the original missing identity');
+    assert.deepEqual(saved.agenda.memberCardIds, ['note']);
+    assert.equal(h.document.getElementById(target), unrelated);
+  }
+});
+
+test('memo Board reopen treats a declared but unavailable target as missing, not as its placeholder', () => {
+  const h = windowBoardMetadataHarness(), snapshot = memoBoardSnapshot({ missing: true });
+  snapshot.agenda.memberCardIds.unshift('target');
+  const projection = h.openBoardSnapshot(snapshot, { focus: false }), memo = liveMemoFor(h, projection);
+  const placeholder = h.document.getElementById(projection.idMap.target);
+  assert.equal(placeholder.dataset.testid, 'board-missing-member');
+  assert.equal(memo._memoRecord.anchor.cardId, projection.idMap.target);
+  assert.equal(memo.dataset.memoAnchor, 'missing');
+  assert.equal(memo.querySelector('.egd-memo-anchor').textContent, '대상 없음');
+  const saved = Surface.snapshotBoardProjection(projection, {}, 3);
+  assert.equal(saved.cards.find(card => card.type === 'memo').runtimeState.anchor.cardId, 'target');
+});
+
+test('memo Desk restore rebinds anchors to a newly allocated target without changing recovery evidence', () => {
+  for (const memoFirst of [false, true]) for (const merge of [false, true]) {
+    const h = windowBoardMetadataHarness(), source = memoBoardSnapshot({ memoFirst });
+    const projection = Surface.planBoardProjection(source, 'saved-board');
+    const records = projection.members.map(member => ({ ...structuredClone(member.record), id: member.viewId,
+      runtimeState: Surface.remapMemberReferences(member.record.runtimeState, projection.idMap) }));
+    const collision = projection.idMap.target;
+    const control = h.document.createElement('button'); control.id = collision; h.document.documentElement.appendChild(control);
+    let otherMemo = null, priorOtherMemo = null;
+    if (merge) {
+      otherMemo = h.spawnDeskWindowShell({ id: 'other-note', kind: 'memo', className: 'egd-memo-card', activate: false }).root;
+      otherMemo.dataset.projectionId = h.a.id;
+      otherMemo._memoRecord = Memo.normalizeMemoRecord({ id: 'other-memo', anchor: { kind: 'canvas', x: 90, y: 80 } }, { now: 1 });
+      priorOtherMemo = structuredClone(otherMemo._memoRecord);
+      h.a.members.push({ sourceId: 'other-note', viewId: otherMemo.id });
+    }
+    const snapshot = { agenda: { id: 'memo-board' }, cards: records, shapes: [],
+      boardProjections: { projections: { [projection.id]: projection }, activeProjectionId: projection.id } };
+    const before = structuredClone(snapshot);
+    assert.equal(h.restoreDeskSession(snapshot, { merge }), true);
+    const restored = h.state.boards.projections[projection.id], memo = liveMemoFor(h, restored);
+    assert.notEqual(restored.idMap.target, collision);
+    assert.equal(memo._memoRecord.anchor.cardId, restored.idMap.target);
+    assert.equal(memo.dataset.memoAnchor, 'attached');
+    assert.equal(h.document.getElementById(collision), control);
+    assert.deepEqual(snapshot, before);
+    if (otherMemo) {
+      assert.deepEqual(otherMemo._memoRecord, priorOtherMemo);
+      assert.equal(otherMemo._memoAnchorProjectionId, undefined, 'merge never changes a live memo restore scope');
+    }
+  }
 });
 
 test('Board rename does not publish or mutate the old store when preference writing fails', () => {

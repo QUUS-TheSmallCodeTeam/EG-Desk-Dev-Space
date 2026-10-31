@@ -1,8 +1,9 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
 import * as Annotation from '../overlay/resources/EGDeskAnnotationState.sys.mjs';
 import * as Memo from '../overlay/resources/EGDeskMemoState.sys.mjs';
-import { CANVAS_SHAPE_TYPES, remapMemberReferences } from '../overlay/resources/EGDeskSurfaceState.sys.mjs';
+import { CANVAS_SHAPE_TYPES, planBoardProjection, snapshotBoardProjection, remapMemberReferences } from '../overlay/resources/EGDeskSurfaceState.sys.mjs';
 import { PRIVATE_KEYS } from '../helper/egdesk-chat-store.mjs';
 
 const deepFreeze = value => {
@@ -237,6 +238,155 @@ test('memo: folded 240×160 and expanded 320×280 are the only frames; folding i
   assert.deepEqual(Memo.memoFrame(null), { width: 240, height: 160 });
 });
 
+const memoSurfaceSource = readFileSync(new URL('../overlay/JS/eg-desk-surface.uc.js', import.meta.url), 'utf8');
+const memoCss = readFileSync(new URL('../overlay/CSS/eg-desk-surface.uc.css', import.meta.url), 'utf8');
+function memoSurfaceFunction(name) {
+  const start = memoSurfaceSource.indexOf(`  function ${name}(`);
+  assert.ok(start >= 0, `${name} exists`);
+  const end = memoSurfaceSource.indexOf('\n  }', start);
+  assert.ok(end > start, `${name} has a complete body`);
+  return memoSurfaceSource.slice(start, end + 4);
+}
+function memoElement(tag, attrs = {}, ...children) {
+  const node = {
+    tag, dataset: attrs.data || {}, style: attrs.style || {}, children: [], parentNode: null,
+    classList: new Set((attrs.class || '').split(/\s+/).filter(Boolean)),
+    addEventListener() {}, removeEventListener() {},
+    appendChild(child) {
+      if (typeof child === 'string') child = { textContent: child };
+      if (child.parentNode) child.parentNode.children.splice(child.parentNode.children.indexOf(child), 1);
+      child.parentNode = this; this.children.push(child); return child;
+    },
+    ...attrs,
+  };
+  for (const child of children) node.appendChild(child);
+  return node;
+}
+
+test('memo UI: only the memo title stays in the common bar; target and fixed actions use the second row', () => {
+  for (const expanded of [false, true]) for (const resolved of [false, true]) {
+    let shell, shellOptions;
+    const scope = {
+      ensureMemoAnchorObserver() {}, memoAnchorCandidates: () => [], MemoState: Memo, memoCards: () => [],
+      spawnDeskWindowShell(options) {
+        shellOptions = options;
+        const identity = memoElement('div'), actions = memoElement('div');
+        const topbar = memoElement('div', {}, identity, actions);
+        const header = memoElement('div', {}, topbar);
+        const toolbar = options.toolbar ? header.appendChild(memoElement('div')) : null;
+        const content = memoElement('div');
+        const root = memoElement('div', { isConnected: true }, header, content);
+        shell = { root, slots: { identity, actions, topbar, header, toolbar, content }, resizeHits: [], registerCleanup() {} };
+        return shell;
+      },
+      el: memoElement, updateMemoRecord(root, next) { root._memoRecord = next; },
+      window: { addEventListener() {}, removeEventListener() {} },
+      syncMemoCardFrame() {}, renderMemoCard() {}, syncMemoCardPosition() {}, state: {},
+    };
+    const spawn = Function(...Object.keys(scope), `let cardSeq = 0;\n${memoSurfaceFunction('spawnMemoCard')}\nreturn spawnMemoCard;`)(...Object.values(scope));
+    const record = Memo.normalizeMemoRecord({ id: 'layout-memo', anchor: { kind: 'canvas', x: 20, y: 30 }, expanded, resolved });
+    const root = spawn({ record, restore: true });
+    assert.equal(shellOptions.toolbar, true, 'the existing shell provides the memo-only second row');
+    assert.deepEqual(shell.slots.identity.children.map(n => n.class), ['egd-memo-title']);
+    assert.equal(shell.slots.actions.parentNode, shell.slots.toolbar, 'actions leave the common title/Board row');
+    assert.equal(shell.slots.toolbar.children[0].dataset.testid, 'memo-anchor');
+    assert.equal(shell.slots.toolbar.classList.has('egd-memo-targetbar'), true);
+    assert.deepEqual([root._memoRecord.expanded, root._memoRecord.resolved], [expanded, resolved]);
+    assert.deepEqual([shellOptions.style.width, shellOptions.style.height], expanded ? ['320px', '280px'] : ['240px', '160px']);
+    const event = { stopPropagation() {} };
+    shell.slots.actions.children[0].onclick(event);
+    assert.equal(root._memoRecord.resolved, !resolved, 'resolve/reopen retains its existing record transition');
+    shell.slots.actions.children[1].onclick(event);
+    assert.equal(root._memoRecord.expanded, !expanded, 'expand/fold retains its existing record transition');
+  }
+});
+
+test('memo badge: exact target View display text is local-only; Agent label and id binding do not change', () => {
+  const rect = { x: 10, y: 20, width: 600, height: 400 };
+  const title = { textContent: '원본 A — 길고 서로 다른 실제 표시 제목' };
+  const card = {
+    dataset: { deskWindowKind: 'browser' },
+    classList: { contains: name => name === 'egd-browser-card' },
+    querySelector: selector => selector === '.egd-card-page-title' ? title : selector === '.egd-card-url' ? { value: 'synthetic:never-send-title' } : null,
+    getAttribute() { throw new Error('Do not read hidden title/source metadata'); },
+    get _browserState() { throw new Error('Do not inspect internal Browser state'); },
+    get _xulBrowser() { throw new Error('Do not inspect a Browser/provider'); },
+  };
+  const decoy = Object.create(card);
+  decoy.querySelector = () => ({ textContent: '비교 B — 다른 제목' });
+  const nodes = new Map([['target-a', card], ['decoy-b', decoy]]);
+  const badge = {};
+  const memo = Memo.createMemoRecord({ id: 'badge-memo', text: '합성 메모 본문', point: { x: 50, y: 60 }, cards: [{ id: 'target-a', rect }] });
+  const root = { _memoRecord: memo, isConnected: true, dataset: {}, style: {}, querySelector: () => badge };
+  const scope = { document: { getElementById: id => nodes.get(id) }, memoAnchorCandidates: () => [{ id: 'target-a', rect }], MemoState: Memo, state: {} };
+  const api = Function(...Object.keys(scope), `${memoSurfaceFunction('cardLabelForViewportRail')}\n${memoSurfaceFunction('memoTargetLabel')}\n${memoSurfaceFunction('syncMemoCardPosition')}\nreturn { syncMemoCardPosition, memoTargetLabel };`)(...Object.values(scope));
+  const agentBefore = Memo.memoAskDraft(memo, { agentId: 'rio', target: api.memoTargetLabel(memo) });
+  api.syncMemoCardPosition(root);
+  assert.equal(badge.textContent, `📎 ${title.textContent}`);
+  assert.equal(badge.title, `${title.textContent} 위에 붙은 메모 · 카드가 움직이면 따라갑니다`);
+  title.textContent = '원본 A — 바뀐 표시 제목';
+  api.syncMemoCardPosition(root);
+  assert.equal(badge.textContent, `📎 ${title.textContent}`, 'read the current display, not a cached/source title');
+  title.textContent = '   ';
+  api.syncMemoCardPosition(root);
+  assert.equal(badge.textContent, '📎 Browser', 'no display title falls back to the View type, not private metadata');
+  const agentAfter = Memo.memoAskDraft(memo, { agentId: 'rio', target: api.memoTargetLabel(memo) });
+  assert.deepEqual(agentAfter, agentBefore, 'badge-only titles never expand Agent messages or shared context');
+  assert.equal(root._memoRecord.anchor.cardId, 'target-a', 'display text never becomes an identity lookup');
+  for (const [kind, selector, fallback] of [
+    ['chat', '.egd-chat-card-title', 'Chat'], ['file', '.egd-file-card-title', '파일'],
+    ['terminal', '.egd-terminal-title', 'Terminal'], ['settings', '.egd-settings-title', 'Settings'],
+    ['ontology', '.egd-ontology-title', 'Ontology'], ['input-evidence', '.egd-desk-window-identity strong', '자료'],
+    ['result', '.egd-result-card-title', '결과'],
+  ]) {
+    card.dataset.deskWindowKind = kind;
+    card.querySelector = query => { assert.equal(query, selector); return title; };
+    title.textContent = `실제 ${kind} 표시 제목`;
+    api.syncMemoCardPosition(root);
+    assert.equal(badge.textContent, `📎 ${title.textContent}`);
+    title.textContent = '';
+    api.syncMemoCardPosition(root);
+    assert.equal(badge.textContent, `📎 ${fallback}`);
+  }
+  for (const kind of ['unknown', 'constructor', 'toString', '__proto__']) {
+    card.dataset.deskWindowKind = kind;
+    card.querySelector = () => { throw new Error('Unknown kinds cannot query arbitrary metadata'); };
+    api.syncMemoCardPosition(root);
+    assert.equal(badge.textContent, '📎 Card');
+  }
+  nodes.delete('target-a');
+  scope.memoAnchorCandidates = () => [];
+  const missing = Function(...Object.keys(scope), `${memoSurfaceFunction('syncMemoCardPosition')}\nreturn syncMemoCardPosition;`)(...Object.values(scope));
+  missing(root);
+  assert.equal(badge.textContent, '대상 없음', 'a similarly titled card does not replace a missing id');
+  root._memoRecord = Memo.moveMemo(memo, { x: 900, y: 900 }, []);
+  missing(root);
+  assert.equal(badge.textContent, '위치 고정');
+});
+
+test('memo CSS: compact target row ellipsizes only its badge and preserves body/reply scrolling', () => {
+  const rule = selector => {
+    const escaped = selector.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    const match = memoCss.match(new RegExp(`(?:^|\\n)${escaped}\\s*\\{([^}]*)\\}`));
+    assert.ok(match, `rule exists: ${selector}`); return match[1];
+  };
+  const row = rule('.egd-memo-card .egd-memo-targetbar');
+  assert.match(row, /min-height:\s*28px/);
+  assert.match(row, /min-width:\s*0/);
+  const frame = rule('.egd-memo-card');
+  assert.match(frame, /min-width:\s*240px/, 'the common 320px minimum cannot enlarge the folded frame');
+  assert.match(frame, /min-height:\s*160px/, 'the common 250px minimum cannot enlarge the folded frame');
+  const badge = rule('.egd-memo-anchor');
+  for (const property of [/flex:\s*1\s+1\s+auto/, /min-width:\s*0/, /overflow:\s*hidden/, /text-overflow:\s*ellipsis/, /white-space:\s*nowrap/]) assert.match(badge, property);
+  const buttons = rule('.egd-memo-card .egd-desk-window-actions button');
+  assert.match(buttons, /flex:\s*0\s+0\s+auto/);
+  assert.match(buttons, /white-space:\s*nowrap/);
+  assert.match(rule('.egd-memo-text'), /min-height:\s*56px/);
+  assert.match(rule('.egd-memo-thread'), /overflow:\s*auto/);
+  assert.match(rule('.egd-memo-detail'), /overflow:\s*auto/, 'an extra Board offer or pending row must not clip the last input');
+  assert.match(rule('.egd-memo-card .egd-card-body'), /min-height:\s*0/);
+});
+
 test('memo: restore is lenient but keeps ids, answer ids and asks unique; no private keys', () => {
   const raw = deepFreeze({
     id: 'memo-9', seq: 3, anchor: { kind: 'card', cardId: 'egd-card-1', x: 1.4, y: -1 }, text: 'x'.repeat(2100), resolved: 'yes',
@@ -378,4 +528,32 @@ test('annotation + memo: opening a Board with new view ids remaps the card each 
   const moved = Memo.normalizeMemoRecord(remapMemberReferences(memo, ids));
   assert.equal(moved.anchor.cardId, 'egd-card-20');
   assert.deepEqual(moved.links, [{ targetViewId: 'egd-card-10' }]);
+});
+
+test('memo Board save reverses live anchor ids without rewriting canonical fallback records or opaque text', () => {
+  const memo = Memo.createMemoRecord({ id: 'memo-1', point: { x: 300, y: 250 }, cards, text: 'egd-card-2', now: 1 });
+  const snapshot = deepFreeze({ agenda: { id: 'board-a', memberCardIds: ['note', 'egd-card-2'] },
+    cards: [{ id: 'note', type: 'memo', runtimeState: memo }, { id: 'egd-card-2', type: 'browser' }], shapes: [] });
+  const projection = planBoardProjection(snapshot, 'projection-a');
+  const live = deepFreeze({ id: projection.idMap.note, type: 'memo', runtimeState: remapMemberReferences(memo, projection.idMap) });
+  const saved = snapshotBoardProjection(projection, { [live.id]: live }, 2);
+  assert.deepEqual(saved.cards[0].runtimeState, memo);
+  assert.deepEqual(snapshotBoardProjection(projection, {}, 3).cards[0].runtimeState, memo, 'unmounted members already carry source ids');
+  assert.equal(saved.cards[0].runtimeState.text, 'egd-card-2');
+  assert.equal(live.runtimeState.anchor.cardId, projection.idMap['egd-card-2'], 'saving never changes the live memo');
+});
+
+test('memo Board projection reserves absent anchor identities without inventing a target member', () => {
+  for (const target of ['gone', 'constructor', 'toString']) {
+    const memo = Memo.normalizeMemoRecord({ id: 'memo-1', anchor: { kind: 'card', cardId: target, x: 0.5, y: 0.5, at: { x: 90, y: 80 } } }, { now: 1 });
+    const snapshot = deepFreeze({ agenda: { id: 'board-a', memberCardIds: ['note'] },
+      cards: [{ id: 'note', type: 'memo', runtimeState: memo }], shapes: [] });
+    const a = planBoardProjection(snapshot, 'projection-a'), b = planBoardProjection(snapshot, 'projection-b');
+    assert.equal(Object.hasOwn(a.idMap, target), true);
+    assert.notEqual(a.idMap[target], target);
+    assert.notEqual(a.idMap[target], b.idMap[target], 'missing anchors are scoped to their own Board opening');
+    assert.deepEqual(a.members.map(member => member.sourceId), ['note']);
+    const live = { id: a.idMap.note, type: 'memo', runtimeState: remapMemberReferences(memo, a.idMap) };
+    assert.deepEqual(snapshotBoardProjection(a, { [live.id]: live }, 2).cards[0].runtimeState.anchor, memo.anchor);
+  }
 });

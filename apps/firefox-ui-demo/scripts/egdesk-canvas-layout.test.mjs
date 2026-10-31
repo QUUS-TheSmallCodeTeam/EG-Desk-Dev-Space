@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
+import { runInNewContext } from 'node:vm';
 import * as Layout from '../overlay/resources/EGDeskCanvasLayout.sys.mjs';
 import { createLayerStack } from '../overlay/resources/EGDeskLayerStack.sys.mjs';
 import { planBoardProjection, snapshotBoardProjection } from '../overlay/resources/EGDeskSurfaceState.sys.mjs';
@@ -613,6 +614,63 @@ test('groups: the frame is the members\' union plus padding, and skips groups wi
   assert.deepEqual(canvasGroupFrames(groups, rects), [{ id: 'g', count: 2, x: 92, y: 92, width: 416, height: 366 }]);
   assert.deepEqual(canvasGroupFrames(groups, id => rects.get(id), { padding: 0 })[0], { id: 'g', count: 2, x: 100, y: 100, width: 400, height: 350 });
   assert.deepEqual(canvasGroupFrames(groups, { a: rect(0, 0, 1, 1) }), []);
+});
+
+test('groups: frame rect Maps from another realm match local Maps, objects and lookup functions', () => {
+  const groups = [{ id: 'g', viewIds: ['a', 'b'] }, { id: 'h', viewIds: ['c', 'gone'] }];
+  const entries = [['a', rect(100, 100, 200, 100)], ['b', rect(400, 150, 100, 300)], ['c', rect(0, 0, 10, 10)]];
+  const foreign = runInNewContext('new Map(entries)', { entries });
+  const before = structuredClone(foreign);
+  assert.equal(foreign instanceof Map, false, 'the caller and layout module really have different Map constructors');
+  assert.equal(Map.prototype.has.call(foreign, 'a'), true, 'the foreign object is still a genuine Map');
+  for (const lookup of [foreign, new Map(entries), Object.fromEntries(entries), id => foreign.get(id)]) {
+    assert.deepEqual(canvasGroupFrames(groups, lookup), [{ id: 'g', count: 2, x: 92, y: 92, width: 416, height: 366 }]);
+    assert.deepEqual(canvasGroupFrames(groups, lookup, { padding: 0 }), [{ id: 'g', count: 2, x: 100, y: 100, width: 400, height: 350 }]);
+  }
+  assert.deepEqual(structuredClone(foreign), before, 'frame lookup never changes the Map or its rects');
+});
+
+test('groups: frame Maps use native lookup without executing shadowed Map hooks', () => {
+  const groups = [{ id: 'g', viewIds: ['a', 'b'] }];
+  const entries = [['a', rect(0, 0, 10, 10)], ['b', rect(20, 30, 10, 10)]];
+  for (const map of [new Map(entries), runInNewContext('new Map(entries)', { entries })]) {
+    for (const key of ['get', 'has', Symbol.toStringTag]) Object.defineProperty(map, key, {
+      get() { assert.fail('Map lookup must not read caller-supplied methods or type tags'); },
+    });
+    assert.deepEqual(canvasGroupFrames(groups, map), [{ id: 'g', count: 2, x: -8, y: -8, width: 46, height: 56 }]);
+  }
+});
+
+test('groups: frame lookup does not call Map-like hooks or mistake a prototype or proxy for a Map', () => {
+  const groups = [{ id: 'g', viewIds: ['a', 'b'] }];
+  const record = { a: rect(0, 0, 10, 10), b: rect(20, 30, 10, 10) };
+  for (const key of ['get', 'has', 'entries', Symbol.iterator, Symbol.toStringTag]) Object.defineProperty(record, key, {
+    get() { assert.fail('plain rect records must not execute Map-like hooks'); },
+  });
+  assert.deepEqual(canvasGroupFrames(groups, record), [{ id: 'g', count: 2, x: -8, y: -8, width: 46, height: 56 }]);
+  const lookalike = { [Symbol.toStringTag]: 'Map', get() { assert.fail('a Map tag does not authorize calling get'); } };
+  for (const input of [lookalike, Object.create(Map.prototype), new Proxy(new Map(), {}), new WeakMap(), new Set(),
+    null, undefined, false, 0, 1n, 'invalid', Symbol('not-a-Map')]) {
+    assert.deepEqual(canvasGroupFrames(groups, input), []);
+  }
+});
+
+test('groups: frame lookup retains invalid rect, group, padding and callback-error guards', () => {
+  const groups = [{ id: 'g', viewIds: ['a', 'b'] }];
+  const entries = [['a', rect(0, 0, 10, 10)], ['b', rect(NaN, 0, 10, 10)]];
+  const invalid = new Map(entries);
+  for (const lookup of [invalid, runInNewContext('new Map(entries)', { entries }), Object.fromEntries(entries), id => invalid.get(id)]) {
+    assert.deepEqual(canvasGroupFrames(groups, lookup), [], 'one valid rect cannot draw a group');
+  }
+  const valid = runInNewContext('new Map(entries)', { entries: [['a', rect(0, 0, 10, 10)], ['b', rect(20, 30, 10, 10)]] });
+  for (const padding of [-1, NaN, Infinity]) {
+    assert.deepEqual(canvasGroupFrames(groups, valid, { padding }), [{ id: 'g', count: 2, x: -8, y: -8, width: 46, height: 56 }]);
+  }
+  for (const value of [null, {}, [{ id: 'bad id!', viewIds: ['a', 'b'] }], [{ id: 'g', viewIds: ['a'] }]]) {
+    assert.deepEqual(canvasGroupFrames(value, valid), []);
+  }
+  const failure = new Error('lookup failure');
+  assert.throws(() => canvasGroupFrames(groups, () => { throw failure; }), error => error === failure);
 });
 
 test('numeric input: integers as typed, empty fields keep their value, sizes never go below the minimum', () => {

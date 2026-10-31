@@ -616,8 +616,12 @@ export function remapCanvasGroups(groups, idMap) {
 // padding, in world px. `rectById` is a function or a Map/object of rects;
 // a group with fewer than two members on the Canvas draws nothing.
 export function canvasGroupFrames(groups, rectById, { padding = 8 } = {}) {
-  const read = typeof rectById === 'function' ? rectById
-    : rectById instanceof Map ? id => rectById.get(id) : id => rectById?.[id];
+  let read = typeof rectById === 'function' ? rectById : id => rectById?.[id];
+  try {
+    // Native Map branding works across globals without reading user hooks.
+    Map.prototype.has.call(rectById, null);
+    read = id => Map.prototype.get.call(rectById, id);
+  } catch {} // Non-Maps keep the existing function/property lookup.
   const pad = Number.isFinite(padding) && padding >= 0 ? padding : 8;
   const out = [];
   for (const group of normalizeCanvasGroups(groups)) {

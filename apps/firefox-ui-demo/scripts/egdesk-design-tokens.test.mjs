@@ -695,6 +695,47 @@ test('D-G3 ordinary input edges become stronger through more/forced media, witho
   }
 });
 
+test('wide Briefing keeps navigation outside the independently scrollable body', () => {
+  const wide = '#egd-answer-briefing[data-compact="false"]';
+  const panel = declarationsFor(wide), header = declarationsFor(`${wide} > .egd-briefing-header`);
+  const body = declarationsFor(`${wide} > .egd-briefing-body`);
+  assert.equal(panel.display, 'flex');
+  assert.equal(panel['flex-direction'], 'column');
+  assert.equal(panel.overflow, 'hidden');
+  assert.equal(panel['max-height'], 'min(48vh, calc(100vh - 150px))');
+  assert.equal(header.flex, '0 0 auto');
+  assert.equal(header['min-width'], '0');
+  assert.equal(body.flex, '1 1 auto');
+  assert.equal(body['min-width'], '0');
+  assert.equal(body['min-height'], '0');
+  assert.equal(body.padding, '4px');
+  assert.equal(body.margin, '-4px');
+  assert.equal(body.overflow, 'auto');
+  assert.equal(body['overscroll-behavior'], 'contain');
+  assert.equal(body['scroll-padding'], '4px');
+});
+
+test('Briefing scroll containment leaves wide placement and the compact layout unchanged', () => {
+  const base = declarationsFor('#egd-answer-briefing');
+  assert.equal(base.position, 'fixed');
+  assert.equal(base.left, '118px');
+  assert.equal(base.bottom, '108px');
+  assert.equal(base.width, 'min(440px, calc(100vw - 150px))');
+  assert.equal(base.padding, '14px');
+  assert.equal(base['max-height'], '48vh');
+  const compact = '#egd-answer-briefing[data-compact="true"]';
+  const narrow = Object.fromEntries(rulesFor(compact).filter(rule => rule.media.includes('(max-width: 56rem)')).flatMap(rule => rule.declarations));
+  assert.equal(narrow['box-sizing'], 'border-box');
+  assert.equal(narrow.gap, '8px');
+  assert.equal(narrow.padding, '8px');
+  assert.equal(narrow.overflow, 'hidden');
+  const body = declarationsFor(`${compact} .egd-briefing-body`);
+  assert.equal(body.order, '-1');
+  assert.equal(body['overflow-y'], 'auto');
+  const wide = declarationsFor('#egd-answer-briefing[data-compact="false"]');
+  for (const property of ['left', 'right', 'top', 'bottom', 'width', 'height', 'padding', 'transform']) assert.equal(wide[property], undefined);
+});
+
 test('approved Chat refinement keeps accessible composer and real HUD actions', () => {
   const input = declarationsFor('.egd-codex-input', { scheme: 'light' });
   assert.equal(input['min-height'], '40px');
