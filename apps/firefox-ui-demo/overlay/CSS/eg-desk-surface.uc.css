@@ -3128,6 +3128,21 @@
   color: var(--egd-on-surface-variant);
 }
 
+/* A View row also names the open Board it belongs to, before its kind. */
+.egd-minimap-row-board {
+  margin-left: auto;
+  min-width: 0;
+  max-width: 38%;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  font-size: 10px;
+  color: var(--egd-on-surface-variant);
+}
+.egd-minimap-row-board + .egd-minimap-row-kind {
+  margin-left: 0;
+}
+
 /* ============ Bottom: Dock ============
    compact bottom dock, centered, content-aware width */
 #egd-dock {

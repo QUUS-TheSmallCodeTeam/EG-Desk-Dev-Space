@@ -7,7 +7,7 @@ import { planBoardProjection, snapshotBoardProjection } from '../overlay/resourc
 
 const {
   snapCanvasRect, moveRegionWithMembers, createLayoutHistory, arrangeWithoutOverlap, placeBesideOpener,
-  edgeIndicatorPoint, edgeIndicators, minimapSearchRows, minimapFocusCamera, minimapViewBox,
+  edgeIndicatorPoint, edgeIndicators, minimapSearchRows, minimapFocusCamera, minimapViewBox, minimapRowKindLabel,
   normalizeCollapsedIds, setCollapsedId, isCollapsedId, displayRect, clampViewRect, innermostRegionAt,
   regionDropSuggestion, regionRecheckInterval, owningProjectionByView, addProjectionMember, removeProjectionMember,
   toWorldRect, unionRect,
@@ -257,12 +257,30 @@ test('minimap search: Boards first, each top to bottom, case-insensitive, all ro
   assert.equal(found.focusIndex, 1, 'the first match already on screen gets focus');
   assert.deepEqual(found.rows[1].match, { start: 0, length: 7 });
   assert.equal(found.rows[1].projectionId, 'b1');
+  assert.equal(found.rows[1].boardTitle, '디자인 리뷰', 'a View row names the open Board it belongs to');
+  assert.equal(found.rows[1].viewKind, 'file');
+  assert.equal(found.rows[0].boardTitle, null, 'a Board row has no Board of its own');
+  assert.equal(all.rows.find(row => row.id === 'v0').boardTitle, null, 'no membership, no Board name');
+  const orphan = minimapSearchRows({ boards, views: [{ id: 'vo', title: 'Orphan', kind: 'browser', rect: rect(0, 0, 10, 10), projectionId: 'closed-board' }] });
+  assert.equal(orphan.rows[2].boardTitle, null, 'a Board that is not open is never named');
   const korean = minimapSearchRows({ query: '리뷰', boards, views });
   assert.deepEqual(korean.rows.map(row => row.id), ['b1']);
   assert.equal(korean.focusIndex, 0, 'nothing on screen: the first match');
   assert.equal(minimapSearchRows({ query: 'zzz', boards, views }).focusIndex, -1);
   const limited = minimapSearchRows({ boards, views, limit: 3, activeId: 'b2' });
   assert.deepEqual([limited.rows.length, limited.total, limited.truncated, limited.focusIndex], [3, 15, true, 1]);
+});
+
+test('minimap rows say what kind of target they are, in the words the Desk uses', () => {
+  assert.equal(minimapRowKindLabel({ kind: 'board' }), 'Board');
+  assert.equal(minimapRowKindLabel({ kind: 'board', current: true }), '현재 Board');
+  assert.equal(minimapRowKindLabel({ kind: 'view', viewKind: 'browser' }), '브라우저');
+  assert.equal(minimapRowKindLabel({ kind: 'view', viewKind: 'chat', current: true }), '활성 대화');
+  assert.equal(minimapRowKindLabel({ kind: 'view', viewKind: 'input-evidence' }), '자료');
+  assert.equal(minimapRowKindLabel({ kind: 'view', viewKind: null }), '화면', 'an unknown kind stays a plain 화면');
+  assert.equal(minimapRowKindLabel({ kind: 'view', viewKind: 'constructor' }), '화면', 'prototype names are not labels');
+  assert.equal(minimapRowKindLabel({ kind: 'view', viewKind: 'nope', current: true }), '활성 화면');
+  assert.equal(minimapRowKindLabel(), '화면');
 });
 
 test('minimap focus: the camera stays when the target is fully in view, else centres it without zooming in', () => {

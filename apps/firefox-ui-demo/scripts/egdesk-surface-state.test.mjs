@@ -11730,6 +11730,38 @@ test('direct minimap presses and overlap selection move only the camera, and poi
   assert.equal(h.state.canvasUserCameraRevision, 4);
 });
 
+test('minimap rows name the View kind and its open Board, in the list and in the overlap menu', () => {
+  const h = minimapUiHarness();
+  h.make('active-board', '주간 보고', 0, 0, 'board');
+  const member = h.make('member-view', '회의록', 20, 20); member.dataset.projectionId = 'active-board';
+  h.make('active-view', '회의록', 2000, 2000);
+  const orphan = h.make('orphan-view', '닫힌 Board 화면', 3000, 3000); orphan.dataset.projectionId = 'closed-board';
+  h.toggleDeskMinimap();
+  h.search('회의록');
+  assert.deepEqual(h.rows().map(row => [row.dataset.targetId, row.textContent]),
+    [['member-view', '회의록주간 보고브라우저'], ['active-view', '회의록활성 브라우저']],
+    'two Views with one name are told apart by their Board; the active one says so with its kind');
+  h.search('');
+  const byId = id => h.rows().find(row => row.dataset.targetId === id);
+  assert.equal(byId('active-board').textContent, '주간 보고현재 Board');
+  assert.equal(byId('orphan-view').textContent, '닫힌 Board 화면브라우저', 'a Board that is not open is never named');
+  const map = h.document.querySelector('.egd-minimap-map');
+  const target = id => map._egdeskMinimapTargets.find(item => item.id === id);
+  assert.deepEqual([target('member-view').viewKind, target('member-view').boardTitle, target('orphan-view').boardTitle],
+    ['browser', '주간 보고', null]);
+  h.clickMap(target('member-view'));
+  assert.equal(h.part('minimap-stack'), null, 'a member View under its own Board is picked through the Board: one target, no list');
+  assert.equal(h.cameras.length, 0, 'the Board is already fully in view, so the camera stays');
+  h.make('loose-view', '겹친 화면', 20, 20);
+  h.refreshDeskMinimap();
+  h.clickMap(target('loose-view'));
+  assert.ok(h.part('minimap-stack'));
+  assert.deepEqual(h.document.querySelectorAll('[data-testid="minimap-stack-row"]').map(row => [row.dataset.targetId, row.textContent]),
+    [['active-board', '주간 보고Board'], ['loose-view', '겹친 화면브라우저']], 'overlap rows carry the same kind words');
+  assert.equal(h.cameras.length, 0, 'opening the list moves nothing');
+  assert.deepEqual([h.state.boards.activeProjectionId, h.state.activeEntityId], ['active-board', 'active-view']);
+});
+
 // AI engine selection (SUB-07, engine layer stage 7). Rows follow the bridge's
 // /v1/state engines[] (helper/engine-registry.mjs publicEngineRow).
 const engineRowsFixture = [
