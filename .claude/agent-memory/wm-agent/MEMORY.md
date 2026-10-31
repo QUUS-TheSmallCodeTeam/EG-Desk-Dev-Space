@@ -123,3 +123,27 @@
 <!-- - file-patterns.md: recurring file organization patterns -->
 <!-- - size-reports.md: agent feasibility / file size analysis results -->
 <!-- - conventions.md: project-specific naming and structure rules -->
+
+### STATE: WM 저장소 stale 확인 — apps/firefox-ui-demo 미등록 (2026-10-31 세션 시작 스캔)
+- `file-map.json` v35 (2026-04-14) + `project-profile.md` (2026-04-10) 모두 Electron 시대 기준. `apps/firefox-ui-demo/` 디렉토리·파일 entry 0개. inventory hash 불일치 (20d12b26 → 0598a3c6)
+- 실측: 살아있는 코드는 `apps/firefox-ui-demo/` (ADR-007 2026-04-17 Firefox shell pivot). 최근 100 커밋 중 src/ 터치 0. `src/` (Electron, 4,535줄)는 마지막 커밋 2026-05-20 chore — deprecated 취급
+- 규모: overlay/JS/eg-desk-surface.uc.js 21,544줄 단일 파일(!), overlay/resources/*.sys.mjs 67개, helper 비테스트 94파일/34,154줄, scripts 비테스트 66파일/39,717줄, 테스트 ~98k줄. feasibility 판단 시 surface.uc.js 는 한 agent 컨텍스트 초과 — 반드시 섹션 단위로 쪼개 매핑
+- 테스트 러너: `node --test` (vitest/jest 없음). Firefox 실행 테스트 = `scripts/verify-firefox-mcp-*.mjs` (24개) + .test.mjs 7개 (cookie-import, popups, browser-import-flow, headless-ui-regression, first-codex-auth-flow, clean-profile-boot, run-egdesk-windows). 고정 Node 24.22.1 → `apps/firefox-ui-demo/.tmp/node-runtime/`
+- TODO: Session Lead 요청 시 file-map 재구축 (대규모 — `/onboard` 재실행 수준). 이번 세션은 즉석 스캔 보고로 대체
+
+### ORIGIN: 2026-10-31 야간 자율 라운드 — firefox-ui-demo 기능 모듈 분리 (586e348..7a5a031, file-map v36)
+- 14개 병렬 세션(브랜치별 `.claude/worktrees/<name>/`), 12개를 `claude/vision-gap-20261024` 에 `--no-ff` 병합 → 7a5a031 (push 없음). 라운드 보고서 `.tmp/overnight-20261031/REPORT.md`. cnv-06-canvas-memo·ux-05-placement-ops 는 중단(미병합)
+- ledger → 산출물: CTX-02 helper/egdesk-recovery-journal / UX-02 EGDeskCanvasLayout 미니맵 / SUB-14 helper/codex-auth-state 접근 상태 / AGENT-05 EGDeskAgentIdentityView / BRW-05·07·11 EGDeskBrowserGrant + helper/egdesk-browser-tool-runtime(navigate·카드 관리·권한 수명) / BRW-09 EGDeskScreenshotMask + EGDeskBrowserAgentRuntimeParent·Child / CHAT-03 EGDeskThreadRouting / CNV-03 EGDeskBoardMembership / CODE-02 helper/egdesk-project-identity / CODE-05 EGDeskChangeReview 2단계 / CODE-06 helper/egdesk-run-result-parse·egdesk-terminal-run-watch + docs/RUN_RESULT_SURFACE.md / SUB-05 EGDeskAccountSettingsView
+- **WHY 모듈 분리**: uc.js(22,878줄) 비대화 회피 — 신규 기능은 기능 단위 `EGDesk*.sys.mjs`(overlay/resources, pure 뷰모델) 또는 helper `.mjs` 로 분리, 기존 EGDeskChatState 패턴 유지. 각 모듈에 단건 `node --test` 파일 짝 (resources 모듈 테스트 → scripts/egdesk-*.test.mjs, helper 모듈 테스트 → helper/*.test.mjs 같은 폴더)
+- **REJECTED**: 없음 (세션 보고에 기각 대안 기록 없음)
+- **RELATIONSHIP**:
+  - EGDeskBrowserGrant 는 BRW-05·07·11 과 BRW-09 가 공유 — BRW-09 브랜치가 BRW-05 브랜치를 먼저 병합해 충돌 해소. 충돌 파일: helper/egdesk-browser-tool-runtime(.test).mjs, helper/codex-browser-tool-provider
+  - EGDeskScreenshotMask ↔ EGDeskBrowserAgentRuntimeParent(캡처·페인트) / Child(측정) — mask 모듈이 판정, fail-closed
+  - CODE-06 체인: helper/egdesk-run-result-parse(runSummaryEnd) → egdesk-terminal-run-watch → /terminal/read runResult → resources/egdesk-terminal-init.js postMessage → surface/EGDeskSurfaceTerminal → EGDeskRunResult(chrome 렌더) → surface/EGDeskSurfaceFileCard.openBoardProjectFileAt. 파서 로직이 helper/chrome 양쪽에 존재하는 것은 의도된 짝
+  - EGDeskThreadRouting 은 helper codex-chat-runtime 의 shareMessages(POST /chat/share) 를 쓰고, 멘션 규칙은 helper boardMentions 와 **동일하게 유지**해야 함 (양쪽 수정 필요)
+  - helper/egdesk-project-identity 는 egdesk-file-http(live root 비교) 와 egdesk-project-store(저장 identity; projectReconnectState 재export) 가 공유
+  - EGDeskBoardMembership → EGDeskCanvasLayout(add/removeProjectionMember, regionDropSuggestion) + EGDeskSurfaceState(planBoardProjection)
+  - **회귀 함정**: `scripts/egdesk-chat-presentation.test.mjs` 는 uc.js Chat 헤더 칩 블록을 문자열로 잘라 vm.compileFunction — 그 블록에 새 심볼을 넣으면 테스트 키 목록도 바꿔야 함 (이번 라운드 회귀 1건 원인). uc.js 해당 블록 수정 agent 에게 반드시 전달
+- **TEMPORARY**: `.tmp/overnight-20261031/` 라운드 보고 산출물(커밋 대상 아님). `.claude/worktrees/*` 14개 worktree — 병합 완료 후 정리 대상
+- **환경**: 테스트는 고정 Node 24.22.1 로 — `apps/firefox-ui-demo/.tmp/node-runtime/node-v24.22.1-darwin-arm64/bin/node`. 핀 파일은 `apps/firefox-ui-demo/.node-version` (Session Lead DM 은 `.nvmrc` 라 했으나 disk 실측 `.node-version`; `.nvmrc` 는 프로젝트에 없음). egdesk-file-http·desk-store 테스트의 node:sqlite 요구 버전 충족용
+- **file-map 커버리지**: v36 은 이 라운드의 66개 파일 + apps/firefox-ui-demo 디렉토리 골격(14개) + `.tmp/`·`.claude/worktrees/` 만 등록. 나머지 (helper 비테스트 ~98 .mjs, scripts ~178, resources 35 중 미등록분) 는 `/onboard` 재실행 TODO 유지 — 위 STATE 항목 참조

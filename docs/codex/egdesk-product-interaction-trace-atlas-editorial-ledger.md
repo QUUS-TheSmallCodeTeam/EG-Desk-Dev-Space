@@ -11,9 +11,9 @@
 
 ## 0. 제품 소유자 확인 목록
 
-현재 선택이 남은 정책 주제는 `OPEN`인 16개다. 하나의 주제 안에서도 각 선택은 독립적이다.
-HUM-DESK-001과 HUM-AGENT-001은 결정됐고 HUM-READ-001은 별도 사용자 선택 없이 설계로 해소했다.
-세 항목의 앵커·이력은 기존 문서 연결을 위해 남긴다. 기본 Codex를 먼저 제공한다는 결정은
+현재 선택이 남은 정책 주제는 `OPEN`인 15개다. 하나의 주제 안에서도 각 선택은 독립적이다.
+HUM-DESK-001, HUM-AGENT-001, HUM-BRIEF-002는 결정됐고 HUM-READ-001은 별도 사용자 선택 없이 설계로 해소했다.
+네 항목의 앵커·이력은 기존 문서 연결을 위해 남긴다. 기본 Codex를 먼저 제공한다는 결정은
 가입·계정 통합, 도구 권한, 기억·공유 정책까지 일괄 승인한 뜻이 아니다.
 결정되지 않은 항목은 연결된 범위만 `OPEN`으로 남으며, 각 항목의 `계속 가능한 작업`에서
 이미 작성한 조건별 흐름과 구현·검사 경로를 확인할 수 있다.
@@ -127,13 +127,15 @@ HUM-DESK-001과 HUM-AGENT-001은 결정됐고 HUM-READ-001은 별도 사용자 �
 <a id="hum-brief-002"></a>
 #### HUM-BRIEF-002 — 작은 화면에서 여러 근거를 보여주는 기본 방식
 
-- **질문**: 한 단계의 여러 근거를 동시에 읽을 크기로 담을 수 없을 때, 모든 근거의 위치를 작게 보여주는 개요를 우선할 것인가, 한 근거를 읽을 크기로 보여주고 목록에서 다른 근거를 고르는 방식을 우선할 것인가?
+- **당시 질문**: 한 단계의 여러 근거를 동시에 읽을 크기로 담을 수 없을 때, 모든 근거의 위치를 작게 보여주는 개요를 우선할 것인가, 한 근거를 읽을 크기로 보여주고 목록에서 다른 근거를 고르는 방식을 우선할 것인가?
+- **사용자 답변 — 2026-10-29**: “전체 근거의 위치를 축소해서 한눈에 보여주기”.
+- **결정**: 한 단계의 여러 근거를 동시에 읽을 크기로 담기 어려우면 기존 카드의 원래 위치와 크기를 유지한 채 전체 근거 위치의 축소 개요를 우선한다. 한 근거를 읽을 크기로 보여주고 목록에서 다른 근거로 바꾸는 방식은 기본으로 삼지 않는다. 축소 개요에서 모든 본문을 동시에 읽을 수 있다는 뜻은 아니다.
 - **발견된 상황 — 2026-10-29**: 720×600 격리 화면의 다중 근거 단계에서 본문 대신 축소된 묶음 표식이 보였다. 단계 버튼·댓글에 키보드로 도달하는 것과 근거를 읽고 이해하는 것은 별개의 수용 기준이다. 현재 배율 계산의 불필요한 과축소 여부는 추가 계측이 필요하지만, 넓게 떨어진 여러 자료를 원래 위치 그대로 동시에 읽을 크기로 담는 데에는 화면 크기의 한계도 있다.
 - **확정된 경계**: 이 선택만으로 기존 카드의 위치를 바꾸거나 프레젠테이션용 사본을 새로 만들지 않는다. 사용자가 이동·선택·입력을 시작한 뒤 늦게 준비된 근거가 그 작업을 덮지 않는다.
 - **왜 사용자 결정인가**: 같은 단계에서 전체 맥락과 개별 근거의 가독성 중 무엇을 먼저 보여줄지, 다음 근거를 확인하는 사용 흐름이 달라진다. 편집·지속·공유 권한인 HUM-BRIEF-001과는 다른 선택이다.
 - **영향**: [Atlas AI-05](../../ideas/confirmed/EGDESK_PRODUCT_INTERACTION_TRACE_ATLAS.md#atlas-ai-05), [Contract §8](../../ideas/confirmed/EGDESK_INTERACTION_AND_ORCHESTRATION_CONTRACT.md#tech-answer-briefing), [다중 근거 가독성 점검](../../ideas/confirmed/EGDESK_VISION_GAP_LEDGER.md#briefing-small-screen-reading).
 - **계속 가능한 작업**: 동일 대상을 유지한 카메라 맞춤의 좌표·가림 계산을 계측하고, 계산 오류가 확인된 부분만 보정한다. 근거의 정확한 범위·부분 재시도·키보드 진입·댓글 보존 검사는 선택과 독립적으로 진행한다.
-- **상태**: `OPEN` — 2026-10-29 사용자에게 질문했으며 답변 전에는 어느 쪽도 확정하지 않는다.
+- **상태**: `DECIDED` — 2026-10-29 사용자 답변으로 기본 방향을 확정했다. 배율 계산과 실제 화면의 수용 검증은 별도다.
 
 <a id="hum-read-001"></a>
 #### HUM-READ-001 — Smart Read 가시성과 사용자 개입 시점
@@ -161,7 +163,7 @@ HUM-DESK-001과 HUM-AGENT-001은 결정됐고 HUM-READ-001은 별도 사용자 �
 #### HUM-ENGINE-001 — AI Engine 계정 기본 선택 범위
 
 - **추천·대안**: [첫 사용·실행 계정 비교](../references/design-synthesis/egdesk-ux-realization-proposals.md#decision-first-use), [실행 설정·사전 위임·적용 시점](../references/design-synthesis/egdesk-ux-realization-proposals.md#execution-settings), [협업 계정 비교](../references/design-synthesis/egdesk-ux-realization-proposals.md#decision-collaboration)
-- **질문**: 기본 AI 계정을 앱·Desk·방·이번 요청 중 어디에 기억할 것인가? 후속 실행의 계정 선택을 명시한 대상·기간·한도 안에서 미리 위임할 수 있는가, 전환마다 직접 선택하는가? 협업의 각자/공동 Engine 비용 귀속은 HUM-COLLAB-001과 한 번만 선택한다.
+- **질문**: 기본 AI 계정을 앱·Desk·방·이번 요청 중 어디에 기억할 것인가? 후속 실행의 계정 선택을 명시한 대상·기간·한도 안에서 미리 위임할 수 있는가, 전환마다 직접 선택하는가? 이용 조건상 허용되는 개인·공용 Engine 계정 각각의 사용 위임 범위와 협업 비용 귀속은 HUM-COLLAB-001과 한 번만 선택한다. 공용 Engine 계정은 실제 직원이나 업무 사이트 계정의 신원을 대신하지 않는다.
 - **온보딩에서 남은 선택**: 최초 Codex 로그인 성공을 이용해 기기 내 EG-Desk 브라우저 프로필을 자동 준비하는 방식을 채택할 것인가? 첫 로그인 전 이용하던 Browser의 자료·쿠키를 어떤 프로필에서 계속 사용할 것인가? 별도 EG-Desk 온라인 회원·협업 identity까지 연결할지는 HUM-REMOTE-001의 인프라·인증 범위와 함께 결정한다. [단일 로그인 후보와 한계](../references/design-synthesis/egdesk-ux-realization-proposals.md#onboarding-account-options). 이는 로그인 가능성 질문을 확정된 가입 정책으로 승격하지 않기 위한 구분이다.
 - **확정된 부분**: 실제 계정과 Run의 binding은 보존한다. 로그아웃·quota 소진을 이유로 진행 중 Run을 다른 계정으로 조용히 옮기지 않으며, 인증·권한·사용 한도 부족은 서로 다른 상태로 복구한다.
 - **관련 후보**: [Reader·Worker 전체 예산과 quota 소진](../references/design-synthesis/egdesk-capability-scenario-connected-agent-work.md#needs-reader-budget), [협업자가 사용할 실행 계정·quota](../references/design-synthesis/egdesk-capability-scenario-connected-agent-work.md#needs-collaboration-authority).
@@ -260,11 +262,13 @@ HUM-DESK-001과 HUM-AGENT-001은 결정됐고 HUM-READ-001은 별도 사용자 �
 
 - **추천·대안**: [협업자의 접근·실행·비용 비교](../references/design-synthesis/egdesk-ux-realization-proposals.md#decision-collaboration), [동시 변경·되돌리기](../references/design-synthesis/egdesk-ux-realization-proposals.md#collaboration-changes), [Desk 소유·관리 이전·복구](../references/design-synthesis/egdesk-ux-realization-proposals.md#desk-ownership)
 - **질문**: 초대의 기본 권한을 관찰만으로 할지 대화 참여까지로 할지, 위임을 해당 업무까지로 할지 회수 전까지로 할지, 타인 변경의 수락·역변경을 누가 할지 각각 선택한다. 관찰·대화·Agent 실행·업무 계정 사용·PC 제어의 위임 가능 주체와 범위도 각각 선택한다. 단일/공동 소유, 소유권 이전 주체, 복구 위임 유무와 이전 후 기존 복구 위임의 존속도 독립된 선택이다. Engine 비용 기본값은 HUM-ENGINE-001과 공유한다.
+- **외부 행동 위임**: 외부 서비스·원본 파일 등에 실제 영향을 주는 행동은 어디까지 매번 사전 승인하고, 어디까지 명시한 대상·행동·기간·한도 안에서 상시 위임할 것인가?
+- **직원 대화 공유·보관**: 직원 대화 원문·요약·첨부의 업무 참여자와 타 부서 공유 범위, 개인·업무 대화의 보관 범위는 무엇인가? 대화 공개 기본값과 보관·삭제 정책은 각각 HUM-CONV-001, HUM-SNAPSHOT-001·HUM-EXPORT-001과 중복 없이 함께 정한다.
 - **같은 범위에서 남은 선택**: 동시 변경이 충돌하면 누구의 변경을 어떻게 보존·수락·되돌릴 수 있게 할 것인가? Desk 소유·관리 권한의 이전·복구는 누가 할 수 있는가? 충돌 알고리즘과 컨트롤 배치는 이 선택을 만족하도록 설계한다.
 - **확정된 부분**: 다중 PC·다중 사용자 방향과 관찰·제어 권한의 분리는 유지한다. 참가자 추가나 PC 연결은 모든 파일·계정에 대한 접근권 부여가 아니다. 실제 실행 위치·행위자·계정·결과 귀속을 보존하고, 연결 끊김을 종료 확인으로 처리하지 않는다.
 - **관련 후보**: [협업자별 보기·실행·계정·quota·이어받기](../references/design-synthesis/egdesk-capability-scenario-connected-agent-work.md#needs-collaboration-authority). 개인 자료를 참고한 파생 요약의 공유 범위도 포함한다.
 - **왜 사용자 결정인가**: 최종 비즈니스 목표인 다중 사용자 협업의 소유권·개인정보·동시 행동 충돌·통제 책임을 정한다.
-- **영향**: [Atlas COL-01](../../ideas/confirmed/EGDESK_PRODUCT_INTERACTION_TRACE_ATLAS.md#atlas-col-01), [CU-01](../../ideas/confirmed/EGDESK_PRODUCT_INTERACTION_TRACE_ATLAS.md#atlas-cu-01), [Contract §12](../../ideas/confirmed/EGDESK_INTERACTION_AND_ORCHESTRATION_CONTRACT.md#tech-collaboration-computer-use)
+- **영향**: [Atlas COL-01](../../ideas/confirmed/EGDESK_PRODUCT_INTERACTION_TRACE_ATLAS.md#atlas-col-01), [CU-01](../../ideas/confirmed/EGDESK_PRODUCT_INTERACTION_TRACE_ATLAS.md#atlas-cu-01), [조직 사용](../../ideas/confirmed/EGDESK_PRODUCT_INTERACTION_TRACE_ATLAS.md#atlas-org-use), [Contract §12](../../ideas/confirmed/EGDESK_INTERACTION_AND_ORCHESTRATION_CONTRACT.md#tech-collaboration-computer-use), [조직 실행 계약](../../ideas/confirmed/EGDESK_INTERACTION_AND_ORCHESTRATION_CONTRACT.md#tech-org-execution)
 - **계속 가능한 작업**: [초대·역할·동시 변경·소유권 이전·PC 제어](../references/design-synthesis/egdesk-ux-realization-proposals.md#ux-detail-e24-collaboration-manage)의 설계를 바탕으로 선택할 권한 정책별 로컬 모의 구현과 경합·철회 검사를 진행할 수 있다.
 - **상태**: `OPEN`; 실제 원격 전송·identity·server provision은 `HUM-REMOTE-001`과 별도 승인 대상.
 
@@ -273,10 +277,10 @@ HUM-DESK-001과 HUM-AGENT-001은 결정됐고 HUM-READ-001은 별도 사용자 �
 
 - **구성 비교**: [전송·녹화·동기화·백업의 독립 선택](../references/design-synthesis/egdesk-ux-realization-proposals.md#ux-detail-e24-computer-use-observe), [전송 구조·공급 방식·승인 범위](../../ideas/confirmed/EGDESK_INTERACTION_AND_ORCHESTRATION_CONTRACT.md#impl-e24-remote-transport)
 
-- **질문**: 원격 협업의 전송 대상, Desk 밖 관찰의 화면 범위·실시간/기록 보관, 기기 간 동기화 대상과 원격 백업 제공 범위를 각각 선택한다. 실제 공급자·호스팅·비용·데이터 이전의 집행 승인은 구성과 비용이 명시된 기존 승인 절차에서 별도로 받으며, 이 정책 선택을 포괄 비용 승인으로 취급하지 않는다.
+- **질문**: 원격 협업의 전송 대상, Desk 밖 관찰의 화면 범위·실시간/기록 보관, 기기 간 동기화 대상과 원격 백업 제공 범위를 각각 선택한다. 호스트·업무 데이터와 백업을 회사 내부·외부·혼합 중 어디까지 둘 수 있는지도 선택한다. 실제 공급자·호스팅·비용·데이터 이전의 집행 승인은 구성과 비용이 명시된 기존 승인 절차에서 별도로 받으며, 이 정책 선택을 포괄 비용 승인으로 취급하지 않는다.
 - **왜 사용자 결정인가**: 외부 인프라·데이터 전송·비용·새 권한 경계다.
-- **영향**: [Atlas COL-01](../../ideas/confirmed/EGDESK_PRODUCT_INTERACTION_TRACE_ATLAS.md#atlas-col-01), [CU-01](../../ideas/confirmed/EGDESK_PRODUCT_INTERACTION_TRACE_ATLAS.md#atlas-cu-01), [DATA-01](../../ideas/confirmed/EGDESK_PRODUCT_INTERACTION_TRACE_ATLAS.md#atlas-data-01)
-- **계속 가능한 작업**: [관찰·녹화·동기화·백업의 독립 구성](../references/design-synthesis/egdesk-ux-realization-proposals.md#ux-detail-e24-computer-use-observe)의 설계를 바탕으로 로컬 모의 구현·연결 계약 검사와 선택한 구성의 집행 승인 준비를 진행할 수 있다.
+- **영향**: [Atlas COL-01](../../ideas/confirmed/EGDESK_PRODUCT_INTERACTION_TRACE_ATLAS.md#atlas-col-01), [CU-01](../../ideas/confirmed/EGDESK_PRODUCT_INTERACTION_TRACE_ATLAS.md#atlas-cu-01), [DATA-01](../../ideas/confirmed/EGDESK_PRODUCT_INTERACTION_TRACE_ATLAS.md#atlas-data-01), [조직 실행 계약](../../ideas/confirmed/EGDESK_INTERACTION_AND_ORCHESTRATION_CONTRACT.md#tech-org-execution), [조직 전달 순서](../../ideas/confirmed/EGDESK_VISION_GAP_LEDGER.md#org-delivery-priority)
+- **계속 가능한 작업**: [관찰·녹화·동기화·백업의 독립 구성](../references/design-synthesis/egdesk-ux-realization-proposals.md#ux-detail-e24-computer-use-observe)의 설계를 바탕으로 로컬 모의 구현·연결 계약 검사와 선택한 구성의 집행 승인 준비를 진행할 수 있다. 같은 Wi-Fi 접속 자체는 권한이 아니며, 등록·승인된 지원 PC의 역할과 최초 호스트의 백업·복구 및 미확인 결과의 재실행 방지는 설계·검사할 수 있다. 회사별 PC 목록과 직원·역할 조합은 배포 설정이지 제품 개발을 막는 공통 필수 질문이 아니다.
 - **상태**: `OPEN / OWNER-APPROVAL-REQUIRED`
 
 <a id="gap-maintenance-appendix"></a>

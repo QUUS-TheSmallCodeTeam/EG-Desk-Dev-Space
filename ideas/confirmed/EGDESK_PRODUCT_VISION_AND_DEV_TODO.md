@@ -168,6 +168,17 @@ Viewport HUD should reflect the Board or maximized card currently in view. When 
 
 ## Development Todo
 
+Organization use extends the existing one Desk/Canvas with multiple Boards;
+departments or locations do not by themselves introduce new Desks, workspaces,
+or Canvases. The [organization delivery sequence](./EGDESK_VISION_GAP_LEDGER.md#org-delivery-priority)
+is the single proposed ordering for these increments; P0–P2 below group backlog work and
+do not replace that sequence. The [organization use](./EGDESK_PRODUCT_INTERACTION_TRACE_ATLAS.md#atlas-org-use)
+and [execution contract](./EGDESK_INTERACTION_AND_ORCHESTRATION_CONTRACT.md#tech-org-execution)
+describe the corresponding behavior and safeguards. These items describe
+planned product capability, not proof of implementation or operational
+validation. Continue unfinished individual-client Chat, Browser, File, and
+other work as well: sharing or adding a host alone does not complete the product.
+
 ### P0 - Active Stabilization
 
 - [x] Seed chat agent profiles and attach them to Agent DM / Board Thread runtime.
@@ -182,6 +193,36 @@ Viewport HUD should reflect the Board or maximized card currently in view. When 
 - [ ] Add result-card creation from chat summary/result chips.
 - [ ] Add Prezi-like canvas run playback with step comments that can be inserted into the next chat message.
 - [ ] Add dependency graph/task state registry and automatic downstream start; model user-action awaits as one dependency-gate type.
+- [ ] Make the local request-to-result flow dependable, including safe local
+  writing and saving: bind the intended resource, account and action,
+  distinguish a draft or request from an observed result, and retain enough
+  state for a user to inspect or correct it. This local client work continues
+  alongside organization-sharing increments.
+- [ ] Bind authorization and attribution to distinct employee, requesting PC,
+  executing PC, Agent, AI Engine account, site/service account, resource and
+  action identities. A shared account may be used only within its permitted
+  terms and does not establish an employee's identity. Each organization
+  configures its own registered PCs and allowed role combinations; collecting
+  every company's list is not a prerequisite for general product development.
+- [ ] Enforce effective access before search, read, context assembly, summaries,
+  titles, tool results and subagent delegation, and at the actual file, shell,
+  browser and service boundaries. A visible permission tag or Agent prompt is
+  not an enforcement mechanism; unauthorized data must not enter results or
+  Agent context through another path.
+- [ ] Preserve authorized work evidence and conversation history with original
+  and derived records, attribution, attachments and correction history
+  distinguishable. Search, sharing, retention and recovery must respect the
+  applicable access and privacy policies; a portable export alone is not a
+  complete organizational backup.
+- [ ] Design and implement the first authorized two-PC, read-only sharing slice
+  around a designated, registered PC with a supported OS and the required host,
+  coordinator and store capability. Keep host/coordinator/store roles distinct
+  from executor roles, even when co-located; another PC connects only within
+  granted scope. Common Wi-Fi neither grants access nor automatically makes a
+  PC a host. From this first slice, require a basic backup and tested restore,
+  an explicit unconfirmed state after connection loss, and safeguards against
+  blindly repeating an execution whose outcome is unknown. Actual remote
+  infrastructure remains subject to the existing approval gate.
 
 ### P1 - Browser Control
 
@@ -193,6 +234,11 @@ Viewport HUD should reflect the Board or maximized card currently in view. When 
 - [ ] Separate content/canonical-resource deduplication from profile/account execution context in SourceRef and Browser Card focus behavior.
 - [ ] OAuth/window.open popup flow regression suite.
 - [ ] Detect OAuth/browser completion events for Await Token satisfaction.
+- [ ] For external actions, distinguish prepared, awaiting approval, requested,
+  executed, verified and unconfirmed states. Apply the selected per-action
+  approval or bounded standing delegation before acting; bind the target and
+  account, then read back the actual destination before reporting completion.
+  Do not retry an action with an unknown outcome as if it had failed.
 
 ### P1 - Canvas and Viewport
 
@@ -214,6 +260,10 @@ Viewport HUD should reflect the Board or maximized card currently in view. When 
 - [ ] Canvas-linked result chips for long outputs.
 - [ ] Thread/session badges: `Resumed`, `Fresh`, `Forked`, `Stateless`.
 - [ ] Multi-agent participant state in Board Thread.
+- [ ] Support a cross-department request and the minimum approved result in the
+  existing Board/Chat flow. Share only the information the receiving role is
+  allowed and needs to see, rather than exposing the source department's full
+  files, conversations or working context by default.
 
 ### P1 - Context, Recovery, and Coding UX
 
@@ -222,6 +272,11 @@ Viewport HUD should reflect the Board or maximized card currently in view. When 
 - [ ] Make the selected run context inspectable and correctable without exposing the whole Desk by default.
 - [ ] Research current project/file/editor/diff/test-result frameworks and active implementations before selecting the coding-surface integration path.
 - [ ] Add user-facing project/folder, file tree/search, editor/viewer, diff, and run/test/review result surfaces; keep terminal as an optional expert/debug view and agent substrate.
+- [ ] Support saving permitted changes to the intended existing file on the
+  intended PC, preserving required format and history and reading the result
+  back from that same target. Apply the file safety contract and the owner's
+  outstanding choice on concurrent-write protection; never silently substitute
+  another PC's same-named file or treat a draft as a saved original.
 
 ### P2 - Runtime/Packaging
 
@@ -234,6 +289,12 @@ Viewport HUD should reflect the Board or maximized card currently in view. When 
 - [ ] Add a Desk-visible host-activity view and control-lease model for computer-use that occurs outside native Desk Windows.
 - [ ] Prefer isolated app/desktop execution for global pointer/keyboard computer-use; require explicit handoff before controlling the user's active desktop.
 - [ ] Keep remote host-activity streaming, identity, and authorization behind the external-infrastructure approval gate.
+- [ ] Extend the initial shared slice to multiple authorized executors and
+  explicit handoff, reconnect and recovery across PCs. Preserve the actual
+  actor, target, account and last confirmed result; distinguish transferred
+  context from resumed execution. Automatic host succession is a later
+  extension, not a substitute for the first slice's basic backup, restore and
+  unknown-outcome protections.
 
 ## Documentation Rule
 
