@@ -4594,28 +4594,50 @@
 .egdesk-chat-change-review > .egdesk-change-approval-details > .egdesk-change-approval-summary { padding: 6px 0; cursor: pointer; overflow-wrap: anywhere; }
 .egdesk-chat-change-content { display: flex; flex-direction: column; gap: 8px; padding-top: 6px; }
 .egdesk-chat-change-note { margin: 0; color: var(--egd-on-surface-variant); overflow-wrap: anywhere; }
-:is(.egdesk-chat-change-review, .egdesk-change-review) .egdesk-diff-view,
-:is(.egdesk-chat-change-review, .egdesk-change-review) .egdesk-diff-file { min-width: 0; max-width: 100%; box-sizing: border-box; }
-:is(.egdesk-chat-change-review, .egdesk-change-review) .egdesk-diff-summary,
-:is(.egdesk-chat-change-review, .egdesk-change-review) .egdesk-diff-note,
-:is(.egdesk-chat-change-review, .egdesk-change-review) .egdesk-diff-file-move { margin: 6px 0; overflow-wrap: anywhere; }
-:is(.egdesk-chat-change-review, .egdesk-change-review) .egdesk-diff-file { margin: 8px 0; }
-:is(.egdesk-chat-change-review, .egdesk-change-review) .egdesk-diff-file-summary { padding: 6px 0; cursor: pointer; overflow-wrap: anywhere; }
-:is(.egdesk-chat-change-review, .egdesk-change-review) .egdesk-diff-file-summary > span { margin-inline-end: 8px; }
-:is(.egdesk-chat-change-review, .egdesk-change-review) .egdesk-diff-file-change,
-:is(.egdesk-chat-change-review, .egdesk-change-review) .egdesk-diff-file-added,
-:is(.egdesk-chat-change-review, .egdesk-change-review) .egdesk-diff-file-removed { display: inline-block; white-space: nowrap; }
-:is(.egdesk-chat-change-review, .egdesk-change-review) .egdesk-diff-hunk,
-:is(.egdesk-chat-change-review, .egdesk-change-review) .egdesk-diff-raw { box-sizing: border-box; min-width: 0; max-width: 100%; max-height: 18rem; overflow: auto; padding-bottom: 12px; background: var(--egd-window-alt); border-radius: 7px; }
-:is(.egdesk-chat-change-review, .egdesk-change-review) .egdesk-diff-raw { white-space: pre; overflow-wrap: normal; word-break: normal; }
-:is(.egdesk-chat-change-review, .egdesk-change-review) .egdesk-diff-hunk-header { margin: 0; padding: 6px 8px; color: var(--egd-on-surface-variant); font-size: 11px; }
-:is(.egdesk-chat-change-review, .egdesk-change-review) .egdesk-diff-lines { width: max-content; min-width: 100%; box-sizing: border-box; margin: 0; padding: 0; list-style: none; font: 12px/1.65 ui-monospace, monospace; }
-:is(.egdesk-chat-change-review, .egdesk-change-review) .egdesk-diff-line { display: grid; grid-template-columns: 4ch 4ch 2ch minmax(0, 1fr); padding-inline: 4px 8px; }
-:is(.egdesk-chat-change-review, .egdesk-change-review) .egdesk-diff-ln { color: var(--egd-on-surface-variant); text-align: right; padding-right: 1ch; }
-:is(.egdesk-chat-change-review, .egdesk-change-review) .egdesk-diff-sign { text-align: center; }
-:is(.egdesk-chat-change-review, .egdesk-change-review) .egdesk-diff-text { white-space: pre; font: inherit; text-decoration: none; }
-:is(.egdesk-chat-change-review, .egdesk-change-review) .egdesk-diff-line-add { background: var(--egd-success-bg); }
-:is(.egdesk-chat-change-review, .egdesk-change-review) .egdesk-diff-line-delete { background: var(--egd-danger-bg); }
+.egdesk-chat-change-review .egdesk-diff-view,
+.egdesk-change-review .egdesk-diff-view,
+.egdesk-chat-change-review .egdesk-diff-file,
+.egdesk-change-review .egdesk-diff-file { min-width: 0; max-width: 100%; box-sizing: border-box; }
+.egdesk-chat-change-review .egdesk-diff-summary,
+.egdesk-change-review .egdesk-diff-summary,
+.egdesk-chat-change-review .egdesk-diff-note,
+.egdesk-change-review .egdesk-diff-note,
+.egdesk-chat-change-review .egdesk-diff-file-move,
+.egdesk-change-review .egdesk-diff-file-move { margin: 6px 0; overflow-wrap: anywhere; }
+.egdesk-chat-change-review .egdesk-diff-file,
+.egdesk-change-review .egdesk-diff-file { margin: 8px 0; }
+.egdesk-chat-change-review .egdesk-diff-file-summary,
+.egdesk-change-review .egdesk-diff-file-summary { padding: 6px 0; cursor: pointer; overflow-wrap: anywhere; }
+.egdesk-chat-change-review .egdesk-diff-file-summary > span,
+.egdesk-change-review .egdesk-diff-file-summary > span { margin-inline-end: 8px; }
+.egdesk-chat-change-review .egdesk-diff-file-change,
+.egdesk-change-review .egdesk-diff-file-change,
+.egdesk-chat-change-review .egdesk-diff-file-added,
+.egdesk-change-review .egdesk-diff-file-added,
+.egdesk-chat-change-review .egdesk-diff-file-removed,
+.egdesk-change-review .egdesk-diff-file-removed { display: inline-block; white-space: nowrap; }
+.egdesk-chat-change-review .egdesk-diff-hunk,
+.egdesk-change-review .egdesk-diff-hunk,
+.egdesk-chat-change-review .egdesk-diff-raw,
+.egdesk-change-review .egdesk-diff-raw { box-sizing: border-box; min-width: 0; max-width: 100%; max-height: 18rem; overflow: auto; padding-bottom: 12px; background: var(--egd-window-alt); border-radius: 7px; }
+.egdesk-chat-change-review .egdesk-diff-raw,
+.egdesk-change-review .egdesk-diff-raw { white-space: pre; overflow-wrap: normal; word-break: normal; }
+.egdesk-chat-change-review .egdesk-diff-hunk-header,
+.egdesk-change-review .egdesk-diff-hunk-header { margin: 0; padding: 6px 8px; color: var(--egd-on-surface-variant); font-size: 11px; }
+.egdesk-chat-change-review .egdesk-diff-lines,
+.egdesk-change-review .egdesk-diff-lines { width: max-content; min-width: 100%; box-sizing: border-box; margin: 0; padding: 0; list-style: none; font: 12px/1.65 ui-monospace, monospace; }
+.egdesk-chat-change-review .egdesk-diff-line,
+.egdesk-change-review .egdesk-diff-line { display: grid; grid-template-columns: 4ch 4ch 2ch minmax(0, 1fr); padding-inline: 4px 8px; }
+.egdesk-chat-change-review .egdesk-diff-ln,
+.egdesk-change-review .egdesk-diff-ln { color: var(--egd-on-surface-variant); text-align: right; padding-right: 1ch; }
+.egdesk-chat-change-review .egdesk-diff-sign,
+.egdesk-change-review .egdesk-diff-sign { text-align: center; }
+.egdesk-chat-change-review .egdesk-diff-text,
+.egdesk-change-review .egdesk-diff-text { white-space: pre; font: inherit; text-decoration: none; }
+.egdesk-chat-change-review .egdesk-diff-line-add,
+.egdesk-change-review .egdesk-diff-line-add { background: var(--egd-success-bg); }
+.egdesk-chat-change-review .egdesk-diff-line-delete,
+.egdesk-change-review .egdesk-diff-line-delete { background: var(--egd-danger-bg); }
 .egdesk-chat-change-review-actions { display: flex; flex-direction: column; gap: 4px; align-items: flex-start; }
 .egdesk-chat-change-review-open { max-width: 100%; text-align: left; }
 /* Stage 2 (D-X2) review after apply: the File Card's 변경 검토 panel (EGDeskChangeReview). */

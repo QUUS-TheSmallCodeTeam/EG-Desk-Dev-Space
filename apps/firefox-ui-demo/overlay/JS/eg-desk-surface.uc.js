@@ -3054,16 +3054,19 @@
         && ChatState.chatThreadEngineId(thread, state.codex) === engineId && ChatState.chatThreadEngineProfileId(thread, state.codex) === profileId
         && ChatState.clientThreadBinding(thread) === binding && thread.conversationId === conversationId;
     };
-    const read = async (endpoint, target, { signal } = {}) => {
+    // itemKind is fixed by the scope method, never by a caller's options bag:
+    // readOrigin serves exactly one command item; readChangeOrigin (CODE-05
+    // stage 2) exactly one COMPLETED file-change item of the same run.
+    const read = async (endpoint, target, { signal } = {}, itemKind = 'commandExecution') => {
       const identity = codexActivityDetailTarget(target, target?.itemId);
       const origin = endpoint === '/chat/run-project-origin';
-      // CODE-05: an origin read serves a command item or a file-change item.
-      const kind = endpoint === '/chat/command-output' ? 'commandExecution' : endpoint === '/chat/run-changes' ? 'fileChange' : null;
+      const kind = endpoint === '/chat/command-output' || (origin && itemKind !== 'fileChange') ? 'commandExecution' : 'fileChange';
       const ownedItem = () => {
         const thread = getCodexThreadById(state.codex, threadId);
         const runs = identity ? codexRuns(thread).filter(run => run.conversationId === identity.conversationId && run.runId === identity.runId) : [];
         const run = runs.length === 1 ? runs[0] : null;
-        const items = (run?.activities || []).filter(activity => activity.id === identity.itemId && (kind ? activity.kind === kind : ['commandExecution', 'fileChange'].includes(activity.kind)));
+        const items = (run?.activities || []).filter(activity => activity.id === identity.itemId && activity.kind === kind
+          && !(origin && kind === 'fileChange' && activity.status !== 'completed'));
         if (items.length === 1) return origin ? JSON.stringify([items[0].kind, items[0].status, items[0].detail ?? null]) : true;
         return !origin && kind === 'fileChange' && (run?.pendingApprovals || []).some(approval => approval.itemId === identity.itemId
           && approval.kind === kind && approval.status === 'pending' && !approval.stale && !approval.replyPending);
@@ -3093,7 +3096,8 @@
     return Object.freeze({ isCurrent,
       readCommandOutput: (target, options) => read('/chat/command-output', target, options),
       readRunChanges: target => read('/chat/run-changes', target),
-      readOrigin: (target, options) => read('/chat/run-project-origin', target, options),
+      readOrigin: (target, options) => read('/chat/run-project-origin', target, { signal: options?.signal }),
+      readChangeOrigin: (target, options) => read('/chat/run-project-origin', target, { signal: options?.signal }, 'fileChange'),
       dispose() { if (disposed) return; disposed = true; token.controller.abort(); epochScope.finish(token); },
     });
   }
@@ -3204,7 +3208,7 @@
           ...(approval ? {} : {
             readOrigin: async (candidate, options) => {
               if (!current(entry, candidate)) throw new Error('이 변경 기록의 연결이 바뀌었습니다.');
-              const origin = await readScope.readOrigin(candidate, options);
+              const origin = await readScope.readChangeOrigin(candidate, options);
               if (!current(entry, candidate)) throw new Error('이 변경 기록의 연결이 바뀌었습니다.');
               return origin;
             },
