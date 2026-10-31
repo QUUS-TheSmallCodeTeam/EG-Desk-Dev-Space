@@ -19,6 +19,7 @@ import { bridgeBuildState, expectedOverlayBuild, startBridgeBuild } from './egde
 import { createInheritedMcpSync } from './codex-inherited-mcp.mjs'
 import { BoundedSseClient } from './codex-bridge-sse.mjs'
 import { TerminalSessionRegistry } from './terminal-sessions.mjs'
+import { createTerminalRunWatch } from './egdesk-terminal-run-watch.mjs'
 import { createTerminalSessionFactory } from './terminal-platform.mjs'
 import { createTerminalHttpHandler } from './terminal-http.mjs'
 import { chatError, publicText } from './codex-chat-values.mjs'
@@ -40,7 +41,7 @@ import { createContextHttpHandler } from './egdesk-context-http.mjs'
 import { buildCodexAppServerLaunch, inspectNativeCapabilities, preflightOwnedAppServer, resolveCodexExecutable, NATIVE_SCHEMA_VERSION } from './egdesk-native-capabilities.mjs'
 import { createEGDeskFileMount, requireEGDeskNodeRuntime } from './egdesk-file-mount.mjs'
 import { createSystemResourceMonitor } from './system-resource-monitor.mjs'
-import { openWorkflowRuntime } from './egdesk-workflow-runtime.mjs'
+import { WORKFLOW_OWNER, openWorkflowRuntime } from './egdesk-workflow-runtime.mjs'
 import { createPlanToolProvider } from './egdesk-plan-tool-provider.mjs'
 import { openOntologyStore } from './egdesk-ontology-store.mjs'
 import { createOntologyHttpHandler, ontologyHealth, openBoundOntologyStore, readOntologyProfileBinding } from './egdesk-ontology-http.mjs'
@@ -741,7 +742,9 @@ async function startChatgptDeviceLogin() {
 }
 
 // ── Terminal PTY support ──
-const terminalRegistry = new TerminalSessionRegistry({ onExit: receipt => workflow?.publishTerminalExit(receipt) })
+// CODE-06: a user-typed test/build command's result rides on the next /terminal/read.
+const terminalRunWatch = createTerminalRunWatch({ bus: workflow?.bus ?? null, owner: WORKFLOW_OWNER })
+const terminalRegistry = new TerminalSessionRegistry({ onExit: receipt => workflow?.publishTerminalExit(receipt), runWatch: terminalRunWatch })
 
 // npm 설치 과정에서 node-pty spawn-helper의 실행 비트가 소실되는 경우가 있어
 // (posix_spawnp failed → 조용히 child_process fallback 강등) 기동 시 복구한다.
@@ -1084,4 +1087,5 @@ process.on('exit', () => {
   try { appServerSocket?.close(); } catch {}
   try { appServerProcess?.kill(); } catch {}
   terminalRegistry.requestStopAll()
+  terminalRunWatch.close()
 })

@@ -12,6 +12,7 @@
   const ChatState = ChromeUtils.importESModule('chrome://userchrome/content/EGDeskChatState.sys.mjs');
   const ThreadRouting = ChromeUtils.importESModule('chrome://userchrome/content/EGDeskThreadRouting.sys.mjs');
   const ChatRunResult = ChromeUtils.importESModule('chrome://userchrome/content/EGDeskChatRunResult.sys.mjs');
+  const RunResult = ChromeUtils.importESModule('chrome://userchrome/content/EGDeskRunResult.sys.mjs');
   const ChatChangeReview = ChromeUtils.importESModule('chrome://userchrome/content/EGDeskChatChangeReview.sys.mjs');
   const Markdown = ChromeUtils.importESModule('chrome://userchrome/content/EGDeskMarkdown.sys.mjs');
   const InputContext = ChromeUtils.importESModule('chrome://userchrome/content/EGDeskInputContext.sys.mjs');
@@ -14731,6 +14732,7 @@
 
   const spawnFileCard = surfaceForward('fileCard', 'spawnFileCard');
   const openBoardProjectFile = surfaceForward('fileCard', 'openBoardProjectFile');
+  const openBoardProjectFileAt = surfaceForward('fileCard', 'openBoardProjectFileAt');
   const openVerifiedRunFile = surfaceForward('fileCard', 'openVerifiedRunFile');
 
   function getProjectTarget() {
@@ -22744,6 +22746,7 @@
     const deps = Object.freeze({
       FileCardState,
       ONTOLOGY_GRAPH_URL,
+      RunResult,
       TAG,
       allocCardSeq,
       bindCardSourceRef,
@@ -22764,6 +22767,7 @@
       isCardFullscreen,
       makeSourceRef,
       markAgendaDirty,
+      openBoardProjectFileAt,
       openChatInputPanel,
       raiseCardZ,
       resolveCanvasCardPlacement,

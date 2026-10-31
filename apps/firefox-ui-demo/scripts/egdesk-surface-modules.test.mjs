@@ -130,7 +130,7 @@ async function install(script, namespaces, { transformNamespace = (_, namespace)
   const forwards = forwardsIn(script);
   const expectedForwards = zones.map(zone => [zone.method, zone.key, zone.method]);
   expectedForwards.splice(2, 0, ['openBoardProjectFile', 'fileCard', 'openBoardProjectFile'],
-    ['openVerifiedRunFile', 'fileCard', 'openVerifiedRunFile']);
+    ['openBoardProjectFileAt', 'fileCard', 'openBoardProjectFileAt'], ['openVerifiedRunFile', 'fileCard', 'openVerifiedRunFile']);
   assert.deepEqual(forwards.map(({ binding, zone, method }) => [binding, zone, method]),
     expectedForwards, 'every stage1 forwarding declaration');
   const footer = installerSource(script);
@@ -172,7 +172,7 @@ async function install(script, namespaces, { transformNamespace = (_, namespace)
             const api = target[name](strictDeps);
             const expected = factoryDeps(read(modulePath(zone)));
             assert.deepEqual(sorted(reads), expected, `${zone.file}: actual factory reads exactly its declared deps`);
-            assert.deepEqual(Object.keys(api), zone.key === 'fileCard' ? [zone.method, 'openVerifiedRunFile', 'openBoardProjectFile', 'onWorkflowEvent'] : [zone.method], `${zone.file}: actual returned interface`);
+            assert.deepEqual(Object.keys(api), zone.key === 'fileCard' ? [zone.method, 'openVerifiedRunFile', 'openBoardProjectFile', 'openBoardProjectFileAt', 'onWorkflowEvent'] : [zone.method], `${zone.file}: actual returned interface`);
             assert.equal(typeof api[zone.method], 'function');
             if (zone.key === 'fileCard') assert.equal(typeof api.onWorkflowEvent, 'function', 'File watcher receiver is callable');
             received.push({ zone, deps, api, reads });
@@ -370,7 +370,7 @@ test('real ESM factories and actual installer use one frozen dependency object w
   const installed = await install(core, await importModules());
   const required = sorted(new Set(zones.flatMap(zone => factoryDeps(read(modulePath(zone))))));
   assert.deepEqual(installerDeps(core), required, 'installer supplies exactly the actual factory dependency union');
-  assert.equal(required.length, 33, 'stage1 plus explicit project target and Terminal Card callbacks');
+  assert.equal(required.length, 35, 'stage1 plus explicit project target, Terminal Card callbacks and the CODE-06 result card (RunResult, openBoardProjectFileAt)');
   assert.equal(installed.received[1].deps.getProjectTarget, installed.bindings.getProjectTarget);
   assert.equal(installed.received[1].deps.spawnTerminalCard, installed.forwards.spawnTerminalCard);
   const api = readBootApi(core, installed.forwards);
