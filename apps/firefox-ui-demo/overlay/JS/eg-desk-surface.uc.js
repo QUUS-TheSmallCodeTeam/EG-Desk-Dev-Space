@@ -15175,6 +15175,10 @@
     let current = null;
     try { current = document.getElementById(cardId)?._browserControls?.toolBinding?.(); } catch { return source; }
     if (!current) return source;
+    // A token re-issued for a send that never bound would otherwise linger.
+    for (const [token, entry] of browserToolUserSelections) {
+      if (entry.threadId === clientThreadId && entry.cardId === cardId && entry.sourceId === source.id && !entry.usedRunId) browserToolUserSelections.delete(token);
+    }
     return registerBrowserToolSelection(threadId, { ...source,
       sourceRef: { ...source.sourceRef, uri: current.url, profileId: current.profileId, accountId: current.accountId },
       browserToolIdentity: { cardEpoch: current.cardEpoch, userContextId: current.userContextId,
@@ -15871,6 +15875,12 @@
       try {
         try { actionLease.projection = card._browserControls.toolPrepareAgentProjection?.(actionLease); } catch {}
         diagnosticPhase = 'actor';
+        // D-B1 for links and redirects: whatever a navigate, click or key press
+        // makes the page commit next is judged by the Card's commit guard.
+        if (['navigate', 'click', 'press'].includes(request.action.type)) {
+          try { card._browserControls.toolSetNavigationGuard?.({ fromUrl: request.guard.url,
+            allowed: (to, from) => browserToolNavigationAllowed(request.clientThreadId, to, from) }); } catch {}
+        }
         // BRW-05: an allowed other site is loaded by EG-Desk chrome; the page
         // actor keeps its same-site rule. Same observed-document guard, same
         // D-B1 check here again, chrome route in the receipt.
