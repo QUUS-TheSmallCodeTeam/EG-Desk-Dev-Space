@@ -2,7 +2,7 @@
 # Desk, Board, and Desk Window Runtime Model
 
 **Date**: 2026-05-18
-**Updated**: 2026-07-19
+**Updated**: 2026-10-31
 **Status**: Product/runtime architecture decision note
 **Scope**: EG-Desk Firefox shell, Desk canvas, Board state, Desk Window lifecycle, search, local index, input ownership
 
@@ -118,6 +118,30 @@ automatic Desk-session change
 Board change
   adding/removing a member, changing a Board binding, or updating saved layout
   -> marked unsaved until the Board update action is performed
+```
+
+Board membership is edited from the View bar (CNV-03; decisions D-V1 to D-V4
+of 2026-10-24). The View bar states only the recorded owner and never infers
+one from the active Board or the View's position:
+
+```text
+View bar
+  recorded owner       -> Board name + chevron; menu '○○에서 빼기', '△△에 넣기'
+  no recorded owner    -> '소속 없음' + chevron; menu '△△에 넣기' per open Board
+  conflicting records  -> no name is guessed; the menu still offers every Board
+
+rules
+  D-V1 one View belongs to one Board at most; joining another leaves the current one
+  D-V2 a new View is never added on its own: opened inside a Board region, or
+  D-V3 dropped into one, it gets '○○에 넣을까요? [넣기] [아니요]' under its View bar
+  D-V4 a new Board saved from open Views binds those Views where they are (no copy)
+  every membership edit marks the Board unsaved ('저장 안 됨') until it is saved
+
+runtime
+  rules   overlay/resources/EGDeskBoardMembership.sys.mjs (pure, unit-tested)
+  edits   EGDeskCanvasLayout addProjectionMember / removeProjectionMember
+  screen  eg-desk-surface.uc.js addViewToBoard / removeViewFromBoard /
+          offerBoardMembershipSuggestion / bindSavedBoardInPlace
 ```
 
 When a Board with unsaved Board changes is closed or switched, the product
