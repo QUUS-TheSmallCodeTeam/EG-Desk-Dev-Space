@@ -4370,7 +4370,12 @@
     view.dataset.boardId = projection.boardId;
     view.dataset.projectionId = projection.id;
     view.dataset.memberId = member.sourceId;
-    view.addEventListener('mousedown', () => selectBoardProjection(projection.id), true);
+    // CNV-03: membership can change later (View bar menu), so a press selects
+    // whichever Board the View belongs to at that moment, and none once removed.
+    if (!view._boardSelectBound) {
+      view._boardSelectBound = true;
+      view.addEventListener('mousedown', () => { if (view.dataset.projectionId) selectBoardProjection(view.dataset.projectionId); }, true);
+    }
     if (registered) syncDeskWindowBoardMetadata(view);
     return view;
   }
@@ -4437,12 +4442,188 @@
       if (accessibleName) label.setAttribute('aria-label', accessibleName);
       else label.removeAttribute('aria-label');
     }
+    // CNV-03: the Board control after the name. Without a recorded owner it
+    // says '소속 없음' (never a guessed Board); with one, a chevron opens the menu.
+    const control = view._deskWindowShell?.boardMenu;
+    if (control) {
+      const kind = title ? 'owned' : view.dataset?.projectionId ? 'unknown' : 'none';
+      const text = kind === 'none' ? '소속 없음' : '';
+      const name = kind === 'owned' ? `소속 Board ${title} · 바꾸기` : kind === 'unknown' ? '소속 Board 확인' : '소속 없음 · Board에 넣기';
+      if (control.dataset.owned !== kind) control.dataset.owned = kind;
+      if (control._text && control._text.textContent !== text) control._text.textContent = text;
+      if (control.title !== name) control.title = name;
+      if (control.getAttribute('aria-label') !== name) control.setAttribute('aria-label', name);
+    }
     view._browserPresentation?.layout?.();
   }
 
   function syncAllDeskWindowBoardMetadata() {
     const index = deskWindowBoardIndex();
     for (const view of document.querySelectorAll('.egd-desk-window')) syncDeskWindowBoardMetadata(view, index);
+  }
+
+  // ── CNV-03: Board membership of a Desk Window (D-V1~D-V4) ──
+  // The rules are EGDeskBoardMembership; this is the screen side: live
+  // projection objects are patched in place (menus, regions and restore hold
+  // the same objects), the View's dataset and the Board's unsaved mark follow,
+  // and the chip under the View bar asks before anything joins by itself.
+  const BoardMembership = ChromeUtils.importESModule('chrome://userchrome/content/EGDeskBoardMembership.sys.mjs');
+
+  function boardRegionsForMembership() {
+    return Object.values(state.boards.projections).map(projection => {
+      const region = projection?.id ? document.getElementById(projection.id) : null;
+      return region ? { id: projection.id, rect: persistentEntityGeometry(region) } : null;
+    }).filter(Boolean);
+  }
+
+  function applyBoardMembershipPatches(change) {
+    for (const patch of change.patches || []) {
+      const projection = state.boards.projections[patch.id];
+      if (!projection) continue;
+      projection.members = patch.members;
+      projection.idMap = patch.idMap;
+    }
+  }
+
+  function bindViewToBoard(view, projection, member) {
+    view.dataset.boardId = projection.boardId;
+    view.dataset.projectionId = projection.id;
+    view.dataset.memberId = member.sourceId;
+    if (!view._boardSelectBound) {
+      view._boardSelectBound = true;
+      view.addEventListener('mousedown', () => { if (view.dataset.projectionId) selectBoardProjection(view.dataset.projectionId); }, true);
+    }
+    syncDeskWindowBoardMetadata(view);
+  }
+
+  function unbindViewFromBoard(view) {
+    delete view.dataset.boardId;
+    delete view.dataset.projectionId;
+    delete view.dataset.memberId;
+    syncDeskWindowBoardMetadata(view);
+  }
+
+  // A membership edit is a Board change: the Board shows '저장 안 됨' until it
+  // is saved again, as moving one of its Views does.
+  function markBoardMembershipDirty(projection, reason, view) {
+    if (!projection) return;
+    if (view?.dataset?.projectionId === projection.id) { markAgendaDirty(reason, view); return; }
+    projection.dirty = true;
+    refreshBoardRegion(projection);
+    scheduleDeskSessionSave();
+  }
+
+  function viewBoardRecord(view) {
+    return view.classList.contains('egd-canvas-shape') ? serializeShapeState(view) : serializeCardState(view);
+  }
+
+  // '○○에 넣기': the View joins the Board as it is, leaving any other Board in
+  // the same step (D-V1). Nothing opens anew.
+  function addViewToBoard(view, projectionId) {
+    const target = state.boards.projections[projectionId];
+    if (!view?.isConnected || !target) return false;
+    if (view.dataset.projectionId === target.id) return true;
+    const kind = view.classList.contains('egd-canvas-shape') ? 'shape' : 'card';
+    const record = viewBoardRecord(view);
+    if (!record) { boardNotice('이 화면은 Board에 넣을 수 없습니다.'); return false; }
+    const change = BoardMembership.planMembershipChange(state.boards.projections,
+      { action: 'add', projectionId: target.id, viewId: view.id, kind, record });
+    if (!change.changed) return false;
+    dismissBoardMembershipSuggestion(view);
+    applyBoardMembershipPatches(change);
+    if (change.from) markBoardMembershipDirty(state.boards.projections[change.from], 'board-member-move', view);
+    bindViewToBoard(view, target, change.member);
+    markBoardMembershipDirty(target, 'board-member-add', view);
+    syncAllDeskWindowBoardMetadata();
+    refreshDeskMinimap();
+    return true;
+  }
+
+  // '○○에서 빼기': the View stays on the Desk and belongs to no Board.
+  function removeViewFromBoard(view) {
+    const owner = view?.dataset?.projectionId ? state.boards.projections[view.dataset.projectionId] : null;
+    if (!view?.isConnected || !owner) return false;
+    const change = BoardMembership.planMembershipChange(state.boards.projections,
+      { action: 'remove', viewId: view.id, projectionId: owner.id });
+    dismissBoardMembershipSuggestion(view);
+    if (change.changed) applyBoardMembershipPatches(change);
+    markBoardMembershipDirty(owner, 'board-member-remove', view);
+    unbindViewFromBoard(view);
+    syncAllDeskWindowBoardMetadata();
+    refreshDeskMinimap();
+    return true;
+  }
+
+  function dismissBoardMembershipSuggestion(view) {
+    const chip = view?._boardSuggestion;
+    if (!chip) return;
+    view._boardSuggestion = null;
+    chip.remove();
+  }
+
+  // D-V2 · D-V3: a View opened inside a Board region, or dropped into one, gets
+  // '○○에 넣을까요?' under its View bar. Only '넣기' changes membership; the chip
+  // leaves on '아니요', Esc, the next drop, or a membership change. Restored
+  // Views keep their recorded membership and get no chip.
+  function offerBoardMembershipSuggestion(view, trigger = 'drop') {
+    if (!view?.isConnected || !view._deskWindowShell || isCardFullscreen(view)) return null;
+    const quiet = !!(state.agenda.suppressDirty || state.agenda.restoreInProgress || state.surface.restoring);
+    const suggestion = BoardMembership.membershipSuggestion({
+      viewRect: persistentEntityGeometry(view), regions: boardRegionsForMembership(), projections: state.boards.projections,
+      ownerId: view.dataset.projectionId || null, quiet,
+    });
+    dismissBoardMembershipSuggestion(view);
+    if (!suggestion) return null;
+    const chip = el('div', {
+      class: 'egd-board-suggest', role: 'group', 'aria-label': suggestion.message,
+      data: { testid: 'window-board-suggest', projectionId: suggestion.projectionId, action: suggestion.action, trigger, noWindowDrag: 'true' },
+    },
+    deskIcon('board'),
+    el('span', { class: 'egd-board-suggest-text', title: suggestion.message }, suggestion.message),
+    el('button', { type: 'button', class: 'egd-board-suggest-accept', data: { testid: 'window-board-suggest-accept' },
+      onclick: (ev) => { ev.stopPropagation(); if (!addViewToBoard(view, suggestion.projectionId)) dismissBoardMembershipSuggestion(view); } },
+    suggestion.accept),
+    el('button', { type: 'button', class: 'egd-board-suggest-decline', title: '이 제안 닫기', data: { testid: 'window-board-suggest-decline' },
+      onclick: (ev) => { ev.stopPropagation(); dismissBoardMembershipSuggestion(view); } },
+    suggestion.decline));
+    chip.addEventListener('keydown', (ev) => {
+      if (ev.key !== 'Escape') return;
+      ev.preventDefault();
+      ev.stopPropagation();
+      dismissBoardMembershipSuggestion(view);
+      view._deskWindowShell?.focus?.();
+    });
+    view._boardSuggestion = chip;
+    view._deskWindowShell.slots.header.appendChild(chip);
+    return chip;
+  }
+
+  // D-V4: a Board saved from open Views becomes a region right there; the
+  // Views are bound as they stand and nothing opens anew. A View that was in
+  // another Board leaves it (D-V1), and that Board shows '저장 안 됨'.
+  function bindSavedBoardInPlace(snapshot) {
+    if (!snapshot?.agenda?.id || Object.values(state.boards.projections).some(item => item?.boardId === snapshot.agenda.id)) return null;
+    let projectionId;
+    do { projectionId = `egd-board-${++cardSeq}`; }
+    while (document.getElementById(projectionId) || Object.hasOwn(state.boards.projections, projectionId)
+      || Object.values(state.boards.projections).some(item => item?.id === projectionId));
+    const projection = BoardMembership.inPlaceBoardProjection(snapshot, projectionId);
+    for (const member of projection.members) {
+      const view = document.getElementById(member.viewId);
+      const change = view ? BoardMembership.planMembershipChange(state.boards.projections, { action: 'remove', viewId: view.id }) : null;
+      if (!change?.changed) continue;
+      applyBoardMembershipPatches(change);
+      markBoardMembershipDirty(state.boards.projections[change.from], 'board-member-move', view);
+    }
+    state.boards.projections[projection.id] = projection;
+    for (const member of projection.members) {
+      const view = document.getElementById(member.viewId);
+      if (!view) continue;
+      dismissBoardMembershipSuggestion(view);
+      bindViewToBoard(view, projection, member);
+    }
+    refreshBoardRegion(projection);
+    return projection;
   }
 
   function refreshBoardRegion(projection) {
@@ -4557,6 +4738,75 @@
     items[0].focus();
     return menu;
   }
+
+  // CNV-03: the View bar's Board control. '○○에서 빼기' and '○○에 넣기' only;
+  // one View belongs to one Board (D-V1), so joining leaves the other. It
+  // shares the Board region menu's chrome and its single open-menu slot.
+  function toggleViewBoardMenu(view, anchor) {
+    const sameMenu = !!view?.id && boardRegionMenu?.dataset.viewId === view.id;
+    closeBoardRegionMenu();
+    if (sameMenu || !view?.isConnected || !anchor?.isConnected) return null;
+    const rows = BoardMembership.membershipMenuItems({
+      projections: state.boards.projections, ownerId: view.dataset.projectionId || null,
+      activeId: state.boards.activeProjectionId, recentIds: recentBoardProjectionIds,
+    });
+    const items = rows.items.map(row => el('button', {
+      type: 'button', class: 'egd-board-menu-item', role: 'menuitem', title: row.title, 'aria-label': row.title,
+      data: { testid: row.testid, projectionId: row.projectionId, viewId: view.id, action: row.action },
+      onclick: (ev) => {
+        ev.stopPropagation();
+        closeBoardRegionMenu({ restoreFocus: true });
+        if (row.action === 'remove') removeViewFromBoard(view);
+        else addViewToBoard(view, row.projectionId);
+      },
+    }, row.label));
+    if (!items.length) {
+      items.push(el('button', { type: 'button', class: 'egd-board-menu-item', role: 'menuitem', 'aria-disabled': 'true',
+        data: { testid: 'window-board-none', viewId: view.id } }, rows.empty));
+    }
+    const menuWidth = 208;
+    const pos = resolveFloatingMenuPlacement(anchor.getBoundingClientRect(), menuWidth, items.length * 36 + 4);
+    const menu = el('div', {
+      class: 'egd-board-menu egd-board-menu-view', role: 'menu', 'aria-label': '소속 Board',
+      data: { viewId: view.id }, style: { left: `${Math.round(pos.left)}px`, top: `${Math.round(pos.top)}px`, width: `${menuWidth}px` },
+    }, ...items);
+    const onKeydown = (ev) => {
+      if (ev.key === 'Escape') {
+        ev.preventDefault();
+        ev.stopPropagation();
+        closeBoardRegionMenu({ restoreFocus: true });
+        return;
+      }
+      const current = items.indexOf(document.activeElement);
+      const next = ev.key === 'ArrowDown' ? (current + 1) % items.length
+        : ev.key === 'ArrowUp' ? (current - 1 + items.length) % items.length
+          : ev.key === 'Home' ? 0 : ev.key === 'End' ? items.length - 1 : -1;
+      if (next < 0) return;
+      ev.preventDefault();
+      items[next].focus();
+    };
+    const onOutside = (ev) => {
+      if (menu.contains(ev.target) || anchor.contains(ev.target)) return;
+      closeBoardRegionMenu();
+    };
+    menu.addEventListener('keydown', onKeydown);
+    window.addEventListener('mousedown', onOutside, true);
+    window.addEventListener('wheel', onOutside, true);
+    menu._anchor = anchor;
+    menu._dispose = () => {
+      window.removeEventListener('mousedown', onOutside, true);
+      window.removeEventListener('wheel', onOutside, true);
+    };
+    document.documentElement.appendChild(menu);
+    anchor.setAttribute('aria-expanded', 'true');
+    boardRegionMenu = menu;
+    items[0].focus();
+    return menu;
+  }
+  // The Desk Window shell reaches these through state so the shell stays
+  // self-contained (its unit harness compiles it alone).
+  state.toggleViewBoardMenu = toggleViewBoardMenu;
+  state.offerBoardMembership = offerBoardMembershipSuggestion;
 
   // ── CTX-01: Board versions in the bridge's Desk store ──
   function boardVersionHistoryReady() {
@@ -5063,7 +5313,9 @@
           view.dataset.boardId = projection.boardId;
           view.dataset.projectionId = projection.id;
           view.dataset.memberId = member.sourceId;
-          view.addEventListener('mousedown', () => selectBoardProjection(projection.id), true);
+          if (view._boardSelectBound) continue;
+          view._boardSelectBound = true;
+          view.addEventListener('mousedown', () => { if (view.dataset.projectionId) selectBoardProjection(view.dataset.projectionId); }, true);
         }
       }
       if (!options.merge) {
@@ -5123,11 +5375,13 @@
         member.record = cloneJson([...(snapshot.cards || []), ...(snapshot.shapes || [])].find(record => record.id === member.sourceId) || member.record);
       }
     }
+    // D-V4: a Board saved from open Views binds them where they are (CNV-03).
+    const bound = projection || (Array.isArray(options.memberIds) && options.memberIds.length ? bindSavedBoardInPlace(snapshot) : null);
     state.agenda.dirty = false;
     state.agenda.dirtyReasons = [];
     state.agenda.hasSavedState = true;
     state.agenda.lastSavedAt = snapshot.savedAt;
-    if (projection) selectBoardProjection(projection.id);
+    if (bound) selectBoardProjection(bound.id);
     else if (state.boards.activeProjectionId) selectBoardProjection(state.boards.activeProjectionId);
     syncViewportAgendaRail();
     scheduleDeskSessionSave();
@@ -6183,7 +6437,7 @@
     const commitScope = memberIds => {
       if (!name.value.trim()) { name.focus(); name.setAttribute('aria-invalid', 'true'); return; }
       const saved = saveCurrentAgendaState({ agendaId: newAgendaId(), title: name.value.trim(), memberIds });
-      if (saved) { dialog.remove(); boardNotice('Board를 저장했습니다. Board 목록에서 열 수 있습니다.'); }
+      if (saved) { dialog.remove(); boardNotice(memberIds.length ? 'Board를 저장하고 그 자리에 묶었습니다.' : 'Board를 저장했습니다. Board 목록에서 열 수 있습니다.'); }
     };
     document.documentElement.appendChild(dialog);
     name.focus();
@@ -13807,6 +14061,16 @@
     const identity = el('div', { class: 'egd-desk-window-identity' });
     identity.appendChild(deskIcon({ browser: 'browser', ontology: 'ontology', file: 'file', 'input-evidence': 'file', result: 'result' }[kind] || 'square', 'egd-ui-icon egd-window-kind-icon'));
     const boardMetadata = el('span', { class: 'egd-desk-window-board', role: 'note', hidden: true, data: { testid: 'window-board' } });
+    // CNV-03: the Board control after the name. It opens '넣기 / 빼기'; without a
+    // recorded owner it says '소속 없음' so the bar never implies a Board.
+    const boardMenuText = el('span', { class: 'egd-desk-window-board-menu-text' }, '소속 없음');
+    const boardMenu = el('button', {
+      type: 'button', class: 'egd-desk-window-board-menu', title: '소속 없음 · Board에 넣기', 'aria-label': '소속 없음 · Board에 넣기',
+      'aria-haspopup': 'menu', 'aria-expanded': 'false',
+      data: { testid: 'window-board-menu', owned: 'none', noWindowDrag: 'true' },
+      onclick: (ev) => { ev.stopPropagation(); state.toggleViewBoardMenu?.(root, ev.currentTarget); },
+    }, boardMenuText, deskIcon('chevron', 'egd-ui-icon egd-desk-window-board-menu-icon'));
+    boardMenu._text = boardMenuText;
     const actions = el('div', { class: 'egd-desk-window-actions' });
     const topbar = el('div', { class: 'egd-card-topbar egd-desk-window-titlebar' },
       el('div', { class: 'egd-card-dots-shell' },
@@ -13815,6 +14079,7 @@
       el('span', { class: 'egd-window-grip', 'aria-hidden': 'true' }, deskIcon('grip')),
       identity,
       boardMetadata,
+      boardMenu,
       actions,
     );
     const header = el('div', {
@@ -13849,6 +14114,10 @@
     if (options.sourceRef) bindCardSourceRef(root, options.sourceRef);
     markAgendaDirty(options.createDirtyReason || `create-${kind}-window`, root);
     if (options.activate !== false) setActiveEntity(root);
+    // D-V2: a View opened inside a Board region is only offered membership,
+    // once its opener has placed it. Restored Views are bound by their record.
+    const quietOpen = !!(state.agenda?.suppressDirty || state.agenda?.restoreInProgress || state.surface?.restoring);
+    if (!quietOpen) setTimeout(() => { if (root.isConnected && !root.dataset.projectionId) state.offerBoardMembership?.(root, 'open'); }, 0);
 
     const startPanIfNeeded = (ev) => {
       if (!state.panModifier || ev.button !== 0) return false;
@@ -13949,6 +14218,8 @@
     const onUp = () => {
       if (drag) markAgendaDirty(options.moveDirtyReason || `move-${kind}-window`, root);
       if (resize) markAgendaDirty(options.resizeDirtyReason || `resize-${kind}-window`, root);
+      // D-V3: a drop into a Board region offers membership; a plain press does not.
+      if (drag && (root.offsetLeft !== drag.left || root.offsetTop !== drag.top)) state.offerBoardMembership?.(root, 'drop');
       drag = null;
       resize = null;
     };
@@ -13967,6 +14238,7 @@
     const shell = {
       root,
       boardMetadata,
+      boardMenu,
       slots: { header, topbar, identity, actions, toolbar, progress, content: body },
       resizeHits,
       focus,
