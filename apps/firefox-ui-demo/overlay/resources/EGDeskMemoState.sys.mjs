@@ -9,9 +9,9 @@
 //   comment kept apart from later replies (backend/src/app/rpc/commands/
 //   comments.clj create-comment-thread / update-comment-thread; frontend
 //   workspace comments update-comment-thread-position re-finds the frame).
-// - excalidraw (MIT, Copyright (c) 2020 Excalidraw): sticky note baseHeight,
-//   the note grows to fit and never shrinks below the height the user set
-//   (packages/element/src/types.ts ExcalidrawStickyNoteElement).
+// - Two fixed frames instead of a free size (CNV-06 decision): folded
+//   240×160 shows the body, expanded 320×280 adds the reply thread and
+//   [Agent에게 묻기]. The body scrolls inside the frame.
 // - CopilotKit (MIT, Copyright (c) Atai Barkai): a response is only live
 //   while its request is still executing (packages/react-core/src/v2/hooks/
 //   use-human-in-the-loop.tsx). Here: an Agent answer joins a memo only while
@@ -30,9 +30,12 @@ const clamp = (value, min, max) => Math.min(max, Math.max(min, value));
 export const MEMO_LIMITS = Object.freeze({
   text: 2000, reply: 2000, replies: 200, asks: 50, links: 8,
   name: 40, linkLabel: 80, question: 500, askText: 4000, askContextReplies: 3, askContextReply: 300,
-  coordinate: 1e7,
+  target: 80, coordinate: 1e7,
 });
-export const MEMO_SIZE = Object.freeze({ width: 220, baseHeight: 140, min: 80, max: 1200 });
+export const MEMO_FRAME = Object.freeze({
+  folded: Object.freeze({ width: 240, height: 160 }),
+  expanded: Object.freeze({ width: 320, height: 280 }),
+});
 export const MEMO_ASK_STATUSES = Object.freeze(['pending', 'answered', 'cancelled']);
 
 function body(value) {
@@ -75,11 +78,6 @@ function normAuthor(raw) {
   return author;
 }
 
-function normSize(raw) {
-  const pick = (value, fallback) => finite(value) ? Math.round(clamp(value, MEMO_SIZE.min, MEMO_SIZE.max)) : fallback;
-  return { width: pick(raw?.width, MEMO_SIZE.width), baseHeight: pick(raw?.baseHeight, MEMO_SIZE.baseHeight) };
-}
-
 function normReply(raw) {
   if (!raw || typeof raw !== 'object') return null;
   const id = token(raw.id);
@@ -102,10 +100,16 @@ function normReply(raw) {
   return reply;
 }
 
+// requestId/threadId: the Chat request the question went out as, so the
+// answer finds its memo again after a restart.
 function normAsk(raw) {
   const askId = token(raw?.askId), agentId = token(raw?.agentId);
   if (!askId || !agentId) return null;
   const ask = { askId, agentId, status: MEMO_ASK_STATUSES.includes(raw.status) ? raw.status : 'pending' };
+  for (const key of ['requestId', 'threadId']) {
+    const value = token(raw[key]);
+    if (value) ask[key] = value;
+  }
   const answerId = token(raw.answerId);
   if (ask.status === 'answered' && answerId) ask.answerId = answerId;
   const askedAt = msTime(raw.askedAt);
@@ -141,7 +145,7 @@ export function normalizeMemoRecord(raw, { now = Date.now() } = {}) {
   const memo = { version: 1, id };
   if (Number.isSafeInteger(raw.seq) && raw.seq > 0) memo.seq = raw.seq;
   memo.anchor = anchor;
-  memo.size = normSize(raw.size);
+  memo.expanded = raw.expanded === true;
   memo.author = normAuthor(raw.author) || { kind: 'user' };
   memo.text = body(raw.text).slice(0, MEMO_LIMITS.text);
   memo.resolved = raw.resolved === true;
@@ -217,18 +221,16 @@ export function memoPosition(memo, cards = []) {
   return anchor.at ? { x: anchor.at.x, y: anchor.at.y, attached: false, missing: true } : null;
 }
 
-// excalidraw sticky note rule: grow to fit the content, never below the height
-// the user set, never past the maximum.
-export function memoDisplayHeight(memo, contentHeight) {
-  const base = memo?.size?.baseHeight ?? MEMO_SIZE.baseHeight;
-  const needed = finite(contentHeight) ? Math.ceil(contentHeight) : 0;
-  return clamp(Math.max(base, needed), MEMO_SIZE.min, MEMO_SIZE.max);
+// The frame the memo is drawn in. Folding is a view choice and leaves
+// updatedAt alone: the memo's content did not change.
+export function memoFrame(memo) {
+  return memo?.expanded === true ? MEMO_FRAME.expanded : MEMO_FRAME.folded;
 }
 
-export function resizeMemo(memo, { width, baseHeight } = {}, { now = Date.now() } = {}) {
-  const size = normSize({ width: width ?? memo.size?.width, baseHeight: baseHeight ?? memo.size?.baseHeight });
-  if (size.width === memo.size?.width && size.baseHeight === memo.size?.baseHeight) return memo;
-  return { ...memo, size, updatedAt: Math.max(memo.updatedAt, now) };
+export function setMemoExpanded(memo, expanded) {
+  const next = expanded === true;
+  if (next === memo.expanded) return memo;
+  return { ...memo, expanded: next };
 }
 
 export function editMemoText(memo, text, { now = Date.now() } = {}) {
@@ -270,12 +272,13 @@ export function memoLinksForCanvas(memo) {
     ...(link.label ? { label: link.label } : {}) }));
 }
 
-const authorName = author => author?.kind === 'agent' ? author.name || 'Agent' : '나';
+export const memoAuthorName = author => author?.kind === 'agent' ? author.name || 'Agent' : '나';
 
-// Draft for [Agent에게 묻기]: one Chat message that carries the memo body, its
-// latest replies and the question, plus ids for routing the answer back. It
-// does not change the memo; call recordMemoAsk after the message was sent.
-export function memoAskDraft(memo, { agentId, agentName, question = '' } = {}) {
+// Draft for [Agent에게 묻기]: one Chat message that carries the memo body, the
+// card it sits on (target), its latest replies and the question, plus ids for
+// routing the answer back. It does not change the memo; call recordMemoAsk
+// after the message was sent.
+export function memoAskDraft(memo, { agentId, agentName, question = '', target = '' } = {}) {
   const agent = token(agentId);
   if (!agent) throw new Error('물어볼 Agent를 골라 주세요.');
   const ask = oneLine(question, MEMO_LIMITS.question + 1) || '';
@@ -285,8 +288,10 @@ export function memoAskDraft(memo, { agentId, agentName, question = '' } = {}) {
   let n = memo.asks.length + 1;
   while (used.has(`ask-${n}`)) n += 1;
   const recent = memo.replies.slice(-MEMO_LIMITS.askContextReplies)
-    .map(reply => `${authorName(reply.author)}: ${reply.text.replace(/\s+/g, ' ').slice(0, MEMO_LIMITS.askContextReply)}`);
+    .map(reply => `${memoAuthorName(reply.author)}: ${reply.text.replace(/\s+/g, ' ').slice(0, MEMO_LIMITS.askContextReply)}`);
   const parts = [`[메모${memo.seq ? ` #${memo.seq}` : ''} · ${memo.id}]`, memo.text || '(내용 없음)'];
+  const targetLabel = oneLine(target, MEMO_LIMITS.target);
+  if (targetLabel) parts.push(`대상: ${targetLabel}`);
   if (recent.length) parts.push(`최근 답글:\n${recent.join('\n')}`);
   if (ask) parts.push(`질문: ${ask}`);
   const draft = { memoId: memo.id, askId: `ask-${n}`, agentId: agent, text: parts.join('\n\n').slice(0, MEMO_LIMITS.askText),
@@ -297,13 +302,46 @@ export function memoAskDraft(memo, { agentId, agentName, question = '' } = {}) {
 }
 
 // The ask message was sent: the memo now waits for that Agent's answer.
-export function recordMemoAsk(memo, draft, { now = Date.now() } = {}) {
+// requestId/threadId name the Chat request so the answer is routed back.
+export function recordMemoAsk(memo, draft, { now = Date.now(), requestId, threadId } = {}) {
   if (draft?.memoId !== memo.id) throw new Error('다른 메모의 질문입니다.');
   const askId = token(draft.askId), agentId = token(draft.agentId);
   if (!askId || !agentId) throw new Error('질문 기록이 올바르지 않습니다.');
   if (memo.asks.some(item => item.askId === askId)) return memo;
   if (memo.asks.length >= MEMO_LIMITS.asks) throw new Error('이 메모의 질문 기록이 가득 찼습니다.');
-  return { ...memo, asks: [...memo.asks, { askId, agentId, status: 'pending', askedAt: now }], updatedAt: Math.max(memo.updatedAt, now) };
+  const ask = { askId, agentId, status: 'pending', askedAt: now };
+  if (token(requestId)) ask.requestId = requestId;
+  if (token(threadId)) ask.threadId = threadId;
+  return { ...memo, asks: [...memo.asks, ask], updatedAt: Math.max(memo.updatedAt, now) };
+}
+
+// The memo and pending ask a Chat request belongs to, or null.
+export function findPendingMemoAsk(memos, requestId) {
+  const id = token(requestId);
+  if (!id) return null;
+  for (const memo of memos || []) {
+    const ask = (memo?.asks || []).find(item => item.status === 'pending' && item.requestId === id);
+    if (ask) return { memo, ask };
+  }
+  return null;
+}
+
+// A finished Chat run as a memo reply candidate: its answerId, runId and the
+// Agent's text (assistant messages joined). null while the run is not
+// completed or has no text yet.
+export function memoReplyFromRun(run) {
+  if (!run || run.status !== 'completed') return null;
+  const answerId = token(run.answerId);
+  if (!answerId) return null;
+  const text = body((Array.isArray(run.messages) ? run.messages : [])
+    .filter(message => message?.role === 'assistant' && !['error', 'failed'].includes(message.status))
+    .map(message => typeof message.content === 'string' ? message.content : typeof message.text === 'string' ? message.text : '')
+    .filter(Boolean).join('\n\n'));
+  if (!text) return null;
+  const reply = { answerId, text };
+  const runId = token(run.runId);
+  if (runId) reply.runId = runId;
+  return reply;
 }
 
 export function cancelMemoAsk(memo, askId, { now = Date.now() } = {}) {

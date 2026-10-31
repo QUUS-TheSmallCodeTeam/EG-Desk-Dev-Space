@@ -213,7 +213,8 @@ test('memo: a memo pins to the topmost card under it as a ratio and follows that
   const memo = Memo.createMemoRecord({ id: 'memo-1', seq: 1, point: { x: 300, y: 250 }, cards, text: '  이 표가 맞는지\r\n\r\n\r\n확인  ', now: 10 });
   assert.deepEqual(memo.anchor, { kind: 'card', cardId: 'egd-card-2', x: 0.25, y: 0.5, at: { x: 300, y: 250 } });
   assert.equal(memo.text, '이 표가 맞는지\n\n확인');
-  assert.deepEqual(memo.size, { width: Memo.MEMO_SIZE.width, baseHeight: Memo.MEMO_SIZE.baseHeight });
+  assert.equal(memo.expanded, false);
+  assert.deepEqual(Memo.memoFrame(memo), { width: 240, height: 160 });
   assert.deepEqual(Memo.memoPosition(memo, cards), { x: 300, y: 250, attached: true, missing: false });
   const resized = [{ id: 'egd-card-2', rect: { x: 1000, y: 0, width: 800, height: 600 } }];
   assert.deepEqual(Memo.memoPosition(memo, resized), { x: 1200, y: 300, attached: true, missing: false });
@@ -225,19 +226,21 @@ test('memo: a memo pins to the topmost card under it as a ratio and follows that
   assert.throws(() => Memo.createMemoRecord({ id: 'memo-3', point: { x: 0, y: 0 }, text: 'x'.repeat(Memo.MEMO_LIMITS.text + 1) }), /2000자/);
 });
 
-test('memo: sticky height grows to fit and never shrinks below the height the user set', () => {
-  const memo = Memo.resizeMemo(Memo.createMemoRecord({ id: 'm', point: { x: 0, y: 900 } }), { baseHeight: 180 });
-  assert.equal(Memo.memoDisplayHeight(memo, 90), 180);
-  assert.equal(Memo.memoDisplayHeight(memo, 260.2), 261);
-  assert.equal(Memo.memoDisplayHeight(memo, 99999), Memo.MEMO_SIZE.max);
-  assert.equal(Memo.resizeMemo(memo, { baseHeight: 180 }), memo);
-  assert.equal(Memo.resizeMemo(memo, { width: 10 }).size.width, Memo.MEMO_SIZE.min);
+test('memo: folded 240×160 and expanded 320×280 are the only frames; folding is not a content change', () => {
+  const memo = Memo.createMemoRecord({ id: 'm', point: { x: 0, y: 900 }, now: 5 });
+  assert.deepEqual(Memo.MEMO_FRAME, { folded: { width: 240, height: 160 }, expanded: { width: 320, height: 280 } });
+  const open = Memo.setMemoExpanded(memo, true);
+  assert.deepEqual([open.expanded, Memo.memoFrame(open)], [true, { width: 320, height: 280 }]);
+  assert.equal(open.updatedAt, 5, 'opening the thread leaves updatedAt alone');
+  assert.equal(Memo.setMemoExpanded(open, true), open);
+  assert.deepEqual(Memo.memoFrame(Memo.setMemoExpanded(open, false)), { width: 240, height: 160 });
+  assert.deepEqual(Memo.memoFrame(null), { width: 240, height: 160 });
 });
 
 test('memo: restore is lenient but keeps ids, answer ids and asks unique; no private keys', () => {
   const raw = deepFreeze({
     id: 'memo-9', seq: 3, anchor: { kind: 'card', cardId: 'egd-card-1', x: 1.4, y: -1 }, text: 'x'.repeat(2100), resolved: 'yes',
-    size: { width: 300, baseHeight: 20 }, createdAt: 100, updatedAt: 50, apiKey: 'never',
+    size: { width: 300, baseHeight: 20 }, expanded: 'yes', createdAt: 100, updatedAt: 50, apiKey: 'never',
     replies: [
       { id: 'reply-1', author: { kind: 'user' }, text: '사람 답글' },
       { id: 'reply-2', author: { kind: 'agent', agentId: 'rio', name: 'Rio' }, text: 'Agent 답', answerId: 'answer-1', askId: 'ask-1' },
@@ -246,17 +249,20 @@ test('memo: restore is lenient but keeps ids, answer ids and asks unique; no pri
       { id: 'reply-4', author: { kind: 'agent', agentId: 'rio' }, text: '답변 id 없음' },
       { id: 'reply-5', author: { kind: 'robot' }, text: '?' },
     ],
-    asks: [{ askId: 'ask-1', agentId: 'rio', status: 'answered', answerId: 'answer-1' }, { askId: 'ask-1', agentId: 'rio' }, { askId: 'ask-2', agentId: 'mina', status: 'weird' }],
+    asks: [{ askId: 'ask-1', agentId: 'rio', status: 'answered', answerId: 'answer-1' }, { askId: 'ask-1', agentId: 'rio' },
+      { askId: 'ask-2', agentId: 'mina', status: 'weird', requestId: 'request-abc', threadId: 'thread-dm-1', extra: 1 }, { askId: 'ask-3', agentId: 'mina', requestId: '../x' }],
     links: [{ targetViewId: 'egd-card-2', label: '참고' }, { targetViewId: 'egd-card-2' }, { targetViewId: 'memo-9' }, { targetViewId: '../etc' }],
   });
   const memo = Memo.normalizeMemoRecord(raw);
   assert.deepEqual(memo.anchor, { kind: 'card', cardId: 'egd-card-1', x: 1, y: 0 });
   assert.equal(memo.text.length, Memo.MEMO_LIMITS.text);
   assert.equal(memo.resolved, false);
-  assert.deepEqual(memo.size, { width: 300, baseHeight: Memo.MEMO_SIZE.min });
+  assert.equal(memo.expanded, false);
+  assert.equal(Object.hasOwn(memo, 'size'), false, 'a memo has two fixed frames, no free size');
   assert.equal(memo.updatedAt, 100);
   assert.deepEqual(memo.replies.map(reply => reply.id), ['reply-1', 'reply-2']);
-  assert.deepEqual(memo.asks, [{ askId: 'ask-1', agentId: 'rio', status: 'answered', answerId: 'answer-1' }, { askId: 'ask-2', agentId: 'mina', status: 'pending' }]);
+  assert.deepEqual(memo.asks, [{ askId: 'ask-1', agentId: 'rio', status: 'answered', answerId: 'answer-1' },
+    { askId: 'ask-2', agentId: 'mina', status: 'pending', requestId: 'request-abc', threadId: 'thread-dm-1' }, { askId: 'ask-3', agentId: 'mina', status: 'pending' }]);
   assert.deepEqual(memo.links, [{ targetViewId: 'egd-card-2', label: '참고' }]);
   assert.deepEqual(privateKeysIn(memo), []);
   assert.throws(() => Memo.normalizeMemoRecord({ id: 'm' }), /자리가 없습니다/);
@@ -268,11 +274,12 @@ test('memo: [Agent에게 묻기] drafts one Chat message with the memo, recent r
   memo = Memo.linkMemo(memo, 'egd-card-2', '원본 표');
   for (const text of ['첫째', '둘째', '셋째', '넷째']) memo = Memo.appendMemoReply(memo, { author: { kind: 'user' }, text }).memo;
   const before = memo;
-  const draft = Memo.memoAskDraft(memo, { agentId: 'rio', agentName: 'Rio', question: ' 원인이 뭘까? ' });
+  const draft = Memo.memoAskDraft(memo, { agentId: 'rio', agentName: 'Rio', question: ' 원인이 뭘까? ', target: ' Browser ·  매출 표 ' });
   assert.equal(memo, before, 'drafting does not change the memo');
   assert.deepEqual({ ...draft, text: undefined }, { memoId: 'memo-1', askId: 'ask-1', agentId: 'rio', agentName: 'Rio', text: undefined,
     contextCardIds: ['egd-card-1', 'egd-card-2'] });
-  assert.equal(draft.text, '[메모 #4 · memo-1]\n\n매출 표의 3분기 숫자가 이상함\n\n최근 답글:\n나: 둘째\n나: 셋째\n나: 넷째\n\n질문: 원인이 뭘까?');
+  assert.equal(draft.text, '[메모 #4 · memo-1]\n\n매출 표의 3분기 숫자가 이상함\n\n대상: Browser · 매출 표\n\n최근 답글:\n나: 둘째\n나: 셋째\n나: 넷째\n\n질문: 원인이 뭘까?');
+  assert.equal(Memo.memoAskDraft(memo, { agentId: 'rio', question: 'q' }).text.includes('대상:'), false, 'a free Canvas memo names no target');
   assert.throws(() => Memo.memoAskDraft(memo, { question: 'x' }), /Agent를 골라/);
   assert.throws(() => Memo.memoAskDraft(memo, { agentId: 'rio', question: 'x'.repeat(501) }), /500자/);
   const empty = Memo.createMemoRecord({ id: 'memo-2', point: { x: 900, y: 900 } });
@@ -283,16 +290,20 @@ test('memo: [Agent에게 묻기] drafts one Chat message with the memo, recent r
 test('memo: an Agent answer joins its memo once, only while the ask is pending, only from the asked Agent', () => {
   let memo = Memo.createMemoRecord({ id: 'memo-1', seq: 1, point: { x: 900, y: 900 }, text: '확인 부탁', now: 1 });
   const draft = Memo.memoAskDraft(memo, { agentId: 'rio', question: '맞아?' });
-  memo = Memo.recordMemoAsk(memo, draft, { now: 2 });
+  memo = Memo.recordMemoAsk(memo, draft, { now: 2, requestId: 'request-1', threadId: 'thread-dm-x' });
   assert.equal(Memo.recordMemoAsk(memo, draft), memo, 'recording the same ask twice is a no-op');
-  assert.deepEqual(Memo.pendingMemoAsks(memo), [{ askId: 'ask-1', agentId: 'rio', status: 'pending', askedAt: 2 }]);
+  assert.deepEqual(Memo.pendingMemoAsks(memo), [{ askId: 'ask-1', agentId: 'rio', status: 'pending', askedAt: 2, requestId: 'request-1', threadId: 'thread-dm-x' }]);
+  assert.deepEqual(Memo.findPendingMemoAsk([null, Memo.createMemoRecord({ id: 'other', point: { x: 1, y: 1 } }), memo], 'request-1'), { memo, ask: memo.asks[0] });
+  assert.equal(Memo.findPendingMemoAsk([memo], 'request-9'), null);
+  assert.equal(Memo.findPendingMemoAsk([memo], undefined), null);
   assert.equal(Memo.memoAskDraft(memo, { agentId: 'rio', question: '또' }).askId, 'ask-2');
   const wrongAgent = Memo.appendMemoReply(memo, { author: { kind: 'agent', agentId: 'mina' }, text: '제가 답할게요', answerId: 'a-0', askId: 'ask-1' });
   assert.deepEqual([wrongAgent.appended, wrongAgent.reason, wrongAgent.memo], [false, 'ask-mismatch', memo]);
   const first = Memo.appendMemoReply(memo, { author: { kind: 'agent', agentId: 'rio', name: 'Rio' }, text: '네, 맞습니다.', answerId: 'a-1', askId: 'ask-1', runId: 'run-1' }, { now: 3 });
   assert.equal(first.appended, true);
   assert.deepEqual(first.memo.replies.at(-1), { id: 'reply-1', author: { kind: 'agent', agentId: 'rio', name: 'Rio' }, text: '네, 맞습니다.', createdAt: 3, answerId: 'a-1', askId: 'ask-1', runId: 'run-1' });
-  assert.deepEqual(first.memo.asks[0], { askId: 'ask-1', agentId: 'rio', status: 'answered', askedAt: 2, answerId: 'a-1' });
+  assert.deepEqual(first.memo.asks[0], { askId: 'ask-1', agentId: 'rio', status: 'answered', askedAt: 2, requestId: 'request-1', threadId: 'thread-dm-x', answerId: 'a-1' });
+  assert.equal(Memo.findPendingMemoAsk([first.memo], 'request-1'), null, 'an answered ask is no longer pending');
   const repeat = Memo.appendMemoReply(first.memo, { author: { kind: 'agent', agentId: 'rio' }, text: '네, 맞습니다.', answerId: 'a-1', askId: 'ask-1' });
   assert.deepEqual([repeat.appended, repeat.reason, repeat.memo], [false, 'duplicate', first.memo]);
   const late = Memo.appendMemoReply(first.memo, { author: { kind: 'agent', agentId: 'rio' }, text: '추가 답', answerId: 'a-2', askId: 'ask-1' });
@@ -310,6 +321,30 @@ test('memo: an Agent answer joins its memo once, only while the ask is pending, 
   assert.throws(() => Memo.appendMemoReply(first.memo, { author: { kind: 'user' }, text: '   ' }), /내용을 입력/);
   assert.throws(() => Memo.appendMemoReply(first.memo, { author: { kind: 'robot' }, text: 'x' }), /작성자/);
   assert.throws(() => Memo.recordMemoAsk(first.memo, { ...draft, memoId: 'other' }), /다른 메모/);
+});
+
+test('memo: a completed Chat run becomes one Agent reply; unfinished or empty runs become nothing', () => {
+  const run = { requestId: 'request-1', answerId: 'answer-7', runId: 'run-7', status: 'completed', messages: [
+    { id: 'u1', role: 'user', content: '[메모 · memo-1]\n\n질문: 맞아?', status: 'complete' },
+    { id: 'a1', role: 'assistant', content: '  네, 맞습니다.\r\n', status: 'complete' },
+    { id: 'a2', role: 'assistant', text: '근거는 3쪽입니다.', status: 'complete' },
+    { id: 'a3', role: 'assistant', content: '실패한 조각', status: 'error' },
+  ] };
+  assert.deepEqual(Memo.memoReplyFromRun(run), { answerId: 'answer-7', runId: 'run-7', text: '네, 맞습니다.\n\n근거는 3쪽입니다.' });
+  assert.equal(Memo.memoReplyFromRun({ ...run, status: 'running' }), null);
+  assert.equal(Memo.memoReplyFromRun({ ...run, answerId: null }), null);
+  assert.equal(Memo.memoReplyFromRun({ ...run, messages: [run.messages[0]] }), null);
+  assert.equal(Memo.memoReplyFromRun(null), null);
+  let memo = Memo.createMemoRecord({ id: 'memo-1', point: { x: 900, y: 900 }, text: '확인 부탁', now: 1 });
+  memo = Memo.recordMemoAsk(memo, Memo.memoAskDraft(memo, { agentId: 'rio', question: '맞아?' }), { now: 2, requestId: 'request-1', threadId: 't' });
+  const found = Memo.findPendingMemoAsk([memo], run.requestId);
+  const reply = Memo.memoReplyFromRun(run);
+  const joined = Memo.appendMemoReply(found.memo, { author: { kind: 'agent', agentId: found.ask.agentId, name: 'Rio' }, ...reply, askId: found.ask.askId }, { now: 3 });
+  assert.equal(joined.appended, true);
+  assert.equal(joined.memo.replies[0].answerId, 'answer-7');
+  assert.equal(Memo.memoAuthorName(joined.memo.replies[0].author), 'Rio');
+  assert.equal(Memo.memoAuthorName({ kind: 'user' }), '나');
+  assert.equal(Memo.memoAuthorName({ kind: 'agent', agentId: 'x' }), 'Agent');
 });
 
 test('memo: resolve, edit, numbering and JSON Canvas edges', () => {

@@ -8582,6 +8582,111 @@ button.egd-result-card-back:focus-visible { outline: var(--egd-focus-outline); o
 .egd-result-card-files { padding-top: 8px; border-top: 1px solid var(--egd-outline-variant); }
 .egd-result-card-files-title { color: var(--egd-on-surface-variant); font-size: 11.5px; font-weight: 650; }
 
+/* CNV-06 Canvas Memo: a note of two fixed frames (240×160, 320×280) on the --egd-note tone,
+   pinned to the card under it. User body on top, replies by author below, [<Agent>에게 묻기] last. */
+.egd-memo-card { background: var(--egd-note); border-color: var(--egd-note-line); }
+.egd-memo-card .egd-desk-window-header { background: var(--egd-note-soft); border-bottom: 1px solid var(--egd-note-line); }
+.egd-memo-card[data-memo-resolved="true"] .egd-card-body { opacity: var(--egd-opacity-disabled); }
+.egd-memo-card .egd-card-body {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 10px 12px;
+  box-sizing: border-box;
+  overflow: hidden;
+  background: var(--egd-note);
+  color: var(--egd-on-surface);
+  font: 13px/1.5 var(--egd-font);
+}
+.egd-memo-title { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.egd-memo-anchor {
+  margin-left: 6px;
+  padding: 1px 7px;
+  border: 1px solid var(--egd-note-line);
+  border-radius: 999px;
+  background: var(--egd-note-soft);
+  color: var(--egd-on-surface-variant);
+  font-size: 11.5px;
+  white-space: nowrap;
+}
+.egd-memo-card[data-memo-anchor="missing"] .egd-memo-anchor { border-color: var(--egd-warning-ink); color: var(--egd-warning-ink); }
+.egd-memo-card .egd-desk-window-actions button {
+  padding: 2px 8px;
+  border: 1px solid var(--egd-note-line);
+  border-radius: 6px;
+  background: var(--egd-note-soft);
+  color: var(--egd-on-surface);
+  font: 600 11.5px/1.4 var(--egd-font);
+  cursor: pointer;
+}
+.egd-memo-card .egd-desk-window-actions button:hover { border-color: var(--egd-primary); background: var(--egd-hover); }
+.egd-memo-card button:focus-visible,
+.egd-memo-card input:focus-visible,
+.egd-memo-card select:focus-visible,
+.egd-memo-card textarea:focus-visible { outline: var(--egd-focus-outline); outline-offset: var(--egd-focus-outline-offset); }
+.egd-memo-body { display: flex; flex: 1 1 auto; flex-direction: column; gap: 6px; min-height: 0; }
+.egd-memo-text {
+  flex: 1 1 auto;
+  width: 100%;
+  min-height: 56px;
+  box-sizing: border-box;
+  padding: 6px 8px;
+  border: 1px solid var(--egd-note-line);
+  border-radius: 7px;
+  background: var(--egd-surface-elevated);
+  color: var(--egd-on-surface);
+  font: 13px/1.5 var(--egd-font);
+  resize: none;
+}
+button.egd-memo-status { align-self: flex-start; padding: 0; border: 0; background: none; color: var(--egd-on-surface-variant); font: 11.5px/1.4 var(--egd-font); text-align: left; cursor: pointer; }
+.egd-memo-card[data-memo-expanded="false"] .egd-memo-detail { display: none; }
+.egd-memo-card[data-memo-expanded="true"] .egd-memo-body { flex: 0 0 auto; }
+.egd-memo-card[data-memo-expanded="true"] .egd-memo-text { min-height: 56px; max-height: 72px; }
+.egd-memo-detail { display: flex; flex: 1 1 auto; flex-direction: column; gap: 6px; min-height: 0; }
+.egd-memo-thread { display: flex; flex: 1 1 auto; flex-direction: column; gap: 6px; min-height: 40px; padding-top: 6px; border-top: 1px solid var(--egd-note-line); overflow: auto; }
+.egd-memo-thread-empty { margin: 0; color: var(--egd-on-surface-variant); font-size: 11.5px; }
+.egd-memo-reply { padding: 6px 8px; border: 1px solid var(--egd-outline-variant); border-radius: 7px; background: var(--egd-surface-elevated); }
+.egd-memo-reply[data-author="agent"] { border-color: var(--egd-note-line); background: var(--egd-note-soft); }
+.egd-memo-reply-head { display: flex; align-items: center; gap: 6px; color: var(--egd-on-surface-variant); font-size: 11.5px; }
+.egd-memo-reply-avatar { width: 18px; height: 18px; font-size: 11.5px; }
+.egd-memo-reply-avatar-user { display: inline-flex; align-items: center; justify-content: center; border-radius: 50%; background: var(--egd-primary); color: var(--egd-on-primary); }
+.egd-memo-reply-name { color: var(--egd-on-surface); }
+.egd-memo-reply-time { margin-left: auto; }
+.egd-memo-reply-text { white-space: pre-wrap; word-break: keep-all; overflow-wrap: anywhere; font-size: 12px; }
+.egd-memo-reply-note { margin-top: 4px; color: var(--egd-on-surface-variant); font-size: 11.5px; }
+.egd-memo-reply-input,
+.egd-memo-ask-question,
+.egd-memo-ask-agent {
+  min-width: 0;
+  box-sizing: border-box;
+  padding: 4px 8px;
+  border: 1px solid var(--egd-note-line);
+  border-radius: 6px;
+  background: var(--egd-surface-elevated);
+  color: var(--egd-on-surface);
+  font: 12px/1.4 var(--egd-font);
+}
+.egd-memo-ask { display: flex; align-items: center; gap: 6px; }
+.egd-memo-ask-agent { flex: 0 1 40%; }
+.egd-memo-ask-question { flex: 1 1 auto; }
+button.egd-memo-ask-send {
+  flex: 0 0 auto;
+  padding: 4px 9px;
+  border: 1px solid var(--egd-outline);
+  border-radius: 7px;
+  background: var(--egd-window-alt);
+  color: var(--egd-primary);
+  font: 600 11.5px/1.4 var(--egd-font);
+  white-space: nowrap;
+  cursor: pointer;
+}
+button.egd-memo-ask-send:hover:not(:disabled) { border-color: var(--egd-primary); background: var(--egd-hover); }
+button.egd-memo-ask-send:disabled { opacity: var(--egd-opacity-disabled); cursor: default; }
+.egd-memo-ask-status { display: flex; flex-wrap: wrap; gap: 6px; color: var(--egd-warning-ink); font-size: 11.5px; }
+.egd-memo-ask-pending { display: inline-flex; align-items: center; gap: 6px; padding: 2px 8px; border: 1px solid var(--egd-note-line); border-radius: 999px; background: var(--egd-note-soft); }
+button.egd-memo-ask-cancel { padding: 0 4px; border: 0; background: none; color: var(--egd-primary); font: 600 11.5px/1.4 var(--egd-font); cursor: pointer; }
+.egd-codex-result-chip.egd-codex-result-chip-memo { color: var(--egd-on-surface-variant) !important; }
+
 /* CTX-03 '이것도 붙일까요?' above the input tray: a quiet, foldable list.
    Nothing is ticked by default; signed-in and Browser rows carry a note, and
    rows outside the account or permission are dimmed with their reason. Tokens

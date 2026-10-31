@@ -25,6 +25,7 @@
   const BoardExport = ChromeUtils.importESModule('chrome://userchrome/content/EGDeskBoardExport.sys.mjs');
   const ProfileTransfer = ChromeUtils.importESModule('chrome://userchrome/content/EGDeskProfileTransfer.sys.mjs');
   const ProfileTransferView = ChromeUtils.importESModule('chrome://userchrome/content/EGDeskProfileTransferView.sys.mjs');
+  const MemoState = ChromeUtils.importESModule('chrome://userchrome/content/EGDeskMemoState.sys.mjs');
   const AgentIdentityView = ChromeUtils.importESModule('chrome://userchrome/content/EGDeskAgentIdentityView.sys.mjs');
   const BROWSER_AGENT_ACTOR_NAME = 'EGDeskBrowserAgentRuntime';
   const BROWSER_AGENT_HISTORY_LIMIT = 100;
@@ -83,6 +84,7 @@
     { id: 'ide',      label: 'IDE',     icon: 'ide' },
     { id: 'terminal', label: '터미널',  icon: 'terminal' },
     { id: 'settings', label: '설정',   icon: 'settings' },
+    { id: 'memo',     label: '메모',    icon: 'note' },
     { id: 'create',   label: '추가',    icon: 'plus' },
   ];
   const DOCK_CENTER = [
@@ -3996,6 +3998,7 @@
     arrow: [['path', { d: 'M5 19 19 5m-8 0h8v8' }]],
     text: [['path', { d: 'M5 6V4h14v2M12 4v16m-3 0h6' }]],
     highlight: [['rect', { x: '3', y: '7', width: '18', height: '10', rx: '1.5' }], ['path', { d: 'm7 17 6-10m-1 10 6-10' }]],
+    note: [['path', { d: 'M5 4.5h10.5L19 8v11.5H5Z' }], ['path', { d: 'M15.5 4.5V8H19M8.5 12.5h7m-7 3.5h4.5' }]],
     board: [['rect', { x: '3', y: '4', width: '18', height: '16', rx: '2' }], ['path', { d: 'M9 4v16' }]],
     pointer: [['path', { d: 'M5 3.5 19 12l-7.2 1.5 2.7 5.7-2.4 1.1-2.7-5.7L5 19Z' }]],
     trash: [['path', { d: 'M4 6h16M9 6V4h6v2m-9 0 1 15h10l1-15M10 10v7m4-7v7' }]],
@@ -4402,6 +4405,7 @@
     if (card.classList.contains('egd-chat-card')) return 'chat';
     if (card.classList.contains('egd-input-evidence-card')) return 'input-evidence';
     if (card.classList.contains('egd-result-card')) return 'result';
+    if (card.classList.contains('egd-memo-card')) return 'memo';
     if (card.classList.contains('egd-file-card')) return 'file';
     return 'card';
   }
@@ -4410,6 +4414,7 @@
     if (type === 'file') return cloneJson(card._fileRecord || { version: 1 });
     if (type === 'input-evidence') return { reference: cloneJson(card._inputReference) };
     if (type === 'result') return cloneJson(card._resultRecord || null);
+    if (type === 'memo') return cloneJson(card._memoRecord || null);
     if (type === 'browser') {
       return {
         uri: normalizeBrowserNavigationUri(card._browserState?.uri || card.querySelector('.egd-card-url')?.value || card._sourceRef?.uri || 'https://duckduckgo.com'),
@@ -4621,6 +4626,7 @@
       } else if (record.type === 'ontology') view = spawnOntologyMapCard(record.runtimeState || {});
       else if (record.type === 'input-evidence' && record.runtimeState?.reference) view = spawnInputEvidence(record.runtimeState.reference, null, { restore: true });
       else if (record.type === 'result') view = spawnResultCard({ restore: true, record: record.runtimeState });
+      else if (record.type === 'memo') view = spawnMemoCard({ restore: true, record: record.runtimeState });
       else if (record.type === 'settings') view = spawnSettingsCard({ openMode: 'new' });
       else if (record.type === 'file') view = spawnFileCard({ openMode: 'new', restore: true, record: record.runtimeState });
       else if (record.type === 'terminal' && options.newTerminal === true) view = spawnTerminalCard();
@@ -5459,6 +5465,8 @@
       card = spawnTerminalCard();
     } else if (cardState.type === 'result') {
       card = spawnResultCard({ restore: true, record: runtime });
+    } else if (cardState.type === 'memo') {
+      card = spawnMemoCard({ restore: true, record: runtime });
     }
     if (!card) return null;
     retargetRestoredEntityId(card, cardState.id);
@@ -8492,6 +8500,8 @@
                 openFileFromUserAction();
               } else if (item.id === 'ide') {
                 openIdeFromUserAction();
+              } else if (item.id === 'memo') {
+                spawnMemoFromDock();
               } else if (item.id === 'ontology') {
                 spawnOntologyMapCard();
               } else if (item.id === 'chat') {
@@ -10042,9 +10052,11 @@
               title: '이 답변을 Canvas에 결과 카드로 남깁니다', data: { testid: 'chat-answer-card', answerId: message.answerId || '', messageId: message.id || '' },
               onclick: keepAsCard,
             }, el('span', { class: 'egd-codex-result-label' }, '카드로 보기')) : null;
-            const resultRow = resultChips || cardChip || outputChips.length ? resultChips || el('div', { class: 'egd-codex-result-chips' }) : null;
+            const memoChip = memoChipForAnswer(message);   // CNV-06: the answer that joined a memo
+            const resultRow = resultChips || cardChip || memoChip || outputChips.length ? resultChips || el('div', { class: 'egd-codex-result-chips' }) : null;
             if (outputChips.length) resultRow.prepend(...outputChips);
             if (cardChip) resultRow.appendChild(cardChip);
+            if (memoChip) resultRow.appendChild(memoChip);
             const briefingControl = BriefingState.validBriefing(message.briefing) ? el('button', {
               class: 'egd-codex-result-chip', data: { testid: 'briefing-open', answerId: message.answerId },
               onclick: (ev) => openAnswerBriefing(activeThread, message,
@@ -10718,6 +10730,7 @@
       }));
       for (const message of run.messages) bindMessageToThread(message.id, threadId);
       if (thread) markUserMessagesReadBy(threadId, thread.profileEnabled ? codexThreadAgentProfile(thread).name : 'Codex');
+      attachMemoRepliesFromRun(run);   // CNV-06: a memo question's answer joins its memo (D-K5)
     }
 
     async function requireClaudeContext(thread, token) {
@@ -14394,7 +14407,7 @@
     }
 
     const identity = el('div', { class: 'egd-desk-window-identity' });
-    identity.appendChild(deskIcon({ browser: 'browser', ontology: 'ontology', file: 'file', 'input-evidence': 'file', result: 'result' }[kind] || 'square', 'egd-ui-icon egd-window-kind-icon'));
+    identity.appendChild(deskIcon({ browser: 'browser', ontology: 'ontology', file: 'file', 'input-evidence': 'file', result: 'result', memo: 'note' }[kind] || 'square', 'egd-ui-icon egd-window-kind-icon'));
     const boardMetadata = el('span', { class: 'egd-desk-window-board', role: 'note', hidden: true, data: { testid: 'window-board' } });
     // CNV-03: the Board control after the name. It opens '넣기 / 빼기'; without a
     // recorded owner it says '소속 없음' so the bar never implies a Board.
@@ -14838,6 +14851,394 @@
     if (!projection || typeof projection.boardId !== 'string' || !projection.boardId) return null;
     return { boardId: projection.boardId, title: projection.title, projectionId: projection.id,
       selectionRevision: state.boardSelectionRevision || 0 };
+  }
+
+  // ============ Canvas Memo (CNV-06) ============
+  // A memo is a Desk window of fixed size (folded 240×160, expanded 320×280)
+  // whose record lives in EGDeskMemoState. It pins to the card under it and
+  // follows that card; the body is the user's, replies stack by author, and
+  // [<Agent>에게 묻기] sends the memo into that Agent's own Chat room through
+  // the ordinary send path. Saving the body never calls an Agent. The answer
+  // to a memo question comes back as a memo reply (D-K5); Chat keeps a chip.
+  const MEMO_RUN_ENDED = ['failed', 'interrupted', 'cancelled', 'unavailable'];
+  let memoAnchorObserver = null;
+
+  function memoCards() {
+    return Array.from(document.querySelectorAll('.egd-memo-card')).filter(root => root.isConnected && root._memoRecord);
+  }
+
+  // Cards a memo can sit on, lowest z first (memoAnchorAt treats the last as topmost).
+  function memoAnchorCandidates() {
+    const layer = document.getElementById('egd-canvas-layer');
+    if (!layer) return [];
+    return Array.from(layer.children)
+      .filter(node => node.classList?.contains('egd-canvas-card') && !node.classList.contains('egd-memo-card') && !node.classList.contains('egd-board-missing'))
+      .map(card => ({ id: card.id, geometry: persistentEntityGeometry(card) }))
+      .sort((a, b) => a.geometry.zIndex - b.geometry.zIndex)
+      .map(({ id, geometry }) => ({ id, rect: { x: geometry.x, y: geometry.y, width: geometry.width, height: geometry.height } }));
+  }
+
+  function memoTargetLabel(memo) {
+    if (memo?.anchor?.kind !== 'card') return '';
+    const card = document.getElementById(memo.anchor.cardId);
+    if (!card || card.classList.contains('egd-memo-card')) return '';
+    return cardLabelForViewportRail(card);
+  }
+
+  function ensureMemoAnchorObserver() {
+    if (memoAnchorObserver) return;
+    const layer = document.getElementById('egd-canvas-layer');
+    if (!layer) return;
+    let queued = 0;
+    const flush = () => {
+      queued = 0;
+      for (const root of memoCards()) syncMemoCardPosition(root);
+    };
+    memoAnchorObserver = new MutationObserver(records => {
+      if (queued) return;
+      const relevant = records.some(record => record.type === 'childList'
+        || (record.target?.parentNode === layer && !record.target.classList?.contains('egd-memo-card')));
+      if (relevant) queued = requestAnimationFrame(flush);
+    });
+    memoAnchorObserver.observe(layer, { childList: true, attributes: true, attributeFilter: ['style'], subtree: true });
+  }
+
+  // Place the memo where its anchor says: on its card when that card is on the
+  // Canvas, else at its last point. Updates the anchor badge.
+  function syncMemoCardPosition(root) {
+    const memo = root?._memoRecord;
+    if (!memo || !root.isConnected) return;
+    const position = MemoState.memoPosition(memo, memoAnchorCandidates());
+    const anchorState = memo.anchor.kind !== 'card' ? 'free' : !position || position.missing ? 'missing' : 'attached';
+    root.dataset.memoAnchor = anchorState;
+    if (position && anchorState === 'attached') {
+      const left = `${Math.round(position.x)}px`, top = `${Math.round(position.y)}px`;
+      if (root.style.left !== left) root.style.left = left;
+      if (root.style.top !== top) root.style.top = top;
+    }
+    const badge = root.querySelector('.egd-memo-anchor');
+    if (badge) {
+      const label = anchorState === 'attached' ? memoTargetLabel(memo) : '';
+      badge.textContent = anchorState === 'free' ? '위치 고정' : anchorState === 'missing' ? '대상 없음' : `📎 ${label || '카드'}`;
+      badge.title = anchorState === 'missing' ? '이 메모가 붙어 있던 카드가 닫혔습니다. 마지막 위치에 남아 있습니다.' : anchorState === 'free' ? '캔버스 위치에 고정된 메모' : `${label || '카드'} 위에 붙은 메모 · 카드가 움직이면 따라갑니다`;
+    }
+  }
+
+  function syncMemoCardFrame(root) {
+    const frame = MemoState.memoFrame(root._memoRecord);
+    root.style.width = `${frame.width}px`;
+    root.style.height = `${frame.height}px`;
+    root.dataset.memoExpanded = root._memoRecord?.expanded === true ? 'true' : 'false';
+  }
+
+  function updateMemoRecord(root, next, reason = 'memo-change') {
+    if (!root?.isConnected || !next || next === root._memoRecord) return;
+    root._memoRecord = next;
+    syncMemoCardFrame(root);
+    renderMemoCard(root);
+    syncMemoCardPosition(root);
+    markAgendaDirty(reason, root);
+  }
+
+  // The user dropped the memo somewhere else: pin it to whatever is under its corner now.
+  function repinMemoCard(root) {
+    const memo = root?._memoRecord;
+    if (!memo) return;
+    try { updateMemoRecord(root, MemoState.moveMemo(memo, { x: root.offsetLeft, y: root.offsetTop }, memoAnchorCandidates()), 'move-memo-window'); }
+    catch (error) { console.warn(TAG, 'memo re-pin failed', error); }
+  }
+
+  function memoAgentChoices() {
+    const choices = codexAgentProfileChoices().map(profile => ({ id: profile.id, name: profile.name || profile.label || 'Agent', avatar: profile.avatar || null }));
+    if (!choices.length && state.codexBridge?.loadProfiles) void state.codexBridge.loadProfiles();
+    return choices;
+  }
+
+  function memoAgentThread(agentId) {
+    return (state.codex.threads || [])
+      .filter(thread => thread?.type === 'dm' && thread.profileEnabled === true && thread.agentProfileId === agentId)
+      .sort((a, b) => (b.updatedAt || 0) - (a.updatedAt || 0))[0] || null;
+  }
+
+  // [<Agent>에게 묻기]: the memo (body, target, recent replies, question) goes
+  // out as one message in that Agent's room through the normal send path.
+  // Only an accepted request is recorded as a pending ask on the memo.
+  async function askMemoAgent(root, { agentId, agentName, question = '' } = {}) {
+    const bridge = state.codexBridge;
+    const memo = root?._memoRecord;
+    if (!bridge || !memo) return false;
+    let draft;
+    try { draft = MemoState.memoAskDraft(memo, { agentId, agentName, question, target: memoTargetLabel(memo) }); }
+    catch (error) { boardNotice(error.message); return false; }
+    let thread = memoAgentThread(agentId);
+    if (!thread) {
+      bridge.createThread('dm', { agentProfileId: agentId, profileEnabled: true });
+      thread = memoAgentThread(agentId);
+    }
+    if (!thread) { boardNotice(`${draft.agentName || 'Agent'}의 대화방을 열 수 없습니다.`); return false; }
+    const chatCard = spawnCodexChatCard();
+    dismissChatReturnCue();
+    state.codex.hudView = 'conversation';
+    state.codex.threadDrafts = { ...(state.codex.threadDrafts || {}), [thread.id]: draft.text };
+    bridge.selectThread(thread.id, { openConversation: true });   // reads the draft back into the composer
+    const requestsBefore = new Set(Object.keys(state.codex.chatProtocol?.requests || {}));
+    root.dataset.memoAsking = 'true';
+    renderMemoCard(root);
+    try { await bridge.sendMessage(); }
+    catch (error) { console.warn(TAG, 'memo ask send failed', error); }
+    delete root.dataset.memoAsking;
+    const accepted = Object.entries(state.codex.chatProtocol?.requests || {})
+      .find(([requestId, request]) => !requestsBefore.has(requestId) && request?.localThreadId === thread.id
+        && (request.status === 'accepted' || (request.conversationId && request.runId)));
+    if (!accepted) {
+      boardNotice(`${draft.agentName || 'Agent'}에게 질문을 보내지 못했습니다. 초안은 ${thread.title} 입력칸에 남아 있습니다.`);
+      renderMemoCard(root);
+      state.focusChatDockIfCompact?.(chatCard);
+      return false;
+    }
+    updateMemoRecord(root, MemoState.setMemoExpanded(MemoState.recordMemoAsk(root._memoRecord, draft, { requestId: accepted[0], threadId: thread.id }), true), 'memo-ask');
+    return true;
+  }
+
+  // Called from syncProtocolRun: a finished run that answers a memo question
+  // joins that memo as the asked Agent's reply (D-K5). A run that ended
+  // without an answer closes the ask so the memo stops waiting.
+  function attachMemoRepliesFromRun(run) {
+    if (!run?.requestId) return;
+    const roots = memoCards();
+    const found = MemoState.findPendingMemoAsk(roots.map(root => root._memoRecord), run.requestId);
+    if (!found) return;
+    const root = roots.find(item => item._memoRecord === found.memo);
+    if (MEMO_RUN_ENDED.includes(run.status)) {
+      updateMemoRecord(root, MemoState.cancelMemoAsk(found.memo, found.ask.askId), 'memo-ask-ended');
+      return;
+    }
+    const reply = MemoState.memoReplyFromRun(run);
+    if (!reply) return;
+    const profile = codexAgentProfile(found.ask.agentId);
+    const result = MemoState.appendMemoReply(found.memo, { author: { kind: 'agent', agentId: found.ask.agentId, name: profile?.name || undefined }, ...reply, askId: found.ask.askId });
+    if (!result.appended) return;
+    updateMemoRecord(root, MemoState.setMemoExpanded(result.memo, true), 'memo-reply');
+  }
+
+  // Chat side of D-K4: the answer that joined a memo gets a chip, nothing opens by itself.
+  function memoChipForAnswer(message) {
+    const answerId = message?.answerId;
+    if (!answerId) return null;
+    const root = memoCards().find(item => item._memoRecord.replies.some(reply => reply.answerId === answerId));
+    if (!root) return null;
+    const memo = root._memoRecord;
+    return el('button', {
+      class: 'egd-codex-result-chip egd-codex-result-chip-memo', type: 'button', title: '이 답은 메모 답글로 붙었습니다. 누르면 그 메모로 갑니다.',
+      data: { testid: 'chat-memo-reply-chip', memoId: memo.id },
+      onclick: (ev) => { ev.preventDefault(); ev.stopPropagation(); focusCanvasCard(root); revealOpenCanvasCard(root, { opener: ev.currentTarget?.closest?.('.egd-chat-card') || null, kind: 'memo' }); },
+    }, el('span', { class: 'egd-codex-result-label' }, memo.seq ? `메모 #${memo.seq} 답글로 붙음` : '메모 답글로 붙음'));
+  }
+
+  function memoReplyRow(reply) {
+    const agent = reply.author.kind === 'agent';
+    const name = MemoState.memoAuthorName(reply.author);
+    const avatar = agent
+      ? codexProfileAvatar(codexAgentProfile(reply.author.agentId)?.avatar || null, name, 'egd-memo-reply-avatar')
+      : el('span', { class: 'egd-memo-reply-avatar egd-memo-reply-avatar-user', 'aria-hidden': 'true' }, '나');
+    return el('div', { class: 'egd-memo-reply', data: { testid: 'memo-reply', author: agent ? 'agent' : 'user', replyId: reply.id, answerId: reply.answerId || '' } },
+      el('div', { class: 'egd-memo-reply-head' }, avatar, el('strong', { class: 'egd-memo-reply-name' }, name),
+        reply.createdAt ? el('time', { class: 'egd-memo-reply-time', datetime: new Date(reply.createdAt).toISOString() }, formatMessageTime(reply.createdAt)) : null),
+      el('div', { class: 'egd-memo-reply-text' }, reply.text),
+      reply.truncated ? el('div', { class: 'egd-memo-reply-note', role: 'note' }, '답이 길어 일부만 붙었습니다. 전체는 Chat에 있습니다.') : null);
+  }
+
+  // Everything but the body textarea is rebuilt from the record.
+  function renderMemoCard(root) {
+    const memo = root?._memoRecord;
+    const shell = root?._deskWindowShell;
+    if (!memo || !shell) return;
+    const title = root.querySelector('.egd-memo-title');
+    if (title) title.textContent = memo.seq ? `메모 #${memo.seq}` : '메모';
+    root.dataset.memoResolved = memo.resolved ? 'true' : 'false';
+    const toggle = root.querySelector('.egd-memo-toggle');
+    if (toggle) { toggle.textContent = memo.expanded ? '접기' : '펼치기'; toggle.setAttribute('aria-expanded', String(memo.expanded)); }
+    const resolve = root.querySelector('.egd-memo-resolve');
+    if (resolve) { resolve.textContent = memo.resolved ? '다시 열기' : '해결'; resolve.setAttribute('aria-pressed', String(memo.resolved)); }
+    const textarea = root.querySelector('.egd-memo-text');
+    if (textarea && document.activeElement !== textarea && textarea.value !== memo.text) textarea.value = memo.text;
+    const pending = MemoState.pendingMemoAsks(memo);
+    const pendingNames = pending.map(ask => codexAgentProfile(ask.agentId)?.name || 'Agent');
+    const agentReplies = memo.replies.filter(reply => reply.author.kind === 'agent').length;
+    const status = root.querySelector('.egd-memo-status');
+    if (status) {
+      const parts = [];
+      if (memo.replies.length) parts.push(`답글 ${memo.replies.length}${agentReplies ? ` · Agent ${agentReplies}` : ''}`);
+      if (pending.length) parts.push(`${pendingNames.join(', ')} 답 기다리는 중`);
+      status.textContent = parts.join(' · ');
+      status.hidden = !parts.length;
+    }
+    const thread = root.querySelector('.egd-memo-thread');
+    if (thread) {
+      thread.replaceChildren(...(memo.replies.length ? memo.replies.map(memoReplyRow)
+        : [el('p', { class: 'egd-memo-thread-empty' }, '아직 답글이 없습니다.')]));
+    }
+    const askStatus = root.querySelector('.egd-memo-ask-status');
+    if (askStatus) {
+      const sending = root.dataset.memoAsking === 'true';
+      const rows = pending.map((ask, index) => el('span', { class: 'egd-memo-ask-pending', data: { testid: 'memo-ask-pending', askId: ask.askId, agentId: ask.agentId } },
+        `${pendingNames[index]} 답 기다리는 중`,
+        el('button', { type: 'button', class: 'egd-memo-ask-cancel', title: '이 질문 기다리기를 멈춥니다. Chat의 대화는 남습니다.',
+          onclick: (ev) => { ev.stopPropagation(); updateMemoRecord(root, MemoState.cancelMemoAsk(root._memoRecord, ask.askId), 'memo-ask-cancel'); } }, '기다리지 않기')));
+      if (sending) rows.unshift(el('span', { class: 'egd-memo-ask-pending', data: { testid: 'memo-ask-sending' } }, '보내는 중…'));
+      askStatus.replaceChildren(...rows);
+      askStatus.hidden = !sending && !pending.length;
+    }
+    const askButton = root.querySelector('.egd-memo-ask-send');
+    const select = root.querySelector('.egd-memo-ask-agent');
+    if (select) {
+      const choices = memoAgentChoices();
+      const current = select.value;
+      select.replaceChildren(el('option', { value: '' }, choices.length ? 'Agent 선택…' : 'Agent 목록 불러오는 중…'),
+        ...choices.map(choice => el('option', { value: choice.id }, choice.name)));
+      if (choices.some(choice => choice.id === current)) select.value = current;
+      const chosen = choices.find(choice => choice.id === select.value) || null;
+      if (askButton) {
+        askButton.textContent = chosen ? `${chosen.name}에게 묻기` : 'Agent에게 묻기…';
+        askButton.disabled = !chosen || root.dataset.memoAsking === 'true';
+        askButton.dataset.agentId = chosen?.id || '';
+      }
+    }
+  }
+
+  // One memo card on the Canvas. point: where it is dropped (world); record:
+  // a saved MemoRecord to restore; anchorCards default to what is on screen.
+  function spawnMemoCard(options = {}) {
+    ensureMemoAnchorObserver();
+    const cards = memoAnchorCandidates();
+    const now = Date.now();
+    let memo = null;
+    try {
+      memo = options.record ? MemoState.normalizeMemoRecord(options.record, { now }) : MemoState.createMemoRecord({
+        id: `memo-${now.toString(36)}-${Math.random().toString(36).slice(2, 8)}`,
+        seq: MemoState.nextMemoSeq(memoCards().map(root => root._memoRecord)),
+        point: options.point, cards, text: options.text || '', now,
+      });
+    } catch (error) {
+      // A saved record that cannot be read becomes a Board '구성원 다시 확인' placeholder, not a blank memo.
+      if (options.restore) { console.warn(TAG, 'memo restore refused', error); return null; }
+      throw error;
+    }
+    const frame = MemoState.memoFrame(memo);
+    const position = MemoState.memoPosition(memo, cards) || { x: 0, y: 0 };
+    const shell = spawnDeskWindowShell({
+      id: `egd-memo-card-${++cardSeq}`, kind: 'memo', className: 'egd-memo-card', bodyClassName: 'egd-memo-card-body',
+      minWidth: frame.width, minHeight: frame.height, activate: !options.restore,
+      createDirtyReason: options.restore ? 'restore-memo' : 'create-memo',
+      style: { left: `${Math.round(position.x)}px`, top: `${Math.round(position.y)}px`, width: `${frame.width}px`, height: `${frame.height}px` },
+    });
+    const root = shell.root;
+    root._memoRecord = memo;
+    root.dataset.testid = 'memo-card';
+    root.dataset.memoId = memo.id;
+    // Two fixed frames: no free resize.
+    for (const hit of shell.resizeHits) hit.remove();
+    shell.slots.identity.appendChild(el('strong', { class: 'egd-memo-title' }, '메모'));
+    shell.slots.identity.appendChild(el('span', { class: 'egd-memo-anchor', role: 'note', data: { testid: 'memo-anchor' } }));
+    shell.slots.actions.appendChild(el('button', {
+      type: 'button', class: 'egd-memo-resolve egd-desk-window-action', data: { testid: 'memo-resolve', noWindowDrag: 'true' },
+      onclick: (ev) => { ev.stopPropagation(); updateMemoRecord(root, MemoState.setMemoResolved(root._memoRecord, !root._memoRecord.resolved), 'memo-resolve'); },
+    }, '해결'));
+    shell.slots.actions.appendChild(el('button', {
+      type: 'button', class: 'egd-memo-toggle egd-desk-window-action', data: { testid: 'memo-toggle', noWindowDrag: 'true' },
+      onclick: (ev) => { ev.stopPropagation(); updateMemoRecord(root, MemoState.setMemoExpanded(root._memoRecord, !root._memoRecord.expanded), 'memo-toggle'); },
+    }, '펼치기'));
+
+    // Body: the user's text. Saving it never calls an Agent.
+    let saveTimer = 0;
+    const saveText = () => {
+      saveTimer = 0;
+      try { updateMemoRecord(root, MemoState.editMemoText(root._memoRecord, textarea.value), 'memo-edit'); }
+      catch (error) { boardNotice(error.message); }
+    };
+    const textarea = el('textarea', {
+      class: 'egd-memo-text', placeholder: '메모를 적어 두세요', 'aria-label': '메모 본문', maxlength: String(MemoState.MEMO_LIMITS.text),
+      data: { testid: 'memo-text' },
+      oninput: () => { if (saveTimer) clearTimeout(saveTimer); saveTimer = setTimeout(saveText, 400); },
+      onblur: () => { if (saveTimer) { clearTimeout(saveTimer); saveText(); } },
+    });
+    textarea.value = memo.text;
+    const status = el('button', { type: 'button', class: 'egd-memo-status', hidden: true, data: { testid: 'memo-status' },
+      onclick: (ev) => { ev.stopPropagation(); updateMemoRecord(root, MemoState.setMemoExpanded(root._memoRecord, true), 'memo-toggle'); } });
+
+    // Thread: replies by author, then a user reply box and the ask row.
+    const thread = el('div', { class: 'egd-memo-thread', role: 'list', 'aria-label': '메모 답글', data: { testid: 'memo-thread' } });
+    const replyInput = el('input', { type: 'text', class: 'egd-memo-reply-input', placeholder: '답글 달기 (Enter)', 'aria-label': '내 답글', maxlength: String(MemoState.MEMO_LIMITS.reply),
+      data: { testid: 'memo-reply-input' },
+      onkeydown: (ev) => {
+        if (ev.key !== 'Enter' || ev.isComposing || ev.shiftKey) return;
+        ev.preventDefault();
+        if (!replyInput.value.trim()) return;
+        try {
+          const result = MemoState.appendMemoReply(root._memoRecord, { author: { kind: 'user' }, text: replyInput.value });
+          if (result.appended) { replyInput.value = ''; updateMemoRecord(root, result.memo, 'memo-reply'); }
+        } catch (error) { boardNotice(error.message); }
+      } });
+    const askStatus = el('div', { class: 'egd-memo-ask-status', hidden: true, data: { testid: 'memo-ask-status' } });
+    const select = el('select', { class: 'egd-memo-ask-agent', 'aria-label': '질문을 받을 Agent', data: { testid: 'memo-ask-agent' },
+      onchange: () => renderMemoCard(root) });
+    const question = el('input', { type: 'text', class: 'egd-memo-ask-question', placeholder: '질문 (선택)', 'aria-label': '질문', maxlength: String(MemoState.MEMO_LIMITS.question),
+      data: { testid: 'memo-ask-question' } });
+    const askButton = el('button', { type: 'button', class: 'egd-memo-ask-send', disabled: true, data: { testid: 'memo-ask-send' },
+      title: '선택한 Agent의 대화방으로 이 메모와 질문을 보냅니다. 저장만으로는 아무 Agent도 부르지 않습니다.',
+      onclick: async (ev) => {
+        ev.stopPropagation();
+        const agentId = askButton.dataset.agentId;
+        const choice = memoAgentChoices().find(item => item.id === agentId);
+        if (!choice) { boardNotice('물어볼 Agent를 골라 주세요.'); return; }
+        if (saveTimer) { clearTimeout(saveTimer); saveText(); }
+        if (await askMemoAgent(root, { agentId: choice.id, agentName: choice.name, question: question.value })) question.value = '';
+      } }, 'Agent에게 묻기…');
+    const askRow = el('div', { class: 'egd-memo-ask', data: { testid: 'memo-ask' } }, select, question, askButton);
+    shell.slots.content.appendChild(el('div', { class: 'egd-memo-body' }, textarea, status));
+    shell.slots.content.appendChild(el('div', { class: 'egd-memo-detail' }, thread, replyInput, askStatus, askRow));
+
+    // Dropping the memo elsewhere re-pins it to what is under its corner.
+    let dragFrom = null;
+    const onHeaderDown = (ev) => { if (ev.button === 0) dragFrom = { left: root.offsetLeft, top: root.offsetTop }; };
+    const onDrop = () => {
+      if (!dragFrom) return;
+      const moved = root.offsetLeft !== dragFrom.left || root.offsetTop !== dragFrom.top;
+      dragFrom = null;
+      if (moved) repinMemoCard(root);
+    };
+    shell.slots.header.addEventListener('mousedown', onHeaderDown);
+    window.addEventListener('mouseup', onDrop);
+    shell.registerCleanup(() => {
+      shell.slots.header.removeEventListener('mousedown', onHeaderDown);
+      window.removeEventListener('mouseup', onDrop);
+      if (saveTimer) clearTimeout(saveTimer);
+    });
+    syncMemoCardFrame(root);
+    renderMemoCard(root);
+    syncMemoCardPosition(root);
+    if (state.codexBridge?.loadProfiles && codexAgentProfileChoices().every(profile => profile.server !== true)) void state.codexBridge.loadProfiles();
+    return root;
+  }
+
+  // Dock [메모]: a memo on the selected card (its top-right corner) or at the
+  // middle of the visible Canvas, ready for typing.
+  function spawnMemoFromDock() {
+    const active = state.activeEntityId ? document.getElementById(state.activeEntityId) : null;
+    const anchorCard = active?.classList.contains('egd-canvas-card') && !active.classList.contains('egd-memo-card') && !active.classList.contains('egd-board-missing') ? active : null;
+    const folded = MemoState.MEMO_FRAME.folded;
+    let point;
+    if (anchorCard) {
+      const rect = persistentEntityGeometry(anchorCard);
+      point = { x: rect.x + Math.max(0, rect.width - folded.width - 16), y: rect.y + Math.min(Math.max(0, rect.height - 1), 48) };
+    } else {
+      const safe = safeViewportWorldRect();
+      point = { x: Math.round((safe.left + safe.right) / 2 - folded.width / 2), y: Math.round((safe.top + safe.bottom) / 2 - folded.height / 2) };
+    }
+    const root = spawnMemoCard({ point });
+    focusCanvasCard(root);
+    root.querySelector('.egd-memo-text')?.focus();
+    return root;
   }
 
   // ============ Settings Canvas Card ============
@@ -20661,12 +21062,12 @@
     const coarsePointer = window.matchMedia?.('(pointer: coarse)');
     const detailWidth = 240;
     const detailHeight = 180;
-    const icons = { browser: 'browser', chat: 'chat', file: 'file', terminal: 'terminal', settings: 'settings', ontology: 'ontology', 'input-evidence': 'file', result: 'result' };
+    const icons = { browser: 'browser', chat: 'chat', file: 'file', terminal: 'terminal', settings: 'settings', ontology: 'ontology', 'input-evidence': 'file', result: 'result', memo: 'note' };
     const typeLabels = { browser: '브라우저', chat: '대화', file: '파일', terminal: '터미널', settings: '설정', ontology: '온톨로지', 'input-evidence': '자료', result: '결과' };
     const titles = {
       browser: '.egd-card-page-title', chat: '.egd-chat-card-title', file: '.egd-file-card-title',
       terminal: '.egd-terminal-title', settings: '.egd-settings-title', ontology: '.egd-ontology-title',
-      'input-evidence': '.egd-desk-window-identity strong', result: '.egd-result-card-title',
+      'input-evidence': '.egd-desk-window-identity strong', result: '.egd-result-card-title', memo: '.egd-memo-title',
     };
     let scheduled = 0;
     const request = () => {
