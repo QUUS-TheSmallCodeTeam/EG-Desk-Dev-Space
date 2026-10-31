@@ -5701,6 +5701,59 @@
 .egd-settings-usage.egd-usage-limit { border-color: var(--egd-danger-line); background: var(--egd-danger-bg); }
 .egd-settings-usage.egd-usage-limit .egd-settings-usage-title { color: var(--egd-danger-ink); }
 
+/* 계정 메뉴·확인 (SUB-01) and the bridge/Claude state cards (SUB-05). */
+.egd-settings-account-card[data-state="checking"],
+.egd-settings-account-card[data-state="offline"],
+.egd-settings-account-card[data-state="disconnected"] { border-style: dashed; }
+.egd-settings-account-card[data-state="offline"] .egd-settings-account-title,
+.egd-settings-account-card[data-state="disconnected"] .egd-settings-account-title { color: var(--egd-warning-ink); }
+.egd-settings-account-menu { position: relative; flex-shrink: 0; }
+.egd-settings-account-menu > summary { list-style: none; display: inline-flex; align-items: center; gap: 5px; }
+.egd-settings-account-menu > summary::-webkit-details-marker { display: none; }
+.egd-settings-account-menu > summary::after { content: '▾'; font-size: 10px; opacity: .8; }
+.egd-settings-account-menu-list {
+  position: absolute;
+  right: 0;
+  top: calc(100% + 4px);
+  z-index: 3;
+  display: flex;
+  flex-direction: column;
+  min-width: 184px;
+  padding: 4px;
+  border: 1px solid var(--egd-outline);
+  border-radius: 8px;
+  background: var(--egd-surface-elevated);
+  box-shadow: var(--egd-shadow);
+}
+.egd-settings-account-menu-item {
+  padding: 7px 10px;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--egd-on-surface);
+  font: 500 12.5px/1.4 var(--egd-font);
+  text-align: left;
+  cursor: pointer;
+}
+.egd-settings-account-menu-item:hover { background: var(--egd-hover); }
+.egd-settings-account-menu-item:focus-visible { outline: var(--egd-focus-outline); outline-offset: var(--egd-focus-outline-offset); }
+.egd-settings-account-menu-item[disabled] { opacity: var(--egd-opacity-disabled); cursor: default; }
+.egd-settings-account-menu-item-danger { color: var(--egd-danger-ink); }
+.egd-settings-account-confirm {
+  margin-top: 8px;
+  padding: 12px 14px;
+  border: 1px solid var(--egd-outline);
+  border-radius: 10px;
+  background: var(--egd-window-alt);
+}
+.egd-settings-account-confirm-danger { border-color: var(--egd-danger-line); background: var(--egd-danger-bg); }
+.egd-settings-account-confirm-title { font-size: 13px; font-weight: 650; }
+.egd-settings-account-confirm-line { margin-top: 4px; font-size: 11.5px; color: var(--egd-on-surface-variant); }
+.egd-settings-account-confirm-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 10px; }
+.egd-settings-account-result { margin-top: 8px; font-size: 11.5px; color: var(--egd-on-surface-variant); }
+.egd-settings-account-result-error { color: var(--egd-danger-ink); }
+.egd-settings-account-hint { margin: 6px 0 8px; }
+
 /* --- Agent list and detail --- */
 .egd-settings-agent-row {
   width: 100%;

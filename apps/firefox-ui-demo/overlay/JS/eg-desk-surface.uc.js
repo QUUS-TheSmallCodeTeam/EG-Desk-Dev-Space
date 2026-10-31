@@ -14745,6 +14745,8 @@
   }
 
   // ============ Settings Canvas Card ============
+  // 계정 view models (SUB-05/SUB-01): bridge snapshots → rows and confirmation copy.
+  const AccountSettingsView = ChromeUtils.importESModule('chrome://userchrome/content/EGDeskAccountSettingsView.sys.mjs');
   // 계정: the real ChatGPT sign-in, plan and usage from the bridge.
   // Agent 관리: Agent Profiles in the local profile store (/profiles).
   function settingsProfileAccountKey() {
@@ -14883,30 +14885,74 @@
     const bridge = () => state.codexBridge || null;
 
     // --- 계정: the signed-in ChatGPT account as the bridge reports it ---
+    // SUB-01 account menu: '로그아웃' and '다른 계정으로 로그인' go through the real
+    // /auth/* client calls, name the running work first, and read the account
+    // back from the bridge afterwards. Nothing switches quietly.
+    let accountAction = null;
+    const runAccountAction = async (action) => {
+      if (!bridge()?.signOut || accountAction?.phase === 'running') return;
+      accountAction = { action, phase: 'running' };
+      renderAccountTab();
+      await bridge()?.signOut();
+      let outcome = AccountSettingsView.accountActionOutcome(action, state.codex.authStatus, { error: state.codex.error });
+      if (action === 'switch' && outcome.phase === 'signedOut') {
+        await bridge()?.startLogin();
+        outcome = AccountSettingsView.accountActionOutcome(action, state.codex.authStatus, { error: state.codex.error, loginStarted: !state.codex.error });
+      }
+      // The sign-out reply is not the whole picture: /v1/state again (account, usage, engines).
+      if (outcome.phase !== 'error') await bridge()?.refreshAuthStatus();
+      accountAction = { action, phase: outcome.phase, text: outcome.text };
+      renderAccountTab();
+    };
     const renderAccountTab = () => {
       const codex = state.codex;
       const auth = codex.authStatus || {};
       const loginBusy = Boolean(codex.isStartingLogin || auth.loginInProgress);
+      const connection = AccountSettingsView.settingsConnectionView({ connected: codex.connected, bridgeState: codexBridgeNotice(codex).state });
       const section = el('section', { class: 'egd-settings-section', 'aria-label': 'ChatGPT 계정' },
         el('div', { class: 'egd-settings-section-title' }, 'ChatGPT 계정'));
-      if (!codex.connected) {
-        section.appendChild(el('div', { class: 'egd-settings-account-card', data: { testid: 'settings-account', state: 'offline' } },
+      // A confirmation stands only while the account it names is still signed in.
+      if (accountAction?.phase === 'confirm' && (connection.state !== 'online' || !auth.isLoggedIn)) accountAction = null;
+      if (connection.state !== 'online') {
+        // '확인 중' until the bridge answers or the quiet reconnects run out; a
+        // stale account from before the break is not shown as current.
+        section.appendChild(el('div', { class: 'egd-settings-account-card', data: { testid: 'settings-account', state: connection.state } },
           el('div', { class: 'egd-settings-account-copy' },
-            el('div', { class: 'egd-settings-account-title' }, '코덱스에 연결되지 않았습니다'),
-            el('div', { class: 'egd-settings-account-sub' }, '이 컴퓨터의 코덱스 연결이 준비되면 계정과 사용 한도를 보여 드립니다.')),
-          el('button', { class: 'egd-settings-btn', onclick: () => bridge()?.refreshAuthStatus() }, '상태 새로고침')));
+            el('div', { class: 'egd-settings-account-title' }, connection.title),
+            el('div', { class: 'egd-settings-account-sub' }, connection.sub)),
+          connection.action === 'reconnect'
+            ? el('button', { class: 'egd-settings-btn', type: 'button', data: { testid: 'settings-account-reconnect' },
+              onclick: () => { const api = bridge(); if (api?.reconnectNow) api.reconnectNow(); else api?.refreshAuthStatus(); } }, connection.actionLabel)
+            : el('button', { class: 'egd-settings-btn', type: 'button', onclick: () => bridge()?.refreshAuthStatus() }, '상태 새로고침')));
       } else if (!auth.isLoggedIn) {
         section.appendChild(el('div', { class: 'egd-settings-account-card', data: { testid: 'settings-account', state: 'signed-out' } },
           el('div', { class: 'egd-settings-account-copy' },
-            el('div', { class: 'egd-settings-account-title' }, '로그인되어 있지 않습니다'),
-            el('div', { class: 'egd-settings-account-sub' }, 'ChatGPT 계정으로 로그인하면 대화를 시작하고 사용 한도를 확인할 수 있습니다.')),
+            el('div', { class: 'egd-settings-account-title' }, loginBusy ? '로그인 진행 중' : '로그인되어 있지 않습니다'),
+            el('div', { class: 'egd-settings-account-sub' }, loginBusy
+              ? '브라우저 카드에서 ChatGPT 로그인을 마치면 여기에 계정이 보입니다.'
+              : 'ChatGPT 계정으로 로그인하면 대화를 시작하고 사용 한도를 확인할 수 있습니다.')),
           el('button', {
             class: 'egd-settings-btn egd-settings-btn-primary', disabled: loginBusy ? 'true' : null,
-            onclick: () => bridge()?.startLogin(),
+            onclick: () => { accountAction = null; bridge()?.startLogin(); },
           }, loginBusy ? '로그인 중…' : '로그인')));
       } else {
         const email = typeof auth.accountEmail === 'string' && auth.accountEmail.trim() ? auth.accountEmail.trim() : null;
         const plan = ChatState.codexPlanLabel(auth.planType);
+        const running = accountAction?.phase === 'running';
+        const menu = el('details', { class: 'egd-settings-account-menu', data: { testid: 'settings-account-menu' } },
+          el('summary', { class: 'egd-settings-btn egd-settings-account-menu-summary', 'aria-label': '계정 메뉴', 'aria-haspopup': 'menu' }, '계정 메뉴'),
+          el('div', { class: 'egd-settings-account-menu-list', role: 'menu' },
+            ...AccountSettingsView.accountMenuItems(auth).map((item) => el('button', {
+              class: `egd-settings-account-menu-item${item.tone === 'danger' ? ' egd-settings-account-menu-item-danger' : ''}`,
+              type: 'button', role: 'menuitem', disabled: running ? 'true' : null, data: { testid: `settings-account-${item.id}` },
+              onclick: () => {
+                menu.open = false;
+                if (item.id === 'refresh') { accountAction = null; void bridge()?.refreshAuthStatus(); return; }
+                accountAction = { action: item.id, phase: 'confirm',
+                  busy: AccountSettingsView.busyRunSummary({ threads: state.codex.threads, protocol: state.codex.chatProtocol }) };
+                renderAccountTab();
+              },
+            }, item.label))));
         section.appendChild(el('div', { class: 'egd-settings-account-card', data: { testid: 'settings-account', state: 'signed-in' } },
           el('span', { class: 'egd-profile-avatar egd-profile-avatar-tone-0 egd-settings-account-avatar', 'aria-hidden': 'true' },
             ChatState.profileAvatarView(null, email || 'C').text),
@@ -14914,7 +14960,21 @@
             el('div', { class: 'egd-settings-account-title' }, email || '이메일 확인 안 됨'),
             el('div', { class: 'egd-settings-account-sub' }, 'ChatGPT로 로그인됨',
               el('span', { class: 'egd-settings-plan-badge', data: { testid: 'settings-plan' } }, plan ? `${plan} 요금제` : '요금제 확인 안 됨'))),
-          el('button', { class: 'egd-settings-btn', onclick: () => bridge()?.signOut() }, '로그아웃')));
+          menu));
+        if (accountAction?.phase === 'confirm') {
+          const confirm = AccountSettingsView.accountActionConfirm(accountAction.action, { email, busy: accountAction.busy });
+          section.appendChild(el('div', {
+            class: `egd-settings-account-confirm egd-settings-account-confirm-${confirm.tone}`, role: 'group', 'aria-label': confirm.title,
+            data: { testid: 'settings-account-confirm', action: confirm.action, busyRuns: String(confirm.busyCount) },
+          },
+          el('div', { class: 'egd-settings-account-confirm-title' }, confirm.title),
+          ...confirm.lines.map((line) => el('div', { class: 'egd-settings-account-confirm-line' }, line)),
+          el('div', { class: 'egd-settings-account-confirm-actions' },
+            el('button', { class: 'egd-settings-btn egd-settings-btn-danger', type: 'button', data: { testid: 'settings-account-confirm-ok' },
+              onclick: () => { void runAccountAction(confirm.action); } }, confirm.confirmLabel),
+            el('button', { class: 'egd-settings-btn', type: 'button', data: { testid: 'settings-account-confirm-cancel' },
+              onclick: () => { accountAction = null; renderAccountTab(); } }, confirm.cancelLabel))));
+        }
         const ring = ChatState.usageRingView(auth);
         const usage = auth.usage && typeof auth.usage === 'object' ? auth.usage : {};
         const unknown = ring.level === 'unknown';
@@ -14930,14 +14990,40 @@
           ring.stale ? el('div', { class: 'egd-settings-usage-note' }, '확인한 지 오래되어 실제와 다를 수 있습니다.') : null,
           ring.level === 'limit' ? el('div', { class: 'egd-settings-usage-note egd-settings-usage-note-strong' }, '한도에 도달했습니다. 초기화 전까지는 새 요청이 거절될 수 있습니다.') : null)));
       }
+      if (accountAction?.phase === 'running') {
+        section.appendChild(el('div', { class: 'egd-settings-account-result egd-settings-account-result-running', role: 'status',
+          data: { testid: 'settings-account-progress', action: accountAction.action } },
+        accountAction.action === 'switch' ? '로그아웃하고 새 로그인을 시작하는 중…' : '로그아웃하는 중…'));
+      } else if (accountAction && accountAction.phase !== 'confirm') {
+        section.appendChild(el('div', {
+          class: `egd-settings-account-result egd-settings-account-result-${accountAction.phase}`, role: accountAction.phase === 'error' ? 'alert' : 'status',
+          data: { testid: 'settings-account-result', phase: accountAction.phase, action: accountAction.action },
+        }, accountAction.text));
+      }
+      // Claude (D-S1): the CLI's own login as the bridge last reported it —
+      // subscription, API key, external provider or signed out. '다시 확인' reads
+      // /v1/state again; the bridge re-runs its static check there.
       const claude = ChatState.claudeSettingsView(codex.engines, { connected: codex.connected });
-      contentArea.replaceChildren(section, renderComputerControl(), renderConnectedTools(), el('section', { class: 'egd-settings-section', 'aria-label': 'Claude' },
+      const claudeAccount = AccountSettingsView.claudeAccountView(codex.engines, { connected: codex.connected });
+      const claudeSection = el('section', { class: 'egd-settings-section', 'aria-label': 'Claude' },
         el('div', { class: 'egd-settings-section-title' }, 'Claude'),
+        el('div', { class: 'egd-settings-account-card', data: { testid: 'settings-claude-account', state: claudeAccount.status } },
+          claudeAccount.status === 'signedIn' ? el('span', { class: 'egd-profile-avatar egd-profile-avatar-tone-3 egd-settings-account-avatar', 'aria-hidden': 'true' },
+            ChatState.profileAvatarView(null, claudeAccount.account || 'A').text) : null,
+          el('div', { class: 'egd-settings-account-copy' },
+            el('div', { class: 'egd-settings-account-title' }, claudeAccount.title),
+            el('div', { class: 'egd-settings-account-sub' }, claudeAccount.sub,
+              claudeAccount.methodLabel ? el('span', { class: 'egd-settings-plan-badge', data: { testid: 'settings-claude-method', method: claudeAccount.method || 'unknown' } }, claudeAccount.methodLabel) : null)),
+          claudeAccount.action === 'refresh'
+            ? el('button', { class: 'egd-settings-btn', type: 'button', data: { testid: 'settings-claude-refresh' }, onclick: () => bridge()?.refreshAuthStatus() }, '다시 확인')
+            : null),
+        claudeAccount.hint ? el('p', { class: 'egd-settings-section-sub egd-settings-account-hint', data: { testid: 'settings-claude-hint' } }, claudeAccount.hint) : null,
         el('div', { class: 'egd-settings-pending-line', data: { testid: 'settings-claude', auth: claude.authStatus, state: claude.engineStatus } },
           el('div', { data: { testid: 'settings-claude-auth' } }, claude.authText),
           el('div', { data: { testid: 'settings-claude-engine' } }, claude.engineText),
           claude.connectionText ? el('div', { data: { testid: 'settings-claude-connection' } }, claude.connectionText) : null,
-          claude.versionText ? el('div', { data: { testid: 'settings-claude-version' } }, claude.versionText) : null)));
+          claude.versionText ? el('div', { data: { testid: 'settings-claude-version' } }, claude.versionText) : null));
+      contentArea.replaceChildren(section, renderComputerControl(), renderConnectedTools(), claudeSection);
     };
 
     // --- 컴퓨터 조작 (CU-01 stage 1): whether ordinary EG-Desk chats keep the
@@ -15773,7 +15859,7 @@
         void openProfile(agents.profileId);
       }
       if (duplicateInvalidated && activeTab === 'agents') renderAgentsTab();
-      const signature = JSON.stringify([codex.connected, codex.isStartingLogin, auth.isLoggedIn, auth.loginInProgress, auth.accountEmail,
+      const signature = JSON.stringify([codex.connected, codex.bridgeFailures, codex.bridgeError, codex.error, codex.isStartingLogin, auth.isLoggedIn, auth.loginInProgress, auth.accountEmail,
         auth.planType, auth.usage, auth.rateLimits, catalog?.status, catalog?.profiles, codex.inheritedMcp, codex.computerControl, codex.engines]);
       if (signature === lastCodexSignature) return;
       lastCodexSignature = signature;
