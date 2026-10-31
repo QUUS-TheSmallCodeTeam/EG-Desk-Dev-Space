@@ -23,6 +23,7 @@ import * as TextFilePickers from '../overlay/resources/EGDeskNativeFilePickers.s
 import * as BoardExport from '../overlay/resources/EGDeskBoardExport.sys.mjs';
 import * as ProfileTransfer from '../overlay/resources/EGDeskProfileTransfer.sys.mjs';
 import * as ProfileTransferView from '../overlay/resources/EGDeskProfileTransferView.sys.mjs';
+import * as AccountSettingsView from '../overlay/resources/EGDeskAccountSettingsView.sys.mjs';
 import { createTerminalCloseController, terminalExitEvidence, terminalResponsePacket } from '../overlay/resources/EGDeskTerminalState.sys.mjs';
 import { AVATAR_PALETTE, PROFILE_TONES, TOOL_CEILING_AXES, normalizeProfileBody } from '../helper/egdesk-profile-store.mjs';
 import { normalizeRateLimits, usageDisplay } from '../helper/codex-account-usage.mjs';
@@ -8997,6 +8998,8 @@ const settingsNodes = (node, predicate, found = []) => {
 const settingsButton = (root, text) => settingsNodes(root, node => node.tagName === 'BUTTON' && node.textContent.trim() === text)[0];
 const settle = async () => { for (let i = 0; i < 6; i++) await new Promise(resolve => setImmediate(resolve)); };
 
+// The Settings card's bridge notice, as the production codexBridgeNotice derives it.
+const settingsBridgeNotice = codex => Surface.bridgeConnectionNotice({ connected: codex.connected, failures: codex.bridgeFailures, error: codex.bridgeError, bridge: codex.bridgeBuild });
 function settingsTransferDeps(document, state, files = { readText: async () => ({ cancelled: true }), saveText: async () => ({ cancelled: true }) }) {
   return compileFunction(`${declaration('settingsProfileAccountKey')}\n${declaration('createSettingsProfileTransfer')}\nreturn { settingsProfileAccountKey, createSettingsProfileTransfer };`,
     ['document', 'state', 'ProfileTransfer', 'ProfileTransferView', 'nativeTextFilePickers'])(document, state, ProfileTransfer, ProfileTransferView, () => files);
@@ -9039,17 +9042,26 @@ test('production Settings card renders the reported account and drives Agent edi
     'revealPlacedCanvasCard', 'el', 'cardZ',
     'closeCanvasCard', 'state', 'ChatState', 'codexProfileAvatar', 'document', 'window', 'bindCardSourceRef', 'markAgendaDirty', 'setActiveEntity',
     'isCardFullscreen', 'focusCanvasCard', 'installCardHeaderFullscreenToggle', 'canvasZoom', 'settingsProfileAccountKey', 'createSettingsProfileTransfer',
-    'fetch', 'fetchJson', 'spawnTerminalCard'])(
+    'fetch', 'fetchJson', 'spawnTerminalCard', 'AccountSettingsView', 'codexBridgeNotice'])(
     () => ({ kind: 'settings-card' }), () => null, 0, kind => { placements.push(kind); return { x: 10, y: 20, width: 600, height: 600, inView: true }; },
     () => {}, el, 0, () => {}, state, Chat, codexProfileAvatar, document, windowStub,
     () => {}, () => {}, () => {}, () => false, () => {}, () => {}, () => 1, ...Object.values(settingsTransferDeps(document, state)),
     (...args) => { calls.push(['fetch', ...args]); }, (...args) => { calls.push(['fetchJson', ...args]); },
-    (...args) => { calls.push(['terminal', ...args]); });
+    (...args) => { calls.push(['terminal', ...args]); }, AccountSettingsView, settingsBridgeNotice);
   const card = spawn();
   assert.deepEqual(placements, ['settings'], 'Settings opens through the shared placement policy');
   assert.deepEqual([card.style.left, card.style.top, card.style.width, card.style.height], ['10px', '20px', '600px', '600px']);
   const text = () => card.textContent;
-  assert.match(text(), /코덱스에 연결되지 않았습니다/);
+  assert.match(text(), /연결 확인 중…/, 'before the bridge answers the card does not claim it is gone');
+  assert.equal(settingsNodes(card, node => node.dataset.testid === 'settings-account')[0].dataset.state, 'checking');
+  state.codex.bridgeFailures = 3;
+  emit();
+  assert.match(text(), /연결이 끊겼습니다/);
+  assert.equal(settingsNodes(card, node => node.dataset.testid === 'settings-account')[0].dataset.state, 'offline');
+  assert.ok(settingsButton(card, '다시 연결'));
+  state.codex.bridgeFailures = 0;
+  emit();
+  assert.match(text(), /연결 확인 중…/);
   const claude = () => settingsNodes(card, node => node.dataset.testid === 'settings-claude')[0];
   assert.equal(claude().dataset.auth, 'unknown');
   assert.equal(claude().dataset.state, 'unknown');
@@ -9117,8 +9129,36 @@ test('production Settings card renders the reported account and drives Agent edi
   assert.match(text(), /Pro 요금제/);
   assert.match(text(), /5시간 한도 · 42% 사용/);
   assert.match(text(), /에 초기화/);
-  settingsButton(card, '로그아웃').fire('click');
-  assert.deepEqual(calls.at(-1), ['signOut']);
+  assert.equal(settingsButton(card, '로그아웃').getAttribute('role'), 'menuitem', 'no bare sign-out button: 로그아웃 is a menu item that confirms first');
+  const menuItem = id => settingsNodes(card, node => node.dataset.testid === `settings-account-${id}`)[0];
+  assert.deepEqual(['refresh', 'switch', 'signout'].map(id => menuItem(id).textContent), ['상태 새로고침', '다른 계정으로 로그인', '로그아웃']);
+  const callsBefore = calls.length;
+  menuItem('signout').fire('click');
+  assert.equal(calls.length, callsBefore, 'choosing 로그아웃 only asks; nothing is sent yet');
+  const confirmBox = () => settingsNodes(card, node => node.dataset.testid === 'settings-account-confirm')[0];
+  assert.equal(confirmBox().dataset.action, 'signout');
+  assert.equal(confirmBox().dataset.busyRuns, '0');
+  assert.match(confirmBox().textContent, /owner@example\.test 계정에서 로그아웃할까요\?/);
+  assert.match(confirmBox().textContent, /터미널의 codex/);
+  settingsNodes(card, node => node.dataset.testid === 'settings-account-confirm-cancel')[0].fire('click');
+  assert.equal(confirmBox(), undefined, '취소 keeps the account');
+  assert.equal(calls.length, callsBefore);
+  state.codex.chatProtocol = { runs: { 'c1/r1': { conversationId: 'c1', runId: 'r1', status: 'running', localThreadId: 'fixture-room' } }, requests: {} };
+  state.codex.threads[0].title = '배포 점검';
+  menuItem('switch').fire('click');
+  assert.equal(confirmBox().dataset.action, 'switch');
+  assert.equal(confirmBox().dataset.busyRuns, '1', 'a running Run is named before the switch');
+  assert.match(confirmBox().textContent, /진행 중인 실행 1개가 중단될 수 있습니다 \('배포 점검'\)/);
+  assert.match(confirmBox().textContent, /새 계정으로 옮기지 않습니다/);
+  settingsNodes(card, node => node.dataset.testid === 'settings-account-confirm-cancel')[0].fire('click');
+  menuItem('signout').fire('click');
+  settingsNodes(card, node => node.dataset.testid === 'settings-account-confirm-ok')[0].fire('click');
+  await settle();
+  assert.deepEqual(calls.slice(callsBefore), [['signOut'], ['refresh']], 'the real sign-out, then the account is read back');
+  const result = () => settingsNodes(card, node => node.dataset.testid === 'settings-account-result')[0];
+  assert.equal(result().dataset.phase, 'unknown', 'the stub left the login in place, so the card says the result is unconfirmed');
+  assert.match(result().textContent, /로그아웃 결과를 확인하지 못했습니다/);
+  delete state.codex.chatProtocol;
   state.codex.authStatus = { isLoggedIn: true, accountEmail: 'owner@example.test', planType: 'unknown' };
   emit();
   assert.match(text(), /요금제 확인 안 됨/);
@@ -12996,9 +13036,9 @@ test('연결된 도구: inherited external tools read in Korean, with the extern
   };
   const spawn = compileFunction(`${declaration('spawnSettingsCard')}\nreturn spawnSettingsCard;`, ['singletonSourceRef', 'focusOpenSourceCard', 'cardSeq', 'resolveCanvasCardPlacement',
     'revealPlacedCanvasCard', 'el', 'cardZ', 'closeCanvasCard', 'state', 'ChatState', 'codexProfileAvatar', 'document', 'window', 'bindCardSourceRef', 'markAgendaDirty', 'setActiveEntity',
-    'isCardFullscreen', 'focusCanvasCard', 'installCardHeaderFullscreenToggle', 'canvasZoom', 'settingsProfileAccountKey', 'createSettingsProfileTransfer'])(
+    'isCardFullscreen', 'focusCanvasCard', 'installCardHeaderFullscreenToggle', 'canvasZoom', 'settingsProfileAccountKey', 'createSettingsProfileTransfer', 'AccountSettingsView', 'codexBridgeNotice'])(
     () => ({ kind: 'settings-card' }), () => null, 0, () => ({ x: 0, y: 0, width: 600, height: 600, inView: true }), () => {}, el, 0, () => {}, state, Chat, codexProfileAvatar,
-    document, { innerWidth: 1280, innerHeight: 800, confirm: () => false, setTimeout: () => 0 }, () => {}, () => {}, () => {}, () => false, () => {}, () => {}, () => 1, ...Object.values(settingsTransferDeps(document, state)));
+    document, { innerWidth: 1280, innerHeight: 800, confirm: () => false, setTimeout: () => 0 }, () => {}, () => {}, () => {}, () => false, () => {}, () => {}, () => 1, ...Object.values(settingsTransferDeps(document, state)), AccountSettingsView, settingsBridgeNotice);
   const card = spawn();
   const section = () => settingsNodes(card, node => node.dataset.testid === 'settings-mcp')[0];
   assert.equal(section().dataset.state, 'unknown');
@@ -14814,10 +14854,10 @@ test('Agent 관리 shows 사용 준비 on the detail and saves the tool section 
   const spawn = compileFunction(`${declaration('spawnSettingsCard')}\nreturn spawnSettingsCard;`, ['singletonSourceRef', 'focusOpenSourceCard', 'cardSeq', 'resolveCanvasCardPlacement',
     'revealPlacedCanvasCard', 'el', 'cardZ',
     'closeCanvasCard', 'state', 'ChatState', 'codexProfileAvatar', 'document', 'window', 'bindCardSourceRef', 'markAgendaDirty', 'setActiveEntity',
-    'isCardFullscreen', 'focusCanvasCard', 'installCardHeaderFullscreenToggle', 'canvasZoom', 'settingsProfileAccountKey', 'createSettingsProfileTransfer'])(
+    'isCardFullscreen', 'focusCanvasCard', 'installCardHeaderFullscreenToggle', 'canvasZoom', 'settingsProfileAccountKey', 'createSettingsProfileTransfer', 'AccountSettingsView', 'codexBridgeNotice'])(
     () => ({ kind: 'settings-card' }), () => null, 0, () => ({ x: 10, y: 20, width: 600, height: 600, inView: true }),
     () => {}, el, 0, () => {}, state, Chat, codexProfileAvatar, document, windowStub,
-    () => {}, () => {}, () => {}, () => false, () => {}, () => {}, () => 1, ...Object.values(settingsTransferDeps(document, state)));
+    () => {}, () => {}, () => {}, () => false, () => {}, () => {}, () => 1, ...Object.values(settingsTransferDeps(document, state)), AccountSettingsView, settingsBridgeNotice);
   // CHAT-07 [Agent 설정 열기] opens straight onto the Agent's detail.
   const card = spawn({ tab: 'agents', profileId: 'review-verifier' });
   await settle();
@@ -15070,9 +15110,9 @@ function computerControlSettingsHarness({ computerControl = null, connected = tr
   };
   const spawn = compileFunction(`${declaration('spawnSettingsCard')}\nreturn spawnSettingsCard;`, ['singletonSourceRef', 'focusOpenSourceCard', 'cardSeq', 'resolveCanvasCardPlacement',
     'revealPlacedCanvasCard', 'el', 'cardZ', 'closeCanvasCard', 'state', 'ChatState', 'codexProfileAvatar', 'document', 'window', 'bindCardSourceRef', 'markAgendaDirty', 'setActiveEntity',
-    'isCardFullscreen', 'focusCanvasCard', 'installCardHeaderFullscreenToggle', 'canvasZoom', 'settingsProfileAccountKey', 'createSettingsProfileTransfer'])(
+    'isCardFullscreen', 'focusCanvasCard', 'installCardHeaderFullscreenToggle', 'canvasZoom', 'settingsProfileAccountKey', 'createSettingsProfileTransfer', 'AccountSettingsView', 'codexBridgeNotice'])(
     () => ({ kind: 'settings-card' }), () => null, 0, () => ({ x: 0, y: 0, width: 600, height: 600, inView: true }), () => {}, el, 0, () => {}, state, Chat, codexProfileAvatar,
-    document, { innerWidth: 1280, innerHeight: 800, confirm: () => false, setTimeout: () => 0 }, () => {}, () => {}, () => {}, () => false, () => {}, () => {}, () => 1, ...Object.values(settingsTransferDeps(document, state)));
+    document, { innerWidth: 1280, innerHeight: 800, confirm: () => false, setTimeout: () => 0 }, () => {}, () => {}, () => {}, () => false, () => {}, () => {}, () => 1, ...Object.values(settingsTransferDeps(document, state)), AccountSettingsView, settingsBridgeNotice);
   const card = spawn();
   const section = () => settingsNodes(card, node => node.dataset.testid === 'settings-computer-control')[0];
   const part = testid => settingsNodes(section(), node => node.dataset.testid === testid)[0] || null;
@@ -18837,7 +18877,8 @@ function portableSettingsHarness({ respond, fullscreen = false, initialDetail = 
   const deps = { singletonSourceRef: () => ({ kind: 'settings-card' }), focusOpenSourceCard: () => null, cardSeq: 0,
     resolveCanvasCardPlacement: () => ({ x: 0, y: 0, width: 600, height: 600 }), revealPlacedCanvasCard() {}, el, cardZ: 0, closeCanvasCard() {}, state, ChatState: Chat,
     codexProfileAvatar, document, window: { setTimeout: () => 0, confirm: () => false }, bindCardSourceRef() {}, markAgendaDirty() {}, setActiveEntity() {},
-    isCardFullscreen: () => false, focusCanvasCard() {}, installCardHeaderFullscreenToggle() {}, canvasZoom: () => 1, ...settingsTransferDeps(document, state, native.adapter) };
+    isCardFullscreen: () => false, focusCanvasCard() {}, installCardHeaderFullscreenToggle() {}, canvasZoom: () => 1, ...settingsTransferDeps(document, state, native.adapter),
+    AccountSettingsView, codexBridgeNotice: settingsBridgeNotice };
   if (fullscreen) {
     Object.assign(state, { cardFullscreen: null, surface: { initialBrowserFocus: false }, pan: { x: 0, y: 0 }, zoom: 1,
       setCanvasViewportTarget(camera) { this.pan = { ...camera.pan }; this.zoom = camera.zoom; } });
