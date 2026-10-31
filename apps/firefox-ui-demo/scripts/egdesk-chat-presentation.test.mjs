@@ -45,11 +45,14 @@ function threadSection(thread, profile = { label: 'Codex', name: 'Codex' }) {
 
 function chromeState(codex, activeEngine) {
   const block = between('      const bridgeNotice = codexBridgeNotice(codex);', '\n      const authCardNeeded =');
-  const keys = ['codexBridgeNotice', 'codex', 'activeEngine', 'buildCodexBridgeNotice', 'codexBridge', 'el'];
-  const bridge = { startLogin() {}, refreshAuthStatus() {} };
+  const keys = ['codexBridgeNotice', 'codex', 'activeEngine', 'buildCodexBridgeNotice', 'codexBridge', 'el', 'codexAccessRow', 'codexAccessActions'];
+  const bridge = { startLogin() {}, refreshAuthStatus() {}, signOut() {} };
   const state = codex.connected ? 'online' : 'offline';
+  // SUB-14 account access chip and its recovery chips, from their production definitions in mountCodexHUD.
+  const accessRow = compileFunction(`${between('    const ACCESS_STATE_VALUES = ', "    // Recovery is the user's pick")}\nreturn codexAccessRow;`, [])();
+  const accessActions = compileFunction(`${between('    let accessWaitKey = null;', '    const onMessageScrollGesture = ')}\nreturn codexAccessActions;`, ['codexBridge', 'el'])(bridge, el);
   return compileFunction(`${block}\nreturn { chromeRow, connectionNotice };`, keys)(
-    () => ({ state }), codex, activeEngine, () => state === 'online' ? null : el('div', {}, '연결 확인'), bridge, el);
+    () => ({ state }), codex, activeEngine, () => state === 'online' ? null : el('div', {}, '연결 확인'), bridge, el, accessRow, accessActions);
 }
 
 test('room row prioritizes title, latest message and time without duplicate Codex labels', () => {
