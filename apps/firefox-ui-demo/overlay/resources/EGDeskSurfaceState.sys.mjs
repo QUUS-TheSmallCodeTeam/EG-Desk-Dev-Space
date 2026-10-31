@@ -969,14 +969,24 @@ export function canPersistDeskSession(surface) {
   return !surface.restoring && !surface.recoveryProtected;
 }
 
+// CODE-02 (D-X3): a saved Board remembers its project folder by identifier and
+// display title only. The folder, its path and its dev/ino live in the bridge's
+// project store; this reference never grants a root or supplies a cwd.
+export function boardProjectReference(project) {
+  if (!project || typeof project !== 'object' || typeof project.projectId !== 'string' || !project.projectId) return null;
+  return { projectId: project.projectId, title: typeof project.title === 'string' && project.title ? project.title.slice(0, 120) : '프로젝트' };
+}
+
 export function planBoardProjection(snapshot, projectionId) {
   if (!snapshot?.agenda?.id || !projectionId) throw new Error('Board and projection IDs are required');
   const cards = snapshot.cards || [];
   const shapes = snapshot.shapes || [];
   const ids = [...new Set([...(snapshot.agenda.memberCardIds || []), ...cards.map(x => x.id), ...shapes.map(x => x.id)].filter(Boolean))];
   const idMap = Object.fromEntries(ids.map((id, index) => [id, `${projectionId}-member-${index}`]));
+  const project = boardProjectReference(snapshot.agenda.project);
   return {
     id: projectionId, boardId: snapshot.agenda.id, title: snapshot.agenda.title || 'Board',
+    ...(project ? { project } : {}),
     source: copy(snapshot), idMap,
     bindings: remapMemberReferences(copy(snapshot.agenda.contextBindings || []), idMap),
     members: ids.map(id => {
@@ -1004,5 +1014,7 @@ export function snapshotBoardProjection(projection, records, now = Date.now()) {
     memberCardIds: projection.members.filter(x => x.kind !== 'shape').map(x => x.sourceId),
     contextBindings: remapMemberReferences(copy(projection.bindings), inverse),
   };
+  const project = boardProjectReference(projection.project);
+  if (project) snapshot.agenda.project = project; else delete snapshot.agenda.project;
   return snapshot;
 }

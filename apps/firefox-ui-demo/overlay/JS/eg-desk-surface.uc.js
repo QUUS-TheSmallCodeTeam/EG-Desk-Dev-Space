@@ -1836,22 +1836,226 @@
     const key = JSON.stringify([boardId, record.project?.projectId || null, record.root?.rootId || null, record.root?.directoryId || null]);
     if (previous?.key === key) return;
     fileProjectAssociations.set(card, { key, boardId });
-    for (const changed of new Set([previous?.boardId, boardId].filter(Boolean))) state.codexBridge?.invalidateRoomProjectDefaults(changed);
+    for (const changed of new Set([previous?.boardId, boardId].filter(Boolean))) {
+      state.codexBridge?.invalidateRoomProjectDefaults(changed);
+      void refreshBoardProject(changed, { force: true });
+    }
   }
 
   // Native result boundary only. Grants, expiry and one-use attachment stay in
   // the existing File adapter; a saved/display path never enters this callback.
-  function pickNativeRoomProjectDirectory() {
+  function pickNativeRoomProjectDirectory(title = '이 방에서 사용할 프로젝트 폴더') {
     return new Promise((resolve, reject) => {
       try {
         const picker = Cc['@mozilla.org/filepicker;1'].createInstance(Ci.nsIFilePicker);
-        picker.init(window.browsingContext, '이 방에서 사용할 프로젝트 폴더', Ci.nsIFilePicker.modeGetFolder);
+        picker.init(window.browsingContext, title, Ci.nsIFilePicker.modeGetFolder);
         picker.open(result => {
           try { resolve(result === Ci.nsIFilePicker.returnOK ? picker.file.path : null); }
           catch (error) { reject(error); }
         });
       } catch (error) { reject(error); }
     });
+  }
+
+  // ── CODE-02 (D-X3): the Board's project folder on the Board head ──
+  // A Board keeps only {projectId, title} (SurfaceState.boardProjectReference)
+  // and saves it with the Board. The bridge's project store owns the folder,
+  // its path and its dev/ino. The head chip shows what the bridge verified just
+  // now: the folder name while connected, or a prompt to pick the folder again
+  // when the stored identity no longer matches (restart onto a replaced or
+  // missing folder, or a saved Board whose folder this bridge never saw). Chat
+  // rooms of the Board inherit the folder through the existing room defaults;
+  // File cards open it through openProject. Nothing here turns a saved
+  // reference, a display path or the current Board into a root grant or cwd.
+  const boardProjectPresentations = new Map();
+  const boardProjectReads = new Map();
+  const BOARD_PROJECT_RECONNECT = '프로젝트 폴더를 다시 선택';
+  const BOARD_PROJECT_PATHS = new Set(['/v1/files/picker/channel', '/v1/files/picker/begin', '/v1/files/picker/complete',
+    '/v1/files/projects/attach', '/v1/files/projects/open', '/v1/files/projects/detach']);
+  let boardProjectActionBusy = false;
+
+  // The File zone's bridge contract (requestLocalFilePacket), limited to the
+  // project routes and fenced by `current`: a Board may close or be rebound
+  // while a picker is open, and a late answer must not land on another Board.
+  function boardProjectService(current) {
+    const fileModule = ChromeUtils.importESModule('chrome://userchrome/content/EGDeskFileView.sys.mjs');
+    const service = fileModule.createEGDeskFileServiceCallbacks({ request: async (path, body, options) => {
+      if (!BOARD_PROJECT_PATHS.has(path) || !current()) throw new Error('Board의 프로젝트 폴더 연결이 바뀌었습니다. 다시 확인하세요.');
+      const headers = { 'Content-Type': 'application/json' };
+      for (const [name, value] of Object.entries(options?.headers || {})) {
+        if (name.toLowerCase() !== 'x-egdesk-picker-channel' || typeof value !== 'string') throw new Error('허용되지 않은 파일 채널 헤더입니다.');
+        headers['X-EGDesk-Picker-Channel'] = value;
+      }
+      const controller = new window.AbortController();
+      const timer = window.setTimeout(() => controller.abort(), 15000);
+      try {
+        const response = await fetch(`http://127.0.0.1:39218${path}`, { method: 'POST', signal: controller.signal, headers, body: JSON.stringify(body) });
+        const packet = await response.json().catch(() => null);
+        if (!current()) throw new Error('Board의 프로젝트 폴더 연결 결과를 다시 확인하세요.');
+        if (!response.ok || packet?.ok !== true) {
+          throw Object.assign(new Error(typeof packet?.error === 'string' ? packet.error : '프로젝트 폴더 요청을 완료하지 못했습니다.'),
+            { code: typeof packet?.code === 'string' ? packet.code : null, status: response.status });
+        }
+        return packet;
+      } catch (error) {
+        if (error.name === 'AbortError') throw new Error('프로젝트 폴더 요청의 완료를 확인하지 못했습니다. 브리지 연결을 확인한 뒤 다시 시도하세요.');
+        throw error;
+      } finally { window.clearTimeout(timer); }
+    } });
+    return { fileModule, service };
+  }
+
+  // What the head shows: the saved reference plus the bridge's current answer.
+  // `live` is openProject's {project, source}; null means the bridge did not answer.
+  function boardProjectPresentation(saved, live) {
+    const project = live?.project || null;
+    if (project && live.source === 'board' && project.status === 'connected') {
+      return { status: 'connected', projectId: project.projectId, name: project.name || project.title || '프로젝트',
+        displayPath: typeof project.displayPath === 'string' ? project.displayPath : '' };
+    }
+    if (project && project.status === 'reconnect-required') {
+      return { status: 'reconnect-required', projectId: project.projectId, name: project.name || project.title || saved?.title || '프로젝트', reason: project.reason || null };
+    }
+    // The bridge knows no folder for this Board: a saved Board that remembers
+    // one must be picked again (never adopted from the reference alone).
+    if (live && !project) return saved ? { status: 'reconnect-required', projectId: saved.projectId, name: saved.title, reason: 'unbound' } : { status: 'none' };
+    return saved ? { status: 'unavailable', projectId: saved.projectId, name: saved.title } : { status: 'none' };
+  }
+
+  function boardProjectionsFor(boardId) {
+    return Object.values(state.boards.projections).filter(item => item.boardId === boardId);
+  }
+
+  // The verified binding becomes the Board's saved reference so the next Board
+  // save carries it. Like any composition change it marks the Board unsaved;
+  // restore marks nothing, and a reconnect-required folder keeps the old reference.
+  function adoptBoardProjectReference(projection, presentation) {
+    if (presentation.status !== 'connected' || state.agenda.restoreInProgress || state.surface?.restoring) return;
+    const next = SurfaceState.boardProjectReference({ projectId: presentation.projectId, title: presentation.name });
+    if (projection.project?.projectId === next.projectId && projection.project.title === next.title) return;
+    projection.project = next;
+    markAgendaDirty('board-project', document.getElementById(projection.id));
+  }
+
+  async function refreshBoardProject(boardId, { force = false } = {}) {
+    if (typeof boardId !== 'string' || !boardId) return null;
+    const pending = boardProjectReads.get(boardId);
+    if (pending && !force) return pending.promise;
+    const entry = { promise: null };
+    boardProjectReads.set(boardId, entry);
+    const current = () => boardProjectReads.get(boardId) === entry;
+    entry.promise = (async () => {
+      let live = null, failed = false;
+      try { live = await boardProjectService(current).service.openProject({ boardId }); }
+      catch { failed = true; }
+      if (!current()) return boardProjectPresentations.get(boardId) || null;
+      boardProjectReads.delete(boardId);
+      const projections = boardProjectionsFor(boardId);
+      const saved = projections.find(item => item.project)?.project || null;
+      const presentation = Object.freeze({ ...boardProjectPresentation(saved, failed ? null : live), at: Date.now(), failed });
+      boardProjectPresentations.set(boardId, presentation);
+      for (const projection of projections) {
+        adoptBoardProjectReference(projection, presentation);
+        const region = document.getElementById(projection.id);
+        if (region) syncBoardRegionProject(region, projection);
+      }
+      return presentation;
+    })();
+    return entry.promise;
+  }
+
+  function buildBoardRegionProjectChip(projection) {
+    const projectionId = projection.id;
+    return el('button', { type: 'button', class: 'egd-board-region-project', hidden: true, data: { testid: 'board-project', projectionId }, onclick: event => {
+      event.stopPropagation();
+      const chip = event.currentTarget, status = chip.dataset.status;
+      if (status === 'reconnect-required') void chooseBoardProjectFolder(projectionId);
+      else if (status === 'unavailable') void refreshBoardProject(state.boards.projections[projectionId]?.boardId, { force: true });
+      else toggleBoardRegionMenu(projectionId, chip.closest('.egd-board-region')?.querySelector('.egd-board-region-menu-button') || chip);
+    } }, deskIcon('folder'), el('span', { class: 'egd-board-region-project-name' }));
+  }
+
+  // Cheap enough for every refreshBoardRegion: reads the cache and renders;
+  // asks the bridge only once per Board, again after a failed answer settles.
+  function syncBoardRegionProject(region, projection) {
+    const chip = region.querySelector('.egd-board-region-project');
+    if (!chip) return;
+    const boardId = projection.boardId;
+    const known = boardProjectPresentations.get(boardId) || null;
+    const reading = boardProjectReads.has(boardId);
+    if (!known || (known.failed && !reading && Date.now() - known.at > 15000)) void refreshBoardProject(boardId);
+    const shown = known || (projection.project ? { status: 'unavailable', projectId: projection.project.projectId, name: projection.project.title } : { status: 'none' });
+    const status = shown.status;
+    const label = status === 'connected' ? shown.name : status === 'reconnect-required' ? BOARD_PROJECT_RECONNECT
+      : status === 'unavailable' ? `${shown.name} · ${reading || !known ? '확인 중' : '확인 필요'}` : '';
+    const description = status === 'connected' ? `프로젝트 폴더: ${shown.name}${shown.displayPath ? ` · ${shown.displayPath}` : ''} · Board 작업 메뉴 열기`
+      : status === 'reconnect-required' ? `${BOARD_PROJECT_RECONNECT}: 저장된 폴더 ‘${shown.name}’을(를) 지금 확인하지 못했습니다. 같은 폴더가 아니면 자동으로 연결하지 않습니다.`
+      : status === 'unavailable' ? `프로젝트 폴더 ‘${shown.name}’의 연결을 브리지에서 확인하지 못했습니다. 눌러서 다시 확인` : '';
+    const hidden = status === 'none';
+    if (chip.hidden !== hidden) chip.hidden = hidden;
+    if (chip.dataset.status !== status) chip.dataset.status = status;
+    const name = chip.querySelector('.egd-board-region-project-name');
+    if (name && name.textContent !== label) name.textContent = label;
+    if (chip.title !== description) { chip.title = description; chip.setAttribute('aria-label', description); }
+  }
+
+  function boardProjectMenuItems(projection, item) {
+    const shown = boardProjectPresentations.get(projection.boardId);
+    const connected = shown?.status === 'connected';
+    const attached = connected || !!projection.project || (!!shown && shown.status !== 'none');
+    return [
+      item('프로젝트 폴더…', connected ? `이 Board의 프로젝트 폴더 바꾸기 (지금: ${shown.name}). 채팅방은 이 폴더를 상속하고 File은 이 폴더를 엽니다.`
+        : '이 Board에 프로젝트 폴더 연결. 채팅방은 이 폴더를 상속하고 File은 이 폴더를 엽니다.', 'board-project-folder', () => { void chooseBoardProjectFolder(projection.id); }),
+      attached ? item('프로젝트 폴더 해제', '이 Board의 프로젝트 폴더 연결 해제 (폴더와 파일은 그대로)', 'board-project-detach', () => { void detachBoardProject(projection.id); }) : null,
+    ];
+  }
+
+  // Attach only through the native picker (the helper consumes the selection
+  // and keeps the verified path and dev/ino). The picker reply alone is not
+  // trusted: the Board is re-read before the head and chat rooms update.
+  async function chooseBoardProjectFolder(projectionId) {
+    const projection = state.boards.projections[projectionId];
+    if (!projection || boardProjectActionBusy) return null;
+    const boardId = projection.boardId, title = projection.title;
+    const current = () => state.boards.projections[projectionId]?.boardId === boardId;
+    boardProjectActionBusy = true;
+    try {
+      const { fileModule, service } = boardProjectService(current);
+      const pickers = fileModule.createEGDeskNativeFilePickers({ service, pickDirectory: () => pickNativeRoomProjectDirectory(`Board ‘${title}’의 프로젝트 폴더`) });
+      const attached = await pickers.chooseProjectFolder({ boardId });
+      if (!current()) return null;
+      if (!attached) { boardNotice('프로젝트 폴더 선택을 취소했습니다. Board의 연결은 바뀌지 않았습니다.'); return null; }
+      const presentation = await refreshBoardProject(boardId, { force: true });
+      if (!current()) return null;
+      state.codexBridge?.invalidateRoomProjectDefaults(boardId);
+      if (presentation?.status === 'connected' && presentation.projectId === attached.projectId) {
+        boardNotice(`Board ‘${title}’의 프로젝트 폴더: ${presentation.name}. 이 Board의 채팅방은 이 폴더에서 실행하고 File은 이 폴더를 엽니다.`);
+      } else boardNotice('프로젝트 폴더 연결을 다시 확인하지 못했습니다. Board 메뉴에서 다시 선택하세요.');
+      return presentation;
+    } catch (error) {
+      if (current()) boardNotice(error?.message || '프로젝트 폴더를 연결하지 못했습니다.');
+      return null;
+    } finally { boardProjectActionBusy = false; }
+  }
+
+  async function detachBoardProject(projectionId) {
+    const projection = state.boards.projections[projectionId];
+    if (!projection || boardProjectActionBusy) return false;
+    const boardId = projection.boardId;
+    const current = () => state.boards.projections[projectionId]?.boardId === boardId;
+    boardProjectActionBusy = true;
+    try {
+      await boardProjectService(current).service.detachProject({ boardId });
+      if (!current()) return false;
+      if (projection.project) { projection.project = null; markAgendaDirty('board-project', document.getElementById(projection.id)); }
+      await refreshBoardProject(boardId, { force: true });
+      state.codexBridge?.invalidateRoomProjectDefaults(boardId);
+      boardNotice(`Board ‘${projection.title}’의 프로젝트 폴더 연결을 해제했습니다. 폴더와 파일은 그대로입니다.`);
+      return true;
+    } catch (error) {
+      if (current()) boardNotice(error?.message || '프로젝트 폴더 연결을 해제하지 못했습니다.');
+      return false;
+    } finally { boardProjectActionBusy = false; }
   }
 
   function buildChatRoomProjectSettings(thread, panelCurrent, actionHost) {
@@ -4396,6 +4600,7 @@
         deskIcon('board'), el('span', { class: 'egd-board-region-name' })),
         el('span', { class: 'egd-board-region-current', hidden: true }, '현재 Board'),
         el('span', { class: 'egd-board-region-unsaved', hidden: true }, '저장 안 됨'),
+        buildBoardRegionProjectChip(projection),
         el('button', { type: 'button', class: 'egd-board-region-menu-button', title: 'Board 작업',
           'aria-haspopup': 'menu', 'aria-expanded': 'false', data: { testid: 'board-menu', projectionId: projection.id },
           onclick: (ev) => {
@@ -4410,6 +4615,7 @@
     region.querySelector('.egd-board-region-title')?.setAttribute('aria-label', `Board ${projection.title} 선택`);
     region.querySelector('.egd-board-region-menu-button')?.setAttribute('aria-label', `${projection.title} Board 작업`);
     syncBoardRegionMarks(region, projection);
+    syncBoardRegionProject(region, projection);
     const rects = projection.members.map(m => document.getElementById(m.viewId)).filter(Boolean).map(persistentEntityGeometry);
     const rect = SurfaceState.boardRegionRect(rects, { fallback: projection.offset });
     Object.assign(region.style, { left: `${rect.x}px`, top: `${rect.y}px`, width: `${rect.width}px`, height: `${rect.height}px` });
@@ -4447,6 +4653,7 @@
       item('저장', '이 Board 저장', 'board-save', () => saveCurrentAgendaState({ projectionId })),
       // CTX-01: only while the bridge's Desk store keeps Board versions.
       boardVersionHistoryReady() ? item('버전 기록', '이 Board의 버전 기록', 'board-history', () => openBoardHistoryPanel(projection.boardId)) : null,
+      ...boardProjectMenuItems(projection, item),
       item('Chat에 첨부', '이 Board의 요소를 Chat에 첨부', 'board-attach-chat',
         () => openChatInputPanel(state.codex.activeThreadId, { viewIds: projection.members.map(member => member.viewId) })),
       // RT-03: only while the bridge can write .egdesk files.
