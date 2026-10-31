@@ -1,3 +1,5 @@
+import { MASK_COLOR, SCREENSHOT_DEFAULTS, encodeAttempts, fitsBudget, scaleMasks, screenshotDecision } from "./EGDeskScreenshotMask.sys.mjs";
+
 // System modules are per-process singletons. The chrome overlay explicitly
 // registers only its own Browser Card elements; content cannot mint a handler.
 const browserAuthorizers = new Map();
@@ -89,6 +91,14 @@ export function browserToolDispatchReceiptFields(actionType, diagnostics) {
   return {};
 }
 
+// BRW-09 screenshot tickets: the chrome side asks for a screenshot only
+// through this actor's own query (options.screenshot on a snapshot query),
+// so the parent mints a one-time ticket there and the child must hand it
+// back. A content process cannot start a capture on its own.
+const SCREENSHOT_TICKET_MS = 60000;
+const XHTML_NS = "http://www.w3.org/1999/xhtml";
+function screenshotFormat(value) { return value === "png" ? { mime: "image/png", format: "png" } : { mime: "image/jpeg", format: "jpeg" }; }
+
 function authorizerFor(browser, context) {
   const registration = browserAuthorizers.get(context?.id);
   if (!registration || !registeredChromeBrowser(registration.browser, registration.ownerWindow) ||
@@ -98,7 +108,96 @@ function authorizerFor(browser, context) {
 }
 
 export class EGDeskBrowserAgentRuntimeParent extends JSWindowActorParent {
+  // Chrome queries pass through here; a snapshot query that carries
+  // options.screenshot gets a one-time ticket the child must return.
+  sendQuery(name, data) {
+    const send = super.sendQuery;
+    if (typeof send !== "function") throw new TypeError("JSWindowActorParent.sendQuery is unavailable");
+    return send.call(this, name, this.ticketedQuery(name, data));
+  }
+
+  ticketedQuery(name, data) {
+    const spec = data?.options?.screenshot;
+    if (name !== "snapshot" || !spec || typeof spec !== "object" || Array.isArray(spec)) return data;
+    const ticket = globalThis.crypto?.randomUUID?.() || `${Date.now()}-${Math.random()}`;
+    this.screenshotTickets ||= new Map();
+    const now = Date.now();
+    for (const [key, expiresAt] of this.screenshotTickets) if (expiresAt <= now) this.screenshotTickets.delete(key);
+    this.screenshotTickets.set(ticket, now + SCREENSHOT_TICKET_MS);
+    return { ...data, options: { ...data.options, screenshot: { ...spec, ticket } } };
+  }
+
+  takeScreenshotTicket(ticket) {
+    const expiresAt = typeof ticket === "string" ? this.screenshotTickets?.get(ticket) : undefined;
+    if (expiresAt === undefined) return false;
+    this.screenshotTickets.delete(ticket);
+    return expiresAt > Date.now();
+  }
+
+  // Captures the visible viewport of this top document, covers what the
+  // child reports as sensitive or unread, and encodes within the budget.
+  // Gecko API (parent process only; dom/chrome-webidl/WindowGlobalActors.webidl):
+  //   WindowGlobalParent.drawSnapshot(DOMRect? rect, double scale,
+  //     UTF8String backgroundColor, optional boolean resetScrollPosition)
+  //     -> Promise<ImageBitmap>; rect null = the currently visible viewport,
+  //     in CSS pixels times scale; works with local and remote frames.
+  //   Reference use: toolkit/components/extensions/parent/ext-tabs-base.js
+  //   (tabs.captureTab) and remote/shared/Capture.sys.mjs. Not run here
+  //   (headless QA cannot capture; a real Firefox window is required).
+  async captureScreenshot(data = {}) {
+    if (!this.takeScreenshotTicket(data.ticket)) return { send: false, reason: "unauthorized" };
+    const windowGlobal = this.manager;
+    const context = this.browsingContext || windowGlobal?.browsingContext;
+    if (!windowGlobal || typeof windowGlobal.drawSnapshot !== "function") return { send: false, reason: "capture-unsupported" };
+    if (!context || (context.top && context.top !== context)) return { send: false, reason: "not-top-document" };
+    const browser = context.top?.embedderElement || context.embedderElement;
+    const ownerDocument = browser?.ownerDocument;
+    if (!registeredChromeBrowser(browser, ownerDocument?.defaultView)) return { send: false, reason: "missing-embedder" };
+    if (windowGlobal.isClosed === true || windowGlobal.isCurrentGlobal === false) return { send: false, reason: "document-changed" };
+    const budgetChars = Number.isSafeInteger(data.budgetChars) && data.budgetChars > 0
+      ? Math.min(data.budgetChars, SCREENSHOT_DEFAULTS.budgetChars) : SCREENSHOT_DEFAULTS.budgetChars;
+    const { mime, format } = screenshotFormat(data.format);
+    let before;
+    try { before = await this.sendQuery("screenshotMask", {}); } catch { return { send: false, reason: "mask-unavailable" }; }
+    if (Number.isSafeInteger(before?.innerWindowId) && Number.isSafeInteger(windowGlobal.innerWindowId) &&
+        before.innerWindowId !== windowGlobal.innerWindowId) return { send: false, reason: "document-changed" };
+    let image;
+    // Scale 1: one capture pixel per CSS pixel, so the child's boxes map
+    // directly; the decision re-measures the mapping from the bitmap size.
+    try { image = await windowGlobal.drawSnapshot(null, 1, "white"); } catch { return { send: false, reason: "capture-failed" }; }
+    try {
+      if (windowGlobal.isClosed === true || windowGlobal.isCurrentGlobal === false) return { send: false, reason: "document-changed" };
+      let after;
+      try { after = await this.sendQuery("screenshotMask", {}); } catch { return { send: false, reason: "mask-unavailable" }; }
+      const capture = { width: image.width, height: image.height };
+      const decision = screenshotDecision({ before, after, image: capture });
+      if (!decision.send) return { send: false, reason: decision.reason };
+      const canvas = ownerDocument.createElementNS(XHTML_NS, "canvas");
+      for (const attempt of encodeAttempts({ ...capture, maxEdge: data.maxEdge, quality: data.quality })) {
+        const masks = scaleMasks(decision.masks, capture, attempt);
+        if (!masks) return { send: false, reason: "mask-unavailable" };
+        canvas.width = attempt.width;
+        canvas.height = attempt.height;
+        const ctx = canvas.getContext("2d", { alpha: false });
+        if (!ctx) return { send: false, reason: "capture-unsupported" };
+        ctx.drawImage(image, 0, 0, attempt.width, attempt.height);
+        ctx.fillStyle = MASK_COLOR;
+        for (const mask of masks) ctx.fillRect(mask.x, mask.y, mask.width, mask.height);
+        const dataUrl = canvas.toDataURL(mime, attempt.quality);
+        if (!fitsBudget(dataUrl, budgetChars)) continue;
+        return { send: true, imageUrl: dataUrl, format, width: attempt.width, height: attempt.height,
+          // CSS pixel = image pixel / imageScale. Pixels are never input coordinates.
+          imageScale: Math.round(decision.imageScale * attempt.factor * 1000) / 1000,
+          maskedRegions: decision.maskedRegions, maskCount: decision.maskedRegions.length,
+          documentId: decision.documentId, revision: decision.revision,
+          ...(Object.hasOwn(decision, "innerWindowId") ? { innerWindowId: decision.innerWindowId } : {}) };
+      }
+      return { send: false, reason: "image-too-large" };
+    } finally { try { image.close?.(); } catch {} }
+  }
+
   receiveMessage(message) {
+    if (message.name === "captureScreenshot") return this.captureScreenshot(message.data || {});
     if (message.name !== "authorizeAct") throw new Error("Unsupported Browser actor parent message");
     const context = this.browsingContext || this.manager?.browsingContext;
     if (!context) return { authorized: false, reason: "missing-browsing-context" };
