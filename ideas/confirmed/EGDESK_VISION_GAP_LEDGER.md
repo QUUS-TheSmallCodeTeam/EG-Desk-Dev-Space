@@ -16,8 +16,21 @@
 
 **2026-10-31 작업자 인계 노트**: `docs/references/session-handoffs/2026-10-31/`에 2026-10-31 라운드 병렬 세션 16개(1차 12 · 2차 2 · 재개 2)의 인계 노트 18건(brw-05-07-11과 chat-03은 plan+handoff 두 파일)을 공유 노트 폴더에서 저장소로 옮겨 보관했다. 같은 폴더의 `README.md`가 색인(세션별 요약, 실화면 검증 체크리스트, 대표님 결정 대기, 다음 작업 포인터)이고, `overnight-report-2026-10-31.md`는 main 세션 라운드 기록 사본이다. 세션·worktree·브랜치 16개는 2026-10-31 17:44 KST에 삭제되어 이 노트들이 세션별 유일 기록이다. 16개 브랜치는 모두 `claude/vision-gap-20261024`(`b476945`)에 병합·push 완료. 어느 항목도 Firefox 실화면 검증은 하지 않았다(코드 + Node 단건 테스트까지).
 
+<a id="checkpoint-20261101-0801"></a>
+
+**2026-11-01 08:01 KST 운영 점검**: 합성 자료·격리 headless의 개별 근거만 반영하며 상태·총계는 유지한다. 날짜가 붙은 과거 '남은 것'은 당시 기록이고, 현재 확인 범위와 미해결 경계는 이번 점검과 구분해 읽는다.
+
 | 날짜 | 항목 | 상태 변화 | 근거 |
 |---|---|---|---|
+| 2026-11-01 08:21 KST | HUM-BRIEF-002 · CNV-06 독립 검토 | 장문 읽기와 메모 내부 배치 확인 | 로컬 코드 `16ce707`. 720×600에서 같은 100줄 원문을 96.36% 배율로 끝까지 스크롤해 마지막 줄의 9개 지점 모두 원문에 닿았다(수정 전 0/9). 브리핑을 닫으면 본문 높이와 카메라가 돌아왔다. 카드 바깥 테두리까지 모두 보인다는 뜻은 아니다. 메모 접힘·펼침·댓글 입력 화면에서 제목, Board, 대상, 버튼의 내부 겹침이 없음을 별도 검토했다. 다른 카드가 메모를 덮는 경우는 이 판정 밖이다. |
+| 2026-11-01 08:01 KST 점검 | 중앙 격리 회귀 | 상태·총계 유지 | 공통 변경 해시 기준 1,284/1,284 통과·skip 0. 아래 실화면 근거와 별개이며, 모든 계정·포맷이나 운영 배포의 검증을 뜻하지 않는다. |
+| 2026-11-01 08:01 KST 점검 | SUB-14 합성 RPC 경계 | 현 상태 유지·합성 검증 한정 | helper 로컬 `2578919`: 합성 RPC의 즉시 거절·epoch 경계·오류 보존 범위만 확인. 실계정 미검증. |
+| 2026-11-01 08:01 KST 점검 | CNV-06 입력·재부착·두 행 배치 | 일부 유지 | 작성자 격리 실화면에서 본문 입력·줄바꿈·Cmd-Z, 직접 drag로 다른 대상에 재부착·빈 공간에서 대상 연결 해제(위치 고정)를 확인. 두 행 배치는 두 크기·100%/표시 76%·서로 다른 긴 제목/Board명·해결 상태 등 16상태·172체크 통과. 대상 제목은 실제 View의 표시 텍스트만 사용하고 없으면 유형명으로 표시하며, Agent 전송용 라벨·ID 연결은 바꾸지 않는다. 재시작·Agent 왕복·다른 OS는 미검증. |
+| 2026-11-01 08:01 KST 점검 | HUM-BRIEF-002 화면·읽기 수용 | 진행중·독립 재수용중 | 전체 근거의 원좌표 보존, 세 배율의 번호·근거 범위 대응, 창 폭별 패널 구조, 넓은 패널 탐색 유지·의견 새로고침 포커스를 확인. 종료 포커스는 독립 2/2 확인. 720px opener의 팔레트 가림은 진입·복귀 모두 기존 상태다. 720px 확대 읽기의 동일 배율 장문 마지막 줄 도달은 0→9/9(구현자 실화면)이며 독립 재수용은 진행중이다. 확대 시 카드 전체가 가림 없이 보인다는 보장은 없다. |
+| 2026-11-01 05:41 KST 점검 | SUB-14 즉시 거절·오류 보존 | 현 상태 유지·합성 검증 한정 | 합성 RPC/HTTP의 즉시 거절·epoch 경계·오류 보존만 확인. 실계정 미검증이며 이번 회차 근거를 제품 전체 완료로 확대하지 않는다. |
+| 2026-11-01 05:41 KST 점검 | UX-05 배치 조작·그룹 외곽선 | 일부 유지 | 1280×800 실제 격리 headless 화면에서 group drag·snap·undo 확인. cross-realm Map 보정 후 그룹 외곽선의 drag Δ(57,48)·90%↔75% 배율 변경·Ungroup 확인. 원격·물리 입력 미검증. |
+| 2026-11-01 05:41 KST 점검 | CNV-06 Board B 저장·닫기·재열기 | 일부 유지 | 실제 격리 headless 화면에서 대상+메모를 Board B로 이동하고 B를 명시 저장·닫기·다시 열기. 동명 및 동일 옛 source ID 조건을 각각 시험해 실제 타깃+메모 Δ(+75,+70), 비교 카드만 이동할 때 메모 불변 확인. 재시작·Agent 왕복 미검증. |
+| 2026-11-01 05:41 KST 점검 | HUM-BRIEF-002 실화면 수용 | 진행중·수용 보류 | 실화면 수용은 아직 보류이며 제품 문서화도 보류한다. 다른 항목의 제한된 검증을 이 항목의 수용 근거로 쓰지 않는다. |
 | 2026-10-31 | (병합) 재개 세션 2개 작업 브랜치 → `claude/vision-gap-20261024` | 기준 `a61b70f` → HEAD `bf3f499` | 1차 라운드에서 계정 한도로 중단됐던 CNV-06·UX-05 세션을 재개한 결과. 병합 커밋 `114f313`(CNV-06, 브랜치 커밋 `41861d2`·`f8b08b3`·`f07ae07`·`56e1c09`, 자기 브랜치에 main 병합 `980cbef` 포함) → `bf3f499`(UX-05, `bbb8052`·`c828880`·`68b67f2`·`e56df16`, main 병합 `6259750` 포함 — uc.js import 두 줄 충돌은 양쪽 유지). 본 브랜치 병합은 충돌 없음. 기준 `a61b70f`는 2차 병합 뒤 원장 커밋이다. 파일 8(+1621/−71: uc.js, CSS, `EGDeskCanvasLayout.sys.mjs`, `EGDeskMemoState.sys.mjs`, 두 시험, `AI_CANVAS_ANNOTATION_LAYER.md`·`VIEWPORT_LAYOUT_INTERACTION_MODEL.md`). 병합 트리에서 프로젝트 고정 Node 단건 테스트 9개 파일 실패 0(annotation-memo 18, canvas-layout 41, surface-state 955/955, surface-modules 13, design-tokens 37, chat-presentation 9, chat-run-result 30, thread-routing 9, board-membership 7). Firefox 실화면은 둘 다 미검증. push 없음. |
 | 2026-10-31 | CNV-06 Canvas Memo 화면 연결(D-K5·D-K4) | 일부 유지(화면 연결 완료·실화면 미검증) | `41861d2`·`f8b08b3`·`f07ae07`·`56e1c09`. Dock [메모] 버튼이 선택 카드 오른쪽 위에 메모를 붙인다(접힘 240×160 ↔ 펼침 320×280의 두 고정 틀만, `MEMO_FRAME`). 메모는 카드를 따라 움직이고 다른 카드에 다시 붙일 수 있으며 카드가 닫히면 '대상 없음'으로 표시한다. 답글 목록은 나/Agent 아바타·이름을 구분한다. [<Agent>에게 묻기]는 그 Agent의 DM 방에 메모 번호·본문·대상 카드·최근 답글·질문을 한 메시지로 실제 전송하고, 저장만으로는 호출하지 않는다. 답은 물어본 동안에만 메모 답글로 한 번 자동 부착되고(D-K5, `memoReplyFromRun`), Chat에는 '메모 #N 답글로 붙음' 칩만 남는다(D-K4). Desk·Board 저장·복원에 type `memo`가 들어갔다. 묻기 상태(pending/answered/cancelled)는 대기 중인 것이 없어도 그대로 그린다. 낡은 시험 기대 1건(size/baseHeight 제거, 저장 데이터 영향 없음) 갱신. `31bc4ba`(2026-10-24 순수 모듈)의 S7 화면 연결에 해당한다. 남은 것: Firefox 실화면(메모 textarea와 Desk 전역 키 간섭, `<select>` 동작), 메모→카드 links 선 표시, '수정 전 메모에 대한 답' 표시, Board 재개 시 anchor.cardId 재매핑, helper memoId 출처 배선, 재촉 알림. |
 | 2026-10-31 | UX-05 배치 조작 화면 연결(D-V5) | 일부 유지(화면 연결 완료·실화면 미검증) | `bbb8052`·`c828880`·`68b67f2`·`e56df16`. 끌기·크기 조절 때 24px 격자(`CANVAS_GRID_PX`)와 다른 창·Board 영역의 가장자리·중심에 8px 화면 거리(`CANVAS_SNAP_SCREEN_PX`)로 스냅하고 안내선을 그리며 Option/Alt로 해제한다. 배치 단계 undo/redo는 View bar 포커스에서 ⌘/Ctrl+Z·⌘/Ctrl+Shift+Z이고, 입력칸·터미널·브라우저 포커스면 그쪽 ⌘Z를 그대로 둔다. 제목줄·빈 Canvas 우클릭 배치 메뉴: [선택 N개 겹침 없이 정리](`arrangeInVisibleArea`) / [그룹으로 묶기]·[그룹 해제](`createCanvasGroup`, 점선 테두리, 함께 선택·이동, Desk 저장 `groups`와 복원 id 재매핑) / [이동…]·[크기…] 숫자 입력(`parsePlacementInput`, 스냅 없음) / 되돌리기 / 다시 실행. 제어 레이어 하나(`installCanvasPlacementOps`)가 모든 카드 유형을 덧써 카드별 드래그 코드는 고치지 않았다(Settings 카드 포함, 도형 제외). `f2058a6`(2026-10-24 순수 모듈)의 S4 화면 연결에 해당한다. 남은 것: Firefox 실화면(MutationObserver가 raw 좌표를 덧쓰는 타이밍, 원격 `<browser>` 위 pointer target, 포커스 이동), 선택 도구줄 `[맞춤]` 토글. |
@@ -654,6 +667,7 @@ Chat의 각 요청·답변에는 `접수`·`실행`·`결과 확인`·`확인 �
 - 최초 조사 시 빠진 것(2026-10-24, 이후 보완은 아래 진행 참고): 단계당 대상 1개(resolveBriefingTargets가 [step.target]만 처리), visibility·dimming·emphasis 상태 없음, 대상이 sourceId/artifactId뿐(Canvas 도형·출력 불가), Comment가 독립 객체(commentId·revision)가 아니라 초안 텍스트로 바로 변환됨. 비전 문서 체크박스도 미갱신.
 - 구현 스케치: briefing step schema를 targets[] + emphasis로 확장(egdesk-context-runtime.mjs tool schema, BriefingState.resolveBriefingTargets/briefingBounds), Canvas dimming 클래스 적용, Comment를 context store record로 저장 후 초안에 참조로 첨부(dedupe draftId+commentId).
 - 진행(2026-10-27): `cfaa1d5`·`7fe8f7d`로 단계 의견을 실제 Context record(id·seq·요청 UUID)에 저장하고 원래 방의 Chat 초안에 참조·본문을 중복 없이 포함하는 경로를 연결했다. 응답 유실 확인·명시적 동일 요청 재시도·방/계정 경계를 포함한 실제 headless UI 11/11과 한정 시각 인수를 통과했다. 자동 메시지 전송은 하지 않는다. 의견 수정·삭제·resolve UI와 전체 다중 대상·annotation 시각 계약의 완료를 뜻하지 않아 상태는 ‘일부’를 유지한다. 상세는 [2026-10-27 체크포인트](#2026-10-27-진행-중-체크포인트).
+- 현재 경계(2026-11-01 08:01 KST): HUM-BRIEF-002의 확인 범위·잔여 가림·독립 재수용 상태는 [운영 점검](#checkpoint-20261101-0801)을 따른다. 아래 작은 화면 관찰은 2026-10-29 당시 기록이며 현재의 최종 수용 판정이 아니다.
 
 <a id="briefing-small-screen-reading"></a>
 #### 다중 근거의 작은 화면 가독성 — 2026-10-29
@@ -882,6 +896,8 @@ Chat의 각 요청·답변에는 `접수`·`실행`·`결과 확인`·`확인 �
 - 환경 제약: 실제 한도 소진은 재현이 어려움. fixture로 구현함
 - 구현 스케치: cleanNotification error·turn.error에서 공개 원인 enum만 allowlist로 통과시키고, publicError에 kind(auth\|quota\|permission\|network)를 추가한다. rateLimitReachedType(SUB-03)과 연결한다. Claude 어댑터는 api_retry.error(rate_limit\|authentication_failed\|billing_error)를 같은 kind로 매핑한다. run 카드에 kind별 문구와 버튼을 단다.
 - 진행(2026-10-31): 브리지 `access` 행(ok / loginRequired / loginInProgress / authFailed / quotaExhausted / permissionDenied)과 복구 선택지(login, reauth, switchAccount, wait, refresh), Chat 머리 칩의 상태별 문구와 버튼. 자동 재시도·계정 전환 없음, 지난 초기화 시각은 '확인 필요'(D-S5). 자세한 범위는 위 진행 기록.
+- 점검(2026-11-01 05:41 KST): 합성 RPC/HTTP의 즉시 거절·epoch 경계·오류 보존만 확인했다. 실계정 검증은 하지 않았으며, 이번 회차의 부분 검증은 제품 전체 완료의 근거가 아니다. 기존 상태 열을 유지한다.
+- 현재 경계(2026-11-01 08:01 KST): 최신 helper 로컬 식별자와 합성 RPC 근거는 [운영 점검](#checkpoint-20261101-0801)에 기록했다. 기존 fixture 기준 완료의 범위를 실계정 수용이나 운영 배포로 넓히지 않는다.
 - 남은 것(2026-10-31): Claude 어댑터 오류의 같은 kind 매핑은 helper(`2a8d699`·`bcbbd11`)에 있고 실제 Claude 왕복은 미검증. Codex 오류 원인 필드 이름의 공식 문서 대조는 여전히 없다.
 
 ### SUB-15 — API 키 Engine Profile(OpenAI·Anthropic 종량 과금 키)
@@ -1266,7 +1282,9 @@ Canvas·Viewport·UI/UX·디자인 영역은 바탕이 이미 깔려 있다. 의
 - 구현 스케치: uc.js에 spawnMemoCard를 추가한다(spawnDeskWindowShell 사용, --egd-note 배경). serializeCardState와 Board 복원(mountBoardMember 1690대)에 'memo' type을 추가한다. 1단계는 본문 편집·이동·삭제·저장만 하고, 2단계는 [Agent에게 묻기…]가 openChatInputPanel 계열로 Memo revision을 첨부한 초안을 여는 방식으로 연결한다. verify 스크립트를 새로 만든다.
 - 진행(2026-10-24): `31bc4ba` — 순수 모듈 `EGDeskMemoState.sys.mjs`(아래 카드에 고정, 답글 스레드, 'Agent에게 묻기' 초안, Agent 답은 물어본 동안에만 한 번 붙음) + node 시험. 화면 연결은 S7로 남겼다.
 - 진행(2026-10-31): `41861d2`·`f8b08b3`·`f07ae07`·`56e1c09` — Dock [메모] → 선택 카드 오른쪽 위 메모(두 고정 틀 240×160/320×280), 카드 따라 이동·다시 붙이기·'대상 없음', 나/Agent 답글 목록, [<Agent>에게 묻기]의 DM 방 실제 전송(저장만으로는 호출 없음), 답의 메모 답글 자동 부착 한 번(D-K5)과 Chat의 '메모 #N 답글로 붙음' 칩(D-K4), Desk·Board 저장·복원 type `memo`. 위 구현 스케치의 spawnMemoCard/openChatInputPanel 초안 방식이 아니라 Chat 요청으로 바로 보낸다. 자세한 범위는 위 진행 기록.
+- 점검(2026-11-01 05:41 KST): 실제 격리 headless 화면에서 대상+메모를 Board B로 이동한 뒤 B를 명시 저장·닫기·다시 열었다. 동명 비교 카드 조건과 동일 옛 source ID 조건을 각각 시험해 실제 타깃+메모 Δ(+75,+70), 비교 카드만 이동할 때 메모 불변을 확인했다. 재시작·Agent 왕복은 미검증이며 일부를 유지한다.
 - 남은 것(2026-10-31): Firefox 실화면(메모 textarea와 Desk 전역 키 간섭, `<select>`), 메모→카드 links 선, '수정 전 메모에 대한 답' 표시, Board 재개 시 anchor.cardId 재매핑, helper memoId 출처 배선, 재촉 알림. 이것들이 확인되면 완료로 올린다.
+- 현재 경계(2026-11-01 08:01 KST): 위 목록은 2026-10-31 당시 기록이다. 입력·재부착·Board 참조 복원의 확인은 각 점검 조건에 한정한다([최신 운영 점검](#checkpoint-20261101-0801)). Agent 선택·왕복, 재시작 및 links 선·이전 본문에 대한 답 표시·helper memoId 출처·알림의 수용 근거는 추가되지 않았다.
 
 ### CNV-07 — Canvas 후속 설명 모드(Answer Briefing)를 완성한다. 단계별 카메라 이동과 단계 의견은 이미 있다. 남은 것은 단계 대상으로 캔버스 영역·annotation·Browser View를 지정하는 것, 진행 중 화면 chrome 조정, 미니맵의 다음·이전 화면 밖 대상 표시, 단계 내 표식 강조다.
 
@@ -1331,6 +1349,7 @@ Canvas·Viewport·UI/UX·디자인 영역은 바탕이 이미 깔려 있다. 의
 - 구현 스케치: EGDeskSurfaceState.sys.mjs에 snapRect·arrangeWithoutOverlap(선택 외는 장애물) 순수 함수와 테스트를 추가한다. uc.js의 카드 드래그·resize 핸들러에 snap을 적용하고, 배치 변경 명령 스택(state.layoutHistory)을 두어 ⌘Z를 bar 포커스로 한정한다. 선택 도구줄에 [정리]를 추가한다.
 - 진행(2026-10-24): `f2058a6` — 순수 모듈 `EGDeskCanvasLayout.sys.mjs`(24px 격자·가장자리·가운데 맞춤, Option/Alt 해제, 새 위치를 덮어쓰지 않는 배치 실행 취소, 겹침 없이 정리). 화면 연결은 S4로 남겼다.
 - 진행(2026-10-31): `bbb8052`·`c828880`·`68b67f2`·`e56df16` — 모듈에 그룹·보이는 영역 안 정리·안내선 상자(`arrangeInVisibleArea`·`createCanvasGroup`·`canvasGroupFrames`·`parsePlacementInput`·`snapGuideScreenBoxes`)를 더하고, uc.js `installCanvasPlacementOps` 제어 레이어 하나로 스냅·안내선, View bar 포커스 undo/redo, 우클릭 배치 메뉴(정리·그룹·해제·이동·크기·되돌리기·다시 실행), 그룹 점선 테두리와 Desk 저장 `groups`·복원 id 재매핑, 숫자 입력을 모든 카드 유형에 덧썼다(카드별 드래그 코드 미수정, Settings 포함, 도형 제외). 위 구현 스케치의 EGDeskSurfaceState/state.layoutHistory 대신 EGDeskCanvasLayout과 제어 레이어를 쓴다. 자세한 범위는 위 진행 기록.
+- 점검(2026-11-01 05:41 KST): 1280×800 실제 격리 headless 화면에서 group drag·snap·undo를 확인했다. cross-realm Map 보정 후 그룹 외곽선의 drag Δ(57,48)·90%↔75% 배율 변경·Ungroup을 확인했다. 원격·물리 입력은 미검증이며 일부를 유지한다.
 - 남은 것(2026-10-31): Firefox 실화면(MutationObserver raw 좌표 덧쓰기 타이밍, 원격 `<browser>` 위 pointer target, 포커스 이동), 선택 도구줄 `[맞춤]` 토글. 이것들이 확인되면 완료로 올린다.
 
 ### UX-06 — 최대화와 집중 보기 표현 모드를 나눈다. 최대화 중 HUD는 엿보기(덮어 보이고 재배치 없음)와 고정(최대화 카드만 재배치) 두 방식을 둔다. Browser 외 유형에도 전체 화면 집중 모드를 두고, Esc는 위에 열린 것부터 닫는다. View 최소화는 접힌 node로 대신한다.
