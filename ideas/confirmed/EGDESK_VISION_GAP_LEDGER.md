@@ -1,11 +1,11 @@
 # EG-Desk 비전 Gap 원장
 
-**기준일**: 2026-10-31 (최초 조사 코드 기준 `bebe45c`, 상태 표는 `5760981` 집계에 `d18ece0`의 CODE-07 일부 전환과 `7a5a031`(2026-10-31, 야간 자율 라운드 12개 작업 브랜치 병합)의 상태 전환을 반영. 나머지 후속 연결·검증은 아래 날짜별 체크포인트에 기록. 작업 브랜치 `claude/vision-gap-20261024`)
+**기준일**: 2026-10-31 (최초 조사 코드 기준 `bebe45c`, 상태 표는 `5760981` 집계에 `d18ece0`의 CODE-07 일부 전환과 `7a5a031`(2026-10-31, 야간 자율 라운드 12개 작업 브랜치 병합)과 `1a2f304`(같은 날 2차 라운드 CHAT-01·CHAT-08 병합)의 상태 전환을 반영. 나머지 후속 연결·검증은 아래 날짜별 체크포인트에 기록. 작업 브랜치 `claude/vision-gap-20261024`)
 
 **정본 백로그**: [EGDESK_PRODUCT_VISION_AND_DEV_TODO.md](./EGDESK_PRODUCT_VISION_AND_DEV_TODO.md)  
 **범위**: 비전 문서의 미체크 항목 + 2026-10-24 대표님 추가 목표(기능·UI/UX·디자인 전부, Codex+Claude 구독 지원, 브라우저 제어, 컴퓨터 사용, Agent 캐릭터 설정)
 
-총 95개 항목 — 없음 9 · 일부 49 · 완료 37 · 미확인 0 (영역 표의 상태 열 집계. `7a5a031`(2026-10-31 병합)에서 CTX-02·UX-02·SUB-14·SUB-05·BRW-05·BRW-11을 일부에서 완료로, BRW-07·BRW-09를 없음에서 일부로 바꿨다. CHAT-03은 영역 표에서 이미 일부였고 상세의 옛 '없음' 표기를 맞췄다. 이 완료 전환은 세션 보고 범위와 단건 테스트에 근거하며 Firefox 실화면 검증은 어느 항목에도 없다. 그 전 `d18ece0` 때 없음 11 · 일부 53 · 완료 31, `5760981` 때 없음 12 · 일부 52 · 완료 31이었다. 나머지 항목 전체를 재검증한 수치는 아니다. 최초 조사 때는 없음 45 · 일부 47 · 완료 2 · 미확인 1).
+총 95개 항목 — 없음 9 · 일부 48 · 완료 38 · 미확인 0 (영역 표의 상태 열 집계. `1a2f304`(2026-10-31 2차 병합)에서 CHAT-08을 일부에서 완료로 바꿨고 CHAT-01은 일부를 유지했다. 그 전 `7a5a031`(2026-10-31 병합)에서 CTX-02·UX-02·SUB-14·SUB-05·BRW-05·BRW-11을 일부에서 완료로, BRW-07·BRW-09를 없음에서 일부로 바꿨다. CHAT-03은 영역 표에서 이미 일부였고 상세의 옛 '없음' 표기를 맞췄다. 이 완료 전환은 세션 보고 범위와 단건 테스트에 근거하며 Firefox 실화면 검증은 어느 항목에도 없다. 그 전 `d18ece0` 때 없음 11 · 일부 53 · 완료 31, `5760981` 때 없음 12 · 일부 52 · 완료 31이었다. 나머지 항목 전체를 재검증한 수치는 아니다. 최초 조사 때는 없음 45 · 일부 47 · 완료 2 · 미확인 1).
 상태는 처음에 코드·git 기록과 대조해 판별했다(읽기 전용 조사, 테스트·Firefox 미실행). 그 뒤 바뀐 것은 진행 기록에 근거를 남겼다. 체크박스가 아니라 이 원장의 상태 열이 현재 판단이다. '일부(helper·모듈)'는 helper나 순수 모듈만 있고 화면 연결 전이라는 뜻이다.
 
 ## 진행 기록
@@ -16,6 +16,9 @@
 
 | 날짜 | 항목 | 상태 변화 | 근거 |
 |---|---|---|---|
+| 2026-10-31 | (병합) 2차 라운드 2개 작업 브랜치 → `claude/vision-gap-20261024` | 기준 `1011163` → HEAD `1a2f304` | 병합 커밋 `9e45e00`(CHAT-01, 브랜치 커밋 `66d4162`·`c34e2d9`·`47f7c4f`·`7fb5089`) → `1a2f304`(CHAT-08, `6f4b4fb`·`69d205c`), 충돌 없음. 기준 `1011163`은 1차 병합 뒤 원장·문서 커밋이다. 파일 9(+790/−51: uc.js, EGDeskChatState, codex-chat-runtime·bridge-http와 각 시험, surface-state 시험, verify-chat-history-restart). 병합 트리에서 프로젝트 고정 Node 단건 테스트 11개 파일 실패 0(surface-state 955/955, codex-chat-runtime 196, codex-bridge-http 36, chat-store 26, chat-presentation 9 등). Firefox 실화면은 둘 다 미검증. push 없음. |
+| 2026-10-31 | CHAT-01 방별 Agent 선택의 store 복원·전송 없는 즉시 저장 | 일부 유지(store 복원·⋯ 메뉴 즉시 저장 연결, 재시작 프로브 미실행) | `66d4162`·`47f7c4f`·`c34e2d9`·`7fb5089`. Desk pref가 되살리지 않은 방은 store가 기록한 `thread.agent{profileId, revision, setAt}`(`/chat/history/threads`·`/chat/history` 양쪽)로 `profileEnabled/agentProfileId`를 복원한다. 살아 있는 Desk pref의 선택이 우선이고 store는 방이 아무것도 고르지 않았을 때만 쓴다. `thread.agent`는 화면 thread에 store 기록 그대로 남고 revision·setAt은 보존·전달만 한다. 없거나 중지된 Agent는 그 자체로 복원해 기존 자리표시·전송 차단이 보인다. ⋯ 메뉴에서 Agent만 바꿔도(또는 '기본 Codex' = null) `POST /chat/rooms/agent`로 전송 없이 즉시 기록해 재시작 뒤 옛 선택이 되살아나지 않는다. 이 라우트는 `/chat/history/import`처럼 로컬 저장소 쓰기라 엔진 계정 확인을 거치지 않고, 한 번도 보내지 않은 방의 404는 화면이 조용히 넘기며 첫 전송이 선택을 기록한다. `verify-chat-history-restart.mjs`에 seed 단계의 방 Agent 기록과 양쪽 라우트의 `thread.agent` 동일·재시작 뒤 보존 단언을 더했으나 프로브는 실행하지 않았다. `b4e51f8`(2026-10-24, 저장소 v3·라우트)의 S10 화면 연결에 해당한다. 남은 것: 재시작 프로브 실행, Firefox 실화면, Board 저장 record(chat card)의 thread binding 참조. |
+| 2026-10-31 | CHAT-08 Agent 게시 결과의 Chat 칩과 Canvas 결과 카드 연결(S3) | 일부 → 완료(실화면 미검증, 저장 방식 D-K3 미결) | `6f4b4fb`·`69d205c`. `output.published`가 run.outputs에 outputKey당 한 항목으로 접히고(최신 버전이 대표, 이전 버전 보존 — D-K4), snapshot·로컬 기록·legacy 기록이 run.context.outputs를 나르며 최종 답변이 message.outputs를 투영한다. 답변 아래 칩 '결과 · 제목 · 버전 n'(testid `chat-output`)은 같은 outputKey의 재게시를 새 칩이 아니라 '버전 2'로 바꾸고 아무것도 저절로 열지 않는다(D-K4). 칩을 누르면 `GET /context/outputs/:id`(방 라우팅 힌트 포함)로 본문을 읽어 CHAT-04 결과 카드로 열며, 같은 key의 열린 카드는 포커스, 새 버전은 다시 그리고 '채팅에서 보기'로 답변에 돌아온다. Claude 방은 칩 없음. 옛 브리지·거절된 방·네트워크 실패는 칩에 '열 수 없음'만 남긴다(토스트 없음). 결과 카드 record가 보여 주는 게시 결과(outputId/outputKey/version)를 기억해 key당 카드 하나로 Desk·Board·로컬 기록·legacy에서 복원한다. 칩 색은 디자인 토큰만 쓴다. helper 변경 없음(`bf085a4`의 `egdesk_publish_output`·snapshot 그대로). surface-state 기대값 1건(`spawnResultCard(` 호출 수 4→5) 갱신. `/context/outputs` 목록 라우트는 화면에서 쓰지 않는다. 남은 결정 D-K3: 지금은 CHAT-04와 같이 본문 사본(≤20,000자, `RESULT_CARD_TEXT_LIMIT`)을 Desk·Board 카드에 저장하며, '참조만'으로 정하면 `publishedOutputCardRecord`의 text만 비운다. 실화면 5항목 미검증. |
 | 2026-10-31 | (병합) 야간 자율 라운드 12개 작업 브랜치 → `claude/vision-gap-20261024` | 기준 `586e348` → HEAD `7a5a031` | 병합 커밋 `1e059cf`(CTX-02) `0d8ce7c`(UX-02) `2daf74f`·`7a5a031`(SUB-14) `5f85ae7`(AGENT-05) `21f8ecb`(BRW-05·07·11) `1b24a79`(BRW-09) `52e2496`(CHAT-03) `ca280fb`(CNV-03) `fa55f95`(CODE-02) `8d3d880`(CODE-05) `2287a83`(CODE-06) `2113787`(SUB-05·01). 브랜치 커밋 52, 파일 66(+7155/−308). 병합 트리에서 `node --check` uc.js 통과, 단건 테스트 27개 파일 실패 0(surface-state 945/945, chat-runtime 195/195, chat-presentation 9/9 등). 병합 전 점검에서 드러난 CODE-05·CODE-06·BRW-05·BRW-09·SUB-14의 단건 회귀는 `db15cd2`·`6aa4227`·`c92b2d3`·`0eea07e`·`e191089`로 고쳤다. `egdesk-file-http.test.mjs` 1건은 셸 Node의 SQLite 버전 차이로만 실패하고 프로젝트 고정 Node에서는 통과하는 환경 문제이며 기준 커밋에도 있었다. 어느 브랜치도 Firefox 실화면 검증을 하지 않았고 `ideas/confirmed`·`docs/codex`는 건드리지 않았다. push 없음. CNV-06·UX-05 브랜치는 각 1커밋에서 중단돼 병합하지 않았다. |
 | 2026-10-31 | CTX-02 복구 기록의 D-R1 보존·자동 저장 묶음·세대 목록 | 일부 → 완료(실제 Firefox 창 복구 미검증) | `0fe679d`·`62bcb48`·`e132292`·`022810e`·`6c54987`. D-R1 수치(자동 저장 60초 묶음, 최근 200 + 30일간 하루 1개, 512 MiB)를 순수 모듈 `egdesk-recovery-journal.mjs`에 두고 Desk 저장소가 그 규칙으로 세대를 합치고 정리한다. 2026-10-24에 '구현 여부 기록 없음'이던 60초 묶음은 이 모듈로 확정됐다. 세대마다 열린 Board 수를 세고 복구 기록 패널이 Board 수·변경·보존 기한을 보이며, 페이지 경계를 넘는 변경도 한 행으로 잇는다. helper·surface-state 단건 테스트 통과. 실제 Firefox 창에서 비정상 종료 뒤 복구는 여전히 미검증. |
 | 2026-10-31 | UX-02 미니맵 행의 종류·소속 Board 이름, rail 검색 결과의 카메라 이동 | 일부 → 완료(마지막 변경의 실기 미검증) | `4fe2cd6`·`ebae4ef`·`65118bc`·`a8cdc54`. 미니맵 검색 행과 '이 위치의 N개' 목록에 대상 종류(Board·브라우저·대화·파일·터미널)와 소속 열린 Board 이름을 적어 같은 이름의 Browser를 구별한다(열리지 않은 Board는 이름을 내지 않음). rail 검색의 Canvas 결과를 고르면 화면 밖 카드는 미니맵의 카메라 경로로 이동만 하고 배율·Board·실행 대상은 바꾸지 않는다. 컴파일된 미니맵 핸들러로 행 이름을 검사했다. Briefing 단계·근거 마커의 지도 연결은 Briefing 항목(CHAT-05·CNV-07) 범위로 남기고, 실제 OS 한글 입력기·다수 live Browser 부하는 미검증. |
@@ -382,7 +385,7 @@ Git 전송 확인 범위는 기존 `ff9ae10`·`4b40588`까지다. B3 후속은 �
 | **일부 결정(2026-10-24)** Agent 캐릭터 설정의 범위 | 정함: 아바타 사진 허용(PNG·JPEG·WebP 512KB 이하, 재인코딩, 내보내기에서 제외, D-A3). Agent 파일 가져오기·내보내기(agency-agents·Claude Code 형식 머리말 .md + Codex .toml 내보내기, 가져온 Agent는 늘 초안, D-A2). 모델은 방에서 따로 고르지 않았을 때만 Agent 모델(D-A4). **남음**: Profile 소유 범위(개인 로컬 / Desk 공유), 기본 제공 6종의 지위(D-A5), 새 Agent 기본 도구 범위(D-A1, 지금 '제한 없음' 유지, 프리셋은 선택지로만), 설명 한 줄로 초안 만들기(D-A6), Agent(담당자 방)와 Profile(설정 버전)을 화면에서 나눠 보여 줄 방식(Q-AGENT-01 앞부분). 남은 것이 정해지기 전에는 "개인 로컬 + 6종은 예시 템플릿"으로 진행 | AGENT-01, AGENT-02, AGENT-04, CHAT-02 |
 | **결정됨(2026-10-24)** Board 대화방의 여러 Agent (D-M1~M5) | D-M1 하위 Agent 승인 요청은 지금처럼 거절 + '부모 Agent에게 다시 맡기기'. D-M2 @로 부른 Agent만 답하고, 안 부르면 Lead만. D-M3 개인 대화 → Board는 고른 메시지 복사본 + 원래 대화 링크, 받는 Agent에는 다음 turn에 블록으로 첨부. D-M4 동시 실행 상한 2. D-M5 Codex agent message board는 관찰만 | CHAT-03, CHAT-06, CHAT-10, CHAT-13 |
 | **결정됨(2026-10-24)** Chat → Canvas · Canvas · Board (D-K1 · K4 · K5 · D-V1~V6) | D-K1 AI 표식은 대상 카드 위 점선 '제안'으로 바로(카메라 안 움직임). D-K4 Agent가 게시한 결과는 칩으로만(자동 열기 없음), 같은 결과 수정은 버전 2. D-K5 메모 질문의 답은 메모 답글로 자동. D-V1 한 창은 한 Board. D-V2 새 창 자동 소속 없음(영역 안에서 열거나 놓을 때 제안). D-V3 끌어 놓기 = 제안 칩. D-V4 새 Board 저장 = 그 자리 영역으로 묶기(사본 없음). D-V5 격자·안내선 맞춤 + 배치 실행 취소 + 겹침 없이 정리. D-V6 채팅 엿보기는 오른쪽 가장자리 대기(Zen 방식) | CNV-03, CNV-05, CNV-06, CHAT-08, UX-05, UX-06 |
-| 남음 — Canvas D-K2 · D-K3 | D-K2 상단 검색 요청의 수신자와 Tab 키. D-K3 CHAT-04 결과 카드 저장 방식(지금은 Desk·Board와 함께 저장되는 Canvas 카드 — 확정할지, '파일로 저장'을 나중에 더할지) | UX-04, CHAT-04 |
+| 남음 — Canvas D-K2 · D-K3 | D-K2 상단 검색 요청의 수신자와 Tab 키. D-K3 CHAT-04·CHAT-08 결과 카드 저장 방식(지금은 Desk·Board와 함께 저장되는 Canvas 카드에 본문 사본 ≤20,000자 — 확정할지, '참조만'으로 바꿀지, '파일로 저장'을 나중에 더할지) | UX-04, CHAT-04, CHAT-08 |
 | **결정됨(2026-10-24)** 디자인 (D-G1 · G2 · G3 · G5) | D-G1 13px 기준 토큰. D-G2 (가) 아바타는 옅은 배경 + 진한 잉크 글자. D-G3 (가) 입력칸 테두리는 대비 증가·고대비에서만 진하게. D-G5 (가) CSS 원본·토큰 표는 시험 기준만 | DSN-03, DSN-04 |
 | **결정됨(2026-10-24)** 코딩 (D-X1~X4 · X6) | D-X1 원본 파일 덮어쓰기는 사용자 저장·검토 중 되돌리기만(열 때와 해시가 다르면 비교 화면). D-X2 1단계 승인 전 '변경 보기' + 전체 허용/거절 → 2단계 적용 후 덩어리별 되돌리기. D-X3 프로젝트 폴더는 Board에 붙이고 채팅방은 상속, 재시작 뒤 같은 폴더(dev/ino)일 때만 자동 재연결. D-X4 회차별 git checkpoint 기본 끔. D-X6 '검사'·IDE는 사용자가 직접 입력한 명령만 | CODE-02, CODE-04, CODE-05, CODE-06 |
 | **결정됨(2026-10-24)** 런타임 (D-R1 · R3) | D-R1 자동 저장 묶음 60초, 복구 기록 보존은 현재 임시값(최근 200개 + 30일간 하루 1개, 512MiB). D-R3 Board 내보내기에 첨부·캡처 기본 끔 | CTX-02, RT-03 |
@@ -492,7 +495,7 @@ Chat의 각 요청·답변에는 `접수`·`실행`·`결과 확인`·`확인 �
 | AGENT-04 | 완료 | L | '읽기만 하는 Agent'처럼 정해 두면 그 Agent는 실제로 파일 수정이나 브라우저 조작을 하지 못한다. | 일부 결정(D-A2 정함, D-A1 남음) |  |
 | CHAT-09 | 완료 | M | 대화방이 이어진 대화인지, 새 대화인지, 갈라져 나온 대화인지 목록에서 바로 구별된다. |  |  |
 | CHAT-04 | 완료 | M | Agent 답변을 버튼 하나로 Canvas 카드로 꺼내 Board에 남겨 둘 수 있다. | 필요(D-K3) |  |
-| CHAT-08 | 일부 | M | 긴 보고서는 Canvas 카드로 열리고 Chat에는 짧은 설명과 바로가기만 남아 대화가 읽기 쉽다. | 결정됨(D-K4) |  |
+| CHAT-08 | 완료 | M | 긴 보고서는 Canvas 카드로 열리고 Chat에는 짧은 설명과 바로가기만 남아 대화가 읽기 쉽다. | 결정됨(D-K4) · 필요(D-K3) |  |
 | CHAT-11 | 완료 | S | 대화 목록과 메뉴에서 Board라는 같은 이름으로 보여 헷갈리지 않는다. |  |  |
 | CHAT-05 | 일부 | M | 답변 브리핑에서 여러 근거를 한 번에 강조해 보며, 남긴 단계 의견이 사라지지 않고 남는다. |  |  |
 | CHAT-06 | 완료 | L | 앞 작업이 끝나면 다음 Agent 작업이 알아서 시작되고, 무엇 때문에 기다리는지 화면에 보인다. | 일부 결정(D-M4 정함, 자동 시작 기본값·사용량 한도 남음) |  |
@@ -528,10 +531,13 @@ Chat의 각 요청·답변에는 `접수`·`실행`·`결과 확인`·`확인 �
 ### CHAT-01 — 채팅 프로필 선택을 브라우저 재시작·Board 복원 후에도 유지
 
 - 출처: EGDESK_PRODUCT_VISION_AND_DEV_TODO.md P0 L176
-- 상태: 일부 · 크기 M
+- 상태: 일부 · 크기 M. `1a2f304`(2026-10-31)까지 store 복원과 ⋯ 메뉴의 전송 없는 즉시 저장이 들어왔고, 재시작 프로브 실행과 Board 저장 record의 binding 참조가 남아 일부를 유지한다. 아래 근거·빠진 것은 최초 조사 기록이다.
 - 근거: Desk 세션 pref 경로는 thread 전체(profileEnabled/agentProfileId/systemPrompt)를 저장(eg-desk-surface.uc.js:1628-1631 serializeDeskSnapshot)하고 복원 때 정규화(:5721-5735). 반면 SQLite chat store threads 테이블은 title만 보관(helper/egdesk-chat-store.mjs:156-159, shape L352). store 기반 복원 ensureLocalHistoryThread(:5942)는 page.thread(EGDeskChatState.sys.mjs:313)에서 profile을 읽으므로 항상 profileEnabled=false. 저장 Board의 chat card는 activeThreadId/chatDockMode만 저장(:1558-1562). scripts/verify-chat-history-restart.mjs에 profile 단언 없음.
 - 빠진 것: durable store에 thread의 profile binding이 없음. Desk pref가 유실되거나 legacy 이관 뒤 store에서 복원하면 profile이 사라짐. Board 저장·복원 record에 thread binding 없음. 재시작 검증 없음.
 - 구현 스케치: egdesk-chat-store.mjs threads에 profile_binding_json(profileId, revision, profileEnabled) 추가(또는 thread.config event) → /chat/history/threads 응답에 포함 → EGDeskChatState threadSnapshot → ensureLocalHistoryThread가 복원. Board chat card record(:1558)에 threadId·binding 참조 추가. verify-chat-history-restart.mjs에 profile 단언 추가. AGENT-01 이후에는 profileId+revision만 저장.
+- 진행(2026-10-24): `b4e51f8` — 대화 저장소 v3에 방마다 고른 Agent(profileId·revision)와 `/chat/rooms/...` 라우트(helper). 화면 연결은 S10으로 남겼다.
+- 진행(2026-10-31): `66d4162`·`47f7c4f`·`c34e2d9`·`7fb5089` — store `thread.agent`로 `profileEnabled/agentProfileId` 복원(살아 있는 Desk pref 우선, store는 방이 고른 것이 없을 때만), ⋯ 메뉴 선택과 '기본 Codex'(null)의 `POST /chat/rooms/agent` 즉시 저장(로컬 저장소 쓰기, 엔진 계정 확인 없음, 미전송 방 404는 조용히 넘김), 재시작 프로브의 seed 기록·양쪽 라우트 동일·재시작 뒤 보존 단언. 위 구현 스케치의 profile_binding_json 대신 명시 필드 `thread.agent`를 쓰며 revision은 보존·전달만 한다. 자세한 범위는 위 진행 기록.
+- 남은 것(2026-10-31): `verify-chat-history-restart.mjs` 실제 실행(단언만 추가됨), Firefox 실화면, Board 저장 record(chat card)에 thread binding 참조. 이 둘이 확인되면 완료로 올린다.
 
 ### AGENT-01 — Agent Profile 저장소: 안정 ID·owner·activeRevision, 불변 revision, draft/active/disabled/archived/deleted 수명, expectedRevision 충돌 처리
 
@@ -617,10 +623,14 @@ Chat의 각 요청·답변에는 `접수`·`실행`·`결과 확인`·`확인 �
 ### CHAT-08 — 긴 출력을 Canvas 결과로 보내고 Chat에는 연결 칩만 두기
 
 - 출처: EGDESK_PRODUCT_VISION_AND_DEV_TODO.md P1 L211; Contract §4 L484-490
-- 상태: 일부 · 크기 M · 선행: CHAT-04
+- 상태: 완료 · 크기 M · 선행: CHAT-04. 완료는 `6f4b4fb`·`69d205c`(2026-10-31)의 단건 테스트 범위이며 Firefox 실화면 5항목은 미검증. 저장 방식(D-K3)은 CHAT-04와 함께 미결이다. 아래 근거·빠진 것은 최초 조사 기록이고 helper 도구는 `bf085a4`(2026-10-24)에서 들어왔다.
 - 근거: 칩은 usableArtifact 파일 참조(eg-desk-surface.uc.js:609-621)와 브리핑 버튼(:5148-5150)만. 기본 profile 지침이 '긴 출력은 canvas로'라고 요구하지만(:111-114) Agent가 Canvas 출력을 만들 도구는 없음(context 도구는 egdesk_publish_briefing 등 읽기·브리핑만, helper/egdesk-context-runtime.mjs:10).
 - 빠진 것: Agent가 긴 결과를 Canvas 산출물로 게시하는 도구와 그 칩 표시.
 - 구현 스케치: egdesk-context-runtime.mjs에 egdesk_publish_output(제목·markdown) dynamic tool 추가 → CHAT-04의 결과 카드 생성 경로 재사용 → artifactRefs로 칩 표시.
+- 진행(2026-10-24): `bf085a4` — `egdesk_publish_output{title, markdown ≤20,000, outputKey?}`(본문 blob 저장, 대화+outputKey별 버전, 'output.published'는 메타데이터만, `GET /context/outputs`). 화면 연결은 S3로 남겼다. `8dc695d`의 아주 긴 답변 접기·'카드로 펼치기'는 위 2026-10-24 진행 기록 참조.
+- 진행(2026-10-31): `6f4b4fb`·`69d205c` — run.outputs(outputKey당 한 항목, 최신 버전 대표·이전 버전 보존)와 snapshot·로컬 기록·legacy의 run.context.outputs, 답변 아래 '결과 · 제목 · 버전 n' 칩(testid `chat-output`, 자동 열기 없음 — D-K4, 같은 key 재게시는 '버전 2'), 칩 → `GET /context/outputs/:id` → CHAT-04 결과 카드(같은 key 열린 카드 포커스, 새 버전 재그리기, '채팅에서 보기' 복귀), Claude 방 칩 없음, 못 열면 칩에 '열 수 없음'(토스트 없음), 결과 카드 record의 outputId/outputKey/version으로 key당 카드 하나 복원. 위 구현 스케치의 artifactRefs 대신 run.outputs/message.outputs를 쓴다. 자세한 범위는 위 진행 기록.
+- 남은 것(2026-10-31): Firefox 실화면 5항목(세션 공유 노트 `chat-08-output-chips-handoff.md`의 목록, 이 원장에는 옮기지 않음), `/context/outputs` 목록 라우트의 화면 사용 여부.
+- 남은 결정(2026-10-31): D-K3(결정 표 '남음 — Canvas D-K2 · D-K3'). 지금은 CHAT-04와 같이 본문 사본(≤20,000자, `RESULT_CARD_TEXT_LIMIT`)을 Desk·Board 카드에 저장한다. '참조만'으로 정하면 `publishedOutputCardRecord`의 text만 비우고 칩·카드 열기는 그대로다. 대표님 결정 전까지 사본 저장을 확정으로 보지 않는다.
 
 ### CHAT-11 — Chat UI의 'Agenda' 표기를 제품 용어 Board로 정리
 
