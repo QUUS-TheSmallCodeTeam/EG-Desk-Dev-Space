@@ -11218,9 +11218,15 @@
       if (getCodexThreadById(state.codex, clientThreadId)) return;
       const type = detail.type === 'group' ? 'group' : 'dm';
       const title = detail.title || summary.title || 'Codex';
+      // CHAT-01: this room was not brought back by the Desk pref (no thread with
+      // its ID), so it answers as the Agent the store recorded for it
+      // (thread.agent) — by ID only; revision is carried, not applied. A pref
+      // field that reached here (detail.profileEnabled) still comes first.
+      const storeAgent = ChatState.roomAgentRecord(detail.agent);
       const base = createCodexThread(type, title, detail.subtitle || '', {
         participants: detail.participants, participantRoles: detail.participantRoles,
-        profileEnabled: detail.profileEnabled === true, agentProfileId: detail.agentProfileId,
+        profileEnabled: detail.profileEnabled === true || !!storeAgent,
+        agentProfileId: detail.profileEnabled === true ? detail.agentProfileId : storeAgent?.profileId,
       });
       const recordedAccountKey = detail.bindingAccountKey || detail.retainedNativeBinding?.accountKey;
       const originalAccountKey = ChatState.knownCodexAccountKey(recordedAccountKey) ? recordedAccountKey : null;

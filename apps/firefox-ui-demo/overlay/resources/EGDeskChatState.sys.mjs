@@ -221,6 +221,35 @@ export function mergeLocalChatMessages(current = [], persisted = [], { liveFence
   }).map(({ message }) => message);
 }
 
+// CHAT-01: the Agent the chat store recorded for a room (thread.agent from
+// /chat/history/threads and /chat/history: null, or {profileId, revision,
+// setAt}), checked. Anything that is not an Agent profile ID is no Agent.
+export function roomAgentRecord(agent) {
+  if (!agent || typeof agent !== 'object' || !isProfileId(agent.profileId)) return null;
+  return { profileId: agent.profileId,
+    revision: Number.isSafeInteger(agent.revision) && agent.revision > 0 ? agent.revision : null,
+    setAt: Number.isSafeInteger(agent.setAt) ? agent.setAt : null };
+}
+
+// CHAT-01: which Agent a restored room answers as. The Desk pref — the
+// screen's own saved thread (serializeDeskSnapshot) — wins while it is alive:
+// a room whose current fields already pick an Agent (profileEnabled true)
+// keeps that pick. Only a room that picks none — fresh from the store listing,
+// or a pref that says nothing — takes the Agent the store recorded for it
+// (recordRoomAgent after a send, setRoomAgent from the ⋯ menu). The pick is
+// restored by ID alone: a missing, archived or stopped Agent stays itself, so
+// the existing '찾을 수 없는 Agent' placeholder and send block show rather than
+// another Agent answering. revision and setAt are carried on thread.agent for
+// the request and peek layers and are not applied here (the room follows the
+// catalog's active revision). thread.agent is the store's record, so it is
+// always taken from the snapshot — the copy a pref kept is replaced — and a
+// snapshot from an older bridge without the field leaves the room's own.
+export function restoredRoomAgentFields(current, saved) {
+  if (!saved || typeof saved !== 'object' || !Object.hasOwn(saved, 'agent')) return {};
+  const agent = roomAgentRecord(saved.agent);
+  return current?.profileEnabled === true || !agent ? { agent } : { agent, profileEnabled: true, agentProfileId: agent.profileId };
+}
+
 // `history` is the single normalized adapter boundary for local DB responses:
 // { clientThreadId, localConversationId, threadSnapshot?, messages? }.
 // The caller supplies a detached/restored current room; a read never promotes
@@ -239,6 +268,7 @@ export function hydrateLocalChatThread(current, history, options = {}) {
   const localRuns = mergeLocalChatRuns(current.localRuns, history.runs);
   return {
     ...copy(saved), ...current,
+    ...restoredRoomAgentFields(current, saved),
     id: clientThreadId,
     localConversationId: history.localConversationId || current.localConversationId || saved.localConversationId || null,
     conversationId: current.conversationId || null,
