@@ -728,7 +728,7 @@
 .egd-board-missing strong { overflow-wrap: anywhere; }
 .egd-board-missing button { padding: 5px 12px; border: 1px solid var(--egd-line-strong); border-radius: 5px; }
 .egd-board-missing pre { white-space: pre-wrap; overflow-wrap: anywhere; }
-#egd-board-notice, #egd-board-scope { position: fixed; z-index: 100100; background: var(--egd-surface-elevated); color: var(--egd-on-surface); border: 1px solid var(--egd-outline); border-radius: 10px; padding: 18px; font: 13px/1.5 var(--egd-font); box-shadow: 0 8px 30px #0002; }
+#egd-board-notice, #egd-board-scope, #egd-placement-dialog { position: fixed; z-index: 100100; background: var(--egd-surface-elevated); color: var(--egd-on-surface); border: 1px solid var(--egd-outline); border-radius: 10px; padding: 18px; font: 13px/1.5 var(--egd-font); box-shadow: 0 8px 30px #0002; }
 #egd-board-notice {
   /* Keep passive status text away from the lower Chat composer and Dock. */
   top: 64px;
@@ -750,6 +750,16 @@
   pointer-events: auto;
 }
 #egd-board-scope { left: 50%; top: 25%; transform: translateX(-50%); width: 350px; }
+/* UX-05 [이동]/[크기]: a small fixed input beside the View bar it changes. */
+#egd-placement-dialog { width: 280px; padding: 14px 16px; }
+#egd-placement-dialog h3 { margin: 0 0 10px; font-size: 13px; }
+.egd-placement-fields { display: flex; gap: 10px; }
+.egd-placement-fields label { display: flex; flex: 1; flex-direction: column; gap: 4px; min-width: 0; font-size: 11px; color: var(--egd-on-surface-variant); }
+.egd-placement-fields input { box-sizing: border-box; width: 100%; padding: 6px 8px; border: 1px solid var(--egd-line-strong); border-radius: 5px; background: var(--egd-surface-elevated); color: var(--egd-on-surface); font: 13px var(--egd-font); }
+.egd-placement-status { margin: 8px 0 0; font-size: 11px; color: var(--egd-on-surface-variant); }
+.egd-placement-actions button { padding: 6px 10px; margin: 10px 6px 0 0; border: 1px solid var(--egd-line-strong); border-radius: 5px; }
+.egd-placement-menu { width: 208px; }
+.egd-placement-menu .egd-board-menu-item:disabled { opacity: var(--egd-opacity-disabled); cursor: default; }
 #egd-board-scope input { padding: 8px; width: 90%; border: 1px solid var(--egd-line-strong); border-radius: 5px; }
 #egd-board-scope button { padding: 6px 10px; margin: 5px 5px 0 0; border: 1px solid var(--egd-line-strong); border-radius: 5px; }
 #egd-desk-recovery { position: fixed; z-index: 100110; left: 50%; bottom: 92px; transform: translateX(-50%); width: min(540px, calc(100vw - 40px)); padding: 18px; background: var(--egd-note-soft); color: var(--egd-on-surface); border: 1px solid var(--egd-note-line); border-radius: 10px; box-shadow: 0 8px 28px #0002; font: 13px/1.55 var(--egd-font); }
@@ -1272,6 +1282,37 @@
   border: 1px dashed color-mix(in srgb, var(--egd-primary) 66%, transparent);
   background: color-mix(in srgb, var(--egd-primary) 8%, transparent);
   box-sizing: border-box;
+}
+
+/* UX-05 placement. Snap guides are screen px over the Canvas (never camera-
+   scaled) and fade out shortly after the gesture; a group frame lives in the
+   layer in world px under the cards, so it scales and pans with them. */
+#egd-snap-guides {
+  position: fixed;
+  inset: 0;
+  z-index: 30009;
+  pointer-events: none;
+}
+.egd-snap-guide {
+  position: fixed;
+  box-sizing: border-box;
+  background: color-mix(in srgb, var(--egd-primary) 78%, transparent);
+  opacity: 1;
+  transition: opacity 0.35s ease;
+}
+.egd-snap-guide-gap {
+  background: color-mix(in srgb, var(--egd-primary) 55%, transparent);
+  border-radius: 1px;
+}
+#egd-snap-guides[data-fading="true"] .egd-snap-guide { opacity: 0; }
+.egd-canvas-group {
+  position: absolute;
+  z-index: 39990;
+  box-sizing: border-box;
+  pointer-events: none;
+  border: calc(1.5px / var(--egd-camera-zoom, 1)) dashed color-mix(in srgb, var(--egd-primary) 55%, transparent);
+  border-radius: 14px;
+  background: color-mix(in srgb, var(--egd-primary) 4%, transparent);
 }
 
 .egd-canvas-shape {

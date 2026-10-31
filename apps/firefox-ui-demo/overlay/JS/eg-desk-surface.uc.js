@@ -27,6 +27,7 @@
   const ProfileTransferView = ChromeUtils.importESModule('chrome://userchrome/content/EGDeskProfileTransferView.sys.mjs');
   const MemoState = ChromeUtils.importESModule('chrome://userchrome/content/EGDeskMemoState.sys.mjs');
   const AgentIdentityView = ChromeUtils.importESModule('chrome://userchrome/content/EGDeskAgentIdentityView.sys.mjs');
+  const CanvasLayout = ChromeUtils.importESModule('chrome://userchrome/content/EGDeskCanvasLayout.sys.mjs');
   const BROWSER_AGENT_ACTOR_NAME = 'EGDeskBrowserAgentRuntime';
   const BROWSER_AGENT_HISTORY_LIMIT = 100;
   // Time a Browser tool reply needs after a wait or settle, before the
@@ -4491,6 +4492,7 @@
       shapes: Array.from(document.querySelectorAll('.egd-canvas-shape'))
         .map(serializeShapeState)
         .filter(Boolean),
+      groups: cloneJson(state.canvasGroups || []),
       surface: { mode: state.surface.mode, browserCardId: state.surface.browserCardId,
         initialBrowserFocus: !!state.surface.initialBrowserFocus,
         recoveryBackupKey: state.surface.recoveryBackupKey || null, recoveryAcknowledged: !!state.surface.recoveryAcknowledged },
@@ -5630,6 +5632,7 @@
           zoom: Number.isFinite(snapshot.desk.zoom) ? snapshot.desk.zoom : state.zoomTarget,
         }, { immediate: true });
       }
+      state.restoreCanvasGroups?.(snapshot.groups, restoredIds, { merge: !!options.merge });
       const activeId = snapshot.desk?.activeCardId;
       const active = activeId ? document.getElementById(restoredIds.get(activeId) || activeId) : null;
       if (active && !options.merge) setActiveEntity(active);
@@ -22018,7 +22021,8 @@
           const rect = entity.getBoundingClientRect();
           return rect.right >= left && rect.left <= right && rect.bottom >= top && rect.top <= bottom;
         });
-        setSelectedEntities(hits, hits[0] || null);
+        // A grouped View brings the rest of its group along (UX-05).
+        setSelectedEntities(state.expandCanvasSelection ? state.expandCanvasSelection(hits) : hits, hits[0] || null);
       }
       marqueeSel = null;
     });
@@ -22168,6 +22172,514 @@
       syncCardFullscreenLayout({ reframe: true });
       state.refreshSemanticProjections?.();
       refreshDeskMinimap();
+    });
+    installCanvasPlacementOps(viewport, layer);
+  }
+
+  // ============ UX-05 Canvas placement: snapping, guides, undo, arrange, groups ============
+  // Each card type keeps its own titlebar and resize listeners (spawnDeskWindowShell,
+  // the Chat and Settings cards, the outline proxy). This installs one layer over
+  // them: while a pointer gesture is active it watches the dragged card's style
+  // and rewrites the raw rect to the snapped one before paint, moves the rest of
+  // the card's group by the same delta, and records the gesture for undo. The
+  // math lives in EGDeskCanvasLayout.sys.mjs; this only measures and applies.
+  function installCanvasPlacementOps(viewport, layer) {
+    const HEADER_SELECTOR = '.egd-card-header, .egd-chat-card-header';
+    const NO_DRAG_SELECTOR = 'input, button, textarea, select, .egd-card-dot, [data-no-window-drag], .egd-desk-window-toolbar';
+    const history = CanvasLayout.createLayoutHistory();
+    state.canvasGroups = CanvasLayout.normalizeCanvasGroups(state.canvasGroups);
+    state.canvasLayoutHistory = history;
+    const guidesHost = el('div', { id: 'egd-snap-guides', 'aria-hidden': 'true' });
+    document.documentElement.appendChild(guidesHost);
+    let guideTimer = 0;
+
+    const cardOf = node => (node instanceof Element ? node.closest('.egd-canvas-card') : null);
+    const liveCards = () => Array.from(layer.querySelectorAll(':scope > .egd-canvas-card')).filter(card => card.isConnected && card.id);
+    const liveRegions = () => Array.from(layer.querySelectorAll(':scope > .egd-board-region')).filter(region => region.isConnected && region.id);
+    const rectOf = node => (node?.isConnected ? CanvasLayout.toWorldRect(persistentEntityGeometry(node)) : null);
+    const worldBox = client => {
+      const a = viewportToCanvasPoint(client.left, client.top);
+      const b = viewportToCanvasPoint(client.right, client.bottom);
+      return { left: a.x, top: a.y, right: b.x, bottom: b.y };
+    };
+    const visibleWorldBox = () => worldBox({ left: 0, top: 0, right: window.innerWidth, bottom: window.innerHeight });
+    const safeWorldBox = () => {
+      const safe = safeViewportRect();
+      return worldBox({ left: safe.left, top: safe.top, right: safe.left + safe.width, bottom: safe.top + safe.height });
+    };
+    const minCardSize = card => {
+      const style = window.getComputedStyle(card);
+      return { width: parsePxNumber(style.minWidth, 320) || 320, height: parsePxNumber(style.minHeight, 250) || 250 };
+    };
+    const selectedCards = () => Array.from(document.querySelectorAll('.egd-canvas-card.egd-entity-selected'))
+      .filter(card => card.isConnected && card.id && !isCardFullscreen(card));
+    // The View bar (a card's title row) takes focus after a placement change so
+    // ⌘/Ctrl+Z reaches the layout history and not the page or terminal inside.
+    const focusViewBar = card => {
+      const header = card?.isConnected ? card.querySelector(HEADER_SELECTOR) : null;
+      if (!header || header.contains(document.activeElement)) return;
+      if (!header.hasAttribute('tabindex')) header.setAttribute('tabindex', '-1');
+      try { header.focus({ preventScroll: true }); } catch {}
+    };
+
+    // --- guide lines (screen px, fade out shortly after the gesture) ---
+    const renderGuides = guides => {
+      window.clearTimeout(guideTimer);
+      guideTimer = 0;
+      delete guidesHost.dataset.fading;
+      const boxes = CanvasLayout.snapGuideScreenBoxes(guides, { pan: state.pan, zoom: canvasZoom() });
+      guidesHost.replaceChildren(...boxes.map(box => el('div', {
+        class: `egd-snap-guide egd-snap-guide-${box.kind}`,
+        style: { left: `${box.left}px`, top: `${box.top}px`, width: `${Math.max(1, box.width)}px`, height: `${Math.max(1, box.height)}px` },
+      })));
+    };
+    const fadeGuides = () => {
+      if (!guidesHost.childElementCount) return;
+      guidesHost.dataset.fading = 'true';
+      window.clearTimeout(guideTimer);
+      guideTimer = window.setTimeout(() => {
+        guideTimer = 0;
+        guidesHost.replaceChildren();
+        delete guidesHost.dataset.fading;
+      }, 420);
+    };
+
+    // --- group frames (world px, under the cards) ---
+    const frames = new Map();
+    let frameRaf = 0;
+    const renderGroupFrames = () => {
+      frameRaf = 0;
+      const live = liveCards();
+      const pruned = CanvasLayout.pruneCanvasGroups(state.canvasGroups, live.map(card => card.id));
+      if (pruned.changed) state.canvasGroups = pruned.groups;
+      const rects = new Map(live.map(card => [card.id, rectOf(card)]));
+      const seen = new Set();
+      for (const box of CanvasLayout.canvasGroupFrames(state.canvasGroups, rects)) {
+        seen.add(box.id);
+        let frame = frames.get(box.id);
+        if (!frame?.isConnected) {
+          frame = el('div', { class: 'egd-canvas-group', 'aria-hidden': 'true', data: { groupId: box.id } });
+          frames.set(box.id, frame);
+          layer.insertBefore(frame, layer.firstChild);
+        }
+        Object.assign(frame.style, {
+          left: `${Math.round(box.x)}px`, top: `${Math.round(box.y)}px`,
+          width: `${Math.round(box.width)}px`, height: `${Math.round(box.height)}px`,
+        });
+      }
+      for (const [id, frame] of frames) {
+        if (seen.has(id)) continue;
+        frame.remove();
+        frames.delete(id);
+      }
+    };
+    const scheduleGroupFrames = () => { if (!frameRaf) frameRaf = window.requestAnimationFrame(renderGroupFrames); };
+    // Members move through many paths (their own drag, Board open, restore);
+    // watching each live card's style keeps the frame true to all of them.
+    const cardStyleObserver = new MutationObserver(records => {
+      if (records.some(record => CanvasLayout.canvasGroupOf(state.canvasGroups, record.target?.id))) scheduleGroupFrames();
+    });
+    const observeCardStyles = () => {
+      cardStyleObserver.disconnect();
+      for (const card of liveCards()) cardStyleObserver.observe(card, { attributes: true, attributeFilter: ['style'] });
+    };
+    new MutationObserver(() => { observeCardStyles(); scheduleGroupFrames(); }).observe(layer, { childList: true });
+    observeCardStyles();
+
+    // --- selection follows groups ---
+    const selectGroupMembers = card => {
+      const group = CanvasLayout.canvasGroupOf(state.canvasGroups, card?.id);
+      if (!group) return;
+      for (const id of group.viewIds) {
+        const node = document.getElementById(id);
+        if (node && node !== card && node.isConnected) node.classList.add('egd-entity-selected');
+      }
+    };
+    state.expandCanvasSelection = entities => {
+      const list = Array.isArray(entities) ? entities.filter(Boolean) : [];
+      const ids = CanvasLayout.expandCanvasGroupSelection(state.canvasGroups, list.map(node => node.id).filter(Boolean));
+      const known = new Set(list);
+      for (const id of ids) {
+        const node = document.getElementById(id);
+        if (node?.isConnected && !known.has(node)) { known.add(node); list.push(node); }
+      }
+      return list;
+    };
+    let preservedSelection = null;
+    window.addEventListener('mousedown', ev => {
+      if (ev.button !== 0 || state.panModifier) return;
+      selectGroupMembers(cardOf(ev.target));
+    });
+
+    // --- the pointer gesture: snap while dragging, one undo step on release ---
+    let gesture = null;
+    const gestureObserver = new MutationObserver(() => applyGestureSnap());
+    const applyGestureSnap = () => {
+      const g = gesture;
+      if (!g || g.applying || !g.card.isConnected) return;
+      const raw = rectOf(g.card);
+      if (!raw) return;
+      const snapped = CanvasLayout.snapCanvasRect({
+        rect: raw, candidates: g.candidates, zoom: canvasZoom(), free: g.free, viewport: visibleWorldBox(),
+        edges: g.mode === 'resize' ? g.edges : null, minWidth: g.minSize.width, minHeight: g.minSize.height,
+      });
+      if (!snapped) return;
+      g.applying = true;
+      try {
+        if (snapped.x !== raw.x || snapped.y !== raw.y || snapped.width !== raw.width || snapped.height !== raw.height) {
+          applyPersistentEntityGeometry(g.card, { x: snapped.x, y: snapped.y, width: snapped.width, height: snapped.height });
+        }
+        if (g.mode === 'move') {
+          const dx = snapped.x - g.start.x;
+          const dy = snapped.y - g.start.y;
+          for (const member of g.members) {
+            if (member.node.isConnected) applyPersistentEntityGeometry(member.node, { x: member.start.x + dx, y: member.start.y + dy });
+          }
+        }
+        renderGuides(snapped.guides);
+      } finally {
+        // Our own writes queued records; drop them so the snap runs once per move.
+        gestureObserver.takeRecords();
+        g.applying = false;
+      }
+    };
+    const beginGesture = (card, mode, { edges = null, free = false } = {}) => {
+      if (gesture) endGesture(null);
+      const start = rectOf(card);
+      if (!start) return;
+      const memberIds = mode === 'move' ? CanvasLayout.expandCanvasGroupSelection(state.canvasGroups, [card.id]) : [card.id];
+      const members = memberIds.map(id => document.getElementById(id))
+        .filter(node => node && node !== card && node.isConnected && node.classList.contains('egd-canvas-card') && !isCardFullscreen(node))
+        .map(node => ({ node, start: rectOf(node) })).filter(member => member.start);
+      const moving = new Set([card, ...members.map(member => member.node)]);
+      const ownRegion = card.dataset.projectionId || null;
+      gesture = {
+        card, mode, edges, free, start, members, applying: false, minSize: minCardSize(card),
+        candidates: [...liveCards(), ...liveRegions().filter(region => region.id !== ownRegion)]
+          .filter(node => !moving.has(node)).map(node => ({ id: node.id, ...rectOf(node) })),
+        step: history.startGesture(mode, [{ id: card.id, rect: start }, ...members.map(member => ({ id: member.node.id, rect: member.start }))]),
+      };
+      gestureObserver.observe(card, { attributes: true, attributeFilter: ['style'] });
+    };
+    const endGesture = ev => {
+      const g = gesture;
+      if (!g) return;
+      gesture = null;
+      gestureObserver.disconnect();
+      const after = [g.card, ...g.members.map(member => member.node)].filter(node => node.isConnected)
+        .map(node => ({ id: node.id, rect: rectOf(node) }));
+      const recorded = g.step.commit(after);
+      if (recorded && g.mode === 'move') {
+        for (const member of g.members) if (member.node.isConnected) markAgendaDirty('move-group-member', member.node);
+      }
+      if (recorded) scheduleGroupFrames();
+      fadeGuides();
+      if (recorded && ev && ev.type !== 'blur') focusViewBar(g.card);
+    };
+    window.addEventListener('pointerdown', ev => {
+      if (ev.button === 2) {
+        // Right-click focuses the card through its own listeners; keep a
+        // multi-selection it was part of for the placement menu.
+        const card = cardOf(ev.target);
+        preservedSelection = card?.classList.contains('egd-entity-selected') ? selectedCards() : null;
+        return;
+      }
+      if (ev.button !== 0 || ev.isPrimary === false || state.panModifier) return;
+      const card = cardOf(ev.target);
+      if (!card?.id || isCardFullscreen(card)) return;
+      const hit = ev.target.closest('.egd-card-resize-hit');
+      if (hit && card.contains(hit)) {
+        let edges = null;
+        try { edges = JSON.parse(hit.dataset.edges || 'null'); } catch {}
+        if (edges && typeof edges === 'object') beginGesture(card, 'resize', { edges, free: ev.altKey });
+        return;
+      }
+      const header = ev.target.closest(HEADER_SELECTOR);
+      if (header && card.contains(header)) {
+        if (!ev.target.closest(NO_DRAG_SELECTOR)) beginGesture(card, 'move', { free: ev.altKey });
+        return;
+      }
+      if (card.dataset.egdSemanticLevel === 'outline' && ev.target.closest('.egd-semantic-proxy')) beginGesture(card, 'move', { free: ev.altKey });
+    }, true);
+    // Option/Alt releases the snap for as long as it is held, even mid-drag.
+    window.addEventListener('pointermove', ev => {
+      if (gesture && gesture.free !== ev.altKey) gesture.free = ev.altKey;
+    }, true);
+    const onAltKey = ev => {
+      if (!gesture || ev.key !== 'Alt') return;
+      gesture.free = ev.type === 'keydown';
+      applyGestureSnap();
+    };
+    window.addEventListener('keydown', onAltKey, true);
+    window.addEventListener('keyup', onAltKey, true);
+    for (const type of ['pointerup', 'pointercancel', 'mouseup']) window.addEventListener(type, endGesture, true);
+    window.addEventListener('blur', endGesture);
+
+    // --- undo / redo (View bar focus only; text inputs and native content keep ⌘/Ctrl+Z) ---
+    const viewBarHasFocus = () => {
+      const active = document.activeElement;
+      if (!active || active === document.body || active === document.documentElement || active === viewport) return true;
+      if (active.closest?.('input, textarea, select, [contenteditable], browser, iframe, .egd-card-body, .egd-chat-card-body, '
+        + '.egd-desk-window-body, #egd-hud, #egd-codex-input-panel, #egd-dock, #egd-preset-bag, #egd-desk-rail')) return false;
+      return !!active.closest?.(HEADER_SELECTOR) || !!active.classList?.contains('egd-canvas-card');
+    };
+    const applyHistoryStep = (result, verb) => {
+      if (!result || result.status === 'empty') return false;
+      if (result.status === 'stale') {
+        boardNotice(`${verb} 배치가 그 뒤에 바뀌어서 건너뛰었습니다.`);
+        return true;
+      }
+      let touched = null;
+      for (const item of result.rects) {
+        const node = document.getElementById(item.id);
+        if (!node?.isConnected || isCardFullscreen(node)) continue;
+        applyPersistentEntityGeometry(node, { x: item.x, y: item.y, width: item.width, height: item.height });
+        markAgendaDirty(result.label === 'resize' ? 'resize-card' : 'move-card', node);
+        touched = node;
+      }
+      if (Array.isArray(result.groups)) {
+        state.canvasGroups = CanvasLayout.normalizeCanvasGroups(result.groups);
+        markAgendaDirty('group-cards', touched);
+      }
+      scheduleGroupFrames();
+      return true;
+    };
+    const readLiveRect = id => rectOf(document.getElementById(id));
+    const undoLayout = () => applyHistoryStep(history.undo(readLiveRect), '되돌릴');
+    const redoLayout = () => applyHistoryStep(history.redo(readLiveRect), '다시 실행할');
+    state.undoCanvasLayout = undoLayout;
+    state.redoCanvasLayout = redoLayout;
+    window.addEventListener('keydown', ev => {
+      if (!(ev.metaKey || ev.ctrlKey) || ev.altKey || ev.isComposing || ev.keyCode === 229) return;
+      if (String(ev.key || '').toLowerCase() !== 'z') return;
+      if (placementMenu || placementDialog || !viewBarHasFocus()) return;
+      if (!(ev.shiftKey ? redoLayout() : undoLayout())) return;
+      ev.preventDefault();
+      ev.stopImmediatePropagation();
+    }, true);
+
+    // --- [선택 N개 겹침 없이 정리] ---
+    const arrangeSelection = () => {
+      const chosen = selectedCards();
+      if (!chosen.length) return false;
+      const ids = CanvasLayout.expandCanvasGroupSelection(state.canvasGroups, chosen.map(card => card.id));
+      const nodes = ids.map(id => document.getElementById(id)).filter(node => node?.isConnected && !isCardFullscreen(node));
+      const moving = new Set(nodes);
+      const items = nodes.map(node => ({ id: node.id, rect: rectOf(node) }));
+      // A Board region a chosen View belongs to is its home, not an obstacle.
+      const homes = new Set(nodes.map(node => node.dataset.projectionId).filter(Boolean));
+      const obstacles = [...liveCards().filter(node => !moving.has(node)), ...liveRegions().filter(region => !homes.has(region.id))]
+        .map(node => ({ id: node.id, ...rectOf(node) }));
+      const result = CanvasLayout.arrangeInVisibleArea({ items, groups: state.canvasGroups, visible: safeWorldBox(), obstacles });
+      if (!result.changed) {
+        boardNotice('선택한 창은 이미 겹침 없이 놓여 있습니다.');
+        return false;
+      }
+      const before = new Map(items.map(item => [item.id, item.rect]));
+      history.record({ label: 'arrange', items: result.placements.map(item => ({ id: item.id, before: before.get(item.id), after: item })) });
+      for (const item of result.placements) {
+        const node = document.getElementById(item.id);
+        if (!node?.isConnected) continue;
+        applyPersistentEntityGeometry(node, { x: item.x, y: item.y });
+        markAgendaDirty('arrange-cards', node);
+      }
+      scheduleGroupFrames();
+      return true;
+    };
+
+    // --- [그룹으로 묶기] / [그룹 해제] ---
+    const groupSelection = () => {
+      const chosen = selectedCards();
+      if (chosen.length < 2) return false;
+      const before = state.canvasGroups;
+      const result = CanvasLayout.createCanvasGroup(before, chosen.map(card => card.id));
+      if (!result.changed) return false;
+      state.canvasGroups = result.groups;
+      history.record({ label: 'group', items: [], groups: { before, after: result.groups } });
+      markAgendaDirty('group-cards', chosen[0]);
+      scheduleGroupFrames();
+      return true;
+    };
+    const ungroupSelection = () => {
+      const chosen = selectedCards();
+      const before = state.canvasGroups;
+      const result = CanvasLayout.dissolveCanvasGroups(before, chosen.map(card => card.id));
+      if (!result.changed) return false;
+      state.canvasGroups = result.groups;
+      history.record({ label: 'ungroup', items: [], groups: { before, after: result.groups } });
+      markAgendaDirty('ungroup-cards', chosen[0] || null);
+      scheduleGroupFrames();
+      return true;
+    };
+    state.restoreCanvasGroups = (groups, restoredIds, { merge = false } = {}) => {
+      const remapped = CanvasLayout.remapCanvasGroups(groups, restoredIds || new Map());
+      state.canvasGroups = merge ? CanvasLayout.normalizeCanvasGroups([...state.canvasGroups, ...remapped]) : remapped;
+      if (!merge) history.clear();
+      scheduleGroupFrames();
+    };
+
+    // --- [이동] / [크기] numeric input ---
+    let placementDialog = null;
+    const closePlacementDialog = ({ restoreFocus = false } = {}) => {
+      const dialog = placementDialog;
+      if (!dialog) return;
+      placementDialog = null;
+      dialog.remove();
+      if (restoreFocus && dialog._returnTo?.isConnected) dialog._returnTo.focus?.();
+    };
+    const openPlacementDialog = (card, mode) => {
+      closePlacementDialog();
+      const rect = rectOf(card);
+      if (!rect) return null;
+      const move = mode === 'move';
+      const labels = move ? ['x', 'y'] : ['너비', '높이'];
+      const values = move ? [rect.x, rect.y] : [rect.width, rect.height];
+      const inputs = labels.map((label, index) => el('input', {
+        type: 'text', inputmode: 'numeric', autocomplete: 'off', 'aria-label': label, value: String(values[index]),
+        data: { testid: `placement-${move ? 'move' : 'size'}-${index === 0 ? 'a' : 'b'}` },
+      }));
+      const status = el('p', { class: 'egd-placement-status', role: 'status' },
+        move ? 'Canvas px. 입력한 값 그대로 놓고, 그룹이면 함께 움직입니다.' : 'Canvas px. 창의 최소 크기보다 작게는 줄지 않습니다.');
+      const apply = () => {
+        if (!card.isConnected || isCardFullscreen(card)) { closePlacementDialog(); return; }
+        const parsed = CanvasLayout.parsePlacementInput(
+          move ? { x: inputs[0].value, y: inputs[1].value } : { width: inputs[0].value, height: inputs[1].value }, minCardSize(card));
+        if (!parsed.ok) {
+          status.textContent = '정수를 입력하세요.';
+          inputs[['x', 'width'].includes(parsed.field) ? 0 : 1].focus();
+          return;
+        }
+        const before = rectOf(card);
+        const after = { ...before, ...parsed.rect };
+        const items = [{ id: card.id, before, after }];
+        if (move) {
+          const dx = after.x - before.x;
+          const dy = after.y - before.y;
+          for (const id of CanvasLayout.expandCanvasGroupSelection(state.canvasGroups, [card.id])) {
+            const node = document.getElementById(id);
+            if (!node || node === card || !node.isConnected || isCardFullscreen(node)) continue;
+            const start = rectOf(node);
+            items.push({ id, before: start, after: { ...start, x: start.x + dx, y: start.y + dy } });
+          }
+        }
+        if (!history.record({ label: move ? 'move' : 'resize', items })) { closePlacementDialog({ restoreFocus: true }); return; }
+        for (const item of items) {
+          const node = document.getElementById(item.id);
+          if (!node?.isConnected) continue;
+          applyPersistentEntityGeometry(node, item.after);
+          markAgendaDirty(move ? 'move-card' : 'resize-card', node);
+        }
+        scheduleGroupFrames();
+        closePlacementDialog();
+        focusViewBar(card);
+      };
+      const dialog = el('div', {
+        id: 'egd-placement-dialog', class: 'egd-edge egd-frosted', role: 'dialog', 'aria-label': move ? '이동' : '크기',
+        data: { testid: 'placement-dialog', mode },
+      },
+      el('h3', {}, move ? '이동' : '크기'),
+      el('div', { class: 'egd-placement-fields' },
+        el('label', {}, labels[0], inputs[0]),
+        el('label', {}, labels[1], inputs[1])),
+      status,
+      el('div', { class: 'egd-placement-actions' },
+        el('button', { type: 'button', 'aria-label': '적용', data: { testid: 'placement-apply' }, onclick: apply }, '적용'),
+        el('button', { type: 'button', 'aria-label': '취소', onclick: () => closePlacementDialog({ restoreFocus: true }) }, '취소')));
+      dialog.addEventListener('keydown', ev => {
+        if (ev.isComposing || ev.keyCode === 229) return;
+        if (ev.key === 'Enter') { ev.preventDefault(); ev.stopPropagation(); apply(); return; }
+        if (ev.key === 'Escape') { ev.preventDefault(); ev.stopPropagation(); closePlacementDialog({ restoreFocus: true }); }
+      });
+      const anchor = card.getBoundingClientRect();
+      Object.assign(dialog.style, {
+        left: `${Math.round(Math.max(8, Math.min(window.innerWidth - 296, anchor.left)))}px`,
+        top: `${Math.round(Math.max(8, Math.min(window.innerHeight - 190, anchor.top + 44)))}px`,
+      });
+      dialog._returnTo = card.querySelector(HEADER_SELECTOR) || viewport;
+      document.documentElement.appendChild(dialog);
+      placementDialog = dialog;
+      inputs[0].focus();
+      inputs[0].select?.();
+      return dialog;
+    };
+
+    // --- the placement menu (right-click on a View bar or on the empty Canvas with a selection) ---
+    let placementMenu = null;
+    const closePlacementMenu = ({ restoreFocus = false } = {}) => {
+      const menu = placementMenu;
+      if (!menu) return;
+      placementMenu = null;
+      menu._dispose?.();
+      menu.remove();
+      if (restoreFocus && menu._returnTo?.isConnected) menu._returnTo.focus?.();
+    };
+    const openPlacementMenu = (clientX, clientY, card) => {
+      closePlacementMenu();
+      const chosen = selectedCards();
+      const count = chosen.length;
+      const active = card || (state.activeEntityId ? document.getElementById(state.activeEntityId) : null);
+      const target = active?.classList?.contains('egd-canvas-card') && active.isConnected && !isCardFullscreen(active) ? active : null;
+      const grouped = chosen.some(node => CanvasLayout.canvasGroupOf(state.canvasGroups, node.id));
+      const item = (label, title, testid, action, disabled = false) => el('button', {
+        type: 'button', class: 'egd-board-menu-item', role: 'menuitem', title, 'aria-label': title,
+        disabled: disabled ? 'true' : null, data: { testid },
+        onclick: ev => { ev.stopPropagation(); closePlacementMenu(); action(); },
+      }, label);
+      const items = [
+        item(`선택 ${count}개 겹침 없이 정리`, '선택한 창을 보이는 영역 안에서 24px 간격으로 다시 놓습니다', 'placement-arrange', arrangeSelection, count < 1),
+        count >= 2 ? item('그룹으로 묶기', '선택한 창을 함께 움직이고 함께 선택되는 그룹으로 묶습니다', 'placement-group', groupSelection) : null,
+        grouped ? item('그룹 해제', '선택한 창이 속한 그룹을 풉니다', 'placement-ungroup', ungroupSelection) : null,
+        target ? item('이동…', '창의 x, y를 숫자로 입력합니다', 'placement-move', () => openPlacementDialog(target, 'move')) : null,
+        target ? item('크기…', '창의 너비와 높이를 숫자로 입력합니다', 'placement-size', () => openPlacementDialog(target, 'size')) : null,
+        item('배치 되돌리기', '⌘/Ctrl+Z', 'placement-undo', undoLayout, !history.canUndo()),
+        item('배치 다시 실행', '⌘/Ctrl+Shift+Z', 'placement-redo', redoLayout, !history.canRedo()),
+      ].filter(Boolean);
+      const width = 208;
+      const height = items.length * 30 + 12;
+      const menu = el('div', {
+        id: 'egd-placement-menu', class: 'egd-board-menu egd-placement-menu', role: 'menu', 'aria-label': '배치',
+        data: { testid: 'placement-menu' },
+        style: {
+          left: `${Math.round(Math.max(8, Math.min(window.innerWidth - width - 8, clientX)))}px`,
+          top: `${Math.round(Math.max(8, Math.min(window.innerHeight - height - 8, clientY)))}px`,
+        },
+      }, ...items);
+      const enabled = () => items.filter(node => !node.disabled);
+      menu.addEventListener('keydown', ev => {
+        if (ev.key === 'Escape') { ev.preventDefault(); ev.stopPropagation(); closePlacementMenu({ restoreFocus: true }); return; }
+        const list = enabled();
+        if (!list.length) return;
+        const current = list.indexOf(document.activeElement);
+        const next = ev.key === 'ArrowDown' ? (current + 1) % list.length : ev.key === 'ArrowUp' ? (current - 1 + list.length) % list.length
+          : ev.key === 'Home' ? 0 : ev.key === 'End' ? list.length - 1 : -1;
+        if (next < 0) return;
+        ev.preventDefault();
+        list[next].focus();
+      });
+      const onOutside = ev => { if (!menu.contains(ev.target)) closePlacementMenu(); };
+      window.addEventListener('mousedown', onOutside, true);
+      menu._returnTo = target?.querySelector(HEADER_SELECTOR) || viewport;
+      menu._dispose = () => window.removeEventListener('mousedown', onOutside, true);
+      document.documentElement.appendChild(menu);
+      placementMenu = menu;
+      enabled()[0]?.focus();
+      return menu;
+    };
+    viewport.addEventListener('contextmenu', ev => {
+      const card = cardOf(ev.target);
+      if (card) {
+        // Card contents keep their own menus; only the View bar opens this one.
+        if (!card.id || !ev.target.closest(HEADER_SELECTOR)) return;
+      } else if (ev.target !== viewport && ev.target !== layer) return;
+      if (card && preservedSelection?.includes(card)) {
+        for (const node of preservedSelection) if (node.isConnected) node.classList.add('egd-entity-selected');
+      }
+      preservedSelection = null;
+      if (card) selectGroupMembers(card);
+      if (!card && !selectedCards().length) return;
+      ev.preventDefault();
+      ev.stopPropagation();
+      openPlacementMenu(ev.clientX, ev.clientY, card);
     });
   }
 

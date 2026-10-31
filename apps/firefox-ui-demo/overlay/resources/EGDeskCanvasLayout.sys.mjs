@@ -259,6 +259,33 @@ export function snapCanvasRect({
   };
 }
 
+// The guide lines a snap returned, as screen boxes: a thin line for 'v'/'h'
+// alignment and a bar across the 24px gap for 'gap'. The screen file draws
+// them as fixed elements, so they never scale with the camera.
+export function snapGuideScreenBoxes(guides = [], { pan, zoom, thickness = 1 } = {}) {
+  if (!finite(pan?.x, pan?.y) || !(zoom > 0)) return [];
+  const sx = x => x * zoom + pan.x;
+  const sy = y => y * zoom + pan.y;
+  const size = Number.isFinite(thickness) && thickness > 0 ? thickness : 1;
+  const half = size / 2;
+  const out = [];
+  for (const guide of Array.isArray(guides) ? guides : []) {
+    if (!guide || typeof guide !== 'object') continue;
+    if (guide.kind === 'v' && finite(guide.x, guide.y1, guide.y2)) {
+      out.push({ kind: 'v', reason: guide.reason || null, left: sx(guide.x) - half,
+        top: sy(Math.min(guide.y1, guide.y2)), width: size, height: Math.abs(guide.y2 - guide.y1) * zoom });
+    } else if (guide.kind === 'h' && finite(guide.y, guide.x1, guide.x2)) {
+      out.push({ kind: 'h', reason: guide.reason || null, left: sx(Math.min(guide.x1, guide.x2)),
+        top: sy(guide.y) - half, width: Math.abs(guide.x2 - guide.x1) * zoom, height: size });
+    } else if (guide.kind === 'gap' && finite(guide.start, guide.end, guide.at)) {
+      const length = Math.abs(guide.end - guide.start) * zoom;
+      if (guide.axis === 'x') out.push({ kind: 'gap', axis: 'x', left: sx(Math.min(guide.start, guide.end)), top: sy(guide.at) - half, width: length, height: size });
+      else out.push({ kind: 'gap', axis: 'y', left: sx(guide.at) - half, top: sy(Math.min(guide.start, guide.end)), width: size, height: length });
+    }
+  }
+  return out;
+}
+
 // CNV-01: dragging a Board's title row moves the region; its member Views
 // follow by the same (snapped) delta.
 export function moveRegionWithMembers({ region, members = [], dx = 0, dy = 0, snap = null } = {}) {
@@ -285,7 +312,9 @@ export function moveRegionWithMembers({ region, members = [], dx = 0, dy = 0, sn
 // UX-05 layout undo. One gesture (a drag, a resize, an arrange) is one step.
 // A step is undone only while every View still has the rect the step left it
 // with; a View moved, resized or closed since makes the step stale and it is
-// dropped instead of overwriting the newer geometry.
+// dropped instead of overwriting the newer geometry. A step may also carry
+// the group list before and after ([그룹으로 묶기]/[그룹 해제]); undo and redo
+// hand back the list to restore.
 
 const historyItems = (items, field) => (Array.isArray(items) ? items : []).map(item => {
   const id = viewId(item?.id);
@@ -298,7 +327,7 @@ export function createLayoutHistory({ limit = LAYOUT_HISTORY_LIMIT, tolerance = 
   let undos = [];
   let redos = [];
 
-  function record({ label = 'move', items = [] } = {}) {
+  function record({ label = 'move', items = [], groups = null } = {}) {
     const byId = new Map();
     for (const item of Array.isArray(items) ? items : []) {
       const id = viewId(item?.id);
@@ -309,8 +338,11 @@ export function createLayoutHistory({ limit = LAYOUT_HISTORY_LIMIT, tolerance = 
       byId.set(id, { id, before: known ? known.before : plainRect(before), after: plainRect(after) });
     }
     const changed = [...byId.values()].filter(item => !sameRect(item.before, item.after, 0));
-    if (!changed.length) return false;
-    undos.push({ label: typeof label === 'string' && LABEL_PATTERN.test(label) ? label : 'move', items: changed });
+    const groupStep = groups && typeof groups === 'object'
+      ? { before: normalizeCanvasGroups(groups.before), after: normalizeCanvasGroups(groups.after) } : null;
+    const groupsChanged = !!groupStep && JSON.stringify(groupStep.before) !== JSON.stringify(groupStep.after);
+    if (!changed.length && !groupsChanged) return false;
+    undos.push({ label: typeof label === 'string' && LABEL_PATTERN.test(label) ? label : 'move', items: changed, groups: groupsChanged ? groupStep : null });
     if (undos.length > max) undos = undos.slice(undos.length - max);
     redos = [];
     return true;
@@ -318,12 +350,15 @@ export function createLayoutHistory({ limit = LAYOUT_HISTORY_LIMIT, tolerance = 
 
   function step(from, to, expect, apply, readRect, done) {
     const entry = from.pop();
-    if (!entry) return { status: 'empty', label: null, rects: [], staleIds: [] };
+    if (!entry) return { status: 'empty', label: null, rects: [], staleIds: [], groups: null };
     const read = typeof readRect === 'function' ? readRect : () => null;
     const staleIds = entry.items.filter(item => !sameRect(toWorldRect(read(item.id)), item[expect], tolerance)).map(item => item.id);
-    if (staleIds.length) return { status: 'stale', label: entry.label, rects: [], staleIds };
+    if (staleIds.length) return { status: 'stale', label: entry.label, rects: [], staleIds, groups: null };
     to.push(entry);
-    return { status: done, label: entry.label, rects: entry.items.map(item => ({ id: item.id, ...item[apply] })), staleIds: [] };
+    return {
+      status: done, label: entry.label, rects: entry.items.map(item => ({ id: item.id, ...item[apply] })), staleIds: [],
+      groups: entry.groups ? entry.groups[apply].map(group => ({ id: group.id, viewIds: [...group.viewIds] })) : null,
+    };
   }
 
   return {
@@ -411,6 +446,214 @@ export function arrangeWithoutOverlap({
   }
   const original = new Map(list.map(item => [item.id, item.rect]));
   return { placements: placed, bounds: block, changed: placed.some(item => !sameRect(item, original.get(item.id), 0)) };
+}
+
+// [선택 N개 겹침 없이 정리] inside the visible area (world box of the safe
+// area). The block starts at the grid-aligned top-left of the selection,
+// pulled inside the visible area when it is outside, and wraps at the visible
+// area's right edge. A group whose member is chosen moves as one block that
+// keeps its inner layout; Views not chosen and Board regions are obstacles.
+export function arrangeInVisibleArea({
+  items = [], groups = [], visible = null, obstacles = [], gap = CANVAS_GAP_PX, grid = CANVAS_GRID_PX, margin = CANVAS_GAP_PX,
+} = {}) {
+  const empty = { placements: [], bounds: null, changed: false, start: null, wrapWidth: null };
+  const views = [];
+  const seen = new Set();
+  for (const item of Array.isArray(items) ? items : []) {
+    const id = viewId(item?.id);
+    const rect = toWorldRect(item?.rect ?? item);
+    if (!id || !rect || !(rect.width > 0 && rect.height > 0) || seen.has(id)) continue;
+    seen.add(id);
+    views.push({ id, rect: plainRect(rect) });
+  }
+  if (!views.length) return empty;
+  // One block per group (its members' union) or per ungrouped View.
+  const blocks = [];
+  const blockOf = new Map();
+  for (const view of views) {
+    const group = canvasGroupOf(groups, view.id);
+    const key = group ? `group:${group.id}` : view.id;
+    let block = blockOf.get(key);
+    if (!block) {
+      block = { key, members: [] };
+      blockOf.set(key, block);
+      blocks.push(block);
+    }
+    block.members.push(view);
+  }
+  for (const block of blocks) block.rect = unionRect(block.members.map(member => member.rect));
+  const bounds = unionRect(blocks.map(block => block.rect));
+  const step = grid > 0 ? grid : 1;
+  const pad = Number.isFinite(margin) && margin >= 0 ? margin : CANVAS_GAP_PX;
+  const box = visible ? toBox(visible) : null;
+  let x = snapDown(bounds.x, step);
+  let y = snapDown(bounds.y, step);
+  let wrapWidth = null;
+  if (box) {
+    const left = Math.ceil((box.left + pad) / step) * step;
+    const top = Math.ceil((box.top + pad) / step) * step;
+    if (x < left || x >= box.right - pad) x = left;
+    if (y < top || y >= box.bottom - pad) y = top;
+    wrapWidth = Math.max(step, box.right - pad - x);
+  }
+  // Block ids are internal; a group's key never collides with a View id
+  // because View ids cannot contain ':'.
+  const packed = arrangeWithoutOverlap({
+    items: blocks.map((block, index) => ({ id: `b${index}`, rect: block.rect })),
+    gap, grid, obstacles, start: { x, y }, wrapWidth,
+  });
+  const placements = [];
+  packed.placements.forEach(placed => {
+    const block = blocks[Number(placed.id.slice(1))];
+    if (!block) return;
+    const dx = placed.x - block.rect.x;
+    const dy = placed.y - block.rect.y;
+    for (const member of block.members) placements.push({ id: member.id, ...member.rect, x: member.rect.x + dx, y: member.rect.y + dy });
+  });
+  const original = new Map(views.map(view => [view.id, view.rect]));
+  return {
+    placements, bounds: unionRect(placements), start: { x, y }, wrapWidth,
+    changed: placements.some(item => !sameRect(item, original.get(item.id), 0)),
+  };
+}
+
+// ---------------------------------------------------------------------------
+// UX-05 groups ([그룹으로 묶기]/[그룹 해제]): a visual bundle of Views that
+// move and select together. A group is { id, viewIds } with two or more
+// Views; a View is in one group at most. Groups are separate from Board
+// membership (D-V1) and are saved with the Desk, not with a Board.
+
+export const CANVAS_GROUP_MAX_VIEWS = 200;
+
+export function normalizeCanvasGroups(value) {
+  const out = [];
+  const seenGroups = new Set();
+  const seenViews = new Set();
+  for (const item of Array.isArray(value) ? value : []) {
+    const id = viewId(item?.id);
+    if (!id || seenGroups.has(id)) continue;
+    const viewIds = [];
+    for (const raw of Array.isArray(item.viewIds) ? item.viewIds : []) {
+      const key = viewId(raw);
+      if (!key || seenViews.has(key) || viewIds.includes(key)) continue;
+      viewIds.push(key);
+      if (viewIds.length >= CANVAS_GROUP_MAX_VIEWS) break;
+    }
+    if (viewIds.length < 2) continue;
+    seenGroups.add(id);
+    for (const key of viewIds) seenViews.add(key);
+    out.push({ id, viewIds });
+  }
+  return out;
+}
+
+export function canvasGroupOf(groups, id) {
+  const key = viewId(id);
+  if (!key) return null;
+  return (Array.isArray(groups) ? groups : []).find(group => Array.isArray(group?.viewIds) && group.viewIds.includes(key)) || null;
+}
+
+// Every View that moves or selects with the given ones: the ids themselves
+// plus the rest of each one's group, in the order first seen.
+export function expandCanvasGroupSelection(groups, ids) {
+  const out = [];
+  const add = key => { if (key && !out.includes(key)) out.push(key); };
+  for (const raw of Array.isArray(ids) ? ids : []) {
+    const key = viewId(raw);
+    if (!key) continue;
+    add(key);
+    const group = canvasGroupOf(groups, key);
+    if (group) for (const member of group.viewIds) add(member);
+  }
+  return out;
+}
+
+// [그룹으로 묶기]: the chosen Views form one group. Each leaves its previous
+// group, and a previous group left with one View dissolves.
+export function createCanvasGroup(groups, ids, { id = null } = {}) {
+  const current = normalizeCanvasGroups(groups);
+  const members = [...new Set((Array.isArray(ids) ? ids : []).map(viewId).filter(Boolean))].slice(0, CANVAS_GROUP_MAX_VIEWS);
+  if (members.length < 2) return { groups: current, group: null, changed: false };
+  const taken = new Set(current.map(group => group.id));
+  let groupId = viewId(id) && !taken.has(id) ? id : null;
+  for (let n = 1; !groupId; n += 1) {
+    const candidate = `egd-group-${n}`;
+    if (!taken.has(candidate)) groupId = candidate;
+  }
+  const memberSet = new Set(members);
+  const kept = current.map(group => ({ id: group.id, viewIds: group.viewIds.filter(key => !memberSet.has(key)) }))
+    .filter(group => group.viewIds.length >= 2);
+  const group = { id: groupId, viewIds: members };
+  return { groups: [...kept, group], group, changed: true };
+}
+
+// [그룹 해제]: every group that holds one of the Views dissolves.
+export function dissolveCanvasGroups(groups, ids) {
+  const current = normalizeCanvasGroups(groups);
+  const keys = new Set((Array.isArray(ids) ? ids : []).map(viewId).filter(Boolean));
+  const dissolved = current.filter(group => group.viewIds.some(key => keys.has(key))).map(group => group.id);
+  if (!dissolved.length) return { groups: current, dissolved: [], changed: false };
+  return { groups: current.filter(group => !dissolved.includes(group.id)), dissolved, changed: true };
+}
+
+// Closed Views leave their groups; a group left with one View dissolves.
+export function pruneCanvasGroups(groups, liveIds) {
+  const live = new Set((Array.isArray(liveIds) ? liveIds : []).map(viewId).filter(Boolean));
+  const current = normalizeCanvasGroups(groups);
+  const next = normalizeCanvasGroups(current.map(group => ({ id: group.id, viewIds: group.viewIds.filter(key => live.has(key)) })));
+  return { groups: next, changed: JSON.stringify(next) !== JSON.stringify(current) };
+}
+
+// Restored Views may come back under new ids (saved id -> live id).
+export function remapCanvasGroups(groups, idMap) {
+  const map = idMap instanceof Map ? idMap : new Map(Object.entries(idMap && typeof idMap === 'object' ? idMap : {}));
+  return normalizeCanvasGroups((Array.isArray(groups) ? groups : []).map(group => ({
+    id: group?.id, viewIds: (Array.isArray(group?.viewIds) ? group.viewIds : []).map(key => map.get(key) ?? key),
+  })));
+}
+
+// The frame drawn around each group: the union of its members' rects plus a
+// padding, in world px. `rectById` is a function or a Map/object of rects;
+// a group with fewer than two members on the Canvas draws nothing.
+export function canvasGroupFrames(groups, rectById, { padding = 8 } = {}) {
+  const read = typeof rectById === 'function' ? rectById
+    : rectById instanceof Map ? id => rectById.get(id) : id => rectById?.[id];
+  const pad = Number.isFinite(padding) && padding >= 0 ? padding : 8;
+  const out = [];
+  for (const group of normalizeCanvasGroups(groups)) {
+    const rects = group.viewIds.map(id => toWorldRect(read(id))).filter(Boolean);
+    const union = unionRect(rects);
+    if (!union || rects.length < 2) continue;
+    out.push({ id: group.id, count: rects.length, x: union.x - pad, y: union.y - pad, width: union.width + pad * 2, height: union.height + pad * 2 });
+  }
+  return out;
+}
+
+// [이동]/[크기] numeric input: integers in Canvas px, applied as typed (no
+// snapping). Width and height never go below the View's minimum. A field
+// left empty keeps its current value; a field that is not a number names
+// itself in `field`.
+export function parsePlacementInput(values = {}, { minWidth = 1, minHeight = 1, maxAbs = 1e6 } = {}) {
+  const number = raw => {
+    if (typeof raw === 'number') return Number.isFinite(raw) ? raw : null;
+    if (typeof raw !== 'string') return null;
+    const text = raw.trim();
+    if (!/^-?\d+(\.\d+)?$/.test(text)) return null;
+    const value = Number(text);
+    return Number.isFinite(value) && Math.abs(value) <= maxAbs ? value : null;
+  };
+  const rect = {};
+  for (const field of ['x', 'y', 'width', 'height']) {
+    const raw = values?.[field];
+    if (raw == null || raw === '') continue;
+    const value = number(raw);
+    if (value === null) return { ok: false, field, rect: null };
+    rect[field] = Math.round(value);
+  }
+  if (!Object.keys(rect).length) return { ok: false, field: null, rect: null };
+  if (rect.width != null) rect.width = Math.max(Math.max(1, Number.isFinite(minWidth) ? minWidth : 1), rect.width);
+  if (rect.height != null) rect.height = Math.max(Math.max(1, Number.isFinite(minHeight) ? minHeight : 1), rect.height);
+  return { ok: true, field: null, rect };
 }
 
 // ---------------------------------------------------------------------------

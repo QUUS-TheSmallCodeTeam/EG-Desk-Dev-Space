@@ -490,6 +490,65 @@ This distinction prevents EG-Desk from feeling like it is fighting the user's sp
 
 ---
 
+## Placement Operations
+
+UX-05 (decision D-V5). Placement is the one layout mutation the user commits
+explicitly; these operations make it precise and reversible without the
+Canvas ever rearranging Views on its own.
+
+```text
+snap while dragging or resizing
+  -> 24px grid, and the edges/centres of other Views and Board regions
+  -> reach is 8 screen px (so 16 world px at 50%, 4 at 200%)
+  -> a side-by-side neighbour docks 24px away instead of stacking
+  -> Option/Alt held: no snap, for as long as it is held
+  -> guide lines show on the snapped axis and fade right after release
+
+layout undo
+  -> one gesture (drag, resize, arrange, group) = one step, 50 steps kept
+  -> ⌘/Ctrl+Z undoes, ⌘/Ctrl+Shift+Z redoes, only while the View bar
+     (a card's title row), the Canvas or nothing has focus
+  -> text inputs, Terminal and Browser content keep their own ⌘/Ctrl+Z
+  -> a step whose Views moved, resized or closed since is dropped, not applied
+
+[선택 N개 겹침 없이 정리]
+  -> the selected Views keep their sizes and reading order and pack in rows
+     24px apart inside the safe area; a group moves as one block
+  -> Views not selected and other Boards' regions are obstacles
+
+[그룹으로 묶기] / [그룹 해제]
+  -> a visual bundle that moves and selects together (dashed frame)
+  -> separate from Board membership; saved with the Desk, not with a Board
+  -> closing a View drops it from its group; a group of one dissolves
+
+[이동…] / [크기…]
+  -> x, y or width, height typed in Canvas px, applied as typed (no snap)
+  -> a group moves with the View; sizes never go below the View's minimum
+```
+
+The placement menu opens on right-click on a View bar, or on the empty
+Canvas while something is selected.
+
+Implementation anchors:
+
+```text
+EGDeskCanvasLayout.sys.mjs
+  -> snapCanvasRect, snapGuideScreenBoxes, createLayoutHistory,
+     arrangeWithoutOverlap, arrangeInVisibleArea, createCanvasGroup,
+     dissolveCanvasGroups, canvasGroupFrames, parsePlacementInput (pure)
+
+installCanvasPlacementOps()  (eg-desk-surface.uc.js, after installCanvasPanZoom)
+  -> one layer over every card type's own titlebar/resize listeners:
+     watches the dragged card's style during the pointer gesture and
+     rewrites the raw rect to the snapped one before paint, moves the rest
+     of the group, records the step; owns the menu, the dialog and ⌘/Ctrl+Z
+
+serializeDeskSnapshot().groups / restoreDeskSession()
+  -> groups travel with the Desk record (ids remapped on restore)
+```
+
+---
+
 ## Interaction Ownership
 
 Input ownership is determined by gesture start, current viewport mode, and the
@@ -628,5 +687,6 @@ The model is aligned only if:
 - HUD peek overlays without reflow; HUD pinned reflows only the maximized card.
 - Focus fullscreen hides all viewport chrome.
 - Safe area is used for placement and presentation, not for arbitrary movement of user-placed cards.
+- Snapping, arrange and groups change geometry only inside a user gesture or menu action, and every such change can be undone from the View bar.
 - Card presentation state does not overwrite saved CardState world geometry.
 - Run Playback can guide the viewport without flooding the canvas.
