@@ -14,6 +14,10 @@ const NOTES = Object.freeze({
   stale: '대화 또는 실행 상태가 바뀌었습니다. 해당 항목을 다시 열어 확인하세요.',
   readonly: '보존된 변경 기록 · 읽기 전용. 일부 내용이 가려질 수 있으며 현재 파일이나 적용 완료를 확인한 결과는 아닙니다.',
   'open-failed': '파일 위치를 확인해 열지 못했습니다.',
+  'review-hint': '적용된 변경을 File 창에서 다시 읽어 덩어리별로 되돌릴 수 있습니다.',
+  'review-opening': '이 실행의 연결을 다시 확인하고 현재 파일을 여는 중입니다.',
+  'review-opened': '별도 File 창에서 현재 파일을 다시 읽어 덩어리별 되돌리기를 열었습니다. 위 기록은 당시 내용입니다.',
+  'review-unavailable': '현재 파일을 열지 못했습니다. 보존된 기록은 유지됩니다. 실행의 현재 연결을 확인해 주세요.',
 })
 
 const validId = value => typeof value === 'string' && Boolean(value.trim()) && value.length <= 300 && !value.includes('\0')
@@ -92,10 +96,21 @@ function selectedItem(packet, target) {
  * onOpenFile({...target, path, line, origin}) must verify that path against
  * that origin before opening, rechecking the original target after any
  * asynchronous verification. No FileView or generic Browser opener is used.
+ *
+ * Optional stage 2 (D-X2 적용 후 덩어리별 되돌리기), activity cards only:
+ * readOrigin(target, {signal}) and onReviewApplied(request) come as a pair,
+ * like EGDeskChatRunResult's. renderActivity(target, {applied}) says the host
+ * saw the change item complete; a retained item marked completed counts too.
+ * The card then offers one button that hands the ORIGINAL IDs and the
+ * retained change rows to onReviewApplied({target, changes, readOrigin,
+ * isCurrent}). The host must re-verify the run origin through readOrigin,
+ * re-read every file and own every revert (D-X1); this module still never
+ * reads or writes a file, and the retained rows are display evidence only.
  */
-export function createChatChangeReview({ document, fetchRunChanges, isCurrent, onOpenFile = null, getVerifiedOrigin = null } = {}) {
+export function createChatChangeReview({ document, fetchRunChanges, isCurrent, onOpenFile = null, getVerifiedOrigin = null, readOrigin = null, onReviewApplied = null } = {}) {
   if (!document?.createElement || typeof fetchRunChanges !== 'function' || typeof isCurrent !== 'function') throw new TypeError('Chat change review requires a document, fetchRunChanges and isCurrent')
-  if ((onOpenFile !== null && typeof onOpenFile !== 'function') || (getVerifiedOrigin !== null && typeof getVerifiedOrigin !== 'function')) throw new TypeError('File opening and verified-origin hooks must be functions')
+  if ([onOpenFile, getVerifiedOrigin, readOrigin, onReviewApplied].some(hook => hook !== null && typeof hook !== 'function')) throw new TypeError('File opening, verified-origin and applied-review hooks must be functions')
+  const reviewHooks = typeof readOrigin === 'function' && typeof onReviewApplied === 'function'
   const cards = new Set()
   let disposed = false
   const el = (tag, className, text) => {
@@ -114,9 +129,10 @@ export function createChatChangeReview({ document, fetchRunChanges, isCurrent, o
     } catch { return null }
   }
 
-  function render(kind, requestedTarget) {
+  function render(kind, requestedTarget, options = {}) {
     if (disposed) throw new Error('Chat change review is disposed')
     const target = targetOf(requestedTarget)
+    const applied = options?.applied === true
     const node = el('section', `egdesk-chat-change-review${kind === 'approval' ? ' egdesk-change-approval' : ''}`)
     node.setAttribute('data-kind', kind)
     const details = el('details', kind === 'approval' ? 'egdesk-change-approval-details' : 'egdesk-chat-change-details')
@@ -142,6 +158,31 @@ export function createChatChangeReview({ document, fetchRunChanges, isCurrent, o
       if (!current(sequence) || JSON.stringify(originFor(target)) !== JSON.stringify(origin)) return
       try { await onOpenFile({ ...target, path: location.path, line: location.line, origin }) }
       catch { if (current(sequence)) content.append(note('open-failed')) }
+    }
+    // Stage 2 entry: the host receives the retained rows and the original IDs
+    // and does the verified re-read and revert elsewhere (File Card). Fenced
+    // by the same card ownership as file opening; nothing is cached here.
+    const appliedReviewActions = (sequence, rows) => {
+      const box = el('div', 'egdesk-chat-change-review-actions')
+      const button = el('button', 'egdesk-chat-change-review-open', '적용된 변경 검토 · 되돌리기')
+      button.type = 'button'
+      const hint = el('p', 'egdesk-chat-change-note egdesk-chat-change-review-note', NOTES['review-hint'])
+      const changes = Object.freeze(rows.map(row => Object.freeze({ path: row.path, kind: row.kind ?? 'update', movePath: typeof row.movePath === 'string' ? row.movePath : null, diff: row.diff, omitted: null })))
+      let opening = false
+      button.addEventListener('click', async () => {
+        if (opening || !current(sequence)) return
+        opening = true
+        button.disabled = true
+        hint.textContent = NOTES['review-opening']
+        const stillCurrent = candidate => current(sequence) && ['conversationId', 'runId', 'itemId'].every(key => candidate?.[key] === target[key])
+        try {
+          const opened = await onReviewApplied({ target, changes, readOrigin, isCurrent: stillCurrent })
+          if (current(sequence)) hint.textContent = NOTES[opened?.status === 'opened' ? 'review-opened' : 'review-unavailable']
+        } catch { if (current(sequence)) hint.textContent = NOTES['review-unavailable'] }
+        finally { opening = false; if (current(sequence)) button.disabled = false }
+      })
+      box.append(button, hint)
+      return box
     }
 
     async function load() {
@@ -180,6 +221,11 @@ export function createChatChangeReview({ document, fetchRunChanges, isCurrent, o
         } else {
           const origin = originFor(target)
           content.append(renderDiffView({ document, files: selected.files, ...(origin ? { onOpenFile: openFile(origin, sequence) } : {}) }))
+          // Only an applied change can be put back; omitted rows carry no text
+          // to review and a declined/failed item changed nothing.
+          const reviewable = reviewHooks && (applied || selected.item.status === 'completed') && !['failed', 'declined'].includes(selected.item.status)
+            ? selected.item.files.filter(file => file.omitted == null && typeof file.diff === 'string' && file.path) : []
+          if (reviewable.length) content.append(appliedReviewActions(sequence, reviewable))
         }
         node.setAttribute('data-state', selected.state)
       } catch {
@@ -208,7 +254,7 @@ export function createChatChangeReview({ document, fetchRunChanges, isCurrent, o
   }
   return Object.freeze({
     renderApproval: target => render('approval', target),
-    renderActivity: target => render('activity', target),
+    renderActivity: (target, options) => render('activity', target, options),
     invalidate,
     dispose() { invalidate(); disposed = true },
   })
