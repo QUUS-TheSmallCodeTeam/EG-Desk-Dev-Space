@@ -3280,12 +3280,13 @@ function browserMenuHarness() {
     return { showBrowserMenu, closeBrowserMenu, get panel() { return browserMenuPanel; } };`,
     ['menuButton', 'card', 'document', 'window', 'el', 'browserState', 'resolveFloatingMenuPlacement',
       'spawnBrowserCard', 'copyTextToClipboard', 'navigateBrowser', 'stopBrowser', 'reloadBrowser',
-      'isCardFullscreen', 'toggleCardFullscreen', 'effects', 'endAgentHold']);
+      'isCardFullscreen', 'toggleCardFullscreen', 'effects', 'endAgentHold', 'browserToolGrantFor']);
   const holdEnds = [];
   const menu = build(menuButton, card, document, window, el, browserState, () => ({ left: 30, top: 40 }),
     () => { effects.push('duplicate'); return nextCard; }, () => { effects.push('copy'); outside.focus(); },
     url => effects.push(['navigate', url]), () => effects.push('stop'), () => effects.push('reload'),
-    () => false, () => effects.push('maximize'), effects, () => { holdEnds.push(effects.length); return false; });
+    () => false, () => effects.push('maximize'), effects, () => { holdEnds.push(effects.length); return false; },
+    () => null);
   const triggerBody = surfaceSource.match(/    const menuButton = el\('button', \{[\s\S]*?onclick: \(ev\) => \{([\s\S]*?)\n      \},\n    \}, deskIcon\('menu'\)\);/)?.[1];
   assert.ok(triggerBody, 'Browser menu trigger must remain directly testable');
   const clickTrigger = compileFunction(`return ev => {${triggerBody}\n      }`,
@@ -5194,9 +5195,10 @@ test('actual send path preserves draft B and new attachments typed during delaye
   const grants = new Map([['selected-a', { token: 'selected-a', localThreadId: 'room', threadId: 'wire-room',
     sourceId: 'a', permission: 'observe', usedRunId: null }]]);
   const actualSelectedSources = compileFunction(`return function browserToolSelectedSources(threadId, candidates = null) {${selectedBody}\n  }`,
-    ['state', 'getCodexThreadById', 'ChatState', 'browserToolUserSelections', 'document', 'browserToolSameUrl', 'structuredClone'])(
+    ['state', 'getCodexThreadById', 'ChatState', 'browserToolUserSelections', 'document', 'browserToolSameUrl', 'structuredClone',
+      'browserToolRefreshSelection'])(
     state, getThread, Chat, grants, { getElementById: id => id === 'browser-a' ? selectedCard : null },
-    (left, right) => new URL(left).href === new URL(right).href, structuredClone);
+    (left, right) => new URL(left).href === new URL(right).href, structuredClone, (_threadId, source) => source);
   let payload, sendCount = 0;
   const running = send(state, () => getThread(null), (codex, id) => codex.threadDrafts[id] || '', Chat, () => false,
     { begin: () => ({}), valid: () => true, finish() {} }, async () => true, update, () => {}, () => delayed, getThread, Chat.createChatProtocolState(), () => ({}),
@@ -14408,11 +14410,14 @@ function browserAgentControlHarness() {
   const transport = new Function('document', 'ChatState', 'browserToolRunBindings', 'browserToolCancelledRuns',
     'browserToolRequestReceipts', 'browserToolCardLeases', 'browserToolUserSelections', 'browserToolPendingBindings',
     'browserToolActionLeases', 'browserToolStoppedRuns', 'chatBindingNonce', 'BROWSER_TOOL_REPLY_MARGIN_MS',
+    'browserToolNavigationPolicy', 'revokeBrowserToolGrants', 'browserToolThreadGrants', 'browserToolGrantKey',
     `let browserToolFixtureLastAction = null;\nconst browserToolFixtureAuthorizationByCard = new Map();\n${revokeSource}\n${dispatchSource}\n` +
     'return {browserToolDispatch,browserToolAuthorizePhysicalAction,revokeBrowserToolCard,browserToolCardPermission,createBrowserToolDialogObserver}')(doc,
     { knownCodexAccountKey: key => typeof key === 'string' && key.startsWith('codex:') }, maps.runBindings, maps.cancelled,
     maps.receipts, maps.cardLeases, maps.selections, maps.pendingBindings, maps.actionLeases, maps.stopped, () => `lease-${++nonce}`,
-    Number(surfaceSource.match(/const BROWSER_TOOL_REPLY_MARGIN_MS = (\d+);/)[1]));
+    Number(surfaceSource.match(/const BROWSER_TOOL_REPLY_MARGIN_MS = (\d+);/)[1]),
+    // BRW-05/11 state this harness does not exercise: default same-site policy, no standing grants.
+    () => ({ scope: 'same-site', allow: [], block: [], allowDowngrade: false }), () => 0, new Map(), (thread, cardId) => `${thread}\u0000${cardId}`);
   authorize = transport.browserToolAuthorizePhysicalAction;
   const timers = new Map();
   let timerSeq = 0;
