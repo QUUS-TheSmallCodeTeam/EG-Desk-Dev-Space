@@ -172,3 +172,7 @@
   - 테스트 기대값 변경 2건: CNV-06 size/baseHeight 제거 1건, UX-05 자기 오기(self-typo) 그룹 id 1건 — 기존 기대는 미변경
 - **TEMPORARY**: 세션 인계 노트 `cnv-06-canvas-memo.md`(2,893B 16:06)·`ux-05-placement-ops.md`(2,205B 16:03) — 앱 side-session-notes 폴더(`~/Library/Application Support/Claude/side-session-notes/local_e667fc3f-…/`, 위 2차 항목 참조)에 존재 `ls` 확인(내용 미열람). 프로젝트 반입 여부는 유저 결정
 - **미검증**: 실화면 미검증(docs 에 "[런타임: node --test만]" 표기). 1차에서 미등록이던 `EGDeskMemoState.sys.mjs`·`egdesk-annotation-memo.test.mjs`·`docs/AI_CANVAS_ANNOTATION_LAYER.md` 는 v38 에 신규 등록(1차 66개 범위 밖이었음). `EGDeskAnnotationState.sys.mjs`(CNV-05 표식 상태 모듈, 테스트가 import)는 이번 diff 밖 → 여전히 미등록(/onboard TODO)
+
+### TEMPORARY 해소: 2026-10-31 라운드 인계 노트 18건 저장소 반입 (2026-10-31 17:50, file-map v39)
+- 위 v37·v38 항목의 "반입 여부는 유저 결정" → 유저 지시 "반입" 으로 확정. 앱 side-session-notes 폴더(`~/Library/Application Support/Claude/side-session-notes/local_e667fc3f-…/`) 18건을 `docs/references/session-handoffs/2026-10-31/` 로 byte-identical 복사(`diff -rq` exit 0 실측). 세션 16개를 앱에서 삭제하면 transcript 복구 불가 → 이 사본이 **세션별 유일 기록**. 정본 진행 상태는 여전히 ledger. README.md(379줄)·overnight-report-2026-10-31.md(159줄, REPORT.md 와 `cmp` 동일) 은 v39 선등록 → v40(19:05) 에 실측 줄수 기입 완료
+- `.claude/worktrees/` 16개 + 로컬 브랜치 16개 17:44 제거(`git branch --list 'claude/*'` → vision-gap 만 남음 실측). 개별 노트는 2026-10-24 handoff-*.md 선례대로 key_files 미등록(디렉토리 purpose 에 파일명 묶음)

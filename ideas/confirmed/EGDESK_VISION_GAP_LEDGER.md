@@ -14,6 +14,8 @@
 
 **최종 중앙 회귀 — `c4944fd` 코드 기준**: helper·scripts 전체 4,249건 중 4,235 통과·실패 0·제외 14. 제외에는 별도 native 바이너리, opt-in 실환경 관찰, 특정 설치된 Codex 스키마, Windows 및 다운로드 경로 등이 포함된다. 제외 항목을 통과로 집계하지 않는다. 테스트 의존성 연결 보완 뒤 재실행한 수치이며, 아래 UI 인수 범위를 대체하지 않는다.
 
+**2026-10-31 작업자 인계 노트**: `docs/references/session-handoffs/2026-10-31/`에 2026-10-31 라운드 병렬 세션 16개(1차 12 · 2차 2 · 재개 2)의 인계 노트 18건(brw-05-07-11과 chat-03은 plan+handoff 두 파일)을 공유 노트 폴더에서 저장소로 옮겨 보관했다. 같은 폴더의 `README.md`가 색인(세션별 요약, 실화면 검증 체크리스트, 대표님 결정 대기, 다음 작업 포인터)이고, `overnight-report-2026-10-31.md`는 main 세션 라운드 기록 사본이다. 세션·worktree·브랜치 16개는 2026-10-31 17:44 KST에 삭제되어 이 노트들이 세션별 유일 기록이다. 16개 브랜치는 모두 `claude/vision-gap-20261024`(`b476945`)에 병합·push 완료. 어느 항목도 Firefox 실화면 검증은 하지 않았다(코드 + Node 단건 테스트까지).
+
 | 날짜 | 항목 | 상태 변화 | 근거 |
 |---|---|---|---|
 | 2026-10-31 | (병합) 재개 세션 2개 작업 브랜치 → `claude/vision-gap-20261024` | 기준 `a61b70f` → HEAD `bf3f499` | 1차 라운드에서 계정 한도로 중단됐던 CNV-06·UX-05 세션을 재개한 결과. 병합 커밋 `114f313`(CNV-06, 브랜치 커밋 `41861d2`·`f8b08b3`·`f07ae07`·`56e1c09`, 자기 브랜치에 main 병합 `980cbef` 포함) → `bf3f499`(UX-05, `bbb8052`·`c828880`·`68b67f2`·`e56df16`, main 병합 `6259750` 포함 — uc.js import 두 줄 충돌은 양쪽 유지). 본 브랜치 병합은 충돌 없음. 기준 `a61b70f`는 2차 병합 뒤 원장 커밋이다. 파일 8(+1621/−71: uc.js, CSS, `EGDeskCanvasLayout.sys.mjs`, `EGDeskMemoState.sys.mjs`, 두 시험, `AI_CANVAS_ANNOTATION_LAYER.md`·`VIEWPORT_LAYOUT_INTERACTION_MODEL.md`). 병합 트리에서 프로젝트 고정 Node 단건 테스트 9개 파일 실패 0(annotation-memo 18, canvas-layout 41, surface-state 955/955, surface-modules 13, design-tokens 37, chat-presentation 9, chat-run-result 30, thread-routing 9, board-membership 7). Firefox 실화면은 둘 다 미검증. push 없음. |
