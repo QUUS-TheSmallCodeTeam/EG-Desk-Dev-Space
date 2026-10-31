@@ -7,6 +7,9 @@ import * as ChatState from '../overlay/resources/EGDeskChatState.sys.mjs'
 globalThis.JSWindowActorParent ||= class {}
 const BrowserAgentReceipts = await import('../overlay/resources/EGDeskBrowserAgentRuntimeParent.sys.mjs')
 const { EGDeskBrowserAgentRuntimeParent, registerBrowserActionAuthorizer } = BrowserAgentReceipts
+// BRW-05/07/11: the conversation grant and site rules the chrome slices use.
+const BrowserGrant = await import('../overlay/resources/EGDeskBrowserGrant.sys.mjs')
+const servicesRef = () => ({ eTLD: { getBaseDomainFromHost: host => host.split('.').slice(-2).join('.') } })
 
 const source = readSurfaceSource()
 const between = (start, end) => {
@@ -16,6 +19,7 @@ const between = (start, end) => {
   return source.slice(first, last)
 }
 const dispatchSource = between('  function browserToolSameUrl(left, right) {', '  function attachBrowserToolTransport(')
+const grantSource = between('  const browserToolThreadGrants = new Map();', '  const browserToolFixtureAuthorizationByCard = new Map();')
 const attachSource = between('  function attachBrowserToolTransport({ source, respond }) {', '\n\n  function spawnBrowserCard(')
 const sourceSelection = between('  function chatInputSourceForView(view) {', '  function chatInputSources(')
 const selectedSources = between('  function registerBrowserToolSelection(threadId, source, permission) {', '  function browserToolSafeNavigationUrl(value) {')
@@ -116,9 +120,10 @@ test('Browser context source identifies exact live Card without silently selecti
   const doc = { getElementById: id => id === 'browser-a' ? card : null }
   const grants = new Map()
   const selectors = new Function('state', 'getCodexThreadById', 'document', 'structuredClone',
-    'browserToolUserSelections', 'chatBindingNonce', 'ChatState', `${selectedSources}\nreturn {registerBrowserToolSelection,browserToolSelectedSources}`)(state,
+    'browserToolUserSelections', 'chatBindingNonce', 'ChatState', 'BrowserGrant', 'servicesRef',
+    `${grantSource}\n${selectedSources}\nreturn {registerBrowserToolSelection,browserToolSelectedSources,browserToolThreadGrants,browserToolGrantFor,revokeBrowserToolGrants}`)(state,
     (codex, id) => codex.threads.find(thread => thread.id === id), doc, structuredClone, grants,
-    () => 'explicit-user-token', ChatState)
+    () => 'explicit-user-token', ChatState, BrowserGrant, servicesRef)
   assert.deepEqual(selectors.browserToolSelectedSources('thread-a'), [])
   const selected = selectors.registerBrowserToolSelection('thread-a', source, 'observe')
   state.codex.threads[0].inputSources = [selected]
@@ -128,6 +133,57 @@ test('Browser context source identifies exact live Card without silently selecti
     'legacy local room ID must not replace its actual client binding ID')
   current.authorityEpoch++
   assert.deepEqual(selectors.browserToolSelectedSources('thread-a'), [], 'old account authority epochs are not auto-selected')
+})
+
+test('BRW-11: a standing interaction grant re-issues the one-time token each turn until the Card, account or site changes', () => {
+  const current = { cardId: 'browser-a', cardEpoch: 'epoch-a', profileId: 'firefox-default', accountId: 'account-a', userContextId: 0,
+    engineAccountKey: 'codex:chatgpt:fixture@example.test', authorityEpoch: 3, url: 'https://shop.example.test/cart' }
+  const card = { id: 'browser-a', isConnected: true, dataset: {}, classList: { contains: name => name === 'egd-browser-card' },
+    _browserControls: { toolBinding: () => ({ ...current }), agentControlState: () => ({ held: false }) } }
+  const source = { id: 'source-a', kind: 'browser', browserToolPermission: 'observe',
+    sourceRef: { viewId: 'browser-a', uri: current.url, profileId: current.profileId, accountId: current.accountId },
+    browserToolIdentity: { cardEpoch: current.cardEpoch, userContextId: 0, engineAccountKey: current.engineAccountKey, authorityEpoch: 3 } }
+  const state = { codex: { threads: [{ id: 'thread-a', clientBindingId: 'client-a', inputSources: [] }] } }
+  const tokens = new Map()
+  let minted = 0
+  const selectors = new Function('state', 'getCodexThreadById', 'document', 'structuredClone',
+    'browserToolUserSelections', 'chatBindingNonce', 'ChatState', 'BrowserGrant', 'servicesRef',
+    `${grantSource}\n${selectedSources}\nreturn {registerBrowserToolSelection,browserToolSelectedSources,browserToolThreadGrants,revokeBrowserToolGrants}`)(state,
+    (codex, id) => codex.threads.find(thread => thread.id === id), { getElementById: id => id === 'browser-a' ? card : null }, structuredClone,
+    tokens, () => `token-${++minted}`, ChatState, BrowserGrant, servicesRef)
+  const selected = selectors.registerBrowserToolSelection('thread-a', source, 'interact')
+  state.codex.threads[0].inputSources = [selected]
+  assert.equal(selectors.browserToolThreadGrants.size, 1, 'an interaction pick is a standing grant for the conversation')
+  assert.equal(selectors.browserToolThreadGrants.get('client-a\u0000browser-a').site, 'example.test')
+  assert.equal(selectors.browserToolSelectedSources('thread-a')[0].browserToolSelection.token, 'token-1')
+  tokens.get('token-1').usedRunId = 'run-1'
+  const next = selectors.browserToolSelectedSources('thread-a')
+  assert.equal(next.length, 1, 'the next turn is not asked again')
+  assert.equal(next[0].browserToolSelection.token, 'token-2')
+  assert.equal(next[0].browserToolPermission, 'interact')
+  assert.equal(next[0].id, 'source-a', 'same chip, fresh one-time token')
+  assert.equal(tokens.get('token-2').usedRunId, null)
+  current.url = 'https://www.example.test/other'
+  tokens.get('token-2').usedRunId = 'run-2'
+  assert.equal(selectors.browserToolSelectedSources('thread-a')[0].sourceRef.uri, current.url, 'same site, another page: still granted, current URL')
+  current.url = 'https://elsewhere.test/'
+  tokens.get('token-3').usedRunId = 'run-3'
+  assert.deepEqual(selectors.browserToolSelectedSources('thread-a'), [], 'the person steered the Card to another site: the grant ends')
+  assert.equal(selectors.browserToolThreadGrants.size, 0)
+  current.url = 'https://shop.example.test/cart'
+  selectors.registerBrowserToolSelection('thread-a', source, 'interact')
+  assert.equal(selectors.browserToolThreadGrants.size, 1)
+  selectors.registerBrowserToolSelection('thread-a', source, 'observe')
+  assert.equal(selectors.browserToolThreadGrants.size, 0, 'a read pick turns the grant read-only')
+  state.codex.threads[0].inputSources = [selectors.registerBrowserToolSelection('thread-a', source, 'interact')]
+  tokens.get('token-6').usedRunId = 'run-6'
+  current.authorityEpoch = 4
+  assert.deepEqual(selectors.browserToolSelectedSources('thread-a'), [], 'an account authority change ends the grant')
+  assert.equal(selectors.browserToolThreadGrants.size, 0)
+  current.authorityEpoch = 3
+  selectors.registerBrowserToolSelection('thread-a', source, 'interact')
+  assert.equal(selectors.revokeBrowserToolGrants({ clientThreadId: 'client-a', cardId: 'browser-a' }), 1, 'explicit revocation')
+  assert.equal(selectors.browserToolThreadGrants.size, 0)
 })
 
 test('read-only Browser attachment remains available when actor binding is unavailable', () => {
@@ -198,11 +254,12 @@ function fixture() {
   const transport = new Function('document', 'ChatState', 'browserToolRunBindings', 'browserToolCancelledRuns',
     'browserToolRequestReceipts', 'browserToolCardLeases', 'browserToolUserSelections', 'browserToolPendingBindings',
     'browserToolActionLeases', 'browserToolStoppedRuns', 'chatBindingNonce', 'Date', 'performance', 'BROWSER_TOOL_REPLY_MARGIN_MS',
-    `let browserToolFixtureLastAction = null;\nconst browserToolFixtureAuthorizationByCard = new Map();\n${dispatchSource}\n` +
-    'return {browserToolDispatch,browserToolAuthorizePhysicalAction,browserToolFixtureActionDiagnostic}')(doc,
+    'BrowserGrant', 'servicesRef',
+    `let browserToolFixtureLastAction = null;\nconst browserToolFixtureAuthorizationByCard = new Map();\n${grantSource}\n${dispatchSource}\n` +
+    'return {browserToolDispatch,browserToolAuthorizePhysicalAction,browserToolFixtureActionDiagnostic,browserToolThreadGrants,browserToolThreadSites}')(doc,
     { knownCodexAccountKey: key => typeof key === 'string' && key.startsWith('codex:') },
     runBindings, cancelled, receipts, leases, userSelections, pendingBindings, actionLeases, stoppedRuns,
-    () => `lease-${++nonce}`, { now: () => clockMs }, { timeOrigin: 0, now: () => clockMs }, 500)
+    () => `lease-${++nonce}`, { now: () => clockMs }, { timeOrigin: 0, now: () => clockMs }, 500, BrowserGrant, servicesRef)
   authorizePhysicalAction = transport.browserToolAuthorizePhysicalAction
   let sequence = 0
   const req = (kind, extra = {}) => ({ version: 1, requestId: `request-${++sequence}`,
@@ -220,6 +277,7 @@ function fixture() {
   }
   return { dispatch: transport.browserToolDispatch, authorize: transport.browserToolAuthorizePhysicalAction,
     fixtureActionDiagnostic: transport.browserToolFixtureActionDiagnostic,
+    threadGrants: transport.browserToolThreadGrants, threadSites: transport.browserToolThreadSites,
     req, selection, current, card, browser, ownerWindow,
     runBindings, pendingBindings, cancelled, stoppedRuns, userSelections, actionLeases, leases,
     get actionCalls() { return actionCalls }, get domEffects() { return domEffects },
@@ -419,7 +477,7 @@ test('human reload clears display synchronously without changing the reload path
   const reloadSource = between('    const reloadBrowser = () => {', '    const stopBrowser = () => {')
   const order = []
   const reload = new Function('agentProjection', 'setBrowserLoading', 'xulBrowser', 'loadBrowserUri', 'browserState',
-    `${reloadSource}\nreturn reloadBrowser`)(
+    `let agentNavigationGuard = null;\n${reloadSource}\nreturn reloadBrowser`)(
     { invalidate: () => order.push('hide') }, () => order.push('loading'),
     { reload: () => order.push('reload') }, () => assert.fail('unexpected fallback'), {})
   assert.equal(reload(), true)
@@ -805,10 +863,10 @@ test('account change or deadline expiry while actor pending leaves DOM unchanged
 function productionStopHarness(f, { run: runFields = {}, thread: threadFields = {}, engines = [] } = {}) {
   const revoke = new Function('browserToolRunBindings', 'browserToolPendingBindings',
     'browserToolActionLeases', 'browserToolCancelledRuns', 'browserToolStoppedRuns',
-    'browserToolUserSelections', 'ChatState',
-    `${stopRevokeSource}\nreturn revokeBrowserToolRunImmediately`)(
+    'browserToolUserSelections', 'ChatState', 'document', 'BrowserGrant', 'servicesRef',
+    `${grantSource}\n${stopRevokeSource}\nreturn revokeBrowserToolRunImmediately`)(
     f.runBindings, f.pendingBindings, f.actionLeases, f.cancelled, f.stoppedRuns, f.userSelections,
-    ChatState)
+    ChatState, { getElementById: () => null }, BrowserGrant, servicesRef)
   const run = { runId: 'run-a', clientThreadId: 'thread-a', conversationId: 'conversation-a',
     status: 'inProgress', stopPending: false, ...runFields }
   const thread = { id: 'local-room', clientBindingId: 'thread-a', ...threadFields }

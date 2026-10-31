@@ -37,17 +37,28 @@ Codex dynamic tool call
 | `egdesk_browser_observe` | `observe` | none (read-only) | none | `observed` |
 | `egdesk_browser_click` | `act` | document, revision, viewport, focused ref, URL, exact live target, not obscured | `dom-click-no-pointerdown` (DOM `click()`, no mousedown, no focus). The actor calls it from system code, so Gecko marks the click `isTrusted: true`, but there is no pointer sequence (pointerdown/mousedown/mouseup) and no coordinates (`docs/references/rea-mechanism-adoption.md` section 2) | `postcondition-observed` / `postcondition-unverified` |
 | `egdesk_browser_fill` | `act` | as click (without the hit test), plus a non-sensitive field or contenteditable editing host, text up to 8000 characters, current value up to 8000 characters | `dom-value-setter` (value setter, then `input`/`change`) or `dom-editor-replace` (cancelable `beforeinput`; EG-Desk replaces the editor text and sends `input` only if the page did not cancel it). No focus, no Selection API call | same; the `target-value` postcondition is the full expected value (see BRW-08 below) |
-| `egdesk_browser_navigate` | `act` | document guard, and the target URL on the **current document's site** (Gecko Public Suffix List; IP, single-label or unknown suffix = exact origin), http(s) only, no https-to-http downgrade | `location.href` | same, plus `navigationScope: "same-site"`, `pageLoadVerified: false` |
+| `egdesk_browser_navigate` | `act` | document guard, and the target URL on the **current document's site** (Gecko Public Suffix List; IP, single-label or unknown suffix = exact origin) **or on a site this conversation allowed** (D-B1, BRW-05), http(s) only, no https-to-http downgrade | same site: `location.href` in the actor. Allowed other site: EG-Desk chrome loads it (`chrome-load-uri`; the actor stays same-site), after the same observed-document check | same, plus `navigationScope: "same-site"` or `"allowed-site"`, `pageLoadVerified: false` |
 | `egdesk_browser_scroll` | `act` | document guard plus the observed scroll offset (a human scroll in between is stale). `direction` (up/down/top/bottom, `amount` page/half) scrolls the document; `ref` + `expectedTarget` brings that element into view | `dom-scroll-api` (`scrollBy`/`scrollTo`/`scrollIntoView`, no focus, no pointer) | `postcondition-observed` (scrollY moved in that direction / target in view), `scroll-at-limit`, `postcondition-unverified` |
 | `egdesk_browser_press` | `act` | as fill's target checks (non-sensitive, bounded value), and the target is **already focused** or is **the field the last guarded action filled** | `dom-keyboard-event` (synthetic, `trustedInput: false`, no focus). Only Enter on a form text field emulates HTML implicit submission (`default-button-click` or `form-request-submit`); no other default key action happens | with postcondition: as click; without: `key-dispatched` |
 | `egdesk_browser_wait` | `observe` with `options.wait` | read-only; `selector-visible` needs the ref's own document | none | `wait-condition-met`, `wait-timeout`, `wait-condition-unverified` |
+| `egdesk_browser_list_cards` | none (helper only) | read-only | none | `cards-listed` with `cards[]` (cardId, permission, last observed URL, `openedByAgent`) |
+| `egdesk_browser_request_site` | `allow-site` (55 s budget) | interact grant; the site is a host or URL, reduced to its registrable domain | none; the person answers on the Card ([이 대화에서 허용] / [거절]) | `site-allowed`, `site-refused`, `site-pending` |
+| `egdesk_browser_open_card` | `open-card` | interact grant; URL judged like navigate from the source Card's current page; same profile, container and account; at most four Cards per run | EG-Desk chrome opens the Card and binds it to the run; the helper admits it only when the returned binding keeps the identity | `card-opened` with the new `cardId` |
+| `egdesk_browser_close_card` | `close-card` | only a Card this run opened (`openedByAgent`) | EG-Desk chrome closes the Card and drops its bindings and grant | `card-closed` |
+| `egdesk_browser_history` | `history` | fresh observation; observed Gecko document identity still current | EG-Desk chrome `back`/`forward`/`reload` (`chrome-history`); the result is the dispatch only | `history-dispatched`, `postcondition-unverified` |
 | `egdesk_browser_screenshot` | `observe` with `options.screenshot` | read-only; the parent actor captures only on its own one-time ticket, covers what the child reports, and sends nothing when a cover box cannot be trusted (see Masked Screenshot) | none | `screenshot-observed`, `screenshot-withheld` (with `screenshot.reason`) |
 
 Press keys: Enter, Escape, Tab, ArrowUp, ArrowDown, ArrowLeft, ArrowRight, Backspace, Space. Enter and Space require a testable postcondition (they can submit or activate); other keys may omit it.
 
 Wait: `for` is `load` (readyState complete), `idle` (complete and no DOM mutation for 500 ms) or `selector-visible` (an observed ref becomes visible), with `timeoutMs` 100 to 10000. The helper refuses a wait that does not leave 2000 ms inside the UI response deadline. After an unconfirmed navigation the actor will not accept the old document as loaded (`notDocumentId`).
 
-Navigation scope is anchored to the current document, not the originally selected URL. A guarded click on a cross-site link can therefore move the Card to another site, after which navigation is limited to that site.
+Navigation scope is anchored to the current document, not the originally selected URL. A guarded click on a cross-site link can therefore move the Card to another site, after which navigation is limited to that site plus the conversation's allowed sites.
+
+### Sites, Cards and Grant Lifetime (BRW-05, BRW-07, BRW-11)
+
+- **D-B1 (allowed sites).** Each conversation has a set of allowed sites (registrable domains), kept by the surface (`browserToolThreadSites`) and reported to the helper beside every `bind`, `observe`, `open-card` and `allow-site` answer as `navigationPolicy` (`{ scope: 'same-site', allow, block, allowDowngrade: false }`; `helper/egdesk-browser-url-policy.mjs` reads it, a widened or unreadable policy is ignored). The same rule judges the tool argument (helper and surface), a new Card's URL, a history move's landing, and every committed top-level document while an Agent-started load lands (surface `onLocationChange`, 20 s window): an outside page is replaced with `about:blank`. A person's own navigation on the Card clears that window. The rule itself lives in `overlay/resources/EGDeskBrowserGrant.sys.mjs` (`browserGrantNavigation`), mirrored by the helper policy module.
+- **D-B2 (Cards the Agent opened).** `open-card` spawns the Card with the source Card's profile, container identity and account, binds it to the same run with the same permission, marks it `data-egd-agent-opened="true"`, and gives it the conversation's standing grant with `openedByAgent: true`, so the next turn can continue in it. A popup a page opened or a Card a person opened is never adopted; `close-card` refuses anything the run did not open.
+- **D-B3 (grant lifetime).** 'Chat 조작 허용' is a standing grant for the conversation (`browserToolThreadGrants`, keyed by client thread and Card). Each turn re-issues the one-time selection token from it (`browserToolRefreshSelection`), so the helper still sees an explicit per-run selection and the person is not asked again. The grant ends when the Card changes (epoch, profile, container), the account changes (accountId, engine account key, authority epoch), the Card leaves its granted site and the conversation's allowed sites, the person pauses the Card ([일시중지]), picks 'Chat에 읽기 첨부' or '조작 허용 해제', the run is stopped (conservative), or 30 minutes pass without a run using it (`BROWSER_GRANT_IDLE_MS`; D-B3 names no number). Payment, OAuth consent, submit and delete keep their existing confirmation paths.
 
 ### Shared Rules (REA section 6, EG-01 to EG-04)
 
@@ -119,8 +130,10 @@ The actor snapshot now includes `scroll: { x, y, maxY }` (CSS pixels, integers) 
 | `BROWSER_NAVIGATE_OUT_OF_SCOPE` | Navigation target is not http(s) on the current document's site, or is a downgrade |
 | `BROWSER_PRESS_TARGET_NOT_FOCUSED` | Key target is neither the observed focused element nor the field just filled |
 | `BROWSER_WAIT_OUTCOME_UNKNOWN` | Wait ended without a verifiable observation |
+| `BROWSER_CARD_NOT_AGENT_OPENED` | `close-card` on a Card the run did not open |
+| `BROWSER_CARD_LIMIT` | A run already holds four Browser Cards |
 
-Until `helper/codex-tool-errors.mjs` lists them, the public classification of these three is `BROWSER_TOOL_FAILED`.
+`BROWSER_NAVIGATE_OUT_OF_SCOPE` carries fixed facts beside the code: `navigation.reason` (the url-policy reason, for example `outside-site`) and `navigation.host` (the host the model itself named). All of these are listed in `helper/codex-tool-errors.mjs`.
 
 ### Wiring Status (2026-10-24)
 
@@ -137,7 +150,10 @@ Until `helper/codex-tool-errors.mjs` lists them, the public classification of th
 | Surface `browserToolDispatchOnce` action allow-list for `scroll`/`press` | Pending Main; until then the UI rejects them |
 | Surface `browserToolAct` receipt route for scroll/press | Pending Main; until then scroll/press results are `postcondition-unverified` |
 | `codex-chat-runtime.mjs` catalog and per-call allow-list | Pending Main; until then the model is not offered navigate/scroll/press/wait |
-| Public error codes in `codex-tool-errors.mjs` | Pending Main |
+| Public error codes in `codex-tool-errors.mjs` | Implemented (navigate scope, press focus, wait unknown, agent-opened Card, Card limit) |
+| Allowed sites per conversation, `request_site` question on the Card, chrome route for an allowed other site, commit-layer blank page (BRW-05) | Implemented 2026-10-31, unit-tested (helper and extracted surface slices); real Firefox run not verified |
+| `list_cards`, `open_card`, `close_card`, `history` and the run's growing Card set (BRW-07) | Implemented 2026-10-31, unit-tested in the helper; the surface `open-card`/`close-card`/`history` handlers are not covered by the extracted-slice tests and need a real Firefox run |
+| Standing conversation grant with D-B3 expiry, token re-issue per turn, '조작 허용 해제' menu item (BRW-11) | Implemented 2026-10-31, unit-tested (`scripts/egdesk-browser-grant.test.mjs`, transport harness); real Firefox run not verified |
 | Actor child: `screenshotMask` cover pass, `options.screenshot` on the snapshot query (BRW-09) | Implemented, unit-tested with a fake DOM |
 | Actor parent: ticketed `captureScreenshot`, `drawSnapshot` + canvas cover + budgeted encode (BRW-09) | Implemented, unit-tested with a fake WindowGlobalParent and canvas; the real `drawSnapshot` call is not run |
 | `EGDeskScreenshotMask.sys.mjs` cover and send policy (BRW-09) | Implemented, unit-tested |

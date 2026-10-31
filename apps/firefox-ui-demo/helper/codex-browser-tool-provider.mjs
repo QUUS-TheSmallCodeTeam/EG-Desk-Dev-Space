@@ -2,6 +2,7 @@ import { BROWSER_INTERACTION_TOOL_NAMES, BROWSER_READ_TOOL_NAMES, BROWSER_TOOL_S
 import { chatError } from './codex-chat-values.mjs'
 import { classifyPublicToolError } from './codex-tool-errors.mjs'
 import { fixtureSnapshotMatches } from './codex-browser-fixture-qa.mjs'
+import { NAVIGATION_REASON_TEXT } from './egdesk-browser-url-policy.mjs'
 
 const BROWSER_BOUNDED = 'browserBounded'
 const READ_ONLY_QA = 'readOnlyQa'
@@ -14,6 +15,11 @@ const BOUNDED_INTERACTION_TOOLS = new Set(BROWSER_INTERACTION_TOOL_NAMES)
 const BOUNDED_READ_TOOLS = new Set(BROWSER_READ_TOOL_NAMES)
 const DISPATCH_PHASES = new Set(['not-dispatched', 'dispatched', 'unknown'])
 const DIALOG_TYPES = new Set(['alert', 'confirm', 'prompt', 'beforeunload'])
+// BRW-07: Cards one run may hold (its explicit grants plus Cards it opened).
+const MAX_RUN_CARDS = 4
+// D-B1 refusal facts: a fixed reason and the host the model itself named.
+const NAVIGATION_REASONS = new Set(Object.keys(NAVIGATION_REASON_TEXT))
+const HOST_PATTERN = /^[a-z0-9.:\[\]-]{1,253}$/i
 // Fixed, content-free facts the model may see beside a public error code:
 // whether the action was sent, what structurally covered a refused click,
 // and the type of a page dialog. Raw diagnostics stay withheld.
@@ -24,6 +30,10 @@ function publicBrowserErrorDetail(error) {
   if ([true, false, 'unknown'].includes(error.dispatched)) detail.dispatched = error.dispatched
   if (typeof error.obscuredBy === 'string' && /^[A-Za-z0-9 #._=:/-]{1,160}$/.test(error.obscuredBy)) detail.obscuredBy = error.obscuredBy
   if (DIALOG_TYPES.has(error.dialog?.type)) detail.dialog = { type: error.dialog.type }
+  if (error.navigation && typeof error.navigation === 'object' && NAVIGATION_REASONS.has(error.navigation.reason)) {
+    detail.navigation = { reason: error.navigation.reason,
+      ...(typeof error.navigation.host === 'string' && HOST_PATTERN.test(error.navigation.host) ? { host: error.navigation.host } : {}) }
+  }
   if (error.reconcile && typeof error.reconcile === 'object') {
     const { answered, entered, performing, fenced, reason } = error.reconcile
     detail.reconcile = { answered: answered === true,
@@ -33,9 +43,10 @@ function publicBrowserErrorDetail(error) {
   }
   return detail
 }
-const SUCCESS_STATUSES = new Set(['observed', 'postcondition-observed', 'wait-condition-met', 'screenshot-observed'])
+const SUCCESS_STATUSES = new Set(['observed', 'postcondition-observed', 'wait-condition-met',
+  'cards-listed', 'site-allowed', 'card-opened', 'card-closed', 'history-dispatched', 'screenshot-observed'])
 const PUBLIC_INPUT_ROUTES = new Set(['dom-click-no-pointerdown', 'dom-scroll-api', 'dom-keyboard-event',
-  'dom-value-setter', 'dom-editor-replace'])
+  'dom-value-setter', 'dom-editor-replace', 'chrome-load-uri', 'chrome-history'])
 
 export function createCodexBrowserToolProvider({ transport, getOwnerKey, schemaReady = () => true, fixtureQa = null, service = createBrowserToolService({ sendToUi: request => transport.sendToUi(request), getOwnerKey }) }) {
   if (!transport || typeof transport.hasClient !== 'function' || typeof getOwnerKey !== 'function') throw new TypeError('Browser provider requires a bounded UI transport and account identity')
@@ -68,14 +79,20 @@ export function createCodexBrowserToolProvider({ transport, getOwnerKey, schemaR
       const interactionRequested = policy === BROWSER_BOUNDED
         && selectedSources.some(source => source.browserToolPermission === 'interact')
       if (interactionRequested) {
-        if (selectedSources.length !== 1 || selectedSources[0].selectedByUser !== true) {
-          throw chatError('INVALID_BROWSER_SELECTION', 'Select exactly one Browser Card for this run', 400)
+        // BRW-07 / BRW-11: every interact Card is an explicit selection of the
+        // person's own (a standing grant the UI re-issued for this turn, or a
+        // Card the Agent opened inside it); never a thread-wide default.
+        const interacting = selectedSources.filter(source => source.browserToolPermission === 'interact')
+        if (selectedSources.length > MAX_RUN_CARDS || interacting.some(source => source.selectedByUser !== true)) {
+          throw chatError('INVALID_BROWSER_SELECTION', 'Select one to four explicitly granted Browser Cards for this run', 400)
         }
-        let selectedUrl
-        try { selectedUrl = new URL(selectedSources[0].sourceRef?.uri) } catch {}
-        if (!selectedUrl || !['http:', 'https:'].includes(selectedUrl.protocol)
-          || selectedUrl.username || selectedUrl.password) {
-          throw chatError('INVALID_BROWSER_SELECTION', 'This run requires one selected HTTP(S) Browser Card', 400)
+        for (const source of interacting) {
+          let selectedUrl
+          try { selectedUrl = new URL(source.sourceRef?.uri) } catch {}
+          if (!selectedUrl || !['http:', 'https:'].includes(selectedUrl.protocol)
+            || selectedUrl.username || selectedUrl.password) {
+            throw chatError('INVALID_BROWSER_SELECTION', 'This run requires selected HTTP(S) Browser Cards', 400)
+          }
         }
       }
       if (policy === FIXTURE_BROWSER_QA && (!fixtureQa || selectedSources.length !== 1 ||
@@ -163,6 +180,21 @@ export function createCodexBrowserToolProvider({ transport, getOwnerKey, schemaR
           throw chatError('BROWSER_FIXTURE_ATTESTATION_FAILED', 'Fixture action did not retain the exact local page and postcondition', 403)
         }
         const success = SUCCESS_STATUSES.has(result.status)
+        // BRW-07: the run's Card set follows what the UI bound or closed, so
+        // later calls for the new Card pass this provider and the chat runtime.
+        if (result.status === 'card-opened' && Array.isArray(run.browserBinding?.cards) &&
+            !run.browserBinding.cards.some(item => item.cardId === result.cardId)) {
+          run.browserBinding.cards.push({ cardId: result.cardId, permission: result.permission, cardEpoch: result.cardEpoch,
+            openedByAgent: true, openedFrom: result.openedFrom })
+          this.runtime.emit(run, 'browser.card.opened', { callId: event.callId, cardId: result.cardId, openedFrom: result.openedFrom,
+            permission: result.permission, targetCardEpoch: result.cardEpoch, originalProviderId: this.providerId,
+            namespace: event.namespace || null, bridgeEpoch: this.runtime.currentEpoch?.() ?? null }, event.callId)
+        }
+        if (result.status === 'card-closed' && Array.isArray(run.browserBinding?.cards)) {
+          run.browserBinding.cards = run.browserBinding.cards.filter(item => item.cardId !== result.cardId)
+          this.runtime.emit(run, 'browser.card.closed', { callId: event.callId, cardId: result.cardId, originalProviderId: this.providerId,
+            namespace: event.namespace || null, bridgeEpoch: this.runtime.currentEpoch?.() ?? null }, event.callId)
+        }
         const selected = run.browserBinding?.cards?.find(card => card.cardId === result.cardId)
         // The route the actor reported, from a fixed set; never a success claim.
         const inputRoute = [result.dispatchReceipt?.inputRoute, result.dispatchReceipt?.clickInputRoute]

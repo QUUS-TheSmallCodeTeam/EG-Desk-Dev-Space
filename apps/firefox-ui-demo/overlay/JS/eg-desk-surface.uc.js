@@ -17,6 +17,7 @@
   const BriefingState = ChromeUtils.importESModule('chrome://userchrome/content/EGDeskBriefingState.sys.mjs');
   const FileCardState = ChromeUtils.importESModule('chrome://userchrome/content/EGDeskFileCardState.sys.mjs');
   const BrowserAgentReceipts = ChromeUtils.importESModule('chrome://userchrome/content/EGDeskBrowserAgentRuntimeParent.sys.mjs');
+  const BrowserGrant = ChromeUtils.importESModule('chrome://userchrome/content/EGDeskBrowserGrant.sys.mjs');
   const PortableState = ChromeUtils.importESModule('chrome://userchrome/content/EGDeskPortableState.sys.mjs');
   const TextFilePickers = ChromeUtils.importESModule('chrome://userchrome/content/EGDeskNativeFilePickers.sys.mjs');
   const BoardExport = ChromeUtils.importESModule('chrome://userchrome/content/EGDeskBoardExport.sys.mjs');
@@ -14994,6 +14995,55 @@
   const browserToolRequestReceipts = new Map();
   const browserToolCardLeases = new Map();
   const browserToolActionLeases = new Map();
+  // BRW-11 (D-B3): the standing interaction grant a Card holds for one
+  // conversation, keyed `${clientThreadId}\0${cardId}`, and BRW-05 (D-B1): the
+  // sites each conversation allowed. A turn re-issues its one-time selection
+  // token from the grant; that token stays the only authority the helper sees.
+  const browserToolThreadGrants = new Map();
+  const browserToolThreadSites = new Map();
+  const browserToolGrantKey = (clientThreadId, cardId) => `${clientThreadId}\u0000${cardId}`;
+  function browserToolSiteForHost(host) {
+    try { return servicesRef().eTLD.getBaseDomainFromHost(host) || null; } catch { return null; }
+  }
+  function browserToolThreadSiteSet(clientThreadId) {
+    let sites = browserToolThreadSites.get(clientThreadId);
+    if (!sites) { sites = new Set(); browserToolThreadSites.set(clientThreadId, sites); }
+    return sites;
+  }
+  function browserToolNavigationPolicy(clientThreadId) {
+    return BrowserGrant.browserNavigationPolicy(browserToolThreadSites.get(clientThreadId) || []);
+  }
+  // D-B1 at every layer: the tool argument, a new Card, a history move and each
+  // committed document are judged by this one rule.
+  function browserToolNavigationAllowed(clientThreadId, toUrl, fromUrl) {
+    return BrowserGrant.browserGrantNavigation(toUrl, fromUrl, browserToolThreadSites.get(clientThreadId) || new Set(), browserToolSiteForHost);
+  }
+  // The grant if it still holds against the live Card (D-B3), else nothing;
+  // an expired grant is forgotten on the spot.
+  function browserToolGrantFor(clientThreadId, cardId) {
+    if (!clientThreadId || !cardId) return null;
+    const grantKey = browserToolGrantKey(clientThreadId, cardId);
+    const grant = browserToolThreadGrants.get(grantKey);
+    if (!grant) return null;
+    const card = document.getElementById(cardId);
+    let current = null, held = false;
+    try { current = card?.isConnected && card.classList?.contains('egd-browser-card') ? card._browserControls?.toolBinding?.() : null; } catch { current = null; }
+    try { held = card?._browserControls?.agentControlState?.().held === true; } catch { held = true; }
+    const state = BrowserGrant.browserGrantState(grant, current, { sites: browserToolThreadSites.get(clientThreadId),
+      siteForHost: browserToolSiteForHost, held });
+    if (state.valid) return grant;
+    browserToolThreadGrants.delete(grantKey);
+    return null;
+  }
+  function revokeBrowserToolGrants({ clientThreadId = null, cardId = null } = {}) {
+    let count = 0;
+    for (const [grantKey, grant] of browserToolThreadGrants) {
+      if ((clientThreadId && grant.clientThreadId !== clientThreadId) || (cardId && grant.cardId !== cardId)) continue;
+      browserToolThreadGrants.delete(grantKey);
+      count++;
+    }
+    return count;
+  }
   const browserToolFixtureAuthorizationByCard = new Map();
   let browserToolFixtureLastAction = null;
   let browserToolAuthorityEpoch = 0;
@@ -15008,12 +15058,15 @@
       if (!key.startsWith(prefix) || bound.clientThreadId !== clientThreadId) continue;
       browserToolRunBindings.delete(key);
       if (bound.selectionToken) browserToolUserSelections.delete(bound.selectionToken);
+      // D-B3, conservatively: Stop also ends this Card's standing grant here.
+      revokeBrowserToolGrants({ clientThreadId, cardId: bound.binding?.cardId || key.split('\u0000')[1] });
       revoked.add(key);
     }
     for (const [key, pending] of browserToolPendingBindings) {
       if (!key.startsWith(prefix) || pending.clientThreadId !== clientThreadId) continue;
       browserToolPendingBindings.delete(key);
       if (pending.selectionToken) browserToolUserSelections.delete(pending.selectionToken);
+      revokeBrowserToolGrants({ clientThreadId, cardId: key.split('\u0000')[1] });
       revoked.add(key);
     }
     for (const [leaseId, lease] of browserToolActionLeases) {
@@ -15030,6 +15083,7 @@
   function revokeBrowserToolCard(cardId) {
     const threads = new Set();
     if (typeof cardId !== 'string' || !cardId) return threads;
+    revokeBrowserToolGrants({ cardId });
     const onCard = key => key.includes(`\u0000${cardId}\u0000`);
     const revoked = new Set();
     for (const [key, bound] of browserToolRunBindings) {
@@ -15075,8 +15129,9 @@
         !clientThreadId || browserToolUserSelections.size >= 256) return null;
     const card = document.getElementById(source.sourceRef?.viewId);
     if (!card?.isConnected || !card.classList?.contains('egd-browser-card')) return null;
+    let current = null;
     try {
-      const current = card._browserControls?.toolBinding?.();
+      current = card._browserControls?.toolBinding?.();
       if (!current || !browserToolSameUrl(current.url, source.sourceRef.uri) ||
           current.profileId !== source.sourceRef.profileId || current.accountId !== source.sourceRef.accountId ||
           ['cardEpoch', 'userContextId', 'engineAccountKey', 'authorityEpoch'].some(field =>
@@ -15095,12 +15150,44 @@
       authorityEpoch: selected.browserToolIdentity.authorityEpoch,
       permission, usedRunId: null,
     });
+    // BRW-11: an interaction pick is a standing grant for this conversation; a
+    // read pick turns an earlier interaction grant on this Card read-only.
+    if (permission === 'interact') {
+      const prior = browserToolThreadGrants.get(browserToolGrantKey(clientThreadId, card.id));
+      const grant = BrowserGrant.browserGrantRecord({ clientThreadId, localThreadId: threadId, cardId: card.id, current,
+        siteForHost: browserToolSiteForHost, sourceId: selected.id,
+        openedByAgent: prior?.openedByAgent === true, openedFrom: prior?.openedFrom ?? null });
+      if (grant) browserToolThreadGrants.set(browserToolGrantKey(clientThreadId, card.id), grant);
+    } else revokeBrowserToolGrants({ clientThreadId, cardId: card.id });
     return selected;
+  }
+  // BRW-11: a Card whose one-time token an earlier turn spent gets a fresh
+  // token from its standing grant, so the person is not asked again while the
+  // grant holds (D-B3). Anything else is left to the filter below.
+  function browserToolRefreshSelection(threadId, source) {
+    if (source?.kind !== 'browser' || source.selectedByUser !== true || source.browserToolPermission !== 'interact') return source;
+    const thread = getCodexThreadById(state.codex, threadId);
+    const clientThreadId = thread && ChatState.clientThreadBinding(thread);
+    const selection = browserToolUserSelections.get(source.browserToolSelection?.token);
+    if (!clientThreadId || (selection && !selection.usedRunId)) return source;
+    const cardId = source.sourceRef?.viewId;
+    if (!browserToolGrantFor(clientThreadId, cardId)) return source;
+    let current = null;
+    try { current = document.getElementById(cardId)?._browserControls?.toolBinding?.(); } catch { return source; }
+    if (!current) return source;
+    // A token re-issued for a send that never bound would otherwise linger.
+    for (const [token, entry] of browserToolUserSelections) {
+      if (entry.threadId === clientThreadId && entry.cardId === cardId && entry.sourceId === source.id && !entry.usedRunId) browserToolUserSelections.delete(token);
+    }
+    return registerBrowserToolSelection(threadId, { ...source,
+      sourceRef: { ...source.sourceRef, uri: current.url, profileId: current.profileId, accountId: current.accountId },
+      browserToolIdentity: { cardEpoch: current.cardEpoch, userContextId: current.userContextId,
+        engineAccountKey: current.engineAccountKey, authorityEpoch: current.authorityEpoch } }, 'interact') || source;
   }
   function browserToolSelectedSources(threadId, candidates = null) {
     const thread = getCodexThreadById(state.codex, threadId);
     const clientThreadId = thread && ChatState.clientThreadBinding(thread);
-    return (candidates || thread?.inputSources || []).filter(source => {
+    return (candidates || thread?.inputSources || []).map(source => browserToolRefreshSelection(threadId, source)).filter(source => {
       if (source.kind !== 'browser' || source.selectedByUser !== true ||
           !['observe', 'interact'].includes(source.browserToolPermission)) return false;
       const selection = browserToolUserSelections.get(source.browserToolSelection?.token);
@@ -15474,6 +15561,105 @@
   function browserToolActivityEnd(activity, response, inputAuthorized) {
     try { activity?.end(response, inputAuthorized === true); } catch {}
   }
+  // BRW-05 / BRW-07 requests EG-Desk chrome answers itself (no page actor): a
+  // site question for the person, a new Card bound to the same run, closing a
+  // Card this run opened, and a history move. D-B1/D-B2 are applied here again;
+  // the helper's copy of the rule is never trusted alone.
+  async function browserToolCardRequest(request, { key, card, authorized, requestId, receivedAtMs }) {
+    const clientThreadId = request.clientThreadId;
+    const timing = () => browserToolTiming({ receivedAtMs });
+    const policy = () => browserToolNavigationPolicy(clientThreadId);
+    const activityRequest = { ...request, action: { type: request.kind === 'history' ? `history-${request.historyAction}` : request.kind,
+      ...(request.kind === 'open-card' ? { url: request.url } : {}) } };
+    if (request.kind === 'allow-site') {
+      const site = typeof request.site === 'string' ? request.site.trim().toLowerCase() : '';
+      if (!site || site.length > 253 || !/^[\p{L}\p{N}.:\[\]-]+$/u.test(site)) throw new Error('Invalid Browser site request');
+      if (browserToolThreadSiteSet(clientThreadId).has(site)) return { requestId, status: 'site-allowed', site, navigationPolicy: policy(), timing: timing() };
+      const activity = browserToolActivityStart(card, activityRequest);
+      const answer = await card._browserControls.toolAskSite?.({ site, deadlineMs: request.deadlineMs });
+      if (browserToolRunBindings.get(key) !== authorized) throw new Error('Browser run was cancelled during the site question');
+      if (answer === 'allowed') {
+        browserToolThreadSiteSet(clientThreadId).add(site);
+        const grant = browserToolThreadGrants.get(browserToolGrantKey(clientThreadId, card.id));
+        if (grant) grant.lastUsedAt = Date.now();
+      }
+      const result = { requestId, status: answer === 'allowed' ? 'site-allowed' : answer === 'refused' ? 'site-refused' : 'site-pending',
+        site, navigationPolicy: policy(), timing: timing() };
+      browserToolActivityEnd(activity, result, false);
+      return result;
+    }
+    if (request.kind === 'history') {
+      if (!['back', 'forward', 'reload'].includes(request.historyAction) || !request.guard) throw new Error('Unsupported Browser history move');
+      const activity = browserToolActivityStart(card, activityRequest);
+      const receipt = await card._browserControls.toolHistory(authorized.binding, request.historyAction, request.guard,
+        { allowed: (to, from) => browserToolNavigationAllowed(clientThreadId, to, from) });
+      if (browserToolRunBindings.get(key) !== authorized) throw new Error('Browser run was cancelled after the history move; outcome is unknown');
+      const acted = { requestId, status: 'acted', receipt, timing: timing() };
+      browserToolActivityEnd(activity, acted, true);
+      return acted;
+    }
+    if (request.kind === 'close-card') {
+      // D-B2: only a Card this run opened; a person's Card is never closed here.
+      if (authorized.openedByAgent !== true) throw new Error('Only a Browser Card this run opened can be closed by the Agent');
+      revokeBrowserToolGrants({ cardId: card.id });
+      browserToolRunBindings.delete(key);
+      for (const [leaseId, lease] of browserToolActionLeases) if (lease.card === card) browserToolActionLeases.delete(leaseId);
+      browserToolCancelledRuns.set(key, request.deadlineMs);
+      const closed = card._deskWindowShell?.requestClose ? card._deskWindowShell.requestClose() : closeCanvasCard(card);
+      if (closed === false) throw new Error('Browser Card could not be closed');
+      return { requestId, status: 'card-closed', timing: timing() };
+    }
+    // open-card (D-B2): same profile, container and account as the source Card;
+    // the URL is judged from the source Card's current page; the new Card is
+    // bound to this run and gets the conversation's standing grant, marked as
+    // opened by the Agent. A popup a page opened or a person's Card never is.
+    if (!browserToolSafeNavigationUrl(request.url)) throw new Error('Browser Card URL must be an absolute http(s) URL without credentials');
+    const current = card._browserControls.toolBinding();
+    const decision = browserToolNavigationAllowed(clientThreadId, request.url, current.url);
+    if (!decision.allowed) throw new Error(`Browser Card URL is outside the allowed sites [${decision.reason}]`);
+    const runCards = [...browserToolRunBindings.keys()].filter(item => item.startsWith(`${request.runId}\u0000`)).length;
+    if (runCards >= 4) throw new Error('This run already has four Browser Cards');
+    const activity = browserToolActivityStart(card, activityRequest);
+    const opened = spawnBrowserCard(request.url, { openMode: 'new', sourceRef: card._sourceRef, opener: card,
+      ...(card._browserIdentity ? { browserIdentity: cloneJson(card._browserIdentity) } : {}) });
+    if (!opened?._browserControls?.toolBinding) throw new Error('Browser Card could not be opened');
+    opened.dataset.egdAgentOpened = 'true';
+    opened._browserControls.toolSetNavigationGuard?.({ fromUrl: current.url,
+      allowed: (to, from) => browserToolNavigationAllowed(clientThreadId, to, from) });
+    const closeOpened = () => { try { opened._deskWindowShell?.requestClose?.(); } catch {} };
+    await opened._browserControls.toolWhenReady?.(request.deadlineMs);
+    let binding;
+    try { binding = opened._browserControls.toolBinding(); } catch (error) { closeOpened(); throw error; }
+    if (['profileId', 'accountId', 'userContextId', 'engineAccountKey', 'authorityEpoch'].some(field => binding[field] !== current[field])) {
+      closeOpened();
+      throw new Error('Opened Browser Card did not keep the same profile, container and account');
+    }
+    if (browserToolRunBindings.get(key) !== authorized) { closeOpened(); throw new Error('Browser run was cancelled while opening a Card'); }
+    browserToolRunBindings.set(`${request.runId}\u0000${binding.cardId}\u0000${binding.cardEpoch}`, { binding,
+      permission: authorized.permission, clientThreadId, selectionToken: null, openedByAgent: true, openedFrom: card.id });
+    const sourceGrant = browserToolThreadGrants.get(browserToolGrantKey(clientThreadId, card.id));
+    const localThreadId = sourceGrant?.localThreadId ?? browserToolUserSelections.get(authorized.selectionToken)?.localThreadId ?? null;
+    const grant = BrowserGrant.browserGrantRecord({ clientThreadId, localThreadId, cardId: binding.cardId,
+      current: { ...binding, url: request.url }, permission: authorized.permission, siteForHost: browserToolSiteForHost,
+      openedByAgent: true, openedFrom: card.id });
+    if (grant) browserToolThreadGrants.set(browserToolGrantKey(clientThreadId, binding.cardId), grant);
+    // The new Card also becomes a chip of the conversation, so the next turn can
+    // keep working in it under the same grant (D-B3) without a new pick.
+    if (localThreadId && authorized.permission === 'interact') {
+      try {
+        const source = chatInputSourceForView(opened);
+        const selectedSource = source?.kind === 'browser' ? registerBrowserToolSelection(localThreadId, source, 'interact') : null;
+        if (selectedSource) {
+          const next = browserToolThreadGrants.get(browserToolGrantKey(clientThreadId, binding.cardId));
+          if (next) Object.assign(next, { openedByAgent: true, openedFrom: card.id });
+          state.codexBridge.addInputSources(localThreadId, [selectedSource]);
+        }
+      } catch (error) { console.warn(TAG, 'agent-opened Browser Card chip failed', error); }
+    }
+    const result = { requestId, status: 'card-opened', binding, navigationPolicy: policy(), timing: timing() };
+    browserToolActivityEnd(activity, result, false);
+    return result;
+  }
   async function browserToolDispatchOnce(request, receivedAtMs = browserToolClock()) {
     const requestId = request?.requestId;
     let diagnosticPhase = 'preflight';
@@ -15596,7 +15782,10 @@
           selectedByUser.usedRunId = request.runId;
           browserToolRunBindings.set(key, { binding: current, permission: selection.permission,
             clientThreadId: request.clientThreadId, selectionToken: selection.selectionToken });
-          return { requestId, status: 'bound', binding: current, timing: browserToolTiming({ receivedAtMs }) };
+          const grant = browserToolThreadGrants.get(browserToolGrantKey(request.clientThreadId, card.id));
+          if (grant) grant.lastUsedAt = Date.now();
+          return { requestId, status: 'bound', binding: current,
+            navigationPolicy: browserToolNavigationPolicy(request.clientThreadId), timing: browserToolTiming({ receivedAtMs }) };
         } finally {
           if (browserToolPendingBindings.get(key) === pending) browserToolPendingBindings.delete(key);
         }
@@ -15636,9 +15825,14 @@
         const snapshot = await card._browserControls.toolObserve(authorized.binding, request.options || {},
           { deadlineMs: request.deadlineMs });
         if (browserToolRunBindings.get(key) !== authorized) throw new Error('Browser run was cancelled during observation');
-        const observed = { requestId, status: 'observed', snapshot, timing: browserToolTiming({ receivedAtMs }) };
+        const observed = { requestId, status: 'observed', snapshot,
+          navigationPolicy: browserToolNavigationPolicy(request.clientThreadId), timing: browserToolTiming({ receivedAtMs }) };
         browserToolActivityEnd(activity, observed, false);
         return observed;
+      }
+      if (['allow-site', 'open-card', 'close-card', 'history'].includes(request.kind)) {
+        if (authorized.permission !== 'interact') throw new Error('Browser interaction was not selected');
+        return await browserToolCardRequest(request, { key, card, authorized, requestId, receivedAtMs });
       }
       if (request.kind !== 'act' || authorized.permission !== 'interact') throw new Error('Browser interaction was not selected');
       if (browserToolRemainingBudget(request, receivedAtMs) <= 0) throw new Error('Browser action budget expired before dispatch');
@@ -15681,11 +15875,24 @@
       try {
         try { actionLease.projection = card._browserControls.toolPrepareAgentProjection?.(actionLease); } catch {}
         diagnosticPhase = 'actor';
-        ({ timing: actorTiming = null, dialog: actorDialog = null, ...receipt } = await card._browserControls.toolAct(authorized.binding,
-          request.action, request.guard, { leaseId, requestId, deadlineMs: request.deadlineMs,
-            ...(request.callId ? { callId: request.callId } : {}),
-            ...(request.budgetMs != null ? { budgetMs: request.budgetMs } : {}),
-            sentAtMs: request.sentAtMs ?? receivedAtMs }) || {});
+        // D-B1 for links and redirects: whatever a navigate, click or key press
+        // makes the page commit next is judged by the Card's commit guard.
+        if (['navigate', 'click', 'press'].includes(request.action.type)) {
+          try { card._browserControls.toolSetNavigationGuard?.({ fromUrl: request.guard.url,
+            allowed: (to, from) => browserToolNavigationAllowed(request.clientThreadId, to, from) }); } catch {}
+        }
+        // BRW-05: an allowed other site is loaded by EG-Desk chrome; the page
+        // actor keeps its same-site rule. Same observed-document guard, same
+        // D-B1 check here again, chrome route in the receipt.
+        const chromeNavigate = request.action.type === 'navigate' && request.guard.navigationScope === 'allowed-site';
+        ({ timing: actorTiming = null, dialog: actorDialog = null, ...receipt } = await (chromeNavigate
+          ? card._browserControls.toolNavigateChrome(authorized.binding, request.action, request.guard,
+            { allowed: (to, from) => browserToolNavigationAllowed(request.clientThreadId, to, from) })
+          : card._browserControls.toolAct(authorized.binding,
+            request.action, request.guard, { leaseId, requestId, deadlineMs: request.deadlineMs,
+              ...(request.callId ? { callId: request.callId } : {}),
+              ...(request.budgetMs != null ? { budgetMs: request.budgetMs } : {}),
+              sentAtMs: request.sentAtMs ?? receivedAtMs })) || {});
       }
       finally {
         try { actionLease.projection?.clear(); } catch {}
@@ -16626,6 +16833,8 @@
     if (options.fixedLogicalHeight) card._fixedLogicalHeight = options.fixedLogicalHeight;
     let xulBrowser = null;
     let unregisterBrowserAuthorizer = null;
+    // BRW-05 (D-B1 commit layer): set while an Agent-started load is landing.
+    let agentNavigationGuard = null;
     let browserLoadTimer = 0;
     let browserMenuPanel = null;
     const agentRefByNode = new WeakMap();
@@ -17962,6 +18171,7 @@
     };
     const navigateBrowser = (rawUrl, navOptions = {}) => {
       if (!requireBrowserContext()) return null;
+      agentNavigationGuard = null;
       agentProjection.invalidate();
       const url = normalizeBrowserNavigationUri(rawUrl || browserState.uri || browserState.homeUrl);
       browserState.uri = url;
@@ -17978,6 +18188,7 @@
     };
     const goBrowserBack = () => {
       if (!requireBrowserContext()) return false;
+      agentNavigationGuard = null;
       agentProjection.invalidate();
       if (browserState.historyIndex > 0) {
         browserState.historyIndex -= 1;
@@ -18005,6 +18216,7 @@
     };
     const goBrowserForward = () => {
       if (!requireBrowserContext()) return false;
+      agentNavigationGuard = null;
       agentProjection.invalidate();
       if (browserState.historyIndex < browserState.history.length - 1) {
         browserState.historyIndex += 1;
@@ -18032,6 +18244,7 @@
     };
     const reloadBrowser = () => {
       if (typeof requireBrowserContext === 'function' && !requireBrowserContext()) return false;
+      agentNavigationGuard = null;
       try {
         agentProjection.invalidate();
         setBrowserLoading(true);
@@ -18094,7 +18307,7 @@
       state.codexBridge.addInputSources(threadId,
         [selectedSource || { ...source, selectedByUser: true, browserToolPermission: 'observe' }]);
       showAgentActivity(permission === 'interact'
-        ? '이번 Chat 조작 대상으로 선택됨' : '이번 Chat 읽기 자료로 선택됨');
+        ? '이 대화의 조작 대상으로 허용됨' : '이번 Chat 읽기 자료로 선택됨');
     };
     // `regrant`: opened by [돌려주기], it names and focuses '다시 조작 허용' and grants nothing itself.
     const showBrowserMenu = (anchor = menuButton, { focusFirst = false, regrant = false } = {}) => {
@@ -18131,14 +18344,22 @@
         },
       }, label);
       // An explicit pick here is 대표님 handing the Card back, so it also ends a hold.
-      const interactItem = item(regrant ? '다시 조작 허용' : 'Chat 조작 허용', `이 Browser만 이번 Chat 실행의 관찰·조작 대상으로 선택합니다. 사이트 계정: ${card._sourceRef?.accountId || '미확인'}(선택 메타데이터, 로그인 증거 아님). 외부 효과는 별도 확인이 필요합니다.`,
+      const interactItem = item(regrant ? '다시 조작 허용' : 'Chat 조작 허용', `이 Browser를 이 대화의 관찰·조작 대상으로 허용합니다. 허용은 같은 대화 동안 이어지고, 카드·계정·사이트가 바뀌거나 일시중지·해제·30분 유휴면 끝납니다. 사이트 계정: ${card._sourceRef?.accountId || '미확인'}(선택 메타데이터, 로그인 증거 아님). 외부 효과는 별도 확인이 필요합니다.`,
         () => { endAgentHold(); return selectBrowserForChat('interact'); });
+      // BRW-11: the standing grant this conversation holds on this Card, if any.
+      let activeClientThreadId = null;
+      try { const thread = getCodexThreadById(state.codex, state.codex.activeThreadId); activeClientThreadId = thread ? ChatState.clientThreadBinding(thread) : null; } catch {}
+      const standingGrant = browserToolGrantFor(activeClientThreadId, card.id);
+      const revokeItem = standingGrant ? item('조작 허용 해제', '이 대화에서 이 Browser에 준 조작 허용을 지금 끝냅니다. 다음 턴부터 Agent는 다시 허락을 받아야 합니다.',
+        () => { revokeBrowserToolGrants({ clientThreadId: activeClientThreadId, cardId: card.id }); showAgentActivity('이 대화의 조작 허용을 끝냄'); },
+        { testid: 'browser-grant-revoke' }) : null;
       const items = [
         item('복제', '현재 URL을 새 Desk Window로 열기', safeDuplicateBrowser),
         item('URL 복사', browserState.uri, () => copyTextToClipboard(browserState.uri)),
         item('Chat에 읽기 첨부', '현재 Browser의 읽기 자료만 다음 Chat에 선택합니다. 기존 조작 허용이 있으면 읽기 전용으로 바뀝니다.',
           () => { endAgentHold(); return selectBrowserForChat('observe'); }),
         interactItem,
+        ...(revokeItem ? [revokeItem] : []),
         item('홈', browserState.homeUrl, () => navigateBrowser(browserState.homeUrl)),
         item(browserState.loading ? '중지' : '새로고침', browserState.loading ? '로드 중지' : '현재 페이지 새로고침', () => (browserState.loading ? stopBrowser() : reloadBrowser())),
         item(isCardFullscreen(card) ? '창 복귀' : '최대화', 'Desk Window 최대화 전환', () => toggleCardFullscreen(card)),
@@ -18646,6 +18867,98 @@
       }
       return reply(answer);
     };
+    // D-B1 commit layer (BRW-05): while an Agent-started navigation, history
+    // move or new Card is landing, every committed top-level document must be on
+    // the current or an allowed site, or it is replaced with a blank page. A
+    // person's own navigation clears the guard first.
+    const AGENT_NAVIGATION_GUARD_MS = 20000;
+    const setAgentNavigationGuard = ({ fromUrl, allowed }) => {
+      agentNavigationGuard = typeof allowed === 'function'
+        ? { fromUrl: fromUrl || browserState.uri, allowed, until: Date.now() + AGENT_NAVIGATION_GUARD_MS } : null;
+    };
+    const enforceAgentNavigationGuard = (spec) => {
+      const guard = agentNavigationGuard;
+      if (!guard || !spec || spec === 'about:blank') return;
+      if (Date.now() > guard.until) { agentNavigationGuard = null; return; }
+      let decision;
+      try { decision = guard.allowed(spec, guard.fromUrl); } catch { decision = { allowed: false, reason: 'invalid-url' }; }
+      if (decision?.allowed) return;
+      agentNavigationGuard = null;
+      try { xulBrowser.stop?.(); } catch {}
+      loadBrowserUri('about:blank');
+      showAgentActivity('허용한 사이트 밖 주소라 빈 페이지로 바꿈');
+      console.warn(TAG, 'agent navigation blocked at commit', card.id, decision?.reason || 'blocked');
+    };
+    const assertGuardedDocumentCurrent = (guard, { compareUrl = true } = {}) => {
+      const context = xulBrowser.browsingContext;
+      const windowGlobal = context?.currentWindowGlobal;
+      if (!windowGlobal) throw new Error('Browser document is unavailable');
+      let currentUrl = browserState.uri;
+      try { currentUrl = windowGlobal.documentURI?.spec || currentUrl; } catch {}
+      if ((Object.hasOwn(guard, 'innerWindowId') && guard.innerWindowId !== windowGlobal.innerWindowId) ||
+          (Object.hasOwn(guard, 'browsingContextId') && guard.browsingContextId !== context.id) ||
+          (compareUrl && typeof guard.url === 'string' && guard.url !== currentUrl && guard.url !== browserState.uri)) {
+        throw Object.assign(new Error('Browser observation is stale; observe the current page again'),
+          { browserToolActor: { dispatchPhase: 'not-dispatched' } });
+      }
+    };
+    // BRW-05: an allowed other site is loaded by EG-Desk chrome (the page actor
+    // stays same-site). The observed document must still be current and the
+    // rule is applied here again; the page is read back only by the next observation.
+    const browserToolNavigateChrome = async (expected, action, guard, { allowed } = {}) => {
+      assertBrowserToolBinding(expected);
+      assertGuardedDocumentCurrent(guard);
+      const decision = typeof allowed === 'function' ? allowed(action.url, guard.url) : { allowed: false, reason: 'no-base' };
+      if (!decision?.allowed) {
+        throw Object.assign(new Error(`Browser navigation is outside the allowed sites [${decision?.reason || 'blocked'}]`),
+          { browserToolActor: { dispatchPhase: 'not-dispatched' } });
+      }
+      showAgentActivity('Agent가 허용한 사이트로 이동');
+      const snapshot = navigateBrowser(action.url, { markDirty: true });
+      setAgentNavigationGuard({ fromUrl: guard.url, allowed });
+      return { dispatchReceipt: { actor: 'chrome', inputRoute: 'chrome-load-uri', eventDispatched: snapshot !== null,
+        documentStillCurrent: false, navigationScope: 'allowed-site' }, after: null, observation: null };
+    };
+    // BRW-07: back, forward or reload on this Card's own history, from the
+    // observed document; where it lands is judged by the commit guard.
+    const browserToolHistory = async (expected, historyAction, guard, { allowed } = {}) => {
+      assertBrowserToolBinding(expected);
+      assertGuardedDocumentCurrent(guard, { compareUrl: false });
+      showAgentActivity(historyAction === 'reload' ? 'Agent가 새로고침' : historyAction === 'back' ? 'Agent가 뒤로 이동' : 'Agent가 앞으로 이동');
+      const moved = historyAction === 'back' ? goBrowserBack() : historyAction === 'forward' ? goBrowserForward() : reloadBrowser();
+      setAgentNavigationGuard({ fromUrl: guard.url, allowed });
+      return { dispatchReceipt: { actor: 'chrome', inputRoute: 'chrome-history', historyAction,
+        eventDispatched: moved !== false && moved !== null, documentStillCurrent: false }, after: null, observation: null };
+    };
+    // BRW-05 (D-B1): the person's answer to "may this conversation also open
+    // <site>?", asked on the Card the Agent works in. No answer before the
+    // deadline is 'pending'; nothing is remembered beyond this conversation.
+    let siteAskPanel = null;
+    const browserToolAskSite = ({ site, deadlineMs }) => new Promise(resolve => {
+      if (siteAskPanel) { try { siteAskPanel.remove(); } catch {} siteAskPanel = null; }
+      let settled = false, timer = 0;
+      const finish = (answer) => {
+        if (settled) return;
+        settled = true;
+        if (timer) window.clearTimeout(timer);
+        try { panel.remove(); } catch {}
+        if (siteAskPanel === panel) siteAskPanel = null;
+        resolve(answer);
+      };
+      const button = (label, answer, testid, primary) => el('button', { type: 'button',
+        class: primary ? 'egd-browser-site-ask-allow' : 'egd-browser-site-ask-refuse', data: { testid },
+        onclick: (ev) => { ev.stopPropagation(); finish(answer); } }, label);
+      const panel = el('div', { class: 'egd-browser-site-ask egd-edge egd-frosted', role: 'dialog', 'aria-live': 'polite',
+        'aria-label': '사이트 허용 요청', data: { testid: 'browser-site-ask' } },
+      el('div', { class: 'egd-browser-site-ask-text' }, `Agent가 이 대화에서 ${site} 사이트도 열려고 합니다. 허용할까요?`),
+      el('div', { class: 'egd-browser-site-ask-actions' },
+        button('이 대화에서 허용', 'allowed', 'browser-site-allow', true),
+        button('거절', 'refused', 'browser-site-refuse', false)));
+      siteAskPanel = panel;
+      wrap.appendChild(panel);
+      try { panel.querySelector('.egd-browser-site-ask-allow')?.focus(); } catch {}
+      timer = window.setTimeout(() => finish('pending'), Math.max(0, (Number.isFinite(deadlineMs) ? deadlineMs : Date.now()) - Date.now() - 500));
+    });
     card._browserControls = {
       getState: () => getBrowserStateSnapshot(),
       sync: () => syncBrowserStateFromBrowser({ markDirtyOnLocationChange: false }),
@@ -18677,6 +18990,10 @@
         innerWindowIds: [...lastToolObserve.innerWindowIds] },
       toolAct: browserToolAct,
       toolReconcile: browserToolReconcile,
+      toolNavigateChrome: browserToolNavigateChrome,
+      toolHistory: browserToolHistory,
+      toolAskSite: browserToolAskSite,
+      toolSetNavigationGuard: setAgentNavigationGuard,
       toolPrepareAgentProjection: agentProjection.prepare,
       toolActivity: startAgentToolActivity,
       toolUserHold: agentUserHold,
@@ -18724,6 +19041,7 @@
       onLocationChange(webProgress, _request, location) {
         if (webProgress && webProgress.isTopLevel === false) return;
         reportBrowserLocation(location?.spec || '');
+        enforceAgentNavigationGuard(location?.spec || '');
       },
       onStateChange() {}, onProgressChange() {}, onStatusChange() {}, onSecurityChange() {}, onContentBlockingEvent() {},
     };

@@ -90,7 +90,7 @@ test('only explicitly selected Browser sources expose tools; read-only never gra
   assert.throws(() => f.service.prepare({ selectedSources: [{ ...source('observe'), browserToolSelection: null }] }),
     { code: 'INVALID_BROWSER_SELECTION' })
   const prepared = f.service.prepare({ selectedSources: [source('observe')] })
-  assert.deepEqual(f.service.specs(prepared).map(item => item.name), ['egdesk_browser_observe', 'egdesk_browser_wait_text', 'egdesk_browser_screenshot'],
+  assert.deepEqual(f.service.specs(prepared).map(item => item.name), ['egdesk_browser_observe', 'egdesk_browser_wait_text', 'egdesk_browser_list_cards', 'egdesk_browser_screenshot'],
     'an observe grant offers only the read tools')
   await f.service.bind(run, prepared)
   const observed = await f.service.dispatch(run, { tool: 'egdesk_browser_observe', arguments: { cardId: 'browser-1' } })
@@ -101,13 +101,13 @@ test('only explicitly selected Browser sources expose tools; read-only never gra
     postcondition: { kind: 'visible-text', value: 'Count: 1' },
   } }), { code: 'BROWSER_INTERACTION_NOT_GRANTED' })
   assert.equal(f.actionCalls, 0)
-  assert.equal(BROWSER_TOOL_SPECS.length, 9)
+  assert.equal(BROWSER_TOOL_SPECS.length, 14)
 })
 
 test('fresh observed target dispatches once and returns DOM post-observation, never external success', async () => {
   const f = fixture()
   const prepared = f.service.prepare({ selectedSources: [source()] })
-  assert.equal(f.service.specs(prepared).length, 9)
+  assert.equal(f.service.specs(prepared).length, 14)
   await f.service.bind(run, prepared)
   const observed = await f.service.dispatch(run, { tool: 'egdesk_browser_observe', arguments: { cardId: 'browser-1' } })
   const args = { cardId: 'browser-1', observationId: observed.observationId, expectedRevision: 3,
@@ -1253,13 +1253,16 @@ test('Gecko innerWindowId and browsingContextId pass from the observation into t
 import { createHash } from 'node:crypto'
 
 test('tool classes are exported for the chat runtime; wait_text is appended and existing schemas are untouched', () => {
-  assert.deepEqual(BROWSER_READ_TOOL_NAMES, ['egdesk_browser_observe', 'egdesk_browser_wait_text', 'egdesk_browser_screenshot'])
+  assert.deepEqual(BROWSER_READ_TOOL_NAMES, ['egdesk_browser_observe', 'egdesk_browser_wait_text', 'egdesk_browser_list_cards', 'egdesk_browser_screenshot'])
   assert.deepEqual(BROWSER_INTERACTION_TOOL_NAMES, ['egdesk_browser_navigate', 'egdesk_browser_click', 'egdesk_browser_fill',
-    'egdesk_browser_scroll', 'egdesk_browser_press', 'egdesk_browser_wait'])
+    'egdesk_browser_scroll', 'egdesk_browser_press', 'egdesk_browser_wait',
+    'egdesk_browser_request_site', 'egdesk_browser_open_card', 'egdesk_browser_close_card', 'egdesk_browser_history'])
   assert.throws(() => BROWSER_READ_TOOL_NAMES.push('x'), TypeError, 'frozen for importers')
   const names = BROWSER_TOOL_SPECS.map(item => item.name)
   assert.deepEqual(names, ['egdesk_browser_observe', 'egdesk_browser_navigate', 'egdesk_browser_click', 'egdesk_browser_fill',
-    'egdesk_browser_scroll', 'egdesk_browser_press', 'egdesk_browser_wait', 'egdesk_browser_wait_text', 'egdesk_browser_screenshot'])
+    'egdesk_browser_scroll', 'egdesk_browser_press', 'egdesk_browser_wait', 'egdesk_browser_wait_text',
+    'egdesk_browser_list_cards', 'egdesk_browser_request_site', 'egdesk_browser_open_card', 'egdesk_browser_close_card', 'egdesk_browser_history',
+    'egdesk_browser_screenshot'])
   assert.deepEqual([...BROWSER_READ_TOOL_NAMES, ...BROWSER_INTERACTION_TOOL_NAMES].sort(), [...names].sort(),
     'every Browser tool is in exactly one class')
   // sha256 of [name, inputSchema] for the seven tools at d7aac51: native
@@ -1267,7 +1270,7 @@ test('tool classes are exported for the chat runtime; wait_text is appended and 
   const digest = createHash('sha256').update(JSON.stringify(BROWSER_TOOL_SPECS.slice(0, 7)
     .map(item => [item.name, item.inputSchema]))).digest('hex')
   assert.equal(digest, '9f92c38ddae6e6c19126d09675001535e8bfb2e1cb7abdeefc7e5165a9c1b684')
-  const waitText = BROWSER_TOOL_SPECS.find(item => item.name === 'egdesk_browser_wait_text')
+  const waitText = BROWSER_TOOL_SPECS[7]
   // BRW-09: appended after wait_text; read-only, cardId only.
   const screenshot = BROWSER_TOOL_SPECS.find(item => item.name === 'egdesk_browser_screenshot')
   assert.ok(BROWSER_TOOL_SPECS.indexOf(screenshot) > BROWSER_TOOL_SPECS.indexOf(waitText))
@@ -1517,4 +1520,153 @@ test('the actor receipt stamp joins the same-clock record when the UI forwards i
     performEnterMs: 1002.75, performExitMs: 1002.9, performCallsBefore: 0, performCallsAfter: 1 } }))
   const click = await f.dispatch('egdesk_browser_click', clickArgs(seen))
   assert.equal(click.timing.actorReceivedAtMs, 1002.65)
+})
+
+// BRW-05 / BRW-07 / BRW-11: a UI that answers bind with the conversation's
+// navigation policy, opens and closes Cards, moves history and answers a site
+// question. Every request is recorded so the tests can check what left.
+function cardsFixture({ sites = [], answerSite = 'site-allowed' } = {}) {
+  const policy = () => ({ scope: 'same-site', allow: sites.flatMap(site => [site, `*.${site}`]), block: [], allowDowngrade: false })
+  const identity = { profileId: 'firefox-default', accountId: 'fixture-account', userContextId: 0,
+    engineAccountKey: 'codex:chatgpt:fixture@example.test', authorityEpoch: 0 }
+  const pages = new Map([['browser-1', guardedSnapshot()]])
+  const requests = []
+  let openedSeq = 1, siteAnswer = answerSite, openedIdentity = identity
+  const sendToUi = async request => {
+    requests.push(request)
+    const reply = extra => ({ requestId: request.requestId, ...extra })
+    if (request.kind === 'bind') return reply({ status: 'bound', navigationPolicy: policy(), binding: {
+      cardId: 'browser-1', cardEpoch: 'card-epoch-1', url: 'https://example.test/local', ...identity } })
+    if (request.kind === 'cancel') return reply({ status: 'cancelled' })
+    if (request.kind === 'observe') return reply({ status: 'observed', navigationPolicy: policy(), snapshot: { ...pages.get(request.cardId), cardId: request.cardId } })
+    if (request.kind === 'allow-site') {
+      if (siteAnswer === 'timeout') throw Object.assign(new Error('no answer'), { code: 'BROWSER_UI_TIMEOUT' })
+      if (siteAnswer === 'site-allowed') sites.push(request.site)
+      return reply({ status: siteAnswer, navigationPolicy: policy() })
+    }
+    if (request.kind === 'open-card') {
+      const cardId = `browser-${++openedSeq}`
+      pages.set(cardId, guardedSnapshot({ documentId: `document-${cardId}`, url: request.url }))
+      return reply({ status: 'card-opened', navigationPolicy: policy(), binding: { cardId, cardEpoch: `card-epoch-${openedSeq}`, url: request.url, ...openedIdentity } })
+    }
+    if (request.kind === 'close-card') { pages.delete(request.cardId); return reply({ status: 'card-closed' }) }
+    if (request.kind === 'history') return reply({ status: 'acted', receipt: { dispatchReceipt: { actor: 'chrome', inputRoute: 'chrome-history',
+      historyAction: request.historyAction, eventDispatched: true, documentStillCurrent: false }, after: null, observation: null } })
+    if (request.kind === 'act' && request.action.type === 'navigate' && request.guard.navigationScope === 'allowed-site') {
+      pages.set(request.cardId, guardedSnapshot({ documentId: 'document-moved', url: request.action.url }))
+      return reply({ status: 'acted', receipt: { dispatchReceipt: { actor: 'chrome', inputRoute: 'chrome-load-uri',
+        eventDispatched: true, documentStillCurrent: false }, after: null, observation: null } })
+    }
+    throw new Error(`unexpected UI request ${request.kind}`)
+  }
+  const service = createBrowserToolService({ sendToUi, getOwnerKey: () => 'engine-account-1' })
+  let sequence = 0
+  const dispatch = (tool, args, callId = `cards-call-${++sequence}`) => service.dispatch(run, { tool, callId, arguments: args })
+  return { service, requests, dispatch, pages,
+    of: kind => requests.filter(request => request.kind === kind),
+    observe: (cardId = 'browser-1') => dispatch('egdesk_browser_observe', { cardId }),
+    setSiteAnswer(value) { siteAnswer = value }, setOpenedIdentity(value) { openedIdentity = value },
+    bind: () => service.bind(run, service.prepare({ selectedSources: [source()] })) }
+}
+
+test('D-B1: navigate reaches a site this conversation allowed through the chrome route and refuses others with host and reason', async () => {
+  const f = cardsFixture({ sites: ['pay.test'] })
+  await f.bind()
+  const seen = await f.observe()
+  const navigate = (observed, url) => f.dispatch('egdesk_browser_navigate', { cardId: 'browser-1',
+    observationId: observed.observationId, expectedRevision: observed.snapshot.revision, url, postcondition: { kind: 'url', value: url } })
+  await assert.rejects(navigate(seen, 'https://evil.test/'), error => error.code === 'BROWSER_NAVIGATE_OUT_OF_SCOPE' &&
+    error.navigation.reason === 'outside-site' && error.navigation.host === 'evil.test')
+  await assert.rejects(navigate(seen, 'http://pay.test/'), error => error.navigation.reason === 'insecure-downgrade', 'an allowed site never allows a downgrade')
+  assert.equal(f.of('act').length, 0)
+  const moved = await navigate(seen, 'https://checkout.pay.test/start')
+  assert.equal(moved.status, 'postcondition-unverified', 'the chrome route reports dispatch, not the page')
+  assert.equal(moved.navigationScope, 'allowed-site')
+  assert.equal(moved.pageLoadVerified, false)
+  const [act] = f.of('act')
+  assert.equal(act.guard.navigationScope, 'allowed-site')
+  assert.deepEqual(act.guard.allowedSites, ['pay.test', '*.pay.test'])
+  await assert.rejects(f.dispatch('egdesk_browser_click', { cardId: 'browser-1', observationId: seen.observationId, expectedRevision: 3,
+    ref: 'el_1', expectedTarget: seen.snapshot.interactiveElements[0], postcondition: { kind: 'visible-text', value: 'x' } }),
+  { code: 'BROWSER_OUTCOME_UNKNOWN' }, 'the Card stays locked until the new document is observed')
+  const after = await f.observe()
+  assert.equal(after.navigationPostconditionReobserved, true, 'the new document on the allowed site resolves the transition')
+  assert.equal(after.snapshot.url, 'https://checkout.pay.test/start')
+  // From the allowed site the current site is now pay.test; the original site stays reachable only as an allowed one.
+  await assert.rejects(navigate(after, 'https://example.test/back'), error => error.navigation.reason === 'outside-site')
+})
+
+test('request_site asks the person once on a long budget; the answer on the Card changes what the run may open', async () => {
+  const f = cardsFixture()
+  await f.bind()
+  const seen = await f.observe()
+  const navigate = (observed, url) => f.dispatch('egdesk_browser_navigate', { cardId: 'browser-1',
+    observationId: observed.observationId, expectedRevision: observed.snapshot.revision, url, postcondition: { kind: 'url', value: url } })
+  await assert.rejects(navigate(seen, 'https://other.test/'), { code: 'BROWSER_NAVIGATE_OUT_OF_SCOPE' })
+  const allowed = await f.dispatch('egdesk_browser_request_site', { cardId: 'browser-1', site: 'https://www.other.test/some/path?q=1' })
+  assert.equal(allowed.status, 'site-allowed')
+  assert.equal(allowed.site, 'other.test', 'the registrable domain, never the path')
+  const [ask] = f.of('allow-site')
+  assert.equal(ask.budgetMs, 55000)
+  assert.deepEqual(ask.patterns, ['other.test', '*.other.test'])
+  assert.equal(ask.site, 'other.test')
+  const moved = await navigate(seen, 'https://other.test/')
+  assert.equal(moved.navigationScope, 'allowed-site')
+  f.setSiteAnswer('site-refused')
+  const refused = await f.dispatch('egdesk_browser_request_site', { cardId: 'browser-1', site: 'third.test' })
+  assert.equal(refused.status, 'site-refused')
+  await assert.rejects(f.dispatch('egdesk_browser_request_site', { cardId: 'browser-1', site: 'third.test' }),
+    { code: 'BROWSER_NAVIGATE_OUT_OF_SCOPE' }, 'a refused site is not asked again in the same run')
+  f.setSiteAnswer('timeout')
+  const pending = await f.dispatch('egdesk_browser_request_site', { cardId: 'browser-1', site: 'slow.test' })
+  assert.equal(pending.status, 'site-pending')
+  await assert.rejects(f.dispatch('egdesk_browser_request_site', { cardId: 'browser-1', site: 'javascript:alert(1)' }), { code: 'INVALID_BROWSER_TOOL' })
+  assert.equal(f.of('allow-site').length, 3)
+})
+
+test('D-B2: open_card binds a Card with the same identity under this run; list_cards shows it; close_card closes only that Card', async () => {
+  const f = cardsFixture()
+  await f.bind()
+  await f.observe()
+  await assert.rejects(f.dispatch('egdesk_browser_open_card', { cardId: 'browser-1', url: 'https://evil.test/' }), { code: 'BROWSER_NAVIGATE_OUT_OF_SCOPE' })
+  const opened = await f.dispatch('egdesk_browser_open_card', { cardId: 'browser-1', url: 'https://www.example.test/compare' })
+  assert.equal(opened.status, 'card-opened')
+  assert.equal(opened.cardId, 'browser-2')
+  assert.equal(opened.openedFrom, 'browser-1')
+  assert.equal(opened.permission, 'interact')
+  const [open] = f.of('open-card')
+  assert.equal(open.permission, 'interact')
+  assert.equal(open.navigationScope, 'same-site')
+  const listed = await f.dispatch('egdesk_browser_list_cards', { cardId: 'browser-2' })
+  assert.deepEqual(listed.cards.map(card => [card.cardId, card.openedByAgent]), [['browser-1', false], ['browser-2', true]])
+  const seen2 = await f.observe('browser-2')
+  assert.equal(seen2.snapshot.url, 'https://www.example.test/compare', 'the new Card is observed under its own cardId')
+  await assert.rejects(f.dispatch('egdesk_browser_close_card', { cardId: 'browser-1' }), { code: 'BROWSER_CARD_NOT_AGENT_OPENED' })
+  f.setOpenedIdentity({ profileId: 'firefox-default', accountId: 'someone-else', userContextId: 0, engineAccountKey: 'codex:chatgpt:fixture@example.test', authorityEpoch: 0 })
+  await assert.rejects(f.dispatch('egdesk_browser_open_card', { cardId: 'browser-1', url: 'https://example.test/x' }), { code: 'BROWSER_BINDING_STALE' },
+    'a Card bound to another account is never adopted')
+  const closed = await f.dispatch('egdesk_browser_close_card', { cardId: 'browser-2' })
+  assert.equal(closed.status, 'card-closed')
+  assert.deepEqual(closed.cards.map(card => card.cardId), ['browser-1'])
+  await assert.rejects(f.dispatch('egdesk_browser_observe', { cardId: 'browser-2' }), { code: 'BROWSER_CARD_NOT_SELECTED' })
+  assert.equal(f.of('close-card').length, 1)
+})
+
+test('history moves are dispatched by chrome from a fresh observation and spend it', async () => {
+  const f = cardsFixture()
+  await f.bind()
+  const seen = await f.observe()
+  const args = { cardId: 'browser-1', observationId: seen.observationId, expectedRevision: seen.snapshot.revision, action: 'back' }
+  const moved = await f.dispatch('egdesk_browser_history', args)
+  assert.equal(moved.status, 'history-dispatched')
+  assert.equal(moved.historyAction, 'back')
+  assert.equal(moved.pageLoadVerified, false)
+  const [request] = f.of('history')
+  assert.equal(request.guard.documentId, 'document-1')
+  assert.equal(request.historyAction, 'back')
+  await assert.rejects(f.dispatch('egdesk_browser_history', args), { code: 'BROWSER_OBSERVATION_STALE' })
+  await assert.rejects(f.dispatch('egdesk_browser_history', { ...args, action: 'home' }), { code: 'INVALID_BROWSER_TOOL' })
+  const again = await f.observe()
+  assert.equal((await f.dispatch('egdesk_browser_history', { ...args, observationId: again.observationId, action: 'reload' })).status, 'history-dispatched')
+  assert.equal(f.of('history').length, 2)
 })
