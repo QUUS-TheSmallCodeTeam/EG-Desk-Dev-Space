@@ -3283,6 +3283,23 @@
       el('summary', {}, '명령 정보'), ...rows) : null;
   }
 
+  // CODE-05 D-X2 stage 2. The Chat row hands over only the retained change
+  // rows; the File Card re-verifies the run origin (openVerifiedRunFile),
+  // re-reads each file and owns every revert through the D-X1 conditional write.
+  async function openAppliedChangeReview({ target, changes, readOrigin, isCurrent } = {}) {
+    const rows = Array.isArray(changes) ? changes.map(row => ({ ...row })) : [];
+    const kindOf = row => typeof row?.kind === 'string' ? row.kind : row?.kind?.type;
+    const first = rows.find(row => kindOf(row) !== 'delete' && typeof (row.movePath || row.path) === 'string');
+    if (!first || typeof isCurrent !== 'function') return { status: 'unavailable' };
+    const opened = await openVerifiedRunFile({ target, location: { path: first.movePath || first.path, line: 1 }, readOrigin, isCurrent });
+    if (opened?.status !== 'opened') return opened || { status: 'unavailable' };
+    const view = document.getElementById(opened.cardId)?._fileView;
+    if (typeof view?.showChangeReview !== 'function') return { status: 'unavailable' };
+    if (isCurrent(target) !== true) return { status: 'stale' };
+    await view.showChangeReview(rows);
+    return opened;
+  }
+
   // One account/binding scope per visible activity view. Only retained-output
   // and original-run read endpoints enter here; responses never emit Chat state.
   function createCodexActivityReadScope(threadId, epochScope, fetchJson, onInvalidate) {
@@ -3302,15 +3319,19 @@
         && ChatState.chatThreadEngineId(thread, state.codex) === engineId && ChatState.chatThreadEngineProfileId(thread, state.codex) === profileId
         && ChatState.clientThreadBinding(thread) === binding && thread.conversationId === conversationId;
     };
-    const read = async (endpoint, target, { signal } = {}) => {
+    // itemKind is fixed by the scope method, never by a caller's options bag:
+    // readOrigin serves exactly one command item; readChangeOrigin (CODE-05
+    // stage 2) exactly one COMPLETED file-change item of the same run.
+    const read = async (endpoint, target, { signal } = {}, itemKind = 'commandExecution') => {
       const identity = codexActivityDetailTarget(target, target?.itemId);
       const origin = endpoint === '/chat/run-project-origin';
-      const kind = origin || endpoint === '/chat/command-output' ? 'commandExecution' : 'fileChange';
+      const kind = endpoint === '/chat/command-output' || (origin && itemKind !== 'fileChange') ? 'commandExecution' : 'fileChange';
       const ownedItem = () => {
         const thread = getCodexThreadById(state.codex, threadId);
         const runs = identity ? codexRuns(thread).filter(run => run.conversationId === identity.conversationId && run.runId === identity.runId) : [];
         const run = runs.length === 1 ? runs[0] : null;
-        const items = (run?.activities || []).filter(activity => activity.id === identity.itemId && activity.kind === kind);
+        const items = (run?.activities || []).filter(activity => activity.id === identity.itemId && activity.kind === kind
+          && !(origin && kind === 'fileChange' && activity.status !== 'completed'));
         if (items.length === 1) return origin ? JSON.stringify([items[0].kind, items[0].status, items[0].detail ?? null]) : true;
         return !origin && kind === 'fileChange' && (run?.pendingApprovals || []).some(approval => approval.itemId === identity.itemId
           && approval.kind === kind && approval.status === 'pending' && !approval.stale && !approval.replyPending);
@@ -3340,7 +3361,8 @@
     return Object.freeze({ isCurrent,
       readCommandOutput: (target, options) => read('/chat/command-output', target, options),
       readRunChanges: target => read('/chat/run-changes', target),
-      readOrigin: (target, options) => read('/chat/run-project-origin', target, options),
+      readOrigin: (target, options) => read('/chat/run-project-origin', target, { signal: options?.signal }),
+      readChangeOrigin: (target, options) => read('/chat/run-project-origin', target, { signal: options?.signal }, 'fileChange'),
       dispose() { if (disposed) return; disposed = true; token.controller.abort(); epochScope.finish(token); },
     });
   }
@@ -3448,8 +3470,17 @@
         entry.reader = ChatChangeReview.createChatChangeReview({ document,
           fetchRunChanges: () => readScope.readRunChanges(target),
           isCurrent: candidate => current(entry, candidate),
+          ...(approval ? {} : {
+            readOrigin: async (candidate, options) => {
+              if (!current(entry, candidate)) throw new Error('이 변경 기록의 연결이 바뀌었습니다.');
+              const origin = await readScope.readChangeOrigin(candidate, options);
+              if (!current(entry, candidate)) throw new Error('이 변경 기록의 연결이 바뀌었습니다.');
+              return origin;
+            },
+            onReviewApplied: request => openAppliedChangeReview(request),
+          }),
         });
-        entry.node = approval ? entry.reader.renderApproval(target) : entry.reader.renderActivity(target);
+        entry.node = approval ? entry.reader.renderApproval(target) : entry.reader.renderActivity(target, { applied: activity.status === 'completed' });
         entry.node.dataset.testid = approval ? 'chat-approval-changes' : 'chat-activity-changes';
         if (approval) entry.node.dataset.approvalId = approvalId;
       }
