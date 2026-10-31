@@ -206,3 +206,141 @@ test('launcher rejects invalid ports before any profile mutation', t => {
   assert.match(result.stderr, /EGDESK_FIREFOX_MARIONETTE_PORT/);
   assert.deepEqual(fs.readdirSync(profile), [marker]);
 });
+
+// Runs the whole launcher against temporary folders only. A `node` shim on
+// PATH answers the two bridge questions, so the running :39218 bridge is never
+// contacted and no bridge is started, and hands every other launcher step
+// (profile guard, user.js writer, build hash) to this Node. Any other node
+// call fails the run. The fake Firefox only records its arguments.
+function launchWithFakeBridge(root, env) {
+  const quote = value => `'${value.replaceAll("'", `'\\''`)}'`;
+  const bin = path.join(root, 'fake-bin');
+  fs.mkdirSync(bin, { recursive: true, mode: 0o700 });
+  fs.writeFileSync(path.join(bin, 'node'), [
+    '#!/bin/sh',
+    'case "$1" in',
+    '  */helper/egdesk-ontology-http.mjs)',
+    '    case "$2" in',
+    '      --check-existing-bridge) echo compatible; exit 0 ;;',
+    '      --prepare-profile) exit 0 ;;',
+    '    esac ;;',
+    `  */scripts/validate-firefox-profile.mjs|*/helper/egdesk-bridge-build.mjs|-) exec ${quote(process.execPath)} "$@" ;;`,
+    'esac',
+    'echo "unexpected node call: $*" >&2',
+    'exit 97',
+    '',
+  ].join('\n'), { mode: 0o700 });
+  const argsFile = path.join(root, 'firefox-args');
+  fs.rmSync(argsFile, { force: true });
+  const firefox = path.join(root, 'fake-firefox');
+  fs.writeFileSync(firefox, `#!/bin/sh\nprintf '%s\\n' "$@" > ${quote(argsFile)}\n`, { mode: 0o700 });
+  const result = run('/bin/bash', [launcher, '--normal', 'about:blank'], {
+    PATH: `${bin}${path.delimiter}${process.env.PATH}`,
+    EGDESK_FIREFOX_BIN: firefox,
+    ...env,
+  });
+  const args = fs.existsSync(argsFile) ? fs.readFileSync(argsFile, 'utf8').split('\n') : [];
+  return { result, args };
+}
+
+function cacheHome(root) {
+  const home = path.join(root, 'home');
+  return {
+    home,
+    profiles: path.join(home, 'Library/Application Support/Firefox/Profiles'),
+    local: path.join(home, 'Library/Caches/Firefox/Profiles'),
+  };
+}
+
+function seed(folder, file = 'scriptCache.bin', content = 'old compiled modules') {
+  fs.mkdirSync(folder, { recursive: true, mode: 0o700 });
+  fs.writeFileSync(path.join(folder, file), content);
+  return path.join(folder, file);
+}
+
+test('launcher clears the local startup cache of a profile in the Firefox profiles folder, and nothing beside it', t => {
+  const root = fixture(t);
+  const { home, profiles, local } = cacheHome(root);
+  const leaf = 'qa1234.egdesk-cache-test';
+  const profile = makeProfile(profiles, leaf);
+  mark(profile);
+  seed(path.join(profile, 'startupCache'));
+  const localProfile = path.join(local, leaf);
+  seed(path.join(localProfile, 'startupCache'));
+  const keptCache2 = seed(path.join(localProfile, 'cache2'), 'keep', 'network cache');
+  const keptFile = seed(localProfile, 'keep.txt', 'keep');
+  const otherProfile = seed(path.join(local, 'other.default-release', 'startupCache'), 'scriptCache.bin', 'other profile');
+
+  const { result, args } = launchWithFakeBridge(root, { HOME: home, EGDESK_FIREFOX_PROFILE: profile });
+  assert.equal(result.status, 0, result.stderr);
+  assert.deepEqual(args.slice(0, 4), ['-profile', profile, '--no-remote', 'about:blank']);
+  assert.equal(fs.existsSync(path.join(localProfile, 'startupCache')), false);
+  assert.equal(fs.existsSync(path.join(profile, 'startupCache')), false);
+  assert.deepEqual(fs.readdirSync(localProfile).sort(), ['cache2', 'keep.txt']);
+  assert.equal(fs.readFileSync(keptCache2, 'utf8'), 'network cache');
+  assert.equal(fs.readFileSync(keptFile, 'utf8'), 'keep');
+  assert.equal(fs.readFileSync(otherProfile, 'utf8'), 'other profile');
+  assert.doesNotMatch(result.stderr, /local startup cache left in place/);
+});
+
+test('launcher leaves local caches alone for a profile outside the Firefox profiles folder or with an unsafe leaf', t => {
+  const root = fixture(t);
+  const { home, profiles, local } = cacheHome(root);
+  const cases = [
+    // A QA profile given by path keeps its cache inside the profile.
+    { profile: makeProfile(root, 'qa-profile'), kept: [path.join(local, 'qa-profile', 'startupCache')] },
+    // A nested folder is not a <leaf> directly under Profiles/.
+    { profile: makeProfile(profiles, 'group/nested'), kept: [
+      path.join(local, 'group', 'nested', 'startupCache'), path.join(local, 'group', 'startupCache')] },
+    // A leaf containing '..' is never turned into a cache path.
+    { profile: makeProfile(profiles, 'a..b'), kept: [path.join(local, 'a..b', 'startupCache')] },
+  ];
+  for (const { profile, kept } of cases) {
+    mark(profile);
+    seed(path.join(profile, 'startupCache'));
+    const files = kept.map(folder => seed(folder));
+    const { result, args } = launchWithFakeBridge(root, { HOME: home, EGDESK_FIREFOX_PROFILE: profile });
+    assert.equal(result.status, 0, result.stderr);
+    assert.equal(args[1], profile);
+    assert.equal(fs.existsSync(path.join(profile, 'startupCache')), false, `${profile} own cache is cleared`);
+    for (const file of files) assert.equal(fs.readFileSync(file, 'utf8'), 'old compiled modules', `${file} is kept`);
+  }
+});
+
+test('launcher does not follow a linked local profile folder and leaves a refused profile\'s local cache alone', t => {
+  const root = fixture(t);
+  const { home, profiles, local } = cacheHome(root);
+  const leaf = 'qa5678.egdesk-cache-test';
+  const profile = makeProfile(profiles, leaf);
+  mark(profile);
+  fs.mkdirSync(local, { recursive: true, mode: 0o700 });
+  const elsewhere = path.join(root, 'elsewhere');
+  const target = seed(path.join(elsewhere, 'startupCache'));
+  fs.symlinkSync(elsewhere, path.join(local, leaf));
+  let { result } = launchWithFakeBridge(root, { HOME: home, EGDESK_FIREFOX_PROFILE: profile });
+  assert.equal(result.status, 0, result.stderr);
+  assert.match(result.stderr, /local startup cache left in place/);
+  assert.equal(fs.readFileSync(target, 'utf8'), 'old compiled modules');
+
+  // A linked parent (…/Caches/Firefox/Profiles → elsewhere) is refused the same way.
+  fs.unlinkSync(path.join(local, leaf));
+  fs.renameSync(local, path.join(root, 'local-parked'));
+  const linkedParent = path.join(root, 'linked-parent');
+  const parentTarget = seed(path.join(linkedParent, leaf, 'startupCache'));
+  fs.symlinkSync(linkedParent, local);
+  ({ result } = launchWithFakeBridge(root, { HOME: home, EGDESK_FIREFOX_PROFILE: profile }));
+  assert.equal(result.status, 0, result.stderr);
+  assert.match(result.stderr, /local startup cache left in place/);
+  assert.equal(fs.readFileSync(parentTarget, 'utf8'), 'old compiled modules');
+
+  // An unmarked profile is refused before either cache is touched.
+  fs.unlinkSync(local);
+  const unmarked = makeProfile(profiles, 'unmarked.egdesk-cache-test');
+  const ownCache = seed(path.join(unmarked, 'startupCache'));
+  const localCache = seed(path.join(local, 'unmarked.egdesk-cache-test', 'startupCache'));
+  ({ result } = launchWithFakeBridge(root, { HOME: home, EGDESK_FIREFOX_PROFILE: unmarked }));
+  assert.notEqual(result.status, 0);
+  assert.match(result.stderr, /Unsafe Firefox profile|ENOENT/);
+  assert.equal(fs.readFileSync(ownCache, 'utf8'), 'old compiled modules');
+  assert.equal(fs.readFileSync(localCache, 'utf8'), 'old compiled modules');
+});

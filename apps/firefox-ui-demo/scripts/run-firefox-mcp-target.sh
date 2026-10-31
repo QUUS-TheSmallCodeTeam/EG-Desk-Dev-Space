@@ -86,6 +86,26 @@ fi
 } > "$PROFILE/chrome/userChrome.css"
 
 rm -rf "$PROFILE/startupCache"
+# Firefox keeps the startup cache of a profile registered under its own
+# profiles folder in the matching local folder, not in the profile: on macOS
+# ~/Library/Application Support/Firefox/Profiles/<leaf> caches compiled modules
+# in ~/Library/Caches/Firefox/Profiles/<leaf>/startupCache. Left there, changed
+# .sys.mjs modules keep loading from the old compiled copy. Only that exact
+# layout is cleared here; a profile anywhere else keeps its cache inside the
+# profile, which the line above already removed.
+CACHE_HOME="${HOME:-}"
+CACHE_HOME="${CACHE_HOME%/}"
+FIREFOX_PROFILES_ROOT="$CACHE_HOME/Library/Application Support/Firefox/Profiles/"
+PROFILE_LEAF="${PROFILE#"$FIREFOX_PROFILES_ROOT"}"
+if [[ "${HOME:-}" == /* && "$PROFILE" == "$FIREFOX_PROFILES_ROOT"?* \
+  && "$PROFILE_LEAF" != */* && "$PROFILE_LEAF" != *..* && "$PROFILE_LEAF" != . ]]; then
+  LOCAL_PROFILE="$CACHE_HOME/Library/Caches/Firefox/Profiles/$PROFILE_LEAF"
+  if [[ -d "$LOCAL_PROFILE" && ! -L "$LOCAL_PROFILE" && "$(cd "$LOCAL_PROFILE" && pwd -P)" == "$LOCAL_PROFILE" ]]; then
+    rm -rf "$LOCAL_PROFILE/startupCache"
+  elif [[ -e "$LOCAL_PROFILE" || -L "$LOCAL_PROFILE" ]]; then
+    echo "[warn] local startup cache left in place: $LOCAL_PROFILE is not a plain folder" >&2
+  fi
+fi
 
 # codex-bridge(:39218 — 터미널 PTY + codex chat/auth 백엔드) 미기동 시 자동 기동.
 # 브리지가 없으면 overlay의 터미널 카드와 채팅 로그인이 전부 "오프라인"이 된다.
