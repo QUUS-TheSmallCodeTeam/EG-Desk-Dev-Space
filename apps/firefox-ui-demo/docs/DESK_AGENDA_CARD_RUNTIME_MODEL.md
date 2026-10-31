@@ -173,6 +173,35 @@ type DeskState = {
 };
 ```
 
+### Desk recovery journal (CTX-02, decision D-R1)
+
+While the local bridge reports a ready Desk store, every accepted Desk save
+also becomes an immutable *generation* in `helper/egdesk-desk-store.mjs`
+(the preference value stays the offline fallback). The journal's two rules are
+pure functions in `helper/egdesk-recovery-journal.mjs`, so they are tested on
+plain rows and the store only feeds them:
+
+- `autosaveWindowMerges`: autosaves within one 60-second window replace that
+  window's head autosave, so continuous editing leaves one recovery point per
+  window. An explicit save, a restore and an import always add a generation,
+  and a head another window collided with is never replaced.
+- `planDeskRetention`: keep the newest 200 generations plus the newest one of
+  each local day for the last 30 days, within 512 MiB on disk (shared chat
+  messages counted once). The head is never removed. D-R1 calls these numbers
+  provisional; they live in `DESK_RETENTION` only.
+
+The rail's **복구 기록** panel lists the generations (time, reason, card and
+shape counts, open Boards, and what changed since the earlier point below it),
+previews a chosen point without showing the saved text, and offers two ways
+back: **이 시점으로 복원** first saves the current Desk as its own explicit
+point and then publishes the chosen point as a new `restore` generation, so
+the current work is never overwritten; **지금 작업에 합치기** adds only the
+views missing now (`missingDeskRecoveryViews`). Chat rooms stay as they are.
+
+Saved Board revisions are separate rows with their own head: a Desk save never
+changes a Board and a Board save never makes a Desk generation (the CTX-01
+boundary).
+
 Board stores committed work state. The model sketches retain identifiers
 containing `agenda` for compatibility; Board is the product name.
 

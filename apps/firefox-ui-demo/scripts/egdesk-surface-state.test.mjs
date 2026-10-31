@@ -16166,13 +16166,23 @@ test('복구 기록 rows read in Korean, the preview never dumps the Desk, and r
     [2, '직접 저장', '카드 3개 · 도형 0개', true, ''],
     [1, '자동 저장', '카드 1개 · 도형 1개', false, ''],
   ]);
+  // CTX-02: Boards open at each point, and what changed since the earlier point below it.
+  assert.deepEqual(page.rows.map(row => [row.boards, row.changes]), [['Board 0개', '카드 +2 · 도형 -1 · Board -1'], ['Board 1개', '']]);
+  assert.deepEqual(Recovery.deskRetentionText(page.retention), '최근 200개와 30일 동안 하루 1개를 남기고, 전체 512MB까지 보관합니다.');
+  assert.equal(Recovery.deskRetentionText(undefined), '', 'an older bridge without retention says nothing');
   for (const row of page.rows) assert.match(row.time, /^\d{1,2}월 \d{1,2}일 \d{2}:\d{2}:\d{2}$/);
   assert.equal(bridge.calls.at(-1).path, '/v1/desk/generations?limit=50');
   const one = await sync.generation(1);
   assert.deepEqual(one.preview, { cardCount: 1, shapeCount: 1, kinds: 'Browser 1', boards: ['주간 보고'], boardsText: 'Board 주간 보고' });
   assert.deepEqual(Recovery.deskStatePreview(deskB), { cardCount: 3, shapeCount: 0, kinds: 'Browser 1 · 파일 1 · Chat 1', boards: [], boardsText: '열린 Board 없음' });
-  assert.deepEqual(Recovery.deskGenerationRows({ head: 9, generations: [{ generation: 9, reason: 'import', createdAt: 0, cardCount: null, shapeCount: 2 }] }, { formatTime: () => 'T' }).map(row => [row.reason, row.counts]),
-    [['가져옴', '카드 0개 · 도형 2개']]);
+  assert.deepEqual(Recovery.deskGenerationRows({ head: 9, generations: [{ generation: 9, reason: 'import', createdAt: 0, cardCount: null, shapeCount: 2 }] }, { formatTime: () => 'T' }).map(row => [row.reason, row.counts, row.boards, row.changes]),
+    [['가져옴', '카드 0개 · 도형 2개', '', '']]);
+  // Equal counts still mean a different Desk; an older bridge without boardCount compares cards and shapes only.
+  assert.deepEqual(Recovery.deskGenerationRows({ head: 3, generations: [
+    { generation: 3, reason: 'autosave', createdAt: 2, cardCount: 2, shapeCount: 0, boardCount: 1 },
+    { generation: 2, reason: 'autosave', createdAt: 1, cardCount: 2, shapeCount: 0, boardCount: 1 },
+    { generation: 1, reason: 'autosave', createdAt: 0, cardCount: 1, shapeCount: 3 },
+  ] }, { formatTime: () => 'T' }).map(row => row.changes), ['개수 변화 없음', '카드 +1 · 도형 -3', '']);
 
   const restored = await sync.restoreGeneration(1);
   assert.equal(restored.restored, true);

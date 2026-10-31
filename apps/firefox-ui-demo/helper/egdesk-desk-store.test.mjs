@@ -167,6 +167,18 @@ test('the byte budget drops the oldest kept generations first and never the head
   for (const retention of [{ recent: 0 }, { dailyDays: 1.5 }, { keepForever: true }]) rejects(() => open({ ownerScope: 'bad', retention }), 'INVALID_STORE_OPTIONS')
 })
 
+test('the generation list counts the open Boards of each point from the saved text; one record carries none', t => {
+  const { open } = fixture(t)
+  const store = open()
+  const projections = { 'egd-board-1': { id: 'egd-board-1', boardId: 'agenda-a', title: '주간 보고' }, 'egd-board-2': { id: 'egd-board-2', boardId: 'agenda-b', title: '회의' } }
+  const first = store.saveCurrent({ state: desk(1), parentGeneration: null })
+  store.saveCurrent({ state: desk(2, { boardProjections: { projections, activeProjectionId: null } }), parentGeneration: first.generation })
+  store.saveCurrent({ state: desk(3, { boardProjections: { projections: null } }), parentGeneration: 2, reason: 'explicit' })
+  assert.deepEqual(store.generations().generations.map(item => [item.generation, item.cardCount, item.boardCount]), [[3, 3, 0], [2, 2, 2], [1, 1, 0]])
+  assert.equal('boardCount' in store.generation(2), false, 'the full record keeps the saved shape; the screen counts it from state')
+  assert.equal('boardCount' in first, false)
+})
+
 test('Board revisions are immutable: create, expectedRevision conflicts, retries, title metadata and revert', t => {
   const { open, file } = fixture(t)
   const store = open()

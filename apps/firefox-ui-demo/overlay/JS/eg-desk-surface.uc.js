@@ -20962,7 +20962,7 @@
     return null;
   }
 
-  const deskHistory = { rows: [], page: null, selected: null, record: null, confirming: false, busy: false, message: null, failed: false };
+  const deskHistory = { rows: [], generations: [], page: null, selected: null, record: null, confirming: false, busy: false, message: null, failed: false };
 
   function closeDeskHistoryPanel({ restoreFocus = false } = {}) {
     const panel = document.getElementById('egd-desk-history');
@@ -20973,7 +20973,7 @@
 
   async function openDeskHistoryPanel() {
     closeDeskHistoryPanel();
-    Object.assign(deskHistory, { rows: [], page: null, selected: null, record: null, confirming: false, busy: false,
+    Object.assign(deskHistory, { rows: [], generations: [], page: null, selected: null, record: null, confirming: false, busy: false,
       message: '복구 기록을 불러오는 중입니다…', failed: false });
     const panel = el('section', { id: 'egd-desk-history', class: 'egd-store-panel', role: 'dialog', 'aria-label': '복구 기록', data: { testid: 'desk-history' } });
     panel.addEventListener('keydown', (ev) => {
@@ -20994,25 +20994,28 @@
     if (page.unavailable || page.error) {
       Object.assign(deskHistory, { message: '복구 기록을 불러오지 못했습니다. 연결을 확인한 뒤 다시 시도해 주세요.', failed: true });
     } else {
-      const rows = more ? [...deskHistory.rows, ...page.rows] : page.rows;
-      Object.assign(deskHistory, { rows, page, failed: false, message: rows.length ? null : '아직 남은 기록이 없습니다. Desk가 저장되면 여기에 시점이 쌓입니다.' });
+      // Pages are joined before the rows are made, so the last row of a page compares its changes with the first of the next.
+      const generations = more ? [...deskHistory.generations, ...(page.generations || [])] : (page.generations || []);
+      const rows = RecoveryState.deskGenerationRows({ ...page, generations });
+      Object.assign(deskHistory, { rows, generations, page, failed: false, message: rows.length ? null : '아직 남은 기록이 없습니다. Desk가 저장되면 여기에 시점이 쌓입니다.' });
     }
     renderDeskHistoryPanel(focusFirst && deskHistory.rows.length ? `generation-${deskHistory.rows[0].generation}` : undefined);
   }
 
-  // One row per saved point; the reason and counts come from the store, in Korean.
+  // One row per saved point; the reason, counts and what changed come from the store, in Korean.
   function deskHistoryListView(rows, { selected = null, onSelect = () => {} } = {}) {
+    const meta = row => [row.counts, row.boards, row.changes, row.note].filter(Boolean).join(' · ');
     return el('div', { class: 'egd-store-list', role: 'group', 'aria-label': '저장된 시점', data: { testid: 'desk-history-list' } },
       ...rows.map(row => el('button', {
         type: 'button', class: 'egd-store-row', 'aria-pressed': row.generation === selected ? 'true' : 'false',
-        'aria-label': `${row.time} ${row.reason}${row.current ? ' · 지금' : ''} · ${row.counts}${row.note ? ` · ${row.note}` : ''}`,
+        'aria-label': `${row.time} ${row.reason}${row.current ? ' · 지금' : ''} · ${meta(row)}`,
         data: { testid: 'desk-history-row', generation: String(row.generation), focusKey: `generation-${row.generation}` },
         onclick: () => onSelect(row.generation),
       },
       el('span', { class: 'egd-store-row-time' }, row.time),
       el('span', { class: 'egd-store-row-tag' }, row.reason),
       row.current ? el('span', { class: 'egd-store-row-current' }, '지금') : null,
-      el('span', { class: 'egd-store-row-meta' }, row.note ? `${row.counts} · ${row.note}` : row.counts))));
+      el('span', { class: 'egd-store-row-meta' }, meta(row)))));
   }
 
   // A short look at one point and its two ways back; the saved text itself is never shown.
@@ -21052,6 +21055,8 @@
         el('button', { type: 'button', class: 'egd-store-panel-close', 'aria-label': '복구 기록 닫기', data: { focusKey: 'close' },
           onclick: () => closeDeskHistoryPanel({ restoreFocus: true }) }, '×')),
       el('p', { class: 'egd-store-panel-copy' }, 'Desk가 저장될 때마다 시점이 남습니다. 시점을 골라 미리 보고, 되돌리거나 지금 작업에 합칠 수 있습니다.'),
+      // D-R1: what the journal keeps, as the bridge reports it (an older bridge says nothing).
+      RecoveryState.deskRetentionText(deskHistory.page?.retention) ? el('p', { class: 'egd-store-panel-copy', data: { testid: 'desk-history-retention' } }, RecoveryState.deskRetentionText(deskHistory.page.retention)) : null,
       deskHistory.message ? el('p', { class: 'egd-store-panel-status', role: 'status' }, deskHistory.message) : null,
       deskHistory.failed ? el('button', { type: 'button', class: 'egd-store-more', data: { focusKey: 'retry' }, onclick: () => loadDeskHistoryPage() }, '다시 시도') : null,
       deskHistoryListView(deskHistory.rows, { selected: deskHistory.selected, onSelect: selectDeskHistoryRow }),
