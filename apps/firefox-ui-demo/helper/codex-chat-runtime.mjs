@@ -2683,7 +2683,9 @@ export class CodexChatRuntime {
       throw chatError('INVALID_SHARE', `Choose 1 to ${MAX_SHARED_MESSAGES} different messages`, 400)
     }
     if (body.shareId !== undefined && !idText(body.shareId)?.trim()) throw chatError('INVALID_SHARE', 'Invalid shareId', 400)
-    if (!store.getConversation(from) || !store.getConversation(to)) throw chatError('CONVERSATION_NOT_FOUND', 'Both conversations must exist', 404)
+    if (!store.getConversation(from)) throw chatError('CONVERSATION_NOT_FOUND', 'The sending conversation must exist', 404)
+    // CHAT-03: a Board Thread that has not spoken yet is created here; its first turn reads the copies.
+    if (!store.getConversation(to)) store.createConversation({ clientThreadId: to, createdAt: this.now() })
     const wanted = new Set(ids), found = new Map()
     let cursor = 0
     for (let page = 0; page < 1000 && found.size < wanted.size; page++) {
@@ -2711,6 +2713,33 @@ export class CodexChatRuntime {
     // The store is the record of what is still to attach; read it again on the next turn.
     this.sharedInbox.delete(to)
     return { accepted: true, shareId, fromClientThreadId: from, toClientThreadId: to, messageCount: messages.length, attach: 'nextTurn' }
+  }
+
+  // CHAT-01: the room's Agent changed on screen without a send — the ⋯ menu
+  // picked another Agent, or '기본 Codex' (profileId null). The same store write
+  // a send makes through recordRoomAgent, so a restart (or a Board restore
+  // without the Desk pref) brings the pick back — and brings back the return
+  // to plain Codex instead of an older pick. revision null = follow the active
+  // revision; the Agent itself is not resolved here, so a missing or stopped
+  // Agent is still refused at send time rather than quietly replaced. A room
+  // that has never been sent is not in the store yet: 404, and its first send
+  // records the pick. Answers {accepted, clientThreadId, agent}.
+  setRoomAgent(body) {
+    const store = this.assertStore()
+    const clientThreadId = idText(body?.clientThreadId)
+    if (!clientThreadId?.trim()) throw chatError('INVALID_ROOM_AGENT', 'clientThreadId is required', 400)
+    if (body.profileId !== null && !idText(body.profileId)?.trim()) throw chatError('INVALID_ROOM_AGENT', 'profileId must be an Agent profile ID, or null for plain Codex', 400)
+    const revision = body.revision === undefined ? null : body.revision
+    if (revision !== null && (!Number.isSafeInteger(revision) || revision < 1)) throw chatError('INVALID_ROOM_AGENT', 'revision must be a positive integer or null', 400)
+    if (body.profileId === null && revision !== null) throw chatError('INVALID_ROOM_AGENT', 'Plain Codex has no revision', 400)
+    try {
+      if (!store.getConversation(clientThreadId)) throw chatError('CONVERSATION_NOT_FOUND', 'That conversation has not been saved yet', 404)
+      return { accepted: true, ...store.setRoomAgent({ clientThreadId, profileId: body.profileId, revision, ts: this.now() }) }
+    } catch (error) {
+      if (error?.httpStatus === 404) throw chatError('CONVERSATION_NOT_FOUND', 'That conversation has not been saved yet', 404)
+      if (error?.code === 'INVALID_CHAT_RECORD' || error?.code === 'INVALID_ROOM_AGENT') throw chatError('INVALID_ROOM_AGENT', error.message, 400)
+      throw chatError('CHAT_STORE_UNAVAILABLE', 'Local chat history could not save the room Agent', 503)
+    }
   }
 
   // D-M3: shares saved for this conversation and not yet attached to a turn.

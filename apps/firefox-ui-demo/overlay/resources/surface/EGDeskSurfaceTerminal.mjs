@@ -3,10 +3,12 @@
 // Never statically import a .sys.mjs here; shared modules arrive through deps.
 export function createTerminalZone(deps) {
   const {
+    RunResult,
     TAG,
     allocCardSeq,
     bindCardSourceRef,
     boardCloseRequests,
+    boardNotice,
     canvasZoom,
     closeCanvasCard,
     completeAgendaClose,
@@ -16,6 +18,7 @@ export function createTerminalZone(deps) {
     isCardFullscreen,
     makeSourceRef,
     markAgendaDirty,
+    openBoardProjectFileAt,
     raiseCardZ,
     resolveCanvasCardPlacement,
     revealPlacedCanvasCard,
@@ -75,9 +78,50 @@ export function createTerminalZone(deps) {
         el('div', { class: 'egd-terminal-title' }, '>_ Terminal'),
       ),
     );
+    // CODE-06: the latest test/build result of a command typed here, as a chip.
+    const runChip = el('button', { type: 'button', class: 'egd-terminal-run-chip', hidden: true, 'aria-expanded': 'false',
+      title: '최근 명령 결과 보기/숨기기', data: { testid: 'terminal-run-chip' },
+      onclick: (ev) => { ev.stopPropagation(); runResultPanel.hidden = !runResultPanel.hidden; runChip.setAttribute('aria-expanded', String(!runResultPanel.hidden)); } });
+    header.querySelector('.egd-card-topbar').appendChild(runChip);
 
     // ---- Body with XUL browser ----
     const body = el('div', { class: 'egd-card-body egd-terminal-body' });
+    // ---- Result of a typed test/build command (CODE-06) ----
+    // The bridge reads this session's own output; nothing is run for the card
+    // (D-X6). The shared result card renders above the terminal; a failure's
+    // file:line opens the selected Board's project File at that line.
+    const runResultPanel = el('section', { class: 'egd-terminal-run-result', hidden: true, 'aria-label': '명령 결과', data: { testid: 'terminal-run-result' } });
+    let runResultSeq = 0;
+    const showRunResult = (runResult) => {
+      if (!runResult || typeof runResult !== 'object' || typeof runResult.output !== 'string') return;
+      let summary;
+      try {
+        summary = RunResult.summarizeRunResult({
+          command: typeof runResult.command === 'string' ? runResult.command : null,
+          output: runResult.output, status: 'completed',
+          durationMs: Number.isFinite(runResult.durationMs) ? runResult.durationMs : null,
+        });
+      } catch (error) { console.warn(TAG, 'terminal run result could not be summarized:', error); return; }
+      const seq = ++runResultSeq;
+      const resultCard = RunResult.renderRunResultCard({ document, result: summary, onOpenLocation: (location) => {
+        if (seq !== runResultSeq || !card.isConnected) return;
+        if (location?.inProject === false) { boardNotice(`프로젝트 밖 경로입니다 · ${location.label || location.path || ''}`); return; }
+        void Promise.resolve(openBoardProjectFileAt(location)).catch(error => boardNotice(`파일을 열지 못했습니다 · ${error?.message || ''}`));
+      } });
+      const bar = el('div', { class: 'egd-terminal-run-result-bar' },
+        el('span', { class: 'egd-terminal-run-result-title' }, '명령 결과'),
+        el('span', { class: 'egd-terminal-run-result-note' }, '직접 입력한 명령의 출력에서 읽었습니다'),
+        el('button', { type: 'button', class: 'egd-terminal-run-result-close', 'aria-label': '명령 결과 닫기', data: { testid: 'terminal-run-result-close' },
+          onclick: (ev) => { ev.stopPropagation(); runResultPanel.hidden = true; runChip.setAttribute('aria-expanded', 'false'); } }, '닫기'));
+      runResultPanel.replaceChildren(bar, resultCard);
+      runResultPanel.dataset.outcome = summary.outcome;
+      runResultPanel.hidden = false;
+      runChip.textContent = summary.headline;
+      runChip.dataset.outcome = summary.outcome;
+      runChip.title = [summary.label, summary.command, summary.headline].filter(Boolean).join(' · ');
+      runChip.hidden = false;
+      runChip.setAttribute('aria-expanded', 'true');
+    };
 
     // ---- Resize hit zones ----
     const resizeHits = [
@@ -95,6 +139,7 @@ export function createTerminalZone(deps) {
     }));
 
     card.appendChild(header);
+    card.appendChild(runResultPanel);
     card.appendChild(body);
     for (const hit of resizeHits) card.appendChild(hit);
 
@@ -170,6 +215,7 @@ export function createTerminalZone(deps) {
         if (state.activeEntityId !== card.id) activateCard();
         return;
       }
+      if (ev.data?.type === 'terminal-run-result') { showRunResult(ev.data.runResult); return; }
       if (ev.data?.type === 'terminal-new-session') {
         const shellId = ev.data.shellId;
         if (typeof shellId === 'string' && /^[a-z][a-z0-9-]{0,31}$/.test(shellId)) spawnTerminalCard({ shellId });

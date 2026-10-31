@@ -243,18 +243,34 @@ export function createChangeReview({ document, service, rootId, changes = [], ma
   error.setAttribute('role', 'alert')
   error.hidden = true
   element.append(summary, undoButton, list, status, error)
-  const files = changes.slice(0, CHANGE_REVIEW_LIMITS.maxFiles).map(change => ({ change, fileId: null, text: null, sha256: null, target: null, chunks: [], chunkStatus: 'empty', actions: null, selected: new Set(), confirmDelete: false, removed: false, node: null }))
+  const files = changes.slice(0, CHANGE_REVIEW_LIMITS.maxFiles).map(change => ({ change, fileId: null, text: null, sha256: null, target: null, chunks: [], chunkStatus: 'empty', actions: null, selected: new Set(), confirmDelete: false, removed: false, conflict: null, node: null }))
   let lastRevert = null
   let disposed = false
 
   const announce = message => { status.textContent = message; onState(snapshot()) }
   const showError = cause => {
-    error.textContent = cause?.code === 'SOURCE_CHANGED' ? '파일이 그 사이 바뀌었습니다. 다시 읽어 왔습니다.' : cause?.code === 'CHUNK_DRIFT' ? '파일이 그 사이 바뀌어 덩어리를 찾지 못했습니다. 다시 읽어 왔습니다.' : cause?.message || String(cause)
+    error.textContent = cause?.code === 'SOURCE_CHANGED' ? '파일이 열 때와 달라 쓰지 않았습니다. 다시 읽은 내용과의 비교를 아래에 보여 줍니다.' : cause?.code === 'CHUNK_DRIFT' ? '파일이 그 사이 바뀌어 덩어리를 찾지 못했습니다. 다시 읽어 왔습니다.' : cause?.message || String(cause)
     error.hidden = false
     announce('작업에 실패했습니다. 파일은 그대로입니다.')
   }
   async function act(work) { error.hidden = true; try { await work() } catch (cause) { showError(cause) } }
-  const snapshot = () => ({ files: files.map(file => ({ path: file.target?.path || file.change?.path || '', change: file.target?.change || null, chunks: file.chunks.length, selected: [...file.selected], removed: file.removed })), canUndo: !!lastRevert })
+  const snapshot = () => ({ files: files.map(file => ({ path: file.target?.path || file.change?.path || '', change: file.target?.change || null, chunks: file.chunks.length, selected: [...file.selected], removed: file.removed, sha256: file.sha256, conflict: !!file.conflict })), canUndo: !!lastRevert })
+  const shortHash = value => typeof value === 'string' && value ? value.slice(0, 12) : '확인 안 됨'
+  // The helper's receipt (requested) and a fresh read of the file (observed)
+  // are kept apart: the status line claims only what the re-read confirmed.
+  const observedNote = (file, result, requested) => {
+    if (file.sha256 == null) return `${requested} 요청은 끝났지만 파일을 다시 읽지 못해 결과를 확인하지 못했습니다.`
+    if (result?.unchanged) return '이미 같은 내용이라 쓰지 않았습니다 · 파일을 다시 읽어 확인했습니다.'
+    if (typeof result?.sha256 === 'string' && result.sha256 === file.sha256) return `${requested} · 파일을 다시 읽어 확인했습니다.`
+    return `${requested} 요청은 끝났지만 다시 읽은 파일이 쓴 결과와 다릅니다. 지금 내용을 기준으로 다시 표시합니다.`
+  }
+  // D-X1: the conditional write refused because the file no longer hashes to
+  // what this screen read. Nothing was written; the comparison is shown and
+  // the undo baseline for that file is gone.
+  const markConflict = (file, cause) => {
+    file.conflict = { reviewedText: file.text, reviewedSha256: file.sha256, reportedSha256: typeof cause?.details?.currentSourceHash === 'string' ? cause.details.currentSourceHash : null }
+    if (lastRevert?.fileId === file.fileId) lastRevert = null
+  }
 
   async function loadFile(file) {
     file.selected.clear(); file.confirmDelete = false
@@ -300,6 +316,20 @@ export function createChangeReview({ document, service, rootId, changes = [], ma
     const path = file.target?.path || reviewPathOf(file.change)
     node.append(el(document, 'h3', 'egdesk-change-review-file-heading', `${path} · ${CHANGE_LABELS[file.target?.change] || CHANGE_LABELS.update}${file.removed ? ' · 삭제함' : ''}`))
     if (file.removed) return node
+    if (file.conflict) {
+      const conflict = el(document, 'section', 'egdesk-change-review-conflict')
+      conflict.setAttribute('role', 'group')
+      conflict.setAttribute('aria-label', '열 때와 다른 파일')
+      const observed = file.sha256 ?? file.conflict.reportedSha256
+      conflict.append(
+        el(document, 'h4', 'egdesk-change-review-conflict-heading', '파일이 열 때와 다릅니다 · 되돌리지 않았습니다'),
+        el(document, 'p', 'egdesk-change-review-conflict-text', `검토를 시작할 때 읽은 내용(−)과 지금 파일(+)의 차이입니다. 원본은 그대로입니다. 해시 ${shortHash(file.conflict.reviewedSha256)} → ${shortHash(observed)}`))
+      if (typeof file.conflict.reviewedText === 'string' && typeof file.text === 'string') {
+        conflict.append(renderDiffView({ document, files: [fileDiffFromTexts({ path, oldText: file.conflict.reviewedText, newText: file.text })], openFiles: 1 }))
+      } else conflict.append(el(document, 'p', 'egdesk-change-review-note', '지금 파일을 읽지 못해 비교를 보여 주지 못했습니다.'))
+      conflict.append(makeButton(document, '지금 내용으로 계속', 'egdesk-change-review-conflict-continue', () => { file.conflict = null; rerender(index); announce('지금 파일 내용을 기준으로 검토합니다.') }))
+      node.append(conflict)
+    }
     if (typeof onOpenFile === 'function' && file.fileId) node.append(makeButton(document, '파일 열기', 'egdesk-change-review-open', () => onOpenFile({ path, line: file.chunks[0]?.currentStartLine || 1 })))
     const before = file.target?.change === 'add' ? null : file.target?.beforeText
     if (file.target && (before != null || file.text != null)) {
@@ -390,10 +420,17 @@ export function createChangeReview({ document, service, rootId, changes = [], ma
     const previous = { text: file.text, sha256: file.sha256 }
     let result
     try { result = await service.revertReviewed({ fileId: file.fileId, expectedSha256: file.sha256, text, operationId: operationId('review-revert') }) }
-    catch (cause) { if (cause?.code === 'SOURCE_CHANGED') await reloadFile(index); throw cause }
+    catch (cause) {
+      if (cause?.code === 'SOURCE_CHANGED') { markConflict(file, cause); await reloadFile(index) }
+      throw cause
+    }
+    file.conflict = null
     lastRevert = { index, fileId: file.fileId, previousText: previous.text, previousSha256: previous.sha256, sha256: result?.sha256 }
     await reloadFile(index)
-    announce(`덩어리 ${chunkIndexes.length}개를 되돌렸습니다.`)
+    // Undo is offered only against a result the re-read actually confirmed.
+    if (result?.unchanged || typeof result?.sha256 !== 'string' || file.sha256 !== result.sha256) lastRevert = null
+    renderSummary()
+    announce(observedNote(file, result, `덩어리 ${chunkIndexes.length}개를 되돌렸습니다`))
     return result
   }
 
@@ -401,24 +438,46 @@ export function createChangeReview({ document, service, rootId, changes = [], ma
     if (!lastRevert) return null
     const { index, previousText, sha256 } = lastRevert
     const file = files[index]
-    const result = await service.revertReviewed({ fileId: file.fileId, expectedSha256: sha256, text: previousText, operationId: operationId('review-undo') })
+    if (!file?.fileId) { lastRevert = null; renderSummary(); return null }
+    let result
+    try { result = await service.revertReviewed({ fileId: file.fileId, expectedSha256: sha256, text: previousText, operationId: operationId('review-undo') }) }
+    catch (cause) {
+      if (cause?.code === 'SOURCE_CHANGED') { markConflict(file, cause); await reloadFile(index) }
+      throw cause
+    }
     lastRevert = null
+    file.conflict = null
     await reloadFile(index)
-    announce('되돌리기를 취소했습니다.')
+    announce(observedNote(file, result, '되돌리기를 취소했습니다'))
     return result
   }
 
   async function deleteFile(index) {
     const file = files[index]
     if (!file?.actions?.deleteFile || !file.fileId || typeof service.deleteCreated !== 'function') return null
-    const result = await service.deleteCreated({ fileId: file.fileId, expectedSha256: file.sha256, operationId: operationId('review-delete') })
+    let result
+    try { result = await service.deleteCreated({ fileId: file.fileId, expectedSha256: file.sha256, operationId: operationId('review-delete') }) }
+    catch (cause) {
+      if (cause?.code === 'SOURCE_CHANGED') { markConflict(file, cause); await reloadFile(index) }
+      throw cause
+    }
+    if (lastRevert?.index === index) lastRevert = null
+    // Observed, not assumed: the path must no longer resolve to a file.
+    let observed = 'gone'
+    try { observed = (await service.resolvePath({ rootId, path: reviewPathOf(file.change) }))?.kind === 'file' ? 'present' : 'gone' }
+    catch (cause) { observed = ['RESOURCE_UNAVAILABLE', 'UNKNOWN_RESOURCE', 'NOT_IN_ROOT'].includes(cause?.code) ? 'gone' : 'unknown' }
+    if (observed === 'present') {
+      await reloadFile(index)
+      announce('삭제 요청은 끝났지만 파일이 아직 있습니다. 지금 내용을 기준으로 다시 표시합니다.')
+      return result
+    }
     file.removed = true
     file.chunks = []
     file.actions = null
-    if (lastRevert?.index === index) lastRevert = null
+    file.conflict = null
     rerender(index)
     renderSummary()
-    announce('Agent가 만든 파일을 지웠습니다.')
+    announce(observed === 'gone' ? 'Agent가 만든 파일을 지웠습니다 · 파일이 더 이상 없는 것을 확인했습니다.' : 'Agent가 만든 파일 삭제 요청은 끝났지만 결과를 다시 읽어 확인하지 못했습니다.')
     return result
   }
 

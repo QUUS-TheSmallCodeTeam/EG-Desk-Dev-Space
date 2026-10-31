@@ -145,11 +145,38 @@ function cardKindsText(cards) {
   return [...counts].map(([label, n]) => `${label} ${n}`).join(' · ');
 }
 
-/** Rows for the '복구 기록' list: when, why (Korean), and how much was on the Desk. */
+const signed = n => (n > 0 ? `+${n}` : String(n));
+/**
+ * What changed since the earlier point shown just below it: card, shape and
+ * Board counts ('카드 +2 · Board -1'). Equal counts still mean a different Desk
+ * (a generation exists only when the content differs), so they read '개수 변화 없음'.
+ * '' when there is no earlier point to compare with (the oldest row of the page).
+ */
+export function deskGenerationChanges(item, earlier) {
+  if (!earlier) return '';
+  const parts = [];
+  const delta = (label, a, b) => { const n = countOf(a) - countOf(b); if (n) parts.push(`${label} ${signed(n)}`); };
+  delta('카드', item?.cardCount, earlier.cardCount);
+  delta('도형', item?.shapeCount, earlier.shapeCount);
+  if (Number.isSafeInteger(item?.boardCount) && Number.isSafeInteger(earlier.boardCount)) delta('Board', item.boardCount, earlier.boardCount);
+  return parts.length ? parts.join(' · ') : '개수 변화 없음';
+}
+
+/** What the journal keeps (D-R1), from the page's retention, in Korean; '' for an older bridge. */
+export function deskRetentionText(retention) {
+  if (!isPlainObject(retention) || ![retention.recent, retention.dailyDays, retention.maxBytes].every(Number.isSafeInteger)) return '';
+  return `최근 ${retention.recent}개와 ${retention.dailyDays}일 동안 하루 1개를 남기고, 전체 ${Math.round(retention.maxBytes / (1024 * 1024))}MB까지 보관합니다.`;
+}
+
+/**
+ * Rows for the '복구 기록' list: when, why (Korean), how much was on the Desk
+ * (cards, shapes and, from a bridge that counts them, Boards) and what changed
+ * since the earlier point below it.
+ */
 export function deskGenerationRows(page, { formatTime = deskStoreTime } = {}) {
   const generations = Array.isArray(page?.generations) ? page.generations : [];
   const byId = new Map(generations.map(item => [item.generation, item]));
-  return generations.map(item => {
+  return generations.map((item, index) => {
     const source = byId.get(item.restoredFrom);
     return {
       generation: item.generation,
@@ -157,6 +184,8 @@ export function deskGenerationRows(page, { formatTime = deskStoreTime } = {}) {
       time: formatTime(item.createdAt),
       reason: DESK_REASON_LABELS[item.reason] || '저장',
       counts: `카드 ${countOf(item.cardCount)}개 · 도형 ${countOf(item.shapeCount)}개`,
+      boards: Number.isSafeInteger(item.boardCount) ? `Board ${countOf(item.boardCount)}개` : '',
+      changes: deskGenerationChanges(item, generations[index + 1] || null),
       note: item.reason === 'restore' ? (source ? `${formatTime(source.createdAt)} 시점에서 복원` : '이전 시점에서 복원') : '',
     };
   });

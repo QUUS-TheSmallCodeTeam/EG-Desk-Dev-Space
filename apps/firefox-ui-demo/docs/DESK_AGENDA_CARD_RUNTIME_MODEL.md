@@ -2,7 +2,7 @@
 # Desk, Board, and Desk Window Runtime Model
 
 **Date**: 2026-05-18
-**Updated**: 2026-07-19
+**Updated**: 2026-10-31
 **Status**: Product/runtime architecture decision note
 **Scope**: EG-Desk Firefox shell, Desk canvas, Board state, Desk Window lifecycle, search, local index, input ownership
 
@@ -120,6 +120,30 @@ Board change
   -> marked unsaved until the Board update action is performed
 ```
 
+Board membership is edited from the View bar (CNV-03; decisions D-V1 to D-V4
+of 2026-10-24). The View bar states only the recorded owner and never infers
+one from the active Board or the View's position:
+
+```text
+View bar
+  recorded owner       -> Board name + chevron; menu '○○에서 빼기', '△△에 넣기'
+  no recorded owner    -> '소속 없음' + chevron; menu '△△에 넣기' per open Board
+  conflicting records  -> no name is guessed; the menu still offers every Board
+
+rules
+  D-V1 one View belongs to one Board at most; joining another leaves the current one
+  D-V2 a new View is never added on its own: opened inside a Board region, or
+  D-V3 dropped into one, it gets '○○에 넣을까요? [넣기] [아니요]' under its View bar
+  D-V4 a new Board saved from open Views binds those Views where they are (no copy)
+  every membership edit marks the Board unsaved ('저장 안 됨') until it is saved
+
+runtime
+  rules   overlay/resources/EGDeskBoardMembership.sys.mjs (pure, unit-tested)
+  edits   EGDeskCanvasLayout addProjectionMember / removeProjectionMember
+  screen  eg-desk-surface.uc.js addViewToBoard / removeViewFromBoard /
+          offerBoardMembershipSuggestion / bindSavedBoardInPlace
+```
+
 When a Board with unsaved Board changes is closed or switched, the product
 may require an explicit guard:
 
@@ -172,6 +196,35 @@ type DeskState = {
   openCards: CardState[];
 };
 ```
+
+### Desk recovery journal (CTX-02, decision D-R1)
+
+While the local bridge reports a ready Desk store, every accepted Desk save
+also becomes an immutable *generation* in `helper/egdesk-desk-store.mjs`
+(the preference value stays the offline fallback). The journal's two rules are
+pure functions in `helper/egdesk-recovery-journal.mjs`, so they are tested on
+plain rows and the store only feeds them:
+
+- `autosaveWindowMerges`: autosaves within one 60-second window replace that
+  window's head autosave, so continuous editing leaves one recovery point per
+  window. An explicit save, a restore and an import always add a generation,
+  and a head another window collided with is never replaced.
+- `planDeskRetention`: keep the newest 200 generations plus the newest one of
+  each local day for the last 30 days, within 512 MiB on disk (shared chat
+  messages counted once). The head is never removed. D-R1 calls these numbers
+  provisional; they live in `DESK_RETENTION` only.
+
+The rail's **복구 기록** panel lists the generations (time, reason, card and
+shape counts, open Boards, and what changed since the earlier point below it),
+previews a chosen point without showing the saved text, and offers two ways
+back: **이 시점으로 복원** first saves the current Desk as its own explicit
+point and then publishes the chosen point as a new `restore` generation, so
+the current work is never overwritten; **지금 작업에 합치기** adds only the
+views missing now (`missingDeskRecoveryViews`). Chat rooms stay as they are.
+
+Saved Board revisions are separate rows with their own head: a Desk save never
+changes a Board and a Board save never makes a Desk generation (the CTX-01
+boundary).
 
 Board stores committed work state. The model sketches retain identifiers
 containing `agenda` for compatibility; Board is the product name.

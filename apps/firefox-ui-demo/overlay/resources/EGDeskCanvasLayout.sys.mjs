@@ -769,16 +769,22 @@ export function minimapSearchRows({
   const needle = searchText(query).trim().slice(0, MINIMAP_QUERY_MAX);
   const box = viewport ? toBox(viewport) : null;
   const order = (a, b) => a.rect.y - b.rect.y || a.rect.x - b.rect.x;
+  // A View's Board is named only from the open Boards passed in here; a saved
+  // Board that is not on the Desk is never resolved.
+  const boardTitles = new Map((Array.isArray(boards) ? boards : [])
+    .filter(board => board?.id != null).map(board => [board.id, String(board.title || 'Board').slice(0, 200)]));
   const collect = (list, kind) => (Array.isArray(list) ? list : []).map(item => {
     const rect = toWorldRect(item?.rect);
     if (item?.id == null || !rect) return null;
     const title = String(item.title ?? '').slice(0, 200);
     const at = needle ? searchText(title).indexOf(needle) : -1;
     if (needle && at < 0) return null;
+    const projectionId = kind === 'view' ? item.projectionId ?? null : null;
     return {
       id: item.id, kind, title, rect,
       viewKind: kind === 'view' && typeof item.kind === 'string' ? item.kind : null,
-      projectionId: kind === 'view' ? item.projectionId ?? null : null,
+      projectionId,
+      boardTitle: projectionId != null ? boardTitles.get(projectionId) ?? null : null,
       match: needle ? { start: at, length: needle.length } : null,
       visible: !!box && intersectsBox(rect, box),
       active: item.id === activeId,
@@ -795,6 +801,20 @@ export function minimapSearchRows({
     focusIndex = rows.findIndex(row => row.active);
   }
   return { rows, focusIndex, total: all.length, truncated: all.length > rows.length };
+}
+
+// What a minimap row is, in the words the Desk already uses for its Views
+// (the edge indicators say the same). The current Board stays '현재 Board'; a
+// current View reads '활성 브라우저', '활성 대화' …; an unknown kind is '화면'.
+export const MINIMAP_VIEW_KIND_LABELS = Object.freeze({
+  browser: '브라우저', chat: '대화', file: '파일', terminal: '터미널', settings: '설정',
+  ontology: '온톨로지', 'input-evidence': '자료', result: '결과', memo: '메모', shape: '도형',
+});
+export function minimapRowKindLabel({ kind = 'view', viewKind = null, current = false } = {}) {
+  if (kind === 'board') return current ? '현재 Board' : 'Board';
+  const type = typeof viewKind === 'string' && Object.hasOwn(MINIMAP_VIEW_KIND_LABELS, viewKind)
+    ? MINIMAP_VIEW_KIND_LABELS[viewKind] : '화면';
+  return current ? `활성 ${type}` : type;
 }
 
 // Choosing a row moves the camera only when the target is not already fully

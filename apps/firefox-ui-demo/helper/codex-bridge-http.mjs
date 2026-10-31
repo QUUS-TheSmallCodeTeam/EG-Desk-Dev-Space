@@ -1,6 +1,6 @@
-import { chatError, publicText, validateChatCwd } from './codex-chat-values.mjs'
+import { chatError, publicErrorKind, publicText, validateChatCwd } from './codex-chat-values.mjs'
 import { applyRateLimitsUpdate, normalizeRateLimits } from './codex-account-usage.mjs'
-import { publicAuthIdentityKey } from './codex-auth-state.mjs'
+import { ACCESS_FAILURE_KINDS, accessCause, accessFailureScope, publicAccessFailure, publicAuthIdentityKey } from './codex-auth-state.mjs'
 
 // Verified Firefox chrome and local CLI callers can omit Origin.
 // Ordinary web origins must match this loopback service; never echo arbitrary origins.
@@ -68,12 +68,18 @@ const historyId = (value, name) => {
 //   /chat/board/send       → sendBoard (D-M2: @mentioned members or the Lead answer; 202)
 //   /chat/share            → shareMessages (D-M3: copies into another conversation; 200)
 //   /chat/subagent/reassign → reassignSubAgent (D-M1: a blocked sub-Agent's task to its parent; 202)
+//   /chat/rooms/agent      → setRoomAgent (CHAT-01: the room's Agent picked without a send, null = plain Codex; 200)
 const CHAT_ACTIONS = Object.freeze({
   '/chat/send': 'send', '/chat/resume': 'resume', '/chat/interrupt': 'interrupt', '/chat/approval': 'replyApproval',
   '/chat/user-input': 'replyUserInput', '/chat/fork': 'fork',
   '/chat/board/send': 'sendBoard', '/chat/share': 'shareMessages', '/chat/subagent/reassign': 'reassignSubAgent',
+  '/chat/rooms/agent': 'setRoomAgent',
 })
 const SENDS = new Set(['/chat/send', '/chat/board/send'])
+// CHAT-01: a local-store write like /chat/history/import — no engine, no turn —
+// so it takes no engine account check: a pick made while signed out is still
+// kept for the next start, and the offline QA restart probe can record one.
+const LOCAL_WRITES = new Set(['/chat/rooms/agent'])
 
 export function createChatHttpHandler(chat, ensureAuth, history = chat) {
   return async (req, res, url) => {
@@ -164,7 +170,7 @@ export function createChatHttpHandler(chat, ensureAuth, history = chat) {
       const isSafetyResponse = url.pathname === '/chat/interrupt'
         || (url.pathname === '/chat/approval' && ['decline', 'cancel'].includes(body.decision))
         || (url.pathname === '/chat/user-input' && body.action === 'skip')
-      if (!isSafetyResponse) await ensureAuth(body)
+      if (!isSafetyResponse && !LOCAL_WRITES.has(url.pathname)) await ensureAuth(body)
       const action = CHAT_ACTIONS[url.pathname]
       if (typeof chat[action] !== 'function') throw Object.assign(new Error('This bridge does not offer that chat action'), { code: 'CHAT_ACTION_UNAVAILABLE', httpStatus: 501 })
       const result = await chat[action](body)
@@ -258,6 +264,47 @@ export function createRateLimitSync({ request, auth, ready = () => true, update,
     return true
   }
   return { refresh, notify }
+}
+
+/**
+ * SUB-14: the last auth/quota/permission rejection of a Codex turn, kept on
+ * the auth state as `accessFailure` {kind, cause, at, identity} so that
+ * auth.status and /v1/state can tell '인증 만료', '한도 도달' and '권한 부족'
+ * apart from '로그인 필요' (codex-auth-state accountAccessState).
+ * - an `error` the app-server will retry itself is not recorded;
+ * - a failed turn/completed records; a completed one clears everything;
+ * - turn/started clears a turn-scoped (policy/sandbox) cause only;
+ * - a finished sign-in clears the previous sign-in's failure.
+ * The identity is stored with the failure; another account never inherits it.
+ */
+export function createAccountAccessTracker({ auth, update, now = Date.now }) {
+  const current = () => publicAccessFailure(auth()?.accessFailure)
+  const set = failure => { if (JSON.stringify(current()) !== JSON.stringify(failure)) update({ accessFailure: failure }) }
+  function record(error) {
+    if (!error || typeof error !== 'object') return false
+    const kind = publicErrorKind(error)
+    if (!ACCESS_FAILURE_KINDS.includes(kind)) return false
+    set(publicAccessFailure({ kind, cause: accessCause(error.codexErrorInfo), at: now(), identity: publicAuthIdentityKey(auth()) }))
+    return true
+  }
+  function notify(message) {
+    const params = message?.params
+    switch (message?.method) {
+      case 'error': return params?.willRetry === true ? false : record(params?.error)
+      case 'turn/completed':
+        if (params?.turn?.error) return record(params.turn.error)
+        if (current()) set(null)
+        return false
+      case 'turn/started':
+        if (accessFailureScope(current()) === 'turn') set(null)
+        return false
+      case 'account/login/completed':
+        if (params?.success === true && current()) set(null)
+        return false
+      default: return false
+    }
+  }
+  return { notify, current }
 }
 
 /**

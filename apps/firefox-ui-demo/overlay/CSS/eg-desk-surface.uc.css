@@ -374,6 +374,46 @@
   user-select: none;
 }
 .egd-browser-agent-target[hidden] { display: none !important; }
+/* BRW-05 (D-B1): the person's answer to one more site, asked on the Card the
+   Agent works in. Tokens only, so dark follows the token block. */
+.egd-browser-site-ask {
+  position: absolute;
+  top: 8px;
+  left: 8px;
+  right: 8px;
+  z-index: 6;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px 12px;
+  padding: 10px 12px;
+  border-radius: 10px;
+  font: 500 12px/1.4 var(--egd-font);
+  color: var(--egd-on-surface);
+}
+.egd-browser-site-ask-text { flex: 1 1 200px; min-width: 0; }
+.egd-browser-site-ask-actions { display: inline-flex; gap: 6px; }
+.egd-browser-site-ask-allow,
+.egd-browser-site-ask-refuse {
+  height: 24px;
+  padding: 0 10px;
+  border: 1px solid var(--egd-outline);
+  border-radius: 6px;
+  background: var(--egd-surface-elevated);
+  color: var(--egd-on-surface);
+  font: 600 12px/1 var(--egd-font);
+  cursor: pointer;
+}
+.egd-browser-site-ask-allow {
+  border-color: color-mix(in srgb, var(--egd-primary) 40%, transparent);
+  color: var(--egd-primary);
+}
+/* BRW-07 (D-B2): a Card the Agent opened inside a grant says so in its title row. */
+.egd-browser-card[data-egd-agent-opened="true"] > .egd-card-header .egd-card-page-title::before {
+  content: "Agent가 연 카드 · ";
+  color: var(--egd-primary);
+  font-weight: 600;
+}
 
 .egd-semantic-label {
   display: block;
@@ -578,6 +618,35 @@
   border-radius: 50%;
   background: var(--egd-primary);
 }
+/* CODE-02 (D-X3): the Board's project folder, as the bridge verified it now.
+   Connected shows the folder name; a stored folder whose dev/ino no longer
+   matches asks to pick it again; 'unavailable' means the bridge did not answer. */
+.egd-board-region-project {
+  appearance: none;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  min-width: 0;
+  max-width: 44%;
+  padding: 2px 7px;
+  border: 1px solid var(--egd-outline-variant);
+  border-radius: 999px;
+  background: var(--egd-surface-elevated);
+  color: var(--egd-on-surface-variant);
+  font: 500 10.5px/1.3 var(--egd-font);
+  white-space: nowrap;
+  cursor: pointer;
+}
+.egd-board-region-project .egd-ui-icon { flex: none; width: 12px; height: 12px; }
+.egd-board-region-project-name { overflow: hidden; text-overflow: ellipsis; }
+.egd-board-region-project:hover { background: var(--egd-hover); color: var(--egd-on-surface); }
+.egd-board-region-project:focus-visible { outline: var(--egd-focus-outline); outline-offset: var(--egd-focus-outline-offset); }
+.egd-board-region-project[data-status="reconnect-required"],
+.egd-board-region-project[data-status="unavailable"] {
+  border-color: color-mix(in srgb, var(--egd-warning-ink) 26%, transparent);
+  background: color-mix(in srgb, var(--egd-warning-ink) 10%, transparent);
+  color: var(--egd-warning-ink);
+}
 .egd-board-region-menu-button {
   appearance: none;
   display: grid;
@@ -652,6 +721,9 @@
 .egd-board-menu-item:hover,
 .egd-board-menu-item:focus-visible { background: var(--egd-hover); }
 .egd-board-menu-item:focus-visible { --egd-focus-outline-offset: var(--egd-focus-outline-inset); outline: var(--egd-focus-outline); outline-offset: var(--egd-focus-outline-offset); }
+/* CNV-03: the View bar's Board menu names Boards, which can be long. */
+.egd-board-menu-view .egd-board-menu-item { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.egd-board-menu-view .egd-board-menu-item[aria-disabled="true"] { color: var(--egd-on-surface-variant); cursor: default; }
 .egd-board-missing { box-sizing: border-box; padding: 18px; overflow: auto; background: var(--egd-note-soft); color: var(--egd-on-surface); font: 13px/1.5 var(--egd-font); }
 .egd-board-missing strong { overflow-wrap: anywhere; }
 .egd-board-missing button { padding: 5px 12px; border: 1px solid var(--egd-line-strong); border-radius: 5px; }
@@ -1426,6 +1498,65 @@
 }
 .egd-desk-window-board[hidden] { display: none; }
 
+/* CNV-03: the Board control after the Board name. Owned: a chevron; without a
+   recorded owner it reads '소속 없음' so the bar never implies a Board. */
+.egd-desk-window-board-menu {
+  appearance: none;
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  flex: 0 0 auto;
+  height: 20px;
+  padding: 0 4px;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--egd-on-surface-variant);
+  font: 500 11px/1 var(--egd-font);
+  white-space: nowrap;
+  cursor: pointer;
+}
+.egd-desk-window-board-menu .egd-ui-icon { width: 12px; height: 12px; }
+.egd-desk-window-board-menu-text:empty { display: none; }
+.egd-desk-window-board-menu:hover,
+.egd-desk-window-board-menu[aria-expanded="true"] { background: var(--egd-hover); color: var(--egd-on-surface); }
+.egd-desk-window-board-menu:focus-visible { outline: var(--egd-focus-outline); outline-offset: var(--egd-focus-outline-offset); }
+/* A compact Browser bar that already yields the Board name keeps only the chevron. */
+.egd-browser-card[data-egd-board-visual-hidden="true"] .egd-desk-window-board-menu-text { display: none; }
+@container egd-browser-title (max-width: 360px) {
+  .egd-desk-window-board-menu-text { display: none; }
+}
+
+/* CNV-03: '○○에 넣을까요?' under the View bar (D-V2, D-V3). It is part of the
+   header, so it moves with the View and never covers the page. */
+.egd-board-suggest {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 8px;
+  border-top: 1px solid var(--egd-outline);
+  background: var(--egd-primary-container);
+  color: var(--egd-on-surface);
+  font: 500 11px/1.3 var(--egd-font);
+  cursor: default;
+}
+.egd-board-suggest > .egd-ui-icon { flex: none; width: 13px; height: 13px; color: var(--egd-primary); }
+.egd-board-suggest-text { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.egd-board-suggest button {
+  appearance: none;
+  flex: none;
+  padding: 2px 9px;
+  border: 1px solid var(--egd-outline);
+  border-radius: 999px;
+  background: var(--egd-surface-elevated);
+  color: var(--egd-on-surface);
+  font: 600 11px/1.3 var(--egd-font);
+  cursor: pointer;
+}
+.egd-board-suggest-accept { border-color: var(--egd-primary); color: var(--egd-primary); }
+.egd-board-suggest button:hover { background: var(--egd-hover); }
+.egd-board-suggest button:focus-visible { outline: var(--egd-focus-outline); outline-offset: var(--egd-focus-outline-offset); }
+
 .egd-desk-window-actions {
   display: inline-flex;
   align-items: center;
@@ -1910,6 +2041,32 @@
 }
 .egd-browser-card .egd-browser-agent-badge[hidden],
 .egd-browser-card .egd-browser-agent-hand[hidden] { display: none; }
+/* AGENT-05: the Agent at work on this Card — its small face and name beside the badge. */
+.egd-browser-card .egd-browser-agent-status { gap: 4px; }
+.egd-browser-card .egd-browser-agent-identity {
+  display: inline-flex;
+  align-items: center;
+  flex: 0 1 auto;
+  gap: 5px;
+  min-width: 0;
+  max-width: 140px;
+  height: 20px;
+  padding: 0 7px 0 3px;
+  border: 1px solid var(--egd-outline);
+  border-radius: 999px;
+  background: var(--egd-surface-elevated);
+  color: var(--egd-on-surface);
+  font: 600 11px/1 var(--egd-font);
+  white-space: nowrap;
+}
+.egd-browser-card .egd-browser-agent-identity[hidden] { display: none; }
+.egd-browser-card .egd-browser-agent-face { width: 14px; height: 14px; font-size: 8px; }
+.egd-browser-card .egd-browser-agent-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.egd-browser-card[data-egd-browser-presentation] .egd-browser-agent-identity {
+  height: calc(20px * var(--egd-browser-ui-scale));
+  max-width: calc(140px * var(--egd-browser-ui-scale));
+  font-size: calc(11px * var(--egd-browser-ui-scale));
+}
 /* The persistent badge says it; the passing note would only repeat it. */
 .egd-browser-card:is([data-egd-agent-control="operating"], [data-egd-agent-control="user"]) .egd-browser-agent-activity { display: none; }
 /* Readable at any Desk zoom, like the rest of the attached Browser bar. */
@@ -3128,6 +3285,21 @@
   color: var(--egd-on-surface-variant);
 }
 
+/* A View row also names the open Board it belongs to, before its kind. */
+.egd-minimap-row-board {
+  margin-left: auto;
+  min-width: 0;
+  max-width: 38%;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  font-size: 10px;
+  color: var(--egd-on-surface-variant);
+}
+.egd-minimap-row-board + .egd-minimap-row-kind {
+  margin-left: 0;
+}
+
 /* ============ Bottom: Dock ============
    compact bottom dock, centered, content-aware width */
 #egd-dock {
@@ -3720,6 +3892,23 @@
   line-height: 1;
 }
 
+/* CHAT-03 (D-M2): a Board Thread row where an Agent called the person by name */
+.egd-codex-thread-mention {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 18px;
+  min-height: 18px;
+  padding: 0 5px;
+  border-radius: 999px;
+  border: 1px solid color-mix(in srgb, var(--egd-primary) 24%, transparent);
+  background: color-mix(in srgb, var(--egd-primary) 14%, transparent);
+  color: var(--egd-primary);
+  font-size: 10px;
+  font-weight: 700;
+  line-height: 1;
+}
+
 .egd-codex-thread-menu-trigger {
   display: inline-flex;
   align-items: center;
@@ -4076,6 +4265,13 @@
 .egd-codex-system-chip-idle {
   background: color-mix(in srgb, var(--egd-on-surface-variant) 10%, transparent);
   border-color: color-mix(in srgb, var(--egd-on-surface-variant) 20%, transparent);
+}
+
+/* SUB-14: a reached usage limit is a wait state, not an error. */
+.egd-codex-system-chip-limit {
+  background: color-mix(in srgb, var(--egd-warning-ink) 12%, transparent);
+  border-color: color-mix(in srgb, var(--egd-warning-ink) 24%, transparent);
+  color: var(--egd-warning-ink);
 }
 
 .egd-codex-chrome-actions {
@@ -4595,27 +4791,67 @@
 .egdesk-chat-change-content { display: flex; flex-direction: column; gap: 8px; padding-top: 6px; }
 .egdesk-chat-change-note { margin: 0; color: var(--egd-on-surface-variant); overflow-wrap: anywhere; }
 .egdesk-chat-change-review .egdesk-diff-view,
-.egdesk-chat-change-review .egdesk-diff-file { min-width: 0; max-width: 100%; box-sizing: border-box; }
+.egdesk-change-review .egdesk-diff-view,
+.egdesk-chat-change-review .egdesk-diff-file,
+.egdesk-change-review .egdesk-diff-file { min-width: 0; max-width: 100%; box-sizing: border-box; }
 .egdesk-chat-change-review .egdesk-diff-summary,
+.egdesk-change-review .egdesk-diff-summary,
 .egdesk-chat-change-review .egdesk-diff-note,
-.egdesk-chat-change-review .egdesk-diff-file-move { margin: 6px 0; overflow-wrap: anywhere; }
-.egdesk-chat-change-review .egdesk-diff-file { margin: 8px 0; }
-.egdesk-chat-change-review .egdesk-diff-file-summary { padding: 6px 0; cursor: pointer; overflow-wrap: anywhere; }
-.egdesk-chat-change-review .egdesk-diff-file-summary > span { margin-inline-end: 8px; }
+.egdesk-change-review .egdesk-diff-note,
+.egdesk-chat-change-review .egdesk-diff-file-move,
+.egdesk-change-review .egdesk-diff-file-move { margin: 6px 0; overflow-wrap: anywhere; }
+.egdesk-chat-change-review .egdesk-diff-file,
+.egdesk-change-review .egdesk-diff-file { margin: 8px 0; }
+.egdesk-chat-change-review .egdesk-diff-file-summary,
+.egdesk-change-review .egdesk-diff-file-summary { padding: 6px 0; cursor: pointer; overflow-wrap: anywhere; }
+.egdesk-chat-change-review .egdesk-diff-file-summary > span,
+.egdesk-change-review .egdesk-diff-file-summary > span { margin-inline-end: 8px; }
 .egdesk-chat-change-review .egdesk-diff-file-change,
+.egdesk-change-review .egdesk-diff-file-change,
 .egdesk-chat-change-review .egdesk-diff-file-added,
-.egdesk-chat-change-review .egdesk-diff-file-removed { display: inline-block; white-space: nowrap; }
+.egdesk-change-review .egdesk-diff-file-added,
+.egdesk-chat-change-review .egdesk-diff-file-removed,
+.egdesk-change-review .egdesk-diff-file-removed { display: inline-block; white-space: nowrap; }
 .egdesk-chat-change-review .egdesk-diff-hunk,
-.egdesk-chat-change-review .egdesk-diff-raw { box-sizing: border-box; min-width: 0; max-width: 100%; max-height: 18rem; overflow: auto; padding-bottom: 12px; background: var(--egd-window-alt); border-radius: 7px; }
-.egdesk-chat-change-review .egdesk-diff-raw { white-space: pre; overflow-wrap: normal; word-break: normal; }
-.egdesk-chat-change-review .egdesk-diff-hunk-header { margin: 0; padding: 6px 8px; color: var(--egd-on-surface-variant); font-size: 11px; }
-.egdesk-chat-change-review .egdesk-diff-lines { width: max-content; min-width: 100%; box-sizing: border-box; margin: 0; padding: 0; list-style: none; font: 12px/1.65 ui-monospace, monospace; }
-.egdesk-chat-change-review .egdesk-diff-line { display: grid; grid-template-columns: 4ch 4ch 2ch minmax(0, 1fr); padding-inline: 4px 8px; }
-.egdesk-chat-change-review .egdesk-diff-ln { color: var(--egd-on-surface-variant); text-align: right; padding-right: 1ch; }
-.egdesk-chat-change-review .egdesk-diff-sign { text-align: center; }
-.egdesk-chat-change-review .egdesk-diff-text { white-space: pre; font: inherit; text-decoration: none; }
-.egdesk-chat-change-review .egdesk-diff-line-add { background: var(--egd-success-bg); }
-.egdesk-chat-change-review .egdesk-diff-line-delete { background: var(--egd-danger-bg); }
+.egdesk-change-review .egdesk-diff-hunk,
+.egdesk-chat-change-review .egdesk-diff-raw,
+.egdesk-change-review .egdesk-diff-raw { box-sizing: border-box; min-width: 0; max-width: 100%; max-height: 18rem; overflow: auto; padding-bottom: 12px; background: var(--egd-window-alt); border-radius: 7px; }
+.egdesk-chat-change-review .egdesk-diff-raw,
+.egdesk-change-review .egdesk-diff-raw { white-space: pre; overflow-wrap: normal; word-break: normal; }
+.egdesk-chat-change-review .egdesk-diff-hunk-header,
+.egdesk-change-review .egdesk-diff-hunk-header { margin: 0; padding: 6px 8px; color: var(--egd-on-surface-variant); font-size: 11px; }
+.egdesk-chat-change-review .egdesk-diff-lines,
+.egdesk-change-review .egdesk-diff-lines { width: max-content; min-width: 100%; box-sizing: border-box; margin: 0; padding: 0; list-style: none; font: 12px/1.65 ui-monospace, monospace; }
+.egdesk-chat-change-review .egdesk-diff-line,
+.egdesk-change-review .egdesk-diff-line { display: grid; grid-template-columns: 4ch 4ch 2ch minmax(0, 1fr); padding-inline: 4px 8px; }
+.egdesk-chat-change-review .egdesk-diff-ln,
+.egdesk-change-review .egdesk-diff-ln { color: var(--egd-on-surface-variant); text-align: right; padding-right: 1ch; }
+.egdesk-chat-change-review .egdesk-diff-sign,
+.egdesk-change-review .egdesk-diff-sign { text-align: center; }
+.egdesk-chat-change-review .egdesk-diff-text,
+.egdesk-change-review .egdesk-diff-text { white-space: pre; font: inherit; text-decoration: none; }
+.egdesk-chat-change-review .egdesk-diff-line-add,
+.egdesk-change-review .egdesk-diff-line-add { background: var(--egd-success-bg); }
+.egdesk-chat-change-review .egdesk-diff-line-delete,
+.egdesk-change-review .egdesk-diff-line-delete { background: var(--egd-danger-bg); }
+.egdesk-chat-change-review-actions { display: flex; flex-direction: column; gap: 4px; align-items: flex-start; }
+.egdesk-chat-change-review-open { max-width: 100%; text-align: left; }
+/* Stage 2 (D-X2) review after apply: the File Card's 변경 검토 panel (EGDeskChangeReview). */
+.egdesk-change-review { display: flex; flex-direction: column; gap: 8px; margin-top: 8px; }
+.egdesk-change-review-summary, .egdesk-change-review-status, .egdesk-change-review-note, .egdesk-change-review-error, .egdesk-change-review-conflict-text, .egdesk-change-review-delete-question { margin: 0; overflow-wrap: anywhere; }
+.egdesk-change-review-status { color: var(--egd-on-surface-variant); font-size: 12px; }
+.egdesk-change-review-error { padding: 5px 8px; background: var(--egd-danger-bg); color: var(--egd-danger-ink); border-radius: 5px; }
+.egdesk-change-review-file { display: flex; flex-direction: column; gap: 6px; padding: 8px; border: 1px solid var(--egd-outline); border-radius: 7px; }
+.egdesk-change-review-file-heading { margin: 0; font-size: 13px; overflow-wrap: anywhere; }
+.egdesk-change-review-chunks { margin: 0; padding-inline-start: 1.4em; }
+.egdesk-change-review-chunk { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; padding: 3px 0; }
+.egdesk-change-review-chunk-label { flex: 1 1 12em; min-width: 0; overflow-wrap: anywhere; }
+.egdesk-change-review-pick[aria-pressed="true"] { background: var(--egd-note-soft); border-color: var(--egd-note-line); }
+.egdesk-change-review-conflict { display: flex; flex-direction: column; gap: 6px; padding: 8px; background: var(--egd-note-soft); border: 1px solid var(--egd-note-line); border-radius: 7px; }
+.egdesk-change-review-conflict-heading { margin: 0; font-size: 13px; }
+.egdesk-change-review-delete-confirm { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
+.egdesk-change-review button { align-self: flex-start; }
+.egdesk-change-review-chunk button, .egdesk-change-review-delete-confirm button { align-self: auto; }
 
 .egd-codex-message-row-assistant,
 .egd-codex-message-row-system {
@@ -4834,6 +5070,35 @@
 .egd-codex-result-chip-run {
   color: var(--egd-on-surface-variant) !important;
 }
+
+/* CHAT-08: Agent-published Canvas result chips — kind badge, title, '버전 n'.
+   Opening and '열 수 없음' are states of the chip itself (no toast). */
+.egd-codex-result-chip-output { gap: 6px; }
+.egd-codex-result-kind {
+  display: inline-flex;
+  align-items: center;
+  flex: 0 0 auto;
+  min-height: 16px;
+  padding: 0 6px;
+  border: 1px solid var(--egd-outline);
+  border-radius: 999px;
+  color: var(--egd-on-surface-variant);
+  font-size: 10px;
+  font-weight: 650;
+  line-height: 1;
+  white-space: nowrap;
+}
+.egd-codex-result-version,
+.egd-codex-result-state {
+  flex: 0 0 auto;
+  color: var(--egd-on-surface-variant);
+  font-size: 12px;
+  white-space: nowrap;
+}
+.egd-codex-result-state:empty { display: none; }
+.egd-codex-result-chip-output[data-state="opening"] { cursor: progress; }
+.egd-codex-result-chip-output[data-state="opening"] .egd-codex-result-label { text-decoration: none; }
+.egd-codex-result-chip-output[data-state="unavailable"] { color: var(--egd-on-surface-variant) !important; }
 
 .egd-codex-streaming {
   margin-top: 5px;
@@ -5075,6 +5340,19 @@
 .egdesk-run-result-failure-name { display: block; margin-bottom: 4px; }
 .egdesk-run-result-location { max-width: 100%; box-sizing: border-box; white-space: normal; overflow-wrap: anywhere; }
 .egdesk-run-result-output { min-width: 0; max-width: 100%; margin-top: 8px; }
+/* CODE-06: a typed Terminal command's result above the terminal, and its chip in the header. */
+.egd-terminal-run-result { flex: 0 0 auto; max-height: 45%; overflow: auto; box-sizing: border-box; padding: 8px 12px 10px; font-size: 13px; line-height: 1.45; color: var(--egd-on-surface); background: var(--egd-surface-elevated); border-bottom: 1px solid var(--egd-outline); }
+.egd-terminal-run-result[hidden] { display: none; }
+.egd-terminal-run-result-bar { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 10px; margin-bottom: 6px; }
+.egd-terminal-run-result-title { font-weight: 600; }
+.egd-terminal-run-result-note { flex: 1 1 auto; min-width: 0; font-size: 11px; color: var(--egd-on-surface-variant); }
+.egd-terminal-run-result-close { flex: 0 0 auto; font: inherit; font-size: 11px; padding: 1px 8px; border-radius: 6px; border: 1px solid var(--egd-outline); background: transparent; color: inherit; cursor: pointer; }
+.egd-terminal-run-result .egdesk-run-result-tail { max-height: 10rem; }
+.egd-terminal-run-chip { flex: 0 1 auto; margin-left: auto; max-width: 42%; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font: inherit; font-size: 11px; line-height: 1.4; padding: 1px 9px; border-radius: 999px; border: 1px solid rgba(255, 255, 255, 0.18); background: rgba(255, 255, 255, 0.08); color: #B9C3CC; cursor: pointer; }
+.egd-terminal-run-chip[hidden] { display: none; }
+.egd-terminal-run-chip[data-outcome="failed"] { color: #FFB4A9; border-color: rgba(255, 180, 169, 0.45); }
+.egd-terminal-run-chip[data-outcome="passed"] { color: #9FE3B0; border-color: rgba(159, 227, 176, 0.45); }
+.egd-terminal-run-chip:focus-visible, .egd-terminal-run-result-close:focus-visible { outline: var(--egd-focus-outline); outline-offset: var(--egd-focus-outline-offset); }
 
 .egd-codex-footer {
   display: flex;
@@ -5451,6 +5729,59 @@
 .egd-settings-usage-note-strong { color: var(--egd-danger-ink); font-weight: 600; }
 .egd-settings-usage.egd-usage-limit { border-color: var(--egd-danger-line); background: var(--egd-danger-bg); }
 .egd-settings-usage.egd-usage-limit .egd-settings-usage-title { color: var(--egd-danger-ink); }
+
+/* 계정 메뉴·확인 (SUB-01) and the bridge/Claude state cards (SUB-05). */
+.egd-settings-account-card[data-state="checking"],
+.egd-settings-account-card[data-state="offline"],
+.egd-settings-account-card[data-state="disconnected"] { border-style: dashed; }
+.egd-settings-account-card[data-state="offline"] .egd-settings-account-title,
+.egd-settings-account-card[data-state="disconnected"] .egd-settings-account-title { color: var(--egd-warning-ink); }
+.egd-settings-account-menu { position: relative; flex-shrink: 0; }
+.egd-settings-account-menu > summary { list-style: none; display: inline-flex; align-items: center; gap: 5px; }
+.egd-settings-account-menu > summary::-webkit-details-marker { display: none; }
+.egd-settings-account-menu > summary::after { content: '▾'; font-size: 10px; opacity: .8; }
+.egd-settings-account-menu-list {
+  position: absolute;
+  right: 0;
+  top: calc(100% + 4px);
+  z-index: 3;
+  display: flex;
+  flex-direction: column;
+  min-width: 184px;
+  padding: 4px;
+  border: 1px solid var(--egd-outline);
+  border-radius: 8px;
+  background: var(--egd-surface-elevated);
+  box-shadow: var(--egd-shadow);
+}
+.egd-settings-account-menu-item {
+  padding: 7px 10px;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--egd-on-surface);
+  font: 500 12.5px/1.4 var(--egd-font);
+  text-align: left;
+  cursor: pointer;
+}
+.egd-settings-account-menu-item:hover { background: var(--egd-hover); }
+.egd-settings-account-menu-item:focus-visible { outline: var(--egd-focus-outline); outline-offset: var(--egd-focus-outline-offset); }
+.egd-settings-account-menu-item[disabled] { opacity: var(--egd-opacity-disabled); cursor: default; }
+.egd-settings-account-menu-item-danger { color: var(--egd-danger-ink); }
+.egd-settings-account-confirm {
+  margin-top: 8px;
+  padding: 12px 14px;
+  border: 1px solid var(--egd-outline);
+  border-radius: 10px;
+  background: var(--egd-window-alt);
+}
+.egd-settings-account-confirm-danger { border-color: var(--egd-danger-line); background: var(--egd-danger-bg); }
+.egd-settings-account-confirm-title { font-size: 13px; font-weight: 650; }
+.egd-settings-account-confirm-line { margin-top: 4px; font-size: 11.5px; color: var(--egd-on-surface-variant); }
+.egd-settings-account-confirm-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 10px; }
+.egd-settings-account-result { margin-top: 8px; font-size: 11.5px; color: var(--egd-on-surface-variant); }
+.egd-settings-account-result-error { color: var(--egd-danger-ink); }
+.egd-settings-account-hint { margin: 6px 0 8px; }
 
 /* --- Agent list and detail --- */
 .egd-settings-agent-row {
@@ -7202,6 +7533,10 @@
 .egd-codex-message-avatar.egd-profile-avatar-tone-4 { background: color-mix(in srgb, var(--egd-avatar-ink) 15%, var(--egd-avatar-paper)); color: var(--egd-avatar-ink); }
 .egd-profile-avatar-tone-5,
 .egd-codex-message-avatar.egd-profile-avatar-tone-5 { background: var(--egd-avatar-note); color: var(--egd-avatar-ink); box-shadow: inset 0 0 0 1px var(--egd-outline); }
+/* AGENT-05 / D-A3: a saved photo fills the face once read; the tone shows only until then. */
+.egd-profile-avatar-photo,
+button.egd-codex-message-avatar.egd-profile-avatar-photo { padding: 0; background: var(--egd-avatar-paper); box-shadow: inset 0 0 0 1px var(--egd-outline); }
+.egd-profile-avatar-image { display: block; width: 100%; height: 100%; object-fit: cover; border-radius: inherit; pointer-events: none; }
 .egd-codex-thread-menu-avatar { width: 18px; height: 18px; font-size: 9px; }
 .egd-codex-thread-menu-note {
   padding: 4px 8px;
@@ -7482,6 +7817,35 @@ button.egd-codex-session-badge-link:focus-visible { outline: var(--egd-focus-out
   background: var(--egd-chat-layer-elevated);
   color: var(--egd-on-surface);
 }
+/* CHAT-03 (D-M3): choosing DM bubbles, the target picker, and the copies shown in the Board Thread */
+.egd-codex-select-bar { display: flex; align-items: center; gap: 8px; flex-shrink: 0; padding: 6px 12px; border-bottom: 1px solid var(--egd-chat-outline-soft); background: var(--egd-chat-layer-elevated); color: var(--egd-on-surface-variant); font: 12px/1.4 var(--egd-font); }
+.egd-codex-select-bar-text { flex: 1 1 auto; min-width: 0; }
+.egd-codex-message-select { flex: none; align-self: center; width: 16px; height: 16px; margin: 0 2px; accent-color: var(--egd-primary); }
+.egd-codex-sent-chip .egd-codex-result-label::before { content: '↗ '; }
+.egd-codex-board-move { min-width: 260px; }
+.egd-codex-return-dm { flex: none; }
+.egd-codex-shared-block {
+  box-sizing: border-box;
+  flex-shrink: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  width: min(100%, 760px);
+  margin-inline: auto;
+  padding: 8px 12px;
+  border: 1px dashed var(--egd-chat-outline-soft);
+  border-radius: 10px;
+  background: color-mix(in srgb, var(--egd-chat-layer-elevated) 70%, transparent);
+}
+.egd-codex-shared-block-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.egd-codex-shared-block-title { color: var(--egd-on-surface); font: 600 12px/1.4 var(--egd-font); }
+.egd-codex-shared-copy { display: grid; grid-template-columns: auto 1fr; gap: 8px; padding: 4px 6px; border-radius: 6px; color: var(--egd-on-surface); font: 12px/1.5 var(--egd-font); white-space: pre-wrap; overflow-wrap: anywhere; }
+.egd-codex-shared-copy-user { background: color-mix(in srgb, var(--egd-primary) 8%, transparent); }
+.egd-codex-shared-copy-author { font-weight: 650; color: var(--egd-on-surface-variant); }
+.egd-codex-shared-block-note { color: var(--egd-on-surface-variant); font: 11px/1.4 var(--egd-font); }
+.egd-codex-mention-row { display: flex; flex-wrap: wrap; gap: 4px; padding: 0 2px; }
+.egd-codex-mention-chip { display: inline-flex; align-items: center; min-height: 16px; padding: 0 6px; border-radius: 999px; background: color-mix(in srgb, var(--egd-on-surface-variant) 10%, transparent); color: var(--egd-on-surface-variant); font-size: 10px; font-weight: 650; line-height: 1; white-space: nowrap; }
+.egd-codex-mention-chip-user { background: color-mix(in srgb, var(--egd-primary) 14%, transparent); color: var(--egd-primary); }
 .egd-codex-stateless-start { display: flex; flex-direction: column; flex-shrink: 0; align-self: flex-start; gap: 5px; width: 100%; max-width: 300px; margin-top: 10px; }
 button.egd-codex-stateless-toggle {
   display: inline-flex;
@@ -8042,6 +8406,10 @@ button.egd-codex-working-bubble:focus-visible { outline: var(--egd-focus-outline
 .egd-codex-working-bubble .egd-codex-typing-dots { margin-right: 0; }
 .egd-codex-working-row[data-state="approval"] .egd-codex-working-bubble,
 .egd-codex-working-row[data-state="question"] .egd-codex-working-bubble { border-color: var(--egd-note-line); background: var(--egd-note-soft); color: var(--egd-warning-ink); }
+/* Several Agents at work in one room: each bubble under its own name, rows a breath apart. */
+.egd-codex-working-stack { display: flex; flex-direction: column; align-items: flex-start; gap: 3px; min-width: 0; }
+.egd-codex-working-name { padding-left: 2px; }
+.egd-codex-working-row + .egd-codex-working-row { margin-top: 4px; }
 
 /* AGENT-04 in the activity record: the run's ceiling under its head, and the
    notes a ceiling row carries. */

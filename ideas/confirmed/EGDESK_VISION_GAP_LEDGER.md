@@ -1,11 +1,11 @@
 # EG-Desk 비전 Gap 원장
 
-**기준일**: 2026-10-29 (최초 조사 코드 기준 `bebe45c`, 상태 표는 `5760981` 집계에 `d18ece0`의 CODE-07 일부 전환을 반영. 나머지 후속 연결·검증은 아래 날짜별 체크포인트에 기록. 작업 브랜치 `claude/vision-gap-20261024`)
+**기준일**: 2026-10-31 (최초 조사 코드 기준 `bebe45c`, 상태 표는 `5760981` 집계에 `d18ece0`의 CODE-07 일부 전환과 `7a5a031`(2026-10-31, 야간 자율 라운드 12개 작업 브랜치 병합)과 `1a2f304`(같은 날 2차 라운드 CHAT-01·CHAT-08 병합)의 상태 전환을 반영. 나머지 후속 연결·검증은 아래 날짜별 체크포인트에 기록. 작업 브랜치 `claude/vision-gap-20261024`)
 
 **정본 백로그**: [EGDESK_PRODUCT_VISION_AND_DEV_TODO.md](./EGDESK_PRODUCT_VISION_AND_DEV_TODO.md)  
 **범위**: 비전 문서의 미체크 항목 + 2026-10-24 대표님 추가 목표(기능·UI/UX·디자인 전부, Codex+Claude 구독 지원, 브라우저 제어, 컴퓨터 사용, Agent 캐릭터 설정)
 
-총 95개 항목 — 없음 11 · 일부 53 · 완료 31 · 미확인 0 (영역 표의 상태 열 집계. `5760981` 때 없음 12 · 일부 52 · 완료 31이었으며, 이번에 CODE-07의 프로젝트 File 진입을 연결·격리 검증해 일부로 바꿨다. 나머지 항목 전체를 재검증한 수치는 아니다. 최초 조사 때는 없음 45 · 일부 47 · 완료 2 · 미확인 1).
+총 95개 항목 — 없음 9 · 일부 48 · 완료 38 · 미확인 0 (영역 표의 상태 열 집계. `1a2f304`(2026-10-31 2차 병합)에서 CHAT-08을 일부에서 완료로 바꿨고 CHAT-01은 일부를 유지했다. 그 전 `7a5a031`(2026-10-31 병합)에서 CTX-02·UX-02·SUB-14·SUB-05·BRW-05·BRW-11을 일부에서 완료로, BRW-07·BRW-09를 없음에서 일부로 바꿨다. CHAT-03은 영역 표에서 이미 일부였고 상세의 옛 '없음' 표기를 맞췄다. 이 완료 전환은 세션 보고 범위와 단건 테스트에 근거하며 Firefox 실화면 검증은 어느 항목에도 없다. 그 전 `d18ece0` 때 없음 11 · 일부 53 · 완료 31, `5760981` 때 없음 12 · 일부 52 · 완료 31이었다. 나머지 항목 전체를 재검증한 수치는 아니다. 최초 조사 때는 없음 45 · 일부 47 · 완료 2 · 미확인 1).
 상태는 처음에 코드·git 기록과 대조해 판별했다(읽기 전용 조사, 테스트·Firefox 미실행). 그 뒤 바뀐 것은 진행 기록에 근거를 남겼다. 체크박스가 아니라 이 원장의 상태 열이 현재 판단이다. '일부(helper·모듈)'는 helper나 순수 모듈만 있고 화면 연결 전이라는 뜻이다.
 
 ## 진행 기록
@@ -16,9 +16,25 @@
 
 | 날짜 | 항목 | 상태 변화 | 근거 |
 |---|---|---|---|
+| 2026-10-31 | (병합) 2차 라운드 2개 작업 브랜치 → `claude/vision-gap-20261024` | 기준 `1011163` → HEAD `1a2f304` | 병합 커밋 `9e45e00`(CHAT-01, 브랜치 커밋 `66d4162`·`c34e2d9`·`47f7c4f`·`7fb5089`) → `1a2f304`(CHAT-08, `6f4b4fb`·`69d205c`), 충돌 없음. 기준 `1011163`은 1차 병합 뒤 원장·문서 커밋이다. 파일 9(+790/−51: uc.js, EGDeskChatState, codex-chat-runtime·bridge-http와 각 시험, surface-state 시험, verify-chat-history-restart). 병합 트리에서 프로젝트 고정 Node 단건 테스트 11개 파일 실패 0(surface-state 955/955, codex-chat-runtime 196, codex-bridge-http 36, chat-store 26, chat-presentation 9 등). Firefox 실화면은 둘 다 미검증. push 없음. |
+| 2026-10-31 | CHAT-01 방별 Agent 선택의 store 복원·전송 없는 즉시 저장 | 일부 유지(store 복원·⋯ 메뉴 즉시 저장 연결, 재시작 프로브 미실행) | `66d4162`·`47f7c4f`·`c34e2d9`·`7fb5089`. Desk pref가 되살리지 않은 방은 store가 기록한 `thread.agent{profileId, revision, setAt}`(`/chat/history/threads`·`/chat/history` 양쪽)로 `profileEnabled/agentProfileId`를 복원한다. 살아 있는 Desk pref의 선택이 우선이고 store는 방이 아무것도 고르지 않았을 때만 쓴다. `thread.agent`는 화면 thread에 store 기록 그대로 남고 revision·setAt은 보존·전달만 한다. 없거나 중지된 Agent는 그 자체로 복원해 기존 자리표시·전송 차단이 보인다. ⋯ 메뉴에서 Agent만 바꿔도(또는 '기본 Codex' = null) `POST /chat/rooms/agent`로 전송 없이 즉시 기록해 재시작 뒤 옛 선택이 되살아나지 않는다. 이 라우트는 `/chat/history/import`처럼 로컬 저장소 쓰기라 엔진 계정 확인을 거치지 않고, 한 번도 보내지 않은 방의 404는 화면이 조용히 넘기며 첫 전송이 선택을 기록한다. `verify-chat-history-restart.mjs`에 seed 단계의 방 Agent 기록과 양쪽 라우트의 `thread.agent` 동일·재시작 뒤 보존 단언을 더했으나 프로브는 실행하지 않았다. `b4e51f8`(2026-10-24, 저장소 v3·라우트)의 S10 화면 연결에 해당한다. 남은 것: 재시작 프로브 실행, Firefox 실화면, Board 저장 record(chat card)의 thread binding 참조. |
+| 2026-10-31 | CHAT-08 Agent 게시 결과의 Chat 칩과 Canvas 결과 카드 연결(S3) | 일부 → 완료(실화면 미검증, 저장 방식 D-K3 미결) | `6f4b4fb`·`69d205c`. `output.published`가 run.outputs에 outputKey당 한 항목으로 접히고(최신 버전이 대표, 이전 버전 보존 — D-K4), snapshot·로컬 기록·legacy 기록이 run.context.outputs를 나르며 최종 답변이 message.outputs를 투영한다. 답변 아래 칩 '결과 · 제목 · 버전 n'(testid `chat-output`)은 같은 outputKey의 재게시를 새 칩이 아니라 '버전 2'로 바꾸고 아무것도 저절로 열지 않는다(D-K4). 칩을 누르면 `GET /context/outputs/:id`(방 라우팅 힌트 포함)로 본문을 읽어 CHAT-04 결과 카드로 열며, 같은 key의 열린 카드는 포커스, 새 버전은 다시 그리고 '채팅에서 보기'로 답변에 돌아온다. Claude 방은 칩 없음. 옛 브리지·거절된 방·네트워크 실패는 칩에 '열 수 없음'만 남긴다(토스트 없음). 결과 카드 record가 보여 주는 게시 결과(outputId/outputKey/version)를 기억해 key당 카드 하나로 Desk·Board·로컬 기록·legacy에서 복원한다. 칩 색은 디자인 토큰만 쓴다. helper 변경 없음(`bf085a4`의 `egdesk_publish_output`·snapshot 그대로). surface-state 기대값 1건(`spawnResultCard(` 호출 수 4→5) 갱신. `/context/outputs` 목록 라우트는 화면에서 쓰지 않는다. 남은 결정 D-K3: 지금은 CHAT-04와 같이 본문 사본(≤20,000자, `RESULT_CARD_TEXT_LIMIT`)을 Desk·Board 카드에 저장하며, '참조만'으로 정하면 `publishedOutputCardRecord`의 text만 비운다. 실화면 5항목 미검증. |
+| 2026-10-31 | (병합) 야간 자율 라운드 12개 작업 브랜치 → `claude/vision-gap-20261024` | 기준 `586e348` → HEAD `7a5a031` | 병합 커밋 `1e059cf`(CTX-02) `0d8ce7c`(UX-02) `2daf74f`·`7a5a031`(SUB-14) `5f85ae7`(AGENT-05) `21f8ecb`(BRW-05·07·11) `1b24a79`(BRW-09) `52e2496`(CHAT-03) `ca280fb`(CNV-03) `fa55f95`(CODE-02) `8d3d880`(CODE-05) `2287a83`(CODE-06) `2113787`(SUB-05·01). 브랜치 커밋 52, 파일 66(+7155/−308). 병합 트리에서 `node --check` uc.js 통과, 단건 테스트 27개 파일 실패 0(surface-state 945/945, chat-runtime 195/195, chat-presentation 9/9 등). 병합 전 점검에서 드러난 CODE-05·CODE-06·BRW-05·BRW-09·SUB-14의 단건 회귀는 `db15cd2`·`6aa4227`·`c92b2d3`·`0eea07e`·`e191089`로 고쳤다. `egdesk-file-http.test.mjs` 1건은 셸 Node의 SQLite 버전 차이로만 실패하고 프로젝트 고정 Node에서는 통과하는 환경 문제이며 기준 커밋에도 있었다. 어느 브랜치도 Firefox 실화면 검증을 하지 않았고 `ideas/confirmed`·`docs/codex`는 건드리지 않았다. push 없음. CNV-06·UX-05 브랜치는 각 1커밋에서 중단돼 병합하지 않았다. |
+| 2026-10-31 | CTX-02 복구 기록의 D-R1 보존·자동 저장 묶음·세대 목록 | 일부 → 완료(실제 Firefox 창 복구 미검증) | `0fe679d`·`62bcb48`·`e132292`·`022810e`·`6c54987`. D-R1 수치(자동 저장 60초 묶음, 최근 200 + 30일간 하루 1개, 512 MiB)를 순수 모듈 `egdesk-recovery-journal.mjs`에 두고 Desk 저장소가 그 규칙으로 세대를 합치고 정리한다. 2026-10-24에 '구현 여부 기록 없음'이던 60초 묶음은 이 모듈로 확정됐다. 세대마다 열린 Board 수를 세고 복구 기록 패널이 Board 수·변경·보존 기한을 보이며, 페이지 경계를 넘는 변경도 한 행으로 잇는다. helper·surface-state 단건 테스트 통과. 실제 Firefox 창에서 비정상 종료 뒤 복구는 여전히 미검증. |
+| 2026-10-31 | UX-02 미니맵 행의 종류·소속 Board 이름, rail 검색 결과의 카메라 이동 | 일부 → 완료(마지막 변경의 실기 미검증) | `4fe2cd6`·`ebae4ef`·`65118bc`·`a8cdc54`. 미니맵 검색 행과 '이 위치의 N개' 목록에 대상 종류(Board·브라우저·대화·파일·터미널)와 소속 열린 Board 이름을 적어 같은 이름의 Browser를 구별한다(열리지 않은 Board는 이름을 내지 않음). rail 검색의 Canvas 결과를 고르면 화면 밖 카드는 미니맵의 카메라 경로로 이동만 하고 배율·Board·실행 대상은 바꾸지 않는다. 컴파일된 미니맵 핸들러로 행 이름을 검사했다. Briefing 단계·근거 마커의 지도 연결은 Briefing 항목(CHAT-05·CNV-07) 범위로 남기고, 실제 OS 한글 입력기·다수 live Browser 부하는 미검증. |
+| 2026-10-31 | SUB-14 인증 실패·한도 소진·권한 부족 상태 구분과 복구 선택지 | 일부 → 완료(fixture 기준, 실제 한도 소진·실기 미검증) | `0813e4b`·`a960327`·`e191089`. 브리지 `auth.status`·`/v1/state.auth`에 `access` 행(ok / loginRequired / loginInProgress / authFailed / quotaExhausted / permissionDenied, 문구·원인·초기화 시각·복구 선택지)을 더하고, 마지막 인증·한도·권한 거절을 identity와 함께 기억해 turn 완료·로그인 완료 때 지운다. Chat 머리 계정 칩은 이 행으로 '한도 도달 · <초기화 시각>'·'인증 만료 · 다시 로그인 필요'·'권한 부족 · <원인>'을 보이고 로그인·다시 로그인·다른 계정·초기화까지 대기·다시 확인 버튼을 준다. 자동 재시도·계정 전환은 하지 않고 지난 초기화 시각은 '확인 필요'로 읽는다(D-S5). 옛 브리지(행 없음)는 이전처럼 그린다. codex-auth-state 16/16, chat-presentation 9/9, surface-state 945/945. Claude 쪽 한도 이름은 helper 매핑(`2a8d699`·`bcbbd11`) 범위이며 실제 Claude 왕복은 미검증. |
+| 2026-10-31 | AGENT-05 Agent 정체성 표시 | 일부 유지(Chat 얼굴·작업 중 버블·Browser 카드 배지 연결, File 카드 배지 남음) | `49f6414`·`d0dffde`·`95be763`·`aa4e501`. 순수 모듈 `EGDeskAgentIdentityView.sys.mjs`가 메시지·진행 중 Run·BRW-13 카드 연결을 Chat과 카드 머리의 Agent 표시로 바꾼다. Agent 답변의 얼굴, '[···] Agent 작업 중' 버블, CHAT-07 peek, Settings·방 메뉴 얼굴이 저장된 사진(D-A3, 브리지가 읽은 뒤 표시하고 그 전엔 색 이니셜)을 그린다. 방의 진행 중 Run마다 버블을 두고 여럿이면 이름을 붙이며 버블을 누르면 그 Run의 기록 패널이 열린다. Agent가 읽거나 조작 중인 Browser 카드에 BRW-13 배지 옆 작은 얼굴·이름을 보인다. surface-state pin 1줄 갱신. 남은 것: File 카드의 Agent 배지(CODE-02 구역), 사진 읽기 실패 시 재시도, Firefox 실화면. |
+| 2026-10-31 | BRW-05 허용 사이트 이동(D-B1), BRW-07 다중 카드 도구(D-B2), BRW-11 대화 단위 조작 허락(D-B3) | 일부 → 완료 / 없음 → 일부 / 일부 → 완료 (셋 모두 실제 사이트·실기 미검증) | `c874a44`·`7ac4105`·`3c37118`·`a1e178a`·`633bbea`·`c92b2d3`. `EGDeskBrowserGrant.sys.mjs`가 대화 단위 허락과 사이트 규칙을 들고, 허락은 카드·계정·사이트 변경·일시중지·철회·유휴로 끝난다(D-B3). 유휴 만료 30분은 D-B3에 수치가 없어 구현이 정한 값이다. 도구 카탈로그에 `egdesk_browser_request_site`(대화에 허용 사이트 추가 요청)·`open_card`·`close_card`·`history`(뒤로·앞으로·새로고침)·`list_cards`를 더했고, 허용 사이트 안에서 Agent가 연 카드는 같은 Run 권한을 승계한다(D-B2). guarded 동작 뒤 링크·리디렉트 착지도 같은 사이트 규칙으로 가드하고 쓰지 않은 허락 토큰을 정리한다. `list_cards`는 읽기 전용이라 관찰 전용 카탈로그에도 노출되며 chat-runtime 기대 목록을 그에 맞췄다. browser-tool-runtime 54/54, provider 13/13, transport 65/65, chat-runtime 195/195. BRW-07을 일부로 두는 이유: 카드 전환은 별도 도구 없이 카드 지정으로만 되고 uc.js 연결부(`3c37118`)의 단건 하네스가 없다. 2026-10-24 BRW-05 근거의 '카탈로그 차단'은 BRW-06(`ce20398`)에서 이미 풀려 있었다. |
+| 2026-10-31 | BRW-09 마스크한 카드 스크린샷 관찰(D-B6·REA 3) | 없음 → 일부(코드·단건 테스트, 실제 Gecko 캡처 미검증) | `d1f7d4e`·`54b1d40`·`b9defc1`·`b13a96f`·`4b8e618`·`7f190ba`(브랜치에 BRW-05 병합 `44fe7f4`·`0eea07e` 포함). actor Parent/Child가 카드 viewport를 캡처하고 `EGDeskScreenshotMask.sys.mjs`가 비밀·민감 칸·다른 사이트 iframe·읽지 못한 창을 가린다. 읽기 전용 도구 `egdesk_browser_screenshot`을 카탈로그와 provider에 더했고 가린 상자 목록과 캡처 크기에 상한을 두었다. screenshot-mask 단건 테스트 통과, chat-runtime 기대 목록에 screenshot 추가. headless에서는 캡처가 되지 않아 실제 창 Firefox의 캡처와 '가리기 실패면 보내지 않음'은 미검증. |
+| 2026-10-31 | CHAT-03 Agent DM에서 Board Thread로 옮기기(D-M3) | 일부(화면·store 연결, 실행 왕복 미검증). 상세의 옛 '없음' 표기를 영역 표의 '일부'에 맞췄다 | `7a2cfd4`·`3022a13`·`aaaf04d`·`eeac9e6`·`f89fc2a`. `EGDeskThreadRouting.sys.mjs`가 store의 messages.shared.in/out 이벤트를 방별 라우팅 뷰로 바꾸고 고른 버블로 `/chat/share` 요청을 만든다. Agent DM의 메시지 메뉴 'Board Thread로 옮기기'와 다중 선택, 기존 Board Thread 선택 또는 DM의 Agent가 이끄는 새 Thread 만들기, 옮긴 블록의 '원래 대화 보기', DM 버블의 '스레드로 보냄' 칩, Board Thread 머리의 'DM으로 돌아오기', @이름 칩과 '@' 방 배지를 연결했다(D-M3: 고른 메시지 복사본 + 원래 대화 링크). 아직 말하지 않은 Board Thread로 보낼 때 받는 대화를 만들어 CONVERSATION_NOT_FOUND를 없앴다. thread-routing 단건 테스트, 컴파일된 surface 블록 검사, D-M3 runtime 검사 통과. 남은 것: 작성기 `@` 자동완성, 실제 provider 왕복, 다중 Agent 라우팅 화면(`/chat/board/send`)은 CHAT-10. |
+| 2026-10-31 | CNV-03 View bar에서 Board 소속 편집 | 일부 유지(화면 연결 완료, 실기 미검증) | `b8fc50a`·`03137fe`·`1ada5f9`. 순수 모듈이 addProjectionMember/removeProjectionMember 위에 View bar 메뉴 행('○○에서 빼기'·'△△에 넣기'), Board 영역 안에서 열거나 끌어 놓은 View의 '○○에 넣을까요? [넣기] [아니요]' 제안, live projection 패치, 열린 View로 저장한 Board의 projection을 만든다(D-V1~V4). 모든 Desk Window의 View bar에 소속 조작('소속 없음' 또는 chevron)을 두고, 한 View는 한 Board에만 속해 다른 Board에 넣으면 현재 Board에서 나간다. 소속 편집은 이동처럼 Board를 미저장 상태로 만든다. 남은 것: Chat 카드·도형의 메뉴·칩, 2026-10-29의 축소 화면 인수 보류 유지. |
+| 2026-10-31 | CODE-02 Board 프로젝트 폴더 메뉴·머리 칩(D-X3) | 일부 유지(Board 메뉴·머리 표시 연결) | `1f37cae`·`bacb4ff`·`1b558e4`·`e6ea9f5`. Board 메뉴에 '프로젝트 폴더…'·'프로젝트 폴더 해제'를 두고 기존 native 선택기·project store를 거쳐 Board의 채팅방이 Agent 작업 폴더로 상속하고 File이 그 폴더를 루트로 연다. Board 머리에 확인된 폴더 이름을 보이고, 재시작 뒤 같은 실제 경로·dev/ino일 때만 재연결하며 아니면 다시 고르라고 안내한다. 저장된 Board는 {projectId, title}만 들고 경로·identity는 브리지 project store에 남는다. 폴더 identity 비교는 `egdesk-project-identity.mjs`로 모아 project store와 file HTTP가 같이 쓴다. 남은 것: 열린 File 카드가 Board 폴더 변경을 자동 반영하지 않음, 방 전용 지정 UI, 실제 엔진 왕복. |
+| 2026-10-31 | CODE-05 2단계 변경 검토(D-X2) | 일부 유지(2단계 화면 연결) | `9821978`·`b675328`·`db15cd2`. 되돌리거나 삭제한 파일은 다시 읽어 확인하고, Chat의 완료된 fileChange 항목에서 적용된 변경 검토(`EGDeskChatChangeReview`)를 연다. Chat diff CSS 셀렉터는 원래 문자열을 유지한 채 File 패널 셀렉터를 덧붙였고, origin 조회는 command 전용 `readOrigin`을 되돌리고 완료된 fileChange 전용 `readChangeOrigin`을 따로 두었다. change-review·chat-change-review 단건 테스트, surface-state 945/945. 남은 것: 삭제만 있는 변경은 2단계에 들어가지 못함, 실제 provider 왕복, 나란히 보기. |
+| 2026-10-31 | CODE-06 Terminal 명령 결과 카드(D-X6) | 일부 유지(Terminal 결과 카드·칩 연결) | `e13dd8e`·`9a3c756`·`6d4283b`·`b672c52`·`6aa4227`·`25eeb28`. helper가 테스트 러너 출력을 결과 모델로 파싱하고(`egdesk-terminal-run-watch.mjs`), 사용자가 직접 입력한 테스트 명령의 결과를 Terminal 읽기에 넘긴다. Terminal에 결과 카드·칩을 보이고 실패 줄을 누르면 File의 그 줄로 간다. 읽을 것이 없으면 '요약 없음 · 원문 보기'로 떨어진다. 결과 패널 색은 surface 토큰만 쓴다. surface-modules deps 계약 수치 33→35 갱신. 남은 것: Chat 요약 칩은 CHAT-08과 함께, 실제 사용자 셸·엔진 왕복. |
+| 2026-10-31 | SUB-05 Settings 계정 탭의 연결 상태·계정 메뉴, SUB-01 로그아웃·계정 전환 | 일부 → 완료(실제 계정 로그아웃·전환 미실행) / 일부 유지(Chat 상단 진입점 미배선) | `87d253b`. Settings '계정'이 '연결 확인 중'(첫 접속·조용한 재연결)과 '연결이 끊겼습니다'(재연결 소진, 다시 연결)를 구별하고 끊기기 전 계정을 현재로 보이지 않는다. 로그인된 ChatGPT 카드에 계정 메뉴(상태 새로고침 / 다른 계정으로 로그인 / 로그아웃)를 두고, 두 계정 동작은 계정·공유되는 터미널 codex 로그인·방별 진행 중 Run을 이름으로 보이는 확인을 먼저 거친 뒤 실제 브리지(signOut, 전환이면 이어서 startLogin)를 부르고 `/v1/state`를 다시 읽어 결과를 보인다. Claude 카드는 브리지가 마지막으로 보고한 `claude auth status`(구독 라벨·이메일, API 키, 외부 provider, 로그아웃, 미설치, 미확인)를 보이고 '다시 확인'은 브리지 상태를 다시 읽는다(D-S1: Claude 자격증명은 건드리지 않음). 뷰 모델·확인 문구는 `EGDeskAccountSettingsView.sys.mjs`. account-settings-view 단건 테스트, surface-state 하네스 6곳 갱신. 남은 것: Claude 강제 재확인 라우트(SUB-08), Chat 상단 계정 칩의 메뉴 진입점(SUB-14 병합 뒤 1–2줄), 실제 계정으로 로그아웃·새 OAuth 왕복. |
 | 2026-10-29 | CNV-03 실제 Board 소속 표시·복원 ID 충돌 방어 | 일부 유지, 최종 축소 화면 인수 보류 | `c4944fd`. 제목줄은 저장된 고유 소유 관계만 표시하며 활성 Board·공간상의 위치로 소속을 추정하지 않는다. 소속 충돌은 임의로 고르지 않고, 이름 변경은 저장 성공 뒤 공개한다. 복원 시 dormant ID·기존 View·같은 Board·단일 Chat의 충돌을 검사하고 실제 복원한 구성원 참조만 다시 연결한다. 이 경계는 독립 함수 검사와 이전 소스의 격리 Firefox 일부 흐름에서 확인했다. 축소 Browser의 새 Board 이름이 Agent 조작을 덮는 문제에는 실제 사각형 충돌 시 시각적 이름만 생략하는 보정을 추가했고, 같은 폭에서 페이지 상태 문구가 바뀌면 다음 레이아웃 호출에서 다시 판정한다. 캐시 변경 자체가 새로운 호출을 예약하지는 않는다. 마지막 보정본의 Firefox 화면·실제 접근성 트리는 위 부팅 실패로 미검증이다. CSS의 이름 있는 note 보존 의도와 실제 보조기기 노출을 구분한다. 기존 50%·35%의 Agent 버튼 접근 실패, 전반적인 작은 카드 가독성, 동일 텍스트·배율에서 외부 글꼴만 바뀌는 경우와 성능 영향은 미완료/미검증이다. 새 LOD 기준은 도입하지 않았다. |
 | 2026-10-29 | CHAT-06 질문 오류의 가독성과 입력 배치 보존 | 일부 유지, 600×600 한정 화면 인수 | `9d9b573`. 실패한 답변과 같은 질문의 전체 오류·계속·취소가 함께 보이도록 필요한 공간을 측정한다. 긴 질문은 두 줄 영역에서 키보드로 끝까지 읽을 수 있다. 좁은 Chat에서 비어 있고 첨부 없는 작성기만 일시적으로 한 줄 배치하며, 명시적 입력 진입 때 복귀하고 이후 SSE가 배치를 다시 바꾸지 않게 했다. 당시 통합 v4 사본의 headless Firefox 600×600에서 답변·질문 제목·전체 오류·두 버튼·Chat 작성기 및 첨부·프로젝트의 가시성과 9점 hit를 확인했다. 실제 Chat 입력 뒤 SSE에서도 목록 120→120, footer 114→114 CSS px와 커서 5→5가 유지됐다. 이후 pointercancel 보완은 합성 회귀만 확인했다. 수정 후 800×600·물리 IME·붙여넣기는 native 미검증이다. Chat 입력으로 돌아간 뒤 Task 동작 버튼은 목록 스크롤이 필요할 수 있고, 초안·첨부가 있는 경우의 전체 동시 표시는 보장하지 않는다. 전송 아이콘 색이 갱신 전후 달랐으나 native disabled 상태는 계측하지 않아 원인은 미확인이다. 별도 실제 입력 핸들러·상태 함수의 fake-DOM 검사에서는 준비된 방에서 전송 가능 조건을 충족한 입력 직후 SSE 없이 활성화됐고 관련 17건이 통과했다. 이 소스 검사는 해당 캡처의 원인을 확정하지 않는다. 실제 provider는 사용하지 않았다. |
-| 2026-10-29 | CHAT-05 다중 고정 근거·범위 표시·키보드 진입·재열기 | 일부 유지, 연결 및 입력 보존 검증 | `0d18018`·`662585d`·`952ab63`. 한 단계의 여러 고정 근거를 준비하고 자료 이름·행 범위·상태와 개별 재시도를 연결했다. 해시 불일치와 잘못된 저장 범위를 성공처럼 표시하지 않는다. 최초 키보드·보조기술 활성화는 단계 탐색으로 진입하며, 재열기 자체나 늦은 준비 완료는 사용자가 옮긴 카메라·선택·입력을 다시 맞추지 않는다. 명시적인 단계·전체 보기와 종료는 별도 동작이다. 독립 함수 검사와 당시 통합 사본(surface SHA `d80c8710…`)의 합성 자료를 쓴 실제 headless Firefox에서 보류한 GET·새 입력·재열기, 720×600 첫 Space 진입 등 최종 4개 흐름을 확인했다. 실행본은 QA 로컬 주소만 치환했으며 `openAnswerBriefing` 함수 해시는 공유 사본과 동일한 `ea3a6452…`다. 커밋 단독 전체 파일이나 실제 물리 키보드·보조기술·provider 실행을 검증한 것은 아니다. 다중 근거 전체의 작은 화면 가독성은 인수하지 않았으며 [별도 사용자 선택](#briefing-small-screen-reading)이 남았다. |
+| 2026-10-29 | CHAT-05 다중 고정 근거·범위 표시·키보드 진입·재열기 | 일부 유지, 연결 및 입력 보존 검증 | `0d18018`·`662585d`·`952ab63`. 한 단계의 여러 고정 근거를 준비하고 자료 이름·행 범위·상태와 개별 재시도를 연결했다. 해시 불일치와 잘못된 저장 범위를 성공처럼 표시하지 않는다. 최초 키보드·보조기술 활성화는 단계 탐색으로 진입하며, 재열기 자체나 늦은 준비 완료는 사용자가 옮긴 카메라·선택·입력을 다시 맞추지 않는다. 명시적인 단계·전체 보기와 종료는 별도 동작이다. 독립 함수 검사와 당시 통합 사본(surface SHA `d80c8710…`)의 합성 자료를 쓴 실제 headless Firefox에서 보류한 GET·새 입력·재열기, 720×600 첫 Space 진입 등 최종 4개 흐름을 확인했다. 실행본은 QA 로컬 주소만 치환했으며 `openAnswerBriefing` 함수 해시는 공유 사본과 동일한 `ea3a6452…`다. 커밋 단독 전체 파일이나 실제 물리 키보드·보조기술·provider 실행을 검증한 것은 아니다. 다중 근거 전체의 작은 화면 가독성은 인수하지 않았다. 표시 기본 방향은 [사용자 결정](#briefing-small-screen-reading)으로 정해졌다. |
 | 2026-10-29 | UX-02 열린 화면 이름 검색·겹침 목록 | 일부 유지, 화면 연결·격리 검증 | `5ac3e42`. 미니맵에 열린 Board·View 이름 검색과 24개씩 더 보기를 연결했다. 화면 밖 대상도 찾되 저장만 된 Board·본문은 검색하지 않고, 선택은 카메라만 이동한다. 실제 headless Firefox에서 합성 View 210개를 포함한 대상 218개, 겹침 목록·검색·창 크기 변경·키보드 포커스를 확인했다. 별도 실제 휠 시험은 사용자가 목록을 스크롤한 뒤 창을 줄일 때 그 위치를 보존하고, 새 방향키 입력 때만 포커스 행을 다시 드러냄을 확인했다. 500×213은 포커스 경계 스트레스 시험이며 화면 전체 배치 승인으로 보지 않는다. 합성 210개 View를 쓴 것이지 live Browser 210개의 성능을 검증한 것은 아니다. OS 한글 입력기·Briefing 마커는 미검증/미완료다. |
 | 2026-10-29 | CODE-03 파일 변경 통지와 열린 File 트리 연결 | 일부 유지, 화면 연결·격리 검증 | `8bdafe3`. 현재 연결의 변경 통지를 File에 전달하고 바뀐 폴더를 다시 조회하되 작업사본·선택·포커스를 보존한다. 과거 Run의 출처 권한은 현재 방의 기본 폴더와 분리한다. 정식 검증기를 쓴 headless Firefox에서 실제 시험 파일 생성 → watcher 이벤트 → 연결된 SSE 클라이언트에 브로드캐스트 시도 → 폴더 재조회·새 행 표시와 선택 0–54 보존을 확인했다. SSE 수신 함수 자체는 별도 계측하지 않았다. 이전 소스 사본과 임시 관찰 드라이버를 쓴 별도 실행에서는 caret 3 보존도 확인했다. QA 집중 검사 42/42 통과. 원본 해시 불변·터미널 실행 없음이며 OS 폴더 선택 결과는 합성이다. provider 호출 수는 미측정으로, 실제 계정 검증을 뜻하지 않는다. 놓친 이벤트 복구·원본 저장 충돌 보장은 별도다. |
 | 2026-10-29 | CODE-07 IDE 프로젝트 File 진입·File 입력 보존 | 없음 → 일부 | `d18ece0`. 선택 Board의 프로젝트를 확인해 File을 열거나 같은 연결의 File을 재사용한다. 지연 응답·Board 전환·카드 선택 A→B→A가 최신 화면을 덮지 않도록 검사한다. Firefox 모듈의 전역 타이머 부재로 편집한 작업사본이 갱신되지 않던 오류도 수정했다. 관련 중앙 검사 944/944, 격리 Firefox에서 실제 키 입력 뒤 작업사본 갱신 HTTP 200·revision 1, 화면 밖 File 재진입 후 제목 9/9 지점 표시와 텍스트·선택 유지, 합성 원본 해시 불변을 확인했다. 폴더 선택은 합성 경계이며 실제 OS 선택기·사용자 원본 저장·provider 실행은 미검증이다. Terminal·검사·Agent 요청은 IDE 클릭만으로 시작하지 않는다. |
@@ -369,7 +385,7 @@ Git 전송 확인 범위는 기존 `ff9ae10`·`4b40588`까지다. B3 후속은 �
 | **일부 결정(2026-10-24)** Agent 캐릭터 설정의 범위 | 정함: 아바타 사진 허용(PNG·JPEG·WebP 512KB 이하, 재인코딩, 내보내기에서 제외, D-A3). Agent 파일 가져오기·내보내기(agency-agents·Claude Code 형식 머리말 .md + Codex .toml 내보내기, 가져온 Agent는 늘 초안, D-A2). 모델은 방에서 따로 고르지 않았을 때만 Agent 모델(D-A4). **남음**: Profile 소유 범위(개인 로컬 / Desk 공유), 기본 제공 6종의 지위(D-A5), 새 Agent 기본 도구 범위(D-A1, 지금 '제한 없음' 유지, 프리셋은 선택지로만), 설명 한 줄로 초안 만들기(D-A6), Agent(담당자 방)와 Profile(설정 버전)을 화면에서 나눠 보여 줄 방식(Q-AGENT-01 앞부분). 남은 것이 정해지기 전에는 "개인 로컬 + 6종은 예시 템플릿"으로 진행 | AGENT-01, AGENT-02, AGENT-04, CHAT-02 |
 | **결정됨(2026-10-24)** Board 대화방의 여러 Agent (D-M1~M5) | D-M1 하위 Agent 승인 요청은 지금처럼 거절 + '부모 Agent에게 다시 맡기기'. D-M2 @로 부른 Agent만 답하고, 안 부르면 Lead만. D-M3 개인 대화 → Board는 고른 메시지 복사본 + 원래 대화 링크, 받는 Agent에는 다음 turn에 블록으로 첨부. D-M4 동시 실행 상한 2. D-M5 Codex agent message board는 관찰만 | CHAT-03, CHAT-06, CHAT-10, CHAT-13 |
 | **결정됨(2026-10-24)** Chat → Canvas · Canvas · Board (D-K1 · K4 · K5 · D-V1~V6) | D-K1 AI 표식은 대상 카드 위 점선 '제안'으로 바로(카메라 안 움직임). D-K4 Agent가 게시한 결과는 칩으로만(자동 열기 없음), 같은 결과 수정은 버전 2. D-K5 메모 질문의 답은 메모 답글로 자동. D-V1 한 창은 한 Board. D-V2 새 창 자동 소속 없음(영역 안에서 열거나 놓을 때 제안). D-V3 끌어 놓기 = 제안 칩. D-V4 새 Board 저장 = 그 자리 영역으로 묶기(사본 없음). D-V5 격자·안내선 맞춤 + 배치 실행 취소 + 겹침 없이 정리. D-V6 채팅 엿보기는 오른쪽 가장자리 대기(Zen 방식) | CNV-03, CNV-05, CNV-06, CHAT-08, UX-05, UX-06 |
-| 남음 — Canvas D-K2 · D-K3 | D-K2 상단 검색 요청의 수신자와 Tab 키. D-K3 CHAT-04 결과 카드 저장 방식(지금은 Desk·Board와 함께 저장되는 Canvas 카드 — 확정할지, '파일로 저장'을 나중에 더할지) | UX-04, CHAT-04 |
+| 남음 — Canvas D-K2 · D-K3 | D-K2 상단 검색 요청의 수신자와 Tab 키. D-K3 CHAT-04·CHAT-08 결과 카드 저장 방식(지금은 Desk·Board와 함께 저장되는 Canvas 카드에 본문 사본 ≤20,000자 — 확정할지, '참조만'으로 바꿀지, '파일로 저장'을 나중에 더할지) | UX-04, CHAT-04, CHAT-08 |
 | **결정됨(2026-10-24)** 디자인 (D-G1 · G2 · G3 · G5) | D-G1 13px 기준 토큰. D-G2 (가) 아바타는 옅은 배경 + 진한 잉크 글자. D-G3 (가) 입력칸 테두리는 대비 증가·고대비에서만 진하게. D-G5 (가) CSS 원본·토큰 표는 시험 기준만 | DSN-03, DSN-04 |
 | **결정됨(2026-10-24)** 코딩 (D-X1~X4 · X6) | D-X1 원본 파일 덮어쓰기는 사용자 저장·검토 중 되돌리기만(열 때와 해시가 다르면 비교 화면). D-X2 1단계 승인 전 '변경 보기' + 전체 허용/거절 → 2단계 적용 후 덩어리별 되돌리기. D-X3 프로젝트 폴더는 Board에 붙이고 채팅방은 상속, 재시작 뒤 같은 폴더(dev/ino)일 때만 자동 재연결. D-X4 회차별 git checkpoint 기본 끔. D-X6 '검사'·IDE는 사용자가 직접 입력한 명령만 | CODE-02, CODE-04, CODE-05, CODE-06 |
 | **결정됨(2026-10-24)** 런타임 (D-R1 · R3) | D-R1 자동 저장 묶음 60초, 복구 기록 보존은 현재 임시값(최근 200개 + 30일간 하루 1개, 512MiB). D-R3 Board 내보내기에 첨부·캡처 기본 끔 | CTX-02, RT-03 |
@@ -382,9 +398,76 @@ Git 전송 확인 범위는 기존 `ff9ae10`·`4b40588`까지다. B3 후속은 �
 
 ## 진행 순서
 
+<a id="org-delivery-priority"></a>
+### 조직 사용을 위한 개발 전달 순서
+
+아래 순서는 기존 백로그를 대체하는 완료 판정이 아니라, 여러 회사에 적용할 수 있는
+업무 흐름을 작게 전달하기 위한 제안이다. [사용자 흐름](./EGDESK_PRODUCT_INTERACTION_TRACE_ATLAS.md#atlas-org-use)과
+[조직 실행 계약](./EGDESK_INTERACTION_AND_ORCHESTRATION_CONTRACT.md#tech-org-execution)을 함께 본다.
+이는 제품 전달 우선순위이며 모든 개발 작업을 직렬로 묶는 일정은 아니다. 실제 업무 실행에는
+공통 신원·권한·대상 식별과 결과를 다시 확인할 경로·기준이 선행하며, 결과 자체는 실행
+뒤에 확인한다. 실제 부서 간 자료를 공유하는 시나리오에만 2단계의 최소 공유 조건을 추가한다.
+독립된 adapter 코드 작업과 로컬 모의 검사는 병렬로 진행할 수 있다. 배포는 해당 시나리오에
+적용되는 모든 조건을 인수한 뒤에만 한다. 새 SSO나 외부 유료 서비스처럼 범위에 의미 있는
+추가가 필요하면 별도 승인을 받으며, 외부 전송·계정 조작은 기존 승인 범위를 넘지 않는다.
+아래 설계만으로 승인되거나 구현된 것으로 보지 않는다.
+
+다중 OS는 기존 제품 방향이다. 정확한 OS·버전 조합과 연결·인증 구현은 별도 제품 정책
+선택이 아니라 기술 조사·검증 항목이며, 회사별 PC 목록은 배포 설정으로 관리한다. 이 조직
+사용에서 사용자 선택이 필요한 정책 범위는 개별·상시 위임 범위, 직원 대화의 공유·보관,
+호스트·데이터 배치이며 기존 연결된 결정 항목을 따른다.
+
+| 순서 | 최소 전달 단위와 선행 | 인수 조건 | 현재 구현·운영 상태 |
+|---|---|---|---|
+| **1. 로컬 업무 신뢰 + 허용된 2 PC 읽기** | 기존 한 Desk/Canvas와 Board·Chat·Browser·File을 사용해 한 직원이 자기 PC에서 요청하고, 다른 승인된 호스트 PC에 있는 제한된 자료를 읽는다. 선행: 실제 직원 인증, 지원 OS·PC 등록, 보호 연결, 자료별 읽기 권한, 로컬 작성·저장 신뢰, 첫 호스트의 백업·복원 검증. | 미등록·철회 기기는 같은 Wi-Fi여도 거부; PC 등록만으로 개인 파일·로그인·전면 제어 노출 0. 권한 없는 제목·요약·첨부·원문 노출 0. 원본 revision·충돌을 확인하고, 호스트 중단 뒤 일관된 저장 데이터와 객체를 복원해 현재 기기·권한·계정을 재확인한다. 대상 OS와 두 실제 PC에서 별도 인수한다. | 기존 로컬 Chat·파일·Board·복구·portable은 영역별 구현과 격리 검증이 있으나 미완·미검증도 남았다. 조직 호스트·실제 두 PC 권한 읽기와 복원 통합은 이 문서에서 구현·운영 검증되지 않았다. portable 내보내기는 완전 백업의 증거가 아니다. |
+| **2. 부서 간 최소 공유** | 1의 신원·기기·읽기·복구 경계 위에서 생산 부서가 승인한 날짜·수량·제약만 요청 부서의 기존 Board에 공유한다. 선행: 소유 범위의 위임과 수신자별 공개 권한, 최소 결과 검토. | 원본을 못 보는 직원에게 원문·제목·첨부·비공개 존재가 새지 않고, 공개된 사실의 열람이 원본 열람·수정 권한으로 바뀌지 않는다. 요청자·승인자·수신자, 전송과 실제 수락·열람을 구분한다. 철회 뒤 도달 가능한 정책 검사 경계에서는 새 접근을 막고, 오프라인 대상의 전달·적용은 확인 전까지 미확인으로 남긴다. 오프라인 보존은 허용된 정책 범위를 따르며 이미 전달된 사본의 회수는 보장하지 않는다. | 기존 협업 설계와 일부 로컬 객체는 있으나 이 조직 간 공유 흐름·권한 집행·운영은 미검증이다. 초대 UI나 공유 계획만으로 권한 격리를 주장하지 않는다. |
+| **3. 외부·파일 실행과 결과 재확인** | 공통 신원·권한·기록 경계에서 지정된 실행 PC와 사이트 계정으로 ERP 정정·삭제 또는 메일 초안을 처리하고, 정확한 PC의 기존 업무 워크북도 제안·검토 후 원본에 저장한다. 선행: 대상 식별, 현재 revision·행동별 위임, 실제 실행 준비, 필요한 승인과 재확인 경로. 실제 부서 간 자료를 쓰는 경우에만 2의 최소 공유 조건도 선행한다. 분리된 adapter 개발·로컬 모의 검사는 병렬 가능하다. | 고객·대상·계정 불일치를 차단하고 정정 전후와 외부 서비스의 확인 증거를 구분한다. 워크북은 Chat 요청 → 정확한 PC·기존 File 선택 → Agent 변경 제안·비교·적용 → 원본 저장 → 같은 File 재조회까지 확인한다. 수식·서식·템플릿·기존 기록의 보존을 보장할 수 없거나 충돌하면 원본 저장을 차단한다. 메일 초안·다른 프로그램의 표시·발송을 혼동하지 않고, 불명확한 외부 쓰기는 확인 없이 재전송하지 않는다. 배포 전 해당 시나리오의 조건을 모두 인수한다. | Browser·로컬 File 도구와 확인 설계에는 일부 구현이 있으나 실제 조직 계정·외부 시스템의 전체 실행과 워크북 보존·원본 저장·재조회 흐름은 이 문서에서 검증하지 않았다. 기존 격리 시험은 실서비스 인수가 아니다. |
+| **4. 인계·복구 확장** | 1–3의 기본 백업·복원을 유지하면서 다른 승인 PC로 업무 인계, 재연결·복구 절차와 장애 대응을 확장한다. 자동 호스트 승계는 별도 후순위다. 선행: 기존 시도·결과 상태 조회, 이전 writer의 중지 또는 격리 확인, 새 기기·계정·권한 재확인. | 인계문 생성·전달·수락·실제 실행을 따로 확인하고, 인계문만으로 다른 PC의 실행을 완료 처리하지 않는다. 단절이 원격 프로세스 종료나 외부 효과 취소를 뜻하지 않으며, 늦은 결과로 현재 실행을 덮거나 중복 전송하지 않는다. 이전 writer 격리가 불확실하면 새 writer를 열지 않는다. | 로컬 복구·가져오기에는 부분 구현이 있으나 원격 인계·호스트 전환·자동 승계의 운영 검증은 없다. 첫 호스트의 수동 백업·복원은 이 단계까지 미루지 않는다. |
+
+**공용 Engine 계정의 직원별 권한 인수 사례 — 미실행**
+
+1. 실제로 별도 인증된 직원 A와 B가 각각 다른 요청 PC에서 같은 허용된 Engine 계정을
+   사용한다. 각 요청의 사람·요청 PC·실행 PC·Engine 계정과 자료·행동 범위를 따로
+   기록한다. 실행 PC는 같거나 다를 수 있으며 공유 계정·이메일·PC 이름만으로 사람을
+   확정하지 않는다.
+2. A에게 허용되고 B에게 금지된 자료를 A는 허용된 행동으로 읽는다. 같은 Engine 계정을
+   사용하는 B의 자료 읽기와 도구·하위 Agent를 통한 우회는 실행 경계에서 차단한다.
+   B의 검색 결과·제목·원문·요약·첨부에도 금지 자료가 드러나지 않아야 한다. 소유
+   범위에서 별도로 공개를 허용한 최소 사실은 원본 권한과 구분한다.
+3. 요청·결과와 실행 귀속이 두 직원 사이에 섞이지 않는지 확인한다. 실제 담당자를 인증할
+   수 없으면 추정해 기록하지 않고 개인 확인이 필요한 행동은 보류한다. 이 사례는 향후
+   인수 시험이며 이번 문서 작업에서 실행하거나 통과한 것은 아니다.
+
+Chat의 각 요청·답변에는 `접수`·`실행`·`결과 확인`·`확인 필요`를 추가 클릭 없이
+표시한다. 작은 화면에서도 상세 닫기와 작성기 접근·초안·포커스를 보존하며, 한 요청의
+권한 대기가 이미 허용된 다른 요청의 작성과 전송을 막지 않는지 별도 인수한다.
+
+**모든 단계의 공통 경계**
+
+- 직원, 요청 PC, 조정·저장 호스트, 실행 PC, Agent, Engine 계정, 사이트 계정,
+  자료와 행동은 각각 식별한다. 같은 PC가 여러 역할을 맡을 수 있고, 공유 provider·서비스
+  계정도 해당 서비스 정책과 OS 권한이 허용하면 사용할 수 있다. 이메일·공유 계정·PC
+  이름은 실제 직원 인증을 대신하지 않는다. 개별 provider 계정 강제는 전제하지 않는다.
+- 검색 범위 결정과 자료 읽기 전, 도구·하위 Agent 호출 전, 수신자별 결과 공개 전에
+  현재 권한을 실행 경계에서 검사한다. 목록 숨김·프롬프트·과거 캐시만으로는 집행이 아니다. 통제할 수 없는
+  shell·직접 네트워크·플러그인·공유 OS 세션은 비활성화하거나 해당 공유 실행을 보류한다.
+- 원본을 열어 작업하는 경우 대상·revision·충돌을 확인하고, 보존 정책에 맞는 불변
+  원본 기록과 정정 이력을 구분한다. 기존 업무 워크북의 수식·템플릿·기존 기록을 보존할
+  수 없으면 원본 저장을 막는다. 백업·복원과 이동용 portable 내보내기는 목적과 범위가 다르다.
+- 이 순서는 호스팅만 더하면 제품이 완성된다는 뜻이 아니다. 기존 클라이언트의 미완 범위
+  중 Chat·Agent(`CHAT-05/08`, `CHAT-03/10`, `AGENT-05/08`), Browser(`BRW-11/14`),
+  파일·Context(`CODE-03/04`, `CTX-04`)와 로컬 저장·복구(`RT-03/07`, `CTX-01/02`)도
+  각 단계의 실제 사용 경로에 필요한 만큼 계속 진행·검증한다. 기존 95개 상태를 이번에
+  일괄 재판정하지 않는다.
+
+### 기존 작업 묶음 (2026-10-24 당시 계획과 후속 상태)
+
+아래 2–8 묶음은 최초 우선순위 기록이다. 이후 구현·검증은 위 진행 기록과 영역별 상태를
+확인한다. 지금도 전부 미착수라는 뜻은 아니다.
+
 | 묶음 | 항목 | 이유 |
 |---|---|---|
-| 1 (진행 중) | CHAT-12 Agent 질문 응답, CHAT-13 하위 Agent 진행·막힘 | Codex 회차가 남긴 다음 우선순위. 승인·질문 뒤 같은 작업 이어가기 |
+| 1 (기록상 기본 범위 완료, 실사용 검증 남음) | CHAT-12 Agent 질문 응답, CHAT-13 하위 Agent 진행·막힘 | `2480174`와 `63a7592`의 격리 검사·fixture 범위 완료. 실제 Codex 계정·모델 질문 응답과 실제 다중 Agent 실행은 미검증 |
 | 2 | AGENT-07·SUB-05 설정 카드의 가짜 데이터 제거, SUB-03 요금제·사용 한도 표시, SUB-14 인증 실패·한도 소진 구분, RT-05 브리지 재연결 UX | 지금 화면이 사실과 다른 정보를 보여 주는 곳부터 바로잡는다 |
 | 3 | AGENT-01 Profile 저장소 → AGENT-03 실행 적용·기록 → CHAT-02 Profile 편집 → AGENT-02 Agent 만들기(이름·아바타·말투·전문 영역) → AGENT-05/CHAT-07 정체성 표시, CHAT-01 프로필 영속화 | Agent 캐릭터 설정 |
 | 4 | SUB-06 실행 엔진 계층(EngineAdapter) → SUB-07 엔진·모델 선택 UI → (결정 후) SUB-08/09/10 Claude 엔진 | Codex+Claude 구독 지원. 엔진 계층은 결정과 무관하게 먼저 만든다 |
@@ -395,7 +478,7 @@ Git 전송 확인 범위는 기존 `ff9ae10`·`4b40588`까지다. B3 후속은 �
 
 ## Chat · Agent · 캐릭터 설정
 
-Chat·Agent·캐릭터성 영역은 "고른 프로필을 실제 지침으로 보내는 길"과 "Answer Briefing"까지는 코드로 있고, 그 위의 사용자 경험은 대부분 없다. 지금 사용자는 대화방 ⋯ 메뉴에서 개발용 고정 프로필 6개 중 하나를 고를 수 있고, 그 지침은 Codex developerInstructions로 실제 전달된다(codex-chat-runtime.mjs:733-738). 반면 Agent를 직접 만들거나(이름·아바타·말투·성격·전문 영역·도구 권한) 저장·적용하는 기능은 없다. Dock에서 여는 설정 카드의 'Agent 관리'·계정·모델 탭은 가짜 데이터를 실제처럼 보여 주는 mock이다(고정 이메일·'Pro' 플랜·GPT-4.1 목록, eg-desk-surface.uc.js:7751-7777). 프로필 선택은 Desk 세션 pref에서만 유지되고 SQLite 기록 저장소와 저장 Board에는 남지 않는다. Board Thread는 이름만 있는 참여자 목록일 뿐 실제 다중 Agent도, Board 연결도 없다. 의존성 스케줄러는 helper 라이브러리와 테스트만 있고 브리지·UI에는 연결되지 않았다. Answer Briefing은 핵심 흐름이 구현·검증됐지만 다중 대상·강조·독립 Comment 객체가 빠져 있다. A(requestUserInput)와 B(collab/subAgent)는 코드 흔적이 없어 기존 계획과 중복되지 않는다.
+최초 조사 당시에는 Chat·Agent·캐릭터성 영역의 "고른 프로필을 실제 지침으로 보내는 길"과 "Answer Briefing" 외 사용자 경험이 대부분 없었다. 당시 사용자는 대화방 ⋯ 메뉴에서 개발용 고정 프로필 6개 중 하나를 고를 수 있고, 그 지침은 Codex developerInstructions로 전달되었다(codex-chat-runtime.mjs:733-738). 당시에는 Agent를 직접 만들어 저장·적용하는 기능이 없었고, 설정 카드에 mock이 있으며, 프로필 선택과 Board Thread·의존성 스케줄러 연결도 부족했다. Answer Briefing에는 다중 대상·강조·독립 Comment 객체가 빠져 있었다. 이 문단은 **최초 조사 시점**의 기록이다. 이후 상태는 진행 기록과 아래 표를 따른다. 특히 A(requestUserInput)와 B(collab/subAgent)는 `2480174`에서 기본 구현·격리 검증되었으나 실제 provider·다중 Agent 실행은 검증하지 않았다.
 
 | ID | 상태 | 크기 | 대표님 화면에서 달라지는 점 | 결정 | 환경 제약 |
 |---|---|---|---|---|---|
@@ -412,7 +495,7 @@ Chat·Agent·캐릭터성 영역은 "고른 프로필을 실제 지침으로 보
 | AGENT-04 | 완료 | L | '읽기만 하는 Agent'처럼 정해 두면 그 Agent는 실제로 파일 수정이나 브라우저 조작을 하지 못한다. | 일부 결정(D-A2 정함, D-A1 남음) |  |
 | CHAT-09 | 완료 | M | 대화방이 이어진 대화인지, 새 대화인지, 갈라져 나온 대화인지 목록에서 바로 구별된다. |  |  |
 | CHAT-04 | 완료 | M | Agent 답변을 버튼 하나로 Canvas 카드로 꺼내 Board에 남겨 둘 수 있다. | 필요(D-K3) |  |
-| CHAT-08 | 일부 | M | 긴 보고서는 Canvas 카드로 열리고 Chat에는 짧은 설명과 바로가기만 남아 대화가 읽기 쉽다. | 결정됨(D-K4) |  |
+| CHAT-08 | 완료 | M | 긴 보고서는 Canvas 카드로 열리고 Chat에는 짧은 설명과 바로가기만 남아 대화가 읽기 쉽다. | 결정됨(D-K4) · 필요(D-K3) |  |
 | CHAT-11 | 완료 | S | 대화 목록과 메뉴에서 Board라는 같은 이름으로 보여 헷갈리지 않는다. |  |  |
 | CHAT-05 | 일부 | M | 답변 브리핑에서 여러 근거를 한 번에 강조해 보며, 남긴 단계 의견이 사라지지 않고 남는다. |  |  |
 | CHAT-06 | 완료 | L | 앞 작업이 끝나면 다음 Agent 작업이 알아서 시작되고, 무엇 때문에 기다리는지 화면에 보인다. | 일부 결정(D-M4 정함, 자동 시작 기본값·사용량 한도 남음) |  |
@@ -426,18 +509,16 @@ Chat·Agent·캐릭터성 영역은 "고른 프로필을 실제 지침으로 보
 ### CHAT-12 — (이미 정해진 A) Codex app-server item/tool/requestUserInput 질문에 답하는 Chat UI
 
 - 출처: 작업 지시: 이미 정해진 다음 구현 대상 (A)
-- 상태: 없음 · 크기 M
-- 근거: helper/codex-chat-runtime.mjs: server request 처리는 item/tool/call(L1230)과 approval/dynamic 이벤트(L1288-1289)만 있음. helper/*.mjs·overlay 전체 grep 'requestUserInput' 0건.
-- 빠진 것: 요청 수신·대기 상태·답변 전송 경로와 Chat UI가 모두 없음. 중복 판별만 함(깊게 보지 않음).
-- 구현 스케치: codex-chat-runtime.mjs handleServerRequest에 requestUserInput 분기 추가(run에 pendingQuestion 저장, SSE emit) → EGDeskChatState.sys.mjs reducer → eg-desk-surface.uc.js 메시지 스택에 질문 카드·답변 버튼. 기존 approval 응답 경로(receiveApproval)를 본뜬다.
+- 상태: 완료 · 크기 M. 아래 완료는 기록된 기본 구현·격리 시험 범위이며 실제 계정·모델 인수가 아니다.
+- 최초 조사: 요청 수신·대기·답변 경로와 Chat UI가 없다고 기록했다. `2480174`에서 이를 구현했으며 질문 수신·답변·건너뛰기·비밀 답 미저장·같은 Run 이어가기를 helper 단위로 확인했다. `63a7592`의 headless fixture 질문 구간 17건도 통과했다.
+- 남은 검증: 실제 Codex 계정·모델의 질문과 답변으로 같은 작업이 이어지는 왕복. 이번 문서 작업에서는 실행하지 않았다.
 
 ### CHAT-13 — (이미 정해진 B) collabAgentToolCall/subAgentActivity 기반 하위 Agent 진행·막힘 표시
 
 - 출처: 작업 지시: 이미 정해진 다음 구현 대상 (B)
-- 상태: 없음 · 크기 M
-- 근거: helper/codex-chat-runtime.mjs safeItem switch(L31-56)에 agentMessage/reasoning/plan/commandExecution/fileChange/mcpToolCall/dynamicToolCall만 있고 collabAgentToolCall 분기 없음. grep 'collab\|subAgentActivity' 0건.
-- 빠진 것: 하위 Agent 항목을 공개 이벤트로 변환하는 경로와 표시 UI 없음. 중복 판별만 함.
-- 구현 스케치: safeItem에 collabAgentToolCall 공개 필드 추가 → applyItem → renderCodexActivityPanel(eg-desk-surface.uc.js:982)과 메시지 스택에 하위 Agent 행. CHAT-10(Board Thread 참여 상태)의 기반이 된다.
+- 상태: 완료 · 크기 M. 아래 완료는 기록된 기본 구현·격리 시험 범위이며 실제 다중 Agent 인수가 아니다.
+- 최초 조사: 하위 Agent 공개 이벤트·표시가 없다고 기록했다. `2480174`에서 기본 경로를 구현하고 `63a7592`의 headless fixture 하위 Agent 구간 10건을 확인했다. `4d2a1a4`의 후속 상태 신호는 진행 기록에 별도로 남아 있다.
+- 남은 검증: 실제 다중 Agent 실행의 진행·막힘 표시. Board Thread의 다중 Agent 참여와 부모에게 다시 맡기기는 별도 연결·인수 범위다.
 
 ### AGENT-07 — 설정 카드의 가짜 계정·모델·Agent 목록(mock)을 실제 상태로 교체하거나 숨김
 
@@ -450,10 +531,13 @@ Chat·Agent·캐릭터성 영역은 "고른 프로필을 실제 지침으로 보
 ### CHAT-01 — 채팅 프로필 선택을 브라우저 재시작·Board 복원 후에도 유지
 
 - 출처: EGDESK_PRODUCT_VISION_AND_DEV_TODO.md P0 L176
-- 상태: 일부 · 크기 M
+- 상태: 일부 · 크기 M. `1a2f304`(2026-10-31)까지 store 복원과 ⋯ 메뉴의 전송 없는 즉시 저장이 들어왔고, 재시작 프로브 실행과 Board 저장 record의 binding 참조가 남아 일부를 유지한다. 아래 근거·빠진 것은 최초 조사 기록이다.
 - 근거: Desk 세션 pref 경로는 thread 전체(profileEnabled/agentProfileId/systemPrompt)를 저장(eg-desk-surface.uc.js:1628-1631 serializeDeskSnapshot)하고 복원 때 정규화(:5721-5735). 반면 SQLite chat store threads 테이블은 title만 보관(helper/egdesk-chat-store.mjs:156-159, shape L352). store 기반 복원 ensureLocalHistoryThread(:5942)는 page.thread(EGDeskChatState.sys.mjs:313)에서 profile을 읽으므로 항상 profileEnabled=false. 저장 Board의 chat card는 activeThreadId/chatDockMode만 저장(:1558-1562). scripts/verify-chat-history-restart.mjs에 profile 단언 없음.
 - 빠진 것: durable store에 thread의 profile binding이 없음. Desk pref가 유실되거나 legacy 이관 뒤 store에서 복원하면 profile이 사라짐. Board 저장·복원 record에 thread binding 없음. 재시작 검증 없음.
 - 구현 스케치: egdesk-chat-store.mjs threads에 profile_binding_json(profileId, revision, profileEnabled) 추가(또는 thread.config event) → /chat/history/threads 응답에 포함 → EGDeskChatState threadSnapshot → ensureLocalHistoryThread가 복원. Board chat card record(:1558)에 threadId·binding 참조 추가. verify-chat-history-restart.mjs에 profile 단언 추가. AGENT-01 이후에는 profileId+revision만 저장.
+- 진행(2026-10-24): `b4e51f8` — 대화 저장소 v3에 방마다 고른 Agent(profileId·revision)와 `/chat/rooms/...` 라우트(helper). 화면 연결은 S10으로 남겼다.
+- 진행(2026-10-31): `66d4162`·`47f7c4f`·`c34e2d9`·`7fb5089` — store `thread.agent`로 `profileEnabled/agentProfileId` 복원(살아 있는 Desk pref 우선, store는 방이 고른 것이 없을 때만), ⋯ 메뉴 선택과 '기본 Codex'(null)의 `POST /chat/rooms/agent` 즉시 저장(로컬 저장소 쓰기, 엔진 계정 확인 없음, 미전송 방 404는 조용히 넘김), 재시작 프로브의 seed 기록·양쪽 라우트 동일·재시작 뒤 보존 단언. 위 구현 스케치의 profile_binding_json 대신 명시 필드 `thread.agent`를 쓰며 revision은 보존·전달만 한다. 자세한 범위는 위 진행 기록.
+- 남은 것(2026-10-31): `verify-chat-history-restart.mjs` 실제 실행(단언만 추가됨), Firefox 실화면, Board 저장 record(chat card)에 thread binding 참조. 이 둘이 확인되면 완료로 올린다.
 
 ### AGENT-01 — Agent Profile 저장소: 안정 ID·owner·activeRevision, 불변 revision, draft/active/disabled/archived/deleted 수명, expectedRevision 충돌 처리
 
@@ -493,10 +577,12 @@ Chat·Agent·캐릭터성 영역은 "고른 프로필을 실제 지침으로 보
 ### AGENT-05 — Agent 정체성 표시: 메시지 작성자 아바타·이름, 작업 중 생각 버블 [···]+'Agent 작업 중', 버블 클릭 시 기록 패널, 실제 작업 대상의 Agent 배지
 
 - 출처: Atlas #atlas-agent-thought-space L210-225; Contract §4.1 L530-540
-- 상태: 일부 · 크기 M · 선행: AGENT-02
+- 상태: 일부 · 크기 M · 선행: AGENT-02. Chat 얼굴·작업 중 버블·Browser 카드 배지는 `7a5a031`(2026-10-31)에 연결됐고 File 카드 배지가 남아 일부를 유지한다. 아래 근거·빠진 것은 최초 조사 기록이다.
 - 근거: profileEnabled thread의 streaming 메시지에만 typing dots 표시(eg-desk-surface.uc.js:5166-5172, aria-label '응답 중'), 클릭 불가. 기록 패널은 존재(renderCodexActivityPanel :982)하지만 '활동' 칩(:5178-5181)으로만 열림. Browser 대상 표시 marker는 일반 표시(96e1a74 egd-browser-agent-target)로 Agent 정체성 없음.
 - 빠진 것: 아바타가 사용자 지정값을 반영하지 않음, 생각 버블 클릭→기록 패널 연결 없음, 작업 대상 배지에 어떤 Agent인지 표시 없음.
 - 구현 스케치: 메시지 avatar(:5183-5187)와 방 목록 avatar(:4903)를 profile identity(avatar/color/name)로 렌더. typing dots를 button으로 바꿔 openCodexActivityPanel 호출. createBrowserAgentProjection(96e1a74)에 profile 이니셜·색 전달.
+- 진행(2026-10-31): `49f6414`·`d0dffde`·`95be763` — 메시지 아바타가 저장된 사진(D-A3)을 반영하고, 작업 중 버블은 Run마다 하나씩 눌러서 그 Run의 기록 패널을 열며, Browser 카드의 BRW-13 배지 옆에 작업 중인 Agent의 얼굴·이름을 보인다. 자세한 범위는 위 진행 기록.
+- 남은 것(2026-10-31): File 카드의 Agent 배지(CODE-02 구역), 사진 읽기 실패 시 재시도, Firefox 실화면 확인.
 
 ### CHAT-07 — 아바타/프로필 클릭 시 상세 peek: 정체성(이름·역할·모델·도구·Board 연결)과 plan/run/action/context 기록 층
 
@@ -537,10 +623,14 @@ Chat·Agent·캐릭터성 영역은 "고른 프로필을 실제 지침으로 보
 ### CHAT-08 — 긴 출력을 Canvas 결과로 보내고 Chat에는 연결 칩만 두기
 
 - 출처: EGDESK_PRODUCT_VISION_AND_DEV_TODO.md P1 L211; Contract §4 L484-490
-- 상태: 일부 · 크기 M · 선행: CHAT-04
+- 상태: 완료 · 크기 M · 선행: CHAT-04. 완료는 `6f4b4fb`·`69d205c`(2026-10-31)의 단건 테스트 범위이며 Firefox 실화면 5항목은 미검증. 저장 방식(D-K3)은 CHAT-04와 함께 미결이다. 아래 근거·빠진 것은 최초 조사 기록이고 helper 도구는 `bf085a4`(2026-10-24)에서 들어왔다.
 - 근거: 칩은 usableArtifact 파일 참조(eg-desk-surface.uc.js:609-621)와 브리핑 버튼(:5148-5150)만. 기본 profile 지침이 '긴 출력은 canvas로'라고 요구하지만(:111-114) Agent가 Canvas 출력을 만들 도구는 없음(context 도구는 egdesk_publish_briefing 등 읽기·브리핑만, helper/egdesk-context-runtime.mjs:10).
 - 빠진 것: Agent가 긴 결과를 Canvas 산출물로 게시하는 도구와 그 칩 표시.
 - 구현 스케치: egdesk-context-runtime.mjs에 egdesk_publish_output(제목·markdown) dynamic tool 추가 → CHAT-04의 결과 카드 생성 경로 재사용 → artifactRefs로 칩 표시.
+- 진행(2026-10-24): `bf085a4` — `egdesk_publish_output{title, markdown ≤20,000, outputKey?}`(본문 blob 저장, 대화+outputKey별 버전, 'output.published'는 메타데이터만, `GET /context/outputs`). 화면 연결은 S3로 남겼다. `8dc695d`의 아주 긴 답변 접기·'카드로 펼치기'는 위 2026-10-24 진행 기록 참조.
+- 진행(2026-10-31): `6f4b4fb`·`69d205c` — run.outputs(outputKey당 한 항목, 최신 버전 대표·이전 버전 보존)와 snapshot·로컬 기록·legacy의 run.context.outputs, 답변 아래 '결과 · 제목 · 버전 n' 칩(testid `chat-output`, 자동 열기 없음 — D-K4, 같은 key 재게시는 '버전 2'), 칩 → `GET /context/outputs/:id` → CHAT-04 결과 카드(같은 key 열린 카드 포커스, 새 버전 재그리기, '채팅에서 보기' 복귀), Claude 방 칩 없음, 못 열면 칩에 '열 수 없음'(토스트 없음), 결과 카드 record의 outputId/outputKey/version으로 key당 카드 하나 복원. 위 구현 스케치의 artifactRefs 대신 run.outputs/message.outputs를 쓴다. 자세한 범위는 위 진행 기록.
+- 남은 것(2026-10-31): Firefox 실화면 5항목(세션 공유 노트 `chat-08-output-chips-handoff.md`의 목록, 이 원장에는 옮기지 않음), `/context/outputs` 목록 라우트의 화면 사용 여부.
+- 남은 결정(2026-10-31): D-K3(결정 표 '남음 — Canvas D-K2 · D-K3'). 지금은 CHAT-04와 같이 본문 사본(≤20,000자, `RESULT_CARD_TEXT_LIMIT`)을 Desk·Board 카드에 저장한다. '참조만'으로 정하면 `publishedOutputCardRecord`의 text만 비우고 칩·카드 열기는 그대로다. 대표님 결정 전까지 사본 저장을 확정으로 보지 않는다.
 
 ### CHAT-11 — Chat UI의 'Agenda' 표기를 제품 용어 Board로 정리
 
@@ -564,7 +654,7 @@ Chat·Agent·캐릭터성 영역은 "고른 프로필을 실제 지침으로 보
 #### 다중 근거의 작은 화면 가독성 — 2026-10-29
 
 - 720×600 격리 Firefox 화면에서 넓게 떨어진 여러 근거를 함께 맞추면 본문 대신 축소된 묶음 표식이 보였다. 키보드로 단계·댓글에 도달하는 기능 검사가 통과해도 근거를 읽기 좋은 화면이라는 뜻은 아니다.
-- 원래 카드 위치와 크기를 유지하면서 전체 개요를 우선할지, 한 근거의 가독성과 목록 탐색을 우선할지는 [HUM-BRIEF-002](../../docs/codex/egdesk-product-interaction-trace-atlas-editorial-ledger.md#hum-brief-002)에 사용자 결정으로 남겼다. 답변 전에는 카드 재배치나 표시 방식 변경을 확정하지 않는다.
+- 원래 카드 위치와 크기를 유지한 채 전체 근거 위치를 축소해 한눈에 보여주는 개요를 우선하기로 [사용자가 결정했다](../../docs/codex/egdesk-product-interaction-trace-atlas-editorial-ledger.md#hum-brief-002). 한 근거씩 바꾸어 읽는 방식은 기본이 아니다. 이 결정만으로 실제 화면의 가독성 검증이 완료된 것은 아니다.
 - 현재 5% 배율이 계산 오류로 불필요하게 낮아졌는지는 대상의 실제 좌표와 선택한 맞춤 영역을 추가로 계측해야 한다. 화면 크기의 제약과 계산 오류를 혼동하지 않는다.
 
 ### CHAT-06 — 의존성 그래프·Task 상태 registry와 자동 하류 시작; 사용자 행동 대기를 dependency gate 한 종류로 모델링
@@ -589,11 +679,13 @@ Chat·Agent·캐릭터성 영역은 "고른 프로필을 실제 지침으로 보
 ### CHAT-03 — Agent DM에서 Board Thread로 보내기: 스레드로 옮기기, 스레드에서 사용자 태그, DM으로 돌아오기
 
 - 출처: EGDESK_PRODUCT_VISION_AND_DEV_TODO.md P0 L178; Contract §5 L707-735, §17.B 공유 relation L1592
-- 상태: 없음 · 크기 L · 선행: CHAT-01
+- 상태: 일부 · 크기 L · 선행: CHAT-01. 아래 근거·빠진 것은 최초 조사 기록이며(영역 표의 '일부'와 어긋났던 옛 '없음' 표기를 정정), `7a5a031`(2026-10-31)에서 화면·store 연결까지 들어왔다. 실행 왕복은 미검증.
 - 근거: chat thread에 Board 연결 필드 없음(createThread eg-desk-surface.uc.js:6650-6676, createCodexThread :302-342). chat store는 boardRefs 참조 종류를 지원(helper/egdesk-chat-store.mjs:61, 112, 461)하지만 생성하는 코드 없음. 라우팅 UI·mention 없음.
 - 빠진 것: DM↔Board Thread 연결 모델, 선택 메시지만 옮기는 공유 operation, 사용자 태그, 복귀 경로 전부.
 - 결정: Q-AI-12 / HUM-CONV-001: 공유 대화를 Board Thread·workroom 중 무엇으로 보여줄지, 옮길 때 무엇을 복사·연결할지(Contract는 방 전체 history 자동 공개 금지).
 - 구현 스케치: thread에 boardId/agendaRefs 추가 → 메시지 선택 후 'Board 대화로 보내기' → 대상 group thread에 messageRefs(boardRefs/contextRefs)로 연결 메시지 생성 → 원 DM에 복귀 링크. 공유 operation 필드(operationId, selectedRefs, recipients)는 Contract L1592 형식.
+- 진행(2026-10-31): `7a2cfd4`·`3022a13`·`aaaf04d`·`eeac9e6`·`f89fc2a` — 스레드로 옮기기(메시지 메뉴·다중 선택·대상 Board Thread 선택 또는 새로 만들기·`/chat/share`·'원래 대화 보기'·'스레드로 보냄' 칩), 사용자 태그(@이름 칩·'@' 방 배지), DM으로 돌아오기(Board Thread 머리)를 연결했다. D-M3(고른 메시지 복사본 + 원래 대화 링크)에 따라 방 전체 history를 공개하지 않는다. 단건 테스트는 위 진행 기록 참조.
+- 남은 것(2026-10-31): 작성기 `@` 자동완성, 실제 provider 왕복과 Firefox 실화면, 여러 Agent 라우팅 화면(`/chat/board/send`)은 CHAT-10.
 
 ### CHAT-10 — Board Thread에 여러 Agent가 실제로 참여하고 각자의 상태(작업 중·막힘·완료)를 표시
 
@@ -641,7 +733,7 @@ Chat·Agent·캐릭터성 영역은 "고른 프로필을 실제 지침으로 보
 | SUB-02 | 완료 | S | 다른 ChatGPT 계정으로 바꿔도 이전 계정의 대화와 실행이 새 계정에 섞이지 않는다. |  |  |
 | SUB-03 | 완료 | M | Chat 상단에 'ChatGPT Pro · 5시간 한도 42% 사용 · 3시 10분 초기화'처럼 요금제와 남은 사용량이 보인다. |  | 있음 |
 | SUB-04 | 일부 | S | 로그인 창이 EG-Desk로 돌아오지 못하는 환경에서도 코드를 입력해 로그인할 수 있다. |  | 있음 |
-| SUB-05 | 일부 | M | 설정 화면의 '계정 & AI 엔진'에 실제로 연결된 ChatGPT·Claude 계정, 요금제, 남은 사용량만 보인다. |  |  |
+| SUB-05 | 완료 | M | 설정 화면의 '계정 & AI 엔진'에 실제로 연결된 ChatGPT·Claude 계정, 요금제, 남은 사용량만 보인다. |  |  |
 | SUB-06 | 일부 | L | 대화마다 어떤 AI(Codex 또는 Claude)로 실행했는지 고정·표시되고, 기본 엔진을 바꿔도 진행 중인 작업은 원래 엔진에서 끝난다. |  |  |
 | SUB-07 | 완료 | M | Chat 상단에서 'Codex · ChatGPT Pro'나 'Claude · Max'를 골라 이 대화에 쓰고, 모델과 추론 강도도 고를 수 있다. | 필요 |  |
 | SUB-08 | 일부 | M | EG-Desk가 이 Mac의 Claude 로그인 상태(Pro/Max 구독인지 API 키인지)를 보여 주고, 로그인되어 있지 않으면 Terminal 카드에서 Anthropic 공식 로그인을 바로 열 수 있다. | 결정됨(D-S1) | 있음 |
@@ -650,7 +742,7 @@ Chat·Agent·캐릭터성 영역은 "고른 프로필을 실제 지침으로 보
 | SUB-11 | 없음 | L | 회사·개인 ChatGPT(또는 Claude) 계정을 둘 다 연결해 두고, 대화마다 어느 계정 사용량을 쓸지 고를 수 있다. | 일부 결정(D-S3 정함, HUM-ENGINE-001 남음) | 있음 |
 | SUB-12 | 완료 | S | Claude 구독을 EG-Desk에서 어떤 방식으로 쓸지 정해져, 계정 정지 위험 없이 Claude 엔진을 붙일 수 있다. | 결정됨(D-S1) | 있음 |
 | SUB-13 | 일부 | S | ChatGPT 구독 연결이 OpenAI 공식 경로 안에서 유지되어, codex 업데이트나 배포 후에도 로그인과 기능이 끊기지 않는다. | 결정됨(D-S6, 개인 사용 기준) | 있음 |
-| SUB-14 | 일부 | M | 사용량이 다 떨어지면 '로그인 필요'가 아니라 '한도 도달 · 3시 10분 초기화'로 보이고, 다른 계정으로 이어서 할지 직접 고를 수 있다. | 결정됨(D-S5) | 있음 |
+| SUB-14 | 완료 | M | 사용량이 다 떨어지면 '로그인 필요'가 아니라 '한도 도달 · 3시 10분 초기화'로 보이고, 다른 계정으로 이어서 할지 직접 고를 수 있다. | 결정됨(D-S5) | 있음 |
 | SUB-15 | 없음 | M | 구독이 없거나 한도가 끝났을 때 본인 API 키로 이어서 쓸 수 있고, 종량 과금이라는 표시가 붙는다. | 일부 결정(D-S4 정함, 비용 상한 남음) | 있음 |
 
 <details><summary>항목별 근거·빠진 것·구현 스케치</summary>
@@ -658,11 +750,13 @@ Chat·Agent·캐릭터성 영역은 "고른 프로필을 실제 지침으로 보
 ### SUB-01 — Codex(ChatGPT 구독) 로그인·상태 표시·로그아웃·계정 전환 동선
 
 - 출처: Contract §0.3 'Codex 인증'(SELECTED-BASELINE); Atlas ENGINE-01; 사용자 요청(구독 요금제 지원)
-- 상태: 일부 · 크기 S
+- 상태: 일부 · 크기 S. `87d253b`(2026-10-31)로 Settings 계정 메뉴의 로그아웃·다른 계정으로 로그인과 터미널 codex 공유 경고는 들어왔고, Chat 상단 칩에서 들어가는 진입점과 실제 계정 왕복이 남아 일부를 유지한다.
 - 근거: helper/codex-bridge-server.mjs:421-440 startChatgptLogin(account/login/start type chatgpt), :563-630 /auth/status·start·cancel·signout; overlay/JS/eg-desk-surface.uc.js:4665-4730 상태 chip + 인증 카드(전용 Browser card), :5257-5263 로그아웃 버튼은 '상태 보기' 진단 토글 안에만 있음; scripts/egdesk-chat-fixture-transport.test.mjs:59-68 fixture 검사; docs/PATH_1_5_STABILIZATION.md:71-80 '실제 계정 로그아웃·새 OAuth는 실행하지 않았다'
 - 빠진 것: (1) 계정 메뉴가 없어 계정 전환은 진단 패널에서 로그아웃한 뒤 다시 로그인하는 방법뿐임. (2) EG-Desk가 사용자의 기본 ~/.codex 로그인을 공유해 EG-Desk에서 로그아웃하면 터미널 codex/IDE 로그인도 끊김. Codex CLI와 IDE가 캐시 로그인 하나를 공유한다는 점은 learn.chatgpt.com/docs/auth에서 확인 [공식]. 이에 대한 화면 경고가 없음. (3) 실제 계정으로 새 OAuth·로그아웃을 처음부터 끝까지 검증한 적 없음
 - 환경 제약: 실제 새 OAuth·로그아웃 검증은 실제 ChatGPT 계정 로그인이 필요함(로그아웃하면 대표님 계정 연결이 끊김)
 - 구현 스케치: eg-desk-surface.uc.js chrome row(4665~)의 계정 chip을 popover로 바꾼다(이메일 / 로그아웃 / 다른 계정으로 로그인). 로그아웃 확인 문구에 '터미널 codex도 로그아웃됩니다'를 넣는다. 기존 codexBridge.signOut()·startLogin()과 /auth/* 라우트를 재사용하고, fixture transport 테스트에 계정 메뉴 경로를 추가한다.
+- 진행(2026-10-31): `87d253b` — Settings '계정'의 ChatGPT 카드 계정 메뉴(상태 새로고침 / 다른 계정으로 로그인 / 로그아웃). 두 동작은 계정 이름·공유되는 터미널 codex 로그인·방별 진행 중 Run을 보이는 확인을 거친 뒤 기존 signOut·startLogin을 부른다. 위 빠진 것 (1)·(2)는 Settings 경로로 충족됐다.
+- 남은 것(2026-10-31): Chat 상단 계정 칩의 메뉴 진입점(SUB-14 `a960327` 뒤 1–2줄 배선), 위 (3) 실제 계정으로 새 OAuth·로그아웃 왕복.
 
 ### SUB-02 — AI 계정이 바뀌면 이전 계정의 대화·요청·실행을 새 계정과 분리
 
@@ -692,18 +786,19 @@ Chat·Agent·캐릭터성 영역은 "고른 프로필을 실제 지침으로 보
 ### SUB-05 — Settings '계정 & Provider' 탭을 실제 엔진·계정 상태에 연결(가짜 데이터 제거)
 
 - 출처: 사용자 요청('Aside처럼' Settings > Models > Providers); Atlas ENGINE-01 #1 '설정 또는 Chat header에서 [AI Engine]'
-- 상태: 일부 · 크기 M · 선행: SUB-03, SUB-08
+- 상태: 완료 · 크기 M · 선행: SUB-03, SUB-08. 완료는 `87d253b`(2026-10-31)의 단건 테스트 범위이며 실제 계정 로그아웃·전환과 Firefox 실화면은 미검증. Claude 강제 재확인은 SUB-08 후속. 아래 근거·빠진 것은 최초 조사 기록이다.
 - 근거: eg-desk-surface.uc.js:7751-7778에 상수로 박힌 가짜 데이터: SETTINGS_MODELS(GPT-4.1, Claude 4 Sonnet 등), CODEX_ACCOUNT(가짜 이메일, plan 'Pro', connectedProviders openai/anthropic/google), SETTINGS_PROVIDERS(quota '무제한'). :9775-9850 renderProvidersTab의 로그인/로그아웃 버튼은 상수만 바꿈. Agent 탭(SETTINGS_AGENTS :7773)도 가짜 데이터. 출처 커밋 65ad8ae(2026-05-11)
 - 빠진 것: 실제 auth 상태·엔진 목록과 무관함. 존재하지 않는 Anthropic/Google/Ollama 연결과 '무제한' 사용량을 실제처럼 보여 줌
-- 구현 스케치: 1차(S): CODEX_ACCOUNT/SETTINGS_PROVIDERS 상수를 지우고 state.codex.authStatus에 연결한다. 미구현 provider는 숨긴다. 2차: /v1/state engines[](SUB-06)에 연결하고, 섹션을 '구독 연결'(Codex·ChatGPT / Claude)과 'API 키'(SUB-15 결정 후)로 나눈다. Agent 탭의 모델 선택은 캐릭터성 영역과 같이 정리한다.
+- 최초 구현 스케치: CODEX_ACCOUNT/SETTINGS_PROVIDERS 상수를 지우고 실제 인증·Engine 상태에 연결한다. 이후 연결과 남은 범위는 진행 기록을 따른다. 현재 코드의 `/v1/state`에서 엔진별 공개 행은 **최상위 `engines` 배열**이며 `capabilities.engines`는 지원 기능 이름의 배열이다. 두 배열을 같은 엔진 계정 목록으로 취급하지 않는다.
+- 진행(2026-10-31): `87d253b` — 연결 확인 중/끊김 구별, 끊기기 전 계정을 현재로 보이지 않음, ChatGPT 카드 계정 메뉴와 확인 문구, Claude 카드의 마지막 보고 상태(구독 라벨·이메일, API 키, 외부 provider, 로그아웃, 미설치, 미확인)와 '다시 확인'. 뷰 모델은 `EGDeskAccountSettingsView.sys.mjs`. 앞선 `ce20398`(가짜 데이터 제거)·`32bb53a`(Claude 상태 표시) 위에 얹었다.
+- 남은 것(2026-10-31): Claude 강제 재확인 라우트(SUB-08), Claude 사용 한도 표시(SUB-14 Claude 범위), 실제 계정 왕복.
 
 ### SUB-06 — Agent 실행 엔진 계층(engine adapter 경계)과 대화·Run별 엔진/프로필/버전 고정
 
-- 출처: Contract §0.3 'Agent engine boundary' FIXED-PRINCIPLE('제품은 engine adapter 경계를 가지며 Run은 사용한 engine/profile/version을 고정'), §14.1; apps/firefox-ui-demo/docs/MULTI_CLI_CHAT_UIUX_IMPLEMENTATION_PLAN_V1.md §4(2026-04-19 계획, 미구현)
-- 상태: 없음 · 크기 L
-- 근거: codex-bridge-server.mjs:35 PROVIDER_ID='codex' 하나뿐, :553-558 capabilities에 엔진 목록 없음; codex-chat-runtime.mjs:74-93 cleanNotification이 Codex app-server 메서드를 직접 소비하고, :913/:960/:1053에서 thread/start·turn/start·thread/resume를 직접 호출; egdesk-chat-store.mjs:156-160 threads 테이블에 engine/profile 컬럼 없음; grep engineProfile 0건
-- 빠진 것: EngineAdapter 인터페이스, 엔진 registry, thread·run별 engineId/profileId/version 저장, /v1/state의 engines 목록이 모두 없음
-- 구현 스케치: 내부 기준 이벤트는 현재 Codex wire 형태(thread/turn/item + serverRequest 승인)를 유지하고, CodexChatRuntime의 request/nativeRespond 주입점을 EngineAdapter{start,resume,turn,steer,interrupt,respond,onNotification}로 감싼다(UI·store 변경 최소). helper/engine-registry.mjs를 새로 만들어 기존 app-server 로직은 codex 어댑터로 옮기고 claude 어댑터 자리를 둔다. egdesk-chat-store.mjs schema를 v+1로 올려 threads.engine_id·engine_profile_id를 추가하고 run public_json에 engine{id,version,profileId}를 넣는다. /v1/state capabilities.engines[]를 추가하고 ownerKey 접두어를 엔진별로 둔다.
+- 출처: Contract §0.3 'Agent engine boundary' FIXED-PRINCIPLE('제품은 engine adapter 경계를 가지며 Run은 사용한 engine/profile/version을 고정'), §14.1; apps/firefox-ui-demo/docs/MULTI_CLI_CHAT_UIUX_IMPLEMENTATION_PLAN_V1.md §4(2026-04-19 계획, 최초 조사 당시 미구현)
+- 상태: 일부 · 크기 L. 초기 조사에서 없었던 구성요소가 이후 추가되었으므로 최초 조사 결과를 현재 코드의 부재로 읽지 않는다.
+- 근거: `8b406b4`의 어댑터·엔진 기록·registry·스키마 연결과 후속 진행 기록. 현재 [브리지 코드](../../apps/firefox-ui-demo/helper/codex-bridge-server.mjs)에는 Codex·Claude registry 등록과 `/v1/state`의 최상위 `engines: engineRegistry.publicEngines()`가 있다. `capabilities.engines`는 `registry`, `thread-lock` 같은 지원 기능 목록이지 공개 엔진 행이 아니다. 이전 `capabilities.engines[]`라는 엔진 목록 위치 표기는 잘못이다.
+- 남은 것: 다중 계정·조직 실행 경계와 실제 provider 사용을 이 코드 존재만으로 완료 판정할 수 없다. Claude 관련 연결과 실제 계정·모델 왕복의 남은 범위는 SUB-08/09/10 및 날짜별 진행 기록을 따른다.
 
 ### SUB-07 — 엔진·모델·추론 강도 선택 UI(Chat header / 새 대화 / 요청별)
 
@@ -776,11 +871,13 @@ Chat·Agent·캐릭터성 영역은 "고른 프로필을 실제 지침으로 보
 ### SUB-14 — 인증 실패·사용 한도 소진·권한 부족을 서로 다른 상태로 표시하고 복구 선택지 제공
 
 - 출처: HUM-ENGINE-001 확정 부분(ledger:155 '인증·권한·사용 한도 부족은 서로 다른 상태로 복구', '진행 중 Run을 다른 계정으로 조용히 옮기지 않음')
-- 상태: 일부 · 크기 M · 선행: SUB-03, SUB-09
+- 상태: 완료 · 크기 M · 선행: SUB-03, SUB-09. 완료는 `0813e4b`·`a960327`·`e191089`(2026-10-31)의 fixture·단건 테스트 범위이며 실제 한도 소진·인증 만료와 Firefox 실화면은 미검증. 아래 근거·빠진 것은 최초 조사 기록이다.
 - 근거: codex-bridge-server.mjs:150-154는 LOGIN_REQUIRED(401)만 따로 분류; codex-chat-values.mjs:42-44 publicError가 turn 오류를 code와 message로만 줄여 원인 분류를 버림; codex-chat-runtime.mjs:91은 error willRetry만 전달; grep usageLimit/quota 0건(가짜 데이터 제외). Run을 다른 계정으로 옮기지 않는 부분은 SUB-02로 충족
 - 빠진 것: 한도 소진 상태, 초기화 시각, '다른 계정으로 계속' 같은 복구 버튼이 없음. Codex 오류의 원인 필드 이름은 공식 문서로 확인하지 않음
 - 환경 제약: 실제 한도 소진은 재현이 어려움. fixture로 구현함
 - 구현 스케치: cleanNotification error·turn.error에서 공개 원인 enum만 allowlist로 통과시키고, publicError에 kind(auth\|quota\|permission\|network)를 추가한다. rateLimitReachedType(SUB-03)과 연결한다. Claude 어댑터는 api_retry.error(rate_limit\|authentication_failed\|billing_error)를 같은 kind로 매핑한다. run 카드에 kind별 문구와 버튼을 단다.
+- 진행(2026-10-31): 브리지 `access` 행(ok / loginRequired / loginInProgress / authFailed / quotaExhausted / permissionDenied)과 복구 선택지(login, reauth, switchAccount, wait, refresh), Chat 머리 칩의 상태별 문구와 버튼. 자동 재시도·계정 전환 없음, 지난 초기화 시각은 '확인 필요'(D-S5). 자세한 범위는 위 진행 기록.
+- 남은 것(2026-10-31): Claude 어댑터 오류의 같은 kind 매핑은 helper(`2a8d699`·`bcbbd11`)에 있고 실제 Claude 왕복은 미검증. Codex 오류 원인 필드 이름의 공식 문서 대조는 여전히 없다.
 
 ### SUB-15 — API 키 Engine Profile(OpenAI·Anthropic 종량 과금 키)
 
@@ -796,7 +893,7 @@ Chat·Agent·캐릭터성 영역은 "고른 프로필을 실제 지침으로 보
 
 ## 브라우저 제어 · 컴퓨터 사용
 
-브라우저 제어: Agent가 실제로 쓸 수 있는 도구는 observe·click·fill 3개뿐이다(helper/codex-chat-runtime.mjs:188-191, helper/codex-browser-tool-provider.mjs:96-99). navigate는 runtime·actor에 구현돼 있지만 카탈로그에서 걸러져 노출되지 않는다. scroll·press·type은 legacy 비보호 경로(window.__egdesk.browserAgent.act)에만 있다. 한 Run에 카드 1개만 조작할 수 있고, 최상위 문서만 다루며(allFrames:false), iframe·shadow DOM·contenteditable·120자 초과 값·스크린샷은 지원하지 않는다. 안전 경계(stale 거부, lease, Stop 철회, 표시 마커, page zoom stale)는 소유 fixture 범위에서 깊게 검증됐다(REA §6.1, 534/534). Windows에서는 실제 모델이 소유 fixture에서 성공했다. 비전 P1의 툴바 polish는 대부분 반영됐다. SourceRef 분리는 키가 하나로 합쳐져 있고 컨테이너 모듈(EGDeskBrowserIdentity.sys.mjs)이 배선되지 않았다. OAuth 팝업은 opener·container·self-close 처리가 없고 회귀 시험도 0개다. OAuth 완료→Await는 전혀 없다. 컴퓨터 사용(Desk 밖): 코드가 0이다. gesture helper는 트랙패드 입력 수신용이고 helper-rust는 PTY 전용이다. 계약 §12/impl-e24에 상세 설계만 있다. 새로 발견한 점: EG-Desk가 app-server를 사용자 ~/.codex 설정 그대로 띄우므로, 일반 thread가 사용자 MCP(playwright, firefox-devtools, Codex Computer Use 관련 node_repl)를 상속할 수 있다. 이 경로는 EG-Desk lease·관찰 밖에서 돈다(동작 여부는 미검증).
+브라우저 제어(최초 조사 `bebe45c` 당시 기록): Agent가 실제로 쓸 수 있는 도구는 observe·click·fill 3개뿐이다(helper/codex-chat-runtime.mjs:188-191, helper/codex-browser-tool-provider.mjs:96-99). navigate는 runtime·actor에 구현돼 있지만 카탈로그에서 걸러져 노출되지 않는다. scroll·press·type은 legacy 비보호 경로(window.__egdesk.browserAgent.act)에만 있다. 한 Run에 카드 1개만 조작할 수 있고, 최상위 문서만 다루며(allFrames:false), iframe·shadow DOM·contenteditable·120자 초과 값·스크린샷은 지원하지 않는다. 안전 경계(stale 거부, lease, Stop 철회, 표시 마커, page zoom stale)는 소유 fixture 범위에서 깊게 검증됐다(REA §6.1, 534/534). Windows에서는 실제 모델이 소유 fixture에서 성공했다. 비전 P1의 툴바 polish는 대부분 반영됐다. SourceRef 분리는 키가 하나로 합쳐져 있고 컨테이너 모듈(EGDeskBrowserIdentity.sys.mjs)이 배선되지 않았다. OAuth 팝업은 opener·container·self-close 처리가 없고 회귀 시험도 0개다. OAuth 완료→Await는 전혀 없다. 컴퓨터 사용(Desk 밖): 코드가 0이다. gesture helper는 트랙패드 입력 수신용이고 helper-rust는 PTY 전용이다. 계약 §12/impl-e24에 상세 설계만 있다. 새로 발견한 점: EG-Desk가 app-server를 사용자 ~/.codex 설정 그대로 띄우므로, 일반 thread가 사용자 MCP(playwright, firefox-devtools, Codex Computer Use 관련 node_repl)를 상속할 수 있다. 이 경로는 EG-Desk lease·관찰 밖에서 돈다(동작 여부는 미검증). 2026-10-31 `7a5a031` 기준 Codex 카탈로그의 브라우저 도구는 observe·click·fill·navigate·scroll·press·wait·wait_text·request_site·open_card·close_card·history·list_cards·screenshot 14개이고, 허용 사이트 안에서 Agent가 연 여러 카드를 한 Run이 다루며 스크린샷 관찰 코드가 있다(실기 미검증). 현재 상태는 BRW-05~07·09·11의 진행 기록과 상세를 따른다.
 
 | ID | 상태 | 크기 | 대표님 화면에서 달라지는 점 | 결정 | 환경 제약 |
 |---|---|---|---|---|---|
@@ -804,13 +901,13 @@ Chat·Agent·캐릭터성 영역은 "고른 프로필을 실제 지침으로 보
 | BRW-02 | 일부 | L | 같은 사이트를 다른 계정으로 열 때 기존 카드로 잘못 이동하지 않고, 계정별로 카드를 구분해 쓸 수 있다. | 일부 결정(D-B8·B9 정함, D-B10 남음) | 있음 |
 | BRW-03 | 일부 | M | 사이트에서 '구글로 로그인' 같은 팝업을 눌러도 로그인이 끝까지 진행되고, 끝나면 팝업 카드가 알아서 닫힌다. | 결정됨(D-B7) | 있음 |
 | BRW-04 | 일부 | L | 로그인을 마치면 '계속' 버튼을 누르지 않아도 멈춰 있던 Agent 작업이 자동으로 이어진다. | 필요(D-B11) | 있음 |
-| BRW-05 | 일부 | S | Agent에게 '이 사이트 열어서 찾아봐'라고 하면 Agent가 직접 주소를 열고 이어서 작업한다. | 결정됨(D-B1) |  |
+| BRW-05 | 완료 | S | Agent에게 '이 사이트 열어서 찾아봐'라고 하면 Agent가 직접 주소를 열고 이어서 작업한다. | 결정됨(D-B1) |  |
 | BRW-06 | 완료 | M | Agent가 긴 페이지를 내려 보며 찾고, 검색어 입력 후 Enter로 제출하는 등 사람처럼 페이지를 다룬다. |  |  |
-| BRW-07 | 없음 | L | Agent가 여러 사이트를 카드로 나란히 열어 비교·정리할 수 있다. | 결정됨(D-B2) |  |
+| BRW-07 | 일부 | L | Agent가 여러 사이트를 카드로 나란히 열어 비교·정리할 수 있다. | 결정됨(D-B2) |  |
 | BRW-08 | 일부 | L | 메일 작성창·임베드된 로그인창 같은 곳에서도 Agent가 입력하고 누를 수 있다. | 결정됨(D-B5·REA 4) |  |
-| BRW-09 | 없음 | M | Agent가 그림·차트처럼 글자가 아닌 화면 내용도 보고 판단한다. | 결정됨(D-B6·REA 3) | 있음 |
+| BRW-09 | 일부 | M | Agent가 그림·차트처럼 글자가 아닌 화면 내용도 보고 판단한다. | 결정됨(D-B6·REA 3) | 있음 |
 | BRW-10 | 없음 | L | 일반 클릭이 안 먹는 사이트에서도 Agent 클릭이 실제로 동작한다. | 결정됨(D-B4·REA 1·2) | 있음 |
-| BRW-11 | 일부 | S | 정한 범위 안에서는 매번 다시 허용하지 않아도 Agent가 같은 카드에서 여러 턴 이어서 작업한다. | 결정됨(D-B3) |  |
+| BRW-11 | 완료 | S | 정한 범위 안에서는 매번 다시 허용하지 않아도 Agent가 같은 카드에서 여러 턴 이어서 작업한다. | 결정됨(D-B3) |  |
 | BRW-12 | 일부 | M | Agent 클릭이 시간 초과돼도 같은 동작이 두 번 실행되지 않는다는 것을 확인된 상태로 쓸 수 있다. |  | 있음 |
 | BRW-13 | 완료 | M | Agent가 브라우저에서 무엇을 했는지 카드에서 바로 보고, 필요하면 그 자리에서 멈추거나 직접 손댈 수 있다. |  |  |
 | BRW-14 | 일부 | M | 실제로 쓰는 웹사이트에서 Agent 브라우저 조작이 된다는 것을 확인하고 쓸 수 있다. | 결정됨(D-B12) | 있음 |
@@ -865,11 +962,13 @@ Chat·Agent·캐릭터성 영역은 "고른 프로필을 실제 지침으로 보
 ### BRW-05 — Agent의 브라우저 이동(navigate) 도구 노출
 
 - 출처: 사용자 요청(브라우저 컨트롤: 이동) + BROWSER_AGENT_OBSERVATION_RUNTIME.md Runtime Contract
-- 상태: 일부 · 크기 S · 선행: BRW-11
+- 상태: 완료 · 크기 S · 선행: BRW-11. 완료는 `7a5a031`(2026-10-31)의 helper 단건 테스트 범위이며 실제 사이트·Firefox 실화면은 미검증. 아래 근거·빠진 것은 최초 조사 기록이고 카탈로그 차단은 BRW-06(`ce20398`)에서 풀렸다.
 - 근거: helper/egdesk-browser-tool-runtime.mjs:28-29 egdesk_browser_navigate spec, :256-264 navigate 처리, overlay/resources/EGDeskBrowserAgentRuntimeChild.sys.mjs:501,585-589 guarded navigate 허용. 그러나 helper/codex-chat-runtime.mjs:188-191 collectToolSpecs가 browserBounded에서 observe/click/fill만 카탈로그에 넣고, helper/codex-browser-tool-provider.mjs:96-99 dispatch도 observe/click/fill만 허용. 즉 모델이 실제로 쓰는 도구는 observe·click·fill 3개.
 - 빠진 것: navigate가 구현돼 있지만 Codex 카탈로그·provider 양쪽에서 차단되어 Agent가 URL 이동을 할 수 없음.
 - 결정: 한 Run의 조작 허용 안에서 Agent가 임의 http(s) URL로 이동해도 되는지(허용 도메인 제한 여부) 정해야 함.
 - 구현 스케치: codex-chat-runtime.mjs:189-190 browserInteraction 목록에 egdesk_browser_navigate 추가, codex-browser-tool-provider.mjs:96 허용 목록에 추가. 필요 시 도메인 정책 검사 추가. codex-browser-tool-provider.test.mjs에 navigate 허용/거부 시험 추가.
+- 진행(2026-10-31): `c874a44`·`7ac4105`·`3c37118`·`a1e178a` — D-B1(같은 사이트 기본 + 대화마다 허용 사이트 추가, 링크·리디렉트에도 같은 규칙)을 `EGDeskBrowserGrant.sys.mjs`의 사이트 규칙과 `egdesk_browser_request_site` 도구로 연결했다. guarded 동작 뒤 링크·리디렉트 착지도 같은 규칙으로 가드한다.
+- 남은 것(2026-10-31): uc.js 연결부 단건 하네스, D-B12의 실제 사이트 5~10개 검증.
 
 ### BRW-06 — Agent의 스크롤·키 입력(press/type)·hover·대기 동작을 guarded 도구 경로에 추가
 
@@ -882,11 +981,13 @@ Chat·Agent·캐릭터성 영역은 "고른 프로필을 실제 지침으로 보
 ### BRW-07 — Agent의 다중 카드/탭 관리: 새 카드 열기, 카드 전환, 닫기, 뒤로/앞으로/새로고침
 
 - 출처: 사용자 요청(브라우저 컨트롤: 탭 관리)
-- 상태: 없음 · 크기 L · 선행: BRW-05, BRW-11
+- 상태: 일부 · 크기 L · 선행: BRW-05, BRW-11. 아래 근거·빠진 것은 최초 조사 기록이며 `7a5a031`(2026-10-31)에서 도구와 권한 승계가 들어왔다.
 - 근거: helper/codex-browser-tool-provider.mjs:44-46 interact Run은 정확히 카드 1개만 선택 허용. 도구 카탈로그에 open/close/switch/back/forward 없음(runtime.mjs:25-36). 사람용 API는 존재: eg-desk-surface.uc.js:13995-14003 browserRuntime.back/forward/reload/duplicate.
 - 빠진 것: Agent가 링크를 새 카드로 열거나 여러 사이트를 비교하는 작업 불가. 새로 연 카드에 권한을 어떻게 넘길지 모델이 없음.
 - 결정: Agent가 연 새 카드가 같은 Run의 조작 권한을 자동 상속할지, 사람이 매번 허용할지 정해야 함.
 - 구현 스케치: runtime.mjs에 egdesk_browser_open_card/close_card/history(back\|forward\|reload) spec 추가. provider.mjs prepare의 1카드 제한을 'Run이 연 카드' 집합으로 확장. eg-desk-surface.uc.js bind/lease(10420~)에 agent-spawned 카드 epoch 등록 경로 추가.
+- 진행(2026-10-31): `7ac4105`·`3c37118` — `egdesk_browser_open_card`·`close_card`·`history`(뒤로·앞으로·새로고침)·`list_cards` 도구. 허용 사이트 안에서 Agent가 연 카드는 같은 Run 권한을 승계하고 사람이 연 카드는 자동 부여하지 않는다(D-B2). `list_cards`는 읽기 전용이라 관찰 전용 카탈로그에도 노출된다.
+- 남은 것(2026-10-31): 카드 전환은 별도 도구 없이 카드 지정으로만 되므로 사용자 문장의 '나란히 열어 비교·정리'를 실제 Run으로 확인하지 않았다. uc.js 연결부 단건 하네스, 페이지가 연 팝업의 보기 전용 처리(D-B2·D-B7) 검증, Firefox 실화면.
 
 ### BRW-08 — iframe·shadow DOM·contenteditable·긴 값 입력 지원
 
@@ -899,12 +1000,14 @@ Chat·Agent·캐릭터성 영역은 "고른 프로필을 실제 지침으로 보
 ### BRW-09 — Agent용 시각 관찰(카드 스크린샷)
 
 - 출처: 사용자 요청(브라우저 관찰) + 계약 impl-e24-computer-use(semantic→접근성→좌표 fallback)
-- 상태: 없음 · 크기 M
+- 상태: 일부 · 크기 M. 코드와 단건 테스트는 `7a5a031`(2026-10-31)에 있고 실제 Gecko 캡처는 미검증. 아래 근거·빠진 것은 최초 조사 기록이다.
 - 근거: 도구 경로에 drawSnapshot/captureScreenshot 없음(grep: eg-desk-surface.uc.js·runtime.mjs 0건). headless QA도 screenshot unsupported·visualPass:null(REA §6.1 EGQ3, 커밋 c79c087).
 - 빠진 것: DOM 텍스트만 관찰하므로 캔버스·이미지·차트 위주 페이지를 Agent가 이해하지 못함.
 - 환경 제약: headless에서는 캡처 미지원이라 시각 검증은 실제 창 Firefox 실행이 필요.
 - 구현 스케치: EGDeskBrowserAgentRuntimeParent 또는 chrome 측에서 browsingContext.currentWindowGlobal.drawSnapshot으로 카드 viewport 캡처, 민감 입력 영역 mask 후 이미지 contentItem으로 반환하는 egdesk_browser_screenshot spec 추가(runtime.mjs, provider.mjs).
 - REA 메커니즘 채택안: [docs/references/rea-mechanism-adoption.md](../../docs/references/rea-mechanism-adoption.md) 웹6(카드 스크린샷, 결정 3 대기·묶음 다)
+- 진행(2026-10-31): `d1f7d4e`·`54b1d40`·`b13a96f` — actor Parent/Child의 카드 viewport 캡처, `EGDeskScreenshotMask.sys.mjs`의 가리기(비밀·민감 칸, 다른 사이트 iframe, 읽지 못한 창), 읽기 전용 도구 `egdesk_browser_screenshot`, 가린 상자 목록·캡처 크기 상한. D-B6·REA 3 결정을 따른다.
+- 남은 것(2026-10-31): 실제 창 Firefox에서 캡처와 '가리기 실패면 보내지 않음' 확인(headless는 캡처 미지원), 이미지 contentItem을 실제 provider가 읽는 왕복.
 
 ### BRW-10 — DOM click에 반응하지 않는 사이트를 위한 좌표·포인터 순서 입력(사람처럼 누르기)
 
@@ -919,11 +1022,13 @@ Chat·Agent·캐릭터성 영역은 "고른 프로필을 실제 지침으로 보
 ### BRW-11 — Browser 조작 권한 수명(BROWSER-CARD-GRANT-01)과 여러 턴 연속 조작
 
 - 출처: docs/codex/egdesk-product-interaction-trace-atlas-editorial-ledger.md:180 (PROPOSED), apps/firefox-ui-demo/docs/PATH_1_5_STABILIZATION.md:190-192
-- 상태: 일부 · 크기 S
+- 상태: 완료 · 크기 S. 완료는 `7a5a031`(2026-10-31)의 단건 테스트 범위이며 실제 여러 턴 Run과 Firefox 실화면은 미검증. 아래 근거·빠진 것·결정은 최초 조사 기록이고 권한 수명은 D-B3로 결정됐다.
 - 근거: 한 Run 권한 방식이 구현됨: 카드 메뉴 'Chat 조작 허용' eg-desk-surface.uc.js:12053-12057, 선택 토큰 1회 사용 usedRunId :10446, Stop 시 즉시 철회(커밋 cb9b9c0, 2849cb2). Windows 실제 모델 소유 fixture 4개 도구 성공(PATH_1_5_STABILIZATION.md:327-345, 커밋 b9a98d9). 소유자 결정은 ledger에 PROPOSED로 남음.
 - 빠진 것: 권한 수명 결정이 확정되지 않음. 현재는 매 턴마다 사람이 다시 '조작 허용'을 눌러야 해서 여러 턴 작업이 끊김.
 - 결정: Run 단위 권한(추천)과 철회 전까지 유지되는 권한 중 선택. HUM-COLLAB-001의 위임 기간과 함께 정해야 함.
 - 구현 스케치: 결정 후 eg-desk-surface.uc.js registerBrowserToolSelection/usedRunId(10104~10150, 10446)에 thread 단위 지속 grant와 만료 조건(카드·계정 변경, 철회) 추가. ledger 상태 갱신.
+- 진행(2026-10-31): `c874a44`·`3c37118`·`a1e178a` — `EGDeskBrowserGrant.sys.mjs`의 대화 단위 조작 허락. 턴마다 다시 발급하되 사람이 다시 누르지 않고, 카드·계정·사이트 변경·일시중지·철회·유휴로 끝난다(D-B3). 쓰지 않은 허락 토큰은 정리한다.
+- 남은 결정(2026-10-31): 유휴 만료 30분(`BROWSER_GRANT_IDLE_MS`)은 D-B3에 수치가 없어 구현이 정한 값이다. 결정 표의 D-B3에 이 수치를 적을지 바꿀지 대표님 확인이 필요하다.
 
 ### BRW-12 — REA §6~7 남은 항목(EG-01~08 적용 이후 R-01~R-06)
 
@@ -1091,7 +1196,7 @@ Canvas·Viewport·UI/UX·디자인 영역은 바탕이 이미 깔려 있다. 의
 | CNV-07 | 일부 | L | AI 답변을 단계별로 따라갈 때 화면이 해당 위치로 움직이고 그 단계의 표식이 강조되어, 긴 결과도 순서대로 이해할 수 있다. |  |  |
 | CNV-08 | 일부 | M | Windows에서도 네트워크 사용량이 보이고, 지금 느린 게 PC 전체 탓인지 EG-Desk 탓인지 구분할 수 있다. | 필요 | 있음 |
 | UX-01 | 완료 | S | 캔버스를 이리저리 옮겨도 상단 이름이 지금 화면에 보이는 Board를 따라가서 현재 위치를 잃지 않는다. |  |  |
-| UX-02 | 일부 | M | 작은 지도에서 각 Board 위치를 보고 눌러서 바로 이동할 수 있고, 창이 많아도 이름으로 찾아간다. |  |  |
+| UX-02 | 완료 | M | 작은 지도에서 각 Board 위치를 보고 눌러서 바로 이동할 수 있고, 창이 많아도 이름으로 찾아간다. |  |  |
 | UX-03 | 완료 | S | 화면 어디서나 같은 이름(Board)과 한국어 문구를 보게 되어 헷갈리지 않는다. |  |  |
 | UX-04 | 없음 | S | 상단 검색창에 할 일을 적고 Enter를 누르면 바로 Agent에게 요청 초안이 만들어진다. | 필요(D-K2) | 있음 |
 | UX-05 | 일부 | L | 창을 깔끔하게 줄 맞춰 놓고, 실수로 옮긴 배치를 되돌리고, 여러 창을 한 번에 정리하거나 묶을 수 있다. | 결정됨(D-V5) |  |
@@ -1122,11 +1227,13 @@ Canvas·Viewport·UI/UX·디자인 영역은 바탕이 이미 깔려 있다. 의
 ### CNV-03 — Board 소속 편집과 표시: 열린 Board에 화면을 추가하거나 제외하고, View bar에 실제 소속 Board 이름을 보인다. 한 View는 한 Board에 속하며 새 View를 자동으로 넣지 않는다.
 
 - 출처: 비전 P1 'active Board placement'; proposals.md:1505-1507(다중 소속 표시), 1525-1529(제외 메뉴); approved-desktop-style.html .eg-win-meta(창 제목줄 오른쪽 Board 이름)
-- 상태: 일부 · 크기 M · 선행: CNV-01
+- 상태: 일부 · 크기 M · 선행: CNV-01. `7a5a031`(2026-10-31)에서 View bar의 소속 편집 화면 연결이 들어왔고, Chat 카드·도형의 메뉴·칩과 실기 검증이 남아 일부를 유지한다.
 - 최초 조사 근거: 당시 serializeAgendaSnapshot은 projection.members를 저장했으나 소속 편집 UI와 창 제목줄의 Board 표시는 없었다. 이후 `f2058a6`의 소속 처리 모듈은 위 진행 표에 기록돼 있으며, 이 절의 옛 ‘없음’ 표기는 영역 표의 ‘일부’와 불일치해 정정했다. 모듈의 존재만으로 화면 연결이나 실제 조작 검증이 완료된 것은 아니다.
 - 최초 조사 시 빠진 것: 기존 Board에 화면을 추가·제외하는 조작과 상태 변경, 창 제목줄의 실제 소속 Board 표시.
 - 결정됨(2026-10-24, D-V1~D-V3): 한 View는 최대 한 Board에 속한다. 새 View를 활성 Board에 자동으로 넣지 않으며 영역 안에서 열거나 끌어 놓으면 소속을 제안한다. 위 출처의 과거 다중 소속 `+1` 제안은 이 결정으로 대체한다. 제목줄은 저장된 구성원 연결을 표시하고 활성 Board나 화면의 위치로 소속을 추정하지 않는다.
 - 구현 스케치: EGDeskSurfaceState.sys.mjs에 addProjectionMember/removeProjectionMember 순수 함수와 테스트를 추가한다. uc.js에서는 창 [⋯]에 'Board에 추가/○○에서 제외' 메뉴를 붙이고 markAgendaDirty로 dirty 처리한다. spawnDeskWindowShell의 identity 옆에 .egd-window-board-meta를 두고 dataset.boardId와 projection 제목으로 갱신한다.
+- 진행(2026-10-31): `b8fc50a`·`03137fe` — 모든 Desk Window의 View bar에 소속 조작('소속 없음' 또는 chevron)과 메뉴('○○에서 빼기'·'△△에 넣기'), Board 영역 안에서 열거나 끌어 놓은 View의 '○○에 넣을까요? [넣기] [아니요]' 제안, 열린 View로 저장한 새 Board의 바로 묶기, 소속 편집의 미저장 표시. 한 View는 한 Board에만 속한다(D-V1~V4).
+- 남은 것(2026-10-31): Chat 카드·도형의 소속 메뉴·칩, 2026-10-29의 축소 화면 인수 보류, Firefox 실화면.
 
 ### CNV-04 — 캔버스 도형 도구를 완성한다. 화살표, 펜(자유선), 레이블(텍스트), 하이라이트(반투명 사각형)를 기존 사각형·원·선과 같은 편집·선택·삭제·Board 저장 경로로 제공한다.
 
@@ -1182,10 +1289,11 @@ Canvas·Viewport·UI/UX·디자인 영역은 바탕이 이미 깔려 있다. 의
 ### UX-02 — 미니맵에서 열린 대상을 찾는다. Board 영역·겹친 화면은 지도와 목록에서 고르고, 화면 밖 대상도 이름으로 검색해 카메라를 이동한다. Briefing 대상 표시는 남아 있다.
 
 - 출처: VIEWPORT 문서 'Desk Minimap'(Board regions, click Board region → pan/zoom, focusTarget); proposals.md:1659-1664 ux-detail-minimap-targets
-- 상태: 일부 · 크기 M · 선행: CNV-01
+- 상태: 완료 · 크기 M · 선행: CNV-01. 완료는 `7a5a031`(2026-10-31)까지의 격리 headless·단건 테스트 범위이며 마지막 변경의 Firefox 실화면은 미검증.
 - 최초 조사 근거: 당시에는 viewport 박스 드래그·희소도 기반 크기만 확인했고 Board별 영역·겹침 목록·이름 검색이 없었다. 이는 현재 상태가 아니며 `dca10a3`·`f2058a6`과 아래 진행으로 보완됐다.
 - 진행(2026-10-29): `5ac3e42` — 열린 Board·View 이름 검색, 24개씩 추가 표시, 화면 밖 대상 찾기, 겹침 목록의 내부 스크롤과 키보드·창 크기 변경 처리를 화면에 연결했다. 대상을 고르면 배율·활성 화면·선택 Board·실행 대상을 바꾸지 않고 카메라만 이동한다. 합성 View 210개를 포함한 218개 대상과 별도 실제 휠 입력을 사용한 headless 검증은 위 진행 표의 범위로 인수했다.
-- 남은 것: Briefing 단계·화면 밖 근거 마커의 지도 연결, 실제 OS 한글 입력기 확인, 다수 live Browser의 부하 검증. 작은 창의 모든 HUD 조합이 승인된 것은 아니다.
+- 진행(2026-10-31): `4fe2cd6`·`ebae4ef` — 미니맵 검색 행과 '이 위치의 N개' 목록에 대상 종류와 소속 열린 Board 이름을 적고(열리지 않은 Board는 이름을 내지 않음), rail 검색의 Canvas 결과를 고르면 화면 밖 카드로 카메라만 이동한다. 컴파일된 미니맵 핸들러로 행 이름을 검사했다.
+- 남은 것(2026-10-31): Briefing 단계·화면 밖 근거 마커의 지도 연결은 Briefing 항목(CHAT-05·CNV-07) 범위로 넘긴다. 실제 OS 한글 입력기 확인, 다수 live Browser의 부하 검증, 마지막 변경의 Firefox 실화면은 남는다. 작은 창의 모든 HUD 조합이 승인된 것은 아니다.
 
 ### UX-03 — 제품 용어와 문구를 정리한다. 화면에 보이는 'Agenda'를 'Board'로 바꾸고(채팅 'Agenda Thread'는 'Board Thread'), 영어 상태 문구('Unsaved', 'Agenda saved', 'Desk Minimap', 검색 구역 'Canvas/History/Files/Web', 'Search "q"', 'Browser card')를 한국어 제품 문구로 바꾼다.
 
@@ -1275,7 +1383,7 @@ Canvas·Viewport·UI/UX·디자인 영역은 바탕이 이미 깔려 있다. 의
 | CODE-03 | 일부 | M | 파일 이름뿐 아니라 내용으로도 찾고, 바뀐 파일 표시와 새로 생긴 파일이 자동으로 트리에 보인다. |  |  |
 | RT-01 | 일부 | M | (바로 보이는 변화는 없음) 새 PC에 처음 설치해도 첫 화면이 깨지지 않는지 배포 전에 자동으로 확인된다. |  | 있음 |
 | RT-07 | 일부 | L | (바로 보이는 변화는 없음) Desk·Board·대화 기록이 한 저장소에 안전하게 쌓여, 비정상 종료 후에도 같은 시점으로 돌아온다. | 필요 |  |
-| CTX-02 | 일부 | M | 실수로 카드를 닫거나 Desk가 꼬여도 '복구 기록'에서 시점을 골라 되돌릴 수 있다(현재 작업은 보존). | 결정됨(D-R1) |  |
+| CTX-02 | 완료 | M | 실수로 카드를 닫거나 Desk가 꼬여도 '복구 기록'에서 시점을 골라 되돌릴 수 있다(현재 작업은 보존). | 결정됨(D-R1) |  |
 | CTX-01 | 일부 | L | Board를 저장할 때마다 버전이 남아, 예전 구성을 골라 새 버전으로 되살릴 수 있고 동시에 고친 경우 충돌을 알려준다. | 필요 |  |
 | CTX-03 | 일부 | XL | 자료를 일일이 첨부하지 않아도 지금 보고 있는 Board·창을 바탕으로 에이전트가 쓸 자료 후보가 자동으로 잡힌다(전체 Desk를 몰래 넣지 않음). | 필요(D-R2) |  |
 | CTX-04 | 일부 | M | 보내기 전에 '이번에 에이전트가 볼 자료'와 고른 이유를 한눈에 보고, 빼거나 더할 수 있다. |  |  |
@@ -1297,27 +1405,33 @@ Canvas·Viewport·UI/UX·디자인 영역은 바탕이 이미 깔려 있다. 의
 ### CODE-02 — Project/folder as the unit of coding work: let the user choose a project folder for a Chat/Board so the agent cwd and the File Card root use the same project
 
 - 출처: Vision P1 Context, Recovery, and Coding UX item 5 (project/folder); CONTRACT §6 사람 중심 코딩 표면
-- 상태: 일부 · 크기 M
+- 상태: 일부 · 크기 M. `7a5a031`(2026-10-31)에서 Board 메뉴의 폴더 선택·해제와 Board 머리 표시가 들어왔다.
 - 근거: `8580896`의 저장 기반에 이어 `87502b2`·`6981082`에서 확인한 프로젝트와 실행 cwd를 연결했다. `98f77ea`의 File·요청별 프로젝트 UI는 격리 headless R8/R9에서 각 118/118 통과했다. `5a99422`·`776b0b0`은 방의 기본 상속 관계와 실행별 귀속 저장·현재 연결 재검증을 포함한다.
 - 결정됨(D-X3): 프로젝트는 Board에 연결하고 채팅방은 상속하되 개별 지정 가능하다. 진행 중 회차의 폴더는 유지하며, 재시작 뒤 같은 폴더(dev/ino 동일)일 때만 자동 재연결한다.
 - 빠진 것: 방 전용 프로젝트를 직접 지정하는 별도 UI와 실제 엔진 왕복 검증. 검증된 실행 출처를 이용한 File 이동은 `42e6fff`에서 화면 연결을 마쳤고 실제 headless 왕복은 검증 중이다. Board 상속 기본값의 저장·조회 UI는 `26498a9`와 headless R14에서 확인했으며 요청별 선택과 구분한다.
 - 연결 원칙: 화면은 식별자만 전달하고 helper가 실제 폴더를 확인한다. 경로 표시·현재 Board·카드 위치를 실행 권한으로 사용하거나 허용 루트를 임의 확장하지 않는다.
+- 진행(2026-10-31): `1f37cae`·`bacb4ff` — Board 메뉴 '프로젝트 폴더…'·'프로젝트 폴더 해제', Board 머리의 확인된 폴더 이름, 재시작 뒤 같은 실제 경로·dev/ino일 때만 재연결하고 아니면 다시 고르라는 안내(D-X3). 저장된 Board는 {projectId, title}만 들고 경로·identity는 브리지 project store에 남는다. 폴더 identity 비교는 `egdesk-project-identity.mjs`로 모았다.
+- 남은 것(2026-10-31): 열린 File 카드가 Board 폴더 변경을 자동 반영하지 않음, 방 전용 프로젝트 지정 UI, 실제 엔진 왕복, Firefox 실화면.
 
 ### CODE-05 — Diff and proposed changes: show the hunks the agent changed or proposed
 
 - 출처: Vision P1 Coding UX item 5 (diff); CONTRACT §6 'diff와 제안된 변경'
-- 상태: 일부 · 크기 L · 선행: CODE-01
+- 상태: 일부 · 크기 L · 선행: CODE-01. `7a5a031`(2026-10-31)에서 D-X2의 2단계(적용 후 검토·되돌리기 확인) 화면 연결이 들어왔다.
 - 근거: 사용자의 File 작업사본 diff와 별도로, `5b88c91`·`fde5bfc`에서 보존된 Agent 변경 내용을 원래 활동·승인 항목의 식별자로 조회하고 파일별 추가·삭제 줄을 읽기 전용으로 표시한다. headless R3은 활동 diff·승인 diff의 명시적 GET과 승인 상태 불변·승인 POST 0회를 확인했다.
 - 빠진 것: 실제 provider가 만든 변경의 전체 왕복, 원래 프로젝트를 검증한 파일 이동, 나란히 보기. 이 읽기 전용 조회를 줄별 적용·거절이나 되돌리기 구현으로 해석하지 않는다.
 - 연결 원칙: 보존 diff는 현재 파일 상태나 적용 완료의 증거가 아니다. 일부가 가려진 기록으로 파일을 재구성하거나, 내용을 펼친 것만으로 승인하지 않는다.
+- 진행(2026-10-31): `9821978`·`b675328`·`db15cd2` — 되돌리거나 삭제한 파일을 다시 읽어 확인, Chat의 완료된 fileChange에서 적용된 변경 검토 열기(`EGDeskChatChangeReview`), 완료된 fileChange 전용 origin 조회(`readChangeOrigin`)와 command 전용 `readOrigin` 분리. 앞선 `a684c9d`(EGDeskDiffView)·`4ae184d`('변경' 탭) 위에 얹었다.
+- 남은 것(2026-10-31): 삭제만 있는 변경은 2단계에 들어가지 못함, 실제 provider가 만든 변경의 전체 왕복, 나란히 보기, Firefox 실화면.
 
 ### CODE-06 — Run/build/test/review result surface
 
 - 출처: Vision P1 Coding UX item 5; CONTRACT §6 'run·build·test·review 결과'
-- 상태: 일부 · 크기 L · 선행: CODE-02
+- 상태: 일부 · 크기 L · 선행: CODE-02. `7a5a031`(2026-10-31)에서 사용자가 직접 입력한 명령의 Terminal 결과 카드·칩과 실패 줄 → File 이동이 들어왔다(D-X6).
 - 근거: `4d2a1a4`·`a684c9d`의 보존 출력·결과 렌더러를 `98f77ea`에서 File 검사와 Terminal 출력 수집에, `fde5bfc`에서 Chat의 원래 명령 활동에 연결했다. 격리 R9는 File 경로, R3는 보존 출력의 통과·실패·소실과 읽던 상태 유지를 확인했다. File의 실행 위치 접기·빈 안내 보정은 `26498a9`와 R14에서 확인했다.
 - 빠진 것: 당시 실행 프로젝트를 검증한 Chat 결과의 파일 줄 이동, 실제 사용자 셸·엔진 왕복 검증. 결과 모듈 존재나 시험용 출력만으로 완료로 올리지 않는다.
 - 연결 원칙: 저장과 실행을 구분하고, 결과 열기는 재실행하지 않는다. 출력 소실·시간 초과·사용자 입력 경합을 성공으로 표시하거나 명령을 자동 재전송하지 않는다. 결과와 Terminal은 각각 읽을 수 있는 배율로 확인한다.
+- 진행(2026-10-31): `e13dd8e`·`9a3c756`·`b672c52`·`6d4283b`·`6aa4227` — helper의 테스트 러너 출력 파싱(`egdesk-terminal-run-watch.mjs`), 직접 입력한 테스트 명령 결과를 Terminal 읽기에 전달, Terminal 결과 카드·칩과 실패 줄 → File 이동, '요약 없음 · 원문 보기' fallback, surface 토큰만 쓰는 결과 패널.
+- 남은 것(2026-10-31): Chat 요약 칩(CHAT-08과 함께), 실제 사용자 셸·엔진 왕복, Firefox 실화면.
 
 ### CODE-07 — IDE에서 선택한 Board의 프로젝트 File 열기
 
@@ -1379,13 +1493,15 @@ Canvas·Viewport·UI/UX·디자인 영역은 바탕이 이미 깔려 있다. 의
 ### CTX-02 — Automatically journaled Desk recovery surface (journal of generations and a browsable recovery list)
 
 - 출처: Vision P1 Context, Recovery, and Coding UX item 1 (Desk recovery side); CONTRACT §1339 자동 세션의 commit과 복구
-- 상태: 일부 · 크기 M · 선행: RT-07
+- 상태: 완료 · 크기 M · 선행: RT-07. 완료는 `7a5a031`(2026-10-31)까지의 helper·surface-state 단건 테스트 범위이며 실제 Firefox 창에서 비정상 종료 뒤 복구는 미검증. 아래 근거·빠진 것은 최초 조사 기록이다.
 - 근거: Desk auto-save goes to the egdesk.deskSession.v1 pref (eg-desk-surface.uc.js:13864). The original is backed up when unreadable or partially restored (EGDeskRecoveryState.sys.mjs:26-40). The UI shows only the latest record with retry/continue (eg-desk-surface.uc.js:13809-13826). Tests: scripts/egdesk-surface-state.test.mjs:89, 482, 518. The vision status section records Firefox corrupt Desk 5/5 and restart 4/4 (commits 76921bc, 6c331ad).
 - 빠진 것: Saving is a single snapshot overwrite, not a generation journal (sessionId/seq/parentSeq/stateHash), so a normal but unwanted state (e.g. many cards closed by mistake) cannot be rolled back. The recovery UI exposes only the latest record; there is no list to browse.
 - 결정: How long and how many recovery generations to keep (disk use).
 - 구현 스케치: Use the RT-07 desk store generations. Extend EGDeskRecoveryState to list generations. Change renderDeskRecoveryNotice into a recovery list panel (time, card count, reason). Restore merges additively, reusing missingDeskRecoveryViews.
 - 진행(2026-10-24): 저장소 `35f772c` — Desk 자동 저장이 세대로 쌓임(같은 내용이면 새 세대 없음, 오래된 parent는 409와 head 반환, 어느 세대든 새 세대로 복원). helper 720/728. 화면 `0943557` — 브리지에 저장소가 있으면 prefs를 한 번 가져오고(prefs는 남김) 자동 저장이 저장소에도 감. 복구 기록 패널에서 세대를 미리 보고 되돌리거나 합침. 중앙 회귀 771/771, headless UI 회귀 274/274.
 - 남은 것(2026-10-24): 보존 개수·기간은 지금 임시값(최근 200 + 30일간 하루 1개, 512 MiB 이하)을 그대로 쓰기로 결정됨(D-R1). 같은 결정에서 자동 저장 묶음 간격은 60초로 정함(구현 여부는 이 원장에 기록 없음). headless 대화 흐름 첫 화면 회귀는 `9dbfa51`에서 고침(72/72). 실제 Firefox 창에서 비정상 종료 뒤 복구는 미검증.
+- 진행(2026-10-31): `0fe679d`·`62bcb48`·`e132292`·`022810e` — D-R1 수치(자동 저장 60초 묶음, 최근 200 + 30일간 하루 1개, 512 MiB)를 `egdesk-recovery-journal.mjs`에 두고 Desk 저장소가 그 규칙으로 세대를 합치고 정리한다. 2026-10-24에 '구현 여부 기록 없음'이던 60초 묶음은 이 모듈로 확정됐다. 세대마다 열린 Board 수를 세고 복구 기록 패널이 Board 수·변경·보존 기한을 보이며, 페이지 경계를 넘는 변경도 한 행으로 잇는다.
+- 남은 것(2026-10-31): 실제 Firefox 창에서 비정상 종료 뒤 복구, 보존 수치의 실사용 디스크 사용량 확인.
 
 ### CTX-01 — Separate saved Board revisions from the Desk recovery journal: Board immutable revisions, head, conflict handling
 

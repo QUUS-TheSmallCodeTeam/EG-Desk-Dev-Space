@@ -604,5 +604,31 @@ export function createFileCardZone(deps) {
     return card;
   }
 
-  return { spawnFileCard, openVerifiedRunFile, openBoardProjectFile, onWorkflowEvent };
+  // CODE-06: a file:line that a command the person typed in a Terminal printed
+  // → the selected Board's project File (opened or reused through the IDE
+  // path) at that line. Only a file inside the connected project folder
+  // opens; anything else is reported, never resolved elsewhere.
+  async function openBoardProjectFileAt(location) {
+    const line = Number.isSafeInteger(location?.line) && location.line > 0 ? location.line : null;
+    const printed = typeof location?.path === 'string' && location.path ? location.path : null;
+    const relativePath = typeof location?.relativePath === 'string' && location.relativePath ? location.relativePath : null;
+    if (!line || !(printed || relativePath)) return { status: 'unavailable' };
+    const opened = await openBoardProjectFile();
+    if (opened?.status !== 'opened') return opened || { status: 'unavailable' };
+    const card = document.getElementById(opened.cardId);
+    const view = card?._fileView;
+    if (!card?.isConnected || card.dataset.closeState || typeof view?.openAt !== 'function') return { status: 'unavailable' };
+    if (opened.reused) focusCanvasCard(card);
+    const label = location.label || relativePath || printed;
+    try {
+      const shown = await view.openAt({ path: printed || relativePath, relativePath, line });
+      if (!shown) boardNotice(`연결된 프로젝트 폴더에서 찾지 못했습니다 · ${label}`);
+      return { status: shown ? 'opened' : 'not-found', cardId: card.id };
+    } catch (error) {
+      boardNotice(`파일을 열지 못했습니다 · ${label} · ${error?.message || ''}`);
+      return { status: 'unavailable', cardId: card.id };
+    }
+  }
+
+  return { spawnFileCard, openVerifiedRunFile, openBoardProjectFile, openBoardProjectFileAt, onWorkflowEvent };
 }

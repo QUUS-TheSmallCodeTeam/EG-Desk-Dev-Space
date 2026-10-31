@@ -1,7 +1,7 @@
 import { createServer } from 'node:http'
 import { spawn } from 'node:child_process'
 import { AppServerRpc } from './codex-app-server-rpc.mjs'
-import { normalizeNativeAuth, publicAuthIdentityKey, publicPlanType } from './codex-auth-state.mjs'
+import { accountAccessState, normalizeNativeAuth, publicAuthIdentityKey, publicPlanType, usageRefreshDue } from './codex-auth-state.mjs'
 import { usageDisplay } from './codex-account-usage.mjs'
 import { CodexChatRuntime } from './codex-chat-runtime.mjs'
 import { createChatEngineAuth } from './codex-bridge-engine-auth.mjs'
@@ -14,11 +14,12 @@ import { BrowserToolTransport } from './codex-browser-tool-transport.mjs'
 import { createCodexBrowserToolProvider } from './codex-browser-tool-provider.mjs'
 import { fixtureBrowserQaFromEnv } from './codex-browser-fixture-qa.mjs'
 import { classifyPublicToolError } from './codex-tool-errors.mjs'
-import { createChatHttpHandler, createComputerControlHttpHandler, createRateLimitSync, createReconnectBackoff, guardBridgeRequest, readJsonBody, sendJson, setBridgeCors } from './codex-bridge-http.mjs'
+import { createAccountAccessTracker, createChatHttpHandler, createComputerControlHttpHandler, createRateLimitSync, createReconnectBackoff, guardBridgeRequest, readJsonBody, sendJson, setBridgeCors } from './codex-bridge-http.mjs'
 import { bridgeBuildState, expectedOverlayBuild, startBridgeBuild } from './egdesk-bridge-build.mjs'
 import { createInheritedMcpSync } from './codex-inherited-mcp.mjs'
 import { BoundedSseClient } from './codex-bridge-sse.mjs'
 import { TerminalSessionRegistry } from './terminal-sessions.mjs'
+import { createTerminalRunWatch } from './egdesk-terminal-run-watch.mjs'
 import { createTerminalSessionFactory } from './terminal-platform.mjs'
 import { createTerminalHttpHandler } from './terminal-http.mjs'
 import { chatError, publicText } from './codex-chat-values.mjs'
@@ -40,7 +41,7 @@ import { createContextHttpHandler } from './egdesk-context-http.mjs'
 import { buildCodexAppServerLaunch, inspectNativeCapabilities, preflightOwnedAppServer, resolveCodexExecutable, NATIVE_SCHEMA_VERSION } from './egdesk-native-capabilities.mjs'
 import { createEGDeskFileMount, requireEGDeskNodeRuntime } from './egdesk-file-mount.mjs'
 import { createSystemResourceMonitor } from './system-resource-monitor.mjs'
-import { openWorkflowRuntime } from './egdesk-workflow-runtime.mjs'
+import { WORKFLOW_OWNER, openWorkflowRuntime } from './egdesk-workflow-runtime.mjs'
 import { createPlanToolProvider } from './egdesk-plan-tool-provider.mjs'
 import { openOntologyStore } from './egdesk-ontology-store.mjs'
 import { createOntologyHttpHandler, ontologyHealth, openBoundOntologyStore, readOntologyProfileBinding } from './egdesk-ontology-http.mjs'
@@ -97,6 +98,7 @@ const authState = {
   loginMode: 'browser',
   requiresOpenaiAuth: true,
   loginError: null,
+  accessFailure: null,
 }
 
 function broadcast(event, chatProtocol = 0) {
@@ -380,12 +382,13 @@ const rateLimitSync = createRateLimitSync({
   ready: () => appServerReady,
   update: patch => updateAuthState(patch),
 })
+// SUB-14: auth/quota/permission rejections of Codex turns → authState.accessFailure.
+const accessTracker = createAccountAccessTracker({ auth: () => authState, update: patch => updateAuthState(patch) })
 
 function authSnapshot() {
-  return {
-    ...authState,
-    usage: usageDisplay(authState.rateLimits, Date.now()),
-  }
+  const usage = usageDisplay(authState.rateLimits, Date.now())
+  // `access` tells 로그인 필요 / 인증 만료 / 한도 도달 / 권한 부족 apart (SUB-14).
+  return { ...authState, usage, access: accountAccessState(authState, usage, Date.now()) }
 }
 
 function updateAuthState(patch, { broadcastStatus = true } = {}) {
@@ -461,12 +464,13 @@ async function refreshAccountState({ refreshToken = false } = {}) {
     ...nextSnapshot,
     statusText: authStatusTextFor(nextSnapshot),
   })
-  if (authState.isLoggedIn && (identityChanged || !authState.rateLimits)) void rateLimitSync.refresh({ force: identityChanged })
+  if (authState.isLoggedIn && (identityChanged || !authState.rateLimits || usageRefreshDue(authState, usageDisplay(authState.rateLimits, Date.now()), Date.now()))) void rateLimitSync.refresh({ force: identityChanged })
   // Models belong to one account; never keep the previous account's list.
   if (modelAccountKey(authState) !== previousAccount) void modelCatalog.refresh({ clear: true })
 }
 
 function handleAppServerNotification(message) {
+  accessTracker.notify(message)
   switch (message.method) {
     case 'account/updated':
       updateAuthState({
@@ -738,7 +742,9 @@ async function startChatgptDeviceLogin() {
 }
 
 // ── Terminal PTY support ──
-const terminalRegistry = new TerminalSessionRegistry({ onExit: receipt => workflow?.publishTerminalExit(receipt) })
+// CODE-06: a user-typed test/build command's result rides on the next /terminal/read.
+const terminalRunWatch = createTerminalRunWatch({ bus: workflow?.bus ?? null, owner: WORKFLOW_OWNER })
+const terminalRegistry = new TerminalSessionRegistry({ onExit: receipt => workflow?.publishTerminalExit(receipt), runWatch: terminalRunWatch })
 
 // npm 설치 과정에서 node-pty spawn-helper의 실행 비트가 소실되는 경우가 있어
 // (posix_spawnp failed → 조용히 child_process fallback 강등) 기동 시 복구한다.
@@ -1081,4 +1087,5 @@ process.on('exit', () => {
   try { appServerSocket?.close(); } catch {}
   try { appServerProcess?.kill(); } catch {}
   terminalRegistry.requestStopAll()
+  terminalRunWatch.close()
 })

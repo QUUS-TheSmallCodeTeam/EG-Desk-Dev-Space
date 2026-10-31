@@ -123,3 +123,39 @@
 <!-- - file-patterns.md: recurring file organization patterns -->
 <!-- - size-reports.md: agent feasibility / file size analysis results -->
 <!-- - conventions.md: project-specific naming and structure rules -->
+
+### STATE: WM 저장소 stale 확인 — apps/firefox-ui-demo 미등록 (2026-10-31 세션 시작 스캔)
+- `file-map.json` v35 (2026-04-14) + `project-profile.md` (2026-04-10) 모두 Electron 시대 기준. `apps/firefox-ui-demo/` 디렉토리·파일 entry 0개. inventory hash 불일치 (20d12b26 → 0598a3c6)
+- 실측: 살아있는 코드는 `apps/firefox-ui-demo/` (ADR-007 2026-04-17 Firefox shell pivot). 최근 100 커밋 중 src/ 터치 0. `src/` (Electron, 4,535줄)는 마지막 커밋 2026-05-20 chore — deprecated 취급
+- 규모: overlay/JS/eg-desk-surface.uc.js 21,544줄 단일 파일(!), overlay/resources/*.sys.mjs 67개, helper 비테스트 94파일/34,154줄, scripts 비테스트 66파일/39,717줄, 테스트 ~98k줄. feasibility 판단 시 surface.uc.js 는 한 agent 컨텍스트 초과 — 반드시 섹션 단위로 쪼개 매핑
+- 테스트 러너: `node --test` (vitest/jest 없음). Firefox 실행 테스트 = `scripts/verify-firefox-mcp-*.mjs` (24개) + .test.mjs 7개 (cookie-import, popups, browser-import-flow, headless-ui-regression, first-codex-auth-flow, clean-profile-boot, run-egdesk-windows). 고정 Node 24.22.1 → `apps/firefox-ui-demo/.tmp/node-runtime/`
+- TODO: Session Lead 요청 시 file-map 재구축 (대규모 — `/onboard` 재실행 수준). 이번 세션은 즉석 스캔 보고로 대체
+
+### ORIGIN: 2026-10-31 야간 자율 라운드 — firefox-ui-demo 기능 모듈 분리 (586e348..7a5a031, file-map v36)
+- 14개 병렬 세션(브랜치별 `.claude/worktrees/<name>/`), 12개를 `claude/vision-gap-20261024` 에 `--no-ff` 병합 → 7a5a031 (push 없음). 라운드 보고서 `.tmp/overnight-20261031/REPORT.md`. cnv-06-canvas-memo·ux-05-placement-ops 는 중단(미병합)
+- ledger → 산출물: CTX-02 helper/egdesk-recovery-journal / UX-02 EGDeskCanvasLayout 미니맵 / SUB-14 helper/codex-auth-state 접근 상태 / AGENT-05 EGDeskAgentIdentityView / BRW-05·07·11 EGDeskBrowserGrant + helper/egdesk-browser-tool-runtime(navigate·카드 관리·권한 수명) / BRW-09 EGDeskScreenshotMask + EGDeskBrowserAgentRuntimeParent·Child / CHAT-03 EGDeskThreadRouting / CNV-03 EGDeskBoardMembership / CODE-02 helper/egdesk-project-identity / CODE-05 EGDeskChangeReview 2단계 / CODE-06 helper/egdesk-run-result-parse·egdesk-terminal-run-watch + docs/RUN_RESULT_SURFACE.md / SUB-05 EGDeskAccountSettingsView
+- **WHY 모듈 분리**: uc.js(22,878줄) 비대화 회피 — 신규 기능은 기능 단위 `EGDesk*.sys.mjs`(overlay/resources, pure 뷰모델) 또는 helper `.mjs` 로 분리, 기존 EGDeskChatState 패턴 유지. 각 모듈에 단건 `node --test` 파일 짝 (resources 모듈 테스트 → scripts/egdesk-*.test.mjs, helper 모듈 테스트 → helper/*.test.mjs 같은 폴더)
+- **REJECTED**: 없음 (세션 보고에 기각 대안 기록 없음)
+- **RELATIONSHIP**:
+  - EGDeskBrowserGrant 는 BRW-05·07·11 과 BRW-09 가 공유 — BRW-09 브랜치가 BRW-05 브랜치를 먼저 병합해 충돌 해소. 충돌 파일: helper/egdesk-browser-tool-runtime(.test).mjs, helper/codex-browser-tool-provider
+  - EGDeskScreenshotMask ↔ EGDeskBrowserAgentRuntimeParent(캡처·페인트) / Child(측정) — mask 모듈이 판정, fail-closed
+  - CODE-06 체인: helper/egdesk-run-result-parse(runSummaryEnd) → egdesk-terminal-run-watch → /terminal/read runResult → resources/egdesk-terminal-init.js postMessage → surface/EGDeskSurfaceTerminal → EGDeskRunResult(chrome 렌더) → surface/EGDeskSurfaceFileCard.openBoardProjectFileAt. 파서 로직이 helper/chrome 양쪽에 존재하는 것은 의도된 짝
+  - EGDeskThreadRouting 은 helper codex-chat-runtime 의 shareMessages(POST /chat/share) 를 쓰고, 멘션 규칙은 helper boardMentions 와 **동일하게 유지**해야 함 (양쪽 수정 필요)
+  - helper/egdesk-project-identity 는 egdesk-file-http(live root 비교) 와 egdesk-project-store(저장 identity; projectReconnectState 재export) 가 공유
+  - EGDeskBoardMembership → EGDeskCanvasLayout(add/removeProjectionMember, regionDropSuggestion) + EGDeskSurfaceState(planBoardProjection)
+  - **회귀 함정**: `scripts/egdesk-chat-presentation.test.mjs` 는 uc.js Chat 헤더 칩 블록을 문자열로 잘라 vm.compileFunction — 그 블록에 새 심볼을 넣으면 테스트 키 목록도 바꿔야 함 (이번 라운드 회귀 1건 원인). uc.js 해당 블록 수정 agent 에게 반드시 전달
+- **TEMPORARY**: `.tmp/overnight-20261031/` 라운드 보고 산출물(커밋 대상 아님). `.claude/worktrees/*` 14개 worktree — 병합 완료 후 정리 대상
+- **환경**: 테스트는 고정 Node 24.22.1 로 — `apps/firefox-ui-demo/.tmp/node-runtime/node-v24.22.1-darwin-arm64/bin/node`. 핀 파일은 `apps/firefox-ui-demo/.node-version` (Session Lead DM 은 `.nvmrc` 라 했으나 disk 실측 `.node-version`; `.nvmrc` 는 프로젝트에 없음). egdesk-file-http·desk-store 테스트의 node:sqlite 요구 버전 충족용
+- **file-map 커버리지**: v36 은 이 라운드의 66개 파일 + apps/firefox-ui-demo 디렉토리 골격(14개) + `.tmp/`·`.claude/worktrees/` 만 등록. 나머지 (helper 비테스트 ~98 .mjs, scripts ~178, resources 35 중 미등록분) 는 `/onboard` 재실행 TODO 유지 — 위 STATE 항목 참조
+
+### ORIGIN: 2026-10-31 2차 라운드 — CHAT-01 방 Agent 영속화 · CHAT-08 게시 결과 칩 (1011163..1a2f304, file-map v37)
+- 세션 2개(worktree `.claude/worktrees/chat-01-agent-persist-901f75`, `chat-08-output-chips-ceb480`). CHAT-01 커밋 66d4162·c34e2d9·47f7c4f·7fb5089, CHAT-08 6f4b4fb·69d205c, 병합 9e45e00·1a2f304 (충돌 없음, push 없음). 보고서 `.tmp/overnight-20261031/REPORT.md` "2차 결과·병합 점검" 절. 1차 v36 file-map 은 커밋 1011163 에 포함됨
+- **WHY (CHAT-01)**: Desk pref(`profileEnabled === true`)가 store agent 보다 우선, store 는 pref 가 비었을 때만 채움 — 사용자가 보내기 없이 바꾼 최신 선택을 지키기 위해. `thread.agent` 는 떼지 않고 명시 필드로 유지(서버 snapshot 값으로 항상 덮어씀), revision 은 복원에 적용 안 하고 보존·전달만. `/chat/rooms/agent` 를 LOCAL_WRITES(ensureAuth 면제)로 둔 이유: 로컬 저장소 쓰기라 `/chat/history/import` 와 같은 성격 + 로그아웃·오프라인에서도 선택을 남겨야 함
+- **WHY (CHAT-08)**: 칩 로직을 `mountCodexHUD` 밖 새 함수(`buildCodexOutputChips`·`openPublishedOutputChip`)에 두어 메시지 렌더 블록 접촉면을 3줄로 최소화(병합 충돌 회피 — 1차 교훈 반영). 카드 본문은 CHAT-04 와 같은 ≤20,000자 사본 저장 — **D-K3 미결**: 'reference only' 로 정해지면 `publishedOutputCardRecord` 의 text 만 비우고 복원 시 읽기
+- **REJECTED**: CHAT-01 — 화면 thread 에서 agent 필드 제거안(명시 필드 유지로 대체). CHAT-08 — helper 수정(불필요: `codex-chat-runtime.mjs snapshot()` 이 run 을 통째 copy 해 `context.outputs` 가 이미 overlay 도달), `/context/outputs` 목록 라우트 사용(칩이 versions 보유하므로 불필요)
+- **RELATIONSHIP**:
+  - **회귀 함정 2호**: `scripts/egdesk-surface-state.test.mjs` 는 uc.js `setThreadAgentProfile(threadId, profileId) {` ~ `cycleThreadAgentProfile(threadId) {` 블록을 잘라 compileFunction(L4760) — 그 블록에 새 식별자를 넣으면 keys 도 함께 (chat-presentation 과 같은 함정). uc.js 매핑 시 두 테스트 모두 context 로 전달
+  - CHAT-08 결과 카드 기록 `source.outputId/outputKey/outputVersion` 은 CHAT-04 결과 카드(`spawnResultCard`)와 Desk 저장 type 공유 — 카드 키 `{room}/output/{key}`. 기존 시험 기대값 1건 변경(`spawnResultCard(` 호출 수 4→5)
+  - CHAT-01 체인: uc.js `setThreadAgentProfile` → POST /chat/rooms/agent (codex-bridge-http CHAT_ACTIONS) → codex-chat-runtime `setRoomAgent` → store.setRoomAgent(폴백 setThreadAgent) → 재시작/복원 시 EGDeskChatState `restoredRoomAgentFields` ← uc.js `ensureLocalHistoryThread`. 양쪽 history 라우트가 같은 agent 를 보고해야 함(verify-chat-history-restart.mjs assertRoomAgent)
+- **TEMPORARY — 위치 확정 (2026-10-31 15:4x, Session Lead 확인)**: 2026-10-31 라운드 세션 인계 노트 16개(2차 `chat-01-agent-persist.md` 3,471B·`chat-08-output-chips-handoff.md` 6,238B + 1차 14건: agent-05, brw-05-07-11 handoff/plan, brw-09, chat-03 handoff/plan, cnv-03, code-02, code-05-plan, code-06, ctx-02, sub-05, sub-14, ux-02)는 `~/Library/Application Support/Claude/side-session-notes/local_e667fc3f-9d17-4fd4-b233-6da2867c4719/` 에 있음 — Claude 데스크톱 앱이 이 main 세션에 연결된 side session 들에게 주는 공유 노트 폴더(앱 관리, 프로젝트 밖·git 밖, 세션별 폴더; WM 의 프로젝트·worktree·~/.claude 탐색 범위 밖이라 처음엔 못 찾음). 내용은 임시(정본은 ledger/Contract/Atlas). 1차(2026-10-24) handoff 처럼 `docs/references/session-handoffs/2026-10-31/` 로 반입할지는 **유저 결정 사항**
+- **미검증**: 실화면·재시작 프로브 미실행(세션 보고 기준). ledger 어휘 번역(일부→완료)은 PM 판단

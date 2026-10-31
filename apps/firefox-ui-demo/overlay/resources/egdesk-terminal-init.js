@@ -151,6 +151,10 @@
       if (ptyId !== sessionAtRead || connectionGeneration !== generationAtRead || unloaded) return;
       if (result.sessionId !== sessionAtRead || result.status === 'UNKNOWN') throw new Error('터미널 출력의 세션을 확인하지 못했습니다.');
       receiveTerminalOutput(result.data, sessionAtRead);
+      // CODE-06: a test/build result the bridge read from this session's own output.
+      if (result.runResult && typeof result.runResult === 'object') {
+        try { window.parent.postMessage({ type: 'terminal-run-result', sessionId: sessionAtRead, runResult: result.runResult }, '*'); } catch {}
+      }
       if (terminalExitEvidence(result, sessionAtRead)) {
         invalidateScriptRun();
         exitConfirmed = true;

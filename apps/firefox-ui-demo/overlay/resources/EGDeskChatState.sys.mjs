@@ -95,6 +95,7 @@ export function legacyPublicChatSnapshot(record) {
     if (message.inputReferences?.length) item.inputReferences = copy(message.inputReferences);
     if (message.readBy?.length) item.readBy = copy(message.readBy);
     if (message.briefing) item.briefing = copy(message.briefing);
+    if (message.outputs?.length) item.outputs = publishedOutputs(message.outputs);
     if (message.contextCaptures?.length) item.contextCaptures = copy(message.contextCaptures);
     if (message.contextEvents?.length) item.contextEvents = copy(message.contextEvents);
     if (message.contextPackets?.length) item.contextPackets = copy(message.contextPackets);
@@ -104,6 +105,7 @@ export function legacyPublicChatSnapshot(record) {
       if (message.authorName) run.authorName = message.authorName;
       if (message.artifacts?.length) run.artifacts = message.artifacts.filter(usableArtifact).map(copy);
       if (message.briefing) run.briefing = copy(message.briefing);
+      if (message.outputs?.length) run.outputs = publishedOutputs(message.outputs);
       if (message.contextCaptures?.length) run.contextCaptures = copy(message.contextCaptures);
       if (message.contextEvents?.length) run.contextEvents = copy(message.contextEvents);
       if (message.contextPackets?.length) run.contextPackets = copy(message.contextPackets);
@@ -112,9 +114,10 @@ export function legacyPublicChatSnapshot(record) {
   }
   if (!runs.size) return null;
   for (const run of runs.values()) {
-    if (run.contextCaptures || run.contextPackets || run.briefing) run.context = {
+    if (run.contextCaptures || run.contextPackets || run.briefing || run.outputs) run.context = {
       captures: copy(run.contextCaptures || []), packets: copy(run.contextPackets || []),
       briefings: run.briefing ? [copy(run.briefing)] : [],
+      outputs: copy(run.outputs || []),
     };
     if (typeof thread.cwd === 'string') run.cwdPublic = thread.cwd;
   }
@@ -221,6 +224,35 @@ export function mergeLocalChatMessages(current = [], persisted = [], { liveFence
   }).map(({ message }) => message);
 }
 
+// CHAT-01: the Agent the chat store recorded for a room (thread.agent from
+// /chat/history/threads and /chat/history: null, or {profileId, revision,
+// setAt}), checked. Anything that is not an Agent profile ID is no Agent.
+export function roomAgentRecord(agent) {
+  if (!agent || typeof agent !== 'object' || !isProfileId(agent.profileId)) return null;
+  return { profileId: agent.profileId,
+    revision: Number.isSafeInteger(agent.revision) && agent.revision > 0 ? agent.revision : null,
+    setAt: Number.isSafeInteger(agent.setAt) ? agent.setAt : null };
+}
+
+// CHAT-01: which Agent a restored room answers as. The Desk pref — the
+// screen's own saved thread (serializeDeskSnapshot) — wins while it is alive:
+// a room whose current fields already pick an Agent (profileEnabled true)
+// keeps that pick. Only a room that picks none — fresh from the store listing,
+// or a pref that says nothing — takes the Agent the store recorded for it
+// (recordRoomAgent after a send, setRoomAgent from the ⋯ menu). The pick is
+// restored by ID alone: a missing, archived or stopped Agent stays itself, so
+// the existing '찾을 수 없는 Agent' placeholder and send block show rather than
+// another Agent answering. revision and setAt are carried on thread.agent for
+// the request and peek layers and are not applied here (the room follows the
+// catalog's active revision). thread.agent is the store's record, so it is
+// always taken from the snapshot — the copy a pref kept is replaced — and a
+// snapshot from an older bridge without the field leaves the room's own.
+export function restoredRoomAgentFields(current, saved) {
+  if (!saved || typeof saved !== 'object' || !Object.hasOwn(saved, 'agent')) return {};
+  const agent = roomAgentRecord(saved.agent);
+  return current?.profileEnabled === true || !agent ? { agent } : { agent, profileEnabled: true, agentProfileId: agent.profileId };
+}
+
 // `history` is the single normalized adapter boundary for local DB responses:
 // { clientThreadId, localConversationId, threadSnapshot?, messages? }.
 // The caller supplies a detached/restored current room; a read never promotes
@@ -239,6 +271,7 @@ export function hydrateLocalChatThread(current, history, options = {}) {
   const localRuns = mergeLocalChatRuns(current.localRuns, history.runs);
   return {
     ...copy(saved), ...current,
+    ...restoredRoomAgentFields(current, saved),
     id: clientThreadId,
     localConversationId: history.localConversationId || current.localConversationId || saved.localConversationId || null,
     conversationId: current.conversationId || null,
@@ -252,20 +285,23 @@ export function hydrateLocalChatThread(current, history, options = {}) {
   };
 }
 
-// Historical run projections can carry a published Briefing even when the
-// bounded message projection does not. Bind by run identity, never by the
-// visible/local message ID (Answer ID is the native conversation/run pair).
+// Historical run projections can carry a published Briefing (and CHAT-08
+// published results) even when the bounded message projection does not. Bind
+// by run identity, never by the visible/local message ID (Answer ID is the
+// native conversation/run pair).
 export function projectLocalRunRelations(messages, runs) {
   const projected = (messages || []).map(copy);
   for (const run of runs || []) {
     const briefing = run.briefing || run.context?.briefings?.at(-1);
-    if (!briefing) continue;
+    const outputs = publishedOutputs(run.outputs?.length ? run.outputs : run.context?.outputs);
+    if (!briefing && !outputs.length) continue;
+    const anchor = briefing || outputs[0];
     const identity = {
-      conversationId: run.conversationId || briefing.conversationId || null,
-      runId: run.runId || briefing.runId || null,
-      answerId: run.answerId || briefing.answerId || null,
+      conversationId: run.conversationId || anchor.conversationId || null,
+      runId: run.runId || anchor.runId || null,
+      answerId: run.answerId || anchor.answerId || null,
     };
-    if (['conversationId', 'runId', 'answerId'].some(key => run[key] && briefing[key] && run[key] !== briefing[key])) continue;
+    if (['conversationId', 'runId', 'answerId'].some(key => run[key] && anchor[key] && run[key] !== anchor[key])) continue;
     const candidates = projected.map((message, index) => ({ message, index })).filter(({ message }) => {
       if (message.role !== 'assistant') return false;
       const localMatch = !!run.localRunId && message.localRunId === run.localRunId;
@@ -278,7 +314,8 @@ export function projectLocalRunRelations(messages, runs) {
     if (!target) continue;
     const next = { ...target.message };
     for (const key of ['conversationId', 'runId', 'answerId']) if (!next[key] && identity[key]) next[key] = identity[key];
-    next.briefing = copy(briefing);
+    if (briefing) next.briefing = copy(briefing);
+    if (outputs.length && !(Array.isArray(next.outputs) && next.outputs.length)) next.outputs = outputs;
     for (const [key, fallback] of [
       ['contextCaptures', run.context?.captures], ['contextPackets', run.context?.packets],
       ['artifacts', run.artifacts],
@@ -840,7 +877,7 @@ function ensureRun(state, identity) {
   };
   if (engineId !== undefined) run.engineId = engineId;
   if (engineProfileId !== undefined) run.engineProfileId = engineProfileId;
-  for (const field of ['requestId', 'clientThreadId', 'localThreadId', 'answerId', 'authorName', 'authorAvatar']) {
+  for (const field of ['requestId', 'clientThreadId', 'localThreadId', 'localMessageId', 'answerId', 'authorName', 'authorAvatar']) {
     if (identity[field] || request?.[field]) run[field] = identity[field] || request[field];
   }
   if (request && !run.submissionOwnerCaptured) {
@@ -930,6 +967,8 @@ export function reduceChatEvent(state, event, engineIds = [DEFAULT_CHAT_ENGINE_I
     if (!id) return run;
     let message = run.messages.find(item => item.id === id);
     if (!message) { message = { id, role: 'assistant', content: '', status: 'streaming', createdAt: event.ts }; run.messages.push(message); }
+    // CHAT-03: the store's name for this bubble rides on the event, so a live answer can be moved without a reload.
+    if (typeof event.localMessageId === 'string' && event.localMessageId && !message.localMessageId) message.localMessageId = event.localMessageId;
     if (event.event === 'message.started' && !message.content && typeof details.text === 'string') message.content = details.text;
     if (details.phase) message.phase = details.phase;
     if (event.event === 'message.delta' && message.completionConfirmed !== true) {
@@ -962,6 +1001,11 @@ export function reduceChatEvent(state, event, engineIds = [DEFAULT_CHAT_ENGINE_I
     run.contextEvents.push({ id: `${event.streamId}:${event.seq}`, event: event.event, ts: event.ts, details: copy(details) });
   } else if (event.event === 'briefing.published') {
     run.briefing = copy(details.briefing);
+  } else if (event.event === 'output.published') {
+    // CHAT-08 / D-K4: one chip per outputKey; a revision is the next version
+    // of the same chip. The event carries metadata only — the body is read
+    // from the bridge when the chip is pressed.
+    run.outputs = upsertPublishedOutput(run.outputs, details.output);
   } else if (event.event === 'approval.required') {
     const approval = details.approval || details;
     const id = approval.id || approval.approvalId || event.itemId;
@@ -1087,11 +1131,14 @@ export function mergeChatSnapshot(state, snapshot, clientThreadId) {
       run.subAgents = (Array.isArray(run.subAgents) ? run.subAgents : []).map(publicSubAgent).filter(Boolean).slice(0, MAX_SUB_AGENTS);
       // CU-01: the bridge's count replaces this screen's; a run that never drove the Mac has none.
       if ('computerUse' in incoming) run.computerUse = publicComputerUse(incoming.computerUse);
+      if (Array.isArray(incoming.outputs)) run.outputs = publishedOutputs(incoming.outputs);
       if (incoming.context) {
         run.contextCaptures = copy(incoming.context.captures || []);
         run.contextPackets = copy(incoming.context.packets || []);
         if (incoming.context.resolver) run.contextResolver = copy(incoming.context.resolver);
         if (incoming.context.briefings?.length) run.briefing = copy(incoming.context.briefings.at(-1));
+        // CHAT-08: the bridge lists every stored version; the screen keeps one entry per outputKey.
+        if (incoming.context.outputs?.length) run.outputs = publishedOutputs(incoming.context.outputs);
       }
       if (stream) { run.streamId = snapshot.streamId; run.seq = snapshot.seq; }
     }
@@ -1265,7 +1312,8 @@ export function projectRunMessages(existing, run, now = Date.now()) {
   const priorAnswer = existing.findLast(message => message.role === 'assistant'
     && message.runId === run.runId && message.conversationId === run.conversationId);
   const messages = existing.map(message => run.requestId && message.requestId === run.requestId && message.role === 'user'
-    ? { ...message, status: 'complete', conversationId: run.conversationId, runId: run.runId, answerId: run.answerId }
+    ? { ...message, status: 'complete', conversationId: run.conversationId, runId: run.runId, answerId: run.answerId,
+      ...(run.localMessageId && !message.localMessageId ? { localMessageId: run.localMessageId } : {}) }
     : { ...message });
   const ordinal = { user: 0, assistant: 0 };
   for (const incoming of run.messages || []) {
@@ -1284,9 +1332,9 @@ export function projectRunMessages(existing, run, now = Date.now()) {
       ...previous, ...incoming, role, id: previous?.id || incoming.id,
       providerItemId: incoming.id, content: incoming.content ?? incoming.text ?? '',
       authorName: role === 'assistant' ? previous?.authorName || run.authorName || 'Codex' : previous?.authorName,
-      ...(role === 'assistant' ? { authorAvatar: publicProfileAvatar(previous?.authorAvatar || run.authorAvatar) } : {}),
+      ...(role === 'assistant' ? { authorAvatar: displayProfileAvatar(previous?.authorAvatar || run.authorAvatar) } : {}),
       createdAt: previous?.createdAt || incoming.createdAt || now,
-      conversationId: run.conversationId, runId: run.runId, answerId: run.answerId, artifacts: [], briefing: null, contextCaptures: [], contextEvents: [], contextPackets: [],
+      conversationId: run.conversationId, runId: run.runId, answerId: run.answerId, artifacts: [], briefing: null, outputs: [], contextCaptures: [], contextEvents: [], contextPackets: [],
     };
     if (index < 0) messages.push(projected);
     else messages[index] = projected;
@@ -1295,6 +1343,7 @@ export function projectRunMessages(existing, run, now = Date.now()) {
   if (last) {
     last.artifacts = (run.artifacts || []).filter(usableArtifact);
     last.briefing = copy(run.briefing !== undefined ? run.briefing : priorAnswer?.briefing || null);
+    last.outputs = copy(run.outputs !== undefined ? run.outputs : priorAnswer?.outputs || []);
     last.contextCaptures = copy(run.contextCaptures !== undefined ? run.contextCaptures : priorAnswer?.contextCaptures || []);
     last.contextEvents = copy(run.contextEvents !== undefined ? run.contextEvents : priorAnswer?.contextEvents || []);
     last.contextPackets = copy(run.contextPackets !== undefined ? run.contextPackets : priorAnswer?.contextPackets || []);
@@ -1341,11 +1390,16 @@ export function publicProfileAvatar(value) {
   return { kind: value.kind, value: text, color: PROFILE_AVATAR_PALETTE.includes(color) ? color : PROFILE_AVATAR_PALETTE[0] };
 }
 
-/** Avatar to draw: the saved emoji/initial, else the name's first letter; tone indexes the palette. */
+// AGENT-05 / D-A3: the avatar as the Chat draws it — a public emoji/initial, or
+// a saved photo reference (its initial stands in until the bytes arrive).
+export const displayProfileAvatar = value => publicProfileAvatar(value) || profileImageReference(value);
+
+/** Avatar to draw: the saved emoji/initial, else the name's first letter; tone indexes the palette. A photo adds `assetId`. */
 export function profileAvatarView(avatar, name = '') {
-  const saved = publicProfileAvatar(avatar);
+  const saved = displayProfileAvatar(avatar);
   const first = graphemesOf(typeof name === 'string' ? name.trim() : '')[0] || '?';
-  return { kind: saved?.kind || 'initial', text: saved?.value || first.toUpperCase(), tone: saved ? PROFILE_AVATAR_PALETTE.indexOf(saved.color) : 0, saved: !!saved };
+  return { kind: saved?.kind || 'initial', text: saved?.value || first.toUpperCase(), tone: saved ? PROFILE_AVATAR_PALETTE.indexOf(saved.color) : 0, saved: !!saved,
+    ...(saved?.kind === 'image' ? { assetId: saved.assetId } : {}) };
 }
 
 /** Catalog rows from GET /profiles; malformed rows are dropped, never repaired into another identity. */
@@ -1360,7 +1414,7 @@ export function normalizeProfileCatalog(payload) {
     return [{ id: row.id, lifecycle: row.lifecycle, origin: PROFILE_ORIGINS.includes(row.origin) ? row.origin : 'user',
       activeRevision: revision(row.activeRevision), headRevision: revision(row.headRevision), hasDraft: row.hasDraft === true,
       name: row.name.trim().slice(0, 40), role: typeof row.role === 'string' ? row.role.trim().slice(0, 80) : '',
-      avatar: publicProfileAvatar(row.avatar), updatedAt: Number.isFinite(row.updatedAt) ? row.updatedAt : null }];
+      avatar: displayProfileAvatar(row.avatar), updatedAt: Number.isFinite(row.updatedAt) ? row.updatedAt : null }];
   });
 }
 export const profileRunnable = profile => !!profile && profile.lifecycle === 'active' && Number.isSafeInteger(profile.activeRevision);
@@ -1689,20 +1743,20 @@ export function agentPeekView({ author = 'Codex', authorAvatar = null, profile =
   const board = `${boardTitle || 'EG-Desk'}${threadType === 'group' ? ' · Board Thread' : ' · 지금 열린 Board'}`;
   const base = { model: modelText || '확인 안 됨', board, profileId: null, loading: false, note: null, expertiseEmpty: '정하지 않음' };
   if (!profile) {
-    return { ...base, name: author || 'Codex', avatar: publicProfileAvatar(authorAvatar), role: '기본 Codex 대화 · 따로 정한 Agent 없음',
+    return { ...base, name: author || 'Codex', avatar: displayProfileAvatar(authorAvatar), role: '기본 Codex 대화 · 따로 정한 Agent 없음',
       tone: '정하지 않음', expertise: [], tools: '제한 없음' };
   }
   const name = profile.name || author || 'Agent';
   const note = author && author !== name ? `이 답변을 보낸 당시 이름: ${author}` : null;
   if (profile.server !== true) {
-    return { ...base, name, avatar: publicProfileAvatar(profile.avatar) || publicProfileAvatar(authorAvatar), role: profile.summary || profile.role || '역할 미설정',
+    return { ...base, name, avatar: displayProfileAvatar(profile.avatar) || displayProfileAvatar(authorAvatar), role: profile.summary || profile.role || '역할 미설정',
       tone: '정하지 않음', expertise: [], tools: '제한 없음', note };
   }
   const body = detail?.active?.body || null;
   const pending = !body && detailStatus === 'loading' ? '불러오는 중…' : !body ? '확인하지 못했습니다' : null;
   const tone = body ? PROFILE_TONE_OPTIONS.find(option => option.value === body.personality?.tone)?.label || '담백' : null;
   const traits = body ? formList(body.personality?.traits).slice(0, 3) : [];
-  return { ...base, name, avatar: publicProfileAvatar(body?.avatar) || publicProfileAvatar(profile.avatar) || publicProfileAvatar(authorAvatar),
+  return { ...base, name, avatar: displayProfileAvatar(body?.avatar) || displayProfileAvatar(profile.avatar) || displayProfileAvatar(authorAvatar),
     role: formLine(body?.role) || profile.role || '역할 미설정', profileId: profile.id, loading: !!pending && detailStatus === 'loading', note,
     tone: pending || [tone, traits.join(', ')].filter(Boolean).join(' · '),
     expertise: body ? formList(body.expertise) : [],
@@ -3206,6 +3260,58 @@ const resultRef = value => typeof value === 'string' && value.length > 0 && valu
 const resultLine = (value, max) => typeof value === 'string' ? value.replace(/\s+/g, ' ').trim().slice(0, max) : '';
 const groupDigits = value => String(value).replace(/\B(?=(\d{3})+(?!\d))/g, ',');
 
+// CHAT-08: Agent-published Canvas results. The bridge keeps the markdown
+// (egdesk_publish_output, at most 20,000 characters) and sends metadata only;
+// Chat shows one chip per outputKey and, per D-K4, a revision of the same
+// result is the next version of that chip, never a second one. Nothing opens
+// by itself. Mirrors helper/egdesk-context-runtime.mjs OUTPUT_KEY_PATTERN.
+export const OUTPUT_KEY_PATTERN = /^[a-z0-9-]{1,64}$/;
+const OUTPUT_ID_PATTERN = /^[\da-f-]{36}$/i;
+const outputId = value => typeof value === 'string' && OUTPUT_ID_PATTERN.test(value) ? value : null;
+
+/** One published result's metadata, checked (an event payload, a stored record or a chip entry), or null. */
+export function publishedOutputRecord(value) {
+  if (!value || typeof value !== 'object' || !outputId(value.id)) return null;
+  if (typeof value.outputKey !== 'string' || !OUTPUT_KEY_PATTERN.test(value.outputKey)) return null;
+  if (!Number.isSafeInteger(value.version) || value.version < 1) return null;
+  const title = resultLine(value.title, 120);
+  if (!title) return null;
+  return {
+    id: value.id, outputKey: value.outputKey, version: value.version, title,
+    charCount: Number.isSafeInteger(value.charCount) && value.charCount >= 0 ? value.charCount : null,
+    createdAt: Number.isFinite(value.createdAt) ? value.createdAt : null,
+    previousId: outputId(value.previousId),
+    conversationId: resultRef(value.conversationId), runId: resultRef(value.runId), answerId: resultRef(value.answerId),
+  };
+}
+
+/** run.outputs with one more published result folded in: one entry per outputKey, showing its latest version and keeping the versions behind it. */
+export function upsertPublishedOutput(list, value) {
+  const entries = (Array.isArray(list) ? list : []).map(copy);
+  const output = publishedOutputRecord(value);
+  if (!output) return entries;
+  const index = entries.findIndex(entry => entry.outputKey === output.outputKey);
+  const current = index >= 0 ? entries[index] : null;
+  const versions = [...(current?.versions || []).filter(item => item.id !== output.id),
+    { id: output.id, version: output.version, title: output.title, charCount: output.charCount, createdAt: output.createdAt }]
+    .sort((a, b) => a.version - b.version || (a.createdAt || 0) - (b.createdAt || 0));
+  const latest = versions.at(-1);
+  const { versions: _known, ...head } = latest.id === output.id || !current ? output : current;
+  const entry = { ...head, versions };
+  if (index >= 0) entries[index] = entry; else entries.push(entry);
+  return entries;
+}
+
+/** Chip entries from a list of published results (every stored version, or entries saved earlier). */
+export function publishedOutputs(list) {
+  let entries = [];
+  for (const item of Array.isArray(list) ? list : []) {
+    if (Array.isArray(item?.versions) && item.versions.length) for (const version of item.versions) entries = upsertPublishedOutput(entries, { ...item, ...version });
+    else entries = upsertPublishedOutput(entries, item);
+  }
+  return entries;
+}
+
 /** Whether this answer can be kept as a result card now (a finished Agent answer with something in it). */
 export function canKeepResultCard(thread, message) {
   if (!thread?.id || nativeBindingHeld(thread) || message?.role !== 'assistant') return false;
@@ -3240,6 +3346,11 @@ export function restoreResultCardRecord(value) {
   if (!text.trim() && !artifacts.length) return null;
   const totalChars = Number.isSafeInteger(value.totalChars) && value.totalChars >= text.length ? value.totalChars : text.length;
   const author = resultLine(source.author, 40) || 'Codex';
+  // CHAT-08: a card opened from a published-result chip remembers which result
+  // and version it shows; all three travel together or not at all.
+  const published = outputId(source.outputId) && typeof source.outputKey === 'string' && OUTPUT_KEY_PATTERN.test(source.outputKey)
+    && Number.isSafeInteger(source.outputVersion) && source.outputVersion >= 1
+    ? { outputId: source.outputId, outputKey: source.outputKey, outputVersion: source.outputVersion } : {};
   return {
     version: 1, title: resultLine(value.title, 80) || resultCardTitle(text, author),
     text, totalChars, truncated: totalChars > text.length, artifacts,
@@ -3247,9 +3358,32 @@ export function restoreResultCardRecord(value) {
       threadId, threadTitle: resultLine(source.threadTitle, 80), conversationId: resultRef(source.conversationId),
       runId: resultRef(source.runId), answerId, messageId, author,
       answeredAt: Number.isFinite(source.answeredAt) ? source.answeredAt : null,
+      ...published,
     },
     createdAt: Number.isFinite(value.createdAt) ? value.createdAt : null,
   };
+}
+
+// D-K3 is still open (how a result card is saved). This card copies the body
+// (at most RESULT_CARD_TEXT_LIMIT, the same cap as a published result) into
+// the Desk/Board record, as the CHAT-04 card does, so a saved Board restores
+// it without the bridge; the bridge's blob stays the version history. If
+// D-K3 lands on 'reference only', drop `text` here and read on restore.
+/** The card record for an Agent-published result the chip just read from the bridge, or null. */
+export function publishedOutputCardRecord(thread, message, output, markdown, { author = 'Codex', now = Date.now() } = {}) {
+  const published = publishedOutputRecord(output);
+  if (!thread?.id || !published || typeof markdown !== 'string' || !markdown.trim()) return null;
+  const name = resultLine(author, 40) || 'Codex';
+  return restoreResultCardRecord({
+    version: 1, title: published.title, text: markdown.slice(0, RESULT_CARD_TEXT_LIMIT), totalChars: markdown.length, artifacts: [],
+    source: {
+      threadId: thread.id, threadTitle: thread.title, conversationId: published.conversationId || message?.conversationId || thread.conversationId || null,
+      runId: published.runId || message?.runId || null, answerId: published.answerId || message?.answerId || null,
+      messageId: message?.id || null, author: name, answeredAt: published.createdAt ?? message?.createdAt ?? null,
+      outputId: published.id, outputKey: published.outputKey, outputVersion: published.version,
+    },
+    createdAt: now,
+  });
 }
 
 /** The card record for one answer, at the moment 대표님 asks for it, or null. */
@@ -3269,10 +3403,11 @@ export function resultCardRecord(thread, message, { author = 'Codex', now = Date
   });
 }
 
-/** One open card per answer: the same answer asked for again focuses its card. */
+/** One open card per answer: the same answer asked for again focuses its card. A published result is one card per outputKey, whatever its version. */
 export function resultCardKey(record) {
   const source = record?.source;
   const room = source?.conversationId || source?.threadId;
+  if (room && source?.outputKey) return `${room}/output/${source.outputKey}`;
   const answer = source?.answerId || source?.messageId;
   return room && answer ? `${room}/${answer}` : null;
 }
@@ -3282,7 +3417,8 @@ export function resultCardSourceView(record, { formatTime = null } = {}) {
   const source = record?.source || {};
   const room = source.threadTitle || '이름 없는';
   const time = typeof formatTime === 'function' && Number.isFinite(source.answeredAt) ? formatTime(source.answeredAt) : '';
-  const parts = [`${room} 대화`, `${source.author || 'Codex'}의 답변`, time].filter(Boolean);
+  const parts = [`${room} 대화`, `${source.author || 'Codex'}의 답변`,
+    source.outputVersion ? `게시한 결과 · 버전 ${source.outputVersion}` : null, time].filter(Boolean);
   return {
     line: `출처 · ${parts.join(' · ')}`,
     truncatedNote: record?.truncated ? `답변이 길어 앞부분 ${groupDigits(record.text.length)}자만 담았습니다. 전체는 채팅에서 볼 수 있습니다.` : null,

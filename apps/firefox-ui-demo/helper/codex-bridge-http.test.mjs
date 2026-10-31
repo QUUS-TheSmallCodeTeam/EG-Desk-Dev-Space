@@ -3,7 +3,7 @@ import assert from 'node:assert/strict'
 import { Readable } from 'node:stream'
 import { rm } from 'node:fs/promises'
 import { readFile } from 'node:fs/promises'
-import { backoffDelayMs, createChatHttpHandler, createRateLimitSync, createReconnectBackoff, guardBridgeRequest, readJsonBody, setBridgeCors } from './codex-bridge-http.mjs'
+import { backoffDelayMs, createAccountAccessTracker, createChatHttpHandler, createRateLimitSync, createReconnectBackoff, guardBridgeRequest, readJsonBody, setBridgeCors } from './codex-bridge-http.mjs'
 import { CodexChatRuntime } from './codex-chat-runtime.mjs'
 import { createChatEngineAuth } from './codex-bridge-engine-auth.mjs'
 import { createCodexEngineAdapter } from './codex-engine-adapter.mjs'
@@ -612,6 +612,58 @@ test('sparse usage notifications merge into the signed-in identity only', async 
   assert.equal(u.updates.length, before)
 })
 
+// SUB-14: the auth/quota/permission failure a Codex turn leaves on the auth state.
+function accessFixture() {
+  const state = { isLoggedIn: true, accountEmail: 'owner@example.test', accountId: null, accessFailure: null }
+  const updates = []
+  let clock = 2_000_000
+  const tracker = createAccountAccessTracker({ auth: () => state, now: () => clock, update: patch => { updates.push(patch); Object.assign(state, patch) } })
+  return { state, updates, tracker, tick: ms => { clock += ms } }
+}
+
+test('access tracker records auth, quota and permission turn rejections for the signed-in identity, with allowlisted causes only', () => {
+  const a = accessFixture()
+  assert.equal(a.tracker.notify({ method: 'error', params: { error: { message: 'Reconnecting', codexErrorInfo: { responseStreamDisconnected: { httpStatusCode: 401 } } }, willRetry: true } }), false, 'the app-server retries itself')
+  assert.equal(a.state.accessFailure, null)
+  assert.equal(a.tracker.notify({ method: 'turn/completed', params: { turn: { id: 't1', status: 'failed', error: { message: 'You have hit your usage limit.', codexErrorInfo: 'usageLimitExceeded' } } } }), true)
+  assert.deepEqual(a.state.accessFailure, { kind: 'quota', cause: 'usageLimitExceeded', at: 2_000_000, identity: 'email:owner@example.test' })
+  a.tick(10)
+  assert.equal(a.tracker.notify({ method: 'error', params: { error: { message: 'Unauthorized', codexErrorInfo: 'unauthorized' } } }), true)
+  assert.deepEqual([a.state.accessFailure.kind, a.state.accessFailure.at], ['auth', 2_000_010])
+  assert.equal(a.tracker.notify({ method: 'error', params: { error: { message: 'boom', codexErrorInfo: 'internalServerError' } } }), false, 'network/model errors are not account states')
+  assert.equal(a.state.accessFailure.kind, 'auth')
+  assert.equal(a.tracker.notify({ method: 'turn/completed', params: { turn: { id: 't2', status: 'failed', error: { message: 'denied', codexErrorInfo: { unknownVariant: 1 } } } } }), false)
+  assert.equal(JSON.stringify(a.state).includes('unknownVariant'), false)
+  assert.equal(a.tracker.notify({ method: 'turn/completed', params: { turn: { status: 'failed', error: { message: 'Permission denied by policy' } } } }), true, 'a message without a structured cause still classifies')
+  assert.deepEqual([a.state.accessFailure.kind, a.state.accessFailure.cause], ['permission', null])
+  assert.equal(a.tracker.notify({ method: 'account/rateLimits/updated', params: {} }), false)
+})
+
+test('access tracker clears on a completed turn or a finished sign-in; a turn-scoped cause clears when the next turn starts', () => {
+  const a = accessFixture()
+  a.tracker.notify({ method: 'turn/completed', params: { turn: { status: 'failed', error: { message: 'policy', codexErrorInfo: 'sandboxError' } } } })
+  assert.deepEqual(a.state.accessFailure, { kind: 'permission', cause: 'sandboxError', at: 2_000_000, identity: 'email:owner@example.test' })
+  a.tracker.notify({ method: 'turn/started', params: {} })
+  assert.equal(a.state.accessFailure, null)
+  a.tracker.notify({ method: 'turn/completed', params: { turn: { status: 'failed', error: { message: 'x', codexErrorInfo: { responseTooManyFailedAttempts: { httpStatusCode: 403 } } } } } })
+  assert.equal(a.state.accessFailure.cause, 'http403')
+  a.tracker.notify({ method: 'turn/started', params: {} })
+  assert.equal(a.state.accessFailure.cause, 'http403', 'an account-level cause survives a new turn')
+  const before = a.updates.length
+  a.tracker.notify({ method: 'turn/completed', params: { turn: { status: 'completed', error: null } } })
+  assert.equal(a.state.accessFailure, null)
+  a.tracker.notify({ method: 'turn/completed', params: { turn: { status: 'completed' } } })
+  assert.equal(a.updates.length, before + 1, 'no update without a change')
+  a.tracker.notify({ method: 'error', params: { error: { message: 'Unauthorized', codexErrorInfo: 'unauthorized' } } })
+  a.tracker.notify({ method: 'account/login/completed', params: { success: false, error: 'cancelled' } })
+  assert.equal(a.state.accessFailure.kind, 'auth')
+  a.tracker.notify({ method: 'account/login/completed', params: { success: true } })
+  assert.equal(a.state.accessFailure, null)
+  a.state.accountEmail = null
+  a.tracker.notify({ method: 'error', params: { error: { message: 'Unauthorized', codexErrorInfo: 'unauthorized' } } })
+  assert.equal(a.state.accessFailure.identity, null, 'an unknown identity records no invented key')
+})
+
 test('bridge mounts Agent profiles, plan usage and PUT preflight in the documented order', async () => {
   const source = await readFile(new URL('./codex-bridge-server.mjs', import.meta.url), 'utf8')
   const at = text => { const index = source.indexOf(text); assert.notEqual(index, -1, `missing server marker: ${text}`); return index }
@@ -769,4 +821,30 @@ test('2-R routes: Board send, message sharing and sub-Agent hand-back reach thei
   const res = response()
   await bare(request(JSON.stringify({ clientThreadId: 'room-1', message: 'hi' }), {}, '/chat/board/send'), res, new URL('http://localhost/chat/board/send'))
   assert.deepEqual([res.status, res.body.code, res.body.accepted], [501, 'CHAT_ACTION_UNAVAILABLE', false])
+})
+
+test('CHAT-01: POST /chat/rooms/agent reaches setRoomAgent without an engine account check; a room never sent answers 404; a bridge without it answers 501', async () => {
+  const seen = []
+  let auth = 0
+  const chat = {
+    setRoomAgent: body => {
+      seen.push(body)
+      if (body.clientThreadId === 'never-sent') throw Object.assign(new Error('That conversation has not been saved yet'), { code: 'CONVERSATION_NOT_FOUND', httpStatus: 404 })
+      return { accepted: true, clientThreadId: body.clientThreadId, agent: body.profileId === null ? null : { profileId: body.profileId, revision: body.revision ?? null, setAt: 7 } }
+    },
+  }
+  const handler = createChatHttpHandler(chat, async () => { auth += 1; throw Object.assign(new Error('Codex ChatGPT login is required'), { code: 'LOGIN_REQUIRED', httpStatus: 401 }) })
+  const post = async body => { const res = response(); assert.equal(await handler(request(JSON.stringify(body), {}, '/chat/rooms/agent'), res, new URL('http://localhost/chat/rooms/agent')), true); return res }
+  const picked = await post({ clientThreadId: 'room-1', profileId: 'code-reviewer', revision: 3 })
+  assert.deepEqual([picked.status, picked.body], [200, { accepted: true, clientThreadId: 'room-1', agent: { profileId: 'code-reviewer', revision: 3, setAt: 7 } }])
+  const cleared = await post({ clientThreadId: 'room-1', profileId: null, revision: null })
+  assert.deepEqual([cleared.status, cleared.body.agent], [200, null])
+  const unsent = await post({ clientThreadId: 'never-sent', profileId: 'code-reviewer' })
+  assert.deepEqual([unsent.status, unsent.body.code, unsent.body.accepted], [404, 'CONVERSATION_NOT_FOUND', false])
+  assert.equal(auth, 0, 'a signed-out pick is still written: the room Agent is a local-store record, not a turn')
+  assert.deepEqual(seen.map(body => [body.clientThreadId, body.profileId]), [['room-1', 'code-reviewer'], ['room-1', null], ['never-sent', 'code-reviewer']])
+  const bare = createChatHttpHandler({}, async () => {})
+  const res = response()
+  await bare(request(JSON.stringify({ clientThreadId: 'room-1', profileId: 'code-reviewer' }), {}, '/chat/rooms/agent'), res, new URL('http://localhost/chat/rooms/agent'))
+  assert.deepEqual([res.status, res.body.code], [501, 'CHAT_ACTION_UNAVAILABLE'])
 })
