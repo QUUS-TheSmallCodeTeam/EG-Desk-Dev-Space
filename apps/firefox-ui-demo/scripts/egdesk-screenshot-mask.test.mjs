@@ -290,3 +290,108 @@ test('parent sends nothing when the boxes moved during capture, the capture is u
   assert.deepEqual(await unsupported.parent.receiveMessage({ name: 'captureScreenshot', data: { ticket: ticket5 } }), { send: false, reason: 'capture-unsupported' })
   assert.deepEqual(unsupported.parent.receiveMessage({ name: 'authorizeAct', data: {} }), { authorized: false, reason: 'missing-authorizer' }, 'the act path is unchanged')
 })
+
+// Helper side: the tool rides on an observe request and the provider hands
+// the image to the model as its own inputImage item.
+const { createBrowserToolService } = await import('../helper/egdesk-browser-tool-runtime.mjs')
+const { createCodexBrowserToolProvider } = await import('../helper/codex-browser-tool-provider.mjs')
+const helperRun = { answerId: 'answer-1', runId: 'run-1', clientThreadId: 'thread-a', status: 'inProgress' }
+function helperSource(permission) {
+  return { id: 'selected-browser-1', kind: 'browser', selectedByUser: true,
+    browserToolPermission: permission, browserToolSelection: { token: 'grant-browser-1', threadId: 'thread-a' },
+    browserToolIdentity: { cardEpoch: 'card-epoch-1', userContextId: 0,
+      engineAccountKey: 'codex:chatgpt:fixture@example.test', authorityEpoch: 0 },
+    sourceRef: { viewId: 'browser-1', profileId: 'firefox-default', accountId: 'fixture-account', uri: 'https://example.test/local' } }
+}
+const sentCapture = { send: true, imageUrl: 'data:image/jpeg;base64,QUJD', format: 'jpeg', width: 720, height: 480, imageScale: 1,
+  maskedRegions: [{ kind: 'sensitive-field', reason: 'password', bounds: { x: 17, y: 77, width: 166, height: 36 } }], maskCount: 1,
+  documentId: 'document-1', revision: 3, innerWindowId: 77 }
+function helperFixture(permission, screenshot) {
+  const requests = []
+  const current = { cardId: 'browser-1', documentId: 'document-1', revision: 3, coordinateSpace: 'browser-viewport-local',
+    viewport: { width: 720, height: 480, devicePixelRatio: 1 }, url: 'https://example.test/local', title: 'Fixture', text: [],
+    interactiveElements: [], ...(screenshot === undefined ? {} : { screenshot }) }
+  const sendToUi = async request => {
+    requests.push(request)
+    if (request.kind === 'bind') return { requestId: request.requestId, status: 'bound',
+      binding: { cardId: 'browser-1', cardEpoch: 'card-epoch-1', profileId: 'firefox-default', accountId: 'fixture-account',
+        userContextId: 0, url: 'https://example.test/local', engineAccountKey: 'codex:chatgpt:fixture@example.test', authorityEpoch: 0 } }
+    if (request.kind === 'observe') return { requestId: request.requestId, status: 'observed', snapshot: current }
+    throw new Error(`unexpected UI request ${request.kind}`)
+  }
+  const service = createBrowserToolService({ sendToUi, getOwnerKey: () => 'engine-account-1' })
+  return { service, requests, permission }
+}
+async function boundDispatch(f, tool, args, callId) {
+  const prepared = f.service.prepare({ selectedSources: [helperSource(f.permission)] })
+  await f.service.bind(helperRun, prepared)
+  return f.service.dispatch(helperRun, { tool, callId, arguments: args })
+}
+
+test('helper sends the screenshot tool as an observe request with screenshot options under an observe grant', async () => {
+  const f = helperFixture('observe', sentCapture)
+  const result = await boundDispatch(f, 'egdesk_browser_screenshot', { cardId: 'browser-1' }, 'call-shot-1')
+  const observe = f.requests.find(request => request.kind === 'observe')
+  assert.deepEqual(observe.options, { textLimit: 1, elementLimit: 1,
+    screenshot: { maxEdge: 1280, budgetChars: 150000, format: 'jpeg', quality: 0.7 } })
+  assert.equal(result.status, 'screenshot-observed')
+  assert.equal(result.cardId, 'browser-1')
+  assert.equal(result.documentId, 'document-1')
+  assert.equal(result.revision, 3)
+  assert.equal(result.externalEffectVerified, false)
+  assert.equal(Object.hasOwn(result, 'observationId'), false, 'a screenshot is not an observation')
+  const { send: _send, ...expected } = sentCapture
+  assert.deepEqual(result.screenshot, expected)
+})
+
+test('helper reports a withheld screenshot with its reason and refuses an image it cannot verify', async () => {
+  const withheld = await boundDispatch(helperFixture('observe', { send: false, reason: 'mask-moved' }), 'egdesk_browser_screenshot', { cardId: 'browser-1' }, 'call-shot-2')
+  assert.equal(withheld.status, 'screenshot-withheld')
+  assert.deepEqual(withheld.screenshot, { reason: 'mask-moved' })
+  for (const bad of [undefined, { send: true, imageUrl: 'https://example.test/shot.jpg', format: 'jpeg', width: 720, height: 480, imageScale: 1, maskedRegions: [] },
+    { send: true, imageUrl: 'data:image/jpeg;base64,QUJD', format: 'jpeg', width: 720, height: 480, imageScale: 1, maskedRegions: [{ kind: 'x' }] },
+    { send: false }]) {
+    await assert.rejects(boundDispatch(helperFixture('observe', bad), 'egdesk_browser_screenshot', { cardId: 'browser-1' }, 'call-shot-3'),
+      error => error.code === 'BROWSER_OBSERVATION_UNAVAILABLE')
+  }
+  // Even with an interaction grant the screenshot never becomes the fresh
+  // observation an action may spend.
+  const f = helperFixture('interact', sentCapture)
+  await boundDispatch(f, 'egdesk_browser_screenshot', { cardId: 'browser-1' }, 'call-shot-4')
+  await assert.rejects(f.service.dispatch(helperRun, { tool: 'egdesk_browser_click', callId: 'call-click-1', arguments: {
+    cardId: 'browser-1', observationId: 'screenshot', expectedRevision: 3, ref: 'el_1',
+    expectedTarget: { ref: 'el_1', role: 'button', label: 'Pay', href: '', value: '', tag: 'button' },
+    postcondition: { kind: 'visible-text', value: 'Paid' } } }), error => error.code === 'BROWSER_OBSERVATION_STALE')
+  assert.equal(f.requests.some(request => request.kind === 'act'), false)
+})
+
+test('provider attaches a sent screenshot as an inputImage item and allows the tool with an observe-only Card', async () => {
+  const events = []
+  const results = new Map()
+  const service = { prepare: () => null, bind: async () => ({ cards: [] }), cancelRun: async () => [], reset: async () => [],
+    dispatch: async (run, event) => results.get(event.callId) }
+  const transport = { runs: new Map(), hasClient: () => true, bindRun() {}, unbindRun() {}, reset() {} }
+  const provider = createCodexBrowserToolProvider({ transport, getOwnerKey: () => 'codex:account-1', service })
+  provider.runtime = { browserRegisteredThreads: new Set(), currentEpoch: () => 1, emit: (run, event, detail) => events.push({ event, detail }) }
+  const run = { answerId: 'a/1', runId: 'turn-1', clientThreadId: 'ui-thread-1', status: 'inProgress',
+    executionPolicy: { mode: 'browserBounded' }, browserBinding: { cards: [{ cardId: 'card-1', permission: 'observe', sourceId: 'source-1' }] } }
+  const { send: _send, ...screenshot } = sentCapture
+  results.set('call-1', { status: 'screenshot-observed', cardId: 'card-1', documentId: 'document-1', revision: 3, screenshot, externalEffectVerified: false })
+  results.set('call-2', { status: 'screenshot-withheld', cardId: 'card-1', documentId: 'document-1', revision: 3, screenshot: { reason: 'image-too-large' }, externalEffectVerified: false })
+  const sent = await provider.dispatch(run, { tool: 'egdesk_browser_screenshot', callId: 'call-1', arguments: { cardId: 'card-1' } })
+  assert.equal(sent.success, true)
+  assert.equal(sent.contentItems.length, 2)
+  assert.equal(sent.contentItems[0].type, 'inputText')
+  assert.equal(JSON.parse(sent.contentItems[0].text).screenshot.imageUrl, '[attached image]')
+  assert.equal(JSON.parse(sent.contentItems[0].text).screenshot.maskCount, 1)
+  assert.deepEqual(sent.contentItems[1], { type: 'inputImage', imageUrl: 'data:image/jpeg;base64,QUJD' })
+  assert.equal(events.at(-1).event, 'browser.tool.completed')
+  assert.equal(events.at(-1).detail.externalEffectVerified, false)
+  const withheld = await provider.dispatch(run, { tool: 'egdesk_browser_screenshot', callId: 'call-2', arguments: { cardId: 'card-1' } })
+  assert.equal(withheld.success, false)
+  assert.equal(withheld.contentItems.length, 1)
+  assert.equal(JSON.parse(withheld.contentItems[0].text).screenshot.reason, 'image-too-large')
+  assert.equal(events.at(-1).event, 'browser.tool.unverified')
+  const denied = await provider.dispatch(run, { tool: 'egdesk_browser_click', callId: 'call-3', arguments: { cardId: 'card-1' } })
+  assert.equal(JSON.parse(denied.contentItems[0].text).error.code, 'BROWSER_INTERACTION_NOT_GRANTED', 'an observe grant still never acts')
+})
