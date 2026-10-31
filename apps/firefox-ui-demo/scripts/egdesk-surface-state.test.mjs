@@ -4717,6 +4717,76 @@ test('late local hydration preserves newer composer, native gate, in-flight UI a
   assert.equal(Chat.hydrateLocalChatThread(twice, { ...history, localConversationId: 'other-local' }), twice);
 });
 
+test('CHAT-01: a room restored from the store alone answers as the Agent recorded there; a live Desk pref keeps its own pick; a room without one is unchanged', () => {
+  const page = agent => Chat.normalizeLocalHistoryPage({ protocolVersion: 1,
+    thread: { clientThreadId: 'room', localConversationId: 'local-a', title: 'Saved room', agent },
+    runs: [], messages: [], events: [], coverage: { scope: 'egdesk-local', status: 'complete', reasons: [], nativeHistoryComplete: null },
+    nextCursor: null, hasMore: false, projectionTruncated: false }, 'room');
+  const fresh = { id: 'room', type: 'dm', profileEnabled: false, agentProfileId: null, toolMode: null, systemPrompt: null, messages: [] };
+  const recorded = { profileId: 'code-reviewer', revision: 3, setAt: 1700000000000 };
+  // (a) No Desk pref for this room: the store's Agent is restored by ID; revision and setAt ride on thread.agent only.
+  const fromStore = Chat.hydrateLocalChatThread(fresh, page(recorded));
+  assert.deepEqual([fromStore.profileEnabled, fromStore.agentProfileId], [true, 'code-reviewer']);
+  assert.deepEqual(fromStore.agent, recorded);
+  assert.deepEqual([fromStore.toolMode, fromStore.systemPrompt], [null, null], 'the screen resolves tool mode and prompt from the Agent, not the store');
+  assert.deepEqual(Chat.hydrateLocalChatThread(fromStore, page(recorded)), fromStore, 'reading the same page again changes nothing');
+  // A missing or stopped Agent comes back as itself (placeholder and send block), never as another Agent.
+  const gone = Chat.hydrateLocalChatThread(fresh, page({ profileId: 'profile-gone-01', revision: null, setAt: 5 }));
+  assert.deepEqual([gone.profileEnabled, gone.agentProfileId, gone.agent], [true, 'profile-gone-01', { profileId: 'profile-gone-01', revision: null, setAt: 5 }]);
+  // A value that is not a profile ID is no Agent.
+  const malformed = Chat.hydrateLocalChatThread(fresh, page({ profileId: 'Not An Id', revision: 1, setAt: 5 }));
+  assert.deepEqual([malformed.profileEnabled, malformed.agentProfileId, malformed.agent], [false, null, null]);
+  // (b) A live Desk pref wins: its pick (and the prompt it carried) stays although the store names another Agent.
+  const pref = { ...fresh, profileEnabled: true, agentProfileId: 'designer', toolMode: 'design', systemPrompt: 'Design.',
+    agent: { profileId: 'stale-copy', revision: 1, setAt: 1 } };
+  const kept = Chat.hydrateLocalChatThread(pref, page(recorded));
+  assert.deepEqual([kept.profileEnabled, kept.agentProfileId, kept.toolMode, kept.systemPrompt], [true, 'designer', 'design', 'Design.']);
+  assert.deepEqual(kept.agent, recorded, 'thread.agent is the store\'s record, never the copy the pref kept');
+  // (c) A room the store records no Agent for is unchanged; a pref copy of a cleared Agent goes with it.
+  const none = Chat.hydrateLocalChatThread(fresh, page(null));
+  assert.deepEqual([none.profileEnabled, none.agentProfileId, none.agent], [false, null, null]);
+  const cleared = Chat.hydrateLocalChatThread({ ...fresh, agent: { profileId: 'stale-copy', revision: null, setAt: 1 } }, page(null));
+  assert.deepEqual([cleared.profileEnabled, cleared.agent], [false, null]);
+  // An older bridge whose thread has no agent field leaves the room exactly as it was.
+  const older = Chat.hydrateLocalChatThread({ ...fresh, agent: recorded }, page(undefined));
+  assert.deepEqual([older.profileEnabled, older.agentProfileId, older.agent], [false, null, recorded]);
+  assert.equal(Object.hasOwn(Chat.hydrateLocalChatThread(fresh, page(undefined)), 'agent'), false);
+  assert.deepEqual(Chat.restoredRoomAgentFields({ profileEnabled: false }, { agent: recorded }), { agent: recorded, profileEnabled: true, agentProfileId: 'code-reviewer' });
+  assert.deepEqual(Chat.restoredRoomAgentFields({ profileEnabled: true }, { agent: recorded }), { agent: recorded });
+  assert.deepEqual(Chat.restoredRoomAgentFields({ profileEnabled: false }, {}), {});
+});
+
+test('CHAT-01: picking an Agent from the ⋯ menu writes the room Agent to the store (null for plain Codex); a room never sent (404) is left to its first send', async () => {
+  const start = surfaceSource.indexOf('      setThreadAgentProfile(threadId, profileId) {');
+  const end = surfaceSource.indexOf('      cycleThreadAgentProfile(threadId) {', start);
+  assert.ok(start > 0 && end > start);
+  const posts = [];
+  let answer = () => Promise.resolve();
+  const state = { codex: { threads: [{ id: 'room-1', profileEnabled: false, agentProfileId: null, toolMode: null, systemPrompt: null }], threadMenu: {}, memberMenu: {} } };
+  const choices = [{ id: 'code-reviewer', server: true, revision: 4, toolMode: 'review', systemPrompt: 'Review.' }];
+  const bridge = compileFunction(`return { ${surfaceSource.slice(start, end)} };`,
+    ['state', 'updateThreadById', 'emit', 'codexAgentProfileChoices', 'normalizeCodexAgentProfileId', 'codexAgentProfile', 'getCodexThreadById', 'ChatState', 'fetchJson'])(
+    state, (id, update) => { state.codex.threads = state.codex.threads.map(thread => thread.id === id ? update(thread) : thread); }, () => {},
+    () => choices, id => id, id => choices.find(choice => choice.id === id) || { id, toolMode: null, systemPrompt: null },
+    (codex, id) => codex.threads.find(thread => thread.id === id), Chat,
+    (path, options) => { posts.push([path, options.method, JSON.parse(options.body)]); return answer(); });
+  const settle = () => new Promise(resolve => setTimeout(resolve, 0));
+  answer = () => Promise.resolve({ clientThreadId: 'room-1', agent: { profileId: 'code-reviewer', revision: 4, setAt: 99 } });
+  bridge.setThreadAgentProfile('room-1', 'code-reviewer');
+  await settle();
+  assert.deepEqual(posts.at(-1), ['/chat/rooms/agent', 'POST', { clientThreadId: 'room-1', profileId: 'code-reviewer', revision: 4 }], 'the revision travels as a send would send it');
+  assert.deepEqual([state.codex.threads[0].profileEnabled, state.codex.threads[0].agentProfileId, state.codex.threads[0].agent],
+    [true, 'code-reviewer', { profileId: 'code-reviewer', revision: 4, setAt: 99 }]);
+  answer = () => Promise.reject(Object.assign(new Error('That conversation has not been saved yet'), { status: 404, code: 'CONVERSATION_NOT_FOUND' }));
+  bridge.setThreadAgentProfile('room-1', null);
+  await settle();
+  assert.deepEqual(posts.at(-1), ['/chat/rooms/agent', 'POST', { clientThreadId: 'room-1', profileId: null, revision: null }]);
+  assert.deepEqual([state.codex.threads[0].profileEnabled, state.codex.threads[0].agentProfileId], [false, null], 'the screen keeps its pick when the store has no such room yet');
+  bridge.setThreadAgentProfile('room-1', 'unknown-choice');
+  await settle();
+  assert.equal(posts.length, 2, 'an Agent outside the catalog is not picked or written');
+});
+
 test('canonical final history supersedes an old pref partial, but a live update after the read fence wins', () => {
   const oldPref = { id: 'optimistic-a', role: 'assistant', providerItemId: 'native-a', conversationId: 'c', runId: 'r',
     content: 'old partial', status: 'streaming', createdAt: 10 };
@@ -4923,6 +4993,40 @@ test('local identity reconciliation fails closed for incomplete, changed, foreig
     assert.equal(Chat.reconcileImportedLocalHistoryThread(value.current, value.page, value.record), value.current, `case ${index}`);
     assert.deepEqual(value.current, before);
   }
+});
+
+test('CHAT-01: a room restored from the store listing alone is created as its recorded Agent; a pref field or a room already on screen comes first', () => {
+  const start = surfaceSource.indexOf('    function ensureLocalHistoryThread(summary, detail = {}) {');
+  const end = surfaceSource.indexOf('    async function loadLocalHistoryThread(summary)', start);
+  assert.ok(start > 0 && end > start);
+  const created = [];
+  const state = { codex: { threads: [], activeThreadId: null, authStatus: { isLoggedIn: false } } };
+  const ensure = compileFunction(`
+    const initialDefaultThreadId = null;
+    const getCodexThreadById = (codex, id) => codex.threads.find(thread => thread.id === id);
+    const getCodexThreadDraft = () => null;
+    const chatBindingNonce = () => 'nonce';
+    const emit = () => {};
+    ${surfaceSource.slice(start, end)}
+    return ensureLocalHistoryThread;
+  `, ['state', 'ChatState', 'createCodexThread'])(state, Chat, (type, title, subtitle, options) => {
+    created.push({ type, title, options });
+    return { id: `new-${created.length}`, type, title, subtitle, participants: [], participantRoles: {}, messages: [],
+      profileEnabled: options.profileEnabled === true, agentProfileId: options.profileEnabled === true ? options.agentProfileId : null,
+      createdAt: 1, updatedAt: 1 };
+  });
+  const summary = id => ({ clientThreadId: id, localConversationId: `local-${id}`, title: 'Saved room', createdAt: 1, updatedAt: 2 });
+  ensure(summary('room-a'), { ...summary('room-a'), agent: { profileId: 'code-reviewer', revision: 3, setAt: 9 } });
+  assert.deepEqual([created[0].options.profileEnabled, created[0].options.agentProfileId], [true, 'code-reviewer']);
+  assert.deepEqual(state.codex.threads.map(thread => [thread.id, thread.profileEnabled, thread.agentProfileId]), [['room-a', true, 'code-reviewer']]);
+  ensure(summary('room-b'), { ...summary('room-b'), agent: null });
+  assert.deepEqual([created[1].options.profileEnabled, created[1].options.agentProfileId], [false, undefined]);
+  ensure(summary('room-c'), { ...summary('room-c'), profileEnabled: true, agentProfileId: 'designer', agent: { profileId: 'code-reviewer', revision: null, setAt: 9 } });
+  assert.deepEqual([created[2].options.profileEnabled, created[2].options.agentProfileId], [true, 'designer'], 'a pref field that reached here wins over the store');
+  ensure(summary('room-d'), { ...summary('room-d'), agent: { profileId: 'Not An Id', revision: null, setAt: 9 } });
+  assert.deepEqual([created[3].options.profileEnabled, created[3].options.agentProfileId], [false, undefined]);
+  ensure(summary('room-a'), { ...summary('room-a'), agent: { profileId: 'designer', revision: null, setAt: 10 } });
+  assert.equal(created.length, 4, 'a room already on screen (the Desk pref brought it back) is not created again');
 });
 
 function localHistoryThreadLoaderHarness(state, records, fetchJson) {

@@ -3794,6 +3794,37 @@ test('CHAT-01: a send records the room\'s Agent through the chat store; turning 
   }
 })
 
+test('CHAT-01: the ⋯ menu pick is written to the room without a send, null returns the room to plain Codex, and both history routes report the same Agent', async () => {
+  const dataDir = createPrivateQaTempDirectory('egdesk-room-agent-pick-')
+  let store = null
+  try {
+    store = openChatStore({ dataDir, ownerScope: 'room-agent-pick-test' })
+    const h = r2Harness({ store, profiles: r2Profiles() })
+    // A room that has never been sent is not in the store: the screen lets its first send record the pick.
+    assert.throws(() => h.chat.setRoomAgent({ clientThreadId: 'room-1', profileId: 'reviewer' }), { code: 'CONVERSATION_NOT_FOUND', httpStatus: 404 })
+    const first = await h.chat.send({ message: 'hi', clientThreadId: 'room-1', requestId: 'rp-1', profileId: 'reviewer', profileRevision: 2 })
+    await h.finish(first)
+    assert.deepEqual(store.getConversation('room-1').agent, { profileId: 'reviewer', revision: 2, setAt: store.getConversation('room-1').agent.setAt })
+    // Picking another Agent from the ⋯ menu, with no send.
+    const picked = h.chat.setRoomAgent({ clientThreadId: 'room-1', profileId: 'designer' })
+    assert.deepEqual([picked.accepted, picked.clientThreadId, picked.agent.profileId, picked.agent.revision], [true, 'room-1', 'designer', null])
+    const sameAgent = page => page.agent
+    assert.deepEqual(sameAgent(h.chat.listLocalThreads({ limit: 10 }).threads.find(thread => thread.clientThreadId === 'room-1')), picked.agent)
+    assert.deepEqual(sameAgent(h.chat.getLocalHistory({ clientThreadId: 'room-1', limit: 10 }).thread), picked.agent, '/chat/history/threads and /chat/history agree')
+    // '기본 Codex' is a record too, so a restart does not revive the earlier Agent.
+    assert.deepEqual(h.chat.setRoomAgent({ clientThreadId: 'room-1', profileId: null }), { accepted: true, clientThreadId: 'room-1', agent: null })
+    assert.equal(h.chat.getLocalHistory({ clientThreadId: 'room-1', limit: 10 }).thread.agent, null)
+    for (const body of [{ profileId: 'designer' }, { clientThreadId: 'room-1' }, { clientThreadId: 'room-1', profileId: 'Not An Id' },
+      { clientThreadId: 'room-1', profileId: 'designer', revision: 0 }, { clientThreadId: 'room-1', profileId: null, revision: 2 }]) {
+      assert.throws(() => h.chat.setRoomAgent(body), { code: 'INVALID_ROOM_AGENT', httpStatus: 400 }, JSON.stringify(body))
+    }
+    assert.equal(store.getConversation('room-1').agent, null, 'a refused pick changes nothing')
+  } finally {
+    try { store?.close() } catch {}
+    await rm(dataDir, { recursive: true, force: true })
+  }
+})
+
 test('D-M2: mentions are read from agent links and @names, longest name first; without one only the Lead answers', () => {
   const members = boardMembers([
     { kind: 'user', role: 'owner' },

@@ -68,12 +68,18 @@ const historyId = (value, name) => {
 //   /chat/board/send       → sendBoard (D-M2: @mentioned members or the Lead answer; 202)
 //   /chat/share            → shareMessages (D-M3: copies into another conversation; 200)
 //   /chat/subagent/reassign → reassignSubAgent (D-M1: a blocked sub-Agent's task to its parent; 202)
+//   /chat/rooms/agent      → setRoomAgent (CHAT-01: the room's Agent picked without a send, null = plain Codex; 200)
 const CHAT_ACTIONS = Object.freeze({
   '/chat/send': 'send', '/chat/resume': 'resume', '/chat/interrupt': 'interrupt', '/chat/approval': 'replyApproval',
   '/chat/user-input': 'replyUserInput', '/chat/fork': 'fork',
   '/chat/board/send': 'sendBoard', '/chat/share': 'shareMessages', '/chat/subagent/reassign': 'reassignSubAgent',
+  '/chat/rooms/agent': 'setRoomAgent',
 })
 const SENDS = new Set(['/chat/send', '/chat/board/send'])
+// CHAT-01: a local-store write like /chat/history/import — no engine, no turn —
+// so it takes no engine account check: a pick made while signed out is still
+// kept for the next start, and the offline QA restart probe can record one.
+const LOCAL_WRITES = new Set(['/chat/rooms/agent'])
 
 export function createChatHttpHandler(chat, ensureAuth, history = chat) {
   return async (req, res, url) => {
@@ -164,7 +170,7 @@ export function createChatHttpHandler(chat, ensureAuth, history = chat) {
       const isSafetyResponse = url.pathname === '/chat/interrupt'
         || (url.pathname === '/chat/approval' && ['decline', 'cancel'].includes(body.decision))
         || (url.pathname === '/chat/user-input' && body.action === 'skip')
-      if (!isSafetyResponse) await ensureAuth(body)
+      if (!isSafetyResponse && !LOCAL_WRITES.has(url.pathname)) await ensureAuth(body)
       const action = CHAT_ACTIONS[url.pathname]
       if (typeof chat[action] !== 'function') throw Object.assign(new Error('This bridge does not offer that chat action'), { code: 'CHAT_ACTION_UNAVAILABLE', httpStatus: 501 })
       const result = await chat[action](body)
