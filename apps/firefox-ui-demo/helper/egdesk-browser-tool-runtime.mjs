@@ -1,4 +1,5 @@
 import { createHash, randomUUID } from 'node:crypto'
+import { DEFAULT_NAVIGATION_POLICY, evaluateNavigation, normalizeNavigationPolicy, sitePatternsFromInput } from './egdesk-browser-url-policy.mjs'
 
 // Lane A/native adapter: chrome /chat/send includes selectedSources from the
 // submitted Chat draft before it is cleared. Never infer action authority from
@@ -41,6 +42,12 @@ const DIALOG_TYPES = new Set(['alert', 'confirm', 'prompt', 'beforeunload'])
 const MAX_FILL_TEXT = 8000
 const MAX_FILL_REQUEST_JSON = 40000
 const OBSERVED_VALUE_MAX = 120
+// BRW-07: history moves EG-Desk chrome dispatches on the Card; Cards per run.
+const HISTORY_ACTIONS = ['back', 'forward', 'reload']
+const MAX_RUN_CARDS = 4
+// BRW-05 (D-B1): one question to the person about one more site, on the
+// longest budget the UI transport allows, so the Card can wait for an answer.
+const SITE_REQUEST_BUDGET_MS = 55000
 // Same-clock receipts: helper, Firefox chrome and the page actor stamp
 // performance.timeOrigin + performance.now() (epoch ms, may be fractional).
 const sameClock = () => performance.timeOrigin + performance.now()
@@ -74,14 +81,28 @@ export const BROWSER_TOOL_SPECS = [
   spec('egdesk_browser_wait_text', 'Wait up to timeoutMs (100 to 10000) until the visible page text of one selected Browser Card contains text, or no longer contains textGone (give exactly one, up to 200 characters), then return a fresh observation. Matching is case-sensitive after collapsing whitespace, on visible page text only: field values, editors, sensitive fields and hidden text are never read. Read-only and allowed with an observe grant; it never acts on the page. wait-timeout means the condition was not seen in time; a replaced document or lost response is an unknown outcome.',
     { cardId: base.cardId, text: { type: 'string' }, textGone: { type: 'string' }, timeoutMs: { type: 'integer' } },
     ['cardId', 'timeoutMs']),
+  // BRW-05 / BRW-07 / BRW-11 tools, appended in this order so earlier schemas
+  // and their manifest order stay. Every one names a Card of this run.
+  spec('egdesk_browser_list_cards', 'List the Browser Cards this run may use: cardId, permission (observe or interact), the last observed URL, and whether this run opened the Card. Every other Browser tool names one of these cardIds; naming another listed Card switches the target. Read-only; cardId is any Card of this run.',
+    { cardId: base.cardId }, ['cardId']),
+  spec('egdesk_browser_request_site', 'Ask the person to allow one more site for this conversation: Agent navigation, links, redirects, history moves and new Cards may then reach that site in addition to the current site. site is a host or http(s) URL; its registrable domain is what gets allowed, never a path. The person answers on the Browser Card; site-allowed, site-refused or site-pending (no answer in time) is the whole result. Ask only after a navigation was refused as outside-site, and do not repeat a refused request in the same run.',
+    { cardId: base.cardId, site: { type: 'string' } }, ['cardId', 'site']),
+  spec('egdesk_browser_open_card', 'Open a new Browser Card beside the named Card, in the same profile, container and account, at an http(s) URL on the current site or on a site this conversation allowed. The new Card inherits this run\'s permission and appears in egdesk_browser_list_cards with its own cardId; observe it before acting. A Card a person opened, or a popup a page opened, is never adopted this way. Up to four Cards per run.',
+    { cardId: base.cardId, url: { type: 'string' } }, ['cardId', 'url']),
+  spec('egdesk_browser_close_card', 'Close a Browser Card this run opened with egdesk_browser_open_card. Cards a person opened or selected cannot be closed by the Agent.',
+    { cardId: base.cardId }, ['cardId']),
+  spec('egdesk_browser_history', 'Move the named Browser Card back or forward in its history, or reload it, from a fresh observation. EG-Desk chrome dispatches the move, not the page; a page outside the current and allowed sites is replaced with a blank page by the same rule as navigation. The result reports the dispatch only; observe again to see the page.',
+    { ...base, action: { type: 'string', enum: HISTORY_ACTIONS } }, ['cardId', 'observationId', 'expectedRevision', 'action']),
 ]
 const SPEC_BY_NAME = new Map(BROWSER_TOOL_SPECS.map(item => [item.name, item]))
 // Tool classes for the runtime and provider (1-R imports these instead of
 // keeping its own copy). Read tools never take an action lease and work
 // with an observe grant; interaction tools need an interact grant.
-export const BROWSER_READ_TOOL_NAMES = Object.freeze(['egdesk_browser_observe', 'egdesk_browser_wait_text'])
+export const BROWSER_READ_TOOL_NAMES = Object.freeze(['egdesk_browser_observe', 'egdesk_browser_wait_text',
+  'egdesk_browser_list_cards'])
 export const BROWSER_INTERACTION_TOOL_NAMES = Object.freeze(['egdesk_browser_navigate', 'egdesk_browser_click',
-  'egdesk_browser_fill', 'egdesk_browser_scroll', 'egdesk_browser_press', 'egdesk_browser_wait'])
+  'egdesk_browser_fill', 'egdesk_browser_scroll', 'egdesk_browser_press', 'egdesk_browser_wait',
+  'egdesk_browser_request_site', 'egdesk_browser_open_card', 'egdesk_browser_close_card', 'egdesk_browser_history'])
 const READ_TOOLS = new Set(BROWSER_READ_TOOL_NAMES)
 
 function reject(code, message) { throw Object.assign(new Error(message), { code }) }
@@ -206,7 +227,15 @@ function validateArgs(tool, args) {
   if (Object.keys(args).some(key => !Object.hasOwn(schema.properties, key)) ||
       schema.required.some(key => !Object.hasOwn(args, key))) reject('INVALID_BROWSER_TOOL', 'Invalid Browser tool arguments')
   if (!short(args.cardId, 160)) reject('INVALID_BROWSER_TOOL', 'cardId is required')
-  if (tool === 'egdesk_browser_observe') return
+  if (['egdesk_browser_observe', 'egdesk_browser_list_cards', 'egdesk_browser_close_card'].includes(tool)) return
+  if (tool === 'egdesk_browser_request_site') {
+    if (!sitePatternsFromInput(args.site).ok) reject('INVALID_BROWSER_TOOL', 'Site request needs a host or http(s) URL')
+    return
+  }
+  if (tool === 'egdesk_browser_open_card') {
+    if (!safeUrl(args.url)) reject('INVALID_BROWSER_TOOL', 'Open Card requires an explicit safe http(s) URL')
+    return
+  }
   if (tool === 'egdesk_browser_wait_text') {
     const wanted = Object.hasOwn(args, 'text') ? args.text : args.textGone
     if (Object.hasOwn(args, 'text') === Object.hasOwn(args, 'textGone') || !waitNeedle(wanted) ||
@@ -227,6 +256,10 @@ function validateArgs(tool, args) {
   }
   if (!short(args.observationId, 160) || !Number.isSafeInteger(args.expectedRevision) || args.expectedRevision < 0) {
     reject('INVALID_BROWSER_TOOL', 'Fresh observation and postcondition are required')
+  }
+  if (tool === 'egdesk_browser_history') {
+    if (!HISTORY_ACTIONS.includes(args.action)) reject('INVALID_BROWSER_TOOL', 'History requires back, forward or reload')
+    return
   }
   if (tool === 'egdesk_browser_scroll') {
     // Schema unchanged: direction alone scrolls the document, ref alone brings
@@ -316,6 +349,28 @@ function provenNotDispatched(response) {
     response.receipt?.dispatchReceipt?.eventDispatched !== true &&
     ['performEnterMs', 'performExitMs', 'firstEventAtMs'].every(key => timing[key] == null) &&
     (counts.every(count => count === undefined) || (Number.isSafeInteger(counts[0]) && counts[1] === counts[0]))
+}
+
+// D-B1: the conversation's navigation rule as the UI reports it beside a bind,
+// observe, open-card or allow-site answer (same site plus the sites the person
+// allowed). An unreadable or widened policy is ignored; the default is today's
+// same-site rule, so the helper never grants more than the UI proved.
+function adoptNavigationPolicy(binding, response) {
+  if (!record(response) || !Object.hasOwn(response, 'navigationPolicy')) return
+  const normalized = normalizeNavigationPolicy(response.navigationPolicy)
+  if (normalized.ok && normalized.policy.scope === 'same-site' && !normalized.policy.allowDowngrade) binding.navigationPolicy = normalized.policy
+}
+function navigationDecision(binding, fromUrl, url) {
+  return evaluateNavigation(url, binding.navigationPolicy || DEFAULT_NAVIGATION_POLICY, { fromUrl, layer: 'tool' })
+}
+function rejectNavigation(decision) {
+  throw Object.assign(new Error('Navigation is limited to http(s) pages on the current site or a site this conversation allowed; ask with egdesk_browser_request_site'),
+    { code: 'BROWSER_NAVIGATE_OUT_OF_SCOPE', navigation: { reason: decision.reason, ...(decision.host ? { host: decision.host } : {}) } })
+}
+function cardSummary(binding) {
+  return [...binding.cards.values()].map(card => ({ cardId: card.cardId, permission: card.permission,
+    url: card.observation?.snapshot?.url ?? card.ui?.url ?? null, openedByAgent: card.openedByAgent === true,
+    ...(card.openedFrom ? { openedFrom: card.openedFrom } : {}) }))
 }
 
 export function createBrowserToolService({ sendToUi, getOwnerKey, timeoutMs = 15000, now = Date.now, clock = sameClock } = {}) {
@@ -415,7 +470,8 @@ export function createBrowserToolService({ sendToUi, getOwnerKey, timeoutMs = 15
     if (bindings.has(run.answerId) || pendingBindings.has(run.answerId)) reject('BROWSER_BINDING_EXISTS', 'Browser run is already bound or binding')
     const binding = { ownerKey: prepared.ownerKey, runId: run.runId || run.answerId,
       clientThreadId: run.clientThreadId, selectedCards: [...prepared.cards.values()],
-      cards: new Map(), pending: new Set(), calls: new Map(), closed: false, seq: 0 }
+      cards: new Map(), pending: new Set(), calls: new Map(), closed: false, seq: 0,
+      navigationPolicy: DEFAULT_NAVIGATION_POLICY, refusedSites: new Set() }
     pendingBindings.set(run.answerId, binding)
     try {
       for (const card of prepared.cards.values()) {
@@ -434,6 +490,7 @@ export function createBrowserToolService({ sendToUi, getOwnerKey, timeoutMs = 15
             response.binding.authorityEpoch !== card.authorityEpoch) reject('BROWSER_BINDING_STALE', 'Selected Browser identity changed before binding')
         if (binding.closed || closedRuns.has(run.answerId) || run.status !== 'inProgress') reject('BROWSER_RUN_ENDED', 'Browser run ended during binding')
         if (prepared.ownerKey !== getOwnerKey()) reject('BROWSER_OWNER_CHANGED', 'Engine account changed during Browser binding')
+        adoptNavigationPolicy(binding, response)
         binding.cards.set(card.cardId, { ...card, ui: response.binding, observation: null,
           busy: false, uncertain: false, uncertainAction: null, pendingTransition: null, lastFill: null })
       }
@@ -617,24 +674,39 @@ export function createBrowserToolService({ sendToUi, getOwnerKey, timeoutMs = 15
       const response = await observeRequest(run, binding, card, { textLimit: 60, elementLimit: 80 }, trace)
       if (binding.closed || binding.ownerKey !== getOwnerKey()) reject('BROWSER_RUN_ENDED', 'Browser run ended during observation')
       const snapshot = observationFrom(response, card.cardId)
+      adoptNavigationPolicy(binding, response)
       const recovery = recordObservation(card, snapshot)
       return { status: 'observed', cardId: card.cardId, observationId: card.observation.id,
         snapshot, ...recovery, timing: { ...trace }, externalEffectVerified: false }
     }
+    if (tool === 'egdesk_browser_list_cards') {
+      return { status: 'cards-listed', cardId: card.cardId, action: 'list_cards', cards: cardSummary(binding), externalEffectVerified: false }
+    }
     if (tool === 'egdesk_browser_wait') return waitForCondition(run, binding, card, args)
     if (tool === 'egdesk_browser_wait_text') return waitForText(run, binding, card, args)
+    if (tool === 'egdesk_browser_request_site') return requestSite(run, binding, card, args)
+    if (tool === 'egdesk_browser_open_card') return openCard(run, binding, card, args)
+    if (tool === 'egdesk_browser_close_card') return closeCard(run, binding, card)
     if (card.uncertain) reject('BROWSER_OUTCOME_UNKNOWN', 'A prior Browser action has an unknown outcome; select the context again')
     const observed = card.observation
     if (!observed || observed.id !== args.observationId || observed.snapshot.revision !== args.expectedRevision) reject('BROWSER_OBSERVATION_STALE', 'Observe this Browser Card again before acting')
+    if (tool === 'egdesk_browser_history') return historyMove(run, binding, card, args, observed)
     const byRef = Object.hasOwn(args, 'ref')
     if (byRef) {
       const original = observed.snapshot.interactiveElements.find(item => item.ref === args.ref)
       if (!original || !sameTarget(original, args.expectedTarget) ||
           (tool !== 'egdesk_browser_scroll' && original.disabled)) reject('BROWSER_TARGET_STALE', 'Target precondition does not match the observed element')
     }
-    if (tool === 'egdesk_browser_navigate' && !sameSiteNavigation(observed.snapshot.url, args.url)) {
-      reject('BROWSER_NAVIGATE_OUT_OF_SCOPE', 'Navigation is limited to http(s) pages on the current document site')
+    // D-B1: the current site by default, plus the sites this conversation
+    // allowed. An allowed other site is dispatched by EG-Desk chrome, since the
+    // page actor only ever navigates within its own site.
+    let navigation = null
+    if (tool === 'egdesk_browser_navigate') {
+      navigation = navigationDecision(binding, observed.snapshot.url, args.url)
+      if (!navigation.allowed) rejectNavigation(navigation)
     }
+    // The policy names an allow-list hit 'allow-list'; the guard calls that scope 'allowed-site'.
+    const navigationScope = navigation?.reason === 'allow-list' ? 'allowed-site' : 'same-site'
     if (tool === 'egdesk_browser_scroll' && !validScroll(observed.snapshot.scroll)) {
       reject('BROWSER_OBSERVATION_STALE', 'Observe this Browser Card again; the observation has no scroll position')
     }
@@ -705,7 +777,8 @@ export function createBrowserToolService({ sendToUi, getOwnerKey, timeoutMs = 15
       ...(Object.hasOwn(observed.snapshot, 'innerWindowId') ? { innerWindowId: observed.snapshot.innerWindowId } : {}),
       ...(Object.hasOwn(observed.snapshot, 'browsingContextId') ? { browsingContextId: observed.snapshot.browsingContextId } : {}),
       ...(args.expectedTarget ? { target: args.expectedTarget } : {}),
-      ...(action.type === 'navigate' ? { navigationScope: 'same-site' } : {}),
+      ...(action.type === 'navigate' ? { navigationScope,
+        ...(navigationScope === 'allowed-site' ? { allowedSites: [...binding.navigationPolicy.allow] } : {}) } : {}),
       ...(action.type === 'scroll' ? { scroll: observed.snapshot.scroll } : {}),
       ...(containerBefore ? { containerScroll: { x: containerBefore.x, y: containerBefore.y } } : {}),
       ...(pressPolicy ? { pressPolicy } : {}) }
@@ -802,8 +875,126 @@ export function createBrowserToolService({ sendToUi, getOwnerKey, timeoutMs = 15
     if (matched && action.type === 'fill') card.lastFill = { ref: args.ref, documentId: observed.snapshot.documentId }
     return { status: matched ? 'postcondition-observed' : 'postcondition-unverified', ...common,
       postcondition: { ...condition, matched, wasAlreadyTrue },
-      ...(action.type === 'navigate' ? { navigationScope: 'same-site', pageLoadVerified: false } : {}),
+      ...(action.type === 'navigate' ? { navigationScope, pageLoadVerified: false } : {}),
       externalEffectVerified: false }
+  }
+
+  // egdesk_browser_request_site (D-B1): one question to the person on the Card,
+  // on a long budget. The UI's answer carries the conversation's new policy;
+  // the helper reports the site allowed only once its own copy says so.
+  async function requestSite(run, binding, card, args) {
+    const site = sitePatternsFromInput(args.site)
+    if (!site.ok) reject('INVALID_BROWSER_TOOL', 'Site request needs a host or http(s) URL')
+    if (binding.refusedSites.has(site.site)) reject('BROWSER_NAVIGATE_OUT_OF_SCOPE', 'The person refused that site in this run; do not ask again')
+    const trace = {}
+    const pending = requestUi({ kind: 'allow-site', runId: binding.runId, clientThreadId: binding.clientThreadId,
+      cardId: card.cardId, binding: card.ui, site: site.site, patterns: [...site.patterns] }, binding, run, trace,
+      { budgetMs: Math.min(SITE_REQUEST_BUDGET_MS, 60000) })
+    binding.pending.add(pending)
+    let response
+    try { response = await pending }
+    catch (error) {
+      if (error?.code === 'BROWSER_UI_TIMEOUT') {
+        return { status: 'site-pending', cardId: card.cardId, action: 'request_site', site: site.site, timing: { ...trace }, externalEffectVerified: false }
+      }
+      throw error
+    }
+    finally { binding.pending.delete(pending) }
+    if (binding.closed || binding.ownerKey !== getOwnerKey()) reject('BROWSER_RUN_ENDED', 'Browser run ended during the site request')
+    if (!['site-allowed', 'site-refused', 'site-pending'].includes(response?.status)) reject('BROWSER_UI_PROTOCOL', 'Browser UI site answer is unreadable')
+    adoptNavigationPolicy(binding, response)
+    if (response.status === 'site-refused') binding.refusedSites.add(site.site)
+    const reflected = site.patterns.every(pattern => binding.navigationPolicy.allow.includes(pattern))
+    const status = response.status === 'site-allowed' && reflected ? 'site-allowed'
+      : response.status === 'site-refused' ? 'site-refused' : 'site-pending'
+    return { status, cardId: card.cardId, action: 'request_site', site: site.site, timing: { ...trace }, externalEffectVerified: false }
+  }
+
+  // egdesk_browser_open_card (D-B2): the UI opens a Card in the same profile,
+  // container and account and binds it to this run; the helper admits it only
+  // when the UI's binding proves that identity. The URL follows the D-B1 rule
+  // from the source Card's current page.
+  async function openCard(run, binding, card, args) {
+    if (binding.cards.size >= MAX_RUN_CARDS) reject('BROWSER_CARD_LIMIT', 'This run already has four Browser Cards')
+    const fromUrl = card.observation?.snapshot?.url ?? card.ui?.url ?? null
+    const navigation = navigationDecision(binding, fromUrl, args.url)
+    if (!navigation.allowed) rejectNavigation(navigation)
+    const trace = {}
+    const pending = requestUi({ kind: 'open-card', runId: binding.runId, clientThreadId: binding.clientThreadId,
+      cardId: card.cardId, binding: card.ui, url: args.url, permission: card.permission,
+      navigationScope: navigation.reason === 'allow-list' ? 'allowed-site' : 'same-site' }, binding, run, trace)
+    binding.pending.add(pending)
+    let response
+    try { response = await pending } finally { binding.pending.delete(pending) }
+    if (binding.closed || binding.ownerKey !== getOwnerKey()) reject('BROWSER_RUN_ENDED', 'Browser run ended while opening a Card')
+    const opened = response?.binding
+    if (response?.status !== 'card-opened' || !record(opened) || !short(opened.cardId, 160) || binding.cards.has(opened.cardId) ||
+        !short(opened.cardEpoch, 160) || opened.profileId !== card.profileId || opened.accountId !== card.accountId ||
+        opened.userContextId !== card.userContextId || opened.engineAccountKey !== card.engineAccountKey ||
+        opened.authorityEpoch !== card.authorityEpoch) {
+      reject('BROWSER_BINDING_STALE', 'The opened Browser Card did not bind with the same profile, container and account')
+    }
+    adoptNavigationPolicy(binding, response)
+    const entry = { cardId: opened.cardId, profileId: card.profileId, accountId: card.accountId, selectedUrl: args.url,
+      permission: card.permission, selectionToken: null, clientThreadId: binding.clientThreadId, sourceId: null,
+      cardEpoch: opened.cardEpoch, userContextId: card.userContextId, engineAccountKey: card.engineAccountKey,
+      authorityEpoch: card.authorityEpoch, ui: opened, observation: null, busy: false, uncertain: false,
+      uncertainAction: null, pendingTransition: null, lastFill: null, openedByAgent: true, openedFrom: card.cardId }
+    binding.cards.set(opened.cardId, entry)
+    binding.selectedCards.push(entry)
+    return { status: 'card-opened', cardId: opened.cardId, action: 'open_card', openedFrom: card.cardId, permission: entry.permission,
+      cardEpoch: entry.cardEpoch, url: args.url, cards: cardSummary(binding), pageLoadVerified: false,
+      timing: { ...trace }, externalEffectVerified: false }
+  }
+
+  // egdesk_browser_close_card: only a Card this run opened (D-B2); a person's
+  // Card is never closed by the Agent.
+  async function closeCard(run, binding, card) {
+    if (card.openedByAgent !== true) reject('BROWSER_CARD_NOT_AGENT_OPENED', 'Only a Browser Card this run opened can be closed by the Agent')
+    const trace = {}
+    card.busy = true
+    const pending = requestUi({ kind: 'close-card', runId: binding.runId, clientThreadId: binding.clientThreadId,
+      cardId: card.cardId, binding: card.ui }, binding, run, trace)
+    binding.pending.add(pending)
+    let response
+    try { response = await pending } finally { binding.pending.delete(pending); card.busy = false }
+    if (response?.status !== 'card-closed') reject('BROWSER_ACTION_UNVERIFIED', 'The Browser Card was not confirmed closed')
+    binding.cards.delete(card.cardId)
+    binding.selectedCards = binding.selectedCards.filter(item => item.cardId !== card.cardId)
+    return { status: 'card-closed', cardId: card.cardId, action: 'close_card', cards: cardSummary(binding),
+      timing: { ...trace }, externalEffectVerified: false }
+  }
+
+  // egdesk_browser_history: EG-Desk chrome moves the Card's own history. The
+  // result is the dispatch only; the observation is spent and the Card is not
+  // locked, because the next observation shows wherever the move landed.
+  async function historyMove(run, binding, card, args, observed) {
+    card.observation = null
+    card.lastFill = null
+    card.busy = true
+    const trace = {}
+    const guard = { documentId: observed.snapshot.documentId, revision: observed.snapshot.revision, url: observed.snapshot.url,
+      ...(Object.hasOwn(observed.snapshot, 'innerWindowId') ? { innerWindowId: observed.snapshot.innerWindowId } : {}),
+      ...(Object.hasOwn(observed.snapshot, 'browsingContextId') ? { browsingContextId: observed.snapshot.browsingContextId } : {}) }
+    const pending = requestUi({ kind: 'history', runId: binding.runId, clientThreadId: binding.clientThreadId,
+      cardId: card.cardId, binding: card.ui, historyAction: args.action, guard }, binding, run, trace)
+    binding.pending.add(pending)
+    let response
+    try { response = await pending } finally { binding.pending.delete(pending); card.busy = false }
+    if (binding.closed || binding.ownerKey !== getOwnerKey()) reject('BROWSER_RUN_ENDED', 'Browser run ended during the history move; effect is unknown')
+    const receipt = response?.receipt?.dispatchReceipt
+    if (response?.status !== 'acted' || !record(receipt)) {
+      if (record(response) && provenNotDispatched(response)) {
+        throw Object.assign(new Error('History move was not sent; observe this Browser Card again'),
+          { code: 'BROWSER_OBSERVATION_STALE', dispatchPhase: 'not-dispatched', dispatched: false, timing: { ...trace } })
+      }
+      throw Object.assign(new Error(response?.error || 'History move was not confirmed'),
+        { code: 'BROWSER_ACTION_UNVERIFIED', timing: { ...trace }, dispatchPhase: 'unknown', dispatched: 'unknown' })
+    }
+    const dispatched = receipt.actor === 'chrome' && receipt.inputRoute === 'chrome-history' &&
+      receipt.historyAction === args.action && receipt.eventDispatched === true
+    return { status: dispatched ? 'history-dispatched' : 'postcondition-unverified', cardId: card.cardId, action: 'history',
+      historyAction: args.action, dispatchReceipt: receipt, pageLoadVerified: false, timing: { ...trace }, externalEffectVerified: false }
   }
 
   async function dispatch(run, event) {
