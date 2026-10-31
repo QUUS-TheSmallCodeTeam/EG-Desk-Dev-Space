@@ -131,21 +131,22 @@ export function routingAfterReceive(routing, result, copies, ts = Date.now()) {
 
 export const sharedOutMark = (routing, message) => (message?.localMessageId && routing?.sharedOut?.[message.localMessageId]) || null;
 
-// Each block of copies sits after the last bubble saved before it; a block
+// Each block of copies sits before the first bubble saved after it; a block
 // newer than every bubble (or not yet saved) closes the conversation.
 export function sharedBlockPlacement(routing, messages) {
-  const byMessageId = new Map();
-  const leading = [], trailing = [];
+  const beforeMessageId = new Map();
+  const trailing = [];
   const list = Array.isArray(messages) ? messages : [];
   for (const share of routing?.sharedIn || []) {
     let anchor = null;
-    if (Number.isSafeInteger(share.seq)) anchor = list.findLast(message => Number.isSafeInteger(message.localSeq) && message.localSeq <= share.seq) || null;
-    if (!anchor && typeof share.ts === 'number' && Number.isSafeInteger(share.seq)) anchor = list.findLast(message => typeof message.createdAt === 'number' && message.createdAt <= share.ts) || null;
-    if (anchor) byMessageId.set(anchor.id, [...(byMessageId.get(anchor.id) || []), share]);
-    else if (Number.isSafeInteger(share.seq) && list.length) leading.push(share);
+    if (Number.isSafeInteger(share.seq)) {
+      anchor = list.find(message => Number.isSafeInteger(message.localSeq) && message.localSeq > share.seq)
+        || (typeof share.ts === 'number' ? list.find(message => typeof message.createdAt === 'number' && message.createdAt > share.ts) : null) || null;
+    }
+    if (anchor) beforeMessageId.set(anchor.id, [...(beforeMessageId.get(anchor.id) || []), share]);
     else trailing.push(share);
   }
-  return { byMessageId, leading, trailing };
+  return { beforeMessageId, trailing };
 }
 
 // ── links between the rooms ─────────────────────────────────────────────────

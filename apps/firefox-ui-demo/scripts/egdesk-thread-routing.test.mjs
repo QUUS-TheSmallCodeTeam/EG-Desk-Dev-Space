@@ -75,17 +75,19 @@ test('CHAT-03: store events build the routing view on both sides and the immedia
   assert.equal(Routing.routingWithEvents(liveReceived, [inEvent]).sharedIn[0].seq, 6);
 });
 
-test('CHAT-03: copied blocks sit after the last bubble saved before them; unsaved ones close the room', () => {
+test('CHAT-03: copied blocks sit before the first bubble saved after them; unsaved ones close the room', () => {
   const routing = Routing.routingWithEvents(Routing.emptyRouting(), [
     { seq: 2, ts: 900, event: 'messages.shared.in', details: { shareId: 'early', link: { clientThreadId: 'thread-dm-1', localMessageIds: ['msg-a'] }, messages: [{ localMessageId: 'msg-a', role: 'user', text: 'x' }] } },
     { seq: 0, ts: 100, event: 'messages.shared.in', details: { shareId: 'first', link: { clientThreadId: 'thread-dm-1', localMessageIds: [] }, messages: [{ role: 'user', text: 'y' }] } },
   ]);
   const live = Routing.routingAfterReceive(routing, { shareId: 'live', fromClientThreadId: 'thread-dm-1' }, [{ localMessageId: 'msg-b', role: 'assistant', text: 'z' }]);
   const placed = Routing.sharedBlockPlacement(live, board().messages);
-  assert.deepEqual(placed.byMessageId.get('b-1').map(share => share.shareId), ['early']);
-  assert.deepEqual(placed.leading.map(share => share.shareId), ['first']);
+  assert.deepEqual(placed.beforeMessageId.get('b-1').map(share => share.shareId), ['first'], 'saved before every bubble');
+  assert.deepEqual(placed.beforeMessageId.get('b-2').map(share => share.shareId), ['early'], 'between b-1 (seq 1) and b-2 (seq 3)');
   assert.deepEqual(placed.trailing.map(share => share.shareId), ['live']);
   assert.deepEqual(Routing.sharedBlockPlacement(live, []).trailing.map(share => share.shareId), ['first', 'early', 'live']);
+  const late = Routing.routingWithEvents(Routing.emptyRouting(), [{ seq: 9, ts: 9000, event: 'messages.shared.in', details: { shareId: 'late', link: {}, messages: [{ role: 'user', text: 'w' }] } }]);
+  assert.deepEqual(Routing.sharedBlockPlacement(late, board().messages).trailing.map(share => share.shareId), ['late'], 'newer than every bubble');
 });
 
 test('CHAT-03: the Board Thread returns to the DM that last sent to it, and the origin link finds the copied bubble', () => {

@@ -8856,7 +8856,7 @@
         const move = codex.boardMove;
         const choices = ThreadRouting.boardThreadChoices(codex.threads, thread);
         return el('div', {
-          class: 'egd-codex-thread-menu egd-codex-board-move', role: 'dialog', 'aria-label': ThreadRouting.PICK_TARGET_TITLE,
+          class: 'egd-codex-thread-menu egd-codex-board-move', role: 'group', 'aria-label': ThreadRouting.PICK_TARGET_TITLE,
           data: { testid: 'chat-board-move', count: String(move.ids.length) },
           style: { left: `${Math.round(move.left ?? 12)}px`, top: `${Math.round(move.top ?? 12)}px` },
           onclick: (ev) => ev.stopPropagation(),
@@ -9304,10 +9304,10 @@
           // choosing, every finished bubble gets a box.
           const sharedPlacement = ThreadRouting.sharedBlockPlacement(activeThread.routing, activeThread.messages);
           const appendSharedBlocks = (shares) => { for (const share of shares || []) messages.appendChild(renderSharedBlock(activeThread, share)); };
-          appendSharedBlocks(sharedPlacement.leading);
           const selecting = codex.messageSelect?.threadId === activeThread.id ? codex.messageSelect : null;
           activeThread.messages.forEach((message, index) => {
             if (Number.isFinite(message.createdAt)) appendControlNotices(message.createdAt);
+            appendSharedBlocks(sharedPlacement.beforeMessageId.get(message.id));
             if (message.role === 'assistant' && message.status === 'streaming' && !message.content) return;
             const resumed = ChatState.awaitResumeMessageView(message);
             if (resumed) {
@@ -9412,7 +9412,10 @@
               selectBox, message.role === 'user' ? menuTrigger : null, bubble, message.role === 'user' ? null : menuTrigger);
             const computerLine = message.role === 'assistant' && message.runId && lastAnswerOfRun.get(message.runId) === message.id
               ? computerUseLine(roomRuns.findLast(run => run.runId === message.runId)) : null;
-            const messageStack = el('div', { class: 'egd-codex-message-stack' }, roleLabel, messageLine, mentionRow, answerFold, computerLine, resultRow, briefingControl, sentChip, meta);
+            const messageStack = el('div', { class: 'egd-codex-message-stack' }, roleLabel, messageLine, answerFold, computerLine, resultRow, briefingControl, meta);
+            // CHAT-03: the @이름 chips sit right under the bubble, '스레드로 보냄' just above the time.
+            if (mentionRow) messageStack.insertBefore(mentionRow, messageLine.nextSibling);
+            if (sentChip) messageStack.insertBefore(sentChip, meta);
             if (message.inputReferences?.length) messageStack.appendChild(el('button', {
               class: 'egd-codex-result-chip', data: { testid: 'chat-message-inputs', requestId: message.requestId || '' },
               onclick: () => openCodexActivityPanel(activeThread.id),
@@ -9434,10 +9437,8 @@
               ].filter(Boolean).join(' '),
             }, avatar, messageStack));
             appendPlanCards(planPlacement.byMessageId.get(message.id));
-            appendSharedBlocks(sharedPlacement.byMessageId.get(message.id));
           });
           appendPlanCards(planPlacement.trailing);
-          appendSharedBlocks(sharedPlacement.trailing);
           appendControlNotices();
           if (working) {
             messages.appendChild(codexAgentWorkingRow(working, {
@@ -9449,6 +9450,8 @@
           // A run with no answer shown yet keeps its count at the end of the conversation.
           const unansweredLine = workingRun?.runId && !lastAnswerOfRun.has(workingRun.runId) ? computerUseLine(workingRun) : null;
           if (unansweredLine) messages.appendChild(el('div', { class: 'egd-codex-computer-use-row' }, unansweredLine));
+          // CHAT-03: copies saved after the last bubble, or just moved and not saved yet, close the conversation.
+          appendSharedBlocks(sharedPlacement.trailing);
         }
         // CHAT-03: while choosing, the count and the way out sit above the log.
         if (codex.messageSelect?.threadId === activeThread.id) conversation.appendChild(el('div', {
@@ -12411,6 +12414,7 @@
         emit();
         const fail = (message) => {
           if (state.codex.boardMove?.threadId === threadId) state.codex.boardMove = { ...state.codex.boardMove, busy: false, error: message };
+          else boardNotice(message);
           emit();
           return false;
         };
