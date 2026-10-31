@@ -1,24 +1,25 @@
 # AI Canvas Annotation Layer
 
-**Date**: 2026-05-19 (갱신 2026-10-24, 1-N 상태 모듈)
-**Status**: Product/runtime concept note + 상태 모듈 구현됨(화면 연결 전) [제안 → 모듈만 런타임 시험]
+**Date**: 2026-05-19 (갱신 2026-10-24 1-N 상태 모듈, 2026-10-31 CNV-06 메모 화면 연결)
+**Status**: 표식(CNV-05)은 상태 모듈만, 메모(CNV-06)는 화면까지 연결됨 [런타임: node --test만 · 실화면 미검증]
 **Scope**: EG-Desk Firefox shell, canvas shapes, card-local visual analysis, AI-generated annotations, Canvas 메모(CNV-06)
 
 ---
 
 ## 2026-10-24 갱신 — 지금 있는 것과 남은 것
 
-**대표님이 보게 될 결과 (화면 연결 S7 뒤)**: Agent가 카드 위에 올린 표식이 '제안'으로 뜨고, [모두 받기]·하나씩 받기·지우기·옮기기를 할 수 있으며, 받은 표식만 Board와 함께 저장된다. Canvas 메모에 [Rio에게 묻기]를 누르면 메모 내용이 Chat 질문으로 가고, Rio의 답은 그 메모 안 답글로 한 번만 붙는다. **지금은 계산 모듈만 있고 화면에는 아직 아무것도 보이지 않는다.**
+**대표님이 보게 될 결과 (화면 연결 S7 뒤)**: Agent가 카드 위에 올린 표식이 '제안'으로 뜨고, [모두 받기]·하나씩 받기·지우기·옮기기를 할 수 있으며, 받은 표식만 Board와 함께 저장된다. Canvas 메모에 [Rio에게 묻기]를 누르면 메모 내용이 Chat 질문으로 가고, Rio의 답은 그 메모 안 답글로 한 번만 붙는다. **표식은 아직 계산 모듈만 있다. 메모는 2026-10-31에 화면에 연결됐다** — Dock [메모]로 만들고, 카드 위에 붙어 따라다니고, 접힘 240×160·펼침 320×280, [<Agent>에게 묻기]가 그 Agent의 방으로 실제 전송되고, 답이 메모 답글로 붙는다(D-K5). node 시험만 통과했고 Firefox 실화면은 아직 보지 않았다.
 
 | 무엇 | 파일 | 상태 |
 |---|---|---|
 | 표식 묶음 상태 | `overlay/resources/EGDeskAnnotationState.sys.mjs` | 모듈·node 시험 통과 [런타임: node --test만] |
-| 메모·답글 상태 | `overlay/resources/EGDeskMemoState.sys.mjs` | 모듈·node 시험 통과 [런타임: node --test만] |
-| 시험 | `scripts/egdesk-annotation-memo.test.mjs` | 17개 |
-| 화면(표식 레이어·메모 카드) | `eg-desk-surface.uc.js` | S7 차례, 미구현 |
+| 메모·답글 상태 | `overlay/resources/EGDeskMemoState.sys.mjs` | 모듈·node 시험 통과 [런타임: node --test만] · 2026-10-31 두 고정 크기·requestId 라우팅 추가 |
+| 시험 | `scripts/egdesk-annotation-memo.test.mjs` | 18개 |
+| 화면(표식 레이어) | `eg-desk-surface.uc.js` | S7 차례, 미구현 |
+| 화면(메모 카드) | `eg-desk-surface.uc.js` 'Canvas Memo (CNV-06)' 구역: `spawnMemoCard`·`askMemoAgent`·`attachMemoRepliesFromRun`, Dock '메모', `.egd-memo-*` CSS | 연결됨(2026-10-31) [실화면 미검증] |
 | Agent가 표식을 올리는 도구 | helper 2차 묶음 2-BH | 미구현, D-K1 뒤 |
 
-**결정 대기**: D-K1(표식이 처음 나타나는 방식: 카드 위 점선 '제안'으로 바로 — 권고 / Chat '표식 N개 · 보기'를 눌러야), D-K5(메모 질문의 답이 답글로 저절로 붙는지 — 권고). 두 모듈은 어느 쪽으로 정해져도 그대로 쓴다.
+**결정**: 2026-10-24에 D-K1(카드 위 점선 '제안'으로 바로)과 D-K5(메모 질문의 답은 메모 답글로 자동)가 정해졌다. 메모 화면은 D-K5대로 askId와 함께 `appendMemoReply()`를 부르고, Chat에는 '메모 #N 답글로 붙음' 칩만 남긴다(D-K4).
 
 ### 표식 묶음 (CNV-05) — 모듈이 정본
 
@@ -75,26 +76,35 @@ type MemoRecord = {
   version: 1; id: string; seq?: number;            // Board 안 번호(#3)
   anchor: { kind: 'card'; cardId: string; x: number; y: number; at?: {x, y} }  // 카드 위 0~1 + 마지막 월드 위치
         | { kind: 'canvas'; x: number; y: number };
-  size: { width: number; baseHeight: number };     // 내용이 길면 커지고 baseHeight 아래로는 안 줄어듦
+  expanded: boolean;                               // 접힘 240×160 / 펼침 320×280 (MEMO_FRAME); 본문은 틀 안에서 스크롤
   author: { kind: 'user' } | { kind: 'agent'; agentId: string; name?: string };
   text: string;                                    // ≤2000자
   resolved: boolean; createdAt: number; updatedAt: number;
   replies: { id; author; text; createdAt?; answerId?; askId?; runId?; truncated? }[];  // ≤200
-  asks: { askId; agentId; status: 'pending' | 'answered' | 'cancelled'; askedAt?; answerId? }[];
+  asks: { askId; agentId; status: 'pending' | 'answered' | 'cancelled'; askedAt?; answerId?; requestId?; threadId? }[];  // requestId: 질문이 나간 Chat 요청 — 답을 되돌리는 열쇠
   links: { targetViewId: string; label?: string }[]; // 메모 → 카드·도형 선(≤8), JSON Canvas edge로 내보냄
 };
 ```
 
 - 메모를 놓으면 그 아래 맨 위 카드에 붙는다(`memoAnchorAt`, Penpot이 옮긴 스레드의 frame을 다시 찾는 방식). 카드가 닫히면 마지막 위치에 남는다(`memoPosition().missing`).
 - [Agent에게 묻기]: `memoAskDraft()` → Chat에 보낼 글 한 개(메모 번호·id, 본문, 최근 답글 3개, 질문)와 `askId`, 관련 카드 id. 보내기가 성공한 뒤에만 `recordMemoAsk()`로 대기 중 질문을 남긴다.
-- 답글: `appendMemoReply()` → `{memo, appended, reason}`. 같은 answerId는 한 번만(`duplicate`). 질문에 대한 답은 그 질문이 대기 중일 때만, 물어본 Agent의 답만 붙는다(`ask-closed`·`ask-mismatch`, CopilotKit의 '실행 중일 때만 응답' 방식). Agent 답이 2000자를 넘으면 잘리고 `truncated`, 전체는 Chat의 answerId에 있다. D-K5가 '수동'으로 정해지면 화면이 askId 없이 같은 함수를 부르면 된다.
+- 답글: `appendMemoReply()` → `{memo, appended, reason}`. 같은 answerId는 한 번만(`duplicate`). 질문에 대한 답은 그 질문이 대기 중일 때만, 물어본 Agent의 답만 붙는다(`ask-closed`·`ask-mismatch`, CopilotKit의 '실행 중일 때만 응답' 방식). Agent 답이 2000자를 넘으면 잘리고 `truncated`, 전체는 Chat의 answerId에 있다. `memoReplyFromRun(run)`이 완료된 Chat run(assistant 메시지 합침)을 답글 후보로 바꾸고, `findPendingMemoAsk(memos, requestId)`가 그 run이 답한 메모를 찾는다.
+
+**화면 연결(2026-10-31, uc.js 'Canvas Memo (CNV-06)' 구역)**
+
+- 만들기: Dock [메모] → 선택한 카드의 오른쪽 위(없으면 보이는 Canvas 가운데)에 메모 카드(`spawnMemoCard`, Desk window kind 'memo', `--egd-note` 바탕). 크기 조절 손잡이는 없고 [펼치기]/[접기]가 두 틀을 오간다.
+- 따라가기: Canvas 레이어의 `MutationObserver`(카드 style·childList)가 다음 프레임에 `memoPosition()`으로 메모를 옮긴다. 메모를 끌어 놓으면 `moveMemo()`가 그 아래 카드에 다시 고정하고, 카드가 닫히면 '대상 없음' 배지로 마지막 위치에 남는다.
+- 저장·복원: `serializeCardState` type 'memo', runtimeState = MemoRecord. Board는 `mountBoardMember`, Desk 세션은 `restoreCardFromState`가 `spawnMemoCard({ restore: true, record })`를 부른다(읽을 수 없는 기록은 Board '구성원 다시 확인' 자리표시).
+- [<Agent>에게 묻기]: Agent 선택(`codexAgentProfileChoices`) + 질문 → `memoAskDraft()`(본문·대상 카드 이름·최근 답글·질문) → 그 Agent의 DM 방(없으면 `createThread`)의 초안에 넣고 기존 `sendMessage()`를 부른다. 새로 접수된 요청(`chatProtocol.requests`, status 'accepted')의 requestId만 `recordMemoAsk()`에 남긴다. 본문 저장은 어떤 Agent도 부르지 않는다.
+- 답(D-K5): `syncProtocolRun` 끝의 한 줄 `attachMemoRepliesFromRun(run)` → `findPendingMemoAsk()` → `memoReplyFromRun()` → `appendMemoReply()`(작성자 아바타·이름으로 쌓임, 자동 펼침). 실패·중단된 run은 그 질문을 `cancelled`로 닫는다. Chat 메시지에는 `memoChipForAnswer()`의 칩만(D-K4).
+- 아직 없는 것: 메모 → 카드 `links` 그리기(JSON Canvas edge), 수정 전 메모에 대한 답 표시, 재촉 알림, Board 재개 시 카드 id 재배정에 따른 `anchor.cardId` 재매핑(기록은 `remapMemberReferences`를 통과하지만 복원 경로가 record를 재매핑하지 않음), Firefox 실화면 검증.
 
 ### 따른 레퍼런스
 
 | 레퍼런스 | 라이선스 | 읽은 곳 | 가져온 것 |
 |---|---|---|---|
 | tldraw/agent-template | MIT | `shared/format/FocusedShape.ts:24-105`, `shared/types/ChatHistoryItem.ts:28-33`, `client/agent/managers/AgentActionManager.ts:90-158`, `client/components/chat-history/ChatHistoryGroupWithDiff.tsx:16-72`, `shared/types/ContextItem.ts:5-29` | 구조화 도형·note·대상 id 화살표, pending/accepted/rejected, 묶음 받기·묶음 상태 |
-| excalidraw | MIT | `packages/element/src/types.ts:97-105`, `:316-333` | 0~1 비율 좌표, sticky note baseHeight |
+| excalidraw | MIT | `packages/element/src/types.ts:97-105`, `:316-333` | 0~1 비율 좌표 (sticky note baseHeight는 2026-10-31 CNV-06 결정의 두 고정 크기로 대체) |
 | Penpot | MPL-2.0, 패턴만 | `backend/src/app/rpc/commands/comments.clj:42`, `:446-455`, `:494-548`, `:569-586`, `frontend/.../comments.cljs:155-193` | 위치·frame 고정 스레드, 번호, 해결 상태, 첫 글과 답글 분리 |
 | CopilotKit | MIT | `packages/react-core/src/v2/hooks/use-human-in-the-loop.tsx:31-105` | 응답은 요청이 진행 중일 때만 |
 | JSON Canvas 1.0 | MIT | `spec/1.0.md` Edges | fromNode·toNode·toEnd·label |
