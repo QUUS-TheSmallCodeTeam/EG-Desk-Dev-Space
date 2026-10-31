@@ -560,11 +560,12 @@ test('selected Browser interaction belongs to one native run despite inherited s
   const first = await h.chat.send({ message: 'Click only this selected Card', clientThreadId: 'selected-chat',
     executionPolicy: { mode: 'browserBounded' }, selectedSources: [f.source], browserTransportId: 'selected-ui' })
   // The interaction grant adds every interaction tool, the BRW-05/07 Card and
-  // site tools included; the read tools (observe, wait_text, list_cards) are
-  // offered to any Browser grant.
+  // site tools included; the read tools (observe, wait_text, list_cards and
+  // the BRW-09 masked screenshot) are offered to any Browser grant.
   assert.deepEqual(h.calls.find(call => call.method === 'thread/start').params.dynamicTools.map(spec => spec.name),
     ['egdesk_browser_observe', 'egdesk_browser_navigate', 'egdesk_browser_click', 'egdesk_browser_fill', 'egdesk_browser_scroll', 'egdesk_browser_press', 'egdesk_browser_wait', 'egdesk_browser_wait_text',
-      'egdesk_browser_list_cards', 'egdesk_browser_request_site', 'egdesk_browser_open_card', 'egdesk_browser_close_card', 'egdesk_browser_history'])
+      'egdesk_browser_list_cards', 'egdesk_browser_request_site', 'egdesk_browser_open_card', 'egdesk_browser_close_card', 'egdesk_browser_history',
+      'egdesk_browser_screenshot'])
   assert.equal(first.executionPolicy.browserEffects, 'selected-card-observe-click-fill-this-run')
   assert.equal(h.chat.threads.get(first.conversationId).qaReceipt.browserEffects, 'observe-only-selected-card')
   assert.deepEqual(h.calls.find(call => call.method === 'turn/start').params.sandboxPolicy,
@@ -593,9 +594,10 @@ test('an observe-only native catalog cannot silently gain click/fill through a l
   const f = selectedBrowserTurnFixture(), h = qaHarness({ toolProviders: [f.provider] })
   const first = await h.chat.send({ message: 'Start an observe-only native catalog',
     clientThreadId: 'selected-chat', executionPolicy: { mode: 'browserBounded' } })
-  // Read tools only: list_cards names the run's Cards and never acts.
+  // Read tools only: list_cards names the run's Cards and never acts; the
+  // masked screenshot is read-only too (an observe grant may capture, D-B6).
   assert.deepEqual(h.calls.find(call => call.method === 'thread/start').params.dynamicTools.map(spec => spec.name),
-    ['egdesk_browser_observe', 'egdesk_browser_wait_text', 'egdesk_browser_list_cards'])
+    ['egdesk_browser_observe', 'egdesk_browser_wait_text', 'egdesk_browser_list_cards', 'egdesk_browser_screenshot'])
   await h.finish(first)
   const count = h.calls.filter(call => call.method === 'turn/start').length
   await assert.rejects(h.chat.send({ message: 'Try to add interaction later', clientThreadId: 'selected-chat',
@@ -622,7 +624,7 @@ test('guarded navigate, scroll, press and wait need the selected Card interactio
   const watched = await observeOnly.chat.send({ message: 'Only look at this Card', clientThreadId: 'selected-chat',
     executionPolicy: { mode: 'browserBounded' }, selectedSources: [{ ...o.source, browserToolPermission: 'observe' }], browserTransportId: 'selected-ui' })
   assert.deepEqual(observeOnly.calls.find(call => call.method === 'thread/start').params.dynamicTools.map(spec => spec.name),
-    ['egdesk_browser_observe', 'egdesk_browser_wait_text', 'egdesk_browser_list_cards'], 'an observe grant offers only the read tools')
+    ['egdesk_browser_observe', 'egdesk_browser_wait_text', 'egdesk_browser_list_cards', 'egdesk_browser_screenshot'], 'an observe grant offers only the read tools')
   for (const tool of ['egdesk_browser_navigate', 'egdesk_browser_scroll', 'egdesk_browser_press', 'egdesk_browser_wait']) {
     await observeOnly.chat.handleServerRequest({ id: `observe-${tool}`, method: 'item/tool/call', params: {
       threadId: watched.conversationId, turnId: watched.runId, callId: `call-${tool}`, tool, arguments: { cardId: 'selected-card' } } })

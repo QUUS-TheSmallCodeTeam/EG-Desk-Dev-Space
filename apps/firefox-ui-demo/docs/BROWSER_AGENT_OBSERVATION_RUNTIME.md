@@ -1,6 +1,6 @@
 # Browser Agent Observation Runtime
 
-**Date**: 2026-05-20, updated 2026-10-24 (guarded tool path, BRW-05/BRW-06; frames, shadow DOM, editors and long values, BRW-08)
+**Date**: 2026-05-20, updated 2026-10-24 (guarded tool path, BRW-05/BRW-06; frames, shadow DOM, editors and long values, BRW-08), 2026-10-31 (masked screenshot, BRW-09)
 **Status**: Two runtime paths. The guarded model tool path is implemented in the helper and actor and unit-tested; its scroll/press chrome wiring and native catalog exposure are pending (see Wiring Status).
 **Scope**: Firefox Browser Cards, model (Codex) Browser tools, legacy internal agent actions and DOM-change summaries
 
@@ -46,6 +46,7 @@ Codex dynamic tool call
 | `egdesk_browser_open_card` | `open-card` | interact grant; URL judged like navigate from the source Card's current page; same profile, container and account; at most four Cards per run | EG-Desk chrome opens the Card and binds it to the run; the helper admits it only when the returned binding keeps the identity | `card-opened` with the new `cardId` |
 | `egdesk_browser_close_card` | `close-card` | only a Card this run opened (`openedByAgent`) | EG-Desk chrome closes the Card and drops its bindings and grant | `card-closed` |
 | `egdesk_browser_history` | `history` | fresh observation; observed Gecko document identity still current | EG-Desk chrome `back`/`forward`/`reload` (`chrome-history`); the result is the dispatch only | `history-dispatched`, `postcondition-unverified` |
+| `egdesk_browser_screenshot` | `observe` with `options.screenshot` | read-only; the parent actor captures only on its own one-time ticket, covers what the child reports, and sends nothing when a cover box cannot be trusted (see Masked Screenshot) | none | `screenshot-observed`, `screenshot-withheld` (with `screenshot.reason`) |
 
 Press keys: Enter, Escape, Tab, ArrowUp, ArrowDown, ArrowLeft, ArrowRight, Backspace, Space. Enter and Space require a testable postcondition (they can submit or activate); other keys may omit it.
 
@@ -88,6 +89,36 @@ The fingerprint is a non-cryptographic 53-bit hash (cyrb53) used only to notice 
 
 Scan bounds: 20000 elements per observation for discovering shadow roots and frames (interactive elements past that still count, in document order), shadow depth 16, 20 inaccessible frames listed.
 
+### Masked Screenshot (BRW-09, D-B6, REA 웹6 decision 3)
+
+A Card with an observe grant may give the model a picture of its visible viewport. Secret and sensitive fields, other-site and unread frames and embedded objects are painted over inside Firefox before the image leaves it; if any cover box cannot be trusted, no image is sent. Image pixels are never input coordinates: an action still needs a fresh `egdesk_browser_observe` and element refs.
+
+```text
+helper  egdesk_browser_screenshot
+  -> observe request, options { textLimit: 1, elementLimit: 1, screenshot: { maxEdge, budgetChars, format, quality } }
+  -> surface browserToolObserve (unchanged) -> actor.sendQuery("snapshot", { options })
+  -> EGDeskBrowserAgentRuntimeParent.sendQuery   mints a one-time ticket into options.screenshot
+  -> child snapshot(light) + sendQuery("captureScreenshot", { ticket, ... })
+  -> parent: child screenshotMask (before) -> WindowGlobalParent.drawSnapshot(null, 1, "white")
+             -> child screenshotMask (after) -> EGDeskScreenshotMask.screenshotDecision
+             -> canvas: draw, paint covers, toDataURL within the budget
+  -> child returns { ...snapshot, screenshot } -> helper result { status, screenshot }
+  -> provider: inputText (JSON, imageUrl replaced) + inputImage (data URL)
+```
+
+| Covered | Child rule (`screenshotMask`) |
+|---|---|
+| Secret or sensitive field | `type=password`; the observation's sensitive control rule (secret, token, OTP, card hints, `data-sensitive`/`data-private`, sensitive editors); any `autocomplete` token `cc-*`, `one-time-code`, `current-password`, `new-password` |
+| Frame the observation did not read | cross-origin, unreadable (no document), `data-sensitive`/`data-private`, past the frame depth limit, or not scanned (for example `aria-hidden`, which still paints) |
+| `<object>` / `<embed>` | always |
+| Not covered | plain fields and editors (their pixels show; their values stay out of the text observation as before), page text |
+
+Fail-closed reasons (`screenshot.reason`): `scan-budget` (element budget ran out, so some shadow roots or frames went unread), `scan-failed`, `rect-unavailable` (a box could not be measured), `frame-transform` (a CSS-transformed same-origin frame on the path), `mask-moved` (the cover boxes differed before and after the capture), `document-changed`, `viewport-changed`, `image-size-mismatch` (the capture is neither the viewport nor a uniform rescale of it), `image-too-large` (no size down to a 480 px long edge fit the 150000-character budget), `capture-failed`, `capture-unsupported` (no `drawSnapshot`, e.g. headless), `unauthorized` (no ticket), `missing-embedder`, `not-top-document`, `mask-unavailable`.
+
+Box geometry: child boxes are top-viewport CSS pixels (`viewportRect`, same-origin frame offsets added, frame transforms refused). Every box grows by 3 CSS pixels; a capture a scrollbar narrower than the viewport keeps the CSS grid and grows every box by the difference; a downscaled output grows every box outward again. The result's `maskedRegions` lists up to 60 `{ kind, reason, bounds }` in CSS pixels (`maskCount` is the full count, `maskedRegionsTruncated: true` when cut) and `imageScale` (image pixel = CSS pixel x imageScale). Capture scale is 1 (one capture pixel per CSS pixel); the output long edge is capped at 1280 and shrunk by 20% steps, then re-encoded at quality 0.5, until the JPEG data URL fits 150000 characters inside the 180000-character UI response bound.
+
+Authority: a content process cannot start a capture. The parent actor mints the ticket only while forwarding the chrome side's own `snapshot` query that carries `options.screenshot`, spends it once, and captures only for the top document of a registered chrome Browser Card. The unmasked bitmap never leaves the parent process. Not changed: observe/act guards, the Card's fresh observation (a screenshot never becomes one), and the surface.
+
 ### Snapshot Fields
 
 The actor snapshot now includes `scroll: { x, y, maxY }` (CSS pixels, integers) and `inaccessibleFrames` (see BRW-08). A wait response carries `wait: { for, outcome: "met" | "timeout", elapsedMs }`; the helper validates and removes it before storing the observation.
@@ -123,9 +154,13 @@ The actor snapshot now includes `scroll: { x, y, maxY }` (CSS pixels, integers) 
 | Allowed sites per conversation, `request_site` question on the Card, chrome route for an allowed other site, commit-layer blank page (BRW-05) | Implemented 2026-10-31, unit-tested (helper and extracted surface slices); real Firefox run not verified |
 | `list_cards`, `open_card`, `close_card`, `history` and the run's growing Card set (BRW-07) | Implemented 2026-10-31, unit-tested in the helper; the surface `open-card`/`close-card`/`history` handlers are not covered by the extracted-slice tests and need a real Firefox run |
 | Standing conversation grant with D-B3 expiry, token re-issue per turn, '조작 허용 해제' menu item (BRW-11) | Implemented 2026-10-31, unit-tested (`scripts/egdesk-browser-grant.test.mjs`, transport harness); real Firefox run not verified |
-| Real Firefox run (trusted page behavior, Gecko PSL, implicit submission on real forms; BRW-08: same-process `contentDocument` under Fission, principal equality, `ShadowRoot.elementFromPoint`, real rich editors such as Gmail or Notion) | Not verified |
+| Actor child: `screenshotMask` cover pass, `options.screenshot` on the snapshot query (BRW-09) | Implemented, unit-tested with a fake DOM |
+| Actor parent: ticketed `captureScreenshot`, `drawSnapshot` + canvas cover + budgeted encode (BRW-09) | Implemented, unit-tested with a fake WindowGlobalParent and canvas; the real `drawSnapshot` call is not run |
+| `EGDeskScreenshotMask.sys.mjs` cover and send policy (BRW-09) | Implemented, unit-tested |
+| Helper: `egdesk_browser_screenshot` spec (appended, read tool), dispatch, `validScreenshot`; provider `inputImage` item (BRW-09) | Implemented, unit-tested. The chat runtime catalog already follows `BROWSER_READ_TOOL_NAMES`, so the tool is offered with readOnlyQa and browserBounded |
+| Real Firefox run (trusted page behavior, Gecko PSL, implicit submission on real forms; BRW-08: same-process `contentDocument` under Fission, principal equality, `ShadowRoot.elementFromPoint`, real rich editors such as Gmail or Notion; BRW-09: `drawSnapshot` viewport size versus `innerWidth`/`innerHeight`, the `sendQuery` override on a JSWindowActorParent subclass, JPEG size of real pages, Codex `inputImage` round trip) | Not verified |
 
-Unit tests: `helper/egdesk-browser-tool-runtime.test.mjs`, `helper/codex-browser-tool-provider.test.mjs`, `scripts/egdesk-browser-agent-guard.test.mjs`, `scripts/egdesk-browser-tool-transport.test.mjs` (tests there skip with a visible reason until the matching surface wiring lands; today only the fill receipt test skips).
+Unit tests: `helper/egdesk-browser-tool-runtime.test.mjs`, `helper/codex-browser-tool-provider.test.mjs`, `scripts/egdesk-browser-agent-guard.test.mjs`, `scripts/egdesk-browser-tool-transport.test.mjs`, `scripts/egdesk-screenshot-mask.test.mjs` (tests there skip with a visible reason until the matching surface wiring lands; today only the fill receipt test skips).
 
 ---
 

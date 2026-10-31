@@ -90,7 +90,7 @@ test('only explicitly selected Browser sources expose tools; read-only never gra
   assert.throws(() => f.service.prepare({ selectedSources: [{ ...source('observe'), browserToolSelection: null }] }),
     { code: 'INVALID_BROWSER_SELECTION' })
   const prepared = f.service.prepare({ selectedSources: [source('observe')] })
-  assert.deepEqual(f.service.specs(prepared).map(item => item.name), ['egdesk_browser_observe', 'egdesk_browser_wait_text', 'egdesk_browser_list_cards'],
+  assert.deepEqual(f.service.specs(prepared).map(item => item.name), ['egdesk_browser_observe', 'egdesk_browser_wait_text', 'egdesk_browser_list_cards', 'egdesk_browser_screenshot'],
     'an observe grant offers only the read tools')
   await f.service.bind(run, prepared)
   const observed = await f.service.dispatch(run, { tool: 'egdesk_browser_observe', arguments: { cardId: 'browser-1' } })
@@ -101,13 +101,13 @@ test('only explicitly selected Browser sources expose tools; read-only never gra
     postcondition: { kind: 'visible-text', value: 'Count: 1' },
   } }), { code: 'BROWSER_INTERACTION_NOT_GRANTED' })
   assert.equal(f.actionCalls, 0)
-  assert.equal(BROWSER_TOOL_SPECS.length, 13)
+  assert.equal(BROWSER_TOOL_SPECS.length, 14)
 })
 
 test('fresh observed target dispatches once and returns DOM post-observation, never external success', async () => {
   const f = fixture()
   const prepared = f.service.prepare({ selectedSources: [source()] })
-  assert.equal(f.service.specs(prepared).length, 13)
+  assert.equal(f.service.specs(prepared).length, 14)
   await f.service.bind(run, prepared)
   const observed = await f.service.dispatch(run, { tool: 'egdesk_browser_observe', arguments: { cardId: 'browser-1' } })
   const args = { cardId: 'browser-1', observationId: observed.observationId, expectedRevision: 3,
@@ -1253,7 +1253,7 @@ test('Gecko innerWindowId and browsingContextId pass from the observation into t
 import { createHash } from 'node:crypto'
 
 test('tool classes are exported for the chat runtime; wait_text is appended and existing schemas are untouched', () => {
-  assert.deepEqual(BROWSER_READ_TOOL_NAMES, ['egdesk_browser_observe', 'egdesk_browser_wait_text', 'egdesk_browser_list_cards'])
+  assert.deepEqual(BROWSER_READ_TOOL_NAMES, ['egdesk_browser_observe', 'egdesk_browser_wait_text', 'egdesk_browser_list_cards', 'egdesk_browser_screenshot'])
   assert.deepEqual(BROWSER_INTERACTION_TOOL_NAMES, ['egdesk_browser_navigate', 'egdesk_browser_click', 'egdesk_browser_fill',
     'egdesk_browser_scroll', 'egdesk_browser_press', 'egdesk_browser_wait',
     'egdesk_browser_request_site', 'egdesk_browser_open_card', 'egdesk_browser_close_card', 'egdesk_browser_history'])
@@ -1261,7 +1261,8 @@ test('tool classes are exported for the chat runtime; wait_text is appended and 
   const names = BROWSER_TOOL_SPECS.map(item => item.name)
   assert.deepEqual(names, ['egdesk_browser_observe', 'egdesk_browser_navigate', 'egdesk_browser_click', 'egdesk_browser_fill',
     'egdesk_browser_scroll', 'egdesk_browser_press', 'egdesk_browser_wait', 'egdesk_browser_wait_text',
-    'egdesk_browser_list_cards', 'egdesk_browser_request_site', 'egdesk_browser_open_card', 'egdesk_browser_close_card', 'egdesk_browser_history'])
+    'egdesk_browser_list_cards', 'egdesk_browser_request_site', 'egdesk_browser_open_card', 'egdesk_browser_close_card', 'egdesk_browser_history',
+    'egdesk_browser_screenshot'])
   assert.deepEqual([...BROWSER_READ_TOOL_NAMES, ...BROWSER_INTERACTION_TOOL_NAMES].sort(), [...names].sort(),
     'every Browser tool is in exactly one class')
   // sha256 of [name, inputSchema] for the seven tools at d7aac51: native
@@ -1270,6 +1271,11 @@ test('tool classes are exported for the chat runtime; wait_text is appended and 
     .map(item => [item.name, item.inputSchema]))).digest('hex')
   assert.equal(digest, '9f92c38ddae6e6c19126d09675001535e8bfb2e1cb7abdeefc7e5165a9c1b684')
   const waitText = BROWSER_TOOL_SPECS[7]
+  // BRW-09: appended after wait_text; read-only, cardId only.
+  const screenshot = BROWSER_TOOL_SPECS.find(item => item.name === 'egdesk_browser_screenshot')
+  assert.ok(BROWSER_TOOL_SPECS.indexOf(screenshot) > BROWSER_TOOL_SPECS.indexOf(waitText))
+  assert.deepEqual(screenshot.inputSchema, { type: 'object', additionalProperties: false, properties: { cardId: { type: 'string' } }, required: ['cardId'] })
+  assert.match(screenshot.description, /never input coordinates/)
   assert.deepEqual(waitText.inputSchema, { type: 'object', additionalProperties: false,
     properties: { cardId: { type: 'string' }, text: { type: 'string' }, textGone: { type: 'string' }, timeoutMs: { type: 'integer' } },
     required: ['cardId', 'timeoutMs'] })

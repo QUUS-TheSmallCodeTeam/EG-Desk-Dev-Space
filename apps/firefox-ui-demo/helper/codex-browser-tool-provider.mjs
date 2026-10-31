@@ -44,7 +44,7 @@ function publicBrowserErrorDetail(error) {
   return detail
 }
 const SUCCESS_STATUSES = new Set(['observed', 'postcondition-observed', 'wait-condition-met',
-  'cards-listed', 'site-allowed', 'card-opened', 'card-closed', 'history-dispatched'])
+  'cards-listed', 'site-allowed', 'card-opened', 'card-closed', 'history-dispatched', 'screenshot-observed'])
 const PUBLIC_INPUT_ROUTES = new Set(['dom-click-no-pointerdown', 'dom-scroll-api', 'dom-keyboard-event',
   'dom-value-setter', 'dom-editor-replace', 'chrome-load-uri', 'chrome-history'])
 
@@ -211,7 +211,10 @@ export function createCodexBrowserToolProvider({ transport, getOwnerKey, schemaR
           ...(inputRoute ? { inputRoute } : {}),
           externalEffectVerified: false,
         }, event.callId)
-        return { success, contentItems: [{ type: 'inputText', text: JSON.stringify(result) }] }
+        // BRW-09: a masked screenshot travels as its own inputImage item.
+        const imageUrl = typeof result.screenshot?.imageUrl === 'string' ? result.screenshot.imageUrl : null
+        const text = JSON.stringify(imageUrl ? { ...result, screenshot: { ...result.screenshot, imageUrl: '[attached image]' } } : result)
+        return { success, contentItems: [{ type: 'inputText', text }, ...(imageUrl ? [{ type: 'inputImage', imageUrl }] : [])] }
       } catch (error) {
         if (run.executionPolicy?.mode === FIXTURE_BROWSER_QA) fixtureAttestations.delete(run.answerId)
         const failure = classifyPublicToolError(error, { browser: true })

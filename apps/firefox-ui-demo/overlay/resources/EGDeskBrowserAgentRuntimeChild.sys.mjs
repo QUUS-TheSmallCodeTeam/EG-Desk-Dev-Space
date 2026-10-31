@@ -1,4 +1,5 @@
 import { captureDocumentText } from './EGDeskInputContext.sys.mjs';
+import { isSensitiveAutocomplete } from './EGDeskScreenshotMask.sys.mjs';
 
 // Guarded key set. Events are synthetic (untrusted): Gecko runs no default
 // action for them, so only Enter's implicit form submission is emulated.
@@ -29,6 +30,10 @@ const MAX_SHADOW_DEPTH = 16;
 const MAX_SCAN_ELEMENTS = 20000;
 const MAX_EDITOR_NODES = 20000;
 const MAX_INACCESSIBLE_FRAMES = 20;
+// BRW-09 screenshot cover pass: form controls and editors (sensitive ones
+// are covered), and embedded documents the observation did not read.
+const MASK_SELECTOR = ["input", "textarea", "select", "iframe", "frame", "object", "embed",
+  '[contenteditable=""]', '[contenteditable="true" i]', '[contenteditable="plaintext-only" i]'].join(",");
 const INTERACTIVE_SELECTOR = ["a[href]", "button", "input", "textarea", "select", "[role]", "[tabindex]",
   '[contenteditable=""]', '[contenteditable="true" i]', '[contenteditable="plaintext-only" i]'].join(",");
 const MUTATION_OPTIONS = Object.freeze({ subtree: true, childList: true, attributes: true, characterData: true });
@@ -111,8 +116,13 @@ export class EGDeskBrowserAgentRuntimeChild extends JSWindowActorChild {
     if (message.name === "presentationMetrics") return this.presentationMetrics();
     const data = message.data || {};
     if (message.name === "snapshot") {
+      // A screenshot rides on the observe request (surface passes options
+      // through); the parent captures, this actor only measures (BRW-09).
+      if (data.options?.screenshot && typeof data.options.screenshot === "object") return this.screenshotThenSnapshot(data.options);
       return data.options?.wait ? this.waitThenSnapshot(data.options) : this.snapshot(data.options || {});
     }
+    // Read-only cover boxes for the parent's capture (BRW-09, D-B6).
+    if (message.name === "screenshotMask") return this.screenshotMask();
     if (message.name === "captureInput") return captureDocumentText(this.document, data.options || {});
     // Read-only question about one earlier guarded request (BRW-12).
     if (message.name === "reconcile") return this.reconcile(data);
@@ -868,7 +878,9 @@ export class EGDeskBrowserAgentRuntimeChild extends JSWindowActorChild {
       for (const element of matchedList) if (!pushed.has(element)) candidates.push(element);
     };
     visit(doc, null, 0);
-    return { roots, candidates, inaccessibleFrames };
+    // truncated: the element budget ran out, so some shadow roots or frames
+    // went unread (the screenshot cover pass then refuses to send).
+    return { roots, candidates, inaccessibleFrames, truncated: scanned >= MAX_SCAN_ELEMENTS };
   }
 
   scanFrame(frameElement, parent, visit, inaccessibleFrames) {
@@ -1056,6 +1068,108 @@ export class EGDeskBrowserAgentRuntimeChild extends JSWindowActorChild {
       inaccessible: false,
       inaccessibleFrames: scan.inaccessibleFrames,
     };
+  }
+
+  // Whether a node paints pixels: a box, and no ancestor hides it by style.
+  // Unlike isVisible this ignores aria-hidden and inert, which still paint.
+  // null when the box cannot be measured (unknown, so never "does not paint").
+  paints(node) {
+    if (!node?.getBoundingClientRect) return null;
+    const rect = node.getBoundingClientRect();
+    if (!Number.isFinite(rect?.width) || !Number.isFinite(rect?.height)) return null;
+    if (!(rect.width > 0) || !(rect.height > 0)) return false;
+    for (let current = node; current; current = this.composedParent(current)) {
+      const style = this.styleFor(current);
+      if (style.display === "none" || ["hidden", "collapse"].includes(style.visibility) || Number(style.opacity) === 0) return false;
+    }
+    const frame = this.frameByDocument.get(node.ownerDocument);
+    return !frame || this.paints(frame.frameElement);
+  }
+
+  // Sensitive for the screenshot: the observation's sensitive control rule
+  // plus every cc-* or one-time-code autocomplete token (D-B6).
+  screenshotSensitiveReason(node) {
+    const type = String(node.type || node.getAttribute?.("type") || "").toLowerCase();
+    if (type === "password") return "password";
+    if (isSensitiveAutocomplete(node.getAttribute?.("autocomplete"))) return "sensitive-autocomplete";
+    return this.isSensitiveControl(node) ? "sensitive-hint" : null;
+  }
+
+  // Cover boxes for a capture of the current viewport, in top-viewport CSS
+  // pixels: sensitive fields, embedded documents the observation did not
+  // read (other-site, unreadable, private, too deep, past the scan budget)
+  // and plugin/object embeds. complete:false means a box could not be
+  // trusted, and the parent then sends nothing (REA 웹6, decision 3).
+  screenshotMask() {
+    const state = this.observationState();
+    const scan = this.scanRoots(this.document, { classify: false });
+    const scanned = new Set(scan.roots);
+    const regions = [];
+    let incompleteReason = scan.truncated ? "scan-budget" : null;
+    const coverRect = node => {
+      // Frame offsets are composed without CSS transforms (viewportRect), so
+      // a transformed frame on the path makes the box untrustworthy.
+      for (let frame = this.frameByDocument.get(node.ownerDocument); frame; frame = frame.parent) {
+        const transform = this.styleFor(frame.frameElement)?.transform;
+        if (transform && transform !== "none") return { error: "frame-transform" };
+      }
+      const rect = this.viewportRect(node);
+      return [rect.left, rect.top, rect.width, rect.height].every(Number.isFinite) ? { rect } : { error: "rect-unavailable" };
+    };
+    // A node that does not paint needs no cover; one whose box cannot be
+    // measured makes the whole report untrustworthy.
+    const push = (node, kind, reason) => {
+      let painted, box;
+      try { painted = this.paints(node); } catch { painted = null; }
+      if (painted === false) return;
+      try { box = painted === null ? { error: "rect-unavailable" } : coverRect(node); } catch { box = { error: "rect-unavailable" }; }
+      if (box.error) { incompleteReason ||= box.error; return; }
+      regions.push({ kind, reason, rect: box.rect });
+    };
+    for (const root of scanned) {
+      let nodes;
+      try { nodes = Array.from(root.querySelectorAll(MASK_SELECTOR)); } catch { incompleteReason ||= "scan-failed"; continue; }
+      for (const node of nodes) {
+        const tag = String(node.tagName || "").toUpperCase();
+        if (tag === "IFRAME" || tag === "FRAME") {
+          let doc = null;
+          try { doc = node.contentDocument || null; } catch {}
+          // A frame whose document this scan read is covered by its own fields.
+          if (doc && scanned.has(doc)) continue;
+          const reason = this.privateMarked(node) ? "private" : !doc ? "unreadable"
+            : !this.sameOriginDocument(doc) ? "cross-origin"
+            : (this.frameByDocument.get(node.ownerDocument)?.path.split("/").length || 0) >= MAX_FRAME_DEPTH ? "depth-limit" : "unscanned";
+          push(node, "frame", reason);
+        } else if (tag === "OBJECT" || tag === "EMBED") {
+          push(node, "embedded-object", "embedded-object");
+        } else {
+          const reason = this.screenshotSensitiveReason(node);
+          if (reason) push(node, "sensitive-field", reason);
+        }
+      }
+    }
+    return { ...state, ...this.documentIdentity(), complete: incompleteReason === null, incompleteReason,
+      regions, regionCount: regions.length };
+  }
+
+  // The observe request that carries options.screenshot: a light snapshot
+  // of the same document plus the parent's masked capture, or the reason
+  // none was sent. The parent holds the one-time ticket it minted on the
+  // chrome side's query; this actor only forwards it.
+  async screenshotThenSnapshot(options = {}) {
+    const { screenshot: spec, wait: _wait, ...snapshotOptions } = options;
+    const snapshot = this.snapshot(snapshotOptions);
+    let capture;
+    if (typeof this.sendQuery !== "function") capture = { send: false, reason: "parent-unavailable" };
+    else {
+      try {
+        capture = await this.sendQuery("captureScreenshot", { ticket: spec.ticket, maxEdge: spec.maxEdge,
+          budgetChars: spec.budgetChars, format: spec.format, quality: spec.quality });
+      } catch { capture = { send: false, reason: "capture-failed" }; }
+    }
+    const screenshot = capture && typeof capture === "object" && capture.send === true
+      ? capture : { send: false, reason: typeof capture?.reason === "string" ? capture.reason.slice(0, 80) : "capture-failed" };
+    return { ...snapshot, screenshot };
   }
 
   // Visible page text nodes that contain needle (whitespace collapsed,
