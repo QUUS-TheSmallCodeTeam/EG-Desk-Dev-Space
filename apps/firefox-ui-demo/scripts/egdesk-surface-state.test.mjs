@@ -15426,6 +15426,147 @@ test("게시 결과 카드: the record read from the bridge keeps its result ide
   assert.deepEqual(Chat.findResultCardMessage([room], record.source), { thread: room, message }, "'채팅에서 보기' finds the answer that published it");
 });
 
+test('게시 결과 칩: one chip per key under the answer — 결과 badge, title, 버전 n — and the press hands the chip to the opener; none in a Claude or held room', () => {
+  const document = settingsFakeDocument();
+  const { el } = compileFunction(`${declaration('el')}\nreturn { el };`, ['document'])(document);
+  const presses = [];
+  const build = compileFunction(`${declaration('buildCodexOutputChips')}\nreturn buildCodexOutputChips;`, ['ChatState', 'el', 'openPublishedOutputChip'])(
+    Chat, el, (...args) => presses.push(args));
+  const thread = resultThread({ engineId: 'codex' });
+  const message = resultMessage({ outputs: Chat.publishedOutputs([outputFixture(), outputV2(), outputOther(), { id: 'broken' }]) });
+  const chips = build(message, thread);
+  assert.deepEqual(chips.map(chip => [chip.dataset.testid, chip.dataset.outputKey, chip.dataset.version, chip.dataset.outputId]),
+    [['chat-output', 'q3-report', '2', outputV2().id], ['chat-output', 'output-ab12cd34', '1', outputOther().id]]);
+  assert.deepEqual(chips.map(chip => chip.textContent), ['결과3분기 보고서 (수정)버전 2', '결과별도 결과버전 1']);
+  assert.equal(chips[0].attributes['aria-label'], '게시한 결과 열기: 3분기 보고서 (수정) · 버전 2');
+  assert.ok(chips[0].className.includes('egd-codex-result-chip-output'));
+  assert.equal(chips[0].attributes.type, 'button');
+  chips[0].fire('click');
+  assert.equal(presses.length, 1);
+  assert.equal(presses[0][0], chips[0]);
+  assert.equal(presses[0][1], thread);
+  assert.equal(presses[0][2], message);
+  assert.equal(presses[0][3].id, outputV2().id);
+  assert.deepEqual(build(message, resultThread({ engineId: 'claude' })), [], 'a Claude room has no publish route');
+  assert.deepEqual(build(message, resultThread({ conversationId: null, retainedNativeBinding: { conversationId: 'conv-1' } })), [], 'a held room opens nothing');
+  assert.deepEqual(build(resultMessage({ role: 'user', outputs: message.outputs }), thread), []);
+  assert.deepEqual(build(resultMessage(), thread), [], 'an answer without published results');
+  const css = readFileSync(new URL('../overlay/CSS/eg-desk-surface.uc.css', import.meta.url), 'utf8');
+  assert.match(css, /\.egd-codex-result-kind \{/);
+  assert.match(css, /\.egd-codex-result-chip-output\[data-state="unavailable"\]/);
+});
+
+test('게시 결과 칩: the press reads through the bridge and opens the card; a bridge or room that cannot serve it leaves 열 수 없음 on the chip, no toast', async () => {
+  const document = settingsFakeDocument();
+  const { el } = compileFunction(`${declaration('el')}\nreturn { el };`, ['document'])(document);
+  let answer = () => ({ id: 'card' });
+  const calls = [];
+  const state = { codexBridge: { openPublishedOutput: async (...args) => { calls.push(args); return answer(); } } };
+  // The press is async, which the sync `declaration` slicer does not read.
+  const pressSource = surfaceSource.match(/  async function openPublishedOutputChip\([\s\S]*?\n  \}\n/)?.[0];
+  assert.ok(pressSource, 'production openPublishedOutputChip remains directly testable');
+  const press = compileFunction(`${pressSource}\nreturn openPublishedOutputChip;`, ['el', 'state'])(el, state);
+  const chat = el('div', { class: 'egd-chat-card' });
+  const chip = el('button', { class: 'egd-codex-result-chip egd-codex-result-chip-output' }, el('span', { class: 'egd-codex-result-label' }, '3분기 보고서'));
+  chip.closest = selector => selector === '.egd-chat-card' ? chat : null;
+  const pending = press(chip, resultThread(), resultMessage(), outputFixture());
+  assert.equal(chip.dataset.state, 'opening');
+  const status = settingsNodes(chip, node => node.className === 'egd-codex-result-state')[0];
+  assert.equal(status.textContent, '여는 중');
+  assert.equal(status.attributes.role, 'status');
+  assert.equal(await press(chip, resultThread(), resultMessage(), outputFixture()), null, 'a second press while opening is ignored');
+  assert.deepEqual(await pending, { id: 'card' });
+  assert.deepEqual(calls.map(args => [args[0], args[1], args[2].id, args[3].opener]), [['room-1', 'msg-a1', outputFixture().id, chat]]);
+  assert.equal(chip.dataset.state, undefined);
+  assert.equal(status.textContent, '');
+  answer = () => null;
+  assert.equal(await press(chip, resultThread(), resultMessage(), outputFixture()), null);
+  assert.equal(chip.dataset.state, 'unavailable');
+  assert.equal(status.textContent, '열 수 없음');
+  answer = () => { throw new Error('404'); };
+  assert.equal(await press(chip, resultThread(), resultMessage(), outputFixture()), null, 'a failed read is the same quiet stop');
+  assert.equal(chip.dataset.state, 'unavailable');
+  assert.equal(settingsNodes(chip, node => node.className === 'egd-codex-result-state').length, 1, 'one status span, reused');
+  answer = () => ({ id: 'card' });
+  await press(chip, resultThread(), resultMessage(), outputFixture());
+  assert.equal(chip.dataset.state, undefined, 'the next press tries again');
+  assert.doesNotMatch(pressSource, /boardNotice/, 'never a toast');
+});
+
+test('게시 결과 카드: the same key at a newer version redraws the open card; a plain answer card never redraws', () => {
+  const thread = resultThread({ conversationId: 'conversation-a' });
+  const message = resultMessage({ conversationId: 'conversation-a', runId: 'turn-a', answerId: 'conversation-a/turn-a' });
+  const first = Chat.publishedOutputCardRecord(thread, message, outputFixture(), '# 보고서 v1\n\n본문', { now: 1 });
+  const second = Chat.publishedOutputCardRecord(thread, message, outputV2(), '# 보고서 v2\n\n고친 본문', { now: 2 });
+  const { spawn, calls } = resultCardHarness();
+  const chat = { id: 'egd-chat-card-1', isConnected: true };
+  const card = spawn({ record: first, opener: chat });
+  assert.deepEqual(calls.focusSource, { kind: 'chat-answer', id: 'conversation-a/output/q3-report', scope: 'codex-answer' });
+  assert.equal(card._deskWindowShell.slots.identity.textContent, '3분기 보고서');
+  const content = card._deskWindowShell.slots.content;
+  const node = testid => settingsNodes(content, item => item.dataset.testid === testid)[0];
+  const sourceLine = () => settingsNodes(node('result-card-source'), item => item.className === 'egd-result-card-source-line')[0].textContent;
+  assert.equal(node('result-card-text').textContent, first.text);
+  assert.match(sourceLine(), /게시한 결과 · 버전 1/);
+  assert.equal(typeof card._renderResultRecord, 'function');
+  card._renderResultRecord(second);
+  assert.deepEqual(card._resultRecord, second);
+  assert.equal(card._deskWindowShell.slots.identity.textContent, '3분기 보고서 (수정)');
+  assert.equal(node('result-card-text').textContent, second.text, 'the new body replaces the old one');
+  assert.match(sourceLine(), /버전 2/);
+  assert.equal(settingsNodes(content, item => item.dataset.testid === 'result-card-text').length, 1);
+  node('result-card-open-chat').fire('click');
+  assert.deepEqual(calls.back, [second], "'채팅에서 보기' follows the version shown");
+
+  const open = { id: 'egd-result-card-9', isConnected: true, _resultRecord: first, redrawn: [] };
+  open._renderResultRecord = record => open.redrawn.push(record);
+  const again = resultCardHarness({ existing: open });
+  assert.equal(again.spawn({ record: second, opener: chat }), open);
+  assert.deepEqual(open.redrawn, [second], 'version 2 redraws the open card');
+  assert.deepEqual(again.calls.revealOpen, [[open, { opener: chat, kind: 'result' }]]);
+  open._resultRecord = second;
+  again.spawn({ record: second, opener: chat });
+  assert.equal(open.redrawn.length, 1, 'the same version again only comes back into view');
+  const plain = Chat.resultCardRecord(thread, message, { now: 1 });
+  const openPlain = { id: 'egd-result-card-3', isConnected: true, _resultRecord: plain, redrawn: [] };
+  openPlain._renderResultRecord = record => openPlain.redrawn.push(record);
+  resultCardHarness({ existing: openPlain }).spawn({ record: plain, opener: chat });
+  assert.deepEqual(openPlain.redrawn, [], 'an answer card never redraws');
+});
+
+test('게시 결과: the bridge reads one result by id with the room routing hints and opens it as a card; a missing route, a Claude room or another body opens nothing', async () => {
+  const body = surfaceSource.match(/      async openPublishedOutput\(threadId, messageId, output, options = \{\}\) \{\n([\s\S]*?)\n      \},/)?.[1];
+  assert.ok(body, 'production openPublishedOutput remains directly testable');
+  const run = compileFunction(`return (async () => {${body}\n})();`, ['threadId', 'messageId', 'output', 'options', 'getCodexThreadById', 'state', 'ChatState', 'fetchJson', 'codexMessageAuthorLabel', 'spawnResultCard']);
+  const message = resultMessage({ conversationId: 'conversation-a', runId: 'turn-a', answerId: 'conversation-a/turn-a', authorName: '분석 담당' });
+  const room = resultThread({ engineId: 'codex', clientBindingId: 'wire-1', conversationId: 'conversation-a', messages: [message] });
+  const state = { codex: { threads: [room], engines: [] } };
+  const byId = (codex, id) => codex.threads.find(thread => thread.id === id) || null;
+  const requests = [], spawned = [];
+  const markdown = '# 3분기 보고서\n\n본문';
+  let reply = async path => { requests.push(path); return { output: outputV2(), markdown }; };
+  const call = (threadId = 'room-1', output = outputV2()) => run(threadId, 'msg-a1', output, { opener: 'chat' }, byId, state, Chat, path => reply(path),
+    item => item.authorName || 'Codex', options => { spawned.push(options); return { id: 'card' }; });
+  assert.deepEqual(await call(), { id: 'card' });
+  assert.deepEqual(requests, [`/context/outputs/${outputV2().id}?engineId=codex&engineProfileId=codex-default&clientThreadId=wire-1&conversationId=conversation-a`]);
+  assert.equal(spawned[0].opener, 'chat');
+  assert.deepEqual([spawned[0].record.source.outputId, spawned[0].record.source.outputVersion, spawned[0].record.source.author, spawned[0].record.text],
+    [outputV2().id, 2, '분석 담당', markdown]);
+  reply = async () => { const error = new Error('Unknown context endpoint'); error.status = 404; throw error; };
+  assert.equal(await call(), null, 'an older bridge without the route');
+  reply = async () => ({ output: outputFixture(), markdown });
+  assert.equal(await call(), null, 'another result than the one asked for');
+  reply = async path => { requests.push(path); return { output: outputV2(), markdown }; };
+  state.codex.threads = [{ ...room, engineId: 'claude', engineProfileId: 'claude-main' }];
+  const before = requests.length;
+  assert.equal(await call(), null, 'a Claude room never asks');
+  assert.equal(requests.length, before);
+  assert.equal(await call('missing-room'), null);
+  assert.equal(await call('room-1', { id: 'nope' }), null);
+  assert.equal(spawned.length, 1);
+  assert.doesNotMatch(body, /boardNotice/, 'the chip reports; the bridge announces nothing');
+});
+
 test('긴 답변: a very long finished answer folds to a preview; the whole text stays and nothing folds by itself early', () => {
   assert.equal(Chat.longAnswerView('짧은 답변').long, false);
   assert.equal(Chat.longAnswerView(null).long, false);
@@ -15463,7 +15604,10 @@ test("Chat: '카드로 보기' sits with the result chips, a long answer folds w
   assert.match(surfaceSource, /const messageStack = el\('div', \{ class: 'egd-codex-message-stack' \}, roleLabel, messageLine, answerFold, computerLine, resultRow, briefingControl, meta\);/);
   // Only a press calls these; no render, event or run end does.
   assert.equal((surfaceSource.match(/openAnswerResultCard\(/g) || []).length, 2, 'the declaration and the one press handler');
-  assert.equal((surfaceSource.match(/spawnResultCard\(/g) || []).length, 4, 'declaration, the press path, and the two restore paths');
+  // CHAT-08 added the published-result chip's path (bridge openPublishedOutput); still no render, event or run end.
+  assert.equal((surfaceSource.match(/spawnResultCard\(/g) || []).length, 5, 'declaration, the press path, the chip path, and the two restore paths');
+  assert.match(surfaceSource, /const outputChips = buildCodexOutputChips\(message, activeThread\);/);
+  assert.match(surfaceSource, /if \(outputChips\.length\) resultRow\.prepend\(\.\.\.outputChips\);\n            if \(cardChip\) resultRow\.appendChild\(cardChip\);/);
 
   const body = surfaceSource.match(/      toggleAnswerFold\(threadId, messageId\) \{\n([\s\S]*?)\n      \},/)?.[1];
   assert.ok(body, 'production toggleAnswerFold remains directly testable');

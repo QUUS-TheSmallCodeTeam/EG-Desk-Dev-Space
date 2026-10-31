@@ -1245,6 +1245,47 @@
     el('span', { 'aria-hidden': 'true', class: 'egd-codex-result-arrow' }, '↗'))));
   }
 
+  // CHAT-08 / D-K4: an Agent-published Canvas result is one chip per outputKey
+  // under the answer — kind badge, title, '버전 n'. A revision moves that chip
+  // to the next version instead of adding one; nothing opens by itself and
+  // Chat never repeats the body (Contract §4, Chat/Canvas projection). The
+  // event carried metadata only, so the press is a GET round trip to the
+  // bridge. A Claude room has no publish route (captures and packets only),
+  // so it shows no chip.
+  function buildCodexOutputChips(message, thread) {
+    if (message?.role !== 'assistant' || ChatState.nativeBindingHeld(thread) || thread?.engineId === 'claude') return [];
+    return (message.outputs || []).map(ChatState.publishedOutputRecord).filter(Boolean).map(output => el('button', {
+      class: 'egd-codex-result-chip egd-codex-result-chip-output', type: 'button',
+      'aria-label': `게시한 결과 열기: ${output.title} · 버전 ${output.version}`,
+      title: output.version > 1 ? `Agent가 게시한 결과 · 같은 결과의 ${output.version}번째 버전을 Canvas 결과 카드로 엽니다` : 'Agent가 게시한 결과를 Canvas 결과 카드로 엽니다',
+      data: { testid: 'chat-output', outputId: output.id, outputKey: output.outputKey, version: String(output.version), answerId: message.answerId || '' },
+      onclick: ev => {
+        ev.preventDefault(); ev.stopPropagation();
+        openPublishedOutputChip(ev.currentTarget, thread, message, output);
+      },
+    }, el('span', { class: 'egd-codex-result-kind' }, '결과'),
+    el('span', { class: 'egd-codex-result-label' }, output.title),
+    el('span', { class: 'egd-codex-result-version' }, `버전 ${output.version}`)));
+  }
+
+  // The press: the chip says it is opening, the body comes from the bridge and
+  // opens through the CHAT-04 result card (the same key focuses the open card;
+  // a newer version redraws it). A bridge without the route, a refused room or
+  // a network failure leaves the chip standing with '열 수 없음' — no toast; the
+  // next press (or render) tries again.
+  async function openPublishedOutputChip(chip, thread, message, output) {
+    if (!chip || chip.dataset.state === 'opening') return null;
+    const status = chip._outputStatus || (chip._outputStatus = chip.appendChild(el('span', { class: 'egd-codex-result-state', role: 'status' })));
+    chip.dataset.state = 'opening'; status.textContent = '여는 중';
+    let card = null;
+    try {
+      card = await state.codexBridge?.openPublishedOutput(thread?.id, message?.id, output, { opener: chip.closest?.('.egd-chat-card') || null });
+    } catch { card = null; }
+    if (card) { delete chip.dataset.state; status.textContent = ''; }
+    else { chip.dataset.state = 'unavailable'; status.textContent = '열 수 없음'; }
+    return card || null;
+  }
+
   function codexRuns(thread) {
     return ChatState.runsForThread(state.codex.chatProtocol, thread);
   }
@@ -3175,44 +3216,54 @@
     if (!record || !key) return null;
     const sourceRef = makeSourceRef('chat-answer', { id: key, scope: 'codex-answer' });
     const existing = options.restore ? null : focusOpenSourceCard(sourceRef);
-    if (existing) { revealOpenCanvasCard(existing, { opener: options.opener || null, kind: 'result' }); return existing; }
+    if (existing) {
+      // CHAT-08: the same published result at a newer version redraws its open card.
+      if (record.source.outputId && existing._resultRecord?.source?.outputId !== record.source.outputId) existing._renderResultRecord?.(record);
+      revealOpenCanvasCard(existing, { opener: options.opener || null, kind: 'result' }); return existing;
+    }
     const placement = resolveCanvasCardPlacement('result');
     const shell = spawnDeskWindowShell({ id: `egd-result-card-${++cardSeq}`, kind: 'result', className: 'egd-result-card', sourceRef,
       bodyClassName: 'egd-result-card-body', minWidth: 360, minHeight: 280,
       style: { left: `${placement.x}px`, top: `${placement.y}px`, width: `${placement.width}px`, height: `${placement.height}px` } });
     if (!options.restore) revealPlacedCanvasCard(shell.root, placement, { opener: options.opener || null, kind: 'result' });
-    shell.root._resultRecord = record;
-    const source = ChatState.resultCardSourceView(record, { formatTime: formatMessageTime });
-    shell.slots.identity.appendChild(el('strong', { class: 'egd-result-card-title', title: record.title }, record.title));
-    const text = el('div', { class: 'egd-result-card-text egd-codex-richtext', data: { testid: 'result-card-text' } });
-    if (record.text) {
-      Markdown.appendMarkdown(text, record.text, {
-        answerId: record.source.answerId, runId: record.source.runId, conversationId: record.source.conversationId,
-        artifacts: record.artifacts, openArtifact: artifact => openCodexResultLink(artifact, { opener: shell.root }),
-        openWeb: url => openUrlInBrowserCard(url),
-      });
-    }
-    const files = record.artifacts.length ? el('section', { class: 'egd-result-card-files', 'aria-label': '이 답변이 가리킨 파일', data: { testid: 'result-card-files' } },
-      el('div', { class: 'egd-result-card-files-title' }, '이 답변이 가리킨 파일'),
-      el('div', { class: 'egd-codex-result-chips' }, ...record.artifacts.map(artifact => el('button', {
-        class: 'egd-codex-result-chip egd-codex-result-chip-file', type: 'button',
-        'aria-label': `참조된 파일 열기: ${artifact.label || artifact.target.path.split('/').pop()}`, title: `참조된 기존 파일 · ${artifact.target.path}`,
-        data: { testid: 'result-card-artifact', artifactId: artifact.id },
-        onclick: (ev) => { ev.preventDefault(); ev.stopPropagation(); openCodexResultLink(artifact, { opener: shell.root }); },
-      }, el('span', { class: 'egd-codex-result-label' }, artifact.label || artifact.target.path.split('/').pop()),
-      el('span', { 'aria-hidden': 'true', class: 'egd-codex-result-arrow' }, '↗'))))) : null;
-    const parts = [
-      el('header', { class: 'egd-result-card-source', data: { testid: 'result-card-source' } },
-        el('span', { class: 'egd-result-card-source-line' }, source.line),
-        el('button', {
-          class: 'egd-result-card-back', type: 'button', data: { testid: 'result-card-open-chat' },
-          onclick: (ev) => { ev.stopPropagation(); openResultCardSource(shell.root._resultRecord); },
-        }, deskIcon('chat'), el('span', {}, '채팅에서 보기'))),
-      source.truncatedNote ? el('p', { class: 'egd-result-card-note', role: 'note' }, source.truncatedNote) : null,
-      record.text ? text : null,
-      files,
-    ];
-    for (const part of parts) if (part) shell.slots.content.appendChild(part);
+    const title = el('strong', { class: 'egd-result-card-title' });
+    shell.slots.identity.appendChild(title);
+    const render = (shown) => {
+      shell.root._resultRecord = shown;
+      title.textContent = shown.title; title.setAttribute('title', shown.title);
+      const source = ChatState.resultCardSourceView(shown, { formatTime: formatMessageTime });
+      const text = el('div', { class: 'egd-result-card-text egd-codex-richtext', data: { testid: 'result-card-text' } });
+      if (shown.text) {
+        Markdown.appendMarkdown(text, shown.text, {
+          answerId: shown.source.answerId, runId: shown.source.runId, conversationId: shown.source.conversationId,
+          artifacts: shown.artifacts, openArtifact: artifact => openCodexResultLink(artifact, { opener: shell.root }),
+          openWeb: url => openUrlInBrowserCard(url),
+        });
+      }
+      const files = shown.artifacts.length ? el('section', { class: 'egd-result-card-files', 'aria-label': '이 답변이 가리킨 파일', data: { testid: 'result-card-files' } },
+        el('div', { class: 'egd-result-card-files-title' }, '이 답변이 가리킨 파일'),
+        el('div', { class: 'egd-codex-result-chips' }, ...shown.artifacts.map(artifact => el('button', {
+          class: 'egd-codex-result-chip egd-codex-result-chip-file', type: 'button',
+          'aria-label': `참조된 파일 열기: ${artifact.label || artifact.target.path.split('/').pop()}`, title: `참조된 기존 파일 · ${artifact.target.path}`,
+          data: { testid: 'result-card-artifact', artifactId: artifact.id },
+          onclick: (ev) => { ev.preventDefault(); ev.stopPropagation(); openCodexResultLink(artifact, { opener: shell.root }); },
+        }, el('span', { class: 'egd-codex-result-label' }, artifact.label || artifact.target.path.split('/').pop()),
+        el('span', { 'aria-hidden': 'true', class: 'egd-codex-result-arrow' }, '↗'))))) : null;
+      const parts = [
+        el('header', { class: 'egd-result-card-source', data: { testid: 'result-card-source' } },
+          el('span', { class: 'egd-result-card-source-line' }, source.line),
+          el('button', {
+            class: 'egd-result-card-back', type: 'button', data: { testid: 'result-card-open-chat' },
+            onclick: (ev) => { ev.stopPropagation(); openResultCardSource(shell.root._resultRecord); },
+          }, deskIcon('chat'), el('span', {}, '채팅에서 보기'))),
+        source.truncatedNote ? el('p', { class: 'egd-result-card-note', role: 'note' }, source.truncatedNote) : null,
+        shown.text ? text : null,
+        files,
+      ];
+      shell.slots.content.replaceChildren(...parts.filter(Boolean));
+    };
+    shell.root._renderResultRecord = render;
+    render(record);
     return shell.root;
   }
 
@@ -9985,12 +10036,14 @@
               onclick: (ev) => { ev.stopPropagation(); codexBridge.toggleAnswerFold(activeThread.id, message.id); },
             }, foldOpen ? '접기' : '여기서 모두 보기')) : null;
             const resultChips = buildCodexResultChips(message, activeThread, parts.links);
+            const outputChips = buildCodexOutputChips(message, activeThread);
             const cardChip = cardable && !fold?.long ? el('button', {
               class: 'egd-codex-result-chip egd-codex-result-chip-card', type: 'button',
               title: '이 답변을 Canvas에 결과 카드로 남깁니다', data: { testid: 'chat-answer-card', answerId: message.answerId || '', messageId: message.id || '' },
               onclick: keepAsCard,
             }, el('span', { class: 'egd-codex-result-label' }, '카드로 보기')) : null;
-            const resultRow = resultChips || cardChip ? resultChips || el('div', { class: 'egd-codex-result-chips' }) : null;
+            const resultRow = resultChips || cardChip || outputChips.length ? resultChips || el('div', { class: 'egd-codex-result-chips' }) : null;
+            if (outputChips.length) resultRow.prepend(...outputChips);
             if (cardChip) resultRow.appendChild(cardChip);
             const briefingControl = BriefingState.validBriefing(message.briefing) ? el('button', {
               class: 'egd-codex-result-chip', data: { testid: 'briefing-open', answerId: message.answerId },
@@ -12449,6 +12502,27 @@
         const { [key]: open, ...rest } = state.codex.expandedAnswers || {};
         state.codex.expandedAnswers = open ? rest : { ...rest, [key]: true };
         emit();
+      },
+      // CHAT-08: the chip's GET. The event stream never carried the body, so
+      // the result is read here (the routing hints every context read sends)
+      // and opened as a CHAT-04 result card. Null when the bridge or the room
+      // cannot serve it (no route on an older bridge, a Claude room, a network
+      // failure) — the chip says so itself; nothing is announced.
+      async openPublishedOutput(threadId, messageId, output, options = {}) {
+        const thread = getCodexThreadById(state.codex, threadId);
+        const published = ChatState.publishedOutputRecord(output);
+        if (!thread || !published) return null;
+        let scope = {};
+        try { scope = ChatState.chatContextRequestScope(thread, state.codex); } catch { scope = {}; }
+        if (scope.engineId === 'claude') return null;
+        const query = Object.entries(scope).map(([key, value]) => `${key}=${encodeURIComponent(value)}`).join('&');
+        let read;
+        try { read = await fetchJson(`/context/outputs/${encodeURIComponent(published.id)}${query ? `?${query}` : ''}`); } catch { return null; }
+        if (read?.output?.id !== published.id || typeof read.markdown !== 'string') return null;
+        const current = getCodexThreadById(state.codex, threadId) || thread;
+        const message = (current.messages || []).find(item => item.id === messageId) || null;
+        const record = ChatState.publishedOutputCardRecord(current, message, read.output, read.markdown, { author: message ? codexMessageAuthorLabel(message) : 'Codex' });
+        return record ? spawnResultCard({ record, opener: options.opener || null }) : null;
       },
       addInputSources(threadId, sources) {
         const thread = getCodexThreadById(state.codex, threadId);
