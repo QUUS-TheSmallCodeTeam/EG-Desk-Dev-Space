@@ -1,6 +1,7 @@
 import { createEGDeskFileService, FileSurfaceError } from './egdesk-file-service.mjs'
 import { openEGDeskManagedDraftStore } from './egdesk-managed-drafts.mjs'
 import { openEGDeskProjectStore, projectReconnectState, suggestProjectScripts, PROJECT_LIMITS } from './egdesk-project-store.mjs'
+import { sameProjectFolder } from './egdesk-project-identity.mjs'
 import { guardBridgeRequest, sendJson } from './codex-bridge-http.mjs'
 import { randomBytes, randomUUID } from 'node:crypto'
 import * as fs from 'node:fs/promises'
@@ -212,7 +213,8 @@ export function createEGDeskFileHttpAdapter({ draftDirectory, projectDirectory, 
     throw error('PICKER_GRANT_EXPIRED', 'Native selection is expired or already consumed', 409)
   }
 
-  const sameFolder = (described, project) => described.absolutePath === project.workspaceRoot && described.identity.dev === project.identity.dev && described.identity.ino === project.identity.ino
+  // Same real path and same dev/ino (egdesk-project-identity.mjs); a path match alone never reconnects.
+  const sameFolder = sameProjectFolder
 
   // A stored project → a live root handle. Reuses a cached root while it
   // still checks out; otherwise reconnects only when the folder at the stored

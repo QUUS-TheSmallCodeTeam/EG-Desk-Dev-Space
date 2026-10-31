@@ -9223,6 +9223,7 @@ function windowBoardMetadataHarness() {
     markAgendaDirty: () => effects.dirty++, setActiveEntity: view => { effects.activations.push(view); state.activeEntityId = view?.id || null; },
     focusCanvasCard: () => effects.focus++, toggleCardFullscreen: () => effects.fullscreen++, closeCanvasCard: () => {},
     isCardFullscreen: () => false, canvasZoom: () => 1, syncBoardRegionMarks: () => {}, scheduleViewportBoardSync: () => {},
+    buildBoardRegionProjectChip: () => document.createElement('button'), syncBoardRegionProject: () => {},
     persistentEntityGeometry: () => ({ x: 0, y: 0, width: 300, height: 200 }),
     SurfaceState: { ...Surface, boardRegionRect: () => ({ x: 0, y: 0, width: 400, height: 300 }), placeCanvasView: () => ({ x: 0, y: 0 }) },
     coerceAgendaStore: () => store, writeAgendaStoreAndSync: next => {
@@ -10199,10 +10200,12 @@ test('production Board region shows icon and name, the current Board edge, unsav
   const calls = [];
   const build = compileFunction(`${marks}\n${refresh}\nreturn { syncBoardRegionMarks, refreshBoardRegion };`,
     ['state', 'document', 'el', 'deskIcon', 'selectBoardProjection', 'toggleBoardRegionMenu',
-      'persistentEntityGeometry', 'SurfaceState', 'scheduleViewportBoardSync', 'syncAllDeskWindowBoardMetadata'])(
+      'persistentEntityGeometry', 'SurfaceState', 'scheduleViewportBoardSync', 'syncAllDeskWindowBoardMetadata',
+      'buildBoardRegionProjectChip', 'syncBoardRegionProject'])(
     state, dom.document, dom.el, name => dom.el('svg', { class: `icon-${name}` }),
     id => calls.push(['select', id]), (id, anchor) => calls.push(['menu', id, anchor.dataset.testid]),
-    view => members[view.id], Surface, () => calls.push(['sync']), () => {});
+    view => members[view.id], Surface, () => calls.push(['sync']), () => {},
+    () => dom.el('button', { class: 'egd-board-region-project', hidden: true }), () => calls.push(['project']));
   const region = build.refreshBoardRegion(projection);
   assert.equal(region.tag, 'section');
   assert.equal(region.className, 'egd-board-region');
@@ -10258,11 +10261,11 @@ test('production Board [⋯] menu offers save, Chat attach and close for that Bo
   let portableReady = false;
   const api = compileFunction(`let boardRegionMenu = null;\n${close}\n${toggle}\nreturn { toggleBoardRegionMenu, closeBoardRegionMenu, current: () => boardRegionMenu };`,
     ['state', 'document', 'window', 'el', 'resolveFloatingMenuPlacement', 'saveCurrentAgendaState', 'openChatInputPanel', 'closeCurrentAgenda', 'boardVersionHistoryReady', 'openBoardHistoryPanel',
-      'portableExportReady', 'openPortableExport', 'openBoardCanvasExport'])(
+      'portableExportReady', 'openPortableExport', 'openBoardCanvasExport', 'boardProjectMenuItems'])(
     state, dom.document, window, dom.el, (rect, width, height) => { placements.push([width, height]); return { left: 300.4, top: 120.6 }; },
     options => actions.push(['save', options]), (threadId, options) => actions.push(['attach', threadId, options]),
     options => actions.push(['close', options]), () => storeReady, boardId => actions.push(['history', boardId]),
-    () => portableReady, options => actions.push(['export', options]), projectionId => actions.push(['canvas', projectionId]));
+    () => portableReady, options => actions.push(['export', options]), projectionId => actions.push(['canvas', projectionId]), () => []);
   const anchor = dom.el('button', { data: { testid: 'board-menu' } });
   anchor.getBoundingClientRect = () => ({ left: 280, top: 90, right: 304, bottom: 114 });
   const menu = api.toggleBoardRegionMenu(projection.id, anchor);
@@ -17122,6 +17125,7 @@ function requestProjectUiHarness({ target, read, roomRead, roomSave, resizeObser
     setActiveThread: id => { if (!getThread(null, id)) return false; state.codex.activeThreadId = id; return true; },
     getCodexThreadDraft: (codex, id) => codex.threadDrafts[id] || '', refreshConversation() {},
     coerceAgendaStore: () => ({ agendas: {}, meta: {} }),
+    refreshBoardProject() {},
     window: { AbortController, ResizeObserver: resizeObserver, setTimeout(fn) { const id = ++timerSeq; timers.set(id, fn); return id; }, clearTimeout: id => timers.delete(id) },
     pickNativeRoomProjectDirectory: () => { assert.ok(pickFolder, 'only an explicit folder fixture supplies a native result'); return pickFolder(); },
     ChromeUtils: { importESModule(url) {

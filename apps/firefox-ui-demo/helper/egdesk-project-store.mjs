@@ -24,6 +24,11 @@ import { createHash, randomUUID } from 'node:crypto'
 import { constants } from 'node:fs'
 import * as fs from 'node:fs/promises'
 import path from 'node:path'
+import { normalizeFolderIdentity, projectReconnectState } from './egdesk-project-identity.mjs'
+
+// The dev/ino reconnect decision lives in egdesk-project-identity.mjs (pure);
+// re-exported so existing callers keep one import.
+export { projectReconnectState }
 
 export const PROJECT_SCRIPT_KINDS = Object.freeze(['test', 'build', 'lint', 'typecheck', 'run'])
 export const PROJECT_LIMITS = Object.freeze({
@@ -56,8 +61,9 @@ function oneLine(value, name, maximum) {
 }
 
 function identityOf(identity) {
-  if (!identity || typeof identity !== 'object' || !/^\d+$/.test(String(identity.dev)) || !/^\d+$/.test(String(identity.ino))) fail('INVALID_PROJECT_REQUEST', 'Folder identity is required')
-  return { dev: String(identity.dev), ino: String(identity.ino) }
+  const folder = normalizeFolderIdentity(identity)
+  if (!folder) fail('INVALID_PROJECT_REQUEST', 'Folder identity is required')
+  return folder
 }
 
 function kindFor(value, name = '') {
@@ -109,13 +115,6 @@ export function suggestProjectScripts(packageJsonText) {
     out.push({ name, command: runner(name), kind: kindFor(null, name), suggested: true })
   }
   return out
-}
-
-/** Stored project + current lstat (bigint or number) → reconnect state. */
-export function projectReconnectState(project, stat) {
-  if (!stat) return 'missing'
-  if (!stat.isDirectory?.() || stat.isSymbolicLink?.()) return 'not-a-directory'
-  return String(stat.dev) === project.identity.dev && String(stat.ino) === project.identity.ino ? 'connected' : 'identity-changed'
 }
 
 function checkedRecord(record) {
