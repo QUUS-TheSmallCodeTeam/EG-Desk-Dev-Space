@@ -110,6 +110,25 @@ async function assertOfflineProductionBridge(http) {
   assert.equal(health.appServerReady, false, 'QA probe refuses a ready native Codex engine');
 }
 
+// CHAT-01: the Agent recorded for the room (chat store v3 thread.agent — null, or
+// {profileId, revision, setAt} written by a send's recordRoomAgent or by
+// POST /chat/rooms/agent) rides on the thread of both production routes. The
+// shape-b adapter already requires the listed thread (/chat/history/threads)
+// and the history thread (/chat/history) to be deepStrictEqual, so this one
+// check of the projection's thread covers both routes.
+function assertRoomAgent(projection) {
+  const thread = object(projection.thread, 'projection.thread');
+  assert.ok(Object.hasOwn(thread, 'agent'), 'thread must carry the room Agent field (chat store v3)');
+  if (thread.agent === null) return null;
+  const agent = object(thread.agent, 'thread.agent');
+  assert.deepStrictEqual(Object.keys(agent).sort(), ['profileId', 'revision', 'setAt']);
+  assert.match(agent.profileId, /^[a-z0-9][a-z0-9-]{0,79}$/, 'room Agent must be an Agent profile ID');
+  assert.ok(agent.revision === null || (Number.isSafeInteger(agent.revision) && agent.revision > 0),
+    'room Agent revision must be null (follow the active revision) or a positive integer');
+  assert.ok(Number.isSafeInteger(agent.setAt) && agent.setAt > 0, 'room Agent needs the time it was picked');
+  return jsonCopy(agent);
+}
+
 async function observeThroughBothRoutes(http, adapter, clientThreadId) {
   assert.equal(typeof adapter.readCanonical, 'function', 'shape adapter needs readCanonical');
   const calls = { threads: 0, history: 0 };
@@ -119,6 +138,7 @@ async function observeThroughBothRoutes(http, adapter, clientThreadId) {
   });
   const observed = assertProjection(await adapter.readCanonical(readOnly, clientThreadId), clientThreadId);
   assert.ok(calls.threads > 0 && calls.history > 0, 'adapter must read both production history routes');
+  assertRoomAgent(observed);
   return observed;
 }
 
@@ -210,7 +230,9 @@ export async function seedHistoryRestart({ http, adapter, dataDir, bridgePid, pa
   return { kind: CHECKPOINT_KIND, dataDir, seedBridgePid: bridgePid,
     clientThreadId: importRequest.clientThreadId, importId: importRequest.importId,
     snapshotSha256: createHash('sha256').update(JSON.stringify(importRequest.snapshot)).digest('hex'),
-    expected: observed, paginationObserved };
+    expected: observed, paginationObserved,
+    // CHAT-01: the room Agent as both routes reported it before the restart.
+    roomAgent: assertRoomAgent(observed) };
 }
 
 export async function verifyHistoryRestart({ http, adapter, dataDir, bridgePid, checkpoint,
@@ -224,6 +246,9 @@ export async function verifyHistoryRestart({ http, adapter, dataDir, bridgePid, 
   await assertOfflineProductionBridge(http);
   const observed = await observeThroughBothRoutes(http, adapter, checkpoint.clientThreadId);
   assert.deepStrictEqual(observed, expected, 'production HTTP/DB history changed across bridge restart');
+  // CHAT-01: the Agent recorded for the room is still the same on /chat/history/threads and /chat/history.
+  assert.deepStrictEqual(assertRoomAgent(observed), checkpoint.roomAgent ?? null,
+    'CHAT-01: the room Agent changed across bridge restart');
   if (paginationSeed) {
     assert.ok(checkpoint.paginationObserved, 'seed phase did not record canonical pagination evidence');
     assert.deepStrictEqual(await verifyPagedCanonicalHistory(http, paginationSeed), checkpoint.paginationObserved,
