@@ -218,6 +218,8 @@ Atlas의 legacy label `USER-PRODUCT`가 붙은 기존 72개 항목은 ID 집합,
 - 현재 미커밋 제품·런타임 문서는 owner 피드백을 유용하게 재서술했을 수 있어도 커밋된 기준선이나 owner decision이 아니므로 제품 의미 승격 근거에서 제외한다.
 - 현재 구현은 `RUNTIME-OBSERVATION`으로만 사용할 수 있으며, 보이는 UI나 성공 응답이 지속성·외부 효과·완료를 입증한다고 확장하지 않는다.
 
+**2026-10-29 태화 AX 후속 근거 범위**: 로컬 PM `01a1853a-53e9-76c3-ad90-e275395a7dd9`의 2·4차 응답은 Main이 전달한 제한적 자료에 대한 `PM-PROPOSAL`이다. 영업 백업은 고유 ID 130개 중 실제 대화 차례가 확인된 17개 표본으로 한정한다. Main이 전달한 AX 운영 12:26 v12는 문서 기록이며 현재 운영·직원별 권한의 live 검증이 아니다. 관련 문서 ID는 `atlas-org-use`·`tech-org-execution`·`org-delivery-priority`다. 이 출처나 ID 관계는 제품 정책 승인·구현·운영 검증의 증거가 아니다.
+
 ## 5. 현재 source snapshot과 candidate delta
 
 ### 5.1 기준 Atlas snapshot

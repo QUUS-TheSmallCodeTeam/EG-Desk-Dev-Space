@@ -559,8 +559,13 @@ test('selected Browser interaction belongs to one native run despite inherited s
   const f = selectedBrowserTurnFixture(), h = qaHarness({ toolProviders: [f.provider] })
   const first = await h.chat.send({ message: 'Click only this selected Card', clientThreadId: 'selected-chat',
     executionPolicy: { mode: 'browserBounded' }, selectedSources: [f.source], browserTransportId: 'selected-ui' })
+  // The interaction grant adds every interaction tool, the BRW-05/07 Card and
+  // site tools included; the read tools (observe, wait_text, list_cards and
+  // the BRW-09 masked screenshot) are offered to any Browser grant.
   assert.deepEqual(h.calls.find(call => call.method === 'thread/start').params.dynamicTools.map(spec => spec.name),
-    ['egdesk_browser_observe', 'egdesk_browser_navigate', 'egdesk_browser_click', 'egdesk_browser_fill', 'egdesk_browser_scroll', 'egdesk_browser_press', 'egdesk_browser_wait', 'egdesk_browser_wait_text'])
+    ['egdesk_browser_observe', 'egdesk_browser_navigate', 'egdesk_browser_click', 'egdesk_browser_fill', 'egdesk_browser_scroll', 'egdesk_browser_press', 'egdesk_browser_wait', 'egdesk_browser_wait_text',
+      'egdesk_browser_list_cards', 'egdesk_browser_request_site', 'egdesk_browser_open_card', 'egdesk_browser_close_card', 'egdesk_browser_history',
+      'egdesk_browser_screenshot'])
   assert.equal(first.executionPolicy.browserEffects, 'selected-card-observe-click-fill-this-run')
   assert.equal(h.chat.threads.get(first.conversationId).qaReceipt.browserEffects, 'observe-only-selected-card')
   assert.deepEqual(h.calls.find(call => call.method === 'turn/start').params.sandboxPolicy,
@@ -589,8 +594,10 @@ test('an observe-only native catalog cannot silently gain click/fill through a l
   const f = selectedBrowserTurnFixture(), h = qaHarness({ toolProviders: [f.provider] })
   const first = await h.chat.send({ message: 'Start an observe-only native catalog',
     clientThreadId: 'selected-chat', executionPolicy: { mode: 'browserBounded' } })
+  // Read tools only: list_cards names the run's Cards and never acts; the
+  // masked screenshot is read-only too (an observe grant may capture, D-B6).
   assert.deepEqual(h.calls.find(call => call.method === 'thread/start').params.dynamicTools.map(spec => spec.name),
-    ['egdesk_browser_observe', 'egdesk_browser_wait_text'])
+    ['egdesk_browser_observe', 'egdesk_browser_wait_text', 'egdesk_browser_list_cards', 'egdesk_browser_screenshot'])
   await h.finish(first)
   const count = h.calls.filter(call => call.method === 'turn/start').length
   await assert.rejects(h.chat.send({ message: 'Try to add interaction later', clientThreadId: 'selected-chat',
@@ -616,7 +623,8 @@ test('guarded navigate, scroll, press and wait need the selected Card interactio
   const o = selectedBrowserTurnFixture(), observeOnly = qaHarness({ toolProviders: [o.provider] })
   const watched = await observeOnly.chat.send({ message: 'Only look at this Card', clientThreadId: 'selected-chat',
     executionPolicy: { mode: 'browserBounded' }, selectedSources: [{ ...o.source, browserToolPermission: 'observe' }], browserTransportId: 'selected-ui' })
-  assert.deepEqual(observeOnly.calls.find(call => call.method === 'thread/start').params.dynamicTools.map(spec => spec.name), ['egdesk_browser_observe', 'egdesk_browser_wait_text'])
+  assert.deepEqual(observeOnly.calls.find(call => call.method === 'thread/start').params.dynamicTools.map(spec => spec.name),
+    ['egdesk_browser_observe', 'egdesk_browser_wait_text', 'egdesk_browser_list_cards', 'egdesk_browser_screenshot'], 'an observe grant offers only the read tools')
   for (const tool of ['egdesk_browser_navigate', 'egdesk_browser_scroll', 'egdesk_browser_press', 'egdesk_browser_wait']) {
     await observeOnly.chat.handleServerRequest({ id: `observe-${tool}`, method: 'item/tool/call', params: {
       threadId: watched.conversationId, turnId: watched.runId, callId: `call-${tool}`, tool, arguments: { cardId: 'selected-card' } } })
@@ -3786,6 +3794,37 @@ test('CHAT-01: a send records the room\'s Agent through the chat store; turning 
   }
 })
 
+test('CHAT-01: the ⋯ menu pick is written to the room without a send, null returns the room to plain Codex, and both history routes report the same Agent', async () => {
+  const dataDir = createPrivateQaTempDirectory('egdesk-room-agent-pick-')
+  let store = null
+  try {
+    store = openChatStore({ dataDir, ownerScope: 'room-agent-pick-test' })
+    const h = r2Harness({ store, profiles: r2Profiles() })
+    // A room that has never been sent is not in the store: the screen lets its first send record the pick.
+    assert.throws(() => h.chat.setRoomAgent({ clientThreadId: 'room-1', profileId: 'reviewer' }), { code: 'CONVERSATION_NOT_FOUND', httpStatus: 404 })
+    const first = await h.chat.send({ message: 'hi', clientThreadId: 'room-1', requestId: 'rp-1', profileId: 'reviewer', profileRevision: 2 })
+    await h.finish(first)
+    assert.deepEqual(store.getConversation('room-1').agent, { profileId: 'reviewer', revision: 2, setAt: store.getConversation('room-1').agent.setAt })
+    // Picking another Agent from the ⋯ menu, with no send.
+    const picked = h.chat.setRoomAgent({ clientThreadId: 'room-1', profileId: 'designer' })
+    assert.deepEqual([picked.accepted, picked.clientThreadId, picked.agent.profileId, picked.agent.revision], [true, 'room-1', 'designer', null])
+    const sameAgent = page => page.agent
+    assert.deepEqual(sameAgent(h.chat.listLocalThreads({ limit: 10 }).threads.find(thread => thread.clientThreadId === 'room-1')), picked.agent)
+    assert.deepEqual(sameAgent(h.chat.getLocalHistory({ clientThreadId: 'room-1', limit: 10 }).thread), picked.agent, '/chat/history/threads and /chat/history agree')
+    // '기본 Codex' is a record too, so a restart does not revive the earlier Agent.
+    assert.deepEqual(h.chat.setRoomAgent({ clientThreadId: 'room-1', profileId: null }), { accepted: true, clientThreadId: 'room-1', agent: null })
+    assert.equal(h.chat.getLocalHistory({ clientThreadId: 'room-1', limit: 10 }).thread.agent, null)
+    for (const body of [{ profileId: 'designer' }, { clientThreadId: 'room-1' }, { clientThreadId: 'room-1', profileId: 'Not An Id' },
+      { clientThreadId: 'room-1', profileId: 'designer', revision: 0 }, { clientThreadId: 'room-1', profileId: null, revision: 2 }]) {
+      assert.throws(() => h.chat.setRoomAgent(body), { code: 'INVALID_ROOM_AGENT', httpStatus: 400 }, JSON.stringify(body))
+    }
+    assert.equal(store.getConversation('room-1').agent, null, 'a refused pick changes nothing')
+  } finally {
+    try { store?.close() } catch {}
+    await rm(dataDir, { recursive: true, force: true })
+  }
+})
+
 test('D-M2: mentions are read from agent links and @names, longest name first; without one only the Lead answers', () => {
   const members = boardMembers([
     { kind: 'user', role: 'owner' },
@@ -3947,6 +3986,14 @@ test('D-M3: shared messages are copied with a line on both sides and reach the r
     const restartedBlock = restarted.calls.find(call => call.method === 'turn/start').params.additionalContext.egdesk_shared_messages.value
     assert.equal((restartedBlock.match(/^--- /gm) || []).length, 1, 'only the share not attached yet')
     assert.equal(again.shareId, 'share-second')
+
+    // CHAT-03: a Board Thread that has not spoken yet takes the copies; the room is created for them.
+    assert.equal(store.getConversation('fresh-room'), null)
+    const fresh = restarted.chat.shareMessages({ fromClientThreadId: 'personal', toClientThreadId: 'fresh-room', localMessageIds: picked.slice(1) })
+    assert.deepEqual([fresh.accepted, fresh.messageCount, fresh.toClientThreadId], [true, 1, 'fresh-room'])
+    assert.ok(store.getConversation('fresh-room'))
+    assert.equal(store.listEvents('fresh-room').events.find(event => event.event === 'messages.shared.in').details.link.clientThreadId, 'personal')
+    assert.throws(() => restarted.chat.shareMessages({ fromClientThreadId: 'never-spoke', toClientThreadId: 'fresh-room', localMessageIds: picked.slice(1) }), error => error.code === 'CONVERSATION_NOT_FOUND')
   } finally {
     try { store?.close() } catch {}
     await rm(dataDir, { recursive: true, force: true })

@@ -4,6 +4,7 @@ import path from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
 import { PRIVATE_KEYS } from './egdesk-chat-store.mjs'
 import { isOwnedAndPrivate } from './egdesk-private-files.mjs'
+import { DAY_MS, DESK_AUTOSAVE_MERGE_MS, DESK_RETENTION, autosaveWindowMerges, planDeskRetention } from './egdesk-recovery-journal.mjs'
 
 // RT-07 / CTX-01 / CTX-02 local Desk store (one SQLite file per owner scope).
 // - Desk recovery journal: every accepted Desk save becomes an immutable
@@ -12,7 +13,8 @@ import { isOwnedAndPrivate } from './egdesk-private-files.mjs'
 //   Autosaves within one DESK_AUTOSAVE_MERGE_MS window replace the head
 //   autosave instead of adding a row (D-R1, 60 s); an explicit save, a
 //   restore and an import always add a row, and a head another writer
-//   collided with (409) is never replaced.
+//   collided with (409) is never replaced. Both rules are pure functions in
+//   helper/egdesk-recovery-journal.mjs; this file only feeds them rows.
 //   Chat transcripts inside a Desk state (chat.threads[].messages) are kept
 //   once per message in desk_blobs and shared by every generation that holds
 //   them; reads give back the exact state that was saved.
@@ -46,12 +48,12 @@ export const MAX_BOARD_BODY_BYTES = 4 * 1024 * 1024
 export const MAX_BOARDS = 500
 export const MAX_BOARD_REVISIONS = 2000
 export const MAX_TITLE_CHARS = 80
-// Keep the newest `recent` generations, plus the newest generation of each
-// local day for the last `dailyDays` days (today included). If what is kept
-// still exceeds `maxBytes`, the oldest kept generations go first. The head
-// always stays. Bytes are what is on disk: a shared chat message counts once.
-export const DESK_RETENTION = Object.freeze({ recent: 200, dailyDays: 30, maxBytes: 512 * 1024 * 1024 })
-export const DESK_AUTOSAVE_MERGE_MS = 60_000
+// D-R1: keep the newest `recent` generations, plus the newest generation of
+// each local day for the last `dailyDays` days (today included). If what is
+// kept still exceeds `maxBytes`, the oldest kept generations go first. The
+// head always stays. Bytes are what is on disk: a shared chat message counts
+// once. The numbers and the rule live in egdesk-recovery-journal.mjs.
+export { DESK_AUTOSAVE_MERGE_MS, DESK_RETENTION }
 export const DESK_REASONS = Object.freeze(['autosave', 'explicit', 'import', 'restore'])
 export const SAVE_REASONS = Object.freeze(['autosave', 'explicit'])
 export const BOARD_LIFECYCLES = Object.freeze(['active', 'archived'])
@@ -59,7 +61,6 @@ export const BOARD_SEARCH_LIMITS = Object.freeze({ queryChars: 200, terms: 8, re
 const BOARD_ID = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/
 const SINGLE_LINE_BAD = /[\u0000-\u001f\u007f\u2028\u2029]/
 const MAX_DEPTH = 100
-const DAY_MS = 86_400_000
 const CONTESTED_KEPT = 64
 
 function fail(code, message, httpStatus = 400, extra) {
@@ -518,7 +519,11 @@ export function openDeskStore({ dataDir, ownerScope, now = Date.now, utcOffsetMi
   const q = {
     head: db.prepare(`SELECT ${SUMMARY} FROM desk_generations ORDER BY generation DESC LIMIT 1`),
     generation: db.prepare('SELECT * FROM desk_generations WHERE generation=?'),
-    page: db.prepare(`SELECT ${SUMMARY} FROM desk_generations WHERE generation < ? ORDER BY generation DESC LIMIT ?`),
+    // CTX-02: the '복구 기록' list also shows how many Boards were open; counted
+    // from the saved text at read time (no column), like card_count at write time.
+    page: db.prepare(`SELECT ${SUMMARY}, CASE WHEN json_type(state_json, '$.boardProjections.projections') = 'object'
+      THEN (SELECT COUNT(*) FROM json_each(desk_generations.state_json, '$.boardProjections.projections')) ELSE 0 END AS board_count
+      FROM desk_generations WHERE generation < ? ORDER BY generation DESC LIMIT ?`),
     kept: db.prepare('SELECT generation, created, bytes, stored_bytes, chat_refs_json IS NOT NULL AS shared FROM desk_generations ORDER BY generation DESC'),
     refsOf: db.prepare('SELECT chat_refs_json FROM desk_generations WHERE generation=?'),
     insertGeneration: db.prepare('INSERT INTO desk_generations (parent, seq, state_hash, created, reason, restored_from, card_count, shape_count, bytes, state_json, window_start, stored_bytes, chat_refs_json) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)'),
@@ -553,7 +558,6 @@ export function openDeskStore({ dataDir, ownerScope, now = Date.now, utcOffsetMi
     if (!Number.isSafeInteger(ts) || ts < 0) fail('STORE_CLOCK', 'Clock returned an invalid time', 500)
     return ts
   }
-  const dayOf = ts => Math.floor((ts + utcOffsetMinutes * 60_000) / DAY_MS)
   const parse = (text, what) => { try { return JSON.parse(text) } catch { fail('STORE_CORRUPT', `Saved ${what} is unreadable; database was not reset`, 500) } }
   // Heads another writer collided with (409). Such a head is never replaced
   // by the autosave window, so the overwritten work stays in the journal.
@@ -612,47 +616,22 @@ export function openDeskStore({ dataDir, ownerScope, now = Date.now, utcOffsetMi
     q.deleteGeneration.run(generation)
     for (const hash of hashes) { q.dropBlobRef.run(hash); q.deleteBlob.run(hash) }
   }
-  /** Fixed retention rule; runs inside the inserting transaction. Returns how many were removed. */
+  /**
+   * D-R1 retention (planDeskRetention); runs inside the inserting transaction.
+   * Rows carry their own on-disk bytes; shared chat messages are counted once,
+   * and looked up only when the upper bound exceeds the budget. Returns how
+   * many generations were removed.
+   */
   function prune(ts) {
     const rows = q.kept.all()
-    const keep = new Set(rows.slice(0, rule.recent).map(row => row.generation))
-    const today = dayOf(ts), days = new Set()
-    for (const row of rows) { // Newest first, so the first row of a day is its newest.
-      const day = dayOf(row.created)
-      if (today - day >= rule.dailyDays || days.has(day)) continue
-      days.add(day)
-      keep.add(row.generation)
-    }
-    const own = row => row.stored_bytes ?? row.bytes
-    // Upper bound: every shared message counted once (all of them are in use).
-    const upper = rows.reduce((sum, row) => keep.has(row.generation) ? sum + own(row) : sum, 0) + q.blobBytes.get().n
-    if (upper > rule.maxBytes) {
-      // Exact count only when it matters: a message is paid for while any kept generation holds it.
-      const holders = new Map(), sizes = new Map()
-      const hashesOf = new Map(rows.filter(row => row.shared).map(row => [row.generation, distinctHashes(refsIn(q.refsOf.get(row.generation).chat_refs_json))]))
-      let bytes = 0
-      for (const row of rows) {
-        if (!keep.has(row.generation)) continue
-        bytes += own(row)
-        for (const hash of hashesOf.get(row.generation) ?? []) {
-          if (!holders.has(hash)) { const size = q.blob.get(hash)?.bytes ?? 0; sizes.set(hash, size); bytes += size }
-          holders.set(hash, (holders.get(hash) ?? 0) + 1)
-        }
-      }
-      for (let index = rows.length - 1; index > 0 && bytes > rule.maxBytes; index--) {
-        const row = rows[index]
-        if (!keep.delete(row.generation)) continue
-        bytes -= own(row)
-        for (const hash of hashesOf.get(row.generation) ?? []) {
-          const left = holders.get(hash) - 1
-          holders.set(hash, left)
-          if (!left) bytes -= sizes.get(hash)
-        }
-      }
-    }
-    let removed = 0
-    for (const row of rows) if (!keep.has(row.generation)) { removeGeneration(row.generation); removed++ }
-    return removed
+    const plan = planDeskRetention(rows.map(row => ({ generation: row.generation, createdAt: row.created, bytes: row.stored_bytes ?? row.bytes, shared: row.shared === 1 })), {
+      rule, now: ts, utcOffsetMinutes,
+      sharedBytes: q.blobBytes.get().n, // Upper bound: every shared message counted once (all of them are in use).
+      hashesOf: generation => [...distinctHashes(refsIn(q.refsOf.get(generation).chat_refs_json))],
+      blobBytesOf: hash => q.blob.get(hash)?.bytes ?? 0,
+    })
+    for (const generation of plan.remove) removeGeneration(generation)
+    return plan.remove.length
   }
   /**
    * Adds a generation on top of head. With replace, the new generation takes
@@ -670,8 +649,9 @@ export function openDeskStore({ dataDir, ownerScope, now = Date.now, utcOffsetMi
     return { ...generationSummary(q.generation.get(Number(info.lastInsertRowid))), unchanged: false, pruned, merged: replace, replacedGeneration: replace ? head.generation : null }
   }
   const unchanged = head => ({ ...generationSummary(head), unchanged: true, pruned: 0, merged: false, replacedGeneration: null })
-  const mergeable = (head, ts) => autosaveMergeMs > 0 && head?.reason === 'autosave' && !contested.has(head.generation)
-    && ts >= head.created && ts - (head.window_start ?? head.created) < autosaveMergeMs
+  // D-R1 autosave window (autosaveWindowMerges), fed the head row's columns.
+  const mergeable = (head, ts) => autosaveWindowMerges({ ts, mergeMs: autosaveMergeMs, contested,
+    head: head ? { generation: head.generation, reason: head.reason, createdAt: head.created, windowStart: head.window_start } : null })
 
   // ── Boards ──
   const boardSummary = row => ({
@@ -785,9 +765,12 @@ export function openDeskStore({ dataDir, ownerScope, now = Date.now, utcOffsetMi
     generations({ limit, before } = {}) {
       ensureOpen()
       const chosen = page(limit, before, 50, 500, 'INVALID_DESK_QUERY')
-      const rows = q.page.all(chosen.before ?? Number.MAX_SAFE_INTEGER, chosen.limit + 1)
+      let rows
+      try { rows = q.page.all(chosen.before ?? Number.MAX_SAFE_INTEGER, chosen.limit + 1) }
+      catch { fail('STORE_CORRUPT', 'Saved Desk state is unreadable; database was not reset', 500) }
       const hasMore = rows.length > chosen.limit
-      const shown = rows.slice(0, chosen.limit).map(generationSummary)
+      // boardCount: open Board regions at that point (boardProjections.projections), beside cardCount and shapeCount.
+      const shown = rows.slice(0, chosen.limit).map(row => ({ ...generationSummary(row), boardCount: row.board_count }))
       return { head: q.head.get()?.generation ?? null, generations: shown, hasMore, nextBefore: hasMore ? shown.at(-1).generation : null, retention: { ...rule } }
     },
     generation(generation) {

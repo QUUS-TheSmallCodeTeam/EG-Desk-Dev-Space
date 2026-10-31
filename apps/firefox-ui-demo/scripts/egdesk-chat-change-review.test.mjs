@@ -353,6 +353,75 @@ test('verified-origin activity callback receives original IDs and literal path/l
   assert.equal(opened.length, 1)
 })
 
+test('an applied change offers the stage-2 review only to the host, with the original IDs and retained rows, fenced like file opening', async () => {
+  const requests = []
+  let active = true
+  const readOrigin = async () => ({ protocolVersion: 1, status: 'verified', verified: true })
+  const rows = [
+    { path: '/original/project/app.txt', kind: 'update', movePath: null, diff: patch('applied change'), omitted: null },
+    { path: '/original/project/gone.txt', kind: 'delete', movePath: null, diff: 'old\n', omitted: null },
+    { path: '/original/project/big.txt', kind: 'update', movePath: null, diff: null, omitted: 'fileLimit' },
+  ]
+  const document = documentFixture()
+  const review = createChatChangeReview({ document, isCurrent: () => active, readOrigin,
+    fetchRunChanges: async () => packet([item(target.itemId, '', rows)]),
+    onReviewApplied: async request => { requests.push(request); return { status: 'opened', cardId: 'file-card-1' } } })
+  const node = review.renderActivity(target, { applied: true })
+  document.body.append(node)
+  await node.querySelector('details').toggle(true)
+  const button = node.querySelector('.egdesk-chat-change-review-open')
+  assert.ok(button, 'an applied activity offers the review')
+  assert.equal(node.querySelectorAll('.egdesk-diff-open').length, 0, 'no synchronous verified origin, so no file-opening buttons')
+  assert.match(node.textContent, /덩어리별로 되돌릴 수 있습니다/)
+  await button.click()
+  assert.equal(requests.length, 1)
+  const request = requests[0]
+  assert.deepEqual(request.target, target)
+  assert.equal(request.readOrigin, readOrigin)
+  assert.equal(Object.isFrozen(request.changes), true)
+  assert.deepEqual(request.changes.map(row => [row.path, row.kind, row.diff]), [
+    ['/original/project/app.txt', 'update', patch('applied change')], ['/original/project/gone.txt', 'delete', 'old\n']], 'omitted rows are not reviewable')
+  assert.equal(request.isCurrent(target), true)
+  assert.equal(request.isCurrent({ ...target, itemId: 'other' }), false)
+  assert.match(node.textContent, /덩어리별 되돌리기를 열었습니다/)
+  assert.doesNotMatch(node.textContent, /file-card-1/)
+  active = false
+  assert.equal(request.isCurrent(target), false)
+  await button.click()
+  assert.equal(requests.length, 1, 'a stale card dispatches nothing')
+})
+
+test('the stage-2 review is never offered without both hooks, for approvals, or for a change that was not applied', async () => {
+  const hooks = { readOrigin: async () => ({}), onReviewApplied: async () => ({ status: 'opened' }) }
+  const cases = [
+    ['activity', { readOrigin: hooks.readOrigin }, { applied: true }, 'completed'],
+    ['activity', { onReviewApplied: hooks.onReviewApplied }, { applied: true }, 'completed'],
+    ['activity', hooks, { applied: false }, 'inProgress'],
+    ['activity', hooks, undefined, 'inProgress'],
+    ['activity', hooks, { applied: true }, 'declined'],
+    ['activity', hooks, { applied: true }, 'failed'],
+    ['approval', hooks, { applied: true }, 'completed'],
+  ]
+  for (const [kind, options, renderOptions, status] of cases) {
+    const document = documentFixture()
+    const review = createChatChangeReview({ document, isCurrent: () => true, fetchRunChanges: async () => packet([{ ...item(), status }]), ...options })
+    const node = kind === 'approval' ? review.renderApproval(target) : review.renderActivity(target, renderOptions)
+    document.body.append(node)
+    await node.querySelector('details').toggle(true)
+    assert.equal(node.getAttribute('data-state'), 'ready')
+    assert.equal(node.querySelectorAll('.egdesk-chat-change-review-open').length, 0, `${kind} ${status} ${Object.keys(options).join(',')}`)
+  }
+  // A retained item the bridge already marks completed needs no host flag.
+  const document = documentFixture()
+  const review = createChatChangeReview({ document, isCurrent: () => true, fetchRunChanges: async () => packet([{ ...item(), status: 'completed' }]), ...hooks })
+  const node = review.renderActivity(target)
+  document.body.append(node)
+  await node.querySelector('details').toggle(true)
+  assert.equal(node.querySelectorAll('.egdesk-chat-change-review-open').length, 1)
+  await node.querySelector('details').toggle(false)
+  assert.equal(node.querySelectorAll('.egdesk-chat-change-review-open').length, 0, 'closing discards the offer with the retained text')
+})
+
 test('approval rendering never exposes decisions or file-open buttons even with verified origin and injected action hooks', async () => {
   const dispatched = []
   const h = fixture({ onDecision: value => dispatched.push(value), replyPending: value => dispatched.push(value),

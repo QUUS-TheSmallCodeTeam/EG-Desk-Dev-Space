@@ -130,6 +130,29 @@ Use one visible grammar across HUD chat and canvas chat cards.
 
 Do not make every control look equally important. Bubbles and result chips are primary. System status and diagnostics are secondary.
 
+### Agent identity (AGENT-05, 2026-10-31)
+
+Who is speaking or working is metadata outside the bubble, KakaoTalk-style,
+never inside it.
+
+- An Agent answer carries its author's face and name beside and above the
+  bubble. The face is the saved photo (D-A3: PNG/JPEG/WebP, 512KB) once
+  EG-Desk has read it, else the saved emoji or initial on its palette tone
+  (D-G2: light background, dark ink). The avatar captured when the answer was
+  sent wins; an older answer borrows the room Agent's face only while the name
+  still matches. User bubbles keep their right alignment and no face.
+- While an Agent works (turn running, tool in flight), `[···] Agent 작업 중`
+  sits at the end of the conversation beside that Agent's face. Each busy run
+  gets its own bubble, so a Board Thread with several Agents at work shows one
+  per Agent, each named above its bubble. Pressing a bubble opens the activity
+  record at that run; the bubble never shows thought text. It disappears when
+  the run ends.
+- A Browser Card an Agent is reading or operating names that Agent in its
+  header: a small face and the name beside the BRW-13 badge, kept while the
+  badge still counts recent activity, gone when 대표님 takes the Card back or
+  the badge hides.
+- Colours come from `--egd-*` tokens only.
+
 ---
 
 ## Session Badges

@@ -14,6 +14,7 @@ import { createEGDeskNativeCreateOnlyAdapter } from './egdesk-file-native.mjs'
 import { createEGDeskFileServiceCallbacks, createEGDeskNativeFilePickers, EGDESK_FILE_CLIENT_ENDPOINTS } from '../overlay/resources/EGDeskFileView.sys.mjs'
 import { execFileSync } from 'node:child_process'
 import { openEGDeskProjectStore, normalizeProjectScripts, suggestProjectScripts, projectReconnectState } from './egdesk-project-store.mjs'
+import { sameProjectFolder } from './egdesk-project-identity.mjs'
 import { fileChangeFromCodex, fileChangeFromAcpDiff, fileChangeFromClaudeToolResult, fileChangesFromGitPatch, hunksToUnified, mergeTurnChanges, boundFileChanges, FILE_CHANGE_LIMITS } from './egdesk-file-change.mjs'
 import { createEGDeskGitCheckpoint, EGDESK_CHECKPOINT_REF_PREFIX } from './egdesk-git-checkpoint.mjs'
 import { fileDiffFromCodexChange } from '../overlay/resources/EGDeskDiffView.sys.mjs'
@@ -849,8 +850,9 @@ test('run origin resolver: production connection snapshot rejects metadata misma
       registerRoot() { registrations++; assert.fail('origin must never create authorization') },
     }
     const projects = { roots, store: { list: () => [project], get: () => current, forRoom: () => scope } }
+    // The pure identity comparison is the real helper; only the resolver body is sliced from the source.
     const resolve = vm.runInNewContext(`${sameFolder};\n(${source.slice(start, end)})`, {
-      path, boundOwner: owner => owner, error: (code, message) => Object.assign(new Error(message), { code }),
+      path, sameProjectFolder, boundOwner: owner => owner, error: (code, message) => Object.assign(new Error(message), { code }),
       entryForOwner: async () => ({ service }), projectsForOwner: async () => projects,
     })
     const pending = resolve({ ownerScope: 'owner-p', origin: { project: { fileOwnerScope: 'owner-p', projectId: 'historic-project', source: 'room', boardId: null, roomId: 'r', startCwd: project.workspaceRoot, fsIdentity: project.identity } } })

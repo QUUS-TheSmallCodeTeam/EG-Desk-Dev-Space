@@ -1099,7 +1099,7 @@ function headlineFor({ kind, outcome, counts, problems, exitCode }) {
   const failedWords = { test: '테스트 실패', typecheck: '타입 검사 실패', lint: '코드 검사 실패', build: '빌드 실패', install: '설치 실패' }
   if (outcome === 'passed') return passedWords[kind] || '완료'
   if (outcome === 'failed') return [failedWords[kind] || '실패', exit].filter(Boolean).join(' · ')
-  return '결과 확인 안 됨'
+  return '요약 없음 · 원문 보기'
 }
 
 // input: {command, exitCode, status, durationMs, output, cwd, projectRoot, commandActions, os}
@@ -1126,6 +1126,8 @@ export function summarizeRunResult(input = {}) {
     counts, problems, failures, firstLocation,
     exitCode, durationMs, durationLabel: durationLabel(durationMs ?? NaN),
     tail: outputTail(lines),
+    // No counts, problems or exit code to read: the card says so and shows the output.
+    summaryless: outcome === 'unknown' && !counts && !problems,
     outputTruncated: truncated,
   }
 }
@@ -1197,6 +1199,7 @@ export function renderRunResultCard({ document, result, onOpenLocation, maxFailu
   }
   if (result.tail) {
     const details = el('details', 'egdesk-run-result-output')
+    if (result.summaryless) details.open = true
     details.append(el('summary', 'egdesk-run-result-output-summary', result.outputTruncated ? '출력 끝부분 (앞부분 일부 생략됨)' : '출력 끝부분'))
     details.append(el('pre', 'egdesk-run-result-tail', result.tail))
     card.append(details)

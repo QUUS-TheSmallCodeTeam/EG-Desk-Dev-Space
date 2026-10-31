@@ -9,6 +9,7 @@ import { initialSurfaceMode, shouldFocusInitialBrowser, planBoardProjection, sna
 import * as Surface from '../overlay/resources/EGDeskSurfaceState.sys.mjs';
 import * as MinimapLayout from '../overlay/resources/EGDeskCanvasLayout.sys.mjs';
 import * as Chat from '../overlay/resources/EGDeskChatState.sys.mjs';
+import * as ThreadRouting from '../overlay/resources/EGDeskThreadRouting.sys.mjs';
 import * as ChatRunResult from '../overlay/resources/EGDeskChatRunResult.sys.mjs';
 import * as ChatChangeReview from '../overlay/resources/EGDeskChatChangeReview.sys.mjs';
 import * as Markdown from '../overlay/resources/EGDeskMarkdown.sys.mjs';
@@ -23,6 +24,7 @@ import * as TextFilePickers from '../overlay/resources/EGDeskNativeFilePickers.s
 import * as BoardExport from '../overlay/resources/EGDeskBoardExport.sys.mjs';
 import * as ProfileTransfer from '../overlay/resources/EGDeskProfileTransfer.sys.mjs';
 import * as ProfileTransferView from '../overlay/resources/EGDeskProfileTransferView.sys.mjs';
+import * as AccountSettingsView from '../overlay/resources/EGDeskAccountSettingsView.sys.mjs';
 import { createTerminalCloseController, terminalExitEvidence, terminalResponsePacket } from '../overlay/resources/EGDeskTerminalState.sys.mjs';
 import { AVATAR_PALETTE, PROFILE_TONES, TOOL_CEILING_AXES, normalizeProfileBody } from '../helper/egdesk-profile-store.mjs';
 import { normalizeRateLimits, usageDisplay } from '../helper/codex-account-usage.mjs';
@@ -3280,12 +3282,13 @@ function browserMenuHarness() {
     return { showBrowserMenu, closeBrowserMenu, get panel() { return browserMenuPanel; } };`,
     ['menuButton', 'card', 'document', 'window', 'el', 'browserState', 'resolveFloatingMenuPlacement',
       'spawnBrowserCard', 'copyTextToClipboard', 'navigateBrowser', 'stopBrowser', 'reloadBrowser',
-      'isCardFullscreen', 'toggleCardFullscreen', 'effects', 'endAgentHold']);
+      'isCardFullscreen', 'toggleCardFullscreen', 'effects', 'endAgentHold', 'browserToolGrantFor']);
   const holdEnds = [];
   const menu = build(menuButton, card, document, window, el, browserState, () => ({ left: 30, top: 40 }),
     () => { effects.push('duplicate'); return nextCard; }, () => { effects.push('copy'); outside.focus(); },
     url => effects.push(['navigate', url]), () => effects.push('stop'), () => effects.push('reload'),
-    () => false, () => effects.push('maximize'), effects, () => { holdEnds.push(effects.length); return false; });
+    () => false, () => effects.push('maximize'), effects, () => { holdEnds.push(effects.length); return false; },
+    () => null);
   const triggerBody = surfaceSource.match(/    const menuButton = el\('button', \{[\s\S]*?onclick: \(ev\) => \{([\s\S]*?)\n      \},\n    \}, deskIcon\('menu'\)\);/)?.[1];
   assert.ok(triggerBody, 'Browser menu trigger must remain directly testable');
   const clickTrigger = compileFunction(`return ev => {${triggerBody}\n      }`,
@@ -4714,6 +4717,76 @@ test('late local hydration preserves newer composer, native gate, in-flight UI a
   assert.equal(Chat.hydrateLocalChatThread(twice, { ...history, localConversationId: 'other-local' }), twice);
 });
 
+test('CHAT-01: a room restored from the store alone answers as the Agent recorded there; a live Desk pref keeps its own pick; a room without one is unchanged', () => {
+  const page = agent => Chat.normalizeLocalHistoryPage({ protocolVersion: 1,
+    thread: { clientThreadId: 'room', localConversationId: 'local-a', title: 'Saved room', agent },
+    runs: [], messages: [], events: [], coverage: { scope: 'egdesk-local', status: 'complete', reasons: [], nativeHistoryComplete: null },
+    nextCursor: null, hasMore: false, projectionTruncated: false }, 'room');
+  const fresh = { id: 'room', type: 'dm', profileEnabled: false, agentProfileId: null, toolMode: null, systemPrompt: null, messages: [] };
+  const recorded = { profileId: 'code-reviewer', revision: 3, setAt: 1700000000000 };
+  // (a) No Desk pref for this room: the store's Agent is restored by ID; revision and setAt ride on thread.agent only.
+  const fromStore = Chat.hydrateLocalChatThread(fresh, page(recorded));
+  assert.deepEqual([fromStore.profileEnabled, fromStore.agentProfileId], [true, 'code-reviewer']);
+  assert.deepEqual(fromStore.agent, recorded);
+  assert.deepEqual([fromStore.toolMode, fromStore.systemPrompt], [null, null], 'the screen resolves tool mode and prompt from the Agent, not the store');
+  assert.deepEqual(Chat.hydrateLocalChatThread(fromStore, page(recorded)), fromStore, 'reading the same page again changes nothing');
+  // A missing or stopped Agent comes back as itself (placeholder and send block), never as another Agent.
+  const gone = Chat.hydrateLocalChatThread(fresh, page({ profileId: 'profile-gone-01', revision: null, setAt: 5 }));
+  assert.deepEqual([gone.profileEnabled, gone.agentProfileId, gone.agent], [true, 'profile-gone-01', { profileId: 'profile-gone-01', revision: null, setAt: 5 }]);
+  // A value that is not a profile ID is no Agent.
+  const malformed = Chat.hydrateLocalChatThread(fresh, page({ profileId: 'Not An Id', revision: 1, setAt: 5 }));
+  assert.deepEqual([malformed.profileEnabled, malformed.agentProfileId, malformed.agent], [false, null, null]);
+  // (b) A live Desk pref wins: its pick (and the prompt it carried) stays although the store names another Agent.
+  const pref = { ...fresh, profileEnabled: true, agentProfileId: 'designer', toolMode: 'design', systemPrompt: 'Design.',
+    agent: { profileId: 'stale-copy', revision: 1, setAt: 1 } };
+  const kept = Chat.hydrateLocalChatThread(pref, page(recorded));
+  assert.deepEqual([kept.profileEnabled, kept.agentProfileId, kept.toolMode, kept.systemPrompt], [true, 'designer', 'design', 'Design.']);
+  assert.deepEqual(kept.agent, recorded, 'thread.agent is the store\'s record, never the copy the pref kept');
+  // (c) A room the store records no Agent for is unchanged; a pref copy of a cleared Agent goes with it.
+  const none = Chat.hydrateLocalChatThread(fresh, page(null));
+  assert.deepEqual([none.profileEnabled, none.agentProfileId, none.agent], [false, null, null]);
+  const cleared = Chat.hydrateLocalChatThread({ ...fresh, agent: { profileId: 'stale-copy', revision: null, setAt: 1 } }, page(null));
+  assert.deepEqual([cleared.profileEnabled, cleared.agent], [false, null]);
+  // An older bridge whose thread has no agent field leaves the room exactly as it was.
+  const older = Chat.hydrateLocalChatThread({ ...fresh, agent: recorded }, page(undefined));
+  assert.deepEqual([older.profileEnabled, older.agentProfileId, older.agent], [false, null, recorded]);
+  assert.equal(Object.hasOwn(Chat.hydrateLocalChatThread(fresh, page(undefined)), 'agent'), false);
+  assert.deepEqual(Chat.restoredRoomAgentFields({ profileEnabled: false }, { agent: recorded }), { agent: recorded, profileEnabled: true, agentProfileId: 'code-reviewer' });
+  assert.deepEqual(Chat.restoredRoomAgentFields({ profileEnabled: true }, { agent: recorded }), { agent: recorded });
+  assert.deepEqual(Chat.restoredRoomAgentFields({ profileEnabled: false }, {}), {});
+});
+
+test('CHAT-01: picking an Agent from the ⋯ menu writes the room Agent to the store (null for plain Codex); a room never sent (404) is left to its first send', async () => {
+  const start = surfaceSource.indexOf('      setThreadAgentProfile(threadId, profileId) {');
+  const end = surfaceSource.indexOf('      cycleThreadAgentProfile(threadId) {', start);
+  assert.ok(start > 0 && end > start);
+  const posts = [];
+  let answer = () => Promise.resolve();
+  const state = { codex: { threads: [{ id: 'room-1', profileEnabled: false, agentProfileId: null, toolMode: null, systemPrompt: null }], threadMenu: {}, memberMenu: {} } };
+  const choices = [{ id: 'code-reviewer', server: true, revision: 4, toolMode: 'review', systemPrompt: 'Review.' }];
+  const bridge = compileFunction(`return { ${surfaceSource.slice(start, end)} };`,
+    ['state', 'updateThreadById', 'emit', 'codexAgentProfileChoices', 'normalizeCodexAgentProfileId', 'codexAgentProfile', 'getCodexThreadById', 'ChatState', 'fetchJson'])(
+    state, (id, update) => { state.codex.threads = state.codex.threads.map(thread => thread.id === id ? update(thread) : thread); }, () => {},
+    () => choices, id => id, id => choices.find(choice => choice.id === id) || { id, toolMode: null, systemPrompt: null },
+    (codex, id) => codex.threads.find(thread => thread.id === id), Chat,
+    (path, options) => { posts.push([path, options.method, JSON.parse(options.body)]); return answer(); });
+  const settle = () => new Promise(resolve => setTimeout(resolve, 0));
+  answer = () => Promise.resolve({ clientThreadId: 'room-1', agent: { profileId: 'code-reviewer', revision: 4, setAt: 99 } });
+  bridge.setThreadAgentProfile('room-1', 'code-reviewer');
+  await settle();
+  assert.deepEqual(posts.at(-1), ['/chat/rooms/agent', 'POST', { clientThreadId: 'room-1', profileId: 'code-reviewer', revision: 4 }], 'the revision travels as a send would send it');
+  assert.deepEqual([state.codex.threads[0].profileEnabled, state.codex.threads[0].agentProfileId, state.codex.threads[0].agent],
+    [true, 'code-reviewer', { profileId: 'code-reviewer', revision: 4, setAt: 99 }]);
+  answer = () => Promise.reject(Object.assign(new Error('That conversation has not been saved yet'), { status: 404, code: 'CONVERSATION_NOT_FOUND' }));
+  bridge.setThreadAgentProfile('room-1', null);
+  await settle();
+  assert.deepEqual(posts.at(-1), ['/chat/rooms/agent', 'POST', { clientThreadId: 'room-1', profileId: null, revision: null }]);
+  assert.deepEqual([state.codex.threads[0].profileEnabled, state.codex.threads[0].agentProfileId], [false, null], 'the screen keeps its pick when the store has no such room yet');
+  bridge.setThreadAgentProfile('room-1', 'unknown-choice');
+  await settle();
+  assert.equal(posts.length, 2, 'an Agent outside the catalog is not picked or written');
+});
+
 test('canonical final history supersedes an old pref partial, but a live update after the read fence wins', () => {
   const oldPref = { id: 'optimistic-a', role: 'assistant', providerItemId: 'native-a', conversationId: 'c', runId: 'r',
     content: 'old partial', status: 'streaming', createdAt: 10 };
@@ -4922,6 +4995,40 @@ test('local identity reconciliation fails closed for incomplete, changed, foreig
   }
 });
 
+test('CHAT-01: a room restored from the store listing alone is created as its recorded Agent; a pref field or a room already on screen comes first', () => {
+  const start = surfaceSource.indexOf('    function ensureLocalHistoryThread(summary, detail = {}) {');
+  const end = surfaceSource.indexOf('    async function loadLocalHistoryThread(summary)', start);
+  assert.ok(start > 0 && end > start);
+  const created = [];
+  const state = { codex: { threads: [], activeThreadId: null, authStatus: { isLoggedIn: false } } };
+  const ensure = compileFunction(`
+    const initialDefaultThreadId = null;
+    const getCodexThreadById = (codex, id) => codex.threads.find(thread => thread.id === id);
+    const getCodexThreadDraft = () => null;
+    const chatBindingNonce = () => 'nonce';
+    const emit = () => {};
+    ${surfaceSource.slice(start, end)}
+    return ensureLocalHistoryThread;
+  `, ['state', 'ChatState', 'createCodexThread'])(state, Chat, (type, title, subtitle, options) => {
+    created.push({ type, title, options });
+    return { id: `new-${created.length}`, type, title, subtitle, participants: [], participantRoles: {}, messages: [],
+      profileEnabled: options.profileEnabled === true, agentProfileId: options.profileEnabled === true ? options.agentProfileId : null,
+      createdAt: 1, updatedAt: 1 };
+  });
+  const summary = id => ({ clientThreadId: id, localConversationId: `local-${id}`, title: 'Saved room', createdAt: 1, updatedAt: 2 });
+  ensure(summary('room-a'), { ...summary('room-a'), agent: { profileId: 'code-reviewer', revision: 3, setAt: 9 } });
+  assert.deepEqual([created[0].options.profileEnabled, created[0].options.agentProfileId], [true, 'code-reviewer']);
+  assert.deepEqual(state.codex.threads.map(thread => [thread.id, thread.profileEnabled, thread.agentProfileId]), [['room-a', true, 'code-reviewer']]);
+  ensure(summary('room-b'), { ...summary('room-b'), agent: null });
+  assert.deepEqual([created[1].options.profileEnabled, created[1].options.agentProfileId], [false, undefined]);
+  ensure(summary('room-c'), { ...summary('room-c'), profileEnabled: true, agentProfileId: 'designer', agent: { profileId: 'code-reviewer', revision: null, setAt: 9 } });
+  assert.deepEqual([created[2].options.profileEnabled, created[2].options.agentProfileId], [true, 'designer'], 'a pref field that reached here wins over the store');
+  ensure(summary('room-d'), { ...summary('room-d'), agent: { profileId: 'Not An Id', revision: null, setAt: 9 } });
+  assert.deepEqual([created[3].options.profileEnabled, created[3].options.agentProfileId], [false, undefined]);
+  ensure(summary('room-a'), { ...summary('room-a'), agent: { profileId: 'designer', revision: null, setAt: 10 } });
+  assert.equal(created.length, 4, 'a room already on screen (the Desk pref brought it back) is not created again');
+});
+
 function localHistoryThreadLoaderHarness(state, records, fetchJson) {
   const start = surfaceSource.indexOf('    async function listLocalHistoryThreads()');
   const end = surfaceSource.indexOf('    function queueLocalHistoryRetry()', start);
@@ -4933,8 +5040,8 @@ function localHistoryThreadLoaderHarness(state, records, fetchJson) {
     const emit = () => {};
     ${surfaceSource.slice(start, end)}
     return { list: listLocalHistoryThreads, read: loadLocalHistoryThread };
-  `, ['state', 'legacyHistoryRecords', 'ChatState', 'fetchJson']);
-  return factory(state, records, Chat, fetchJson);
+  `, ['state', 'legacyHistoryRecords', 'ChatState', 'ThreadRouting', 'fetchJson']);
+  return factory(state, records, Chat, ThreadRouting, fetchJson);
 }
 
 test('production history loader recovers persisted old-store IDs from actual SQLite import receipts with no native calls', async t => {
@@ -5194,9 +5301,10 @@ test('actual send path preserves draft B and new attachments typed during delaye
   const grants = new Map([['selected-a', { token: 'selected-a', localThreadId: 'room', threadId: 'wire-room',
     sourceId: 'a', permission: 'observe', usedRunId: null }]]);
   const actualSelectedSources = compileFunction(`return function browserToolSelectedSources(threadId, candidates = null) {${selectedBody}\n  }`,
-    ['state', 'getCodexThreadById', 'ChatState', 'browserToolUserSelections', 'document', 'browserToolSameUrl', 'structuredClone'])(
+    ['state', 'getCodexThreadById', 'ChatState', 'browserToolUserSelections', 'document', 'browserToolSameUrl', 'structuredClone',
+      'browserToolRefreshSelection'])(
     state, getThread, Chat, grants, { getElementById: id => id === 'browser-a' ? selectedCard : null },
-    (left, right) => new URL(left).href === new URL(right).href, structuredClone);
+    (left, right) => new URL(left).href === new URL(right).href, structuredClone, (_threadId, source) => source);
   let payload, sendCount = 0;
   const running = send(state, () => getThread(null), (codex, id) => codex.threadDrafts[id] || '', Chat, () => false,
     { begin: () => ({}), valid: () => true, finish() {} }, async () => true, update, () => {}, () => delayed, getThread, Chat.createChatProtocolState(), () => ({}),
@@ -8997,6 +9105,8 @@ const settingsNodes = (node, predicate, found = []) => {
 const settingsButton = (root, text) => settingsNodes(root, node => node.tagName === 'BUTTON' && node.textContent.trim() === text)[0];
 const settle = async () => { for (let i = 0; i < 6; i++) await new Promise(resolve => setImmediate(resolve)); };
 
+// The Settings card's bridge notice, as the production codexBridgeNotice derives it.
+const settingsBridgeNotice = codex => Surface.bridgeConnectionNotice({ connected: codex.connected, failures: codex.bridgeFailures, error: codex.bridgeError, bridge: codex.bridgeBuild });
 function settingsTransferDeps(document, state, files = { readText: async () => ({ cancelled: true }), saveText: async () => ({ cancelled: true }) }) {
   return compileFunction(`${declaration('settingsProfileAccountKey')}\n${declaration('createSettingsProfileTransfer')}\nreturn { settingsProfileAccountKey, createSettingsProfileTransfer };`,
     ['document', 'state', 'ProfileTransfer', 'ProfileTransferView', 'nativeTextFilePickers'])(document, state, ProfileTransfer, ProfileTransferView, () => files);
@@ -9039,17 +9149,26 @@ test('production Settings card renders the reported account and drives Agent edi
     'revealPlacedCanvasCard', 'el', 'cardZ',
     'closeCanvasCard', 'state', 'ChatState', 'codexProfileAvatar', 'document', 'window', 'bindCardSourceRef', 'markAgendaDirty', 'setActiveEntity',
     'isCardFullscreen', 'focusCanvasCard', 'installCardHeaderFullscreenToggle', 'canvasZoom', 'settingsProfileAccountKey', 'createSettingsProfileTransfer',
-    'fetch', 'fetchJson', 'spawnTerminalCard'])(
+    'fetch', 'fetchJson', 'spawnTerminalCard', 'AccountSettingsView', 'codexBridgeNotice'])(
     () => ({ kind: 'settings-card' }), () => null, 0, kind => { placements.push(kind); return { x: 10, y: 20, width: 600, height: 600, inView: true }; },
     () => {}, el, 0, () => {}, state, Chat, codexProfileAvatar, document, windowStub,
     () => {}, () => {}, () => {}, () => false, () => {}, () => {}, () => 1, ...Object.values(settingsTransferDeps(document, state)),
     (...args) => { calls.push(['fetch', ...args]); }, (...args) => { calls.push(['fetchJson', ...args]); },
-    (...args) => { calls.push(['terminal', ...args]); });
+    (...args) => { calls.push(['terminal', ...args]); }, AccountSettingsView, settingsBridgeNotice);
   const card = spawn();
   assert.deepEqual(placements, ['settings'], 'Settings opens through the shared placement policy');
   assert.deepEqual([card.style.left, card.style.top, card.style.width, card.style.height], ['10px', '20px', '600px', '600px']);
   const text = () => card.textContent;
-  assert.match(text(), /코덱스에 연결되지 않았습니다/);
+  assert.match(text(), /연결 확인 중…/, 'before the bridge answers the card does not claim it is gone');
+  assert.equal(settingsNodes(card, node => node.dataset.testid === 'settings-account')[0].dataset.state, 'checking');
+  state.codex.bridgeFailures = 3;
+  emit();
+  assert.match(text(), /연결이 끊겼습니다/);
+  assert.equal(settingsNodes(card, node => node.dataset.testid === 'settings-account')[0].dataset.state, 'offline');
+  assert.ok(settingsButton(card, '다시 연결'));
+  state.codex.bridgeFailures = 0;
+  emit();
+  assert.match(text(), /연결 확인 중…/);
   const claude = () => settingsNodes(card, node => node.dataset.testid === 'settings-claude')[0];
   assert.equal(claude().dataset.auth, 'unknown');
   assert.equal(claude().dataset.state, 'unknown');
@@ -9117,8 +9236,36 @@ test('production Settings card renders the reported account and drives Agent edi
   assert.match(text(), /Pro 요금제/);
   assert.match(text(), /5시간 한도 · 42% 사용/);
   assert.match(text(), /에 초기화/);
-  settingsButton(card, '로그아웃').fire('click');
-  assert.deepEqual(calls.at(-1), ['signOut']);
+  assert.equal(settingsButton(card, '로그아웃').getAttribute('role'), 'menuitem', 'no bare sign-out button: 로그아웃 is a menu item that confirms first');
+  const menuItem = id => settingsNodes(card, node => node.dataset.testid === `settings-account-${id}`)[0];
+  assert.deepEqual(['refresh', 'switch', 'signout'].map(id => menuItem(id).textContent), ['상태 새로고침', '다른 계정으로 로그인', '로그아웃']);
+  const callsBefore = calls.length;
+  menuItem('signout').fire('click');
+  assert.equal(calls.length, callsBefore, 'choosing 로그아웃 only asks; nothing is sent yet');
+  const confirmBox = () => settingsNodes(card, node => node.dataset.testid === 'settings-account-confirm')[0];
+  assert.equal(confirmBox().dataset.action, 'signout');
+  assert.equal(confirmBox().dataset.busyRuns, '0');
+  assert.match(confirmBox().textContent, /owner@example\.test 계정에서 로그아웃할까요\?/);
+  assert.match(confirmBox().textContent, /터미널의 codex/);
+  settingsNodes(card, node => node.dataset.testid === 'settings-account-confirm-cancel')[0].fire('click');
+  assert.equal(confirmBox(), undefined, '취소 keeps the account');
+  assert.equal(calls.length, callsBefore);
+  state.codex.chatProtocol = { runs: { 'c1/r1': { conversationId: 'c1', runId: 'r1', status: 'running', localThreadId: 'fixture-room' } }, requests: {} };
+  state.codex.threads[0].title = '배포 점검';
+  menuItem('switch').fire('click');
+  assert.equal(confirmBox().dataset.action, 'switch');
+  assert.equal(confirmBox().dataset.busyRuns, '1', 'a running Run is named before the switch');
+  assert.match(confirmBox().textContent, /진행 중인 실행 1개가 중단될 수 있습니다 \('배포 점검'\)/);
+  assert.match(confirmBox().textContent, /새 계정으로 옮기지 않습니다/);
+  settingsNodes(card, node => node.dataset.testid === 'settings-account-confirm-cancel')[0].fire('click');
+  menuItem('signout').fire('click');
+  settingsNodes(card, node => node.dataset.testid === 'settings-account-confirm-ok')[0].fire('click');
+  await settle();
+  assert.deepEqual(calls.slice(callsBefore), [['signOut'], ['refresh']], 'the real sign-out, then the account is read back');
+  const result = () => settingsNodes(card, node => node.dataset.testid === 'settings-account-result')[0];
+  assert.equal(result().dataset.phase, 'unknown', 'the stub left the login in place, so the card says the result is unconfirmed');
+  assert.match(result().textContent, /로그아웃 결과를 확인하지 못했습니다/);
+  delete state.codex.chatProtocol;
   state.codex.authStatus = { isLoggedIn: true, accountEmail: 'owner@example.test', planType: 'unknown' };
   emit();
   assert.match(text(), /요금제 확인 안 됨/);
@@ -9220,6 +9367,7 @@ function windowBoardMetadataHarness() {
     markAgendaDirty: () => effects.dirty++, setActiveEntity: view => { effects.activations.push(view); state.activeEntityId = view?.id || null; },
     focusCanvasCard: () => effects.focus++, toggleCardFullscreen: () => effects.fullscreen++, closeCanvasCard: () => {},
     isCardFullscreen: () => false, canvasZoom: () => 1, syncBoardRegionMarks: () => {}, scheduleViewportBoardSync: () => {},
+    buildBoardRegionProjectChip: () => document.createElement('button'), syncBoardRegionProject: () => {},
     persistentEntityGeometry: () => ({ x: 0, y: 0, width: 300, height: 200 }),
     SurfaceState: { ...Surface, boardRegionRect: () => ({ x: 0, y: 0, width: 400, height: 300 }), placeCanvasView: () => ({ x: 0, y: 0 }) },
     coerceAgendaStore: () => store, writeAgendaStoreAndSync: next => {
@@ -10196,10 +10344,12 @@ test('production Board region shows icon and name, the current Board edge, unsav
   const calls = [];
   const build = compileFunction(`${marks}\n${refresh}\nreturn { syncBoardRegionMarks, refreshBoardRegion };`,
     ['state', 'document', 'el', 'deskIcon', 'selectBoardProjection', 'toggleBoardRegionMenu',
-      'persistentEntityGeometry', 'SurfaceState', 'scheduleViewportBoardSync', 'syncAllDeskWindowBoardMetadata'])(
+      'persistentEntityGeometry', 'SurfaceState', 'scheduleViewportBoardSync', 'syncAllDeskWindowBoardMetadata',
+      'buildBoardRegionProjectChip', 'syncBoardRegionProject'])(
     state, dom.document, dom.el, name => dom.el('svg', { class: `icon-${name}` }),
     id => calls.push(['select', id]), (id, anchor) => calls.push(['menu', id, anchor.dataset.testid]),
-    view => members[view.id], Surface, () => calls.push(['sync']), () => {});
+    view => members[view.id], Surface, () => calls.push(['sync']), () => {},
+    () => dom.el('button', { class: 'egd-board-region-project', hidden: true }), () => calls.push(['project']));
   const region = build.refreshBoardRegion(projection);
   assert.equal(region.tag, 'section');
   assert.equal(region.className, 'egd-board-region');
@@ -10255,11 +10405,11 @@ test('production Board [⋯] menu offers save, Chat attach and close for that Bo
   let portableReady = false;
   const api = compileFunction(`let boardRegionMenu = null;\n${close}\n${toggle}\nreturn { toggleBoardRegionMenu, closeBoardRegionMenu, current: () => boardRegionMenu };`,
     ['state', 'document', 'window', 'el', 'resolveFloatingMenuPlacement', 'saveCurrentAgendaState', 'openChatInputPanel', 'closeCurrentAgenda', 'boardVersionHistoryReady', 'openBoardHistoryPanel',
-      'portableExportReady', 'openPortableExport', 'openBoardCanvasExport'])(
+      'portableExportReady', 'openPortableExport', 'openBoardCanvasExport', 'boardProjectMenuItems'])(
     state, dom.document, window, dom.el, (rect, width, height) => { placements.push([width, height]); return { left: 300.4, top: 120.6 }; },
     options => actions.push(['save', options]), (threadId, options) => actions.push(['attach', threadId, options]),
     options => actions.push(['close', options]), () => storeReady, boardId => actions.push(['history', boardId]),
-    () => portableReady, options => actions.push(['export', options]), projectionId => actions.push(['canvas', projectionId]));
+    () => portableReady, options => actions.push(['export', options]), projectionId => actions.push(['canvas', projectionId]), () => []);
   const anchor = dom.el('button', { data: { testid: 'board-menu' } });
   anchor.getBoundingClientRect = () => ({ left: 280, top: 90, right: 304, bottom: 114 });
   const menu = api.toggleBoardRegionMenu(projection.id, anchor);
@@ -11730,6 +11880,38 @@ test('direct minimap presses and overlap selection move only the camera, and poi
   assert.equal(h.state.canvasUserCameraRevision, 4);
 });
 
+test('minimap rows name the View kind and its open Board, in the list and in the overlap menu', () => {
+  const h = minimapUiHarness();
+  h.make('active-board', '주간 보고', 0, 0, 'board');
+  const member = h.make('member-view', '회의록', 20, 20); member.dataset.projectionId = 'active-board';
+  h.make('active-view', '회의록', 2000, 2000);
+  const orphan = h.make('orphan-view', '닫힌 Board 화면', 3000, 3000); orphan.dataset.projectionId = 'closed-board';
+  h.toggleDeskMinimap();
+  h.search('회의록');
+  assert.deepEqual(h.rows().map(row => [row.dataset.targetId, row.textContent]),
+    [['member-view', '회의록주간 보고브라우저'], ['active-view', '회의록활성 브라우저']],
+    'two Views with one name are told apart by their Board; the active one says so with its kind');
+  h.search('');
+  const byId = id => h.rows().find(row => row.dataset.targetId === id);
+  assert.equal(byId('active-board').textContent, '주간 보고현재 Board');
+  assert.equal(byId('orphan-view').textContent, '닫힌 Board 화면브라우저', 'a Board that is not open is never named');
+  const map = h.document.querySelector('.egd-minimap-map');
+  const target = id => map._egdeskMinimapTargets.find(item => item.id === id);
+  assert.deepEqual([target('member-view').viewKind, target('member-view').boardTitle, target('orphan-view').boardTitle],
+    ['browser', '주간 보고', null]);
+  h.clickMap(target('member-view'));
+  assert.equal(h.part('minimap-stack'), null, 'a member View under its own Board is picked through the Board: one target, no list');
+  assert.equal(h.cameras.length, 0, 'the Board is already fully in view, so the camera stays');
+  h.make('loose-view', '겹친 화면', 20, 20);
+  h.refreshDeskMinimap();
+  h.clickMap(target('loose-view'));
+  assert.ok(h.part('minimap-stack'));
+  assert.deepEqual(h.document.querySelectorAll('[data-testid="minimap-stack-row"]').map(row => [row.dataset.targetId, row.textContent]),
+    [['active-board', '주간 보고Board'], ['loose-view', '겹친 화면브라우저']], 'overlap rows carry the same kind words');
+  assert.equal(h.cameras.length, 0, 'opening the list moves nothing');
+  assert.deepEqual([h.state.boards.activeProjectionId, h.state.activeEntityId], ['active-board', 'active-view']);
+});
+
 // AI engine selection (SUB-07, engine layer stage 7). Rows follow the bridge's
 // /v1/state engines[] (helper/engine-registry.mjs publicEngineRow).
 const engineRowsFixture = [
@@ -12888,7 +13070,7 @@ test('branch menus and the 기록 없이 시작 switch: disabled with the reason
     setThreadStateless: (...args) => calls.push(['setThreadStateless', ...args]),
   };
   const renderers = codex => compileFunction(`${surfaceSource.slice(start, end)}\nreturn { renderForkMenuItems, renderMessageMenu, renderMessageMenuTrigger, renderStatelessStart };`,
-    ['codex', 'ChatState', 'el', 'codexBridge'])(codex, Chat, el, bridge);
+    ['codex', 'ChatState', 'ThreadRouting', 'el', 'codexBridge'])(codex, Chat, ThreadRouting, el, bridge);
   const ui = renderers({ messageMenu: { threadId: 'room-a', messageId: 'm2', left: 40, top: 60 }, chatCapabilities: ['send', 'stateless', 'fork'] });
 
   const [roomItem, roomNote] = ui.renderForkMenuItems(sessionSource, null, '대화 분기', '지금까지의 대화를 새 대화방으로 이어 갑니다.');
@@ -12910,8 +13092,11 @@ test('branch menus and the 기록 없이 시작 switch: disabled with the reason
   const menu = ui.renderMessageMenu(sessionSource, answer);
   assert.deepEqual([menu.getAttribute('role'), menu.getAttribute('aria-label'), menu.style.left, menu.style.top, menu.dataset.messageId], ['group', '메시지 메뉴', '40px', '60px', 'm2']);
   assert.match(menu.className, /egd-codex-thread-menu egd-codex-message-menu/, 'the shared menu class keeps clicks inside it from closing it');
-  const [forkItem, note, close] = menu.children;
+  // CHAT-03 adds the Board Thread move items between the branch note and 닫기.
+  const [forkItem, note] = menu.children;
+  const close = menu.children[menu.children.length - 1];
   assert.deepEqual([forkItem.textContent, note.textContent, close.textContent], ['이 지점에서 분기', '이 응답까지의 대화를 새 대화방으로 이어 갑니다.', '닫기']);
+  assert.deepEqual(menu.children.slice(2, 4).map(item => item.textContent), ['Board Thread로 옮기기', '여러 메시지 골라 옮기기']);
   forkItem.fire('click');
   close.fire('click');
   assert.deepEqual(calls.splice(0), [['forkAvailability', 'room-a', 'r2'], ['forkThread', 'room-a', { fromTurnId: 'r2' }], ['closeMessageMenu']]);
@@ -12996,9 +13181,9 @@ test('연결된 도구: inherited external tools read in Korean, with the extern
   };
   const spawn = compileFunction(`${declaration('spawnSettingsCard')}\nreturn spawnSettingsCard;`, ['singletonSourceRef', 'focusOpenSourceCard', 'cardSeq', 'resolveCanvasCardPlacement',
     'revealPlacedCanvasCard', 'el', 'cardZ', 'closeCanvasCard', 'state', 'ChatState', 'codexProfileAvatar', 'document', 'window', 'bindCardSourceRef', 'markAgendaDirty', 'setActiveEntity',
-    'isCardFullscreen', 'focusCanvasCard', 'installCardHeaderFullscreenToggle', 'canvasZoom', 'settingsProfileAccountKey', 'createSettingsProfileTransfer'])(
+    'isCardFullscreen', 'focusCanvasCard', 'installCardHeaderFullscreenToggle', 'canvasZoom', 'settingsProfileAccountKey', 'createSettingsProfileTransfer', 'AccountSettingsView', 'codexBridgeNotice'])(
     () => ({ kind: 'settings-card' }), () => null, 0, () => ({ x: 0, y: 0, width: 600, height: 600, inView: true }), () => {}, el, 0, () => {}, state, Chat, codexProfileAvatar,
-    document, { innerWidth: 1280, innerHeight: 800, confirm: () => false, setTimeout: () => 0 }, () => {}, () => {}, () => {}, () => false, () => {}, () => {}, () => 1, ...Object.values(settingsTransferDeps(document, state)));
+    document, { innerWidth: 1280, innerHeight: 800, confirm: () => false, setTimeout: () => 0 }, () => {}, () => {}, () => {}, () => false, () => {}, () => {}, () => 1, ...Object.values(settingsTransferDeps(document, state)), AccountSettingsView, settingsBridgeNotice);
   const card = spawn();
   const section = () => settingsNodes(card, node => node.dataset.testid === 'settings-mcp')[0];
   assert.equal(section().dataset.state, 'unknown');
@@ -14376,11 +14561,14 @@ function browserAgentControlHarness() {
   const transport = new Function('document', 'ChatState', 'browserToolRunBindings', 'browserToolCancelledRuns',
     'browserToolRequestReceipts', 'browserToolCardLeases', 'browserToolUserSelections', 'browserToolPendingBindings',
     'browserToolActionLeases', 'browserToolStoppedRuns', 'chatBindingNonce', 'BROWSER_TOOL_REPLY_MARGIN_MS',
+    'browserToolNavigationPolicy', 'revokeBrowserToolGrants', 'browserToolThreadGrants', 'browserToolGrantKey',
     `let browserToolFixtureLastAction = null;\nconst browserToolFixtureAuthorizationByCard = new Map();\n${revokeSource}\n${dispatchSource}\n` +
     'return {browserToolDispatch,browserToolAuthorizePhysicalAction,revokeBrowserToolCard,browserToolCardPermission,createBrowserToolDialogObserver}')(doc,
     { knownCodexAccountKey: key => typeof key === 'string' && key.startsWith('codex:') }, maps.runBindings, maps.cancelled,
     maps.receipts, maps.cardLeases, maps.selections, maps.pendingBindings, maps.actionLeases, maps.stopped, () => `lease-${++nonce}`,
-    Number(surfaceSource.match(/const BROWSER_TOOL_REPLY_MARGIN_MS = (\d+);/)[1]));
+    Number(surfaceSource.match(/const BROWSER_TOOL_REPLY_MARGIN_MS = (\d+);/)[1]),
+    // BRW-05/11 state this harness does not exercise: default same-site policy, no standing grants.
+    () => ({ scope: 'same-site', allow: [], block: [], allowDowngrade: false }), () => 0, new Map(), (thread, cardId) => `${thread}\u0000${cardId}`);
   authorize = transport.browserToolAuthorizePhysicalAction;
   const timers = new Map();
   let timerSeq = 0;
@@ -14814,10 +15002,10 @@ test('Agent 관리 shows 사용 준비 on the detail and saves the tool section 
   const spawn = compileFunction(`${declaration('spawnSettingsCard')}\nreturn spawnSettingsCard;`, ['singletonSourceRef', 'focusOpenSourceCard', 'cardSeq', 'resolveCanvasCardPlacement',
     'revealPlacedCanvasCard', 'el', 'cardZ',
     'closeCanvasCard', 'state', 'ChatState', 'codexProfileAvatar', 'document', 'window', 'bindCardSourceRef', 'markAgendaDirty', 'setActiveEntity',
-    'isCardFullscreen', 'focusCanvasCard', 'installCardHeaderFullscreenToggle', 'canvasZoom', 'settingsProfileAccountKey', 'createSettingsProfileTransfer'])(
+    'isCardFullscreen', 'focusCanvasCard', 'installCardHeaderFullscreenToggle', 'canvasZoom', 'settingsProfileAccountKey', 'createSettingsProfileTransfer', 'AccountSettingsView', 'codexBridgeNotice'])(
     () => ({ kind: 'settings-card' }), () => null, 0, () => ({ x: 10, y: 20, width: 600, height: 600, inView: true }),
     () => {}, el, 0, () => {}, state, Chat, codexProfileAvatar, document, windowStub,
-    () => {}, () => {}, () => {}, () => false, () => {}, () => {}, () => 1, ...Object.values(settingsTransferDeps(document, state)));
+    () => {}, () => {}, () => {}, () => false, () => {}, () => {}, () => 1, ...Object.values(settingsTransferDeps(document, state)), AccountSettingsView, settingsBridgeNotice);
   // CHAT-07 [Agent 설정 열기] opens straight onto the Agent's detail.
   const card = spawn({ tab: 'agents', profileId: 'review-verifier' });
   await settle();
@@ -14939,7 +15127,9 @@ test('chat wiring: faces and names open the peek, the 작업 중 bubble closes t
   // The bubble follows the last line, replaces the dots inside its run's answer, and opens the record; the status line stays.
   assert.match(surfaceSource, /const working = ChatState\.nativeBindingHeld\(activeThread\) \? null : ChatState\.agentWorkingView\(workingRun,\s*\{ connected: activeEngine\.engineId === 'claude' \? activeEngine\.ready : codex\.connected \}\);/);
   assert.match(surfaceSource, /          appendControlNotices\(\);\n          if \(working\) \{\n            messages\.appendChild\(codexAgentWorkingRow\(working, \{/);
-  assert.match(surfaceSource, /onOpen: \(\) => codexBridge\.openActivity\(activeThread\.id\)/);
+  // AGENT-05: the bubble opens the record at its own run, not just the room.
+  assert.match(surfaceSource, /onOpen: \(\) => codexBridge\.openActivity\(activeThread\.id, \{ runId: workingRun\.runId \|\| null \}\)/);
+  assert.match(surfaceSource, /for \(const row of otherWorkingRows\) \{\n            messages\.appendChild\(codexAgentWorkingRow\(row, \{/, 'every other busy run gets its own bubble');
   assert.match(surfaceSource, /&& !\(working && message\.runId && message\.runId === workingRun\?\.runId\)\) \{/);
   assert.match(surfaceSource, /data: \{ testid: 'chat-run-status', status, runId: run\?\.runId \|\| ''/);
   // The activity record.
@@ -15070,9 +15260,9 @@ function computerControlSettingsHarness({ computerControl = null, connected = tr
   };
   const spawn = compileFunction(`${declaration('spawnSettingsCard')}\nreturn spawnSettingsCard;`, ['singletonSourceRef', 'focusOpenSourceCard', 'cardSeq', 'resolveCanvasCardPlacement',
     'revealPlacedCanvasCard', 'el', 'cardZ', 'closeCanvasCard', 'state', 'ChatState', 'codexProfileAvatar', 'document', 'window', 'bindCardSourceRef', 'markAgendaDirty', 'setActiveEntity',
-    'isCardFullscreen', 'focusCanvasCard', 'installCardHeaderFullscreenToggle', 'canvasZoom', 'settingsProfileAccountKey', 'createSettingsProfileTransfer'])(
+    'isCardFullscreen', 'focusCanvasCard', 'installCardHeaderFullscreenToggle', 'canvasZoom', 'settingsProfileAccountKey', 'createSettingsProfileTransfer', 'AccountSettingsView', 'codexBridgeNotice'])(
     () => ({ kind: 'settings-card' }), () => null, 0, () => ({ x: 0, y: 0, width: 600, height: 600, inView: true }), () => {}, el, 0, () => {}, state, Chat, codexProfileAvatar,
-    document, { innerWidth: 1280, innerHeight: 800, confirm: () => false, setTimeout: () => 0 }, () => {}, () => {}, () => {}, () => false, () => {}, () => {}, () => 1, ...Object.values(settingsTransferDeps(document, state)));
+    document, { innerWidth: 1280, innerHeight: 800, confirm: () => false, setTimeout: () => 0 }, () => {}, () => {}, () => {}, () => false, () => {}, () => {}, () => 1, ...Object.values(settingsTransferDeps(document, state)), AccountSettingsView, settingsBridgeNotice);
   const card = spawn();
   const section = () => settingsNodes(card, node => node.dataset.testid === 'settings-computer-control')[0];
   const part = testid => settingsNodes(section(), node => node.dataset.testid === testid)[0] || null;
@@ -15235,6 +15425,252 @@ test('결과 카드: a stored record is checked on restore, names its source in 
   assert.equal(Chat.findResultCardMessage(null, record.source), null);
 });
 
+// ============ CHAT-08 published results (D-K4: chips only, a revision is 버전 2) ============
+const outputFixture = (extra = {}) => ({ id: '50000000-0000-4000-8000-000000000001', outputKey: 'q3-report', version: 1, title: '3분기 보고서', format: 'markdown',
+  charCount: 1200, createdAt: 1_700_000_000_500, previousId: null, conversationId: 'conversation-a', runId: 'turn-a', answerId: 'conversation-a/turn-a', hash: 'h1', byteLength: 1200, ...extra });
+const outputV2 = (extra = {}) => outputFixture({ id: '50000000-0000-4000-8000-000000000002', version: 2, previousId: '50000000-0000-4000-8000-000000000001',
+  charCount: 1300, createdAt: 1_700_000_001_000, title: '3분기 보고서 (수정)', ...extra });
+const outputOther = () => outputFixture({ id: '50000000-0000-4000-8000-000000000003', outputKey: 'output-ab12cd34', title: '별도 결과', createdAt: 1_700_000_002_000 });
+
+test('게시 결과: output.published folds into one chip entry per outputKey; a revision becomes 버전 2 and the versions stay', () => {
+  const state = Chat.createChatProtocolState();
+  Chat.registerChatRequest(state, { requestId: 'request-a', clientThreadId: 'ui-a' });
+  const run = Chat.reduceChatEvent(state, envelope('run.started', 1));
+  Chat.reduceChatEvent(state, envelope('message.completed', 2, { messageId: 'assistant-a', text: '보고서를 게시했습니다.', phase: 'final_answer' }));
+  Chat.reduceChatEvent(state, envelope('output.published', 3, { output: outputFixture() }));
+  assert.equal(run.outputs.length, 1);
+  assert.equal(run.outputs[0].version, 1);
+  assert.deepEqual(run.outputs[0].versions.map(item => item.version), [1]);
+  assert.equal(run.outputs[0].hash, undefined, 'chip fields only, nothing of the blob');
+  Chat.reduceChatEvent(state, envelope('output.published', 4, { output: outputV2() }));
+  assert.equal(run.outputs.length, 1, 'the same key stays one chip');
+  assert.equal(run.outputs[0].id, outputV2().id);
+  assert.equal(run.outputs[0].version, 2);
+  assert.equal(run.outputs[0].title, '3분기 보고서 (수정)');
+  assert.deepEqual(run.outputs[0].versions.map(item => [item.version, item.id]), [[1, outputFixture().id], [2, outputV2().id]]);
+  Chat.reduceChatEvent(state, envelope('output.published', 5, { output: outputOther() }));
+  assert.deepEqual(run.outputs.map(item => item.outputKey), ['q3-report', 'output-ab12cd34'], 'another key is another chip, in publish order');
+  Chat.reduceChatEvent(state, envelope('output.published', 6, { output: { id: 'not-a-uuid', outputKey: 'bad key', version: 0, title: '' } }));
+  Chat.reduceChatEvent(state, envelope('output.published', 7, { output: outputV2() }));
+  assert.equal(run.outputs.length, 2, 'a broken payload or the same version again changes nothing');
+  assert.deepEqual(run.outputs[0].versions.map(item => item.version), [1, 2]);
+  const answer = Chat.projectRunMessages([], run).findLast(message => message.role === 'assistant');
+  assert.deepEqual(answer.outputs.map(item => [item.outputKey, item.version]), [['q3-report', 2], ['output-ab12cd34', 1]], 'the final answer carries the chips');
+  assert.notEqual(answer.outputs, run.outputs, 'a copy, not the run array');
+  assert.deepEqual(Chat.publishedOutputs([outputV2(), outputFixture()]).map(item => item.version), [2], 'an older version arriving later never demotes the chip');
+  assert.deepEqual(Chat.publishedOutputs(run.outputs), run.outputs, 'saved entries fold back to themselves');
+});
+
+test('게시 결과: a bridge snapshot lists every stored version and the screen keeps one entry per key; local history and legacy records carry it too', () => {
+  const state = Chat.createChatProtocolState();
+  const [run] = Chat.mergeChatSnapshot(state, { streamId: 'stream', seq: 1, conversationId: 'conversation-a', connection: 'ready', runs: [{ runId: 'turn-a', answerId: 'conversation-a/turn-a', status: 'completed',
+    messages: [{ id: 'assistant-a', role: 'assistant', text: '게시했습니다.', status: 'complete' }], context: { captures: [], packets: [], briefings: [], outputs: [outputFixture(), outputV2(), outputOther()] } }] }, 'wire');
+  assert.deepEqual(run.outputs.map(item => [item.outputKey, item.version, item.versions.length]), [['q3-report', 2, 2], ['output-ab12cd34', 1, 1]]);
+  assert.deepEqual(Chat.projectRunMessages([], run)[0].outputs, run.outputs);
+  Chat.mergeChatSnapshot(state, { streamId: 'stream', seq: 2, conversationId: 'conversation-a', connection: 'ready', runs: [{ runId: 'turn-a', answerId: 'conversation-a/turn-a', status: 'completed',
+    messages: [], context: { captures: [], packets: [], briefings: [], outputs: [] } }] }, 'wire');
+  assert.equal(run.outputs.length, 2, 'a snapshot without the list leaves what the events built');
+
+  // Local history pages (bridge run checkpoints) keep run.context.outputs; the final answer gets the chips by run identity.
+  const thread = { clientThreadId: 'room', localConversationId: 'local-room' };
+  const localRunId = 'local-run-o';
+  const messagePage = Chat.normalizeLocalHistoryPage({ protocolVersion: 1, thread, runs: [], events: [],
+    messages: [{ localMessageId: 'local-user-o', localRunId, role: 'user', content: '보고서 정리해 줘' },
+      { localMessageId: 'local-answer-o', localRunId, role: 'assistant', phase: 'final_answer', content: '게시했습니다.' }],
+    coverage: { scope: 'egdesk-local', status: 'partial', reasons: [], nativeHistoryComplete: null }, hasMore: true, nextCursor: 1, projectionTruncated: false }, 'room');
+  const runPage = Chat.normalizeLocalHistoryPage({ protocolVersion: 1, thread, messages: [], events: [],
+    runs: [{ localRunId, conversationId: 'conversation-a', runId: 'turn-a', answerId: 'conversation-a/turn-a', status: 'completed', messages: [],
+      context: { captures: [], packets: [], briefings: [], outputs: [outputFixture(), outputV2()] } }],
+    coverage: { scope: 'egdesk-local', status: 'complete', reasons: [], nativeHistoryComplete: null }, hasMore: false, nextCursor: null, projectionTruncated: false }, 'room');
+  const restored = Chat.hydrateLocalChatThread(Chat.hydrateLocalChatThread({ id: 'room', conversationId: null, messages: [] }, messagePage), runPage);
+  const answer = restored.messages.at(-1);
+  assert.deepEqual(answer.outputs.map(item => item.version), [2]);
+  assert.equal(answer.briefing, undefined, 'no Briefing is invented for a result-only run');
+  assert.equal(answer.answerId, 'conversation-a/turn-a');
+  assert.equal(restored.messages[0].outputs, undefined, 'only the final answer');
+
+  // A Desk record saved with chips restores the same chips; one saved before has none.
+  const legacy = Chat.legacyPublicChatSnapshot({ clientThreadId: 'room', threadSnapshot: { id: 'room', conversationId: 'conversation-a', messages: [
+    { id: 'u', providerItemId: 'native-u', role: 'user', conversationId: 'conversation-a', runId: 'turn-a', content: 'q' },
+    { id: 'a', providerItemId: 'native-a', role: 'assistant', conversationId: 'conversation-a', runId: 'turn-a', answerId: 'conversation-a/turn-a', content: '게시했습니다.',
+      outputs: Chat.publishedOutputs([outputFixture(), outputV2()]) },
+  ] } });
+  assert.deepEqual(legacy.runs[0].context.outputs.map(item => [item.outputKey, item.version]), [['q3-report', 2]]);
+  assert.deepEqual(legacy.runs[0].messages[1].outputs[0].versions.map(item => item.version), [1, 2]);
+  const [again] = Chat.mergeChatSnapshot(Chat.createChatProtocolState(), { ...legacy, streamId: 'legacy', seq: 0, connection: 'ready' }, 'room');
+  assert.deepEqual(again.outputs, legacy.runs[0].messages[1].outputs, 'the saved chips come back unchanged');
+});
+
+test("게시 결과 카드: the record read from the bridge keeps its result identity, one card per key, and leads back to the answer", () => {
+  const thread = resultThread({ conversationId: 'conversation-a' });
+  const message = resultMessage({ conversationId: 'conversation-a', runId: 'turn-a', answerId: 'conversation-a/turn-a', content: '보고서를 게시했습니다.' });
+  const markdown = '# 3분기 보고서\n\n' + '발견 사항 한 줄\n'.repeat(40);
+  const record = Chat.publishedOutputCardRecord(thread, message, outputV2(), markdown, { author: '분석 담당', now: 7 });
+  assert.equal(record.title, '3분기 보고서 (수정)');
+  assert.equal(record.text, markdown);
+  assert.deepEqual(record.artifacts, []);
+  assert.deepEqual([record.source.outputId, record.source.outputKey, record.source.outputVersion], [outputV2().id, 'q3-report', 2]);
+  assert.equal(record.source.answerId, 'conversation-a/turn-a');
+  assert.equal(record.source.messageId, 'msg-a1');
+  assert.equal(record.source.answeredAt, outputV2().createdAt, 'the moment it was published');
+  assert.equal(Chat.resultCardKey(record), 'conversation-a/output/q3-report');
+  assert.equal(Chat.resultCardKey(Chat.publishedOutputCardRecord(thread, message, outputFixture(), markdown)), 'conversation-a/output/q3-report', '버전 1 and 2 share the card');
+  assert.notEqual(Chat.resultCardKey(record), Chat.resultCardKey(Chat.resultCardRecord(thread, message)), 'not the answer card');
+  assert.deepEqual(Chat.restoreResultCardRecord(JSON.parse(JSON.stringify(record))), record, 'a saved Board member restores as it was');
+  const plain = Chat.restoreResultCardRecord({ ...record, source: { ...record.source, outputVersion: 'two' } });
+  assert.equal(plain.source.outputId, undefined, 'a broken result identity falls back to a plain answer card');
+  assert.equal(Chat.resultCardKey(plain), 'conversation-a/conversation-a/turn-a');
+  assert.equal(Chat.resultCardSourceView(record, { formatTime: () => '오후 3:12' }).line, '출처 · 분기 매출 정리 대화 · 분석 담당의 답변 · 게시한 결과 · 버전 2 · 오후 3:12');
+  assert.equal(Chat.publishedOutputCardRecord(thread, message, outputV2(), '   '), null, 'no body, no card');
+  assert.equal(Chat.publishedOutputCardRecord(thread, message, { id: 'x' }, markdown), null);
+  const long = 'a'.repeat(Chat.RESULT_CARD_TEXT_LIMIT + 5);
+  const cut = Chat.publishedOutputCardRecord(thread, message, outputFixture(), long);
+  assert.deepEqual([cut.text.length, cut.totalChars, cut.truncated], [Chat.RESULT_CARD_TEXT_LIMIT, long.length, true]);
+  const room = resultThread({ conversationId: 'conversation-a', messages: [message] });
+  assert.deepEqual(Chat.findResultCardMessage([room], record.source), { thread: room, message }, "'채팅에서 보기' finds the answer that published it");
+});
+
+test('게시 결과 칩: one chip per key under the answer — 결과 badge, title, 버전 n — and the press hands the chip to the opener; none in a Claude or held room', () => {
+  const document = settingsFakeDocument();
+  const { el } = compileFunction(`${declaration('el')}\nreturn { el };`, ['document'])(document);
+  const presses = [];
+  const build = compileFunction(`${declaration('buildCodexOutputChips')}\nreturn buildCodexOutputChips;`, ['ChatState', 'el', 'openPublishedOutputChip'])(
+    Chat, el, (...args) => presses.push(args));
+  const thread = resultThread({ engineId: 'codex' });
+  const message = resultMessage({ outputs: Chat.publishedOutputs([outputFixture(), outputV2(), outputOther(), { id: 'broken' }]) });
+  const chips = build(message, thread);
+  assert.deepEqual(chips.map(chip => [chip.dataset.testid, chip.dataset.outputKey, chip.dataset.version, chip.dataset.outputId]),
+    [['chat-output', 'q3-report', '2', outputV2().id], ['chat-output', 'output-ab12cd34', '1', outputOther().id]]);
+  assert.deepEqual(chips.map(chip => chip.textContent), ['결과3분기 보고서 (수정)버전 2', '결과별도 결과버전 1']);
+  assert.equal(chips[0].attributes['aria-label'], '게시한 결과 열기: 3분기 보고서 (수정) · 버전 2');
+  assert.ok(chips[0].className.includes('egd-codex-result-chip-output'));
+  assert.equal(chips[0].attributes.type, 'button');
+  chips[0].fire('click');
+  assert.equal(presses.length, 1);
+  assert.equal(presses[0][0], chips[0]);
+  assert.equal(presses[0][1], thread);
+  assert.equal(presses[0][2], message);
+  assert.equal(presses[0][3].id, outputV2().id);
+  assert.deepEqual(build(message, resultThread({ engineId: 'claude' })), [], 'a Claude room has no publish route');
+  assert.deepEqual(build(message, resultThread({ conversationId: null, retainedNativeBinding: { conversationId: 'conv-1' } })), [], 'a held room opens nothing');
+  assert.deepEqual(build(resultMessage({ role: 'user', outputs: message.outputs }), thread), []);
+  assert.deepEqual(build(resultMessage(), thread), [], 'an answer without published results');
+  const css = readFileSync(new URL('../overlay/CSS/eg-desk-surface.uc.css', import.meta.url), 'utf8');
+  assert.match(css, /\.egd-codex-result-kind \{/);
+  assert.match(css, /\.egd-codex-result-chip-output\[data-state="unavailable"\]/);
+});
+
+test('게시 결과 칩: the press reads through the bridge and opens the card; a bridge or room that cannot serve it leaves 열 수 없음 on the chip, no toast', async () => {
+  const document = settingsFakeDocument();
+  const { el } = compileFunction(`${declaration('el')}\nreturn { el };`, ['document'])(document);
+  let answer = () => ({ id: 'card' });
+  const calls = [];
+  const state = { codexBridge: { openPublishedOutput: async (...args) => { calls.push(args); return answer(); } } };
+  // The press is async, which the sync `declaration` slicer does not read.
+  const pressSource = surfaceSource.match(/  async function openPublishedOutputChip\([\s\S]*?\n  \}\n/)?.[0];
+  assert.ok(pressSource, 'production openPublishedOutputChip remains directly testable');
+  const press = compileFunction(`${pressSource}\nreturn openPublishedOutputChip;`, ['el', 'state'])(el, state);
+  const chat = el('div', { class: 'egd-chat-card' });
+  const chip = el('button', { class: 'egd-codex-result-chip egd-codex-result-chip-output' }, el('span', { class: 'egd-codex-result-label' }, '3분기 보고서'));
+  chip.closest = selector => selector === '.egd-chat-card' ? chat : null;
+  const pending = press(chip, resultThread(), resultMessage(), outputFixture());
+  assert.equal(chip.dataset.state, 'opening');
+  const status = settingsNodes(chip, node => node.className === 'egd-codex-result-state')[0];
+  assert.equal(status.textContent, '여는 중');
+  assert.equal(status.attributes.role, 'status');
+  assert.equal(await press(chip, resultThread(), resultMessage(), outputFixture()), null, 'a second press while opening is ignored');
+  assert.deepEqual(await pending, { id: 'card' });
+  assert.deepEqual(calls.map(args => [args[0], args[1], args[2].id, args[3].opener]), [['room-1', 'msg-a1', outputFixture().id, chat]]);
+  assert.equal(chip.dataset.state, undefined);
+  assert.equal(status.textContent, '');
+  answer = () => null;
+  assert.equal(await press(chip, resultThread(), resultMessage(), outputFixture()), null);
+  assert.equal(chip.dataset.state, 'unavailable');
+  assert.equal(status.textContent, '열 수 없음');
+  answer = () => { throw new Error('404'); };
+  assert.equal(await press(chip, resultThread(), resultMessage(), outputFixture()), null, 'a failed read is the same quiet stop');
+  assert.equal(chip.dataset.state, 'unavailable');
+  assert.equal(settingsNodes(chip, node => node.className === 'egd-codex-result-state').length, 1, 'one status span, reused');
+  answer = () => ({ id: 'card' });
+  await press(chip, resultThread(), resultMessage(), outputFixture());
+  assert.equal(chip.dataset.state, undefined, 'the next press tries again');
+  assert.doesNotMatch(pressSource, /boardNotice/, 'never a toast');
+});
+
+test('게시 결과 카드: the same key at a newer version redraws the open card; a plain answer card never redraws', () => {
+  const thread = resultThread({ conversationId: 'conversation-a' });
+  const message = resultMessage({ conversationId: 'conversation-a', runId: 'turn-a', answerId: 'conversation-a/turn-a' });
+  const first = Chat.publishedOutputCardRecord(thread, message, outputFixture(), '# 보고서 v1\n\n본문', { now: 1 });
+  const second = Chat.publishedOutputCardRecord(thread, message, outputV2(), '# 보고서 v2\n\n고친 본문', { now: 2 });
+  const { spawn, calls } = resultCardHarness();
+  const chat = { id: 'egd-chat-card-1', isConnected: true };
+  const card = spawn({ record: first, opener: chat });
+  assert.deepEqual(calls.focusSource, { kind: 'chat-answer', id: 'conversation-a/output/q3-report', scope: 'codex-answer' });
+  assert.equal(card._deskWindowShell.slots.identity.textContent, '3분기 보고서');
+  const content = card._deskWindowShell.slots.content;
+  const node = testid => settingsNodes(content, item => item.dataset.testid === testid)[0];
+  const sourceLine = () => settingsNodes(node('result-card-source'), item => item.className === 'egd-result-card-source-line')[0].textContent;
+  assert.equal(node('result-card-text').textContent, first.text);
+  assert.match(sourceLine(), /게시한 결과 · 버전 1/);
+  assert.equal(typeof card._renderResultRecord, 'function');
+  card._renderResultRecord(second);
+  assert.deepEqual(card._resultRecord, second);
+  assert.equal(card._deskWindowShell.slots.identity.textContent, '3분기 보고서 (수정)');
+  assert.equal(node('result-card-text').textContent, second.text, 'the new body replaces the old one');
+  assert.match(sourceLine(), /버전 2/);
+  assert.equal(settingsNodes(content, item => item.dataset.testid === 'result-card-text').length, 1);
+  node('result-card-open-chat').fire('click');
+  assert.deepEqual(calls.back, [second], "'채팅에서 보기' follows the version shown");
+
+  const open = { id: 'egd-result-card-9', isConnected: true, _resultRecord: first, redrawn: [] };
+  open._renderResultRecord = record => open.redrawn.push(record);
+  const again = resultCardHarness({ existing: open });
+  assert.equal(again.spawn({ record: second, opener: chat }), open);
+  assert.deepEqual(open.redrawn, [second], 'version 2 redraws the open card');
+  assert.deepEqual(again.calls.revealOpen, [[open, { opener: chat, kind: 'result' }]]);
+  open._resultRecord = second;
+  again.spawn({ record: second, opener: chat });
+  assert.equal(open.redrawn.length, 1, 'the same version again only comes back into view');
+  const plain = Chat.resultCardRecord(thread, message, { now: 1 });
+  const openPlain = { id: 'egd-result-card-3', isConnected: true, _resultRecord: plain, redrawn: [] };
+  openPlain._renderResultRecord = record => openPlain.redrawn.push(record);
+  resultCardHarness({ existing: openPlain }).spawn({ record: plain, opener: chat });
+  assert.deepEqual(openPlain.redrawn, [], 'an answer card never redraws');
+});
+
+test('게시 결과: the bridge reads one result by id with the room routing hints and opens it as a card; a missing route, a Claude room or another body opens nothing', async () => {
+  const body = surfaceSource.match(/      async openPublishedOutput\(threadId, messageId, output, options = \{\}\) \{\n([\s\S]*?)\n      \},/)?.[1];
+  assert.ok(body, 'production openPublishedOutput remains directly testable');
+  const run = compileFunction(`return (async () => {${body}\n})();`, ['threadId', 'messageId', 'output', 'options', 'getCodexThreadById', 'state', 'ChatState', 'fetchJson', 'codexMessageAuthorLabel', 'spawnResultCard']);
+  const message = resultMessage({ conversationId: 'conversation-a', runId: 'turn-a', answerId: 'conversation-a/turn-a', authorName: '분석 담당' });
+  const room = resultThread({ engineId: 'codex', clientBindingId: 'wire-1', conversationId: 'conversation-a', messages: [message] });
+  const state = { codex: { threads: [room], engines: [] } };
+  const byId = (codex, id) => codex.threads.find(thread => thread.id === id) || null;
+  const requests = [], spawned = [];
+  const markdown = '# 3분기 보고서\n\n본문';
+  let reply = async path => { requests.push(path); return { output: outputV2(), markdown }; };
+  const call = (threadId = 'room-1', output = outputV2()) => run(threadId, 'msg-a1', output, { opener: 'chat' }, byId, state, Chat, path => reply(path),
+    item => item.authorName || 'Codex', options => { spawned.push(options); return { id: 'card' }; });
+  assert.deepEqual(await call(), { id: 'card' });
+  assert.deepEqual(requests, [`/context/outputs/${outputV2().id}?engineId=codex&engineProfileId=codex-default&clientThreadId=wire-1&conversationId=conversation-a`]);
+  assert.equal(spawned[0].opener, 'chat');
+  assert.deepEqual([spawned[0].record.source.outputId, spawned[0].record.source.outputVersion, spawned[0].record.source.author, spawned[0].record.text],
+    [outputV2().id, 2, '분석 담당', markdown]);
+  reply = async () => { const error = new Error('Unknown context endpoint'); error.status = 404; throw error; };
+  assert.equal(await call(), null, 'an older bridge without the route');
+  reply = async () => ({ output: outputFixture(), markdown });
+  assert.equal(await call(), null, 'another result than the one asked for');
+  reply = async path => { requests.push(path); return { output: outputV2(), markdown }; };
+  state.codex.threads = [{ ...room, engineId: 'claude', engineProfileId: 'claude-main' }];
+  const before = requests.length;
+  assert.equal(await call(), null, 'a Claude room never asks');
+  assert.equal(requests.length, before);
+  assert.equal(await call('missing-room'), null);
+  assert.equal(await call('room-1', { id: 'nope' }), null);
+  assert.equal(spawned.length, 1);
+  assert.doesNotMatch(body, /boardNotice/, 'the chip reports; the bridge announces nothing');
+});
+
 test('긴 답변: a very long finished answer folds to a preview; the whole text stays and nothing folds by itself early', () => {
   assert.equal(Chat.longAnswerView('짧은 답변').long, false);
   assert.equal(Chat.longAnswerView(null).long, false);
@@ -15272,7 +15708,10 @@ test("Chat: '카드로 보기' sits with the result chips, a long answer folds w
   assert.match(surfaceSource, /const messageStack = el\('div', \{ class: 'egd-codex-message-stack' \}, roleLabel, messageLine, answerFold, computerLine, resultRow, briefingControl, meta\);/);
   // Only a press calls these; no render, event or run end does.
   assert.equal((surfaceSource.match(/openAnswerResultCard\(/g) || []).length, 2, 'the declaration and the one press handler');
-  assert.equal((surfaceSource.match(/spawnResultCard\(/g) || []).length, 4, 'declaration, the press path, and the two restore paths');
+  // CHAT-08 added the published-result chip's path (bridge openPublishedOutput); still no render, event or run end.
+  assert.equal((surfaceSource.match(/spawnResultCard\(/g) || []).length, 5, 'declaration, the press path, the chip path, and the two restore paths');
+  assert.match(surfaceSource, /const outputChips = buildCodexOutputChips\(message, activeThread\);/);
+  assert.match(surfaceSource, /if \(outputChips\.length\) resultRow\.prepend\(\.\.\.outputChips\);\n            if \(cardChip\) resultRow\.appendChild\(cardChip\);/);
 
   const body = surfaceSource.match(/      toggleAnswerFold\(threadId, messageId\) \{\n([\s\S]*?)\n      \},/)?.[1];
   assert.ok(body, 'production toggleAnswerFold remains directly testable');
@@ -16166,13 +16605,23 @@ test('복구 기록 rows read in Korean, the preview never dumps the Desk, and r
     [2, '직접 저장', '카드 3개 · 도형 0개', true, ''],
     [1, '자동 저장', '카드 1개 · 도형 1개', false, ''],
   ]);
+  // CTX-02: Boards open at each point, and what changed since the earlier point below it.
+  assert.deepEqual(page.rows.map(row => [row.boards, row.changes]), [['Board 0개', '카드 +2 · 도형 -1 · Board -1'], ['Board 1개', '']]);
+  assert.deepEqual(Recovery.deskRetentionText(page.retention), '최근 200개와 30일 동안 하루 1개를 남기고, 전체 512MB까지 보관합니다.');
+  assert.equal(Recovery.deskRetentionText(undefined), '', 'an older bridge without retention says nothing');
   for (const row of page.rows) assert.match(row.time, /^\d{1,2}월 \d{1,2}일 \d{2}:\d{2}:\d{2}$/);
   assert.equal(bridge.calls.at(-1).path, '/v1/desk/generations?limit=50');
   const one = await sync.generation(1);
   assert.deepEqual(one.preview, { cardCount: 1, shapeCount: 1, kinds: 'Browser 1', boards: ['주간 보고'], boardsText: 'Board 주간 보고' });
   assert.deepEqual(Recovery.deskStatePreview(deskB), { cardCount: 3, shapeCount: 0, kinds: 'Browser 1 · 파일 1 · Chat 1', boards: [], boardsText: '열린 Board 없음' });
-  assert.deepEqual(Recovery.deskGenerationRows({ head: 9, generations: [{ generation: 9, reason: 'import', createdAt: 0, cardCount: null, shapeCount: 2 }] }, { formatTime: () => 'T' }).map(row => [row.reason, row.counts]),
-    [['가져옴', '카드 0개 · 도형 2개']]);
+  assert.deepEqual(Recovery.deskGenerationRows({ head: 9, generations: [{ generation: 9, reason: 'import', createdAt: 0, cardCount: null, shapeCount: 2 }] }, { formatTime: () => 'T' }).map(row => [row.reason, row.counts, row.boards, row.changes]),
+    [['가져옴', '카드 0개 · 도형 2개', '', '']]);
+  // Equal counts still mean a different Desk; an older bridge without boardCount compares cards and shapes only.
+  assert.deepEqual(Recovery.deskGenerationRows({ head: 3, generations: [
+    { generation: 3, reason: 'autosave', createdAt: 2, cardCount: 2, shapeCount: 0, boardCount: 1 },
+    { generation: 2, reason: 'autosave', createdAt: 1, cardCount: 2, shapeCount: 0, boardCount: 1 },
+    { generation: 1, reason: 'autosave', createdAt: 0, cardCount: 1, shapeCount: 3 },
+  ] }, { formatTime: () => 'T' }).map(row => row.changes), ['개수 변화 없음', '카드 +1 · 도형 -3', '']);
 
   const restored = await sync.restoreGeneration(1);
   assert.equal(restored.restored, true);
@@ -17069,6 +17518,7 @@ function requestProjectUiHarness({ target, read, roomRead, roomSave, resizeObser
     setActiveThread: id => { if (!getThread(null, id)) return false; state.codex.activeThreadId = id; return true; },
     getCodexThreadDraft: (codex, id) => codex.threadDrafts[id] || '', refreshConversation() {},
     coerceAgendaStore: () => ({ agendas: {}, meta: {} }),
+    refreshBoardProject() {},
     window: { AbortController, ResizeObserver: resizeObserver, setTimeout(fn) { const id = ++timerSeq; timers.set(id, fn); return id; }, clearTimeout: id => timers.delete(id) },
     pickNativeRoomProjectDirectory: () => { assert.ok(pickFolder, 'only an explicit folder fixture supplies a native result'); return pickFolder(); },
     ChromeUtils: { importESModule(url) {
@@ -18837,7 +19287,8 @@ function portableSettingsHarness({ respond, fullscreen = false, initialDetail = 
   const deps = { singletonSourceRef: () => ({ kind: 'settings-card' }), focusOpenSourceCard: () => null, cardSeq: 0,
     resolveCanvasCardPlacement: () => ({ x: 0, y: 0, width: 600, height: 600 }), revealPlacedCanvasCard() {}, el, cardZ: 0, closeCanvasCard() {}, state, ChatState: Chat,
     codexProfileAvatar, document, window: { setTimeout: () => 0, confirm: () => false }, bindCardSourceRef() {}, markAgendaDirty() {}, setActiveEntity() {},
-    isCardFullscreen: () => false, focusCanvasCard() {}, installCardHeaderFullscreenToggle() {}, canvasZoom: () => 1, ...settingsTransferDeps(document, state, native.adapter) };
+    isCardFullscreen: () => false, focusCanvasCard() {}, installCardHeaderFullscreenToggle() {}, canvasZoom: () => 1, ...settingsTransferDeps(document, state, native.adapter),
+    AccountSettingsView, codexBridgeNotice: settingsBridgeNotice };
   if (fullscreen) {
     Object.assign(state, { cardFullscreen: null, surface: { initialBrowserFocus: false }, pan: { x: 0, y: 0 }, zoom: 1,
       setCanvasViewportTarget(camera) { this.pan = { ...camera.pan }; this.zoom = camera.zoom; } });

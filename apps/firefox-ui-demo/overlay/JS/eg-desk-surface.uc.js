@@ -10,18 +10,22 @@
   const SurfaceState = ChromeUtils.importESModule('chrome://userchrome/content/EGDeskSurfaceState.sys.mjs');
   const RecoveryState = ChromeUtils.importESModule('chrome://userchrome/content/EGDeskRecoveryState.sys.mjs');
   const ChatState = ChromeUtils.importESModule('chrome://userchrome/content/EGDeskChatState.sys.mjs');
+  const ThreadRouting = ChromeUtils.importESModule('chrome://userchrome/content/EGDeskThreadRouting.sys.mjs');
   const ChatRunResult = ChromeUtils.importESModule('chrome://userchrome/content/EGDeskChatRunResult.sys.mjs');
+  const RunResult = ChromeUtils.importESModule('chrome://userchrome/content/EGDeskRunResult.sys.mjs');
   const ChatChangeReview = ChromeUtils.importESModule('chrome://userchrome/content/EGDeskChatChangeReview.sys.mjs');
   const Markdown = ChromeUtils.importESModule('chrome://userchrome/content/EGDeskMarkdown.sys.mjs');
   const InputContext = ChromeUtils.importESModule('chrome://userchrome/content/EGDeskInputContext.sys.mjs');
   const BriefingState = ChromeUtils.importESModule('chrome://userchrome/content/EGDeskBriefingState.sys.mjs');
   const FileCardState = ChromeUtils.importESModule('chrome://userchrome/content/EGDeskFileCardState.sys.mjs');
   const BrowserAgentReceipts = ChromeUtils.importESModule('chrome://userchrome/content/EGDeskBrowserAgentRuntimeParent.sys.mjs');
+  const BrowserGrant = ChromeUtils.importESModule('chrome://userchrome/content/EGDeskBrowserGrant.sys.mjs');
   const PortableState = ChromeUtils.importESModule('chrome://userchrome/content/EGDeskPortableState.sys.mjs');
   const TextFilePickers = ChromeUtils.importESModule('chrome://userchrome/content/EGDeskNativeFilePickers.sys.mjs');
   const BoardExport = ChromeUtils.importESModule('chrome://userchrome/content/EGDeskBoardExport.sys.mjs');
   const ProfileTransfer = ChromeUtils.importESModule('chrome://userchrome/content/EGDeskProfileTransfer.sys.mjs');
   const ProfileTransferView = ChromeUtils.importESModule('chrome://userchrome/content/EGDeskProfileTransferView.sys.mjs');
+  const AgentIdentityView = ChromeUtils.importESModule('chrome://userchrome/content/EGDeskAgentIdentityView.sys.mjs');
   const BROWSER_AGENT_ACTOR_NAME = 'EGDeskBrowserAgentRuntime';
   const BROWSER_AGENT_HISTORY_LIMIT = 100;
   // Time a Browser tool reply needs after a wait or settle, before the
@@ -242,17 +246,31 @@
     return CODEX_AGENT_PROFILES[DEFAULT_CODEX_AGENT_PROFILE_ID];
   }
 
-  // Agent avatar: the saved emoji/initial on one of the six approved palette tones.
+  // Agent avatar: the saved emoji/initial on one of the six approved palette
+  // tones, or the saved photo (D-A3) once the bridge has read it.
   function codexProfileAvatar(avatar, name, className = '') {
     const view = ChatState.profileAvatarView(avatar, name);
-    return el('span', { class: `egd-profile-avatar egd-profile-avatar-tone-${view.tone}${className ? ` ${className}` : ''}`, 'aria-hidden': 'true' }, view.text);
+    const photo = typeof codexAvatarPhotoSource === 'function' ? codexAvatarPhotoSource(view) : null;
+    return el('span', { class: `egd-profile-avatar egd-profile-avatar-tone-${view.tone}${photo ? ' egd-profile-avatar-photo' : ''}${className ? ` ${className}` : ''}`, 'aria-hidden': 'true' },
+      photo ? el('img', { class: 'egd-profile-avatar-image', src: photo, alt: '', draggable: 'false' }) : view.text);
   }
 
-  // Chat author face: a saved emoji/initial on its palette tone, else the
-  // name's first letter on the plain chat avatar colour.
+  // AGENT-05 / D-A3: the photo bytes arrive later through the bridge (one read
+  // per asset, GET /profiles/avatar-images/:id). Until then — and wherever a
+  // face is drawn without the surface, as the tests compile the face helpers
+  // alone — the saved initial on its tone stands in.
+  function codexAvatarPhotoSource(view) {
+    const assetId = view?.assetId;
+    return typeof assetId === 'string' && assetId ? state.codexBridge?.avatarImage?.(assetId) || null : null;
+  }
+
+  // Chat author face: a saved emoji/initial/photo on its palette tone, else
+  // the name's first letter on the plain chat avatar colour.
   function codexMessageAvatarFace(avatar, name) {
     const view = ChatState.profileAvatarView(avatar, name);
-    return { text: view.saved ? view.text : String(name || '?').slice(0, 1), toneClass: view.saved ? ` egd-profile-avatar-tone-${view.tone}` : '' };
+    const photo = typeof codexAvatarPhotoSource === 'function' ? codexAvatarPhotoSource(view) : null;
+    return { text: view.saved ? view.text : String(name || '?').slice(0, 1), tone: view.tone, photo,
+      toneClass: `${view.saved ? ` egd-profile-avatar-tone-${view.tone}` : ''}${photo ? ' egd-profile-avatar-photo' : ''}` };
   }
 
   // CHAT-07: the small profile peek an Agent answer's face or name opens
@@ -269,7 +287,8 @@
       onclick: (ev) => ev.stopPropagation(),
     },
     el('div', { class: 'egd-codex-agent-peek-head' },
-      el('span', { class: `egd-codex-message-avatar egd-codex-agent-peek-avatar${face.toneClass}`, 'aria-hidden': 'true' }, face.text),
+      el('span', { class: `egd-codex-message-avatar egd-codex-agent-peek-avatar${face.toneClass}`, 'aria-hidden': 'true' },
+        face.photo ? el('img', { class: 'egd-profile-avatar-image', src: face.photo, alt: '', draggable: 'false' }) : face.text),
       el('div', { class: 'egd-codex-agent-peek-identity' },
         el('div', { class: 'egd-codex-agent-peek-name' }, view.name),
         el('div', { class: 'egd-codex-agent-peek-role' }, view.role))),
@@ -295,20 +314,59 @@
   }
 
   // AGENT-05: '[···] Agent 작업 중' beside the Agent's face at the end of the
-  // conversation (view from ChatState.agentWorkingView). Pressing it opens the
-  // activity record; it never shows thought text.
-  function codexAgentWorkingRow(working, { runId = '', name = 'Codex', avatar = null, onOpen } = {}) {
+  // conversation (rows from AgentIdentityView.agentWorkingRows). Pressing it
+  // opens the activity record at that run; it never shows thought text. With
+  // several Agents at work in one room, `showName` puts the Agent's name above
+  // its bubble, outside it, as an answer's name sits.
+  function codexAgentWorkingRow(working, { runId = '', name = 'Codex', avatar = null, showName = false, onOpen } = {}) {
     const face = codexMessageAvatarFace(avatar, name);
     return el('div', { class: 'egd-codex-working-row', data: { testid: 'chat-agent-working', runId, state: working.state } },
-      el('span', { class: `egd-codex-message-avatar${face.toneClass}`, 'aria-hidden': 'true' }, face.text),
-      el('button', {
-        class: 'egd-codex-working-bubble', type: 'button', title: '활동 기록 열기',
-        'aria-label': `${name} · ${working.text} · 활동 기록 열기`,
-        data: { testid: 'chat-agent-working-open', focusKey: `agent-working-${runId}` },
-        onclick: (ev) => { ev.stopPropagation(); onOpen?.(); },
-      },
-      el('span', { class: 'egd-codex-typing-dots', 'aria-hidden': 'true' }, el('span'), el('span'), el('span')),
-      el('span', { class: 'egd-codex-working-text' }, working.text)));
+      el('span', { class: `egd-codex-message-avatar${face.toneClass}`, 'aria-hidden': 'true' },
+        face.photo ? el('img', { class: 'egd-profile-avatar-image', src: face.photo, alt: '', draggable: 'false' }) : face.text),
+      el('div', { class: 'egd-codex-working-stack' },
+        showName ? el('div', { class: 'egd-codex-message-role egd-codex-working-name', data: { testid: 'chat-agent-working-name' } }, name) : null,
+        el('button', {
+          class: 'egd-codex-working-bubble', type: 'button', title: '활동 기록 열기',
+          'aria-label': `${name} · ${working.text} · 활동 기록 열기`,
+          data: { testid: 'chat-agent-working-open', focusKey: `agent-working-${runId}` },
+          onclick: (ev) => { ev.stopPropagation(); onOpen?.(); },
+        },
+        el('span', { class: 'egd-codex-typing-dots', 'aria-hidden': 'true' }, el('span'), el('span'), el('span')),
+        el('span', { class: 'egd-codex-working-text' }, working.text))));
+  }
+
+  // AGENT-05: which Agent holds this Browser Card right now, read from the
+  // BRW-13 run bindings (the records browserToolCardPermission reads). Display
+  // only — nothing here grants or refuses anything.
+  function codexCardAgentIdentity(cardId) {
+    const entries = [];
+    for (const [key, bound] of browserToolRunBindings) {
+      if (bound?.binding?.cardId !== cardId || browserToolCancelledRuns.has(key)) continue;
+      entries.push({ runId: key.split('\u0000')[0], clientThreadId: bound.clientThreadId, permission: bound.permission });
+    }
+    return AgentIdentityView.resolveCardAgentIdentity(entries, {
+      threadFor: clientThreadId => state.codex.threads.find(thread => ChatState.clientThreadBinding(thread) === clientThreadId) || null,
+      runsFor: codexRuns,
+      roomProfileFor: thread => thread.profileEnabled === true ? codexThreadAgentProfile(thread) : null,
+    });
+  }
+
+  // The Card header chip beside the BRW-13 badge: the Agent's small face and
+  // name while it works on the Card. Redrawn only when the shown Agent changes,
+  // so the status region never re-announces on a timer refresh.
+  function codexCardAgentIdentityRender(chip, badgeView, control, cardId) {
+    const view = AgentIdentityView.cardAgentIdentityView(badgeView, codexCardAgentIdentity(cardId), control.agentIdentity || null);
+    control.agentIdentity = view.remember;
+    const face = view.shown ? codexMessageAvatarFace(view.avatar, view.name) : null;
+    const signature = view.shown ? [view.name, face.photo || face.text, face.toneClass].join('\u0000') : '';
+    if (chip.dataset.agentSignature === signature) return;
+    chip.dataset.agentSignature = signature;
+    chip.hidden = !view.shown;
+    chip.title = view.shown ? `${view.name} · 이 카드에서 작업 중` : '';
+    chip.replaceChildren(...(view.shown ? [
+      el('span', { class: `egd-profile-avatar egd-browser-agent-face egd-profile-avatar-tone-${face.tone}${face.photo ? ' egd-profile-avatar-photo' : ''}`, 'aria-hidden': 'true' },
+        face.photo ? el('img', { class: 'egd-profile-avatar-image', src: face.photo, alt: '', draggable: 'false' }) : face.text),
+      el('span', { class: 'egd-browser-agent-name' }, view.name)] : []));
   }
 
   // ChatGPT usage in the resource-monitor ring shape. Nothing reported shows a
@@ -627,6 +685,10 @@
       // CHAT-04 '채팅에서 보기': the answer to bring into view once { threadId, messageId }.
       revealMessage: null,
       messageMenu: null,
+      // CHAT-03: the DM bubbles being chosen for a Board Thread { threadId, ids }, and the
+      // open target picker { threadId, ids, busy, error, left, top }.
+      messageSelect: null,
+      boardMove: null,
       localHistoryStatus: 'idle',
       localHistoryError: null,
       localHistoryBootReady: false,
@@ -1181,6 +1243,47 @@
       },
     }, el('span', { class: 'egd-codex-result-label' }, artifact.label || artifact.target.path.split('/').pop()),
     el('span', { 'aria-hidden': 'true', class: 'egd-codex-result-arrow' }, '↗'))));
+  }
+
+  // CHAT-08 / D-K4: an Agent-published Canvas result is one chip per outputKey
+  // under the answer — kind badge, title, '버전 n'. A revision moves that chip
+  // to the next version instead of adding one; nothing opens by itself and
+  // Chat never repeats the body (Contract §4, Chat/Canvas projection). The
+  // event carried metadata only, so the press is a GET round trip to the
+  // bridge. A Claude room has no publish route (captures and packets only),
+  // so it shows no chip.
+  function buildCodexOutputChips(message, thread) {
+    if (message?.role !== 'assistant' || ChatState.nativeBindingHeld(thread) || thread?.engineId === 'claude') return [];
+    return (message.outputs || []).map(ChatState.publishedOutputRecord).filter(Boolean).map(output => el('button', {
+      class: 'egd-codex-result-chip egd-codex-result-chip-output', type: 'button',
+      'aria-label': `게시한 결과 열기: ${output.title} · 버전 ${output.version}`,
+      title: output.version > 1 ? `Agent가 게시한 결과 · 같은 결과의 ${output.version}번째 버전을 Canvas 결과 카드로 엽니다` : 'Agent가 게시한 결과를 Canvas 결과 카드로 엽니다',
+      data: { testid: 'chat-output', outputId: output.id, outputKey: output.outputKey, version: String(output.version), answerId: message.answerId || '' },
+      onclick: ev => {
+        ev.preventDefault(); ev.stopPropagation();
+        openPublishedOutputChip(ev.currentTarget, thread, message, output);
+      },
+    }, el('span', { class: 'egd-codex-result-kind' }, '결과'),
+    el('span', { class: 'egd-codex-result-label' }, output.title),
+    el('span', { class: 'egd-codex-result-version' }, `버전 ${output.version}`)));
+  }
+
+  // The press: the chip says it is opening, the body comes from the bridge and
+  // opens through the CHAT-04 result card (the same key focuses the open card;
+  // a newer version redraws it). A bridge without the route, a refused room or
+  // a network failure leaves the chip standing with '열 수 없음' — no toast; the
+  // next press (or render) tries again.
+  async function openPublishedOutputChip(chip, thread, message, output) {
+    if (!chip || chip.dataset.state === 'opening') return null;
+    const status = chip._outputStatus || (chip._outputStatus = chip.appendChild(el('span', { class: 'egd-codex-result-state', role: 'status' })));
+    chip.dataset.state = 'opening'; status.textContent = '여는 중';
+    let card = null;
+    try {
+      card = await state.codexBridge?.openPublishedOutput(thread?.id, message?.id, output, { opener: chip.closest?.('.egd-chat-card') || null });
+    } catch { card = null; }
+    if (card) { delete chip.dataset.state; status.textContent = ''; }
+    else { chip.dataset.state = 'unavailable'; status.textContent = '열 수 없음'; }
+    return card || null;
   }
 
   function codexRuns(thread) {
@@ -1836,22 +1939,226 @@
     const key = JSON.stringify([boardId, record.project?.projectId || null, record.root?.rootId || null, record.root?.directoryId || null]);
     if (previous?.key === key) return;
     fileProjectAssociations.set(card, { key, boardId });
-    for (const changed of new Set([previous?.boardId, boardId].filter(Boolean))) state.codexBridge?.invalidateRoomProjectDefaults(changed);
+    for (const changed of new Set([previous?.boardId, boardId].filter(Boolean))) {
+      state.codexBridge?.invalidateRoomProjectDefaults(changed);
+      void refreshBoardProject(changed, { force: true });
+    }
   }
 
   // Native result boundary only. Grants, expiry and one-use attachment stay in
   // the existing File adapter; a saved/display path never enters this callback.
-  function pickNativeRoomProjectDirectory() {
+  function pickNativeRoomProjectDirectory(title = '이 방에서 사용할 프로젝트 폴더') {
     return new Promise((resolve, reject) => {
       try {
         const picker = Cc['@mozilla.org/filepicker;1'].createInstance(Ci.nsIFilePicker);
-        picker.init(window.browsingContext, '이 방에서 사용할 프로젝트 폴더', Ci.nsIFilePicker.modeGetFolder);
+        picker.init(window.browsingContext, title, Ci.nsIFilePicker.modeGetFolder);
         picker.open(result => {
           try { resolve(result === Ci.nsIFilePicker.returnOK ? picker.file.path : null); }
           catch (error) { reject(error); }
         });
       } catch (error) { reject(error); }
     });
+  }
+
+  // ── CODE-02 (D-X3): the Board's project folder on the Board head ──
+  // A Board keeps only {projectId, title} (SurfaceState.boardProjectReference)
+  // and saves it with the Board. The bridge's project store owns the folder,
+  // its path and its dev/ino. The head chip shows what the bridge verified just
+  // now: the folder name while connected, or a prompt to pick the folder again
+  // when the stored identity no longer matches (restart onto a replaced or
+  // missing folder, or a saved Board whose folder this bridge never saw). Chat
+  // rooms of the Board inherit the folder through the existing room defaults;
+  // File cards open it through openProject. Nothing here turns a saved
+  // reference, a display path or the current Board into a root grant or cwd.
+  const boardProjectPresentations = new Map();
+  const boardProjectReads = new Map();
+  const BOARD_PROJECT_RECONNECT = '프로젝트 폴더를 다시 선택';
+  const BOARD_PROJECT_PATHS = new Set(['/v1/files/picker/channel', '/v1/files/picker/begin', '/v1/files/picker/complete',
+    '/v1/files/projects/attach', '/v1/files/projects/open', '/v1/files/projects/detach']);
+  let boardProjectActionBusy = false;
+
+  // The File zone's bridge contract (requestLocalFilePacket), limited to the
+  // project routes and fenced by `current`: a Board may close or be rebound
+  // while a picker is open, and a late answer must not land on another Board.
+  function boardProjectService(current) {
+    const fileModule = ChromeUtils.importESModule('chrome://userchrome/content/EGDeskFileView.sys.mjs');
+    const service = fileModule.createEGDeskFileServiceCallbacks({ request: async (path, body, options) => {
+      if (!BOARD_PROJECT_PATHS.has(path) || !current()) throw new Error('Board의 프로젝트 폴더 연결이 바뀌었습니다. 다시 확인하세요.');
+      const headers = { 'Content-Type': 'application/json' };
+      for (const [name, value] of Object.entries(options?.headers || {})) {
+        if (name.toLowerCase() !== 'x-egdesk-picker-channel' || typeof value !== 'string') throw new Error('허용되지 않은 파일 채널 헤더입니다.');
+        headers['X-EGDesk-Picker-Channel'] = value;
+      }
+      const controller = new window.AbortController();
+      const timer = window.setTimeout(() => controller.abort(), 15000);
+      try {
+        const response = await fetch(`http://127.0.0.1:39218${path}`, { method: 'POST', signal: controller.signal, headers, body: JSON.stringify(body) });
+        const packet = await response.json().catch(() => null);
+        if (!current()) throw new Error('Board의 프로젝트 폴더 연결 결과를 다시 확인하세요.');
+        if (!response.ok || packet?.ok !== true) {
+          throw Object.assign(new Error(typeof packet?.error === 'string' ? packet.error : '프로젝트 폴더 요청을 완료하지 못했습니다.'),
+            { code: typeof packet?.code === 'string' ? packet.code : null, status: response.status });
+        }
+        return packet;
+      } catch (error) {
+        if (error.name === 'AbortError') throw new Error('프로젝트 폴더 요청의 완료를 확인하지 못했습니다. 브리지 연결을 확인한 뒤 다시 시도하세요.');
+        throw error;
+      } finally { window.clearTimeout(timer); }
+    } });
+    return { fileModule, service };
+  }
+
+  // What the head shows: the saved reference plus the bridge's current answer.
+  // `live` is openProject's {project, source}; null means the bridge did not answer.
+  function boardProjectPresentation(saved, live) {
+    const project = live?.project || null;
+    if (project && live.source === 'board' && project.status === 'connected') {
+      return { status: 'connected', projectId: project.projectId, name: project.name || project.title || '프로젝트',
+        displayPath: typeof project.displayPath === 'string' ? project.displayPath : '' };
+    }
+    if (project && project.status === 'reconnect-required') {
+      return { status: 'reconnect-required', projectId: project.projectId, name: project.name || project.title || saved?.title || '프로젝트', reason: project.reason || null };
+    }
+    // The bridge knows no folder for this Board: a saved Board that remembers
+    // one must be picked again (never adopted from the reference alone).
+    if (live && !project) return saved ? { status: 'reconnect-required', projectId: saved.projectId, name: saved.title, reason: 'unbound' } : { status: 'none' };
+    return saved ? { status: 'unavailable', projectId: saved.projectId, name: saved.title } : { status: 'none' };
+  }
+
+  function boardProjectionsFor(boardId) {
+    return Object.values(state.boards.projections).filter(item => item.boardId === boardId);
+  }
+
+  // The verified binding becomes the Board's saved reference so the next Board
+  // save carries it. Like any composition change it marks the Board unsaved;
+  // restore marks nothing, and a reconnect-required folder keeps the old reference.
+  function adoptBoardProjectReference(projection, presentation) {
+    if (presentation.status !== 'connected' || state.agenda.restoreInProgress || state.surface?.restoring) return;
+    const next = SurfaceState.boardProjectReference({ projectId: presentation.projectId, title: presentation.name });
+    if (projection.project?.projectId === next.projectId && projection.project.title === next.title) return;
+    projection.project = next;
+    markAgendaDirty('board-project', document.getElementById(projection.id));
+  }
+
+  async function refreshBoardProject(boardId, { force = false } = {}) {
+    if (typeof boardId !== 'string' || !boardId) return null;
+    const pending = boardProjectReads.get(boardId);
+    if (pending && !force) return pending.promise;
+    const entry = { promise: null };
+    boardProjectReads.set(boardId, entry);
+    const current = () => boardProjectReads.get(boardId) === entry;
+    entry.promise = (async () => {
+      let live = null, failed = false;
+      try { live = await boardProjectService(current).service.openProject({ boardId }); }
+      catch { failed = true; }
+      if (!current()) return boardProjectPresentations.get(boardId) || null;
+      boardProjectReads.delete(boardId);
+      const projections = boardProjectionsFor(boardId);
+      const saved = projections.find(item => item.project)?.project || null;
+      const presentation = Object.freeze({ ...boardProjectPresentation(saved, failed ? null : live), at: Date.now(), failed });
+      boardProjectPresentations.set(boardId, presentation);
+      for (const projection of projections) {
+        adoptBoardProjectReference(projection, presentation);
+        const region = document.getElementById(projection.id);
+        if (region) syncBoardRegionProject(region, projection);
+      }
+      return presentation;
+    })();
+    return entry.promise;
+  }
+
+  function buildBoardRegionProjectChip(projection) {
+    const projectionId = projection.id;
+    return el('button', { type: 'button', class: 'egd-board-region-project', hidden: true, data: { testid: 'board-project', projectionId }, onclick: event => {
+      event.stopPropagation();
+      const chip = event.currentTarget, status = chip.dataset.status;
+      if (status === 'reconnect-required') void chooseBoardProjectFolder(projectionId);
+      else if (status === 'unavailable') void refreshBoardProject(state.boards.projections[projectionId]?.boardId, { force: true });
+      else toggleBoardRegionMenu(projectionId, chip.closest('.egd-board-region')?.querySelector('.egd-board-region-menu-button') || chip);
+    } }, deskIcon('folder'), el('span', { class: 'egd-board-region-project-name' }));
+  }
+
+  // Cheap enough for every refreshBoardRegion: reads the cache and renders;
+  // asks the bridge only once per Board, again after a failed answer settles.
+  function syncBoardRegionProject(region, projection) {
+    const chip = region.querySelector('.egd-board-region-project');
+    if (!chip) return;
+    const boardId = projection.boardId;
+    const known = boardProjectPresentations.get(boardId) || null;
+    const reading = boardProjectReads.has(boardId);
+    if (!known || (known.failed && !reading && Date.now() - known.at > 15000)) void refreshBoardProject(boardId);
+    const shown = known || (projection.project ? { status: 'unavailable', projectId: projection.project.projectId, name: projection.project.title } : { status: 'none' });
+    const status = shown.status;
+    const label = status === 'connected' ? shown.name : status === 'reconnect-required' ? BOARD_PROJECT_RECONNECT
+      : status === 'unavailable' ? `${shown.name} · ${reading || !known ? '확인 중' : '확인 필요'}` : '';
+    const description = status === 'connected' ? `프로젝트 폴더: ${shown.name}${shown.displayPath ? ` · ${shown.displayPath}` : ''} · Board 작업 메뉴 열기`
+      : status === 'reconnect-required' ? `${BOARD_PROJECT_RECONNECT}: 저장된 폴더 ‘${shown.name}’을(를) 지금 확인하지 못했습니다. 같은 폴더가 아니면 자동으로 연결하지 않습니다.`
+      : status === 'unavailable' ? `프로젝트 폴더 ‘${shown.name}’의 연결을 브리지에서 확인하지 못했습니다. 눌러서 다시 확인` : '';
+    const hidden = status === 'none';
+    if (chip.hidden !== hidden) chip.hidden = hidden;
+    if (chip.dataset.status !== status) chip.dataset.status = status;
+    const name = chip.querySelector('.egd-board-region-project-name');
+    if (name && name.textContent !== label) name.textContent = label;
+    if (chip.title !== description) { chip.title = description; chip.setAttribute('aria-label', description); }
+  }
+
+  function boardProjectMenuItems(projection, item) {
+    const shown = boardProjectPresentations.get(projection.boardId);
+    const connected = shown?.status === 'connected';
+    const attached = connected || !!projection.project || (!!shown && shown.status !== 'none');
+    return [
+      item('프로젝트 폴더…', connected ? `이 Board의 프로젝트 폴더 바꾸기 (지금: ${shown.name}). 채팅방은 이 폴더를 상속하고 File은 이 폴더를 엽니다.`
+        : '이 Board에 프로젝트 폴더 연결. 채팅방은 이 폴더를 상속하고 File은 이 폴더를 엽니다.', 'board-project-folder', () => { void chooseBoardProjectFolder(projection.id); }),
+      attached ? item('프로젝트 폴더 해제', '이 Board의 프로젝트 폴더 연결 해제 (폴더와 파일은 그대로)', 'board-project-detach', () => { void detachBoardProject(projection.id); }) : null,
+    ];
+  }
+
+  // Attach only through the native picker (the helper consumes the selection
+  // and keeps the verified path and dev/ino). The picker reply alone is not
+  // trusted: the Board is re-read before the head and chat rooms update.
+  async function chooseBoardProjectFolder(projectionId) {
+    const projection = state.boards.projections[projectionId];
+    if (!projection || boardProjectActionBusy) return null;
+    const boardId = projection.boardId, title = projection.title;
+    const current = () => state.boards.projections[projectionId]?.boardId === boardId;
+    boardProjectActionBusy = true;
+    try {
+      const { fileModule, service } = boardProjectService(current);
+      const pickers = fileModule.createEGDeskNativeFilePickers({ service, pickDirectory: () => pickNativeRoomProjectDirectory(`Board ‘${title}’의 프로젝트 폴더`) });
+      const attached = await pickers.chooseProjectFolder({ boardId });
+      if (!current()) return null;
+      if (!attached) { boardNotice('프로젝트 폴더 선택을 취소했습니다. Board의 연결은 바뀌지 않았습니다.'); return null; }
+      const presentation = await refreshBoardProject(boardId, { force: true });
+      if (!current()) return null;
+      state.codexBridge?.invalidateRoomProjectDefaults(boardId);
+      if (presentation?.status === 'connected' && presentation.projectId === attached.projectId) {
+        boardNotice(`Board ‘${title}’의 프로젝트 폴더: ${presentation.name}. 이 Board의 채팅방은 이 폴더에서 실행하고 File은 이 폴더를 엽니다.`);
+      } else boardNotice('프로젝트 폴더 연결을 다시 확인하지 못했습니다. Board 메뉴에서 다시 선택하세요.');
+      return presentation;
+    } catch (error) {
+      if (current()) boardNotice(error?.message || '프로젝트 폴더를 연결하지 못했습니다.');
+      return null;
+    } finally { boardProjectActionBusy = false; }
+  }
+
+  async function detachBoardProject(projectionId) {
+    const projection = state.boards.projections[projectionId];
+    if (!projection || boardProjectActionBusy) return false;
+    const boardId = projection.boardId;
+    const current = () => state.boards.projections[projectionId]?.boardId === boardId;
+    boardProjectActionBusy = true;
+    try {
+      await boardProjectService(current).service.detachProject({ boardId });
+      if (!current()) return false;
+      if (projection.project) { projection.project = null; markAgendaDirty('board-project', document.getElementById(projection.id)); }
+      await refreshBoardProject(boardId, { force: true });
+      state.codexBridge?.invalidateRoomProjectDefaults(boardId);
+      boardNotice(`Board ‘${projection.title}’의 프로젝트 폴더 연결을 해제했습니다. 폴더와 파일은 그대로입니다.`);
+      return true;
+    } catch (error) {
+      if (current()) boardNotice(error?.message || '프로젝트 폴더 연결을 해제하지 못했습니다.');
+      return false;
+    } finally { boardProjectActionBusy = false; }
   }
 
   function buildChatRoomProjectSettings(thread, panelCurrent, actionHost) {
@@ -2909,44 +3216,54 @@
     if (!record || !key) return null;
     const sourceRef = makeSourceRef('chat-answer', { id: key, scope: 'codex-answer' });
     const existing = options.restore ? null : focusOpenSourceCard(sourceRef);
-    if (existing) { revealOpenCanvasCard(existing, { opener: options.opener || null, kind: 'result' }); return existing; }
+    if (existing) {
+      // CHAT-08: the same published result at a newer version redraws its open card.
+      if (record.source.outputId && existing._resultRecord?.source?.outputId !== record.source.outputId) existing._renderResultRecord?.(record);
+      revealOpenCanvasCard(existing, { opener: options.opener || null, kind: 'result' }); return existing;
+    }
     const placement = resolveCanvasCardPlacement('result');
     const shell = spawnDeskWindowShell({ id: `egd-result-card-${++cardSeq}`, kind: 'result', className: 'egd-result-card', sourceRef,
       bodyClassName: 'egd-result-card-body', minWidth: 360, minHeight: 280,
       style: { left: `${placement.x}px`, top: `${placement.y}px`, width: `${placement.width}px`, height: `${placement.height}px` } });
     if (!options.restore) revealPlacedCanvasCard(shell.root, placement, { opener: options.opener || null, kind: 'result' });
-    shell.root._resultRecord = record;
-    const source = ChatState.resultCardSourceView(record, { formatTime: formatMessageTime });
-    shell.slots.identity.appendChild(el('strong', { class: 'egd-result-card-title', title: record.title }, record.title));
-    const text = el('div', { class: 'egd-result-card-text egd-codex-richtext', data: { testid: 'result-card-text' } });
-    if (record.text) {
-      Markdown.appendMarkdown(text, record.text, {
-        answerId: record.source.answerId, runId: record.source.runId, conversationId: record.source.conversationId,
-        artifacts: record.artifacts, openArtifact: artifact => openCodexResultLink(artifact, { opener: shell.root }),
-        openWeb: url => openUrlInBrowserCard(url),
-      });
-    }
-    const files = record.artifacts.length ? el('section', { class: 'egd-result-card-files', 'aria-label': '이 답변이 가리킨 파일', data: { testid: 'result-card-files' } },
-      el('div', { class: 'egd-result-card-files-title' }, '이 답변이 가리킨 파일'),
-      el('div', { class: 'egd-codex-result-chips' }, ...record.artifacts.map(artifact => el('button', {
-        class: 'egd-codex-result-chip egd-codex-result-chip-file', type: 'button',
-        'aria-label': `참조된 파일 열기: ${artifact.label || artifact.target.path.split('/').pop()}`, title: `참조된 기존 파일 · ${artifact.target.path}`,
-        data: { testid: 'result-card-artifact', artifactId: artifact.id },
-        onclick: (ev) => { ev.preventDefault(); ev.stopPropagation(); openCodexResultLink(artifact, { opener: shell.root }); },
-      }, el('span', { class: 'egd-codex-result-label' }, artifact.label || artifact.target.path.split('/').pop()),
-      el('span', { 'aria-hidden': 'true', class: 'egd-codex-result-arrow' }, '↗'))))) : null;
-    const parts = [
-      el('header', { class: 'egd-result-card-source', data: { testid: 'result-card-source' } },
-        el('span', { class: 'egd-result-card-source-line' }, source.line),
-        el('button', {
-          class: 'egd-result-card-back', type: 'button', data: { testid: 'result-card-open-chat' },
-          onclick: (ev) => { ev.stopPropagation(); openResultCardSource(shell.root._resultRecord); },
-        }, deskIcon('chat'), el('span', {}, '채팅에서 보기'))),
-      source.truncatedNote ? el('p', { class: 'egd-result-card-note', role: 'note' }, source.truncatedNote) : null,
-      record.text ? text : null,
-      files,
-    ];
-    for (const part of parts) if (part) shell.slots.content.appendChild(part);
+    const title = el('strong', { class: 'egd-result-card-title' });
+    shell.slots.identity.appendChild(title);
+    const render = (shown) => {
+      shell.root._resultRecord = shown;
+      title.textContent = shown.title; title.setAttribute('title', shown.title);
+      const source = ChatState.resultCardSourceView(shown, { formatTime: formatMessageTime });
+      const text = el('div', { class: 'egd-result-card-text egd-codex-richtext', data: { testid: 'result-card-text' } });
+      if (shown.text) {
+        Markdown.appendMarkdown(text, shown.text, {
+          answerId: shown.source.answerId, runId: shown.source.runId, conversationId: shown.source.conversationId,
+          artifacts: shown.artifacts, openArtifact: artifact => openCodexResultLink(artifact, { opener: shell.root }),
+          openWeb: url => openUrlInBrowserCard(url),
+        });
+      }
+      const files = shown.artifacts.length ? el('section', { class: 'egd-result-card-files', 'aria-label': '이 답변이 가리킨 파일', data: { testid: 'result-card-files' } },
+        el('div', { class: 'egd-result-card-files-title' }, '이 답변이 가리킨 파일'),
+        el('div', { class: 'egd-codex-result-chips' }, ...shown.artifacts.map(artifact => el('button', {
+          class: 'egd-codex-result-chip egd-codex-result-chip-file', type: 'button',
+          'aria-label': `참조된 파일 열기: ${artifact.label || artifact.target.path.split('/').pop()}`, title: `참조된 기존 파일 · ${artifact.target.path}`,
+          data: { testid: 'result-card-artifact', artifactId: artifact.id },
+          onclick: (ev) => { ev.preventDefault(); ev.stopPropagation(); openCodexResultLink(artifact, { opener: shell.root }); },
+        }, el('span', { class: 'egd-codex-result-label' }, artifact.label || artifact.target.path.split('/').pop()),
+        el('span', { 'aria-hidden': 'true', class: 'egd-codex-result-arrow' }, '↗'))))) : null;
+      const parts = [
+        el('header', { class: 'egd-result-card-source', data: { testid: 'result-card-source' } },
+          el('span', { class: 'egd-result-card-source-line' }, source.line),
+          el('button', {
+            class: 'egd-result-card-back', type: 'button', data: { testid: 'result-card-open-chat' },
+            onclick: (ev) => { ev.stopPropagation(); openResultCardSource(shell.root._resultRecord); },
+          }, deskIcon('chat'), el('span', {}, '채팅에서 보기'))),
+        source.truncatedNote ? el('p', { class: 'egd-result-card-note', role: 'note' }, source.truncatedNote) : null,
+        shown.text ? text : null,
+        files,
+      ];
+      shell.slots.content.replaceChildren(...parts.filter(Boolean));
+    };
+    shell.root._renderResultRecord = render;
+    render(record);
     return shell.root;
   }
 
@@ -3018,6 +3335,23 @@
       el('summary', {}, '명령 정보'), ...rows) : null;
   }
 
+  // CODE-05 D-X2 stage 2. The Chat row hands over only the retained change
+  // rows; the File Card re-verifies the run origin (openVerifiedRunFile),
+  // re-reads each file and owns every revert through the D-X1 conditional write.
+  async function openAppliedChangeReview({ target, changes, readOrigin, isCurrent } = {}) {
+    const rows = Array.isArray(changes) ? changes.map(row => ({ ...row })) : [];
+    const kindOf = row => typeof row?.kind === 'string' ? row.kind : row?.kind?.type;
+    const first = rows.find(row => kindOf(row) !== 'delete' && typeof (row.movePath || row.path) === 'string');
+    if (!first || typeof isCurrent !== 'function') return { status: 'unavailable' };
+    const opened = await openVerifiedRunFile({ target, location: { path: first.movePath || first.path, line: 1 }, readOrigin, isCurrent });
+    if (opened?.status !== 'opened') return opened || { status: 'unavailable' };
+    const view = document.getElementById(opened.cardId)?._fileView;
+    if (typeof view?.showChangeReview !== 'function') return { status: 'unavailable' };
+    if (isCurrent(target) !== true) return { status: 'stale' };
+    await view.showChangeReview(rows);
+    return opened;
+  }
+
   // One account/binding scope per visible activity view. Only retained-output
   // and original-run read endpoints enter here; responses never emit Chat state.
   function createCodexActivityReadScope(threadId, epochScope, fetchJson, onInvalidate) {
@@ -3037,15 +3371,19 @@
         && ChatState.chatThreadEngineId(thread, state.codex) === engineId && ChatState.chatThreadEngineProfileId(thread, state.codex) === profileId
         && ChatState.clientThreadBinding(thread) === binding && thread.conversationId === conversationId;
     };
-    const read = async (endpoint, target, { signal } = {}) => {
+    // itemKind is fixed by the scope method, never by a caller's options bag:
+    // readOrigin serves exactly one command item; readChangeOrigin (CODE-05
+    // stage 2) exactly one COMPLETED file-change item of the same run.
+    const read = async (endpoint, target, { signal } = {}, itemKind = 'commandExecution') => {
       const identity = codexActivityDetailTarget(target, target?.itemId);
       const origin = endpoint === '/chat/run-project-origin';
-      const kind = origin || endpoint === '/chat/command-output' ? 'commandExecution' : 'fileChange';
+      const kind = endpoint === '/chat/command-output' || (origin && itemKind !== 'fileChange') ? 'commandExecution' : 'fileChange';
       const ownedItem = () => {
         const thread = getCodexThreadById(state.codex, threadId);
         const runs = identity ? codexRuns(thread).filter(run => run.conversationId === identity.conversationId && run.runId === identity.runId) : [];
         const run = runs.length === 1 ? runs[0] : null;
-        const items = (run?.activities || []).filter(activity => activity.id === identity.itemId && activity.kind === kind);
+        const items = (run?.activities || []).filter(activity => activity.id === identity.itemId && activity.kind === kind
+          && !(origin && kind === 'fileChange' && activity.status !== 'completed'));
         if (items.length === 1) return origin ? JSON.stringify([items[0].kind, items[0].status, items[0].detail ?? null]) : true;
         return !origin && kind === 'fileChange' && (run?.pendingApprovals || []).some(approval => approval.itemId === identity.itemId
           && approval.kind === kind && approval.status === 'pending' && !approval.stale && !approval.replyPending);
@@ -3075,7 +3413,8 @@
     return Object.freeze({ isCurrent,
       readCommandOutput: (target, options) => read('/chat/command-output', target, options),
       readRunChanges: target => read('/chat/run-changes', target),
-      readOrigin: (target, options) => read('/chat/run-project-origin', target, options),
+      readOrigin: (target, options) => read('/chat/run-project-origin', target, { signal: options?.signal }),
+      readChangeOrigin: (target, options) => read('/chat/run-project-origin', target, { signal: options?.signal }, 'fileChange'),
       dispose() { if (disposed) return; disposed = true; token.controller.abort(); epochScope.finish(token); },
     });
   }
@@ -3183,8 +3522,17 @@
         entry.reader = ChatChangeReview.createChatChangeReview({ document,
           fetchRunChanges: () => readScope.readRunChanges(target),
           isCurrent: candidate => current(entry, candidate),
+          ...(approval ? {} : {
+            readOrigin: async (candidate, options) => {
+              if (!current(entry, candidate)) throw new Error('이 변경 기록의 연결이 바뀌었습니다.');
+              const origin = await readScope.readChangeOrigin(candidate, options);
+              if (!current(entry, candidate)) throw new Error('이 변경 기록의 연결이 바뀌었습니다.');
+              return origin;
+            },
+            onReviewApplied: request => openAppliedChangeReview(request),
+          }),
         });
-        entry.node = approval ? entry.reader.renderApproval(target) : entry.reader.renderActivity(target);
+        entry.node = approval ? entry.reader.renderApproval(target) : entry.reader.renderActivity(target, { applied: activity.status === 'completed' });
         entry.node.dataset.testid = approval ? 'chat-approval-changes' : 'chat-activity-changes';
         if (approval) entry.node.dataset.approvalId = approvalId;
       }
@@ -4309,7 +4657,12 @@
     view.dataset.boardId = projection.boardId;
     view.dataset.projectionId = projection.id;
     view.dataset.memberId = member.sourceId;
-    view.addEventListener('mousedown', () => selectBoardProjection(projection.id), true);
+    // CNV-03: membership can change later (View bar menu), so a press selects
+    // whichever Board the View belongs to at that moment, and none once removed.
+    if (!view._boardSelectBound) {
+      view._boardSelectBound = true;
+      view.addEventListener('mousedown', () => { if (view.dataset.projectionId) selectBoardProjection(view.dataset.projectionId); }, true);
+    }
     if (registered) syncDeskWindowBoardMetadata(view);
     return view;
   }
@@ -4376,12 +4729,188 @@
       if (accessibleName) label.setAttribute('aria-label', accessibleName);
       else label.removeAttribute('aria-label');
     }
+    // CNV-03: the Board control after the name. Without a recorded owner it
+    // says '소속 없음' (never a guessed Board); with one, a chevron opens the menu.
+    const control = view._deskWindowShell?.boardMenu;
+    if (control) {
+      const kind = title ? 'owned' : view.dataset?.projectionId ? 'unknown' : 'none';
+      const text = kind === 'none' ? '소속 없음' : '';
+      const name = kind === 'owned' ? `소속 Board ${title} · 바꾸기` : kind === 'unknown' ? '소속 Board 확인' : '소속 없음 · Board에 넣기';
+      if (control.dataset.owned !== kind) control.dataset.owned = kind;
+      if (control._text && control._text.textContent !== text) control._text.textContent = text;
+      if (control.title !== name) control.title = name;
+      if (control.getAttribute('aria-label') !== name) control.setAttribute('aria-label', name);
+    }
     view._browserPresentation?.layout?.();
   }
 
   function syncAllDeskWindowBoardMetadata() {
     const index = deskWindowBoardIndex();
     for (const view of document.querySelectorAll('.egd-desk-window')) syncDeskWindowBoardMetadata(view, index);
+  }
+
+  // ── CNV-03: Board membership of a Desk Window (D-V1~D-V4) ──
+  // The rules are EGDeskBoardMembership; this is the screen side: live
+  // projection objects are patched in place (menus, regions and restore hold
+  // the same objects), the View's dataset and the Board's unsaved mark follow,
+  // and the chip under the View bar asks before anything joins by itself.
+  const BoardMembership = ChromeUtils.importESModule('chrome://userchrome/content/EGDeskBoardMembership.sys.mjs');
+
+  function boardRegionsForMembership() {
+    return Object.values(state.boards.projections).map(projection => {
+      const region = projection?.id ? document.getElementById(projection.id) : null;
+      return region ? { id: projection.id, rect: persistentEntityGeometry(region) } : null;
+    }).filter(Boolean);
+  }
+
+  function applyBoardMembershipPatches(change) {
+    for (const patch of change.patches || []) {
+      const projection = state.boards.projections[patch.id];
+      if (!projection) continue;
+      projection.members = patch.members;
+      projection.idMap = patch.idMap;
+    }
+  }
+
+  function bindViewToBoard(view, projection, member) {
+    view.dataset.boardId = projection.boardId;
+    view.dataset.projectionId = projection.id;
+    view.dataset.memberId = member.sourceId;
+    if (!view._boardSelectBound) {
+      view._boardSelectBound = true;
+      view.addEventListener('mousedown', () => { if (view.dataset.projectionId) selectBoardProjection(view.dataset.projectionId); }, true);
+    }
+    syncDeskWindowBoardMetadata(view);
+  }
+
+  function unbindViewFromBoard(view) {
+    delete view.dataset.boardId;
+    delete view.dataset.projectionId;
+    delete view.dataset.memberId;
+    syncDeskWindowBoardMetadata(view);
+  }
+
+  // A membership edit is a Board change: the Board shows '저장 안 됨' until it
+  // is saved again, as moving one of its Views does.
+  function markBoardMembershipDirty(projection, reason, view) {
+    if (!projection) return;
+    if (view?.dataset?.projectionId === projection.id) { markAgendaDirty(reason, view); return; }
+    projection.dirty = true;
+    refreshBoardRegion(projection);
+    scheduleDeskSessionSave();
+  }
+
+  function viewBoardRecord(view) {
+    return view.classList.contains('egd-canvas-shape') ? serializeShapeState(view) : serializeCardState(view);
+  }
+
+  // '○○에 넣기': the View joins the Board as it is, leaving any other Board in
+  // the same step (D-V1). Nothing opens anew.
+  function addViewToBoard(view, projectionId) {
+    const target = state.boards.projections[projectionId];
+    if (!view?.isConnected || !target) return false;
+    if (view.dataset.projectionId === target.id) return true;
+    const kind = view.classList.contains('egd-canvas-shape') ? 'shape' : 'card';
+    const record = viewBoardRecord(view);
+    if (!record) { boardNotice('이 화면은 Board에 넣을 수 없습니다.'); return false; }
+    const change = BoardMembership.planMembershipChange(state.boards.projections,
+      { action: 'add', projectionId: target.id, viewId: view.id, kind, record });
+    if (!change.changed) return false;
+    dismissBoardMembershipSuggestion(view);
+    applyBoardMembershipPatches(change);
+    if (change.from) markBoardMembershipDirty(state.boards.projections[change.from], 'board-member-move', view);
+    bindViewToBoard(view, target, change.member);
+    markBoardMembershipDirty(target, 'board-member-add', view);
+    syncAllDeskWindowBoardMetadata();
+    refreshDeskMinimap();
+    return true;
+  }
+
+  // '○○에서 빼기': the View stays on the Desk and belongs to no Board.
+  function removeViewFromBoard(view) {
+    const owner = view?.dataset?.projectionId ? state.boards.projections[view.dataset.projectionId] : null;
+    if (!view?.isConnected || !owner) return false;
+    const change = BoardMembership.planMembershipChange(state.boards.projections,
+      { action: 'remove', viewId: view.id, projectionId: owner.id });
+    dismissBoardMembershipSuggestion(view);
+    if (change.changed) applyBoardMembershipPatches(change);
+    markBoardMembershipDirty(owner, 'board-member-remove', view);
+    unbindViewFromBoard(view);
+    syncAllDeskWindowBoardMetadata();
+    refreshDeskMinimap();
+    return true;
+  }
+
+  function dismissBoardMembershipSuggestion(view) {
+    const chip = view?._boardSuggestion;
+    if (!chip) return;
+    view._boardSuggestion = null;
+    chip.remove();
+  }
+
+  // D-V2 · D-V3: a View opened inside a Board region, or dropped into one, gets
+  // '○○에 넣을까요?' under its View bar. Only '넣기' changes membership; the chip
+  // leaves on '아니요', Esc, the next drop, or a membership change. Restored
+  // Views keep their recorded membership and get no chip.
+  function offerBoardMembershipSuggestion(view, trigger = 'drop') {
+    if (!view?.isConnected || !view._deskWindowShell || isCardFullscreen(view)) return null;
+    const quiet = !!(state.agenda.suppressDirty || state.agenda.restoreInProgress || state.surface.restoring);
+    const suggestion = BoardMembership.membershipSuggestion({
+      viewRect: persistentEntityGeometry(view), regions: boardRegionsForMembership(), projections: state.boards.projections,
+      ownerId: view.dataset.projectionId || null, quiet,
+    });
+    dismissBoardMembershipSuggestion(view);
+    if (!suggestion) return null;
+    const chip = el('div', {
+      class: 'egd-board-suggest', role: 'group', 'aria-label': suggestion.message,
+      data: { testid: 'window-board-suggest', projectionId: suggestion.projectionId, action: suggestion.action, trigger, noWindowDrag: 'true' },
+    },
+    deskIcon('board'),
+    el('span', { class: 'egd-board-suggest-text', title: suggestion.message }, suggestion.message),
+    el('button', { type: 'button', class: 'egd-board-suggest-accept', data: { testid: 'window-board-suggest-accept' },
+      onclick: (ev) => { ev.stopPropagation(); if (!addViewToBoard(view, suggestion.projectionId)) dismissBoardMembershipSuggestion(view); } },
+    suggestion.accept),
+    el('button', { type: 'button', class: 'egd-board-suggest-decline', title: '이 제안 닫기', data: { testid: 'window-board-suggest-decline' },
+      onclick: (ev) => { ev.stopPropagation(); dismissBoardMembershipSuggestion(view); } },
+    suggestion.decline));
+    chip.addEventListener('keydown', (ev) => {
+      if (ev.key !== 'Escape') return;
+      ev.preventDefault();
+      ev.stopPropagation();
+      dismissBoardMembershipSuggestion(view);
+      view._deskWindowShell?.focus?.();
+    });
+    view._boardSuggestion = chip;
+    view._deskWindowShell.slots.header.appendChild(chip);
+    return chip;
+  }
+
+  // D-V4: a Board saved from open Views becomes a region right there; the
+  // Views are bound as they stand and nothing opens anew. A View that was in
+  // another Board leaves it (D-V1), and that Board shows '저장 안 됨'.
+  function bindSavedBoardInPlace(snapshot) {
+    if (!snapshot?.agenda?.id || Object.values(state.boards.projections).some(item => item?.boardId === snapshot.agenda.id)) return null;
+    let projectionId;
+    do { projectionId = `egd-board-${++cardSeq}`; }
+    while (document.getElementById(projectionId) || Object.hasOwn(state.boards.projections, projectionId)
+      || Object.values(state.boards.projections).some(item => item?.id === projectionId));
+    const projection = BoardMembership.inPlaceBoardProjection(snapshot, projectionId);
+    for (const member of projection.members) {
+      const view = document.getElementById(member.viewId);
+      const change = view ? BoardMembership.planMembershipChange(state.boards.projections, { action: 'remove', viewId: view.id }) : null;
+      if (!change?.changed) continue;
+      applyBoardMembershipPatches(change);
+      markBoardMembershipDirty(state.boards.projections[change.from], 'board-member-move', view);
+    }
+    state.boards.projections[projection.id] = projection;
+    for (const member of projection.members) {
+      const view = document.getElementById(member.viewId);
+      if (!view) continue;
+      dismissBoardMembershipSuggestion(view);
+      bindViewToBoard(view, projection, member);
+    }
+    refreshBoardRegion(projection);
+    return projection;
   }
 
   function refreshBoardRegion(projection) {
@@ -4396,6 +4925,7 @@
         deskIcon('board'), el('span', { class: 'egd-board-region-name' })),
         el('span', { class: 'egd-board-region-current', hidden: true }, '현재 Board'),
         el('span', { class: 'egd-board-region-unsaved', hidden: true }, '저장 안 됨'),
+        buildBoardRegionProjectChip(projection),
         el('button', { type: 'button', class: 'egd-board-region-menu-button', title: 'Board 작업',
           'aria-haspopup': 'menu', 'aria-expanded': 'false', data: { testid: 'board-menu', projectionId: projection.id },
           onclick: (ev) => {
@@ -4410,6 +4940,7 @@
     region.querySelector('.egd-board-region-title')?.setAttribute('aria-label', `Board ${projection.title} 선택`);
     region.querySelector('.egd-board-region-menu-button')?.setAttribute('aria-label', `${projection.title} Board 작업`);
     syncBoardRegionMarks(region, projection);
+    syncBoardRegionProject(region, projection);
     const rects = projection.members.map(m => document.getElementById(m.viewId)).filter(Boolean).map(persistentEntityGeometry);
     const rect = SurfaceState.boardRegionRect(rects, { fallback: projection.offset });
     Object.assign(region.style, { left: `${rect.x}px`, top: `${rect.y}px`, width: `${rect.width}px`, height: `${rect.height}px` });
@@ -4447,6 +4978,7 @@
       item('저장', '이 Board 저장', 'board-save', () => saveCurrentAgendaState({ projectionId })),
       // CTX-01: only while the bridge's Desk store keeps Board versions.
       boardVersionHistoryReady() ? item('버전 기록', '이 Board의 버전 기록', 'board-history', () => openBoardHistoryPanel(projection.boardId)) : null,
+      ...boardProjectMenuItems(projection, item),
       item('Chat에 첨부', '이 Board의 요소를 Chat에 첨부', 'board-attach-chat',
         () => openChatInputPanel(state.codex.activeThreadId, { viewIds: projection.members.map(member => member.viewId) })),
       // RT-03: only while the bridge can write .egdesk files.
@@ -4496,6 +5028,75 @@
     items[0].focus();
     return menu;
   }
+
+  // CNV-03: the View bar's Board control. '○○에서 빼기' and '○○에 넣기' only;
+  // one View belongs to one Board (D-V1), so joining leaves the other. It
+  // shares the Board region menu's chrome and its single open-menu slot.
+  function toggleViewBoardMenu(view, anchor) {
+    const sameMenu = !!view?.id && boardRegionMenu?.dataset.viewId === view.id;
+    closeBoardRegionMenu();
+    if (sameMenu || !view?.isConnected || !anchor?.isConnected) return null;
+    const rows = BoardMembership.membershipMenuItems({
+      projections: state.boards.projections, ownerId: view.dataset.projectionId || null,
+      activeId: state.boards.activeProjectionId, recentIds: recentBoardProjectionIds,
+    });
+    const items = rows.items.map(row => el('button', {
+      type: 'button', class: 'egd-board-menu-item', role: 'menuitem', title: row.title, 'aria-label': row.title,
+      data: { testid: row.testid, projectionId: row.projectionId, viewId: view.id, action: row.action },
+      onclick: (ev) => {
+        ev.stopPropagation();
+        closeBoardRegionMenu({ restoreFocus: true });
+        if (row.action === 'remove') removeViewFromBoard(view);
+        else addViewToBoard(view, row.projectionId);
+      },
+    }, row.label));
+    if (!items.length) {
+      items.push(el('button', { type: 'button', class: 'egd-board-menu-item', role: 'menuitem', 'aria-disabled': 'true',
+        data: { testid: 'window-board-none', viewId: view.id } }, rows.empty));
+    }
+    const menuWidth = 208;
+    const pos = resolveFloatingMenuPlacement(anchor.getBoundingClientRect(), menuWidth, items.length * 36 + 4);
+    const menu = el('div', {
+      class: 'egd-board-menu egd-board-menu-view', role: 'menu', 'aria-label': '소속 Board',
+      data: { viewId: view.id }, style: { left: `${Math.round(pos.left)}px`, top: `${Math.round(pos.top)}px`, width: `${menuWidth}px` },
+    }, ...items);
+    const onKeydown = (ev) => {
+      if (ev.key === 'Escape') {
+        ev.preventDefault();
+        ev.stopPropagation();
+        closeBoardRegionMenu({ restoreFocus: true });
+        return;
+      }
+      const current = items.indexOf(document.activeElement);
+      const next = ev.key === 'ArrowDown' ? (current + 1) % items.length
+        : ev.key === 'ArrowUp' ? (current - 1 + items.length) % items.length
+          : ev.key === 'Home' ? 0 : ev.key === 'End' ? items.length - 1 : -1;
+      if (next < 0) return;
+      ev.preventDefault();
+      items[next].focus();
+    };
+    const onOutside = (ev) => {
+      if (menu.contains(ev.target) || anchor.contains(ev.target)) return;
+      closeBoardRegionMenu();
+    };
+    menu.addEventListener('keydown', onKeydown);
+    window.addEventListener('mousedown', onOutside, true);
+    window.addEventListener('wheel', onOutside, true);
+    menu._anchor = anchor;
+    menu._dispose = () => {
+      window.removeEventListener('mousedown', onOutside, true);
+      window.removeEventListener('wheel', onOutside, true);
+    };
+    document.documentElement.appendChild(menu);
+    anchor.setAttribute('aria-expanded', 'true');
+    boardRegionMenu = menu;
+    items[0].focus();
+    return menu;
+  }
+  // The Desk Window shell reaches these through state so the shell stays
+  // self-contained (its unit harness compiles it alone).
+  state.toggleViewBoardMenu = toggleViewBoardMenu;
+  state.offerBoardMembership = offerBoardMembershipSuggestion;
 
   // ── CTX-01: Board versions in the bridge's Desk store ──
   function boardVersionHistoryReady() {
@@ -5002,7 +5603,9 @@
           view.dataset.boardId = projection.boardId;
           view.dataset.projectionId = projection.id;
           view.dataset.memberId = member.sourceId;
-          view.addEventListener('mousedown', () => selectBoardProjection(projection.id), true);
+          if (view._boardSelectBound) continue;
+          view._boardSelectBound = true;
+          view.addEventListener('mousedown', () => { if (view.dataset.projectionId) selectBoardProjection(view.dataset.projectionId); }, true);
         }
       }
       if (!options.merge) {
@@ -5062,11 +5665,13 @@
         member.record = cloneJson([...(snapshot.cards || []), ...(snapshot.shapes || [])].find(record => record.id === member.sourceId) || member.record);
       }
     }
+    // D-V4: a Board saved from open Views binds them where they are (CNV-03).
+    const bound = projection || (Array.isArray(options.memberIds) && options.memberIds.length ? bindSavedBoardInPlace(snapshot) : null);
     state.agenda.dirty = false;
     state.agenda.dirtyReasons = [];
     state.agenda.hasSavedState = true;
     state.agenda.lastSavedAt = snapshot.savedAt;
-    if (projection) selectBoardProjection(projection.id);
+    if (bound) selectBoardProjection(bound.id);
     else if (state.boards.activeProjectionId) selectBoardProjection(state.boards.activeProjectionId);
     syncViewportAgendaRail();
     scheduleDeskSessionSave();
@@ -5701,7 +6306,9 @@
     return Array.from(document.querySelectorAll('.egd-canvas-card'))
       .map((card) => {
         const title = cardLabelForViewportRail(card);
-        const subtitle = cardSubtitleForRailSearch(card);
+        // The Board a card belongs to is named (and searchable) only while that Board is open.
+        const boardTitle = card.dataset.projectionId ? state.boards.projections[card.dataset.projectionId]?.title || '' : '';
+        const subtitle = [cardSubtitleForRailSearch(card), boardTitle ? `${boardTitle} Board` : ''].filter(Boolean).join(' · ');
         const sourceRef = card._sourceRef || {};
         return { card, title, subtitle, sourceRef };
       })
@@ -5723,7 +6330,12 @@
         title,
         subtitle,
         active: card.id === state.activeEntityId,
-        execute: () => focusCanvasCard(card),
+        // A chosen card that sits off screen is also brought into view: the
+        // camera pans only (the minimap rule), zoom and Board stay as they are.
+        execute: () => {
+          focusCanvasCard(card);
+          if (!isCardFullscreen(card)) moveCameraToMinimapNode(card);
+        },
       }));
   }
 
@@ -6115,7 +6727,7 @@
     const commitScope = memberIds => {
       if (!name.value.trim()) { name.focus(); name.setAttribute('aria-invalid', 'true'); return; }
       const saved = saveCurrentAgendaState({ agendaId: newAgendaId(), title: name.value.trim(), memberIds });
-      if (saved) { dialog.remove(); boardNotice('Board를 저장했습니다. Board 목록에서 열 수 있습니다.'); }
+      if (saved) { dialog.remove(); boardNotice(memberIds.length ? 'Board를 저장하고 그 자리에 묶었습니다.' : 'Board를 저장했습니다. Board 목록에서 열 수 있습니다.'); }
     };
     document.documentElement.appendChild(dialog);
     name.focus();
@@ -6951,10 +7563,16 @@
     const views = model.entities
       .map((item) => ({ item, z: parsePxNumber(item.entity.style.zIndex, 0) }))
       .sort((a, b) => b.z - a.z)
-      .map(({ item }) => ({
-        kind: 'view', id: item.entity.id, title: minimapEntityTitle(item.entity),
-        projectionId: item.entity.dataset.projectionId || null, box: SurfaceState.minimapBox(item.rect, model),
-      }));
+      .map(({ item }) => {
+        const projectionId = item.entity.dataset.projectionId || null;
+        return {
+          kind: 'view', id: item.entity.id, title: minimapEntityTitle(item.entity), projectionId,
+          // Kind and Board name feed the '이 위치의 N개' rows; a Board is named only while open.
+          viewKind: item.entity.dataset.deskWindowKind || (item.entity.classList?.contains?.('egd-canvas-shape') ? 'shape' : null),
+          boardTitle: projectionId ? boards.find((board) => board.id === projectionId)?.title ?? null : null,
+          box: SurfaceState.minimapBox(item.rect, model),
+        };
+      });
     map._egdeskMinimapTargets = [
       ...boards.map((board) => ({ kind: 'board', id: board.id, title: board.title, box: board })),
       ...views,
@@ -7043,7 +7661,9 @@
     },
       el('span', { class: 'egd-minimap-row-dot', 'aria-hidden': 'true' }),
       el('span', { class: 'egd-minimap-row-label' }, target.title),
-      target.kind === 'board' ? el('span', { class: 'egd-minimap-row-kind' }, 'Board') : null,
+      target.boardTitle ? el('span', { class: 'egd-minimap-row-board', title: `${target.boardTitle} Board에 속함` }, target.boardTitle) : null,
+      target.kind === 'board' ? el('span', { class: 'egd-minimap-row-kind' }, 'Board')
+        : target.viewKind ? el('span', { class: 'egd-minimap-row-kind' }, MinimapLayout.minimapRowKindLabel(target)) : null,
     ));
     const stack = el('div', { class: 'egd-minimap-stack', role: 'menu', 'aria-label': title, data: { testid: 'minimap-stack' } },
       el('div', { class: 'egd-minimap-stack-title' }, title), ...rows);
@@ -7130,7 +7750,10 @@
     if (!search || !list || !status || !model) return;
     const boards = model.regions;
     const views = model.entities.filter(({ entity }) => entity.classList.contains('egd-canvas-card')).map(({ entity, rect }) => ({
-      id: entity.id, title: minimapEntityTitle(entity), kind: entity.dataset.deskWindowKind || 'view',
+      id: entity.id, title: minimapEntityTitle(entity),
+      kind: entity.dataset.deskWindowKind || (entity.classList.contains('egd-chat-card') ? 'chat'
+        : entity.classList.contains('egd-terminal-card') ? 'terminal'
+          : entity.classList.contains('egd-settings-card') ? 'settings' : null),
       projectionId: entity.dataset.projectionId || null, rect,
     }));
     const signature = JSON.stringify([search.query, search.visibleLimit, search.notice, model.viewport,
@@ -7160,8 +7783,10 @@
       },
         el('span', { class: 'egd-minimap-row-dot', 'aria-hidden': 'true' }),
         el('span', { class: 'egd-minimap-row-label' }, row.title),
-        el('span', { class: 'egd-minimap-row-kind' }, current
-          ? (row.kind === 'board' ? '현재 Board' : '활성 화면') : (row.kind === 'board' ? 'Board' : '화면')),
+        // The row says what it is and which open Board it belongs to, so a
+        // search for 'Browser' can be told apart by its Board.
+        row.boardTitle ? el('span', { class: 'egd-minimap-row-board', title: `${row.boardTitle} Board에 속함` }, row.boardTitle) : null,
+        el('span', { class: 'egd-minimap-row-kind' }, MinimapLayout.minimapRowKindLabel({ kind: row.kind, viewKind: row.viewKind, current })),
       );
     });
     if (!rows.length) rows.push(el('div', { class: 'egd-minimap-empty' }, search.query.trim()
@@ -8341,6 +8966,58 @@
       codexBridge.closeMessageMenu?.();
       codexBridge.closeAgentPeek?.();
     };
+    // SUB-14 account access chip. The bridge's `access` row (auth.status and
+    // /v1/state) tells '로그인 필요', '인증 만료', '한도 도달 · 초기화 시각' and
+    // '권한 부족 · 원인' apart; an older bridge without one reads as before.
+    const ACCESS_STATE_VALUES = ['ok', 'loginRequired', 'loginInProgress', 'authFailed', 'quotaExhausted', 'permissionDenied'];
+    const ACCESS_RECOVERY_VALUES = ['login', 'reauth', 'switchAccount', 'wait', 'refresh'];
+    const codexAccessRow = (codex) => {
+      const auth = codex.authStatus || {};
+      const busy = Boolean(codex.isStartingLogin || auth.loginInProgress);
+      const row = auth.access && typeof auth.access === 'object' && ACCESS_STATE_VALUES.includes(auth.access.state) ? auth.access : null;
+      if (!row) {
+        if (!auth.isLoggedIn) return busy ? { state: 'loginInProgress', label: '로그인 중…', detail: null, recovery: [], resetsAt: null, resetPassed: false, failedAt: null }
+          : { state: 'loginRequired', label: '로그인 필요', detail: null, recovery: ['login'], resetsAt: null, resetPassed: false, failedAt: null };
+        return auth.usage?.level === 'limit'
+          ? { state: 'quotaExhausted', label: `한도 도달 · ${auth.usage.resetLabel || '초기화 시각 미확인'}`, detail: null, recovery: ['wait', 'switchAccount'], resetsAt: Number.isFinite(auth.usage.resetsAt) ? auth.usage.resetsAt : null, resetPassed: false, failedAt: null }
+          : { state: 'ok', label: '로그인됨', detail: null, recovery: [], resetsAt: null, resetPassed: false, failedAt: null };
+      }
+      // A sign-in the overlay just started is in progress before the bridge says so.
+      if (busy && !auth.isLoggedIn && row.state === 'loginRequired') return { state: 'loginInProgress', label: '로그인 중…', detail: null, recovery: [], resetsAt: null, resetPassed: false, failedAt: null };
+      return {
+        state: row.state,
+        label: typeof row.label === 'string' && row.label ? row.label : '상태 확인 안 됨',
+        detail: typeof row.detail === 'string' && row.detail ? row.detail : null,
+        recovery: (Array.isArray(row.recovery) ? row.recovery : []).filter((id) => ACCESS_RECOVERY_VALUES.includes(id)),
+        resetsAt: Number.isFinite(row.resetsAt) ? row.resetsAt : null,
+        resetPassed: row.resetPassed === true,
+        failedAt: Number.isFinite(row.failedAt) ? row.failedAt : null,
+      };
+    };
+    // Recovery is the user's pick (Contract: a Run is never moved to another
+    // account quietly; D-S5: no automatic continuation after a reset).
+    // '다시 로그인' and '다른 계정' end the current sign-in first so the ChatGPT
+    // page lets the user choose the account; '초기화까지 대기' only folds the
+    // buttons for this reset; '다시 확인' re-reads the state (usage included).
+    let accessWaitKey = null;
+    const accessKey = (access) => `${access.state}:${access.failedAt ?? ''}:${access.resetsAt ?? ''}`;
+    const reauthenticateCodex = async () => { await codexBridge.signOut(); await codexBridge.startLogin(); };
+    const codexAccessActions = (access, codex) => {
+      const busy = Boolean(codex.isStartingLogin || codex.authStatus.loginInProgress);
+      if (access.recovery.includes('wait') && accessWaitKey === accessKey(access)) return [];
+      const chip = (label, onclick, { primary = false, disabled = false, testid, title = null } = {}) => el('button', {
+        class: `egd-codex-chip${primary ? ' egd-codex-chip-primary' : ' egd-codex-chip-subtle'}`,
+        disabled: disabled ? 'true' : null, title, data: { testid }, onclick,
+      }, label);
+      return access.recovery.map((id) => {
+        if (id === 'login') return chip(busy ? '로그인 중…' : '로그인', () => codexBridge.startLogin(), { primary: true, disabled: busy, testid: 'chat-access-login' });
+        if (id === 'reauth') return chip(busy ? '로그인 중…' : '다시 로그인', reauthenticateCodex, { primary: true, disabled: busy, testid: 'chat-access-reauth', title: '현재 로그인을 끝내고 같은 계정으로 다시 로그인합니다.' });
+        if (id === 'switchAccount') return chip('다른 계정', reauthenticateCodex, { disabled: busy, testid: 'chat-access-switch', title: '현재 로그인을 끝내고 다른 ChatGPT 계정으로 로그인합니다. 진행 중이던 대화는 옮겨지지 않습니다.' });
+        if (id === 'wait') return chip('초기화까지 대기', () => { accessWaitKey = accessKey(access); codexBridge.refreshAuthStatus(); }, { testid: 'chat-access-wait', title: '초기화 시각까지 기다립니다. 초기화 뒤에도 자동으로 이어가지 않습니다.' });
+        if (id === 'refresh') return chip('다시 확인', () => codexBridge.refreshAuthStatus(), { testid: 'chat-access-refresh' });
+        return null;
+      }).filter(Boolean);
+    };
     const onMessageScrollGesture = (ev) => {
       const target = ev.target;
       if (!(target instanceof Element)) return;
@@ -8445,22 +9122,18 @@
       const statusBridge = bridgeNotice.state !== 'online' ? null
         : activeEngine.engineId !== 'codex' ? (!activeEngine.ready ? activeEngine.reason : null)
           : (codex.error ? 'Codex 점검 필요' : null);
-      const statusAccount = activeEngine.engineId !== 'codex' ? (activeEngine.ready ? '사용 가능' : activeEngine.reason) : codex.authStatus.isLoggedIn
-        ? '로그인됨'
-        : ((codex.isStartingLogin || codex.authStatus.loginInProgress) ? '로그인 중…' : '로그인 필요');
+      const access = codexAccessRow(codex);
+      const statusAccount = activeEngine.engineId !== 'codex' ? (activeEngine.ready ? '사용 가능' : activeEngine.reason) : access.label;
+      const accountChipTone = activeEngine.engineId !== 'codex' ? (codex.authStatus.isLoggedIn ? 'ok' : null)
+        : access.state === 'ok' ? 'ok' : access.state === 'loginInProgress' || access.resetPassed ? 'idle'
+          : access.state === 'quotaExhausted' ? 'limit' : 'error';
       const indicatorState = bridgeNotice.state === 'reconnecting'
         ? 'idle'
         : (bridgeNotice.state !== 'online' || codex.error ? 'error' : 'ok');
       const connectionNotice = buildCodexBridgeNotice(codex, codexBridge);
 
       const chromeActions = [];
-      if (activeEngine.engineId === 'codex' && !codex.authStatus.isLoggedIn) {
-        chromeActions.push(el('button', {
-          class: 'egd-codex-chip egd-codex-chip-primary',
-          disabled: (codex.isStartingLogin || codex.authStatus.loginInProgress) ? 'true' : null,
-          onclick: () => codexBridge.startLogin(),
-        }, (codex.isStartingLogin || codex.authStatus.loginInProgress) ? '로그인 중…' : '로그인'));
-      }
+      if (activeEngine.engineId === 'codex') chromeActions.push(...codexAccessActions(access, codex));
       if (codex.error && codex.connected) {
         chromeActions.push(el('button', {
           class: 'egd-codex-chip egd-codex-chip-subtle',
@@ -8468,13 +9141,18 @@
         }, '새로고침'));
       }
       // Healthy account details live in Settings; keep actionable states here.
-      const showChromeRow = chromeActions.length > 0 || (activeEngine.engineId !== 'codex' && !activeEngine.ready);
+      const showChromeRow = chromeActions.length > 0 || (activeEngine.engineId !== 'codex' && !activeEngine.ready)
+        || (activeEngine.engineId === 'codex' && access.state !== 'ok');
       const chromeRow = showChromeRow ? el('div', { class: 'egd-codex-chrome-row' },
         el('div', { class: 'egd-codex-chrome-main' },
           el('span', { class: `egd-codex-chrome-indicator egd-codex-chrome-indicator-${indicatorState}` }),
           el('div', { class: 'egd-codex-chrome-status' },
             statusBridge ? el('span', { class: `egd-codex-system-chip egd-codex-system-chip-${indicatorState}` }, statusBridge) : null,
-            statusAccount !== statusBridge ? el('span', { class: `egd-codex-system-chip${codex.authStatus.isLoggedIn ? ' egd-codex-system-chip-ok' : ''}` }, statusAccount) : null,
+            statusAccount !== statusBridge ? el('span', {
+              class: `egd-codex-system-chip${accountChipTone ? ` egd-codex-system-chip-${accountChipTone}` : ''}`,
+              title: activeEngine.engineId === 'codex' ? access.detail : null,
+              data: { testid: 'chat-account-access', state: activeEngine.engineId === 'codex' ? access.state : 'engine' },
+            }, statusAccount) : null,
           ),
         ),
         el('div', { class: 'egd-codex-chrome-actions' }, ...chromeActions),
@@ -8809,6 +9487,14 @@
           el('div', { class: 'egd-codex-thread-menu-note', role: 'note' }, fork.available ? hint : fork.reason),
         ];
       };
+      // CHAT-03 (D-M3): a DM bubble goes to a Board Thread as a copy; several can be chosen first.
+      const renderMoveMenuItems = (thread, message) => thread.type !== 'dm' || !ThreadRouting.shareableMessage(message) ? [] : [
+        el('button', { class: 'egd-codex-thread-menu-item', data: { testid: 'chat-move-to-board' },
+          onclick: (ev) => codexBridge.openBoardMove(thread.id, [message.id], ev.currentTarget) }, ThreadRouting.MOVE_TO_BOARD_LABEL),
+        el('button', { class: 'egd-codex-thread-menu-item', data: { testid: 'chat-pick-messages' },
+          onclick: () => codexBridge.startMessageSelect(thread.id, message.id) }, ThreadRouting.PICK_MESSAGES_LABEL),
+        el('div', { class: 'egd-codex-thread-menu-note', role: 'note' }, '복사본이 가고 원래 대화는 그대로 남습니다. 받는 Agent는 다음 메시지에서 함께 읽습니다.'),
+      ];
       const renderMessageMenu = (thread, message) => el('div', {
         class: 'egd-codex-thread-menu egd-codex-message-menu', role: 'group', 'aria-label': '메시지 메뉴',
         data: { testid: 'chat-message-menu', messageId: message.id },
@@ -8818,11 +9504,14 @@
         },
         onclick: (ev) => ev.stopPropagation(),
       },
-      ...renderForkMenuItems(thread, message.runId, '이 지점에서 분기', message.role === 'user'
-        ? '이 요청과 그 응답까지의 대화를 새 대화방으로 이어 갑니다.' : '이 응답까지의 대화를 새 대화방으로 이어 갑니다.'),
+      ...(ChatState.chatMessageForkPoint(thread, message) ? renderForkMenuItems(thread, message.runId, '이 지점에서 분기', message.role === 'user'
+        ? '이 요청과 그 응답까지의 대화를 새 대화방으로 이어 갑니다.' : '이 응답까지의 대화를 새 대화방으로 이어 갑니다.') : []),
+      ...renderMoveMenuItems(thread, message),
       el('button', { class: 'egd-codex-thread-menu-item', onclick: () => codexBridge.closeMessageMenu() }, '닫기'));
+      const messageMenuAvailable = (thread, message) => ChatState.chatMessageForkPoint(thread, message)
+        || (thread.type === 'dm' && ThreadRouting.shareableMessage(message));
       const renderMessageMenuTrigger = (thread, message) => {
-        if (!ChatState.chatMessageForkPoint(thread, message)) return null;
+        if (!messageMenuAvailable(thread, message)) return null;
         const open = codex.messageMenu?.threadId === thread.id && codex.messageMenu.messageId === message.id;
         return el('button', {
           class: `egd-codex-message-menu-trigger${open ? ' egd-codex-message-menu-trigger-active' : ''}`,
@@ -8834,6 +9523,74 @@
             codexBridge.toggleMessageMenu(thread.id, message.id, ev.currentTarget);
           },
         }, '⋯');
+      };
+      // CHAT-03: where the chosen bubbles go — an existing Board Thread or a new one.
+      const renderBoardMovePicker = (thread) => {
+        const move = codex.boardMove;
+        const choices = ThreadRouting.boardThreadChoices(codex.threads, thread);
+        return el('div', {
+          class: 'egd-codex-thread-menu egd-codex-board-move', role: 'group', 'aria-label': ThreadRouting.PICK_TARGET_TITLE,
+          data: { testid: 'chat-board-move', count: String(move.ids.length) },
+          style: { left: `${Math.round(move.left ?? 12)}px`, top: `${Math.round(move.top ?? 12)}px` },
+          onclick: (ev) => ev.stopPropagation(),
+        },
+        el('div', { class: 'egd-codex-thread-menu-label' }, `${ThreadRouting.PICK_TARGET_TITLE} · 메시지 ${move.ids.length}개`),
+        ...choices.map(choice => el('button', {
+          class: 'egd-codex-thread-menu-item', disabled: move.busy ? 'true' : null,
+          data: { testid: 'chat-board-move-target', threadId: choice.id, focusKey: `board-move-${choice.id}` },
+          onclick: () => { void codexBridge.moveMessagesToBoardThread(thread.id, move.ids, { toThreadId: choice.id }); },
+        }, `${choice.title} · 멤버 ${choice.memberCount}명`)),
+        el('button', {
+          class: 'egd-codex-thread-menu-item', disabled: move.busy ? 'true' : null,
+          data: { testid: 'chat-board-move-new', focusKey: 'board-move-new' },
+          onclick: () => { void codexBridge.moveMessagesToBoardThread(thread.id, move.ids, { create: true }); },
+        }, ThreadRouting.NEW_BOARD_THREAD_LABEL),
+        move.error ? el('div', { class: 'egd-codex-thread-menu-note egd-codex-error', role: 'alert' }, move.error) : null,
+        el('div', { class: 'egd-codex-thread-menu-note', role: 'note' }, move.busy ? '옮기는 중…' : ThreadRouting.SHARED_BLOCK_NOTE),
+        el('button', { class: 'egd-codex-thread-menu-item', onclick: () => codexBridge.closeBoardMove() }, '닫기'));
+      };
+      // CHAT-03 (D-M3): copies brought here from a DM; each block links back to the original.
+      const renderSharedBlock = (thread, share) => {
+        const origin = ThreadRouting.sharedOriginTarget(share, codex.threads);
+        return el('div', {
+          class: 'egd-codex-shared-block', role: 'group', 'aria-label': ThreadRouting.sharedBlockTitle(share),
+          data: { testid: 'chat-shared-block', shareId: share.shareId, count: String(share.messages.length) },
+        },
+        el('div', { class: 'egd-codex-shared-block-head' },
+          el('span', { class: 'egd-codex-shared-block-title' }, ThreadRouting.sharedBlockTitle(share)),
+          el('button', {
+            class: 'egd-codex-result-chip', type: 'button', disabled: origin ? null : 'true',
+            title: origin ? '원래 대화방을 열어 그 메시지로 갑니다' : '원래 대화를 이 기기에서 찾지 못했습니다',
+            data: { testid: 'chat-shared-origin', threadId: origin?.threadId || '' },
+            onclick: () => codexBridge.openSharedOrigin(thread.id, share.shareId),
+          }, el('span', { class: 'egd-codex-result-label' }, ThreadRouting.VIEW_ORIGIN_LABEL))),
+        ...share.messages.map(message => el('div', { class: `egd-codex-shared-copy egd-codex-shared-copy-${message.role}` },
+          el('span', { class: 'egd-codex-shared-copy-author' }, ThreadRouting.sharedCopyAuthor(message)),
+          el('span', { class: 'egd-codex-shared-copy-text' }, message.text))),
+        el('div', { class: 'egd-codex-shared-block-note' }, ThreadRouting.SHARED_BLOCK_NOTE));
+      };
+      // D-M2: @이름 chips under a Board Thread bubble. Only the Agents named answer; a call
+      // to the person is what the room list's '@' badge counts.
+      const renderMentionRow = (thread, message) => {
+        if (thread.type !== 'group') return null;
+        const spans = ThreadRouting.mentionSpans(message.content, { agentNames: ThreadRouting.threadAgentNames(thread, SELF_MEMBER) });
+        if (!spans.length) return null;
+        const seen = new Set();
+        return el('div', { class: 'egd-codex-mention-row', data: { testid: 'chat-mentions' } },
+          ...spans.filter(span => !seen.has(`${span.kind}:${span.name}`) && seen.add(`${span.kind}:${span.name}`)).map(span => el('span', {
+            class: `egd-codex-mention-chip egd-codex-mention-chip-${span.kind}`,
+            title: span.kind === 'user' ? '대표님을 불렀습니다' : `${span.name}에게 한 말입니다. 부른 Agent만 답합니다.`,
+          }, `@${span.kind === 'user' ? SELF_MEMBER : span.name}`)));
+      };
+      // CHAT-03: a Board Thread that received DM copies can go back to that DM.
+      const renderReturnToDm = (thread) => {
+        const target = ThreadRouting.returnToDmTarget(thread, codex.threads);
+        if (!target) return null;
+        return el('button', {
+          class: 'egd-codex-chip egd-codex-chip-subtle egd-codex-return-dm', type: 'button', title: `‘${target.title}’ 대화로 돌아갑니다`,
+          data: { testid: 'chat-return-dm', threadId: target.id, focusKey: 'return-dm' },
+          onclick: () => codexBridge.returnToDm(thread.id),
+        }, ThreadRouting.RETURN_TO_DM_LABEL);
       };
       const renderStatelessStart = (thread) => {
         const view = ChatState.chatStatelessStartView(thread, codex.chatCapabilities);
@@ -8909,6 +9666,9 @@
                   el('div', { class: 'egd-codex-thread-item-bottom' },
                     el('div', { class: 'egd-codex-thread-preview' }, stripMarkdown(codexThreadPreview(thread))),
                   el('div', { class: 'egd-codex-thread-item-actions' },
+                    ThreadRouting.userMentionBadge(thread) > 0
+                      ? el('span', { class: 'egd-codex-thread-mention', title: '대표님을 부른 메시지가 있습니다', 'aria-label': '나를 부른 메시지' }, '@')
+                      : null,
                     thread.unreadCount > 0
                       ? el('span', { class: 'egd-codex-thread-unread' }, String(thread.unreadCount))
                       : null,
@@ -9088,6 +9848,7 @@
             }, deskIcon('back')),
             el('div', { class: 'egd-codex-thread-active-title' }, activeThread.title,
               buildCodexSessionBadge(activeThread, codexBridge)),
+            renderReturnToDm(activeThread),
             renderEngineChip(activeThread),
             codexUsageRing(codex.authStatus),
             el('button', {
@@ -9190,6 +9951,17 @@
           for (const message of activeThread.messages) {
             if (message.role === 'assistant' && message.runId && !(message.status === 'streaming' && !message.content)) lastAnswerOfRun.set(message.runId, message.id);
           }
+          // AGENT-05: every busy run of this room gets its own bubble, so a Board
+          // with several Agents at work shows each of them. The current run keeps
+          // the bubble below; the other runs' bubbles follow it, and their
+          // streaming answers drop the dots inside the bubble the same way.
+          const workingRows = AgentIdentityView.agentWorkingRows(roomRuns, {
+            connected: activeEngine.engineId === 'claude' ? activeEngine.ready : codex.connected, held: ChatState.nativeBindingHeld(activeThread),
+            roomName: roomProfile?.name || 'Codex', roomAvatar: roomProfile?.avatar || null, group: activeThread.type === 'group',
+          });
+          const currentWorkingRow = working ? workingRows.find(row => row.runId === (workingRun?.runId || '')) || null : null;
+          const otherWorkingRows = workingRows.filter(row => row.runId && row.runId !== (workingRun?.runId || ''));
+          const otherWorkingRunIds = new Set(otherWorkingRows.map(row => row.runId));
           const computerUseLine = (run) => {
             const view = run ? ChatState.computerUseView(run, { formatTime: formatMessageTime }) : null;
             if (!view) return null;
@@ -9212,8 +9984,14 @@
               el('span', { class: 'egd-codex-message-time' }, formatMessageTime(notice.at))));
             }
           };
+          // CHAT-03: copied blocks from a DM sit where the store saved them; while
+          // choosing, every finished bubble gets a box.
+          const sharedPlacement = ThreadRouting.sharedBlockPlacement(activeThread.routing, activeThread.messages);
+          const appendSharedBlocks = (shares) => { for (const share of shares || []) messages.appendChild(renderSharedBlock(activeThread, share)); };
+          const selecting = codex.messageSelect?.threadId === activeThread.id ? codex.messageSelect : null;
           activeThread.messages.forEach((message, index) => {
             if (Number.isFinite(message.createdAt)) appendControlNotices(message.createdAt);
+            appendSharedBlocks(sharedPlacement.beforeMessageId.get(message.id));
             if (message.role === 'assistant' && message.status === 'streaming' && !message.content) return;
             const resumed = ChatState.awaitResumeMessageView(message);
             if (resumed) {
@@ -9258,12 +10036,14 @@
               onclick: (ev) => { ev.stopPropagation(); codexBridge.toggleAnswerFold(activeThread.id, message.id); },
             }, foldOpen ? '접기' : '여기서 모두 보기')) : null;
             const resultChips = buildCodexResultChips(message, activeThread, parts.links);
+            const outputChips = buildCodexOutputChips(message, activeThread);
             const cardChip = cardable && !fold?.long ? el('button', {
               class: 'egd-codex-result-chip egd-codex-result-chip-card', type: 'button',
               title: '이 답변을 Canvas에 결과 카드로 남깁니다', data: { testid: 'chat-answer-card', answerId: message.answerId || '', messageId: message.id || '' },
               onclick: keepAsCard,
             }, el('span', { class: 'egd-codex-result-label' }, '카드로 보기')) : null;
-            const resultRow = resultChips || cardChip ? resultChips || el('div', { class: 'egd-codex-result-chips' }) : null;
+            const resultRow = resultChips || cardChip || outputChips.length ? resultChips || el('div', { class: 'egd-codex-result-chips' }) : null;
+            if (outputChips.length) resultRow.prepend(...outputChips);
             if (cardChip) resultRow.appendChild(cardChip);
             const briefingControl = BriefingState.validBriefing(message.briefing) ? el('button', {
               class: 'egd-codex-result-chip', data: { testid: 'briefing-open', answerId: message.answerId },
@@ -9285,6 +10065,7 @@
               bubble.appendChild(el('span', { class: 'egd-codex-message-time', role: 'status' }, ({ submitting: '보내는 중', unconfirmed: '접수 미확인', failed: '전송 거절됨' })[message.status]));
             }
             if (message.status === 'streaming' && message.role === 'assistant' && activeThread.profileEnabled === true && !ChatState.nativeBindingHeld(activeThread)
+              && !(message.runId && otherWorkingRunIds.has(message.runId))
               && !(working && message.runId && message.runId === workingRun?.runId)) {
               bubble.appendChild(el('div', {
                 class: 'egd-codex-streaming',
@@ -9298,22 +10079,38 @@
                 : author)
               : null;
             const meta = codexMessageTimeMeta(message, activeThread);
+            // CHAT-03: a bubble already copied to a Board Thread says so and opens it.
+            const sentMark = ThreadRouting.sharedOutMark(activeThread.routing, message);
+            const sentChip = sentMark ? el('button', {
+              class: 'egd-codex-result-chip egd-codex-sent-chip', type: 'button', title: '옮긴 Board Thread를 엽니다',
+              data: { testid: 'chat-sent-to-thread', threadId: sentMark.toClientThreadId || '' },
+              onclick: () => codexBridge.openSharedTarget(sentMark.toClientThreadId),
+            }, el('span', { class: 'egd-codex-result-label' }, ThreadRouting.SENT_TO_THREAD_TEXT)) : null;
+            const mentionRow = renderMentionRow(activeThread, message);
+            const selectBox = selecting && ThreadRouting.shareableMessage(message) ? el('input', {
+              type: 'checkbox', class: 'egd-codex-message-select', 'aria-label': '이 메시지를 옮길 목록에 넣기',
+              checked: selecting.ids.includes(message.id) ? 'true' : null,
+              data: { testid: 'chat-message-select', messageId: message.id, focusKey: `message-select-${message.id}` },
+              onchange: () => codexBridge.toggleMessageSelect(activeThread.id, message.id),
+            }) : null;
             // The message menu sits on the open side of the bubble.
             const menuTrigger = renderMessageMenuTrigger(activeThread, message);
             const messageLine = el('div', { class: 'egd-codex-message-line' },
-              message.role === 'user' ? menuTrigger : null, bubble, message.role === 'user' ? null : menuTrigger);
+              selectBox, message.role === 'user' ? menuTrigger : null, bubble, message.role === 'user' ? null : menuTrigger);
             const computerLine = message.role === 'assistant' && message.runId && lastAnswerOfRun.get(message.runId) === message.id
               ? computerUseLine(roomRuns.findLast(run => run.runId === message.runId)) : null;
             const messageStack = el('div', { class: 'egd-codex-message-stack' }, roleLabel, messageLine, answerFold, computerLine, resultRow, briefingControl, meta);
+            // CHAT-03: the @이름 chips sit right under the bubble, '스레드로 보냄' just above the time.
+            if (mentionRow) messageStack.insertBefore(mentionRow, messageLine.nextSibling);
+            if (sentChip) messageStack.insertBefore(sentChip, meta);
             if (message.inputReferences?.length) messageStack.appendChild(el('button', {
               class: 'egd-codex-result-chip', data: { testid: 'chat-message-inputs', requestId: message.requestId || '' },
               onclick: () => openCodexActivityPanel(activeThread.id),
             }, `첨부 입력 ${message.inputReferences.length}개 · 기록 보기`));
-            const authorAvatar = message.role === 'assistant'
-              ? message.authorAvatar || (roomProfile?.avatar && roomProfile.name === author ? roomProfile.avatar : null) : null;
-            const avatarView = ChatState.profileAvatarView(authorAvatar, author);
-            const avatarClass = `egd-codex-message-avatar${groupedWithPrevious ? ' egd-codex-message-avatar-spacer' : ''}${avatarView.saved ? ` egd-profile-avatar-tone-${avatarView.tone}` : ''}`;
-            const avatarText = groupedWithPrevious ? '' : avatarView.saved ? avatarView.text : author.slice(0, 1);
+            // AGENT-05: the face is the photo (D-A3) once read, else the saved emoji/initial on its tone.
+            const face = codexMessageAvatarFace(AgentIdentityView.messageAuthorAvatar(message, author, roomProfile), author);
+            const avatarClass = `egd-codex-message-avatar${groupedWithPrevious ? ' egd-codex-message-avatar-spacer' : ''}${face.toneClass}`;
+            const avatarText = groupedWithPrevious ? '' : face.photo ? el('img', { class: 'egd-profile-avatar-image', src: face.photo, alt: '', draggable: 'false' }) : face.text;
             const avatar = message.role === 'assistant' && !groupedWithPrevious
               ? el('button', peekTriggerProps(message, author, avatarClass, `agent-peek-face-${message.id}`), avatarText)
               : message.role !== 'user' ? el('div', { class: avatarClass, 'aria-hidden': 'true' }, avatarText) : null;
@@ -9332,22 +10129,43 @@
           if (working) {
             messages.appendChild(codexAgentWorkingRow(working, {
               runId: workingRun.runId || '', name: workingRun.authorName || roomProfile?.name || 'Codex',
-              avatar: workingRun.authorAvatar || roomProfile?.avatar || null,
-              onOpen: () => codexBridge.openActivity(activeThread.id),
+              avatar: workingRun.authorAvatar || roomProfile?.avatar || null, showName: !!currentWorkingRow?.showName,
+              // The record opens on this run's head (CHAT-07 activity record, AGENT-05).
+              onOpen: () => codexBridge.openActivity(activeThread.id, { runId: workingRun.runId || null }),
+            }));
+          }
+          for (const row of otherWorkingRows) {
+            messages.appendChild(codexAgentWorkingRow(row, {
+              runId: row.runId, name: row.name, avatar: row.avatar, showName: row.showName,
+              onOpen: () => codexBridge.openActivity(activeThread.id, { runId: row.runId }),
             }));
           }
           // A run with no answer shown yet keeps its count at the end of the conversation.
           const unansweredLine = workingRun?.runId && !lastAnswerOfRun.has(workingRun.runId) ? computerUseLine(workingRun) : null;
           if (unansweredLine) messages.appendChild(el('div', { class: 'egd-codex-computer-use-row' }, unansweredLine));
+          // CHAT-03: copies saved after the last bubble, or just moved and not saved yet, close the conversation.
+          appendSharedBlocks(sharedPlacement.trailing);
         }
+        // CHAT-03: while choosing, the count and the way out sit above the log.
+        if (codex.messageSelect?.threadId === activeThread.id) conversation.appendChild(el('div', {
+          class: 'egd-codex-select-bar', role: 'toolbar', 'aria-label': '옮길 메시지 고르기',
+          data: { testid: 'chat-select-bar', count: String(codex.messageSelect.ids.length) },
+        }, el('span', { class: 'egd-codex-select-bar-text' }, `메시지 ${codex.messageSelect.ids.length}개 고름 · 최대 ${ThreadRouting.MAX_SHARED_MESSAGES}개`),
+        el('button', {
+          class: 'egd-codex-chip egd-codex-chip-primary', type: 'button', disabled: codex.messageSelect.ids.length ? null : 'true',
+          data: { testid: 'chat-select-move', focusKey: 'select-move' },
+          onclick: (ev) => codexBridge.openBoardMove(activeThread.id, codex.messageSelect.ids, ev.currentTarget),
+        }, ThreadRouting.MOVE_TO_BOARD_LABEL),
+        el('button', { class: 'egd-codex-chip', type: 'button', data: { testid: 'chat-select-cancel' }, onclick: () => codexBridge.cancelMessageSelect() }, '취소')));
         conversation.appendChild(messages);
         if (codex.agentPeek?.threadId === activeThread.id) {
           const peekMessage = activeThread.messages.find((message) => message.id === codex.agentPeek.messageId && message.role === 'assistant');
           if (peekMessage) conversation.appendChild(renderAgentPeek(activeThread, peekMessage));
         }
         const menuMessage = codex.messageMenu?.threadId === activeThread.id
-          ? activeThread.messages.find((message) => message.id === codex.messageMenu.messageId && ChatState.chatMessageForkPoint(activeThread, message)) : null;
+          ? activeThread.messages.find((message) => message.id === codex.messageMenu.messageId && messageMenuAvailable(activeThread, message)) : null;
         if (menuMessage) conversation.appendChild(renderMessageMenu(activeThread, menuMessage));
+        if (codex.boardMove?.threadId === activeThread.id) conversation.appendChild(renderBoardMovePicker(activeThread));
         if (activeThread.localHistoryCoverage && activeThread.localHistoryCoverage.status !== 'complete') conversation.appendChild(el('p', {
           class: 'egd-codex-run-status', role: 'status', data: { testid: 'chat-local-history-coverage' },
         }, activeThread.localHistoryCoverage.status === 'unknown' && !activeThread.localHistoryCoverage.reasons?.length
@@ -10404,6 +11222,19 @@
     let profileCatalogLoad = null;
     // CHAT-07 peek: GET /profiles/:id per Agent, keyed by the active revision asked for.
     const agentProfileDetails = new Map();
+    // AGENT-05 / D-A3: avatar photos by asset id, each read once per session from
+    // GET /profiles/avatar-images/:id. Null until (or unless) the bytes arrive —
+    // a photo that cannot be read leaves the initial standing; it is not retried.
+    const avatarImages = new Map();
+    const avatarImage = (assetId) => {
+      if (!AgentIdentityView.isAvatarAssetId(assetId)) return null;
+      if (avatarImages.has(assetId)) return avatarImages.get(assetId);
+      avatarImages.set(assetId, null);
+      fetchJson(`/profiles/avatar-images/${encodeURIComponent(assetId)}`)
+        .then((payload) => { avatarImages.set(assetId, AgentIdentityView.agentAvatarImageSource(payload, assetId)); emit(); })
+        .catch(() => {});
+      return null;
+    };
     const loadProfileCatalog = () => {
       if (profileCatalogLoad) return profileCatalogLoad;
       if (codexProfileCatalog.status !== 'ready') codexProfileCatalog = { status: 'loading', profiles: [] };
@@ -10440,9 +11271,15 @@
       if (getCodexThreadById(state.codex, clientThreadId)) return;
       const type = detail.type === 'group' ? 'group' : 'dm';
       const title = detail.title || summary.title || 'Codex';
+      // CHAT-01: this room was not brought back by the Desk pref (no thread with
+      // its ID), so it answers as the Agent the store recorded for it
+      // (thread.agent) — by ID only; revision is carried, not applied. A pref
+      // field that reached here (detail.profileEnabled) still comes first.
+      const storeAgent = ChatState.roomAgentRecord(detail.agent);
       const base = createCodexThread(type, title, detail.subtitle || '', {
         participants: detail.participants, participantRoles: detail.participantRoles,
-        profileEnabled: detail.profileEnabled === true, agentProfileId: detail.agentProfileId,
+        profileEnabled: detail.profileEnabled === true || !!storeAgent,
+        agentProfileId: detail.profileEnabled === true ? detail.agentProfileId : storeAgent?.profileId,
       });
       const recordedAccountKey = detail.bindingAccountKey || detail.retainedNativeBinding?.accountKey;
       const originalAccountKey = ChatState.knownCodexAccountKey(recordedAccountKey) ? recordedAccountKey : null;
@@ -10493,7 +11330,8 @@
             legacyHistoryRecords.find(record => record.clientThreadId === clientThreadId));
         }
         if (current?.localConversationId && current.localConversationId !== normalized.localConversationId) throw new Error('로컬 기록의 채팅방 식별자가 바뀌었습니다.');
-        updateThreadById(clientThreadId, () => ChatState.hydrateLocalChatThread(current, normalized, { liveFenceRevision }));
+        updateThreadById(clientThreadId, () => ({ ...ChatState.hydrateLocalChatThread(current, normalized, { liveFenceRevision }),
+          routing: ThreadRouting.routingWithEvents(current?.routing, normalized.events) }));
         emit();
         if (!normalized.hasMore) return;
         const nextSeq = Number(normalized.nextCursor);
@@ -10501,6 +11339,19 @@
         afterSeq = nextSeq;
         seenCursors.add(String(afterSeq));
       }
+    }
+
+    // CHAT-03: one room's saved history read again, so live bubbles carry the store's
+    // names (localMessageId) before they are moved. Quiet when the bridge has none.
+    async function refreshLocalHistoryForThread(thread) {
+      const clientThreadId = ChatState.clientThreadBinding(thread);
+      if (!clientThreadId || clientThreadId !== thread?.id) return false;
+      try {
+        const head = await fetchJson(`/chat/history?clientThreadId=${encodeURIComponent(clientThreadId)}&afterSeq=0&limit=1`);
+        if (!head?.thread?.localConversationId) return false;
+        await loadLocalHistoryThread({ ...head.thread, clientThreadId });
+        return true;
+      } catch { return false; }
     }
 
     function queueLocalHistoryRetry() {
@@ -11216,6 +12067,8 @@
         return createCodexActivityReadScope(threadId, epochScope, fetchJson, onInvalidate);
       },
       openActivity(threadId = state.codex.activeThreadId, focus = null) { openCodexActivityPanel(threadId, focus); },
+      // AGENT-05 / D-A3: the data: URL of a saved avatar photo once read, else null (and the read starts).
+      avatarImage,
       async replyApproval({ approvalId, conversationId, runId, decision }) {
         const run = protocol.runs[ChatState.runKey(conversationId, runId)];
         const approval = run?.pendingApprovals.find(item => (item.approvalId || item.id) === approvalId);
@@ -11656,6 +12509,27 @@
         state.codex.expandedAnswers = open ? rest : { ...rest, [key]: true };
         emit();
       },
+      // CHAT-08: the chip's GET. The event stream never carried the body, so
+      // the result is read here (the routing hints every context read sends)
+      // and opened as a CHAT-04 result card. Null when the bridge or the room
+      // cannot serve it (no route on an older bridge, a Claude room, a network
+      // failure) — the chip says so itself; nothing is announced.
+      async openPublishedOutput(threadId, messageId, output, options = {}) {
+        const thread = getCodexThreadById(state.codex, threadId);
+        const published = ChatState.publishedOutputRecord(output);
+        if (!thread || !published) return null;
+        let scope = {};
+        try { scope = ChatState.chatContextRequestScope(thread, state.codex); } catch { scope = {}; }
+        if (scope.engineId === 'claude') return null;
+        const query = Object.entries(scope).map(([key, value]) => `${key}=${encodeURIComponent(value)}`).join('&');
+        let read;
+        try { read = await fetchJson(`/context/outputs/${encodeURIComponent(published.id)}${query ? `?${query}` : ''}`); } catch { return null; }
+        if (read?.output?.id !== published.id || typeof read.markdown !== 'string') return null;
+        const current = getCodexThreadById(state.codex, threadId) || thread;
+        const message = (current.messages || []).find(item => item.id === messageId) || null;
+        const record = ChatState.publishedOutputCardRecord(current, message, read.output, read.markdown, { author: message ? codexMessageAuthorLabel(message) : 'Codex' });
+        return record ? spawnResultCard({ record, opener: options.opener || null }) : null;
+      },
       addInputSources(threadId, sources) {
         const thread = getCodexThreadById(state.codex, threadId);
         if (!thread || thread.preparingInput) return;
@@ -12009,6 +12883,22 @@
         state.codex.threadMenu = null;
         state.codex.memberMenu = null;
         emit();
+        // CHAT-01: the store remembers the pick too (null = back to plain Codex),
+        // so a restart without the Desk pref restores it — and does not revive
+        // an older pick. The revision travels as a send would send it (the
+        // catalog's active revision for a saved Agent); it is kept, not applied.
+        // A room that has not been sent yet is not in the store (404) and its
+        // first send records it; any other failure leaves the screen's pick alone.
+        const clientThreadId = ChatState.clientThreadBinding(getCodexThreadById(state.codex, threadId));
+        if (!clientThreadId) return;
+        const revision = profileId && profile.server === true && Number.isSafeInteger(profile.revision) ? profile.revision : null;
+        fetchJson('/chat/rooms/agent', { method: 'POST', body: JSON.stringify({ clientThreadId, profileId: profileId ? normalizedProfileId : null, revision }) })
+          .then((result) => {
+            if (result?.clientThreadId !== clientThreadId) return;
+            // thread.agent is the store's record of the room Agent (ChatState.restoredRoomAgentFields).
+            updateThreadById(threadId, (current) => ({ ...current, agent: ChatState.roomAgentRecord(result.agent) }));
+          })
+          .catch(() => {});
       },
       cycleThreadAgentProfile(threadId) {
         const thread = getCodexThreadById(state.codex, threadId);
@@ -12225,6 +13115,112 @@
         if (!state.codex.messageMenu) return;
         state.codex.messageMenu = null;
         emit();
+      },
+      // CHAT-03 (D-M3): choosing DM bubbles and moving their copies into a Board Thread.
+      startMessageSelect(threadId, messageId = null) {
+        const thread = getCodexThreadById(state.codex, threadId);
+        if (!thread || thread.type !== 'dm') return;
+        const ids = messageId && thread.messages.some(message => message.id === messageId && ThreadRouting.shareableMessage(message)) ? [messageId] : [];
+        state.codex.messageSelect = { threadId, ids };
+        state.codex.messageMenu = null;
+        state.codex.boardMove = null;
+        emit();
+      },
+      toggleMessageSelect(threadId, messageId) {
+        const select = state.codex.messageSelect;
+        if (!select || select.threadId !== threadId || !messageId) return;
+        if (select.ids.includes(messageId)) state.codex.messageSelect = { ...select, ids: select.ids.filter(id => id !== messageId) };
+        else if (select.ids.length < ThreadRouting.MAX_SHARED_MESSAGES) state.codex.messageSelect = { ...select, ids: [...select.ids, messageId] };
+        else boardNotice(`한 번에 ${ThreadRouting.MAX_SHARED_MESSAGES}개까지 옮길 수 있습니다.`);
+        emit();
+      },
+      cancelMessageSelect() {
+        if (!state.codex.messageSelect && !state.codex.boardMove) return;
+        state.codex.messageSelect = null;
+        state.codex.boardMove = null;
+        emit();
+      },
+      openBoardMove(threadId, ids, anchorEl = null) {
+        const thread = getCodexThreadById(state.codex, threadId);
+        const chosen = (Array.isArray(ids) ? ids : []).filter(id => thread?.messages.some(message => message.id === id));
+        if (!thread || thread.type !== 'dm' || !chosen.length) return;
+        const rect = anchorEl?.getBoundingClientRect?.();
+        state.codex.boardMove = { threadId, ids: chosen, busy: false, error: null, ...(rect ? resolveFloatingMenuPlacement(rect, 260, 240) : { left: 12, top: 12 }) };
+        state.codex.messageMenu = null;
+        state.codex.threadMenu = null;
+        emit();
+      },
+      closeBoardMove() {
+        if (!state.codex.boardMove) return;
+        state.codex.boardMove = null;
+        emit();
+      },
+      // The copies go through POST /chat/share: the bridge writes a line on both sides and
+      // hands the block to the receiving Agent's next turn. A bubble the store has not
+      // named yet is read again from local history first.
+      async moveMessagesToBoardThread(threadId, ids, { toThreadId = null, create = false } = {}) {
+        const from = getCodexThreadById(state.codex, threadId);
+        if (!from || from.type !== 'dm' || !state.codex.boardMove || state.codex.boardMove.busy) return false;
+        state.codex.boardMove = { ...state.codex.boardMove, busy: true, error: null };
+        emit();
+        const fail = (message) => {
+          if (state.codex.boardMove?.threadId === threadId) state.codex.boardMove = { ...state.codex.boardMove, busy: false, error: message };
+          else boardNotice(message);
+          emit();
+          return false;
+        };
+        try {
+          let picked = ThreadRouting.resolveShareMessages(from, ids);
+          if (picked.missing.length) {
+            await refreshLocalHistoryForThread(from);
+            picked = ThreadRouting.resolveShareMessages(getCodexThreadById(state.codex, threadId) || from, ids);
+          }
+          if (!picked.localMessageIds.length || picked.missing.length) return fail(ThreadRouting.shareErrorText('MESSAGE_NOT_FOUND'));
+          let target = toThreadId ? getCodexThreadById(state.codex, toThreadId) : null;
+          if (!target && create) {
+            // The new Board Thread starts with the DM's Agent as its Lead; the DM stays open.
+            this.createThread('group', { openConversation: false, profileEnabled: from.profileEnabled === true, agentProfileId: from.agentProfileId });
+            target = getActiveCodexThread(state.codex);
+            this.selectThread(from.id, { openConversation: true });
+          }
+          if (!target || target.type !== 'group') return fail(ThreadRouting.shareErrorText('CONVERSATION_NOT_FOUND'));
+          const result = await fetchJson('/chat/share', { method: 'POST', body: JSON.stringify(ThreadRouting.buildShareRequest(from, target, picked.localMessageIds)) });
+          if (result?.accepted !== true) return fail(ThreadRouting.shareErrorText(result?.code));
+          const now = Date.now();
+          updateThreadById(from.id, current => ({ ...current, routing: ThreadRouting.routingAfterSend(current.routing, result, picked.localMessageIds, now) }));
+          updateThreadById(target.id, current => ({ ...current, routing: ThreadRouting.routingAfterReceive(current.routing, result, picked.messages, now) }));
+          state.codex.boardMove = null;
+          state.codex.messageSelect = null;
+          boardNotice(ThreadRouting.moveDoneText(picked.localMessageIds.length, target.title));
+          this.selectThread(target.id, { openConversation: true });
+          return true;
+        } catch (error) {
+          return fail(ThreadRouting.shareErrorText(error));
+        }
+      },
+      // '원래 대화 보기' on a copied block: the DM opens on the first copied bubble.
+      openSharedOrigin(threadId, shareId) {
+        const thread = getCodexThreadById(state.codex, threadId);
+        const share = (thread?.routing?.sharedIn || []).find(entry => entry.shareId === shareId);
+        const target = share ? ThreadRouting.sharedOriginTarget(share, state.codex.threads) : null;
+        if (!target) { boardNotice('원래 대화를 이 기기에서 찾지 못했습니다.'); return false; }
+        state.codex.revealMessage = target.messageId ? { threadId: target.threadId, messageId: target.messageId } : null;
+        this.selectThread(target.threadId, { openConversation: true });
+        return true;
+      },
+      // '스레드로 보냄' on a DM bubble opens the Board Thread it went to.
+      openSharedTarget(clientThreadId) {
+        const target = ThreadRouting.threadByClientId(state.codex.threads, clientThreadId);
+        if (!target) { boardNotice('옮긴 Board Thread를 이 기기에서 찾지 못했습니다.'); return false; }
+        this.selectThread(target.id, { openConversation: true });
+        return true;
+      },
+      // [DM으로 돌아오기]: the DM that last sent copies here.
+      returnToDm(threadId) {
+        const target = ThreadRouting.returnToDmTarget(getCodexThreadById(state.codex, threadId), state.codex.threads);
+        if (!target) { boardNotice('돌아갈 DM을 이 기기에서 찾지 못했습니다.'); return false; }
+        this.selectThread(target.id, { openConversation: true });
+        return true;
       },
       // CHAT-07: one peek at a time, opened beside the face or name that was pressed.
       toggleAgentPeek(threadId, messageId, anchorEl = null) {
@@ -13400,6 +14396,16 @@
     const identity = el('div', { class: 'egd-desk-window-identity' });
     identity.appendChild(deskIcon({ browser: 'browser', ontology: 'ontology', file: 'file', 'input-evidence': 'file', result: 'result' }[kind] || 'square', 'egd-ui-icon egd-window-kind-icon'));
     const boardMetadata = el('span', { class: 'egd-desk-window-board', role: 'note', hidden: true, data: { testid: 'window-board' } });
+    // CNV-03: the Board control after the name. It opens '넣기 / 빼기'; without a
+    // recorded owner it says '소속 없음' so the bar never implies a Board.
+    const boardMenuText = el('span', { class: 'egd-desk-window-board-menu-text' }, '소속 없음');
+    const boardMenu = el('button', {
+      type: 'button', class: 'egd-desk-window-board-menu', title: '소속 없음 · Board에 넣기', 'aria-label': '소속 없음 · Board에 넣기',
+      'aria-haspopup': 'menu', 'aria-expanded': 'false',
+      data: { testid: 'window-board-menu', owned: 'none', noWindowDrag: 'true' },
+      onclick: (ev) => { ev.stopPropagation(); state.toggleViewBoardMenu?.(root, ev.currentTarget); },
+    }, boardMenuText, deskIcon('chevron', 'egd-ui-icon egd-desk-window-board-menu-icon'));
+    boardMenu._text = boardMenuText;
     const actions = el('div', { class: 'egd-desk-window-actions' });
     const topbar = el('div', { class: 'egd-card-topbar egd-desk-window-titlebar' },
       el('div', { class: 'egd-card-dots-shell' },
@@ -13408,6 +14414,7 @@
       el('span', { class: 'egd-window-grip', 'aria-hidden': 'true' }, deskIcon('grip')),
       identity,
       boardMetadata,
+      boardMenu,
       actions,
     );
     const header = el('div', {
@@ -13442,6 +14449,10 @@
     if (options.sourceRef) bindCardSourceRef(root, options.sourceRef);
     markAgendaDirty(options.createDirtyReason || `create-${kind}-window`, root);
     if (options.activate !== false) setActiveEntity(root);
+    // D-V2: a View opened inside a Board region is only offered membership,
+    // once its opener has placed it. Restored Views are bound by their record.
+    const quietOpen = !!(state.agenda?.suppressDirty || state.agenda?.restoreInProgress || state.surface?.restoring);
+    if (!quietOpen) setTimeout(() => { if (root.isConnected && !root.dataset.projectionId) state.offerBoardMembership?.(root, 'open'); }, 0);
 
     const startPanIfNeeded = (ev) => {
       if (!state.panModifier || ev.button !== 0) return false;
@@ -13542,6 +14553,8 @@
     const onUp = () => {
       if (drag) markAgendaDirty(options.moveDirtyReason || `move-${kind}-window`, root);
       if (resize) markAgendaDirty(options.resizeDirtyReason || `resize-${kind}-window`, root);
+      // D-V3: a drop into a Board region offers membership; a plain press does not.
+      if (drag && (root.offsetLeft !== drag.left || root.offsetTop !== drag.top)) state.offerBoardMembership?.(root, 'drop');
       drag = null;
       resize = null;
     };
@@ -13560,6 +14573,7 @@
     const shell = {
       root,
       boardMetadata,
+      boardMenu,
       slots: { header, topbar, identity, actions, toolbar, progress, content: body },
       resizeHits,
       focus,
@@ -13814,6 +14828,7 @@
 
   const spawnFileCard = surfaceForward('fileCard', 'spawnFileCard');
   const openBoardProjectFile = surfaceForward('fileCard', 'openBoardProjectFile');
+  const openBoardProjectFileAt = surfaceForward('fileCard', 'openBoardProjectFileAt');
   const openVerifiedRunFile = surfaceForward('fileCard', 'openVerifiedRunFile');
 
   function getProjectTarget() {
@@ -13826,6 +14841,8 @@
   }
 
   // ============ Settings Canvas Card ============
+  // 계정 view models (SUB-05/SUB-01): bridge snapshots → rows and confirmation copy.
+  const AccountSettingsView = ChromeUtils.importESModule('chrome://userchrome/content/EGDeskAccountSettingsView.sys.mjs');
   // 계정: the real ChatGPT sign-in, plan and usage from the bridge.
   // Agent 관리: Agent Profiles in the local profile store (/profiles).
   function settingsProfileAccountKey() {
@@ -13964,30 +14981,74 @@
     const bridge = () => state.codexBridge || null;
 
     // --- 계정: the signed-in ChatGPT account as the bridge reports it ---
+    // SUB-01 account menu: '로그아웃' and '다른 계정으로 로그인' go through the real
+    // /auth/* client calls, name the running work first, and read the account
+    // back from the bridge afterwards. Nothing switches quietly.
+    let accountAction = null;
+    const runAccountAction = async (action) => {
+      if (!bridge()?.signOut || accountAction?.phase === 'running') return;
+      accountAction = { action, phase: 'running' };
+      renderAccountTab();
+      await bridge()?.signOut();
+      let outcome = AccountSettingsView.accountActionOutcome(action, state.codex.authStatus, { error: state.codex.error });
+      if (action === 'switch' && outcome.phase === 'signedOut') {
+        await bridge()?.startLogin();
+        outcome = AccountSettingsView.accountActionOutcome(action, state.codex.authStatus, { error: state.codex.error, loginStarted: !state.codex.error });
+      }
+      // The sign-out reply is not the whole picture: /v1/state again (account, usage, engines).
+      if (outcome.phase !== 'error') await bridge()?.refreshAuthStatus();
+      accountAction = { action, phase: outcome.phase, text: outcome.text };
+      renderAccountTab();
+    };
     const renderAccountTab = () => {
       const codex = state.codex;
       const auth = codex.authStatus || {};
       const loginBusy = Boolean(codex.isStartingLogin || auth.loginInProgress);
+      const connection = AccountSettingsView.settingsConnectionView({ connected: codex.connected, bridgeState: codexBridgeNotice(codex).state });
       const section = el('section', { class: 'egd-settings-section', 'aria-label': 'ChatGPT 계정' },
         el('div', { class: 'egd-settings-section-title' }, 'ChatGPT 계정'));
-      if (!codex.connected) {
-        section.appendChild(el('div', { class: 'egd-settings-account-card', data: { testid: 'settings-account', state: 'offline' } },
+      // A confirmation stands only while the account it names is still signed in.
+      if (accountAction?.phase === 'confirm' && (connection.state !== 'online' || !auth.isLoggedIn)) accountAction = null;
+      if (connection.state !== 'online') {
+        // '확인 중' until the bridge answers or the quiet reconnects run out; a
+        // stale account from before the break is not shown as current.
+        section.appendChild(el('div', { class: 'egd-settings-account-card', data: { testid: 'settings-account', state: connection.state } },
           el('div', { class: 'egd-settings-account-copy' },
-            el('div', { class: 'egd-settings-account-title' }, '코덱스에 연결되지 않았습니다'),
-            el('div', { class: 'egd-settings-account-sub' }, '이 컴퓨터의 코덱스 연결이 준비되면 계정과 사용 한도를 보여 드립니다.')),
-          el('button', { class: 'egd-settings-btn', onclick: () => bridge()?.refreshAuthStatus() }, '상태 새로고침')));
+            el('div', { class: 'egd-settings-account-title' }, connection.title),
+            el('div', { class: 'egd-settings-account-sub' }, connection.sub)),
+          connection.action === 'reconnect'
+            ? el('button', { class: 'egd-settings-btn', type: 'button', data: { testid: 'settings-account-reconnect' },
+              onclick: () => { const api = bridge(); if (api?.reconnectNow) api.reconnectNow(); else api?.refreshAuthStatus(); } }, connection.actionLabel)
+            : el('button', { class: 'egd-settings-btn', type: 'button', onclick: () => bridge()?.refreshAuthStatus() }, '상태 새로고침')));
       } else if (!auth.isLoggedIn) {
         section.appendChild(el('div', { class: 'egd-settings-account-card', data: { testid: 'settings-account', state: 'signed-out' } },
           el('div', { class: 'egd-settings-account-copy' },
-            el('div', { class: 'egd-settings-account-title' }, '로그인되어 있지 않습니다'),
-            el('div', { class: 'egd-settings-account-sub' }, 'ChatGPT 계정으로 로그인하면 대화를 시작하고 사용 한도를 확인할 수 있습니다.')),
+            el('div', { class: 'egd-settings-account-title' }, loginBusy ? '로그인 진행 중' : '로그인되어 있지 않습니다'),
+            el('div', { class: 'egd-settings-account-sub' }, loginBusy
+              ? '브라우저 카드에서 ChatGPT 로그인을 마치면 여기에 계정이 보입니다.'
+              : 'ChatGPT 계정으로 로그인하면 대화를 시작하고 사용 한도를 확인할 수 있습니다.')),
           el('button', {
             class: 'egd-settings-btn egd-settings-btn-primary', disabled: loginBusy ? 'true' : null,
-            onclick: () => bridge()?.startLogin(),
+            onclick: () => { accountAction = null; bridge()?.startLogin(); },
           }, loginBusy ? '로그인 중…' : '로그인')));
       } else {
         const email = typeof auth.accountEmail === 'string' && auth.accountEmail.trim() ? auth.accountEmail.trim() : null;
         const plan = ChatState.codexPlanLabel(auth.planType);
+        const running = accountAction?.phase === 'running';
+        const menu = el('details', { class: 'egd-settings-account-menu', data: { testid: 'settings-account-menu' } },
+          el('summary', { class: 'egd-settings-btn egd-settings-account-menu-summary', 'aria-label': '계정 메뉴', 'aria-haspopup': 'menu' }, '계정 메뉴'),
+          el('div', { class: 'egd-settings-account-menu-list', role: 'menu' },
+            ...AccountSettingsView.accountMenuItems(auth).map((item) => el('button', {
+              class: `egd-settings-account-menu-item${item.tone === 'danger' ? ' egd-settings-account-menu-item-danger' : ''}`,
+              type: 'button', role: 'menuitem', disabled: running ? 'true' : null, data: { testid: `settings-account-${item.id}` },
+              onclick: () => {
+                menu.open = false;
+                if (item.id === 'refresh') { accountAction = null; void bridge()?.refreshAuthStatus(); return; }
+                accountAction = { action: item.id, phase: 'confirm',
+                  busy: AccountSettingsView.busyRunSummary({ threads: state.codex.threads, protocol: state.codex.chatProtocol }) };
+                renderAccountTab();
+              },
+            }, item.label))));
         section.appendChild(el('div', { class: 'egd-settings-account-card', data: { testid: 'settings-account', state: 'signed-in' } },
           el('span', { class: 'egd-profile-avatar egd-profile-avatar-tone-0 egd-settings-account-avatar', 'aria-hidden': 'true' },
             ChatState.profileAvatarView(null, email || 'C').text),
@@ -13995,7 +15056,21 @@
             el('div', { class: 'egd-settings-account-title' }, email || '이메일 확인 안 됨'),
             el('div', { class: 'egd-settings-account-sub' }, 'ChatGPT로 로그인됨',
               el('span', { class: 'egd-settings-plan-badge', data: { testid: 'settings-plan' } }, plan ? `${plan} 요금제` : '요금제 확인 안 됨'))),
-          el('button', { class: 'egd-settings-btn', onclick: () => bridge()?.signOut() }, '로그아웃')));
+          menu));
+        if (accountAction?.phase === 'confirm') {
+          const confirm = AccountSettingsView.accountActionConfirm(accountAction.action, { email, busy: accountAction.busy });
+          section.appendChild(el('div', {
+            class: `egd-settings-account-confirm egd-settings-account-confirm-${confirm.tone}`, role: 'group', 'aria-label': confirm.title,
+            data: { testid: 'settings-account-confirm', action: confirm.action, busyRuns: String(confirm.busyCount) },
+          },
+          el('div', { class: 'egd-settings-account-confirm-title' }, confirm.title),
+          ...confirm.lines.map((line) => el('div', { class: 'egd-settings-account-confirm-line' }, line)),
+          el('div', { class: 'egd-settings-account-confirm-actions' },
+            el('button', { class: 'egd-settings-btn egd-settings-btn-danger', type: 'button', data: { testid: 'settings-account-confirm-ok' },
+              onclick: () => { void runAccountAction(confirm.action); } }, confirm.confirmLabel),
+            el('button', { class: 'egd-settings-btn', type: 'button', data: { testid: 'settings-account-confirm-cancel' },
+              onclick: () => { accountAction = null; renderAccountTab(); } }, confirm.cancelLabel))));
+        }
         const ring = ChatState.usageRingView(auth);
         const usage = auth.usage && typeof auth.usage === 'object' ? auth.usage : {};
         const unknown = ring.level === 'unknown';
@@ -14011,14 +15086,40 @@
           ring.stale ? el('div', { class: 'egd-settings-usage-note' }, '확인한 지 오래되어 실제와 다를 수 있습니다.') : null,
           ring.level === 'limit' ? el('div', { class: 'egd-settings-usage-note egd-settings-usage-note-strong' }, '한도에 도달했습니다. 초기화 전까지는 새 요청이 거절될 수 있습니다.') : null)));
       }
+      if (accountAction?.phase === 'running') {
+        section.appendChild(el('div', { class: 'egd-settings-account-result egd-settings-account-result-running', role: 'status',
+          data: { testid: 'settings-account-progress', action: accountAction.action } },
+        accountAction.action === 'switch' ? '로그아웃하고 새 로그인을 시작하는 중…' : '로그아웃하는 중…'));
+      } else if (accountAction && accountAction.phase !== 'confirm') {
+        section.appendChild(el('div', {
+          class: `egd-settings-account-result egd-settings-account-result-${accountAction.phase}`, role: accountAction.phase === 'error' ? 'alert' : 'status',
+          data: { testid: 'settings-account-result', phase: accountAction.phase, action: accountAction.action },
+        }, accountAction.text));
+      }
+      // Claude (D-S1): the CLI's own login as the bridge last reported it —
+      // subscription, API key, external provider or signed out. '다시 확인' reads
+      // /v1/state again; the bridge re-runs its static check there.
       const claude = ChatState.claudeSettingsView(codex.engines, { connected: codex.connected });
-      contentArea.replaceChildren(section, renderComputerControl(), renderConnectedTools(), el('section', { class: 'egd-settings-section', 'aria-label': 'Claude' },
+      const claudeAccount = AccountSettingsView.claudeAccountView(codex.engines, { connected: codex.connected });
+      const claudeSection = el('section', { class: 'egd-settings-section', 'aria-label': 'Claude' },
         el('div', { class: 'egd-settings-section-title' }, 'Claude'),
+        el('div', { class: 'egd-settings-account-card', data: { testid: 'settings-claude-account', state: claudeAccount.status } },
+          claudeAccount.status === 'signedIn' ? el('span', { class: 'egd-profile-avatar egd-profile-avatar-tone-3 egd-settings-account-avatar', 'aria-hidden': 'true' },
+            ChatState.profileAvatarView(null, claudeAccount.account || 'A').text) : null,
+          el('div', { class: 'egd-settings-account-copy' },
+            el('div', { class: 'egd-settings-account-title' }, claudeAccount.title),
+            el('div', { class: 'egd-settings-account-sub' }, claudeAccount.sub,
+              claudeAccount.methodLabel ? el('span', { class: 'egd-settings-plan-badge', data: { testid: 'settings-claude-method', method: claudeAccount.method || 'unknown' } }, claudeAccount.methodLabel) : null)),
+          claudeAccount.action === 'refresh'
+            ? el('button', { class: 'egd-settings-btn', type: 'button', data: { testid: 'settings-claude-refresh' }, onclick: () => bridge()?.refreshAuthStatus() }, '다시 확인')
+            : null),
+        claudeAccount.hint ? el('p', { class: 'egd-settings-section-sub egd-settings-account-hint', data: { testid: 'settings-claude-hint' } }, claudeAccount.hint) : null,
         el('div', { class: 'egd-settings-pending-line', data: { testid: 'settings-claude', auth: claude.authStatus, state: claude.engineStatus } },
           el('div', { data: { testid: 'settings-claude-auth' } }, claude.authText),
           el('div', { data: { testid: 'settings-claude-engine' } }, claude.engineText),
           claude.connectionText ? el('div', { data: { testid: 'settings-claude-connection' } }, claude.connectionText) : null,
-          claude.versionText ? el('div', { data: { testid: 'settings-claude-version' } }, claude.versionText) : null)));
+          claude.versionText ? el('div', { data: { testid: 'settings-claude-version' } }, claude.versionText) : null));
+      contentArea.replaceChildren(section, renderComputerControl(), renderConnectedTools(), claudeSection);
     };
 
     // --- 컴퓨터 조작 (CU-01 stage 1): whether ordinary EG-Desk chats keep the
@@ -14854,7 +15955,7 @@
         void openProfile(agents.profileId);
       }
       if (duplicateInvalidated && activeTab === 'agents') renderAgentsTab();
-      const signature = JSON.stringify([codex.connected, codex.isStartingLogin, auth.isLoggedIn, auth.loginInProgress, auth.accountEmail,
+      const signature = JSON.stringify([codex.connected, codex.bridgeFailures, codex.bridgeError, codex.error, codex.isStartingLogin, auth.isLoggedIn, auth.loginInProgress, auth.accountEmail,
         auth.planType, auth.usage, auth.rateLimits, catalog?.status, catalog?.profiles, codex.inheritedMcp, codex.computerControl, codex.engines]);
       if (signature === lastCodexSignature) return;
       lastCodexSignature = signature;
@@ -14994,6 +16095,55 @@
   const browserToolRequestReceipts = new Map();
   const browserToolCardLeases = new Map();
   const browserToolActionLeases = new Map();
+  // BRW-11 (D-B3): the standing interaction grant a Card holds for one
+  // conversation, keyed `${clientThreadId}\0${cardId}`, and BRW-05 (D-B1): the
+  // sites each conversation allowed. A turn re-issues its one-time selection
+  // token from the grant; that token stays the only authority the helper sees.
+  const browserToolThreadGrants = new Map();
+  const browserToolThreadSites = new Map();
+  const browserToolGrantKey = (clientThreadId, cardId) => `${clientThreadId}\u0000${cardId}`;
+  function browserToolSiteForHost(host) {
+    try { return servicesRef().eTLD.getBaseDomainFromHost(host) || null; } catch { return null; }
+  }
+  function browserToolThreadSiteSet(clientThreadId) {
+    let sites = browserToolThreadSites.get(clientThreadId);
+    if (!sites) { sites = new Set(); browserToolThreadSites.set(clientThreadId, sites); }
+    return sites;
+  }
+  function browserToolNavigationPolicy(clientThreadId) {
+    return BrowserGrant.browserNavigationPolicy(browserToolThreadSites.get(clientThreadId) || []);
+  }
+  // D-B1 at every layer: the tool argument, a new Card, a history move and each
+  // committed document are judged by this one rule.
+  function browserToolNavigationAllowed(clientThreadId, toUrl, fromUrl) {
+    return BrowserGrant.browserGrantNavigation(toUrl, fromUrl, browserToolThreadSites.get(clientThreadId) || new Set(), browserToolSiteForHost);
+  }
+  // The grant if it still holds against the live Card (D-B3), else nothing;
+  // an expired grant is forgotten on the spot.
+  function browserToolGrantFor(clientThreadId, cardId) {
+    if (!clientThreadId || !cardId) return null;
+    const grantKey = browserToolGrantKey(clientThreadId, cardId);
+    const grant = browserToolThreadGrants.get(grantKey);
+    if (!grant) return null;
+    const card = document.getElementById(cardId);
+    let current = null, held = false;
+    try { current = card?.isConnected && card.classList?.contains('egd-browser-card') ? card._browserControls?.toolBinding?.() : null; } catch { current = null; }
+    try { held = card?._browserControls?.agentControlState?.().held === true; } catch { held = true; }
+    const state = BrowserGrant.browserGrantState(grant, current, { sites: browserToolThreadSites.get(clientThreadId),
+      siteForHost: browserToolSiteForHost, held });
+    if (state.valid) return grant;
+    browserToolThreadGrants.delete(grantKey);
+    return null;
+  }
+  function revokeBrowserToolGrants({ clientThreadId = null, cardId = null } = {}) {
+    let count = 0;
+    for (const [grantKey, grant] of browserToolThreadGrants) {
+      if ((clientThreadId && grant.clientThreadId !== clientThreadId) || (cardId && grant.cardId !== cardId)) continue;
+      browserToolThreadGrants.delete(grantKey);
+      count++;
+    }
+    return count;
+  }
   const browserToolFixtureAuthorizationByCard = new Map();
   let browserToolFixtureLastAction = null;
   let browserToolAuthorityEpoch = 0;
@@ -15008,12 +16158,15 @@
       if (!key.startsWith(prefix) || bound.clientThreadId !== clientThreadId) continue;
       browserToolRunBindings.delete(key);
       if (bound.selectionToken) browserToolUserSelections.delete(bound.selectionToken);
+      // D-B3, conservatively: Stop also ends this Card's standing grant here.
+      revokeBrowserToolGrants({ clientThreadId, cardId: bound.binding?.cardId || key.split('\u0000')[1] });
       revoked.add(key);
     }
     for (const [key, pending] of browserToolPendingBindings) {
       if (!key.startsWith(prefix) || pending.clientThreadId !== clientThreadId) continue;
       browserToolPendingBindings.delete(key);
       if (pending.selectionToken) browserToolUserSelections.delete(pending.selectionToken);
+      revokeBrowserToolGrants({ clientThreadId, cardId: key.split('\u0000')[1] });
       revoked.add(key);
     }
     for (const [leaseId, lease] of browserToolActionLeases) {
@@ -15030,6 +16183,7 @@
   function revokeBrowserToolCard(cardId) {
     const threads = new Set();
     if (typeof cardId !== 'string' || !cardId) return threads;
+    revokeBrowserToolGrants({ cardId });
     const onCard = key => key.includes(`\u0000${cardId}\u0000`);
     const revoked = new Set();
     for (const [key, bound] of browserToolRunBindings) {
@@ -15075,8 +16229,9 @@
         !clientThreadId || browserToolUserSelections.size >= 256) return null;
     const card = document.getElementById(source.sourceRef?.viewId);
     if (!card?.isConnected || !card.classList?.contains('egd-browser-card')) return null;
+    let current = null;
     try {
-      const current = card._browserControls?.toolBinding?.();
+      current = card._browserControls?.toolBinding?.();
       if (!current || !browserToolSameUrl(current.url, source.sourceRef.uri) ||
           current.profileId !== source.sourceRef.profileId || current.accountId !== source.sourceRef.accountId ||
           ['cardEpoch', 'userContextId', 'engineAccountKey', 'authorityEpoch'].some(field =>
@@ -15095,12 +16250,44 @@
       authorityEpoch: selected.browserToolIdentity.authorityEpoch,
       permission, usedRunId: null,
     });
+    // BRW-11: an interaction pick is a standing grant for this conversation; a
+    // read pick turns an earlier interaction grant on this Card read-only.
+    if (permission === 'interact') {
+      const prior = browserToolThreadGrants.get(browserToolGrantKey(clientThreadId, card.id));
+      const grant = BrowserGrant.browserGrantRecord({ clientThreadId, localThreadId: threadId, cardId: card.id, current,
+        siteForHost: browserToolSiteForHost, sourceId: selected.id,
+        openedByAgent: prior?.openedByAgent === true, openedFrom: prior?.openedFrom ?? null });
+      if (grant) browserToolThreadGrants.set(browserToolGrantKey(clientThreadId, card.id), grant);
+    } else revokeBrowserToolGrants({ clientThreadId, cardId: card.id });
     return selected;
+  }
+  // BRW-11: a Card whose one-time token an earlier turn spent gets a fresh
+  // token from its standing grant, so the person is not asked again while the
+  // grant holds (D-B3). Anything else is left to the filter below.
+  function browserToolRefreshSelection(threadId, source) {
+    if (source?.kind !== 'browser' || source.selectedByUser !== true || source.browserToolPermission !== 'interact') return source;
+    const thread = getCodexThreadById(state.codex, threadId);
+    const clientThreadId = thread && ChatState.clientThreadBinding(thread);
+    const selection = browserToolUserSelections.get(source.browserToolSelection?.token);
+    if (!clientThreadId || (selection && !selection.usedRunId)) return source;
+    const cardId = source.sourceRef?.viewId;
+    if (!browserToolGrantFor(clientThreadId, cardId)) return source;
+    let current = null;
+    try { current = document.getElementById(cardId)?._browserControls?.toolBinding?.(); } catch { return source; }
+    if (!current) return source;
+    // A token re-issued for a send that never bound would otherwise linger.
+    for (const [token, entry] of browserToolUserSelections) {
+      if (entry.threadId === clientThreadId && entry.cardId === cardId && entry.sourceId === source.id && !entry.usedRunId) browserToolUserSelections.delete(token);
+    }
+    return registerBrowserToolSelection(threadId, { ...source,
+      sourceRef: { ...source.sourceRef, uri: current.url, profileId: current.profileId, accountId: current.accountId },
+      browserToolIdentity: { cardEpoch: current.cardEpoch, userContextId: current.userContextId,
+        engineAccountKey: current.engineAccountKey, authorityEpoch: current.authorityEpoch } }, 'interact') || source;
   }
   function browserToolSelectedSources(threadId, candidates = null) {
     const thread = getCodexThreadById(state.codex, threadId);
     const clientThreadId = thread && ChatState.clientThreadBinding(thread);
-    return (candidates || thread?.inputSources || []).filter(source => {
+    return (candidates || thread?.inputSources || []).map(source => browserToolRefreshSelection(threadId, source)).filter(source => {
       if (source.kind !== 'browser' || source.selectedByUser !== true ||
           !['observe', 'interact'].includes(source.browserToolPermission)) return false;
       const selection = browserToolUserSelections.get(source.browserToolSelection?.token);
@@ -15474,6 +16661,105 @@
   function browserToolActivityEnd(activity, response, inputAuthorized) {
     try { activity?.end(response, inputAuthorized === true); } catch {}
   }
+  // BRW-05 / BRW-07 requests EG-Desk chrome answers itself (no page actor): a
+  // site question for the person, a new Card bound to the same run, closing a
+  // Card this run opened, and a history move. D-B1/D-B2 are applied here again;
+  // the helper's copy of the rule is never trusted alone.
+  async function browserToolCardRequest(request, { key, card, authorized, requestId, receivedAtMs }) {
+    const clientThreadId = request.clientThreadId;
+    const timing = () => browserToolTiming({ receivedAtMs });
+    const policy = () => browserToolNavigationPolicy(clientThreadId);
+    const activityRequest = { ...request, action: { type: request.kind === 'history' ? `history-${request.historyAction}` : request.kind,
+      ...(request.kind === 'open-card' ? { url: request.url } : {}) } };
+    if (request.kind === 'allow-site') {
+      const site = typeof request.site === 'string' ? request.site.trim().toLowerCase() : '';
+      if (!site || site.length > 253 || !/^[\p{L}\p{N}.:\[\]-]+$/u.test(site)) throw new Error('Invalid Browser site request');
+      if (browserToolThreadSiteSet(clientThreadId).has(site)) return { requestId, status: 'site-allowed', site, navigationPolicy: policy(), timing: timing() };
+      const activity = browserToolActivityStart(card, activityRequest);
+      const answer = await card._browserControls.toolAskSite?.({ site, deadlineMs: request.deadlineMs });
+      if (browserToolRunBindings.get(key) !== authorized) throw new Error('Browser run was cancelled during the site question');
+      if (answer === 'allowed') {
+        browserToolThreadSiteSet(clientThreadId).add(site);
+        const grant = browserToolThreadGrants.get(browserToolGrantKey(clientThreadId, card.id));
+        if (grant) grant.lastUsedAt = Date.now();
+      }
+      const result = { requestId, status: answer === 'allowed' ? 'site-allowed' : answer === 'refused' ? 'site-refused' : 'site-pending',
+        site, navigationPolicy: policy(), timing: timing() };
+      browserToolActivityEnd(activity, result, false);
+      return result;
+    }
+    if (request.kind === 'history') {
+      if (!['back', 'forward', 'reload'].includes(request.historyAction) || !request.guard) throw new Error('Unsupported Browser history move');
+      const activity = browserToolActivityStart(card, activityRequest);
+      const receipt = await card._browserControls.toolHistory(authorized.binding, request.historyAction, request.guard,
+        { allowed: (to, from) => browserToolNavigationAllowed(clientThreadId, to, from) });
+      if (browserToolRunBindings.get(key) !== authorized) throw new Error('Browser run was cancelled after the history move; outcome is unknown');
+      const acted = { requestId, status: 'acted', receipt, timing: timing() };
+      browserToolActivityEnd(activity, acted, true);
+      return acted;
+    }
+    if (request.kind === 'close-card') {
+      // D-B2: only a Card this run opened; a person's Card is never closed here.
+      if (authorized.openedByAgent !== true) throw new Error('Only a Browser Card this run opened can be closed by the Agent');
+      revokeBrowserToolGrants({ cardId: card.id });
+      browserToolRunBindings.delete(key);
+      for (const [leaseId, lease] of browserToolActionLeases) if (lease.card === card) browserToolActionLeases.delete(leaseId);
+      browserToolCancelledRuns.set(key, request.deadlineMs);
+      const closed = card._deskWindowShell?.requestClose ? card._deskWindowShell.requestClose() : closeCanvasCard(card);
+      if (closed === false) throw new Error('Browser Card could not be closed');
+      return { requestId, status: 'card-closed', timing: timing() };
+    }
+    // open-card (D-B2): same profile, container and account as the source Card;
+    // the URL is judged from the source Card's current page; the new Card is
+    // bound to this run and gets the conversation's standing grant, marked as
+    // opened by the Agent. A popup a page opened or a person's Card never is.
+    if (!browserToolSafeNavigationUrl(request.url)) throw new Error('Browser Card URL must be an absolute http(s) URL without credentials');
+    const current = card._browserControls.toolBinding();
+    const decision = browserToolNavigationAllowed(clientThreadId, request.url, current.url);
+    if (!decision.allowed) throw new Error(`Browser Card URL is outside the allowed sites [${decision.reason}]`);
+    const runCards = [...browserToolRunBindings.keys()].filter(item => item.startsWith(`${request.runId}\u0000`)).length;
+    if (runCards >= 4) throw new Error('This run already has four Browser Cards');
+    const activity = browserToolActivityStart(card, activityRequest);
+    const opened = spawnBrowserCard(request.url, { openMode: 'new', sourceRef: card._sourceRef, opener: card,
+      ...(card._browserIdentity ? { browserIdentity: cloneJson(card._browserIdentity) } : {}) });
+    if (!opened?._browserControls?.toolBinding) throw new Error('Browser Card could not be opened');
+    opened.dataset.egdAgentOpened = 'true';
+    opened._browserControls.toolSetNavigationGuard?.({ fromUrl: current.url,
+      allowed: (to, from) => browserToolNavigationAllowed(clientThreadId, to, from) });
+    const closeOpened = () => { try { opened._deskWindowShell?.requestClose?.(); } catch {} };
+    await opened._browserControls.toolWhenReady?.(request.deadlineMs);
+    let binding;
+    try { binding = opened._browserControls.toolBinding(); } catch (error) { closeOpened(); throw error; }
+    if (['profileId', 'accountId', 'userContextId', 'engineAccountKey', 'authorityEpoch'].some(field => binding[field] !== current[field])) {
+      closeOpened();
+      throw new Error('Opened Browser Card did not keep the same profile, container and account');
+    }
+    if (browserToolRunBindings.get(key) !== authorized) { closeOpened(); throw new Error('Browser run was cancelled while opening a Card'); }
+    browserToolRunBindings.set(`${request.runId}\u0000${binding.cardId}\u0000${binding.cardEpoch}`, { binding,
+      permission: authorized.permission, clientThreadId, selectionToken: null, openedByAgent: true, openedFrom: card.id });
+    const sourceGrant = browserToolThreadGrants.get(browserToolGrantKey(clientThreadId, card.id));
+    const localThreadId = sourceGrant?.localThreadId ?? browserToolUserSelections.get(authorized.selectionToken)?.localThreadId ?? null;
+    const grant = BrowserGrant.browserGrantRecord({ clientThreadId, localThreadId, cardId: binding.cardId,
+      current: { ...binding, url: request.url }, permission: authorized.permission, siteForHost: browserToolSiteForHost,
+      openedByAgent: true, openedFrom: card.id });
+    if (grant) browserToolThreadGrants.set(browserToolGrantKey(clientThreadId, binding.cardId), grant);
+    // The new Card also becomes a chip of the conversation, so the next turn can
+    // keep working in it under the same grant (D-B3) without a new pick.
+    if (localThreadId && authorized.permission === 'interact') {
+      try {
+        const source = chatInputSourceForView(opened);
+        const selectedSource = source?.kind === 'browser' ? registerBrowserToolSelection(localThreadId, source, 'interact') : null;
+        if (selectedSource) {
+          const next = browserToolThreadGrants.get(browserToolGrantKey(clientThreadId, binding.cardId));
+          if (next) Object.assign(next, { openedByAgent: true, openedFrom: card.id });
+          state.codexBridge.addInputSources(localThreadId, [selectedSource]);
+        }
+      } catch (error) { console.warn(TAG, 'agent-opened Browser Card chip failed', error); }
+    }
+    const result = { requestId, status: 'card-opened', binding, navigationPolicy: policy(), timing: timing() };
+    browserToolActivityEnd(activity, result, false);
+    return result;
+  }
   async function browserToolDispatchOnce(request, receivedAtMs = browserToolClock()) {
     const requestId = request?.requestId;
     let diagnosticPhase = 'preflight';
@@ -15596,7 +16882,10 @@
           selectedByUser.usedRunId = request.runId;
           browserToolRunBindings.set(key, { binding: current, permission: selection.permission,
             clientThreadId: request.clientThreadId, selectionToken: selection.selectionToken });
-          return { requestId, status: 'bound', binding: current, timing: browserToolTiming({ receivedAtMs }) };
+          const grant = browserToolThreadGrants.get(browserToolGrantKey(request.clientThreadId, card.id));
+          if (grant) grant.lastUsedAt = Date.now();
+          return { requestId, status: 'bound', binding: current,
+            navigationPolicy: browserToolNavigationPolicy(request.clientThreadId), timing: browserToolTiming({ receivedAtMs }) };
         } finally {
           if (browserToolPendingBindings.get(key) === pending) browserToolPendingBindings.delete(key);
         }
@@ -15636,9 +16925,14 @@
         const snapshot = await card._browserControls.toolObserve(authorized.binding, request.options || {},
           { deadlineMs: request.deadlineMs });
         if (browserToolRunBindings.get(key) !== authorized) throw new Error('Browser run was cancelled during observation');
-        const observed = { requestId, status: 'observed', snapshot, timing: browserToolTiming({ receivedAtMs }) };
+        const observed = { requestId, status: 'observed', snapshot,
+          navigationPolicy: browserToolNavigationPolicy(request.clientThreadId), timing: browserToolTiming({ receivedAtMs }) };
         browserToolActivityEnd(activity, observed, false);
         return observed;
+      }
+      if (['allow-site', 'open-card', 'close-card', 'history'].includes(request.kind)) {
+        if (authorized.permission !== 'interact') throw new Error('Browser interaction was not selected');
+        return await browserToolCardRequest(request, { key, card, authorized, requestId, receivedAtMs });
       }
       if (request.kind !== 'act' || authorized.permission !== 'interact') throw new Error('Browser interaction was not selected');
       if (browserToolRemainingBudget(request, receivedAtMs) <= 0) throw new Error('Browser action budget expired before dispatch');
@@ -15681,11 +16975,24 @@
       try {
         try { actionLease.projection = card._browserControls.toolPrepareAgentProjection?.(actionLease); } catch {}
         diagnosticPhase = 'actor';
-        ({ timing: actorTiming = null, dialog: actorDialog = null, ...receipt } = await card._browserControls.toolAct(authorized.binding,
-          request.action, request.guard, { leaseId, requestId, deadlineMs: request.deadlineMs,
-            ...(request.callId ? { callId: request.callId } : {}),
-            ...(request.budgetMs != null ? { budgetMs: request.budgetMs } : {}),
-            sentAtMs: request.sentAtMs ?? receivedAtMs }) || {});
+        // D-B1 for links and redirects: whatever a navigate, click or key press
+        // makes the page commit next is judged by the Card's commit guard.
+        if (['navigate', 'click', 'press'].includes(request.action.type)) {
+          try { card._browserControls.toolSetNavigationGuard?.({ fromUrl: request.guard.url,
+            allowed: (to, from) => browserToolNavigationAllowed(request.clientThreadId, to, from) }); } catch {}
+        }
+        // BRW-05: an allowed other site is loaded by EG-Desk chrome; the page
+        // actor keeps its same-site rule. Same observed-document guard, same
+        // D-B1 check here again, chrome route in the receipt.
+        const chromeNavigate = request.action.type === 'navigate' && request.guard.navigationScope === 'allowed-site';
+        ({ timing: actorTiming = null, dialog: actorDialog = null, ...receipt } = await (chromeNavigate
+          ? card._browserControls.toolNavigateChrome(authorized.binding, request.action, request.guard,
+            { allowed: (to, from) => browserToolNavigationAllowed(request.clientThreadId, to, from) })
+          : card._browserControls.toolAct(authorized.binding,
+            request.action, request.guard, { leaseId, requestId, deadlineMs: request.deadlineMs,
+              ...(request.callId ? { callId: request.callId } : {}),
+              ...(request.budgetMs != null ? { budgetMs: request.budgetMs } : {}),
+              sentAtMs: request.sentAtMs ?? receivedAtMs })) || {});
       }
       finally {
         try { actionLease.projection?.clear(); } catch {}
@@ -16626,6 +17933,8 @@
     if (options.fixedLogicalHeight) card._fixedLogicalHeight = options.fixedLogicalHeight;
     let xulBrowser = null;
     let unregisterBrowserAuthorizer = null;
+    // BRW-05 (D-B1 commit layer): set while an Agent-started load is landing.
+    let agentNavigationGuard = null;
     let browserLoadTimer = 0;
     let browserMenuPanel = null;
     const agentRefByNode = new WeakMap();
@@ -16674,6 +17983,9 @@
       onclick: (ev) => { ev.stopPropagation(); toggleAgentTimeline(); },
     });
     const agentBadgeStatus = el('span', { class: 'egd-browser-agent-status', role: 'status' }, agentBadge);
+    // AGENT-05: the Agent's face and name beside the badge while it works on this Card.
+    const agentIdentityChip = el('span', { class: 'egd-browser-agent-identity', hidden: true, data: { testid: 'browser-agent-identity' } });
+    agentBadgeStatus.prepend(agentIdentityChip);
     const agentHandButton = el('button', {
       type: 'button', class: 'egd-browser-agent-hand', hidden: true, data: { testid: 'browser-agent-pause', action: '' },
       onclick: (ev) => {
@@ -17962,6 +19274,7 @@
     };
     const navigateBrowser = (rawUrl, navOptions = {}) => {
       if (!requireBrowserContext()) return null;
+      agentNavigationGuard = null;
       agentProjection.invalidate();
       const url = normalizeBrowserNavigationUri(rawUrl || browserState.uri || browserState.homeUrl);
       browserState.uri = url;
@@ -17978,6 +19291,7 @@
     };
     const goBrowserBack = () => {
       if (!requireBrowserContext()) return false;
+      agentNavigationGuard = null;
       agentProjection.invalidate();
       if (browserState.historyIndex > 0) {
         browserState.historyIndex -= 1;
@@ -18005,6 +19319,7 @@
     };
     const goBrowserForward = () => {
       if (!requireBrowserContext()) return false;
+      agentNavigationGuard = null;
       agentProjection.invalidate();
       if (browserState.historyIndex < browserState.history.length - 1) {
         browserState.historyIndex += 1;
@@ -18032,6 +19347,7 @@
     };
     const reloadBrowser = () => {
       if (typeof requireBrowserContext === 'function' && !requireBrowserContext()) return false;
+      agentNavigationGuard = null;
       try {
         agentProjection.invalidate();
         setBrowserLoading(true);
@@ -18094,7 +19410,7 @@
       state.codexBridge.addInputSources(threadId,
         [selectedSource || { ...source, selectedByUser: true, browserToolPermission: 'observe' }]);
       showAgentActivity(permission === 'interact'
-        ? '이번 Chat 조작 대상으로 선택됨' : '이번 Chat 읽기 자료로 선택됨');
+        ? '이 대화의 조작 대상으로 허용됨' : '이번 Chat 읽기 자료로 선택됨');
     };
     // `regrant`: opened by [돌려주기], it names and focuses '다시 조작 허용' and grants nothing itself.
     const showBrowserMenu = (anchor = menuButton, { focusFirst = false, regrant = false } = {}) => {
@@ -18131,14 +19447,22 @@
         },
       }, label);
       // An explicit pick here is 대표님 handing the Card back, so it also ends a hold.
-      const interactItem = item(regrant ? '다시 조작 허용' : 'Chat 조작 허용', `이 Browser만 이번 Chat 실행의 관찰·조작 대상으로 선택합니다. 사이트 계정: ${card._sourceRef?.accountId || '미확인'}(선택 메타데이터, 로그인 증거 아님). 외부 효과는 별도 확인이 필요합니다.`,
+      const interactItem = item(regrant ? '다시 조작 허용' : 'Chat 조작 허용', `이 Browser를 이 대화의 관찰·조작 대상으로 허용합니다. 허용은 같은 대화 동안 이어지고, 카드·계정·사이트가 바뀌거나 일시중지·해제·30분 유휴면 끝납니다. 사이트 계정: ${card._sourceRef?.accountId || '미확인'}(선택 메타데이터, 로그인 증거 아님). 외부 효과는 별도 확인이 필요합니다.`,
         () => { endAgentHold(); return selectBrowserForChat('interact'); });
+      // BRW-11: the standing grant this conversation holds on this Card, if any.
+      let activeClientThreadId = null;
+      try { const thread = getCodexThreadById(state.codex, state.codex.activeThreadId); activeClientThreadId = thread ? ChatState.clientThreadBinding(thread) : null; } catch {}
+      const standingGrant = browserToolGrantFor(activeClientThreadId, card.id);
+      const revokeItem = standingGrant ? item('조작 허용 해제', '이 대화에서 이 Browser에 준 조작 허용을 지금 끝냅니다. 다음 턴부터 Agent는 다시 허락을 받아야 합니다.',
+        () => { revokeBrowserToolGrants({ clientThreadId: activeClientThreadId, cardId: card.id }); showAgentActivity('이 대화의 조작 허용을 끝냄'); },
+        { testid: 'browser-grant-revoke' }) : null;
       const items = [
         item('복제', '현재 URL을 새 Desk Window로 열기', safeDuplicateBrowser),
         item('URL 복사', browserState.uri, () => copyTextToClipboard(browserState.uri)),
         item('Chat에 읽기 첨부', '현재 Browser의 읽기 자료만 다음 Chat에 선택합니다. 기존 조작 허용이 있으면 읽기 전용으로 바뀝니다.',
           () => { endAgentHold(); return selectBrowserForChat('observe'); }),
         interactItem,
+        ...(revokeItem ? [revokeItem] : []),
         item('홈', browserState.homeUrl, () => navigateBrowser(browserState.homeUrl)),
         item(browserState.loading ? '중지' : '새로고침', browserState.loading ? '로드 중지' : '현재 페이지 새로고침', () => (browserState.loading ? stopBrowser() : reloadBrowser())),
         item(isCardFullscreen(card) ? '창 복귀' : '최대화', 'Desk Window 최대화 전환', () => toggleCardFullscreen(card)),
@@ -18244,6 +19568,8 @@
       agentBadge.dataset.mode = view.mode;
       // The status region speaks when the label changes, never on a re-render.
       if (agentBadge.textContent !== view.label) agentBadge.textContent = view.label;
+      // AGENT-05: the Agent chip beside the badge (absent where this block runs alone, as in tests).
+      if (typeof codexCardAgentIdentityRender === 'function') codexCardAgentIdentityRender(agentIdentityChip, view, agentControl, card.id);
       agentBadge.dataset.compactLabel = view.mode === 'user' ? '직접'
         : view.mode === 'operating' ? (view.label === 'Agent 읽는 중' ? '읽기' : '조작') : '';
       const badgeName = view.label ? `${view.label} · Agent 활동 기록 보기` : 'Agent 활동 기록 보기';
@@ -18646,6 +19972,98 @@
       }
       return reply(answer);
     };
+    // D-B1 commit layer (BRW-05): while an Agent-started navigation, history
+    // move or new Card is landing, every committed top-level document must be on
+    // the current or an allowed site, or it is replaced with a blank page. A
+    // person's own navigation clears the guard first.
+    const AGENT_NAVIGATION_GUARD_MS = 20000;
+    const setAgentNavigationGuard = ({ fromUrl, allowed }) => {
+      agentNavigationGuard = typeof allowed === 'function'
+        ? { fromUrl: fromUrl || browserState.uri, allowed, until: Date.now() + AGENT_NAVIGATION_GUARD_MS } : null;
+    };
+    const enforceAgentNavigationGuard = (spec) => {
+      const guard = agentNavigationGuard;
+      if (!guard || !spec || spec === 'about:blank') return;
+      if (Date.now() > guard.until) { agentNavigationGuard = null; return; }
+      let decision;
+      try { decision = guard.allowed(spec, guard.fromUrl); } catch { decision = { allowed: false, reason: 'invalid-url' }; }
+      if (decision?.allowed) return;
+      agentNavigationGuard = null;
+      try { xulBrowser.stop?.(); } catch {}
+      loadBrowserUri('about:blank');
+      showAgentActivity('허용한 사이트 밖 주소라 빈 페이지로 바꿈');
+      console.warn(TAG, 'agent navigation blocked at commit', card.id, decision?.reason || 'blocked');
+    };
+    const assertGuardedDocumentCurrent = (guard, { compareUrl = true } = {}) => {
+      const context = xulBrowser.browsingContext;
+      const windowGlobal = context?.currentWindowGlobal;
+      if (!windowGlobal) throw new Error('Browser document is unavailable');
+      let currentUrl = browserState.uri;
+      try { currentUrl = windowGlobal.documentURI?.spec || currentUrl; } catch {}
+      if ((Object.hasOwn(guard, 'innerWindowId') && guard.innerWindowId !== windowGlobal.innerWindowId) ||
+          (Object.hasOwn(guard, 'browsingContextId') && guard.browsingContextId !== context.id) ||
+          (compareUrl && typeof guard.url === 'string' && guard.url !== currentUrl && guard.url !== browserState.uri)) {
+        throw Object.assign(new Error('Browser observation is stale; observe the current page again'),
+          { browserToolActor: { dispatchPhase: 'not-dispatched' } });
+      }
+    };
+    // BRW-05: an allowed other site is loaded by EG-Desk chrome (the page actor
+    // stays same-site). The observed document must still be current and the
+    // rule is applied here again; the page is read back only by the next observation.
+    const browserToolNavigateChrome = async (expected, action, guard, { allowed } = {}) => {
+      assertBrowserToolBinding(expected);
+      assertGuardedDocumentCurrent(guard);
+      const decision = typeof allowed === 'function' ? allowed(action.url, guard.url) : { allowed: false, reason: 'no-base' };
+      if (!decision?.allowed) {
+        throw Object.assign(new Error(`Browser navigation is outside the allowed sites [${decision?.reason || 'blocked'}]`),
+          { browserToolActor: { dispatchPhase: 'not-dispatched' } });
+      }
+      showAgentActivity('Agent가 허용한 사이트로 이동');
+      const snapshot = navigateBrowser(action.url, { markDirty: true });
+      setAgentNavigationGuard({ fromUrl: guard.url, allowed });
+      return { dispatchReceipt: { actor: 'chrome', inputRoute: 'chrome-load-uri', eventDispatched: snapshot !== null,
+        documentStillCurrent: false, navigationScope: 'allowed-site' }, after: null, observation: null };
+    };
+    // BRW-07: back, forward or reload on this Card's own history, from the
+    // observed document; where it lands is judged by the commit guard.
+    const browserToolHistory = async (expected, historyAction, guard, { allowed } = {}) => {
+      assertBrowserToolBinding(expected);
+      assertGuardedDocumentCurrent(guard, { compareUrl: false });
+      showAgentActivity(historyAction === 'reload' ? 'Agent가 새로고침' : historyAction === 'back' ? 'Agent가 뒤로 이동' : 'Agent가 앞으로 이동');
+      const moved = historyAction === 'back' ? goBrowserBack() : historyAction === 'forward' ? goBrowserForward() : reloadBrowser();
+      setAgentNavigationGuard({ fromUrl: guard.url, allowed });
+      return { dispatchReceipt: { actor: 'chrome', inputRoute: 'chrome-history', historyAction,
+        eventDispatched: moved !== false && moved !== null, documentStillCurrent: false }, after: null, observation: null };
+    };
+    // BRW-05 (D-B1): the person's answer to "may this conversation also open
+    // <site>?", asked on the Card the Agent works in. No answer before the
+    // deadline is 'pending'; nothing is remembered beyond this conversation.
+    let siteAskPanel = null;
+    const browserToolAskSite = ({ site, deadlineMs }) => new Promise(resolve => {
+      if (siteAskPanel) { try { siteAskPanel.remove(); } catch {} siteAskPanel = null; }
+      let settled = false, timer = 0;
+      const finish = (answer) => {
+        if (settled) return;
+        settled = true;
+        if (timer) window.clearTimeout(timer);
+        try { panel.remove(); } catch {}
+        if (siteAskPanel === panel) siteAskPanel = null;
+        resolve(answer);
+      };
+      const button = (label, answer, testid, primary) => el('button', { type: 'button',
+        class: primary ? 'egd-browser-site-ask-allow' : 'egd-browser-site-ask-refuse', data: { testid },
+        onclick: (ev) => { ev.stopPropagation(); finish(answer); } }, label);
+      const panel = el('div', { class: 'egd-browser-site-ask egd-edge egd-frosted', role: 'dialog', 'aria-live': 'polite',
+        'aria-label': '사이트 허용 요청', data: { testid: 'browser-site-ask' } },
+      el('div', { class: 'egd-browser-site-ask-text' }, `Agent가 이 대화에서 ${site} 사이트도 열려고 합니다. 허용할까요?`),
+      el('div', { class: 'egd-browser-site-ask-actions' },
+        button('이 대화에서 허용', 'allowed', 'browser-site-allow', true),
+        button('거절', 'refused', 'browser-site-refuse', false)));
+      siteAskPanel = panel;
+      wrap.appendChild(panel);
+      try { panel.querySelector('.egd-browser-site-ask-allow')?.focus(); } catch {}
+      timer = window.setTimeout(() => finish('pending'), Math.max(0, (Number.isFinite(deadlineMs) ? deadlineMs : Date.now()) - Date.now() - 500));
+    });
     card._browserControls = {
       getState: () => getBrowserStateSnapshot(),
       sync: () => syncBrowserStateFromBrowser({ markDirtyOnLocationChange: false }),
@@ -18677,6 +20095,10 @@
         innerWindowIds: [...lastToolObserve.innerWindowIds] },
       toolAct: browserToolAct,
       toolReconcile: browserToolReconcile,
+      toolNavigateChrome: browserToolNavigateChrome,
+      toolHistory: browserToolHistory,
+      toolAskSite: browserToolAskSite,
+      toolSetNavigationGuard: setAgentNavigationGuard,
       toolPrepareAgentProjection: agentProjection.prepare,
       toolActivity: startAgentToolActivity,
       toolUserHold: agentUserHold,
@@ -18724,6 +20146,7 @@
       onLocationChange(webProgress, _request, location) {
         if (webProgress && webProgress.isTopLevel === false) return;
         reportBrowserLocation(location?.spec || '');
+        enforceAgentNavigationGuard(location?.spec || '');
       },
       onStateChange() {}, onProgressChange() {}, onStatusChange() {}, onSecurityChange() {}, onContentBlockingEvent() {},
     };
@@ -20962,7 +22385,7 @@
     return null;
   }
 
-  const deskHistory = { rows: [], page: null, selected: null, record: null, confirming: false, busy: false, message: null, failed: false };
+  const deskHistory = { rows: [], generations: [], page: null, selected: null, record: null, confirming: false, busy: false, message: null, failed: false };
 
   function closeDeskHistoryPanel({ restoreFocus = false } = {}) {
     const panel = document.getElementById('egd-desk-history');
@@ -20973,7 +22396,7 @@
 
   async function openDeskHistoryPanel() {
     closeDeskHistoryPanel();
-    Object.assign(deskHistory, { rows: [], page: null, selected: null, record: null, confirming: false, busy: false,
+    Object.assign(deskHistory, { rows: [], generations: [], page: null, selected: null, record: null, confirming: false, busy: false,
       message: '복구 기록을 불러오는 중입니다…', failed: false });
     const panel = el('section', { id: 'egd-desk-history', class: 'egd-store-panel', role: 'dialog', 'aria-label': '복구 기록', data: { testid: 'desk-history' } });
     panel.addEventListener('keydown', (ev) => {
@@ -20994,25 +22417,28 @@
     if (page.unavailable || page.error) {
       Object.assign(deskHistory, { message: '복구 기록을 불러오지 못했습니다. 연결을 확인한 뒤 다시 시도해 주세요.', failed: true });
     } else {
-      const rows = more ? [...deskHistory.rows, ...page.rows] : page.rows;
-      Object.assign(deskHistory, { rows, page, failed: false, message: rows.length ? null : '아직 남은 기록이 없습니다. Desk가 저장되면 여기에 시점이 쌓입니다.' });
+      // Pages are joined before the rows are made, so the last row of a page compares its changes with the first of the next.
+      const generations = more ? [...deskHistory.generations, ...(page.generations || [])] : (page.generations || []);
+      const rows = RecoveryState.deskGenerationRows({ ...page, generations });
+      Object.assign(deskHistory, { rows, generations, page, failed: false, message: rows.length ? null : '아직 남은 기록이 없습니다. Desk가 저장되면 여기에 시점이 쌓입니다.' });
     }
     renderDeskHistoryPanel(focusFirst && deskHistory.rows.length ? `generation-${deskHistory.rows[0].generation}` : undefined);
   }
 
-  // One row per saved point; the reason and counts come from the store, in Korean.
+  // One row per saved point; the reason, counts and what changed come from the store, in Korean.
   function deskHistoryListView(rows, { selected = null, onSelect = () => {} } = {}) {
+    const meta = row => [row.counts, row.boards, row.changes, row.note].filter(Boolean).join(' · ');
     return el('div', { class: 'egd-store-list', role: 'group', 'aria-label': '저장된 시점', data: { testid: 'desk-history-list' } },
       ...rows.map(row => el('button', {
         type: 'button', class: 'egd-store-row', 'aria-pressed': row.generation === selected ? 'true' : 'false',
-        'aria-label': `${row.time} ${row.reason}${row.current ? ' · 지금' : ''} · ${row.counts}${row.note ? ` · ${row.note}` : ''}`,
+        'aria-label': `${row.time} ${row.reason}${row.current ? ' · 지금' : ''} · ${meta(row)}`,
         data: { testid: 'desk-history-row', generation: String(row.generation), focusKey: `generation-${row.generation}` },
         onclick: () => onSelect(row.generation),
       },
       el('span', { class: 'egd-store-row-time' }, row.time),
       el('span', { class: 'egd-store-row-tag' }, row.reason),
       row.current ? el('span', { class: 'egd-store-row-current' }, '지금') : null,
-      el('span', { class: 'egd-store-row-meta' }, row.note ? `${row.counts} · ${row.note}` : row.counts))));
+      el('span', { class: 'egd-store-row-meta' }, meta(row)))));
   }
 
   // A short look at one point and its two ways back; the saved text itself is never shown.
@@ -21052,6 +22478,8 @@
         el('button', { type: 'button', class: 'egd-store-panel-close', 'aria-label': '복구 기록 닫기', data: { focusKey: 'close' },
           onclick: () => closeDeskHistoryPanel({ restoreFocus: true }) }, '×')),
       el('p', { class: 'egd-store-panel-copy' }, 'Desk가 저장될 때마다 시점이 남습니다. 시점을 골라 미리 보고, 되돌리거나 지금 작업에 합칠 수 있습니다.'),
+      // D-R1: what the journal keeps, as the bridge reports it (an older bridge says nothing).
+      RecoveryState.deskRetentionText(deskHistory.page?.retention) ? el('p', { class: 'egd-store-panel-copy', data: { testid: 'desk-history-retention' } }, RecoveryState.deskRetentionText(deskHistory.page.retention)) : null,
       deskHistory.message ? el('p', { class: 'egd-store-panel-status', role: 'status' }, deskHistory.message) : null,
       deskHistory.failed ? el('button', { type: 'button', class: 'egd-store-more', data: { focusKey: 'retry' }, onclick: () => loadDeskHistoryPage() }, '다시 시도') : null,
       deskHistoryListView(deskHistory.rows, { selected: deskHistory.selected, onSelect: selectDeskHistoryRow }),
@@ -21500,6 +22928,7 @@
     const deps = Object.freeze({
       FileCardState,
       ONTOLOGY_GRAPH_URL,
+      RunResult,
       TAG,
       allocCardSeq,
       bindCardSourceRef,
@@ -21520,6 +22949,7 @@
       isCardFullscreen,
       makeSourceRef,
       markAgendaDirty,
+      openBoardProjectFileAt,
       openChatInputPanel,
       raiseCardZ,
       resolveCanvasCardPlacement,

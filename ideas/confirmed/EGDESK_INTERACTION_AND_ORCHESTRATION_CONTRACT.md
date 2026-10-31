@@ -105,6 +105,7 @@ App Server 관련 세부사항은 변동 가능한 외부 인터페이스다. �
 | 답변 브리핑 | [§8](#tech-answer-briefing) | [AI-05](./EGDESK_PRODUCT_INTERACTION_TRACE_ATLAS.md#atlas-ai-05) |
 | Ontology | [§10](#tech-ontology-runtime) | [ONT-01](./EGDESK_PRODUCT_INTERACTION_TRACE_ATLAS.md#atlas-ont-01), [ONT-02](./EGDESK_PRODUCT_INTERACTION_TRACE_ATLAS.md#atlas-ont-02) |
 | 협업·computer-use | [§12](#tech-collaboration-computer-use) | [COL-01](./EGDESK_PRODUCT_INTERACTION_TRACE_ATLAS.md#atlas-col-01), [CU-01](./EGDESK_PRODUCT_INTERACTION_TRACE_ATLAS.md#atlas-cu-01) |
+| 조직의 Board 공유·여러 PC 실행 | [§12.2 조직 실행 경계](#tech-org-execution) | [조직 사용](./EGDESK_PRODUCT_INTERACTION_TRACE_ATLAS.md#atlas-org-use), [조직 전달 우선순위](./EGDESK_VISION_GAP_LEDGER.md#org-delivery-priority) |
 | 실패·복구 | [§13](#tech-failure-boundaries) | [SYS-01](./EGDESK_PRODUCT_INTERACTION_TRACE_ATLAS.md#atlas-sys-01) |
 | Profile·Run binding | [§14](#tech-agent-run-binding) | [AGENT-01–03](./EGDESK_PRODUCT_INTERACTION_TRACE_ATLAS.md#atlas-agent-01) |
 | 로컬 저장·내보내기·동기화 | [§15 로컬 저장](#tech-storage-export), [§15.1 `.egdesk`](#tech-portable-bundle) | [DATA-01](./EGDESK_PRODUCT_INTERACTION_TRACE_ATLAS.md#atlas-data-01) |
@@ -841,6 +842,10 @@ System은 참조된 모든 target의 존재, 현재 permission, freshness state�
 step 직접 이동·종료 control을 처리한다. step 변경은 System의 presentation transition이며
 새 Agent Run을 시작하지 않는다.
 
+한 단계의 여러 근거를 동시에 읽을 크기로 담기 어려우면, System은 준비된 근거의
+원래 위치와 상대 배치를 유지한 전체 축소 개요를 우선 표시한다. 개요 표시 자체는
+기존 카드의 저장된 위치·크기를 변경하거나 별도의 프레젠테이션용 사본을 만들지 않는다.
+
 사용자는 Briefing Step에서 멈춘 뒤 해당 step 또는 허용된 visible target에 고정된
 Briefing Comment를 남기고, 검증된 reference와 comment를 다음 Chat draft에 넣을 수 있다.
 사용자가 그 Chat message를 실제 전송한 뒤에만 새 Agent turn이 시작될 수 있다.
@@ -991,12 +996,137 @@ PC를 연결했다는 사실만으로 그 PC의 모든 파일·프로그램·계
   작업 맥락을 사용해 새 실행을 시작했는지는 별도 기록으로 구분한다.
 - 연결이 돌아오면 기존 실행의 동일성과 현재 권한을 검증해 재연결 상태를 갱신한다.
   완료·종료 상태는 각각 해당 증거를 확인한 경우에만 갱신하며, 뒤늦게 도착한 결과만으로 취소되거나
-  다른 작업으로 전환된 실행을 자동 재활성화하지 않는다.
+  다른 작업으로 전환된 실행을 자동 재활성화하지 않는다. 이미 발생한 외부 효과를 가리키는
+  늦은 증거는 별도로 보존·대조하며 [§12.2](#tech-org-execution)를 따른다.
 - `.egdesk` 가져오기는 허용된 자료·맥락의 반입이다. 원격 PC 연결, 실행 권한 부여,
   살아 있는 process의 재연결 또는 작업 재실행을 대신하지 않는다.
 
 기기 발견·연결 방식, 실행 배치 알고리즘과 통신 프로토콜은 구현 재량이다. 자동 배치가
 기존 위임·계정·비용·자료 이동 범위를 넘으면 그 종속 행동만 해당 권한 결정에 따른다.
+
+<a id="tech-org-execution"></a>
+
+### 12.2 조직의 Board 공유와 여러 PC 실행
+
+**상태:** 일반 제품을 위한 계약·검증 조건이다. 어떤 OS나 PC에서 호스팅·공유·실행이
+현재 구현 또는 운영 검증되었다는 뜻이 아니다. [조직 사용 trace](./EGDESK_PRODUCT_INTERACTION_TRACE_ATLAS.md#atlas-org-use)와
+[개발 우선순위](./EGDESK_VISION_GAP_LEDGER.md#org-delivery-priority)를 함께 본다.
+이 절은 [Context·공유](#impl-context-share), [계정 binding](#impl-account-binding),
+[승인·외부 효과](#impl-approval-receipts), [기기 grant](#impl-e24-collaboration-authority),
+[원격 연결·복구](#impl-e24-remote-transport)를 대체하지 않고 조직 실행에 함께 적용한다.
+
+**사용 범위와 배치.** 사람은 하나의 Desk/Canvas 안에서 여러 Board를 사용한다.
+회사·부서는 Board와 자료에 적용할 접근 범위·정책이지 새 Desk, Canvas 또는 workspace를
+만드는 지시가 아니다. 같은 PC에 작업 조정·저장·실행 역할을 함께 둘 수 있고, 등록된
+다른 PC를 실행기로 연결할 수도 있다. 실행기 추가는 전체 공유 호스트의 자동 승계를 뜻하지 않는다.
+
+지원 OS·자원·설치·기기 승인·통신·실행 준비가 확인된 PC는 호스트나 실행기 후보가
+될 수 있다. 같은 회사 Wi-Fi 접속, 장비 이름 또는 IP만으로 신뢰하거나 역할을 자동
+부여하지 않는다. 기기 등록·철회와 보호된 연결은 역할별로 확인한다. OS/브라우저별
+연결기, TPM 또는 다른 기기 인증수단은 해당 환경과 필요한 보증 수준에 따라 선택·검증한다.
+TPM이나 Native Messaging을 모든 플랫폼의 필수 조건으로 만들지 않으며, 키 서명 확인과
+하드웨어 출처 attestation도 구분한다. 새 인프라·클라우드·SSO·계정 도입이나 외부
+전송은 이 설계만으로 승인되지 않는다.
+
+**신원과 실행 경계.** 요청 계정과 실제 담당자, 요청 PC와 실행 PC, Agent 실행체,
+Engine 계정, 업무 서비스·사이트 계정, OS 사용자를 구분해 각 행동에 결합한다.
+공유 Engine 또는 업무 계정은 해당 서비스 정책과 실제 격리가 허용하는 범위에서 사용할 수
+있으며 직원마다 새 provider 구독·계정을 만들도록 강제하지 않는다. 공유 신원만으로
+개인을 확인할 수 없다면 담당자를 확정하지 않고, 개인 확인이 필수인 행위는 확인 전 보류한다.
+기기 등록이나 직원 표시 설정은 그 사람의 물리적 현장 존재를 증명하지 않으므로 인증된
+주체와 자기 신고한 담당자 표시를 구분한다.
+접속됨과 실행 준비됨은 다르다. 백그라운드 API 읽기와 로그인된 앱·실제 OS 화면 제어는
+서로 다른 capability이며 각각 필요한 세션·자료 연결·도구·자원을 검사한다. 해당 조건이
+준비되지 않으면 이유를 표시하고 그 작업만 대기한다.
+
+직원이 평소 쓰는 PC를 호스트로 등록해도 global focus·마우스·키보드 사용이나 전면 화면
+인계를 승인한 것은 아니다. 백그라운드에서 가능한 작업은 승인된 범위에서 수행하고,
+실제 전면 인계가 필요한 작업은 [§12](#tech-collaboration-computer-use)의 명시적 인계
+전까지 대기하며 사용자에게 요청한다. 공용 호스트의 동시 작업 수·CPU·메모리와 Engine
+사용에 제품이 설정할 수 있는 실행 상한을 둔다. provider가 정한 quota는 별도로 확인해
+함께 적용한다. 실제 준비·허용 범위를 넘으면 대기하거나 이유를 표시하며 임의의 고정
+수치를 제품 기본값으로 확정하지 않는다.
+
+호스트의 Engine·업무 서비스 credential은 보호된 호스트 측 저장소와 범위 제한된 handle로
+사용하며 참여 client에 복제하거나 일반 이벤트에 싣지 않는다. handle은 계정·사용 범위·
+세대에 결합하고 교체·철회 시 새 행동에 이전 권한을 재사용하지 않는다. credential은
+업무 데이터 백업·bundle에서 제외한다. 별도 승인된 보호 백업으로 인증정보를 복원하는 경로가 있더라도
+복원만으로 사용을 재개하지 않고 해당 서비스의 재인증·권한 확인·회수/교체 정책을 적용한다.
+
+허용 범위는 기존 grant·위임·계정·resource·행동 제한을 함께 검사한다. 원자료를 실제로
+읽기 직전, 도구 사용·외부 행위 직전, 결과를 각 수신자에게 제공하기 직전에 해당 행동의
+권한 유효성을 다시 확인한다. 매 행동마다 외부 서버 왕복을 요구하지는 않는다. 정책이
+허용하면 발급자·대상·행동·기기/세션 범위, 유효기간과 허용된 최신성·철회 정보를
+검증한 로컬 grant/lease 또는 캐시를 사용할 수 있다. 이전 검색 결과·Agent memory·공유
+초대만으로 읽기 권한을 대신하지 않는다. 해당 행동에 최신 확인이 필수인데 확인할 수 없으면
+그 행동만 보류하고 다른 허용 작업은 계속한다. 연결되지 않은 기기에 철회가 즉시 반영되거나
+이미 받은 사본을 회수할 수 있다고 보장하지 않으며 허용된 오프라인 보존은 별도 정책에 따른다.
+
+사용자에게 보이지 않는 파일·브라우저·사이트 계정을 Engine의 native shell, 직접 네트워크,
+다른 플러그인이나 공유 OS 세션으로 우회할 수 있다면 화면의 제한은 실행 권한 격리가 아니다.
+기존 실행 경계에서 OS·자료원 권한과 허용 도구를 함께 집행하고 통제할 수 없는 경로는
+비활성화한다. 그 경계가 확인되지 않은 계정·세션 조합은 해당 공유 실행을 허용하지 않는다.
+접근 권한이 넓은 연결 계정의 권한을 요청자나 다른 부서의 권한으로 간주하지 않는다.
+
+원본을 직접 볼 수 없는 사람에게 대리 분석 결과를 제공하려면 원본 소유 범위에서 그
+위임을 허용하고 실행자가 필요한 최소 자료만 읽어야 한다. 공개는 수신자별 허용 필드·범위를
+집행하는 공유 결과 계약 또는 정책상 권한 있는 담당자의 검토·승인으로 통제하며, 요약이나
+LLM 검사만으로 권한 집행을 보장하지 않는다. 원문·인용·파일명·존재 등 허용되지 않은 정보가
+요약을 통해 드러나지 않게 하며, 결과 열람 권한은 원본 열람·수정 권한을 자동으로 부여하지 않는다.
+
+**대상과 정정.** 읽기·승인·수정·전달은 실제 자료원과 제공된 안정 ID 또는 검증된 locator,
+그때 확인한 revision, 행위·내용·수신 범위를 기록한다. 같은 이름이나 내용 hash만으로
+다른 PC·계정의 원본을 같은 권한 대상으로 취급하지 않는다. 대상이나 원본이 바뀌면 이번
+행동에 영향을 주는 변경과 현재 권한·승인 범위를 다시 검사한다. 원본 전체 revision의
+변경은 재검사 신호이지 이전 승인의 자동 무효 조건이 아니다. 승인된 대상·payload·수신자·
+권한 범위가 달라졌으면 이전 승인을 재사용하지 않는다. 조건부 저장이 충돌하면 현재본의
+다른 변경을 보존하며 재검증한다. 관련 없는 필드 변경만으로 모든 작업을 중단하거나
+재승인을 요구하지 않으며, Agent는 변경을 문맥에 반영해 다음 턴을 계속하고 영향받지 않은
+허용 작업도 이어간다. 결과의 근거가 정정되거나 새 사실로 기존 판단이 달라지면 기존 기록을
+조용히 덮지 않고, 보존 정책과 현재 열람 권한 안에서 이전 판단·정정 내용·확인 시점을 연결한다.
+
+**첫 공유 단계의 장애와 복구.** 호스트가 정지하면 그 호스트가 맡은 공유 조정·새 원격
+실행은 이용할 수 없으며, 마지막 확인 시각과 실행·외부 효과의 미확인 상태를 구분한다.
+단절이나 lease 만료만으로 원격 process 종료 또는 외부 행위 취소를 주장하지 않는다.
+재연결·재시도는 기존 operation/attempt·현재 권한·실행 상태·외부 receipt를 먼저 대조한다.
+결과가 불명확한 외부 쓰기는 확인 없이 다시 보내지 않는다.
+
+이전 실행기의 늦은 결과는 현재 실행 상태를 덮거나 후속 dispatch·새 외부 효과를 승인하지
+않는다. 동시에 수신한, 이미 발생했을 수 있는 외부 효과의 주장·receipt는 원래 시도와
+출처에 연결해 보존 정책 안에서 별도 증거로 남긴다. 출처를 확인하지 못한 주장은 그 상태를
+표시하며 사실로 확정하지 않는다. 증거 자체를 성공 확정으로 취급하지 않고 원천 서비스의 상태나
+허용된 독립 확인과 대조한다. 확인할 수 없으면 `결과 확인 필요`로 남기며, 단순 폐기나
+자동 재실행으로 중복을 만들지 않는다. 현재 권한이 없는 사람에게 그 증거를 공개하지 않는다.
+
+초기 추천 기준은 기존 [로컬 SQLite·불변 객체](#impl-storage)와 단일 writer를 유지한다.
+이 기준을 만족하는 구체 구현·배치는 선택 사항이며 신규 인프라 도입을 확정하지 않는다.
+여러 PC는 호스트의 권한 검사된 서비스로 접근하며 network-mounted SQLite 파일을 직접
+공동 사용해 다중 PC 서비스를 만든 것으로 간주하지 않는다. 백업은 일관된 DB와 필요한
+객체를 함께 보존하고 별도 복원 검증을 거친다. 다른 PC로 이전할 때 이전 writer의 중지
+또는 격리를 확인하고, 새 기기 승인과 현재 권한·계정 재확인을 거치며 오래된 grant·
+lease·실행을 부활시키지 않는다. 이전 writer의 배제를 확인하지 못하면 새 writer를 열지
+않는다. 자동 호스트 승계는 후순위이며 첫 공유 단계의 전제가 아니다.
+
+일반 사용자는 자기 작업에 필요한 실행 PC·진행·대기·승인 대상·확인 필요 상태를 본다.
+기기 등록·연결 관리와 진단은 권한 있는 관리 표면에 두며 모든 client에 관리 HUD를
+항상 노출하지 않는다.
+
+**미실행 인수 조건:** 같은 Wi-Fi의 미등록 기기와 철회된 기기는 접근·dispatch 0; 공유
+계정에서 담당자 미확인 시 개인 승인 필수 행위 0; 금지된 원문을 shell·브라우저·캐시와
+대리 결과로 우회 노출 0(정의된 시험의 인수 기준이며 임의 자유형 생성 전체의 무누출 보증은 아님).
+호스트 등록만으로 전면 입력 인계 0; API 읽기와 화면 제어의
+준비 상태 독립 확인; 한도 초과 dispatch와 client credential 복제 0. 유효한 로컬 grant/lease의
+허용 행동은 불필요한 외부 왕복 없이 진행하고, 필수 최신 확인이 불가능한 행동만 보류한다.
+승인 대상·payload·수신자·권한 범위 변경 후 옛 승인 재사용 0; 무관한 원본 변경만으로
+작업 전체 중단·재승인 0; 정정 전후 기록의 무단 덮어쓰기 0. 첫 공유 단계에서 호스트
+정지, 전송 직후 단절, 늦은 외부 receipt와 재연결을 시험해 미확인 효과의 중복 재전송 0,
+보존 대상인 늦은 증거의 폐기 0, 현재 상태 오염 0을 확인한다. 복원 시험에서는 DB·객체
+정합성, 인증정보 재인증·회수, 새 기기 재승인과 옛 권한·실행 비부활을 확인한다.
+같은 공용 Engine 계정을 쓰는 직원 A/B의 요청 PC와 권한이 다른 시험에서 각 행동의 직원·
+요청 PC·실행 PC 귀속, 상대방 자료 접근 차단과 A의 권한·허용되지 않은 이전 Agent memory의
+B 전이 차단, 각자 허용된 자료 작업의 정상 실행을 함께 확인한다.
+
+**기술 참고:** 같은 LAN이라는 이유만으로 신뢰를 부여하지 않는 원칙은 [NIST SP 800-207](https://csrc.nist.gov/pubs/sp/800/207/final)을, SQLite 파일을 네트워크에서 직접 공유할 때의 제약과 대안은 [SQLite 공식 안내](https://www.sqlite.org/useovernet.html)를 따른다.
 
 <a id="tech-failure-boundaries"></a>
 
@@ -2019,6 +2149,8 @@ ActionIntent는 요청자·실행자·계정·resource revision·payload hash·�
 
 gateway는 executor lease와 단일 dispatch 기록을 요구한다. 서비스의 멱등 키를 지원할 때 같은 논리 행동의 재시도에 재사용한다. 지원하지 않으면 read-only receipt 조회가 선행한다. HTTP 성공·로컬 UUID·버튼 클릭만으로 exactly-once를 보장하지 않는다. receipt와 현재 업무 상태가 충돌하면 기존 판단을 stale로 표시하고 증거를 덮지 않는다.
 
+이전 attempt의 늦은 외부 효과 증거도 현재 attempt의 상태 전이·새 행동 권한과 분리해 보존하고 원천 서비스와 대조한다. 확인되지 않은 효과는 [조직 실행의 복구 경계](#tech-org-execution)를 따른다.
+
 인수 절차: 승인 후 계정 교체·payload 수정·scope 철회·만료, 업로드 성공/제출 실패, 전송 직후 연결 유실을 주입한다. gate 재사용은 동일 범위에서만 가능하고 새 범위는 dispatch 0건이어야 한다. 공식 접수와 후속 처리 상태가 별도이며, 미확인 효과의 재전송은 0건이어야 한다. 독립 Task는 계속 진행해야 한다.
 
 ##### UI 결정과 provider 응답 분리
@@ -2544,9 +2676,9 @@ accept commit 전후 단절, 중복 탭, 늦은 취소, 전달 링크·계정 �
 
 **화면 연결**: [사용자 조작](../../docs/references/design-synthesis/egdesk-ux-realization-proposals.md#ux-detail-e24-computer-use-observe)
 
-**구조.** Firefox 셸, 로컬 coordinator, PC별 host bridge, 원격 권위 coordinator, 객체 저장, 미디어 adapter를 분리한다. 초기 권위 저장은 단일 writer SQLite WAL·불변 객체로 구성한다. coordinator 장애 시 임의의 두 번째 writer를 만들지 않는다. 기존 환경 배치 또는 조직 운영형/관리형 adapter는 구현 대안이며 공급자 구매를 전제하지 않는다.
+**구조.** Firefox 셸, 로컬 coordinator, PC별 host bridge, 원격 권위 coordinator, 객체 저장, 미디어 adapter를 분리한다. 초기 권위 저장의 추천 기준선은 단일 writer SQLite WAL·불변 객체다. SQLite DB와 접근 프로세스는 해당 호스트에 두고 다른 PC는 권한 검사된 서비스로 접근한다. network-mounted DB 파일의 다중 PC 직접 접근을 공유 서비스로 취급하지 않는다. coordinator 장애 시 임의의 두 번째 writer를 만들지 않는다. 기존 환경 배치 또는 조직 운영형/관리형 adapter는 구현 대안이며 공급자 구매를 전제하지 않는다.
 
-인증은 외부 브라우저 Authorization Code+PKCE, issuer·subject·audience·nonce 검증, 보호 저장소의 device key/token을 사용한다. 공개 client refresh token은 rotation 또는 sender constraint를 적용한다. 제어·중지 전용 WSS, 사건 WSS, 객체 HTTPS, 영상 WebRTC, 소실 가능한 커서 DataChannel을 분리한다. [RFC 8252](https://www.rfc-editor.org/info/rfc8252/), [RFC 9700](https://www.rfc-editor.org/info/rfc9700/), [RFC 8831](https://www.rfc-editor.org/rfc/rfc8831.html).
+신원·기기 인증은 선택된 배치에서 지원·검증된 방법과 보호 저장소의 device key/token을 사용한다. OAuth를 사용하는 경로는 외부 브라우저 Authorization Code+PKCE와 issuer·subject·audience·nonce를 검증하고, 공개 client refresh token에 rotation 또는 sender constraint를 적용한다. 새 조직 SSO 도입을 모든 배치의 전제로 삼지 않는다. 통신의 추천 기준선은 제어·중지 전용 WSS, 사건 WSS, 객체 HTTPS, 영상 WebRTC, 소실 가능한 커서 DataChannel의 분리다. 동등한 구현은 같은 권한·중지·격리 조건을 검증한다. [RFC 8252](https://www.rfc-editor.org/info/rfc8252/), [RFC 9700](https://www.rfc-editor.org/info/rfc9700/), [RFC 8831](https://www.rfc-editor.org/rfc/rfc8831.html).
 
 P2P 실패는 승인된 TURN, 수신자 증가로 source 송신 한계를 넘으면 허용된 SFU adapter로 처리한다. 새로운 전송 주체·지역·비용 범위를 넘는 fallback은 하지 않는다. 경로가 없으면 원격 관찰 불가이며 독립 로컬 업무는 계속한다.
 

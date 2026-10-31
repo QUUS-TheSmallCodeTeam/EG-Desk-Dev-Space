@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { compileFunction } from 'node:vm';
 import * as ChatState from '../overlay/resources/EGDeskChatState.sys.mjs';
+import * as ThreadRouting from '../overlay/resources/EGDeskThreadRouting.sys.mjs';
 
 const source = readFileSync(new URL('../overlay/JS/eg-desk-surface.uc.js', import.meta.url), 'utf8');
 const css = readFileSync(new URL('../overlay/CSS/eg-desk-surface.uc.css', import.meta.url), 'utf8');
@@ -32,24 +33,27 @@ function threadSection(thread, profile = { label: 'Codex', name: 'Codex' }) {
   const block = between('      const renderThreadSection = ', "\n\n      if (mode === 'hud')");
   const keys = ['el', 'codex', 'activeThread', 'codexBridge', 'codexThreadRowLabel', 'bindChatRoomRowKeys',
     'openRoomFromKeyboard', 'formatRelativeTime', 'codexThreadKindMeta', 'codexThreadAgentProfile', 'ChatState',
-    'engineContext', 'codexThreadSessionKey', 'buildCodexSessionBadge', 'renderEngineBadge', 'stripMarkdown', 'codexThreadPreview', 'renderThreadMenu', 'query'];
+    'engineContext', 'codexThreadSessionKey', 'buildCodexSessionBadge', 'renderEngineBadge', 'stripMarkdown', 'codexThreadPreview', 'renderThreadMenu', 'query', 'ThreadRouting'];
   const context = { auth: { isLoggedIn: true }, engines: [{ id: 'claude', label: 'Claude', status: 'ready' }] };
   const values = [el, { threadMenu: null }, thread, { selectThread() {} }, t => t.title, () => {}, () => {},
     () => '방금', type => ({ label: type === 'group' ? 'Board' : 'Codex' }), () => profile, ChatState,
     context, t => t.session || 'resumed', () => el('span', { class: 'egd-codex-session-badge' }, '로컬 기록'),
     t => el('span', { class: 'egd-codex-engine-badge' }, ChatState.chatEngineChipView(t, context).label),
-    value => value, t => t.messages.at(-1)?.content || '', () => el('div'), ''];
+    value => value, t => t.messages.at(-1)?.content || '', () => el('div'), '', ThreadRouting];
   const render = compileFunction(`${block}\nreturn renderThreadSection;`, keys)(...values);
   return render('전체', [thread]);
 }
 
 function chromeState(codex, activeEngine) {
   const block = between('      const bridgeNotice = codexBridgeNotice(codex);', '\n      const authCardNeeded =');
-  const keys = ['codexBridgeNotice', 'codex', 'activeEngine', 'buildCodexBridgeNotice', 'codexBridge', 'el'];
-  const bridge = { startLogin() {}, refreshAuthStatus() {} };
+  const keys = ['codexBridgeNotice', 'codex', 'activeEngine', 'buildCodexBridgeNotice', 'codexBridge', 'el', 'codexAccessRow', 'codexAccessActions'];
+  const bridge = { startLogin() {}, refreshAuthStatus() {}, signOut() {} };
   const state = codex.connected ? 'online' : 'offline';
+  // SUB-14 account access chip and its recovery chips, from their production definitions in mountCodexHUD.
+  const accessRow = compileFunction(`${between('    const ACCESS_STATE_VALUES = ', "    // Recovery is the user's pick")}\nreturn codexAccessRow;`, [])();
+  const accessActions = compileFunction(`${between('    let accessWaitKey = null;', '    const onMessageScrollGesture = ')}\nreturn codexAccessActions;`, ['codexBridge', 'el'])(bridge, el);
   return compileFunction(`${block}\nreturn { chromeRow, connectionNotice };`, keys)(
-    () => ({ state }), codex, activeEngine, () => state === 'online' ? null : el('div', {}, '연결 확인'), bridge, el);
+    () => ({ state }), codex, activeEngine, () => state === 'online' ? null : el('div', {}, '연결 확인'), bridge, el, accessRow, accessActions);
 }
 
 test('room row prioritizes title, latest message and time without duplicate Codex labels', () => {

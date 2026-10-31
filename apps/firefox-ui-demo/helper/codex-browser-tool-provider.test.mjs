@@ -43,7 +43,7 @@ test('QA Browser preparation requires an original observe selection and a live U
   assert.equal(prepared.selection.selectedSources[0].browserToolPermission, 'observe')
   assert.equal(prepared.selection.selectedSources[0].id, 'source-1')
   assert.equal(prepared.selection.selectedSources[0].browserToolSelection.token, 'one-time-token')
-  assert.equal(f.provider.specs().length, 8)
+  assert.equal(f.provider.specs().length, 14)
   assert.throws(() => f.provider.requireThread('old-native', prepared), error => error.code === 'BROWSER_TOOLS_UNAVAILABLE')
   f.provider.registerThread('new-native')
   f.provider.requireThread('new-native', prepared)
@@ -76,7 +76,11 @@ test('BrowserBounded accepts a single explicit current-turn interaction selectio
   assert.equal(prepared.interactionRequested, false)
   assert.equal(f.provider.prepare({ effectiveExecutionPolicy: 'browserBounded' }), null)
   const source = { ...selected('interact')[0], sourceRef: { viewId: 'card-1', uri: 'https://example.test/owned-page' } }
-  assert.throws(() => f.provider.prepare({ selectedSources: [source, { ...source, id: 'source-2' }], clientThreadId: 'ui-thread-1', effectiveExecutionPolicy: 'browserBounded', browserTransportId: 'ui-stream-1' }), error => error.code === 'INVALID_BROWSER_SELECTION')
+  // BRW-07 / BRW-11: several explicitly granted Cards may share one run, but
+  // an interact Card the person did not pick is still refused.
+  assert.throws(() => f.provider.prepare({ selectedSources: [source, { ...source, id: 'source-2', selectedByUser: false }], clientThreadId: 'ui-thread-1', effectiveExecutionPolicy: 'browserBounded', browserTransportId: 'ui-stream-1' }), error => error.code === 'INVALID_BROWSER_SELECTION')
+  assert.throws(() => f.provider.prepare({ selectedSources: [1, 2, 3, 4, 5].map(n => ({ ...source, id: `source-${n}`, sourceRef: { viewId: `card-${n}`, uri: 'https://example.test/' } })), clientThreadId: 'ui-thread-1', effectiveExecutionPolicy: 'browserBounded', browserTransportId: 'ui-stream-1' }), error => error.code === 'INVALID_BROWSER_SELECTION')
+  assert.equal(f.provider.prepare({ selectedSources: [source, { ...source, id: 'source-2', sourceRef: { viewId: 'card-2', uri: 'https://example.test/other' } }], clientThreadId: 'ui-thread-1', effectiveExecutionPolicy: 'browserBounded', browserTransportId: 'ui-stream-1' }).interactionRequested, true)
   const interacting = f.provider.prepare({ selectedSources: [source], clientThreadId: 'ui-thread-1', effectiveExecutionPolicy: 'browserBounded', browserTransportId: 'ui-stream-1' })
   assert.equal(interacting.interactionRequested, true)
   const run = { answerId: 'native/turn-1', runId: 'turn-1', clientThreadId: 'ui-thread-1', status: 'inProgress', executionPolicy: { mode: 'browserBounded' } }
@@ -461,4 +465,35 @@ test('a failed Browser call shows only fixed facts beside the public code: sent 
     assert.equal(JSON.stringify(error).includes('cookies'), false)
     assert.equal(JSON.stringify(error).includes('Delete everything'), false)
   }
+})
+
+test('a Card the Agent opened joins the run binding and leaves it when closed; other Cards stay refused', async () => {
+  const f = fixture()
+  f.provider.runtime.browserRegisteredThreads.add('native-thread')
+  const service = {
+    prepare: input => ({ selectedSources: input.selectedSources, cards: new Map([['card-1', { sourceId: 'source-1', cardEpoch: 'epoch-1' }]]) }),
+    bind: async () => ({ cards: [{ cardId: 'card-1', permission: 'interact', accountStatus: 'unverified' }] }),
+    dispatch: async (run, event) => event.tool === 'egdesk_browser_open_card'
+      ? { status: 'card-opened', cardId: 'card-2', action: 'open_card', openedFrom: 'card-1', permission: 'interact', cardEpoch: 'epoch-2', externalEffectVerified: false }
+      : event.tool === 'egdesk_browser_close_card' ? { status: 'card-closed', cardId: event.arguments.cardId, action: 'close_card', externalEffectVerified: false }
+      : { status: 'observed', cardId: event.arguments.cardId, observationId: 'o', snapshot: { cardId: event.arguments.cardId }, externalEffectVerified: false },
+    cancelRun: async () => [], reset: async () => [],
+  }
+  const provider = createCodexBrowserToolProvider({ transport: f.transport, getOwnerKey: () => 'codex:account-1', service })
+  provider.runtime = f.provider.runtime
+  const source = { ...selected('interact')[0], sourceRef: { viewId: 'card-1', uri: 'https://example.test/owned-page' } }
+  const prepared = provider.prepare({ selectedSources: [source], clientThreadId: 'ui-thread-1', effectiveExecutionPolicy: 'browserBounded', browserTransportId: 'ui-stream-1' })
+  const run = { answerId: 'native-thread/turn', runId: 'turn', clientThreadId: 'ui-thread-1', status: 'inProgress', executionPolicy: { mode: 'browserBounded' } }
+  await provider.bindRun(run, prepared)
+  assert.equal((await provider.dispatch(run, { tool: 'egdesk_browser_observe', callId: 'o-2', arguments: { cardId: 'card-2' } })).success, false, 'not yet a Card of this run')
+  const opened = await provider.dispatch(run, { tool: 'egdesk_browser_open_card', callId: 'open', arguments: { cardId: 'card-1', url: 'https://example.test/x' } })
+  assert.equal(opened.success, true)
+  assert.deepEqual(run.browserBinding.cards.map(card => [card.cardId, card.openedByAgent === true]), [['card-1', false], ['card-2', true]])
+  assert.equal(f.events.find(event => event.event === 'browser.card.opened').detail.openedFrom, 'card-1')
+  assert.equal((await provider.dispatch(run, { tool: 'egdesk_browser_observe', callId: 'o-3', arguments: { cardId: 'card-2' } })).success, true)
+  const closed = await provider.dispatch(run, { tool: 'egdesk_browser_close_card', callId: 'close', arguments: { cardId: 'card-2' } })
+  assert.equal(closed.success, true)
+  assert.deepEqual(run.browserBinding.cards.map(card => card.cardId), ['card-1'])
+  assert.equal((await provider.dispatch(run, { tool: 'egdesk_browser_observe', callId: 'o-4', arguments: { cardId: 'card-2' } })).success, false)
+  assert.equal(f.events.filter(event => event.event === 'browser.card.closed').length, 1)
 })

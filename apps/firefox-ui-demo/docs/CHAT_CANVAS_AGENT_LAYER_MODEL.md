@@ -80,6 +80,34 @@ Moving work from Agent DM to a Board Thread must not expose an entire private
 DM automatically. The system links or copies only the selected messages and
 resolved context needed for the shared work.
 
+**Implemented flow (2026-10-31, CHAT-03 · D-M3 · D-M2):**
+
+```text
+Agent DM bubble ⋯ menu
+  -> [Board Thread로 옮기기]            one bubble
+  -> [여러 메시지 골라 옮기기]           checkboxes + a bar above the log (max 20)
+  -> picker: an existing Board Thread, or [새 Board Thread 만들기]
+     (the new room is led by the DM's Agent)
+  -> POST /chat/share { fromClientThreadId, toClientThreadId, localMessageIds }
+```
+
+- Board Thread: the copies appear as one block per move, placed where the
+  store saved them, with `[원래 대화 보기]` back to the DM bubble. The
+  receiving Agent reads the block once, with its next turn
+  (`<egdesk-shared-messages>`); the person's saved message never changes.
+- Agent DM: the original bubbles stay; each gets a `스레드로 보냄` chip
+  that opens the Board Thread.
+- Board Thread header: `[DM으로 돌아오기]` returns to the DM that last sent
+  copies here.
+- Mentions: `@이름` / `[@이름](agent://profileId)` chips under a Board
+  Thread bubble (same rules as the helper's `boardMentions`); an unread
+  Agent line that calls the person (`@나`, `@사용자`, `@사람`) puts an `@`
+  badge on the room row. Which Agents answer stays the helper's D-M2 rule;
+  routing several Agents from the composer is CHAT-10.
+- Record: chat store events `messages.shared.in` (copies + link back) and
+  `messages.shared.out` (ids + link forward); the screen reads them into
+  `thread.routing` (`EGDeskThreadRouting.sys.mjs`).
+
 ---
 
 ## Canvas Outcome
@@ -301,6 +329,8 @@ Rationale:
 | Click result chip | Open/create linked canvas card |
 | Click agent avatar | Open agent profile |
 | Click run indicator | Open run bubble / plan bubble |
+| Click `[···] Agent 작업 중` bubble (AGENT-05) | Open the activity record at that run; one bubble per Agent at work, named when several share a room |
+| Look at a Card header while an Agent uses it (AGENT-05) | Small face + name of that Agent beside the BRW-13 badge; gone when the work ends |
 | Click profile settings | Open agent config card on canvas |
 | Click canvas result card provenance | Jump back to source chat bubble/run |
 
