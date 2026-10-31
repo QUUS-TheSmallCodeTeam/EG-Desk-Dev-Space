@@ -5071,6 +5071,35 @@
   color: var(--egd-on-surface-variant) !important;
 }
 
+/* CHAT-08: Agent-published Canvas result chips — kind badge, title, '버전 n'.
+   Opening and '열 수 없음' are states of the chip itself (no toast). */
+.egd-codex-result-chip-output { gap: 6px; }
+.egd-codex-result-kind {
+  display: inline-flex;
+  align-items: center;
+  flex: 0 0 auto;
+  min-height: 16px;
+  padding: 0 6px;
+  border: 1px solid var(--egd-outline);
+  border-radius: 999px;
+  color: var(--egd-on-surface-variant);
+  font-size: 10px;
+  font-weight: 650;
+  line-height: 1;
+  white-space: nowrap;
+}
+.egd-codex-result-version,
+.egd-codex-result-state {
+  flex: 0 0 auto;
+  color: var(--egd-on-surface-variant);
+  font-size: 12px;
+  white-space: nowrap;
+}
+.egd-codex-result-state:empty { display: none; }
+.egd-codex-result-chip-output[data-state="opening"] { cursor: progress; }
+.egd-codex-result-chip-output[data-state="opening"] .egd-codex-result-label { text-decoration: none; }
+.egd-codex-result-chip-output[data-state="unavailable"] { color: var(--egd-on-surface-variant) !important; }
+
 .egd-codex-streaming {
   margin-top: 5px;
   font-size: 10px;
