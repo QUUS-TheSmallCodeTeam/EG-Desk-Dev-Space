@@ -4,6 +4,7 @@ import { mkdtemp, mkdir, readFile, realpath, rename, rm, writeFile } from 'node:
 import os from 'node:os'
 import path from 'node:path'
 import vm from 'node:vm'
+import { Readable } from 'node:stream'
 import { CodexChatRuntime } from './codex-chat-runtime.mjs'
 import { createEGDeskFileMount } from './egdesk-file-mount.mjs'
 import { createEGDeskFileHttpAdapter, EGDESK_FILE_ENDPOINTS } from './egdesk-file-http.mjs'
@@ -12,7 +13,10 @@ import { ImmutableContextStore } from './egdesk-context-store.mjs'
 import { openBridgeSettings } from './egdesk-bridge-settings.mjs'
 import { openWorkflowRuntime } from './egdesk-workflow-runtime.mjs'
 import { openChatStore } from './egdesk-chat-store.mjs'
-import { createChatHttpHandler } from './codex-bridge-http.mjs'
+import { createAccountAccessTracker, createChatHttpHandler } from './codex-bridge-http.mjs'
+import { accountAccessState, publicAuthIdentityKey } from './codex-auth-state.mjs'
+import { chatError } from './codex-chat-values.mjs'
+import { AppServerRpc } from './codex-app-server-rpc.mjs'
 
 // Never import or boot the production entrypoint. Only these explicitly
 // bounded service-wiring blocks run in a VM with fake server/process/native
@@ -32,6 +36,201 @@ const resolverExpression = source.match(/^  resolveProjectWorkspace: (request =>
 assert.ok(resolverExpression, 'the production Chat constructor must inject the file-mount resolver')
 const originResolverExpression = source.match(/^  resolveRunProjectOrigin: (request => localFiles\.resolveRunProjectOrigin\(request\)),\s*$/m)?.[1]
 assert.ok(originResolverExpression, 'the production Chat constructor must inject the read-only origin resolver')
+
+// Execute the real request boundary and auth broadcast wiring, not the
+// entrypoint. All RPCs are deferred synthetic replies; no process or socket.
+function accessRequestHarness({ memoryRpc = false } = {}) {
+  const authState = { isLoggedIn: true, accountEmail: 'owner@example.test', accessFailure: null, rateLimits: null }
+  const calls = [], pending = [], events = [], effects = [], frames = []
+  const connection = () => {
+    if (memoryRpc) {
+      const rpc = new AppServerRpc({ send: frame => frames.push(JSON.parse(frame)) })
+      rpc.ready = true // a synthetic ready connection; request/receive are real
+      return rpc
+    }
+    return { request(method, params) {
+      calls.push({ method, params })
+      if (method === 'thread/start') return Promise.resolve({ thread: { id: 'native-thread' } })
+      return new Promise((resolve, reject) => pending.push({ method, resolve, reject }))
+    } }
+  }
+  const sandbox = vm.createContext({ authState, rpc: connection(), appServerReady: true, createAccountAccessTracker,
+    publicAuthIdentityKey, accountAccessState, chatError, usageDisplay: () => null,
+    broadcast: event => events.push(structuredClone(event)), BRIDGE_PROTOCOL_VERSION: 1, PROVIDER_ID: 'codex',
+    workflow: { observeAuth: value => effects.push(['observe', value]) }, engineStatus: { check: () => effects.push(['engine']) },
+  })
+  const epoch = source.match(/^let accountAccessEpoch = 0$/m)?.[0] || ''
+  vm.runInContext(`${epoch}\n${block('const accessTracker = createAccountAccessTracker(', '\nfunction authSnapshot()')}\n`
+    + `${block('function authSnapshot()', '\nfunction authStatusTextFor(')}\n`
+    + `${block('function emitAuthStatus()', '\nfunction emitAuthLifecycle(')}\n`
+    + `${block('function modelAccountKey(', '\nfunction appServerRequest(')}\n`
+    + `${block('function appServerRequest(', '\nasync function refreshAccountState(')}\n`
+    + 'this.request = appServerRequest; this.update = updateAuthState; this.snapshot = authSnapshot;', sandbox)
+  return { state: authState, calls, pending, events, effects, frames, request: sandbox.request, update: sandbox.update, snapshot: sandbox.snapshot,
+    get rpc() { return sandbox.rpc },
+    replace: () => { sandbox.rpc = connection() }, offline: () => { sandbox.appServerReady = false } }
+}
+
+test('SUB-14 service request boundary publishes immediate turn/start rejections to auth.status and the state snapshot', async () => {
+  for (const [message, expected] of [['Usage limit reached', 'quotaExhausted'], ['Unauthorized', 'authFailed'], ['Permission denied', 'permissionDenied']]) {
+    const h = accessRequestHarness(), params = { threadId: 'native-thread', input: [{ type: 'text', text: 'synthetic request' }] }
+    const before = structuredClone(params), failure = Object.assign(new Error(message), { code: -32000 })
+    assert.equal(h.snapshot().access.state, 'ok')
+    const result = h.request('turn/start', params)
+    h.pending[0].reject(failure)
+    await assert.rejects(result, error => error === failure)
+    assert.equal(h.snapshot().access.state, expected)
+    assert.equal(h.events.find(event => event.type === 'auth.status')?.status.access.state, expected)
+    assert.equal(h.events.find(event => event.type === 'auth-status')?.status.access.state, expected)
+    assert.deepEqual(h.calls, [{ method: 'turn/start', params: before }], 'same request, once only')
+    assert.deepEqual(params, before)
+  }
+})
+
+test('SUB-14 service request boundary fences account transitions, replaced connections and offline late rejections', async () => {
+  for (const change of ['account', 'account-roundtrip', 'signout', 'connection', 'offline']) {
+    const h = accessRequestHarness(), failure = Object.assign(new Error('Unauthorized'), { code: -32000 })
+    const result = h.request('turn/start', { threadId: 'native-thread' })
+    if (change === 'account' || change === 'account-roundtrip') h.update({ accountEmail: 'other@example.test' })
+    if (change === 'account-roundtrip') h.update({ accountEmail: 'owner@example.test' })
+    if (change === 'signout') h.update({ isLoggedIn: false, accountEmail: null })
+    if (change === 'connection') h.replace()
+    if (change === 'offline') h.offline()
+    const previousEvents = h.events.length
+    h.pending[0].reject(failure)
+    await assert.rejects(result, error => error === failure)
+    assert.equal(h.state.accessFailure, null, change)
+    assert.equal(h.events.length, previousEvents, 'late rejection emits no new account state')
+  }
+})
+
+test('SUB-14 service HTTP failure keeps the original turn/start rejection while exposing the new account state, without retry', async () => {
+  const h = accessRequestHarness()
+  const chat = new CodexChatRuntime({ request: h.request, respond: () => assert.fail('no callback or automatic retry'), getOwnerKey: () => publicAuthIdentityKey(h.state) })
+  chat.setConnection(true)
+  const handler = createChatHttpHandler(chat, async () => {})
+  const body = { message: 'Synthetic request', requestId: 'ui-request', clientThreadId: 'ui-thread' }
+  const req = Readable.from([Buffer.from(JSON.stringify(body))]); req.method = 'POST'; req.headers = { 'content-type': 'application/json' }
+  const res = { writeHead(status) { this.status = status }, end(text) { this.body = JSON.parse(text) } }
+  const sending = handler(req, res, new URL('http://localhost/chat/send'))
+  await until(() => h.pending.some(call => call.method === 'turn/start'))
+  h.pending.find(call => call.method === 'turn/start').reject(Object.assign(new Error('You have hit your usage limit.'), { code: -32000 }))
+  await sending
+  assert.equal(res.status, 400)
+  assert.deepEqual({ accepted: res.body.accepted, conversationId: res.body.conversationId, requestId: res.body.requestId, error: res.body.error },
+    { accepted: false, conversationId: 'native-thread', requestId: 'ui-request', error: 'You have hit your usage limit.' })
+  assert.equal(h.snapshot().access.state, 'quotaExhausted')
+  assert.deepEqual(h.calls.map(call => call.method), ['thread/start', 'turn/start'])
+})
+
+async function memoryAccessRejection(h, message) {
+  const rpc = h.rpc, request = rpc.request.bind(rpc)
+  let original = null
+  rpc.request = (...args) => request(...args).catch(error => { original = error; throw error })
+  const rejected = h.request('turn/start', { threadId: 'native-thread', input: [] })
+  const frame = h.frames.at(-1)
+  assert.equal(frame.method, 'turn/start')
+  rpc.receive(JSON.stringify({ id: frame.id, error: { code: -32000, message,
+    data: { codexErrorInfo: 'usageLimitExceeded', privateDetail: 'synthetic-sensitive-payload' } } }))
+  await assert.rejects(rejected, error => {
+    assert.equal(error, original, 'the account observer rethrows the very same transport Error')
+    assert.equal(error.code, -32000)
+    assert.equal(error.message, message)
+    assert.deepEqual(Object.keys(error), ['code'], 'no new transport error.data policy')
+    return true
+  })
+  assert.equal(h.frames.length, 1, 'one RPC, no automatic retry')
+  assert.equal(rpc.pending.size, 0)
+  rpc.close()
+}
+
+test('SUB-14 memory RPC: ambiguous lookup and transport diagnostics never assert an account rejection', async () => {
+  for (const message of [
+    'usage limit lookup timed out',
+    'rate limit read failed',
+    'Failed to fetch quota exceeded status',
+    'Unauthorized status lookup failed',
+    'Could not check whether token expired',
+    'Permission denied while writing to socket',
+    'Access denied response stream disconnected',
+    'Permission check failed: forbidden result is unavailable',
+    'Usage limit information unavailable',
+    'Rate limit reached status could not be read',
+    'Could not determine whether token expired',
+    'Unauthorized status lookup returned unknown',
+    'You have not hit your usage limit',
+    'The quota has not been exceeded',
+  ]) for (const existingFailure of [false, true]) {
+    const h = accessRequestHarness({ memoryRpc: true })
+    if (existingFailure) h.state.accessFailure = { kind: 'auth', cause: 'unauthorized', at: 2_000_000, identity: 'email:owner@example.test' }
+    const before = structuredClone(h.state), access = h.snapshot().access.state
+    await memoryAccessRejection(h, message)
+    assert.deepEqual(h.state, before, 'an RPC error code and account-related words are not evidence of account exhaustion or denial')
+    assert.equal(h.snapshot().access.state, access)
+    assert.deepEqual(h.events, [], 'diagnostic text never enters account-state broadcasts')
+  }
+})
+
+test('SUB-14 memory RPC: explicit quota, auth and permission rejection controls still publish only allowlisted account state', async () => {
+  for (const [message, expected] of [
+    ['You have hit your usage limit.', 'quotaExhausted'], ['Usage limit reached', 'quotaExhausted'],
+    ['Rate limit exceeded', 'quotaExhausted'], ['Quota exceeded', 'quotaExhausted'],
+    ['Unauthorized', 'authFailed'], ['Token has expired', 'authFailed'],
+    ['Permission denied by policy', 'permissionDenied'], ['Access denied', 'permissionDenied'],
+  ]) {
+    const h = accessRequestHarness({ memoryRpc: true })
+    await memoryAccessRejection(h, message)
+    assert.equal(h.snapshot().access.state, expected)
+    assert.equal(h.events.find(event => event.type === 'auth.status')?.status.access.state, expected)
+    const publicState = JSON.stringify([h.state, h.events])
+    assert.equal(publicState.includes(message), false, 'the raw RPC error is not copied into account state')
+    assert.equal(publicState.includes('synthetic-sensitive-payload'), false)
+    assert.equal(h.state.accessFailure.cause, null, 'error.data is still neither forwarded nor interpreted')
+  }
+})
+
+const accessDeclarations = [
+  ['quota exceeded', 'quotaExhausted'], ['rate limit reached', 'quotaExhausted'],
+  ['Unauthorized', 'authFailed'], ['Permission denied by policy', 'permissionDenied'],
+]
+
+test('SUB-14 clause RPC: a leading rejection cause is distinct from later advice, regardless of advice topic', async () => {
+  for (const [declaration, expected] of accessDeclarations) for (const message of [
+    `Request failed: ${declaration}. Please check your plan.`,
+    `${declaration}. Please check your usage limit.`,
+    `  Request   failed : ${declaration}! Please sign in again.  `,
+  ]) {
+    const h = accessRequestHarness({ memoryRpc: true })
+    await memoryAccessRejection(h, message)
+    assert.equal(h.snapshot().access.state, expected, 'only the declaration, never the advice topic, determines the account cause')
+    assert.equal(h.events.find(event => event.type === 'auth.status')?.status.access.state, expected)
+    assert.equal(JSON.stringify([h.state, h.events]).includes(message), false)
+  }
+})
+
+test('SUB-14 clause RPC: quoted retrieval subjects, unknown envelopes and unverified statements remain unclassified', async () => {
+  for (const [declaration] of accessDeclarations) for (const message of [
+    `Failed to retrieve '${declaration}' status.`,
+    `Failed to retrieve "${declaration}" status.`,
+    `Failed to retrieve \`${declaration}\` status.`,
+    `Failed to retrieve “${declaration}” status.`,
+    `Request failed: '${declaration}'. Please check your plan.`,
+    `Could not determine whether ${declaration}.`,
+    `Unverified diagnostic: ${declaration}.`,
+    `Status lookup failed: ${declaration}.`,
+    `Please check your plan. ${declaration}.`,
+    `${declaration}. The result could not be verified.`,
+    `${declaration}?`,
+    `Request failed: '${declaration}`,
+  ]) for (const existingFailure of [false, true]) {
+    const h = accessRequestHarness({ memoryRpc: true })
+    if (existingFailure) h.state.accessFailure = { kind: 'auth', cause: 'unauthorized', at: 2_000_000, identity: 'email:owner@example.test' }
+    const before = structuredClone(h.state)
+    await memoryAccessRejection(h, message)
+    assert.deepEqual(h.state, before, 'unsupported syntax is not guessed into account authority')
+    assert.deepEqual(h.events, [])
+  }
+})
 
 async function harness(t, { constructionRoots = false, failingUnsubscribe = false, unavailableTasks = false,
   unavailableOntology = false, failingOntologyClose = false, durable = false } = {}) {

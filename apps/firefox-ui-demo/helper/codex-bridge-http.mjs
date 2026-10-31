@@ -276,6 +276,8 @@ export function createRateLimitSync({ request, auth, ready = () => true, update,
  * - turn/started clears a turn-scoped (policy/sandbox) cause only;
  * - a finished sign-in clears the previous sign-in's failure.
  * The identity is stored with the failure; another account never inherits it.
+ * Definite turn/start RPC rejections use the same tracker, scoped to the
+ * requesting identity and connection. Tracking never retries or wraps errors.
  */
 export function createAccountAccessTracker({ auth, update, now = Date.now }) {
   const current = () => publicAccessFailure(auth()?.accessFailure)
@@ -304,7 +306,70 @@ export function createAccountAccessTracker({ auth, update, now = Date.now }) {
       default: return false
     }
   }
-  return { notify, current }
+  function requestRejectionKind(error) {
+    const structured = publicErrorKind({ codexErrorInfo: error.codexErrorInfo, code: error.code })
+    if (ACCESS_FAILURE_KINDS.includes(structured)) return structured
+    if (error.codexErrorInfo != null || structured !== 'unknown') return null
+    const message = error.message
+    if (typeof message !== 'string' || !message.trim() || message.length > 2000) return null
+    // A bounded message grammar, not general provider-language inference:
+    // leading declaration (optionally in a request-failure envelope), then
+    // courtesy instructions. Quoted subjects are opaque, never declarations.
+    const quoteEnds = new Map([["'", "'"], ['"', '"'], ['`', '`'], ['‘', '’'], ['“', '”']])
+    const statements = []
+    let text = '', quote = null
+    const finish = question => {
+      if (text.trim()) statements.push({ text: text.trim().replace(/\s+/g, ' '), question })
+      text = ''
+    }
+    for (let index = 0; index < message.length; index++) {
+      const char = message[index]
+      if (quote) {
+        if (char === '\\') index++
+        else if (char === quote) quote = null
+        continue
+      }
+      const apostrophe = (char === "'" || char === '’') && /[A-Za-z]/.test(message[index - 1] || '') && /[A-Za-z]/.test(message[index + 1] || '')
+      if (!apostrophe && quoteEnds.has(char)) { quote = quoteEnds.get(char); text += ' \uFFFC '; continue }
+      if (/[.!?;\r\n]/.test(char)) finish(char === '?')
+      else text += char
+    }
+    if (quote) return null
+    finish(false)
+    const [first, ...advice] = statements
+    if (!first || first.question || advice.some(item => !/^please\b/i.test(item.text))) return null
+    const declaration = first.text.replace(/^request\s+failed\s*:\s*/i, '')
+    const kind = publicErrorKind({ message: declaration })
+    // Reuse the existing kinds, but require a complete declarative clause.
+    // Unknown envelopes, qualifiers or continuations stay unclassified.
+    const grammar = {
+      quota: /^(?:(?:you(?: have|'ve)? )?(?:hit|reached|exceeded|exhausted) (?:(?:your|the|current|available) )*(?:usage limit|rate limit|quota)|(?:(?:your|the|current|available) )*(?:usage limit|rate limit|quota) (?:(?:has|have|is|was|been|now|already) )*(?:reached|exceeded|exhausted|depleted))$/i,
+      auth: /^(?:unauthori[sz]ed|(?:you are )?not (?:logged|signed) in|(?:please )?(?:log|sign) in again|(?:please )?re-?authenticate|(?:your )?token (?:has )?expired)$/i,
+      permission: /^(?:permission denied|access denied|forbidden|not permitted)(?: by policy)?$/i,
+    }
+    return grammar[kind]?.test(declaration) ? kind : null
+  }
+  async function request(method, dispatch, isCurrent = () => true) {
+    if (method !== 'turn/start') return dispatch()
+    const state = auth()
+    const identity = state?.isLoggedIn === true ? publicAuthIdentityKey(state) : null
+    try {
+      return await dispatch()
+    } catch (error) {
+      // A definite RPC rejection is not proof of an account-access cause.
+      // Keep ambiguous inspection/transport failures out of account state.
+      try {
+        const live = auth()
+        if ((Number.isInteger(error?.code) || error?.definite === true) && error?.willRetry !== true
+            && identity && live?.isLoggedIn === true && publicAuthIdentityKey(live) === identity && isCurrent()) {
+          const kind = requestRejectionKind(error)
+          if (kind) set(publicAccessFailure({ kind, cause: accessCause(error.codexErrorInfo), at: now(), identity }))
+        }
+      } catch { /* An account-state observer must not replace the RPC error. */ }
+      throw error
+    }
+  }
+  return { notify, current, request }
 }
 
 /**

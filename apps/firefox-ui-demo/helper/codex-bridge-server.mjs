@@ -68,6 +68,7 @@ let reconnectTimer = null
 const appServerBackoff = createReconnectBackoff()
 let loginPollTimer = null
 let rpc = null
+let accountAccessEpoch = 0
 let nativeCapabilities = { executable: null, version: null, schemaVersion: NATIVE_SCHEMA_VERSION, schemaMatch: false, experimentalApi: true, dynamicTools: false, readerReadOnly: false, qaReadOnly: false }
 let launchConfigBlocked = false
 let nativePreflight = {
@@ -392,7 +393,9 @@ function authSnapshot() {
 }
 
 function updateAuthState(patch, { broadcastStatus = true } = {}) {
+  const previousAccount = modelAccountKey(authState)
   Object.assign(authState, patch, { lastRefresh: Date.now() })
+  if (modelAccountKey(authState) !== previousAccount) accountAccessEpoch += 1
   if (broadcastStatus) {
     emitAuthStatus()
     broadcast({ type: 'auth-status', status: authSnapshot() })
@@ -439,7 +442,11 @@ function modelAccountKey(state) {
 
 function appServerRequest(method, params) {
   if (!appServerReady || !rpc) return Promise.reject(chatError('BRIDGE_OFFLINE', 'Codex app-server is offline', 503))
-  return rpc.request(method, params)
+  const connection = rpc
+  if (method !== 'turn/start') return connection.request(method, params)
+  const epoch = accountAccessEpoch
+  return accessTracker.request(method, () => connection.request(method, params),
+    () => appServerReady && rpc === connection && accountAccessEpoch === epoch)
 }
 
 async function refreshAccountState({ refreshToken = false } = {}) {

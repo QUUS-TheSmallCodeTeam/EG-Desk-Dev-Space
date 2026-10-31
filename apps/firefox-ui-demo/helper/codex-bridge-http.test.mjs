@@ -664,6 +664,77 @@ test('access tracker clears on a completed turn or a finished sign-in; a turn-sc
   assert.equal(a.state.accessFailure.identity, null, 'an unknown identity records no invented key')
 })
 
+test('SUB-14 request tracker records only definite turn/start auth, quota and permission rejections and rethrows the original', async () => {
+  for (const [message, info, kind, cause] of [
+    ['Turn refused', 'usageLimitExceeded', 'quota', 'usageLimitExceeded'],
+    ['Turn refused', 'unauthorized', 'auth', 'unauthorized'],
+    ['Turn refused', 'sandboxError', 'permission', 'sandboxError'],
+    ['You have hit your usage limit.', undefined, 'quota', null],
+    ['Unauthorized', undefined, 'auth', null],
+    ['Permission denied by policy', undefined, 'permission', null],
+  ]) {
+    const a = accessFixture()
+    const failure = Object.assign(new Error(message), { code: -32000, codexErrorInfo: info, privateDetail: 'not an account-state field' })
+    let calls = 0
+    await assert.rejects(a.tracker.request('turn/start', () => { calls++; return Promise.reject(failure) }), error => error === failure)
+    assert.deepEqual(a.state.accessFailure, { kind, cause, at: 2_000_000, identity: 'email:owner@example.test' })
+    assert.equal(calls, 1, 'tracking never retries')
+    assert.equal(a.updates.length, 1)
+    assert.equal(JSON.stringify(a.state).includes('privateDetail'), false)
+  }
+})
+
+test('SUB-14 request tracker leaves timeouts, transport/model/unknown errors, other methods and success unchanged', async () => {
+  const a = accessFixture()
+  a.tracker.notify({ method: 'error', params: { error: { codexErrorInfo: 'unauthorized' } } })
+  const previous = structuredClone(a.state.accessFailure), count = a.updates.length
+  for (const failure of [
+    Object.assign(new Error('usage limit lookup timed out'), { code: 'RPC_TIMEOUT' }),
+    Object.assign(new Error('usage limit lookup timed out'), { code: -32000 }),
+    Object.assign(new Error('Unauthorized status lookup failed'), { code: -32000 }),
+    Object.assign(new Error('Permission denied while writing to socket'), { code: -32000 }),
+    Object.assign(new Error('Permission denied while writing to socket'), { code: 'EACCES' }),
+    new Error('Unauthorized'),
+    Object.assign(new Error('Turn failed'), { code: -32603 }),
+    Object.assign(new Error('Turn failed'), { code: -32000, codexErrorInfo: 'contextWindowExceeded' }),
+    Object.assign(new Error('Turn failed'), { code: -32000, codexErrorInfo: { unknownVariant: 1 } }),
+    Object.assign(new Error('Rate limit exceeded'), { code: -32000, willRetry: true }),
+  ]) {
+    await assert.rejects(a.tracker.request('turn/start', () => Promise.reject(failure)), error => error === failure)
+    assert.deepEqual(a.state.accessFailure, previous)
+  }
+  for (const method of ['thread/start', 'thread/resume', 'account/read', 'turn/interrupt']) {
+    const failure = Object.assign(new Error('Quota exceeded'), { code: -32000 })
+    await assert.rejects(a.tracker.request(method, () => Promise.reject(failure)), error => error === failure)
+  }
+  const result = { turn: { id: 'accepted' } }
+  assert.equal(await a.tracker.request('turn/start', () => Promise.resolve(result)), result)
+  assert.deepEqual(a.state.accessFailure, previous, 'an accepted RPC alone does not prove turn completion or account recovery')
+  assert.equal(a.updates.length, count)
+})
+
+test('SUB-14 request tracker ignores unowned/stale rejections and cannot mask the original error if tracking fails', async () => {
+  for (const change of ['account', 'signout', 'unknown', 'connection']) {
+    const a = accessFixture()
+    if (change === 'unknown') a.state.accountEmail = null
+    let reject, current = true
+    const failure = Object.assign(new Error('Unauthorized'), { code: -32000 })
+    const pending = a.tracker.request('turn/start', () => new Promise((_resolve, fail) => { reject = fail }), () => current)
+    if (change === 'account') a.state.accountEmail = 'other@example.test'
+    if (change === 'signout') a.state.isLoggedIn = false
+    if (change === 'connection') current = false
+    reject(failure)
+    await assert.rejects(pending, error => error === failure)
+    assert.equal(a.state.accessFailure, null, change)
+    assert.equal(a.updates.length, 0)
+  }
+  const failure = Object.assign(new Error('Unauthorized'), { code: -32000 })
+  const tracker = createAccountAccessTracker({ auth: () => ({ isLoggedIn: true, accountEmail: 'owner@example.test' }),
+    update: () => { throw new Error('status observer failed') } })
+  await assert.rejects(tracker.request('turn/start', () => { throw failure }), error => error === failure)
+  await assert.rejects(tracker.request('turn/start', () => Promise.reject(failure), () => { throw new Error('scope observer failed') }), error => error === failure)
+})
+
 test('bridge mounts Agent profiles, plan usage and PUT preflight in the documented order', async () => {
   const source = await readFile(new URL('./codex-bridge-server.mjs', import.meta.url), 'utf8')
   const at = text => { const index = source.indexOf(text); assert.notEqual(index, -1, `missing server marker: ${text}`); return index }
