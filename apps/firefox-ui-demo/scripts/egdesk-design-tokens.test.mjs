@@ -3,6 +3,8 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { compileFunction } from 'node:vm';
 import * as SurfaceState from '../overlay/resources/EGDeskSurfaceState.sys.mjs';
+import * as ChatState from '../overlay/resources/EGDeskChatState.sys.mjs';
+import * as InputContext from '../overlay/resources/EGDeskInputContext.sys.mjs';
 import {
   CONTRAST_RATIOS, CONTRAST_REQUIREMENTS, MORE_CONTRAST_REQUIREMENTS, STATE_TOKEN_TABLE, SYSTEM_COLOR_KEYWORDS,
   auditCssScale, checkSurfaceContrast, compositeOver, contrastRatio, formatHex, hasRootOverrides, mediaApplies,
@@ -736,6 +738,73 @@ test('Briefing scroll containment leaves wide placement and the compact layout u
   for (const property of ['left', 'right', 'top', 'bottom', 'width', 'height', 'padding', 'transform']) assert.equal(wide[property], undefined);
 });
 
+// Run the production composer handlers and bridge send together. The DOM,
+// project preparation and transport boundaries below are local fixtures; the
+// transport records the request and returns a synthetic acceptance only.
+function chatComposerFixture({ reply } = {}) {
+  const target = { boardId: 'fixture-board', projectId: 'fixture-project', rootId: 'fixture-root' };
+  const activeThread = { id: 'room-a', clientBindingId: 'wire-a', title: '합성 방', engineId: 'codex',
+    messages: [], inputSources: [], briefingInputs: [], requestProjectTarget: target };
+  const state = { codex: { activeThreadId: activeThread.id, activityRoomGeneration: 7, threads: [activeThread],
+    threadDrafts: { 'room-a': '합성 질문' }, threadDraftRevisions: { 'room-a': 1 },
+    authStatus: { isLoggedIn: true, authMode: 'chatgpt', accountEmail: 'fixture@example.test', identityStatus: 'known' }, connected: true, liveRevision: 0 } };
+  const protocol = ChatState.createChatProtocolState(), reservations = new Map(), requests = [], owners = [], notices = [];
+  const thread = id => state.codex.threads.find(item => item.id === id) || null;
+  const updateThreadById = (id, update) => { state.codex.threads = state.codex.threads.map(item => item.id === id ? update(item) : item); };
+  const draft = (codex, id) => codex.threadDrafts[id] || '';
+  const deps = { state, ChatState, InputContext, protocol, memoAskSendReservations: reservations,
+    getActiveCodexThread: codex => thread(codex.activeThreadId), getCodexThreadById: (_codex, id) => thread(id), getCodexThreadDraft: draft,
+    clearMemoManualSendNotice: () => false, showMemoManualSendNotice: item => notices.push(item.id),
+    threadBusy: () => false, chatRoomProjectSendBlock: () => null, chatRequestProjectDisplays: new Map(),
+    epochScope: ChatState.createChatEpochScope(), ensureNativeReadyForSend: async () => true, updateThreadById, emit() {},
+    captureThreadInputs: async (_thread, inputs) => { assert.deepEqual(inputs, []); return []; },
+    codexThreadAgentProfile: () => null, SELF_MEMBER: 'self',
+    createCodexMessage: (role, content, status, options) => ({ role, content, status, ...options }),
+    appendMessageToThread: (id, message) => updateThreadById(id, item => ({ ...item, messages: [...item.messages, message] })),
+    codexThreadRuntimeConfig: () => ({}), browserToolSelectedSources: () => [], rootSseReady: () => ({ sourceReady: true }),
+    fetchJson: async (path, options) => {
+      assert.equal(path, '/chat/send', 'the fixture must never perform an external call');
+      assert.equal(options.method, 'POST');
+      const request = JSON.parse(options.body);
+      requests.push(request);
+      return reply ? reply(request) : { accepted: true, conversationId: 'fixture-conversation', runId: 'fixture-run' };
+    },
+    syncProtocolRun() {},
+  };
+  const watchStart = surfaceScript.indexOf('    const memoReadWatches = new Map();');
+  const watchEnd = surfaceScript.indexOf('    const confirmedLegacyImports', watchStart);
+  assert.ok(watchStart >= 0 && watchEnd > watchStart, 'production room identity watches');
+  deps.watchMemoRead = compileFunction(`${surfaceScript.slice(watchStart, watchEnd)}\nreturn watchMemoRead;`,
+    ['state', 'ChatState', 'getCodexThreadById', 'memoAskRuntimeIdentity'])(
+    state, ChatState, deps.getCodexThreadById, () => null);
+  const captureStart = surfaceScript.indexOf('      captureManualSendOwner(');
+  const captureEnd = surfaceScript.indexOf('\n      },', captureStart);
+  assert.ok(captureStart >= 0 && captureEnd > captureStart, 'production composer owner capture');
+  const captureOwner = compileFunction(`return { ${surfaceScript.slice(captureStart, captureEnd + 8)} };`,
+    Object.keys(deps))(...Object.values(deps)).captureManualSendOwner;
+  const methodStart = surfaceScript.indexOf('      async sendMessage(');
+  const methodEnd = surfaceScript.indexOf('\n      },', methodStart);
+  assert.ok(methodStart >= 0 && methodEnd > methodStart, 'production send method');
+  const send = compileFunction(`return { ${surfaceScript.slice(methodStart, methodEnd + 8)} };`,
+    Object.keys(deps))(...Object.values(deps)).sendMessage;
+  let pending = null;
+  const codexBridge = {
+    sendMessage(options) { owners.push(options.manualOwner); pending = send(options); return pending; },
+    captureManualSendOwner: captureOwner,
+    setDraft(value, id) { state.codex.threadDrafts[id] = value; },
+  };
+  state.codexBridge = codexBridge;
+  const el = (tag, props, ...children) => ({ tag, props, children, events: {}, isConnected: false,
+    addEventListener(type, handler) { this.events[type] = handler; } });
+  const composerStart = surfaceScript.indexOf('            const manualOwner = ');
+  const composerEnd = surfaceScript.indexOf('            let composerWidth = 0;', composerStart);
+  assert.ok(composerStart >= 0 && composerEnd > composerStart, 'production composer event handlers');
+  const composer = compileFunction(`let compositionInProgress = false, deferredCodex = null;\n${surfaceScript.slice(composerStart, composerEnd)}\nreturn { input, sendButton, manualOwner };`,
+    ['activeThread', 'codex', 'ChatState', 'el', 'deskIcon', 'getCodexThreadDraft', 'composerViewport', 'codexBridge', 'body'])(
+    activeThread, state.codex, ChatState, el, name => ({ icon: name }), draft, { cancel() {} }, codexBridge, {});
+  return { ...composer, state, protocol, reservations, requests, owners, notices, pending: () => pending };
+}
+
 test('approved Chat refinement keeps accessible composer and real HUD actions', () => {
   const input = declarationsFor('.egd-codex-input', { scheme: 'light' });
   assert.equal(input['min-height'], '40px');
@@ -745,12 +814,135 @@ test('approved Chat refinement keeps accessible composer and real HUD actions', 
   const send = declarationsFor('.egd-codex-send', { scheme: 'light' });
   assert.equal(send['min-width'], '34px');
   assert.equal(send['min-height'], '34px');
-  assert.match(surfaceScript, /data: \{ testid: 'chat-send' \},\s*onclick: \(\) => \{ if \(!compositionInProgress\) void codexBridge\.sendMessage\(\); \},\s*\}, deskIcon\('send'\)/);
+  const { input: composer, sendButton } = chatComposerFixture();
+  assert.equal(composer.props['aria-label'], '합성 방에 보낼 메시지');
+  assert.match(composer.props['aria-description'], /Enter로 줄바꿈.*Enter로 전송/);
+  assert.equal(composer.props.data.testid, 'chat-composer');
+  assert.equal(sendButton.props['aria-label'], '메시지 보내기');
+  assert.equal(sendButton.props.type, 'button');
+  assert.equal(sendButton.props.data.testid, 'chat-send');
+  assert.equal(sendButton.children[0].icon, 'send');
+  assert.equal(typeof sendButton.props.onclick, 'function');
   assert.match(surfaceScript, /class: 'egd-hud-pin',[^]*?'aria-label': '캔버스로 이동'[^]*?detachCodexChatFromHud\(\)[^]*?deskIcon\('detach'\)/);
   assert.match(surfaceScript, /class: 'egd-hud-close',[^]*?'aria-label': '닫기'[^]*?toggleHUD\(null\)[^]*?deskIcon\('close'\)/);
   assert.match(surfaceScript, /data: \{ testid: 'chat-attach-open' \}/);
   assert.match(surfaceScript, /renderEngineChip\(activeThread\)/);
   assert.match(surfaceScript, /codexUsageRing\(codex\.authStatus\)/);
+});
+
+test('the actual composer button and keyboard handlers dispatch once with their room owner', async t => {
+  for (const mode of ['button', 'control-enter', 'command-enter']) await t.test(mode, async () => {
+    const h = chatComposerFixture();
+    let prevented = false;
+    if (mode === 'button') h.sendButton.props.onclick();
+    else h.input.events.keydown({ key: 'Enter', ctrlKey: mode === 'control-enter', metaKey: mode === 'command-enter',
+      preventDefault() { prevented = true; } });
+    assert.equal(prevented, mode !== 'button');
+    const result = await h.pending();
+    assert.equal(result.accepted, true);
+    assert.equal(h.owners.length, 1);
+    const { threadId, binding, roomGeneration, current, release } = h.owners[0];
+    assert.deepEqual({ threadId, binding, roomGeneration }, { threadId: 'room-a', binding: 'wire-a', roomGeneration: 7 });
+    assert.equal(typeof current, 'function');
+    assert.equal(typeof release, 'function');
+    assert.equal(h.requests.length, 1);
+    assert.equal(h.requests[0].clientThreadId, 'wire-a');
+    assert.equal(h.requests[0].message, '합성 질문');
+    assert.deepEqual(h.requests[0].projectTarget, { boardId: 'fixture-board', projectId: 'fixture-project', rootId: 'fixture-root' });
+    assert.equal(h.protocol.requests[result.requestId].status, 'accepted');
+    assert.equal(h.state.codex.threads[0].messages.length, 1);
+  });
+});
+
+test('composer does not dispatch for newline, modified shortcuts or IME composition', async () => {
+  const h = chatComposerFixture();
+  for (const fields of [{ key: 'Enter' }, { key: 'Enter', ctrlKey: true, shiftKey: true },
+    { key: 'Enter', metaKey: true, altKey: true }, { key: 'Enter', ctrlKey: true, isComposing: true },
+    { key: 'Enter', ctrlKey: true, keyCode: 229 }]) {
+    h.input.events.keydown({ ...fields, preventDefault() { assert.fail('this key must remain available to the editor'); } });
+  }
+  h.input.events.compositionstart();
+  h.sendButton.props.onclick();
+  h.input.events.keydown({ key: 'Enter', ctrlKey: true, preventDefault() { assert.fail('IME must retain Enter'); } });
+  assert.equal(h.owners.length, 0);
+  assert.equal(h.requests.length, 0);
+  h.input.events.compositionend();
+  h.input.events.keydown({ key: 'Enter', ctrlKey: true, preventDefault() {} });
+  assert.equal((await h.pending()).accepted, true);
+  assert.equal(h.requests.length, 1);
+});
+
+test('a reserved room blocks the real composer send without queueing or changing its draft', async () => {
+  const h = chatComposerFixture();
+  h.reservations.set('room-a', { scope: { current: () => true } });
+  h.sendButton.props.onclick();
+  await h.pending();
+  assert.deepEqual(h.notices, ['room-a']);
+  assert.equal(h.state.codex.threadDrafts['room-a'], '합성 질문');
+  assert.equal(h.requests.length, 0);
+  h.reservations.delete('room-a');
+  await Promise.resolve();
+  assert.equal(h.requests.length, 0, 'releasing a reservation must not automatically resend');
+  h.sendButton.props.onclick();
+  assert.equal((await h.pending()).accepted, true);
+  assert.equal(h.requests.length, 1, 'an explicit retry sends once');
+});
+
+test('an old composer cannot send to a different room, binding or room generation', async t => {
+  for (const change of ['room', 'binding', 'generation']) for (const reserved of [false, true]) await t.test(`${change}, reserved=${reserved}`, async () => {
+    const h = chatComposerFixture();
+    if (change === 'room') {
+      h.state.codex.threads.push({ id: 'room-b', clientBindingId: 'wire-b', messages: [], inputSources: [], briefingInputs: [] });
+      h.state.codex.threadDrafts['room-b'] = '다른 방 초안';
+      h.state.codex.activeThreadId = 'room-b';
+      h.state.codex.activityRoomGeneration++;
+    } else if (change === 'binding') h.state.codex.threads[0].clientBindingId = 'replacement-wire';
+    else h.state.codex.activityRoomGeneration += 2;
+    if (reserved) h.reservations.set(h.state.codex.activeThreadId, { scope: { current: () => true } });
+    const before = structuredClone(h.state.codex.threadDrafts);
+    h.sendButton.props.onclick();
+    await h.pending();
+    assert.equal(h.requests.length, 0);
+    assert.deepEqual(h.state.codex.threadDrafts, before);
+    assert.deepEqual(h.notices, []);
+  });
+});
+
+test('composer send preserves the distinction between refusal and an unknown outcome', async t => {
+  const cases = [
+    { name: 'refusal', reply: () => ({ accepted: false, error: 'fixture refusal' }), status: 'failed', error: /fixture refusal/ },
+    { name: 'timeout', reply: () => { throw new Error('fixture timeout'); }, status: 'unconfirmed', error: /접수 여부를 확인하지 못했습니다.*fixture timeout/ },
+  ];
+  for (const scenario of cases) await t.test(scenario.name, async () => {
+    const h = chatComposerFixture({ reply: scenario.reply });
+    h.sendButton.props.onclick();
+    const result = await h.pending();
+    assert.equal(result.accepted, false);
+    assert.equal(result.status, scenario.status);
+    assert.equal(h.protocol.requests[result.requestId].status, scenario.status);
+    assert.match(h.state.codex.threads[0].sendError, scenario.error);
+    assert.equal(h.requests.length, 1);
+    if (scenario.status === 'failed') {
+      assert.equal(h.state.codex.threadDrafts['room-a'], '합성 질문');
+      assert.deepEqual(h.state.codex.threads[0].requestProjectTarget,
+        { boardId: 'fixture-board', projectId: 'fixture-project', rootId: 'fixture-root' });
+    }
+    await Promise.resolve();
+    assert.equal(h.requests.length, 1, 'neither failure mode retries automatically');
+  });
+});
+
+test('an observed account change and return invalidates the original composer owner', async () => {
+  const h = chatComposerFixture();
+  assert.equal(h.manualOwner.current(), true);
+  h.state.codex.authStatus.accountEmail = 'other-fixture@example.test';
+  assert.equal(h.manualOwner.current(), false);
+  h.state.codex.authStatus.accountEmail = 'fixture@example.test';
+  assert.equal(h.manualOwner.current(), false, 'a return to the old value does not revive the owner');
+  h.sendButton.props.onclick();
+  await h.pending();
+  assert.equal(h.requests.length, 0);
+  assert.equal(h.state.codex.threadDrafts['room-a'], '합성 질문');
 });
 
 test('Desk chrome keeps its existing geometry and legible local outline glyphs', () => {

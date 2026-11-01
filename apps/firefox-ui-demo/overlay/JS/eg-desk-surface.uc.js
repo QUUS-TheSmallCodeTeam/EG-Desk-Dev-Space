@@ -1824,6 +1824,7 @@
   const chatRoomProjectDefaults = new Map();
   const chatProjectDraftActions = new Map();
   const memoAskSendReservations = new Map();
+  const memoManualSendNotices = new Map();
   const chatRoomProjectPreparations = new WeakMap();
   const fileProjectAssociations = new WeakMap();
   const CHAT_REQUEST_PROJECT_INVALID = '실행 프로젝트를 다시 선택하거나 제거한 뒤 보내세요.';
@@ -9346,6 +9347,8 @@
         return;
       }
       taskAnswerReveal.beforeRender();
+      body._codexManualSendOwner?.release?.();
+      body._codexManualSendOwner = null;
       const oldInput = body.querySelector('.egd-codex-input');
       const oldMessages = body.querySelector('.egd-codex-messages');
       const oldTaskList = body.querySelector('[data-testid="chat-task-list"]');
@@ -10535,8 +10538,12 @@
             },
               el('summary', {}, '자세히'), el('p', {}, notice.detail)) : null));
         }
+        const memoSendNotice = memoManualSendNotices.get(activeThread.id);
+        if (memoSendNotice?.current()) conversation.appendChild(el('div', {
+          class: 'egd-codex-error egd-codex-send-notice', role: 'status', data: { testid: 'chat-memo-send-blocked' },
+        }, '메모 질문을 준비 중이라 이 메시지는 보내지 않았습니다. 초안은 그대로입니다.'));
         const noticeIds = new Set(['chat-local-history-coverage', 'chat-local-history-error', 'chat-binding-held',
-          'chat-agent-unavailable', 'chat-run-rate-limit', 'chat-run-error', 'chat-reconcile', 'chat-send-notice']);
+          'chat-agent-unavailable', 'chat-run-rate-limit', 'chat-run-error', 'chat-reconcile', 'chat-send-notice', 'chat-memo-send-blocked']);
         const notices = Array.from(conversation.children).filter(node => noticeIds.has(node.dataset.testid));
         if (notices.length) {
           const region = el('div', {
@@ -10610,6 +10617,10 @@
       const allowComposer = Boolean(activeThread && isHudConversationView);
       const footer = allowComposer
         ? (() => {
+            const manualOwner = codexBridge.captureManualSendOwner?.(activeThread.id)
+              || { threadId: activeThread.id, binding: ChatState.clientThreadBinding(activeThread),
+                roomGeneration: codex.activityRoomGeneration || 0 };
+            body._codexManualSendOwner = manualOwner;
             const input = el('textarea', {
               class: 'egd-codex-input',
               rows: '1',
@@ -10625,7 +10636,7 @@
               'aria-label': '메시지 보내기',
               title: '보내기',
               data: { testid: 'chat-send' },
-              onclick: () => { if (!compositionInProgress) void codexBridge.sendMessage(); },
+              onclick: () => { if (!compositionInProgress) void codexBridge.sendMessage({ manualOwner }); },
             }, deskIcon('send'));
             input.value = getCodexThreadDraft(codex, activeThread.id);
             const resizeComposer = (preserveViewport = true) => {
@@ -10682,7 +10693,7 @@
               if (ev.key !== 'Enter' || !(ev.metaKey || ev.ctrlKey) || ev.shiftKey || ev.altKey) return;
               if (ev.isComposing || compositionInProgress || ev.keyCode === 229) return;
               ev.preventDefault();
-              void codexBridge.sendMessage();
+              void codexBridge.sendMessage({ manualOwner });
             });
             input.addEventListener('compositionstart', () => { composerViewport.cancel(input); compositionInProgress = true; });
             input.addEventListener('compositionend', () => {
@@ -10814,6 +10825,8 @@
     unsubscribe = codexBridge.subscribe(render)
     body._codexCleanup = () => {
       unsubscribe?.();
+      body._codexManualSendOwner?.release?.();
+      body._codexManualSendOwner = null;
       codexBridge.clearTaskAnswers?.();
       composerObserver?.disconnect();
       compositionInProgress = false;
@@ -10913,6 +10926,70 @@
     let taskAnswers = null;
     const refreshing = new Map();
     const resumedNativeBindings = new Set();
+    // Track only live reads/intents. A changed identity stays invalid even if
+    // it later changes back to the same visible values (ABA).
+    const memoReadWatches = new Map();
+    const manualOwnerWatches = new Map();
+    const memoReadIdentity = threadId => {
+      const thread = getCodexThreadById(state.codex, threadId), auth = state.codex.authStatus;
+      if (!thread) return null;
+      try {
+        return JSON.stringify([thread.id, thread.type, thread.profileEnabled, thread.agentProfileId,
+          ChatState.clientThreadBinding(thread), thread.conversationId, ChatState.nativeBindingHeld(thread),
+          thread.bindingState, thread.bindingAccountKey, thread.retainedNativeBinding || null,
+          ChatState.chatThreadEngineId(thread, state.codex), ChatState.chatThreadEngineProfileId(thread, state.codex),
+          memoAskRuntimeIdentity(thread), ChatState.chatThreadReadiness(thread, state.codex),
+          state.codex.codexAccountKey, auth?.accountId, auth?.accountEmail, auth?.authMode,
+          auth?.isLoggedIn, auth?.identityStatus, state.codex.connected,
+          thread.inputSources || [], thread.briefingInputs || [], thread.requestProjectTarget || null,
+          state.contextSuggest?.byThread?.[threadId]?.picked || []]);
+      } catch { return null; }
+    };
+    // Drafts and attachments are deliberately excluded: ordinary Send owns
+    // its submitted snapshot even if the composer is edited afterwards.
+    const manualOwnerIdentity = threadId => {
+      const thread = getCodexThreadById(state.codex, threadId), auth = state.codex.authStatus;
+      if (!thread) return null;
+      try {
+        const engineId = ChatState.chatThreadEngineId(thread, state.codex);
+        const profileId = ChatState.chatThreadEngineProfileId(thread, state.codex);
+        const engine = (Array.isArray(state.codex.engines) ? state.codex.engines : []).find(row => row.id === engineId);
+        const profiles = (Array.isArray(engine?.profiles) ? engine.profiles : []).map(profile =>
+          [profile.id, profile.active, profile.auth?.status, profile.auth?.method, profile.auth?.account]);
+        return JSON.stringify([thread.id, thread.type, thread.profileEnabled, thread.agentProfileId,
+          ChatState.clientThreadBinding(thread), thread.conversationId, thread.bindingState, thread.bindingAccountKey,
+          thread.retainedNativeBinding || null, engineId, profileId, ChatState.chatThreadReadiness(thread, state.codex),
+          engine?.status, engine?.statusReason, profiles, state.codex.codexAccountKey,
+          auth?.accountId, auth?.accountEmail, auth?.authMode, auth?.isLoggedIn, auth?.identityStatus, state.codex.connected]);
+      } catch { return null; }
+    };
+    const observeMemoReadWatch = entry => {
+      const identity = entry.ownerOnly ? manualOwnerIdentity(entry.threadId) : memoReadIdentity(entry.threadId);
+      if (identity !== entry.identity) { entry.identity = identity; entry.revision++; }
+    };
+    const watchMemoRead = (threadId, { ownerOnly = false } = {}) => {
+      const watches = ownerOnly ? manualOwnerWatches : memoReadWatches;
+      let entry = watches.get(threadId);
+      if (!entry) {
+        entry = { threadId, ownerOnly, identity: ownerOnly ? manualOwnerIdentity(threadId) : memoReadIdentity(threadId), revision: 0, owners: 0 };
+        watches.set(threadId, entry);
+        if (ownerOnly) { entry.ownerKey = Symbol('manual-send-owner'); memoReadWatches.set(entry.ownerKey, entry); }
+      } else observeMemoReadWatch(entry);
+      const revision = entry.revision;
+      entry.owners++;
+      let released = false;
+      return {
+        current: () => { observeMemoReadWatch(entry); return !released && entry.identity !== null && entry.revision === revision; },
+        release: () => {
+          if (released) return;
+          released = true;
+          if (--entry.owners === 0 && watches.get(threadId) === entry) {
+            watches.delete(threadId);
+            if (entry.ownerKey) memoReadWatches.delete(entry.ownerKey);
+          }
+        },
+      };
+    };
     const confirmedLegacyImports = new Set();
     // Rooms with a /chat/fork request in flight (one branch at a time per room).
     const forkingThreads = new Set();
@@ -11021,13 +11098,13 @@
       token.claudeContextCapabilities = { read: true, reader: descriptor.nativeReader === true, publishBriefing: false };
     }
 
-    async function captureThreadInputs(thread, sources, token) {
+    async function captureThreadInputs(thread, sources, token, ownerCurrent = () => true) {
       if (!sources?.length) return [];
       if (sources.length > 16) throw new Error('한 요청에는 최대 16개 자료를 첨부할 수 있습니다. 첨부를 나누거나 제거해 주세요.');
       const contextScope = ChatState.chatContextRequestScope(thread, state.codex);
       const assertCurrent = () => {
         const current = getCodexThreadById(state.codex, thread.id);
-        if (!epochScope.valid(token) || token.scope !== contextScope.engineId
+        if (!epochScope.valid(token) || !ownerCurrent() || token.scope !== contextScope.engineId
             || contextScope.engineId === 'claude' && token.profile !== contextScope.engineProfileId
             || !current || JSON.stringify(ChatState.chatContextRequestScope(current, state.codex)) !== JSON.stringify(contextScope)) {
           throw new Error('연결이 바뀌어 자료 캡처를 중단했습니다.');
@@ -11136,23 +11213,42 @@
       if (shownBefore || ChatState.contextSuggestionShown(store.byThread[threadId])) emit();
     }
 
-    async function ensureNativeReadyForSend(thread) {
+    async function ensureNativeReadyForSend(thread, { joinExisting = false } = {}) {
       if (!thread?.conversationId) return true;
       if (!ChatState.canResumeNativeThread(thread, state.codex.authStatus, state.codex)) return false;
       const key = `${ChatState.clientThreadBinding(thread)}|${thread.conversationId}`;
+      if (joinExisting && refreshing.has(thread.conversationId)) {
+        const snapshot = await refreshConversation(thread, true, { joinExisting: true });
+        if (!snapshot) return false;
+        resumedNativeBindings.add(key);
+        return true;
+      }
       if (thread.engineId !== 'claude' && resumedNativeBindings.has(key)) return true;
-      const snapshot = await refreshConversation(thread, true);
+      const snapshot = await refreshConversation(thread, true, { joinExisting });
       if (!snapshot) return false;
       resumedNativeBindings.add(key);
       return true;
     }
 
-    async function refreshConversation(thread, resume = false) {
-      if (!thread?.conversationId || refreshing.has(thread.conversationId)) return null;
+    async function refreshConversation(thread, resume = false, { joinExisting = false } = {}) {
+      if (!thread?.conversationId) return null;
+      const existing = refreshing.get(thread.conversationId);
+      if (existing) {
+        if (!joinExisting || !resume || !existing.resume || existing.threadId !== thread.id
+            || existing.binding !== ChatState.clientThreadBinding(thread) || !epochScope.valid(existing.token)
+            || existing.token.signal.aborted || !existing.watch.current()
+            || !ChatState.canResumeNativeThread(thread, state.codex.authStatus, state.codex)
+            || !ChatState.chatThreadReadiness(thread, state.codex).ready) return null;
+        return existing.promise;
+      }
       if (resume && !ChatState.canResumeNativeThread(thread, state.codex.authStatus, state.codex)) return null;
       const conversationId = thread.conversationId;
       const token = epochScope.begin(ChatState.chatThreadEngineId(thread, state.codex), ChatState.chatThreadEngineProfileId(thread, state.codex));
-      refreshing.set(conversationId, token);
+      const watch = watchMemoRead(thread.id);
+      let resolveJoined, outcome = null;
+      const entry = { token, watch, resume, threadId: thread.id, binding: ChatState.clientThreadBinding(thread),
+        promise: new Promise(resolve => { resolveJoined = resolve; }) };
+      refreshing.set(conversationId, entry);
       updateThreadById(thread.id, current => ({ ...current, resuming: true }));
       emit();
       try {
@@ -11165,6 +11261,7 @@
         for (const run of ChatState.mergeChatSnapshot(protocol, snapshot, ChatState.clientThreadBinding(thread))) syncProtocolRun(run, { liveEvent: false });
         if (resume && ChatState.settleReconciledRequests(protocol, thread.id, snapshot)) updateThreadById(thread.id, current => ({ ...current, sendError: '대화 기록을 다시 확인했습니다. 접수 미확인 메시지와 실제 기록을 확인한 뒤 다음 요청을 보내세요.' }));
         emit();
+        outcome = snapshot;
         return snapshot;
       } catch (error) {
         if (!epochScope.valid(token) || ChatState.clientThreadBinding(getCodexThreadById(state.codex, thread.id)) !== ChatState.clientThreadBinding(thread)) return null;
@@ -11173,11 +11270,14 @@
         return null;
       } finally {
         epochScope.finish(token);
-        if (refreshing.get(conversationId) === token) refreshing.delete(conversationId);
-        if (epochScope.valid(token)) {
+        const owned = refreshing.get(conversationId) === entry;
+        if (owned) refreshing.delete(conversationId);
+        if (owned && epochScope.valid(token)) {
           updateThreadById(thread.id, current => ({ ...current, resuming: false }));
           emit();
         }
+        resolveJoined(owned && epochScope.valid(token) && !token.signal.aborted && watch.current() ? outcome : null);
+        watch.release();
       }
     }
 
@@ -11256,6 +11356,7 @@
 
     const emit = () => {
       normalizeThreads();
+      for (const watch of memoReadWatches.values()) observeMemoReadWatch(watch);
       taskAnswers?.sync();
       const projectPanel = document.getElementById('egd-codex-input-panel');
       if (projectPanel?._projectScopeCurrent && !projectPanel._projectScopeCurrent()) {
@@ -11363,6 +11464,7 @@
         next,
         ...state.codex.threads.slice(index + 1),
       ];
+      for (const watch of memoReadWatches.values()) if (watch.threadId === threadId) observeMemoReadWatch(watch);
       if (threadId === state.codex.activeThreadId) {
         state.codex.conversationId = next.conversationId || null;
       }
@@ -12095,6 +12197,35 @@
       } finally { epochScope.finish(token); }
     };
 
+    const clearMemoManualSendNotice = threadId => {
+      const notice = memoManualSendNotices.get(threadId);
+      if (!notice) return false;
+      memoManualSendNotices.delete(threadId);
+      window.clearTimeout(notice.timer);
+      notice.scope.finish();
+      notice.watch.release();
+      return true;
+    };
+    const showMemoManualSendNotice = thread => {
+      if (!thread || state.codex.activeThreadId !== thread.id) return;
+      const scope = createChatProjectScope(thread.id, epochScope);
+      if (!scope) return;
+      const watch = watchMemoRead(thread.id), binding = ChatState.clientThreadBinding(thread);
+      const roomGeneration = state.codex.activityRoomGeneration || 0;
+      clearMemoManualSendNotice(thread.id);
+      const notice = { scope, watch, timer: 0,
+        current: () => scope.current() && !scope.signal.aborted && watch.current()
+          && state.codex.activeThreadId === thread.id && (state.codex.activityRoomGeneration || 0) === roomGeneration
+          && ChatState.clientThreadBinding(getCodexThreadById(state.codex, thread.id)) === binding };
+      memoManualSendNotices.set(thread.id, notice);
+      notice.timer = window.setTimeout(() => {
+        if (memoManualSendNotices.get(thread.id) !== notice) return;
+        clearMemoManualSendNotice(thread.id);
+        if (state.codex.activeThreadId === thread.id) emit();
+      }, 7000);
+      emit();
+    };
+
     connect();
 
     return {
@@ -12459,8 +12590,23 @@
         }
         scheduleDeskSessionSave();
       },
+      captureManualSendOwner(threadId) {
+        const thread = getCodexThreadById(state.codex, threadId);
+        if (!thread) return null;
+        const watch = watchMemoRead(threadId, { ownerOnly: true });
+        return { threadId, binding: ChatState.clientThreadBinding(thread),
+          roomGeneration: state.codex.activityRoomGeneration || 0,
+          current: watch.current, release: watch.release };
+      },
       createProjectScope(threadId) {
         return createChatProjectScope(threadId, epochScope);
+      },
+      createMemoAskScope(threadId) {
+        const scope = this.createProjectScope(threadId);
+        if (!scope) return null;
+        const watch = watchMemoRead(threadId);
+        return { ...scope, current: () => scope.current() && !scope.signal.aborted && watch.current(),
+          finish: () => { scope.finish(); watch.release(); } };
       },
       ensureRoomProjectDefault(threadId) {
         return this.readRoomProjectDefault(threadId).catch(() => null);
@@ -12478,7 +12624,8 @@
         const scope = this.createProjectScope(threadId);
         if (!scope) throw new Error(CHAT_ROOM_PROJECT_UNAVAILABLE);
         if (previous?.status === 'loading') previous.scope.abort();
-        const entry = { binding, scope, status: 'loading', value: previous?.value || null };
+        const watch = watchMemoRead(threadId);
+        const entry = { binding, scope, watch, status: 'loading', value: previous?.value || null };
         chatRoomProjectDefaults.set(threadId, entry);
         const timer = window.setTimeout(() => scope.abort(), 15000);
         const current = () => scope.current() && chatRoomProjectDefaults.get(threadId) === entry
@@ -12492,18 +12639,26 @@
             entry.value = value; entry.status = 'ready';
             return value;
           } catch (error) { if (current()) entry.status = 'error'; throw error; }
-          finally { window.clearTimeout(timer); scope.finish(); if (current()) emit(); }
+          finally {
+            window.clearTimeout(timer); scope.finish(); if (current()) emit();
+            entry.joinSafe = current() && !scope.signal.aborted && watch.current();
+            watch.release();
+          }
         })();
         return entry.promise;
       },
-      async refreshRoomProjectDefault(threadId) {
+      async refreshRoomProjectDefault(threadId, { joinCurrentRead = false } = {}) {
         const thread = getCodexThreadById(state.codex, threadId);
         const previous = chatRoomProjectState(thread)?.value || null;
         const scope = this.createProjectScope(threadId);
         if (!scope) return null;
         try {
-          const value = await this.readRoomProjectDefault(threadId, { force: true, supersede: true });
-          if (!scope.current()) return null;
+          const ongoing = chatRoomProjectState(thread);
+          if (joinCurrentRead && (ongoing?.status === 'saving' || ongoing?.status === 'loading'
+              && (!ongoing.watch?.current() || ongoing.scope.signal.aborted))) return null;
+          const joined = joinCurrentRead && ongoing?.status === 'loading' ? ongoing : null;
+          const value = await this.readRoomProjectDefault(threadId, { force: true, supersede: !joinCurrentRead });
+          if (!scope.current() || joined && joined.joinSafe !== true) return null;
           if (previous && !chatRoomProjectTargetsMatch(previous, value) && !chatRequestProjectSelection(getCodexThreadById(state.codex, threadId)).target) {
             updateThreadById(threadId, current => ({ ...current, sendError: value.status === 'connected'
               ? '방 기본 프로젝트가 바뀌었습니다. 표시된 프로젝트와 전체 위치를 확인한 뒤 보내세요.' : CHAT_ROOM_PROJECT_UNAVAILABLE }));
@@ -12521,10 +12676,10 @@
         }
         emit();
       },
-      async prepareRoomProjectSend(threadId, previous) {
+      async prepareRoomProjectSend(threadId, previous, ownerCurrent = () => true) {
         const thread = getCodexThreadById(state.codex, threadId);
         const scope = this.createProjectScope(threadId);
-        if (!scope || chatProjectDraftActions.get(threadId)?.scope.current()) { scope?.finish(); return false; }
+        if (!scope || !ownerCurrent() || chatProjectDraftActions.get(threadId)?.scope.current()) { scope?.finish(); return false; }
         const binding = ChatState.clientThreadBinding(thread), action = { binding, scope };
         chatProjectDraftActions.set(threadId, action); emit();
         let draft;
@@ -12534,7 +12689,7 @@
           if (draft.requestProjectTarget) return false;
           const value = await this.readRoomProjectDefault(threadId, { force: true, supersede: true });
           const current = getCodexThreadById(state.codex, threadId);
-          if (!scope.current() || state.codex.activeThreadId !== threadId
+          if (!scope.current() || !ownerCurrent() || state.codex.activeThreadId !== threadId
               || !ChatState.chatDraftMatches(current, state.codex.threadDrafts[threadId] || '', state.codex.threadDraftRevisions[threadId] || 0, draft)) return false;
           const latest = chatRoomProjectState(current);
           if (latest?.status !== 'ready' || latest.value !== value) return false;
@@ -12546,7 +12701,7 @@
           return chatRoomProjectExpectation(value, binding);
         } catch {
           const current = getCodexThreadById(state.codex, threadId);
-          if (scope.current() && (!draft || ChatState.chatDraftMatches(current, state.codex.threadDrafts[threadId] || '', state.codex.threadDraftRevisions[threadId] || 0, draft))) {
+          if (scope.current() && ownerCurrent() && (!draft || ChatState.chatDraftMatches(current, state.codex.threadDrafts[threadId] || '', state.codex.threadDraftRevisions[threadId] || 0, draft))) {
             const latest = chatRoomProjectState(current);
             const changed = latest?.status === 'ready' && latest.value.status === 'connected' && !chatRoomProjectTargetsMatch(previous, latest.value);
             updateThreadById(threadId, current => ({ ...current, sendError: !draft ? CHAT_REQUEST_PROJECT_INVALID : changed
@@ -12829,6 +12984,8 @@
         const next = new Set(entry.picked || []);
         if (picked) next.add(ref); else next.delete(ref);
         entry.picked = [...next];
+        const watch = memoReadWatches.get(threadId);
+        if (watch) observeMemoReadWatch(watch);
       },
       toggleContextSuggestions(threadId) {
         const entry = state.contextSuggest?.byThread?.[threadId];
@@ -13556,8 +13713,10 @@
         }
         state.codex.draft = getCodexThreadDraft(state.codex, threadId);
         const selected = getCodexThreadById(state.codex, threadId);
-        const conversation = selected?.conversationId ? refreshConversation(selected, true) : null;
-        const roomProject = this.refreshRoomProjectDefault(threadId);
+        const conversation = selected?.conversationId
+          ? options.memoAsk === true ? ensureNativeReadyForSend(selected, { joinExisting: true }) : refreshConversation(selected, true)
+          : null;
+        const roomProject = this.refreshRoomProjectDefault(threadId, { joinCurrentRead: options.memoAsk === true });
         emit();
         return Promise.all([conversation, roomProject]);
       },
@@ -13815,12 +13974,45 @@
       },
       async sendMessage(options = {}) {
         const activeThread = getActiveCodexThread(state.codex);
-        const reservation = memoAskSendReservations.get(activeThread?.id);
-        if (reservation !== (options.memoAskReservation || undefined)) return;
+        const owner = options.manualOwner;
+        try {
+          if (owner && (state.codex.activeThreadId !== owner.threadId || activeThread?.id !== owner.threadId
+              || ChatState.clientThreadBinding(activeThread) !== owner.binding
+              || (state.codex.activityRoomGeneration || 0) !== owner.roomGeneration
+              || typeof owner.current === 'function' && !owner.current())) return;
+        } catch { return; }
+        const sendOwnerWatch = !options.memoAskReservation && activeThread ? watchMemoRead(activeThread.id, { ownerOnly: true }) : null;
+        const sendRoomGeneration = state.codex.activityRoomGeneration || 0;
+        const sendBinding = ChatState.clientThreadBinding(activeThread);
+        const sendIdentityCurrent = () => !sendOwnerWatch || sendOwnerWatch.current();
+        const sendOwnerCurrent = () => !sendOwnerWatch || sendIdentityCurrent()
+          && state.codex.activeThreadId === activeThread.id && (state.codex.activityRoomGeneration || 0) === sendRoomGeneration
+          && ChatState.clientThreadBinding(getCodexThreadById(state.codex, activeThread.id)) === sendBinding;
+        try {
+        let reservation = memoAskSendReservations.get(activeThread?.id);
+        if (reservation && !reservation.scope.current()) {
+          if (memoAskSendReservations.get(activeThread.id) === reservation) memoAskSendReservations.delete(activeThread.id);
+          reservation = undefined;
+        }
+        if (reservation !== (options.memoAskReservation || undefined)) {
+          if (reservation && !options.memoAskReservation) showMemoManualSendNotice(activeThread);
+          return;
+        }
+        if (!options.memoAskReservation && clearMemoManualSendNotice(activeThread?.id)) emit();
         const memoSendCurrent = () => {
           try { return reservation ? memoAskSendReservations.get(activeThread.id) === reservation && reservation.current()
             : !memoAskSendReservations.has(activeThread?.id); }
           catch { return false; }
+        };
+        const memoSendBlocked = () => {
+          if (memoSendCurrent()) return false;
+          if (!reservation && !options.memoAskReservation && sendOwnerCurrent()) {
+            const conflict = memoAskSendReservations.get(activeThread?.id);
+            try {
+              if (conflict?.binding === sendBinding && conflict.scope.current()) showMemoManualSendNotice(activeThread);
+            } catch {}
+          }
+          return true;
         };
         if (!memoSendCurrent()) return;
         const draftText = getCodexThreadDraft(state.codex, activeThread?.id || null);
@@ -13874,29 +14066,31 @@
           state.codex.threadDrafts[activeThread.id] = '';
           state.codex.draft = getCodexThreadDraft(state.codex, state.codex.activeThreadId);
         };
-        if (!await ensureNativeReadyForSend(activeThread) || !epochScope.valid(token) || !memoSendCurrent()) { epochScope.finish(token); return; }
+        if (!await ensureNativeReadyForSend(activeThread) || !epochScope.valid(token) || !sendOwnerCurrent()) { epochScope.finish(token); return; }
+        if (memoSendBlocked()) { epochScope.finish(token); return; }
         const resumedThread = getCodexThreadById(state.codex, activeThread.id);
         if (!resumedThread || ChatState.clientThreadBinding(resumedThread) !== ChatState.clientThreadBinding(activeThread)
             || resumedThread.conversationId !== activeThread.conversationId || threadBusy(resumedThread)
             || !ChatState.chatThreadReadiness(resumedThread, state.codex).ready) { epochScope.finish(token); return; }
-        updateThreadById(activeThread.id, thread => ({ ...thread, preparingInput: true, sendError: null }));
+        updateThreadById(activeThread.id, thread => ({ ...thread, preparingInput: true }));
         emit();
         try {
           if (engineId === 'claude' && !selectedInputs.length && submittedDraft.briefingInputs.length) await requireClaudeContext(activeThread, token);
-          inputReferences = [...await captureThreadInputs(activeThread, selectedInputs, token), ...submittedDraft.briefingInputs];
+          inputReferences = [...await captureThreadInputs(activeThread, selectedInputs, token, sendOwnerCurrent), ...submittedDraft.briefingInputs];
           for (const reference of inputReferences) if (reference.contextScope) InputContext.assertInputContextScope(reference, ChatState.chatContextRequestScope(activeThread, state.codex));
-          if (!epochScope.valid(token) || !memoSendCurrent()) { epochScope.finish(token); return; }
+          if (!epochScope.valid(token) || !sendOwnerCurrent()) { epochScope.finish(token); return; }
+          if (memoSendBlocked()) { epochScope.finish(token); return; }
           const current = getCodexThreadById(state.codex, activeThread.id);
           if (!current || ChatState.clientThreadBinding(current) !== ChatState.clientThreadBinding(activeThread)) throw new Error('대화 연결이 바뀌었습니다. 초안을 다시 확인해 주세요.');
           const readiness = ChatState.chatThreadReadiness(current, state.codex);
           if (!readiness.ready) throw new Error(readiness.reason);
         } catch (error) {
-          if (epochScope.valid(token)) updateThreadById(activeThread.id, thread => ({ ...thread,
+          if (epochScope.valid(token) && sendOwnerCurrent()) updateThreadById(activeThread.id, thread => ({ ...thread,
             sendError: ChatState.claudeContextSendErrorText(error.code, engineId) || `자료를 준비하지 못해 전송하지 않았습니다: ${error.message}` }));
           epochScope.finish(token);
           return;
         } finally {
-          if (epochScope.valid(token)) { updateThreadById(activeThread.id, thread => ({ ...thread, preparingInput: false })); emit(); }
+          if (epochScope.valid(token) && sendIdentityCurrent()) { updateThreadById(activeThread.id, thread => ({ ...thread, preparingInput: false })); emit(); }
         }
         const requestId = `request-${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
         // Claude B2 reads the selected immutable capture, not the live Browser
@@ -13923,14 +14117,16 @@
         let expectedRoomProject = null;
         if (!submittedDraft.requestProjectTarget) {
           if (!defaultSendCurrent()) { epochScope.finish(token); return; }
-          const observed = await state.codexBridge.prepareRoomProjectSend(activeThread.id, submittedRoomDefault);
-          if (!observed || !defaultSendCurrent() || !memoSendCurrent()) { epochScope.finish(token); return; }
+          const observed = await state.codexBridge.prepareRoomProjectSend(activeThread.id, submittedRoomDefault, sendOwnerCurrent);
+          if (!observed || !defaultSendCurrent() || !sendOwnerCurrent()) { epochScope.finish(token); return; }
+          if (memoSendBlocked()) { epochScope.finish(token); return; }
           try { expectedRoomProject = snapshotChatRoomProjectExpectation(observed, projectBinding); }
           catch { updateThreadById(activeThread.id, thread => ({ ...thread, sendError: CHAT_ROOM_PROJECT_UNAVAILABLE })); epochScope.finish(token); emit(); return; }
         }
-        if (!epochScope.valid(token) || !memoSendCurrent()) { epochScope.finish(token); return; }
+        if (!epochScope.valid(token) || !sendOwnerCurrent()) { epochScope.finish(token); return; }
+        if (memoSendBlocked()) { epochScope.finish(token); return; }
         // The first send ties the room to its engine (D3) and makes it the app's recent one (D4).
-        updateThreadById(activeThread.id, thread => ({ ...thread, engineId,
+        updateThreadById(activeThread.id, thread => ({ ...thread, engineId, sendError: null,
           ...(engineId === 'claude' ? { engineProfileId: token.profile } : {}) }));
         state.codex.recentEngineId = engineId;
         const authorProfile = activeThread.profileEnabled ? codexThreadAgentProfile(activeThread) : null;
@@ -14072,6 +14268,7 @@
           }
           return { requestId, accepted: request.status === 'accepted' && !!request.runId, status: request.status };
         } finally { epochScope.finish(token); if (epochScope.valid(token)) emit(); }
+        } finally { sendOwnerWatch?.release(); }
       },
     };
   }
@@ -15268,6 +15465,13 @@
       .sort((a, b) => (b.updatedAt || 0) - (a.updatedAt || 0))[0] || null;
   }
 
+  // A resumed run can make the already-effective default engine/profile
+  // explicit. Compare their effective scope once, not their optional spelling.
+  function memoAskRuntimeIdentity(thread) {
+    const { engineId, engineProfileId, ...runtime } = codexThreadRuntimeConfig(thread);
+    return [ChatState.chatContextRequestScope(thread, state.codex), runtime];
+  }
+
   // [<Agent>에게 묻기]: the memo (body, target, recent replies, question) goes
   // out as one message in that Agent's room through the normal send path.
   // Only an accepted request is recorded as a pending ask on the memo.
@@ -15275,6 +15479,7 @@
     const bridge = state.codexBridge;
     const memo = root?._memoRecord;
     if (!bridge || !memo || root.dataset.memoAsking === 'true') return false;
+    delete root._memoAskNotice;
     if (memo.asks.length >= MemoState.MEMO_LIMITS.asks) {
       boardNotice('이 메모의 질문 기록이 가득 차 새 질문을 보내지 않았습니다.');
       return false;
@@ -15285,7 +15490,7 @@
     catch (error) { boardNotice(error.message); return false; }
     root.dataset.memoAsking = 'true';
     renderMemoCard(root);
-    let scope, reservation, thread, submittedDraft, refreshTimer;
+    let scope, reservation, thread, submittedDraft, refreshTimer, roomGeneration;
     try {
       thread = memoAgentThread(agentId);
       if (!thread) {
@@ -15298,16 +15503,22 @@
         getCodexThreadDraft(state.codex, thread.id), state.codex.threadDraftRevisions[thread.id] || 0);
       const initialDraft = currentDraft();
       const hasPickedContext = () => !!state.contextSuggest?.byThread?.[thread.id]?.picked?.length;
+      const priorReservation = memoAskSendReservations.get(thread.id);
+      if (priorReservation && !priorReservation.scope.current()) memoAskSendReservations.delete(thread.id);
+      if (memoAskSendReservations.has(thread.id)) {
+        root._memoAskNotice = '이 방에서 다른 메모 질문을 준비 중입니다. 질문은 유지되며, 끝난 뒤 다시 눌러 주세요.';
+        return false;
+      }
       if (initialDraft.text !== '' || !Array.isArray(initialDraft.inputSources) || initialDraft.inputSources.length
           || !Array.isArray(initialDraft.briefingInputs) || initialDraft.briefingInputs.length
-          || initialDraft.requestProjectTarget || hasPickedContext() || memoAskSendReservations.has(thread.id)) {
+          || initialDraft.requestProjectTarget || hasPickedContext()) {
         boardNotice('이 대화방에 작성 중인 초안이나 선택 자료가 있어 메모 질문을 보내지 않았습니다. 기존 내용은 유지했습니다.');
         return false;
       }
-      scope = bridge.createProjectScope(thread.id);
+      scope = bridge.createMemoAskScope(thread.id);
       if (!scope) { boardNotice('대화 연결을 확인할 수 없어 메모 질문을 보내지 않았습니다.'); return false; }
       const originalProject = chatRoomProjectState(thread)?.value || null;
-      const identity = JSON.stringify([ChatState.chatContextRequestScope(thread, state.codex), codexThreadRuntimeConfig(thread)]);
+      const identity = JSON.stringify(memoAskRuntimeIdentity(thread));
       const memoCurrent = () => root.isConnected && root._memoRecord === memo && memoTargetLabel(memo) === target
         && root.querySelector('.egd-memo-ask-agent')?.value === agentId
         && root.querySelector('.egd-memo-ask-question')?.value === question;
@@ -15315,13 +15526,18 @@
         const current = getCodexThreadById(state.codex, thread.id);
         return scope.current() && current?.type === 'dm' && current.profileEnabled === true && current.agentProfileId === agentId
           && ChatState.clientThreadBinding(current) === binding && ChatState.chatThreadReadiness(current, state.codex).ready
-          && JSON.stringify([ChatState.chatContextRequestScope(current, state.codex), codexThreadRuntimeConfig(current)]) === identity;
+          && JSON.stringify(memoAskRuntimeIdentity(current)) === identity;
       };
-      const chatCard = spawnCodexChatCard();
+      reservation = { binding, scope, current: () => !!submittedDraft && threadCurrent() && memoCurrent()
+        && state.codex.activeThreadId === thread.id && state.codex.activityRoomGeneration === roomGeneration && !hasPickedContext()
+        && ChatState.chatDraftMatches(getCodexThreadById(state.codex, thread.id), getCodexThreadDraft(state.codex, thread.id),
+          state.codex.threadDraftRevisions[thread.id] || 0, submittedDraft) };
+      memoAskSendReservations.set(thread.id, reservation);
+      spawnCodexChatCard();
       dismissChatReturnCue();
       state.codex.hudView = 'conversation';
-      const selection = bridge.selectThread(thread.id, { openConversation: true });
-      const roomGeneration = state.codex.activityRoomGeneration;
+      const selection = bridge.selectThread(thread.id, { openConversation: true, memoAsk: true });
+      roomGeneration = state.codex.activityRoomGeneration;
       // A slow resume/read must not leave this explicit action pending forever.
       const selected = await Promise.race([selection, new Promise(resolve => { refreshTimer = window.setTimeout(() => resolve(null), 15000); })]);
       window.clearTimeout(refreshTimer); refreshTimer = null;
@@ -15336,11 +15552,6 @@
         boardNotice('방 기본 프로젝트가 바뀌었습니다. 프로젝트를 확인한 뒤 다시 물어보세요.');
         return false;
       }
-      reservation = { current: () => threadCurrent() && memoCurrent() && state.codex.activeThreadId === thread.id
-        && state.codex.activityRoomGeneration === roomGeneration && !hasPickedContext()
-        && ChatState.chatDraftMatches(getCodexThreadById(state.codex, thread.id), getCodexThreadDraft(state.codex, thread.id),
-          state.codex.threadDraftRevisions[thread.id] || 0, submittedDraft) };
-      memoAskSendReservations.set(thread.id, reservation);
       bridge.setDraft(draft.text, thread.id);
       submittedDraft = currentDraft();
       const result = await bridge.sendMessage({ memoAskReservation: reservation });
@@ -15351,7 +15562,6 @@
             && ChatState.chatDraftMatches(latest, getCodexThreadDraft(state.codex, thread.id),
               state.codex.threadDraftRevisions[thread.id] || 0, submittedDraft)) bridge.setDraft('', thread.id);
         boardNotice('메모 질문의 접수를 확인하지 못했습니다. 대화방 상태와 메모의 질문을 확인해 주세요.');
-        state.focusChatDockIfCompact?.(chatCard);
         return false;
       }
       const request = state.codex.chatProtocol?.requests?.[result.requestId];
@@ -15490,8 +15700,10 @@
         el('button', { type: 'button', class: 'egd-memo-ask-cancel', title: '이 질문 기다리기를 멈춥니다. Chat의 대화는 남습니다.',
           onclick: (ev) => { ev.stopPropagation(); updateMemoRecord(root, MemoState.cancelMemoAsk(root._memoRecord, ask.askId), 'memo-ask-cancel'); } }, '기다리지 않기')));
       if (sending) rows.unshift(el('span', { class: 'egd-memo-ask-pending', data: { testid: 'memo-ask-sending' } }, '보내는 중…'));
+      if (root._memoAskNotice) rows.unshift(el('span', { class: 'egd-memo-ask-pending', role: 'status',
+        data: { testid: 'memo-ask-notice' } }, root._memoAskNotice));
       askStatus.replaceChildren(...rows);
-      askStatus.hidden = !sending && !pending.length;
+      askStatus.hidden = !sending && !pending.length && !root._memoAskNotice;
     }
     const askButton = root.querySelector('.egd-memo-ask-send');
     const select = root.querySelector('.egd-memo-ask-agent');
@@ -15609,9 +15821,10 @@
       } });
     const askStatus = el('div', { class: 'egd-memo-ask-status', hidden: true, data: { testid: 'memo-ask-status' } });
     const select = el('select', { class: 'egd-memo-ask-agent', 'aria-label': '질문을 받을 Agent', data: { testid: 'memo-ask-agent' },
-      onchange: () => renderMemoCard(root) });
+      onchange: () => { delete root._memoAskNotice; renderMemoCard(root); } });
     const question = el('input', { type: 'text', class: 'egd-memo-ask-question', placeholder: '질문 (선택)', 'aria-label': '질문', maxlength: String(MemoState.MEMO_LIMITS.question),
-      data: { testid: 'memo-ask-question' } });
+      data: { testid: 'memo-ask-question' },
+      oninput: () => { if (root._memoAskNotice) { delete root._memoAskNotice; renderMemoCard(root); } } });
     const askButton = el('button', { type: 'button', class: 'egd-memo-ask-send', disabled: true, data: { testid: 'memo-ask-send' },
       title: '선택한 Agent의 대화방으로 이 메모와 질문을 보냅니다. 저장만으로는 아무 Agent도 부르지 않습니다.',
       onclick: async (ev) => {

@@ -4623,10 +4623,18 @@ test('Briefing range matching uses immutable source/hash/range, never just the o
   assert.throws(() => InputContext.projectionRange({ startLine: 1, endLine: 501 }), /최대 500행/);
 });
 
+function productionCaptureThreadInputs(deps) {
+  const start = surfaceSource.indexOf('    async function captureThreadInputs(');
+  const end = surfaceSource.indexOf('\n    }\n', start);
+  const body = start >= 0 && end > start ? surfaceSource.slice(start, end + 6) : null;
+  assert.ok(body, 'the complete production capture coordinator must be present');
+  return compileFunction(`${declaration('getCodexThreadById')}\n${body}\nreturn captureThreadInputs;`,
+    Object.keys(deps))(...Object.values(deps));
+}
+
 test('production batch coordinator sends real content once and uses the rotated wire binding', async () => {
-  const body = surfaceSource.match(/    async function captureThreadInputs\(thread, sources, token\) \{([\s\S]*?)\n    \}/)?.[1];
-  assert.ok(body);
-  const run = compileFunction(`${declaration('getCodexThreadById')}\nreturn (async () => {${body}\n})();`, ['thread', 'sources', 'token', 'epochScope', 'captureChatInputs', 'fetchJson', 'InputContext', 'ChatState', 'captureManagedFileInput', 'state']);
+  const run = (thread, sources, token, epochScope, captureChatInputs, fetchJson, InputContext, ChatState, captureManagedFileInput, state, ownerCurrent) =>
+    productionCaptureThreadInputs({ epochScope, captureChatInputs, fetchJson, InputContext, ChatState, captureManagedFileInput, state })(thread, sources, token, ownerCurrent);
   const thread = { id: 'local-room', clientBindingId: 'wire-after-reset', engineId: 'codex' };
   const state = { codex: { threads: [thread] } };
   const epochScope = Chat.createChatEpochScope();
@@ -4667,6 +4675,36 @@ test('production batch coordinator sends real content once and uses the rotated 
   assert.equal(wire.attachments, undefined, 'Chat sends immutable IDs, not a second competing payload shape');
   epochScope.reset('codex');
   await assert.rejects(() => run(thread, [browser], token, epochScope, () => assert.fail(), () => assert.fail(), InputContext, Chat, () => assert.fail(), state), /연결이 바뀌/);
+});
+
+test('production capture: an invalid owner stops each pending source before storage and ignores a late storage receipt', async t => {
+  for (const stage of ['before', 'browser', 'managed-file', 'store']) await t.test(stage, async () => {
+    const pending = requestProjectDeferred(), thread = { id: 'room', clientBindingId: 'wire-room', engineId: 'codex' };
+    const state = { codex: { threads: [thread] } }, epochScope = Chat.createChatEpochScope(), token = epochScope.begin('codex', 'codex-default');
+    const browser = browserInput(), managed = { id: 'file', kind: 'file', sourceRef: { viewId: 'file-card', fileId: 'f', draftId: 'd' } };
+    const source = stage === 'managed-file' ? managed : browser;
+    const snapshot = InputContext.inputSnapshot(browser, { text: 'selected fixture', url: browser.sourceRef.uri });
+    const calls = { browser: 0, managed: 0, store: [] }; let current = stage !== 'before';
+    const capture = productionCaptureThreadInputs({ state, epochScope, InputContext, ChatState: Chat,
+      captureChatInputs: async () => { calls.browser++; return stage === 'browser' ? pending.promise : [snapshot]; },
+      captureManagedFileInput: async () => { calls.managed++; return stage === 'managed-file' ? pending.promise : { fileId: 'f', draftId: 'd' }; },
+      fetchJson: async (route, options) => { calls.store.push({ route, body: JSON.parse(options.body) }); return pending.promise; } });
+    const running = capture(thread, [source], token, () => current);
+    if (stage !== 'before') {
+      await settle();
+      assert.equal(calls.browser, ['browser', 'store'].includes(stage) ? 1 : 0);
+      assert.equal(calls.managed, stage === 'managed-file' ? 1 : 0);
+      assert.equal(calls.store.length, stage === 'store' ? 1 : 0);
+      current = false;
+      pending.resolve(stage === 'browser' ? [snapshot] : stage === 'managed-file' ? { fileId: 'f', draftId: 'd' }
+        : { captures: [{ id: source.id, sourceId: 'stored-source', snapshotId: 'stored-source', hash: 'fixture-hash', sourceRef: source.sourceRef }] });
+    }
+    await assert.rejects(running, /연결이 바뀌/);
+    await settle();
+    assert.equal(calls.store.length, stage === 'store' ? 1 : 0, 'no store request starts after owner loss and no request is retried');
+    if (stage === 'store') assert.equal(calls.store[0].route, '/context/captures', 'an already-issued store request cannot be undone');
+    epochScope.finish(token);
+  });
 });
 
 test('context/Reader/Briefing events preserve answer provenance and never become chat tool spam', () => {
@@ -5383,7 +5421,7 @@ test('actual send path preserves draft B and new attachments typed during delaye
   const deps = ['state', 'getActiveCodexThread', 'getCodexThreadDraft', 'ChatState', 'threadBusy', 'epochScope', 'ensureNativeReadyForSend', 'updateThreadById', 'emit',
     'captureThreadInputs', 'getCodexThreadById', 'protocol', 'codexThreadAgentProfile', 'appendMessageToThread', 'createCodexMessage', 'SELF_MEMBER', 'codexThreadRuntimeConfig', 'fetchJson', 'syncProtocolRun', 'browserToolSelectedSources',
     'rootSseReady', 'chatRequestProjectDisplays', 'CHAT_REQUEST_PROJECT_INVALID', 'chatRoomProjectSendBlock', 'chatRoomProjectState',
-    'normalizeChatRoomProjectDefault', 'snapshotChatRoomProjectExpectation', 'CHAT_ROOM_PROJECT_UNAVAILABLE', 'memoAskSendReservations', 'InputContext'];
+    'normalizeChatRoomProjectDefault', 'snapshotChatRoomProjectExpectation', 'CHAT_ROOM_PROJECT_UNAVAILABLE', 'memoAskSendReservations', 'InputContext', 'clearMemoManualSendNotice', 'showMemoManualSendNotice', 'watchMemoRead'];
   const send = (...values) => isolatedProductionSend(deps, values);
   const memoAskSendReservations = new Map();
   const selectedBody = surfaceSource.match(/  function browserToolSelectedSources\(threadId, candidates = null\) \{([\s\S]*?)\n  \}/)?.[1];
@@ -5419,7 +5457,7 @@ test('actual send path preserves draft B and new attachments typed during delaye
     (role, content, status, options) => ({ role, content, status, ...options }), 'self', () => ({}),
     async (_url, request) => { sendCount++; payload = JSON.parse(request.body); return { accepted: true, conversationId: 'c', runId: 'r', answerId: 'c/r' }; }, () => {},
     actualSelectedSources, () => ({ sourceReady: true, eventSourceReadyState: 1, browserTransportId: 'ui-stream-1' }), new Map(), requestProjectSurfaceConstants().CHAT_REQUEST_PROJECT_INVALID, projectDefaults.chatRoomProjectSendBlock, projectDefaults.chatRoomProjectState,
-    projectDefaults.normalizeChatRoomProjectDefault, projectDefaults.snapshotChatRoomProjectExpectation, requestProjectSurfaceConstants().CHAT_ROOM_PROJECT_UNAVAILABLE, memoAskSendReservations, InputContext);
+    projectDefaults.normalizeChatRoomProjectDefault, projectDefaults.snapshotChatRoomProjectExpectation, requestProjectSurfaceConstants().CHAT_ROOM_PROJECT_UNAVAILABLE, memoAskSendReservations, InputContext, projectDefaults.clearMemoManualSendNotice, projectDefaults.showMemoManualSendNotice, projectDefaults.watchMemoRead);
   state.codex.threadDrafts.room = 'B';
   state.codex.threadDraftRevisions.room = 2;
   update('room', thread => ({ ...thread, inputSources: [...thread.inputSources, { id: 'b' }] }));
@@ -5458,7 +5496,7 @@ test('actual send path preserves draft B and new attachments typed during delaye
     (role, content, status, options) => ({ role, content, status, ...options }), 'self', () => ({}),
     async () => { assert.fail('a selected Browser must not submit without its ready SSE transport ID'); }, () => {},
     actualSelectedSources, connectingStatus, new Map(), requestProjectSurfaceConstants().CHAT_REQUEST_PROJECT_INVALID, projectDefaults.chatRoomProjectSendBlock, projectDefaults.chatRoomProjectState,
-    projectDefaults.normalizeChatRoomProjectDefault, projectDefaults.snapshotChatRoomProjectExpectation, requestProjectSurfaceConstants().CHAT_ROOM_PROJECT_UNAVAILABLE, memoAskSendReservations, InputContext);
+    projectDefaults.normalizeChatRoomProjectDefault, projectDefaults.snapshotChatRoomProjectExpectation, requestProjectSurfaceConstants().CHAT_ROOM_PROJECT_UNAVAILABLE, memoAskSendReservations, InputContext, projectDefaults.clearMemoManualSendNotice, projectDefaults.showMemoManualSendNotice, projectDefaults.watchMemoRead);
   assert.equal(payload, null);
   assert.equal(sendCount, 1);
   assert.equal(state.codex.threadDrafts.room, 'B');
@@ -5473,7 +5511,7 @@ test('actual send path preserves draft B and new attachments typed during delaye
     (role, content, status, options) => ({ role, content, status, ...options }), 'self', () => ({}),
     async () => { assert.fail('stale interaction authority must not degrade silently to a normal read-only send'); }, () => {},
     actualSelectedSources, () => ({ sourceReady: true, eventSourceReadyState: 1, browserTransportId: 'ui-stream-1' }), new Map(), requestProjectSurfaceConstants().CHAT_REQUEST_PROJECT_INVALID, projectDefaults.chatRoomProjectSendBlock, projectDefaults.chatRoomProjectState,
-    projectDefaults.normalizeChatRoomProjectDefault, projectDefaults.snapshotChatRoomProjectExpectation, requestProjectSurfaceConstants().CHAT_ROOM_PROJECT_UNAVAILABLE, memoAskSendReservations, InputContext);
+    projectDefaults.normalizeChatRoomProjectDefault, projectDefaults.snapshotChatRoomProjectExpectation, requestProjectSurfaceConstants().CHAT_ROOM_PROJECT_UNAVAILABLE, memoAskSendReservations, InputContext, projectDefaults.clearMemoManualSendNotice, projectDefaults.showMemoManualSendNotice, projectDefaults.watchMemoRead);
   assert.equal(sendCount, 1);
   assert.equal(getThread(null).messages.length, 1);
   assert.equal(state.codex.threadDrafts.room, 'B');
@@ -13245,7 +13283,7 @@ test('기록 없이 시작: the switch, the first-send body, the confirmed badge
   const deps = ['state', 'getActiveCodexThread', 'getCodexThreadDraft', 'ChatState', 'threadBusy', 'epochScope', 'ensureNativeReadyForSend', 'updateThreadById', 'emit',
     'captureThreadInputs', 'getCodexThreadById', 'protocol', 'codexThreadAgentProfile', 'appendMessageToThread', 'createCodexMessage', 'SELF_MEMBER', 'codexThreadRuntimeConfig', 'fetchJson', 'syncProtocolRun', 'browserToolSelectedSources',
     'rootSseReady', 'InputContext', 'chatRequestProjectDisplays', 'CHAT_REQUEST_PROJECT_INVALID', 'chatRoomProjectSendBlock', 'chatRoomProjectState',
-    'normalizeChatRoomProjectDefault', 'snapshotChatRoomProjectExpectation', 'CHAT_ROOM_PROJECT_UNAVAILABLE', 'memoAskSendReservations'];
+    'normalizeChatRoomProjectDefault', 'snapshotChatRoomProjectExpectation', 'CHAT_ROOM_PROJECT_UNAVAILABLE', 'memoAskSendReservations', 'clearMemoManualSendNotice', 'showMemoManualSendNotice', 'watchMemoRead'];
   const send = async (room, capabilities, reply) => {
     const state = { codex: { activeThreadId: 'room', threads: [{ id: 'room', messages: [], inputSources: [], briefingInputs: [], profileEnabled: false, ...room }],
       threadDrafts: { room: '안녕' }, threadDraftRevisions: { room: 1 }, authStatus: sessionAuth, connected: true, chatCapabilities: capabilities } };
@@ -13259,7 +13297,7 @@ test('기록 없이 시작: the switch, the first-send body, the confirmed badge
       (role, content, status, options) => ({ id: `message-${role}`, role, content, status, ...options }), '나', () => ({}),
       async (_url, request) => { payload = JSON.parse(request.body); return reply(payload); }, () => {}, () => [],
       () => ({ sourceReady: true, eventSourceReadyState: 1, browserTransportId: null }), InputContext, new Map(), requestProjectSurfaceConstants().CHAT_REQUEST_PROJECT_INVALID, projectDefaults.chatRoomProjectSendBlock, projectDefaults.chatRoomProjectState,
-      projectDefaults.normalizeChatRoomProjectDefault, projectDefaults.snapshotChatRoomProjectExpectation, requestProjectSurfaceConstants().CHAT_ROOM_PROJECT_UNAVAILABLE, new Map()]);
+      projectDefaults.normalizeChatRoomProjectDefault, projectDefaults.snapshotChatRoomProjectExpectation, requestProjectSurfaceConstants().CHAT_ROOM_PROJECT_UNAVAILABLE, new Map(), projectDefaults.clearMemoManualSendNotice, projectDefaults.showMemoManualSendNotice, projectDefaults.watchMemoRead]);
     return { payload, thread: getThread(null) };
   };
   const accepted = request => ({ accepted: true, conversationId: 'native-one', runId: 'r1', answerId: 'native-one/r1', ...(request.stateless ? { stateless: true } : {}) });
@@ -16608,7 +16646,7 @@ test('CTX-03 send: contextResolution names the list and the refs taken from it, 
   const deps = ['state', 'getActiveCodexThread', 'getCodexThreadDraft', 'ChatState', 'threadBusy', 'epochScope', 'ensureNativeReadyForSend', 'updateThreadById', 'emit',
     'captureThreadInputs', 'getCodexThreadById', 'protocol', 'codexThreadAgentProfile', 'appendMessageToThread', 'createCodexMessage', 'SELF_MEMBER', 'codexThreadRuntimeConfig', 'fetchJson', 'syncProtocolRun', 'browserToolSelectedSources',
     'rootSseReady', 'InputContext', 'expireContextSuggestions', 'chatRequestProjectDisplays', 'CHAT_REQUEST_PROJECT_INVALID', 'chatRoomProjectSendBlock', 'chatRoomProjectState',
-    'normalizeChatRoomProjectDefault', 'snapshotChatRoomProjectExpectation', 'CHAT_ROOM_PROJECT_UNAVAILABLE', 'memoAskSendReservations'];
+    'normalizeChatRoomProjectDefault', 'snapshotChatRoomProjectExpectation', 'CHAT_ROOM_PROJECT_UNAVAILABLE', 'memoAskSendReservations', 'clearMemoManualSendNotice', 'showMemoManualSendNotice', 'watchMemoRead'];
   const send = async ({ inputSources = [], suggest = { resolution, receivedAt: Date.now(), accountKey }, reply }) => {
     const state = { codex: { activeThreadId: 'room', threads: [{ id: 'room', messages: [], inputSources, briefingInputs: [], profileEnabled: false }],
       threadDrafts: { room: '이 자료로 정리해 줘' }, threadDraftRevisions: { room: 1 }, authStatus: sessionAuth, connected: true, chatCapabilities: ['send'] },
@@ -16626,7 +16664,7 @@ test('CTX-03 send: contextResolution names the list and the refs taken from it, 
       (role, content, status, options) => ({ id: `message-${role}`, role, content, status, ...options }), '나', () => ({}),
       async (_url, request) => { payload = JSON.parse(request.body); return reply(payload); }, () => {}, () => [],
       () => ({ sourceReady: true, eventSourceReadyState: 1, browserTransportId: null }), InputContext, id => expired.push(id), new Map(), requestProjectSurfaceConstants().CHAT_REQUEST_PROJECT_INVALID, projectDefaults.chatRoomProjectSendBlock, projectDefaults.chatRoomProjectState,
-      projectDefaults.normalizeChatRoomProjectDefault, projectDefaults.snapshotChatRoomProjectExpectation, requestProjectSurfaceConstants().CHAT_ROOM_PROJECT_UNAVAILABLE, new Map()]);
+      projectDefaults.normalizeChatRoomProjectDefault, projectDefaults.snapshotChatRoomProjectExpectation, requestProjectSurfaceConstants().CHAT_ROOM_PROJECT_UNAVAILABLE, new Map(), projectDefaults.clearMemoManualSendNotice, projectDefaults.showMemoManualSendNotice, projectDefaults.watchMemoRead]);
     return { payload, thread: getThread(null), state, expired };
   };
   const accepted = () => ({ accepted: true, conversationId: 'native-one', runId: 'r1', answerId: 'native-one/r1' });
@@ -17751,7 +17789,7 @@ function requestProjectSurfaceConstants() {
   const end = surfaceSource.indexOf('\n  function normalizeChatRequestProjectDraft(', start);
   assert.ok(start >= 0 && end > start);
   return compileFunction(surfaceSource.slice(start, end)
-    + '\nreturn { chatRequestProjectDisplays, chatRequestProjectDisplayScopes, chatRoomProjectDefaults, chatProjectDraftActions, chatRoomProjectPreparations, fileProjectAssociations, CHAT_REQUEST_PROJECT_INVALID, CHAT_REQUEST_PROJECT_CONNECT, CHAT_ROOM_PROJECT_UNAVAILABLE };')();
+    + '\nreturn { chatRequestProjectDisplays, chatRequestProjectDisplayScopes, chatRoomProjectDefaults, chatProjectDraftActions, memoManualSendNotices, chatRoomProjectPreparations, fileProjectAssociations, CHAT_REQUEST_PROJECT_INVALID, CHAT_REQUEST_PROJECT_CONNECT, CHAT_ROOM_PROJECT_UNAVAILABLE };')();
 }
 
 function actualProjectSendBlock() {
@@ -17760,11 +17798,48 @@ function actualProjectSendBlock() {
     + '\nreturn chatRoomProjectSendBlock;', Object.keys(deps))(...Object.values(deps));
 }
 
+// Project reads also use the production identity watch; each harness owns its
+// own Map and runs the real watch rather than assuming every read is current.
+function productionMemoReadWatch(deps) {
+  const start = surfaceSource.indexOf('    const memoReadWatches = new Map();');
+  const end = surfaceSource.indexOf('    const confirmedLegacyImports', start);
+  assert.ok(start >= 0 && end > start, 'production project-read identity watch');
+  const runtimeIdentity = declaration('memoAskRuntimeIdentity');
+  assert.ok(runtimeIdentity, 'production memo runtime identity');
+  return compileFunction(runtimeIdentity + '\n' + surfaceSource.slice(start, end) + '\nreturn { memoReadWatches, manualOwnerWatches, observeMemoReadWatch, watchMemoRead };',
+    ['state', 'getCodexThreadById', 'ChatState', 'codexThreadRuntimeConfig'])(deps.state, deps.getCodexThreadById, deps.ChatState, deps.codexThreadRuntimeConfig);
+}
+
+function productionManualSendNotice(deps) {
+  const bridge = surfaceSource.indexOf('  function installCodexBridge(');
+  const send = surfaceSource.indexOf('      async sendMessage(', bridge);
+  const start = surfaceSource.indexOf('    const clearMemoManualSendNotice = ', bridge);
+  const show = surfaceSource.indexOf('    const showMemoManualSendNotice = ', start);
+  const end = surfaceSource.indexOf('\n    };', show);
+  assert.ok(bridge >= 0 && start > bridge && show > start && end > show && end < send,
+    'the real send bridge must own the manual-notice helpers');
+  return compileFunction(surfaceSource.slice(start, end + 7) + '\nreturn { clearMemoManualSendNotice, showMemoManualSendNotice };',
+    Object.keys(deps))(...Object.values(deps));
+}
+
+// Keep the real observation loop when simulating state changes; the DOM and
+// side effects remain isolated, and the listener is the test's observer.
+function productionSendFixtureEmit(deps, onEmit) {
+  const bridge = surfaceSource.indexOf('  function installCodexBridge(');
+  const start = surfaceSource.indexOf('    const emit = () => {', bridge);
+  const end = surfaceSource.indexOf('\n    };', start);
+  assert.ok(bridge >= 0 && start > bridge && end > start, 'production bridge emission');
+  const emitDeps = { ...deps, document: { getElementById: () => null }, normalizeThreads() {}, taskAnswers: null,
+    listeners: [() => onEmit(deps.state.codex)], renderCodexActivityPanel() {}, scheduleDeskSessionSave() {} };
+  delete emitDeps.emit;
+  return compileFunction(surfaceSource.slice(start, end + 7) + '\nreturn emit;', Object.keys(emitDeps))(...Object.values(emitDeps));
+}
+
 // Older send fixtures retain their provider/Context assertions. Only the new
 // room-default HTTP boundary is supplied here; all freshness guards are real.
 function installDefaultProjectSendFixture(state) {
   const constants = requestProjectSurfaceConstants();
-  const deps = { ...constants, state, ChatState: Chat, epochScope: Chat.createChatEpochScope(),
+  const deps = { ...constants, state, ChatState: Chat, epochScope: Chat.createChatEpochScope(), codexThreadRuntimeConfig: () => ({}),
     getCodexThreadById: (_codex, id) => state.codex.threads.find(thread => thread.id === id),
     updateThreadById: (id, update) => { state.codex.threads = state.codex.threads.map(thread => thread.id === id ? update(thread) : thread); },
     emit() {}, window: { AbortController, setTimeout: () => 1, clearTimeout() {} },
@@ -17774,12 +17849,14 @@ function installDefaultProjectSendFixture(state) {
       return { ok: true, result: { roomId, inheritance: null, override: null, project: null, source: null, status: 'none' } };
     },
   };
+  Object.assign(deps, productionMemoReadWatch(deps));
   const names = ['chatRequestProjectSelection', 'chatRoomProjectState', 'chatRoomProjectSendBlock', 'createChatProjectScope', 'normalizeChatRoomProjectDefault',
     'snapshotChatRoomProjectExpectation', 'chatRoomProjectExpectation', 'chatRoomProjectTargetsMatch'];
   const api = compileFunction(names.map(declaration).join('\n') + '\nreturn { ' + names.join(', ') + ' };', Object.keys(deps))(...Object.values(deps));
   Object.assign(deps, api);
+  Object.assign(deps, productionManualSendNotice(deps));
   state.codexBridge = Object.fromEntries(['createProjectScope', 'readRoomProjectDefault', 'prepareRoomProjectSend'].map(name => [name, requestProjectBridgeMethod(name, deps)]));
-  return api;
+  return { ...api, clearMemoManualSendNotice: deps.clearMemoManualSendNotice, showMemoManualSendNotice: deps.showMemoManualSendNotice, watchMemoRead: deps.watchMemoRead };
 }
 
 function requestProjectBridgeMethod(name, deps) {
@@ -17886,7 +17963,7 @@ function requestProjectUiHarness({ target, read, roomRead, roomSave, resizeObser
   let roomValue = { roomId: 'wire-room', inheritance: null, override: null, project: null, source: null, status: 'none' };
   let roomReader = roomRead || (() => ({ ok: true, result: roomValue }));
   let timerSeq = 0, reader = read || (boardId => requestProjectPacket(boardId === 'board-a' ? requestProjectA() : requestProjectB()));
-  const deps = { ...constants, state, document, el, epochScope, ChatState: Chat, getCodexThreadById: getThread, updateThreadById: update, emit() {},
+  const deps = { ...constants, state, document, el, epochScope, ChatState: Chat, getCodexThreadById: getThread, updateThreadById: update, codexThreadRuntimeConfig: () => ({}), emit() {},
     setActiveThread: id => { if (!getThread(null, id)) return false; state.codex.activeThreadId = id; return true; },
     getCodexThreadDraft: (codex, id) => codex.threadDrafts[id] || '', refreshConversation() {},
     coerceAgendaStore: () => ({ agendas: {}, meta: {} }),
@@ -17922,6 +17999,7 @@ function requestProjectUiHarness({ target, read, roomRead, roomSave, resizeObser
       return reader(body.boardId);
     },
   };
+  Object.assign(deps, productionMemoReadWatch(deps));
   const names = ['normalizeChatRequestProjectDraft', 'chatRequestProjectSelection', 'chatRoomProjectState', 'createChatProjectScope', 'normalizeChatRoomProjectDefault',
     'snapshotChatRoomProjectExpectation', 'chatRoomProjectExpectation',
     'chatRoomProjectSendBlock', 'chatRoomProjectTargetsMatch', 'observeFileProjectAssociation', 'buildChatRoomProjectSettings', 'chatRequestProjectCandidates', 'openChatRequestProjectPanel', 'buildChatRequestProjectControl'];
@@ -17930,7 +18008,8 @@ function requestProjectUiHarness({ target, read, roomRead, roomSave, resizeObser
   Object.assign(deps, api);
   const emitSource = surfaceSource.match(/    const emit = \(\) => \{([\s\S]*?)\n    \};/)?.[1];
   assert.ok(emitSource);
-  const emitDeps = { document, state, taskAnswers: productionTaskAnswerFactory()(() => state.codex, epochScope), normalizeThreads() {}, listeners: [], renderCodexActivityPanel() {}, scheduleDeskSessionSave() {} };
+  const emitDeps = { document, state, memoReadWatches: deps.memoReadWatches, manualOwnerWatches: deps.manualOwnerWatches, observeMemoReadWatch: deps.observeMemoReadWatch,
+    taskAnswers: productionTaskAnswerFactory()(() => state.codex, epochScope), normalizeThreads() {}, listeners: [], renderCodexActivityPanel() {}, scheduleDeskSessionSave() {} };
   deps.emit = compileFunction('return () => {' + emitSource + '\n};', Object.keys(emitDeps))(...Object.values(emitDeps));
   const bridge = Object.fromEntries(['createProjectScope', 'readRequestProject', 'setRequestProjectTarget', 'ensureRoomProjectDefault', 'readRoomProjectDefault',
     'refreshRoomProjectDefault', 'invalidateRoomProjectDefaults', 'prepareRoomProjectSend', 'selectThread', 'saveRoomProjectDefault', 'prepareRoomProjectFolder', 'saveRoomProjectOverride', 'clearRequestProjectTarget'].map(name => [name, requestProjectBridgeMethod(name, deps)]));
@@ -17946,10 +18025,11 @@ function requestProjectUiHarness({ target, read, roomRead, roomSave, resizeObser
   };
 }
 
-function requestProjectSendHarness({ target, capture, reply, roomRead, inputSources = [{ id: 'attachment', kind: 'board-element', label: 'Selected element', sourceRef: { viewId: 'element-a' } }] } = {}) {
+function requestProjectSendHarness({ target, capture, reply, roomRead, memoAgentRoom = false, ready = async () => true, onEmit = () => {}, selectBrowserSources = () => [], inputSources = [{ id: 'attachment', kind: 'board-element', label: 'Selected element', sourceRef: { viewId: 'element-a' } }] } = {}) {
   const constants = requestProjectSurfaceConstants();
   const state = { codex: { activeThreadId: 'room', threads: [{ id: 'room', clientBindingId: 'original-wire-room', profileEnabled: false,
-    messages: [], inputSources, briefingInputs: [], ...(target === undefined ? {} : { requestProjectTarget: target }) }],
+    messages: [], inputSources, briefingInputs: [], ...(memoAgentRoom ? { type: 'dm', profileEnabled: true, agentProfileId: 'fixture-agent' } : {}),
+    ...(target === undefined ? {} : { requestProjectTarget: target }) }],
     threadDrafts: { room: 'original words' }, threadDraftRevisions: { room: 1 }, authStatus: sessionAuth, connected: true },
   boards: {} };
   Object.defineProperty(state.boards, 'activeProjectionId', { get() { assert.fail('sending must never infer an active Board target'); } });
@@ -17957,16 +18037,17 @@ function requestProjectSendHarness({ target, capture, reply, roomRead, inputSour
   const update = (id, action) => { state.codex.threads = state.codex.threads.map(thread => thread.id === id ? action(thread) : thread); };
   const calls = { begin: 0, prepare: 0, capture: 0, provider: [] };
   const epoch = Chat.createChatEpochScope();
-  const roomCalls = [];
+  const roomCalls = [], timers = new Map(); let timerId = 0;
   let roomReader = roomRead || (body => ({ ok: true, result: { roomId: body.roomId, inheritance: null, override: null, project: null, source: null, status: 'none' } }));
   const protocol = Chat.createChatProtocolState();
   if (target) constants.chatRequestProjectDisplays.set('room', target);
   const deps = { ...constants, state, ChatState: Chat, InputContext, protocol, memoAskSendReservations: new Map(),
-    window: { AbortController, setTimeout: () => 1, clearTimeout() {} },
-    getActiveCodexThread: () => getThread(null), getCodexThreadDraft: (codex, id) => codex.threadDrafts[id] || '', getCodexThreadById: getThread,
+    window: { AbortController, setTimeout: (fn, ms) => { const id = ++timerId; timers.set(id, { ms, fire: () => { timers.delete(id); fn(); } }); return id; },
+      clearTimeout: id => timers.delete(id) },
+    getActiveCodexThread: codex => getThread(codex, codex.activeThreadId), getCodexThreadDraft: (codex, id) => codex.threadDrafts[id] || '', getCodexThreadById: getThread,
     threadBusy: () => false, epochScope: { ...epoch, begin: (...args) => { calls.begin++; return epoch.begin(...args); } },
-    ensureNativeReadyForSend: async () => { calls.prepare++; return true; }, updateThreadById: update, emit() {},
-    captureThreadInputs: async (thread, inputs, token) => { calls.capture++; return capture ? capture(thread, inputs, token) : inputs.map((input, index) => ({ snapshotId: 'snapshot-' + index, sourceId: input.id })); },
+    ensureNativeReadyForSend: async thread => { calls.prepare++; return ready(thread); }, updateThreadById: update, emit() { onEmit(state.codex); },
+    captureThreadInputs: async (thread, inputs, token, ownerCurrent) => { calls.capture++; return capture ? capture(thread, inputs, token, ownerCurrent) : inputs.map((input, index) => ({ snapshotId: 'snapshot-' + index, sourceId: input.id })); },
     codexThreadAgentProfile: () => null,
     appendMessageToThread: (id, message) => update(id, thread => ({ ...thread, messages: [...thread.messages, message] })),
     createCodexMessage: (role, content, status, options) => ({ id: 'message-' + role, role, content, status, ...options }),
@@ -17980,16 +18061,25 @@ function requestProjectSendHarness({ target, capture, reply, roomRead, inputSour
       calls.provider.push(body);
       return reply ? reply(body) : { accepted: true, conversationId: 'native', runId: 'run', answerId: 'native/run' };
     },
-    syncProtocolRun() {}, browserToolSelectedSources: () => [], rootSseReady: () => ({ sourceReady: true }), expireContextSuggestions() {},
+    syncProtocolRun() {}, browserToolSelectedSources: selectBrowserSources, rootSseReady: () => ({ sourceReady: true }), expireContextSuggestions() {},
   };
+  Object.assign(deps, productionMemoReadWatch(deps));
   const names = ['chatRequestProjectSelection', 'chatRoomProjectState', 'createChatProjectScope', 'chatRoomProjectSendBlock', 'normalizeChatRoomProjectDefault',
     'snapshotChatRoomProjectExpectation', 'chatRoomProjectExpectation', 'chatRoomProjectTargetsMatch'];
   Object.assign(deps, compileFunction(names.map(declaration).join('\n') + '\nreturn { ' + names.join(', ') + ' };', Object.keys(deps))(...Object.values(deps)));
+  deps.emit = productionSendFixtureEmit(deps, onEmit);
+  Object.assign(deps, productionManualSendNotice({ ...deps, epochScope: epoch }));
+  const memoScopeBridge = { createProjectScope: id => deps.createChatProjectScope(id, epoch),
+    createMemoAskScope: requestProjectBridgeMethod('createMemoAskScope', deps) };
   const send = requestProjectBridgeMethod('sendMessage', deps);
+  const captureManualSendOwner = requestProjectBridgeMethod('captureManualSendOwner', deps);
   const setTarget = requestProjectBridgeMethod('setRequestProjectTarget', deps);
   const bridge = Object.fromEntries(['createProjectScope', 'readRoomProjectDefault', 'prepareRoomProjectSend'].map(name => [name, requestProjectBridgeMethod(name, deps)]));
   state.codexBridge = bridge;
-  return { ...constants, state, protocol, calls, send, bridge, roomCalls, epoch, memoAskSendReservations: deps.memoAskSendReservations, thread: () => getThread(null),
+  return { ...constants, state, protocol, calls, send, bridge, roomCalls, epoch, timers, emit: deps.emit, memoAskSendReservations: deps.memoAskSendReservations, thread: () => getThread(null),
+    owner: (id = 'room') => { const owner = captureManualSendOwner(id); assert.ok(owner); return owner; },
+    reservation: (current = () => true, id = 'room') => { const scope = memoScopeBridge.createMemoAskScope(id); assert.ok(scope); return { binding: Chat.clientThreadBinding(getThread(null, id)), scope, current }; },
+    notice: id => !!constants.memoManualSendNotices.get(id)?.current(),
     setRoomReader: reader => { roomReader = reader; },
     projectScope: () => { const scope = deps.createChatProjectScope('room', epoch); scope.finish(); return scope; },
     setTarget: target => setTarget('room', target),
@@ -18006,10 +18096,509 @@ function requestProjectDeferred() {
   return { promise, resolve, reject };
 }
 
+// A real memo ask can reserve only an empty composer. These local user edits
+// let the boundary tests introduce that reservation without faking a memo send.
+function clearComposerForMemo(h, id = 'room') {
+  h.state.codex.threadDrafts[id] = ''; h.state.codex.threadDraftRevisions[id] = (h.state.codex.threadDraftRevisions[id] || 0) + 1;
+  if (h.state.codex.activeThreadId === id) h.state.codex.draft = '';
+  h.state.codex.threads = h.state.codex.threads.map(thread => thread.id === id
+    ? Chat.applyRequestProjectTarget({ ...thread, inputSources: [], briefingInputs: [] }, null) : thread);
+}
+
+function reserveEmptyMemoRoom(h, id = 'room') {
+  const thread = h.state.codex.threads.find(item => item.id === id);
+  assert.equal(thread.type, 'dm'); assert.equal(thread.profileEnabled, true); assert.ok(thread.agentProfileId);
+  assert.equal(h.state.codex.threadDrafts[id], ''); assert.deepEqual(thread.inputSources, []); assert.deepEqual(thread.briefingInputs, []);
+  assert.equal(thread.requestProjectTarget, undefined);
+  const reservation = h.reservation(() => true, id); h.memoAskSendReservations.set(id, reservation);
+  return reservation;
+}
+
+function typeOrdinaryDraft(h, text, id = 'room') {
+  h.state.codex.threadDrafts[id] = text; h.state.codex.threadDraftRevisions[id]++;
+  if (h.state.codex.activeThreadId === id) h.state.codex.draft = text;
+}
+
+test('ordinary chat: a conflicting memo reservation reports the blocked send and needs an explicit retry', async () => {
+  const emissions = [];
+  let h;
+  h = requestProjectSendHarness({ memoAgentRoom: true, onEmit: codex => emissions.push({ room: codex.activeThreadId, notice: h.notice('room') }) });
+  clearComposerForMemo(h); reserveEmptyMemoRoom(h); typeOrdinaryDraft(h, 'original words');
+  const inputs = structuredClone(h.thread().inputSources);
+  await h.send();
+  assert.equal(h.calls.provider.length, 0); assert.equal(h.calls.capture, 0); assert.equal(h.roomCalls.length, 0);
+  assert.equal(Object.keys(h.protocol.requests).length, 0); assert.equal(h.thread().messages.length, 0);
+  assert.equal(h.state.codex.threadDrafts.room, 'original words'); assert.deepEqual(h.thread().inputSources, inputs);
+  assert.equal(h.notice('room'), true, 'the blocked ordinary send must not be silent');
+  assert.ok(emissions.some(event => event.room === 'room' && event.notice), 'the originating room must receive the notice');
+  h.memoAskSendReservations.delete('room');
+  await settle(); assert.equal(h.calls.provider.length, 0, 'releasing the reservation must not send automatically');
+  assert.equal((await h.send()).accepted, true);
+  assert.equal(h.calls.provider.length, 1); assert.equal(h.calls.provider[0].message, 'original words');
+  assert.equal(h.roomCalls.length, 1, 'the explicit retry still checks the room project');
+  assert.equal(h.notice('room'), false, 'the explicit retry clears the old notice');
+});
+
+test('ordinary chat: a conflict notice preserves existing errors and expires without leaking into another room', async t => {
+  for (const mode of ['timeout', 'leave-and-return']) await t.test(mode, async () => {
+    const h = requestProjectSendHarness({ memoAgentRoom: true });
+    h.state.codex.threads.push({ id: 'room-b', clientBindingId: 'wire-b', messages: [], inputSources: [], briefingInputs: [], sendError: 'room-b error' });
+    h.state.codex.threadDrafts['room-b'] = 'room-b words'; h.state.codex.threadDraftRevisions['room-b'] = 1;
+    h.thread().sendError = 'existing room error'; h.state.codex.error = 'existing global error';
+    clearComposerForMemo(h); reserveEmptyMemoRoom(h); typeOrdinaryDraft(h, 'original words');
+    const inputs = structuredClone(h.thread().inputSources);
+    await h.send();
+    assert.equal(h.notice('room'), true); assert.equal(h.notice('room-b'), false);
+    assert.equal(h.thread().sendError, 'existing room error'); assert.equal(h.state.codex.error, 'existing global error');
+    assert.equal(h.state.codex.threadDrafts.room, 'original words'); assert.deepEqual(h.thread().inputSources, inputs);
+    const timer = [...h.timers.values()].find(entry => entry.ms === 7000);
+    assert.ok(timer, 'the temporary notice has a bounded lifetime');
+    if (mode === 'leave-and-return') {
+      h.state.codex.activeThreadId = 'room-b'; h.state.codex.activityRoomGeneration = 1;
+      assert.equal(h.notice('room'), false); assert.equal(h.notice('room-b'), false);
+      assert.equal(h.state.codex.threads.find(thread => thread.id === 'room-b').sendError, 'room-b error');
+      assert.equal(h.state.codex.threadDrafts['room-b'], 'room-b words');
+      h.state.codex.activeThreadId = 'room'; h.state.codex.activityRoomGeneration = 2;
+      assert.equal(h.notice('room'), false, 'a stale notice must not reappear after returning');
+    }
+    timer.fire(); assert.equal(h.notice('room'), false);
+    assert.equal(h.thread().sendError, 'existing room error'); assert.equal(h.state.codex.error, 'existing global error');
+    assert.equal(h.state.codex.threadDrafts.room, 'original words'); assert.deepEqual(h.thread().inputSources, inputs);
+    await settle(); assert.equal(h.calls.provider.length, 0); assert.equal(Object.keys(h.protocol.requests).length, 0);
+  });
+});
+
+test('ordinary chat: a conflict during readiness is reported before capture and requires another explicit send', async () => {
+  const pending = requestProjectDeferred(), emissions = []; let reads = 0, h;
+  h = requestProjectSendHarness({ memoAgentRoom: true, ready: () => ++reads === 1 ? pending.promise : Promise.resolve(true),
+    onEmit: codex => emissions.push({ room: codex.activeThreadId, notice: h.notice('room') }) });
+  const owner = h.owner();
+  const sending = h.send({ manualOwner: owner });
+  await settle(); assert.equal(h.calls.prepare, 1); assert.equal(h.calls.capture, 0);
+  clearComposerForMemo(h); const reservation = reserveEmptyMemoRoom(h); typeOrdinaryDraft(h, 'newer words');
+  assert.equal(reservation.scope.current(), true);
+  const inputs = structuredClone(h.thread().inputSources); pending.resolve(true); await sending;
+  assert.equal(h.calls.provider.length, 0); assert.equal(h.calls.capture, 0); assert.equal(h.roomCalls.length, 0);
+  assert.equal(Object.keys(h.protocol.requests).length, 0); assert.equal(h.thread().messages.length, 0);
+  assert.equal(h.state.codex.threadDrafts.room, 'newer words'); assert.deepEqual(h.thread().inputSources, inputs);
+  assert.equal(h.notice('room'), true, 'the interrupted ordinary send must not be silent');
+  assert.ok(emissions.some(event => event.room === 'room' && event.notice));
+  h.memoAskSendReservations.delete('room'); await settle(); assert.equal(h.calls.provider.length, 0);
+  assert.equal((await h.send({ manualOwner: owner })).accepted, true); assert.equal(h.calls.provider.length, 1); assert.equal(h.roomCalls.length, 1);
+  assert.equal(h.calls.provider[0].message, 'newer words');
+});
+
+test('ordinary chat: a valid same-room reservation arriving during capture reports the interruption', async () => {
+  const pending = requestProjectDeferred(), emissions = []; let h;
+  h = requestProjectSendHarness({ memoAgentRoom: true, capture: () => pending.promise,
+    onEmit: codex => emissions.push({ room: codex.activeThreadId, notice: h.notice('room') }) });
+  const owner = h.owner();
+  const sending = h.send({ manualOwner: owner });
+  await settle(); assert.equal(h.calls.capture, 1); assert.equal(h.roomCalls.length, 0);
+  clearComposerForMemo(h); const reservation = reserveEmptyMemoRoom(h); typeOrdinaryDraft(h, 'newer words');
+  assert.equal(reservation.scope.current(), true);
+  const inputs = structuredClone(h.thread().inputSources);
+  pending.resolve([{ snapshotId: 'snapshot-a', sourceId: 'attachment' }]); await sending;
+  assert.equal(h.calls.provider.length, 0); assert.equal(Object.keys(h.protocol.requests).length, 0);
+  assert.equal(h.thread().messages.length, 0); assert.equal(h.state.codex.threadDrafts.room, 'newer words');
+  assert.deepEqual(h.thread().inputSources, inputs);
+  assert.equal(h.notice('room'), true, 'the reservation interrupted the ordinary send and must not be silent');
+  assert.ok(emissions.some(event => event.room === 'room' && event.notice));
+  h.memoAskSendReservations.delete('room'); await settle();
+  assert.equal(h.calls.provider.length, 0, 'release alone is never another send');
+  assert.equal((await h.send({ manualOwner: owner })).accepted, true); assert.equal(h.calls.provider.length, 1);
+  assert.equal(h.calls.provider[0].message, 'newer words');
+});
+
+test('ordinary chat: a valid same-room reservation stops a successful project recheck before dispatch', async () => {
+  const capture = requestProjectDeferred(), project = requestProjectDeferred(), observations = [], emissions = [];
+  let h, captureCount = 0;
+  h = requestProjectSendHarness({ memoAgentRoom: true, capture: (_thread, inputs) => ++captureCount === 1 ? capture.promise
+    : inputs.map((input, index) => ({ snapshotId: `retry-${index}`, sourceId: input.id })), roomRead: () => project.promise,
+  onEmit: codex => emissions.push({ room: codex.activeThreadId, notice: h.notice('room') }) });
+  const prepare = h.bridge.prepareRoomProjectSend;
+  h.bridge.prepareRoomProjectSend = async function (...args) { const value = await prepare.apply(this, args); observations.push(value); return value; };
+  const owner = h.owner();
+  const sending = h.send({ manualOwner: owner });
+  await settle(); assert.equal(h.calls.capture, 1); assert.equal(h.roomCalls.length, 0);
+  clearComposerForMemo(h);
+  capture.resolve([{ snapshotId: 'snapshot-a', sourceId: 'attachment' }]); await settle();
+  assert.equal(h.roomCalls.length, 1); assert.equal(h.state.codex.threadDrafts.room, '');
+  const reservation = reserveEmptyMemoRoom(h); assert.equal(reservation.scope.current(), true);
+  project.resolve({ ok: true, result: { roomId: 'original-wire-room', inheritance: null, override: null, project: null, source: null, status: 'none' } });
+  await sending;
+  assert.deepEqual(observations, [{ roomId: 'original-wire-room', status: 'none', source: null, boardId: null, projectId: null, rootId: null }],
+    'the actual project recheck succeeded before the reservation stopped the send');
+  assert.equal(reservation.scope.current(), true); assert.equal(h.state.codex.activeThreadId, 'room');
+  assert.equal(h.calls.provider.length, 0); assert.equal(Object.keys(h.protocol.requests).length, 0);
+  assert.equal(h.thread().messages.length, 0); assert.equal(h.state.codex.threadDrafts.room, ''); assert.deepEqual(h.thread().inputSources, []);
+  assert.equal(h.notice('room'), true, 'a reservation-caused interruption is reported');
+  assert.ok(emissions.some(event => event.room === 'room' && event.notice));
+  h.memoAskSendReservations.delete('room'); reservation.scope.finish(); await settle();
+  assert.equal(h.calls.provider.length, 0, 'release alone is never another send');
+  typeOrdinaryDraft(h, 'newer words');
+  assert.equal((await h.send({ manualOwner: owner })).accepted, true); assert.equal(h.calls.provider.length, 1);
+  assert.equal(h.calls.provider[0].message, 'newer words'); assert.equal(h.calls.provider[0].expectedRoomProject.roomId, 'original-wire-room');
+});
+
+test('ordinary chat: a changed project-check draft is not mislabeled as a reservation interruption', async () => {
+  const pending = requestProjectDeferred();
+  const h = requestProjectSendHarness({ memoAgentRoom: true, roomRead: () => pending.promise });
+  const owner = h.owner();
+  const sending = h.send({ manualOwner: owner }); await settle(); assert.equal(h.roomCalls.length, 1);
+  const originalError = h.thread().sendError;
+  clearComposerForMemo(h); const reservation = reserveEmptyMemoRoom(h); typeOrdinaryDraft(h, 'newer words');
+  assert.equal(reservation.scope.current(), true);
+  pending.resolve({ ok: true, result: { roomId: 'original-wire-room', inheritance: null, override: null, project: null, source: null, status: 'none' } });
+  await sending;
+  assert.equal(h.calls.provider.length, 0); assert.equal(Object.keys(h.protocol.requests).length, 0);
+  assert.equal(h.thread().messages.length, 0); assert.equal(h.state.codex.threadDrafts.room, 'newer words');
+  assert.deepEqual(h.thread().inputSources, []); assert.equal(h.thread().sendError, originalError);
+  assert.equal(h.notice('room'), false, 'the project draft mismatch, not the reservation, stopped this send');
+  h.memoAskSendReservations.delete('room'); reservation.scope.finish(); await settle();
+  assert.equal(h.calls.provider.length, 0, 'a failed send is never retried automatically');
+  assert.equal((await h.send({ manualOwner: owner })).accepted, true); assert.equal(h.calls.provider.length, 1);
+  assert.equal(h.calls.provider[0].message, 'newer words');
+});
+
+test('ordinary chat: an edited draft alone also stops a pending project recheck without dispatch', async () => {
+  const pending = requestProjectDeferred();
+  const h = requestProjectSendHarness({ memoAgentRoom: true, roomRead: () => pending.promise });
+  const owner = h.owner();
+  const sending = h.send({ manualOwner: owner }); await settle(); assert.equal(h.roomCalls.length, 1);
+  const originalError = h.thread().sendError; assert.equal(h.memoAskSendReservations.size, 0);
+  clearComposerForMemo(h); typeOrdinaryDraft(h, 'newer words');
+  pending.resolve({ ok: true, result: { roomId: 'original-wire-room', inheritance: null, override: null, project: null, source: null, status: 'none' } });
+  await sending;
+  assert.equal(h.calls.provider.length, 0); assert.equal(Object.keys(h.protocol.requests).length, 0);
+  assert.equal(h.thread().messages.length, 0); assert.equal(h.state.codex.threadDrafts.room, 'newer words');
+  assert.deepEqual(h.thread().inputSources, []); assert.equal(h.thread().sendError, originalError); assert.equal(h.notice('room'), false);
+  await settle(); assert.equal(h.calls.provider.length, 0, 'an edited draft does not trigger a retry');
+});
+
+test('ordinary chat: a late conflict after leaving the room never writes an error or requests focus in the new room', async t => {
+  for (const stage of ['readiness', 'capture', 'project']) await t.test(stage, async () => {
+    const pending = requestProjectDeferred(), emissions = [], focus = [];
+    const h = requestProjectSendHarness({ memoAgentRoom: true, ...(stage === 'readiness' ? { ready: () => pending.promise } : stage === 'capture' ? { capture: () => pending.promise } : { roomRead: () => pending.promise }),
+      onEmit: codex => emissions.push({ active: codex.activeThreadId, otherError: codex.threads.find(thread => thread.id === 'room-b')?.sendError, globalError: codex.error }) });
+    h.state.codex.threads.push({ id: 'room-b', clientBindingId: 'wire-b', messages: [], inputSources: [], briefingInputs: [], sendError: 'room-b existing notice' });
+    h.state.codex.error = 'existing global notice';
+    h.state.codex.threadDrafts['room-b'] = 'room-b unsent words'; h.state.codex.threadDraftRevisions['room-b'] = 1;
+    h.state.focusChatDockIfCompact = () => { focus.push(h.state.codex.activeThreadId); };
+    const sending = h.send();
+    await settle(); assert.equal(h.calls.capture, stage === 'readiness' ? 0 : 1); assert.equal(h.roomCalls.length, stage === 'project' ? 1 : 0);
+    clearComposerForMemo(h); reserveEmptyMemoRoom(h); typeOrdinaryDraft(h, 'newer words');
+    const inputs = structuredClone(h.thread().inputSources);
+    h.state.codex.activeThreadId = 'room-b'; h.state.codex.activityRoomGeneration = (h.state.codex.activityRoomGeneration || 0) + 1;
+    pending.resolve(stage === 'readiness' ? true : stage === 'capture' ? [{ snapshotId: 'snapshot-a', sourceId: 'attachment' }]
+      : { ok: true, result: { roomId: 'original-wire-room', inheritance: null, override: null, project: null, source: null, status: 'none' } });
+    await sending;
+    const other = h.state.codex.threads.find(thread => thread.id === 'room-b');
+    assert.equal(other.sendError, 'room-b existing notice'); assert.equal(h.state.codex.error, 'existing global notice');
+    assert.equal(h.state.codex.threadDrafts['room-b'], 'room-b unsent words');
+    assert.equal(other.messages.length, 0); assert.equal(h.notice('room-b'), false); assert.deepEqual(focus, []);
+    assert.ok(emissions.every(event => event.active !== 'room-b' || event.otherError === 'room-b existing notice' && event.globalError === 'existing global notice'));
+    assert.equal(h.calls.provider.length, 0); assert.equal(Object.keys(h.protocol.requests).length, 0);
+    assert.equal(h.thread().messages.length, 0); assert.equal(h.state.codex.threadDrafts.room, 'newer words');
+    assert.deepEqual(h.thread().inputSources, inputs);
+    h.memoAskSendReservations.delete('room'); await settle(); assert.equal(h.calls.provider.length, 0);
+  });
+});
+
+test('ordinary chat: a late conflict cannot write a notice into a replacement binding with the same local room ID', async t => {
+  for (const stage of ['readiness', 'capture', 'project']) await t.test(stage, async () => {
+    const pending = requestProjectDeferred(), focus = [], emissions = [];
+    const h = requestProjectSendHarness({ memoAgentRoom: true, ...(stage === 'readiness' ? { ready: () => pending.promise } : stage === 'capture' ? { capture: () => pending.promise } : { roomRead: () => pending.promise }),
+      onEmit: codex => emissions.push(codex.threads.find(thread => thread.id === 'room')?.sendError) });
+    h.state.focusChatDockIfCompact = () => focus.push('requested');
+    const sending = h.send(); await settle();
+    assert.equal(h.calls.capture, stage === 'readiness' ? 0 : 1); assert.equal(h.roomCalls.length, stage === 'project' ? 1 : 0);
+    clearComposerForMemo(h); reserveEmptyMemoRoom(h); typeOrdinaryDraft(h, 'newer words');
+    h.state.codex.threads = h.state.codex.threads.map(thread => thread.id === 'room'
+      ? { ...thread, clientBindingId: 'replacement-wire-room', sendError: 'replacement room notice', inputSources: [{ id: 'replacement-input' }] } : thread);
+    h.state.codex.threadDrafts.room = 'replacement words'; h.state.codex.threadDraftRevisions.room++;
+    pending.resolve(stage === 'readiness' ? true : stage === 'capture' ? [{ snapshotId: 'snapshot-a', sourceId: 'attachment' }]
+      : { ok: true, result: { roomId: 'original-wire-room', inheritance: null, override: null, project: null, source: null, status: 'none' } });
+    await sending;
+    assert.equal(h.thread().sendError, 'replacement room notice'); assert.deepEqual(h.thread().inputSources, [{ id: 'replacement-input' }]);
+    assert.equal(h.state.codex.threadDrafts.room, 'replacement words'); assert.equal(h.thread().messages.length, 0);
+    assert.equal(h.calls.provider.length, 0); assert.equal(Object.keys(h.protocol.requests).length, 0); assert.deepEqual(focus, []);
+    assert.ok(emissions.every(value => value == null || value === 'replacement room notice'));
+  });
+});
+
+test('ordinary chat: a new draft and project survive a conflict arriving during delayed preparation', async t => {
+  for (const stage of ['readiness', 'capture', 'project']) await t.test(stage, async () => {
+    const pending = requestProjectDeferred();
+    const h = requestProjectSendHarness({ memoAgentRoom: true, ...(stage === 'readiness' ? { ready: () => pending.promise } : stage === 'capture' ? { capture: () => pending.promise } : { roomRead: () => pending.promise }) });
+    const sending = h.send(); await settle();
+    assert.equal(h.calls.capture, stage === 'readiness' ? 0 : 1); assert.equal(h.roomCalls.length, stage === 'project' ? 1 : 0);
+    clearComposerForMemo(h); reserveEmptyMemoRoom(h); h.edit('newer words', requestProjectB());
+    pending.resolve(stage === 'readiness' ? true : stage === 'capture' ? [{ snapshotId: 'snapshot-a', sourceId: 'attachment' }]
+      : { ok: true, result: { roomId: 'original-wire-room', inheritance: null, override: null, project: null, source: null, status: 'none' } });
+    await sending;
+    assert.equal(h.state.codex.threadDrafts.room, 'newer words');
+    assert.deepEqual(h.thread().inputSources, [{ id: 'new-attachment' }]); assert.deepEqual(h.thread().requestProjectTarget, requestProjectB());
+    assert.equal(h.calls.provider.length, 0); assert.equal(Object.keys(h.protocol.requests).length, 0); assert.equal(h.thread().messages.length, 0);
+    h.memoAskSendReservations.delete('room'); await settle(); assert.equal(h.calls.provider.length, 0);
+  });
+});
+
+test('ordinary chat: a reservation in another room does not block the active room or change its neighbor', async () => {
+  const h = requestProjectSendHarness({ memoAgentRoom: true });
+  h.state.codex.threads.push({ id: 'room-b', clientBindingId: 'wire-b', messages: [], inputSources: [], briefingInputs: [] });
+  h.state.codex.threadDrafts['room-b'] = 'room-b words'; h.state.codex.threadDraftRevisions['room-b'] = 1;
+  clearComposerForMemo(h); reserveEmptyMemoRoom(h); typeOrdinaryDraft(h, 'original words');
+  const original = structuredClone(h.thread());
+  h.state.codex.activeThreadId = 'room-b';
+  assert.equal((await h.send()).accepted, true);
+  assert.equal(h.calls.provider.length, 1); assert.equal(h.calls.provider[0].clientThreadId, 'wire-b');
+  assert.equal(h.calls.provider[0].message, 'room-b words');
+  assert.equal(h.calls.provider[0].expectedRoomProject.roomId, 'wire-b');
+  assert.deepEqual(h.thread(), original); assert.equal(h.state.codex.threadDrafts.room, 'original words');
+});
+
+test('ordinary chat: a stale room-owned send cannot target a different room or replacement binding', async t => {
+  for (const mode of ['other-room', 'replacement-binding', 'leave-and-return']) await t.test(mode, async () => {
+    const h = requestProjectSendHarness({ memoAgentRoom: true }), focus = [];
+    h.state.codex.threads.push({ id: 'room-b', clientBindingId: 'wire-b', type: 'dm', profileEnabled: true, agentProfileId: 'fixture-agent-b', messages: [], inputSources: [], briefingInputs: [], sendError: 'room-b notice' });
+    h.state.codex.threadDrafts['room-b'] = ''; h.state.codex.threadDraftRevisions['room-b'] = 1; clearComposerForMemo(h);
+    h.state.focusChatDockIfCompact = () => focus.push('requested');
+    const manualOwner = { threadId: 'room', binding: 'original-wire-room', roomGeneration: 0 };
+    if (mode === 'other-room') {
+      reserveEmptyMemoRoom(h, 'room-b'); typeOrdinaryDraft(h, 'room-b words', 'room-b');
+      h.state.codex.activeThreadId = 'room-b'; h.state.codex.activityRoomGeneration = 1;
+    } else if (mode === 'replacement-binding') {
+      reserveEmptyMemoRoom(h); typeOrdinaryDraft(h, 'original words');
+      h.state.codex.threads = h.state.codex.threads.map(thread => thread.id === 'room'
+        ? { ...thread, clientBindingId: 'replacement-wire', sendError: 'replacement notice' } : thread);
+    } else { reserveEmptyMemoRoom(h); typeOrdinaryDraft(h, 'original words'); h.state.codex.activityRoomGeneration = 2; }
+    const before = structuredClone(h.state.codex.threads), drafts = { ...h.state.codex.threadDrafts };
+    await h.send({ manualOwner });
+    assert.equal(h.calls.provider.length, 0, 'a stale owner must not dispatch into the replacement room');
+    assert.deepEqual(h.state.codex.threads, before); assert.deepEqual(h.state.codex.threadDrafts, drafts);
+    assert.equal(h.calls.begin, 0); assert.equal(h.calls.capture, 0); assert.equal(h.roomCalls.length, 0);
+    assert.equal(Object.keys(h.protocol.requests).length, 0);
+    assert.equal(h.notice('room-b'), false); assert.deepEqual(focus, []);
+  });
+});
+
+test('ordinary chat: stale owner without any reservation cannot send to another room, binding or observed return', async t => {
+  for (const mode of ['other-room', 'replacement-binding', 'leave-and-return']) await t.test(mode, async () => {
+    const h = requestProjectSendHarness(), focus = [];
+    h.thread().sendError = 'room-a existing error'; h.state.codex.error = 'global existing error';
+    h.state.codex.threads.push({ id: 'room-b', clientBindingId: 'wire-b', messages: [], inputSources: [], briefingInputs: [], sendError: 'room-b existing error' });
+    h.state.codex.threadDrafts['room-b'] = 'room-b words'; h.state.codex.threadDraftRevisions['room-b'] = 1;
+    h.state.focusChatDockIfCompact = () => focus.push('requested');
+    const owner = h.owner();
+    if (mode === 'other-room') {
+      h.state.codex.activeThreadId = 'room-b'; h.state.codex.activityRoomGeneration = 1; h.emit();
+    } else if (mode === 'replacement-binding') {
+      h.state.codex.threads = h.state.codex.threads.map(thread => thread.id === 'room'
+        ? { ...thread, clientBindingId: 'replacement-wire', sendError: 'replacement existing error' } : thread);
+      h.emit();
+    } else {
+      h.state.codex.activeThreadId = 'room-b'; h.state.codex.activityRoomGeneration = 1; h.emit();
+      h.state.codex.activeThreadId = 'room'; h.state.codex.activityRoomGeneration = 2; h.emit();
+    }
+    const before = structuredClone(h.state.codex.threads), drafts = { ...h.state.codex.threadDrafts }, globalError = h.state.codex.error;
+    assert.equal(h.memoAskSendReservations.size, 0);
+    await h.send({ manualOwner: owner });
+    assert.equal(h.calls.provider.length, 0, 'a stale owner cannot dispatch, even without a memo reservation');
+    assert.equal(h.calls.begin, 0); assert.equal(h.calls.capture, 0); assert.equal(h.roomCalls.length, 0);
+    assert.equal(Object.keys(h.protocol.requests).length, 0); assert.deepEqual(h.state.codex.threads, before);
+    assert.deepEqual(h.state.codex.threadDrafts, drafts); assert.equal(h.state.codex.error, globalError);
+    assert.equal(h.notice('room'), false); assert.equal(h.notice('room-b'), false); assert.deepEqual(focus, []);
+    await settle(); assert.equal(h.calls.provider.length, 0, 'a refused stale send is not retried automatically');
+  });
+});
+
+test('ordinary chat: a current owner without a reservation still performs the normal project check and send', async () => {
+  const h = requestProjectSendHarness();
+  const owner = h.owner();
+  assert.equal(h.memoAskSendReservations.size, 0);
+  assert.equal((await h.send({ manualOwner: owner })).accepted, true);
+  assert.equal(h.calls.capture, 1); assert.equal(h.roomCalls.length, 1); assert.equal(h.calls.provider.length, 1);
+  assert.equal(h.calls.provider[0].message, 'original words'); assert.equal(h.calls.provider[0].clientThreadId, 'original-wire-room');
+  assert.equal(h.calls.provider[0].expectedRoomProject.roomId, 'original-wire-room');
+});
+
+test('ordinary chat: a current owner without a reservation cannot bypass expired Browser interaction authority', async () => {
+  const source = { id: 'browser', kind: 'browser', selectedByUser: true, browserToolPermission: 'interact',
+    sourceRef: { viewId: 'browser-a', uri: 'https://example.test/' } };
+  const h = requestProjectSendHarness({ inputSources: [source] });
+  const owner = h.owner();
+  assert.equal(h.memoAskSendReservations.size, 0); await h.send({ manualOwner: owner });
+  assert.equal(h.calls.capture, 1); assert.equal(h.roomCalls.length, 0); assert.equal(h.calls.provider.length, 0);
+  assert.equal(Object.keys(h.protocol.requests).length, 0); assert.equal(h.thread().messages.length, 0);
+  assert.equal(h.state.codex.threadDrafts.room, 'original words'); assert.deepEqual(h.thread().inputSources, [source]);
+  assert.ok(h.thread().sendError.includes('권한')); await settle(); assert.equal(h.calls.provider.length, 0);
+});
+
+test('ordinary chat: observed room or identity ABA while waiting cannot dispatch without a reservation', async t => {
+  for (const stage of ['readiness', 'capture', 'project']) for (const mode of ['room', 'binding', 'account', 'engine', 'profile', 'connected']) {
+    await t.test(`${stage}: ${mode}`, async () => {
+      const pending = requestProjectDeferred();
+      const h = requestProjectSendHarness(stage === 'readiness' ? { ready: () => pending.promise }
+        : stage === 'capture' ? { capture: () => pending.promise } : { roomRead: () => pending.promise });
+      h.state.codex.threads.push({ id: 'room-b', clientBindingId: 'wire-b', messages: [], inputSources: [], briefingInputs: [], sendError: 'other room error' });
+      h.state.codex.threadDrafts['room-b'] = 'other room words'; h.state.codex.threadDraftRevisions['room-b'] = 1;
+      h.thread().sendError = 'existing room error'; h.state.codex.error = 'existing global error';
+      const inputs = structuredClone(h.thread().inputSources), owner = h.owner(), sending = h.send({ manualOwner: owner });
+      await settle();
+      assert.equal(h.calls.prepare, 1); assert.equal(h.calls.capture, stage === 'readiness' ? 0 : 1);
+      assert.equal(h.roomCalls.length, stage === 'project' ? 1 : 0); assert.equal(h.memoAskSendReservations.size, 0);
+      const changeThread = action => { h.state.codex.threads = h.state.codex.threads.map(thread => thread.id === 'room' ? action(thread) : thread); h.emit(); };
+      if (mode === 'room') {
+        h.state.codex.activeThreadId = 'room-b'; h.state.codex.activityRoomGeneration = 1; h.emit();
+        h.state.codex.activeThreadId = 'room'; h.state.codex.activityRoomGeneration = 2; h.emit();
+      } else if (mode === 'binding') {
+        changeThread(thread => ({ ...thread, clientBindingId: 'temporary-binding' }));
+        changeThread(thread => ({ ...thread, clientBindingId: 'original-wire-room' }));
+      } else if (mode === 'account') {
+        const auth = h.state.codex.authStatus;
+        h.state.codex.authStatus = { ...auth, accountEmail: 'other@example.test' }; h.emit();
+        h.state.codex.authStatus = auth; h.emit();
+      } else if (mode === 'engine') {
+        changeThread(thread => ({ ...thread, engineId: 'claude' }));
+        changeThread(thread => { const next = { ...thread }; delete next.engineId; return next; });
+      } else if (mode === 'profile') {
+        changeThread(thread => ({ ...thread, engineProfileId: 'other-slot' }));
+        changeThread(thread => { const next = { ...thread }; delete next.engineProfileId; return next; });
+      } else {
+        h.state.codex.connected = false; h.emit(); h.state.codex.connected = true; h.emit();
+      }
+      pending.resolve(stage === 'readiness' ? true : stage === 'capture' ? [{ snapshotId: 'snapshot-a', sourceId: 'attachment' }]
+        : { ok: true, result: { roomId: 'original-wire-room', inheritance: null, override: null, project: null, source: null, status: 'none' } });
+      await sending;
+      assert.equal(h.calls.provider.length, 0, 'an observed owner transition cannot be undone by restoring old values');
+      assert.equal(Object.keys(h.protocol.requests).length, 0); assert.equal(h.thread().messages.length, 0);
+      assert.equal(h.thread().sendError, 'existing room error'); assert.equal(h.state.codex.error, 'existing global error');
+      assert.equal(h.state.codex.threadDrafts.room, 'original words'); assert.deepEqual(h.thread().inputSources, inputs);
+      assert.equal(h.state.codex.threadDrafts['room-b'], 'other room words');
+      assert.equal(h.state.codex.threads.find(thread => thread.id === 'room-b').sendError, 'other room error');
+      assert.equal(h.notice('room'), false); await settle(); assert.equal(h.calls.provider.length, 0);
+      owner.release();
+    });
+  }
+});
+
+test('ordinary chat: the actual capture coordinator receives the owner guard before any context store', async t => {
+  for (const mode of ['room', 'room-aba', 'binding', 'account-aba']) await t.test(mode, async () => {
+    const pending = requestProjectDeferred(), source = browserInput(), focus = [];
+    let capture, sourceReads = 0, stores = 0;
+    const h = requestProjectSendHarness({ inputSources: [source], capture: (thread, inputs, token, ownerCurrent) => capture(thread, inputs, token, ownerCurrent) });
+    h.state.codex.threads.push({ id: 'room-b', clientBindingId: 'wire-b', messages: [], inputSources: [], briefingInputs: [], sendError: 'other room error' });
+    h.state.codex.threadDrafts['room-b'] = 'other room words'; h.state.codex.threadDraftRevisions['room-b'] = 1;
+    h.thread().sendError = 'original room error'; h.state.codex.error = 'global error';
+    h.state.focusChatDockIfCompact = () => focus.push('requested');
+    capture = productionCaptureThreadInputs({ state: h.state, epochScope: h.epoch, InputContext, ChatState: Chat,
+      captureChatInputs: async () => { sourceReads++; return pending.promise; },
+      captureManagedFileInput: () => assert.fail('this fixture has no managed file'),
+      fetchJson: async () => { stores++; throw new Error('a stale owner must not store captured context'); } });
+    const owner = h.owner(), sending = h.send({ manualOwner: owner });
+    await settle(); assert.equal(sourceReads, 1); assert.equal(h.calls.capture, 1); assert.equal(stores, 0);
+    if (mode === 'room' || mode === 'room-aba') {
+      h.state.codex.activeThreadId = 'room-b'; h.state.codex.activityRoomGeneration = 1; h.emit();
+      if (mode === 'room-aba') { h.state.codex.activeThreadId = 'room'; h.state.codex.activityRoomGeneration = 2; h.emit(); }
+    } else if (mode === 'binding') {
+      h.state.codex.threads = h.state.codex.threads.map(thread => thread.id === 'room'
+        ? { ...thread, clientBindingId: 'replacement-wire', sendError: 'replacement room error' } : thread); h.emit();
+    } else {
+      const auth = h.state.codex.authStatus;
+      h.state.codex.authStatus = { ...auth, accountEmail: 'other@example.test' }; h.emit();
+      h.state.codex.authStatus = auth; h.emit();
+    }
+    pending.resolve([InputContext.inputSnapshot(source, { text: 'selected fixture', url: source.sourceRef.uri })]);
+    await sending;
+    assert.equal(stores, 0); assert.equal(h.calls.provider.length, 0); assert.equal(Object.keys(h.protocol.requests).length, 0);
+    assert.equal(h.thread().sendError, mode === 'binding' ? 'replacement room error' : 'original room error');
+    assert.equal(h.state.codex.error, 'global error'); assert.equal(h.thread().messages.length, 0);
+    assert.equal(h.state.codex.threadDrafts.room, 'original words'); assert.deepEqual(h.thread().inputSources, [source]);
+    assert.equal(h.state.codex.threadDrafts['room-b'], 'other room words');
+    assert.equal(h.state.codex.threads.find(thread => thread.id === 'room-b').sendError, 'other room error');
+    assert.deepEqual(focus, []); await settle(); assert.equal(stores, 0); assert.equal(h.calls.provider.length, 0);
+    owner.release();
+  });
+});
+
+test('ordinary chat: a current owner remains valid across a later draft edit or an equivalent default-profile spelling', async t => {
+  for (const mode of ['draft-and-attachment', 'equivalent-profile']) await t.test(mode, async () => {
+    const pending = requestProjectDeferred();
+    const h = requestProjectSendHarness({ capture: () => pending.promise });
+    const owner = h.owner(), sending = h.send({ manualOwner: owner });
+    await settle(); assert.equal(h.calls.capture, 1);
+    if (mode === 'draft-and-attachment') {
+      typeOrdinaryDraft(h, 'newer words');
+      h.state.codex.threads = h.state.codex.threads.map(thread => thread.id === 'room'
+        ? { ...thread, inputSources: [...thread.inputSources, { id: 'new-attachment' }] } : thread);
+    } else {
+      h.state.codex.threads = h.state.codex.threads.map(thread => thread.id === 'room' ? { ...thread, engineProfileId: 'codex-default' } : thread);
+    }
+    h.emit(); assert.equal(owner.current(), true);
+    pending.resolve([{ snapshotId: 'snapshot-a', sourceId: 'attachment' }]);
+    assert.equal((await sending).accepted, true); assert.equal(h.calls.provider.length, 1); assert.equal(h.roomCalls.length, 1);
+    assert.equal(h.calls.provider[0].message, 'original words'); assert.deepEqual(h.calls.provider[0].contextSnapshotIds, ['snapshot-a']);
+    if (mode === 'draft-and-attachment') {
+      assert.equal(h.state.codex.threadDrafts.room, 'newer words');
+      assert.deepEqual(h.thread().inputSources.map(input => input.id), ['attachment', 'new-attachment']);
+    }
+    owner.release();
+  });
+});
+
+test('ordinary chat: retry after a conflict rechecks a changed room project before dispatch', async () => {
+  const updated = roomProjectDefault(requestProjectB(), { roomId: 'original-wire-room' });
+  const h = requestProjectSendHarness({ memoAgentRoom: true, roomRead: () => ({ ok: true, result: updated }) });
+  h.chatRoomProjectDefaults.set('room', { binding: 'original-wire-room', scope: h.projectScope(), status: 'ready',
+    value: roomProjectDefault(requestProjectA(), { roomId: 'original-wire-room' }) });
+  clearComposerForMemo(h); reserveEmptyMemoRoom(h); typeOrdinaryDraft(h, 'original words');
+  const inputs = structuredClone(h.thread().inputSources); await h.send();
+  assert.equal(h.calls.provider.length, 0); assert.equal(h.roomCalls.length, 0);
+  h.memoAskSendReservations.delete('room'); await settle(); assert.equal(h.calls.provider.length, 0);
+  await h.send();
+  assert.equal(h.roomCalls.length, 1); assert.equal(h.calls.provider.length, 0);
+  assert.equal(Object.keys(h.protocol.requests).length, 0); assert.equal(h.thread().messages.length, 0);
+  assert.equal(h.state.codex.threadDrafts.room, 'original words'); assert.deepEqual(h.thread().inputSources, inputs);
+  assert.equal(typeof h.thread().sendError, 'string'); assert.ok(h.thread().sendError.trim());
+  await settle(); assert.equal(h.calls.provider.length, 0, 'a changed project is not retried automatically');
+  assert.equal((await h.send()).accepted, true); assert.equal(h.calls.provider.length, 1);
+  assert.equal(h.calls.provider[0].expectedRoomProject.projectId, 'project-b');
+});
+
+test('ordinary chat: retry after a conflict rejects a Browser grant that expired while blocked', async () => {
+  const binding = { url: 'https://example.test/local', profileId: 'firefox-default', accountId: '', cardEpoch: 'card-a',
+    userContextId: 0, engineAccountKey: 'fixture-owner', authorityEpoch: 1 };
+  const source = { id: 'browser-a', kind: 'browser', selectedByUser: true, browserToolPermission: 'interact',
+    browserToolSelection: { token: 'grant-a', threadId: 'original-wire-room' },
+    browserToolIdentity: { cardEpoch: binding.cardEpoch, userContextId: binding.userContextId, engineAccountKey: binding.engineAccountKey, authorityEpoch: binding.authorityEpoch },
+    sourceRef: { viewId: 'browser-card-a', uri: binding.url, profileId: binding.profileId, accountId: binding.accountId } };
+  const grants = new Map([['grant-a', { token: 'grant-a', localThreadId: 'room', threadId: 'original-wire-room', sourceId: 'browser-a', permission: 'interact', usedRunId: null }]]);
+  const card = { isConnected: true, classList: { contains: name => name === 'egd-browser-card' }, _browserControls: { toolBinding: () => binding } };
+  let selected, checks = 0;
+  const h = requestProjectSendHarness({ memoAgentRoom: true, inputSources: [], selectBrowserSources: (...args) => { checks++; return selected(...args); } });
+  selected = compileFunction(`${declaration('browserToolSelectedSources')}\nreturn browserToolSelectedSources;`,
+    ['state', 'getCodexThreadById', 'ChatState', 'browserToolUserSelections', 'document', 'browserToolSameUrl', 'structuredClone', 'browserToolRefreshSelection'])(
+    h.state, (codex, id) => codex.threads.find(thread => thread.id === id), Chat, grants,
+    { getElementById: id => id === 'browser-card-a' ? card : null }, (left, right) => new URL(left).href === new URL(right).href,
+    structuredClone, (_threadId, input) => input);
+  clearComposerForMemo(h); reserveEmptyMemoRoom(h); typeOrdinaryDraft(h, 'original words'); await h.send();
+  assert.equal(checks, 0); assert.equal(h.calls.provider.length, 0);
+  h.state.codex.threads = h.state.codex.threads.map(thread => thread.id === 'room' ? { ...thread, inputSources: [source] } : thread);
+  assert.equal(selected('room', [source]).length, 1, 'the actual Browser selector initially sees a valid grant');
+  grants.delete('grant-a'); h.memoAskSendReservations.delete('room');
+  await settle(); assert.equal(h.calls.provider.length, 0);
+  await h.send();
+  assert.equal(checks, 1); assert.equal(h.calls.provider.length, 0); assert.equal(h.roomCalls.length, 0);
+  assert.equal(Object.keys(h.protocol.requests).length, 0); assert.equal(h.thread().messages.length, 0);
+  assert.equal(h.state.codex.threadDrafts.room, 'original words'); assert.deepEqual(h.thread().inputSources, [source]);
+  assert.ok(h.thread().sendError.includes('권한'), 'the failed permission check remains actionable');
+});
+
 test('send reservation host: only the current reservation may use its room, while other rooms do not block ordinary chat', async t => {
   for (const mode of ['ordinary-in-reserved-room', 'wrong-reservation', 'absent-reservation', 'stale', 'throws']) await t.test(mode, async () => {
     const h = requestProjectSendHarness(), before = structuredClone(h.thread().inputSources);
-    const reservation = { current: () => { if (mode === 'throws') throw new Error('stale'); return mode !== 'stale'; } };
+    const reservation = h.reservation(() => { if (mode === 'throws') throw new Error('stale'); return mode !== 'stale'; });
     if (mode !== 'absent-reservation') h.memoAskSendReservations.set('room', reservation);
     const options = mode === 'ordinary-in-reserved-room' ? undefined
       : { memoAskReservation: mode === 'wrong-reservation' ? { current: () => true } : reservation };
@@ -18020,12 +18609,13 @@ test('send reservation host: only the current reservation may use its room, whil
     assert.equal(h.state.codex.threadDrafts.room, 'original words'); assert.deepEqual(h.thread().inputSources, before);
   });
   const ordinary = requestProjectSendHarness();
-  ordinary.memoAskSendReservations.set('another-room', { current: () => true });
+  ordinary.state.codex.threads.push({ id: 'another-room', clientBindingId: 'another-binding', messages: [], inputSources: [], briefingInputs: [] });
+  ordinary.memoAskSendReservations.set('another-room', ordinary.reservation(() => true, 'another-room'));
   assert.equal((await ordinary.send()).accepted, true);
   assert.equal(ordinary.calls.provider.length, 1); assert.equal(ordinary.calls.provider[0].message, 'original words');
   const reserved = requestProjectSendHarness();
   let checks = 0;
-  const reservation = { current: () => { checks++; return true; } };
+  const reservation = reserved.reservation(() => { checks++; return true; });
   reserved.memoAskSendReservations.set('room', reservation);
   assert.equal((await reserved.send({ memoAskReservation: reservation })).accepted, true);
   assert.ok(checks > 1, 'the reservation is rechecked after asynchronous boundaries');
@@ -18039,7 +18629,7 @@ test('ordinary send: a new same-room reservation during capture or project reche
     const before = structuredClone(h.thread().inputSources), sending = h.send();
     await settle();
     assert.equal(h.calls.capture, 1); assert.equal(h.roomCalls.length, stage === 'project' ? 1 : 0);
-    const reservation = { current: () => true };
+    const reservation = h.reservation();
     h.memoAskSendReservations.set('room', reservation);
     pending.resolve(stage === 'capture' ? [{ snapshotId: 'snapshot-a', sourceId: 'attachment' }]
       : { ok: true, result: { roomId: 'original-wire-room', inheritance: null, override: null, project: null, source: null, status: 'none' } });
@@ -18060,13 +18650,13 @@ test('reserved send: cancellation or replacement during capture or project reche
     const pending = requestProjectDeferred();
     const h = requestProjectSendHarness(stage === 'capture' ? { capture: () => pending.promise } : { roomRead: () => pending.promise });
     let current = true;
-    const reservation = { current: () => { if (current === 'throws') throw new Error('cancelled'); return current; } };
+    const reservation = h.reservation(() => { if (current === 'throws') throw new Error('cancelled'); return current; });
     h.memoAskSendReservations.set('room', reservation);
     const before = structuredClone(h.thread().inputSources), sending = h.send({ memoAskReservation: reservation });
     await settle();
     assert.equal(h.calls.capture, 1); assert.equal(h.roomCalls.length, stage === 'project' ? 1 : 0);
     if (mode === 'removed') h.memoAskSendReservations.delete('room');
-    if (mode === 'replaced') h.memoAskSendReservations.set('room', { current: () => true });
+    if (mode === 'replaced') h.memoAskSendReservations.set('room', h.reservation());
     if (mode === 'not-current') current = false;
     if (mode === 'throws') current = 'throws';
     pending.resolve(stage === 'capture' ? [{ snapshotId: 'snapshot-a', sourceId: 'attachment' }]
@@ -18085,7 +18675,7 @@ test('send reservation host: a matching reservation cannot bypass an expired Bro
     // This fixture returns no selected Browser sources: the actual send method
     // must reject the missing grant instead of silently sending without it.
     const h = requestProjectSendHarness({ inputSources });
-    const reservation = { current: () => true };
+    const reservation = h.reservation();
     if (mode === 'reserved') h.memoAskSendReservations.set('room', reservation);
     await h.send(mode === 'reserved' ? { memoAskReservation: reservation } : undefined);
     assert.equal(h.calls.capture, 1); assert.equal(h.roomCalls.length, 0); assert.equal(h.calls.provider.length, 0);
@@ -20586,6 +21176,7 @@ function taskQuestionHarness(graph = taskQuestionGraph(), { boardKnown = true } 
   const methodsStart = surfaceSource.indexOf('      toggleTaskBoard() {'), methodsEnd = surfaceSource.indexOf("      // '다시 시도' after the quiet retries ran out", methodsStart);
   const emitBody = surfaceSource.match(/    const emit = \(\) => \{([\s\S]*?)\n    \};/)?.[1];
   const deps = { state, ChatState: Chat, epochScope, createChatTaskAnswers: productionTaskAnswerFactory(), document,
+    getCodexThreadById: (codex, id) => codex.threads.find(thread => thread.id === id), codexThreadRuntimeConfig: () => ({}),
     normalizeThreads() {}, listeners: [() => { if (api) draw(); }], renderCodexActivityPanel() {}, scheduleDeskSessionSave() {},
     browserWorkflow: { graph: value => graphReceipts.push(value) },
     fetchJson: async (path, options = {}) => {
@@ -20594,6 +21185,7 @@ function taskQuestionHarness(graph = taskQuestionGraph(), { boardKnown = true } 
       if (answer instanceof Error) throw answer;
       return typeof answer === 'function' ? answer(path, options) : answer;
     } };
+  Object.assign(deps, productionMemoReadWatch(deps));
   api = compileFunction(`let taskAnswers = null;\nconst emit = () => {${emitBody}\n};\n${surfaceSource.slice(start, end)}\nreturn { emit, taskGraphFrame, readTaskGraphs, methods: {\n${surfaceSource.slice(methodsStart, methodsEnd)}\n} };`, Object.keys(deps))(...Object.values(deps));
   draw();
   const parts = id => settingsNodes(root, node => node.dataset.testid === id);

@@ -125,7 +125,8 @@ test('old failed requests do not relabel later stop or history errors; unconfirm
   const block = between('        const threadRequests = Object.values(codex.chatProtocol.requests)', '\n        const status =');
   const select = compileFunction(`${block}\nreturn pending;`, ['codex', 'ChatState', 'activeThread']);
   const noticeBlock = between('        if (activeThread.sendError) {', '\n        const noticeIds =');
-  const renderNotice = compileFunction(`${noticeBlock}\nreturn conversation;`, ['activeThread', 'ChatState', 'conversation', 'el', 'sendNoticeDetailsThreadId']);
+  const renderNotice = compileFunction(`${noticeBlock}\nreturn conversation;`, ['activeThread', 'ChatState', 'conversation', 'el', 'sendNoticeDetailsThreadId', 'memoManualSendNotices']);
+  const memoManualSendNotices = new Map();
   const room = { id: 'room' };
   const state = requests => select({ chatProtocol: { requests } }, ChatState, room);
   const oldFailed = { localThreadId: 'room', status: 'failed' };
@@ -133,7 +134,7 @@ test('old failed requests do not relabel later stop or history errors; unconfirm
   for (const error of ['중지 여부를 확인하지 못했습니다: timeout', '상태를 확인하지 못했습니다: history unavailable',
     'Error: history refresh failed\nprovider detail']) {
     const conversation = el('div');
-    renderNotice({ ...room, sendError: error }, ChatState, conversation, el, null);
+    renderNotice({ ...room, sendError: error }, ChatState, conversation, el, null, memoManualSendNotices);
     const notice = conversation.children[0];
     assert.doesNotMatch(text(notice), /메시지를 보내지 못했습니다/);
     assert.ok(text(notice).includes(error), 'the original error remains visible or expandable');
@@ -142,11 +143,35 @@ test('old failed requests do not relabel later stop or history errors; unconfirm
   const unknown = { localThreadId: 'room', status: 'unconfirmed' };
   assert.equal(state({ a: oldFailed, b: unknown }), unknown);
   const unrelated = el('div');
-  renderNotice({ ...room, sendError: 'Error: stop request failed' }, ChatState, unrelated, el, null);
+  renderNotice({ ...room, sendError: 'Error: stop request failed' }, ChatState, unrelated, el, null, memoManualSendNotices);
   assert.equal(text(unrelated.children[0].children[0]), '문제가 발생했습니다. 자세히를 확인해 주세요.');
   assert.match(source, /pending\?\.status === 'unconfirmed'[\s\S]*?testid: 'chat-reconcile'/);
   assert.match(source, /\['error', 'failed'\]\.includes\(message\.status\) \? 'egd-codex-bubble-error'/);
   assert.match(source, /unconfirmed: '접수 미확인', failed: '전송 거절됨'/);
+});
+
+test('a current memo-send notice stays distinct from the original room error', () => {
+  const block = between('        if (activeThread.sendError) {', '\n        const noticeIds =');
+  const render = compileFunction(`${block}\nreturn conversation;`,
+    ['activeThread', 'ChatState', 'conversation', 'el', 'sendNoticeDetailsThreadId', 'memoManualSendNotices']);
+  const error = 'Error: history refresh failed\nprovider detail';
+  const room = { id: 'room', sendError: error };
+  const check = notices => render(room, ChatState, el('div'), el, null, notices);
+  const shown = check(new Map([['room', { current: () => true }]]));
+  assert.equal(shown.children.length, 2);
+  assert.equal(shown.children[0].props.role, 'alert');
+  assert.equal(shown.children[0].props.data.testid, 'chat-send-notice');
+  assert.ok(text(shown.children[0]).includes(error), 'the original error details remain available');
+  assert.equal(shown.children[1].props.role, 'status');
+  assert.equal(shown.children[1].props.data.testid, 'chat-memo-send-blocked');
+  assert.match(text(shown.children[1]), /보내지 않았습니다.*초안은 그대로입니다/);
+  for (const notices of [new Map([['other-room', { current: () => true }]]),
+    new Map([['room', { current: () => false }]])]) {
+    const hidden = check(notices);
+    assert.equal(hidden.children.length, 1, 'another room or expired notice is not displayed');
+    assert.ok(text(hidden.children[0]).includes(error));
+  }
+  assert.equal(room.sendError, error);
 });
 
 test('filters, history warnings, activity and expandable error details remain separately wired', () => {

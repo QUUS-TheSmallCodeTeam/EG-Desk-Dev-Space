@@ -617,14 +617,14 @@ function memoDispatchBridgeSource() {
   assert.equal(bridge.split(bootstrap).length, 2, 'only automatic bridge connection is disabled');
   // Expose the existing event entry only inside this isolated fixture. The
   // production handler still performs admission, reduction and run syncing.
-  bridge = bridge.replace(bootstrap, '\n    return {\n      __memoFixtureDeliver(event) { return handleEvent(event); },');
+  bridge = bridge.replace(bootstrap, '\n    return {\n      __memoFixtureDeliver(event) { return handleEvent(event); },\n      __memoFixtureResetEpoch(engine) { epochScope.reset(engine); },\n      __memoFixtureObserveState() { emit(); },');
   const functions = [
     'getCodexThreadById', 'getActiveCodexThread', 'getCodexThreadDraft', 'uniqueNames', 'buildThreadSubtitle',
     'createCodexThread', 'normalizeHudView', 'createCodexMessage', 'defaultCodexAgentProfileIdForThread',
     'codexThreadAgentProfile', 'codexThreadToolMode', 'codexThreadSystemPrompt', 'codexThreadRuntimeConfig',
     'browserToolRefreshSelection', 'browserToolSelectedSources', 'browserToolSameUrl',
   ].map(memoSurfaceFunction).join('\n');
-  return `${memoSurfaceSource.slice(projectStart, projectEnd)}\n${functions}\n${bridge}\n${memoSurfaceSource.slice(memoStart, memoEnd)}\nreturn { bridge: installCodexBridge(), askMemoAgent, attachMemoRepliesFromRun, renderMemoCard };`;
+  return `let cardSeq = 0;\n${memoSurfaceSource.slice(projectStart, projectEnd)}\n${functions}\n${bridge}\n${memoSurfaceSource.slice(memoStart, memoEnd)}\nreturn { bridge: installCodexBridge(), askMemoAgent, attachMemoRepliesFromRun, renderMemoCard, spawnMemoCard };`;
 }
 
 const memoSyntheticProject = (roomId, version = 'none') => version === 'none'
@@ -646,7 +646,38 @@ async function waitForMemoFixture(predicate, message) {
   assert.ok(predicate(), message);
 }
 
-function memoDispatchHarness({ active = 'dm-rio', existing = true, conversation = false, targetDraft = '', targetInputs = [], record = revisionMemo(), holdSend = false } = {}) {
+function changeMemoJoinIdentity(h, change) {
+  const originalAuth = { ...h.state.codex.authStatus }, originalBinding = h.target().clientBindingId;
+  const originalBindingState = h.target().bindingState, originalBindingAccountKey = h.target().bindingAccountKey;
+  const hadBindingState = Object.hasOwn(h.target(), 'bindingState'), hadBindingAccountKey = Object.hasOwn(h.target(), 'bindingAccountKey');
+  if (change === 'binding' || change.startsWith('binding-aba')) h.target().clientBindingId = 'synthetic-other-binding';
+  if (change === 'binding-state-aba-observed') h.target().bindingState = 'quarantined';
+  if (change === 'binding-account-key-aba-observed') h.target().bindingAccountKey = 'codex:chatgpt:synthetic-account-b';
+  if (change === 'account' || change.startsWith('account-aba')) {
+    h.state.codex.authStatus = { ...originalAuth, accountId: 'synthetic-account-b' };
+    h.state.codex.codexAccountKey = ChatState.codexAccountKey(h.state.codex.authStatus);
+  }
+  // Observe both sides of an ABA through the production notification path.
+  if (change.endsWith('-observed')) h.bridge.__memoFixtureObserveState();
+  if (change.includes('epoch')) h.bridge.__memoFixtureResetEpoch('codex');
+  if (change.startsWith('binding-aba')) h.target().clientBindingId = originalBinding;
+  if (change === 'binding-state-aba-observed') {
+    if (hadBindingState) h.target().bindingState = originalBindingState;
+    else delete h.target().bindingState;
+  }
+  if (change === 'binding-account-key-aba-observed') {
+    if (hadBindingAccountKey) h.target().bindingAccountKey = originalBindingAccountKey;
+    else delete h.target().bindingAccountKey;
+  }
+  if (change.startsWith('account-aba')) {
+    h.state.codex.authStatus = originalAuth;
+    h.state.codex.codexAccountKey = ChatState.codexAccountKey(originalAuth);
+  }
+  if (change.endsWith('-observed')) h.bridge.__memoFixtureObserveState();
+}
+
+function memoDispatchHarness({ active = 'dm-rio', existing = true, conversation = false, targetDraft = '', targetInputs = [],
+  record = revisionMemo(), holdSend = false, resumeHistory = [] } = {}) {
   const element = memoRuntimeElement, notices = [];
   const selectors = new Map([
     ['.egd-memo-text', element('textarea', { value: record.text })],
@@ -659,6 +690,7 @@ function memoDispatchHarness({ active = 'dm-rio', existing = true, conversation 
   const root = element('div', { isConnected: true });
   root._memoRecord = record; root._deskWindowShell = {};
   root.querySelector = selector => selectors.get(selector) || null;
+  const roots = [root];
   const state = { hudOpen: true };
   const auth = { isLoggedIn: true, authMode: 'chatgpt', accountId: 'synthetic-account-a', accountEmail: 'a@example.invalid', identityStatus: 'known' };
   const accountKey = ChatState.codexAccountKey(auth);
@@ -675,7 +707,7 @@ function memoDispatchHarness({ active = 'dm-rio', existing = true, conversation 
     authStatus: auth, codexAccountKey: accountKey, connected: true, engines: [{ id: 'codex', status: 'ready' }],
     recentEngineId: 'codex', liveRevision: 0 };
   state.contextSuggest = { byThread: {} };
-  const effects = { requests: [], captures: [], warnings: [] }, holds = [];
+  const effects = { requests: [], captures: [], warnings: [], focusCalls: [] }, holds = [];
   let signalStarted, releaseSend;
   const started = new Promise(resolve => { signalStarted = resolve; });
   if (holdSend) {
@@ -703,23 +735,51 @@ function memoDispatchHarness({ active = 'dm-rio', existing = true, conversation 
     if (call.path === '/chat/send' && outcome === 'unconfirmed') throw new Error('synthetic response lost');
     let payload;
     if (call.path === '/v1/files/projects/room-default') payload = { ok: true, result: memoSyntheticProject(body.roomId, project) };
-    else if (call.path === '/chat/resume') payload = { conversationId: body.conversationId, runs: [], historyComplete: true };
+    else if (call.path === '/chat/resume') payload = { conversationId: body.conversationId, runs: memoJson(resumeHistory), historyComplete: true };
     else if (call.path === '/chat/send') payload = { accepted: true, conversationId: body.conversationId || 'synthetic-conversation', runId: 'synthetic-run', requestId: body.requestId };
     else assert.fail(`unexpected synthetic bridge request: ${call.path}`);
     return { ok: true, status: 200, json: async () => payload, text: async () => JSON.stringify(payload) };
   };
+  const focusEntities = new Map();
   const document = { activeElement: selectors.get('.egd-memo-text'),
-    getElementById: id => id === 'egd-canvas-layer' ? { children: [] } : null,
-    querySelectorAll: selector => selector === '.egd-memo-card' ? [root] : [] };
+    getElementById: id => id === 'egd-canvas-layer' ? { children: [] } : focusEntities.get(id) || null,
+    querySelectorAll: selector => selector === '.egd-memo-card' ? roots : [] };
+  const chatFocus = { kind: 'synthetic-chat-composer', isConnected: true };
+  const chatFocusOwners = new Set([chatFocus]);
+  const chatCard = { id: 'synthetic-chat-card', isConnected: true,
+    classList: { contains: name => name === 'egd-chat-card' }, contains: node => chatFocusOwners.has(node) };
+  focusEntities.set(chatCard.id, chatCard);
+  // In-memory focus surrogate only. If requested, model compact Chat taking
+  // ownership; the spy does not observe or move operating-system focus.
+  state.focusChatDockIfCompact = () => {
+    effects.focusCalls.push({ previous: document.activeElement, threadId: state.codex.activeThreadId });
+    document.activeElement = chatFocus;
+    return true;
+  };
+  const descendants = node => [node, ...(node?.children || []).flatMap(descendants)];
+  const spawnDeskWindowShell = options => {
+    const identity = element('div'), actions = element('div'), topbar = element('div', {}, identity, actions);
+    const toolbar = element('div'), header = element('div', {}, topbar, toolbar), content = element('div');
+    const card = element('div', { isConnected: true, style: options.style }, header, content);
+    card.querySelector = selector => descendants(card).find(node => node?.classList?.has(selector.slice(1))) || null;
+    card.contains = node => descendants(card).includes(node);
+    const shell = { root: card, slots: { identity, actions, topbar, toolbar, header, content }, resizeHits: [], registerCleanup() {} };
+    card._deskWindowShell = shell; roots.push(card); return shell;
+  };
   const profile = { id: 'rio', name: 'Rio', label: 'Rio', category: 'synthetic', summary: '', capabilities: [], toolMode: null, systemPrompt: null };
+  let mountingSyntheticCard = false;
   const scope = { state, ChatState, InputContext, SurfaceState, MemoState: Memo, fetch, document, el: element,
-    window: { AbortController, setTimeout: () => 0, clearTimeout() {}, EventSource: { OPEN: 1 } },
+    window: { AbortController, setTimeout: () => 0, clearTimeout() {}, EventSource: { OPEN: 1 },
+      addEventListener() {}, removeEventListener() {} },
+    MutationObserver: class { observe() {} disconnect() {} }, requestAnimationFrame: () => 0,
+    setTimeout: () => 0, clearTimeout() {}, spawnDeskWindowShell,
     createChatTaskAnswers: () => ({ sync() {} }),
     codexAgentProfile: id => id === 'mina' ? { ...profile, id: 'mina', name: 'Mina', label: 'Mina' } : profile,
     normalizeCodexAgentProfileId: id => id || 'rio', DEFAULT_CODEX_AGENT_PROFILE_ID: 'rio',
-    codexAgentProfileChoices: () => [profile], codexProfileAvatar: (_avatar, name) => element('span', {}, name),
+    codexAgentProfileChoices: () => mountingSyntheticCard ? [{ ...profile, server: true }] : [profile],
+    codexProfileAvatar: (_avatar, name) => element('span', {}, name),
     formatMessageTime: () => '합성 시각', markAgendaDirty() {}, boardNotice: message => notices.push(message),
-    spawnCodexChatCard: () => ({}), dismissChatReturnCue() {},
+    spawnCodexChatCard: () => chatCard, dismissChatReturnCue() {},
     SELF_MEMBER: 'self', cloneJson: memoJson, renderCodexActivityPanel() {}, scheduleDeskSessionSave() {},
     browserToolUserSelections: new Map(), browserToolGrantFor: () => false,
     captureChatInputs: async sources => { effects.captures.push(memoJson(sources)); throw new Error('Unrelated synthetic inputs must not be captured'); },
@@ -734,6 +794,24 @@ function memoDispatchHarness({ active = 'dm-rio', existing = true, conversation 
   render();
   return { root, notices, state, bridge, protocol, effects, otherInput, started, render, set,
     ask: () => api.askMemoAgent(root, { agentId: 'rio', agentName: 'Rio', question: '맞아?' }),
+    spawnMemo(record, question) {
+      let card;
+      mountingSyntheticCard = true;
+      try { card = api.spawnMemoCard({ record, restore: true }); }
+      finally { mountingSyntheticCard = false; }
+      const select = card.querySelector('.egd-memo-ask-agent');
+      select.value = 'rio'; select.onchange();
+      const questionInput = card.querySelector('.egd-memo-ask-question');
+      questionInput.value = question;
+      const button = card.querySelector('.egd-memo-ask-send');
+      return { root: card, questionInput, click: () => button.onclick({ stopPropagation() {} }) };
+    },
+    setFocus(owner, entityId) {
+      if (entityId === chatCard.id) chatFocusOwners.add(owner);
+      else focusEntities.set(entityId, { id: entityId, isConnected: true, contains: node => node === owner });
+      document.activeElement = owner; state.activeEntityId = entityId;
+    },
+    currentFocus: () => document.activeElement,
     completeSend: (outcome = 'accept') => releaseSend?.(outcome),
     edit: text => set(Memo.editMemoText(root._memoRecord, text, { now: 1 })),
     attach(run = fakeCompletedMemoRun()) {
@@ -1443,4 +1521,316 @@ test('memo answer identity: a composite run ID cannot name a different or incomp
   assert.equal(Memo.memoReplyFromRun({ ...base, runId: 'run-2' }), null);
   assert.equal(Memo.memoReplyFromRun({ ...base, conversationId: undefined }), null);
   assert.equal(Memo.memoReplyFromRun({ ...base, runId: undefined }), null);
+});
+
+test('memo concurrency: two different memos in one preparing room keep the first ask and explicitly defer the second', async t => {
+  const h = memoDispatchHarness({ conversation: true });
+  const otherRecord = Memo.createMemoRecord({ id: 'memo-2', seq: 2, point: { x: 400, y: 500 }, text: '두 번째 메모', now: 1 });
+  const second = h.spawnMemo(otherRecord, '두 번째 질문은 그대로');
+  const resume = h.hold('/chat/resume'), project = h.hold('/v1/files/projects/room-default');
+  const first = trackedMemoPromise(h.ask());
+  let secondClick;
+  try {
+    await waitForMemoFixture(() => resume.started && project.started, 'the first ask is waiting on real room preparation');
+    secondClick = trackedMemoPromise(second.click());
+    // A busy second action is a visible refusal, not an implicit queued send.
+    for (let i = 0; i < 10 && !secondClick.settled; i++) await new Promise(resolve => setImmediate(resolve));
+    const refusedBeforeRelease = secondClick.settled;
+    const localStatus = second.root.querySelector('.egd-memo-ask-status');
+    const noticeBeforeRelease = h.notices.join(' ') + ' ' + (localStatus && !localStatus.hidden ? localStatus.textContent : '');
+    resume.release(); project.release();
+    await waitForMemoFixture(() => first.settled && secondClick.settled, 'both explicit actions settle');
+    assert.ifError(first.error); assert.ifError(secondClick.error);
+    t.diagnostic(JSON.stringify({ firstAccepted: first.value, secondSettledBeforeRelease: refusedBeforeRelease,
+      sends: h.sends().length, firstAsks: h.root._memoRecord.asks.length, secondAsks: second.root._memoRecord.asks.length,
+      secondQuestion: second.questionInput.value, displayedNotice: noticeBeforeRelease.trim(), notices: h.notices }));
+    assert.equal(first.value, true, 'the first still-valid memo ask is accepted');
+    assert.equal(refusedBeforeRelease, true, 'the second action does not silently wait in a queue');
+    assert.match(noticeBeforeRelease, /진행|대기|기다|잠시|준비 중|먼저|바쁘|보류|사용 중|다른.{0,10}질문/,
+      'the second memo gets an explicit busy or wait explanation');
+    assert.equal(second.questionInput.value, '두 번째 질문은 그대로', 'the actual memo button retains the unsent question');
+    assert.equal(second.root._memoRecord.asks.length, 0);
+    assert.equal(h.root._memoRecord.asks.length, 1);
+    assert.equal(h.root._memoRecord.asks[0].status, 'pending');
+    assert.equal(h.sends().length, 1);
+    assert.match(h.sends()[0].body.message, /\[메모 #1 · memo-1\]/);
+    assert.doesNotMatch(h.sends()[0].body.message, /두 번째 메모|두 번째 질문/);
+    await new Promise(resolve => setImmediate(resolve));
+    assert.equal(h.sends().length, 1, 'the deferred second question is not sent later without a new action');
+  } finally { resume.release(); project.release(); }
+});
+
+test('memo concurrency: an ordinary in-flight resume of the same verified room may finish one explicit ask', async t => {
+  const h = memoDispatchHarness({ conversation: true }), resume = h.hold('/chat/resume');
+  const ordinaryResume = trackedMemoPromise(h.bridge.reconcileRequest('dm-rio'));
+  try {
+    await waitForMemoFixture(() => resume.started, 'the ordinary resume is already in flight');
+    const asking = trackedMemoPromise(h.ask());
+    await new Promise(resolve => setImmediate(resolve));
+    const earlySends = h.sends().length;
+    resume.release();
+    await waitForMemoFixture(() => ordinaryResume.settled && asking.settled, 'resume and ask settle');
+    assert.ifError(ordinaryResume.error); assert.ifError(asking.error);
+    t.diagnostic(JSON.stringify({ accepted: asking.value, sends: h.sends().length, notices: h.notices }));
+    assert.equal(earlySends, 0, 'the ask does not send before the existing resume resolves');
+    assert.equal(asking.value, true, 'a matching in-flight resume does not lose the explicit ask');
+    assert.equal(h.sends().length, 1);
+    assert.equal(h.root._memoRecord.asks.length, 1);
+    assert.equal(h.root._memoRecord.asks[0].status, 'pending');
+    await new Promise(resolve => setImmediate(resolve));
+    assert.equal(h.sends().length, 1);
+  } finally { resume.release(); }
+});
+
+test('memo concurrency: completed resume history can explicitly name the unchanged default engine profile', async () => {
+  const resumeHistory = [{ runId: 'synthetic-history-run', engineId: 'codex', engineProfileId: 'codex-default',
+    status: 'completed', messages: [], activities: [], artifacts: [] }];
+  const h = memoDispatchHarness({ conversation: true, resumeHistory }), resume = h.hold('/chat/resume');
+  assert.equal(h.target().engineProfileId, undefined, 'the room starts without an explicitly stored profile');
+  assert.equal(ChatState.chatThreadEngineProfileId(h.target(), h.state.codex), 'codex-default');
+  const ordinaryResume = trackedMemoPromise(h.bridge.reconcileRequest('dm-rio'));
+  try {
+    await waitForMemoFixture(() => resume.started, 'the ordinary history resume is in flight');
+    const asking = trackedMemoPromise(h.ask());
+    await new Promise(resolve => setImmediate(resolve));
+    assert.equal(h.sends().length, 0);
+    resume.release();
+    await waitForMemoFixture(() => ordinaryResume.settled && asking.settled, 'the history and explicit ask settle');
+    assert.ifError(ordinaryResume.error); assert.ifError(asking.error);
+    const restoredRun = h.protocol.runs[ChatState.runKey('synthetic-conversation', 'synthetic-history-run')];
+    assert.equal(restoredRun?.status, 'completed', 'the actual Chat reducer merged the completed history');
+    assert.equal(restoredRun?.engineProfileId, 'codex-default');
+    assert.equal(h.target().engineProfileId, 'codex-default', 'history made the already-effective profile explicit');
+    assert.equal(asking.value, true, 'that equivalent representation does not invalidate the waiting ask');
+    assert.equal(h.sends().length, 1);
+    assert.equal(h.root._memoRecord.asks.length, 1);
+    assert.equal(h.root._memoRecord.asks[0].status, 'pending');
+  } finally { resume.release(); }
+});
+
+test('memo concurrency: joined preparation still uses the final fresh room project check', async t => {
+  for (const outcome of ['unchanged', 'changed', 'denied']) await t.test(outcome, async () => {
+    const h = memoDispatchHarness({ conversation: true });
+    h.setProject('a'); await h.warmProject();
+    const project = h.hold('/v1/files/projects/room-default');
+    const ordinaryProject = trackedMemoPromise(h.bridge.readRoomProjectDefault('dm-rio', { force: true }));
+    const resume = h.hold('/chat/resume');
+    const ordinaryResume = trackedMemoPromise(h.bridge.reconcileRequest('dm-rio'));
+    let finalProject;
+    try {
+      await waitForMemoFixture(() => project.started && resume.started, 'both ordinary preparation reads are in flight');
+      finalProject = h.hold('/v1/files/projects/room-default');
+      const asking = trackedMemoPromise(h.ask());
+      await new Promise(resolve => setImmediate(resolve));
+      assert.equal(asking.settled, false);
+      assert.equal(h.sends().length, 0);
+      project.release(); resume.release();
+      await waitForMemoFixture(() => finalProject.started, 'a fresh project check starts after joined preparation');
+      assert.equal(h.sends().length, 0, 'the joined old observation alone is not sent');
+      if (outcome === 'changed') h.setProject('b');
+      if (outcome === 'denied') h.setProject('denied');
+      finalProject.release();
+      await waitForMemoFixture(() => ordinaryProject.settled && ordinaryResume.settled && asking.settled, 'all preparation and the ask settle');
+      assert.ifError(ordinaryProject.error); assert.ifError(ordinaryResume.error); assert.ifError(asking.error);
+      assert.ok(h.projectReads().length >= 3, 'initial, joined and final fresh observations are separate');
+      if (outcome === 'unchanged') {
+        assert.equal(asking.value, true);
+        assert.equal(h.sends().length, 1);
+        assert.deepEqual(h.sends()[0].body.expectedRoomProject, { roomId: 'wire-rio', status: 'connected', source: 'board',
+          boardId: 'board-a', projectId: 'project-a', rootId: 'root-a' });
+        assert.equal(Object.hasOwn(h.sends()[0].body, 'projectTarget'), false);
+        assert.equal(h.root._memoRecord.asks[0].status, 'pending');
+      } else {
+        assert.equal(asking.value, false);
+        assert.equal(h.sends().length, 0, 'a changed or denied project cannot dispatch');
+        assert.equal(h.root._memoRecord.asks.length, 0);
+        assert.equal(h.root.querySelector('.egd-memo-ask-question').value, '맞아?');
+      }
+      await new Promise(resolve => setImmediate(resolve));
+      assert.equal(h.sends().length, outcome === 'unchanged' ? 1 : 0, 'no automatic repeat follows the check');
+    } finally { project.release(); resume.release(); finalProject?.release(); }
+  });
+});
+
+test('memo concurrency: an ordinary in-flight project read of the same room may finish one explicit ask', async t => {
+  const h = memoDispatchHarness(), project = h.hold('/v1/files/projects/room-default');
+  const ordinaryRead = trackedMemoPromise(h.bridge.readRoomProjectDefault('dm-rio', { force: true }));
+  try {
+    await waitForMemoFixture(() => project.started, 'the ordinary project read is already in flight');
+    const asking = trackedMemoPromise(h.ask());
+    await new Promise(resolve => setImmediate(resolve));
+    const earlySends = h.sends().length, readsBeforeRelease = h.projectReads().length;
+    project.release();
+    await waitForMemoFixture(() => ordinaryRead.settled && asking.settled, 'the read and the ask settle');
+    assert.ifError(asking.error);
+    t.diagnostic(JSON.stringify({ accepted: asking.value, earlySends, readsBeforeRelease, sends: h.sends().length,
+      ordinaryReadError: ordinaryRead.error?.message || null, notices: h.notices }));
+    assert.equal(earlySends, 0, 'the question waits for the existing room project read');
+    assert.equal(readsBeforeRelease, 1, 'matching preparation does not supersede the existing read');
+    assert.ifError(ordinaryRead.error);
+    assert.equal(asking.value, true);
+    assert.equal(h.sends().length, 1);
+    assert.equal(h.root._memoRecord.asks.length, 1);
+    assert.equal(h.root._memoRecord.asks[0].status, 'pending');
+  } finally { project.release(); }
+});
+
+test('memo concurrency: a waiting project read cannot authorize an ask after its identity changes', async t => {
+  for (const change of ['binding', 'account', 'epoch-reset', 'binding-aba-with-epoch', 'account-aba-with-epoch',
+    'binding-aba-observed', 'account-aba-observed', 'binding-state-aba-observed', 'binding-account-key-aba-observed']) await t.test(change, async () => {
+    const h = memoDispatchHarness({ conversation: change.startsWith('binding-state-') || change.startsWith('binding-account-key-') });
+    const project = h.hold('/v1/files/projects/room-default');
+    const ordinaryRead = trackedMemoPromise(h.bridge.readRoomProjectDefault('dm-rio', { force: true }));
+    let replacement;
+    try {
+      await waitForMemoFixture(() => project.started, 'the original room project read is in flight');
+      // Also hold an implementation that starts a replacement: the identity
+      // change must occur before either possible read can authorize a send.
+      replacement = h.hold('/v1/files/projects/room-default');
+      const asking = trackedMemoPromise(h.ask());
+      await new Promise(resolve => setImmediate(resolve));
+      const wasWaiting = !asking.settled, earlySends = h.sends().length;
+      changeMemoJoinIdentity(h, change);
+      project.release(); replacement.release();
+      await waitForMemoFixture(() => ordinaryRead.settled && asking.settled, 'invalidated work settles');
+      assert.ifError(asking.error);
+      assert.equal(earlySends, 0);
+      assert.equal(asking.value, false);
+      assert.equal(h.sends().length, 0);
+      assert.equal(h.root._memoRecord.asks.length, 0);
+      assert.equal(h.root.querySelector('.egd-memo-ask-question').value, '맞아?');
+      assert.equal(wasWaiting, true, 'the fixture exercised the pending project join before the change');
+      await new Promise(resolve => setImmediate(resolve));
+      assert.equal(h.sends().length, 0, 'invalidated project work is not retried automatically');
+    } finally { project.release(); replacement?.release(); }
+  });
+});
+
+test('memo concurrency: a waiting resume cannot authorize an ask after binding, account or epoch changes', async t => {
+  for (const change of ['binding', 'account', 'epoch-reset', 'binding-aba-with-epoch', 'account-aba-with-epoch',
+    'binding-aba-observed', 'account-aba-observed', 'binding-state-aba-observed', 'binding-account-key-aba-observed']) await t.test(change, async () => {
+    const h = memoDispatchHarness({ conversation: true }), resume = h.hold('/chat/resume');
+    const ordinaryResume = trackedMemoPromise(h.bridge.reconcileRequest('dm-rio'));
+    try {
+      await waitForMemoFixture(() => resume.started, 'the original room resume is in flight');
+      const asking = trackedMemoPromise(h.ask());
+      await new Promise(resolve => setImmediate(resolve));
+      const wasWaiting = !asking.settled;
+      changeMemoJoinIdentity(h, change);
+      resume.release();
+      await waitForMemoFixture(() => ordinaryResume.settled && asking.settled, 'invalidated work settles');
+      assert.ifError(ordinaryResume.error); assert.ifError(asking.error);
+      assert.equal(asking.value, false);
+      assert.equal(h.sends().length, 0, 'old preparation cannot dispatch into a different identity');
+      assert.equal(h.root._memoRecord.asks.length, 0);
+      assert.equal(h.root.querySelector('.egd-memo-ask-question').value, '맞아?');
+      assert.equal(wasWaiting, true, 'the fixture exercised a real pending join before the change');
+      await new Promise(resolve => setImmediate(resolve));
+      assert.equal(h.sends().length, 0, 'invalidated work is not retried in the background');
+    } finally { resume.release(); }
+  });
+});
+
+test('memo concurrency: a new identity cannot reuse another in-flight room resume', async t => {
+  for (const change of ['binding', 'account', 'epoch']) await t.test(change, async () => {
+    const h = memoDispatchHarness({ conversation: true }), oldResume = h.hold('/chat/resume');
+    const ordinaryResume = trackedMemoPromise(h.bridge.reconcileRequest('dm-rio'));
+    let freshResume;
+    try {
+      await waitForMemoFixture(() => oldResume.started, 'the original identity has an in-flight resume');
+      if (change === 'binding') h.target().clientBindingId = 'synthetic-other-binding';
+      if (change === 'account') {
+        h.state.codex.authStatus = { ...h.state.codex.authStatus, accountId: 'synthetic-account-b' };
+        h.state.codex.codexAccountKey = ChatState.codexAccountKey(h.state.codex.authStatus);
+      }
+      if (change === 'epoch') h.bridge.__memoFixtureResetEpoch('codex');
+      freshResume = h.hold('/chat/resume');
+      const asking = trackedMemoPromise(h.ask());
+      await new Promise(resolve => setImmediate(resolve));
+      oldResume.release();
+      await waitForMemoFixture(() => asking.settled || freshResume.started, 'the new intent either refuses or starts its own fresh resume');
+      assert.equal(h.sends().length, 0, 'the old identity response alone cannot authorize a send');
+      if (freshResume.started) {
+        const reads = h.effects.requests.filter(call => call.path === '/chat/resume');
+        assert.ok(reads.length >= 2, 'a separate resume is required before any later acceptance');
+        if (change === 'binding') assert.equal(reads.at(-1).body.clientThreadId, 'synthetic-other-binding');
+        freshResume.release();
+        await waitForMemoFixture(() => asking.settled, 'freshly prepared work settles');
+        assert.ifError(asking.error);
+        if (asking.value) assert.equal(h.sends().length, 1);
+        else assert.equal(h.sends().length, 0);
+      } else {
+        assert.ifError(asking.error);
+        assert.equal(asking.value, false, 'without a fresh resume the new intent is refused');
+        assert.equal(h.sends().length, 0);
+      }
+      await waitForMemoFixture(() => ordinaryResume.settled, 'the original resume settles');
+      assert.ifError(ordinaryResume.error);
+      await new Promise(resolve => setImmediate(resolve));
+      assert.ok(h.sends().length <= 1, 'no implicit retry or duplicate occurs');
+    } finally { oldResume.release(); freshResume?.release(); }
+  });
+});
+
+test('memo concurrency: a new identity cannot reuse another in-flight room project read', async t => {
+  for (const change of ['binding', 'account', 'epoch']) await t.test(change, async () => {
+    const h = memoDispatchHarness(), oldProject = h.hold('/v1/files/projects/room-default');
+    const ordinaryRead = trackedMemoPromise(h.bridge.readRoomProjectDefault('dm-rio', { force: true }));
+    let freshProject;
+    try {
+      await waitForMemoFixture(() => oldProject.started, 'the original identity has an in-flight project read');
+      if (change === 'binding') h.target().clientBindingId = 'synthetic-other-binding';
+      if (change === 'account') {
+        h.state.codex.authStatus = { ...h.state.codex.authStatus, accountId: 'synthetic-account-b' };
+        h.state.codex.codexAccountKey = ChatState.codexAccountKey(h.state.codex.authStatus);
+      }
+      if (change === 'epoch') h.bridge.__memoFixtureResetEpoch('codex');
+      freshProject = h.hold('/v1/files/projects/room-default');
+      const asking = trackedMemoPromise(h.ask());
+      await new Promise(resolve => setImmediate(resolve));
+      oldProject.release();
+      await waitForMemoFixture(() => asking.settled || freshProject.started, 'the new intent either refuses or starts its own fresh project read');
+      assert.equal(h.sends().length, 0, 'the old identity project response alone cannot authorize a send');
+      if (freshProject.started) {
+        const reads = h.projectReads();
+        assert.ok(reads.length >= 2, 'a separate project read is required before any later acceptance');
+        if (change === 'binding') assert.equal(reads.at(-1).body.roomId, 'synthetic-other-binding');
+        freshProject.release();
+        await waitForMemoFixture(() => asking.settled, 'freshly prepared work settles');
+        assert.ifError(asking.error);
+        if (asking.value) assert.equal(h.sends().length, 1);
+        else assert.equal(h.sends().length, 0);
+      } else {
+        assert.ifError(asking.error);
+        assert.equal(asking.value, false, 'without a fresh read the new intent is refused');
+        assert.equal(h.sends().length, 0);
+      }
+      await waitForMemoFixture(() => ordinaryRead.settled, 'the original project read settles');
+      await new Promise(resolve => setImmediate(resolve));
+      assert.ok(h.sends().length <= 1, 'no implicit retry or duplicate occurs');
+    } finally { oldProject.release(); freshProject?.release(); }
+  });
+});
+
+test('memo focus: a failed pending ask does not take synthetic focus from another room or Canvas input', async t => {
+  for (const location of ['other-room', 'other-canvas-card']) await t.test(location, async () => {
+    const h = memoDispatchHarness(), project = h.hold('/v1/files/projects/room-default', 1);
+    const asking = trackedMemoPromise(h.ask());
+    try {
+      await waitForMemoFixture(() => project.started, 'the send is waiting at its pre-dispatch project check');
+      if (location === 'other-room') await h.bridge.selectThread('unrelated-room', { openConversation: true });
+      else h.setProject('denied');
+      const owner = { kind: 'synthetic-' + location + '-input', tagName: 'TEXTAREA', isConnected: true, closest: () => null };
+      h.setFocus(owner, location === 'other-room' ? 'synthetic-chat-card' : 'other-canvas-card');
+      project.release();
+      await waitForMemoFixture(() => asking.settled, 'the rejected ask settles');
+      assert.ifError(asking.error);
+      assert.equal(asking.value, false);
+      assert.equal(h.sends().length, 0);
+      assert.equal(h.currentFocus(), owner, 'the in-memory focus owner is not replaced');
+      assert.equal(h.effects.focusCalls.length, 0, 'no compact-Chat focus request is made after ownership moved');
+      assert.equal(h.state.codex.threadDrafts['unrelated-room'], '이전부터 쓰던 다른 방 초안');
+      assert.equal(h.root.querySelector('.egd-memo-ask-question').value, '맞아?');
+    } finally { project.release(); }
+  });
 });
