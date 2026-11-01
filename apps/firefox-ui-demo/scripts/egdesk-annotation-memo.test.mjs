@@ -427,7 +427,7 @@ test('memo: [Agent에게 묻기] drafts one Chat message with the memo, recent r
   const draft = Memo.memoAskDraft(memo, { agentId: 'rio', agentName: 'Rio', question: ' 원인이 뭘까? ', target: ' Browser ·  매출 표 ' });
   assert.equal(memo, before, 'drafting does not change the memo');
   assert.deepEqual({ ...draft, text: undefined }, { memoId: 'memo-1', askId: 'ask-1', agentId: 'rio', agentName: 'Rio', text: undefined,
-    contextCardIds: ['egd-card-1', 'egd-card-2'] });
+    contextCardIds: ['egd-card-1', 'egd-card-2'], basedOnMemoRevision: Memo.memoAskDraft(memo, { agentId: 'rio' }).basedOnMemoRevision });
   assert.equal(draft.text, '[메모 #4 · memo-1]\n\n매출 표의 3분기 숫자가 이상함\n\n대상: Browser · 매출 표\n\n최근 답글:\n나: 둘째\n나: 셋째\n나: 넷째\n\n질문: 원인이 뭘까?');
   assert.equal(Memo.memoAskDraft(memo, { agentId: 'rio', question: 'q' }).text.includes('대상:'), false, 'a free Canvas memo names no target');
   assert.throws(() => Memo.memoAskDraft(memo, { question: 'x' }), /Agent를 골라/);
@@ -442,7 +442,7 @@ test('memo: an Agent answer joins its memo once, only while the ask is pending, 
   const draft = Memo.memoAskDraft(memo, { agentId: 'rio', question: '맞아?' });
   memo = Memo.recordMemoAsk(memo, draft, { now: 2, requestId: 'request-1', threadId: 'thread-dm-x' });
   assert.equal(Memo.recordMemoAsk(memo, draft), memo, 'recording the same ask twice is a no-op');
-  assert.deepEqual(Memo.pendingMemoAsks(memo), [{ askId: 'ask-1', agentId: 'rio', status: 'pending', askedAt: 2, requestId: 'request-1', threadId: 'thread-dm-x' }]);
+  assert.deepEqual(Memo.pendingMemoAsks(memo), [{ askId: 'ask-1', agentId: 'rio', status: 'pending', askedAt: 2, requestId: 'request-1', threadId: 'thread-dm-x', basedOnMemoRevision: draft.basedOnMemoRevision }]);
   assert.deepEqual(Memo.findPendingMemoAsk([null, Memo.createMemoRecord({ id: 'other', point: { x: 1, y: 1 } }), memo], 'request-1'), { memo, ask: memo.asks[0] });
   assert.equal(Memo.findPendingMemoAsk([memo], 'request-9'), null);
   assert.equal(Memo.findPendingMemoAsk([memo], undefined), null);
@@ -451,8 +451,8 @@ test('memo: an Agent answer joins its memo once, only while the ask is pending, 
   assert.deepEqual([wrongAgent.appended, wrongAgent.reason, wrongAgent.memo], [false, 'ask-mismatch', memo]);
   const first = Memo.appendMemoReply(memo, { author: { kind: 'agent', agentId: 'rio', name: 'Rio' }, text: '네, 맞습니다.', answerId: 'a-1', askId: 'ask-1', runId: 'run-1' }, { now: 3 });
   assert.equal(first.appended, true);
-  assert.deepEqual(first.memo.replies.at(-1), { id: 'reply-1', author: { kind: 'agent', agentId: 'rio', name: 'Rio' }, text: '네, 맞습니다.', createdAt: 3, answerId: 'a-1', askId: 'ask-1', runId: 'run-1' });
-  assert.deepEqual(first.memo.asks[0], { askId: 'ask-1', agentId: 'rio', status: 'answered', askedAt: 2, requestId: 'request-1', threadId: 'thread-dm-x', answerId: 'a-1' });
+  assert.deepEqual(first.memo.replies.at(-1), { id: 'reply-1', author: { kind: 'agent', agentId: 'rio', name: 'Rio' }, text: '네, 맞습니다.', createdAt: 3, answerId: 'a-1', askId: 'ask-1', runId: 'run-1', basedOnMemoRevision: draft.basedOnMemoRevision });
+  assert.deepEqual(first.memo.asks[0], { askId: 'ask-1', agentId: 'rio', status: 'answered', askedAt: 2, requestId: 'request-1', threadId: 'thread-dm-x', answerId: 'a-1', basedOnMemoRevision: draft.basedOnMemoRevision });
   assert.equal(Memo.findPendingMemoAsk([first.memo], 'request-1'), null, 'an answered ask is no longer pending');
   const repeat = Memo.appendMemoReply(first.memo, { author: { kind: 'agent', agentId: 'rio' }, text: '네, 맞습니다.', answerId: 'a-1', askId: 'ask-1' });
   assert.deepEqual([repeat.appended, repeat.reason, repeat.memo], [false, 'duplicate', first.memo]);
@@ -473,13 +473,15 @@ test('memo: an Agent answer joins its memo once, only while the ask is pending, 
   assert.throws(() => Memo.recordMemoAsk(first.memo, { ...draft, memoId: 'other' }), /다른 메모/);
 });
 
-test('memo: a completed Chat run becomes one Agent reply; unfinished or empty runs become nothing', () => {
-  const run = { requestId: 'request-1', answerId: 'answer-7', runId: 'run-7', status: 'completed', messages: [
+const fakeCompletedMemoRun = (overrides = {}) => ({ requestId: 'request-1', answerId: 'answer-7', runId: 'run-7', status: 'completed', messages: [
     { id: 'u1', role: 'user', content: '[메모 · memo-1]\n\n질문: 맞아?', status: 'complete' },
     { id: 'a1', role: 'assistant', content: '  네, 맞습니다.\r\n', status: 'complete' },
     { id: 'a2', role: 'assistant', text: '근거는 3쪽입니다.', status: 'complete' },
     { id: 'a3', role: 'assistant', content: '실패한 조각', status: 'error' },
-  ] };
+  ], ...overrides });
+
+test('memo: a completed Chat run becomes one Agent reply; unfinished or empty runs become nothing', () => {
+  const run = fakeCompletedMemoRun();
   assert.deepEqual(Memo.memoReplyFromRun(run), { answerId: 'answer-7', runId: 'run-7', text: '네, 맞습니다.\n\n근거는 3쪽입니다.' });
   assert.equal(Memo.memoReplyFromRun({ ...run, status: 'running' }), null);
   assert.equal(Memo.memoReplyFromRun({ ...run, answerId: null }), null);
@@ -556,4 +558,398 @@ test('memo Board projection reserves absent anchor identities without inventing 
     const live = { id: a.idMap.note, type: 'memo', runtimeState: remapMemberReferences(memo, a.idMap) };
     assert.deepEqual(snapshotBoardProjection(a, { [live.id]: live }, 2).cards[0].runtimeState.anchor, memo.anchor);
   }
+});
+
+const oldMemoAnswer = /수정 전 메모/;
+const memoJson = value => JSON.parse(JSON.stringify(value));
+const revisionDraft = memo => Memo.memoAskDraft(memo, { agentId: 'rio', agentName: 'Rio', question: '맞아?' });
+const revisionMemo = () => Memo.createMemoRecord({ id: 'memo-1', seq: 1, point: { x: 900, y: 900 }, text: '본문 A', now: 1 });
+
+// Compile the existing memo zone, not a replacement send/attach/row model.
+// This also carries any local helpers with it without making their names an API.
+function memoRuntimeElement(tag, attrs = {}, ...children) {
+    const node = memoElement(tag, attrs, ...children.filter(child => child != null && child !== false));
+    node.replacements = 0;
+    node.setAttribute = (key, value) => { node[key] = String(value); };
+    node.getAttribute = key => node[key] ?? null;
+    node.replaceChildren = (...next) => {
+      node.replacements += 1;
+      for (const child of node.children) child.parentNode = null;
+      node.children = [];
+      for (const child of next.filter(child => child != null && child !== false)) node.appendChild(child);
+    };
+    Object.defineProperty(node, 'textContent', {
+      get: () => node.children.map(child => child.textContent || '').join(''),
+      set: value => node.replaceChildren(String(value)),
+    });
+    return node;
+}
+
+function memoRevisionHarness(record = revisionMemo()) {
+  const element = memoRuntimeElement;
+  const selectors = new Map([
+    ['.egd-memo-text', element('textarea', { value: record.text })],
+    ['.egd-memo-thread', element('div')], ['.egd-memo-title', element('strong')],
+    ['.egd-memo-toggle', element('button')], ['.egd-memo-resolve', element('button')],
+    ['.egd-memo-status', element('button')], ['.egd-memo-ask-status', element('div')],
+    ['.egd-memo-ask-send', element('button')], ['.egd-memo-ask-agent', element('select', { value: 'rio' })],
+  ]);
+  const root = element('div', { isConnected: true });
+  root._memoRecord = record;
+  root._deskWindowShell = {};
+  root.querySelector = selector => selectors.get(selector) || null;
+  const roots = [root], notices = [], sent = [];
+  const profiles = [{ id: 'rio', name: 'Rio' }, { id: 'mina', name: 'Mina' }];
+  const state = { codex: {
+    threads: profiles.map(profile => ({ id: `dm-${profile.id}`, title: profile.name, type: 'dm', profileEnabled: true, agentProfileId: profile.id, updatedAt: 1 })),
+    threadDrafts: { 'unrelated-room': '이전부터 쓰던 다른 방 초안' },
+    chatProtocol: { requests: { 'old-request': { localThreadId: 'unrelated-room', status: 'accepted' } } },
+  } };
+  let releaseSend, signalStarted;
+  const gate = new Promise(resolve => { releaseSend = resolve; });
+  const started = new Promise(resolve => { signalStarted = resolve; });
+  state.codexBridge = {
+    createThread() { throw new Error('Synthetic Agent rooms already exist; no real room creation'); },
+    selectThread() {},
+    async sendMessage() {
+      sent.push({ text: state.codex.threadDrafts['dm-rio'], memo: root._memoRecord });
+      signalStarted();
+      const outcome = await gate;
+      if (outcome === 'reject') throw new Error('synthetic send rejected');
+      if (outcome === 'accept') state.codex.chatProtocol.requests['request-1'] = { localThreadId: 'dm-rio', status: 'accepted' };
+    },
+  };
+  const scope = {
+    MemoState: Memo, state, el: element,
+    document: {
+      activeElement: selectors.get('.egd-memo-text'),
+      querySelectorAll: selector => selector === '.egd-memo-card' ? roots : [],
+      getElementById: id => id === 'egd-canvas-layer' ? { children: [] } : null,
+    },
+    codexAgentProfileChoices: () => profiles,
+    codexAgentProfile: id => profiles.find(profile => profile.id === id),
+    codexProfileAvatar: (_avatar, name) => element('span', {}, name),
+    formatMessageTime: () => '합성 시각', markAgendaDirty() {},
+    boardNotice: message => notices.push(message),
+    spawnCodexChatCard: () => ({}), dismissChatReturnCue() {},
+    console: { warn() {} }, TAG: 'memo-regression',
+  };
+  const start = memoSurfaceSource.indexOf('  const MEMO_RUN_ENDED =');
+  const end = memoSurfaceSource.indexOf('  // Dock [메모]', start);
+  assert.ok(start >= 0 && end > start, 'the existing memo zone is available');
+  const api = Function(...Object.keys(scope), `${memoSurfaceSource.slice(start, end)}\nreturn { askMemoAgent, attachMemoRepliesFromRun, renderMemoCard };`)(...Object.values(scope));
+  const render = () => api.renderMemoCard(root);
+  const set = next => { root._memoRecord = next; selectors.get('.egd-memo-text').value = next.text; render(); };
+  render();
+  return {
+    root, state, sent, notices, started, render, set,
+    ask: () => api.askMemoAgent(root, { agentId: 'rio', agentName: 'Rio', question: '맞아?' }),
+    completeSend: (outcome = 'accept') => releaseSend(outcome),
+    edit: text => set(Memo.editMemoText(root._memoRecord, text, { now: 1 })),
+    attach: (run = fakeCompletedMemoRun()) => api.attachMemoRepliesFromRun(run),
+    warning(answerId = 'answer-7') {
+      const row = selectors.get('.egd-memo-thread').children.find(node => node.dataset.answerId === answerId);
+      assert.ok(row, `actual memoReplyRow rendered answer ${answerId}`);
+      return oldMemoAnswer.test(row.textContent);
+    },
+    replyText: () => selectors.get('.egd-memo-thread').textContent,
+    editorText: () => selectors.get('.egd-memo-text').value,
+    restore() { set(Memo.normalizeMemoRecord(memoJson(root._memoRecord), { now: 1 })); },
+  };
+}
+
+async function acceptMemoQuestion(harness, beforeAcceptance = () => {}) {
+  const sending = harness.ask();
+  await harness.started;
+  try { beforeAcceptance(); }
+  finally { harness.completeSend(); }
+  assert.equal(await sending, true, 'the fake request was accepted through askMemoAgent');
+}
+
+test('memo revision: a dispatch basis tracks body edits, not timestamps or unrelated memo changes', () => {
+  const original = deepFreeze(revisionMemo()), before = memoJson(original);
+  const draft = deepFreeze(revisionDraft(original)), draftBefore = memoJson(draft);
+  assert.notEqual(draft.basedOnMemoRevision, undefined, 'the existing basedOnMemoRevision contract identifies the dispatched body');
+  const basis = memo => revisionDraft(memo).basedOnMemoRevision;
+  const same = Memo.editMemoText(original, '  본문 A\r\n  ', { now: 999 });
+  assert.deepEqual(basis(same), draft.basedOnMemoRevision, 'normalized identical body is not a new revision');
+  const changed = Memo.editMemoText(original, '본문 B', { now: 1 });
+  assert.notDeepEqual(basis(changed), draft.basedOnMemoRevision, 'a real edit counts even when the clock has not advanced');
+  const back = Memo.editMemoText(changed, original.text, { now: 1 });
+  assert.notDeepEqual(basis(back), draft.basedOnMemoRevision, 'A→B→A is not the original body revision');
+  const replied = Memo.appendMemoReply(original, { author: { kind: 'user' }, text: '사람 답글' }, { now: 999 }).memo;
+  const pending = Memo.recordMemoAsk(original, draft, { now: 999, requestId: 'request-1', threadId: 'dm-rio' });
+  for (const [name, memo] of [
+    ['expand', Memo.setMemoExpanded(original, true)], ['resolve', Memo.setMemoResolved(original, true, { now: 999 })],
+    ['move', Memo.moveMemo(original, { x: 400, y: 300 }, [], { now: 999 })],
+    ['link', Memo.linkMemo(original, 'other-view', '참고', { now: 999 })],
+    ['unlink', Memo.unlinkMemo(Memo.linkMemo(original, 'other-view'), 'other-view', { now: 999 })],
+    ['user reply', replied], ['ask', pending], ['cancel', Memo.cancelMemoAsk(pending, draft.askId, { now: 999 })],
+  ]) assert.deepEqual(basis(memo), draft.basedOnMemoRevision, `${name} does not change the body revision`);
+  assert.deepEqual(original, before, 'all original memo fields remain untouched');
+  assert.deepEqual(draft, draftBefore, 'the original outgoing draft remains untouched');
+});
+
+test('memo revision: operational send/accept/completed-run/row paths show older-body answers at the right time', async t => {
+  for (const scenario of [
+    { name: 'same body while send is pending', before: h => h.edit(' 본문 A '), expected: false },
+    { name: 'edit before request acceptance', before: h => h.edit('본문 B'), expected: true },
+    { name: 'edit after request acceptance', after: h => h.edit('본문 B'), expected: true },
+    { name: 'different edits before and after acceptance', before: h => h.edit('본문 B'), after: h => h.edit('본문 C'), expected: true },
+    { name: 'A→B→A while the answer is pending', after: h => { h.edit('본문 B'); h.edit('본문 A'); }, expected: true },
+  ]) await t.test(scenario.name, async () => {
+    const original = deepFreeze(revisionMemo()), snapshot = memoJson(original);
+    const dispatched = deepFreeze(revisionDraft(original)), draftSnapshot = memoJson(dispatched);
+    const h = memoRevisionHarness(original);
+    await acceptMemoQuestion(h, () => scenario.before?.(h));
+    assert.deepEqual(h.root._memoRecord.asks[0].basedOnMemoRevision, dispatched.basedOnMemoRevision, 'acceptance records the dispatch basis, not the latest editor revision');
+    scenario.after?.(h);
+    const latestBody = h.root._memoRecord.text;
+    const run = deepFreeze(fakeCompletedMemoRun()), runSnapshot = memoJson(run);
+    h.attach(run);
+    assert.equal(h.root._memoRecord.replies.length, 1);
+    assert.equal(h.warning(), scenario.expected, 'the actual row distinguishes an older-body answer');
+    assert.equal(h.root._memoRecord.text, latestBody, 'attaching an answer never rolls back the current body');
+    assert.equal(h.editorText(), latestBody, 'active editor input is retained');
+    assert.equal(h.sent[0].text, dispatched.text, 'the dispatched text stays at the original body');
+    assert.equal(h.state.codex.threadDrafts['unrelated-room'], '이전부터 쓰던 다른 방 초안');
+    assert.deepEqual(original, snapshot); assert.deepEqual(dispatched, draftSnapshot); assert.deepEqual(run, runSnapshot);
+  });
+});
+
+test('memo revision: edits after an attached answer update the real row; non-body changes do not', async () => {
+  const h = memoRevisionHarness(); await acceptMemoQuestion(h); h.attach();
+  assert.equal(h.warning(), false);
+  h.set(Memo.setMemoResolved(Memo.setMemoExpanded(h.root._memoRecord, false), true, { now: 999 }));
+  h.set(Memo.moveMemo(h.root._memoRecord, { x: 30, y: 40 }, [], { now: 1000 }));
+  h.set(Memo.appendMemoReply(h.root._memoRecord, { author: { kind: 'user' }, text: '본문은 그대로' }, { now: 1001 }).memo);
+  assert.equal(h.warning(), false, 'layout, resolved state and another reply are not a body edit');
+  h.edit('본문 B'); assert.equal(h.warning(), true, 'an already attached answer becomes older-body after editing');
+  h.edit('본문 A'); assert.equal(h.warning(), true, 'returning to A does not erase intervening revision history');
+});
+
+test('memo revision: pending and answered JSON roundtrips retain the send basis without changing originals', async () => {
+  const h = memoRevisionHarness();
+  const dispatched = deepFreeze(revisionDraft(h.root._memoRecord)), draftBefore = memoJson(dispatched);
+  await acceptMemoQuestion(h, () => h.edit('본문 B'));
+  const pending = deepFreeze(h.root._memoRecord), pendingBefore = memoJson(pending);
+  h.restore();
+  assert.deepEqual(h.root._memoRecord, pendingBefore, 'normalizing a saved pending ask retains its data');
+  assert.deepEqual(h.root._memoRecord.asks[0].basedOnMemoRevision, dispatched.basedOnMemoRevision);
+  h.attach(); assert.equal(h.warning(), true);
+  const answered = deepFreeze(h.root._memoRecord), answeredBefore = memoJson(answered);
+  h.restore();
+  assert.deepEqual(h.root._memoRecord, answeredBefore, 'normalizing a saved answer retains its data');
+  assert.equal(h.warning(), true, 'reopening does not relabel an old-body answer as current');
+  assert.deepEqual(pending, pendingBefore); assert.deepEqual(answered, answeredBefore); assert.deepEqual(dispatched, draftBefore);
+});
+
+test('memo revision: rejected or unconfirmed synthetic sends preserve current body and the outgoing draft', async t => {
+  for (const outcome of ['reject', 'unconfirmed']) await t.test(outcome, async () => {
+    const original = deepFreeze(revisionMemo()), snapshot = memoJson(original), draft = deepFreeze(revisionDraft(original));
+    const h = memoRevisionHarness(original), sending = h.ask();
+    await h.started; h.edit('수락을 기다리며 쓴 본문 B'); h.completeSend(outcome);
+    assert.equal(await sending, false);
+    assert.equal(h.root._memoRecord.asks.length, 0, 'an unaccepted send does not create a pending ask');
+    assert.equal(h.root._memoRecord.text, '수락을 기다리며 쓴 본문 B');
+    assert.equal(h.editorText(), '수락을 기다리며 쓴 본문 B');
+    assert.equal(h.state.codex.threadDrafts['dm-rio'], draft.text, 'the original question remains available in the recipient room');
+    assert.equal(h.state.codex.threadDrafts['unrelated-room'], '이전부터 쓰던 다른 방 초안');
+    assert.deepEqual(original, snapshot);
+  });
+});
+
+test('memo revision: duplicate, cancellation and another Agent still cannot attach an answer', async t => {
+  await t.test('duplicate completion and unknown request', async () => {
+    const h = memoRevisionHarness(); await acceptMemoQuestion(h); h.edit('본문 B'); h.attach();
+    const attached = deepFreeze(h.root._memoRecord), before = memoJson(attached);
+    h.attach(); h.attach(fakeCompletedMemoRun({ requestId: 'other-request', answerId: 'other-answer' }));
+    assert.equal(h.root._memoRecord, attached); assert.deepEqual(attached, before);
+    assert.equal(h.root._memoRecord.replies.length, 1);
+  });
+  for (const ended of ['cancelled', 'failed', 'interrupted', 'unavailable']) await t.test(ended, async () => {
+    const h = memoRevisionHarness(); await acceptMemoQuestion(h); h.edit('본문 B');
+    h.attach(fakeCompletedMemoRun({ status: ended }));
+    const cancelled = deepFreeze(h.root._memoRecord), before = memoJson(cancelled);
+    h.attach();
+    assert.equal(cancelled.asks[0].status, 'cancelled');
+    assert.equal(h.root._memoRecord, cancelled); assert.deepEqual(cancelled, before);
+    assert.equal(cancelled.replies.length, 0); assert.doesNotMatch(h.replyText(), oldMemoAnswer);
+  });
+  await t.test('explicit cancel and wrong Agent', async () => {
+    const h = memoRevisionHarness(); await acceptMemoQuestion(h); h.edit('본문 B');
+    const pending = deepFreeze(h.root._memoRecord), before = memoJson(pending);
+    const wrong = Memo.appendMemoReply(pending, { author: { kind: 'agent', agentId: 'mina' }, ...Memo.memoReplyFromRun(fakeCompletedMemoRun()), askId: pending.asks[0].askId });
+    assert.equal(wrong.appended, false); assert.equal(wrong.memo, pending); assert.deepEqual(pending, before);
+    h.set(Memo.cancelMemoAsk(pending, pending.asks[0].askId));
+    const cancelled = deepFreeze(h.root._memoRecord); h.attach();
+    assert.equal(h.root._memoRecord, cancelled); assert.equal(cancelled.replies.length, 0);
+  });
+});
+
+test('memo revision: legacy unknown basis and human replies never get an older-body warning', async () => {
+  const h = memoRevisionHarness(); await acceptMemoQuestion(h); h.attach();
+  const legacy = memoJson(h.root._memoRecord);
+  for (const item of [...legacy.asks, ...legacy.replies]) delete item.basedOnMemoRevision;
+  h.set(Memo.normalizeMemoRecord(legacy, { now: 1 })); h.edit('본문 B');
+  assert.equal(h.warning(), false, 'missing historical basis is unknown, not evidence of an older body');
+  const originalBasis = revisionDraft(revisionMemo()).basedOnMemoRevision;
+  const withHuman = memoJson(Memo.appendMemoReply(h.root._memoRecord, { author: { kind: 'user' }, text: '사람 답글' }).memo);
+  withHuman.replies.at(-1).basedOnMemoRevision = originalBasis;
+  h.set(Memo.normalizeMemoRecord(withHuman, { now: 1 })); h.restore();
+  assert.doesNotMatch(h.replyText(), oldMemoAnswer, 'unknown Agent basis and a human reply are not mislabeled after restore');
+});
+
+test('memo revision: first new legacy question keeps its submitted basis across acceptance edits without guessing history', async t => {
+  for (const history of [false, true]) await t.test(history ? 'unknown historical answer, then A→B→A' : 'no historical answers, then A→B', async () => {
+    const raw = memoJson(revisionMemo());
+    delete raw.revision;
+    if (history) {
+      raw.asks = [{ askId: 'legacy-ask', agentId: 'rio', status: 'answered', answerId: 'legacy-answer', requestId: 'legacy-request' }];
+      raw.replies = [{ id: 'legacy-reply', author: { kind: 'agent', agentId: 'rio', name: 'Rio' }, text: '기반을 모르는 옛 답', askId: 'legacy-ask', answerId: 'legacy-answer' }];
+    }
+    const original = deepFreeze(Memo.normalizeMemoRecord(raw, { now: 1 })), before = memoJson(original);
+    assert.equal(Object.hasOwn(original, 'revision'), false, 'the fixture really has no memo revision');
+    const submitted = deepFreeze(revisionDraft(original)), draftBefore = memoJson(submitted);
+    assert.notEqual(submitted.basedOnMemoRevision, undefined, 'a newly observed body has its own new-question basis');
+    const h = memoRevisionHarness(original);
+    await acceptMemoQuestion(h, () => { h.edit('본문 B'); if (history) h.edit('본문 A'); });
+    const accepted = h.root._memoRecord.asks.find(ask => ask.requestId === 'request-1');
+    assert.deepEqual(accepted.basedOnMemoRevision, submitted.basedOnMemoRevision, 'acceptance cannot borrow the edited body revision');
+    assert.notDeepEqual(revisionDraft(h.root._memoRecord).basedOnMemoRevision, submitted.basedOnMemoRevision);
+    h.restore(); h.attach(); h.restore();
+    const reply = h.root._memoRecord.replies.find(item => item.answerId === 'answer-7');
+    assert.equal(reply.askId, accepted.askId);
+    assert.deepEqual(reply.basedOnMemoRevision, submitted.basedOnMemoRevision);
+    assert.equal(h.warning(), true, 'the new answer is for the body submitted before the acceptance edit');
+    if (history) {
+      assert.deepEqual(h.root._memoRecord.asks.find(ask => ask.askId === 'legacy-ask'), before.asks[0]);
+      assert.deepEqual(h.root._memoRecord.replies.find(item => item.answerId === 'legacy-answer'), before.replies[0]);
+      assert.equal(h.warning('legacy-answer'), false, 'the new baseline must not invent historical provenance');
+    }
+    assert.equal(h.sent[0].text, submitted.text);
+    assert.deepEqual(original, before); assert.deepEqual(submitted, draftBefore);
+  });
+});
+
+test('memo revision: pure-state overlapping requests to one Agent keep distinct bases when answers arrive in reverse order', () => {
+  // Two accepted records are constructed with the existing state API. This is
+  // not a claim that a busy Agent room permits two concurrent UI sends.
+  const original = deepFreeze(revisionMemo()), originalBefore = memoJson(original);
+  const a = deepFreeze(revisionDraft(original));
+  let memo = Memo.recordMemoAsk(original, a, { requestId: 'overlap-a', threadId: 'dm-rio', now: 2 });
+  memo = Memo.editMemoText(memo, '본문 B', { now: 3 });
+  const b = deepFreeze(revisionDraft(memo));
+  assert.notEqual(a.askId, b.askId); assert.equal(a.agentId, b.agentId);
+  assert.notDeepEqual(a.basedOnMemoRevision, b.basedOnMemoRevision);
+  memo = deepFreeze(Memo.recordMemoAsk(memo, b, { requestId: 'overlap-b', threadId: 'dm-rio', now: 4 }));
+  const pendingBefore = memoJson(memo), draftsBefore = memoJson([a, b]);
+  const h = memoRevisionHarness(memo);
+  const runB = deepFreeze(fakeCompletedMemoRun({ requestId: 'overlap-b', answerId: 'answer-b', runId: 'run-b' }));
+  const runA = deepFreeze(fakeCompletedMemoRun({ requestId: 'overlap-a', answerId: 'answer-a', runId: 'run-a' }));
+  h.attach(runB);
+  assert.equal(h.root._memoRecord.asks.find(ask => ask.askId === a.askId).status, 'pending');
+  assert.equal(h.root._memoRecord.asks.find(ask => ask.askId === b.askId).answerId, 'answer-b');
+  assert.equal(h.warning('answer-b'), false);
+  h.attach(runA);
+  for (const [draft, answerId] of [[a, 'answer-a'], [b, 'answer-b']]) {
+    const reply = h.root._memoRecord.replies.find(item => item.answerId === answerId);
+    const ask = h.root._memoRecord.asks.find(item => item.askId === draft.askId);
+    assert.equal(reply.askId, draft.askId); assert.deepEqual(reply.basedOnMemoRevision, draft.basedOnMemoRevision);
+    assert.equal(ask.status, 'answered'); assert.equal(ask.answerId, answerId);
+    assert.deepEqual(ask.basedOnMemoRevision, draft.basedOnMemoRevision);
+  }
+  assert.deepEqual(h.root._memoRecord.replies.map(reply => reply.answerId), ['answer-b', 'answer-a']);
+  h.restore();
+  assert.equal(h.warning('answer-a'), true); assert.equal(h.warning('answer-b'), false);
+  const done = h.root._memoRecord; h.attach(runA); h.attach(runB);
+  assert.equal(h.root._memoRecord, done, 'duplicate completions do not reconnect either request');
+  assert.deepEqual(original, originalBefore); assert.deepEqual(memo, pendingBefore); assert.deepEqual([a, b], draftsBefore);
+});
+
+function memoInputFixture(record, emptyProfiles) {
+  const created = [], roots = [], timers = new Map();
+  const counts = { choices: 0, profileReads: 0, profileLoads: 0, options: 0, sends: 0 };
+  const el = (tag, attrs, ...children) => {
+    if (tag === 'option') counts.options += 1;
+    const node = memoRuntimeElement(tag, attrs, ...children); created.push(node); return node;
+  };
+  const profiles = emptyProfiles ? [] : [{ id: 'rio', name: 'Rio', server: true }];
+  const document = {
+    activeElement: null,
+    getElementById: id => id === 'egd-canvas-layer' ? { children: [] } : null,
+    querySelectorAll: selector => selector === '.egd-memo-card' ? roots : [],
+  };
+  let timerId = 0;
+  const scope = {
+    MemoState: Memo, el, document, TAG: 'memo-input-regression', console: { warn() {} },
+    state: { codex: { threads: [], threadDrafts: {}, chatProtocol: { requests: {} } }, codexBridge: {
+      loadProfiles() { counts.profileLoads += 1; },
+      sendMessage() { counts.sends += 1; throw new Error('No transport in the input fixture'); },
+    } },
+    codexAgentProfileChoices() { counts.choices += 1; return profiles; },
+    codexAgentProfile(id) { counts.profileReads += 1; return profiles.find(profile => profile.id === id); },
+    codexProfileAvatar: (_avatar, name) => el('span', {}, name), formatMessageTime: () => '합성 시각',
+    markAgendaDirty() {}, boardNotice(message) { throw new Error(message); },
+    window: { addEventListener() {}, removeEventListener() {} },
+    MutationObserver: class { observe() {} disconnect() {} }, requestAnimationFrame: () => 0,
+    setTimeout(callback) { timers.set(++timerId, callback); return timerId; }, clearTimeout: id => timers.delete(id),
+    spawnDeskWindowShell(options) {
+      const identity = el('div'), actions = el('div'), topbar = el('div', {}, identity, actions);
+      const toolbar = el('div'), header = el('div', {}, topbar, toolbar), content = el('div');
+      const root = el('div', { isConnected: true, style: options.style }, header, content);
+      root.querySelector = selector => created.find(node => node.classList.has(selector.slice(1))) || null;
+      const shell = { root, slots: { identity, actions, topbar, toolbar, header, content }, resizeHits: [], registerCleanup() {} };
+      root._deskWindowShell = shell; roots.push(root); return shell;
+    },
+  };
+  const start = memoSurfaceSource.indexOf('  const MEMO_RUN_ENDED =');
+  const end = memoSurfaceSource.indexOf('  // Dock [메모]', start);
+  assert.ok(start >= 0 && end > start);
+  const spawn = Function(...Object.keys(scope), `let cardSeq = 0;\n${memoSurfaceSource.slice(start, end)}\nreturn spawnMemoCard;`)(...Object.values(scope));
+  const root = spawn({ record, restore: true }), textarea = root.querySelector('.egd-memo-text');
+  const containers = ['.egd-memo-ask-agent', '.egd-memo-thread', '.egd-memo-ask-status'].map(selector => root.querySelector(selector));
+  const row = answerId => containers[1].children.find(node => node.dataset.answerId === answerId);
+  const visibleText = node => node.hidden ? '' : node.children ? node.children.map(visibleText).join('') : node.textContent || '';
+  return { root, textarea, counts, containers,
+    input(text) { document.activeElement = textarea; textarea.value = text; textarea.oninput({ target: textarea, isComposing: false }); },
+    flush() { const pending = [...timers.values()]; timers.clear(); for (const callback of pending) callback(); },
+    warning(answerId) { assert.ok(row(answerId)); return oldMemoAnswer.test(visibleText(row(answerId))); },
+  };
+}
+
+test('memo input: 60 body events update revision guidance without rebuilding unrelated UI or querying empty profiles', async t => {
+  for (const emptyProfiles of [true, false]) await t.test(emptyProfiles ? 'empty profiles and thread' : 'older/current answers and pending ask', () => {
+    let record = revisionMemo();
+    if (!emptyProfiles) {
+      const first = revisionDraft(record);
+      record = Memo.recordMemoAsk(record, first, { requestId: 'input-a', threadId: 'dm-rio' });
+      record = Memo.editMemoText(record, '본문 B');
+      const second = revisionDraft(record);
+      record = Memo.recordMemoAsk(record, second, { requestId: 'input-b', threadId: 'dm-rio' });
+      for (const [draft, answerId] of [[first, 'input-answer-a'], [second, 'input-answer-b']]) {
+        record = Memo.appendMemoReply(record, { author: { kind: 'agent', agentId: 'rio', name: 'Rio' }, text: '보존할 답 원문', askId: draft.askId, answerId }).memo;
+      }
+      record = Memo.recordMemoAsk(record, revisionDraft(record), { requestId: 'input-pending', threadId: 'dm-rio' });
+    }
+    const h = memoInputFixture(record, emptyProfiles), before = { ...h.counts };
+    const collection = h.containers.map(node => ({ node, replacements: node.replacements, children: [...node.children] }));
+    if (!emptyProfiles) { assert.equal(h.warning('input-answer-a'), true); assert.equal(h.warning('input-answer-b'), false); }
+    for (let n = 1; n <= 60; n++) h.input(record.text + 'x'.repeat(n));
+    const delta = Object.fromEntries(Object.keys(before).map(key => [key, h.counts[key] - before[key]]));
+    t.diagnostic(JSON.stringify({ fixture: emptyProfiles ? 'empty-profile-input' : 'answered-and-pending-input', inputEvents: 60, ...delta,
+      collectionReplacements: h.containers.map((node, index) => node.replacements - collection[index].replacements) }));
+    assert.deepEqual(delta, { choices: 0, profileReads: 0, profileLoads: 0, options: 0, sends: 0 });
+    const unchanged = () => {
+      for (const saved of collection) {
+        assert.equal(saved.node.replacements, saved.replacements, 'body input does not replace the select/thread/pending collection');
+        assert.equal(saved.node.children.length, saved.children.length);
+        saved.children.forEach((node, index) => assert.equal(saved.node.children[index], node, 'existing options, reply rows and pending controls retain identity'));
+      }
+    };
+    unchanged(); h.flush(); unchanged();
+    assert.deepEqual(h.counts, before, 'the delayed body save also avoids unrelated rebuilds and profile queries');
+    assert.equal(h.root._memoRecord.text, record.text + 'x'.repeat(60));
+    if (!emptyProfiles) { assert.equal(h.warning('input-answer-a'), true); assert.equal(h.warning('input-answer-b'), true, 'the same current-answer row changes to older-body guidance'); }
+  });
 });

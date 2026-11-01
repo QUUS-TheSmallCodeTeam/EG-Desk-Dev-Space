@@ -23,6 +23,8 @@ const TOKEN = /^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$/;
 const token = value => typeof value === 'string' && TOKEN.test(value) ? value : null;
 const finite = value => typeof value === 'number' && Number.isFinite(value);
 const msTime = value => Number.isSafeInteger(value) && value >= 0 ? value : null;
+const memoRevision = value => Number.isSafeInteger(value) && value >= 0 ? value : null;
+const knownMemoBasis = memo => [...memo.asks, ...memo.replies].some(item => memoRevision(item.basedOnMemoRevision) !== null);
 const round1 = value => Math.round(value * 10) / 10;
 const round4 = value => Math.round(value * 10000) / 10000;
 const clamp = (value, min, max) => Math.min(max, Math.max(min, value));
@@ -93,6 +95,8 @@ function normReply(raw) {
       const value = token(raw[key]);
       if (value) reply[key] = value;
     }
+    const basedOn = memoRevision(raw.basedOnMemoRevision);
+    if (reply.askId && basedOn !== null) reply.basedOnMemoRevision = basedOn;
     if (raw.truncated === true || text.length > MEMO_LIMITS.reply) reply.truncated = true;
   }
   const createdAt = msTime(raw.createdAt);
@@ -114,6 +118,8 @@ function normAsk(raw) {
   if (ask.status === 'answered' && answerId) ask.answerId = answerId;
   const askedAt = msTime(raw.askedAt);
   if (askedAt !== null) ask.askedAt = askedAt;
+  const basedOn = memoRevision(raw.basedOnMemoRevision);
+  if (basedOn !== null) ask.basedOnMemoRevision = basedOn;
   return ask;
 }
 
@@ -148,6 +154,8 @@ export function normalizeMemoRecord(raw, { now = Date.now() } = {}) {
   memo.expanded = raw.expanded === true;
   memo.author = normAuthor(raw.author) || { kind: 'user' };
   memo.text = body(raw.text).slice(0, MEMO_LIMITS.text);
+  const revision = memoRevision(raw.revision);
+  if (revision !== null) memo.revision = revision; // Legacy records stay unknown, not versioned retroactively.
   memo.resolved = raw.resolved === true;
   memo.createdAt = msTime(raw.createdAt) ?? now;
   memo.updatedAt = Math.max(memo.createdAt, msTime(raw.updatedAt) ?? memo.createdAt);
@@ -172,6 +180,12 @@ export function normalizeMemoRecord(raw, { now = Date.now() } = {}) {
     asks.push(ask);
   }
   memo.asks = asks;
+  for (const reply of replies) {
+    if (reply.basedOnMemoRevision === undefined) continue;
+    const ask = asks.find(item => item.askId === reply.askId && item.agentId === reply.author.agentId
+      && item.status === 'answered' && item.answerId === reply.answerId);
+    if (!ask || ask.basedOnMemoRevision !== reply.basedOnMemoRevision) delete reply.basedOnMemoRevision;
+  }
   memo.links = normLinks(raw.links, id);
   return memo;
 }
@@ -198,7 +212,7 @@ export function createMemoRecord({ id, seq, point, cards = [], text = '', now = 
   const anchor = memoAnchorAt(point, cards);
   if (!anchor) throw new Error('메모를 둘 자리가 없습니다.');
   if (body(text).length > MEMO_LIMITS.text) throw new Error(`메모는 ${MEMO_LIMITS.text}자까지 쓸 수 있습니다.`);
-  return normalizeMemoRecord({ id, seq, anchor, text, author: { kind: 'user' }, createdAt: now, updatedAt: now }, { now });
+  return normalizeMemoRecord({ id, seq, anchor, text, revision: 1, author: { kind: 'user' }, createdAt: now, updatedAt: now }, { now });
 }
 
 // The user dropped the memo somewhere else: re-pin to whatever is under it.
@@ -237,7 +251,11 @@ export function editMemoText(memo, text, { now = Date.now() } = {}) {
   const next = body(text);
   if (next.length > MEMO_LIMITS.text) throw new Error(`메모는 ${MEMO_LIMITS.text}자까지 쓸 수 있습니다.`);
   if (next === memo.text) return memo;
-  return { ...memo, text: next, updatedAt: Math.max(memo.updatedAt, now) };
+  const previous = memoRevision(memo.revision) ?? Math.max(0,
+    ...[...memo.asks, ...memo.replies].map(item => memoRevision(item.basedOnMemoRevision) ?? 0));
+  const revision = previous + 1;
+  // Never wrap an exhausted counter into a falsely matching historical version.
+  return { ...memo, text: next, revision: Number.isSafeInteger(revision) ? revision : undefined, updatedAt: Math.max(memo.updatedAt, now) };
 }
 
 export function setMemoResolved(memo, resolved, { now = Date.now() } = {}) {
@@ -298,6 +316,10 @@ export function memoAskDraft(memo, { agentId, agentName, question = '', target =
     contextCardIds: [...new Set([...(memo.anchor?.kind === 'card' ? [memo.anchor.cardId] : []), ...memo.links.map(link => link.targetViewId)])] };
   const name = oneLine(agentName, MEMO_LIMITS.name);
   if (name) draft.agentName = name;
+  // A new question observes the live body, even on an unversioned legacy memo.
+  // This baseline is only for this new draft; historical missing bases stay missing.
+  const revision = memoRevision(memo.revision) ?? (knownMemoBasis(memo) ? null : 0);
+  if (revision !== null) draft.basedOnMemoRevision = revision;
   return draft;
 }
 
@@ -310,9 +332,13 @@ export function recordMemoAsk(memo, draft, { now = Date.now(), requestId, thread
   if (memo.asks.some(item => item.askId === askId)) return memo;
   if (memo.asks.length >= MEMO_LIMITS.asks) throw new Error('이 메모의 질문 기록이 가득 찼습니다.');
   const ask = { askId, agentId, status: 'pending', askedAt: now };
+  // This is the submitted draft's snapshot, not the possibly edited memo at acceptance.
+  const basedOn = memoRevision(draft.basedOnMemoRevision);
+  if (basedOn !== null) ask.basedOnMemoRevision = basedOn;
   if (token(requestId)) ask.requestId = requestId;
   if (token(threadId)) ask.threadId = threadId;
-  return { ...memo, asks: [...memo.asks, ask], updatedAt: Math.max(memo.updatedAt, now) };
+  const observedBody = memoRevision(memo.revision) === null && basedOn === 0 && !knownMemoBasis(memo);
+  return { ...memo, ...(observedBody ? { revision: 0 } : {}), asks: [...memo.asks, ask], updatedAt: Math.max(memo.updatedAt, now) };
 }
 
 // The memo and pending ask a Chat request belongs to, or null.
@@ -385,6 +411,8 @@ export function appendMemoReply(memo, reply = {}, { now = Date.now() } = {}) {
       asks = memo.asks.slice();
       asks[index] = { ...asks[index], status: 'answered', answerId };
       next.askId = askId;
+      const basedOn = memoRevision(memo.asks[index].basedOnMemoRevision);
+      if (basedOn !== null) next.basedOnMemoRevision = basedOn;
     }
     const runId = token(reply.runId);
     if (runId) next.runId = runId;

@@ -8770,6 +8770,11 @@ button.egd-memo-status { align-self: flex-start; flex-shrink: 0; max-width: 100%
 .egd-memo-reply-time { margin-left: auto; }
 .egd-memo-reply-text { white-space: pre-wrap; word-break: keep-all; overflow-wrap: anywhere; font-size: 12px; }
 .egd-memo-reply-note { margin-top: 4px; color: var(--egd-on-surface-variant); font-size: 11.5px; }
+/* Match the inline line box to the existing 12px answer, not its outer card. */
+.egd-memo-reply:has(> .egd-memo-reply-revision:not([hidden])) { font-size: 12px; }
+.egd-memo-reply > .egd-memo-reply-revision:not([hidden]) { display: inline; margin-top: 0; }
+.egd-memo-reply > .egd-memo-reply-revision:not([hidden])::after { content: ' '; }
+.egd-memo-reply > .egd-memo-reply-revision:not([hidden]) + .egd-memo-reply-text { display: inline; }
 .egd-memo-reply-input,
 .egd-memo-ask-question,
 .egd-memo-ask-agent {

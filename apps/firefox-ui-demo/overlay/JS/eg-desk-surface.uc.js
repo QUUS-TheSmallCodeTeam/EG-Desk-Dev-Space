@@ -15331,17 +15331,32 @@
     }, el('span', { class: 'egd-codex-result-label' }, memo.seq ? `메모 #${memo.seq} 답글로 붙음` : '메모 답글로 붙음'));
   }
 
-  function memoReplyRow(reply) {
+  function memoReplyRow(reply, memo) {
     const agent = reply.author.kind === 'agent';
+    const basedOn = reply.basedOnMemoRevision, current = memo?.revision;
+    const knownBasis = agent && Number.isSafeInteger(basedOn) && basedOn >= 0;
+    let priorBody = knownBasis && Number.isSafeInteger(current) && current >= 0 && basedOn !== current;
+    const priorLabel = `수정 전 메모에 대한 답 · 기반 버전 ${basedOn}`;
+    const revisionNote = knownBasis ? el('div', { class: 'egd-memo-reply-note egd-memo-reply-revision', role: 'note', hidden: !priorBody,
+      data: { testid: 'memo-reply-revision', basedOnMemoRevision: basedOn } }, priorBody ? priorLabel : '') : null;
     const name = MemoState.memoAuthorName(reply.author);
     const avatar = agent
       ? codexProfileAvatar(codexAgentProfile(reply.author.agentId)?.avatar || null, name, 'egd-memo-reply-avatar')
       : el('span', { class: 'egd-memo-reply-avatar egd-memo-reply-avatar-user', 'aria-hidden': 'true' }, '나');
-    return el('div', { class: 'egd-memo-reply', data: { testid: 'memo-reply', author: agent ? 'agent' : 'user', replyId: reply.id, answerId: reply.answerId || '' } },
+    const row = el('div', { class: 'egd-memo-reply', data: { testid: 'memo-reply', author: agent ? 'agent' : 'user', replyId: reply.id, answerId: reply.answerId || '' } },
       el('div', { class: 'egd-memo-reply-head' }, avatar, el('strong', { class: 'egd-memo-reply-name' }, name),
         reply.createdAt ? el('time', { class: 'egd-memo-reply-time', datetime: new Date(reply.createdAt).toISOString() }, formatMessageTime(reply.createdAt)) : null),
+      revisionNote,
       el('div', { class: 'egd-memo-reply-text' }, reply.text),
       reply.truncated ? el('div', { class: 'egd-memo-reply-note', role: 'note' }, '답이 길어 일부만 붙었습니다. 전체는 Chat에 있습니다.') : null);
+    if (revisionNote) Object.defineProperty(row, '_syncMemoRevision', { value: revision => {
+      const older = Number.isSafeInteger(revision) && revision >= 0 && basedOn !== revision;
+      if (older === priorBody) return;
+      priorBody = older;
+      revisionNote.hidden = !older;
+      revisionNote.textContent = older ? priorLabel : '';
+    } });
+    return row;
   }
 
   // Everything but the body textarea is rebuilt from the record.
@@ -15357,7 +15372,7 @@
     const resolve = root.querySelector('.egd-memo-resolve');
     if (resolve) { resolve.textContent = memo.resolved ? '다시 열기' : '해결'; resolve.setAttribute('aria-pressed', String(memo.resolved)); }
     const textarea = root.querySelector('.egd-memo-text');
-    if (textarea && document.activeElement !== textarea && textarea.value !== memo.text) textarea.value = memo.text;
+    if (textarea && !root._memoTextDirty && document.activeElement !== textarea && textarea.value !== memo.text) textarea.value = memo.text;
     const pending = MemoState.pendingMemoAsks(memo);
     const pendingNames = pending.map(ask => codexAgentProfile(ask.agentId)?.name || 'Agent');
     const agentReplies = memo.replies.filter(reply => reply.author.kind === 'agent').length;
@@ -15371,7 +15386,7 @@
     }
     const thread = root.querySelector('.egd-memo-thread');
     if (thread) {
-      thread.replaceChildren(...(memo.replies.length ? memo.replies.map(memoReplyRow)
+      thread.replaceChildren(...(memo.replies.length ? memo.replies.map(reply => memoReplyRow(reply, memo))
         : [el('p', { class: 'egd-memo-thread-empty' }, '아직 답글이 없습니다.')]));
     }
     const askStatus = root.querySelector('.egd-memo-ask-status');
@@ -15450,15 +15465,36 @@
 
     // Body: the user's text. Saving it never calls an Agent.
     let saveTimer = 0;
+    const stageText = () => {
+      const next = MemoState.editMemoText(root._memoRecord, textarea.value);
+      if (next === root._memoRecord) return;
+      // Keep body versions current while storage remains debounced. An answer
+      // arriving in this window must not label against the previous body or
+      // replace the user's still-unsaved textarea/caret.
+      root._memoRecord = next;
+      root._memoTextDirty = true;
+      // Body input changes only the existing revision notes, never the reply
+      // rows, pending controls, Agent options or profile-lookup render path.
+      for (const row of root.querySelector('.egd-memo-thread')?.children || []) row._syncMemoRevision?.(next.revision);
+    };
     const saveText = () => {
       saveTimer = 0;
-      try { updateMemoRecord(root, MemoState.editMemoText(root._memoRecord, textarea.value), 'memo-edit'); }
+      try {
+        stageText();
+        if (root._memoTextDirty) {
+          delete root._memoTextDirty;
+          markAgendaDirty('memo-edit', root);
+        }
+      }
       catch (error) { boardNotice(error.message); }
     };
     const textarea = el('textarea', {
       class: 'egd-memo-text', placeholder: '메모를 적어 두세요', 'aria-label': '메모 본문', maxlength: String(MemoState.MEMO_LIMITS.text),
       data: { testid: 'memo-text' },
-      oninput: () => { if (saveTimer) clearTimeout(saveTimer); saveTimer = setTimeout(saveText, 400); },
+      oninput: () => {
+        try { stageText(); } catch (error) { boardNotice(error.message); return; }
+        if (saveTimer) clearTimeout(saveTimer); saveTimer = setTimeout(saveText, 400);
+      },
       onblur: () => { if (saveTimer) { clearTimeout(saveTimer); saveText(); } },
     });
     textarea.value = memo.text;
