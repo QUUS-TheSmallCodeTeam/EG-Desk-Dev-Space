@@ -9,6 +9,7 @@ import vm from 'node:vm';
 import net from 'node:net';
 import http from 'node:http';
 import * as BriefingState from '../overlay/resources/EGDeskBriefingState.sys.mjs';
+import { createMemoRecord, memoAskDraft } from '../overlay/resources/EGDeskMemoState.sys.mjs';
 import { bootstrapQaProfile, canonicalTempRoot, LOADER_FILES } from './egdesk-chat-qa-profile.mjs';
 import { createQaFixtureTransport, CLAUDE_FIXTURE_QUESTIONS, CLAUDE_FIXTURE_TEXT } from './egdesk-chat-fixture-transport.mjs';
 import { chatRunOutputFixtureIds, CHAT_RUN_OUTPUT_MARKER, CHAT_RUN_DIFF_MARKER } from './egdesk-chat-run-outputs-fixture.mjs';
@@ -17,7 +18,7 @@ import { CHAT_ORIGIN_FILE_SEED, CHAT_ORIGIN_FILE_TEXT, CHAT_ORIGIN_FILE_OUTPUT }
 import { prepareQaFirefox } from './run-firefox-mcp-target.mjs';
 import { assertNativeTerminalExit, assertQaFixtureArtifact } from './egdesk-chat-qa-contract.sys.mjs';
 import { createChatProtocolState, mergeChatSnapshot, projectRunMessages, usableArtifact,
-  normalizeLocalHistoryPage, hydrateLocalChatThread, mergeLocalChatMessages } from '../overlay/resources/EGDeskChatState.sys.mjs';
+  normalizeLocalHistoryPage, hydrateLocalChatThread, mergeLocalChatMessages, freshClientThreadBinding } from '../overlay/resources/EGDeskChatState.sys.mjs';
 import { createEGDeskFileServiceCallbacks, createEGDeskNativeFilePickers } from '../overlay/resources/EGDeskFileView.sys.mjs';
 import { assertPublishedBriefing, assertContextCaptureBatch, assertStoredAgentDelivery,
   captureContextReadEvidence, fingerprintQaBytes } from './egdesk-context-qa-contract.mjs';
@@ -25,7 +26,7 @@ import { assertPublishedBriefing, assertContextCaptureBatch, assertStoredAgentDe
 const TOKEN = 'unit-fixture-token-no-credentials';
 const FIXTURE_ENV = { EGDESK_QA_FIXTURE_TRANSPORT: '1', EGDESK_QA_FIXTURE_PORT: '49318' };
 
-function setup(t, { claude = false, reader = false, projectFile = false, watch = false, runOutputs = false, portable = false, taskGate = false, originFile = false, stateFixtures = false, sourceChangeSeed = false, briefingComments = false, briefingMultiTarget = false, firstAuth = false, fixturePort = FIXTURE_ENV.EGDESK_QA_FIXTURE_PORT } = {}) {
+function setup(t, { claude = false, reader = false, projectFile = false, watch = false, runOutputs = false, portable = false, taskGate = false, originFile = false, stateFixtures = false, sourceChangeSeed = false, briefingComments = false, briefingMultiTarget = false, firstAuth = false, memoRoundTrip, memoRuntimeRoomId, fixturePort = FIXTURE_ENV.EGDESK_QA_FIXTURE_PORT } = {}) {
   const source = fs.mkdtempSync(path.join(canonicalTempRoot(), 'egdesk-loader-fixture-'));
   for (const name of LOADER_FILES) fs.writeFileSync(path.join(source, name), `unit fixture ${name}\n`);
   const { profile } = bootstrapQaProfile({ loaderSource: source });
@@ -39,6 +40,7 @@ function setup(t, { claude = false, reader = false, projectFile = false, watch =
   const fetchBefore = globalThis.fetch;
   const eventSourceBefore = globalThis.EventSource;
   const fixtureEnv = { ...FIXTURE_ENV, EGDESK_QA_FIXTURE_PORT: String(fixturePort), ...(projectFile ? { EGDESK_QA_PROJECT_FILE_FIXTURE: '1', EGDESK_QA_REAL_TURN: '0' } : {}),
+    ...(memoRoundTrip === undefined ? {} : { EGDESK_QA_REAL_TURN: '0' }),
     ...(watch ? { EGDESK_QA_PROJECT_FILE_WATCH: '1' } : {}),
     ...(firstAuth ? { EGDESK_QA_FIRST_CODEX_AUTH_FIXTURE: '1', EGDESK_QA_REAL_TURN: '0' } : {}),
     ...(stateFixtures || sourceChangeSeed || briefingComments ? { EGDESK_QA_STATE_FIXTURES: '1', EGDESK_QA_REAL_TURN: '0' } : {}),
@@ -50,7 +52,8 @@ function setup(t, { claude = false, reader = false, projectFile = false, watch =
     ...(taskGate ? { EGDESK_QA_TASK_GATE_FIXTURE: '1', EGDESK_QA_REAL_TURN: '0' } : {}),
     ...(originFile ? { EGDESK_QA_CHAT_ORIGIN_FILE_FIXTURE: '1', EGDESK_QA_REAL_TURN: '0' } : {}) };
   prepareQaFirefox(profile, { env: fixtureEnv });
-  const transport = createQaFixtureTransport({ profile, token: TOKEN,
+  const transport = createQaFixtureTransport({ profile, token: TOKEN, ...(memoRoundTrip === undefined ? {} : { memoRoundTrip }),
+    ...(memoRuntimeRoomId === undefined ? {} : { memoRuntimeRoomId }),
     env: { ...fixtureEnv, ...(claude ? { EGDESK_QA_CLAUDE_FIXTURE: '1' } : {}),
       ...(reader ? { EGDESK_QA_CLAUDE_READER_FIXTURE: '1', EGDESK_QA_REAL_TURN: '0' } : {}) } });
   t.after(() => transport.dispose());
@@ -85,6 +88,264 @@ async function request(handler, method, url, body = null, token = null, onRespon
 const sendRunOutputs = (handler, scenario = 'RUN_OUTPUTS') => request(handler, 'POST', '/chat/send', {
   message: `EGDESK_QA_${scenario} handler-only unit`, profileEnabled: false,
   clientThreadId: `qa-output-${scenario}`, requestId: `qa-output-${scenario}` });
+
+function memoRoundTripCase() {
+  const sessionId = randomUUID(), memoId = 'qa-cnv06-late-memo', agentId = 'qa-cnv06-agent', caseId = 'cnv06-late-answer';
+  const question = `SYNTHETIC [${caseId}] QUESTION ONE`;
+  const memo = createMemoRecord({ id: memoId, seq: 1, point: { x: 20, y: 30 }, text: 'SYNTHETIC MEMO BEFORE SEND', now: 1 });
+  const draft = memoAskDraft(memo, { agentId, question });
+  return { sessionId, memoId, agentId, caseId, question, deadlineAt: Date.now() + 60000,
+    send: { message: draft.text, clientThreadId: `qa-memo-${sessionId}`, profileEnabled: true,
+      profileId: agentId, profileRevision: 1, engineId: 'codex', engineProfileId: 'codex-default' } };
+}
+const memoHeaders = transport => ({ host: `${transport.info.host}:${transport.info.port}`, origin: 'chrome://browser', 'content-type': 'application/json' });
+const memoRelease = (spec, accepted, phase) => ({ sessionId: spec.sessionId, caseId: spec.caseId, memoId: spec.memoId,
+  requestId: accepted.requestId, runId: accepted.runId, phase });
+
+test('Memo one-shot: default remains closed and an opt-in is exact, offline, bounded and exclusive', async t => {
+  const ordinary = setup(t), spec = memoRoundTripCase();
+  const send = { ...spec.send, requestId: randomUUID() };
+  assert.equal((await request(ordinary.handler, 'POST', '/chat/send', send)).status, 400, 'a native Memo envelope is not a stock scenario');
+  const create = (memoRoundTrip, patch = {}) => {
+    const fixture = createQaFixtureTransport({ profile: ordinary.info.profile, token: TOKEN, memoRoundTrip,
+      env: { ...FIXTURE_ENV, EGDESK_QA_REAL_TURN: '0', ...patch } });
+    t.after(() => fixture.dispose()); return fixture;
+  };
+  for (const patch of [null, false, {}, { ...spec, extra: true }, { ...spec, sessionId: '' },
+    { ...spec, deadlineAt: Date.now() - 1 }, { ...spec, deadlineAt: Date.now() + 600000 },
+    { ...spec, question: 'not synthetic' }, { ...spec, memoId: 'another-memo' },
+    { ...spec, send: { ...spec.send, requestId: 'already-bound' } },
+    { ...spec, send: { ...spec.send, profileId: 'other-agent' } },
+    { ...spec, send: { ...spec.send, message: spec.send.message + ' changed' } }]) {
+    assert.throws(() => create(patch), /Memo/i);
+  }
+  for (const realTurn of [undefined, '1']) assert.throws(() => create(spec, { EGDESK_QA_REAL_TURN: realTurn }), /Memo/i);
+  assert.throws(() => create(spec, { EGDESK_QA_FIXTURE_TOKEN: 'another-private-fixture-token' }), /Memo/i);
+  for (const flag of ['EGDESK_QA_FIRST_CODEX_AUTH_FIXTURE', 'EGDESK_QA_CLAUDE_FIXTURE', 'EGDESK_QA_STATE_FIXTURES',
+    'EGDESK_QA_PROJECT_FILE_FIXTURE', 'EGDESK_QA_RUN_OUTPUTS_FIXTURE', 'EGDESK_QA_TASK_GATE_FIXTURE', 'EGDESK_QA_PORTABLE_TRANSFER_FIXTURE']) {
+    assert.throws(() => create(spec, { [flag]: '1' }), /Memo/i, flag);
+  }
+  const enabled = create(spec), headers = memoHeaders(enabled);
+  const wrongBodies = [
+    { ...send, message: send.message + ' ' }, { ...send, message: send.message.replace('QUESTION ONE', 'QUESTION TWO') },
+    { ...send, clientThreadId: 'other-session' }, { ...send, profileId: 'other-agent' },
+    { ...send, profileRevision: 2 }, { ...send, profileEnabled: false }, { ...send, injected: true },
+    { ...send, message: 'EGDESK_QA_TEXT_ONLY must not fall through in Memo-only mode' },
+  ];
+  for (const body of wrongBodies) assert.equal((await request(enabled.handler, 'POST', '/chat/send', body, null, () => {}, headers)).status, 403);
+  for (const extra of [{ origin: 'https://outside.invalid' }, { 'sec-fetch-site': 'cross-site' }]) {
+    assert.equal((await request(enabled.handler, 'POST', '/chat/send', send, TOKEN, () => {}, { ...headers, ...extra })).status, 403);
+  }
+  assert.equal((await request(enabled.handler, 'POST', '/chat/send?unexpected=1', send, null, () => {}, headers)).status, 400);
+  assert.equal((await request(enabled.handler, 'POST', '/__qa/delta', { runId: 'invented', delta: 'success' }, TOKEN, () => {}, headers)).status, 403);
+  assert.equal((await request(enabled.handler, 'POST', '/__qa/account-change', {}, TOKEN, () => {}, headers)).status, 403);
+  assert.equal((await request(enabled.handler, 'POST', '/auth/signout', {}, null, () => {}, headers)).status, 403);
+  const state = (await request(enabled.handler, 'GET', '/__qa/state', null, TOKEN, () => {}, headers)).body;
+  assert.equal(state.observed.sends.length, 0); assert.equal(state.runs.length, 0);
+});
+
+test('Memo one-shot: expected bytes are copied, retries before ACK are refused and close cannot acknowledge success', async t => {
+  const spec = memoRoundTripCase(), originalSend = structuredClone(spec.send);
+  const transport = setup(t, { memoRoundTrip: spec }), headers = memoHeaders(transport), requestId = randomUUID();
+  spec.send.message += ' changed after opt-in'; spec.send.profileId = 'other-agent';
+  const pending = request(transport.handler, 'POST', '/chat/send', { ...originalSend, requestId }, null, () => {}, headers);
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal((await request(transport.handler, 'POST', '/chat/send', { ...originalSend, requestId: randomUUID() }, null, () => {}, headers)).status, 409);
+  await transport.dispose();
+  assert.equal((await pending).status, 503, 'disposing before the delayed ACK must not fabricate acceptance');
+});
+
+test('Memo one-shot: exact local Agent envelope works without a stored-profile backend or any forwarding', async t => {
+  const fetchSpy = t.mock.method(globalThis, 'fetch', () => { throw new Error('No network in the handler-only Memo test'); });
+  const spec = memoRoundTripCase();
+  delete spec.send.profileId; delete spec.send.profileRevision;
+  spec.send.agentProfile = { id: spec.agentId, name: 'Synthetic QA Agent' };
+  spec.send.systemPrompt = 'SYNTHETIC QA instructions only'; spec.send.toolMode = 'default';
+  const expected = structuredClone(spec.send), transport = setup(t, { memoRoundTrip: spec }), headers = memoHeaders(transport);
+  spec.send.agentProfile.name = 'changed after construction';
+  const wrong = { ...expected, requestId: randomUUID(), agentProfile: { ...expected.agentProfile, name: 'different metadata' } };
+  assert.equal((await request(transport.handler, 'POST', '/chat/send', wrong, null, () => {}, headers)).status, 403);
+  const accepted = await request(transport.handler, 'POST', '/chat/send', { ...expected, requestId: randomUUID() }, null, () => {}, headers);
+  assert.equal(accepted.status, 202);
+  assert.equal(fetchSpy.mock.callCount(), 0);
+});
+
+for (const runtimeBinding of [false, true]) test(runtimeBinding
+  ? 'Memo runtime binding: explicitly armed loopback send and held final SSE retain the exact native room pair'
+  : 'Memo one-shot: real loopback send and held final SSE reuse the stock run, without a provider or global hook', { timeout: 6000 }, async t => {
+  const server = http.createServer();
+  await new Promise((resolve, reject) => { server.once('error', reject); server.listen(0, '127.0.0.1', resolve); });
+  const port = server.address().port, base = `http://127.0.0.1:${port}`;
+  const { spec, roomId } = runtimeBinding ? memoRuntimeCase() : { spec: memoRoundTripCase() };
+  const expectedSend = structuredClone(spec.send);
+  const transport = setup(t, { memoRoundTrip: spec, ...(runtimeBinding ? { memoRuntimeRoomId: roomId } : {}), fixturePort: port }); server.on('request', transport.handler);
+  const controller = new AbortController(), nativeFetch = globalThis.fetch;
+  const fetchSpy = t.mock.method(globalThis, 'fetch', (url, options) => {
+    assert.equal(new URL(url).origin, base, 'only this owned loopback listener is permitted');
+    return nativeFetch(url, options);
+  });
+  t.after(async () => { controller.abort(); server.closeAllConnections(); await new Promise(resolve => server.close(resolve)); });
+  const call = async (method, route, body, control = false) => {
+    const response = await fetch(base + route, { method, redirect: 'error',
+      headers: { Origin: 'chrome://browser', ...(body ? { 'Content-Type': 'application/json' } : {}), ...(control ? { 'X-EGDESK-QA-Token': TOKEN } : {}) },
+      ...(body ? { body: JSON.stringify(body) } : {}) });
+    return { status: response.status, body: await response.json() };
+  };
+  const stream = await fetch(base + '/events?chatProtocol=2', { signal: controller.signal });
+  assert.equal(stream.status, 200);
+  const reader = stream.body.getReader(), decoder = new TextDecoder(), frames = []; let buffered = '';
+  const next = async () => {
+    while (!buffered.includes('\n\n')) {
+      let timer;
+      const part = await Promise.race([reader.read(), new Promise((_, reject) => { timer = setTimeout(() => reject(new Error('Memo fixture SSE timeout')), 2500); })]).finally(() => clearTimeout(timer));
+      assert.equal(part.done, false); buffered += decoder.decode(part.value, { stream: true });
+    }
+    const boundary = buffered.indexOf('\n\n'), frame = buffered.slice(0, boundary); buffered = buffered.slice(boundary + 2);
+    if (frame.startsWith('event: codex\n')) frames.push(JSON.parse(frame.split('\ndata: ')[1]));
+    return frame;
+  };
+  assert.match(await next(), /^event: ready/);
+  if (runtimeBinding) {
+    const binding = freshClientThreadBinding({ id: roomId }, randomUUID());
+    const ready = await call('POST', '/v1/files/projects/room-default', { roomId: binding });
+    assert.equal(ready.status, 200); assert.equal(ready.body.result.status, 'none');
+    transport.memoRuntimeBinding.arm(binding);
+    expectedSend.clientThreadId = binding; expectedSend.expectedRoomProject.roomId = binding;
+  }
+  const requestId = randomUUID(), sent = await call('POST', '/chat/send', { ...expectedSend, requestId });
+  assert.equal(sent.status, 202); assert.equal(sent.body.requestId, requestId);
+  assert.equal((await call('POST', '/chat/send', { ...expectedSend, requestId: randomUUID() })).status, 409, 'one-shot is consumed before any retry');
+  let state;
+  const end = Date.now() + 2500;
+  do { state = (await call('GET', '/__qa/state', null, true)).body; if (state.runs[0]?.fixtureStage === 'streaming-visible') break;
+    await new Promise(resolve => setTimeout(resolve, 20)); } while (Date.now() < end);
+  assert.equal(state.runs[0].fixtureStage, 'streaming-visible');
+  assert.equal(state.observed.sends.length, 1); assert.equal(state.observed.sends[0].message, expectedSend.message, 'no prompt translation');
+  if (runtimeBinding) assert.deepEqual(state.observed.sends[0].expectedRoomProject, expectedSend.expectedRoomProject);
+  assert.equal(state.observed.events.some(event => event.event === 'run.completed'), false, 'final is held for the UI edit');
+  assert.equal((await call('POST', '/__qa/release', memoRelease(spec, sent.body, 'run'), true)).status, 409);
+  assert.equal((await call('POST', '/__qa/release', memoRelease(spec, sent.body, 'message'))).status, 403);
+  for (const patch of [{ sessionId: randomUUID() }, { memoId: 'other-memo' }, { caseId: 'other-case' }, { requestId: 'other-request' }, { extra: true }]) {
+    assert.equal((await call('POST', '/__qa/release', { ...memoRelease(spec, sent.body, 'message'), ...patch }, true)).status, 403);
+  }
+  assert.equal((await call('POST', '/__qa/release', memoRelease(spec, sent.body, 'message'), true)).status, 200);
+  assert.equal((await call('POST', '/__qa/release', memoRelease(spec, sent.body, 'run'), true)).status, 200);
+  while (!frames.some(event => event.event === 'run.completed')) await next();
+  const completed = frames.find(event => event.event === 'run.completed');
+  assert.equal(completed.details.status, 'completed');
+  for (const event of frames) {
+    assert.equal(event.requestId, requestId); assert.equal(event.clientThreadId, expectedSend.clientThreadId);
+    assert.equal(event.runId, sent.body.runId); assert.equal(event.answerId, sent.body.answerId);
+  }
+  assert.ok(frames.some(event => event.event === 'message.delta')); assert.ok(frames.some(event => event.event === 'message.completed'));
+  assert.equal((await call('POST', '/__qa/release', memoRelease(spec, sent.body, 'run'), true)).status, 409);
+  assert.ok(fetchSpy.mock.callCount() > 5); assert.equal(transport.info.memoRoundTrip.caseId, spec.caseId);
+});
+
+test('Memo one-shot: expiration and disposal close send/release without a fallback', async t => {
+  const spec = memoRoundTripCase(), transport = setup(t, { memoRoundTrip: spec }), headers = memoHeaders(transport);
+  const call = (route, body, control = false) => request(transport.handler, 'POST', route, body, control ? TOKEN : null, () => {}, headers);
+  const sent = await call('/chat/send', { ...spec.send, requestId: randomUUID() }); assert.equal(sent.status, 202);
+  const now = t.mock.method(Date, 'now', () => spec.deadlineAt + 1);
+  assert.equal((await call('/__qa/release', memoRelease(spec, sent.body, 'message'), true)).status, 410);
+  assert.equal((await call('/chat/send', { ...spec.send, requestId: randomUUID() })).status, 410);
+  now.mock.restore(); await transport.dispose();
+  assert.equal((await call('/chat/send', { ...spec.send, requestId: randomUUID() })).status, 503);
+  assert.equal((await call('/__qa/release', memoRelease(spec, sent.body, 'message'), true)).status, 503);
+});
+
+function memoRuntimeCase() {
+  const spec = memoRoundTripCase(), roomId = `qa-cnv06-room-${spec.sessionId}`;
+  spec.send.clientThreadId = roomId;
+  spec.send.expectedRoomProject = { roomId, status: 'none', source: null, boardId: null, projectId: null, rootId: null };
+  return { spec, roomId };
+}
+
+test('Memo runtime binding: explicit local capability changes only the declared room pair once; no HTTP learning', async t => {
+  const fetchSpy = t.mock.method(globalThis, 'fetch', () => { throw new Error('No forwarding from Memo runtime binding'); });
+  const { spec, roomId } = memoRuntimeCase(), original = structuredClone(spec.send);
+  const transport = setup(t, { memoRoundTrip: spec, memoRuntimeRoomId: roomId }), headers = memoHeaders(transport);
+  assert.equal(typeof transport.memoRuntimeBinding?.arm, 'function');
+  assert.ok(Object.isFrozen(transport.memoRuntimeBinding));
+  const binding = freshClientThreadBinding({ id: roomId }, randomUUID());
+  const expected = { ...original, clientThreadId: binding, expectedRoomProject: { ...original.expectedRoomProject, roomId: binding } };
+  const send = body => request(transport.handler, 'POST', '/chat/send', { ...body, requestId: randomUUID() }, null, () => {}, headers);
+  assert.equal((await send(original)).status, 409);
+  assert.equal((await send(expected)).status, 409, 'the first request cannot learn a binding');
+  assert.equal((await request(transport.handler, 'POST', '/__qa/memo-arm', { binding }, TOKEN, () => {}, headers)).status, 403);
+  for (const invalid of [roomId, `${roomId}-binding-`, `${roomId}-binding-not-a-nonce`,
+    freshClientThreadBinding({ id: `${roomId}-other` }, randomUUID()), binding + '\n', { clientThreadId: binding }]) {
+    assert.throws(() => transport.memoRuntimeBinding.arm(invalid), /Memo runtime binding/);
+  }
+  assert.throws(() => transport.memoRuntimeBinding.arm(binding, { message: 'override' }), /Memo runtime binding/);
+  spec.send.message += ' caller mutation'; spec.send.expectedRoomProject.status = 'connected';
+  const armed = transport.memoRuntimeBinding.arm(binding);
+  assert.equal(armed.clientThreadId, binding); assert.equal(armed.runtimeBindingArmed, true);
+  assert.throws(() => transport.memoRuntimeBinding.arm(binding), /Memo runtime binding/);
+  for (const changed of [{ ...expected, message: expected.message + ' ' }, { ...expected, profileRevision: 2 },
+    { ...expected, profileId: 'other-agent' }, { ...expected, clientThreadId: roomId },
+    { ...expected, expectedRoomProject: original.expectedRoomProject }, { ...expected, unexpected: true }]) {
+    assert.notEqual((await send(changed)).status, 202);
+  }
+  for (const extra of [{ origin: 'https://outside.invalid' }, { 'sec-fetch-site': 'cross-site' }]) {
+    assert.equal((await request(transport.handler, 'POST', '/chat/send', { ...expected, requestId: randomUUID() }, TOKEN, () => {}, { ...headers, ...extra })).status, 403);
+  }
+  assert.equal((await send(expected)).status, 202);
+  assert.equal((await send(expected)).status, 409);
+  const state = (await request(transport.handler, 'GET', '/__qa/state', null, TOKEN, () => {}, headers)).body;
+  assert.equal(state.observed.sends.length, 1); assert.equal(state.runs.length, 1);
+  const { requestId, scenario, runId, acceptedAt, respondedAt, ...observed } = state.observed.sends[0];
+  assert.equal(typeof requestId, 'string'); assert.equal(scenario, 'COMPLETE'); assert.equal(runId, state.runs[0].runId);
+  assert.equal(typeof acceptedAt, 'number'); assert.equal(typeof respondedAt, 'number');
+  assert.deepEqual(observed, expected, 'only the two declared binding fields differ from the frozen template');
+  assert.equal(state.memoRoundTrip.clientThreadId, binding); assert.equal(fetchSpy.mock.callCount(), 0);
+});
+
+test('Memo runtime binding: invalid setup, external modes and used profiles remain closed; fixed mode has no capability', t => {
+  const ordinary = setup(t), { spec, roomId } = memoRuntimeCase();
+  assert.equal(ordinary.memoRuntimeBinding, undefined);
+  const fixed = setup(t, { memoRoundTrip: spec }); assert.equal(fixed.memoRuntimeBinding, undefined);
+  const create = (memoRoundTrip, memoRuntimeRoomId, env = {}) => {
+    const fixture = createQaFixtureTransport({ profile: ordinary.info.profile, token: TOKEN, memoRoundTrip, memoRuntimeRoomId,
+      env: { ...FIXTURE_ENV, EGDESK_QA_REAL_TURN: '0', ...env } });
+    t.after(() => fixture.dispose()); return fixture;
+  };
+  for (const id of [null, '', 'foreign-room', roomId + '-other']) assert.throws(() => create(spec, id), /Memo runtime binding/);
+  assert.throws(() => create(undefined, roomId), /Memo runtime binding/);
+  for (const patch of [{ expectedRoomProject: undefined }, { clientThreadId: 'qa-another-room' },
+    { expectedRoomProject: { ...spec.send.expectedRoomProject, status: 'connected' } },
+    { expectedRoomProject: { ...spec.send.expectedRoomProject, extra: true } }]) {
+    assert.throws(() => create({ ...spec, send: { ...spec.send, ...patch } }, roomId), /Memo/);
+  }
+  for (const env of [{ EGDESK_QA_REAL_TURN: '1' }, { EGDESK_QA_CLAUDE_FIXTURE: '1' }, { EGDESK_QA_PROJECT_FILE_FIXTURE: '1' }]) {
+    assert.throws(() => create(spec, roomId, env), /Memo/);
+  }
+  // Only owned synthetic profile markers are written; no Firefox or OS input.
+  fs.writeFileSync(path.join(ordinary.info.profile, 'times.json'), '{}', { flag: 'wx' });
+  assert.throws(() => create(spec, roomId), /new, unused QA profile/);
+});
+
+test('Memo runtime binding: native fallback nonce, expiry and disposal cannot rearm or acknowledge after close', async t => {
+  const { spec, roomId } = memoRuntimeCase(), expired = setup(t, { memoRoundTrip: spec, memoRuntimeRoomId: roomId });
+  const binding = freshClientThreadBinding({ id: roomId }, randomUUID());
+  const clock = t.mock.method(Date, 'now', () => spec.deadlineAt + 1);
+  assert.throws(() => expired.memoRuntimeBinding.arm(binding), /Memo runtime binding/);
+  clock.mock.restore();
+  const second = memoRuntimeCase(), closed = setup(t, { memoRoundTrip: second.spec, memoRuntimeRoomId: second.roomId });
+  await closed.dispose();
+  assert.throws(() => closed.memoRuntimeBinding.arm(freshClientThreadBinding({ id: second.roomId }, randomUUID())), /Memo runtime binding/);
+  const third = memoRuntimeCase(), transport = setup(t, { memoRoundTrip: third.spec, memoRuntimeRoomId: third.roomId });
+  const fallback = `${Date.now().toString(36)}-${(0.123456789).toString(36).slice(2)}`;
+  const runtime = freshClientThreadBinding({ id: third.roomId }, fallback);
+  transport.memoRuntimeBinding.arm(runtime);
+  const expected = { ...third.spec.send, clientThreadId: runtime, expectedRoomProject: { ...third.spec.send.expectedRoomProject, roomId: runtime } };
+  const headers = memoHeaders(transport);
+  const pending = request(transport.handler, 'POST', '/chat/send', { ...expected, requestId: randomUUID() }, null, () => {}, headers);
+  await new Promise(resolve => setImmediate(resolve));
+  assert.throws(() => transport.memoRuntimeBinding.arm(runtime), /Memo runtime binding/);
+  assert.equal((await request(transport.handler, 'POST', '/chat/send', { ...expected, requestId: randomUUID() }, null, () => {}, headers)).status, 409);
+  await transport.dispose(); assert.equal((await pending).status, 503);
+});
 const outputRoute = (path, run, itemId) => `${path}?${new URLSearchParams({ conversationId: run.conversationId, runId: run.runId,
   ...(itemId === undefined ? {} : { itemId }) })}`;
 

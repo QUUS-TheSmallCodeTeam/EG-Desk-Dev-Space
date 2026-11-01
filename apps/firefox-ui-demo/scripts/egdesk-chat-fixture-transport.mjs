@@ -8,6 +8,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createHash, createHmac, randomUUID } from 'node:crypto';
 import { Readable } from 'node:stream';
+import { isDeepStrictEqual } from 'node:util';
 import { assertQaFixtureManifest } from './egdesk-chat-qa-profile.mjs';
 import { assertOrdinarySend } from './egdesk-chat-qa-contract.sys.mjs';
 import { createQaContextFixture, seedQaSourceChangeScene, seedQaBriefingCommentsScene } from './egdesk-context-qa-fixture.mjs';
@@ -81,8 +82,75 @@ function assertSubAgentRow(row) {
 }
 
 // Importing this factory starts no service. Unit tests invoke the handler with
-// in-memory requests; only the explicit CLI below is allowed to listen.
-export function createQaFixtureTransport({ profile: profilePath, token, env = process.env }) {
+// in-memory requests; an explicit QA caller/CLI owns any loopback listener.
+// Optional Memo producer: one immutable, synthetic request in one fresh QA
+// session. It reuses COMPLETE and its existing message/run release phases.
+function memoRoundTripOption(value, env, token) {
+  if (value === undefined) return null;
+  const fail = () => { throw new Error('Memo one-shot requires an exact synthetic request, exclusive offline QA and a lease of at most five minutes'); };
+  if (env.EGDESK_QA_FIXTURE_TRANSPORT !== '1' || env.EGDESK_QA_REAL_TURN !== '0'
+      || (env.EGDESK_QA_FIXTURE_TOKEN != null && env.EGDESK_QA_FIXTURE_TOKEN !== token)) fail();
+  if (Object.entries(env).some(([key, flag]) => (/^EGDESK_QA_.*_FIXTURE$/.test(key)
+      || ['EGDESK_QA_STATE_FIXTURES', 'EGDESK_QA_CONTEXT_SOURCE_CHANGE_SEED', 'EGDESK_QA_BRIEFING_COMMENTS_SEED',
+        'EGDESK_QA_BROWSER_NEGATIVE', 'EGDESK_QA_BROWSER_RELAY'].includes(key)) && flag != null && flag !== '' && flag !== '0')) fail();
+  const keys = ['sessionId', 'caseId', 'memoId', 'agentId', 'question', 'deadlineAt', 'send'];
+  if (!value || typeof value !== 'object' || Array.isArray(value) || Object.keys(value).length !== keys.length
+      || keys.some(key => !Object.hasOwn(value, key))) fail();
+  const id = value => typeof value === 'string' && /^[A-Za-z0-9][A-Za-z0-9_.:-]{0,191}$/.test(value);
+  if (typeof value.sessionId !== 'string' || !/^[\da-f]{8}(?:-[\da-f]{4}){3}-[\da-f]{12}$/i.test(value.sessionId)
+      || ![value.caseId, value.memoId, value.agentId].every(id)
+      || typeof value.question !== 'string' || value.question.length > 500 || /[\r\n\0]/.test(value.question)
+      || !value.question.startsWith('SYNTHETIC ') || !value.question.includes(`[${value.caseId}]`)
+      || !Number.isSafeInteger(value.deadlineAt) || value.deadlineAt <= Date.now() || value.deadlineAt > Date.now() + 300000) fail();
+  let send;
+  try { send = JSON.parse(JSON.stringify(value.send)); } catch { fail(); }
+  if (!send || typeof send !== 'object' || Array.isArray(send) || !isDeepStrictEqual(send, value.send)
+      || typeof send.message !== 'string' || send.message.length > 4000 || send.message.includes('\0')
+      || !send.message.endsWith(`\n\n질문: ${value.question}`) || !id(send.clientThreadId)
+      || send.profileEnabled !== true || (send.engineId !== undefined && send.engineId !== 'codex')
+      || ['requestId', 'conversationId', 'projectTarget', 'executionPolicy', 'stateless', 'selectedSources',
+        'attachments', 'briefingInputs', 'inputSources', 'browserTransportId', 'contextResolution'].some(key => Object.hasOwn(send, key))
+      || (send.contextSnapshotIds !== undefined && (!Array.isArray(send.contextSnapshotIds) || send.contextSnapshotIds.length))) fail();
+  const header = send.message.split('\n\n')[0];
+  if (header !== `[메모 · ${value.memoId}]` && header.match(/^\[메모 #[1-9]\d* · ([A-Za-z0-9_.:-]+)\]$/)?.[1] !== value.memoId) fail();
+  const stored = send.profileId === value.agentId && !Object.hasOwn(send, 'agentProfile');
+  const legacy = send.agentProfile?.id === value.agentId && !Object.hasOwn(send, 'profileId');
+  if ((!stored && !legacy) || (send.profileRevision !== undefined && (!Number.isSafeInteger(send.profileRevision) || send.profileRevision < 1))) fail();
+  return Object.freeze({ ...value, send, messageSha256: createHash('sha256').update(send.message).digest('hex') });
+}
+
+export function createQaFixtureTransport({ profile: profilePath, token, env = process.env, memoRoundTrip, memoRuntimeRoomId }) {
+const memoCase = memoRoundTripOption(memoRoundTrip, env, token);
+const memoRuntime = memoRuntimeRoomId !== undefined;
+const runtimeBindingError = () => { throw new Error('Memo runtime binding requires one explicit native nonce for the declared synthetic room, within its original lease'); };
+if (memoRuntime && (!memoCase || typeof memoRuntimeRoomId !== 'string'
+    || !/^qa-[A-Za-z0-9][A-Za-z0-9_.:-]{0,95}$/.test(memoRuntimeRoomId)
+    || memoCase.send.clientThreadId !== memoRuntimeRoomId
+    || !isDeepStrictEqual(memoCase.send.expectedRoomProject, {
+      roomId: memoRuntimeRoomId, status: 'none', source: null, boardId: null, projectId: null, rootId: null,
+    }))) runtimeBindingError();
+let memoExpectedSend = memoCase?.send, memoRuntimeArmed = !memoRuntime;
+let memoUsed = false, memoRunId = null, memoClosed = false;
+const memoUnavailable = () => memoClosed ? 503 : Date.now() >= memoCase.deadlineAt ? 410 : 0;
+const memoEvidence = () => ({ sessionId: memoCase.sessionId, caseId: memoCase.caseId, memoId: memoCase.memoId,
+  agentId: memoCase.agentId, clientThreadId: memoExpectedSend.clientThreadId, deadlineAt: memoCase.deadlineAt,
+  ...(memoRuntime ? { runtimeRoomId: memoRuntimeRoomId, runtimeBindingArmed: memoRuntimeArmed } : {}),
+  messageSha256: memoCase.messageSha256, used: memoUsed, runId: memoRunId, closed: memoClosed });
+// This capability never enters HTTP state. The local QA owner first observes
+// its ready room, then supplies only the native binding; no request learns it.
+const memoRuntimeBinding = memoRuntime ? Object.freeze({ arm(...args) {
+  if (args.length !== 1 || memoUnavailable() || memoRuntimeArmed || memoUsed) runtimeBindingError();
+  const binding = args[0], prefix = `${memoRuntimeRoomId}-binding-`;
+  if (typeof binding !== 'string' || binding.length > 192 || !binding.startsWith(prefix)) runtimeBindingError();
+  const nonce = binding.slice(prefix.length);
+  // chatBindingNonce: crypto.randomUUID(), or base36 Date.now()-Math.random().
+  if (!/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(nonce)
+      && !/^[0-9a-z]{8,11}-[0-9a-z]{0,11}$/.test(nonce)) runtimeBindingError();
+  memoExpectedSend = { ...memoCase.send, clientThreadId: binding,
+    expectedRoomProject: { ...memoCase.send.expectedRoomProject, roomId: binding } };
+  memoRuntimeArmed = true;
+  return Object.freeze(memoEvidence());
+} }) : null;
 if (env.EGDESK_QA_FIRST_CODEX_AUTH_FIXTURE != null && !['0', '1'].includes(env.EGDESK_QA_FIRST_CODEX_AUTH_FIXTURE)) {
   throw new Error('Invalid first Codex auth fixture gate');
 }
@@ -847,6 +915,7 @@ function completeScenario(run) {
   ];
   let index = 0;
   const next = () => {
+    if (memoCase && memoUnavailable()) return;
     if (index < chunks.length) {
       const delta = chunks[index++];
       run.messages.get(messageId).text += delta;
@@ -1117,6 +1186,18 @@ const handler = async (req, res) => {
         || (req.socket?.remoteAddress && !['127.0.0.1', '::ffff:127.0.0.1'].includes(req.socket.remoteAddress))) {
       return json(res, 400, { error: 'Fixture accepts only its loopback origin' });
     }
+    if (memoCase) {
+      if (!guardBridgeRequest(req, PORT)) return json(res, 403, { error: 'Memo fixture requires a trusted loopback initiator' });
+      if (memoClosed) return json(res, 503, { error: 'Memo fixture is closed' });
+      const paths = ['/health', '/v1/state', '/auth/status', '/events', '/chat/state', '/chat/resume', '/chat/send',
+        '/chat/interrupt', '/v1/files/projects/room-default', '/__qa/state', '/__qa/release'];
+      if (!paths.includes(url.pathname)) return json(res, 403, { error: 'Memo fixture has no fallback route' });
+      if (['/chat/send', '/__qa/release'].includes(url.pathname)) {
+        if (url.search) return json(res, 400, { error: 'Memo fixture writes require an exact path' });
+        const status = memoUnavailable();
+        if (status) return json(res, status, { error: 'Memo fixture lease expired' });
+      }
+    }
     if (sourceStatusEnabled && sourceChangeClosing) return json(res, 503, { code: 'QA_FIXTURE_CLOSED', error: 'Source-status fixture is closed' });
     if (sourceChangeReady) {
       if (sourceChangeClosing) return json(res, 503, { code: 'QA_FIXTURE_CLOSED', error: 'Source-change fixture is closed' });
@@ -1221,6 +1302,7 @@ const handler = async (req, res) => {
     if (req.method === 'GET' && url.pathname === '/__qa/state') {
       if (req.headers['x-egdesk-qa-token'] !== token) return json(res, 403, { error: 'Fixture token required' });
       return json(res, 200, { fixture: true, profile, host: HOST, port: PORT, origin, artifactRoot, artifactPath,
+        ...(memoCase ? { memoRoundTrip: memoEvidence() } : {}),
         ...(firstCodexAuthFixture ? { firstCodexAuthFixture: true, firstCodexAuthBoundary } : {}),
         ...(projectFileFixture ? { projectFileFixture: true, providerTurns: 0,
           nativePickerInvocations: 0, nativeProcessSpawns: 0 } : {}),
@@ -1508,6 +1590,14 @@ const handler = async (req, res) => {
       const body = await bodyJson(req);
       const run = runs.get(body.runId);
       if (!run) return json(res, 404, { error: 'Unknown fixture run' });
+      if (memoCase) {
+        const status = memoUnavailable();
+        if (status) return json(res, status, { error: 'Memo fixture lease expired or closed' });
+        if (run.runId !== memoRunId || !['message', 'run'].includes(body.phase) || !isDeepStrictEqual(body, {
+          sessionId: memoCase.sessionId, caseId: memoCase.caseId, memoId: memoCase.memoId,
+          requestId: run.requestId, runId: run.runId, phase: body.phase,
+        })) return json(res, 403, { error: 'Memo release requires the exact accepted session, case, memo and request' });
+      }
       if (body.phase === 'claude-rate-rejected' && run.engineId === 'claude' && run.fixtureStage === 'claude-rate-warning') claudeRateLimit(run, true);
       else if (body.phase === 'message' && run.fixtureStage === 'streaming-visible') run.releaseMessage();
       else if (body.phase === 'approval' && run.fixtureStage === 'approval-reply-sent') {
@@ -1678,6 +1768,10 @@ const handler = async (req, res) => {
     }
     if (req.method === 'POST' && url.pathname === '/chat/resume') {
       const body = await bodyJson(req);
+      if (memoCase && (body.clientThreadId !== memoExpectedSend.clientThreadId
+          || !memoRunId || body.conversationId !== runs.get(memoRunId)?.conversationId)) {
+        return json(res, 403, { error: 'Memo resume requires its accepted thread and conversation' });
+      }
       let sourceChangeResume;
       if (sourceChangeScene) {
         const seed = sourceChangeScene.identities.find(row => row.conversationId === body.conversationId);
@@ -1743,7 +1837,17 @@ const handler = async (req, res) => {
             && run.engineId === 'claude' && run.clientThreadId === body.clientThreadId)) return json(res, 409, {
           code: 'ENGINE_MISMATCH', error: 'Unknown Claude fixture conversation binding' });
       } else if (body.engineId && body.engineId !== 'codex') return json(res, 409, { code: 'ENGINE_UNAVAILABLE', error: 'Claude fixture is not enabled' });
-      const matchedScenario = body.message.match(SCENARIO)?.[1]
+      let matchedScenario;
+      if (memoCase) {
+        const status = memoUnavailable();
+        if (status) return json(res, status, { error: 'Memo fixture lease expired or closed' });
+        if (!memoRuntimeArmed) return json(res, 409, { error: 'Memo runtime binding has not been explicitly armed' });
+        if (memoUsed) return json(res, 409, { error: 'Memo one-shot was already consumed' });
+        const { requestId, ...candidate } = body;
+        if (typeof requestId !== 'string' || !/^[A-Za-z0-9][A-Za-z0-9_.:-]{0,191}$/.test(requestId)
+            || !isDeepStrictEqual(candidate, memoExpectedSend)) return json(res, 403, { error: 'Memo send differs from the exact configured request' });
+        matchedScenario = 'COMPLETE';
+      } else matchedScenario = body.message.match(SCENARIO)?.[1]
         || (runOutputsFixture && body.message.match(/^EGDESK_QA_(RUN_OUTPUTS(?:_LOST)?)\b/)?.[1]);
       if (!matchedScenario) {
         return json(res, 400, { error: 'Fixture accepts only explicit EGDESK_QA_* messages' });
@@ -1783,6 +1887,7 @@ const handler = async (req, res) => {
         scenario = 'TEXT_ONLY';
       }
       const number = ++turnCounter;
+      if (memoCase) memoUsed = true;
       const conversationId = body.conversationId || `qa-conversation-${number}`;
       const requestId = body.requestId || `qa-request-${number}`;
       const runId = `qa-run-${number}`;
@@ -1810,6 +1915,7 @@ const handler = async (req, res) => {
         run.fixtureStage = 'context-bound';
       }
       runs.set(runId, run);
+      if (memoCase) memoRunId = runId;
       const observedSend = { ...body, scenario, runId, acceptedAt: Date.now() };
       observed.sends.push(observedSend);
       envelope(run, 'run.started'); // Deliberately before the POST response.
@@ -1819,6 +1925,7 @@ const handler = async (req, res) => {
       // exist, and the ACK must not restart it or discard a later delta.
       if (scenario === 'STOP') stopScenario(run);
       setTimeout(() => {
+        if (memoCase && memoUnavailable()) return json(res, memoUnavailable(), { accepted: false, error: 'Memo fixture expired or closed before acknowledgement' });
         json(res, 202, { accepted: true, conversationId, requestId, runId, answerId: run.answerId });
         observedSend.respondedAt = Date.now();
         if (runOutputsFixture?.accepts(scenario)) runOutputsFixture.seed(run);
@@ -1932,6 +2039,11 @@ const handler = async (req, res) => {
   }
 };
 const dispose = () => {
+  if (memoCase) {
+    memoClosed = true;
+    for (const client of clients) { try { client.end(); } catch {} }
+    clients.clear();
+  }
   sourceChangeClosing = true;
   for (const recovery of commentRecoveryGets.values()) clearCommentRecovery(recovery, 'server-close');
   for (const entry of new Set([...commentArms.values(), ...commentPending])) cancelComment(entry, 'server-close');
@@ -1953,7 +2065,9 @@ const dispose = () => {
   portableTransferFixture?.dispose();
   return projectFileFixture?.dispose();
 };
-return { handler, dispose, ...(taskGateReady || originFileReady || sourceChangeReady ? { ready: taskGateReady || originFileReady || sourceChangeReady } : {}), info: { kind: 'egdesk-qa-fixture-ready', host: HOST, port: PORT,
+return { handler, dispose, ...(memoRuntimeBinding ? { memoRuntimeBinding } : {}),
+  ...(taskGateReady || originFileReady || sourceChangeReady ? { ready: taskGateReady || originFileReady || sourceChangeReady } : {}), info: { kind: 'egdesk-qa-fixture-ready', host: HOST, port: PORT,
+  ...(memoCase ? { memoRoundTrip: memoEvidence(), providerIntegration: 'none-configured' } : {}),
   ...(firstCodexAuthFixture ? { firstCodexAuthFixture: true, firstCodexAuthBoundary } : {}),
   ...(projectFileFixture ? projectFileFixture.info : {}),
   ...(claudeFixture ? { claudeFixture: true, claudeReaderFixture, providerTurns: 0 } : {}),
