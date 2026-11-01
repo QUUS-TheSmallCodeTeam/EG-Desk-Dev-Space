@@ -18513,7 +18513,7 @@ function requestProjectSurfaceConstants() {
   const end = surfaceSource.indexOf('\n  function normalizeChatRequestProjectDraft(', start);
   assert.ok(start >= 0 && end > start);
   return compileFunction(surfaceSource.slice(start, end)
-    + '\nreturn { chatRequestProjectDisplays, chatRequestProjectDisplayScopes, chatRoomProjectDefaults, chatProjectDraftActions, memoManualSendNotices, chatRoomProjectPreparations, fileProjectAssociations, CHAT_REQUEST_PROJECT_INVALID, CHAT_REQUEST_PROJECT_CONNECT, CHAT_ROOM_PROJECT_UNAVAILABLE };')();
+    + '\nreturn { chatRequestProjectDisplays, chatRequestProjectDisplayScopes, chatRoomProjectDefaults, chatProjectDraftActions, memoManualSendNotices, chatEditedDraftNotices: typeof chatEditedDraftNotices === "undefined" ? new Map() : chatEditedDraftNotices, chatRoomProjectPreparations, fileProjectAssociations, CHAT_REQUEST_PROJECT_INVALID, CHAT_REQUEST_PROJECT_CONNECT, CHAT_ROOM_PROJECT_UNAVAILABLE };')();
 }
 
 function actualProjectSendBlock() {
@@ -18804,6 +18804,7 @@ function requestProjectSendHarness({ target, capture, reply, roomRead, memoAgent
     owner: (id = 'room') => { const owner = captureManualSendOwner(id); assert.ok(owner); return owner; },
     reservation: (current = () => true, id = 'room') => { const scope = memoScopeBridge.createMemoAskScope(id); assert.ok(scope); return { binding: Chat.clientThreadBinding(getThread(null, id)), scope, current }; },
     notice: id => !!constants.memoManualSendNotices.get(id)?.current(),
+    editedNotice: id => !!constants.chatEditedDraftNotices.get(id)?.current(),
     setRoomReader: reader => { roomReader = reader; },
     projectScope: () => { const scope = deps.createChatProjectScope('room', epoch); scope.finish(); return scope; },
     setTarget: target => setTarget('room', target),
@@ -18963,6 +18964,115 @@ test('ordinary chat: a valid same-room reservation stops a successful project re
   typeOrdinaryDraft(h, 'newer words');
   assert.equal((await h.send({ manualOwner: owner })).accepted, true); assert.equal(h.calls.provider.length, 1);
   assert.equal(h.calls.provider[0].message, 'newer words'); assert.equal(h.calls.provider[0].expectedRoomProject.roomId, 'original-wire-room');
+});
+
+
+test('draft recheck notice: text-only edit in the same owner retains error and needs explicit resend', async () => {
+  const pending = requestProjectDeferred();
+  const h = requestProjectSendHarness({ roomRead: () => pending.promise });
+  h.thread().sendError = 'existing error';
+  const selected = structuredClone(h.thread().inputSources), owner = h.owner();
+  const sending = h.send({ manualOwner: owner }); await settle();
+  assert.equal(h.roomCalls.length, 1);
+  typeOrdinaryDraft(h, 'newer words');
+  pending.resolve({ ok: true, result: { roomId: 'original-wire-room', inheritance: null, override: null, project: null, source: null, status: 'none' } });
+  await sending;
+  assert.equal(h.calls.provider.length, 0); assert.equal(Object.keys(h.protocol.requests).length, 0);
+  assert.equal(h.thread().messages.length, 0); assert.equal(h.state.codex.threadDrafts.room, 'newer words');
+  assert.deepEqual(h.thread().inputSources, selected); assert.equal(h.thread().sendError, 'existing error');
+  assert.equal(h.notice('room'), false, 'this is not a memo reservation');
+  assert.equal(h.editedNotice('room'), true, 'the interrupted attempt is visible separately');
+  await settle(); assert.equal(h.calls.provider.length, 0, 'no automatic retry');
+  assert.equal((await h.send({ manualOwner: owner })).accepted, true);
+  assert.equal(h.editedNotice('room'), false); assert.equal(h.calls.provider.length, 1);
+  assert.equal(h.calls.provider[0].message, 'newer words');
+});
+
+test('draft recheck notice: the actual separate status preserves the existing error and has no reservation wording', () => {
+  const start = surfaceSource.indexOf('        const editedDraftNotice = ');
+  const end = surfaceSource.indexOf('        const noticeIds = ', start);
+  assert.ok(start >= 0 && end > start, 'the production status rendering exists');
+  const render = compileFunction(surfaceSource.slice(start, end), ['chatEditedDraftNotices', 'activeThread', 'conversation', 'el']);
+  const existing = { text: 'existing error' }, children = [existing];
+  const conversation = { appendChild: node => children.push(node) };
+  const el = (tag, attributes, text) => ({ tag, attributes, text });
+  const notices = new Map([['room', { current: () => true }]]);
+  render(notices, { id: 'room' }, conversation, el);
+  assert.equal(children[0], existing); assert.equal(children.length, 2);
+  assert.equal(children[1].attributes.role, 'status'); assert.equal(children[1].attributes.data.testid, 'chat-edited-draft-notice');
+  assert.match(children[1].text, /보내지 않았습니다/); assert.doesNotMatch(children[1].text, /메모|예약/);
+  notices.set('room', { current: () => false }); render(notices, { id: 'room' }, conversation, el);
+  assert.equal(children.length, 2, 'invalidated authority renders no notice');
+});
+
+test('draft recheck notice: other causes never claim a text-only interruption', async t => {
+  for (const mode of ['attachment', 'target', 'context-selection', 'context-ABA', 'browser-attachment', 'room', 'account', 'permission', 'access-denied', 'access-ABA', 'initial-denied', 'initial-quota', 'initial-unknown', 'not-manual', 'reservation', 'project-change', 'read-failure']) await t.test(mode, async () => {
+    const pending = requestProjectDeferred();
+    const h = requestProjectSendHarness({ memoAgentRoom: true,
+      inputSources: mode === 'browser-attachment' ? [{ id: 'browser', kind: 'browser', selectedByUser: true, browserToolPermission: 'observe' }] : [],
+      roomRead: () => pending.promise });
+    h.thread().sendError = 'existing error';
+    if (mode.startsWith('access-')) h.state.codex.authStatus = { ...h.state.codex.authStatus, access: { state: 'ok' } };
+    if (mode.startsWith('initial-')) h.state.codex.authStatus = { ...h.state.codex.authStatus,
+      access: { state: mode === 'initial-denied' ? 'permissionDenied' : mode === 'initial-quota' ? 'quotaExhausted' : 'unknown' } };
+    if (mode === 'project-change') {
+      const value = roomProjectDefault(requestProjectA(), { roomId: 'original-wire-room' });
+      h.chatRoomProjectDefaults.set('room', { binding: 'original-wire-room', scope: h.projectScope(), status: 'ready', value });
+    }
+    const owner = mode === 'not-manual' ? null : h.owner(), sending = owner ? h.send({ manualOwner: owner }) : h.send(); await settle();
+    assert.equal(h.roomCalls.length, 1);
+    if (mode === 'reservation') { clearComposerForMemo(h); reserveEmptyMemoRoom(h); }
+    typeOrdinaryDraft(h, 'newer words');
+    if (mode === 'attachment') h.thread().inputSources = [{ id: 'different', kind: 'board-element' }];
+    if (mode === 'target') h.thread().requestProjectTarget = requestProjectB();
+    if (mode.startsWith('context-')) {
+      h.state.contextSuggest = { byThread: { room: { picked: ['different'] } } }; h.emit();
+      if (mode === 'context-ABA') { h.state.contextSuggest = { byThread: {} }; h.emit(); }
+    }
+    if (mode === 'room') { h.state.codex.activeThreadId = 'other'; h.state.codex.activityRoomGeneration = 1; h.emit(); h.state.codex.activeThreadId = 'room'; h.emit(); }
+    if (mode === 'account') { const original = h.state.codex.authStatus; h.state.codex.authStatus = { ...original, accountEmail: 'other@example.test' }; h.emit(); h.state.codex.authStatus = original; h.emit(); }
+    if (mode === 'permission') { h.state.codex.connected = false; h.emit(); }
+    if (mode.startsWith('access-')) {
+      h.state.codex.authStatus = { ...h.state.codex.authStatus, access: { state: 'permissionDenied' } }; h.emit();
+      if (mode === 'access-ABA') { h.state.codex.authStatus = { ...h.state.codex.authStatus, access: { state: 'ok' } }; h.emit(); }
+    }
+    if (mode === 'read-failure') pending.reject(new Error('synthetic project read failure'));
+    else pending.resolve({ ok: true, result: mode === 'project-change' ? roomProjectDefault(requestProjectB(), { roomId: 'original-wire-room' })
+      : { roomId: 'original-wire-room', inheritance: null, override: null, project: null, source: null, status: 'none' } });
+    await sending;
+    assert.equal(h.calls.provider.length, 0); assert.equal(Object.keys(h.protocol.requests).length, 0);
+    assert.equal(h.thread().messages.length, 0); assert.equal(h.state.codex.threadDrafts.room, 'newer words');
+    assert.equal(h.thread().sendError, 'existing error'); assert.equal(h.notice('room'), false);
+    assert.equal(h.editedNotice('room'), false, mode);
+  });
+});
+
+test('draft recheck notice: accepted or uncertain delivery is never relabeled as unsent', async t => {
+  for (const result of ['accepted', 'unknown']) await t.test(result, async () => {
+    const pending = requestProjectDeferred(), h = requestProjectSendHarness({ inputSources: [], reply: () => pending.promise });
+    const sending = h.send({ manualOwner: h.owner() }); await settle();
+    assert.equal(h.calls.provider.length, 1);
+    typeOrdinaryDraft(h, 'newer words');
+    if (result === 'accepted') pending.resolve({ accepted: true, conversationId: 'native', runId: 'run', answerId: 'native/run' });
+    else pending.reject(new Error('synthetic unknown delivery'));
+    await sending; assert.equal(h.calls.provider.length, 1); assert.equal(h.editedNotice('room'), false);
+    assert.equal(h.state.codex.threadDrafts.room, 'newer words');
+  });
+});
+
+test('draft recheck notice: a displayed notice cannot return across room, account, permission or selection ABA', async t => {
+  for (const mode of ['room', 'account', 'access', 'selection']) await t.test(mode, async () => {
+    const pending = requestProjectDeferred(), h = requestProjectSendHarness({ roomRead: () => pending.promise });
+    if (mode === 'access') h.state.codex.authStatus = { ...h.state.codex.authStatus, access: { state: 'ok' } };
+    const sending = h.send({ manualOwner: h.owner() }); await settle(); typeOrdinaryDraft(h, 'newer words');
+    pending.resolve({ ok: true, result: { roomId: 'original-wire-room', inheritance: null, override: null, project: null, source: null, status: 'none' } });
+    await sending; assert.equal(h.editedNotice('room'), true);
+    if (mode === 'room') { h.state.codex.activeThreadId = 'other'; h.state.codex.activityRoomGeneration = 1; h.emit(); h.state.codex.activeThreadId = 'room'; h.emit(); }
+    else if (mode === 'account') { const original = h.state.codex.authStatus; h.state.codex.authStatus = { ...original, accountEmail: 'other@example.test' }; h.emit(); h.state.codex.authStatus = original; h.emit(); }
+    else if (mode === 'access') { h.state.codex.authStatus = { ...h.state.codex.authStatus, access: { state: 'permissionDenied' } }; h.emit(); h.state.codex.authStatus = { ...h.state.codex.authStatus, access: { state: 'ok' } }; h.emit(); }
+    else { h.state.contextSuggest = { byThread: { room: { picked: ['different'] } } }; h.emit(); h.state.contextSuggest = { byThread: {} }; h.emit(); }
+    assert.equal(h.editedNotice('room'), false); assert.equal(h.calls.provider.length, 0);
+  });
 });
 
 test('ordinary chat: a changed project-check draft is not mislabeled as a reservation interruption', async () => {

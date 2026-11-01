@@ -1825,6 +1825,7 @@
   const chatProjectDraftActions = new Map();
   const memoAskSendReservations = new Map();
   const memoManualSendNotices = new Map();
+  const chatEditedDraftNotices = new Map();
   const chatRoomProjectPreparations = new WeakMap();
   const fileProjectAssociations = new WeakMap();
   const CHAT_REQUEST_PROJECT_INVALID = '실행 프로젝트를 다시 선택하거나 제거한 뒤 보내세요.';
@@ -10725,7 +10726,11 @@
         if (memoSendNotice?.current()) conversation.appendChild(el('div', {
           class: 'egd-codex-error egd-codex-send-notice', role: 'status', data: { testid: 'chat-memo-send-blocked' },
         }, '메모 질문을 준비 중이라 이 메시지는 보내지 않았습니다. 초안은 그대로입니다.'));
-        const noticeIds = new Set(['chat-local-history-coverage', 'chat-local-history-error', 'chat-binding-held',
+        const editedDraftNotice = chatEditedDraftNotices.get(activeThread.id);
+        if (editedDraftNotice?.current()) conversation.appendChild(el('div', {
+          class: 'egd-codex-error egd-codex-send-notice', role: 'status', data: { testid: 'chat-edited-draft-notice' },
+        }, '입력이 바뀌어 확인 중이던 요청은 보내지 않았습니다. 내용을 확인한 뒤 직접 다시 보내세요.'));
+        const noticeIds = new Set(['chat-edited-draft-notice', 'chat-local-history-coverage', 'chat-local-history-error', 'chat-binding-held',
           'chat-agent-unavailable', 'chat-run-rate-limit', 'chat-run-error', 'chat-reconcile', 'chat-send-notice', 'chat-memo-send-blocked']);
         const notices = Array.from(conversation.children).filter(node => noticeIds.has(node.dataset.testid));
         if (notices.length) {
@@ -11113,6 +11118,8 @@
     // it later changes back to the same visible values (ABA).
     const memoReadWatches = new Map();
     const manualOwnerWatches = new Map();
+    // This extra fence is used only for the explanatory notice, not for send authorization.
+    const editedDraftAuthorityWatches = new Map();
     const memoReadIdentity = threadId => {
       const thread = getCodexThreadById(state.codex, threadId), auth = state.codex.authStatus;
       if (!thread) return null;
@@ -11146,17 +11153,21 @@
           auth?.accountId, auth?.accountEmail, auth?.authMode, auth?.isLoggedIn, auth?.identityStatus, state.codex.connected]);
       } catch { return null; }
     };
+    const memoWatchIdentity = (threadId, ownerOnly, includeAccess) => {
+      const identity = ownerOnly ? manualOwnerIdentity(threadId) : memoReadIdentity(threadId);
+      return !identity || !includeAccess ? identity : JSON.stringify([identity, state.codex.authStatus?.access?.state ?? null]);
+    };
     const observeMemoReadWatch = entry => {
-      const identity = entry.ownerOnly ? manualOwnerIdentity(entry.threadId) : memoReadIdentity(entry.threadId);
+      const identity = memoWatchIdentity(entry.threadId, entry.ownerOnly, entry.includeAccess);
       if (identity !== entry.identity) { entry.identity = identity; entry.revision++; }
     };
-    const watchMemoRead = (threadId, { ownerOnly = false } = {}) => {
-      const watches = ownerOnly ? manualOwnerWatches : memoReadWatches;
+    const watchMemoRead = (threadId, { ownerOnly = false, includeAccess = false } = {}) => {
+      const watches = includeAccess ? editedDraftAuthorityWatches : ownerOnly ? manualOwnerWatches : memoReadWatches;
       let entry = watches.get(threadId);
       if (!entry) {
-        entry = { threadId, ownerOnly, identity: ownerOnly ? manualOwnerIdentity(threadId) : memoReadIdentity(threadId), revision: 0, owners: 0 };
+        entry = { threadId, ownerOnly, includeAccess, identity: memoWatchIdentity(threadId, ownerOnly, includeAccess), revision: 0, owners: 0 };
         watches.set(threadId, entry);
-        if (ownerOnly) { entry.ownerKey = Symbol('manual-send-owner'); memoReadWatches.set(entry.ownerKey, entry); }
+        if (ownerOnly || includeAccess) { entry.ownerKey = Symbol('manual-send-owner'); memoReadWatches.set(entry.ownerKey, entry); }
       } else observeMemoReadWatch(entry);
       const revision = entry.revision;
       entry.owners++;
@@ -12380,30 +12391,32 @@
       } finally { epochScope.finish(token); }
     };
 
-    const clearMemoManualSendNotice = threadId => {
-      const notice = memoManualSendNotices.get(threadId);
+    const clearMemoManualSendNotice = (threadId, kind = 'memo') => {
+      const notices = kind === 'draft-edited' ? chatEditedDraftNotices : memoManualSendNotices;
+      const notice = notices.get(threadId);
       if (!notice) return false;
-      memoManualSendNotices.delete(threadId);
+      notices.delete(threadId);
       window.clearTimeout(notice.timer);
       notice.scope.finish();
       notice.watch.release();
       return true;
     };
-    const showMemoManualSendNotice = thread => {
+    const showMemoManualSendNotice = (thread, kind = 'memo') => {
       if (!thread || state.codex.activeThreadId !== thread.id) return;
+      const notices = kind === 'draft-edited' ? chatEditedDraftNotices : memoManualSendNotices;
       const scope = createChatProjectScope(thread.id, epochScope);
       if (!scope) return;
-      const watch = watchMemoRead(thread.id), binding = ChatState.clientThreadBinding(thread);
-      const roomGeneration = state.codex.activityRoomGeneration || 0;
-      clearMemoManualSendNotice(thread.id);
+      const watch = watchMemoRead(thread.id, kind === 'draft-edited' ? { includeAccess: true } : undefined);
+      const binding = ChatState.clientThreadBinding(thread), roomGeneration = state.codex.activityRoomGeneration || 0;
+      clearMemoManualSendNotice(thread.id, kind);
       const notice = { scope, watch, timer: 0,
         current: () => scope.current() && !scope.signal.aborted && watch.current()
           && state.codex.activeThreadId === thread.id && (state.codex.activityRoomGeneration || 0) === roomGeneration
           && ChatState.clientThreadBinding(getCodexThreadById(state.codex, thread.id)) === binding };
-      memoManualSendNotices.set(thread.id, notice);
+      notices.set(thread.id, notice);
       notice.timer = window.setTimeout(() => {
-        if (memoManualSendNotices.get(thread.id) !== notice) return;
-        clearMemoManualSendNotice(thread.id);
+        if (notices.get(thread.id) !== notice) return;
+        clearMemoManualSendNotice(thread.id, kind);
         if (state.codex.activeThreadId === thread.id) emit();
       }, 7000);
       emit();
@@ -12859,7 +12872,7 @@
         }
         emit();
       },
-      async prepareRoomProjectSend(threadId, previous, ownerCurrent = () => true) {
+      async prepareRoomProjectSend(threadId, previous, ownerCurrent = () => true, onEditedDraft = null) {
         const thread = getCodexThreadById(state.codex, threadId);
         const scope = this.createProjectScope(threadId);
         if (!scope || !ownerCurrent() || chatProjectDraftActions.get(threadId)?.scope.current()) { scope?.finish(); return false; }
@@ -12872,9 +12885,17 @@
           if (draft.requestProjectTarget) return false;
           const value = await this.readRoomProjectDefault(threadId, { force: true, supersede: true });
           const current = getCodexThreadById(state.codex, threadId);
-          if (!scope.current() || !ownerCurrent() || state.codex.activeThreadId !== threadId
-              || !ChatState.chatDraftMatches(current, state.codex.threadDrafts[threadId] || '', state.codex.threadDraftRevisions[threadId] || 0, draft)) return false;
+          if (!scope.current() || !ownerCurrent() || state.codex.activeThreadId !== threadId) return false;
           const latest = chatRoomProjectState(current);
+          const text = state.codex.threadDrafts[threadId] || '';
+          if (!ChatState.chatDraftMatches(current, text, state.codex.threadDraftRevisions[threadId] || 0, draft)) {
+            // Only a successful, unchanged project recheck and a text-only edit
+            // explain this return. Attachments, project and ownership stay fenced.
+            if (text !== draft.text && ChatState.chatDraftMatches(current, draft.text, draft.revision, draft)
+                && latest?.status === 'ready' && latest.value === value && ['none', 'connected'].includes(value.status)
+                && (chatRoomProjectTargetsMatch(previous, value) || (!previous && value.status === 'none'))) onEditedDraft?.();
+            return false;
+          }
           if (latest?.status !== 'ready' || latest.value !== value) return false;
           if (!['none', 'connected'].includes(value.status)) throw new Error(CHAT_ROOM_PROJECT_UNAVAILABLE);
           if (!chatRoomProjectTargetsMatch(previous, value) && (previous || value.status !== 'none')) {
@@ -14169,6 +14190,8 @@
               || typeof owner.current === 'function' && !owner.current())) return;
         } catch { return; }
         const sendOwnerWatch = !options.memoAskReservation && activeThread ? watchMemoRead(activeThread.id, { ownerOnly: true }) : null;
+        const editedDraftWatch = owner && !options.memoAskReservation && activeThread
+          ? watchMemoRead(activeThread.id, { includeAccess: true }) : null;
         const sendRoomGeneration = state.codex.activityRoomGeneration || 0;
         const sendBinding = ChatState.clientThreadBinding(activeThread);
         const sendIdentityCurrent = () => !sendOwnerWatch || sendOwnerWatch.current();
@@ -14185,7 +14208,11 @@
           if (reservation && !options.memoAskReservation) showMemoManualSendNotice(activeThread);
           return;
         }
-        if (!options.memoAskReservation && clearMemoManualSendNotice(activeThread?.id)) emit();
+        if (!options.memoAskReservation) {
+          const clearedMemo = clearMemoManualSendNotice(activeThread?.id);
+          const clearedEdited = owner && clearMemoManualSendNotice(activeThread?.id, 'draft-edited');
+          if (clearedMemo || clearedEdited) emit();
+        }
         const memoSendCurrent = () => {
           try { return reservation ? memoAskSendReservations.get(activeThread.id) === reservation && reservation.current()
             : !memoAskSendReservations.has(activeThread?.id); }
@@ -14304,7 +14331,15 @@
         let expectedRoomProject = null;
         if (!submittedDraft.requestProjectTarget) {
           if (!defaultSendCurrent()) { epochScope.finish(token); return; }
-          const observed = await state.codexBridge.prepareRoomProjectSend(activeThread.id, submittedRoomDefault, sendOwnerCurrent);
+          const observed = await state.codexBridge.prepareRoomProjectSend(activeThread.id, submittedRoomDefault, sendOwnerCurrent, () => {
+            const access = state.codex.authStatus?.access?.state;
+            if (owner && !reservation && !options.memoAskReservation && editedDraftWatch?.current()
+                && (access == null || access === 'ok')
+                && !selectedInputs.some(input => input.kind === 'browser')
+                && sendOwnerCurrent() && defaultSendCurrent() && memoSendCurrent()) {
+              showMemoManualSendNotice(getCodexThreadById(state.codex, activeThread.id), 'draft-edited');
+            }
+          });
           if (!observed || !defaultSendCurrent() || !sendOwnerCurrent()) { epochScope.finish(token); return; }
           if (memoSendBlocked()) { epochScope.finish(token); return; }
           try { expectedRoomProject = snapshotChatRoomProjectExpectation(observed, projectBinding); }
@@ -14455,7 +14490,7 @@
           }
           return { requestId, accepted: request.status === 'accepted' && !!request.runId, status: request.status };
         } finally { epochScope.finish(token); if (epochScope.valid(token)) emit(); }
-        } finally { sendOwnerWatch?.release(); }
+        } finally { editedDraftWatch?.release(); sendOwnerWatch?.release(); }
       },
     };
   }

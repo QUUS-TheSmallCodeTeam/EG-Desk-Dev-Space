@@ -125,8 +125,10 @@ test('old failed requests do not relabel later stop or history errors; unconfirm
   const block = between('        const threadRequests = Object.values(codex.chatProtocol.requests)', '\n        const status =');
   const select = compileFunction(`${block}\nreturn pending;`, ['codex', 'ChatState', 'activeThread']);
   const noticeBlock = between('        if (activeThread.sendError) {', '\n        const noticeIds =');
-  const renderNotice = compileFunction(`${noticeBlock}\nreturn conversation;`, ['activeThread', 'ChatState', 'conversation', 'el', 'sendNoticeDetailsThreadId', 'memoManualSendNotices']);
+  const renderNotice = compileFunction(`${noticeBlock}\nreturn conversation;`,
+    ['activeThread', 'ChatState', 'conversation', 'el', 'sendNoticeDetailsThreadId', 'memoManualSendNotices', 'chatEditedDraftNotices']);
   const memoManualSendNotices = new Map();
+  const chatEditedDraftNotices = new Map();
   const room = { id: 'room' };
   const state = requests => select({ chatProtocol: { requests } }, ChatState, room);
   const oldFailed = { localThreadId: 'room', status: 'failed' };
@@ -134,7 +136,7 @@ test('old failed requests do not relabel later stop or history errors; unconfirm
   for (const error of ['중지 여부를 확인하지 못했습니다: timeout', '상태를 확인하지 못했습니다: history unavailable',
     'Error: history refresh failed\nprovider detail']) {
     const conversation = el('div');
-    renderNotice({ ...room, sendError: error }, ChatState, conversation, el, null, memoManualSendNotices);
+    renderNotice({ ...room, sendError: error }, ChatState, conversation, el, null, memoManualSendNotices, chatEditedDraftNotices);
     const notice = conversation.children[0];
     assert.doesNotMatch(text(notice), /메시지를 보내지 못했습니다/);
     assert.ok(text(notice).includes(error), 'the original error remains visible or expandable');
@@ -143,7 +145,7 @@ test('old failed requests do not relabel later stop or history errors; unconfirm
   const unknown = { localThreadId: 'room', status: 'unconfirmed' };
   assert.equal(state({ a: oldFailed, b: unknown }), unknown);
   const unrelated = el('div');
-  renderNotice({ ...room, sendError: 'Error: stop request failed' }, ChatState, unrelated, el, null, memoManualSendNotices);
+  renderNotice({ ...room, sendError: 'Error: stop request failed' }, ChatState, unrelated, el, null, memoManualSendNotices, chatEditedDraftNotices);
   assert.equal(text(unrelated.children[0].children[0]), '문제가 발생했습니다. 자세히를 확인해 주세요.');
   assert.match(source, /pending\?\.status === 'unconfirmed'[\s\S]*?testid: 'chat-reconcile'/);
   assert.match(source, /\['error', 'failed'\]\.includes\(message\.status\) \? 'egd-codex-bubble-error'/);
@@ -153,10 +155,11 @@ test('old failed requests do not relabel later stop or history errors; unconfirm
 test('a current memo-send notice stays distinct from the original room error', () => {
   const block = between('        if (activeThread.sendError) {', '\n        const noticeIds =');
   const render = compileFunction(`${block}\nreturn conversation;`,
-    ['activeThread', 'ChatState', 'conversation', 'el', 'sendNoticeDetailsThreadId', 'memoManualSendNotices']);
+    ['activeThread', 'ChatState', 'conversation', 'el', 'sendNoticeDetailsThreadId', 'memoManualSendNotices', 'chatEditedDraftNotices']);
   const error = 'Error: history refresh failed\nprovider detail';
   const room = { id: 'room', sendError: error };
-  const check = notices => render(room, ChatState, el('div'), el, null, notices);
+  const chatEditedDraftNotices = new Map();
+  const check = notices => render(room, ChatState, el('div'), el, null, notices, chatEditedDraftNotices);
   const shown = check(new Map([['room', { current: () => true }]]));
   assert.equal(shown.children.length, 2);
   assert.equal(shown.children[0].props.role, 'alert');
@@ -172,6 +175,147 @@ test('a current memo-send notice stays distinct from the original room error', (
     assert.ok(text(hidden.children[0]).includes(error));
   }
   assert.equal(room.sendError, error);
+});
+
+// Run the production project-recheck callback, notice lifetime and notice
+// renderer together. The project reply, clock and authority scopes are local
+// fixtures; this does not run a provider or exercise a browser send button.
+function editedDraftNoticeFixture() {
+  const error = 'Error: history refresh failed\nprovider detail';
+  const room = { id: 'room', clientBindingId: 'wire-room', inputSources: [], briefingInputs: [], messages: [], sendError: error };
+  const other = { id: 'other-room', clientBindingId: 'wire-other', inputSources: [], briefingInputs: [], messages: [], sendError: '다른 방 오류' };
+  const state = { codex: { threads: [room, other], activeThreadId: room.id, activityRoomGeneration: 0,
+    threadDrafts: { [room.id]: '원래 초안', [other.id]: '다른 초안' }, threadDraftRevisions: { [room.id]: 1, [other.id]: 1 } } };
+  const memoManualSendNotices = new Map(), chatEditedDraftNotices = new Map(), timers = new Map(), watches = [];
+  const flags = { owner: true, scope: true, watch: true, editedWatch: true };
+  let nextTimer = 0, reads = 0, emissions = 0, onEdited = 0, releaseRead;
+  const pendingRead = new Promise(resolve => { releaseRead = resolve; });
+  const value = { roomId: 'wire-room', status: 'none', source: null, inheritance: null, override: null, project: null };
+  const window = { setTimeout: (fn, ms) => { const id = ++nextTimer; timers.set(id, { fn, ms }); return id; },
+    clearTimeout: id => timers.delete(id) };
+  const scope = () => ({ signal: { aborted: false }, current: () => flags.scope, finish() {} });
+  const lookup = compileFunction(`${between('  function getCodexThreadById(', '\n  function getActiveCodexThread(')}\nreturn getCodexThreadById;`, [])();
+  const watchMemoRead = (threadId, options) => {
+    watches.push({ threadId, options });
+    return { current: () => flags.watch && (options?.includeAccess !== true || flags.editedWatch), release() {} };
+  };
+  const emit = () => { emissions++; };
+  const noticeBlock = between('    const clearMemoManualSendNotice = ', '\n\n    connect();');
+  const notices = compileFunction(`${noticeBlock}\nreturn { showMemoManualSendNotice, clearMemoManualSendNotice };`,
+    ['memoManualSendNotices', 'chatEditedDraftNotices', 'window', 'state', 'createChatProjectScope', 'epochScope',
+      'watchMemoRead', 'ChatState', 'getCodexThreadById', 'emit'])(memoManualSendNotices, chatEditedDraftNotices,
+    window, state, scope, {}, watchMemoRead, ChatState, lookup, emit);
+  const defaults = new Map(), actions = new Map();
+  const roomState = compileFunction(`${between('  function chatRoomProjectState(', '\n  function createChatProjectScope(')}\nreturn chatRoomProjectState;`,
+    ['chatRoomProjectDefaults', 'ChatState'])(defaults, ChatState);
+  const targetsMatch = compileFunction(`${between('  function chatRoomProjectTargetsMatch(', '\n  function observeFileProjectAssociation(')}\nreturn chatRoomProjectTargetsMatch;`, [])();
+  const prepareBlock = between('      async prepareRoomProjectSend(', '\n      async saveRoomProjectDefault(');
+  const deps = { state, ChatState, getCodexThreadById: lookup, chatProjectDraftActions: actions, emit,
+    normalizeChatRoomProjectDefault: () => assert.fail('no previous project is used in this fixture'),
+    chatRoomProjectState: roomState, chatRoomProjectTargetsMatch: targetsMatch,
+    chatRoomProjectExpectation: () => assert.fail('an edited draft must not reach dispatch preparation'),
+    updateThreadById: () => assert.fail('the existing error must not be overwritten'),
+    CHAT_ROOM_PROJECT_UNAVAILABLE: '프로젝트 확인 실패', CHAT_REQUEST_PROJECT_INVALID: '프로젝트 선택 오류' };
+  const bridge = compileFunction(`return { ${prepareBlock} };`, Object.keys(deps))(...Object.values(deps));
+  bridge.createProjectScope = () => scope();
+  bridge.readRoomProjectDefault = async (threadId, options) => {
+    assert.equal(threadId, room.id); assert.deepEqual(options, { force: true, supersede: true }); reads++;
+    const result = await pendingRead;
+    defaults.set(room.id, { binding: room.clientBindingId, scope: scope(), status: 'ready', value: result });
+    return result;
+  };
+  const renderBlock = between('        if (activeThread.sendError) {', '\n        const noticeIds =');
+  const render = compileFunction(`${renderBlock}\nreturn conversation;`,
+    ['activeThread', 'ChatState', 'conversation', 'el', 'sendNoticeDetailsThreadId', 'memoManualSendNotices', 'chatEditedDraftNotices']);
+  return { state, room, other, error, flags, timers, watches, memoManualSendNotices, chatEditedDraftNotices,
+    reads: () => reads, emissions: () => emissions, editedCallbacks: () => onEdited,
+    start: () => bridge.prepareRoomProjectSend(room.id, null, () => flags.owner,
+      () => { onEdited++; notices.showMemoManualSendNotice(room, 'draft-edited'); }),
+    resolve: () => releaseRead(value),
+    edit: text => { state.codex.threadDrafts[room.id] = text; state.codex.threadDraftRevisions[room.id]++; },
+    showMemo: () => notices.showMemoManualSendNotice(room),
+    render: thread => render(thread, ChatState, el('div'), el, null, memoManualSendNotices, chatEditedDraftNotices) };
+}
+
+test('a text-only edit renders its own notice beside the original error and memo conflict', async () => {
+  const h = editedDraftNoticeFixture(), checking = h.start();
+  assert.equal(h.reads(), 1);
+  h.edit('사용자가 고친 초안'); h.resolve();
+  assert.equal(await checking, false);
+  assert.equal(h.editedCallbacks(), 1);
+  assert.equal(h.state.codex.threadDrafts.room, '사용자가 고친 초안');
+  assert.deepEqual(h.room.inputSources, []); assert.deepEqual(h.room.briefingInputs, []); assert.deepEqual(h.room.messages, []);
+  assert.equal(h.room.sendError, h.error);
+  assert.equal(h.memoManualSendNotices.has('room'), false, 'text editing is not a memo conflict');
+  assert.deepEqual(h.watches[0], { threadId: 'room', options: { includeAccess: true } });
+
+  h.showMemo();
+  const shown = h.render(h.room);
+  assert.deepEqual(shown.children.map(node => [node.props.data.testid, node.props.role]),
+    [['chat-send-notice', 'alert'], ['chat-memo-send-blocked', 'status'], ['chat-edited-draft-notice', 'status']]);
+  assert.ok(text(shown.children[0]).includes(h.error), 'the original error details remain intact');
+  assert.match(text(shown.children[1]), /메모 질문.*보내지 않았습니다.*초안은 그대로입니다/);
+  assert.match(text(shown.children[2]), /입력이 바뀌어.*보내지 않았습니다.*직접 다시 보내세요/);
+  assert.doesNotMatch(text(shown.children[2]), /메모|예약/);
+  assert.equal(h.room.sendError, h.error); assert.equal(h.state.codex.threadDrafts.room, '사용자가 고친 초안');
+  assert.ok(h.emissions() > 0);
+
+  h.flags.editedWatch = false;
+  const stale = h.render(h.room);
+  assert.deepEqual(stale.children.map(node => node.props.data.testid), ['chat-send-notice', 'chat-memo-send-blocked']);
+  assert.ok(text(stale.children[0]).includes(h.error));
+  h.flags.editedWatch = true; // Isolate the independent room-generation fence below.
+  h.state.codex.activeThreadId = h.other.id; h.state.codex.activityRoomGeneration++;
+  const other = h.render(h.other);
+  assert.equal(other.children.length, 1); assert.equal(text(other.children[0]), '다른 방 오류');
+  assert.equal(h.render(h.room).children.length, 1, 'the inactive room has no live status');
+  h.state.codex.activeThreadId = h.room.id; h.state.codex.activityRoomGeneration++;
+  assert.equal(h.render(h.room).children.length, 1, 'an old notice does not revive after a room round trip');
+  assert.equal(h.room.sendError, h.error);
+});
+
+test('only a current text-only project recheck creates an edited-draft notice', async t => {
+  for (const change of ['attachment', 'same-text', 'other-room', 'stale-owner']) await t.test(change, async () => {
+    const h = editedDraftNoticeFixture(), checking = h.start();
+    assert.equal(h.reads(), 1);
+    h.edit(change === 'same-text' ? '원래 초안' : '사용자가 고친 초안');
+    if (change === 'attachment') h.room.inputSources = [{ id: 'new-attachment', kind: 'file' }];
+    if (change === 'other-room') { h.state.codex.activeThreadId = h.other.id; h.state.codex.activityRoomGeneration++; }
+    if (change === 'stale-owner') h.flags.owner = false;
+    h.resolve(); assert.equal(await checking, false);
+    assert.equal(h.editedCallbacks(), 0); assert.equal(h.chatEditedDraftNotices.size, 0);
+    assert.equal(h.memoManualSendNotices.size, 0); assert.equal(h.room.sendError, h.error);
+  });
+});
+
+test('the actual notice region groups the edited-draft status with independent memo and error notices', () => {
+  // This tiny tree implements DOM-style reparenting for the production region.
+  const make = (tag, props = {}, ...children) => {
+    const node = { tag, props, dataset: props.data || {}, children: [], parent: null,
+      appendChild(child) {
+        if (child && typeof child === 'object') {
+          if (child.parent) child.parent.children = child.parent.children.filter(item => item !== child);
+          child.parent = this;
+        }
+        this.children.push(child); return child;
+      } };
+    for (const child of children.filter(child => child != null)) node.appendChild(child);
+    return node;
+  };
+  const block = between('        if (activeThread.sendError) {', '\n        if (!activeThread.messages.some');
+  const render = compileFunction(`${block}\nreturn conversation;`,
+    ['activeThread', 'ChatState', 'conversation', 'el', 'sendNoticeDetailsThreadId', 'memoManualSendNotices', 'chatEditedDraftNotices']);
+  const room = { id: 'room', sendError: 'Error: original detail' }, current = { current: () => true };
+  const result = render(room, ChatState, make('div'), make, null, new Map([['room', current]]), new Map([['room', current]]));
+  assert.equal(result.children.length, 1);
+  const region = result.children[0];
+  assert.equal(region.props.role, 'region'); assert.equal(region.props.tabindex, '0');
+  assert.equal(region.dataset.threadId, 'room'); assert.match(region.props['aria-label'], /알림 3개/);
+  const notices = region.children.filter(node => node.dataset.testid);
+  assert.deepEqual(notices.map(node => [node.dataset.testid, node.props.role]),
+    [['chat-send-notice', 'alert'], ['chat-memo-send-blocked', 'status'], ['chat-edited-draft-notice', 'status']]);
+  assert.match(text(notices[0]), /Error: original detail/);
+  assert.match(text(notices[1]), /메모 질문/); assert.match(text(notices[2]), /입력이 바뀌어/);
 });
 
 test('filters, history warnings, activity and expandable error details remain separately wired', () => {
