@@ -46,7 +46,8 @@ import { contrastRatio, mediaApplies, readAvatarTones, readCssRules, readRootPro
 
 // Briefing opinions exercise the real scope, bridge methods, controller and
 // DOM mount. The deferred transport deliberately does not filter on abort.
-function savedBriefingUiHarness({ respond, engineId = 'codex', verified = true, prepareEvidence = null, fitEvidence = null, allowClose = false, onSetActiveEntity = null } = {}) {
+function savedBriefingUiHarness({ respond, engineId = 'codex', verified = true, prepareEvidence = null, fitEvidence = null, allowClose = false, onSetActiveEntity = null,
+  resolveEvidence = null, evidenceCard = null, refreshMinimap = null, onBoardNotice = null, useProductionEmit = false } = {}) {
   const document = settingsFakeDocument(), listeners = new Set(), requests = [], timers = new Map(), records = new Map();
   const create = document.createElement;
   document.createElement = tag => {
@@ -84,12 +85,21 @@ function savedBriefingUiHarness({ respond, engineId = 'codex', verified = true, 
     const call = { url, options, body: options.body ? JSON.parse(options.body) : null }; requests.push(call);
     return respond ? respond(call, { row, list }) : Promise.resolve(options.method === 'POST' ? { comment: row({ clientRequestId: call.body.clientRequestId, text: call.body.text }) } : list());
   };
-  const emit = () => { for (const listener of [...listeners]) listener(state.codex); };
+  let emit = () => { for (const listener of [...listeners]) listener(state.codex); };
+  if (useProductionEmit) {
+    const start = surfaceSource.indexOf('    const emit = () => {', surfaceSource.indexOf('  function installCodexBridge('));
+    const end = surfaceSource.indexOf('\n    };', start);
+    assert.ok(start >= 0 && end > start, 'the production bridge emit must be present');
+    emit = compileFunction(`${surfaceSource.slice(start, end + 7)}\nreturn emit;`,
+      ['state', 'document', 'listeners', 'normalizeThreads', 'memoReadWatches', 'manualOwnerWatches', 'observeMemoReadWatch', 'taskAnswers',
+        'renderCodexActivityPanel', 'scheduleDeskSessionSave', 'refreshDeskMinimap', 'TAG'])(
+      state, document, listeners, () => {}, new Map(), new Map(), () => {}, null, () => {}, () => { saves++; }, () => refreshMinimap?.(), 'fixture');
+  }
   const updateThreadById = (id, fn) => { const index = state.codex.threads.findIndex(item => item.id === id); if (index < 0) return null; return state.codex.threads[index] = fn(state.codex.threads[index]); };
   const method = signature => { const start = surfaceSource.indexOf(`      ${signature}`), end = surfaceSource.indexOf('\n      },', start); assert.ok(start >= 0 && end > start); return surfaceSource.slice(start, end + 8); };
   const fits = [], prepared = new Set(), evidenceCalls = [], selectionRestores = [];
   const deps = { state, document, window, ChatState: Chat, BriefingState: Briefing, InputContext, epochScope, fetchJson, briefingCommentRecords: records,
-    briefingResolvedTargets: shown => prepareEvidence ? Briefing.resolveBriefingTargets(Briefing.currentBriefingStep(shown), {
+    briefingResolvedTargets: (shown, step) => resolveEvidence ? resolveEvidence(shown, step) : prepareEvidence ? Briefing.resolveBriefingTargets(step || Briefing.currentBriefingStep(shown), {
       references: shown.references, views: shown.briefing.steps.flatMap(step => Briefing.briefingStepTargets(step)).filter(target => prepared.has(target.sourceId))
         .flatMap(target => {
           try { return [{ sourceId: target.sourceId, hash: target.hash, evidenceKey: InputContext.inputEvidenceKey({ ...target, presentationRange: target.range }),
@@ -100,12 +110,15 @@ function savedBriefingUiHarness({ respond, engineId = 'codex', verified = true, 
       if (!prepareEvidence) throw new Error('comment refresh must not move camera');
       fits.push('fit'); return fitEvidence?.({ state, document, resolved });
     },
-    boardNotice: message => assert.fail(message),
+    boardNotice: message => onBoardNotice ? onBoardNotice(message) : assert.fail(message),
     setActiveEntity: node => { if (!allowClose) throw new Error('comment refresh must not activate a Canvas object');
       selectionRestores.push(node); onSetActiveEntity?.(node); },
-    cloneJson: value => JSON.parse(JSON.stringify(value)), updateThreadById, emit, scheduleDeskSessionSave: () => { saves++; } };
+    cloneJson: value => JSON.parse(JSON.stringify(value)), updateThreadById, emit, scheduleDeskSessionSave: () => { saves++; },
+    refreshDeskMinimap: () => refreshMinimap?.() };
   const openerStart = surfaceSource.indexOf('  async function openAnswerBriefing('), openerEnd = surfaceSource.indexOf('\n  }\n', openerStart);
-  const actual = compileFunction(`${['el', 'chatBindingNonce', 'getCodexThreadById', 'getCodexThreadDraft', 'briefingInputReferences', 'briefingRangeIssue', 'createBriefingCommentScope', 'mountBriefingComments', 'renderAnswerBriefing', 'closeAnswerBriefing'].map(declaration).join('\n')}
+  const optionalMinimapDefinitions = ['rememberBriefingMinimapEvidence', 'clearBriefingMinimapDisplay']
+    .filter(name => surfaceSource.includes(`  function ${name}(`)).map(declaration).join('\n');
+  const actual = compileFunction(`${['el', 'chatBindingNonce', 'getCodexThreadById', 'getCodexThreadDraft', 'briefingInputReferences', 'briefingRangeIssue', 'createBriefingCommentScope', 'mountBriefingComments', 'renderAnswerBriefing', 'closeAnswerBriefing'].map(declaration).join('\n')}\n${optionalMinimapDefinitions}
     ${surfaceSource.slice(openerStart, openerEnd + 4)}
     return { openAnswerBriefing, mountBriefingComments, renderAnswerBriefing, closeAnswerBriefing, bridge: { ${['createBriefingPreparationScope(', 'createBriefingComments(', 'attachBriefingComment(', 'setDraft('].map(method).join(',\n')} } };`, Object.keys(deps))(...Object.values(deps));
   const bridge = state.codexBridge = actual.bridge;
@@ -115,7 +128,7 @@ function savedBriefingUiHarness({ respond, engineId = 'codex', verified = true, 
   bridge.openInputEvidence = async (threadId, reference, options) => {
     evidenceCalls.push({ threadId, reference, options });
     const result = await prepareEvidence?.(reference);
-    if (result !== false && options.isCurrent()) { prepared.add(reference.sourceId); return { reference }; }
+    if (result !== false && options.isCurrent()) { prepared.add(reference.sourceId); return evidenceCard ? evidenceCard(reference) : { reference }; }
     return null;
   };
   const open = (options = {}) => {
@@ -11647,8 +11660,8 @@ test('minimap picks go to the Board or View, and several targets open "이 위�
 
 // Production minimap handlers over a small DOM and the real Canvas layout math.
 // The camera setter is the test boundary; no Browser or Agent is launched.
-function minimapUiHarness() {
-  const document = settingsFakeDocument();
+function minimapUiHarness({ document: suppliedDocument = null, state: suppliedState = null, resolveEvidence = () => [] } = {}) {
+  const document = suppliedDocument || settingsFakeDocument();
   const byId = document.getElementById;
   const create = document.createElement;
   const matches = (node, selector) => {
@@ -11705,23 +11718,35 @@ function minimapUiHarness() {
     removeEventListener: (type, fn) => { listeners[type] = (listeners[type] || []).filter(item => item !== fn); } };
   const emitWindow = (type, event) => { for (const listener of [...(listeners[type] || [])]) listener(event); };
   const cameras = [];
-  const state = { zoom: 1, zoomTarget: 1, panTarget: { x: 0, y: 0 }, pan: { x: 0, y: 0 },
+  const state = suppliedState || { zoom: 1, zoomTarget: 1, panTarget: { x: 0, y: 0 }, pan: { x: 0, y: 0 },
     activeEntityId: 'active-view', boards: { activeProjectionId: 'active-board', projections: {} },
     agenda: { activeId: 'saved-board' }, codex: { activeThreadId: 'unchanged-run-target' }, cardFullscreen: null };
-  state.setCanvasViewportTarget = () => assert.fail('minimap navigation must not change zoom');
+  if (suppliedState) {
+    state.zoomTarget ??= state.zoom;
+    state.panTarget ??= { ...state.pan };
+    state.boards ||= { activeProjectionId: 'active-board', projections: {} };
+    state.agenda ||= { activeId: 'saved-board' };
+    state.cardFullscreen ??= null;
+  }
+  state.setCanvasViewportTarget = suppliedState ? view => { cameras.push({ pan: { ...view.pan }, zoom: view.zoom });
+    state.panTarget = { ...view.pan }; state.zoomTarget = view.zoom; }
+    : () => assert.fail('minimap navigation must not change zoom');
   state.setCanvasPanTarget = pan => { cameras.push({ pan: { ...pan }, zoom: state.zoomTarget }); state.panTarget = { ...pan }; };
-  const names = ['el', 'clampNumber', 'parsePxNumber', 'persistentEntityGeometry', 'viewportWorldRect', 'entityWorldRect',
+  const names = ['el', 'clampNumber', 'parsePxNumber', 'persistentEntityGeometry', 'viewportWorldRect', 'entityWorldRect', 'getCodexThreadById',
     'minimapTargetAvailable', 'boardRegionWorldRects', 'minimapDeskBounds', 'minimapDimensionsForBounds',
     'applyMinimapDynamicSizing', 'minimapWorldModel', 'worldRectToMinimapStyle', 'minimapPointToWorld',
     'moveCanvasViewportToWorld', 'minimapEntityTitle', 'buildMinimapEntityMarker', 'buildMinimapBoardRegion',
     'renderDeskMinimapWorld', 'moveCameraToMinimapNode', 'focusBoardFromMinimap', 'focusEntityFromMinimap',
     'goToMinimapTarget', 'closeMinimapStack', 'openMinimapTargets', 'buildDeskMinimapEntityRows', 'refreshDeskMinimap',
     'closeDeskMinimap', 'installDeskMinimapPan', 'toggleDeskMinimap'];
+  for (const name of ['rememberBriefingMinimapEvidence', 'briefingMinimapModel', 'minimapBriefingEvidenceLabel', 'renderDeskMinimapBriefing']) {
+    if (surfaceSource.includes(`  function ${name}(`)) names.push(name);
+  }
   let safeRect = { left: 0, top: 0, right: 1000, bottom: 800, width: 1000, height: 800 };
   const actual = compileFunction(`const MINIMAP_SEARCH_PAGE_SIZE = 24, MINIMAP_PICK_SLOP = 4, MINIMAP_IME_COMMIT_GUARD_MS = 80;\n${names.map(declaration).join('\n')}\nreturn { toggleDeskMinimap, refreshDeskMinimap, openMinimapTargets };`,
-    ['document', 'window', 'state', 'SurfaceState', 'MinimapLayout', 'CANVAS_SHAPE_TITLES', 'cardLabelForViewportRail', 'safeViewportRect'])(
+    ['document', 'window', 'state', 'SurfaceState', 'MinimapLayout', 'CANVAS_SHAPE_TITLES', 'cardLabelForViewportRail', 'safeViewportRect', 'BriefingState', 'briefingResolvedTargets', 'ChatState', 'InputContext'])(
     document, window, state, Surface, MinimapLayout, { rect: '사각형' }, () => '이름 없는 화면',
-    () => safeRect);
+    () => safeRect, Briefing, resolveEvidence, Chat, InputContext);
   const make = (id, title, x, y, kind = 'view') => {
     const node = document.createElement('div');
     node.setAttribute('id', id);
@@ -11752,6 +11777,705 @@ function minimapUiHarness() {
   return { document, window, state, cameras, make, part, rows, search, clickMap, emitWindow, setSafeRect: value => { safeRect = value; },
     listenerCount: type => (listeners[type] || []).length, ...actual };
 }
+
+// Reuse the existing synthetic document, but execute the production Briefing
+// opener, step controls, evidence resolver, and minimap renderer together.
+// Evidence opening is a local, scope-checked fixture; this is not Firefox QA.
+function briefingMinimapUiHarness({ prepare = null, useProductionEmit = false } = {}) {
+  let minimap, resolveTargets, refreshFailure = false, refreshCalls = 0;
+  const cards = new Map(), notices = [], materialized = [];
+  const evidenceKey = reference => InputContext.inputEvidenceKey(reference);
+  const briefing = savedBriefingUiHarness({ allowClose: true,
+    prepareEvidence: reference => cards.has(evidenceKey(reference)) ? (prepare ? prepare(reference) : true) : false,
+    evidenceCard: reference => { const card = cards.get(evidenceKey(reference)) || null; if (card) materialized.push(card.id); return card; },
+    resolveEvidence: (session, step) => resolveTargets(session, step),
+    refreshMinimap: () => { refreshCalls++; if (refreshFailure) throw new Error('합성 미니맵 갱신 실패'); return minimap?.refreshDeskMinimap(); },
+    onBoardNotice: message => notices.push(message),
+    useProductionEmit,
+  });
+  briefing.close();
+  minimap = minimapUiHarness({ document: briefing.document, state: briefing.state,
+    resolveEvidence: (session, step) => resolveTargets(session, step) });
+  const { state, document } = minimap;
+  state.codex.connected = true;
+  state.activeEntityId = 'existing-card';
+  minimap.make('existing-card', '기존 화면', -500, -400);
+  resolveTargets = compileFunction(`${['parsePxNumber', 'persistentEntityGeometry', 'briefingRangeIssue', 'briefingResolvedTargets'].map(declaration).join('\n')}\nreturn briefingResolvedTargets;`,
+    ['document', 'state', 'InputContext', 'BriefingState'])(document, state, InputContext, Briefing);
+  const first = { sourceId: 'source-a', hash: 'hash-a', range: { startLine: 1, endLine: 4 } };
+  const distant = { sourceId: 'source-b', hash: 'hash-b', range: { startLine: 1, endLine: 4 } };
+  const otherRange = { sourceId: 'source-a', hash: 'hash-a', range: { startLine: 5, endLine: 8 } };
+  const stale = { sourceId: 'source-b', hash: 'stale-hash', range: { startLine: 1, endLine: 4 } };
+  const denied = { sourceId: 'denied-source', hash: 'denied-hash', range: { startLine: 1, endLine: 4 } };
+  briefing.briefing.steps = [
+    { id: 'first', text: '첫 단계', target: first, targets: [first, distant, stale, denied] },
+    { id: 'second', text: '둘째 단계', target: otherRange, targets: [otherRange, first] },
+    { id: 'third', text: '셋째 단계', target: distant },
+  ];
+  const scope = Chat.chatContextRequestScope(briefing.thread(), state.codex);
+  assert.equal(Chat.canResumeNativeThread(briefing.thread(), state.codex.authStatus), true);
+  const originals = ['a', 'b'].map(letter => {
+    const source = { id: `selection-${letter}`, kind: 'file', label: `허용 자료 ${letter.toUpperCase()}`,
+      sourceRef: { path: `/fixture/${letter}.txt` } };
+    const receipt = { id: source.id, sourceId: `source-${letter}`, snapshotId: `source-${letter}`, hash: `hash-${letter}`,
+      sourceRef: source.sourceRef, clientThreadId: scope.clientThreadId,
+      engine: { engineId: scope.engineId, engineProfileId: scope.engineProfileId } };
+    return InputContext.capturedInputReference(source, receipt, scope);
+  });
+  briefing.thread().briefingInputs = originals;
+  const attach = (id, target, x, y) => {
+    const reference = { ...originals.find(item => item.sourceId === target.sourceId), presentationRange: target.range };
+    const card = minimap.make(id, id, x, y);
+    card.className = 'egd-canvas-card egd-input-evidence-card';
+    card.dataset.deskWindowKind = 'input-evidence';
+    card._inputReference = reference;
+    card._inputEvidenceLoaded = true;
+    cards.set(evidenceKey(reference), card);
+    return card;
+  };
+  const firstCard = attach('evidence-a-1', first, 0, 0);
+  const distantCard = attach('evidence-b-1', distant, 1800, 0);
+  const rangeCard = attach('evidence-a-2', otherRange, 0, 1000);
+  const deniedCard = minimap.make('evidence-denied', '비공개 합성 대상', 2900, 900);
+  deniedCard.className = 'egd-canvas-card egd-input-evidence-card';
+  deniedCard._inputReference = { sourceId: denied.sourceId, hash: denied.hash, presentationRange: denied.range };
+  deniedCard._inputEvidenceLoaded = true;
+  const decoyCard = minimap.make('evidence-decoy', '허용 자료 A', 2500, 1600);
+  decoyCard.className = 'egd-canvas-card egd-input-evidence-card';
+  decoyCard._inputReference = { ...originals[0], hash: 'wrong-hash', presentationRange: first.range };
+  decoyCard._inputEvidenceLoaded = true;
+  const parts = testid => document.querySelectorAll(`[data-testid="${testid}"]`);
+  const openViaButton = () => {
+    let opening;
+    const button = briefingStartControl(document, briefing.briefing, briefing.thread(), (thread, message, options) => {
+      assert.equal(thread, briefing.thread()); assert.equal(message.briefing, briefing.briefing);
+      opening = briefing.open(options);
+    });
+    assert.ok(button, 'the existing Chat answer has its production Briefing control');
+    document.documentElement.appendChild(button);
+    button.fire('click', { isTrusted: true, detail: 1 });
+    assert.ok(opening, 'the real control invokes the real opener');
+    return opening;
+  };
+  return { briefing, minimap, state, document, resolveTargets, first, distant, otherRange, stale, denied,
+    firstCard, distantCard, rangeCard, deniedCard, decoyCard, cards, notices, materialized, parts, openViaButton,
+    setRefreshFailure: value => { refreshFailure = value; }, refreshCalls: () => refreshCalls };
+}
+
+test('CNV-07: the existing Briefing opens its ready evidence in the actual minimap renderer', async () => {
+  const h = briefingMinimapUiHarness();
+  await h.openViaButton(); await settle();
+  assert.deepEqual(h.resolveTargets(h.briefing.session(), h.briefing.briefing.steps[0]).map(item => item.status),
+    ['available', 'available', 'stale', 'missing']);
+  assert.equal(h.document.getElementById('egd-desk-minimap'), null, 'opening Briefing does not open the minimap');
+  const before = JSON.stringify([h.state.pan, h.state.panTarget, h.state.zoom, h.state.zoomTarget, h.state.activeEntityId,
+    h.state.codex.threadDrafts['room-a'], h.firstCard.style, h.distantCard.style, h.rangeCard.style]);
+  h.briefing.type('브리핑 의견 초안');
+  const input = h.briefing.part('briefing-comment'); input.focus();
+  h.minimap.toggleDeskMinimap();
+  assert.equal(JSON.stringify([h.state.pan, h.state.panTarget, h.state.zoom, h.state.zoomTarget, h.state.activeEntityId,
+    h.state.codex.threadDrafts['room-a'], h.firstCard.style, h.distantCard.style, h.rangeCard.style]), before);
+  assert.equal(h.document.activeElement, input);
+  assert.equal(input.value, '브리핑 의견 초안');
+  const markers = h.parts('minimap-briefing-marker');
+  assert.ok(markers.length >= 2, 'actual minimap must mark the two distinct ready card locations');
+  const map = h.document.querySelector('.egd-minimap-map'), model = map._egdeskMinimapModel;
+  assert.deepEqual(markers.map(node => node.dataset.viewId).sort(), ['evidence-a-1', 'evidence-a-2', 'evidence-b-1']);
+  const markerPoint = node => ({ x: Number.parseFloat(node.style.left), y: Number.parseFloat(node.style.top) });
+  for (const marker of markers) {
+    const item = model.entities.find(entry => entry.entity.id === marker.dataset.viewId);
+    assert.ok(item, 'a marker belongs to an actually open card');
+    const point = markerPoint(marker);
+    const x = model.offsetX + (item.rect.left + item.rect.width / 2 - model.bounds.left) * model.scale;
+    const y = model.offsetY + (item.rect.top + item.rect.height / 2 - model.bounds.top) * model.scale;
+    assert.ok(Math.abs(point.x - x) < 0.01, 'the marker uses the unrounded card center');
+    assert.ok(Math.abs(point.y - y) < 0.01, 'the marker uses the unrounded card center');
+  }
+  const a = markerPoint(markers.find(node => node.dataset.viewId === 'evidence-a-1'));
+  const b = markerPoint(markers.find(node => node.dataset.viewId === 'evidence-b-1'));
+  assert.ok(Math.abs(a.x - b.x) > 12, 'the two ready cards are genuinely separated');
+  assert.ok(markers.every(node => { const point = markerPoint(node);
+    return Math.hypot(point.x - (a.x + b.x) / 2, point.y - (a.y + b.y) / 2) > 1; }),
+  'the empty midpoint of the two cards is not presented as evidence');
+  const rows = () => h.parts('minimap-briefing-row');
+  const rowData = () => rows().map(node => [node.dataset.viewId, Number(node.dataset.stepNumber),
+    Number(node.dataset.evidenceNumber), Number(node.dataset.relativeStep)]);
+  assert.deepEqual(rowData(), [['evidence-a-1', 1, 1, 0], ['evidence-b-1', 1, 2, 0],
+    ['evidence-a-2', 2, 1, 1], ['evidence-a-1', 2, 2, 1]], 'step and ready-evidence numbers are separate, including a reused card');
+  assert.match(rows()[0].textContent, /현재 1단계.*열린 근거 1.*1–4행/);
+  assert.match(rows()[2].textContent, /다음 2단계.*열린 근거 1.*5–8행/);
+  assert.ok(rows().every(node => !/비공개 합성 대상|denied-source|stale-hash/.test(node.textContent)));
+
+  h.briefing.click('briefing-next'); await settle();
+  assert.equal(h.briefing.session().index, 1);
+  assert.deepEqual(rowData(), [['evidence-a-1', 1, 1, -1], ['evidence-b-1', 1, 2, -1],
+    ['evidence-a-2', 2, 1, 0], ['evidence-a-1', 2, 2, 0], ['evidence-b-1', 3, 1, 1]]);
+  assert.match(rows()[0].textContent, /이전 1단계/);
+  assert.match(rows()[2].textContent, /현재 2단계/);
+  assert.match(rows()[4].textContent, /다음 3단계/);
+  h.briefing.type('둘째 단계 초안');
+  h.briefing.click('briefing-previous'); await settle();
+  assert.equal(h.briefing.part('briefing-comment').value, '브리핑 의견 초안');
+  assert.equal(h.state.codex.threadDrafts['room-a'], '기존 초안');
+  assert.equal(JSON.stringify([h.firstCard.style, h.distantCard.style, h.rangeCard.style]),
+    JSON.stringify(JSON.parse(before).slice(6)), 'navigation does not reposition the evidence cards');
+  h.briefing.click('briefing-exit');
+  assert.equal(h.state.codex.briefingSession, null);
+  assert.equal(h.parts('minimap-briefing-marker').length, 0);
+  assert.equal(rows().length, 0);
+  assert.equal(h.state.codex.threadDrafts['room-a'], '기존 초안');
+});
+
+test('CNV-07: stale evidence and an invalidated room never leave Briefing markers or private rows', async () => {
+  const h = briefingMinimapUiHarness();
+  await h.briefing.open(); await settle(); h.minimap.toggleDeskMinimap();
+  assert.ok(h.parts('minimap-briefing-row').some(node => node.dataset.viewId === 'evidence-a-1'));
+  const before = JSON.stringify([h.state.panTarget, h.state.zoomTarget, h.state.codex.threadDrafts['room-a']]);
+  h.firstCard._inputEvidenceLoaded = false;
+  h.minimap.refreshDeskMinimap();
+  assert.ok(h.parts('minimap-briefing-row').every(node => node.dataset.viewId !== 'evidence-a-1'));
+  assert.ok(h.parts('minimap-briefing-marker').every(node => node.dataset.viewId !== 'evidence-a-1'));
+  assert.ok(h.parts('minimap-briefing-row').every(node => !/비공개 합성 대상|denied-source|stale-hash/.test(node.textContent)));
+  h.rangeCard.remove();
+  h.minimap.refreshDeskMinimap();
+  assert.ok(h.parts('minimap-briefing-row').every(node => node.dataset.viewId !== 'evidence-a-2'));
+  assert.ok(h.parts('minimap-briefing-marker').every(node => node.dataset.viewId !== 'evidence-a-2'));
+  assert.equal(JSON.stringify([h.state.panTarget, h.state.zoomTarget, h.state.codex.threadDrafts['room-a']]), before);
+  const otherInput = h.document.createElement('textarea'); h.document.documentElement.appendChild(otherInput); otherInput.focus();
+  h.state.codex.activeThreadId = 'other-room';
+  h.minimap.refreshDeskMinimap();
+  assert.equal(h.parts('minimap-briefing-marker').length, 0);
+  assert.equal(h.parts('minimap-briefing-row').length, 0);
+  assert.equal(h.state.codex.threadDrafts['room-a'], '기존 초안');
+  h.briefing.close();
+  assert.equal(h.document.activeElement, otherInput, 'a stale refresh and close do not claim another input');
+});
+
+test('CNV-07: an observed room or account round trip cannot revive a prior presentation', async t => {
+  for (const change of ['room', 'account']) await t.test(change, async () => {
+    const h = briefingMinimapUiHarness();
+    await h.briefing.open(); await settle(); h.minimap.toggleDeskMinimap();
+    assert.ok(h.parts('minimap-briefing-row').length > 0);
+    const before = JSON.stringify([h.state.panTarget, h.state.zoomTarget, h.state.codex.threadDrafts['room-a']]);
+    const email = h.state.codex.authStatus.accountEmail;
+    if (change === 'room') h.state.codex.activeThreadId = 'other-room';
+    else h.state.codex.authStatus = { ...h.state.codex.authStatus, accountEmail: 'other-fixture@example.test' };
+    h.briefing.emit(); h.minimap.refreshDeskMinimap();
+    assert.equal(h.parts('minimap-briefing-row').length, 0);
+    assert.equal(h.parts('minimap-briefing-marker').length, 0);
+    if (change === 'room') h.state.codex.activeThreadId = 'room-a';
+    else h.state.codex.authStatus = { ...h.state.codex.authStatus, accountEmail: email };
+    h.briefing.emit(); h.minimap.refreshDeskMinimap();
+    assert.equal(h.state.codex.briefingSession, null);
+    assert.equal(h.parts('minimap-briefing-row').length, 0, 'returning to the old identity does not replay the old presentation');
+    assert.equal(JSON.stringify([h.state.panTarget, h.state.zoomTarget, h.state.codex.threadDrafts['room-a']]), before);
+    await h.briefing.open(); await settle();
+    assert.ok(h.parts('minimap-briefing-row').length > 0, 'an explicit reopen can obtain fresh local proof');
+    h.briefing.close();
+  });
+});
+
+test('CNV-07: production bridge emit immediately removes evidence after transport or permission loss', async t => {
+  for (const change of ['disconnected', 'permission-denied']) await t.test(change, async () => {
+    const h = briefingMinimapUiHarness({ useProductionEmit: true });
+    h.state.codex.authStatus = { ...h.state.codex.authStatus, access: { state: 'ok' } };
+    await h.openViaButton(); await settle(); h.minimap.toggleDeskMinimap();
+    assert.ok(h.parts('minimap-briefing-marker').length > 0, 'precondition: authorized evidence was displayed');
+    assert.ok(h.parts('minimap-briefing-row').some(node => /허용 자료 A/.test(node.textContent)));
+    h.briefing.type('권한 변경 전 의견 초안');
+    const session = h.state.codex.briefingSession;
+    const before = JSON.stringify([h.state.panTarget, h.state.zoomTarget, h.state.codex.threadDrafts['room-a']]);
+    const reads = h.briefing.evidenceCalls.length;
+    const otherInput = h.document.createElement('textarea'); h.document.documentElement.appendChild(otherInput); otherInput.focus();
+    if (change === 'disconnected') h.state.codex.connected = false;
+    else h.state.codex.authStatus = { ...h.state.codex.authStatus, access: { state: 'permissionDenied' } };
+    h.briefing.emit();
+    assert.equal(h.parts('minimap-briefing-marker').length, 0, 'bridge notification must remove markers without a manual minimap refresh');
+    assert.equal(h.parts('minimap-briefing-row').length, 0, 'names and counts must not remain in the evidence list');
+    assert.equal(h.document.activeElement, otherInput);
+    assert.equal(h.state.codex.briefingSession, session, 'access loss does not dismiss the Briefing');
+    assert.equal(h.briefing.part('briefing-comment').value, '권한 변경 전 의견 초안');
+    assert.equal(JSON.stringify([h.state.panTarget, h.state.zoomTarget, h.state.codex.threadDrafts['room-a']]), before);
+    if (change === 'disconnected') h.state.codex.connected = true;
+    else h.state.codex.authStatus = { ...h.state.codex.authStatus, access: { state: 'ok' } };
+    h.briefing.emit();
+    assert.equal(h.parts('minimap-briefing-marker').length, 0, 'restoring access does not revive old proof');
+    assert.equal(h.parts('minimap-briefing-row').length, 0);
+    assert.equal(h.briefing.evidenceCalls.length, reads, 'reconnection must not read evidence automatically');
+    h.briefing.close();
+  });
+});
+
+test('CNV-07: access loss clears the visible evidence even when minimap refresh throws', async t => {
+  for (const change of ['disconnected', 'permission-denied']) await t.test(change, async () => {
+    const h = briefingMinimapUiHarness({ useProductionEmit: true });
+    h.state.codex.authStatus = { ...h.state.codex.authStatus, access: { state: 'ok' } };
+    await h.openViaButton(); await settle(); h.minimap.toggleDeskMinimap();
+    assert.ok(h.parts('minimap-briefing-marker').length > 0);
+    assert.ok(h.parts('minimap-briefing-row').some(node => /허용 자료 A/.test(node.textContent)));
+    const details = h.parts('minimap-briefing-evidence')[0];
+    const summary = settingsNodes(details, node => node.tagName === 'SUMMARY')[0];
+    const otherInput = h.document.createElement('textarea'); h.document.documentElement.appendChild(otherInput);
+    const focused = change === 'permission-denied' ? summary : otherInput; focused.focus();
+    h.briefing.type('갱신 오류 이전 의견');
+    const before = JSON.stringify([h.state.panTarget, h.state.zoomTarget, h.state.codex.threadDrafts['room-a']]);
+    const reads = h.briefing.evidenceCalls.length, attempts = h.refreshCalls();
+    h.setRefreshFailure(true);
+    if (change === 'disconnected') h.state.codex.connected = false;
+    else h.state.codex.authStatus = { ...h.state.codex.authStatus, access: { state: 'permissionDenied' } };
+    assert.doesNotThrow(() => h.briefing.emit());
+    assert.ok(h.refreshCalls() > attempts, 'the failing production refresh boundary was exercised');
+    assert.equal(h.parts('minimap-briefing-marker').length, 0);
+    assert.equal(h.parts('minimap-briefing-row').length, 0);
+    assert.doesNotMatch(details.textContent, /허용 자료 [AB]|1–4행|5–8행/);
+    assert.equal(h.document.activeElement, focused);
+    if (focused === summary) assert.equal(details.hidden, false, 'the focused summary stays available without private rows');
+    assert.equal(h.briefing.part('briefing-comment').value, '갱신 오류 이전 의견');
+    assert.equal(JSON.stringify([h.state.panTarget, h.state.zoomTarget, h.state.codex.threadDrafts['room-a']]), before);
+    h.setRefreshFailure(false);
+    if (change === 'disconnected') h.state.codex.connected = true;
+    else h.state.codex.authStatus = { ...h.state.codex.authStatus, access: { state: 'ok' } };
+    h.briefing.emit(); h.minimap.refreshDeskMinimap();
+    assert.equal(h.parts('minimap-briefing-row').length, 0, 'restored access does not replay old proof');
+    assert.equal(h.briefing.evidenceCalls.length, reads);
+    h.briefing.close();
+    await h.openViaButton(); await settle();
+    assert.ok(h.parts('minimap-briefing-row').length > 0, 'a fresh explicit open can render new proof after the cache is cleared');
+    h.briefing.close();
+  });
+});
+
+test('CNV-07: Briefing close clears its evidence and finishes even when a refresh throws', async t => {
+  for (const failure of ['minimap', 'semantic-projection']) await t.test(failure, async () => {
+    const h = briefingMinimapUiHarness();
+    await h.openViaButton(); await settle(); h.minimap.toggleDeskMinimap();
+    assert.ok(h.parts('minimap-briefing-row').length > 0);
+    const attempts = h.refreshCalls();
+    if (failure === 'minimap') h.setRefreshFailure(true);
+    else h.state.refreshSemanticProjections = () => { throw new Error('합성 투영 갱신 실패'); };
+    assert.doesNotThrow(() => h.briefing.click('briefing-exit'));
+    assert.ok(h.refreshCalls() > attempts);
+    assert.equal(h.state.codex.briefingSession, null);
+    assert.equal(h.parts('minimap-briefing-marker').length, 0);
+    assert.equal(h.parts('minimap-briefing-row').length, 0);
+    assert.equal(h.state.codex.threadDrafts['room-a'], '기존 초안');
+  });
+});
+
+test('CNV-07: a failed minimap refresh at explicit retry leaves no old evidence visible or new read', async () => {
+  const h = briefingMinimapUiHarness();
+  await h.openViaButton(); await settle(); h.minimap.toggleDeskMinimap();
+  h.firstCard._inputEvidenceLoaded = false; h.briefing.render();
+  const retry = settingsNodes(h.briefing.panel(), node => node.dataset.testid === 'briefing-show-evidence'
+    && node.dataset.sourceId === 'source-a' && /1–4행/.test(node.getAttribute('aria-label') || ''))[0];
+  assert.ok(retry); assert.ok(h.parts('minimap-briefing-row').length > 0);
+  const reads = h.briefing.evidenceCalls.length, attempts = h.refreshCalls(); h.setRefreshFailure(true);
+  retry.fire('click'); await settle();
+  assert.ok(h.refreshCalls() > attempts);
+  assert.equal(h.parts('minimap-briefing-marker').length, 0);
+  assert.equal(h.parts('minimap-briefing-row').length, 0);
+  assert.equal(h.briefing.evidenceCalls.length, reads);
+  assert.ok(h.notices.includes('합성 미니맵 갱신 실패'));
+  assert.equal(h.state.codex.threadDrafts['room-a'], '기존 초안');
+  h.setRefreshFailure(false); h.briefing.close();
+});
+
+test('CNV-07: a late evidence read cannot survive observed transport or permission ABA', async t => {
+  for (const source of ['source-a', 'source-b']) for (const change of ['disconnected', 'permission-denied']) await t.test(`${source}, ${change}`, async () => {
+    const pending = requestProjectDeferred();
+    const h = briefingMinimapUiHarness({ useProductionEmit: true, prepare: reference => reference.sourceId === source ? pending.promise : true });
+    h.state.codex.authStatus = { ...h.state.codex.authStatus, access: { state: 'ok' } };
+    const opening = h.openViaButton(); await settle(); h.minimap.toggleDeskMinimap();
+    const reads = source === 'source-a' ? 1 : 2;
+    assert.equal(h.briefing.evidenceCalls.length, reads, 'the selected authorized read is actually pending');
+    const materialized = [...h.materialized];
+    assert.deepEqual(materialized, source === 'source-a' ? [] : ['evidence-a-1']);
+    h.briefing.type('늦은 확인 중 의견 초안');
+    const before = JSON.stringify([h.state.panTarget, h.state.zoomTarget, h.state.codex.threadDrafts['room-a']]);
+    const otherInput = h.document.createElement('textarea'); h.document.documentElement.appendChild(otherInput); otherInput.focus();
+    if (change === 'disconnected') h.state.codex.connected = false;
+    else h.state.codex.authStatus = { ...h.state.codex.authStatus, access: { state: 'permissionDenied' } };
+    h.briefing.emit();
+    if (change === 'disconnected') h.state.codex.connected = true;
+    else h.state.codex.authStatus = { ...h.state.codex.authStatus, access: { state: 'ok' } };
+    h.briefing.emit();
+    pending.resolve(true); await opening; await settle();
+    assert.deepEqual(h.materialized, materialized, 'the late result is not materialized into an evidence card');
+    assert.equal(h.parts('minimap-briefing-marker').length, 0);
+    assert.equal(h.parts('minimap-briefing-row').length, 0);
+    assert.equal(h.briefing.evidenceCalls.length, reads, 'restoring access must not silently read or retry');
+    assert.equal(h.state.codex.briefingSession.preparing, false, 'cancelled preparation is not left pending');
+    assert.equal(h.briefing.part('briefing-comment').value, '늦은 확인 중 의견 초안');
+    assert.equal(h.document.activeElement, otherInput);
+    assert.equal(JSON.stringify([h.state.panTarget, h.state.zoomTarget, h.state.codex.threadDrafts['room-a']]), before);
+    h.briefing.close();
+  });
+});
+
+test('CNV-07: a pending explicit retry cannot survive observed transport or permission ABA', async t => {
+  for (const change of ['disconnected', 'permission-denied']) await t.test(change, async () => {
+    const pending = requestProjectDeferred(); let retrying = false;
+    const h = briefingMinimapUiHarness({ useProductionEmit: true, prepare: () => retrying ? pending.promise : true });
+    h.state.codex.authStatus = { ...h.state.codex.authStatus, access: { state: 'ok' } };
+    await h.openViaButton(); await settle(); h.minimap.toggleDeskMinimap();
+    assert.ok(h.parts('minimap-briefing-row').length > 0);
+    const materialized = [...h.materialized], reads = h.briefing.evidenceCalls.length;
+    h.firstCard._inputEvidenceLoaded = false; h.briefing.render();
+    const retry = settingsNodes(h.briefing.panel(), node => node.dataset.testid === 'briefing-show-evidence'
+      && node.dataset.sourceId === 'source-a' && /1–4행/.test(node.getAttribute('aria-label') || ''))[0];
+    assert.ok(retry); retrying = true; retry.fire('click'); await settle();
+    assert.equal(h.briefing.evidenceCalls.length, reads + 1, 'the explicit retry is actually pending');
+    const before = JSON.stringify([h.state.panTarget, h.state.zoomTarget, h.state.codex.threadDrafts['room-a']]);
+    if (change === 'disconnected') h.state.codex.connected = false;
+    else h.state.codex.authStatus = { ...h.state.codex.authStatus, access: { state: 'permissionDenied' } };
+    h.briefing.emit();
+    if (change === 'disconnected') h.state.codex.connected = true;
+    else h.state.codex.authStatus = { ...h.state.codex.authStatus, access: { state: 'ok' } };
+    h.briefing.emit();
+    pending.resolve(true); await settle();
+    assert.deepEqual(h.materialized, materialized, 'a late retry cannot reopen the old evidence');
+    assert.equal(h.parts('minimap-briefing-marker').length, 0);
+    assert.equal(h.parts('minimap-briefing-row').length, 0);
+    assert.equal(h.briefing.evidenceCalls.length, reads + 1, 'there is no automatic retry after the explicit attempt');
+    assert.equal(JSON.stringify([h.state.panTarget, h.state.zoomTarget, h.state.codex.threadDrafts['room-a']]), before);
+    h.briefing.close();
+  });
+});
+
+test('CNV-07: a denied read cannot reuse an already-open matching evidence card as proof', async () => {
+  const h = briefingMinimapUiHarness({ prepare: reference => {
+    if (reference.sourceId === 'source-b') throw new Error('합성 권한 거부');
+    return true;
+  } });
+  await h.briefing.open(); await settle();
+  assert.ok(h.notices.includes('합성 권한 거부'));
+  assert.equal(h.resolveTargets(h.briefing.session(), h.briefing.briefing.steps[0])[1].status, 'available',
+    'the old matching card exists, but was not authorized for this presentation');
+  h.minimap.toggleDeskMinimap();
+  const rows = h.parts('minimap-briefing-row'), markers = h.parts('minimap-briefing-marker');
+  assert.deepEqual(rows.map(node => node.dataset.viewId), ['evidence-a-1', 'evidence-a-2', 'evidence-a-1']);
+  assert.ok(markers.every(node => node.dataset.viewId !== 'evidence-b-1'));
+  assert.ok(rows.every(node => !node.textContent.includes('허용 자료 B')));
+  assert.equal(h.state.codex.threadDrafts['room-a'], '기존 초안');
+  h.briefing.close();
+});
+
+test('CNV-07: an explicit failed evidence retry revokes the old proof even if the old card looks ready again', async () => {
+  let retrying = false;
+  const pending = requestProjectDeferred();
+  const h = briefingMinimapUiHarness({ prepare: reference => retrying && reference.sourceId === 'source-a' ? pending.promise : true });
+  await h.briefing.open(); await settle(); h.minimap.toggleDeskMinimap();
+  assert.ok(h.parts('minimap-briefing-row').some(node => node.dataset.viewId === 'evidence-a-1'));
+  h.firstCard._inputEvidenceLoaded = false;
+  h.briefing.render();
+  const retry = settingsNodes(h.briefing.panel(), node => node.dataset.testid === 'briefing-show-evidence'
+    && node.dataset.sourceId === 'source-a' && /1–4행/.test(node.getAttribute('aria-label') || ''))[0];
+  assert.ok(retry, 'the existing Briefing exposes its explicit retry action');
+  retrying = true;
+  retry.fire('click'); await settle();
+  h.firstCard._inputEvidenceLoaded = true;
+  h.minimap.refreshDeskMinimap();
+  assert.ok(h.parts('minimap-briefing-row').every(node => node.dataset.viewId !== 'evidence-a-1'),
+    'a matching old card alone is not renewed permission while the retry is pending');
+  pending.reject(new Error('합성 재확인 거부')); await settle();
+  h.minimap.refreshDeskMinimap();
+  assert.ok(h.notices.includes('합성 재확인 거부'));
+  assert.ok(h.parts('minimap-briefing-row').every(node => node.dataset.viewId !== 'evidence-a-1'),
+    'a failed retry does not restore the previous proof');
+  assert.ok(h.parts('minimap-briefing-marker').every(node => node.dataset.viewId !== 'evidence-a-1'));
+  assert.equal(h.state.codex.threadDrafts['room-a'], '기존 초안');
+  h.briefing.close();
+});
+
+test('CNV-07: overlapping open cards and a reused card remain distinct in the accessible evidence list', async () => {
+  const h = briefingMinimapUiHarness();
+  h.rangeCard.style.left = '10px'; h.rangeCard.style.top = '10px';
+  await h.briefing.open(); await settle(); h.minimap.toggleDeskMinimap();
+  const rows = h.parts('minimap-briefing-row');
+  assert.deepEqual(rows.map(node => [node.dataset.viewId, node.dataset.stepNumber, node.dataset.evidenceNumber]),
+    [['evidence-a-1', '1', '1'], ['evidence-b-1', '1', '2'],
+      ['evidence-a-2', '2', '1'], ['evidence-a-1', '2', '2']]);
+  assert.match(rows[2].textContent, /5–8행/);
+  assert.match(rows[3].textContent, /1–4행/);
+  const details = h.parts('minimap-briefing-evidence')[0];
+  assert.equal(details.tagName, 'DETAILS');
+  assert.equal(details.hidden, false);
+  assert.equal(!!details.open, false, 'the evidence list is closed until the user opens it');
+  assert.ok(settingsNodes(details, node => node.tagName === 'SUMMARY')[0], 'native details has a reachable summary');
+  const list = details.querySelector('.egd-minimap-briefing-list');
+  assert.equal(list.getAttribute('aria-label'), '브리핑 단계별 열린 근거');
+  assert.equal(list.getAttribute('tabindex'), '0');
+  const markers = h.parts('minimap-briefing-marker');
+  assert.equal(markers.length, 2, 'nearby cards may share a visual badge, not their accessible rows');
+  const shared = markers.find(node => node.dataset.viewId === 'evidence-a-1');
+  assert.ok(shared);
+  assert.match(shared.textContent, /1/); assert.match(shared.textContent, /2/);
+  assert.equal(shared.closest('.egd-minimap-briefing-layer').getAttribute('aria-hidden'), 'true');
+  assert.equal(h.state.codex.threadDrafts['room-a'], '기존 초안');
+  h.briefing.close();
+});
+
+test('CNV-07: a successful read never marks a same-key card from another room origin', async t => {
+  for (const changed of [null, 'clientThreadId', 'conversationId', 'engineId', 'engineProfileId', 'missing']) await t.test(changed || 'matching origin', async () => {
+    const h = briefingMinimapUiHarness();
+    const card = h.firstCard, original = card._inputReference;
+    if (changed === 'missing') { card._inputReference = { ...original }; delete card._inputReference.contextScope; }
+    else if (changed) card._inputReference = { ...original, contextScope: { ...original.contextScope, [changed]: `other-${changed}` },
+      ...(changed === 'clientThreadId' ? { clientThreadId: 'other-clientThreadId' } : {}),
+      ...(['engineId', 'engineProfileId'].includes(changed) ? { engine: { ...original.engine, [changed]: `other-${changed}` } } : {}) };
+    assert.equal(InputContext.inputEvidenceKey(card._inputReference), InputContext.inputEvidenceKey(original));
+
+    // Execute the production read-to-spawn bridge and card-reuse function;
+    // only the server read and any newly created shell are local fixtures.
+    const start = surfaceSource.indexOf('      async openInputEvidence('), end = surfaceSource.indexOf('\n      },', start);
+    assert.ok(start >= 0 && end > start);
+    const spawns = [], reads = [];
+    const makeShell = ({ id }) => {
+      const root = h.minimap.make(id, '새 합성 근거', 1000, 2400);
+      root.className = 'egd-canvas-card egd-input-evidence-card';
+      root.dataset.deskWindowKind = 'input-evidence';
+      const identity = h.document.createElement('div'), content = h.document.createElement('div');
+      root.appendChild(identity); root.appendChild(content);
+      const shell = { root, slots: { identity, content } }; root._deskWindowShell = shell; return shell;
+    };
+    const bridge = compileFunction(`let cardSeq = 0;\n${declaration('el')}\n${declaration('getCodexThreadById')}\n${declaration('spawnInputEvidence')}
+      const spawn = spawnInputEvidence;
+      spawnInputEvidence = (...args) => { const result = spawn(...args); spawns.push({ reference: args[0], card: result }); return result; };
+      return { ${surfaceSource.slice(start, end + 8)} };`,
+    ['document', 'state', 'InputContext', 'spawns', 'resolveCanvasCardPlacement', 'spawnDeskWindowShell',
+      'revealPlacedCanvasCard', 'cloneJson', 'boardNotice'])(h.document, h.state, InputContext, spawns,
+      () => ({ x: 1000, y: 2400, width: 400, height: 300 }), makeShell,
+      () => assert.fail('Briefing must not reveal a new card'), value => JSON.parse(JSON.stringify(value)), text => h.notices.push(text));
+    bridge.readInput = async (reference, options) => {
+      assert.equal(options.threadId, 'room-a'); assert.equal(options.isCurrent(), true);
+      assert.equal(options.briefingScope.current(), true); reads.push(reference);
+      const range = InputContext.projectionRange(reference.presentationRange);
+      return { capture: { sourceId: reference.sourceId, hash: reference.hash, capturedAt: 1, captureScope: { type: 'file' } },
+        source: { role: 'source', hash: reference.hash, rangeHash: 'fixture-range', text: '합성 원문',
+          range: { ...range, totalLines: range.endLine } } };
+    };
+    h.briefing.bridge.openInputEvidence = bridge.openInputEvidence.bind(bridge);
+    const before = JSON.stringify([h.state.panTarget, h.state.zoomTarget, h.state.codex.threadDrafts['room-a'], card.style]);
+    await h.openViaButton(); await settle(); h.minimap.toggleDeskMinimap();
+    const firstRead = reads.find(ref => ref.sourceId === 'source-a' && ref.presentationRange?.startLine === 1);
+    const firstSpawn = spawns.find(item => item.reference.sourceId === 'source-a' && item.reference.presentationRange?.startLine === 1);
+    assert.ok(firstRead && firstSpawn, 'the current room read and production spawn both ran');
+    assert.equal(firstRead.contextScope.clientThreadId, h.briefing.thread().clientBindingId);
+    assert.equal(firstRead.contextScope.conversationId, h.briefing.thread().conversationId);
+    const markers = h.parts('minimap-briefing-marker'), rows = h.parts('minimap-briefing-row');
+    assert.ok(markers.some(node => node.dataset.viewId === 'evidence-b-1'), 'a matching other card remains visible');
+    if (!changed) {
+      assert.equal(firstSpawn.card, card, 'a matching open card is reused');
+      assert.ok(markers.some(node => node.dataset.viewId === card.id));
+      assert.ok(rows.some(node => node.dataset.viewId === card.id));
+    } else {
+      assert.deepEqual({ marker: markers.some(node => node.dataset.viewId === card.id), row: rows.some(node => node.dataset.viewId === card.id) },
+        { marker: false, row: false }, `different ${changed} must not authorize the old card (spawn reused it: ${firstSpawn.card === card})`);
+    }
+    assert.equal(JSON.stringify([h.state.panTarget, h.state.zoomTarget, h.state.codex.threadDrafts['room-a'], card.style]), before);
+    h.briefing.close();
+  });
+});
+
+test('CNV-07: evidence labels identify ready-list order when the first source is unavailable', async () => {
+  const h = briefingMinimapUiHarness();
+  // The first original target is unavailable; list numbering must describe
+  // only the ready rows and must not expose its private label or identifier.
+  h.briefing.briefing.steps[0] = { ...h.briefing.briefing.steps[0], target: h.denied,
+    targets: [h.denied, h.distant, h.first] };
+  await h.openViaButton(); await settle(); h.minimap.toggleDeskMinimap();
+  const rows = () => h.parts('minimap-briefing-row');
+  const firstStep = () => rows().filter(node => node.dataset.stepNumber === '1');
+  assert.deepEqual(firstStep().map(node => [node.dataset.viewId, node.dataset.evidenceNumber]),
+    [['evidence-b-1', '1'], ['evidence-a-1', '2']]);
+  assert.match(firstStep()[0].textContent, /현재 1단계.*열린 근거 1 \(목록 순서\).*허용 자료 B/);
+  assert.match(firstStep()[1].textContent, /현재 1단계.*열린 근거 2 \(목록 순서\).*허용 자료 A/);
+  assert.ok(rows().every(node => !/비공개 합성 대상|denied-source|denied-hash/.test(node.textContent)));
+  assert.ok(h.parts('minimap-briefing-marker').every(node => node.dataset.viewId !== 'evidence-denied'));
+  h.briefing.click('briefing-next'); await settle();
+  assert.match(firstStep()[0].textContent, /이전 1단계.*열린 근거 1 \(목록 순서\)/);
+  assert.ok(rows().some(node => /현재 2단계.*열린 근거 1 \(목록 순서\)/.test(node.textContent)));
+  assert.ok(rows().some(node => /다음 3단계.*열린 근거 1 \(목록 순서\)/.test(node.textContent)));
+  assert.equal(h.state.codex.threadDrafts['room-a'], '기존 초안');
+  h.briefing.close();
+});
+
+test('CNV-07: a delayed evidence result after a room or account change cannot create markers', async t => {
+  for (const change of ['room', 'account']) await t.test(change, async () => {
+    const pending = requestProjectDeferred();
+    const h = briefingMinimapUiHarness({ prepare: reference => reference.sourceId === 'source-a' ? pending.promise : true });
+    const opening = h.briefing.open(); await settle();
+    h.minimap.toggleDeskMinimap();
+    assert.equal(h.parts('minimap-briefing-marker').length, 0);
+    const before = JSON.stringify([h.state.panTarget, h.state.zoomTarget, h.state.codex.threadDrafts['room-a']]);
+    if (change === 'room') h.state.codex.activeThreadId = 'other-room';
+    else h.state.codex.authStatus = { ...h.state.codex.authStatus, accountEmail: 'other-fixture@example.test' };
+    h.briefing.emit();
+    pending.resolve(true); await opening; await settle();
+    h.minimap.refreshDeskMinimap();
+    assert.equal(h.parts('minimap-briefing-marker').length, 0);
+    assert.equal(h.parts('minimap-briefing-row').length, 0);
+    assert.equal(JSON.stringify([h.state.panTarget, h.state.zoomTarget, h.state.codex.threadDrafts['room-a']]), before);
+    assert.equal(h.state.codex.briefingSession, null);
+  });
+});
+
+test('CNV-07: existing explicit minimap navigation can still move the camera without moving evidence or drafts', async () => {
+  const h = briefingMinimapUiHarness();
+  await h.briefing.open(); await settle(); h.minimap.toggleDeskMinimap();
+  const before = JSON.stringify([h.firstCard.style, h.distantCard.style, h.rangeCard.style]);
+  const count = h.minimap.cameras.length, zoom = h.state.zoomTarget;
+  const row = h.minimap.rows().find(node => node.dataset.targetId === 'evidence-b-1');
+  assert.ok(row, 'the existing open-view navigation remains reachable');
+  row.fire('click');
+  assert.equal(h.minimap.cameras.length, count + 1);
+  assert.equal(h.state.zoomTarget, zoom);
+  assert.equal(JSON.stringify([h.firstCard.style, h.distantCard.style, h.rangeCard.style]), before);
+  assert.equal(h.state.codex.threadDrafts['room-a'], '기존 초안');
+  h.briefing.close();
+});
+
+test('CNV-07: disclosure toggles reproject the minimap and preserve the existing search control', async () => {
+  const h = briefingMinimapUiHarness();
+  h.minimap.window.innerWidth = 720; h.minimap.window.innerHeight = 600;
+  h.minimap.setSafeRect({ left: 0, top: 0, right: 720, bottom: 600, width: 720, height: 600 });
+  for (let index = 1; index <= 8; index++) h.minimap.make(`search-fixture-${index}`, `검색 표본 ${index}`, 2500 + index * 500, 2000);
+  await h.openViaButton(); await settle(); h.minimap.toggleDeskMinimap();
+  h.briefing.type('접힘 전 의견 초안');
+  const search = h.minimap.search('검색 표본'); search.focus(); search.setSelectionRange(1, 3);
+  const details = h.parts('minimap-briefing-evidence')[0], map = h.document.querySelector('.egd-minimap-map');
+  const before = JSON.stringify([h.state.panTarget, h.state.zoomTarget, h.state.activeEntityId,
+    h.state.codex.threadDrafts['room-a'], h.minimap.cameras.length]);
+  const initialHeight = map.clientHeight, initialScale = map._egdeskMinimapModel.scale;
+  const assertProjection = () => {
+    const model = map._egdeskMinimapModel;
+    assert.equal(model.mapHeight, map.clientHeight, 'the model uses the currently laid-out map height');
+    for (const marker of h.parts('minimap-briefing-marker')) {
+      const item = model.entities.find(entry => entry.entity.id === marker.dataset.viewId);
+      assert.ok(item);
+      const x = model.offsetX + (item.rect.left + item.rect.width / 2 - model.bounds.left) * model.scale;
+      const y = model.offsetY + (item.rect.top + item.rect.height / 2 - model.bounds.top) * model.scale;
+      assert.ok(Math.abs(Number.parseFloat(marker.style.left) - x) < 0.01);
+      assert.ok(Math.abs(Number.parseFloat(marker.style.top) - y) < 0.01);
+    }
+  };
+  // The existing fixture has no CSS engine. Change only its measured map
+  // height to simulate the browser's resize; fire the production toggle.
+  details.open = true; map.clientHeight = 70; details.fire('toggle');
+  assertProjection(); assert.notEqual(map._egdeskMinimapModel.scale, initialScale);
+  assert.equal(h.document.activeElement, search);
+  assert.deepEqual([search.value, search.selectionStart, search.selectionEnd], ['검색 표본', 1, 3]);
+  assert.equal(h.briefing.part('briefing-comment').value, '접힘 전 의견 초안');
+  assert.equal(JSON.stringify([h.state.panTarget, h.state.zoomTarget, h.state.activeEntityId,
+    h.state.codex.threadDrafts['room-a'], h.minimap.cameras.length]), before);
+  details.open = false; map.clientHeight = initialHeight; details.fire('toggle');
+  assertProjection(); assert.equal(map._egdeskMinimapModel.scale, initialScale);
+  details.open = true; map.clientHeight = 70; details.fire('toggle');
+  assert.equal(h.document.activeElement, search);
+  const rows = h.minimap.rows(); assert.equal(rows.length, 8);
+  const last = rows.at(-1), calls = h.minimap.cameras.length, zoom = h.state.zoomTarget;
+  last.fire('click');
+  assert.equal(h.minimap.cameras.length, calls + 1, 'the existing last-result handler still permits explicit navigation');
+  assert.equal(h.state.zoomTarget, zoom);
+  assert.equal(h.state.activeEntityId, 'existing-card');
+  assert.equal(h.state.codex.threadDrafts['room-a'], '기존 초안');
+  h.briefing.close();
+});
+
+test('CNV-07: hiding and explicitly reopening an expanded disclosure reprojects after permission loss', async () => {
+  const h = briefingMinimapUiHarness({ useProductionEmit: true });
+  h.state.codex.authStatus = { ...h.state.codex.authStatus, access: { state: 'ok' } };
+  h.minimap.window.innerWidth = 720; h.minimap.window.innerHeight = 600;
+  await h.openViaButton(); await settle(); h.minimap.toggleDeskMinimap();
+  const details = h.parts('minimap-briefing-evidence')[0], map = h.document.querySelector('.egd-minimap-map');
+  // Model the two measured heights only; the separate Firefox QA checks the
+  // actual CSS, visual overlap, and pointer reachability at 720×600.
+  let hidden = !!details.hidden;
+  Object.defineProperty(details, 'hidden', { configurable: true, get: () => hidden,
+    set: value => { hidden = !!value; map.clientHeight = details.open && !hidden ? 70 : 160; } });
+  details.open = true; map.clientHeight = 70; details.fire('toggle');
+  assert.equal(map._egdeskMinimapModel.mapHeight, 70);
+  assert.ok(h.parts('minimap-briefing-marker').length > 0);
+  const before = JSON.stringify([h.state.panTarget, h.state.zoomTarget, h.state.codex.threadDrafts['room-a']]);
+  const outside = h.document.createElement('textarea'); h.document.documentElement.appendChild(outside); outside.focus();
+  h.state.codex.authStatus = { ...h.state.codex.authStatus, access: { state: 'permissionDenied' } };
+  h.briefing.emit();
+  assert.equal(details.hidden, true);
+  assert.equal(map._egdeskMinimapModel.mapHeight, 160, 'hiding the open disclosure recomputes the map projection');
+  assert.equal(h.parts('minimap-briefing-marker').length, 0);
+  assert.equal(h.parts('minimap-briefing-row').length, 0);
+  assert.equal(h.document.activeElement, outside);
+  assert.equal(JSON.stringify([h.state.panTarget, h.state.zoomTarget, h.state.codex.threadDrafts['room-a']]), before);
+  h.state.codex.authStatus = { ...h.state.codex.authStatus, access: { state: 'ok' } };
+  h.briefing.emit();
+  assert.equal(h.parts('minimap-briefing-row').length, 0);
+  h.briefing.close();
+  await h.openViaButton(); await settle();
+  assert.equal(details.hidden, false);
+  assert.equal(map._egdeskMinimapModel.mapHeight, 70, 'fresh proof makes the open disclosure reproject again');
+  assert.ok(h.parts('minimap-briefing-row').length > 0);
+  h.briefing.close();
+});
+
+test('CNV-07: first ready evidence reprojects a collapsed disclosure before the next read', async () => {
+  const first = requestProjectDeferred(), second = requestProjectDeferred();
+  const h = briefingMinimapUiHarness({ prepare: reference => reference.sourceId === 'source-a' ? first.promise : second.promise });
+  h.minimap.window.innerWidth = 720; h.minimap.window.innerHeight = 600;
+  const opening = h.openViaButton(); await settle(); h.minimap.toggleDeskMinimap();
+  const details = h.parts('minimap-briefing-evidence')[0], map = h.document.querySelector('.egd-minimap-map');
+  assert.equal(details.hidden, true); details.open = false;
+  // The synthetic document has no CSS engine: these are modeled measurements,
+  // not proof of the compact layout or pointer reachability in Firefox.
+  let hidden = !!details.hidden;
+  Object.defineProperty(details, 'hidden', { configurable: true, get: () => hidden,
+    set: value => { hidden = !!value; map.clientHeight = hidden ? 160 : 90; } });
+  map.clientHeight = 160;
+  h.briefing.type('접힌 목록 의견');
+  const outside = h.document.createElement('textarea'); h.document.documentElement.appendChild(outside); outside.focus();
+  const before = JSON.stringify([h.state.panTarget, h.state.zoomTarget, h.state.codex.threadDrafts['room-a']]);
+  try {
+    first.resolve(true); await settle();
+    assert.equal(h.briefing.evidenceCalls.length, 2, 'the next read remains pending');
+    assert.equal(details.hidden, false); assert.equal(details.open, false);
+    assert.ok(h.parts('minimap-briefing-marker').length > 0);
+    assert.equal(map.clientHeight, 90);
+    assert.equal(map._egdeskMinimapModel.mapHeight, 90, 'showing the collapsed summary updates the projection immediately');
+    assert.equal(h.document.activeElement, outside);
+    assert.equal(h.briefing.part('briefing-comment').value, '접힌 목록 의견');
+    assert.equal(JSON.stringify([h.state.panTarget, h.state.zoomTarget, h.state.codex.threadDrafts['room-a']]), before);
+  } finally {
+    second.resolve(true); await opening; h.briefing.close();
+  }
+});
+
+test('CNV-07: first ready evidence reprojects an already-open hidden disclosure before the next read', async () => {
+  const first = requestProjectDeferred(), second = requestProjectDeferred();
+  const h = briefingMinimapUiHarness({ prepare: reference => reference.sourceId === 'source-a' ? first.promise : second.promise });
+  h.minimap.window.innerWidth = 720; h.minimap.window.innerHeight = 600;
+  const opening = h.openViaButton(); await settle(); h.minimap.toggleDeskMinimap();
+  const details = h.parts('minimap-briefing-evidence')[0], map = h.document.querySelector('.egd-minimap-map');
+  assert.equal(details.hidden, true);
+  let hidden = !!details.hidden;
+  Object.defineProperty(details, 'hidden', { configurable: true, get: () => hidden,
+    set: value => { hidden = !!value; map.clientHeight = details.open && !hidden ? 70 : 160; } });
+  details.open = true; map.clientHeight = 160; details.fire('toggle');
+  h.briefing.type('준비 중인 의견');
+  const otherInput = h.document.createElement('textarea'); h.document.documentElement.appendChild(otherInput); otherInput.focus();
+  const before = JSON.stringify([h.state.panTarget, h.state.zoomTarget, h.state.codex.threadDrafts['room-a']]);
+  try {
+    first.resolve(true); await settle();
+    assert.equal(h.briefing.evidenceCalls.length, 2, 'the next read remains pending');
+    assert.equal(details.hidden, false);
+    assert.ok(h.parts('minimap-briefing-marker').length > 0);
+    assert.equal(map.clientHeight, 70);
+    assert.equal(map._egdeskMinimapModel.mapHeight, 70, 'projection is updated immediately when the disclosure becomes visible');
+    assert.equal(h.document.activeElement, otherInput);
+    assert.equal(h.briefing.part('briefing-comment').value, '준비 중인 의견');
+    assert.equal(JSON.stringify([h.state.panTarget, h.state.zoomTarget, h.state.codex.threadDrafts['room-a']]), before);
+  } finally {
+    second.resolve(true); await opening; h.briefing.close();
+  }
+});
 
 test('a dense minimap overlap menu clamps to the viewport and scrolls only itself for keyboard focus', () => {
   const h = minimapUiHarness();

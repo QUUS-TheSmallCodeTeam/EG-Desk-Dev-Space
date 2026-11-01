@@ -198,6 +198,192 @@ test('step marks give the main view and the minimap the same numbers, places and
   assert.ok(Array.isArray(marks), 'marks are a list, never keyed by a model-written step ID');
 });
 
+// An isolated presentation: same-titled sources are deliberately not evidence
+// identities, and both out-of-window and denied sources have real decoy views.
+function minimapFixture() {
+  const identity = { conversationId: 'conversation-1', runId: 'run-1', answerId: 'answer-1' };
+  const names = ['source-a', 'source-b', 'not-visible', 'denied-secret', 'far-left-secret', 'far-right-secret'];
+  const refs = Object.fromEntries(names.map(name => [name, { ...reference(name), localSource: { label: '같은 제목' } }]));
+  refs['not-visible'].localSource.label = '미공개 누락 이름';
+  refs['denied-secret'].localSource.label = '미공개 거부 이름';
+  const target = (name, range) => ({ sourceId: name, hash: refs[name].hash, ...(range ? { range } : {}) });
+  const briefing = { id: 'brief-minimap', ...identity, steps: [
+    { id: 'outside-before', text: 'outside', target: target('far-left-secret') },
+    { id: 'previous', text: 'previous', target: target('source-a') },
+    { id: 'current', text: 'current', targets: [target('not-visible'), target('source-a'), target('source-b'),
+      target('source-a', { startLine: 5, endLine: 8 }), target('denied-secret')] },
+    { id: 'next', text: 'next', target: target('source-a') },
+    { id: 'outside-after', text: 'outside', target: target('far-right-secret') },
+  ] };
+  const session = { ...Briefing.beginBriefing(briefing, {}), index: 2, threadId: 'room-1',
+    presentationId: 'presentation-1', identity, references: Object.values(refs) };
+  const viewA = evidenceView(refs['source-a'], { x: 10, y: 20, width: 40, height: 20 });
+  const viewB = evidenceView(refs['source-b'], { x: 1010, y: 1020, width: 20, height: 40 });
+  const viewRange = evidenceView(refs['source-a'], { x: 100, y: 100, width: 10, height: 10 }, {
+    id: 'card-a-range', evidenceKey: InputContext.inputEvidenceKey({ ...refs['source-a'], presentationRange: { startLine: 5, endLine: 8 } }),
+  });
+  const views = [viewA, viewB, viewRange, ...['denied-secret', 'far-left-secret', 'far-right-secret']
+    .map((name, index) => evidenceView(refs[name], { x: 8000 + index, y: 9000, width: 10, height: 10 }))];
+  const context = { activeThreadId: session.threadId, presentationId: session.presentationId,
+    briefingId: briefing.id, identity: { ...identity }, authorized: true, preparationCurrent: true };
+  const resolve = () => session.briefing.steps.map(step => Briefing.resolveBriefingTargets(step, {
+    references: session.references, views, identity,
+  }).map(item => item.target.sourceId === 'denied-secret' ? { ...item, status: 'denied' } : item));
+  return { session, context, refs, views, viewA, viewB, viewRange, resolve };
+}
+
+test('minimap evidence uses real per-card centers and retains shared cards and distinct ranges', () => {
+  const f = minimapFixture(), resolved = f.resolve();
+  const overview = Briefing.briefingStepMarks(f.session, resolved);
+  assert.deepEqual(overview[2].bounds, { x: 10, y: 20, width: 1020, height: 1040 }, 'the existing union overview stays unchanged');
+  const before = JSON.stringify([f.session, resolved, f.context]);
+  const result = Briefing.briefingMinimapEvidence(f.session, resolved, f.context);
+  assert.equal(JSON.stringify([f.session, resolved, f.context]), before, 'the model does not mutate presentation or resolution state');
+  assert.deepEqual(result.markers.map(({ viewId, x, y }) => [viewId, x, y]), [
+    ['card-source-a', 30, 30], ['card-source-b', 1020, 1040], ['card-a-range', 105, 105],
+  ]);
+  assert.deepEqual(result.markers[0].geometry, f.viewA.geometry);
+  assert.deepEqual(result.markers[0].entries.map(item => [item.stepId, item.stepNumber, item.relativeStep, item.evidenceNumber]), [
+    ['previous', 2, -1, 1], ['current', 3, 0, 1], ['next', 4, 1, 1],
+  ]);
+  assert.deepEqual(result.items.map(item => [item.stepId, item.viewId, item.evidenceNumber]), [
+    ['previous', 'card-source-a', 1], ['current', 'card-source-a', 1], ['current', 'card-source-b', 2],
+    ['current', 'card-a-range', 3], ['next', 'card-source-a', 1],
+  ]);
+  assert.equal(result.items[3].target.range.startLine, 5);
+  assert.equal(result.items[3].reference.sourceId, 'source-a');
+  assert.equal(result.items[1].current, true);
+  const exposed = JSON.stringify(result);
+  for (const secret of ['not-visible', 'denied-secret', 'far-left-secret', 'far-right-secret', '미공개 누락 이름',
+    '미공개 거부 이름', '8000', '9000', 'targetIndex', 'targetCount']) {
+    assert.equal(exposed.includes(secret), false, `${secret} must not leak`);
+  }
+});
+
+test('minimap evidence fails closed for room, presentation, answer, briefing, authorization and preparation changes', () => {
+  const f = minimapFixture(), resolved = f.resolve(), empty = { markers: [], items: [] };
+  assert.ok(Briefing.briefingMinimapEvidence(f.session, resolved, f.context).items.length > 0);
+  for (const context of [
+    { ...f.context, activeThreadId: 'other-room' }, { ...f.context, presentationId: 'other-presentation' },
+    { ...f.context, briefingId: 'other-briefing' }, { ...f.context, authorized: false },
+    { ...f.context, authorized: undefined }, { ...f.context, authorized: 1 }, { ...f.context, preparationCurrent: false },
+    { ...f.context, preparationCurrent: undefined },
+    ...['conversationId', 'runId', 'answerId'].map(key => ({ ...f.context, identity: { ...f.context.identity, [key]: 'other' } })),
+  ]) assert.deepEqual(Briefing.briefingMinimapEvidence(f.session, resolved, context), empty);
+  const wrongBriefing = { ...f.session, briefing: { ...f.session.briefing, answerId: 'other' } };
+  assert.deepEqual(Briefing.briefingMinimapEvidence(wrongBriefing, resolved, f.context), empty);
+  assert.deepEqual(Briefing.briefingMinimapEvidence({ ...f.session, index: -1 }, resolved, f.context), empty);
+  assert.deepEqual(Briefing.briefingMinimapEvidence(null, resolved, f.context), empty);
+  assert.deepEqual(Briefing.briefingMinimapEvidence(f.session, [], f.context), empty);
+  assert.deepEqual(Briefing.briefingMinimapEvidence(f.session, resolved, null), empty);
+  assert.deepEqual(Briefing.briefingMinimapEvidence({ ...f.session, briefing: { ...f.session.briefing, steps: [null] } }, resolved, f.context), empty);
+});
+
+test('minimap evidence follows the actual target, hash and exact range, never a same-title decoy or input order', () => {
+  const f = minimapFixture(), resolved = f.resolve();
+  const shuffled = resolved.map(items => [...items].reverse());
+  const original = Briefing.briefingMinimapEvidence(f.session, resolved, f.context);
+  const reordered = Briefing.briefingMinimapEvidence(f.session, shuffled, f.context);
+  assert.deepEqual(reordered, original, 'reordered resolution records do not reorder briefing targets');
+  for (const changes of [
+    { sourceId: 'source-b' }, { hash: 'different-hash' }, { evidenceKey: f.viewRange.evidenceKey },
+    { sourceMatches: false }, { revisionMatches: false },
+  ]) {
+    const tampered = f.resolve();
+    const a = tampered[2].find(item => item.target.sourceId === 'source-a' && !item.target.range);
+    a.view = { ...a.view, ...changes };
+    const items = Briefing.briefingMinimapEvidence(f.session, tampered, f.context).items;
+    assert.equal(items.some(item => item.stepId === 'current' && item.viewId === 'card-source-a'), false);
+    assert.equal(items.some(item => item.stepId === 'current' && item.viewId === 'card-a-range'), true);
+  }
+  const wrongRange = f.resolve();
+  const range = wrongRange[2].find(item => item.target.range);
+  range.view = { ...range.view, evidenceKey: f.viewA.evidenceKey };
+  assert.equal(Briefing.briefingMinimapEvidence(f.session, wrongRange, f.context).items.some(item => item.viewId === 'card-a-range'), false);
+  const wrongStep = f.resolve();
+  wrongStep[2] = wrongStep[1];
+  assert.equal(Briefing.briefingMinimapEvidence(f.session, wrongStep, f.context).items.some(item => item.stepId === 'current'), false);
+  const duplicated = f.resolve();
+  const b = duplicated[2].find(item => item.target.sourceId === 'source-b');
+  duplicated[2].push({ ...b, status: 'denied' });
+  for (const entries of [duplicated[2], [...duplicated[2]].reverse()]) {
+    const ambiguous = [...duplicated];
+    ambiguous[2] = entries;
+    assert.equal(Briefing.briefingMinimapEvidence(f.session, ambiguous, f.context).items.some(item => item.viewId === 'card-source-b'), false,
+      'ambiguous duplicate decisions are not chosen by their order');
+  }
+});
+
+test('minimap never emits denied or unready identity, title, position or original ordinal', () => {
+  for (const status of ['denied', 'missing', 'stale', 'unsupported']) {
+    const f = minimapFixture(), resolved = f.resolve();
+    f.refs['source-b'].localSource.label = '비공개 B 이름';
+    resolved[2].find(item => item.target.sourceId === 'source-b').status = status;
+    const result = Briefing.briefingMinimapEvidence(f.session, resolved, f.context);
+    const exposed = JSON.stringify(result);
+    for (const secret of ['source-b', '비공개 B 이름', '1020', '1040', 'targetIndex']) assert.equal(exposed.includes(secret), false);
+    assert.deepEqual(result.items.filter(item => item.stepId === 'current').map(item => item.evidenceNumber), [1, 2]);
+  }
+});
+
+test('minimap rejects malformed explicit ranges even if a forged view carries a matching normalized key', () => {
+  for (const badRange of [null, [], { startLine: null }, { startLine: 1, endLine: null }, { page: 1 }, { startLine: NaN }]) {
+    const f = minimapFixture(), resolved = f.resolve();
+    const item = resolved[2].find(entry => entry.target.sourceId === 'source-a' && !entry.target.range);
+    item.target.range = badRange;
+    // Null bounds have normalized keys in the shared reader; the presentation
+    // explicitly rejects them and the minimap must never bypass that check.
+    try { item.view = { ...item.view, evidenceKey: InputContext.inputEvidenceKey({ ...item.reference, presentationRange: badRange }) }; } catch {}
+    assert.equal(Briefing.briefingMinimapEvidence(f.session, resolved, f.context).items.some(entry =>
+      entry.stepId === 'current' && entry.viewId === 'card-source-a'), false);
+  }
+});
+
+test('minimap evidence drops malformed geometry and changes immediately with freshness', () => {
+  for (const geometry of [
+    { x: NaN, y: 0, width: 10, height: 10 }, { x: Infinity, y: 0, width: 10, height: 10 },
+    { x: 0, y: 0, width: 0, height: 10 }, { x: 0, y: 0, width: 10, height: -1 },
+    { x: Number.MAX_VALUE, y: 0, width: Number.MAX_VALUE, height: 10 },
+  ]) {
+    const f = minimapFixture();
+    f.viewB.geometry = geometry;
+    assert.equal(Briefing.briefingMinimapEvidence(f.session, f.resolve(), f.context).items.some(item => item.viewId === 'card-source-b'), false);
+  }
+  const f = minimapFixture();
+  assert.equal(Briefing.briefingMinimapEvidence(f.session, f.resolve(), f.context).markers.some(item => item.viewId === 'card-source-b'), true);
+  f.viewB.revisionMatches = false;
+  const stale = Briefing.briefingMinimapEvidence(f.session, f.resolve(), f.context);
+  assert.equal(stale.items.some(item => item.viewId === 'card-source-b'), false);
+  assert.deepEqual(stale.items.filter(item => item.stepId === 'current').map(item => item.evidenceNumber), [1, 2]);
+  f.viewB.revisionMatches = true;
+  assert.equal(Briefing.briefingMinimapEvidence(f.session, f.resolve(), f.context).markers.some(item => item.viewId === 'card-source-b'), true);
+});
+
+test('a replaced briefing object cannot borrow old resolution with identical step and source IDs', () => {
+  const f = minimapFixture(), oldResolution = f.resolve();
+  const reopened = { ...f.session, briefing: JSON.parse(JSON.stringify(f.session.briefing)), presentationId: 'presentation-2' };
+  const currentContext = { ...f.context, presentationId: reopened.presentationId };
+  assert.deepEqual(Briefing.briefingMinimapEvidence(reopened, oldResolution, currentContext), { markers: [], items: [] });
+  const fresh = reopened.briefing.steps.map(step => Briefing.resolveBriefingTargets(step, {
+    references: reopened.references, views: f.views, identity: reopened.identity,
+  }).map(item => item.target.sourceId === 'denied-secret' ? { ...item, status: 'denied' } : item));
+  assert.ok(Briefing.briefingMinimapEvidence(reopened, fresh, currentContext).items.length > 0);
+});
+
+test('overlapping real cards stay separately accessible, and conflicting reuse of a view id fails closed', () => {
+  const f = minimapFixture();
+  f.viewB.geometry = { ...f.viewA.geometry };
+  const overlap = Briefing.briefingMinimapEvidence(f.session, f.resolve(), f.context);
+  const samePlace = overlap.markers.filter(marker => marker.x === 30 && marker.y === 30);
+  assert.deepEqual(samePlace.map(marker => marker.viewId), ['card-source-a', 'card-source-b']);
+  assert.ok(samePlace.every(marker => overlap.items.some(item => item.viewId === marker.viewId)), 'each possible representative is a real accessible card');
+  f.viewRange.id = f.viewA.id;
+  const conflict = Briefing.briefingMinimapEvidence(f.session, f.resolve(), f.context);
+  assert.equal(conflict.markers.some(marker => marker.viewId === f.viewA.id), false);
+  assert.equal(conflict.items.some(item => item.viewId === f.viewA.id), false);
+  assert.ok(conflict.items.some(item => item.viewId === f.viewB.id));
+});
+
 test('the screen enters its briefing chrome mode only while a briefing is open', () => {
   assert.equal(Briefing.briefingChromeMode(null), null);
   assert.equal(Briefing.briefingChromeMode(Briefing.beginBriefing(multiBriefing(), {})), 'briefing');

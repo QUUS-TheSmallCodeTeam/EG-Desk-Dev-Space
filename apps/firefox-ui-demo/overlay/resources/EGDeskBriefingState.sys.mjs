@@ -171,6 +171,91 @@ export function briefingStepMarks(session, resolvedSteps = []) {
   });
 }
 
+// A minimap marker describes an actual, prepared input-evidence card, not the
+// center of a step's union bounds. The caller must supply freshly resolved
+// targets and filter each one through the current room/actor/presentation's
+// successful evidence-read authorization before invoking this function.
+// Recheck that authorization when an item is activated, too: this is display
+// data, not an authorization receipt or permission to navigate.
+export function briefingMinimapEvidence(session, resolvedSteps = [], context = {}) {
+  const empty = () => ({ markers: [], items: [] });
+  const id = value => typeof value === 'string' && value.trim().length > 0;
+  const identityKeys = ['conversationId', 'runId', 'answerId'];
+  if (!Array.isArray(session?.briefing?.steps)
+      || !session.briefing.steps.every(step => step && typeof step === 'object' && !Array.isArray(step))
+      || !validBriefing(session.briefing) || !Number.isInteger(session.index) || session.index < 0
+      || session.index >= session.briefing.steps.length || !Array.isArray(session.references)
+      || !Array.isArray(resolvedSteps) || context?.authorized !== true || context?.preparationCurrent !== true
+      || !id(session.threadId) || context.activeThreadId !== session.threadId
+      || !id(session.presentationId) || context.presentationId !== session.presentationId
+      || context.briefingId !== session.briefing.id
+      || identityKeys.some(key => !id(session.identity?.[key]) || context.identity?.[key] !== session.identity[key]
+        || session.briefing[key] !== session.identity[key])) return empty();
+
+  const candidates = [];
+  for (let index = Math.max(0, session.index - 1); index <= Math.min(session.briefing.steps.length - 1, session.index + 1); index++) {
+    const step = session.briefing.steps[index];
+    const resolved = Array.isArray(resolvedSteps[index]) ? resolvedSteps[index] : [];
+    for (const target of briefingStepTargets(step)) {
+      // The production resolver retains the presented target object. Requiring
+      // it prevents a result from another step or replaced briefing object
+      // being substituted even when their source and range happen to match.
+      const matches = resolved.filter(entry => entry?.target === target);
+      if (matches.length !== 1) continue;
+      const item = matches[0];
+      if (item?.status !== 'available' || !id(target.sourceId)) continue;
+      const reference = session.references.find(ref => ref?.sourceId === target.sourceId);
+      if (!reference || !id(reference.hash) || (target.hash !== undefined && target.hash !== reference.hash)
+          || item.reference?.sourceId !== reference.sourceId || item.reference?.hash !== reference.hash) continue;
+      const range = target.range;
+      if (range !== undefined && (!range || typeof range !== 'object' || Array.isArray(range)
+          || range.startLine === null || range.endLine === null)) continue;
+      let evidenceKey;
+      try { evidenceKey = inputEvidenceKey({ ...reference, presentationRange: range }); }
+      catch { continue; }
+      const view = item.view, rect = view?.geometry;
+      if (!id(view?.id) || view.sourceId !== reference.sourceId || view.hash !== reference.hash
+          || view.evidenceKey !== evidenceKey || view.sourceMatches !== true || view.revisionMatches !== true
+          || !finiteRect(rect) || !Number.isFinite(rect.x + rect.width) || !Number.isFinite(rect.y + rect.height)) continue;
+      const geometry = { x: rect.x, y: rect.y, width: rect.width, height: rect.height };
+      const x = rect.x + rect.width / 2, y = rect.y + rect.height / 2;
+      if (!Number.isFinite(x) || !Number.isFinite(y)) continue;
+      candidates.push({ viewId: view.id, x, y, geometry, evidenceKey, stepId: step.id, stepNumber: index + 1,
+        relativeStep: index - session.index, current: index === session.index, target, reference });
+    }
+  }
+
+  // A single DOM card cannot simultaneously have different bindings or
+  // geometries. If an inconsistent snapshot claims otherwise, omit it rather
+  // than choosing a possibly stale location. Actual overlapping cards with
+  // distinct IDs remain separate and can be grouped after screen projection.
+  const byId = new Map();
+  for (const candidate of candidates) {
+    const prior = byId.get(candidate.viewId);
+    if (!prior) byId.set(candidate.viewId, { first: candidate, conflict: false });
+    else if (prior.first.evidenceKey !== candidate.evidenceKey
+        || ['x', 'y', 'width', 'height'].some(key => prior.first.geometry[key] !== candidate.geometry[key])) prior.conflict = true;
+  }
+  const markers = [], items = [], markerById = new Map(), evidenceNumbers = new Map();
+  for (const candidate of candidates) {
+    if (byId.get(candidate.viewId).conflict) continue;
+    const evidenceNumber = (evidenceNumbers.get(candidate.stepId) || 0) + 1;
+    evidenceNumbers.set(candidate.stepId, evidenceNumber);
+    const entry = { viewId: candidate.viewId, stepId: candidate.stepId, stepNumber: candidate.stepNumber,
+      relativeStep: candidate.relativeStep, evidenceNumber, current: candidate.current,
+      target: candidate.target, reference: candidate.reference };
+    items.push(entry);
+    let marker = markerById.get(candidate.viewId);
+    if (!marker) {
+      marker = { viewId: candidate.viewId, x: candidate.x, y: candidate.y, geometry: candidate.geometry, entries: [] };
+      markerById.set(candidate.viewId, marker);
+      markers.push(marker);
+    }
+    marker.entries.push(entry);
+  }
+  return { markers, items };
+}
+
 // CHAT-05: the comment itself is saved first (POST /context/briefings/:id/comments
 // with this body); the helper attaches the step's own evidence.
 export function briefingCommentRequest(session, comment, clientRequestId) {

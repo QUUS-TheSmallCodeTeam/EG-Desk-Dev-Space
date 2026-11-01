@@ -3201,6 +3201,72 @@
   z-index: 4;
 }
 
+/* Briefing numbers mark individual open cards; the existing map still owns
+   pointer input and its normal camera gestures. */
+.egd-minimap-briefing-layer {
+  position: absolute;
+  inset: 0;
+  z-index: 6;
+  pointer-events: none;
+}
+.egd-minimap-briefing-marker {
+  position: absolute;
+  display: flex;
+  gap: 1px;
+  transform: translate(-50%, -50%);
+  pointer-events: none;
+}
+.egd-minimap-briefing-number {
+  min-width: 13px;
+  height: 13px;
+  padding: 0 2px;
+  box-sizing: border-box;
+  border: 1px solid var(--egd-primary);
+  border-radius: 7px;
+  background: var(--egd-surface-elevated);
+  color: var(--egd-primary);
+  font: 700 9px/11px var(--egd-font, system-ui);
+  text-align: center;
+}
+.egd-minimap-briefing-number[data-relative-step="0"] {
+  background: var(--egd-primary);
+  color: var(--egd-surface-elevated);
+}
+.egd-minimap-briefing-number[data-relative-step="1"] { border-style: dashed; }
+.egd-minimap-briefing {
+  margin-top: 6px;
+  color: var(--egd-on-surface-variant);
+  font-size: 10px;
+}
+.egd-minimap-briefing > summary { cursor: pointer; }
+.egd-minimap-briefing > summary:focus-visible,
+.egd-minimap-briefing-list:focus-visible {
+  outline: var(--egd-focus-outline);
+  outline-offset: var(--egd-focus-outline-offset);
+}
+.egd-minimap-briefing-list {
+  max-height: min(112px, 18vh);
+  overflow: auto;
+  margin: 4px 0 0;
+  padding-left: 18px;
+  line-height: 1.45;
+  overflow-wrap: anywhere;
+}
+
+/* On a short, narrow window the expanded evidence list must leave the
+   existing search results above the Briefing controls. */
+@media (max-width: 56rem) and (max-height: 42rem) {
+  #egd-desk-minimap:has(.egd-minimap-briefing:not([open]):not([hidden])) .egd-minimap-map {
+    max-height: max(48px, calc(100vh - 510px));
+  }
+  #egd-desk-minimap:has(.egd-minimap-briefing[open]:not([hidden])) .egd-minimap-map {
+    max-height: max(48px, calc(100vh - 542px));
+  }
+  #egd-desk-minimap:has(.egd-minimap-briefing[open]:not([hidden])) .egd-minimap-briefing-list {
+    max-height: min(48px, 10vh);
+  }
+}
+
 .egd-minimap-dragging,
 .egd-minimap-dragging .egd-minimap-viewport {
   cursor: grabbing;

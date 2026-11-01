@@ -2707,6 +2707,42 @@
       });
   }
 
+  // Only a successful read for this presentation can authorize an already
+  // open evidence card for the minimap. Never carry this proof across rooms,
+  // accounts, presentations or a detached/replaced card.
+  function rememberBriefingMinimapEvidence(session, reference, card) {
+    const shown = state.codex.briefingSession;
+    try {
+      if (!shown || shown.presentationId !== session.presentationId || shown.threadId !== state.codex.activeThreadId
+          || shown.preparationScope?.current() !== true || !card?.isConnected || !card._inputEvidenceLoaded) return false;
+      const thread = getCodexThreadById(state.codex, shown.threadId);
+      const route = ChatState.chatContextRequestScope(thread, state.codex), origin = reference?.contextScope;
+      const accountKey = ChatState.codexAccountKey(state.codex.authStatus);
+      const access = state.codex.authStatus?.access?.state;
+      if (state.codex.connected !== true || ['permissionDenied', 'authFailed', 'loginRequired', 'loginInProgress'].includes(access)
+          || route.engineId !== 'codex' || !accountKey || state.codex.codexAccountKey !== accountKey
+          || !ChatState.canResumeNativeThread(thread, state.codex.authStatus, state.codex)
+          || !origin || ['engineId', 'engineProfileId', 'clientThreadId', 'conversationId'].some(key => origin[key] !== route[key])) return false;
+      InputContext.inputReadContext(reference, route, { thread, accountKey, cachedAccountKey: state.codex.codexAccountKey });
+      const key = InputContext.inputEvidenceKey(reference), cardReference = card._inputReference;
+      if (!cardReference?.contextScope
+          || ['engineId', 'engineProfileId', 'clientThreadId', 'conversationId'].some(key => cardReference.contextScope[key] !== origin[key])
+          || InputContext.inputEvidenceKey(cardReference) !== key) return false;
+      (shown._minimapVerifiedEvidence ||= new Map()).set(key, card);
+      return true;
+    } catch { return false; }
+  }
+
+  function clearBriefingMinimapDisplay() {
+    const panel = document.getElementById('egd-desk-minimap');
+    const layer = panel?.querySelector('.egd-minimap-briefing-layer');
+    const details = panel?.querySelector('.egd-minimap-briefing');
+    const list = details?.querySelector('.egd-minimap-briefing-list');
+    if (layer) { layer.replaceChildren(); layer._briefingSignature = null; }
+    if (list) { list.replaceChildren(); list._briefingSignature = null; }
+    if (details) details.hidden = !details.contains(document.activeElement);
+  }
+
   function briefingFitCamera(bounds, safe, panel) {
     const area = (left, top, right, bottom) => ({ left, top, right, bottom, width: right - left, height: bottom - top });
     const gap = 20;
@@ -2776,7 +2812,10 @@
       session.commentEditor?.dispose();
       if (state.codex.briefingSession !== session) return;
       state.codex.briefingSession = null;
-      state.refreshSemanticProjections?.();
+      session._minimapVerifiedEvidence?.clear();
+      if (typeof clearBriefingMinimapDisplay === 'function') clearBriefingMinimapDisplay();
+      try { state.refreshSemanticProjections?.(); } catch {}
+      try { if (typeof refreshDeskMinimap === 'function') refreshDeskMinimap(); } catch {}
       panel?._disposeBriefingLayout?.();
       panel?._syncBriefingSemanticMarkers?.(new Map());
       panel?.remove();
@@ -2845,12 +2884,27 @@
       references: briefingInputReferences(thread, message),
       artifacts: message.artifacts || [],
       presentationId: chatBindingNonce(), preparing: true, interaction: { revision: 0 },
+      _minimapAccessFence: { revision: 0, blocked: false },
     };
     const preparationScope = session.preparationScope = state.codexBridge.createBriefingPreparationScope(thread.id, () => {
       // Losing the original room/account closes only the presentation. The
       // comment controller retains its in-memory draft; never restore a camera
       // into a different room or a newer user-selected view.
       if (state.codex.briefingSession?.presentationId === session.presentationId) closeAnswerBriefing({ restore: false });
+    }, () => {
+      // A previously verified read cannot authorize the map after an observed
+      // disconnect or access denial. Reconnection alone never restores proof.
+      const shown = state.codex.briefingSession, access = state.codex.authStatus?.access?.state;
+      if (shown?.presentationId !== session.presentationId) return;
+      const fence = shown._minimapAccessFence;
+      const blocked = state.codex.connected === false || ['permissionDenied', 'authFailed', 'loginRequired', 'loginInProgress'].includes(access);
+      if (blocked && !fence.blocked) fence.revision++;
+      fence.blocked = blocked;
+      if (blocked && shown._minimapVerifiedEvidence?.size) {
+        shown._minimapVerifiedEvidence.clear();
+        if (typeof clearBriefingMinimapDisplay === 'function') clearBriefingMinimapDisplay();
+        if (typeof refreshDeskMinimap === 'function') refreshDeskMinimap();
+      }
     });
     if (state.codex.briefingSession !== session) { preparationScope.dispose(); return; }
     // Per-presentation intent only. Never read or record the input value; a
@@ -2945,10 +2999,16 @@
           interactionRevision = entryFocusRevision; focusedElement = nav;
         }
       }
-      const materialized = new Set();
+      const materialized = new Set(), accessFence = session._minimapAccessFence, accessRevision = accessFence.revision;
+      const readCurrent = () => isCurrent() && !accessFence.blocked && accessFence.revision === accessRevision;
+      const stopPreparation = () => {
+        if (!isCurrent()) return;
+        state.codex.briefingSession.preparing = false;
+        renderAnswerBriefing();
+      };
       for (const step of session.briefing.steps) {
         for (const target of BriefingState.briefingStepTargets(step)) {
-          if (!isCurrent()) return;
+          if (!readCurrent()) { stopPreparation(); return; }
           if (!target.sourceId) continue;
           const reference = session.references.find(item => item.sourceId === target.sourceId);
           if (!reference) continue;
@@ -2960,17 +3020,23 @@
             const key = InputContext.inputEvidenceKey(ranged);
             if (materialized.has(key)) continue;
             materialized.add(key);
-            await state.codexBridge.openInputEvidence(thread.id, ranged, { isCurrent, reveal: false, briefingScope: preparationScope });
-          } catch (error) { if (isCurrent()) boardNotice(error.message); }
+            const opened = await state.codexBridge.openInputEvidence(thread.id, ranged, { isCurrent: readCurrent, reveal: false, briefingScope: preparationScope });
+            if (!readCurrent()) { stopPreparation(); return; }
+            if (typeof rememberBriefingMinimapEvidence === 'function'
+                && rememberBriefingMinimapEvidence(session, ranged, opened) && typeof refreshDeskMinimap === 'function') refreshDeskMinimap();
+          } catch (error) {
+            if (!readCurrent()) { stopPreparation(); return; }
+            boardNotice(error.message);
+          }
         }
       }
-      if (!isCurrent()) return;
+      if (!readCurrent()) { stopPreparation(); return; }
       state.codex.briefingSession.preparing = false;
       renderAnswerBriefing();
       // A replacement starts from the user's current view. Its completion
       // must not implicitly fit/select; explicit stage and overview still can.
       // For a first entry, the shared selection revision also guards A -> B -> A.
-      if (!isReplacement && (state.canvasUserCameraRevision || 0) === cameraRevision
+      if (readCurrent() && !isReplacement && (state.canvasUserCameraRevision || 0) === cameraRevision
           && (state.canvasSelectionRevision || 0) === selectionRevision && state.activeEntityId === activeEntityId
           && document.activeElement === focusedElement
           && (state.codex.activityRoomGeneration || 0) === roomGeneration
@@ -2990,6 +3056,8 @@
   function renderAnswerBriefing() {
     const session = state.codex.briefingSession;
     state.refreshSemanticProjections?.();
+    try { if (typeof refreshDeskMinimap === 'function') refreshDeskMinimap(); }
+    catch { if (typeof clearBriefingMinimapDisplay === 'function') clearBriefingMinimapDisplay(); }
     if (!session) return;
     const mounted = document.getElementById('egd-answer-briefing');
     if (mounted?.isConnected && mounted._briefingSession === session) {
@@ -3167,16 +3235,24 @@
           row.retry = el('button', { type: 'button', class: 'egd-briefing-evidence-retry',
             'aria-label': `${row.identity} · 고정 근거 다시 열기`, data: { testid: 'briefing-show-evidence', sourceId: target.reference.sourceId },
             onclick: async () => {
-              const isCurrent = sessionCurrent;
+              const accessFence = session._minimapAccessFence || { revision: 0, blocked: false }, accessRevision = accessFence.revision;
+              const isCurrent = () => sessionCurrent() && !accessFence.blocked && accessFence.revision === accessRevision;
               if (!isCurrent() || briefingRangeIssue(target.target) || (target.target.hash && target.target.hash !== target.reference.hash)) return;
               noteInteraction();
               const cameraRevision = state.canvasUserCameraRevision || 0, selectionRevision = state.canvasSelectionRevision || 0;
               const roomGeneration = state.codex.activityRoomGeneration || 0;
               const activeEntityId = state.activeEntityId, focusedElement = document.activeElement, interactionRevision = session.interaction?.revision || 0;
               try {
-                const opened = await state.codexBridge.openInputEvidence(session.threadId, { ...target.reference, presentationRange: target.target.range },
+                const ranged = { ...target.reference, presentationRange: target.target.range };
+                session._minimapVerifiedEvidence?.delete(InputContext.inputEvidenceKey(ranged));
+                if (typeof clearBriefingMinimapDisplay === 'function') clearBriefingMinimapDisplay();
+                if (typeof refreshDeskMinimap === 'function') refreshDeskMinimap();
+                const opened = await state.codexBridge.openInputEvidence(session.threadId, ranged,
                   { isCurrent, reveal: false, briefingScope: session.preparationScope });
                 if (!isCurrent()) return;
+                if (typeof rememberBriefingMinimapEvidence === 'function') {
+                  rememberBriefingMinimapEvidence(session, ranged, opened);
+                }
                 renderAnswerBriefing();
                 if (opened && (state.canvasUserCameraRevision || 0) === cameraRevision
                     && (state.canvasSelectionRevision || 0) === selectionRevision && state.activeEntityId === activeEntityId
@@ -7809,6 +7885,107 @@
     }, board.showLabel ? board.title : ''));
   }
 
+  function briefingMinimapModel(model) {
+    const empty = () => ({ markers: [], items: [] });
+    const session = state.codex?.briefingSession;
+    try {
+      if (!session || session.threadId !== state.codex.activeThreadId || session.preparationScope?.current() !== true
+          || state.codex.connected !== true
+          || ['permissionDenied', 'authFailed', 'loginRequired', 'loginInProgress'].includes(state.codex.authStatus?.access?.state)
+          || state.codex.briefingSession !== session || !(session._minimapVerifiedEvidence instanceof Map)
+          || typeof BriefingState.briefingMinimapEvidence !== 'function') return empty();
+      const visible = new Map(model.entities.map(item => [item.entity.id, item.entity]));
+      const resolvedSteps = session.briefing.steps.map((step, index) => {
+        if (Math.abs(index - session.index) > 1) return [];
+        return briefingResolvedTargets(session, step).map(item => {
+          if (item.status !== 'available' || !item.reference || !item.target?.sourceId || !item.view?.id) return { status: 'missing' };
+          try {
+            const ranged = { ...item.reference, presentationRange: item.target.range };
+            const key = InputContext.inputEvidenceKey(ranged), card = visible.get(item.view.id);
+            return card && session._minimapVerifiedEvidence.get(key) === card
+              && rememberBriefingMinimapEvidence(session, ranged, card) ? item : { status: 'missing' };
+          } catch { return { status: 'missing' }; }
+        });
+      });
+      if (state.codex.briefingSession !== session || session.preparationScope?.current() !== true) return empty();
+      return BriefingState.briefingMinimapEvidence(session, resolvedSteps, {
+        activeThreadId: state.codex.activeThreadId, presentationId: session.presentationId,
+        briefingId: session.briefing.id, identity: session.identity, authorized: true, preparationCurrent: true,
+      });
+    } catch { return empty(); }
+  }
+
+  function minimapBriefingEvidenceLabel(item) {
+    const position = item.relativeStep === -1 ? '이전' : item.relativeStep === 1 ? '다음' : '현재';
+    const name = [item.reference?.localSource?.label, item.reference?.label]
+      .find(value => typeof value === 'string' && value.trim())?.trim() || '열린 자료';
+    const range = item.target?.range, start = range?.startLine, end = range?.endLine;
+    const rangeText = Number.isInteger(start) && Number.isInteger(end) ? `${start}–${end}행`
+      : Number.isInteger(start) ? `${start}행부터 · 끝 미지정`
+        : Number.isInteger(end) ? `시작 미지정 · ${end}행까지` : '범위 미지정';
+    return `${position} ${item.stepNumber}단계 · 열린 근거 ${item.evidenceNumber} (목록 순서) · ${name} · ${rangeText}`;
+  }
+
+  function renderDeskMinimapBriefing(panel, model) {
+    const map = panel?.querySelector('.egd-minimap-map');
+    const details = panel?.querySelector('.egd-minimap-briefing');
+    const list = details?.querySelector('.egd-minimap-briefing-list');
+    if (!map || !details || !list || !model) return;
+    const plan = briefingMinimapModel(model);
+    const visible = new Map(model.entities.map(item => [item.entity.id, item]));
+    const projected = plan.markers.flatMap(marker => {
+      const item = visible.get(marker.viewId);
+      if (!item) return [];
+      const left = model.offsetX + (marker.x - model.bounds.left) * model.scale;
+      const top = model.offsetY + (marker.y - model.bounds.top) * model.scale;
+      return Number.isFinite(left) && Number.isFinite(top) ? [{ ...marker, left, top }] : [];
+    });
+    // Dense markers may share a visual badge, but its anchor is always one
+    // real card, never the midpoint of several unrelated pieces of evidence.
+    const groups = [];
+    for (const marker of projected) {
+      let group = groups.find(item => Math.abs(item.left - marker.left) < 12 && Math.abs(item.top - marker.top) < 12);
+      if (!group) { group = { left: marker.left, top: marker.top, viewId: marker.viewId, entries: [] }; groups.push(group); }
+      group.entries.push(...marker.entries);
+    }
+    let layer = map.querySelector('.egd-minimap-briefing-layer');
+    if (!layer) { layer = el('div', { class: 'egd-minimap-briefing-layer', 'aria-hidden': 'true' }); map.appendChild(layer); }
+    const markerSignature = JSON.stringify(groups.map(group => [group.viewId, group.left, group.top,
+      group.entries.map(entry => [entry.stepNumber, entry.relativeStep])]));
+    if (layer._briefingSignature !== markerSignature) {
+      layer._briefingSignature = markerSignature;
+      layer.replaceChildren(...groups.map(group => {
+        const seen = new Set();
+        const badges = group.entries.flatMap(entry => {
+          const key = `${entry.stepNumber}:${entry.relativeStep}`;
+          if (seen.has(key)) return [];
+          seen.add(key);
+          return [el('span', { class: 'egd-minimap-briefing-number', data: { relativeStep: String(entry.relativeStep) } }, String(entry.stepNumber))];
+        });
+        return el('span', { class: 'egd-minimap-briefing-marker', data: { testid: 'minimap-briefing-marker', viewId: group.viewId },
+          style: { left: group.left + 'px', top: group.top + 'px' } }, ...badges);
+      }));
+    }
+    const rows = plan.items.map(item => ({ item, label: minimapBriefingEvidenceLabel(item) }));
+    const listSignature = JSON.stringify(rows.map(({ item, label }) => [item.viewId, item.stepId, item.evidenceNumber, label]));
+    if (list._briefingSignature !== listSignature) {
+      list._briefingSignature = listSignature;
+      list.replaceChildren(...rows.map(({ item, label }) => el('li', {
+        data: { testid: 'minimap-briefing-row', viewId: item.viewId, stepNumber: String(item.stepNumber),
+          evidenceNumber: String(item.evidenceNumber), relativeStep: String(item.relativeStep) },
+      }, label)));
+    }
+    // Keep an already-focused summary/list in place when permission disappears;
+    // its private rows and count have nevertheless been removed immediately.
+    const hidden = !rows.length && !details.contains(document.activeElement);
+    if (details.hidden !== hidden) {
+      details.hidden = hidden;
+      // Showing or hiding the disclosure can change the compact map's CSS
+      // height; rebuild its projection after that change.
+      if (panel.isConnected) refreshDeskMinimap();
+    }
+  }
+
   function renderDeskMinimapWorld(panel) {
     const map = panel?.querySelector('.egd-minimap-map');
     if (!map) return null;
@@ -8091,6 +8268,7 @@
     if (!panel) return;
     const model = renderDeskMinimapWorld(panel);
     buildDeskMinimapEntityRows(panel, model);
+    panel._renderBriefingMinimap?.(model);
     panel.querySelector('.egd-minimap-stack')?._reposition?.();
   }
 
@@ -8232,10 +8410,15 @@
       ),
       el('div', { class: 'egd-minimap-map' }),
       el('div', { class: 'egd-minimap-caption' }, SurfaceState.deskMinimapCaption(1, 0)),
+      el('details', { class: 'egd-minimap-briefing', hidden: 'true', data: { testid: 'minimap-briefing-evidence' } },
+        el('summary', {}, '브리핑 단계와 열린 근거'),
+        el('ul', { class: 'egd-minimap-briefing-list', tabindex: '0', 'aria-label': '브리핑 단계별 열린 근거' })),
       input,
       el('div', { id: 'egd-minimap-search-status', class: 'egd-minimap-search-status', role: 'status', 'aria-live': 'polite' }),
       el('div', { id: 'egd-minimap-search-results', class: 'egd-minimap-list', 'aria-label': '열린 Board와 화면 목록' }),
     );
+    panel._renderBriefingMinimap = model => renderDeskMinimapBriefing(panel, model);
+    panel.querySelector('.egd-minimap-briefing')?.addEventListener('toggle', () => refreshDeskMinimap());
     const search = panel._minimapSearch = { query: '', visibleLimit: MINIMAP_SEARCH_PAGE_SIZE,
       composing: false, imeEnterDown: false, imeEndedAt: 0, notice: '', rows: [], signature: '' };
     const updateQuery = () => {
@@ -13192,7 +13375,7 @@
         } catch (error) { if (current()) boardNotice(`당시 입력을 열지 못했습니다: ${error.message}`); }
         finally { unsubscribe(); epochScope.finish(token); }
       },
-      createBriefingPreparationScope(threadId, onInvalid = null) {
+      createBriefingPreparationScope(threadId, onInvalid = null, onObservation = null) {
         const thread = getCodexThreadById(state.codex, threadId);
         const route = ChatState.chatContextRequestScope(thread, state.codex);
         const token = epochScope.begin(route.engineId, route.engineProfileId);
@@ -13209,8 +13392,12 @@
         // this presentation. Activity-panel opens alone are not room changes.
         const current = () => {
           if (invalid || disposed) return false;
-          try { if (!token.signal.aborted && epochScope.valid(token) && identity() === original
-              && state.codex.activeThreadId === threadId) return true; } catch {}
+          try {
+            if (!token.signal.aborted && epochScope.valid(token) && identity() === original && state.codex.activeThreadId === threadId) {
+              try { onObservation?.(); } catch {}
+              return true;
+            }
+          } catch {}
           invalid = true;
           onInvalid?.();
           return false;
