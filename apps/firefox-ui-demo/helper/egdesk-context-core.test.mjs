@@ -5,6 +5,10 @@ import os from 'node:os'
 import path from 'node:path'
 import { Readable } from 'node:stream'
 import { randomUUID } from 'node:crypto'
+import { createServer } from 'node:http'
+import { once } from 'node:events'
+import { createChatHttpHandler, guardBridgeRequest } from './codex-bridge-http.mjs'
+import { createChatEngineAuth } from './codex-bridge-engine-auth.mjs'
 import { ImmutableContextStore, hashContent, appDataDirectory } from './egdesk-context-store.mjs'
 import { ContextRuntime, CONTEXT_TOOL_SPECS } from './egdesk-context-runtime.mjs'
 import { createContextHttpHandler } from './egdesk-context-http.mjs'
@@ -1804,4 +1808,213 @@ test('B2 capture-to-prepare account switch refuses stale scope before lookup/bin
   const ownerB = h.contexts.owner(h.contexts.authority(h.route))
   for (const kind of ['sources', 'bindings', 'packets', 'deliveries']) assert.equal((await h.store.listRecords(ownerB, kind)).length, 0)
   assert.equal(h.replies.length, 0)
+})
+
+// The current READ API reports source-level bindings and deliveries; a 200
+// does not authorize a UI to attribute a different run's packet to this answer.
+test('first Chat source inspection reports source-scoped bindings and delivery receipts', async t => {
+  const h = await harness(t, { verifiedComments: true })
+  // Real HTTP guard/auth logic, Chat/Context runtimes and SQLite/Context stores.
+  // Account/login/refresh, native thread/turn replies, tool transport and
+  // assistant/turn notifications are synthetic; no model is started.
+  let loggedIn = true, turn = 0, tick = 1_800_000_000_000
+  h.store.now = h.contexts.now = () => ++tick
+  const dispatched = []
+  h.chat.engines.get('codex').startTurn = async params => {
+    dispatched.push(params)
+    return { turn: { id: `synthetic-turn-${++turn}`, status: 'inProgress', items: [] } }
+  }
+  const auth = createChatEngineAuth({ chat: h.chat, refreshCodexAccount: async () => {}, getCodexAuth: () => ({ isLoggedIn: loggedIn }) })
+  const chatHttp = createChatHttpHandler(h.chat, auth)
+  let contextHttp, port
+  const server = createServer(async (req, res) => {
+    if (!guardBridgeRequest(req, port)) { res.writeHead(403); res.end('{}'); return }
+    const url = new URL(req.url, `http://127.0.0.1:${port}`)
+    if (await contextHttp(req, res, url) || await chatHttp(req, res, url)) return
+    res.writeHead(404); res.end('{}')
+  })
+  server.listen(0, '127.0.0.1'); await once(server, 'listening')
+  port = server.address().port
+  contextHttp = createContextHttpHandler(h.contexts, auth, { port })
+  t.after(async () => { server.close(); await once(server, 'close') })
+  const http = async (method, endpoint, body) => {
+    const response = await fetch(`http://127.0.0.1:${port}${endpoint}`, { method, ...(body === undefined ? {} : { headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) }) })
+    return { status: response.status, body: await response.json() }
+  }
+  const route = (clientThreadId, conversationId, extra = {}) => new URLSearchParams({ engineId: 'codex', engineProfileId: 'codex-default', clientThreadId, ...(conversationId ? { conversationId } : {}), ...extra })
+  const inspect = (sourceId, client, conversation, extra) => http('GET', `/context/captures/${sourceId}?${route(client, conversation, extra)}`)
+  const capture = async clientThreadId => {
+    const response = await http('POST', '/context/captures', { engineId: 'codex', clientThreadId, attachments: [{ id: 'same-ui-key', kind: 'browser', label: 'Synthetic selection', sourceRef: { viewId: 'same-view', resourceId: 'same-resource' }, captureScope: { type: 'dom-range', locator: '#selected' }, content: { mime: 'text/plain', text: 'First line\nShared evidence\nThird line', truncated: false } }] })
+    assert.equal(response.status, 201)
+    return response.body.captures[0]
+  }
+  const send = (clientThreadId, requestId, sourceId, conversationId, read = true) => http('POST', '/chat/send', { engineId: 'codex', clientThreadId, requestId, message: 'Synthetic question', cwd: h.cwd, contextSnapshotIds: [sourceId], contextCapabilities: { read, reader: false, publishBriefing: false }, ...(conversationId ? { conversationId } : {}) })
+  const matching = (body, run) => body.bindings.some(row => row.conversationId === run.conversationId && row.runId === run.runId && row.answerId === run.answerId)
+  const finish = async (run, itemId) => {
+    await h.chat.handleNotification({ method: 'item/completed', params: { threadId: run.conversationId, turnId: run.runId, item: { id: itemId, type: 'agentMessage', text: 'Same synthetic answer' } } })
+    await h.chat.handleNotification({ method: 'turn/completed', params: { threadId: run.conversationId, turn: { id: run.runId, status: 'completed', items: [], itemsView: 'notLoaded' } } })
+  }
+  const read = async (run, sourceId, callId, range) => {
+    const reply = await h.tool(run, 'egdesk_read_source', { snapshotId: sourceId, intent: 'Read synthetic selection', range }, callId)
+    assert.equal(reply.result.success, true)
+    return { response: reply.result, packet: JSON.parse(reply.result.contentItems[0].text) }
+  }
+
+  const sourceA = await capture('room-a'), sourceB = await capture('room-b')
+  assert.notEqual(sourceA.sourceId, sourceB.sourceId)
+  assert.equal(sourceA.hash, sourceB.hash)
+  const initial = await inspect(sourceA.sourceId, 'room-a')
+  assert.equal(initial.status, 200)
+  assert.deepEqual(initial.body.bindings, [])
+  assert.equal(initial.body.delivered, null)
+  loggedIn = false
+  const signedOut = await inspect(sourceA.sourceId, 'room-a')
+  assert.deepEqual([signedOut.status, signedOut.body.code], [401, 'LOGIN_REQUIRED'])
+  loggedIn = true
+  const noCapability = await send('room-a', 'without-read', sourceA.sourceId, null, false)
+  assert.deepEqual([noCapability.status, noCapability.body.code], [403, 'CONTEXT_PERMISSION_REQUIRED'])
+  h.changeOwner('email:b@example.com')
+  const changedBeforeSend = await send('room-a', 'account-changed', sourceA.sourceId)
+  assert.deepEqual([changedBeforeSend.status, changedBeforeSend.body.code, changedBeforeSend.body.dispatchStatus, changedBeforeSend.body.saved], [502, 'TOOL_PROVIDER_FAILED', 'rejected', true])
+  assert.equal(dispatched.length, 0)
+  h.changeOwner('email:a@example.com')
+
+  const sentA1 = await send('room-a', 'a1', sourceA.sourceId)
+  assert.equal(sentA1.status, 202, JSON.stringify(sentA1.body))
+  const a1 = sentA1.body
+  const request = h.chatStore.getRequest({ clientThreadId: 'room-a', requestId: 'a1' })
+  assert.equal(request.localMessageId, a1.localMessageId)
+  assert.equal(request.outcome.conversationId, a1.conversationId)
+  assert.equal(request.outcome.runId, a1.runId)
+  const bound = await inspect(sourceA.sourceId, 'room-a', a1.conversationId)
+  assert.equal(bound.status, 200)
+  assert.equal(matching(bound.body, a1), true)
+  assert.deepEqual(Object.keys(bound.body.bindings[0]).sort(), ['answerId', 'bindingId', 'conversationId', 'runId'])
+  assert.equal(bound.body.delivered, null)
+  const receiptsFor = run => h.store.listRecords('email:a@example.com', 'deliveries', record =>
+    record.sourceId === sourceA.sourceId && record.binding?.conversationId === run.conversationId
+      && record.binding?.runId === run.runId && record.binding?.answerId === run.answerId)
+  assert.deepEqual(await receiptsFor(a1), [])
+  const unselected = await h.tool(a1, 'egdesk_read_source', { snapshotId: sourceB.sourceId, intent: 'Not selected' }, 'unselected')
+  assert.equal(unselected.result.success, false)
+  assert.equal(JSON.parse(unselected.result.contentItems[0].text).error.code, 'CONTEXT_FORBIDDEN')
+  // A is bound but has no delivery. B explicitly reuses the same source and
+  // reads it first; a successful GET in A can therefore contain only B's
+  // delivery. Binding the source to A does not bind B's packet to A.
+  const sentBOnly = await send('room-b', 'b-only', sourceA.sourceId)
+  assert.equal(sentBOnly.status, 202, JSON.stringify(sentBOnly.body))
+  const bOnly = sentBOnly.body
+  const readBOnly = await read(bOnly, sourceA.sourceId, 'read-b-only', { startLine: 3, endLine: 3 })
+  const aWithOnlyB = await inspect(sourceA.sourceId, 'room-a', a1.conversationId)
+  assert.equal(aWithOnlyB.status, 200)
+  assert.equal(matching(aWithOnlyB.body, a1), true)
+  assert.equal(matching(aWithOnlyB.body, bOnly), true)
+  assert.equal(aWithOnlyB.body.delivered.packetId, readBOnly.packet.packetId)
+  assert.deepEqual(aWithOnlyB.body.delivered.binding, { conversationId: bOnly.conversationId, runId: bOnly.runId, answerId: bOnly.answerId })
+  assert.notEqual(aWithOnlyB.body.delivered.binding.answerId, a1.answerId)
+  assert.equal((await receiptsFor(bOnly)).length, 1)
+  assert.deepEqual(await receiptsFor(a1), [])
+  const namedB = await inspect(sourceA.sourceId, 'room-a', a1.conversationId, { packetId: readBOnly.packet.packetId })
+  assert.equal(namedB.status, 200)
+  assert.equal(namedB.body.delivered.binding.answerId, bOnly.answerId)
+  await finish(bOnly, 'answer-b-only')
+  const readA1 = await read(a1, sourceA.sourceId, 'read-a1', { startLine: 2, endLine: 2 })
+  const exactA1 = await inspect(sourceA.sourceId, 'room-a', a1.conversationId, { packetId: readA1.packet.packetId })
+  assert.equal(exactA1.status, 200)
+  assert.equal(exactA1.body.delivered.binding.answerId, a1.answerId)
+  assert.equal(exactA1.body.delivered.binding.runId, a1.runId)
+  assert.equal(exactA1.body.delivered.binding.conversationId, a1.conversationId)
+  assert.equal(exactA1.body.delivered.text, readA1.response.contentItems[0].text)
+  assert.equal(exactA1.body.delivered.hash, hashContent(readA1.response.contentItems[0].text))
+  assert.equal(readA1.packet.sourceHash, sourceA.hash)
+  assert.equal(readA1.packet.coverage.scope, 'line-range')
+  const receiptRef = h.chat.runs.get(a1.answerId).context.packets.find(packet => packet.packetId === readA1.packet.packetId)
+  const receipt = await h.store.getRecord('email:a@example.com', 'deliveries', receiptRef.receiptId)
+  assert.equal(receipt.deliveryHash, exactA1.body.delivered.hash)
+  assert.equal(receipt.responseHash, hashContent(JSON.stringify(readA1.response)))
+  assert.equal(receipt.binding.answerId, a1.answerId)
+  assert.equal(receipt.deliveryStatus, 'sent-to-app-server')
+  const receiptView = await http('GET', `/context/packets/${readA1.packet.packetId}?${route('room-a', a1.conversationId)}`)
+  assert.equal(receiptView.status, 200)
+  assert.equal(receiptView.body.deliveryStatus, 'sent-to-app-server')
+  assert.deepEqual(receiptView.body.binding, receipt.binding)
+  await finish(a1, 'answer-a1')
+
+  const sentB1 = await send('room-b', 'b1', sourceB.sourceId, bOnly.conversationId)
+  assert.equal(sentB1.status, 202)
+  const b1 = sentB1.body
+  const readB1 = await read(b1, sourceB.sourceId, 'read-b1', { startLine: 2, endLine: 2 })
+  await finish(b1, 'answer-b1')
+  assert.throws(() => h.chatStore.bindNative({ clientThreadId: 'room-a', conversationId: b1.conversationId }), error => error.code === 'NATIVE_MAPPING_CONFLICT')
+  assert.throws(() => h.chatStore.bindNative({ clientThreadId: 'room-a', engineId: 'codex', engineProfileId: 'other' }), error => error.code === 'ENGINE_MAPPING_CONFLICT')
+  assert.equal(h.chatStore.getConversation('room-a').conversationId, a1.conversationId)
+  const falseReuse = await inspect(sourceA.sourceId, 'room-b', b1.conversationId)
+  assert.equal(falseReuse.status, 200)
+  assert.equal(matching(falseReuse.body, a1), true)
+  assert.equal(matching(falseReuse.body, b1), false)
+  const sameBytes = await inspect(sourceB.sourceId, 'room-a', a1.conversationId)
+  assert.equal(sameBytes.status, 200)
+  assert.equal(sameBytes.body.source.hash, exactA1.body.source.hash)
+  assert.equal(matching(sameBytes.body, a1), false)
+  const wrongClient = await inspect(sourceA.sourceId, 'room-b', a1.conversationId)
+  assert.deepEqual([wrongClient.status, wrongClient.body.code], [409, 'NATIVE_BINDING_MISMATCH'])
+  const wrongProfile = await http('GET', `/context/captures/${sourceA.sourceId}?${new URLSearchParams({ engineId: 'codex', engineProfileId: 'other', clientThreadId: 'room-a', conversationId: a1.conversationId })}`)
+  assert.deepEqual([wrongProfile.status, wrongProfile.body.code], [403, 'ENGINE_PROFILE_MISMATCH'])
+  h.changeOwner('email:b@example.com')
+  const wrongAccount = await inspect(sourceA.sourceId, 'room-a', a1.conversationId)
+  assert.deepEqual([wrongAccount.status, wrongAccount.body.code], [403, 'NATIVE_ACCOUNT_MISMATCH'])
+  h.changeOwner('email:a@example.com')
+
+  const sentA2 = await send('room-a', 'a2', sourceA.sourceId, a1.conversationId)
+  assert.equal(sentA2.status, 202)
+  const a2 = sentA2.body
+  const beforeA2Read = await inspect(sourceA.sourceId, 'room-a', a2.conversationId, { answerId: a2.answerId, runId: a2.runId })
+  assert.equal(matching(beforeA2Read.body, a2), true)
+  assert.equal(beforeA2Read.body.delivered.binding.answerId, a1.answerId)
+  const readA2 = await read(a2, sourceA.sourceId, 'read-a2', { startLine: 1, endLine: 1 })
+  const latest = await inspect(sourceA.sourceId, 'room-a', a1.conversationId, { answerId: a1.answerId, runId: a1.runId })
+  assert.equal(latest.status, 200)
+  assert.equal(matching(latest.body, a1), true)
+  assert.equal(matching(latest.body, a2), true)
+  assert.equal(latest.body.delivered.binding.answerId, a2.answerId)
+  const exactOld = await inspect(sourceA.sourceId, 'room-a', a1.conversationId, { packetId: readA1.packet.packetId })
+  const exactNew = await inspect(sourceA.sourceId, 'room-a', a1.conversationId, { packetId: readA2.packet.packetId })
+  assert.equal(exactOld.body.delivered.binding.answerId, a1.answerId)
+  assert.equal(exactNew.body.delivered.binding.answerId, a2.answerId)
+  const wrongPacket = await inspect(sourceA.sourceId, 'room-a', a1.conversationId, { packetId: readB1.packet.packetId })
+  assert.deepEqual([wrongPacket.status, wrongPacket.body.code], [404, 'DELIVERY_NOT_FOUND'])
+  await finish(a2, 'answer-a2')
+  const reused = await send('room-b', 'b2-reuse', sourceA.sourceId, b1.conversationId)
+  assert.equal(reused.status, 202)
+  const afterReuse = await inspect(sourceA.sourceId, 'room-b', b1.conversationId)
+  assert.equal(matching(afterReuse.body, reused.body), true)
+  assert.equal(matching(afterReuse.body, b1), false)
+  // A -> B -> A: a later A answer is bound but has not read the source. The
+  // latest packet remains B's even when the GET names A's run/answer hints.
+  const readB2 = await read(reused.body, sourceA.sourceId, 'read-b2', { startLine: 3, endLine: 3 })
+  await finish(reused.body, 'answer-b2')
+  const sentA3 = await send('room-a', 'a3-no-read', sourceA.sourceId, a1.conversationId)
+  assert.equal(sentA3.status, 202, JSON.stringify(sentA3.body))
+  const a3 = sentA3.body
+  const latestBNotA3 = await inspect(sourceA.sourceId, 'room-a', a3.conversationId, { startLine: '1', endLine: '2', runId: a3.runId, answerId: a3.answerId })
+  assert.equal(latestBNotA3.status, 200)
+  assert.equal(matching(latestBNotA3.body, a3), true)
+  assert.deepEqual(latestBNotA3.body.source.range, { startLine: 1, endLine: 2, totalLines: 3 })
+  assert.equal(latestBNotA3.body.source.rangeHash, hashContent('First line\nShared evidence'))
+  assert.equal(latestBNotA3.body.delivered.packetId, readB2.packet.packetId)
+  assert.deepEqual(latestBNotA3.body.delivered.binding, { conversationId: reused.body.conversationId, runId: reused.body.runId, answerId: reused.body.answerId })
+  assert.notEqual(latestBNotA3.body.delivered.binding.answerId, a3.answerId)
+  const latestBPacket = JSON.parse(latestBNotA3.body.delivered.text)
+  assert.equal(latestBPacket.sourceId, sourceA.sourceId)
+  assert.equal(latestBPacket.sourceHash, sourceA.hash)
+  assert.equal(latestBPacket.projectionHash, sourceA.payloads.projection.hash)
+  assert.equal(latestBPacket.content.text, 'Third line')
+  assert.deepEqual(latestBPacket.coverage.reviewedRanges, [{ startOffset: 27, endOffset: 37 }])
+  assert.equal((await receiptsFor(reused.body)).length, 1)
+  assert.deepEqual(await receiptsFor(a3), [])
+  const namedLatestB = await inspect(sourceA.sourceId, 'room-a', a3.conversationId, { packetId: readB2.packet.packetId })
+  assert.equal(namedLatestB.status, 200)
+  assert.equal(namedLatestB.body.delivered.binding.answerId, reused.body.answerId)
+  assert.notEqual(namedLatestB.body.delivered.binding.answerId, a3.answerId)
+  await finish(a3, 'answer-a3')
 })
