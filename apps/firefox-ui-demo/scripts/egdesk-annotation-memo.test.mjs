@@ -3,6 +3,9 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import * as Annotation from '../overlay/resources/EGDeskAnnotationState.sys.mjs';
 import * as Memo from '../overlay/resources/EGDeskMemoState.sys.mjs';
+import * as ChatState from '../overlay/resources/EGDeskChatState.sys.mjs';
+import * as InputContext from '../overlay/resources/EGDeskInputContext.sys.mjs';
+import * as SurfaceState from '../overlay/resources/EGDeskSurfaceState.sys.mjs';
 import { CANVAS_SHAPE_TYPES, planBoardProjection, snapshotBoardProjection, remapMemberReferences } from '../overlay/resources/EGDeskSurfaceState.sys.mjs';
 import { PRIVATE_KEYS } from '../helper/egdesk-chat-store.mjs';
 
@@ -586,76 +589,7 @@ function memoRuntimeElement(tag, attrs = {}, ...children) {
 }
 
 function memoRevisionHarness(record = revisionMemo()) {
-  const element = memoRuntimeElement;
-  const selectors = new Map([
-    ['.egd-memo-text', element('textarea', { value: record.text })],
-    ['.egd-memo-thread', element('div')], ['.egd-memo-title', element('strong')],
-    ['.egd-memo-toggle', element('button')], ['.egd-memo-resolve', element('button')],
-    ['.egd-memo-status', element('button')], ['.egd-memo-ask-status', element('div')],
-    ['.egd-memo-ask-send', element('button')], ['.egd-memo-ask-agent', element('select', { value: 'rio' })],
-  ]);
-  const root = element('div', { isConnected: true });
-  root._memoRecord = record;
-  root._deskWindowShell = {};
-  root.querySelector = selector => selectors.get(selector) || null;
-  const roots = [root], notices = [], sent = [];
-  const profiles = [{ id: 'rio', name: 'Rio' }, { id: 'mina', name: 'Mina' }];
-  const state = { codex: {
-    threads: profiles.map(profile => ({ id: `dm-${profile.id}`, title: profile.name, type: 'dm', profileEnabled: true, agentProfileId: profile.id, updatedAt: 1 })),
-    threadDrafts: { 'unrelated-room': '이전부터 쓰던 다른 방 초안' },
-    chatProtocol: { requests: { 'old-request': { localThreadId: 'unrelated-room', status: 'accepted' } } },
-  } };
-  let releaseSend, signalStarted;
-  const gate = new Promise(resolve => { releaseSend = resolve; });
-  const started = new Promise(resolve => { signalStarted = resolve; });
-  state.codexBridge = {
-    createThread() { throw new Error('Synthetic Agent rooms already exist; no real room creation'); },
-    selectThread() {},
-    async sendMessage() {
-      sent.push({ text: state.codex.threadDrafts['dm-rio'], memo: root._memoRecord });
-      signalStarted();
-      const outcome = await gate;
-      if (outcome === 'reject') throw new Error('synthetic send rejected');
-      if (outcome === 'accept') state.codex.chatProtocol.requests['request-1'] = { localThreadId: 'dm-rio', status: 'accepted' };
-    },
-  };
-  const scope = {
-    MemoState: Memo, state, el: element,
-    document: {
-      activeElement: selectors.get('.egd-memo-text'),
-      querySelectorAll: selector => selector === '.egd-memo-card' ? roots : [],
-      getElementById: id => id === 'egd-canvas-layer' ? { children: [] } : null,
-    },
-    codexAgentProfileChoices: () => profiles,
-    codexAgentProfile: id => profiles.find(profile => profile.id === id),
-    codexProfileAvatar: (_avatar, name) => element('span', {}, name),
-    formatMessageTime: () => '합성 시각', markAgendaDirty() {},
-    boardNotice: message => notices.push(message),
-    spawnCodexChatCard: () => ({}), dismissChatReturnCue() {},
-    console: { warn() {} }, TAG: 'memo-regression',
-  };
-  const start = memoSurfaceSource.indexOf('  const MEMO_RUN_ENDED =');
-  const end = memoSurfaceSource.indexOf('  // Dock [메모]', start);
-  assert.ok(start >= 0 && end > start, 'the existing memo zone is available');
-  const api = Function(...Object.keys(scope), `${memoSurfaceSource.slice(start, end)}\nreturn { askMemoAgent, attachMemoRepliesFromRun, renderMemoCard };`)(...Object.values(scope));
-  const render = () => api.renderMemoCard(root);
-  const set = next => { root._memoRecord = next; selectors.get('.egd-memo-text').value = next.text; render(); };
-  render();
-  return {
-    root, state, sent, notices, started, render, set,
-    ask: () => api.askMemoAgent(root, { agentId: 'rio', agentName: 'Rio', question: '맞아?' }),
-    completeSend: (outcome = 'accept') => releaseSend(outcome),
-    edit: text => set(Memo.editMemoText(root._memoRecord, text, { now: 1 })),
-    attach: (run = fakeCompletedMemoRun()) => api.attachMemoRepliesFromRun(run),
-    warning(answerId = 'answer-7') {
-      const row = selectors.get('.egd-memo-thread').children.find(node => node.dataset.answerId === answerId);
-      assert.ok(row, `actual memoReplyRow rendered answer ${answerId}`);
-      return oldMemoAnswer.test(row.textContent);
-    },
-    replyText: () => selectors.get('.egd-memo-thread').textContent,
-    editorText: () => selectors.get('.egd-memo-text').value,
-    restore() { set(Memo.normalizeMemoRecord(memoJson(root._memoRecord), { now: 1 })); },
-  };
+  return memoDispatchHarness({ record, holdSend: true });
 }
 
 async function acceptMemoQuestion(harness, beforeAcceptance = () => {}) {
@@ -665,6 +599,351 @@ async function acceptMemoQuestion(harness, beforeAcceptance = () => {}) {
   finally { harness.completeSend(); }
   assert.equal(await sending, true, 'the fake request was accepted through askMemoAgent');
 }
+
+// The revision fixture above deliberately controls only acceptance. These
+// dispatch tests instead install the production bridge and its real select,
+// readiness, project and send paths. Only Firefox UI/persistence and the
+// transport boundary are replaced; fetch below never opens a socket.
+function memoDispatchBridgeSource() {
+  const projectStart = memoSurfaceSource.indexOf('  const chatRequestProjectDisplays = ');
+  const projectEnd = memoSurfaceSource.indexOf('  function observeFileProjectAssociation(', projectStart);
+  const bridgeStart = memoSurfaceSource.indexOf('  function installCodexBridge(');
+  const bridgeEnd = memoSurfaceSource.indexOf('  function toggleHUD(', bridgeStart);
+  const memoStart = memoSurfaceSource.indexOf('  const MEMO_RUN_ENDED =');
+  const memoEnd = memoSurfaceSource.indexOf('  // Dock [메모]', memoStart);
+  assert.ok(projectStart >= 0 && projectEnd > projectStart && bridgeStart >= 0 && bridgeEnd > bridgeStart && memoStart >= 0 && memoEnd > memoStart);
+  let bridge = memoSurfaceSource.slice(bridgeStart, bridgeEnd);
+  const bootstrap = '\n    connect();\n\n    return {';
+  assert.equal(bridge.split(bootstrap).length, 2, 'only automatic bridge connection is disabled');
+  // Expose the existing event entry only inside this isolated fixture. The
+  // production handler still performs admission, reduction and run syncing.
+  bridge = bridge.replace(bootstrap, '\n    return {\n      __memoFixtureDeliver(event) { return handleEvent(event); },');
+  const functions = [
+    'getCodexThreadById', 'getActiveCodexThread', 'getCodexThreadDraft', 'uniqueNames', 'buildThreadSubtitle',
+    'createCodexThread', 'normalizeHudView', 'createCodexMessage', 'defaultCodexAgentProfileIdForThread',
+    'codexThreadAgentProfile', 'codexThreadToolMode', 'codexThreadSystemPrompt', 'codexThreadRuntimeConfig',
+    'browserToolRefreshSelection', 'browserToolSelectedSources', 'browserToolSameUrl',
+  ].map(memoSurfaceFunction).join('\n');
+  return `${memoSurfaceSource.slice(projectStart, projectEnd)}\n${functions}\n${bridge}\n${memoSurfaceSource.slice(memoStart, memoEnd)}\nreturn { bridge: installCodexBridge(), askMemoAgent, attachMemoRepliesFromRun, renderMemoCard };`;
+}
+
+const memoSyntheticProject = (roomId, version = 'none') => version === 'none'
+  ? { roomId, inheritance: null, override: null, project: null, source: null, status: 'none' }
+  : version === 'unavailable'
+    ? { roomId, inheritance: { boardId: 'board-a' }, override: null, project: null, source: 'board', status: 'unavailable' }
+    : { roomId, inheritance: { boardId: 'board-a' }, override: null,
+      project: { projectId: `project-${version}`, rootId: `root-${version}`, title: `Project ${version}`,
+        displayPath: `/synthetic/project-${version}`, status: 'connected', source: 'board' }, source: 'board', status: 'connected' };
+
+function trackedMemoPromise(promise) {
+  const tracked = { settled: false, value: undefined, error: null };
+  promise.then(value => { tracked.settled = true; tracked.value = value; }, error => { tracked.settled = true; tracked.error = error; });
+  return tracked;
+}
+
+async function waitForMemoFixture(predicate, message) {
+  for (let i = 0; i < 50 && !predicate(); i++) await new Promise(resolve => setImmediate(resolve));
+  assert.ok(predicate(), message);
+}
+
+function memoDispatchHarness({ active = 'dm-rio', existing = true, conversation = false, targetDraft = '', targetInputs = [], record = revisionMemo(), holdSend = false } = {}) {
+  const element = memoRuntimeElement, notices = [];
+  const selectors = new Map([
+    ['.egd-memo-text', element('textarea', { value: record.text })],
+    ['.egd-memo-thread', element('div')], ['.egd-memo-title', element('strong')],
+    ['.egd-memo-toggle', element('button')], ['.egd-memo-resolve', element('button')],
+    ['.egd-memo-status', element('button')], ['.egd-memo-ask-status', element('div')],
+    ['.egd-memo-ask-send', element('button')], ['.egd-memo-ask-agent', element('select', { value: 'rio' })],
+    ['.egd-memo-ask-question', element('textarea', { value: '맞아?' })],
+  ]);
+  const root = element('div', { isConnected: true });
+  root._memoRecord = record; root._deskWindowShell = {};
+  root.querySelector = selector => selectors.get(selector) || null;
+  const state = { hudOpen: true };
+  const auth = { isLoggedIn: true, authMode: 'chatgpt', accountId: 'synthetic-account-a', accountEmail: 'a@example.invalid', identityStatus: 'known' };
+  const accountKey = ChatState.codexAccountKey(auth);
+  const otherInput = { id: 'other-attachment', kind: 'board-element', label: '다른 방 자료', sourceRef: { viewId: 'synthetic-other-view' } };
+  const target = { id: 'dm-rio', clientBindingId: 'wire-rio', title: 'Rio', type: 'dm', profileEnabled: true,
+    agentProfileId: 'rio', engineId: 'codex', messages: [], inputSources: memoJson(targetInputs), briefingInputs: [], unreadCount: 0,
+    ...(conversation ? { conversationId: 'synthetic-conversation', bindingState: 'verified', bindingAccountKey: accountKey } : {}) };
+  const other = { id: 'unrelated-room', clientBindingId: 'wire-other', title: 'Other', type: 'dm', profileEnabled: false,
+    engineId: 'codex', messages: [], inputSources: [otherInput], briefingInputs: [], unreadCount: 0 };
+  const protocol = ChatState.createChatProtocolState();
+  state.codex = { activeThreadId: existing ? active : 'unrelated-room', threads: existing ? [target, other] : [other],
+    threadDrafts: { ...(existing ? { 'dm-rio': targetDraft } : {}), 'unrelated-room': '이전부터 쓰던 다른 방 초안' },
+    threadDraftRevisions: { 'dm-rio': 1, 'unrelated-room': 2 }, chatProtocol: protocol, threadNonce: 1,
+    authStatus: auth, codexAccountKey: accountKey, connected: true, engines: [{ id: 'codex', status: 'ready' }],
+    recentEngineId: 'codex', liveRevision: 0 };
+  state.contextSuggest = { byThread: {} };
+  const effects = { requests: [], captures: [], warnings: [] }, holds = [];
+  let signalStarted, releaseSend;
+  const started = new Promise(resolve => { signalStarted = resolve; });
+  if (holdSend) {
+    const promise = new Promise(resolve => { releaseSend = resolve; });
+    holds.push({ path: '/chat/send', started: false, promise });
+  }
+  let project = 'none';
+  const fetch = async (address, options = {}) => {
+    const url = new URL(address);
+    assert.equal(url.origin, 'http://127.0.0.1:39218', 'the fixture intercepts the bridge before any network access');
+    const body = options.body ? JSON.parse(options.body) : null;
+    const call = { path: url.pathname, body };
+    effects.requests.push(call);
+    if (call.path === '/chat/send') signalStarted();
+    let hold = holds.find(item => !item.started && item.path === call.path);
+    if (hold?.skip) { hold.skip--; hold = null; }
+    let outcome;
+    if (hold) { hold.started = true; outcome = await hold.promise; }
+    if (call.path === '/v1/files/projects/room-default' && project === 'denied') {
+      return { ok: false, status: 403, statusText: 'Forbidden', text: async () => JSON.stringify({ error: 'synthetic project permission denied' }) };
+    }
+    if (call.path === '/chat/send' && outcome === 'reject') {
+      return { ok: false, status: 400, statusText: 'Rejected', text: async () => JSON.stringify({ error: 'synthetic send rejected', accepted: false }) };
+    }
+    if (call.path === '/chat/send' && outcome === 'unconfirmed') throw new Error('synthetic response lost');
+    let payload;
+    if (call.path === '/v1/files/projects/room-default') payload = { ok: true, result: memoSyntheticProject(body.roomId, project) };
+    else if (call.path === '/chat/resume') payload = { conversationId: body.conversationId, runs: [], historyComplete: true };
+    else if (call.path === '/chat/send') payload = { accepted: true, conversationId: body.conversationId || 'synthetic-conversation', runId: 'synthetic-run', requestId: body.requestId };
+    else assert.fail(`unexpected synthetic bridge request: ${call.path}`);
+    return { ok: true, status: 200, json: async () => payload, text: async () => JSON.stringify(payload) };
+  };
+  const document = { activeElement: selectors.get('.egd-memo-text'),
+    getElementById: id => id === 'egd-canvas-layer' ? { children: [] } : null,
+    querySelectorAll: selector => selector === '.egd-memo-card' ? [root] : [] };
+  const profile = { id: 'rio', name: 'Rio', label: 'Rio', category: 'synthetic', summary: '', capabilities: [], toolMode: null, systemPrompt: null };
+  const scope = { state, ChatState, InputContext, SurfaceState, MemoState: Memo, fetch, document, el: element,
+    window: { AbortController, setTimeout: () => 0, clearTimeout() {}, EventSource: { OPEN: 1 } },
+    createChatTaskAnswers: () => ({ sync() {} }),
+    codexAgentProfile: id => id === 'mina' ? { ...profile, id: 'mina', name: 'Mina', label: 'Mina' } : profile,
+    normalizeCodexAgentProfileId: id => id || 'rio', DEFAULT_CODEX_AGENT_PROFILE_ID: 'rio',
+    codexAgentProfileChoices: () => [profile], codexProfileAvatar: (_avatar, name) => element('span', {}, name),
+    formatMessageTime: () => '합성 시각', markAgendaDirty() {}, boardNotice: message => notices.push(message),
+    spawnCodexChatCard: () => ({}), dismissChatReturnCue() {},
+    SELF_MEMBER: 'self', cloneJson: memoJson, renderCodexActivityPanel() {}, scheduleDeskSessionSave() {},
+    browserToolUserSelections: new Map(), browserToolGrantFor: () => false,
+    captureChatInputs: async sources => { effects.captures.push(memoJson(sources)); throw new Error('Unrelated synthetic inputs must not be captured'); },
+    captureManagedFileInput: async source => { effects.captures.push(memoJson(source)); throw new Error('Unrelated synthetic file must not be captured'); },
+    console: { warn: (...args) => effects.warnings.push(args.map(String)) }, TAG: 'memo-dispatch-fixture',
+  };
+  const api = Function(...Object.keys(scope), memoDispatchBridgeSource())(...Object.values(scope));
+  const { bridge } = api;
+  state.codexBridge = bridge;
+  const render = () => api.renderMemoCard(root);
+  const set = next => { root._memoRecord = next; selectors.get('.egd-memo-text').value = next.text; render(); };
+  render();
+  return { root, notices, state, bridge, protocol, effects, otherInput, started, render, set,
+    ask: () => api.askMemoAgent(root, { agentId: 'rio', agentName: 'Rio', question: '맞아?' }),
+    completeSend: (outcome = 'accept') => releaseSend?.(outcome),
+    edit: text => set(Memo.editMemoText(root._memoRecord, text, { now: 1 })),
+    attach(run = fakeCompletedMemoRun()) {
+      const requestId = effects.requests.find(request => request.path === '/chat/send')?.body.requestId;
+      api.attachMemoRepliesFromRun(run.requestId === 'request-1' && requestId ? { ...run, requestId } : run);
+    },
+    warning(answerId = 'answer-7') {
+      const row = selectors.get('.egd-memo-thread').children.find(node => node.dataset.answerId === answerId);
+      assert.ok(row, `actual memoReplyRow rendered answer ${answerId}`);
+      return oldMemoAnswer.test(row.textContent);
+    },
+    replyText: () => selectors.get('.egd-memo-thread').textContent,
+    editorText: () => selectors.get('.egd-memo-text').value,
+    restore() { set(Memo.normalizeMemoRecord(memoJson(root._memoRecord), { now: 1 })); },
+    get sent() { return effects.requests.filter(request => request.path === '/chat/send').map(request => ({ text: request.body.message })); },
+    target: () => state.codex.threads.find(thread => thread.profileEnabled && thread.agentProfileId === 'rio'),
+    other: () => state.codex.threads.find(thread => thread.id === 'unrelated-room'),
+    sends: () => effects.requests.filter(request => request.path === '/chat/send'),
+    projectReads: () => effects.requests.filter(request => request.path === '/v1/files/projects/room-default'),
+    setProject: value => { project = value; },
+    hold(path, skip = 0) {
+      let release;
+      const promise = new Promise(resolve => { release = resolve; });
+      const gate = { path, skip, started: false, promise, release };
+      holds.push(gate); return gate;
+    },
+    async warmProject() { assert.ok(await bridge.ensureRoomProjectDefault(this.target().id), 'synthetic initial room project is readable'); },
+  };
+}
+
+test('memo dispatch: one ask waits for actual room readiness, then sends and accepts exactly once', async t => {
+  const scenarios = [
+    { name: 'same room with a ready project must force a fresh read', warm: true, gate: '/v1/files/projects/room-default' },
+    { name: 'first opening an existing Agent room', active: 'unrelated-room', gate: '/v1/files/projects/room-default' },
+    { name: 'first opening a newly created Agent room', existing: false, gate: '/v1/files/projects/room-default' },
+    { name: 'existing native conversation must finish resuming', conversation: true, gate: '/chat/resume' },
+  ];
+  for (const scenario of scenarios) await t.test(scenario.name, async () => {
+    const h = memoDispatchHarness(scenario);
+    if (scenario.warm) await h.warmProject();
+    const beforeReads = h.projectReads().length, gate = h.hold(scenario.gate), asking = trackedMemoPromise(h.ask());
+    try {
+      await waitForMemoFixture(() => gate.started, 'the real readiness read started');
+      assert.equal(h.sends().length, 0, 'no send while the readiness read is pending');
+      gate.release();
+      await waitForMemoFixture(() => asking.settled, 'the ask settles after readiness');
+      assert.ifError(asking.error);
+      assert.equal(asking.value, true, `one accepted ask after readiness; notices: ${h.notices.join(' | ')}`);
+      assert.equal(h.sends().length, 1);
+      assert.ok(h.projectReads().length > beforeReads, 'project is freshly checked for this ask');
+      const sent = h.sends()[0].body;
+      assert.equal(sent.clientThreadId, ChatState.clientThreadBinding(h.target()));
+      assert.equal(sent.message, revisionDraft(revisionMemo()).text);
+      assert.deepEqual(sent.contextSnapshotIds || [], [], 'no unrelated attachments are sent');
+      const accepted = Object.values(h.protocol.requests).filter(request => request.status === 'accepted');
+      assert.equal(accepted.length, 1);
+      assert.equal(h.root._memoRecord.asks.length, 1);
+      assert.equal(h.root._memoRecord.asks[0].requestId, accepted[0].requestId);
+      assert.equal(h.state.codex.threadDrafts['unrelated-room'], '이전부터 쓰던 다른 방 초안');
+      assert.deepEqual(h.other().inputSources, [h.otherInput]);
+      await new Promise(resolve => setImmediate(resolve));
+      assert.equal(h.sends().length, 1, 'completion of background reads does not resend');
+    } finally { gate.release(); }
+  });
+});
+
+test('memo dispatch: a pending recheck cannot send after room, draft, account, permission or project changes', async t => {
+  for (const change of ['room', 'draft', 'account', 'signed-out', 'disconnected', 'request-project', 'project-changed', 'project-unavailable', 'project-denied']) await t.test(change, async () => {
+    const h = memoDispatchHarness();
+    h.setProject('a'); await h.warmProject();
+    const gate = h.hold('/v1/files/projects/room-default'), asking = trackedMemoPromise(h.ask());
+    try {
+      await waitForMemoFixture(() => gate.started, 'the recheck is actually pending');
+      await new Promise(resolve => setImmediate(resolve));
+      assert.equal(asking.settled, false, 'this scenario must exercise a waiting ask, not an already-aborted stub');
+      if (change === 'room') void h.bridge.selectThread('unrelated-room');
+      if (change === 'draft') h.bridge.setDraft('전송 대기 중 새로 작성한 초안', 'dm-rio');
+      if (change === 'account') { h.state.codex.authStatus = { ...h.state.codex.authStatus, accountId: 'synthetic-account-b' }; h.state.codex.codexAccountKey = ChatState.codexAccountKey(h.state.codex.authStatus); }
+      if (change === 'signed-out') h.state.codex.authStatus = { ...h.state.codex.authStatus, isLoggedIn: false };
+      if (change === 'disconnected') h.state.codex.connected = false;
+      if (change === 'request-project') h.target().requestProjectTarget = { boardId: 'board-b', projectId: 'project-b', rootId: 'root-b' };
+      if (change === 'project-changed') h.setProject('b');
+      if (change === 'project-unavailable') h.setProject('unavailable');
+      if (change === 'project-denied') h.setProject('denied');
+      gate.release();
+      await waitForMemoFixture(() => asking.settled, 'the invalidated ask settles');
+      assert.ifError(asking.error);
+      assert.equal(asking.value, false);
+      assert.equal(h.sends().length, 0, 'nothing is dispatched after the original intent is invalidated');
+      assert.equal(h.root._memoRecord.asks.length, 0);
+      assert.equal(h.state.codex.threadDrafts['unrelated-room'], '이전부터 쓰던 다른 방 초안');
+      assert.deepEqual(h.other().inputSources, [h.otherInput]);
+      if (change === 'draft') assert.equal(h.state.codex.threadDrafts['dm-rio'], '전송 대기 중 새로 작성한 초안');
+      if (change === 'request-project') assert.equal(h.target().requestProjectTarget.projectId, 'project-b');
+    } finally { gate.release(); }
+  });
+});
+
+test('memo dispatch: later pre-send project recheck keeps room, draft, account and selected inputs fenced', async t => {
+  for (const change of ['room-away-return', 'draft', 'account', 'signed-out', 'disconnected', 'added-attachment', 'request-project', 'project-changed', 'project-unavailable', 'project-denied']) await t.test(change, async () => {
+    const h = memoDispatchHarness();
+    h.setProject('a'); await h.warmProject();
+    // The first read is opening the room; hold the following pre-send read.
+    const gate = h.hold('/v1/files/projects/room-default', 1), asking = trackedMemoPromise(h.ask());
+    const added = { id: 'new-attachment', kind: 'board-element', label: '대기 중 선택한 자료', sourceRef: { viewId: 'synthetic-new-view' } };
+    try {
+      await waitForMemoFixture(() => gate.started, 'a second project read was reached before dispatch');
+      assert.equal(h.sends().length, 0);
+      assert.equal(asking.settled, false);
+      if (change === 'room-away-return') { void h.bridge.selectThread('unrelated-room'); void h.bridge.selectThread('dm-rio'); }
+      if (change === 'draft') h.bridge.setDraft('나중에 입력한 초안', 'dm-rio');
+      if (change === 'account') { h.state.codex.authStatus = { ...h.state.codex.authStatus, accountId: 'synthetic-account-b' }; h.state.codex.codexAccountKey = ChatState.codexAccountKey(h.state.codex.authStatus); }
+      if (change === 'signed-out') h.state.codex.authStatus = { ...h.state.codex.authStatus, isLoggedIn: false };
+      if (change === 'disconnected') h.state.codex.connected = false;
+      if (change === 'added-attachment') h.bridge.addInputSources('dm-rio', [added]);
+      if (change === 'request-project') h.target().requestProjectTarget = { boardId: 'board-b', projectId: 'project-b', rootId: 'root-b' };
+      if (change === 'project-changed') h.setProject('b');
+      if (change === 'project-unavailable') h.setProject('unavailable');
+      if (change === 'project-denied') h.setProject('denied');
+      gate.release();
+      await waitForMemoFixture(() => asking.settled, 'the invalidated ask settles');
+      assert.ifError(asking.error);
+      assert.equal(asking.value, false);
+      assert.equal(h.sends().length, 0, 'a stale intent must not reach the send boundary');
+      assert.equal(h.root._memoRecord.asks.length, 0);
+      assert.deepEqual(h.effects.captures, []);
+      if (change === 'draft') assert.equal(h.state.codex.threadDrafts['dm-rio'], '나중에 입력한 초안');
+      if (change === 'added-attachment') assert.deepEqual(h.target().inputSources, [added]);
+      if (change === 'request-project') assert.equal(h.target().requestProjectTarget.projectId, 'project-b');
+    } finally { gate.release(); }
+  });
+});
+
+test('memo dispatch: the accepted send carries the freshly checked room project without inventing an override', async () => {
+  const h = memoDispatchHarness();
+  h.setProject('a'); await h.warmProject();
+  const beforeReads = h.projectReads().length, asking = trackedMemoPromise(h.ask());
+  await waitForMemoFixture(() => asking.settled, 'the ask settles');
+  assert.ifError(asking.error);
+  assert.equal(asking.value, true);
+  assert.equal(h.sends().length, 1);
+  assert.ok(h.projectReads().length > beforeReads);
+  const sent = h.sends()[0].body;
+  assert.deepEqual(sent.expectedRoomProject, { roomId: 'wire-rio', status: 'connected', source: 'board',
+    boardId: 'board-a', projectId: 'project-a', rootId: 'root-a' });
+  assert.equal(Object.hasOwn(sent, 'projectTarget'), false);
+});
+
+test('memo dispatch: repeated ask while preparation is pending sends and records at most once', async () => {
+  const h = memoDispatchHarness(), gate = h.hold('/v1/files/projects/room-default');
+  const first = trackedMemoPromise(h.ask());
+  try {
+    await waitForMemoFixture(() => gate.started, 'first ask is preparing');
+    const second = trackedMemoPromise(h.ask());
+    await waitForMemoFixture(() => second.settled, 'second ask is rejected while preparation is pending');
+    assert.ifError(second.error);
+    assert.equal(second.value, false);
+    assert.equal(h.sends().length, 0);
+    gate.release();
+    await waitForMemoFixture(() => first.settled, 'first ask completes');
+    assert.ifError(first.error);
+    assert.equal(first.value, true);
+    assert.equal(h.sends().length, 1);
+    assert.equal(Object.values(h.protocol.requests).filter(request => request.status === 'accepted').length, 1);
+    assert.equal(h.root._memoRecord.asks.length, 1);
+  } finally { gate.release(); }
+});
+
+test('memo dispatch: another accepted request cannot be mistaken for this unconfirmed ask', async () => {
+  const h = memoDispatchHarness({ holdSend: true }), asking = trackedMemoPromise(h.ask());
+  await waitForMemoFixture(() => h.sends().length === 1, 'the memo request reached the synthetic send boundary');
+  try {
+    h.protocol.requests['synthetic-other-request'] = { requestId: 'synthetic-other-request', localThreadId: 'dm-rio',
+      status: 'accepted', conversationId: 'synthetic-other-conversation', runId: 'synthetic-other-run' };
+    h.completeSend('unconfirmed');
+    await waitForMemoFixture(() => asking.settled, 'the unconfirmed ask settles');
+    assert.ifError(asking.error);
+    assert.equal(asking.value, false);
+    assert.equal(h.root._memoRecord.asks.length, 0, 'an unrelated acceptance cannot attach a memo ask');
+    assert.equal(h.sends().length, 1, 'an unknown outcome is not retried');
+  } finally { h.completeSend('unconfirmed'); }
+});
+
+test('memo dispatch: unrelated draft or attachment in the recipient room is never sent or overwritten', async t => {
+  const oldDraft = '이 방에서 이미 작성 중인 별도 초안';
+  const oldInput = { id: 'old-attachment', kind: 'board-element', label: '별도 자료', sourceRef: { viewId: 'synthetic-old-view' } };
+  const browserInput = { id: 'old-browser', kind: 'browser', label: '별도 Browser', selectedByUser: true, browserToolPermission: 'interact',
+    browserToolSelection: { token: 'synthetic-token', threadId: 'wire-rio' },
+    browserToolIdentity: { cardEpoch: 'synthetic-epoch', userContextId: 0, engineAccountKey: 'synthetic-account', authorityEpoch: 1 },
+    sourceRef: { viewId: 'synthetic-browser', uri: 'https://example.invalid/', profileId: 'synthetic-profile', accountId: '' } };
+  for (const scenario of [
+    { name: 'draft only', targetDraft: oldDraft, targetInputs: [] },
+    { name: 'attachment only', targetDraft: '', targetInputs: [oldInput] },
+    { name: 'Browser interaction selection only', targetDraft: '', targetInputs: [browserInput] },
+    { name: 'draft and attachment', targetDraft: oldDraft, targetInputs: [oldInput] },
+  ]) await t.test(scenario.name, async () => {
+    const h = memoDispatchHarness(scenario), asking = trackedMemoPromise(h.ask());
+    await waitForMemoFixture(() => asking.settled, 'the ask settles');
+    assert.ifError(asking.error);
+    if (scenario.targetDraft) assert.equal(h.state.codex.threadDrafts['dm-rio'], scenario.targetDraft, 'the existing composer draft is preserved');
+    assert.deepEqual(h.target().inputSources, scenario.targetInputs, 'the existing attachment remains selected for its owner');
+    assert.deepEqual(h.effects.captures, [], 'the memo ask cannot capture the unrelated attachment');
+    assert.equal(h.state.codex.threadDrafts['unrelated-room'], '이전부터 쓰던 다른 방 초안');
+    assert.deepEqual(h.other().inputSources, [h.otherInput]);
+    for (const { body } of h.sends()) {
+      assert.equal(body.message, revisionDraft(revisionMemo()).text);
+      assert.deepEqual(body.contextSnapshotIds || [], []);
+    }
+  });
+});
 
 test('memo revision: a dispatch basis tracks body edits, not timestamps or unrelated memo changes', () => {
   const original = deepFreeze(revisionMemo()), before = memoJson(original);
@@ -744,7 +1023,7 @@ test('memo revision: pending and answered JSON roundtrips retain the send basis 
   assert.deepEqual(pending, pendingBefore); assert.deepEqual(answered, answeredBefore); assert.deepEqual(dispatched, draftBefore);
 });
 
-test('memo revision: rejected or unconfirmed synthetic sends preserve current body and the outgoing draft', async t => {
+test('memo revision: rejected or unconfirmed sends preserve current body and the outgoing question without retrying', async t => {
   for (const outcome of ['reject', 'unconfirmed']) await t.test(outcome, async () => {
     const original = deepFreeze(revisionMemo()), snapshot = memoJson(original), draft = deepFreeze(revisionDraft(original));
     const h = memoRevisionHarness(original), sending = h.ask();
@@ -753,7 +1032,16 @@ test('memo revision: rejected or unconfirmed synthetic sends preserve current bo
     assert.equal(h.root._memoRecord.asks.length, 0, 'an unaccepted send does not create a pending ask');
     assert.equal(h.root._memoRecord.text, '수락을 기다리며 쓴 본문 B');
     assert.equal(h.editorText(), '수락을 기다리며 쓴 본문 B');
-    assert.equal(h.state.codex.threadDrafts['dm-rio'], draft.text, 'the original question remains available in the recipient room');
+    if (outcome === 'reject') {
+      assert.equal(h.state.codex.threadDrafts['dm-rio'], draft.text, 'a definite refusal restores the question as a draft');
+    } else {
+      const pending = h.target().messages.find(message => message.content === draft.text);
+      assert.ok(h.state.codex.threadDrafts['dm-rio'] === draft.text || pending?.status === 'unconfirmed',
+        'an unknown outcome retains the question as a draft or an unconfirmed Chat message');
+      const request = h.protocol.requests[h.sends()[0].body.requestId];
+      assert.equal(request?.status, 'unconfirmed', 'the recipient room must retain the uncertain outcome');
+      assert.equal(h.sends().length, 1, 'an unknown outcome is never automatically retried');
+    }
     assert.equal(h.state.codex.threadDrafts['unrelated-room'], '이전부터 쓰던 다른 방 초안');
     assert.deepEqual(original, snapshot);
   });
@@ -814,7 +1102,7 @@ test('memo revision: first new legacy question keeps its submitted basis across 
     assert.notEqual(submitted.basedOnMemoRevision, undefined, 'a newly observed body has its own new-question basis');
     const h = memoRevisionHarness(original);
     await acceptMemoQuestion(h, () => { h.edit('본문 B'); if (history) h.edit('본문 A'); });
-    const accepted = h.root._memoRecord.asks.find(ask => ask.requestId === 'request-1');
+    const accepted = h.root._memoRecord.asks.find(ask => ask.askId === submitted.askId);
     assert.deepEqual(accepted.basedOnMemoRevision, submitted.basedOnMemoRevision, 'acceptance cannot borrow the edited body revision');
     assert.notDeepEqual(revisionDraft(h.root._memoRecord).basedOnMemoRevision, submitted.basedOnMemoRevision);
     h.restore(); h.attach(); h.restore();
@@ -952,4 +1240,207 @@ test('memo input: 60 body events update revision guidance without rebuilding unr
     assert.equal(h.root._memoRecord.text, record.text + 'x'.repeat(60));
     if (!emptyProfiles) { assert.equal(h.warning('input-answer-a'), true); assert.equal(h.warning('input-answer-b'), true, 'the same current-answer row changes to older-body guidance'); }
   });
+});
+
+// The bridge fixture exposes its real event handler but still intercepts every
+// transport call. ChatState, not this fixture, constructs conversationId/runId.
+function memoAnswerIdentityEvent(h, kind, seq, overrides = {}) {
+  const requestId = h.sends()[0].body.requestId;
+  const request = h.protocol.requests[requestId];
+  return { type: 'chat.event', v: 2, streamId: 'synthetic-answer-stream', seq, engineId: 'codex',
+    clientThreadId: request.clientThreadId, conversationId: request.conversationId, runId: request.runId, requestId,
+    event: kind, ts: 1800000000000 + seq,
+    details: kind === 'message.completed'
+      ? { messageId: 'synthetic-answer-message', text: '실제 경로를 거친 늦은 합성 답변' }
+      : { status: 'completed' },
+    ...overrides };
+}
+
+// Exercise the production Board projection snapshot and reopen plan, followed
+// by the same Memo normalizer used when a saved memo is mounted. No disk/DOM.
+function memoAnswerIdentityBoardRoundTrip(record) {
+  const snapshot = { agenda: { id: 'synthetic-board', memberCardIds: ['memo-card'] },
+    cards: [{ id: 'memo-card', type: 'memo', runtimeState: record }], shapes: [] };
+  const opening = planBoardProjection(snapshot, 'synthetic-opening');
+  const live = { id: opening.idMap['memo-card'], type: 'memo', runtimeState: record };
+  const serialized = JSON.stringify(snapshotBoardProjection(opening, { [live.id]: live }, 10));
+  const reopened = planBoardProjection(JSON.parse(serialized), 'synthetic-reopening');
+  return Memo.normalizeMemoRecord(reopened.members.find(member => member.sourceId === 'memo-card').record.runtimeState, { now: 1 });
+}
+
+test('memo answer identity: a producer run joins one pending memo after the late completed event and survives reopen', async t => {
+  for (const edited of [false, true]) await t.test(edited ? 'edited body is marked older' : 'unchanged body is current', async () => {
+    const h = memoDispatchHarness({ holdSend: true });
+    const asking = h.ask();
+    await h.started;
+    assert.equal(h.root._memoRecord.asks.length, 0, 'an unaccepted request is not yet a pending ask');
+    h.completeSend();
+    assert.equal(await asking, true);
+    const requestId = h.sends()[0].body.requestId, request = h.protocol.requests[requestId];
+    assert.equal(request.status, 'accepted');
+    const answerId = ChatState.runKey(request.conversationId, request.runId);
+    assert.equal(answerId, 'synthetic-conversation/synthetic-run');
+    const run = h.protocol.runs[answerId];
+    assert.equal(run.answerId, answerId, 'the actual Chat producer constructs the answer identity');
+    assert.equal(h.root._memoRecord.asks[0].status, 'pending');
+    assert.equal(h.root._memoRecord.asks[0].requestId, requestId);
+    const basis = h.root._memoRecord.asks[0].basedOnMemoRevision;
+    h.set(memoAnswerIdentityBoardRoundTrip(h.root._memoRecord));
+    assert.equal(h.root._memoRecord.asks[0].status, 'pending', 'the pending link survives Board serialization and reopen');
+    if (edited) h.edit('본문 B');
+
+    const message = memoAnswerIdentityEvent(h, 'message.completed', 1);
+    const completed = memoAnswerIdentityEvent(h, 'run.completed', 2);
+    h.bridge.__memoFixtureDeliver(message);
+    assert.equal(h.root._memoRecord.replies.length, 0, 'a message is not a completed run');
+    h.bridge.__memoFixtureDeliver(completed);
+    assert.equal(run.status, 'completed', 'the actual event reducer consumed the late completion');
+    assert.equal(h.target().messages.find(item => item.role === 'assistant')?.answerId, answerId);
+    assert.equal(h.root._memoRecord.replies.length, 1, 'the completed producer answer joins once');
+    const reply = h.root._memoRecord.replies[0], ask = h.root._memoRecord.asks[0];
+    assert.equal(reply.answerId, answerId);
+    assert.equal(reply.runId, request.runId);
+    assert.equal(reply.askId, ask.askId);
+    assert.equal(reply.author.agentId, 'rio');
+    assert.equal(reply.text, '실제 경로를 거친 늦은 합성 답변');
+    assert.equal(ask.status, 'answered');
+    assert.equal(ask.answerId, answerId);
+    assert.equal(reply.basedOnMemoRevision, basis);
+    assert.equal(h.warning(answerId), edited);
+
+    h.set(memoAnswerIdentityBoardRoundTrip(h.root._memoRecord));
+    assert.equal(h.root._memoRecord.replies[0].answerId, answerId, 'the exact composite answer ID survives reopening');
+    assert.equal(h.root._memoRecord.asks[0].answerId, answerId);
+    assert.equal(h.root._memoRecord.replies[0].basedOnMemoRevision, basis);
+    assert.equal(h.warning(answerId), edited);
+    const saved = memoJson(h.root._memoRecord);
+    h.bridge.__memoFixtureDeliver(completed);
+    h.bridge.__memoFixtureDeliver(memoAnswerIdentityEvent(h, 'run.completed', 3));
+    assert.deepEqual(h.root._memoRecord, saved, 'replayed and newly sequenced duplicate completions do not append again');
+    assert.equal(h.sends().length, 1);
+  });
+});
+
+test('memo answer identity: other rooms and Agents cannot answer this pending request', async () => {
+  const h = memoDispatchHarness();
+  assert.equal(await h.ask(), true);
+  const requestId = h.sends()[0].body.requestId, request = h.protocol.requests[requestId];
+  const pending = h.root._memoRecord.asks[0], expectedId = ChatState.runKey(request.conversationId, request.runId);
+  const foreign = memoAnswerIdentityEvent(h, 'message.completed', 1, {
+    clientThreadId: 'wire-other', conversationId: 'other-conversation', runId: 'other-run',
+  });
+  h.bridge.__memoFixtureDeliver(foreign);
+  assert.equal(h.protocol.runs['other-conversation/other-run'], undefined, 'a different room cannot claim this request');
+  assert.equal(h.root._memoRecord.asks[0].status, 'pending');
+  assert.equal(h.root._memoRecord.replies.length, 0);
+
+  Object.assign(h.other(), { profileEnabled: true, agentProfileId: 'mina' });
+  ChatState.registerChatRequest(h.protocol, { requestId: 'other-request', localThreadId: 'unrelated-room', clientThreadId: 'wire-other' }, h.state.codex.authStatus);
+  const otherRun = ChatState.acceptChatRequest(h.protocol, { accepted: true, requestId: 'other-request',
+    conversationId: 'other-conversation', runId: 'other-run' }, 'other-request');
+  const otherBase = { type: 'chat.event', v: 2, streamId: 'other-stream', engineId: 'codex', clientThreadId: 'wire-other',
+    conversationId: 'other-conversation', runId: 'other-run', requestId: 'other-request' };
+  h.bridge.__memoFixtureDeliver({ ...otherBase, seq: 1, event: 'message.completed', details: { messageId: 'other-message', text: '다른 Agent의 답' } });
+  h.bridge.__memoFixtureDeliver({ ...otherBase, seq: 2, event: 'run.completed', details: { status: 'completed' } });
+  assert.equal(otherRun.status, 'completed', 'the other Agent really completed in its own room');
+  assert.equal(h.root._memoRecord.asks[0].status, 'pending');
+  assert.equal(h.root._memoRecord.replies.length, 0);
+  const mismatch = Memo.appendMemoReply(h.root._memoRecord, { author: { kind: 'agent', agentId: 'mina' },
+    text: '다른 Agent의 답', answerId: 'legacy-other-answer', askId: pending.askId });
+  assert.equal(mismatch.appended, false);
+  assert.equal(mismatch.reason, 'ask-mismatch');
+  assert.equal(mismatch.memo, h.root._memoRecord);
+
+  h.bridge.__memoFixtureDeliver(memoAnswerIdentityEvent(h, 'message.completed', 1));
+  h.bridge.__memoFixtureDeliver(memoAnswerIdentityEvent(h, 'run.completed', 2));
+  assert.equal(h.root._memoRecord.replies.length, 1);
+  assert.equal(h.root._memoRecord.replies[0].answerId, expectedId);
+  assert.equal(h.root._memoRecord.replies[0].author.agentId, 'rio');
+});
+
+test('memo answer identity: producer IDs and single legacy IDs survive Board serialization and normalization', async t => {
+  const nativeCases = [
+    { name: 'normal producer identity', conversationId: 'conversation-1', runId: 'run-1' },
+    // The helper's native idText accepts at most 300 characters per native ID;
+    // the existing memo token grammar defines the permitted character set.
+    { name: '300-character producer components', conversationId: 'c'.repeat(300), runId: 'r'.repeat(300) },
+  ];
+  for (const sample of nativeCases) await t.test(sample.name, () => {
+    const answerId = ChatState.runKey(sample.conversationId, sample.runId);
+    const run = { ...fakeCompletedMemoRun(), conversationId: sample.conversationId, runId: sample.runId, answerId };
+    const candidate = Memo.memoReplyFromRun(run);
+    assert.equal(candidate?.answerId, answerId, 'the parser accepts the producer identity unchanged');
+    const original = revisionMemo(), draft = revisionDraft(original);
+    const pending = Memo.recordMemoAsk(original, draft, { now: 2, requestId: 'request-1', threadId: 'dm-rio' });
+    const joined = Memo.appendMemoReply(pending, { author: { kind: 'agent', agentId: 'rio' }, ...candidate, askId: draft.askId }, { now: 3 });
+    assert.equal(joined.appended, true);
+    const reopened = memoAnswerIdentityBoardRoundTrip(joined.memo);
+    assert.equal(reopened.asks[0].answerId, answerId);
+    assert.equal(reopened.replies[0].answerId, answerId);
+    assert.equal(reopened.replies[0].basedOnMemoRevision, draft.basedOnMemoRevision);
+    const duplicate = Memo.appendMemoReply(reopened, { author: { kind: 'agent', agentId: 'rio' }, ...candidate, askId: draft.askId });
+    assert.equal(duplicate.appended, false);
+    assert.equal(duplicate.memo, reopened);
+  });
+  await t.test('single legacy answer ID', () => {
+    for (const legacyId of ['Legacy_2026.11:2-okay', 'L'.repeat(128)]) {
+      const original = revisionMemo(), draft = revisionDraft(original);
+      const pending = Memo.recordMemoAsk(original, draft, { now: 2, requestId: 'request-1', threadId: 'dm-rio' });
+      const joined = Memo.appendMemoReply(pending, { author: { kind: 'agent', agentId: 'rio' }, text: '이전 답',
+        answerId: legacyId, askId: draft.askId, runId: 'legacy-run' }, { now: 3 });
+      const reopened = memoAnswerIdentityBoardRoundTrip(joined.memo);
+      assert.equal(reopened.asks[0].answerId, legacyId);
+      assert.equal(reopened.replies[0].answerId, legacyId);
+      assert.equal(reopened.replies[0].basedOnMemoRevision, draft.basedOnMemoRevision);
+    }
+  });
+});
+
+test('memo answer identity: reject controls and formats outside the bounded legacy or two-part grammar', async t => {
+  const invalid = [
+    ['empty legacy ID', ''],
+    ['embedded NUL', 'conversation\u0000/run'],
+    ['embedded newline', 'conversation/\nrun'],
+    ['trailing newline', 'conversation/run\n'],
+    ['trailing carriage return', 'conversation/run\r'],
+    ['trailing tab', 'conversation/run\t'],
+    ['unit separator', 'conversation/run\u001f'],
+    ['leading whitespace', ' conversation/run'],
+    ['missing conversation', '/run'],
+    ['missing run', 'conversation/'],
+    ['empty component', 'conversation//run'],
+    ['extra separator', 'conversation/run/other'],
+    ['path traversal shape', 'conversation/../run'],
+    ['query punctuation', 'conversation/run?x'],
+    ['backslash', 'conversation/run\\other'],
+    ['non-ASCII token', 'conversation/실행'],
+    ['legacy token over 128', 'a'.repeat(129)],
+    ['conversation component over 300', 'c'.repeat(301) + '/run'],
+    ['run component over 300', 'conversation/' + 'r'.repeat(301)],
+  ];
+  for (const [name, answerId] of invalid) await t.test(name, () => {
+    const run = { ...fakeCompletedMemoRun(), conversationId: undefined, runId: undefined, answerId };
+    assert.equal(Memo.memoReplyFromRun(run), null);
+    assert.throws(() => Memo.appendMemoReply(revisionMemo(), { author: { kind: 'agent', agentId: 'rio' }, text: '답', answerId }));
+    const restored = Memo.normalizeMemoRecord({ ...memoJson(revisionMemo()),
+      asks: [{ askId: 'ask-1', agentId: 'rio', status: 'answered', answerId }],
+      replies: [{ id: 'reply-1', author: { kind: 'agent', agentId: 'rio' }, text: '잘못된 답', answerId }] });
+    assert.equal(restored.asks[0].answerId, undefined);
+    assert.equal(restored.replies.length, 0);
+  });
+  const original = revisionMemo(), draft = revisionDraft(original);
+  const pending = Memo.recordMemoAsk(original, draft, { requestId: 'request/invalid', threadId: 'thread/invalid' });
+  assert.equal(pending.asks[0].requestId, undefined, 'the answer ID exception does not widen request IDs');
+  assert.equal(pending.asks[0].threadId, undefined, 'the answer ID exception does not widen room IDs');
+  assert.throws(() => Memo.memoAskDraft(original, { agentId: 'rio/mina' }), 'the exception does not widen Agent IDs');
+});
+
+test('memo answer identity: a composite run ID cannot name a different or incomplete run', () => {
+  const answerId = ChatState.runKey('conversation-1', 'run-1');
+  const base = { ...fakeCompletedMemoRun(), answerId, conversationId: 'conversation-1', runId: 'run-1' };
+  assert.equal(Memo.memoReplyFromRun(base)?.answerId, answerId);
+  assert.equal(Memo.memoReplyFromRun({ ...base, conversationId: 'conversation-2' }), null);
+  assert.equal(Memo.memoReplyFromRun({ ...base, runId: 'run-2' }), null);
+  assert.equal(Memo.memoReplyFromRun({ ...base, conversationId: undefined }), null);
+  assert.equal(Memo.memoReplyFromRun({ ...base, runId: undefined }), null);
 });

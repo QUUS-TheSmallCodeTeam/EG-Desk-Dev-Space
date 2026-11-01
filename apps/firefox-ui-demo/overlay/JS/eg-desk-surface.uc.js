@@ -1823,6 +1823,7 @@
   const chatRequestProjectDisplayScopes = new Map();
   const chatRoomProjectDefaults = new Map();
   const chatProjectDraftActions = new Map();
+  const memoAskSendReservations = new Map();
   const chatRoomProjectPreparations = new WeakMap();
   const fileProjectAssociations = new WeakMap();
   const CHAT_REQUEST_PROJECT_INVALID = '실행 프로젝트를 다시 선택하거나 제거한 뒤 보내세요.';
@@ -13555,9 +13556,10 @@
         }
         state.codex.draft = getCodexThreadDraft(state.codex, threadId);
         const selected = getCodexThreadById(state.codex, threadId);
-        if (selected?.conversationId) void refreshConversation(selected, true);
-        void this.refreshRoomProjectDefault(threadId);
+        const conversation = selected?.conversationId ? refreshConversation(selected, true) : null;
+        const roomProject = this.refreshRoomProjectDefault(threadId);
         emit();
+        return Promise.all([conversation, roomProject]);
       },
       toggleThreadPin(threadId) {
         if (!threadId) return;
@@ -13811,8 +13813,16 @@
         this.setDraft(prompt.content, threadId);
         return this.sendMessage();
       },
-      async sendMessage() {
+      async sendMessage(options = {}) {
         const activeThread = getActiveCodexThread(state.codex);
+        const reservation = memoAskSendReservations.get(activeThread?.id);
+        if (reservation !== (options.memoAskReservation || undefined)) return;
+        const memoSendCurrent = () => {
+          try { return reservation ? memoAskSendReservations.get(activeThread.id) === reservation && reservation.current()
+            : !memoAskSendReservations.has(activeThread?.id); }
+          catch { return false; }
+        };
+        if (!memoSendCurrent()) return;
         const draftText = getCodexThreadDraft(state.codex, activeThread?.id || null);
         const content = draftText.trim();
         // Keep explicit intent even when the engine's live availability changes.
@@ -13864,7 +13874,7 @@
           state.codex.threadDrafts[activeThread.id] = '';
           state.codex.draft = getCodexThreadDraft(state.codex, state.codex.activeThreadId);
         };
-        if (!await ensureNativeReadyForSend(activeThread) || !epochScope.valid(token)) { epochScope.finish(token); return; }
+        if (!await ensureNativeReadyForSend(activeThread) || !epochScope.valid(token) || !memoSendCurrent()) { epochScope.finish(token); return; }
         const resumedThread = getCodexThreadById(state.codex, activeThread.id);
         if (!resumedThread || ChatState.clientThreadBinding(resumedThread) !== ChatState.clientThreadBinding(activeThread)
             || resumedThread.conversationId !== activeThread.conversationId || threadBusy(resumedThread)
@@ -13875,7 +13885,7 @@
           if (engineId === 'claude' && !selectedInputs.length && submittedDraft.briefingInputs.length) await requireClaudeContext(activeThread, token);
           inputReferences = [...await captureThreadInputs(activeThread, selectedInputs, token), ...submittedDraft.briefingInputs];
           for (const reference of inputReferences) if (reference.contextScope) InputContext.assertInputContextScope(reference, ChatState.chatContextRequestScope(activeThread, state.codex));
-          if (!epochScope.valid(token)) { epochScope.finish(token); return; }
+          if (!epochScope.valid(token) || !memoSendCurrent()) { epochScope.finish(token); return; }
           const current = getCodexThreadById(state.codex, activeThread.id);
           if (!current || ChatState.clientThreadBinding(current) !== ChatState.clientThreadBinding(activeThread)) throw new Error('대화 연결이 바뀌었습니다. 초안을 다시 확인해 주세요.');
           const readiness = ChatState.chatThreadReadiness(current, state.codex);
@@ -13914,11 +13924,11 @@
         if (!submittedDraft.requestProjectTarget) {
           if (!defaultSendCurrent()) { epochScope.finish(token); return; }
           const observed = await state.codexBridge.prepareRoomProjectSend(activeThread.id, submittedRoomDefault);
-          if (!observed || !defaultSendCurrent()) { epochScope.finish(token); return; }
+          if (!observed || !defaultSendCurrent() || !memoSendCurrent()) { epochScope.finish(token); return; }
           try { expectedRoomProject = snapshotChatRoomProjectExpectation(observed, projectBinding); }
           catch { updateThreadById(activeThread.id, thread => ({ ...thread, sendError: CHAT_ROOM_PROJECT_UNAVAILABLE })); epochScope.finish(token); emit(); return; }
         }
-        if (!epochScope.valid(token)) { epochScope.finish(token); return; }
+        if (!epochScope.valid(token) || !memoSendCurrent()) { epochScope.finish(token); return; }
         // The first send ties the room to its engine (D3) and makes it the app's recent one (D4).
         updateThreadById(activeThread.id, thread => ({ ...thread, engineId,
           ...(engineId === 'claude' ? { engineProfileId: token.profile } : {}) }));
@@ -13979,7 +13989,7 @@
             signal: token.signal,
             body: JSON.stringify(chatRequest),
           });
-          if (!epochScope.valid(token) || ChatState.clientThreadBinding(getCodexThreadById(state.codex, activeThread.id)) !== ChatState.clientThreadBinding(activeThread)) return;
+          if (!epochScope.valid(token) || ChatState.clientThreadBinding(getCodexThreadById(state.codex, activeThread.id)) !== ChatState.clientThreadBinding(activeThread)) return { requestId, accepted: false, status: 'unconfirmed' };
           const run = ChatState.acceptChatRequest(protocol, result, requestId);
           if (run) {
             clearAcceptedClaudeDraft();
@@ -13990,6 +14000,7 @@
             // Codex keeps a named model for later turns; going back to the default must name it.
             if (chatRequest.model) updateThreadById(activeThread.id, thread => ({ ...thread, sentModel: chatRequest.model, nameModelNext: false }));
             syncProtocolRun(run);
+            return { requestId, accepted: run.requestId === requestId && protocol.requests[requestId]?.status === 'accepted' };
           } else {
             const error = new Error(typeof result.error === 'string' ? result.error
               : typeof result.error?.message === 'string' ? result.error.message : '실행 접수 상태를 확인하지 못했습니다.');
@@ -14003,7 +14014,7 @@
             throw error;
           }
         } catch (error) {
-          if (!epochScope.valid(token) || ChatState.clientThreadBinding(getCodexThreadById(state.codex, activeThread.id)) !== ChatState.clientThreadBinding(activeThread)) return;
+          if (!epochScope.valid(token) || ChatState.clientThreadBinding(getCodexThreadById(state.codex, activeThread.id)) !== ChatState.clientThreadBinding(activeThread)) return { requestId, accepted: false, status: 'unconfirmed' };
           const request = protocol.requests[requestId];
           if (error.code === 'BROWSER_TOOLS_UNAVAILABLE') {
             error.message = '이 대화는 Browser 조작 도구가 등록되기 전에 만들어졌습니다. 기존 기록과 초안은 유지됩니다. 새 Chat을 만든 뒤 Browser에서 이번 실행의 조작 대상을 다시 선택해 주세요.';
@@ -14059,6 +14070,7 @@
               state.codex.draft = getCodexThreadDraft(state.codex, state.codex.activeThreadId);
             }
           }
+          return { requestId, accepted: request.status === 'accepted' && !!request.runId, status: request.status };
         } finally { epochScope.finish(token); if (epochScope.valid(token)) emit(); }
       },
     };
@@ -15262,38 +15274,119 @@
   async function askMemoAgent(root, { agentId, agentName, question = '' } = {}) {
     const bridge = state.codexBridge;
     const memo = root?._memoRecord;
-    if (!bridge || !memo) return false;
-    let draft;
-    try { draft = MemoState.memoAskDraft(memo, { agentId, agentName, question, target: memoTargetLabel(memo) }); }
-    catch (error) { boardNotice(error.message); return false; }
-    let thread = memoAgentThread(agentId);
-    if (!thread) {
-      bridge.createThread('dm', { agentProfileId: agentId, profileEnabled: true });
-      thread = memoAgentThread(agentId);
-    }
-    if (!thread) { boardNotice(`${draft.agentName || 'Agent'}의 대화방을 열 수 없습니다.`); return false; }
-    const chatCard = spawnCodexChatCard();
-    dismissChatReturnCue();
-    state.codex.hudView = 'conversation';
-    state.codex.threadDrafts = { ...(state.codex.threadDrafts || {}), [thread.id]: draft.text };
-    bridge.selectThread(thread.id, { openConversation: true });   // reads the draft back into the composer
-    const requestsBefore = new Set(Object.keys(state.codex.chatProtocol?.requests || {}));
-    root.dataset.memoAsking = 'true';
-    renderMemoCard(root);
-    try { await bridge.sendMessage(); }
-    catch (error) { console.warn(TAG, 'memo ask send failed', error); }
-    delete root.dataset.memoAsking;
-    const accepted = Object.entries(state.codex.chatProtocol?.requests || {})
-      .find(([requestId, request]) => !requestsBefore.has(requestId) && request?.localThreadId === thread.id
-        && (request.status === 'accepted' || (request.conversationId && request.runId)));
-    if (!accepted) {
-      boardNotice(`${draft.agentName || 'Agent'}에게 질문을 보내지 못했습니다. 초안은 ${thread.title} 입력칸에 남아 있습니다.`);
-      renderMemoCard(root);
-      state.focusChatDockIfCompact?.(chatCard);
+    if (!bridge || !memo || root.dataset.memoAsking === 'true') return false;
+    if (memo.asks.length >= MemoState.MEMO_LIMITS.asks) {
+      boardNotice('이 메모의 질문 기록이 가득 차 새 질문을 보내지 않았습니다.');
       return false;
     }
-    updateMemoRecord(root, MemoState.setMemoExpanded(MemoState.recordMemoAsk(root._memoRecord, draft, { requestId: accepted[0], threadId: thread.id }), true), 'memo-ask');
-    return true;
+    const target = memoTargetLabel(memo);
+    let draft;
+    try { draft = MemoState.memoAskDraft(memo, { agentId, agentName, question, target }); }
+    catch (error) { boardNotice(error.message); return false; }
+    root.dataset.memoAsking = 'true';
+    renderMemoCard(root);
+    let scope, reservation, thread, submittedDraft, refreshTimer;
+    try {
+      thread = memoAgentThread(agentId);
+      if (!thread) {
+        bridge.createThread('dm', { agentProfileId: agentId, profileEnabled: true });
+        thread = memoAgentThread(agentId);
+      }
+      if (!thread) { boardNotice(`${draft.agentName || 'Agent'}의 대화방을 열 수 없습니다.`); return false; }
+      const binding = ChatState.clientThreadBinding(thread);
+      const currentDraft = () => ChatState.snapshotChatDraft(getCodexThreadById(state.codex, thread.id),
+        getCodexThreadDraft(state.codex, thread.id), state.codex.threadDraftRevisions[thread.id] || 0);
+      const initialDraft = currentDraft();
+      const hasPickedContext = () => !!state.contextSuggest?.byThread?.[thread.id]?.picked?.length;
+      if (initialDraft.text !== '' || !Array.isArray(initialDraft.inputSources) || initialDraft.inputSources.length
+          || !Array.isArray(initialDraft.briefingInputs) || initialDraft.briefingInputs.length
+          || initialDraft.requestProjectTarget || hasPickedContext() || memoAskSendReservations.has(thread.id)) {
+        boardNotice('이 대화방에 작성 중인 초안이나 선택 자료가 있어 메모 질문을 보내지 않았습니다. 기존 내용은 유지했습니다.');
+        return false;
+      }
+      scope = bridge.createProjectScope(thread.id);
+      if (!scope) { boardNotice('대화 연결을 확인할 수 없어 메모 질문을 보내지 않았습니다.'); return false; }
+      const originalProject = chatRoomProjectState(thread)?.value || null;
+      const identity = JSON.stringify([ChatState.chatContextRequestScope(thread, state.codex), codexThreadRuntimeConfig(thread)]);
+      const memoCurrent = () => root.isConnected && root._memoRecord === memo && memoTargetLabel(memo) === target
+        && root.querySelector('.egd-memo-ask-agent')?.value === agentId
+        && root.querySelector('.egd-memo-ask-question')?.value === question;
+      const threadCurrent = () => {
+        const current = getCodexThreadById(state.codex, thread.id);
+        return scope.current() && current?.type === 'dm' && current.profileEnabled === true && current.agentProfileId === agentId
+          && ChatState.clientThreadBinding(current) === binding && ChatState.chatThreadReadiness(current, state.codex).ready
+          && JSON.stringify([ChatState.chatContextRequestScope(current, state.codex), codexThreadRuntimeConfig(current)]) === identity;
+      };
+      const chatCard = spawnCodexChatCard();
+      dismissChatReturnCue();
+      state.codex.hudView = 'conversation';
+      const selection = bridge.selectThread(thread.id, { openConversation: true });
+      const roomGeneration = state.codex.activityRoomGeneration;
+      // A slow resume/read must not leave this explicit action pending forever.
+      const selected = await Promise.race([selection, new Promise(resolve => { refreshTimer = window.setTimeout(() => resolve(null), 15000); })]);
+      window.clearTimeout(refreshTimer); refreshTimer = null;
+      const current = getCodexThreadById(state.codex, thread.id);
+      if (!selected?.[1] || thread.conversationId && !selected[0] || !threadCurrent() || !memoCurrent() || state.codex.activeThreadId !== thread.id
+          || state.codex.activityRoomGeneration !== roomGeneration || hasPickedContext()
+          || !ChatState.chatDraftMatches(current, getCodexThreadDraft(state.codex, thread.id), state.codex.threadDraftRevisions[thread.id] || 0, initialDraft)) {
+        boardNotice('대화방이나 메모 상태가 바뀌었거나 준비되지 않아 질문을 보내지 않았습니다. 내용을 확인해 주세요.');
+        return false;
+      }
+      if (originalProject && !chatRoomProjectTargetsMatch(originalProject, selected[1])) {
+        boardNotice('방 기본 프로젝트가 바뀌었습니다. 프로젝트를 확인한 뒤 다시 물어보세요.');
+        return false;
+      }
+      reservation = { current: () => threadCurrent() && memoCurrent() && state.codex.activeThreadId === thread.id
+        && state.codex.activityRoomGeneration === roomGeneration && !hasPickedContext()
+        && ChatState.chatDraftMatches(getCodexThreadById(state.codex, thread.id), getCodexThreadDraft(state.codex, thread.id),
+          state.codex.threadDraftRevisions[thread.id] || 0, submittedDraft) };
+      memoAskSendReservations.set(thread.id, reservation);
+      bridge.setDraft(draft.text, thread.id);
+      submittedDraft = currentDraft();
+      const result = await bridge.sendMessage({ memoAskReservation: reservation });
+      if (!result?.accepted) {
+        // Before registration this envelope is still ours; never clear a user's edit.
+        const latest = getCodexThreadById(state.codex, thread.id);
+        if (!result?.requestId && latest && ChatState.clientThreadBinding(latest) === binding
+            && ChatState.chatDraftMatches(latest, getCodexThreadDraft(state.codex, thread.id),
+              state.codex.threadDraftRevisions[thread.id] || 0, submittedDraft)) bridge.setDraft('', thread.id);
+        boardNotice('메모 질문의 접수를 확인하지 못했습니다. 대화방 상태와 메모의 질문을 확인해 주세요.');
+        state.focusChatDockIfCompact?.(chatCard);
+        return false;
+      }
+      const request = state.codex.chatProtocol?.requests?.[result.requestId];
+      if (request?.localThreadId !== thread.id || request.status !== 'accepted' || !request.runId) {
+        boardNotice('메모 질문의 접수 연결을 확인하지 못했습니다. 대화방 상태를 확인해 주세요.');
+        return false;
+      }
+      if (!root.isConnected || root._memoRecord?.id !== draft.memoId) {
+        boardNotice('질문은 접수됐지만 메모가 닫혀 기록하지 못했습니다. 대화방에서 확인해 주세요.');
+        return false;
+      }
+      let recorded;
+      try { recorded = MemoState.recordMemoAsk(root._memoRecord, draft, { requestId: result.requestId, threadId: thread.id }); }
+      catch { boardNotice('질문은 접수됐지만 메모에 기록하지 못했습니다. 대화방에서 확인해 주세요.'); return false; }
+      if (!recorded.asks.some(ask => ask.askId === draft.askId && ask.requestId === result.requestId)) {
+        boardNotice('질문은 접수됐지만 메모에 기록하지 못했습니다. 대화방에서 확인해 주세요.');
+        return false;
+      }
+      updateMemoRecord(root, MemoState.setMemoExpanded(recorded, true), 'memo-ask');
+      // A very fast run may have completed before its accepted ask was recorded.
+      const run = Object.values(state.codex.chatProtocol?.runs || {}).find(item => item.requestId === result.requestId
+        && item.localThreadId === thread.id && item.runId === request.runId);
+      if (run) attachMemoRepliesFromRun(run);
+      return true;
+    } catch (error) {
+      console.warn(TAG, 'memo ask send failed', error);
+      boardNotice('메모 질문을 완료하지 못했습니다. 대화방 상태와 메모의 질문을 확인해 주세요.');
+      return false;
+    } finally {
+      if (refreshTimer) window.clearTimeout(refreshTimer);
+      if (thread && memoAskSendReservations.get(thread.id) === reservation) memoAskSendReservations.delete(thread.id);
+      scope?.finish();
+      delete root.dataset.memoAsking;
+      renderMemoCard(root);
+    }
   }
 
   // Called from syncProtocolRun: a finished run that answers a memo question
@@ -15527,7 +15620,9 @@
         const choice = memoAgentChoices().find(item => item.id === agentId);
         if (!choice) { boardNotice('물어볼 Agent를 골라 주세요.'); return; }
         if (saveTimer) { clearTimeout(saveTimer); saveText(); }
-        if (await askMemoAgent(root, { agentId: choice.id, agentName: choice.name, question: question.value })) question.value = '';
+        const submittedQuestion = question.value;
+        if (await askMemoAgent(root, { agentId: choice.id, agentName: choice.name, question: submittedQuestion })
+            && question.value === submittedQuestion) question.value = '';
       } }, 'Agent에게 묻기…');
     const askRow = el('div', { class: 'egd-memo-ask', data: { testid: 'memo-ask' } }, select, question, askButton);
     shell.slots.content.appendChild(el('div', { class: 'egd-memo-body' }, textarea, status));

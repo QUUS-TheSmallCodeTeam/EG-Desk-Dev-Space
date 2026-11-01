@@ -21,6 +21,11 @@
 
 const TOKEN = /^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$/;
 const token = value => typeof value === 'string' && TOKEN.test(value) ? value : null;
+// Chat's answer identity is an opaque run key (conversationId/runId).
+// The helper permits up to 300 characters per native ID; no other memo ID
+// gets this longer, two-part grammar, and the value is never treated as a path.
+const CHAT_ANSWER_ID = /^[A-Za-z0-9][A-Za-z0-9_.:-]{0,299}\/[A-Za-z0-9][A-Za-z0-9_.:-]{0,299}$/;
+const answerIdentifier = value => token(value) || (typeof value === 'string' && CHAT_ANSWER_ID.test(value) ? value : null);
 const finite = value => typeof value === 'number' && Number.isFinite(value);
 const msTime = value => Number.isSafeInteger(value) && value >= 0 ? value : null;
 const memoRevision = value => Number.isSafeInteger(value) && value >= 0 ? value : null;
@@ -88,7 +93,7 @@ function normReply(raw) {
   if (!id || !author || !text) return null;
   const reply = { id, author, text: text.slice(0, MEMO_LIMITS.reply) };
   if (author.kind === 'agent') {
-    const answerId = token(raw.answerId);
+    const answerId = answerIdentifier(raw.answerId);
     if (!answerId) return null;
     reply.answerId = answerId;
     for (const key of ['askId', 'runId']) {
@@ -114,7 +119,7 @@ function normAsk(raw) {
     const value = token(raw[key]);
     if (value) ask[key] = value;
   }
-  const answerId = token(raw.answerId);
+  const answerId = answerIdentifier(raw.answerId);
   if (ask.status === 'answered' && answerId) ask.answerId = answerId;
   const askedAt = msTime(raw.askedAt);
   if (askedAt !== null) ask.askedAt = askedAt;
@@ -357,8 +362,11 @@ export function findPendingMemoAsk(memos, requestId) {
 // completed or has no text yet.
 export function memoReplyFromRun(run) {
   if (!run || run.status !== 'completed') return null;
-  const answerId = token(run.answerId);
+  const answerId = answerIdentifier(run.answerId);
   if (!answerId) return null;
+  if (answerId.includes('/') && (run.conversationId != null || run.runId != null)
+      && (typeof run.conversationId !== 'string' || typeof run.runId !== 'string'
+        || answerId !== `${run.conversationId}/${run.runId}`)) return null;
   const text = body((Array.isArray(run.messages) ? run.messages : [])
     .filter(message => message?.role === 'assistant' && !['error', 'failed'].includes(message.status))
     .map(message => typeof message.content === 'string' ? message.content : typeof message.text === 'string' ? message.text : '')
@@ -392,7 +400,7 @@ export function appendMemoReply(memo, reply = {}, { now = Date.now() } = {}) {
   if (!author) throw new Error('답글 작성자가 올바르지 않습니다.');
   const text = body(reply.text);
   if (!text) throw new Error('답글 내용을 입력해 주세요.');
-  const answerId = author.kind === 'agent' ? token(reply.answerId) : null;
+  const answerId = author.kind === 'agent' ? answerIdentifier(reply.answerId) : null;
   if (author.kind === 'agent' && !answerId) throw new Error('Agent 답글에는 답변 id가 필요합니다.');
   if (answerId && memo.replies.some(item => item.answerId === answerId)) return { memo, appended: false, reason: 'duplicate' };
   if (memo.replies.length >= MEMO_LIMITS.replies) throw new Error('이 메모의 답글이 가득 찼습니다.');

@@ -5378,13 +5378,14 @@ test('submitted draft matching includes user revision, exact text and both attac
 });
 
 test('actual send path preserves draft B and new attachments typed during delayed capture of draft A', async () => {
-  const body = surfaceSource.match(/      async sendMessage\(\) \{([\s\S]*?)\n      \},/)?.[1];
+  const body = surfaceSource.match(/      async sendMessage\(options = \{\}\) \{([\s\S]*?)\n      \},/)?.[1];
   assert.ok(body);
   const deps = ['state', 'getActiveCodexThread', 'getCodexThreadDraft', 'ChatState', 'threadBusy', 'epochScope', 'ensureNativeReadyForSend', 'updateThreadById', 'emit',
     'captureThreadInputs', 'getCodexThreadById', 'protocol', 'codexThreadAgentProfile', 'appendMessageToThread', 'createCodexMessage', 'SELF_MEMBER', 'codexThreadRuntimeConfig', 'fetchJson', 'syncProtocolRun', 'browserToolSelectedSources',
     'rootSseReady', 'chatRequestProjectDisplays', 'CHAT_REQUEST_PROJECT_INVALID', 'chatRoomProjectSendBlock', 'chatRoomProjectState',
-    'normalizeChatRoomProjectDefault', 'snapshotChatRoomProjectExpectation', 'CHAT_ROOM_PROJECT_UNAVAILABLE'];
-  const send = compileFunction(`return (async () => {${body}\n})();`, deps);
+    'normalizeChatRoomProjectDefault', 'snapshotChatRoomProjectExpectation', 'CHAT_ROOM_PROJECT_UNAVAILABLE', 'memoAskSendReservations', 'InputContext'];
+  const send = (...values) => isolatedProductionSend(deps, values);
+  const memoAskSendReservations = new Map();
   const selectedBody = surfaceSource.match(/  function browserToolSelectedSources\(threadId, candidates = null\) \{([\s\S]*?)\n  \}/)?.[1];
   assert.ok(selectedBody, 'test the production selected-source filter rather than inventing a permissive selector');
   const initial = { id: 'room', clientBindingId: 'wire-room', inputSources: [{ id: 'a', kind: 'browser', selectedByUser: true,
@@ -5418,7 +5419,7 @@ test('actual send path preserves draft B and new attachments typed during delaye
     (role, content, status, options) => ({ role, content, status, ...options }), 'self', () => ({}),
     async (_url, request) => { sendCount++; payload = JSON.parse(request.body); return { accepted: true, conversationId: 'c', runId: 'r', answerId: 'c/r' }; }, () => {},
     actualSelectedSources, () => ({ sourceReady: true, eventSourceReadyState: 1, browserTransportId: 'ui-stream-1' }), new Map(), requestProjectSurfaceConstants().CHAT_REQUEST_PROJECT_INVALID, projectDefaults.chatRoomProjectSendBlock, projectDefaults.chatRoomProjectState,
-    projectDefaults.normalizeChatRoomProjectDefault, projectDefaults.snapshotChatRoomProjectExpectation, requestProjectSurfaceConstants().CHAT_ROOM_PROJECT_UNAVAILABLE);
+    projectDefaults.normalizeChatRoomProjectDefault, projectDefaults.snapshotChatRoomProjectExpectation, requestProjectSurfaceConstants().CHAT_ROOM_PROJECT_UNAVAILABLE, memoAskSendReservations, InputContext);
   state.codex.threadDrafts.room = 'B';
   state.codex.threadDraftRevisions.room = 2;
   update('room', thread => ({ ...thread, inputSources: [...thread.inputSources, { id: 'b' }] }));
@@ -5457,7 +5458,7 @@ test('actual send path preserves draft B and new attachments typed during delaye
     (role, content, status, options) => ({ role, content, status, ...options }), 'self', () => ({}),
     async () => { assert.fail('a selected Browser must not submit without its ready SSE transport ID'); }, () => {},
     actualSelectedSources, connectingStatus, new Map(), requestProjectSurfaceConstants().CHAT_REQUEST_PROJECT_INVALID, projectDefaults.chatRoomProjectSendBlock, projectDefaults.chatRoomProjectState,
-    projectDefaults.normalizeChatRoomProjectDefault, projectDefaults.snapshotChatRoomProjectExpectation, requestProjectSurfaceConstants().CHAT_ROOM_PROJECT_UNAVAILABLE);
+    projectDefaults.normalizeChatRoomProjectDefault, projectDefaults.snapshotChatRoomProjectExpectation, requestProjectSurfaceConstants().CHAT_ROOM_PROJECT_UNAVAILABLE, memoAskSendReservations, InputContext);
   assert.equal(payload, null);
   assert.equal(sendCount, 1);
   assert.equal(state.codex.threadDrafts.room, 'B');
@@ -5472,7 +5473,7 @@ test('actual send path preserves draft B and new attachments typed during delaye
     (role, content, status, options) => ({ role, content, status, ...options }), 'self', () => ({}),
     async () => { assert.fail('stale interaction authority must not degrade silently to a normal read-only send'); }, () => {},
     actualSelectedSources, () => ({ sourceReady: true, eventSourceReadyState: 1, browserTransportId: 'ui-stream-1' }), new Map(), requestProjectSurfaceConstants().CHAT_REQUEST_PROJECT_INVALID, projectDefaults.chatRoomProjectSendBlock, projectDefaults.chatRoomProjectState,
-    projectDefaults.normalizeChatRoomProjectDefault, projectDefaults.snapshotChatRoomProjectExpectation, requestProjectSurfaceConstants().CHAT_ROOM_PROJECT_UNAVAILABLE);
+    projectDefaults.normalizeChatRoomProjectDefault, projectDefaults.snapshotChatRoomProjectExpectation, requestProjectSurfaceConstants().CHAT_ROOM_PROJECT_UNAVAILABLE, memoAskSendReservations, InputContext);
   assert.equal(sendCount, 1);
   assert.equal(getThread(null).messages.length, 1);
   assert.equal(state.codex.threadDrafts.room, 'B');
@@ -13239,12 +13240,12 @@ test('기록 없이 시작: the switch, the first-send body, the confirmed badge
   assert.equal(Chat.chatStatelessErrorText('RUN_IN_PROGRESS'), null);
 
   // The production send path: the switch adds stateless:true once, and the reply sets the badge.
-  const body = surfaceSource.match(/      async sendMessage\(\) \{([\s\S]*?)\n      \},/)?.[1];
+  const body = surfaceSource.match(/      async sendMessage\(options = \{\}\) \{([\s\S]*?)\n      \},/)?.[1];
   assert.ok(body);
   const deps = ['state', 'getActiveCodexThread', 'getCodexThreadDraft', 'ChatState', 'threadBusy', 'epochScope', 'ensureNativeReadyForSend', 'updateThreadById', 'emit',
     'captureThreadInputs', 'getCodexThreadById', 'protocol', 'codexThreadAgentProfile', 'appendMessageToThread', 'createCodexMessage', 'SELF_MEMBER', 'codexThreadRuntimeConfig', 'fetchJson', 'syncProtocolRun', 'browserToolSelectedSources',
     'rootSseReady', 'InputContext', 'chatRequestProjectDisplays', 'CHAT_REQUEST_PROJECT_INVALID', 'chatRoomProjectSendBlock', 'chatRoomProjectState',
-    'normalizeChatRoomProjectDefault', 'snapshotChatRoomProjectExpectation', 'CHAT_ROOM_PROJECT_UNAVAILABLE'];
+    'normalizeChatRoomProjectDefault', 'snapshotChatRoomProjectExpectation', 'CHAT_ROOM_PROJECT_UNAVAILABLE', 'memoAskSendReservations'];
   const send = async (room, capabilities, reply) => {
     const state = { codex: { activeThreadId: 'room', threads: [{ id: 'room', messages: [], inputSources: [], briefingInputs: [], profileEnabled: false, ...room }],
       threadDrafts: { room: '안녕' }, threadDraftRevisions: { room: 1 }, authStatus: sessionAuth, connected: true, chatCapabilities: capabilities } };
@@ -13252,13 +13253,13 @@ test('기록 없이 시작: the switch, the first-send body, the confirmed badge
     const getThread = (_codex, id = 'room') => state.codex.threads.find(thread => thread.id === id);
     const update = (id, fn) => { const index = state.codex.threads.findIndex(thread => thread.id === id); state.codex.threads[index] = fn(state.codex.threads[index]); return state.codex.threads[index]; };
     let payload = null;
-    await compileFunction(`return (async () => {${body}\n})();`, deps)(state, () => getThread(null), (codex, id) => codex.threadDrafts[id] || '', Chat, () => false,
+    await isolatedProductionSend(deps, [state, () => getThread(null), (codex, id) => codex.threadDrafts[id] || '', Chat, () => false,
       { begin: () => ({}), valid: () => true, finish() {} }, async () => true, update, () => {}, async () => [], getThread, Chat.createChatProtocolState(), () => ({}),
       (id, message) => update(id, thread => ({ ...thread, messages: [...thread.messages, message] })),
       (role, content, status, options) => ({ id: `message-${role}`, role, content, status, ...options }), '나', () => ({}),
       async (_url, request) => { payload = JSON.parse(request.body); return reply(payload); }, () => {}, () => [],
       () => ({ sourceReady: true, eventSourceReadyState: 1, browserTransportId: null }), InputContext, new Map(), requestProjectSurfaceConstants().CHAT_REQUEST_PROJECT_INVALID, projectDefaults.chatRoomProjectSendBlock, projectDefaults.chatRoomProjectState,
-      projectDefaults.normalizeChatRoomProjectDefault, projectDefaults.snapshotChatRoomProjectExpectation, requestProjectSurfaceConstants().CHAT_ROOM_PROJECT_UNAVAILABLE);
+      projectDefaults.normalizeChatRoomProjectDefault, projectDefaults.snapshotChatRoomProjectExpectation, requestProjectSurfaceConstants().CHAT_ROOM_PROJECT_UNAVAILABLE, new Map()]);
     return { payload, thread: getThread(null) };
   };
   const accepted = request => ({ accepted: true, conversationId: 'native-one', runId: 'r1', answerId: 'native-one/r1', ...(request.stateless ? { stateless: true } : {}) });
@@ -16602,12 +16603,12 @@ test('CTX-03 send: contextResolution names the list and the refs taken from it, 
   assert.equal(Object.hasOwn(Chat.buildChatRequest({ id: 'room' }, 'hi', 'q', {}), 'contextResolution'), false);
 
   // The production send path.
-  const body = surfaceSource.match(/      async sendMessage\(\) \{([\s\S]*?)\n      \},/)?.[1];
+  const body = surfaceSource.match(/      async sendMessage\(options = \{\}\) \{([\s\S]*?)\n      \},/)?.[1];
   assert.ok(body);
   const deps = ['state', 'getActiveCodexThread', 'getCodexThreadDraft', 'ChatState', 'threadBusy', 'epochScope', 'ensureNativeReadyForSend', 'updateThreadById', 'emit',
     'captureThreadInputs', 'getCodexThreadById', 'protocol', 'codexThreadAgentProfile', 'appendMessageToThread', 'createCodexMessage', 'SELF_MEMBER', 'codexThreadRuntimeConfig', 'fetchJson', 'syncProtocolRun', 'browserToolSelectedSources',
     'rootSseReady', 'InputContext', 'expireContextSuggestions', 'chatRequestProjectDisplays', 'CHAT_REQUEST_PROJECT_INVALID', 'chatRoomProjectSendBlock', 'chatRoomProjectState',
-    'normalizeChatRoomProjectDefault', 'snapshotChatRoomProjectExpectation', 'CHAT_ROOM_PROJECT_UNAVAILABLE'];
+    'normalizeChatRoomProjectDefault', 'snapshotChatRoomProjectExpectation', 'CHAT_ROOM_PROJECT_UNAVAILABLE', 'memoAskSendReservations'];
   const send = async ({ inputSources = [], suggest = { resolution, receivedAt: Date.now(), accountKey }, reply }) => {
     const state = { codex: { activeThreadId: 'room', threads: [{ id: 'room', messages: [], inputSources, briefingInputs: [], profileEnabled: false }],
       threadDrafts: { room: '이 자료로 정리해 줘' }, threadDraftRevisions: { room: 1 }, authStatus: sessionAuth, connected: true, chatCapabilities: ['send'] },
@@ -16617,7 +16618,7 @@ test('CTX-03 send: contextResolution names the list and the refs taken from it, 
     const update = (id, fn) => { const index = state.codex.threads.findIndex(thread => thread.id === id); state.codex.threads[index] = fn(state.codex.threads[index]); return state.codex.threads[index]; };
     let payload = null;
     const expired = [];
-    await compileFunction(`return (async () => {${body}\n})();`, deps)(state, () => getThread(null), (codex, id) => codex.threadDrafts[id] || '', Chat, () => false,
+    await isolatedProductionSend(deps, [state, () => getThread(null), (codex, id) => codex.threadDrafts[id] || '', Chat, () => false,
       { begin: () => ({}), valid: () => true, finish() {} }, async () => true, update, () => {},
       async (_thread, sources) => sources.map((source, index) => ({ sourceId: `stored-${index}`, snapshotId: `stored-${index}`, hash: 'h', localSource: source })),
       getThread, Chat.createChatProtocolState(), () => ({}),
@@ -16625,7 +16626,7 @@ test('CTX-03 send: contextResolution names the list and the refs taken from it, 
       (role, content, status, options) => ({ id: `message-${role}`, role, content, status, ...options }), '나', () => ({}),
       async (_url, request) => { payload = JSON.parse(request.body); return reply(payload); }, () => {}, () => [],
       () => ({ sourceReady: true, eventSourceReadyState: 1, browserTransportId: null }), InputContext, id => expired.push(id), new Map(), requestProjectSurfaceConstants().CHAT_REQUEST_PROJECT_INVALID, projectDefaults.chatRoomProjectSendBlock, projectDefaults.chatRoomProjectState,
-      projectDefaults.normalizeChatRoomProjectDefault, projectDefaults.snapshotChatRoomProjectExpectation, requestProjectSurfaceConstants().CHAT_ROOM_PROJECT_UNAVAILABLE);
+      projectDefaults.normalizeChatRoomProjectDefault, projectDefaults.snapshotChatRoomProjectExpectation, requestProjectSurfaceConstants().CHAT_ROOM_PROJECT_UNAVAILABLE, new Map()]);
     return { payload, thread: getThread(null), state, expired };
   };
   const accepted = () => ({ accepted: true, conversationId: 'native-one', runId: 'r1', answerId: 'native-one/r1' });
@@ -17790,6 +17791,15 @@ function requestProjectBridgeMethod(name, deps) {
     Object.keys(deps))(...Object.values(deps))[name];
 }
 
+// Compile the complete production method, including its options signature and
+// reservation guards, rather than executing a copied body with invented scope.
+function isolatedProductionSend(names, values) {
+  assert.equal(values.length, names.length, 'every send dependency must have an explicit fixture');
+  const deps = Object.fromEntries(names.map((name, index) => [name, values[index]]));
+  assert.ok(deps.memoAskSendReservations instanceof Map, 'send uses a real per-harness reservation Map');
+  return requestProjectBridgeMethod('sendMessage', deps)();
+}
+
 function requestProjectDOM() {
   let document;
   class Node {
@@ -17951,12 +17961,12 @@ function requestProjectSendHarness({ target, capture, reply, roomRead, inputSour
   let roomReader = roomRead || (body => ({ ok: true, result: { roomId: body.roomId, inheritance: null, override: null, project: null, source: null, status: 'none' } }));
   const protocol = Chat.createChatProtocolState();
   if (target) constants.chatRequestProjectDisplays.set('room', target);
-  const deps = { ...constants, state, ChatState: Chat, InputContext, protocol,
+  const deps = { ...constants, state, ChatState: Chat, InputContext, protocol, memoAskSendReservations: new Map(),
     window: { AbortController, setTimeout: () => 1, clearTimeout() {} },
     getActiveCodexThread: () => getThread(null), getCodexThreadDraft: (codex, id) => codex.threadDrafts[id] || '', getCodexThreadById: getThread,
     threadBusy: () => false, epochScope: { ...epoch, begin: (...args) => { calls.begin++; return epoch.begin(...args); } },
     ensureNativeReadyForSend: async () => { calls.prepare++; return true; }, updateThreadById: update, emit() {},
-    captureThreadInputs: async (thread, inputs) => { calls.capture++; return capture ? capture(thread, inputs) : inputs.map((input, index) => ({ snapshotId: 'snapshot-' + index, sourceId: input.id })); },
+    captureThreadInputs: async (thread, inputs, token) => { calls.capture++; return capture ? capture(thread, inputs, token) : inputs.map((input, index) => ({ snapshotId: 'snapshot-' + index, sourceId: input.id })); },
     codexThreadAgentProfile: () => null,
     appendMessageToThread: (id, message) => update(id, thread => ({ ...thread, messages: [...thread.messages, message] })),
     createCodexMessage: (role, content, status, options) => ({ id: 'message-' + role, role, content, status, ...options }),
@@ -17979,7 +17989,7 @@ function requestProjectSendHarness({ target, capture, reply, roomRead, inputSour
   const setTarget = requestProjectBridgeMethod('setRequestProjectTarget', deps);
   const bridge = Object.fromEntries(['createProjectScope', 'readRoomProjectDefault', 'prepareRoomProjectSend'].map(name => [name, requestProjectBridgeMethod(name, deps)]));
   state.codexBridge = bridge;
-  return { ...constants, state, protocol, calls, send, bridge, roomCalls, epoch, thread: () => getThread(null),
+  return { ...constants, state, protocol, calls, send, bridge, roomCalls, epoch, memoAskSendReservations: deps.memoAskSendReservations, thread: () => getThread(null),
     setRoomReader: reader => { roomReader = reader; },
     projectScope: () => { const scope = deps.createChatProjectScope('room', epoch); scope.finish(); return scope; },
     setTarget: target => setTarget('room', target),
@@ -17995,6 +18005,108 @@ function requestProjectDeferred() {
   const promise = new Promise((yes, no) => { resolve = yes; reject = no; });
   return { promise, resolve, reject };
 }
+
+test('send reservation host: only the current reservation may use its room, while other rooms do not block ordinary chat', async t => {
+  for (const mode of ['ordinary-in-reserved-room', 'wrong-reservation', 'absent-reservation', 'stale', 'throws']) await t.test(mode, async () => {
+    const h = requestProjectSendHarness(), before = structuredClone(h.thread().inputSources);
+    const reservation = { current: () => { if (mode === 'throws') throw new Error('stale'); return mode !== 'stale'; } };
+    if (mode !== 'absent-reservation') h.memoAskSendReservations.set('room', reservation);
+    const options = mode === 'ordinary-in-reserved-room' ? undefined
+      : { memoAskReservation: mode === 'wrong-reservation' ? { current: () => true } : reservation };
+    await h.send(options);
+    assert.equal(h.calls.begin, 0); assert.equal(h.calls.prepare, 0); assert.equal(h.calls.capture, 0);
+    assert.equal(h.roomCalls.length, 0); assert.equal(h.calls.provider.length, 0);
+    assert.equal(Object.keys(h.protocol.requests).length, 0); assert.equal(h.thread().messages.length, 0);
+    assert.equal(h.state.codex.threadDrafts.room, 'original words'); assert.deepEqual(h.thread().inputSources, before);
+  });
+  const ordinary = requestProjectSendHarness();
+  ordinary.memoAskSendReservations.set('another-room', { current: () => true });
+  assert.equal((await ordinary.send()).accepted, true);
+  assert.equal(ordinary.calls.provider.length, 1); assert.equal(ordinary.calls.provider[0].message, 'original words');
+  const reserved = requestProjectSendHarness();
+  let checks = 0;
+  const reservation = { current: () => { checks++; return true; } };
+  reserved.memoAskSendReservations.set('room', reservation);
+  assert.equal((await reserved.send({ memoAskReservation: reservation })).accepted, true);
+  assert.ok(checks > 1, 'the reservation is rechecked after asynchronous boundaries');
+  assert.equal(reserved.calls.provider.length, 1); assert.equal(reserved.calls.provider[0].message, 'original words');
+});
+
+test('ordinary send: a new same-room reservation during capture or project recheck stops dispatch and requires a new explicit send', async t => {
+  for (const stage of ['capture', 'project']) await t.test(stage, async () => {
+    const pending = requestProjectDeferred();
+    const h = requestProjectSendHarness(stage === 'capture' ? { capture: () => pending.promise } : { roomRead: () => pending.promise });
+    const before = structuredClone(h.thread().inputSources), sending = h.send();
+    await settle();
+    assert.equal(h.calls.capture, 1); assert.equal(h.roomCalls.length, stage === 'project' ? 1 : 0);
+    const reservation = { current: () => true };
+    h.memoAskSendReservations.set('room', reservation);
+    pending.resolve(stage === 'capture' ? [{ snapshotId: 'snapshot-a', sourceId: 'attachment' }]
+      : { ok: true, result: { roomId: 'original-wire-room', inheritance: null, override: null, project: null, source: null, status: 'none' } });
+    await sending;
+    assert.equal(h.calls.provider.length, 0); assert.equal(h.thread().messages.length, 0);
+    assert.equal(Object.keys(h.protocol.requests).length, 0);
+    assert.equal(h.state.codex.threadDrafts.room, 'original words'); assert.deepEqual(h.thread().inputSources, before);
+    assert.equal(h.memoAskSendReservations.get('room'), reservation, 'the send does not release another operation’s reservation');
+    h.memoAskSendReservations.delete('room');
+    await settle(); assert.equal(h.calls.provider.length, 0, 'release must not automatically retry');
+    assert.equal((await h.send()).accepted, true);
+    assert.equal(h.calls.provider.length, 1); assert.equal(h.calls.provider[0].message, 'original words');
+  });
+});
+
+test('reserved send: cancellation or replacement during capture or project recheck cannot dispatch or consume the draft', async t => {
+  for (const stage of ['capture', 'project']) for (const mode of ['removed', 'replaced', 'not-current', 'throws']) await t.test(`${stage}: ${mode}`, async () => {
+    const pending = requestProjectDeferred();
+    const h = requestProjectSendHarness(stage === 'capture' ? { capture: () => pending.promise } : { roomRead: () => pending.promise });
+    let current = true;
+    const reservation = { current: () => { if (current === 'throws') throw new Error('cancelled'); return current; } };
+    h.memoAskSendReservations.set('room', reservation);
+    const before = structuredClone(h.thread().inputSources), sending = h.send({ memoAskReservation: reservation });
+    await settle();
+    assert.equal(h.calls.capture, 1); assert.equal(h.roomCalls.length, stage === 'project' ? 1 : 0);
+    if (mode === 'removed') h.memoAskSendReservations.delete('room');
+    if (mode === 'replaced') h.memoAskSendReservations.set('room', { current: () => true });
+    if (mode === 'not-current') current = false;
+    if (mode === 'throws') current = 'throws';
+    pending.resolve(stage === 'capture' ? [{ snapshotId: 'snapshot-a', sourceId: 'attachment' }]
+      : { ok: true, result: { roomId: 'original-wire-room', inheritance: null, override: null, project: null, source: null, status: 'none' } });
+    await sending;
+    assert.equal(h.calls.provider.length, 0); assert.equal(h.thread().messages.length, 0);
+    assert.equal(Object.keys(h.protocol.requests).length, 0);
+    assert.equal(h.state.codex.threadDrafts.room, 'original words'); assert.deepEqual(h.thread().inputSources, before);
+  });
+});
+
+test('send reservation host: a matching reservation cannot bypass an expired Browser interaction grant', async t => {
+  for (const mode of ['ordinary', 'reserved']) await t.test(mode, async () => {
+    const inputSources = [{ id: 'browser', kind: 'browser', selectedByUser: true, browserToolPermission: 'interact',
+      sourceRef: { viewId: 'browser-a', uri: 'https://example.test/' } }];
+    // This fixture returns no selected Browser sources: the actual send method
+    // must reject the missing grant instead of silently sending without it.
+    const h = requestProjectSendHarness({ inputSources });
+    const reservation = { current: () => true };
+    if (mode === 'reserved') h.memoAskSendReservations.set('room', reservation);
+    await h.send(mode === 'reserved' ? { memoAskReservation: reservation } : undefined);
+    assert.equal(h.calls.capture, 1); assert.equal(h.roomCalls.length, 0); assert.equal(h.calls.provider.length, 0);
+    assert.equal(Object.keys(h.protocol.requests).length, 0); assert.equal(h.thread().messages.length, 0);
+    assert.equal(h.state.codex.threadDrafts.room, 'original words'); assert.deepEqual(h.thread().inputSources, inputSources);
+    assert.match(h.thread().sendError, /조작 권한이 만료/);
+  });
+});
+
+test('ordinary send: epoch cancellation aborts delayed capture and its late result cannot dispatch', async () => {
+  const pending = requestProjectDeferred(); let signal;
+  const h = requestProjectSendHarness({ capture: (_thread, _inputs, token) => { signal = token.signal; return pending.promise; } });
+  const before = structuredClone(h.thread().inputSources), sending = h.send();
+  await settle();
+  assert.equal(h.calls.capture, 1); assert.equal(signal.aborted, false);
+  h.epoch.reset('codex'); assert.equal(signal.aborted, true);
+  pending.resolve([{ snapshotId: 'snapshot-a', sourceId: 'attachment' }]); await sending;
+  assert.equal(h.roomCalls.length, 0); assert.equal(h.calls.provider.length, 0);
+  assert.equal(Object.keys(h.protocol.requests).length, 0); assert.equal(h.thread().messages.length, 0);
+  assert.equal(h.state.codex.threadDrafts.room, 'original words'); assert.deepEqual(h.thread().inputSources, before);
+});
 
 test('실행 프로젝트: opening the real editor never infers a Board; lookup and Cancel preserve the draft', async () => {
   const h = requestProjectUiHarness();
