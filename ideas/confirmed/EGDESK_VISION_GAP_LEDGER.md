@@ -22,6 +22,7 @@
 
 | 날짜 | 항목 | 상태 변화 | 근거 |
 |---|---|---|---|
+| 2026-11-02 06:33 KST | CNV-07 · 브리핑 근거를 미니맵에서 찾기 | 열린 원문 근거 카드에 한해 확인 | 로컬 `58d1374`. Chat 답변에서 브리핑을 연 뒤 기존 미니맵을 펼치면 이전·현재·다음 단계 번호가 검증된 근거 카드의 실제 위치에 표시된다. 떨어진 두 카드는 빈 중간점에 하나로 표시하지 않는다. 목록은 단계와 근거 순번·범위를 구별한다. 격리 Firefox 58/58: 720×600에서 목록을 펼치거나 접어도 마지막 검색 행을 마우스와 키보드로 선택할 수 있었다. 중앙 13개 묶음 1,569/1,569 통과. 다른 방의 동일 키 카드 제외는 합성 코드 경로에서 확인했으며, 실제 계정 권한 시험은 아니다. |
 | 2026-11-02 05:53 KST | CNV-06 · 같은 방에서 메모와 일반 전송이 겹칠 때 | 방 전환 중 오발송 방지 확인 | 로컬 `6a49753`. 방 A에서 보내기를 누른 뒤 준비 응답을 보류하고, 실제 Firefox 화면에서 전송 가능한 합성 방 B로 이동해 입력했다. A의 준비 응답을 전달해도 A·B 모두 전송은 0건이었고 두 방의 초안과 B 작성기의 포커스·커서는 유지됐다. 합성 코드 경로 시험에서는 준비 중인 메모 질문을 다른 메모가 취소하지 않고, 일반 전송이 메모에 막힌 경우 그 방에만 이유를 표시하며 자동 재전송하지 않는 것을 확인했다. 중앙 13개 묶음 1,519/1,519 통과. Firefox 방 전환 시험에는 자료 캡처 지연·실계정 전환·OS 포커스가 포함되지 않는다. |
 | 2026-11-02 05:12 KST | CNV-06 · 준비된 담당자 방에서 묻고 늦은 답 받기 | 한 방·한 질문의 격리 Firefox 왕복 확인 | 로컬 `d971230`. 메모에서 한 번 묻자 합성 요청 1건이 접수됐다(HTTP 202). 메모를 편집한 뒤 답을 전달하자 지정한 Agent의 답글이 한 번 붙고 ‘수정 전 메모에 대한 답 · 기반 버전 1’이 보였다. 새로 쓰던 질문·답글과 다른 방 초안이 유지됐으며, Board를 명시 저장하고 닫았다 다시 열어도 편집 본문과 답글 한 개가 남았다. 검증에 실제 계정·모델을 쓰지 않았으며 앱 재시작 복원은 확인하지 않았다. 중앙 13개 시험 묶음 1,396/1,396 통과(건너뜀 0). |
 | 2026-11-02 05:12 KST | CNV-06 · 같은 방에서 작업이 겹치는 경우 | 단일 질문 결과와 분리 · 후속 수정 대상 | 합성 동시성 시험에서는 진행 중인 방 준비에 질문이 겹치면 전송되지 않는 경우, 메모 질문 대기 중 일반 메시지 전송이 안내 없이 막히는 경우가 남았다. 늦은 실패 처리가 사용자가 떠난 Chat의 포커스를 다시 요청하는 경로도 확인했다. 다른 카드에서 실제 키 입력을 빼앗았다고 확인한 것은 아니다. |
@@ -1299,7 +1300,8 @@ Canvas·Viewport·UI/UX·디자인 영역은 바탕이 이미 깔려 있다. 의
 - 출처: 비전 P1 'Canvas output follow-up mode: temporal/spatial steps, camera movement, annotations, and comment anchors'; 비전 P0 'Prezi-like canvas run playback with step comments'; VIEWPORT 문서 Chrome Mode 'runPlayback' 행
 - 상태: 일부 · 크기 L · 선행: CNV-05, UX-02
 - 근거: 구현된 부분: uc.js:860-946 openAnswerBriefing·renderAnswerBriefing(이전·다음·전체 보기·종료, fitBriefingTargets 카메라 맞춤, 단계 의견 → '다음 Chat 초안에 포함'). overlay/resources/EGDeskBriefingState.sys.mjs(70줄). helper/egdesk-context-runtime.mjs:10에서 에이전트 도구 egdesk_publish_briefing의 target이 sourceId/artifactId/viewId+line range로 한정된다. 검증 스크립트는 scripts/verify-firefox-mcp-context-briefing.mjs.
-- 빠진 것: 단계 대상이 원문 줄 범위 중심이라 캔버스 영역 좌표, annotation 묶음, Browser 화면 영역을 지정할 수 없다. 진행 중 Dock과 레일을 줄이는 chrome 모드가 없다. 미니맵에 화면 밖 단계 대상이 표시되지 않는다. 단계에서 annotation을 강조할 수 없다.
+- 현재 미니맵 범위(2026-11-02): 같은 방·브리핑에서 접근을 확인하고 이미 연 원문 근거 카드의 위치만 표시한다. 최초 전송 참조에 대화 ID가 없을 때의 권한 결합과 기존 검색에서 동명 카드의 범위 식별은 남았다. 작은 화면에서 일부 배지 테두리가 약 2px 겹치는 사례가 있었으며, 실제 스크린리더 판독은 미검증이다.
+- 그 밖에 빠진 것: 단계 대상으로 임의의 캔버스 좌표·annotation 묶음·Browser 화면 영역을 지정할 수 없다. 진행 중 Dock과 레일을 줄이는 chrome 모드와 단계 내 annotation 강조도 남는다.
 - 구현 스케치: egdesk-context-runtime.mjs의 briefing target 스키마에 canvasRect·annotationSetId를 추가하고 검증한다(paths·URL 금지 유지). BriefingState.resolveBriefingTargets를 확장한다. uc.js renderAnswerBriefing에 data-chrome-mode='briefing' 토글과 annotation 강조를 넣고, renderDeskMinimapWorld에 단계 대상 마커를 추가한다.
 
 ### CNV-08 — 자원 모니터의 남은 범위: Windows·Linux 네트워크 측정, 디스크 읽기·쓰기 전송률(공간과 별개), PC 전체와 EG-Desk 앱 범위의 구분, 경고 임계값·이력 보존 결정.
