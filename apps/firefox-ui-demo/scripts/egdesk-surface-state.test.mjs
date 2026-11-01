@@ -116,7 +116,7 @@ function savedBriefingUiHarness({ respond, engineId = 'codex', verified = true, 
     cloneJson: value => JSON.parse(JSON.stringify(value)), updateThreadById, emit, scheduleDeskSessionSave: () => { saves++; },
     refreshDeskMinimap: () => refreshMinimap?.() };
   const openerStart = surfaceSource.indexOf('  async function openAnswerBriefing('), openerEnd = surfaceSource.indexOf('\n  }\n', openerStart);
-  const optionalMinimapDefinitions = ['rememberBriefingMinimapEvidence', 'clearBriefingMinimapDisplay']
+  const optionalMinimapDefinitions = ['rememberBriefingMinimapEvidence', 'clearMinimapBriefingSearchLabels', 'clearBriefingMinimapDisplay']
     .filter(name => surfaceSource.includes(`  function ${name}(`)).map(declaration).join('\n');
   const actual = compileFunction(`${['el', 'chatBindingNonce', 'getCodexThreadById', 'getCodexThreadDraft', 'briefingInputReferences', 'briefingRangeIssue', 'createBriefingCommentScope', 'mountBriefingComments', 'renderAnswerBriefing', 'closeAnswerBriefing'].map(declaration).join('\n')}\n${optionalMinimapDefinitions}
     ${surfaceSource.slice(openerStart, openerEnd + 4)}
@@ -11691,6 +11691,9 @@ function minimapUiHarness({ document: suppliedDocument = null, state: suppliedSt
     const node = create(tag);
     const setAttribute = node.setAttribute.bind(node);
     node.setAttribute = (key, value) => { setAttribute(key, value); if (key === 'id') node.id = String(value); };
+    node.removeAttribute = key => { delete node.attributes[key]; };
+    Object.defineProperty(node, 'hidden', { configurable: true, get: () => node.getAttribute('hidden') !== null,
+      set: value => { if (value) node.setAttribute('hidden', ''); else node.removeAttribute('hidden'); } });
     node.classList = {
       contains: name => node.className.split(/\s+/).includes(name),
       add: name => { if (!node.classList.contains(name)) node.className += ` ${name}`; },
@@ -11739,7 +11742,8 @@ function minimapUiHarness({ document: suppliedDocument = null, state: suppliedSt
     'renderDeskMinimapWorld', 'moveCameraToMinimapNode', 'focusBoardFromMinimap', 'focusEntityFromMinimap',
     'goToMinimapTarget', 'closeMinimapStack', 'openMinimapTargets', 'buildDeskMinimapEntityRows', 'refreshDeskMinimap',
     'closeDeskMinimap', 'installDeskMinimapPan', 'toggleDeskMinimap'];
-  for (const name of ['rememberBriefingMinimapEvidence', 'briefingMinimapModel', 'minimapBriefingEvidenceLabel', 'renderDeskMinimapBriefing']) {
+  for (const name of ['rememberBriefingMinimapEvidence', 'briefingMinimapModel', 'minimapBriefingEvidenceLabel', 'renderDeskMinimapBriefing',
+    'clearMinimapBriefingSearchLabels', 'renderMinimapBriefingSearchLabels']) {
     if (surfaceSource.includes(`  function ${name}(`)) names.push(name);
   }
   let safeRect = { left: 0, top: 0, right: 1000, bottom: 800, width: 1000, height: 800 };
@@ -11861,6 +11865,141 @@ function briefingMinimapUiHarness({ prepare = null, useProductionEmit = false } 
     firstCard, distantCard, rangeCard, deniedCard, decoyCard, cards, notices, materialized, parts, openViaButton,
     setRefreshFailure: value => { refreshFailure = value; }, refreshCalls: () => refreshCalls };
 }
+
+function briefingMinimapSearchFixture(options = {}) {
+  const h = briefingMinimapUiHarness(options), thread = h.briefing.thread();
+  // Distinct sources intentionally have the same visible name and line range;
+  // the other A card uses a different range. These are synthetic references.
+  thread.briefingInputs = thread.briefingInputs.map(ref =>
+    InputContext.capturedInputReference({ ...ref.localSource, label: '표본 문서' }, ref, ref.contextScope));
+  const cards = [h.firstCard, h.distantCard, h.rangeCard, h.deniedCard, h.decoyCard];
+  for (const [index, card] of cards.entries()) {
+    card.querySelector('.egd-card-page-title').textContent = '공통 캡처';
+    card.style.left = `${1400 + index * 800}px`; card.style.top = `${100 + (index > 1 ? 700 : 0)}px`;
+  }
+  const ordinary = h.minimap.make('ordinary-card', '공통 캡처', 6200, 1400);
+  // A normal card must not gain evidence details merely because it carries
+  // a similarly shaped property or shares the same visible title.
+  ordinary._inputReference = { ...h.firstCard._inputReference };
+  h.state.activeEntityId = h.firstCard.id;
+  return { ...h, ordinary };
+}
+
+function assertBriefingSearchRowCleared(h, id) {
+  const row = h.minimap.rows().find(node => node.dataset.targetId === id);
+  assert.ok(row, `the existing search row remains: ${id}`);
+  const label = row.querySelector('.egd-minimap-row-label'), detail = row.querySelector('.egd-minimap-row-briefing');
+  assert.equal(label?.textContent, '공통 캡처');
+  assert.equal(detail?.textContent, ''); assert.equal(detail?.hidden, true);
+  assert.equal(row.getAttribute('aria-label'), null);
+  assert.equal(row.getAttribute('title'), '공통 캡처 위치로 이동');
+  return row;
+}
+
+test('CNV-07 search: real search ranking and navigation retain targets while ready evidence rows distinguish names and ranges', async () => {
+  const h = briefingMinimapSearchFixture();
+  await h.openViaButton(); await settle(); h.minimap.toggleDeskMinimap();
+  const input = h.minimap.search('공통 캡처'); input.focus();
+  const panel = h.document.getElementById('egd-desk-minimap'), map = h.document.querySelector('.egd-minimap-map');
+  const model = map._egdeskMinimapModel;
+  const views = model.entities.filter(({ entity }) => entity.classList.contains('egd-canvas-card')).map(({ entity, rect }) => ({
+    id: entity.id, title: entity.querySelector('.egd-card-page-title')?.textContent?.trim() || '이름 없는 화면',
+    kind: entity.dataset.deskWindowKind || null, projectionId: entity.dataset.projectionId || null, rect,
+  }));
+  const expected = MinimapLayout.minimapSearchRows({ query: input.value, boards: model.regions, views, viewport: model.viewport,
+    activeId: h.state.activeEntityId, limit: Math.max(1, model.regions.length + views.length) });
+  assert.deepEqual(h.minimap.rows().map(row => row.dataset.targetId), expected.rows.map(row => row.id));
+  assert.equal(panel._minimapSearch.focusIndex, expected.focusIndex, 'decoration cannot change the existing rank or Enter target');
+  const row = id => h.minimap.rows().find(node => node.dataset.targetId === id);
+  const detail = id => row(id)?.querySelector('.egd-minimap-row-briefing');
+  for (const id of ['evidence-a-1', 'evidence-b-1', 'evidence-a-2']) {
+    assert.equal(row(id)?.querySelector('.egd-minimap-row-label')?.textContent, '표본 문서');
+    assert.equal(detail(id)?.hidden, false);
+    assert.match(row(id).getAttribute('aria-label'), /표본 문서/);
+    assert.match(row(id).getAttribute('title'), /표본 문서.*위치로 이동/);
+  }
+  assert.match(detail('evidence-a-1').textContent, /1–4행.*1단계 1번/);
+  assert.match(detail('evidence-b-1').textContent, /1–4행.*1단계 2번/);
+  assert.match(detail('evidence-a-2').textContent, /5–8행.*2단계 1번/);
+  assert.equal(row('evidence-a-1').getAttribute('aria-current'), 'true');
+  assert.match(row('evidence-a-1').getAttribute('aria-label'), /활성 자료/);
+  for (const id of ['evidence-denied', 'evidence-decoy', 'ordinary-card']) assertBriefingSearchRowCleared(h, id);
+
+  // Only the original visible card title is searchable; an added evidence
+  // label or range must not silently expand the search corpus.
+  h.minimap.search('표본 문서'); assert.equal(h.minimap.rows().length, 0);
+  h.minimap.search('1–4행'); assert.equal(h.minimap.rows().length, 0);
+  h.minimap.search('공통 캡처'); input.focus();
+  const safe = { left: 0, top: 0, right: 1000, bottom: 800, width: 1000, height: 800 };
+  const move = (id, action) => {
+    const entry = map._egdeskMinimapModel.entities.find(item => item.entity.id === id);
+    assert.ok(entry);
+    const rect = { x: entry.rect.left, y: entry.rect.top, width: entry.rect.width, height: entry.rect.height };
+    const expectedPan = Surface.revealRectPan(rect, safe, { pan: h.state.panTarget, zoom: h.state.zoomTarget });
+    const previous = { ...h.state.panTarget }, calls = h.minimap.cameras.length;
+    assert.ok(expectedPan && (expectedPan.x !== previous.x || expectedPan.y !== previous.y));
+    action(); assert.deepEqual(h.state.panTarget, expectedPan); assert.equal(h.minimap.cameras.length, calls + 1);
+  };
+  const target = panel._minimapSearch.rows[panel._minimapSearch.focusIndex];
+  assert.ok(target && expected.rows.some(item => item.id === target.id));
+  const before = JSON.stringify([h.state.activeEntityId, h.state.zoomTarget, h.state.codex.threadDrafts['room-a'],
+    h.firstCard.style, h.distantCard.style, h.rangeCard.style]);
+  move(target.id, () => input.fire('keydown', { key: 'Enter' }));
+  move('evidence-a-2', () => row('evidence-a-2').fire('click'));
+  assert.equal(JSON.stringify([h.state.activeEntityId, h.state.zoomTarget, h.state.codex.threadDrafts['room-a'],
+    h.firstCard.style, h.distantCard.style, h.rangeCard.style]), before);
+
+  const oldRow = row('evidence-a-1'); h.firstCard._inputEvidenceLoaded = false; h.minimap.refreshDeskMinimap();
+  assert.equal(row('evidence-a-1'), oldRow, 'the same rendered row is sanitized when its evidence becomes stale');
+  assertBriefingSearchRowCleared(h, 'evidence-a-1');
+  assert.equal(row('evidence-b-1').querySelector('.egd-minimap-row-label').textContent, '표본 문서');
+  h.briefing.close();
+});
+
+test('CNV-07 search: access changes, close and refresh errors erase old names from rows and accessibility attributes', async t => {
+  for (const change of ['permission', 'room', 'account', 'close', 'permission-refresh-error', 'room-refresh-error',
+    'account-refresh-error', 'close-refresh-error', 'direct-refresh-error']) {
+    await t.test(change, async () => {
+      const h = briefingMinimapSearchFixture({ useProductionEmit: true });
+      h.state.codex.authStatus = { ...h.state.codex.authStatus, access: { state: 'ok' } };
+      await h.openViaButton(); await settle(); h.minimap.toggleDeskMinimap(); h.minimap.search('공통 캡처');
+      const before = JSON.stringify([h.state.panTarget, h.state.zoomTarget, h.state.codex.threadDrafts['room-a']]);
+      const originalAuth = h.state.codex.authStatus, reads = h.briefing.evidenceCalls.length;
+      const row = h.minimap.rows().find(node => node.dataset.targetId === 'evidence-a-1');
+      assert.equal(row.querySelector('.egd-minimap-row-label').textContent, '표본 문서');
+      assert.match(row.getAttribute('aria-label'), /표본 문서/); assert.match(row.getAttribute('title'), /표본 문서/);
+      const outside = h.document.createElement('textarea'); h.document.documentElement.appendChild(outside); outside.focus();
+      if (change.endsWith('refresh-error') && change !== 'direct-refresh-error') h.setRefreshFailure(true);
+      if (change.startsWith('permission')) {
+        h.state.codex.authStatus = { ...h.state.codex.authStatus, access: { state: 'permissionDenied' } }; h.briefing.emit();
+      } else if (change.startsWith('room')) {
+        h.state.codex.activeThreadId = 'other-room'; h.briefing.emit();
+      } else if (change.startsWith('account')) {
+        h.state.codex.authStatus = { ...h.state.codex.authStatus, accountEmail: 'other-fixture@example.test' }; h.briefing.emit();
+      } else if (change.startsWith('close')) h.briefing.close();
+      else {
+        const descriptor = Object.getOwnPropertyDescriptor(h.state, 'zoomTarget');
+        Object.defineProperty(h.state, 'zoomTarget', { configurable: true, get: () => { throw new Error('합성 지도 갱신 오류'); } });
+        try { assert.throws(() => h.minimap.refreshDeskMinimap(), /합성 지도 갱신 오류/); }
+        finally { Object.defineProperty(h.state, 'zoomTarget', descriptor); }
+      }
+      for (const id of ['evidence-a-1', 'evidence-b-1', 'evidence-a-2', 'evidence-denied', 'evidence-decoy', 'ordinary-card']) {
+        const cleared = assertBriefingSearchRowCleared(h, id);
+        assert.doesNotMatch([cleared.textContent, cleared.getAttribute('aria-label'), cleared.getAttribute('title')].join(' '), /표본 문서|1–4행|5–8행/);
+      }
+      assert.equal(h.document.activeElement, outside);
+      assert.equal(JSON.stringify([h.state.panTarget, h.state.zoomTarget, h.state.codex.threadDrafts['room-a']]), before);
+      h.setRefreshFailure(false);
+      if (change.startsWith('permission') || change.startsWith('room') || change.startsWith('account')) {
+        h.state.codex.activeThreadId = 'room-a'; h.state.codex.authStatus = originalAuth;
+        h.briefing.emit(); h.minimap.refreshDeskMinimap();
+        for (const id of ['evidence-a-1', 'evidence-b-1', 'evidence-a-2']) assertBriefingSearchRowCleared(h, id);
+        assert.equal(h.briefing.evidenceCalls.length, reads, 'returning access does not silently reload old evidence');
+      }
+      h.briefing.close();
+    });
+  }
+});
 
 test('CNV-07: the existing Briefing opens its ready evidence in the actual minimap renderer', async () => {
   const h = briefingMinimapUiHarness();

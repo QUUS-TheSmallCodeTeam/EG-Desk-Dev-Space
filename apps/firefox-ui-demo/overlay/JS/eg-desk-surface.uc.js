@@ -2736,6 +2736,7 @@
 
   function clearBriefingMinimapDisplay() {
     const panel = document.getElementById('egd-desk-minimap');
+    if (typeof clearMinimapBriefingSearchLabels === 'function') clearMinimapBriefingSearchLabels(panel);
     const layer = panel?.querySelector('.egd-minimap-briefing-layer');
     const details = panel?.querySelector('.egd-minimap-briefing');
     const list = details?.querySelector('.egd-minimap-briefing-list');
@@ -8239,6 +8240,7 @@
       },
         el('span', { class: 'egd-minimap-row-dot', 'aria-hidden': 'true' }),
         el('span', { class: 'egd-minimap-row-label' }, row.title),
+        el('span', { class: 'egd-minimap-row-briefing', hidden: 'true' }),
         // The row says what it is and which open Board it belongs to, so a
         // search for 'Browser' can be told apart by its Board.
         row.boardTitle ? el('span', { class: 'egd-minimap-row-board', title: `${row.boardTitle} Board에 속함` }, row.boardTitle) : null,
@@ -8264,13 +8266,72 @@
     }
   }
 
+  // Only store the pre-existing, non-Briefing row text. The private label is
+  // derived from a fresh authorization plan and lives solely in visible DOM.
+  function clearMinimapBriefingSearchLabels(panel, selected = null) {
+    const list = panel?.querySelector('.egd-minimap-list');
+    for (const button of selected ? [selected] : list?.querySelectorAll('[data-testid="minimap-search-row"]') || []) {
+      const base = button._briefingSearchBase;
+      if (!base) continue;
+      const label = button.querySelector('.egd-minimap-row-label');
+      const detail = button.querySelector('.egd-minimap-row-briefing');
+      if (label) label.textContent = base.label;
+      if (detail) { detail.textContent = ''; detail.hidden = true; }
+      if (base.aria === null) button.removeAttribute('aria-label'); else button.setAttribute('aria-label', base.aria);
+      if (base.title === null) button.removeAttribute('title'); else button.setAttribute('title', base.title);
+      delete button._briefingSearchBase;
+    }
+  }
+
+  function renderMinimapBriefingSearchLabels(panel, model) {
+    const list = panel?.querySelector('.egd-minimap-list'), search = panel?._minimapSearch;
+    if (!list || !search) return;
+    const evidence = new Map();
+    for (const item of briefingMinimapModel(model).items) {
+      const earlier = evidence.get(item.viewId);
+      if (!earlier || item.current && !earlier.current) evidence.set(item.viewId, item);
+    }
+    const results = new Map(search.rows.map(row => [`${row.kind}:${row.id}`, row]));
+    for (const button of list.querySelectorAll('[data-testid="minimap-search-row"]')) {
+      const row = results.get(`${button.dataset.kind}:${button.dataset.targetId}`);
+      const item = row?.kind === 'view' ? evidence.get(row.id) : null;
+      const label = button.querySelector('.egd-minimap-row-label');
+      const detail = button.querySelector('.egd-minimap-row-briefing');
+      if (!item || !label || !detail) {
+        clearMinimapBriefingSearchLabels(panel, button);
+        continue;
+      }
+      button._briefingSearchBase ||= { label: label.textContent, aria: button.getAttribute('aria-label'), title: button.getAttribute('title') };
+      const name = [item.reference?.localSource?.label, item.reference?.label]
+        .find(value => typeof value === 'string' && value.trim())?.trim() || '열린 자료';
+      const range = item.target?.range, start = range?.startLine, end = range?.endLine;
+      const rangeText = Number.isInteger(start) && Number.isInteger(end) ? `${start}–${end}행`
+        : Number.isInteger(start) ? `${start}행부터 · 끝 미지정`
+          : Number.isInteger(end) ? `시작 미지정 · ${end}행까지` : '범위 미지정';
+      const description = minimapBriefingEvidenceLabel(item);
+      const current = row.id === state.activeEntityId;
+      const kind = MinimapLayout.minimapRowKindLabel({ kind: row.kind, viewKind: row.viewKind, current });
+      label.textContent = name;
+      detail.textContent = `${rangeText} · ${item.stepNumber}단계 ${item.evidenceNumber}번`;
+      detail.hidden = false;
+      button.setAttribute('aria-label', [description, row.boardTitle ? `${row.boardTitle} Board` : '', kind].filter(Boolean).join(' · '));
+      button.setAttribute('title', `${description} 위치로 이동`);
+    }
+  }
+
   function refreshDeskMinimap() {
     const panel = document.getElementById('egd-desk-minimap');
     if (!panel) return;
-    const model = renderDeskMinimapWorld(panel);
-    buildDeskMinimapEntityRows(panel, model);
-    panel._renderBriefingMinimap?.(model);
-    panel.querySelector('.egd-minimap-stack')?._reposition?.();
+    try {
+      const model = renderDeskMinimapWorld(panel);
+      buildDeskMinimapEntityRows(panel, model);
+      panel._renderBriefingMinimap?.(model);
+      if (typeof renderMinimapBriefingSearchLabels === 'function') renderMinimapBriefingSearchLabels(panel, model);
+      panel.querySelector('.egd-minimap-stack')?._reposition?.();
+    } catch (error) {
+      if (typeof clearMinimapBriefingSearchLabels === 'function') clearMinimapBriefingSearchLabels(panel);
+      throw error;
+    }
   }
 
   function deskMinimapSnapshot() {

@@ -3364,6 +3364,15 @@
   font-weight: 600;
 }
 
+.egd-minimap-row-briefing {
+  min-width: 0;
+  max-width: 48%;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  font-size: 10px;
+}
+
 /* The current row is also said in words, not only by its tint. */
 .egd-minimap-row-current {
   margin-left: auto;
