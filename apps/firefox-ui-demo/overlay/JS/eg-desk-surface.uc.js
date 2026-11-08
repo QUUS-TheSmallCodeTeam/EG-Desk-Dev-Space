@@ -1758,12 +1758,13 @@
     if (!thread) return;
     document.getElementById('egd-codex-input-panel')?._finishProjectScope?.();
     document.getElementById('egd-codex-input-panel')?._finishInputSourceChange?.();
+    document.getElementById('egd-codex-input-panel')?._finishInputScope?.();
     document.getElementById('egd-codex-input-panel')?.remove();
     const panel = el('section', { id: 'egd-codex-input-panel', role: 'dialog', 'aria-label': snapshots ? '당시 입력 캡처' : 'Chat에 자료 첨부',
       data: { testid: 'chat-input-panel', threadId } });
     const close = () => {
       state.codex.inputInspectNonce = (state.codex.inputInspectNonce || 0) + 1;
-      panel._finishInputSourceChange?.(); panel.remove();
+      panel._finishInputSourceChange?.(); panel._finishInputScope?.(); panel.remove();
     };
     panel.addEventListener('mousedown', event => event.stopPropagation());
     panel.addEventListener('keydown', event => { if (event.key === 'Escape') { event.stopPropagation(); close(); } });
@@ -2693,11 +2694,19 @@
   }
 
   function briefingResolvedTargets(session, step = BriefingState.currentBriefingStep(session)) {
+    const access = state.codex.authStatus?.access?.state;
+    const canUseVerified = state.codex.briefingSession === session && session.preparationScope?.current() === true
+      && state.codex.connected === true && !['permissionDenied', 'authFailed', 'loginRequired', 'loginInProgress'].includes(access);
     const views = Array.from(document.querySelectorAll('.egd-input-evidence-card')).flatMap(card => {
       const reference = card._inputReference;
       if (briefingRangeIssue({ sourceId: reference?.sourceId, range: reference?.presentationRange })) return [];
       let evidenceKey;
       try { evidenceKey = InputContext.inputEvidenceKey(reference); } catch { return []; }
+      // A same-key card from another room/account is not evidence for this
+      // presentation. Only the card returned by its verified read is usable.
+      if (!canUseVerified || !card.isConnected || !briefingReadReferenceCurrent(session.threadId, reference, session.preparationScope)
+          || !(session._minimapVerifiedEvidence instanceof Map)
+          || session._minimapVerifiedEvidence.get(evidenceKey) !== card) return [];
       return [{ id: card.id, sourceId: reference?.sourceId, hash: reference?.hash, evidenceKey,
         geometry: persistentEntityGeometry(card), sourceMatches: !!card._inputEvidenceLoaded, revisionMatches: !!card._inputEvidenceLoaded }];
     });
@@ -2711,11 +2720,12 @@
   // Only a successful read for this presentation can authorize an already
   // open evidence card for the minimap. Never carry this proof across rooms,
   // accounts, presentations or a detached/replaced card.
-  function rememberBriefingMinimapEvidence(session, reference, card) {
+  function rememberBriefingMinimapEvidence(session, reference, card, validatedRead = false) {
     const shown = state.codex.briefingSession;
     try {
       if (!shown || shown.presentationId !== session.presentationId || shown.threadId !== state.codex.activeThreadId
           || shown.preparationScope?.current() !== true || !card?.isConnected || !card._inputEvidenceLoaded) return false;
+      if (!briefingReadReferenceCurrent(shown.threadId, reference, shown.preparationScope)) return false;
       const thread = getCodexThreadById(state.codex, shown.threadId);
       const route = ChatState.chatContextRequestScope(thread, state.codex), origin = reference?.contextScope;
       const accountKey = ChatState.codexAccountKey(state.codex.authStatus);
@@ -2723,12 +2733,15 @@
       if (state.codex.connected !== true || ['permissionDenied', 'authFailed', 'loginRequired', 'loginInProgress'].includes(access)
           || route.engineId !== 'codex' || !accountKey || state.codex.codexAccountKey !== accountKey
           || !ChatState.canResumeNativeThread(thread, state.codex.authStatus, state.codex)
-          || !origin || ['engineId', 'engineProfileId', 'clientThreadId', 'conversationId'].some(key => origin[key] !== route[key])) return false;
+          || !origin || ['engineId', 'engineProfileId', 'clientThreadId'].some(key => origin[key] !== route[key])
+          || Object.hasOwn(origin, 'conversationId') && origin.conversationId !== route.conversationId) return false;
       InputContext.inputReadContext(reference, route, { thread, accountKey, cachedAccountKey: state.codex.codexAccountKey });
       const key = InputContext.inputEvidenceKey(reference), cardReference = card._inputReference;
       if (!cardReference?.contextScope
-          || ['engineId', 'engineProfileId', 'clientThreadId', 'conversationId'].some(key => cardReference.contextScope[key] !== origin[key])
+          || ['engineId', 'engineProfileId', 'clientThreadId'].some(key => cardReference.contextScope[key] !== route[key])
+          || Object.hasOwn(cardReference.contextScope, 'conversationId') && cardReference.contextScope.conversationId !== route.conversationId
           || InputContext.inputEvidenceKey(cardReference) !== key) return false;
+      if (!validatedRead && shown._minimapVerifiedEvidence?.get(key) !== card) return false;
       (shown._minimapVerifiedEvidence ||= new Map()).set(key, card);
       return true;
     } catch { return false; }
@@ -2815,6 +2828,10 @@
       if (state.codex.briefingSession !== session) return;
       state.codex.briefingSession = null;
       session._minimapVerifiedEvidence?.clear();
+      const inputPanel = document.getElementById('egd-codex-input-panel');
+      if (inputPanel?._briefingPresentationId === session.presentationId) {
+        inputPanel._finishInputSourceChange?.(); inputPanel._finishInputScope?.(); inputPanel.remove();
+      }
       if (typeof clearBriefingMinimapDisplay === 'function') clearBriefingMinimapDisplay();
       try { state.refreshSemanticProjections?.(); } catch {}
       try { if (typeof refreshDeskMinimap === 'function') refreshDeskMinimap(); } catch {}
@@ -2834,6 +2851,258 @@
     }
   }
 
+  // Observe the owner only while this one send is in flight. A new room's
+  // first server-bound native ID is its one permitted transition; any later
+  // observed replacement, account/profile change or room ABA is latched.
+  function createAcceptedReceiptWatch(threadId, { valid, subscribe }) {
+    try {
+      const initial = getCodexThreadById(state.codex, threadId), auth = state.codex.authStatus;
+      const accountKey = ChatState.codexAccountKey(auth);
+      if (!initial || !accountKey || state.codex.codexAccountKey !== accountKey || state.codex.activeThreadId !== threadId) throw new Error('unverified owner');
+      const base = () => {
+        const thread = getCodexThreadById(state.codex, threadId), currentAuth = state.codex.authStatus;
+        if (!thread) return null;
+        const engineId = ChatState.chatThreadEngineId(thread, state.codex);
+        const engine = (Array.isArray(state.codex.engines) ? state.codex.engines : []).find(item => item.id === engineId);
+        const profiles = (Array.isArray(engine?.profiles) ? engine.profiles : []).map(profile =>
+          [profile.id, profile.active, profile.auth?.status, profile.auth?.method, profile.auth?.account]);
+        return JSON.stringify([thread.id, thread.type, thread.profileEnabled, thread.agentProfileId,
+          ChatState.clientThreadBinding(thread), engineId, ChatState.chatThreadEngineProfileId(thread, state.codex),
+          engine?.status, engine?.statusReason, profiles, state.codex.codexAccountKey,
+          currentAuth?.accountId, currentAuth?.accountEmail, currentAuth?.authMode, currentAuth?.isLoggedIn,
+          currentAuth?.identityStatus, currentAuth?.access?.state, state.codex.connected,
+          state.codex.activeThreadId, state.codex.activityRoomGeneration || 0]);
+      };
+      const binding = thread => JSON.stringify([thread.bindingState, thread.bindingAccountKey, thread.retainedNativeBinding || null]);
+      const originalBase = base(), originalBinding = binding(initial), initialNative = initial.conversationId || null;
+      let native = initialNative, nativeBinding = initialNative ? originalBinding : null, stopped = false, invalid = false;
+      const check = () => {
+        if (stopped || invalid) return false;
+        try {
+          const thread = getCodexThreadById(state.codex, threadId), current = thread?.conversationId || null;
+          if (!valid() || !thread || base() !== originalBase) invalid = true;
+          else if (initialNative) {
+            if (current !== initialNative || binding(thread) !== originalBinding) invalid = true;
+          } else if (!native && !current) {
+            if (binding(thread) !== originalBinding) invalid = true;
+          } else if (!native) {
+            if (thread.bindingState !== 'verified' || thread.bindingAccountKey !== accountKey || thread.retainedNativeBinding) invalid = true;
+            else { native = current; nativeBinding = binding(thread); }
+          } else if (current !== native || binding(thread) !== nativeBinding) invalid = true;
+        } catch { invalid = true; }
+        return !invalid;
+      };
+      const unsubscribe = subscribe(check);
+      return { current: result => check() && !!result?.conversationId && (!native || native === result.conversationId),
+        dispose: () => { if (!stopped) { stopped = true; unsubscribe(); } } };
+    } catch { return { current: () => false, dispose() {} }; }
+  }
+
+  // The request's user receipt is not run.localMessageId: later assistant
+  // message events also update that run field. Save only the actual accepted
+  // response's user receipt and keep it tied to the submitted request.
+  function rememberAcceptedInputReceipt(thread, result, requestId, run) {
+    try {
+      const request = state.codex.chatProtocol?.requests?.[requestId], accountKey = ChatState.codexAccountKey(state.codex.authStatus);
+      if (!thread || !request || !run || result?.accepted !== true || result.durable !== true || result.duplicate === true
+          || result.requestId !== requestId || result.clientThreadId !== ChatState.clientThreadBinding(thread)
+          || typeof result.localMessageId !== 'string' || !result.localMessageId || !accountKey
+          || typeof result.localConversationId !== 'string' || !result.localConversationId
+          || typeof result.localRunId !== 'string' || !result.localRunId
+          || thread.localConversationId && thread.localConversationId !== result.localConversationId
+          || run.localRunId && run.localRunId !== result.localRunId
+          || state.codex.codexAccountKey !== accountKey || request.accountKey !== accountKey || run.accountKey !== accountKey
+          || request.localThreadId !== thread.id || run.localThreadId !== thread.id || run.requestId !== requestId
+          || request.clientThreadId !== result.clientThreadId || run.clientThreadId !== result.clientThreadId
+          || ['conversationId', 'runId', 'answerId'].some(key => !result[key] || result[key] !== run[key] || result[key] !== request[key])
+          || result.answerId !== ChatState.runKey(result.conversationId, result.runId)
+          || (thread.messages || []).filter(row => row.role === 'user' && row.requestId === requestId).length !== 1
+          || (thread.messages || []).some(row => (row.role !== 'user' || row.requestId !== requestId)
+            && [row.localMessageId, row.id, row.providerItemId].includes(result.localMessageId))
+          || Object.values(state.codex.chatProtocol.requests).some(row => row !== request
+            && (row.acceptedInputMessageId === result.localMessageId || row.acceptedInputLocalRunId === result.localRunId))
+          || (run.messages || []).some(row => row.role === 'assistant' && row.localMessageId === result.localMessageId)
+          || request.acceptedInputReceiptConflict) return false;
+      if (request.acceptedInputMessageId && (request.acceptedInputMessageId !== result.localMessageId
+          || request.acceptedInputLocalConversationId !== result.localConversationId || request.acceptedInputLocalRunId !== result.localRunId)) {
+        delete request.acceptedInputMessageId; delete run.acceptedInputMessageId; request.acceptedInputReceiptConflict = true; return false;
+      }
+      request.acceptedInputMessageId = result.localMessageId;
+      request.acceptedInputLocalConversationId = result.localConversationId;
+      request.acceptedInputLocalRunId = result.localRunId;
+      run.acceptedInputMessageId = result.localMessageId;
+      return true;
+    } catch { return false; }
+  }
+
+  function acceptedInputReceipt(thread, identity) {
+    try {
+      const route = ChatState.chatContextRequestScope(thread, state.codex), accountKey = ChatState.codexAccountKey(state.codex.authStatus);
+      const run = state.codex.chatProtocol?.runs?.[ChatState.runKey(identity.conversationId, identity.runId)];
+      const request = run?.requestId && state.codex.chatProtocol?.requests?.[run.requestId];
+      if (!run || !request || !accountKey || state.codex.codexAccountKey !== accountKey || request.status !== 'accepted'
+          || run.submissionOwnerCaptured !== true || run.accountKey !== accountKey || request.accountKey !== accountKey
+          || run.requestId !== request.requestId || run.localThreadId !== thread.id || request.localThreadId !== thread.id
+          || run.clientThreadId !== route.clientThreadId || request.clientThreadId !== route.clientThreadId
+          || route.conversationId !== identity.conversationId || request.acceptedInputReceiptConflict
+          || typeof request.acceptedInputMessageId !== 'string' || !request.acceptedInputMessageId
+          || typeof request.acceptedInputLocalConversationId !== 'string' || !request.acceptedInputLocalConversationId
+          || typeof request.acceptedInputLocalRunId !== 'string' || !request.acceptedInputLocalRunId
+          || thread.localConversationId && thread.localConversationId !== request.acceptedInputLocalConversationId
+          || run.localRunId && run.localRunId !== request.acceptedInputLocalRunId
+          || run.acceptedInputMessageId !== request.acceptedInputMessageId
+          || run.engineId && run.engineId !== route.engineId || run.engineProfileId && run.engineProfileId !== route.engineProfileId
+          || ['conversationId', 'runId', 'answerId'].some(key => !identity[key] || run[key] !== identity[key] || request[key] !== identity[key])) return null;
+      return { conversationId: identity.conversationId, runId: identity.runId, answerId: identity.answerId,
+        requestId: run.requestId, localMessageId: request.acceptedInputMessageId };
+    } catch { return null; }
+  }
+
+  function visibleInputAnswer(thread, reference, identity, briefingId = null) {
+    const answers = (thread?.messages || []).filter(row => row.role === 'assistant'
+      && (!briefingId || row.briefing?.id === briefingId)
+      && ['conversationId', 'runId', 'answerId'].every(key => row[key] === identity?.[key])
+      && Array.isArray(row.contextCaptures) && row.contextCaptures.filter(capture => capture.sourceId === reference.sourceId
+        && capture.snapshotId === reference.snapshotId && capture.hash === reference.hash
+        && capture.clientThreadId === reference.clientThreadId && capture.engine?.engineId === reference.engine?.engineId
+        && capture.engine?.engineProfileId === reference.engine?.engineProfileId).length === 1);
+    return answers.length === 1 ? answers[0] : null;
+  }
+
+  // Packet selection uses only the server-issued receipt on the visible
+  // answer's own run. A source's latest packet is never a substitute.
+  function inputDeliveryProof(threadId, reference, identity, briefingId = null, packetId = null) {
+    try {
+      const answer = visibleInputAnswer(getCodexThreadById(state.codex, threadId), reference, identity, briefingId);
+      if (!answer) return null;
+      const records = [...(answer.contextPackets || []), ...(answer.contextEvents || [])
+        .filter(event => event.event === 'context.read.completed').map(event => event.details)];
+      const proofs = new Map();
+      for (const item of records) {
+        if (!item || item.sourceId !== reference.sourceId || typeof item.packetId !== 'string' || !item.packetId
+            || typeof item.receiptId !== 'string' || !item.receiptId || typeof item.hash !== 'string' || !item.hash
+            || !['direct', 'reader'].includes(item.mode) || !item.coverage || typeof item.coverage !== 'object'
+            || item.deliveryStatus !== 'sent-to-app-server') continue;
+        const proof = { packetId: item.packetId, sourceId: item.sourceId, receiptId: item.receiptId, hash: item.hash,
+          mode: item.mode, coverage: item.coverage, deliveryStatus: item.deliveryStatus };
+        const prior = proofs.get(item.packetId);
+        if (prior && JSON.stringify(prior) !== JSON.stringify(proof)) return null;
+        proofs.set(item.packetId, proof);
+      }
+      if (packetId) return proofs.get(packetId) || null;
+      return proofs.size === 1 ? [...proofs.values()][0] : null;
+    } catch { return null; }
+  }
+
+  function inputDeliveryMatches(delivered, capture, reference, identity, proof) {
+    try {
+      if (!proof || delivered?.role !== 'agent_input' || delivered.packetId !== proof.packetId || delivered.hash !== proof.hash
+          || delivered.mode !== proof.mode || delivered.deliveryStatus !== 'sent-to-app-server'
+          || ['conversationId', 'runId', 'answerId'].some(key => delivered.binding?.[key] !== identity[key])
+          || JSON.stringify(delivered.coverage) !== JSON.stringify(proof.coverage)) return false;
+      const packet = JSON.parse(delivered.text);
+      if (packet.packetId !== proof.packetId || packet.sourceId !== reference.sourceId || packet.sourceHash !== reference.hash
+          || !capture?.payloads?.projection?.hash || packet.projectionHash !== capture.payloads.projection.hash
+          || packet.mode !== proof.mode || JSON.stringify(packet.coverage) !== JSON.stringify(proof.coverage)) return false;
+      if (packet.mode === 'direct') {
+        const ranges = packet.content?.ranges;
+        if (typeof packet.content?.text !== 'string' || !Array.isArray(ranges) || !ranges.length
+            || !Number.isSafeInteger(capture.shape?.charCount) || capture.shape.charCount < 0
+            || JSON.stringify(ranges) !== JSON.stringify(packet.coverage?.reviewedRanges)
+            || ranges.some(range => !Number.isInteger(range.startOffset) || !Number.isInteger(range.endOffset)
+              || range.startOffset < 0 || range.endOffset < range.startOffset || range.endOffset > capture.shape?.charCount)) return false;
+      } else if (!packet.coverage?.manifestId || !Number.isInteger(packet.coverage.reviewedPartitions)
+          || !Number.isInteger(packet.coverage.totalPartitions) || packet.coverage.reviewedPartitions < 0
+          || packet.coverage.reviewedPartitions > packet.coverage.totalPartitions) return false;
+      return true;
+    } catch { return false; }
+  }
+
+  function inputAuthorizationFailure(error) {
+    return error?.status === 401 || error?.status === 403
+      || ['CONTEXT_NOT_FOUND', 'NATIVE_BINDING_MISMATCH', 'NATIVE_ACCOUNT_MISMATCH', 'ENGINE_PROFILE_MISMATCH', 'INPUT_PROOF_MISMATCH'].includes(error?.code);
+  }
+
+  function invalidateInputReadOnDenial(threadId, reference, identity, previousPanel) {
+    const accountKey = ChatState.codexAccountKey(state.codex.authStatus);
+    let changed = false;
+    const same = owner => owner?.threadId === threadId && owner.sourceId === reference.sourceId && owner.hash === reference.hash
+      && owner.accountKey === accountKey && ['conversationId', 'runId', 'answerId'].every(key => owner[key] === identity?.[key]);
+    if (previousPanel && document.getElementById('egd-codex-input-panel') === previousPanel && same(previousPanel._inputProofScope)) {
+      previousPanel._finishInputSourceChange?.(); previousPanel._finishInputScope?.(); previousPanel.remove();
+    }
+    for (const card of document.querySelectorAll('.egd-input-evidence-card')) {
+      if (same(card._briefingEvidenceScope) && card._invalidateBriefingEvidence) { card._invalidateBriefingEvidence(); changed = true; }
+    }
+    const shown = state.codex.briefingSession;
+    if (changed && shown?.threadId === threadId && ['conversationId', 'runId', 'answerId'].every(key => shown.identity?.[key] === identity?.[key])) {
+      document.getElementById('egd-answer-briefing')?._refreshBriefingEvidence?.();
+      if (typeof refreshDeskMinimap === 'function') refreshDeskMinimap();
+    }
+  }
+
+  function briefingReadReferenceCurrent(threadId, reference, scope) {
+    try {
+      const shown = state.codex.briefingSession, active = getCodexThreadById(state.codex, threadId);
+      const access = state.codex.authStatus?.access?.state, accountKey = ChatState.codexAccountKey(state.codex.authStatus);
+      if (!shown || shown.threadId !== threadId || shown.preparationScope !== scope || !scope?.current() || !active
+          || state.codex.connected !== true || !accountKey || state.codex.codexAccountKey !== accountKey
+          || ['permissionDenied', 'authFailed', 'loginRequired', 'loginInProgress'].includes(access)
+          || !ChatState.canResumeNativeThread(active, state.codex.authStatus, state.codex)
+          || ['conversationId', 'runId', 'answerId'].some(key => !shown.identity?.[key] || shown.briefing?.[key] !== shown.identity[key])) return false;
+      const answers = (active.messages || []).filter(row => row.role === 'assistant' && row.briefing?.id === shown.briefing.id
+        && ['conversationId', 'runId', 'answerId'].every(key => row[key] === shown.identity[key]));
+      if (answers.length !== 1 || !reference?.contextScope
+          || visibleInputAnswer(active, reference, shown.identity, shown.briefing.id) !== answers[0]) return false;
+      const receipt = acceptedInputReceipt(active, shown.identity);
+      if (!receipt || !historyReadReferenceCurrent(threadId, reference, receipt)) return false;
+      const exact = item => item.sourceId === reference.sourceId && item.snapshotId === reference.snapshotId
+        && item.hash === reference.hash && JSON.stringify(item.contextScope || null) === JSON.stringify(reference.contextScope);
+      if (shown.references.filter(exact).length !== 1 || briefingInputReferences(active, answers[0]).filter(exact).length !== 1) return false;
+      if (Object.hasOwn(reference, 'presentationRange')) {
+        const key = InputContext.inputEvidenceKey(reference);
+        if (!shown.briefing.steps.some(step => BriefingState.briefingStepTargets(step).some(target => {
+          if (target.sourceId !== reference.sourceId || target.hash && target.hash !== reference.hash || briefingRangeIssue(target)) return false;
+          try { return InputContext.inputEvidenceKey({ ...reference, presentationRange: target.range }) === key; }
+          catch { return false; }
+        }))) return false;
+      }
+      return true;
+    } catch { return false; }
+  }
+
+  // An activity-history input belongs to one submitted user message, not to
+  // the latest packet for a source which another room may also have used.
+  function historyReadReferenceCurrent(threadId, reference, receipt) {
+    try {
+      const thread = getCodexThreadById(state.codex, threadId), auth = state.codex.authStatus;
+      const accountKey = ChatState.codexAccountKey(auth), access = auth?.access?.state;
+      if (!thread || state.codex.activeThreadId !== threadId || state.codex.connected !== true || !accountKey
+          || state.codex.codexAccountKey !== accountKey || ['permissionDenied', 'authFailed', 'loginRequired', 'loginInProgress'].includes(access)
+          || !ChatState.canResumeNativeThread(thread, auth, state.codex) || !reference?.contextScope
+          || !reference.sourceId || reference.snapshotId !== reference.sourceId || !reference.hash
+          || ['requestId', 'localMessageId', 'conversationId', 'runId', 'answerId'].some(key => !receipt?.[key])) return false;
+      const scope = ChatState.chatContextRequestScope(thread, state.codex), origin = reference.contextScope;
+      if (scope.engineId !== 'codex' || scope.conversationId !== receipt.conversationId
+          || ['engineId', 'engineProfileId', 'clientThreadId'].some(key => origin[key] !== scope[key])
+          || Object.hasOwn(origin, 'conversationId') && origin.conversationId !== scope.conversationId
+          || reference.clientThreadId !== scope.clientThreadId || reference.engine?.engineId !== scope.engineId
+          || reference.engine?.engineProfileId !== scope.engineProfileId) return false;
+      InputContext.inputReadContext(reference, scope, { thread, accountKey, cachedAccountKey: state.codex.codexAccountKey });
+      const confirmed = acceptedInputReceipt(thread, receipt), identity = ['conversationId', 'runId', 'answerId'];
+      if (!confirmed || confirmed.requestId !== receipt.requestId || confirmed.localMessageId !== receipt.localMessageId) return false;
+      const messages = (thread.messages || []).filter(row => row.role === 'user' && row.requestId === receipt.requestId
+        && row.localMessageId === receipt.localMessageId && identity.every(key => row[key] === receipt[key]));
+      if (messages.length !== 1) return false;
+      const exact = item => item.sourceId === reference.sourceId && item.snapshotId === reference.snapshotId && item.hash === reference.hash
+        && item.clientThreadId === scope.clientThreadId && item.engine?.engineId === scope.engineId
+        && item.engine?.engineProfileId === scope.engineProfileId
+        && JSON.stringify(item.contextScope || null) === JSON.stringify(reference.contextScope);
+      return Array.isArray(messages[0].inputReferences) && messages[0].inputReferences.filter(exact).length === 1
+        && !!visibleInputAnswer(thread, reference, receipt);
+    } catch { return false; }
+  }
+
   function briefingInputReferences(thread, message) {
     const local = [...(thread.briefingInputs || []), ...(thread.messages || []).flatMap(item => item.inputReferences || [])];
     const accountKey = ChatState.codexAccountKey(state.codex.authStatus);
@@ -2842,25 +3111,40 @@
     const eligible = scope?.engineId === 'codex' && accountKey && state.codex.codexAccountKey === accountKey
       && ChatState.canResumeNativeThread(thread, state.codex.authStatus)
       && !!message.conversationId && scope.conversationId === message.conversationId;
+    // A first-send capture has no native CID yet. It is eligible for a read
+    // only through its own accepted request and projected user-message receipt;
+    // the immutable origin is never rewritten with today's conversation ID.
+    let firstSendReferences = [];
+    if (eligible && message.runId && message.answerId) {
+      const receipt = acceptedInputReceipt(thread, message);
+      const identity = ['conversationId', 'runId', 'answerId'];
+      if (receipt) {
+        const messages = (thread.messages || []).filter(row => row.role === 'user' && row.requestId === receipt.requestId
+          && row.localMessageId === receipt.localMessageId && identity.every(key => row[key] === message[key]));
+        if (messages.length === 1 && Array.isArray(messages[0].inputReferences)) firstSendReferences = messages[0].inputReferences;
+      }
+    }
     return (message.contextCaptures || []).map(reference => {
       // Backend capture descriptors do not carry the UI's original scope. Join
       // only a matching saved constructor reference, never today's room as an
       // invented origin. The unchanged reader/helper still verify authority.
-      const original = eligible && local.find(item => {
+      const matches = (item, allowMissingConversation) => {
+        if (!item || typeof item !== 'object') return false;
         const origin = item.contextScope;
         if (!reference.sourceId || reference.snapshotId !== reference.sourceId || !reference.hash
             || item.sourceId !== reference.sourceId || item.snapshotId !== reference.snapshotId || item.hash !== reference.hash
-            || !origin || origin.conversationId !== message.conversationId
-            || ['engineId', 'engineProfileId', 'clientThreadId', 'conversationId'].some(key => origin[key] !== scope[key])
+            || !origin || (allowMissingConversation ? Object.hasOwn(origin, 'conversationId') : origin.conversationId !== message.conversationId)
+            || ['engineId', 'engineProfileId', 'clientThreadId'].some(key => origin[key] !== scope[key])
             || [reference, item].some(capture => capture.clientThreadId !== origin.clientThreadId
               || capture.engine?.engineId !== origin.engineId || capture.engine?.engineProfileId !== origin.engineProfileId)) return false;
         try {
           InputContext.inputReadContext(item, scope, { thread, accountKey, cachedAccountKey: state.codex.codexAccountKey });
           return true;
         } catch { return false; }
-      });
-      const joined = { ...reference, localSource: cloneJson((original
-        || local.find(item => item.sourceId === reference.sourceId && item.hash === reference.hash))?.localSource || null) };
+      };
+      const firstMatches = firstSendReferences.filter(item => matches(item, true));
+      const original = eligible && (local.find(item => matches(item, false)) || (firstMatches.length === 1 ? firstMatches[0] : null));
+      const joined = { ...reference, localSource: cloneJson(original?.localSource || null) };
       if (original) joined.contextScope = cloneJson(original.contextScope);
       else delete joined.contextScope;
       return joined;
@@ -2886,7 +3170,7 @@
       references: briefingInputReferences(thread, message),
       artifacts: message.artifacts || [],
       presentationId: chatBindingNonce(), preparing: true, interaction: { revision: 0 },
-      _minimapAccessFence: { revision: 0, blocked: false },
+      _minimapAccessFence: { revision: 0, blocked: false }, _minimapVerifiedEvidence: new Map(),
     };
     const preparationScope = session.preparationScope = state.codexBridge.createBriefingPreparationScope(thread.id, () => {
       // Losing the original room/account closes only the presentation. The
@@ -2904,6 +3188,8 @@
       fence.blocked = blocked;
       if (blocked && shown._minimapVerifiedEvidence?.size) {
         shown._minimapVerifiedEvidence.clear();
+        document.getElementById('egd-answer-briefing')?._refreshBriefingEvidence?.();
+        shown.commentEditor?.notify();
         if (typeof clearBriefingMinimapDisplay === 'function') clearBriefingMinimapDisplay();
         if (typeof refreshDeskMinimap === 'function') refreshDeskMinimap();
       }
@@ -3131,12 +3417,13 @@
     if (session.preparing) body.appendChild(preparingNotice);
     const describeTarget = (target, index) => {
       const requested = target.target || {}, range = requested.range;
-      const named = [target.reference?.localSource?.label, target.reference?.label, target.artifact?.label,
-        requested.sourceId, requested.artifactId].find(value => typeof value === 'string' && value.trim());
+      const verified = target.status === 'available' && !!target.view?.id;
+      const named = verified ? [target.reference?.localSource?.label, target.reference?.label, target.artifact?.label,
+        requested.sourceId, requested.artifactId].find(value => typeof value === 'string' && value.trim()) : null;
       const name = named?.trim() || `근거 ${index + 1}`;
       const start = Number.isInteger(range?.startLine) && range.startLine > 0 ? range.startLine : null;
       const end = Number.isInteger(range?.endLine) && range.endLine > 0 ? range.endLine : null;
-      const rangeText = briefingRangeIssue(requested) ? '지원하지 않는 범위'
+      const rangeText = !verified ? '범위 확인 필요' : briefingRangeIssue(requested) ? '지원하지 않는 범위'
         : start && end && end >= start ? `${start}–${end}행`
         : start && range?.endLine == null ? `${start}행부터 · 끝 미지정`
           : end && range?.startLine == null ? `시작 미지정 · ${end}행까지`
@@ -3160,15 +3447,16 @@
       const stateText = el('span', { class: 'egd-briefing-evidence-state', data: { testid: 'briefing-evidence-state' } });
       const actionText = el('span', { class: 'egd-briefing-evidence-action' }, '당시 입력 보기');
       const nameText = el('span', { class: 'egd-briefing-evidence-name' }, name);
+      const rangeNode = el('span', { class: 'egd-briefing-evidence-range' }, rangeText);
+      const suffixNode = el('span', { class: 'egd-briefing-evidence-range' }, suffix);
+      suffixNode.hidden = !suffix;
       const contents = el('span', { class: 'egd-briefing-evidence-identity' },
-        nameText,
-        el('span', { class: 'egd-briefing-evidence-range' }, rangeText),
-        suffix ? el('span', { class: 'egd-briefing-evidence-range' }, suffix) : null, stateText);
-      const row = { target, name, nameText, identity, stateText, actionText, status: el('p', { role: 'status', class: 'egd-briefing-evidence-reason' }),
+        nameText, rangeNode, suffixNode, stateText);
+      const row = { target, name, nameText, rangeNode, suffixNode, identity, stateText, actionText, status: el('p', { role: 'status', class: 'egd-briefing-evidence-reason' }),
         inspect: null, retry: null, end: document.createTextNode('') };
       if (target.reference && target.status !== 'unsupported' && !briefingRangeIssue(target.target)) {
         row.inspect = el('button', { type: 'button', class: 'egd-briefing-evidence-row',
-          data: { testid: 'briefing-inspect', sourceId: target.reference.sourceId },
+          data: { testid: 'briefing-inspect' },
           onclick: () => {
             if (!sessionCurrent() || briefingRangeIssue(target.target)) return;
             noteInteraction();
@@ -3177,7 +3465,7 @@
             // must not cover or blur work started after this request.
             const isCurrent = () => sessionCurrent() && (session.interaction?.revision || 0) === interactionRevision
               && document.activeElement === focusedElement;
-            state.codexBridge.inspectInput(session.threadId, target.reference, { ...target.target.range, isCurrent });
+            state.codexBridge.inspectInput(session.threadId, target.reference, { ...target.target.range, isCurrent, briefingScope: session.preparationScope });
           } }, contents, actionText);
         body.appendChild(row.inspect);
       } else body.appendChild(el('div', { class: 'egd-briefing-evidence-row', data: { testid: 'briefing-evidence-unavailable' } }, contents));
@@ -3211,9 +3499,20 @@
     panel._refreshBriefingEvidence = () => {
       if (!session.preparing) preparingNotice.remove();
       const latest = briefingResolvedTargets(session);
+      const currentLabels = latest.map(describeTarget), currentCollisions = new Map();
+      for (const label of currentLabels) {
+        if (!currentCollisions.has(label.identity)) currentCollisions.set(label.identity, new Set());
+        currentCollisions.get(label.identity).add(label.capture);
+      }
       for (const [index, row] of evidenceRows.entries()) {
         const target = latest[index] || row.target;
         const rangeIssue = briefingRangeIssue(target.target), unsupported = !!rangeIssue || target.status === 'unsupported';
+        const description = currentLabels[index] || describeTarget(target, index);
+        const suffix = (currentCollisions.get(description.identity)?.size || 0) > 1 ? `항목 ${index + 1}` : '';
+        row.name = description.name;
+        row.identity = description.identity + (suffix ? ` · ${suffix}` : '');
+        if (row.rangeNode.textContent !== description.rangeText) row.rangeNode.textContent = description.rangeText;
+        row.suffixNode.textContent = suffix; row.suffixNode.hidden = !suffix;
         const hashMatches = !!target.reference && (!target.target.hash || target.target.hash === target.reference.hash);
         const stateLabel = unsupported ? '지원 안 됨' : target.status === 'available' ? '열림' : target.status === 'stale' ? '일치 확인 필요'
           : session.preparing && hashMatches ? '준비 중' : '확인 필요';
@@ -3235,7 +3534,7 @@
         const retryVisible = hashMatches && !unsupported && target.status !== 'available' && !session.preparing;
         if (retryVisible && !row.retry) {
           row.retry = el('button', { type: 'button', class: 'egd-briefing-evidence-retry',
-            'aria-label': `${row.identity} · 고정 근거 다시 열기`, data: { testid: 'briefing-show-evidence', sourceId: target.reference.sourceId },
+            'aria-label': `${row.identity} · 고정 근거 다시 열기`, data: { testid: 'briefing-show-evidence' },
             onclick: async () => {
               const accessFence = session._minimapAccessFence || { revision: 0, blocked: false }, accessRevision = accessFence.revision;
               const isCurrent = () => sessionCurrent() && !accessFence.blocked && accessFence.revision === accessRevision;
@@ -3266,6 +3565,7 @@
           body.insertBefore(row.retry, row.end);
         }
         if (!retryVisible && row.retry) { row.retry.remove(); row.retry = null; }
+        if (row.retry) row.retry.setAttribute('aria-label', `${row.identity} · 고정 근거 다시 열기`);
       }
     };
     panel._refreshBriefingEvidence();
@@ -3447,13 +3747,27 @@
       text(listStatus, view.listState === 'failed' ? '저장된 의견을 불러오지 못했습니다. 다시 확인해 주세요.'
         : view.listState === 'loading' ? '저장된 의견을 확인하고 있습니다.'
         : view.listState === 'ready' && !view.comments.length ? '이 단계에 저장된 의견이 없습니다.' : '');
+      const step = session.briefing.steps[session.index];
+      const resolved = view.comments.length ? briefingResolvedTargets(session, step) : [];
       for (const item of view.comments) {
+        const targets = BriefingState.briefingStepTargets(step).filter(target => item.sourceIds.includes(target.sourceId));
+        let unverified = item.sourceIds.some(sourceId => !targets.some(target => target.sourceId === sourceId));
+        const labels = [];
+        for (const entry of targets) {
+          const ready = resolved.find(candidate => candidate.target === entry && candidate.status === 'available' && candidate.view?.id);
+          if (!ready) { unverified = true; continue; }
+          const name = ready.reference?.localSource?.label || '확인된 근거';
+          const start = entry.range?.startLine, end = entry.range?.endLine;
+          const range = Number.isInteger(start) && Number.isInteger(end) ? ` · ${start}–${end}행`
+            : Number.isInteger(start) ? ` · ${start}행부터 · 끝 미지정` : '';
+          labels.push(`${name}${range}`);
+        }
+        if (unverified) labels.push('근거 확인 필요');
+        const targetText = labels.join(' / ') || '이 단계의 설명';
         let row = rows.get(item.id);
         if (!row) {
           const body = el('p', { style: { whiteSpace: 'pre-wrap', overflowWrap: 'anywhere' }, data: { testid: 'briefing-comment-body' } }, item.text);
-          const targets = BriefingState.briefingStepTargets(session.briefing.steps[session.index]).filter(target => item.sourceIds.includes(target.sourceId));
-          const target = el('p', { data: { testid: 'briefing-comment-target' }, style: { overflowWrap: 'anywhere' } },
-            targets.map((entry, index) => `${session.references.find(ref => ref.sourceId === entry.sourceId)?.localSource?.label || `근거 ${index + 1}`}${entry.range ? ` · ${entry.range.startLine}–${entry.range.endLine}행` : ''}`).join(' / ') || '이 단계의 설명');
+          const target = el('p', { data: { testid: 'briefing-comment-target' }, style: { overflowWrap: 'anywhere' } });
           const draftStatus = el('p', { data: { testid: 'briefing-comment-draft-status' } });
           const button = el('button', { type: 'button', data: { testid: 'briefing-comment-include', commentId: item.id },
             onclick: () => controller?.include(item.id) }, 'Chat 초안에 포함');
@@ -3461,10 +3775,12 @@
             el('strong', {}, `의견 #${item.seq}`), body, target, draftStatus, button);
           const next = [...rows.values()].filter(existing => Number(existing.root.dataset.commentSeq) > item.seq)
             .sort((a, b) => Number(a.root.dataset.commentSeq) - Number(b.root.dataset.commentSeq))[0];
-          row = { root, draftStatus, button }; rows.set(item.id, row);
+          row = { root, target, draftStatus, button }; rows.set(item.id, row);
           if (next) list.insertBefore(root, next.root); else list.appendChild(root);
         }
-        text(row.draftStatus, item.included ? 'Chat 초안에 포함됨 · 아직 전송하지 않음' : item.draftError || '저장됨 · 초안에 포함하지 않음');
+        text(row.target, targetText);
+        text(row.draftStatus, item.included ? 'Chat 초안에 포함됨 · 아직 전송하지 않음' : item.draftError
+          || (unverified ? '근거를 다시 확인한 뒤 초안에 포함할 수 있습니다.' : '저장됨 · 초안에 포함하지 않음'));
         row.button.disabled = item.included || !!session.preparing;
       }
       scroller.scrollTop = top + (anchor ? anchor.getBoundingClientRect().top - anchorTop : 0); scroller.scrollLeft = left;
@@ -3489,8 +3805,11 @@
 
   function spawnInputEvidence(reference, stored = null, options = {}) {
     const evidenceSnapshot = stored ? InputContext.inputEvidenceSnapshot(stored, reference) : null;
+    const shown = options.briefingScope && state.codex.briefingSession?.preparationScope === options.briefingScope
+      ? state.codex.briefingSession : null;
     const existing = Array.from(document.querySelectorAll('.egd-input-evidence-card')).find(card =>
-      InputContext.inputEvidenceKey(card._inputReference) === InputContext.inputEvidenceKey(reference));
+      (!options.briefingScope || shown?._minimapVerifiedEvidence?.get(InputContext.inputEvidenceKey(reference)) === card)
+      && InputContext.inputEvidenceKey(card._inputReference) === InputContext.inputEvidenceKey(reference));
     if (existing && !options.restore) {
       if (stored && !existing._inputEvidenceLoaded) {
         existing._deskWindowShell.slots.content.replaceChildren(InputContext.inputSnapshotView(document, evidenceSnapshot, { includeDelivered: false }));
@@ -4066,7 +4385,10 @@
         el('summary', {}, `당시 첨부 입력 · ${message.inputReferences.length}개`),
         ...message.inputReferences.map(reference => el('button', { 'aria-label': `당시 입력 확인: ${reference.localSource?.label || reference.sourceId}`,
           data: { testid: 'chat-input-history-open', snapshotId: reference.snapshotId },
-          onclick: () => state.codexBridge.inspectInput(thread.id, reference) }, reference.localSource?.label || reference.sourceId))));
+          onclick: () => state.codexBridge.inspectInput(thread.id, reference, { historyReceipt: {
+            requestId: message.requestId, localMessageId: message.localMessageId, conversationId: message.conversationId,
+            runId: message.runId, answerId: message.answerId,
+          } }) }, reference.localSource?.label || reference.sourceId))));
     }
     if (ChatState.nativeBindingHeld(thread)) {
       const reference = thread.retainedNativeBinding;
@@ -4104,12 +4426,20 @@
       const packets = [...new Map([...(run.contextPackets || []), ...(run.contextEvents || []).filter(entry => entry.event === 'context.read.completed').map(entry => entry.details)]
         .filter(packet => packet.packetId).map(packet => [packet.packetId, packet])).values()];
       for (const packet of packets) {
-        const reference = run.contextCaptures?.find(capture => capture.sourceId === packet.sourceId);
-        if (!reference) continue;
-        rows.push(el('button', { 'aria-label': '이 읽기에서 실제 전달한 payload 확인',
-          data: { testid: 'chat-delivered-input-open', packetId: packet.packetId, sourceId: packet.sourceId },
-          onclick: () => state.codexBridge.inspectInput(thread.id, reference, { packetId: packet.packetId }),
-        }, `${reference.label || '입력'} · 전달 payload 보기`));
+        const capture = run.contextCaptures?.find(item => item.sourceId === packet.sourceId);
+        const answer = capture && visibleInputAnswer(thread, capture, run);
+        const candidates = answer ? briefingInputReferences(thread, answer).filter(item => item.sourceId === capture.sourceId
+          && item.snapshotId === capture.snapshotId && item.hash === capture.hash && item.contextScope) : [];
+        const reference = candidates.length === 1 ? candidates[0] : null;
+        const receipt = acceptedInputReceipt(thread, run);
+        if (!reference || !historyReadReferenceCurrent(thread.id, reference, receipt)
+            || !inputDeliveryProof(thread.id, reference, receipt, null, packet.packetId)) continue;
+        // Packet IDs are not exposed in the DOM before the scoped server read
+        // confirms the packet; they are opaque, not selectors or authority.
+        rows.push(el('button', { 'aria-label': '이 읽기의 전달 기록 확인',
+          data: { testid: 'chat-delivered-input-open' },
+          onclick: () => state.codexBridge.inspectInput(thread.id, reference, { packetId: packet.packetId, historyReceipt: receipt }),
+        }, `${reference.localSource?.label || '입력'} · 전달 기록 확인`));
       }
       if (run.summary) rows.push(el('p', { class: 'egd-codex-public-summary' }, run.summary));
       const steps = Array.isArray(run.plan) ? run.plan : run.plan?.steps;
@@ -13301,33 +13631,91 @@
       async inspectInput(threadId, reference, options = {}) {
         const thread = getCodexThreadById(state.codex, threadId);
         if (!thread || !reference?.snapshotId || (options.isCurrent && !options.isCurrent())) return;
+        const focusedAtRequest = document.activeElement;
+        const stillCurrent = () => (!options.isCurrent || options.isCurrent())
+          && (!options.historyReceipt || document.activeElement === focusedAtRequest);
         const nonce = state.codex.inputInspectNonce = (state.codex.inputInspectNonce || 0) + 1;
         const activeRoom = state.codex.activeThreadId, roomGeneration = state.codex.activityRoomGeneration || 0;
         const priorPanel = document.getElementById('egd-codex-input-panel');
-        const stored = await this.readInput(reference, { ...options, threadId });
-        if (!stored || (options.isCurrent && !options.isCurrent()) || state.codex.inputInspectNonce !== nonce || state.codex.activeThreadId !== activeRoom
+        const stored = await this.readInput(reference, { ...options, threadId, isCurrent: stillCurrent,
+          includeAnswerDelivery: !!(options.briefingScope || options.historyReceipt) });
+        if (!stored || !stillCurrent() || state.codex.inputInspectNonce !== nonce || state.codex.activeThreadId !== activeRoom
             || (state.codex.activityRoomGeneration || 0) !== roomGeneration
             || document.getElementById('egd-codex-input-panel') !== priorPanel) return;
         const snapshot = InputContext.storedSnapshotForView(stored, reference);
         const sourceChange = ChatState.chatThreadEngineId(thread, state.codex) === 'codex'
           ? { state: 'loading', sourceId: snapshot.id, conversationId: thread.conversationId || '' } : null;
         const panel = openChatInputPanel(threadId, { snapshots: [snapshot], sourceChange });
+        if ((options.briefingScope || options.historyReceipt) && panel) {
+          const owner = options.briefingScope ? state.codex.briefingSession : null;
+          const identity = owner?.identity || options.historyReceipt, briefingId = owner?.briefing?.id || null;
+          panel._inputProofScope = { threadId, sourceId: reference.sourceId, hash: reference.hash,
+            accountKey: ChatState.codexAccountKey(state.codex.authStatus), ...identity };
+          const proof = snapshot.delivered ? JSON.stringify(inputDeliveryProof(threadId, reference, identity, briefingId, snapshot.delivered.packetId)) : null;
+          const accessAtOpen = state.codex.authStatus?.access?.state;
+          if (owner) panel._briefingPresentationId = owner.presentationId;
+          let stopped = false, unsubscribe = () => {};
+          const finish = () => {
+            if (stopped) return;
+            stopped = true; unsubscribe();
+            if (panel._finishInputScope === finish) panel._finishInputScope = null;
+          };
+          const observe = () => {
+            if (stopped) return;
+            if (!panel.isConnected || document.getElementById('egd-codex-input-panel') !== panel) { finish(); return; }
+            const valid = owner ? state.codex.briefingSession === owner
+              && briefingReadReferenceCurrent(threadId, reference, options.briefingScope)
+              : historyReadReferenceCurrent(threadId, reference, options.historyReceipt);
+            if (!valid || state.codex.authStatus?.access?.state !== accessAtOpen
+                || proof && JSON.stringify(inputDeliveryProof(threadId, reference, identity, briefingId, snapshot.delivered.packetId)) !== proof) {
+              finish(); panel._finishInputSourceChange?.(); panel.remove();
+            }
+          };
+          panel._finishInputScope = finish;
+          unsubscribe = this.subscribe(observe);
+          if (stopped) unsubscribe();
+          if (!panel.isConnected) return;
+        }
+        // A capture response can include another run's latest delivery. In a
+        // Briefing it is not evidence for this answer, nor evidence of absence.
+        if ((options.briefingScope || options.historyReceipt) && !snapshot.delivered) {
+          const status = panel?.querySelector('[data-testid="chat-input-delivery-status"]');
+          if (status) status.textContent = '해당 답변의 전달 기록을 확인할 수 없습니다.';
+        } else if ((options.briefingScope || options.historyReceipt) && snapshot.delivered) {
+          panel?.querySelector('[data-testid="chat-input-delivery"]')?.appendChild(el('p', {},
+            '전달 범위는 이 packet에 기록된 범위이며, 위 원문 페이지의 범위와 다를 수 있습니다.'));
+        }
+        const followupScope = () => {
+          if (!options.briefingScope && !options.historyReceipt) return {};
+          if (options.historyReceipt) {
+            const receipt = options.historyReceipt, focused = document.activeElement;
+            return { historyReceipt: receipt, isCurrent: () => panel?.isConnected
+              && document.getElementById('egd-codex-input-panel') === panel && document.activeElement === focused
+              && historyReadReferenceCurrent(threadId, reference, receipt) };
+          }
+          const owner = state.codex.briefingSession, focused = document.activeElement;
+          const revision = owner?.interaction?.revision || 0, scope = options.briefingScope;
+          return { briefingScope: scope, isCurrent: () => !!owner && state.codex.briefingSession === owner
+            && owner.preparationScope === scope && scope.current() && panel?.isConnected
+            && document.getElementById('egd-codex-input-panel') === panel
+            && (owner.interaction?.revision || 0) === revision && document.activeElement === focused };
+        };
         const priorPages = options.pageRanges || [];
         const currentPage = snapshot.range ? { startLine: snapshot.range.startLine, endLine: snapshot.range.endLine } : null;
         const selectedPacketId = options.packetId || snapshot.delivered?.packetId;
         const nav = el('nav', { class: 'egd-codex-input-panel-footer', tabindex: '-1', 'aria-label': '저장된 입력 페이지', data: { testid: 'chat-input-pagination' } },
           el('button', { disabled: priorPages.length ? null : 'true', 'aria-label': '이전 캡처 페이지', data: { testid: 'chat-input-previous' },
-            onclick: () => this.inspectInput(threadId, reference, { ...priorPages.at(-1), pageRanges: priorPages.slice(0, -1), packetId: selectedPacketId }) }, '이전'),
+            onclick: () => this.inspectInput(threadId, reference, { ...priorPages.at(-1), pageRanges: priorPages.slice(0, -1), packetId: selectedPacketId, ...followupScope() }) }, '이전'),
           el('span', { 'aria-live': 'polite' }, snapshot.range ? `${snapshot.range.startLine}–${snapshot.range.endLine} / ${snapshot.range.totalLines ?? '?'}행` : '바이너리 캡처'),
           el('button', { disabled: snapshot.nextLine == null ? 'true' : null, 'aria-label': '다음 캡처 페이지', data: { testid: 'chat-input-next' },
-            onclick: () => this.inspectInput(threadId, reference, { startLine: snapshot.nextLine, pageRanges: [...priorPages, currentPage], packetId: selectedPacketId }) }, '다음'));
+            onclick: () => this.inspectInput(threadId, reference, { startLine: snapshot.nextLine, pageRanges: [...priorPages, currentPage], packetId: selectedPacketId, ...followupScope() }) }, '다음'));
         document.getElementById('egd-codex-input-panel')?.appendChild(nav);
         const packet = el('input', { type: 'text', placeholder: '기록된 packetId', 'aria-label': '과거 전달 packet ID', data: { testid: 'chat-input-packet-id' } });
         packet.value = selectedPacketId || '';
         document.querySelector('#egd-codex-input-panel .egd-codex-input-panel-body')?.appendChild(el('details', { class: 'egd-input-snapshot-metadata' },
           el('summary', {}, '다른 전달 기록 찾기'), packet,
           el('button', { 'aria-label': '지정한 과거 전달본 조회', data: { testid: 'chat-input-packet-open' }, onclick: () => {
-            if (packet.value.trim()) void this.inspectInput(threadId, reference, { ...(currentPage || { startLine: 1 }), packetId: packet.value.trim() });
+            if (packet.value.trim()) void this.inspectInput(threadId, reference, { ...(currentPage || { startLine: 1 }), packetId: packet.value.trim(), ...followupScope() });
           } }, '전달본 조회')));
         if (options.pageRanges) nav.focus();
         // This optional metadata request never gates immutable source reading
@@ -13408,8 +13796,11 @@
         const candidates = state.codex.threads.filter(thread => options.threadId ? thread.id === options.threadId
           : reference.contextScope ? ChatState.clientThreadBinding(thread) === reference.contextScope.clientThreadId
             : thread.messages?.some(message => message.inputReferences?.some(input => input.sourceId === reference.sourceId)));
-        if (candidates.length !== 1) { boardNotice('이 고정 캡처의 원래 대화 연결을 확인하지 못했습니다.'); return null; }
+        if (candidates.length !== 1) { if (!options.silent) boardNotice('이 고정 캡처의 원래 대화 연결을 확인하지 못했습니다.'); return null; }
         const thread = candidates[0];
+        if (options.historyReceipt && !historyReadReferenceCurrent(thread.id, reference, options.historyReceipt)) {
+          if (!options.silent) boardNotice('이 입력의 접수와 대화 연결을 확인하지 못했습니다.'); return null;
+        }
         const readContext = () => {
           const currentThread = getCodexThreadById(state.codex, thread.id);
           return InputContext.inputReadContext(reference, ChatState.chatContextRequestScope(currentThread, state.codex), {
@@ -13418,12 +13809,20 @@
         };
         let context;
         try { context = readContext(); }
-        catch (error) { boardNotice(error.message); return null; }
+        catch (error) { if (!options.silent) boardNotice(error.message); return null; }
         const contextScope = context.scope, capturedContext = JSON.stringify(context);
         const activeRoom = state.codex.activeThreadId, roomGeneration = state.codex.activityRoomGeneration || 0;
         const inspectNonce = state.codex.inputInspectNonce;
         const inputPanel = document.getElementById('egd-codex-input-panel');
         const token = epochScope.begin(contextScope.engineId, contextScope.engineProfileId);
+        let unsubscribe = () => {}, closed = false;
+        const cleanup = () => {
+          if (closed) return;
+          closed = true; options.signal?.removeEventListener('abort', abortExternal); unsubscribe(); epochScope.finish(token);
+        };
+        const abortExternal = () => { token.controller.abort(); cleanup(); };
+        if (options.signal?.aborted) abortExternal();
+        else options.signal?.addEventListener('abort', abortExternal, { once: true });
         // Only a live, exact Briefing presentation can replace the activity
         // panel generation check with its latched room/account scope. Every
         // other reader retains the existing activity-generation fence.
@@ -13435,27 +13834,78 @@
             && options.briefingScope.current();
         const current = () => {
           if (token.signal.aborted || !epochScope.valid(token) || state.codex.activeThreadId !== activeRoom
-              || !roomCurrent() || (!options.briefingScope && (state.codex.inputInspectNonce !== inspectNonce
+              || !roomCurrent() || (options.briefingScope && !briefingReadReferenceCurrent(thread.id, reference, options.briefingScope))
+              || (options.historyReceipt && !historyReadReferenceCurrent(thread.id, reference, options.historyReceipt))
+              || (!options.briefingScope && (state.codex.inputInspectNonce !== inspectNonce
                 || document.getElementById('egd-codex-input-panel') !== inputPanel))
               || (options.isCurrent && !options.isCurrent())) return false;
           try { return JSON.stringify(readContext()) === capturedContext; } catch { return false; }
         };
-        const unsubscribe = this.subscribe(() => { if (!current()) token.controller.abort(); });
+        unsubscribe = this.subscribe(() => { if (!current()) { token.controller.abort(); cleanup(); } });
+        if (closed) unsubscribe();
         try {
           if (!current()) return;
+          const strict = !!(options.briefingScope || options.historyReceipt);
+          const identity = strict ? options.briefingScope ? state.codex.briefingSession.identity : options.historyReceipt : null;
+          const briefingId = options.briefingScope ? state.codex.briefingSession.briefing.id : null;
+          const proofFor = () => inputDeliveryProof(thread.id, reference, identity, briefingId, options.packetId || null);
+          if (strict && options.packetId && !proofFor()) throw new Error('이 입력의 지정 전달 기록은 아직 검증할 수 없습니다.');
           const { startLine, endLine } = InputContext.projectionRange({ startLine: options.startLine, endLine: options.endLine });
           const route = Object.entries(contextScope).map(([key, value]) => `${key}=${encodeURIComponent(value)}`).join('&');
-          const query = `?startLine=${startLine}${options.endLine !== undefined ? `&endLine=${endLine}` : ''}${options.packetId ? `&packetId=${encodeURIComponent(options.packetId)}` : ''}&${route}`;
-          const stored = await fetchJson(`/context/captures/${encodeURIComponent(reference.sourceId)}${query}`, { signal: token.signal });
+          const query = `?startLine=${startLine}${options.endLine !== undefined ? `&endLine=${endLine}` : ''}${!strict && options.packetId ? `&packetId=${encodeURIComponent(options.packetId)}` : ''}&${route}`;
+          let stored = await fetchJson(`/context/captures/${encodeURIComponent(reference.sourceId)}${query}`, { signal: token.signal });
           if (!current()) return;
+          const safeSource = value => {
+            const capture = value?.capture;
+            if (capture?.sourceId !== reference.sourceId || capture.snapshotId !== reference.snapshotId || capture.hash !== reference.hash
+                || capture.clientThreadId !== contextScope.clientThreadId || capture.engine?.engineId !== contextScope.engineId
+                || capture.engine?.engineProfileId !== contextScope.engineProfileId
+                || !Array.isArray(value.bindings)) {
+              throw Object.assign(new Error('이 답변과 고정 캡처의 서버 연결을 확인하지 못했습니다.'), { code: 'INPUT_PROOF_MISMATCH' });
+            }
+            const bindings = value.bindings.filter(binding => typeof binding?.bindingId === 'string' && binding.bindingId
+              && ['conversationId', 'runId', 'answerId'].every(key => binding[key] === identity[key]));
+            if (!bindings.length) throw Object.assign(new Error('이 답변과 고정 캡처의 서버 연결을 확인하지 못했습니다.'), { code: 'INPUT_PROOF_MISMATCH' });
+            return { ...value, bindings, delivered: null };
+          };
+          if (strict) stored = safeSource(stored);
           const snapshot = InputContext.storedSnapshotForView(stored, reference);
           InputContext.assertRestoredInputCapture(snapshot, stored.capture, reference, context);
           if (stored.source.range && (stored.source.range.startLine !== startLine
               || options.endLine !== undefined && stored.source.range.endLine !== endLine)) throw new Error('요청한 캡처 페이지 범위가 반환되지 않았습니다.');
-          if (options.packetId && stored.delivered?.packetId !== options.packetId) throw new Error('지정한 과거 전달본이 반환되지 않았습니다.');
+          if (strict && options.includeAnswerDelivery) {
+            const proof = proofFor(), capturedProof = JSON.stringify(proof);
+            if (proof) {
+              try {
+                const exact = await fetchJson(`/context/captures/${encodeURIComponent(reference.sourceId)}${query}&packetId=${encodeURIComponent(proof.packetId)}`, { signal: token.signal });
+                if (!current()) return;
+                const safe = safeSource(exact), exactSnapshot = InputContext.storedSnapshotForView(safe, reference);
+                InputContext.assertRestoredInputCapture(exactSnapshot, safe.capture, reference, context);
+                if (JSON.stringify(proofFor()) === capturedProof && safe.source.range?.startLine === stored.source.range?.startLine
+                    && safe.source.range?.endLine === stored.source.range?.endLine
+                    && safe.source.rangeHash === stored.source.rangeHash
+                    && inputDeliveryMatches(exact.delivered, safe.capture, reference, identity, proof)) {
+                  const bytes = new TextEncoder().encode(exact.delivered.text);
+                  const digest = await window.crypto.subtle.digest('SHA-256', bytes);
+                  if (!current()) return;
+                  const hash = Array.from(new Uint8Array(digest), byte => byte.toString(16).padStart(2, '0')).join('');
+                  if (hash === proof.hash && JSON.stringify(proofFor()) === capturedProof) stored = { ...stored, delivered: exact.delivered };
+                }
+              } catch (error) { if (!current()) return; if (inputAuthorizationFailure(error)) throw error; }
+            }
+          }
+          if (!strict && options.packetId && stored.delivered?.packetId !== options.packetId) throw new Error('지정한 과거 전달본이 반환되지 않았습니다.');
           return stored;
-        } catch (error) { if (current()) boardNotice(`당시 입력을 열지 못했습니다: ${error.message}`); }
-        finally { unsubscribe(); epochScope.finish(token); }
+        } catch (error) {
+          if (current()) {
+            if ((options.briefingScope || options.historyReceipt) && inputAuthorizationFailure(error)) {
+              const identity = options.briefingScope ? state.codex.briefingSession?.identity : options.historyReceipt;
+              invalidateInputReadOnDenial(thread.id, reference, identity, inputPanel);
+            }
+            if (!options.silent) boardNotice(`당시 입력을 열지 못했습니다: ${error.message}`);
+          }
+        }
+        finally { cleanup(); }
       },
       createBriefingPreparationScope(threadId, onInvalid = null, onObservation = null) {
         const thread = getCodexThreadById(state.codex, threadId);
@@ -13500,7 +13950,53 @@
           isCurrent: options.isCurrent, briefingScope: options.briefingScope });
         if (options.isCurrent && !options.isCurrent()) return null;
         if (stored?.source.text === null) { boardNotice('이 고정 원문은 바이너리입니다. 당시 입력 inspector에서 형식·전달 기록을 확인할 수 있습니다.'); return null; }
-        return stored ? spawnInputEvidence(reference, stored, { reveal: options.reveal }) : null;
+        if (!stored) return null;
+        if (options.briefingScope && !briefingReadReferenceCurrent(threadId, reference, options.briefingScope)) return null;
+        const previous = options.briefingScope ? new Set(document.querySelectorAll('.egd-input-evidence-card')) : null;
+        const card = spawnInputEvidence(reference, stored, { reveal: options.reveal, briefingScope: options.briefingScope });
+        if (options.briefingScope) {
+          const shown = state.codex.briefingSession;
+          if (!shown || shown.preparationScope !== options.briefingScope || !rememberBriefingMinimapEvidence(shown, reference, card, true)) {
+            if (card && !previous.has(card)) card.remove();
+            return null;
+          }
+          if (!previous.has(card)) {
+            const receipt = acceptedInputReceipt(getCodexThreadById(state.codex, threadId), shown.identity);
+            const accessAtOpen = state.codex.authStatus?.access?.state;
+            let stopped = false, unsubscribe = () => {};
+            const finish = () => {
+              if (!stopped) { stopped = true; unsubscribe(); }
+              if (card._invalidateBriefingEvidence === invalidate) card._invalidateBriefingEvidence = null;
+            };
+            const invalidate = () => {
+              finish();
+              if (!card.isConnected) return;
+              card._deskWindowShell?.slots?.content?.replaceChildren(el('p', { role: 'status' }, '원래 대화에서 고정 근거를 다시 확인해 주세요.'));
+              card._inputEvidenceLoaded = false;
+              const current = state.codex.briefingSession, key = InputContext.inputEvidenceKey(reference);
+              if (current?._minimapVerifiedEvidence?.get(key) === card) {
+                current._minimapVerifiedEvidence.delete(key);
+                document.getElementById('egd-answer-briefing')?._refreshBriefingEvidence?.();
+                current.commentEditor?.notify();
+                if (typeof refreshDeskMinimap === 'function') refreshDeskMinimap();
+              }
+            };
+            card._briefingEvidenceScope = { threadId, sourceId: reference.sourceId, hash: reference.hash,
+              accountKey: ChatState.codexAccountKey(state.codex.authStatus), ...shown.identity };
+            card._invalidateBriefingEvidence = invalidate;
+            const observe = () => {
+              if (stopped) return;
+              if (!card.isConnected) { finish(); return; }
+              if (state.codex.authStatus?.access?.state !== accessAtOpen || !historyReadReferenceCurrent(threadId, reference, receipt)) {
+                invalidate();
+              }
+            };
+            unsubscribe = this.subscribe(observe);
+            if (stopped) unsubscribe();
+            if (!card._inputEvidenceLoaded) return null;
+          }
+        }
+        return card;
       },
       removeBriefingInput(threadId, sourceId) {
         const thread = getCodexThreadById(state.codex, threadId);
@@ -13524,16 +14020,31 @@
             return !!ref?.draftText && getCodexThreadDraft(state.codex, session.threadId).includes(ref.draftText);
           },
           include: (row, origin) => {
-            const targets = BriefingState.briefingStepTargets(origin.briefing.steps[origin.index]);
-            const selected = row.sourceIds.map(sourceId => {
-              const matches = references.filter(ref => ref.sourceId === sourceId);
-              if (matches.length !== 1 || !matches[0].hash || targets.filter(target => target.sourceId === sourceId).some(target => target.hash !== matches[0].hash)) {
-                throw new Error('저장된 의견의 고정 근거 연결을 확인하지 못했습니다.');
-              }
-              return matches[0];
-            });
+            const verifiedSelection = () => {
+              if (!scope.current() || session.preparing) throw new Error('원래 대화와 고정 근거를 다시 확인해 주세요.');
+              const step = session.briefing.steps[session.index];
+              const targets = BriefingState.briefingStepTargets(step), resolved = briefingResolvedTargets(session, step);
+              return row.sourceIds.map(sourceId => {
+                const matches = references.filter(ref => ref.sourceId === sourceId);
+                const current = session.references.filter(ref => ref.sourceId === sourceId);
+                const requested = targets.filter(target => target.sourceId === sourceId);
+                if (matches.length !== 1 || current.length !== 1 || !matches[0].hash || !requested.length
+                    || JSON.stringify(current[0]) !== JSON.stringify(matches[0])
+                    || requested.some(target => target.hash !== matches[0].hash || (() => {
+                      const found = resolved.filter(item => item.target === target);
+                      return found.length !== 1 || found[0].status !== 'available' || !found[0].view?.id
+                        || found[0].reference?.sourceId !== sourceId || found[0].reference?.hash !== matches[0].hash;
+                    })())) {
+                  throw new Error('의견의 고정 근거를 다시 확인한 뒤 초안에 포함해 주세요.');
+                }
+                return matches[0];
+              });
+            };
+            const selected = verifiedSelection();
             const draft = BriefingState.briefingCommentDraft(origin, row.text, selected.map(reference => ({ reference })), row);
-            this.attachBriefingComment(session.threadId, draft, selected, scope.current);
+            this.attachBriefingComment(session.threadId, draft, selected, () => {
+              try { return JSON.stringify(verifiedSelection()) === JSON.stringify(selected); } catch { return false; }
+            });
           } });
         // The record is already keyed to this original account/route/step.
         // Preserve the textarea's currently visible text at teardown, even if
@@ -13548,6 +14059,96 @@
         unsubscribe = this.subscribe(() => { if (!scope.current()) controller.dispose(); else controller.notify(); });
         if (!scope.current()) unsubscribe();
         return controller;
+      },
+      async prepareBriefingInputSend(threadId, draft, token, ownerCurrent) {
+        const original = getCodexThreadById(state.codex, threadId);
+        if (!original?.conversationId || !Array.isArray(draft?.briefingInputs) || !draft.briefingInputs.length) return null;
+        const watch = createAcceptedReceiptWatch(threadId, { valid: () => epochScope.valid(token), subscribe: listener => this.subscribe(listener) });
+        const probe = { conversationId: original.conversationId };
+        const commentSnapshot = JSON.stringify(original.briefingCommentRefs || []);
+        let draftChanged = false;
+        const observeDraft = () => {
+          try {
+            const thread = getCodexThreadById(state.codex, threadId);
+            if (!thread || !ChatState.chatDraftMatches(thread, getCodexThreadDraft(state.codex, threadId),
+                state.codex.threadDraftRevisions[threadId] || 0, draft)
+                || JSON.stringify(thread.briefingCommentRefs || []) !== commentSnapshot) draftChanged = true;
+          } catch { draftChanged = true; }
+        };
+        let unsubscribeDraft;
+        try { unsubscribeDraft = this.subscribe(observeDraft); } catch { watch.dispose(); return null; }
+        const dispose = () => { unsubscribeDraft(); watch.dispose(); };
+        const build = () => {
+          const thread = getCodexThreadById(state.codex, threadId), account = ChatState.codexAccountKey(state.codex.authStatus);
+          const access = state.codex.authStatus?.access?.state;
+          if (draftChanged || !watch.current(probe) || !ownerCurrent() || !thread || !account || state.codex.codexAccountKey !== account
+              || state.codex.connected !== true || ['permissionDenied', 'authFailed', 'loginRequired', 'loginInProgress'].includes(access)
+              || !ChatState.chatDraftMatches(thread, getCodexThreadDraft(state.codex, threadId), state.codex.threadDraftRevisions[threadId] || 0, draft)
+              || JSON.stringify(thread.briefingCommentRefs || []) !== commentSnapshot) return null;
+          const comments = (thread.briefingCommentRefs || []).filter(item => item?.draftText && draft.text.includes(item.draftText));
+          const cards = Array.from(document.querySelectorAll('.egd-input-evidence-card'));
+          const plan = [];
+          for (const reference of draft.briefingInputs) {
+            if (!reference?.contextScope || !reference.sourceId || reference.snapshotId !== reference.sourceId || !reference.hash) return null;
+            const matches = [];
+            for (const comment of comments) {
+              const answers = (thread.messages || []).filter(row => row.role === 'assistant' && row.briefing?.id === comment.briefingId);
+              if (answers.length !== 1) continue;
+              const answer = answers[0], steps = (answer.briefing?.steps || []).filter(step => step.id === comment.stepId);
+              if (steps.length !== 1) continue;
+              const targets = BriefingState.briefingStepTargets(steps[0]).filter(target => target.sourceId === reference.sourceId);
+              if (!targets.length) continue;
+              const receipt = acceptedInputReceipt(thread, answer);
+              if (!receipt || !historyReadReferenceCurrent(threadId, reference, receipt)) return null;
+              for (const target of targets) {
+                if (target.hash !== reference.hash || briefingRangeIssue(target)) return null;
+                const key = InputContext.inputEvidenceKey({ ...reference, presentationRange: target.range });
+                const card = cards.find(item => {
+                  const owner = item._briefingEvidenceScope, saved = item._inputReference;
+                  if (!item.isConnected || !item._inputEvidenceLoaded || typeof item._invalidateBriefingEvidence !== 'function'
+                      || owner?.threadId !== threadId || owner.accountKey !== account || owner.sourceId !== reference.sourceId
+                      || owner.hash !== reference.hash || ['conversationId', 'runId', 'answerId'].some(field => owner[field] !== receipt[field])
+                      || !saved || InputContext.inputEvidenceKey(saved) !== key) return false;
+                  const { presentationRange, ...origin } = saved;
+                  return JSON.stringify(origin) === JSON.stringify(reference);
+                });
+                if (!card) return null;
+                matches.push({ reference, receipt, range: target.range, card, key });
+              }
+            }
+            if (!matches.length || new Set(matches.map(item => item.receipt.answerId)).size !== 1) return null;
+            for (const item of matches) if (!plan.some(existing => existing.reference.sourceId === reference.sourceId
+                && existing.key === item.key && existing.receipt.answerId === item.receipt.answerId)) plan.push(item);
+          }
+          return plan;
+        };
+        let initial;
+        try { initial = build(); } catch { initial = null; }
+        if (!initial?.length) { dispose(); return null; }
+        const current = () => {
+          try {
+            const next = build();
+            return !!next && next.length === initial.length && next.every((item, index) => item.card === initial[index].card
+              && item.key === initial[index].key && JSON.stringify(item.receipt) === JSON.stringify(initial[index].receipt));
+          } catch { return false; }
+        };
+        const abort = new window.AbortController();
+        let timer;
+        try {
+          const read = async () => {
+            for (const item of initial) {
+              if (!current()) return false;
+              const value = await this.readInput(item.reference, { threadId, historyReceipt: item.receipt,
+                ...item.range, isCurrent: current, signal: abort.signal, silent: true });
+              if (!value || !current()) return false;
+            }
+            return current();
+          };
+          const timeout = new Promise(resolve => { timer = window.setTimeout(() => { abort.abort(); resolve(false); }, 8000); });
+          if (!await Promise.race([read(), timeout])) { abort.abort(); dispose(); return null; }
+          return { current, dispose: () => { abort.abort(); dispose(); } };
+        } catch { abort.abort(); dispose(); return null; }
+        finally { window.clearTimeout(timer); }
       },
       attachBriefingComment(threadId, comment, references, currentScope) {
         const thread = getCodexThreadById(state.codex, threadId);
@@ -14259,6 +14860,7 @@
         const sendOwnerCurrent = () => !sendOwnerWatch || sendIdentityCurrent()
           && state.codex.activeThreadId === activeThread.id && (state.codex.activityRoomGeneration || 0) === sendRoomGeneration
           && ChatState.clientThreadBinding(getCodexThreadById(state.codex, activeThread.id)) === sendBinding;
+        let briefingProof = null;
         try {
         let reservation = memoAskSendReservations.get(activeThread?.id);
         if (reservation && !reservation.scope.current()) {
@@ -14319,6 +14921,14 @@
           submittedRoomDefault = observed ? normalizeChatRoomProjectDefault(observed, ChatState.clientThreadBinding(activeThread)) : null;
         } catch { updateThreadById(activeThread.id, thread => ({ ...thread, sendError: CHAT_ROOM_PROJECT_UNAVAILABLE })); emit(); return; }
         const token = epochScope.begin(engineId, ChatState.chatThreadEngineProfileId(activeThread, state.codex));
+        const failBriefingSend = () => {
+          if (sendOwnerCurrent()) {
+            updateThreadById(activeThread.id, thread => ({ ...thread,
+              sendError: thread.sendError || '브리핑 근거의 출처와 접근 권한을 확인할 수 없어 전송하지 않았습니다. 원래 브리핑에서 다시 확인하거나 첨부를 직접 제거하고 다시 선택해 주세요.' }));
+            emit();
+          }
+          epochScope.finish(token);
+        };
         const projectBinding = ChatState.clientThreadBinding(activeThread), projectProfile = ChatState.chatThreadEngineProfileId(activeThread, state.codex);
         const projectAccountKey = () => JSON.stringify([state.codex.codexAccountKey, state.codex.authStatus?.accountId,
           state.codex.authStatus?.accountEmail, state.codex.authStatus?.isLoggedIn]);
@@ -14333,6 +14943,11 @@
         const selectedInputs = submittedDraft.inputSources;
         let submittedWasCleared = false;
         let inputReferences;
+        if (submittedDraft.briefingInputs.length) {
+          try { briefingProof = await this.prepareBriefingInputSend(activeThread.id, submittedDraft, token, sendOwnerCurrent); }
+          catch { briefingProof = null; }
+          if (!briefingProof || !briefingProof.current()) { failBriefingSend(); return; }
+        }
         const clearAcceptedClaudeDraft = () => {
           if (engineId !== 'claude' || !ChatState.chatDraftMatches(getCodexThreadById(state.codex, activeThread.id),
               getCodexThreadDraft(state.codex, activeThread.id), state.codex.threadDraftRevisions[activeThread.id] || 0, submittedDraft)) return;
@@ -14342,6 +14957,7 @@
           state.codex.draft = getCodexThreadDraft(state.codex, state.codex.activeThreadId);
         };
         if (!await ensureNativeReadyForSend(activeThread) || !epochScope.valid(token) || !sendOwnerCurrent()) { epochScope.finish(token); return; }
+        if (briefingProof && !briefingProof.current()) { failBriefingSend(); return; }
         if (memoSendBlocked()) { epochScope.finish(token); return; }
         const resumedThread = getCodexThreadById(state.codex, activeThread.id);
         if (!resumedThread || ChatState.clientThreadBinding(resumedThread) !== ChatState.clientThreadBinding(activeThread)
@@ -14354,6 +14970,7 @@
           inputReferences = [...await captureThreadInputs(activeThread, selectedInputs, token, sendOwnerCurrent), ...submittedDraft.briefingInputs];
           for (const reference of inputReferences) if (reference.contextScope) InputContext.assertInputContextScope(reference, ChatState.chatContextRequestScope(activeThread, state.codex));
           if (!epochScope.valid(token) || !sendOwnerCurrent()) { epochScope.finish(token); return; }
+          if (briefingProof && !briefingProof.current()) { failBriefingSend(); return; }
           if (memoSendBlocked()) { epochScope.finish(token); return; }
           const current = getCodexThreadById(state.codex, activeThread.id);
           if (!current || ChatState.clientThreadBinding(current) !== ChatState.clientThreadBinding(activeThread)) throw new Error('대화 연결이 바뀌었습니다. 초안을 다시 확인해 주세요.');
@@ -14408,25 +15025,29 @@
         }
         if (!epochScope.valid(token) || !sendOwnerCurrent()) { epochScope.finish(token); return; }
         if (memoSendBlocked()) { epochScope.finish(token); return; }
-        // The first send ties the room to its engine (D3) and makes it the app's recent one (D4).
-        updateThreadById(activeThread.id, thread => ({ ...thread, engineId, sendError: null,
-          ...(engineId === 'claude' ? { engineProfileId: token.profile } : {}) }));
-        state.codex.recentEngineId = engineId;
-        const authorProfile = activeThread.profileEnabled ? codexThreadAgentProfile(activeThread) : null;
-        ChatState.registerChatRequest(protocol, { requestId, clientThreadId: ChatState.clientThreadBinding(activeThread), localThreadId: activeThread.id, conversationId: activeThread.conversationId, authorName: authorProfile ? authorProfile.name : engineId === 'claude' ? 'Claude' : 'Codex', ...(authorProfile?.avatar ? { authorAvatar: authorProfile.avatar } : {}) }, state.codex.authStatus, engineId);
-        appendMessageToThread(activeThread.id, createCodexMessage('user', content, 'submitting', {
-          readBy: [SELF_MEMBER], requestId, inputReferences,
-        }), { countUnread: false });
-        state.codex.error = null;
-        const currentComposer = getCodexThreadById(state.codex, activeThread.id);
-        submittedWasCleared = ChatState.chatDraftMatches(currentComposer, getCodexThreadDraft(state.codex, activeThread.id), state.codex.threadDraftRevisions[activeThread.id] || 0, submittedDraft);
-        if (submittedWasCleared && engineId !== 'claude') {
-          updateThreadById(activeThread.id, thread => ChatState.applyRequestProjectTarget({ ...thread, sendError: null, inputSources: [], briefingInputs: [] }, null));
-          chatRequestProjectDisplays.delete(activeThread.id);
-          state.codex.threadDrafts = { ...state.codex.threadDrafts, [activeThread.id]: '' };
-        }
-        state.codex.draft = getCodexThreadDraft(state.codex, state.codex.activeThreadId);
-        emit();
+        if (briefingProof && !briefingProof.current()) { failBriefingSend(); return; }
+        const registerPending = () => {
+          // The first send ties the room to its engine (D3) and makes it the app's recent one (D4).
+          updateThreadById(activeThread.id, thread => ({ ...thread, engineId, sendError: null,
+            ...(engineId === 'claude' ? { engineProfileId: token.profile } : {}) }));
+          state.codex.recentEngineId = engineId;
+          const authorProfile = activeThread.profileEnabled ? codexThreadAgentProfile(activeThread) : null;
+          ChatState.registerChatRequest(protocol, { requestId, clientThreadId: ChatState.clientThreadBinding(activeThread), localThreadId: activeThread.id, conversationId: activeThread.conversationId, authorName: authorProfile ? authorProfile.name : engineId === 'claude' ? 'Claude' : 'Codex', ...(authorProfile?.avatar ? { authorAvatar: authorProfile.avatar } : {}) }, state.codex.authStatus, engineId);
+          appendMessageToThread(activeThread.id, createCodexMessage('user', content, 'submitting', {
+            readBy: [SELF_MEMBER], requestId, inputReferences,
+          }), { countUnread: false });
+          state.codex.error = null;
+          const currentComposer = getCodexThreadById(state.codex, activeThread.id);
+          submittedWasCleared = ChatState.chatDraftMatches(currentComposer, getCodexThreadDraft(state.codex, activeThread.id), state.codex.threadDraftRevisions[activeThread.id] || 0, submittedDraft);
+          if (submittedWasCleared && engineId !== 'claude') {
+            updateThreadById(activeThread.id, thread => ChatState.applyRequestProjectTarget({ ...thread, sendError: null, inputSources: [], briefingInputs: [] }, null));
+            chatRequestProjectDisplays.delete(activeThread.id);
+            state.codex.threadDrafts = { ...state.codex.threadDrafts, [activeThread.id]: '' };
+          }
+          state.codex.draft = getCodexThreadDraft(state.codex, state.codex.activeThreadId);
+        };
+        if (!briefingProof) { registerPending(); emit(); }
+        let receiptWatch = null;
         try {
           const runtimeConfig = codexThreadRuntimeConfig(activeThread);
           runtimeConfig.engineId = engineId;
@@ -14463,14 +15084,30 @@
             // envelope cannot create or renew a Browser interaction grant.
             chatRequest.executionPolicy = { mode: 'browserBounded' };
           }
-          const result = await fetchJson('/chat/send', {
+          receiptWatch = createAcceptedReceiptWatch(activeThread.id, { valid: () => epochScope.valid(token), subscribe: listener => this.subscribe(listener) });
+          if (briefingProof) {
+            // Flush synchronous observers before the final check. No draft or
+            // request state has been changed on this guarded path yet.
+            emit();
+            if (!briefingProof.current() || !defaultSendCurrent() || !sendOwnerCurrent()) { failBriefingSend(); return; }
+            if (memoSendBlocked()) { epochScope.finish(token); return; }
+            registerPending();
+          }
+          const pendingSend = fetchJson('/chat/send', {
             method: 'POST',
             signal: token.signal,
             body: JSON.stringify(chatRequest),
           });
+          if (briefingProof) emit();
+          const result = await pendingSend;
           if (!epochScope.valid(token) || ChatState.clientThreadBinding(getCodexThreadById(state.codex, activeThread.id)) !== ChatState.clientThreadBinding(activeThread)) return { requestId, accepted: false, status: 'unconfirmed' };
           const run = ChatState.acceptChatRequest(protocol, result, requestId);
           if (run) {
+            try {
+              if (receiptWatch.current(result) && (!options.memoAskReservation || options.memoAskReservation.current())) {
+                rememberAcceptedInputReceipt(getCodexThreadById(state.codex, activeThread.id), result, requestId, run);
+              }
+            } catch {} // The send remains accepted; only this optional receipt proof is withheld.
             clearAcceptedClaudeDraft();
             // CHAT-09: the reply confirms a one-time start; a bounded run keeps the room from branching.
             if (chatRequest.stateless || chatRequest.executionPolicy) updateThreadById(activeThread.id, thread => ({ ...thread,
@@ -14495,6 +15132,11 @@
         } catch (error) {
           if (!epochScope.valid(token) || ChatState.clientThreadBinding(getCodexThreadById(state.codex, activeThread.id)) !== ChatState.clientThreadBinding(activeThread)) return { requestId, accepted: false, status: 'unconfirmed' };
           const request = protocol.requests[requestId];
+          if (!request) {
+            if (briefingProof && sendOwnerCurrent()) updateThreadById(activeThread.id, thread => ({ ...thread,
+              sendError: thread.sendError || '고정 근거와 대화 연결을 확인하지 못해 전송하지 않았습니다.' }));
+            return { requestId, accepted: false, status: 'failed' };
+          }
           if (error.code === 'BROWSER_TOOLS_UNAVAILABLE') {
             error.message = '이 대화는 Browser 조작 도구가 등록되기 전에 만들어졌습니다. 기존 기록과 초안은 유지됩니다. 새 Chat을 만든 뒤 Browser에서 이번 실행의 조작 대상을 다시 선택해 주세요.';
           }
@@ -14550,8 +15192,8 @@
             }
           }
           return { requestId, accepted: request.status === 'accepted' && !!request.runId, status: request.status };
-        } finally { epochScope.finish(token); if (epochScope.valid(token)) emit(); }
-        } finally { editedDraftWatch?.release(); sendOwnerWatch?.release(); }
+        } finally { receiptWatch?.dispose(); epochScope.finish(token); if (epochScope.valid(token)) emit(); }
+        } finally { briefingProof?.dispose(); editedDraftWatch?.release(); sendOwnerWatch?.release(); }
       },
     };
   }

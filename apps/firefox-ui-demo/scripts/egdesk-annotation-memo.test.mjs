@@ -622,6 +622,7 @@ function memoDispatchBridgeSource() {
     'getCodexThreadById', 'getActiveCodexThread', 'getCodexThreadDraft', 'uniqueNames', 'buildThreadSubtitle',
     'createCodexThread', 'normalizeHudView', 'createCodexMessage', 'defaultCodexAgentProfileIdForThread',
     'codexThreadAgentProfile', 'codexThreadToolMode', 'codexThreadSystemPrompt', 'codexThreadRuntimeConfig',
+    'createAcceptedReceiptWatch', 'rememberAcceptedInputReceipt',
     'browserToolRefreshSelection', 'browserToolSelectedSources', 'browserToolSameUrl',
   ].map(memoSurfaceFunction).join('\n');
   return `let cardSeq = 0;\n${memoSurfaceSource.slice(projectStart, projectEnd)}\n${functions}\n${bridge}\n${memoSurfaceSource.slice(memoStart, memoEnd)}\nreturn { bridge: installCodexBridge(), askMemoAgent, attachMemoRepliesFromRun, renderMemoCard, spawnMemoCard };`;
@@ -960,6 +961,68 @@ test('memo dispatch: the accepted send carries the freshly checked room project 
   assert.equal(Object.hasOwn(sent, 'projectTarget'), false);
 });
 
+test('memo dispatch: the actual receipt watch closes on an observed owner or permission round trip', async t => {
+  for (const change of ['room', 'binding', 'account', 'permission', 'scope']) await t.test(change, () => {
+    const h = memoDispatchHarness({ conversation: true }), listeners = new Set();
+    const create = Function('state', 'ChatState', 'getCodexThreadById',
+      `${memoSurfaceFunction('createAcceptedReceiptWatch')}\nreturn createAcceptedReceiptWatch;`)(
+      h.state, ChatState, (_codex, id) => h.state.codex.threads.find(thread => thread.id === id) || null);
+    let valid = true;
+    const watch = create('dm-rio', { valid: () => valid,
+      subscribe: listener => { listeners.add(listener); listener(); return () => listeners.delete(listener); } });
+    const receipt = { conversationId: 'synthetic-conversation' };
+    assert.equal(watch.current(receipt), true, 'the unchanged verified owner can be observed');
+    assert.equal(watch.current({ conversationId: 'different-conversation' }), false, 'a different conversation cannot use the watch');
+    assert.equal(watch.current(receipt), true);
+    const auth = h.state.codex.authStatus, accountKey = h.state.codex.codexAccountKey;
+    const binding = h.target().clientBindingId, generation = h.state.codex.activityRoomGeneration;
+    if (change === 'room') { h.state.codex.activeThreadId = 'unrelated-room'; h.state.codex.activityRoomGeneration = 1; }
+    if (change === 'binding') h.target().clientBindingId = 'different-wire';
+    if (change === 'account') {
+      h.state.codex.authStatus = { ...auth, accountId: 'synthetic-account-b' };
+      h.state.codex.codexAccountKey = ChatState.codexAccountKey(h.state.codex.authStatus);
+    }
+    if (change === 'permission') h.state.codex.authStatus = { ...auth, access: { state: 'permissionDenied' } };
+    if (change === 'scope') valid = false;
+    for (const listener of listeners) listener();
+    h.state.codex.activeThreadId = 'dm-rio'; h.state.codex.activityRoomGeneration = generation;
+    h.target().clientBindingId = binding; h.state.codex.authStatus = auth; h.state.codex.codexAccountKey = accountKey; valid = true;
+    for (const listener of listeners) listener();
+    assert.equal(watch.current(receipt), false, 'returning to prior values cannot revive this receipt watch');
+    watch.dispose(); assert.equal(listeners.size, 0, 'the in-flight observer is released');
+  });
+});
+
+test('memo dispatch: real receipt proof rejects incomplete and mismatched accepted responses', async () => {
+  const h = memoDispatchHarness();
+  assert.equal(await h.ask(), true); assert.equal(h.sends().length, 1);
+  const request = Object.values(h.protocol.requests)[0], run = Object.values(h.protocol.runs)[0];
+  assert.equal(request.status, 'accepted');
+  assert.equal(request.acceptedInputMessageId, undefined, 'ordinary acceptance alone is not durable receipt proof');
+  const remember = Function('state', 'ChatState',
+    `${memoSurfaceFunction('rememberAcceptedInputReceipt')}\nreturn rememberAcceptedInputReceipt;`)(h.state, ChatState);
+  const receipt = { accepted: true, durable: true, duplicate: false, requestId: request.requestId, clientThreadId: request.clientThreadId,
+    conversationId: run.conversationId, runId: run.runId, answerId: run.answerId,
+    localMessageId: 'synthetic-user-message', localConversationId: 'synthetic-local-conversation', localRunId: 'synthetic-local-run' };
+  for (const changed of [{ durable: false }, { duplicate: true }, { clientThreadId: 'different-wire' },
+    { requestId: 'different-request' }, { answerId: 'different-answer' }, { localMessageId: '' }]) {
+    assert.equal(remember(h.target(), { ...receipt, ...changed }, request.requestId, run), false);
+    assert.equal(request.acceptedInputMessageId, undefined); assert.equal(run.acceptedInputMessageId, undefined);
+  }
+  h.protocol.requests['synthetic-other-request'] = { requestId: 'synthetic-other-request', acceptedInputMessageId: receipt.localMessageId };
+  assert.equal(remember(h.target(), receipt, request.requestId, run), false, 'another request already owns this input receipt');
+  h.protocol.requests['synthetic-other-request'] = { requestId: 'synthetic-other-request', acceptedInputLocalRunId: receipt.localRunId };
+  assert.equal(remember(h.target(), receipt, request.requestId, run), false, 'another request already owns this local run');
+  delete h.protocol.requests['synthetic-other-request'];
+  h.target().messages.push({ role: 'assistant', id: receipt.localMessageId });
+  assert.equal(remember(h.target(), receipt, request.requestId, run), false, 'an assistant message cannot be the user input receipt');
+  h.target().messages.pop();
+  assert.equal(request.acceptedInputMessageId, undefined); assert.equal(run.acceptedInputMessageId, undefined);
+  assert.equal(remember(h.target(), receipt, request.requestId, run), true, 'only the fully matching synthetic receipt is recorded');
+  assert.equal(request.acceptedInputMessageId, 'synthetic-user-message');
+  assert.equal(run.acceptedInputMessageId, 'synthetic-user-message');
+});
+
 test('memo dispatch: repeated ask while preparation is pending sends and records at most once', async () => {
   const h = memoDispatchHarness(), gate = h.hold('/v1/files/projects/room-default');
   const first = trackedMemoPromise(h.ask());
@@ -1021,6 +1084,27 @@ test('memo dispatch: unrelated draft or attachment in the recipient room is neve
       assert.deepEqual(body.contextSnapshotIds || [], []);
     }
   });
+});
+
+test('memo dispatch: manual and briefing inputs from the same source both remain in the original draft', async () => {
+  const manual = { id: 'synthetic-same-source', kind: 'board-element', label: '기존 선택 자료', sourceRef: { viewId: 'synthetic-view' } };
+  const memo = revisionMemo(), prior = Memo.recordMemoAsk(memo, revisionDraft(memo), { requestId: 'prior-request', threadId: 'dm-rio', now: 2 });
+  const answered = Memo.appendMemoReply(prior, { author: { kind: 'agent', agentId: 'rio' }, text: '이전 답', askId: 'ask-1', answerId: 'prior-answer' }, { now: 3 });
+  assert.equal(answered.appended, true);
+  const h = memoDispatchHarness({ targetInputs: [manual], record: answered.memo });
+  const scope = ChatState.chatContextRequestScope(h.target(), h.state.codex);
+  const briefing = InputContext.capturedInputReference(manual, { id: manual.id, sourceId: 'synthetic-snapshot', snapshotId: 'synthetic-snapshot',
+    hash: 'synthetic-hash', sourceRef: manual.sourceRef, clientThreadId: scope.clientThreadId,
+    engine: { engineId: scope.engineId, engineProfileId: scope.engineProfileId } }, scope);
+  h.target().briefingInputs = [briefing]; h.target().sendError = '기존 오류';
+  const before = memoJson({ draft: h.state.codex.threadDrafts['dm-rio'], inputs: h.target().inputSources,
+    briefing: h.target().briefingInputs, memo: h.root._memoRecord });
+  assert.equal(await h.ask(), false, 'an explicit memo ask cannot replace an existing selected draft');
+  assert.equal(h.sends().length, 0); assert.deepEqual(h.effects.captures, []);
+  assert.deepEqual({ draft: h.state.codex.threadDrafts['dm-rio'], inputs: h.target().inputSources,
+    briefing: h.target().briefingInputs, memo: h.root._memoRecord }, before);
+  assert.equal(h.target().sendError, '기존 오류');
+  await new Promise(resolve => setImmediate(resolve)); assert.equal(h.sends().length, 0, 'no automatic retry');
 });
 
 test('memo revision: a dispatch basis tracks body edits, not timestamps or unrelated memo changes', () => {

@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { existsSync, readFileSync, rmSync } from 'node:fs';
 import { Readable } from 'node:stream';
-import { createHash } from 'node:crypto';
+import { createHash, webcrypto } from 'node:crypto';
 import { compileFunction, runInNewContext } from 'node:vm';
 import { readSurfaceSource } from './egdesk-surface-source.mjs';
 import { initialSurfaceMode, shouldFocusInitialBrowser, planBoardProjection, snapshotBoardProjection, remapMemberReferences, recoverDeskSnapshot, canPersistDeskSession, ownedProjectionMembers, missingProjectionMembers, fitSurfaceCamera, surfaceSemanticLevel, surfaceProximityClusters } from '../overlay/resources/EGDeskSurfaceState.sys.mjs';
@@ -59,7 +59,7 @@ function savedBriefingUiHarness({ respond, engineId = 'codex', verified = true, 
   document.querySelector = selector => selector === '#egd-answer-briefing nav'
     ? settingsNodes(document.getElementById('egd-answer-briefing'), node => node.tagName === 'NAV')[0] : null;
   let timerId = 0, uuidCount = 0, saves = 0;
-  const window = { AbortController, crypto: { randomUUID: () => `10000000-0000-4000-8000-${String(++uuidCount).padStart(12, '0')}` },
+  const window = { AbortController, crypto: { subtle: webcrypto.subtle, randomUUID: () => `10000000-0000-4000-8000-${String(++uuidCount).padStart(12, '0')}` },
     setTimeout: (fn, ms) => { const id = ++timerId; timers.set(id, { fn, ms }); return id; }, clearTimeout: id => timers.delete(id) };
   const authStatus = { isLoggedIn: true, accountEmail: 'owner@example.test', authMode: 'chatgpt', identityStatus: 'known' };
   const owner = Chat.codexAccountKey(authStatus);
@@ -102,7 +102,8 @@ function savedBriefingUiHarness({ respond, engineId = 'codex', verified = true, 
     briefingResolvedTargets: (shown, step) => resolveEvidence ? resolveEvidence(shown, step) : prepareEvidence ? Briefing.resolveBriefingTargets(step || Briefing.currentBriefingStep(shown), {
       references: shown.references, views: shown.briefing.steps.flatMap(step => Briefing.briefingStepTargets(step)).filter(target => prepared.has(target.sourceId))
         .flatMap(target => {
-          try { return [{ sourceId: target.sourceId, hash: target.hash, evidenceKey: InputContext.inputEvidenceKey({ ...target, presentationRange: target.range }),
+          try { return [{ id: `fixture-evidence-${InputContext.inputEvidenceKey({ ...target, presentationRange: target.range })}`,
+            sourceId: target.sourceId, hash: target.hash, evidenceKey: InputContext.inputEvidenceKey({ ...target, presentationRange: target.range }),
             sourceMatches: true, revisionMatches: true, geometry: { x: 0, y: 0, width: 640, height: 480 } }]; }
           catch { return []; }
         }),
@@ -116,11 +117,14 @@ function savedBriefingUiHarness({ respond, engineId = 'codex', verified = true, 
     cloneJson: value => JSON.parse(JSON.stringify(value)), updateThreadById, emit, scheduleDeskSessionSave: () => { saves++; },
     refreshDeskMinimap: () => refreshMinimap?.() };
   const openerStart = surfaceSource.indexOf('  async function openAnswerBriefing('), openerEnd = surfaceSource.indexOf('\n  }\n', openerStart);
-  const optionalMinimapDefinitions = ['rememberBriefingMinimapEvidence', 'clearMinimapBriefingSearchLabels', 'clearBriefingMinimapDisplay']
+  const optionalMinimapDefinitions = ['acceptedInputReceipt', 'visibleInputAnswer', 'historyReadReferenceCurrent', 'briefingReadReferenceCurrent',
+    'rememberBriefingMinimapEvidence', 'clearMinimapBriefingSearchLabels', 'clearBriefingMinimapDisplay']
     .filter(name => surfaceSource.includes(`  function ${name}(`)).map(declaration).join('\n');
   const actual = compileFunction(`${['el', 'chatBindingNonce', 'getCodexThreadById', 'getCodexThreadDraft', 'briefingInputReferences', 'briefingRangeIssue', 'createBriefingCommentScope', 'mountBriefingComments', 'renderAnswerBriefing', 'closeAnswerBriefing'].map(declaration).join('\n')}\n${optionalMinimapDefinitions}
     ${surfaceSource.slice(openerStart, openerEnd + 4)}
-    return { openAnswerBriefing, mountBriefingComments, renderAnswerBriefing, closeAnswerBriefing, bridge: { ${['createBriefingPreparationScope(', 'createBriefingComments(', 'attachBriefingComment(', 'setDraft('].map(method).join(',\n')} } };`, Object.keys(deps))(...Object.values(deps));
+    return { openAnswerBriefing, mountBriefingComments, renderAnswerBriefing, closeAnswerBriefing,
+      rememberEvidence: typeof rememberBriefingMinimapEvidence === 'function' ? rememberBriefingMinimapEvidence : null,
+      bridge: { ${['createBriefingPreparationScope(', 'createBriefingComments(', 'attachBriefingComment(', 'setDraft('].map(method).join(',\n')} } };`, Object.keys(deps))(...Object.values(deps));
   const bridge = state.codexBridge = actual.bridge;
   bridge.subscribe = fn => { listeners.add(fn); fn(state.codex); return () => listeners.delete(fn); };
   // Only source materialization is deferred by this adapter. The opener,
@@ -128,15 +132,22 @@ function savedBriefingUiHarness({ respond, engineId = 'codex', verified = true, 
   bridge.openInputEvidence = async (threadId, reference, options) => {
     evidenceCalls.push({ threadId, reference, options });
     const result = await prepareEvidence?.(reference);
-    if (result !== false && options.isCurrent()) { prepared.add(reference.sourceId); return evidenceCard ? evidenceCard(reference) : { reference }; }
+    if (result !== false && options.isCurrent()) {
+      prepared.add(reference.sourceId);
+      const card = evidenceCard ? evidenceCard(reference) : { reference };
+      // This older renderer fixture represents a successful local read at its
+      // adapter boundary. Still run the real proof guard before marking it.
+      if (card?.isConnected && actual.rememberEvidence) actual.rememberEvidence(state.codex.briefingSession, reference, card, true);
+      return card;
+    }
     return null;
   };
-  const open = (options = {}) => {
+  const open = (options = {}, message = null) => {
     state.panTarget = { ...state.pan }; state.zoomTarget = state.zoom;
     const current = state.codex.threads.find(item => item.id === 'room-a'); current.messages ||= [];
     const captures = makeSession().references.map(ref => ({ ...ref, snapshotId: ref.sourceId, clientThreadId: current.clientBindingId,
       engine: { engineId: current.engineId, engineProfileId: current.engineProfileId } }));
-    const opening = actual.openAnswerBriefing(current, { ...makeSession().identity, briefing, contextCaptures: captures }, options);
+    const opening = actual.openAnswerBriefing(current, message || { ...makeSession().identity, briefing, contextCaptures: captures }, options);
     session = state.codex.briefingSession; panel = document.getElementById('egd-answer-briefing');
     return opening.finally(() => { session = state.codex.briefingSession; panel = document.getElementById('egd-answer-briefing'); });
   };
@@ -489,13 +500,13 @@ test('Briefing editor preparation: existing evidence retry updates only evidence
 
 test('Briefing saved UI: actual POST receipt appends to the latest draft once and preserves attachments, panel and focus', async () => {
   let resolve;
-  const h = savedBriefingUiHarness({ respond: (call, { row, list }) => call.options.method === 'GET' ? Promise.resolve(list())
+  const h = await verifiedSavedBriefingUiHarness({ respond: (call, { row, list }) => call.options.method === 'GET' ? Promise.resolve(list())
     : new Promise(done => { resolve = () => done({ comment: row({ text: call.body.text, clientRequestId: call.body.clientRequestId }) }); }) });
-  h.mount(); await settle(); const panel = h.panel(), input = h.part('briefing-comment'); input.focus(); input.setSelectionRange(2, 2);
+  const initialIds = h.uuidCount(), panel = h.panel(), input = h.part('briefing-comment'); input.focus(); input.setSelectionRange(2, 2);
   h.type('새 의견'); input.scrollTop = 3; const camera = JSON.stringify([h.state.pan, h.state.zoom]);
   const attachments = JSON.stringify(h.thread().inputSources); h.click('briefing-comment-attach');
-  assert.equal(h.part('briefing-comment-status').dataset.state, 'saving'); assert.equal(h.uuidCount(), 1);
-  assert.equal(h.part('briefing-comment-status').dataset.clientRequestId, '10000000-0000-4000-8000-000000000001');
+  assert.equal(h.part('briefing-comment-status').dataset.state, 'saving'); assert.equal(h.uuidCount(), initialIds + 1);
+  assert.equal(h.part('briefing-comment-status').dataset.clientRequestId, `10000000-0000-4000-8000-${String(initialIds + 1).padStart(12, '0')}`);
   assert.equal(h.part('briefing-comment-attach').disabled, true);
   h.bridge.setDraft('기존 초안 + 저장 대기 중 추가한 내용', 'room-a'); resolve(); await settle();
   const text = h.state.codex.threadDrafts['room-a']; assert.match(text, /^기존 초안 \+ 저장 대기 중 추가한 내용\n\n\[설명 · 1단계 · 의견 #1\]/);
@@ -510,16 +521,16 @@ test('Briefing saved UI: actual POST receipt appends to the latest draft once an
   const url = new URL(h.requests.find(call => call.options.method === 'POST').url, 'http://fixture.invalid');
   assert.deepEqual(Object.fromEntries(url.searchParams), { engineId: 'codex', engineProfileId: 'codex-slot', clientThreadId: 'stable-a', conversationId: 'native-a' });
   h.reopen(); await settle(); assert.equal(h.part('briefing-comment-include').disabled, true); assert.equal(h.part('briefing-comment').value, '새 의견');
-  assert.equal(h.uuidCount(), 1); assert.equal(h.requests.filter(call => call.options.method === 'POST').length, 1); h.close();
+  assert.equal(h.uuidCount(), initialIds + 1); assert.equal(h.requests.filter(call => call.options.method === 'POST').length, 1); h.close();
 });
 
 test('Briefing saved UI: automatic lost-response GET recovers exact UUID, requires explicit draft include and never resends', async () => {
   let committed;
-  const h = savedBriefingUiHarness({ respond: (call, { row, list }) => {
+  const h = await verifiedSavedBriefingUiHarness({ respond: (call, { row, list }) => {
     if (call.options.method === 'POST') { committed = row({ text: call.body.text, clientRequestId: call.body.clientRequestId }); return Promise.reject(new Error('response lost')); }
     return Promise.resolve(committed ? list(committed) : list());
   } });
-  h.mount(); await settle(); h.type('새 의견'); h.click('briefing-comment-attach'); await settle();
+  h.type('새 의견'); h.click('briefing-comment-attach'); await settle();
   assert.deepEqual(h.requests.map(call => call.options.method), ['GET', 'POST', 'GET']);
   assert.equal(h.part('briefing-comment-status').dataset.state, 'saved'); assert.equal(h.state.codex.threadDrafts['room-a'], '기존 초안');
   assert.equal(h.part('briefing-comment-row').dataset.clientRequestId, committed.clientRequestId);
@@ -529,7 +540,7 @@ test('Briefing saved UI: automatic lost-response GET recovers exact UUID, requir
 });
 
 test('Briefing saved UI: known save plus busy draft exposes row-only retry, without lost input or another POST', async () => {
-  const h = savedBriefingUiHarness(); h.mount(); await settle(); h.thread().preparingInput = true;
+  const h = await verifiedSavedBriefingUiHarness(); h.thread().preparingInput = true;
   h.type('새 의견'); h.click('briefing-comment-attach'); await settle();
   assert.match(h.part('briefing-comment-draft-status').textContent, /#1 저장됐지만 초안에 넣지 못함/);
   assert.equal(h.state.codex.threadDrafts['room-a'], '기존 초안'); h.thread().preparingInput = false;
@@ -736,11 +747,11 @@ test('Briefing saved UI: retained unknown UUID survives close and reopen; new GE
 });
 
 test('Briefing saved UI: legacy comment without request UUID is readable and draft-only; unknown save does not claim it', async () => {
-  const h = savedBriefingUiHarness({ respond: (call, { row, list }) => {
+  const h = await verifiedSavedBriefingUiHarness({ respond: (call, { row, list }) => {
     const legacy = row(); delete legacy.clientRequestId;
     return call.options.method === 'POST' ? Promise.reject(new Error('lost')) : Promise.resolve(list(legacy));
   } });
-  h.mount(); await settle(); assert.equal(h.part('briefing-comment-body').textContent, '새 의견');
+  assert.equal(h.part('briefing-comment-body').textContent, '새 의견');
   h.type('새 의견'); h.click('briefing-comment-attach'); await settle();
   assert.equal(h.part('briefing-comment-status').dataset.state, 'unknown'); assert.equal(h.state.codex.threadDrafts['room-a'], '기존 초안');
   h.click('briefing-comment-include'); await settle(); assert.match(h.state.codex.threadDrafts['room-a'], /의견 #1/);
@@ -761,13 +772,13 @@ test('Briefing saved UI: production renderer places comments after explanation a
 
 test('Briefing saved UI: an explicitly edited new attempt may repeat the same text with a new UUID, never infer identity from text', async () => {
   let seq = 0;
-  const h = savedBriefingUiHarness({ respond: (call, { row, list }) => {
+  const h = await verifiedSavedBriefingUiHarness({ respond: (call, { row, list }) => {
     if (call.options.method === 'GET') return Promise.resolve(list());
     seq++;
     return Promise.resolve({ comment: row({ id: `20000000-0000-4000-8000-${String(seq).padStart(12, '0')}`, seq,
       clientRequestId: call.body.clientRequestId, text: call.body.text }) });
   } });
-  h.mount(); await settle(); h.click('briefing-comment-attach'); await settle(); assert.equal(h.uuidCount(), 0, 'empty validation does not allocate an attempt');
+  const initialIds = h.uuidCount(); h.click('briefing-comment-attach'); await settle(); assert.equal(h.uuidCount(), initialIds, 'empty validation does not allocate an attempt');
   h.type('같은 문장'); h.click('briefing-comment-attach'); await settle();
   h.type(''); h.type('같은 문장'); h.click('briefing-comment-attach'); await settle();
   const posts = h.requests.filter(call => call.options.method === 'POST'); assert.equal(posts.length, 2);
@@ -791,7 +802,7 @@ test('Briefing explicit retry: real helper idempotency stores once, accepts its 
     },
   };
   contexts = new ContextRuntime({ store, getOwnerKey: () => 'owner-a', getAuthority: hints => server.runtime.contextAuthority(hints) });
-  h = savedBriefingUiHarness({ respond: async call => {
+  h = await verifiedSavedBriefingUiHarness({ clientBindingId: 'binding-a', onCreate: value => { h = value; }, respond: async call => {
     const url = new URL(call.url, 'http://fixture.invalid'), authority = contexts.authority(Object.fromEntries(url.searchParams));
     if (call.options.method === 'GET') {
       if (readsFail) throw new Error('recovery GET offline');
@@ -803,7 +814,7 @@ test('Briefing explicit retry: real helper idempotency stores once, accepts its 
     if (posts === 1) { readsFail = true; throw new Error('committed response lost'); }
     return { comment };
   } });
-  h.thread().clientBindingId = 'binding-a'; h.mount(); await settle();
+  const initialIds = h.uuidCount();
   h.type('  Bearer synthetic-example-only  '); h.click('briefing-comment-attach'); await settle();
   assert.equal(records.size, 1); const first = h.requests.find(call => call.options.method === 'POST');
   const original = h.part('briefing-comment-unconfirmed'), originalBody = h.part('briefing-comment-unconfirmed-body');
@@ -818,7 +829,7 @@ test('Briefing explicit retry: real helper idempotency stores once, accepts its 
   h.click('briefing-comment-retry'); await settle();
   const retried = h.requests.filter(call => call.options.method === 'POST')[1];
   assert.equal(retried.options.body, first.options.body, 'identical captured wire body, UUID and omitted optional sources');
-  assert.equal(records.size, 1); assert.equal(h.uuidCount(), 1); assert.equal(h.part('briefing-comment-status').dataset.state, 'saved');
+  assert.equal(records.size, 1); assert.equal(h.uuidCount(), initialIds + 1); assert.equal(h.part('briefing-comment-status').dataset.state, 'saved');
   assert.equal(h.part('briefing-comment-body').textContent, 'Bearer [REDACTED]', 'the actual helper publicText output remains authoritative');
   assert.equal(JSON.stringify({ draft: h.state.codex.threadDrafts, inputs: h.thread().inputSources, briefing: h.thread().briefingInputs, camera: [h.state.pan, h.state.zoom] }), before);
   assert.equal(input.value, '현재 편집 중인 다른 의견'); assert.equal(h.document.activeElement, input);
@@ -826,7 +837,7 @@ test('Briefing explicit retry: real helper idempotency stores once, accepts its 
   assert.equal(h.part('briefing-comment-unconfirmed').hidden, true); assert.equal(server.calls.length, 0);
   // The edited primary is a new explicit save, not an accidental old include.
   h.click('briefing-comment-attach'); await settle();
-  assert.equal(records.size, 2); assert.equal(h.uuidCount(), 2); assert.match(h.state.codex.threadDrafts['room-a'], /의견 #2/);
+  assert.equal(records.size, 2); assert.equal(h.uuidCount(), initialIds + 2); assert.match(h.state.codex.threadDrafts['room-a'], /의견 #2/);
   assert.doesNotMatch(h.state.codex.threadDrafts['room-a'], /의견 #1|synthetic-example-only|REDACTED/);
   h.click('briefing-comment-include'); await settle(); assert.match(h.state.codex.threadDrafts['room-a'], /의견 #1\]\n의견: Bearer \[REDACTED\]/);
   assert.equal(posts, 3); assert.equal(records.size, 2); assert.equal(server.calls.length, 0); h.close();
@@ -835,7 +846,7 @@ test('Briefing explicit retry: real helper idempotency stores once, accepts its 
 test('Briefing explicit retry: both GET and manual recovery require row inclusion; unchanged primary never reuses the old receipt', async () => {
   for (const recovery of ['get', 'manual']) {
     let attempts = 0, saved;
-    const h = savedBriefingUiHarness({ respond: (call, { row, list }) => {
+    const h = await verifiedSavedBriefingUiHarness({ respond: (call, { row, list }) => {
       if (call.options.method === 'POST') {
         attempts++; saved = row({ text: call.body.text, clientRequestId: call.body.clientRequestId });
         return attempts === 1 ? Promise.reject(new Error('lost')) : Promise.resolve({ comment: saved });
@@ -843,7 +854,7 @@ test('Briefing explicit retry: both GET and manual recovery require row inclusio
       if (!saved) return Promise.resolve(list());
       return recovery === 'get' ? Promise.resolve(list(saved)) : Promise.reject(new Error('GET offline'));
     } });
-    h.mount(); await settle(); h.type('새 의견'); h.click('briefing-comment-attach'); await settle();
+    h.type('새 의견'); h.click('briefing-comment-attach'); await settle();
     if (recovery === 'manual') { h.click('briefing-comment-retry'); await settle(); }
     assert.equal(h.part('briefing-comment-status').dataset.state, 'saved'); const posts = attempts;
     h.click('briefing-comment-attach'); await settle();
@@ -6028,9 +6039,12 @@ test('snapshot inspector keeps concise source/delivery labels and folds paths, h
 
 function inputInspectorHarness({ engineId = 'codex', capture = null, beforeTracking = null, trackingTransform = null } = {}) {
   const document = settingsFakeDocument(), calls = [], pending = [], listeners = new Set(), notices = [];
+  const byId = document.getElementById;
+  document.getElementById = id => { const node = byId(id); return node?.isConnected ? node : null; };
   const timers = new Map(), trackingRuns = [];
   let timerId = 0;
   const window = {
+    crypto: { subtle: webcrypto.subtle },
     setTimeout: (fn, ms) => { const id = ++timerId; timers.set(id, { fn, ms }); return id; },
     clearTimeout: id => timers.delete(id),
   };
@@ -6051,6 +6065,7 @@ function inputInspectorHarness({ engineId = 'codex', capture = null, beforeTrack
   document.querySelector = selector => selector.startsWith('#egd-codex-input-panel ')
     ? document.getElementById('egd-codex-input-panel')?.querySelector(selector.slice('#egd-codex-input-panel '.length))
     : document.documentElement.querySelector(selector);
+  document.querySelectorAll = selector => document.documentElement.querySelectorAll(selector);
   const authStatus = { isLoggedIn: true, accountEmail: 'owner@example.test', authMode: 'chatgpt', identityStatus: 'known' };
   const thread = { id: 'room-a', engineId, engineProfileId: `${engineId}-slot`, clientBindingId: 'binding-a', conversationId: 'conversation-a', messages: [] };
   const state = { codex: { threads: [thread], activeThreadId: thread.id, activityRoomGeneration: 0,
@@ -6067,14 +6082,14 @@ function inputInspectorHarness({ engineId = 'codex', capture = null, beforeTrack
     const sourceId = decodeURIComponent(request.pathname.slice('/context/captures/'.length));
     const startLine = Number(request.searchParams.get('startLine') || 1);
     const endLine = Math.min(610, Number(request.searchParams.get('endLine') || startLine + 199));
-    const response = { capture: { sourceId, hash: 'capture-hash', capturedAt: 100, sourceRef: { path: '/fixture/original.txt' },
+    const response = { capture: { sourceId, snapshotId: sourceId, hash: 'capture-hash', capturedAt: 100, sourceRef: { path: '/fixture/original.txt' },
       engine: { engineId, engineProfileId: `${engineId}-slot` }, clientThreadId: 'binding-a', captureScope: { type: 'file' } },
       source: { role: 'source', hash: 'capture-hash', rangeHash: `range-${startLine}-${endLine}`, mime: 'text/plain',
         text: Array.from({ length: endLine - startLine + 1 }, (_, i) => `exact line ${startLine + i}`).join('\n'),
         range: { startLine, endLine, totalLines: 610 }, nextLine: endLine < 610 ? endLine + 1 : null },
       delivered: { role: 'agent_input', packetId: request.searchParams.get('packetId') || 'packet-a', hash: 'payload-hash', text: '{"immutable":"payload"}',
         deliveryStatus: 'sent-to-app-server', binding: { conversationId: 'conversation-a', runId: 'run-a', answerId: 'answer-a' } },
-      bindings: [{ conversationId: 'conversation-a', runId: 'run-a', answerId: 'answer-a' }] };
+      bindings: [{ bindingId: 'binding-receipt-a', conversationId: 'conversation-a', runId: 'run-a', answerId: 'answer-a' }] };
     return capture ? capture(response, request) : response;
   };
   const method = signature => {
@@ -6083,8 +6098,12 @@ function inputInspectorHarness({ engineId = 'codex', capture = null, beforeTrack
     const code = surfaceSource.slice(start, end + 8);
     return signature === 'async refreshInputSourceChange(' && trackingTransform ? trackingTransform(code) : code;
   };
-  const deps = { document, window, state, ChatState: Chat, InputContext, epochScope, fetchJson, boardNotice: message => notices.push(message) };
-  const factory = compileFunction(`${declaration('el')}\n${declaration('getCodexThreadById')}\n${declaration('openChatInputPanel')}\nreturn {
+  const deps = { document, window, state, ChatState: Chat, BriefingState: Briefing, InputContext, epochScope, fetchJson,
+    cloneJson: value => JSON.parse(JSON.stringify(value)), boardNotice: message => notices.push(message) };
+  const guards = ['briefingInputReferences', 'briefingRangeIssue', 'acceptedInputReceipt', 'visibleInputAnswer', 'inputDeliveryProof', 'inputDeliveryMatches',
+    'briefingReadReferenceCurrent', 'historyReadReferenceCurrent', 'inputAuthorizationFailure', 'invalidateInputReadOnDenial']
+    .filter(name => surfaceSource.includes(`  function ${name}(`)).map(declaration).join('\n');
+  const factory = compileFunction(`${declaration('el')}\n${declaration('getCodexThreadById')}\n${guards}\n${declaration('openChatInputPanel')}\nreturn {
     openChatInputPanel, bridge: { ${['async inspectInput(', 'async refreshInputSourceChange(', 'async readInput('].map(method).join(',\n')} }
   };`, Object.keys(deps))(...Object.values(deps));
   const bridge = factory.bridge;
@@ -6095,7 +6114,7 @@ function inputInspectorHarness({ engineId = 'codex', capture = null, beforeTrack
     const work = refresh.apply(bridge, args); trackingRuns.push(work); return work;
   };
   const part = id => document.documentElement.querySelector(`[data-testid="${id}"]`);
-  return { document, state, thread, reference, epochScope, calls, pending, listeners, notices, bridge, part, timers, trackingRuns,
+  return { document, state, thread, reference, epochScope, calls, pending, listeners, notices, bridge, part, timers, trackingRuns, fetchJson,
     expire: () => { for (const [id, timer] of [...timers]) { timers.delete(id); timer.fn(); } },
     open: (options = {}, ref = reference) => bridge.inspectInput(thread.id, ref, options),
     emit: () => { for (const fn of [...listeners]) fn(state.codex); },
@@ -6112,10 +6131,411 @@ function restoreInputInspector(h) {
   return h;
 }
 
+// Legacy renderer-only fixtures model the direct durable response at their
+// adapter boundary. Production code validates and retains this receipt; the
+// separate first-send integration drives the complete send bridge instead.
+function seedFixtureAcceptedInput(state, thread, run, requestId, localMessageId) {
+  if (!surfaceSource.includes('  function rememberAcceptedInputReceipt(')) return;
+  const remember = compileFunction(`${declaration('rememberAcceptedInputReceipt')}\nreturn rememberAcceptedInputReceipt;`,
+    ['state', 'ChatState'])(state, Chat);
+  assert.equal(remember(thread, { accepted: true, durable: true, requestId, clientThreadId: thread.clientBindingId,
+    localConversationId: 'fixture-local-conversation', localRunId: 'fixture-local-run', localMessageId,
+    conversationId: run.conversationId, runId: run.runId, answerId: run.answerId }, requestId, run), true);
+}
+
+// A first-send reference is created before a native conversation exists. The
+// local response models the helper's observed contract: its source page can
+// carry A's binding while `delivered` is the latest packet from another run.
+// No socket, provider, real account or user data is used in this fixture.
+function firstSendInspectorPacketFixture({ delivery = 'other-room', hasAReceipt = false, assistantLifecycle = false, projectAfterEvents = false } = {}) {
+  const identity = { conversationId: 'conversation-a', runId: 'run-a', answerId: 'conversation-a/run-a' };
+  const sourceText = 'First line\nShared evidence\nThird line';
+  const sourceHash = createHash('sha256').update(sourceText).digest('hex');
+  const packet = (packetId, binding, text, startOffset, endOffset) => {
+    const ranges = [{ startOffset, endOffset }], coverage = { scope: 'line-range', reviewedRanges: ranges };
+    const body = JSON.stringify({ packetId, sourceId: 'stored-capture', sourceHash, projectionHash: sourceHash,
+      mode: 'direct', coverage, content: { text, ranges } });
+    return { role: 'agent_input', packetId, hash: createHash('sha256').update(body).digest('hex'), text: body,
+      mode: 'direct', coverage, deliveryStatus: 'sent-to-app-server', binding };
+  };
+  const packetA = packet('packet-a', { ...identity }, 'Shared evidence', 11, 26);
+  const packetB = packet('packet-b', delivery === 'other-run'
+    ? { conversationId: identity.conversationId, runId: 'run-b', answerId: 'conversation-a/run-b' }
+    : { conversationId: 'conversation-b', runId: 'run-b', answerId: 'conversation-b/run-b' }, 'Third line', 27, 37);
+  const policy = { delivery, deny: false, denialStatus: 403, failure: null, gate: null }, observed = [];
+  const h = inputInspectorHarness({ capture: (response, request) => {
+    response.capture.snapshotId = response.capture.sourceId; response.capture.hash = sourceHash;
+    response.capture.payloads = { source: { hash: sourceHash }, projection: { hash: sourceHash } };
+    response.capture.shape = { charCount: sourceText.length };
+    const startLine = Number(request.searchParams.get('startLine') || 1);
+    const endLine = Math.min(3, Number(request.searchParams.get('endLine') || 3));
+    response.source = { ...response.source, hash: sourceHash, text: sourceText.split('\n').slice(startLine - 1, endLine).join('\n'),
+      range: { startLine, endLine, totalLines: 3 }, nextLine: endLine < 3 ? endLine + 1 : null };
+    response.source.rangeHash = createHash('sha256').update(response.source.text).digest('hex');
+    response.bindings = [{ bindingId: 'binding-receipt-a', ...identity }, { bindingId: 'binding-receipt-b', ...packetB.binding }];
+    const selected = request.searchParams.get('packetId');
+    response.delivered = selected === 'packet-a' ? structuredClone(packetA)
+      : selected === 'packet-b' ? structuredClone(packetB) : structuredClone(policy.delivery === 'own' ? packetA : packetB);
+    observed.push({ request: request.toString(), body: structuredClone(response) });
+    if (policy.failure) throw policy.failure;
+    if (policy.deny) throw Object.assign(new Error('합성 조회 권한 거부'), { status: policy.denialStatus });
+    return policy.gate ? policy.gate.promise.then(() => response) : response;
+  } });
+  h.state.codex.connected = true; h.state.codex.authStatus = { ...h.state.codex.authStatus, access: { state: 'ok' } };
+  Object.assign(h.thread, { conversationId: null, bindingState: 'fresh', bindingAccountKey: null, retainedNativeBinding: null });
+  const scope = Chat.chatContextRequestScope(h.thread, h.state.codex);
+  assert.equal(Object.hasOwn(scope, 'conversationId'), false);
+  const source = { id: 'local-selection', kind: 'file', label: '합성 공유 문서', sourceRef: { path: '/fixture/shared.txt' } };
+  const capture = { id: source.id, sourceId: 'stored-capture', snapshotId: 'stored-capture', hash: sourceHash,
+    sourceRef: source.sourceRef, payloads: { source: { hash: sourceHash }, projection: { hash: sourceHash } },
+    shape: { charCount: sourceText.length }, clientThreadId: scope.clientThreadId,
+    engine: { engineId: scope.engineId, engineProfileId: scope.engineProfileId } };
+  const original = InputContext.capturedInputReference(source, capture, scope), originalJson = JSON.stringify(original);
+  const requestId = 'request-a', protocol = Chat.createChatProtocolState();
+  Chat.registerChatRequest(protocol, { requestId, clientThreadId: scope.clientThreadId, localThreadId: h.thread.id }, h.state.codex.authStatus);
+  const run = Chat.acceptChatRequest(protocol, { accepted: true, requestId, clientThreadId: scope.clientThreadId,
+    localMessageId: 'local-message-a', engineId: 'codex', engineProfileId: scope.engineProfileId, ...identity }, requestId);
+  assert.ok(run); assert.equal(protocol.requests[requestId].status, 'accepted');
+  const target = { sourceId: capture.sourceId, hash: capture.hash, range: { startLine: 1, endLine: 4 } };
+  const briefing = { id: 'briefing-a', title: '합성 답변', ...identity, steps: [{ id: 'step-a', text: '합성 단계', target }] };
+  Object.assign(run, { messages: assistantLifecycle ? [] : [{ id: 'assistant-a', role: 'assistant', content: '합성 A 답변', status: 'complete' }],
+    contextCaptures: [capture], briefing,
+    contextPackets: hasAReceipt ? [{ packetId: packetA.packetId, receiptId: 'receipt-a', sourceId: capture.sourceId,
+      hash: packetA.hash, mode: packetA.mode, coverage: packetA.coverage, deliveryStatus: packetA.deliveryStatus }] : [] });
+  const submitted = [{ id: 'local-user-a', role: 'user', content: '합성 질문', requestId, inputReferences: [original] }];
+  let messages = projectAfterEvents ? submitted : Chat.projectRunMessages(submitted, run);
+  if (assistantLifecycle) {
+    for (const [index, event] of ['message.started', 'message.delta', 'message.completed'].entries()) {
+      const reduced = Chat.reduceChatEvent(protocol, { type: 'chat.event', v: 2, streamId: 'synthetic-stream-a', seq: index + 1,
+        ...identity, requestId, clientThreadId: scope.clientThreadId, engineId: scope.engineId, engineProfileId: scope.engineProfileId,
+        localMessageId: 'local-assistant-message-a', itemId: 'assistant-a', event,
+        details: { messageId: 'assistant-a', text: '합성 A 답변', delta: '합성 A 답변' } });
+      assert.equal(reduced, run, 'the actual event reducer accepts the synthetic assistant event');
+    }
+    messages = Chat.projectRunMessages(messages, run);
+    assert.equal(run.localMessageId, 'local-assistant-message-a');
+    if (projectAfterEvents) assert.notEqual(messages.find(row => row.role === 'user').localMessageId, 'local-message-a',
+      'the accepted user ID was not supplied to this late projection');
+    else assert.notEqual(messages.find(row => row.role === 'user').localMessageId, 'local-assistant-message-a',
+      'a previously projected user ID must not be replaced with the assistant ID');
+  }
+  const user = messages.find(row => row.role === 'user'), answer = messages.find(row => row.role === 'assistant');
+  assert.equal(answer.answerId, identity.answerId);
+  Object.assign(h.thread, Chat.nativeBindingForRun(h.thread, run), { conversationId: identity.conversationId, messages });
+  h.state.codex.chatProtocol = protocol; h.state.codexBridge = h.bridge;
+  const start = surfaceSource.indexOf('    for (const message of thread.messages || []) {', surfaceSource.indexOf('  function renderCodexActivityPanel('));
+  const end = surfaceSource.indexOf('\n    if (ChatState.nativeBindingHeld(thread))', start);
+  assert.ok(start >= 0 && end > start, 'the actual Activity history controls must exist');
+  const element = compileFunction(`${declaration('el')}\nreturn el;`, ['document'])(h.document);
+  const controls = compileFunction(`const rows = [];\n${surfaceSource.slice(start, end)}\nreturn rows;`, ['thread', 'state', 'el'])(h.thread, h.state, element);
+  const button = controls.flatMap(node => settingsNodes(node, item => item.dataset.testid === 'chat-input-history-open'))[0];
+  assert.ok(button); h.document.documentElement.appendChild(controls[0]);
+  const pendingInspections = [], inspect = h.bridge.inspectInput;
+  h.bridge.inspectInput = function (...args) { const pending = inspect.apply(this, args); pendingInspections.push(pending); return pending; };
+  return Object.assign(h, { identity, packetA, packetB, sourceText, policy, observed, original, originalJson, capture, run, user, answer, button,
+    inspections: pendingInspections,
+    clickActivity: () => { button.fire('click'); return pendingInspections.at(-1); },
+    settleTracking: async () => { for (const item of h.pending) item.resolve(h.sourceResponse()); await Promise.all(h.trackingRuns); } });
+}
+
+function inspectorRenderedData(panel) {
+  return settingsNodes(panel, () => true).flatMap(node => [node.textContent, JSON.stringify(node.attributes),
+    JSON.stringify(node.dataset), node.value || '']).join('\n');
+}
+
+// Drive the complete production send bridge into a synthetic accepted reply.
+// No helper socket, provider, OS process or real account is involved.
+async function firstSendThroughActualBridge({ acceptedUserId = true, eventBeforeResponse = false, hasAReceipt = true, delivery = 'other-room',
+  receiptVariant = 'normal', interrupted = null } = {}) {
+  const h = firstSendInspectorPacketFixture({ hasAReceipt: true, delivery }), state = h.state, identity = h.identity;
+  const baseBriefing = structuredClone(h.answer.briefing), packetReceipt = structuredClone(h.answer.contextPackets[0]);
+  Object.assign(h.thread, { conversationId: null, bindingState: 'fresh', bindingAccountKey: null, retainedNativeBinding: null,
+    messages: [], inputSources: [], briefingInputs: [], profileEnabled: false });
+  Object.assign(state.codex, { activeThreadId: h.thread.id, threadDrafts: { [h.thread.id]: '합성 질문' },
+    threadDraftRevisions: { [h.thread.id]: 0 }, draft: '합성 질문', liveRevision: 0, activityRoomGeneration: 0 });
+  const protocol = Chat.createChatProtocolState(); state.codex.chatProtocol = protocol;
+  const getThread = (codex, id = 'room-a') => codex.threads.find(thread => thread.id === id);
+  const update = (id, fn) => { const index = state.codex.threads.findIndex(thread => thread.id === id);
+    if (index >= 0) state.codex.threads[index] = fn(state.codex.threads[index]); };
+  const defaults = installDefaultProjectSendFixture(state);
+  Object.assign(h.bridge, state.codexBridge); state.codexBridge = h.bridge;
+  const sync = run => {
+    update('room-a', thread => ({ ...thread, ...Chat.nativeBindingForRun(thread, run),
+      conversationId: run.conversationId, messages: Chat.projectRunMessages(thread.messages || [], run) }));
+    h.emit();
+  };
+  let requestId = null, sends = 0, sequence = 0;
+  const reduce = event => {
+    const run = Chat.reduceChatEvent(protocol, { type: 'chat.event', v: 2, streamId: 'actual-send-stream', seq: ++sequence,
+      ...identity, requestId, clientThreadId: 'binding-a', engineId: 'codex', engineProfileId: 'codex-slot',
+      localMessageId: 'local-assistant-message-a', itemId: 'assistant-a', event,
+      details: { messageId: 'assistant-a', text: '합성 A 답변', delta: '합성 A 답변' } });
+    assert.ok(run); Object.assign(run, { contextCaptures: [h.capture], contextPackets: hasAReceipt ? [packetReceipt] : [], briefing: baseBriefing });
+    sync(run);
+  };
+  const constants = requestProjectSurfaceConstants();
+  const deps = { state, getActiveCodexThread: codex => getThread(codex, codex.activeThreadId),
+    getCodexThreadDraft: (codex, id) => codex.threadDrafts[id] || '', ChatState: Chat, threadBusy: () => false,
+    epochScope: h.epochScope, ensureNativeReadyForSend: async () => true, updateThreadById: update, emit() {},
+    captureThreadInputs: async () => [structuredClone(h.original)], getCodexThreadById: getThread, protocol,
+    codexThreadAgentProfile: () => null,
+    appendMessageToThread: (id, message) => update(id, thread => ({ ...thread, messages: [...thread.messages, message] })),
+    createCodexMessage: (role, content, status, options) => ({ id: 'synthetic-user', role, content, status, ...options }), SELF_MEMBER: 'self',
+    codexThreadRuntimeConfig: () => ({}),
+    fetchJson: async (path, options) => {
+      assert.equal(path, '/chat/send'); assert.equal(options.method, 'POST'); sends++;
+      const body = JSON.parse(options.body); requestId = body.requestId;
+      if (eventBeforeResponse) reduce('message.started');
+      if (receiptVariant === 'id-collision') update('room-a', thread => ({ ...thread, messages: [...thread.messages,
+        { id: 'other-user', role: 'user', requestId: 'different-request', localMessageId: 'local-message-a' }] }));
+      if (receiptVariant === 'duplicate-user') update('room-a', thread => ({ ...thread, messages: [...thread.messages,
+        { ...thread.messages.find(row => row.role === 'user'), id: 'duplicate-user' }] }));
+      if (interrupted) {
+        const auth = state.codex.authStatus, thread = getThread(state.codex), room = state.codex.activeThreadId;
+        const oldProfile = thread.engineProfileId, oldBinding = thread.clientBindingId;
+        if (interrupted === 'account') state.codex.authStatus = { ...auth, accountEmail: 'other@example.test' };
+        else if (interrupted === 'permission') state.codex.authStatus = { ...auth, access: { state: 'permissionDenied' } };
+        else if (interrupted === 'room') { state.codex.activeThreadId = 'room-b'; state.codex.activityRoomGeneration++; }
+        else if (interrupted === 'profile') thread.engineProfileId = 'other-slot';
+        else if (interrupted === 'binding') thread.clientBindingId = 'other-binding';
+        h.emit();
+        state.codex.authStatus = auth; state.codex.activeThreadId = room;
+        if (interrupted === 'room') state.codex.activityRoomGeneration++;
+        thread.engineProfileId = oldProfile; thread.clientBindingId = oldBinding; h.emit();
+      }
+      const response = { accepted: true, durable: true, requestId, clientThreadId: 'binding-a', localConversationId: 'local-room-a',
+        localRunId: 'local-run-a', ...(acceptedUserId ? { localMessageId: 'local-message-a' } : {}), ...identity };
+      if (receiptVariant === 'not-durable') response.durable = false;
+      if (receiptVariant === 'duplicate') response.duplicate = true;
+      if (receiptVariant === 'missing-local-conversation') delete response.localConversationId;
+      if (receiptVariant === 'missing-local-run') delete response.localRunId;
+      return response;
+    }, syncProtocolRun: sync, browserToolSelectedSources: () => [],
+    rootSseReady: () => ({ sourceReady: true, eventSourceReadyState: 1, browserTransportId: 'fixture-stream' }),
+    chatRequestProjectDisplays: constants.chatRequestProjectDisplays, CHAT_REQUEST_PROJECT_INVALID: constants.CHAT_REQUEST_PROJECT_INVALID,
+    chatRoomProjectSendBlock: defaults.chatRoomProjectSendBlock, chatRoomProjectState: defaults.chatRoomProjectState,
+    normalizeChatRoomProjectDefault: defaults.normalizeChatRoomProjectDefault, snapshotChatRoomProjectExpectation: defaults.snapshotChatRoomProjectExpectation,
+    CHAT_ROOM_PROJECT_UNAVAILABLE: constants.CHAT_ROOM_PROJECT_UNAVAILABLE, memoAskSendReservations: new Map(), InputContext,
+    clearMemoManualSendNotice: defaults.clearMemoManualSendNotice, showMemoManualSendNotice: defaults.showMemoManualSendNotice,
+    watchMemoRead: defaults.watchMemoRead };
+  const result = await requestProjectBridgeMethod('sendMessage', deps).call(h.bridge);
+  assert.equal(result?.accepted, true); assert.equal(sends, 1);
+  if (!eventBeforeResponse) reduce('message.started');
+  reduce('message.delta'); reduce('message.completed');
+  const thread = getThread(state.codex), user = thread.messages.find(row => row.role === 'user');
+  const answer = thread.messages.find(row => row.role === 'assistant'), run = protocol.runs[Chat.runKey(identity.conversationId, identity.runId)];
+  assert.ok(user); assert.equal(JSON.stringify(user.inputReferences[0]), h.originalJson);
+  assert.ok(answer && run); h.thread = thread; h.user = user; h.answer = answer; h.run = run;
+  const start = surfaceSource.indexOf('    for (const message of thread.messages || []) {', surfaceSource.indexOf('  function renderCodexActivityPanel('));
+  const end = surfaceSource.indexOf('\n    if (ChatState.nativeBindingHeld(thread))', start);
+  assert.ok(start >= 0 && end > start);
+  const element = compileFunction(`${declaration('el')}\nreturn el;`, ['document'])(h.document);
+  const controls = compileFunction(`const rows = [];\n${surfaceSource.slice(start, end)}\nreturn rows;`, ['thread', 'state', 'el'])(thread, state, element);
+  const button = controls.flatMap(node => settingsNodes(node, item => item.dataset.testid === 'chat-input-history-open'))[0];
+  assert.ok(button); h.document.documentElement.appendChild(controls[0]);
+  return Object.assign(h, { protocol, sends, requestId, button,
+    clickActivity: () => { button.fire('click'); return h.inspections.at(-1); } });
+}
+
+test('first-send actual bridge requires its accepted user receipt across assistant-event ordering', async t => {
+  for (const before of [false, true]) for (const acceptedUserId of [true, false]) {
+    await t.test(`${before ? 'event before response' : 'event after response'}, ${acceptedUserId ? 'accepted receipt' : 'missing receipt'}`, async () => {
+      const h = await firstSendThroughActualBridge({ acceptedUserId, eventBeforeResponse: before });
+      const activity = activityDetailsHarness({ approval: false });
+      activity.state.codex = h.state.codex; activity.state.codex.activityThreadId = h.thread.id;
+      activity.state.codexBridge.inspectInput = (...args) => h.bridge.inspectInput(...args);
+      activity.renderCodexActivityPanel();
+      const control = activity.panel().testid('chat-input-history-open'); assert.ok(control);
+      await control.click(); await h.inspections.at(-1); await settle();
+      const panel = h.document.getElementById('egd-codex-input-panel');
+      if (acceptedUserId) {
+        assert.ok(h.observed.length > 0 && panel, `the direct accepted user receipt authorizes its own source: ${JSON.stringify({
+          user: h.user.localMessageId, request: h.protocol.requests[h.requestId], run: { localMessageId: h.run.localMessageId,
+            acceptedInputMessageId: h.run.acceptedInputMessageId, localRunId: h.run.localRunId }, notices: h.notices })}`);
+        const rendered = inspectorRenderedData(panel);
+        assert.ok(rendered.includes(h.packetA.text));
+        assert.equal(rendered.includes(h.packetB.text) || /packet-b|conversation-b\/run-b/.test(rendered), false);
+        await h.settleTracking(); h.close();
+      } else {
+        assert.equal(h.observed.length, 0, 'an accepted response without a user receipt is not proof');
+        assert.equal(!!panel, false); await h.settleTracking();
+      }
+      assert.equal(JSON.stringify(h.user.inputReferences[0]), h.originalJson);
+    });
+  }
+});
+
+test('first-send actual bridge fails closed for ambiguous receipts and observed authority round trips', async t => {
+  const scenarios = [
+    ...['not-durable', 'duplicate', 'missing-local-conversation', 'missing-local-run', 'id-collision', 'duplicate-user']
+      .map(receiptVariant => ({ receiptVariant })),
+    ...['account', 'permission', 'room', 'profile', 'binding'].map(interrupted => ({ interrupted })),
+  ];
+  for (const scenario of scenarios) await t.test(Object.values(scenario)[0], async () => {
+    const h = await firstSendThroughActualBridge(scenario);
+    const activity = activityDetailsHarness({ approval: false });
+    activity.state.codex = h.state.codex; activity.state.codex.activityThreadId = h.thread.id;
+    activity.state.codexBridge.inspectInput = (...args) => h.bridge.inspectInput(...args);
+    activity.renderCodexActivityPanel();
+    const control = activity.panel().testid('chat-input-history-open'); assert.ok(control);
+    const outside = h.document.createElement('textarea'); h.document.documentElement.appendChild(outside); outside.focus();
+    await control.click(); await h.inspections.at(-1); await settle();
+    assert.equal(h.observed.length, 0, 'an ambiguous or stale accepted receipt cannot authorize source or packet reads');
+    assert.equal(!!h.document.getElementById('egd-codex-input-panel'), false);
+    assert.equal(h.document.activeElement, outside); assert.equal(h.sends, 1, 'nothing is resent automatically');
+    assert.equal(JSON.stringify(h.user.inputReferences[0]), h.originalJson);
+    await h.settleTracking();
+  });
+});
+
+test('first-send Activity inspector never assigns another run or room delivery to A', async t => {
+  for (const delivery of ['other-run', 'other-room']) await t.test(delivery, async () => {
+    const h = await firstSendThroughActualBridge({ delivery, hasAReceipt: false });
+    await h.clickActivity(); await settle();
+    assert.equal(h.observed.length, 1, 'the synthetic A source request received a B latest delivery');
+    assert.equal(h.observed[0].body.delivered.packetId, 'packet-b');
+    assert.ok(h.observed[0].body.bindings.some(binding => binding.answerId === h.identity.answerId));
+    const panel = h.document.getElementById('egd-codex-input-panel'); assert.ok(panel, 'the authorized source remains inspectable');
+    const rendered = inspectorRenderedData(panel);
+    assert.ok(rendered.includes(h.sourceText), 'the immutable source page remains readable');
+    assert.equal(/packet-b|run-b|conversation-b/.test(rendered) || rendered.includes(h.packetB.hash), false,
+      'B packet metadata and payload must not be attributed to A');
+    assert.doesNotMatch(panel.textContent, /전달 기록 없음/, 'unknown is not proof that no delivery occurred');
+    assert.equal(JSON.stringify(h.user.inputReferences[0]), h.originalJson);
+    assert.equal(Object.hasOwn(h.user.inputReferences[0].contextScope, 'conversationId'), false);
+    await h.settleTracking(); h.close();
+  });
+});
+
+test('first-send Activity inspector can separately show A source and A verified delivery receipt', async () => {
+  const h = await firstSendThroughActualBridge({ delivery: 'other-room', hasAReceipt: true });
+  await h.clickActivity(); await settle();
+  assert.equal(h.observed[0]?.body.delivered.packetId, h.packetB.packetId, 'the unselected latest response is B, not A');
+  let panel = h.document.getElementById('egd-codex-input-panel'); assert.ok(panel);
+  if (!h.part('chat-input-delivery')) {
+    const input = h.part('chat-input-packet-id'), open = h.part('chat-input-packet-open');
+    assert.ok(input && open, 'the recorded A packet can be explicitly requested');
+    input.value = h.packetA.packetId; open.fire('click'); await settle();
+    panel = h.document.getElementById('egd-codex-input-panel');
+  }
+  const delivery = h.part('chat-input-delivery');
+  assert.ok(delivery, 'an actual same-answer A receipt must remain inspectable, not be silently discarded');
+  assert.equal(delivery.dataset.packetId, h.packetA.packetId);
+  assert.ok(h.observed.some(item => item.body.delivered.packetId === h.packetA.packetId), 'A must be selected from its own receipt');
+  const source = settingsNodes(panel, node => node.tagName === 'PRE' && node.getAttribute('aria-label') === '당시 캡처 본문')[0];
+  const payload = settingsNodes(delivery, node => node.tagName === 'PRE' && node.getAttribute('aria-label') === '실제로 전달된 payload 원문')[0];
+  assert.ok(source && payload); assert.equal(source.textContent, h.sourceText);
+  assert.equal(payload.textContent, h.packetA.text); assert.notEqual(source.textContent, payload.textContent);
+  const rendered = inspectorRenderedData(panel);
+  assert.equal(/packet-b|run-b|conversation-b/.test(rendered) || rendered.includes(h.packetB.hash), false);
+  assert.equal(JSON.stringify(h.user.inputReferences[0]), h.originalJson);
+  await h.settleTracking(); h.close();
+});
+
+test('first-send Activity inspector cannot replace A with an explicitly requested B packet', async () => {
+  const h = await firstSendThroughActualBridge({ delivery: 'other-room', hasAReceipt: true });
+  await h.clickActivity(); await settle();
+  const panel = h.document.getElementById('egd-codex-input-panel'); assert.ok(panel);
+  assert.equal(h.part('chat-input-delivery')?.dataset.packetId, h.packetA.packetId, 'the verified A control is visible first');
+  const input = h.part('chat-input-packet-id'), open = h.part('chat-input-packet-open'); assert.ok(input && open);
+  input.value = h.packetB.packetId; open.fire('click'); await h.inspections.at(-1); await settle();
+  const current = h.document.getElementById('egd-codex-input-panel'); assert.ok(current);
+  assert.notEqual(h.part('chat-input-delivery')?.dataset.packetId, h.packetB.packetId);
+  const displayed = settingsNodes(current, () => true).flatMap(node => [node.textContent, JSON.stringify(node.attributes), JSON.stringify(node.dataset)]).join('\n');
+  assert.equal(/packet-b|run-b|conversation-b/.test(displayed) || displayed.includes(h.packetB.hash), false,
+    'a user-typed packet ID is not permission to show B content or metadata');
+  assert.equal(JSON.stringify(h.user.inputReferences[0]), h.originalJson);
+  await h.settleTracking(); h.close();
+});
+
+test('first-send Activity inspector requires the exact accepted owner and user-message receipt', async t => {
+  for (const change of ['missing-receipt', 'wrong-user', 'unaccepted-request', 'duplicate-user', 'wrong-answer-capture', 'account', 'permission']) {
+    await t.test(change, async () => {
+      const h = await firstSendThroughActualBridge({ delivery: 'other-room', hasAReceipt: false, acceptedUserId: change !== 'missing-receipt' });
+      if (change === 'missing-receipt') assert.notEqual(h.user.localMessageId, 'local-message-a');
+      else if (change === 'wrong-user') h.user.localMessageId = 'different-local-message';
+      else if (change === 'unaccepted-request') h.state.codex.chatProtocol.requests[h.requestId].status = 'unconfirmed';
+      else if (change === 'duplicate-user') h.thread.messages.push({ ...h.user });
+      else if (change === 'wrong-answer-capture') h.answer.contextCaptures[0].hash = 'other-hash';
+      else if (change === 'account') h.state.codex.authStatus = { ...h.state.codex.authStatus, accountEmail: 'other@example.test' };
+      else h.state.codex.authStatus = { ...h.state.codex.authStatus, access: { state: 'permissionDenied' } };
+      const outside = h.document.createElement('textarea'); h.document.documentElement.appendChild(outside); outside.focus();
+      await h.clickActivity(); await settle();
+      assert.equal(h.observed.length, 0, 'unproven A cannot start a source read');
+      assert.equal(!!h.document.getElementById('egd-codex-input-panel'), false);
+      assert.equal(h.document.activeElement, outside);
+      assert.equal(JSON.stringify(h.user.inputReferences[0]), h.originalJson);
+      await h.settleTracking();
+    });
+  }
+});
+
+test('first-send Activity inspector removes an earlier A panel after an explicit read is denied', async () => {
+  const h = await firstSendThroughActualBridge({ delivery: 'other-room', hasAReceipt: true });
+  await h.clickActivity(); await settle();
+  const old = h.document.getElementById('egd-codex-input-panel'); assert.ok(old);
+  assert.equal(h.part('chat-input-delivery')?.dataset.packetId, h.packetA.packetId);
+  const outside = h.document.createElement('textarea'); h.document.documentElement.appendChild(outside); outside.focus();
+  h.policy.deny = true; await h.clickActivity(); await settle();
+  assert.ok(h.notices.some(message => /조회 권한 거부/.test(message)), 'the synthetic 403 is not relabeled as success');
+  assert.equal(!!h.document.getElementById('egd-codex-input-panel'), false,
+    'a denied re-read cannot leave the prior source, title or delivery visible as current');
+  assert.equal(old.isConnected, false); assert.equal(h.document.activeElement, outside);
+  assert.equal(JSON.stringify(h.user.inputReferences[0]), h.originalJson);
+  await h.settleTracking();
+});
+
+test('first-send Activity inspector removes old panel details when room, account, permission or receipt becomes stale', async t => {
+  for (const change of ['room', 'account', 'permission', 'receipt']) await t.test(change, async () => {
+    const h = await firstSendThroughActualBridge({ delivery: 'other-room', hasAReceipt: true });
+    await h.clickActivity(); await settle();
+    const old = h.document.getElementById('egd-codex-input-panel'); assert.ok(old);
+    assert.equal(h.part('chat-input-delivery')?.dataset.packetId, h.packetA.packetId);
+    const outside = h.document.createElement('textarea'); h.document.documentElement.appendChild(outside); outside.focus();
+    if (change === 'room') { h.state.codex.activeThreadId = 'room-b'; h.state.codex.activityRoomGeneration++; }
+    else if (change === 'account') h.state.codex.authStatus = { ...h.state.codex.authStatus, accountEmail: 'other@example.test' };
+    else if (change === 'permission') h.state.codex.authStatus = { ...h.state.codex.authStatus, access: { state: 'permissionDenied' } };
+    else h.answer.contextPackets = [];
+    h.emit(); await settle();
+    assert.equal(!!h.document.getElementById('egd-codex-input-panel'), false, 'old source, title and delivery controls are no longer connected');
+    assert.equal(old.isConnected, false); assert.equal(h.part('chat-input-delivery'), null);
+    assert.equal(h.document.activeElement, outside, 'a stale panel cannot reclaim another input');
+    assert.equal(JSON.stringify(h.user.inputReferences[0]), h.originalJson);
+    await h.settleTracking();
+  });
+});
+
+test('first-send Activity inspector discards a late read after an observed authority round trip', async t => {
+  for (const change of ['room', 'account', 'permission', 'receipt']) await t.test(change, async () => {
+    const h = await firstSendThroughActualBridge({ delivery: 'other-room', hasAReceipt: false }), gate = requestProjectDeferred();
+    h.policy.gate = gate;
+    const outside = h.document.createElement('textarea'); h.document.documentElement.appendChild(outside); outside.focus();
+    const pending = h.clickActivity(); await settle(); assert.equal(h.observed.length, 1);
+    const auth = h.state.codex.authStatus, localMessageId = h.user.localMessageId;
+    try {
+      if (change === 'room') { h.state.codex.activeThreadId = 'room-b'; h.state.codex.activityRoomGeneration++; }
+      else if (change === 'account') h.state.codex.authStatus = { ...auth, accountEmail: 'other@example.test' };
+      else if (change === 'permission') h.state.codex.authStatus = { ...auth, access: { state: 'permissionDenied' } };
+      else delete h.user.localMessageId;
+      h.emit();
+      h.state.codex.activeThreadId = 'room-a'; h.state.codex.authStatus = auth; h.user.localMessageId = localMessageId; h.emit();
+    } finally { gate.resolve(); }
+    await pending; await settle();
+    assert.equal(h.document.getElementById('egd-codex-input-panel'), null);
+    assert.equal(h.document.activeElement, outside); assert.equal(JSON.stringify(h.user.inputReferences[0]), h.originalJson);
+    await h.settleTracking();
+  });
+});
+
 // The real Briefing opener feeds the real evidence/read bridge. Only the final
 // Canvas renderer is observed here; this is not a browser or native-input test.
 function briefingOriginHarness({ capture = null, location = 'briefingInputs', twoRanges = false, createEvidence = null } = {}) {
-  const h = restoreInputInspector(inputInspectorHarness({ capture }));
+  const h = restoreInputInspector(inputInspectorHarness({ capture: (value, request) => {
+    value.bindings = value.bindings.map(binding => ({ ...binding, answerId: 'conversation-a/run-a' }));
+    if (value.delivered?.binding) value.delivered.binding.answerId = 'conversation-a/run-a';
+    return capture ? capture(value, request) : value;
+  } }));
+  h.state.codex.connected = true;
   const source = { id: 'local-selection', kind: 'file', label: '고정 원문', sourceRef: { path: '/fixture/original.txt' } };
   const receipt = { id: source.id, sourceId: 'stored-capture', snapshotId: 'stored-capture', hash: 'capture-hash',
     sourceRef: source.sourceRef, clientThreadId: 'binding-a', engine: { engineId: 'codex', engineProfileId: 'codex-slot' } };
@@ -6123,12 +6543,29 @@ function briefingOriginHarness({ capture = null, location = 'briefingInputs', tw
   const copy = value => JSON.parse(JSON.stringify(value));
   if (location === 'messages') h.thread.messages = [{ id: 'original-input', inputReferences: [copy(reference)] }];
   else h.thread.briefingInputs = [copy(reference)];
-  const message = { conversationId: 'conversation-a', runId: 'run-a', answerId: 'answer-a', contextCaptures: [copy(receipt)],
-    briefing: { id: 'original-briefing', conversationId: 'conversation-a', runId: 'run-a', answerId: 'answer-a',
+  const message = { conversationId: 'conversation-a', runId: 'run-a', answerId: 'conversation-a/run-a', contextCaptures: [copy(receipt)],
+    briefing: { id: 'original-briefing', conversationId: 'conversation-a', runId: 'run-a', answerId: 'conversation-a/run-a',
       steps: [{ id: 'first', text: '당시 근거', target: { sourceId: receipt.sourceId, hash: receipt.hash, range: { startLine: 1, endLine: 4 } } }] } };
   if (twoRanges) message.briefing.steps.push({ id: 'second', text: '다음 근거',
     target: { sourceId: receipt.sourceId, hash: receipt.hash, range: { startLine: 5, endLine: 8 } } });
-  const evidence = [], renders = [], fits = [];
+  const requestId = 'origin-fixture-request', protocol = Chat.createChatProtocolState();
+  Chat.registerChatRequest(protocol, { requestId, clientThreadId: h.thread.clientBindingId, localThreadId: h.thread.id }, h.state.codex.authStatus);
+  const run = Chat.acceptChatRequest(protocol, { accepted: true, requestId, clientThreadId: h.thread.clientBindingId,
+    localMessageId: 'origin-fixture-user', engineId: h.thread.engineId, engineProfileId: h.thread.engineProfileId,
+    conversationId: message.conversationId, runId: message.runId, answerId: message.answerId }, requestId);
+  assert.ok(run); h.state.codex.chatProtocol = protocol;
+  const user = location === 'messages' ? h.thread.messages[0] : { id: 'original-input', inputReferences: h.thread.briefingInputs };
+  Object.assign(user, { role: 'user', requestId, localMessageId: run.localMessageId,
+    conversationId: message.conversationId, runId: message.runId, answerId: message.answerId });
+  Object.assign(message, { role: 'assistant', id: 'origin-fixture-answer' });
+  if (location !== 'messages') h.thread.messages = [user];
+  h.thread.messages.push(message);
+  seedFixtureAcceptedInput(h.state, h.thread, run, requestId, 'origin-fixture-user');
+  const evidence = [], renders = [], fits = [], mockCards = new Map(), queryAll = h.document.querySelectorAll;
+  // This older bridge fixture observes a pre-existing local card adapter, not
+  // Canvas rendering. The separate first-send UI test exercises real spawn.
+  h.document.querySelectorAll = selector => selector === '.egd-input-evidence-card'
+    ? [...queryAll(selector), ...mockCards.values()] : queryAll(selector);
   h.state.panTarget = { x: 12, y: 34 }; h.state.zoomTarget = .8;
   const start = surfaceSource.indexOf('  async function openAnswerBriefing('), end = surfaceSource.indexOf('\n  }\n', start);
   assert.ok(start >= 0 && end > start);
@@ -6143,17 +6580,32 @@ function briefingOriginHarness({ capture = null, location = 'briefingInputs', tw
     briefingResolvedTargets: () => [], fitBriefingTargets: () => fits.push('fit'),
     spawnInputEvidence: (ref, stored, options) => {
       const snapshot = InputContext.inputEvidenceSnapshot(stored, ref); evidence.push({ ref, snapshot, options });
-      return createEvidence ? createEvidence(ref, stored, options) : snapshot;
+      return createEvidence ? createEvidence(ref, stored, options) : mockCards.get(InputContext.inputEvidenceKey(ref));
     },
     setActiveEntity: () => assert.fail('a non-restoring close must not change focus') };
-  const actual = compileFunction(`${declaration('getCodexThreadById')}\n${declaration('briefingInputReferences') || ''}\n${declaration('briefingRangeIssue')}\n${declaration('closeAnswerBriefing')}
+  const guards = ['acceptedInputReceipt', 'visibleInputAnswer', 'historyReadReferenceCurrent', 'briefingReadReferenceCurrent', 'rememberBriefingMinimapEvidence']
+    .filter(name => surfaceSource.includes(`  function ${name}(`)).map(declaration).join('\n');
+  const actual = compileFunction(`${declaration('getCodexThreadById')}\n${declaration('briefingInputReferences') || ''}\n${guards}\n${declaration('briefingRangeIssue')}\n${declaration('closeAnswerBriefing')}
     ${surfaceSource.slice(start, end + 4)}\nreturn { openAnswerBriefing, closeAnswerBriefing, bridge: { ${scopeMethod} ${surfaceSource.slice(methodStart, methodEnd + 8)} } };`,
   Object.keys(deps))(...Object.values(deps));
   Object.assign(h.bridge, actual.bridge); h.state.codexBridge = h.bridge;
-  return Object.assign(h, { message, evidence, renders, fits, original: reference,
-    openBriefing: () => actual.openAnswerBriefing(h.thread, message),
+  const localReferences = () => location === 'messages' ? h.thread.messages[0].inputReferences : h.thread.briefingInputs;
+  return Object.assign(h, { message, evidence, renders, fits, mockCards, original: reference,
+    openBriefing: () => {
+      for (const step of message.briefing.steps) for (const target of Briefing.briefingStepTargets(step)) {
+        const original = localReferences()?.find(item => item.sourceId === target.sourceId);
+        if (!original) continue;
+        const ref = { ...copy(original), presentationRange: target.range };
+        try {
+          const key = InputContext.inputEvidenceKey(ref);
+          if (!mockCards.has(key)) mockCards.set(key, { id: `fixture-card-${mockCards.size + 1}`, isConnected: true, _inputEvidenceLoaded: true,
+            _inputReference: ref, remove() { this.isConnected = false; } });
+        } catch {}
+      }
+      return actual.openAnswerBriefing(h.thread, message);
+    },
     closeBriefing: () => actual.closeAnswerBriefing({ restore: false }),
-    localReferences: () => location === 'messages' ? h.thread.messages[0].inputReferences : h.thread.briefingInputs });
+    localReferences });
 }
 
 test('Briefing original scope: actual opener retains constructor provenance from history or pending references and passes the unchanged restore guard', async () => {
@@ -6167,7 +6619,7 @@ test('Briefing original scope: actual opener retains constructor provenance from
     const joined = h.state.codex.briefingSession.references[0];
     assert.deepEqual(joined.contextScope, h.original.contextScope);
     assert.notEqual(joined.contextScope, h.localReferences()[0].contextScope, 'the session holds its own original-scope copy');
-    assert.equal(h.evidence[0].snapshot.delivered.packetId, 'packet-a');
+    assert.equal(h.evidence[0].snapshot.delivered, null, 'a Canvas source snapshot does not claim an unverified delivery');
     assert.equal(h.evidence[0].snapshot.hash, h.original.hash);
     assert.equal(h.evidence[0].options.reveal, false, 'the actual Briefing bridge carries batch-only reveal suppression');
     assert.equal(JSON.stringify([h.thread, h.message]), before, 'no capture, message, hash or saved reference rewrite');
@@ -6183,15 +6635,15 @@ test('Briefing original scope: actual opener retains constructor provenance from
 
 test('Briefing original scope: missing or mismatched stored identity is never replaced by the active room', async () => {
   const changes = [
-    h => { h.thread.briefingInputs = []; },
-    h => { h.state.codex.threads.push({ ...h.thread, id: 'other-room' }); h.thread.briefingInputs = []; },
-    h => { h.message.contextCaptures[0].contextScope = { ...h.original.contextScope }; h.thread.briefingInputs = []; },
+    h => { h.thread.briefingInputs = []; h.thread.messages[0].inputReferences = []; },
+    h => { h.state.codex.threads.push({ ...h.thread, id: 'other-room' }); h.thread.briefingInputs = []; h.thread.messages[0].inputReferences = []; },
+    h => { h.message.contextCaptures[0].contextScope = { ...h.original.contextScope }; h.thread.briefingInputs = []; h.thread.messages[0].inputReferences = []; },
     h => { delete h.localReferences()[0].contextScope; },
     ...['sourceId', 'snapshotId', 'hash', 'clientThreadId'].map(key => h => { h.localReferences()[0][key] = 'other'; }),
     ...['sourceId', 'snapshotId', 'hash', 'clientThreadId', 'engine'].map(key => h => { delete h.localReferences()[0][key]; }),
     ...['engineId', 'engineProfileId'].map(key => h => { h.localReferences()[0].engine[key] = 'other'; }),
     ...['clientThreadId', 'conversationId', 'engineId', 'engineProfileId'].map(key => h => { h.localReferences()[0].contextScope[key] = 'other'; }),
-    h => { delete h.localReferences()[0].contextScope.conversationId; },
+    h => { delete h.localReferences()[0].contextScope.conversationId; delete h.thread.messages[0].localMessageId; },
     ...['sourceId', 'snapshotId', 'hash', 'clientThreadId'].map(key => h => { h.message.contextCaptures[0][key] = 'other'; }),
     ...['sourceId', 'snapshotId', 'hash', 'clientThreadId', 'engine'].map(key => h => { delete h.message.contextCaptures[0][key]; }),
     ...['engineId', 'engineProfileId'].map(key => h => { h.message.contextCaptures[0].engine[key] = 'other'; }),
@@ -6503,19 +6955,18 @@ test('Briefing evidence rows name exact source ranges, expose honest states and 
   h.render(); await settle(); const panel = h.panel();
   const rows = settingsNodes(panel, node => ['briefing-inspect', 'briefing-evidence-unavailable'].includes(node.dataset.testid));
   assert.equal(rows.length, 6);
-  assert.match(rows[0].textContent, /CTX04 · 보관 파일.*1–4행.*확인 필요.*당시 입력 보기/);
-  assert.match(rows[1].textContent, /CTX04 · 보관 파일.*5–8행.*확인 필요.*당시 입력 보기/);
-  assert.match(rows[2].textContent, /합성 고정 근거 B.*1–4행.*확인 필요.*당시 입력 보기/);
-  assert.match(rows[3].textContent, /missing-source.*9행부터 · 끝 미지정.*확인 필요/);
+  for (const [index, row] of rows.entries()) {
+    assert.match(row.textContent, new RegExp(`근거 ${index + 1}.*범위 확인 필요`));
+    assert.doesNotMatch([row.textContent, row.getAttribute('aria-label')].join(' '), /CTX04|합성 고정 근거 B|missing-source|1–4행|5–8행/);
+  }
   assert.match(rows[4].textContent, /일치 확인 필요.*연결된 입력 보기/);
-  assert.match(rows[5].textContent, /범위 미지정/);
-  assert.match(rows[0].getAttribute('aria-label'), /CTX04 · 보관 파일.*1–4행.*당시 입력 보기/);
-  assert.match(rows[1].getAttribute('aria-label'), /CTX04 · 보관 파일.*5–8행.*당시 입력 보기/);
+  assert.match(rows[0].getAttribute('aria-label'), /근거 1.*범위 확인 필요.*당시 입력 보기/);
+  assert.match(rows[1].getAttribute('aria-label'), /근거 2.*범위 확인 필요.*당시 입력 보기/);
   assert.notEqual(rows[0].getAttribute('aria-label'), rows[1].getAttribute('aria-label'));
   assert.match(rows[4].getAttribute('aria-label'), /일치 확인 필요.*연결된 입력 보기/);
   const retries = settingsNodes(panel, node => node.dataset.testid === 'briefing-show-evidence');
   assert.equal(retries.length, 4, 'missing references and mismatched hashes have no retry');
-  assert.match(retries[0].getAttribute('aria-label'), /CTX04 · 보관 파일.*1–4행.*고정 근거 다시 열기/);
+  assert.match(retries[0].getAttribute('aria-label'), /근거 1.*범위 확인 필요.*고정 근거 다시 열기/);
   rows[0].fire('click'); assert.equal(calls[0][2].isCurrent(), true);
   rows[1].fire('click'); assert.equal(calls[0][2].isCurrent(), false); assert.equal(calls[1][2].isCurrent(), true);
   assert.deepEqual(calls.map(call => [call[2].startLine, call[2].endLine]), [[1, 4], [5, 8]]);
@@ -6525,8 +6976,8 @@ test('Briefing evidence rows name exact source ranges, expose honest states and 
   session.preparing = true; h.render(); assert.match(rows[0].textContent, /준비 중/);
   session.preparing = false; allowReady = true;
   await h.bridge.openInputEvidence('room-a', { sourceId: 'source-a' }, { isCurrent: () => true }); h.render();
-  assert.match(rows[0].textContent, /1–4행.*열림.*당시 입력 보기/);
-  assert.match(rows[1].textContent, /5–8행.*열림.*당시 입력 보기/);
+  assert.match(rows[0].textContent, /CTX04 · 보관 파일.*1–4행.*열림.*당시 입력 보기/);
+  assert.match(rows[1].textContent, /CTX04 · 보관 파일.*5–8행.*열림.*당시 입력 보기/);
   assert.match(rows[2].textContent, /확인 필요/); assert.match(rows[4].textContent, /일치 확인 필요/);
   assert.equal(h.panel(), panel); assert.equal(h.part('briefing-comment'), input); assert.equal(session.commentEditor, editor);
   assert.equal(input.value, '보존할 의견'); assert.equal(h.document.activeElement, input);
@@ -6546,7 +6997,8 @@ test('Briefing panel controls use existing surface tokens with visible focus and
 });
 
 test('Briefing collision labels distinguish different captures without inventing metadata or changing their actions', async () => {
-  const h = savedBriefingUiHarness({ prepareEvidence: async () => false }), session = h.session();
+  let allowReady = false;
+  const h = savedBriefingUiHarness({ prepareEvidence: async () => allowReady }), session = h.session();
   session.preparationScope = { current: () => true, dispose() {} }; session.interaction = { revision: 0 };
   session.references = [
     { sourceId: 'source-a', hash: 'hash-a', localSource: { label: 'Report.txt' } },
@@ -6559,25 +7011,32 @@ test('Briefing collision labels distinguish different captures without inventing
   h.render(); await settle(); const panel = h.panel();
   const rows = settingsNodes(panel, node => node.dataset.testid === 'briefing-inspect');
   assert.equal(rows.length, 5);
-  assert.match(rows[0].textContent, /Report\.txt.*1–4행.*항목 1/);
-  assert.match(rows[1].textContent, /Report\.txt.*1–4행.*항목 2/);
-  assert.match(rows[2].textContent, /Report\.txt.*1–4행.*항목 3/, 'the suffix is the actual list position, even for a repeated capture');
-  assert.doesNotMatch(rows[3].textContent, /항목 \d/, 'a different range has no collision');
-  assert.match(rows[4].textContent, /항목 5.*일치 확인 필요.*연결된 입력 보기/);
+  for (const [index, row] of rows.entries()) {
+    assert.match(row.textContent, new RegExp(`근거 ${index + 1}.*범위 확인 필요`));
+    assert.doesNotMatch([row.textContent, row.getAttribute('aria-label')].join(' '), /Report\.txt|1–4행|5–8행/);
+  }
+  assert.match(rows[4].textContent, /일치 확인 필요.*연결된 입력 보기/);
   assert.notEqual(rows[0].getAttribute('aria-label'), rows[1].getAttribute('aria-label'));
-  assert.match(rows[0].getAttribute('aria-label'), /Report\.txt.*1–4행.*항목 1.*당시 입력 보기/);
-  assert.match(rows[1].getAttribute('aria-label'), /Report\.txt.*1–4행.*항목 2.*당시 입력 보기/);
+  assert.match(rows[0].getAttribute('aria-label'), /근거 1.*범위 확인 필요.*당시 입력 보기/);
+  assert.match(rows[1].getAttribute('aria-label'), /근거 2.*범위 확인 필요.*당시 입력 보기/);
   rows[0].fire('click'); rows[1].fire('click'); rows[4].fire('click');
   assert.deepEqual(inspected.map(call => [call[1].sourceId, call[1].hash, call[2].startLine, call[2].endLine]),
     [['source-a', 'hash-a', 1, 4], ['source-b', 'hash-b', 1, 4], ['source-a', 'hash-a', 1, 4]]);
   assert.equal(inspected[0][2].isCurrent(), false); assert.equal(inspected[2][2].isCurrent(), true);
   const retries = settingsNodes(panel, node => node.dataset.testid === 'briefing-show-evidence');
   assert.equal(retries.length, 4, 'the mismatched hash never gains a retry');
-  assert.match(retries[0].getAttribute('aria-label'), /항목 1.*고정 근거 다시 열기/);
-  assert.match(retries[1].getAttribute('aria-label'), /항목 2.*고정 근거 다시 열기/);
+  assert.match(retries[0].getAttribute('aria-label'), /근거 1.*고정 근거 다시 열기/);
+  assert.match(retries[1].getAttribute('aria-label'), /근거 2.*고정 근거 다시 열기/);
   retries[1].fire('click'); await settle();
   assert.equal(h.evidenceCalls.at(-1).reference.sourceId, 'source-b');
   assert.equal(h.evidenceCalls.at(-1).reference.hash, 'hash-b');
+  allowReady = true;
+  await h.bridge.openInputEvidence('room-a', { sourceId: 'source-a' }, { isCurrent: () => true });
+  await h.bridge.openInputEvidence('room-a', { sourceId: 'source-b' }, { isCurrent: () => true }); h.render();
+  assert.match(rows[0].textContent, /Report\.txt.*1–4행.*항목 1/);
+  assert.match(rows[1].textContent, /Report\.txt.*1–4행.*항목 2/);
+  assert.match(rows[2].textContent, /Report\.txt.*1–4행.*항목 3/, 'the suffix is the actual list position');
+  assert.doesNotMatch(rows[3].textContent, /항목 \d/, 'a different range has no collision');
   h.type('보존할 의견'); const input = h.part('briefing-comment'); input.focus(); input.setSelectionRange(1, 4);
   const labels = rows.map(row => row.getAttribute('aria-label')); h.render();
   assert.deepEqual(rows.map(row => row.getAttribute('aria-label')), labels, 'refresh preserves ordinals');
@@ -6636,13 +7095,15 @@ test('Briefing colliding Report.txt rows invoke the real inspector with each ori
       child.parentNode = node; child._connect(node.isConnected); return child; };
     return node;
   };
-  document.querySelectorAll = selector => selector === '.egd-input-evidence-card'
-    ? h.evidence.map((item, index) => ({ id: `view-${index}`, _inputReference: item.ref, _inputEvidenceLoaded: true })) : [];
-  const deps = { state: h.state, document, BriefingState: Briefing, InputContext,
+  document.querySelectorAll = selector => selector === '.egd-input-evidence-card' ? [...h.mockCards.values()] : [];
+  const deps = { state: h.state, document, BriefingState: Briefing, InputContext, ChatState: Chat,
+    cloneJson: value => JSON.parse(JSON.stringify(value)),
     persistentEntityGeometry: () => ({ x: 0, y: 0, width: 100, height: 100 }),
     fitBriefingTargets: () => {}, closeAnswerBriefing: () => h.closeBriefing(),
     mountBriefingComments: () => ({ dispose() {}, notify() {} }), boardNotice: text => h.notices.push(text) };
-  compileFunction(`${declaration('el')}\n${declaration('briefingRangeIssue')}\n${declaration('briefingResolvedTargets')}\n${declaration('renderAnswerBriefing')}\nreturn renderAnswerBriefing;`,
+  const guards = ['getCodexThreadById', 'briefingInputReferences', 'acceptedInputReceipt', 'visibleInputAnswer', 'historyReadReferenceCurrent', 'briefingReadReferenceCurrent']
+    .filter(name => surfaceSource.includes(`  function ${name}(`)).map(declaration).join('\n');
+  compileFunction(`${declaration('el')}\n${guards}\n${declaration('briefingRangeIssue')}\n${declaration('briefingResolvedTargets')}\n${declaration('renderAnswerBriefing')}\nreturn renderAnswerBriefing;`,
     Object.keys(deps))(...Object.values(deps))();
   const rows = settingsNodes(document.getElementById('egd-answer-briefing'), node => node.dataset.testid === 'briefing-inspect');
   assert.match(rows[0].getAttribute('aria-label'), /Report\.txt.*1–4행.*항목 1/);
@@ -6672,11 +7133,18 @@ test('Briefing malformed rows cannot claim readiness, inspect or retry even with
   ];
   const reference = { sourceId: 'source-a', hash: 'hash-a', localSource: { label: 'Report.txt' } };
   const cards = [targets[0], targets[1], targets[2]].map((target, index) => ({ id: `card-${index}`,
-    _inputReference: { ...reference, presentationRange: target.range }, _inputEvidenceLoaded: true }));
+    isConnected: true, _inputReference: { ...reference, presentationRange: target.range }, _inputEvidenceLoaded: true }));
   const document = { querySelectorAll: () => cards }, session = { briefing: { steps: [{ id: 'first', targets }] }, index: 0,
-    references: [reference], artifacts: [], identity: {} };
+    references: [reference], artifacts: [], identity: {}, preparationScope: { current: () => true },
+    _minimapVerifiedEvidence: new Map(cards.flatMap(card => {
+      try { return [[InputContext.inputEvidenceKey(card._inputReference), card]]; } catch { return []; }
+    })) };
+  const state = { codex: { briefingSession: session, connected: true, authStatus: {} } };
+  // Isolate range resolution here; the full guard/read/spawn integration is
+  // exercised separately by the first-send Briefing fixture.
   const resolve = compileFunction(`${declaration('briefingRangeIssue')}\n${declaration('briefingResolvedTargets')}\nreturn briefingResolvedTargets;`,
-    ['document', 'InputContext', 'BriefingState', 'persistentEntityGeometry'])(document, InputContext, Briefing, () => ({ x: 0, y: 0, width: 100, height: 100 }));
+    ['document', 'state', 'InputContext', 'BriefingState', 'persistentEntityGeometry', 'briefingReadReferenceCurrent'])
+    (document, state, InputContext, Briefing, () => ({ x: 0, y: 0, width: 100, height: 100 }), () => true);
   assert.deepEqual(resolve(session).map(item => item.status), ['unsupported', 'unsupported', 'available', 'missing'],
     'an old null-end card cannot masquerade as a valid explicit 200-line card');
   const h = savedBriefingUiHarness({ prepareEvidence: async () => false }), shown = h.session();
@@ -6685,7 +7153,8 @@ test('Briefing malformed rows cannot claim readiness, inspect or retry even with
   h.render(); await settle();
   const panel = h.panel(), invalid = settingsNodes(panel, node => node.dataset.testid === 'briefing-evidence-unavailable');
   assert.equal(invalid.length, 2);
-  for (const row of invalid) { assert.match(row.textContent, /지원하지 않는 범위.*지원 안 됨/); assert.doesNotMatch(row.textContent, /열림|당시 입력 보기/); }
+  for (const row of invalid) { assert.match(row.textContent, /범위 확인 필요.*지원 안 됨/); assert.doesNotMatch(row.textContent, /열림|당시 입력 보기/); }
+  assert.match(panel.textContent, /지원하지 않는 캡처 행 범위/);
   assert.equal(settingsNodes(panel, node => node.dataset.testid === 'briefing-inspect').length, 2);
   assert.equal(settingsNodes(panel, node => node.dataset.testid === 'briefing-show-evidence').length, 2);
   h.close();
@@ -7209,8 +7678,8 @@ test('Briefing selection revision: actual Canvas selection ABA, same-card focus 
       if (value.source.range.startLine === 5) { response = value; return pending.promise; }
       return value;
     } });
-    const document = h.document, nodes = [];
-    document.querySelectorAll = selector => selector === '.egd-entity-active, .egd-entity-selected' ? nodes : [];
+    const document = h.document, nodes = [], queryAll = document.querySelectorAll;
+    document.querySelectorAll = selector => selector === '.egd-entity-active, .egd-entity-selected' ? nodes : queryAll(selector);
     const card = id => {
       const node = document.createElement('div'), classes = new Set();
       node.id = id; node.classList = { add: (...values) => values.forEach(value => classes.add(value)),
@@ -11742,15 +12211,16 @@ function minimapUiHarness({ document: suppliedDocument = null, state: suppliedSt
     'renderDeskMinimapWorld', 'moveCameraToMinimapNode', 'focusBoardFromMinimap', 'focusEntityFromMinimap',
     'goToMinimapTarget', 'closeMinimapStack', 'openMinimapTargets', 'buildDeskMinimapEntityRows', 'refreshDeskMinimap',
     'closeDeskMinimap', 'installDeskMinimapPan', 'toggleDeskMinimap'];
-  for (const name of ['rememberBriefingMinimapEvidence', 'briefingMinimapModel', 'minimapBriefingEvidenceLabel', 'renderDeskMinimapBriefing',
+  for (const name of ['briefingInputReferences', 'briefingRangeIssue', 'acceptedInputReceipt', 'visibleInputAnswer', 'historyReadReferenceCurrent', 'briefingReadReferenceCurrent',
+    'rememberBriefingMinimapEvidence', 'briefingMinimapModel', 'minimapBriefingEvidenceLabel', 'renderDeskMinimapBriefing',
     'clearMinimapBriefingSearchLabels', 'renderMinimapBriefingSearchLabels']) {
     if (surfaceSource.includes(`  function ${name}(`)) names.push(name);
   }
   let safeRect = { left: 0, top: 0, right: 1000, bottom: 800, width: 1000, height: 800 };
   const actual = compileFunction(`const MINIMAP_SEARCH_PAGE_SIZE = 24, MINIMAP_PICK_SLOP = 4, MINIMAP_IME_COMMIT_GUARD_MS = 80;\n${names.map(declaration).join('\n')}\nreturn { toggleDeskMinimap, refreshDeskMinimap, openMinimapTargets };`,
-    ['document', 'window', 'state', 'SurfaceState', 'MinimapLayout', 'CANVAS_SHAPE_TITLES', 'cardLabelForViewportRail', 'safeViewportRect', 'BriefingState', 'briefingResolvedTargets', 'ChatState', 'InputContext'])(
+    ['document', 'window', 'state', 'SurfaceState', 'MinimapLayout', 'CANVAS_SHAPE_TITLES', 'cardLabelForViewportRail', 'safeViewportRect', 'BriefingState', 'briefingResolvedTargets', 'ChatState', 'InputContext', 'cloneJson'])(
     document, window, state, Surface, MinimapLayout, { rect: '사각형' }, () => '이름 없는 화면',
-    () => safeRect, Briefing, resolveEvidence, Chat, InputContext);
+    () => safeRect, Briefing, resolveEvidence, Chat, InputContext, value => JSON.parse(JSON.stringify(value)));
   const make = (id, title, x, y, kind = 'view') => {
     const node = document.createElement('div');
     node.setAttribute('id', id);
@@ -11785,11 +12255,11 @@ function minimapUiHarness({ document: suppliedDocument = null, state: suppliedSt
 // Reuse the existing synthetic document, but execute the production Briefing
 // opener, step controls, evidence resolver, and minimap renderer together.
 // Evidence opening is a local, scope-checked fixture; this is not Firefox QA.
-function briefingMinimapUiHarness({ prepare = null, useProductionEmit = false } = {}) {
+function briefingMinimapUiHarness({ prepare = null, useProductionEmit = false, respond = null } = {}) {
   let minimap, resolveTargets, refreshFailure = false, refreshCalls = 0;
   const cards = new Map(), notices = [], materialized = [];
   const evidenceKey = reference => InputContext.inputEvidenceKey(reference);
-  const briefing = savedBriefingUiHarness({ allowClose: true,
+  const briefing = savedBriefingUiHarness({ allowClose: true, respond,
     prepareEvidence: reference => cards.has(evidenceKey(reference)) ? (prepare ? prepare(reference) : true) : false,
     evidenceCard: reference => { const card = cards.get(evidenceKey(reference)) || null; if (card) materialized.push(card.id); return card; },
     resolveEvidence: (session, step) => resolveTargets(session, step),
@@ -11804,8 +12274,13 @@ function briefingMinimapUiHarness({ prepare = null, useProductionEmit = false } 
   state.codex.connected = true;
   state.activeEntityId = 'existing-card';
   minimap.make('existing-card', '기존 화면', -500, -400);
-  resolveTargets = compileFunction(`${['parsePxNumber', 'persistentEntityGeometry', 'briefingRangeIssue', 'briefingResolvedTargets'].map(declaration).join('\n')}\nreturn briefingResolvedTargets;`,
-    ['document', 'state', 'InputContext', 'BriefingState'])(document, state, InputContext, Briefing);
+  const resolverNames = ['parsePxNumber', 'persistentEntityGeometry', 'briefingRangeIssue', 'briefingResolvedTargets'];
+  for (const name of ['getCodexThreadById', 'briefingInputReferences', 'acceptedInputReceipt', 'visibleInputAnswer', 'historyReadReferenceCurrent', 'briefingReadReferenceCurrent']) {
+    if (surfaceSource.includes(`  function ${name}(`)) resolverNames.push(name);
+  }
+  resolveTargets = compileFunction(`${resolverNames.map(declaration).join('\n')}\nreturn briefingResolvedTargets;`,
+    ['document', 'state', 'InputContext', 'BriefingState', 'ChatState', 'cloneJson'])(document, state, InputContext, Briefing, Chat,
+    value => JSON.parse(JSON.stringify(value)));
   const first = { sourceId: 'source-a', hash: 'hash-a', range: { startLine: 1, endLine: 4 } };
   const distant = { sourceId: 'source-b', hash: 'hash-b', range: { startLine: 1, endLine: 4 } };
   const otherRange = { sourceId: 'source-a', hash: 'hash-a', range: { startLine: 5, endLine: 8 } };
@@ -11827,6 +12302,25 @@ function briefingMinimapUiHarness({ prepare = null, useProductionEmit = false } 
     return InputContext.capturedInputReference(source, receipt, scope);
   });
   briefing.thread().briefingInputs = originals;
+  const baseOpen = briefing.open;
+  briefing.open = (options = {}, suppliedMessage = null) => {
+    if (suppliedMessage) return baseOpen(options, suppliedMessage);
+    const current = briefing.thread(), identity = { conversationId: briefing.briefing.conversationId,
+      runId: briefing.briefing.runId, answerId: briefing.briefing.answerId };
+    const requestId = 'minimap-fixture-request', protocol = Chat.createChatProtocolState();
+    Chat.registerChatRequest(protocol, { requestId, clientThreadId: current.clientBindingId, localThreadId: current.id }, state.codex.authStatus);
+    const run = Chat.acceptChatRequest(protocol, { accepted: true, requestId, clientThreadId: current.clientBindingId,
+      localMessageId: 'minimap-fixture-user', engineId: current.engineId, engineProfileId: current.engineProfileId, ...identity }, requestId);
+    assert.ok(run);
+    Object.assign(run, { messages: [{ id: 'minimap-fixture-answer', role: 'assistant', content: '합성 답변', status: 'complete' }],
+      contextCaptures: current.briefingInputs.map(reference => structuredClone(reference)), briefing: briefing.briefing });
+    state.codex.chatProtocol = protocol;
+    current.messages = [{ id: 'minimap-fixture-local', role: 'user', requestId,
+      inputReferences: structuredClone(current.briefingInputs) }];
+    seedFixtureAcceptedInput(state, current, run, requestId, 'minimap-fixture-user');
+    current.messages = Chat.projectRunMessages(current.messages, run);
+    return baseOpen(options, current.messages.find(message => message.role === 'assistant'));
+  };
   const attach = (id, target, x, y) => {
     const reference = { ...originals.find(item => item.sourceId === target.sourceId), presentationRange: target.range };
     const card = minimap.make(id, id, x, y);
@@ -11865,6 +12359,1129 @@ function briefingMinimapUiHarness({ prepare = null, useProductionEmit = false } 
     firstCard, distantCard, rangeCard, deniedCard, decoyCard, cards, notices, materialized, parts, openViaButton,
     setRefreshFailure: value => { refreshFailure = value; }, refreshCalls: () => refreshCalls };
 }
+
+// Existing saved-comment success tests now enter through the real Briefing
+// opener, resolver and verified-card guard. Only the source read is the
+// already-existing synthetic adapter; this does not claim browser QA.
+async function verifiedSavedBriefingUiHarness({ respond, clientBindingId = null, onCreate = null } = {}) {
+  const h = briefingMinimapUiHarness({ respond });
+  if (clientBindingId) {
+    const thread = h.briefing.thread(); thread.clientBindingId = clientBindingId;
+    const scope = Chat.chatContextRequestScope(thread, h.state.codex);
+    thread.briefingInputs = thread.briefingInputs.map(reference => {
+      const { contextScope: _oldScope, ...capture } = reference;
+      return InputContext.capturedInputReference(reference.localSource,
+        { ...capture, clientThreadId: clientBindingId, engine: { engineId: scope.engineId, engineProfileId: scope.engineProfileId } }, scope);
+    });
+    const first = thread.briefingInputs.find(reference => reference.sourceId === h.first.sourceId);
+    h.firstCard._inputReference = { ...first, presentationRange: h.first.range };
+    h.cards.set(InputContext.inputEvidenceKey(h.firstCard._inputReference), h.firstCard);
+  }
+  h.briefing.briefing.steps = [{ id: 'first', text: '첫 단계', target: h.first }];
+  onCreate?.(h.briefing);
+  await h.openViaButton(); await settle();
+  assert.equal(h.resolveTargets(h.briefing.session(), h.briefing.briefing.steps[0])[0].status, 'available');
+  h.briefing.thread().briefingInputs = [{ sourceId: 'existing-source', hash: 'existing-hash' }];
+  h.briefing.panel().scrollTop = 17; h.briefing.panel().scrollLeft = 2;
+  return h.briefing;
+}
+
+// Connect the actual Briefing/inspector/read/spawn paths to the same minimal
+// first-send producer used by the Activity test. The HTTP responses and DOM
+// are synthetic; in particular this is not a real Firefox or account test.
+function firstSendBriefingUiHarness({ hasAReceipt = false, assistantLifecycle = false, projectAfterEvents = false,
+  transport: supplied = null, respond = null } = {}) {
+  const transport = supplied || firstSendInspectorPacketFixture({ hasAReceipt, assistantLifecycle, projectAfterEvents });
+  const h = briefingMinimapUiHarness({ useProductionEmit: true, respond });
+  const { state, document, briefing, minimap } = h, thread = briefing.thread();
+  for (const card of [h.firstCard, h.distantCard, h.rangeCard, h.deniedCard, h.decoyCard]) card.remove();
+  Object.assign(thread, transport.thread, { briefingInputs: [] });
+  state.codex.chatProtocol = transport.state.codex.chatProtocol;
+  state.codex.authStatus = transport.state.codex.authStatus;
+  state.codex.codexAccountKey = transport.state.codex.codexAccountKey;
+  const target = { sourceId: transport.capture.sourceId, hash: transport.capture.hash, range: { startLine: 1, endLine: 2 } };
+  transport.answer.briefing.steps = [{ id: 'step-a', text: '합성 단계', target }];
+  const referenceB = { ...structuredClone(transport.original), presentationRange: target.range,
+    clientThreadId: 'binding-b', contextScope: { ...transport.original.contextScope, clientThreadId: 'binding-b', conversationId: 'conversation-b' } };
+  const otherCard = minimap.make('other-room-evidence', '같은 이름의 B 카드', 2400, 1400);
+  otherCard.className = 'egd-canvas-card egd-input-evidence-card';
+  otherCard.dataset.deskWindowKind = 'input-evidence'; otherCard._inputReference = referenceB; otherCard._inputEvidenceLoaded = true;
+  assert.equal(InputContext.inputEvidenceKey(referenceB), InputContext.inputEvidenceKey({ ...transport.original, presentationRange: target.range }));
+  const spawns = [], copy = value => JSON.parse(JSON.stringify(value));
+  const method = signature => {
+    const start = surfaceSource.indexOf(`      ${signature}`), end = surfaceSource.indexOf('\n      },', start);
+    assert.ok(start >= 0 && end > start); return surfaceSource.slice(start, end + 8);
+  };
+  const names = ['el', 'getCodexThreadById', 'briefingInputReferences', 'briefingRangeIssue', 'openChatInputPanel', 'spawnInputEvidence'];
+  for (const name of ['acceptedInputReceipt', 'visibleInputAnswer', 'inputDeliveryProof', 'inputDeliveryMatches', 'historyReadReferenceCurrent',
+    'briefingReadReferenceCurrent', 'inputAuthorizationFailure', 'invalidateInputReadOnDenial', 'rememberBriefingMinimapEvidence']) {
+    if (surfaceSource.includes(`  function ${name}(`)) names.push(name);
+  }
+  const makeShell = ({ id }) => {
+    const root = minimap.make(id, 'A 합성 근거', 1000, 2400);
+    root.className = 'egd-canvas-card egd-input-evidence-card'; root.dataset.deskWindowKind = 'input-evidence';
+    const identity = document.createElement('div'), content = document.createElement('div'); root.append(identity, content);
+    const shell = { root, slots: { identity, content } }; root._deskWindowShell = shell; return shell;
+  };
+  const deps = { state, document, window: briefing.window, ChatState: Chat, BriefingState: Briefing, InputContext,
+    epochScope: briefing.epochScope, fetchJson: transport.fetchJson, cloneJson: copy, spawns,
+    resolveCanvasCardPlacement: () => ({ x: 1000, y: 2400, width: 400, height: 300 }), spawnDeskWindowShell: makeShell,
+    revealPlacedCanvasCard: () => assert.fail('batch evidence must not reveal a card'), boardNotice: text => h.notices.push(text),
+    refreshDeskMinimap: () => minimap.refreshDeskMinimap() };
+  const actual = compileFunction(`let cardSeq = 0;\n${names.map(declaration).join('\n')}\nconst spawn = spawnInputEvidence;
+    spawnInputEvidence = (...args) => { const card = spawn(...args); spawns.push({ reference: args[0], card }); return card; };
+    return { ${['async inspectInput(', 'async readInput(', 'async openInputEvidence('].map(method).join(',\n')} };`, Object.keys(deps))(...Object.values(deps));
+  Object.assign(briefing.bridge, actual);
+  // Source-change metadata is an independent background tracker; the source
+  // read, inspector and evidence renderer above remain production methods.
+  briefing.bridge.refreshInputSourceChange = async () => {};
+  const inspections = [], inspect = briefing.bridge.inspectInput;
+  briefing.bridge.inspectInput = function (...args) { const work = inspect.apply(this, args); inspections.push(work); return work; };
+  const openViaButton = () => {
+    let opening;
+    const button = briefingStartControl(document, transport.answer.briefing, thread, (_thread, _message, options) => {
+      opening = briefing.open(options, transport.answer);
+    });
+    document.documentElement.appendChild(button); button.fire('click', { isTrusted: true, detail: 1 });
+    assert.ok(opening); return opening;
+  };
+  return { ...h, transport, target, otherCard, spawns, inspections, openViaButton };
+}
+
+test('first-send Briefing: same-key B card is never shown as A and A inspector uses its own receipt', async t => {
+  for (const hasAReceipt of [false, true]) await t.test(hasAReceipt ? 'verified A packet' : 'no A delivery receipt', async () => {
+    const transport = await firstSendThroughActualBridge({ hasAReceipt });
+    const h = firstSendBriefingUiHarness({ transport }), gate = requestProjectDeferred(); h.transport.policy.gate = gate;
+    const before = JSON.stringify([h.state.panTarget, h.state.zoomTarget, h.state.activeEntityId, h.otherCard.style]);
+    const outside = h.document.createElement('textarea'); h.document.documentElement.appendChild(outside); outside.focus();
+    const opening = h.openViaButton(); await settle(); h.minimap.toggleDeskMinimap();
+    assert.equal(h.transport.observed.length, 1, 'the synthetic source read is delayed');
+    assert.ok(h.parts('minimap-briefing-marker').every(node => node.dataset.viewId !== h.otherCard.id));
+    assert.ok(h.parts('minimap-briefing-row').every(node => node.dataset.viewId !== h.otherCard.id));
+    assert.equal(h.spawns.length, 0); assert.equal(h.document.activeElement, outside);
+    gate.resolve(); await opening; await settle();
+    const a = h.spawns.find(item => item.reference.sourceId === h.target.sourceId)?.card;
+    assert.ok(a); assert.notEqual(a.id, h.otherCard.id, 'a matching source/hash/range is not a matching room');
+    assert.equal(h.resolveTargets(h.briefing.session(), h.transport.answer.briefing.steps[0])[0].view?.id, a.id);
+    assert.ok(h.parts('minimap-briefing-row').some(node => node.dataset.viewId === a.id));
+    assert.ok(h.parts('minimap-briefing-row').every(node => node.dataset.viewId !== h.otherCard.id));
+    assert.equal(JSON.stringify([h.state.panTarget, h.state.zoomTarget, h.state.activeEntityId, h.otherCard.style]), before);
+    assert.equal(JSON.stringify(h.transport.user.inputReferences[0]), h.transport.originalJson, 'native CID is not backfilled into the original reference');
+    h.briefing.click('briefing-inspect'); await h.inspections.at(-1); await settle();
+    const panel = h.document.getElementById('egd-codex-input-panel'); assert.ok(panel);
+    const rendered = inspectorRenderedData(panel);
+    assert.equal(/packet-b|conversation-b\/run-b|Third line/.test(rendered), false, 'B payload and metadata are never rendered as A');
+    assert.ok(rendered.includes('First line') && rendered.includes('Shared evidence'));
+    if (hasAReceipt) assert.ok(rendered.includes('packet-a') && rendered.includes(h.transport.packetA.text));
+    else assert.equal(rendered.includes('packet-a'), false);
+    h.briefing.close();
+  });
+});
+
+test('first-send Briefing: denied A read, explicit range retry and later permission loss preserve newer focus', async () => {
+  const transport = await firstSendThroughActualBridge({ hasAReceipt: true });
+  const h = firstSendBriefingUiHarness({ transport }); h.transport.policy.deny = true;
+  const before = JSON.stringify([h.state.panTarget, h.state.zoomTarget, h.state.activeEntityId, h.otherCard.style]);
+  const outside = h.document.createElement('textarea'); h.document.documentElement.appendChild(outside); outside.focus();
+  await h.openViaButton(); await settle(); h.minimap.toggleDeskMinimap();
+  assert.equal(h.transport.observed.length, 1); assert.equal(h.spawns.length, 0);
+  assert.ok(h.notices.some(message => /조회 권한 거부/.test(message)));
+  assert.equal(h.resolveTargets(h.briefing.session(), h.transport.answer.briefing.steps[0])[0].status, 'missing');
+  assert.ok(h.parts('minimap-briefing-row').every(row => row.dataset.viewId !== h.otherCard.id));
+  assert.doesNotMatch(inspectorRenderedData(h.briefing.panel()), /합성 공유 문서|같은 이름의 B 카드|packet-b|1–2행/);
+  assert.equal(JSON.stringify([h.state.panTarget, h.state.zoomTarget, h.state.activeEntityId, h.otherCard.style]), before);
+  assert.equal(h.document.activeElement, outside);
+
+  const retry = h.parts('briefing-show-evidence')[0]; assert.ok(retry, 'only an explicit user retry starts another read');
+  assert.match(retry.getAttribute('aria-label'), /범위 확인 필요/);
+  const gate = requestProjectDeferred(); h.transport.policy.deny = false; h.transport.policy.gate = gate;
+  retry.fire('click'); await settle();
+  assert.equal(h.transport.observed.length, 2);
+  assert.deepEqual(h.transport.observed.map(item => {
+    const url = new URL(item.request); return [url.searchParams.get('startLine'), url.searchParams.get('endLine')];
+  }), [['1', '2'], ['1', '2']], 'the explicit retry uses exactly the original requested range');
+  const newer = h.document.createElement('textarea'); h.document.documentElement.appendChild(newer); newer.focus();
+  h.state.panTarget = { x: 501, y: 702 }; h.state.canvasUserCameraRevision = (h.state.canvasUserCameraRevision || 0) + 1;
+  gate.resolve(); await settle(); h.minimap.refreshDeskMinimap();
+  const card = h.spawns.find(item => item.reference.sourceId === h.target.sourceId)?.card;
+  assert.ok(card && card.id !== h.otherCard.id);
+  assert.ok(h.parts('minimap-briefing-row').some(row => row.dataset.viewId === card.id));
+  assert.ok(h.parts('minimap-briefing-row').every(row => row.dataset.viewId !== h.otherCard.id));
+  assert.deepEqual(h.state.panTarget, { x: 501, y: 702 }); assert.equal(h.document.activeElement, newer);
+  h.minimap.search('A 합성 근거');
+  const row = h.minimap.rows().find(item => item.dataset.targetId === card.id); assert.ok(row);
+  assert.match([row.textContent, row.getAttribute('aria-label'), row.getAttribute('title')].join(' '), /합성 공유 문서/);
+  const auth = h.state.codex.authStatus, reads = h.transport.observed.length;
+  h.state.codex.authStatus = { ...auth, access: { state: 'permissionDenied' } }; h.briefing.emit(); await settle();
+  assert.equal(card._inputEvidenceLoaded, false);
+  assert.equal(h.parts('minimap-briefing-row').length, 0);
+  assert.doesNotMatch([row.textContent, row.getAttribute('aria-label'), row.getAttribute('title')].join(' '), /합성 공유 문서|1–2행/);
+  assert.equal(h.document.activeElement, newer); assert.deepEqual(h.state.panTarget, { x: 501, y: 702 });
+  h.state.codex.authStatus = auth; h.briefing.emit(); await settle();
+  assert.equal(h.transport.observed.length, reads, 'restoring permission never silently retries');
+  assert.equal(h.parts('minimap-briefing-row').length, 0);
+  assert.equal(JSON.stringify(h.transport.user.inputReferences[0]), h.transport.originalJson);
+  h.briefing.close();
+});
+
+test('first-send Briefing: delayed A read cannot revive after a permission round trip', async () => {
+  const transport = await firstSendThroughActualBridge({ hasAReceipt: true });
+  const h = firstSendBriefingUiHarness({ transport }), gate = requestProjectDeferred(); h.transport.policy.gate = gate;
+  const outside = h.document.createElement('textarea'); h.document.documentElement.appendChild(outside); outside.focus();
+  const camera = JSON.stringify([h.state.panTarget, h.state.zoomTarget, h.state.activeEntityId, h.otherCard.style]);
+  const opening = h.openViaButton(); await settle(); h.minimap.toggleDeskMinimap();
+  assert.equal(h.transport.observed.length, 1); assert.equal(h.spawns.length, 0);
+  const auth = h.state.codex.authStatus;
+  h.state.codex.authStatus = { ...auth, access: { state: 'permissionDenied' } }; h.briefing.emit();
+  h.state.codex.authStatus = auth; h.briefing.emit(); gate.resolve();
+  await opening; await settle(); h.minimap.refreshDeskMinimap();
+  assert.equal(h.spawns.length, 0); assert.equal(h.transport.observed.length, 1);
+  assert.equal(h.parts('minimap-briefing-row').length, 0); assert.equal(h.parts('minimap-briefing-marker').length, 0);
+  assert.equal(h.document.activeElement, outside);
+  assert.equal(JSON.stringify([h.state.panTarget, h.state.zoomTarget, h.state.activeEntityId, h.otherCard.style]), camera);
+  assert.equal(JSON.stringify(h.transport.user.inputReferences[0]), h.transport.originalJson);
+  h.briefing.close();
+});
+
+async function firstSendSavedCommentHarness({ commentText = '합성 저장 의견', sourceIds = ['stored-capture'] } = {}) {
+  const transport = await firstSendThroughActualBridge({ hasAReceipt: true });
+  return firstSendBriefingUiHarness({ transport, respond: (call, { row }) => {
+      assert.equal(call.options.method, 'GET', 'rendering saved comments never posts or sends');
+      return { briefingId: 'briefing-a', comments: [row({ briefingId: 'briefing-a', stepId: 'step-a', stepIndex: 0,
+        sourceIds, text: commentText, ...transport.identity })] };
+    } });
+}
+
+// The Briefing UI and the production send method share the same in-memory
+// room and draft. Only source/project/transport collaborators are synthetic.
+async function savedCommentSameRoomSendHarness({ manualReference = false, otherBriefingInput = false, sameCapturedId = false } = {}) {
+  const h = await firstSendSavedCommentHarness({ commentText: '사용자가 직접 쓴 합성 의견' });
+  await h.openViaButton(); await settle();
+  const original = h.briefing.thread();
+  const manual = { ...structuredClone(h.transport.original), id: 'manual-selection', sourceId: 'manual-source', snapshotId: 'manual-source',
+    localSource: { id: 'manual-selection', kind: 'file', label: '사용자가 선택한 별도 자료' } };
+  const attachment = { id: 'kept-attachment', kind: 'file', label: '사용자가 선택한 첨부' };
+  original.briefingInputs = manualReference ? [manual] : []; original.inputSources = [attachment];
+  h.state.codex.threadDrafts['room-a'] = '사용자가 작성한 기존 초안';
+  const include = h.parts('briefing-comment-include')[0]; assert.ok(include && !include.disabled); include.fire('click'); await settle();
+  assert.ok(h.briefing.thread().briefingInputs.some(reference => reference.sourceId === h.target.sourceId));
+  assert.ok(h.state.codex.threadDrafts['room-a'].includes('사용자가 직접 쓴 합성 의견'));
+  const other = { id: 'room-b', clientBindingId: 'binding-b', engineId: 'codex', engineProfileId: 'codex-slot',
+    conversationId: 'conversation-b', bindingState: 'verified', bindingAccountKey: h.state.codex.codexAccountKey,
+    messages: [{ id: 'b-message', role: 'user', content: '다른 방 기록' }],
+    inputSources: [{ id: 'b-attachment', kind: 'file' }], briefingInputs: [] };
+  if (otherBriefingInput) {
+    const otherScope = Chat.chatContextRequestScope(other, h.state.codex);
+    other.briefingInputs.push(InputContext.capturedInputReference({ id: 'b-selection', kind: 'file', label: 'B 방 자료' },
+      { id: 'b-selection', sourceId: 'b-source', snapshotId: 'b-source', hash: 'b-hash', sourceRef: { path: '/fixture/b.txt' }, clientThreadId: otherScope.clientThreadId,
+        engine: { engineId: otherScope.engineId, engineProfileId: otherScope.engineProfileId } }, otherScope));
+  }
+  h.state.codex.threads.push(other); h.state.codex.threadDrafts['room-b'] = '다른 방의 초안';
+  h.state.codex.threadDraftRevisions['room-b'] = 1;
+  const readSource = (path, options = {}) => {
+    assert.equal(options.method || 'GET', 'GET');
+    const getOptions = { ...options }; delete getOptions.method;
+    return h.transport.fetchJson(path, getOptions);
+  };
+  let sendObserver = () => {};
+  const capture = sameCapturedId ? async (_thread, inputs) => inputs.map((input, index) => {
+    if (index !== 0) return { snapshotId: `snapshot-${index}`, sourceId: input.id };
+    assert.equal(input.id, h.transport.original.localSource.id);
+    assert.deepEqual(input.sourceRef, h.transport.original.sourceRef);
+    return structuredClone(h.transport.original);
+  }) : undefined;
+  const send = requestProjectSendHarness({ sharedState: h.state, sourceDocument: h.document, sourceRead: readSource,
+    capture, onEmit: codex => sendObserver(codex) });
+  const productionSend = send.send;
+  send.send = (...args) => productionSend.apply(h.state.codexBridge, args);
+  return { ...h, send, manual, attachment, otherId: other.id, onSendEmit: listener => { sendObserver = listener; } };
+}
+
+test('saved comment in the same room cannot send its previously included source after a real 401 lookup', async () => {
+  const h = await savedCommentSameRoomSendHarness(), state = h.state.codex;
+  const beforeDraft = state.threadDrafts['room-a'], beforeInputs = structuredClone(h.briefing.thread().briefingInputs);
+  const beforeOther = structuredClone(state.threads.find(thread => thread.id === h.otherId));
+  const beforeMessages = structuredClone(h.briefing.thread().messages);
+  assert.equal(InputContext.inputEvidenceKey(h.otherCard._inputReference),
+    InputContext.inputEvidenceKey({ ...h.transport.original, presentationRange: h.target.range }), 'B has the same source/hash/range key as A');
+  h.transport.policy.deny = true; h.transport.policy.denialStatus = 401;
+  h.briefing.click('briefing-inspect'); await h.inspections.at(-1); await settle();
+  assert.ok(h.notices.some(message => /조회 권한 거부/.test(message)));
+  assert.equal(h.resolveTargets(h.briefing.session(), h.transport.answer.briefing.steps[0])[0].status, 'missing');
+  assert.ok(h.otherCard.isConnected && h.otherCard._inputEvidenceLoaded, 'B remains a distinct loaded card, not proof for A');
+  await h.send.send({ manualOwner: h.send.owner('room-a') }); await settle();
+  assert.equal(h.send.calls.provider.length, 0, 'a denied previously included source is never dispatched');
+  assert.equal(state.threadDrafts['room-a'], beforeDraft);
+  assert.deepEqual(h.briefing.thread().briefingInputs, beforeInputs, 'neither automatic nor manually chosen references are removed');
+  assert.deepEqual(h.briefing.thread().inputSources, [h.attachment]);
+  assert.deepEqual(h.briefing.thread().messages, beforeMessages, 'a blocked send does not create a falsely approved user row');
+  assert.deepEqual(state.threads.find(thread => thread.id === h.otherId), beforeOther);
+  assert.equal(state.threadDrafts['room-b'], '다른 방의 초안');
+  const status = h.briefing.thread().sendError || '';
+  assert.match(status, /전송하지|전송되지|보내지|확인할 수 없|다시 확인/);
+  assert.match(status, /근거|자료|권한/);
+  assert.doesNotMatch(status, /전송 완료|전송 성공|접수 완료/);
+  h.transport.policy.deny = false;
+  const retry = h.parts('briefing-show-evidence')[0]; assert.ok(retry, 'recovery is an explicit existing source retry');
+  retry.fire('click'); await settle();
+  assert.equal(h.resolveTargets(h.briefing.session(), h.transport.answer.briefing.steps[0])[0].status, 'available');
+  assert.equal(h.send.calls.provider.length, 0, 'a successful lookup does not resend automatically');
+  assert.equal(state.threadDrafts['room-a'], beforeDraft);
+  assert.deepEqual(h.briefing.thread().briefingInputs, beforeInputs);
+  await h.send.send({ manualOwner: h.send.owner('room-a') }); await settle();
+  assert.equal(h.send.calls.provider.length, 1, 'a new explicit send is required after the successful lookup');
+  const request = h.send.calls.provider[0];
+  assert.equal(request.clientThreadId, h.briefing.thread().clientBindingId); assert.equal(request.message, beforeDraft);
+  assert.equal(request.contextSnapshotIds.filter(id => id === h.target.sourceId).length, 1);
+  assert.deepEqual(state.threads.find(thread => thread.id === h.otherId), beforeOther);
+  h.briefing.close();
+});
+
+test('closing the briefing alone preserves an approved source for one explicit same-room send', async () => {
+  const h = await savedCommentSameRoomSendHarness(), state = h.state.codex, draft = state.threadDrafts['room-a'];
+  const a = h.spawns.find(item => item.reference.sourceId === h.target.sourceId)?.card;
+  assert.ok(a?.isConnected && a._inputEvidenceLoaded); h.briefing.close();
+  assert.ok(a.isConnected && a._inputEvidenceLoaded); assert.equal(state.activeThreadId, 'room-a');
+  await h.send.send({ manualOwner: h.send.owner('room-a') }); await settle();
+  assert.equal(h.send.calls.provider.length, 1); const request = h.send.calls.provider[0];
+  assert.equal(request.message, draft); assert.equal(request.clientThreadId, 'binding-a');
+  assert.equal(request.contextSnapshotIds.filter(id => id === h.target.sourceId).length, 1);
+  assert.equal(state.threadDrafts['room-b'], '다른 방의 초안');
+});
+
+test('overlapping manual selection and saved-comment source survive 401 separately until explicit send', async () => {
+  const h = await savedCommentSameRoomSendHarness(), state = h.state.codex;
+  const sameSelection = structuredClone(h.transport.original.localSource);
+  const thread = h.briefing.thread(), sameReference = thread.briefingInputs.find(item => item.sourceId === h.target.sourceId);
+  assert.deepEqual(sameSelection.sourceRef, sameReference.sourceRef, 'both refer to the same user-selected source');
+  thread.inputSources = [sameSelection, h.attachment];
+  const draft = state.threadDrafts['room-a'], inputs = structuredClone(thread.briefingInputs), selections = structuredClone(thread.inputSources);
+  const serializedInputs = JSON.stringify(thread.briefingInputs), serializedSelections = JSON.stringify(thread.inputSources);
+  h.transport.policy.deny = true; h.transport.policy.denialStatus = 401;
+  h.briefing.click('briefing-inspect'); await h.inspections.at(-1); await settle();
+  await h.send.send({ manualOwner: h.send.owner('room-a') }); await settle();
+  assert.equal(h.send.calls.provider.length, 0); assert.equal(h.send.calls.capture, 0);
+  assert.equal(state.threadDrafts['room-a'], draft); assert.deepEqual(h.briefing.thread().briefingInputs, inputs);
+  assert.deepEqual(h.briefing.thread().inputSources, selections, 'the independently selected source is not merged or erased');
+  assert.equal(JSON.stringify(h.briefing.thread().briefingInputs), serializedInputs);
+  assert.equal(JSON.stringify(h.briefing.thread().inputSources), serializedSelections);
+  h.transport.policy.deny = false;
+  const retry = h.parts('briefing-show-evidence')[0]; assert.ok(retry); retry.fire('click'); await settle();
+  assert.equal(h.resolveTargets(h.briefing.session(), h.transport.answer.briefing.steps[0])[0].status, 'available');
+  assert.equal(h.send.calls.provider.length, 0); assert.deepEqual(h.briefing.thread().briefingInputs, inputs);
+  assert.deepEqual(h.briefing.thread().inputSources, selections); assert.equal(state.threadDrafts['room-a'], draft);
+  assert.equal(JSON.stringify(h.briefing.thread().briefingInputs), serializedInputs);
+  assert.equal(JSON.stringify(h.briefing.thread().inputSources), serializedSelections);
+  await h.send.send({ manualOwner: h.send.owner('room-a') }); await settle();
+  assert.equal(h.send.calls.provider.length, 1); assert.equal(h.send.calls.capture, 1);
+  const request = h.send.calls.provider[0]; assert.equal(request.message, draft);
+  assert.deepEqual(request.contextSnapshotIds, ['snapshot-0', 'snapshot-1', h.target.sourceId]);
+  assert.equal(state.threadDrafts['room-b'], '다른 방의 초안'); h.briefing.close();
+});
+
+test('the same captured ID in a manual selection and saved opinion stays owned through 401 and is serialized once', async () => {
+  const h = await savedCommentSameRoomSendHarness({ sameCapturedId: true }), state = h.state.codex;
+  const selected = structuredClone(h.transport.original.localSource), thread = h.briefing.thread();
+  const automatic = thread.briefingInputs.find(reference => reference.sourceId === h.target.sourceId);
+  assert.deepEqual(selected.sourceRef, automatic.sourceRef); thread.inputSources = [selected, h.attachment];
+  const draft = state.threadDrafts['room-a'], savedRefs = JSON.stringify(thread.briefingInputs), savedSelections = JSON.stringify(thread.inputSources);
+  h.transport.policy.deny = true; h.transport.policy.denialStatus = 401;
+  h.briefing.click('briefing-inspect'); await h.inspections.at(-1); await settle();
+  await h.send.send({ manualOwner: h.send.owner('room-a') }); await settle();
+  assert.equal(h.send.calls.provider.length, 0); assert.equal(h.send.calls.capture, 0); assert.equal(state.threadDrafts['room-a'], draft);
+  assert.equal(JSON.stringify(h.briefing.thread().briefingInputs), savedRefs); assert.equal(JSON.stringify(h.briefing.thread().inputSources), savedSelections);
+  h.transport.policy.deny = false;
+  const retry = h.parts('briefing-show-evidence')[0]; assert.ok(retry); retry.fire('click'); await settle();
+  assert.equal(h.resolveTargets(h.briefing.session(), h.transport.answer.briefing.steps[0])[0].status, 'available');
+  assert.equal(h.send.calls.provider.length, 0); assert.equal(JSON.stringify(h.briefing.thread().briefingInputs), savedRefs);
+  assert.equal(JSON.stringify(h.briefing.thread().inputSources), savedSelections); assert.equal(state.threadDrafts['room-a'], draft);
+  await h.send.send({ manualOwner: h.send.owner('room-a') }); await settle();
+  assert.equal(h.send.calls.provider.length, 1); assert.equal(h.send.calls.capture, 1);
+  const request = h.send.calls.provider[0]; assert.equal(request.message, draft);
+  assert.equal(request.contextSnapshotIds.filter(id => id === h.target.sourceId).length, 1, 'the request builder de-duplicates equal snapshot IDs');
+  assert.ok(request.contextSnapshotIds.includes('snapshot-1')); assert.equal(request.contextSnapshotIds.length, 2);
+  const user = h.briefing.thread().messages.find(message => message.role === 'user' && message.requestId === request.requestId);
+  assert.ok(user?.inputReferences.some(reference => reference.sourceId === h.target.sourceId), 'the sent message retains its authorized source');
+  assert.equal(state.threadDrafts['room-b'], '다른 방의 초안'); h.briefing.close();
+});
+
+test('a closed briefing cannot reuse old source approval after room or authority round trips', async t => {
+  for (const change of ['room', 'account', 'profile', 'access']) await t.test(change, async () => {
+    const h = await savedCommentSameRoomSendHarness(), state = h.state.codex;
+    const draft = state.threadDrafts['room-a'], inputs = structuredClone(h.briefing.thread().briefingInputs);
+    const other = structuredClone(state.threads.find(thread => thread.id === h.otherId));
+    h.briefing.close();
+    const emit = () => { h.briefing.emit(); h.send.emit(); };
+    if (change === 'room') {
+      state.activeThreadId = 'room-b'; state.activityRoomGeneration++; emit();
+      state.activeThreadId = 'room-a'; state.activityRoomGeneration++; emit();
+    } else if (change === 'account') {
+      const auth = state.authStatus, key = state.codexAccountKey;
+      state.authStatus = { ...auth, accountEmail: 'different@example.test' }; state.codexAccountKey = Chat.codexAccountKey(state.authStatus); emit();
+      state.authStatus = auth; state.codexAccountKey = key; emit();
+    } else if (change === 'profile') {
+      const thread = h.briefing.thread(), profile = thread.engineProfileId;
+      thread.engineProfileId = 'different-profile'; emit(); thread.engineProfileId = profile; emit();
+    } else {
+      const auth = state.authStatus;
+      state.authStatus = { ...auth, access: { state: 'permissionDenied' } }; emit(); state.authStatus = auth; emit();
+    }
+    await h.send.send({ manualOwner: h.send.owner('room-a') }); await settle();
+    assert.equal(h.send.calls.provider.length, 0, 'an observed authority round trip cannot revive an old approval');
+    assert.equal(state.threadDrafts['room-a'], draft); assert.deepEqual(h.briefing.thread().briefingInputs, inputs);
+    assert.deepEqual(h.briefing.thread().inputSources, [h.attachment]);
+    assert.deepEqual(state.threads.find(thread => thread.id === h.otherId), other); assert.equal(state.threadDrafts['room-b'], '다른 방의 초안');
+  });
+});
+
+test('saved comment send fails closed when source permission or lookup fails before the UI observes it', async t => {
+  for (const failure of ['401', '403', 'server error', 'timeout']) await t.test(failure, async () => {
+    const h = await savedCommentSameRoomSendHarness(), state = h.state.codex;
+    const beforeDraft = state.threadDrafts['room-a'], beforeInputs = structuredClone(h.briefing.thread().briefingInputs);
+    const beforeOther = structuredClone(state.threads.find(thread => thread.id === h.otherId));
+    const beforeMessages = structuredClone(h.briefing.thread().messages);
+    const outside = h.document.createElement('textarea'); h.document.documentElement.appendChild(outside); outside.focus();
+    assert.equal(h.resolveTargets(h.briefing.session(), h.transport.answer.briefing.steps[0])[0].status, 'available');
+    const reads = h.transport.observed.length;
+    if (failure === 'timeout') h.transport.policy.failure = Object.assign(new Error('합성 조회 시간 초과'), { code: 'ETIMEDOUT' });
+    else { h.transport.policy.deny = true; h.transport.policy.denialStatus = failure === 'server error' ? 500 : Number(failure); }
+    await h.send.send({ manualOwner: h.send.owner('room-a') }); await settle();
+    assert.equal(h.send.calls.provider.length, 0, 'a source whose current lookup would fail cannot be dispatched');
+    assert.ok(h.transport.observed.length > reads, 'the permission loss is observed by a source lookup before dispatch');
+    assert.equal(state.threadDrafts['room-a'], beforeDraft); assert.deepEqual(h.briefing.thread().briefingInputs, beforeInputs);
+    assert.deepEqual(h.briefing.thread().inputSources, [h.attachment]); assert.deepEqual(h.briefing.thread().messages, beforeMessages);
+    assert.deepEqual(state.threads.find(thread => thread.id === h.otherId), beforeOther);
+    assert.equal(state.threadDrafts['room-b'], '다른 방의 초안');
+    assert.equal(h.document.activeElement, outside, 'synthetic focus stays with the newer input');
+    assert.match(h.briefing.thread().sendError || '', /전송하지|전송되지|보내지|확인할 수 없|다시 확인/);
+    assert.match(h.briefing.thread().sendError || '', /근거|자료|권한/);
+    assert.doesNotMatch(h.briefing.thread().sendError || '', /전송 완료|전송 성공|접수 완료/);
+    h.briefing.close();
+  });
+});
+
+test('saved comment preflight never displays sensitive text from a source lookup error', async () => {
+  const h = await savedCommentSameRoomSendHarness(), state = h.state.codex;
+  const markers = ['SYNTHETIC_RESTRICTED_SOURCE_ID', 'SYNTHETIC_RESTRICTED_TITLE', 'SYNTHETIC_RESTRICTED_BODY'];
+  const draft = state.threadDrafts['room-a'], inputs = JSON.stringify(h.briefing.thread().briefingInputs);
+  const selections = JSON.stringify(h.briefing.thread().inputSources), reads = h.transport.observed.length;
+  h.transport.policy.failure = Object.assign(new Error(markers.join(' ')), { status: 401 });
+  await h.send.send({ manualOwner: h.send.owner('room-a') }); await settle();
+  assert.ok(h.transport.observed.length > reads, 'the production source read reached the synthetic denial');
+  assert.equal(h.send.calls.provider.length, 0); assert.equal(state.threadDrafts['room-a'], draft);
+  assert.equal(JSON.stringify(h.briefing.thread().briefingInputs), inputs);
+  assert.equal(JSON.stringify(h.briefing.thread().inputSources), selections);
+  const visible = [h.briefing.thread().sendError || '', ...h.notices, inspectorRenderedData(h.document.documentElement)].join('\n');
+  assert.match(h.briefing.thread().sendError || '', /근거|자료|권한/);
+  for (const marker of markers) assert.equal(visible.includes(marker), false, 'backend error details are not displayed');
+  assert.equal(state.threadDrafts['room-b'], '다른 방의 초안'); h.briefing.close();
+});
+
+test('ambiguous manual and automatic references are preserved through denial and explicit recovery', async () => {
+  const h = await savedCommentSameRoomSendHarness({ manualReference: true }), state = h.state.codex;
+  const draft = state.threadDrafts['room-a'], inputs = structuredClone(h.briefing.thread().briefingInputs);
+  assert.ok(inputs.some(reference => reference.sourceId === h.manual.sourceId));
+  assert.ok(inputs.some(reference => reference.sourceId === h.target.sourceId));
+  h.transport.policy.deny = true; h.transport.policy.denialStatus = 401;
+  h.briefing.click('briefing-inspect'); await h.inspections.at(-1); await settle();
+  await h.send.send({ manualOwner: h.send.owner('room-a') }); await settle();
+  assert.equal(h.send.calls.provider.length, 0); assert.equal(state.threadDrafts['room-a'], draft);
+  assert.deepEqual(h.briefing.thread().briefingInputs, inputs); assert.deepEqual(h.briefing.thread().inputSources, [h.attachment]);
+  h.transport.policy.deny = false;
+  const retry = h.parts('briefing-show-evidence')[0]; assert.ok(retry); retry.fire('click'); await settle();
+  assert.equal(h.resolveTargets(h.briefing.session(), h.transport.answer.briefing.steps[0])[0].status, 'available');
+  assert.equal(h.send.calls.provider.length, 0, 'reverification does not resend automatically');
+  await h.send.send({ manualOwner: h.send.owner('room-a') }); await settle();
+  assert.equal(h.send.calls.provider.length, 0, 'a second source with no provable origin cannot be assumed to be manual');
+  assert.equal(state.threadDrafts['room-a'], draft);
+  assert.deepEqual(h.briefing.thread().briefingInputs, inputs); assert.deepEqual(h.briefing.thread().inputSources, [h.attachment]);
+  const status = h.briefing.thread().sendError || '';
+  assert.match(status, /제거|다시 선택|분리|원래.*의견|원래.*브리핑/, 'an unresolvable mixed selection needs an actionable recovery');
+  assert.doesNotMatch(status, /전송 완료|전송 성공|접수 완료/);
+  assert.equal(state.threadDrafts['room-b'], '다른 방의 초안'); h.briefing.close();
+});
+
+test('a previously included and denied source cannot be sent when its opinion provenance is incomplete', async t => {
+  for (const missing of ['comment reference', 'original answer', 'both']) await t.test(missing, async () => {
+    const h = await savedCommentSameRoomSendHarness(), state = h.state.codex;
+    h.transport.policy.deny = true; h.transport.policy.denialStatus = 401;
+    h.briefing.click('briefing-inspect'); await h.inspections.at(-1); await settle();
+    assert.equal(h.resolveTargets(h.briefing.session(), h.transport.answer.briefing.steps[0])[0].status, 'missing');
+    // Model a truncated or inconsistent local state, not a claim that the UI
+    // normally loses either record. Keep the actual previously attached A ref.
+    const thread = h.briefing.thread();
+    if (missing !== 'original answer') thread.briefingCommentRefs = [];
+    if (missing !== 'comment reference') thread.messages = thread.messages.filter(message => message.briefing?.id !== 'briefing-a');
+    const draft = state.threadDrafts['room-a'], inputs = structuredClone(thread.briefingInputs), messages = structuredClone(thread.messages);
+    const other = structuredClone(state.threads.find(item => item.id === h.otherId));
+    assert.ok(inputs.some(reference => reference.sourceId === h.target.sourceId));
+    await h.send.send({ manualOwner: h.send.owner('room-a') }); await settle();
+    assert.equal(h.send.calls.provider.length, 0, 'missing provenance cannot turn a denied automatic source into an unrelated manual one');
+    assert.equal(state.threadDrafts['room-a'], draft); assert.deepEqual(h.briefing.thread().briefingInputs, inputs);
+    assert.deepEqual(h.briefing.thread().inputSources, [h.attachment]); assert.deepEqual(h.briefing.thread().messages, messages);
+    assert.deepEqual(state.threads.find(item => item.id === h.otherId), other); assert.equal(state.threadDrafts['room-b'], '다른 방의 초안');
+    h.briefing.close();
+  });
+});
+
+test('saved comment send invalidates a delayed source check when its owner, permission or draft changes', async t => {
+  for (const change of ['room', 'account round trip', 'permission round trip', 'binding round trip', 'draft edit', 'attachment edit', 'reference edit']) await t.test(change, async () => {
+    const h = await savedCommentSameRoomSendHarness(), state = h.state.codex, gate = requestProjectDeferred();
+    const beforeDraft = state.threadDrafts['room-a'], beforeInputs = structuredClone(h.briefing.thread().briefingInputs);
+    const beforeOther = structuredClone(state.threads.find(thread => thread.id === h.otherId));
+    const reads = h.transport.observed.length; h.transport.policy.gate = gate;
+    const pending = h.send.send({ manualOwner: h.send.owner('room-a') });
+    try {
+      await settle();
+      assert.ok(h.transport.observed.length > reads, 'the real send method has begun the delayed source check');
+      if (change === 'room') {
+        state.activeThreadId = 'room-b'; state.activityRoomGeneration++; h.briefing.emit(); h.send.emit();
+      } else if (change === 'account round trip') {
+        const auth = state.authStatus, account = state.codexAccountKey;
+        state.authStatus = { ...auth, accountEmail: 'different@example.test' };
+        state.codexAccountKey = Chat.codexAccountKey(state.authStatus); h.briefing.emit(); h.send.emit();
+        state.authStatus = auth; state.codexAccountKey = account; h.briefing.emit(); h.send.emit();
+      } else if (change === 'permission round trip') {
+        const auth = state.authStatus;
+        state.authStatus = { ...auth, access: { state: 'permissionDenied' } }; h.briefing.emit(); h.send.emit();
+        state.authStatus = auth; h.briefing.emit(); h.send.emit();
+      } else if (change === 'binding round trip') {
+        const thread = h.briefing.thread(), binding = thread.clientBindingId;
+        thread.clientBindingId = 'other-binding'; h.briefing.emit(); h.send.emit();
+        thread.clientBindingId = binding; h.briefing.emit(); h.send.emit();
+      } else if (change === 'draft edit') {
+        state.threadDrafts['room-a'] = '대기 중 새로 고친 사용자 초안'; state.threadDraftRevisions['room-a']++;
+        h.send.emit();
+      } else if (change === 'attachment edit') {
+        h.briefing.thread().inputSources = [h.attachment, { id: 'newer-user-attachment', kind: 'file' }]; h.send.emit();
+      } else {
+        h.briefing.thread().briefingInputs = []; h.send.emit();
+      }
+    } finally { gate.resolve(); await pending; }
+    await settle();
+    assert.equal(h.send.calls.provider.length, 0, 'a result belonging to an earlier owner or draft is never sent');
+    assert.equal(state.threadDrafts['room-a'], change === 'draft edit' ? '대기 중 새로 고친 사용자 초안' : beforeDraft);
+    assert.deepEqual(h.briefing.thread().briefingInputs, change === 'reference edit' ? [] : beforeInputs);
+    assert.deepEqual(h.briefing.thread().inputSources, change === 'attachment edit'
+      ? [h.attachment, { id: 'newer-user-attachment', kind: 'file' }] : [h.attachment]);
+    assert.deepEqual(state.threads.find(thread => thread.id === h.otherId), beforeOther);
+    assert.equal(state.threadDrafts['room-b'], '다른 방의 초안');
+    h.briefing.close();
+  });
+});
+
+test('a synchronous observer changing access before saved-comment dispatch leaves the draft unsent', async () => {
+  const h = await savedCommentSameRoomSendHarness(), state = h.state.codex;
+  const draft = state.threadDrafts['room-a'], inputs = structuredClone(h.briefing.thread().briefingInputs);
+  const messages = structuredClone(h.briefing.thread().messages), reads = h.transport.observed.length;
+  let changed = false;
+  h.onSendEmit(() => {
+    if (!changed && h.transport.observed.length > reads && h.send.roomCalls.length > 0
+        && !h.send.chatProjectDraftActions.has('room-a') && h.send.calls.provider.length === 0) {
+      changed = true; state.authStatus = { ...state.authStatus, access: { state: 'permissionDenied' } };
+    }
+  });
+  await h.send.send({ manualOwner: h.send.owner('room-a') }); await settle();
+  assert.equal(changed, true, 'the observer runs after the successful source/project checks and before dispatch');
+  assert.equal(h.send.calls.provider.length, 0); assert.equal(state.threadDrafts['room-a'], draft);
+  assert.deepEqual(h.briefing.thread().briefingInputs, inputs); assert.deepEqual(h.briefing.thread().inputSources, [h.attachment]);
+  assert.deepEqual(h.briefing.thread().messages, messages); assert.equal(state.threadDrafts['room-b'], '다른 방의 초안');
+  h.briefing.close();
+});
+
+test('a saved-comment send does not survive attachment change and restoration during project recheck', async () => {
+  const h = await savedCommentSameRoomSendHarness(), state = h.state.codex, gate = requestProjectDeferred();
+  const draft = state.threadDrafts['room-a'], inputs = JSON.stringify(h.briefing.thread().briefingInputs);
+  const selections = JSON.stringify(h.briefing.thread().inputSources), reads = h.transport.observed.length;
+  h.state.hudOpen = true;
+  const deps = { state: h.state, InputContext, browserToolUserSelections: new Map(),
+    getCodexThreadById: (codex, id) => codex.threads.find(thread => thread.id === id),
+    updateThreadById: (id, update) => { state.threads = state.threads.map(thread => thread.id === id ? update(thread) : thread); },
+    emit: () => { h.briefing.emit(); h.send.emit(); }, toggleHUD: () => assert.fail('no foreground UI is opened') };
+  const add = requestProjectBridgeMethod('addInputSources', deps), remove = requestProjectBridgeMethod('removeInputSource', deps);
+  h.send.setRoomReader(() => gate.promise);
+  const pending = h.send.send({ manualOwner: h.send.owner('room-a') });
+  try {
+    await settle();
+    assert.ok(h.transport.observed.length > reads, 'strict source read has completed before the project recheck');
+    assert.equal(h.send.roomCalls.length, 1); assert.equal(h.send.calls.provider.length, 0);
+    const extra = { id: 'synthetic-aba-file', kind: 'file', label: '대기 중 선택', sourceRef: { path: '/fixture/aba.txt' } };
+    add.call(h.state.codexBridge, 'room-a', [extra]);
+    assert.ok(h.briefing.thread().inputSources.some(source => source.id === extra.id));
+    remove.call(h.state.codexBridge, 'room-a', extra.id);
+    assert.equal(JSON.stringify(h.briefing.thread().inputSources), selections, 'the user restored the original selection');
+  } finally {
+    const roomId = h.send.roomCalls[0]?.roomId || 'binding-a';
+    gate.resolve({ ok: true, result: { roomId, inheritance: null, override: null, project: null, source: null, status: 'none' } });
+    await pending;
+  }
+  await settle();
+  assert.equal(h.send.calls.provider.length, 0, 'a send observed across an attachment ABA must be retried explicitly');
+  assert.equal(state.threadDrafts['room-a'], draft); assert.equal(JSON.stringify(h.briefing.thread().briefingInputs), inputs);
+  assert.equal(JSON.stringify(h.briefing.thread().inputSources), selections); assert.equal(state.threadDrafts['room-b'], '다른 방의 초안');
+  h.briefing.close();
+});
+
+test('a denied saved-comment source in A does not contaminate or block an independent B room send', async () => {
+  const h = await savedCommentSameRoomSendHarness(), state = h.state.codex;
+  const aDraft = state.threadDrafts['room-a'], aInputs = structuredClone(h.briefing.thread().briefingInputs);
+  h.transport.policy.deny = true; h.transport.policy.denialStatus = 401;
+  h.briefing.click('briefing-inspect'); await h.inspections.at(-1); await settle();
+  assert.equal(h.resolveTargets(h.briefing.session(), h.transport.answer.briefing.steps[0])[0].status, 'missing');
+  await h.send.send({ manualOwner: h.send.owner('room-a') }); await settle();
+  assert.equal(h.send.calls.provider.length, 0);
+  state.activeThreadId = 'room-b'; state.activityRoomGeneration++; h.send.emit();
+  await h.send.send({ manualOwner: h.send.owner('room-b') }); await settle();
+  assert.equal(h.send.calls.provider.length, 1, 'the unrelated B draft remains independently sendable');
+  const request = h.send.calls.provider[0];
+  assert.equal(request.clientThreadId, 'binding-b'); assert.equal(request.message, '다른 방의 초안');
+  assert.ok(request.contextSnapshotIds.includes('snapshot-0'));
+  assert.equal(request.contextSnapshotIds.includes(h.target.sourceId), false, 'A is not added to B\'s request');
+  assert.equal(state.threadDrafts['room-a'], aDraft); assert.deepEqual(h.briefing.thread().briefingInputs, aInputs);
+  assert.deepEqual(h.briefing.thread().inputSources, [h.attachment]); h.briefing.close();
+});
+
+test('an unrelated B room can send its own source without borrowing the saved comment in A', async () => {
+  const h = await savedCommentSameRoomSendHarness(), state = h.state.codex;
+  const aDraft = state.threadDrafts['room-a'], aInputs = structuredClone(h.briefing.thread().briefingInputs);
+  state.activeThreadId = 'room-b'; state.activityRoomGeneration++; h.send.emit();
+  await h.send.send({ manualOwner: h.send.owner('room-b') }); await settle();
+  assert.equal(h.send.calls.provider.length, 1);
+  const request = h.send.calls.provider[0];
+  assert.equal(request.clientThreadId, 'binding-b'); assert.equal(request.message, '다른 방의 초안');
+  assert.ok(request.contextSnapshotIds.includes('snapshot-0')); assert.equal(request.contextSnapshotIds.includes(h.target.sourceId), false);
+  assert.equal(state.threadDrafts['room-a'], aDraft); assert.deepEqual(h.briefing.thread().briefingInputs, aInputs);
+  assert.deepEqual(h.briefing.thread().inputSources, [h.attachment]); h.briefing.close();
+});
+
+test('an unrelated room keeps an origin-ambiguous reference and explains safe recovery', async () => {
+  const h = await savedCommentSameRoomSendHarness({ otherBriefingInput: true }), state = h.state.codex;
+  const b = state.threads.find(thread => thread.id === 'room-b'), before = structuredClone(b), draft = state.threadDrafts['room-b'];
+  state.activeThreadId = 'room-b'; state.activityRoomGeneration++; h.send.emit();
+  await h.send.send({ manualOwner: h.send.owner('room-b') }); await settle();
+  assert.equal(h.send.calls.provider.length, 0, 'the B reference has no verifiable manual or opinion provenance');
+  const current = state.threads.find(thread => thread.id === 'room-b');
+  assert.equal(state.threadDrafts['room-b'], draft); assert.deepEqual(current.briefingInputs, before.briefingInputs);
+  assert.deepEqual(current.inputSources, before.inputSources); assert.deepEqual(current.messages, before.messages);
+  assert.match(current.sendError || '', /제거|다시 선택|분리|원래.*의견|원래.*브리핑/);
+  assert.doesNotMatch(current.sendError || '', /전송 완료|전송 성공|접수 완료/);
+  assert.ok(h.briefing.thread().briefingInputs.some(reference => reference.sourceId === h.target.sourceId)); h.briefing.close();
+});
+
+test('a hung saved-comment source lookup times out without sending or losing the draft, even on late success', async () => {
+  const h = await savedCommentSameRoomSendHarness(), state = h.state.codex, gate = requestProjectDeferred();
+  const beforeDraft = state.threadDrafts['room-a'], beforeInputs = structuredClone(h.briefing.thread().briefingInputs);
+  const reads = h.transport.observed.length; h.transport.policy.gate = gate;
+  let settled = false;
+  const pending = h.send.send({ manualOwner: h.send.owner('room-a') }).finally(() => { settled = true; });
+  try {
+    await settle(); assert.ok(h.transport.observed.length > reads, 'the source request is actually in flight');
+    const timers = [...h.send.timers.values()]; assert.ok(timers.length, 'the local source check has a bounded timeout');
+    for (const timer of timers) timer.fire();
+    await settle();
+    assert.equal(settled, true, 'timeout settles the send even if the source adapter ignores abort');
+    assert.equal(h.send.calls.provider.length, 0);
+    assert.equal(state.threadDrafts['room-a'], beforeDraft); assert.deepEqual(h.briefing.thread().briefingInputs, beforeInputs);
+    assert.deepEqual(h.briefing.thread().inputSources, [h.attachment]);
+  } finally { gate.resolve(); await pending; }
+  await settle(); assert.equal(h.send.calls.provider.length, 0, 'the late read result cannot trigger a resend');
+  assert.equal(state.threadDrafts['room-a'], beforeDraft); h.briefing.close();
+});
+
+// The production comment renderer/controller runs against the existing small
+// Briefing fixture. Its source-read boundary simulates distinct 401 denials;
+// these synthetic DOM/hover checks are not native Firefox accessibility QA.
+async function restrictedSavedCommentFixture(order) {
+  const authored = '사용자가 직접 쓴 비공개-B 31–33행과 비공개-C 41–43행';
+  const ids = { a: 'source-a', b: 'source-b', c: 'source-c' };
+  const denied = new Set([ids.b, ids.c]);
+  const h = briefingMinimapUiHarness({
+    prepare: reference => {
+      if (denied.has(reference.sourceId)) throw Object.assign(new Error('합성 원문 조회 거부'), { status: 401 });
+      return true;
+    },
+    respond: (call, { row, list }) => {
+      assert.equal(call.options.method, 'GET');
+      return list(row({ sourceIds: order.map(key => ids[key]), text: authored }));
+    },
+  });
+  const thread = h.briefing.thread(), scope = Chat.chatContextRequestScope(thread, h.state.codex);
+  thread.briefingInputs = thread.briefingInputs.map((reference, index) => index === 1
+    ? { ...structuredClone(reference), localSource: { ...reference.localSource, label: '비공개-B' } } : reference);
+  const sourceC = { id: 'selection-c', kind: 'file', label: '비공개-C', sourceRef: { path: '/fixture/c.txt' } };
+  const captureC = { id: sourceC.id, sourceId: ids.c, snapshotId: ids.c, hash: 'hash-c', sourceRef: sourceC.sourceRef,
+    clientThreadId: scope.clientThreadId, engine: { engineId: scope.engineId, engineProfileId: scope.engineProfileId } };
+  const refC = InputContext.capturedInputReference(sourceC, captureC, scope); thread.briefingInputs.push(refC);
+  const targets = {
+    a: { sourceId: ids.a, hash: 'hash-a', range: { startLine: 1, endLine: 4 } },
+    b: { sourceId: ids.b, hash: 'hash-b', range: { startLine: 31, endLine: 33 } },
+    c: { sourceId: ids.c, hash: 'hash-c', range: { startLine: 41, endLine: 43 } },
+  };
+  h.distantCard._inputReference = { ...structuredClone(thread.briefingInputs[1]), presentationRange: targets.b.range };
+  h.cards.set(InputContext.inputEvidenceKey(h.distantCard._inputReference), h.distantCard);
+  const cardC = h.minimap.make('evidence-c-fixture', '비공개-C', 3500, 2400);
+  cardC.className = 'egd-canvas-card egd-input-evidence-card'; cardC.dataset.deskWindowKind = 'input-evidence';
+  cardC._inputReference = { ...structuredClone(refC), presentationRange: targets.c.range }; cardC._inputEvidenceLoaded = true;
+  h.cards.set(InputContext.inputEvidenceKey(cardC._inputReference), cardC);
+  const selected = order.map(key => targets[key]);
+  h.briefing.briefing.steps = [{ id: 'first', text: '합성 단계', target: selected[0], targets: selected }];
+  await h.openViaButton(); await settle();
+  const row = h.parts('briefing-comment-row')[0], target = h.parts('briefing-comment-target')[0], body = h.parts('briefing-comment-body')[0];
+  assert.ok(row && target && body); assert.equal(body.textContent, authored);
+  for (const key of order.filter(key => key !== 'a')) {
+    assert.ok(h.briefing.evidenceCalls.some(call => call.reference.sourceId === ids[key]), `${key}: the synthetic 401 read was attempted`);
+  }
+  if (order.includes('a')) assert.equal(h.resolveTargets(h.briefing.session(), h.briefing.briefing.steps[0])
+    .find(item => item.target.sourceId === ids.a)?.status, 'available', 'the allowed source is actually verified');
+  return { ...h, row, target, body, authored, ids, targets, denied };
+}
+
+function savedCommentAutomaticSurface(h) {
+  return JSON.stringify({ row: { attributes: h.row.attributes, dataset: h.row.dataset }, body: { attributes: h.body.attributes, dataset: h.body.dataset },
+    nodes: settingsNodes(h.row, node => node !== h.row && node !== h.body).map(node => ({
+      text: node.textContent,
+      attributes: node.attributes, dataset: node.dataset, disabled: !!node.disabled, hidden: !!node.hidden,
+    })) });
+}
+
+test('saved comment system metadata does not reveal restricted target count or order', async () => {
+  const cases = [ ['b'], ['b', 'c'], ['c', 'b'], ['a', 'b'], ['a', 'b', 'c'], ['c', 'a', 'b'] ];
+  const surfaces = [];
+  for (const order of cases) {
+    const h = await restrictedSavedCommentFixture(order), before = savedCommentAutomaticSurface(h);
+    assert.doesNotMatch(before, /비공개-[BC]|source-[bc]|31–33|41–43/, 'unverified labels, IDs and ranges are not system metadata');
+    for (const node of [h.row, h.target, h.parts('briefing-comment-include')[0]]) {
+      for (const event of ['mouseenter', 'mouseover', 'mousemove']) node.fire(event);
+    }
+    assert.equal(savedCommentAutomaticSurface(h), before, 'hover does not disclose additional DOM or accessibility metadata');
+    assert.equal(h.body.textContent, h.authored, 'words deliberately written by the user remain untouched');
+    if (order.includes('a')) assert.match(h.target.textContent, /허용 자료 A.*1–4행/, 'the verified source remains visible');
+    surfaces.push(before); h.briefing.close();
+  }
+  assert.equal(surfaces[0], surfaces[1], 'one versus several restricted targets must have the same visible representation');
+  assert.equal(surfaces[1], surfaces[2], 'reordering only restricted targets changes no exposed representation');
+  assert.equal(surfaces[3], surfaces[4], 'an allowed target does not reveal how many other targets are restricted');
+  assert.equal(surfaces[4], surfaces[5], 'a restricted target cannot reveal its position around the allowed target');
+});
+
+test('saved comment failed inclusion notice and draft metadata do not disclose restricted target count or order', async () => {
+  const cases = [['b'], ['b', 'c'], ['c', 'b'], ['a', 'b'], ['a', 'b', 'c'], ['c', 'a', 'b']], surfaces = [];
+  for (const order of cases) {
+    const h = await restrictedSavedCommentFixture(order), priorDraft = '내가 적은 비공개-B 31–33행은 기존 입력';
+    const priorRef = { sourceId: 'user-existing', hash: 'user-existing-hash' }, priorInput = { id: 'user-attachment', kind: 'file' };
+    h.state.codex.threadDrafts['room-a'] = priorDraft;
+    h.briefing.thread().briefingInputs = [structuredClone(priorRef)]; h.briefing.thread().inputSources = [structuredClone(priorInput)];
+    const editor = h.briefing.part('briefing-comment'); editor.focus();
+    const include = h.parts('briefing-comment-include')[0]; assert.ok(include && !include.disabled); include.fire('click'); await settle();
+    const thread = h.briefing.thread(), status = h.parts('briefing-comment-status-message')[0]; assert.ok(status);
+    assert.equal(h.state.codex.threadDrafts['room-a'], priorDraft); assert.deepEqual(thread.briefingInputs, [priorRef]);
+    assert.deepEqual(thread.inputSources, [priorInput]); assert.equal((thread.briefingCommentRefs || []).length, 0);
+    assert.equal(h.body.textContent, h.authored); assert.equal(h.document.activeElement, editor);
+    const snapshot = () => JSON.stringify({ row: savedCommentAutomaticSurface(h), status: {
+      text: status.textContent, attributes: status.attributes, dataset: status.dataset,
+    }, draftRefs: thread.briefingCommentRefs || [], sourceRefs: thread.briefingInputs });
+    const before = snapshot(); assert.doesNotMatch(before, /비공개-[BC]|source-[bc]|31–33|41–43/);
+    for (const node of [h.row, h.target, status, include]) for (const event of ['mouseenter', 'mouseover']) node.fire(event);
+    assert.equal(snapshot(), before); surfaces.push(before); h.briefing.close();
+  }
+  assert.equal(surfaces[0], surfaces[1]); assert.equal(surfaces[1], surfaces[2]);
+  assert.equal(surfaces[3], surfaces[4]); assert.equal(surfaces[4], surfaces[5]);
+});
+
+test('saved comment requires every requested range of an otherwise allowed source before inclusion', async () => {
+  let denySecond = true;
+  const authored = '사용자가 직접 쓴 같은 자료 5–8행 의견';
+  const h = briefingMinimapUiHarness({
+    prepare: reference => {
+      if (denySecond && reference.sourceId === 'source-a' && reference.presentationRange?.startLine === 5) {
+        throw Object.assign(new Error('합성 범위 조회 거부'), { status: 401 });
+      }
+      return true;
+    },
+    respond: (call, { row, list }) => { assert.equal(call.options.method, 'GET'); return list(row({ sourceIds: ['source-a'], text: authored })); },
+  });
+  h.briefing.briefing.steps = [{ id: 'first', text: '합성 단계', target: h.first, targets: [h.first, h.otherRange] }];
+  await h.openViaButton(); await settle();
+  assert.deepEqual(h.resolveTargets(h.briefing.session(), h.briefing.briefing.steps[0]).map(item => item.status), ['available', 'missing']);
+  const target = h.parts('briefing-comment-target')[0], body = h.parts('briefing-comment-body')[0]; assert.ok(target && body);
+  assert.match(target.textContent, /허용 자료 A.*1–4행/); assert.doesNotMatch(target.textContent, /5–8행/); assert.equal(body.textContent, authored);
+  const draft = '이미 작성한 사용자 초안', priorRef = { sourceId: 'user-existing', hash: 'user-existing-hash' };
+  h.state.codex.threadDrafts['room-a'] = draft; h.briefing.thread().briefingInputs = [structuredClone(priorRef)];
+  const editor = h.briefing.part('briefing-comment'); editor.focus();
+  const include = h.parts('briefing-comment-include')[0]; assert.ok(include && !include.disabled); include.fire('click'); await settle();
+  assert.equal(h.state.codex.threadDrafts['room-a'], draft); assert.deepEqual(h.briefing.thread().briefingInputs, [priorRef]);
+  assert.equal((h.briefing.thread().briefingCommentRefs || []).length, 0); assert.equal(h.document.activeElement, editor);
+  denySecond = false;
+  const retry = h.parts('briefing-show-evidence')[0]; assert.ok(retry); retry.fire('click'); await settle();
+  assert.deepEqual(h.briefing.evidenceCalls.at(-1).reference.presentationRange, h.otherRange.range);
+  assert.deepEqual(h.resolveTargets(h.briefing.session(), h.briefing.briefing.steps[0]).map(item => item.status), ['available', 'available']);
+  const retryInclude = h.parts('briefing-comment-include')[0]; assert.ok(retryInclude && !retryInclude.disabled); retryInclude.fire('click'); await settle();
+  assert.ok(h.state.codex.threadDrafts['room-a'].startsWith(draft)); assert.ok(h.state.codex.threadDrafts['room-a'].includes(authored));
+  assert.equal(h.briefing.thread().briefingInputs.filter(item => item.sourceId === 'source-a').length, 1);
+  assert.ok(h.briefing.thread().briefingInputs.some(item => item.sourceId === priorRef.sourceId));
+  assert.equal(h.briefing.requests.filter(call => call.options.method === 'POST').length, 0); h.briefing.close();
+});
+
+test('saved comment with restricted targets cannot add automatic draft references before explicit successful retries', async t => {
+  for (const userAlreadySelected of [false, true]) await t.test(userAlreadySelected ? 'preserve user-selected restricted source' : 'no existing restricted source', async () => {
+    const h = await restrictedSavedCommentFixture(['a', 'b', 'c']), thread = h.briefing.thread();
+    const allowed = structuredClone(thread.briefingInputs.find(item => item.sourceId === h.ids.a));
+    const userSelected = structuredClone(thread.briefingInputs.find(item => item.sourceId === h.ids.b));
+    const existing = userAlreadySelected ? [allowed, userSelected] : [allowed];
+    const existingInput = { id: 'my-existing-attachment', kind: 'file', label: '사용자가 선택한 첨부' };
+    const priorDraft = '내가 직접 적은 비공개-B 31–33행은 기존 초안';
+    thread.briefingInputs = structuredClone(existing); thread.inputSources = [structuredClone(existingInput)];
+    h.state.codex.threadDrafts['room-a'] = priorDraft;
+    h.briefing.type('의견 편집 중'); const editor = h.briefing.part('briefing-comment');
+    editor.focus(); editor.setSelectionRange(1, 4, 'backward');
+    const include = h.parts('briefing-comment-include')[0]; assert.ok(include && !include.disabled); include.fire('click'); await settle();
+    const blocked = h.briefing.thread();
+    assert.equal(h.state.codex.threadDrafts['room-a'], priorDraft, 'a denied inclusion leaves the user draft exactly as written');
+    assert.deepEqual(blocked.briefingInputs, existing, 'neither a user-selected source nor an allowed source is erased or replaced');
+    assert.deepEqual(blocked.inputSources, [existingInput]);
+    assert.equal((blocked.briefingCommentRefs || []).length, 0, 'no automatic comment ref is attached while any source is unverified');
+    assert.equal(h.body.textContent, h.authored, 'user-authored restricted words remain in the saved opinion');
+    assert.equal(h.document.activeElement, editor);
+    assert.deepEqual([editor.value, editor.selectionStart, editor.selectionEnd, editor.selectionDirection], ['의견 편집 중', 1, 4, 'backward']);
+    h.denied.clear();
+    for (const [sourceId, range] of [[h.ids.b, h.targets.b.range], [h.ids.c, h.targets.c.range]]) {
+      const retry = h.parts('briefing-show-evidence')[0]; assert.ok(retry, 'recovery requires the existing explicit retry control');
+      retry.fire('click'); await settle();
+      assert.equal(h.briefing.evidenceCalls.at(-1).reference.sourceId, sourceId);
+      assert.deepEqual(h.briefing.evidenceCalls.at(-1).reference.presentationRange, range);
+    }
+    assert.match(h.target.textContent, /허용 자료 A/);
+    const retryInclude = h.parts('briefing-comment-include')[0]; assert.ok(retryInclude && !retryInclude.disabled);
+    retryInclude.fire('click'); await settle();
+    const recovered = h.briefing.thread();
+    assert.ok(h.state.codex.threadDrafts['room-a'].startsWith(priorDraft));
+    assert.equal(h.state.codex.threadDrafts['room-a'].split(h.authored).length, 2, 'the user-authored opinion is included once');
+    assert.deepEqual(recovered.inputSources, [existingInput]);
+    assert.deepEqual(new Set(recovered.briefingInputs.map(item => item.sourceId)), new Set([h.ids.a, h.ids.b, h.ids.c]));
+    assert.equal(recovered.briefingCommentRefs.length, 1);
+    assert.equal(h.briefing.requests.filter(call => call.options.method === 'POST').length, 0);
+    assert.equal(h.document.activeElement, editor);
+    h.briefing.close();
+  });
+});
+
+test('first-send saved comment inclusion rechecks the source after 401 and preserves intentional draft text', async () => {
+  const authored = '내가 직접 적은 합성 공유 문서 · 1–2행은 내 메모입니다.';
+  const h = await firstSendSavedCommentHarness({ commentText: authored }); await h.openViaButton(); await settle();
+  const source = h.parts('briefing-comment-target')[0], body = h.parts('briefing-comment-body')[0];
+  assert.ok(source && body); assert.match(source.textContent, /합성 공유 문서.*1–2행/);
+  assert.equal(body.textContent, authored, 'user-authored words are not automatically redacted');
+  const existingText = '기존 작성: 합성 공유 문서 1–2행은 내가 직접 쓴 글';
+  const existingRef = { sourceId: 'existing-authorized', snapshotId: 'existing-authorized', hash: 'existing-hash', localSource: { label: '기존 허용 근거' } };
+  const existingInput = { id: 'existing-user-attachment', kind: 'file', label: '기존 첨부' };
+  h.state.codex.threadDrafts['room-a'] = existingText;
+  h.briefing.thread().briefingInputs = [structuredClone(existingRef)];
+  h.briefing.thread().inputSources = [structuredClone(existingInput)];
+  h.briefing.type('사용자가 계속 쓰던 의견');
+  const editor = h.briefing.part('briefing-comment'); editor.focus(); editor.setSelectionRange(1, 4, 'backward');
+  h.transport.policy.deny = true; h.transport.policy.denialStatus = 401;
+  h.briefing.click('briefing-inspect'); await h.inspections.at(-1); await settle();
+  assert.ok(h.notices.some(message => /조회 권한 거부/.test(message)));
+  assert.doesNotMatch(source.textContent, /합성 공유 문서|1–2행/);
+  assert.equal(body.textContent, authored, 'denial hides automatic labels, not a user-authored saved opinion');
+  const include = h.parts('briefing-comment-include')[0]; assert.ok(include); include.fire('click'); await settle();
+  const after = h.briefing.thread(), draftAfter = h.state.codex.threadDrafts['room-a'];
+  assert.ok(draftAfter.startsWith(existingText), 'existing user text is never removed');
+  assert.deepEqual(after.inputSources, [existingInput]);
+  assert.ok(after.briefingInputs.some(item => JSON.stringify(item) === JSON.stringify(existingRef)));
+  assert.equal(after.briefingInputs.some(item => item.sourceId === h.target.sourceId), false,
+    'a failed read cannot silently attach its previously cached source to the Chat draft');
+  assert.equal(h.document.activeElement, editor);
+  assert.deepEqual([editor.value, editor.selectionStart, editor.selectionEnd, editor.selectionDirection], ['사용자가 계속 쓰던 의견', 1, 4, 'backward']);
+  h.transport.policy.deny = false;
+  const retry = h.parts('briefing-show-evidence')[0]; assert.ok(retry, 'the existing explicit evidence retry remains available');
+  retry.fire('click'); await settle(); assert.match(source.textContent, /합성 공유 문서.*1–2행/);
+  const includeAgain = h.parts('briefing-comment-include')[0]; assert.ok(includeAgain && !includeAgain.disabled);
+  includeAgain.fire('click'); await settle();
+  const recovered = h.briefing.thread(), recoveredDraft = h.state.codex.threadDrafts['room-a'];
+  assert.ok(recovered.briefingInputs.some(item => item.sourceId === h.target.sourceId), 'a reverified source can be included explicitly');
+  assert.ok(recovered.briefingInputs.some(item => JSON.stringify(item) === JSON.stringify(existingRef)));
+  assert.deepEqual(recovered.inputSources, [existingInput]); assert.ok(recoveredDraft.startsWith(existingText));
+  assert.ok(recoveredDraft.includes(authored)); assert.equal(recoveredDraft.split(authored).length, 2, 'the saved user text is included exactly once');
+  assert.equal(h.briefing.requests.filter(call => call.options.method === 'POST').length, 0);
+  assert.equal(JSON.stringify(h.transport.user.inputReferences[0]), h.transport.originalJson);
+  h.briefing.close();
+});
+
+test('first-send saved comment cannot attach a source when the initial source GET is 401', async () => {
+  const authored = '직접 적은 합성 공유 문서 1–2행';
+  const h = await firstSendSavedCommentHarness({ commentText: authored });
+  h.transport.policy.deny = true; h.transport.policy.denialStatus = 401; await h.openViaButton(); await settle();
+  assert.equal(h.transport.observed.length, 1); assert.ok(h.notices.some(message => /조회 권한 거부/.test(message)));
+  const priorDraft = '기존 사용자 초안의 1–2행', priorRef = { sourceId: 'existing-authorized', hash: 'existing-hash' };
+  const priorInput = { id: 'existing-attachment', kind: 'file' };
+  h.state.codex.threadDrafts['room-a'] = priorDraft; h.briefing.thread().briefingInputs = [structuredClone(priorRef)];
+  h.briefing.thread().inputSources = [structuredClone(priorInput)];
+  h.briefing.type('입력 중인 의견'); const editor = h.briefing.part('briefing-comment'); editor.focus(); editor.setSelectionRange(1, 3, 'backward');
+  const target = h.parts('briefing-comment-target')[0], body = h.parts('briefing-comment-body')[0];
+  assert.ok(target && body); assert.doesNotMatch(target.textContent, /합성 공유 문서|1–2행/); assert.equal(body.textContent, authored);
+  const include = h.parts('briefing-comment-include')[0]; assert.ok(include && !include.disabled); include.fire('click'); await settle();
+  assert.equal(h.state.codex.threadDrafts['room-a'], priorDraft);
+  assert.deepEqual(h.briefing.thread().briefingInputs, [priorRef]); assert.deepEqual(h.briefing.thread().inputSources, [priorInput]);
+  assert.equal((h.briefing.thread().briefingCommentRefs || []).length, 0);
+  assert.equal(h.transport.observed.length, 1, 'the include action does not silently re-read or resend');
+  assert.equal(h.document.activeElement, editor);
+  assert.deepEqual([editor.value, editor.selectionStart, editor.selectionEnd, editor.selectionDirection], ['입력 중인 의견', 1, 3, 'backward']);
+  h.transport.policy.deny = false;
+  const retry = h.parts('briefing-show-evidence')[0]; assert.ok(retry); retry.fire('click'); await settle();
+  assert.equal(h.transport.observed.length, 2); assert.match(target.textContent, /합성 공유 문서.*1–2행/);
+  const includeAgain = h.parts('briefing-comment-include')[0]; assert.ok(includeAgain && !includeAgain.disabled); includeAgain.fire('click'); await settle();
+  assert.ok(h.state.codex.threadDrafts['room-a'].startsWith(priorDraft) && h.state.codex.threadDrafts['room-a'].includes(authored));
+  assert.ok(h.briefing.thread().briefingInputs.some(item => item.sourceId === h.target.sourceId));
+  assert.ok(h.briefing.thread().briefingInputs.some(item => item.sourceId === priorRef.sourceId));
+  assert.deepEqual(h.briefing.thread().inputSources, [priorInput]);
+  assert.equal(h.briefing.requests.filter(call => call.options.method === 'POST').length, 0);
+  assert.equal(JSON.stringify(h.transport.user.inputReferences[0]), h.transport.originalJson);
+  h.briefing.close();
+});
+
+test('first-send saved comment can include a currently verified source without replacing the existing draft', async () => {
+  const authored = '내가 직접 적은 합성 공유 문서 · 1–2행';
+  const h = await firstSendSavedCommentHarness({ commentText: authored }); await h.openViaButton(); await settle();
+  const priorDraft = '원래 작성한 내용', priorRef = { sourceId: 'existing-authorized', hash: 'existing-hash' };
+  h.state.codex.threadDrafts['room-a'] = priorDraft; h.briefing.thread().briefingInputs = [structuredClone(priorRef)];
+  const editor = h.briefing.part('briefing-comment'); editor.focus();
+  const include = h.parts('briefing-comment-include')[0]; assert.ok(include && !include.disabled); include.fire('click'); await settle();
+  const draft = h.state.codex.threadDrafts['room-a'], thread = h.briefing.thread();
+  assert.ok(draft.startsWith(priorDraft)); assert.ok(draft.includes(authored));
+  assert.ok(thread.briefingInputs.some(item => item.sourceId === priorRef.sourceId && item.hash === priorRef.hash));
+  assert.ok(thread.briefingInputs.some(item => item.sourceId === h.target.sourceId && item.hash === h.target.hash));
+  assert.equal(thread.briefingCommentRefs.filter(ref => ref.commentId === '20000000-0000-4000-8000-000000000001').length, 1);
+  assert.equal(h.document.activeElement, editor); assert.equal(h.briefing.requests.filter(call => call.options.method === 'POST').length, 0);
+  assert.equal(JSON.stringify(h.transport.user.inputReferences[0]), h.transport.originalJson);
+  h.briefing.close();
+});
+
+test('a source-free saved opinion remains includable without adding a denied automatic source', async () => {
+  const authored = '사용자가 직접 쓴 합성 공유 문서 1–2행 의견';
+  const h = await firstSendSavedCommentHarness({ commentText: authored, sourceIds: [] });
+  h.transport.policy.deny = true; h.transport.policy.denialStatus = 401; await h.openViaButton(); await settle();
+  const previousDraft = '보존할 기존 초안', previousInput = { id: 'user-attachment', kind: 'file' };
+  h.state.codex.threadDrafts['room-a'] = previousDraft; h.briefing.thread().inputSources = [structuredClone(previousInput)];
+  h.briefing.thread().briefingInputs = [{ sourceId: 'existing-authorized', hash: 'existing-hash' }];
+  const editor = h.briefing.part('briefing-comment'); editor.focus();
+  const include = h.parts('briefing-comment-include')[0]; assert.ok(include && !include.disabled); include.fire('click'); await settle();
+  const draft = h.state.codex.threadDrafts['room-a'], thread = h.briefing.thread();
+  assert.ok(draft.startsWith(previousDraft) && draft.includes(authored), 'the user-authored text is not censored');
+  assert.deepEqual(thread.inputSources, [previousInput]);
+  assert.deepEqual(thread.briefingInputs, [{ sourceId: 'existing-authorized', hash: 'existing-hash' }]);
+  assert.equal(thread.briefingCommentRefs.length, 1); assert.equal(h.document.activeElement, editor);
+  assert.equal(h.briefing.requests.filter(call => call.options.method === 'POST').length, 0);
+  h.briefing.close();
+});
+
+test('saving a comment cannot auto-attach a source denied while its POST is pending', async t => {
+  for (const deny of [false, true]) await t.test(deny ? '401 while saving' : 'verified positive control', async () => {
+    const transport = await firstSendThroughActualBridge({ hasAReceipt: true }), pending = requestProjectDeferred();
+    let posted, makeRow;
+    const h = firstSendBriefingUiHarness({ transport, respond: (call, { row }) => {
+      if (call.options.method === 'GET') return { briefingId: 'briefing-a', comments: [] };
+      assert.equal(call.options.method, 'POST'); posted = call; makeRow = row; return pending.promise;
+    } });
+    await h.openViaButton(); await settle();
+    const priorDraft = '기존 사용자가 쓴 초안', priorRef = { sourceId: 'existing-authorized', hash: 'existing-hash' };
+    const priorAttachment = { id: 'user-existing-input', kind: 'file', label: '기존 첨부' };
+    h.state.codex.threadDrafts['room-a'] = priorDraft;
+    h.briefing.thread().briefingInputs = [structuredClone(priorRef)];
+    h.briefing.thread().inputSources = [structuredClone(priorAttachment)];
+    const authored = '내가 직접 적은 합성 공유 문서 1–2행';
+    h.briefing.type(authored); h.briefing.click('briefing-comment-attach'); await settle();
+    assert.ok(posted); assert.equal(posted.body.text, authored); assert.equal(h.briefing.requests.filter(call => call.options.method === 'POST').length, 1);
+    h.briefing.type('저장 대기 중 계속 쓴 의견');
+    const editor = h.briefing.part('briefing-comment'); editor.focus(); editor.setSelectionRange(2, 5, 'backward');
+    if (deny) {
+      h.transport.policy.deny = true; h.transport.policy.denialStatus = 401;
+      h.briefing.click('briefing-inspect'); await h.inspections.at(-1); await settle();
+      assert.ok(h.notices.some(message => /조회 권한 거부/.test(message)));
+    }
+    pending.resolve({ comment: makeRow({ briefingId: 'briefing-a', stepId: 'step-a', stepIndex: 0, sourceIds: ['stored-capture'],
+      text: posted.body.text, clientRequestId: posted.body.clientRequestId, ...transport.identity }) });
+    await settle();
+    const current = h.briefing.thread(), draft = h.state.codex.threadDrafts['room-a'];
+    assert.deepEqual(current.inputSources, [priorAttachment]);
+    assert.ok(current.briefingInputs.some(item => JSON.stringify(item) === JSON.stringify(priorRef)));
+    if (deny) {
+      assert.equal(draft, priorDraft, 'a saved response cannot append an unverified source or generated draft');
+      assert.equal(current.briefingInputs.some(item => item.sourceId === h.target.sourceId), false);
+      assert.equal((current.briefingCommentRefs || []).length, 0);
+    } else {
+      assert.ok(draft.startsWith(priorDraft) && draft.includes(authored), 'a still-verified source retains normal automatic inclusion');
+      assert.ok(current.briefingInputs.some(item => item.sourceId === h.target.sourceId));
+      assert.equal(current.briefingCommentRefs.length, 1);
+    }
+    const savedBody = h.parts('briefing-comment-body')[0]; assert.ok(savedBody); assert.equal(savedBody.textContent, authored);
+    assert.equal(h.briefing.part('briefing-comment'), editor); assert.equal(h.document.activeElement, editor);
+    assert.deepEqual([editor.value, editor.selectionStart, editor.selectionEnd, editor.selectionDirection], ['저장 대기 중 계속 쓴 의견', 2, 5, 'backward']);
+    assert.equal(h.briefing.requests.filter(call => call.options.method === 'POST').length, 1, 'no automatic save or resend');
+    assert.equal(JSON.stringify(h.transport.user.inputReferences[0]), h.transport.originalJson);
+    h.briefing.close();
+  });
+});
+
+test('first-send Briefing saved comment targets reveal names only while the matching source is verified', async t => {
+  for (const scenario of ['denied then retry', 'ready then denied']) for (const status of [401, 403]) await t.test(`${scenario}, ${status}`, async () => {
+    const h = await firstSendSavedCommentHarness();
+    h.transport.policy.deny = scenario === 'denied then retry'; h.transport.policy.denialStatus = status;
+    await h.openViaButton(); await settle();
+    const row = h.parts('briefing-comment-row')[0], target = h.parts('briefing-comment-target')[0];
+    const body = h.parts('briefing-comment-body')[0];
+    assert.ok(row && target && body, 'the actual saved-comment renderer mounted the synthetic saved row');
+    assert.equal(body.textContent, '합성 저장 의견');
+    h.briefing.type('보존할 입력 중 의견');
+    const editor = h.briefing.part('briefing-comment'); editor.focus(); editor.setSelectionRange(2, 6, 'backward');
+    const targetData = () => [target.textContent, target.getAttribute('aria-label'), target.getAttribute('title'), JSON.stringify(target.dataset)].join(' ');
+    if (scenario === 'denied then retry') {
+      assert.doesNotMatch(targetData(), /합성 공유 문서|stored-capture|1–2행/, 'the denied read cannot expose the saved target name or range');
+      const retry = h.parts('briefing-show-evidence')[0]; assert.ok(retry);
+      h.transport.policy.deny = false; retry.fire('click'); await settle();
+      assert.match(targetData(), /합성 공유 문서.*1–2행/, 'an explicitly reverified source restores the same row label');
+    } else {
+      assert.match(targetData(), /합성 공유 문서.*1–2행/, 'the genuine A delivery is the positive control');
+      h.transport.policy.deny = true; h.briefing.click('briefing-inspect'); await h.inspections.at(-1); await settle();
+      assert.ok(h.notices.some(message => /조회 권한 거부/.test(message)));
+      assert.doesNotMatch(targetData(), /합성 공유 문서|stored-capture|1–2행/, 'the prior row cannot retain a denied target');
+    }
+    assert.equal(h.parts('briefing-comment-row')[0], row, 'redaction must not replace the saved comment row');
+    assert.equal(h.parts('briefing-comment-target')[0], target, 'the existing target node is updated in place');
+    assert.equal(h.parts('briefing-comment-body')[0], body); assert.equal(body.textContent, '합성 저장 의견');
+    assert.equal(h.briefing.part('briefing-comment'), editor); assert.equal(h.document.activeElement, editor);
+    assert.deepEqual([editor.value, editor.selectionStart, editor.selectionEnd, editor.selectionDirection], ['보존할 입력 중 의견', 2, 6, 'backward']);
+    assert.equal(h.briefing.requests.filter(call => call.options.method === 'POST').length, 0);
+    assert.equal(JSON.stringify(h.transport.user.inputReferences[0]), h.transport.originalJson);
+    h.briefing.close();
+  });
+});
+
+test('first-send Briefing saved comment target is cleared on observed permission or transport loss', async t => {
+  for (const change of ['permission', 'disconnected', 'permission-refresh-error']) await t.test(change, async () => {
+    const h = await firstSendSavedCommentHarness(); await h.openViaButton(); await settle(); h.minimap.toggleDeskMinimap();
+    const row = h.parts('briefing-comment-row')[0], target = h.parts('briefing-comment-target')[0], body = h.parts('briefing-comment-body')[0];
+    assert.ok(row && target && body); assert.match(target.textContent, /합성 공유 문서.*1–2행/);
+    h.briefing.type('보존할 입력 중 의견'); const editor = h.briefing.part('briefing-comment');
+    editor.focus(); editor.setSelectionRange(2, 6, 'backward');
+    const auth = h.state.codex.authStatus, reads = h.transport.observed.length;
+    if (change.endsWith('refresh-error')) h.setRefreshFailure(true);
+    if (change === 'disconnected') h.state.codex.connected = false;
+    else h.state.codex.authStatus = { ...auth, access: { state: 'permissionDenied' } };
+    h.briefing.emit(); await settle();
+    assert.equal(h.parts('briefing-comment-row')[0], row); assert.equal(h.parts('briefing-comment-target')[0], target);
+    assert.doesNotMatch([target.textContent, target.getAttribute('aria-label'), target.getAttribute('title'), JSON.stringify(target.dataset)].join(' '),
+      /합성 공유 문서|stored-capture|1–2행/, 'a connected saved row cannot retain a stale source label');
+    assert.equal(body.textContent, '합성 저장 의견'); assert.equal(h.document.activeElement, editor);
+    assert.deepEqual([editor.value, editor.selectionStart, editor.selectionEnd, editor.selectionDirection], ['보존할 입력 중 의견', 2, 6, 'backward']);
+    h.setRefreshFailure(false); h.state.codex.connected = true; h.state.codex.authStatus = auth; h.briefing.emit(); await settle();
+    assert.equal(h.transport.observed.length, reads, 'restoring access cannot silently retry');
+    assert.doesNotMatch(target.textContent, /합성 공유 문서|1–2행/);
+    assert.equal(h.briefing.requests.filter(call => call.options.method === 'POST').length, 0);
+    assert.equal(JSON.stringify(h.transport.user.inputReferences[0]), h.transport.originalJson);
+    h.briefing.close();
+  });
+});
+
+test('first-send Briefing saved comment target stays generic until a delayed exact source read succeeds', async () => {
+  const h = await firstSendSavedCommentHarness(), gate = requestProjectDeferred(); h.transport.policy.gate = gate;
+  const opening = h.openViaButton(); await settle();
+  const row = h.parts('briefing-comment-row')[0], target = h.parts('briefing-comment-target')[0], body = h.parts('briefing-comment-body')[0];
+  assert.ok(row && target && body); assert.equal(h.transport.observed.length, 1); assert.equal(h.spawns.length, 0);
+  assert.doesNotMatch([target.textContent, target.getAttribute('title'), target.getAttribute('aria-label')].join(' '),
+    /합성 공유 문서|stored-capture|1–2행|packet-b/, 'the saved row is not permission to reveal a pending source');
+  h.briefing.type('확인 중 작성한 의견'); const editor = h.briefing.part('briefing-comment');
+  editor.focus(); editor.setSelectionRange(1, 5, 'forward');
+  const camera = JSON.stringify([h.state.panTarget, h.state.zoomTarget, h.state.activeEntityId]);
+  gate.resolve(); await opening; await settle();
+  assert.equal(h.parts('briefing-comment-row')[0], row); assert.equal(h.parts('briefing-comment-target')[0], target);
+  assert.match(target.textContent, /합성 공유 문서.*1–2행/);
+  assert.equal(body.textContent, '합성 저장 의견'); assert.equal(h.document.activeElement, editor);
+  assert.deepEqual([editor.value, editor.selectionStart, editor.selectionEnd, editor.selectionDirection], ['확인 중 작성한 의견', 1, 5, 'forward']);
+  assert.equal(JSON.stringify([h.state.panTarget, h.state.zoomTarget, h.state.activeEntityId]), camera);
+  assert.equal(h.transport.observed.length, 1); assert.equal(h.briefing.requests.filter(call => call.options.method === 'POST').length, 0);
+  assert.equal(JSON.stringify(h.transport.user.inputReferences[0]), h.transport.originalJson);
+  h.briefing.close();
+});
+
+test('first-send Briefing saved comment cannot leave an old target row visible across room or account changes', async t => {
+  for (const change of ['room', 'account']) await t.test(change, async () => {
+    const h = await firstSendSavedCommentHarness(); await h.openViaButton(); await settle();
+    const row = h.parts('briefing-comment-row')[0], target = h.parts('briefing-comment-target')[0];
+    assert.ok(row && target); assert.match(target.textContent, /합성 공유 문서.*1–2행/);
+    h.briefing.type('닫혀도 남을 의견 초안');
+    const outside = h.document.createElement('textarea'); h.document.documentElement.appendChild(outside); outside.focus();
+    const auth = h.state.codex.authStatus, chatDraft = h.state.codex.threadDrafts['room-a'], reads = h.transport.observed.length;
+    if (change === 'room') { h.state.codex.activeThreadId = 'room-b'; h.state.codex.activityRoomGeneration++; }
+    else h.state.codex.authStatus = { ...auth, accountEmail: 'other@example.test' };
+    h.briefing.emit(); await settle();
+    assert.equal(row.isConnected, false, 'the old saved row is removed with the stale presentation');
+    assert.equal(h.parts('briefing-comment-target').length, 0);
+    assert.equal(h.document.activeElement, outside); assert.equal(h.state.codex.threadDrafts['room-a'], chatDraft);
+    h.state.codex.activeThreadId = 'room-a'; h.state.codex.authStatus = auth; h.briefing.emit(); await settle();
+    assert.equal(h.transport.observed.length, reads, 'returning to the old owner does not automatically reopen');
+    await h.openViaButton(); await settle();
+    assert.equal(h.briefing.part('briefing-comment').value, '닫혀도 남을 의견 초안', 'explicit reopen preserves the unsaved comment draft');
+    assert.equal(h.state.codex.threadDrafts['room-a'], chatDraft);
+    assert.equal(h.briefing.requests.filter(call => call.options.method === 'POST').length, 0);
+    assert.equal(JSON.stringify(h.transport.user.inputReferences[0]), h.transport.originalJson);
+    h.briefing.close();
+  });
+});
+
+test('first-send Activity and Briefing retain the accepted user receipt after actual assistant events', async t => {
+  await t.test('Activity', async () => {
+    const h = await firstSendThroughActualBridge({ hasAReceipt: true });
+    await h.clickActivity(); await settle();
+    assert.ok(h.observed.length, 'a valid A receipt must still reach the scoped source read after assistant events');
+    const panel = h.document.getElementById('egd-codex-input-panel'); assert.ok(panel);
+    const rendered = inspectorRenderedData(panel);
+    assert.ok(rendered.includes(h.packetA.text));
+    assert.equal(rendered.includes(h.packetB.text) || /packet-b|conversation-b\/run-b/.test(rendered), false);
+    assert.equal(JSON.stringify(h.user.inputReferences[0]), h.originalJson);
+    await h.settleTracking(); h.close();
+  });
+  await t.test('Briefing', async () => {
+    const transport = await firstSendThroughActualBridge({ hasAReceipt: true });
+    const h = firstSendBriefingUiHarness({ transport });
+    await h.openViaButton(); await settle(); h.minimap.toggleDeskMinimap();
+    assert.ok(h.transport.observed.length, `Briefing must read the same valid A source after assistant events: ${JSON.stringify({
+      notices: h.notices, references: h.briefing.session()?.references, user: h.transport.user.localMessageId,
+      request: h.transport.protocol.requests[h.transport.requestId] })}`);
+    const card = h.spawns.find(item => item.reference.sourceId === h.target.sourceId)?.card;
+    assert.ok(card && card.id !== h.otherCard.id);
+    assert.equal(h.resolveTargets(h.briefing.session(), h.transport.answer.briefing.steps[0])[0].view?.id, card.id);
+    assert.ok(h.parts('minimap-briefing-row').every(row => row.dataset.viewId !== h.otherCard.id));
+    h.briefing.click('briefing-inspect'); await h.inspections.at(-1); await settle();
+    const panel = h.document.getElementById('egd-codex-input-panel'); assert.ok(panel);
+    const rendered = inspectorRenderedData(panel);
+    assert.ok(rendered.includes(h.transport.packetA.text));
+    assert.equal(rendered.includes(h.transport.packetB.text) || /packet-b|conversation-b\/run-b/.test(rendered), false);
+    assert.equal(JSON.stringify(h.transport.user.inputReferences[0]), h.transport.originalJson);
+    h.briefing.close();
+  });
+});
+
+test('first-send Activity and Briefing reject an assistant ID projected as a user receipt without independent proof', async t => {
+  await t.test('Activity', async () => {
+    const h = firstSendInspectorPacketFixture({ hasAReceipt: true, assistantLifecycle: true, projectAfterEvents: true });
+    assert.notEqual(h.user.localMessageId, 'local-message-a', 'no independently accepted user receipt was projected');
+    await h.clickActivity(); await settle();
+    assert.equal(h.observed.length, 0, 'matching projected IDs alone cannot authorize the source read');
+    assert.equal(!!h.document.getElementById('egd-codex-input-panel'), false);
+    assert.equal(JSON.stringify(h.user.inputReferences[0]), h.originalJson);
+    await h.settleTracking();
+  });
+  await t.test('Briefing', async () => {
+    const h = firstSendBriefingUiHarness({ hasAReceipt: true, assistantLifecycle: true, projectAfterEvents: true });
+    await h.openViaButton(); await settle(); h.minimap.toggleDeskMinimap();
+    assert.equal(h.transport.observed.length, 0, 'a projected assistant ID is not an accepted user receipt');
+    assert.equal(h.spawns.length, 0);
+    assert.ok(h.parts('minimap-briefing-row').every(row => row.dataset.viewId !== h.otherCard.id));
+    assert.equal(JSON.stringify(h.transport.user.inputReferences[0]), h.transport.originalJson);
+    h.briefing.close();
+  });
+});
 
 function briefingMinimapSearchFixture(options = {}) {
   const h = briefingMinimapUiHarness(options), thread = h.briefing.thread();
@@ -12205,8 +13822,7 @@ test('CNV-07: a failed minimap refresh at explicit retry leaves no old evidence 
   const h = briefingMinimapUiHarness();
   await h.openViaButton(); await settle(); h.minimap.toggleDeskMinimap();
   h.firstCard._inputEvidenceLoaded = false; h.briefing.render();
-  const retry = settingsNodes(h.briefing.panel(), node => node.dataset.testid === 'briefing-show-evidence'
-    && node.dataset.sourceId === 'source-a' && /1–4행/.test(node.getAttribute('aria-label') || ''))[0];
+  const retry = settingsNodes(h.briefing.panel(), node => node.dataset.testid === 'briefing-show-evidence')[0];
   assert.ok(retry); assert.ok(h.parts('minimap-briefing-row').length > 0);
   const reads = h.briefing.evidenceCalls.length, attempts = h.refreshCalls(); h.setRefreshFailure(true);
   retry.fire('click'); await settle();
@@ -12260,10 +13876,11 @@ test('CNV-07: a pending explicit retry cannot survive observed transport or perm
     assert.ok(h.parts('minimap-briefing-row').length > 0);
     const materialized = [...h.materialized], reads = h.briefing.evidenceCalls.length;
     h.firstCard._inputEvidenceLoaded = false; h.briefing.render();
-    const retry = settingsNodes(h.briefing.panel(), node => node.dataset.testid === 'briefing-show-evidence'
-      && node.dataset.sourceId === 'source-a' && /1–4행/.test(node.getAttribute('aria-label') || ''))[0];
+    const retry = settingsNodes(h.briefing.panel(), node => node.dataset.testid === 'briefing-show-evidence')[0];
     assert.ok(retry); retrying = true; retry.fire('click'); await settle();
     assert.equal(h.briefing.evidenceCalls.length, reads + 1, 'the explicit retry is actually pending');
+    assert.equal(h.briefing.evidenceCalls.at(-1).reference.sourceId, 'source-a');
+    assert.deepEqual(h.briefing.evidenceCalls.at(-1).reference.presentationRange, h.first.range);
     const before = JSON.stringify([h.state.panTarget, h.state.zoomTarget, h.state.codex.threadDrafts['room-a']]);
     if (change === 'disconnected') h.state.codex.connected = false;
     else h.state.codex.authStatus = { ...h.state.codex.authStatus, access: { state: 'permissionDenied' } };
@@ -12288,8 +13905,9 @@ test('CNV-07: a denied read cannot reuse an already-open matching evidence card 
   } });
   await h.briefing.open(); await settle();
   assert.ok(h.notices.includes('합성 권한 거부'));
-  assert.equal(h.resolveTargets(h.briefing.session(), h.briefing.briefing.steps[0])[1].status, 'available',
-    'the old matching card exists, but was not authorized for this presentation');
+  assert.ok(h.distantCard.isConnected, 'the old matching card exists');
+  assert.notEqual(h.resolveTargets(h.briefing.session(), h.briefing.briefing.steps[0])[1].status, 'available',
+    'the denied card must not be presented as open for this presentation');
   h.minimap.toggleDeskMinimap();
   const rows = h.parts('minimap-briefing-row'), markers = h.parts('minimap-briefing-marker');
   assert.deepEqual(rows.map(node => node.dataset.viewId), ['evidence-a-1', 'evidence-a-2', 'evidence-a-1']);
@@ -12307,11 +13925,12 @@ test('CNV-07: an explicit failed evidence retry revokes the old proof even if th
   assert.ok(h.parts('minimap-briefing-row').some(node => node.dataset.viewId === 'evidence-a-1'));
   h.firstCard._inputEvidenceLoaded = false;
   h.briefing.render();
-  const retry = settingsNodes(h.briefing.panel(), node => node.dataset.testid === 'briefing-show-evidence'
-    && node.dataset.sourceId === 'source-a' && /1–4행/.test(node.getAttribute('aria-label') || ''))[0];
+  const retry = settingsNodes(h.briefing.panel(), node => node.dataset.testid === 'briefing-show-evidence')[0];
   assert.ok(retry, 'the existing Briefing exposes its explicit retry action');
   retrying = true;
   retry.fire('click'); await settle();
+  assert.equal(h.briefing.evidenceCalls.at(-1).reference.sourceId, 'source-a');
+  assert.deepEqual(h.briefing.evidenceCalls.at(-1).reference.presentationRange, h.first.range);
   h.firstCard._inputEvidenceLoaded = true;
   h.minimap.refreshDeskMinimap();
   assert.ok(h.parts('minimap-briefing-row').every(node => node.dataset.viewId !== 'evidence-a-1'),
@@ -12370,21 +13989,26 @@ test('CNV-07: a successful read never marks a same-key card from another room or
     assert.ok(start >= 0 && end > start);
     const spawns = [], reads = [];
     const makeShell = ({ id }) => {
-      const root = h.minimap.make(id, '새 합성 근거', 1000, 2400);
+      const sequence = Number(id.match(/-(\d+)$/)?.[1] || 1);
+      const root = h.minimap.make(id, '새 합성 근거', sequence === 2 ? 2800 : 1000, sequence === 3 ? 3400 : 2400);
       root.className = 'egd-canvas-card egd-input-evidence-card';
       root.dataset.deskWindowKind = 'input-evidence';
       const identity = h.document.createElement('div'), content = h.document.createElement('div');
       root.appendChild(identity); root.appendChild(content);
       const shell = { root, slots: { identity, content } }; root._deskWindowShell = shell; return shell;
     };
-    const bridge = compileFunction(`let cardSeq = 0;\n${declaration('el')}\n${declaration('getCodexThreadById')}\n${declaration('spawnInputEvidence')}
+    const guards = ['briefingInputReferences', 'briefingRangeIssue', 'acceptedInputReceipt', 'visibleInputAnswer', 'historyReadReferenceCurrent', 'briefingReadReferenceCurrent', 'rememberBriefingMinimapEvidence']
+      .filter(name => surfaceSource.includes(`  function ${name}(`)).map(declaration).join('\n');
+    const bridge = compileFunction(`let cardSeq = 0;\n${declaration('el')}\n${declaration('getCodexThreadById')}\n${guards}\n${declaration('spawnInputEvidence')}
       const spawn = spawnInputEvidence;
       spawnInputEvidence = (...args) => { const result = spawn(...args); spawns.push({ reference: args[0], card: result }); return result; };
       return { ${surfaceSource.slice(start, end + 8)} };`,
     ['document', 'state', 'InputContext', 'spawns', 'resolveCanvasCardPlacement', 'spawnDeskWindowShell',
-      'revealPlacedCanvasCard', 'cloneJson', 'boardNotice'])(h.document, h.state, InputContext, spawns,
+      'revealPlacedCanvasCard', 'cloneJson', 'boardNotice', 'ChatState', 'BriefingState', 'refreshDeskMinimap'])(h.document, h.state, InputContext, spawns,
       () => ({ x: 1000, y: 2400, width: 400, height: 300 }), makeShell,
-      () => assert.fail('Briefing must not reveal a new card'), value => JSON.parse(JSON.stringify(value)), text => h.notices.push(text));
+      () => assert.fail('Briefing must not reveal a new card'), value => JSON.parse(JSON.stringify(value)), text => h.notices.push(text),
+      Chat, Briefing, () => h.minimap.refreshDeskMinimap());
+    bridge.subscribe = h.briefing.bridge.subscribe;
     bridge.readInput = async (reference, options) => {
       assert.equal(options.threadId, 'room-a'); assert.equal(options.isCurrent(), true);
       assert.equal(options.briefingScope.current(), true); reads.push(reference);
@@ -12402,11 +14026,13 @@ test('CNV-07: a successful read never marks a same-key card from another room or
     assert.equal(firstRead.contextScope.clientThreadId, h.briefing.thread().clientBindingId);
     assert.equal(firstRead.contextScope.conversationId, h.briefing.thread().conversationId);
     const markers = h.parts('minimap-briefing-marker'), rows = h.parts('minimap-briefing-row');
-    assert.ok(markers.some(node => node.dataset.viewId === 'evidence-b-1'), 'a matching other card remains visible');
+    const otherSpawn = spawns.find(item => item.reference.sourceId === 'source-b');
+    assert.ok(otherSpawn && markers.some(node => node.dataset.viewId === otherSpawn.card.id),
+      `a successfully read other target remains visible: ${JSON.stringify({ spawns: spawns.map(item => [item.reference.sourceId, item.card?.id]),
+        markers: markers.map(node => node.dataset.viewId), notices: h.notices })}`);
     if (!changed) {
-      assert.equal(firstSpawn.card, card, 'a matching open card is reused');
-      assert.ok(markers.some(node => node.dataset.viewId === card.id));
-      assert.ok(rows.some(node => node.dataset.viewId === card.id));
+      assert.ok(markers.some(node => node.dataset.viewId === firstSpawn.card.id));
+      assert.ok(rows.some(node => node.dataset.viewId === firstSpawn.card.id));
     } else {
       assert.deepEqual({ marker: markers.some(node => node.dataset.viewId === card.id), row: rows.some(node => node.dataset.viewId === card.id) },
         { marker: false, row: false }, `different ${changed} must not authorize the old card (spawn reused it: ${firstSpawn.card === card})`);
@@ -18723,7 +20349,15 @@ function installDefaultProjectSendFixture(state) {
 }
 
 function requestProjectBridgeMethod(name, deps) {
-  const prefix = ['readRequestProject', 'readRoomProjectDefault', 'refreshRoomProjectDefault', 'prepareRoomProjectSend', 'saveRoomProjectDefault', 'prepareRoomProjectFolder', 'saveRoomProjectOverride', 'clearRequestProjectTarget', 'sendMessage'].includes(name) ? 'async ' : '';
+  if (name === 'sendMessage' && surfaceSource.includes('  function rememberAcceptedInputReceipt(') && !deps.rememberAcceptedInputReceipt) {
+    deps = { ...deps, rememberAcceptedInputReceipt: compileFunction(`${declaration('rememberAcceptedInputReceipt')}\nreturn rememberAcceptedInputReceipt;`,
+      ['state', 'ChatState'])(deps.state, deps.ChatState) };
+  }
+  if (name === 'sendMessage' && surfaceSource.includes('  function createAcceptedReceiptWatch(') && !deps.createAcceptedReceiptWatch) {
+    deps = { ...deps, createAcceptedReceiptWatch: compileFunction(`${declaration('createAcceptedReceiptWatch')}\nreturn createAcceptedReceiptWatch;`,
+      ['state', 'ChatState', 'getCodexThreadById'])(deps.state, deps.ChatState, deps.getCodexThreadById) };
+  }
+  const prefix = ['readRequestProject', 'readRoomProjectDefault', 'refreshRoomProjectDefault', 'prepareRoomProjectSend', 'prepareBriefingInputSend', 'saveRoomProjectDefault', 'prepareRoomProjectFolder', 'saveRoomProjectOverride', 'clearRequestProjectTarget', 'sendMessage'].includes(name) ? 'async ' : '';
   const start = surfaceSource.indexOf('      ' + prefix + name + '(');
   const end = surfaceSource.indexOf('\n      },', start);
   assert.ok(start >= 0 && end > start, 'actual bridge method: ' + name);
@@ -18888,21 +20522,23 @@ function requestProjectUiHarness({ target, read, roomRead, roomSave, resizeObser
   };
 }
 
-function requestProjectSendHarness({ target, capture, reply, roomRead, memoAgentRoom = false, ready = async () => true, onEmit = () => {}, selectBrowserSources = () => [], inputSources = [{ id: 'attachment', kind: 'board-element', label: 'Selected element', sourceRef: { viewId: 'element-a' } }] } = {}) {
+function requestProjectSendHarness({ target, capture, reply, roomRead, sharedState = null, sourceDocument = null, sourceRead = null, memoAgentRoom = false, ready = async () => true, onEmit = () => {}, selectBrowserSources = () => [], inputSources = [{ id: 'attachment', kind: 'board-element', label: 'Selected element', sourceRef: { viewId: 'element-a' } }] } = {}) {
   const constants = requestProjectSurfaceConstants();
-  const state = { codex: { activeThreadId: 'room', threads: [{ id: 'room', clientBindingId: 'original-wire-room', profileEnabled: false,
+  const state = sharedState || { codex: { activeThreadId: 'room', threads: [{ id: 'room', clientBindingId: 'original-wire-room', profileEnabled: false,
     messages: [], inputSources, briefingInputs: [], ...(memoAgentRoom ? { type: 'dm', profileEnabled: true, agentProfileId: 'fixture-agent' } : {}),
     ...(target === undefined ? {} : { requestProjectTarget: target }) }],
     threadDrafts: { room: 'original words' }, threadDraftRevisions: { room: 1 }, authStatus: sessionAuth, connected: true },
   boards: {} };
+  state.boards ||= {};
   Object.defineProperty(state.boards, 'activeProjectionId', { get() { assert.fail('sending must never infer an active Board target'); } });
-  const getThread = (_codex, id = 'room') => state.codex.threads.find(thread => thread.id === id) || null;
+  const fixtureThreadId = state.codex.activeThreadId;
+  const getThread = (_codex, id = fixtureThreadId) => state.codex.threads.find(thread => thread.id === id) || null;
   const update = (id, action) => { state.codex.threads = state.codex.threads.map(thread => thread.id === id ? action(thread) : thread); };
   const calls = { begin: 0, prepare: 0, capture: 0, provider: [] };
   const epoch = Chat.createChatEpochScope();
   const roomCalls = [], timers = new Map(); let timerId = 0;
   let roomReader = roomRead || (body => ({ ok: true, result: { roomId: body.roomId, inheritance: null, override: null, project: null, source: null, status: 'none' } }));
-  const protocol = Chat.createChatProtocolState();
+  const protocol = sharedState ? state.codex.chatProtocol : Chat.createChatProtocolState();
   if (target) constants.chatRequestProjectDisplays.set('room', target);
   const deps = { ...constants, state, ChatState: Chat, InputContext, protocol, memoAskSendReservations: new Map(),
     window: { AbortController, setTimeout: (fn, ms) => { const id = ++timerId; timers.set(id, { ms, fire: () => { timers.delete(id); fn(); } }); return id; },
@@ -18916,6 +20552,7 @@ function requestProjectSendHarness({ target, capture, reply, roomRead, memoAgent
     createCodexMessage: (role, content, status, options) => ({ id: 'message-' + role, role, content, status, ...options }),
     SELF_MEMBER: 'self', codexThreadRuntimeConfig: () => ({}),
     fetchJson: async (path, options) => {
+      if (sourceRead && path.startsWith('/context/')) return sourceRead(path, options);
       if (path === '/v1/files/projects/room-default') {
         const body = JSON.parse(options.body); roomCalls.push(body); return roomReader(body);
       }
@@ -18930,6 +20567,12 @@ function requestProjectSendHarness({ target, capture, reply, roomRead, memoAgent
   const names = ['chatRequestProjectSelection', 'chatRoomProjectState', 'createChatProjectScope', 'chatRoomProjectSendBlock', 'normalizeChatRoomProjectDefault',
     'snapshotChatRoomProjectExpectation', 'chatRoomProjectExpectation', 'chatRoomProjectTargetsMatch'];
   Object.assign(deps, compileFunction(names.map(declaration).join('\n') + '\nreturn { ' + names.join(', ') + ' };', Object.keys(deps))(...Object.values(deps)));
+  if (sharedState && surfaceSource.includes('      async prepareBriefingInputSend(')) {
+    const proofNames = ['acceptedInputReceipt', 'visibleInputAnswer', 'historyReadReferenceCurrent', 'briefingRangeIssue', 'createAcceptedReceiptWatch'];
+    Object.assign(deps, { document: sourceDocument, BriefingState: Briefing });
+    Object.assign(deps, compileFunction(proofNames.map(declaration).join('\n') + '\nreturn { ' + proofNames.join(', ') + ' };',
+      ['state', 'ChatState', 'InputContext', 'getCodexThreadById'])(state, Chat, InputContext, getThread));
+  }
   deps.emit = productionSendFixtureEmit(deps, onEmit);
   Object.assign(deps, productionManualSendNotice({ ...deps, epochScope: epoch }));
   const memoScopeBridge = { createProjectScope: id => deps.createChatProjectScope(id, epoch),
@@ -18937,8 +20580,10 @@ function requestProjectSendHarness({ target, capture, reply, roomRead, memoAgent
   const send = requestProjectBridgeMethod('sendMessage', deps);
   const captureManualSendOwner = requestProjectBridgeMethod('captureManualSendOwner', deps);
   const setTarget = requestProjectBridgeMethod('setRequestProjectTarget', deps);
-  const bridge = Object.fromEntries(['createProjectScope', 'readRoomProjectDefault', 'prepareRoomProjectSend'].map(name => [name, requestProjectBridgeMethod(name, deps)]));
-  state.codexBridge = bridge;
+  const bridgeMethods = ['createProjectScope', 'readRoomProjectDefault', 'prepareRoomProjectSend'];
+  if (sharedState && surfaceSource.includes('      async prepareBriefingInputSend(')) bridgeMethods.push('prepareBriefingInputSend');
+  const bridge = Object.fromEntries(bridgeMethods.map(name => [name, requestProjectBridgeMethod(name, deps)]));
+  state.codexBridge = sharedState ? Object.assign(state.codexBridge || {}, bridge) : bridge;
   return { ...constants, state, protocol, calls, send, bridge, roomCalls, epoch, timers, emit: deps.emit, memoAskSendReservations: deps.memoAskSendReservations, thread: () => getThread(null),
     owner: (id = 'room') => { const owner = captureManualSendOwner(id); assert.ok(owner); return owner; },
     reservation: (current = () => true, id = 'room') => { const scope = memoScopeBridge.createMemoAskScope(id); assert.ok(scope); return { binding: Chat.clientThreadBinding(getThread(null, id)), scope, current }; },
@@ -20317,13 +21962,17 @@ function activityDetailsHarness({ fetchRead, approval = true, openFile } = {}) {
     return fetchRead ? fetchRead(url.pathname, target, options) : url.pathname === '/chat/command-output' ? packet(target)
       : url.pathname === '/chat/run-project-origin' ? { protocolVersion: 1, ...target, status: 'unavailable', verified: false } : changes(target);
   };
-  const deps = { state, document, window: { AbortController }, ChatState: Chat, ChatRunResult, ChatChangeReview,
+  const deps = { state, document, window: { AbortController }, ChatState: Chat, ChatRunResult, ChatChangeReview, InputContext,
+    cloneJson: value => JSON.parse(JSON.stringify(value)),
     pruneUserInputDrafts() {}, contextResolverRecordSection: () => null, codexSubAgentSection: () => null,
     formatMessageTime: () => '', queueMicrotask, openChatFileReference: () => assert.fail('no inferred FileView authority'),
     openVerifiedRunFile: request => openFile ? openFile(request) : assert.fail('no verified file opening requested by this fixture'),
     codexUserInputBlock: () => assert.fail('this fixture has no Agent answer'), userInputDrafts: new Map(), userInputDraftKey: () => '' };
   const names = ['el', 'getCodexThreadById', 'codexRuns', 'codexRunLabel', 'openCodexActivityPanel', 'codexActivityDetailTarget',
     'codexCommandInfo', 'createCodexActivityReadScope', 'replaceCodexActivityDetails', 'createCodexActivityDetailsView', 'renderCodexActivityPanel'];
+  for (const name of ['briefingInputReferences', 'acceptedInputReceipt', 'visibleInputAnswer', 'historyReadReferenceCurrent', 'inputDeliveryProof']) {
+    if (surfaceSource.includes(`  function ${name}(`)) names.push(name);
+  }
   const api = compileFunction('let activityPanelComposing = false, activityPanelDeferred = false, activityDetailsGeneration = 0, activityDetailsView = null;\n'
     + names.map(declaration).join('\n') + '\nreturn { ' + names.join(', ') + ', generation: () => activityDetailsGeneration };', Object.keys(deps))(...Object.values(deps));
   const bridgeFactory = requestProjectBridgeMethod('createActivityReadScope', { createCodexActivityReadScope: api.createCodexActivityReadScope, epochScope, fetchJson });
@@ -20336,6 +21985,41 @@ function activityDetailsHarness({ fetchRead, approval = true, openFile } = {}) {
     async openChanges(kind = 'activity') { const node = panel().testid(kind === 'approval' ? 'chat-approval-changes' : 'chat-activity-changes'); await node.querySelector('summary').click(); return node; },
   };
 }
+
+test('first-send Activity delivery control shows only a receipt for the visible answer', async t => {
+  for (const scenario of ['verified A', 'unrelated B packet', 'missing accepted receipt', 'wrong account']) await t.test(scenario, async () => {
+    // The production Activity renderer and production inspector share state;
+    // their small synthetic documents are separate to reuse both fixtures.
+    const input = await firstSendThroughActualBridge({ hasAReceipt: scenario !== 'unrelated B packet',
+      acceptedUserId: scenario !== 'missing accepted receipt' });
+    const activity = activityDetailsHarness({ approval: false });
+    activity.state.codex = input.state.codex; activity.state.codex.activityThreadId = input.thread.id;
+    activity.state.codexBridge.inspectInput = (...args) => input.bridge.inspectInput(...args);
+    if (scenario === 'unrelated B packet') {
+      input.run.contextPackets = [{ packetId: input.packetB.packetId, sourceId: input.capture.sourceId,
+        receiptId: 'receipt-b', hash: input.packetB.hash, mode: input.packetB.mode,
+        coverage: input.packetB.coverage, deliveryStatus: input.packetB.deliveryStatus }];
+    } else if (scenario === 'missing accepted receipt') assert.notEqual(input.user.localMessageId, 'local-message-a');
+    else if (scenario === 'wrong account') input.state.codex.authStatus.accountEmail = 'other@example.test';
+    activity.renderCodexActivityPanel();
+    const panel = activity.panel(), buttons = panel.querySelectorAll('[data-testid="chat-delivered-input-open"]');
+    if (scenario !== 'verified A') {
+      assert.equal(buttons.length, 0, 'an unverified packet must not become an A delivery control');
+      assert.equal(panel.textContent.includes('packet-b'), false); assert.equal(input.observed.length, 0);
+    } else {
+      assert.equal(buttons.length, 1, 'the visible answer retains its own positive control');
+      assert.equal(Object.hasOwn(buttons[0].dataset, 'packetId'), false, 'the packet identifier is not exposed before verification');
+      await buttons[0].click(); await input.inspections.at(-1); await settle();
+      const inspector = input.document.getElementById('egd-codex-input-panel'); assert.ok(inspector);
+      const rendered = inspectorRenderedData(inspector);
+      assert.ok(rendered.includes(input.packetA.text), `A packet is missing; synthetic reads: ${JSON.stringify(input.observed.map(row => [row.request, row.body.delivered?.packetId]))}; notices: ${JSON.stringify(input.notices)}; panel: ${rendered.slice(0, 1200)}`);
+      assert.equal(/packet-b|conversation-b\/run-b/.test(rendered) || rendered.includes(input.packetB.text), false,
+        'a source page may contain B\'s words, but B\'s packet and identity are not A\'s delivery');
+      await input.settleTracking(); input.close();
+    }
+    assert.equal(JSON.stringify(input.user.inputReferences[0]), input.originalJson);
+  });
+});
 
 test('Chat retained details integration: actual activity/approval DOM opens only exact original-ID GETs', async () => {
   const h = activityDetailsHarness();

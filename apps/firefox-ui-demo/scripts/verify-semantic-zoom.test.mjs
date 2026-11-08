@@ -152,32 +152,60 @@ function briefingSemanticHarness({ width = 720, height = 600, zoom = .0467171717
     card.resource = Object.freeze({ id: `original-resource-${id}` }); layer.appendChild(card); return card;
   };
   const positions = [[352, -402], [352, 724], [-288, -402], [992, -402], [-480, 80], [1184, 80]];
-  const references = positions.map((_point, index) => ({ sourceId: `source-${index}`, hash: `hash-${index}`, localSource: { label: '같은 제목' } }));
+  const identity = { conversationId: 'conversation-a', runId: 'run-a', answerId: ChatState.runKey('conversation-a', 'run-a') };
+  const auth = { isLoggedIn: true, accountEmail: 'focus-owner@example.test', authMode: 'chatgpt', identityStatus: 'known', access: { state: 'ok' } };
+  const accountKey = ChatState.codexAccountKey(auth);
+  Object.assign(state.codex, { authStatus: auth, codexAccountKey: accountKey, connected: true });
+  const thread = { id: 'room-a', engineId: 'codex', engineProfileId: 'fixture-codex', conversationId: identity.conversationId,
+    clientBindingId: 'fixture-binding', bindingState: 'verified', bindingAccountKey: accountKey, messages: [], briefingInputs: [] };
+  state.codex.threads = [thread];
+  const firstSendScope = ChatState.chatContextRequestScope({ ...thread, conversationId: null }, state.codex);
+  const captures = positions.map((_point, index) => {
+    const source = { id: `selection-${index}`, kind: 'browser', label: '같은 제목', sourceRef: { viewId: `synthetic-view-${index}` } };
+    const capture = { id: source.id, sourceId: `source-${index}`, snapshotId: `source-${index}`, hash: `hash-${index}`,
+      sourceRef: source.sourceRef, clientThreadId: firstSendScope.clientThreadId,
+      engine: { engineId: firstSendScope.engineId, engineProfileId: firstSendScope.engineProfileId } };
+    return { source, capture, bindings: [{ bindingId: `synthetic-binding-${index}`, ...identity }] };
+  });
+  const references = captures.map(({ source, capture }) => InputContext.capturedInputReference(source, capture, firstSendScope));
   const cards = positions.map(([x, y], index) => {
     const card = createCard(`evidence-${index}`, 'input-evidence', { x, y, width: 616, height: 458 });
     card._inputReference = { ...references[index] }; card._inputEvidenceLoaded = true; return card;
   });
   const chat = createCard('ordinary-chat', 'chat', { x: 160, y: 80, width: 1000, height: 458 });
-  const identity = { conversationId: 'conversation-a', runId: 'run-a', answerId: 'answer-a' };
   const target = index => ({ sourceId: references[index].sourceId, hash: references[index].hash });
   const briefing = { id: 'brief-a', ...identity, steps: [
     { id: 'six', text: '여섯 근거', targets: cards.map((_card, index) => target(index)) },
     { id: 'single', text: '한 근거', target: target(0) }, { id: 'three', text: '세 근거', targets: [3, 4, 5].map(target) }] };
-  const scopeFor = presentationId => { let live = true; return {
-    current: () => live && state.codex.activeThreadId === 'room-a' && state.codex.briefingSession?.presentationId === presentationId,
-    dispose: () => { live = false; },
-  }; };
-  state.codex.briefingSession = { ...BriefingState.beginBriefing(briefing, { zoom, pan, activeEntityId: 'existing-selection' }),
-    identity, references, artifacts: [], threadId: 'room-a', presentationId: 'initial', interaction: { revision: 0 },
-    preparationScope: scopeFor('initial') };
+  const protocol = state.codex.chatProtocol = ChatState.createChatProtocolState(), requestId = 'fixture-first-request';
+  ChatState.registerChatRequest(protocol, { requestId, clientThreadId: firstSendScope.clientThreadId, localThreadId: thread.id }, auth);
+  const accepted = { accepted: true, durable: true, requestId, clientThreadId: firstSendScope.clientThreadId,
+    localMessageId: 'fixture-user-receipt', localConversationId: 'fixture-local-conversation', localRunId: 'fixture-local-run',
+    engineId: firstSendScope.engineId, engineProfileId: firstSendScope.engineProfileId, ...identity };
+  const run = ChatState.acceptChatRequest(protocol, accepted, requestId);
+  assert.ok(run, 'the synthetic first send has a real accepted protocol run');
+  thread.messages.push({ id: 'fixture-user', role: 'user', requestId, localMessageId: accepted.localMessageId,
+    ...identity, inputReferences: references });
+  thread.messages.push({ id: 'fixture-answer', role: 'assistant', ...identity, briefing,
+    contextCaptures: captures.map(({ capture }) => capture) });
+  const rememberReceipt = production('rememberAcceptedInputReceipt', { state, ChatState });
+  assert.equal(rememberReceipt(thread, accepted, requestId, run), true, 'only a verified accepted user receipt seeds the fixture');
   const briefingRangeIssue = production('briefingRangeIssue', { InputContext });
-  const resolve = production('briefingResolvedTargets', { document, BriefingState, InputContext, briefingRangeIssue, persistentEntityGeometry: geometry });
+  const getCodexThreadById = production('getCodexThreadById');
+  const cloneJson = value => value == null ? value : JSON.parse(JSON.stringify(value));
+  const guardNames = ['acceptedInputReceipt', 'visibleInputAnswer', 'historyReadReferenceCurrent', 'briefingInputReferences',
+    'briefingReadReferenceCurrent', 'rememberBriefingMinimapEvidence', 'briefingResolvedTargets'];
+  const guardDeps = { state, document, BriefingState, InputContext, ChatState, briefingRangeIssue,
+    persistentEntityGeometry: geometry, getCodexThreadById, cloneJson };
+  const guards = compileFunction(`${guardNames.map(functionSource).join('\n')}\nreturn { ${guardNames.join(', ')} };`,
+    Object.keys(guardDeps))(...Object.values(guardDeps));
+  const resolve = guards.briefingResolvedTargets;
   const briefingResolvedTargets = (...args) => {
     if (failResolution === true || failResolution === args[1]?.id) throw new Error('synthetic resolution failure');
     return resolve(...args);
   };
-  const deps = { document, window, state, el, SurfaceState, BriefingState, InputContext, ChatState,
-    getCodexThreadById: production('getCodexThreadById'), briefingRangeIssue, briefingResolvedTargets,
+  const deps = { document, window, state, el, SurfaceState, BriefingState, InputContext, ChatState, ...guards,
+    getCodexThreadById, briefingRangeIssue, briefingResolvedTargets,
     ZOOM_MIN: .01, ZOOM_MAX: 4, CHAT_ZOOM_GAP: 10, MutationObserver, Node: { ELEMENT_NODE: 1 },
     parsePxNumber: (value, fallback = 0) => Number.parseFloat(value) || fallback,
     safeViewportRect: production('safeViewportRect', { window, document }),
@@ -193,7 +221,7 @@ function briefingSemanticHarness({ width = 720, height = 600, zoom = .0467171717
       else panel.appendChild(el('textarea', { data: { testid: 'briefing-comment' } }));
       return { dispose() { comments.disposals++; editor?.dispose(); }, notify() { comments.notifications++; editor?.notify(); } };
     },
-    briefingInputReferences: () => references, chatBindingNonce: () => `presentation-${++nonce}`, boardNotice: () => {},
+    chatBindingNonce: () => `presentation-${++nonce}`, boardNotice: () => {},
   };
   const code = ['installSemanticOutlineDrag', 'installSemanticZoom', 'renderAnswerBriefing', 'closeAnswerBriefing', 'openAnswerBriefing'].map(functionSource);
   assert.ok(code.every(Boolean));
@@ -201,7 +229,30 @@ function briefingSemanticHarness({ width = 720, height = 600, zoom = .0467171717
     Object.keys(deps))(...Object.values(deps));
   actualFit = production('fitBriefingTargets', { ...deps, briefingFitCamera: production('briefingFitCamera', deps) });
   const semantic = api.installSemanticZoom(viewport, layer);
+  const listeners = new Set(), epochScope = ChatState.createChatEpochScope();
+  const scopeStart = overlay.indexOf('      createBriefingPreparationScope(');
+  const scopeEnd = overlay.indexOf('\n      },', scopeStart);
+  assert.ok(scopeStart >= 0 && scopeEnd > scopeStart, 'production preparation scope exists');
+  const createBriefingPreparationScope = compileFunction(`return { ${overlay.slice(scopeStart, scopeEnd + 8)}\n };`,
+    ['state', 'ChatState', 'getCodexThreadById', 'epochScope'])(state, ChatState, getCodexThreadById, epochScope).createBriefingPreparationScope;
+  // Only the source transport is synthetic. A fixture read must still match
+  // the captured source and the real room/receipt/presentation guards before
+  // the real production function records a per-presentation verified card.
+  const verifySyntheticRead = (card, reference = card?._inputReference) => {
+    const shown = state.codex.briefingSession;
+    if (!card?._inputEvidenceLoaded || !shown?.preparationScope?.current()
+        || !guards.briefingReadReferenceCurrent(shown.threadId, reference, shown.preparationScope)) return false;
+    const stored = captures.find(({ capture }) => capture.sourceId === reference.sourceId && capture.hash === reference.hash);
+    if (!stored || stored.capture.snapshotId !== reference.snapshotId || stored.capture.clientThreadId !== reference.clientThreadId
+        || stored.capture.engine.engineId !== reference.engine?.engineId || stored.capture.engine.engineProfileId !== reference.engine?.engineProfileId
+        || !stored.bindings.some(binding => binding.bindingId && ['conversationId', 'runId', 'answerId'].every(key => binding[key] === shown.identity[key]))) return false;
+    try {
+      if (InputContext.inputEvidenceKey(card._inputReference) !== InputContext.inputEvidenceKey(reference)) return false;
+      return guards.rememberBriefingMinimapEvidence(shown, reference, card, true);
+    } catch { return false; }
+  };
   state.codexBridge = {
+    subscribe: listener => { listeners.add(listener); listener(state.codex); return () => listeners.delete(listener); },
     createBriefingComments: (_session, paint) => {
       const view = { phase: 'editing', message: '', text: '', originalText: null, canRetry: false,
         pending: false, unconfirmed: false, listState: 'ready', comments: [] };
@@ -209,15 +260,30 @@ function briefingSemanticHarness({ width = 720, height = 600, zoom = .0467171717
         notify: () => paint(view), refresh: () => paint(view), submit: () => assert.fail('folding cannot submit a comment'),
         captureClosingText: text => { comments.closedText = text; } };
     },
-    createBriefingPreparationScope: () => scopeFor(state.codex.briefingSession.presentationId),
+    createBriefingPreparationScope,
     openInputEvidence: (_threadId, reference, options) => {
       if (reference.sourceId === failedPreparation) return Promise.reject(new Error('synthetic preparation failure'));
-      const complete = () => { const card = cards.find(card => card._inputReference.sourceId === reference.sourceId);
-        if (options.isCurrent() && card) card._inputEvidenceLoaded = true; return card; };
+      const complete = () => {
+        const shown = state.codex.briefingSession;
+        if (!options.isCurrent() || shown?.preparationScope !== options.briefingScope
+            || !guards.briefingReadReferenceCurrent(_threadId, reference, options.briefingScope)) return null;
+        const key = InputContext.inputEvidenceKey(reference);
+        const card = document.querySelectorAll('.egd-input-evidence-card').find(item => {
+          try { return InputContext.inputEvidenceKey(item._inputReference) === key; } catch { return false; }
+        });
+        if (!card) return null;
+        card._inputEvidenceLoaded = true;
+        return verifySyntheticRead(card, reference) ? card : null;
+      };
       if (!deferred) return Promise.resolve(complete());
       return new Promise(resolve => pending.push(() => resolve(complete())));
     },
   };
+  state.codex.briefingSession = { ...BriefingState.beginBriefing(briefing, { zoom, pan, activeEntityId: 'existing-selection' }),
+    identity, references: guards.briefingInputReferences(thread, thread.messages[1]), artifacts: [], threadId: thread.id,
+    presentationId: 'initial', interaction: { revision: 0 }, _minimapVerifiedEvidence: new Map() };
+  state.codex.briefingSession.preparationScope = state.codexBridge.createBriefingPreparationScope(thread.id);
+  for (const card of cards) assert.equal(verifySyntheticRead(card), true, 'initial evidence has an exact, scoped synthetic read');
   const render = () => state.renderSemanticProjections();
   const flush = () => { for (const [id, fn] of [...frames]) { frames.delete(id); fn(); } };
   const click = id => { const button = walk(document.documentElement, node => node.dataset.testid === id)[0]; assert.ok(button, id); button.fire('click'); flush(); };
@@ -238,9 +304,14 @@ function briefingSemanticHarness({ width = 720, height = 600, zoom = .0467171717
   };
   const notifyResize = node => { for (const observer of [...resizeObservers]) if (observer.nodes.has(node)) observer.callback([{ target: node }]); };
   return { state, cards, chat, semantic, focus, fits, pending, frames, render, flush, click, proxies, geometry, createCard, el, document, viewport, mutation, comments, windowListeners, resize, applyCamera, notifyResize, resizeObservers,
+    verifySyntheticRead, guards, fixtureCaptures: captures, emit: () => [...listeners].forEach(listener => listener(state.codex)),
     useActualFit: () => { useActualFit = true; },
     mount: () => api.renderAnswerBriefing(), close: (options = { restore: false }) => api.closeAnswerBriefing(options),
-    open: (nextBriefing, options = {}) => api.openAnswerBriefing({ id: 'room-a' }, { ...identity, briefing: nextBriefing || briefing }, options), briefing,
+    open: (nextBriefing, options = {}) => {
+      const current = getCodexThreadById(state.codex, 'room-a'), answer = current.messages.find(row => row.role === 'assistant' && row.answerId === identity.answerId);
+      answer.briefing = nextBriefing || briefing;
+      return api.openAnswerBriefing(current, answer, options);
+    }, briefing,
     failResolution: value => { failResolution = value; }, failPreparation: value => { failedPreparation = value; },
     defer: value => { deferred = value; } };
 }
@@ -248,22 +319,7 @@ function briefingSemanticHarness({ width = 720, height = 600, zoom = .0467171717
 // Only the receiving Chat and a document event adapter are fixtures here.
 // Open/step/Exit/ESC/close and their async preparation are production code.
 function briefingReturnFocusHarness() {
-  const h = briefingSemanticHarness(), document = h.document, handlers = new Map(), scopes = new Set(); h.close();
-  const auth = { isLoggedIn: true, accountEmail: 'focus-owner@example.test', authMode: 'chatgpt', identityStatus: 'known' };
-  h.state.codex.authStatus = auth; h.state.codex.codexAccountKey = ChatState.codexAccountKey(auth);
-  h.state.codex.threads = [{ id: 'room-a', engineId: 'codex', engineProfileId: 'fixture-codex', conversationId: 'conversation-a',
-    clientBindingId: 'fixture-binding', bindingState: 'verified', bindingAccountKey: h.state.codex.codexAccountKey }];
-  const binding = () => JSON.stringify([h.state.codex.activeThreadId, ChatState.codexAccountKey(h.state.codex.authStatus),
-    h.state.codex.codexAccountKey, h.state.codex.threads[0].engineProfileId, h.state.codex.threads[0].conversationId]);
-  h.state.codexBridge.createBriefingPreparationScope = (_threadId, onInvalid) => {
-    const original = binding(); let disposed = false, invalid = false;
-    const current = () => {
-      if (disposed || invalid) return false;
-      if (original === binding()) return true;
-      invalid = true; onInvalid?.(); return false;
-    };
-    scopes.add(current); return { current, dispose() { disposed = true; scopes.delete(current); } };
-  };
+  const h = briefingSemanticHarness(), document = h.document, handlers = new Map(); h.close();
   document.addEventListener = (type, fn) => { if (!handlers.has(type)) handlers.set(type, new Set()); handlers.get(type).add(fn); };
   document.removeEventListener = (type, fn) => handlers.get(type)?.delete(fn);
   document.body = h.el('body'); document.documentElement.appendChild(document.body);
@@ -274,7 +330,7 @@ function briefingReturnFocusHarness() {
     return node;
   };
   const surface = h.el('section', { class: 'egd-chat-card', 'aria-label': '원래 대화' });
-  const opener = h.el('button', { data: { testid: 'briefing-open', answerId: 'answer-a' } }, '브리핑 보기');
+  const opener = h.el('button', { data: { testid: 'briefing-open', answerId: h.briefing.answerId } }, '브리핑 보기');
   const composer = h.el('textarea', { class: 'egd-codex-input', data: { testid: 'chat-composer', threadId: 'room-a' } });
   surface.append(opener, composer); document.body.appendChild(surface);
   const key = (target, key = 'Escape', extra = {}) => {
@@ -283,10 +339,58 @@ function briefingReturnFocusHarness() {
     for (const fn of [...(handlers.get('keydown') || [])]) fn(event);
     return event;
   };
-  return { ...h, surface, opener, composer, key, handlers, emit: () => [...scopes].forEach(current => current()),
+  return { ...h, surface, opener, composer, key, handlers,
     enter: async (element = opener, options = {}) => { element.focus(); await h.open(undefined, { opener: element, trustedZeroDetail: true, ...options }); h.flush(); },
     exit: () => h.click('briefing-exit') };
 }
+
+test('HUM-BRIEF-002 authority: only the exact accepted receipt, room and current preparation protect an evidence View', async t => {
+  const valid = briefingSemanticHarness(), shown = valid.state.codex.briefingSession, card = valid.cards[0];
+  const receipt = valid.guards.acceptedInputReceipt(valid.state.codex.threads[0], shown.identity);
+  assert.equal(receipt?.localMessageId, 'fixture-user-receipt');
+  assert.equal(Object.hasOwn(card._inputReference.contextScope, 'conversationId'), false, 'the synthetic first-send origin stays unchanged');
+  assert.equal(valid.guards.briefingReadReferenceCurrent('room-a', card._inputReference, shown.preparationScope), true);
+  assert.equal(shown._minimapVerifiedEvidence.get(InputContext.inputEvidenceKey(card._inputReference)), card);
+  valid.render(); assert.equal(valid.proxies()[0].hidden, false);
+
+  for (const mode of ['missing-receipt', 'wrong-user', 'unaccepted', 'account', 'client', 'profile', 'room', 'disconnected', 'permission', 'scope', 'answer', 'hash']) {
+    await t.test(mode, () => {
+      const h = briefingSemanticHarness(), session = h.state.codex.briefingSession, target = h.cards[0];
+      const room = h.state.codex.threads[0], request = h.state.codex.chatProtocol.requests['fixture-first-request'];
+      if (mode === 'missing-receipt') delete request.acceptedInputMessageId;
+      else if (mode === 'wrong-user') room.messages[0].localMessageId = 'different-user';
+      else if (mode === 'unaccepted') request.status = 'unconfirmed';
+      else if (mode === 'account') h.state.codex.authStatus = { ...h.state.codex.authStatus, accountEmail: 'other@example.test' };
+      else if (mode === 'client') room.clientBindingId = 'different-client';
+      else if (mode === 'profile') room.engineProfileId = 'different-profile';
+      else if (mode === 'room') h.state.codex.activeThreadId = 'room-b';
+      else if (mode === 'disconnected') h.state.codex.connected = false;
+      else if (mode === 'permission') h.state.codex.authStatus = { ...h.state.codex.authStatus, access: { state: 'permissionDenied' } };
+      else if (mode === 'scope') session.preparationScope.dispose();
+      else if (mode === 'answer') room.messages[1].answerId = 'different-answer';
+      else if (mode === 'hash') target._inputReference.hash = 'different-hash';
+      assert.equal(h.guards.briefingReadReferenceCurrent('room-a', target._inputReference, session.preparationScope), false, mode);
+      assert.equal(h.verifySyntheticRead(target), false, `${mode}: fixture read cannot reauthorize the target`);
+      h.render(); assert.equal(h.proxies()[0].hidden, true, `${mode}: the View is not protected`);
+    });
+  }
+  await t.test('a 200-like source response without this answer binding does not prove a read', () => {
+    const h = briefingSemanticHarness(), session = h.state.codex.briefingSession, target = h.cards[0];
+    session._minimapVerifiedEvidence.delete(InputContext.inputEvidenceKey(target._inputReference));
+    h.fixtureCaptures[0].bindings.splice(0);
+    assert.equal(h.guards.briefingReadReferenceCurrent('room-a', target._inputReference, session.preparationScope), true,
+      'a valid local receipt does not replace the server binding check');
+    assert.equal(h.verifySyntheticRead(target), false);
+    h.render(); assert.equal(h.proxies()[0].hidden, true);
+  });
+  await t.test('same-key card without a verified read', () => {
+    const h = briefingSemanticHarness(), session = h.state.codex.briefingSession;
+    const imposter = h.createCard('unverified-same-key', 'input-evidence', h.geometry(h.cards[0]));
+    imposter._inputReference = { ...h.cards[0]._inputReference }; imposter._inputEvidenceLoaded = true;
+    assert.equal(h.guards.rememberBriefingMinimapEvidence(session, imposter._inputReference, imposter), false);
+    assert.equal(session._minimapVerifiedEvidence.get(InputContext.inputEvidenceKey(imposter._inputReference)), h.cards[0]);
+  });
+});
 
 test('HUM-BRIEF-002 return: explicit Exit after real step/overview/viewport transitions returns to the first receiving element', async () => {
   const h = briefingReturnFocusHarness(); await h.enter();
@@ -329,7 +433,7 @@ test('HUM-BRIEF-002 return: fallback stays in the original surface and never gue
     const wrong = h.el('button', { data: { testid: 'briefing-open', answerId: 'other-answer' } }, '브리핑 보기'); h.surface.appendChild(wrong);
     let expected = h.composer;
     if (mode === 'replaced-button') {
-      h.opener.remove(); expected = h.el('button', { data: { testid: 'briefing-open', answerId: 'answer-a' } }, '브리핑 보기'); h.surface.appendChild(expected);
+      h.opener.remove(); expected = h.el('button', { data: { testid: 'briefing-open', answerId: h.briefing.answerId } }, '브리핑 보기'); h.surface.appendChild(expected);
     } else if (mode === 'composer') h.opener.remove();
     else if (mode === 'hidden') h.opener.setAttribute('hidden', '');
     else if (mode === 'disabled') h.opener.setAttribute('disabled', '');
@@ -344,7 +448,7 @@ test('HUM-BRIEF-002 return: stale old-step/old-presentation Exit and delayed pre
   const old = h.document.getElementById('egd-answer-briefing').querySelectorAll('button').find(node => node.dataset.testid === 'briefing-exit');
   h.click('briefing-next'); const samePresentation = h.state.codex.briefingSession; old.fire('click');
   assert.equal(h.state.codex.briefingSession, samePresentation);
-  const newOpener = h.el('button', { data: { testid: 'briefing-open', answerId: 'answer-a' } }, '새 진입'); h.surface.appendChild(newOpener);
+  const newOpener = h.el('button', { data: { testid: 'briefing-open', answerId: h.briefing.answerId } }, '새 진입'); h.surface.appendChild(newOpener);
   await h.enter(newOpener); const newer = h.state.codex.briefingSession; old.fire('click'); assert.equal(h.state.codex.briefingSession, newer);
   h.document.getElementById('egd-answer-briefing').querySelector('nav').focus(); h.exit(); assert.equal(h.document.activeElement, newOpener);
   h.defer(true); const opening = h.enter(); await Promise.resolve();
@@ -472,7 +576,9 @@ test('HUM-BRIEF-002: a preparation failure protects only available targets and a
   assert.equal(h.proxies()[0].hidden, true);
   assert.equal(h.proxies().filter(proxy => !proxy.hidden).length, 5);
   assert.ok(h.semantic.snapshot().clusters.some(cluster => cluster.memberIds.includes('evidence-0')));
-  h.cards[0]._inputEvidenceLoaded = true; h.mount();
+  h.cards[0]._inputEvidenceLoaded = true;
+  assert.equal(h.verifySyntheticRead(h.cards[0]), true, 'a current successful read reauthorizes the recovered target');
+  h.mount();
   assert.ok(h.frames.size, 'current preparation/evidence refresh schedules a semantic update');
   h.flush(); assert.equal(h.proxies().filter(proxy => !proxy.hidden).length, 6);
 });
@@ -483,6 +589,8 @@ test('HUM-BRIEF-002 identity: six visible numbers pair actual View IDs with pane
   targets[1] = { ...targets[0], range: { startLine: 5, endLine: 8 } };
   h.cards[0]._inputReference.presentationRange = targets[0].range;
   h.cards[1]._inputReference = { ...h.cards[0]._inputReference, presentationRange: targets[1].range };
+  assert.equal(h.verifySyntheticRead(h.cards[0]), true, 'first requested range is verified');
+  assert.equal(h.verifySyntheticRead(h.cards[1]), true, 'second requested range is verified separately');
   const other = h.createCard('same-name-other-range', 'input-evidence', { x: 352, y: -402, width: 616, height: 458 });
   other._inputReference = { ...h.cards[0]._inputReference, presentationRange: { startLine: 9, endLine: 12 } }; other._inputEvidenceLoaded = true;
   const before = h.cards.map(h.geometry), resources = h.cards.map(card => card.resource);
@@ -530,7 +638,16 @@ test('HUM-BRIEF-002 identity: actual step/overview/exit controls discard old lab
 test('HUM-BRIEF-002 identity: failed/missing/late targets and room loss clear labels, while an active wide Briefing keeps its correspondence', () => {
   const h = briefingSemanticHarness(); h.cards[0]._inputEvidenceLoaded = false; h.mount(); h.render();
   const panel = h.document.getElementById('egd-answer-briefing'), firstName = panel.querySelector('.egd-briefing-evidence-name');
-  assert.equal(firstName.textContent, '같은 제목');
+  const firstRow = panel.querySelector('.egd-briefing-evidence-row');
+  const retry = panel.querySelectorAll('button').find(node => node.dataset.testid === 'briefing-show-evidence');
+  const exposed = node => [node.textContent, JSON.stringify(node.attributes || {}), JSON.stringify(node.dataset || {}),
+    ...(node.children || []).flatMap(exposed)];
+  assert.equal(firstName.textContent, '근거 1', 'an unverified source must use the non-disclosing fallback');
+  assert.doesNotMatch(exposed(firstRow).join('\n'), /같은 제목/, 'the unavailable row text, attributes and descendants do not disclose the name');
+  assert.ok(retry, 'an unavailable source can still be retried');
+  assert.doesNotMatch(exposed(retry).join('\n'), /같은 제목/, 'the retry text and attributes must also be non-disclosing');
+  assert.equal(panel.querySelectorAll('.egd-briefing-evidence-name')[1].textContent, '2. 같은 제목',
+    'a different verified row with the same original title still keeps its own name');
   assert.equal(h.proxies()[1].querySelector('.egd-semantic-icon').textContent, '2', 'unavailable rows keep their reserved position');
   h.cards[0]._inputEvidenceLoaded = true; h.mount(); h.flush();
   assert.equal(firstName.textContent, '1. 같은 제목');
@@ -549,13 +666,41 @@ test('HUM-BRIEF-002 identity: failed/missing/late targets and room loss clear la
   assert.ok(normal.proxies().every(proxy => !/^\d+$/.test(proxy.querySelector('.egd-semantic-icon').textContent)));
 });
 
+test('HUM-BRIEF-002 identity: a verified retry restores its original name without overriding later focus or camera', async () => {
+  const h = briefingReturnFocusHarness(); await h.enter();
+  const panel = h.document.getElementById('egd-answer-briefing'), session = h.state.codex.briefingSession, card = h.cards[0];
+  const name = panel.querySelector('.egd-briefing-evidence-name'), key = InputContext.inputEvidenceKey(card._inputReference);
+  assert.equal(h.guards.briefingReadReferenceCurrent('room-a', card._inputReference, session.preparationScope), true);
+  assert.equal(session._minimapVerifiedEvidence.get(key), card, 'the original name is backed by the exact successful read');
+  assert.equal(name.textContent, '1. 같은 제목');
+
+  card._inputEvidenceLoaded = false; session._minimapVerifiedEvidence.delete(key); h.mount(); h.flush();
+  assert.equal(name.textContent, '근거 1');
+  const retry = panel.querySelectorAll('button').find(node => node.dataset.testid === 'briefing-show-evidence');
+  assert.ok(retry); h.defer(true);
+  const beforeFits = h.fits.length, beforeCamera = { zoom: h.state.zoom, zoomTarget: h.state.zoomTarget,
+    pan: { ...h.state.pan }, panTarget: { ...h.state.panTarget } };
+  retry.fire('click'); assert.equal(h.pending.length, 1, 'the explicit retry requests the source again');
+  const editor = h.el('textarea'); h.document.body.appendChild(editor); editor.value = '보존'; editor.focus();
+  h.pending[0](); await new Promise(resolve => setImmediate(resolve)); h.flush(); h.render();
+
+  assert.equal(session._minimapVerifiedEvidence.get(key), card, 'the successful retry passes the same scoped read guard');
+  assert.equal(name.textContent, '1. 같은 제목', 'a verified source keeps its original name');
+  assert.equal(h.document.activeElement, editor); assert.equal(editor.value, '보존');
+  assert.equal(h.fits.length, beforeFits, 'a late retry cannot refit after the user changes focus');
+  assert.deepEqual({ zoom: h.state.zoom, zoomTarget: h.state.zoomTarget, pan: h.state.pan, panTarget: h.state.panTarget }, beforeCamera);
+  assert.equal(panel.querySelectorAll('button').some(node => node.dataset.testid === 'briefing-show-evidence'), false);
+});
+
 test('HUM-BRIEF-002 identity: a newly available live View rebinds its row on semantic refresh without relying on cached IDs', () => {
   const h = briefingSemanticHarness(); h.mount(); h.render();
   const row = h.document.getElementById('egd-answer-briefing').querySelector('.egd-briefing-evidence-row');
   const original = h.cards[0], card = h.createCard('reopened-evidence-0', 'input-evidence', h.geometry(original));
   original.remove(); card._inputReference = { ...original._inputReference }; card._inputEvidenceLoaded = false;
   h.render(); assert.equal(row.querySelector('.egd-briefing-evidence-name').textContent, '같은 제목');
-  card._inputEvidenceLoaded = true; h.render();
+  card._inputEvidenceLoaded = true;
+  assert.equal(h.verifySyntheticRead(card), true, 'the reopened View requires its own current successful read');
+  h.render();
   assert.equal(card.querySelector('.egd-semantic-proxy').querySelector('.egd-semantic-icon').textContent, '1');
   assert.equal(row.querySelector('.egd-briefing-evidence-name').textContent, '1. 같은 제목');
   assert.equal(row.getAttribute('aria-label').split(' · ').slice(0, 3).join(' · '), '근거 1 · 같은 제목 · 범위 미지정');

@@ -741,14 +741,16 @@ test('Briefing scroll containment leaves wide placement and the compact layout u
 // Run the production composer handlers and bridge send together. The DOM,
 // project preparation and transport boundaries below are local fixtures; the
 // transport records the request and returns a synthetic acceptance only.
-function chatComposerFixture({ reply } = {}) {
+function chatComposerFixture({ reply, inputSources = [], captureInputs = null } = {}) {
   const target = { boardId: 'fixture-board', projectId: 'fixture-project', rootId: 'fixture-root' };
   const activeThread = { id: 'room-a', clientBindingId: 'wire-a', title: '합성 방', engineId: 'codex',
-    messages: [], inputSources: [], briefingInputs: [], requestProjectTarget: target };
+    messages: [], inputSources: structuredClone(inputSources), briefingInputs: [], requestProjectTarget: target };
   const state = { codex: { activeThreadId: activeThread.id, activityRoomGeneration: 7, threads: [activeThread],
     threadDrafts: { 'room-a': '합성 질문' }, threadDraftRevisions: { 'room-a': 1 },
     authStatus: { isLoggedIn: true, authMode: 'chatgpt', accountEmail: 'fixture@example.test', identityStatus: 'known' }, connected: true, liveRevision: 0 } };
-  const protocol = ChatState.createChatProtocolState(), reservations = new Map(), requests = [], owners = [], notices = [];
+  const protocol = ChatState.createChatProtocolState(), reservations = new Map(), requests = [], owners = [], notices = [], listeners = new Set();
+  state.codex.chatProtocol = protocol;
+  state.codex.codexAccountKey = ChatState.codexAccountKey(state.codex.authStatus);
   const thread = id => state.codex.threads.find(item => item.id === id) || null;
   const updateThreadById = (id, update) => { state.codex.threads = state.codex.threads.map(item => item.id === id ? update(item) : item); };
   const draft = (codex, id) => codex.threadDrafts[id] || '';
@@ -756,8 +758,12 @@ function chatComposerFixture({ reply } = {}) {
     getActiveCodexThread: codex => thread(codex.activeThreadId), getCodexThreadById: (_codex, id) => thread(id), getCodexThreadDraft: draft,
     clearMemoManualSendNotice: () => false, showMemoManualSendNotice: item => notices.push(item.id),
     threadBusy: () => false, chatRoomProjectSendBlock: () => null, chatRequestProjectDisplays: new Map(),
-    epochScope: ChatState.createChatEpochScope(), ensureNativeReadyForSend: async () => true, updateThreadById, emit() {},
-    captureThreadInputs: async (_thread, inputs) => { assert.deepEqual(inputs, []); return []; },
+    epochScope: ChatState.createChatEpochScope(), ensureNativeReadyForSend: async () => true, updateThreadById,
+    emit() { for (const listener of [...listeners]) listener(state.codex); },
+    captureThreadInputs: async (_thread, inputs) => {
+      if (captureInputs) return captureInputs(inputs);
+      assert.deepEqual(inputs, []); return [];
+    },
     codexThreadAgentProfile: () => null, SELF_MEMBER: 'self',
     createCodexMessage: (role, content, status, options) => ({ role, content, status, ...options }),
     appendMessageToThread: (id, message) => updateThreadById(id, item => ({ ...item, messages: [...item.messages, message] })),
@@ -771,6 +777,15 @@ function chatComposerFixture({ reply } = {}) {
     },
     syncProtocolRun() {},
   };
+  const receiptNames = ['createAcceptedReceiptWatch', 'rememberAcceptedInputReceipt'];
+  const receiptSources = receiptNames.map(name => {
+    const start = surfaceScript.indexOf(`  function ${name}(`);
+    const end = surfaceScript.indexOf('\n  }', start);
+    assert.ok(start >= 0 && end > start, `production ${name}`);
+    return surfaceScript.slice(start, end + 4);
+  });
+  Object.assign(deps, compileFunction(`${receiptSources.join('\n')}\nreturn { ${receiptNames.join(', ')} };`,
+    ['state', 'ChatState', 'getCodexThreadById'])(state, ChatState, deps.getCodexThreadById));
   const watchStart = surfaceScript.indexOf('    const memoReadWatches = new Map();');
   const watchEnd = surfaceScript.indexOf('    const confirmedLegacyImports', watchStart);
   assert.ok(watchStart >= 0 && watchEnd > watchStart, 'production room identity watches');
@@ -789,7 +804,8 @@ function chatComposerFixture({ reply } = {}) {
     Object.keys(deps))(...Object.values(deps)).sendMessage;
   let pending = null;
   const codexBridge = {
-    sendMessage(options) { owners.push(options.manualOwner); pending = send(options); return pending; },
+    sendMessage(options) { owners.push(options.manualOwner); pending = send.call(this, options); return pending; },
+    subscribe(listener) { listeners.add(listener); listener(state.codex); return () => listeners.delete(listener); },
     captureManualSendOwner: captureOwner,
     setDraft(value, id) { state.codex.threadDrafts[id] = value; },
   };
@@ -852,6 +868,35 @@ test('the actual composer button and keyboard handlers dispatch once with their 
     assert.equal(h.protocol.requests[result.requestId].status, 'accepted');
     assert.equal(h.state.codex.threads[0].messages.length, 1);
   });
+});
+
+test('ordinary composer: acceptance does not clear a newer draft or manual selection', async () => {
+  const original = { id: 'synthetic-input-a', kind: 'board-element', sourceRef: { viewId: 'synthetic-view-a' } };
+  const newer = { id: 'synthetic-input-b', kind: 'board-element', sourceRef: { viewId: 'synthetic-view-b' } };
+  let release;
+  const pendingReply = new Promise(resolve => { release = resolve; });
+  const response = { accepted: true, conversationId: 'fixture-conversation', runId: 'fixture-run' };
+  const h = chatComposerFixture({ inputSources: [original], captureInputs: inputs => {
+    assert.deepEqual(inputs, [original]);
+    const scope = ChatState.chatContextRequestScope(h.state.codex.threads[0], h.state.codex);
+    return [InputContext.capturedInputReference(original, { id: original.id, sourceId: 'synthetic-snapshot-a',
+      snapshotId: 'synthetic-snapshot-a', hash: 'synthetic-hash-a', sourceRef: original.sourceRef,
+      clientThreadId: scope.clientThreadId, engine: { engineId: scope.engineId, engineProfileId: scope.engineProfileId } }, scope)];
+  }, reply: () => pendingReply });
+  h.sendButton.props.onclick();
+  try {
+    for (let count = 0; count < 50 && !h.requests.length; count++) await new Promise(resolve => setImmediate(resolve));
+    assert.equal(h.requests.length, 1); assert.deepEqual(h.requests[0].contextSnapshotIds, ['synthetic-snapshot-a']);
+    h.state.codex.threadDrafts['room-a'] = '새 초안 B'; h.state.codex.threadDraftRevisions['room-a']++;
+    h.state.codex.threads[0].inputSources = [newer];
+    release(response);
+    const result = await h.pending();
+    assert.equal(result.accepted, true); assert.equal(h.requests.length, 1);
+    assert.equal(h.state.codex.threadDrafts['room-a'], '새 초안 B');
+    assert.deepEqual(h.state.codex.threads[0].inputSources, [newer]);
+    assert.deepEqual(h.state.codex.threads[0].briefingInputs, []);
+    assert.equal(h.protocol.requests[result.requestId].acceptedInputMessageId, undefined, 'acceptance is not invented receipt proof');
+  } finally { release(response); h.manualOwner.release(); }
 });
 
 test('composer does not dispatch for newline, modified shortcuts or IME composition', async () => {

@@ -1313,7 +1313,9 @@ export function projectRunMessages(existing, run, now = Date.now()) {
     && message.runId === run.runId && message.conversationId === run.conversationId);
   const messages = existing.map(message => run.requestId && message.requestId === run.requestId && message.role === 'user'
     ? { ...message, status: 'complete', conversationId: run.conversationId, runId: run.runId, answerId: run.answerId,
-      ...(run.localMessageId && !message.localMessageId ? { localMessageId: run.localMessageId } : {}) }
+      // run.localMessageId may belong to a later assistant message event.
+      // Only the separately checked live acceptance can name this user row.
+      ...(run.acceptedInputMessageId && !message.localMessageId ? { localMessageId: run.acceptedInputMessageId } : {}) }
     : { ...message });
   const ordinal = { user: 0, assistant: 0 };
   for (const incoming of run.messages || []) {
@@ -1330,6 +1332,7 @@ export function projectRunMessages(existing, run, now = Date.now()) {
     const previous = index >= 0 ? messages[index] : null;
     const projected = {
       ...previous, ...incoming, role, id: previous?.id || incoming.id,
+      ...(role === 'user' && previous?.localMessageId ? { localMessageId: previous.localMessageId } : {}),
       providerItemId: incoming.id, content: incoming.content ?? incoming.text ?? '',
       authorName: role === 'assistant' ? previous?.authorName || run.authorName || 'Codex' : previous?.authorName,
       ...(role === 'assistant' ? { authorAvatar: displayProfileAvatar(previous?.authorAvatar || run.authorAvatar) } : {}),

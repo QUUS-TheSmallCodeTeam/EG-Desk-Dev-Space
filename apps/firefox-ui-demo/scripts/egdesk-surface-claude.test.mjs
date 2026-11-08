@@ -68,6 +68,8 @@ function productionController(name, ...args) {
 // Instantiate its real map, constants and normalizer for each isolated surface.
 const requestProjectDraftSource = between('  const chatRequestProjectDisplays = ', '  function chatRequestProjectSelection(');
 const bridgeNormalizeSource = between('    const normalizeThreads = () => {', '    const emit = () => {');
+const bridgeWatchSource = between('    const memoReadWatches = new Map();', '    const confirmedLegacyImports = new Set();');
+const bridgeNoticeSource = between('    const clearMemoManualSendNotice = ', '    connect();');
 // Keep the production subscription/notification closure, without installing
 // Firefox rendering or persistence. emit's listener loop is not a copied bus.
 const bridgeNotifySource = between('      for (const listener of listeners) {', '      renderCodexActivityPanel();',
@@ -167,7 +169,9 @@ function surface({ run = null, thread = {}, auth = {}, fetchJson = async () => (
   const definitions = ['el', 'getCodexThreadById', 'getActiveCodexThread', 'getCodexThreadDraft', 'createCodexMessage',
     'uniqueNames', 'normalizeHudView', 'normalizeCodexAgentProfileId', 'codexServerAgentProfile', 'codexAgentProfile',
     'buildThreadSubtitle', 'createCodexThread', 'defaultCodexThreads',
-    'chatRequestProjectSelection', 'chatRoomProjectState', 'chatRoomProjectSendBlock',
+    'chatRequestProjectSelection', 'chatRoomProjectState', 'chatRoomProjectSendBlock', 'memoAskRuntimeIdentity',
+    'createAcceptedReceiptWatch', 'rememberAcceptedInputReceipt', 'acceptedInputReceipt', 'visibleInputAnswer',
+    'briefingInputReferences', 'historyReadReferenceCurrent', 'inputDeliveryProof',
     'createChatProjectScope', 'normalizeChatRoomProjectDefault', 'snapshotChatRoomProjectExpectation', 'chatRoomProjectExpectation', 'chatRoomProjectTargetsMatch',
     'codexRuns', 'codexRunLabel', 'codexUserInputBlock', 'pruneUserInputDrafts', 'contextResolverRecordSection',
     'codexSubAgentSection', 'codexActivityDetailTarget', 'codexCommandInfo', 'createCodexActivityReadScope',
@@ -184,13 +188,17 @@ function surface({ run = null, thread = {}, auth = {}, fetchJson = async () => (
     ${nativeReady ? functionSource('ensureNativeReadyForSend', '    ') : ''}
     let activityPanelComposing = false, activityPanelDeferred = false, activityDetailsGeneration = 0, activityDetailsView = null;
     const listeners = new Set();
+    ${bridgeWatchSource}
     ${bridgeNormalizeSource}
-    const emit = () => { effects.emits++; ${bridgeNotifySource} };
+    const emit = () => { effects.emits++; for (const watch of memoReadWatches.values()) observeMemoReadWatch(watch); ${bridgeNotifySource} };
+    ${bridgeNoticeSource}
     ${source.match(/^  const userInputDraftKey = .*;$/m)[0]}
-    const bridge = { ${['subscribe', 'createActivityReadScope', 'createProjectScope', 'readRoomProjectDefault', 'prepareRoomProjectSend', 'replyApproval', 'replyUserInput', 'sendMessage', 'captureInputs', 'readInput', 'setThreadEngine', 'interrupt'].map(methodSource).join(',\n')} };
+    const bridge = { ${['subscribe', 'captureManualSendOwner', 'createActivityReadScope', 'createProjectScope', 'readRoomProjectDefault', 'prepareRoomProjectSend', 'prepareBriefingInputSend', 'replyApproval', 'replyUserInput', 'sendMessage', 'captureInputs', 'readInput', 'setThreadEngine', 'interrupt'].map(methodSource).join(',\n')} };
     return { ...bridge, render: renderCodexActivityPanel, question: codexUserInputBlock, serialize: serializeDeskSnapshot,
       refresh: refreshConversation, workingRow: codexAgentWorkingRow, projectBlock: chatRoomProjectSendBlock,
-      notify: emit, listenerCount: () => listeners.size, el };`, globals);
+      notify: emit, listenerCount: () => listeners.size, el,
+      visibleAnswer: visibleInputAnswer, deliveryProof: inputDeliveryProof,
+      historyCurrent: historyReadReferenceCurrent, inputReceipt: acceptedInputReceipt };`, globals);
   state.codexBridge = { ...api, refreshConversation: () => {} };
   return { ...api, state, protocol, effects, epochScope, drafts: userInputDrafts, document, root,
     thread: () => state.codex.threads[0], panel: () => document.getElementById('egd-codex-activity-panel') };
@@ -198,12 +206,12 @@ function surface({ run = null, thread = {}, auth = {}, fetchJson = async () => (
 
 function composer(ui) {
   const viewport = ui.composerViewport ||= productionController('createChatComposerViewport');
-  const block = between("            const input = el('textarea', {", "            input.addEventListener('input'");
+  const block = between('            const manualOwner = ', "            input.addEventListener('input'");
   // Keep the real icon helper, its SVG builder and source shapes in the same
   // VM scope as the extracted production composer, just as in the app.
   const icons = `${functionSource('svgEl')}\n${between('  const DESK_ICON_SHAPES = {', '  function normalizeSourcePart(')}`;
   const controls = compile(`${functionSource('getCodexThreadDraft')}\n${icons}\n${block}\nreturn {input, sendButton, resizeComposer};`, {
-    document: ui.document, el: ui.el, ChatState, activeThread: ui.thread(), codex: ui.state.codex, codexBridge: ui,
+    document: ui.document, body: {}, el: ui.el, ChatState, activeThread: ui.thread(), codex: ui.state.codex, codexBridge: ui,
     chatRoomProjectSendBlock: ui.projectBlock, composerViewport: viewport.instance,
     compositionInProgress: false,
   });
@@ -959,7 +967,7 @@ test('unbound Claude chat rejects A capture intent under B before delayed SSE, u
 // Synthetic capacity evidence exercises the positive contract, not the installed
 // Claude provider's readiness. Actual authority, planning, storage, HTTP and UI
 // functions run; a Reader or live native process must never run during preflight.
-async function contextSurface(t,{contents=['complete small source'],capacityKnown=true,readerReady=true,beforeSend}={}){
+async function contextSurface(t,{contents=['complete small source'],capacityKnown=true,readerReady=true,beforeSend,allowDelivery=false}={}){
   const dir=mkdtempSync(join(tmpdir(),'egdesk-ui-reader-'));
   t.after(()=>rmSync(dir,{recursive:true,force:true}));
   const store=new ImmutableContextStore({dataDir:dir,allowedRoots:[dir]});
@@ -988,7 +996,7 @@ async function contextSurface(t,{contents=['complete small source'],capacityKnow
   });
   const actualRead=contexts.smartRead.read.bind(contexts.smartRead);
   contexts.smartRead.read=async options=>{
-    assert.equal(options.prepareOnly,true,'this UI admission test never executes a Reader');
+    assert.ok(options.prepareOnly || allowDelivery,'this UI admission test never executes a Reader');
     const result=await actualRead(options);
     plans.push(result.plan||{mode:result.packet.mode});return result;
   };
@@ -1017,6 +1025,41 @@ async function contextSurface(t,{contents=['complete small source'],capacityKnow
   ui.state.codex.connected=false;ui.state.codex.engines[0].status='offline';
   return{ui,h,contexts,store,plans,replies,selected};
 }
+
+test('Claude delivered packet with a real local receipt remains visible only for its own source', async t => {
+  const {ui,h,contexts,store,replies,selected}=await contextSurface(t,{contents:['SYNTHETIC_SOURCE'],capacityKnown:true,allowDelivery:true});
+  await ui.sendMessage();
+  const capture=replies.find(row=>row.path==='/context/captures').body.captures[0];
+  const run=[...h.chat.runs.values()][0];
+  assert.ok(run && capture.sourceId);
+  const request={subtype:'mcp_message',server_name:'egdesk',message:{jsonrpc:'2.0',id:1,method:'tools/call',
+    params:{name:'egdesk_read_source',arguments:{snapshotId:capture.sourceId,intent:'Read the selected immutable source'}}}};
+  h.transports[0].options.controlHandlers.mcp_message(request,{requestId:'proof-read'});
+  await h.drain(); await Promise.all([...contexts.calls.values()]); await h.drain();
+  const packet=run.context.packets[0];
+  assert.ok(packet?.receiptId,`the real local context runtime issued a delivery receipt: ${JSON.stringify({replies:h.transports[0].replies,events:h.events.filter(e=>e.event?.startsWith('context.read'))})}`);
+  const authority=h.chat.contextAuthority({engineId:'claude',engineProfileId:'claude-default',clientThreadId:'ui'});
+  const receipt=await store.getRecord(contexts.owner(authority),'deliveries',packet.receiptId);
+  assert.equal(receipt.deliveryStatus,'sent-to-app-server');
+  assert.equal(receipt.packetId,packet.packetId);
+  assert.deepEqual([receipt.binding.conversationId,receipt.binding.runId,receipt.binding.answerId],
+    [run.conversationId,run.runId,run.answerId]);
+  const origin={engineId:'claude',engineProfileId:'claude-default',clientThreadId:'ui'};
+  const reference=InputContext.capturedInputReference(selected[0],capture,origin);
+  const thread=ui.thread(); thread.conversationId=run.conversationId; thread.engineProfileId='claude-default';
+  const identity={conversationId:run.conversationId,runId:run.runId,answerId:run.answerId};
+  const answer={role:'assistant',...identity,contextCaptures:[reference],contextPackets:[packet]};
+  thread.messages.push(answer);
+  const displayed=ui.protocol.runs[ChatState.runKey(run.conversationId,run.runId)];
+  assert.ok(displayed); Object.assign(displayed,identity,{engineId:'claude',contextCaptures:[reference],contextPackets:[packet]});
+  assert.equal(ui.visibleAnswer(thread,reference,identity),answer);
+  assert.equal(ui.deliveryProof('ui',reference,identity,null,packet.packetId)?.receiptId,packet.receiptId);
+  assert.equal(ui.deliveryProof('ui',{...reference,sourceId:'other-source'},identity,null,packet.packetId),null,
+    'a receipt for another source never authorizes this packet');
+  ui.state.codex.activityThreadId='ui'; ui.render();
+  assert.equal(nodes(ui.panel(),'chat-delivered-input-open').length,1,
+    'a same-run server-issued Claude delivery remains discoverable without a Codex login');
+});
 
 test('real Context capability and pure planning admit direct, large and aggregate UI selections without preflight Reader execution',async t=>{
   for(const [name,contents,capacityKnown,expectedMode] of [
