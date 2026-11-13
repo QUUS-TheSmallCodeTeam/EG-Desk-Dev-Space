@@ -11288,10 +11288,10 @@ test('production Board [⋯] menu offers save, Chat attach and close for that Bo
   const placements = [];
   let portableReady = false;
   const api = compileFunction(`let boardRegionMenu = null;\n${close}\n${toggle}\nreturn { toggleBoardRegionMenu, closeBoardRegionMenu, current: () => boardRegionMenu };`,
-    ['state', 'document', 'window', 'el', 'resolveFloatingMenuPlacement', 'saveCurrentAgendaState', 'openChatInputPanel', 'closeCurrentAgenda', 'boardVersionHistoryReady', 'openBoardHistoryPanel',
+    ['state', 'document', 'window', 'el', 'resolveFloatingMenuPlacement', 'saveBoardWithNotice', 'openBoardSaveAs', 'openChatInputPanel', 'closeCurrentAgenda', 'boardVersionHistoryReady', 'openBoardHistoryPanel',
       'portableExportReady', 'openPortableExport', 'openBoardCanvasExport', 'boardProjectMenuItems'])(
     state, dom.document, window, dom.el, (rect, width, height) => { placements.push([width, height]); return { left: 300.4, top: 120.6 }; },
-    options => actions.push(['save', options]), (threadId, options) => actions.push(['attach', threadId, options]),
+    options => actions.push(['save', options]), projectionId => actions.push(['save-as', projectionId]), (threadId, options) => actions.push(['attach', threadId, options]),
     options => actions.push(['close', options]), () => storeReady, boardId => actions.push(['history', boardId]),
     () => portableReady, options => actions.push(['export', options]), projectionId => actions.push(['canvas', projectionId]), () => []);
   const anchor = dom.el('button', { data: { testid: 'board-menu' } });
@@ -11302,6 +11302,7 @@ test('production Board [⋯] menu offers save, Chat attach and close for that Bo
   assert.deepEqual(menu.style, { left: '300px', top: '121px' });
   assert.deepEqual(menu.children.map(item => [item.textContent, item.dataset.testid, item.dataset.projectionId, item.getAttribute('role')]), [
     ['저장', 'board-save', 'egd-board-7', 'menuitem'],
+    ['다른 이름으로 저장…', 'board-save-as', 'egd-board-7', 'menuitem'],
     ['Chat에 첨부', 'board-attach-chat', 'egd-board-7', 'menuitem'],
     ['Board 닫기', 'board-close', 'egd-board-7', 'menuitem'],
   ]);
@@ -11309,7 +11310,7 @@ test('production Board [⋯] menu offers save, Chat attach and close for that Bo
   assert.equal(dom.document.activeElement, menu.children[0], 'keyboard users land on the first action');
   menu.listeners.keydown({ key: 'ArrowDown', preventDefault() {} });
   assert.equal(dom.document.activeElement, menu.children[1]);
-  menu.children[1].onclick({ stopPropagation() {} });
+  menu.children[2].onclick({ stopPropagation() {} });
   assert.deepEqual(actions, [['attach', 'thread-1', { viewIds: ['m-1', 'm-2'] }]]);
   assert.equal(api.current(), null);
   assert.equal(anchor.getAttribute('aria-expanded'), 'false');
@@ -11317,8 +11318,9 @@ test('production Board [⋯] menu offers save, Chat attach and close for that Bo
 
   const again = api.toggleBoardRegionMenu(projection.id, anchor);
   again.children[0].onclick({ stopPropagation() {} });
-  api.toggleBoardRegionMenu(projection.id, anchor).children[2].onclick({ stopPropagation() {} });
-  assert.deepEqual(actions.slice(1), [['save', { projectionId: 'egd-board-7' }], ['close', { projectionId: 'egd-board-7' }]]);
+  api.toggleBoardRegionMenu(projection.id, anchor).children[1].onclick({ stopPropagation() {} });
+  api.toggleBoardRegionMenu(projection.id, anchor).children[3].onclick({ stopPropagation() {} });
+  assert.deepEqual(actions.slice(1), [['save', { projectionId: 'egd-board-7' }], ['save-as', 'egd-board-7'], ['close', { projectionId: 'egd-board-7' }]]);
   api.toggleBoardRegionMenu(projection.id, anchor);
   assert.equal(api.toggleBoardRegionMenu(projection.id, anchor), null, 'pressing [⋯] again closes its menu');
   const escaped = api.toggleBoardRegionMenu(projection.id, anchor);
@@ -11328,17 +11330,17 @@ test('production Board [⋯] menu offers save, Chat attach and close for that Bo
   api.toggleBoardRegionMenu(projection.id, anchor);
   windowListeners.get('mousedown')({ target: { outside: true } });
   assert.equal(api.current(), null, 'a press elsewhere closes the menu');
-  assert.equal(placements[0][1], 112, 'three actions keep the earlier menu height');
+  assert.equal(placements[0][1], 148, 'the menu is placed for four actions');
 
   // CTX-01: with the Desk store ready, '버전 기록' follows '저장' and opens that Board's versions.
   storeReady = true;
   const withHistory = api.toggleBoardRegionMenu(projection.id, anchor);
   assert.deepEqual(withHistory.children.map(item => [item.textContent, item.dataset.testid]), [
-    ['저장', 'board-save'], ['버전 기록', 'board-history'], ['Chat에 첨부', 'board-attach-chat'], ['저장본을 .canvas로 내보내기…', 'board-export-json-canvas'], ['Board 닫기', 'board-close'],
+    ['저장', 'board-save'], ['다른 이름으로 저장…', 'board-save-as'], ['버전 기록', 'board-history'], ['Chat에 첨부', 'board-attach-chat'], ['저장본을 .canvas로 내보내기…', 'board-export-json-canvas'], ['Board 닫기', 'board-close'],
   ]);
-  assert.equal(placements.at(-1)[1], 184, 'the menu is placed for five actions');
+  assert.equal(placements.at(-1)[1], 220, 'the menu is placed for six actions');
   assert.equal(placements.at(-1)[0], 232); assert.equal(withHistory.style.width, '232px', 'the visible saved-copy label has its measured menu width');
-  withHistory.children[1].onclick({ stopPropagation() {} });
+  withHistory.children[2].onclick({ stopPropagation() {} });
   assert.deepEqual(actions.at(-1), ['history', 'agenda-weekly']);
   assert.equal(api.current(), null);
 
@@ -11346,12 +11348,12 @@ test('production Board [⋯] menu offers save, Chat attach and close for that Bo
   portableReady = true;
   const withExport = api.toggleBoardRegionMenu(projection.id, anchor);
   assert.deepEqual(withExport.children.map(item => [item.textContent, item.dataset.testid]), [
-    ['저장', 'board-save'], ['버전 기록', 'board-history'], ['Chat에 첨부', 'board-attach-chat'], ['내보내기…', 'board-export'], ['저장본을 .canvas로 내보내기…', 'board-export-json-canvas'], ['Board 닫기', 'board-close'],
+    ['저장', 'board-save'], ['다른 이름으로 저장…', 'board-save-as'], ['버전 기록', 'board-history'], ['Chat에 첨부', 'board-attach-chat'], ['내보내기…', 'board-export'], ['저장본을 .canvas로 내보내기…', 'board-export-json-canvas'], ['Board 닫기', 'board-close'],
   ]);
-  withExport.children[3].onclick({ stopPropagation() {} });
+  withExport.children[4].onclick({ stopPropagation() {} });
   assert.deepEqual(actions.at(-1), ['export', { scope: 'board', boardId: 'agenda-weekly', boardTitle: '주간 보고' }]);
   assert.equal(api.current(), null);
-  api.toggleBoardRegionMenu(projection.id, anchor).children[4].onclick({ stopPropagation() {} });
+  api.toggleBoardRegionMenu(projection.id, anchor).children[5].onclick({ stopPropagation() {} });
   assert.deepEqual(actions.at(-1), ['canvas', projection.id], 'the saved-copy action captures the clicked projection, not the active Board');
 });
 

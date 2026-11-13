@@ -3166,6 +3166,45 @@
   line-height: 1.45;
 }
 
+/* 다른 이름으로 저장: the new Board's name, typed in the dialog. */
+.egd-agenda-close-field {
+  box-sizing: border-box;
+  width: 100%;
+  min-height: 34px;
+  margin-top: 12px;
+  padding: 0 10px;
+  border: 1px solid var(--egd-outline);
+  border-radius: 8px;
+  background: var(--egd-surface-elevated);
+  color: var(--egd-on-surface);
+  font-family: inherit;
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.egd-agenda-close-field:hover {
+  border-color: var(--egd-primary);
+}
+
+.egd-agenda-close-field:focus-visible {
+  border-color: var(--egd-primary);
+  outline: var(--egd-focus-outline);
+  outline-offset: var(--egd-focus-outline-offset);
+}
+
+.egd-agenda-close-field[aria-invalid="true"] {
+  border-color: var(--egd-danger-ink);
+  background: var(--egd-danger-bg);
+}
+
+.egd-agenda-close-error {
+  color: var(--egd-danger-ink);
+}
+
+.egd-agenda-close-error[hidden] {
+  display: none;
+}
+
 .egd-agenda-close-actions {
   display: flex;
   flex-wrap: wrap;

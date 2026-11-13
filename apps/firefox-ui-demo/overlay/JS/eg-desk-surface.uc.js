@@ -5682,7 +5682,8 @@
       },
     }, label);
     const items = [
-      item('저장', '이 Board 저장', 'board-save', () => saveCurrentAgendaState({ projectionId })),
+      item('저장', '이 Board 저장', 'board-save', () => saveBoardWithNotice({ projectionId })),
+      item('다른 이름으로 저장…', '지금 구성을 새 이름의 Board로 저장', 'board-save-as', () => openBoardSaveAs(projectionId)),
       // CTX-01: only while the bridge's Desk store keeps Board versions.
       boardVersionHistoryReady() ? item('버전 기록', '이 Board의 버전 기록', 'board-history', () => openBoardHistoryPanel(projection.boardId)) : null,
       ...boardProjectMenuItems(projection, item),
@@ -6805,6 +6806,108 @@
     return true;
   }
 
+  // 저장, and one line that says what went in (화면 N개).
+  function saveBoardWithNotice(options = {}) {
+    const snapshot = saveCurrentAgendaState(options);
+    if (snapshot) boardNotice(BoardLifecycle.boardSavedNotice({ title: snapshot.agenda?.title, count: snapshot.cards?.length, shapeCount: snapshot.shapes?.length }));
+    return snapshot;
+  }
+
+  function closeBoardSaveAs({ restoreFocus = true } = {}) {
+    const dialog = document.getElementById('egd-board-save-as');
+    if (!dialog) return;
+    const back = dialog._returnFocus;
+    dialog.remove();
+    if (restoreFocus && back?.isConnected) back.focus?.();
+  }
+
+  // 다른 이름으로 저장: the arrangement on screen becomes a new saved Board (closed, in the
+  // Board list). The open Board, its saved copy and everything on the Desk stay where they are.
+  function commitBoardSaveAs(projectionId, name) {
+    const projection = state.boards.projections[projectionId];
+    const snapshot = projection ? serializeAgendaSnapshot({ projectionId }) : null;
+    if (!snapshot) return { ok: false, message: '저장할 Board를 찾지 못했습니다. Board를 다시 선택해 주세요.' };
+    const result = BoardLifecycle.saveBoardAs(coerceAgendaStore(), {
+      snapshot, newId: newAgendaId(), title: name, sourceId: projection.boardId, now: Date.now(),
+    });
+    if (!result.ok) return result;
+    if (!writeAgendaStoreAndSync(result.store)) return { ok: false, message: 'Board를 저장하지 못했습니다. 잠시 뒤 다시 시도해 주세요.' };
+    // Like 저장: a ready Desk store also keeps the new Board as its first version.
+    void syncBoardToStore(result.id, result.snapshot, result.title);
+    syncViewportAgendaRail();
+    boardNotice(BoardLifecycle.boardSavedAsNotice(result));
+    return result;
+  }
+
+  function openBoardSaveAs(projectionId = state.boards.activeProjectionId) {
+    const projection = state.boards.projections[projectionId];
+    if (!projection) { boardNotice('다른 이름으로 저장할 Board를 먼저 선택해 주세요.'); return null; }
+    closeBoardSaveAs({ restoreFocus: false });
+    const returnFocus = document.activeElement;
+    const prompt = BoardLifecycle.boardSaveAsPrompt({
+      title: projection.title, viewCount: projection.members.length, taken: BoardLifecycle.liveBoardTitles(coerceAgendaStore()),
+    });
+    const error = el('p', { id: 'egd-board-save-as-error', class: 'egd-agenda-close-line egd-agenda-close-error', role: 'alert', hidden: true });
+    const submit = () => {
+      const result = commitBoardSaveAs(projectionId, input.value);
+      if (result.ok) { closeBoardSaveAs(); return; }
+      error.textContent = result.message;
+      error.hidden = false;
+      input.setAttribute('aria-invalid', 'true');
+      input.focus();
+    };
+    const input = el('input', {
+      type: 'text', class: 'egd-agenda-close-field', value: prompt.suggested, maxlength: '80',
+      'aria-label': '새 Board 이름', 'aria-describedby': 'egd-board-save-as-error', title: 'Enter로 저장, Esc로 취소',
+      data: { testid: 'board-save-as-name' },
+      oninput: () => { input.removeAttribute('aria-invalid'); error.hidden = true; },
+      onkeydown: (ev) => {
+        if (ev.key !== 'Enter') return;
+        ev.preventDefault();
+        ev.stopPropagation();
+        submit();
+      },
+    });
+    let pressedOutside = false;
+    const dialog = el('div', {
+      id: 'egd-board-save-as', class: 'egd-agenda-close-guard', role: 'dialog', 'aria-modal': 'true',
+      'aria-labelledby': 'egd-board-save-as-title', 'aria-describedby': 'egd-board-save-as-copy', tabindex: '-1',
+      // Only a press that both starts and ends outside the panel closes it (a text drag does not).
+      onmousedown: (ev) => { pressedOutside = ev.target === dialog; },
+      onclick: (ev) => { if (ev.target === dialog && pressedOutside) closeBoardSaveAs(); },
+      onkeydown: (ev) => {
+        if (ev.key !== 'Escape') return;
+        closeBoardSaveAs();
+        ev.preventDefault();
+        ev.stopPropagation();
+      },
+    },
+      el('div', { class: 'egd-agenda-close-panel' },
+        el('div', { class: 'egd-agenda-close-kicker' }, '다른 이름으로 저장'),
+        el('div', { id: 'egd-board-save-as-title', class: 'egd-agenda-close-title' }, prompt.heading),
+        input,
+        el('div', { id: 'egd-board-save-as-copy', class: 'egd-agenda-close-copy' },
+          ...prompt.lines.map(line => el('p', { class: 'egd-agenda-close-line' }, line)), error),
+        el('div', { class: 'egd-agenda-close-actions' },
+          el('button', {
+            type: 'button', class: 'egd-agenda-close-btn egd-agenda-close-btn-ghost', title: '저장하지 않고 닫습니다 (Esc)',
+            data: { action: 'cancel' },
+            onclick: (ev) => { ev.stopPropagation(); closeBoardSaveAs(); },
+          }, prompt.cancelLabel),
+          el('button', {
+            type: 'button', class: 'egd-agenda-close-btn egd-agenda-close-btn-primary', title: '이 이름의 새 Board로 저장합니다 (Enter)',
+            data: { action: 'confirm' },
+            onclick: (ev) => { ev.stopPropagation(); submit(); },
+          }, prompt.confirmLabel)),
+      ),
+    );
+    dialog._returnFocus = returnFocus;
+    document.documentElement.appendChild(dialog);
+    input.focus();
+    input.select?.();
+    return dialog;
+  }
+
   function duplicateAgenda(agendaId = state.agenda.activeAgendaId, options = {}) {
     const store = coerceAgendaStore();
     const sourceSnapshot = agendaId === state.agenda.activeAgendaId
@@ -7779,7 +7882,7 @@
             data: { testid: 'board-save' },
             onclick: (ev) => {
               ev.stopPropagation();
-              saveCurrentAgendaState();
+              saveBoardWithNotice();
               renderAgendaSwitcherPanel(panel);
             },
           }, '저장'),
@@ -9474,7 +9577,7 @@
         hidden: !state.agenda.dirty,
         onclick: (ev) => {
           ev.stopPropagation();
-          saveCurrentAgendaState();
+          saveBoardWithNotice();
         },
       }, deskIcon('check')),
       el('button', {

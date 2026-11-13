@@ -5,7 +5,7 @@ import * as Lifecycle from '../overlay/resources/EGDeskBoardLifecycle.sys.mjs';
 import {
   isBoardTrashed, trashBoard, restoreBoard, purgeBoard, trashedBoardEntries, liveBoardIds,
   boardDeletePrompt, boardPurgePrompt, boardSavedNotice, boardCloseSummary, boardRenameResult, uniqueBoardTitle,
-  boardTrashedAtLabel, boardRowKeyAction,
+  boardTrashedAtLabel, boardRowKeyAction, boardSaveAsName, boardSaveAsPrompt, boardSavedAsNotice, saveBoardAs, liveBoardTitles,
 } from '../overlay/resources/EGDeskBoardLifecycle.sys.mjs';
 
 const snapshot = (id, title, cards = 0) => ({ agenda: { id, title }, cards: Array.from({ length: cards }, (_, i) => ({ id: `${id}-c${i}` })), shapes: [], savedAt: 100 });
@@ -131,6 +131,58 @@ test('save notice says how many 화면 went in', () => {
   assert.equal(boardSavedNotice({ title: '자료 정리', count: 4 }), "'자료 정리' Board에 화면 4개 저장됨");
   assert.equal(boardSavedNotice({ count: 0 }), '빈 Board로 저장됨');
   assert.equal(boardSavedNotice({ title: '  ', count: 2.4 }), 'Board에 화면 2개 저장됨');
+  assert.equal(boardSavedNotice({ title: '자료 정리', count: 4, shapeCount: 2 }), "'자료 정리' Board에 화면 4개 · 도형 2개 저장됨");
+  assert.equal(boardSavedNotice({ title: '자료 정리', count: 0, shapeCount: 1 }), "'자료 정리' Board에 도형 1개 저장됨");
+  assert.equal(boardSavedAsNotice({ title: '자료 정리 사본', count: 3 }), "'자료 정리 사본' Board로 화면 3개 저장됨 · Board 목록에서 열 수 있습니다.");
+  assert.equal(boardSavedAsNotice({ title: '빈 것', count: 0 }), "'빈 것' Board로 저장됨(화면 없음) · Board 목록에서 열 수 있습니다.");
+});
+
+// ------------------------------------------------------------------ 다른 이름으로 저장
+
+test('save as: the name must be given and free among the Boards the list shows', () => {
+  assert.deepEqual(boardSaveAsName('  새   이름 ', ['자료 정리']), { ok: true, title: '새 이름' });
+  assert.equal(boardSaveAsName('   ', []).message, 'Board 이름을 입력해 주세요.');
+  const taken = boardSaveAsName('자료 정리', ['회의', ' 자료 정리 ']);
+  assert.equal(taken.ok, false);
+  assert.equal(taken.message, "'자료 정리' 이름의 Board가 이미 있습니다. 다른 이름을 입력해 주세요.");
+  const store = storeOf(['a', '자료 정리', 3], ['b', '회의', 1, { deletedAt: 10 }]);
+  assert.deepEqual(liveBoardTitles(store), ['자료 정리'], 'a name that only exists in the trash is free');
+});
+
+test('save as prompt suggests a free name and says the open Board stays', () => {
+  const prompt = boardSaveAsPrompt({ title: '자료 정리', viewCount: 4, taken: ['자료 정리', '자료 정리 사본'] });
+  assert.equal(prompt.heading, "'자료 정리' Board를 다른 이름으로 저장");
+  assert.equal(prompt.suggested, '자료 정리 사본 2');
+  assert.deepEqual(prompt.lines, [
+    '지금 화면에 있는 구성(화면 4개)을 새 Board로 저장합니다.',
+    "열려 있는 '자료 정리' Board와 저장된 내용은 바뀌지 않습니다.",
+  ]);
+  assert.deepEqual([prompt.confirmLabel, prompt.cancelLabel], ['저장', '취소']);
+  assert.equal(boardSaveAsPrompt({ title: '회의', viewCount: 0, taken: [] }).suggested, '회의 사본');
+});
+
+test('save as adds a new closed Board and leaves the source Board, the active Board and the input store untouched', () => {
+  const store = storeOf(['a', '자료 정리', 3], ['b', '회의', 1]);
+  const before = JSON.stringify(store);
+  const live = { ...snapshot('a', '자료 정리', 4), desk: { activeAgendaId: 'a' } };
+  const result = saveBoardAs(store, { snapshot: live, newId: 'n1', title: ' 자료 정리 2차 ', sourceId: 'a', now: 500 });
+  assert.equal(result.ok, true);
+  assert.equal(JSON.stringify(store), before);
+  assert.deepEqual([result.id, result.title, result.count, result.shapeCount], ['n1', '자료 정리 2차', 4, 0]);
+  assert.equal(result.store.activeAgendaId, 'a');
+  assert.deepEqual(result.store.agendas.a, store.agendas.a);
+  assert.deepEqual(result.store.agendas.n1.agenda, { id: 'n1', title: '자료 정리 2차' });
+  assert.equal(result.store.agendas.n1.savedAt, 500);
+  assert.equal(result.store.agendas.n1.cards.length, 4);
+  assert.deepEqual(result.store.agendas.n1.desk, { activeAgendaId: 'n1' });
+  assert.deepEqual(result.store.meta.n1, { id: 'n1', title: '자료 정리 2차', createdAt: 500, updatedAt: 500, lastOpenedAt: null, closedAt: 500, duplicatedFrom: 'a' });
+  assert.equal(live.agenda.id, 'a', 'the snapshot handed in is not changed');
+  assert.notEqual(result.snapshot.cards, live.cards);
+
+  assert.equal(saveBoardAs(store, { snapshot: live, newId: 'n2', title: '회의', sourceId: 'a' }).message, "'회의' 이름의 Board가 이미 있습니다. 다른 이름을 입력해 주세요.");
+  assert.equal(saveBoardAs(store, { snapshot: live, newId: 'n2', title: '', sourceId: 'a' }).ok, false);
+  assert.equal(saveBoardAs(store, { snapshot: live, newId: 'b', title: '새 것', sourceId: 'a' }).ok, false, 'never writes over an existing Board');
+  assert.equal(saveBoardAs(store, { snapshot: null, newId: 'n3', title: '새 것' }).ok, false);
 });
 
 test('close summary lists what closes together and makes 저장 후 닫기 the default', () => {
@@ -525,4 +577,152 @@ test('screen: 취소, Esc and a click outside keep the Board open and put focus 
   assert.equal(h.showAgendaCloseGuard(), false, 'a second request reuses the open confirmation');
   assert.equal(h.dialog(), first);
   assert.equal(h.document.activeElement, first.find('save'));
+});
+
+// ------------------------------------------------------------------ 저장 안내 · 다른 이름으로 저장 (화면)
+
+function saveAsHarness(initialStore, { writable = true, snapshotFor = () => ({ ...snapshot('a', '자료 정리', 2), shapes: [{ id: 's1' }] }), saveResult } = {}) {
+  let store = JSON.parse(JSON.stringify(initialStore));
+  const attached = [], notices = [], synced = [], saves = [];
+  let rails = 0;
+  const document = {
+    activeElement: null,
+    documentElement: { appendChild: node => { attached.push(node); node.isConnected = true; } },
+    getElementById: id => attached.find(node => node.id === id && node.isConnected) || null,
+  };
+  const el = (tag, props = {}, ...children) => {
+    const node = { tag, dataset: {}, attrs: {}, listeners: {}, children: children.filter(child => child != null), isConnected: false, hidden: false, value: '', selected: false,
+      get textContent() { return this._text ?? this.children.map(child => typeof child === 'string' ? child : child.textContent).join(''); },
+      set textContent(value) { this._text = String(value); },
+      focus() { document.activeElement = this; }, select() { this.selected = true; }, remove() { this.isConnected = false; },
+      setAttribute(name, value) { this.attrs[name] = value; }, removeAttribute(name) { delete this.attrs[name]; },
+      find(action) { return this.dataset.action === action ? this : this.children.map(child => typeof child === 'string' ? null : child.find(action)).find(Boolean) || null; },
+      all(tagName) { return [...(this.tag === tagName ? [this] : []), ...this.children.flatMap(child => typeof child === 'string' ? [] : child.all(tagName))]; } };
+    for (const [key, value] of Object.entries(props)) {
+      if (key === 'hidden') node.hidden = !!value;
+      else if (value == null || value === false) continue;
+      else if (key === 'id') node.id = value;
+      else if (key === 'value') node.value = value;
+      else if (key === 'data') Object.assign(node.dataset, value);
+      else if (key.startsWith('on') && typeof value === 'function') node.listeners[key.slice(2)] = value;
+      else node.attrs[key] = value;
+    }
+    return node;
+  };
+  const state = { boards: { activeProjectionId: 'p1', projections: { p1: { id: 'p1', boardId: 'a', title: '자료 정리', members: [{ viewId: 'v1' }, { viewId: 'v2' }, { viewId: 'v3' }] } } } };
+  let seq = 0;
+  const deps = {
+    document, el, state, BoardLifecycle: Lifecycle,
+    coerceAgendaStore: () => JSON.parse(JSON.stringify(store)),
+    writeAgendaStoreAndSync: next => { if (!writable) return false; store = JSON.parse(JSON.stringify(next)); return true; },
+    serializeAgendaSnapshot: options => snapshotFor(options),
+    saveCurrentAgendaState: options => { saves.push(options); return saveResult === undefined ? { agenda: { id: 'a', title: '자료 정리' }, cards: [{}, {}], shapes: [] } : saveResult; },
+    syncBoardToStore: (...args) => { synced.push(args); return Promise.resolve({}); },
+    newAgendaId: () => `new-${++seq}`,
+    boardNotice: message => notices.push(message), syncViewportAgendaRail: () => { rails += 1; },
+  };
+  const names = ['saveBoardWithNotice', 'closeBoardSaveAs', 'commitBoardSaveAs', 'openBoardSaveAs'];
+  const api = new Function(...Object.keys(deps), `${names.map(declaration).join('\n')}\nreturn { ${names.join(', ')} };`)(...Object.values(deps));
+  return { ...api, document, state, notices, synced, saves, store: () => store, rails: () => rails, dialog: () => document.getElementById('egd-board-save-as') };
+}
+
+test('screen: 저장 says in one line how many 화면 went in, and says nothing when the save did not happen', () => {
+  const h = saveAsHarness(storeOf(['a', '자료 정리', 2]));
+  const saved = h.saveBoardWithNotice({ projectionId: 'p1' });
+  assert.deepEqual(h.saves, [{ projectionId: 'p1' }]);
+  assert.equal(saved.agenda.id, 'a');
+  assert.deepEqual(h.notices, ["'자료 정리' Board에 화면 2개 저장됨"]);
+  const failed = saveAsHarness(storeOf(['a', '자료 정리', 2]), { saveResult: null });
+  assert.equal(failed.saveBoardWithNotice(), null);
+  assert.deepEqual(failed.notices, []);
+});
+
+test('screen: 다른 이름으로 저장 asks for the name in a dialog, saves a new closed Board and leaves the open one alone', () => {
+  const h = saveAsHarness(storeOf(['a', '자료 정리', 2], ['b', '회의', 1]));
+  const opener = { isConnected: true, focus() { h.document.activeElement = this; } };
+  h.document.activeElement = opener;
+  const dialog = h.openBoardSaveAs('p1');
+  assert.equal(dialog, h.dialog());
+  assert.equal(dialog.attrs.role, 'dialog');
+  assert.match(dialog.textContent, /다른 이름으로 저장/);
+  assert.match(dialog.textContent, /구성\(화면 3개\)을 새 Board로 저장합니다/);
+  assert.match(dialog.textContent, /열려 있는 '자료 정리' Board와 저장된 내용은 바뀌지 않습니다/);
+  const input = dialog.all('input')[0];
+  assert.equal(input.value, '자료 정리 사본');
+  assert.equal(input.attrs['aria-label'], '새 Board 이름');
+  assert.equal(h.document.activeElement, input);
+  assert.equal(input.selected, true, 'the suggested name is selected so typing replaces it');
+  assert.deepEqual(dialog.all('button').map(button => [button.dataset.action, button.textContent, button.attrs.type]), [['cancel', '취소', 'button'], ['confirm', '저장', 'button']]);
+  const error = dialog.all('p').find(node => node.attrs.role === 'alert');
+  assert.equal(error.hidden, true);
+
+  input.value = '회의';
+  press(dialog.find('confirm'));
+  assert.equal(h.dialog(), dialog, 'a taken name keeps the dialog open');
+  assert.equal(error.hidden, false);
+  assert.equal(error.textContent, "'회의' 이름의 Board가 이미 있습니다. 다른 이름을 입력해 주세요.");
+  assert.equal(input.attrs['aria-invalid'], 'true');
+  assert.deepEqual(Object.keys(h.store().agendas), ['a', 'b']);
+  input.value = '자료 정리 2차';
+  input.listeners.input();
+  assert.equal(error.hidden, true);
+  assert.equal('aria-invalid' in input.attrs, false);
+
+  let prevented = false;
+  input.listeners.keydown({ key: 'Enter', preventDefault() { prevented = true; }, stopPropagation() {} });
+  assert.equal(prevented, true);
+  assert.equal(h.dialog(), null);
+  assert.equal(h.document.activeElement, opener, 'focus returns to where the person was');
+  const stored = h.store();
+  const added = Object.keys(stored.agendas).filter(id => id !== 'a' && id !== 'b');
+  assert.equal(added.length, 1, 'exactly one Board is added (the refused name added none)');
+  const [newId] = added;
+  assert.equal(stored.agendas[newId].agenda.title, '자료 정리 2차');
+  assert.equal(stored.agendas[newId].agenda.id, newId);
+  assert.equal(stored.meta[newId].duplicatedFrom, 'a');
+  assert.ok(stored.meta[newId].closedAt > 0, 'the new Board is saved closed; nothing opens or moves');
+  assert.equal(stored.activeAgendaId, 'a');
+  assert.equal(h.state.boards.projections.p1.boardId, 'a');
+  assert.deepEqual(h.synced.map(args => [args[0], args[2]]), [[newId, '자료 정리 2차']]);
+  assert.equal(h.rails(), 1);
+  assert.deepEqual(h.notices, ["'자료 정리 2차' Board로 화면 2개 · 도형 1개 저장됨 · Board 목록에서 열 수 있습니다."]);
+});
+
+test('screen: 다른 이름으로 저장 closes on 취소, Esc and a press outside without saving, and claims nothing when the list cannot be written', () => {
+  const h = saveAsHarness(storeOf(['a', '자료 정리', 2]));
+  press(h.openBoardSaveAs('p1').find('cancel'));
+  assert.equal(h.dialog(), null);
+  const escaped = h.openBoardSaveAs('p1');
+  escaped.listeners.keydown({ key: 'Escape', preventDefault() {}, stopPropagation() {} });
+  assert.equal(h.dialog(), null);
+  const outside = h.openBoardSaveAs('p1');
+  outside.listeners.mousedown({ target: outside.all('input')[0] });
+  outside.listeners.click({ target: outside });
+  assert.equal(h.dialog(), outside, 'a drag that started in the name field does not close the dialog');
+  outside.listeners.mousedown({ target: outside });
+  outside.listeners.click({ target: outside });
+  assert.equal(h.dialog(), null);
+  assert.deepEqual(Object.keys(h.store().agendas), ['a']);
+  assert.deepEqual(h.notices, []);
+
+  assert.equal(h.openBoardSaveAs('missing'), null);
+  assert.match(h.notices.at(-1), /Board를 먼저 선택해 주세요/);
+
+  const locked = saveAsHarness(storeOf(['a', '자료 정리', 2]), { writable: false });
+  const dialog = locked.openBoardSaveAs('p1');
+  press(dialog.find('confirm'));
+  assert.equal(locked.dialog(), dialog);
+  assert.match(dialog.all('p').find(node => node.attrs.role === 'alert').textContent, /저장하지 못했습니다/);
+  assert.deepEqual(locked.notices, []);
+  assert.deepEqual(locked.synced, []);
+
+  const gone = saveAsHarness(storeOf(['a', '자료 정리', 2]), { snapshotFor: () => null });
+  assert.equal(gone.commitBoardSaveAs('p1', '새 이름').ok, false);
+});
+
+test('screen: the Board menu and the Board list save through the one-line notice, and the menu offers 다른 이름으로 저장', () => {
+  const menu = declaration('toggleBoardRegionMenu');
+  assert.match(menu, /item\('저장', '이 Board 저장', 'board-save', \(\) => saveBoardWithNotice\(\{ projectionId \}\)\)/);
+  assert.match(menu, /item\('다른 이름으로 저장…', [^\n]*'board-save-as', \(\) => openBoardSaveAs\(projectionId\)\)/);
+  assert.match(declaration('renderAgendaSwitcherPanel'), /saveBoardWithNotice\(\);/);
 });

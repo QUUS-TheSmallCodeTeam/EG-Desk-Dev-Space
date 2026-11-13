@@ -143,11 +143,68 @@ export function boardPurgePrompt({ title, count, keepsHistory = false } = {}) {
   };
 }
 
-export function boardSavedNotice({ title, count } = {}) {
+const savedParts = (count, shapeCount) => [
+  wholeCount(count) ? `화면 ${wholeCount(count)}개` : null,
+  wholeCount(shapeCount) ? `도형 ${wholeCount(shapeCount)}개` : null,
+].filter(Boolean).join(' · ');
+
+export function boardSavedNotice({ title, count, shapeCount } = {}) {
   const name = cleanTitle(title);
-  const n = wholeCount(count);
-  if (!n) return name ? `'${name}' Board 저장됨 · 화면 없음` : '빈 Board로 저장됨';
-  return `${name ? `'${name}' ` : ''}Board에 화면 ${n}개 저장됨`;
+  const parts = savedParts(count, shapeCount);
+  if (!parts) return name ? `'${name}' Board 저장됨 · 화면 없음` : '빈 Board로 저장됨';
+  return `${name ? `'${name}' ` : ''}Board에 ${parts} 저장됨`;
+}
+
+// 다른 이름으로 저장: the arrangement on screen is saved as a new Board with
+// its own name. The open Board, its saved copy and the active Board stay as
+// they are; the new Board waits closed in the Board list.
+export function liveBoardTitles(store) {
+  return liveBoardIds(store).map(id => titleIn(store, id));
+}
+
+export function boardSaveAsName(input, taken = []) {
+  const title = cleanTitle(input);
+  if (!title) return { ok: false, title: '', message: 'Board 이름을 입력해 주세요.' };
+  if ((Array.isArray(taken) ? taken : []).map(cleanTitle).includes(title)) {
+    return { ok: false, title, message: `'${title}' 이름의 Board가 이미 있습니다. 다른 이름을 입력해 주세요.` };
+  }
+  return { ok: true, title };
+}
+
+export function boardSaveAsPrompt({ title, viewCount, taken = [] } = {}) {
+  const name = titleOr(title);
+  return {
+    heading: `'${name}' Board를 다른 이름으로 저장`,
+    suggested: uniqueBoardTitle(`${name} 사본`, taken),
+    lines: [
+      `지금 화면에 있는 구성(화면 ${wholeCount(viewCount)}개)을 새 Board로 저장합니다.`,
+      `열려 있는 '${name}' Board와 저장된 내용은 바뀌지 않습니다.`,
+    ],
+    confirmLabel: '저장',
+    cancelLabel: '취소',
+  };
+}
+
+export function saveBoardAs(store, { snapshot, newId, title, sourceId, now = Date.now() } = {}) {
+  if (!newId || !isObject(snapshot) || boardIds(store).includes(newId)) return { ok: false, store, message: 'Board를 저장하지 못했습니다. 잠시 뒤 다시 시도해 주세요.' };
+  const name = boardSaveAsName(title, liveBoardTitles(store));
+  if (!name.ok) return { ok: false, store, message: name.message };
+  const saved = JSON.parse(JSON.stringify(snapshot));
+  saved.savedAt = now;
+  saved.agenda = { ...(isObject(saved.agenda) ? saved.agenda : {}), id: newId, title: name.title };
+  if (isObject(saved.desk)) saved.desk = { ...saved.desk, activeAgendaId: newId };
+  const next = copyStore(store);
+  next.agendas[newId] = saved;
+  next.meta[newId] = { id: newId, title: name.title, createdAt: now, updatedAt: now, lastOpenedAt: null, closedAt: now, duplicatedFrom: sourceId || null };
+  return {
+    ok: true, store: next, id: newId, title: name.title, snapshot: saved,
+    count: Array.isArray(saved.cards) ? saved.cards.length : 0, shapeCount: Array.isArray(saved.shapes) ? saved.shapes.length : 0,
+  };
+}
+
+export function boardSavedAsNotice({ title, count, shapeCount } = {}) {
+  const parts = savedParts(count, shapeCount);
+  return `'${titleOr(title)}' Board로 ${parts ? `${parts} 저장됨` : '저장됨(화면 없음)'} · Board 목록에서 열 수 있습니다.`;
 }
 
 // The close confirmation: saving is the default, closing without saving is a
