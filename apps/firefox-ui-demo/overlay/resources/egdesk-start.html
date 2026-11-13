@@ -15,6 +15,10 @@
     --eg-line: light-dark(#DEDFD8, #4A4E47);
     --eg-hover: light-dark(#E8EAE3, #414840);
   }
+  /* Settings > 화면·입력 "밝게/어둡게": the Desk copies its data-egd-theme onto
+     <html>, and the pairs above follow it instead of the system. */
+  :root[data-egd-theme="light"] { color-scheme: light; }
+  :root[data-egd-theme="dark"] { color-scheme: dark; }
   body { margin: 0; min-height: 100vh; display: grid; place-items: center; background: var(--eg-window); color: var(--eg-ink); font-family: -apple-system, BlinkMacSystemFont, "Apple SD Gothic Neo", "Malgun Gothic", sans-serif; }
   main { box-sizing: border-box; width: min(100%, 640px); padding: 40px; }
   h1 { margin: 0 0 18px; font-size: clamp(44px, 5vw, 48px); line-height: 1.1; letter-spacing: -.04em; }

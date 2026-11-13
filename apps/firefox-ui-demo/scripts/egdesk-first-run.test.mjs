@@ -197,14 +197,21 @@ function harness({ codex = { connected: false, authStatus: { isLoggedIn: false }
   const realAppend = root.append;
   root.appendChild = node => { realAppend(node); if (node.id) byId.set(node.id, node); return node; };
   const windowListeners = {};
-  let observed = null, entered = 0, logins = 0, settings = [], unsubscribed = 0, codexListener = null;
+  let observed = null, themeObserved = null, entered = 0, logins = 0, settings = [], unsubscribed = 0, codexListener = null;
   const state = { surface: { initialBrowserFocus: true, browserCardId: card.id }, codex,
     codexBridge: { subscribe: fn => { codexListener = fn; return () => { unsubscribed++; codexListener = null; }; }, startLogin: () => { logins++; } } };
   const document = { documentElement: root,
     getElementById: id => { const node = byId.get(id); return node?.isConnected ? node : null; },
     querySelectorAll: selector => selector === '.egd-browser-card' ? [card, other, web] : [] };
   const window = { addEventListener: (type, fn, capture, untrusted) => { windowListeners[type] = { fn, capture, untrusted }; } };
-  class MutationObserver { constructor(fn) { observed = { fn }; } observe(target, options) { observed.target = target; observed.options = options; } }
+  // Two observers watch the window root: its class (first-run focus) and its forced screen mode.
+  class MutationObserver {
+    constructor(fn) { this.entry = { fn }; }
+    observe(target, options) {
+      Object.assign(this.entry, { target, options });
+      if (options.attributeFilter.includes('class')) observed = this.entry; else themeObserved = this.entry;
+    }
+  }
   const enterLocalDesk = () => {
     if (!state.surface.initialBrowserFocus) return false;
     entered++; state.surface.initialBrowserFocus = false; rootClasses.delete('egd-initial-browser-focus'); return true;
@@ -219,7 +226,7 @@ function harness({ codex = { connected: false, authStatus: { isLoggedIn: false }
     enterLocalDesk, options => { settings.push(options); }, START_URI,
     () => ({ startup: { quit: flags => { quits.push(flags); } } }), Ci, text => { copied.push(text); return clipboard.works; });
   return { install, showStartFailure, quits, copied, clipboard, state, card, toolbar, startDoc, otherDoc, webDoc, root, rootClasses, windowListeners, byId,
-    observed: () => observed, entered: () => entered, logins: () => logins, settings, unsubscribed: () => unsubscribed,
+    observed: () => observed, themeObserved: () => themeObserved, entered: () => entered, logins: () => logins, settings, unsubscribed: () => unsubscribed,
     codexChanged: () => codexListener?.(), hasCodexListener: () => !!codexListener,
     notice: () => document.getElementById('egd-first-entry-notice') };
 }
@@ -331,6 +338,46 @@ test('entering the Desk shows one quiet Codex line, which logs in, follows the s
   h4.observed().fn();
   h4.notice().querySelector('.egd-first-entry-action').listeners.click();
   assert.deepEqual(h4.settings, [{ tab: 'account' }]);
+});
+
+test('a forced 밝게/어둡게 reaches every open start page, at once and after a reload; web pages are left alone', () => {
+  assert.equal(FirstRun.START_PAGE_THEME_ATTRIBUTE, 'data-egd-theme');
+  const style = startPage.match(/<style>([\s\S]*?)<\/style>/)[1];
+  assert.match(style, /:root\[data-egd-theme="light"\] \{ color-scheme: light; \}/);
+  assert.match(style, /:root\[data-egd-theme="dark"\] \{ color-scheme: dark; \}/);
+  assert.ok(style.indexOf(':root[data-egd-theme="dark"]') > style.indexOf('color-scheme: light dark'), 'the forced mode comes after the system pair');
+
+  const h = harness();
+  h.root.setAttribute('data-egd-theme', 'dark');
+  h.install();
+  assert.equal(h.startDoc.documentElement.attributes['data-egd-theme'], 'dark', 'a saved choice is there from the start');
+  assert.equal(h.otherDoc.documentElement.attributes['data-egd-theme'], 'dark', 'every Browser showing the start page follows');
+  assert.equal(h.webDoc.documentElement.attributes['data-egd-theme'], undefined, 'a web page is never marked');
+  assert.equal(h.themeObserved().target, h.root);
+  assert.deepEqual(h.themeObserved().options, { attributes: true, attributeFilter: ['data-egd-theme'] });
+
+  h.root.setAttribute('data-egd-theme', 'light');
+  h.themeObserved().fn();
+  assert.equal(h.startDoc.documentElement.attributes['data-egd-theme'], 'light', 'a change in Settings applies without a reload');
+  h.root.removeAttribute('data-egd-theme');
+  h.themeObserved().fn();
+  assert.equal(h.startDoc.documentElement.attributes['data-egd-theme'], undefined, '시스템 따라가기 leaves the page to the system');
+  assert.equal(h.otherDoc.documentElement.attributes['data-egd-theme'], undefined);
+
+  // A reloaded start page starts unmarked and is marked again when it announces itself.
+  h.root.setAttribute('data-egd-theme', 'dark');
+  h.windowListeners[FirstRun.START_PAGE_READY_EVENT].fn({ target: h.webDoc });
+  assert.equal(h.startDoc.documentElement.attributes['data-egd-theme'], undefined, 'only the start page can ask');
+  h.windowListeners[FirstRun.START_PAGE_READY_EVENT].fn({ target: h.startDoc });
+  assert.equal(h.startDoc.documentElement.attributes['data-egd-theme'], 'dark');
+
+  // Once the Desk is open the start page still follows the screen mode.
+  const open = harness();
+  open.state.surface.initialBrowserFocus = false; open.rootClasses.delete('egd-initial-browser-focus');
+  open.root.setAttribute('data-egd-theme', 'dark');
+  open.install();
+  assert.equal(open.startDoc.documentElement.attributes['data-egd-theme'], 'dark');
+  assert.equal(open.startDoc.documentElement.attributes['data-desk-entry'], undefined);
 });
 
 test('a Desk that was never in first-run focus gets neither the button nor the line', () => {
