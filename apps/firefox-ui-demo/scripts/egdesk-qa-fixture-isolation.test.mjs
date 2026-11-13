@@ -269,8 +269,13 @@ test('project picker transform is explicit and replaces only the OS-result funct
   }
 });
 
+// Reviewed signature: the dialog title is a parameter because the Board's
+// project folder picker reuses this one native boundary with its own title.
+const ROOM_PICKER_SIGNATURE = "function pickNativeRoomProjectDirectory(title = '이 방에서 사용할 프로젝트 폴더')";
+
 function roomPickerParts(source) {
-  const start = source.indexOf('  function pickNativeRoomProjectDirectory() {');
+  const start = source.indexOf(`  ${ROOM_PICKER_SIGNATURE} {`);
+  assert.notEqual(start, -1, 'reviewed room picker signature must exist');
   const from = source.indexOf('\n', start) + 1, to = source.indexOf('\n  }', from);
   return { prefix: source.slice(0, from), body: source.slice(from, to), suffix: source.slice(to),
     functionSource: source.slice(start, to + '\n  }'.length) };
@@ -371,8 +376,11 @@ test('room picker missing/duplicate/changed signatures and body drift fail close
   const original = fs.readFileSync(path.join(overlay, QA_ROOM_PROJECT_PICKER_FILE), 'utf8');
   const { functionSource } = roomPickerParts(original);
   for (const source of ['', original.replace(functionSource, ''), original + functionSource,
-    original + functionSource.replace('function pickNativeRoomProjectDirectory()', 'function  pickNativeRoomProjectDirectory ()'),
-    original.replace('function pickNativeRoomProjectDirectory()', 'function pickNativeRoomProjectDirectory(options)'),
+    original + functionSource.replace(ROOM_PICKER_SIGNATURE, 'function  pickNativeRoomProjectDirectory ()'),
+    original.replace(ROOM_PICKER_SIGNATURE, 'function pickNativeRoomProjectDirectory(options)'),
+    original.replace(ROOM_PICKER_SIGNATURE, 'function pickNativeRoomProjectDirectory()'),
+    original.replace(ROOM_PICKER_SIGNATURE, "function pickNativeRoomProjectDirectory(title = '다른 제목')"),
+    original.replace(functionSource, functionSource.replace('window.browsingContext, title,', "window.browsingContext, '이 방에서 사용할 프로젝트 폴더',")),
     original.replace(functionSource, functionSource.replace('picker.file.path', 'changed.path')),
     original.replace(functionSource, functionSource.replace('return new Promise', 'IOUtils.read("outside"); return new Promise')),
     original.replace(functionSource, functionSource.replace('returnOK', 'returnReplace')),
@@ -417,7 +425,7 @@ test('missing actual room picker rejects materialization before endpoint/body wr
   const copyPath = path.join(profile, 'chrome', QA_ROOM_PROJECT_PICKER_FILE), copyBefore = fs.readFileSync(copyPath);
   const read = fs.readFileSync;
   const missing = t.mock.method(fs, 'readFileSync', function(file, ...args) {
-    if (file === source) return Buffer.from(original.toString().replace('function pickNativeRoomProjectDirectory()', 'function removedRoomPicker()'));
+    if (file === source) return Buffer.from(original.toString().replace(ROOM_PICKER_SIGNATURE, 'function removedRoomPicker()'));
     return read.call(fs, file, ...args);
   });
   const write = t.mock.method(fs, 'writeFileSync', () => assert.fail('missing function must precede any write'));
