@@ -5200,7 +5200,7 @@
     }
     notice.replaceChildren(document.createTextNode(message), el('button', {
       'aria-label': '안내 닫기', onclick: () => notice.remove(),
-    }, '×'));
+    }, deskIcon('close')));
   }
 
   function activeBoardProjection() {
@@ -5854,7 +5854,7 @@
     return el('div', { class: 'egd-store-conflict-body' },
       el('div', { class: 'egd-store-panel-head' },
         el('strong', {}, '다른 곳에서 이 Board가 바뀌었습니다'),
-        el('button', { type: 'button', class: 'egd-store-panel-close', 'aria-label': '안내 닫기', data: { testid: 'board-conflict-close', focusKey: 'close' }, onclick: () => actions.onClose?.() }, '×')),
+        el('button', { type: 'button', class: 'egd-store-panel-close', 'aria-label': '안내 닫기', data: { testid: 'board-conflict-close', focusKey: 'close' }, onclick: () => actions.onClose?.() }, deskIcon('close'))),
       el('p', { class: 'egd-store-panel-copy' }, `'${conflict.title || 'Board'}'에 다른 창이나 PC에서 저장한 새 버전이 있습니다. 내 변경은 이 PC 설정에 저장했고, 버전 기록은 덮어쓰지 않았습니다.`),
       conflict.message ? el('p', { class: 'egd-store-panel-status', role: 'status' }, conflict.message) : null,
       latestView,
@@ -6004,7 +6004,7 @@
       el('div', { class: 'egd-store-panel-head' },
         el('strong', {}, `${boardHistory.title} · 버전 기록`),
         el('button', { type: 'button', class: 'egd-store-panel-close', 'aria-label': '버전 기록 닫기', data: { focusKey: 'close' },
-          onclick: () => closeBoardHistoryPanel({ restoreFocus: true }) }, '×')),
+          onclick: () => closeBoardHistoryPanel({ restoreFocus: true }) }, deskIcon('close'))),
       el('p', { class: 'egd-store-panel-copy' }, '저장할 때마다 버전이 남습니다. 예전 버전으로 되돌려도 새 버전으로 저장되어 지금 버전이 지워지지 않습니다.'),
       boardHistory.message ? el('p', { class: 'egd-store-panel-status', role: 'status' }, boardHistory.message) : null,
       boardHistory.failed ? el('button', { type: 'button', class: 'egd-store-more', data: { focusKey: 'retry' }, onclick: () => loadBoardHistory() }, '다시 시도') : null,
@@ -8831,7 +8831,7 @@
       onmousedown: (ev) => { if (ev.target?.closest?.('button')) ev.preventDefault(); } },
       el('div', { class: 'egd-minimap-header' },
         el('div', { class: 'egd-minimap-title' }, '미니맵'),
-        el('button', { class: 'egd-minimap-close', title: '닫기', onclick: closeDeskMinimap }, '×'),
+        el('button', { class: 'egd-minimap-close', title: '미니맵 닫기', 'aria-label': '미니맵 닫기', onclick: closeDeskMinimap }, deskIcon('close')),
       ),
       el('div', { class: 'egd-minimap-map' }),
       el('div', { class: 'egd-minimap-caption' }, SurfaceState.deskMinimapCaption(1, 0)),
@@ -17741,7 +17741,7 @@
               form[key] = form[key].filter((_, at) => at !== index);
               agents.focusField = key;
               renderAgentsTab();
-            } }, '×')))) : null,
+            } }, deskIcon('close'))))) : null,
           el('div', { class: 'egd-settings-chip-add' }, input,
             el('button', { class: 'egd-settings-btn', disabled: form[key].length >= max ? 'true' : null, onclick: add }, '추가'),
             el('span', { class: 'egd-settings-form-count' }, `${form[key].length}/${max}`)));
@@ -19700,7 +19700,7 @@
     const render = focusId => {
       const nodes = [el('div', { class: 'egd-store-panel-head' }, el('strong', {}, 'Chrome 로그인 가져오기'),
         el('button', { type: 'button', class: 'egd-store-panel-close', 'aria-label': '닫기',
-          data: { testid: 'browser-cookie-close' }, onclick: requestClose }, '×'))];
+          data: { testid: 'browser-cookie-close' }, onclick: requestClose }, deskIcon('close')))];
       if (phase === 'intro' || phase === 'listing') {
         nodes.push(el('p', { class: 'egd-store-panel-copy' }, '이 Mac의 Chrome 프로필을 찾아 선택하세요.'));
         if (phase === 'listing') nodes.push(el('p', { role: 'status' }, '프로필을 찾는 중…'));
@@ -24784,7 +24784,7 @@
       panel.replaceChildren(...[
         el('div', { class: 'egd-store-panel-head' }, el('strong', {}, 'JSON Canvas 내보내기'),
           el('button', { type: 'button', class: 'egd-store-panel-close', 'aria-label': '내보내기 안내 닫기',
-            data: { testid: 'board-canvas-close' }, onclick: close }, '×')),
+            data: { testid: 'board-canvas-close' }, onclick: close }, deskIcon('close'))),
         el('p', { class: 'egd-store-panel-status', role: 'status', data: { testid: 'board-canvas-status' } }, view.message),
         fileExists && view.status === 'failed' ? el('p', { class: 'egd-portable-warning', data: { testid: 'board-canvas-file-exists' } },
           '같은 이름의 파일이 있습니다. 기존 파일은 덮어쓰지 않습니다. 다른 이름이나 위치를 선택해 주세요.') : null,
@@ -25115,7 +25115,7 @@
     const head = (title) => el('div', { class: 'egd-store-panel-head' },
       el('strong', {}, title),
       el('button', { type: 'button', class: 'egd-store-panel-close', 'aria-label': `${title} 닫기`, disabled: busy, data: { focusKey: 'close', testid: 'portable-close' },
-        onclick: () => actions.onClose?.() }, '×'));
+        onclick: () => actions.onClose?.() }, deskIcon('close')));
     const error = view.error ? el('p', { class: 'egd-store-panel-status egd-portable-error', role: 'alert', data: { testid: 'portable-error' } }, view.error) : null;
     const status = (text) => el('p', { class: 'egd-store-panel-status', role: 'status', data: { testid: 'portable-status' } }, text);
     const field = (name, label, { autofocus = false, invalid = false } = {}) => {
@@ -25342,7 +25342,7 @@
       el('div', { class: 'egd-store-panel-head' },
         el('strong', {}, '복구 기록'),
         el('button', { type: 'button', class: 'egd-store-panel-close', 'aria-label': '복구 기록 닫기', data: { focusKey: 'close' },
-          onclick: () => closeDeskHistoryPanel({ restoreFocus: true }) }, '×')),
+          onclick: () => closeDeskHistoryPanel({ restoreFocus: true }) }, deskIcon('close'))),
       el('p', { class: 'egd-store-panel-copy' }, 'Desk가 저장될 때마다 시점이 남습니다. 시점을 골라 미리 보고, 되돌리거나 지금 작업에 합칠 수 있습니다.'),
       // D-R1: what the journal keeps, as the bridge reports it (an older bridge says nothing).
       RecoveryState.deskRetentionText(deskHistory.page?.retention) ? el('p', { class: 'egd-store-panel-copy', data: { testid: 'desk-history-retention' } }, RecoveryState.deskRetentionText(deskHistory.page.retention)) : null,

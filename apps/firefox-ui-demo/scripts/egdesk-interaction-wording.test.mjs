@@ -1,14 +1,16 @@
 // A36 / B70 / B27 / B06 (UX-03, BRW-01): general words on screen are Korean,
-// the way back to a conversation has one name.
-// The surface source stays the source of truth; this file reads it.
+// the way back to a conversation has one name, and close buttons draw the shared
+// line icon instead of a letter glyph. The surface source stays the source of
+// truth; this file reads it. Controls owned by other screen areas (Chat input
+// chips, Thread member menu, Browser toolbar, Terminal) are not listed here.
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
-
+import { readCssRules } from '../overlay/resources/EGDeskDesignTokens.sys.mjs';
 
 const read = path => readFileSync(new URL(path, import.meta.url), 'utf8').replace(/\r\n/g, '\n');
 const surfaceJs = read('../overlay/JS/eg-desk-surface.uc.js');
-
+const surfaceRules = readCssRules(read('../overlay/CSS/eg-desk-surface.uc.css'));
 
 function between(source, start, end) {
   const from = source.indexOf(start);
@@ -46,4 +48,47 @@ test('B70 the way back to a conversation has one name', () => {
 test('B27 the side Chat panel is titled 채팅, not 코덱스 채팅', () => {
   assert.equal(occurrences(surfaceJs, '코덱스 채팅'), 0);
   assert.ok(surfaceJs.includes("textContent = appId === 'chat' ? '채팅' : appLabel;"));
+});
+
+// Each entry: a marker that starts the control, and how many of them exist.
+const ICON_CLOSE_CONTROLS = [
+  ["class: 'egd-store-panel-close'", 6],
+  ["class: 'egd-minimap-close'", 1],
+  ["class: 'egd-settings-chip-remove'", 1],
+  ["'aria-label': '안내 닫기', onclick: () => notice.remove()", 1],
+];
+
+test('B06 panel, minimap, notice and chip close buttons draw the shared close icon', () => {
+  for (const [marker, count] of ICON_CLOSE_CONTROLS) {
+    const parts = surfaceJs.split(marker);
+    assert.equal(parts.length - 1, count, marker);
+    for (const tail of parts.slice(1)) {
+      // The button call ends at its last argument; a named control ends within a few lines.
+      const call = tail.slice(0, tail.search(/\}, (?:deskIcon\('close'\)|'[^']*')\)/) + 40);
+      assert.match(call, /\}, deskIcon\('close'\)\)/, `${marker} must end with the close icon`);
+      assert.doesNotMatch(call, /'×'/, marker);
+    }
+  }
+});
+
+test('B06 every icon-only close button keeps a spoken name', () => {
+  for (const [marker] of ICON_CLOSE_CONTROLS) {
+    for (const tail of surfaceJs.split(marker).slice(1)) {
+      const at = surfaceJs.indexOf(tail);
+      const call = surfaceJs.slice(surfaceJs.lastIndexOf("el('button', {", at), at + tail.indexOf("deskIcon('close')"));
+      assert.match(call, /'aria-label': (?:'[^']+'|`[^`]+`)/, marker);
+    }
+  }
+});
+
+test('B06 the close icon has a set size inside each of those buttons', () => {
+  for (const selector of ['.egd-store-panel-close .egd-ui-icon', '.egd-minimap-close .egd-ui-icon',
+    '.egd-settings-chip-remove .egd-ui-icon', '#egd-board-notice button .egd-ui-icon']) {
+    const rule = surfaceRules.find(candidate => candidate.selectors.includes(selector));
+    assert.ok(rule, `missing ${selector}`);
+    const declared = Object.fromEntries(rule.declarations);
+    assert.match(declared.width || '', /^1[0-6]px$/, selector);
+    assert.equal(declared.height, declared.width, selector);
+    assert.equal(declared.margin, 'auto', `${selector} is centred in its button`);
+  }
 });

@@ -805,6 +805,7 @@
   min-height: 24px;
   pointer-events: auto;
 }
+#egd-board-notice button .egd-ui-icon { width: 12px; height: 12px; margin: auto; }
 #egd-board-scope { left: 50%; top: 25%; transform: translateX(-50%); width: 350px; }
 /* UX-05 [이동]/[크기]: a small fixed input beside the View bar it changes. */
 #egd-placement-dialog { width: 280px; padding: 14px 16px; }
@@ -876,6 +877,7 @@
 .egd-store-panel button.egd-store-primary { background: var(--egd-primary); border-color: var(--egd-primary); color: var(--egd-on-primary); }
 .egd-store-panel button.egd-store-primary:hover:not([disabled]) { background: var(--egd-primary-strong); }
 .egd-store-panel button.egd-store-panel-close { min-width: 28px; min-height: 28px; padding: 0; border-color: transparent; background: transparent; font-size: 16px; }
+.egd-store-panel-close .egd-ui-icon { width: 14px; height: 14px; margin: auto; }
 .egd-store-list { display: flex; flex-direction: column; gap: 2px; max-height: 240px; overflow: auto; }
 .egd-store-panel button.egd-store-row {
   display: grid;
@@ -3128,6 +3130,7 @@
   background: var(--egd-outline-variant);
   color: var(--egd-on-surface);
 }
+.egd-minimap-close .egd-ui-icon { width: 12px; height: 12px; margin: auto; }
 
 .egd-minimap-map {
   position: relative;
@@ -6173,6 +6176,7 @@
   cursor: pointer;
 }
 .egd-settings-chip-remove:hover { color: var(--egd-on-surface); }
+.egd-settings-chip-remove .egd-ui-icon { width: 10px; height: 10px; margin: auto; }
 .egd-settings-form-actions {
   position: sticky;
   bottom: 0;
