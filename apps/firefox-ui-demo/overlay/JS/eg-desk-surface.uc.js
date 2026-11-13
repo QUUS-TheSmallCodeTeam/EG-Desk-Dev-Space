@@ -17219,10 +17219,17 @@
       'aria-label': '창 닫기',
       onclick: (ev) => { ev.stopPropagation(); closeCanvasCard(card, cleanup); },
     });
+    // UX-06: the yellow dot folds the Chat window to its title row, as on every
+    // other Desk Window.
+    const isCollapsed = () => card.classList.contains('egd-card-collapsed');
     const minimizeControl = el('span', {
-      class: 'egd-card-dot egd-card-dot-min egd-desk-window-control egd-desk-window-control-disabled',
-      'aria-disabled': 'true',
-      title: '창 최소화는 아직 지원되지 않음',
+      class: 'egd-card-dot egd-card-dot-min egd-desk-window-control',
+      role: 'button',
+      tabindex: '0',
+      title: '창 접기',
+      'aria-label': '창 접기',
+      'aria-expanded': 'true',
+      onclick: (ev) => { ev.stopPropagation(); setCollapsed(!isCollapsed()); },
     });
     const maximizeControl = el('span', {
       class: 'egd-card-dot egd-card-dot-max egd-desk-window-control',
@@ -17230,15 +17237,45 @@
       tabindex: '0',
       title: '창 최대화',
       'aria-label': '창 최대화',
+      'aria-pressed': 'false',
       onclick: (ev) => { ev.stopPropagation(); toggleCardFullscreen(card); },
     });
-    for (const control of [closeControl, maximizeControl]) {
+    for (const control of [closeControl, minimizeControl, maximizeControl]) {
       control.addEventListener('keydown', (ev) => {
         if (ev.key !== 'Enter' && ev.key !== ' ') return;
         ev.preventDefault();
         control.click();
       });
     }
+    // The dots name what a press does now: the green one restores a maximized
+    // window, the yellow one opens a folded one. A maximized window is never
+    // left folded underneath.
+    const syncWindowControls = () => {
+      const maximized = card.classList.contains('egd-card-fullscreen');
+      if (maximized && isCollapsed()) { setCollapsed(false); return; }
+      const maximizeLabel = maximized ? '원래 크기로' : '창 최대화';
+      maximizeControl.setAttribute('title', maximizeLabel);
+      maximizeControl.setAttribute('aria-label', maximizeLabel);
+      maximizeControl.setAttribute('aria-pressed', String(maximized));
+      const collapsed = isCollapsed();
+      const minimizeLabel = collapsed ? '창 펼치기' : '창 접기';
+      minimizeControl.setAttribute('title', minimizeLabel);
+      minimizeControl.setAttribute('aria-label', minimizeLabel);
+      minimizeControl.setAttribute('aria-expanded', String(!collapsed));
+    };
+    const setCollapsed = (collapsed, { quiet = false } = {}) => {
+      const next = !!collapsed;
+      if (next === isCollapsed()) return next;
+      // Folding a maximized window first returns it to its own size.
+      if (next && isCardFullscreen(card)) toggleCardFullscreen(card);
+      card.classList.toggle('egd-card-collapsed', next);
+      syncWindowControls();
+      if (!quiet) markAgendaDirty(next ? 'collapse-chat-window' : 'expand-chat-window', card);
+      return next;
+    };
+    // Maximize and restore change the card class from outside this window.
+    const controlObserver = typeof MutationObserver === 'function' ? new MutationObserver(syncWindowControls) : null;
+    controlObserver?.observe(card, { attributes: true, attributeFilter: ['class'] });
     const titleLabel = el('div', { class: 'egd-chat-card-title' }, ChatFrame.CHAT_FRAME_HOME_TITLE);
     // CNV-03: the recorded Board after the name, and the same '넣기 / 빼기' menu.
     const boardMetadata = el('span', { class: 'egd-desk-window-board', role: 'note', hidden: true, data: { testid: 'window-board' } });
@@ -17291,6 +17328,9 @@
       slots: { header: head, topbar: header, content: body },
       focus: () => focusCanvasCard(card),
       requestClose: () => closeCanvasCard(card, cleanup),
+      isCollapsed,
+      setCollapsed,
+      syncWindowControls,
     };
 
     const host = document.getElementById('egd-canvas-layer') || document.documentElement;
@@ -17430,6 +17470,7 @@
       unsubscribeFrameTitle = null;
       dismissBoardMembershipSuggestion(card);
       try { chatCardResizeObserver.disconnect(); } catch {}
+      try { controlObserver?.disconnect(); } catch {}
       window.removeEventListener('mousemove', onMove);
       window.removeEventListener('mouseup', onUp);
       if (state.activeEntityId === card.id) setActiveEntity(null);
