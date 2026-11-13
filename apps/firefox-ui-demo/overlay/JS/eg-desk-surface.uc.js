@@ -2181,7 +2181,7 @@
       if (!current()) return null;
       state.codexBridge?.invalidateRoomProjectDefaults(boardId);
       if (presentation?.status === 'connected' && presentation.projectId === attached.projectId) {
-        boardNotice(`Board ‘${title}’의 프로젝트 폴더: ${presentation.name}. 이 Board의 채팅방은 이 폴더에서 실행하고 File은 이 폴더를 엽니다.`);
+        boardDoneNotice(`Board ‘${title}’의 프로젝트 폴더: ${presentation.name}. 이 Board의 채팅방은 이 폴더에서 실행하고 File은 이 폴더를 엽니다.`);
       } else boardNotice('프로젝트 폴더 연결을 다시 확인하지 못했습니다. Board 메뉴에서 다시 선택하세요.');
       return presentation;
     } catch (error) {
@@ -2202,7 +2202,7 @@
       if (projection.project) { projection.project = null; markAgendaDirty('board-project', document.getElementById(projection.id)); }
       await refreshBoardProject(boardId, { force: true });
       state.codexBridge?.invalidateRoomProjectDefaults(boardId);
-      boardNotice(`Board ‘${projection.title}’의 프로젝트 폴더 연결을 해제했습니다. 폴더와 파일은 그대로입니다.`);
+      boardDoneNotice(`Board ‘${projection.title}’의 프로젝트 폴더 연결을 해제했습니다. 폴더와 파일은 그대로입니다.`);
       return true;
     } catch (error) {
       if (current()) boardNotice(error?.message || '프로젝트 폴더 연결을 해제하지 못했습니다.');
@@ -5358,6 +5358,34 @@
     };
   }
 
+  // A notice that only reports finished work leaves on its own after a few
+  // seconds. Failure notices (boardNotice) stay until closed. The wait holds
+  // while the pointer rests on the notice or its close button has focus.
+  function boardDoneNotice(message) {
+    boardNotice(message);
+    const notice = document.getElementById('egd-board-notice');
+    const shown = notice?.firstChild;
+    if (!shown) return;
+    let pointer = null;
+    const track = (ev) => { pointer = { x: ev.clientX, y: ev.clientY }; };
+    const stop = () => window.removeEventListener('mousemove', track, true);
+    const held = () => {
+      if (notice.contains(document.activeElement)) return true;
+      if (!pointer) return false;
+      const box = notice.getBoundingClientRect();
+      return pointer.x >= box.left && pointer.x <= box.right && pointer.y >= box.top && pointer.y <= box.bottom;
+    };
+    const wait = (ms) => setTimeout(() => {
+      // A newer notice took this place; its own rule decides when it leaves.
+      if (!notice.isConnected || notice.firstChild !== shown) { stop(); return; }
+      if (held()) { wait(1000); return; }
+      stop();
+      notice.remove();
+    }, ms);
+    window.addEventListener('mousemove', track, true);
+    wait(Math.min(12000, 5000 + String(message || '').length * 60));
+  }
+
   function boardNotice(message) {
     let notice = document.getElementById('egd-board-notice');
     if (!notice) {
@@ -6054,7 +6082,7 @@
           conflict.busy = true;
           render();
           const opened = await applyBoardBodyLocally(boardId, conflict.latest.body, { title: conflict.latest.title });
-          if (opened) { close(); boardNotice('최신 버전으로 Board를 열었습니다.'); return; }
+          if (opened) { close(); boardDoneNotice('최신 버전으로 Board를 열었습니다.'); return; }
           Object.assign(conflict, { busy: false, message: '열려 있는 화면을 닫지 못해 최신 버전을 열지 못했습니다. 화면의 상태를 확인한 뒤 다시 시도해 주세요.' });
           render('open-latest');
         },
@@ -6064,7 +6092,7 @@
           const result = await deskStoreSync().saveBoardAsNewVersion(boardId, conflict.snapshot, { title: conflict.title, headRevision: conflict.headRevision });
           if (result.stored === 'both') {
             close();
-            boardNotice(result.unchanged ? '최신 버전과 같은 구성이라 새 버전을 만들지 않았습니다.' : `내 구성을 새 버전 ${result.revision}으로 저장했습니다.`);
+            boardDoneNotice(result.unchanged ? '최신 버전과 같은 구성이라 새 버전을 만들지 않았습니다.' : `내 구성을 새 버전 ${result.revision}으로 저장했습니다.`);
             return;
           }
           Object.assign(conflict, { busy: false, latest: null, headRevision: result.headRevision ?? conflict.headRevision,
@@ -6944,7 +6972,7 @@
     if (!writeBoardLifecycleStore(result, 'Board를 휴지통으로 옮기지 못했습니다. 저장된 Board는 그대로 있습니다.')) return false;
     boardTrashOpen = true;
     syncViewportAgendaRail();
-    boardNotice(`'${result.title}' Board를 휴지통으로 옮겼습니다. Board 목록 아래 휴지통에서 복구할 수 있습니다.`);
+    boardDoneNotice(`'${result.title}' Board를 휴지통으로 옮겼습니다. Board 목록 아래 휴지통에서 복구할 수 있습니다.`);
     focusBoardTrashToggle();
     return true;
   }
@@ -6957,7 +6985,7 @@
       ? 'Board를 보관함으로 옮기지 못했습니다. Board 목록에 그대로 있습니다.'
       : 'Board를 보관함에서 꺼내지 못했습니다. 보관함에 그대로 있습니다.')) return false;
     syncViewportAgendaRail();
-    boardNotice(archived
+    boardDoneNotice(archived
       ? `'${result.title}' Board를 보관함으로 옮겼습니다. Board 목록의 '보관함'에서 다시 꺼낼 수 있습니다.`
       : `'${result.title}' Board를 보관함에서 꺼냈습니다.`);
     (agendaSwitcherRow(agendaId) || document.querySelector('#egd-agenda-switcher .egd-agenda-switch-filter-active'))?.focus?.();
@@ -6968,7 +6996,7 @@
     const result = BoardLifecycle.restoreBoard(coerceAgendaStore(), agendaId, Date.now());
     if (!writeBoardLifecycleStore(result, 'Board를 복구하지 못했습니다. 휴지통에 그대로 있습니다.')) return false;
     syncViewportAgendaRail();
-    boardNotice(result.renamed
+    boardDoneNotice(result.renamed
       ? `같은 이름의 Board가 있어 '${result.title}' 이름으로 복구했습니다. Board 목록에서 열 수 있습니다.`
       : `'${result.title}' Board를 복구했습니다. Board 목록에서 열 수 있습니다.`);
     const row = agendaSwitcherRow(agendaId);
@@ -6983,7 +7011,7 @@
       const result = BoardLifecycle.purgeBoard(coerceAgendaStore(), agendaId);
       if (!writeBoardLifecycleStore(result, 'Board를 삭제하지 못했습니다. 휴지통에 그대로 있습니다.')) return false;
       syncViewportAgendaRail();
-      boardNotice(`'${result.title}' Board를 완전히 삭제했습니다.`);
+      boardDoneNotice(`'${result.title}' Board를 완전히 삭제했습니다.`);
       focusBoardTrashToggle();
       return true;
     };
@@ -6998,7 +7026,7 @@
   // 저장, and one line that says what went in (화면 N개).
   function saveBoardWithNotice(options = {}) {
     const snapshot = saveCurrentAgendaState(options);
-    if (snapshot) boardNotice(BoardLifecycle.boardSavedNotice({ title: snapshot.agenda?.title, count: snapshot.cards?.length, shapeCount: snapshot.shapes?.length }));
+    if (snapshot) boardDoneNotice(BoardLifecycle.boardSavedNotice({ title: snapshot.agenda?.title, count: snapshot.cards?.length, shapeCount: snapshot.shapes?.length }));
     return snapshot;
   }
 
@@ -7024,7 +7052,7 @@
     // Like 저장: a ready Desk store also keeps the new Board as its first version.
     void syncBoardToStore(result.id, result.snapshot, result.title);
     syncViewportAgendaRail();
-    boardNotice(BoardLifecycle.boardSavedAsNotice(result));
+    boardDoneNotice(BoardLifecycle.boardSavedAsNotice(result));
     return result;
   }
 
@@ -7186,10 +7214,12 @@
     return Array.from(ids).map((id) => {
       const snapshot = store.agendas?.[id] || null;
       const meta = store.meta?.[id] || null;
-      const current = id === state.agenda.activeAgendaId;
+      const closedAt = meta?.closedAt || null;
+      // A Board marked closed is not the one on the Desk, even while the Desk
+      // still remembers its id (closed, or deleted and restored from the trash).
+      const current = id === state.agenda.activeAgendaId && !closedAt;
       const updatedAt = snapshot?.savedAt || meta?.updatedAt || meta?.createdAt || null;
       const lastOpenedAt = meta?.lastOpenedAt || null;
-      const closedAt = meta?.closedAt || null;
       const liveCount = current
         ? document.querySelectorAll('.egd-canvas-card, .egd-canvas-shape').length
         : 0;
@@ -8035,7 +8065,7 @@
     const commitScope = memberIds => {
       if (!name.value.trim()) { name.focus(); name.setAttribute('aria-invalid', 'true'); return; }
       const saved = saveCurrentAgendaState({ agendaId: newAgendaId(), title: name.value.trim(), memberIds });
-      if (saved) { dialog.remove(); boardNotice(memberIds.length ? 'Board를 저장하고 그 자리에 묶었습니다.' : 'Board를 저장했습니다. Board 목록에서 열 수 있습니다.'); }
+      if (saved) { dialog.remove(); boardDoneNotice(memberIds.length ? 'Board를 저장하고 그 자리에 묶었습니다.' : 'Board를 저장했습니다. Board 목록에서 열 수 있습니다.'); }
     };
     document.documentElement.appendChild(dialog);
     name.focus();
@@ -8119,7 +8149,8 @@
             entry.current && agendaEntryStatus(entry) !== '현재' ? '현재' : null,
             agendaEntryStatus(entry),
             entry.archived ? '보관됨' : null,
-            SurfaceState.boardEntryRecencyLabel(entry),
+            // '닫힘' already says it; '닫은 기록' would repeat the same state.
+            agendaEntryStatus(entry) === '닫힘' ? null : SurfaceState.boardEntryRecencyLabel(entry),
             SurfaceState.boardItemCountLabel(entry.count),
           ].filter(Boolean).join(' · '),
         ),
@@ -16163,7 +16194,7 @@
         if (!thread) return;
         state.codex.engineMenu = null;
         this.createThread(thread.type, { agentProfileId: thread.agentProfileId, profileEnabled: thread.profileEnabled === true, openConversation: true });
-        boardNotice('새 대화를 열었습니다. 이전 대화 내용은 자동으로 옮겨지지 않습니다.');
+        boardDoneNotice('새 대화를 열었습니다. 이전 대화 내용은 자동으로 옮겨지지 않습니다.');
       },
       // CHAT-09: '기록 없이 시작' on a room that has not sent yet.
       setThreadStateless(threadId, on) {
@@ -16213,7 +16244,7 @@
           state.codex.threads = [forked, ...state.codex.threads];
           state.codex.threadDrafts = { ...(state.codex.threadDrafts || {}), [forked.id]: '' };
           this.selectThread(forked.id, { openConversation: true });
-          boardNotice(fromTurnId ? '선택한 지점까지의 대화를 새 대화방으로 분기했습니다. 원본 대화는 그대로입니다.'
+          boardDoneNotice(fromTurnId ? '선택한 지점까지의 대화를 새 대화방으로 분기했습니다. 원본 대화는 그대로입니다.'
             : '대화를 새 대화방으로 분기했습니다. 원본 대화는 그대로입니다.');
           return result;
         } catch (error) {
