@@ -505,20 +505,6 @@
     return `Agent DM · ${peer}`;
   }
 
-  function codexThreadHeaderSubtitle(thread) {
-    if (!thread) return '';
-    if (thread.profileEnabled !== true) return `Codex · ${codexThreadSessionLabel(thread)}`;
-    const kind = codexThreadLongLabel(thread.type);
-    const session = codexThreadSessionLabel(thread);
-    const profile = codexThreadAgentProfile(thread);
-    if (thread.type === 'group') {
-      const count = Math.max(0, (thread.participants || []).length);
-      return `${kind} · 멤버 ${count}명 · ${session} · ${profile.label}`;
-    }
-    const peer = (thread.participants || []).find((name) => name !== SELF_MEMBER) || 'Agent';
-    return `${kind} · ${peer} · ${session} · ${profile.label}`;
-  }
-
   function createCodexThread(type, title, subtitle = '', options = {}) {
     const participants = Array.isArray(options.participants) && options.participants.length > 0
       ? uniqueNames(options.participants)
