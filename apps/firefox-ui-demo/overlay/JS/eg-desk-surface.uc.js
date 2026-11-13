@@ -17087,23 +17087,44 @@
       },
     });
 
+    // Same title row as every Desk window: dots, grip, icon and the name '설정'.
+    // Settings does not fold, so it shows no yellow dot.
+    const closeControl = el('span', {
+      class: 'egd-card-dot egd-card-dot-close egd-desk-window-control', role: 'button', tabindex: '0',
+      title: '창 닫기', 'aria-label': '창 닫기',
+      onclick: (ev) => { ev.stopPropagation(); closeCanvasCard(card); },
+    });
     const maximizeControl = el('span', {
       class: 'egd-card-dot egd-card-dot-max egd-desk-window-control', role: 'button', tabindex: '0',
-      title: '설정 창 최대화 또는 복원', 'aria-label': '설정 창 최대화 또는 복원',
-      onclick: (ev) => { ev.stopPropagation(); toggleCardFullscreen(card); },
+      title: '창 최대화', 'aria-label': '창 최대화', 'aria-pressed': 'false',
+      onclick: (ev) => { ev.stopPropagation(); toggleCardFullscreen(card); syncMaximizeControl(); },
     });
-    maximizeControl.addEventListener('keydown', (ev) => {
-      if (ev.key !== 'Enter' && ev.key !== ' ') return;
-      ev.preventDefault(); ev.stopPropagation(); maximizeControl.click();
-    });
+    for (const control of [closeControl, maximizeControl]) {
+      control.addEventListener('keydown', (ev) => {
+        if (ev.key !== 'Enter' && ev.key !== ' ') return;
+        ev.preventDefault(); ev.stopPropagation(); control.click();
+      });
+    }
+    // The green dot names what a press does now. Maximize can also end from
+    // outside this window, so the card class is watched as well.
+    const syncMaximizeControl = () => {
+      const maximized = !!card.classList?.contains('egd-card-fullscreen');
+      const label = maximized ? '원래 크기로' : '창 최대화';
+      maximizeControl.setAttribute('title', label);
+      maximizeControl.setAttribute('aria-label', label);
+      maximizeControl.setAttribute('aria-pressed', String(maximized));
+    };
+    const controlObserver = typeof MutationObserver === 'function' ? new MutationObserver(syncMaximizeControl) : null;
+    controlObserver?.observe(card, { attributes: true, attributeFilter: ['class'] });
     const header = el('div', { class: 'egd-card-header' },
-      el('div', { class: 'egd-card-topbar' },
+      el('div', { class: 'egd-card-topbar egd-desk-window-titlebar' },
         el('div', { class: 'egd-card-dots-shell' },
-          el('div', { class: 'egd-card-dots' },
-            el('span', { class: 'egd-card-dot egd-card-dot-close', onclick: (ev) => { ev.stopPropagation(); closeCanvasCard(card); } }),
-            el('span', { class: 'egd-card-dot egd-card-dot-min' }),
-            maximizeControl,
-          ),
+          el('div', { class: 'egd-card-dots' }, closeControl, maximizeControl),
+        ),
+        el('span', { class: 'egd-window-grip', 'aria-hidden': 'true' }, deskIcon('grip')),
+        el('div', { class: 'egd-desk-window-identity' },
+          deskIcon('settings', 'egd-ui-icon egd-window-kind-icon'),
+          el('strong', { class: 'egd-settings-title' }, '설정'),
         ),
       ),
     );
@@ -18148,19 +18169,58 @@
       ev.preventDefault();
     });
     installCardHeaderFullscreenToggle(card, header);
+    // Resize from any edge or corner, like every other Desk window. The
+    // smallest size matches .egd-settings-card in the stylesheet.
+    let resize = null;
+    const minWidth = 420, minHeight = 320;
+    for (const hit of resizeHits) {
+      hit.addEventListener('mousedown', (ev) => {
+        if (ev.button !== 0 || isCardFullscreen(card)) return;
+        focusCanvasCard(card);
+        resize = {
+          edges: JSON.parse(hit.dataset.edges), x: ev.clientX, y: ev.clientY,
+          left: card.offsetLeft, top: card.offsetTop, width: card.offsetWidth, height: card.offsetHeight,
+        };
+        ev.preventDefault();
+        ev.stopPropagation();
+      });
+    }
     const onMove = (ev) => {
-      if (!drag) return;
       const s = canvasZoom();
-      card.style.left = (drag.left + (ev.clientX - drag.x) / s) + 'px';
-      card.style.top = (drag.top + (ev.clientY - drag.y) / s) + 'px';
+      if (drag) {
+        card.style.left = (drag.left + (ev.clientX - drag.x) / s) + 'px';
+        card.style.top = (drag.top + (ev.clientY - drag.y) / s) + 'px';
+        return;
+      }
+      if (!resize) return;
+      const dx = (ev.clientX - resize.x) / s;
+      const dy = (ev.clientY - resize.y) / s;
+      let { left, top, width, height } = resize;
+      if (resize.edges.right) width = Math.max(minWidth, resize.width + dx);
+      if (resize.edges.bottom) height = Math.max(minHeight, resize.height + dy);
+      if (resize.edges.left) {
+        width = Math.max(minWidth, resize.width - dx);
+        left = resize.left + (resize.width - width);
+      }
+      if (resize.edges.top) {
+        height = Math.max(minHeight, resize.height - dy);
+        top = resize.top + (resize.height - height);
+      }
+      card.style.left = left + 'px';
+      card.style.top = top + 'px';
+      card.style.width = width + 'px';
+      card.style.height = height + 'px';
     };
     const onUp = () => {
       if (drag) markAgendaDirty('move-settings-card', card);
+      if (resize) markAgendaDirty('resize-settings-card', card);
       drag = null;
+      resize = null;
     };
     document.addEventListener('mousemove', onMove);
     document.addEventListener('mouseup', onUp);
     card._cleanup = () => {
+      try { controlObserver?.disconnect(); } catch {}
       cancelProfileDuplicate();
       profileReadSequence++;
       profileTransfer.dispose();

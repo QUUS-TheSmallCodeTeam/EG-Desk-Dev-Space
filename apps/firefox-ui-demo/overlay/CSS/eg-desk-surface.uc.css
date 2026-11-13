@@ -5730,6 +5730,8 @@
   min-width: 420px;
   min-height: 320px;
 }
+/* The window name in the title row, next to the Settings icon. */
+.egd-settings-title { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--egd-on-surface); }
 .egd-settings-card .egd-card-body {
   display: flex;
   flex-direction: column;
