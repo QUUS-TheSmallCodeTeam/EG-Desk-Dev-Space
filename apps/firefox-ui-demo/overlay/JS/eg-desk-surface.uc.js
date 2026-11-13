@@ -9592,7 +9592,8 @@
         window.removeEventListener('resize', onResize);
       };
 
-      (dock.parentNode || document.documentElement).appendChild(menu);
+      // Mounted where the Board and Desk menus are, so it takes clicks the same way.
+      document.documentElement.appendChild(menu);
       syncDockState(dock);
       // Sits above the Dock, centred on [새 카드], kept inside the window.
       const anchorRect = anchor.getBoundingClientRect(), dockRect = dock.getBoundingClientRect();
