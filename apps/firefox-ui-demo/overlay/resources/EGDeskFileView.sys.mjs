@@ -405,7 +405,9 @@ export function createEGDeskFileView({ document, service, chooseRoot, chooseProj
   const searchResults = el('div', 'egdesk-file-search-results')
   const workspace = el('section', 'egdesk-file-workspace')
   layout(workspace, 'min-width: 0;')
-  const title = el('h2', 'egdesk-file-title', '파일을 선택하세요')
+  // Empty until a folder or file names it: the Desk reads this as the window's
+  // name (minimap, recommended material) and falls back to '파일' while it is empty.
+  const title = el('h2', 'egdesk-file-title', '')
   layout(title, 'min-width: 0; flex-shrink: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;')
   const setTitle = text => { title.textContent = text; title.title = text }
   const fileDetails = el('details', 'egdesk-file-details')

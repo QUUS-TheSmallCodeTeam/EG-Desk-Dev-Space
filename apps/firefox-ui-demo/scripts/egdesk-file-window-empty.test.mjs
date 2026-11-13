@@ -106,6 +106,8 @@ test('a new File window shows one prompt and the connect buttons, with no search
     '.egdesk-file-details', '.egdesk-file-actions', '.egdesk-file-review-button', '.egdesk-file-save-button', '.egdesk-file-save-as-button']) {
     assert.equal(shown(h, selector), false, `${selector} is not shown before a folder is connected`);
   }
+  // The Desk names the window from this title; an instruction is not a name.
+  assert.equal(h.find('.egdesk-file-title').textContent, '');
   // Order in the document follows the reading order: prompt, then its buttons.
   assert.deepEqual(h.view.element.children.slice(0, 2).map(node => node.className), ['egdesk-file-empty', 'egdesk-file-toolbar']);
 });
@@ -168,7 +170,10 @@ test('File window CSS uses the shared font, token buttons and inputs, and a cent
   assert.match(button, /border:\s*1px solid var\(--egd-outline\)/);
   assert.match(button, /background:\s*var\(--egd-surface-elevated\)/);
   assert.match(button, /min-height:\s*28px/);
-  assert.match(declarations('.egdesk-file-view button:hover:not(:disabled)'), /background:\s*var\(--egd-hover\)/);
+  assert.match(declarations('.egdesk-file-view button:hover:not(:disabled):not([aria-disabled="true"])'), /background:\s*var\(--egd-hover\)/);
+  assert.match(declarations('.egdesk-file-view button:active:not(:disabled):not([aria-disabled="true"])'), /background:\s*var\(--egd-primary-container\)/);
+  // The filled button keeps a readable face while pressed, not the pale pressed tint.
+  assert.match(declarations('.egdesk-file-view[data-file-state="empty"] .egdesk-file-connect:active:not(:disabled)'), /background:\s*var\(--egd-primary-strong\)/);
   const focus = declarations('.egdesk-file-view button:focus-visible');
   assert.match(focus, /outline:\s*var\(--egd-focus-outline\)/);
   assert.match(focus, /outline-offset:\s*var\(--egd-focus-outline-offset\)/);

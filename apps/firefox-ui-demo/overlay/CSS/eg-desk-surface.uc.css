@@ -5488,7 +5488,8 @@
 .egdesk-file-view[data-file-state="empty"] .egdesk-file-toolbar { grid-row: 2; align-self: start; justify-content: center; padding: 0 24px 16px; border-bottom: 0; }
 .egdesk-file-view[data-file-state="empty"] .egdesk-file-connections { flex-direction: column; }
 .egdesk-file-view[data-file-state="empty"] .egdesk-file-connect { min-height: 34px; padding: 6px 20px; border-color: var(--egd-primary); background: var(--egd-primary); color: var(--egd-on-primary); font-size: 13px; }
-.egdesk-file-view[data-file-state="empty"] .egdesk-file-connect:hover:not(:disabled) { background: var(--egd-primary-strong); border-color: var(--egd-primary-strong); }
+.egdesk-file-view[data-file-state="empty"] .egdesk-file-connect:hover:not(:disabled),
+.egdesk-file-view[data-file-state="empty"] .egdesk-file-connect:active:not(:disabled) { background: var(--egd-primary-strong); border-color: var(--egd-primary-strong); }
 .egdesk-file-view[data-file-state="empty"] .egdesk-file-project-connect { border-color: transparent; background: transparent; color: var(--egd-on-surface-variant); }
 .egdesk-file-view[data-file-state="empty"] .egdesk-file-project-connect:hover:not(:disabled) { background: var(--egd-hover); color: var(--egd-on-surface); }
 /* A restored working copy without its folder has no tree column. */
@@ -5528,9 +5529,10 @@
 .egdesk-file-viewer { overflow: auto; flex: 1; padding: 10px 0; color: var(--egd-on-surface-variant); }
 .egdesk-file-actions { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 10px; }
 .egdesk-file-view button { box-sizing: border-box; min-height: 28px; padding: 4px 11px; border: 1px solid var(--egd-outline); border-radius: 7px; color: var(--egd-on-surface); background: var(--egd-surface-elevated); font: 600 12px/1.4 var(--egd-font); cursor: pointer; }
-.egdesk-file-view button:hover:not(:disabled) { background: var(--egd-hover); }
-.egdesk-file-view button:active:not(:disabled) { background: var(--egd-primary-container); }
-.egdesk-file-view button:focus-visible { outline: var(--egd-focus-outline); outline-offset: var(--egd-focus-outline-offset); }
+.egdesk-file-view button:hover:not(:disabled):not([aria-disabled="true"]) { background: var(--egd-hover); }
+.egdesk-file-view button:active:not(:disabled):not([aria-disabled="true"]) { background: var(--egd-primary-container); }
+.egdesk-file-view button:focus-visible,
+.egdesk-file-script-fields input:focus-visible { outline: var(--egd-focus-outline); outline-offset: var(--egd-focus-outline-offset); }
 .egdesk-file-view button:disabled { opacity: var(--egd-opacity-disabled); cursor: default; }
 .egdesk-file-view button[aria-disabled="true"] { opacity: var(--egd-opacity-disabled); cursor: default; }
 /* '이름 / 내용' and the change scope are single-choice groups: the chosen one is tinted. */
