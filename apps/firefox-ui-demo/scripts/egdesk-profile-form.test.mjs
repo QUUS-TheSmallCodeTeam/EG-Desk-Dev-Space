@@ -4,6 +4,8 @@ import { Readable } from 'node:stream';
 import test from 'node:test';
 import { compileFunction, runInNewContext } from 'node:vm';
 import * as ChatState from '../overlay/resources/EGDeskChatState.sys.mjs';
+import * as Surface from '../overlay/resources/EGDeskSurfaceState.sys.mjs';
+import * as AccountSettingsView from '../overlay/resources/EGDeskAccountSettingsView.sys.mjs';
 import * as ProfileTransfer from '../overlay/resources/EGDeskProfileTransfer.sys.mjs';
 import * as ProfileTransferView from '../overlay/resources/EGDeskProfileTransferView.sys.mjs';
 import {
@@ -69,14 +71,16 @@ function imageSettingsHarness() {
   const nativeTextGlueHarness = () => ({ files: new Map(), pickers: [],
     adapter: { readText: async () => ({ cancelled: true }), saveText: async () => ({ cancelled: true }) } });
   return compileFunction([
+    // This section also carries the shared fixture's bridge-notice helper, which
+    // the Settings account tab reads through the real Surface and account view modules.
     between('function settingsFakeDocument()', "test('production Settings card"),
     between('function profileTransferBridgeMethods(', 'function portableSettingsHarness('),
     between('function portableSettingsHarness(', 'async function duplicateSettingsHarness('),
     'return { portableSettingsHarness, settingsButton, settingsNodes, settle };',
   ].join('\n'), ['surfaceSource', 'declaration', 'assert', 'compileFunction', 'Chat', 'ProfileTransfer', 'ProfileTransferView',
-    'nativeTextGlueHarness', 'normalizeProfileBody', 'profileHash', 'Surface'])(
+    'nativeTextGlueHarness', 'normalizeProfileBody', 'profileHash', 'Surface', 'AccountSettingsView'])(
     surfaceSource, declaration, assert, compileFunction, ChatState, ProfileTransfer, ProfileTransferView,
-    nativeTextGlueHarness, normalizeProfileBody, profileHash, null);
+    nativeTextGlueHarness, normalizeProfileBody, profileHash, Surface, AccountSettingsView);
 }
 
 test('form limits expose the exact backend personality limits without changing the established limits', () => {
