@@ -316,3 +316,31 @@ test('the frame page takes the host window colours when it is framed and keeps i
   assert.deepEqual({ ...run({ frameElement: null, parent: {} }, document) }, {}, 'opened alone: the page fallbacks stand');
   assert.deepEqual({ ...run({ get frameElement() { throw new Error('cross-origin'); } }, document) }, {}, 'an unreadable host never breaks the terminal');
 });
+
+test('deleting a selected window goes through that window\'s own close gate', () => {
+  const body = surface.match(/^  function deleteSelectedEntities\(\) \{([\s\S]*?)^  \}/m)?.[1];
+  assert.ok(body, 'exercise the production delete path');
+  const calls = [];
+  const classes = (...names) => ({ contains: name => names.includes(name) });
+  const terminal = { id: 'terminal', classList: classes('egd-canvas-card'), _deskWindowShell: { requestClose: () => { calls.push('gate:terminal'); return false; } } };
+  const chat = { id: 'chat', classList: classes('egd-canvas-card') };
+  const shape = { id: 'shape', classList: classes('egd-canvas-shape'), _cleanup: () => calls.push('cleanup:shape'), remove: () => calls.push('remove:shape') };
+  compileFunction(body, ['document', 'closeCanvasCard', 'markAgendaDirty', 'setActiveEntity'])(
+    { querySelectorAll: selector => { assert.equal(selector, '.egd-entity-selected'); return [terminal, chat, shape]; } },
+    card => calls.push(`close:${card.id}`), (reason, entity) => calls.push(`${reason}:${entity.id}`), value => calls.push(`active:${value}`));
+  assert.deepEqual(calls, ['gate:terminal', 'close:chat', 'cleanup:shape', 'remove:shape', 'delete-shape:shape', 'active:null'],
+    'a running Terminal is asked instead of being removed; windows without a gate and shapes behave as before');
+});
+
+test('a close that is refused names the kind of window that was kept', async () => {
+  const body = surface.match(/^  function closeCanvasCard\(card, cleanup\) \{([\s\S]*?)^  \}/m)?.[1];
+  assert.ok(body, 'exercise the production close path');
+  const notices = [];
+  const close = compileFunction(body, ['card', 'cleanup', 'closeCanvasCard', 'boardNotice']);
+  const refuse = kind => close({ dataset: kind ? { deskWindowKind: kind } : {}, _beforeClose: async () => { throw new Error('사유'); }, remove: () => assert.fail('the window stays') },
+    undefined, () => assert.fail('not approved'), text => notices.push(text));
+  assert.deepEqual([await refuse('terminal'), await refuse('file'), await refuse('memo'), await refuse(null), await refuse('toString')],
+    [false, false, false, false, false]);
+  assert.deepEqual(notices, ['터미널 창을 유지했습니다: 사유', '파일 창을 유지했습니다: 사유', '메모 창을 유지했습니다: 사유',
+    '창을 유지했습니다: 사유', '창을 유지했습니다: 사유']);
+});
