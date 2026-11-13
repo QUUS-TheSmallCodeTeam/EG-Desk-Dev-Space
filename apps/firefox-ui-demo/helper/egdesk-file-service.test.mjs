@@ -1440,7 +1440,15 @@ test('File view hosts the change review: chunk revert writes against the read ha
   files.set('src/a.txt', 'a\nB\nc\nD\nuser\n')
   panel.querySelectorAll('.egdesk-change-review-revert')[0].click(); await settle(10)
   assert.equal(writes.length, 2)
-  assert.match(panel.querySelector('.egdesk-change-review-error').textContent, /다시 읽어 왔습니다/)
+  assert.match(panel.querySelector('.egdesk-change-review-error').textContent, /열 때와 달라 쓰지 않았습니다\. 다시 읽은 내용과의 비교를 아래에 보여 줍니다/)
+  // The re-read is shown as a comparison of what the review read (−) against the file now (+); undo is gone with its baseline.
+  const conflict = panel.querySelector('.egdesk-change-review-conflict')
+  assert.ok(conflict, 'the comparison block is shown in the File view panel')
+  assert.match(conflict.textContent, new RegExp(`${sha('a\nB\nc\nD\n').slice(0, 12)} → ${sha('a\nB\nc\nD\nuser\n').slice(0, 12)}`))
+  assert.deepEqual(conflict.querySelectorAll('.egdesk-diff-line-add').map(line => line.querySelector('.egdesk-diff-text').textContent), ['user'])
+  assert.equal(review.snapshot().files[0].conflict, true)
+  assert.equal(review.snapshot().files[0].sha256, sha('a\nB\nc\nD\nuser\n'), 're-read, so the next write is checked against the file as it is now')
+  assert.equal(review.snapshot().canUndo, false)
   // Created file: propose, confirm, remove.
   panel.querySelector('.egdesk-change-review-delete').click(); await settle()
   assert.equal(writes.some(write => write[0] === 'delete'), false, 'nothing is removed before confirmation')
