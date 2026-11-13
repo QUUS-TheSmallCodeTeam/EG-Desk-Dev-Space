@@ -956,7 +956,8 @@ export async function runPortableTransferFlow({ harness, result, check }, { prof
     proof.beforeMissingHead, proof.missingHead.after, missingBoard.boardId, ui));
   await click(testid('board-canvas-close'), 'close missing-head reason');
 
-  await click('#egd-dock .egd-dock-btn[data-id="settings"]', 'native Settings Dock');
+  await click('#egd-dock .egd-dock-btn[data-id="create"]', 'open the 새 카드 menu from the Dock');
+  await click('#egd-dock-menu .egd-dock-menu-item[data-id="settings"]', 'native Settings from the 새 카드 menu');
   ui = await waitUi(value => !!value.settingsId);
   if (ui.settingsProxy?.visible) await click(`${selectorForId(ui.settingsId)} > .egd-semantic-proxy`, 'native Settings summary focus');
   await click(`${selectorForId(ui.settingsId)} .egd-card-dot-max`, 'native Settings maximize for readable transfer review');
