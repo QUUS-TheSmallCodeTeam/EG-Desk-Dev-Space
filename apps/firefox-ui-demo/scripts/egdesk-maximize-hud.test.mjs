@@ -138,6 +138,25 @@ test('surface: the top-bar badge buttons take clicks instead of dragging the win
   assert.match(rule[1], /cursor:\s*pointer/);
 });
 
+test('surface: while a window is shown large the top-bar name and badge keep their full text', () => {
+  // The quiet record status leaves instead of shrinking to a stub; a failure still shows.
+  assert.match(css, /@media \(max-width: 1599px\) \{\n  :root\.egd-card-fullscreen-active \.egd-rail-record-status:not\(\[data-state="failed"\]\) \{ display: none; \}\n\}/);
+  // Shrink is shared in proportion, so each tier must outweigh the next by far: record status, Board name, badge.
+  const shrink = (selector) => {
+    const escaped = selector.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    const found = css.match(new RegExp(`\\n\\s*${escaped} \\{[^}]*?flex(?:-shrink)?: (?:0 )?(\\d+)`));
+    assert.ok(found, `${selector} declares its shrink weight`);
+    return Number(found[1]);
+  };
+  const record = shrink('.egd-rail-record-status');
+  const switcherLarge = shrink(':root.egd-card-fullscreen-active .egd-rail-switcher');
+  const recordLarge = shrink(':root.egd-card-fullscreen-active .egd-rail-record-status:not([data-state="failed"])');
+  assert.ok(record >= 10000, 'the record status takes the whole squeeze before the Board name loses a pixel');
+  assert.ok(switcherLarge >= 10000, 'the Board name gives way before the badge');
+  assert.ok(recordLarge >= switcherLarge * 10000, 'the record status still gives way before the Board name');
+  assert.match(css, /\.egd-rail-presentation \{[^}]*flex: 0 1 auto;/, 'the badge group shrinks last, with weight 1');
+});
+
 test('surface: maximize keeps Desk chrome for every View type; only focus view hides it', () => {
   const enter = functionBody('enterCardFullscreen');
   assert.match(enter, /mode: focusView \? 'focus' : 'maximized'/);
