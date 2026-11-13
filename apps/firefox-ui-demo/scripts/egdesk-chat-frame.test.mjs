@@ -79,6 +79,24 @@ test('the Chat window carries the shared bar: three dots, name, Board, one actio
   assert.match(spawnBody, /onclick: \(ev\) => \{ ev\.stopPropagation\(\); closeCanvasCard\(card, cleanup\); \}/);
   assert.match(spawnBody, /onclick: \(ev\) => \{ ev\.stopPropagation\(\); toggleCardFullscreen\(card\); \}/);
   assert.match(spawnBody, /if \(ev\.key !== 'Enter' && ev\.key !== ' '\) return;/, 'the dots answer the keyboard');
+  // The yellow dot folds the Chat window like every other Desk Window, and both dots name what a press does now.
+  const minimize = spawnBody.match(/    const minimizeControl = el\('span', \{[\s\S]*?\n    \}\);/)?.[0] || '';
+  assert.ok(minimize.includes("class: 'egd-card-dot egd-card-dot-min egd-desk-window-control',") && minimize.includes("role: 'button'")
+    && minimize.includes("tabindex: '0'") && minimize.includes("title: '창 접기'") && minimize.includes("'aria-label': '창 접기'"), 'the yellow dot is a live control');
+  assert.ok(!minimize.includes('egd-desk-window-control-disabled') && !minimize.includes('aria-disabled'));
+  assert.match(minimize, /onclick: \(ev\) => \{ ev\.stopPropagation\(\); setCollapsed\(!isCollapsed\(\)\); \}/);
+  assert.match(spawnBody, /for \(const control of \[closeControl, minimizeControl, maximizeControl\]\) \{/);
+  assert.match(spawnBody, /const maximizeLabel = maximized \? '원래 크기로' : '창 최대화';/);
+  assert.match(spawnBody, /const minimizeLabel = collapsed \? '창 펼치기' : '창 접기';/);
+  assert.match(spawnBody, /if \(maximized && isCollapsed\(\)\) \{ setCollapsed\(false\); return; \}/, 'a maximized Chat window is never left folded');
+  assert.match(spawnBody, /if \(next && isCardFullscreen\(card\)\) toggleCardFullscreen\(card\);\n      card\.classList\.toggle\('egd-card-collapsed', next\);/);
+  assert.match(spawnBody, /new MutationObserver\(syncWindowControls\)[\s\S]*?controlObserver\?\.observe\(card, \{ attributes: true, attributeFilter: \['class'\] \}\);/);
+  assert.match(spawnBody, /requestClose: \(\) => closeCanvasCard\(card, cleanup\),\n      isCollapsed,\n      setCollapsed,\n      syncWindowControls,\n    \};/,
+    'double-click on the bar and Desk restore reach the same fold');
+  assert.match(spawnBody, /try \{ controlObserver\?\.disconnect\(\); \} catch \{\}/);
+  assert.match(surfaceCss, /^\.egd-canvas-card\.egd-card-collapsed:not\(\.egd-card-fullscreen\) > \.egd-chat-card-body \{\n  display: none !important;\n\}/m,
+    'folded, the Chat window shows only its bar');
+  assert.match(surfaceCss, /^\.egd-canvas-card\.egd-card-collapsed:not\(\.egd-card-fullscreen\) > \.egd-chat-card-head > \.egd-chat-card-header:last-child \{\n  border-bottom-color: transparent;\n  border-radius: 8px;\n\}/m);
   // The same Board control and menu the other Desk Windows use.
   assert.match(spawnBody, /class: 'egd-desk-window-board', role: 'note', hidden: true/);
   assert.match(spawnBody, /class: 'egd-desk-window-board-menu'[\s\S]*?state\.toggleViewBoardMenu\?\.\(card, ev\.currentTarget\)/);

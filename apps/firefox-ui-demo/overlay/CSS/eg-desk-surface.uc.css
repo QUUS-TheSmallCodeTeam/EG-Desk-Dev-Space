@@ -2247,6 +2247,14 @@
   /* The title row is the whole window now, so all four corners are round. */
   border-radius: 8px;
 }
+/* The Chat window folds the same way: its body goes and its bar is the window. */
+.egd-canvas-card.egd-card-collapsed:not(.egd-card-fullscreen) > .egd-chat-card-body {
+  display: none !important;
+}
+.egd-canvas-card.egd-card-collapsed:not(.egd-card-fullscreen) > .egd-chat-card-head > .egd-chat-card-header:last-child {
+  border-bottom-color: transparent;
+  border-radius: 8px;
+}
 
 .egd-desk-window-control-disabled {
   opacity: var(--egd-opacity-disabled);
