@@ -218,6 +218,34 @@
   }
 }
 
+/* A30 / A34 (BRW-01, DSN-04): shared pressed and keyboard-focus states.
+   The veil is the text ink at low strength, so it deepens a light fill and
+   lifts a dark one without a per-theme value; the always-light Ontology lens
+   resolves its own. */
+:root,
+.egd-ontology-card {
+  --egd-pressed-veil: color-mix(in srgb, var(--egd-on-surface) 8%, transparent);
+}
+
+/* Pressed: one step past whatever fill the control shows at that moment
+   (resting, hover or filled primary). It is a background layer, so nothing
+   moves or resizes. Selector weight stays at zero; !important is only there
+   because hover rules reset the background shorthand. :root carries egd-
+   state classes, so it is excluded to leave Firefox's own buttons alone, and
+   a row does not press when a button inside it does. */
+:where([class*="egd-"], [id^="egd-"]):where(button, summary, [role="button"], [role="tab"], [role="menuitem"], [role="menuitemradio"], [role="menuitemcheckbox"], [role="option"], [role="switch"]):where(:active:not(:disabled, [disabled], [aria-disabled="true"], .egd-desk-window-control-disabled):not(:has(:is(button, summary, [role="button"], [role="tab"], [role="menuitem"], [role="menuitemradio"], [role="menuitemcheckbox"], [role="option"], [role="switch"]):active))),
+:where([class*="egd-"], [id^="egd-"]):where(:not(:root)) :where(button, summary, [role="button"], [role="tab"], [role="menuitem"], [role="menuitemradio"], [role="menuitemcheckbox"], [role="option"], [role="switch"]):where(:active:not(:disabled, [disabled], [aria-disabled="true"], .egd-desk-window-control-disabled):not(:has(:is(button, summary, [role="button"], [role="tab"], [role="menuitem"], [role="menuitemradio"], [role="menuitemcheckbox"], [role="option"], [role="switch"]):active))) {
+  background-image: linear-gradient(var(--egd-pressed-veil), var(--egd-pressed-veil)) !important;
+}
+
+/* Focus fallback: any button-like control without its own rule still shows
+   the shared ring. Zero weight, so every class rule above or below wins. */
+:where([class*="egd-"], [id^="egd-"]):where(button, summary, a[href], [role="button"], [role="tab"], [role="menuitem"], [role="menuitemradio"], [role="menuitemcheckbox"], [role="option"], [role="switch"], [role="radio"]):where(:focus-visible),
+:where([class*="egd-"], [id^="egd-"]):where(:not(:root)) :where(button, summary, a[href], [role="button"], [role="tab"], [role="menuitem"], [role="menuitemradio"], [role="menuitemcheckbox"], [role="option"], [role="switch"], [role="radio"]):where(:focus-visible) {
+  outline: var(--egd-focus-outline);
+  outline-offset: var(--egd-focus-outline-offset);
+}
+
 .egd-ui-icon {
   display: block;
   flex: none;
@@ -2572,6 +2600,12 @@
 .egd-rail-search-result-active {
   border-color: color-mix(in srgb, var(--egd-primary) 18%, transparent);
   background: color-mix(in srgb, var(--egd-surface-elevated) 68%, transparent);
+}
+/* Full-width rows in a scrolling list: the ring stays inside the row. */
+.egd-rail-search-result:focus-visible {
+  --egd-focus-outline-offset: var(--egd-focus-outline-inset);
+  outline: var(--egd-focus-outline);
+  outline-offset: var(--egd-focus-outline-offset);
 }
 
 .egd-rail-search-type {
