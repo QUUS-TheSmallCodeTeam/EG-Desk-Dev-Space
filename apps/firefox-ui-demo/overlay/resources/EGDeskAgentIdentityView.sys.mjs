@@ -32,6 +32,45 @@ export function agentAvatarImageSource(payload, assetId) {
   return `data:${mediaType};base64,${base64}`;
 }
 
+// AGENT-05: a photo that could not be read (the bridge was not up yet, a
+// dropped connection) is asked for again after these waits, then left alone.
+export const AVATAR_RETRY_DELAYS_MS = Object.freeze([2000, 8000, 30000]);
+
+/**
+ * Agent photos by asset id for one session. `get` answers the data: URL once
+ * the photo has been read and null until then (the letter face stands in).
+ * `load(assetId)` resolves the GET /profiles/avatar-images/:id reply; a read
+ * that fails or is not the photo asked for is tried again after each wait in
+ * `retryDelays`, and `onChange` runs when a photo arrives.
+ */
+export function createAvatarImageCache({ load, onChange, setTimer = (run, delay) => globalThis.setTimeout(run, delay), retryDelays = AVATAR_RETRY_DELAYS_MS } = {}) {
+  const sources = new Map();
+  const failures = new Map();
+  const read = (assetId) => {
+    Promise.resolve().then(() => load(assetId)).then((payload) => {
+      const source = agentAvatarImageSource(payload, assetId);
+      if (!source) throw new Error('The photo could not be read');
+      sources.set(assetId, source);
+      failures.delete(assetId);
+      onChange?.();
+    }).catch(() => {
+      const failed = failures.get(assetId) || 0;
+      if (failed >= retryDelays.length) return;
+      failures.set(assetId, failed + 1);
+      setTimer(() => { if (!sources.get(assetId)) read(assetId); }, retryDelays[failed]);
+    });
+  };
+  return {
+    get(assetId) {
+      if (!isAvatarAssetId(assetId)) return null;
+      if (sources.has(assetId)) return sources.get(assetId);
+      sources.set(assetId, null);
+      read(assetId);
+      return null;
+    },
+  };
+}
+
 /** The avatar an answer shows: the one captured at send; older answers borrow the room Agent's while the name still matches. */
 export function messageAuthorAvatar(message, author, roomProfile = null) {
   if (message?.role !== 'assistant') return null;

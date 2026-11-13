@@ -619,7 +619,6 @@
       messageThreadMap: {},
       pendingThreadId: null,
       threadNonce: 0,
-      memberNonce: 0,
       threadQuery: '',
       threadFilter: 'all',
       hudView: 'conversation',
@@ -10418,6 +10417,9 @@
     return { menu };
   }
 
+  // CHAT-10: Board Thread members and the '초대' list (pure view models).
+  const ThreadMembers = ChromeUtils.importESModule('chrome://userchrome/content/EGDeskThreadMembers.sys.mjs');
+
   function mountCodexHUD(body, codexBridge, options = {}) {
     let unsubscribe = null;
     let composerObserver = null;
@@ -10519,6 +10521,7 @@
       onMessageScrollGesture(ev);
       if (target.closest('.egd-codex-thread-member-menu')) return;
       if (target.closest('.egd-codex-thread-member-clickable')) return;
+      if (target.closest('.egd-codex-thread-invite-trigger')) return;
       if (target.closest('.egd-codex-thread-menu')) return;
       if (target.closest('.egd-codex-thread-menu-trigger')) return;
       if (target.closest('.egd-codex-message-menu-trigger')) return;
@@ -10528,6 +10531,8 @@
     };
     const onViewportMutate = (ev) => {
       if (ev.type === 'wheel') onMessageScrollGesture(ev);
+      // A long '초대' list scrolls in place; the wheel over it does not close it.
+      if (ev.type === 'wheel' && ev.target?.closest?.('.egd-codex-thread-invite-menu')) return;
       closeFloatingMenus();
     };
     document.addEventListener('mousedown', onDocumentMouseDown, true);
@@ -11253,70 +11258,161 @@
             conversation.appendChild(renderThreadMenu(activeThread));
           }
         } else {
-          const memberRow = activeThread.type === 'group' ? el('div', { class: 'egd-codex-thread-members' }) : null;
-          for (const member of (activeThread.participants || []).slice(0, 4)) {
+          // CHAT-10: who is in this Board Thread — each member as a face and a
+          // name, with a status dot only when a run of that Agent in this room
+          // says so (ThreadMembers.memberChipViews). '초대' lists the saved Agents.
+          const memberRoomProfile = activeThread.profileEnabled === true ? codexThreadAgentProfile(activeThread) : null;
+          const memberView = ThreadMembers.memberChipViews(activeThread, {
+            profiles: codexProfileCatalog.profiles, runs: codexRuns(activeThread), roomAgentName: memberRoomProfile?.name || 'Codex',
+            connected: activeEngine.engineId === 'claude' ? activeEngine.ready : codex.connected, selfName: SELF_MEMBER,
+          });
+          const focusMemberControl = (key) => [...body.querySelectorAll('[data-focus-key]')]
+            .find((node) => node.dataset.focusKey === key)?.focus({ preventScroll: true });
+          // Esc closes the list and hands focus back to what opened it; the arrow keys walk its rows.
+          const memberMenuKeydown = (returnFocusKey) => (ev) => {
+            const items = [...ev.currentTarget.querySelectorAll('button:not([disabled])')];
+            const at = items.indexOf(document.activeElement);
+            const step = ev.key === 'ArrowDown' ? 1 : ev.key === 'ArrowUp' ? -1 : 0;
+            if (ev.key === 'Escape') {
+              codexBridge.closeMemberMenu();
+              focusMemberControl(returnFocusKey);
+            } else if (step && items.length) {
+              items[(at + step + items.length) % items.length].focus({ preventScroll: true });
+            } else if ((ev.key === 'Home' || ev.key === 'End') && items.length) {
+              items[ev.key === 'Home' ? 0 : items.length - 1].focus({ preventScroll: true });
+            } else {
+              return;
+            }
+            ev.preventDefault();
+            ev.stopPropagation();
+          };
+          const memberFace = (avatar, name, className) => {
+            const face = codexMessageAvatarFace(avatar, name);
+            return el('span', { class: `egd-codex-message-avatar ${className}${face.toneClass}`, 'aria-hidden': 'true' },
+              face.photo ? el('img', { class: 'egd-profile-avatar-image', src: face.photo, alt: '', draggable: 'false' }) : face.text);
+          };
+          const memberMenuPlacement = {
+            left: `${Math.round(codex.memberMenu?.left ?? 12)}px`,
+            top: `${Math.round(codex.memberMenu?.top ?? 12)}px`,
+          };
+          const memberRow = activeThread.type === 'group' ? el('div', { class: 'egd-codex-thread-members', data: { testid: 'chat-thread-members' } }) : null;
+          let memberMenuPanel = null;
+          for (const chipView of memberView.chips) {
             if (!memberRow) break;
-            const role = codexThreadRole(activeThread, member);
-            const canManageMember = activeThread.type === 'group' && member !== SELF_MEMBER;
+            const member = chipView.name;
+            const role = chipView.role;
+            const canManageMember = chipView.manageable;
+            const chipFocusKey = `thread-member-${member}`;
             const menuOpen = Boolean(
               canManageMember
               && codex.memberMenu
+              && codex.memberMenu.invite !== true
               && codex.memberMenu.threadId === activeThread.id
               && codex.memberMenu.memberName === member
             );
-            const chip = el('button', {
+            const chip = el(canManageMember ? 'button' : 'span', {
               class: `egd-codex-thread-member${canManageMember ? ' egd-codex-thread-member-clickable' : ''}${menuOpen ? ' egd-codex-thread-member-menu-open' : ''}`,
-              title: canManageMember ? '멤버 관리' : '멤버',
+              type: canManageMember ? 'button' : null,
+              title: chipView.title, 'aria-label': canManageMember ? chipView.title : null,
+              'aria-haspopup': canManageMember ? 'menu' : null, 'aria-expanded': canManageMember ? String(menuOpen) : null,
+              data: { testid: 'chat-thread-member', member, status: chipView.status?.kind || 'none', ...(canManageMember ? { focusKey: chipFocusKey } : {}) },
             },
-            el('span', { class: 'egd-codex-thread-member-name' }, member),
+            el('span', { class: 'egd-codex-thread-member-face-wrap' },
+              memberFace(chipView.avatar, chipView.label, 'egd-codex-thread-member-face'),
+              chipView.status ? el('span', {
+                class: `egd-codex-thread-member-status egd-codex-thread-member-status-${chipView.status.kind}`,
+                role: 'img', 'aria-label': chipView.status.label, data: { testid: 'chat-thread-member-status' },
+              }) : null),
+            el('span', { class: 'egd-codex-thread-member-name' }, chipView.label),
             canManageMember
-              ? el('span', { class: 'egd-codex-thread-member-role' }, codexRoleLabel(role))
-              : el('span', { class: 'egd-codex-thread-member-role-static' }, codexRoleLabel(role)),
-            canManageMember ? el('span', { class: 'egd-codex-thread-member-caret' }, '▾') : null,
+              ? el('span', { class: 'egd-codex-thread-member-role' }, chipView.roleLabel)
+              : el('span', { class: 'egd-codex-thread-member-role-static' }, chipView.roleLabel),
+            canManageMember ? deskIcon('chevron', 'egd-codex-thread-member-caret') : null,
             );
-            chip.addEventListener('click', (ev) => {
-              ev.stopPropagation();
-              if (!canManageMember) return;
-              codexBridge.toggleMemberMenu(activeThread.id, member, ev.currentTarget);
-            });
+            if (canManageMember) {
+              chip.addEventListener('click', (ev) => {
+                ev.stopPropagation();
+                codexBridge.toggleMemberMenu(activeThread.id, member, ev.currentTarget);
+                if (!menuOpen) body.querySelector('.egd-codex-thread-member-menu button')?.focus({ preventScroll: true });
+              });
+            }
             if (menuOpen) {
-              chip.appendChild(el('div', {
-                class: 'egd-codex-thread-member-menu',
-                style: {
-                  left: `${Math.round(codex.memberMenu?.left ?? 12)}px`,
-                  top: `${Math.round(codex.memberMenu?.top ?? 12)}px`,
-                },
+              const act = (run) => () => { run(); focusMemberControl(chipFocusKey); };
+              memberMenuPanel = el('div', {
+                class: 'egd-codex-thread-member-menu', role: 'menu', 'aria-label': `${chipView.label} 멤버 관리`,
+                data: { testid: 'chat-thread-member-menu' },
+                style: memberMenuPlacement,
                 onclick: (ev) => ev.stopPropagation(),
               },
               el('button', {
                 class: `egd-codex-thread-member-menu-item${role === 'admin' ? ' egd-codex-thread-member-menu-item-active' : ''}`,
-                onclick: () => codexBridge.setThreadMemberRole(activeThread.id, member, 'admin'),
-              }, role === 'admin' ? '관리자 ✓' : '관리자로 변경'),
+                type: 'button', role: 'menuitemradio', 'aria-checked': String(role === 'admin'), data: { focusKey: 'thread-member-menu-admin' },
+                onclick: act(() => codexBridge.setThreadMemberRole(activeThread.id, member, 'admin')),
+              }, el('span', {}, '관리자'), role === 'admin' ? deskIcon('check', 'egd-codex-thread-member-menu-check') : null),
               el('button', {
                 class: `egd-codex-thread-member-menu-item${role === 'member' ? ' egd-codex-thread-member-menu-item-active' : ''}`,
-                onclick: () => codexBridge.setThreadMemberRole(activeThread.id, member, 'member'),
-              }, role === 'member' ? '멤버 ✓' : '멤버로 변경'),
+                type: 'button', role: 'menuitemradio', 'aria-checked': String(role === 'member'), data: { focusKey: 'thread-member-menu-member' },
+                onclick: act(() => codexBridge.setThreadMemberRole(activeThread.id, member, 'member')),
+              }, el('span', {}, '멤버'), role === 'member' ? deskIcon('check', 'egd-codex-thread-member-menu-check') : null),
               el('button', {
                 class: 'egd-codex-thread-member-menu-item egd-codex-thread-member-menu-item-danger',
-                onclick: () => codexBridge.removeFromThread(activeThread.id, member),
+                type: 'button', role: 'menuitem', data: { focusKey: 'thread-member-menu-remove' },
+                onclick: () => { codexBridge.removeFromThread(activeThread.id, member); focusMemberControl('thread-invite'); },
               }, 'Board Thread에서 제거'),
-              el('button', {
-                class: 'egd-codex-thread-member-menu-item',
-                onclick: () => codexBridge.closeMemberMenu(),
-              }, '닫기'),
-              ));
+              );
+              memberMenuPanel.addEventListener('keydown', memberMenuKeydown(chipFocusKey));
             }
             memberRow.appendChild(chip);
           }
-          if (memberRow && (activeThread.participants || []).length > 4) {
-            memberRow.appendChild(el('span', { class: 'egd-codex-thread-member egd-codex-thread-member-more' }, `+${activeThread.participants.length - 4}`));
+          if (memberRow && memberView.more > 0) {
+            memberRow.appendChild(el('span', {
+              class: 'egd-codex-thread-member egd-codex-thread-member-more',
+              title: `참여자 ${memberView.more}명 더 있음`,
+            }, `+${memberView.more}`));
           }
+          const inviteOpen = Boolean(codex.memberMenu?.invite === true && codex.memberMenu.threadId === activeThread.id);
           const memberActions = activeThread.type === 'group'
             ? el('button', {
-                class: 'egd-codex-chip egd-codex-chip-subtle egd-codex-thread-members-action',
-                onclick: () => codexBridge.inviteToThread(activeThread.id),
+                class: `egd-codex-chip egd-codex-chip-subtle egd-codex-thread-members-action egd-codex-thread-invite-trigger${inviteOpen ? ' egd-codex-thread-invite-trigger-open' : ''}`,
+                type: 'button', title: 'Agent 초대', 'aria-label': 'Board Thread에 Agent 초대',
+                'aria-haspopup': 'menu', 'aria-expanded': String(inviteOpen),
+                data: { testid: 'chat-thread-invite', focusKey: 'thread-invite' },
+                onclick: (ev) => {
+                  ev.stopPropagation();
+                  codexBridge.toggleInviteMenu(activeThread.id, ev.currentTarget);
+                  if (!inviteOpen) body.querySelector('.egd-codex-thread-invite-menu button')?.focus({ preventScroll: true });
+                },
               }, '초대')
             : null;
+          if (inviteOpen) {
+            // The same saved Agents the room menu offers, minus whoever is already in. Picking one starts nothing.
+            const inviteView = ThreadMembers.inviteMenuView(activeThread, {
+              profiles: codexProfileCatalog.profiles, catalogStatus: codexProfileCatalog.status, selfName: SELF_MEMBER,
+            });
+            memberMenuPanel = el('div', {
+              class: 'egd-codex-thread-member-menu egd-codex-thread-invite-menu', role: 'menu', 'aria-label': 'Board Thread에 Agent 초대',
+              data: { testid: 'chat-thread-invite-menu' },
+              style: memberMenuPlacement,
+              onclick: (ev) => ev.stopPropagation(),
+            },
+            el('div', { class: 'egd-codex-thread-invite-label' }, 'Agent 초대'),
+            ...inviteView.choices.map((choice) => el('button', {
+              class: 'egd-codex-thread-member-menu-item egd-codex-thread-invite-item', type: 'button', role: 'menuitem',
+              title: `${choice.name} 초대`,
+              data: { testid: 'chat-thread-invite-choice', choice: choice.key, focusKey: `thread-invite-${choice.key}` },
+              onclick: () => { codexBridge.inviteToThread(activeThread.id, choice.key); focusMemberControl('thread-invite'); },
+            },
+            memberFace(choice.avatar, choice.name, 'egd-codex-thread-invite-face'),
+            el('span', { class: 'egd-codex-thread-invite-name' }, choice.name),
+            choice.role ? el('span', { class: 'egd-codex-thread-invite-role' }, choice.role) : null)),
+            inviteView.note ? el('div', { class: 'egd-codex-thread-invite-note', role: 'note', data: { testid: 'chat-thread-invite-note' } }, inviteView.note) : null,
+            el('button', {
+              class: 'egd-codex-thread-member-menu-item egd-codex-thread-invite-create', type: 'button', role: 'menuitem',
+              data: { testid: 'chat-thread-invite-create', focusKey: 'thread-invite-create' },
+              onclick: () => { codexBridge.closeMemberMenu(); spawnSettingsCard({ tab: 'agents' }); },
+            }, deskIcon('plus', 'egd-codex-thread-invite-create-icon'), el('span', {}, inviteView.createLabel)));
+            memberMenuPanel.addEventListener('keydown', memberMenuKeydown('thread-invite'));
+          }
           const memberRowWrap = memberRow
             ? el('div', { class: 'egd-codex-thread-members-row' }, memberRow, memberActions)
             : null;
@@ -11342,6 +11438,7 @@
             memberRowWrap,
           ));
           if (codex.threadMenu?.threadId === activeThread.id) conversation.appendChild(renderThreadMenu(activeThread));
+          if (memberMenuPanel) conversation.appendChild(memberMenuPanel);
         }
         if (codex.engineMenu?.threadId === activeThread.id) conversation.appendChild(renderEnginePanel(activeThread));
 
@@ -12555,7 +12652,10 @@
       );
       if (state.codex.memberMenu) {
         const menuThread = getCodexThreadById(state.codex, state.codex.memberMenu.threadId);
-        if (!menuThread || !(menuThread.participants || []).includes(state.codex.memberMenu.memberName)) {
+        // The '초대' list is open on the room itself, not on one member.
+        const menuValid = state.codex.memberMenu.invite === true ? menuThread?.type === 'group'
+          : (menuThread?.participants || []).includes(state.codex.memberMenu.memberName);
+        if (!menuValid) {
           state.codex.memberMenu = null;
         }
       }
@@ -12829,18 +12929,16 @@
     // CHAT-07 peek: GET /profiles/:id per Agent, keyed by the active revision asked for.
     const agentProfileDetails = new Map();
     // AGENT-05 / D-A3: avatar photos by asset id, each read once per session from
-    // GET /profiles/avatar-images/:id. Null until (or unless) the bytes arrive —
-    // a photo that cannot be read leaves the initial standing; it is not retried.
-    const avatarImages = new Map();
-    const avatarImage = (assetId) => {
-      if (!AgentIdentityView.isAvatarAssetId(assetId)) return null;
-      if (avatarImages.has(assetId)) return avatarImages.get(assetId);
-      avatarImages.set(assetId, null);
-      fetchJson(`/profiles/avatar-images/${encodeURIComponent(assetId)}`)
-        .then((payload) => { avatarImages.set(assetId, AgentIdentityView.agentAvatarImageSource(payload, assetId)); emit(); })
-        .catch(() => {});
-      return null;
-    };
+    // GET /profiles/avatar-images/:id. Null until the bytes arrive — the initial
+    // stands in. A read that fails (the bridge was not up yet) is tried again
+    // after a wait, three more times at most; then the initial stays. The
+    // cache is made on the first face drawn.
+    let avatarImages = null;
+    const avatarImage = (assetId) => (avatarImages ||= AgentIdentityView.createAvatarImageCache({
+      load: (id) => fetchJson(`/profiles/avatar-images/${encodeURIComponent(id)}`),
+      onChange: () => emit(),
+      setTimer: (run, delay) => window.setTimeout(run, delay),
+    })).get(assetId);
     const loadProfileCatalog = () => {
       if (profileCatalogLoad) return profileCatalogLoad;
       if (codexProfileCatalog.status !== 'ready') codexProfileCatalog = { status: 'loading', profiles: [] };
@@ -14943,6 +15041,25 @@
         state.codex.memberMenu = null;
         emit();
       },
+      // CHAT-10: the '초대' list shares the member menu's place, so whatever
+      // closes that menu closes the list too.
+      toggleInviteMenu(threadId, anchorEl = null) {
+        const thread = getCodexThreadById(state.codex, threadId);
+        if (!thread || thread.type !== 'group') return;
+        if (state.codex.memberMenu?.invite === true && state.codex.memberMenu.threadId === threadId) {
+          state.codex.memberMenu = null;
+        } else {
+          const rect = anchorEl?.getBoundingClientRect?.();
+          state.codex.memberMenu = { threadId, memberName: null, invite: true, ...(rect ? resolveFloatingMenuPlacement(rect, 248, 300) : { left: 12, top: 12 }) };
+          state.codex.threadMenu = null;
+          state.codex.engineMenu = null;
+          state.codex.messageMenu = null;
+          state.codex.agentPeek = null;
+          // An Agent made a moment ago is in the list when it opens.
+          loadProfileCatalog();
+        }
+        emit();
+      },
       toggleEngineMenu(threadId, anchorEl = null) {
         if (!threadId) return;
         if (state.codex.engineMenu?.threadId === threadId) {
@@ -15027,6 +15144,8 @@
           participants: source.participants, participantRoles: source.participantRoles,
           profileEnabled: source.profileEnabled === true, agentProfileId: source.agentProfileId,
         });
+        // CHAT-10: the members' Agent links (faces) follow the fork.
+        if (source.participantAgents) target.participantAgents = { ...source.participantAgents };
         if (source.effort) target.effort = source.effort;
         if (source.model) target.model = source.model;
         if (source.sentModel) target.sentModel = source.sentModel;
@@ -15379,42 +15498,34 @@
         if (!threadId || !memberName || memberName === SELF_MEMBER) return;
         const thread = getCodexThreadById(state.codex, threadId);
         if (!thread || thread.type !== 'group') return;
-        const nextParticipants = (thread.participants || []).filter((member) => member !== memberName);
-        if (nextParticipants.length < 2) return;
+        if (!ThreadMembers.removedThreadFields(thread, memberName, { selfName: SELF_MEMBER })) return;
         updateThreadById(threadId, (current) => {
-          const nextRoles = { ...(current.participantRoles || {}) };
-          delete nextRoles[memberName];
-          return {
-            ...current,
-            participants: nextParticipants,
-            participantRoles: nextRoles,
-            subtitle: buildThreadSubtitle(current.type, nextParticipants),
-          };
+          const fields = ThreadMembers.removedThreadFields(current, memberName, { selfName: SELF_MEMBER });
+          return fields ? { ...current, ...fields, subtitle: buildThreadSubtitle(current.type, fields.participants) } : current;
         });
         state.codex.memberMenu = null;
         state.codex.threadMenu = null;
         emit();
       },
-      inviteToThread(threadId) {
+      // CHAT-10: '초대' adds the Agent picked from the saved list (or the plain
+      // Codex) under its own name and face. It only joins the room: no run
+      // starts, and no name is invented.
+      inviteToThread(threadId, choiceKey) {
         const targetId = threadId || state.codex.activeThreadId;
         if (!targetId) return;
         const thread = getCodexThreadById(state.codex, targetId);
         if (!thread || thread.type !== 'group') return;
-        const nextMemberNonce = state.codex.memberNonce + 1;
-        const memberName = `멤버 ${nextMemberNonce}`;
-        state.codex.memberNonce = nextMemberNonce;
-        updateThreadById(targetId, (current) => {
-          const nextParticipants = uniqueNames([...(current.participants || []), memberName]);
-          const nextRoles = { ...(current.participantRoles || {}), [memberName]: 'member' };
-          return {
-            ...current,
-            participants: nextParticipants,
-            participantRoles: nextRoles,
-            subtitle: buildThreadSubtitle(current.type, nextParticipants),
-          };
-        });
+        const choice = ThreadMembers.inviteMenuView(thread, {
+          profiles: codexProfileCatalog.profiles, catalogStatus: codexProfileCatalog.status, selfName: SELF_MEMBER,
+        }).choices.find((row) => row.key === choiceKey) || null;
         state.codex.memberMenu = null;
         state.codex.threadMenu = null;
+        if (choice) {
+          updateThreadById(targetId, (current) => {
+            const fields = ThreadMembers.invitedThreadFields(current, choice, { selfName: SELF_MEMBER });
+            return fields ? { ...current, ...fields, subtitle: buildThreadSubtitle(current.type, fields.participants) } : current;
+          });
+        }
         emit();
       },
       async refreshAuthStatus() {
