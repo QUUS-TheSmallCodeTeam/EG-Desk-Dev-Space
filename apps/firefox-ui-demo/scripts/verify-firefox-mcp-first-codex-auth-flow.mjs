@@ -278,7 +278,8 @@ export async function runFirstCodexAuthFlow(options) {
     await screenshotOptional('first-codex-before-auth');
 
     const visitSettings = async outcome => {
-      await click('#egd-dock .egd-dock-btn[data-id="settings"]');
+      await click('#egd-dock .egd-dock-btn[data-id="create"]');
+      await click('#egd-dock-menu .egd-dock-menu-item[data-id="settings"]');
       await click('[data-testid="settings-account"][data-state="signed-out"] button');
       const pending = await waitUntil(readAuth, value => value.loginInProgress && /^qa-auth-/.test(value.authSessionId || ''),
         { timeoutMs: 10000 });

@@ -14,8 +14,9 @@ export const VIEWPORTS = Object.freeze([
   { width: 960, height: 700 },
   { width: 1280, height: 776 },
 ]);
-const DOCK_IDS = Object.freeze(['chat', 'shelf', 'ontology', 'browser', 'ide', 'terminal', 'settings',
-  'create', 'pencil', 'hand', 'square', 'ellipse', 'line', 'arrow', 'label', 'highlight', 'select', 'trash']);
+// The approved eight-button Dock. 파일·개발 (IDE)·온톨로지·설정 and the drawing
+// tools open from the 새 카드 menu (#egd-dock-menu).
+const DOCK_IDS = Object.freeze(['chat', 'memo', 'browser', 'terminal', 'select', 'hand', 'create', 'trash']);
 const ZOOM_LABELS = Object.freeze(['Canvas 축소', 'Canvas 확대', '열린 창 전체 보기']);
 const DRAFT = 'EG-Desk headless QA draft — never send';
 export const NARROW_CHAT_SAMPLE = ' QA600';
@@ -916,10 +917,10 @@ async function scanControls(harness, size, deadlineMs, result, stage) {
         { issues: targetIssues(items[0]), rect: items[0]?.rect });
     }
   }
-  const ide = dock.find(item => item.id === 'ide');
-  record(result, `${stage}: IDE keeps its label and describes the Board project File entry`,
-    ide?.ariaLabel === 'IDE' && ide.title === '현재 보드의 프로젝트 파일 열기',
-    { ariaLabel: ide?.ariaLabel, title: ide?.title });
+  const create = dock.find(item => item.id === 'create');
+  record(result, `${stage}: 새 카드 names itself and the menu it opens`,
+    !!create && create.ariaLabel.startsWith('새 카드') && create.title.startsWith('새 카드'),
+    { ariaLabel: create?.ariaLabel, title: create?.title });
   return { dock, zoom };
 }
 
@@ -981,7 +982,8 @@ export async function verifyIdeProjectCardVisible({ harness, size, deadlineMs, r
     value.snapshot?.projectId === expected.projectId && value.snapshot?.rootId === expected.rootId;
   requireCheck(result, 'IDE visibility: exact connected fixture card starts offscreen or obscured',
     matches(before) && !(before.title.shown && before.title.inside && before.title.hits === 9), before);
-  await safeClick(harness, '#egd-dock .egd-dock-btn[data-id="ide"]', 'IDE visibility: native Dock click', size, deadlineMs, result);
+  await safeClick(harness, '#egd-dock .egd-dock-btn[data-id="create"]', 'IDE visibility: open the 새 카드 menu', size, deadlineMs, result);
+  await safeClick(harness, '#egd-dock-menu .egd-dock-menu-item[data-id="ide"]', 'IDE visibility: native 새 카드 menu click', size, deadlineMs, result);
   const after = await waitFor(harness, value => observeIdeProjectCard(value, expected.cardId),
     value => matches(value) && value.activeEntityId === expected.cardId && value.title.shown &&
       value.title.inside && value.title.hits === 9, deadlineMs);

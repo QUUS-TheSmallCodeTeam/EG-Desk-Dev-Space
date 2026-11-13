@@ -1760,7 +1760,8 @@ export async function runProjectFileFlow({ harness, result, check }, { profile, 
     check('only the notice produced by this owned Board creation is dismissed', boardNotice.includes('Board를 저장했습니다.'), boardNotice);
     await click('#egd-board-notice button[aria-label="안내 닫기"]', 'dismiss owned Board-save notice by native close button');
   }
-  await click('#egd-dock .egd-dock-btn[data-id="shelf"]', 'Files from native Dock');
+  await click('#egd-dock .egd-dock-btn[data-id="create"]', 'open the 새 카드 menu from the Dock');
+  await click('[data-testid="file-dock-open"]', 'Files from the 새 카드 menu');
   let ui = await waitUi(value => value.count === 1 && !!value.snapshot && !value.connect.disabled);
   ui = await ensureFileDetail(ui.cardId, 'new-files-dock');
   proof.boardId = ui.board?.boardId;
@@ -1783,7 +1784,8 @@ export async function runProjectFileFlow({ harness, result, check }, { profile, 
   // to _fileView.openProject or a synthetic attach response.
   await click(`${card} .egd-card-dot-close`, 'close connected FileView');
   await waitUi(value => value.count === 0);
-  await click('#egd-dock .egd-dock-btn[data-id="shelf"]', 'reopen FileView from Files');
+  await click('#egd-dock .egd-dock-btn[data-id="create"]', 'open the 새 카드 menu again');
+  await click('[data-testid="file-dock-open"]', 'reopen FileView from Files');
   ui = await waitUi(value => value.count === 1 && !!value.snapshot && !value.connect.disabled);
   ui = await ensureFileDetail(ui.cardId, 'reopen-files-dock');
   check('reopen created another actual FileView', ui.cardId !== proof.uiConnected.cardId);
@@ -1984,7 +1986,8 @@ export async function runProjectFileWatcherFlow({ harness, result, check }, { pr
     await harness.click(selector); result.actions.push({ label, selector, kind: 'native-click' });
     if (!result.observedStages.includes('native headless input')) result.observedStages.push('native headless input');
   };
-  await click('#egd-dock .egd-dock-btn[data-id="shelf"]', 'open File');
+  await click('#egd-dock .egd-dock-btn[data-id="create"]', 'open the 새 카드 menu');
+  await click('[data-testid="file-dock-open"]', 'open File');
   // Data-ready does not mean that the native canvas camera has settled.
   // Observe the motion; never replay the opening click or alter camera state.
   await waitStableViewport(harness, size, deadlineMs);

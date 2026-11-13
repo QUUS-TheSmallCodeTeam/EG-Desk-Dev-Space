@@ -137,7 +137,14 @@ async function main() {
         target.dispatchEvent(event);
       };
       const clickTool = (id) => {
-        const button = Array.from(document.querySelectorAll('.egd-dock-btn')).find((node) => node.dataset.id === id);
+        // Drawing tools live in the Dock's 새 카드 menu; 선택 and 이동 stay on the Dock.
+        const find = () => Array.from(document.querySelectorAll('#egd-dock .egd-dock-btn:not(.egd-dock-current-tool), #egd-dock-menu .egd-dock-menu-tool'))
+          .find((node) => node.dataset.id === id);
+        let button = find();
+        if (!button) {
+          document.querySelector('#egd-dock .egd-dock-btn[data-id="create"]')?.click();
+          button = find();
+        }
         if (!button) throw new Error('missing dock tool: ' + id);
         button.click();
       };
