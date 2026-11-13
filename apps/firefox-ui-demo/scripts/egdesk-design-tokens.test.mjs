@@ -493,7 +493,8 @@ test('DSN-03 clipping-sensitive focus rings keep the inset through a local offse
     for (const [name, value] of rule.declarations) {
       if (!sharedNames.has(name)) continue;
       for (const selector of rule.selectors) {
-        if (selector === ':root' || selector === '.egd-ontology-card') continue;
+        // A forced screen mode (Settings > 화면·입력) is still the window root.
+        if (selector === ':root' || selector === '.egd-ontology-card' || /^:root\[data-egd-theme(="(light|dark)")?\]$/.test(selector)) continue;
         assert.equal(name, '--egd-focus-outline-offset', `${selector} must not shadow shared state token ${name}`);
         if (focusOffsetResets.has(selector)) assert.equal(value, focusOffsetResets.get(selector), `${selector} outward reset`);
         else {

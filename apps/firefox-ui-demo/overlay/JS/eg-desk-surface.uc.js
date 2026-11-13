@@ -4620,10 +4620,44 @@
   const DESK_SESSION_PREF = 'egdesk.deskSession.v1';
   const ONTOLOGY_GRAPH_URL = 'chrome://userchrome/content/ontology/graph.json';
 
-  // The system 'reduce motion' setting, read at each camera move so a change
-  // applies without a restart.
+  // DSN-01 화면·입력: the chosen screen mode and motion live on the window root
+  // (data-egd-theme / data-egd-motion) so the stylesheet can force them. They
+  // are applied here, before any EG-Desk surface is built.
+  const DisplaySettings = ChromeUtils.importESModule('chrome://userchrome/content/EGDeskDisplaySettings.sys.mjs');
+  function readDisplaySettings() {
+    try {
+      const prefs = servicesRef().prefs, key = DisplaySettings.DISPLAY_SETTINGS_PREF;
+      return DisplaySettings.parseDisplaySettings(prefs.prefHasUserValue(key) ? prefs.getStringPref(key, '') : null);
+    } catch { return DisplaySettings.normalizeDisplaySettings(null); }
+  }
+  function applyDisplaySettings(settings) {
+    const rootEl = document.documentElement;
+    for (const [name, value] of Object.entries(DisplaySettings.displayRootAttributes(settings))) {
+      if (value == null) rootEl.removeAttribute(name);
+      else rootEl.setAttribute(name, value);
+    }
+  }
+  // Applies at once and keeps the choice for the next start; the defaults leave nothing stored.
+  function saveDisplaySettings(settings) {
+    const next = DisplaySettings.normalizeDisplaySettings(settings);
+    try {
+      const prefs = servicesRef().prefs, key = DisplaySettings.DISPLAY_SETTINGS_PREF;
+      const text = DisplaySettings.serializeDisplaySettings(next);
+      if (text != null) prefs.setStringPref(key, text);
+      else if (prefs.prefHasUserValue(key)) prefs.clearUserPref(key);
+    } catch {}
+    applyDisplaySettings(next);
+    return next;
+  }
+  applyDisplaySettings(readDisplaySettings());
+
+  // 'Reduce motion' from Settings or the system, read at each camera move so a
+  // change applies without a restart.
   function prefersReducedMotion() {
-    try { return window.matchMedia?.('(prefers-reduced-motion: reduce)')?.matches === true; } catch { return false; }
+    try {
+      return window.document?.documentElement?.getAttribute('data-egd-motion') === 'reduce'
+        || window.matchMedia?.('(prefers-reduced-motion: reduce)')?.matches === true;
+    } catch { return false; }
   }
 
   function el(tag, props = {}, ...children) {
@@ -17048,7 +17082,7 @@
     );
 
     const contentArea = el('div', { class: 'egd-settings-content' });
-    let activeTab = options.tab === 'agents' ? 'agents' : 'account';
+    let activeTab = ['agents', 'display', 'data'].includes(options.tab) ? options.tab : 'account';
     const bridge = () => state.codexBridge || null;
 
     // --- 계정: the signed-in ChatGPT account as the bridge reports it ---
@@ -17072,6 +17106,7 @@
       renderAccountTab();
     };
     const renderAccountTab = () => {
+      if (activeTab !== 'account') return;
       const codex = state.codex;
       const auth = codex.authStatus || {};
       const loginBusy = Boolean(codex.isStartingLogin || auth.loginInProgress);
@@ -17966,10 +18001,94 @@
       }
     };
 
+    // --- 화면·입력 (DSN-01 / D-G4): a choice applies at once and is kept for the next start ---
+    const displayChoiceGroup = (key, title, choices, scopeNote = null) => {
+      const ids = choices.map(choice => choice.id);
+      const choose = (id) => {
+        saveDisplaySettings({ ...readDisplaySettings(), [key]: id });
+        renderDisplayTab();
+        contentArea.querySelector(`[data-testid="settings-display-${key}-${id}"]`)?.focus({ preventScroll: true });
+      };
+      const group = el('div', { class: 'egd-settings-segmented', role: 'radiogroup', 'aria-label': title, data: { testid: `settings-display-${key}` } });
+      for (const choice of choices) {
+        group.appendChild(el('button', {
+          class: 'egd-settings-segment' + (choice.selected ? ' egd-settings-segment-active' : ''), type: 'button',
+          role: 'radio', 'aria-checked': String(choice.selected), tabindex: choice.selected ? '0' : '-1', title: choice.note,
+          data: { testid: `settings-display-${key}-${choice.id}` },
+          onclick: () => choose(choice.id),
+          onkeydown: (ev) => {
+            const next = DisplaySettings.choiceForKey(ids, choice.id, ev.key);
+            if (next == null) return;
+            ev.preventDefault(); ev.stopPropagation();
+            choose(next);
+          },
+        }, choice.label));
+      }
+      return el('section', { class: 'egd-settings-section', 'aria-label': title },
+        el('div', { class: 'egd-settings-section-title' }, title), group,
+        el('p', { class: 'egd-settings-form-hint egd-settings-choice-note', data: { testid: `settings-display-${key}-note` } },
+          choices.find(choice => choice.selected)?.note || ''),
+        scopeNote ? el('p', { class: 'egd-settings-form-hint' }, scopeNote) : null);
+    };
+    // The one reset this window performs: screen mode and motion back to following the system.
+    const displayResetRow = (afterReset) => {
+      const view = DisplaySettings.displayResetView(readDisplaySettings());
+      return el('div', { class: 'egd-settings-reset-row' },
+        el('button', {
+          class: 'egd-settings-btn', type: 'button', disabled: view.disabled ? 'true' : null, data: { testid: 'settings-display-reset' },
+          onclick: () => { saveDisplaySettings(DisplaySettings.DISPLAY_DEFAULTS); afterReset(); },
+        }, view.label),
+        el('p', { class: 'egd-settings-form-hint', role: 'status', data: { testid: 'settings-display-reset-note' } }, view.note));
+    };
+    const renderDisplayTab = () => {
+      if (activeTab !== 'display') return;
+      const settings = readDisplaySettings();
+      contentArea.replaceChildren(
+        displayChoiceGroup('theme', '화면 모드', DisplaySettings.themeChoices(settings),
+          'Browser 안 웹페이지와 Terminal의 색은 바뀌지 않습니다.'),
+        displayChoiceGroup('motion', '동작 줄이기', DisplaySettings.motionChoices(settings)),
+        el('section', { class: 'egd-settings-section', 'aria-label': 'Chat 입력' },
+          el('div', { class: 'egd-settings-section-title' }, 'Chat 입력'),
+          el('p', { class: 'egd-settings-form-hint', data: { testid: 'settings-display-input-hint' } }, DisplaySettings.CHAT_INPUT_HINT)),
+        el('section', { class: 'egd-settings-section', 'aria-label': '화면 설정 되돌리기' },
+          el('div', { class: 'egd-settings-section-title' }, '되돌리기'),
+          displayResetRow(() => {
+            renderDisplayTab();
+            contentArea.querySelector('[data-testid="settings-display-theme-system"]')?.focus({ preventScroll: true });
+          })));
+    };
+    // --- 데이터와 초기화: what is kept where. Only the 화면·입력 choices reset here;
+    // nothing on this tab deletes a Desk, a conversation or an Agent.
+    const renderDataTab = () => {
+      if (activeTab !== 'data') return;
+      const list = el('div', { class: 'egd-settings-data-list', role: 'list' });
+      for (const row of DisplaySettings.dataCategories()) {
+        list.appendChild(el('div', { class: 'egd-settings-data-row', role: 'listitem', data: { testid: `settings-data-${row.id}`, reset: row.reset } },
+          el('div', { class: 'egd-settings-data-title' }, row.title),
+          el('div', { class: 'egd-settings-data-holds' }, row.holds),
+          el('div', { class: 'egd-settings-data-where' }, `보관 위치: ${row.where}`),
+          el('div', { class: 'egd-settings-data-reset' }, row.resetNote),
+          row.tab ? el('button', { class: 'egd-settings-link', type: 'button', data: { testid: `settings-data-open-${row.tab}` },
+            onclick: () => { card._settingsShowTab(row.tab); tabs.querySelector('[aria-selected="true"]')?.focus({ preventScroll: true }); } }, row.tabLabel) : null));
+      }
+      contentArea.replaceChildren(
+        el('section', { class: 'egd-settings-section', 'aria-label': '보관하는 것' },
+          el('div', { class: 'egd-settings-section-title' }, '보관하는 것'), list),
+        el('section', { class: 'egd-settings-section', 'aria-label': '초기화' },
+          el('div', { class: 'egd-settings-section-title' }, '초기화'),
+          el('p', { class: 'egd-settings-form-hint' }, '이 창에서 되돌리는 것은 화면·입력 설정뿐입니다. Desk, Board, 대화 기록, Agent는 그대로 남습니다.'),
+          displayResetRow(() => {
+            renderDataTab();
+            tabs.querySelector('[aria-selected="true"]')?.focus({ preventScroll: true });
+          })));
+    };
+
     const tabs = el('div', { class: 'egd-settings-tabs', role: 'tablist' });
     const tabDefs = [
       { id: 'account', label: '계정', render: renderAccountTab },
       { id: 'agents', label: 'Agent 관리', render: renderAgentsTab },
+      { id: 'display', label: '화면·입력', render: renderDisplayTab },
+      { id: 'data', label: '데이터와 초기화', render: renderDataTab },
     ];
     const renderTabs = () => {
       syncProfileDuplicate();
@@ -18073,7 +18192,7 @@
     revealPlacedCanvasCard(card, placement);
 
     renderTabs();
-    (activeTab === 'agents' ? renderAgentsTab : renderAccountTab)();
+    (tabDefs.find(t => t.id === activeTab) || tabDefs[0]).render();
     if (activeTab === 'agents' && ChatState.isProfileId(options.profileId)) void openProfile(options.profileId);
     ensureCodexSubscription();
 
