@@ -73,6 +73,14 @@ function actualRoomPreparation(fixture) {
       const response = await request(fixture, options.method, route, JSON.parse(options.body));
       assert.equal(response.status, 200); return response.body;
     } };
+  // The room-default read fences itself with the production room identity
+  // watch, so this harness runs that watch rather than assuming it is current.
+  const runtimeIdentity = source.match(/^  function memoAskRuntimeIdentity\([^]*?^  \}/m);
+  const watchStart = source.indexOf('    const memoReadWatches = new Map();');
+  const watchEnd = source.indexOf('    const confirmedLegacyImports', watchStart);
+  assert.ok(runtimeIdentity && watchStart >= 0 && watchEnd > watchStart, 'Actual host room identity watch');
+  deps.watchMemoRead = compileFunction(`${runtimeIdentity[0]}\n${source.slice(watchStart, watchEnd)}\nreturn watchMemoRead;`,
+    ['state', 'getCodexThreadById', 'ChatState', 'codexThreadRuntimeConfig'])(state, deps.getCodexThreadById, ChatState, () => ({}));
   const functions = ['createChatProjectScope', 'chatRoomProjectState', 'normalizeChatRoomProjectDefault',
     'chatRoomProjectTargetsMatch', 'snapshotChatRoomProjectExpectation', 'chatRoomProjectExpectation'].map(name => {
     const match = source.match(new RegExp(`^  function ${name}\\([^]*?^  \\}`, 'm'));
@@ -83,7 +91,7 @@ function actualRoomPreparation(fixture) {
     assert.ok(match, `Actual host method ${name}`); return match[0].slice(0, -1);
   });
   const bridge = compileFunction(`${functions.join('\n')}\nreturn { ${methods.join(',\n')} };`, Object.keys(deps))(...Object.values(deps));
-  return { state, bridge, roomId };
+  return { state, bridge, roomId, roomProjectDefaults: deps.chatRoomProjectDefaults };
 }
 
 test('origin fixture: strict exclusive opt-in, owned fresh profile and token before new effects', async t => {
@@ -158,9 +166,10 @@ test('origin fixture: real rejected send has no private origin, fake turn or rep
 });
 
 test('origin fixture: actual host blocks stale none before HTTP send; a fresh Details read prepares the same real six-field origin', async t => {
-  const { fixture } = await setup(t), { state, bridge, roomId } = actualRoomPreparation(fixture);
+  const { fixture } = await setup(t), { state, bridge, roomId, roomProjectDefaults } = actualRoomPreparation(fixture);
   const none = await bridge.readRoomProjectDefault('local-room');
   assert.equal(none.status, 'none');
+  assert.equal(roomProjectDefaults.get('local-room').joinSafe, true, 'the production room identity watch stayed current through the read');
   await control(fixture, 'prepare-room', { clientThreadId: roomId });
   assert.equal(await bridge.prepareRoomProjectSend('local-room', none), false);
   assert.match(state.codex.threads[0].sendError, /방 기본 프로젝트가 바뀌었습니다.*초안은 유지/);

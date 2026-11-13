@@ -24,7 +24,9 @@ function fakeProductionStore(shared = { request: null, data: null }) {
     const localRunId = `local-${run.runId}`;
     const thread = { localConversationId: `local-${request.clientThreadId}`,
       clientThreadId: request.clientThreadId, conversationId: request.snapshot.conversationId,
-      title: 'QA imported Chat', createdAt: run.createdAt, updatedAt: run.createdAt, coverage };
+      title: 'QA imported Chat', createdAt: run.createdAt, updatedAt: run.createdAt, coverage,
+      // Chat store v3: every saved thread reports its room Agent, null until one is picked.
+      agent: null };
     shared.request = structuredClone(request);
     shared.data = { thread, runs: [{ ...structuredClone(run), localRunId, firstSeq: 1, lastSeq: 3 }],
       messages: run.messages.map((message, index) => ({ ...structuredClone(message),
@@ -44,6 +46,15 @@ function fakeProductionStore(shared = { request: null, data: null }) {
       return result.body;
     },
     async importHistoryOutcome(request) { return importOutcome(request); },
+    // CHAT-01: the same answer the bridge gives for POST /chat/rooms/agent. The
+    // pick is saved on the shared thread, so the second instance must still report it.
+    async setRoomAgent({ clientThreadId, profileId, revision = null }) {
+      const thread = saved().thread;
+      assert.equal(clientThreadId, thread.clientThreadId);
+      const same = thread.agent && thread.agent.profileId === profileId && thread.agent.revision === revision;
+      if (!same) thread.agent = profileId === null ? null : { profileId, revision, setAt: thread.createdAt + 1 };
+      return { accepted: true, clientThreadId, agent: structuredClone(thread.agent) };
+    },
     async threads() { return { protocolVersion: 1, threads: [saved().thread], nextCursor: null, hasMore: false }; },
     async history() { return { protocolVersion: 1, ...saved(), nextCursor: null, hasMore: false,
       projectionTruncated: false, coverage }; },
@@ -58,6 +69,8 @@ test('two distinct bridge instances preserve exact public Chat, references and l
   assert.equal(checkpoint.expected.messages.length, 2);
   assert.equal(checkpoint.expected.attachmentRefs.length, 1);
   assert.equal(checkpoint.expected.briefingRefs.length, 1);
+  assert.equal(checkpoint.roomAgent.profileId, 'qa-room-agent-chat-01', 'the seed phase recorded the room Agent on both routes');
+  assert.deepEqual(checkpoint.expected.thread.agent, checkpoint.roomAgent);
   const second = fakeProductionStore(first.shared);
   const result = await verifyHistoryRestart({ http: second, adapter, dataDir, bridgePid: 222, checkpoint });
   assert.equal(result.exactHistoryRestored, true);
@@ -94,9 +107,10 @@ test('HTTP adapter only issues the approved loopback history routes', async () =
   await http.threads({ cursor: 'next', limit: 20 });
   await http.history({ clientThreadId: request.clientThreadId, afterSeq: 0, limit: 100 });
   await http.importHistory(request);
-  assert.deepEqual(calls.map(item => item.method), ['GET', 'GET', 'GET', 'POST']);
+  await http.setRoomAgent({ clientThreadId: request.clientThreadId, profileId: 'qa-room-agent-chat-01' });
+  assert.deepEqual(calls.map(item => item.method), ['GET', 'GET', 'GET', 'POST', 'POST']);
   assert.deepEqual(calls.map(item => new URL(item.url).pathname),
-    ['/health', '/chat/history/threads', '/chat/history', '/chat/history/import']);
+    ['/health', '/chat/history/threads', '/chat/history', '/chat/history/import', '/chat/rooms/agent']);
   assert.ok(calls.every(item => new URL(item.url).origin === 'http://127.0.0.1:39218'));
 });
 
@@ -160,6 +174,10 @@ test('frozen-shape adapter reads actual StoreA SQLite after close/reopen without
           projectionTruncated: false, coverage: thread.coverage };
       },
       async importHistory(request) { return store.importSnapshot(request); },
+      // CHAT-01: the bridge's POST /chat/rooms/agent is this one store write.
+      async setRoomAgent({ clientThreadId, profileId, revision = null }) {
+        return { accepted: true, ...store.setRoomAgent({ clientThreadId, profileId, revision, ts: Date.now() }) };
+      },
       async importHistoryOutcome(request) {
         try { return { status: 200, body: store.importSnapshot(request) }; }
         catch (error) { return { status: error.httpStatus || 500, body: { code: error.code } }; }
@@ -172,6 +190,7 @@ test('frozen-shape adapter reads actual StoreA SQLite after close/reopen without
   try {
     checkpoint = await seedHistoryRestart({ http: storeHttp(first), adapter, dataDir, bridgePid: 111 });
   } finally { first.close(); }
+  assert.equal(checkpoint.roomAgent.profileId, 'qa-room-agent-chat-01', 'the real store saved the room Agent before the close');
   const reopened = openChatStore({ dataDir, ownerScope });
   try {
     const verified = await verifyHistoryRestart({ http: storeHttp(reopened), adapter,
