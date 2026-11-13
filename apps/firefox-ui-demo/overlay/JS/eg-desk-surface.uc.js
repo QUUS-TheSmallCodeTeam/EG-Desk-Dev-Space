@@ -7267,10 +7267,10 @@
       ev.stopPropagation();
     };
     const scopes = el('div', { class: 'egd-rail-search-scopes', role: 'group', 'aria-label': '찾기 범위' },
-      ...RailSearchView.RAIL_SEARCH_SCOPES.map((scope) => el('button', {
+      ...RailSearchView.RAIL_SEARCH_SCOPES.map((scope, index) => el('button', {
         type: 'button',
         class: 'egd-rail-search-scope',
-        title: scope.title,
+        title: `${scope.title} (Alt/⌥ ${index + 1})`,
         'aria-pressed': String(scope.id === activeScope),
         data: { scope: scope.id },
         onmousedown: keepPointerFocus,
@@ -7383,6 +7383,18 @@
         input.value = '';
         state.railSearch.query = '';
       }
+      ev.preventDefault();
+      ev.stopPropagation();
+      return;
+    }
+
+    // Alt/⌥ 1·2·3 picks the scope chip without leaving the field.
+    const scopeChoice = ev.altKey && !ev.metaKey && !ev.ctrlKey && !ev.isComposing
+      ? RailSearchView.RAIL_SEARCH_SCOPES[['Digit1', 'Digit2', 'Digit3'].indexOf(ev.code)] : null;
+    if (scopeChoice) {
+      state.railSearch.query = input?.value ?? state.railSearch.query;
+      openRailSearchPanel();
+      setRailSearchScope(scopeChoice.id);
       ev.preventDefault();
       ev.stopPropagation();
       return;

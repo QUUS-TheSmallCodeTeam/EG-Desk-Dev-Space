@@ -195,6 +195,8 @@ function keyboard({ results, activeIndex = 0, existingCard = false }) {
     railSearchBrowserUrl: q => `https://${q}`,
     browserSourceRef: uri => ({ uri }),
     focusOpenSourceCard: () => { calls.push(['tab-focus']); return existingCard; },
+    RailSearchView,
+    setRailSearchScope: (scope) => calls.push(['scope', scope]),
   });
   const press = (key, extra = {}) => {
     const ev = { key, metaKey: false, ctrlKey: false, prevented: false, preventDefault() { this.prevented = true; }, stopPropagation() {}, ...extra };
@@ -228,11 +230,77 @@ test('keyboard: Enter runs the request only when it is the selected row; Ctrl/�
   assert.equal(arrows.state.railSearch.activeIndex, 1, 'one ↑ from the top reaches the request row');
 });
 
+test('keyboard: Alt/⌥ 1·2·3 picks the scope from the field and leaves other keys alone', () => {
+  const pad = keyboard({ results: [row('web', 'w')] });
+  assert.equal(pad.press('™', { altKey: true, code: 'Digit2' }).prevented, true, 'the key is read by position, not by the typed symbol');
+  pad.press('£', { altKey: true, code: 'Digit3' });
+  pad.press('¡', { altKey: true, code: 'Digit1' });
+  assert.deepEqual(pad.calls.filter(([name]) => name === 'scope'), [['scope', 'canvas'], ['scope', 'boards'], ['scope', 'all']]);
+  assert.equal(pad.state.railSearch.query, '견적서 정리해줘', 'the typed words stay');
+  pad.calls.length = 0;
+  for (const extra of [{ altKey: true, code: 'Digit4' }, { altKey: true, ctrlKey: true, code: 'Digit1' },
+    { altKey: true, isComposing: true, code: 'Digit1' }, { code: 'Digit1' }]) {
+    assert.equal(pad.press('1', extra).prevented, false);
+  }
+  assert.deepEqual(pad.calls, []);
+});
+
+// A minimal element stand-in: enough to read what the panel was told to draw.
+function fakeEl(tag, props = {}, ...children) {
+  const classes = String(props.class || '').split(' ');
+  return { tag, props, children: children.filter(child => child != null), dataset: props.data || {},
+    classList: { contains: name => classes.includes(name) } };
+}
+const walk = (node, visit) => { if (!node || typeof node === 'string') return; visit(node); node.children.forEach(child => walk(child, visit)); };
+const collect = (nodes, className) => { const found = []; nodes.forEach(node => walk(node, item => { if (item.classList.contains(className)) found.push(item); })); return found; };
+const textOf = node => typeof node === 'string' ? node : node.children.map(textOf).join('');
+const click = node => node.props.onclick({ preventDefault() {}, stopPropagation() {} });
+
+test('panel drawing: chips show the chosen scope; an empty narrowed scope offers 범위를 전체로 above the request row', () => {
+  const ask = { ...RailSearchView.askRow('정리', RailSearchView.askRecipient({ threads: [codex] })), execute: () => true };
+  const found = [row('agenda', '견적 Board', { saved: true })];
+  const state = { railSearch: { query: '정리', scope: 'canvas', activeIndex: 3 } };
+  const executed = [];
+  const panel = { nodes: [], contains: () => false, replaceChildren(...nodes) { this.nodes = nodes; }, querySelectorAll: () => [] };
+  const { renderRailSearchPanel } = compile(['setRailSearchScope', 'renderRailSearchPanel'], {
+    state, RailSearchView, el: fakeEl,
+    document: { activeElement: null, getElementById: () => panel },
+    SurfaceState: { railSearchSectionLabel: type => `kind:${type}` },
+    buildRailSearchResults: () => RailSearchView.composeResults({ scope: state.railSearch.scope, local: found, web: row('web', 'w'), ask }),
+    updateRailSearchActiveRow: () => {}, updateRailSearchPanelPlacement: () => {},
+    executeRailSearchResult: (result) => executed.push(result.key),
+  });
+  renderRailSearchPanel(panel);
+  const chips = () => collect(panel.nodes, 'egd-rail-search-scope');
+  assert.deepEqual(chips().map(chip => [textOf(chip), chip.props['aria-pressed'], chip.props.type]),
+    [['전체', 'false', 'button'], ['Canvas', 'true', 'button'], ['저장한 Board', 'false', 'button']]);
+  assert.ok(chips().every((chip, index) => chip.props.title.endsWith(`(Alt/⌥ ${index + 1})`)), 'each chip names its key');
+  assert.equal(panel.nodes[0].props.role, 'group');
+  assert.equal(textOf(collect(panel.nodes, 'egd-rail-search-empty')[0].children[0]), "'Canvas' 범위에서 찾은 것이 없습니다");
+  const rows = () => collect(panel.nodes, 'egd-rail-search-result');
+  assert.deepEqual(rows().map(item => item.dataset.type), ['ask']);
+  assert.ok(rows()[0].classList.contains('egd-rail-search-result-active'), 'the lone request row is the Enter target');
+  assert.equal(state.railSearch.activeIndex, 0);
+  assert.deepEqual(rows()[0].children.map(textOf), ['Agent', `Codex에게 요청: 정리${ask.subtitle}`, 'Ctrl/⌘ Enter']);
+  click(rows()[0]);
+  assert.deepEqual(executed, ['ask:t-codex']);
+
+  click(collect(panel.nodes, 'egd-rail-search-empty-action')[0]);
+  assert.equal(state.railSearch.scope, 'all');
+  assert.equal(chips()[0].props['aria-pressed'], 'true');
+  assert.deepEqual(collect(panel.nodes, 'egd-rail-search-empty'), [], 'widening found rows, so the empty note is gone');
+  assert.deepEqual(rows().map(item => item.dataset.type), ['agenda', 'web', 'ask']);
+  assert.equal(textOf(rows()[0].children[0]), 'kind:agenda', 'found rows keep their own kind label');
+  click(chips()[2]);
+  assert.equal(state.railSearch.scope, 'boards');
+  assert.deepEqual(rows().map(item => item.dataset.type), ['agenda', 'ask']);
+});
+
 test('panel: scope chips, the widen button and the request row are real buttons with labels, focus and token colors', () => {
   const render = declaration('renderRailSearchPanel');
   assert.match(render, /role: 'group', 'aria-label': '찾기 범위'/);
   assert.match(render, /'aria-pressed': String\(scope\.id === activeScope\)/);
-  assert.match(render, /title: scope\.title/);
+  assert.match(render, /title: `\$\{scope\.title\} \(Alt\/⌥ \$\{index \+ 1\}\)`/);
   assert.match(render, /setRailSearchScope\('all'\)/);
   assert.match(render, /result\.typeLabel \|\| SurfaceState\.railSearchSectionLabel\(result\.type\)/);
   assert.match(declaration('executeRailSearchResult'), /result\.type === 'ask' && outcome === false\) return false;/,
