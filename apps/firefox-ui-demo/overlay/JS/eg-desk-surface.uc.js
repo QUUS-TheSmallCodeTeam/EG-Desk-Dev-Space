@@ -25579,6 +25579,118 @@
     return true;
   }
 
+  // ---- First run: the visible way to the Desk ----
+  // The first Browser fills the window with the Desk behind it. Its header
+  // gets a labelled [Desk] button and the start page a [Desk 시작] button; both
+  // use enterLocalDesk, and the zoom-out gesture stays. After that first entry
+  // one quiet line says whether Codex still needs a login. The root class is
+  // the one signal for first-run focus, so this follows it.
+  const FirstRun = ChromeUtils.importESModule('chrome://userchrome/content/EGDeskFirstRun.sys.mjs');
+  const firstRun = { installed: false, focused: false, entered: false, closed: false, unsubscribe: null };
+
+  function ensureDeskEntryButton(card) {
+    const toolbar = card?.querySelector?.('.egd-card-toolbar');
+    if (!toolbar || toolbar.querySelector('.egd-first-run-desk')) return;
+    toolbar.append(el('button', {
+      type: 'button', class: 'egd-first-run-desk', title: 'Desk 시작 — 열어 둔 웹페이지는 그대로 남습니다',
+      data: { testid: 'first-run-desk-entry' },
+      onclick: (ev) => { ev.stopPropagation(); enterLocalDesk(); },
+    }, deskIcon('desk'), el('span', {}, 'Desk')));
+  }
+
+  // Only a start page in this process can be read here; web pages cannot.
+  function startPageDocument(card) {
+    try {
+      const doc = card?._xulBrowser?.contentDocument;
+      return doc?.documentElement && doc.documentURI === EGDESK_START_URI ? doc : null;
+    } catch { return null; }
+  }
+
+  function startPageDeskEntryFor(card) {
+    return FirstRun.startPageDeskEntry({ initialBrowserFocus: state.surface.initialBrowserFocus,
+      browserCardId: state.surface.browserCardId, cardId: card?.id });
+  }
+
+  function syncStartPageDeskEntry() {
+    for (const card of document.querySelectorAll('.egd-browser-card')) {
+      const doc = startPageDocument(card);
+      if (!doc) continue;
+      const entry = startPageDeskEntryFor(card);
+      if (entry) doc.documentElement.setAttribute(FirstRun.START_PAGE_ENTRY_ATTRIBUTE, entry);
+      else doc.documentElement.removeAttribute(FirstRun.START_PAGE_ENTRY_ATTRIBUTE);
+    }
+  }
+
+  function onStartPageDeskRequest(ev) {
+    const doc = FirstRun.startPageEventDocument(ev, EGDESK_START_URI);
+    if (!doc) return;
+    const card = [...document.querySelectorAll('.egd-browser-card')].find(item => startPageDocument(item) === doc);
+    if (card && startPageDeskEntryFor(card)) enterLocalDesk();
+  }
+
+  function closeFirstEntryNotice() {
+    firstRun.closed = true;
+    firstRun.unsubscribe?.();
+    firstRun.unsubscribe = null;
+    document.getElementById('egd-first-entry-notice')?.remove();
+  }
+
+  function renderFirstEntryNotice() {
+    const view = FirstRun.firstEntryConnectionNotice({ entered: firstRun.entered, closed: firstRun.closed, codex: state.codex });
+    const current = document.getElementById('egd-first-entry-notice');
+    if (!view) {
+      current?.remove();
+      if (firstRun.entered && !firstRun.closed && FirstRun.firstEntryConnectionSettled(state.codex)) closeFirstEntryNotice();
+      return;
+    }
+    if (current?.dataset.state === view.state) return;
+    const act = view.action === 'login' ? () => state.codexBridge?.startLogin()
+      : view.action === 'settings' ? () => spawnSettingsCard({ tab: 'account' }) : null;
+    const line = el('div', {
+      id: 'egd-first-entry-notice', class: 'egd-edge', role: 'status',
+      data: { testid: 'first-entry-connection', state: view.state },
+      onkeydown: (ev) => {
+        if (ev.key !== 'Escape') return;
+        ev.preventDefault(); ev.stopPropagation();
+        closeFirstEntryNotice();
+      },
+    },
+      el('span', { class: 'egd-first-entry-text' }, view.text),
+      act ? el('button', { type: 'button', class: 'egd-first-entry-action',
+        data: { testid: 'first-entry-connection-action' }, onclick: () => act() }, view.actionLabel) : null,
+      el('button', { type: 'button', class: 'egd-first-entry-close', title: '닫기', 'aria-label': '연결 안내 닫기',
+        onclick: () => closeFirstEntryNotice() }, deskIcon('close')));
+    const hadFocus = !!current?.contains?.(document.activeElement);
+    current?.remove();
+    document.documentElement.appendChild(line);
+    if (hadFocus) line.querySelector('.egd-first-entry-close')?.focus();
+  }
+
+  function syncFirstRunFocus() {
+    const focused = document.documentElement.classList.contains('egd-initial-browser-focus');
+    if (focused) ensureDeskEntryButton(document.getElementById(state.surface.browserCardId));
+    syncStartPageDeskEntry();
+    if (firstRun.focused && !focused && !firstRun.entered) {
+      firstRun.entered = true;
+      firstRun.unsubscribe = state.codexBridge?.subscribe?.(renderFirstEntryNotice) || null;
+      renderFirstEntryNotice();
+    }
+    firstRun.focused = focused;
+  }
+
+  function installFirstRunDeskEntry() {
+    if (!firstRun.installed) {
+      firstRun.installed = true;
+      window.addEventListener(FirstRun.START_PAGE_READY_EVENT, (ev) => {
+        if (FirstRun.startPageEventDocument(ev, EGDESK_START_URI)) syncStartPageDeskEntry();
+      }, true, true);
+      window.addEventListener(FirstRun.START_PAGE_DESK_EVENT, onStartPageDeskRequest, true, true);
+      new MutationObserver(syncFirstRunFocus).observe(document.documentElement, { attributes: true, attributeFilter: ['class'] });
+    }
+    syncFirstRunFocus();
+  }
+  // ---- end first run ----
+
   function restoreSurfaceEntry(lifecycle, deskSession, legacyStore) {
     state.surface.restoring = true;
     try {
@@ -25775,6 +25887,7 @@
       host.appendChild(buildPresetBag());
       host.appendChild(buildHUD());
       restoreSurfaceEntry(lifecycle, deskSession, legacyStore);
+      installFirstRunDeskEntry();
       state.codex.localHistoryBootReady = true;
       if (state.codex.legacyChatBackupRequired && !state.codex.legacyChatBackupKey) boardNotice(state.codex.localHistoryError);
       void state.codexBridge.loadLocalHistory(legacyChatRecords);

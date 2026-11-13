@@ -3247,7 +3247,7 @@ test('wheel or focused-URL keyboard zoom-out reveals the same live Browser Card 
   assert.equal(stopped, 2);
 });
 
-test('main-window topbar is edge-attached while controls remain non-draggable, with no Desk Start prompt', () => {
+test('main-window topbar is edge-attached while controls remain non-draggable, with no top-bar Desk Start prompt', () => {
   const css = readFileSync(new URL('../overlay/CSS/eg-desk-surface.uc.css', import.meta.url), 'utf8');
   const rail = css.match(/#egd-desk-rail \{([^}]+)\}/)?.[1];
   assert.ok(rail);
@@ -3258,7 +3258,11 @@ test('main-window topbar is edge-attached while controls remain non-draggable, w
     assert.match(css.match(new RegExp(`${selector.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')} \\{([^}]+)\\}`))?.[1] || '', /-moz-window-dragging:\s*no-drag/);
   }
   const startPage = readFileSync(new URL('../overlay/resources/egdesk-start.html', import.meta.url), 'utf8');
-  assert.doesNotMatch(startPage, /Desk 시작|누르세요/);
+  // First-run decision: [Desk 시작] lives on the start page only, hidden until
+  // the Desk marks it available. The old top-bar prompt and Browser mode stay gone.
+  assert.match(startPage, /<button id="start-desk" type="button">Desk 시작<\/button>/);
+  assert.match(startPage, /:root:not\(\[data-desk-entry="available"\]\) \.desk-entry \{ display: none; \}/);
+  assert.equal(startPage.match(/Desk 시작/g).length, 2, 'one button and one sentence that names it');
   assert.doesNotMatch(surfaceSource, /id: 'egd-desk-entry'|if \(state\.surface\.mode === 'browser'\) return;/);
 });
 
@@ -3267,7 +3271,7 @@ test('internal start page has plain-language copy and only its own chrome badge 
   const startPage = readFileSync(new URL('../overlay/resources/egdesk-start.html', import.meta.url), 'utf8');
   assert.match(startPage, /<h1>웹에서 시작하세요<\/h1>/);
   assert.match(startPage, /위 주소창에 주소나 검색어를 입력하세요\./);
-  assert.match(startPage, /화면을 축소하면 주변 작업 공간이 보입니다\. 열어 둔 웹페이지는 그대로 남습니다\./);
+  assert.match(startPage, /자료와 도구를 펼치려면 Desk 시작을 누르세요\. 열어 둔 웹페이지는 그대로 남습니다\./);
   assert.doesNotMatch(startPage, /Desk Canvas|Browser Card|Ctrl\+|⌘|계정|Codex/);
   assert.match(startPage, /font-size: clamp\(44px, 5vw, 48px\)/);
   assert.match(startPage, /\.lead \{[^}]*font-size: 19px/);

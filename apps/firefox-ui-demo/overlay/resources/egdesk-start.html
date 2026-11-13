@@ -4,16 +4,39 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>EG-Desk</title>
 <style>
-  body { margin: 0; min-height: 100vh; display: grid; place-items: center; background: #f7f9fa; color: #26333d; font-family: system-ui, sans-serif; }
+  /* The approved light-dark pairs (docs/egdesk-approved-desktop-style.html),
+     at the values the Desk windows use (eg-desk-surface.uc.css :root). */
+  :root {
+    color-scheme: light dark;
+    --eg-window: light-dark(#FFFEFA, #363934);
+    --eg-ink: light-dark(#252A26, #EDECE7);
+    --eg-muted: light-dark(#646A61, #B5B9AE);
+    --eg-accent: light-dark(#49634F, #A9C5A9);
+    --eg-line: light-dark(#DEDFD8, #4A4E47);
+    --eg-hover: light-dark(#E8EAE3, #414840);
+  }
+  body { margin: 0; min-height: 100vh; display: grid; place-items: center; background: var(--eg-window); color: var(--eg-ink); font-family: -apple-system, BlinkMacSystemFont, "Apple SD Gothic Neo", "Malgun Gothic", sans-serif; }
   main { box-sizing: border-box; width: min(100%, 640px); padding: 40px; }
   h1 { margin: 0 0 18px; font-size: clamp(44px, 5vw, 48px); line-height: 1.1; letter-spacing: -.04em; }
-  p { margin: 0; color: #586873; }
+  p { margin: 0; color: var(--eg-muted); }
   .lead { font-size: 19px; line-height: 1.5; }
   .secondary { margin-top: 9px; font-size: 15px; line-height: 1.5; }
+  .desk-entry { margin-top: 28px; padding-top: 24px; border-top: 1px solid var(--eg-line); }
+  :root:not([data-desk-entry="available"]) .desk-entry { display: none; }
+  #start-desk { margin: 0 0 12px; padding: 11px 22px; border: 1px solid var(--eg-accent); border-radius: 10px; background: var(--eg-accent); color: var(--eg-window); font: inherit; font-size: 17px; font-weight: 600; cursor: pointer; transition: background-color .12s ease, color .12s ease; }
+  #start-desk:hover { background: color-mix(in srgb, var(--eg-accent) 86%, var(--eg-ink)); }
+  #start-desk:active { background: color-mix(in srgb, var(--eg-accent) 72%, var(--eg-ink)); }
+  #start-desk:focus-visible { outline: 2px solid var(--eg-accent); outline-offset: 3px; }
+  .desk-entry .secondary { margin-top: 0; }
+  @media (prefers-reduced-motion: reduce) { #start-desk { transition: none; } }
 </style>
 <main>
   <h1>웹에서 시작하세요</h1>
   <p class="lead">위 주소창에 주소나 검색어를 입력하세요.</p>
-  <p class="secondary">화면을 축소하면 주변 작업 공간이 보입니다. 열어 둔 웹페이지는 그대로 남습니다.</p>
+  <div class="desk-entry">
+    <button id="start-desk" type="button">Desk 시작</button>
+    <p class="secondary">자료와 도구를 펼치려면 Desk 시작을 누르세요. 열어 둔 웹페이지는 그대로 남습니다.</p>
+  </div>
 </main>
+<script src="chrome://userchrome/content/egdesk-start.js"></script>
 </html>
