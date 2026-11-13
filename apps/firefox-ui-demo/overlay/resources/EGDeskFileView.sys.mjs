@@ -243,6 +243,19 @@ export function createEGDeskNativeFilePickers({ service, pickDirectory, pickSave
   }
 }
 
+// Which parts of the File window exist for the current connection. Before a
+// folder is connected the window is one prompt and its connect buttons; find
+// and tabs need a folder, and save/compare need a chosen editable file. A
+// restored working copy without its folder ('unconnected') keeps the copy.
+export function egdeskFileViewRegions({ connected = false, hasFile = false, editable = false } = {}) {
+  const empty = !connected && !hasFile
+  return Object.freeze({
+    state: empty ? 'empty' : connected ? 'connected' : 'unconnected',
+    empty, search: !!connected, treePanel: !!connected, workspace: !empty,
+    details: !!hasFile, actions: !!hasFile && !!editable,
+  })
+}
+
 // Native, keyboard-operable File surface. The shell supplies authorized picker
 // results and bridge operations; no renderer-controlled filesystem paths exist.
 // Optional service callbacks gitStatus/gitChanges/gitFileDiff/searchContents
@@ -301,6 +314,8 @@ export function createEGDeskFileView({ document, service, chooseRoot, chooseProj
   })
   const root = el('section', 'egdesk-file-view')
   root.setAttribute('aria-label', '파일 작업')
+  const emptyState = el('div', 'egdesk-file-empty')
+  emptyState.append(el('p', 'egdesk-file-empty-hint', '폴더를 연결하면 이 창에서 파일을 찾아 열고 고칠 수 있습니다.'))
   const toolbar = el('div', 'egdesk-file-toolbar')
   layout(toolbar, 'flex-wrap: wrap; gap: 6px; min-width: 0;')
   const connections = el('div', 'egdesk-file-connections')
@@ -308,7 +323,8 @@ export function createEGDeskFileView({ document, service, chooseRoot, chooseProj
   const projectActions = el('div', 'egdesk-file-project-actions')
   layout(projectActions, 'display: flex; flex-wrap: wrap; align-items: center; gap: 6px; flex: 0 0 auto;')
   const treePanel = el('section', 'egdesk-file-tree-panel')
-  const treeHeading = el('h2', 'egdesk-file-tree-heading', '파일')
+  // The tab strip already prints '파일'; the heading stays for assistive technology only.
+  const treeHeading = el('h2', 'egdesk-file-tree-heading egdesk-file-visually-hidden', '파일')
   const tree = el('ul', 'egdesk-file-tree')
   tree.setAttribute('role', 'tree')
   tree.setAttribute('aria-label', '연결된 폴더의 파일')
@@ -375,7 +391,8 @@ export function createEGDeskFileView({ document, service, chooseRoot, chooseProj
   bindRovingKeys(modeGroup, () => [nameModeButton, contentModeButton], node => setSearchMode(node.dataset.mode))
   const searchLabel = el('label', 'egdesk-file-search-label')
   layout(searchLabel, 'flex: 1 1 14rem; min-width: 0;')
-  const searchLabelText = el('span', 'egdesk-file-search-label-text', '파일 이름 검색')
+  // The input's placeholder prints this label; the text stays as its accessible name.
+  const searchLabelText = el('span', 'egdesk-file-search-label-text egdesk-file-visually-hidden', '파일 이름 검색')
   layout(searchLabelText, 'white-space: nowrap; flex: 0 0 auto;')
   const searchInput = el('input', 'egdesk-file-search-input')
   layout(searchInput, 'flex: 1 1 8rem; width: 0; min-width: 4rem; box-sizing: border-box;')
@@ -435,7 +452,7 @@ export function createEGDeskFileView({ document, service, chooseRoot, chooseProj
     catch (cause) { showError(cause) }
   })
   connectButton.disabled = typeof chooseRoot !== 'function'
-  connectButton.title = chooseRoot ? 'OS 선택기로 허용할 폴더를 고릅니다.' : '폴더 선택기가 연결되지 않았습니다.'
+  connectButton.title = chooseRoot ? '이 창에서 열어 볼 폴더를 고릅니다.' : '폴더 선택기가 연결되지 않았습니다.'
   const projectConnectButton = button('보드 프로젝트 연결', 'egdesk-file-project-connect', () => act(async () => {
     if (projectConnecting || typeof chooseProject !== 'function') return
     // Read the Board once, synchronously with the click, never after a picker.
@@ -501,7 +518,7 @@ export function createEGDeskFileView({ document, service, chooseRoot, chooseProj
   projectActions.append(scriptSettingsButton, projectCheckButton)
   toolbar.append(connections, projectActions, searchForm)
   workspace.append(title, fileDetails, scriptPanel, editorLabel, viewer, actions, sourceConflictPanel, reviewPanel, changeDiffPanel, checkPanel, changeReviewPanel)
-  root.append(toolbar, treePanel, searchResults, workspace, status, error)
+  root.append(emptyState, toolbar, treePanel, searchResults, workspace, status, error)
 
   let activeRoot = null
   let activeProject = null
@@ -582,8 +599,19 @@ export function createEGDeskFileView({ document, service, chooseRoot, chooseProj
     viewer.hidden = !editorLabel.hidden || (!activeFileId && !!hasResult)
   }
   const showCheckPanel = () => { checkPanel.hidden = false; refreshViewerVisibility() }
+  const refreshRegions = () => {
+    const regions = egdeskFileViewRegions({ connected: !!activeRoot, hasFile: !!activeFileId, editable: !editorLabel.hidden })
+    root.dataset.fileState = regions.state
+    emptyState.hidden = !regions.empty
+    searchForm.hidden = !regions.search
+    treePanel.hidden = !regions.treePanel
+    workspace.hidden = !regions.workspace
+    fileDetails.hidden = !regions.details
+    actions.hidden = !regions.actions
+  }
   const setEditable = enabled => {
-    editorLabel.hidden = !enabled; actions.hidden = !enabled
+    editorLabel.hidden = !enabled
+    refreshRegions()
     refreshViewerVisibility()
     saveAsButton.disabled = !enabled || !chooseSaveAs || draft?.saveAsAvailable !== true
     saveAsButton.title = draft?.saveAsAvailable === true ? '기존 파일은 덮어쓰지 않습니다.' : '새 파일 저장 기능을 준비 중입니다.'
@@ -855,6 +883,7 @@ export function createEGDeskFileView({ document, service, chooseRoot, chooseProj
     changeReview?.dispose(); changeReview = null; changeReviewPanel.hidden = true; sourceConflictPanel.hidden = true
     activeRoot = rootHandle
     if (!preserveDraft) { activeFileId = null; draft = null; readReceipt = null; sourceDisconnected = false; pendingReconnect = false }
+    refreshRegions()
     loadedGroups.clear(); pendingFolders.clear(); gitIndex = createEGDeskGitStateIndex([])
     if (fileChangeTimer) { timers.clearTimeout(fileChangeTimer); fileChangeTimer = null }
     tree.replaceChildren()
@@ -897,6 +926,7 @@ export function createEGDeskFileView({ document, service, chooseRoot, chooseProj
       radio.tabIndex = checked ? 0 : -1
     }
     searchLabelText.textContent = searchMode === 'contents' ? '파일 내용 검색' : '파일 이름 검색'
+    searchInput.placeholder = searchLabelText.textContent
   }
 
   function hunkSections(hunks, { before, after, heading }) {
@@ -1643,6 +1673,7 @@ export function createEGDeskFileView({ document, service, chooseRoot, chooseProj
   setSearchMode('names')
   selectTab('files')
   refreshProjectTarget()
+  refreshRegions()
 
   root.addEventListener('keydown', event => {
     if (event.defaultPrevented || event.isComposing || composing || event.keyCode === 229 || Date.now() - compositionEndedAt < 100) return
