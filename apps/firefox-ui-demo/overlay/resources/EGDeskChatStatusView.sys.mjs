@@ -110,6 +110,21 @@ export function uncertainStatusText(text, checkedAt) {
 }
 
 /**
+ * The connection state as one line: what is observed, when it was last
+ * checked, and one retry. Everything else — a history read that failed while
+ * the bridge was away, the raw transport error — folds under '자세히', so a
+ * lost connection never stacks a second alert. null while the bridge answers.
+ * `notice` is SurfaceState.bridgeConnectionNotice(); the cause is not claimed.
+ */
+export function connectionLine(notice, { localHistoryError = null, checkedAt = null } = {}) {
+  if (!notice || typeof notice.state !== 'string' || notice.state === 'online') return null;
+  const history = typeof localHistoryError === 'string' ? localHistoryError.trim() : '';
+  const details = (Array.isArray(notice.details) ? notice.details : []).filter(line => typeof line === 'string' && line);
+  return { state: notice.state, text: notice.text, action: notice.action || null,
+    checked: checkedClockText(checkedAt), details: history ? [history, ...details] : details };
+}
+
+/**
  * Whether the task list opens by itself: once, when a wait that needs 대표님
  * (a question or an approval) appears that was not there before. Folding it
  * keeps it folded until a new one shows up.

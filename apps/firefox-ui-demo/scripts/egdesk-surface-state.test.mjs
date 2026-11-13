@@ -11482,7 +11482,8 @@ test('reduced motion settles camera moves at once unless the caller chose', () =
 });
 
 // RT-05: bridge connection said by state; raw detail folded; older bridges compatible.
-test('bridge connection notice maps reconnect states and folds raw detail', () => {
+test('bridge connection notice maps reconnect states and folds raw detail', async () => {
+  const ChatStatusView = await import('../overlay/resources/EGDeskChatStatusView.sys.mjs');
   const online = Surface.bridgeConnectionNotice({ connected: true, latencyMs: 41.6 });
   assert.equal(online.state, 'online');
   assert.equal(online.text, '연결됨');
@@ -11514,7 +11515,7 @@ test('bridge connection notice maps reconnect states and folds raw detail', () =
   const state = { codex: { showBridgeDetails: false } };
   const { el } = compileFunction(`${declaration('el')}\nreturn { el };`, ['document'])(document);
   const api = compileFunction(`${declaration('codexBridgeNotice')}\n${declaration('codexBridgeSummary')}\n${declaration('buildCodexBridgeNotice')}\nreturn { codexBridgeSummary, buildCodexBridgeNotice };`,
-    ['el', 'SurfaceState', 'state'])(el, Surface, state);
+    ['el', 'SurfaceState', 'state', 'ChatStatusView'])(el, Surface, state, ChatStatusView);
   const codex = patch => ({ connected: false, bridgeFailures: 0, bridgeError: 'TypeError: NetworkError', lastBridgeLatency: null, bridgeBuild: null, ...patch });
   assert.equal(api.buildCodexBridgeNotice(codex({ connected: true }), {}), null, 'nothing extra while connected');
   assert.equal(api.codexBridgeSummary(codex({ connected: true, lastBridgeLatency: 30 })), '연결됨');

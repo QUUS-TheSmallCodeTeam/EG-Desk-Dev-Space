@@ -7267,6 +7267,19 @@ button.egd-codex-message-activity:focus-visible { outline: var(--egd-focus-outli
 .egd-codex-connection-details { margin-top: 4px; }
 .egd-codex-connection-details summary { cursor: pointer; font-size: 11px; color: var(--egd-on-surface-variant); }
 .egd-codex-connection-details pre { margin: 4px 0 0; padding: 8px; border-radius: 6px; background: var(--egd-surface-elevated); color: var(--egd-on-surface-variant); font-size: 11px; line-height: 1.6; white-space: pre-wrap; overflow-wrap: anywhere; }
+/* A74/B38: the whole notice reads as one line — state · when it was checked ·
+   retry · '자세히'. Opening '자세히' drops the detail onto its own line below. */
+.egd-codex-connection { display: flex; flex-wrap: wrap; align-items: center; gap: 2px 10px; padding: 5px 10px; }
+.egd-codex-connection-row { flex: 1 1 auto; min-width: 0; }
+.egd-codex-connection-text { flex: 0 1 auto; }
+.egd-codex-connection-checked { flex: 0 0 auto; color: inherit; font-size: 11px; font-variant-numeric: tabular-nums; white-space: nowrap; }
+.egd-codex-connection-checked::before { content: "· "; }
+.egd-codex-connection-row > button { flex: 0 0 auto; margin-left: auto; }
+.egd-codex-connection-details { flex: 0 0 auto; margin-top: 0; }
+.egd-codex-connection-details[open] { flex: 1 0 100%; }
+.egd-codex-connection-details summary { color: inherit; border-radius: 4px; }
+.egd-codex-connection-details summary:hover { text-decoration: underline; }
+.egd-codex-connection-details summary:focus-visible { outline: var(--egd-focus-outline); outline-offset: var(--egd-focus-outline-offset); }
 
 /* Agent questions and sub-agent rows stay quiet inside the activity record. */
 .egd-codex-user-input { display: flex; flex-direction: column; gap: 8px; margin: 12px 0; padding: 14px; border: 1px solid var(--egd-outline); border-radius: 10px; background: var(--egd-window-alt); font-size: 12px; }

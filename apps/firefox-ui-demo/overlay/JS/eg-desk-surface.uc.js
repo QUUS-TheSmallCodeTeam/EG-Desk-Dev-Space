@@ -9836,9 +9836,14 @@
 
   // The bridge state in one line; the raw error and timing stay folded under
   // '자세히', which keeps its open state across re-renders.
+  // A74/B38: one line only — a history read that failed while the bridge was
+  // away folds under '자세히' too, and the line says when the state was checked.
   function buildCodexBridgeNotice(codex, codexBridge) {
-    const notice = codexBridgeNotice(codex);
-    if (notice.state === 'online') return null;
+    const notice = ChatStatusView.connectionLine(codexBridgeNotice(codex), {
+      localHistoryError: codex.localHistoryStatus === 'error' ? codex.localHistoryError : null,
+      checkedAt: codex.bridgeCheckedAt,
+    });
+    if (!notice) return null;
     return el('div', {
       class: `egd-codex-connection egd-codex-connection-${notice.state}`,
       role: 'status',
@@ -9846,8 +9851,11 @@
     },
       el('div', { class: 'egd-codex-connection-row' },
         el('span', { class: 'egd-codex-connection-text' }, notice.text),
+        notice.checked ? el('span', { class: 'egd-codex-connection-checked', title: '연결 상태를 마지막으로 확인한 시각', data: { testid: 'chat-bridge-checked' } }, notice.checked) : null,
         notice.action ? el('button', {
-          class: 'egd-codex-chip egd-codex-chip-subtle',
+          class: 'egd-codex-chip egd-codex-chip-subtle', type: 'button',
+          title: '지금 다시 연결하기', 'aria-label': '연결 다시 시도',
+          data: { testid: 'chat-bridge-retry', focusKey: 'chat-bridge-retry' },
           onclick: () => codexBridge.reconnectNow?.(),
         }, notice.action) : null,
       ),
@@ -11104,9 +11112,9 @@
         }, activeThread.localHistoryCoverage.status === 'unknown' && !activeThread.localHistoryCoverage.reasons?.length
           ? '이 기기에 저장된 기록 · 전체 대화 범위 미확인'
           : '로컬 기록 일부를 확인하지 못했습니다. 표시된 대화는 유지됩니다.'));
-        if (codex.localHistoryStatus === 'error' && codex.localHistoryError) conversation.appendChild(el('p', {
+        if (codex.localHistoryStatus === 'error' && codex.localHistoryError && !connectionNotice) conversation.appendChild(el('p', {
           class: 'egd-codex-error', role: 'status', data: { testid: 'chat-local-history-error' },
-        }, codex.localHistoryError));
+        }, codex.localHistoryError)); // A74: while the connection line is up it holds this under '자세히'.
         const bindingHeld = ChatState.nativeBindingHeld(activeThread);
         if (bindingHeld) conversation.appendChild(el('div', {
           class: 'egd-codex-error', role: 'status', data: { testid: 'chat-binding-held', bindingState: activeThread.bindingState },
@@ -12044,6 +12052,8 @@
       scheduleDeskSessionSave();
     };
     const update = (patch) => {
+      // B38: every observation of the bridge, either way, stamps when it was made.
+      if (Object.hasOwn(patch, 'connected')) patch = { ...patch, bridgeCheckedAt: Date.now() };
       // `connected` is the shared helper transport. A failed transport must
       // not leave a stale ready Claude row enabling new sends.
       if (patch.connected === false && !Object.hasOwn(patch, 'engines')) {

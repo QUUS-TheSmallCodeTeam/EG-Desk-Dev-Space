@@ -208,3 +208,46 @@ test('the status line steps aside by state, stays in the page, and keeps a way i
   // B12: the list opens by state, once; drawing never closes it.
   assert.match(surfaceSource, /if \(taskAttention\.changed\) codex\.taskAttentionSeen = taskAttention\.seen;\n\s+if \(taskAttention\.opened\) codex\.taskBoardOpen = true;/);
 });
+
+test('a lost connection is one line: state, when it was checked, retry; the rest folds', () => {
+  const at = new Date(2026, 10, 14, 3, 12).getTime();
+  const offline = { state: 'offline', text: '연결이 끊겼습니다', action: '다시 시도', details: ['오류: TypeError: NetworkError'] };
+  const history = '로컬 기록을 확인하지 못했습니다. 기존 채팅과 초안은 유지됩니다.';
+  assert.deepEqual(StatusView.connectionLine(offline, { localHistoryError: history, checkedAt: at }), {
+    state: 'offline', text: '연결이 끊겼습니다', action: '다시 시도', checked: '03:12 확인',
+    details: [history, '오류: TypeError: NetworkError'] }, 'the history failure sits under 자세히, not in a second box');
+  assert.deepEqual(StatusView.connectionLine({ state: 'reconnecting', text: '다시 연결 중…', action: null, details: [] }),
+    { state: 'reconnecting', text: '다시 연결 중…', action: null, checked: null, details: [] }, 'never checked: no time is made up');
+  assert.equal(StatusView.connectionLine({ state: 'online', text: '연결됨', action: null, details: ['응답 시간 30ms'] }, { localHistoryError: history, checkedAt: at }), null,
+    'nothing extra while connected');
+  assert.equal(StatusView.connectionLine(null), null);
+  assert.deepEqual(StatusView.connectionLine(offline, { localHistoryError: '   ' }).details, ['오류: TypeError: NetworkError']);
+});
+
+test('the connection notice draws that one line and the conversation drops its second box', () => {
+  const state = { codex: { showBridgeDetails: false } };
+  const build = new Function('el', 'codexBridgeNotice', 'ChatStatusView', 'state', `${declaration('buildCodexBridgeNotice')}\nreturn buildCodexBridgeNotice;`)(
+    node, codex => ({ state: codex.connected ? 'online' : 'offline', text: '연결이 끊겼습니다', action: '다시 시도', details: ['오류: TypeError: NetworkError'] }), StatusView, state);
+  const at = new Date(2026, 10, 14, 3, 12).getTime();
+  let retried = 0;
+  const notice = build({ connected: false, bridgeCheckedAt: at, localHistoryStatus: 'error', localHistoryError: '로컬 기록을 확인하지 못했습니다.' }, { reconnectNow: () => { retried++; } });
+  assert.equal(notice.props.data.bridgeState, 'offline');
+  const [row, details] = notice.children;
+  assert.equal(textOf(row), '연결이 끊겼습니다03:12 확인다시 시도');
+  assert.equal(textOf(byTestId(notice, 'chat-bridge-checked')[0]), '03:12 확인');
+  const [retry] = byTestId(notice, 'chat-bridge-retry');
+  assert.deepEqual([retry.tag, retry.props.type, retry.props.title, retry.props['aria-label']], ['button', 'button', '지금 다시 연결하기', '연결 다시 시도']);
+  click(retry);
+  assert.equal(retried, 1);
+  assert.equal(details.tag, 'details');
+  assert.equal(details.props.open, null, "'자세히' starts folded");
+  assert.equal(textOf(details), '자세히로컬 기록을 확인하지 못했습니다.\n오류: TypeError: NetworkError');
+  assert.equal(build({ connected: true, bridgeCheckedAt: at, localHistoryStatus: 'error', localHistoryError: 'x' }, {}), null);
+  // A history failure that is not folded (the bridge answers) keeps its own line.
+  assert.match(surfaceSource, /if \(codex\.localHistoryStatus === 'error' && codex\.localHistoryError && !connectionNotice\) conversation\.appendChild\(/);
+  // Every observation of the bridge stamps when it was made.
+  assert.match(surfaceSource, /if \(Object\.hasOwn\(patch, 'connected'\)\) patch = \{ \.\.\.patch, bridgeCheckedAt: Date\.now\(\) \};/);
+  assert.match(css, /\.egd-codex-connection \{[^}]*display: flex;[^}]*flex-wrap: wrap;/);
+  assert.match(css, /\.egd-codex-connection-details\[open\] \{[^}]*flex: 1 0 100%;/);
+  assert.match(css, /\.egd-codex-connection-details summary:focus-visible \{[^}]*outline: var\(--egd-focus-outline\);/);
+});
