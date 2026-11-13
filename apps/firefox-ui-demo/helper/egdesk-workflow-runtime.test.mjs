@@ -212,7 +212,7 @@ test('the bridge opens the workflow runtime after Chat, mounts its routes behind
   const { readFile } = await import('node:fs/promises')
   const source = await readFile(new URL('./codex-bridge-server.mjs', import.meta.url), 'utf8')
   const at = text => { const index = source.indexOf(text); assert.notEqual(index, -1, `missing server marker: ${text}`); return index }
-  at("import { openWorkflowRuntime } from './egdesk-workflow-runtime.mjs'")
+  at("import { WORKFLOW_OWNER, openWorkflowRuntime } from './egdesk-workflow-runtime.mjs'")
   const files = at('const localFiles = createEGDeskFileMount({ dataDir, port: BRIDGE_PORT, onRootRegistered: root => {')
   assert.ok(at('let workflow = null') < files)
   const rootCallback = source.slice(files, at('const contextStore = new ImmutableContextStore({'))
@@ -227,7 +227,10 @@ test('the bridge opens the workflow runtime after Chat, mounts its routes behind
   assert.ok(at('const chat = new CodexChatRuntime({') < auth && auth < open)
   assert.ok(auth < at('const handleChatHttp = createChatHttpHandler(chat, ensureChatAuth)'))
   at("  ensureAuth: () => ensureChatAuth(), getOwnerKey: () => publicAuthIdentityKey(authState), maxConcurrency: 2,")
-  at('const terminalRegistry = new TerminalSessionRegistry({ onExit: receipt => workflow?.publishTerminalExit(receipt) })')
+  // CODE-06 added the typed-command watch: it shares the workflow bus and owner scope, and the registry still feeds exits to the runtime.
+  const runWatch = at('const terminalRunWatch = createTerminalRunWatch({ bus: workflow?.bus ?? null, owner: WORKFLOW_OWNER })')
+  assert.ok(open < runWatch, 'the watch reads workflow.bus, so the runtime opens first')
+  assert.ok(runWatch < at('const terminalRegistry = new TerminalSessionRegistry({ onExit: receipt => workflow?.publishTerminalExit(receipt), runWatch: terminalRunWatch })'))
   const update = source.slice(at('function updateAuthState(patch, { broadcastStatus = true } = {}) {'), at('function authStatusTextFor(snapshot) {'))
   assert.match(update, /workflow\?\.observeAuth\(\{ signedIn: authState\.isLoggedIn === true, accountKey: modelAccountKey\(authState\) \}\)\n {2}engineStatus\.check\(\)\n\}/)
   const mount = at('if (await workflow.handle(req, res, url)) return')
