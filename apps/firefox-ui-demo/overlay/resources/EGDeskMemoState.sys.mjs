@@ -44,6 +44,8 @@ export const MEMO_FRAME = Object.freeze({
   expanded: Object.freeze({ width: 320, height: 280 }),
 });
 export const MEMO_ASK_STATUSES = Object.freeze(['pending', 'answered', 'cancelled']);
+// How far (world px) a memo may sit outside the window it is pinned to.
+export const MEMO_ANCHOR_REACH = 4000;
 
 function body(value) {
   return typeof value === 'string' ? value.replace(/\r\n?/g, '\n').replace(/\n{3,}/g, '\n\n').trim() : '';
@@ -60,6 +62,10 @@ const validRect = rect => rect && finite(rect.x) && finite(rect.y) && finite(rec
 // A memo is pinned to the card under it (as a 0..1 ratio of the card, so it
 // follows move and resize) or to the free Canvas. A card anchor also keeps
 // the last world point, so the memo stays visible when the card is closed.
+// offset: a memo placed beside its card keeps that world distance from the
+// card's nearest edge point (the ratio), so the gap survives a resize.
+// label: the card's name when the memo was pinned, shown only on the memo
+// itself once that card is closed ('대상 없음'). Never part of an Agent ask.
 function normAnchor(raw) {
   if (!raw || typeof raw !== 'object') return null;
   if (raw.kind === 'card') {
@@ -68,6 +74,12 @@ function normAnchor(raw) {
     const anchor = { kind: 'card', cardId, x: round4(clamp(raw.x, 0, 1)), y: round4(clamp(raw.y, 0, 1)) };
     const at = worldPoint(raw.at);
     if (at) anchor.at = at;
+    if (finite(raw.offset?.x) && finite(raw.offset?.y)) {
+      const offset = { x: round1(clamp(raw.offset.x, -MEMO_ANCHOR_REACH, MEMO_ANCHOR_REACH)), y: round1(clamp(raw.offset.y, -MEMO_ANCHOR_REACH, MEMO_ANCHOR_REACH)) };
+      if (offset.x || offset.y) anchor.offset = offset;
+    }
+    const label = oneLine(raw.label, MEMO_LIMITS.target);
+    if (label) anchor.label = label;
     return anchor;
   }
   const point = worldPoint(raw);
@@ -207,24 +219,81 @@ export function memoAnchorAt(point, cards = []) {
     const rect = card?.rect;
     if (!cardId || !validRect(rect)) continue;
     if (at.x >= rect.x && at.x <= rect.x + rect.width && at.y >= rect.y && at.y <= rect.y + rect.height) {
-      return { kind: 'card', cardId, x: round4((at.x - rect.x) / rect.width), y: round4((at.y - rect.y) / rect.height), at };
+      return memoAnchorBeside(at, card);
     }
   }
   return { kind: 'canvas', ...at };
 }
 
-export function createMemoRecord({ id, seq, point, cards = [], text = '', now = Date.now() } = {}) {
-  const anchor = memoAnchorAt(point, cards);
+// Pin to this card wherever the memo is: on it (ratio only) or beside it
+// (ratio of the card's nearest edge point plus the world offset from there).
+// card: { id, rect, label? }.
+export function memoAnchorBeside(point, card) {
+  const at = worldPoint(point);
+  const cardId = token(card?.id);
+  const rect = card?.rect;
+  if (!at || !cardId || !validRect(rect)) return null;
+  const near = { x: clamp(at.x, rect.x, rect.x + rect.width), y: clamp(at.y, rect.y, rect.y + rect.height) };
+  return normAnchor({ kind: 'card', cardId, x: (near.x - rect.x) / rect.width, y: (near.y - rect.y) / rect.height, at,
+    offset: { x: at.x - near.x, y: at.y - near.y }, label: card.label });
+}
+
+// target: the window the memo is about when it opens beside it (Dock [메모]
+// with a window selected). Without one the point decides, as on a drop.
+export function createMemoRecord({ id, seq, point, cards = [], target = null, text = '', now = Date.now() } = {}) {
+  const anchor = target ? memoAnchorBeside(point, target) : memoAnchorAt(point, cards);
   if (!anchor) throw new Error('메모를 둘 자리가 없습니다.');
   if (body(text).length > MEMO_LIMITS.text) throw new Error(`메모는 ${MEMO_LIMITS.text}자까지 쓸 수 있습니다.`);
   return normalizeMemoRecord({ id, seq, anchor, text, revision: 1, author: { kind: 'user' }, createdAt: now, updatedAt: now }, { now });
 }
 
 // The user dropped the memo somewhere else: re-pin to whatever is under it.
+// A memo that sat beside its window (offset) and lands on empty Canvas stays
+// linked to that window; a memo lifted off the window it lay on comes free.
 export function moveMemo(memo, point, cards = [], { now = Date.now() } = {}) {
-  const anchor = memoAnchorAt(point, cards);
+  let anchor = memoAnchorAt(point, cards);
   if (!anchor) throw new Error('메모를 둘 자리가 없습니다.');
+  if (anchor.kind === 'canvas' && memo.anchor?.kind === 'card' && memo.anchor.offset) {
+    const current = cards.find(card => card?.id === memo.anchor.cardId && validRect(card.rect));
+    if (current) anchor = memoAnchorBeside(point, { ...current, label: current.label || memo.anchor.label }) || anchor;
+  }
   return { ...memo, anchor, updatedAt: Math.max(memo.updatedAt, now) };
+}
+
+// [다시 연결]: pin the memo, where it is now, to the window the user chose.
+export function attachMemoToCard(memo, card, point, { now = Date.now() } = {}) {
+  const anchor = token(card?.id) !== memo.id ? memoAnchorBeside(point, card) : null;
+  if (!anchor) throw new Error('메모를 이을 대상을 찾을 수 없습니다.');
+  return { ...memo, anchor, updatedAt: Math.max(memo.updatedAt, now) };
+}
+
+// The thin line from a memo to the window it is pinned to, in world
+// coordinates: along the line between the two centres, from the memo's edge
+// to the window's edge. null when the memo lies on or touches the window (the
+// badge already names it). angle: degrees, for a rotated 1px box.
+export function memoTetherSegment(memoRect, targetRect, { minLength = 8 } = {}) {
+  if (!validRect(memoRect) || !validRect(targetRect)) return null;
+  const from = { x: memoRect.x + memoRect.width / 2, y: memoRect.y + memoRect.height / 2 };
+  const dx = targetRect.x + targetRect.width / 2 - from.x, dy = targetRect.y + targetRect.height / 2 - from.y;
+  if (!dx && !dy) return null;
+  const reach = rect => Math.min(dx ? rect.width / 2 / Math.abs(dx) : Infinity, dy ? rect.height / 2 / Math.abs(dy) : Infinity);
+  const exit = reach(memoRect), enter = 1 - reach(targetRect);
+  if (!(enter > exit)) return null;
+  const length = (enter - exit) * Math.hypot(dx, dy);
+  if (length < minLength) return null;
+  return { x1: round1(from.x + dx * exit), y1: round1(from.y + dy * exit), x2: round1(from.x + dx * enter), y2: round1(from.y + dy * enter),
+    length: round1(length), angle: Math.round(Math.atan2(dy, dx) * 18000 / Math.PI) / 100 };
+}
+
+// '답 기다리는 중' elapsed text for a pending ask. '' when the ask has no time.
+export function memoWaitLabel(askedAt, now = Date.now()) {
+  if (msTime(askedAt) === null || !finite(now)) return '';
+  const minutes = Math.floor(Math.max(0, now - askedAt) / 60000);
+  if (minutes < 1) return '방금 물음';
+  if (minutes < 60) return `${minutes}분째`;
+  const hours = Math.floor(minutes / 60);
+  if (hours < 24) return minutes % 60 ? `${hours}시간 ${minutes % 60}분째` : `${hours}시간째`;
+  return `${Math.floor(hours / 24)}일째`;
 }
 
 // World position of the memo's top-left corner. attached: pinned to a card
@@ -235,7 +304,8 @@ export function memoPosition(memo, cards = []) {
   if (anchor?.kind !== 'card') return null;
   const card = cards.find(item => item?.id === anchor.cardId && validRect(item.rect));
   if (card) {
-    return { x: round1(card.rect.x + anchor.x * card.rect.width), y: round1(card.rect.y + anchor.y * card.rect.height), attached: true, missing: false };
+    return { x: round1(card.rect.x + anchor.x * card.rect.width + (anchor.offset?.x || 0)),
+      y: round1(card.rect.y + anchor.y * card.rect.height + (anchor.offset?.y || 0)), attached: true, missing: false };
   }
   return anchor.at ? { x: anchor.at.x, y: anchor.at.y, attached: false, missing: true } : null;
 }
