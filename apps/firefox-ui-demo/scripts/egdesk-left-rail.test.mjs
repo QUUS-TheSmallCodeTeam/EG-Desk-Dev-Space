@@ -166,20 +166,34 @@ const el = (tag, props, ...children) => fakeNode(tag, props, children.filter(chi
 const LeftRail = { boardRailRows, boardRailSignature, railFocusIndex, boardListEmptyState, emptyCanvasHint };
 
 function railHarness({ entries = [], projections = {}, activeProjectionId = null } = {}) {
-  const calls = { opened: [], created: 0, files: 0, hintSyncs: 0 };
+  const calls = { opened: [], created: 0, files: 0, hintSyncs: 0, listToggles: 0 };
   const state = { boards: { projections, activeProjectionId }, entries };
   const nodes = {};
-  const document = { activeElement: null, getElementById: id => nodes[id] || null };
-  const source = ['boardRailChip', 'renderBoardRail', 'syncBoardRail', 'moveBoardRailFocus', 'buildPresetBag']
+  const observers = [];
+  const documentElement = {};
+  const document = { activeElement: null, documentElement, getElementById: id => nodes[id] || null };
+  class MutationObserver {
+    constructor(run) { this.run = run; }
+    observe(target, options) { observers.push({ run: this.run, target, options }); }
+  }
+  // The Board list of the screen: toggling adds or removes its panel.
+  const toggleAgendaSwitcher = () => {
+    calls.listToggles += 1;
+    if (nodes['egd-agenda-switcher']) delete nodes['egd-agenda-switcher'];
+    else nodes['egd-agenda-switcher'] = {};
+  };
+  const source = ['boardRailChip', 'renderBoardRail', 'syncBoardRail', 'moveBoardRailFocus', 'syncDeskRailButton', 'deskRailButton', 'buildPresetBag']
     .map(declaration).join('\n');
-  const api = compileFunction(`let boardRailSignatureShown = null;\n${source}\nreturn { buildPresetBag, syncBoardRail, moveBoardRailFocus };`,
-    ['el', 'deskIcon', 'document', 'state', 'LeftRail', 'agendaListEntries', 'switchAgenda', 'createNewAgenda', 'openFileFromUserAction', 'syncEmptyCanvasHint'])(
+  const api = compileFunction(`let boardRailSignatureShown = null;\nlet deskRailListOpenAtPress = false;\n${source}\nreturn { buildPresetBag, syncBoardRail, moveBoardRailFocus };`,
+    ['el', 'deskIcon', 'document', 'state', 'LeftRail', 'agendaListEntries', 'switchAgenda', 'createNewAgenda', 'openFileFromUserAction', 'syncEmptyCanvasHint',
+      'toggleAgendaSwitcher', 'MutationObserver'])(
     el, name => fakeNode('svg', { class: 'egd-ui-icon', data: { icon: name } }), document, state, LeftRail,
-    () => state.entries, id => calls.opened.push(id), () => { calls.created += 1; }, () => { calls.files += 1; }, () => { calls.hintSyncs += 1; });
+    () => state.entries, id => calls.opened.push(id), () => { calls.created += 1; }, () => { calls.files += 1; }, () => { calls.hintSyncs += 1; },
+    toggleAgendaSwitcher, MutationObserver);
   const bag = api.buildPresetBag();
   nodes['egd-preset-bag'] = bag;
   nodes['egd-bag-boards'] = bag.all().find(node => node.attrs.id === 'egd-bag-boards');
-  return { ...api, bag, state, calls, document };
+  return { ...api, bag, state, calls, document, nodes, observers, documentElement };
 }
 
 test('left rail: the fake presets are gone and the rail lists the saved Boards under Desk and 파일', () => {
@@ -251,7 +265,7 @@ test('left rail: a sync redraws only when the rows changed and keeps the keyboar
 test('left rail: ↑/↓/Home/End move between rail items without leaving the rail', () => {
   const h = railHarness({ entries: [entry('a', '견적 검토'), entry('b', '회의 준비')] });
   const items = h.bag.all().filter(node => node.tag === 'button');
-  assert.deepEqual(items.map(node => node.attrs.class.split(' ').pop()), ['egd-bag-file', 'egd-bag-board', 'egd-bag-board', 'egd-bag-add']);
+  assert.deepEqual(items.map(node => node.attrs.class.split(' ').pop()), ['egd-bag-header', 'egd-bag-file', 'egd-bag-board', 'egd-bag-board', 'egd-bag-add']);
   const press = (key, target) => {
     let prevented = false;
     h.moveBoardRailFocus({ key, target, preventDefault() { prevented = true; } });
@@ -260,11 +274,13 @@ test('left rail: ↑/↓/Home/End move between rail items without leaving the ra
   fakeNode.focused = null;
   assert.equal(press('ArrowDown', items[0]), true);
   assert.equal(fakeNode.focused, items[1]);
-  assert.equal(press('End', items[1]), true);
-  assert.equal(fakeNode.focused, items[3]);
-  assert.equal(press('ArrowUp', items[3]), true);
+  assert.equal(press('ArrowDown', items[1]), true);
   assert.equal(fakeNode.focused, items[2]);
-  assert.equal(press('Home', items[2]), true);
+  assert.equal(press('End', items[2]), true);
+  assert.equal(fakeNode.focused, items[4]);
+  assert.equal(press('ArrowUp', items[4]), true);
+  assert.equal(fakeNode.focused, items[3]);
+  assert.equal(press('Home', items[3]), true);
   assert.equal(fakeNode.focused, items[0]);
   fakeNode.focused = null;
   assert.equal(press('Enter', items[1]), false, 'Enter keeps the native button activation');
@@ -274,6 +290,48 @@ test('left rail: ↑/↓/Home/End move between rail items without leaving the ra
     h.moveBoardRailFocus({ key: 'ArrowDown', target: items[0], ...modified, preventDefault() { prevented = true; } });
     assert.equal(prevented, false);
   }
+});
+
+test('left rail: Desk is a button that opens the existing Board list and says whether the list is open', () => {
+  const h = railHarness({ entries: [entry('a', '견적 검토')] });
+  const desk = h.bag.byClass('egd-bag-header');
+  assert.equal(desk.length, 1);
+  assert.equal(desk[0].tag, 'button');
+  assert.equal(desk[0].attrs.type, 'button');
+  assert.equal(desk[0].textContent, 'Desk');
+  assert.equal(desk[0].attrs.title, 'Board 목록');
+  assert.equal(desk[0].attrs['aria-label'], 'Desk · Board 목록');
+  assert.equal(desk[0].attrs['aria-expanded'], 'false');
+  desk[0].click();
+  assert.equal(h.calls.listToggles, 1);
+  assert.equal(desk[0].attrs['aria-expanded'], 'true');
+  desk[0].click();
+  assert.equal(h.calls.listToggles, 2, 'a keyboard press on the open list closes it');
+  assert.equal(desk[0].attrs['aria-expanded'], 'false');
+});
+
+test('left rail: a pointer press on Desk while the list is open only closes it, and the list closing elsewhere is followed', () => {
+  const h = railHarness();
+  const desk = h.bag.byClass('egd-bag-header')[0];
+  desk.click();
+  assert.equal(desk.attrs['aria-expanded'], 'true');
+  // The list closes itself on the press outside it; the click that follows must not open it again.
+  desk.listeners.pointerdown();
+  delete h.nodes['egd-agenda-switcher'];
+  desk.click();
+  assert.equal(h.calls.listToggles, 1);
+  assert.equal(desk.attrs['aria-expanded'], 'false');
+  desk.listeners.pointerdown();
+  desk.click();
+  assert.equal(h.calls.listToggles, 2, 'the next press opens it');
+  assert.equal(desk.attrs['aria-expanded'], 'true');
+  // Esc, a press elsewhere or choosing a Board removes the panel without the rail being touched.
+  assert.equal(h.observers.length, 1);
+  assert.equal(h.observers[0].target, h.documentElement);
+  assert.deepEqual(h.observers[0].options, { childList: true });
+  delete h.nodes['egd-agenda-switcher'];
+  h.observers[0].run();
+  assert.equal(desk.attrs['aria-expanded'], 'false');
 });
 
 const rule = selector => {
@@ -289,6 +347,16 @@ test('left rail CSS: long lists scroll inside the rail, + stays in view, long na
   assert.match(rule('.egd-bag-board .egd-bag-label'), /-webkit-line-clamp: 2;/);
   assert.match(rule('.egd-bag-board .egd-bag-label'), /overflow: hidden;/);
   assert.match(rule('.egd-bag-chip:active'), /background: var\(--egd-/);
+  // The shared `.egd-edge button` reset (one class + one tag) clears fill and padding of any
+  // single-class rule, so the pressed look and the Board row padding carry two classes.
+  assert.match(rule('.egd-edge button'), /background: transparent;/);
+  assert.match(rule('.egd-bag-chip.egd-bag-chip-active'), /background: var\(--egd-primary-container\);/);
+  assert.match(rule('.egd-bag-chip.egd-bag-board'), /padding: 6px 1px 5px;/);
+  assert.match(rule('button.egd-bag-header'), /color: var\(--egd-on-surface\);/);
+  assert.match(rule('button.egd-bag-header.egd-bag-header-muted'), /color: var\(--egd-on-surface-variant\);/);
+  assert.match(css, /\n\.egd-bag-header:hover,\n\.egd-bag-header\[aria-expanded="true"\] \{ background: var\(--egd-hover\); \}/);
+  assert.match(rule('.egd-bag-header:active'), /background: var\(--egd-/);
+  assert.match(css, /\n\.egd-bag-header:focus-visible,\n\.egd-bag-chip:focus-visible,\n\.egd-bag-add:focus-visible \{ outline: var\(--egd-focus-outline\);/);
   assert.match(rule('.egd-bag-board[data-open="true"]::after'), /background: var\(--egd-/);
 });
 
@@ -399,4 +467,15 @@ test('Board list panel: the empty list uses the empty-state words and wires 새 
   assert.equal(search.all().filter(node => node.tag === 'button').length, 0);
   assert.equal(make({ agenda: { switcherQuery: '', switcherFilter: 'closed' } }, 2).textContent, '닫은 Board가 없습니다');
   assert.match(declaration('renderAgendaSwitcherPanel'), /\.\.\.\(rows\.length \? rows : \[agendaSwitcherEmptyState\(counts\.all\)\]\),/);
+});
+
+test('Board list panel CSS: the two starts keep a button frame above the shared edge-button reset, with hover, press and focus looks', () => {
+  const start = rule('.egd-agenda-switch-empty-actions .egd-agenda-switch-action');
+  assert.match(start, /border: 1px solid var\(--egd-outline\);/);
+  assert.match(start, /padding: 0 9px;/);
+  assert.match(start, /background: var\(--egd-surface-elevated\);/);
+  assert.match(rule('.egd-agenda-switch-empty-actions .egd-agenda-switch-action-primary'), /background: var\(--egd-primary-container\);/);
+  assert.match(rule('.egd-agenda-switch-empty-actions .egd-agenda-switch-action:hover'), /background: var\(--egd-hover\);/);
+  assert.match(rule('.egd-agenda-switch-empty-actions .egd-agenda-switch-action:active'), /background: var\(--egd-/);
+  assert.match(rule('.egd-agenda-switch-empty-actions .egd-agenda-switch-action:focus-visible'), /outline: var\(--egd-focus-outline\);/);
 });

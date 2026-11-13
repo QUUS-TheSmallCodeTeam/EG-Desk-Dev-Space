@@ -2989,7 +2989,21 @@
   align-items: center;
   gap: 6px;
 }
+/* The two starts read as buttons: frame, fill and padding are said with two
+   classes, above the shared edge-button reset that would clear them. */
+.egd-agenda-switch-empty-actions .egd-agenda-switch-action {
+  padding: 0 9px;
+  border: 1px solid var(--egd-outline);
+  background: var(--egd-surface-elevated);
+  color: var(--egd-on-surface);
+}
+.egd-agenda-switch-empty-actions .egd-agenda-switch-action-primary {
+  border-color: color-mix(in srgb, var(--egd-primary) 24%, transparent);
+  background: var(--egd-primary-container);
+  color: var(--egd-primary);
+}
 .egd-agenda-switch-empty-actions .egd-agenda-switch-action:hover { background: var(--egd-hover); }
+.egd-agenda-switch-empty-actions .egd-agenda-switch-action:active { background: var(--egd-primary-container); }
 .egd-agenda-switch-empty-actions .egd-agenda-switch-action:focus-visible {
   outline: var(--egd-focus-outline);
   outline-offset: var(--egd-focus-outline-offset);
@@ -3584,8 +3598,20 @@
   color: var(--egd-on-surface);
   font: 600 11px/1.1 var(--egd-font);
 }
+/* Desk is a button: it opens the Board list. The shared edge-button reset
+   would take its ink and weight, so they are said again here. */
+button.egd-bag-header {
+  border-radius: 6px;
+  color: var(--egd-on-surface);
+  font: 600 11px/1.1 var(--egd-font);
+  transition: background .15s;
+}
+.egd-bag-header:hover,
+.egd-bag-header[aria-expanded="true"] { background: var(--egd-hover); }
+.egd-bag-header:active { background: var(--egd-primary-container); }
 .egd-bag-header .egd-ui-icon { width: 16px; height: 16px; }
 .egd-bag-header-muted { color: var(--egd-on-surface-variant); }
+button.egd-bag-header.egd-bag-header-muted { color: var(--egd-on-surface-variant); }
 .egd-bag-divider { width: 43px; height: 1px; background: var(--egd-outline); }
 
 /* Saved Boards: the only part of the rail that scrolls; Desk, 파일 and + stay put. */
@@ -3630,9 +3656,12 @@
 .egd-bag-chip:active { background: var(--egd-primary-container); color: var(--egd-on-surface); }
 .egd-bag-chip .egd-ui-icon { width: 16px; height: 16px; }
 .egd-bag-chip-active { background: var(--egd-primary-container); color: var(--egd-on-surface); font-weight: 650; }
+/* Where the person is (the Board being worked in, or 파일): the pressed look.
+   Said again with two classes, so the shared edge-button reset cannot clear the fill. */
+.egd-bag-chip.egd-bag-chip-active { background: var(--egd-primary-container); color: var(--egd-on-surface); }
 /* A saved Board row: the rail item of the approved style, with the Board's own
    name. Long names take two lines and are then cut; the tooltip has it whole. */
-.egd-bag-board {
+.egd-bag-chip.egd-bag-board {
   position: relative;
   flex: 0 0 auto;
   max-width: 100%;
@@ -3658,6 +3687,7 @@
   border-radius: 50%;
   background: var(--egd-primary);
 }
+.egd-bag-header:focus-visible,
 .egd-bag-chip:focus-visible,
 .egd-bag-add:focus-visible { outline: var(--egd-focus-outline); outline-offset: var(--egd-focus-outline-offset); }
 

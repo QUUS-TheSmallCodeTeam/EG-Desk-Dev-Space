@@ -9488,12 +9488,41 @@
     items[next].focus();
   }
 
+  // Desk, the first rail item, opens the Board list the top bar opens (the approved rail's Desk).
+  let deskRailListOpenAtPress = false;
+
+  function syncDeskRailButton(desk) {
+    desk.setAttribute('aria-expanded', String(!!document.getElementById('egd-agenda-switcher')));
+  }
+
+  function deskRailButton() {
+    const desk = el('button', {
+      class: 'egd-bag-header',
+      type: 'button',
+      title: 'Board 목록',
+      'aria-label': 'Desk · Board 목록',
+      'aria-expanded': 'false',
+      data: { testid: 'rail-board-list' },
+      // An open list closes itself on this press; the click after it must not open it again.
+      onpointerdown: () => { deskRailListOpenAtPress = !!document.getElementById('egd-agenda-switcher'); },
+      onclick: (ev) => {
+        const closedByPress = deskRailListOpenAtPress;
+        deskRailListOpenAtPress = false;
+        if (!closedByPress) toggleAgendaSwitcher(ev);
+        syncDeskRailButton(desk);
+      },
+    }, deskIcon('desk'), el('span', {}, 'Desk'));
+    return desk;
+  }
+
   function buildPresetBag() {
     const bag = el('div', { id: 'egd-preset-bag', class: 'egd-edge egd-frosted', role: 'navigation', 'aria-label': 'Desk 도구',
       onkeydown: moveBoardRailFocus });
 
-    bag.appendChild(el('div', { class: 'egd-bag-header', title: 'Desk 도구' },
-      deskIcon('desk'), el('span', {}, 'Desk')));
+    const desk = deskRailButton();
+    bag.appendChild(desk);
+    // The Board list also closes on Esc, on a press elsewhere and on choosing a Board.
+    new MutationObserver(() => syncDeskRailButton(desk)).observe(document.documentElement, { childList: true });
     bag.appendChild(el('span', { class: 'egd-bag-divider', 'aria-hidden': 'true' }));
     bag.appendChild(el('button', { class: 'egd-bag-chip egd-bag-file', title: '파일 작업 열기', 'aria-label': '파일 작업 열기',
       data: { testid: 'file-sidebar-open' }, onclick: () => openFileFromUserAction() }, deskIcon('folder'), el('span', {}, '파일')));
