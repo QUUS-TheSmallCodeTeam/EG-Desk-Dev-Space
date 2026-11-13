@@ -295,7 +295,7 @@ function lifecycleHarness(initialStore, { projections = {}, historyReady = false
     document, el, BoardLifecycle: Lifecycle, state: { boards: { projections } },
     coerceAgendaStore: () => JSON.parse(JSON.stringify(store)),
     writeAgendaStoreAndSync: next => { if (!writable) return false; store = JSON.parse(JSON.stringify(next)); return true; },
-    boardNotice: message => notices.push(message), syncViewportAgendaRail: () => { rails += 1; },
+    boardNotice: message => notices.push(message), boardDoneNotice: message => notices.push(message), syncViewportAgendaRail: () => { rails += 1; },
     agendaCardCountForSnapshot: snapshot => (snapshot?.cards?.length || 0) + (snapshot?.shapes?.length || 0),
     agendaSwitcherRow: () => null, boardVersionHistoryReady: () => historyReady,
   };
@@ -619,7 +619,7 @@ function saveAsHarness(initialStore, { writable = true, snapshotFor = () => ({ .
     saveCurrentAgendaState: options => { saves.push(options); return saveResult === undefined ? { agenda: { id: 'a', title: '자료 정리' }, cards: [{}, {}], shapes: [] } : saveResult; },
     syncBoardToStore: (...args) => { synced.push(args); return Promise.resolve({}); },
     newAgendaId: () => `new-${++seq}`,
-    boardNotice: message => notices.push(message), syncViewportAgendaRail: () => { rails += 1; },
+    boardNotice: message => notices.push(message), boardDoneNotice: message => notices.push(message), syncViewportAgendaRail: () => { rails += 1; },
   };
   const names = ['saveBoardWithNotice', 'closeBoardSaveAs', 'commitBoardSaveAs', 'openBoardSaveAs'];
   const api = new Function(...Object.keys(deps), `${names.map(declaration).join('\n')}\nreturn { ${names.join(', ')} };`)(...Object.values(deps));
@@ -777,7 +777,7 @@ test('screen: 보관함으로 이동 / 보관 해제 write the mark and say wher
     BoardLifecycle: Lifecycle,
     coerceAgendaStore: () => JSON.parse(JSON.stringify(store)),
     writeAgendaStoreAndSync: next => { if (!writable) return false; store = JSON.parse(JSON.stringify(next)); return true; },
-    boardNotice: message => notices.push(message), syncViewportAgendaRail: () => { rails += 1; },
+    boardNotice: message => notices.push(message), boardDoneNotice: message => notices.push(message), syncViewportAgendaRail: () => { rails += 1; },
     agendaSwitcherRow: () => null, document: { querySelector: () => null },
   };
   const names = ['writeBoardLifecycleStore', 'setAgendaArchived'];

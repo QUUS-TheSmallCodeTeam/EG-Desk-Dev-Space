@@ -16337,7 +16337,7 @@ test('대화 분기: availability with reasons, the /chat/fork body, the new roo
       },
       selectThread(threadId) { selected.push(threadId); },
       async forkThread(threadId, { fromTurnId = null } = {}) {${body}\n      },
-    };`, ['state', 'getCodexThreadById', 'createCodexThread', 'ChatState', 'epochScope', 'forkingThreads', 'emit', 'fetchJson', 'boardNotice', 'selected'])(
+    };`, ['state', 'getCodexThreadById', 'createCodexThread', 'ChatState', 'epochScope', 'forkingThreads', 'emit', 'fetchJson', 'boardNotice', 'boardDoneNotice', 'selected'])(
       state, (codex, id) => codex.threads.find(row => row.id === id) || null,
       (type, title, subtitle, options) => ({ id: 'room-new', type, title, subtitle, participants: options.participants, participantRoles: options.participantRoles,
         profileEnabled: options.profileEnabled, agentProfileId: options.agentProfileId, conversationId: null, messages: [] }),
@@ -16347,7 +16347,7 @@ test('대화 분기: availability with reasons, the /chat/fork body, the new roo
         assert.equal(forking.has(source.id), true, 'the room is marked while its branch is in flight');
         return reply(JSON.parse(init.body));
       },
-      text => calls.notices.push(text), calls.selected);
+      text => calls.notices.push(text), text => calls.notices.push(text), calls.selected);
     return { state, calls, bridge, forking };
   };
   const created = request => ({ accepted: true, durable: true, conversationId: 'native-b', clientThreadId: request.clientThreadId, localConversationId: 'local-b',
