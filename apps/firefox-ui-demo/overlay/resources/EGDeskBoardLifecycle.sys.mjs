@@ -151,21 +151,22 @@ export function boardSavedNotice({ title, count } = {}) {
 }
 
 // The close confirmation: saving is the default, closing without saving is a
-// plain second choice, and what closes together is said in one line.
-export function boardCloseSummary({ dirtyCount, viewCount, terminalCount, runningCount } = {}) {
-  const dirty = wholeCount(dirtyCount), views = wholeCount(viewCount), terminals = wholeCount(terminalCount), running = wholeCount(runningCount);
+// plain second choice, and what closes together is said in one line. Actions
+// come in the order the buttons sit (the default last, on the right).
+export function boardCloseSummary({ dirtyCount, viewCount, terminalCount } = {}) {
+  const dirty = wholeCount(dirtyCount), views = wholeCount(viewCount), terminals = Math.min(views, wholeCount(terminalCount));
   const parts = [
     views ? `화면 ${views}개` : null,
-    terminals ? `터미널 ${terminals}개(실행 종료)` : null,
-    running ? `진행 중인 일 ${running}건(중단)` : null,
+    terminals ? `그중 터미널 ${terminals}개(실행 중인 명령도 종료)` : null,
   ].filter(Boolean);
   return {
     copy: dirty > 1 ? `저장하지 않은 변경 ${dirty}건이 있습니다.` : '저장하지 않은 변경이 있습니다.',
     closing: parts.length ? `같이 닫히는 것: ${parts.join(' · ')}` : '같이 닫히는 화면이 없습니다.',
+    kept: '저장된 Board는 Board 목록에 남아 다시 열 수 있습니다.',
     actions: [
-      { action: 'save', label: '저장 후 닫기', kind: 'primary', title: '변경을 저장하고 Board를 닫습니다' },
+      { action: 'continue', label: '취소', kind: 'ghost', title: '닫지 않고 계속 작업합니다 (Esc)' },
       { action: 'discard', label: '저장하지 않고 닫기', kind: 'ghost', title: '마지막으로 저장한 상태를 그대로 두고 Board를 닫습니다' },
-      { action: 'continue', label: '취소', kind: 'ghost', title: '닫지 않고 계속 작업합니다' },
+      { action: 'save', label: '저장 후 닫기', kind: 'primary', title: '변경을 저장하고 Board를 닫습니다' },
     ],
     defaultAction: 'save',
   };

@@ -6486,72 +6486,68 @@
     return true;
   }
 
+  // What closes with this Board: the 화면 it owns that are still open, and the terminals among them.
+  function boardCloseFacts(projection) {
+    const views = (projection?.members || []).map(member => document.getElementById(member.viewId))
+      .filter(view => view && view.dataset?.projectionId === projection.id);
+    return { viewCount: views.length, terminalCount: views.filter(view => typeof view._closeOwnedRuntime === 'function').length };
+  }
+
+  // Board 닫기 확인: [취소] [저장하지 않고 닫기] [저장 후 닫기](기본), with what closes together.
   function showAgendaCloseGuard() {
     const projectionId = state.boards.activeProjectionId;
     const existing = document.getElementById('egd-agenda-close-guard');
     if (existing) {
-      existing.querySelector('[data-action="continue"]')?.focus?.();
+      (existing.querySelector('[data-action="save"]') || existing.querySelector('[data-action="continue"]'))?.focus?.();
       return false;
     }
     state.agenda.closeGuardOpen = true;
-    const dirtyCount = state.agenda.dirtyReasons.length;
-    const dirtyText = dirtyCount > 1
-      ? `${dirtyCount}개의 변경사항이 아직 저장되지 않았습니다.`
-      : '저장되지 않은 변경사항이 있습니다.';
-
+    const summary = BoardLifecycle.boardCloseSummary({
+      dirtyCount: state.agenda.dirtyReasons.length, ...boardCloseFacts(state.boards.projections[projectionId]),
+    });
+    const returnFocus = document.activeElement;
+    const keepOpen = () => {
+      closeAgendaCloseGuard();
+      if (returnFocus?.isConnected) returnFocus.focus?.();
+    };
+    const run = {
+      continue: () => { closeAgendaSwitcher(); keepOpen(); },
+      discard: () => completeAgendaClose({ saveFirst: false, projectionId }),
+      save: () => completeAgendaClose({ saveFirst: true, projectionId }),
+    };
+    const buttons = summary.actions.map(action => el('button', {
+      type: 'button', class: `egd-agenda-close-btn egd-agenda-close-btn-${action.kind}`, title: action.title,
+      data: { action: action.action },
+      onclick: (ev) => { ev.stopPropagation(); run[action.action](); },
+    }, action.label));
     const dialog = el('div', {
       id: 'egd-agenda-close-guard',
       class: 'egd-agenda-close-guard',
       role: 'dialog',
       'aria-modal': 'true',
       'aria-labelledby': 'egd-agenda-close-title',
+      'aria-describedby': 'egd-agenda-close-copy',
       tabindex: '-1',
-      onclick: (ev) => {
-        if (ev.target === dialog) closeAgendaCloseGuard();
-      },
+      onclick: (ev) => { if (ev.target === dialog) keepOpen(); },
       onkeydown: (ev) => {
-        if (ev.key === 'Escape') {
-          closeAgendaCloseGuard();
-          ev.preventDefault();
-          ev.stopPropagation();
-        }
+        if (ev.key !== 'Escape') return;
+        keepOpen();
+        ev.preventDefault();
+        ev.stopPropagation();
       },
     },
       el('div', { class: 'egd-agenda-close-panel' },
         el('div', { class: 'egd-agenda-close-kicker' }, currentViewportAgendaLabel()),
         el('div', { id: 'egd-agenda-close-title', class: 'egd-agenda-close-title' }, 'Board를 닫을까요?'),
-        el('div', { class: 'egd-agenda-close-copy' }, dirtyText),
-        el('div', { class: 'egd-agenda-close-actions' },
-          el('button', {
-            class: 'egd-agenda-close-btn egd-agenda-close-btn-ghost',
-            data: { action: 'continue' },
-            onclick: (ev) => {
-              ev.stopPropagation();
-              closeAgendaCloseGuard();
-              closeAgendaSwitcher();
-            },
-          }, '계속 작업'),
-          el('button', {
-            class: 'egd-agenda-close-btn egd-agenda-close-btn-danger',
-            data: { action: 'discard' },
-            onclick: (ev) => {
-              ev.stopPropagation();
-              completeAgendaClose({ saveFirst: false, projectionId });
-            },
-          }, '버리고 닫기'),
-          el('button', {
-            class: 'egd-agenda-close-btn egd-agenda-close-btn-primary',
-            data: { action: 'save' },
-            onclick: (ev) => {
-              ev.stopPropagation();
-              completeAgendaClose({ saveFirst: true, projectionId });
-            },
-          }, '저장 후 닫기'),
-        ),
+        el('div', { id: 'egd-agenda-close-copy', class: 'egd-agenda-close-copy' },
+          el('p', { class: 'egd-agenda-close-line' }, summary.copy),
+          el('p', { class: 'egd-agenda-close-line' }, summary.kept)),
+        el('div', { class: 'egd-agenda-close-closing', data: { testid: 'board-close-closing' } }, summary.closing),
+        el('div', { class: 'egd-agenda-close-actions' }, ...buttons),
       ),
     );
     document.documentElement.appendChild(dialog);
-    dialog.focus();
+    (buttons[summary.actions.findIndex(action => action.action === summary.defaultAction)] || dialog).focus();
     return false;
   }
 

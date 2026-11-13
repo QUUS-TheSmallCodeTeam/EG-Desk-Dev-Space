@@ -133,18 +133,23 @@ test('save notice says how many 화면 went in', () => {
   assert.equal(boardSavedNotice({ title: '  ', count: 2.4 }), 'Board에 화면 2개 저장됨');
 });
 
-test('close summary lists what closes together and offers 저장 후 닫기 first', () => {
-  const summary = boardCloseSummary({ dirtyCount: 3, viewCount: 5, terminalCount: 2, runningCount: 1 });
+test('close summary lists what closes together and makes 저장 후 닫기 the default', () => {
+  const summary = boardCloseSummary({ dirtyCount: 3, viewCount: 5, terminalCount: 2 });
   assert.equal(summary.copy, '저장하지 않은 변경 3건이 있습니다.');
-  assert.equal(summary.closing, '같이 닫히는 것: 화면 5개 · 터미널 2개(실행 종료) · 진행 중인 일 1건(중단)');
+  assert.equal(summary.closing, '같이 닫히는 것: 화면 5개 · 그중 터미널 2개(실행 중인 명령도 종료)');
+  assert.equal(summary.kept, '저장된 Board는 Board 목록에 남아 다시 열 수 있습니다.');
+  // In the order the buttons sit, the default last (right), as on the other Board dialogs.
   assert.deepEqual(summary.actions.map(action => [action.action, action.label, action.kind]), [
-    ['save', '저장 후 닫기', 'primary'], ['discard', '저장하지 않고 닫기', 'ghost'], ['continue', '취소', 'ghost'],
+    ['continue', '취소', 'ghost'], ['discard', '저장하지 않고 닫기', 'ghost'], ['save', '저장 후 닫기', 'primary'],
   ]);
+  assert.equal(summary.actions.every(action => action.title), true);
   assert.equal(summary.defaultAction, 'save');
   const quiet = boardCloseSummary({ dirtyCount: 1, viewCount: 1 });
   assert.equal(quiet.copy, '저장하지 않은 변경이 있습니다.');
   assert.equal(quiet.closing, '같이 닫히는 것: 화면 1개');
   assert.equal(boardCloseSummary({}).closing, '같이 닫히는 화면이 없습니다.');
+  // A count that cannot be true (more terminals than 화면) is not repeated to the person.
+  assert.equal(boardCloseSummary({ viewCount: 1, terminalCount: 4 }).closing, '같이 닫히는 것: 화면 1개 · 그중 터미널 1개(실행 중인 명령도 종료)');
 });
 
 // ------------------------------------------------------------------ 이름
@@ -417,4 +422,107 @@ test('screen: when the list cannot be written nothing is claimed', () => {
   assert.equal(h.deleteAgenda('a', { confirmed: true }), false);
   assert.match(h.notices.at(-1), /옮기지 못했습니다/);
   assert.equal(h.trashOpen(), false);
+});
+
+// ------------------------------------------------------------------ 닫기 확인창
+
+// The production close confirmation, cut out of the surface script.
+function closeGuardHarness({ dirtyReasons = ['move', 'resize'], views = {}, members = [] } = {}) {
+  const attached = [];
+  const closes = [];
+  let switcherCloses = 0;
+  const document = {
+    activeElement: null,
+    documentElement: { appendChild: node => { attached.push(node); node.isConnected = true; } },
+    getElementById: id => views[id] || attached.find(node => node.id === id && node.isConnected) || null,
+  };
+  const el = (tag, props = {}, ...children) => {
+    const node = { tag, dataset: {}, attrs: {}, listeners: {}, children: children.filter(child => child != null), isConnected: false,
+      get textContent() { return this.children.map(child => typeof child === 'string' ? child : child.textContent).join(''); },
+      focus() { document.activeElement = this; }, remove() { this.isConnected = false; },
+      find(action) { return this.dataset.action === action ? this : this.children.map(child => typeof child === 'string' ? null : child.find(action)).find(Boolean) || null; },
+      querySelector(selector) { const action = /data-action="([a-z]+)"/.exec(selector)?.[1]; return action ? this.find(action) : null; },
+      all(tagName) { return [...(this.tag === tagName ? [this] : []), ...this.children.flatMap(child => typeof child === 'string' ? [] : child.all(tagName))]; } };
+    for (const [key, value] of Object.entries(props)) {
+      if (value == null || value === false) continue;
+      if (key === 'id') node.id = value;
+      else if (key === 'data') Object.assign(node.dataset, value);
+      else if (key.startsWith('on') && typeof value === 'function') node.listeners[key.slice(2)] = value;
+      else node.attrs[key] = value;
+    }
+    return node;
+  };
+  const state = { agenda: { closeGuardOpen: false, dirtyReasons }, boards: { activeProjectionId: 'p1', projections: { p1: { id: 'p1', boardId: 'a', members } } } };
+  const deps = {
+    document, el, state, BoardLifecycle: Lifecycle,
+    currentViewportAgendaLabel: () => '자료 정리',
+    completeAgendaClose: options => { closes.push(options); },
+    closeAgendaSwitcher: () => { switcherCloses += 1; },
+  };
+  const names = ['closeAgendaCloseGuard', 'boardCloseFacts', 'showAgendaCloseGuard'];
+  const api = new Function(...Object.keys(deps), `${names.map(declaration).join('\n')}\nreturn { ${names.join(', ')} };`)(...Object.values(deps));
+  return { ...api, document, state, closes, switcherCloses: () => switcherCloses, dialog: () => document.getElementById('egd-agenda-close-guard') };
+}
+
+test('screen: Board close asks with 저장 후 닫기 as the default and says what closes together', () => {
+  const terminal = { dataset: { projectionId: 'p1' }, _closeOwnedRuntime: async () => true };
+  const browser = { dataset: { projectionId: 'p1' } };
+  const borrowed = { dataset: { projectionId: 'p2' }, _closeOwnedRuntime: async () => true };
+  const h = closeGuardHarness({
+    views: { v1: terminal, v2: browser, v3: borrowed },
+    members: [{ viewId: 'v1' }, { viewId: 'v2' }, { viewId: 'v3' }, { viewId: 'gone' }],
+  });
+  assert.deepEqual(h.boardCloseFacts(h.state.boards.projections.p1), { viewCount: 2, terminalCount: 1 }, 'only the 화면 this Board owns and still has');
+  assert.equal(h.showAgendaCloseGuard(), false);
+  const dialog = h.dialog();
+  assert.equal(h.state.agenda.closeGuardOpen, true);
+  assert.match(dialog.textContent, /Board를 닫을까요\?/);
+  assert.match(dialog.textContent, /저장하지 않은 변경 2건이 있습니다\./);
+  assert.match(dialog.textContent, /같이 닫히는 것: 화면 2개 · 그중 터미널 1개\(실행 중인 명령도 종료\)/);
+  assert.match(dialog.textContent, /저장된 Board는 Board 목록에 남아 다시 열 수 있습니다\./);
+  assert.deepEqual(dialog.all('button').map(button => [button.dataset.action, button.textContent]), [
+    ['continue', '취소'], ['discard', '저장하지 않고 닫기'], ['save', '저장 후 닫기'],
+  ]);
+  assert.equal(dialog.all('button').every(button => button.attrs.type === 'button' && button.attrs.title), true);
+  assert.equal(/danger/.test(dialog.find('discard').attrs.class), false, 'closing without saving is a plain choice, not the red one');
+  assert.equal(h.document.activeElement, dialog.find('save'), 'focus starts on the default');
+  assert.equal(/버리고 닫기|계속 작업/.test(dialog.textContent), false);
+
+  press(dialog.find('save'));
+  assert.deepEqual(h.closes, [{ saveFirst: true, projectionId: 'p1' }]);
+  press(dialog.find('discard'));
+  assert.deepEqual(h.closes.at(-1), { saveFirst: false, projectionId: 'p1' });
+});
+
+test('screen: 취소, Esc and a click outside keep the Board open and put focus back', () => {
+  const h = closeGuardHarness();
+  const opener = { isConnected: true, focus() { h.document.activeElement = this; } };
+  h.document.activeElement = opener;
+  h.showAgendaCloseGuard();
+  press(h.dialog().find('continue'));
+  assert.equal(h.dialog(), null);
+  assert.equal(h.state.agenda.closeGuardOpen, false);
+  assert.equal(h.switcherCloses(), 1);
+  assert.equal(h.document.activeElement, opener);
+  assert.deepEqual(h.closes, []);
+
+  h.showAgendaCloseGuard();
+  let prevented = false;
+  h.dialog().listeners.keydown({ key: 'Escape', preventDefault() { prevented = true; }, stopPropagation() {} });
+  assert.equal(h.dialog(), null);
+  assert.equal(prevented, true);
+  assert.equal(h.document.activeElement, opener);
+
+  h.showAgendaCloseGuard();
+  const dialog = h.dialog();
+  dialog.listeners.click({ target: dialog });
+  assert.equal(h.dialog(), null);
+  assert.deepEqual(h.closes, []);
+
+  h.showAgendaCloseGuard();
+  const first = h.dialog();
+  h.document.activeElement = null;
+  assert.equal(h.showAgendaCloseGuard(), false, 'a second request reuses the open confirmation');
+  assert.equal(h.dialog(), first);
+  assert.equal(h.document.activeElement, first.find('save'));
 });

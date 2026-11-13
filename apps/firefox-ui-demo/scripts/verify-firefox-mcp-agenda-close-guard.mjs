@@ -280,7 +280,7 @@ async function main() {
   const failures = [];
   if (guardCheck.closeResult !== false) failures.push('dirty close should be blocked by guard');
   if (!guardCheck.guardOpen || !guardCheck.closeGuardOpenState || !guardCheck.dirty || guardCheck.cardCount !== 1) failures.push('guard open state');
-  if (guardCheck.primaryText !== '저장 후 닫기' || guardCheck.discardText !== '버리고 닫기' || guardCheck.continueText !== '계속 작업') failures.push('guard button labels');
+  if (guardCheck.primaryText !== '저장 후 닫기' || guardCheck.discardText !== '저장하지 않고 닫기' || guardCheck.continueText !== '취소') failures.push('guard button labels');
   if (continueCheck.guardOpen || continueCheck.closeGuardOpenState || !continueCheck.dirty || continueCheck.cardCount !== 1) failures.push('continue action');
   if (discardCheck.guardOpen || discardCheck.closeGuardOpenState || discardCheck.dirty || discardCheck.cardCount !== 0 || discardCheck.hasSavedState) failures.push('discard action');
   if (saveCloseCheck.guardOpen || saveCloseCheck.closeGuardOpenState || saveCloseCheck.dirty || !saveCloseCheck.hasSavedState) failures.push('save-close state');
