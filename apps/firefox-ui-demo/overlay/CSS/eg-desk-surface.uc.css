@@ -6356,7 +6356,7 @@
   min-width: 680px;
   min-height: 440px;
   overflow: hidden;
-  background: #F8F5EF;
+  background: var(--egd-surface);
 }
 
 .egd-ontology-header {
@@ -6402,7 +6402,7 @@
   display: grid;
   grid-template-columns: minmax(0, 1fr);
   overflow: hidden;
-  background: #F8F5EF;
+  background: var(--egd-surface);
 }
 
 .egd-ontology-card.egd-ontology-canvas-first .egd-ontology-body {
@@ -6421,7 +6421,7 @@
     radial-gradient(circle at 50% 26%, rgba(255, 255, 255, 0.99) 0, rgba(255, 255, 255, 0.76) 40%, rgba(244, 240, 233, 0.88) 78%),
     linear-gradient(rgba(92, 97, 105, 0.003) 1px, transparent 1px),
     linear-gradient(90deg, rgba(92, 97, 105, 0.003) 1px, transparent 1px),
-    #F8F5EF;
+    var(--egd-surface);
   background-size: auto, 44px 44px, 44px 44px, auto;
   cursor: grab;
 }
@@ -6517,7 +6517,7 @@
 }
 
 .egd-ontology-minimap-legend-swatch-virtual { background: #7E57C2; }
-.egd-ontology-minimap-legend-swatch-physical { background: #2D5A7B; }
+.egd-ontology-minimap-legend-swatch-physical { background: var(--egd-primary); }
 .egd-ontology-minimap-legend-swatch-selected {
   border: 2px solid #6F469F;
   border-radius: 50%;
@@ -6784,8 +6784,8 @@
 
 .egd-ontology-v2-layer-surface-physical,
 .egd-ontology-v2-side-layer-physical {
-  fill: rgba(45, 90, 123, 0.050);
-  stroke: rgba(45, 90, 123, 0.25);
+  fill: color-mix(in srgb, var(--egd-primary) 5%, transparent);
+  stroke: color-mix(in srgb, var(--egd-primary) 25%, transparent);
 }
 
 .egd-ontology-v2-layer-surface-active {
@@ -6825,8 +6825,8 @@
 }
 
 .egd-ontology-v2-layer-surface-physical.egd-ontology-v2-layer-surface-active {
-  fill: rgba(45, 90, 123, 0.112);
-  stroke: rgba(35, 76, 106, 0.68);
+  fill: color-mix(in srgb, var(--egd-primary) 11.2%, transparent);
+  stroke: color-mix(in srgb, var(--egd-primary-strong) 68%, transparent);
 }
 
 .egd-ontology-v2-layer-surface:hover {
@@ -6877,7 +6877,7 @@
 }
 
 .egd-ontology-v2-layer-label-virtual { fill: rgba(103, 67, 166, 0.78); }
-.egd-ontology-v2-layer-label-physical { fill: rgba(35, 76, 106, 0.80); }
+.egd-ontology-v2-layer-label-physical { fill: color-mix(in srgb, var(--egd-primary-strong) 80%, transparent); }
 
 *|*.egd-ontology-v2-side-layer-label {
   font: 700 calc(9px * var(--egd-ontology-text-scale, 1)) var(--egd-font);
@@ -6917,7 +6917,7 @@
 }
 
 .egd-ontology-v2-box-outline-physical {
-  stroke: rgba(35, 76, 106, 0.74);
+  stroke: color-mix(in srgb, var(--egd-primary-strong) 74%, transparent);
 }
 
 .egd-ontology-v2-box-path-virtual {
@@ -6925,7 +6925,7 @@
 }
 
 .egd-ontology-v2-box-path-physical {
-  stroke: rgba(35, 76, 106, 0.70);
+  stroke: color-mix(in srgb, var(--egd-primary-strong) 70%, transparent);
 }
 
 .egd-ontology-v2-box-root .egd-ontology-v2-box-path {
@@ -6994,7 +6994,7 @@
 }
 
 .egd-ontology-v2-pip-virtual { fill: rgba(103, 67, 166, 0.82); }
-.egd-ontology-v2-pip-physical { fill: rgba(35, 76, 106, 0.84); }
+.egd-ontology-v2-pip-physical { fill: color-mix(in srgb, var(--egd-primary-strong) 84%, transparent); }
 
 .egd-ontology-v2-breadcrumb {
   cursor: pointer;
@@ -7028,7 +7028,7 @@
 }
 
 .egd-ontology-v2-edge-layer {
-  stroke: rgba(35, 76, 106, 0.48);
+  stroke: color-mix(in srgb, var(--egd-primary-strong) 48%, transparent);
   stroke-width: 1.7;
   stroke-dasharray: 6 5;
 }
@@ -7106,7 +7106,7 @@
 }
 
 .egd-ontology-error {
-  color: #8E3A2E;
+  color: var(--egd-danger-ink);
 }
 
 /* Existing Chat controls and state remain; their palette resolves through

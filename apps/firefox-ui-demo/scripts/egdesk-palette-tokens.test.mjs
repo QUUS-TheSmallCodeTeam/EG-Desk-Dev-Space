@@ -197,3 +197,25 @@ test('badges are at least 10px and labels 11px; only initials inside 14-18px fac
     assert.ok(parseFloat(declarationsFor(selector)[property]) >= minimum, `${selector} ${property}`);
   }
 });
+
+test('the Ontology map draws its physical layer in sage; the virtual layer keeps its own purple', () => {
+  const ontologySource = readFileSync(new URL('../overlay/resources/surface/EGDeskSurfaceOntology.mjs', import.meta.url), 'utf8');
+  for (const [name, source] of [['stylesheet', surfaceCss], ['Ontology module', ontologySource]]) {
+    for (const legacy of ['#2D5A7B', '#244F6C', 'rgba(45, 90, 123', 'rgba(35, 76, 106', '#252c33']) {
+      assert.equal(source.toLowerCase().includes(legacy.toLowerCase()), false, `${name}: ${legacy}`);
+    }
+  }
+  assert.equal(declarationsFor('.egd-ontology-minimap-legend-swatch-physical').background, 'var(--egd-primary)');
+  assert.equal(declarationsFor('.egd-ontology-v2-pip-physical').fill, 'color-mix(in srgb, var(--egd-primary-strong) 84%, transparent)');
+  assert.equal(declarationsFor('.egd-ontology-error').color, 'var(--egd-danger-ink)');
+  assert.equal(declarationsFor('.egd-ontology-card').background, 'var(--egd-surface)');
+  // SVG attributes carry the same sage as literals: --egd-primary and --egd-primary-strong of the light set.
+  const light = readRootProperties(surfaceCss, { scheme: 'light' });
+  assert.equal(formatHex(resolveColor('var(--egd-primary)', light)), '#49634F');
+  assert.equal(formatHex(resolveColor('var(--egd-primary-strong)', light)), '#3F5344');
+  assert.ok(ontologySource.includes("'#7E57C2' : '#49634F'") && ontologySource.includes("'#6F469F' : '#3F5344'"));
+  assert.ok(ontologySource.includes('rgba(73, 99, 79, ') && ontologySource.includes('rgba(63, 83, 68, '));
+  // The lens keeps the light palette in both schemes, so its sage does not change in dark.
+  assert.ok(rules.some(rule => rule.selectors.includes('.egd-ontology-card') && rule.media.length === 0
+    && rule.declarations.some(([name]) => name === '--egd-primary-strong')));
+});
