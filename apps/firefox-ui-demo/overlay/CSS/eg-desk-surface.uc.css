@@ -209,7 +209,7 @@
   --egd-chrome-shadow: 0 3px 14px rgba(0, 0, 0, .27);
   --egd-card-shadow: 0 4px 16px rgba(0, 0, 0, .33);
   --egd-card-shadow-active: 0 7px 21px rgba(0, 0, 0, .4);
-  --egd-card-selection: #80B4FF;
+  --egd-card-active-border: var(--egd-focus-border);
 }
 :where(:root[data-egd-theme="dark"]) :where(.egd-edge, .egd-canvas-card:not(.egd-browser-card, .egd-terminal-card, .egd-ontology-card),
   .egd-browser-card > .egd-card-header, #egd-board-notice, #egd-board-scope, #egd-desk-recovery,
