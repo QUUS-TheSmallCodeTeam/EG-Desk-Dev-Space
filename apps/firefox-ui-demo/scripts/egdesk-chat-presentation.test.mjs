@@ -4,6 +4,7 @@ import { readFileSync } from 'node:fs';
 import { compileFunction } from 'node:vm';
 import * as ChatState from '../overlay/resources/EGDeskChatState.sys.mjs';
 import * as ThreadRouting from '../overlay/resources/EGDeskThreadRouting.sys.mjs';
+import * as ChatHistoryView from '../overlay/resources/EGDeskChatHistoryView.sys.mjs';
 
 const source = readFileSync(new URL('../overlay/JS/eg-desk-surface.uc.js', import.meta.url), 'utf8');
 const css = readFileSync(new URL('../overlay/CSS/eg-desk-surface.uc.css', import.meta.url), 'utf8');
@@ -33,13 +34,16 @@ function threadSection(thread, profile = { label: 'Codex', name: 'Codex' }) {
   const block = between('      const renderThreadSection = ', "\n\n      if (mode === 'hud')");
   const keys = ['el', 'codex', 'activeThread', 'codexBridge', 'codexThreadRowLabel', 'bindChatRoomRowKeys',
     'openRoomFromKeyboard', 'formatRelativeTime', 'codexThreadKindMeta', 'codexThreadAgentProfile', 'ChatState',
-    'engineContext', 'codexThreadSessionKey', 'buildCodexSessionBadge', 'renderEngineBadge', 'stripMarkdown', 'codexThreadPreview', 'renderThreadMenu', 'query', 'ThreadRouting'];
+    'engineContext', 'codexThreadSessionKey', 'buildCodexSessionBadge', 'renderEngineBadge', 'stripMarkdown', 'codexThreadPreview', 'renderThreadMenu', 'query', 'ThreadRouting',
+    'buildCodexThreadKindBadge'];
+  // A42: the production kind badge, so the row shows the real 'Agent DM' / 'Board Thread' words.
+  const kindBadge = compileFunction(`${between('  function buildCodexThreadKindBadge(thread) {', '\n  }\n')}\n  }\nreturn buildCodexThreadKindBadge;`, ['el', 'ChatHistoryView'])(el, ChatHistoryView);
   const context = { auth: { isLoggedIn: true }, engines: [{ id: 'claude', label: 'Claude', status: 'ready' }] };
   const values = [el, { threadMenu: null }, thread, { selectThread() {} }, t => t.title, () => {}, () => {},
     () => '방금', type => ({ label: type === 'group' ? 'Board' : 'Codex' }), () => profile, ChatState,
     context, t => t.session || 'resumed', () => el('span', { class: 'egd-codex-session-badge' }, '로컬 기록'),
     t => el('span', { class: 'egd-codex-engine-badge' }, ChatState.chatEngineChipView(t, context).label),
-    value => value, t => t.messages.at(-1)?.content || '', () => el('div'), '', ThreadRouting];
+    value => value, t => t.messages.at(-1)?.content || '', () => el('div'), '', ThreadRouting, kindBadge];
   const render = compileFunction(`${block}\nreturn renderThreadSection;`, keys)(...values);
   return render('전체', [thread]);
 }
@@ -66,7 +70,11 @@ test('room row prioritizes title, latest message and time without duplicate Code
   assert.equal(text(byClass(row, 'egd-codex-thread-title')), 'Codex');
   assert.equal(text(byClass(row, 'egd-codex-thread-preview')), '최근 메시지');
   assert.equal(text(byClass(row, 'egd-codex-thread-time')), '방금');
-  assert.equal(byClass(row, 'egd-codex-thread-kind'), undefined);
+  // A42: the kind sits beside the title, so a plain room stays two lines tall.
+  assert.deepEqual(byClass(row, 'egd-codex-thread-item-top').children.map(child => child.props.class),
+    ['egd-codex-thread-title', 'egd-codex-thread-kind egd-codex-thread-kind-dm', 'egd-codex-thread-time']);
+  assert.equal(text(byClass(row, 'egd-codex-thread-kind')), 'Agent DM');
+  assert.equal(byClass(row, 'egd-codex-thread-meta-row'), undefined);
   assert.equal(byClass(row, 'egd-codex-engine-badge'), undefined);
   assert.equal(byClass(row, 'egd-codex-agent-profile-chip'), undefined);
   assert.equal(byClass(row, 'egd-codex-session-badge'), undefined);
@@ -76,7 +84,9 @@ test('distinct Board, Agent and provider identities remain visible', () => {
   const thread = { id: 'board', type: 'group', title: '회의 준비', profileEnabled: true,
     engineId: 'claude', messages: [{ content: '다음 단계', createdAt: 1 }] };
   const row = threadSection(thread, { label: 'Rio', name: 'Rio Agent' });
-  assert.equal(text(byClass(row, 'egd-codex-thread-kind')), 'Board');
+  assert.equal(text(byClass(row, 'egd-codex-thread-kind')), 'Board Thread');
+  assert.equal(byClass(row, 'egd-codex-thread-kind').props.class, 'egd-codex-thread-kind egd-codex-thread-kind-group');
+  assert.equal(byClass(byClass(row, 'egd-codex-thread-meta-row'), 'egd-codex-thread-kind'), undefined, 'the kind is shown once, beside the title');
   assert.equal(text(byClass(row, 'egd-codex-agent-profile-chip')), 'Rio');
   assert.equal(text(byClass(row, 'egd-codex-engine-badge')), 'Claude');
   assert.equal(text(byClass(row, 'egd-codex-thread-preview')), '다음 단계');
@@ -95,7 +105,7 @@ test('plain local-only rooms retain their important binding status without an Ag
     engineId: 'codex', messages: [{ content: '메시지', createdAt: 1 }] };
   const row = threadSection(thread);
   assert.equal(text(byClass(row, 'egd-codex-session-badge')), '로컬 기록');
-  assert.equal(byClass(row, 'egd-codex-thread-kind'), undefined);
+  assert.equal(text(byClass(row, 'egd-codex-thread-kind')), 'Agent DM');
   assert.equal(byClass(row, 'egd-codex-engine-badge'), undefined);
 });
 

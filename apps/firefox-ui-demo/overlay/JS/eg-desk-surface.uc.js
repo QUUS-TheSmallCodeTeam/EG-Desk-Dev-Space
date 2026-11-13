@@ -80,9 +80,9 @@
   const SELF_MEMBER = '나';
   const THREAD_KIND_META = {
     dm: {
-      label: 'Codex',
-      longLabel: 'Codex 대화',
-      createTitle: '새 Codex 대화',
+      label: 'Agent DM',
+      longLabel: 'Agent DM',
+      createTitle: '새 Agent DM',
       emptyPreview: '아직 메시지가 없습니다',
     },
     group: {
@@ -479,20 +479,6 @@
     }
     const peer = participants.find((name) => name !== SELF_MEMBER) || 'Agent';
     return `Agent DM · ${peer}`;
-  }
-
-  function codexThreadHeaderSubtitle(thread) {
-    if (!thread) return '';
-    if (thread.profileEnabled !== true) return `Codex · ${codexThreadSessionLabel(thread)}`;
-    const kind = codexThreadLongLabel(thread.type);
-    const session = codexThreadSessionLabel(thread);
-    const profile = codexThreadAgentProfile(thread);
-    if (thread.type === 'group') {
-      const count = Math.max(0, (thread.participants || []).length);
-      return `${kind} · 멤버 ${count}명 · ${session} · ${profile.label}`;
-    }
-    const peer = (thread.participants || []).find((name) => name !== SELF_MEMBER) || 'Agent';
-    return `${kind} · ${peer} · ${session} · ${profile.label}`;
   }
 
   function createCodexThread(type, title, subtitle = '', options = {}) {
@@ -1131,7 +1117,7 @@
   function codexMessageRoleLabel(role) {
     if (role === 'user') return SELF_MEMBER;
     if (role === 'assistant') return 'Codex';
-    if (role === 'system') return 'System';
+    if (role === 'system') return '시스템';
     return role || '메시지';
   }
 
@@ -1169,6 +1155,62 @@
     }
     if (children.length === 0) return null;
     return el('div', { class: 'egd-codex-message-meta' }, ...children);
+  }
+
+  // Chat history (A18·A41·A42·A43): the day line, the room kind badge and the
+  // '새 메시지' button take their words and rules from this view model.
+  const ChatHistoryView = ChromeUtils.importESModule('chrome://userchrome/content/EGDeskChatHistoryView.sys.mjs');
+
+  // '오늘 · 오전 9:41' above the first message of the conversation and of each day.
+  function buildCodexDayLine(previousAt, at, now = Date.now()) {
+    const day = ChatHistoryView.dayDivider(previousAt, at, now, { formatTime: formatMessageTime });
+    if (!day) return null;
+    return el('div', { class: 'egd-codex-day', role: 'separator', 'aria-label': day.label, data: { testid: 'chat-day', day: day.key } },
+      el('span', { class: 'egd-codex-day-text' }, day.label));
+  }
+
+  // Agent DM / Board Thread, on the open conversation's head and on room rows.
+  function buildCodexThreadKindBadge(thread) {
+    const view = ChatHistoryView.threadKindView(thread?.type);
+    return el('span', {
+      class: `egd-codex-thread-kind egd-codex-thread-kind-${view.kind}`, title: view.title,
+      data: { testid: 'chat-thread-kind', kind: view.kind },
+    }, view.label);
+  }
+
+  // Floats over the foot of the log while 대표님 reads further up.
+  function buildCodexNewMessageButton(onPress) {
+    return el('div', { class: 'egd-codex-new-message-dock' },
+      el('button', {
+        class: 'egd-codex-new-message', type: 'button', title: ChatHistoryView.NEW_MESSAGE_HINT,
+        data: { testid: 'chat-new-message', focusKey: 'chat-new-message' },
+        onclick: (ev) => { ev.stopPropagation(); onPress(); },
+      }, el('span', { class: 'egd-codex-new-message-text' }, ChatHistoryView.NEW_MESSAGE_LABEL), deskIcon('chevron', 'egd-codex-new-message-icon')));
+  }
+
+  // A46: '다시 보내기' under a message of mine that was refused. It only puts
+  // the words back in the composer; 대표님 presses send.
+  function buildCodexResendButton(message, onPress) {
+    if (!ChatHistoryView.resendAvailable(message)) return null;
+    return el('button', {
+      class: 'egd-codex-resend', type: 'button', title: ChatHistoryView.RESEND_HINT,
+      data: { testid: 'chat-message-resend', messageId: message.id, focusKey: `message-resend-${message.id}` },
+      onclick: (ev) => { ev.stopPropagation(); onPress(message); },
+    }, ChatHistoryView.RESEND_LABEL);
+  }
+
+  // The composer's own input listener saves the draft and resizes the box.
+  function restoreCodexMessageToComposer(body, message) {
+    const input = body?.querySelector('.egd-codex-input');
+    if (!input) return false;
+    const next = ChatHistoryView.resendDraft(input.value, message?.content);
+    if (next.changed) {
+      input.value = next.draft;
+      input.dispatchEvent(new Event('input', { bubbles: true }));
+    }
+    input.focus();
+    input.setSelectionRange(input.value.length, input.value.length);
+    return true;
   }
 
   function codexResultChipKind(label) {
@@ -10691,6 +10733,8 @@
     let compositionInProgress = false;
     let deferredCodex = null;
     let pendingMessageScroll = null;
+    // A43: an answer arrived below while 대표님 reads further up ({ threadId, messageId }).
+    let newMessageNotice = null;
     let sendNoticeDetailsThreadId = null;
     const composerViewport = createChatComposerViewport();
     const taskAnswerReveal = createChatTaskAnswerReveal(body);
@@ -10838,8 +10882,9 @@
         : oldMessages ? {
         threadId: oldMessages.dataset.threadId,
         lastUserMessageId: oldMessages.dataset.lastUserMessageId,
+        lastAnswerId: oldMessages.dataset.lastAnswerId,
         top: oldMessages.scrollTop,
-        atBottom: oldMessages.scrollHeight - oldMessages.scrollTop - oldMessages.clientHeight < 24,
+        atBottom: ChatHistoryView.atLogBottom(oldMessages),
         anchor: (() => {
           const top = oldMessages.getBoundingClientRect();
           const row = Array.from(oldMessages.querySelectorAll('[data-testid="chat-message"]'))
@@ -10974,7 +11019,8 @@
             el('div', { class: 'egd-codex-thread-home-title' }, 'Chat'),
             el('button', {
               class: 'egd-codex-thread-home-new',
-              title: '새 Codex 대화',
+              title: '새 Agent DM',
+              'aria-label': '새 Agent DM',
               onclick: () => codexBridge.createThread('dm', { openConversation: true }),
             }, '+'),
           ),
@@ -11394,7 +11440,6 @@
           bindChatRoomRowKeys(item, () => openRoomFromKeyboard(thread.id));
           const lastMsg = thread.messages && thread.messages.length > 0 ? thread.messages[thread.messages.length - 1] : null;
           const lastTime = lastMsg && lastMsg.createdAt ? formatRelativeTime(lastMsg.createdAt) : '';
-          const kindMeta = codexThreadKindMeta(thread.type);
           const profile = codexThreadAgentProfile(thread);
           const engine = ChatState.chatEngineChipView(thread, engineContext);
           const labelKey = value => String(value || '').trim().toLocaleLowerCase();
@@ -11411,6 +11456,7 @@
                 el('div', { class: 'egd-codex-thread-item-body' },
                   el('div', { class: 'egd-codex-thread-item-top' },
                     el('div', { class: 'egd-codex-thread-title' }, thread.title),
+                    buildCodexThreadKindBadge(thread),
                     el('div', { class: 'egd-codex-thread-time' }, lastTime),
                   ),
                   el('div', { class: 'egd-codex-thread-item-bottom' },
@@ -11433,8 +11479,7 @@
                     }, '⋯'),
                   ),
                 ),
-                  thread.type === 'group' || profileLabel || showEngine || showSession ? el('div', { class: 'egd-codex-thread-meta-row' },
-                    thread.type === 'group' ? el('span', { class: 'egd-codex-thread-kind egd-codex-thread-kind-group' }, kindMeta.label) : null,
+                  profileLabel || showEngine || showSession ? el('div', { class: 'egd-codex-thread-meta-row' },
                     showSession ? buildCodexSessionBadge(thread, codexBridge) : null,
                     showEngine ? renderEngineBadge(thread) : null,
                     profileLabel ? el('span', { class: 'egd-codex-agent-profile-chip', title: profile.name }, profileLabel) : null,
@@ -11505,7 +11550,7 @@
               activeThread.type === 'group'
                 ? el('div', { class: 'egd-codex-conversation-hud-sub' }, (activeThread.participants || []).join(' · '))
                 : null,
-              el('div', { class: 'egd-codex-conversation-hud-badges' }, buildCodexSessionBadge(activeThread, codexBridge)),
+              el('div', { class: 'egd-codex-conversation-hud-badges' }, buildCodexThreadKindBadge(activeThread), buildCodexSessionBadge(activeThread, codexBridge)),
             ),
             renderEngineChip(activeThread),
             codexUsageRing(codex.authStatus),
@@ -11688,6 +11733,7 @@
               onclick: () => codexBridge.setHudView('list'),
             }, deskIcon('back')),
             el('div', { class: 'egd-codex-thread-active-title' }, activeThread.title,
+              buildCodexThreadKindBadge(activeThread),
               buildCodexSessionBadge(activeThread, codexBridge)),
             renderReturnToDm(activeThread),
             renderEngineChip(activeThread),
@@ -11716,12 +11762,18 @@
             threadId: activeThread.id,
             // A plan step resumed in place is not 대표님 sending: it never pulls the view down.
             lastUserMessageId: activeThread.messages.filter(message => message.role === 'user' && !ChatState.awaitResumeMessageView(message)).at(-1)?.id || '',
+            // A43: the newest answer drawn, so the next render knows a new one arrived.
+            lastAnswerId: ChatHistoryView.latestAnswerId(activeThread.messages),
           },
         });
         if (!hasConversation) {
           const canStart = activeEngine.engineId === 'codex' ? codex.authStatus.isLoggedIn : activeEngine.ready;
           const emptyChildren = [
-            el('div', { class: 'egd-codex-empty-eyebrow' }, canStart ? '새 대화' : activeEngine.engineId === 'claude' ? 'Claude 연결' : 'Codex 연결'),
+            // Not connected: the room kind leads and the provider to connect stays a small badge.
+            el('div', { class: 'egd-codex-empty-eyebrow' }, ...(canStart ? ['새 대화'] : [
+              ChatHistoryView.threadKindView(activeThread.type).label,
+              el('span', { class: 'egd-codex-engine-badge', data: { testid: 'chat-empty-engine' } }, activeEngine.engineId === 'claude' ? 'Claude' : 'Codex'),
+            ])),
             el('div', { class: 'egd-codex-empty-title' }, canStart ? '어떤 일을 함께할까요?' : activeEngine.engineId === 'claude' ? activeEngine.reason : '로그인 필요'),
           ];
           if (canStart) {
@@ -11831,10 +11883,16 @@
           const sharedPlacement = ThreadRouting.sharedBlockPlacement(activeThread.routing, activeThread.messages);
           const appendSharedBlocks = (shares) => { for (const share of shares || []) messages.appendChild(renderSharedBlock(activeThread, share)); };
           const selecting = codex.messageSelect?.threadId === activeThread.id ? codex.messageSelect : null;
+          // A18·A41: a quiet day line opens the conversation and each new day.
+          let lastDayAt = null;
+          const renderedAt = Date.now();
           activeThread.messages.forEach((message, index) => {
             if (Number.isFinite(message.createdAt)) appendControlNotices(message.createdAt);
             appendSharedBlocks(sharedPlacement.beforeMessageId.get(message.id));
             if (message.role === 'assistant' && message.status === 'streaming' && !message.content) return;
+            const dayLine = buildCodexDayLine(lastDayAt, message.createdAt, renderedAt);
+            if (dayLine) messages.appendChild(dayLine);
+            if (Number.isFinite(message.createdAt) && message.createdAt > 0) lastDayAt = message.createdAt;
             const resumed = ChatState.awaitResumeMessageView(message);
             if (resumed) {
               messages.appendChild(el('div', {
@@ -11947,6 +12005,9 @@
             // CHAT-03: the @이름 chips sit right under the bubble, '스레드로 보냄' just above the time.
             if (mentionRow) messageStack.insertBefore(mentionRow, messageLine.nextSibling);
             if (sentChip) messageStack.insertBefore(sentChip, meta);
+            // A46: a refused message of mine offers its words back, just above the time.
+            const resend = buildCodexResendButton(message, (refused) => restoreCodexMessageToComposer(body, refused));
+            if (resend) messageStack.insertBefore(resend, meta);
             if (message.inputReferences?.length) messageStack.appendChild(el('button', {
               class: 'egd-codex-result-chip', data: { testid: 'chat-message-inputs', requestId: message.requestId || '' },
               onclick: () => openCodexActivityPanel(activeThread.id),
@@ -12024,7 +12085,7 @@
         if (bindingHeld) conversation.appendChild(el('div', {
           class: 'egd-codex-error', role: 'status', data: { testid: 'chat-binding-held', bindingState: activeThread.bindingState },
         }, '이전 대화의 계정 소유가 확인되지 않아 연결을 보류했습니다. 로컬 기록은 유지됩니다.',
-        el('button', { class: 'egd-codex-chip', 'aria-label': '새 Codex 대화 열기', data: { testid: 'chat-new-unbound-room' }, onclick: () => codexBridge.createThread('dm', { openConversation: true }) }, '새 Codex 대화')));
+        el('button', { class: 'egd-codex-chip', 'aria-label': '새 Agent DM 열기', data: { testid: 'chat-new-unbound-room' }, onclick: () => codexBridge.createThread('dm', { openConversation: true }) }, '새 Agent DM')));
         // A stopped or missing Agent is named, not replaced; the room and draft stay.
         const roomAgent = activeThread.profileEnabled === true ? codexThreadAgentProfile(activeThread) : null;
         if (roomAgent && !roomAgent.server && roomAgent.lifecycle === 'unknown' && codexProfileCatalog.status === 'unavailable') {
@@ -12359,11 +12420,31 @@
       if (msgEl) {
         const sentNewMessage = msgEl.dataset.lastUserMessageId !== messageState?.lastUserMessageId;
         const preserveAnchor = messageState?.threadId === activeThread?.id && !messageState.atBottom && !sentNewMessage;
+        // A43: reading further up when an answer arrives shows '새 메시지' at the
+        // foot of the log. Pressing it, or scrolling down to the newest message,
+        // clears it; at the bottom the log keeps following by itself.
+        newMessageNotice = ChatHistoryView.nextNewMessageNotice(newMessageNotice, {
+          threadId: msgEl.dataset.threadId, readingAbove: preserveAnchor,
+          previousAnswerId: messageState?.lastAnswerId, answerId: msgEl.dataset.lastAnswerId,
+        });
+        if (newMessageNotice) {
+          const clearNewMessage = () => { newMessageNotice = null; newMessageDock.remove(); };
+          const newMessageDock = buildCodexNewMessageButton(() => {
+            pendingMessageScroll = null;
+            msgEl.scrollTop = msgEl.scrollHeight;
+            clearNewMessage();
+          });
+          msgEl.appendChild(newMessageDock);
+          msgEl.addEventListener('scroll', () => {
+            if (newMessageNotice && ChatHistoryView.atLogBottom(msgEl)) clearNewMessage();
+          }, { passive: true });
+        }
         const scrollIntent = {
           element: msgEl,
           state: {
             threadId: msgEl.dataset.threadId,
             lastUserMessageId: msgEl.dataset.lastUserMessageId,
+            lastAnswerId: msgEl.dataset.lastAnswerId,
             atBottom: !preserveAnchor,
             top: preserveAnchor ? messageState.top : 0,
             anchor: preserveAnchor ? messageState.anchor : null,
@@ -12412,6 +12493,7 @@
       compositionInProgress = false;
       deferredCodex = null;
       pendingMessageScroll = null;
+      newMessageNotice = null;
       composerViewport.dispose();
       taskAnswerReveal.dispose();
       body.removeEventListener('keydown', onMessageScrollGesture, true);
