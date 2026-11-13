@@ -130,6 +130,10 @@ test('view bar wiring: 1.25 steps, typed zoom, 돌아가기 and 맞춤 are real 
   assert.match(surfaceSource, /data: \{ testid: 'canvas-view-return' \}/);
   assert.match(surfaceSource, /data: \{ testid: 'canvas-snap-toggle' \}/);
   assert.match(surfaceSource, /'placement-snap-toggle'/, 'the placement menu has the same toggle');
+  const barStart = surfaceSource.indexOf("const indicator = el('div', { id: 'egd-zoom-indicator'");
+  const bar = surfaceSource.slice(barStart, surfaceSource.indexOf(');\n', barStart));
+  const order = ['zoomOutButton', 'zoomValue', 'zoomInButton', 'zoomFitButton', 'snapToggleButton', 'zoomReturnButton'].map(name => bar.indexOf(name));
+  assert.equal(order.every((at, index) => at > 0 && (index === 0 || at > order[index - 1])), true, 'the bar reads 배율 · 전체 보기 · 맞춤 · 돌아가기');
 });
 
 test('돌아가기 wiring: 전체 보기 and the minimap/찾기 move remember the view first', () => {

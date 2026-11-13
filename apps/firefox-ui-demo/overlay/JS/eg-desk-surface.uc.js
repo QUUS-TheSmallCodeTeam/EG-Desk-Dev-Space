@@ -26227,8 +26227,9 @@
     const zoomInButton = el('button', { type: 'button', class: 'egd-zoom-button', 'aria-label': 'Canvas 확대', title: 'Canvas 확대' }, deskIcon('plus'));
     const zoomFitButton = el('button', { type: 'button', class: 'egd-zoom-button', 'aria-label': '열린 창 전체 보기', title: '열린 창 전체 보기' }, deskIcon('fit'));
     const indicator = el('div', { id: 'egd-zoom-indicator', role: 'group', 'aria-label': 'Canvas 보기', data: { noPan: 'true' } },
+      // Read left to right: 배율 · 전체 보기 · 맞춤 · 돌아가기.
       zoomOutButton, zoomValue, zoomInput, zoomInButton, el('span', { class: 'egd-zoom-divider', 'aria-hidden': 'true' }), zoomFitButton,
-      zoomReturnButton, el('span', { class: 'egd-zoom-divider', 'aria-hidden': 'true' }), snapToggleButton);
+      snapToggleButton, el('span', { class: 'egd-zoom-divider', 'aria-hidden': 'true' }), zoomReturnButton);
     for (const eventName of ['mousedown', 'pointerdown', 'wheel']) {
       for (const node of [indicator, edgeDotsHost]) {
         node.addEventListener(eventName, event => {
