@@ -108,6 +108,9 @@ export function createTerminalZone(deps) {
         if (location?.inProject === false) { boardNotice(`프로젝트 밖 경로입니다 · ${location.label || location.path || ''}`); return; }
         void Promise.resolve(openBoardProjectFileAt(location)).catch(error => boardNotice(`파일을 열지 못했습니다 · ${error?.message || ''}`));
       } });
+      // The panel sits above the terminal, so it asks for the shared card's
+      // compact output height on the card itself.
+      resultCard.className = `${resultCard.className} egdesk-run-result-compact`;
       const bar = el('div', { class: 'egd-terminal-run-result-bar' },
         el('span', { class: 'egd-terminal-run-result-title' }, '명령 결과'),
         el('span', { class: 'egd-terminal-run-result-note' }, '직접 입력한 명령의 출력에서 읽었습니다'),

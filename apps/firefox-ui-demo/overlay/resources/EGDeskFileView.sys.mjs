@@ -1458,11 +1458,18 @@ export function createEGDeskFileView({ document, service, chooseRoot, chooseProj
       const metaIndex = contents.indexOf(meta)
       contents.splice(metaIndex < 0 ? contents.length : metaIndex, 0, context)
       card.replaceChildren(...contents)
-      checkPanel.replaceChildren(el('h3', 'egdesk-file-check-heading', `검사 결과 · ${script.name}`), card)
+      // A run that never started, or whose reply never arrived, is not a
+      // finished result with a quiet output: File says so above the shared
+      // card, whose own headline only describes what the output contains.
+      const unconfirmed = result.status === 'not-started' ? '검사를 시작하지 못했습니다.'
+        : result.status === 'unknown' ? '검사가 끝까지 실행됐는지 확인하지 못했습니다.' : ''
+      const note = unconfirmed ? el('p', 'egdesk-file-check-unconfirmed', unconfirmed) : null
+      if (note) { note.setAttribute('role', 'status'); note.setAttribute('data-testid', 'file-check-unconfirmed') }
+      checkPanel.replaceChildren(el('h3', 'egdesk-file-check-heading', `검사 결과 · ${script.name}`), ...(note ? [note] : []), card)
       layoutCheckResult()
       showCheckPanel()
       refreshCheckStale()
-      announce(`검사 결과 · ${summary.headline}`)
+      announce(unconfirmed ? `검사 결과 · ${unconfirmed}` : `검사 결과 · ${summary.headline}`)
       return
     }
     checkPanel.replaceChildren(el('h3', 'egdesk-file-check-heading', `검사 결과 · ${script.name}`), el('pre', 'egdesk-file-check-body', result?.summary || '검사 결과를 확인할 수 없습니다.'), context)
@@ -1475,8 +1482,10 @@ export function createEGDeskFileView({ document, service, chooseRoot, chooseProj
   function layoutCheckResult() {
     // Shared RunResult classes are styled once by the surface stylesheet.
     // Only File's own context/fallback and native keyboard scrolling live here.
-    for (const node of checkPanel.querySelectorAll('.egdesk-file-check-context')) {
-      layout(node, 'min-width: 0; max-width: 100%; margin: 8px 0; overflow-wrap: anywhere;')
+    for (const selector of ['.egdesk-file-check-context', '.egdesk-file-check-unconfirmed']) {
+      for (const node of checkPanel.querySelectorAll(selector)) {
+        layout(node, 'min-width: 0; max-width: 100%; margin: 8px 0; overflow-wrap: anywhere;')
+      }
     }
     for (const node of checkPanel.querySelectorAll('.egdesk-file-check-body')) {
       layout(node, 'display: block; width: 100%; min-width: 0; max-width: 100%; max-height: 18rem; box-sizing: border-box; overflow: auto; white-space: pre; overflow-wrap: normal; word-break: normal; font-family: ui-monospace, monospace;')

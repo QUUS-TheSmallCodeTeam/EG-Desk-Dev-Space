@@ -203,7 +203,10 @@ export function transformProjectPickerResult(original, port) {
 export function transformRoomProjectPickerResult(original, port) {
   qaBridgeConfig({ EGDESK_QA_FIXTURE_TRANSPORT: '1', EGDESK_QA_FIXTURE_PORT: String(port) });
   const name = 'pickNativeRoomProjectDirectory';
-  const matches = [...original.matchAll(/^  function pickNativeRoomProjectDirectory\(\) \{\r?\n/gm)];
+  // The reviewed signature carries the dialog title: the room picker uses the
+  // default, the Board's project folder picker passes its own. A title is
+  // only ever handed to the native dialog, so the synthetic body ignores it.
+  const matches = [...original.matchAll(/^  function pickNativeRoomProjectDirectory\(title = '이 방에서 사용할 프로젝트 폴더'\) \{\r?\n/gm)];
   if (matches.length !== 1 || [...original.matchAll(/\bfunction\s+pickNativeRoomProjectDirectory\s*\(/g)].length !== 1) {
     fail('room project picker function missing or ambiguous');
   }
@@ -218,7 +221,7 @@ export function transformRoomProjectPickerResult(original, port) {
     return new Promise((resolve, reject) => {
       try {
         const picker = Cc['@mozilla.org/filepicker;1'].createInstance(Ci.nsIFilePicker);
-        picker.init(window.browsingContext, '이 방에서 사용할 프로젝트 폴더', Ci.nsIFilePicker.modeGetFolder);
+        picker.init(window.browsingContext, title, Ci.nsIFilePicker.modeGetFolder);
         picker.open(result => {
           try { resolve(result === Ci.nsIFilePicker.returnOK ? picker.file.path : null); }
           catch (error) { reject(error); }
