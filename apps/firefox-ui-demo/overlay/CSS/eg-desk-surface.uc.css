@@ -2540,9 +2540,50 @@
 }
 
 .egd-rail-search-list {
-  max-height: min(500px, calc(100vh - 116px));
+  max-height: min(458px, calc(100vh - 158px));
   overflow: auto;
-  padding: 2px;
+  /* Room for a row's keyboard focus ring inside the scrolling list. */
+  padding: 4px;
+}
+
+/* Scope chips stay under the field for as long as the panel is open. The id
+   keeps these buttons above the shared `.egd-edge button` reset. */
+.egd-rail-search-scopes {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  padding: 2px 2px 8px;
+  margin-bottom: 4px;
+  border-bottom: 1px solid var(--egd-outline-variant);
+}
+
+#egd-rail-search-results .egd-rail-search-scope {
+  min-height: 26px;
+  padding: 0 11px;
+  border: 1px solid var(--egd-outline);
+  border-radius: 999px;
+  color: var(--egd-on-surface-variant);
+  font-size: 12px;
+  font-weight: 640;
+  line-height: 1;
+  white-space: nowrap;
+}
+
+#egd-rail-search-results .egd-rail-search-scope:hover {
+  background: color-mix(in srgb, var(--egd-primary) 8%, transparent);
+  color: var(--egd-on-surface);
+}
+
+#egd-rail-search-results .egd-rail-search-scope[aria-pressed="true"] {
+  background: var(--egd-primary-container);
+  border-color: var(--egd-focus-border);
+  color: var(--egd-primary-strong);
+}
+
+#egd-rail-search-results .egd-rail-search-scope:focus-visible,
+#egd-rail-search-results .egd-rail-search-empty-action:focus-visible {
+  outline: var(--egd-focus-outline);
+  outline-offset: var(--egd-focus-outline-offset);
 }
 
 .egd-rail-search-section {
@@ -2572,6 +2613,24 @@
 .egd-rail-search-result-active {
   border-color: color-mix(in srgb, var(--egd-primary) 18%, transparent);
   background: color-mix(in srgb, var(--egd-surface-elevated) 68%, transparent);
+}
+
+/* The row Enter will run is marked for keyboard use too: the shared
+   `.egd-edge button` reset otherwise clears the row's padding, border and wash. */
+#egd-rail-search-results .egd-rail-search-result {
+  padding: 7px 9px;
+  border: 1px solid transparent;
+}
+
+#egd-rail-search-results .egd-rail-search-result:hover,
+#egd-rail-search-results .egd-rail-search-result-active {
+  border-color: color-mix(in srgb, var(--egd-primary) 22%, transparent);
+  background: color-mix(in srgb, var(--egd-primary) 8%, transparent);
+}
+
+#egd-rail-search-results .egd-rail-search-result:focus-visible {
+  outline: var(--egd-focus-outline);
+  outline-offset: var(--egd-focus-outline-offset);
 }
 
 .egd-rail-search-type {
@@ -2627,6 +2686,12 @@
   color: var(--egd-type-ink);
 }
 
+/* The request row: an Agent, not a found thing. */
+.egd-rail-search-type-ask {
+  background: var(--egd-primary);
+  color: var(--egd-on-primary);
+}
+
 .egd-rail-search-main {
   min-width: 0;
   display: flex;
@@ -2666,11 +2731,44 @@
   line-height: 1;
 }
 
+.egd-rail-search-hint {
+  height: 20px;
+  display: inline-flex;
+  align-items: center;
+  padding: 0 7px;
+  border: 1px solid var(--egd-outline-variant);
+  border-radius: 6px;
+  color: var(--egd-on-surface-variant);
+  font-size: 11px;
+  font-weight: 640;
+  line-height: 1;
+  white-space: nowrap;
+}
+
 .egd-rail-search-empty {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 10px;
   padding: 18px 10px;
   color: var(--egd-on-surface-variant);
   font-size: 12px;
   text-align: center;
+}
+
+#egd-rail-search-results .egd-rail-search-empty-action {
+  min-height: 28px;
+  padding: 0 12px;
+  border: 1px solid var(--egd-outline);
+  border-radius: 8px;
+  color: var(--egd-primary);
+  font-size: 12px;
+  font-weight: 680;
+  line-height: 1;
+}
+
+#egd-rail-search-results .egd-rail-search-empty-action:hover {
+  background: color-mix(in srgb, var(--egd-primary) 8%, transparent);
 }
 
 .egd-rail-icon {
