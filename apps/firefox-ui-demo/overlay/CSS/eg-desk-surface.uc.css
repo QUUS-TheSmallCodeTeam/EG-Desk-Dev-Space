@@ -201,6 +201,18 @@
   color-scheme: light;
   color: var(--egd-on-surface);
 }
+/* Menus, dialogs and panels hang directly off the window root and would
+   otherwise inherit the system's text colour under a forced theme. The canvas
+   host stays out, so Browser pages, the Terminal and the Ontology lens keep
+   their own colours. :where() keeps every explicit color above these. */
+:where(:root[data-egd-theme="dark"]) > :where([id^="egd-"]:not(#egd-canvas-viewport), [class^="egd-"]) {
+  color-scheme: dark;
+  color: var(--egd-on-surface);
+}
+:where(:root[data-egd-theme="light"]) > :where([id^="egd-"]:not(#egd-canvas-viewport), [class^="egd-"]) {
+  color-scheme: light;
+  color: var(--egd-on-surface);
+}
 
 /* D-G3: ordinary edges deepen only when more contrast is requested. The
    Ontology card owns a light palette, so it also owns these overrides. */

@@ -147,6 +147,22 @@ test('forced light gives EG-Desk surfaces light native controls and the light in
   assert.deepEqual(dark.declarations, [['color-scheme', 'dark'], ['color', 'var(--egd-on-surface)']]);
 });
 
+test('a forced theme gives every floating EG-Desk panel the chosen ink instead of the system text colour', () => {
+  // Menus, dialogs and panels hang directly off the window root. Without this
+  // they inherit the system's text colour: dark text on a forced dark panel.
+  for (const theme of ['dark', 'light']) {
+    const rule = rules.find(candidate => candidate.media.length === 0 &&
+      candidate.selectors[0].startsWith(`:where(:root[data-egd-theme="${theme}"]) > :where(`));
+    assert.ok(rule, `floating panel rule for ${theme}`);
+    assert.deepEqual(flat(rule.selectors),
+      [`:where(:root[data-egd-theme="${theme}"]) > :where([id^="egd-"]:not(#egd-canvas-viewport), [class^="egd-"])`]);
+    assert.deepEqual(rule.declarations, [['color-scheme', theme], ['color', 'var(--egd-on-surface)']]);
+  }
+  // The canvas host stays out: Browser page content, the Terminal and the
+  // Ontology lens keep their own colours, as the scope note in Settings says.
+  assert.match(surfaceSource, /host\.appendChild\(canvasViewport\);/);
+});
+
 test('"항상 줄이기" applies the same stillness as the system reduced-motion rule', () => {
   const system = rules.filter(rule => rule.media.length === 1 && rule.media[0] === '(prefers-reduced-motion: reduce)'
     && rule.declarations.some(([name]) => name === 'transition'));
