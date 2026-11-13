@@ -321,7 +321,7 @@
   // opens the activity record at that run; it never shows thought text. With
   // several Agents at work in one room, `showName` puts the Agent's name above
   // its bubble, outside it, as an answer's name sits.
-  function codexAgentWorkingRow(working, { runId = '', name = 'Codex', avatar = null, showName = false, onOpen } = {}) {
+  function codexAgentWorkingRow(working, { runId = '', name = 'Codex', avatar = null, showName = false, onOpen, workScreen = null } = {}) {
     const face = codexMessageAvatarFace(avatar, name);
     return el('div', { class: 'egd-codex-working-row', data: { testid: 'chat-agent-working', runId, state: working.state } },
       el('span', { class: `egd-codex-message-avatar${face.toneClass}`, 'aria-hidden': 'true' },
@@ -335,7 +335,9 @@
           onclick: (ev) => { ev.stopPropagation(); onOpen?.(); },
         },
         el('span', { class: 'egd-codex-typing-dots', 'aria-hidden': 'true' }, el('span'), el('span'), el('span')),
-        el('span', { class: 'egd-codex-working-text' }, working.text))));
+        el('span', { class: 'egd-codex-working-text' }, working.text)),
+        // [현재 작업 화면] under the bubble, only when the caller found the Card this run works on.
+        workScreen));
   }
 
   // AGENT-05: which Agent holds this Browser Card right now, read from the
@@ -4439,6 +4441,10 @@
     if (state.codex.chatProtocol.unobservedPreviousRun) rows.push(el('p', { role: 'status', data: { testid: 'chat-account-reset-status' } }, '이전 Codex 연결의 실행 종료는 확인되지 않았습니다. 로그아웃은 중지 확인이 아닙니다. 이전 계정에 다시 연결해 상태를 확인하세요.'));
     for (const run of codexRuns(thread)) {
       rows.push(el('h4', { data: { runId: run.runId } }, codexRunLabel(run)));
+      // AGENT-05: [현재 작업 화면] under a busy run's head while the Card it works on is open
+      // (absent where this block runs alone, as in tests). The panel itself never moves the camera.
+      const workScreen = typeof codexRunWorkScreenButton === 'function' ? codexRunWorkScreenButton(run) : null;
+      if (workScreen) rows.push(workScreen);
       // AGENT-04: the ceiling this run was started under, named under its head.
       const ceilingLine = ChatState.toolCeilingRunLine(run);
       if (ceilingLine) rows.push(el('p', { class: 'egd-codex-run-ceiling', data: { testid: 'chat-run-tool-ceiling', runId: run.runId } }, ceilingLine));
@@ -7879,6 +7885,41 @@
     return cue;
   }
 
+  // [현재 작업 화면] (AGENT-05/BRW-13): the open Card a busy run is bound to,
+  // read from the same run bindings the Card's Agent chip reads. Null — no
+  // button is drawn — when the run is not busy, holds no Card, or its Card is
+  // closed. Display only; nothing here grants or refuses anything.
+  function codexRunWorkScreen(run, busy = ChatState.isRunBusy(run)) {
+    if (busy !== true || typeof run?.runId !== 'string' || !run.runId) return null;
+    return ChatCanvasLinks.runWorkScreen(run, browserToolRunBindings, { busy: true, cancelled: browserToolCancelledRuns,
+      cardFor: (cardId) => {
+        const card = document.getElementById(cardId);
+        if (!card?.isConnected || !card.classList.contains('egd-canvas-card')) return null;
+        return { name: contextCandidateLabel(card) || cardLabelForViewportRail(card) || '' };
+      } });
+  }
+
+  // The camera goes to that Card on this press only. It is framed with the
+  // Chat when both stay readable; otherwise the way back to the Chat stays up.
+  function goToRunWorkScreen(cardId) {
+    const card = cardId ? document.getElementById(cardId) : null;
+    if (!card?.isConnected) { boardNotice('작업 화면을 찾지 못했습니다. 창이 닫혔을 수 있습니다.'); return false; }
+    const chatCard = state.codex.chatCardEntityId ? document.getElementById(state.codex.chatCardEntityId) : null;
+    focusCanvasCard(card);
+    revealOpenCanvasCard(card, { kind: 'browser', opener: chatCard });
+    return true;
+  }
+
+  function codexRunWorkScreenButton(run, { busy, testid = 'chat-run-work-screen' } = {}) {
+    const view = busy === undefined ? codexRunWorkScreen(run) : codexRunWorkScreen(run, busy);
+    if (!view) return null;
+    return el('button', {
+      type: 'button', class: 'egd-codex-work-screen', title: view.title, 'aria-label': view.ariaLabel,
+      data: { testid, runId: run.runId, cardId: view.cardId, focusKey: `work-screen:${testid}:${run.runId}` },
+      onclick: (ev) => { ev.stopPropagation(); goToRunWorkScreen(view.cardId); },
+    }, deskIcon('browser'), el('span', {}, view.label));
+  }
+
   function resolveFloatingMenuPlacement(anchorRect, menuWidth = 152, menuHeight = 156) {
     const margin = 8;
     const viewportW = window.innerWidth || 1280;
@@ -11043,12 +11084,14 @@
               avatar: workingRun.authorAvatar || roomProfile?.avatar || null, showName: !!currentWorkingRow?.showName,
               // The record opens on this run's head (CHAT-07 activity record, AGENT-05).
               onOpen: () => codexBridge.openActivity(activeThread.id, { runId: workingRun.runId || null }),
+              workScreen: typeof codexRunWorkScreenButton === 'function' ? codexRunWorkScreenButton(workingRun, { testid: 'chat-agent-work-screen' }) : null,
             }));
           }
           for (const row of otherWorkingRows) {
             messages.appendChild(codexAgentWorkingRow(row, {
               runId: row.runId, name: row.name, avatar: row.avatar, showName: row.showName,
               onOpen: () => codexBridge.openActivity(activeThread.id, { runId: row.runId }),
+              workScreen: typeof codexRunWorkScreenButton === 'function' ? codexRunWorkScreenButton({ runId: row.runId }, { busy: true, testid: 'chat-agent-work-screen' }) : null,
             }));
           }
           // A run with no answer shown yet keeps its count at the end of the conversation.

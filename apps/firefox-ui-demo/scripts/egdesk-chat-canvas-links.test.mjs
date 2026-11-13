@@ -92,6 +92,73 @@ test('runWorkScreen: no button without a live target', () => {
   assert.equal(runWorkScreen({ runId: 'run-1' }, new Map([[key('run-1', 'card-a'), null], [7, {}], [key('run-1', ''), { binding: {} }]]), { busy: true, cardFor }), null);
 });
 
+test('[현재 작업 화면] is drawn only for a busy run with an open Card and moves the camera only when pressed', () => {
+  const doc = fakeDocument();
+  const el = elFor(doc);
+  const calls = [];
+  const browserCard = doc.register('egd-browser-card-3', doc.createElement('article'));
+  browserCard.className = 'egd-canvas-card egd-browser-card';
+  const chatCard = doc.register('egd-chat-card-1', doc.createElement('article'));
+  const bindings = new Map([[key('run-1', 'egd-browser-card-3'), { binding: { cardId: 'egd-browser-card-3' }, permission: 'interact' }]]);
+  const cancelled = new Map();
+  const state = { codex: { chatCardEntityId: 'egd-chat-card-1' } };
+  const parts = compileFunction(`${declaration('codexRunWorkScreen')}\n${declaration('goToRunWorkScreen')}\n${declaration('codexRunWorkScreenButton')}
+    return { codexRunWorkScreen, goToRunWorkScreen, codexRunWorkScreenButton };`,
+  ['document', 'el', 'state', 'ChatState', 'ChatCanvasLinks', 'browserToolRunBindings', 'browserToolCancelledRuns', 'contextCandidateLabel',
+    'cardLabelForViewportRail', 'deskIcon', 'boardNotice', 'focusCanvasCard', 'revealOpenCanvasCard'])(
+    doc, el, state, { isRunBusy: run => run.status === 'running' }, { runWorkScreen }, bindings, cancelled, card => card === browserCard ? 'Browser · example.com' : null,
+    () => 'Browser', () => doc.createElement('svg'), message => calls.push(['notice', message]),
+    card => calls.push(['focus', card.id]), (card, options) => calls.push(['reveal', card.id, options.kind, options.opener?.id || null]));
+
+  const button = parts.codexRunWorkScreenButton({ runId: 'run-1', status: 'running' });
+  assert.equal(button.tag, 'button');
+  assert.equal(button.textContent, '현재 작업 화면');
+  assert.equal(button.className, 'egd-codex-work-screen');
+  assert.equal(button.attributes.title, 'Browser · example.com 창으로 화면 이동');
+  assert.equal(button.attributes['aria-label'], '현재 작업 화면 · Browser · example.com 창으로 화면 이동');
+  assert.deepEqual({ ...button.dataset }, { testid: 'chat-run-work-screen', runId: 'run-1', cardId: 'egd-browser-card-3', focusKey: 'work-screen:chat-run-work-screen:run-1' });
+  assert.deepEqual(calls, [], 'drawing it moves nothing');
+  button.dispatch('click');
+  assert.deepEqual(calls, [['focus', 'egd-browser-card-3'], ['reveal', 'egd-browser-card-3', 'browser', 'egd-chat-card-1']],
+    'the Card is brought into view with its Chat as the opener, so the way back can stay up');
+
+  // No target, no button: a finished run, a run without a Card, a cancelled binding, a closed Card.
+  assert.equal(parts.codexRunWorkScreenButton({ runId: 'run-1', status: 'completed' }), null);
+  assert.equal(parts.codexRunWorkScreenButton({ runId: 'run-2', status: 'running' }), null);
+  assert.equal(parts.codexRunWorkScreenButton({ status: 'running' }), null);
+  cancelled.set(key('run-1', 'egd-browser-card-3'), true);
+  assert.equal(parts.codexRunWorkScreenButton({ runId: 'run-1', status: 'running' }), null);
+  cancelled.clear();
+  // The working bubble's rows carry only a run id and are busy by definition.
+  assert.equal(parts.codexRunWorkScreenButton({ runId: 'run-1' }, { busy: true, testid: 'chat-agent-work-screen' }).dataset.testid, 'chat-agent-work-screen');
+  assert.equal(parts.codexRunWorkScreenButton({ runId: 'run-1' }), null);
+  // The Card closed between the draw and the press: a plain sentence, no camera move.
+  calls.length = 0;
+  const stale = parts.codexRunWorkScreenButton({ runId: 'run-1', status: 'running' });
+  browserCard.isConnected = false;
+  stale.dispatch('click');
+  assert.deepEqual(calls, [['notice', '작업 화면을 찾지 못했습니다. 창이 닫혔을 수 있습니다.']]);
+  assert.equal(parts.codexRunWorkScreenButton({ runId: 'run-1', status: 'running' }), null);
+
+  // Wiring: under each run head in the activity record and under each working bubble; guarded where those blocks run alone.
+  const panel = declaration('renderCodexActivityPanel') || '';
+  assert.match(panel, /rows\.push\(el\('h4', \{ data: \{ runId: run\.runId \} \}, codexRunLabel\(run\)\)\);\n(?:\s*\/\/[^\n]*\n)*\s*const workScreen = typeof codexRunWorkScreenButton === 'function' \? codexRunWorkScreenButton\(run\) : null;\n\s*if \(workScreen\) rows\.push\(workScreen\);/);
+  assert.match(surfaceSource, /workScreen: typeof codexRunWorkScreenButton === 'function' \? codexRunWorkScreenButton\(workingRun, \{ testid: 'chat-agent-work-screen' \}\) : null,/);
+  assert.match(surfaceSource, /workScreen: typeof codexRunWorkScreenButton === 'function' \? codexRunWorkScreenButton\(\{ runId: row\.runId \}, \{ busy: true, testid: 'chat-agent-work-screen' \}\) : null,/);
+  const row = compileFunction(`${declaration('codexMessageAvatarFace')}\n${declaration('codexAgentWorkingRow')}\nreturn codexAgentWorkingRow;`, ['document', 'el', 'ChatState'])(
+    doc, el, { profileAvatarView: () => ({ kind: 'initial', text: 'C', tone: 0 }) });
+  const withScreen = row({ state: 'working', text: 'Agent 작업 중' }, { runId: 'run-1', name: 'Codex', workScreen: button });
+  const stack = withScreen.all(node => node.className === 'egd-codex-working-stack')[0];
+  assert.equal(stack.children.at(-1), button, 'under the bubble');
+  assert.equal(stack.children.at(-2).dataset.testid, 'chat-agent-working-open', 'the bubble still opens the record');
+  const without = row({ state: 'working', text: 'Agent 작업 중' }, { runId: 'run-1', name: 'Codex' });
+  assert.equal(without.all(node => node.className === 'egd-codex-work-screen').length, 0);
+  // Style: tokens only, with hover and focus.
+  for (const [, body] of surfaceCss.matchAll(/button\.egd-codex-work-screen[^{]*\{([^}]+)\}/g)) assert.doesNotMatch(body, /#[0-9a-f]{3,8}\b|rgba?\(/i, 'tokens only');
+  assert.match(surfaceCss, /button\.egd-codex-work-screen:hover,/);
+  assert.match(surfaceCss, /button\.egd-codex-work-screen:focus-visible,\n#egd-codex-activity-panel button\.egd-codex-work-screen:focus-visible \{ outline: var\(--egd-focus-outline\);/);
+});
+
 // ---- 채팅으로 돌아가기 (B44) ----
 
 test('chatReturnOrigin keeps the camera and the conversation scroll it left from', () => {

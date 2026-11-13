@@ -4925,6 +4925,31 @@
 .egd-codex-activity-row button, .egd-codex-approval-pending p { overflow-wrap: anywhere; text-align: left; }
 .egd-codex-approval-pending { margin: 12px 0; padding: 14px; background: var(--egd-note-soft); border: 1px solid var(--egd-note-line); border-radius: 10px; }
 
+/* [현재 작업 화면]: under a busy run's head in the activity record and under
+   its working bubble in Chat. Pressing it is what moves the camera to the
+   Card that run works on; tokens only, so light and dark follow the theme. */
+button.egd-codex-work-screen,
+#egd-codex-activity-panel button.egd-codex-work-screen {
+  display: inline-flex;
+  align-items: center;
+  align-self: flex-start;
+  gap: 6px;
+  min-height: 32px;
+  padding: 5px 10px;
+  border: 1px solid var(--egd-outline);
+  border-radius: 7px;
+  background: var(--egd-surface-elevated);
+  color: var(--egd-primary);
+  font: 600 12px/1.5 var(--egd-font);
+  cursor: pointer;
+}
+#egd-codex-activity-panel button.egd-codex-work-screen { margin: 0 0 6px; }
+button.egd-codex-work-screen:hover,
+#egd-codex-activity-panel button.egd-codex-work-screen:hover { border-color: var(--egd-focus-border); background: var(--egd-hover); color: var(--egd-on-surface); }
+button.egd-codex-work-screen:focus-visible,
+#egd-codex-activity-panel button.egd-codex-work-screen:focus-visible { outline: var(--egd-focus-outline); outline-offset: var(--egd-focus-outline-offset); }
+button.egd-codex-work-screen .egd-ui-icon { flex: none; width: 14px; height: 14px; }
+
 /* Retained Chat details stay inside the activity record and open on demand.
    Shared RunResult typography/spacing is owned by .egdesk-run-result-* below. */
 .egd-chat-retained-detail,
