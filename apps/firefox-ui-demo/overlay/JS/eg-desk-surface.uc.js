@@ -70,13 +70,6 @@
     }
   }
 
-  const PRESETS = [
-    { id: 'react-dev',  label: '개발', name: 'React 개발',  count: 5 },
-    { id: 'meeting',    label: '회의', name: '회의 준비',    count: 4 },
-    { id: 'research',   label: '조사', name: '리서치 모드',  count: 3 },
-    { id: 'writing',    label: '작성', name: '글쓰기',      count: 2 },
-  ];
-
   const SELF_MEMBER = '나';
   const THREAD_KIND_META = {
     dm: {
@@ -5108,6 +5101,7 @@
     };
     if (!writeAgendaStore(nextStore)) return false;
     updateAgendaMetaFromStore(nextStore);
+    scheduleBoardRailSync();
     return true;
   }
 
@@ -7678,6 +7672,26 @@
     return saveCurrentAgendaState({ ...options, agendaId: options.agendaId || newAgendaId() });
   }
 
+  // The Board list with no row: nothing saved yet, or nothing matching.
+  function agendaSwitcherEmptyState(total) {
+    const empty = LeftRail.boardListEmptyState({
+      total, query: state.agenda.switcherQuery, filter: state.agenda.switcherFilter, canImport: portableImportReady(),
+    });
+    const actions = {
+      new: { label: '새 Board', run: () => createNewAgenda() },
+      import: { label: '가져오기', run: () => { closeAgendaSwitcher(); openPortableImport(); } },
+    };
+    return el('div', { class: 'egd-agenda-switch-empty', data: { kind: empty.kind } },
+      el('span', { class: 'egd-agenda-switch-empty-text' }, empty.message),
+      empty.actions.length ? el('span', { class: 'egd-agenda-switch-empty-actions' },
+        ...empty.actions.map(id => el('button', {
+          class: 'egd-agenda-switch-action' + (id === 'new' ? ' egd-agenda-switch-action-primary' : ''),
+          type: 'button',
+          data: { action: id },
+          onclick: (ev) => { ev.stopPropagation(); actions[id].run(); },
+        }, actions[id].label))) : null);
+  }
+
   function renderAgendaSwitcherPanel(panel) {
     const entries = agendaListEntries();
     const counts = agendaFilterCounts();
@@ -7816,9 +7830,7 @@
         }, `${label} ${count}`)),
       ),
       el('div', { class: 'egd-agenda-switch-list' },
-        ...(rows.length ? rows : [
-          el('div', { class: 'egd-agenda-switch-empty' }, '검색 결과가 없습니다.'),
-        ]),
+        ...(rows.length ? rows : [agendaSwitcherEmptyState(counts.all)]),
       ),
     );
   }
@@ -8437,6 +8449,7 @@
       else fileRailItem.removeAttribute('aria-current');
     }
     document.querySelector('#egd-preset-bag .egd-bag-header')?.classList.toggle('egd-bag-header-muted', focusedFile);
+    scheduleBoardRailSync();
 
     const badge = document.querySelector('.egd-rail-card-badge');
     if (badge) {
@@ -10237,30 +10250,165 @@
     return dock;
   }
 
+  // ============ Left: Desk rail — Desk, 파일, the saved Boards, + ============
+  // Rows, labels and the empty Canvas cues are decided in EGDeskLeftRail.
+  const LeftRail = ChromeUtils.importESModule('chrome://userchrome/content/EGDeskLeftRail.sys.mjs');
+  const BOARD_RAIL_SYNC_MS = 60;
+  let boardRailSignatureShown = null;
+  let boardRailSyncTimer = 0;
 
-  // ============ Left: Preset Bag ============
+  function boardRailChip(row) {
+    return el('button', {
+      class: 'egd-bag-chip' + (row.current ? ' egd-bag-chip-active' : '') + ' egd-bag-board',
+      type: 'button',
+      title: row.tooltip,
+      'aria-label': row.ariaLabel,
+      'aria-current': row.current ? 'true' : null,
+      data: { boardId: row.id, open: String(row.open), testid: 'rail-board-open' },
+      // The same 'Board 열기' the Board list uses: opens it, or moves to it when open.
+      onclick: () => switchAgenda(row.id),
+    }, deskIcon('board'), el('span', { class: 'egd-bag-label' }, row.label));
+  }
+
+  function renderBoardRail(list, rows, focusedBoardId = null) {
+    list.replaceChildren(...rows.map(boardRailChip));
+    list.hidden = rows.length === 0;
+    if (focusedBoardId != null) Array.from(list.children).find(chip => chip.dataset.boardId === focusedBoardId)?.focus();
+  }
+
+  // Redraws the saved Board rows only when what they show has changed.
+  function syncBoardRail(list = document.getElementById('egd-bag-boards')) {
+    if (!list) return false;
+    const rows = LeftRail.boardRailRows(agendaListEntries({ filter: 'all', query: '' }), {
+      openBoardIds: Object.values(state.boards.projections).map(projection => projection.boardId),
+      activeBoardId: state.boards.projections[state.boards.activeProjectionId]?.boardId || null,
+    });
+    const signature = LeftRail.boardRailSignature(rows);
+    if (signature === boardRailSignatureShown) return false;
+    boardRailSignatureShown = signature;
+    const focused = document.activeElement;
+    renderBoardRail(list, rows, focused && list.contains(focused) ? focused.dataset.boardId : null);
+    syncEmptyCanvasHint();
+    return true;
+  }
+
+  // Saves, renames, opens and closes all end here; one redraw per burst.
+  function scheduleBoardRailSync() {
+    if (boardRailSyncTimer) return;
+    boardRailSyncTimer = window.setTimeout(() => {
+      boardRailSyncTimer = 0;
+      syncBoardRail();
+    }, BOARD_RAIL_SYNC_MS);
+  }
+
+  function moveBoardRailFocus(ev) {
+    if (ev.altKey || ev.metaKey || ev.ctrlKey || ev.shiftKey) return;
+    const bag = document.getElementById('egd-preset-bag');
+    const items = bag ? Array.from(bag.querySelectorAll('button')) : [];
+    const next = LeftRail.railFocusIndex({ key: ev.key, index: items.indexOf(ev.target), count: items.length });
+    if (next == null) return;
+    ev.preventDefault();
+    items[next].focus();
+  }
+
+  // Desk, the first rail item, opens the Board list the top bar opens (the approved rail's Desk).
+  let deskRailListOpenAtPress = false;
+
+  function syncDeskRailButton(desk) {
+    desk.setAttribute('aria-expanded', String(!!document.getElementById('egd-agenda-switcher')));
+  }
+
+  function deskRailButton() {
+    const desk = el('button', {
+      class: 'egd-bag-header',
+      type: 'button',
+      title: 'Board 목록',
+      'aria-label': 'Desk · Board 목록',
+      'aria-expanded': 'false',
+      data: { testid: 'rail-board-list' },
+      // An open list closes itself on this press; the click after it must not open it again.
+      onpointerdown: () => { deskRailListOpenAtPress = !!document.getElementById('egd-agenda-switcher'); },
+      onclick: (ev) => {
+        const closedByPress = deskRailListOpenAtPress;
+        deskRailListOpenAtPress = false;
+        if (!closedByPress) toggleAgendaSwitcher(ev);
+        syncDeskRailButton(desk);
+      },
+    }, deskIcon('desk'), el('span', {}, 'Desk'));
+    return desk;
+  }
+
   function buildPresetBag() {
-    const bag = el('div', { id: 'egd-preset-bag', class: 'egd-edge egd-frosted' });
+    const bag = el('div', { id: 'egd-preset-bag', class: 'egd-edge egd-frosted', role: 'navigation', 'aria-label': 'Desk 도구',
+      onkeydown: moveBoardRailFocus });
 
-    bag.appendChild(el('div', { class: 'egd-bag-header', title: 'Desk 도구' },
-      deskIcon('desk'), el('span', {}, 'Desk')));
+    const desk = deskRailButton();
+    bag.appendChild(desk);
+    // The Board list also closes on Esc, on a press elsewhere and on choosing a Board.
+    new MutationObserver(() => syncDeskRailButton(desk)).observe(document.documentElement, { childList: true });
     bag.appendChild(el('span', { class: 'egd-bag-divider', 'aria-hidden': 'true' }));
     bag.appendChild(el('button', { class: 'egd-bag-chip egd-bag-file', title: '파일 작업 열기', 'aria-label': '파일 작업 열기',
       data: { testid: 'file-sidebar-open' }, onclick: () => openFileFromUserAction() }, deskIcon('folder'), el('span', {}, '파일')));
 
-    const list = el('div', { class: 'egd-bag-list' });
-    for (const preset of PRESETS) {
-      const chip = el('button', {
-        class: 'egd-bag-chip',
-        title: `${preset.name} · ${preset.count}개 항목`,
-        data: { id: preset.id },
-      }, deskIcon({ 'react-dev': 'ide', meeting: 'users', research: 'search', writing: 'pencil' }[preset.id] || 'desk'), el('span', {}, preset.label));
-      list.appendChild(chip);
-    }
-    list.appendChild(el('button', { class: 'egd-bag-add', title: '새 프리셋', 'aria-label': '새 프리셋' }, deskIcon('plus')));
+    const list = el('div', { id: 'egd-bag-boards', class: 'egd-bag-list', role: 'group', 'aria-label': '저장한 Board' });
     bag.appendChild(list);
+    bag.appendChild(el('button', { class: 'egd-bag-add', type: 'button', title: '새 Board', 'aria-label': '새 Board',
+      data: { testid: 'rail-board-new' }, onclick: () => createNewAgenda() }, deskIcon('plus')));
+    boardRailSignatureShown = null;
+    syncBoardRail(list);
 
     return bag;
+  }
+
+  // ============ Empty Canvas hint ============
+  // A decoration under the Views: three faint cues toward the Edges that are
+  // already there. It takes no pointer and no focus, and leaves with the first View.
+  const EMPTY_CANVAS_HINT_SETTLE_MS = 300;
+
+  function emptyCanvasHintState() {
+    const counts = {
+      cards: document.querySelectorAll('.egd-canvas-card').length,
+      shapes: document.querySelectorAll('.egd-canvas-shape').length,
+      boards: document.querySelectorAll('.egd-board-region').length,
+    };
+    const empty = counts.cards + counts.shapes + counts.boards === 0;
+    return LeftRail.emptyCanvasHint({
+      ...counts,
+      // Read the saved Boards only while the hint shows; the left cue names what the rail offers.
+      savedBoards: empty ? agendaListEntries({ filter: 'all', query: '' }).filter(entry => entry.saved).length : 0,
+    });
+  }
+
+  function renderEmptyCanvasHint(hint, model) {
+    if (model.visible) {
+      const words = model.cues.map(cue => cue.text).join(' / ');
+      if (hint.dataset.cues !== words) {
+        hint.dataset.cues = words;
+        hint.replaceChildren(...model.cues.map(cue => el('div', { class: 'egd-canvas-hint-cue', data: { cue: cue.id, direction: cue.direction } },
+          svgEl('svg', { class: 'egd-canvas-hint-arrow', viewBox: '0 0 12 12', width: '12', height: '12', fill: 'none',
+            stroke: 'currentColor', 'stroke-width': '1', 'stroke-linecap': 'round', 'stroke-linejoin': 'round', focusable: 'false' },
+            svgEl('path', { d: 'M6 10.5v-9M2.5 5 6 1.5 9.5 5' })),
+          el('span', {}, cue.text))));
+      }
+    }
+    const visible = String(model.visible);
+    if (hint.dataset.visible !== visible) hint.dataset.visible = visible;
+  }
+
+  function syncEmptyCanvasHint() {
+    const hint = document.getElementById('egd-canvas-hint');
+    if (!hint) return false;
+    renderEmptyCanvasHint(hint, emptyCanvasHintState());
+    return true;
+  }
+
+  function installEmptyCanvasHint(viewport, layer) {
+    const hint = el('div', { id: 'egd-canvas-hint', 'aria-hidden': 'true' });
+    viewport.prepend(hint);
+    new MutationObserver(() => syncEmptyCanvasHint()).observe(layer, { childList: true });
+    // A restored Desk mounts its Views first; an empty one then fades the cues in.
+    window.setTimeout(syncEmptyCanvasHint, EMPTY_CANVAS_HINT_SETTLE_MS);
+    return hint;
   }
 
   // ============ Right: Contextual HUD ============
@@ -27170,6 +27318,7 @@
       host.appendChild(canvasViewport);
       const semantic = installSemanticZoom(canvasViewport, canvasLayer);
       installCanvasPanZoom(canvasViewport, canvasLayer);
+      installEmptyCanvasHint(canvasViewport, canvasLayer);
       installDeskCloseShortcut();
       installBrowserShortcuts();
       installNativeGestureHelperBridge();
