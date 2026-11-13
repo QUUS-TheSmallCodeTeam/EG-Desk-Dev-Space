@@ -325,6 +325,11 @@ test('input failure is visible; reconnect reuses the same PTY without replay', a
   const failed = h.api.write('first'), stale = h.api.write('queued text');
   await assert.rejects(failed, /input unavailable/); assert.equal((await stale).skipped, true);
   assert.match(h.elements['status-overlay'].textContent, /자동으로 다시 보내지 않습니다/);
+  // The raw transport error is not part of the Korean line; it sits folded under '자세히' once.
+  assert.doesNotMatch(h.elements['status-overlay'].textContent, /input unavailable/);
+  const rawDetails = h.elements['status-overlay'].children.filter(child => child.children[0]?.textContent === '자세히');
+  assert.equal(rawDetails.length, 1); assert.equal(rawDetails[0].children[1].textContent, 'input unavailable');
+  assert.equal(h.term.output.some(chunk => String(chunk).includes('input unavailable')), false);
   assert.equal(h.api.isConnected(), false);
   assert.equal(h.term.options.disableStdin, true);
   failWrite = false;
