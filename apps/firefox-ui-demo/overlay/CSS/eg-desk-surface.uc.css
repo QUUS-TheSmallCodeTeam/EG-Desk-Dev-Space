@@ -5504,7 +5504,8 @@
 .egdesk-file-tree-panel { grid-column: 1; grid-row: 2; overflow: auto; border-right: 1px solid var(--egd-outline-variant); padding: 0 8px 8px; background: var(--egd-window-alt); }
 .egdesk-file-tree-heading { font-size: 13px; margin: 0 0 6px; }
 /* '파일 / 변경' is a tab strip on one line: the selected tab carries the ink and the underline. */
-.egdesk-file-tabs { display: flex; gap: 2px; margin: 0 -8px 8px; padding: 2px 8px 0; border-bottom: 1px solid var(--egd-outline-variant); }
+/* 4px above the tabs: the scrolling panel must not clip a tab's focus ring. */
+.egdesk-file-tabs { display: flex; gap: 2px; margin: 0 -8px 8px; padding: 4px 8px 0; border-bottom: 1px solid var(--egd-outline-variant); }
 .egdesk-file-view .egdesk-file-tab { min-height: 32px; margin-bottom: -1px; padding: 4px 10px; border: 0; border-bottom: 2px solid transparent; border-radius: 0; background: transparent; color: var(--egd-on-surface-variant); }
 .egdesk-file-view .egdesk-file-tab:hover:not(:disabled) { background: transparent; color: var(--egd-on-surface); }
 .egdesk-file-view .egdesk-file-tab[aria-selected="true"] { border-bottom-color: var(--egd-primary); color: var(--egd-on-surface); }
