@@ -369,7 +369,9 @@ export function createFileCardZone(deps) {
         card._fileRecord = FileCardState.fileCardRecord(rootHandle, snapshot, projectReference);
         preserveRestoreRecord = false;
       }
-      badge.textContent = failedOriginal ? '복구 확인 필요' : rootNeedsReconnect || snapshot.sourceConnection === 'reconnect-required' ? '보관 사본 · 원본 재연결 필요' : snapshot.dirty ? '작업사본 · 미저장' : '파일';
+      badge.textContent = failedOriginal ? '복구 확인 필요' : rootNeedsReconnect || snapshot.sourceConnection === 'reconnect-required' ? '보관 사본 · 원본 재연결 필요' : snapshot.dirty ? '작업사본 · 미저장'
+        // The title already reads '파일' until a folder is connected; the state must not repeat it.
+        : rootHandle?.name ? '파일' : snapshot.fileId ? '파일 열림' : '폴더 연결 전';
       if (runFileOrigin) {
         if (snapshot.rootId === runFileOrigin.rootId && snapshot.fileId === runFileOrigin.fileId && snapshot.sourceConnection !== 'reconnect-required') {
           badge.textContent = snapshot.dirty ? '현재 파일 · 작업사본 미저장' : '현재 파일';
