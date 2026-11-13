@@ -258,6 +258,39 @@
   opacity: var(--egd-wood-opacity, 1);
 }
 
+/* Empty Canvas hint: three faint cues toward the Edges that already exist
+   (search above, the Desk rail on the left, the Dock below). It lies on the
+   desk under every View, takes no pointer, and fades with the first View. */
+#egd-canvas-hint {
+  position: absolute;
+  inset: 0;
+  z-index: 0;
+  pointer-events: none;
+  user-select: none;
+  opacity: 0;
+  transition: opacity 400ms ease;
+  color: var(--egd-on-surface-variant);
+  font: 400 12px/1.4 var(--egd-font);
+}
+#egd-canvas-hint[data-visible="true"] { opacity: .4; }
+.egd-canvas-hint-cue {
+  position: absolute;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  white-space: nowrap;
+  transform: translate(-50%, -50%);
+}
+.egd-canvas-hint-cue[data-cue="search"] { left: 50%; top: 30%; flex-direction: column; }
+.egd-canvas-hint-cue[data-cue="board"] { left: max(30%, 190px); top: 50%; }
+.egd-canvas-hint-cue[data-cue="dock"] { left: 50%; top: 70%; flex-direction: column-reverse; }
+.egd-canvas-hint-arrow { flex: 0 0 auto; width: 12px; height: 12px; }
+.egd-canvas-hint-cue[data-direction="left"] .egd-canvas-hint-arrow { transform: rotate(-90deg); }
+.egd-canvas-hint-cue[data-direction="down"] .egd-canvas-hint-arrow { transform: rotate(180deg); }
+/* Reduced motion: the shared [id^="egd-"] rule below shows and hides it at once. */
+:root.egd-initial-browser-focus #egd-canvas-hint,
+:root.egd-browser-fullscreen-active #egd-canvas-hint { display: none; }
+
 #egd-canvas-layer {
   position: absolute;
   inset: 0;
@@ -2945,6 +2978,21 @@
   color: var(--egd-on-surface-variant);
   font-size: 12px;
   text-align: center;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 12px;
+}
+/* Nothing saved yet: the two ways to start sit under the sentence. */
+.egd-agenda-switch-empty-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+.egd-agenda-switch-empty-actions .egd-agenda-switch-action:hover { background: var(--egd-hover); }
+.egd-agenda-switch-empty-actions .egd-agenda-switch-action:focus-visible {
+  outline: var(--egd-focus-outline);
+  outline-offset: var(--egd-focus-outline-offset);
 }
 
 .egd-agenda-close-guard {
@@ -3540,15 +3588,23 @@
 .egd-bag-header-muted { color: var(--egd-on-surface-variant); }
 .egd-bag-divider { width: 43px; height: 1px; background: var(--egd-outline); }
 
+/* Saved Boards: the only part of the rail that scrolls; Desk, 파일 and + stay put. */
 .egd-bag-list {
   flex: 0 1 auto;
+  min-height: 0;
   display: flex;
   flex-direction: column;
   gap: 7px;
   width: 100%;
   align-items: center;
+  overflow-x: hidden;
   overflow-y: auto;
+  scrollbar-width: thin;
+  scrollbar-color: var(--egd-outline) transparent;
+  /* Room for the focus ring, which the scroll box would otherwise clip. */
+  padding-block: 2px;
 }
+.egd-bag-list[hidden] { display: none; }
 
 .egd-bag-chip {
   width: 50px;
@@ -3571,12 +3627,42 @@
   background: var(--egd-hover);
   color: var(--egd-on-surface);
 }
+.egd-bag-chip:active { background: var(--egd-primary-container); color: var(--egd-on-surface); }
 .egd-bag-chip .egd-ui-icon { width: 16px; height: 16px; }
 .egd-bag-chip-active { background: var(--egd-primary-container); color: var(--egd-on-surface); font-weight: 650; }
+/* A saved Board row: the rail item of the approved style, with the Board's own
+   name. Long names take two lines and are then cut; the tooltip has it whole. */
+.egd-bag-board {
+  position: relative;
+  flex: 0 0 auto;
+  max-width: 100%;
+  padding: 6px 1px 5px;
+}
+.egd-bag-board .egd-bag-label {
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  max-width: 100%;
+  overflow: hidden;
+  overflow-wrap: anywhere;
+  text-align: center;
+}
+/* Open on the Canvas: a small dot beside the icon, also said in the tooltip. */
+.egd-bag-board[data-open="true"]::after {
+  content: "";
+  position: absolute;
+  top: 5px;
+  right: 9px;
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background: var(--egd-primary);
+}
 .egd-bag-chip:focus-visible,
 .egd-bag-add:focus-visible { outline: var(--egd-focus-outline); outline-offset: var(--egd-focus-outline-offset); }
 
 .egd-bag-add {
+  flex: 0 0 auto;
   width: 48px;
   height: 40px;
   border-radius: 8px;
@@ -3589,6 +3675,7 @@
   transition: border-color 0.15s, color 0.15s;
 }
 .egd-bag-add:hover { border-color: var(--egd-primary) !important; color: var(--egd-primary); }
+.egd-bag-add:active { background: var(--egd-primary-container); }
 .egd-bag-add .egd-ui-icon { width: 16px; height: 16px; }
 
 /* ============ Right: Contextual HUD ============
