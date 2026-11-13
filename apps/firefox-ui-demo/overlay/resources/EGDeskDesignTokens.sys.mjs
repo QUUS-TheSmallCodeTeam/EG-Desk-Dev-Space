@@ -59,6 +59,8 @@ export const CONTRAST_REQUIREMENTS = Object.freeze([
   ['text', 'avatar.tone-3.color', 'avatar.tone-3.background'],
   ['text', 'avatar.tone-4.color', 'avatar.tone-4.background'],
   ['text', 'avatar.tone-5.color', 'avatar.tone-5.background'],
+  // Account glyph on the approved blue-grey circle (.egd-rail-avatar).
+  ['border', '--egd-surface-elevated', '--egd-account'],
   // Existing accent-based edges and the shared keyboard focus outline.
   ['border', '--egd-primary', '--egd-surface'],
   ['border', '--egd-primary', '--egd-surface-elevated'],

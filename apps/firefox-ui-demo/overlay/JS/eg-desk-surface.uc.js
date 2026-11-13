@@ -8948,12 +8948,14 @@
 
   // Four compact host-resource readouts live in viewport chrome, never in Canvas or Chat.
   // Values come only from the protected local bridge; unavailable is not zero.
+  // The bar shows rings only (approved .eg-resources); every number is read in the
+  // popup a ring opens: that metric's rows, then all four at a glance.
   let resourceGadget = null;
   function buildResourceGadget() {
     if (resourceGadget) return resourceGadget;
     const specs = [
-      { id: 'cpu', label: 'CPU', shortLabel: 'CPU' },
-      { id: 'memory', label: '메모리', shortLabel: 'RAM' },
+      { id: 'cpu', label: 'CPU' },
+      { id: 'memory', label: '메모리' },
       { id: 'disk', label: '디스크' },
       { id: 'network', label: '네트워크' },
     ];
@@ -8973,7 +8975,8 @@
     const staleMs = 4000;
     const requestTimeoutMs = 2500;
     const buttons = new Map();
-    const readouts = new Map();
+    const overviewValues = new Map();
+    const overview = el('dl', { class: 'egd-resource-overview', 'aria-label': '전체 자원 한눈에 보기' });
     const metricReady = (metric) => metric?.status === 'ok';
     const numeric = (value) => typeof value === 'number' && Number.isFinite(value) && value >= 0;
     const size = (bytes) => {
@@ -8984,14 +8987,6 @@
       return `${Math.round(bytes / 1024)} KiB`;
     };
     const rate = (bytes) => numeric(bytes) ? `${size(bytes)}/s` : '—';
-    // Tight readouts use binary K/M/G; the tooltip and detail spell out KiB/MiB/GiB.
-    const compactRate = (bytes) => {
-      if (!numeric(bytes)) return '—';
-      if (bytes >= 1024 ** 3) return `${Number((bytes / 1024 ** 3).toFixed(1))}G/s`;
-      if (bytes >= 1024 ** 2) return `${Number((bytes / 1024 ** 2).toFixed(1))}M/s`;
-      if (bytes >= 1024) return `${Math.round(bytes / 1024)}K/s`;
-      return `${Math.round(bytes)}B/s`;
-    };
     const percent = (metric) => metricReady(metric) && numeric(metric.percent)
       ? `${Math.round(metric.percent)}%` : '—';
     const metricStatus = (metric) => {
@@ -9050,6 +9045,8 @@
         el('p', { class: 'egd-resource-detail-scope' }, `${opened === 'network' ? '기본 네트워크 연결' : '이 컴퓨터'} · ${sampledAt}`),
         el('dl', {}, ...rows(opened, metric).map(([label, value]) =>
           el('div', { class: 'egd-resource-detail-row' }, el('dt', {}, label), el('dd', {}, value)))),
+        el('div', { class: 'egd-resource-overview-title' }, '전체 자원'),
+        overview,
       );
     };
     const render = () => {
@@ -9069,12 +9066,8 @@
         const label = spec.id === 'memory' ? '메모리 사용(캐시 포함)' : spec.label;
         button.setAttribute('aria-label', `${label} ${value}, 상세 보기`);
         button.title = `${label} · ${value}`;
-        const readout = readouts.get(spec.id);
-        readout.first.textContent = isRate
-          ? `${spec.id === 'disk' ? 'R' : '↓'} ${metricReady(throughput) ? compactRate(firstRate) : '—'}`
-          : `${spec.shortLabel} ${value}`;
-        readout.second.textContent = isRate
-          ? `${spec.id === 'disk' ? 'W' : '↑'} ${metricReady(throughput) ? compactRate(secondRate) : '—'}` : '';
+        overviewValues.get(spec.id).textContent = isRate && metricReady(throughput)
+          ? `${firstLabel} ${rate(firstRate)} · ${secondLabel} ${rate(secondRate)}` : value;
         const ring = button.querySelector('.egd-resource-ring');
         if (!isRate) {
           const measured = metricReady(metric) && numeric(metric.percent);
@@ -9098,10 +9091,9 @@
     for (const spec of specs) {
       const ring = el('span', { class: `egd-resource-ring egd-resource-${spec.id} egd-resource-unmeasured`, 'aria-hidden': 'true' },
         spec.id === 'network' ? '↕' : null);
-      const first = el('span', { class: 'egd-resource-value egd-resource-value-primary' }, '—');
-      const second = el('span', { class: 'egd-resource-value egd-resource-value-secondary' });
-      const readout = el('span', { class: 'egd-resource-readout', 'aria-hidden': 'true' }, first, second);
-      readouts.set(spec.id, { first, second });
+      const overviewValue = el('dd', {}, '—');
+      overviewValues.set(spec.id, overviewValue);
+      overview.appendChild(el('div', { class: 'egd-resource-detail-row' }, el('dt', {}, spec.label), overviewValue));
       const button = el('button', {
         type: 'button', class: `egd-resource-button egd-resource-button-${spec.id}`, title: `${title(spec.id)} · 측정 대기`,
         'aria-label': `${title(spec.id)} 측정 대기, 상세 보기`,
@@ -9114,7 +9106,7 @@
           for (const [id, control] of buttons) control.setAttribute('aria-expanded', String(id === opened));
           render();
         },
-      }, ring, readout);
+      }, ring);
       buttons.set(spec.id, button);
       gadget.appendChild(button);
     }

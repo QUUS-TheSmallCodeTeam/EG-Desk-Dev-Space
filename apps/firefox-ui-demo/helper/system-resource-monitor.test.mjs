@@ -152,14 +152,17 @@ test('gadget renders measured read/write rates and retains storage detail when I
   const gadget = context.makeGadget()
   await new Promise(resolve => setImmediate(resolve))
   const [cpu, , disk, network, detail] = gadget.children
-  assert.equal(cpu.children[1].children[0].textContent, 'CPU 25%')
-  assert.equal(disk.children[1].children[0].textContent, 'R 1K/s')
-  assert.equal(disk.children[1].children[1].textContent, 'W 2K/s')
+  // The bar shows rings only; each number is read in the popup's four-row overview.
+  for (const button of [cpu, disk, network]) assert.equal(button.children.length, 1)
+  const overviewRows = () => detail.children.at(-1).children.map(row => [row.children[0].children[0], row.children[1].textContent])
+  assert.equal(cpu.title, 'CPU · 25%')
   assert.equal(disk.children[0].toggles['egd-resource-unmeasured'], true) // No made-up disk utilization arc.
   assert.match(disk.attrs['aria-label'], /읽기 1 KiB\/s, 쓰기 2 KiB\/s/)
-  assert.equal(network.children[1].children[0].textContent, '↓ 3K/s')
   assert.deepEqual([...timers.values()].map(timer => timer.delay), [1000])
   disk.onclick({ stopPropagation() {} })
+  assert.equal(detail.children.at(-2).children[0], '전체 자원')
+  assert.deepEqual(overviewRows(), [['CPU', '25%'], ['메모리', '60%'],
+    ['디스크', '읽기 1 KiB/s · 쓰기 2 KiB/s'], ['네트워크', '수신 3 KiB/s · 송신 4 KiB/s']])
   const textOf = node => [node.textContent, ...node.children.flatMap(child => typeof child === 'string' ? [child] : textOf(child))]
   assert.ok(textOf(detail).includes('1 KiB / 2 KiB'))
   payload.diskIo = { status: 'unsupported', readBytesPerSecond: null, writeBytesPerSecond: null }
@@ -168,7 +171,7 @@ test('gadget renders measured read/write rates and retains storage detail when I
   const [timerId, timer] = [...timers.entries()][0]; timers.delete(timerId); timer.fn()
   await new Promise(resolve => setImmediate(resolve))
   assert.equal(calls, 2)
-  assert.equal(disk.children[1].children[0].textContent, 'R —')
+  assert.deepEqual(overviewRows().slice(2), [['디스크', '이 환경에서는 지원하지 않음'], ['네트워크', '이 환경에서는 지원하지 않음']])
   assert.match(disk.attrs['aria-label'], /이 환경에서는 지원하지 않음/)
   assert.match(network.attrs['aria-label'], /이 환경에서는 지원하지 않음/)
   assert.ok(textOf(detail).includes('이 환경에서는 지원하지 않음'))
@@ -184,14 +187,14 @@ test('gadget renders measured read/write rates and retains storage detail when I
   await new Promise(resolve => setImmediate(resolve))
   document.hidden = true; listeners.get('visibilitychange')()
   await new Promise(resolve => setImmediate(resolve))
-  assert.equal(cpu.children[1].children[0].textContent, 'CPU 25%')
+  assert.equal(overviewRows()[0][1], '25%')
   assert.equal(timers.size, 0) // No hidden polling and no false failure on abort.
   document.hidden = false; waitForAbort = false; payload.diskIo.status = 'ok'
   payload.diskIo.readBytesPerSecond = 512; payload.diskIo.writeBytesPerSecond = 1024
   listeners.get('visibilitychange')()
   await new Promise(resolve => setImmediate(resolve))
   assert.equal(calls, 5)
-  assert.equal(disk.children[1].children[0].textContent, 'R 512B/s')
+  assert.equal(overviewRows()[2][1], '읽기 512 B/s · 쓰기 1 KiB/s')
 })
 
 test('one-second samples re-read CPU, network and disk I/O, while storage capacity is cached', async () => {
