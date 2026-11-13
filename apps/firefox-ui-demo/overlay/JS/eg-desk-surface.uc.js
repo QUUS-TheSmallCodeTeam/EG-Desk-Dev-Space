@@ -9378,7 +9378,10 @@
         'aria-label': current.title,
         'aria-haspopup': 'menu',
         data: { id: current.id, kind: 'center' },
-        onclick: () => dock._openDockMenu?.({ focusTool: true }),
+        onclick: () => {
+          if (document.getElementById('egd-dock-menu')) closeDockMenu();
+          else dock._openDockMenu?.({ focusTool: true });
+        },
       }, el('span', { class: 'egd-dock-icon' }, deskIcon(current.icon)));
       if (chip) chip.replaceWith(next);
       else dock.querySelector('.egd-dock-btn[data-id="create"]')?.before(next);
