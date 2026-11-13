@@ -109,7 +109,7 @@
 
 ## 실화면 검증 결과
 
-통합 뒤 Firefox를 두 번 띄워 화면을 봤다. 화면은 정상적으로 뜨고 화면 스크립트 오류는 없었다. 처음 본 화면에서 결함 11건이 나왔고, 눈에 띄는 5건을 고친 뒤 다시 봐서 5건 모두 화면에서 풀린 것을 확인했다. **2차 기준 남은 결함은 9건(눈에 띔 2, 사소 7)**이고, 그 뒤 05:13~05:20의 마지막 수정 묶음에서 7건을 고쳤다(아래 '마지막 수정 묶음' — **이 7건은 실화면 미확인**). 그리고 화면으로 확인하지 못한 것이 아래 '화면으로 확인되지 않은 것'만큼 남아 있다. 대표님이 04:20에 알려 주신 **자원 사용량 숫자의 깜박임·정렬은 화면으로 확인하지 못했다**(이 검증 방식에서는 숫자가 나오지 않는다).
+통합 뒤 Firefox를 두 번 띄워 화면을 봤고, 마지막 수정 묶음 뒤 05:22~05:25에 한 번 더 짧게 봤다. 화면은 정상적으로 뜨고 화면 스크립트 오류는 없었다. 처음 본 화면에서 결함 11건이 나왔고, 눈에 띄는 5건을 고친 뒤 다시 봐서 5건 모두 화면에서 풀린 것을 확인했다. **2차 기준 남은 결함은 9건(눈에 띔 2, 사소 7)**이고, 그 뒤 05:13~05:20의 마지막 수정 묶음에서 7건을 고쳤다. **05:22~05:25 재검증에서 고친 것 8가지가 모두 화면에서 확인됐다**(크게 본 창은 다른 창만 가려지고 화면을 꽉 채우지는 않는다. 보기 줄은 순서만 바뀌었고 처음 배율은 원래 설계 그대로다). 재검증에서 사소한 결함 2건이 새로 나와 05:28까지 고쳤고, **이 마지막 손질 2건은 실화면 미확인**이다(아래 '마지막 수정 묶음'). 그리고 화면으로 확인하지 못한 것이 아래 '화면으로 확인되지 않은 것'만큼 남아 있다. 대표님이 04:20에 알려 주신 **자원 사용량 숫자의 깜박임·정렬은 화면으로 확인하지 못했다**(이 검증 방식에서는 숫자가 나오지 않는다).
 
 ### 언제, 어떻게 봤나
 
@@ -164,7 +164,7 @@
 
 ### 지금 남은 결함 9건
 
-아래 9건은 2차 검증(05:00) 때의 목록이다. 각 줄 끝의 '→'는 마지막 수정 묶음(05:13~)의 처리이고, 고친 것도 **화면으로는 아직 확인하지 않았다.**
+아래 9건은 2차 검증(05:00) 때의 목록이다. 각 줄 끝의 '→'는 마지막 수정 묶음(05:13~)의 처리이고, 고친 것은 05:22~05:25 재검증에서 화면으로 확인했다(아래 '마지막 재검증').
 
 **눈에 띔 2건(2차에 새로 적음)**
 
@@ -185,7 +185,33 @@
 
 ### 마지막 수정 묶음 (05:13~05:20 KST)
 
-2차 검증 뒤 남은 결함 9건을 네 갈래로 나눠 고쳤다. 7건을 고쳤고(1건은 일부만), 1건은 고치지 않았다. **이 묶음은 짧은 재검증 결과를 문서에 반영하지 못했다(재검증이 이 문서 작업과 동시에 진행됨) — 실화면 미확인.** 아래는 코드와 단위 테스트, 수정 작업자 보고 기준이다.
+2차 검증 뒤 남은 결함 9건을 네 갈래로 나눠 고쳤다. 7건을 고쳤고(1건은 일부만), 1건은 고치지 않았다. 고친 것은 05:22~05:25 KST 재검증에서 화면으로 확인했다(바로 아래 '마지막 재검증'). 그 아래 '고친 것' 목록은 코드와 단위 테스트, 수정 작업자 보고 기준으로 적은 것이고, 재검증이 본 범위는 '마지막 재검증'에 적힌 만큼이다.
+
+**마지막 재검증 (05:22~05:25 KST)**
+
+Firefox를 한 번 띄워(격리 프로필) 고친 것 8가지를 다시 봤다. 8가지 모두 화면에서 확인됐고 화면 스크립트 오류는 없었다(검증 작업자 보고 기준).
+
+- 창을 크게 보는 동안 그 창 하나만 보이고 옆 창과 메모 연결선은 가려진다(파일·Browser·메모·Chat·터미널 창에서 확인). 원래 크기로 돌아오면 제자리에 다시 보인다. **창이 화면의 안전 영역을 꽉 채우지는 않는다**(남음).
+- Browser 창 배지는 '<페이지 제목> · 크게 보는 중', 메모 창 배지는 '메모 #1 · 크게 보는 중'으로 나온다.
+- 'Board를 저장했습니다'·'복구했습니다' 알림이 닫기를 누르지 않아도 수십 초 안에 사라진다. 마우스를 올렸을 때 기다리는 것과 오류 알림이 남는 것은 보지 않았다.
+- 복구한 Board 줄은 '닫힘 · 항목 N개'만 나오고 현재 Board 강조가 없다.
+- 가장자리 점 이름표가 '오른쪽 화면 밖 · 파일 창으로 이동'처럼 나온다. '이름 없는 창'·'창 창'은 없다.
+- 보기 줄 순서가 '− 배율 + · 전체 보기 · 맞춤 · 돌아가기'다. **순서만 바뀌었고 처음 배율은 원래 설계 그대로다**(창 6개를 연 직후 96%).
+- 폴더 연결 전 파일 창 윗줄은 왼쪽 '파일', 오른쪽 '폴더 연결 전 · 소속 없음'이다.
+- 터미널 가운데 안내는 한 줄이고, 영어 원문은 접힌 '자세히' 안에만 있다.
+
+**재검증에서 새로 나온 사소한 결함 2건과 마지막 손질 (05:28 KST까지, 실화면 미확인)**
+
+두 건 모두 고쳤다. 고친 뒤에는 Firefox를 띄우지 않았으므로 아래는 코드와 단위 테스트, 수정 작업자 보고 기준이다 — **실화면 미확인.**
+
+1. Browser 창을 크게 보면 페이지 제목이 길 때 맨 위 줄 왼쪽 'EG-Desk'가 'EG'로, 배지 끝이 '크게 보는…'으로 잘렸다. → **고침(실화면 미확인)**: 왼쪽 Board 이름은 토막 나지 않고, 배지는 페이지 제목 부분만 '…'로 줄며 '· 크게 보는 중'은 끝까지 보인다. 같이 바뀌는 점: 창 폭 1200~1599px에서 크게 보는 동안에는 Board 이름 최대 폭이 168px에서 96px로 줄어 긴 Board 이름은 말줄임된다('EG-Desk'처럼 짧은 이름은 영향 없음). 긴 Board 이름과 '저장 안 됨' 표시가 함께 있을 때 왼쪽 묶음이 넘치는지는 계산만 했다.
+2. 터미널 연결에 실패해 가운데에 '터미널을 연결하지 못했습니다'가 떠 있는데 창 윗줄은 '연결 중', 오른쪽은 '연결 준비 중'으로 남아 있었다. → **고침(실화면 미확인)**: 처음부터 연결에 실패하면 윗줄과 오른쪽 셸 줄이 모두 '연결 실패'가 되고, 가운데 문구를 눌러 다시 연결하면 윗줄 '연결 중'·오른쪽 '연결 준비 중'으로 돌아간다. 한 번 연결됐다가 끊긴 경우는 예전처럼 '연결 끊김'이다. 다만 재검증 화면에서 윗줄이 '연결 끊김'도 아닌 '연결 중'에 머문 직접 원인은 코드로 설명되지 않았다(끊김을 윗줄에 알리는 코드는 04:11부터 있었다) — 화면으로 다시 봐야 한다.
+
+**남은 결정 사항 (대표 확인)**
+
+- 설정 창의 점 2개와 Board 소속: 설정은 하나만 열리는 앱 수준 창이라 Board 소속을 둘지부터 대표 결정이 필요하다(점 2개는 테스트로 고정된 설계).
+- 처음 배율 80~96%: Desk를 처음 펼칠 때 첫 Browser 창을 여백 안에 맞춰 보여 주는 원래 설계다. 100%로 시작하게 할지.
+- 크게 보기에서 창이 화면을 채우지 않는 구조: 크게 보기는 창을 키우지 않고 보는 자리와 배율을 창에 맞춘다. 꽉 채우려면 큰 변경이 필요하다 — 그 변경을 할지.
 
 **고친 것 — 화면에서 달라지는 것**
 
@@ -210,8 +236,9 @@
 
 - 네 갈래 모두 통합 브랜치에 병합했고 보류한 것은 없다(05:20 KST 완료, 병합 작업자 보고 기준).
 - 병합 뒤 전체 테스트 193개 파일을 파일 단위로 실행해 실패 파일 0개(Node 단위·조각 테스트, 병합 작업자 보고 기준. 실화면 검증과 별개).
+- 마지막 손질 2건도 충돌 없이 병합했고 보류한 것은 없다. 병합 뒤 전체 테스트 193개 파일 실패 파일 0개(05:28 KST 완료, Node 단위·조각 테스트, 병합 작업자 보고 기준).
 
-**대표 확인 거리의 변화**: 아래 목록 중 '보기 줄의 순서'는 기대 순서로 고쳤고, 'Board 저장·복구 알림'은 성공 알림만 저절로 사라지게 바꿨다. '처음 배율 80%'와 '설정 창에 Board 소속을 둘지'는 대표 결정으로 남는다.
+**대표 확인 거리의 변화**: 아래 목록 중 '보기 줄의 순서'는 기대 순서로 고쳤고, 'Board 저장·복구 알림'은 성공 알림만 저절로 사라지게 바꿨다. '처음 배율 80%'와 '설정 창에 Board 소속을 둘지', '크게 본 창이 화면을 채우게 할지'는 대표 결정으로 남는다(위 '남은 결정 사항').
 
 ### 콘솔 오류
 
@@ -253,8 +280,10 @@
 - 상단 검색에서 그냥 Enter는 웹 검색으로 나가고 요청 줄은 Ctrl/⌘+Enter다. 검증 시나리오는 'Enter → Chat'을 기대했다. 어느 쪽이 맞는지.
 - 새 창은 먼저 연 창의 왼쪽·위부터 놓인다. 오른쪽·아래부터가 더 자연스러운지.
 - 창을 크게 보는 동안 '이 PC에 기록됨' 표시를 숨긴 것(검색창을 좁히는 대신).
-- 보기 줄의 순서와 처음 배율 80%가 의도한 것인지.
-- Board 저장·복구 알림을 누를 때까지 남겨 두는 것이 의도한 것인지.
+- 보기 줄의 순서와 처음 배율 80%가 의도한 것인지. (순서는 고쳐 05:22 재검증에서 확인. 처음 배율 80~96%는 원래 설계로 남음)
+- Board 저장·복구 알림을 누를 때까지 남겨 두는 것이 의도한 것인지. (성공 알림은 저절로 사라지게 고쳐 05:22 재검증에서 확인)
+- 설정 창에 Board 소속을 둘지(설정은 하나만 열리는 앱 수준 창).
+- 크게 본 창이 화면을 꽉 채우게 할지(지금은 창에 화면을 맞추는 구조).
 
 ## 실화면 확인 체크리스트
 
@@ -394,7 +423,8 @@
 - `973247f`: 25개 묶음 병합이 끝난 지점(04:29 KST). 병합은 모두 `--no-ff`라 묶음별 커밋이 이력에 남아 있다. 병합 사이에 통합 브랜치에 직접 얹힌 맞춤 커밋이 5개 있다(`142ef22`, `779351a`, `ce7781a`, `042333f`, `0990bba` — 묶음끼리 어긋난 테스트 기대값·문구·색 토큰을 맞춘 것). 묶음 브랜치는 작업자 보고 기준 push하지 않았다.
 - `36c7723`: 실화면 1차 검증에서 나온 결함 5건의 수정 브랜치(`uiux/vfix-1`~`5`)를 합친 지점(04:50 KST 무렵). 2차 검증은 이 커밋의 화면을 봤다.
 - `8323e68`: 문서 브랜치 `uiux/docs`(`e614130`에서 분기, `51f26f7`)를 합친 지점. 그 뒤 실화면 검증 결과를 이 문서와 원장에 적은 커밋(`5c2af41`)이 통합 브랜치에 직접 얹혀 있다.
-- `4b272dd`: 마지막 수정 묶음 네 브랜치(`uiux/final-1-maximize-hud`, `uiux/final-2-board-lifecycle`, `uiux/final-3-viewport-extras`, `uiux/final-4-frame-text`)를 합친 지점(05:19~05:20 KST). 이 커밋의 화면은 문서에 반영된 검증이 없다.
+- `4b272dd`: 마지막 수정 묶음 네 브랜치(`uiux/final-1-maximize-hud`, `uiux/final-2-board-lifecycle`, `uiux/final-3-viewport-extras`, `uiux/final-4-frame-text`)를 합친 지점(05:19~05:20 KST). 05:22~05:25 재검증이 본 화면이 이 커밋이다.
+- `0ada888`: 마지막 손질 두 브랜치(`uiux/polish-1-maximize-badge`, `uiux/polish-2-terminal-status`)를 합친 지점(05:28 KST). 이 뒤의 커밋은 문서 기록뿐이다.
 
 04:01에 Session Lead가 모델 사용량 소진을 잘못 추정해 작업자 15개를 중단했다가 대표 지시로 같은 모델로 다시 이어 붙였다. 이어받은 묶음은 브랜치 이름 끝에 `-b`가 붙고, 앞 작업자의 커밋을 포함한다.
 
@@ -448,19 +478,21 @@
 | D05 | Board 목록 비침 | 2차 재현 안 됨 | 왼쪽 줄 · Board 목록 패널 |
 | D06 | Board 목록 Esc | 2차 재현 안 됨 | `toggleAgendaSwitcher` / `closeAgendaSwitcher` (`eg-desk-surface.uc.js` 10280 부근) |
 | D07 | 설정 창 점 2개·소속 없음 | 남음(고치지 않음) | `spawnSettingsCard`(`eg-desk-surface.uc.js` 19417~20690)는 공통 틀 `spawnDeskWindowShell`을 쓰지 않는다. 점 2개와 윗줄 아이콘 `['grip','settings']`는 `egdesk-surface-state.test.mjs` 9916행 부근이 고정. 소속 표시는 `view._deskWindowShell.boardMenu`·`.egd-desk-window`에 묶여 있다 |
-| D08 | 보기 줄 순서·처음 80% | 순서 고침(실화면 미확인) · 80%는 원래 설계 | `uiux/final-3-viewport-extras` `bcea3f8` — `#egd-zoom-indicator` 자식 순서, `egdesk-viewport-extras.test.mjs`. 80%는 첫 Browser 창 맞춤(`fitSurfaceCamera`, 최대 0.85, `9db3298`·`6600cb7`)의 결과 |
-| D09 | 파일 창 '파일' 두 번 | 고침(실화면 미확인) | `uiux/final-4-frame-text` `2d26d14` — `surface/EGDeskSurfaceFileCard.mjs` `publish()` |
-| D10 | 영어 오류 원문 | 터미널 고침(실화면 미확인) · Chat 미변경 | `uiux/final-4-frame-text` `960ecb5` — `egdesk-terminal-init.js`의 `showStatusDetail()`, `terminal.html`, `egdesk-terminal-init.test.mjs`. Chat은 `buildCodexBridgeNotice`가 원문을 이미 '자세히'에만 둔다(작업자 판독) |
-| N01 | 크게 본 창 둘레에 옆 창 | 다른 창 가림 고침(실화면 미확인) · 화면 채움은 남음 | `uiux/final-1-maximize-hud` `aff74f2` — `eg-desk-surface.uc.css`에 `:root.egd-card-fullscreen-active #egd-canvas-layer :is(.egd-canvas-card:not(.egd-card-fullscreen), .egd-canvas-shape, .egd-memo-tether) { visibility: hidden; }` 한 규칙. JS 변경 없음. 채움은 `syncCardFullscreenLayout` → `SurfaceState.fitSurfaceCamera` 구조를 바꿔야 한다 |
-| N02 | Board 알림이 안 사라짐 | 고침(실화면 미확인) | `uiux/final-2-board-lifecycle` `bc44411` — `boardDoneNotice(message)` 추가, 성공 알림 호출 13곳 교체(`boardNotice`는 그대로). 테스트 주입 keys에 `boardDoneNotice` 추가(`egdesk-board-lifecycle.test.mjs` 3곳, `egdesk-surface-state.test.mjs` 1곳). 자리(top 64px / right 16px)는 그대로 |
-| N03 | 배지 이름 없음(Browser·메모) | 고침(실화면 미확인) | `uiux/final-1-maximize-hud` `ce073e7` — `presentationBadgeLabel(card)` 추가, `syncViewportAgendaRail`의 배지 호출만 교체. `cardLabelForViewportRail`은 그대로(Agent에게 가는 창 이름 불변) |
-| N04 | 가장자리 점 이름표 | 고침(실화면 미확인) | `uiux/final-3-viewport-extras` `d4c3199` — `EGDeskViewportExtras.sys.mjs` `edgeDotModel`: `titles instanceof Map`이 창과 모듈의 global이 달라 항상 거짓이던 것을 `typeof titles?.get === 'function'`으로. 다른 global의 Map 단언 추가 |
-| N05 | 복구한 Board 상태 글자 | 고침(실화면 미확인) | `uiux/final-2-board-lifecycle` `48a6a9b` — `agendaListEntries()`의 current에 `&& !closedAt`, `renderAgendaSwitcherPanel`에서 '닫힘'이면 최근 표시 생략. 원인: `updateAgendaMetaFromStore`가 비워진 `activeAgendaId` 대신 옛 id를 유지. 휴지통→복구 테스트 1개 추가 |
+| D08 | 보기 줄 순서·처음 80% | 순서 고침, 05:22 재검증 확인 · 처음 배율(재검증 때 96%)은 원래 설계 | `uiux/final-3-viewport-extras` `bcea3f8` — `#egd-zoom-indicator` 자식 순서, `egdesk-viewport-extras.test.mjs`. 80%는 첫 Browser 창 맞춤(`fitSurfaceCamera`, 최대 0.85, `9db3298`·`6600cb7`)의 결과 |
+| D09 | 파일 창 '파일' 두 번 | 고침, 05:22 재검증 확인 | `uiux/final-4-frame-text` `2d26d14` — `surface/EGDeskSurfaceFileCard.mjs` `publish()` |
+| D10 | 영어 오류 원문 | 터미널 고침, 05:22 재검증 확인 · Chat 미변경 | `uiux/final-4-frame-text` `960ecb5` — `egdesk-terminal-init.js`의 `showStatusDetail()`, `terminal.html`, `egdesk-terminal-init.test.mjs`. Chat은 `buildCodexBridgeNotice`가 원문을 이미 '자세히'에만 둔다(작업자 판독) |
+| N01 | 크게 본 창 둘레에 옆 창 | 다른 창 가림 고침, 05:22 재검증 확인 · 화면 채움은 남음 | `uiux/final-1-maximize-hud` `aff74f2` — `eg-desk-surface.uc.css`에 `:root.egd-card-fullscreen-active #egd-canvas-layer :is(.egd-canvas-card:not(.egd-card-fullscreen), .egd-canvas-shape, .egd-memo-tether) { visibility: hidden; }` 한 규칙. JS 변경 없음. 채움은 `syncCardFullscreenLayout` → `SurfaceState.fitSurfaceCamera` 구조를 바꿔야 한다 |
+| N02 | Board 알림이 안 사라짐 | 고침, 05:22 재검증 확인(마우스 올림·오류 알림은 안 봄) | `uiux/final-2-board-lifecycle` `bc44411` — `boardDoneNotice(message)` 추가, 성공 알림 호출 13곳 교체(`boardNotice`는 그대로). 테스트 주입 keys에 `boardDoneNotice` 추가(`egdesk-board-lifecycle.test.mjs` 3곳, `egdesk-surface-state.test.mjs` 1곳). 자리(top 64px / right 16px)는 그대로 |
+| N03 | 배지 이름 없음(Browser·메모) | 고침, 05:22 재검증 확인 | `uiux/final-1-maximize-hud` `ce073e7` — `presentationBadgeLabel(card)` 추가, `syncViewportAgendaRail`의 배지 호출만 교체. `cardLabelForViewportRail`은 그대로(Agent에게 가는 창 이름 불변) |
+| N04 | 가장자리 점 이름표 | 고침, 05:22 재검증 확인 | `uiux/final-3-viewport-extras` `d4c3199` — `EGDeskViewportExtras.sys.mjs` `edgeDotModel`: `titles instanceof Map`이 창과 모듈의 global이 달라 항상 거짓이던 것을 `typeof titles?.get === 'function'`으로. 다른 global의 Map 단언 추가 |
+| N05 | 복구한 Board 상태 글자 | 고침, 05:22 재검증 확인 | `uiux/final-2-board-lifecycle` `48a6a9b` — `agendaListEntries()`의 current에 `&& !closedAt`, `renderAgendaSwitcherPanel`에서 '닫힘'이면 최근 표시 생략. 원인: `updateAgendaMetaFromStore`가 비워진 `activeAgendaId` 대신 옛 id를 유지. 휴지통→복구 테스트 1개 추가 |
+| (번호 없음) | 크게 본 Browser 창에서 'EG-Desk'가 'EG'로, 배지 끝이 잘림 | 고침(실화면 미확인) | `uiux/polish-1-maximize-badge` `aa8a583` (병합 `4079874`) — `EGDeskMaximizeHud.sys.mjs`의 `presentationBadge`가 `name`·`state` 조각도 반환, `eg-desk-surface.uc.js` `syncViewportAgendaRail`이 배지를 `.egd-rail-card-badge-name` + `.egd-rail-card-badge-state` span으로 나눔, `eg-desk-surface.uc.css`에서 이름 span만 줄고 크게 보는 동안 `.egd-rail-switcher`는 `min-width: max-content`. 원인: 폭 1280에서 왼쪽 묶음이 `calc(50% - 224px)` = 416px로 묶이고 Board 이름 버튼이 바닥 없이 먼저 줄었다. 새 span 구조를 직접 단언하는 테스트는 없다 |
+| (번호 없음) | 터미널 연결 실패인데 윗줄 '연결 중'·오른쪽 '연결 준비 중' | 고침(실화면 미확인) · 윗줄이 '연결 중'에 머문 원인 미확정 | `uiux/polish-2-terminal-status` `886fb73` (병합 `0ada888`) — `surface/EGDeskSurfaceTerminal.mjs`: `terminal-disconnected`를 받았을 때 `terminal-ready`가 한 번도 없었으면 '연결 실패', 새 메시지 `terminal-connecting`을 받으면 '연결 중'. `egdesk-terminal-init.js`: `connectBridge` 시작 시 `terminal-connecting` 전송, 실패 catch에서 `#terminal-shell-label`을 '연결 실패'로. `egdesk-terminal-window.test.mjs`에 단언 2개 추가. 윗줄 끊김 표시는 `ad55ec6`(04:11)부터 있었으므로 재검증 때 메시지가 창에 닿지 않았거나 옛 overlay였을 가능성이 남는다 |
 
 - 수정 작업자 다섯 명은 모두 Firefox를 띄우지 않고 고쳤고, 화면 확인은 2차 검증이 했다. 수정 5건은 충돌 없이 자동 병합됐다. 수정 브랜치는 push하지 않았다.
-- 마지막 수정 묶음(`uiux/final-1`~`4`) 작업자도 Firefox를 띄우지 않고 고쳤다. 네 브랜치는 `01f45d1`·`383a9ee`·`9226851`·`4b272dd`로 병합됐고 보류 없음. 병합 뒤 `4b272dd`에서 전체 테스트 193개 파일 실패 0(`run-tests.sh` 출력 `DONE total=193 failed_files=0`, 결과 `verify/final-merge-tests/results.tsv`, 병합 작업자 보고 기준). 같은 시각 다른 작업자가 이 overlay로 짧은 Firefox 재검증을 돌렸으나 결과는 이 문서에 없다. 수정 작업자는 스크린샷 `v05-pin2.png`를 열어 보지 않았다.
+- 마지막 수정 묶음(`uiux/final-1`~`4`) 작업자도 Firefox를 띄우지 않고 고쳤다. 네 브랜치는 `01f45d1`·`383a9ee`·`9226851`·`4b272dd`로 병합됐고 보류 없음. 병합 뒤 `4b272dd`에서 전체 테스트 193개 파일 실패 0(`run-tests.sh` 출력 `DONE total=193 failed_files=0`, 결과 `verify/final-merge-tests/results.tsv`, 병합 작업자 보고 기준). 05:22~05:25 KST에 이 overlay(`4b272dd`)로 짧은 Firefox 재검증을 한 번 돌렸고(격리 프로필, 콘솔 오류 0건, 검증 작업자 보고 기준) 결과는 위 '마지막 재검증'에 적었다. 마지막 손질 두 브랜치(`uiux/polish-1-maximize-badge`, `uiux/polish-2-terminal-status`)는 `4079874`·`0ada888`로 병합됐고 보류 없음. 병합 뒤 `0ada888`에서 05:28:53 KST에 전체 테스트 193개 파일 실패 0, `node --check eg-desk-surface.uc.js` 통과(결과 `verify/polish-tests/results.tsv`, 병합 작업자 보고 기준). 손질 작업자도 Firefox를 띄우지 않았다. 수정 작업자는 스크린샷 `v05-pin2.png`를 열어 보지 않았다.
 - 검증·수정·병합 작업자 보고 전문: `verify/final-results.json`. 스크린샷과 평가 스크립트: `verify/run1/`(1차), `verify/run2/`(2차 — 여러 장을 한 연결에서 찍는 `shot2.mjs`, 맨 위 줄 잘림 측정 `railm.js`, Board 흐름 `nb1`~`nb7.js`, 엿보기·고정 `p1`~`p4.js`, 다크 `g2`·`g3`·`gb`·`gall`·`glight.js`). 전체 테스트 결과: `verify/merge-tests/results.tsv`. 모두 아래 세션 임시 폴더 밑이다.
-- 다음 회차 우선순위(검증 작업자 제안, 05:00 기준): 자원 숫자를 실제 연결 상태나 표본을 넣은 fixture로 보기 → 눈에 띄는 남은 결함 2건(N01·N02) → Board 저장 흐름의 나머지와 답변이 필요한 화면. 마지막 수정 묶음 뒤로는 N01·N02 대신 '마지막 수정 묶음 7건의 실화면 확인'과 'Chat 영어 원문이 실제로 보이는지'가 그 자리에 온다.
+- 다음 회차 우선순위(검증 작업자 제안, 05:00 기준): 자원 숫자를 실제 연결 상태나 표본을 넣은 fixture로 보기 → 눈에 띄는 남은 결함 2건(N01·N02) → Board 저장 흐름의 나머지와 답변이 필요한 화면. 05:22 재검증과 마지막 손질 뒤로는 N01·N02 대신 '마지막 손질 2건의 실화면 확인(긴 페이지 제목의 Browser 창 크게 보기, 터미널 연결 실패 때 윗줄 상태)'과 'Chat 영어 원문이 실제로 보이는지'가 그 자리에 온다.
 
 ### 테스트 실행 방법
 
@@ -468,7 +500,7 @@
 - 한 번의 glob으로 전체를 돌리지 않고 파일 단위로 돌린다. 구현 중에는 Firefox를 실행하지 않았다.
 - 화면 스크립트(`eg-desk-surface.uc.js`)나 스타일(`eg-desk-surface.uc.css`)을 고치면 항상 함께 돌린 11개: `egdesk-surface-state`, `egdesk-chat-presentation`, `egdesk-design-tokens`, `egdesk-surface-claude`, `egdesk-surface-modules`, `verify-semantic-zoom`, `egdesk-annotation-memo`, `egdesk-browser-library`, `egdesk-qa-fixture-isolation`, `egdesk-project-file-flow`, `egdesk-profile-form`(모두 `scripts/*.test.mjs`).
 - 화면 스크립트의 일부를 잘라 컴파일하는 테스트가 많다. 잘린 함수에 새 이름을 쓰면 그 테스트의 문맥 목록에도 넣어야 한다(오늘 고친 기준선 실패 9개 파일 중 여럿이 이런 문맥 누락이었다).
-- 통합 뒤 전체 테스트: 마지막 수정 묶음을 합친 `4b272dd`에서 05:20 KST에 193개 파일 실패 0개(병합 작업자 보고 기준). 그 앞: 수정 5건을 합친 `36c7723`에서 04:50 KST에 193개 파일을 파일 단위로 실행해 실패 파일 0개(병합 작업자 보고 기준, Node 단위·조각 테스트이며 실화면 검증과 별개). 묶음별 수치는 각 묶음이 자기 브랜치에서 돌린 것이다(원장 규칙대로 합산하지 않는다).
+- 통합 뒤 전체 테스트: 마지막 손질 2건을 합친 `0ada888`에서 05:28 KST에 193개 파일 실패 0개(병합 작업자 보고 기준). 그 앞: 마지막 수정 묶음을 합친 `4b272dd`에서 05:20 KST에 193개 파일 실패 0개(병합 작업자 보고 기준). 그 앞: 수정 5건을 합친 `36c7723`에서 04:50 KST에 193개 파일을 파일 단위로 실행해 실패 파일 0개(병합 작업자 보고 기준, Node 단위·조각 테스트이며 실화면 검증과 별개). 묶음별 수치는 각 묶음이 자기 브랜치에서 돌린 것이다(원장 규칙대로 합산하지 않는다).
 
 ### 새 worktree에 없는 것
 
