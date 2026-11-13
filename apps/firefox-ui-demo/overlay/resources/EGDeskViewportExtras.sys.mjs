@@ -160,10 +160,12 @@ export function shiftClickSelection(selectedIds = [], pressedIds = [], activeId 
 export function edgeDotModel(indicators = [], {
   perSide = EDGE_DOTS_PER_SIDE, gap = EDGE_DOT_GAP_PX, titles = null, bounds = null,
 } = {}) {
-  const titleOf = id => {
-    const value = titles instanceof Map ? titles.get(id) : titles?.[id];
+  // The caller's Map is made in the window, another global than this module,
+  // where `instanceof Map` is false; it is read by its get method instead.
+  const windowOf = id => {
+    const value = typeof titles?.get === 'function' ? titles.get(id) : titles?.[id];
     const text = String(value ?? '').replace(/\s+/g, ' ').trim();
-    return text || '이름 없는 창';
+    return text ? `${text} 창` : '이름 없는 창';
   };
   const keep = Math.max(1, Math.floor(perSide) || 1);
   const out = [];
@@ -178,14 +180,14 @@ export function edgeDotModel(indicators = [], {
     const rest = list.length <= keep ? [] : list.slice(keep - 1);
     const dots = single.map(item => ({
       key: `view:${item.id}`, type: 'view', side, x: item.x, y: item.y, id: item.id, ids: [item.id], count: 1,
-      text: '', label: `${SIDE_LABELS[side]} 화면 밖 · ${titleOf(item.id)} 창으로 이동`,
+      text: '', label: `${SIDE_LABELS[side]} 화면 밖 · ${windowOf(item.id)}으로 이동`,
     }));
     if (rest.length) {
       const nearest = rest[0];
       dots.push({
         key: `more:${side}`, type: 'more', side, x: nearest.x, y: nearest.y, id: nearest.id,
         ids: rest.map(item => item.id), count: rest.length, text: `+${rest.length}`,
-        label: `${SIDE_LABELS[side]} 화면 밖 창 ${rest.length}개 더 · 가장 가까운 ${titleOf(nearest.id)} 창으로 이동`,
+        label: `${SIDE_LABELS[side]} 화면 밖 창 ${rest.length}개 더 · 가장 가까운 ${windowOf(nearest.id)}으로 이동`,
       });
     }
     out.push(...spreadAlongSide(dots, side, gap, bounds));

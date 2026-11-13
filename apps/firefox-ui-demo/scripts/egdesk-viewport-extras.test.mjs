@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import test from 'node:test';
+import vm from 'node:vm';
 
 import * as Extras from '../overlay/resources/EGDeskViewportExtras.sys.mjs';
 import * as CanvasLayout from '../overlay/resources/EGDeskCanvasLayout.sys.mjs';
@@ -79,7 +80,12 @@ test('edge dots: each off-screen View gets a named dot on its side; a View on sc
   const dots = Extras.edgeDotModel(points, { titles: { 'far-right': '견적서.xlsx', above: '  ' } });
   assert.deepEqual(dots.map(dot => [dot.side, dot.id, dot.type]), [['top', 'above', 'view'], ['right', 'far-right', 'view']]);
   assert.equal(dots[1].label, '오른쪽 화면 밖 · 견적서.xlsx 창으로 이동');
-  assert.equal(dots[0].label, '위쪽 화면 밖 · 이름 없는 창 창으로 이동');
+  assert.equal(dots[0].label, '위쪽 화면 밖 · 이름 없는 창으로 이동', 'a View without a name says "창" once');
+  // The window hands over a Map made in another global, where `instanceof Map` is false.
+  const foreignTitles = vm.runInNewContext("new Map([['far-right', '견적서.xlsx'], ['above', '파일']])");
+  assert.equal(foreignTitles instanceof Map, false);
+  assert.deepEqual(Extras.edgeDotModel(points, { titles: foreignTitles }).map(dot => dot.label),
+    ['위쪽 화면 밖 · 파일 창으로 이동', '오른쪽 화면 밖 · 견적서.xlsx 창으로 이동']);
   assert.equal(dots[1].x, 992, 'the dot sits on the edge, inset by 8px');
 });
 
@@ -124,6 +130,10 @@ test('view bar wiring: 1.25 steps, typed zoom, 돌아가기 and 맞춤 are real 
   assert.match(surfaceSource, /data: \{ testid: 'canvas-view-return' \}/);
   assert.match(surfaceSource, /data: \{ testid: 'canvas-snap-toggle' \}/);
   assert.match(surfaceSource, /'placement-snap-toggle'/, 'the placement menu has the same toggle');
+  const barStart = surfaceSource.indexOf("const indicator = el('div', { id: 'egd-zoom-indicator'");
+  const bar = surfaceSource.slice(barStart, surfaceSource.indexOf(');\n', barStart));
+  const order = ['zoomOutButton', 'zoomValue', 'zoomInButton', 'zoomFitButton', 'snapToggleButton', 'zoomReturnButton'].map(name => bar.indexOf(name));
+  assert.equal(order.every((at, index) => at > 0 && (index === 0 || at > order[index - 1])), true, 'the bar reads 배율 · 전체 보기 · 맞춤 · 돌아가기');
 });
 
 test('돌아가기 wiring: 전체 보기 and the minimap/찾기 move remember the view first', () => {
