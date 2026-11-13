@@ -9828,6 +9828,80 @@
     );
   }
 
+  // CHAT-03 '@' list: in a Board Thread, typing '@' in the composer lists who can
+  // be called (the room's Agents, then 나). ↑↓ move, Enter/Tab or a click put
+  // '@이름 ' in the draft, Escape closes the list only. The rules are
+  // EGDeskChatComposer; this is the screen side. `memory` outlives a Chat redraw,
+  // so the list and its highlighted row come back with the caret.
+  const ChatComposer = ChromeUtils.importESModule('chrome://userchrome/content/EGDeskChatComposer.sys.mjs');
+  function mountComposerMention(input, thread, memory, { onChange } = {}) {
+    const names = ChatComposer.mentionNames(thread, SELF_MEMBER);
+    if (!names.length) return null;
+    if (memory.threadId !== thread.id) Object.assign(memory, { threadId: thread.id, state: ChatComposer.emptyMention() });
+    mountComposerMention.lists = (mountComposerMention.lists || 0) + 1;
+    const menu = el('div', { class: 'egd-codex-mention-menu', id: `egd-chat-mention-list-${mountComposerMention.lists}`, role: 'listbox',
+      'aria-label': ChatComposer.MENTION_LIST_LABEL, hidden: 'true', data: { testid: 'chat-mention-list' } });
+    input.setAttribute('aria-controls', menu.id);
+    input.setAttribute('aria-haspopup', 'listbox');
+    input.setAttribute('aria-autocomplete', 'list');
+    let composing = false;
+    const paint = () => {
+      const view = memory.state;
+      menu.replaceChildren(...view.items.map((item, index) => {
+        const option = el('div', { class: 'egd-codex-mention-option', id: `${menu.id}-${index}`, role: 'option',
+          'aria-selected': String(index === view.index),
+          title: item.kind === 'user' ? '나를 가리키는 이름을 넣습니다' : `${item.name}에게 말합니다. 부른 Agent만 답합니다.`,
+          data: { testid: 'chat-mention-option', name: item.name, kind: item.kind } },
+          el('span', { class: 'egd-codex-mention-option-name' }, item.label),
+          el('span', { class: 'egd-codex-mention-option-hint' }, item.hint));
+        // The press must not take focus (and the caret) out of the draft.
+        option.addEventListener('mousedown', ev => ev.preventDefault());
+        option.addEventListener('click', () => pick(index));
+        return option;
+      }));
+      menu.hidden = !view.open;
+      const current = view.open ? menu.children[view.index] : null;
+      if (!current) { input.removeAttribute('aria-activedescendant'); return; }
+      input.setAttribute('aria-activedescendant', current.id);
+      // Keep the highlighted row inside the list's own scroll; nothing else moves.
+      if (current.offsetTop < menu.scrollTop) menu.scrollTop = current.offsetTop;
+      else if (current.offsetTop + current.offsetHeight > menu.scrollTop + menu.clientHeight) menu.scrollTop = current.offsetTop + current.offsetHeight - menu.clientHeight;
+    };
+    const sync = (focused = input.ownerDocument.activeElement === input) => {
+      memory.state = ChatComposer.nextMention(memory.state, { names, text: input.value, caret: input.selectionStart,
+        selectionEnd: input.selectionEnd, active: focused === true && input.isConnected, composing });
+      paint();
+    };
+    const pick = (index) => {
+      const item = memory.state.open ? memory.state.items[index] : null;
+      if (!item) return;
+      const next = ChatComposer.applyMention(input.value, memory.state, item.name);
+      input.value = next.text;
+      input.setSelectionRange(next.caret, next.caret);
+      onChange?.();
+      sync();
+    };
+    for (const type of ['input', 'keyup', 'click']) input.addEventListener(type, () => sync());
+    input.addEventListener('compositionstart', () => { composing = true; });
+    input.addEventListener('compositionend', () => { composing = false; sync(); });
+    // A redraw replaces this textarea while it has focus; only a real leave hides the list.
+    input.addEventListener('blur', () => { if (input.isConnected) sync(false); });
+    input._syncMention = () => sync();
+    input._mentionKeydown = (ev) => {
+      const action = ChatComposer.mentionKeyAction(ev, memory.state.open);
+      if (!action) return false;
+      ev.preventDefault?.();
+      // Escape closes this list, not the Chat behind it.
+      ev.stopPropagation?.();
+      if (action === 'pick') { pick(memory.state.index); return true; }
+      memory.state = action === 'close' ? ChatComposer.dismissMention(memory.state)
+        : ChatComposer.moveMention(memory.state, action === 'next' ? 1 : -1);
+      paint();
+      return true;
+    };
+    return { menu };
+  }
+
   function mountCodexHUD(body, codexBridge, options = {}) {
     let unsubscribe = null;
     let composerObserver = null;
@@ -11238,8 +11312,8 @@
               rows: '1',
               placeholder: '메시지 보내기',
               'aria-label': `${activeThread.title}에 보낼 메시지`,
-              'aria-description': 'Enter로 전송, Shift와 Enter로 줄바꿈',
-              title: 'Enter 전송 · Shift+Enter 줄바꿈',
+              'aria-description': `Enter로 전송, Shift와 Enter로 줄바꿈${activeThread.type === 'group' ? ', @로 Agent 부르기' : ''}`,
+              title: `Enter 전송 · Shift+Enter 줄바꿈${activeThread.type === 'group' ? ' · @로 Agent 부르기' : ''}`,
               data: { threadId: activeThread.id, testid: 'chat-composer' },
             });
             const sendButton = el('button', {
@@ -11338,6 +11412,10 @@
             composerObserver.observe(input);
             composerObserver.observe(body);
             queueMicrotask(resizeComposer);
+            // CHAT-03: '@' lists who this Board Thread can call (no list in an Agent DM).
+            const mention = mountComposerMention(input, activeThread, body._composerMention ||= {}, {
+              onChange: () => { codexBridge.setDraft(input.value, activeThread.id); resizeComposer(false); },
+            });
             // CTX-03: opening this room's composer, or focusing it, asks for suggestions (debounced).
             input.addEventListener('focus', () => { if (!restoringComposerFocus) codexBridge.requestContextSuggestions?.(activeThread.id); });
             if (inputState?.threadId !== activeThread.id) codexBridge.requestContextSuggestions?.(activeThread.id);
@@ -11360,6 +11438,7 @@
                   sendButton,
                 ),
               ),
+              mention?.menu,
             );
           })()
         : null;
@@ -11431,6 +11510,7 @@
         restoringComposerFocus = true;
         try { newInput.focus({ preventScroll: true }); } finally { restoringComposerFocus = false; }
         newInput.setSelectionRange(inputState.start, inputState.end, inputState.direction);
+        newInput._syncMention?.();
         composerViewport.restore(newInput, inputState);
       }
       if (focusOpenedRoom) {

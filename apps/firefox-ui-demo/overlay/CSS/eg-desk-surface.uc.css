@@ -7461,6 +7461,44 @@
 .egd-codex-chat-shell .egd-codex-input-row:has(.egd-chat-input-chip) {
   grid-template-areas: "attachments attachments attachments" "draft draft actions";
 }
+/* CHAT-03 '@' list: who this Board Thread can call, floating just above the composer. */
+.egd-codex-footer:has(> .egd-codex-mention-menu) { position: relative; }
+.egd-codex-mention-menu {
+  position: absolute;
+  left: 11px;
+  bottom: 100%;
+  z-index: 3;
+  box-sizing: border-box;
+  min-width: 168px;
+  max-width: min(280px, calc(100% - 22px));
+  max-height: 148px;
+  margin-bottom: 4px;
+  padding: 4px;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  scrollbar-width: thin;
+  border: 1px solid var(--egd-outline);
+  border-radius: 8px;
+  background: var(--egd-surface-elevated);
+  box-shadow: var(--egd-shadow);
+  color: var(--egd-on-surface);
+  font: 12px/1.4 var(--egd-font);
+}
+.egd-codex-mention-menu[hidden] { display: none; }
+.egd-codex-mention-option {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  min-height: 28px;
+  padding: 0 8px;
+  border-radius: 6px;
+  cursor: pointer;
+}
+.egd-codex-mention-option:hover { background: var(--egd-hover); }
+.egd-codex-mention-option[aria-selected="true"] { background: var(--egd-primary-container); }
+.egd-codex-mention-option-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 600; }
+.egd-codex-mention-option-hint { flex: none; color: var(--egd-on-surface-variant); font-size: 11px; }
 .egd-codex-chat-shell .egd-codex-run-status { min-height: 36px; padding: 3px 12px; }
 
 /* Local host resources: one compact strip, details only on activation. */
