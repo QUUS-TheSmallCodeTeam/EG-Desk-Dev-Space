@@ -6373,6 +6373,8 @@
       updatedAt: snapshot.savedAt,
       lastOpenedAt: store.meta[agendaId]?.lastOpenedAt || Date.now(),
       closedAt: null,
+      // 보관함 is a list category; saving the Board does not take it out.
+      ...(store.meta[agendaId]?.archivedAt ? { archivedAt: store.meta[agendaId].archivedAt } : {}),
     };
     if (!writeAgendaStoreAndSync(store)) return null;
     // The preference value is saved; a ready Desk store also keeps it as a new Board version.
@@ -6775,6 +6777,21 @@
     return true;
   }
 
+  // 보관함: only where the Board is listed changes. Nothing on the Desk moves or closes.
+  function setAgendaArchived(agendaId, archived) {
+    const store = coerceAgendaStore();
+    const result = archived ? BoardLifecycle.archiveBoard(store, agendaId, Date.now()) : BoardLifecycle.unarchiveBoard(store, agendaId);
+    if (!writeBoardLifecycleStore(result, archived
+      ? 'Board를 보관함으로 옮기지 못했습니다. Board 목록에 그대로 있습니다.'
+      : 'Board를 보관함에서 꺼내지 못했습니다. 보관함에 그대로 있습니다.')) return false;
+    syncViewportAgendaRail();
+    boardNotice(archived
+      ? `'${result.title}' Board를 보관함으로 옮겼습니다. Board 목록의 '보관함'에서 다시 꺼낼 수 있습니다.`
+      : `'${result.title}' Board를 보관함에서 꺼냈습니다.`);
+    (agendaSwitcherRow(agendaId) || document.querySelector('#egd-agenda-switcher .egd-agenda-switch-filter-active'))?.focus?.();
+    return true;
+  }
+
   function restoreAgendaFromTrash(agendaId) {
     const result = BoardLifecycle.restoreBoard(coerceAgendaStore(), agendaId, Date.now());
     if (!writeBoardLifecycleStore(result, 'Board를 복구하지 못했습니다. 휴지통에 그대로 있습니다.')) return false;
@@ -6971,9 +6988,7 @@
   }
 
   function agendaEntryMatchesFilter(entry, filter = state.agenda.switcherFilter) {
-    if (filter === 'recent') return !!(entry.lastOpenedAt || entry.updatedAt);
-    if (filter === 'closed') return !!entry.closed;
-    return true;
+    return BoardLifecycle.boardListFilterMatch(entry, filter);
   }
 
   function agendaEntryMatchesQuery(entry, query = state.agenda.switcherQuery) {
@@ -7015,6 +7030,7 @@
         saved: !!snapshot,
         dirty: current && state.agenda.dirty,
         closed: !!closedAt,
+        archived: BoardLifecycle.isBoardArchived(meta),
         count: snapshot ? agendaCardCountForSnapshot(snapshot) : liveCount,
         updatedAt,
         lastOpenedAt,
@@ -7035,6 +7051,7 @@
       all: agendaListEntries({ filter: 'all', query: '' }).length,
       recent: agendaListEntries({ filter: 'recent', query: '' }).length,
       closed: agendaListEntries({ filter: 'closed', query: '' }).length,
+      archived: agendaListEntries({ filter: 'archived', query: '' }).length,
     };
   }
 
@@ -7754,6 +7771,7 @@
       ['all', '전체', counts.all],
       ['recent', '최근', counts.recent],
       ['closed', '닫힘', counts.closed],
+      ['archived', '보관함', counts.archived],
     ];
     const renderAgain = (focusSearch = false) => {
       renderAgendaSwitcherPanel(panel);
@@ -7763,7 +7781,7 @@
         input?.setSelectionRange?.(input.value.length, input.value.length);
       }
     };
-    const rows = entries.map((entry) => el('div', {
+    const rows = entries.map((entry, _index, _all, archiveAction = BoardLifecycle.boardArchiveAction(entry)) => el('div', {
       class: 'egd-agenda-switch-row' + (entry.current ? ' egd-agenda-switch-row-current' : ''),
       role: 'button',
       tabindex: '0',
@@ -7793,6 +7811,7 @@
             // The current Board is said in words, not only by the row colour.
             entry.current && agendaEntryStatus(entry) !== '현재' ? '현재' : null,
             agendaEntryStatus(entry),
+            entry.archived ? '보관됨' : null,
             SurfaceState.boardEntryRecencyLabel(entry),
             SurfaceState.boardItemCountLabel(entry.count),
           ].filter(Boolean).join(' · '),
@@ -7821,6 +7840,18 @@
             duplicateAgenda(entry.id);
           },
         }, deskIcon('duplicate')),
+        el('button', {
+          class: 'egd-agenda-switch-row-action',
+          type: 'button',
+          title: archiveAction.label,
+          'aria-label': archiveAction.ariaLabel,
+          'aria-pressed': entry.archived ? 'true' : 'false',
+          data: { action: 'archive' },
+          onclick: (ev) => {
+            ev.stopPropagation();
+            setAgendaArchived(entry.id, archiveAction.archive);
+          },
+        }, deskIcon('folder')),
         el('button', {
           class: 'egd-agenda-switch-row-action egd-agenda-switch-row-action-danger',
           type: 'button',

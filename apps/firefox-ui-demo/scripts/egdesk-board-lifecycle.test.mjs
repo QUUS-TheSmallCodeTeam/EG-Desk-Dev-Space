@@ -726,3 +726,81 @@ test('screen: the Board menu and the Board list save through the one-line notice
   assert.match(menu, /item\('다른 이름으로 저장…', [^\n]*'board-save-as', \(\) => openBoardSaveAs\(projectionId\)\)/);
   assert.match(declaration('renderAgendaSwitcherPanel'), /saveBoardWithNotice\(\);/);
 });
+
+// ------------------------------------------------------------------ 보관함
+
+test('archive is a list category only: the saved Board, its name and its open state are untouched', () => {
+  const store = storeOf(['a', '자료 정리', 3], ['b', '회의', 1], ['c', '지난 것', 2, { deletedAt: 10 }]);
+  const before = JSON.stringify(store);
+  assert.equal(Lifecycle.isBoardArchived(store.meta.a), false);
+  assert.equal(Lifecycle.isBoardArchived({ archivedAt: 'x' }), false);
+  const archived = Lifecycle.archiveBoard(store, 'b', 700);
+  assert.equal(archived.ok, true);
+  assert.equal(archived.title, '회의');
+  assert.equal(JSON.stringify(store), before);
+  assert.equal(archived.store.meta.b.archivedAt, 700);
+  assert.deepEqual(archived.store.agendas.b, store.agendas.b);
+  assert.equal(archived.store.activeAgendaId, 'a');
+  assert.equal(Lifecycle.archiveBoard(archived.store, 'b', 800).ok, false, 'already archived');
+  assert.equal(Lifecycle.archiveBoard(store, 'c', 800).ok, false, 'a Board in the trash is not archived');
+  assert.equal(Lifecycle.archiveBoard(store, 'missing', 800).ok, false);
+
+  const back = Lifecycle.unarchiveBoard(archived.store, 'b');
+  assert.equal(back.ok, true);
+  assert.equal('archivedAt' in back.store.meta.b, false);
+  assert.equal(Lifecycle.unarchiveBoard(store, 'a').ok, false);
+
+  // A Board restored from the trash comes back to the normal list.
+  const trashed = trashBoard(archived.store, 'b', 900);
+  assert.equal('archivedAt' in restoreBoard(trashed.store, 'b', 950).store.meta.b, false);
+});
+
+test('archived Boards show only under 보관함, except the Board that is open now', () => {
+  const match = Lifecycle.boardListFilterMatch;
+  const plain = { closed: false, lastOpenedAt: 5, updatedAt: 5 };
+  const closed = { closed: true, lastOpenedAt: null, updatedAt: null };
+  const archived = { ...closed, archived: true, updatedAt: 3 };
+  assert.deepEqual(['all', 'recent', 'closed', 'archived'].map(filter => match(plain, filter)), [true, true, false, false]);
+  assert.deepEqual(['all', 'recent', 'closed', 'archived'].map(filter => match(closed, filter)), [true, false, true, false]);
+  assert.deepEqual(['all', 'recent', 'closed', 'archived'].map(filter => match(archived, filter)), [false, false, false, true]);
+  assert.equal(match({ ...archived, current: true }, 'all'), true, 'the open Board never disappears from its own list');
+  assert.equal(match(plain, undefined), true);
+  assert.deepEqual(Lifecycle.boardArchiveAction({ archived: false, title: '회의' }), { archive: true, label: '보관함으로 이동', ariaLabel: 'Board 회의 보관함으로 이동' });
+  assert.deepEqual(Lifecycle.boardArchiveAction({ archived: true, title: '회의' }), { archive: false, label: '보관 해제', ariaLabel: 'Board 회의 보관 해제' });
+});
+
+test('screen: 보관함으로 이동 / 보관 해제 write the mark and say where the Board went', () => {
+  let store = storeOf(['a', '자료 정리', 3], ['b', '회의', 1]);
+  const notices = [];
+  let rails = 0, writable = true;
+  const deps = {
+    BoardLifecycle: Lifecycle,
+    coerceAgendaStore: () => JSON.parse(JSON.stringify(store)),
+    writeAgendaStoreAndSync: next => { if (!writable) return false; store = JSON.parse(JSON.stringify(next)); return true; },
+    boardNotice: message => notices.push(message), syncViewportAgendaRail: () => { rails += 1; },
+    agendaSwitcherRow: () => null, document: { querySelector: () => null },
+  };
+  const names = ['writeBoardLifecycleStore', 'setAgendaArchived'];
+  const api = new Function(...Object.keys(deps), `${names.map(declaration).join('\n')}\nreturn { ${names.join(', ')} };`)(...Object.values(deps));
+  assert.equal(api.setAgendaArchived('b', true), true);
+  assert.ok(store.meta.b.archivedAt > 0);
+  assert.ok(store.agendas.b, 'the saved Board is kept');
+  assert.equal(notices.at(-1), "'회의' Board를 보관함으로 옮겼습니다. Board 목록의 '보관함'에서 다시 꺼낼 수 있습니다.");
+  assert.equal(api.setAgendaArchived('b', false), true);
+  assert.equal('archivedAt' in store.meta.b, false);
+  assert.equal(notices.at(-1), "'회의' Board를 보관함에서 꺼냈습니다.");
+  assert.equal(rails, 2);
+  writable = false;
+  assert.equal(api.setAgendaArchived('a', true), false);
+  assert.match(notices.at(-1), /보관함으로 옮기지 못했습니다/);
+  assert.equal('archivedAt' in store.meta.a, false);
+
+  const render = declaration('renderAgendaSwitcherPanel');
+  assert.match(render, /\['archived', '보관함', counts\.archived\]/);
+  assert.match(render, /setAgendaArchived\(entry\.id, archiveAction\.archive\)/);
+  assert.match(declaration('agendaEntryMatchesFilter'), /BoardLifecycle\.boardListFilterMatch\(entry, filter\)/);
+  assert.match(declaration('agendaListEntries'), /archived: BoardLifecycle\.isBoardArchived\(meta\)/);
+  assert.match(declaration('agendaFilterCounts'), /archived: agendaListEntries\(\{ filter: 'archived', query: '' \}\)\.length/);
+  // Saving an open Board keeps its 보관함 mark.
+  assert.match(declaration('saveCurrentAgendaState'), /archivedAt: store\.meta\[agendaId\]\.archivedAt/);
+});

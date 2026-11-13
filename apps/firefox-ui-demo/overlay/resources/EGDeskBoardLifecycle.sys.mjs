@@ -63,8 +63,9 @@ export function uniqueBoardTitle(title, taken = []) {
   for (let n = 2; ; n += 1) if (!used.has(`${base} ${n}`)) return `${base} ${n}`;
 }
 
-// A restored Board comes back closed and saved, under its own name unless a
-// live Board took that name meanwhile. Nothing reopens or runs on its own.
+// A restored Board comes back closed and saved in the normal list, under its
+// own name unless a live Board took that name meanwhile. Nothing reopens or
+// runs on its own.
 export function restoreBoard(store, boardId, now = Date.now()) {
   if (!boardId || !isBoardTrashed(store?.meta?.[boardId])) return { ok: false, store };
   const original = titleIn(store, boardId);
@@ -75,7 +76,7 @@ export function restoreBoard(store, boardId, now = Date.now()) {
     for (let n = 2; taken.has(title); n += 1) title = `${original} (복구 ${n})`;
   }
   const next = copyStore(store);
-  const { deletedAt: _deletedAt, ...meta } = next.meta[boardId];
+  const { deletedAt: _deletedAt, archivedAt: _archivedAt, ...meta } = next.meta[boardId];
   next.meta[boardId] = { ...meta, id: boardId, title, closedAt: now, restoredAt: now, updatedAt: Math.max(meta.updatedAt || 0, now) };
   const snapshot = next.agendas[boardId];
   if (snapshot?.agenda && snapshot.agenda.title !== title) next.agendas[boardId] = { ...snapshot, agenda: { ...snapshot.agenda, title } };
@@ -227,6 +228,44 @@ export function boardCloseSummary({ dirtyCount, viewCount, terminalCount } = {})
     ],
     defaultAction: 'save',
   };
+}
+
+// 보관함: a list category only (`meta[boardId].archivedAt`, a time). The saved
+// Board, its name and whether it is open stay as they are. A record without
+// the mark is a normal Board.
+export function isBoardArchived(meta) {
+  return Number.isFinite(meta?.archivedAt) && meta.archivedAt > 0;
+}
+
+export function archiveBoard(store, boardId, now = Date.now()) {
+  const meta = store?.meta?.[boardId];
+  if (!boardId || !boardIds(store).includes(boardId) || isBoardTrashed(meta) || isBoardArchived(meta)) return { ok: false, store };
+  const next = copyStore(store);
+  next.meta[boardId] = { ...(next.meta[boardId] || {}), id: boardId, title: titleIn(store, boardId), archivedAt: now };
+  return { ok: true, store: next, title: titleIn(store, boardId) };
+}
+
+export function unarchiveBoard(store, boardId) {
+  if (!boardId || !isBoardArchived(store?.meta?.[boardId])) return { ok: false, store };
+  const next = copyStore(store);
+  const { archivedAt: _archivedAt, ...meta } = next.meta[boardId];
+  next.meta[boardId] = meta;
+  return { ok: true, store: next, title: titleIn(store, boardId) };
+}
+
+// Which Board list filter shows a row. Archived Boards sit only under 보관함,
+// except the Board that is open now, which never leaves its own list.
+export function boardListFilterMatch(entry, filter = 'all') {
+  if (filter === 'archived') return !!entry?.archived;
+  if (entry?.archived && !entry.current) return false;
+  if (filter === 'recent') return !!(entry?.lastOpenedAt || entry?.updatedAt);
+  if (filter === 'closed') return !!entry?.closed;
+  return true;
+}
+
+export function boardArchiveAction({ archived = false, title } = {}) {
+  const label = archived ? '보관 해제' : '보관함으로 이동';
+  return { archive: !archived, label, ariaLabel: `Board ${titleOr(title)} ${label}` };
 }
 
 export function boardRenameResult(currentTitle, input) {
