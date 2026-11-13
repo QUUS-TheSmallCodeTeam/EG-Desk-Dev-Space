@@ -199,7 +199,8 @@
       stopPolling();
       writeQueue.invalidate();
       composition.invalidate();
-      showDisconnected('연결이 끊겼습니다. 같은 세션 연결 다시 확인: ' + e.message);
+      showDisconnected('연결이 끊겼습니다. 눌러서 같은 세션 연결을 다시 확인합니다.');
+      showStatusDetail(e.message);
     } finally { readPending = false; }
   }
 
@@ -285,7 +286,8 @@
       term.options.disableStdin = true;
       stopPolling();
       composition.invalidate();
-      showDisconnected('입력을 보내지 못했습니다. 명령을 자동으로 다시 보내지 않습니다. ' + error.message);
+      showDisconnected('입력을 보내지 못했습니다. 명령을 자동으로 다시 보내지 않습니다.');
+      showStatusDetail(error.message);
     },
   });
   const writeToTerminal = data => { inputRevision++; return writeQueue.enqueue(data); };
@@ -457,6 +459,17 @@
     shellButton.disabled = true;
   }
 
+  // The raw error under the status line, folded. Opening it never reconnects.
+  function showStatusDetail(raw) {
+    if (!raw || closeRequested) return;
+    const details = document.createElement('details'), summary = document.createElement('summary'), text = document.createElement('div');
+    summary.textContent = '자세히';
+    text.textContent = String(raw);
+    details.appendChild(summary); details.appendChild(text);
+    details.addEventListener('click', event => event.stopPropagation());
+    statusEl.appendChild(details);
+  }
+
   async function connectBridge() {
     if (unloaded || closeRequested) return false;
     if (spawnPhase === 'unknown' && !ptyId) {
@@ -561,8 +574,11 @@
         composition.invalidate();
         shellButton.disabled = false;
         if (spawnPhase === 'unknown') showSpawnUnconfirmed();
-        else showDisconnected('터미널 연결을 확인해 주세요. ' + error.message);
-        term.write('\r\n\x1b[31m' + error.message + '\x1b[0m\r\n');
+        else {
+          // One Korean line; the raw transport error stays folded under '자세히'.
+          showDisconnected('터미널을 연결하지 못했습니다. 눌러서 다시 연결합니다.');
+          showStatusDetail(error.message);
+        }
         return false;
       }
     })();
