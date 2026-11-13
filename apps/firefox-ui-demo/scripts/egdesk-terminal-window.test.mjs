@@ -62,6 +62,7 @@ function makeNode(tag, props = {}, ...children) {
       }
       return null;
     },
+    querySelector(selector) { return this.find(selector); },
     focus() { this.focused += 1; },
     get isConnected() { for (let at = this; at; at = at.parent) if (at.isRoot) return true; return false; },
   };
@@ -164,6 +165,8 @@ test('the Terminal window uses the shared Desk Window bar with a Korean name and
     assert.equal(identity.children[1].textContent, '연결 중');
     assert.equal(identity.children[1].getAttribute('role'), 'status');
     assert.equal(h.shell.slots.actions.children[0].className, 'egd-terminal-run-chip', 'the result chip sits with the bar actions');
+    assert.equal(h.closeDot.title, '터미널 종료 후 닫기', 'the red dot says that it also ends the session');
+    assert.equal(h.closeDot.getAttribute('aria-label'), '터미널 종료 후 닫기');
     assert.deepEqual(h.card.children.map(child => child.className.split(' ').pop()),
       ['egd-terminal-header', 'egd-terminal-run-result', 'egd-terminal-close-confirm', 'egd-terminal-body']);
     h.message({ type: 'terminal-ready', shellLabel: 'zsh' });

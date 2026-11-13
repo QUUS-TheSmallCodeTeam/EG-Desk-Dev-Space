@@ -88,6 +88,9 @@ export function createTerminalZone(deps) {
     const sessionText = el('span', { class: 'egd-terminal-session', role: 'status', data: { testid: 'terminal-session' } }, '연결 중');
     shell.slots.identity.appendChild(title);
     shell.slots.identity.appendChild(sessionText);
+    // The red dot ends the session together with the window, and says so.
+    const closeDot = shell.slots.topbar.querySelector?.('.egd-card-dot-close');
+    if (closeDot) { closeDot.title = '터미널 종료 후 닫기'; closeDot.setAttribute?.('aria-label', '터미널 종료 후 닫기'); }
     // CODE-06: the latest test/build result of a command typed here, as a chip.
     const runChip = el('button', { type: 'button', class: 'egd-terminal-run-chip', hidden: true, 'aria-expanded': 'false',
       title: '최근 명령 결과 보기/숨기기', data: { testid: 'terminal-run-chip' },
