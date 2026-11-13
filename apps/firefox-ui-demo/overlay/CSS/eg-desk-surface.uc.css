@@ -5092,6 +5092,30 @@
   white-space: nowrap;
 }
 
+/* A38: time · … — the small button opens how that answer was made. */
+.egd-codex-message-meta.egd-codex-message-meta-foot {
+  flex-direction: row;
+  align-items: center;
+  gap: 6px;
+}
+button.egd-codex-message-activity {
+  display: inline-grid;
+  place-items: center;
+  width: 24px;
+  height: 20px;
+  padding: 0;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--egd-on-surface-variant);
+  cursor: pointer;
+}
+button.egd-codex-message-activity:hover { background: var(--egd-hover); color: var(--egd-on-surface); }
+button.egd-codex-message-activity:active { background: var(--egd-hover); }
+button.egd-codex-message-activity:focus-visible { outline: var(--egd-focus-outline); outline-offset: var(--egd-focus-outline-offset); }
+.egd-codex-message-activity-dots { display: inline-flex; align-items: center; gap: 2px; }
+.egd-codex-message-activity-dots > span { width: 3px; height: 3px; border-radius: 50%; background: currentColor; }
+
 .egd-codex-empty-state {
   padding: 24px 8px;
   background: transparent;
@@ -7118,6 +7142,12 @@
   color: var(--egd-on-surface-variant);
 }
 .egd-codex-run-status > span { min-width: 0; overflow-wrap: anywhere; }
+/* A38: nothing going on — the line steps aside and the conversation stays quiet. */
+.egd-codex-run-status[data-quiet="true"] { display: none; }
+/* B32: how much of a split run came back, apart from the run state. */
+.egd-codex-run-scope { margin-left: 8px; padding: 1px 7px; border: 1px solid var(--egd-outline-variant); border-radius: 999px; color: var(--egd-on-surface); white-space: nowrap; }
+.egd-codex-run-scope[data-completeness="partial"],
+.egd-codex-run-scope[data-completeness="none"] { border-color: var(--egd-note-line); background: var(--egd-note-soft); color: var(--egd-warning-ink); }
 .egd-codex-run-status button { flex: 0 0 auto; min-height: 32px; padding: 4px 7px; border: 1px solid transparent; border-radius: 6px; font-size: 12px; background: transparent; color: var(--egd-primary); }
 .egd-codex-run-status button:hover { background: var(--egd-hover); }
 .egd-codex-run-status[data-status="submitting"],
@@ -8122,6 +8152,9 @@ button.egd-task-board-summary {
 }
 button.egd-task-board-summary:hover { background: var(--egd-hover); }
 .egd-task-board-summary-text { flex: 1 1 auto; min-width: 0; overflow-wrap: anywhere; }
+/* B12: waits only 대표님 can clear stand out from waits on earlier work. */
+.egd-task-board-mine { flex: none; padding: 1px 8px; border: 1px solid var(--egd-note-line); border-radius: 999px; background: var(--egd-note-soft); color: var(--egd-warning-ink); }
+button.egd-task-board-summary:focus-visible { outline: var(--egd-focus-outline); outline-offset: var(--egd-focus-outline-offset); }
 .egd-task-board-chevron { flex: none; width: 14px; height: 14px; color: var(--egd-on-surface-variant); }
 .egd-task-board[data-open="true"] .egd-task-board-chevron { transform: rotate(180deg); }
 .egd-task-board-list {
@@ -8167,6 +8200,9 @@ button.egd-task-board-summary:hover { background: var(--egd-hover); }
 .egd-task-row[data-status="running"] .egd-task-status { color: var(--egd-primary); }
 .egd-task-row[data-status="completed"] .egd-task-status { color: var(--egd-success-ink); }
 .egd-task-row[data-status="failed"] .egd-task-status { color: var(--egd-danger-ink); }
+.egd-task-row[data-status="approval-required"] .egd-task-status { color: var(--egd-warning-ink); }
+.egd-task-condition[data-mine="true"][data-state="waiting"] .egd-task-condition-dot { background: var(--egd-warning-ink); }
+.egd-task-condition[data-mine="true"][data-state="waiting"] .egd-task-condition-text { color: var(--egd-on-surface); font-weight: 600; }
 .egd-task-conditions { display: flex; flex-direction: column; gap: 2px; margin: 0; padding: 0; list-style: none; }
 .egd-task-condition { display: flex; flex-wrap: wrap; align-items: center; gap: 2px 6px; min-height: 24px; }
 .egd-task-condition-dot { flex: none; width: 6px; height: 6px; margin: 0 4px; border-radius: 50%; background: var(--egd-outline); }
@@ -8192,6 +8228,19 @@ button.egd-task-confirm-cancel {
 }
 button.egd-task-continue:hover,
 button.egd-task-confirm-cancel:hover { background: var(--egd-hover); }
+/* B12: '로그인 열기' — the place to finish a wait, in the same inline control size. */
+button.egd-task-open-target {
+  flex: none;
+  min-height: 32px;
+  padding: 2px 9px;
+  border: 1px solid var(--egd-primary);
+  border-radius: 6px;
+  background: var(--egd-surface-elevated);
+  color: var(--egd-primary);
+  font: 600 11.5px/1.4 var(--egd-font);
+}
+button.egd-task-open-target:hover { background: var(--egd-hover); }
+button.egd-task-open-target:focus-visible { outline: var(--egd-focus-outline); outline-offset: var(--egd-focus-outline-offset); }
 button.egd-task-confirm-go { border-color: var(--egd-primary); background: var(--egd-primary); color: var(--egd-on-primary); }
 button.egd-task-confirm-go:hover { background: var(--egd-primary-strong); }
 button.egd-task-confirm-go[aria-disabled="true"] { opacity: var(--egd-opacity-disabled); cursor: default; }
@@ -8589,6 +8638,11 @@ button.egd-codex-working-bubble:focus-visible { outline: var(--egd-focus-outline
 .egd-codex-working-bubble .egd-codex-typing-dots { margin-right: 0; }
 .egd-codex-working-row[data-state="approval"] .egd-codex-working-bubble,
 .egd-codex-working-row[data-state="question"] .egd-codex-working-bubble { border-color: var(--egd-note-line); background: var(--egd-note-soft); color: var(--egd-warning-ink); }
+/* A44: what the Agent waits on, in one line, with the button that goes to answer it. */
+.egd-codex-working-ask { display: flex; align-items: center; flex-wrap: wrap; gap: 6px 8px; max-width: 100%; padding: 2px 2px 0; color: var(--egd-on-surface); font: 12px/1.5 var(--egd-font); }
+.egd-codex-working-ask-text { flex: 0 1 auto; min-width: 0; overflow-wrap: anywhere; }
+.egd-codex-working-ask-more { flex: none; color: var(--egd-on-surface-variant); }
+.egd-codex-working-ask-go { flex: none; }
 /* Several Agents at work in one room: each bubble under its own name, rows a breath apart. */
 .egd-codex-working-stack { display: flex; flex-direction: column; align-items: flex-start; gap: 3px; min-width: 0; }
 .egd-codex-working-name { padding-left: 2px; }

@@ -16436,7 +16436,12 @@ test('await task list: one line under the run state opens the list; \'계속\' a
   const closed = draw({ taskBoard: board });
   assert.deepEqual([closed.props.data.open, closed.props['aria-label'], closed.children.length], ['false', '작업 목록', 1]);
   const summary = closed.children[0];
-  assert.deepEqual([text(summary), summary.props['aria-expanded'], summary.props['aria-controls'] ?? null], ['진행 1건 · 대기 2건', 'false', null]);
+  const summaryText = all(summary, item => item.className === 'egd-task-board-summary-text')[0];
+  assert.deepEqual([text(summaryText), summary.props['aria-expanded'], summary.props['aria-controls'] ?? null], ['진행 1건 · 대기 2건', 'false', null]);
+  // B12: waits only 대표님 can clear are counted apart, ahead of the plain count.
+  assert.equal(text(byTestId(summary, 'chat-task-mine')[0]), `내 확인 ${Chat.taskBoardSummary(board).mine}건`);
+  assert.deepEqual(Chat.taskBoardSummary(board).mineKeys.map(key => key.split(':').at(-1)), ['sso', 'ok'], 'an approval not asked for yet is not counted');
+  assert.equal(text(summary), `내 확인 2건진행 1건 · 대기 2건`);
   summary.props.onclick();
   assert.deepEqual(calls.pop(), ['toggleTaskBoard']);
 
@@ -16453,7 +16458,16 @@ test('await task list: one line under the run state opens the list; \'계속\' a
     ['waiting', '승인 대기'],
   ]);
   assert.equal(byTestId(rows[2], 'chat-task-condition')[0].children[0].icon, 'check', 'a met condition carries a check');
-  assert.deepEqual(byTestId(rows[1], 'chat-task-condition').map(text), ['작업 1 완료 대기', '로그인 완료 대기 · accounts.example.com계속']);
+  assert.deepEqual(byTestId(rows[1], 'chat-task-condition').map(text), ['작업 1 완료 대기', '로그인 완료 대기 · accounts.example.com로그인 열기계속']);
+  // B12: a login wait offers its sign-in site; a press is the only thing that opens it.
+  const openTargets = byTestId(open, 'chat-task-open-target');
+  assert.equal(openTargets.length, 1, 'only the login wait has a place to open');
+  assert.equal(openTargets[0].props['aria-label'], '로그인 완료 대기 · accounts.example.com, 로그인 열기');
+  assert.equal(calls.length, 0, 'drawing the list opens nothing');
+  openTargets[0].props.onclick();
+  assert.deepEqual(calls.pop(), ['openTaskGateTarget', 'graph-a', 'login', 'sso']);
+  assert.deepEqual(byTestId(open, 'chat-task-condition').map(row => row.props.data.mine ?? null), [null, 'true', null, null, 'true', null],
+    'waits on 대표님 are marked; an approval not asked for yet is not');
   const continues = byTestId(open, 'chat-task-continue');
   assert.equal(continues.length, 3, 'only outside conditions offer 계속');
   continues[0].props.onclick();
