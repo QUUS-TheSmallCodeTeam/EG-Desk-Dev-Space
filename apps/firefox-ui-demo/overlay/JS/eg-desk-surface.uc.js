@@ -2732,6 +2732,31 @@
     if (details) details.hidden = !details.contains(document.activeElement);
   }
 
+  // CNV-07: while a briefing is read, the Dock and left rail recede (:root
+  // mode mark) and the open windows of the step being read keep full contrast
+  // while the others step back. Marks only: no camera move, nothing blocks
+  // the pointer, and every mark is removed when the briefing ends.
+  function syncBriefingFocus() {
+    const root = document.documentElement, session = state.codex.briefingSession || null;
+    let resolved = [];
+    if (session) {
+      try {
+        resolved = session.semanticOverview ? session.briefing.steps.flatMap(step => briefingResolvedTargets(session, step))
+          : briefingResolvedTargets(session);
+      } catch { resolved = []; }
+    }
+    const focus = BriefingState.briefingStepFocus(session, resolved, { overview: !!session?.semanticOverview });
+    if (focus.chromeMode) root.dataset.egdChromeMode = focus.chromeMode;
+    else if (root.dataset.egdChromeMode === 'briefing') delete root.dataset.egdChromeMode;
+    if (focus.emphasis) root.dataset.egdBriefingFocus = focus.emphasis; else delete root.dataset.egdBriefingFocus;
+    const targets = new Set(focus.targetIds);
+    for (const card of document.querySelectorAll('.egd-canvas-card')) {
+      if (targets.has(card.id)) { if (card.dataset.egdBriefingTarget !== 'true') card.dataset.egdBriefingTarget = 'true'; }
+      else if (card.dataset.egdBriefingTarget) delete card.dataset.egdBriefingTarget;
+    }
+    return focus;
+  }
+
   function briefingFitCamera(bounds, safe, panel) {
     const area = (left, top, right, bottom) => ({ left, top, right, bottom, width: right - left, height: bottom - top });
     const gap = 20;
@@ -2807,6 +2832,10 @@
         inputPanel._finishInputSourceChange?.(); inputPanel._finishInputScope?.(); inputPanel.remove();
       }
       if (typeof clearBriefingMinimapDisplay === 'function') clearBriefingMinimapDisplay();
+      // The step last read is kept for "이어보기" on re-entry; the screen's
+      // briefing marks end with the presentation, whatever closed it.
+      try { BriefingState.rememberBriefingStep(closeAnswerBriefing._stepMemory ||= new Map(), session); } catch {}
+      try { if (typeof syncBriefingFocus === 'function') syncBriefingFocus(); } catch {}
       try { state.refreshSemanticProjections?.(); } catch {}
       try { if (typeof refreshDeskMinimap === 'function') refreshDeskMinimap(); } catch {}
       panel?._disposeBriefingLayout?.();
@@ -3177,6 +3206,9 @@
       references: briefingInputReferences(thread, message),
       artifacts: message.artifacts || [],
       presentationId: chatBindingNonce(), preparing: true, interaction: { revision: 0 },
+      // Re-entry opens at the first step as before and only offers the step
+      // last read; moving there stays the reader's choice.
+      resumeOffer: BriefingState.briefingResumeOffer(closeAnswerBriefing._stepMemory, message.briefing),
       _minimapAccessFence: { revision: 0, blocked: false }, _minimapVerifiedEvidence: new Map(),
     };
     const preparationScope = session.preparationScope = state.codexBridge.createBriefingPreparationScope(thread.id, () => {
@@ -3387,8 +3419,10 @@
     const go = index => {
       if (!sessionCurrent()) return;
       noteInteraction();
-      state.codex.briefingSession = BriefingState.selectBriefingStep(session, index);
-      state.codex.briefingSession.semanticOverview = false;
+      const selected = state.codex.briefingSession = BriefingState.selectBriefingStep(session, index);
+      selected.semanticOverview = false;
+      // Any step the reader picks answers the pending "이어보기 / 처음부터".
+      if (selected !== session) selected.resumeOffer = null;
       renderAnswerBriefing();
       fitBriefingTargets(briefingResolvedTargets(state.codex.briefingSession));
       document.querySelector('#egd-answer-briefing nav')?.focus();
@@ -3406,7 +3440,7 @@
     const nav = el('nav', { tabindex: '0', 'aria-label': '브리핑 단계 탐색' },
       el('button', { disabled: session.index === 0 ? 'true' : null, data: { testid: 'briefing-previous' }, onclick: () => go(session.index - 1) }, '이전'),
       el('span', { 'aria-live': 'polite' }, `${session.index + 1} / ${session.briefing.steps.length}`),
-      el('button', { data: { testid: 'briefing-overview' }, onclick: () => { if (!sessionCurrent()) return; noteInteraction(); session.semanticOverview = true; fitBriefingTargets(session.briefing.steps.flatMap(item => briefingResolvedTargets(session, item))); } }, '전체 보기'),
+      el('button', { data: { testid: 'briefing-overview' }, onclick: () => { if (!sessionCurrent()) return; noteInteraction(); session.semanticOverview = true; if (typeof syncBriefingFocus === 'function') syncBriefingFocus(); fitBriefingTargets(session.briefing.steps.flatMap(item => briefingResolvedTargets(session, item))); } }, '전체 보기'),
       el('button', { disabled: session.index === session.briefing.steps.length - 1 ? 'true' : null, data: { testid: 'briefing-next' }, onclick: () => go(session.index + 1) }, '다음'),
       el('button', { 'aria-label': '브리핑 종료하고 이전 보기로 복귀', data: { testid: 'briefing-exit' }, onclick: closeAnswerBriefing }, '종료'), toggle);
     nav.addEventListener('keydown', event => {
@@ -3418,6 +3452,21 @@
     } else {
       panel.appendChild(el('strong', {}, session.briefing.title || '답변 브리핑'));
       panel.appendChild(nav);
+    }
+    if (session.resumeOffer) {
+      const offer = session.resumeOffer;
+      const resume = el('div', { class: 'egd-briefing-resume', role: 'group', 'aria-label': '이전에 읽던 단계', data: { testid: 'briefing-resume' } },
+        el('span', {}, `지난번에 ${offer.number}단계까지 읽었습니다.`),
+        el('button', { type: 'button', title: `${offer.number}단계로 이동`, data: { testid: 'briefing-resume-continue' },
+          onclick: () => go(offer.index) }, `${offer.number}단계부터 이어보기`),
+        el('button', { type: 'button', title: '1단계부터 읽기', data: { testid: 'briefing-resume-restart' }, onclick: () => {
+          if (!sessionCurrent()) return;
+          noteInteraction();
+          session.resumeOffer = null;
+          BriefingState.forgetBriefingStep(closeAnswerBriefing._stepMemory, session.briefing);
+          resume.remove(); nav.focus();
+        } }, '처음부터'));
+      body.appendChild(resume);
     }
     body.appendChild(el('p', {}, step.text));
     const preparingNotice = el('p', { role: 'status' }, '이 브리핑이 선택한 고정 근거를 준비하고 있습니다.');
@@ -3574,6 +3623,8 @@
         if (!retryVisible && row.retry) { row.retry.remove(); row.retry = null; }
         if (row.retry) row.retry.setAttribute('aria-label', `${row.identity} · 고정 근거 다시 열기`);
       }
+      // The same resolution decides which windows the screen keeps clear.
+      if (state.codex.briefingSession === session && typeof syncBriefingFocus === 'function') syncBriefingFocus();
     };
     panel._refreshBriefingEvidence();
     const mountComments = () => { session.commentEditor = mountBriefingComments(session, body); };
@@ -3692,7 +3743,9 @@
       return same;
     };
     const query = Object.entries(route).map(([key, value]) => `${key}=${encodeURIComponent(value)}`).join('&');
-    const request = async (method, body) => {
+    // commentId selects the helper's state route of one saved comment
+    // (POST { resolved }); without it this is the briefing's list/add route.
+    const request = async (method, body, commentId = null) => {
       if (!current()) throw new Error('브리핑 연결이 바뀌었습니다.');
       const controller = new window.AbortController();
       let timer, stop;
@@ -3702,7 +3755,9 @@
         controller.abort(); reject(new Error('응답을 확인하지 못했습니다.'));
       }, 10000); });
       try {
-        const response = await Promise.race([fetchJson(`/context/briefings/${encodeURIComponent(session.briefing.id)}/comments?${query}`,
+        const path = commentId ? `/context/briefing-comments/${encodeURIComponent(commentId)}`
+          : `/context/briefings/${encodeURIComponent(session.briefing.id)}/comments`;
+        const response = await Promise.race([fetchJson(`${path}?${query}`,
           { method, signal: controller.signal, ...(method === 'POST' ? { body: JSON.stringify(body) } : {}) }), cancelled, timeout]);
         if (!current()) throw new Error('브리핑 연결이 바뀌었습니다.');
         return response;
@@ -3773,22 +3828,48 @@
         const targetText = labels.join(' / ') || '이 단계의 설명';
         let row = rows.get(item.id);
         if (!row) {
-          const body = el('p', { style: { whiteSpace: 'pre-wrap', overflowWrap: 'anywhere' }, data: { testid: 'briefing-comment-body' } }, item.text);
-          const target = el('p', { data: { testid: 'briefing-comment-target' }, style: { overflowWrap: 'anywhere' } });
-          const draftStatus = el('p', { data: { testid: 'briefing-comment-draft-status' } });
+          // One card per saved comment: number and what it is about on the
+          // head line, the text, then its draft/state line and actions.
+          const body = el('p', { class: 'egd-briefing-comment-body', style: { whiteSpace: 'pre-wrap', overflowWrap: 'anywhere' }, data: { testid: 'briefing-comment-body' } }, item.text);
+          const target = el('p', { class: 'egd-briefing-comment-target', data: { testid: 'briefing-comment-target' }, style: { overflowWrap: 'anywhere' } });
+          const stateText = el('span', { class: 'egd-briefing-comment-state', data: { testid: 'briefing-comment-state' } });
+          const draftStatus = el('p', { class: 'egd-briefing-comment-status', data: { testid: 'briefing-comment-draft-status' } });
           const button = el('button', { type: 'button', data: { testid: 'briefing-comment-include', commentId: item.id },
             onclick: () => controller?.include(item.id) }, 'Chat 초안에 포함');
-          const root = el('section', { data: { testid: 'briefing-comment-row', commentId: item.id, commentSeq: String(item.seq), stepId: item.stepId, clientRequestId: item.clientRequestId || '' } },
-            el('strong', {}, `의견 #${item.seq}`), body, target, draftStatus, button);
+          // Resolve / reopen is the one change the helper keeps for a saved
+          // comment. Without that controller action the row offers nothing.
+          const resolve = typeof controller?.setResolved === 'function' ? el('button', { type: 'button',
+            data: { testid: 'briefing-comment-resolve', commentId: item.id },
+            onclick: () => {
+              if (resolve.getAttribute('aria-disabled') === 'true') return;
+              noteInteraction(); void controller.setResolved(item.id, resolve.dataset.resolved !== 'true');
+            } }) : null;
+          const root = el('section', { class: 'egd-briefing-comment', data: { testid: 'briefing-comment-row', commentId: item.id, commentSeq: String(item.seq), stepId: item.stepId, clientRequestId: item.clientRequestId || '' } },
+            el('div', { class: 'egd-briefing-comment-head' }, el('strong', { class: 'egd-briefing-comment-number' }, `의견 #${item.seq}`), target, stateText),
+            body, draftStatus, el('div', { class: 'egd-briefing-comment-actions' }, button, resolve));
           const next = [...rows.values()].filter(existing => Number(existing.root.dataset.commentSeq) > item.seq)
             .sort((a, b) => Number(a.root.dataset.commentSeq) - Number(b.root.dataset.commentSeq))[0];
-          row = { root, target, draftStatus, button }; rows.set(item.id, row);
+          row = { root, target, draftStatus, button, stateText, resolve }; rows.set(item.id, row);
           if (next) list.insertBefore(root, next.root); else list.appendChild(root);
         }
         text(row.target, targetText);
-        text(row.draftStatus, item.included ? 'Chat 초안에 포함됨 · 아직 전송하지 않음' : item.draftError
-          || (unverified ? '근거를 다시 확인한 뒤 초안에 포함할 수 있습니다.' : '저장됨 · 초안에 포함하지 않음'));
+        text(row.draftStatus, item.stateError || (item.included ? 'Chat 초안에 포함됨 · 아직 전송하지 않음' : item.draftError
+          || (unverified ? '근거를 다시 확인한 뒤 초안에 포함할 수 있습니다.' : '저장됨 · 초안에 포함하지 않음')));
         row.button.disabled = item.included || !!session.preparing;
+        const card = BriefingState.briefingCommentRow(item, { targetText });
+        if (row.root.dataset.state !== card.state) row.root.dataset.state = card.state;
+        if (row.stateText) { text(row.stateText, card.stateLabel); row.stateText.hidden = !card.stateLabel; }
+        if (row.resolve) {
+          // aria-disabled keeps keyboard focus on this same button while the
+          // helper answers; its click guard owns repeat activation.
+          const busy = item.stateBusy === true;
+          text(row.resolve, busy ? '저장 중' : card.resolveLabel);
+          row.resolve.dataset.resolved = String(card.state === 'resolved');
+          row.resolve.setAttribute('title', card.resolveTitle);
+          row.resolve.setAttribute('aria-label', card.resolveTitle);
+          row.resolve.setAttribute('aria-disabled', String(busy));
+          row.resolve.setAttribute('aria-busy', String(busy));
+        }
       }
       scroller.scrollTop = top + (anchor ? anchor.getBoundingClientRect().top - anchorTop : 0); scroller.scrollLeft = left;
     };

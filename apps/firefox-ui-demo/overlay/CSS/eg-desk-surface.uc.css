@@ -525,6 +525,44 @@
 .egd-input-evidence-card .egd-card-body[data-egd-briefing-scroll-viewport="true"] {
   flex: 0 1 auto; min-height: 0; overflow: auto; box-sizing: border-box;
 }
+/* CNV-07 step focus. The windows the step being read points at carry a sage
+   ring (a shadow, so the selection edge stays as it is) and, for a spotlight
+   step, the other windows step back. A window the reader points at, works in
+   or has selected is never dimmed, and nothing here takes pointer input. */
+:root[data-egd-chrome-mode="briefing"] .egd-canvas-card:not(.egd-card-fullscreen) {
+  transition: opacity 0.18s ease, border-color 0.14s ease, box-shadow 0.18s ease, transform 0.14s ease;
+}
+:root[data-egd-briefing-focus] .egd-canvas-card[data-egd-briefing-target="true"]:not(.egd-card-fullscreen) {
+  box-shadow: 0 0 0 calc(3px / var(--egd-camera-zoom, 1)) var(--egd-primary),
+    0 0 0 calc(8px / var(--egd-camera-zoom, 1)) var(--egd-mark-highlight), var(--egd-card-shadow-active);
+}
+:root[data-egd-briefing-focus="spotlight"] .egd-canvas-card:not([data-egd-briefing-target="true"]):not(.egd-card-fullscreen, .egd-entity-active, :hover, :focus-within) {
+  opacity: 0.5;
+}
+/* While a briefing is read the Dock and the left rail recede; pointing at or
+   tabbing into either brings it straight back. Narrow windows keep their
+   compact placement, so only the wide layout also shrinks them. */
+:root[data-egd-chrome-mode="briefing"] :is(#egd-dock, #egd-preset-bag) {
+  transition: opacity 0.18s ease, scale 0.18s ease;
+}
+:root[data-egd-chrome-mode="briefing"] :is(#egd-dock, #egd-preset-bag):not(:hover, :focus-within) { opacity: 0.55; }
+@media (min-width: 56.0625rem) {
+  :root[data-egd-chrome-mode="briefing"] #egd-dock:not(:hover, :focus-within) { scale: 0.9; transform-origin: 0 100%; }
+  :root[data-egd-chrome-mode="briefing"] #egd-preset-bag:not(:hover, :focus-within) { scale: 0.9; transform-origin: 0 0; }
+}
+@media (prefers-contrast: more) {
+  /* Receding stays visible, but text in the other windows keeps its contrast. */
+  :root[data-egd-briefing-focus="spotlight"] .egd-canvas-card:not([data-egd-briefing-target="true"]):not(.egd-card-fullscreen, .egd-entity-active, :hover, :focus-within) { opacity: 0.8; }
+  :root[data-egd-chrome-mode="briefing"] :is(#egd-dock, #egd-preset-bag):not(:hover, :focus-within) { opacity: 0.85; }
+}
+@media (forced-colors: active) {
+  :root[data-egd-briefing-focus] .egd-canvas-card[data-egd-briefing-target="true"]:not(.egd-card-fullscreen, .egd-entity-active, .egd-entity-selected) {
+    outline: calc(3px / var(--egd-camera-zoom, 1)) solid var(--egd-primary);
+  }
+  /* Same selectors as above, so forced colours never lose contrast to a fade. */
+  :root[data-egd-briefing-focus="spotlight"] .egd-canvas-card:not([data-egd-briefing-target="true"]):not(.egd-card-fullscreen, .egd-entity-active, :hover, :focus-within) { opacity: 1; }
+  :root[data-egd-chrome-mode="briefing"] :is(#egd-dock, #egd-preset-bag):not(:hover, :focus-within) { opacity: 1; }
+}
 
 .egd-semantic-cluster {
   display: grid;
@@ -5836,6 +5874,42 @@
 #egd-answer-briefing textarea { width: 100%; box-sizing: border-box; margin-top: 8px; padding: 8px;
   border: 1px solid var(--egd-outline); border-radius: 7px; background: var(--egd-surface-elevated); color: var(--egd-on-surface); font: inherit; }
 #egd-answer-briefing details button { display: block; }
+/* Re-entry: the step last read, offered once at the top of the body. */
+#egd-answer-briefing .egd-briefing-resume {
+  display: flex; flex-wrap: wrap; align-items: center; gap: 4px 6px; margin: 8px 0 4px; padding: 6px 8px;
+  border: 1px solid var(--egd-note-line); border-radius: 7px; background: var(--egd-note-soft); color: var(--egd-on-surface);
+}
+#egd-answer-briefing .egd-briefing-resume > span { flex: 1 1 10em; min-width: 0; font-size: 12px; overflow-wrap: anywhere; }
+#egd-answer-briefing [data-testid="briefing-resume-continue"] {
+  border-color: var(--egd-primary); background: var(--egd-primary-container); color: var(--egd-on-surface);
+}
+#egd-answer-briefing [data-testid="briefing-resume-continue"]:hover { background: var(--egd-hover); }
+/* Saved step comments read as cards: number and target on the head line,
+   then the text, its draft/state line and the actions. */
+#egd-answer-briefing [data-testid="briefing-comment-list"] { display: flex; flex-direction: column; gap: 6px; margin: 4px 0; }
+#egd-answer-briefing .egd-briefing-comment {
+  display: flex; flex-direction: column; gap: 4px; padding: 8px 10px;
+  border: 1px solid var(--egd-outline); border-inline-start: 3px solid var(--egd-primary); border-radius: 7px;
+  background: var(--egd-surface-elevated);
+}
+#egd-answer-briefing .egd-briefing-comment-head { display: flex; flex-wrap: wrap; align-items: baseline; gap: 2px 8px; min-width: 0; }
+#egd-answer-briefing .egd-briefing-comment-number { flex: 0 0 auto; color: var(--egd-primary-strong); font-size: 12px; }
+#egd-answer-briefing .egd-briefing-comment-target { flex: 1 1 8em; min-width: 0; margin: 0; color: var(--egd-on-surface-variant); font-size: 11px; }
+#egd-answer-briefing .egd-briefing-comment-state {
+  flex: 0 0 auto; padding: 0 6px; border: 1px solid var(--egd-outline); border-radius: 7px;
+  color: var(--egd-on-surface-variant); font-size: 11px;
+}
+#egd-answer-briefing .egd-briefing-comment-state[hidden] { display: none; }
+#egd-answer-briefing .egd-briefing-comment-body { margin: 0; }
+#egd-answer-briefing .egd-briefing-comment-status { margin: 0; color: var(--egd-on-surface-variant); font-size: 11px; }
+#egd-answer-briefing .egd-briefing-comment-actions { display: flex; flex-wrap: wrap; gap: 4px; }
+#egd-answer-briefing .egd-briefing-comment-actions > button { margin: 0; }
+/* A resolved comment stays in place, quieter: neutral edge, clamped text. */
+#egd-answer-briefing .egd-briefing-comment[data-state="resolved"] { border-inline-start-color: var(--egd-outline); background: var(--egd-surface); }
+#egd-answer-briefing .egd-briefing-comment[data-state="resolved"] .egd-briefing-comment-body {
+  color: var(--egd-on-surface-variant); max-height: 3em; overflow: hidden;
+}
+#egd-answer-briefing .egd-briefing-comment[data-state="resolved"] [data-testid="briefing-comment-include"] { display: none; }
 #egd-answer-briefing .egd-briefing-body[hidden],
 #egd-answer-briefing [data-testid="briefing-toggle"][hidden] { display: none; }
 /* Wide Briefing keeps its existing frame; only the body scrolls past the

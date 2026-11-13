@@ -524,6 +524,33 @@ test('Briefing saved UI: actual POST receipt appends to the latest draft once an
   assert.equal(h.uuidCount(), initialIds + 1); assert.equal(h.requests.filter(call => call.options.method === 'POST').length, 1); h.close();
 });
 
+test('Briefing saved UI: a saved comment is a card whose resolve action posts only its state to its own route', async () => {
+  let saved = null;
+  const h = await verifiedSavedBriefingUiHarness({ respond: (call, { row, list }) => {
+    if (call.url.startsWith('/context/briefing-comments/')) { saved = { ...saved, resolved: call.body.resolved }; return Promise.resolve({ comment: saved }); }
+    if (call.options.method === 'POST') { saved = row({ text: call.body.text, clientRequestId: call.body.clientRequestId }); return Promise.resolve({ comment: saved }); }
+    return Promise.resolve(saved ? list(saved) : list());
+  } });
+  h.type('새 의견'); h.click('briefing-comment-attach'); await settle();
+  const card = h.part('briefing-comment-row'), resolve = h.part('briefing-comment-resolve');
+  assert.equal(card.className, 'egd-briefing-comment'); assert.equal(card.dataset.state, 'open');
+  assert.equal(resolve.textContent, '해결됨으로 표시'); assert.equal(resolve.getAttribute('aria-label'), '의견 #1을 해결됨으로 표시');
+  assert.equal(h.part('briefing-comment-state').hidden, true, 'an open comment carries no state chip');
+  const before = h.requests.length;
+  h.click('briefing-comment-resolve'); await settle();
+  const call = h.requests[before];
+  assert.equal(call.url.split('?')[0], `/context/briefing-comments/${saved.id}`);
+  assert.equal(call.options.method, 'POST'); assert.deepEqual(call.body, { resolved: true });
+  assert.equal(h.requests.length, before + 1, 'a state change neither saves a new comment nor re-reads the list');
+  assert.equal(h.part('briefing-comment-row'), card, 'the same card is updated in place');
+  assert.equal(card.dataset.state, 'resolved'); assert.equal(h.part('briefing-comment-state').textContent, '해결됨');
+  assert.equal(h.part('briefing-comment-state').hidden, false); assert.equal(resolve.textContent, '다시 열기');
+  h.click('briefing-comment-resolve'); await settle();
+  assert.deepEqual(h.requests.at(-1).body, { resolved: false }); assert.equal(card.dataset.state, 'open');
+  assert.equal(resolve.textContent, '해결됨으로 표시');
+  h.close();
+});
+
 test('Briefing saved UI: automatic lost-response GET recovers exact UUID, requires explicit draft include and never resends', async () => {
   let committed;
   const h = await verifiedSavedBriefingUiHarness({ respond: (call, { row, list }) => {

@@ -56,6 +56,60 @@ export const currentBriefingStep = session => session?.briefing.steps[session.in
 // (smaller Dock and rail, step numbers on the minimap).
 export const briefingChromeMode = session => session?.briefing ? 'briefing' : null;
 
+// CNV-07: what the screen shows for the step being read — the open windows it
+// points at keep full contrast, the rest recede for a spotlight step. resolved
+// is resolveBriefingTargets(current step), or of every step for the overview.
+// No open target means no emphasis at all: the Canvas is never dimmed whole.
+export function briefingStepFocus(session, resolved = [], { overview = false } = {}) {
+  const chromeMode = briefingChromeMode(session);
+  if (!chromeMode) return { chromeMode: null, emphasis: null, targetIds: [], dimOthers: false };
+  const targetIds = [...new Set((Array.isArray(resolved) ? resolved : [])
+    .filter(item => item?.status === 'available' && typeof item.view?.id === 'string' && item.view.id)
+    .map(item => item.view.id))];
+  const emphasis = !targetIds.length ? null : overview ? 'spotlight' : briefingEmphasis(currentBriefingStep(session));
+  return { chromeMode, emphasis, targetIds, dimOthers: emphasis === 'spotlight' };
+}
+
+// CHAT-05/CNV-07 re-entry: the step last read, per answer, kept by the caller
+// in this window's memory only (a Map it owns). A briefing left at its first
+// or last step reopens from the start without asking.
+export const BRIEFING_RESUME_MAX = 40;
+const resumeKey = briefing => JSON.stringify([briefing?.conversationId ?? null, briefing?.runId ?? null, briefing?.answerId ?? null, briefing?.id ?? null]);
+export function rememberBriefingStep(memory, session) {
+  if (!(memory instanceof Map) || !session?.briefing || !Number.isInteger(session.index)) return;
+  // An unanswered "이어보기 / 처음부터" choice is not a new reading position.
+  if (session.resumeOffer) return;
+  const key = resumeKey(session.briefing), steps = session.briefing.steps;
+  memory.delete(key);
+  if (session.index <= 0 || session.index >= steps.length - 1) return;
+  memory.set(key, { index: session.index, stepIds: steps.map(step => step.id) });
+  while (memory.size > BRIEFING_RESUME_MAX) memory.delete(memory.keys().next().value);
+}
+export function forgetBriefingStep(memory, briefing) {
+  if (memory instanceof Map) memory.delete(resumeKey(briefing));
+}
+export function briefingResumeOffer(memory, briefing) {
+  if (!(memory instanceof Map) || !validBriefing(briefing)) return null;
+  const kept = memory.get(resumeKey(briefing)), steps = briefing.steps;
+  if (!kept || !Number.isInteger(kept.index) || kept.index <= 0 || kept.index >= steps.length - 1
+      || kept.stepIds?.length !== steps.length || kept.stepIds.some((id, index) => id !== steps[index].id)) return null;
+  return { index: kept.index, number: kept.index + 1, stepId: steps[kept.index].id, total: steps.length };
+}
+
+// CHAT-05: one saved comment as a card — number, what it is about, and its
+// open/resolved state. Only the state change the helper really supports
+// (resolve / reopen) is offered; a saved comment keeps its text.
+export function briefingCommentRow(comment, { targetText = '' } = {}) {
+  const resolved = comment?.resolved === true, title = `의견 #${comment?.seq}`;
+  return {
+    number: `#${comment?.seq}`, title, target: targetText || '이 단계의 설명',
+    state: resolved ? 'resolved' : 'open', stateLabel: resolved ? '해결됨' : '',
+    resolveLabel: resolved ? '다시 열기' : '해결됨으로 표시',
+    resolveTitle: resolved ? `${title}을 다시 열기` : `${title}을 해결됨으로 표시`,
+    collapsed: resolved,
+  };
+}
+
 export function resolveBriefingTargets(step, { references = [], artifacts = [], views = [], identity = {} } = {}) {
   return briefingStepTargets(step).map(target => {
     if (target.sourceId) {
@@ -384,7 +438,32 @@ export function createBriefingComments({ session, record, request, current, incl
     originalText: record.attempt?.recoveryVisible && !record.attempt.receipt ? record.attempt.body.text : null,
     canRetry: record.attempt?.phase === 'unknown' && !record.attempt.retryBlocked && record.attempt.anchor === anchor,
     comments: (record.comments || []).filter(row => row.stepId === step.id).map(row => ({ ...copy(row),
-      included: included(row), draftError: record.draftErrors?.[row.id] || null })) });
+      included: included(row), draftError: record.draftErrors?.[row.id] || null,
+      ...(record.resolving?.[row.id] ? { stateBusy: true } : {}),
+      ...(record.stateErrors?.[row.id] ? { stateError: record.stateErrors[row.id] } : {}) })) });
+  // Only the resolved state of a saved comment may change (the helper keeps
+  // its text and anchor). The row changes after the helper's own receipt for
+  // this same comment, never optimistically.
+  const setResolved = async (id, resolved) => {
+    if (!live() || typeof resolved !== 'boolean') return false;
+    const row = record.comments?.find(item => item.id === id && item.stepId === step.id);
+    if (!row || record.resolving?.[id]) return false;
+    (record.resolving ||= {})[id] = true;
+    if (record.stateErrors) delete record.stateErrors[id];
+    notify();
+    try {
+      const response = await request('POST', { resolved }, id);
+      if (!live()) return false;
+      const saved = verifiedBriefingComment(response?.comment, origin);
+      if (saved.id !== id || saved.resolved !== resolved) throw commentFailure();
+      merge([saved]);
+      return true;
+    } catch (error) {
+      if (!live()) return false;
+      (record.stateErrors ||= {})[id] = resolved ? '해결됨으로 바꾸지 못했습니다. 다시 시도해 주세요.' : '다시 열지 못했습니다. 다시 시도해 주세요.';
+      return false;
+    } finally { delete record.resolving[id]; notify(); }
+  };
   const attach = id => {
     if (!live()) return false;
     const row = record.comments?.find(item => item.id === id && item.stepId === step.id);
@@ -497,7 +576,7 @@ export function createBriefingComments({ session, record, request, current, incl
     const attempt = record.attempt = { body: copy(body), anchor, editRevision: record.editRevision || 0, phase: 'saving' };
     return postAttempt(attempt, false);
   };
-  return { view, refresh, submit, retry, include: attach, notify,
+  return { view, refresh, submit, retry, include: attach, setResolved, notify,
     edit(text) { if (live() && record.text !== String(text)) { record.text = String(text); record.editRevision = (record.editRevision || 0) + 1; } },
     dispose() { if (disposed) return; disposed = true; if (record.attempt?.phase === 'saving') { record.attempt.phase = 'unknown'; record.attempt.recoveryVisible = true; } },
   };
