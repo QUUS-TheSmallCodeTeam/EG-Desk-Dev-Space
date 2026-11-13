@@ -188,7 +188,11 @@ test('surface: the right edge strip is not offered when Chat lives on the Canvas
   assert.match(functionBody('syncMaximizeHudPinControl'), /syncMaximizeHudEdge\(\);/);
   assert.match(functionBody('openMaximizeHudPeek'), /if \(!maximizeHudPeekAvailable\(\)\) return false;/);
   assert.match(css, /#egd-maximize-hud-edge\[hidden\] \{ display: none !important; \}/);
+  // Browser window menu: Korean names for both modes (leaving focus view has its own always-visible button).
+  assert.match(surfaceSource, /item\(isCardFullscreen\(card\) \? '원래 크기로' : '크게 보기',/);
   assert.match(surfaceSource, /item\('집중 보기', '상단 바와 Dock을 숨기고 화면 전체로 봅니다', \(\) => enterCardFocusView\(card\)\)/);
+  assert.doesNotMatch(surfaceSource, /Desk Window 최대화 전환|'창 복귀'/, 'no developer wording left on the maximize entry');
+  assert.match(functionBody('isCardFocusView'), /isCardFullscreen\(card\) && state\.cardFullscreen\.mode === 'focus'/);
 });
 
 test('surface: the Dock chat button reveals a Chat that maximize only hid, before any teardown runs', () => {

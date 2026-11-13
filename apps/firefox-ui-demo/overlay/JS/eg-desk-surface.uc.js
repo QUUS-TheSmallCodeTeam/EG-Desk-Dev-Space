@@ -15861,6 +15861,10 @@
     return true;
   }
 
+  function isCardFocusView(card) {
+    return isCardFullscreen(card) && state.cardFullscreen.mode === 'focus';
+  }
+
   // 집중 보기: 상단 바·Dock까지 숨기고 화면 전체를 쓴다. 크게 보는 중이면 그 자리에서 바꾸고
   // (원래 자리·카메라 기억은 그대로), 아니면 집중 보기로 바로 들어간다.
   function enterCardFocusView(card) {
@@ -15968,7 +15972,7 @@
       if (!card) return;
       ev.preventDefault();
       ev.stopPropagation();
-      if (isCardFullscreen(card) && state.cardFullscreen.mode === 'focus') exitCardFullscreen(card);
+      if (isCardFocusView(card)) exitCardFullscreen(card);
       else enterCardFocusView(card);
     }, true);
   }
@@ -21798,7 +21802,8 @@
         ...(revokeItem ? [revokeItem] : []),
         item('홈', browserState.homeUrl, () => navigateBrowser(browserState.homeUrl)),
         item(browserState.loading ? '중지' : '새로고침', browserState.loading ? '로드 중지' : '현재 페이지 새로고침', () => (browserState.loading ? stopBrowser() : reloadBrowser())),
-        item(isCardFullscreen(card) ? '창 복귀' : '최대화', 'Desk Window 최대화 전환', () => toggleCardFullscreen(card)),
+        item(isCardFullscreen(card) ? '원래 크기로' : '크게 보기',
+          isCardFullscreen(card) ? '창을 원래 크기와 자리로 되돌립니다' : '상단 바와 Dock은 남기고 창을 크게 봅니다', () => toggleCardFullscreen(card)),
         item('집중 보기', '상단 바와 Dock을 숨기고 화면 전체로 봅니다', () => enterCardFocusView(card)),
         item('북마크 관리…', 'Firefox 북마크 관리', () => openFirefoxBrowserLibrary('AllBookmarks', card),
           { testid: 'browser-library-bookmarks', nativeWindow: true }),
