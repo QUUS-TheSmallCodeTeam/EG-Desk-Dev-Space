@@ -9887,6 +9887,80 @@ test('다시 시도 sends the failed request words once more, only into an empty
   assert.match(notices.at(-1), /계획 단계에서 이어진 실행은 다시 보내지 않습니다/);
 });
 
+test('Settings window frame: a named title row, two working dots and resize from any edge', () => {
+  const document = settingsFakeDocument(), docListeners = {};
+  document.addEventListener = (type, fn) => { (docListeners[type] ||= []).push(fn); };
+  const { el, codexProfileAvatar } = compileFunction(`${declaration('el')}\n${declaration('codexProfileAvatar')}\nreturn { el, codexProfileAvatar };`, ['document', 'ChatState'])(document, Chat);
+  const state = { codex: { connected: false, isStartingLogin: false, authStatus: { isLoggedIn: false }, recentEngineId: 'codex', threads: [] } };
+  state.codexBridge = { subscribe(listener) { listener(state.codex); return () => {}; }, profileCatalog: () => ({ status: 'ready', profiles: [] }), loadProfiles: () => Promise.resolve() };
+  const effects = { closed: 0, fullscreen: 0, focus: 0, dirty: [] };
+  let maximized = false;
+  const deps = { singletonSourceRef: () => ({ kind: 'settings-card' }), focusOpenSourceCard: () => null, cardSeq: 0,
+    resolveCanvasCardPlacement: () => ({ x: 100, y: 80, width: 600, height: 500, inView: true }), revealPlacedCanvasCard() {}, el, cardZ: 0,
+    closeCanvasCard: () => effects.closed++, state, ChatState: Chat, codexProfileAvatar, document, window: { setTimeout: () => 0, confirm: () => false },
+    bindCardSourceRef() {}, markAgendaDirty: reason => effects.dirty.push(reason), setActiveEntity() {}, isCardFullscreen: () => maximized,
+    focusCanvasCard: () => effects.focus++, installCardHeaderFullscreenToggle() {}, canvasZoom: () => 2, ...settingsTransferDeps(document, state),
+    AccountSettingsView, codexBridgeNotice: settingsBridgeNotice, deskIcon: settingsDeskIcon(document), toggleCardFullscreen: () => effects.fullscreen++ };
+  const card = compileFunction(`${declaration('spawnSettingsCard')}\nreturn spawnSettingsCard;`, Object.keys(deps))(...Object.values(deps))();
+  const byClass = name => settingsNodes(card, node => String(node.className).split(/\s+/).includes(name));
+
+  // Title row: grip, the Settings icon and the Korean window name.
+  const titlebar = byClass('egd-desk-window-titlebar')[0];
+  assert.ok(titlebar, 'Settings uses the shared title row class');
+  assert.equal(titlebar.parentNode.className, 'egd-card-header egd-desk-window-header', 'the header is one title row high, with no empty band under it');
+  assert.equal(cssDeclarationsFor(surfaceCss, '.egd-desk-window-header')['min-height'], '32px');
+  assert.equal(byClass('egd-settings-title')[0].textContent, '설정');
+  assert.deepEqual(settingsNodes(titlebar, node => !!node.dataset.icon).map(node => node.dataset.icon), ['grip', 'settings']);
+  assert.equal(byClass('egd-window-grip')[0].getAttribute('aria-hidden'), 'true');
+
+  // Dots: close and maximize only. Settings does not fold, so there is no yellow dot.
+  const dots = byClass('egd-card-dot');
+  assert.deepEqual(dots.map(dot => dot.className), ['egd-card-dot egd-card-dot-close egd-desk-window-control', 'egd-card-dot egd-card-dot-max egd-desk-window-control']);
+  for (const dot of dots) {
+    assert.equal(dot.getAttribute('role'), 'button'); assert.equal(dot.getAttribute('tabindex'), '0');
+    assert.ok(dot.getAttribute('title')); assert.equal(dot.getAttribute('aria-label'), dot.getAttribute('title'));
+    dot.click = () => dot.fire('click');
+  }
+  const [close, maximize] = dots;
+  assert.deepEqual([close.getAttribute('title'), maximize.getAttribute('title'), maximize.getAttribute('aria-pressed')], ['창 닫기', '창 최대화', 'false']);
+  close.fire('click'); assert.equal(effects.closed, 1);
+  let prevented = 0;
+  close.fire('keydown', { key: 'Enter', preventDefault() { prevented++; } }); assert.equal(effects.closed, 2);
+  maximize.fire('keydown', { key: ' ', preventDefault() { prevented++; } }); assert.equal(effects.fullscreen, 1);
+  close.fire('keydown', { key: 'a', preventDefault() { prevented++; } });
+  assert.deepEqual([prevented, effects.closed], [2, 2], 'other keys are left alone');
+
+  // Resize: eight handles, camera zoom respected, smallest size held, the far edge stays put.
+  const hits = byClass('egd-card-resize-hit');
+  assert.equal(hits.length, 8);
+  Object.assign(card, { offsetLeft: 100, offsetTop: 80, offsetWidth: 600, offsetHeight: 500 });
+  const hit = edge => byClass(`egd-card-resize-hit-${edge}`)[0];
+  const move = (clientX, clientY) => { for (const fn of docListeners.mousemove) fn({ clientX, clientY }); };
+  const release = () => { for (const fn of docListeners.mouseup) fn({}); };
+  const rect = () => [card.style.left, card.style.top, card.style.width, card.style.height];
+  const created = effects.dirty.length, focus = effects.focus;
+  hit('se').fire('mousedown', { button: 0, clientX: 700, clientY: 580 });
+  assert.equal(effects.focus, focus + 1);
+  move(760, 620);
+  assert.deepEqual(rect(), ['100px', '80px', '630px', '520px'], 'half the pointer distance at 2x zoom');
+  release();
+  assert.deepEqual(effects.dirty.slice(created), ['resize-settings-card']);
+  hit('nw').fire('mousedown', { button: 0, clientX: 100, clientY: 80 });
+  move(1100, 1080);
+  assert.deepEqual(rect(), ['280px', '260px', '420px', '320px'], 'the smallest size holds and the right/bottom edge does not move');
+  release();
+  move(0, 0);
+  assert.deepEqual(rect(), ['280px', '260px', '420px', '320px'], 'no resize after release');
+  assert.deepEqual(effects.dirty.slice(created), ['resize-settings-card', 'resize-settings-card']);
+  hit('e').fire('mousedown', { button: 2, clientX: 0, clientY: 0 }); move(500, 0); release();
+  maximized = true;
+  hit('e').fire('mousedown', { button: 0, clientX: 0, clientY: 0 }); move(500, 0); release();
+  assert.deepEqual(rect(), ['280px', '260px', '420px', '320px'], 'no resize from another button or while maximized');
+  assert.equal(effects.dirty.length, created + 2);
+  const settingsCss = cssDeclarationsFor(surfaceCss, '.egd-settings-card');
+  assert.deepEqual([settingsCss['min-width'], settingsCss['min-height']], ['420px', '320px'], 'the script and the stylesheet agree on the smallest size');
+});
+
 // A small element fake: enough for el(), events and text, so the production
 // Settings card can be driven without Firefox.
 function settingsFakeDocument() {
@@ -9919,6 +9993,10 @@ function settingsFakeDocument() {
   });
   return doc;
 }
+// The Settings title row draws its grip and kind icon through deskIcon.
+const settingsDeskIcon = document => (name, className = 'egd-ui-icon') => {
+  const icon = document.createElement('svg'); icon.className = className; icon.dataset.icon = name; return icon;
+};
 const settingsNodes = (node, predicate, found = []) => {
   if (node?.tagName && predicate(node)) found.push(node);
   for (const child of node?.children || []) settingsNodes(child, predicate, found);
@@ -9971,12 +10049,12 @@ test('production Settings card renders the reported account and drives Agent edi
     'revealPlacedCanvasCard', 'el', 'cardZ',
     'closeCanvasCard', 'state', 'ChatState', 'codexProfileAvatar', 'document', 'window', 'bindCardSourceRef', 'markAgendaDirty', 'setActiveEntity',
     'isCardFullscreen', 'focusCanvasCard', 'installCardHeaderFullscreenToggle', 'canvasZoom', 'settingsProfileAccountKey', 'createSettingsProfileTransfer',
-    'fetch', 'fetchJson', 'spawnTerminalCard', 'AccountSettingsView', 'codexBridgeNotice'])(
+    'fetch', 'fetchJson', 'spawnTerminalCard', 'AccountSettingsView', 'codexBridgeNotice', 'deskIcon'])(
     () => ({ kind: 'settings-card' }), () => null, 0, kind => { placements.push(kind); return { x: 10, y: 20, width: 600, height: 600, inView: true }; },
     () => {}, el, 0, () => {}, state, Chat, codexProfileAvatar, document, windowStub,
     () => {}, () => {}, () => {}, () => false, () => {}, () => {}, () => 1, ...Object.values(settingsTransferDeps(document, state)),
     (...args) => { calls.push(['fetch', ...args]); }, (...args) => { calls.push(['fetchJson', ...args]); },
-    (...args) => { calls.push(['terminal', ...args]); }, AccountSettingsView, settingsBridgeNotice);
+    (...args) => { calls.push(['terminal', ...args]); }, AccountSettingsView, settingsBridgeNotice, settingsDeskIcon(document));
   const card = spawn();
   assert.deepEqual(placements, ['settings'], 'Settings opens through the shared placement policy');
   assert.deepEqual([card.style.left, card.style.top, card.style.width, card.style.height], ['10px', '20px', '600px', '600px']);
@@ -10163,7 +10241,12 @@ function windowBoardMetadataHarness() {
     node.removeAttribute = key => { delete node.attributes[key]; };
     node.closest = () => null;
     node.prepend = child => { node.appendChild(child); node.children.unshift(node.children.pop()); };
-    node.classList = { contains: name => node.className.split(/\s+/).includes(name) };
+    const classNames = () => node.className.split(/\s+/).filter(Boolean);
+    node.classList = { contains: name => classNames().includes(name),
+      add: (...names) => { node.className = [...new Set([...classNames(), ...names])].join(' '); },
+      remove: (...names) => { node.className = classNames().filter(name => !names.includes(name)).join(' '); },
+      toggle: (name, force) => { const on = force ?? !classNames().includes(name); node.classList[on ? 'add' : 'remove'](name); return on; } };
+    node.click = () => node.fire('click');
     node.querySelector = () => null;
     node.getBoundingClientRect = () => ({ left: 0, top: 0, right: 24, bottom: 24, width: 24, height: 24 });
     return node;
@@ -10336,6 +10419,112 @@ test('Board metadata reserves hoverable ellipsis space without replacing the Vie
   assert.equal(shell.slots.identity.children.includes(viewTitle), true);
   assert.deepEqual([h.state.activeEntityId, h.state.boards.activeProjectionId, h.state.codex.activeThreadId],
     ['existing-selection', 'board-b', 'existing-run']);
+});
+
+test('window frame: the yellow dot folds a window to its title row and opens it again without touching its stored size', async () => {
+  const h = windowBoardMetadataHarness();
+  const shell = h.spawnDeskWindowShell({ id: 'fold', kind: 'file', activate: false, style: { left: '40px', top: '60px', width: '520px', height: '380px' } });
+  const { close, minimize, maximize } = shell.controls, stored = { ...shell.root.style };
+  for (const control of [close, minimize, maximize]) {
+    assert.equal(control.getAttribute('role'), 'button'); assert.equal(control.getAttribute('tabindex'), '0');
+    assert.ok(control.getAttribute('title')); assert.equal(control.getAttribute('aria-label'), control.getAttribute('title'));
+    assert.equal(control.getAttribute('aria-disabled'), null, 'no dot is shown switched off');
+    assert.equal(control.className.includes('egd-desk-window-control-disabled'), false);
+  }
+  assert.deepEqual([minimize.getAttribute('title'), minimize.getAttribute('aria-expanded'), minimize.getAttribute('hidden')], ['창 접기', 'true', null]);
+  const sizes = []; shell.onResize(rect => sizes.push(rect)); await settle();
+  const heard = sizes.length, dirty = h.effects.dirty;
+  minimize.fire('click');
+  assert.equal(shell.isCollapsed(), true); assert.equal(shell.root.classList.contains('egd-card-collapsed'), true);
+  assert.deepEqual([minimize.getAttribute('title'), minimize.getAttribute('aria-label'), minimize.getAttribute('aria-expanded')], ['창 펼치기', '창 펼치기', 'false']);
+  assert.equal(h.effects.dirty, dirty + 1, 'folding is a Desk change to save');
+  assert.equal(sizes.length, heard, 'the content is not told about the folded height');
+  assert.deepEqual({ ...shell.root.style }, stored, 'the stored position and size are untouched');
+  let prevented = 0;
+  minimize.fire('keydown', { key: 'Enter', preventDefault() { prevented++; } });
+  assert.equal(prevented, 1); assert.equal(shell.isCollapsed(), false);
+  assert.deepEqual([minimize.getAttribute('title'), minimize.getAttribute('aria-expanded')], ['창 접기', 'true']);
+  assert.equal(sizes.length, heard + 1, 'opening reports the real size again');
+  assert.equal(h.effects.dirty, dirty + 2);
+  minimize.fire('keydown', { key: ' ', preventDefault() {} });
+  assert.equal(shell.isCollapsed(), true);
+  // The green dot on a folded window opens it first, then maximizes.
+  const fullscreen = h.effects.fullscreen;
+  maximize.fire('click');
+  assert.equal(shell.isCollapsed(), false); assert.equal(h.effects.fullscreen, fullscreen + 1);
+  // A restore folds quietly.
+  const quiet = h.effects.dirty;
+  assert.equal(shell.setCollapsed(true, { quiet: true }), true);
+  assert.equal(h.effects.dirty, quiet); assert.equal(shell.isCollapsed(), true);
+  // Double-clicking the title row of a folded window opens it; it is not maximized from there.
+  shell.slots.topbar.fire('dblclick', { button: 0, target: { closest: () => null } });
+  assert.equal(shell.isCollapsed(), false); assert.equal(h.effects.fullscreen, fullscreen + 1);
+  shell.slots.topbar.fire('dblclick', { button: 0, target: { closest: () => null } });
+  assert.equal(h.effects.fullscreen, fullscreen + 2, 'an open window still maximizes on double-click');
+});
+
+test('window frame: a window type that cannot fold shows no yellow dot and never folds', () => {
+  const h = windowBoardMetadataHarness();
+  const shell = h.spawnDeskWindowShell({ id: 'fixed', kind: 'browser', activate: false, collapsible: false });
+  assert.equal(shell.controls.minimize.getAttribute('hidden'), 'true');
+  assert.equal(shell.setCollapsed(true), false);
+  assert.equal(shell.isCollapsed(), false); assert.equal(h.effects.dirty, 1, 'only the window creation was recorded');
+});
+
+test('window frame: the green dot says what a press does now', () => {
+  const h = windowBoardMetadataHarness();
+  const shell = h.spawnDeskWindowShell({ id: 'grow', kind: 'file', activate: false }), { maximize } = shell.controls;
+  assert.deepEqual([maximize.getAttribute('title'), maximize.getAttribute('aria-label'), maximize.getAttribute('aria-pressed')], ['창 최대화', '창 최대화', 'false']);
+  shell.root.classList.add('egd-card-fullscreen'); shell.syncWindowControls();
+  assert.deepEqual([maximize.getAttribute('title'), maximize.getAttribute('aria-label'), maximize.getAttribute('aria-pressed')], ['원래 크기로', '원래 크기로', 'true']);
+  shell.root.classList.remove('egd-card-fullscreen'); shell.syncWindowControls();
+  assert.deepEqual([maximize.getAttribute('title'), maximize.getAttribute('aria-pressed')], ['창 최대화', 'false']);
+  assert.match(declaration('spawnDeskWindowShell'), /new MutationObserver\(syncWindowControls\)[\s\S]*attributeFilter: \['class'\]/,
+    'maximize and restore are followed from the root class, without a call from the maximize code');
+});
+
+test('window frame: a folded window maximized from outside its own dots opens instead of staying folded', async () => {
+  const h = windowBoardMetadataHarness();
+  const shell = h.spawnDeskWindowShell({ id: 'fold-max', kind: 'file', activate: false }), { minimize, maximize } = shell.controls;
+  const sizes = []; shell.onResize(rect => sizes.push(rect)); await settle();
+  assert.equal(shell.setCollapsed(true), true);
+  const heard = sizes.length, dirty = h.effects.dirty;
+  // Maximize reached from elsewhere only changes the root class; the shell follows it.
+  shell.root.classList.add('egd-card-fullscreen'); shell.syncWindowControls();
+  assert.equal(shell.isCollapsed(), false, 'a maximized window is never left folded underneath');
+  assert.deepEqual([minimize.getAttribute('title'), minimize.getAttribute('aria-expanded')], ['창 접기', 'true']);
+  assert.deepEqual([maximize.getAttribute('title'), maximize.getAttribute('aria-pressed')], ['원래 크기로', 'true']);
+  assert.equal(sizes.length, heard + 1, 'the content hears its real size again');
+  assert.equal(h.effects.dirty, dirty + 1, 'opening is recorded once');
+  shell.syncWindowControls();
+  assert.equal(h.effects.dirty, dirty + 1, 'a second sync changes nothing');
+});
+
+test('Desk restore brings a folded window back folded, by its restored ID, without a new change mark', () => {
+  const h = windowBoardMetadataHarness(), collision = 'existing-control';
+  const existing = h.document.createElement('button'); existing.id = collision; h.document.documentElement.appendChild(existing);
+  const folded = { id: collision, type: 'browser', geometry: { x: 0, y: 0, width: 400, height: 300 },
+    runtimeState: { uri: 'about:blank' }, sourceRef: { uri: 'about:blank' } };
+  const open = { ...structuredClone(folded), id: 'open-view' };
+  const snapshot = { agenda: { id: 'desk', title: 'Desk' }, cards: [folded, open], shapes: [],
+    desk: { activeCardId: null, collapsedViewIds: [collision, 'missing-view', 7] },
+    boardProjections: { projections: {}, activeProjectionId: null } };
+  const before = structuredClone(snapshot), dirty = h.effects.dirty;
+  assert.equal(h.restoreDeskSession(snapshot), true);
+  const views = h.document.querySelectorAll('.egd-desk-window');
+  assert.equal(views.length, 2);
+  const [restoredFolded, restoredOpen] = views;
+  assert.notEqual(restoredFolded.id, collision, 'the saved ID was taken, so the View was remapped');
+  assert.equal(restoredFolded._deskWindowShell.isCollapsed(), true);
+  assert.equal(restoredFolded._deskWindowShell.controls.minimize.getAttribute('aria-expanded'), 'false');
+  assert.equal(restoredOpen._deskWindowShell.isCollapsed(), false);
+  assert.deepEqual(restoredFolded.geometry, { x: 0, y: 0, width: 400, height: 300 }, 'the stored size is restored whole');
+  assert.deepEqual(snapshot, before);
+  // Opening the two windows is recorded either way; folding on restore adds nothing of its own.
+  const plain = windowBoardMetadataHarness(), plainDirty = plain.effects.dirty;
+  assert.equal(plain.restoreDeskSession({ ...structuredClone(before), desk: { activeCardId: null } }), true);
+  assert.equal(h.effects.dirty - dirty, plain.effects.dirty - plainDirty, 'folding on restore is not a new change');
+  assert.match(declaration('serializeDeskSnapshot'), /collapsedViewIds: Array\.from\(document\.querySelectorAll\('\.egd-canvas-card'\)\)\n\s+\.filter\(card => card\.classList\?\.contains\('egd-card-collapsed'\)\)\.map\(card => card\.id\)/);
 });
 
 test('compact Browser Agent header keeps its height and exposes short status and labelled actions', () => {
@@ -16300,9 +16489,9 @@ test('연결된 도구: inherited external tools read in Korean, with the extern
   };
   const spawn = compileFunction(`${declaration('spawnSettingsCard')}\nreturn spawnSettingsCard;`, ['singletonSourceRef', 'focusOpenSourceCard', 'cardSeq', 'resolveCanvasCardPlacement',
     'revealPlacedCanvasCard', 'el', 'cardZ', 'closeCanvasCard', 'state', 'ChatState', 'codexProfileAvatar', 'document', 'window', 'bindCardSourceRef', 'markAgendaDirty', 'setActiveEntity',
-    'isCardFullscreen', 'focusCanvasCard', 'installCardHeaderFullscreenToggle', 'canvasZoom', 'settingsProfileAccountKey', 'createSettingsProfileTransfer', 'AccountSettingsView', 'codexBridgeNotice'])(
+    'isCardFullscreen', 'focusCanvasCard', 'installCardHeaderFullscreenToggle', 'canvasZoom', 'settingsProfileAccountKey', 'createSettingsProfileTransfer', 'AccountSettingsView', 'codexBridgeNotice', 'deskIcon'])(
     () => ({ kind: 'settings-card' }), () => null, 0, () => ({ x: 0, y: 0, width: 600, height: 600, inView: true }), () => {}, el, 0, () => {}, state, Chat, codexProfileAvatar,
-    document, { innerWidth: 1280, innerHeight: 800, confirm: () => false, setTimeout: () => 0 }, () => {}, () => {}, () => {}, () => false, () => {}, () => {}, () => 1, ...Object.values(settingsTransferDeps(document, state)), AccountSettingsView, settingsBridgeNotice);
+    document, { innerWidth: 1280, innerHeight: 800, confirm: () => false, setTimeout: () => 0 }, () => {}, () => {}, () => {}, () => false, () => {}, () => {}, () => 1, ...Object.values(settingsTransferDeps(document, state)), AccountSettingsView, settingsBridgeNotice, settingsDeskIcon(document));
   const card = spawn();
   const section = () => settingsNodes(card, node => node.dataset.testid === 'settings-mcp')[0];
   assert.equal(section().dataset.state, 'unknown');
@@ -18135,10 +18324,10 @@ test('Agent 관리 shows 사용 준비 on the detail and saves the tool section 
   const spawn = compileFunction(`${declaration('spawnSettingsCard')}\nreturn spawnSettingsCard;`, ['singletonSourceRef', 'focusOpenSourceCard', 'cardSeq', 'resolveCanvasCardPlacement',
     'revealPlacedCanvasCard', 'el', 'cardZ',
     'closeCanvasCard', 'state', 'ChatState', 'codexProfileAvatar', 'document', 'window', 'bindCardSourceRef', 'markAgendaDirty', 'setActiveEntity',
-    'isCardFullscreen', 'focusCanvasCard', 'installCardHeaderFullscreenToggle', 'canvasZoom', 'settingsProfileAccountKey', 'createSettingsProfileTransfer', 'AccountSettingsView', 'codexBridgeNotice'])(
+    'isCardFullscreen', 'focusCanvasCard', 'installCardHeaderFullscreenToggle', 'canvasZoom', 'settingsProfileAccountKey', 'createSettingsProfileTransfer', 'AccountSettingsView', 'codexBridgeNotice', 'deskIcon'])(
     () => ({ kind: 'settings-card' }), () => null, 0, () => ({ x: 10, y: 20, width: 600, height: 600, inView: true }),
     () => {}, el, 0, () => {}, state, Chat, codexProfileAvatar, document, windowStub,
-    () => {}, () => {}, () => {}, () => false, () => {}, () => {}, () => 1, ...Object.values(settingsTransferDeps(document, state)), AccountSettingsView, settingsBridgeNotice);
+    () => {}, () => {}, () => {}, () => false, () => {}, () => {}, () => 1, ...Object.values(settingsTransferDeps(document, state)), AccountSettingsView, settingsBridgeNotice, settingsDeskIcon(document));
   // CHAT-07 [Agent 설정 열기] opens straight onto the Agent's detail.
   const card = spawn({ tab: 'agents', profileId: 'review-verifier' });
   await settle();
@@ -18393,9 +18582,9 @@ function computerControlSettingsHarness({ computerControl = null, connected = tr
   };
   const spawn = compileFunction(`${declaration('spawnSettingsCard')}\nreturn spawnSettingsCard;`, ['singletonSourceRef', 'focusOpenSourceCard', 'cardSeq', 'resolveCanvasCardPlacement',
     'revealPlacedCanvasCard', 'el', 'cardZ', 'closeCanvasCard', 'state', 'ChatState', 'codexProfileAvatar', 'document', 'window', 'bindCardSourceRef', 'markAgendaDirty', 'setActiveEntity',
-    'isCardFullscreen', 'focusCanvasCard', 'installCardHeaderFullscreenToggle', 'canvasZoom', 'settingsProfileAccountKey', 'createSettingsProfileTransfer', 'AccountSettingsView', 'codexBridgeNotice'])(
+    'isCardFullscreen', 'focusCanvasCard', 'installCardHeaderFullscreenToggle', 'canvasZoom', 'settingsProfileAccountKey', 'createSettingsProfileTransfer', 'AccountSettingsView', 'codexBridgeNotice', 'deskIcon'])(
     () => ({ kind: 'settings-card' }), () => null, 0, () => ({ x: 0, y: 0, width: 600, height: 600, inView: true }), () => {}, el, 0, () => {}, state, Chat, codexProfileAvatar,
-    document, { innerWidth: 1280, innerHeight: 800, confirm: () => false, setTimeout: () => 0 }, () => {}, () => {}, () => {}, () => false, () => {}, () => {}, () => 1, ...Object.values(settingsTransferDeps(document, state)), AccountSettingsView, settingsBridgeNotice);
+    document, { innerWidth: 1280, innerHeight: 800, confirm: () => false, setTimeout: () => 0 }, () => {}, () => {}, () => {}, () => false, () => {}, () => {}, () => 1, ...Object.values(settingsTransferDeps(document, state)), AccountSettingsView, settingsBridgeNotice, settingsDeskIcon(document));
   const card = spawn();
   const section = () => settingsNodes(card, node => node.dataset.testid === 'settings-computer-control')[0];
   const part = testid => settingsNodes(section(), node => node.dataset.testid === testid)[0] || null;
@@ -23257,7 +23446,7 @@ function portableSettingsHarness({ respond, fullscreen = false, initialDetail = 
     resolveCanvasCardPlacement: () => ({ x: 0, y: 0, width: 600, height: 600 }), revealPlacedCanvasCard() {}, el, cardZ: 0, closeCanvasCard() {}, state, ChatState: Chat,
     codexProfileAvatar, document, window: { setTimeout: () => 0, confirm: () => false }, bindCardSourceRef() {}, markAgendaDirty() {}, setActiveEntity() {},
     isCardFullscreen: () => false, focusCanvasCard() {}, installCardHeaderFullscreenToggle() {}, canvasZoom: () => 1, ...settingsTransferDeps(document, state, native.adapter),
-    AccountSettingsView, codexBridgeNotice: settingsBridgeNotice, deskIcon: () => document.createElement('svg') };
+    AccountSettingsView, codexBridgeNotice: settingsBridgeNotice, deskIcon: settingsDeskIcon(document) };
   if (fullscreen) {
     Object.assign(state, { cardFullscreen: null, surface: { initialBrowserFocus: false }, pan: { x: 0, y: 0 }, zoom: 1,
       setCanvasViewportTarget(camera) { this.pan = { ...camera.pan }; this.zoom = camera.zoom; } });
@@ -23566,11 +23755,14 @@ test('Settings green control: click, Enter and Space use shared camera Focus and
   h.document.documentElement.appendChild(other);
   const original = { ...h.card.style }, untouched = { ...other.style };
   assert.equal(control.getAttribute('role'), 'button'); assert.equal(control.getAttribute('tabindex'), '0');
-  assert.match(control.getAttribute('aria-label'), /최대화.*복원/);
+  // The green dot names what a press does now, in both states.
+  const label = () => [control.getAttribute('title'), control.getAttribute('aria-label'), control.getAttribute('aria-pressed')];
+  assert.deepEqual(label(), ['창 최대화', '창 최대화', 'false']);
   for (const key of [null, 'Enter', ' ']) {
     let prevented = 0;
     const activate = () => key === null ? control.fire('click') : control.fire('keydown', { key, preventDefault() { prevented++; } });
     activate();
+    assert.deepEqual(label(), ['원래 크기로', '원래 크기로', 'true']);
     assert.equal(h.state.cardFullscreen.cardId, h.card.id); assert.equal(h.state.activeEntityId, h.card.id);
     assert.equal(h.card.classList.contains('egd-card-fullscreen'), true);
     assert.deepEqual([h.card.style.left, h.card.style.top, h.card.style.width, h.card.style.height],
@@ -23581,6 +23773,7 @@ test('Settings green control: click, Enter and Space use shared camera Focus and
     assert.equal(h.state.zoom, camera.zoom); assert.deepEqual(h.state.pan, camera.pan);
     assert.equal(other.classList.contains('egd-card-fullscreen'), false); assert.deepEqual(other.style, untouched);
     activate(); assert.equal(h.state.cardFullscreen, null); assert.equal(h.card.classList.contains('egd-card-fullscreen'), false);
+    assert.deepEqual(label(), ['창 최대화', '창 최대화', 'false']);
     assert.deepEqual(h.card.style, original); assert.deepEqual(other.style, untouched);
     assert.equal(h.state.zoom, 1); assert.deepEqual(h.state.pan, { x: 0, y: 0 });
     assert.equal(prevented, key === null ? 0 : 2);

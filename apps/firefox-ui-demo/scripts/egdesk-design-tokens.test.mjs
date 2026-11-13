@@ -449,6 +449,7 @@ const focusSelectors = [
   '#egd-chat-return .egd-chat-return-button:focus-visible', '.egd-zoom-button:focus-visible',
   '.egd-chat-card-action:focus-visible', '.egd-hud-pin:focus-visible', '.egd-hud-close:focus-visible',
   '.egd-browser-card .egd-desk-window-control:focus-visible',
+  '.egd-card-dot:focus-visible', '.egd-desk-window-control:focus-visible',
   '.egd-browser-card .egd-card-nav-btn:focus-visible', '.egd-browser-card .egd-card-menu:focus-visible',
   '.egd-browser-card .egd-browser-agent-badge:focus-visible', '.egd-browser-card .egd-browser-agent-hand:focus-visible',
   '.egd-rail-icon:focus-visible', '.egd-rail-switcher:focus-visible', '.egd-minimap-board-label:focus-visible',
@@ -1089,24 +1090,83 @@ test('Browser measurement candidate follows the shared projected-size policy; fo
   assert.match(focus, /\(detailWidth \+ 1\) \/ world\.width, \(detailHeight \+ 1\) \/ world\.height/);
 });
 
-test('active and selected cards keep a blue selection edge across zoom and compact views', () => {
-  const selectors = ['.egd-canvas-card.egd-entity-active', '.egd-canvas-card.egd-entity-selected:not(.egd-entity-active)',
-    '.egd-browser-card.egd-entity-active', '.egd-browser-card.egd-entity-selected:not(.egd-entity-active)', '.egd-chat-card.egd-entity-active'];
+test('selected cards keep a sage accent edge and the active card a quiet sage ring across zoom and compact views', () => {
+  const selected = ['.egd-canvas-card.egd-entity-selected:not(.egd-entity-active)', '.egd-browser-card.egd-entity-selected:not(.egd-entity-active)'];
+  const active = ['.egd-canvas-card.egd-entity-active', '.egd-browser-card.egd-entity-active', '.egd-chat-card.egd-entity-active'];
+  const multiActive = '#egd-canvas-layer:has(> .egd-entity-selected:not(.egd-entity-active)) > .egd-canvas-card.egd-entity-active';
   for (const scheme of ['light', 'dark']) {
     const env = { scheme };
-    for (const selector of selectors) assert.equal(declarationsFor(selector, env)['border-color'], 'var(--egd-card-selection)', selector);
-    for (const selector of selectors.slice(0, 2)) assert.equal(declarationsFor(selector, env).outline,
-      'calc(2px / var(--egd-camera-zoom, 1)) solid var(--egd-card-selection)', selector);
+    for (const selector of selected) assert.equal(declarationsFor(selector, env)['border-color'], 'var(--egd-card-selection)', selector);
+    for (const selector of active) assert.equal(declarationsFor(selector, env)['border-color'], 'var(--egd-card-active-border)', selector);
+    assert.equal(declarationsFor(selected[0], env).outline, 'calc(2px / var(--egd-camera-zoom, 1)) solid var(--egd-card-selection)');
+    assert.equal(declarationsFor(active[0], env).outline, 'calc(2px / var(--egd-camera-zoom, 1)) solid var(--egd-card-active-ring)');
+    assert.equal(declarationsFor(active[0], env)['box-shadow'], 'var(--egd-card-shadow-active)');
+    // Among several selected windows the active one is not the weakest edge.
+    assert.equal(declarationsFor(multiActive, env)['border-color'], 'var(--egd-card-selection)');
+    assert.equal(declarationsFor(multiActive, env)['outline-color'], 'var(--egd-card-selection)');
     const root = readRootProperties(surfaceCss, env);
+    assert.equal(root['--egd-card-selection'], 'var(--egd-primary)', 'the selection edge is the approved sage accent, not a separate blue');
     const selection = resolveColor('var(--egd-card-selection)', root);
+    const surface = resolveColor('var(--egd-surface-elevated)', root);
     for (const background of ['--egd-surface-elevated', '--egd-wood']) {
       assert.ok(contrastRatio(selection, resolveColor(`var(${background})`, root)) >= 4.5, `${scheme} ${background}`);
     }
+    // The active edge is quieter than the accent but stronger than a resting window edge.
+    const activeEdge = contrastRatio(resolveColor('var(--egd-card-active-border)', root), surface);
+    assert.ok(activeEdge >= 2, `${scheme} active edge ${activeEdge}`);
+    assert.ok(activeEdge > contrastRatio(resolveColor('var(--egd-outline)', root), surface), `${scheme} active edge above the resting edge`);
+    assert.ok(activeEdge < contrastRatio(selection, surface), `${scheme} active edge below the accent`);
+    assert.match(root['--egd-card-active-ring'], /^color-mix\(in srgb, var\(--egd-primary\) \d+%, transparent\)$/);
   }
+  assert.doesNotMatch(surfaceCss, /#295EAB|#80B4FF/i, 'the legacy blue selection values are gone');
   const proxy = declarationsFor('.egd-canvas-card:is(.egd-entity-active, .egd-entity-selected) > .egd-semantic-proxy');
   assert.equal(proxy['border-width'], '2px');
   assert.equal(proxy['border-color'], 'var(--egd-card-selection)');
-  assert.equal(readRootProperties(surfaceCss, { forcedColors: true })['--egd-card-selection'], 'Highlight');
+  const forced = readRootProperties(surfaceCss, { forcedColors: true });
+  for (const token of ['--egd-card-selection', '--egd-card-active-border', '--egd-card-active-ring']) assert.equal(forced[token], 'Highlight', token);
+});
+
+test('window dots stay quiet until the title row is hovered or focused, with one press area and focus ring', () => {
+  const dot = declarationsFor('.egd-card-dot');
+  assert.equal(dot.width, '10px'); assert.equal(dot.height, '10px');
+  assert.equal(declarationsFor('.egd-card-dots').gap, '8px', 'contract: 10px dots on an 8px gap');
+  assert.equal(dot['background-color'], 'color-mix(in srgb, var(--egd-on-surface-variant) 32%, transparent)', 'resting dots carry no hue');
+  for (const kind of ['close', 'min', 'max']) {
+    const own = declarationsFor(`.egd-card-dot-${kind}`);
+    assert.deepEqual(Object.keys(own), ['--egd-window-dot-live'], `${kind} only names its live colour`);
+  }
+  const live = rulesFor('.egd-card-dot:focus-visible').find(rule => new Map(rule.declarations).has('background-color'));
+  assert.ok(live, 'live colour rule');
+  // Browser clips its dot inside a 29px press box; a background shorthand in a
+  // stronger dot rule would reset that clip and paint the whole box.
+  assert.equal(declarationsFor('.egd-browser-card .egd-desk-window-control')['background-clip'], 'padding-box');
+  for (const rule of [...rulesFor('.egd-card-dot'), live]) assert.equal(new Map(rule.declarations).has('background'), false, 'dot colours never use the background shorthand');
+  assert.ok(live.selectors.includes(':is(.egd-card-header, .egd-chat-card-header, .egd-window-dots-host):is(:hover, :has(:is(.egd-card-dot, button):focus-visible)) .egd-card-dot'),
+    'any title row lights its dots on hover or keyboard focus');
+  assert.ok(live.selectors.every(selector => !selector.includes(':focus-within')), 'a focus placed by script after a drag does not keep the dots lit');
+  assert.equal(new Map(live.declarations).get('background-color'), 'var(--egd-window-dot-live, var(--egd-on-surface-variant))');
+  // 10px dot + 7px above and below = 24px tall; 4px each side stays inside the 8px gap.
+  const press = declarationsFor('.egd-card-dot::before');
+  assert.equal(press.inset, '-7px -4px'); assert.equal(press.position, 'absolute');
+  assert.equal(declarationsFor('.egd-card-dot[hidden]').display, 'none', 'a window that cannot fold shows no yellow dot');
+  assert.equal(declarationsFor('.egd-card-dot:is(.egd-card-dot-min, .egd-card-dot-max):not([role="button"])').display, 'none',
+    'a yellow or green dot that is not wired as a button is not shown');
+  assert.equal(declarationsFor('.egd-browser-card .egd-desk-window-control::before').content, 'none', 'Browser keeps its own 29px box');
+  // The surface-wide reduced-motion rule already settles every egd- transition at once.
+  assert.match(surfaceCss, /@media \(prefers-reduced-motion: reduce\) \{[^}]*\[class\*="egd-"\]/);
+});
+
+test('a folded window shows only its title row and never while maximized', () => {
+  const folded = '.egd-canvas-card.egd-card-collapsed:not(.egd-card-fullscreen)';
+  assert.equal(declarationsFor(folded).height, 'auto');
+  assert.equal(declarationsFor(folded)['min-height'], '0');
+  assert.match(surfaceCss, /\.egd-card-collapsed:not\(\.egd-card-fullscreen\) \{\n  height: auto !important;\n  min-height: 0 !important;\n\}/,
+    'the inline stored height is kept, only overridden');
+  const hidden = rulesFor(`${folded} > :is(.egd-card-body, .egd-card-resize-hit)`)[0];
+  assert.ok(hidden, 'body and resize handles are hidden together');
+  assert.equal(new Map(hidden.declarations).get('display'), 'none');
+  assert.ok(hidden.selectors.includes(`${folded} > .egd-card-header > :is(.egd-desk-window-toolbar, .egd-desk-window-progress)`));
+  assert.equal(declarationsFor(`${folded} > .egd-card-header`)['border-radius'], '8px', 'the folded title row is round on all four corners');
 });
 
 test('resource strip shows approved 22px rings only, with a neutral disk glyph', () => {
