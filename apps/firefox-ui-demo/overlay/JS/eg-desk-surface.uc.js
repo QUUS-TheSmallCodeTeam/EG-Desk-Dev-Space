@@ -1226,6 +1226,31 @@
       }, el('span', { class: 'egd-codex-new-message-text' }, ChatHistoryView.NEW_MESSAGE_LABEL), deskIcon('chevron', 'egd-codex-new-message-icon')));
   }
 
+  // A46: '다시 보내기' under a message of mine that was refused. It only puts
+  // the words back in the composer; 대표님 presses send.
+  function buildCodexResendButton(message, onPress) {
+    if (!ChatHistoryView.resendAvailable(message)) return null;
+    return el('button', {
+      class: 'egd-codex-resend', type: 'button', title: ChatHistoryView.RESEND_HINT,
+      data: { testid: 'chat-message-resend', messageId: message.id, focusKey: `message-resend-${message.id}` },
+      onclick: (ev) => { ev.stopPropagation(); onPress(message); },
+    }, ChatHistoryView.RESEND_LABEL);
+  }
+
+  // The composer's own input listener saves the draft and resizes the box.
+  function restoreCodexMessageToComposer(body, message) {
+    const input = body?.querySelector('.egd-codex-input');
+    if (!input) return false;
+    const next = ChatHistoryView.resendDraft(input.value, message?.content);
+    if (next.changed) {
+      input.value = next.draft;
+      input.dispatchEvent(new Event('input', { bubbles: true }));
+    }
+    input.focus();
+    input.setSelectionRange(input.value.length, input.value.length);
+    return true;
+  }
+
   function codexResultChipKind(label) {
     const normalized = String(label || '').trim().toLowerCase();
     if (/^(run|plan|action|context)$/.test(normalized)) return 'run';
@@ -11042,6 +11067,9 @@
             // CHAT-03: the @이름 chips sit right under the bubble, '스레드로 보냄' just above the time.
             if (mentionRow) messageStack.insertBefore(mentionRow, messageLine.nextSibling);
             if (sentChip) messageStack.insertBefore(sentChip, meta);
+            // A46: a refused message of mine offers its words back, just above the time.
+            const resend = buildCodexResendButton(message, (refused) => restoreCodexMessageToComposer(body, refused));
+            if (resend) messageStack.insertBefore(resend, meta);
             if (message.inputReferences?.length) messageStack.appendChild(el('button', {
               class: 'egd-codex-result-chip', data: { testid: 'chat-message-inputs', requestId: message.requestId || '' },
               onclick: () => openCodexActivityPanel(activeThread.id),

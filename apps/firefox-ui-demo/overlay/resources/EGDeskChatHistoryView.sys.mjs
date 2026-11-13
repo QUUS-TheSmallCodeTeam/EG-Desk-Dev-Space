@@ -79,3 +79,24 @@ export const BOTTOM_SLACK_PX = 24;
 export function atLogBottom({ scrollHeight, scrollTop, clientHeight } = {}) {
   return (Number(scrollHeight) || 0) - (Number(scrollTop) || 0) - (Number(clientHeight) || 0) < BOTTOM_SLACK_PX;
 }
+
+// A46: a message of mine the connection refused can go back to the composer.
+// Only a known refusal ('failed') offers it; an unknown outcome might still
+// have arrived, so it is not offered again.
+export const RESEND_LABEL = '다시 보내기';
+export const RESEND_HINT = '이 내용을 입력창에 다시 넣습니다. 보내기는 직접 누릅니다.';
+
+export function resendAvailable(message) {
+  return message?.role === 'user' && message.status === 'failed'
+    && typeof message.content === 'string' && message.content.trim() !== '';
+}
+
+// What the composer should hold after '다시 보내기'. A draft in progress is
+// kept and the refused words follow it; words already there are not doubled.
+export function resendDraft(current, refused) {
+  const draft = typeof current === 'string' ? current : '';
+  const words = typeof refused === 'string' ? refused.trim() : '';
+  const kept = draft.trimEnd();
+  if (!words || kept === words || kept.endsWith(`\n\n${words}`)) return { draft, changed: false };
+  return { draft: kept.trim() ? `${kept}\n\n${words}` : words, changed: true };
+}

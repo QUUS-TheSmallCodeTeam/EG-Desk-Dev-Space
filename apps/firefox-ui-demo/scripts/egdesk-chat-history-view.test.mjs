@@ -210,6 +210,66 @@ test('both Chat heads and every room row carry the kind badge; DM words name the
   assert.match(source, /if \(role === 'system'\) return '시스템';/);
 });
 
+// A46: a refused message of mine goes back to the composer; sending stays my press.
+test('a refused message returns its words to the composer without replacing what is being written', () => {
+  assert.equal(View.resendAvailable({ role: 'user', status: 'failed', content: '보고서 요약해 줘' }), true);
+  assert.equal(View.resendAvailable({ role: 'user', status: 'unconfirmed', content: '보고서' }), false, 'an unknown outcome is not offered again');
+  assert.equal(View.resendAvailable({ role: 'user', status: 'failed', content: '   ' }), false);
+  assert.equal(View.resendAvailable({ role: 'assistant', status: 'failed', content: '답' }), false);
+  assert.deepEqual(View.resendDraft('', '보고서 요약해 줘'), { draft: '보고서 요약해 줘', changed: true });
+  assert.deepEqual(View.resendDraft('  \n', '보고서 요약해 줘\n'), { draft: '보고서 요약해 줘', changed: true });
+  assert.deepEqual(View.resendDraft('새로 쓰던 글 ', '보고서 요약해 줘'), { draft: '새로 쓰던 글\n\n보고서 요약해 줘', changed: true },
+    'a draft in progress is kept and the refused words follow it');
+  assert.deepEqual(View.resendDraft('보고서 요약해 줘', '보고서 요약해 줘'), { draft: '보고서 요약해 줘', changed: false }, 'pressing twice does not double the words');
+  assert.deepEqual(View.resendDraft('쓰던 글', undefined), { draft: '쓰던 글', changed: false });
+  assert.equal(View.RESEND_LABEL, '다시 보내기');
+});
+
+test("'다시 보내기' sits under a refused bubble and fills this Chat's composer through its own input handling", () => {
+  const api = compileFunction(`${declaration('buildCodexResendButton')}\n${declaration('restoreCodexMessageToComposer')}
+    return { buildCodexResendButton, restoreCodexMessageToComposer };`, ['el', 'ChatHistoryView', 'Event'])(el, View, class { constructor(type, init) { this.type = type; this.bubbles = init?.bubbles; } });
+  const failed = { id: 'm7', role: 'user', status: 'failed', content: '보고서 요약해 줘' };
+  let pressed = null;
+  const button = api.buildCodexResendButton(failed, message => { pressed = message; });
+  assert.equal(button.tag, 'button');
+  assert.equal(button.className, 'egd-codex-resend');
+  assert.equal(button.props.type, 'button');
+  assert.deepEqual(button.children, ['다시 보내기']);
+  assert.match(button.props.title, /입력창/);
+  assert.deepEqual(button.dataset, { testid: 'chat-message-resend', messageId: 'm7', focusKey: 'message-resend-m7' });
+  button.props.onclick({ stopPropagation() {} });
+  assert.equal(pressed, failed);
+  assert.equal(api.buildCodexResendButton({ ...failed, status: 'unconfirmed' }, () => {}), null);
+  assert.equal(api.buildCodexResendButton({ id: 'a', role: 'assistant', status: 'failed', content: '답' }, () => {}), null);
+
+  const events = [];
+  const input = {
+    value: '쓰던 글', focused: 0, selection: null,
+    dispatchEvent(event) { events.push([event.type, event.bubbles, this.value]); },
+    focus() { this.focused += 1; },
+    setSelectionRange(start, end) { this.selection = [start, end]; },
+  };
+  const body = { querySelector: selector => selector === '.egd-codex-input' ? input : null };
+  assert.equal(api.restoreCodexMessageToComposer(body, failed), true);
+  assert.equal(input.value, '쓰던 글\n\n보고서 요약해 줘');
+  assert.deepEqual(events, [['input', true, '쓰던 글\n\n보고서 요약해 줘']], "the composer's own input listener saves the draft and enables send");
+  assert.equal(input.focused, 1);
+  assert.deepEqual(input.selection, [input.value.length, input.value.length]);
+  assert.equal(api.restoreCodexMessageToComposer(body, failed), true);
+  assert.equal(events.length, 1, 'already there: only the focus moves');
+  assert.equal(input.focused, 2);
+  assert.equal(api.restoreCodexMessageToComposer({ querySelector: () => null }, failed), false);
+
+  assert.match(source, /const resend = buildCodexResendButton\(message, \(refused\) => restoreCodexMessageToComposer\(body, refused\)\);/);
+  assert.match(source, /if \(resend\) messageStack\.insertBefore\(resend, meta\);/);
+  assert.doesNotMatch(declaration('restoreCodexMessageToComposer'), /sendMessage/, 'never an automatic resend');
+  const rule = css.slice(css.indexOf('\n.egd-codex-resend {'), css.indexOf('}', css.indexOf('\n.egd-codex-resend {')) + 1);
+  assert.match(rule, /color: var\(--egd-danger-ink\);/);
+  assert.doesNotMatch(rule, /#[0-9a-fA-F]{3,8}\b|rgba?\(/);
+  assert.match(css, /\.egd-codex-resend:hover \{[^}]*var\(--egd-/);
+  assert.match(css, /\.egd-codex-resend:focus-visible \{[^}]*outline: var\(--egd-focus-outline\);/);
+});
+
 test('day line and new-message button use tokens, show focus, and do not animate under reduced motion', () => {
   const rule = (selector) => {
     const start = css.indexOf(`\n${selector} {`);
