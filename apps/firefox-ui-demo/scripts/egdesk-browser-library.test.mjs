@@ -693,6 +693,8 @@ test('production Browser menu invokes only its native Library and import entries
     el: make, resolveFloatingMenuPlacement: () => ({ left: 0, top: 0 }),
     spawnBrowserCard() {}, copyTextToClipboard() {}, navigateBrowser() {}, stopBrowser() {}, reloadBrowser() {},
     isCardFullscreen: () => false, toggleCardFullscreen() {}, endAgentHold() {},
+    // No conversation is bound here, so the menu holds no standing grant (BRW-11).
+    browserToolGrantFor: () => null,
     openFirefoxBrowserLibrary(section, opener) { actions.push(['library', section, opener]); },
     openFirefoxBrowserImport() { actions.push(['import']); },
   };
