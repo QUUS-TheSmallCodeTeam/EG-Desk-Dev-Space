@@ -436,6 +436,7 @@ const insetFocusSelectors = [
   '.egd-codex-notices:focus-visible',
   '.egd-context-suggest-row:focus-within',
   '.egd-ontology-stage-mini-tool:focus-visible',
+  '.egd-rail-search-result:focus-visible',
 ];
 // The focused row passes its local inset variable to descendants. Its button
 // needs an explicit outward reset while the row itself keeps the inset ring.

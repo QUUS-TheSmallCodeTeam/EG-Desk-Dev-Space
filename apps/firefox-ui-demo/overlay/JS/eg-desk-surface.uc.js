@@ -104,7 +104,7 @@
     },
     {
       id: 'tool-operator',
-      label: 'Tool',
+      label: '도구',
       name: 'Basic Tool Operator',
       category: 'tool',
       toolMode: 'tool-call',
@@ -134,7 +134,7 @@
     },
     {
       id: 'codebase-explorer',
-      label: 'Explore',
+      label: '탐색',
       name: 'Codebase Explorer',
       category: 'coding',
       toolMode: 'read-only-code',
@@ -149,7 +149,7 @@
     },
     {
       id: 'implementation-worker',
-      label: 'Build',
+      label: '구현',
       name: 'Implementation Worker',
       category: 'coding',
       toolMode: 'implementation',
@@ -164,7 +164,7 @@
     },
     {
       id: 'review-verifier',
-      label: 'Verify',
+      label: '검증',
       name: 'Review and Verification Agent',
       category: 'coding',
       toolMode: 'verification',
@@ -1277,7 +1277,7 @@
         openCodexResultLink(artifact, { opener: ev.currentTarget?.closest?.('.egd-chat-card') || null });
       },
     }, el('span', { class: 'egd-codex-result-label' }, artifact.label || artifact.target.path.split('/').pop()),
-    el('span', { 'aria-hidden': 'true', class: 'egd-codex-result-arrow' }, '↗'))));
+    el('span', { 'aria-hidden': 'true', class: 'egd-codex-result-arrow' }, deskIcon('arrow')))));
   }
 
   // CHAT-08 / D-K4: an Agent-published Canvas result is one chip per outputKey
@@ -4044,7 +4044,7 @@
           data: { testid: 'result-card-artifact', artifactId: artifact.id },
           onclick: (ev) => { ev.preventDefault(); ev.stopPropagation(); openCodexResultLink(artifact, { opener: shell.root }); },
         }, el('span', { class: 'egd-codex-result-label' }, artifact.label || artifact.target.path.split('/').pop()),
-        el('span', { 'aria-hidden': 'true', class: 'egd-codex-result-arrow' }, '↗'))))) : null;
+        el('span', { 'aria-hidden': 'true', class: 'egd-codex-result-arrow' }, deskIcon('arrow')))))) : null;
       const parts = [
         el('header', { class: 'egd-result-card-source', data: { testid: 'result-card-source' } },
           el('span', { class: 'egd-result-card-source-line' }, source.line),
@@ -5363,7 +5363,7 @@
     }
     notice.replaceChildren(document.createTextNode(message), el('button', {
       'aria-label': '안내 닫기', onclick: () => notice.remove(),
-    }, '×'));
+    }, deskIcon('close')));
   }
 
   function activeBoardProjection() {
@@ -6018,7 +6018,7 @@
     return el('div', { class: 'egd-store-conflict-body' },
       el('div', { class: 'egd-store-panel-head' },
         el('strong', {}, '다른 곳에서 이 Board가 바뀌었습니다'),
-        el('button', { type: 'button', class: 'egd-store-panel-close', 'aria-label': '안내 닫기', data: { testid: 'board-conflict-close', focusKey: 'close' }, onclick: () => actions.onClose?.() }, '×')),
+        el('button', { type: 'button', class: 'egd-store-panel-close', 'aria-label': '안내 닫기', data: { testid: 'board-conflict-close', focusKey: 'close' }, onclick: () => actions.onClose?.() }, deskIcon('close'))),
       el('p', { class: 'egd-store-panel-copy' }, `'${conflict.title || 'Board'}'에 다른 창이나 PC에서 저장한 새 버전이 있습니다. 내 변경은 이 PC 설정에 저장했고, 버전 기록은 덮어쓰지 않았습니다.`),
       conflict.message ? el('p', { class: 'egd-store-panel-status', role: 'status' }, conflict.message) : null,
       latestView,
@@ -6168,7 +6168,7 @@
       el('div', { class: 'egd-store-panel-head' },
         el('strong', {}, `${boardHistory.title} · 버전 기록`),
         el('button', { type: 'button', class: 'egd-store-panel-close', 'aria-label': '버전 기록 닫기', data: { focusKey: 'close' },
-          onclick: () => closeBoardHistoryPanel({ restoreFocus: true }) }, '×')),
+          onclick: () => closeBoardHistoryPanel({ restoreFocus: true }) }, deskIcon('close'))),
       el('p', { class: 'egd-store-panel-copy' }, '저장할 때마다 버전이 남습니다. 예전 버전으로 되돌려도 새 버전으로 저장되어 지금 버전이 지워지지 않습니다.'),
       boardHistory.message ? el('p', { class: 'egd-store-panel-status', role: 'status' }, boardHistory.message) : null,
       boardHistory.failed ? el('button', { type: 'button', class: 'egd-store-more', data: { focusKey: 'retry' }, onclick: () => loadBoardHistory() }, '다시 시도') : null,
@@ -8545,7 +8545,7 @@
         const log = plan.scrollTop !== null ? chatLog() : null;
         if (log) log.scrollTop = plan.scrollTop;
       },
-    }, deskIcon('chat'), el('span', {}, '채팅으로 돌아가기')));
+    }, deskIcon('chat'), el('span', {}, '대화로 돌아가기')));
     cue.appendChild(el('button', {
       type: 'button', class: 'egd-chat-return-close', title: '닫기', 'aria-label': '채팅으로 돌아가기 닫기', data: { testid: 'chat-return-close' },
       onclick: (ev) => { ev.stopPropagation(); dismiss(); },
@@ -8825,10 +8825,10 @@
   }
 
   function cardLabelForViewportRail(card) {
-    if (!card) return 'Card';
+    if (!card) return '창';
     if (card.classList.contains('egd-terminal-card')) return 'Terminal';
-    if (card.classList.contains('egd-settings-card')) return 'Settings';
-    if (card.classList.contains('egd-ontology-card')) return 'Ontology';
+    if (card.classList.contains('egd-settings-card')) return '설정';
+    if (card.classList.contains('egd-ontology-card')) return '온톨로지';
     if (card.classList.contains('egd-file-card')) return card._fileRecord?.root?.name || '파일';
     if (card.classList.contains('egd-chat-card')) {
       return card.querySelector('.egd-chat-card-title')?.textContent?.trim() || 'Chat';
@@ -8837,7 +8837,7 @@
     if (urlInput && typeof urlInput.value === 'string' && urlInput.value.trim()) {
       return 'Browser';
     }
-    return card.getAttribute('title') || 'Card';
+    return card.getAttribute('title') || '창';
   }
 
   function syncViewportAgendaRail() {
@@ -9869,7 +9869,7 @@
       onmousedown: (ev) => { if (ev.target?.closest?.('button')) ev.preventDefault(); } },
       el('div', { class: 'egd-minimap-header' },
         el('div', { class: 'egd-minimap-title' }, '미니맵'),
-        el('button', { class: 'egd-minimap-close', title: '닫기', onclick: closeDeskMinimap }, '×'),
+        el('button', { class: 'egd-minimap-close', title: '미니맵 닫기', 'aria-label': '미니맵 닫기', onclick: closeDeskMinimap }, deskIcon('close')),
       ),
       el('div', { class: 'egd-minimap-map' }),
       el('div', { class: 'egd-minimap-caption' }, SurfaceState.deskMinimapCaption(1, 0)),
@@ -17034,7 +17034,7 @@
     state.hudApp = appId;
     hud.dataset.app = appId;
     hud.classList.remove('egd-hud-hidden');
-    hud.querySelector('.egd-hud-title').textContent = appId === 'chat' ? '코덱스 채팅' : appLabel;
+    hud.querySelector('.egd-hud-title').textContent = appId === 'chat' ? '채팅' : appLabel;
     syncHudViewportFit();
     syncMaximizeHudAfterToggle(options);
     body.textContent = '';
@@ -18522,10 +18522,10 @@
         __proto__: null,
         browser: ['.egd-card-page-title', 'Browser'], chat: ['.egd-chat-card-title', 'Chat'],
         file: ['.egd-file-card-title', '파일'], terminal: ['.egd-terminal-title', 'Terminal'],
-        settings: ['.egd-settings-title', 'Settings'], ontology: ['.egd-ontology-title', 'Ontology'],
+        settings: ['.egd-settings-title', '설정'], ontology: ['.egd-ontology-title', '온톨로지'],
         'input-evidence': ['.egd-desk-window-identity strong', '자료'], result: ['.egd-result-card-title', '결과'],
       }[kind];
-      return display ? card.querySelector(display[0])?.textContent?.trim() || display[1] : 'Card';
+      return display ? card.querySelector(display[0])?.textContent?.trim() || display[1] : '창';
     }
     const memo = root?._memoRecord;
     if (!memo || !root.isConnected) return;
@@ -20003,7 +20003,7 @@
               form[key] = form[key].filter((_, at) => at !== index);
               agents.focusField = key;
               renderAgentsTab();
-            } }, '×')))) : null,
+            } }, deskIcon('close'))))) : null,
           el('div', { class: 'egd-settings-chip-add' }, input,
             el('button', { class: 'egd-settings-btn', disabled: form[key].length >= max ? 'true' : null, onclick: add }, '추가'),
             el('span', { class: 'egd-settings-form-count' }, `${form[key].length}/${max}`)));
@@ -20166,7 +20166,7 @@
       const section = el('section', { class: 'egd-settings-section egd-settings-agent-form', data: { testid: 'settings-agent-form' } },
         el('button', { class: 'egd-settings-link', onclick: () => {
           if (agents.profileId) void openProfile(agents.profileId); else { agents.mode = 'list'; renderAgentsTab(); }
-        } }, '← 돌아가기'),
+        } }, agents.profileId ? '← Agent 상세로' : '← Agent 목록으로'),
         el('div', { class: 'egd-settings-detail-name' }, agents.profileId ? 'Agent 편집' : 'Agent 만들기'),
         agents.errors.length ? el('div', { class: 'egd-settings-error-summary', role: 'alert', data: { testid: 'settings-agent-errors' } },
           el('div', {}, '저장하지 못했습니다. 아래 항목을 확인해 주세요.'),
@@ -22097,7 +22097,7 @@
     const render = focusId => {
       const nodes = [el('div', { class: 'egd-store-panel-head' }, el('strong', {}, 'Chrome 로그인 가져오기'),
         el('button', { type: 'button', class: 'egd-store-panel-close', 'aria-label': '닫기',
-          data: { testid: 'browser-cookie-close' }, onclick: requestClose }, '×'))];
+          data: { testid: 'browser-cookie-close' }, onclick: requestClose }, deskIcon('close')))];
       if (phase === 'intro' || phase === 'listing') {
         nodes.push(el('p', { class: 'egd-store-panel-copy' }, '이 Mac의 Chrome 프로필을 찾아 선택하세요.'));
         if (phase === 'listing') nodes.push(el('p', { role: 'status' }, '프로필을 찾는 중…'));
@@ -27477,7 +27477,7 @@
       panel.replaceChildren(...[
         el('div', { class: 'egd-store-panel-head' }, el('strong', {}, 'JSON Canvas 내보내기'),
           el('button', { type: 'button', class: 'egd-store-panel-close', 'aria-label': '내보내기 안내 닫기',
-            data: { testid: 'board-canvas-close' }, onclick: close }, '×')),
+            data: { testid: 'board-canvas-close' }, onclick: close }, deskIcon('close'))),
         el('p', { class: 'egd-store-panel-status', role: 'status', data: { testid: 'board-canvas-status' } }, view.message),
         fileExists && view.status === 'failed' ? el('p', { class: 'egd-portable-warning', data: { testid: 'board-canvas-file-exists' } },
           '같은 이름의 파일이 있습니다. 기존 파일은 덮어쓰지 않습니다. 다른 이름이나 위치를 선택해 주세요.') : null,
@@ -27808,7 +27808,7 @@
     const head = (title) => el('div', { class: 'egd-store-panel-head' },
       el('strong', {}, title),
       el('button', { type: 'button', class: 'egd-store-panel-close', 'aria-label': `${title} 닫기`, disabled: busy, data: { focusKey: 'close', testid: 'portable-close' },
-        onclick: () => actions.onClose?.() }, '×'));
+        onclick: () => actions.onClose?.() }, deskIcon('close')));
     const error = view.error ? el('p', { class: 'egd-store-panel-status egd-portable-error', role: 'alert', data: { testid: 'portable-error' } }, view.error) : null;
     const status = (text) => el('p', { class: 'egd-store-panel-status', role: 'status', data: { testid: 'portable-status' } }, text);
     const field = (name, label, { autofocus = false, invalid = false } = {}) => {
@@ -28035,7 +28035,7 @@
       el('div', { class: 'egd-store-panel-head' },
         el('strong', {}, '복구 기록'),
         el('button', { type: 'button', class: 'egd-store-panel-close', 'aria-label': '복구 기록 닫기', data: { focusKey: 'close' },
-          onclick: () => closeDeskHistoryPanel({ restoreFocus: true }) }, '×')),
+          onclick: () => closeDeskHistoryPanel({ restoreFocus: true }) }, deskIcon('close'))),
       el('p', { class: 'egd-store-panel-copy' }, 'Desk가 저장될 때마다 시점이 남습니다. 시점을 골라 미리 보고, 되돌리거나 지금 작업에 합칠 수 있습니다.'),
       // D-R1: what the journal keeps, as the bridge reports it (an older bridge says nothing).
       RecoveryState.deskRetentionText(deskHistory.page?.retention) ? el('p', { class: 'egd-store-panel-copy', data: { testid: 'desk-history-retention' } }, RecoveryState.deskRetentionText(deskHistory.page.retention)) : null,
@@ -28460,6 +28460,40 @@
     document.body.style.background = 'var(--egd-wood)';
   }
 
+  // A65 (BRW-01): Left/Right/Home/End move focus between the buttons of the
+  // Dock, the top bar and the Canvas view bar. One listener on the window, so
+  // it does not depend on how those bars are built; Tab order is unchanged and
+  // a control that handles the key itself keeps it.
+  const ArrowRowNavigation = ChromeUtils.importESModule('chrome://userchrome/content/EGDeskFocusNavigation.sys.mjs');
+  const ARROW_ROW_ROOTS = '#egd-dock, #egd-desk-rail, #egd-zoom-indicator';
+  const ARROW_ROW_ITEMS = 'button, [role="button"]';
+  const ARROW_ROW_POPUPS = '[role="menu"], [role="listbox"], [role="dialog"], [role="tablist"], [role="radiogroup"]';
+
+  function handleArrowRowKeydown(ev) {
+    if (ev.defaultPrevented || ev.altKey || ev.ctrlKey || ev.metaKey || ev.shiftKey) return;
+    const intent = ArrowRowNavigation.compositeKeyIntent(ev.key);
+    const target = ev.target;
+    if (!intent || !target?.matches?.(ARROW_ROW_ITEMS)) return;
+    const root = target.closest(ARROW_ROW_ROOTS);
+    if (!root || target.closest(ARROW_ROW_POPUPS)) return;
+    const items = [...root.querySelectorAll(ARROW_ROW_ITEMS)]
+      .filter(item => !item.closest(ARROW_ROW_POPUPS) && item.getClientRects().length > 0);
+    const next = ArrowRowNavigation.nextCompositeIndex({
+      count: items.length, current: items.indexOf(target), intent,
+      isSkipped: index => items[index].disabled === true,
+    });
+    if (next < 0 || items[next] === target) return;
+    ev.preventDefault();
+    ev.stopPropagation();
+    items[next].focus();
+  }
+
+  function installArrowRowKeys() {
+    try { window.__egdeskArrowRowKeysCleanup?.(); } catch {}
+    window.addEventListener('keydown', handleArrowRowKeydown);
+    window.__egdeskArrowRowKeysCleanup = () => window.removeEventListener('keydown', handleArrowRowKeydown);
+  }
+
   function boot() {
     try {
       if (document.getElementById('egd-desk-rail')) return;
@@ -28614,6 +28648,7 @@
       host.appendChild(buildDock());
       host.appendChild(buildPresetBag());
       host.appendChild(buildHUD());
+      installArrowRowKeys();
       restoreSurfaceEntry(lifecycle, deskSession, legacyStore);
       installFirstRunDeskEntry();
       state.codex.localHistoryBootReady = true;

@@ -338,8 +338,8 @@ test('memo badge: exact target View display text is local-only; Agent label and 
   assert.equal(root._memoRecord.anchor.cardId, 'target-a', 'display text never becomes an identity lookup');
   for (const [kind, selector, fallback] of [
     ['chat', '.egd-chat-card-title', 'Chat'], ['file', '.egd-file-card-title', '파일'],
-    ['terminal', '.egd-terminal-title', 'Terminal'], ['settings', '.egd-settings-title', 'Settings'],
-    ['ontology', '.egd-ontology-title', 'Ontology'], ['input-evidence', '.egd-desk-window-identity strong', '자료'],
+    ['terminal', '.egd-terminal-title', 'Terminal'], ['settings', '.egd-settings-title', '설정'],
+    ['ontology', '.egd-ontology-title', '온톨로지'], ['input-evidence', '.egd-desk-window-identity strong', '자료'],
     ['result', '.egd-result-card-title', '결과'],
   ]) {
     card.dataset.deskWindowKind = kind;
@@ -355,7 +355,7 @@ test('memo badge: exact target View display text is local-only; Agent label and 
     card.dataset.deskWindowKind = kind;
     card.querySelector = () => { throw new Error('Unknown kinds cannot query arbitrary metadata'); };
     api.syncMemoCardPosition(root);
-    assert.equal(badge.textContent, '📎 Card');
+    assert.equal(badge.textContent, '📎 창');
   }
   nodes.delete('target-a');
   scope.memoAnchorCandidates = () => [];

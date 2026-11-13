@@ -134,6 +134,8 @@ function uiFixture({ supported = true, availabilityReason = 'platform-unsupporte
     },
     focusCanvasCard: node => events.push(['focus-card', node]),
     revealOpenCanvasCard: node => events.push(['reveal-card', node]),
+    // The panel's close control draws the shared line icon instead of a letter.
+    deskIcon: name => Object.assign(document.createElement('svg'), { className: `egd-ui-icon egd-icon-${name}` }),
   };
   const code = section('  function el(', '\n  function svgEl(') +
     section('  const BROWSER_IDENTITY_REGISTRY_PREF', '\n  // Firefox Library is a separate native window.') +
@@ -250,6 +252,7 @@ test('profile listing failures use a fixed actionable message and do not display
     assert.match(f.part('browser-cookie-result').textContent, expected);
     assert.doesNotMatch(f.document.documentElement.textContent, /COOKIE_SECRET_DO_NOT_SHOW/);
     assert.equal(f.document.activeElement, f.part('browser-cookie-close'));
+    assert.deepEqual(f.part('browser-cookie-close').children.map(child => child.className), ['egd-ui-icon egd-icon-close'], 'close draws the shared icon');
     assert.equal(f.events.filter(item => item[0] === 'import').length, 0);
   }
 });

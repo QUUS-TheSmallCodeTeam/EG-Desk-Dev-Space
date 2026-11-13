@@ -309,6 +309,34 @@
   }
 }
 
+/* A30 / A34 (BRW-01, DSN-04): shared pressed and keyboard-focus states.
+   The veil is the text ink at low strength, so it deepens a light fill and
+   lifts a dark one without a per-theme value; the always-light Ontology lens
+   resolves its own. */
+:root,
+.egd-ontology-card {
+  --egd-pressed-veil: color-mix(in srgb, var(--egd-on-surface) 8%, transparent);
+}
+
+/* Pressed: one step past whatever fill the control shows at that moment
+   (resting, hover or filled primary). It is a background layer, so nothing
+   moves or resizes. Selector weight stays at zero; !important is only there
+   because hover rules reset the background shorthand. :root carries egd-
+   state classes, so it is excluded to leave Firefox's own buttons alone, and
+   a row does not press when a button inside it does. */
+:where([class*="egd-"], [id^="egd-"]):where(button, summary, [role="button"], [role="tab"], [role="menuitem"], [role="menuitemradio"], [role="menuitemcheckbox"], [role="option"], [role="switch"]):where(:active:not(:disabled, [disabled], [aria-disabled="true"], .egd-desk-window-control-disabled):not(:has(:is(button, summary, [role="button"], [role="tab"], [role="menuitem"], [role="menuitemradio"], [role="menuitemcheckbox"], [role="option"], [role="switch"]):active))),
+:where([class*="egd-"], [id^="egd-"]):where(:not(:root)) :where(button, summary, [role="button"], [role="tab"], [role="menuitem"], [role="menuitemradio"], [role="menuitemcheckbox"], [role="option"], [role="switch"]):where(:active:not(:disabled, [disabled], [aria-disabled="true"], .egd-desk-window-control-disabled):not(:has(:is(button, summary, [role="button"], [role="tab"], [role="menuitem"], [role="menuitemradio"], [role="menuitemcheckbox"], [role="option"], [role="switch"]):active))) {
+  background-image: linear-gradient(var(--egd-pressed-veil), var(--egd-pressed-veil)) !important;
+}
+
+/* Focus fallback: any button-like control without its own rule still shows
+   the shared ring. Zero weight, so every class rule above or below wins. */
+:where([class*="egd-"], [id^="egd-"]):where(button, summary, a[href], [role="button"], [role="tab"], [role="menuitem"], [role="menuitemradio"], [role="menuitemcheckbox"], [role="option"], [role="switch"], [role="radio"]):where(:focus-visible),
+:where([class*="egd-"], [id^="egd-"]):where(:not(:root)) :where(button, summary, a[href], [role="button"], [role="tab"], [role="menuitem"], [role="menuitemradio"], [role="menuitemcheckbox"], [role="option"], [role="switch"], [role="radio"]):where(:focus-visible) {
+  outline: var(--egd-focus-outline);
+  outline-offset: var(--egd-focus-outline-offset);
+}
+
 .egd-ui-icon {
   display: block;
   flex: none;
@@ -1093,6 +1121,7 @@
   min-height: 24px;
   pointer-events: auto;
 }
+#egd-board-notice button .egd-ui-icon { width: 12px; height: 12px; margin: auto; }
 #egd-board-scope { left: 50%; top: 25%; transform: translateX(-50%); width: 350px; }
 /* UX-05 [이동]/[크기]: a small fixed input beside the View bar it changes. */
 #egd-placement-dialog { width: 280px; padding: 14px 16px; }
@@ -1169,6 +1198,7 @@
 .egd-store-panel button.egd-store-primary { background: var(--egd-primary); border-color: var(--egd-primary); color: var(--egd-on-primary); }
 .egd-store-panel button.egd-store-primary:hover:not([disabled]) { background: var(--egd-primary-strong); }
 .egd-store-panel button.egd-store-panel-close { min-width: 28px; min-height: 28px; padding: 0; border-color: transparent; background: transparent; font-size: 16px; }
+.egd-store-panel-close .egd-ui-icon { width: 14px; height: 14px; margin: auto; }
 .egd-store-list { display: flex; flex-direction: column; gap: 2px; max-height: 240px; overflow: auto; }
 .egd-store-panel button.egd-store-row {
   display: grid;
@@ -3212,6 +3242,12 @@ button.egd-rail-focus-view {
   border-color: color-mix(in srgb, var(--egd-primary) 18%, transparent);
   background: color-mix(in srgb, var(--egd-surface-elevated) 68%, transparent);
 }
+/* Full-width rows in a scrolling list: the ring stays inside the row. */
+.egd-rail-search-result:focus-visible {
+  --egd-focus-outline-offset: var(--egd-focus-outline-inset);
+  outline: var(--egd-focus-outline);
+  outline-offset: var(--egd-focus-outline-offset);
+}
 
 /* The row Enter will run is marked for keyboard use too: the shared
    `.egd-edge button` reset otherwise clears the row's padding, border and wash. */
@@ -4037,6 +4073,7 @@ button.egd-rail-focus-view {
   background: var(--egd-outline-variant);
   color: var(--egd-on-surface);
 }
+.egd-minimap-close .egd-ui-icon { width: 12px; height: 12px; margin: auto; }
 
 .egd-minimap-map {
   position: relative;
@@ -7600,6 +7637,7 @@ button.egd-codex-message-activity:focus-visible { outline: var(--egd-focus-outli
   cursor: pointer;
 }
 .egd-settings-chip-remove:hover { color: var(--egd-on-surface); }
+.egd-settings-chip-remove .egd-ui-icon { width: 10px; height: 10px; margin: auto; }
 .egd-settings-form-actions {
   position: sticky;
   bottom: 0;
@@ -9039,6 +9077,10 @@ button.egd-codex-message-activity:focus-visible { outline: var(--egd-focus-outli
    only here so real result/briefing actions keep the approved attached-card look. */
 .egd-codex-result-chip { min-height: 32px !important; padding: 6px 9px !important; border: 1px solid var(--egd-outline) !important; border-radius: 7px !important; background: var(--egd-chat-paper) !important; color: var(--egd-on-surface) !important; font-size: 11.5px !important; font-weight: 600 !important; }
 .egd-codex-result-chip:hover { background: var(--egd-hover) !important; border-color: var(--egd-primary) !important; }
+/* This chip sets its fill with !important, which outranks the shared pressed
+   rule, so it repeats the same veil here. */
+.egd-codex-result-chip:active:not(:disabled) { background-image: linear-gradient(var(--egd-pressed-veil), var(--egd-pressed-veil)) !important; }
+.egd-codex-result-arrow .egd-ui-icon { width: 11px; height: 11px; }
 .egd-codex-empty-eyebrow,
 .egd-codex-empty-sub,
 .egd-codex-compose-hint { color: var(--egd-on-surface-variant); }

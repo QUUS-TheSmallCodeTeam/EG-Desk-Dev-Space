@@ -3817,12 +3817,13 @@ test('passive Board status stays off the lower Chat composer while its close con
     replaceChildren(...next) { this.children = next; },
     remove() { notice = null; },
   });
-  const showNotice = compileFunction(`return function boardNotice(message) {${body}\n  }`, ['document', 'el'])(document, el);
+  const showNotice = compileFunction(`return function boardNotice(message) {${body}\n  }`, ['document', 'el', 'deskIcon'])(document, el, name => ({ icon: name }));
   showNotice('작업 결과를 확인해 주세요.');
   assert.equal(notice.role, 'status');
   assert.match(notice.class, /egd-edge egd-frosted/);
   assert.equal(notice.children[0].textContent, '작업 결과를 확인해 주세요.');
   assert.equal(notice.children[1]['aria-label'], '안내 닫기');
+  assert.deepEqual(notice.children[1].children, [{ icon: 'close' }], 'the close control draws the shared icon, not a letter');
   const original = notice;
   showNotice('새 안내');
   assert.equal(notice, original, 'a new status updates the same notice without covering another area');
@@ -9426,7 +9427,7 @@ function productionProfileResolver(catalog) {
   assert.ok(sources.every(Boolean), 'profile resolution must remain directly testable');
   const legacy = {
     'conversational-coding': { id: 'conversational-coding', label: 'Chat', name: 'Conversational Coding Agent', summary: '', capabilities: [], systemPrompt: 'legacy chat prompt', toolMode: 'basic-tools' },
-    'review-verifier': { id: 'review-verifier', label: 'Verify', name: 'Review and Verification Agent', summary: '', capabilities: [], systemPrompt: 'legacy verifier prompt', toolMode: 'verification' },
+    'review-verifier': { id: 'review-verifier', label: '검증', name: 'Review and Verification Agent', summary: '', capabilities: [], systemPrompt: 'legacy verifier prompt', toolMode: 'verification' },
   };
   return compileFunction(`${sources.join('\n')}\nreturn { codexAgentProfile, codexAgentProfileChoices };`,
     ['ChatState', 'CODEX_AGENT_PROFILES', 'CODEX_AGENT_PROFILE_DEFS', 'DEFAULT_CODEX_AGENT_PROFILE_ID', 'codexProfileCatalog'])(
@@ -12438,9 +12439,10 @@ function minimapUiHarness({ document: suppliedDocument = null, state: suppliedSt
   }
   let safeRect = { left: 0, top: 0, right: 1000, bottom: 800, width: 1000, height: 800 };
   const actual = compileFunction(`const MINIMAP_SEARCH_PAGE_SIZE = 24, MINIMAP_PICK_SLOP = 4, MINIMAP_IME_COMMIT_GUARD_MS = 80;\n${names.map(declaration).join('\n')}\nreturn { toggleDeskMinimap, refreshDeskMinimap, openMinimapTargets };`,
-    ['document', 'window', 'state', 'SurfaceState', 'MinimapLayout', 'CANVAS_SHAPE_TITLES', 'cardLabelForViewportRail', 'safeViewportRect', 'BriefingState', 'briefingResolvedTargets', 'ChatState', 'InputContext', 'cloneJson'])(
+    ['document', 'window', 'state', 'SurfaceState', 'MinimapLayout', 'CANVAS_SHAPE_TITLES', 'cardLabelForViewportRail', 'safeViewportRect', 'BriefingState', 'briefingResolvedTargets', 'ChatState', 'InputContext', 'cloneJson', 'deskIcon'])(
     document, window, state, Surface, MinimapLayout, { rect: '사각형' }, () => '이름 없는 화면',
-    () => safeRect, Briefing, resolveEvidence, Chat, InputContext, value => JSON.parse(JSON.stringify(value)));
+    () => safeRect, Briefing, resolveEvidence, Chat, InputContext, value => JSON.parse(JSON.stringify(value)),
+    name => Object.assign(document.createElement('svg'), { className: `egd-ui-icon egd-icon-${name}` }));
   const make = (id, title, x, y, kind = 'view') => {
     const node = document.createElement('div');
     node.setAttribute('id', id);
@@ -15862,7 +15864,7 @@ test('the way back to Chat stays until used and brings the Chat back like the Do
   assert.ok(cue.className.includes('egd-edge'));
   const button = cue.children[0];
   assert.equal(button.dataset.testid, 'chat-return');
-  assert.equal(button.textContent, '채팅으로 돌아가기');
+  assert.equal(button.textContent, '대화로 돌아가기');
   assert.equal(cue.children[1].dataset.testid, 'chat-return-close');
   assert.equal(timers.size, 0, 'no timer takes it away');
   assert.deepEqual(chat.listeners.map(entry => [entry.type, entry.capture]), [['mousedown', true], ['focusin', true]]);
@@ -19859,11 +19861,12 @@ test('Board saves keep versions: a 409 never overwrites, the list reads 직접 �
 
   // The production conflict choice, the version list and preview.
   const views = compileFunction(`${storeDeclaration('boardConflictView')}\n${storeDeclaration('boardHistoryListView')}\n${storeDeclaration('boardHistoryPreviewView')}\nreturn { boardConflictView, boardHistoryListView, boardHistoryPreviewView };`,
-    ['el', 'RecoveryState'])(productionEl(), Recovery);
+    ['el', 'RecoveryState', 'deskIcon'])(productionEl(), Recovery, name => Object.assign(inertDOM().createElement('svg'), { dataset: { icon: name } }));
   const chosen = [];
   const conflictActions = { onShowLatest: () => chosen.push('latest'), onOpenLatest: () => chosen.push('open'), onSaveMine: () => chosen.push('mine'), onClose: () => chosen.push('close') };
   const asked = views.boardConflictView({ title: '주간 보고', headRevision: 6, latest: null }, conflictActions);
-  assert.match(asked.textContent, /^다른 곳에서 이 Board가 바뀌었습니다×'주간 보고'에 다른 창이나 PC에서 저장한 새 버전이 있습니다\. 내 변경은 이 PC 설정에 저장했고, 버전 기록은 덮어쓰지 않았습니다\.최신 보기내 것으로 새 버전 저장$/);
+  assert.match(asked.textContent, /^다른 곳에서 이 Board가 바뀌었습니다'주간 보고'에 다른 창이나 PC에서 저장한 새 버전이 있습니다\. 내 변경은 이 PC 설정에 저장했고, 버전 기록은 덮어쓰지 않았습니다\.최신 보기내 것으로 새 버전 저장$/);
+  assert.deepEqual(asked.testid('board-conflict-close')[0].children.map(child => child.dataset?.icon), ['close'], 'the close control draws the shared icon, not a letter');
   asked.testid('board-conflict-show-latest')[0].dispatch('click');
   asked.testid('board-conflict-save-mine')[0].dispatch('click');
   asked.testid('board-conflict-close')[0].dispatch('click');
@@ -20423,7 +20426,7 @@ test('RT-03 production hooks: export saves the Desk or an unsaved Board first; i
 
 test('RT-03 production dialog: plain-file warning, passphrase twice, the check before import with its warning, and Korean only', () => {
   const document = settingsFakeDocument();
-  const { portableDialogView } = compileFunction(`${declaration('el')}\n${declaration('portableDialogView')}\nreturn { portableDialogView };`, ['document', 'PortableState'])(document, Portable);
+  const { portableDialogView } = compileFunction(`${declaration('el')}\n${declaration('portableDialogView')}\nreturn { portableDialogView };`, ['document', 'PortableState', 'deskIcon'])(document, Portable, () => document.createElement('svg'));
   const nodes = (root, testid) => settingsNodes({ children: root.children }, node => node.dataset.testid === testid);
   const actions = [];
   const handlers = { onClose: () => actions.push(['close']), onSubmitExport: values => actions.push(['export', values]), onChooseExport: file => actions.push(['choose', file]),
@@ -23128,8 +23131,9 @@ function boardCanvasGlueHarness({ head = 1, latest = async () => ({ missing: tru
   const sync = { status: () => store, knownHead: () => store.head, latestBoard: latest };
   const packet = { canvas: { nodes: [], edges: [] }, report: { nodes: 0, edges: 0, omitted: [{ id: null, kind: 'attachment', reason: '원본 제외' }] } };
   const create = compileFunction(`${declaration('createBoardCanvasExportSession')}\nreturn createBoardCanvasExportSession;`,
-    ['deskStoreSync', 'nativeTextFilePickers', 'state', 'el', 'document', 'BoardExport', 'deskStoreRequest'])(
-    () => sync, () => native.adapter, state, el, document, BoardExport, async (...args) => { requests.push(args); return request ? request(...args) : { status: 200, body: packet }; });
+    ['deskStoreSync', 'nativeTextFilePickers', 'state', 'el', 'document', 'BoardExport', 'deskStoreRequest', 'deskIcon'])(
+    () => sync, () => native.adapter, state, el, document, BoardExport, async (...args) => { requests.push(args); return request ? request(...args) : { status: 200, body: packet }; },
+    () => document.createElement('svg'));
   const session = create(projection, region);
   const part = id => settingsNodes(document.documentElement, node => node.dataset.testid === id)[0];
   return { session, region, state, store, native, requests, part, packet };
@@ -23253,7 +23257,7 @@ function portableSettingsHarness({ respond, fullscreen = false, initialDetail = 
     resolveCanvasCardPlacement: () => ({ x: 0, y: 0, width: 600, height: 600 }), revealPlacedCanvasCard() {}, el, cardZ: 0, closeCanvasCard() {}, state, ChatState: Chat,
     codexProfileAvatar, document, window: { setTimeout: () => 0, confirm: () => false }, bindCardSourceRef() {}, markAgendaDirty() {}, setActiveEntity() {},
     isCardFullscreen: () => false, focusCanvasCard() {}, installCardHeaderFullscreenToggle() {}, canvasZoom: () => 1, ...settingsTransferDeps(document, state, native.adapter),
-    AccountSettingsView, codexBridgeNotice: settingsBridgeNotice };
+    AccountSettingsView, codexBridgeNotice: settingsBridgeNotice, deskIcon: () => document.createElement('svg') };
   if (fullscreen) {
     Object.assign(state, { cardFullscreen: null, surface: { initialBrowserFocus: false }, pan: { x: 0, y: 0 }, zoom: 1,
       setCanvasViewportTarget(camera) { this.pan = { ...camera.pan }; this.zoom = camera.zoom; } });
