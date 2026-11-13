@@ -8040,6 +8040,158 @@
     panel?.remove();
   }
 
+  // ---- Escape layers (UX-06) ----
+  // One Escape closes the one thing on top: a small menu, then a
+  // confirmation, then search and panels, then a Chat peeked over a fullscreen
+  // View, and last the fullscreen View goes back to its size. Everything
+  // Escape can close comes in through registerEscapeLayer; the two window
+  // listeners below are the only screen-wide Escape handling.
+  const EscapeLayerStack = ChromeUtils.importESModule('chrome://userchrome/content/EGDeskLayerStack.sys.mjs');
+  const escapeLayers = EscapeLayerStack.createLayerStack({ rank: EscapeLayerStack.escapeRank });
+  // layer = { id, kind, dismiss(reason), contains?(target), isOpen?(),
+  // dismissOnPointerOutside? }. With isOpen() the layer is registered once and
+  // reads its own state; without it, register when it opens and call the
+  // returned function when it closes by other means.
+  function registerEscapeLayer(layer) {
+    const id = escapeLayers.push(layer);
+    return () => { if (id) escapeLayers.remove(id); };
+  }
+
+  function installEscapeLayers() {
+    const within = selector => target => !!target?.closest?.(selector);
+    const byId = id => document.getElementById(id);
+    const hudShown = () => { const hud = byId('egd-hud'); return !!hud && !hud.classList.contains('egd-hud-hidden'); };
+    // The first-run Browser focus screen is left through its own button.
+    const fullscreenView = () => !!state.cardFullscreen && !state.surface?.initialBrowserFocus;
+    // Focus goes back to the button that opened a menu, unless the person is typing.
+    const returnsFocus = reason => reason === 'escape' && zoneOf(document.activeElement) !== 'field';
+
+    // Chat: room menu, member menu, engine choice, message menu, Agent profile.
+    const CHAT_MENU_KEYS = ['threadMenu', 'memberMenu', 'engineMenu', 'messageMenu', 'agentPeek'];
+    const CHAT_MENU_OPENER = '.egd-codex-thread-menu-trigger-active, .egd-codex-message-menu-trigger-active, '
+      + '.egd-codex-engine-chip[aria-expanded="true"], .egd-codex-agent-peek-trigger[aria-expanded="true"], .egd-codex-thread-member-menu-open';
+    registerEscapeLayer({
+      id: 'chat-menu', kind: 'menu',
+      isOpen: () => CHAT_MENU_KEYS.some(key => !!state.codex?.[key]),
+      // The Agent profile returns focus to the face that opened it by itself.
+      contains: within('.egd-codex-agent-peek'),
+      dismiss: (reason) => {
+        const bridge = state.codexBridge;
+        const opener = returnsFocus(reason) ? document.querySelector(CHAT_MENU_OPENER) : null;
+        const focusKey = opener?.dataset?.focusKey || null;
+        try { opener?.focus?.({ preventScroll: true }); } catch {}
+        bridge?.closeMemberMenu?.();
+        bridge?.closeThreadMenu?.();
+        bridge?.closeEngineMenu?.();
+        bridge?.closeMessageMenu?.();
+        bridge?.closeAgentPeek?.();
+        if (!focusKey || opener.isConnected) return;
+        try {
+          [...document.querySelectorAll('[data-focus-key]')].find(node => node.dataset.focusKey === focusKey)?.focus({ preventScroll: true });
+        } catch {}
+      },
+    });
+    // Settings: the account menu also closes on a click outside it.
+    const accountMenu = () => document.querySelector('.egd-settings-account-menu[open]');
+    registerEscapeLayer({
+      id: 'settings-account-menu', kind: 'menu', dismissOnPointerOutside: true,
+      isOpen: () => !!accountMenu(),
+      contains: within('.egd-settings-account-menu'),
+      dismiss: (reason) => {
+        const menu = accountMenu();
+        if (!menu) return;
+        menu.open = false;
+        if (returnsFocus(reason)) menu.querySelector('summary')?.focus?.({ preventScroll: true });
+      },
+    });
+    registerEscapeLayer({
+      id: 'board-menu', kind: 'menu',
+      isOpen: () => !!boardRegionMenu, contains: target => !!boardRegionMenu?.contains?.(target),
+      dismiss: () => closeBoardRegionMenu({ restoreFocus: true }),
+    });
+    registerEscapeLayer({
+      id: 'desk-menu', kind: 'menu',
+      isOpen: () => !!deskMenu, contains: target => !!deskMenu?.contains?.(target),
+      dismiss: () => closeDeskMenu({ restoreFocus: true }),
+    });
+    registerEscapeLayer({
+      id: 'minimap-stack', kind: 'list',
+      isOpen: () => !!document.querySelector('#egd-desk-minimap .egd-minimap-stack'),
+      contains: within('#egd-desk-minimap .egd-minimap-stack'),
+      dismiss: () => closeMinimapStack(),
+    });
+    registerEscapeLayer({
+      id: 'board-close-guard', kind: 'confirm',
+      isOpen: () => !!byId('egd-agenda-close-guard'), contains: within('#egd-agenda-close-guard'),
+      dismiss: () => closeAgendaCloseGuard(),
+    });
+    // Standing layers of one tier close newest-registered first: search
+    // results, then the Board list, the history panels, and the minimap last.
+    registerEscapeLayer({
+      id: 'minimap', kind: 'minimap',
+      isOpen: () => !!byId('egd-desk-minimap'), contains: within('#egd-desk-minimap'),
+      dismiss: () => closeDeskMinimap(),
+    });
+    registerEscapeLayer({
+      id: 'desk-history', kind: 'panel',
+      isOpen: () => !!byId('egd-desk-history'), contains: within('#egd-desk-history'),
+      dismiss: () => closeDeskHistoryPanel({ restoreFocus: true }),
+    });
+    registerEscapeLayer({
+      id: 'board-history', kind: 'panel',
+      isOpen: () => !!byId('egd-board-history'), contains: within('#egd-board-history'),
+      dismiss: () => closeBoardHistoryPanel({ restoreFocus: true }),
+    });
+    registerEscapeLayer({
+      id: 'board-switcher', kind: 'panel',
+      isOpen: () => !!state.agenda?.switcherOpen, contains: within('#egd-agenda-switcher, .egd-rail-switcher'),
+      dismiss: () => closeAgendaSwitcher(),
+    });
+    registerEscapeLayer({
+      id: 'rail-search', kind: 'search',
+      isOpen: () => !!state.railSearch?.open, contains: within('#egd-rail-search-results, .egd-rail-search'),
+      dismiss: () => closeRailSearchPanel(),
+    });
+    // Chat shown over a fullscreen View goes away before the View shrinks.
+    registerEscapeLayer({
+      id: 'chat-peek', kind: 'peek',
+      isOpen: () => fullscreenView() && hudShown(), contains: within('#egd-hud'),
+      dismiss: () => setHudPresentationHidden(true),
+    });
+    registerEscapeLayer({
+      id: 'view-fullscreen', kind: 'fullscreen',
+      isOpen: fullscreenView,
+      dismiss: () => exitCardFullscreen(),
+    });
+
+    // A page, a terminal or a file frame owns its own Escape.
+    const zoneOf = (target) => {
+      if (!target || target === window || target === document) return 'chrome';
+      if (target.ownerDocument !== document) return 'content';
+      const name = target.localName;
+      if (name === 'browser' || name === 'iframe' || name === 'webview') return 'content';
+      if (name === 'input' || name === 'textarea' || name === 'select' || target.isContentEditable) return 'field';
+      return 'chrome';
+    };
+    const onEscape = (ev, phase) => {
+      if (ev.key !== 'Escape') return;
+      const target = ev.target;
+      const zone = zoneOf(target);
+      const route = EscapeLayerStack.escapeRoute({
+        key: ev.key, composing: ev.isComposing === true || ev.keyCode === 229,
+        defaultPrevented: ev.defaultPrevented, repeat: ev.repeat === true, phase, zone,
+        fieldEnded: zone === 'field' && (!target.isConnected || document.activeElement !== target),
+        kind: escapeLayers.top()?.kind ?? null,
+        inside: escapeLayers.topContains(target),
+      });
+      if (route.act) escapeLayers.handleEscape(ev);
+    };
+    window.addEventListener('keydown', ev => onEscape(ev, 'capture'), true);
+    window.addEventListener('keydown', ev => onEscape(ev, 'bubble'), false);
+    window.addEventListener('mousedown', ev => { escapeLayers.handlePointerDown(ev); }, true);
+  }
+  installEscapeLayers();
+
   function viewportWorldRect() {
     const zoom = Math.max(0.001, state.zoomTarget || state.zoom || 1);
     return {

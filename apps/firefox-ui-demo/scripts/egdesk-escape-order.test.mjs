@@ -104,10 +104,14 @@ test('pointer-down outside closes the layer Escape would close, and only when it
     isOpen: () => menuOpen, contains: target => target === inside, dismiss: () => { menuOpen = false; },
   });
   assert.equal(stack.handlePointerDown({}, inside).reason, 'inside');
+  assert.equal(stack.topContains(inside), true);
+  assert.equal(stack.topContains({ name: 'elsewhere' }), false);
   assert.equal(menuOpen, true);
   const outside = stack.handlePointerDown({}, { name: 'outside' });
   assert.deepEqual([outside.id, outside.dismissed], ['account-menu', true]);
   assert.equal(stack.handlePointerDown({}, { name: 'outside' }).reason, 'not-dismissable');
+  // The fullscreen layer gave no contains(): nothing is "inside" it.
+  assert.equal(stack.topContains(inside), false);
 });
 
 test('escapeRoute leaves Escape alone while composing, inside a page or terminal, and after a field used it', () => {
@@ -118,18 +122,30 @@ test('escapeRoute leaves Escape alone while composing, inside a page or terminal
   assert.deepEqual(route({ zone: 'content', phase: 'bubble', kind: 'fullscreen' }), { act: false, reason: 'content-owns-key' });
   assert.deepEqual(route({ kind: null }), { act: false, reason: 'empty' });
   assert.deepEqual(route({ defaultPrevented: true }), { act: false, reason: 'already-handled' });
-  // Menus, confirmations and panels close before anything else sees the key.
+  // Small menus and confirmations close before anything else sees the key.
   assert.deepEqual(route({}), { act: true, reason: 'top-layer' });
+  assert.deepEqual(route({ kind: 'list' }), { act: true, reason: 'top-layer' });
   assert.deepEqual(route({ kind: 'confirm' }), { act: true, reason: 'top-layer' });
-  assert.deepEqual(route({ kind: 'minimap' }), { act: true, reason: 'top-layer' });
   // A field (rename, search, composer) cancels its own edit first.
   assert.deepEqual(route({ zone: 'field' }), { act: false, reason: 'field-first' });
   assert.deepEqual(route({ zone: 'field', phase: 'bubble', fieldEnded: true }), { act: false, reason: 'field-used-key' });
   assert.deepEqual(route({ zone: 'field', phase: 'bubble', defaultPrevented: true }), { act: false, reason: 'already-handled' });
   assert.deepEqual(route({ zone: 'field', phase: 'bubble' }), { act: true, reason: 'top-layer' });
-  // A peeked Chat and a fullscreen View wait for panels that own their Escape.
-  assert.deepEqual(route({ kind: 'peek' }), { act: false, reason: 'base-waits' });
-  assert.deepEqual(route({ kind: 'fullscreen' }), { act: false, reason: 'base-waits' });
+  // Focus inside the open layer: its own Escape (step back, return focus) goes first.
+  assert.deepEqual(route({ inside: true }), { act: false, reason: 'layer-first' });
+  assert.deepEqual(route({ inside: true, phase: 'bubble' }), { act: true, reason: 'top-layer' });
+  assert.deepEqual(route({ inside: true, phase: 'bubble', defaultPrevented: true }), { act: false, reason: 'already-handled' });
+  // Holding the key down does not peel every layer off.
+  assert.deepEqual(route({ repeat: true }), { act: false, reason: 'held' });
+  assert.deepEqual(route({ repeat: true, phase: 'bubble', kind: 'fullscreen' }), { act: false, reason: 'held' });
+  // Search, panels, a peeked Chat and a fullscreen View wait for whatever has
+  // focus: a popover that handles its own Escape closes before the minimap does.
+  assert.deepEqual(route({ kind: 'search' }), { act: false, reason: 'after-focused' });
+  assert.deepEqual(route({ kind: 'minimap' }), { act: false, reason: 'after-focused' });
+  assert.deepEqual(route({ kind: 'minimap', phase: 'bubble' }), { act: true, reason: 'top-layer' });
+  assert.deepEqual(route({ kind: 'minimap', phase: 'bubble', defaultPrevented: true }), { act: false, reason: 'already-handled' });
+  assert.deepEqual(route({ kind: 'peek' }), { act: false, reason: 'after-focused' });
+  assert.deepEqual(route({ kind: 'fullscreen' }), { act: false, reason: 'after-focused' });
   assert.deepEqual(route({ kind: 'fullscreen', phase: 'bubble' }), { act: true, reason: 'top-layer' });
   assert.deepEqual(route({ kind: 'fullscreen', phase: 'bubble', defaultPrevented: true }), { act: false, reason: 'already-handled' });
 });

@@ -46,7 +46,6 @@ const KIND_TIER = Object.freeze({
   fullscreen: 'fullscreen', focus: 'fullscreen',
 });
 const PANEL_RANK = ESCAPE_ORDER.indexOf('panel');
-const BASE_RANK = ESCAPE_ORDER.indexOf('peek');
 // Lower closes first. An unknown kind is a panel.
 export function escapeRank(kind) {
   const tier = typeof kind === 'string' && Object.hasOwn(KIND_TIER, kind) ? KIND_TIER[kind] : null;
@@ -58,12 +57,15 @@ export function escapeRank(kind) {
 //   zone   'content' (a page or a terminal owns the key), 'field' (a text
 //          field; its own cancel goes first) or 'chrome',
 //   fieldEnded  the field is gone or lost focus, so it used this Escape,
-//   kind   kind of the top open layer, null when nothing is open.
-// Menus, confirmations and panels close in capture. A peeked Chat and a
-// fullscreen View wait for bubble so a panel that handles its own Escape wins.
+//   kind   kind of the top open layer, null when nothing is open,
+//   inside the key was pressed inside that layer (its own Escape goes first),
+//   repeat the key is being held down.
+// Small menus and confirmations close in capture, before anything else sees
+// the key. Search, panels, a peeked Chat and a fullscreen View wait for bubble,
+// so whatever has focus and handles its own Escape closes first.
 export function escapeRoute({
-  key, composing: imeComposing = false, defaultPrevented = false,
-  phase = 'capture', zone = 'chrome', fieldEnded = false, kind = null,
+  key, composing: imeComposing = false, defaultPrevented = false, repeat = false,
+  phase = 'capture', zone = 'chrome', fieldEnded = false, kind = null, inside = false,
 } = {}) {
   const no = reason => ({ act: false, reason });
   if (key !== 'Escape') return no('not-escape');
@@ -71,9 +73,11 @@ export function escapeRoute({
   if (zone === 'content') return no('content-owns-key');
   if (kind == null) return no('empty');
   if (defaultPrevented) return no('already-handled');
+  if (repeat) return no('held');
   if (phase === 'capture') {
     if (zone === 'field') return no('field-first');
-    if (escapeRank(kind) >= BASE_RANK) return no('base-waits');
+    if (inside) return no('layer-first');
+    if (escapeRank(kind) >= PANEL_RANK) return no('after-focused');
   } else if (zone === 'field' && fieldEnded) {
     return no('field-used-key');
   }
@@ -198,6 +202,12 @@ export function createLayerStack({ onChange = null, rank = null } = {}) {
       return result.dismissed ? publicLayer(layer) : null;
     },
     top: () => publicLayer(topLayer()),
+    // True when `target` is inside the layer Escape would close next.
+    topContains(target) {
+      const layer = topLayer();
+      if (!layer?.contains) return false;
+      try { return !!layer.contains(target); } catch { return false; }
+    },
     has: id => index(id) >= 0,
     size: () => layers.filter(isOpen).length,
     // Open layers in the order they were added, ids and kinds only.
