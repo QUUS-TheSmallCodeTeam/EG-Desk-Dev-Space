@@ -7979,7 +7979,8 @@
     const gadget = resourceGadget;
     const fullscreenCard = state.cardFullscreen?.cardId
       ? document.getElementById(state.cardFullscreen.cardId) : null;
-    const focusedBrowserToolbar = fullscreenCard?.classList.contains('egd-browser-card')
+    // 상단 바가 숨는 집중 보기에서만 자원 표시를 Browser 주소줄로 옮긴다(크게 보기는 상단 바가 남는다).
+    const focusedBrowserToolbar = fullscreenCard?.classList.contains('egd-browser-card') && state.cardFullscreen.mode === 'focus'
       ? fullscreenCard.querySelector('.egd-desk-window-toolbar') : null;
     if (gadget && focusedBrowserToolbar) {
       const duplicate = focusedBrowserToolbar.querySelector('.egd-card-duplicate');
@@ -8017,15 +8018,20 @@
     }
     document.querySelector('#egd-preset-bag .egd-bag-header')?.classList.toggle('egd-bag-header-muted', focusedFile);
 
-    const badge = document.querySelector('.egd-rail-card-badge');
-    if (badge) {
+    const presentation = ensureCardPresentationBadge();
+    if (presentation) {
       const card = state.cardFullscreen?.cardId ? document.getElementById(state.cardFullscreen.cardId) : null;
+      const badge = presentation.querySelector('.egd-rail-card-badge');
       if (card?.isConnected) {
-        badge.textContent = `${cardLabelForViewportRail(card)} · Maximized`;
-        badge.hidden = false;
+        const copy = MaximizeHud.presentationBadge(cardLabelForViewportRail(card), state.cardFullscreen.mode);
+        badge.textContent = copy.text;
+        badge.title = copy.title;
+        badge.setAttribute('aria-label', copy.title);
+        presentation.hidden = false;
+        syncMaximizeHudEdge();
       } else {
         badge.textContent = '';
-        badge.hidden = true;
+        presentation.hidden = true;
       }
     }
     const agendaSwitcher = document.getElementById('egd-agenda-switcher');
@@ -8227,8 +8233,9 @@
     return el('span', {
       class: 'egd-minimap-entity'
         + (isCard ? ' egd-minimap-entity-card' : ' egd-minimap-entity-shape')
-        + (entity.id === state.activeEntityId ? ' egd-minimap-entity-active' : ''),
-      title: minimapEntityTitle(entity),
+        + (entity.id === state.activeEntityId ? ' egd-minimap-entity-active' : '')
+        + (state.cardFullscreen?.cardId === entity.id ? ' egd-minimap-entity-maximized' : ''),
+      title: minimapEntityTitle(entity) + (state.cardFullscreen?.cardId === entity.id ? ' · 크게 보는 중' : ''),
       data: { entityId: entity.id },
       style: worldRectToMinimapStyle(item.rect, model),
     });
@@ -8408,6 +8415,8 @@
   // Minimap navigation changes only the Canvas camera. It must not select a
   // Board, activate a View, modify a Browser viewport, or start work.
   function moveCameraToMinimapNode(node) {
+    // 크게 보는 중에 지도에서 다른 곳을 고르면 먼저 원래 크기로 되돌린 뒤 그곳으로 간다.
+    if (state.cardFullscreen && state.cardFullscreen.cardId !== node?.id) exitCardFullscreen();
     const rect = persistentEntityGeometry(node);
     const safe = safeViewportRect();
     const currentZoom = state.zoomTarget || state.zoom || 1;
@@ -8744,6 +8753,12 @@
     if (!map) return;
     let drag = null;
     const setFromEvent = (ev) => {
+      if (state.cardFullscreen) {
+        // 크게 보는 중에 지도를 끌어 다른 곳으로 가면 원래 크기로 되돌린다. 화면 틀 크기가
+        // 달라지므로 틀을 잡고 끌던 중이면 그 지점을 가운데로 맞추는 방식으로 잇는다.
+        exitCardFullscreen();
+        if (drag) drag.mode = 'center';
+      }
       const model = minimapWorldModel(map);
       const point = minimapPointToWorld(ev.clientX, ev.clientY, map, model);
       const viewport = viewportWorldRect();
@@ -8817,7 +8832,6 @@
   }
 
   function toggleDeskMinimap() {
-    if (state.cardFullscreen) return;
     const existing = document.getElementById('egd-desk-minimap');
     if (existing) {
       closeDeskMinimap();
@@ -9198,7 +9212,6 @@
         el('span', { class: 'egd-rail-desk-dot' }),
         el('span', { class: 'egd-rail-desk-name egd-rail-agenda-name' }, viewportBoardLabel().text),
         el('span', { class: 'egd-rail-dirty-badge', hidden: !state.agenda.dirty }, '저장 안 됨'),
-        el('span', { class: 'egd-rail-card-badge', hidden: true }),
         el('span', { class: 'egd-rail-chevron' }, deskIcon('chevron')),
       ),
     );
@@ -9460,6 +9473,11 @@
           deskIcon('grip'), deskIcon('chat')),
         el('span', { class: 'egd-hud-title' }, '채팅')),
       el('div', { class: 'egd-hud-header-actions' },
+        el('button', {
+          class: 'egd-hud-maximize-pin', type: 'button', 'aria-pressed': 'false',
+          title: MaximizeHud.pinControlCopy('peek').title,
+          onclick: (ev) => { ev.stopPropagation(); toggleMaximizeHudPin(); },
+        }, MaximizeHud.pinControlCopy('peek').label),
         pinButton,
         el('button', {
           class: 'egd-hud-close',
@@ -9517,6 +9535,7 @@
 
     hud.appendChild(header);
     hud.appendChild(body);
+    installMaximizeHudControls(hud);
     return hud;
   }
 
@@ -15303,6 +15322,7 @@
   function toggleHUD(appId, appLabel, options = {}) {
     const hud = document.getElementById('egd-hud');
     if (!hud) return;
+    if (revealPresentationHiddenHud(hud, appId)) return;
     const body = document.getElementById('egd-hud-body');
     body?._codexCleanup?.();
     if (appId === 'chat' && state.codex.chatDockMode === 'canvas' && state.codex.chatCardEntityId) {
@@ -15320,6 +15340,7 @@
       state.hudOpen = false;
       state.hudApp = null;
       hud.dataset.app = '';
+      syncMaximizeHudAfterToggle(options);
       return;
     }
     state.hudOpen = true;
@@ -15328,6 +15349,7 @@
     hud.classList.remove('egd-hud-hidden');
     hud.querySelector('.egd-hud-title').textContent = appId === 'chat' ? '코덱스 채팅' : appLabel;
     syncHudViewportFit();
+    syncMaximizeHudAfterToggle(options);
     body.textContent = '';
     if (appId === 'chat' && state.codexBridge) {
       if (options.preserveConversation && getCodexThreadById(state.codex, state.codex.activeThreadId)) {
@@ -15620,6 +15642,9 @@
       state.cardFullscreen = null;
       document.documentElement.classList.remove('egd-card-fullscreen-active');
       document.documentElement.classList.remove('egd-browser-fullscreen-active');
+      document.documentElement.classList.remove('egd-card-focus-active');
+      document.documentElement.classList.remove('egd-maximize-hud-peek');
+      document.documentElement.classList.remove('egd-maximize-hud-pinned');
       if (state.surface.initialBrowserFocus) {
         state.surface.initialBrowserFocus = false;
         document.documentElement.classList.remove('egd-initial-browser-focus');
@@ -15631,8 +15656,10 @@
     // pinned to the viewport by inverse zoom. Ordinary camera frames must not
     // undo the user's zoom (including zoom-in while Focus remains active).
     if (!reframe) return;
-    const isBrowserFullscreen = card.classList.contains('egd-browser-card');
-    const safe = safeViewportRect({ avoidHud: false, margin: (state.surface.initialBrowserFocus || isBrowserFullscreen) ? 0 : 10 });
+    // 크게 보기는 상단 바·Dock을 남긴 안전 영역에 맞추고, 집중 보기만 화면 끝까지 쓴다.
+    // 채팅을 옆에 고정했을 때만 그만큼 좁혀 다시 맞춘다(엿보기는 창 위에 겹친다).
+    const edgeToEdge = fullscreen.mode === 'focus' || !!state.surface.initialBrowserFocus;
+    const safe = safeViewportRect({ avoidHud: fullscreen.hudMode === 'pinned', margin: edgeToEdge ? 0 : 10 });
     const rect = fullscreen.rect;
     const world = { x: parsePxNumber(rect.left), y: parsePxNumber(rect.top),
       width: parsePxNumber(rect.width), height: parsePxNumber(rect.height) };
@@ -15649,6 +15676,11 @@
     const hud = document.getElementById('egd-hud');
     const previousHudHidden = hud ? hud.classList.contains('egd-hud-hidden') : true;
     const previousMinimapOpen = !!document.getElementById('egd-desk-minimap');
+    // 크게 보기(maximized)는 모든 창 유형에서 상단 바·Dock을 남긴다. 화면 전체를 쓰는
+    // 집중 보기(focus)는 사용자가 따로 켰을 때와 첫 실행 Browser 집중 화면뿐이다.
+    const isBrowserCard = card.classList.contains('egd-browser-card');
+    const focusView = state.cardFocusIntent === card.id || (!!state.surface.initialBrowserFocus && isBrowserCard);
+    state.cardFocusIntent = null;
     state.cardFullscreen = {
       cardId: card.id,
       rect: getCardRect(card),
@@ -15656,14 +15688,19 @@
       previousHudHidden,
       previousMinimapOpen,
       zIndex: ++cardZ,
+      mode: focusView ? 'focus' : 'maximized',
+      hudMode: 'hidden',
+      hudPeekSource: null,
+      hudKeptOnRestore: false,
     };
     setActiveEntity(card);
     card.style.zIndex = String(state.cardFullscreen.zIndex);
     card.classList.add('egd-card-fullscreen');
     document.documentElement.classList.add('egd-card-fullscreen-active');
-    // Browser cards go Chrome-like: hide Desk chrome, edge-to-edge browser area.
-    if (card.classList.contains('egd-browser-card')) {
-      document.documentElement.classList.add('egd-browser-fullscreen-active');
+    if (focusView) {
+      document.documentElement.classList.add('egd-card-focus-active');
+      // Browser focus view goes Chrome-like: edge-to-edge browser area.
+      if (isBrowserCard) document.documentElement.classList.add('egd-browser-fullscreen-active');
     }
     setHudPresentationHidden(true);
     if (previousMinimapOpen) closeDeskMinimap();
@@ -15687,9 +15724,13 @@
     }
     document.documentElement.classList.remove('egd-card-fullscreen-active');
     document.documentElement.classList.remove('egd-browser-fullscreen-active');
+    document.documentElement.classList.remove('egd-card-focus-active');
+    document.documentElement.classList.remove('egd-maximize-hud-peek');
+    document.documentElement.classList.remove('egd-maximize-hud-pinned');
     state.cardFullscreen = null;
-    setHudPresentationHidden(fullscreen.previousHudHidden);
-    if (fullscreen.previousMinimapOpen) toggleDeskMinimap();
+    restoreHudAfterCardFullscreen(fullscreen);
+    // 크게 보는 동안 사용자가 미니맵을 다시 열었으면 그대로 둔다(토글로 닫지 않는다).
+    if (fullscreen.previousMinimapOpen && !document.getElementById('egd-desk-minimap')) toggleDeskMinimap();
     if (!options.preserveCamera && initialBrowserFocus && fullscreenCard?.isConnected && options.restoreRect !== false
         && typeof state.setCanvasViewportTarget === 'function') {
       // The first Browser's restoreRect may be the full initial viewport at
@@ -15706,9 +15747,230 @@
     return true;
   }
 
+  // 크게 보는 동안 사용자가 직접 열었거나 고정한 채팅은 원래 크기로 돌아와도 그대로 둔다.
+  // 잠깐 엿보기만 한 채팅(크게 보기 전에는 닫혀 있던)은 숨기기만 하지 않고 닫아서,
+  // 화면에 안 보이는데 열린 것으로 남는 일이 없게 한다(Dock 채팅 버튼이 늘 한 번에 열린다).
+  function restoreHudAfterCardFullscreen(fullscreen) {
+    const keepOpen = !!fullscreen.hudKeptOnRestore || !fullscreen.previousHudHidden;
+    if (!keepOpen && state.hudOpen) {
+      toggleHUD(null);
+      return;
+    }
+    setHudPresentationHidden(!keepOpen);
+  }
+
   function toggleCardFullscreen(card) {
     if (isCardFullscreen(card)) exitCardFullscreen(card);
     else enterCardFullscreen(card);
+  }
+
+  // ── 크게 보는 동안 채팅 엿보기/고정 · 집중 보기 (UX-06, 원장 D-V6) ─────────────
+  // 규칙(어떤 사건이 hidden/peek/pinned 중 무엇으로 가는지, 문구)은 순수 모듈에 있고
+  // 여기서는 그 결과를 화면에 옮기기만 한다. 상태는 state.cardFullscreen에 둔다:
+  //   mode 'maximized'|'focus', hudMode 'hidden'|'peek'|'pinned', hudPeekSource, hudKeptOnRestore.
+  const MaximizeHud = ChromeUtils.importESModule('chrome://userchrome/content/EGDeskMaximizeHud.sys.mjs');
+
+  // Chat이 Canvas 창으로 나와 있으면 엿볼 패널이 없다(그 창을 앞으로 당기지도 않는다).
+  function maximizeHudPeekAvailable() {
+    return !(state.codex.chatDockMode === 'canvas' && document.getElementById(state.codex.chatCardEntityId || ''));
+  }
+
+  // 눌러도 반응 없는 띠를 남기지 않는다: 엿볼 수 없으면 오른쪽 가장자리 띠를 감춘다.
+  function syncMaximizeHudEdge() {
+    const edge = document.getElementById('egd-maximize-hud-edge');
+    const unavailable = !maximizeHudPeekAvailable();
+    if (edge && edge.hidden !== unavailable) edge.hidden = unavailable;
+  }
+
+  function syncMaximizeHudPinControl() {
+    syncMaximizeHudEdge();
+    const pin = document.querySelector('#egd-hud .egd-hud-maximize-pin');
+    if (!pin) return;
+    const copy = MaximizeHud.pinControlCopy(state.cardFullscreen?.hudMode);
+    pin.textContent = copy.label;
+    pin.title = copy.title;
+    pin.setAttribute('aria-pressed', copy.pressed ? 'true' : 'false');
+  }
+
+  function applyMaximizeHudEvent(event) {
+    const fullscreen = state.cardFullscreen;
+    if (!fullscreen) return null;
+    const wasPinned = fullscreen.hudMode === 'pinned';
+    const next = MaximizeHud.nextHudState(
+      { mode: fullscreen.mode, hudMode: fullscreen.hudMode, peekSource: fullscreen.hudPeekSource }, event);
+    fullscreen.hudMode = next.hudMode;
+    fullscreen.hudPeekSource = next.peekSource;
+    fullscreen.hudKeptOnRestore = MaximizeHud.hudKeptOnRestore(next);
+    document.documentElement.classList.toggle('egd-maximize-hud-peek', next.hudMode === 'peek');
+    document.documentElement.classList.toggle('egd-maximize-hud-pinned', next.hudMode === 'pinned');
+    setHudPresentationHidden(next.hudMode === 'hidden');
+    syncMaximizeHudPinControl();
+    // 고정하거나 풀 때만 크게 보는 창을 다시 맞춘다. 엿보기는 창 위에 겹칠 뿐 크기를 바꾸지 않는다.
+    if (wasPinned !== next.avoidHud) syncCardFullscreenLayout({ reframe: true });
+    return next.hudMode;
+  }
+
+  // toggleHUD가 채팅을 열거나 닫은 직후, 크게 보는 중이면 그 결과를 hudMode에 맞춘다.
+  function syncMaximizeHudAfterToggle(options = {}) {
+    const fullscreen = state.cardFullscreen;
+    if (!fullscreen) return;
+    if (!state.hudOpen) {
+      fullscreen.previousHudHidden = true;
+      applyMaximizeHudEvent('hud-closed');
+      return;
+    }
+    // 집중 보기 중에 열린 채팅은 화면에 보이지 않으므로, 원래 크기로 돌아왔을 때 보여 준다.
+    if (fullscreen.mode === 'focus') fullscreen.previousHudHidden = false;
+    applyMaximizeHudEvent(options.maximizeHudSource === 'edge' ? 'edge-dwell' : 'dock-open');
+  }
+
+  // 표시만 숨겨 둔(state.hudOpen은 그대로인) 채팅은 Dock 버튼 한 번에 다시 보여 준다 (A60).
+  // 붙어 있는 채팅을 정리(teardown)하기 전에 판단해야 대화 화면이 그대로 남는다.
+  function revealPresentationHiddenHud(hud, appId) {
+    if (!appId || !state.hudOpen || state.hudApp !== appId || !hud.classList.contains('egd-hud-hidden')) return false;
+    const fullscreen = state.cardFullscreen;
+    if (!fullscreen) setHudPresentationHidden(false);
+    else if (fullscreen.mode === 'focus') fullscreen.previousHudHidden = false;
+    else applyMaximizeHudEvent('dock-open');
+    return true;
+  }
+
+  function openMaximizeHudPeek(source = 'edge') {
+    const fullscreen = state.cardFullscreen;
+    if (!fullscreen || fullscreen.mode === 'focus') return false;
+    if (fullscreen.hudMode === 'hidden' && !state.hudOpen) {
+      if (!maximizeHudPeekAvailable()) return false;
+      toggleHUD('chat', '채팅', { preserveConversation: true, maximizeHudSource: source });
+      return state.cardFullscreen?.hudMode !== 'hidden';
+    }
+    applyMaximizeHudEvent(source === 'edge' ? 'edge-dwell' : 'dock-open');
+    return true;
+  }
+
+  // Esc 층(esc-stack)과 바깥 클릭이 부르는 닫기. 엿보기가 아니면 아무것도 하지 않는다.
+  function closeMaximizeHudPeek() {
+    if (state.cardFullscreen?.hudMode !== 'peek') return false;
+    applyMaximizeHudEvent('dismiss');
+    return true;
+  }
+
+  function toggleMaximizeHudPin() {
+    const fullscreen = state.cardFullscreen;
+    if (!fullscreen || fullscreen.mode === 'focus' || fullscreen.hudMode === 'hidden') return false;
+    applyMaximizeHudEvent('pin-toggle');
+    return true;
+  }
+
+  // 집중 보기: 상단 바·Dock까지 숨기고 화면 전체를 쓴다. 크게 보는 중이면 그 자리에서 바꾸고
+  // (원래 자리·카메라 기억은 그대로), 아니면 집중 보기로 바로 들어간다.
+  function enterCardFocusView(card) {
+    if (!card || !card.isConnected) return false;
+    if (!isCardFullscreen(card)) {
+      state.cardFocusIntent = card.id;
+      enterCardFullscreen(card);
+      state.cardFocusIntent = null;
+      return isCardFullscreen(card);
+    }
+    const fullscreen = state.cardFullscreen;
+    if (fullscreen.mode === 'focus') return true;
+    const keptHud = fullscreen.hudKeptOnRestore;
+    fullscreen.mode = 'focus';
+    applyMaximizeHudEvent('enter-focus');
+    fullscreen.hudKeptOnRestore = keptHud;
+    document.documentElement.classList.add('egd-card-focus-active');
+    if (card.classList.contains('egd-browser-card')) document.documentElement.classList.add('egd-browser-fullscreen-active');
+    syncCardFullscreenLayout({ reframe: true });
+    syncViewportAgendaRail();
+    return true;
+  }
+
+  // 상단 바의 '○○ · 크게 보는 중' 표시(누르면 원래 크기)와 그 옆 [집중 보기].
+  // Board 목록 버튼 안에 넣으면 버튼 속 버튼이 되므로 그 옆에 따로 둔다.
+  function ensureCardPresentationBadge() {
+    const railLeft = document.querySelector('#egd-desk-rail .egd-rail-left');
+    if (!railLeft) return null;
+    const existing = railLeft.querySelector('.egd-rail-presentation');
+    if (existing) return existing;
+    const group = el('span', { class: 'egd-rail-presentation', hidden: true },
+      el('button', { class: 'egd-rail-card-badge', type: 'button',
+        onclick: (ev) => { ev.stopPropagation(); exitCardFullscreen(); } }),
+      el('button', { class: 'egd-rail-focus-view', type: 'button',
+        title: '집중 보기 — 상단 바와 Dock을 숨기고 화면 전체로 봅니다', 'aria-label': '집중 보기',
+        onclick: (ev) => {
+          ev.stopPropagation();
+          const card = state.cardFullscreen?.cardId ? document.getElementById(state.cardFullscreen.cardId) : null;
+          if (card) enterCardFocusView(card);
+        } }, '집중 보기'));
+    railLeft.appendChild(group);
+    return group;
+  }
+
+  // 오른쪽 가장자리 대기 띠, [집중 보기 종료], 엿보기를 닫는 전역 입력을 한 번만 건다.
+  function installMaximizeHudControls(hud) {
+    let openTimer = 0;
+    let closeTimer = 0;
+    const cancelOpen = () => { if (openTimer) window.clearTimeout(openTimer); openTimer = 0; };
+    const cancelClose = () => { if (closeTimer) window.clearTimeout(closeTimer); closeTimer = 0; };
+    const edge = el('button', {
+      id: 'egd-maximize-hud-edge', type: 'button', 'aria-label': '채팅 엿보기',
+      title: '채팅 엿보기 — 마우스를 대면 잠깐 보이고, 누르면 열어 둡니다',
+      onclick: (ev) => { ev.stopPropagation(); cancelOpen(); openMaximizeHudPeek('dock'); },
+    });
+    edge.addEventListener('mouseenter', () => {
+      cancelOpen();
+      openTimer = window.setTimeout(() => { openTimer = 0; openMaximizeHudPeek('edge'); },
+        MaximizeHud.MAXIMIZE_HUD_PEEK_OPEN_DELAY_MS);
+    });
+    edge.addEventListener('mouseleave', cancelOpen);
+    const focusExit = el('button', {
+      id: 'egd-focus-view-exit', type: 'button', title: '집중 보기 종료 — 원래 크기와 자리로 돌아갑니다',
+      onclick: (ev) => { ev.stopPropagation(); exitCardFullscreen(); },
+    }, '집중 보기 종료');
+    // HUD는 아직 화면에 붙기 전이다. 붙은 뒤 같은 자리(Desk 도구 층)에 나란히 둔다.
+    Promise.resolve().then(() => hud.parentNode?.append(edge, focusExit));
+
+    // 가장자리로 연 엿보기는 마우스가 채팅 밖으로 나가면 유예 뒤 들어간다. 입력 중이면 두고 본다.
+    window.addEventListener('mousemove', (ev) => {
+      const fullscreen = state.cardFullscreen;
+      if (!fullscreen || !MaximizeHud.peekClosesOnPointerLeave({ hudMode: fullscreen.hudMode, peekSource: fullscreen.hudPeekSource })) {
+        cancelClose();
+        return;
+      }
+      if (MaximizeHud.pointerInsidePeekZone({ x: ev.clientX, y: ev.clientY }, hud.getBoundingClientRect())
+          || hud.contains(document.activeElement)) {
+        cancelClose();
+        return;
+      }
+      if (closeTimer) return;
+      closeTimer = window.setTimeout(() => {
+        closeTimer = 0;
+        if (state.cardFullscreen?.hudMode === 'peek' && state.cardFullscreen.hudPeekSource !== 'dock'
+            && !hud.contains(document.activeElement)) applyMaximizeHudEvent('pointer-leave');
+      }, MaximizeHud.MAXIMIZE_HUD_PEEK_CLOSE_GRACE_MS);
+    }, true);
+    // 바깥 클릭: 크게 보는 창이나 Canvas를 누르면 엿보기가 닫힌다(채팅·Dock·상단 바 클릭은 제외).
+    window.addEventListener('mousedown', (ev) => {
+      if (state.cardFullscreen?.hudMode !== 'peek') return;
+      const target = ev.target;
+      if (!target?.closest || target.closest('#egd-hud, #egd-maximize-hud-edge, #egd-dock, #egd-desk-rail, #egd-desk-minimap')) return;
+      const card = document.getElementById(state.cardFullscreen.cardId);
+      if (card?.contains(target) || !target.closest('.egd-edge')) closeMaximizeHudPeek();
+    }, true);
+    // Esc: 채팅 안의 메뉴·입력이 먼저 쓰고 남긴 Esc만 받아 엿보기를 닫는다.
+    window.addEventListener('keydown', (ev) => {
+      if (ev.key !== 'Escape' || ev.defaultPrevented || ev.isComposing) return;
+      if (closeMaximizeHudPeek()) ev.preventDefault();
+    });
+    // Option(Alt)+초록 점 = 집중 보기. 창 점 자체의 동작(크게 보기)은 그대로 둔다.
+    window.addEventListener('click', (ev) => {
+      if (!ev.altKey || ev.button !== 0) return;
+      const card = ev.target?.closest?.('.egd-card-dot-max')?.closest('.egd-canvas-card');
+      if (!card) return;
+      ev.preventDefault();
+      ev.stopPropagation();
+      if (isCardFullscreen(card) && state.cardFullscreen.mode === 'focus') exitCardFullscreen(card);
+      else enterCardFocusView(card);
+    }, true);
   }
 
   function focusCanvasCard(card) {
@@ -21537,6 +21799,7 @@
         item('홈', browserState.homeUrl, () => navigateBrowser(browserState.homeUrl)),
         item(browserState.loading ? '중지' : '새로고침', browserState.loading ? '로드 중지' : '현재 페이지 새로고침', () => (browserState.loading ? stopBrowser() : reloadBrowser())),
         item(isCardFullscreen(card) ? '창 복귀' : '최대화', 'Desk Window 최대화 전환', () => toggleCardFullscreen(card)),
+        item('집중 보기', '상단 바와 Dock을 숨기고 화면 전체로 봅니다', () => enterCardFocusView(card)),
         item('북마크 관리…', 'Firefox 북마크 관리', () => openFirefoxBrowserLibrary('AllBookmarks', card),
           { testid: 'browser-library-bookmarks', nativeWindow: true }),
         item('방문 기록…', 'Firefox 방문 기록', () => openFirefoxBrowserLibrary('History', card),

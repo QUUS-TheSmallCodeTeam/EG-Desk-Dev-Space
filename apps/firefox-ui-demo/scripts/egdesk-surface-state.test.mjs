@@ -1805,7 +1805,7 @@ test('first-use Browser restore fits its saved world rect below Desk chrome with
   const body = surfaceSource.match(/  function exitCardFullscreen\(card = null, options = \{\}\) \{([\s\S]*?)\n  \}/)?.[1];
   assert.ok(body, 'exercise the production fullscreen exit');
   const exit = compileFunction(`return function exitCardFullscreen(card = null, options = {}) {${body}\n  }`,
-    ['state', 'document', 'applyCardRect', 'setHudPresentationHidden', 'toggleDeskMinimap', 'setActiveEntity', 'syncViewportAgendaRail', 'scheduleDeskSessionSave', 'SurfaceState', 'persistentEntityGeometry', 'safeViewportRect']);
+    ['state', 'document', 'applyCardRect', 'restoreHudAfterCardFullscreen', 'toggleDeskMinimap', 'setActiveEntity', 'syncViewportAgendaRail', 'scheduleDeskSessionSave', 'SurfaceState', 'persistentEntityGeometry', 'safeViewportRect']);
   const worldRect = { left: '0px', top: '0px', width: '1280px', height: '776px', zIndex: '41000' };
   const browserState = { uri: 'https://example.test/', pageZoom: 1.25, selectedTab: 'tab-a' };
   const browser = { id: 'browser-view-a', isConnected: true, style: { ...worldRect }, _browserState: browserState,
@@ -1871,7 +1871,7 @@ test('first Browser zoom-out reveals the Desk continuously without a restore-fit
     ['state', 'ZOOM_MIN', 'ZOOM_MAX', 'frame', 'window', 'apply', 'scheduleAnimate', 'SurfaceState', 'prefersReducedMotion'])(
     state, .01, 4, 0, window, () => { applied++; }, () => { animated++; }, Surface, () => false);
   const exitFullscreen = compileFunction(`return function exitCardFullscreen(card = null, options = {}) {${exitBody}\n  }`,
-    ['state', 'document', 'applyCardRect', 'setHudPresentationHidden', 'toggleDeskMinimap', 'setActiveEntity',
+    ['state', 'document', 'applyCardRect', 'restoreHudAfterCardFullscreen', 'toggleDeskMinimap', 'setActiveEntity',
       'syncViewportAgendaRail', 'scheduleDeskSessionSave', 'SurfaceState', 'persistentEntityGeometry', 'safeViewportRect'])(
     state, document, (card, rect) => Object.assign(card.style, rect), () => {},
     () => assert.fail('minimap was closed'), () => {}, () => {}, () => {}, { fitSurfaceCamera },
@@ -2568,9 +2568,12 @@ function createFullscreenHarness({ hudInitiallyHidden = false, minimapInitiallyO
       safeCalls.push(options);
       return safe(options);
     }, () => {}, Number.parseFloat, Surface, 4);
+  const hudCloses = [];
+  const restoreHud = compile('restoreHudAfterCardFullscreen(fullscreen)', ['state', 'setHudPresentationHidden', 'toggleHUD'])(
+    state, setHud, appId => { hudCloses.push(appId); state.hudOpen = false; hudClasses.add('egd-hud-hidden'); });
   const exit = compile('exitCardFullscreen(card = null, options = {})',
-    ['state', 'document', 'applyCardRect', 'setHudPresentationHidden', 'toggleDeskMinimap', 'setActiveEntity', 'syncViewportAgendaRail', 'scheduleDeskSessionSave'])(
-    state, document, applyRect, setHud, () => {
+    ['state', 'document', 'applyCardRect', 'restoreHudAfterCardFullscreen', 'toggleDeskMinimap', 'setActiveEntity', 'syncViewportAgendaRail', 'scheduleDeskSessionSave'])(
+    state, document, applyRect, restoreHud, () => {
       assert.equal(state.cardFullscreen, null, 'minimap reopens after fullscreen state clears');
       minimapOpen = !minimapOpen;
     }, card => { state.activeEntityId = card?.id || null; }, () => {}, () => { saved++; });
@@ -2594,8 +2597,9 @@ function createFullscreenHarness({ hudInitiallyHidden = false, minimapInitiallyO
   const chatRect = { left: '70px', top: '80px', width: '640px', height: '450px', zIndex: '41001' };
   const chat = makeCard('chat-view-a', 'egd-chat-card', chatRect);
   return { browser, browserRect, chat, chatRect, cards, document, state, rootClasses, hudClasses,
-    safeCalls, enter, exit, layout, isFullscreen,
+    safeCalls, enter, exit, layout, isFullscreen, hudCloses,
     get minimapOpen() { return minimapOpen; },
+    set minimapOpen(value) { minimapOpen = value; },
     get hudFitCount() { return hudFitCount; },
     get saved() { return saved; } };
 }
@@ -2924,14 +2928,17 @@ test('Focus wheel routing consumes directional camera zoom but leaves active bod
   assert.equal(pan, 0);
 });
 
-test('ordinary Browser Focus changes only the camera and chrome, and explicit restore restores the camera', () => {
+test('ordinary Browser maximize changes only the camera and keeps Desk chrome, and explicit restore restores the camera', () => {
   const h = createFullscreenHarness();
   h.enter(h.browser);
   assert.equal(h.state.cardFullscreen.cardId, h.browser.id);
-  assert.deepEqual(h.safeCalls.at(-1), { avoidHud: false, margin: 0 });
+  assert.equal(h.state.cardFullscreen.mode, 'maximized', 'a Browser is maximized like every other View type');
+  assert.equal(h.state.cardFullscreen.hudMode, 'hidden');
+  assert.deepEqual(h.safeCalls.at(-1), { avoidHud: false, margin: 10 });
   assert.deepEqual(h.browser.style, { ...h.browserRect, zIndex: '40001' });
-  assert.equal(h.state.zoom, 774 / 620);
-  assert.ok(h.rootClasses.has('egd-browser-fullscreen-active'));
+  assert.equal(h.state.zoom, 754 / 620);
+  assert.ok(!h.rootClasses.has('egd-browser-fullscreen-active'), 'the top bar and Dock stay while maximized');
+  assert.ok(!h.rootClasses.has('egd-card-focus-active'));
   assert.ok(h.rootClasses.has('egd-card-fullscreen-active'));
   assert.ok(h.hudClasses.has('egd-hud-hidden'));
   assert.equal(h.minimapOpen, false);
@@ -2950,6 +2957,67 @@ test('ordinary Browser Focus changes only the camera and chrome, and explicit re
   previouslyHidden.exit(previouslyHidden.browser);
   assert.ok(previouslyHidden.hudClasses.has('egd-hud-hidden'));
   assert.equal(previouslyHidden.minimapOpen, false);
+});
+
+test('focus view is a separate user choice for any View type: edge to edge, Desk chrome hidden, cleared on restore', () => {
+  for (const kind of ['browser', 'chat']) {
+    const h = createFullscreenHarness();
+    const card = h[kind];
+    h.state.cardFocusIntent = card.id;
+    h.enter(card);
+    assert.equal(h.state.cardFullscreen.mode, 'focus');
+    assert.equal(h.state.cardFocusIntent, null, 'the intent is spent by one entry');
+    assert.deepEqual(h.safeCalls.at(-1), { avoidHud: false, margin: 0 });
+    assert.ok(h.rootClasses.has('egd-card-focus-active'));
+    assert.equal(h.rootClasses.has('egd-browser-fullscreen-active'), kind === 'browser', 'only a Browser goes Chrome-like');
+    assert.deepEqual(card.style, { ...h[`${kind}Rect`], zIndex: '40001' }, 'focus view is still only a camera pose');
+    assert.equal(h.exit(card), true);
+    assert.deepEqual(card.style, h[`${kind}Rect`]);
+    assert.deepEqual(h.state.pan, { x: 100, y: 50 });
+    for (const name of ['egd-card-focus-active', 'egd-browser-fullscreen-active', 'egd-card-fullscreen-active']) assert.ok(!h.rootClasses.has(name));
+    h.enter(card);
+    assert.equal(h.state.cardFullscreen.mode, 'maximized', 'the next plain maximize is not a focus view');
+  }
+});
+
+test('while maximized only a pinned Chat refits the View, and a Chat the user opened survives restore', () => {
+  const h = createFullscreenHarness({ hudInitiallyHidden: true, minimapInitiallyOpen: true });
+  h.enter(h.chat);
+  h.state.cardFullscreen.hudMode = 'peek';
+  h.layout({ reframe: true });
+  assert.deepEqual(h.safeCalls.at(-1), { avoidHud: false, margin: 10 }, 'a peek overlays the View without resizing it');
+  h.state.cardFullscreen.hudMode = 'pinned';
+  h.rootClasses.add('egd-maximize-hud-pinned');
+  h.layout({ reframe: true });
+  assert.deepEqual(h.safeCalls.at(-1), { avoidHud: true, margin: 10 });
+  assert.deepEqual(h.state.cardFullscreen.rect, h.chatRect, 'restoreRect is unchanged by pinning');
+  h.state.cardFullscreen.hudKeptOnRestore = true;
+  h.minimapOpen = true; // the user reopened the minimap while maximized
+  assert.equal(h.exit(h.chat), true);
+  assert.ok(!h.hudClasses.has('egd-hud-hidden'), 'Chat stays open although it was closed before maximizing');
+  assert.ok(!h.rootClasses.has('egd-maximize-hud-pinned'));
+  assert.equal(h.minimapOpen, true, 'restore does not toggle an already open minimap shut');
+  assert.deepEqual(h.chat.style, h.chatRect);
+});
+
+test('a Chat that was only peeked at while maximized is closed, not left open-but-hidden, on restore', () => {
+  const peeked = createFullscreenHarness({ hudInitiallyHidden: true });
+  peeked.enter(peeked.chat);
+  peeked.state.hudOpen = true; // the right-edge peek mounted Chat, then the pointer left
+  peeked.state.cardFullscreen.hudMode = 'hidden';
+  assert.equal(peeked.exit(peeked.chat), true);
+  assert.deepEqual(peeked.hudCloses, [null], 'the hidden Chat is closed through the ordinary close path');
+  assert.equal(peeked.state.hudOpen, false);
+  assert.ok(peeked.hudClasses.has('egd-hud-hidden'));
+
+  const openBefore = createFullscreenHarness({ hudInitiallyHidden: false });
+  openBefore.state.hudOpen = true;
+  openBefore.enter(openBefore.chat);
+  assert.ok(openBefore.hudClasses.has('egd-hud-hidden'));
+  assert.equal(openBefore.exit(openBefore.chat), true);
+  assert.deepEqual(openBefore.hudCloses, [], 'a Chat that was open before maximizing is shown again, never closed');
+  assert.ok(!openBefore.hudClasses.has('egd-hud-hidden'));
+  assert.equal(openBefore.state.hudOpen, true);
 });
 
 test('switching from Browser to non-Browser fullscreen clears Browser chrome mode and preserves restoration', () => {
@@ -3156,7 +3224,7 @@ test('wheel or focused-URL keyboard zoom-out reveals the same live Browser Card 
   assert.ok(exitBody && enterBody && factorBody && wheelBody && keyBody);
   assert.match(surfaceSource, /window\.addEventListener\('keydown', handleCanvasZoomKeydown, true\)/);
   const exit = compileFunction(`return function exitCardFullscreen(card = null, options = {}) {${exitBody}\n  }`,
-    ['state', 'document', 'applyCardRect', 'setHudPresentationHidden', 'toggleDeskMinimap', 'setActiveEntity', 'syncViewportAgendaRail', 'scheduleDeskSessionSave']);
+    ['state', 'document', 'applyCardRect', 'restoreHudAfterCardFullscreen', 'toggleDeskMinimap', 'setActiveEntity', 'syncViewportAgendaRail', 'scheduleDeskSessionSave']);
   const enter = compileFunction(`return function enterLocalDesk() {${enterBody}\n  }`,
     ['state', 'exitCardFullscreen', 'document', 'scheduleDeskSessionSave']);
   const zoomFactor = compileFunction(`return function zoomCanvasByFactor(factor, cx, cy) {${factorBody}\n    }`,
@@ -23016,9 +23084,9 @@ function portableSettingsHarness({ respond, fullscreen = false, initialDetail = 
     const fullDeps = { state, document, cardZ: 0, canvasZoom: () => 1, parsePxNumber: Number.parseFloat, SurfaceState: Surface, ZOOM_MAX: 4,
       safeViewportRect: () => ({ left: 10, top: 10, width: 980, height: 680 }),
       setActiveEntity: card => { state.activeEntityId = card?.id; }, syncViewportAgendaRail() {}, syncHudViewportFit() {},
-      closeDeskMinimap() {}, toggleDeskMinimap() {}, scheduleDeskSessionSave() {} };
+      closeDeskMinimap() {}, toggleDeskMinimap() {}, scheduleDeskSessionSave() {}, toggleHUD() {} };
     const source = ['isCardFullscreen', 'getCardRect', 'applyCardRect', 'setHudPresentationHidden', 'syncCardFullscreenLayout',
-      'enterCardFullscreen', 'exitCardFullscreen', 'toggleCardFullscreen'].map(declaration).join('\n');
+      'enterCardFullscreen', 'exitCardFullscreen', 'restoreHudAfterCardFullscreen', 'toggleCardFullscreen'].map(declaration).join('\n');
     Object.assign(deps, compileFunction(`${source}\nreturn { isCardFullscreen, toggleCardFullscreen };`, Object.keys(fullDeps))(...Object.values(fullDeps)));
   }
   const spawn = compileFunction(`${declaration('spawnSettingsCard')}\nreturn spawnSettingsCard;`, Object.keys(deps))(...Object.values(deps));
