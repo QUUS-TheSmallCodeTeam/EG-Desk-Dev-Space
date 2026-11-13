@@ -26,6 +26,15 @@ test('badge: a maximized View reads "○○ · 크게 보는 중" and a focus Vi
   for (const badge of [maximized, focus]) assert.doesNotMatch(badge.text + badge.title, /Maximized|Focus|Fullscreen/i);
 });
 
+test('badge: a long View name is shortened so the state words always stay visible; the tooltip keeps the full name', () => {
+  const long = '2026년 5월 태화 월간 운영 리포트 최종본 검토용';
+  const badge = presentationBadge(long, 'maximized');
+  assert.equal(badge.text, '2026년 5월 태화 월간 운영… · 크게 보는 중');
+  assert.ok(badge.title.startsWith(`${long} 창을 크게 보는 중`), 'the tooltip names the whole View');
+  assert.equal(presentationBadge('가'.repeat(18), 'focus').text, `${'가'.repeat(18)} · 집중 보기`, 'a name at the limit is left alone');
+  assert.equal(presentationBadge('  회의   자료  ', 'maximized').text, '회의 자료 · 크게 보는 중', 'stray spacing is tidied');
+});
+
 // ------------------------------------------------------------- HUD mode reducer
 
 const hidden = { mode: 'maximized', hudMode: 'hidden', peekSource: null };
@@ -120,6 +129,13 @@ test('surface: the English "Maximized" badge is gone and the badge is a real but
   assert.match(ensure, /exitCardFullscreen\(\)/);
   assert.match(ensure, /집중 보기/);
   assert.match(functionBody('syncViewportAgendaRail'), /MaximizeHud\.presentationBadge\(/);
+});
+
+test('surface: the top-bar badge buttons take clicks instead of dragging the window', () => {
+  const rule = css.match(/button\.egd-rail-card-badge,\s*button\.egd-rail-focus-view \{([^}]+)\}/);
+  assert.ok(rule, 'the two top-bar buttons share one rule');
+  assert.match(rule[1], /-moz-window-dragging:\s*no-drag/, 'the top bar itself is a window drag handle');
+  assert.match(rule[1], /cursor:\s*pointer/);
 });
 
 test('surface: maximize keeps Desk chrome for every View type; only focus view hides it', () => {

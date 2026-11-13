@@ -22,12 +22,21 @@ const MODE_COPY = { maximized: '크게 보는 중', focus: '집중 보기' };
 // is user-facing copy, so those read the way the Dock names them.
 const TYPE_LABEL_KO = { Terminal: '터미널', Settings: '설정', Card: '창' };
 
+// The badge sits in the top bar beside the Board name: a long View name is cut
+// here (not by CSS) so the state words after it are never the part that is lost.
+export const MAXIMIZE_BADGE_NAME_MAX = 18;
+
+function shortBadgeName(name) {
+  const chars = Array.from(name);
+  return chars.length <= MAXIMIZE_BADGE_NAME_MAX ? name : `${chars.slice(0, MAXIMIZE_BADGE_NAME_MAX).join('').trimEnd()}…`;
+}
+
 export function presentationBadge(label, mode) {
-  const raw = String(label || '').trim();
+  const raw = String(label || '').replace(/\s+/g, ' ').trim();
   const name = TYPE_LABEL_KO[raw] || raw || '창';
   const focus = mode === 'focus';
   return {
-    text: `${name} · ${focus ? MODE_COPY.focus : MODE_COPY.maximized}`,
+    text: `${shortBadgeName(name)} · ${focus ? MODE_COPY.focus : MODE_COPY.maximized}`,
     title: `${name} 창을 ${focus ? '집중 보기 중' : '크게 보는 중'} — 누르면 원래 크기로 돌아갑니다`,
   };
 }
