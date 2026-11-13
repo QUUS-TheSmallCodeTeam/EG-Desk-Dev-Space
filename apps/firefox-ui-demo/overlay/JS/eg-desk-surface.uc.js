@@ -77,32 +77,6 @@
     { id: 'writing',    label: '작성', name: '글쓰기',      count: 2 },
   ];
 
-  const DOCK_LEFT = [
-    { id: 'chat',     label: '채팅',    icon: 'chat' },
-    { id: 'shelf',    label: '파일',    icon: 'file' },
-    { id: 'ontology', label: '온톨로지', icon: 'ontology' },
-    { id: 'browser',  label: '브라우저', icon: 'browser' },
-    { id: 'ide',      label: 'IDE',     icon: 'ide' },
-    { id: 'terminal', label: '터미널',  icon: 'terminal' },
-    { id: 'settings', label: '설정',   icon: 'settings' },
-    { id: 'memo',     label: '메모',    icon: 'note' },
-    { id: 'create',   label: '추가',    icon: 'plus' },
-  ];
-  const DOCK_CENTER = [
-    { id: 'pencil',    label: '펜',     icon: 'pencil' },
-    { id: 'hand',      label: '손',     icon: 'move' },
-    { id: 'square',    label: '사각형', icon: 'square' },
-    { id: 'ellipse',   label: '원',     icon: 'ellipse' },
-    { id: 'line',      label: '선',     icon: 'line' },
-    { id: 'arrow',     label: '화살표', icon: 'arrow' },
-    { id: 'label',     label: '글자',   icon: 'text' },
-    { id: 'highlight', label: '강조',   icon: 'highlight' },
-    { id: 'select',    label: '선택',   icon: 'pointer', active: true },
-  ];
-  const DOCK_RIGHT = [
-    { id: 'trash',    label: '휴지통', icon: 'trash' },
-  ];
-
   const SELF_MEMBER = '나';
   const THREAD_KIND_META = {
     dm: {
@@ -9340,6 +9314,117 @@
   }
 
   // ============ Bottom: Dock ============
+  // Eight buttons stay on the Dock (approved desktop style). The other windows,
+  // the drawing tools and the marks toggle open from [새 카드].
+  const DockLayout = ChromeUtils.importESModule('chrome://userchrome/content/EGDeskDockLayout.sys.mjs');
+  const DOCK_LEFT = DockLayout.DOCK_OPEN_ITEMS;
+  const DOCK_CENTER = DockLayout.DOCK_TOOL_ITEMS;
+  const DOCK_RIGHT = DockLayout.DOCK_CLOSE_ITEMS;
+  const DOCK_ANNOTATION_SELECTOR = '.egd-canvas-shape, .egd-memo-card';
+
+  function dockAnnotationsHidden() {
+    return document.documentElement.dataset.egdAnnotationsHidden === 'true';
+  }
+
+  // One root attribute hides marks and memos through CSS. Nothing moves: the
+  // camera, the windows and the hidden items all keep their places.
+  function setDockAnnotationsHidden(hidden) {
+    if (hidden) {
+      document.documentElement.dataset.egdAnnotationsHidden = 'true';
+      // A hidden item must not stay the target of Delete or of the close button.
+      if (document.querySelector('.egd-canvas-shape.egd-entity-selected, .egd-memo-card.egd-entity-selected')) setActiveEntity(null);
+    } else {
+      delete document.documentElement.dataset.egdAnnotationsHidden;
+    }
+    syncDockState();
+  }
+
+  function setDockTool(toolId) {
+    state.activeTool = toolId;
+    syncActiveToolMode();
+    // Drawing while marks are hidden would leave nothing to see.
+    if (DockLayout.dockCurrentDrawTool(toolId) && dockAnnotationsHidden()) setDockAnnotationsHidden(false);
+    else syncDockState();
+  }
+
+  function dockEyeIcon(hidden) {
+    const icon = svgEl('svg', {
+      class: 'egd-ui-icon', viewBox: '0 0 24 24', width: '18', height: '18',
+      fill: 'none', stroke: 'currentColor', 'stroke-width': '1.8',
+      'stroke-linecap': 'round', 'stroke-linejoin': 'round',
+      'aria-hidden': 'true', focusable: 'false',
+    },
+    svgEl('path', { d: 'M2.5 12s3.5-6.5 9.5-6.5 9.5 6.5 9.5 6.5-3.5 6.5-9.5 6.5S2.5 12 2.5 12Z' }),
+    svgEl('circle', { cx: '12', cy: '12', r: '2.8' }));
+    if (hidden) icon.appendChild(svgEl('path', { d: 'M4 4 20 20' }));
+    return icon;
+  }
+
+  // Brings the Dock and its open menu in line with the tool in use, the
+  // current selection and whether marks are hidden.
+  function syncDockState(dock = document.getElementById('egd-dock')) {
+    if (!dock) return;
+    const menu = document.getElementById('egd-dock-menu');
+    const current = DockLayout.dockCurrentDrawTool(state.activeTool);
+    let chip = dock.querySelector('.egd-dock-current-tool');
+    if (!current) {
+      chip?.remove();
+    } else if (chip?.dataset.id !== current.id) {
+      // The drawing tool in use sits beside [선택] until the pointer is chosen again.
+      const next = el('button', {
+        type: 'button',
+        class: 'egd-dock-btn egd-dock-current-tool',
+        title: current.title,
+        'aria-label': current.title,
+        'aria-haspopup': 'menu',
+        data: { id: current.id, kind: 'center' },
+        onclick: () => dock._openDockMenu?.({ focusTool: true }),
+      }, el('span', { class: 'egd-dock-icon' }, deskIcon(current.icon)));
+      if (chip) chip.replaceWith(next);
+      else dock.querySelector('.egd-dock-btn[data-id="create"]')?.before(next);
+      chip = next;
+    }
+    for (const b of [...dock.querySelectorAll('.egd-dock-btn[data-kind="center"]'), ...(menu?.querySelectorAll('.egd-dock-menu-tool') || [])]) {
+      const chosen = b.dataset.id === state.activeTool;
+      b.classList.toggle('egd-dock-btn-active', chosen);
+      b.setAttribute(b.getAttribute('role') === 'menuitemradio' ? 'aria-checked' : 'aria-pressed', String(chosen));
+    }
+    const closeButton = dock.querySelector('.egd-dock-btn[data-id="trash"]');
+    if (closeButton) {
+      const selected = Array.from(document.querySelectorAll('.egd-entity-selected'));
+      const windows = selected.filter(node => node.classList.contains('egd-canvas-card')).length;
+      const view = DockLayout.dockCloseState({ windows, marks: selected.length - windows });
+      closeButton.setAttribute('aria-disabled', String(view.disabled));
+      closeButton.title = view.title;
+      closeButton.setAttribute('aria-label', view.title);
+    }
+    const hidden = dockAnnotationsHidden();
+    const toggle = DockLayout.dockAnnotationToggle({ hidden, count: hidden ? document.querySelectorAll(DOCK_ANNOTATION_SELECTOR).length : 0 });
+    const createButton = dock.querySelector('.egd-dock-btn[data-id="create"]');
+    if (createButton) {
+      createButton.title = toggle.newCardTitle;
+      createButton.setAttribute('aria-label', toggle.newCardTitle);
+      createButton.setAttribute('aria-expanded', String(!!menu));
+      createButton.classList.toggle('egd-dock-btn-marks-hidden', hidden);
+    }
+    const toggleItem = menu?.querySelector('.egd-dock-menu-toggle');
+    if (toggleItem) {
+      toggleItem.setAttribute('aria-checked', String(toggle.pressed));
+      toggleItem.querySelector('.egd-dock-icon').replaceChildren(dockEyeIcon(hidden));
+      toggleItem.querySelector('.egd-dock-menu-label').textContent = toggle.label;
+      toggleItem.querySelector('.egd-dock-menu-detail').textContent = toggle.detail;
+    }
+  }
+
+  function closeDockMenu({ restoreFocus = false } = {}) {
+    const menu = document.getElementById('egd-dock-menu');
+    if (!menu) return;
+    menu._cleanup?.();
+    menu.remove();
+    syncDockState();
+    if (restoreFocus) document.querySelector('#egd-dock .egd-dock-btn[data-id="create"]')?.focus();
+  }
+
   function buildDock() {
     const dock = el('div', {
       id: 'egd-dock',
@@ -9349,24 +9434,22 @@
       tabindex: '0',
     });
 
-    const makeGroup = (items, kind) => {
-      const g = el('div', { class: `egd-dock-group egd-dock-${kind}` });
-      for (const item of items) {
+    const makeButton = (item, kind, { className = 'egd-dock-btn', role = null } = {}) => {
         const btn = el('button', {
-          class: 'egd-dock-btn' + (kind === 'center' && state.activeTool === item.id ? ' egd-dock-btn-active' : ''),
+          type: 'button',
+          class: className + (kind === 'center' && state.activeTool === item.id ? ' egd-dock-btn-active' : ''),
           title: item.id === 'ide' ? '현재 보드의 프로젝트 파일 열기' : item.label,
           data: { id: item.id, kind, ...(item.id === 'shelf' ? { testid: 'file-dock-open' } : {}) },
           'aria-label': item.label,
+          role,
           // The chosen tool is also said as a pressed state, not only by its tint.
           'aria-pressed': kind === 'center' ? String(state.activeTool === item.id) : null,
           onclick: () => {
             if (kind === 'center') {
-              state.activeTool = item.id;
-              syncActiveToolMode();
-              for (const b of g.querySelectorAll('.egd-dock-btn')) {
-                b.classList.toggle('egd-dock-btn-active', b.dataset.id === item.id);
-                b.setAttribute('aria-pressed', String(b.dataset.id === item.id));
-              }
+              setDockTool(item.id);
+            } else if (kind === 'menu') {
+              if (document.getElementById('egd-dock-menu')) closeDockMenu();
+              else openDockMenu();
             } else if (kind === 'left') {
               if (item.id === 'browser') {
                 spawnBrowserCard();
@@ -9391,28 +9474,148 @@
                 // settled camera would show only its semantic proxy, use the
                 // proxy's existing focus-to-readable path without another click.
                 state.focusChatDockIfCompact?.(chatCard);
-              } else {
-                toggleHUD(item.id, item.label);
               }
             } else if (kind === 'right' && item.id === 'trash') {
               deleteSelectedEntities();
             }
           },
         }, el('span', { class: 'egd-dock-icon' }, deskIcon(item.icon)));
+        return btn;
+    };
+
+    const divider = () => el('span', { class: 'egd-dock-divider', 'aria-hidden': 'true' });
+
+    const makeGroup = (items, kind) => {
+      const g = el('div', { class: `egd-dock-group egd-dock-${kind}` });
+      for (const item of items) {
+        const btn = makeButton(item, kind);
+        // A memo made while marks are hidden is shown, together with the rest.
+        if (item.id === 'memo') btn.addEventListener('click', () => { if (dockAnnotationsHidden()) setDockAnnotationsHidden(false); });
+        btn.addEventListener('click', () => syncDockState());
         g.appendChild(btn);
       }
       return g;
     };
 
-    const divider = () => el('span', { class: 'egd-dock-divider' });
+    const menuItems = menu => Array.from(menu.querySelectorAll('.egd-dock-menu-item, .egd-dock-menu-tool'));
+
+    function openDockMenu({ focusTool = false } = {}) {
+      closeDockMenu();
+      const anchor = dock.querySelector('.egd-dock-btn[data-id="create"]');
+      if (!anchor) return;
+      const menu = el('div', { id: 'egd-dock-menu', class: 'egd-dock-menu', role: 'menu', 'aria-label': DockLayout.DOCK_NEW_CARD.label });
+      menu.appendChild(el('div', { class: 'egd-dock-menu-caption', 'aria-hidden': 'true' }, DockLayout.DOCK_NEW_CARD.label));
+      for (const item of DockLayout.DOCK_NEW_CARD_ITEMS) {
+        const row = makeButton(item, 'left', { className: 'egd-dock-menu-item', role: 'menuitem' });
+        row.tabIndex = -1;
+        row.appendChild(el('span', { class: 'egd-dock-menu-label' }, item.label));
+        row.addEventListener('click', () => closeDockMenu());
+        menu.appendChild(row);
+      }
+      menu.appendChild(el('div', { class: 'egd-dock-menu-sep', role: 'separator' }));
+      menu.appendChild(el('div', { class: 'egd-dock-menu-caption', 'aria-hidden': 'true' }, '작성 도구'));
+      const tools = el('div', { class: 'egd-dock-menu-tools', role: 'group', 'aria-label': '작성 도구' });
+      for (const item of DockLayout.DOCK_DRAW_TOOLS) {
+        const tool = makeButton(item, 'center', { className: 'egd-dock-menu-tool', role: 'menuitemradio' });
+        tool.tabIndex = -1;
+        tool.removeAttribute('aria-pressed');
+        tool.addEventListener('click', event => {
+          closeDockMenu();
+          // A keyboard pick lands on the Dock button that now shows the tool.
+          if (event.detail === 0) dock.querySelector('.egd-dock-current-tool')?.focus();
+        });
+        tools.appendChild(tool);
+      }
+      menu.appendChild(tools);
+      menu.appendChild(el('div', { class: 'egd-dock-menu-sep', role: 'separator' }));
+      menu.appendChild(el('button', {
+        type: 'button',
+        class: 'egd-dock-menu-item egd-dock-menu-toggle',
+        role: 'menuitemcheckbox',
+        tabindex: '-1',
+        data: { id: 'annotations' },
+        onclick: () => setDockAnnotationsHidden(!dockAnnotationsHidden()),
+      },
+      el('span', { class: 'egd-dock-icon' }),
+      el('span', { class: 'egd-dock-menu-label' }),
+      el('span', { class: 'egd-dock-menu-detail' })));
+
+      const onKeydown = event => {
+        if (event.key === 'Escape') {
+          event.preventDefault();
+          event.stopPropagation();
+          closeDockMenu({ restoreFocus: true });
+          return;
+        }
+        const items = menuItems(menu);
+        const cards = DockLayout.DOCK_NEW_CARD_ITEMS.length, toolCount = DockLayout.DOCK_DRAW_TOOLS.length;
+        const index = DockLayout.dockMenuMove({
+          index: items.indexOf(document.activeElement), key: event.key, cards, tools: toolCount,
+          activeTool: DockLayout.DOCK_DRAW_TOOLS.findIndex(item => item.id === state.activeTool),
+        });
+        if (index < 0 || !items[index]) return;
+        event.preventDefault();
+        event.stopPropagation();
+        items[index].focus();
+      };
+      const onPointerDown = event => {
+        // The two Dock buttons that open this menu close it themselves.
+        if (menu.contains(event.target) || event.target?.closest?.('.egd-dock-btn[data-id="create"], .egd-dock-current-tool')) return;
+        closeDockMenu();
+      };
+      const onFocusOut = event => {
+        if (event.relatedTarget && !menu.contains(event.relatedTarget)) closeDockMenu();
+      };
+      const onResize = () => closeDockMenu();
+      window.addEventListener('keydown', onKeydown, true);
+      document.addEventListener('pointerdown', onPointerDown, true);
+      menu.addEventListener('focusout', onFocusOut);
+      window.addEventListener('resize', onResize);
+      menu._cleanup = () => {
+        window.removeEventListener('keydown', onKeydown, true);
+        document.removeEventListener('pointerdown', onPointerDown, true);
+        window.removeEventListener('resize', onResize);
+      };
+
+      (dock.parentNode || document.documentElement).appendChild(menu);
+      syncDockState(dock);
+      // Sits above the Dock, centred on [새 카드], kept inside the window.
+      const anchorRect = anchor.getBoundingClientRect(), dockRect = dock.getBoundingClientRect();
+      const width = menu.offsetWidth;
+      const left = Math.max(8, Math.min(window.innerWidth - width - 8, anchorRect.left + anchorRect.width / 2 - width / 2));
+      menu.style.left = `${Math.round(left)}px`;
+      menu.style.bottom = `${Math.round(window.innerHeight - dockRect.top + 8)}px`;
+      const items = menuItems(menu);
+      const activeTool = focusTool ? items.find(item => item.classList.contains('egd-dock-menu-tool') && item.dataset.id === state.activeTool) : null;
+      (activeTool || items[0])?.focus();
+    }
+    dock._openDockMenu = openDockMenu;
 
     dock.appendChild(makeGroup(DOCK_LEFT, 'left'));
     dock.appendChild(divider());
-    dock.appendChild(makeGroup(DOCK_CENTER, 'center'));
+    const toolGroup = makeGroup(DOCK_CENTER, 'center');
+    const createButton = makeButton(DockLayout.DOCK_NEW_CARD, 'menu');
+    createButton.setAttribute('aria-haspopup', 'menu');
+    toolGroup.appendChild(createButton);
+    dock.appendChild(toolGroup);
     dock.appendChild(divider());
     dock.appendChild(makeGroup(DOCK_RIGHT, 'right'));
+
+    // Selection changes come from pointer and key input; one sync per frame
+    // keeps the close button's inactive look current without watching the Canvas.
+    let syncFrame = 0;
+    const scheduleSync = () => {
+      if (syncFrame) return;
+      syncFrame = window.requestAnimationFrame(() => { syncFrame = 0; syncDockState(); });
+    };
+    document.addEventListener('pointerup', scheduleSync, true);
+    document.addEventListener('keyup', scheduleSync, true);
+    dock.addEventListener('pointerenter', () => syncDockState());
+    dock.addEventListener('focusin', () => syncDockState());
+    syncDockState(dock);
     return dock;
   }
+
 
   // ============ Left: Preset Bag ============
   function buildPresetBag() {
@@ -9470,12 +9673,7 @@
       ),
     );
 
-    const body = el('div', { class: 'egd-hud-body', id: 'egd-hud-body' },
-      el('div', { class: 'egd-hud-placeholder' },
-        el('div', { class: 'egd-hud-ph-title' }, '컨텍스트 패널'),
-        el('div', { class: 'egd-hud-ph-sub' }, '도크 왼쪽 앱 클릭 시 여기에 전용 패널이 렌더됩니다.'),
-      ),
-    );
+    const body = el('div', { class: 'egd-hud-body', id: 'egd-hud-body' });
 
     let hudDrag = null;
     const cancelHudDrag = () => {
@@ -15341,9 +15539,11 @@
       });
       return;
     }
+    // Only Chat lives in this panel. Until its connection exists the panel
+    // says so in product words.
     body.appendChild(el('div', { class: 'egd-hud-placeholder' },
-      el('div', { class: 'egd-hud-ph-title' }, `${appLabel} 패널`),
-      el('div', { class: 'egd-hud-ph-sub' }, `${appLabel} 전용 패널이 여기 렌더됩니다. 실제 기능은 2단계에서 연결됩니다.`),
+      el('div', { class: 'egd-hud-ph-title' }, appLabel || '패널'),
+      el('div', { class: 'egd-hud-ph-sub' }, '아직 준비 중입니다. 잠시 뒤 다시 열어 주세요.'),
     ));
   }
 

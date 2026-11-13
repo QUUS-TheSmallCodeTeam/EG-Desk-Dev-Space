@@ -3445,7 +3445,19 @@
 }
 
 /* ============ Bottom: Dock ============
-   compact bottom dock, centered, content-aware width */
+   compact bottom dock, centered, content-aware width.
+   Sizes follow the approved desktop style (.eg-dock, .eg-dock button,
+   .eg-dock-sep) and are named once here for the Dock and its menu. */
+#egd-dock, .egd-dock-menu {
+  --egd-dock-gap: 6px;
+  --egd-dock-pad: 9px;
+  --egd-dock-button: 32px;
+  --egd-dock-icon: 17px;
+  --egd-dock-sep-height: 23px;
+  --egd-dock-sep-gap: 3px;
+  --egd-dock-radius: 10px;
+  --egd-dock-button-radius: 6px;
+}
 #egd-dock {
   bottom: 12px;
   left: 50%;
@@ -3456,8 +3468,8 @@
   border-radius: 10px;
   display: flex;
   align-items: center;
-  gap: 4px;
-  padding: 0 7px;
+  gap: var(--egd-dock-gap);
+  padding: 0 var(--egd-dock-pad);
   background: var(--egd-surface-elevated);
   border-color: var(--egd-outline);
   backdrop-filter: none;
@@ -3468,12 +3480,13 @@
 .egd-dock-group {
   display: flex;
   align-items: center;
-  gap: 4px;
+  gap: var(--egd-dock-gap);
 }
 
 .egd-dock-divider {
   width: 1px;
-  height: 17px;
+  height: var(--egd-dock-sep-height);
+  margin: 0 var(--egd-dock-sep-gap);
   background: var(--egd-outline-variant);
   flex-shrink: 0;
 }
@@ -3498,13 +3511,120 @@
   box-shadow: inset 0 -2px 0 var(--egd-primary);
 }
 .egd-dock-btn:focus-visible { outline: var(--egd-focus-outline); outline-offset: var(--egd-focus-outline-offset); }
+.egd-dock-btn:active { background: var(--egd-primary-container); color: var(--egd-on-surface); }
+/* Nothing selected: the close button stays reachable but reads as inactive. */
+.egd-dock-btn[aria-disabled="true"],
+.egd-dock-btn[aria-disabled="true"]:hover,
+.egd-dock-btn[aria-disabled="true"]:active {
+  background: transparent;
+  color: var(--egd-on-surface-variant);
+  opacity: var(--egd-opacity-disabled);
+  cursor: default;
+}
+/* Marks and memos are hidden: [새 카드] carries a small dot until they return. */
+.egd-dock-btn-marks-hidden { position: relative; }
+.egd-dock-btn-marks-hidden::after {
+  content: "";
+  position: absolute;
+  top: 5px;
+  right: 5px;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--egd-warning);
+}
 .egd-dock-icon {
   display: grid;
   place-items: center;
   width: 18px;
   height: 18px;
 }
-.egd-dock-icon .egd-ui-icon { width: 16px; height: 16px; }
+.egd-dock-icon .egd-ui-icon { width: var(--egd-dock-icon); height: var(--egd-dock-icon); }
+
+/* [새 카드] menu: opens above the Dock, closes on Esc or an outside click. */
+.egd-dock-menu {
+  position: fixed;
+  z-index: 100020;
+  box-sizing: border-box;
+  width: 236px;
+  max-width: calc(100vw - 16px);
+  padding: 6px;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  background: var(--egd-surface-elevated);
+  border: 1px solid var(--egd-outline);
+  border-radius: var(--egd-dock-radius);
+  box-shadow: var(--egd-shadow);
+  color: var(--egd-on-surface);
+  font-family: var(--egd-font);
+  letter-spacing: 0;
+}
+.egd-dock-menu-caption {
+  padding: 4px 8px 2px;
+  color: var(--egd-on-surface-variant);
+  font: 600 11px/1.3 var(--egd-font);
+}
+.egd-dock-menu-item {
+  appearance: none;
+  box-sizing: border-box;
+  width: 100%;
+  min-height: var(--egd-dock-button);
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 0 8px;
+  border: 0;
+  border-radius: var(--egd-dock-button-radius);
+  background: transparent;
+  color: var(--egd-on-surface);
+  font: 500 12px/1.3 var(--egd-font);
+  text-align: left;
+  cursor: pointer;
+}
+.egd-dock-menu-item .egd-dock-icon { color: var(--egd-on-surface-variant); flex: none; }
+.egd-dock-menu-label { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.egd-dock-menu-detail { flex: none; color: var(--egd-on-surface-variant); font-size: 11px; }
+.egd-dock-menu-detail:empty { display: none; }
+.egd-dock-menu-sep { height: 1px; margin: 4px 2px; background: var(--egd-outline-variant); }
+.egd-dock-menu-tools { display: flex; gap: 2px; }
+.egd-dock-menu-tool {
+  appearance: none;
+  flex: 1;
+  min-width: 0;
+  min-height: 30px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: 0;
+  border-radius: var(--egd-dock-button-radius);
+  background: transparent;
+  color: var(--egd-on-surface-variant);
+  cursor: pointer;
+}
+.egd-dock-menu-item:hover,
+.egd-dock-menu-item:focus-visible,
+.egd-dock-menu-tool:hover,
+.egd-dock-menu-tool:focus-visible { background: var(--egd-hover); color: var(--egd-on-surface); }
+.egd-dock-menu-item:active,
+.egd-dock-menu-tool:active { background: var(--egd-primary-container); color: var(--egd-on-surface); }
+/* The tool in use keeps the Dock's underline mark inside the menu too. */
+.egd-dock-menu-tool.egd-dock-btn-active {
+  background: var(--egd-primary-container);
+  color: var(--egd-on-surface);
+  box-shadow: inset 0 -2px 0 var(--egd-primary);
+}
+.egd-dock-menu-item:focus-visible,
+.egd-dock-menu-tool:focus-visible {
+  outline: var(--egd-focus-outline);
+  outline-offset: var(--egd-focus-outline-offset);
+}
+/* 표식·메모 숨기기: one root attribute, nothing is moved or removed. */
+:root[data-egd-annotations-hidden="true"] .egd-canvas-shape,
+:root[data-egd-annotations-hidden="true"] .egd-memo-card {
+  visibility: hidden !important;
+  pointer-events: none !important;
+}
 
 /* ============ Left: Preset Bag ============
    compact preset rail, left 12, content-sized */
@@ -7667,7 +7787,7 @@
     border-radius: 5px;
   }
   .egd-dock-group { gap: 2px; flex: none; }
-  /* 18 buttons stay inside a 600px window: 18 × 29 + gaps + padding = 580px. */
+  /* The eight Dock buttons and the current-tool button stay inside a 600px window. */
   .egd-dock-btn { width: 29px; min-height: 30px; flex: none; }
   .egd-rail-right { gap: 3px; }
   .egd-rail-right { flex: 0 1 auto; min-width: 0; overflow-x: auto; overflow-y: hidden; scrollbar-width: thin; }

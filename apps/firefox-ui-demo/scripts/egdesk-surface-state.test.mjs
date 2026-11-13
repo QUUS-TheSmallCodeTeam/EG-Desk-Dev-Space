@@ -10872,17 +10872,18 @@ test('duplicate Desk View IDs are rejected before a restore can clear existing w
 });
 
 const topLevelFunction = name => surfaceSource.match(new RegExp(`  function ${name}\\([^]*?\\n  }\\n`))?.[0];
+// The Dock layout lives in its own view model; the surface only binds it.
+const DockLayout = await import('../overlay/resources/EGDeskDockLayout.sys.mjs');
 const productionDockCenter = () => {
-  const literal = surfaceSource.match(/  const DOCK_CENTER = (\[[\s\S]*?\n  \]);/)?.[1];
-  assert.ok(literal, 'production Dock centre group stays a plain array');
-  return compileFunction(`return ${literal};`)();
+  assert.match(surfaceSource, /\n  const DOCK_CENTER = DockLayout\.DOCK_TOOL_ITEMS;\n/, 'the Dock tool group is the layout view model');
+  return [...DockLayout.DOCK_TOOL_ITEMS, ...DockLayout.DOCK_DRAW_TOOLS];
 };
 
 test('Dock tool ids keep the selection pointer apart from the arrow mark', () => {
   const tools = productionDockCenter();
   assert.deepEqual(tools.map(tool => tool.id),
-    ['pencil', 'hand', 'square', 'ellipse', 'line', 'arrow', 'label', 'highlight', 'select']);
-  assert.deepEqual(tools.map(tool => tool.label), ['펜', '손', '사각형', '원', '선', '화살표', '글자', '강조', '선택']);
+    ['select', 'hand', 'pencil', 'square', 'ellipse', 'line', 'arrow', 'label', 'highlight']);
+  assert.deepEqual(tools.map(tool => tool.label), ['선택', '이동', '펜', '사각형', '원', '선', '화살표', '글자', '강조']);
   assert.equal(new Set(tools.map(tool => tool.id)).size, tools.length);
   assert.deepEqual(tools.filter(tool => tool.active).map(tool => tool.id), ['select']);
   assert.match(surfaceSource, /\n    activeTool: 'select',\n/, 'the Desk opens with the selection pointer');
@@ -10913,7 +10914,7 @@ test('Dock tool ids keep the selection pointer apart from the arrow mark', () =>
   assert.equal(tool.shapeTypeForTool('select'), 'rect', 'the legacy fallback shape is unchanged');
 });
 
-test('the 18-button Dock fits a 600px window without scrolling any tool away', () => {
+test('the eight-button Dock with its current-tool button fits a 600px window without scrolling any tool away', () => {
   // The breakpoint can be split across Focus and Dock blocks. Cascade only
   // the exact Dock selectors, in source order, across all matching blocks.
   const narrow = readCssRules(surfaceCss).filter(rule => rule.media.length === 1 && rule.media[0] === '(max-width: 700px)');
@@ -10925,10 +10926,14 @@ test('the 18-button Dock fits a 600px window without scrolling any tool away', (
   const dock = declarations('#egd-dock');
   const group = declarations('.egd-dock-group');
   const button = declarations('.egd-dock-btn');
-  const counts = [8, productionDockCenter().length, 1];
+  // Open windows | 선택·이동·current drawing tool·새 카드 | close.
+  const counts = [DockLayout.DOCK_OPEN_ITEMS.length, DockLayout.DOCK_TOOL_ITEMS.length + 2, DockLayout.DOCK_CLOSE_ITEMS.length];
+  assert.deepEqual(counts, [4, 4, 1]);
+  const dividerGap = Number.parseFloat(surfaceCss.match(/--egd-dock-sep-gap: (\d+)px;/)?.[1]);
+  assert.match(surfaceCss, /\.egd-dock-divider \{\n  width: 1px;\n  height: var\(--egd-dock-sep-height\);\n  margin: 0 var\(--egd-dock-sep-gap\);/);
   const width = counts.reduce((sum, count) => sum + count * px(button, 'width') + (count - 1) * px(group, 'gap'), 0)
-    + 2 /* dividers */ + 4 * px(dock, 'gap') + 2 * px(dock, 'padding-inline') + 2 /* border */;
-  assert.equal(width, 580);
+    + 2 * (1 + 2 * dividerGap) /* dividers */ + 4 * px(dock, 'gap') + 2 * px(dock, 'padding-inline') + 2 /* border */;
+  assert.equal(width, 313);
   assert.ok(width <= 600 - 16, `${width}px Dock fits calc(100vw - 16px)`);
 });
 
@@ -11733,7 +11738,9 @@ test('the chosen Dock tool, open room, Settings tab and File rail item are marke
   assert.match(rule('.egd-settings-tab-active'), /font-weight: 700;/);
   assert.match(rule('.egd-bag-chip-active'), /font-weight: 650;/);
   assert.match(surfaceSource, /'aria-pressed': kind === 'center' \? String\(state\.activeTool === item\.id\) : null,/);
-  assert.match(surfaceSource, /b\.classList\.toggle\('egd-dock-btn-active', b\.dataset\.id === item\.id\);\n\s*b\.setAttribute\('aria-pressed', String\(b\.dataset\.id === item\.id\)\);/);
+  // One sync marks the tool in use on the Dock (pressed) and in the [새 카드] menu (checked).
+  assert.match(surfaceSource, /const chosen = b\.dataset\.id === state\.activeTool;\n\s*b\.classList\.toggle\('egd-dock-btn-active', chosen\);\n\s*b\.setAttribute\(b\.getAttribute\('role'\) === 'menuitemradio' \? 'aria-checked' : 'aria-pressed', String\(chosen\)\);/);
+  assert.match(rule('.egd-dock-menu-tool.egd-dock-btn-active'), /box-shadow: inset 0 -2px 0 var\(--egd-primary\);/);
   assert.match(surfaceSource, /'aria-current': activeThread && thread\.id === activeThread\.id \? 'true' : null,/);
   // Status dots already sit next to their words; the avatar ink stays readable on the fixed sage.
   assert.match(surfaceSource, /egd-codex-subagent-dot egd-codex-subagent-dot-\$\{display\.status\}`, 'aria-hidden': 'true' \}\),\n\s*el\('span', \{ class: 'egd-codex-subagent-name' \}/);
