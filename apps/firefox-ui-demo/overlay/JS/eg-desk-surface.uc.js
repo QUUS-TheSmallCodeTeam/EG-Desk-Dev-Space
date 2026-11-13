@@ -12227,13 +12227,14 @@
     // AGENT-05 / D-A3: avatar photos by asset id, each read once per session from
     // GET /profiles/avatar-images/:id. Null until the bytes arrive — the initial
     // stands in. A read that fails (the bridge was not up yet) is tried again
-    // after a wait, three more times at most; then the initial stays.
-    const avatarImages = AgentIdentityView.createAvatarImageCache({
-      load: (assetId) => fetchJson(`/profiles/avatar-images/${encodeURIComponent(assetId)}`),
+    // after a wait, three more times at most; then the initial stays. The
+    // cache is made on the first face drawn.
+    let avatarImages = null;
+    const avatarImage = (assetId) => (avatarImages ||= AgentIdentityView.createAvatarImageCache({
+      load: (id) => fetchJson(`/profiles/avatar-images/${encodeURIComponent(id)}`),
       onChange: () => emit(),
       setTimer: (run, delay) => window.setTimeout(run, delay),
-    });
-    const avatarImage = (assetId) => avatarImages.get(assetId);
+    })).get(assetId);
     const loadProfileCatalog = () => {
       if (profileCatalogLoad) return profileCatalogLoad;
       if (codexProfileCatalog.status !== 'ready') codexProfileCatalog = { status: 'loading', profiles: [] };

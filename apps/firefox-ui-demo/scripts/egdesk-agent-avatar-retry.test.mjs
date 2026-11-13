@@ -1,7 +1,10 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
-import { AVATAR_RETRY_DELAYS_MS, createAvatarImageCache } from '../overlay/resources/EGDeskAgentIdentityView.sys.mjs';
+import { compileFunction } from 'node:vm';
+import * as AgentIdentityView from '../overlay/resources/EGDeskAgentIdentityView.sys.mjs';
+
+const { AVATAR_RETRY_DELAYS_MS, createAvatarImageCache } = AgentIdentityView;
 
 const ASSET = `img-${'a'.repeat(64)}`;
 const OTHER = `img-${'b'.repeat(64)}`;
@@ -74,12 +77,28 @@ test('B08: each photo keeps its own tries; a name that is not a photo id is neve
 
 test('B08: the surface reads Agent photos through the retrying cache', () => {
   const source = readFileSync(new URL('../overlay/JS/eg-desk-surface.uc.js', import.meta.url), 'utf8');
-  const start = source.indexOf('const avatarImages = AgentIdentityView.createAvatarImageCache({');
-  assert.notEqual(start, -1, 'the bridge builds its photo cache from createAvatarImageCache');
-  const block = source.slice(start, source.indexOf('const loadProfileCatalog', start));
-  assert.match(block, /load: \(assetId\) => fetchJson\(`\/profiles\/avatar-images\/\$\{encodeURIComponent\(assetId\)\}`\)/);
+  const start = source.indexOf('    let avatarImages = null;');
+  const end = source.indexOf('    const loadProfileCatalog', start);
+  assert.ok(start > 0 && end > start, 'the bridge keeps one photo cache');
+  const block = source.slice(start, end);
+  assert.match(block, /const avatarImage = \(assetId\) => \(avatarImages \|\|= AgentIdentityView\.createAvatarImageCache\(\{/);
+  assert.match(block, /load: \(id\) => fetchJson\(`\/profiles\/avatar-images\/\$\{encodeURIComponent\(id\)\}`\)/);
   assert.match(block, /onChange: \(\) => emit\(\)/);
   assert.match(block, /setTimer: \(run, delay\) => window\.setTimeout\(run, delay\)/, 'the wait runs on the window timer');
-  assert.match(block, /const avatarImage = \(assetId\) => avatarImages\.get\(assetId\);/);
   assert.doesNotMatch(block, /\.catch\(\(\) => \{\}\)/, 'a failed read is no longer swallowed for the whole session');
+  // The cut block, run with the real cache: one failed read, then the photo after the wait.
+  const fetches = [];
+  const timers = [];
+  let emits = 0;
+  const avatarImage = compileFunction(`${block}\n return avatarImage;`, ['AgentIdentityView', 'fetchJson', 'emit', 'window'])(
+    AgentIdentityView, (path) => { fetches.push(path); return fetches.length === 1 ? Promise.reject(new Error('offline')) : Promise.resolve(photo(ASSET)); },
+    () => { emits += 1; }, { setTimeout: (run, delay) => { timers.push({ run, delay }); } });
+  assert.equal(avatarImage(ASSET), null);
+  return settle().then(async () => {
+    assert.deepEqual([fetches, timers.map(timer => timer.delay), emits], [[`/profiles/avatar-images/${ASSET}`], [AVATAR_RETRY_DELAYS_MS[0]], 0]);
+    timers[0].run();
+    await settle();
+    assert.equal(avatarImage(ASSET), `data:image/png;base64,${PNG}`);
+    assert.deepEqual([fetches.length, emits], [2, 1]);
+  });
 });
