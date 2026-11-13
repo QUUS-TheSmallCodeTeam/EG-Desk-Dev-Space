@@ -1367,9 +1367,9 @@ export async function runLegacyContextBriefing({ profile, deadlineMs, phase }, {
   });
   check('native Chat card header click does not raise the missing pan helper error',
     !headerErrors.some(message => message.includes('startPanIfNeeded')));
-  const moveToHud = (await harness.inspect('.egd-chat-card button[title="우측 패널로 이동"]'))[0];
+  const moveToHud = (await harness.inspect('.egd-chat-card button[title="오른쪽 패널로 옮기기"]'))[0];
   if (moveToHud?.visible) {
-    await clickThen('Dock existing Chat in the side panel', '.egd-chat-card button[title="우측 패널로 이동"]',
+    await clickThen('Dock existing Chat in the side panel', '.egd-chat-card button[title="오른쪽 패널로 옮기기"]',
       () => chrome(harness, () => window.__egdesk.state.codex.chatDockMode), value => value === 'hud');
     await selectQaThread(harness, thread);
   }

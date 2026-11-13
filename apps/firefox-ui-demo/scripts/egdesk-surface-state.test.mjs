@@ -15371,10 +15371,11 @@ test('card and Chat panel header buttons draw no native face and take their colo
   assertFocusTokens(surfaceCss, ['.egd-chat-card-action:focus-visible', '.egd-hud-pin:focus-visible', '.egd-hud-close:focus-visible']);
   // Hover keeps the light look: the outline edge and the paper layer, both tokens that the dark block redefines.
   assert.match(surfaceCss, /\.egd-chat-card-action:hover \{\n  border-color: var\(--egd-chat-outline-soft\);\n  background: var\(--egd-chat-layer-elevated\);/);
-  // The header still builds exactly these two buttons with that class.
+  // The header builds exactly one button with that class; closing moved to the shared window dots.
   const header = surfaceSource.match(/    const header = el\('div', \{ class: 'egd-chat-card-header' \},[\s\S]*?\n    \);/)?.[0] || '';
-  assert.equal(header.match(/class: 'egd-chat-card-action'/g)?.length, 2, "'우측' and close");
-  assert.ok(header.includes("}, '우측'),") && header.includes("title: '닫기'"));
+  assert.equal(header.match(/class: 'egd-chat-card-action'/g)?.length, 1, 'move to the right panel');
+  assert.ok(header.includes("title: '오른쪽 패널로 옮기기'") && header.includes("}, deskIcon('sidepanel')),"));
+  assert.ok(header.includes('closeControl, minimizeControl, maximizeControl') && !header.includes("'우측'"));
 });
 
 test('Chat room rows are buttons a keyboard can reach and choose, with the open room marked', () => {
