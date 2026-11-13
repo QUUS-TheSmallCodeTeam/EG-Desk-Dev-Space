@@ -2744,7 +2744,30 @@ export function taskBoardSummary(board) {
   const completed = count(['completed']), failed = count(['failed']), cancelled = count(['cancelled']);
   const text = running || waiting ? `진행 ${running}건 · 대기 ${waiting}건`
     : ['작업 끝남', completed ? `완료 ${completed}건` : '', failed ? `실패 ${failed}건` : '', cancelled ? `취소 ${cancelled}건` : ''].filter(Boolean).join(' · ');
-  return { visible: tasks.length > 0, running, waiting, completed, failed, cancelled, text };
+  // B12: waits only 대표님 can clear (an answer, a sign-in, an approval already
+  // asked for), apart from waits on earlier work. The keys only tell one wait from another.
+  const mineKeys = taskBoardShown(board).filter(entry => entry.graph.cancelRequested !== true)
+    .flatMap(entry => entry.graph.tasks.filter(task => TASK_WAITING_STATUSES.includes(task.status))
+      .flatMap(task => task.gates.filter(gate => taskGateMine(entry, task, gate))
+        .map(gate => `${entry.graphId}:${task.taskId}:${gate.gateId}`)));
+  return { visible: tasks.length > 0, running, waiting, completed, failed, cancelled, text,
+    mine: mineKeys.length, mineText: mineKeys.length ? `내 확인 ${mineKeys.length}건` : '', mineKeys };
+}
+
+/** A wait that needs 대표님's hand now: a question/confirmation, a sign-in, or an approval the task has asked for. */
+export function taskGateMine(entry, task, gate) {
+  if (gate?.status !== 'waiting') return false;
+  if (gate.kind === 'approval') return !!taskApprovalId(entry, task?.taskId);
+  return ['userAction', 'oauth'].includes(gate.kind);
+}
+
+/** The sign-in site a waiting login condition names (its exact http(s) origin), or null. */
+export function taskGateOpenTarget(gate) {
+  if (gate?.kind !== 'oauth' || gate.status !== 'waiting' || typeof gate.origin !== 'string') return null;
+  try {
+    const url = new URL(gate.origin);
+    return ['http:', 'https:'].includes(url.protocol) && url.origin === gate.origin ? url.origin : null;
+  } catch { return null; }
 }
 
 const originHost = origin => { try { return new URL(origin).host || null; } catch { return null; } };
@@ -2815,7 +2838,9 @@ export function taskGateView(gate, { taskNames = {}, folderName = null, now = Da
   if (status === 'rejected') return { gateId: gate.gateId, kind, state: status, text: '승인 거절됨', time: null, byHand: false, ...question };
   if (status === 'expired') return { gateId: gate.gateId, kind, state: status, text: `${waitingText} · 시간 초과`, time: clock(gate.expiredAt), byHand: false, ...question };
   const until = clock(gate.expiresAt);
-  return { gateId: gate.gateId, kind, state: status, text: waitingText, time: until ? `${until}까지` : null, byHand: false, ...question };
+  return { gateId: gate.gateId, kind, state: status, text: waitingText, time: until ? `${until}까지` : null, byHand: false, ...question,
+    // B12: a login wait offers its sign-in site.
+    ...(taskGateOpenTarget(gate) ? { openLabel: '로그인 열기' } : {}) };
 }
 
 /** The '계속' fallback: an outside condition still waiting (or run out) in a started, not cancelled graph. */
@@ -2983,6 +3008,7 @@ export function taskBoardView(board, { folderName = null, continuing = null, app
         return { ...condition, continuable: !condition.responseInvalid && taskGateContinuable(graph, task, gate),
           phase: here ? continuing.phase : null,
           approvable: gate.kind === 'approval' && !!taskApprovalId(entry, task.taskId),
+          mine: TASK_WAITING_STATUSES.includes(task.status) && graph.cancelRequested !== true && taskGateMine(entry, task, gate),
           approvalPhase: deciding ? deciding.phase : null, approvalDecision: deciding ? deciding.decision : null,
           error: here && continuing.phase === 'error' ? continuing.error || null : deciding?.phase === 'error' ? deciding.error || null : condition.responseError || null };
       }),

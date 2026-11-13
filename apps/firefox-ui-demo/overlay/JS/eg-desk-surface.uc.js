@@ -288,7 +288,9 @@
   // opens the activity record at that run; it never shows thought text. With
   // several Agents at work in one room, `showName` puts the Agent's name above
   // its bubble, outside it, as an answer's name sits.
-  function codexAgentWorkingRow(working, { runId = '', name = 'Codex', avatar = null, showName = false, onOpen, workScreen = null } = {}) {
+  // A44: a run waiting on 대표님 adds `ask` — what it asks in one line and the
+  // button that goes to answer it (the decision itself stays in the record).
+  function codexAgentWorkingRow(working, { runId = '', name = 'Codex', avatar = null, showName = false, onOpen, workScreen = null, ask = null, onAnswer } = {}) {
     const face = codexMessageAvatarFace(avatar, name);
     return el('div', { class: 'egd-codex-working-row', data: { testid: 'chat-agent-working', runId, state: working.state } },
       el('span', { class: `egd-codex-message-avatar${face.toneClass}`, 'aria-hidden': 'true' },
@@ -303,6 +305,16 @@
         },
         el('span', { class: 'egd-codex-typing-dots', 'aria-hidden': 'true' }, el('span'), el('span'), el('span')),
         el('span', { class: 'egd-codex-working-text' }, working.text)),
+        ask ? el('div', { class: 'egd-codex-working-ask', data: { testid: 'chat-agent-working-ask', kind: ask.kind } },
+          el('span', { class: 'egd-codex-working-ask-text' }, ask.detail),
+          ask.moreText ? el('span', { class: 'egd-codex-working-ask-more' }, ask.moreText) : null,
+          el('button', {
+            class: 'egd-codex-chip egd-codex-chip-primary egd-codex-working-ask-go', type: 'button',
+            title: ask.kind === 'question' ? '활동 기록에서 답하기' : '활동 기록에서 확인하기',
+            'aria-label': `${name} · ${ask.detail} · ${ask.actionLabel}`,
+            data: { testid: 'chat-agent-working-answer', focusKey: `agent-working-answer-${runId}` },
+            onclick: (ev) => { ev.stopPropagation(); (onAnswer || onOpen)?.(); },
+          }, ask.actionLabel)) : null,
         // [현재 작업 화면] under the bubble, only when the caller found the Card this run works on.
         workScreen));
   }
@@ -1137,7 +1149,9 @@
     }, String(unreadCount));
   }
 
-  function codexMessageTimeMeta(message, thread) {
+  // A38: an answer's time line; `onOpenActivity` adds the small '…' that opens
+  // how that answer was made (its run in the activity record).
+  function codexMessageTimeMeta(message, thread, onOpenActivity = null) {
     const children = [];
     if (message?.role === 'user') {
       const readMeta = codexReadMeta(message, thread);
@@ -1146,8 +1160,15 @@
     if (message?.createdAt) {
       children.push(el('span', { class: 'egd-codex-message-time' }, formatMessageTime(message.createdAt)));
     }
+    if (onOpenActivity) {
+      children.push(el('button', {
+        class: 'egd-codex-message-activity', type: 'button', title: '이 답변의 실행 내역 보기', 'aria-label': '이 답변의 실행 내역 보기',
+        data: { testid: 'chat-answer-activity', runId: message.runId || '', focusKey: `answer-activity-${message.id}` },
+        onclick: (ev) => { ev.stopPropagation(); onOpenActivity(); },
+      }, el('span', { class: 'egd-codex-message-activity-dots', 'aria-hidden': 'true' }, el('span'), el('span'), el('span'))));
+    }
     if (children.length === 0) return null;
-    return el('div', { class: 'egd-codex-message-meta' }, ...children);
+    return el('div', { class: `egd-codex-message-meta${onOpenActivity ? ' egd-codex-message-meta-foot' : ''}` }, ...children);
   }
 
   // Chat history (A18·A41·A42·A43): the day line, the room kind badge and the
@@ -1308,6 +1329,9 @@
     const runs = codexRuns(thread);
     return runs.findLast(ChatState.isRunBusy) || runs.at(-1) || null;
   }
+
+  // Chat status view model: quiet status line, waiting asks, result scope, check time.
+  const ChatStatusView = ChromeUtils.importESModule('chrome://userchrome/content/EGDeskChatStatusView.sys.mjs');
 
   function codexRunLabel(run) {
     if (!run) return '대화 준비';
@@ -1527,7 +1551,8 @@
       title: open ? '작업 목록 접기' : '작업 목록 열기',
       data: { testid: 'chat-task-summary', focusKey: 'chat-task-summary' },
       onclick: () => actions.toggleTaskBoard(),
-    }, el('span', { class: 'egd-task-board-summary-text' }, view.summary), deskIcon('chevron', 'egd-task-board-chevron'));
+    }, view.counts.mine ? el('span', { class: 'egd-task-board-mine', data: { testid: 'chat-task-mine' } }, view.counts.mineText) : null,
+    el('span', { class: 'egd-task-board-summary-text' }, view.summary), deskIcon('chevron', 'egd-task-board-chevron'));
     // A bridge restart holds started work until 대표님 says to go on; reconnecting never does.
     const resuming = view.held?.phase === 'sending';
     const hold = view.held ? el('div', { class: 'egd-task-hold', role: 'group', 'aria-label': '멈춘 작업', data: { testid: 'chat-task-hold' } },
@@ -1555,10 +1580,16 @@
         'aria-label': `${task.name} ${label}`, data: { testid: decision === 'approved' ? 'chat-task-approve' : 'chat-task-reject', focusKey: `${key}:${decision}` },
         onclick: () => { if (!deciding) actions.decideTaskApproval(group.graphId, task.taskId, decision); },
       }, deciding && condition.approvalDecision === decision ? busyLabel : label);
-      return el('li', { class: 'egd-task-condition', data: { testid: 'chat-task-condition', state: condition.state } },
+      return el('li', { class: 'egd-task-condition', data: { testid: 'chat-task-condition', state: condition.state, ...(condition.mine ? { mine: 'true' } : {}) } },
         condition.state === 'satisfied' ? deskIcon('check', 'egd-task-condition-mark') : el('span', { class: 'egd-task-condition-dot', 'aria-hidden': 'true' }),
         el('span', { class: 'egd-task-condition-text' }, condition.text),
         condition.time ? el('span', { class: 'egd-task-condition-time' }, condition.time) : null,
+        // B12: the place to finish the wait opens only on this press.
+        condition.openLabel ? el('button', {
+          class: 'egd-task-open-target', title: 'Browser 창에서 로그인 화면 열기', 'aria-label': `${condition.text}, ${condition.openLabel}`,
+          data: { testid: 'chat-task-open-target', focusKey: `${key}:open` },
+          onclick: () => actions.openTaskGateTarget(group.graphId, task.taskId, condition.gateId),
+        }, condition.openLabel) : null,
         condition.continuable && !confirming ? el('button', {
           class: 'egd-task-continue', 'aria-label': `${condition.text}, 기다리지 않고 계속`,
           data: { testid: 'chat-task-continue', focusKey: key },
@@ -10772,9 +10803,14 @@
 
   // The bridge state in one line; the raw error and timing stay folded under
   // '자세히', which keeps its open state across re-renders.
+  // A74/B38: one line only — a history read that failed while the bridge was
+  // away folds under '자세히' too, and the line says when the state was checked.
   function buildCodexBridgeNotice(codex, codexBridge) {
-    const notice = codexBridgeNotice(codex);
-    if (notice.state === 'online') return null;
+    const notice = ChatStatusView.connectionLine(codexBridgeNotice(codex), {
+      localHistoryError: codex.localHistoryStatus === 'error' ? codex.localHistoryError : null,
+      checkedAt: codex.bridgeCheckedAt,
+    });
+    if (!notice) return null;
     return el('div', {
       class: `egd-codex-connection egd-codex-connection-${notice.state}`,
       role: 'status',
@@ -10782,8 +10818,11 @@
     },
       el('div', { class: 'egd-codex-connection-row' },
         el('span', { class: 'egd-codex-connection-text' }, notice.text),
+        notice.checked ? el('span', { class: 'egd-codex-connection-checked', title: '연결 상태를 마지막으로 확인한 시각', data: { testid: 'chat-bridge-checked' } }, notice.checked) : null,
         notice.action ? el('button', {
-          class: 'egd-codex-chip egd-codex-chip-subtle',
+          class: 'egd-codex-chip egd-codex-chip-subtle', type: 'button',
+          title: '지금 다시 연결하기', 'aria-label': '연결 다시 시도',
+          data: { testid: 'chat-bridge-retry', focusKey: 'chat-bridge-retry' },
           onclick: () => codexBridge.reconnectNow?.(),
         }, notice.action) : null,
       ),
@@ -11984,6 +12023,12 @@
           // CU-01: '이 답변에서 컴퓨터를 N번 조작했어요' sits under the last shown answer
           // of each run that drove this Mac; pressing it opens that run's rows.
           const roomRuns = codexRuns(activeThread);
+          // A44: the waiting bubble names what is asked; its button opens the record on that request.
+          const workingAskProps = (row, run) => {
+            const ask = ['approval', 'question'].includes(row?.state) ? ChatStatusView.waitingAsk(run) : null;
+            return ask ? { ask: { ...ask, moreText: ChatStatusView.waitingMoreText(ask) },
+              onAnswer: () => codexBridge.openActivity(activeThread.id, { runId: run.runId || null, activityId: ask.activityId }) } : {};
+          };
           const lastAnswerOfRun = new Map();
           for (const message of activeThread.messages) {
             if (message.role === 'assistant' && message.runId && !(message.status === 'streaming' && !message.content)) lastAnswerOfRun.set(message.runId, message.id);
@@ -12123,7 +12168,9 @@
                 ? el('button', peekTriggerProps(message, author, 'egd-codex-message-role-name', `agent-peek-name-${message.id}`), author)
                 : author)
               : null;
-            const meta = codexMessageTimeMeta(message, activeThread);
+            const meta = codexMessageTimeMeta(message, activeThread,
+              ChatStatusView.answerActivityShown(message, lastAnswerOfRun.get(message.runId))
+                ? () => codexBridge.openActivity(activeThread.id, { runId: message.runId }) : null);
             // CHAT-03: a bubble already copied to a Board Thread says so and opens it.
             const sentMark = ThreadRouting.sharedOutMark(activeThread.routing, message);
             const sentChip = sentMark ? el('button', {
@@ -12181,6 +12228,7 @@
               // The record opens on this run's head (CHAT-07 activity record, AGENT-05).
               onOpen: () => codexBridge.openActivity(activeThread.id, { runId: workingRun.runId || null }),
               workScreen: typeof codexRunWorkScreenButton === 'function' ? codexRunWorkScreenButton(workingRun, { testid: 'chat-agent-work-screen' }) : null,
+              ...workingAskProps(working, workingRun),
             }));
           }
           for (const row of otherWorkingRows) {
@@ -12188,6 +12236,7 @@
               runId: row.runId, name: row.name, avatar: row.avatar, showName: row.showName,
               onOpen: () => codexBridge.openActivity(activeThread.id, { runId: row.runId }),
               workScreen: typeof codexRunWorkScreenButton === 'function' ? codexRunWorkScreenButton({ runId: row.runId }, { busy: true, testid: 'chat-agent-work-screen' }) : null,
+              ...workingAskProps(row, roomRuns.find(run => run.runId === row.runId)),
             }));
           }
           // A run with no answer shown yet keeps its count at the end of the conversation.
@@ -12221,9 +12270,9 @@
         }, activeThread.localHistoryCoverage.status === 'unknown' && !activeThread.localHistoryCoverage.reasons?.length
           ? '이 기기에 저장된 기록 · 전체 대화 범위 미확인'
           : '로컬 기록 일부를 확인하지 못했습니다. 표시된 대화는 유지됩니다.'));
-        if (codex.localHistoryStatus === 'error' && codex.localHistoryError) conversation.appendChild(el('p', {
+        if (codex.localHistoryStatus === 'error' && codex.localHistoryError && !connectionNotice) conversation.appendChild(el('p', {
           class: 'egd-codex-error', role: 'status', data: { testid: 'chat-local-history-error' },
-        }, codex.localHistoryError));
+        }, codex.localHistoryError)); // A74: while the connection line is up it holds this under '자세히'.
         const bindingHeld = ChatState.nativeBindingHeld(activeThread);
         if (bindingHeld) conversation.appendChild(el('div', {
           class: 'egd-codex-error', role: 'status', data: { testid: 'chat-binding-held', bindingState: activeThread.bindingState },
@@ -12252,10 +12301,26 @@
         const status = activeThread.preparingInput ? 'preparing-input' : activeThread.resuming ? 'restoring' : pending?.status || run?.status || 'ready';
         const statusText = bindingHeld ? '로컬 기록 · 연결 확인 필요' : activeThread.preparingInput ? '첨부 캡처 준비 중 · 아직 전송하지 않음' : activeThread.resuming ? '대화 상태 확인 중' : pending ? (pending.status === 'unconfirmed' ? '접수 상태 확인 필요' : '요청 보내는 중')
           : !run && codex.chatProtocol.unobservedPreviousRun ? '이전 연결의 실행 상태 미확인' : codexRunLabel(run);
+        // A38/B32/B38: the line stays out of sight while nothing asks for attention
+        // (the answer's own '…' opens its record); a finished run that split its work
+        // says how much came back, and a state nobody can vouch for says when it was checked.
+        // B12: a new wait on 대표님 opens the task list once; folding it keeps it folded.
+        const taskAttention = ChatStatusView.taskAttention({ keys: ChatState.taskBoardSummary(codex.taskBoard).mineKeys,
+          seen: codex.taskAttentionSeen, open: codex.taskBoardOpen === true });
+        if (taskAttention.changed) codex.taskAttentionSeen = taskAttention.seen;
+        if (taskAttention.opened) codex.taskBoardOpen = true;
+        const subAgents = ChatState.subAgentSummary(run);
+        const resultScope = ChatStatusView.resultScope(run, subAgents.rows.map(({ display }) => display.status));
+        const answerHoldsRecord = !run || activeThread.messages.some(message => message.role === 'assistant' && message.runId === run.runId);
+        const statusQuiet = answerHoldsRecord && ChatStatusView.statusRowQuiet({
+          status, bindingHeld: !!bindingHeld, unobservedPreviousRun: !run && !!codex.chatProtocol.unobservedPreviousRun,
+          approvals: run?.pendingApprovals?.length || 0, questions: ChatState.pendingUserInputCount(run), blocked: subAgents.blocked, scope: resultScope,
+        });
         conversation.appendChild(el('div', {
           class: 'egd-codex-run-status', role: 'status', 'aria-live': 'polite',
-          data: { testid: 'chat-run-status', status, runId: run?.runId || '', stopConfirmed: String(run?.status === 'interrupted') },
-        }, el('span', {}, statusText),
+          data: { testid: 'chat-run-status', status, runId: run?.runId || '', stopConfirmed: String(run?.status === 'interrupted'), quiet: String(statusQuiet) },
+        }, el('span', {}, ChatStatusView.uncertainStatusText(statusText, codex.bridgeCheckedAt),
+          resultScope && !pending ? el('span', { class: 'egd-codex-run-scope', data: { testid: 'chat-run-scope', completeness: resultScope.completeness } }, `결과 범위: ${resultScope.text}`) : null),
         el('button', { 'aria-label': '활동 기록 열기', data: { testid: 'chat-activity-open', threadId: activeThread.id }, onclick: () => codexBridge.openActivity(activeThread.id) }, codexActivityButtonLabel(run))));
         // CHAT-06 Await: the task list line sits right under the run state.
         const taskBoard = renderChatTaskBoard(codex, codexBridge, connectedFolderName);
@@ -13183,6 +13248,8 @@
       scheduleDeskSessionSave();
     };
     const update = (patch) => {
+      // B38: every observation of the bridge, either way, stamps when it was made.
+      if (Object.hasOwn(patch, 'connected')) patch = { ...patch, bridgeCheckedAt: Date.now() };
       // `connected` is the shared helper transport. A failed transport must
       // not leave a stale ready Claude row enabling new sends.
       if (patch.connected === false && !Object.hasOwn(patch, 'engines')) {
@@ -14062,6 +14129,13 @@
       toggleTaskBoard() {
         state.codex.taskBoardOpen = !state.codex.taskBoardOpen;
         emit();
+      },
+      // B12 '로그인 열기': the sign-in site a login wait names opens in a Browser window, only on a press.
+      openTaskGateTarget(graphId, taskId, gateId) {
+        const gate = (state.codex.taskBoard?.graphs || []).find(entry => entry.graphId === graphId)?.graph?.tasks
+          .find(task => task.taskId === taskId)?.gates.find(row => row.gateId === gateId);
+        const origin = ChatState.taskGateOpenTarget(gate);
+        if (origin) openUrlInBrowserCard(origin, { openMode: 'focus-existing' });
       },
       taskAnswerDraft(graphId, taskId, gateId, responseKey) { return taskAnswers.draft(graphId, taskId, gateId, responseKey); },
       taskAnswerCurrent(draft) { return taskAnswers.current(draft); },
