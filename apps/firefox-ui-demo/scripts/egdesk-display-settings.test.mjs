@@ -155,7 +155,7 @@ test('a forced theme gives every floating EG-Desk panel the chosen ink instead o
       candidate.selectors[0].startsWith(`:where(:root[data-egd-theme="${theme}"]) > :where(`));
     assert.ok(rule, `floating panel rule for ${theme}`);
     assert.deepEqual(flat(rule.selectors),
-      [`:where(:root[data-egd-theme="${theme}"]) > :where([id^="egd-"]:not(#egd-canvas-viewport), [class^="egd-"])`]);
+      [`:where(:root[data-egd-theme="${theme}"]) > :where(:is([id^="egd-"], [class^="egd-"]):not(#egd-canvas-viewport, .egd-browser-card, .egd-terminal-card, .egd-ontology-card))`]);
     assert.deepEqual(rule.declarations, [['color-scheme', theme], ['color', 'var(--egd-on-surface)']]);
   }
   // The canvas host stays out: Browser page content, the Terminal and the

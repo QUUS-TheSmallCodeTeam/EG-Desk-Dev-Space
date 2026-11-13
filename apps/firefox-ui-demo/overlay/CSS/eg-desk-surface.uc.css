@@ -203,13 +203,13 @@
 }
 /* Menus, dialogs and panels hang directly off the window root and would
    otherwise inherit the system's text colour under a forced theme. The canvas
-   host stays out, so Browser pages, the Terminal and the Ontology lens keep
+   host and any Browser, Terminal or Ontology card stay out, so those keep
    their own colours. :where() keeps every explicit color above these. */
-:where(:root[data-egd-theme="dark"]) > :where([id^="egd-"]:not(#egd-canvas-viewport), [class^="egd-"]) {
+:where(:root[data-egd-theme="dark"]) > :where(:is([id^="egd-"], [class^="egd-"]):not(#egd-canvas-viewport, .egd-browser-card, .egd-terminal-card, .egd-ontology-card)) {
   color-scheme: dark;
   color: var(--egd-on-surface);
 }
-:where(:root[data-egd-theme="light"]) > :where([id^="egd-"]:not(#egd-canvas-viewport), [class^="egd-"]) {
+:where(:root[data-egd-theme="light"]) > :where(:is([id^="egd-"], [class^="egd-"]):not(#egd-canvas-viewport, .egd-browser-card, .egd-terminal-card, .egd-ontology-card)) {
   color-scheme: light;
   color: var(--egd-on-surface);
 }
