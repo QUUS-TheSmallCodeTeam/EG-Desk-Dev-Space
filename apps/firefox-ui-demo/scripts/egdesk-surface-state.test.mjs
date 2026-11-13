@@ -12243,6 +12243,37 @@ test('a new View opens in an empty spot of the view, or beside it with the camer
   assert.equal(Surface.placeCanvasView({ size, safe: { left: 0, top: 0, right: NaN, bottom: 10 } }), null);
 });
 
+test('Views opened one after another gather in the shape of the view, not in one column', () => {
+  const card = { x: 0, y: 0, width: 200, height: 100 };
+  assert.deepEqual(Surface.nearestFreeCanvasSpot({ width: 100, height: 50, target: { x: 100, y: 20 }, occupied: [card] }), { x: 100, y: -74 },
+    'plain distance: just above the card');
+  assert.deepEqual(Surface.nearestFreeCanvasSpot({ width: 100, height: 50, target: { x: 100, y: 20 }, occupied: [card], reach: { width: 1200, height: 300 } }),
+    { x: 224, y: 20 }, 'in the proportions of a wide view the spot beside the card is closer');
+  assert.deepEqual(Surface.nearestFreeCanvasSpot({ width: 100, height: 50, target: { x: 100, y: 20 }, occupied: [card], reach: { width: 0, height: 300 } }),
+    { x: 100, y: -74 }, 'an unusable reach falls back to plain distance');
+
+  // The V04 walk at 100%: a Browser fills the view, then five more Views open
+  // while the camera follows each one that lands outside the view.
+  const client = { left: 92, top: 64, right: 1264, bottom: 740 };
+  const occupied = [];
+  let pan = { x: 0, y: 0 };
+  for (const kind of ['browser', 'chat', 'note', 'terminal', 'file', 'settings']) {
+    const safe = { left: client.left - pan.x, top: client.top - pan.y, right: client.right - pan.x, bottom: client.bottom - pan.y };
+    const placed = Surface.placeCanvasView({ size: Surface.canvasViewSize(kind, { width: safe.right - safe.left, height: safe.bottom - safe.top }), safe, occupied, gap: 24 });
+    for (const other of occupied) {
+      assert.ok(placed.x >= other.x + other.width + 24 || placed.x + placed.width + 24 <= other.x
+        || placed.y >= other.y + other.height + 24 || placed.y + placed.height + 24 <= other.y, `${kind} keeps 24px from every open View`);
+    }
+    occupied.push({ x: placed.x, y: placed.y, width: placed.width, height: placed.height });
+    if (!placed.inView) pan = Surface.revealRectPan(placed, client, { pan, zoom: 1 });
+  }
+  const width = Math.max(...occupied.map(rect => rect.x + rect.width)) - Math.min(...occupied.map(rect => rect.x));
+  const height = Math.max(...occupied.map(rect => rect.y + rect.height)) - Math.min(...occupied.map(rect => rect.y));
+  assert.ok(width > height, `six Views spread wider than tall on a wide view (${width}x${height})`);
+  const fit = Math.min((client.right - client.left) / width, (client.bottom - client.top) / height);
+  assert.ok(fit >= 0.35, `the whole set fits the view well above the 20% floor (${fit.toFixed(2)})`);
+});
+
 test('revealing a placed View moves the camera only as far as needed', () => {
   const safe = { left: 0, top: 0, right: 1000, bottom: 800 };
   const camera = { pan: { x: 0, y: 0 }, zoom: 1 };
