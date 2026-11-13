@@ -9326,13 +9326,25 @@
     return document.documentElement.dataset.egdAnnotationsHidden === 'true';
   }
 
+  // A hidden mark or memo must not stay the target of Delete or of the close
+  // button, also when a drag selection sweeps over where it sits. Selected
+  // windows stay selected.
+  function dropHiddenDockSelection() {
+    if (!dockAnnotationsHidden()) return;
+    const selected = Array.from(document.querySelectorAll('.egd-entity-selected'));
+    const kept = selected.filter(node => !node.matches(DOCK_ANNOTATION_SELECTOR));
+    if (kept.length === selected.length) return;
+    const active = state.activeEntityId ? document.getElementById(state.activeEntityId) : null;
+    if (kept.length) setSelectedEntities(kept, kept.includes(active) ? active : null);
+    else setActiveEntity(null);
+  }
+
   // One root attribute hides marks and memos through CSS. Nothing moves: the
   // camera, the windows and the hidden items all keep their places.
   function setDockAnnotationsHidden(hidden) {
     if (hidden) {
       document.documentElement.dataset.egdAnnotationsHidden = 'true';
-      // A hidden item must not stay the target of Delete or of the close button.
-      if (document.querySelector('.egd-canvas-shape.egd-entity-selected, .egd-memo-card.egd-entity-selected')) setActiveEntity(null);
+      dropHiddenDockSelection();
     } else {
       delete document.documentElement.dataset.egdAnnotationsHidden;
     }
@@ -9609,7 +9621,7 @@
     let syncFrame = 0;
     const scheduleSync = () => {
       if (syncFrame) return;
-      syncFrame = window.requestAnimationFrame(() => { syncFrame = 0; syncDockState(); });
+      syncFrame = window.requestAnimationFrame(() => { syncFrame = 0; dropHiddenDockSelection(); syncDockState(); });
     };
     document.addEventListener('pointerup', scheduleSync, true);
     document.addEventListener('keyup', scheduleSync, true);

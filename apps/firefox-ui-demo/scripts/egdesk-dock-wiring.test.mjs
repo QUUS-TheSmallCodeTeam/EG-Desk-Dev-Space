@@ -49,13 +49,16 @@ function dockHarness({ activeTool = 'select', hidden = false, selected = [], ann
   let selection = selected;
   const document = {
     documentElement: root,
-    getElementById: id => (id === 'egd-dock' ? dock : null),
-    querySelector: selector => {
-      assert.equal(selector, '.egd-canvas-shape.egd-entity-selected, .egd-memo-card.egd-entity-selected');
-      return selection.find(node => !node.window) || null;
-    },
+    getElementById: id => (id === 'egd-dock' ? dock : id === state.activeEntityId ? { activeMarker: true } : null),
     querySelectorAll: selector => {
-      if (selector === '.egd-entity-selected') return selection.map(node => ({ classList: { contains: name => name === 'egd-canvas-card' && !!node.window } }));
+      if (selector === '.egd-entity-selected') {
+        return selection.map(node => ({
+          source: node,
+          // A memo is a window and a mark at once; a shape is only a mark.
+          classList: { contains: name => name === 'egd-canvas-card' && !!node.window },
+          matches: query => { assert.equal(query, '.egd-canvas-shape, .egd-memo-card'); return !node.window || !!node.memo; },
+        }));
+      }
       if (selector === '.egd-canvas-shape, .egd-memo-card') return { length: annotations };
       throw new Error(`unexpected document selector ${selector}`);
     },
@@ -69,11 +72,12 @@ function dockHarness({ activeTool = 'select', hidden = false, selected = [], ann
     node.replaceWith = next => { chip = next; calls.push(['chip-replaced', next.dataset.id]); };
     return node;
   };
-  const api = compileFunction(`${['dockAnnotationsHidden', 'setDockAnnotationsHidden', 'setDockTool', 'syncDockState'].map(topLevel).join('\n')}
-    return { dockAnnotationsHidden, setDockAnnotationsHidden, setDockTool, syncDockState };`,
-  ['state', 'document', 'DockLayout', 'DOCK_ANNOTATION_SELECTOR', 'el', 'deskIcon', 'dockEyeIcon', 'syncActiveToolMode', 'setActiveEntity'])(
+  const api = compileFunction(`${['dockAnnotationsHidden', 'dropHiddenDockSelection', 'setDockAnnotationsHidden', 'setDockTool', 'syncDockState'].map(topLevel).join('\n')}
+    return { dockAnnotationsHidden, dropHiddenDockSelection, setDockAnnotationsHidden, setDockTool, syncDockState };`,
+  ['state', 'document', 'DockLayout', 'DOCK_ANNOTATION_SELECTOR', 'el', 'deskIcon', 'dockEyeIcon', 'syncActiveToolMode', 'setActiveEntity', 'setSelectedEntities'])(
     state, document, DockLayout, '.egd-canvas-shape, .egd-memo-card', el, icon => ({ icon }), () => ({}),
-    () => calls.push(['tool-mode', state.activeTool]), entity => { calls.push(['active-entity', entity]); selection = []; });
+    () => calls.push(['tool-mode', state.activeTool]), entity => { calls.push(['active-entity', entity]); selection = []; },
+    (kept, active) => { calls.push(['keep-selected', kept.length, active]); selection = kept.map(node => node.source); });
   return { ...api, state, root, calls, select, hand, create, close, chip: () => chip, setSelection: next => { selection = next; } };
 }
 
@@ -132,6 +136,20 @@ test('hiding marks sets one root attribute, drops a hidden selection, and marks 
   assert.equal('egdAnnotationsHidden' in dock.root.dataset, false);
   assert.equal(dock.create.title, '새 카드');
   assert.ok(!dock.create.classes.has('egd-dock-btn-marks-hidden'));
+});
+
+test('a hidden mark never stays selected, while selected windows do', () => {
+  const dock = dockHarness({ selected: [{ window: true }, { window: false }, { window: true, memo: true }] });
+  dock.dropHiddenDockSelection();
+  assert.deepEqual(dock.calls, [], 'nothing is hidden, so the selection is left alone');
+  dock.setDockAnnotationsHidden(true);
+  assert.deepEqual(dock.calls, [['keep-selected', 1, null]], 'the shape and the memo leave the selection, the window stays');
+  assert.equal(dock.close.title, '선택한 창 닫기');
+  // A later drag selection sweeps over the place where a hidden shape sits.
+  dock.setSelection([{ window: false }]);
+  dock.dropHiddenDockSelection();
+  assert.deepEqual(dock.calls.at(-1), ['active-entity', null]);
+  assert.match(source, /requestAnimationFrame\(\(\) => \{ syncFrame = 0; dropHiddenDockSelection\(\); syncDockState\(\); \}\);/, 'checked after each pointer or key release');
 });
 
 test('hiding marks leaves a selected window alone, and drawing brings the marks back', () => {
