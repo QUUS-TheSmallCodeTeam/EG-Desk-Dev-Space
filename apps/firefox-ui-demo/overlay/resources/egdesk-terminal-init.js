@@ -149,7 +149,9 @@
 
   function showDisconnected(message) {
     if (closeRequested) { renderCloseState({ phase: 'offline', error: message }); return; }
-    statusEl.textContent = message || 'Disconnected. Click to reconnect.';
+    // The window bar shows the session state; tell it the connection is lost.
+    try { window.parent.postMessage({ type: 'terminal-disconnected' }, '*'); } catch {}
+    statusEl.textContent = message || '연결이 끊겼습니다. 눌러서 다시 연결합니다.';
     statusEl.classList.remove('hidden');
     statusEl.style.pointerEvents = 'auto';
     statusEl.style.cursor = 'pointer';

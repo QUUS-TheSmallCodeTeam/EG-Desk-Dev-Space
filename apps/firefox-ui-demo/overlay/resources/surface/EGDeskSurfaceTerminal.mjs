@@ -231,6 +231,7 @@ export function createTerminalZone(deps) {
       }
       if (ev.data?.type === 'terminal-exit-confirmed') { sessionText.textContent = '종료됨'; dismissCloseConfirm(); }
       if (ev.data?.type === 'terminal-no-session') sessionText.textContent = '세션 없음';
+      if (ev.data?.type === 'terminal-disconnected') sessionText.textContent = '연결 끊김';
       if (['terminal-ready', 'terminal-exit-confirmed', 'terminal-no-session'].includes(ev.data?.type)
           && boardCloseRequests.has(card.dataset.projectionId)) {
         void completeAgendaClose({ projectionId: card.dataset.projectionId });

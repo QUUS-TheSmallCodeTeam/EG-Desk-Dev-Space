@@ -317,6 +317,32 @@ test('the frame page takes the host window colours when it is framed and keeps i
   assert.deepEqual({ ...run({ get frameElement() { throw new Error('cross-origin'); } }, document) }, {}, 'an unreadable host never breaks the terminal');
 });
 
+test('a lost connection is told to the window, and the bar says so until the session is back', async () => {
+  const body = initializer.match(/^  function showDisconnected\(message\) \{([\s\S]*?)^  \}/m)?.[1];
+  assert.ok(body, 'exercise the production frame-page boundary');
+  const show = compileFunction(body, ['message', 'closeRequested', 'renderCloseState', 'statusEl', 'connectBridge', 'window']);
+  const posted = [], closeStates = [];
+  const statusEl = { textContent: '', style: {}, classList: { remove() {} } };
+  const parent = { postMessage: value => posted.push(value) };
+  show('연결이 끊겼습니다.', false, state => closeStates.push(state), statusEl, () => {}, { parent });
+  assert.deepEqual(posted, [{ type: 'terminal-disconnected' }]);
+  assert.equal(statusEl.textContent, '연결이 끊겼습니다.');
+  show('연결이 끊겼습니다.', true, state => closeStates.push(state), statusEl, () => {}, { parent });
+  assert.equal(posted.length, 1, 'a window that is already closing reports its close state instead');
+  assert.equal(closeStates.length, 1);
+  show('연결이 끊겼습니다.', false, () => {}, statusEl, () => {}, { parent: { postMessage() { throw new Error('gone'); } } });
+
+  const h = await terminalWindow({ api: { ptyId: 'pty-9', isConnected: () => true } });
+  try {
+    const session = h.shell.slots.identity.children[1];
+    h.message({ type: 'terminal-ready', shellLabel: 'zsh' });
+    h.message({ type: 'terminal-disconnected' });
+    assert.equal(session.textContent, '연결 끊김');
+    h.message({ type: 'terminal-ready', shellLabel: 'zsh' });
+    assert.equal(session.textContent, 'zsh');
+  } finally { h.restore(); }
+});
+
 test('deleting a selected window goes through that window\'s own close gate', () => {
   const body = surface.match(/^  function deleteSelectedEntities\(\) \{([\s\S]*?)^  \}/m)?.[1];
   assert.ok(body, 'exercise the production delete path');
