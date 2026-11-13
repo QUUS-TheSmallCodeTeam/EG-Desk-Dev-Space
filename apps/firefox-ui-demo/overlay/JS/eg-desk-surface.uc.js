@@ -20178,6 +20178,14 @@
       duplicateButton,
       menuButton,
     );
+    // BRW-01: the address field says which key reaches it (⌘/Ctrl+L).
+    const applyBrowserAddressField = () => {
+      const named = BrowserChrome.browserAddressFieldState({ isMac: servicesRef().appinfo.OS === 'Darwin' });
+      urlInput.title = named.title;
+      urlInput.setAttribute('aria-label', named.label);
+      urlInput.setAttribute('aria-keyshortcuts', named.ariaKeyShortcuts);
+    };
+    applyBrowserAddressField();
     // BRW-01 (APG toolbar): Tab enters the bar once; arrows, Home and End move
     // inside it. The address field keeps its own arrow keys until the caret
     // reaches an edge. Only the Browser's own controls rove: the resource
@@ -21586,7 +21594,7 @@
       browserMenuPanel = el('div', {
         class: 'egd-browser-menu egd-edge egd-frosted',
         role: 'menu',
-        'aria-label': 'Browser 도구',
+        'aria-label': 'Browser 더보기',
         style: {
           left: Math.round(pos.left) + 'px',
           top: Math.round(pos.top) + 'px',

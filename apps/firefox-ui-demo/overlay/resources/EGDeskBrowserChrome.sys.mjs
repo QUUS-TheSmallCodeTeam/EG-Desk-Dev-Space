@@ -58,6 +58,19 @@ export function browserNavButtonState(action, { canGoBack = false, canGoForward 
 }
 
 /**
+ * Name, tooltip and aria-keyshortcuts of the address field. The tooltip is the
+ * one place the bar says which key reaches it (⌘L on macOS, Ctrl+L elsewhere).
+ */
+export function browserAddressFieldState({ isMac = false } = {}) {
+  const label = '주소 또는 검색어';
+  return {
+    label,
+    title: `${label} (${isMac ? '⌘L' : 'Ctrl+L'})`,
+    ariaKeyShortcuts: isMac ? 'Meta+L' : 'Control+L',
+  };
+}
+
+/**
  * 'focus-address' (⌘/Ctrl+L) | 'new-browser' (⌘/Ctrl+T) | null.
  * Only the platform accelerator alone counts, and only while the active Desk
  * window is a Browser that holds the focus — every other case leaves the key

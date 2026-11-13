@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import {
-  BROWSER_LOADING_LABEL, browserNavButtonState, browserSecurityIconName, browserSecurityKind,
+  BROWSER_LOADING_LABEL, browserAddressFieldState, browserNavButtonState, browserSecurityIconName, browserSecurityKind,
   browserSecurityLabel, browserShortcutIntent, browserStatusText,
 } from '../overlay/resources/EGDeskBrowserChrome.sys.mjs';
 
@@ -135,6 +135,30 @@ test('Browser window wires the toolbar pattern, names every icon button and inst
   assert.match(shortcut, /BrowserChrome\.browserShortcutIntent\(/);
   assert.match(shortcut, /ev\.preventDefault\(\);\s*ev\.stopImmediatePropagation\(\);/);
   assert.match(surfaceSource, /\n      installBrowserShortcuts\(\);/);
+});
+
+test('Browser address field says which key reaches it, and the bar and its menu have different names', () => {
+  assert.deepEqual(browserAddressFieldState({ isMac: true }),
+    { label: '주소 또는 검색어', title: '주소 또는 검색어 (⌘L)', ariaKeyShortcuts: 'Meta+L' });
+  assert.deepEqual(browserAddressFieldState({ isMac: false }),
+    { label: '주소 또는 검색어', title: '주소 또는 검색어 (Ctrl+L)', ariaKeyShortcuts: 'Control+L' });
+  assert.deepEqual(browserAddressFieldState(), browserAddressFieldState({ isMac: false }));
+
+  const spawn = surfaceSource.match(/  function spawnBrowserCard\(initialUrl[\s\S]*?\n  \}\n/)?.[0] || '';
+  const applyBody = spawn.match(/const applyBrowserAddressField = \(\) => \{([\s\S]*?)\n    \};\n    applyBrowserAddressField\(\);/)?.[1];
+  assert.ok(applyBody, 'applyBrowserAddressField body, applied once when the bar is built');
+  const urlInput = { title: '', attrs: {}, setAttribute(name, value) { this.attrs[name] = value; } };
+  const run = os => new Function('BrowserChrome', 'servicesRef', 'urlInput', applyBody)(
+    { browserAddressFieldState }, () => ({ appinfo: { OS: os } }), urlInput);
+  run('Darwin');
+  assert.deepEqual([urlInput.title, urlInput.attrs['aria-label'], urlInput.attrs['aria-keyshortcuts']],
+    ['주소 또는 검색어 (⌘L)', '주소 또는 검색어', 'Meta+L']);
+  run('WINNT');
+  assert.deepEqual([urlInput.title, urlInput.attrs['aria-keyshortcuts']], ['주소 또는 검색어 (Ctrl+L)', 'Control+L']);
+
+  // A screen reader hears two different things: the bar and the menu its last button opens.
+  assert.match(spawn, /role: 'menu',\n\s+'aria-label': 'Browser 더보기',/);
+  assert.equal(spawn.split("'Browser 도구'").length - 1, 1, 'only the toolbar is named Browser 도구');
 });
 
 test('Browser shortcut handler leaves the key alone unless the view model claims it', () => {
