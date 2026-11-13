@@ -1686,6 +1686,9 @@
   transition: background-color .12s ease;
 }
 .egd-card-dot[hidden] { display: none; }
+/* A yellow or green dot that is not wired as a button does nothing when
+   pressed, so it is not shown. A window type shows it by giving it role="button". */
+.egd-card-dot:is(.egd-card-dot-min, .egd-card-dot-max):not([role="button"]) { display: none; }
 /* Transparent press area around the 10px dot: 24px tall, and as wide as the
    8px gap allows without overlapping the next dot. */
 .egd-card-dot::before {
@@ -1699,7 +1702,9 @@
 .egd-card-dot-close { --egd-window-dot-live: #FF6057; }
 .egd-card-dot-min   { --egd-window-dot-live: #FFBD2E; }
 .egd-card-dot-max   { --egd-window-dot-live: #27C93F; }
-:is(.egd-card-header, .egd-chat-card-header, .egd-window-dots-host):is(:hover, :focus-within) .egd-card-dot,
+/* Keyboard focus on a dot or button of the title row lights the dots; a focus
+   placed by script after a drag, or typing in an address field, does not. */
+:is(.egd-card-header, .egd-chat-card-header, .egd-window-dots-host):is(:hover, :has(:is(.egd-card-dot, button):focus-visible)) .egd-card-dot,
 .egd-card-dots:hover > .egd-card-dot,
 .egd-card-dot:focus-visible {
   background: var(--egd-window-dot-live, var(--egd-on-surface-variant));
@@ -1723,6 +1728,8 @@
 }
 .egd-canvas-card.egd-card-collapsed:not(.egd-card-fullscreen) > .egd-card-header {
   border-bottom-color: transparent;
+  /* The title row is the whole window now, so all four corners are round. */
+  border-radius: 8px;
 }
 
 .egd-desk-window-control-disabled {

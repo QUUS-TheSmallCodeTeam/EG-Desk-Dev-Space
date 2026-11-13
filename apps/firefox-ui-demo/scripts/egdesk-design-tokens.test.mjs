@@ -1111,13 +1111,16 @@ test('window dots stay quiet until the title row is hovered or focused, with one
   }
   const live = rulesFor('.egd-card-dot:focus-visible').find(rule => new Map(rule.declarations).has('background'));
   assert.ok(live, 'live colour rule');
-  assert.ok(live.selectors.includes(':is(.egd-card-header, .egd-chat-card-header, .egd-window-dots-host):is(:hover, :focus-within) .egd-card-dot'),
+  assert.ok(live.selectors.includes(':is(.egd-card-header, .egd-chat-card-header, .egd-window-dots-host):is(:hover, :has(:is(.egd-card-dot, button):focus-visible)) .egd-card-dot'),
     'any title row lights its dots on hover or keyboard focus');
+  assert.ok(live.selectors.every(selector => !selector.includes(':focus-within')), 'a focus placed by script after a drag does not keep the dots lit');
   assert.equal(new Map(live.declarations).get('background'), 'var(--egd-window-dot-live, var(--egd-on-surface-variant))');
   // 10px dot + 7px above and below = 24px tall; 4px each side stays inside the 8px gap.
   const press = declarationsFor('.egd-card-dot::before');
   assert.equal(press.inset, '-7px -4px'); assert.equal(press.position, 'absolute');
   assert.equal(declarationsFor('.egd-card-dot[hidden]').display, 'none', 'a window that cannot fold shows no yellow dot');
+  assert.equal(declarationsFor('.egd-card-dot:is(.egd-card-dot-min, .egd-card-dot-max):not([role="button"])').display, 'none',
+    'a yellow or green dot that is not wired as a button is not shown');
   assert.equal(declarationsFor('.egd-browser-card .egd-desk-window-control::before').content, 'none', 'Browser keeps its own 29px box');
   // The surface-wide reduced-motion rule already settles every egd- transition at once.
   assert.match(surfaceCss, /@media \(prefers-reduced-motion: reduce\) \{[^}]*\[class\*="egd-"\]/);
@@ -1133,6 +1136,7 @@ test('a folded window shows only its title row and never while maximized', () =>
   assert.ok(hidden, 'body and resize handles are hidden together');
   assert.equal(new Map(hidden.declarations).get('display'), 'none');
   assert.ok(hidden.selectors.includes(`${folded} > .egd-card-header > :is(.egd-desk-window-toolbar, .egd-desk-window-progress)`));
+  assert.equal(declarationsFor(`${folded} > .egd-card-header`)['border-radius'], '8px', 'the folded title row is round on all four corners');
 });
 
 test('resource strip keeps readable compact values and a neutral disk glyph', () => {
