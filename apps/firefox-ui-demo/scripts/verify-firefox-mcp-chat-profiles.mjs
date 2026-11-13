@@ -302,9 +302,9 @@ async function main() {
         toolChips,
         visibleProfileChips,
         visibleToolChips,
-        hasReviewChip: profileChips.includes('Verify'),
+        hasReviewChip: profileChips.includes('검증'),
         hasVerificationToolChip: toolChips.includes('verification'),
-        hasVisibleReviewChip: visibleProfileChips.includes('Verify'),
+        hasVisibleReviewChip: visibleProfileChips.includes('검증'),
         hasVisibleVerificationToolChip: visibleToolChips.includes('verification'),
       };
     })()`,
@@ -340,7 +340,7 @@ async function main() {
   if (visualCheck.hudRightGap == null || visualCheck.hudRightGap < 0 || visualCheck.hudRightGap > 24) failures.push('chat hud right dock');
   if (!visualCheck.userBubbleInsideHud) failures.push('user bubble overflow');
   if (visualCheck.hasVisibleReviewChip || visualCheck.hasVisibleVerificationToolChip) failures.push('runtime chips leaked into conversation header');
-  if (visualCheck.selectedProfileInMenu !== 'Verify') failures.push('active profile remains accessible in room menu');
+  if (visualCheck.selectedProfileInMenu !== '검증') failures.push('active profile remains accessible in room menu');
 
   if (failures.length) {
     throw new Error(`Chat profile verification failed (${failures.join(', ')}): ${JSON.stringify({

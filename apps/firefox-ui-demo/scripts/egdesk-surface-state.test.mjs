@@ -9234,7 +9234,7 @@ function productionProfileResolver(catalog) {
   assert.ok(sources.every(Boolean), 'profile resolution must remain directly testable');
   const legacy = {
     'conversational-coding': { id: 'conversational-coding', label: 'Chat', name: 'Conversational Coding Agent', summary: '', capabilities: [], systemPrompt: 'legacy chat prompt', toolMode: 'basic-tools' },
-    'review-verifier': { id: 'review-verifier', label: 'Verify', name: 'Review and Verification Agent', summary: '', capabilities: [], systemPrompt: 'legacy verifier prompt', toolMode: 'verification' },
+    'review-verifier': { id: 'review-verifier', label: '검증', name: 'Review and Verification Agent', summary: '', capabilities: [], systemPrompt: 'legacy verifier prompt', toolMode: 'verification' },
   };
   return compileFunction(`${sources.join('\n')}\nreturn { codexAgentProfile, codexAgentProfileChoices };`,
     ['ChatState', 'CODEX_AGENT_PROFILES', 'CODEX_AGENT_PROFILE_DEFS', 'DEFAULT_CODEX_AGENT_PROFILE_ID', 'codexProfileCatalog'])(
@@ -15636,7 +15636,7 @@ test('the way back to Chat is a short-lived button that brings the Chat back lik
   assert.ok(cue.className.includes('egd-edge'));
   const button = cue.children[0];
   assert.equal(button.dataset.testid, 'chat-return');
-  assert.equal(button.textContent, '채팅으로 돌아가기');
+  assert.equal(button.textContent, '대화로 돌아가기');
   assert.deepEqual([...timers.values()].map(timer => timer.ms), [6000], 'it stays a few seconds');
   assert.deepEqual(chat.listeners.map(entry => [entry.type, entry.capture]), [['mousedown', true], ['focusin', true]]);
   button.dispatch('click', { stopPropagation() {} });

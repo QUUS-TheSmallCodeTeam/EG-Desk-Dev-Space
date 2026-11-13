@@ -137,7 +137,7 @@
     },
     {
       id: 'tool-operator',
-      label: 'Tool',
+      label: '도구',
       name: 'Basic Tool Operator',
       category: 'tool',
       toolMode: 'tool-call',
@@ -167,7 +167,7 @@
     },
     {
       id: 'codebase-explorer',
-      label: 'Explore',
+      label: '탐색',
       name: 'Codebase Explorer',
       category: 'coding',
       toolMode: 'read-only-code',
@@ -182,7 +182,7 @@
     },
     {
       id: 'implementation-worker',
-      label: 'Build',
+      label: '구현',
       name: 'Implementation Worker',
       category: 'coding',
       toolMode: 'implementation',
@@ -197,7 +197,7 @@
     },
     {
       id: 'review-verifier',
-      label: 'Verify',
+      label: '검증',
       name: 'Review and Verification Agent',
       category: 'coding',
       toolMode: 'verification',
@@ -7854,7 +7854,7 @@
         if (!chatCard.isConnected) return;
         if (!state.focusChatDockIfCompact?.(chatCard)) focusCanvasCard(chatCard);
       },
-    }, deskIcon('chat'), el('span', {}, '채팅으로 돌아가기')));
+    }, deskIcon('chat'), el('span', {}, '대화로 돌아가기')));
     document.documentElement.appendChild(cue);
     timer = window.setTimeout(dismiss, CHAT_RETURN_CUE_MS);
     return cue;
@@ -7960,8 +7960,8 @@
   function cardLabelForViewportRail(card) {
     if (!card) return 'Card';
     if (card.classList.contains('egd-terminal-card')) return 'Terminal';
-    if (card.classList.contains('egd-settings-card')) return 'Settings';
-    if (card.classList.contains('egd-ontology-card')) return 'Ontology';
+    if (card.classList.contains('egd-settings-card')) return '설정';
+    if (card.classList.contains('egd-ontology-card')) return '온톨로지';
     if (card.classList.contains('egd-file-card')) return card._fileRecord?.root?.name || '파일';
     if (card.classList.contains('egd-chat-card')) {
       return card.querySelector('.egd-chat-card-title')?.textContent?.trim() || 'Chat';
@@ -15326,7 +15326,7 @@
     state.hudApp = appId;
     hud.dataset.app = appId;
     hud.classList.remove('egd-hud-hidden');
-    hud.querySelector('.egd-hud-title').textContent = appId === 'chat' ? '코덱스 채팅' : appLabel;
+    hud.querySelector('.egd-hud-title').textContent = appId === 'chat' ? '채팅' : appLabel;
     syncHudViewportFit();
     body.textContent = '';
     if (appId === 'chat' && state.codexBridge) {
@@ -16421,7 +16421,7 @@
         __proto__: null,
         browser: ['.egd-card-page-title', 'Browser'], chat: ['.egd-chat-card-title', 'Chat'],
         file: ['.egd-file-card-title', '파일'], terminal: ['.egd-terminal-title', 'Terminal'],
-        settings: ['.egd-settings-title', 'Settings'], ontology: ['.egd-ontology-title', 'Ontology'],
+        settings: ['.egd-settings-title', '설정'], ontology: ['.egd-ontology-title', '온톨로지'],
         'input-evidence': ['.egd-desk-window-identity strong', '자료'], result: ['.egd-result-card-title', '결과'],
       }[kind];
       return display ? card.querySelector(display[0])?.textContent?.trim() || display[1] : 'Card';
@@ -17885,7 +17885,7 @@
       const section = el('section', { class: 'egd-settings-section egd-settings-agent-form', data: { testid: 'settings-agent-form' } },
         el('button', { class: 'egd-settings-link', onclick: () => {
           if (agents.profileId) void openProfile(agents.profileId); else { agents.mode = 'list'; renderAgentsTab(); }
-        } }, '← 돌아가기'),
+        } }, agents.profileId ? '← Agent 상세로' : '← Agent 목록으로'),
         el('div', { class: 'egd-settings-detail-name' }, agents.profileId ? 'Agent 편집' : 'Agent 만들기'),
         agents.errors.length ? el('div', { class: 'egd-settings-error-summary', role: 'alert', data: { testid: 'settings-agent-errors' } },
           el('div', {}, '저장하지 못했습니다. 아래 항목을 확인해 주세요.'),
