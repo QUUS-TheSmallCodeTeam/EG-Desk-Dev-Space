@@ -223,6 +223,7 @@ function briefingSemanticHarness({ width = 720, height = 600, zoom = .0467171717
     },
     chatBindingNonce: () => `presentation-${++nonce}`, boardNotice: () => {},
   };
+  deps.syncBriefingFocus = production('syncBriefingFocus', deps);
   const code = ['installSemanticOutlineDrag', 'installSemanticZoom', 'renderAnswerBriefing', 'closeAnswerBriefing', 'openAnswerBriefing'].map(functionSource);
   assert.ok(code.every(Boolean));
   const api = compileFunction(`${code.join('\n')}\nreturn { installSemanticZoom, renderAnswerBriefing, closeAnswerBriefing, openAnswerBriefing };`,
@@ -343,6 +344,75 @@ function briefingReturnFocusHarness() {
     enter: async (element = opener, options = {}) => { element.focus(); await h.open(undefined, { opener: element, trustedZeroDetail: true, ...options }); h.flush(); },
     exit: () => h.click('briefing-exit') };
 }
+
+const briefingPart = (h, id) => {
+  const pending = [h.document.documentElement];
+  while (pending.length) {
+    const node = pending.shift();
+    if (node.dataset?.testid === id) return node;
+    pending.push(...node.children.filter(child => child.nodeType === 1));
+  }
+  return null;
+};
+
+test('CNV-07 step focus: the windows of the step being read are marked, the screen mode is set, and closing clears both', () => {
+  const h = briefingSemanticHarness(), root = h.document.documentElement;
+  const marked = () => h.cards.filter(card => card.dataset.egdBriefingTarget === 'true').map(card => card.id);
+  const everyCard = h.cards.map(card => card.id);
+  h.mount(); h.flush();
+  assert.equal(root.dataset.egdChromeMode, 'briefing', 'the Dock and left rail recede while a briefing is read');
+  assert.equal(root.dataset.egdBriefingFocus, 'spotlight');
+  assert.deepEqual(marked(), everyCard, 'a six-target step keeps all six windows clear');
+  assert.equal(h.chat.dataset.egdBriefingTarget, undefined, 'a window the step does not point at is never marked');
+  h.click('briefing-next');
+  assert.deepEqual(marked(), ['evidence-0'], 'the next step moves the emphasis to its own window only');
+  h.click('briefing-next');
+  assert.deepEqual(marked(), ['evidence-3', 'evidence-4', 'evidence-5']);
+  h.click('briefing-overview');
+  assert.deepEqual(marked(), everyCard, 'the overview keeps every window of the briefing clear');
+  h.click('briefing-previous');
+  assert.deepEqual(marked(), ['evidence-0'], 'choosing a step leaves the overview emphasis');
+  h.state.codex.briefingSession._minimapVerifiedEvidence.clear(); h.mount();
+  assert.deepEqual(marked(), [], 'a step whose evidence is no longer verified emphasizes nothing');
+  assert.equal(root.dataset.egdBriefingFocus, undefined, 'and never dims the rest of the Canvas');
+  assert.equal(root.dataset.egdChromeMode, 'briefing');
+  for (const card of h.cards) assert.equal(h.verifySyntheticRead(card), true);
+  h.mount(); assert.deepEqual(marked(), ['evidence-0']);
+  const fits = h.fits.length;
+  h.close();
+  assert.deepEqual(marked(), []); assert.equal(root.dataset.egdBriefingFocus, undefined);
+  assert.equal(root.dataset.egdChromeMode, undefined, 'ending the briefing restores the Dock and left rail');
+  assert.equal(h.fits.length, fits, 'clearing the marks never moves the camera');
+});
+
+test('CHAT-05 re-entry: a briefing left mid-way opens at step 1 and offers the step last read or a restart', async () => {
+  const h = briefingSemanticHarness(), session = () => h.state.codex.briefingSession;
+  const reopen = async () => { h.close(); await h.open(); h.flush(); };
+  h.mount(); h.flush();
+  assert.equal(briefingPart(h, 'briefing-resume'), null, 'a first reading has nothing to resume');
+  h.click('briefing-next');
+  await reopen();
+  assert.equal(session().index, 0, 're-entry does not jump on its own');
+  const resume = briefingPart(h, 'briefing-resume');
+  assert.ok(resume, 'the step last read is offered');
+  assert.equal(briefingPart(h, 'briefing-resume-continue').textContent, '2단계부터 이어보기');
+  assert.equal(briefingPart(h, 'briefing-resume-restart').textContent, '처음부터');
+  await reopen();
+  assert.ok(briefingPart(h, 'briefing-resume'), 'closing without answering keeps the remembered step');
+  h.click('briefing-resume-continue');
+  assert.equal(session().index, 1, 'the reader chose to continue at step 2');
+  assert.equal(briefingPart(h, 'briefing-resume'), null);
+  assert.deepEqual(h.cards.filter(card => card.dataset.egdBriefingTarget === 'true').map(card => card.id), ['evidence-0']);
+  await reopen();
+  h.click('briefing-resume-restart');
+  assert.equal(session().index, 0); assert.equal(briefingPart(h, 'briefing-resume'), null);
+  assert.equal(h.document.activeElement?.tagName, 'NAV', 'focus returns to the step navigation');
+  await reopen();
+  assert.equal(briefingPart(h, 'briefing-resume'), null, 'after "처음부터" the old position is forgotten');
+  h.click('briefing-next'); h.click('briefing-next');
+  await reopen();
+  assert.equal(briefingPart(h, 'briefing-resume'), null, 'a briefing read to its last step reopens from the start without asking');
+});
 
 test('HUM-BRIEF-002 authority: only the exact accepted receipt, room and current preparation protect an evidence View', async t => {
   const valid = briefingSemanticHarness(), shown = valid.state.codex.briefingSession, card = valid.cards[0];
