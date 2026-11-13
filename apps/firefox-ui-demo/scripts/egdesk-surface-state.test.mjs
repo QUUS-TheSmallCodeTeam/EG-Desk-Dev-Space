@@ -15665,7 +15665,8 @@ test('an artifact Browser keeps its Chat in sight, or shows alone with a short w
   assert.match(surfaceSource, /if \(item\.id === 'browser'\) \{\n                spawnBrowserCard\(\);/, 'the Dock Browser opens without an opener');
 });
 
-test('the way back to Chat is a short-lived button that brings the Chat back like the Dock does', () => {
+test('the way back to Chat stays until used and brings the Chat back like the Dock does when its saved view is gone', async () => {
+  const ChatCanvasLinks = await import('../overlay/resources/EGDeskChatCanvasLinks.sys.mjs');
   const created = [];
   const doc = { createElement: tag => { const node = inertDOM().createElement(tag); node.remove = () => { node.removed = true; }; created.push(node); return node; },
     createTextNode: value => inertDOM().createTextNode(value), documentElement: { children: [], appendChild(node) { this.children.push(node); } },
@@ -15675,10 +15676,13 @@ test('the way back to Chat is a short-lived button that brings the Chat back lik
   let nextTimer = 0;
   const windowStub = { setTimeout: (fn, ms) => { timers.set(++nextTimer, { fn, ms }); return nextTimer; }, clearTimeout: id => timers.delete(id) };
   const calls = [];
+  // No camera is saved here (the state has no pan target), so every return takes the Dock Chat path; the
+  // return to the saved view and conversation scroll is covered in egdesk-chat-canvas-links.test.mjs.
   const state = { focusChatDockIfCompact: card => { calls.push(['dock', card.id]); return card.compact; } };
   const show = compileFunction(`${declaration('showChatReturnCue')}\nreturn showChatReturnCue;`,
-    ['document', 'el', 'window', 'state', 'deskIcon', 'focusCanvasCard', 'CHAT_RETURN_CUE_MS', 'AbortController'])(
-    doc, el, windowStub, state, () => doc.createElement('svg'), card => calls.push(['focus', card.id]), 6000, AbortController);
+    ['document', 'el', 'window', 'state', 'deskIcon', 'focusCanvasCard', 'ChatCanvasLinks', 'persistentEntityGeometry', 'safeViewportRect', 'AbortController'])(
+    doc, el, windowStub, state, () => doc.createElement('svg'), card => calls.push(['focus', card.id]), ChatCanvasLinks,
+    () => ({ x: 0, y: 0, width: 420, height: 600 }), () => ({ left: 0, top: 0, right: 1280, bottom: 720 }), AbortController);
   const chatCard = (id, fields = {}) => ({ id, isConnected: true, compact: false, listeners: [], ...fields,
     addEventListener(type, fn, options) {
       const entry = { type, fn, capture: options?.capture === true };
@@ -15689,12 +15693,14 @@ test('the way back to Chat is a short-lived button that brings the Chat back lik
   const chat = chatCard('chat-1', { compact: true });
   const cue = show(chat);
   assert.equal(cue.attributes.id, 'egd-chat-return');
-  assert.equal(cue.attributes.role, 'status');
+  assert.equal(cue.attributes.role, 'group');
+  assert.equal(cue.attributes['aria-label'], '채팅으로 돌아가기');
   assert.ok(cue.className.includes('egd-edge'));
   const button = cue.children[0];
   assert.equal(button.dataset.testid, 'chat-return');
   assert.equal(button.textContent, '채팅으로 돌아가기');
-  assert.deepEqual([...timers.values()].map(timer => timer.ms), [6000], 'it stays a few seconds');
+  assert.equal(cue.children[1].dataset.testid, 'chat-return-close');
+  assert.equal(timers.size, 0, 'no timer takes it away');
   assert.deepEqual(chat.listeners.map(entry => [entry.type, entry.capture]), [['mousedown', true], ['focusin', true]]);
   button.dispatch('click', { stopPropagation() {} });
   assert.deepEqual(calls, [['dock', 'chat-1']], 'the Dock Chat path moves the camera to a readable Chat');
@@ -15708,8 +15714,8 @@ test('the way back to Chat is a short-lived button that brings the Chat back lik
   third.children[0].dispatch('click', { stopPropagation() {} });
   assert.deepEqual(calls.slice(1), [['dock', 'chat-3'], ['focus', 'chat-3']], 'a Chat already readable is just brought forward');
   const lone = show(chatCard('chat-4', { isConnected: false }));
-  [...timers.values()][0].fn();
-  assert.equal(lone.removed, true, 'it leaves on its own');
+  lone.children[1].dispatch('click', { stopPropagation() {} });
+  assert.equal(lone.removed, true, 'its own close button takes it away');
   const clicked = chatCard('chat-5');
   const back = show(clicked);
   clicked.fire('mousedown');
@@ -15720,7 +15726,7 @@ test('the way back to Chat is a short-lived button that brings the Chat back lik
   assert.equal(viaFocus.removed, true);
   assert.match(surfaceSource, /\} else if \(item\.id === 'chat'\) \{\n                dismissChatReturnCue\(\);/, 'the Dock Chat button also clears it');
   assert.match(declaration('dismissChatReturnCue'), /document\.getElementById\('egd-chat-return'\)\?\._dismiss\?\.\(\);/);
-  assert.match(surfaceSource, /  const CHAT_RETURN_CUE_MS = 6000;\n  function dismissChatReturnCue\(\) \{/);
+  assert.doesNotMatch(surfaceSource, /CHAT_RETURN_CUE_MS/, 'it no longer leaves after six seconds');
   const rule = surfaceCss.match(/^#egd-chat-return \{([^}]+)\}/m)?.[1] || '';
   assert.match(rule, /bottom: 70px;/, 'above the Dock');
   for (const [, body] of surfaceCss.matchAll(/^#egd-chat-return[^{]*\{([^}]+)\}/gm)) assert.doesNotMatch(body, /#[0-9a-f]{3,8}\b|rgba?\(/i, 'tokens only');

@@ -295,7 +295,7 @@
   // opens the activity record at that run; it never shows thought text. With
   // several Agents at work in one room, `showName` puts the Agent's name above
   // its bubble, outside it, as an answer's name sits.
-  function codexAgentWorkingRow(working, { runId = '', name = 'Codex', avatar = null, showName = false, onOpen } = {}) {
+  function codexAgentWorkingRow(working, { runId = '', name = 'Codex', avatar = null, showName = false, onOpen, workScreen = null } = {}) {
     const face = codexMessageAvatarFace(avatar, name);
     return el('div', { class: 'egd-codex-working-row', data: { testid: 'chat-agent-working', runId, state: working.state } },
       el('span', { class: `egd-codex-message-avatar${face.toneClass}`, 'aria-hidden': 'true' },
@@ -309,7 +309,9 @@
           onclick: (ev) => { ev.stopPropagation(); onOpen?.(); },
         },
         el('span', { class: 'egd-codex-typing-dots', 'aria-hidden': 'true' }, el('span'), el('span'), el('span')),
-        el('span', { class: 'egd-codex-working-text' }, working.text))));
+        el('span', { class: 'egd-codex-working-text' }, working.text)),
+        // [현재 작업 화면] under the bubble, only when the caller found the Card this run works on.
+        workScreen));
   }
 
   // AGENT-05: which Agent holds this Browser Card right now, read from the
@@ -4494,6 +4496,10 @@
     if (state.codex.chatProtocol.unobservedPreviousRun) rows.push(el('p', { role: 'status', data: { testid: 'chat-account-reset-status' } }, '이전 Codex 연결의 실행 종료는 확인되지 않았습니다. 로그아웃은 중지 확인이 아닙니다. 이전 계정에 다시 연결해 상태를 확인하세요.'));
     for (const run of codexRuns(thread)) {
       rows.push(el('h4', { data: { runId: run.runId } }, codexRunLabel(run)));
+      // AGENT-05: [현재 작업 화면] under a busy run's head while the Card it works on is open
+      // (absent where this block runs alone, as in tests). Drawing it moves nothing; pressing it does.
+      const workScreen = typeof codexRunWorkScreenButton === 'function' ? codexRunWorkScreenButton(run) : null;
+      if (workScreen) rows.push(workScreen);
       // AGENT-04: the ceiling this run was started under, named under its head.
       const ceilingLine = ChatState.toolCeilingRunLine(run);
       if (ceilingLine) rows.push(el('p', { class: 'egd-codex-run-ceiling', data: { testid: 'chat-run-tool-ceiling', runId: run.runId } }, ceilingLine));
@@ -4524,10 +4530,14 @@
             || !inputDeliveryProof(thread.id, reference, receipt, null, packet.packetId)) continue;
         // Packet IDs are not exposed in the DOM before the scoped server read
         // confirms the packet; they are opaque, not selectors or authority.
-        rows.push(el('button', { 'aria-label': '이 읽기의 전달 기록 확인',
+        // '당시 읽은 내용' opens what this read delivered, inside the record; [현재 작업 화면]
+        // beside it is the only one that goes to the material on the Canvas (absent where this block runs alone).
+        rows.push(el('button', { 'aria-label': `당시 읽은 내용 확인: ${reference.localSource?.label || '입력'}`, title: '이 읽기에서 Agent에게 전달된 내용을 여기서 확인합니다',
           data: { testid: 'chat-delivered-input-open' },
           onclick: () => state.codexBridge.inspectInput(thread.id, reference, { packetId: packet.packetId, historyReceipt: receipt }),
-        }, `${reference.localSource?.label || '입력'} · 전달 기록 확인`));
+        }, `${reference.localSource?.label || '입력'} · 당시 읽은 내용`));
+        const sourceScreen = typeof codexSourceWorkScreenButton === 'function' ? codexSourceWorkScreenButton(reference) : null;
+        if (sourceScreen) rows.push(sourceScreen);
       }
       if (run.summary) rows.push(el('p', { class: 'egd-codex-public-summary' }, run.summary));
       const steps = Array.isArray(run.plan) ? run.plan : run.plan?.steps;
@@ -4632,7 +4642,9 @@
     // Reconcile only on actual replacement, after the IME return. Keyed readers
     // survive unrelated SSE updates; disappeared or invalidated ones retire.
     replaceCodexActivityDetails(detailsView);
-    panel.replaceChildren(el('header', {}, el('strong', {}, '활동 기록'), el('button', {
+    // BRW-13: [따라보기] sits in the head while there is a work screen to follow (absent where this block runs alone, as in tests).
+    const followToggle = typeof codexWorkScreenFollowToggle === 'function' ? codexWorkScreenFollowToggle(thread) : null;
+    panel.replaceChildren(el('header', {}, el('strong', {}, '활동 기록'), followToggle, el('button', {
       'aria-label': '활동 상태 다시 확인', onclick: () => state.codexBridge.refreshConversation(thread.id),
     }, '새로고침'), el('button', {
       'aria-label': '활동 기록 닫기', onclick: () => {
@@ -7996,40 +8008,212 @@
       fontPx: parsePxNumber(window.getComputedStyle(body).fontSize, 14) };
   }
 
-  // Shown for a few seconds when a View opened from Chat took the camera
-  // alone. Pressing it brings that Chat back the way the Dock's Chat does; it
-  // leaves once the Chat is back by any way (Dock, a click into the Chat).
-  const CHAT_RETURN_CUE_MS = 6000;
+  // The way back to the Chat a View was opened from, shown when that View took
+  // the camera alone. It stays until used, closed (its [닫기] or Esc inside
+  // it) or the Chat is back by any way (Dock, a click into the Chat). Pressing
+  // it returns to the view and conversation scroll the user left; when the
+  // Chat is no longer in that view it is brought back the way the Dock's Chat
+  // does. Call it before the camera moves away.
+  const ChatCanvasLinks = ChromeUtils.importESModule('chrome://userchrome/content/EGDeskChatCanvasLinks.sys.mjs');
   function dismissChatReturnCue() {
     document.getElementById('egd-chat-return')?._dismiss?.();
   }
 
   function showChatReturnCue(chatCard) {
-    document.getElementById('egd-chat-return')?._dismiss?.();
-    const cue = el('div', { id: 'egd-chat-return', class: 'egd-edge egd-frosted', role: 'status' });
+    // A second move away from the same Chat (another work screen) keeps the first view as the place to return to.
+    const standing = document.getElementById('egd-chat-return');
+    const kept = standing?._chatCard === chatCard ? standing._origin : null;
+    standing?._dismiss?.();
+    const chatLog = () => chatCard.querySelector?.('.egd-codex-messages') || null;
+    const origin = kept || ChatCanvasLinks.chatReturnOrigin({ pan: state.panTarget, zoom: state.zoomTarget,
+      threadId: state.codex?.activeThreadId, scrollTop: chatLog()?.scrollTop });
+    const cue = el('div', { id: 'egd-chat-return', class: 'egd-edge egd-frosted', role: 'group', 'aria-label': '채팅으로 돌아가기' });
+    cue._chatCard = chatCard;
+    cue._origin = origin;
     const chatListeners = new AbortController();
-    let timer = 0;
     const dismiss = () => {
-      if (timer) window.clearTimeout(timer);
-      timer = 0;
       chatListeners.abort();
       cue.remove();
     };
     cue._dismiss = dismiss;
     for (const type of ['mousedown', 'focusin']) chatCard.addEventListener(type, dismiss, { capture: true, signal: chatListeners.signal });
+    cue.addEventListener('keydown', (ev) => {
+      if (ev.key !== 'Escape') return;
+      ev.preventDefault();
+      ev.stopPropagation();
+      dismiss();
+    });
     cue.appendChild(el('button', {
-      type: 'button', class: 'egd-chat-return-button', data: { testid: 'chat-return' },
+      type: 'button', class: 'egd-chat-return-button', title: '떠나기 전 화면과 대화 위치로 돌아갑니다', data: { testid: 'chat-return' },
       onclick: (ev) => {
         ev.stopPropagation();
         dismiss();
         if (!chatCard.isConnected) return;
-        if (!state.focusChatDockIfCompact?.(chatCard)) focusCanvasCard(chatCard);
+        const plan = ChatCanvasLinks.chatReturnPlan(origin, { activeThreadId: state.codex?.activeThreadId,
+          chat: persistentEntityGeometry(chatCard), safe: safeViewportRect() });
+        if (plan.camera) {
+          state.setCanvasViewportTarget?.(plan.camera);
+          focusCanvasCard(chatCard);
+        } else if (!state.focusChatDockIfCompact?.(chatCard)) focusCanvasCard(chatCard);
+        const log = plan.scrollTop !== null ? chatLog() : null;
+        if (log) log.scrollTop = plan.scrollTop;
       },
     }, deskIcon('chat'), el('span', {}, '채팅으로 돌아가기')));
+    cue.appendChild(el('button', {
+      type: 'button', class: 'egd-chat-return-close', title: '닫기', 'aria-label': '채팅으로 돌아가기 닫기', data: { testid: 'chat-return-close' },
+      onclick: (ev) => { ev.stopPropagation(); dismiss(); },
+    }, deskIcon('close')));
     document.documentElement.appendChild(cue);
-    timer = window.setTimeout(dismiss, CHAT_RETURN_CUE_MS);
     return cue;
   }
+
+  // [현재 작업 화면] (AGENT-05/BRW-13): the open Card a busy run is bound to,
+  // read from the same run bindings the Card's Agent chip reads. Null — no
+  // button is drawn — when the run is not busy, holds no Card, or its Card is
+  // closed. Display only; nothing here grants or refuses anything.
+  function codexRunWorkScreen(run, busy = ChatState.isRunBusy(run)) {
+    if (busy !== true || typeof run?.runId !== 'string' || !run.runId) return null;
+    return ChatCanvasLinks.runWorkScreen(run, browserToolRunBindings, { busy: true, cancelled: browserToolCancelledRuns,
+      cardFor: (cardId) => {
+        const card = document.getElementById(cardId);
+        if (!card?.isConnected || !card.classList.contains('egd-canvas-card')) return null;
+        return { name: contextCandidateLabel(card) || cardLabelForViewportRail(card) || '' };
+      } });
+  }
+
+  // The camera goes to that Card on this press only. It is framed with the
+  // Chat when both stay readable; otherwise the way back to the Chat stays up.
+  function goToRunWorkScreen(cardId, { activate = true } = {}) {
+    const card = cardId ? document.getElementById(cardId) : null;
+    if (!card?.isConnected) { if (activate) boardNotice('작업 화면을 찾지 못했습니다. 창이 닫혔을 수 있습니다.'); return false; }
+    const chatCard = state.codex.chatCardEntityId ? document.getElementById(state.codex.chatCardEntityId) : null;
+    // A press selects the Card; [따라보기] only brings it into view, so typing elsewhere keeps its focus.
+    if (activate) focusCanvasCard(card);
+    revealOpenCanvasCard(card, { kind: card.classList.contains('egd-browser-card') ? 'browser' : 'view', opener: chatCard });
+    return true;
+  }
+
+  // Beside a read's '당시 읽은 내용' (what was delivered then, shown inside the
+  // record): [현재 작업 화면] goes to that material as it is on the Canvas now.
+  // Drawn only while the material is still open; pressing it is the only move.
+  function codexSourceWorkScreenButton(reference) {
+    const viewId = reference?.localSource?.sourceRef?.viewId;
+    const card = typeof viewId === 'string' && viewId ? document.getElementById(viewId) : null;
+    if (!card?.isConnected || !card.matches?.('.egd-canvas-card, .egd-canvas-shape')) return null;
+    const title = `${reference.localSource?.label || contextCandidateLabel(card) || '자료'} 위치로 화면 이동`;
+    return el('button', {
+      type: 'button', class: 'egd-codex-work-screen', title, 'aria-label': `${ChatCanvasLinks.WORK_SCREEN_LABEL} · ${title}`,
+      data: { testid: 'chat-source-work-screen', cardId: viewId },
+      onclick: (ev) => { ev.stopPropagation(); goToRunWorkScreen(viewId); },
+    }, deskIcon('browser'), el('span', {}, ChatCanvasLinks.WORK_SCREEN_LABEL));
+  }
+
+  // [따라보기] in the activity record's head (BRW-13). Off until pressed. While
+  // on, the camera goes to the Card the conversation's Agent works on each time
+  // that Card changes; the user's own pan or zoom, another conversation in the
+  // record, or the end of the work turns it off. It hands over no input.
+  let workScreenFollow = ChatCanvasLinks.workScreenFollowStart();
+  let workScreenFollowTimer = 0;
+  function codexThreadWorkScreen(thread) {
+    for (const run of [...codexRuns(thread)].reverse()) {
+      const view = codexRunWorkScreen(run);
+      if (view) return view;
+    }
+    return null;
+  }
+
+  // One look: true when [따라보기] just ended, so its toggle needs a redraw.
+  function stepWorkScreenFollow() {
+    if (!workScreenFollow.on) return false;
+    const thread = getCodexThreadById(state.codex, state.codex.activityThreadId);
+    const step = ChatCanvasLinks.workScreenFollowStep(workScreenFollow, { threadId: thread?.id || null,
+      busy: !!thread && codexRuns(thread).some(ChatState.isRunBusy), targetCardId: thread ? codexThreadWorkScreen(thread)?.cardId || null : null,
+      cameraRevision: state.canvasUserCameraRevision || 0 });
+    workScreenFollow = step.follow;
+    if (step.moveTo) goToRunWorkScreen(step.moveTo, { activate: false });
+    if (!workScreenFollow.on && workScreenFollowTimer) { window.clearInterval(workScreenFollowTimer); workScreenFollowTimer = 0; }
+    return step.ended !== null;
+  }
+
+  function codexWorkScreenFollowToggle(thread) {
+    stepWorkScreenFollow();
+    const target = codexThreadWorkScreen(thread);
+    const view = ChatCanvasLinks.workScreenFollowToggle(workScreenFollow, { threadId: thread.id, available: !!target });
+    if (!view) return null;
+    return el('button', {
+      type: 'button', class: 'egd-codex-follow-toggle', 'aria-pressed': String(view.pressed), title: view.title,
+      data: { testid: 'chat-work-screen-follow', focusKey: 'work-screen-follow' },
+      onclick: (ev) => {
+        ev.stopPropagation();
+        if (workScreenFollowTimer) { window.clearInterval(workScreenFollowTimer); workScreenFollowTimer = 0; }
+        if (view.pressed) workScreenFollow = ChatCanvasLinks.workScreenFollowStart();
+        else {
+          const now = codexThreadWorkScreen(thread);
+          workScreenFollow = ChatCanvasLinks.workScreenFollowStart({ threadId: thread.id, targetCardId: now?.cardId || null,
+            cameraRevision: state.canvasUserCameraRevision || 0 });
+          if (workScreenFollow.on) {
+            if (now) goToRunWorkScreen(now.cardId, { activate: false });
+            // The Agent can take another Card without a new record line; a slow look catches that and the user's own camera move.
+            workScreenFollowTimer = window.setInterval(() => { if (stepWorkScreenFollow()) renderCodexActivityPanel(); }, 1000);
+          }
+        }
+        renderCodexActivityPanel();
+        // The head is redrawn with the record; the toggle keeps the focus it was pressed with.
+        document.getElementById('egd-codex-activity-panel')?.querySelector?.('.egd-codex-follow-toggle')?.focus({ preventScroll: true });
+      },
+    }, view.label);
+  }
+
+  function codexRunWorkScreenButton(run, { busy, testid = 'chat-run-work-screen' } = {}) {
+    const view = busy === undefined ? codexRunWorkScreen(run) : codexRunWorkScreen(run, busy);
+    if (!view) return null;
+    return el('button', {
+      type: 'button', class: 'egd-codex-work-screen', title: view.title, 'aria-label': view.ariaLabel,
+      data: { testid, runId: run.runId, cardId: view.cardId, focusKey: `work-screen:${testid}:${run.runId}` },
+      onclick: (ev) => { ev.stopPropagation(); goToRunWorkScreen(view.cardId); },
+    }, deskIcon('browser'), el('span', {}, view.label));
+  }
+
+  // "가까이 있는 것 = 관련 있는 것": while the pointer or keyboard focus is on a
+  // recommended material row in Chat, the Card that row names is outlined on
+  // the Canvas. It lasts only that long and never moves the camera — a Card
+  // outside the view simply stays there. The rows are redrawn with the Chat,
+  // so this listens on the document and drops an outline whose row is gone.
+  const contextSuggestOutline = { ref: null, row: null };
+  function applyContextSuggestOutline(next, row = null) {
+    const ref = next?.ref || null;
+    if (contextSuggestOutline.ref !== ref) {
+      if (contextSuggestOutline.ref) document.getElementById(contextSuggestOutline.ref)?.classList.remove('egd-entity-suggested');
+      const card = ref ? document.getElementById(ref) : null;
+      const shown = card?.isConnected && card.matches?.('.egd-canvas-card, .egd-canvas-shape') ? card : null;
+      shown?.classList.add('egd-entity-suggested');
+      contextSuggestOutline.ref = shown ? ref : null;
+    }
+    contextSuggestOutline.row = contextSuggestOutline.ref ? row : null;
+  }
+
+  function contextSuggestOutlineEvent(ev) {
+    const rowOf = node => node?.closest?.('.egd-context-suggest-row') || null;
+    const row = rowOf(ev.target);
+    const keyboardRow = () => {
+      const focused = document.activeElement;
+      return focused?.matches?.(':focus-visible') ? rowOf(focused) : null;
+    };
+    let event = null, source = row;
+    if (ev.type === 'mouseover' || ev.type === 'focusin') {
+      // A click's focus is not a wish to see the Card; keyboard focus is.
+      if (row && (ev.type === 'mouseover' || ev.target.matches?.(':focus-visible'))) event = { type: 'enter', ref: row.dataset.ref };
+      else if (!row && contextSuggestOutline.row && !contextSuggestOutline.row.isConnected) event = { type: 'clear' };
+    } else if (row && !row.contains(ev.relatedTarget)) {
+      // Focus moving on does not end an outline the pointer still holds.
+      if (ev.type === 'focusout' && row.matches?.(':hover')) return;
+      // The pointer left: the row the keyboard is on, if any, takes the outline back.
+      source = ev.type === 'mouseout' ? keyboardRow() : null;
+      event = source?.isConnected ? { type: 'enter', ref: source.dataset.ref } : { type: 'leave', ref: row.dataset.ref };
+    }
+    if (event) applyContextSuggestOutline(ChatCanvasLinks.suggestionHighlight({ ref: contextSuggestOutline.ref }, event), source);
+  }
+  for (const type of ['mouseover', 'mouseout', 'focusin', 'focusout']) document.addEventListener(type, contextSuggestOutlineEvent, true);
 
   function resolveFloatingMenuPlacement(anchorRect, menuWidth = 152, menuHeight = 156) {
     const margin = 8;
@@ -11792,12 +11976,14 @@
               avatar: workingRun.authorAvatar || roomProfile?.avatar || null, showName: !!currentWorkingRow?.showName,
               // The record opens on this run's head (CHAT-07 activity record, AGENT-05).
               onOpen: () => codexBridge.openActivity(activeThread.id, { runId: workingRun.runId || null }),
+              workScreen: typeof codexRunWorkScreenButton === 'function' ? codexRunWorkScreenButton(workingRun, { testid: 'chat-agent-work-screen' }) : null,
             }));
           }
           for (const row of otherWorkingRows) {
             messages.appendChild(codexAgentWorkingRow(row, {
               runId: row.runId, name: row.name, avatar: row.avatar, showName: row.showName,
               onOpen: () => codexBridge.openActivity(activeThread.id, { runId: row.runId }),
+              workScreen: typeof codexRunWorkScreenButton === 'function' ? codexRunWorkScreenButton({ runId: row.runId }, { busy: true, testid: 'chat-agent-work-screen' }) : null,
             }));
           }
           // A run with no answer shown yet keeps its count at the end of the conversation.
