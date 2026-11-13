@@ -9439,7 +9439,9 @@ test('Settings has no sample account, provider, model or Agent data left', () =>
     'GPT-4.1', 'Gemini 2.5', 'Claude 4 Sonnet', 'Ollama', 'connectedProviders', '무제한']) {
     assert.equal(surfaceSource.includes(sample), false, `sample data still present: ${sample}`);
   }
-  assert.match(settingsSource, /const tabDefs = \[\s*\{ id: 'account', label: '계정'[^\]]*\{ id: 'agents', label: 'Agent 관리'[^\]]*\];/, 'only 계정 and Agent 관리; the model list is hidden');
+  assert.match(settingsSource, /const tabDefs = \[\s*\{ id: 'account', label: '계정'[^\]]*\{ id: 'agents', label: 'Agent 관리'[^\]]*\{ id: 'display', label: '화면·입력'[^\]]*\{ id: 'data', label: '데이터와 초기화'[^\]]*\];/,
+    '계정, Agent 관리, 화면·입력 and 데이터와 초기화; the model list is hidden');
+  assert.equal((settingsSource.match(/const tabDefs = \[[^\]]*\];/)?.[0].match(/\{ id: '/g) || []).length, 4, 'no other Settings tab');
   assert.match(settingsSource, /const auth = codex\.authStatus \|\| \{\};/);
   assert.match(settingsSource, /ChatState\.codexPlanLabel\(auth\.planType\)/);
   assert.match(settingsSource, /ChatState\.usageRingView\(auth\)/);
@@ -11789,7 +11791,8 @@ test('hard-coded light and white colours outside the tokens are down to a short 
   const declarations = [];
   for (const chunk of surfaceCss.replace(/\/\*[\s\S]*?\*\//g, '').split(/\n(?=[^\s])/)) {
     const head = chunk.split('{')[0].trim();
-    if (/^(:root,|@media \(prefers-color-scheme: dark\))/.test(head) || /ontology|terminal/.test(head)) continue;
+    // The forced dark block (Settings > 화면·입력 "어둡게") is the dark token set again.
+    if (/^(:root,|:root\[data-egd-theme="dark"\]$|@media \(prefers-color-scheme: dark\))/.test(head) || /ontology|terminal/.test(head)) continue;
     for (const [, property, value] of chunk.matchAll(/([a-z-]+)\s*:\s*([^;{}]+)/g)) {
       for (const [literal] of value.matchAll(/#[0-9a-f]{3,8}\b|rgba?\([^)]*\)/gi)) declarations.push({ head, property, literal });
     }

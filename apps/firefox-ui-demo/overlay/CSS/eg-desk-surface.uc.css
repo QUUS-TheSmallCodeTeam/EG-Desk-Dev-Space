@@ -7,7 +7,10 @@
 @namespace url("http://www.w3.org/1999/xhtml");
 
 /* Light values are the approved style's light half. The Ontology lens keeps
-   this palette in both schemes, so it re-declares the same set. */
+   this palette in both schemes, so it re-declares the same set. Settings >
+   화면·입력 "밝게" sets data-egd-theme="light" on the window root; that selector
+   outranks the dark :root block below, so light wins on a dark system. */
+:root[data-egd-theme="light"],
 :root,
 .egd-ontology-card {
   --egd-surface: #F4F3EE;
@@ -111,6 +114,7 @@
 }
 
 /* Selection follows the surrounding Desk, including for the light Ontology lens. */
+:root[data-egd-theme="light"],
 :root { --egd-card-selection: #295EAB; }
 
 /* DSN-01: the dark half of each light-dark() pair in
@@ -154,7 +158,7 @@
   }
   /* Native controls and scrollbars follow; inherited text gets the dark ink.
      :where() keeps every explicit color above this one. */
-  :where(.egd-edge, .egd-canvas-card:not(.egd-browser-card, .egd-terminal-card, .egd-ontology-card),
+  :where(:root:not([data-egd-theme="light"])) :where(.egd-edge, .egd-canvas-card:not(.egd-browser-card, .egd-terminal-card, .egd-ontology-card),
     .egd-browser-card > .egd-card-header, #egd-board-notice, #egd-board-scope, #egd-desk-recovery,
     #egd-desk-history, #egd-board-history, #egd-board-conflict,
     #egd-codex-input-panel, #egd-answer-briefing, #egd-rail-search-results, #egd-desk-minimap, #egd-portable-dialog) {
@@ -163,9 +167,75 @@
   }
 }
 
+/* Settings > 화면·입력 "어둡게": the same dark set on a light system. CSS cannot
+   share declarations across the media boundary, so this block repeats the one
+   above value for value; scripts/egdesk-display-settings.test.mjs fails when
+   they drift. Change both together. */
+:root[data-egd-theme="dark"] {
+  --egd-surface: #262925;
+  --egd-surface-elevated: #363934;
+  --egd-primary: #A9C5A9;
+  --egd-primary-container: #414F43;
+  --egd-secondary: #B5B9AE;
+  --egd-outline: #4A4E47;
+  --egd-outline-variant: #41463F;
+  --egd-on-surface: #EDECE7;
+  --egd-on-surface-variant: #B5B9AE;
+  --egd-wood: #302E29;
+  --egd-wood-line: #A39987;
+  --egd-wood-veil: rgba(36, 42, 40, .82);
+  --egd-topbar: #2D302C;
+  --egd-window-alt: #30342F;
+  --egd-hover: #414840;
+  --egd-user-bubble: #485748;
+  --egd-focus-border: #748673;
+  --egd-avatar-bg: #536552;
+  --egd-note: #49443A;
+  --egd-region-line: rgba(204, 198, 180, .19);
+  --egd-danger-ink: color-mix(in srgb, var(--egd-danger) 40%, var(--egd-on-surface));
+  --egd-danger-line: color-mix(in srgb, var(--egd-danger) 45%, var(--egd-surface-elevated));
+  --egd-danger-bg: color-mix(in srgb, var(--egd-danger) 22%, var(--egd-surface-elevated));
+  --egd-warning-ink: color-mix(in srgb, var(--egd-warning) 40%, var(--egd-on-surface));
+  --egd-success-ink: color-mix(in srgb, var(--egd-success) 40%, var(--egd-on-surface));
+  --egd-success-bg: color-mix(in srgb, var(--egd-success) 30%, var(--egd-surface-elevated));
+  --egd-shadow: 0 16px 32px rgba(0, 0, 0, .25);
+  --egd-chrome-shadow: 0 3px 14px rgba(0, 0, 0, .27);
+  --egd-card-shadow: 0 4px 16px rgba(0, 0, 0, .33);
+  --egd-card-shadow-active: 0 7px 21px rgba(0, 0, 0, .4);
+  --egd-card-selection: #80B4FF;
+}
+:where(:root[data-egd-theme="dark"]) :where(.egd-edge, .egd-canvas-card:not(.egd-browser-card, .egd-terminal-card, .egd-ontology-card),
+  .egd-browser-card > .egd-card-header, #egd-board-notice, #egd-board-scope, #egd-desk-recovery,
+  #egd-desk-history, #egd-board-history, #egd-board-conflict,
+  #egd-codex-input-panel, #egd-answer-briefing, #egd-rail-search-results, #egd-desk-minimap, #egd-portable-dialog) {
+  color-scheme: dark;
+  color: var(--egd-on-surface);
+}
+/* "밝게" on a dark system: light native controls and the light ink. */
+:where(:root[data-egd-theme="light"]) :where(.egd-edge, .egd-canvas-card:not(.egd-browser-card, .egd-terminal-card, .egd-ontology-card),
+  .egd-browser-card > .egd-card-header, #egd-board-notice, #egd-board-scope, #egd-desk-recovery,
+  #egd-desk-history, #egd-board-history, #egd-board-conflict,
+  #egd-codex-input-panel, #egd-answer-briefing, #egd-rail-search-results, #egd-desk-minimap, #egd-portable-dialog) {
+  color-scheme: light;
+  color: var(--egd-on-surface);
+}
+/* Menus, dialogs and panels hang directly off the window root and would
+   otherwise inherit the system's text colour under a forced theme. The canvas
+   host and any Browser, Terminal or Ontology card stay out, so those keep
+   their own colours. :where() keeps every explicit color above these. */
+:where(:root[data-egd-theme="dark"]) > :where(:is([id^="egd-"], [class^="egd-"]):not(#egd-canvas-viewport, .egd-browser-card, .egd-terminal-card, .egd-ontology-card)) {
+  color-scheme: dark;
+  color: var(--egd-on-surface);
+}
+:where(:root[data-egd-theme="light"]) > :where(:is([id^="egd-"], [class^="egd-"]):not(#egd-canvas-viewport, .egd-browser-card, .egd-terminal-card, .egd-ontology-card)) {
+  color-scheme: light;
+  color: var(--egd-on-surface);
+}
+
 /* D-G3: ordinary edges deepen only when more contrast is requested. The
    Ontology card owns a light palette, so it also owns these overrides. */
 @media (prefers-contrast: more) {
+  :root[data-egd-theme],
   :root,
   .egd-ontology-card {
     --egd-on-surface-variant: var(--egd-on-surface);
@@ -180,6 +250,7 @@
 }
 
 @media (forced-colors: active) {
+  :root[data-egd-theme],
   :root,
   .egd-ontology-card {
     --egd-surface: Canvas;
@@ -6700,6 +6771,7 @@ button.egd-codex-message-activity:focus-visible { outline: var(--egd-focus-outli
 }
 .egd-settings-tabs {
   display: flex;
+  flex-wrap: wrap;
   gap: 4px;
   padding: 0 16px 10px;
   border-bottom: 1px solid var(--egd-outline-variant);
@@ -6834,6 +6906,33 @@ button.egd-codex-message-activity:focus-visible { outline: var(--egd-focus-outli
 }
 .egd-settings-link:hover { text-decoration: underline; }
 .egd-settings-link[disabled] { opacity: var(--egd-opacity-disabled); cursor: default; text-decoration: none; }
+/* Settings > 화면·입력 and 데이터와 초기화. The choices reuse the segmented
+   control; these are the note under a choice, the reset row and the list of
+   what EG-Desk keeps. */
+.egd-settings-choice-note { margin-top: 6px; }
+.egd-settings-choice-note + .egd-settings-form-hint { margin-top: 2px; }
+.egd-settings-reset-row, .egd-settings-example-row { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 12px; margin-top: 8px; }
+/* Agent 만들기 [예시로 채우기]: the form's own gap already spaces it. */
+.egd-settings-example-row { margin-top: 0; }
+.egd-settings-example-row .egd-settings-form-hint { margin: 0; }
+.egd-settings-data-list { display: flex; flex-direction: column; gap: 8px; }
+.egd-settings-data-row {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 2px;
+  padding: 10px 12px;
+  border: 1px solid var(--egd-outline-variant);
+  border-radius: 9px;
+  background: var(--egd-window-alt);
+  font: 400 11.5px/1.5 var(--egd-font);
+  color: var(--egd-on-surface-variant);
+  overflow-wrap: anywhere;
+}
+.egd-settings-data-row[data-reset="here"] { border-color: var(--egd-outline); background: var(--egd-surface-elevated); }
+.egd-settings-data-title { font: 650 12.5px/1.4 var(--egd-font); color: var(--egd-on-surface); }
+.egd-settings-data-holds { color: var(--egd-on-surface); }
+.egd-settings-data-row .egd-settings-link { margin-top: 2px; }
 .egd-settings-badge {
   display: inline-block;
   margin-left: 6px;
@@ -8395,6 +8494,18 @@ button.egd-codex-message-activity:focus-visible { outline: var(--egd-focus-outli
   .egd-codex-typing-dots span { opacity: .65; }
   .egd-browser-loading .egd-card-progress::before { left: 0; width: 100%; opacity: .5; }
 }
+/* Settings > 화면·입력 "항상 줄이기" (data-egd-motion="reduce" on the window
+   root): the same stillness when the system setting is off. */
+:root[data-egd-motion="reduce"] [id^="egd-"], :root[data-egd-motion="reduce"] [id^="egd-"] *,
+:root[data-egd-motion="reduce"] [id^="egd-"]::before, :root[data-egd-motion="reduce"] [id^="egd-"]::after,
+:root[data-egd-motion="reduce"] [class*="egd-"], :root[data-egd-motion="reduce"] [class*="egd-"]::before,
+:root[data-egd-motion="reduce"] [class*="egd-"]::after {
+  transition: none !important;
+  animation: none !important;
+  scroll-behavior: auto !important;
+}
+:root[data-egd-motion="reduce"] .egd-codex-typing-dots span { opacity: .65; }
+:root[data-egd-motion="reduce"] .egd-browser-loading .egd-card-progress::before { left: 0; width: 100%; opacity: .5; }
 
 /* Provenance is readable notice text, not a second 44px action toolbar. */
 .egd-codex-conversation-pane > p.egd-codex-run-status {
