@@ -1,0 +1,257 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
+import * as RailSearchView from '../overlay/resources/EGDeskRailSearchView.sys.mjs';
+
+const surfaceSource = readFileSync(new URL('../overlay/JS/eg-desk-surface.uc.js', import.meta.url), 'utf8');
+const surfaceCss = readFileSync(new URL('../overlay/CSS/eg-desk-surface.uc.css', import.meta.url), 'utf8');
+const declaration = name => {
+  const start = surfaceSource.indexOf(`  function ${name}(`);
+  const end = start < 0 ? -1 : surfaceSource.indexOf('\n  }\n', start);
+  assert.ok(end > 0, `${name} must remain directly testable`);
+  return surfaceSource.slice(start, end + 4);
+};
+const compile = (names, deps) => new Function(...Object.keys(deps),
+  `${names.map(declaration).join('\n')}\nreturn { ${names.join(', ')} };`)(...Object.values(deps));
+
+const codex = { id: 't-codex', type: 'dm', title: 'Codex', pinned: true };
+const analyst = { id: 't-analyst', type: 'dm', title: '분석가' };
+const room = { id: 't-room', type: 'group', title: '견적 검토' };
+const row = (type, key, extra = {}) => ({ key: `${type}:${key}`, type, section: type, title: key, subtitle: '', active: false, ...extra });
+
+// ------------------------------------------------------------------ scopes
+
+test('scope: three choices, unknown values read as 전체', () => {
+  assert.deepEqual(RailSearchView.RAIL_SEARCH_SCOPES.map(scope => [scope.id, scope.label]),
+    [['all', '전체'], ['canvas', 'Canvas'], ['boards', '저장한 Board']]);
+  assert.ok(RailSearchView.RAIL_SEARCH_SCOPES.every(scope => scope.title), 'every chip explains itself');
+  for (const value of [undefined, null, '', 'library', 'constructor']) assert.equal(RailSearchView.normalizeScope(value), 'all');
+  assert.equal(RailSearchView.normalizeScope('boards'), 'boards');
+  assert.equal(RailSearchView.scopeLabel('canvas'), 'Canvas');
+  assert.equal(RailSearchView.scopeLabel('nope'), '전체');
+});
+
+test('scope: Canvas keeps open windows, 저장한 Board keeps saved Boards and their saved Browser pages', () => {
+  const local = [row('agenda', 'saved', { saved: true }), row('agenda', 'unsaved', { saved: false }), row('card', 'c1'),
+    row('history', 'h1'), row('file', 'f1'), row('thread', 't1')];
+  const web = row('web', 'w');
+  const keys = scope => RailSearchView.composeResults({ scope, local, web, ask: null }).map(result => result.key);
+  assert.deepEqual(keys('all'), ['agenda:saved', 'agenda:unsaved', 'card:c1', 'history:h1', 'file:f1', 'thread:t1', 'web:w']);
+  assert.deepEqual(keys('canvas'), ['card:c1']);
+  assert.deepEqual(keys('boards'), ['agenda:saved', 'history:h1'], 'an unsaved Board is not a saved Board');
+  assert.deepEqual(RailSearchView.composeResults({ scope: 'all', local, web, ask: null, navigation: true }).map(result => result.key)[0], 'web:w',
+    'an address still leads the list');
+});
+
+// ---------------------------------------------------------------- ask row
+
+test('ask recipient: the open conversation wins, otherwise the pinned Agent DM, never a guess', () => {
+  const threads = [codex, analyst, room];
+  assert.deepEqual(RailSearchView.askRecipient({ threads, activeThreadId: 't-analyst', conversationOpen: true }),
+    { threadId: 't-analyst', name: '분석가', label: '분석가에게 요청', source: 'open' });
+  assert.deepEqual(RailSearchView.askRecipient({ threads, activeThreadId: 't-room', conversationOpen: true }),
+    { threadId: 't-room', name: '견적 검토', label: '견적 검토 대화에 요청', source: 'open' });
+  assert.deepEqual(RailSearchView.askRecipient({ threads, activeThreadId: 't-analyst', conversationOpen: false }),
+    { threadId: 't-codex', name: 'Codex', label: 'Codex에게 요청', source: 'pinned' }, 'a closed Chat does not make its last room the recipient');
+  assert.equal(RailSearchView.askRecipient({ threads: [analyst, room], activeThreadId: 't-analyst', conversationOpen: false }), null);
+  assert.equal(RailSearchView.askRecipient({ threads: [{ ...room, pinned: true }], conversationOpen: false }), null, 'a pinned room is not the fixed Agent');
+  assert.equal(RailSearchView.askRecipient({}), null);
+});
+
+test('ask row: names the recipient and the sentence, says it is a draft, and is absent without words or recipient', () => {
+  const recipient = RailSearchView.askRecipient({ threads: [codex], conversationOpen: false });
+  const ask = RailSearchView.askRow('  이번 주   견적서 정리해줘 ', recipient);
+  assert.equal(ask.key, 'ask:t-codex');
+  assert.equal(ask.type, 'ask');
+  assert.equal(ask.section, 'Agent 요청');
+  assert.equal(ask.typeLabel, 'Agent');
+  assert.equal(ask.title, 'Codex에게 요청: 이번 주 견적서 정리해줘');
+  assert.match(ask.subtitle, /초안/);
+  assert.match(ask.subtitle, /보내기는 직접/);
+  assert.equal(ask.threadId, 't-codex');
+  assert.equal(ask.text, '이번 주 견적서 정리해줘');
+  assert.ok(ask.hint);
+  assert.equal(RailSearchView.askRow('   ', recipient), null);
+  assert.equal(RailSearchView.askRow('정리해줘', null), null);
+});
+
+test('ask row: always last, never cut by the row limit, and first only when nothing else was found', () => {
+  const ask = RailSearchView.askRow('정리', RailSearchView.askRecipient({ threads: [codex] }));
+  const local = Array.from({ length: 20 }, (_, index) => row('card', `c${index}`));
+  const full = RailSearchView.composeResults({ scope: 'all', local, web: row('web', 'w'), ask });
+  assert.equal(full.length, 14);
+  assert.equal(full.at(-1), ask);
+  assert.equal(full.filter(result => result.type === 'ask').length, 1);
+  assert.deepEqual(RailSearchView.composeResults({ scope: 'canvas', local: [row('file', 'f')], web: row('web', 'w'), ask }), [ask],
+    'with no other row the request is the default Enter target');
+  const withWeb = RailSearchView.composeResults({ scope: 'all', local: [], web: row('web', 'w'), ask });
+  assert.deepEqual(withWeb.map(result => result.type), ['web', 'ask'], 'the existing web row keeps its Enter');
+});
+
+test('ask draft: an existing draft is kept and the request goes on a new line, once', () => {
+  assert.equal(RailSearchView.mergeAskDraft('', ' 정리해줘 '), '정리해줘');
+  assert.equal(RailSearchView.mergeAskDraft('  \n', '정리해줘'), '정리해줘');
+  assert.equal(RailSearchView.mergeAskDraft('쓰던 글', '정리해줘'), '쓰던 글\n정리해줘');
+  assert.equal(RailSearchView.mergeAskDraft('쓰던 글\n\n', '정리해줘'), '쓰던 글\n정리해줘');
+  assert.equal(RailSearchView.mergeAskDraft('쓰던 글\n정리해줘', '정리해줘'), '쓰던 글\n정리해줘', 'the same request is not stacked twice');
+  assert.equal(RailSearchView.mergeAskDraft('정리해줘', '정리해줘'), '정리해줘');
+  assert.equal(RailSearchView.mergeAskDraft('쓰던 글', '   '), '쓰던 글');
+  assert.equal(RailSearchView.mergeAskDraft(undefined, '정리해줘'), '정리해줘');
+});
+
+// ------------------------------------------------------------ empty state
+
+test('empty state: a narrowed scope with nothing found names the scope and offers 범위를 전체로', () => {
+  const ask = RailSearchView.askRow('정리', RailSearchView.askRecipient({ threads: [codex] }));
+  assert.equal(RailSearchView.emptyState({ scope: 'canvas', results: [row('card', 'c')] }), null);
+  assert.deepEqual(RailSearchView.emptyState({ scope: 'canvas', results: [ask] }),
+    { message: "'Canvas' 범위에서 찾은 것이 없습니다", widenLabel: '범위를 전체로' });
+  assert.deepEqual(RailSearchView.emptyState({ scope: 'boards', results: [] }),
+    { message: "'저장한 Board' 범위에서 찾은 것이 없습니다", widenLabel: '범위를 전체로' });
+  assert.deepEqual(RailSearchView.emptyState({ scope: 'all', results: [] }), { message: '결과 없음', widenLabel: null });
+  assert.deepEqual(RailSearchView.emptyState({ scope: 'all', results: [ask] }), { message: '결과 없음', widenLabel: null });
+});
+
+// -------------------------------------------------- production wiring slices
+
+function wiring({ threads = [codex, analyst], activeThreadId = 't-codex', hudOpen = false, hudApp = null, hudView = 'list',
+  chatCardEntityId = null, drafts = {}, scope = 'all', local = [], bridge = true } = {}) {
+  const calls = [];
+  const state = {
+    hudOpen, hudApp,
+    railSearch: { query: '', scope, activeIndex: 0 },
+    codex: { threads, activeThreadId, hudView, chatCardEntityId, threadDrafts: { ...drafts } },
+    codexBridge: bridge ? {
+      setDraft: (value, threadId) => { calls.push(['setDraft', threadId, value]); state.codex.threadDrafts[threadId] = value; },
+      sendMessage: () => { calls.push(['sendMessage']); },
+    } : null,
+  };
+  const composer = { dataset: { threadId: null }, disabled: false, value: '', focus: () => calls.push(['focus']), setSelectionRange: (...args) => calls.push(['caret', ...args]) };
+  const api = compile(['railSearchQuery', 'railSearchAskRecipient', 'draftRailSearchAsk', 'buildRailSearchAskResult', 'buildRailSearchResults'], {
+    state, RailSearchView,
+    getCodexThreadById: (value, threadId) => value.threads.find(thread => thread.id === threadId) || null,
+    getCodexThreadDraft: (value, threadId) => value.threadDrafts[threadId] || '',
+    openCodexThreadFromRailSearch: (threadId) => { calls.push(['open', threadId]); state.codex.activeThreadId = threadId; composer.dataset.threadId = threadId; composer.value = state.codex.threadDrafts[threadId]; return true; },
+    boardNotice: (message) => calls.push(['notice', message]),
+    document: { querySelectorAll: () => [composer] },
+    window: { requestAnimationFrame: (callback) => callback() },
+    buildRailSearchAgendaResults: () => local.filter(result => result.type === 'agenda'),
+    buildRailSearchCardResults: () => local.filter(result => result.type === 'card'),
+    buildRailSearchHistoryResults: () => local.filter(result => result.type === 'history'),
+    buildRailSearchFileResults: () => local.filter(result => result.type === 'file'),
+    buildRailSearchThreadResults: () => local.filter(result => result.type === 'thread'),
+    buildRailSearchWebResult: (q) => q ? row('web', q) : null,
+    railSearchLooksLikeNavigation: () => false,
+  });
+  return { ...api, state, calls };
+}
+
+test('wiring: the request row is last, names the pinned Codex DM, and running it only drafts', () => {
+  const { buildRailSearchResults, calls, state } = wiring({ local: [row('card', 'c1')], drafts: { 't-codex': '쓰던 글' } });
+  assert.deepEqual(buildRailSearchResults('').map(result => result.type), ['card'], 'no words, no request row');
+  const results = buildRailSearchResults('견적서 정리해줘');
+  assert.deepEqual(results.map(result => result.type), ['card', 'web', 'ask']);
+  const ask = results.at(-1);
+  assert.equal(ask.title, 'Codex에게 요청: 견적서 정리해줘');
+  assert.equal(ask.execute(), true);
+  assert.deepEqual(calls.slice(0, 2), [['setDraft', 't-codex', '쓰던 글\n견적서 정리해줘'], ['open', 't-codex']], 'the draft is in place before the room opens');
+  assert.ok(calls.some(([name]) => name === 'focus'), 'the composer takes focus so 보내기 is one step away');
+  assert.ok(!calls.some(([name]) => name === 'sendMessage'), 'nothing is sent');
+  assert.equal(state.codex.threadDrafts['t-codex'], '쓰던 글\n견적서 정리해줘');
+});
+
+test('wiring: an open Chat conversation is the recipient, in the HUD or as a Canvas window', () => {
+  const hud = wiring({ activeThreadId: 't-analyst', hudOpen: true, hudApp: 'chat', hudView: 'conversation' });
+  assert.equal(hud.buildRailSearchResults('요약').at(-1).title, '분석가에게 요청: 요약');
+  const card = wiring({ activeThreadId: 't-analyst', chatCardEntityId: 'card-1', hudView: 'conversation' });
+  assert.equal(card.buildRailSearchResults('요약').at(-1).title, '분석가에게 요청: 요약');
+  const list = wiring({ activeThreadId: 't-analyst', hudOpen: true, hudApp: 'chat', hudView: 'list' });
+  assert.equal(list.buildRailSearchResults('요약').at(-1).title, 'Codex에게 요청: 요약', 'the room list is not an open conversation');
+  const otherPanel = wiring({ activeThreadId: 't-analyst', hudOpen: true, hudApp: 'settings', hudView: 'conversation' });
+  assert.equal(otherPanel.buildRailSearchResults('요약').at(-1).title, 'Codex에게 요청: 요약');
+});
+
+test('wiring: a narrowed scope filters rows but keeps the request row; a failed draft says so and keeps the words', () => {
+  const scoped = wiring({ scope: 'canvas', local: [row('agenda', 'b', { saved: true }), row('thread', 't')] });
+  assert.deepEqual(scoped.buildRailSearchResults('정리').map(result => result.type), ['ask']);
+  const gone = wiring({ bridge: false });
+  const ask = gone.buildRailSearchResults('정리').at(-1);
+  assert.equal(ask.execute(), false);
+  assert.deepEqual(gone.calls, [['notice', '요청을 넣을 대화를 열지 못했습니다. Chat을 연 뒤 다시 시도해 주세요.']]);
+  assert.equal(wiring({ threads: [analyst] }).buildRailSearchResults('정리').some(result => result.type === 'ask'), false,
+    'without a fixed recipient there is no request row');
+});
+
+function keyboard({ results, activeIndex = 0, existingCard = false }) {
+  const calls = [];
+  const state = { railSearch: { query: '', open: true, activeIndex } };
+  const { handleRailSearchKeydown } = compile(['handleRailSearchKeydown'], {
+    state,
+    railSearchQuery: value => String(value || '').trim(),
+    buildRailSearchResults: () => results,
+    executeRailSearchResult: (result) => { calls.push(['execute', result.key]); return true; },
+    closeRailSearchPanel: () => calls.push(['close']),
+    openRailSearchPanel: () => calls.push(['open']),
+    railSearchBrowserUrl: q => `https://${q}`,
+    browserSourceRef: uri => ({ uri }),
+    focusOpenSourceCard: () => { calls.push(['tab-focus']); return existingCard; },
+  });
+  const press = (key, extra = {}) => {
+    const ev = { key, metaKey: false, ctrlKey: false, prevented: false, preventDefault() { this.prevented = true; }, stopPropagation() {}, ...extra };
+    handleRailSearchKeydown(ev, { value: '견적서 정리해줘' });
+    return ev;
+  };
+  return { press, calls, state };
+}
+
+test('keyboard: Enter runs the request only when it is the selected row; Ctrl/⌘ Enter always asks; Tab is unchanged', () => {
+  const ask = row('ask', 't-codex');
+  const web = row('web', 'w');
+  const only = keyboard({ results: [ask] });
+  assert.equal(only.press('Enter').prevented, true);
+  assert.deepEqual(only.calls, [['execute', 'ask:t-codex']]);
+  const mixed = keyboard({ results: [web, ask] });
+  mixed.press('Enter');
+  assert.deepEqual(mixed.calls, [['execute', 'web:w']], 'plain Enter keeps opening the first result');
+  mixed.calls.length = 0;
+  assert.equal(mixed.press('Enter', { ctrlKey: true }).prevented, true);
+  mixed.press('Enter', { metaKey: true });
+  assert.deepEqual(mixed.calls, [['execute', 'ask:t-codex'], ['execute', 'ask:t-codex']]);
+  const noAsk = keyboard({ results: [web] });
+  noAsk.press('Enter', { ctrlKey: true });
+  assert.deepEqual(noAsk.calls, [['execute', 'web:w']], 'without a request row the shortcut is ordinary Enter');
+  const tab = keyboard({ results: [web, ask], existingCard: true });
+  assert.equal(tab.press('Tab').prevented, true);
+  assert.deepEqual(tab.calls, [['tab-focus'], ['close']]);
+  const arrows = keyboard({ results: [web, ask] });
+  arrows.press('ArrowUp');
+  assert.equal(arrows.state.railSearch.activeIndex, 1, 'one ↑ from the top reaches the request row');
+});
+
+test('panel: scope chips, the widen button and the request row are real buttons with labels, focus and token colors', () => {
+  const render = declaration('renderRailSearchPanel');
+  assert.match(render, /role: 'group', 'aria-label': '찾기 범위'/);
+  assert.match(render, /'aria-pressed': String\(scope\.id === activeScope\)/);
+  assert.match(render, /title: scope\.title/);
+  assert.match(render, /setRailSearchScope\('all'\)/);
+  assert.match(render, /result\.typeLabel \|\| SurfaceState\.railSearchSectionLabel\(result\.type\)/);
+  assert.match(declaration('executeRailSearchResult'), /result\.type === 'ask' && outcome === false\) return false;/,
+    'a request that could not be drafted leaves the typed words in place');
+  assert.match(declaration('openRailSearchPanel'), /ev\.key !== 'Escape'/, 'Esc from a chip closes the panel');
+  const rule = selector => surfaceCss.match(new RegExp(`^${selector.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')} \\{([^}]+)\\}`, 'm'))?.[1] || '';
+  // Buttons in the panel are written under its id: `.egd-edge button` would otherwise reset them.
+  const panel = '#egd-rail-search-results ';
+  for (const selector of ['.egd-rail-search-scopes', `${panel}.egd-rail-search-scope`, `${panel}.egd-rail-search-scope[aria-pressed="true"]`,
+    '.egd-rail-search-type-ask', '.egd-rail-search-hint', `${panel}.egd-rail-search-empty-action`, `${panel}.egd-rail-search-result`]) {
+    const body = rule(selector);
+    assert.ok(body, `${selector} is styled`);
+    assert.doesNotMatch(body, /#[0-9a-f]{3,8}\b|rgba?\(/i, `${selector} uses tokens only`);
+  }
+  assert.match(surfaceCss, /#egd-rail-search-results \.egd-rail-search-result:hover,\n#egd-rail-search-results \.egd-rail-search-result-active \{[^}]*background: color-mix\(in srgb, var\(--egd-primary\) 8%, transparent\)/,
+    'the row Enter will run is visibly marked, also without the pointer');
+  for (const selector of ['.egd-rail-search-scope', '.egd-rail-search-empty-action', '.egd-rail-search-result']) {
+    assert.match(surfaceCss, new RegExp(`${selector.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}:focus-visible[^{]*\\{[^}]*outline: var\\(--egd-focus-outline\\)`),
+      `${selector} shows keyboard focus`);
+  }
+  assert.match(surfaceSource, /placeholder: '검색 또는 AI에게 요청\.\.\.'/, 'the promise on the field stays, now kept');
+});

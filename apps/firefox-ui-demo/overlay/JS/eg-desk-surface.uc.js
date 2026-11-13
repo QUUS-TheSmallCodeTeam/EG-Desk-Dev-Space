@@ -588,6 +588,7 @@
     codexBridge: null,
     railSearch: {
       query: '',
+      scope: 'all',
       open: false,
       activeIndex: 0,
       fileQuery: '',
@@ -7014,6 +7015,7 @@
         title: entry.title,
         subtitle: [agendaEntryStatus(entry), SurfaceState.boardItemCountLabel(entry.count)].join(' · '),
         active: entry.current,
+        saved: !!entry.saved,
         execute: () => {
           if (!entry.current) switchAgenda(entry.id);
           else syncViewportAgendaRail();
@@ -7142,20 +7144,61 @@
     };
   }
 
+  // Scope chips and the "ask an Agent" row (UX-04): the rules are in the module.
+  const RailSearchView = ChromeUtils.importESModule('chrome://userchrome/content/EGDeskRailSearchView.sys.mjs');
+
+  // The recipient is the Chat conversation open on screen, else the pinned Agent DM.
+  function railSearchAskRecipient() {
+    const chatOpen = (state.hudOpen && state.hudApp === 'chat') || !!state.codex?.chatCardEntityId;
+    return RailSearchView.askRecipient({
+      threads: state.codex?.threads || [],
+      activeThreadId: state.codex?.activeThreadId || null,
+      conversationOpen: chatOpen && state.codex?.hudView === 'conversation',
+    });
+  }
+
+  // Opens the room with the sentence in its composer. An existing draft is
+  // kept (the sentence joins on a new line) and nothing is sent.
+  function draftRailSearchAsk(threadId, text) {
+    const bridge = state.codexBridge;
+    if (typeof bridge?.setDraft !== 'function' || !getCodexThreadById(state.codex, threadId)) {
+      boardNotice('요청을 넣을 대화를 열지 못했습니다. Chat을 연 뒤 다시 시도해 주세요.');
+      return false;
+    }
+    // Set before the room opens, so its composer is drawn with the draft.
+    bridge.setDraft(RailSearchView.mergeAskDraft(getCodexThreadDraft(state.codex, threadId), text), threadId);
+    if (!openCodexThreadFromRailSearch(threadId)) return false;
+    window.requestAnimationFrame(() => {
+      const composer = Array.from(document.querySelectorAll('.egd-codex-input'))
+        .find((input) => input.dataset.threadId === threadId && !input.disabled);
+      if (!composer) return;
+      composer.focus({ preventScroll: true });
+      composer.setSelectionRange(composer.value.length, composer.value.length);
+    });
+    return true;
+  }
+
+  function buildRailSearchAskResult(query) {
+    const row = RailSearchView.askRow(query, railSearchAskRecipient());
+    return row ? { ...row, execute: () => draftRailSearchAsk(row.threadId, row.text) } : null;
+  }
+
   function buildRailSearchResults(query = state.railSearch.query) {
     const q = railSearchQuery(query);
-    const localResults = [
-      ...buildRailSearchAgendaResults(q),
-      ...buildRailSearchCardResults(q),
-      ...buildRailSearchHistoryResults(q),
-      ...buildRailSearchFileResults(q),
-      ...buildRailSearchThreadResults(q),
-    ];
-    const webResult = buildRailSearchWebResult(q);
-    const results = webResult && railSearchLooksLikeNavigation(q)
-      ? [webResult, ...localResults]
-      : [...localResults, ...(webResult ? [webResult] : [])];
-    return results.slice(0, 14);
+    return RailSearchView.composeResults({
+      scope: state.railSearch.scope,
+      local: [
+        ...buildRailSearchAgendaResults(q),
+        ...buildRailSearchCardResults(q),
+        ...buildRailSearchHistoryResults(q),
+        ...buildRailSearchFileResults(q),
+        ...buildRailSearchThreadResults(q),
+      ],
+      web: buildRailSearchWebResult(q),
+      ask: buildRailSearchAskResult(q),
+      navigation: railSearchLooksLikeNavigation(q),
+      limit: 14,
+    });
   }
 
   function updateRailSearchActiveRow(panel = document.getElementById('egd-rail-search-results')) {
@@ -7193,7 +7236,9 @@
       ? buildRailSearchResults().find((entry) => entry.key === resultOrKey)
       : resultOrKey;
     if (!result || typeof result.execute !== 'function') return false;
-    result.execute();
+    const outcome = result.execute();
+    // A request that could not be drafted keeps the typed words in the field.
+    if (result.type === 'ask' && outcome === false) return false;
     const input = document.querySelector('.egd-rail-search-input');
     if (input) input.value = '';
     state.railSearch.query = '';
@@ -7201,11 +7246,59 @@
     return true;
   }
 
+  function setRailSearchScope(scope) {
+    const next = RailSearchView.normalizeScope(scope);
+    if (next === RailSearchView.normalizeScope(state.railSearch.scope)) return;
+    state.railSearch.scope = next;
+    state.railSearch.activeIndex = 0;
+    renderRailSearchPanel();
+  }
+
   function renderRailSearchPanel(panel = document.getElementById('egd-rail-search-results')) {
     if (!panel) return;
     const results = buildRailSearchResults();
     state.railSearch.activeIndex = Math.max(0, Math.min(state.railSearch.activeIndex, Math.max(0, results.length - 1)));
+    const activeScope = RailSearchView.normalizeScope(state.railSearch.scope);
+    // A chip or the widen button used from the keyboard keeps focus across the redraw.
+    const focused = panel.contains(document.activeElement) ? document.activeElement : null;
+    const focusedScope = focused?.dataset?.scope || (focused?.classList?.contains('egd-rail-search-empty-action') ? 'all' : null);
+    const keepPointerFocus = (ev) => {
+      ev.preventDefault();
+      ev.stopPropagation();
+    };
+    const scopes = el('div', { class: 'egd-rail-search-scopes', role: 'group', 'aria-label': '찾기 범위' },
+      ...RailSearchView.RAIL_SEARCH_SCOPES.map((scope) => el('button', {
+        type: 'button',
+        class: 'egd-rail-search-scope',
+        title: scope.title,
+        'aria-pressed': String(scope.id === activeScope),
+        data: { scope: scope.id },
+        onmousedown: keepPointerFocus,
+        onclick: (ev) => {
+          ev.preventDefault();
+          ev.stopPropagation();
+          setRailSearchScope(scope.id);
+        },
+      }, scope.label)),
+    );
+    const empty = RailSearchView.emptyState({ scope: activeScope, results });
     const children = [];
+    if (empty) {
+      children.push(el('div', { class: 'egd-rail-search-empty', role: 'status' },
+        el('span', {}, empty.message),
+        empty.widenLabel ? el('button', {
+          type: 'button',
+          class: 'egd-rail-search-empty-action',
+          title: '찾기 범위를 전체로 넓혀 다시 찾기',
+          onmousedown: keepPointerFocus,
+          onclick: (ev) => {
+            ev.preventDefault();
+            ev.stopPropagation();
+            setRailSearchScope('all');
+          },
+        }, empty.widenLabel) : null,
+      ));
+    }
     let section = '';
     results.forEach((result, index) => {
       if (result.section !== section) {
@@ -7229,19 +7322,20 @@
           executeRailSearchResult(result);
         },
       },
-        el('span', { class: `egd-rail-search-type egd-rail-search-type-${result.type}` }, SurfaceState.railSearchSectionLabel(result.type)),
+        el('span', { class: `egd-rail-search-type egd-rail-search-type-${result.type}` }, result.typeLabel || SurfaceState.railSearchSectionLabel(result.type)),
         el('span', { class: 'egd-rail-search-main' },
           el('span', { class: 'egd-rail-search-title' }, result.title),
           el('span', { class: 'egd-rail-search-subtitle' }, result.subtitle),
         ),
-        result.active ? el('span', { class: 'egd-rail-search-current' }, '현재') : null,
+        result.active ? el('span', { class: 'egd-rail-search-current' }, '현재')
+          : result.hint ? el('span', { class: 'egd-rail-search-hint' }, result.hint) : null,
       ));
     });
-    panel.replaceChildren(
-      children.length
-        ? el('div', { class: 'egd-rail-search-list' }, ...children)
-        : el('div', { class: 'egd-rail-search-empty' }, '결과 없음'),
-    );
+    panel.replaceChildren(scopes, el('div', { class: 'egd-rail-search-list' }, ...children));
+    if (focusedScope) {
+      Array.from(panel.querySelectorAll('.egd-rail-search-scope'))
+        .find((chip) => chip.dataset.scope === focusedScope)?.focus({ preventScroll: true });
+    }
     updateRailSearchPanelPlacement(panel);
   }
 
@@ -7254,6 +7348,14 @@
         closeRailSearchPanel();
       };
       panel._resizeHandler = () => updateRailSearchPanelPlacement(panel);
+      // Esc from a scope chip or a row closes the panel and returns to the field.
+      panel.addEventListener('keydown', (ev) => {
+        if (ev.key !== 'Escape') return;
+        ev.preventDefault();
+        ev.stopPropagation();
+        closeRailSearchPanel();
+        document.querySelector('.egd-rail-search-input')?.focus({ preventScroll: true });
+      });
       document.documentElement.appendChild(panel);
       setTimeout(() => window.addEventListener('mousedown', panel._outsideHandler, true), 0);
       window.addEventListener('resize', panel._resizeHandler);
@@ -7313,7 +7415,9 @@
 
     if (ev.key === 'Enter' && q) {
       const results = buildRailSearchResults(q);
-      const result = results[state.railSearch.activeIndex] || results[0];
+      // Ctrl/⌘ Enter goes straight to the request row; plain Enter runs the selected row.
+      const ask = ev.metaKey || ev.ctrlKey ? results.find((entry) => entry.type === 'ask') : null;
+      const result = ask || results[state.railSearch.activeIndex] || results[0];
       if (result) {
         executeRailSearchResult(result);
         ev.preventDefault();
