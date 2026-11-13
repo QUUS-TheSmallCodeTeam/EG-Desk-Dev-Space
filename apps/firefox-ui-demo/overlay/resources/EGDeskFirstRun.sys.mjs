@@ -46,6 +46,26 @@ export function firstEntryConnectionNotice({ entered = false, closed = false, co
   return view ? { ...view } : null;
 }
 
+// The Desk could not start: the three next steps instead of an empty screen.
+// The diagnostic text is what [진단 정보 복사] puts on the clipboard. It carries
+// the error and where it was thrown, nothing from the user's Desk.
+export function startFailureView(error) {
+  const message = String(error?.message || (typeof error === 'string' ? error : '')).trim().slice(0, 400) || '원인을 알 수 없습니다';
+  const stack = String(error?.stack || '').split('\n').map(line => line.trim()).filter(Boolean).slice(0, 12);
+  return {
+    title: 'EG-Desk를 시작하지 못했습니다',
+    body: '다시 시도해도 같으면 진단 정보를 복사해 문의할 때 붙여 주세요.',
+    actions: [
+      { id: 'retry', label: '다시 시도', title: 'EG-Desk를 다시 시작합니다', primary: true },
+      { id: 'diagnostics', label: '진단 정보 복사', title: '오류 내용을 클립보드에 복사합니다', primary: false },
+      { id: 'quit', label: '종료', title: 'EG-Desk를 끝냅니다', primary: false },
+    ],
+    copied: '진단 정보를 복사했습니다.',
+    copyFailed: '진단 정보를 복사하지 못했습니다.',
+    diagnostics: ['EG-Desk 시작 실패', message, ...stack].join('\n'),
+  };
+}
+
 // Connected: the line has nothing left to say and stops listening.
 export function firstEntryConnectionSettled(codex) {
   return codexConnectionState(codex) === 'connected';

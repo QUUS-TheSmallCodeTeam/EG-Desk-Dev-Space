@@ -25691,6 +25691,36 @@
     }
     syncFirstRunFocus();
   }
+
+  // The Desk could not start (boot threw): three next steps, not an empty
+  // screen. 다시 시도 restarts EG-Desk, since a half-built Desk cannot boot twice.
+  function showStartFailure(error) {
+    if (document.getElementById('egd-start-failure')) return;
+    const view = FirstRun.startFailureView(error);
+    const status = el('p', { class: 'egd-start-failure-status', role: 'status' });
+    const quit = (restart) => {
+      const flags = Ci.nsIAppStartup;
+      servicesRef().startup.quit(restart ? flags.eAttemptQuit | flags.eRestart : flags.eAttemptQuit);
+    };
+    const run = {
+      retry: () => quit(true),
+      diagnostics: () => { status.textContent = copyTextToClipboard(view.diagnostics) ? view.copied : view.copyFailed; },
+      quit: () => quit(false),
+    };
+    const panel = el('div', {
+      id: 'egd-start-failure', role: 'alertdialog', 'aria-labelledby': 'egd-start-failure-title',
+      data: { testid: 'start-failure' },
+    },
+      el('h2', { id: 'egd-start-failure-title' }, view.title),
+      el('p', {}, view.body),
+      el('div', { class: 'egd-start-failure-actions' }, ...view.actions.map(action => el('button', {
+        type: 'button', class: action.primary ? 'egd-start-failure-primary' : null, title: action.title,
+        data: { action: action.id }, onclick: () => run[action.id](),
+      }, action.label))),
+      status);
+    document.documentElement.appendChild(panel);
+    panel.querySelector('.egd-start-failure-primary')?.focus();
+  }
   // ---- end first run ----
 
   function restoreSurfaceEntry(lifecycle, deskSession, legacyStore) {
@@ -25898,6 +25928,7 @@
       console.warn(TAG, 'ready ✅');
     } catch (err) {
       console.error(TAG, 'boot failed:', err, err.stack);
+      try { showStartFailure(err); } catch (failure) { console.error(TAG, 'start failure screen failed:', failure); }
     }
   }
 

@@ -209,11 +209,16 @@ function harness({ codex = { connected: false, authStatus: { isLoggedIn: false }
     if (!state.surface.initialBrowserFocus) return false;
     entered++; state.surface.initialBrowserFocus = false; rootClasses.delete('egd-initial-browser-focus'); return true;
   };
-  const install = compileFunction(`${firstRunBlock()}\nreturn installFirstRunDeskEntry;`,
-    ['ChromeUtils', 'state', 'document', 'window', 'MutationObserver', 'el', 'deskIcon', 'enterLocalDesk', 'spawnSettingsCard', 'EGDESK_START_URI'])(
+  const quits = [], copied = [];
+  const clipboard = { works: true };
+  const Ci = { nsIAppStartup: { eAttemptQuit: 2, eRestart: 16 } };
+  const { install, showStartFailure } = compileFunction(`${firstRunBlock()}\nreturn { install: installFirstRunDeskEntry, showStartFailure };`,
+    ['ChromeUtils', 'state', 'document', 'window', 'MutationObserver', 'el', 'deskIcon', 'enterLocalDesk', 'spawnSettingsCard', 'EGDESK_START_URI',
+      'servicesRef', 'Ci', 'copyTextToClipboard'])(
     { importESModule: () => FirstRun }, state, document, window, MutationObserver, el, name => ({ icon: name, children: [] }),
-    enterLocalDesk, options => { settings.push(options); }, START_URI);
-  return { install, state, card, toolbar, startDoc, otherDoc, webDoc, root, rootClasses, windowListeners, byId,
+    enterLocalDesk, options => { settings.push(options); }, START_URI,
+    () => ({ startup: { quit: flags => { quits.push(flags); } } }), Ci, text => { copied.push(text); return clipboard.works; });
+  return { install, showStartFailure, quits, copied, clipboard, state, card, toolbar, startDoc, otherDoc, webDoc, root, rootClasses, windowListeners, byId,
     observed: () => observed, entered: () => entered, logins: () => logins, settings, unsubscribed: () => unsubscribed,
     codexChanged: () => codexListener?.(), hasCodexListener: () => !!codexListener,
     notice: () => document.getElementById('egd-first-entry-notice') };
@@ -379,6 +384,79 @@ test('once the Desk is open, other root class changes no longer read the Browser
   h.rootClasses.delete('egd-card-fullscreen-active');
   h.observed().fn();
   assert.equal(reads, 0, 'first run follows its own class only');
+});
+
+// ---- Start failure ----
+
+test('a failed start offers 다시 시도 / 진단 정보 복사 / 종료 and diagnostic text about the error only', () => {
+  const error = new Error('Browser 창을 만들지 못했습니다');
+  error.stack = ['boot@chrome://userchrome/content/a.js:1:1', '', ...Array.from({ length: 30 }, (_, i) => `  frame${i}@x:1:1`)].join('\n');
+  const view = FirstRun.startFailureView(error);
+  assert.equal(view.title, 'EG-Desk를 시작하지 못했습니다');
+  assert.deepEqual(view.actions.map(action => [action.id, action.label, action.primary]),
+    [['retry', '다시 시도', true], ['diagnostics', '진단 정보 복사', false], ['quit', '종료', false]]);
+  for (const action of view.actions) assert.ok(action.title, `${action.id} says what it does`);
+  const lines = view.diagnostics.split('\n');
+  assert.deepEqual(lines.slice(0, 3), ['EG-Desk 시작 실패', 'Browser 창을 만들지 못했습니다', 'boot@chrome://userchrome/content/a.js:1:1']);
+  assert.equal(lines.length, 2 + 12, 'the stack is cut to its first twelve frames');
+  assert.doesNotMatch(`${view.title}${view.body}${view.copied}${view.copyFailed}`, /[A-Za-z]{4,}(?<!Desk)/, 'Korean wording on screen');
+
+  assert.equal(FirstRun.startFailureView('x'.repeat(900)).diagnostics.split('\n')[1].length, 400);
+  for (const nothing of [null, undefined, '', {}]) {
+    assert.deepEqual(FirstRun.startFailureView(nothing).diagnostics.split('\n'), ['EG-Desk 시작 실패', '원인을 알 수 없습니다']);
+  }
+});
+
+function descendants(node, out = []) {
+  for (const child of node.children || []) { out.push(child); descendants(child, out); }
+  return out;
+}
+
+test('a failed start shows the three next steps once; they restart, copy and quit', () => {
+  const h = harness();
+  const error = new Error('시작 오류');
+  error.stack = 'boot@x:1:1';
+  h.showStartFailure(error);
+  h.showStartFailure(error);
+  const panels = h.root.children.filter(child => child.id === 'egd-start-failure');
+  assert.equal(panels.length, 1, 'never a second panel');
+  const panel = panels[0];
+  assert.equal(panel.attributes.role, 'alertdialog');
+  assert.equal(panel.attributes['aria-labelledby'], 'egd-start-failure-title');
+  assert.equal(panel.dataset.testid, 'start-failure');
+  const all = descendants(panel);
+  assert.equal(all.find(node => node.id === 'egd-start-failure-title').children[0].text, 'EG-Desk를 시작하지 못했습니다');
+  const buttons = all.filter(node => node.tag === 'button');
+  assert.deepEqual(buttons.map(button => [button.dataset.action, button.children[0].text, button.attributes.type]),
+    [['retry', '다시 시도', 'button'], ['diagnostics', '진단 정보 복사', 'button'], ['quit', '종료', 'button']]);
+  for (const button of buttons) assert.ok(button.attributes.title);
+  assert.equal(buttons[0].focused, true, 'the keyboard starts on 다시 시도');
+  const status = all.find(node => node.className === 'egd-start-failure-status');
+  assert.equal(status.attributes.role, 'status');
+
+  buttons[1].listeners.click();
+  assert.deepEqual(h.copied, ['EG-Desk 시작 실패\n시작 오류\nboot@x:1:1']);
+  assert.equal(status.textContent, '진단 정보를 복사했습니다.');
+  h.clipboard.works = false;
+  buttons[1].listeners.click();
+  assert.equal(status.textContent, '진단 정보를 복사하지 못했습니다.');
+  assert.deepEqual(h.quits, [], 'copying never quits');
+  buttons[0].listeners.click();
+  assert.deepEqual(h.quits, [2 | 16], '다시 시도 restarts EG-Desk');
+  buttons[2].listeners.click();
+  assert.deepEqual(h.quits, [2 | 16, 2], '종료 quits without a restart');
+});
+
+test('boot shows the start failure instead of an empty screen, in tokens only', () => {
+  assert.match(surfaceSource, /console\.error\(TAG, 'boot failed:', err, err\.stack\);\n      try \{ showStartFailure\(err\); \} catch \(failure\) \{ console\.error\(TAG, 'start failure screen failed:', failure\); \}/);
+  const rule = selector => surfaceCss.match(new RegExp(`^${selector.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')} \\{([^}]+)\\}`, 'm'))?.[1] || '';
+  const panel = rule('#egd-start-failure');
+  assert.match(panel, /position: fixed/);
+  assert.match(panel, /background: var\(--egd-surface-elevated\)/);
+  assert.match(panel, /color: var\(--egd-on-surface\)/);
+  assert.match(rule('.egd-start-failure-actions button:hover'), /background: var\(--egd-/);
+  assert.match(rule('.egd-start-failure-actions button:active'), /background: var\(--egd-/);
+  assert.match(rule('.egd-start-failure-actions button:focus-visible'), /outline: var\(--egd-focus-outline\)/);
 });
 
 test('the first Browser fills the screen without a selection edge around it', () => {
