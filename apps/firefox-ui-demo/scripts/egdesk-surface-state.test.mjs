@@ -8794,7 +8794,8 @@ test('Chat composer reserves title, status and log space on compact cards', asyn
     assert.match(css, /\.egd-codex-conversation-pane > p\.egd-codex-run-status \{[^}]*min-height: 0;[^}]*padding: 4px 16px;/);
     assert.match(css, /\[data-compact-composer="true"\] \.egd-codex-messages \{ padding: 12px 16px; \}/);
     assert.match(css, /\[data-compact-composer="true"\] \.egd-codex-footer \{ padding: 4px 11px 10px; \}/);
-    assert.match(css, /\[data-compact-composer="true"\] \.egd-codex-input-row \{ padding: 8px 10px; gap: 4px; \}/);
+    assert.match(css, /\[data-compact-composer="true"\] \.egd-codex-input-row \{ padding: 3px 5px 3px 7px; gap: 4px; \}/);
+    assert.match(css, /\.egd-codex-chat-shell \.egd-codex-input-row \{[^}]*padding: 3px 5px 3px 7px;/, 'a short Chat frames the draft no fatter than a tall one');
     assert.match(css, /\.egd-codex-run-status \{[^}]*flex: 0 0 auto;[^}]*min-height: 44px;/);
     assert.match(css, /\.egd-codex-send \{ width: 34px; height: 34px; min-width: 34px; min-height: 34px;/);
   });

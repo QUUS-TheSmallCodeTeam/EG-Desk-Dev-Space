@@ -7320,7 +7320,8 @@
 }
 .egd-codex-chat-main[data-compact-composer="true"] .egd-codex-messages { padding: 12px 16px; }
 .egd-codex-chat-main[data-compact-composer="true"] .egd-codex-footer { padding: 4px 11px 10px; }
-.egd-codex-chat-main[data-compact-composer="true"] .egd-codex-input-row { padding: 8px 10px; gap: 4px; }
+/* A short Chat frames the draft no fatter than a tall one (the one-line box below). */
+.egd-codex-chat-main[data-compact-composer="true"] .egd-codex-input-row { padding: 3px 5px 3px 7px; gap: 4px; }
 .egd-codex-chat-main[data-compact-composer="true"] .egd-codex-footer .egd-chat-input-tray { padding-bottom: 3px; }
 
 /* Existing Chat-specific layers below keep their own density and runtime state. */
