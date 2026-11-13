@@ -93,8 +93,14 @@
   --egd-font: -apple-system, BlinkMacSystemFont, "Apple SD Gothic Neo", "Malgun Gothic", sans-serif;
 }
 
-/* Selection follows the surrounding Desk, including for the light Ontology lens. */
-:root { --egd-card-selection: #295EAB; }
+/* Selection follows the surrounding Desk, including for the light Ontology lens.
+   Approved style: the active window is a quiet sage-grey edge with a faint 2px
+   ring; several selected windows use the sage accent. */
+:root {
+  --egd-card-selection: var(--egd-primary);
+  --egd-card-active-border: color-mix(in srgb, var(--egd-primary) 50%, var(--egd-surface-elevated));
+  --egd-card-active-ring: color-mix(in srgb, var(--egd-primary) 14%, transparent);
+}
 
 /* DSN-01: the dark half of each light-dark() pair in
    docs/egdesk-approved-desktop-style.html. State inks without an approved dark
@@ -132,7 +138,7 @@
     --egd-chrome-shadow: 0 3px 14px rgba(0, 0, 0, .27);
     --egd-card-shadow: 0 4px 16px rgba(0, 0, 0, .33);
     --egd-card-shadow-active: 0 7px 21px rgba(0, 0, 0, .4);
-    --egd-card-selection: #80B4FF;
+    --egd-card-active-border: var(--egd-focus-border);
   }
   /* Native controls and scrollbars follow; inherited text gets the dark ink.
      :where() keeps every explicit color above this one. */
@@ -177,6 +183,8 @@
     --egd-focus-border: CanvasText;
     --egd-focus-outline-color: CanvasText;
     --egd-card-selection: Highlight;
+    --egd-card-active-border: Highlight;
+    --egd-card-active-ring: Highlight;
     --egd-primary: SelectedItem;
     --egd-on-primary: SelectedItemText;
     --egd-text-disabled: GrayText;
@@ -1252,7 +1260,6 @@
   background: var(--egd-chat-room);
 }
 
-.egd-canvas-card.egd-entity-active,
 .egd-canvas-card.egd-entity-selected:not(.egd-entity-active) {
   border-color: var(--egd-card-selection);
   /* The card is camera-scaled; keep a 2px selection edge on screen. */
@@ -1260,8 +1267,18 @@
   outline-offset: 0;
 }
 
+/* The one active window: sage-grey edge, faint 2px ring, deeper shadow. */
 .egd-canvas-card.egd-entity-active {
+  border-color: var(--egd-card-active-border);
+  outline: calc(2px / var(--egd-camera-zoom, 1)) solid var(--egd-card-active-ring);
+  outline-offset: 0;
   box-shadow: var(--egd-card-shadow-active);
+}
+
+/* Among several selected windows the active one keeps the same accent edge. */
+#egd-canvas-layer:has(> .egd-entity-selected:not(.egd-entity-active)) > .egd-canvas-card.egd-entity-active {
+  border-color: var(--egd-card-selection);
+  outline-color: var(--egd-card-selection);
 }
 
 .egd-chat-card.egd-entity-active .egd-chat-card-header {
@@ -1654,16 +1671,59 @@
   flex-shrink: 0;
 }
 
+/* Window dots (close / fold / maximize): 10px dots on an 8px gap, quiet grey
+   until the title row is hovered or holds keyboard focus. Any window type gets
+   the same look by using .egd-card-dots > .egd-card-dot.egd-card-dot-{close,min,max};
+   a title row that is not .egd-card-header adds .egd-window-dots-host. */
 .egd-card-dot {
+  position: relative;
   width: 10px;
   height: 10px;
   border-radius: 50%;
   display: inline-block;
   cursor: pointer;
+  background: color-mix(in srgb, var(--egd-on-surface-variant) 32%, transparent);
+  transition: background-color .12s ease;
 }
-.egd-card-dot-close { background: #FF6057; }
-.egd-card-dot-min   { background: #FFBD2E; }
-.egd-card-dot-max   { background: #27C93F; }
+.egd-card-dot[hidden] { display: none; }
+/* Transparent press area around the 10px dot: 24px tall, and as wide as the
+   8px gap allows without overlapping the next dot. */
+.egd-card-dot::before {
+  content: "";
+  position: absolute;
+  inset: -7px -4px;
+  border-radius: 50%;
+}
+.egd-card-dot:first-child::before { left: -10px; }
+.egd-card-dot:last-child::before { right: -10px; }
+.egd-card-dot-close { --egd-window-dot-live: #FF6057; }
+.egd-card-dot-min   { --egd-window-dot-live: #FFBD2E; }
+.egd-card-dot-max   { --egd-window-dot-live: #27C93F; }
+:is(.egd-card-header, .egd-chat-card-header, .egd-window-dots-host):is(:hover, :focus-within) .egd-card-dot,
+.egd-card-dots:hover > .egd-card-dot,
+.egd-card-dot:focus-visible {
+  background: var(--egd-window-dot-live, var(--egd-on-surface-variant));
+}
+.egd-card-dot:is(:hover, :active) { filter: brightness(.9); }
+.egd-card-dot:focus-visible,
+.egd-desk-window-control:focus-visible {
+  outline: var(--egd-focus-outline);
+  outline-offset: var(--egd-focus-outline-offset);
+}
+/* UX-06: the yellow dot folds a window to its title row. The stored size stays
+   in the inline style; only the shown height changes, and a maximized window
+   is never shown folded. */
+.egd-canvas-card.egd-card-collapsed:not(.egd-card-fullscreen) {
+  height: auto !important;
+  min-height: 0 !important;
+}
+.egd-canvas-card.egd-card-collapsed:not(.egd-card-fullscreen) > :is(.egd-card-body, .egd-card-resize-hit),
+.egd-canvas-card.egd-card-collapsed:not(.egd-card-fullscreen) > .egd-card-header > :is(.egd-desk-window-toolbar, .egd-desk-window-progress) {
+  display: none !important;
+}
+.egd-canvas-card.egd-card-collapsed:not(.egd-card-fullscreen) > .egd-card-header {
+  border-bottom-color: transparent;
+}
 
 .egd-desk-window-control-disabled {
   opacity: var(--egd-opacity-disabled);
@@ -1817,7 +1877,7 @@
 }
 
 .egd-browser-card.egd-entity-active {
-  border-color: var(--egd-card-selection);
+  border-color: var(--egd-card-active-border);
   box-shadow: var(--egd-card-shadow-active);
 }
 
@@ -1853,6 +1913,7 @@
   outline: var(--egd-focus-outline);
   outline-offset: var(--egd-focus-outline-offset);
 }
+.egd-browser-card .egd-desk-window-control::before { content: none; }
 
 .egd-browser-card .egd-card-page-title {
   font-size: 11px;
@@ -7332,7 +7393,7 @@
   box-shadow: var(--egd-card-shadow);
 }
 .egd-chat-card { border-radius: 9px; }
-.egd-chat-card.egd-entity-active { border-color: var(--egd-card-selection); box-shadow: var(--egd-card-shadow-active); }
+.egd-chat-card.egd-entity-active { border-color: var(--egd-card-active-border); box-shadow: var(--egd-card-shadow-active); }
 .egd-chat-card-header,
 .egd-chat-card.egd-entity-active .egd-chat-card-header {
   min-height: 32px;

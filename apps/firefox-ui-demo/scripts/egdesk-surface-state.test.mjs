@@ -9968,7 +9968,12 @@ function windowBoardMetadataHarness() {
     node.removeAttribute = key => { delete node.attributes[key]; };
     node.closest = () => null;
     node.prepend = child => { node.appendChild(child); node.children.unshift(node.children.pop()); };
-    node.classList = { contains: name => node.className.split(/\s+/).includes(name) };
+    const classNames = () => node.className.split(/\s+/).filter(Boolean);
+    node.classList = { contains: name => classNames().includes(name),
+      add: (...names) => { node.className = [...new Set([...classNames(), ...names])].join(' '); },
+      remove: (...names) => { node.className = classNames().filter(name => !names.includes(name)).join(' '); },
+      toggle: (name, force) => { const on = force ?? !classNames().includes(name); node.classList[on ? 'add' : 'remove'](name); return on; } };
+    node.click = () => node.fire('click');
     node.querySelector = () => null;
     node.getBoundingClientRect = () => ({ left: 0, top: 0, right: 24, bottom: 24, width: 24, height: 24 });
     return node;
@@ -10141,6 +10146,95 @@ test('Board metadata reserves hoverable ellipsis space without replacing the Vie
   assert.equal(shell.slots.identity.children.includes(viewTitle), true);
   assert.deepEqual([h.state.activeEntityId, h.state.boards.activeProjectionId, h.state.codex.activeThreadId],
     ['existing-selection', 'board-b', 'existing-run']);
+});
+
+test('window frame: the yellow dot folds a window to its title row and opens it again without touching its stored size', async () => {
+  const h = windowBoardMetadataHarness();
+  const shell = h.spawnDeskWindowShell({ id: 'fold', kind: 'file', activate: false, style: { left: '40px', top: '60px', width: '520px', height: '380px' } });
+  const { close, minimize, maximize } = shell.controls, stored = { ...shell.root.style };
+  for (const control of [close, minimize, maximize]) {
+    assert.equal(control.getAttribute('role'), 'button'); assert.equal(control.getAttribute('tabindex'), '0');
+    assert.ok(control.getAttribute('title')); assert.equal(control.getAttribute('aria-label'), control.getAttribute('title'));
+    assert.equal(control.getAttribute('aria-disabled'), null, 'no dot is shown switched off');
+    assert.equal(control.className.includes('egd-desk-window-control-disabled'), false);
+  }
+  assert.deepEqual([minimize.getAttribute('title'), minimize.getAttribute('aria-expanded'), minimize.getAttribute('hidden')], ['창 접기', 'true', null]);
+  const sizes = []; shell.onResize(rect => sizes.push(rect)); await settle();
+  const heard = sizes.length, dirty = h.effects.dirty;
+  minimize.fire('click');
+  assert.equal(shell.isCollapsed(), true); assert.equal(shell.root.classList.contains('egd-card-collapsed'), true);
+  assert.deepEqual([minimize.getAttribute('title'), minimize.getAttribute('aria-label'), minimize.getAttribute('aria-expanded')], ['창 펼치기', '창 펼치기', 'false']);
+  assert.equal(h.effects.dirty, dirty + 1, 'folding is a Desk change to save');
+  assert.equal(sizes.length, heard, 'the content is not told about the folded height');
+  assert.deepEqual({ ...shell.root.style }, stored, 'the stored position and size are untouched');
+  let prevented = 0;
+  minimize.fire('keydown', { key: 'Enter', preventDefault() { prevented++; } });
+  assert.equal(prevented, 1); assert.equal(shell.isCollapsed(), false);
+  assert.deepEqual([minimize.getAttribute('title'), minimize.getAttribute('aria-expanded')], ['창 접기', 'true']);
+  assert.equal(sizes.length, heard + 1, 'opening reports the real size again');
+  assert.equal(h.effects.dirty, dirty + 2);
+  minimize.fire('keydown', { key: ' ', preventDefault() {} });
+  assert.equal(shell.isCollapsed(), true);
+  // The green dot on a folded window opens it first, then maximizes.
+  const fullscreen = h.effects.fullscreen;
+  maximize.fire('click');
+  assert.equal(shell.isCollapsed(), false); assert.equal(h.effects.fullscreen, fullscreen + 1);
+  // A restore folds quietly.
+  const quiet = h.effects.dirty;
+  assert.equal(shell.setCollapsed(true, { quiet: true }), true);
+  assert.equal(h.effects.dirty, quiet); assert.equal(shell.isCollapsed(), true);
+  // Double-clicking the title row of a folded window opens it; it is not maximized from there.
+  shell.slots.topbar.fire('dblclick', { button: 0, target: { closest: () => null } });
+  assert.equal(shell.isCollapsed(), false); assert.equal(h.effects.fullscreen, fullscreen + 1);
+  shell.slots.topbar.fire('dblclick', { button: 0, target: { closest: () => null } });
+  assert.equal(h.effects.fullscreen, fullscreen + 2, 'an open window still maximizes on double-click');
+});
+
+test('window frame: a window type that cannot fold shows no yellow dot and never folds', () => {
+  const h = windowBoardMetadataHarness();
+  const shell = h.spawnDeskWindowShell({ id: 'fixed', kind: 'browser', activate: false, collapsible: false });
+  assert.equal(shell.controls.minimize.getAttribute('hidden'), 'true');
+  assert.equal(shell.setCollapsed(true), false);
+  assert.equal(shell.isCollapsed(), false); assert.equal(h.effects.dirty, 1, 'only the window creation was recorded');
+});
+
+test('window frame: the green dot says what a press does now', () => {
+  const h = windowBoardMetadataHarness();
+  const shell = h.spawnDeskWindowShell({ id: 'grow', kind: 'file', activate: false }), { maximize } = shell.controls;
+  assert.deepEqual([maximize.getAttribute('title'), maximize.getAttribute('aria-label'), maximize.getAttribute('aria-pressed')], ['창 최대화', '창 최대화', 'false']);
+  shell.root.classList.add('egd-card-fullscreen'); shell.syncWindowControls();
+  assert.deepEqual([maximize.getAttribute('title'), maximize.getAttribute('aria-label'), maximize.getAttribute('aria-pressed')], ['원래 크기로', '원래 크기로', 'true']);
+  shell.root.classList.remove('egd-card-fullscreen'); shell.syncWindowControls();
+  assert.deepEqual([maximize.getAttribute('title'), maximize.getAttribute('aria-pressed')], ['창 최대화', 'false']);
+  assert.match(declaration('spawnDeskWindowShell'), /new MutationObserver\(syncWindowControls\)[\s\S]*attributeFilter: \['class'\]/,
+    'maximize and restore are followed from the root class, without a call from the maximize code');
+});
+
+test('Desk restore brings a folded window back folded, by its restored ID, without a new change mark', () => {
+  const h = windowBoardMetadataHarness(), collision = 'existing-control';
+  const existing = h.document.createElement('button'); existing.id = collision; h.document.documentElement.appendChild(existing);
+  const folded = { id: collision, type: 'browser', geometry: { x: 0, y: 0, width: 400, height: 300 },
+    runtimeState: { uri: 'about:blank' }, sourceRef: { uri: 'about:blank' } };
+  const open = { ...structuredClone(folded), id: 'open-view' };
+  const snapshot = { agenda: { id: 'desk', title: 'Desk' }, cards: [folded, open], shapes: [],
+    desk: { activeCardId: null, collapsedViewIds: [collision, 'missing-view', 7] },
+    boardProjections: { projections: {}, activeProjectionId: null } };
+  const before = structuredClone(snapshot), dirty = h.effects.dirty;
+  assert.equal(h.restoreDeskSession(snapshot), true);
+  const views = h.document.querySelectorAll('.egd-desk-window');
+  assert.equal(views.length, 2);
+  const [restoredFolded, restoredOpen] = views;
+  assert.notEqual(restoredFolded.id, collision, 'the saved ID was taken, so the View was remapped');
+  assert.equal(restoredFolded._deskWindowShell.isCollapsed(), true);
+  assert.equal(restoredFolded._deskWindowShell.controls.minimize.getAttribute('aria-expanded'), 'false');
+  assert.equal(restoredOpen._deskWindowShell.isCollapsed(), false);
+  assert.deepEqual(restoredFolded.geometry, { x: 0, y: 0, width: 400, height: 300 }, 'the stored size is restored whole');
+  assert.deepEqual(snapshot, before);
+  // Opening the two windows is recorded either way; folding on restore adds nothing of its own.
+  const plain = windowBoardMetadataHarness(), plainDirty = plain.effects.dirty;
+  assert.equal(plain.restoreDeskSession({ ...structuredClone(before), desk: { activeCardId: null } }), true);
+  assert.equal(h.effects.dirty - dirty, plain.effects.dirty - plainDirty, 'folding on restore is not a new change');
+  assert.match(declaration('serializeDeskSnapshot'), /collapsedViewIds: Array\.from\(document\.querySelectorAll\('\.egd-canvas-card'\)\)\n\s+\.filter\(card => card\.classList\?\.contains\('egd-card-collapsed'\)\)\.map\(card => card\.id\)/);
 });
 
 test('compact Browser Agent header keeps its height and exposes short status and labelled actions', () => {

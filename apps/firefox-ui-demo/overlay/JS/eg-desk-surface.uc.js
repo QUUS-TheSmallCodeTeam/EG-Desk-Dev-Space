@@ -5160,6 +5160,9 @@
         zoom: state.zoomTarget,
         activeAgendaId: state.agenda.activeAgendaId,
         activeCardId: state.activeEntityId,
+        // UX-06: folded windows are a list of ids; each stored size stays whole.
+        collapsedViewIds: Array.from(document.querySelectorAll('.egd-canvas-card'))
+          .filter(card => card.classList?.contains('egd-card-collapsed')).map(card => card.id),
       },
       agenda: {
         id: state.agenda.activeAgendaId,
@@ -6341,6 +6344,11 @@
         }, { immediate: true });
       }
       state.restoreCanvasGroups?.(snapshot.groups, restoredIds, { merge: !!options.merge });
+      // UX-06: windows saved folded come back folded, without a new change mark.
+      for (const savedId of MinimapLayout.normalizeCollapsedIds(snapshot.desk?.collapsedViewIds)) {
+        const view = document.getElementById(restoredIds.get(savedId) || savedId);
+        if (view && restoredViews.includes(view)) view._deskWindowShell?.setCollapsed?.(true, { quiet: true });
+      }
       const activeId = snapshot.desk?.activeCardId;
       const active = activeId ? document.getElementById(restoredIds.get(activeId) || activeId) : null;
       if (active && !options.merge) setActiveEntity(active);
@@ -15818,7 +15826,9 @@
       if (ev.button !== 0) return;
       if (ev.target.closest('input, button, .egd-card-dot')) return;
       focusCanvasCard(card);
-      toggleCardFullscreen(card);
+      // A folded window opens again from its title row; it is not maximized from there.
+      if (card._deskWindowShell?.isCollapsed?.()) card._deskWindowShell.setCollapsed(false);
+      else toggleCardFullscreen(card);
       ev.preventDefault();
       ev.stopPropagation();
     });
@@ -15890,25 +15900,67 @@
       title: '창 닫기',
       onclick: (ev) => { ev.stopPropagation(); requestClose(); },
     });
+    // UX-06: the yellow dot folds the window to its title row. A window type
+    // that cannot fold passes collapsible: false and shows no yellow dot.
+    const collapsible = options.collapsible !== false;
+    const isCollapsed = () => root.classList.contains('egd-card-collapsed');
     const minimizeControl = el('span', {
-      class: 'egd-card-dot egd-card-dot-min egd-desk-window-control egd-desk-window-control-disabled',
-      'aria-disabled': 'true',
-      title: '창 최소화는 아직 지원되지 않음',
+      class: 'egd-card-dot egd-card-dot-min egd-desk-window-control',
+      role: 'button',
+      tabindex: '0',
+      title: '창 접기',
+      'aria-label': '창 접기',
+      'aria-expanded': 'true',
+      hidden: !collapsible,
+      onclick: (ev) => { ev.stopPropagation(); setCollapsed(!isCollapsed()); },
     });
     const maximizeControl = el('span', {
       class: 'egd-card-dot egd-card-dot-max egd-desk-window-control',
       role: 'button',
       tabindex: '0',
       title: '창 최대화',
-      onclick: (ev) => { ev.stopPropagation(); toggleCardFullscreen(root); },
+      'aria-label': '창 최대화',
+      'aria-pressed': 'false',
+      onclick: (ev) => {
+        ev.stopPropagation();
+        if (isCollapsed()) setCollapsed(false);
+        toggleCardFullscreen(root);
+      },
     });
-    for (const control of [closeControl, maximizeControl]) {
+    closeControl.setAttribute('aria-label', '창 닫기');
+    for (const control of [closeControl, minimizeControl, maximizeControl]) {
       control.addEventListener('keydown', (ev) => {
         if (ev.key !== 'Enter' && ev.key !== ' ') return;
         ev.preventDefault();
         control.click();
       });
     }
+    // The dots name what a press does now: the green one restores a maximized
+    // window, the yellow one opens a folded one.
+    const syncWindowControls = () => {
+      const maximized = root.classList.contains('egd-card-fullscreen');
+      const maximizeLabel = maximized ? '원래 크기로' : '창 최대화';
+      maximizeControl.setAttribute('title', maximizeLabel);
+      maximizeControl.setAttribute('aria-label', maximizeLabel);
+      maximizeControl.setAttribute('aria-pressed', String(maximized));
+      const collapsed = isCollapsed();
+      const minimizeLabel = collapsed ? '창 펼치기' : '창 접기';
+      minimizeControl.setAttribute('title', minimizeLabel);
+      minimizeControl.setAttribute('aria-label', minimizeLabel);
+      minimizeControl.setAttribute('aria-expanded', String(!collapsed));
+    };
+    const setCollapsed = (collapsed, { quiet = false } = {}) => {
+      const next = collapsible && !!collapsed;
+      if (next === isCollapsed()) return next;
+      // Folding a maximized window first returns it to its own size.
+      if (next && isCardFullscreen(root)) toggleCardFullscreen(root);
+      root.classList.toggle('egd-card-collapsed', next);
+      syncWindowControls();
+      // Adapters hear nothing while folded; they get the real size back on open.
+      if (!next) notifyResize();
+      if (!quiet) markAgendaDirty(next ? `collapse-${kind}-window` : `expand-${kind}-window`, root);
+      return next;
+    };
 
     const identity = el('div', { class: 'egd-desk-window-identity' });
     identity.appendChild(deskIcon({ browser: 'browser', ontology: 'ontology', file: 'file', 'input-evidence': 'file', result: 'result', memo: 'note' }[kind] || 'square', 'egd-ui-icon egd-window-kind-icon'));
@@ -16027,6 +16079,7 @@
     }
 
     const notifyResize = () => {
+      if (isCollapsed()) return;
       const rect = {
         width: root.offsetWidth,
         height: root.offsetHeight,
@@ -16080,11 +16133,15 @@
 
     const resizeObserver = new ResizeObserver(notifyResize);
     resizeObserver.observe(root);
+    // Maximize and restore change the root class from outside the shell.
+    const controlObserver = typeof MutationObserver === 'function' ? new MutationObserver(syncWindowControls) : null;
+    controlObserver?.observe(root, { attributes: true, attributeFilter: ['class'] });
     registerCleanup(() => {
       root.removeEventListener('mousedown', onRootMouseDown, true);
       window.removeEventListener('mousemove', onMove);
       window.removeEventListener('mouseup', onUp);
       try { resizeObserver.disconnect(); } catch {}
+      try { controlObserver?.disconnect(); } catch {}
     });
 
     const shell = {
@@ -16093,8 +16150,12 @@
       boardMenu,
       slots: { header, topbar, identity, actions, toolbar, progress, content: body },
       resizeHits,
+      controls: { close: closeControl, minimize: minimizeControl, maximize: maximizeControl },
       focus,
       requestClose,
+      isCollapsed,
+      setCollapsed,
+      syncWindowControls,
       startPanIfNeeded,
       registerCleanup,
       onResize(listener) {
