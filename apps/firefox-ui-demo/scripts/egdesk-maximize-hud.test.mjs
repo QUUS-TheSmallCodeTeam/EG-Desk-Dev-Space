@@ -174,6 +174,32 @@ test('surface: maximize keeps Desk chrome for every View type; only focus view h
     'the exit button exists only in a user-chosen focus view');
 });
 
+test('surface: the badge names a Browser by its page title and a memo by its memo title', () => {
+  assert.match(functionBody('syncViewportAgendaRail'), /MaximizeHud\.presentationBadge\(presentationBadgeLabel\(card\), state\.cardFullscreen\.mode\)/);
+  const label = Function('cardLabelForViewportRail', `${functionBody('presentationBadgeLabel')}\nreturn presentationBadgeLabel;`)(() => '줄 이름');
+  const view = (classes, titles = {}) => ({
+    classList: { contains: name => classes.includes(name) },
+    querySelector: selector => (selector in titles ? { textContent: titles[selector] } : null),
+  });
+  const badge = card => presentationBadge(label(card), 'maximized').text;
+  assert.equal(badge(view(['egd-canvas-card', 'egd-browser-card'], { '.egd-card-page-title': ' DuckDuckGo ' })), 'DuckDuckGo · 크게 보는 중');
+  assert.equal(badge(view(['egd-canvas-card', 'egd-browser-card'], { '.egd-card-page-title': '' })), 'Browser · 크게 보는 중', 'a page with no title yet');
+  assert.equal(badge(view(['egd-canvas-card', 'egd-browser-card'])), 'Browser · 크게 보는 중');
+  assert.equal(badge(view(['egd-canvas-card', 'egd-memo-card'], { '.egd-memo-title': '메모 #1' })), '메모 #1 · 크게 보는 중');
+  assert.equal(badge(view(['egd-canvas-card', 'egd-memo-card'])), '메모 · 크게 보는 중');
+  assert.equal(badge(view(['egd-canvas-card', 'egd-file-card'])), '줄 이름 · 크게 보는 중', 'other Views keep the name they already had');
+});
+
+test('surface: while one View is shown large the other windows, shapes and memo lines around it are not shown', () => {
+  const rule = css.match(/:root\.egd-card-fullscreen-active #egd-canvas-layer :is\(([^{]+)\) \{([^}]+)\}/);
+  assert.ok(rule, 'one root class hides the surroundings');
+  assert.match(rule[1], /\.egd-canvas-card:not\(\.egd-card-fullscreen\)/, 'the View shown large itself stays');
+  for (const selector of ['.egd-canvas-shape', '.egd-memo-tether']) assert.ok(rule[1].includes(selector), selector);
+  assert.match(rule[2], /visibility: hidden;/);
+  assert.doesNotMatch(rule[2], /display|left|top|width|height/, 'nothing is moved, resized or removed, so restoring shows everything as it was');
+  assert.match(functionBody('exitCardFullscreen'), /classList\.remove\('egd-card-fullscreen-active'\)/);
+});
+
 test('surface: restoring keeps a Chat the user opened or pinned and never reopens the minimap twice', () => {
   const exit = functionBody('exitCardFullscreen');
   assert.match(exit, /restoreHudAfterCardFullscreen\(fullscreen\)/);

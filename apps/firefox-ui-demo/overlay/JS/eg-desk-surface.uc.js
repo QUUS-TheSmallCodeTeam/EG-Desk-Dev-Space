@@ -8850,6 +8850,14 @@
     return card.getAttribute('title') || '창';
   }
 
+  // 크게 보기 배지의 이름. Browser는 머리줄에 보이는 페이지 제목(없으면 'Browser'),
+  // 메모는 메모 제목을 쓴다. 그 밖의 창은 줄 이름 그대로다(Agent에게 가는 이름은 바꾸지 않는다).
+  function presentationBadgeLabel(card) {
+    if (card.classList.contains('egd-memo-card')) return card.querySelector('.egd-memo-title')?.textContent?.trim() || '메모';
+    if (card.classList.contains('egd-browser-card')) return card.querySelector('.egd-card-page-title')?.textContent?.trim() || 'Browser';
+    return cardLabelForViewportRail(card);
+  }
+
   function syncViewportAgendaRail() {
     // The focused Browser can be removed before this sync; retain the single
     // gadget node so its poller and controls can return to the rail intact.
@@ -8904,7 +8912,7 @@
       const card = state.cardFullscreen?.cardId ? document.getElementById(state.cardFullscreen.cardId) : null;
       const badge = presentation.querySelector('.egd-rail-card-badge');
       if (card?.isConnected) {
-        const copy = MaximizeHud.presentationBadge(cardLabelForViewportRail(card), state.cardFullscreen.mode);
+        const copy = MaximizeHud.presentationBadge(presentationBadgeLabel(card), state.cardFullscreen.mode);
         badge.textContent = copy.text;
         badge.title = copy.title;
         badge.setAttribute('aria-label', copy.title);
