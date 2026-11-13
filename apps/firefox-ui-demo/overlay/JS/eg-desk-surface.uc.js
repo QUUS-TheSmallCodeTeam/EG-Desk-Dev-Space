@@ -4475,10 +4475,14 @@
             || !inputDeliveryProof(thread.id, reference, receipt, null, packet.packetId)) continue;
         // Packet IDs are not exposed in the DOM before the scoped server read
         // confirms the packet; they are opaque, not selectors or authority.
-        rows.push(el('button', { 'aria-label': '이 읽기의 전달 기록 확인',
+        // '당시 읽은 내용' opens what this read delivered, inside the record; [현재 작업 화면]
+        // beside it is the only one that goes to the material on the Canvas (absent where this block runs alone).
+        rows.push(el('button', { 'aria-label': `당시 읽은 내용 확인: ${reference.localSource?.label || '입력'}`, title: '이 읽기에서 Agent에게 전달된 내용을 여기서 확인합니다',
           data: { testid: 'chat-delivered-input-open' },
           onclick: () => state.codexBridge.inspectInput(thread.id, reference, { packetId: packet.packetId, historyReceipt: receipt }),
-        }, `${reference.localSource?.label || '입력'} · 전달 기록 확인`));
+        }, `${reference.localSource?.label || '입력'} · 당시 읽은 내용`));
+        const sourceScreen = typeof codexSourceWorkScreenButton === 'function' ? codexSourceWorkScreenButton(reference) : null;
+        if (sourceScreen) rows.push(sourceScreen);
       }
       if (run.summary) rows.push(el('p', { class: 'egd-codex-public-summary' }, run.summary));
       const steps = Array.isArray(run.plan) ? run.plan : run.plan?.steps;
@@ -7906,8 +7910,23 @@
     if (!card?.isConnected) { boardNotice('작업 화면을 찾지 못했습니다. 창이 닫혔을 수 있습니다.'); return false; }
     const chatCard = state.codex.chatCardEntityId ? document.getElementById(state.codex.chatCardEntityId) : null;
     focusCanvasCard(card);
-    revealOpenCanvasCard(card, { kind: 'browser', opener: chatCard });
+    revealOpenCanvasCard(card, { kind: card.classList.contains('egd-browser-card') ? 'browser' : 'view', opener: chatCard });
     return true;
+  }
+
+  // Beside a read's '당시 읽은 내용' (what was delivered then, shown inside the
+  // record): [현재 작업 화면] goes to that material as it is on the Canvas now.
+  // Drawn only while the material is still open; pressing it is the only move.
+  function codexSourceWorkScreenButton(reference) {
+    const viewId = reference?.localSource?.sourceRef?.viewId;
+    const card = typeof viewId === 'string' && viewId ? document.getElementById(viewId) : null;
+    if (!card?.isConnected || !card.matches?.('.egd-canvas-card, .egd-canvas-shape')) return null;
+    const title = `${reference.localSource?.label || contextCandidateLabel(card) || '자료'} 위치로 화면 이동`;
+    return el('button', {
+      type: 'button', class: 'egd-codex-work-screen', title, 'aria-label': `${ChatCanvasLinks.WORK_SCREEN_LABEL} · ${title}`,
+      data: { testid: 'chat-source-work-screen', cardId: viewId },
+      onclick: (ev) => { ev.stopPropagation(); goToRunWorkScreen(viewId); },
+    }, deskIcon('browser'), el('span', {}, ChatCanvasLinks.WORK_SCREEN_LABEL));
   }
 
   function codexRunWorkScreenButton(run, { busy, testid = 'chat-run-work-screen' } = {}) {

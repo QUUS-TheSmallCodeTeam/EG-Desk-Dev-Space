@@ -159,6 +159,45 @@ test('[현재 작업 화면] is drawn only for a busy run with an open Card and 
   assert.match(surfaceCss, /button\.egd-codex-work-screen:focus-visible,\n#egd-codex-activity-panel button\.egd-codex-work-screen:focus-visible \{ outline: var\(--egd-focus-outline\);/);
 });
 
+test('a read in the activity record offers 당시 읽은 내용 and, while the material is open, a separate 현재 작업 화면', () => {
+  const doc = fakeDocument();
+  const el = elFor(doc);
+  const calls = [];
+  const fileCard = doc.register('egd-file-card-2', doc.createElement('article'));
+  fileCard.className = 'egd-canvas-card egd-file-card';
+  fileCard.matches = query => query === '.egd-canvas-card, .egd-canvas-shape';
+  const hud = doc.register('egd-hud', doc.createElement('div'));
+  hud.matches = () => false;
+  const chatCard = doc.register('egd-chat-card-1', doc.createElement('article'));
+  const parts = compileFunction(`${declaration('goToRunWorkScreen')}\n${declaration('codexSourceWorkScreenButton')}\nreturn { codexSourceWorkScreenButton };`,
+    ['document', 'el', 'state', 'ChatCanvasLinks', 'contextCandidateLabel', 'deskIcon', 'boardNotice', 'focusCanvasCard', 'revealOpenCanvasCard'])(
+    doc, el, { codex: { chatCardEntityId: 'egd-chat-card-1' } }, { WORK_SCREEN_LABEL }, () => '견적서.md', () => doc.createElement('svg'),
+    message => calls.push(['notice', message]), card => calls.push(['focus', card.id]), (card, options) => calls.push(['reveal', card.id, options.kind, options.opener?.id || null]));
+  const reference = { sourceId: 's1', localSource: { label: '견적서 초안', sourceRef: { viewId: 'egd-file-card-2' } } };
+  const button = parts.codexSourceWorkScreenButton(reference);
+  assert.equal(button.textContent, '현재 작업 화면');
+  assert.equal(button.attributes.title, '견적서 초안 위치로 화면 이동');
+  assert.equal(button.attributes['aria-label'], '현재 작업 화면 · 견적서 초안 위치로 화면 이동');
+  assert.deepEqual({ ...button.dataset }, { testid: 'chat-source-work-screen', cardId: 'egd-file-card-2' });
+  assert.deepEqual(calls, []);
+  button.dispatch('click');
+  assert.deepEqual(calls, [['focus', 'egd-file-card-2'], ['reveal', 'egd-file-card-2', 'view', 'egd-chat-card-1']]);
+  assert.equal(parts.codexSourceWorkScreenButton({ localSource: { sourceRef: { viewId: 'egd-file-card-2' } } }).attributes.title, '견적서.md 위치로 화면 이동');
+  // Closed material, something that is not a Canvas object, or no view at all: no button.
+  assert.equal(parts.codexSourceWorkScreenButton({ localSource: { sourceRef: { viewId: 'egd-hud' } } }), null);
+  assert.equal(parts.codexSourceWorkScreenButton({ localSource: { sourceRef: { viewId: 'gone' } } }), null);
+  assert.equal(parts.codexSourceWorkScreenButton({ localSource: {} }), null);
+  assert.equal(parts.codexSourceWorkScreenButton(null), null);
+  fileCard.isConnected = false;
+  assert.equal(parts.codexSourceWorkScreenButton(reference), null);
+
+  const panel = declaration('renderCodexActivityPanel') || '';
+  assert.match(panel, /rows\.push\(el\('button', \{ 'aria-label': `당시 읽은 내용 확인: \$\{reference\.localSource\?\.label \|\| '입력'\}`, title: '이 읽기에서 Agent에게 전달된 내용을 여기서 확인합니다',\n\s*data: \{ testid: 'chat-delivered-input-open' \},\n\s*onclick: \(\) => state\.codexBridge\.inspectInput\(thread\.id, reference, \{ packetId: packet\.packetId, historyReceipt: receipt \}\),\n\s*\}, `\$\{reference\.localSource\?\.label \|\| '입력'\} · 당시 읽은 내용`\)\);\n\s*const sourceScreen = typeof codexSourceWorkScreenButton === 'function' \? codexSourceWorkScreenButton\(reference\) : null;\n\s*if \(sourceScreen\) rows\.push\(sourceScreen\);/,
+    'the record button stays inside the panel; only the second one goes to the Canvas');
+  assert.doesNotMatch(panel, /전달 기록 확인/);
+  assert.match(surfaceCss, /^#egd-codex-activity-panel button \+ button\.egd-codex-work-screen \{ margin-left: 6px; \}/m);
+});
+
 // ---- 채팅으로 돌아가기 (B44) ----
 
 test('chatReturnOrigin keeps the camera and the conversation scroll it left from', () => {

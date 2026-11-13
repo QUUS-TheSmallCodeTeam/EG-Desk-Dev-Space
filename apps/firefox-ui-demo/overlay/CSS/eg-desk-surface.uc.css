@@ -4954,6 +4954,8 @@ button.egd-codex-work-screen,
   cursor: pointer;
 }
 #egd-codex-activity-panel button.egd-codex-work-screen { margin: 0 0 6px; }
+/* Beside a read's '당시 읽은 내용': two separate buttons, a breath apart. */
+#egd-codex-activity-panel button + button.egd-codex-work-screen { margin-left: 6px; }
 button.egd-codex-work-screen:hover,
 #egd-codex-activity-panel button.egd-codex-work-screen:hover { border-color: var(--egd-focus-border); background: var(--egd-hover); color: var(--egd-on-surface); }
 button.egd-codex-work-screen:focus-visible,
