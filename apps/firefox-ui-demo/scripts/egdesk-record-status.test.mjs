@@ -93,6 +93,7 @@ test('record status is muted text; only a failure is coloured, and the retry but
   assert.match(rule('.egd-rail-record-retry'), /-moz-window-dragging: no-drag;/);
   assert.match(rule('.egd-rail-record-retry:hover'), /background: var\(--egd-hover\);/);
   assert.match(rule('.egd-rail-record-retry:focus-visible'), /outline: var\(--egd-focus-outline\);/);
-  // On a narrow window the quiet time gives its room to search; a failure stays.
-  assert.match(surfaceCss, /@media \(max-width: 1000px\) \{\n  \.egd-rail-record-status:not\(\[data-state="failed"\]\) \{ display: none; \}\n\}/);
+  // Below the centred-search width (1200px) the quiet time gives its room to search; a failure stays.
+  assert.match(surfaceCss, /@media \(max-width: 1199px\) \{\n  \.egd-rail-record-status:not\(\[data-state="failed"\]\) \{ display: none; \}\n\}/);
+  assert.match(surfaceCss, /@media \(min-width: 1200px\) \{\n  \.egd-rail-left \{ min-width: 0; max-width: calc\(50% - 224px\); \}/);
 });

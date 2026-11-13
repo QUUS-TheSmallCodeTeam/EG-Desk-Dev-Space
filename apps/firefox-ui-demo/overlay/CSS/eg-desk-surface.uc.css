@@ -2522,7 +2522,8 @@
 .egd-rail-record-retry:hover { background: var(--egd-hover); }
 .egd-rail-record-retry:active { background: var(--egd-outline-variant); }
 .egd-rail-record-retry:focus-visible { outline: var(--egd-focus-outline); outline-offset: var(--egd-focus-outline-offset); }
-@media (max-width: 1000px) {
+/* Below the width where search is centred, the quiet time gives its room to search. */
+@media (max-width: 1199px) {
   .egd-rail-record-status:not([data-state="failed"]) { display: none; }
 }
 
