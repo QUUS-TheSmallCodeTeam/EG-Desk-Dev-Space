@@ -424,7 +424,10 @@ const worldBox = rect => !!rect && [rect.x, rect.y, rect.width, rect.height].eve
 // `gap` px clear of every occupied rect, inside `bounds` when given. The
 // closest free point lies on the target's own axis or on an edge of a grown
 // obstacle, so only those coordinates are tried. Null when bounds hold none.
-export function nearestFreeCanvasSpot({ width, height, target, occupied = [], gap = 24, bounds = null } = {}) {
+// `reach` ({ width, height } of the view) measures closeness in view
+// proportions, so spots spread to the sides of a wide view as readily as
+// below it instead of stacking in one column.
+export function nearestFreeCanvasSpot({ width, height, target, occupied = [], gap = 24, bounds = null, reach = null } = {}) {
   if (![width, height, target?.x, target?.y, gap].every(Number.isFinite) || width <= 0 || height <= 0) return null;
   const limited = !!bounds && [bounds.left, bounds.top, bounds.right, bounds.bottom].every(Number.isFinite);
   // Whole px inside the bounds. A rect wider or taller than the bounds keeps
@@ -443,8 +446,11 @@ export function nearestFreeCanvasSpot({ width, height, target, occupied = [], ga
     .filter(value => value >= min && value <= max);
   const xs = axis(Math.round(target.x), blocks.flatMap(block => [block.left, block.right]), minX, maxX);
   const ys = axis(Math.round(target.y), blocks.flatMap(block => [block.top, block.bottom]), minY, maxY);
+  const proportional = reach?.width > 0 && reach?.height > 0;
+  const reachX = proportional ? reach.width : 1;
+  const reachY = proportional ? reach.height : 1;
   const candidates = [];
-  for (const x of xs) for (const y of ys) candidates.push({ x, y, distance: Math.hypot(x - target.x, y - target.y) });
+  for (const x of xs) for (const y of ys) candidates.push({ x, y, distance: Math.hypot((x - target.x) / reachX, (y - target.y) / reachY) });
   candidates.sort((a, b) => a.distance - b.distance || a.y - b.y || a.x - b.x);
   const spot = candidates.find(({ x, y }) => blocks.every(block => x <= block.left || x >= block.right || y <= block.top || y >= block.bottom));
   return spot ? { x: spot.x, y: spot.y } : null;
@@ -453,7 +459,9 @@ export function nearestFreeCanvasSpot({ width, height, target, occupied = [], ga
 // A new View or reopened Board takes the closest empty spot inside the visible
 // safe area (world px), centred on `anchor` when given. Without room there it
 // takes the closest empty Canvas spot with inView false, so the camera can
-// follow it. Occupied rects never move.
+// follow it; closest is measured in proportions of the safe area, so Views
+// opened one after another gather in the shape of the view, not in a column.
+// Occupied rects never move.
 export function placeCanvasView({ size, safe, occupied = [], anchor = null, gap = 24 } = {}) {
   const width = size?.width;
   const height = size?.height;
@@ -464,7 +472,7 @@ export function placeCanvasView({ size, safe, occupied = [], anchor = null, gap 
   const target = { x: Math.round(center.x - width / 2), y: Math.round(center.y - height / 2) };
   const inside = nearestFreeCanvasSpot({ width, height, target, occupied, gap, bounds: safe });
   if (inside) return { x: Math.round(inside.x), y: Math.round(inside.y), width, height, inView: fits };
-  const outside = nearestFreeCanvasSpot({ width, height, target, occupied, gap });
+  const outside = nearestFreeCanvasSpot({ width, height, target, occupied, gap, reach: { width: safe.right - safe.left, height: safe.bottom - safe.top } });
   return { x: Math.round(outside.x), y: Math.round(outside.y), width, height, inView: false };
 }
 
