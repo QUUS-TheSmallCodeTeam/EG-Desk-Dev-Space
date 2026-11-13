@@ -1362,6 +1362,13 @@ export const isProfileId = value => typeof value === 'string' && PROFILE_ID_PATT
 // Six swatches from docs/egdesk-approved-desktop-style.html :root tokens
 // (same order as helper AVATAR_PALETTE; the index picks the CSS tone class).
 export const PROFILE_AVATAR_PALETTE = ['#49634f', '#a9c5a9', '#958879', '#7b8079', '#252a26', '#f5f0df'];
+/** Room-list avatar tone: one of the palette indexes, stable for a room id. */
+export function roomAvatarTone(roomId) {
+  if (typeof roomId !== 'string') return 0;
+  let sum = 0;
+  for (let index = 0; index < roomId.length; index++) sum += roomId.charCodeAt(index);
+  return sum % PROFILE_AVATAR_PALETTE.length;
+}
 export const PROFILE_TONE_OPTIONS = [
   { value: 'plain', label: '담백' }, { value: 'warm', label: '따뜻' }, { value: 'concise', label: '간결' },
   { value: 'formal', label: '격식' }, { value: 'playful', label: '유쾌' },

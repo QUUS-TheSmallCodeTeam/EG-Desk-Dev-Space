@@ -80,6 +80,14 @@ test('room row prioritizes title, latest message and time without duplicate Code
   assert.equal(byClass(row, 'egd-codex-session-badge'), undefined);
 });
 
+test('room avatar uses an approved tone class for its room and no inline colour', () => {
+  const thread = { id: 'one', type: 'dm', title: 'codex', profileEnabled: false, engineId: 'codex', messages: [] };
+  const avatar = byClass(threadSection(thread), 'egd-codex-thread-avatar');
+  assert.equal(avatar.props.class, `egd-codex-thread-avatar egd-profile-avatar-tone-${ChatState.roomAvatarTone('one')}`);
+  assert.equal(avatar.props.style, undefined);
+  assert.equal(text(avatar), 'C');
+});
+
 test('distinct Board, Agent and provider identities remain visible', () => {
   const thread = { id: 'board', type: 'group', title: '회의 준비', profileEnabled: true,
     engineId: 'claude', messages: [{ content: '다음 단계', createdAt: 1 }] };

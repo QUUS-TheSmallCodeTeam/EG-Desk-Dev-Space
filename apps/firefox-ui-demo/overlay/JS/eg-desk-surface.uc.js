@@ -11448,11 +11448,9 @@
           const showEngine = engine.engineId !== 'codex' && labelKey(engine.label) !== titleKey && labelKey(engine.label) !== labelKey(profileLabel);
           const showSession = ['local', 'forked', 'stateless'].includes(codexThreadSessionKey(thread));
           const avatarInitial = (thread.title || '?')[0].toUpperCase();
-          const avatarColors = ['#2D5A7B','#7B2D5A','#5A7B2D','#2D7B5A','#7B5A2D','#5A2D7B','#3D6B8B','#8B3D6B'];
-          const avatarColor = avatarColors[Math.abs(thread.id.split('').reduce((a,c) => a + c.charCodeAt(0), 0)) % avatarColors.length];
           item.append(
             el('div', { class: 'egd-codex-thread-item-row' },
-              el('div', { class: 'egd-codex-thread-avatar', style: { background: avatarColor } }, avatarInitial),
+              el('div', { class: `egd-codex-thread-avatar egd-profile-avatar-tone-${ChatState.roomAvatarTone(thread.id)}` }, avatarInitial),
                 el('div', { class: 'egd-codex-thread-item-body' },
                   el('div', { class: 'egd-codex-thread-item-top' },
                     el('div', { class: 'egd-codex-thread-title' }, thread.title),

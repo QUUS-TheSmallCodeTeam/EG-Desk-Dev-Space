@@ -298,7 +298,7 @@ export function createOntologyZone(deps) {
       y: point.y,
       transform: Math.abs(angle) > 0.1 ? `rotate(${angle.toFixed(2)} ${point.x.toFixed(1)} ${point.y.toFixed(1)})` : null,
       'text-anchor': anchor,
-      fill: '#252c33',
+      fill: '#252A26',
       'font-family': 'Inter, -apple-system, BlinkMacSystemFont, Segoe UI, system-ui, sans-serif',
       'font-size': '12',
       'font-weight': '800',
@@ -331,7 +331,7 @@ export function createOntologyZone(deps) {
       parent.appendChild(svgEl('path', {
         class: `egd-ontology-v2-pip egd-ontology-v2-pip-${layer}`,
         d: geometry.rectPath(u, v, pipW, pipH),
-        fill: layer === 'virtual' ? 'rgba(103, 67, 166, 0.82)' : 'rgba(35, 76, 106, 0.84)',
+        fill: layer === 'virtual' ? 'rgba(103, 67, 166, 0.82)' : 'rgba(63, 83, 68, 0.84)',
         stroke: 'rgba(255, 255, 255, 0.90)',
         'stroke-width': '0.6',
         'data-pip-index': String(index),
@@ -355,7 +355,7 @@ export function createOntologyZone(deps) {
     });
     const boxPath = geometry.rectPath(spec.u, spec.v, spec.w, spec.h);
     const boxFill = options.root ? 'rgba(255, 254, 250, 0.88)' : options.side ? 'rgba(255, 255, 255, 0.88)' : options.overview ? 'rgba(255, 255, 255, 0.92)' : 'rgba(255, 255, 255, 0.95)';
-    const boxStroke = occurrence.layer === 'virtual' ? 'rgba(103, 67, 166, 0.68)' : 'rgba(35, 76, 106, 0.70)';
+    const boxStroke = occurrence.layer === 'virtual' ? 'rgba(103, 67, 166, 0.68)' : 'rgba(63, 83, 68, 0.70)';
     group.appendChild(svgEl('path', {
       class: `egd-ontology-v2-box-path egd-ontology-v2-box-path-${occurrence.layer}${expandedRoot ? ' egd-ontology-v2-box-fill' : ''}`,
       d: boxPath,
@@ -659,7 +659,7 @@ export function createOntologyZone(deps) {
           class: 'egd-ontology-v2-layer-strut',
           d: `M ${from.x.toFixed(1)} ${from.y.toFixed(1)} L ${to.x.toFixed(1)} ${to.y.toFixed(1)}`,
           fill: 'none',
-          stroke: active ? 'rgba(45, 90, 123, 0.34)' : 'rgba(45, 90, 123, 0.22)',
+          stroke: active ? 'rgba(73, 99, 79, 0.34)' : 'rgba(73, 99, 79, 0.22)',
           'stroke-width': active ? '1.35' : '0.95',
           'stroke-dasharray': '5 5',
           data: { phase, anchorU: u },
@@ -682,10 +682,10 @@ export function createOntologyZone(deps) {
           pane.appendChild(svgEl('path', {
             class: `egd-ontology-v2-layer-pane egd-ontology-v2-layer-surface egd-ontology-v2-layer-surface-${layer}${layerActive ? ' egd-ontology-v2-layer-surface-active' : ' egd-ontology-v2-layer-surface-behind'}`,
             d: layerGeometry.rectPath(spec.u, spec.v, spec.w, spec.h),
-            fill: layer === 'virtual' ? 'rgba(126, 87, 194, 0.078)' : 'rgba(45, 90, 123, 0.085)',
+            fill: layer === 'virtual' ? 'rgba(126, 87, 194, 0.078)' : 'rgba(73, 99, 79, 0.085)',
             stroke: layer === 'virtual'
               ? (layerActive ? 'rgba(103, 67, 166, 0.64)' : 'rgba(126, 87, 194, 0.38)')
-              : (layerActive ? 'rgba(35, 76, 106, 0.66)' : 'rgba(45, 90, 123, 0.40)'),
+              : (layerActive ? 'rgba(63, 83, 68, 0.66)' : 'rgba(73, 99, 79, 0.40)'),
             'stroke-width': layerActive ? '2.1' : '1.15',
             data: { phase, layer, planeRole: layerActive ? 'main' : 'trailing' },
             onclick: (ev) => {
@@ -726,7 +726,7 @@ export function createOntologyZone(deps) {
             anchor: 'start',
             fill: layer === 'virtual'
               ? (layerActive ? 'rgba(103, 67, 166, 0.88)' : 'rgba(103, 67, 166, 0.48)')
-              : (layerActive ? 'rgba(35, 76, 106, 0.90)' : 'rgba(35, 76, 106, 0.52)'),
+              : (layerActive ? 'rgba(63, 83, 68, 0.90)' : 'rgba(63, 83, 68, 0.52)'),
             'font-size': '11',
             'font-weight': '900',
           });
@@ -765,8 +765,8 @@ export function createOntologyZone(deps) {
           pane.appendChild(svgEl('path', {
             class: `egd-ontology-v2-layer-pane egd-ontology-v2-side-layer egd-ontology-v2-side-layer-${layer}${layerActive ? ' egd-ontology-v2-side-layer-front' : ' egd-ontology-v2-side-layer-behind'}`,
             d: layerGeometry.rectPath(spec.u, spec.v, spec.w, spec.h),
-            fill: layer === 'virtual' ? 'rgba(126, 87, 194, 0.025)' : 'rgba(45, 90, 123, 0.030)',
-            stroke: layer === 'virtual' ? 'rgba(126, 87, 194, 0.26)' : 'rgba(45, 90, 123, 0.28)',
+            fill: layer === 'virtual' ? 'rgba(126, 87, 194, 0.025)' : 'rgba(73, 99, 79, 0.030)',
+            stroke: layer === 'virtual' ? 'rgba(126, 87, 194, 0.26)' : 'rgba(73, 99, 79, 0.28)',
             'stroke-width': layerActive ? '1.25' : '0.95',
             data: { phase, layer, planeRole: layerActive ? 'main' : 'trailing' },
             onclick: (ev) => activateLayerAtPhase(layer, ev),
@@ -774,7 +774,7 @@ export function createOntologyZone(deps) {
           drawOntologyText(pane, layerGeometry, spec.u + 0.06, spec.v + 0.085, layer === 'virtual' ? '가상' : '물리', {
             class: `egd-ontology-v2-side-layer-label egd-ontology-v2-layer-label-${layer}`,
             anchor: 'start',
-            fill: layer === 'virtual' ? 'rgba(103, 67, 166, 0.58)' : 'rgba(35, 76, 106, 0.62)',
+            fill: layer === 'virtual' ? 'rgba(103, 67, 166, 0.58)' : 'rgba(63, 83, 68, 0.62)',
             'font-size': '8.5',
             'font-weight': '900',
           });
@@ -904,13 +904,13 @@ export function createOntologyZone(deps) {
         cx: marker.x,
         cy: marker.y,
         r: 4,
-        fill: localState.activeLayer === 'virtual' ? 'rgba(103, 67, 166, 0.56)' : 'rgba(35, 76, 106, 0.58)',
+        fill: localState.activeLayer === 'virtual' ? 'rgba(103, 67, 166, 0.56)' : 'rgba(63, 83, 68, 0.58)',
       }));
       emptyState.appendChild(svgEl('path', {
         class: 'egd-ontology-v2-empty-state-line',
         d: `M ${marker.x.toFixed(1)} ${marker.y.toFixed(1)} L ${markerTail.x.toFixed(1)} ${markerTail.y.toFixed(1)}`,
         fill: 'none',
-        stroke: localState.activeLayer === 'virtual' ? 'rgba(103, 67, 166, 0.34)' : 'rgba(35, 76, 106, 0.36)',
+        stroke: localState.activeLayer === 'virtual' ? 'rgba(103, 67, 166, 0.34)' : 'rgba(63, 83, 68, 0.36)',
         'stroke-width': '1.4',
       }));
       const emptyTitleV = 0.343;
@@ -1185,7 +1185,7 @@ export function createOntologyZone(deps) {
       const edgeStroke = kind === 'temporal'
         ? 'rgba(111, 90, 154, 0.46)'
         : kind === 'layer'
-          ? 'rgba(35, 76, 106, 0.48)'
+          ? 'rgba(63, 83, 68, 0.48)'
           : 'rgba(82, 89, 98, 0.26)';
       let temporalPaneClipId = null;
       if (kind === 'temporal') {
@@ -1471,7 +1471,7 @@ export function createOntologyZone(deps) {
       miniSvg.appendChild(svgEl('path', {
         class: `egd-ontology-minimap-layer-pane egd-ontology-minimap-time-active${layer === localState.activeLayer ? ' egd-ontology-minimap-layer-pane-active' : ''}`,
         d: miniGeometry.rectPath(spec.u, spec.v, spec.w, spec.h),
-        fill: layer === 'virtual' ? '#7E57C2' : '#2D5A7B',
+        fill: layer === 'virtual' ? '#7E57C2' : '#49634F',
         data: { phase: localState.activePane, layer },
         tabindex: '0',
         role: 'button',
@@ -1501,7 +1501,7 @@ export function createOntologyZone(deps) {
         cy: point.y,
         rx: markerSize * miniViewWidth / 168,
         ry: markerSize * miniViewHeight / 110,
-        fill: occurrence.layer === 'virtual' ? '#6F469F' : '#244F6C',
+        fill: occurrence.layer === 'virtual' ? '#6F469F' : '#3F5344',
         stroke: 'rgba(255, 255, 255, 0.94)',
         'stroke-width': isSelected ? '4' : '2.5',
         data: { refId, phase: occurrence.timeSlice, layer: occurrence.layer },
@@ -1542,7 +1542,7 @@ export function createOntologyZone(deps) {
         activeCameraGeometry.viewportSpec.h,
       ),
       fill: 'none',
-      stroke: localState.activeLayer === 'virtual' ? 'rgba(103, 67, 166, 0.96)' : 'rgba(35, 76, 106, 0.96)',
+      stroke: localState.activeLayer === 'virtual' ? 'rgba(103, 67, 166, 0.96)' : 'rgba(63, 83, 68, 0.96)',
       'stroke-width': '2.2',
       'stroke-dasharray': '5 3',
     }));
