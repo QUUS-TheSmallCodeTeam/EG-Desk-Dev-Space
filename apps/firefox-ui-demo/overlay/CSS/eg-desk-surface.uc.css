@@ -8803,6 +8803,9 @@ button.egd-result-card-back:focus-visible { outline: var(--egd-focus-outline); o
 .egd-memo-card .egd-memo-title { flex: 0 0 auto; }
 .egd-memo-card .egd-desk-window-board-menu-text { max-width: 96px; overflow: hidden; text-overflow: ellipsis; }
 .egd-memo-card[data-memo-expanded="false"] .egd-desk-window-board-menu-text { display: none; }
+/* In a Board the folded header has no room for the Board name next to the title;
+   the chevron's tooltip ('소속 Board ○○ · 바꾸기') keeps it. */
+.egd-memo-card[data-memo-expanded="false"] .egd-desk-window-board { display: none; }
 /* Memo → target window: a thin line in Canvas (world) coordinates, under the
    windows. left/top are its memo end; width and rotation reach the window. */
 .egd-memo-tether {

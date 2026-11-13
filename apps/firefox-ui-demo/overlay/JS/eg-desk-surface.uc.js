@@ -16404,8 +16404,8 @@
       moved.clear();
       for (const root of roots) {
         // A memo the user is dragging keeps its place; only its line follows.
-        if (full) { syncMemoCardPosition(root); syncMemoLinkUi(root); }
-        else syncMemoTether(root);
+        if (!full) syncMemoTether(root);
+        else { if (!root._memoDragging) syncMemoCardPosition(root); syncMemoLinkUi(root); }
       }
       // A line whose memo left the Canvas without its own close goes with it.
       if (full) for (const line of layer.querySelectorAll('.egd-memo-tether')) if (!line._memoRoot?.isConnected) line.remove();
@@ -16469,7 +16469,10 @@
     const badge = root.querySelector('.egd-memo-anchor');
     if (badge) {
       const label = anchorState === 'attached' ? memoBadgeTargetLabel(memo) : '';
-      badge.textContent = anchorState === 'free' ? '위치 고정' : anchorState === 'missing' ? '대상 없음' : `📎 ${label || '카드'}`;
+      // Write only a changed text: the Canvas observer watches child changes
+      // and would run this sync again on every frame.
+      const text = anchorState === 'free' ? '위치 고정' : anchorState === 'missing' ? '대상 없음' : `📎 ${label || '카드'}`;
+      if (badge.textContent !== text) badge.textContent = text;
       badge.title = anchorState === 'missing' ? '이 메모가 붙어 있던 카드가 닫혔습니다. 마지막 위치에 남아 있습니다.' : anchorState === 'free' ? '캔버스 위치에 고정된 메모' : `${label || '카드'} 위에 붙은 메모 · 카드가 움직이면 따라갑니다`;
     }
   }
@@ -16521,9 +16524,12 @@
     const picking = memoRelink?.root === root;
     parts.row.hidden = anchorState !== 'missing' && !picking;
     const name = root._memoSeenTarget || (anchor?.kind === 'card' && anchor.label) || '';
-    parts.label.textContent = picking ? '연결할 창을 누르세요 · Esc 취소' : name ? `원래 창: ${name}` : '붙어 있던 창이 닫혔습니다';
+    // Text is written only when it changed (see syncMemoCardPosition).
+    const labelText = picking ? '연결할 창을 누르세요 · Esc 취소' : name ? `원래 창: ${name}` : '붙어 있던 창이 닫혔습니다';
+    if (parts.label.textContent !== labelText) parts.label.textContent = labelText;
     parts.label.title = picking ? '' : name ? `이 메모가 붙어 있던 창: ${name} (닫힘)` : '';
-    parts.relink.textContent = picking ? '취소' : '다시 연결';
+    const relinkText = picking ? '취소' : '다시 연결';
+    if (parts.relink.textContent !== relinkText) parts.relink.textContent = relinkText;
     parts.relink.setAttribute('aria-pressed', String(picking));
     parts.remove.hidden = picking;
   }
@@ -17015,11 +17021,14 @@
 
     // Dropping the memo elsewhere re-pins it to what is under its corner.
     let dragFrom = null;
-    const onHeaderDown = (ev) => { if (ev.button === 0) dragFrom = { left: root.offsetLeft, top: root.offsetTop }; };
+    // While the header is held the memo is the user's to place: a change
+    // elsewhere on the Canvas must not put it back on its anchor mid-drag.
+    const onHeaderDown = (ev) => { if (ev.button === 0) { dragFrom = { left: root.offsetLeft, top: root.offsetTop }; root._memoDragging = true; } };
     const onDrop = () => {
       if (!dragFrom) return;
       const moved = root.offsetLeft !== dragFrom.left || root.offsetTop !== dragFrom.top;
       dragFrom = null;
+      delete root._memoDragging;
       if (moved) repinMemoCard(root);
     };
     shell.slots.header.addEventListener('mousedown', onHeaderDown);

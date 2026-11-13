@@ -83,6 +83,15 @@ test('memo reconnect: [다시 연결] pins the memo where it is to the chosen wi
   assert.equal('offset' in Memo.normalizeMemoRecord({ id: 'm', anchor: { kind: 'card', cardId: 'c', x: 0, y: 0, offset: { x: 0, y: 0 } } }).anchor, false);
 });
 
+test('memo beside its target: reopening a Board gives the target a new id and the memo keeps its side spot and remembered name', () => {
+  const memo = Memo.createMemoRecord({ id: 'memo-1', seq: 1, point: { x: 724, y: 148 }, target: card, now: 10 });
+  const reopened = Memo.normalizeMemoRecord(SurfaceState.remapMemberReferences(JSON.parse(JSON.stringify(memo)), { 'egd-card-1': 'projection-1-member-0' }));
+  assert.deepEqual(reopened.anchor, { ...memo.anchor, cardId: 'projection-1-member-0' });
+  assert.deepEqual(Memo.memoPosition(reopened, [{ id: 'projection-1-member-0', rect: card.rect }]), { x: 724, y: 148, attached: true, missing: false });
+  // The old id on another Board's window is not this memo's target.
+  assert.equal(Memo.memoPosition(reopened, [card]).missing, true);
+});
+
 test('memo wait: the pending row says how long the question has waited, in Korean, without a clock', () => {
   const asked = 1_000_000;
   const at = minutes => asked + minutes * 60_000;
@@ -158,6 +167,81 @@ test('memo tether wiring: the line is drawn in the Canvas layer for an attached 
   assert.equal(line.hidden, true);
 });
 
+test('memo sync is quiet: repeating it with nothing changed rewrites no text, so the Canvas observer is not woken again', () => {
+  // Assigning textContent replaces the text node even for the same string; the
+  // memo observer watches child changes in the whole Canvas layer and would
+  // re-run this sync on every frame.
+  const writes = [];
+  const counted = name => {
+    let text = '';
+    return { hidden: false, title: '', attrs: {}, setAttribute(key, value) { this.attrs[key] = value; },
+      get textContent() { return text; }, set textContent(value) { writes.push(name); text = value; } };
+  };
+  const badge = counted('badge');
+  const memo = Memo.createMemoRecord({ id: 'memo-1', point: { x: 724, y: 148 }, target: card, now: 10 });
+  const target = { id: card.id, dataset: {}, classList: { contains: () => false }, querySelector: () => null };
+  const root = { _memoRecord: memo, isConnected: true, dataset: {}, style: {}, querySelector: selector => selector === '.egd-memo-anchor' ? badge : null,
+    _memoMissing: { row: counted('row'), label: counted('label'), relink: counted('relink'), remove: counted('remove') } };
+  let cards = [card];
+  const scope = { document: { getElementById: id => id === card.id && cards.length ? target : null }, memoAnchorCandidates: () => cards, MemoState: Memo, state: {},
+    syncMemoTether() {}, memoTargetLabel: () => cards.length ? card.label : '' };
+  const api = Function(...Object.keys(scope), `let memoRelink = null;\n${surfaceFunction('syncMemoCardPosition')}\n${surfaceFunction('syncMemoLinkUi')}\nreturn { syncMemoCardPosition, syncMemoLinkUi };`)(...Object.values(scope));
+  const sync = () => { api.syncMemoCardPosition(root); api.syncMemoLinkUi(root); };
+  sync();
+  assert.deepEqual([root.dataset.memoAnchor, badge.textContent, root._memoMissing.row.hidden], ['attached', '📎 Card', true]);
+  writes.length = 0;
+  sync();
+  assert.deepEqual(writes, [], 'an unchanged attached memo writes nothing');
+  // Its window closes: the texts change once, then stay quiet again.
+  cards = [];
+  sync();
+  assert.deepEqual([root.dataset.memoAnchor, badge.textContent, root._memoMissing.row.hidden, root._memoMissing.label.textContent, root._memoMissing.relink.textContent],
+    ['missing', '대상 없음', false, '원래 창: 보고서 폴더', '다시 연결']);
+  writes.length = 0;
+  sync();
+  assert.deepEqual(writes, [], 'an unchanged 대상 없음 memo writes nothing');
+});
+
+test('memo follow: a moved window re-places its memos, a moved memo only re-aims its line, and a memo being dragged is not pulled back', () => {
+  let observed = null;
+  const frames = [], calls = [], removed = [];
+  const has = names => ({ contains: name => names.includes(name) });
+  const layer = { id: 'egd-canvas-layer', lines: [], querySelectorAll() { return this.lines; } };
+  const memoRoot = { id: 'memo', parentNode: layer, isConnected: true, _memoRecord: {}, classList: has(['egd-canvas-card', 'egd-memo-card']) };
+  const windowCard = { id: 'window', parentNode: layer, classList: has(['egd-canvas-card']) };
+  const line = { parentNode: layer, classList: has(['egd-memo-tether']), _memoRoot: memoRoot, remove() { removed.push('line'); } };
+  const scope = {
+    document: { getElementById: id => id === layer.id ? layer : null, querySelectorAll: () => [] }, MemoState: Memo,
+    MutationObserver: class { constructor(callback) { observed = callback; } observe() {} },
+    requestAnimationFrame: callback => { frames.push(callback); return frames.length; }, window: { setInterval() {} },
+    memoCards: () => [memoRoot], syncMemoCardPosition: root => calls.push(`position:${root.id}`),
+    syncMemoLinkUi: root => calls.push(`link:${root.id}`), syncMemoTether: root => calls.push(`tether:${root.id}`),
+  };
+  Function(...Object.keys(scope), `let memoAnchorObserver = null;\n${surfaceFunction('ensureMemoAnchorObserver')}\nreturn ensureMemoAnchorObserver;`)(...Object.values(scope))();
+  const frame = () => { assert.equal(frames.length, 1, 'one frame is queued'); frames.shift()(); return calls.splice(0); };
+  // The memo itself moved (a drag, fold/unfold): only its line follows.
+  observed([{ type: 'attributes', target: memoRoot }]);
+  assert.deepEqual(frame(), ['tether:memo']);
+  // The line being re-aimed does not wake the sync again.
+  observed([{ type: 'attributes', target: line }]);
+  assert.equal(frames.length, 0);
+  // A window moved or resized: its memos are placed again and their line and '대상 없음' row follow.
+  observed([{ type: 'attributes', target: windowCard }, { type: 'attributes', target: memoRoot }]);
+  assert.deepEqual(frame(), ['position:memo', 'link:memo']);
+  // Something inside a window changed style: not a move.
+  observed([{ type: 'attributes', target: { parentNode: windowCard, classList: has([]) } }]);
+  assert.equal(frames.length, 0);
+  // While the user drags the memo, a change elsewhere on the Canvas does not pull it back to its anchor.
+  memoRoot._memoDragging = true;
+  observed([{ type: 'childList', target: windowCard }]);
+  assert.deepEqual(frame(), ['link:memo']);
+  delete memoRoot._memoDragging;
+  // A line whose memo is gone is removed with the next full pass; a live one stays.
+  layer.lines = [line, { _memoRoot: { isConnected: false }, remove() { removed.push('orphan'); } }];
+  observed([{ type: 'childList', target: layer }]);
+  assert.deepEqual([frame(), removed], [['position:memo', 'link:memo'], ['orphan']]);
+});
+
 test('memo open: Dock [메모] opens beside the selected window in a free spot and stays attached to it', () => {
   const selected = fakeNode({ id: 'egd-card-1', class: 'egd-canvas-card', geometry: { ...card.rect } });
   const chat = fakeNode({ id: 'egd-card-2', class: 'egd-canvas-card', geometry: { x: 724, y: 100, width: 400, height: 600 } });
@@ -200,7 +284,8 @@ test('memo CSS: folded title is not squeezed by the Board menu text, the tether 
   };
   assert.match(rule('.egd-memo-card[data-memo-expanded="false"] .egd-desk-window-board-menu-text'), /display:\s*none/);
   assert.match(rule('.egd-memo-card .egd-memo-title'), /flex:\s*0\s+0\s+auto/, 'the short memo title keeps its full width');
-  const tether = rule('.egd-memo-tether');
+  // A folded memo in a Board: the Board name would run into the title, so it stays in the chevron's tooltip.
+  assert.match(rule('.egd-memo-card[data-memo-expanded="false"] .egd-desk-window-board'), /display:\s*none/);  const tether = rule('.egd-memo-tether');
   assert.match(tether, /pointer-events:\s*none/);
   assert.match(tether, /background:\s*var\(--egd-/);
   assert.match(tether, /transform-origin:\s*0\s+50%/);
