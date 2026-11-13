@@ -9606,7 +9606,9 @@
     const rateOf = (bytes) => ResourceReadout.amountValue(sizeParts(bytes), '/s');
     const percentOf = (metric) => ResourceReadout.percentValue(percentParts(metric));
     const rateText = (bytes) => ResourceReadout.amountText(sizeParts(bytes), '/s');
-    const interval = (metric) => words(metricReady(metric) && numeric(metric.intervalMs) ? `${Math.round(metric.intervalMs)} ms` : '—');
+    // 998 ms <-> 1001 ms every second: the number keeps its own cell too.
+    const interval = (metric) => ResourceReadout.amountValue(metricReady(metric) && numeric(metric.intervalMs)
+      ? { number: String(Math.round(metric.intervalMs)), unit: 'ms' } : null);
     const metricStatus = (metric) => {
       if (metric?.status === 'unsupported') return '이 환경에서는 지원하지 않음';
       if (metric?.status === 'warming' || (!metric && (pending || refreshOnResume || document.hidden))) return '측정 준비 중';

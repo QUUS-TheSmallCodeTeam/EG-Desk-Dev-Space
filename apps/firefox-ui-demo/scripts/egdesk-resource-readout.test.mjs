@@ -213,7 +213,7 @@ test('a new sample changes text in place: no row or ring is rebuilt, an equal sa
   // 9% -> 10%, 900 B/s -> 12.3 MiB/s: digits and units change, nodes stay.
   responses.push(snapshotAt({
     sampledAt: first.sampledAt,
-    cpu: { ...first.cpu, percent: 10.4 },
+    cpu: { ...first.cpu, percent: 10.4, intervalMs: 998 },
     network: { ...first.network, rxBytesPerSecond: 12.3 * 1024 ** 2 },
   }));
   before = everything();
@@ -226,8 +226,12 @@ test('a new sample changes text in place: no row or ring is rebuilt, an equal sa
   assert.equal(cpuRing.style.values.get('--egd-resource-fill'), '10%');
   assert.equal(buttons[0].attributes.get('title'), 'CPU · 10%');
   assert.equal(buttons[3].attributes.get('title'), '네트워크 · 수신 12.3 MiB/s, 송신 120 B/s');
-  // cpu: title, aria-label, ring fill, overview number, detail number; network: title, aria-label, overview number + unit.
-  assert.equal(everything() - before, 9);
+  // 1000 ms -> 998 ms: the measuring interval is a number cell and a unit cell as well.
+  assert.equal(shownDds.at(-1).className, 'egd-resource-figure egd-resource-figure-size');
+  assert.deepEqual(shownDds.at(-1).children.map(cell => cell.textContent), ['998', 'ms']);
+  // cpu: title, aria-label, ring fill, overview number, detail number, detail interval;
+  // network: title, aria-label, overview number + unit.
+  assert.equal(everything() - before, 10);
 });
 
 test('the bar and the popup are drawn without rebuilding the popup on every sample', () => {
