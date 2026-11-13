@@ -850,6 +850,11 @@
 .egd-placement-fields { display: flex; gap: 10px; }
 .egd-placement-fields label { display: flex; flex: 1; flex-direction: column; gap: 4px; min-width: 0; font-size: 11px; color: var(--egd-on-surface-variant); }
 .egd-placement-fields input { box-sizing: border-box; width: 100%; padding: 6px 8px; border: 1px solid var(--egd-line-strong); border-radius: 5px; background: var(--egd-surface-elevated); color: var(--egd-on-surface); font: 13px var(--egd-font); }
+/* 방향키로 옮기기: takes the arrow keys while it has focus. */
+.egd-placement-nudge { appearance: none; display: block; box-sizing: border-box; width: 100%; margin: 10px 0 0; padding: 6px 10px; border: 1px dashed var(--egd-line-strong); border-radius: 5px; background: transparent; color: var(--egd-on-surface-variant); font: 12px var(--egd-font); cursor: pointer; }
+.egd-placement-nudge:hover { background: var(--egd-hover); color: var(--egd-on-surface); }
+.egd-placement-nudge:active { background: var(--egd-primary-container); }
+.egd-placement-nudge:focus-visible { outline: var(--egd-focus-outline); outline-offset: var(--egd-focus-outline-offset); border-style: solid; border-color: var(--egd-focus-border); color: var(--egd-on-surface); }
 .egd-placement-status { margin: 8px 0 0; font-size: 11px; color: var(--egd-on-surface-variant); }
 .egd-placement-actions button { padding: 6px 10px; margin: 10px 6px 0 0; border: 1px solid var(--egd-line-strong); border-radius: 5px; }
 .egd-placement-menu { width: 208px; }
@@ -1185,8 +1190,120 @@
 .egd-zoom-button:hover { background: var(--egd-hover); color: var(--egd-on-surface); }
 .egd-zoom-button:focus-visible { outline: var(--egd-focus-outline); outline-offset: var(--egd-focus-outline-offset); }
 .egd-zoom-button .egd-ui-icon { width: 14px; height: 14px; }
-.egd-zoom-value { min-width: 45px; text-align: center; font-variant-numeric: tabular-nums; }
+.egd-zoom-value {
+  appearance: none;
+  min-width: 45px;
+  height: 28px;
+  padding: 0 2px;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  text-align: center;
+  font-variant-numeric: tabular-nums;
+  cursor: text;
+}
+.egd-zoom-value:hover { background: var(--egd-hover); }
+.egd-zoom-value:active { background: var(--egd-primary-container); }
+.egd-zoom-value:focus-visible { outline: var(--egd-focus-outline); outline-offset: var(--egd-focus-outline-offset); }
+.egd-zoom-value[hidden], .egd-zoom-input[hidden] { display: none; }
+/* The typed zoom takes the number's place, so the bar does not change width. */
+.egd-zoom-input {
+  appearance: none;
+  box-sizing: border-box;
+  width: 45px;
+  height: 26px;
+  padding: 0 3px;
+  border: 1px solid var(--egd-focus-border);
+  border-radius: 6px;
+  background: var(--egd-surface);
+  color: var(--egd-on-surface);
+  font: inherit;
+  text-align: center;
+  font-variant-numeric: tabular-nums;
+}
+.egd-zoom-input:focus-visible { outline: var(--egd-focus-outline); outline-offset: var(--egd-focus-outline-offset); }
+.egd-zoom-input[aria-invalid="true"] { border-color: var(--egd-danger-line); background: var(--egd-danger-bg); color: var(--egd-danger-ink); }
+.egd-zoom-button:active:not(:disabled) { background: var(--egd-primary-container); }
+.egd-zoom-button:disabled { opacity: var(--egd-opacity-disabled); cursor: default; }
+.egd-zoom-button:disabled:hover { background: transparent; color: var(--egd-on-surface-variant); }
+/* 맞춤: pressed while grid and guide snapping is on. */
+.egd-zoom-snap {
+  appearance: none;
+  height: 28px;
+  padding: 0 7px;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--egd-on-surface-variant);
+  font: inherit;
+  white-space: nowrap;
+  cursor: pointer;
+}
+.egd-zoom-snap:hover { background: var(--egd-hover); color: var(--egd-on-surface); }
+.egd-zoom-snap:active { background: var(--egd-primary-container); }
+.egd-zoom-snap:focus-visible { outline: var(--egd-focus-outline); outline-offset: var(--egd-focus-outline-offset); }
+.egd-zoom-snap[aria-pressed="true"] { background: var(--egd-primary-container); border-color: var(--egd-focus-border); color: var(--egd-on-surface); }
 .egd-zoom-divider { width: 1px; height: 18px; background: var(--egd-outline-variant); margin: 0 2px; }
+/* With 돌아가기 and 맞춤 the bar is about 80px wider, so it stays above the
+   centered Dock until the window is wide enough for both side by side. */
+@media (min-width: 1081px) and (max-width: 1260px) {
+  #egd-zoom-indicator { bottom: 68px; }
+}
+
+/* Edge dots: a View that is entirely outside the visible area shows as a dot
+   on the edge towards it. Viewport chrome, never in the transformed world. */
+#egd-edge-dots {
+  position: fixed;
+  inset: 0;
+  z-index: 30008;
+  pointer-events: none;
+}
+.egd-edge-dot {
+  appearance: none;
+  position: fixed;
+  display: grid;
+  place-items: center;
+  min-width: 22px;
+  height: 22px;
+  margin: 0;
+  padding: 0;
+  border: 0;
+  border-radius: 11px;
+  background: transparent;
+  color: var(--egd-on-primary);
+  font: 600 11px var(--egd-font);
+  font-variant-numeric: tabular-nums;
+  transform: translate(-50%, -50%);
+  pointer-events: auto;
+  cursor: pointer;
+  -moz-window-dragging: no-drag;
+}
+/* The 22px button is the hit area; the dot itself is 10px. */
+.egd-edge-dot[data-kind="view"]::before {
+  content: "";
+  width: 10px;
+  height: 10px;
+  border: 2px solid var(--egd-surface-elevated);
+  border-radius: 50%;
+  background: var(--egd-primary);
+  box-shadow: var(--egd-chrome-shadow);
+  transition: transform 0.12s ease;
+}
+.egd-edge-dot[data-kind="more"] {
+  padding: 0 6px;
+  border: 2px solid var(--egd-surface-elevated);
+  background: var(--egd-primary);
+  box-shadow: var(--egd-chrome-shadow);
+}
+.egd-edge-dot:hover::before { transform: scale(1.3); background: var(--egd-primary-strong); }
+.egd-edge-dot[data-kind="more"]:hover { background: var(--egd-primary-strong); }
+.egd-edge-dot:active::before { transform: scale(1.1); }
+.egd-edge-dot:focus-visible { outline: var(--egd-focus-outline); outline-offset: var(--egd-focus-outline-offset); }
+:root.egd-initial-browser-focus #egd-edge-dots,
+:root.egd-browser-fullscreen-active #egd-edge-dots { display: none; }
+/* Reduced motion: the surface-wide [class*="egd-"] rule already removes the dot's transition. */
 
 #egd-input-helper-status {
   position: fixed;
