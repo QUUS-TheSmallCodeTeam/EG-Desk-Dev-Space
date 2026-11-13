@@ -25622,6 +25622,40 @@
     document.body.style.background = 'var(--egd-wood)';
   }
 
+  // A65 (BRW-01): Left/Right/Home/End move focus between the buttons of the
+  // Dock, the top bar and the Canvas view bar. One listener on the window, so
+  // it does not depend on how those bars are built; Tab order is unchanged and
+  // a control that handles the key itself keeps it.
+  const ArrowRowNavigation = ChromeUtils.importESModule('chrome://userchrome/content/EGDeskFocusNavigation.sys.mjs');
+  const ARROW_ROW_ROOTS = '#egd-dock, #egd-desk-rail, #egd-zoom-indicator';
+  const ARROW_ROW_ITEMS = 'button, [role="button"]';
+  const ARROW_ROW_POPUPS = '[role="menu"], [role="listbox"], [role="dialog"], [role="tablist"], [role="radiogroup"]';
+
+  function handleArrowRowKeydown(ev) {
+    if (ev.defaultPrevented || ev.altKey || ev.ctrlKey || ev.metaKey || ev.shiftKey) return;
+    const intent = ArrowRowNavigation.compositeKeyIntent(ev.key);
+    const target = ev.target;
+    if (!intent || !target?.matches?.(ARROW_ROW_ITEMS)) return;
+    const root = target.closest(ARROW_ROW_ROOTS);
+    if (!root || target.closest(ARROW_ROW_POPUPS)) return;
+    const items = [...root.querySelectorAll(ARROW_ROW_ITEMS)]
+      .filter(item => !item.closest(ARROW_ROW_POPUPS) && item.getClientRects().length > 0);
+    const next = ArrowRowNavigation.nextCompositeIndex({
+      count: items.length, current: items.indexOf(target), intent,
+      isSkipped: index => items[index].disabled === true,
+    });
+    if (next < 0 || items[next] === target) return;
+    ev.preventDefault();
+    ev.stopPropagation();
+    items[next].focus();
+  }
+
+  function installArrowRowKeys() {
+    try { window.__egdeskArrowRowKeysCleanup?.(); } catch {}
+    window.addEventListener('keydown', handleArrowRowKeydown);
+    window.__egdeskArrowRowKeysCleanup = () => window.removeEventListener('keydown', handleArrowRowKeydown);
+  }
+
   function boot() {
     try {
       if (document.getElementById('egd-desk-rail')) return;
@@ -25774,6 +25808,7 @@
       host.appendChild(buildDock());
       host.appendChild(buildPresetBag());
       host.appendChild(buildHUD());
+      installArrowRowKeys();
       restoreSurfaceEntry(lifecycle, deskSession, legacyStore);
       state.codex.localHistoryBootReady = true;
       if (state.codex.legacyChatBackupRequired && !state.codex.legacyChatBackupKey) boardNotice(state.codex.localHistoryError);
