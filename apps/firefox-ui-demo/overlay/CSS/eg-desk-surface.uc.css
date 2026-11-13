@@ -93,6 +93,22 @@
   --egd-font: -apple-system, BlinkMacSystemFont, "Apple SD Gothic Neo", "Malgun Gothic", sans-serif;
 }
 
+/* D-G1: text and corner steps of the approved style (13px base). New and
+   retouched rules pick from these; the steps do not change with the scheme. */
+:root {
+  --egd-text-2xs: 10px;
+  --egd-text-xs: 10.5px;
+  --egd-text-sm: 11px;
+  --egd-text-md: 11.5px;
+  --egd-text-base: 12px;
+  --egd-text-lg: 13px;
+  --egd-radius-xs: 5px;
+  --egd-radius-sm: 7px;
+  --egd-radius-md: 8px;
+  --egd-radius-lg: 10px;
+  --egd-radius-xl: 14px;
+}
+
 /* Selection follows the surrounding Desk, including for the light Ontology lens. */
 :root { --egd-card-selection: #295EAB; }
 
@@ -304,7 +320,7 @@
   border: 1px solid var(--egd-outline);
   background: color-mix(in srgb, var(--egd-surface-elevated) 96%, transparent);
   color: var(--egd-on-surface);
-  box-shadow: 0 2px 10px rgba(49, 43, 34, .08);
+  box-shadow: var(--egd-chrome-shadow);
   font-family: var(--egd-font, system-ui);
   text-align: left;
   cursor: pointer;
@@ -575,19 +591,26 @@
 :root.egd-browser-fullscreen-active .egd-browser-card.egd-card-fullscreen .egd-card-header {
   border-radius: 0;
 }
-/* Board region (approved .eg-board-region / .eg-region-label). The 24px inner
-   padding and 36px title row are in the region geometry; actions live in [⋯]. */
+/* Board region (approved .eg-board-region / .eg-region-label, final values):
+   on the desk a Board is only its name tag, with no edge or wash. The current
+   Board draws its edge; pointing at or focusing a name tag shows that Board's
+   extent with the faint approved line. The 24px inner padding and 36px title
+   row are in the region geometry; actions live in [⋯]. */
 .egd-board-region {
   position: absolute;
   box-sizing: border-box;
-  border: calc(1px * var(--egd-board-label-scale, 1)) solid var(--egd-region-line);
+  border: calc(1px * var(--egd-board-label-scale, 1)) solid transparent;
   border-radius: 14px;
-  background: var(--egd-region-fill);
+  background: transparent;
   pointer-events: none;
+}
+.egd-board-region:has(.egd-board-region-head:hover, .egd-board-region-head:focus-within, .egd-board-region-menu-button[aria-expanded="true"]) {
+  border-color: var(--egd-region-line);
 }
 .egd-board-region[data-active="true"] {
   border-width: calc(2px * var(--egd-board-label-scale, 1));
   border-color: var(--egd-primary);
+  background: var(--egd-region-fill);
 }
 .egd-board-region-head {
   position: absolute;
@@ -599,10 +622,12 @@
   display: flex;
   align-items: center;
   gap: 6px;
-  padding: 0 6px 0 13px;
+  padding: 0 6px 0 4px;
   pointer-events: none;
   transform-origin: 0 0;
 }
+/* Inside a drawn edge the name tag keeps the approved 13px inset. */
+.egd-board-region[data-active="true"] .egd-board-region-head { padding-left: 13px; }
 .egd-board-region-head > * { pointer-events: auto; }
 .egd-board-region [hidden] { display: none !important; }
 .egd-board-region-title {
@@ -616,7 +641,7 @@
   border-radius: 6px;
   background: transparent;
   color: var(--egd-on-surface-variant);
-  font: 600 11.5px/1.3 var(--egd-font);
+  font: 600 var(--egd-text-sm)/1.3 var(--egd-font);
   white-space: nowrap;
   cursor: pointer;
 }
@@ -1280,7 +1305,7 @@
   border-radius: 8px;
   min-width: 0;
   min-height: 0;
-  box-shadow: 0 5px 16px rgba(29, 44, 55, 0.09);
+  box-shadow: var(--egd-card-shadow);
   transition: none;
 }
 
@@ -1823,7 +1848,7 @@
 
 .egd-browser-card.egd-entity-selected:not(.egd-entity-active) {
   border-color: var(--egd-card-selection);
-  box-shadow: 0 4px 16px rgba(29, 44, 55, .09);
+  box-shadow: var(--egd-card-shadow);
 }
 
 .egd-browser-card .egd-card-header {
@@ -2010,7 +2035,7 @@
   border-radius: 8px;
   border: 1px solid var(--egd-outline);
   background: color-mix(in srgb, var(--egd-surface-elevated) 92%, transparent);
-  box-shadow: 0 12px 28px rgba(29, 44, 55, 0.14);
+  box-shadow: var(--egd-shadow);
   display: flex;
   flex-direction: column;
   gap: 2px;
@@ -2534,7 +2559,7 @@
   overflow: hidden;
   background: var(--egd-surface-elevated);
   border: 1px solid color-mix(in srgb, var(--egd-on-surface) 10%, transparent);
-  box-shadow: 0 18px 48px rgba(28, 30, 34, 0.18);
+  box-shadow: var(--egd-shadow);
   backdrop-filter: none;
   -webkit-backdrop-filter: none;
 }
@@ -2595,35 +2620,36 @@
   color: var(--egd-primary);
 }
 
-/* Result kinds keep their own hue; in dark the ink is mixed toward the
-   dark ink and the wash toward the dark surface (end of this file). */
+/* Result kinds keep their own hue, each an approved token: success, sage,
+   muted, warning and wood. The wash is the same ink mixed into the panel, so
+   both follow the scheme without a separate dark rule. */
 .egd-rail-search-type-card {
-  --egd-type-ink: #226E5D;
-  background: #E0F0EC;
+  --egd-type-ink: var(--egd-success-ink);
+  background: color-mix(in srgb, var(--egd-type-ink) 10%, var(--egd-surface-elevated));
   color: var(--egd-type-ink);
 }
 
 .egd-rail-search-type-file {
-  --egd-type-ink: #52613A;
-  background: #E8ECE6;
+  --egd-type-ink: var(--egd-primary);
+  background: color-mix(in srgb, var(--egd-type-ink) 10%, var(--egd-surface-elevated));
   color: var(--egd-type-ink);
 }
 
 .egd-rail-search-type-history {
-  --egd-type-ink: #3E5F95;
-  background: #E7EDF8;
+  --egd-type-ink: var(--egd-secondary);
+  background: color-mix(in srgb, var(--egd-type-ink) 10%, var(--egd-surface-elevated));
   color: var(--egd-type-ink);
 }
 
 .egd-rail-search-type-thread {
-  --egd-type-ink: #805A20;
-  background: #EFE8DC;
+  --egd-type-ink: var(--egd-warning-ink);
+  background: color-mix(in srgb, var(--egd-type-ink) 10%, var(--egd-surface-elevated));
   color: var(--egd-type-ink);
 }
 
 .egd-rail-search-type-web {
-  --egd-type-ink: #4F4C91;
-  background: #E8E6F4;
+  --egd-type-ink: color-mix(in srgb, var(--egd-wood-line) 60%, var(--egd-on-surface));
+  background: color-mix(in srgb, var(--egd-type-ink) 10%, var(--egd-surface-elevated));
   color: var(--egd-type-ink);
 }
 
@@ -2661,7 +2687,7 @@
   border-radius: 999px;
   background: color-mix(in srgb, var(--egd-primary) 10%, transparent);
   color: var(--egd-primary);
-  font-size: 9px;
+  font-size: var(--egd-text-2xs);
   font-weight: 720;
   line-height: 1;
 }
@@ -2966,7 +2992,7 @@
   border-radius: 12px;
   padding: 18px;
   background: color-mix(in srgb, var(--egd-surface-elevated) 96%, transparent);
-  box-shadow: 0 18px 50px rgba(28, 30, 34, 0.22);
+  box-shadow: var(--egd-shadow);
   color: var(--egd-on-surface);
 }
 
@@ -3139,7 +3165,7 @@
   box-sizing: border-box;
   background: color-mix(in srgb, var(--egd-surface-elevated) 88%, transparent);
   color: var(--egd-on-surface-variant);
-  font: 600 9.5px/13px var(--egd-font, system-ui);
+  font: 600 var(--egd-text-2xs)/13px var(--egd-font, system-ui);
   text-align: left;
   overflow: hidden;
   white-space: nowrap;
@@ -3181,8 +3207,8 @@
 }
 
 .egd-minimap-entity-shape {
-  border: 1px solid rgba(138, 90, 0, 0.64);
-  background: rgba(251, 191, 36, 0.26);
+  border: 1px solid color-mix(in srgb, var(--egd-warning-ink) 64%, transparent);
+  background: color-mix(in srgb, var(--egd-warning-ink) 22%, transparent);
 }
 
 .egd-minimap-entity-active {
@@ -3225,7 +3251,7 @@
   border-radius: 7px;
   background: var(--egd-surface-elevated);
   color: var(--egd-primary);
-  font: 700 9px/11px var(--egd-font, system-ui);
+  font: 700 var(--egd-text-2xs)/11px var(--egd-font, system-ui);
   text-align: center;
 }
 .egd-minimap-briefing-number[data-relative-step="0"] {
@@ -3616,7 +3642,7 @@
   padding: 0;
   gap: 0;
   background: var(--egd-chat-room);
-  box-shadow: 0 5px 16px rgba(29, 44, 55, 0.09);
+  box-shadow: var(--egd-card-shadow);
 }
 .egd-hud-hidden {
   transform: translateX(calc(100% + 20px));
@@ -3873,7 +3899,7 @@
   background: color-mix(in srgb, var(--egd-surface-elevated) 80%, transparent);
   border: 1px solid var(--egd-chat-outline-soft);
   color: var(--egd-on-surface-variant);
-  font-size: 9px;
+  font-size: var(--egd-text-2xs);
   font-weight: 600;
   line-height: 1;
 }
@@ -4031,7 +4057,7 @@
   border-radius: 999px;
   background: var(--egd-primary);
   color: var(--egd-surface-elevated);
-  font-size: 9px;
+  font-size: var(--egd-text-2xs);
   font-weight: 700;
   line-height: 1;
 }
@@ -4100,7 +4126,7 @@
   border-radius: 10px;
   border: 1px solid var(--egd-chat-outline-soft);
   background: color-mix(in srgb, var(--egd-surface-elevated) 98%, transparent);
-  box-shadow: 0 10px 20px rgba(29, 44, 55, 0.14);
+  box-shadow: var(--egd-shadow);
   display: flex;
   flex-direction: column;
   gap: 4px;
@@ -4130,7 +4156,7 @@
 
 .egd-codex-thread-menu-label {
   padding: 5px 8px 2px;
-  font-size: 9px;
+  font-size: var(--egd-text-sm);
   font-weight: 700;
   color: var(--egd-on-surface-variant);
   text-transform: uppercase;
@@ -4388,7 +4414,7 @@
   border: 1px solid var(--egd-chat-outline-soft);
   background: color-mix(in srgb, var(--egd-surface-elevated) 60%, transparent);
   color: var(--egd-on-surface-variant);
-  font-size: 9px;
+  font-size: var(--egd-text-2xs);
   font-weight: 600;
   line-height: 1;
   white-space: nowrap;
@@ -4810,7 +4836,7 @@
   border-radius: 999px;
   background: color-mix(in srgb, var(--egd-surface-elevated) 82%, transparent);
   color: var(--egd-on-surface-variant);
-  font-size: 8px;
+  font-size: var(--egd-text-2xs);
   line-height: 1;
 }
 
@@ -4835,7 +4861,7 @@
   border-radius: 10px;
   border: 1px solid var(--egd-chat-outline-soft);
   background: color-mix(in srgb, var(--egd-surface-elevated) 98%, transparent);
-  box-shadow: 0 10px 20px rgba(29, 44, 55, 0.14);
+  box-shadow: var(--egd-shadow);
   display: flex;
   flex-direction: column;
   gap: 4px;
@@ -5276,7 +5302,7 @@
   background: color-mix(in srgb, var(--egd-surface-elevated) 70%, transparent);
   border: 1px solid var(--egd-chat-outline-soft);
   color: var(--egd-on-surface-variant);
-  font-size: 9px;
+  font-size: var(--egd-text-sm);
   font-weight: 600;
   line-height: 1;
   transition: background 0.15s, border-color 0.15s;
@@ -5335,7 +5361,7 @@
   background: color-mix(in srgb, var(--egd-surface-elevated) 72%, transparent);
   border: 1px solid var(--egd-chat-outline-soft);
   color: var(--egd-on-surface-variant);
-  font-size: 9px;
+  font-size: var(--egd-text-sm);
   line-height: 1.45;
   white-space: pre-wrap;
   user-select: text;
@@ -5375,7 +5401,7 @@
   background: var(--egd-surface);
   border: 1px solid color-mix(in srgb, var(--egd-on-surface) 22%, transparent);
   border-radius: 14px;
-  box-shadow: 0 8px 28px rgba(20, 30, 20, .16);
+  box-shadow: var(--egd-shadow);
   font: 13px/1.5 sans-serif;
 }
 #egd-codex-input-panel header { display: flex; flex: 0 0 auto; align-items: center; justify-content: space-between; padding: 12px 16px; }
@@ -5402,7 +5428,7 @@
   width: min(440px, calc(100vw - 150px)); max-height: 48vh; overflow: auto;
   padding: 14px; border-radius: 14px; border: 1px solid color-mix(in srgb, var(--egd-on-surface) 22%, transparent);
   background: var(--egd-surface); color: var(--egd-on-surface);
-  box-shadow: 0 8px 28px rgba(20, 30, 20, .16); font: 13px/1.5 var(--egd-font, system-ui);
+  box-shadow: var(--egd-shadow); font: 13px/1.5 var(--egd-font, system-ui);
 }
 #egd-answer-briefing nav { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin-top: 8px; }
 #egd-answer-briefing button {
@@ -5645,7 +5671,7 @@
 /* ============ Phase 2: Read Status Icons ============ */
 .egd-codex-bubble-read {
   margin-top: 0;
-  font-size: 9px;
+  font-size: var(--egd-text-sm);
   font-weight: 600;
   color: var(--egd-on-surface-variant);
   display: flex;
@@ -6102,7 +6128,7 @@
 .egd-settings-segment-active:hover {
   background: var(--egd-surface-elevated);
   color: var(--egd-on-surface);
-  box-shadow: 0 1px 3px rgba(47, 42, 32, .12);
+  box-shadow: var(--egd-chrome-shadow);
 }
 .egd-settings-swatches { display: flex; gap: 8px; }
 .egd-settings-swatch {
@@ -6222,7 +6248,7 @@
   font-style: italic;
 }
 
-/* Thread item avatar */
+/* Thread item avatar: paint comes from its .egd-profile-avatar-tone-N class. */
 .egd-codex-thread-avatar {
   width: 36px;
   height: 36px;
@@ -6231,7 +6257,7 @@
   display: flex;
   align-items: center;
   justify-content: center;
-  color: #fff;
+  color: var(--egd-avatar-ink);
   font-size: 14px;
   font-weight: 700;
   flex-shrink: 0;
@@ -7475,7 +7501,7 @@
   border: 1px solid var(--egd-outline);
   border-radius: 10px;
   background: var(--egd-surface-elevated);
-  box-shadow: 0 2px 8px rgba(47, 42, 32, .06);
+  box-shadow: var(--egd-chrome-shadow);
   -moz-window-dragging: no-drag;
 }
 /* The focused Browser keeps Desk chrome hidden; the same gadget sits in its
@@ -7688,7 +7714,7 @@
   .egd-rail-search { box-sizing: border-box; gap: 4px; padding-inline: 5px; }
   .egd-rail-right { flex: 1 1 0; }
   .egd-rail-right .egd-resource-gadget { display: grid; grid-template-columns: repeat(2, max-content); grid-template-rows: repeat(2, 18px); height: 44px; gap: 0 3px; }
-  .egd-rail-right .egd-resource-button { height: 18px; justify-content: flex-start; font-size: 9px; }
+  .egd-rail-right .egd-resource-button { height: 18px; justify-content: flex-start; font-size: var(--egd-text-2xs); }
 }
 
 /* Agent Profile avatars: emoji or initial on the six approved palette tones
@@ -8928,13 +8954,3 @@ button.egd-memo-ask-cancel { padding: 0 4px; border: 0; background: none; color:
 .egd-codex-context-resolver-list li { display: flex; flex-wrap: wrap; align-items: baseline; gap: 0 8px; }
 .egd-codex-context-resolver-name { overflow-wrap: anywhere; }
 .egd-codex-context-resolver-reason, .egd-codex-context-resolver-score { color: var(--egd-on-surface-variant); font-size: 11.5px; }
-
-/* DSN-01: rules a token cannot carry. Search result kinds keep their own hue;
-   in dark the ink lifts toward the dark ink and the wash darkens. */
-@media (prefers-color-scheme: dark) {
-  .egd-rail-search-type:is(.egd-rail-search-type-card, .egd-rail-search-type-file,
-    .egd-rail-search-type-history, .egd-rail-search-type-thread, .egd-rail-search-type-web) {
-    background: color-mix(in srgb, var(--egd-type-ink) 30%, var(--egd-surface-elevated));
-    color: color-mix(in srgb, var(--egd-type-ink) 35%, var(--egd-on-surface));
-  }
-}

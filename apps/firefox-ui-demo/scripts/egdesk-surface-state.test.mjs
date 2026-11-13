@@ -11354,17 +11354,22 @@ test('production Board [⋯] menu offers save, Chat attach and close for that Bo
   assert.deepEqual(actions.at(-1), ['canvas', projection.id], 'the saved-copy action captures the clicked projection, not the active Board');
 });
 
-test('Board region and mark CSS use approved tokens: faint solid edge, 14px corners, 2px current Board', () => {
+test('Board region and mark CSS use approved tokens: name tag only, 14px corners, 2px current Board', () => {
   const rule = selector => surfaceCss.match(new RegExp(`^${selector.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')} \\{([^}]+)\\}`, 'm'))?.[1] || '';
   const region = rule('.egd-board-region');
-  assert.match(region, /border: calc\(1px \* var\(--egd-board-label-scale, 1\)\) solid var\(--egd-region-line\)/);
+  assert.match(region, /border: calc\(1px \* var\(--egd-board-label-scale, 1\)\) solid transparent/);
+  assert.match(region, /background: transparent/);
+  assert.match(surfaceCss, /^\.egd-board-region:has\(\.egd-board-region-head:hover, [^{]*\) \{\n  border-color: var\(--egd-region-line\);\n\}/m,
+    'the approved faint edge appears while the name tag is pointed at or focused');
   assert.match(region, /border-radius: 14px/);
   assert.doesNotMatch(region, /dashed/);
   const active = rule('.egd-board-region[data-active="true"]');
   assert.match(active, /border-width: calc\(2px \* var\(--egd-board-label-scale, 1\)\)/);
   assert.match(active, /border-color: var\(--egd-primary\)/);
+  assert.match(active, /background: var\(--egd-region-fill\)/);
   assert.match(rule('.egd-board-region-head'), /height: 36px/);
-  assert.match(rule('.egd-board-region-title'), /font: 600 11\.5px/);
+  assert.match(rule('.egd-board-region-title'), /font: 600 var\(--egd-text-sm\)/);
+  assert.match(surfaceCss, /^:root \{\n  --egd-text-2xs: 10px;[\s\S]*?--egd-text-sm: 11px;/m, 'the approved 11px name tag step');
   const far = rule('#egd-canvas-layer[data-egd-board-label="far"] .egd-board-region-head');
   assert.match(far, /bottom: 100%/);
   assert.match(far, /transform: scale\(var\(--egd-board-label-scale, 1\)\)/);
@@ -11659,20 +11664,20 @@ test('hard-coded light and white colours outside the tokens are down to a short 
     const parts = literal.match(/\(([^)]*)\)/)[1].split(',').map(Number);
     return parts.length === 3 ? [...parts, 1] : parts;
   };
-  assert.ok(declarations.length > 20, 'colour declarations found');
+  // The scan still finds the few literals left (window dots, selection edge,
+  // black shadows, scrim); the count only goes down from here.
+  assert.ok(declarations.length > 5, 'colour declarations found');
+  assert.ok(declarations.length <= 14, `literal colours outside the tokens: ${declarations.length}`);
   const light = declarations.filter(({ literal }) => {
     const [r, g, b, a] = channels(literal);
     return a > .02 && Math.min(r, g, b) >= 200;
   }).map(({ head, property, literal }) => `${head} ${property}: ${literal}`);
-  assert.deepEqual(light, [
-    '.egd-rail-search-type-card background: #E0F0EC',
-    '.egd-rail-search-type-file background: #E8ECE6',
-    '.egd-rail-search-type-history background: #E7EDF8',
-    '.egd-rail-search-type-thread background: #EFE8DC',
-    '.egd-rail-search-type-web background: #E8E6F4',
-    '.egd-codex-thread-avatar color: #fff',
-  ], 'only result-kind washes (repainted in dark below) and white initials on fixed avatar colours remain');
-  assert.match(surfaceCss, /@media \(prefers-color-scheme: dark\) \{\n  \.egd-rail-search-type:is\(\.egd-rail-search-type-card, [^)]*\) \{\n    background: color-mix\(in srgb, var\(--egd-type-ink\) 30%, var\(--egd-surface-elevated\)\);/);
+  assert.deepEqual(light, [], 'result-kind washes and room avatar initials now come from tokens');
+  for (const kind of ['card', 'file', 'history', 'thread', 'web']) {
+    const badge = surfaceCss.match(new RegExp(`^\\.egd-rail-search-type-${kind} \\{([^}]+)\\}`, 'm'))?.[1] || '';
+    assert.match(badge, /--egd-type-ink: (var|color-mix)\([^;#]+;/, `${kind} ink is a token`);
+    assert.match(badge, /background: color-mix\(in srgb, var\(--egd-type-ink\) 10%, var\(--egd-surface-elevated\)\);/, `${kind} wash follows its ink in both schemes`);
+  }
   // Near-black literals are shadows, the close-guard scrim or the invisible resize hit area.
   const black = declarations.filter(({ literal }) => Math.max(...channels(literal).slice(0, 3)) <= 60);
   assert.ok(black.length > 5);
