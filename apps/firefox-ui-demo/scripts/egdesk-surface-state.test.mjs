@@ -11118,7 +11118,7 @@ test('resolveViewportBoard ranks the Board in view and counts the others', () =>
   assert.deepEqual(ties.visibleIds, ['first', 'second'], 'equal overlap keeps region order');
 });
 
-test('production top-bar Board name reads "이름 · +N" and "Board 없음"', () => {
+test('production top-bar Board name reads "이름 · +N" and "EG-Desk" when no Board is in view', () => {
   const body = topLevelFunction('viewportBoardLabel');
   assert.ok(body);
   const state = { boards: { projections: { a: { title: '태화 5월 리포트' }, b: { title: 'UI 리뷰' }, c: { title: '자료' } } } };
@@ -11126,9 +11126,17 @@ test('production top-bar Board name reads "이름 · +N" and "Board 없음"', ()
   assert.deepEqual(label({ primaryId: 'a', visibleIds: ['b', 'a', 'c'], extraCount: 2 }),
     { text: '태화 5월 리포트 · +2', title: '화면의 Board: UI 리뷰, 태화 5월 리포트, 자료' });
   assert.deepEqual(label({ primaryId: 'a', visibleIds: [], extraCount: 0 }), { text: '태화 5월 리포트', title: '태화 5월 리포트' });
-  assert.equal(label({ primaryId: null, visibleIds: [], extraCount: 0 }).text, 'Board 없음');
-  assert.equal(label({ primaryId: 'closed', visibleIds: [], extraCount: 0 }).text, 'Board 없음');
+  assert.deepEqual(label({ primaryId: null, visibleIds: [], extraCount: 0 }),
+    { text: 'EG-Desk', title: '화면에 보이는 Board가 없습니다' });
+  assert.equal(label({ primaryId: 'closed', visibleIds: [], extraCount: 0 }).text, 'EG-Desk');
   const rail = topLevelFunction('syncViewportAgendaRail');
+  // Quiet top bar: 'Board 닫기' shows only while a Board is open, and the unconnected bell stays hidden.
+  assert.match(rail, /closeBoardBtn\.hidden = Object\.keys\(state\.boards\.projections\)\.length === 0;/);
+  const railSource = topLevelFunction('buildDeskRail');
+  assert.match(railSource, /title: '선택한 Board 닫기',\n\s+'aria-label': '선택한 Board 닫기',\n\s+hidden: Object\.keys\(state\.boards\.projections\)\.length === 0,/);
+  assert.match(railSource, /class: 'egd-rail-icon egd-rail-notice-btn', title: '알림', 'aria-label': '알림', hidden: true/);
+  assert.doesNotMatch(railSource, /알림 연결 전/);
+  assert.match(railSource, /title: '미니맵', 'aria-label': '미니맵'/);
   assert.match(rail, /syncViewportBoardName\(\);\n    syncAllBoardRegionMarks\(\);/);
   assert.doesNotMatch(rail, /agendaName\.textContent = currentViewportAgendaLabel\(\)/,
     'the top bar follows the camera; saved titles keep currentViewportAgendaLabel');

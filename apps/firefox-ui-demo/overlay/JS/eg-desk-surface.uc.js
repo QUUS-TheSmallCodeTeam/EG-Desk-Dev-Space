@@ -7927,7 +7927,8 @@
 
   function viewportBoardLabel(resolution = viewportBoardResolution()) {
     const projection = resolution.primaryId != null ? state.boards.projections[resolution.primaryId] : null;
-    if (!projection) return { text: 'Board 없음', title: '화면에 보이는 Board가 없습니다' };
+    // With no Board in view the top bar shows the product name, as in the approved style.
+    if (!projection) return { text: 'EG-Desk', title: '화면에 보이는 Board가 없습니다' };
     const names = resolution.visibleIds.map(id => state.boards.projections[id]?.title).filter(Boolean);
     return {
       text: resolution.extraCount > 0 ? `${projection.title} · +${resolution.extraCount}` : projection.title,
@@ -8007,6 +8008,9 @@
     if (saveBtn) saveBtn.hidden = !state.agenda.dirty;
     const restoreBtn = document.querySelector('.egd-rail-restore-btn');
     if (restoreBtn) restoreBtn.hidden = !state.agenda.hasSavedState;
+    // 'Board 닫기' acts on an open Board; with none on the Desk it would do nothing.
+    const closeBoardBtn = document.querySelector('.egd-rail-close-agenda-btn');
+    if (closeBoardBtn) closeBoardBtn.hidden = Object.keys(state.boards.projections).length === 0;
     const focusedFile = Boolean(state.activeEntityId
       && document.getElementById(state.activeEntityId)?.classList.contains('egd-file-card'));
     const fileRailItem = document.querySelector('#egd-preset-bag .egd-bag-file');
@@ -9251,8 +9255,9 @@
       }, deskIcon('recovery')),
       el('button', {
         class: 'egd-rail-icon egd-rail-close-agenda-btn',
-        title: 'Board 닫기',
+        title: '선택한 Board 닫기',
         'aria-label': '선택한 Board 닫기',
+        hidden: Object.keys(state.boards.projections).length === 0,
         onclick: (ev) => {
           ev.stopPropagation();
           closeCurrentAgenda();
@@ -9266,7 +9271,8 @@
         onclick: (ev) => { ev.stopPropagation(); toggleDeskMenu(ev.currentTarget); },
       }, deskIcon('menu')),
       el('button', { id: 'egd-recovery-open', class: 'egd-rail-icon', 'aria-label': '복구 기록', title: '복구 기록', hidden: true, onclick: () => openDeskRecoveryEntry() }, deskIcon('recovery')),
-      el('button', { class: 'egd-rail-icon', title: '알림 연결 전', 'aria-label': '알림 연결 전', disabled: 'true' }, deskIcon('alert')),
+      // Notifications are not connected yet: the bell stays out of the bar until it has something to say.
+      el('button', { class: 'egd-rail-icon egd-rail-notice-btn', title: '알림', 'aria-label': '알림', hidden: true, disabled: 'true' }, deskIcon('alert')),
       buildResourceGadget(),
       el('div', { class: 'egd-rail-avatar', title: '로컬 Desk', 'aria-label': '로컬 Desk' }, deskIcon('account')),
     );
