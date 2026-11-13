@@ -11238,8 +11238,8 @@
               rows: '1',
               placeholder: '메시지 보내기',
               'aria-label': `${activeThread.title}에 보낼 메시지`,
-              'aria-description': 'Enter로 줄바꿈, Ctrl 또는 Command와 Enter로 전송',
-              title: 'Enter 줄바꿈 · Ctrl/⌘ Enter 전송',
+              'aria-description': 'Enter로 전송, Shift와 Enter로 줄바꿈',
+              title: 'Enter 전송 · Shift+Enter 줄바꿈',
               data: { threadId: activeThread.id, testid: 'chat-composer' },
             });
             const sendButton = el('button', {
@@ -11259,8 +11259,12 @@
               const footer = input.closest?.('.egd-codex-footer');
               const pane = main?.querySelector('.egd-codex-conversation-pane');
               const messages = pane?.querySelector('.egd-codex-messages');
-              const cssMaxHeight = Number.parseFloat(input.ownerDocument.defaultView.getComputedStyle(input).maxHeight);
+              const inputStyle = input.ownerDocument.defaultView.getComputedStyle(input);
+              const cssMaxHeight = Number.parseFloat(inputStyle.maxHeight);
               let heightLimit = Number.isFinite(cssMaxHeight) ? Math.min(240, cssMaxHeight) : 240;
+              // The one-line floor is the stylesheet's min-height (approved 35px); 40 before layout.
+              const cssMinHeight = Number.parseFloat(inputStyle.minHeight);
+              const heightFloor = Number.isFinite(cssMinHeight) && cssMinHeight > 0 ? cssMinHeight : 40;
               if (main?.clientHeight > 0 && footer && pane && messages) {
                 main.dataset.compactComposer = String(main.clientHeight < 480);
                 const outerHeight = (node) => {
@@ -11280,10 +11284,10 @@
                 if (answerSpace) logReserve = Math.max(0, answerSpace.logReserve + answerSpace.boardHeight - answerSpace.board.offsetHeight);
                 const chromeHeight = otherChildrenHeight(main, [pane, footer])
                   + otherChildrenHeight(pane, [messages]) + outerHeight(footer) - input.offsetHeight;
-                heightLimit = Math.max(40, Math.min(heightLimit, Math.floor(main.clientHeight - chromeHeight - logReserve)));
+                heightLimit = Math.max(heightFloor, Math.min(heightLimit, Math.floor(main.clientHeight - chromeHeight - logReserve)));
                 if (main.clientHeight < 480) heightLimit = Math.min(80, heightLimit);
               }
-              const height = Math.min(heightLimit, Math.max(40, input.scrollHeight));
+              const height = Math.min(heightLimit, Math.max(heightFloor, input.scrollHeight));
               input.style.height = `${height}px`;
               input.style.overflowY = input.scrollHeight > height ? 'auto' : 'hidden';
               if (viewport) composerViewport.resized(input, viewport);
@@ -11301,11 +11305,15 @@
               codexBridge.setDraft(input.value, activeThread.id);
               resizeComposer(false);
             });
+            // Enter sends as in a messenger (Ctrl/⌘+Enter too); Shift+Enter keeps the
+            // line break. A Korean syllable still in composition keeps its Enter, and an
+            // open '@' list takes the key before the send does.
             input.addEventListener('keydown', (ev) => {
-              if (ev.key !== 'Enter' || !(ev.metaKey || ev.ctrlKey) || ev.shiftKey || ev.altKey) return;
+              if (input._mentionKeydown?.(ev)) return;
+              if (ev.key !== 'Enter' || ev.shiftKey || ev.altKey) return;
               if (ev.isComposing || compositionInProgress || ev.keyCode === 229) return;
               ev.preventDefault();
-              void codexBridge.sendMessage({ manualOwner });
+              if (!ev.repeat) void codexBridge.sendMessage({ manualOwner });
             });
             input.addEventListener('compositionstart', () => { composerViewport.cancel(input); compositionInProgress = true; });
             input.addEventListener('compositionend', () => {
@@ -11347,7 +11355,7 @@
                 buildChatInputTray(activeThread, codexBridge),
                 input,
                 el('div', { class: 'egd-codex-compose-actions' },
-                  el('span', { class: 'egd-codex-compose-hint', 'aria-hidden': 'true' }, 'Enter 줄바꿈 · Ctrl/⌘ Enter 전송'),
+                  el('span', { class: 'egd-codex-compose-hint', 'aria-hidden': 'true' }, 'Enter 전송 · Shift+Enter 줄바꿈'),
                   stopButton,
                   sendButton,
                 ),

@@ -7415,8 +7415,10 @@
 .egd-codex-footer { padding: 7px 11px 10px; gap: 0; border-top: 1px solid var(--egd-chat-outline-soft); }
 .egd-codex-input-row { gap: 8px; padding: 8px 9px; border: 1px solid var(--egd-outline); border-radius: 8px; background: var(--egd-window-alt); box-shadow: none; }
 .egd-codex-input-row:focus-within { border-color: var(--egd-primary); box-shadow: 0 0 0 2px color-mix(in srgb, var(--egd-primary) 12%, transparent); }
-/* DSN-04: line height and the six-line cap follow the font (24px and 144px at 15px). */
-.egd-codex-input { min-height: 40px; max-height: 9.6em; padding: 3px 2px 0; font-size: 15px; line-height: 1.6; color: var(--egd-on-surface); }
+/* Approved composer: the draft reads at the bubble's 12px/1.52 and starts as one 35px line
+   (18px of text between 8px paddings). The autosize grows it to 140px, then it scrolls.
+   DSN-04: the line height stays relative to the font. */
+.egd-codex-input { box-sizing: border-box; min-height: 35px; max-height: 140px; padding: 8px 2px; font-size: 12px; line-height: 1.52; color: var(--egd-on-surface); }
 .egd-codex-input::placeholder { color: var(--egd-on-surface-variant); }
 .egd-codex-diagnostics-toggle { min-height: 32px; padding: 0 8px; border-radius: 6px; background: var(--egd-window-alt); color: var(--egd-on-surface-variant); font-size: 12px; }
 #egd-hud[data-app="chat"] .egd-codex-diagnostics-toggle {
@@ -7436,7 +7438,8 @@
   grid-template-areas: "attachments draft actions";
   align-items: end;
   gap: 6px;
-  padding: 5px 7px;
+  /* The 35px draft line and the 34px send button set the height; the box only frames them. */
+  padding: 3px 5px 3px 7px;
 }
 .egd-codex-chat-shell .egd-codex-footer .egd-chat-input-tray {
   grid-area: attachments;

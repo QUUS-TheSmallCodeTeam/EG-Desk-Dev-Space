@@ -3339,8 +3339,8 @@ test('bounded visual hierarchy keeps Canvas chrome quiet and Browser and Chat co
   assert.match(rule('.egd-codex-bubble'), /font-size:\s*14\.5px;\s*line-height:\s*1\.48/);
   assert.match(rule('.egd-codex-input'), /min-height:\s*40px/);
   const composerOverrides = [...css.matchAll(/^\.egd-codex-input \{([^}]+)\}/gm)];
-  assert.match(composerOverrides.at(-1)?.[1] || '', /max-height:\s*9\.6em;[^}]*font-size:\s*15px;\s*line-height:\s*1\.6;/,
-    'the approved final composer rule caps layout at six 24px lines: 144px at 15px, growing with the font');
+  assert.match(composerOverrides.at(-1)?.[1] || '', /box-sizing:\s*border-box;\s*min-height:\s*35px;\s*max-height:\s*140px;[^}]*font-size:\s*12px;\s*line-height:\s*1\.52;/,
+    'the approved final composer rule starts as one 35px line of bubble-sized text and caps layout at 140px');
   assert.match(surfaceSource, /rows: '1'/);
   assert.match(surfaceSource, /input\.addEventListener\('compositionstart'/);
   assert.match(surfaceSource, /input\.addEventListener\('compositionend'/);
@@ -3779,6 +3779,19 @@ test('Chat composer starts compact but expands and scrolls for long requests', (
   assert.equal(input.style.height, '144px');
   assert.equal(input.style.overflowY, 'auto');
   assert.equal(sendButton.disabled, false);
+  // The one-line floor and the cap are the stylesheet's (approved 35px and 140px), not a script constant.
+  input.ownerDocument.defaultView.getComputedStyle = () => ({ minHeight: '35px', maxHeight: '140px' });
+  input.scrollHeight = 34;
+  run();
+  assert.equal(input.style.height, '35px');
+  assert.equal(input.style.overflowY, 'hidden');
+  input.scrollHeight = 72;
+  run();
+  assert.equal(input.style.height, '72px');
+  input.scrollHeight = 500;
+  run();
+  assert.equal(input.style.height, '140px');
+  assert.equal(input.style.overflowY, 'auto');
 });
 
 test('account reset drops all correlated data without inventing a stopped run', () => {
@@ -11721,7 +11734,7 @@ test('main rows and buttons keep a minimum height instead of a fixed one, and th
   assert.equal(narrowButton.flex, 'none');
   const composer = rules('.egd-codex-input');
   for (const body of composer) assert.doesNotMatch(body, /line-height: \d+px/, 'composer line height is relative');
-  assert.match(composer.at(-1), /max-height: 9\.6em;[^}]*font-size: 15px; line-height: 1\.6;/, '6 × 24px = 144px at 15px');
+  assert.match(composer.at(-1), /min-height: 35px; max-height: 140px;[^}]*font-size: 12px; line-height: 1\.52;/, 'approved composer: one 35px line up to 140px at the bubble\'s 12px');
   // Browser rows keep their own scale-aware heights.
   assert.match(surfaceCss, /\.egd-browser-card \.egd-desk-window-titlebar \{\n  height: 29px;/);
 });
@@ -24430,8 +24443,8 @@ test('Task question compact controls: two readable lines and counter share exist
   assert.ok(actions.children.includes(counter));
   assert.equal(cssDeclarationsFor(surfaceCss, '.egd-task-answer-text')['overflow-y'], 'auto');
   assert.equal(cssDeclarationsFor(surfaceCss, '.egd-task-answer-text')['min-height'], '44px');
-  assert.equal(cssDeclarationsFor(surfaceCss, '.egd-codex-input')['min-height'], '40px');
-  assert.equal(cssDeclarationsFor(surfaceCss, '.egd-codex-input')['font-size'], '15px');
+  assert.equal(cssDeclarationsFor(surfaceCss, '.egd-codex-input')['min-height'], '35px');
+  assert.equal(cssDeclarationsFor(surfaceCss, '.egd-codex-input')['font-size'], '12px');
   const mount = declaration('mountCodexHUD');
   assert.ok(mount.indexOf('taskAnswerReveal.restoreLayout();') < mount.indexOf('newTaskList.scrollTop = taskScroll.top'));
 });

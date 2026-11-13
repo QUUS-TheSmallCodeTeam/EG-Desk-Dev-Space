@@ -823,16 +823,20 @@ function chatComposerFixture({ reply, inputSources = [], captureInputs = null } 
 
 test('approved Chat refinement keeps accessible composer and real HUD actions', () => {
   const input = declarationsFor('.egd-codex-input', { scheme: 'light' });
-  assert.equal(input['min-height'], '40px');
-  assert.equal(input['max-height'], '9.6em');
-  assert.equal(input['font-size'], '15px');
-  assert.equal(input['line-height'], '1.6');
+  assert.equal(input['min-height'], '35px');
+  assert.equal(input['max-height'], '140px');
+  assert.equal(input['font-size'], '12px');
+  assert.equal(input['line-height'], '1.52');
+  assert.equal(input['box-sizing'], 'border-box');
+  const bubble = declarationsFor('.egd-codex-bubble', { scheme: 'light' });
+  assert.deepEqual([input['font-size'], input['line-height']], [bubble['font-size'], bubble['line-height']], 'the draft reads at the bubble size');
   const send = declarationsFor('.egd-codex-send', { scheme: 'light' });
   assert.equal(send['min-width'], '34px');
   assert.equal(send['min-height'], '34px');
   const { input: composer, sendButton } = chatComposerFixture();
   assert.equal(composer.props['aria-label'], '합성 방에 보낼 메시지');
-  assert.match(composer.props['aria-description'], /Enter로 줄바꿈.*Enter로 전송/);
+  assert.match(composer.props['aria-description'], /^Enter로 전송, Shift와 Enter로 줄바꿈$/);
+  assert.equal(composer.props.title, 'Enter 전송 · Shift+Enter 줄바꿈');
   assert.equal(composer.props.data.testid, 'chat-composer');
   assert.equal(sendButton.props['aria-label'], '메시지 보내기');
   assert.equal(sendButton.props.type, 'button');
@@ -847,7 +851,7 @@ test('approved Chat refinement keeps accessible composer and real HUD actions', 
 });
 
 test('the actual composer button and keyboard handlers dispatch once with their room owner', async t => {
-  for (const mode of ['button', 'control-enter', 'command-enter']) await t.test(mode, async () => {
+  for (const mode of ['button', 'enter', 'control-enter', 'command-enter']) await t.test(mode, async () => {
     const h = chatComposerFixture();
     let prevented = false;
     if (mode === 'button') h.sendButton.props.onclick();
@@ -899,21 +903,41 @@ test('ordinary composer: acceptance does not clear a newer draft or manual selec
   } finally { release(response); h.manualOwner.release(); }
 });
 
-test('composer does not dispatch for newline, modified shortcuts or IME composition', async () => {
+test('composer does not dispatch for Shift+Enter line breaks, other keys, modified shortcuts or IME composition', async () => {
   const h = chatComposerFixture();
-  for (const fields of [{ key: 'Enter' }, { key: 'Enter', ctrlKey: true, shiftKey: true },
-    { key: 'Enter', metaKey: true, altKey: true }, { key: 'Enter', ctrlKey: true, isComposing: true },
+  for (const fields of [{ key: 'Enter', shiftKey: true }, { key: 'a' }, { key: 'Tab' }, { key: 'Enter', ctrlKey: true, shiftKey: true },
+    { key: 'Enter', altKey: true }, { key: 'Enter', metaKey: true, altKey: true },
+    { key: 'Enter', isComposing: true }, { key: 'Enter', keyCode: 229 }, { key: 'Enter', ctrlKey: true, isComposing: true },
     { key: 'Enter', ctrlKey: true, keyCode: 229 }]) {
     h.input.events.keydown({ ...fields, preventDefault() { assert.fail('this key must remain available to the editor'); } });
   }
   h.input.events.compositionstart();
   h.sendButton.props.onclick();
+  h.input.events.keydown({ key: 'Enter', preventDefault() { assert.fail('IME must retain Enter'); } });
   h.input.events.keydown({ key: 'Enter', ctrlKey: true, preventDefault() { assert.fail('IME must retain Enter'); } });
   assert.equal(h.owners.length, 0);
   assert.equal(h.requests.length, 0);
   h.input.events.compositionend();
-  h.input.events.keydown({ key: 'Enter', ctrlKey: true, preventDefault() {} });
+  h.input.events.keydown({ key: 'Enter', preventDefault() {} });
   assert.equal((await h.pending()).accepted, true);
+  assert.equal(h.requests.length, 1);
+});
+
+test('a held Enter sends once and an open @ list takes Enter before the send', async () => {
+  const h = chatComposerFixture();
+  let prevented = 0;
+  const seen = [];
+  h.input._mentionKeydown = ev => { seen.push(ev.key); return true; };
+  h.input.events.keydown({ key: 'Enter', preventDefault() { assert.fail('the @ list owns this Enter'); } });
+  assert.deepEqual(seen, ['Enter']);
+  assert.equal(h.owners.length, 0);
+  h.input._mentionKeydown = () => false;
+  h.input.events.keydown({ key: 'Enter', repeat: true, preventDefault() { prevented++; } });
+  assert.equal(h.owners.length, 0, 'key repeat neither sends nor breaks the line');
+  h.input.events.keydown({ key: 'Enter', preventDefault() { prevented++; } });
+  assert.equal(prevented, 2);
+  assert.equal((await h.pending()).accepted, true);
+  assert.equal(h.owners.length, 1);
   assert.equal(h.requests.length, 1);
 });
 
