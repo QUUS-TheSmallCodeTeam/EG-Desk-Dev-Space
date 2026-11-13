@@ -239,6 +239,100 @@ test('B01·B02 화면 배선: 멤버 줄은 얼굴·상태 점·아이콘 펼침
   assert.match(surfaceSource, /state\.codex\.memberMenu\.invite === true \? menuThread\?\.type === 'group'/);
 });
 
+// The member row block of mountCodexHUD, run against a small stand-in for el():
+// what gets drawn and what each press calls.
+function drawMemberRow({ thread, memberMenu = null, runs = [], catalog = { status: 'ready', profiles: CATALOG } }) {
+  const el = (tag, props = {}, ...children) => {
+    const node = { tag, props, children: children.filter(child => child != null), listeners: {}, dataset: { ...(props.data || {}) }, focusCount: 0,
+      addEventListener(type, handler) { (this.listeners[type] ||= []).push(handler); },
+      appendChild(child) { this.children.push(child); },
+      focus() { this.focusCount += 1; },
+      querySelectorAll(selector) { assert.equal(selector, 'button:not([disabled])'); return all(this).filter(item => item.tag === 'button'); } };
+    for (const [key, value] of Object.entries(props)) if (key.startsWith('on') && typeof value === 'function') node.addEventListener(key.slice(2).toLowerCase(), value);
+    return node;
+  };
+  const all = node => (typeof node === 'string' ? [] : [node, ...node.children.flatMap(all)]);
+  const calls = [];
+  const bridge = new Proxy({}, { get: (_, name) => (...args) => { calls.push([name, ...args.filter(arg => typeof arg !== 'object' || arg === null)]); } });
+  let drawn = null;
+  const nodes = () => [...all(drawn.memberRowWrap), ...(drawn.memberMenuPanel ? all(drawn.memberMenuPanel) : [])];
+  const body = { querySelectorAll: () => nodes().filter(node => node.dataset.focusKey), querySelector: () => null };
+  const row = cut('          // CHAT-10: who is in this Board Thread', "          conversation.appendChild(el('div', { class: 'egd-codex-thread-active-head' },");
+  drawn = compileFunction(`${row}\n return { memberRowWrap, memberMenuPanel };`, ['activeThread', 'codex', 'codexBridge', 'ThreadMembers', 'codexProfileCatalog',
+    'codexRuns', 'codexThreadAgentProfile', 'activeEngine', 'SELF_MEMBER', 'body', 'document', 'el', 'deskIcon', 'codexMessageAvatarFace', 'spawnSettingsCard'])(
+    thread, { memberMenu, connected: true }, bridge, ThreadMembers, catalog, () => runs, () => null, { engineId: 'codex', ready: true }, '나', body,
+    { activeElement: null }, el, (name, className) => el('svg', { class: className, data: { icon: name } }),
+    (avatar, name) => ({ text: avatar?.value || String(name).slice(0, 1), toneClass: avatar ? ' egd-profile-avatar-tone-1' : '', photo: null }),
+    (options) => { calls.push(['spawnSettingsCard', options.tab]); });
+  const byTestId = id => nodes().filter(node => node.dataset.testid === id);
+  const textOf = node => (typeof node === 'string' ? node : node.children.map(textOf).join(''));
+  const fire = (node, type, event = {}) => { for (const handler of node.listeners[type] || []) handler({ stopPropagation() {}, preventDefault() {}, currentTarget: node, ...event }); };
+  return { drawn, calls, byTestId, textOf, fire, all };
+}
+
+test('B01·B02 화면: 멤버 줄이 얼굴·이름·상태 점으로 그려지고, 초대 목록에서 고르면 그 Agent가 초대된다', () => {
+  const thread = room({ participants: ['나', '디자인 리뷰어', '멤버 3'], participantRoles: { 나: 'owner', '디자인 리뷰어': 'admin', '멤버 3': 'member' },
+    participantAgents: { '디자인 리뷰어': { profileId: ID_A, avatar: EMOJI } } });
+  const runs = [{ runId: 'r1', status: 'running', authorName: '디자인 리뷰어' }];
+
+  const closed = drawMemberRow({ thread, runs });
+  assert.equal(closed.drawn.memberMenuPanel, null, 'nothing floats until asked');
+  const chips = closed.byTestId('chat-thread-member');
+  assert.deepEqual(chips.map(chip => [chip.tag, chip.dataset.member, chip.dataset.status]), [['span', '나', 'none'], ['button', '디자인 리뷰어', 'active'], ['button', '멤버 3', 'none']]);
+  assert.deepEqual(chips.map(chip => closed.textOf(chip)), ['나나소유자', '🦉디자인 리뷰어관리자', '멤멤버 3멤버'], 'face, name, role — the name-only member shows its first letter');
+  assert.equal(closed.byTestId('chat-thread-member-status').length, 1);
+  assert.equal(closed.byTestId('chat-thread-member-status')[0].props['aria-label'], '작업 중');
+  assert.equal(chips[1].props['aria-expanded'], 'false');
+  assert.equal(chips[1].props.title, '디자인 리뷰어 · 관리자 · 작업 중 · 멤버 관리');
+  assert.equal(closed.all(chips[1]).filter(node => node.dataset.icon === 'chevron').length, 1);
+  const invite = closed.byTestId('chat-thread-invite')[0];
+  assert.deepEqual([closed.textOf(invite), invite.props['aria-expanded'], invite.props['aria-haspopup']], ['초대', 'false', 'menu']);
+  closed.fire(invite, 'click');
+  assert.deepEqual(closed.calls, [['toggleInviteMenu', 'room-1']], 'pressing 초대 opens the list; nobody is added');
+  closed.fire(chips[2], 'click');
+  assert.deepEqual(closed.calls.at(-1), ['toggleMemberMenu', 'room-1', '멤버 3']);
+  assert.deepEqual(chips[0].listeners, {}, 'the person is not a button');
+
+  const inviting = drawMemberRow({ thread, runs, memberMenu: { threadId: 'room-1', memberName: null, invite: true, left: 40.4, top: 90 } });
+  const list = inviting.byTestId('chat-thread-invite-menu')[0];
+  assert.deepEqual([list.props.role, list.props.style], ['menu', { left: '40px', top: '90px' }]);
+  const choices = inviting.byTestId('chat-thread-invite-choice');
+  assert.deepEqual(choices.map(choice => [choice.dataset.choice, inviting.textOf(choice)]), [['codex', 'CCodex기본 Codex'], [`agent:${ID_B}`, '검검증 담당검증 담당 역할']]);
+  assert.equal(inviting.byTestId('chat-thread-invite-note').length, 0);
+  assert.equal(inviting.byTestId('chat-thread-invite')[0].props['aria-expanded'], 'true');
+  inviting.fire(choices[1], 'click');
+  assert.deepEqual(inviting.calls, [['inviteToThread', 'room-1', `agent:${ID_B}`]]);
+  assert.equal(inviting.byTestId('chat-thread-invite')[0].focusCount, 1, 'after a pick, focus is back on 초대');
+  inviting.fire(inviting.byTestId('chat-thread-invite-create')[0], 'click');
+  assert.deepEqual(inviting.calls.slice(1), [['closeMemberMenu'], ['spawnSettingsCard', 'agents']]);
+  inviting.calls.length = 0;
+  inviting.fire(list, 'keydown', { key: 'Escape' });
+  assert.deepEqual(inviting.calls, [['closeMemberMenu']], 'Esc closes the invite list');
+  assert.equal(inviting.byTestId('chat-thread-invite')[0].focusCount, 2, 'and focus returns to 초대');
+  inviting.fire(list, 'keydown', { key: 'ArrowDown' });
+  assert.equal(choices[0].focusCount, 1, 'the arrow keys walk the rows');
+  inviting.fire(list, 'keydown', { key: 'End' });
+  assert.equal(inviting.byTestId('chat-thread-invite-create')[0].focusCount, 1);
+
+  const none = drawMemberRow({ thread: room({ participants: ['나', 'Codex'] }), memberMenu: { threadId: 'room-1', memberName: null, invite: true }, catalog: { status: 'ready', profiles: [] } });
+  assert.equal(none.byTestId('chat-thread-invite-choice').length, 0);
+  assert.equal(none.textOf(none.byTestId('chat-thread-invite-note')[0]), '아직 만든 Agent가 없습니다.');
+  assert.equal(none.textOf(none.byTestId('chat-thread-invite-create')[0]), 'Agent 만들기');
+
+  const managing = drawMemberRow({ thread, runs, memberMenu: { threadId: 'room-1', memberName: '멤버 3', left: 10, top: 20 } });
+  const menu = managing.byTestId('chat-thread-member-menu')[0];
+  assert.equal(menu.props['aria-label'], '멤버 3 멤버 관리');
+  const items = managing.all(menu).filter(node => node.tag === 'button');
+  assert.deepEqual(items.map(item => [managing.textOf(item), item.props.role, item.props['aria-checked'] ?? null]),
+    [['관리자', 'menuitemradio', 'false'], ['멤버', 'menuitemradio', 'true'], ['Board Thread에서 제거', 'menuitem', null]]);
+  assert.equal(managing.byTestId('chat-thread-member')[2].props['aria-expanded'], 'true');
+  managing.fire(items[0], 'click');
+  managing.fire(items[2], 'click');
+  managing.fire(menu, 'keydown', { key: 'Escape' });
+  assert.deepEqual(managing.calls, [['setThreadMemberRole', 'room-1', '멤버 3', 'admin'], ['removeFromThread', 'room-1', '멤버 3'], ['closeMemberMenu']]);
+  assert.equal(managing.byTestId('chat-thread-invite-menu').length, 0, 'one list at a time');
+});
+
 test('B02 스타일: 역할 글자 11px 이상, 상태 점은 토큰 색, 누를 수 있는 것은 hover·active·focus 표현', () => {
   const rule = (selector) => {
     const at = surfaceCss.indexOf(`\n${selector} {`);
