@@ -261,6 +261,11 @@ test('shared RunResult styles separate metadata and bound command/output scrolli
   assert.match(style('.egdesk-run-result-command'), /line-height: 1\.5; padding-bottom: 16px; min-height: calc\(1\.5em \+ 16px\)/,
     'the native overlay scrollbar has space below the glyph line without changing copyable command text');
   assert.match(style('.egdesk-run-result .egdesk-run-result-tail'), /max-height: 18rem; overflow-y: auto/);
+  // A short host lowers the output height through the shared card's own
+  // compact class, so the Terminal panel needs no parent selector.
+  assert.match(style('.egdesk-run-result.egdesk-run-result-compact .egdesk-run-result-tail'), /max-height: 10rem/);
+  const terminal = await fs.readFile(new URL('../overlay/resources/surface/EGDeskSurfaceTerminal.mjs', import.meta.url), 'utf8');
+  assert.match(terminal, /resultCard\.className = `\$\{resultCard\.className\} egdesk-run-result-compact`/);
   assert.match(style('.egdesk-run-result-failure'), /margin: 8px 0/);
   assert.match(style('.egdesk-run-result-failure-name'), /display: block; margin-bottom: 4px/);
   for (const selector of ['.egdesk-run-result', '.egdesk-run-result-header', '.egdesk-run-result-meta', '.egdesk-run-result-output']) {

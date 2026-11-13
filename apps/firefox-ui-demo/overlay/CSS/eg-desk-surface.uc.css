@@ -5516,6 +5516,8 @@
 .egdesk-run-result .egdesk-run-result-tail { display: block; width: 100%; min-width: 0; max-width: 100%; box-sizing: border-box; overflow-x: auto; white-space: pre; overflow-wrap: normal; word-break: normal; font-family: ui-monospace, monospace; }
 .egdesk-run-result-command { flex: 0 1 100%; line-height: 1.5; padding-bottom: 16px; min-height: calc(1.5em + 16px); }
 .egdesk-run-result .egdesk-run-result-tail { max-height: 18rem; overflow-y: auto; margin: 8px 0; padding: 8px; font-size: 12px; }
+/* Shared compact variant for a host with little height; the host opts in on the card itself, never through a parent selector. */
+.egdesk-run-result.egdesk-run-result-compact .egdesk-run-result-tail { max-height: 10rem; }
 .egdesk-run-result-command:focus-visible, .egdesk-run-result-tail:focus-visible { outline: var(--egd-focus-outline); outline-offset: var(--egd-focus-outline-offset); }
 .egdesk-run-result-failures { min-width: 0; max-width: 100%; box-sizing: border-box; padding-left: 20px; }
 .egdesk-run-result-failure { min-width: 0; margin: 8px 0; overflow-wrap: anywhere; }
@@ -5529,7 +5531,6 @@
 .egd-terminal-run-result-title { font-weight: 600; }
 .egd-terminal-run-result-note { flex: 1 1 auto; min-width: 0; font-size: 11px; color: var(--egd-on-surface-variant); }
 .egd-terminal-run-result-close { flex: 0 0 auto; font: inherit; font-size: 11px; padding: 1px 8px; border-radius: 6px; border: 1px solid var(--egd-outline); background: transparent; color: inherit; cursor: pointer; }
-.egd-terminal-run-result .egdesk-run-result-tail { max-height: 10rem; }
 .egd-terminal-run-chip { flex: 0 1 auto; margin-left: auto; max-width: 42%; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font: inherit; font-size: 11px; line-height: 1.4; padding: 1px 9px; border-radius: 999px; border: 1px solid rgba(255, 255, 255, 0.18); background: rgba(255, 255, 255, 0.08); color: #B9C3CC; cursor: pointer; }
 .egd-terminal-run-chip[hidden] { display: none; }
 .egd-terminal-run-chip[data-outcome="failed"] { color: #FFB4A9; border-color: rgba(255, 180, 169, 0.45); }
