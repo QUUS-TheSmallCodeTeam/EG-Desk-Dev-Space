@@ -3713,17 +3713,18 @@ test('passive Board status stays off the lower Chat composer while its close con
   assert.equal(notice, null, 'the close button still dismisses the notice');
 });
 
-test('empty logged-in Chat uses plain first-message guidance while keeping title and auth fallback', () => {
+test('empty logged-in Chat uses plain first-message guidance while keeping title and auth fallback', async () => {
   const body = surfaceSource.match(/          (const canStart = [\s\S]*?)\n          messages\.appendChild\(el\('div', \{ class: 'egd-codex-empty-state' \}, \.\.\.emptyChildren\)\);/)?.[1];
   assert.ok(body, 'exercise the production empty-state branches');
   const calls = [];
-  const renderEmpty = compileFunction(`return function renderEmpty(codex) {
+  const ChatHistoryView = await import('../overlay/resources/EGDeskChatHistoryView.sys.mjs');
+  const renderEmpty = compileFunction(`return function renderEmpty(codex, activeThread = { type: 'dm' }) {
     const activeEngine = ChatState.chatThreadReadiness({engineId: 'codex'}, codex);
     ${body}\n    return emptyChildren;
-  }`, ['el', 'codexBridge', 'ChatState'])((tag, props, ...children) => ({ tag, props, className: props.class, children }), {
+  }`, ['el', 'codexBridge', 'ChatState', 'ChatHistoryView'])((tag, props, ...children) => ({ tag, props, className: props.class, children }), {
     startLogin: () => calls.push('login'),
     refreshAuthStatus: () => calls.push('refresh'),
-  }, Chat);
+  }, Chat, ChatHistoryView);
   const loggedIn = renderEmpty({ authStatus: { isLoggedIn: true } });
   const emptyClasses = ['egd-codex-empty-eyebrow', 'egd-codex-empty-title', 'egd-codex-empty-sub'];
   assert.deepEqual(loggedIn.map(node => node.className), emptyClasses);
@@ -3735,7 +3736,12 @@ test('empty logged-in Chat uses plain first-message guidance while keeping title
   assert.deepEqual(loggedOut.map(node => node.className), [
     'egd-codex-empty-eyebrow', 'egd-codex-empty-title', 'egd-codex-empty-actions',
   ]);
-  assert.deepEqual(loggedOut.slice(0, 2).map(node => node.children[0]), ['Codex 연결', '로그인 필요']);
+  // A39: the room kind leads; the provider that needs connecting is a small badge.
+  assert.deepEqual(loggedOut.slice(0, 2).map(node => node.children[0]), ['Agent DM', '로그인 필요']);
+  assert.equal(loggedOut[0].children.length, 2);
+  assert.equal(loggedOut[0].children[1].className, 'egd-codex-engine-badge');
+  assert.deepEqual(loggedOut[0].children[1].children, ['Codex']);
+  assert.equal(renderEmpty({ authStatus: { isLoggedIn: false } }, { type: 'group' })[0].children[0], 'Board Thread');
   const actions = loggedOut[2].children;
   assert.deepEqual(actions.map(node => node.children[0]), ['로그인', '상태 새로고침']);
   assert.deepEqual(actions.map(node => node.className), [
@@ -8362,6 +8368,10 @@ test('Chat pending scroll intent preserves the rendered viewport across SSE rere
   const mount = surfaceSource.match(/  function mountCodexHUD\(body, codexBridge, options = \{\}\) \{([\s\S]*?)\n  \}/)?.[1];
   assert.ok(mount, 'production Chat mount remains directly testable');
   const declaration = mount.match(/    let pendingMessageScroll = null;/)?.[0];
+  // A43: the '새 메시지' notice lives beside the pending scroll intent.
+  const noticeDeclaration = mount.match(/    let newMessageNotice = null;/)?.[0];
+  assert.ok(noticeDeclaration, 'production new-message notice declaration must remain testable');
+  const ChatHistoryView = await import('../overlay/resources/EGDeskChatHistoryView.sys.mjs');
   const gesture = mount.match(/    const onMessageScrollGesture = \(ev\) => \{[\s\S]*?\n    \};/)?.[0];
   const snapshot = mount.match(/      const oldInput = body\.querySelector\('\.egd-codex-input'\);[\s\S]*?(?=\n      composerObserver\?\.disconnect\(\);)/)?.[0];
   const restore = mount.match(/      const msgEl = body\.querySelector\("\.egd-codex-messages"\);[\s\S]*?(?=\n      const newInput = body\.querySelector)/)?.[0];
@@ -8375,9 +8385,11 @@ test('Chat pending scroll intent preserves the rendered viewport across SSE rere
   class ChatScrollElement {}
   class ChatScrollLog extends ChatScrollElement {
     constructor({ thread = 'A', last = 'u1', height = 1800, viewport = 300, top = 0,
-      rows = [{ id: 'middle', offset: 220, height: 40 }] } = {}) {
+      rows = [{ id: 'middle', offset: 220, height: 40 }], answer = 'a1' } = {}) {
       super();
-      this.dataset = { threadId: thread, lastUserMessageId: last };
+      this.dataset = { threadId: thread, lastUserMessageId: last, lastAnswerId: answer };
+      this.docks = [];
+      this.listeners = {};
       this.scrollHeight = height;
       this.clientHeight = viewport;
       this._top = top;
@@ -8394,10 +8406,13 @@ test('Chat pending scroll intent preserves the rendered viewport across SSE rere
       }));
     }
     closest(selector) { return selector === '.egd-codex-messages' ? this : null; }
+    appendChild(node) { node.remove = () => { this.docks = this.docks.filter(dock => dock !== node); }; this.docks.push(node); }
+    addEventListener(type, fn) { this.listeners[type] = fn; }
   }
 
   const bind = compileFunction([
     declaration,
+    noticeDeclaration,
     surfaceSource.match(/  function createChatComposerViewport\([\s\S]*?\n  \}/)[0],
     'const composerViewport = createChatComposerViewport();',
     'const onComposerViewportGesture = () => {};',
@@ -8421,7 +8436,7 @@ test('Chat pending scroll intent preserves the rendered viewport across SSE rere
     cleanup,
     '};',
     'return { render, gesture: onMessageScrollGesture, cleanup };',
-  ].join('\n'), ['body', 'document', 'Element', 'requestAnimationFrame', 'window', 'codexBridge']);
+  ].join('\n'), ['body', 'document', 'Element', 'requestAnimationFrame', 'window', 'codexBridge', 'ChatHistoryView', 'buildCodexNewMessageButton']);
 
   const harness = (initial = new ChatScrollLog({ last: '', height: 100, rows: [] })) => {
     const frames = [], removed = [];
@@ -8434,7 +8449,8 @@ test('Chat pending scroll intent preserves the rendered viewport across SSE rere
     const api = bind(body,
       { activeElement: null, removeEventListener(type) { removed.push('document:' + type); } },
       ChatScrollElement, callback => frames.push(callback),
-      { removeEventListener(type) { removed.push('window:' + type); } }, { clearTaskAnswers: () => productionTaskAnswerFactory()(() => ({}), Chat.createChatEpochScope()).dispose() });
+      { removeEventListener(type) { removed.push('window:' + type); } }, { clearTaskAnswers: () => productionTaskAnswerFactory()(() => ({}), Chat.createChatEpochScope()).dispose() },
+      ChatHistoryView, onPress => ({ className: 'egd-codex-new-message-dock', press: onPress }));
     return {
       render: api.render,
       gesture: event => api.gesture({ target: body.log, ...event }),
@@ -8518,6 +8534,50 @@ test('Chat pending scroll intent preserves the rendered viewport across SSE rere
     h.gesture({ type: 'wheel', deltaY: -100, ctrlKey: true });
     h.flush();
     assert.equal(h.log.scrollTop, 1300);
+  });
+
+  await t.test("reading further up, a new answer shows '새 메시지' and keeps the reading place", () => {
+    const h = harness(new ChatScrollLog({ top: 200 }));
+    h.render(new ChatScrollLog({ height: 2000 }));
+    assert.equal(h.log.docks.length, 0, 'the same answer growing adds no button');
+    h.render(new ChatScrollLog({ height: 2300, answer: 'a2' }));
+    h.flush();
+    assert.equal(h.log.docks.length, 1);
+    assert.equal(h.log.scrollTop, 200, 'the reader stays where they were');
+    h.render(new ChatScrollLog({ height: 2600, answer: 'a2' }));
+    h.flush();
+    assert.equal(h.log.docks.length, 1, 'it stays through later renders of the same answer');
+    h.log.listeners.scroll();
+    assert.equal(h.log.docks.length, 1, 'scrolling while still above keeps it');
+    h.log.docks[0].press();
+    assert.equal(h.log.scrollTop, 2300, 'pressing it shows the newest message');
+    assert.equal(h.log.docks.length, 0);
+    h.render(new ChatScrollLog({ height: 2900, answer: 'a3' }));
+    h.flush();
+    assert.equal(h.log.docks.length, 0, 'at the bottom the log follows the next answer without a button');
+    assert.equal(h.log.scrollTop, 2600);
+  });
+
+  await t.test("scrolling down to the newest message, sending, or changing rooms clears '새 메시지'", () => {
+    const shown = () => {
+      const h = harness(new ChatScrollLog({ top: 200 }));
+      h.render(new ChatScrollLog({ height: 2300, answer: 'a2' }));
+      h.flush();
+      assert.equal(h.log.docks.length, 1);
+      return h;
+    };
+    const scrolled = shown();
+    scrolled.log.scrollTop = 2000;
+    scrolled.log.listeners.scroll();
+    assert.equal(scrolled.log.docks.length, 0);
+    scrolled.render(new ChatScrollLog({ height: 2300, answer: 'a2' }));
+    assert.equal(scrolled.log.docks.length, 0, 'it does not come back for the answer already seen');
+    const sent = shown();
+    sent.render(new ChatScrollLog({ last: 'u2', height: 2500, answer: 'a2' }));
+    assert.equal(sent.log.docks.length, 0);
+    const moved = shown();
+    moved.render(new ChatScrollLog({ thread: 'B', height: 900, answer: 'b9' }));
+    assert.equal(moved.log.docks.length, 0);
   });
 
   await t.test('mount cleanup cancels pending rAF work and removes gesture listeners', () => {

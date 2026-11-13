@@ -7393,6 +7393,60 @@
 .egd-codex-message-meta,
 .egd-codex-message-time { font-size: 11px; color: var(--egd-on-surface-variant); }
 .egd-codex-message-meta { line-height: 1.5; padding: 0 2px; }
+/* A18·A41: the day line above the first message of the conversation and of
+   each new day ('오늘 · 오전 9:41', '11월 13일'). Approved .eg-chat-day. */
+.egd-codex-day {
+  flex-shrink: 0;
+  width: min(100%, 760px);
+  margin-inline: auto;
+  padding: 2px 0;
+  font-size: 11px;
+  line-height: 1.5;
+  color: var(--egd-on-surface-variant);
+  text-align: center;
+}
+/* A43: '새 메시지' floats over the foot of the log while reading further up.
+   The dock has no height and takes back the log's row gap, so the log is no
+   longer than its messages. */
+.egd-codex-new-message-dock {
+  position: sticky;
+  bottom: 0;
+  z-index: 2;
+  flex: none;
+  align-self: stretch;
+  height: 0;
+  margin-top: -14px;
+  pointer-events: none;
+}
+.egd-codex-new-message {
+  position: absolute;
+  left: 50%;
+  bottom: 2px;
+  transform: translateX(-50%);
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  min-height: 28px;
+  padding: 0 8px 0 12px;
+  border: 1px solid var(--egd-outline);
+  border-radius: 999px;
+  background: var(--egd-chat-paper);
+  box-shadow: var(--egd-chrome-shadow);
+  color: var(--egd-primary);
+  font-size: 11.5px;
+  font-weight: 650;
+  line-height: 1;
+  white-space: nowrap;
+  pointer-events: auto;
+  transition: background-color .12s ease, border-color .12s ease;
+}
+.egd-codex-new-message:hover { background: var(--egd-hover); border-color: var(--egd-primary); }
+.egd-codex-new-message:active { background: var(--egd-chat-outline-soft); }
+.egd-codex-new-message:focus-visible { outline: var(--egd-focus-outline); outline-offset: var(--egd-focus-outline-offset); }
+.egd-codex-new-message-icon { flex: none; width: 14px; height: 14px; }
+@media (prefers-reduced-motion: reduce) {
+  .egd-codex-new-message { transition: none; }
+}
 .egd-codex-result-chips { gap: 6px; margin-top: 8px; }
 /* The legacy chip recipe above is already !important; match its specificity
    only here so real result/briefing actions keep the approved attached-card look. */
@@ -7408,6 +7462,7 @@
 }
 .egd-codex-empty-state { width: 100%; max-width: 300px; align-self: flex-start; padding: 0; }
 .egd-codex-empty-eyebrow { margin-bottom: 5px; font-size: 11px; font-weight: 600; letter-spacing: .03em; }
+.egd-codex-empty-eyebrow .egd-codex-engine-badge { margin-left: 6px; letter-spacing: 0; vertical-align: 1px; }
 .egd-codex-empty-title { font-size: 16px; font-weight: 650; line-height: 1.35; letter-spacing: -.025em; }
 .egd-codex-empty-sub { max-width: 300px; margin-top: 5px; font-size: 11.5px; line-height: 1.5; word-break: keep-all; }
 .egd-codex-empty-actions { gap: 8px; margin-top: 13px; }
@@ -7970,6 +8025,10 @@ button.egd-codex-session-badge-link:hover { text-decoration: underline; }
 button.egd-codex-session-badge-link:focus-visible { outline: var(--egd-focus-outline); outline-offset: var(--egd-focus-outline-offset); }
 .egd-codex-conversation-hud-badges { display: flex; align-items: center; gap: 4px; min-height: 16px; }
 .egd-codex-thread-active-title .egd-codex-session-badge { margin-left: 6px; vertical-align: 1px; }
+/* A42: Agent DM / Board Thread beside the open conversation's title and each room row's title. */
+.egd-codex-thread-active-title .egd-codex-thread-kind { margin-left: 6px; vertical-align: 1px; }
+.egd-codex-thread-item-top .egd-codex-thread-kind { flex: none; }
+.egd-codex-thread-item-top .egd-codex-thread-time { flex: none; margin-left: auto; }
 .egd-codex-thread-menu-item:disabled,
 .egd-codex-thread-menu-item:disabled:hover { background: transparent; color: var(--egd-on-surface-variant); opacity: var(--egd-opacity-disabled); }
 .egd-codex-message-menu-trigger {
