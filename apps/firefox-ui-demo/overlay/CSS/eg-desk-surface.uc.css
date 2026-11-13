@@ -4748,17 +4748,19 @@
   align-items: center;
   justify-content: space-between;
   gap: 8px;
-  min-height: 24px;
+  min-height: 26px;
   flex-wrap: wrap;
 }
 
 .egd-codex-thread-members {
   min-width: 0;
-  min-height: 24px;
+  min-height: 26px;
   display: flex;
   align-items: center;
   gap: 5px;
-  padding-bottom: 0;
+  /* Room for a chip's focus ring inside the clipping box. */
+  padding: 4px;
+  margin: -4px;
   overflow: hidden;
 }
 
@@ -4771,15 +4773,15 @@
   display: inline-flex;
   align-items: center;
   justify-content: flex-start;
-  min-height: 23px;
-  padding: 0 8px;
+  min-height: 26px;
+  padding: 0 8px 0 3px;
   border-radius: 999px;
   background: color-mix(in srgb, var(--egd-primary) 9%, transparent);
-  color: var(--egd-on-surface-variant);
-  font-size: 10px;
+  color: var(--egd-on-surface);
+  font-size: 11px;
   line-height: 1;
   white-space: nowrap;
-  gap: 4px;
+  gap: 5px;
   border: 1px solid transparent;
 }
 
@@ -4788,10 +4790,56 @@
 }
 
 .egd-codex-thread-member-clickable:hover,
-.egd-codex-thread-member-menu-open {
+.egd-codex-thread-member-menu-open,
+.egd-codex-thread-invite-trigger-open {
   border-color: var(--egd-chat-accent-strong);
   background: color-mix(in srgb, var(--egd-primary) 15%, transparent);
 }
+
+.egd-codex-thread-member-clickable:active {
+  background: color-mix(in srgb, var(--egd-primary) 22%, transparent);
+}
+
+.egd-codex-thread-member-clickable:focus-visible,
+.egd-codex-thread-invite-trigger:focus-visible,
+.egd-codex-thread-member-menu-item:focus-visible {
+  outline: var(--egd-focus-outline);
+  outline-offset: var(--egd-focus-outline-offset);
+}
+
+/* CHAT-10: the member's face (the message avatar, chip-sized) and, only when
+   a run of that Agent in this room says so, its status dot. */
+.egd-codex-thread-member-face-wrap {
+  position: relative;
+  display: inline-flex;
+  flex: none;
+}
+
+.egd-codex-thread-member .egd-codex-thread-member-face,
+.egd-codex-thread-invite-item .egd-codex-thread-invite-face {
+  width: 20px;
+  height: 20px;
+  min-width: 20px;
+  margin: 0;
+  border-radius: 50%;
+  font-size: 11px;
+  overflow: hidden;
+}
+
+.egd-codex-thread-member-status {
+  position: absolute;
+  right: -2px;
+  bottom: -2px;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  border: 1px solid var(--egd-surface-elevated);
+  background: var(--egd-avatar-muted);
+}
+.egd-codex-thread-member-status-active { background: var(--egd-primary); }
+.egd-codex-thread-member-status-waiting { background: var(--egd-warning-ink); }
+.egd-codex-thread-member-status-blocked { background: var(--egd-danger-ink); }
+.egd-codex-thread-member-status-done { background: var(--egd-success-ink); }
 
 .egd-codex-thread-member-name {
   max-width: 102px;
@@ -4805,12 +4853,12 @@
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  min-height: 15px;
-  padding: 0 4px;
+  min-height: 17px;
+  padding: 0 5px;
   border-radius: 999px;
   background: color-mix(in srgb, var(--egd-surface-elevated) 82%, transparent);
   color: var(--egd-on-surface-variant);
-  font-size: 8px;
+  font-size: 11px;
   line-height: 1;
 }
 
@@ -4819,8 +4867,9 @@
 }
 
 .egd-codex-thread-member-caret {
-  font-size: 10px;
-  line-height: 1;
+  flex: none;
+  width: 12px;
+  height: 12px;
   color: var(--egd-on-surface-variant);
 }
 
@@ -4845,6 +4894,7 @@
   display: inline-flex;
   align-items: center;
   justify-content: flex-start;
+  gap: 8px;
   min-height: 27px;
   padding: 0 8px;
   border-radius: 7px;
@@ -4852,6 +4902,63 @@
   font-size: 11px;
   color: var(--egd-on-surface);
   line-height: 1.2;
+}
+
+.egd-codex-thread-member-menu-check {
+  flex: none;
+  width: 12px;
+  height: 12px;
+  margin-left: auto;
+}
+
+/* CHAT-10: the '초대' list — saved Agents by face and name. */
+.egd-codex-thread-invite-menu {
+  width: 248px;
+  max-height: 300px;
+  overflow-y: auto;
+}
+
+.egd-codex-thread-invite-label,
+.egd-codex-thread-invite-note {
+  padding: 3px 8px;
+  font-size: 11px;
+  line-height: 1.4;
+  color: var(--egd-on-surface-variant);
+}
+
+.egd-codex-thread-invite-item {
+  min-height: 32px;
+}
+
+.egd-codex-thread-invite-name {
+  flex: none;
+  max-width: 120px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-weight: 600;
+}
+
+.egd-codex-thread-invite-role {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--egd-on-surface-variant);
+}
+
+.egd-codex-thread-invite-create {
+  flex: none;
+  margin-top: 2px;
+  border-top: 1px solid var(--egd-chat-outline-soft);
+  border-radius: 0 0 7px 7px;
+  color: var(--egd-primary);
+}
+
+.egd-codex-thread-invite-create-icon {
+  flex: none;
+  width: 12px;
+  height: 12px;
 }
 
 .egd-codex-thread-member-menu-item:hover {
