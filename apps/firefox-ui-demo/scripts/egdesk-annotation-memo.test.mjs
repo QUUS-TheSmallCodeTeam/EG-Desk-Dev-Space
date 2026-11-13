@@ -355,7 +355,7 @@ test('memo badge: exact target View display text is local-only; Agent label and 
     card.dataset.deskWindowKind = kind;
     card.querySelector = () => { throw new Error('Unknown kinds cannot query arbitrary metadata'); };
     api.syncMemoCardPosition(root);
-    assert.equal(badge.textContent, '📎 Card');
+    assert.equal(badge.textContent, '📎 창');
   }
   nodes.delete('target-a');
   scope.memoAnchorCandidates = () => [];

@@ -7436,6 +7436,10 @@
    only here so real result/briefing actions keep the approved attached-card look. */
 .egd-codex-result-chip { min-height: 32px !important; padding: 6px 9px !important; border: 1px solid var(--egd-outline) !important; border-radius: 7px !important; background: var(--egd-chat-paper) !important; color: var(--egd-on-surface) !important; font-size: 11.5px !important; font-weight: 600 !important; }
 .egd-codex-result-chip:hover { background: var(--egd-hover) !important; border-color: var(--egd-primary) !important; }
+/* This chip sets its fill with !important, which outranks the shared pressed
+   rule, so it repeats the same veil here. */
+.egd-codex-result-chip:active:not(:disabled) { background-image: linear-gradient(var(--egd-pressed-veil), var(--egd-pressed-veil)) !important; }
+.egd-codex-result-arrow .egd-ui-icon { width: 11px; height: 11px; }
 .egd-codex-empty-eyebrow,
 .egd-codex-empty-sub,
 .egd-codex-compose-hint { color: var(--egd-on-surface-variant); }

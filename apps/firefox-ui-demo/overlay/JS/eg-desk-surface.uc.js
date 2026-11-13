@@ -1155,7 +1155,7 @@
   function codexMessageRoleLabel(role) {
     if (role === 'user') return SELF_MEMBER;
     if (role === 'assistant') return 'Codex';
-    if (role === 'system') return 'System';
+    if (role === 'system') return '시스템';
     return role || '메시지';
   }
 
@@ -1245,7 +1245,7 @@
         openCodexResultLink(artifact, { opener: ev.currentTarget?.closest?.('.egd-chat-card') || null });
       },
     }, el('span', { class: 'egd-codex-result-label' }, artifact.label || artifact.target.path.split('/').pop()),
-    el('span', { 'aria-hidden': 'true', class: 'egd-codex-result-arrow' }, '↗'))));
+    el('span', { 'aria-hidden': 'true', class: 'egd-codex-result-arrow' }, deskIcon('arrow')))));
   }
 
   // CHAT-08 / D-K4: an Agent-published Canvas result is one chip per outputKey
@@ -3921,7 +3921,7 @@
           data: { testid: 'result-card-artifact', artifactId: artifact.id },
           onclick: (ev) => { ev.preventDefault(); ev.stopPropagation(); openCodexResultLink(artifact, { opener: shell.root }); },
         }, el('span', { class: 'egd-codex-result-label' }, artifact.label || artifact.target.path.split('/').pop()),
-        el('span', { 'aria-hidden': 'true', class: 'egd-codex-result-arrow' }, '↗'))))) : null;
+        el('span', { 'aria-hidden': 'true', class: 'egd-codex-result-arrow' }, deskIcon('arrow')))))) : null;
       const parts = [
         el('header', { class: 'egd-result-card-source', data: { testid: 'result-card-source' } },
           el('span', { class: 'egd-result-card-source-line' }, source.line),
@@ -7958,7 +7958,7 @@
   }
 
   function cardLabelForViewportRail(card) {
-    if (!card) return 'Card';
+    if (!card) return '창';
     if (card.classList.contains('egd-terminal-card')) return 'Terminal';
     if (card.classList.contains('egd-settings-card')) return '설정';
     if (card.classList.contains('egd-ontology-card')) return '온톨로지';
@@ -7970,7 +7970,7 @@
     if (urlInput && typeof urlInput.value === 'string' && urlInput.value.trim()) {
       return 'Browser';
     }
-    return card.getAttribute('title') || 'Card';
+    return card.getAttribute('title') || '창';
   }
 
   function syncViewportAgendaRail() {
@@ -16424,7 +16424,7 @@
         settings: ['.egd-settings-title', '설정'], ontology: ['.egd-ontology-title', '온톨로지'],
         'input-evidence': ['.egd-desk-window-identity strong', '자료'], result: ['.egd-result-card-title', '결과'],
       }[kind];
-      return display ? card.querySelector(display[0])?.textContent?.trim() || display[1] : 'Card';
+      return display ? card.querySelector(display[0])?.textContent?.trim() || display[1] : '창';
     }
     const memo = root?._memoRecord;
     if (!memo || !root.isConnected) return;

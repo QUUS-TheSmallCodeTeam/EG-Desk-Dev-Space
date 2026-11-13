@@ -91,6 +91,15 @@ test('A30 one zero-specificity rule presses every enabled button-like control', 
   assert.match(source, /^[^;]*\) !important;/);
 });
 
+test('A30 a control that fills itself with !important repeats the veil at its own weight', () => {
+  // An !important class fill outranks the zero-weight rule, so such a control
+  // would otherwise show nothing while pressed.
+  const veil = 'background-image: linear-gradient(var(--egd-pressed-veil), var(--egd-pressed-veil)) !important;';
+  const owners = [...surfaceCss.matchAll(/^(\.egd-[\w-]+):hover \{[^}]*background: [^;}]*!important/gm)].map(match => match[1]);
+  assert.deepEqual(owners, ['.egd-codex-result-chip'], 'a new !important hover fill needs its own pressed rule and an entry here');
+  for (const owner of owners) assert.ok(surfaceCss.includes(`${owner}:active:not(:disabled) { ${veil} }`), owner);
+});
+
 test('A30 pressing never changes size or position', () => {
   for (const rule of surfaceRules) {
     if (!rule.selectors.some(selector => /:active\b/.test(selector))) continue;

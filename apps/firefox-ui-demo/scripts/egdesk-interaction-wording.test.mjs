@@ -50,6 +50,23 @@ test('B27 the side Chat panel is titled 채팅, not 코덱스 채팅', () => {
   assert.ok(surfaceJs.includes("textContent = appId === 'chat' ? '채팅' : appLabel;"));
 });
 
+test('A36 an unnamed window and a system message fall back to Korean words', () => {
+  for (const english of ["'Card'", "'System'"]) assert.equal(occurrences(surfaceJs, english), 0, english);
+  const rail = between(surfaceJs, 'function cardLabelForViewportRail(card) {', '\n  }\n');
+  assert.match(rail, /if \(!card\) return '창';/);
+  assert.match(rail, /getAttribute\('title'\) \|\| '창';/);
+  assert.match(between(surfaceJs, 'function codexMessageRoleLabel(role) {', '\n  }\n'), /role === 'system'\) return '시스템';/);
+});
+
+test('B06 the open-file arrow on result chips is the shared arrow icon', () => {
+  assert.equal(occurrences(surfaceJs, "'↗'"), 0);
+  assert.equal(occurrences(surfaceJs, "{ 'aria-hidden': 'true', class: 'egd-codex-result-arrow' }, deskIcon('arrow'))"), 2);
+  const rule = surfaceRules.find(candidate => candidate.selectors.includes('.egd-codex-result-arrow .egd-ui-icon'));
+  assert.ok(rule, 'the arrow needs a size beside the chip label');
+  const declared = Object.fromEntries(rule.declarations);
+  assert.equal(declared.width, declared.height);
+});
+
 // Each entry: a marker that starts the control, and how many of them exist.
 const ICON_CLOSE_CONTROLS = [
   ["class: 'egd-store-panel-close'", 6],
