@@ -7214,10 +7214,12 @@
     return Array.from(ids).map((id) => {
       const snapshot = store.agendas?.[id] || null;
       const meta = store.meta?.[id] || null;
-      const current = id === state.agenda.activeAgendaId;
+      const closedAt = meta?.closedAt || null;
+      // A Board marked closed is not the one on the Desk, even while the Desk
+      // still remembers its id (closed, or deleted and restored from the trash).
+      const current = id === state.agenda.activeAgendaId && !closedAt;
       const updatedAt = snapshot?.savedAt || meta?.updatedAt || meta?.createdAt || null;
       const lastOpenedAt = meta?.lastOpenedAt || null;
-      const closedAt = meta?.closedAt || null;
       const liveCount = current
         ? document.querySelectorAll('.egd-canvas-card, .egd-canvas-shape').length
         : 0;
@@ -8147,7 +8149,8 @@
             entry.current && agendaEntryStatus(entry) !== '현재' ? '현재' : null,
             agendaEntryStatus(entry),
             entry.archived ? '보관됨' : null,
-            SurfaceState.boardEntryRecencyLabel(entry),
+            // '닫힘' already says it; '닫은 기록' would repeat the same state.
+            agendaEntryStatus(entry) === '닫힘' ? null : SurfaceState.boardEntryRecencyLabel(entry),
             SurfaceState.boardItemCountLabel(entry.count),
           ].filter(Boolean).join(' · '),
         ),

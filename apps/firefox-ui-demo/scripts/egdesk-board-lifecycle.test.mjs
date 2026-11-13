@@ -804,3 +804,22 @@ test('screen: 보관함으로 이동 / 보관 해제 write the mark and say wher
   // Saving an open Board keeps its 보관함 mark.
   assert.match(declaration('saveCurrentAgendaState'), /archivedAt: store\.meta\[agendaId\]\.archivedAt/);
 });
+
+test('screen: a Board restored from the trash is listed as closed only, never as the current Board too', () => {
+  // The Desk still remembers the id of the Board it last saved under after that Board went to the trash.
+  const trashed = Lifecycle.trashBoard({ activeAgendaId: 'a', agendas: { a: { agenda: { id: 'a', title: '검증 Board' }, cards: [] } }, meta: { a: { id: 'a', title: '검증 Board', lastOpenedAt: 5 } } }, 'a', 10);
+  const restored = Lifecycle.restoreBoard(trashed.store, 'a', 20);
+  assert.equal(restored.ok, true);
+  const list = new Function('state', 'coerceAgendaStore', 'BoardLifecycle', 'document', 'currentViewportAgendaLabel',
+    'agendaCardCountForSnapshot', 'agendaEntryMatchesFilter', 'agendaEntryMatchesQuery',
+    `${declaration('agendaListEntries')}\nreturn agendaListEntries;`)(
+    { agenda: { activeAgendaId: 'a', dirty: false, switcherFilter: 'all', switcherQuery: '' } }, () => restored.store, Lifecycle,
+    { querySelectorAll: () => [] }, () => 'EG-Desk', snapshot => snapshot?.cards?.length || 0, () => true, () => true);
+  const entries = list();
+  assert.equal(entries.length, 1);
+  assert.equal(entries[0].closed, true);
+  assert.equal(entries[0].current, false, 'a closed Board is not the Board on the Desk');
+  assert.equal(entries[0].title, '검증 Board', 'the row keeps its saved name, not the top bar label');
+  // The row says one state: '닫힘' is not followed by '닫은 기록'.
+  assert.match(declaration('renderAgendaSwitcherPanel'), /agendaEntryStatus\(entry\) === '닫힘' \? null : SurfaceState\.boardEntryRecencyLabel\(entry\)/);
+});
