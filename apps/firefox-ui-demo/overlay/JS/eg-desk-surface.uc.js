@@ -24441,6 +24441,7 @@
       return list;
     };
     let preservedSelection = null;
+    let shiftPick = null;
     window.addEventListener('mousedown', ev => {
       if (ev.button !== 0 || state.panModifier) return;
       selectGroupMembers(cardOf(ev.target));
@@ -24520,6 +24521,7 @@
         preservedSelection = card?.classList.contains('egd-entity-selected') ? selectedCards() : null;
         return;
       }
+      shiftPick = null;
       if (ev.button !== 0 || ev.isPrimary === false || state.panModifier) return;
       const card = cardOf(ev.target);
       if (!card?.id || isCardFullscreen(card)) return;
@@ -24532,10 +24534,31 @@
       }
       const header = ev.target.closest(HEADER_SELECTOR);
       if (header && card.contains(header)) {
-        if (!ev.target.closest(NO_DRAG_SELECTOR)) beginGesture(card, 'move', { free: ev.altKey });
+        if (!ev.target.closest(NO_DRAG_SELECTOR)) {
+          // Shift+press on a View bar picks several Views. The press itself
+          // makes this View the only selected one, so the selection is read
+          // here and put together again on the click that follows.
+          shiftPick = ev.shiftKey
+            ? { card, ids: selectedCards().map(node => node.id), activeId: state.activeEntityId || null,
+              pressed: [card.id, ...CanvasLayout.expandCanvasGroupSelection(state.canvasGroups, [card.id])],
+              x: ev.clientX, y: ev.clientY }
+            : null;
+          beginGesture(card, 'move', { free: ev.altKey });
+        }
         return;
       }
       if (card.dataset.egdSemanticLevel === 'outline' && ev.target.closest('.egd-semantic-proxy')) beginGesture(card, 'move', { free: ev.altKey });
+    }, true);
+    window.addEventListener('click', ev => {
+      const pick = shiftPick;
+      shiftPick = null;
+      if (!pick || ev.button !== 0 || !pick.card.isConnected || cardOf(ev.target) !== pick.card) return;
+      // More than a few px between press and release was a drag, not a pick.
+      if (Math.hypot(ev.clientX - pick.x, ev.clientY - pick.y) > 4) return;
+      const next = ViewportExtras.shiftClickSelection(pick.ids, pick.pressed, pick.activeId);
+      const nodes = next.ids.map(id => document.getElementById(id)).filter(node => node?.isConnected);
+      if (!nodes.length) return;
+      setSelectedEntities(state.expandCanvasSelection(nodes), document.getElementById(next.activeId));
     }, true);
     // Option/Alt releases the snap for as long as it is held, even mid-drag.
     window.addEventListener('pointermove', ev => {
@@ -24661,6 +24684,7 @@
       if (!dialog) return;
       placementDialog = null;
       dialog.remove();
+      dialog._revert?.();
       if (restoreFocus && dialog._returnTo?.isConnected) dialog._returnTo.focus?.();
     };
     const openPlacementDialog = (card, mode) => {
@@ -24676,6 +24700,59 @@
       }));
       const status = el('p', { class: 'egd-placement-status', role: 'status' },
         move ? 'Canvas px. 입력한 값 그대로 놓고, 그룹이면 함께 움직입니다.' : 'Canvas px. 창의 최소 크기보다 작게는 줄지 않습니다.');
+      // [방향키로 옮기기] start
+      // Arrow presses move the View (and its group) at once so the user sees
+      // where it goes. The places before the first press are kept: Enter
+      // records one undo step from them, Esc or 취소 puts everything back.
+      let nudgeOrigin = null;
+      const nudge = step => {
+        if (!step || !card.isConnected || isCardFullscreen(card)) return;
+        if (!nudgeOrigin) {
+          nudgeOrigin = new Map();
+          for (const id of [card.id, ...CanvasLayout.expandCanvasGroupSelection(state.canvasGroups, [card.id])]) {
+            const node = document.getElementById(id);
+            if (!node?.isConnected || nudgeOrigin.has(id) || (node !== card && isCardFullscreen(node))) continue;
+            nudgeOrigin.set(id, rectOf(node));
+          }
+        }
+        const from = rectOf(card);
+        const home = nudgeOrigin.get(card.id);
+        const next = { x: from.x + step.dx, y: from.y + step.dy };
+        for (const [id, start] of nudgeOrigin) {
+          const node = document.getElementById(id);
+          if (!node?.isConnected) continue;
+          applyPersistentEntityGeometry(node, { ...start, x: start.x + next.x - home.x, y: start.y + next.y - home.y });
+        }
+        inputs[0].value = String(next.x);
+        inputs[1].value = String(next.y);
+        status.textContent = ViewportExtras.nudgeStatus(next);
+        scheduleGroupFrames();
+      };
+      const revertNudge = () => {
+        if (!nudgeOrigin) return;
+        for (const [id, start] of nudgeOrigin) {
+          const node = document.getElementById(id);
+          if (!node?.isConnected) continue;
+          applyPersistentEntityGeometry(node, start);
+          markAgendaDirty('move-card', node);
+        }
+        nudgeOrigin = null;
+        scheduleGroupFrames();
+      };
+      // [방향키로 옮기기] end
+      const nudgeView = ViewportExtras.nudgeView();
+      const nudgeButton = move ? el('button', {
+        type: 'button', class: 'egd-placement-nudge', title: nudgeView.title, 'aria-label': nudgeView.title,
+        data: { testid: 'placement-nudge' }, onclick: () => { status.textContent = nudgeView.hint; },
+      }, nudgeView.label) : null;
+      nudgeButton?.addEventListener('keydown', ev => {
+        if (ev.isComposing || ev.keyCode === 229 || ev.metaKey || ev.ctrlKey || ev.altKey) return;
+        const step = ViewportExtras.nudgeDelta(ev.key, { shift: ev.shiftKey });
+        if (!step) return;
+        ev.preventDefault();
+        ev.stopPropagation();
+        nudge(step);
+      });
       const apply = () => {
         if (!card.isConnected || isCardFullscreen(card)) { closePlacementDialog(); return; }
         const parsed = CanvasLayout.parsePlacementInput(
@@ -24685,7 +24762,7 @@
           inputs[['x', 'width'].includes(parsed.field) ? 0 : 1].focus();
           return;
         }
-        const before = rectOf(card);
+        const before = nudgeOrigin?.get(card.id) || rectOf(card);
         const after = { ...before, ...parsed.rect };
         const items = [{ id: card.id, before, after }];
         if (move) {
@@ -24694,11 +24771,12 @@
           for (const id of CanvasLayout.expandCanvasGroupSelection(state.canvasGroups, [card.id])) {
             const node = document.getElementById(id);
             if (!node || node === card || !node.isConnected || isCardFullscreen(node)) continue;
-            const start = rectOf(node);
+            const start = nudgeOrigin?.get(id) || rectOf(node);
             items.push({ id, before: start, after: { ...start, x: start.x + dx, y: start.y + dy } });
           }
         }
         if (!history.record({ label: move ? 'move' : 'resize', items })) { closePlacementDialog({ restoreFocus: true }); return; }
+        nudgeOrigin = null;
         for (const item of items) {
           const node = document.getElementById(item.id);
           if (!node?.isConnected) continue;
@@ -24717,6 +24795,7 @@
       el('div', { class: 'egd-placement-fields' },
         el('label', {}, labels[0], inputs[0]),
         el('label', {}, labels[1], inputs[1])),
+      ...(nudgeButton ? [nudgeButton] : []),
       status,
       el('div', { class: 'egd-placement-actions' },
         el('button', { type: 'button', 'aria-label': '적용', data: { testid: 'placement-apply' }, onclick: apply }, '적용'),
@@ -24732,6 +24811,7 @@
         top: `${Math.round(Math.max(8, Math.min(window.innerHeight - 190, anchor.top + 44)))}px`,
       });
       dialog._returnTo = card.querySelector(HEADER_SELECTOR) || viewport;
+      dialog._revert = revertNudge;
       document.documentElement.appendChild(dialog);
       placementDialog = dialog;
       inputs[0].focus();
@@ -24762,7 +24842,9 @@
         onclick: ev => { ev.stopPropagation(); closePlacementMenu(); action(); },
       }, label);
       const items = [
-        item(`선택 ${count}개 겹침 없이 정리`, '선택한 창을 보이는 영역 안에서 24px 간격으로 다시 놓습니다', 'placement-arrange', arrangeSelection, count < 1),
+        item(`선택 ${count}개 겹침 없이 정리`, count >= 2 ? '선택한 창을 보이는 영역 안에서 24px 간격으로 다시 놓습니다'
+          : '선택한 창을 보이는 영역 안에서 24px 간격으로 다시 놓습니다 — Shift를 누른 채 다른 창 머리를 누르면 여러 창을 함께 고릅니다',
+        'placement-arrange', arrangeSelection, count < 1),
         count >= 2 ? item('그룹으로 묶기', '선택한 창을 함께 움직이고 함께 선택되는 그룹으로 묶습니다', 'placement-group', groupSelection) : null,
         grouped ? item('그룹 해제', '선택한 창이 속한 그룹을 풉니다', 'placement-ungroup', ungroupSelection) : null,
         target ? item('이동…', '창의 x, y를 숫자로 입력합니다', 'placement-move', () => openPlacementDialog(target, 'move')) : null,

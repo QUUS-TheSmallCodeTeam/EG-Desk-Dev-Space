@@ -784,6 +784,11 @@
 .egd-placement-fields { display: flex; gap: 10px; }
 .egd-placement-fields label { display: flex; flex: 1; flex-direction: column; gap: 4px; min-width: 0; font-size: 11px; color: var(--egd-on-surface-variant); }
 .egd-placement-fields input { box-sizing: border-box; width: 100%; padding: 6px 8px; border: 1px solid var(--egd-line-strong); border-radius: 5px; background: var(--egd-surface-elevated); color: var(--egd-on-surface); font: 13px var(--egd-font); }
+/* 방향키로 옮기기: takes the arrow keys while it has focus. */
+.egd-placement-nudge { appearance: none; display: block; box-sizing: border-box; width: 100%; margin: 10px 0 0; padding: 6px 10px; border: 1px dashed var(--egd-line-strong); border-radius: 5px; background: transparent; color: var(--egd-on-surface-variant); font: 12px var(--egd-font); cursor: pointer; }
+.egd-placement-nudge:hover { background: var(--egd-hover); color: var(--egd-on-surface); }
+.egd-placement-nudge:active { background: var(--egd-primary-container); }
+.egd-placement-nudge:focus-visible { outline: var(--egd-focus-outline); outline-offset: var(--egd-focus-outline-offset); border-style: solid; border-color: var(--egd-focus-border); color: var(--egd-on-surface); }
 .egd-placement-status { margin: 8px 0 0; font-size: 11px; color: var(--egd-on-surface-variant); }
 .egd-placement-actions button { padding: 6px 10px; margin: 10px 6px 0 0; border: 1px solid var(--egd-line-strong); border-radius: 5px; }
 .egd-placement-menu { width: 208px; }

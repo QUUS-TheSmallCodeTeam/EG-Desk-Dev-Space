@@ -106,6 +106,52 @@ export function snapToggleView(enabled) {
 }
 
 // ---------------------------------------------------------------------------
+// Moving a View from the keyboard (the 이동 dialog's [방향키로 옮기기]):
+// one arrow press is 16px, with Shift 128px.
+
+export const NUDGE_STEP_PX = 16;
+export const NUDGE_STEP_LARGE_PX = 128;
+const NUDGE_DIRECTIONS = Object.freeze({ ArrowLeft: [-1, 0], ArrowRight: [1, 0], ArrowUp: [0, -1], ArrowDown: [0, 1] });
+
+export function nudgeDelta(key, { shift = false } = {}) {
+  const direction = typeof key === 'string' && Object.hasOwn(NUDGE_DIRECTIONS, key) ? NUDGE_DIRECTIONS[key] : null;
+  if (!direction) return null;
+  const step = shift ? NUDGE_STEP_LARGE_PX : NUDGE_STEP_PX;
+  return { dx: direction[0] * step || 0, dy: direction[1] * step || 0 };
+}
+
+export function nudgeView() {
+  return {
+    label: '방향키로 옮기기',
+    title: `방향키로 ${NUDGE_STEP_PX}px, Shift+방향키로 ${NUDGE_STEP_LARGE_PX}px씩 옮깁니다 — Enter 적용, Esc 취소`,
+    hint: `방향키 ${NUDGE_STEP_PX}px · Shift+방향키 ${NUDGE_STEP_LARGE_PX}px. Enter 적용 · Esc 취소`,
+  };
+}
+
+export function nudgeStatus({ x, y } = {}) {
+  return `x ${Math.round(x)}, y ${Math.round(y)} — Enter 적용 · Esc 취소`;
+}
+
+// Shift+press on a View bar: an unselected View joins the selection and
+// becomes the active one; a selected View leaves it. `pressedIds` is the
+// pressed View first, then its group mates (a group comes and goes whole).
+// The selection is never emptied this way.
+export function shiftClickSelection(selectedIds = [], pressedIds = [], activeId = null) {
+  const unique = list => Array.from(new Set((Array.isArray(list) ? list : []).filter(id => id != null && id !== '')));
+  const selected = unique(selectedIds);
+  const pressed = unique(pressedIds);
+  const activeIn = ids => (ids.includes(activeId) ? activeId : ids[0] ?? null);
+  if (!pressed.length) return { ids: selected, activeId: activeIn(selected) };
+  if (!selected.includes(pressed[0])) {
+    const ids = [...selected, ...pressed.filter(id => !selected.includes(id))];
+    return { ids, activeId: pressed[0] };
+  }
+  const rest = selected.filter(id => !pressed.includes(id));
+  if (!rest.length) return { ids: selected, activeId: activeIn(selected) };
+  return { ids: rest, activeId: activeIn(rest) };
+}
+
+// ---------------------------------------------------------------------------
 // Edge dots. Input: the points from EGDeskCanvasLayout.edgeIndicators (one per
 // off-screen View, on the visible area's edge). Per side the nearest Views
 // keep their own dot; the rest fold into one "+N" dot that leads to the

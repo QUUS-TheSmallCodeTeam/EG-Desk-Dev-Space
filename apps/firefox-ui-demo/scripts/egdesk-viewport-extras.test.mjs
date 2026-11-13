@@ -267,3 +267,125 @@ test('돌아가기 in the view bar: 전체 보기 then 돌아가기 lands on the
   await Promise.resolve();
   assert.equal(button.disabled, true, 'a maximized View keeps its own return and does not fill this one');
 });
+
+// --- moving a View with the arrow keys, and Shift+View bar press to pick several ---
+
+test('arrow keys move by 16px, with Shift by 128px; any other key is left alone', () => {
+  assert.deepEqual(Extras.nudgeDelta('ArrowLeft'), { dx: -16, dy: 0 });
+  assert.deepEqual(Extras.nudgeDelta('ArrowRight'), { dx: 16, dy: 0 });
+  assert.deepEqual(Extras.nudgeDelta('ArrowUp'), { dx: 0, dy: -16 });
+  assert.deepEqual(Extras.nudgeDelta('ArrowDown', { shift: true }), { dx: 0, dy: 128 });
+  assert.deepEqual(Extras.nudgeDelta('ArrowLeft', { shift: true }), { dx: -128, dy: 0 });
+  for (const key of ['Enter', 'Escape', 'a', 'Tab', '', null, undefined]) assert.equal(Extras.nudgeDelta(key), null);
+  const view = Extras.nudgeView();
+  assert.equal(view.label, '방향키로 옮기기');
+  assert.match(view.title, /16px/);
+  assert.match(view.title, /128px/);
+  assert.match(view.hint, /Enter/);
+  assert.match(view.hint, /Esc/);
+  assert.equal(Extras.nudgeStatus({ x: 48, y: -16 }), 'x 48, y -16 — Enter 적용 · Esc 취소');
+});
+
+test('Shift+View bar press adds an unselected View and takes a selected one out; the last one stays', () => {
+  assert.deepEqual(Extras.shiftClickSelection(['a'], ['b'], 'a'), { ids: ['a', 'b'], activeId: 'b' }, 'adds, and the pressed View is the active one');
+  assert.deepEqual(Extras.shiftClickSelection(['a', 'b', 'c'], ['b'], 'a'), { ids: ['a', 'c'], activeId: 'a' }, 'takes out, active stays');
+  assert.deepEqual(Extras.shiftClickSelection(['a', 'b'], ['a'], 'a'), { ids: ['b'], activeId: 'b' }, 'the active one taken out hands over');
+  assert.deepEqual(Extras.shiftClickSelection(['a'], ['a'], 'a'), { ids: ['a'], activeId: 'a' }, 'never empties the selection');
+  assert.deepEqual(Extras.shiftClickSelection([], ['a'], null), { ids: ['a'], activeId: 'a' });
+  // A grouped View comes and goes with its group (the pressed View is first).
+  assert.deepEqual(Extras.shiftClickSelection(['x'], ['g1', 'g2'], 'x'), { ids: ['x', 'g1', 'g2'], activeId: 'g1' });
+  assert.deepEqual(Extras.shiftClickSelection(['x', 'g1', 'g2'], ['g2', 'g1'], 'g1'), { ids: ['x'], activeId: 'x' });
+  assert.deepEqual(Extras.shiftClickSelection(['g1', 'g2'], ['g1', 'g2'], 'g1'), { ids: ['g1', 'g2'], activeId: 'g1' }, 'a group that is the whole selection stays');
+  assert.deepEqual(Extras.shiftClickSelection(['a', null, 'a', 'b'], ['c', 'c'], 'zz'), { ids: ['a', 'b', 'c'], activeId: 'c' }, 'duplicates and blanks are dropped');
+  assert.deepEqual(Extras.shiftClickSelection(['a'], [], 'a'), { ids: ['a'], activeId: 'a' }, 'nothing pressed changes nothing');
+});
+
+function moveDialogHarness() {
+  const rects = new Map([['card', { x: 96, y: 48, width: 400, height: 300 }], ['mate', { x: 600, y: 48, width: 320, height: 250 }]]);
+  const nodes = new Map([...rects.keys()].map(id => [id, { id, isConnected: true }]));
+  const card = nodes.get('card');
+  const inputs = [{ value: '96' }, { value: '48' }];
+  const status = { textContent: '' };
+  const dirty = [];
+  let frames = 0;
+  const deps = {
+    card, inputs, status, ViewportExtras: Extras, state: { canvasGroups: [] },
+    CanvasLayout: { expandCanvasGroupSelection: () => ['card', 'mate'] },
+    document: { getElementById: id => nodes.get(id) || null },
+    isCardFullscreen: () => false,
+    rectOf: node => (node?.isConnected ? { ...rects.get(node.id) } : null),
+    applyPersistentEntityGeometry: (node, rect) => rects.set(node.id, { ...rect }),
+    scheduleGroupFrames: () => { frames++; },
+    markAgendaDirty: (reason, node) => dirty.push([reason, node.id]),
+  };
+  const built = compile(`${cut('      // [방향키로 옮기기] start', '      // [방향키로 옮기기] end')}
+    return { nudge, revertNudge, origin: () => nudgeOrigin };`, Object.keys(deps))(...Object.values(deps));
+  return { ...built, rects, inputs, status, dirty, nodes, frames: () => frames };
+}
+
+test('move dialog: arrow presses move the View and its group at once and show the new x, y', () => {
+  const h = moveDialogHarness();
+  h.nudge(Extras.nudgeDelta('ArrowRight'));
+  h.nudge(Extras.nudgeDelta('ArrowDown', { shift: true }));
+  assert.deepEqual(h.rects.get('card'), { x: 112, y: 176, width: 400, height: 300 });
+  assert.deepEqual(h.rects.get('mate'), { x: 616, y: 176, width: 320, height: 250 }, 'the group moves by the same amount');
+  assert.deepEqual(h.inputs.map(input => input.value), ['112', '176']);
+  assert.equal(h.status.textContent, 'x 112, y 176 — Enter 적용 · Esc 취소');
+  assert.deepEqual(h.origin().get('card'), { x: 96, y: 48, width: 400, height: 300 }, 'the place before the first press is kept for undo and Esc');
+  assert.ok(h.frames() >= 2);
+});
+
+test('move dialog: Esc after arrow presses puts every moved View back', () => {
+  const h = moveDialogHarness();
+  h.revertNudge();
+  assert.deepEqual(h.dirty, [], 'nothing moved, nothing to put back');
+  h.nudge(Extras.nudgeDelta('ArrowLeft', { shift: true }));
+  h.nudge(Extras.nudgeDelta('ArrowUp'));
+  h.revertNudge();
+  assert.deepEqual(h.rects.get('card'), { x: 96, y: 48, width: 400, height: 300 });
+  assert.deepEqual(h.rects.get('mate'), { x: 600, y: 48, width: 320, height: 250 });
+  assert.equal(h.origin(), null);
+  assert.deepEqual(h.dirty.map(entry => entry[1]).sort(), ['card', 'mate'], 'the Desk is saved again with the restored places');
+});
+
+test('move dialog wiring: the arrow button is a real control, apply records from the place before the arrows, closing reverts', () => {
+  assert.match(surfaceSource, /data: \{ testid: 'placement-nudge' \}/);
+  assert.match(surfaceSource, /const step = ViewportExtras\.nudgeDelta\(ev\.key, \{ shift: ev\.shiftKey \}\);/);
+  assert.match(surfaceSource, /const before = nudgeOrigin\?\.get\(card\.id\) \|\| rectOf\(card\);/);
+  assert.match(surfaceSource, /const start = nudgeOrigin\?\.get\(id\) \|\| rectOf\(node\);/);
+  assert.match(surfaceSource, /dialog\._revert\?\.\(\);/, 'Esc, 취소 and any other close put the View back');
+  assert.match(css, /\.egd-placement-nudge:focus-visible \{[^}]*outline: var\(--egd-focus-outline\)/);
+  assert.match(css, /\.egd-placement-nudge:hover \{/);
+});
+
+test('Shift+View bar press: the pick is applied on click, a drag is not a pick', () => {
+  const nodes = new Map(['a', 'b', 'c'].map(id => [id, { id, isConnected: true }]));
+  const calls = [];
+  const state = { activeEntityId: 'a', expandCanvasSelection: list => list };
+  const deps = {
+    state, ViewportExtras: Extras,
+    document: { getElementById: id => nodes.get(id) || null },
+    cardOf: target => target?.card || null,
+    setSelectedEntities: (list, active) => calls.push({ ids: list.map(node => node.id), active: active?.id || null }),
+  };
+  const body = cut("    window.addEventListener('click', ev => {\n      const pick = shiftPick;", '\n    }, true);');
+  const h = compile(`let shiftPick = null;
+    const onClick = ev => {
+      const pick = shiftPick;${body}
+    };
+    return { set: pick => { shiftPick = pick; }, get: () => shiftPick, onClick };`, Object.keys(deps))(...Object.values(deps));
+  const b = nodes.get('b');
+  h.set({ card: b, ids: ['a'], pressed: ['b'], activeId: 'a', x: 100, y: 100 });
+  h.onClick({ button: 0, clientX: 101, clientY: 102, target: { card: b } });
+  assert.deepEqual(calls, [{ ids: ['a', 'b'], active: 'b' }]);
+  assert.equal(h.get(), null, 'one press, one pick');
+  h.onClick({ button: 0, clientX: 101, clientY: 102, target: { card: b } });
+  assert.equal(calls.length, 1, 'a plain click afterwards changes nothing here');
+  h.set({ card: b, ids: ['a'], pressed: ['b'], activeId: 'a', x: 100, y: 100 });
+  h.onClick({ button: 0, clientX: 130, clientY: 100, target: { card: b } });
+  assert.equal(calls.length, 1, 'the View was dragged, not picked');
+  h.set({ card: b, ids: ['a', 'b', 'c'], pressed: ['b'], activeId: 'a', x: 5, y: 5 });
+  h.onClick({ button: 0, clientX: 5, clientY: 5, target: { card: b } });
+  assert.deepEqual(calls[1], { ids: ['a', 'c'], active: 'a' }, 'a selected View is taken out');
+  assert.match(surfaceSource, /shiftPick = ev\.shiftKey\s*\? \{ card, ids: selectedCards\(\)\.map\(node => node\.id\)/, 'the selection is read before the press changes it');
+});
