@@ -3164,7 +3164,7 @@ test('wheel or focused-URL keyboard zoom-out reveals the same live Browser Card 
   const zoom = compileFunction(`return function zoomCanvasByWheel(ev) {${wheelBody}\n    }`,
     ['normalizeWheelDelta', 'zoomCanvasByFactor', 'WHEEL_ZOOM_SPEED']);
   const keydown = compileFunction(`return function handleCanvasZoomKeydown(ev) {${keyBody}\n    }`,
-    ['state', 'syncPanModeCursor', 'zoomCanvasByFactor', 'window', 'scheduleAnimate']);
+    ['state', 'syncPanModeCursor', 'zoomCanvasByFactor', 'window', 'scheduleAnimate', 'ViewportExtras']);
   const nativeBrowser = { uri: 'https://example.test/page', session: {} };
   const rect = { left: '45px', top: '60px', width: '900px', height: '620px', zIndex: '41000' };
   const browser = { id: 'browser-view-a', isConnected: true, _xulBrowser: nativeBrowser,
@@ -3220,7 +3220,7 @@ test('wheel or focused-URL keyboard zoom-out reveals the same live Browser Card 
   Object.assign(browser.style, { ...rect, zIndex: '42000' });
   classes.add('egd-initial-browser-focus');
   classes.add('egd-card-fullscreen-active');
-  const handleKey = keydown(state, () => {}, applyFactor, { innerWidth: 1600, innerHeight: 960 }, () => { animated++; });
+  const handleKey = keydown(state, () => {}, applyFactor, { innerWidth: 1600, innerHeight: 960 }, () => { animated++; }, { ZOOM_STEP: 1.25 });
   let prevented = 0, stopped = 0;
   const urlKey = { target: { className: 'egd-card-url' }, key: '-', code: 'Minus', ctrlKey: true,
     metaKey: false, altKey: false, isComposing: false, keyCode: 189,

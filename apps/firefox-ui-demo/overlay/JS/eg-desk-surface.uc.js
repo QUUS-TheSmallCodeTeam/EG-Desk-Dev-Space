@@ -5158,6 +5158,7 @@
       desk: {
         pan: { ...state.panTarget },
         zoom: state.zoomTarget,
+        snap: state.canvasSnapEnabled !== false,
         activeAgendaId: state.agenda.activeAgendaId,
         activeCardId: state.activeEntityId,
       },
@@ -6341,6 +6342,7 @@
         }, { immediate: true });
       }
       state.restoreCanvasGroups?.(snapshot.groups, restoredIds, { merge: !!options.merge });
+      if (!options.merge && typeof snapshot.desk?.snap === 'boolean') state.setCanvasSnapEnabled?.(snapshot.desk.snap, { persist: false });
       const activeId = snapshot.desk?.activeCardId;
       const active = activeId ? document.getElementById(restoredIds.get(activeId) || activeId) : null;
       if (active && !options.merge) setActiveEntity(active);
@@ -8416,6 +8418,7 @@
     const pan = SurfaceState.revealRectPan(rect, safe, { pan: state.panTarget, zoom: currentZoom });
     if (pan && typeof state.setCanvasPanTarget === 'function'
         && (pan.x !== state.panTarget.x || pan.y !== state.panTarget.y)) {
+      state.rememberCanvasReturnView?.();
       state.canvasUserCameraRevision = (state.canvasUserCameraRevision || 0) + 1;
       state.setCanvasPanTarget(pan);
     }
@@ -23577,21 +23580,35 @@
     };
   }
 
+  // View bar extras and edge dots: wording, typed zoom, the remembered view
+  // and dot placement are EGDeskViewportExtras; this is the screen side.
+  const ViewportExtras = ChromeUtils.importESModule('chrome://userchrome/content/EGDeskViewportExtras.sys.mjs');
+
   function installCanvasPanZoom(viewport, layer) {
-    const zoomValue = el('span', { class: 'egd-zoom-value', 'aria-live': 'off' }, '100%');
+    const zoomValue = el('button', { type: 'button', class: 'egd-zoom-value', 'aria-live': 'off',
+      'aria-label': 'Canvas 배율 직접 입력', title: '배율 직접 입력 (1~400%)', data: { testid: 'canvas-zoom-value' } }, '100%');
+    const zoomInput = el('input', { type: 'text', class: 'egd-zoom-input', inputmode: 'decimal', maxlength: '7', hidden: 'true',
+      'aria-label': 'Canvas 배율(%) — Enter 적용, Esc 취소', autocomplete: 'off', spellcheck: 'false', data: { testid: 'canvas-zoom-input' } });
+    const zoomReturnButton = el('button', { type: 'button', class: 'egd-zoom-button egd-zoom-return', data: { testid: 'canvas-view-return' } }, deskIcon('back'));
+    const snapToggleButton = el('button', { type: 'button', class: 'egd-zoom-snap', data: { testid: 'canvas-snap-toggle' } }, ViewportExtras.snapToggleView(true).label);
+    const edgeDotsHost = el('div', { id: 'egd-edge-dots', role: 'group', 'aria-label': '화면 밖 창', data: { noPan: 'true' } });
     const zoomOutButton = el('button', { type: 'button', class: 'egd-zoom-button', 'aria-label': 'Canvas 축소', title: 'Canvas 축소' }, deskIcon('minimize'));
     const zoomInButton = el('button', { type: 'button', class: 'egd-zoom-button', 'aria-label': 'Canvas 확대', title: 'Canvas 확대' }, deskIcon('plus'));
     const zoomFitButton = el('button', { type: 'button', class: 'egd-zoom-button', 'aria-label': '열린 창 전체 보기', title: '열린 창 전체 보기' }, deskIcon('fit'));
     const indicator = el('div', { id: 'egd-zoom-indicator', role: 'group', 'aria-label': 'Canvas 보기', data: { noPan: 'true' } },
-      zoomOutButton, zoomValue, zoomInButton, el('span', { class: 'egd-zoom-divider', 'aria-hidden': 'true' }), zoomFitButton);
+      zoomOutButton, zoomValue, zoomInput, zoomInButton, el('span', { class: 'egd-zoom-divider', 'aria-hidden': 'true' }), zoomFitButton,
+      zoomReturnButton, el('span', { class: 'egd-zoom-divider', 'aria-hidden': 'true' }), snapToggleButton);
     for (const eventName of ['mousedown', 'pointerdown', 'wheel']) {
-      indicator.addEventListener(eventName, event => {
-        event.stopPropagation();
-        if (eventName === 'wheel') event.preventDefault();
-      }, { passive: false });
+      for (const node of [indicator, edgeDotsHost]) {
+        node.addEventListener(eventName, event => {
+          event.stopPropagation();
+          if (eventName === 'wheel') event.preventDefault();
+        }, { passive: false });
+      }
     }
     const marquee = el('div', { id: 'egd-selection-marquee' });
     document.documentElement.appendChild(indicator);
+    document.documentElement.appendChild(edgeDotsHost);
     document.documentElement.appendChild(marquee);
     state.panTarget = { ...state.pan };
     state.zoomTarget = state.zoom;
@@ -23605,6 +23622,8 @@
     function apply() {
       layer.style.transform = `translate(${state.pan.x}px, ${state.pan.y}px) scale(${state.zoom})`;
       zoomValue.textContent = Math.round(state.zoom * 100) + '%';
+      syncReturnButton();
+      scheduleEdgeDots();
       syncCardFullscreenLayout();
       viewport.style.setProperty('--egd-camera-pan-x', state.pan.x + 'px');
       viewport.style.setProperty('--egd-camera-pan-y', state.pan.y + 'px');
@@ -23680,6 +23699,168 @@
       scheduleAnimate();
     };
     state.setCanvasViewportTarget = setCanvasViewportTarget;
+
+    // [돌아가기]: 전체 보기 · 미니맵 · 찾기 remember the view they leave; one
+    // press returns there. Nothing else moves the camera on its own here.
+    const returnView = ViewportExtras.createReturnView();
+    const currentCameraTarget = () => ({ pan: { x: state.panTarget.x, y: state.panTarget.y }, zoom: state.zoomTarget });
+    function syncReturnButton() {
+      const view = ViewportExtras.returnButtonView(returnView.available(currentCameraTarget()));
+      if (zoomReturnButton.disabled !== view.disabled) zoomReturnButton.disabled = view.disabled;
+      if (zoomReturnButton.title !== view.title) {
+        zoomReturnButton.title = view.title;
+        zoomReturnButton.setAttribute('aria-label', view.title);
+      }
+    }
+    state.rememberCanvasReturnView = () => {
+      if (state.cardFullscreen?.cardId || state.surface.initialBrowserFocus || state.surface.restoring) return false;
+      // The caller moves the camera right after this call; keep the view
+      // only when that move really went somewhere else.
+      const before = currentCameraTarget();
+      Promise.resolve().then(() => {
+        returnView.rememberIfMoved(before, currentCameraTarget());
+        syncReturnButton();
+      });
+      return true;
+    };
+    zoomReturnButton.addEventListener('click', () => {
+      const target = returnView.take(currentCameraTarget());
+      if (target) {
+        state.canvasUserCameraRevision = (state.canvasUserCameraRevision || 0) + 1;
+        setCanvasViewportTarget(target);
+      }
+      syncReturnButton();
+    });
+
+    // Typed zoom: the number becomes a field; Enter applies, Esc or leaving
+    // the field cancels, and a value outside 1~400% stays in the field as an error.
+    const closeZoomInput = ({ restoreFocus = false } = {}) => {
+      if (zoomInput.hidden) return;
+      zoomInput.hidden = true;
+      zoomInput.removeAttribute('aria-invalid');
+      zoomInput.title = '';
+      zoomValue.hidden = false;
+      if (restoreFocus) zoomValue.focus({ preventScroll: true });
+    };
+    zoomValue.addEventListener('click', () => {
+      zoomInput.value = String(Math.round(state.zoomTarget * 100));
+      zoomValue.hidden = true;
+      zoomInput.hidden = false;
+      zoomInput.focus({ preventScroll: true });
+      zoomInput.select();
+    });
+    zoomInput.addEventListener('input', () => { zoomInput.removeAttribute('aria-invalid'); zoomInput.title = ''; });
+    zoomInput.addEventListener('blur', () => closeZoomInput());
+    zoomInput.addEventListener('keydown', ev => {
+      if (ev.isComposing || ev.keyCode === 229) return;
+      if (ev.key === 'Escape') {
+        ev.preventDefault();
+        ev.stopPropagation();
+        closeZoomInput({ restoreFocus: true });
+        return;
+      }
+      ev.stopPropagation();
+      if (ev.key !== 'Enter') return;
+      ev.preventDefault();
+      const parsed = ViewportExtras.parseZoomPercentInput(zoomInput.value);
+      if (!parsed.ok) {
+        zoomInput.setAttribute('aria-invalid', 'true');
+        zoomInput.title = parsed.message;
+        zoomInput.select();
+        return;
+      }
+      const safe = safeViewportRect();
+      const camera = ViewportExtras.zoomCameraAt({ pan: state.panTarget, zoom: state.zoomTarget, nextZoom: parsed.zoom,
+        anchor: { x: safe.left + safe.width / 2, y: safe.top + safe.height / 2 } });
+      if (camera && !ViewportExtras.sameCamera(camera, currentCameraTarget())) {
+        if (state.cardFullscreen?.cardId) exitCardFullscreen(null, { preserveCamera: true });
+        state.canvasUserCameraRevision = (state.canvasUserCameraRevision || 0) + 1;
+        setCanvasViewportTarget(camera);
+      }
+      closeZoomInput({ restoreFocus: true });
+    });
+
+    // [맞춤]: grid and guide snapping on or off, saved with the Desk. Off
+    // behaves like holding Option/Alt for every drag.
+    const syncSnapToggle = () => {
+      const view = ViewportExtras.snapToggleView(state.canvasSnapEnabled);
+      snapToggleButton.setAttribute('aria-pressed', view.pressed);
+      snapToggleButton.title = view.title;
+      snapToggleButton.setAttribute('aria-label', view.title);
+    };
+    state.setCanvasSnapEnabled = (enabled, { persist = true } = {}) => {
+      const next = enabled !== false;
+      const changed = (state.canvasSnapEnabled !== false) !== next;
+      state.canvasSnapEnabled = next;
+      syncSnapToggle();
+      if (changed && persist) markAgendaDirty('canvas-snap-toggle', null);
+      return next;
+    };
+    snapToggleButton.addEventListener('click', () => state.setCanvasSnapEnabled(state.canvasSnapEnabled === false));
+    syncSnapToggle();
+
+    // Edge dots: one small dot on the visible area's edge for each View that
+    // is entirely outside it; pressing a dot pans to that View (zoom stays).
+    let edgeDotsFrame = 0;
+    const edgeDotNodes = new Map();
+    const renderEdgeDots = () => {
+      edgeDotsFrame = 0;
+      const visible = ViewportExtras.edgeDotsVisible({
+        minimapOpen: !!document.getElementById('egd-desk-minimap'), fullscreen: !!state.cardFullscreen?.cardId,
+        browserFocus: !!state.surface.initialBrowserFocus, restoring: !!state.surface.restoring || !!state.agenda.restoreInProgress,
+      });
+      let dots = [];
+      if (visible) {
+        const cards = Array.from(layer.querySelectorAll(':scope > .egd-canvas-card'))
+          .filter(card => card.isConnected && card.id && !card.hidden && !card.dataset.closeState);
+        const safe = safeViewportRect({ margin: 12 });
+        const box = { x: safe.left, y: safe.top, width: safe.width, height: safe.height };
+        const points = CanvasLayout.edgeIndicators(cards.map(card => ({ id: card.id, rect: persistentEntityGeometry(card) })),
+          { viewport: box, pan: state.pan, zoom: state.zoom, inset: 6, limit: ViewportExtras.EDGE_DOT_TARGET_LIMIT });
+        const titles = new Map(points.map(point => [point.id, minimapEntityTitle(document.getElementById(point.id))]));
+        dots = ViewportExtras.edgeDotModel(points, { titles,
+          bounds: { left: safe.left + 6, top: safe.top + 6, right: safe.right - 6, bottom: safe.bottom - 6 } });
+      }
+      const live = new Set(dots.map(dot => dot.key));
+      for (const [key, node] of edgeDotNodes) {
+        if (live.has(key)) continue;
+        node.remove();
+        edgeDotNodes.delete(key);
+      }
+      for (const dot of dots) {
+        let node = edgeDotNodes.get(dot.key);
+        if (!node) {
+          node = el('button', { type: 'button', class: 'egd-edge-dot', data: { testid: 'canvas-edge-dot' } });
+          node.addEventListener('click', () => {
+            const card = document.getElementById(node.dataset.targetId);
+            if (card?.isConnected && card.classList.contains('egd-canvas-card')) moveCameraToMinimapNode(card);
+          });
+          edgeDotNodes.set(dot.key, node);
+          edgeDotsHost.appendChild(node);
+        }
+        if (node.dataset.targetId !== dot.id) node.dataset.targetId = dot.id;
+        if (node.dataset.side !== dot.side) node.dataset.side = dot.side;
+        if (node.dataset.kind !== dot.type) node.dataset.kind = dot.type;
+        if (node.textContent !== dot.text) node.textContent = dot.text;
+        if (node.title !== dot.label) {
+          node.title = dot.label;
+          node.setAttribute('aria-label', dot.label);
+        }
+        node.style.left = `${Math.round(dot.x)}px`;
+        node.style.top = `${Math.round(dot.y)}px`;
+      }
+    };
+    function scheduleEdgeDots() {
+      if (edgeDotsFrame) return;
+      edgeDotsFrame = window.requestAnimationFrame(renderEdgeDots);
+    }
+    state.refreshCanvasEdgeDots = scheduleEdgeDots;
+    // Views open, close and move without the camera changing; the minimap
+    // (a direct child of the root) opens and closes the same way.
+    new MutationObserver(scheduleEdgeDots).observe(layer, { childList: true });
+    new MutationObserver(scheduleEdgeDots).observe(document.documentElement, { childList: true });
+    for (const eventName of ['mouseup', 'keyup', 'resize']) window.addEventListener(eventName, scheduleEdgeDots, { passive: true });
+
     const panCanvasByWheel = (ev) => {
       const unit = normalizeWheelDelta(ev);
       const beforeX = state.panTarget.x, beforeY = state.panTarget.y;
@@ -23791,8 +23972,8 @@
       const safe = safeViewportRect();
       zoomCanvasByFactor(factor, safe.left + safe.width / 2, safe.top + safe.height / 2);
     };
-    zoomOutButton.addEventListener('click', () => zoomAtSafeCenter(1 / 1.2));
-    zoomInButton.addEventListener('click', () => zoomAtSafeCenter(1.2));
+    zoomOutButton.addEventListener('click', () => zoomAtSafeCenter(1 / ViewportExtras.ZOOM_STEP));
+    zoomInButton.addEventListener('click', () => zoomAtSafeCenter(ViewportExtras.ZOOM_STEP));
     zoomFitButton.addEventListener('click', () => {
       const before = { x: state.panTarget.x, y: state.panTarget.y, zoom: state.zoomTarget };
       const recordChange = () => {
@@ -23803,6 +23984,7 @@
       const cards = Array.from(layer.querySelectorAll(':scope > .egd-canvas-card'))
         .filter(card => card.isConnected && !card.hidden && card.getClientRects().length
           && window.getComputedStyle(card).visibility === 'visible');
+      state.rememberCanvasReturnView?.();
       if (!cards.length) {
         setCanvasViewportTarget({ pan: { x: 0, y: 0 }, zoom: 1 });
         recordChange();
@@ -24085,7 +24267,7 @@
         const zoomOut = ev.key === '-' || ev.key === '_' || ev.code === 'NumpadSubtract';
         const zoomIn = ev.key === '+' || ev.key === '=' || ev.code === 'NumpadAdd';
         if (zoomOut || zoomIn) {
-          zoomCanvasByFactor(zoomOut ? 1 / 1.2 : 1.2, window.innerWidth / 2, window.innerHeight / 2);
+          zoomCanvasByFactor(zoomOut ? 1 / ViewportExtras.ZOOM_STEP : ViewportExtras.ZOOM_STEP, window.innerWidth / 2, window.innerHeight / 2);
           ev.preventDefault();
           ev.stopImmediatePropagation();
           return;
@@ -24273,7 +24455,8 @@
       const raw = rectOf(g.card);
       if (!raw) return;
       const snapped = CanvasLayout.snapCanvasRect({
-        rect: raw, candidates: g.candidates, zoom: canvasZoom(), free: g.free, viewport: visibleWorldBox(),
+        rect: raw, candidates: g.candidates, zoom: canvasZoom(),
+        free: g.free || state.canvasSnapEnabled === false, viewport: visibleWorldBox(),
         edges: g.mode === 'resize' ? g.edges : null, minWidth: g.minSize.width, minHeight: g.minSize.height,
       });
       if (!snapped) return;
@@ -24584,6 +24767,8 @@
         grouped ? item('그룹 해제', '선택한 창이 속한 그룹을 풉니다', 'placement-ungroup', ungroupSelection) : null,
         target ? item('이동…', '창의 x, y를 숫자로 입력합니다', 'placement-move', () => openPlacementDialog(target, 'move')) : null,
         target ? item('크기…', '창의 너비와 높이를 숫자로 입력합니다', 'placement-size', () => openPlacementDialog(target, 'size')) : null,
+        (snap => item(snap.menuLabel, snap.menuTitle, 'placement-snap-toggle',
+          () => state.setCanvasSnapEnabled?.(state.canvasSnapEnabled === false)))(ViewportExtras.snapToggleView(state.canvasSnapEnabled)),
         item('배치 되돌리기', '⌘/Ctrl+Z', 'placement-undo', undoLayout, !history.canUndo()),
         item('배치 다시 실행', '⌘/Ctrl+Shift+Z', 'placement-redo', redoLayout, !history.canRedo()),
       ].filter(Boolean);
