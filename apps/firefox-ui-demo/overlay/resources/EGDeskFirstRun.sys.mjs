@@ -9,6 +9,9 @@
 export const START_PAGE_READY_EVENT = 'egdesk-start-ready';
 export const START_PAGE_DESK_EVENT = 'egdesk-start-desk';
 export const START_PAGE_ENTRY_ATTRIBUTE = 'data-desk-entry';
+// Settings > 화면·입력 "밝게/어둡게": the window root's forced screen mode, copied
+// onto the start page so EG-Desk's own page follows it. Web pages are left alone.
+export const START_PAGE_THEME_ATTRIBUTE = 'data-egd-theme';
 
 export function startPageEventDocument(event, startUri) {
   const target = event?.target;

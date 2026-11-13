@@ -28526,6 +28526,19 @@
     }
   }
 
+  // 화면·입력 "밝게/어둡게" is forced on the window root, which a page inside a
+  // Browser cannot see. The start page is EG-Desk's own, so the choice is copied
+  // onto it; web pages keep their own colours.
+  function syncStartPageTheme() {
+    const theme = document.documentElement.getAttribute(FirstRun.START_PAGE_THEME_ATTRIBUTE);
+    for (const card of document.querySelectorAll('.egd-browser-card')) {
+      const pageRoot = startPageDocument(card)?.documentElement;
+      if (!pageRoot) continue;
+      if (theme) pageRoot.setAttribute(FirstRun.START_PAGE_THEME_ATTRIBUTE, theme);
+      else pageRoot.removeAttribute(FirstRun.START_PAGE_THEME_ATTRIBUTE);
+    }
+  }
+
   function onStartPageDeskRequest(ev) {
     const doc = FirstRun.startPageEventDocument(ev, EGDESK_START_URI);
     if (!doc) return;
@@ -28589,11 +28602,16 @@
     if (!firstRun.installed) {
       firstRun.installed = true;
       window.addEventListener(FirstRun.START_PAGE_READY_EVENT, (ev) => {
-        if (FirstRun.startPageEventDocument(ev, EGDESK_START_URI)) syncStartPageDeskEntry();
+        if (!FirstRun.startPageEventDocument(ev, EGDESK_START_URI)) return;
+        syncStartPageTheme();
+        syncStartPageDeskEntry();
       }, true, true);
       window.addEventListener(FirstRun.START_PAGE_DESK_EVENT, onStartPageDeskRequest, true, true);
+      new MutationObserver(syncStartPageTheme).observe(document.documentElement,
+        { attributes: true, attributeFilter: [FirstRun.START_PAGE_THEME_ATTRIBUTE] });
       new MutationObserver(syncFirstRunFocus).observe(document.documentElement, { attributes: true, attributeFilter: ['class'] });
     }
+    syncStartPageTheme();
     syncFirstRunFocus();
   }
 
