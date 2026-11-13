@@ -3343,6 +3343,18 @@
   border-radius: 14px;
   padding: 10px;
   overflow: hidden;
+  /* A column, so the Board list gives way and the 휴지통 line under it stays in view. */
+  display: flex;
+  flex-direction: column;
+}
+
+#egd-agenda-switcher > * {
+  flex: 0 0 auto;
+}
+
+#egd-agenda-switcher > .egd-agenda-switch-list {
+  flex: 1 1 auto;
+  min-height: 60px;
 }
 
 @media (min-width: 1280px) {
@@ -3563,6 +3575,42 @@
   color: var(--egd-danger-ink);
 }
 
+.egd-agenda-switch-row-action .egd-ui-icon {
+  width: 14px;
+  height: 14px;
+}
+
+.egd-agenda-switch-row:focus-visible,
+.egd-agenda-switch-row-action:focus-visible,
+.egd-agenda-switch-row-rename:focus-visible,
+.egd-agenda-switch-trash-toggle:focus-visible,
+.egd-agenda-switch-trash-action:focus-visible {
+  outline: var(--egd-focus-outline);
+  outline-offset: var(--egd-focus-outline-offset);
+}
+
+/* The Board name is edited in its own row (F2 · Enter 확정 · Esc 취소). */
+.egd-agenda-switch-row-rename {
+  box-sizing: border-box;
+  width: 100%;
+  min-width: 0;
+  min-height: 24px;
+  padding: 2px 6px;
+  border: 1px solid var(--egd-primary);
+  border-radius: 6px;
+  background: var(--egd-surface-elevated);
+  color: var(--egd-on-surface);
+  font-family: inherit;
+  font-size: 13px;
+  font-weight: 670;
+  line-height: 1.25;
+}
+
+.egd-agenda-switch-row-rename[aria-invalid="true"] {
+  border-color: var(--egd-danger-ink);
+  background: var(--egd-danger-bg);
+}
+
 .egd-agenda-switch-empty {
   padding: 20px 10px 18px;
   color: var(--egd-on-surface-variant);
@@ -3597,6 +3645,110 @@
 .egd-agenda-switch-empty-actions .egd-agenda-switch-action:focus-visible {
   outline: var(--egd-focus-outline);
   outline-offset: var(--egd-focus-outline-offset);
+}
+
+/* 휴지통: a folded section under the Board list; deleted Boards wait here until restored or deleted for good. */
+.egd-agenda-switch-trash {
+  margin-top: 8px;
+  padding-top: 8px;
+  border-top: 1px solid var(--egd-outline-variant);
+}
+
+.egd-agenda-switch-trash-toggle {
+  box-sizing: border-box;
+  width: 100%;
+  min-height: 30px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 0 10px;
+  border-radius: 8px;
+  color: var(--egd-on-surface-variant);
+  font-family: inherit;
+  font-size: 12px;
+  font-weight: 650;
+  text-align: left;
+  cursor: pointer;
+}
+
+.egd-agenda-switch-trash-toggle:hover {
+  background: var(--egd-hover);
+  color: var(--egd-on-surface);
+}
+
+.egd-agenda-switch-trash-toggle .egd-ui-icon {
+  width: 14px;
+  height: 14px;
+  flex: 0 0 auto;
+}
+
+.egd-agenda-switch-trash-label {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.egd-agenda-switch-trash-chevron {
+  transform: rotate(-90deg);
+  transition: transform 120ms ease;
+}
+
+.egd-agenda-switch-trash-toggle[aria-expanded="true"] .egd-agenda-switch-trash-chevron {
+  transform: none;
+}
+
+.egd-agenda-switch-trash-list {
+  max-height: 132px;
+  overflow: auto;
+  padding-top: 4px;
+}
+
+.egd-agenda-switch-trash-row {
+  box-sizing: border-box;
+  min-width: 0;
+  width: 100%;
+  min-height: 44px;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto auto;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 10px;
+  border-radius: 10px;
+}
+
+.egd-agenda-switch-trash-row:hover {
+  background: color-mix(in srgb, var(--egd-surface-elevated) 58%, transparent);
+}
+
+.egd-agenda-switch-trash-row .egd-agenda-switch-row-title {
+  color: var(--egd-on-surface-variant);
+}
+
+.egd-agenda-switch-trash-action {
+  min-height: 26px;
+  padding: 0 8px;
+  border: 1px solid var(--egd-outline);
+  border-radius: 7px;
+  background: var(--egd-surface-elevated);
+  color: var(--egd-on-surface);
+  font-family: inherit;
+  font-size: 11px;
+  font-weight: 650;
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+.egd-agenda-switch-trash-action:hover {
+  border-color: var(--egd-primary);
+}
+
+.egd-agenda-switch-trash-action-danger {
+  border-color: color-mix(in srgb, var(--egd-danger-ink) 30%, transparent);
+  color: var(--egd-danger-ink);
+}
+
+.egd-agenda-switch-trash-action-danger:hover {
+  border-color: var(--egd-danger-ink);
+  background: var(--egd-danger-bg);
 }
 
 .egd-agenda-close-guard {
@@ -3647,11 +3799,75 @@
   line-height: 1.45;
 }
 
+.egd-agenda-close-line {
+  margin: 0;
+}
+
+.egd-agenda-close-line + .egd-agenda-close-line {
+  margin-top: 4px;
+}
+
+/* What closes together with the Board, said once under the unsaved-change line. */
+.egd-agenda-close-closing {
+  margin-top: 10px;
+  padding: 8px 10px;
+  border: 1px solid var(--egd-outline-variant);
+  border-radius: 8px;
+  color: var(--egd-on-surface);
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+/* 다른 이름으로 저장: the new Board's name, typed in the dialog. */
+.egd-agenda-close-field {
+  box-sizing: border-box;
+  width: 100%;
+  min-height: 34px;
+  margin-top: 12px;
+  padding: 0 10px;
+  border: 1px solid var(--egd-outline);
+  border-radius: 8px;
+  background: var(--egd-surface-elevated);
+  color: var(--egd-on-surface);
+  font-family: inherit;
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.egd-agenda-close-field:hover {
+  border-color: var(--egd-primary);
+}
+
+.egd-agenda-close-field:focus-visible {
+  border-color: var(--egd-primary);
+  outline: var(--egd-focus-outline);
+  outline-offset: var(--egd-focus-outline-offset);
+}
+
+.egd-agenda-close-field[aria-invalid="true"] {
+  border-color: var(--egd-danger-ink);
+  background: var(--egd-danger-bg);
+}
+
+.egd-agenda-close-error {
+  color: var(--egd-danger-ink);
+}
+
+.egd-agenda-close-error[hidden] {
+  display: none;
+}
+
 .egd-agenda-close-actions {
   display: flex;
+  flex-wrap: wrap;
   justify-content: flex-end;
   gap: 8px;
   margin-top: 18px;
+}
+
+.egd-agenda-close-btn:focus-visible {
+  outline: var(--egd-focus-outline);
+  outline-offset: var(--egd-focus-outline-offset);
 }
 
 .egd-agenda-close-btn {

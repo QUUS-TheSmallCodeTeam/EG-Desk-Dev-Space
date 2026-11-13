@@ -2371,7 +2371,7 @@
     const candidates = new Map();
     const store = coerceAgendaStore();
     for (const [boardId, snapshot] of Object.entries(store.agendas || {})) {
-      if (boardId) candidates.set(boardId, { boardId, title: snapshot?.agenda?.title || store.meta?.[boardId]?.title || 'Board' });
+      if (boardId && !BoardLifecycle.isBoardTrashed(store.meta?.[boardId])) candidates.set(boardId, { boardId, title: snapshot?.agenda?.title || store.meta?.[boardId]?.title || 'Board' });
     }
     for (const projection of Object.values(state.boards.projections)) {
       if (typeof projection.boardId === 'string' && projection.boardId) candidates.set(projection.boardId, { boardId: projection.boardId, title: projection.title || 'Board' });
@@ -5845,7 +5845,8 @@
       },
     }, label);
     const items = [
-      item('저장', '이 Board 저장', 'board-save', () => saveCurrentAgendaState({ projectionId })),
+      item('저장', '이 Board 저장', 'board-save', () => saveBoardWithNotice({ projectionId })),
+      item('다른 이름으로 저장…', '지금 구성을 새 이름의 Board로 저장', 'board-save-as', () => openBoardSaveAs(projectionId)),
       // CTX-01: only while the bridge's Desk store keeps Board versions.
       boardVersionHistoryReady() ? item('버전 기록', '이 Board의 버전 기록', 'board-history', () => openBoardHistoryPanel(projection.boardId)) : null,
       ...boardProjectMenuItems(projection, item),
@@ -6536,6 +6537,8 @@
       updatedAt: snapshot.savedAt,
       lastOpenedAt: store.meta[agendaId]?.lastOpenedAt || Date.now(),
       closedAt: null,
+      // 보관함 is a list category; saving the Board does not take it out.
+      ...(store.meta[agendaId]?.archivedAt ? { archivedAt: store.meta[agendaId].archivedAt } : {}),
     };
     if (!writeAgendaStoreAndSync(store)) return null;
     // The preference value is saved; a ready Desk store also keeps it as a new Board version.
@@ -6650,72 +6653,68 @@
     return true;
   }
 
+  // What closes with this Board: the 화면 it owns that are still open, and the terminals among them.
+  function boardCloseFacts(projection) {
+    const views = (projection?.members || []).map(member => document.getElementById(member.viewId))
+      .filter(view => view && view.dataset?.projectionId === projection.id);
+    return { viewCount: views.length, terminalCount: views.filter(view => typeof view._closeOwnedRuntime === 'function').length };
+  }
+
+  // Board 닫기 확인: [취소] [저장하지 않고 닫기] [저장 후 닫기](기본), with what closes together.
   function showAgendaCloseGuard() {
     const projectionId = state.boards.activeProjectionId;
     const existing = document.getElementById('egd-agenda-close-guard');
     if (existing) {
-      existing.querySelector('[data-action="continue"]')?.focus?.();
+      (existing.querySelector('[data-action="save"]') || existing.querySelector('[data-action="continue"]'))?.focus?.();
       return false;
     }
     state.agenda.closeGuardOpen = true;
-    const dirtyCount = state.agenda.dirtyReasons.length;
-    const dirtyText = dirtyCount > 1
-      ? `${dirtyCount}개의 변경사항이 아직 저장되지 않았습니다.`
-      : '저장되지 않은 변경사항이 있습니다.';
-
+    const summary = BoardLifecycle.boardCloseSummary({
+      dirtyCount: state.agenda.dirtyReasons.length, ...boardCloseFacts(state.boards.projections[projectionId]),
+    });
+    const returnFocus = document.activeElement;
+    const keepOpen = () => {
+      closeAgendaCloseGuard();
+      if (returnFocus?.isConnected) returnFocus.focus?.();
+    };
+    const run = {
+      continue: () => { closeAgendaSwitcher(); keepOpen(); },
+      discard: () => completeAgendaClose({ saveFirst: false, projectionId }),
+      save: () => completeAgendaClose({ saveFirst: true, projectionId }),
+    };
+    const buttons = summary.actions.map(action => el('button', {
+      type: 'button', class: `egd-agenda-close-btn egd-agenda-close-btn-${action.kind}`, title: action.title,
+      data: { action: action.action },
+      onclick: (ev) => { ev.stopPropagation(); run[action.action](); },
+    }, action.label));
     const dialog = el('div', {
       id: 'egd-agenda-close-guard',
       class: 'egd-agenda-close-guard',
       role: 'dialog',
       'aria-modal': 'true',
       'aria-labelledby': 'egd-agenda-close-title',
+      'aria-describedby': 'egd-agenda-close-copy',
       tabindex: '-1',
-      onclick: (ev) => {
-        if (ev.target === dialog) closeAgendaCloseGuard();
-      },
+      onclick: (ev) => { if (ev.target === dialog) keepOpen(); },
       onkeydown: (ev) => {
-        if (ev.key === 'Escape') {
-          closeAgendaCloseGuard();
-          ev.preventDefault();
-          ev.stopPropagation();
-        }
+        if (ev.key !== 'Escape') return;
+        keepOpen();
+        ev.preventDefault();
+        ev.stopPropagation();
       },
     },
       el('div', { class: 'egd-agenda-close-panel' },
         el('div', { class: 'egd-agenda-close-kicker' }, currentViewportAgendaLabel()),
         el('div', { id: 'egd-agenda-close-title', class: 'egd-agenda-close-title' }, 'Board를 닫을까요?'),
-        el('div', { class: 'egd-agenda-close-copy' }, dirtyText),
-        el('div', { class: 'egd-agenda-close-actions' },
-          el('button', {
-            class: 'egd-agenda-close-btn egd-agenda-close-btn-ghost',
-            data: { action: 'continue' },
-            onclick: (ev) => {
-              ev.stopPropagation();
-              closeAgendaCloseGuard();
-              closeAgendaSwitcher();
-            },
-          }, '계속 작업'),
-          el('button', {
-            class: 'egd-agenda-close-btn egd-agenda-close-btn-danger',
-            data: { action: 'discard' },
-            onclick: (ev) => {
-              ev.stopPropagation();
-              completeAgendaClose({ saveFirst: false, projectionId });
-            },
-          }, '버리고 닫기'),
-          el('button', {
-            class: 'egd-agenda-close-btn egd-agenda-close-btn-primary',
-            data: { action: 'save' },
-            onclick: (ev) => {
-              ev.stopPropagation();
-              completeAgendaClose({ saveFirst: true, projectionId });
-            },
-          }, '저장 후 닫기'),
-        ),
+        el('div', { id: 'egd-agenda-close-copy', class: 'egd-agenda-close-copy' },
+          el('p', { class: 'egd-agenda-close-line' }, summary.copy),
+          el('p', { class: 'egd-agenda-close-line' }, summary.kept)),
+        el('div', { class: 'egd-agenda-close-closing', data: { testid: 'board-close-closing' } }, summary.closing),
+        el('div', { class: 'egd-agenda-close-actions' }, ...buttons),
       ),
     );
     document.documentElement.appendChild(dialog);
-    dialog.focus();
+    (buttons[summary.actions.findIndex(action => action.action === summary.defaultAction)] || dialog).focus();
     return false;
   }
 
@@ -6792,11 +6791,302 @@
     return title;
   }
 
-  function renameAgendaWithPrompt(agendaId) {
-    const entry = agendaListEntries().find((item) => item.id === agendaId);
-    const nextTitle = window.prompt('Board 이름', entry?.title || 'Board');
-    if (nextTitle == null) return false;
-    return renameAgenda(agendaId, nextTitle);
+  // Saved Board lifecycle (휴지통 · 복구 · 완전히 삭제 · 이름 변경 · 닫기/저장 안내):
+  // the rules and the words live in EGDeskBoardLifecycle; this is the screen side.
+  const BoardLifecycle = ChromeUtils.importESModule('chrome://userchrome/content/EGDeskBoardLifecycle.sys.mjs');
+  let boardRenamingId = null;
+  let boardTrashOpen = false;
+
+  function agendaSwitcherRow(agendaId) {
+    return Array.from(document.querySelectorAll('#egd-agenda-switcher .egd-agenda-switch-row'))
+      .find(row => row.dataset.agendaId === agendaId) || null;
+  }
+
+  // The name is edited in its own row of the Board list (Enter 확정 · Esc 취소).
+  function beginAgendaRename(agendaId) {
+    if (!agendaId) return false;
+    if (!document.getElementById('egd-agenda-switcher')) toggleAgendaSwitcher();
+    const panel = document.getElementById('egd-agenda-switcher');
+    if (!panel) return false;
+    boardRenamingId = agendaId;
+    renderAgendaSwitcherPanel(panel);
+    const input = agendaSwitcherRow(agendaId)?.querySelector('.egd-agenda-switch-row-rename');
+    if (!input) { boardRenamingId = null; return false; }
+    input.focus();
+    input.select?.();
+    return true;
+  }
+
+  function endAgendaRename(agendaId, { commit = false, value = '', refocus = true } = {}) {
+    if (boardRenamingId !== agendaId) return false;
+    const entry = agendaListEntries({ filter: 'all', query: '' }).find(item => item.id === agendaId);
+    const result = commit ? BoardLifecycle.boardRenameResult(entry?.title, value) : { ok: true, changed: false };
+    if (!result.ok) return result;
+    boardRenamingId = null;
+    if (result.changed && !renameAgenda(agendaId, result.title)) boardNotice('Board 이름을 바꾸지 못했습니다. 이전 이름을 유지합니다.');
+    const panel = document.getElementById('egd-agenda-switcher');
+    if (panel) renderAgendaSwitcherPanel(panel);
+    if (refocus) agendaSwitcherRow(agendaId)?.focus?.();
+    return result;
+  }
+
+  function buildAgendaRenameField(entry) {
+    let settled = false;
+    const settle = (commit, refocus) => {
+      if (settled) return;
+      const result = endAgendaRename(entry.id, { commit, value: input.value, refocus });
+      if (result && result.ok === false) {
+        input.setAttribute('aria-invalid', 'true');
+        input.title = result.message;
+        return;
+      }
+      settled = true;
+    };
+    const input = el('input', {
+      type: 'text', class: 'egd-agenda-switch-row-rename', value: entry.title, maxlength: '80',
+      'aria-label': `Board ${entry.title} 이름 변경`, title: 'Enter로 확정, Esc로 취소',
+      data: { testid: 'board-rename-input' },
+      onclick: (ev) => ev.stopPropagation(),
+      onmousedown: (ev) => ev.stopPropagation(),
+      oninput: () => { input.removeAttribute('aria-invalid'); input.title = 'Enter로 확정, Esc로 취소'; },
+      onkeydown: (ev) => {
+        // Every key stays in the field: the row's own Enter/Space would open the Board.
+        ev.stopPropagation();
+        if (ev.key === 'Enter') { ev.preventDefault(); settle(true, true); }
+        else if (ev.key === 'Escape') { ev.preventDefault(); settle(false, true); }
+      },
+      // Leaving the field keeps a valid new name and drops an empty one.
+      onblur: () => { if (input.isConnected) settle(!!input.value.trim(), false); },
+    });
+    return input;
+  }
+
+  // Board list row keys beyond open: F2 이름 변경, Delete 삭제, Shift+F10 행 작업.
+  function handleAgendaRowKey(ev, entry, row) {
+    const action = BoardLifecycle.boardRowKeyAction(ev, { editing: boardRenamingId === entry.id });
+    if (!action) return false;
+    ev.preventDefault();
+    ev.stopPropagation();
+    if (action === 'rename') beginAgendaRename(entry.id);
+    else if (action === 'delete') deleteAgenda(entry.id);
+    else row?.querySelector('.egd-agenda-switch-row-action')?.focus?.();
+    return true;
+  }
+
+  // One confirmation for Board delete and permanent delete, on the Board close dialog's frame.
+  function closeBoardConfirm({ restoreFocus = true } = {}) {
+    const dialog = document.getElementById('egd-board-confirm');
+    if (!dialog) return;
+    const back = dialog._returnFocus;
+    dialog.remove();
+    if (!restoreFocus) return;
+    const target = back?.isConnected ? back : document.querySelector('#egd-agenda-switcher .egd-agenda-switch-search-input');
+    target?.focus?.();
+  }
+
+  function showBoardConfirm({ kicker, heading, lines = [], confirmLabel, cancelLabel = '취소', danger = false, onConfirm } = {}) {
+    closeBoardConfirm({ restoreFocus: false });
+    const cancel = el('button', {
+      type: 'button', class: 'egd-agenda-close-btn egd-agenda-close-btn-ghost', data: { action: 'cancel' },
+      onclick: (ev) => { ev.stopPropagation(); closeBoardConfirm(); },
+    }, cancelLabel);
+    const confirm = confirmLabel && typeof onConfirm === 'function' ? el('button', {
+      type: 'button', class: 'egd-agenda-close-btn ' + (danger ? 'egd-agenda-close-btn-danger' : 'egd-agenda-close-btn-primary'),
+      data: { action: 'confirm' },
+      onclick: (ev) => { ev.stopPropagation(); closeBoardConfirm({ restoreFocus: false }); onConfirm(); },
+    }, confirmLabel) : null;
+    const dialog = el('div', {
+      id: 'egd-board-confirm', class: 'egd-agenda-close-guard', role: 'alertdialog', 'aria-modal': 'true',
+      'aria-labelledby': 'egd-board-confirm-title', 'aria-describedby': 'egd-board-confirm-copy', tabindex: '-1',
+      onclick: (ev) => { if (ev.target === dialog) closeBoardConfirm(); },
+      onkeydown: (ev) => {
+        if (ev.key !== 'Escape') return;
+        closeBoardConfirm();
+        ev.preventDefault();
+        ev.stopPropagation();
+      },
+    },
+      el('div', { class: 'egd-agenda-close-panel' },
+        el('div', { class: 'egd-agenda-close-kicker' }, kicker || 'Board'),
+        el('div', { id: 'egd-board-confirm-title', class: 'egd-agenda-close-title' }, heading),
+        el('div', { id: 'egd-board-confirm-copy', class: 'egd-agenda-close-copy' },
+          ...lines.map(line => el('p', { class: 'egd-agenda-close-line' }, line))),
+        el('div', { class: 'egd-agenda-close-actions' }, cancel, confirm),
+      ),
+    );
+    dialog._returnFocus = document.activeElement;
+    document.documentElement.appendChild(dialog);
+    // Focus starts on the safe choice; the destructive one takes a deliberate Tab or click.
+    cancel.focus();
+    return dialog;
+  }
+
+  function writeBoardLifecycleStore(result, failure) {
+    if (result?.ok && writeAgendaStoreAndSync(result.store)) return true;
+    boardNotice(failure);
+    return false;
+  }
+
+  function focusBoardTrashToggle() {
+    document.querySelector('#egd-agenda-switcher .egd-agenda-switch-trash-toggle')?.focus?.();
+  }
+
+  function moveAgendaToTrash(agendaId) {
+    const result = BoardLifecycle.trashBoard(coerceAgendaStore(), agendaId, Date.now());
+    if (!writeBoardLifecycleStore(result, 'Board를 휴지통으로 옮기지 못했습니다. 저장된 Board는 그대로 있습니다.')) return false;
+    boardTrashOpen = true;
+    syncViewportAgendaRail();
+    boardNotice(`'${result.title}' Board를 휴지통으로 옮겼습니다. Board 목록 아래 휴지통에서 복구할 수 있습니다.`);
+    focusBoardTrashToggle();
+    return true;
+  }
+
+  // 보관함: only where the Board is listed changes. Nothing on the Desk moves or closes.
+  function setAgendaArchived(agendaId, archived) {
+    const store = coerceAgendaStore();
+    const result = archived ? BoardLifecycle.archiveBoard(store, agendaId, Date.now()) : BoardLifecycle.unarchiveBoard(store, agendaId);
+    if (!writeBoardLifecycleStore(result, archived
+      ? 'Board를 보관함으로 옮기지 못했습니다. Board 목록에 그대로 있습니다.'
+      : 'Board를 보관함에서 꺼내지 못했습니다. 보관함에 그대로 있습니다.')) return false;
+    syncViewportAgendaRail();
+    boardNotice(archived
+      ? `'${result.title}' Board를 보관함으로 옮겼습니다. Board 목록의 '보관함'에서 다시 꺼낼 수 있습니다.`
+      : `'${result.title}' Board를 보관함에서 꺼냈습니다.`);
+    (agendaSwitcherRow(agendaId) || document.querySelector('#egd-agenda-switcher .egd-agenda-switch-filter-active'))?.focus?.();
+    return true;
+  }
+
+  function restoreAgendaFromTrash(agendaId) {
+    const result = BoardLifecycle.restoreBoard(coerceAgendaStore(), agendaId, Date.now());
+    if (!writeBoardLifecycleStore(result, 'Board를 복구하지 못했습니다. 휴지통에 그대로 있습니다.')) return false;
+    syncViewportAgendaRail();
+    boardNotice(result.renamed
+      ? `같은 이름의 Board가 있어 '${result.title}' 이름으로 복구했습니다. Board 목록에서 열 수 있습니다.`
+      : `'${result.title}' Board를 복구했습니다. Board 목록에서 열 수 있습니다.`);
+    const row = agendaSwitcherRow(agendaId);
+    if (row) row.focus?.(); else focusBoardTrashToggle();
+    return true;
+  }
+
+  function purgeAgendaFromTrash(agendaId, options = {}) {
+    const entry = BoardLifecycle.trashedBoardEntries(coerceAgendaStore()).find(item => item.id === agendaId);
+    if (!entry) return false;
+    const purge = () => {
+      const result = BoardLifecycle.purgeBoard(coerceAgendaStore(), agendaId);
+      if (!writeBoardLifecycleStore(result, 'Board를 삭제하지 못했습니다. 휴지통에 그대로 있습니다.')) return false;
+      syncViewportAgendaRail();
+      boardNotice(`'${result.title}' Board를 완전히 삭제했습니다.`);
+      focusBoardTrashToggle();
+      return true;
+    };
+    if (options.confirmed === true) return purge();
+    showBoardConfirm({
+      kicker: '휴지통', danger: true, onConfirm: purge,
+      ...BoardLifecycle.boardPurgePrompt({ title: entry.title, count: entry.count, keepsHistory: boardVersionHistoryReady() }),
+    });
+    return true;
+  }
+
+  // 저장, and one line that says what went in (화면 N개).
+  function saveBoardWithNotice(options = {}) {
+    const snapshot = saveCurrentAgendaState(options);
+    if (snapshot) boardNotice(BoardLifecycle.boardSavedNotice({ title: snapshot.agenda?.title, count: snapshot.cards?.length, shapeCount: snapshot.shapes?.length }));
+    return snapshot;
+  }
+
+  function closeBoardSaveAs({ restoreFocus = true } = {}) {
+    const dialog = document.getElementById('egd-board-save-as');
+    if (!dialog) return;
+    const back = dialog._returnFocus;
+    dialog.remove();
+    if (restoreFocus && back?.isConnected) back.focus?.();
+  }
+
+  // 다른 이름으로 저장: the arrangement on screen becomes a new saved Board (closed, in the
+  // Board list). The open Board, its saved copy and everything on the Desk stay where they are.
+  function commitBoardSaveAs(projectionId, name) {
+    const projection = state.boards.projections[projectionId];
+    const snapshot = projection ? serializeAgendaSnapshot({ projectionId }) : null;
+    if (!snapshot) return { ok: false, message: '저장할 Board를 찾지 못했습니다. Board를 다시 선택해 주세요.' };
+    const result = BoardLifecycle.saveBoardAs(coerceAgendaStore(), {
+      snapshot, newId: newAgendaId(), title: name, sourceId: projection.boardId, now: Date.now(),
+    });
+    if (!result.ok) return result;
+    if (!writeAgendaStoreAndSync(result.store)) return { ok: false, message: 'Board를 저장하지 못했습니다. 잠시 뒤 다시 시도해 주세요.' };
+    // Like 저장: a ready Desk store also keeps the new Board as its first version.
+    void syncBoardToStore(result.id, result.snapshot, result.title);
+    syncViewportAgendaRail();
+    boardNotice(BoardLifecycle.boardSavedAsNotice(result));
+    return result;
+  }
+
+  function openBoardSaveAs(projectionId = state.boards.activeProjectionId) {
+    const projection = state.boards.projections[projectionId];
+    if (!projection) { boardNotice('다른 이름으로 저장할 Board를 먼저 선택해 주세요.'); return null; }
+    closeBoardSaveAs({ restoreFocus: false });
+    const returnFocus = document.activeElement;
+    const prompt = BoardLifecycle.boardSaveAsPrompt({
+      title: projection.title, viewCount: projection.members.length, taken: BoardLifecycle.liveBoardTitles(coerceAgendaStore()),
+    });
+    const error = el('p', { id: 'egd-board-save-as-error', class: 'egd-agenda-close-line egd-agenda-close-error', role: 'alert', hidden: true });
+    const submit = () => {
+      const result = commitBoardSaveAs(projectionId, input.value);
+      if (result.ok) { closeBoardSaveAs(); return; }
+      error.textContent = result.message;
+      error.hidden = false;
+      input.setAttribute('aria-invalid', 'true');
+      input.focus();
+    };
+    const input = el('input', {
+      type: 'text', class: 'egd-agenda-close-field', value: prompt.suggested, maxlength: '80',
+      'aria-label': '새 Board 이름', 'aria-describedby': 'egd-board-save-as-error', title: 'Enter로 저장, Esc로 취소',
+      data: { testid: 'board-save-as-name' },
+      oninput: () => { input.removeAttribute('aria-invalid'); error.hidden = true; },
+      onkeydown: (ev) => {
+        if (ev.key !== 'Enter') return;
+        ev.preventDefault();
+        ev.stopPropagation();
+        submit();
+      },
+    });
+    let pressedOutside = false;
+    const dialog = el('div', {
+      id: 'egd-board-save-as', class: 'egd-agenda-close-guard', role: 'dialog', 'aria-modal': 'true',
+      'aria-labelledby': 'egd-board-save-as-title', 'aria-describedby': 'egd-board-save-as-copy', tabindex: '-1',
+      // Only a press that both starts and ends outside the panel closes it (a text drag does not).
+      onmousedown: (ev) => { pressedOutside = ev.target === dialog; },
+      onclick: (ev) => { if (ev.target === dialog && pressedOutside) closeBoardSaveAs(); },
+      onkeydown: (ev) => {
+        if (ev.key !== 'Escape') return;
+        closeBoardSaveAs();
+        ev.preventDefault();
+        ev.stopPropagation();
+      },
+    },
+      el('div', { class: 'egd-agenda-close-panel' },
+        el('div', { class: 'egd-agenda-close-kicker' }, '다른 이름으로 저장'),
+        el('div', { id: 'egd-board-save-as-title', class: 'egd-agenda-close-title' }, prompt.heading),
+        input,
+        el('div', { id: 'egd-board-save-as-copy', class: 'egd-agenda-close-copy' },
+          ...prompt.lines.map(line => el('p', { class: 'egd-agenda-close-line' }, line)), error),
+        el('div', { class: 'egd-agenda-close-actions' },
+          el('button', {
+            type: 'button', class: 'egd-agenda-close-btn egd-agenda-close-btn-ghost', title: '저장하지 않고 닫습니다 (Esc)',
+            data: { action: 'cancel' },
+            onclick: (ev) => { ev.stopPropagation(); closeBoardSaveAs(); },
+          }, prompt.cancelLabel),
+          el('button', {
+            type: 'button', class: 'egd-agenda-close-btn egd-agenda-close-btn-primary', title: '이 이름의 새 Board로 저장합니다 (Enter)',
+            data: { action: 'confirm' },
+            onclick: (ev) => { ev.stopPropagation(); submit(); },
+          }, prompt.confirmLabel)),
+      ),
+    );
+    dialog._returnFocus = returnFocus;
+    document.documentElement.appendChild(dialog);
+    input.focus();
+    input.select?.();
+    return dialog;
   }
 
   function duplicateAgenda(agendaId = state.agenda.activeAgendaId, options = {}) {
@@ -6842,9 +7132,19 @@
     return newId;
   }
 
-  function deleteAgenda() {
-    boardNotice('Board 삭제와 복구 정책은 아직 연결되지 않았습니다. 저장된 Board는 유지됩니다.');
-    return false;
+  // Deleting a saved Board says what goes and moves it to the trash (복구 가능).
+  // A Board that is open on the Desk is closed first, by its own close confirmation.
+  function deleteAgenda(agendaId, options = {}) {
+    const store = coerceAgendaStore();
+    if (!agendaId || (!store.agendas?.[agendaId] && !store.meta?.[agendaId]) || BoardLifecycle.isBoardTrashed(store.meta?.[agendaId])) return false;
+    const snapshot = store.agendas?.[agendaId] || null;
+    const open = Object.values(state.boards.projections).some(projection => projection.boardId === agendaId);
+    const prompt = BoardLifecycle.boardDeletePrompt({
+      title: snapshot?.agenda?.title || store.meta?.[agendaId]?.title, count: agendaCardCountForSnapshot(snapshot), open,
+    });
+    if (options.confirmed === true) return prompt.canDelete ? moveAgendaToTrash(agendaId) : false;
+    showBoardConfirm({ kicker: '저장한 Board 삭제', ...prompt, onConfirm: prompt.canDelete ? () => moveAgendaToTrash(agendaId) : null });
+    return true;
   }
 
   function agendaEntryStatus(entry) {
@@ -6852,9 +7152,7 @@
   }
 
   function agendaEntryMatchesFilter(entry, filter = state.agenda.switcherFilter) {
-    if (filter === 'recent') return !!(entry.lastOpenedAt || entry.updatedAt);
-    if (filter === 'closed') return !!entry.closed;
-    return true;
+    return BoardLifecycle.boardListFilterMatch(entry, filter);
   }
 
   function agendaEntryMatchesQuery(entry, query = state.agenda.switcherQuery) {
@@ -6876,7 +7174,7 @@
     const ids = new Set([
       ...Object.keys(store.meta || {}),
       ...Object.keys(store.agendas || {}),
-    ].filter(Boolean));
+    ].filter(id => id && !BoardLifecycle.isBoardTrashed(store.meta?.[id])));
     return Array.from(ids).map((id) => {
       const snapshot = store.agendas?.[id] || null;
       const meta = store.meta?.[id] || null;
@@ -6896,6 +7194,7 @@
         saved: !!snapshot,
         dirty: current && state.agenda.dirty,
         closed: !!closedAt,
+        archived: BoardLifecycle.isBoardArchived(meta),
         count: snapshot ? agendaCardCountForSnapshot(snapshot) : liveCount,
         updatedAt,
         lastOpenedAt,
@@ -6916,6 +7215,7 @@
       all: agendaListEntries({ filter: 'all', query: '' }).length,
       recent: agendaListEntries({ filter: 'recent', query: '' }).length,
       closed: agendaListEntries({ filter: 'closed', query: '' }).length,
+      archived: agendaListEntries({ filter: 'archived', query: '' }).length,
     };
   }
 
@@ -7230,6 +7530,7 @@
     const seen = new Set();
     const results = [];
     for (const [agendaId, snapshot] of Object.entries(store.agendas || {})) {
+      if (BoardLifecycle.isBoardTrashed(store.meta?.[agendaId])) continue;
       const agendaTitle = snapshot?.agenda?.title || store.meta?.[agendaId]?.title || agendaId;
       for (const card of snapshot?.cards || []) {
         if (card?.type !== 'browser') continue;
@@ -7708,6 +8009,7 @@
   function switchAgenda(agendaId, options = {}) {
     const store = coerceAgendaStore();
     const snapshot = store.agendas?.[agendaId] || null;
+    if (BoardLifecycle.isBoardTrashed(store.meta?.[agendaId])) { boardNotice('휴지통에 있는 Board입니다. Board 목록의 휴지통에서 복구한 뒤 열어 주세요.'); return false; }
     closeAgendaSwitcher();
     return openBoardSnapshot(snapshot, options);
   }
@@ -7758,12 +8060,17 @@
   }
 
   function renderAgendaSwitcherPanel(panel) {
+    // A redraw while a name is being typed keeps the typed text and the caret.
+    const editing = boardRenamingId ? panel.querySelector?.('.egd-agenda-switch-row-rename') : null;
+    const renameDraft = editing && document.activeElement === editing
+      ? { value: editing.value, start: editing.selectionStart, end: editing.selectionEnd } : null;
     const entries = agendaListEntries();
     const counts = agendaFilterCounts();
     const filters = [
       ['all', '전체', counts.all],
       ['recent', '최근', counts.recent],
       ['closed', '닫힘', counts.closed],
+      ['archived', '보관함', counts.archived],
     ];
     const renderAgain = (focusSearch = false) => {
       renderAgendaSwitcherPanel(panel);
@@ -7773,7 +8080,7 @@
         input?.setSelectionRange?.(input.value.length, input.value.length);
       }
     };
-    const rows = entries.map((entry) => el('div', {
+    const rows = entries.map((entry, _index, _all, archiveAction = BoardLifecycle.boardArchiveAction(entry)) => el('div', {
       class: 'egd-agenda-switch-row' + (entry.current ? ' egd-agenda-switch-row-current' : ''),
       role: 'button',
       tabindex: '0',
@@ -7787,7 +8094,7 @@
       },
       onkeydown: (ev) => {
         if (ev.target?.closest?.('.egd-agenda-switch-row-action')) return;
-        if (ev.key !== 'Enter' && ev.key !== ' ') return;
+        if (ev.key !== 'Enter' && ev.key !== ' ') return handleAgendaRowKey(ev, entry, ev.currentTarget);
         ev.preventDefault();
         ev.stopPropagation();
         switchAgenda(entry.id);
@@ -7795,12 +8102,15 @@
     },
       el('span', { class: 'egd-agenda-switch-row-dot', 'aria-hidden': 'true' }),
       el('span', { class: 'egd-agenda-switch-row-main' },
-        el('span', { class: 'egd-agenda-switch-row-title' }, entry.title),
+        boardRenamingId === entry.id
+          ? buildAgendaRenameField(entry)
+          : el('span', { class: 'egd-agenda-switch-row-title' }, entry.title),
         el('span', { class: 'egd-agenda-switch-row-meta' },
           [
             // The current Board is said in words, not only by the row colour.
             entry.current && agendaEntryStatus(entry) !== '현재' ? '현재' : null,
             agendaEntryStatus(entry),
+            entry.archived ? '보관됨' : null,
             SurfaceState.boardEntryRecencyLabel(entry),
             SurfaceState.boardItemCountLabel(entry.count),
           ].filter(Boolean).join(' · '),
@@ -7809,33 +8119,88 @@
       el('span', { class: 'egd-agenda-switch-row-actions' },
         el('button', {
           class: 'egd-agenda-switch-row-action',
-          title: '이름 변경',
+          type: 'button',
+          title: '이름 변경 (F2)',
+          'aria-label': `Board ${entry.title} 이름 변경`,
           data: { action: 'rename' },
           onclick: (ev) => {
             ev.stopPropagation();
-            renameAgendaWithPrompt(entry.id);
+            beginAgendaRename(entry.id);
           },
-        }, '✎'),
+        }, deskIcon('pencil')),
         el('button', {
           class: 'egd-agenda-switch-row-action',
+          type: 'button',
           title: '복제',
+          'aria-label': `Board ${entry.title} 복제`,
           data: { action: 'duplicate' },
           onclick: (ev) => {
             ev.stopPropagation();
             duplicateAgenda(entry.id);
           },
-        }, '⧉'),
+        }, deskIcon('duplicate')),
+        el('button', {
+          class: 'egd-agenda-switch-row-action',
+          type: 'button',
+          title: archiveAction.label,
+          'aria-label': archiveAction.ariaLabel,
+          'aria-pressed': entry.archived ? 'true' : 'false',
+          data: { action: 'archive' },
+          onclick: (ev) => {
+            ev.stopPropagation();
+            setAgendaArchived(entry.id, archiveAction.archive);
+          },
+        }, deskIcon('folder')),
         el('button', {
           class: 'egd-agenda-switch-row-action egd-agenda-switch-row-action-danger',
-          title: '삭제',
+          type: 'button',
+          title: '삭제 (휴지통으로 이동)',
+          'aria-label': `Board ${entry.title} 삭제`,
           data: { action: 'delete' },
           onclick: (ev) => {
             ev.stopPropagation();
             deleteAgenda(entry.id);
           },
-        }, '🗑︎'),
+        }, deskIcon('trash')),
       ),
     ));
+    const trashed = BoardLifecycle.trashedBoardEntries(coerceAgendaStore());
+    const trashRows = trashed.map((entry) => el('div', {
+      class: 'egd-agenda-switch-trash-row', role: 'listitem', data: { boardId: entry.id, testid: 'board-trash-row' },
+    },
+      el('span', { class: 'egd-agenda-switch-row-main' },
+        el('span', { class: 'egd-agenda-switch-row-title' }, entry.title),
+        el('span', { class: 'egd-agenda-switch-row-meta' },
+          [BoardLifecycle.boardTrashedAtLabel(entry.deletedAt, Date.now()), SurfaceState.boardItemCountLabel(entry.count)].join(' · ')),
+      ),
+      el('button', {
+        type: 'button', class: 'egd-agenda-switch-trash-action', title: '이 Board를 Board 목록으로 되돌립니다',
+        'aria-label': `Board ${entry.title} 복구`, data: { action: 'restore', testid: 'board-restore' },
+        onclick: (ev) => { ev.stopPropagation(); restoreAgendaFromTrash(entry.id); },
+      }, '복구'),
+      el('button', {
+        type: 'button', class: 'egd-agenda-switch-trash-action egd-agenda-switch-trash-action-danger', title: '되돌릴 수 없게 삭제합니다',
+        'aria-label': `Board ${entry.title} 완전히 삭제`, data: { action: 'purge', testid: 'board-purge' },
+        onclick: (ev) => { ev.stopPropagation(); purgeAgendaFromTrash(entry.id); },
+      }, '완전히 삭제'),
+    ));
+    const trashSection = el('div', { class: 'egd-agenda-switch-trash' },
+      el('button', {
+        type: 'button', class: 'egd-agenda-switch-trash-toggle',
+        title: boardTrashOpen ? '휴지통 접기' : '휴지통 펼치기',
+        'aria-expanded': boardTrashOpen ? 'true' : 'false', 'aria-controls': 'egd-agenda-switch-trash-list',
+        data: { testid: 'board-trash-toggle' },
+        onclick: (ev) => {
+          ev.stopPropagation();
+          boardTrashOpen = !boardTrashOpen;
+          renderAgendaSwitcherPanel(panel);
+          focusBoardTrashToggle();
+        },
+      }, deskIcon('trash'), el('span', { class: 'egd-agenda-switch-trash-label' }, `휴지통 ${trashed.length}`),
+        deskIcon('chevron', 'egd-ui-icon egd-agenda-switch-trash-chevron')),
+      boardTrashOpen ? el('div', { id: 'egd-agenda-switch-trash-list', class: 'egd-agenda-switch-trash-list', role: 'list' },
+        ...(trashRows.length ? trashRows : [el('div', { class: 'egd-agenda-switch-empty' }, '휴지통이 비어 있습니다.')])) : null,
+    );
     panel.replaceChildren(
       el('div', { class: 'egd-agenda-switch-head' },
         el('div', { class: 'egd-agenda-switch-title' }, 'Board'),
@@ -7847,7 +8212,7 @@
             data: { testid: 'board-save' },
             onclick: (ev) => {
               ev.stopPropagation();
-              saveCurrentAgendaState();
+              saveBoardWithNotice();
               renderAgendaSwitcherPanel(panel);
             },
           }, '저장'),
@@ -7897,7 +8262,14 @@
       el('div', { class: 'egd-agenda-switch-list' },
         ...(rows.length ? rows : [agendaSwitcherEmptyState(counts.all)]),
       ),
+      trashSection,
     );
+    const field = renameDraft && panel.querySelector('.egd-agenda-switch-row-rename');
+    if (field) {
+      field.value = renameDraft.value;
+      field.focus();
+      field.setSelectionRange?.(renameDraft.start, renameDraft.end);
+    }
   }
 
   function toggleAgendaSwitcher(ev = null) {
@@ -7913,7 +8285,7 @@
     state.agenda.switcherOpen = true;
     document.querySelector('.egd-rail-switcher')?.classList.add('egd-rail-switcher-open');
     panel._outsideHandler = (event) => {
-      if (event.target?.closest?.('#egd-agenda-switcher, .egd-rail-switcher')) return;
+      if (event.target?.closest?.('#egd-agenda-switcher, .egd-rail-switcher, #egd-board-confirm')) return;
       closeAgendaSwitcher();
     };
     setTimeout(() => window.addEventListener('mousedown', panel._outsideHandler, true), 0);
@@ -9890,7 +10262,7 @@
         hidden: !state.agenda.dirty,
         onclick: (ev) => {
           ev.stopPropagation();
-          saveCurrentAgendaState();
+          saveBoardWithNotice();
         },
       }, deskIcon('check')),
       el('button', {
