@@ -9412,11 +9412,29 @@ button.egd-codex-message-activity:focus-visible { outline: var(--egd-focus-outli
 }
 .egd-resource-detail[hidden] { display: none; }
 .egd-resource-detail-title { font-size: 13px; font-weight: 650; }
-.egd-resource-detail-scope { margin: 2px 0 0; color: var(--egd-on-surface-variant); }
+.egd-resource-detail-scope { margin: 2px 0 0; color: var(--egd-on-surface-variant); font-variant-numeric: tabular-nums; }
 .egd-resource-detail dl { margin: 13px 0 0; border-top: 1px solid var(--egd-outline-variant); }
 .egd-resource-detail-row { display: flex; justify-content: space-between; gap: 10px; padding: 7px 0; border-bottom: 1px solid var(--egd-outline-variant); }
 .egd-resource-detail-row dt { color: var(--egd-on-surface-variant); }
 .egd-resource-detail-row dd { margin: 0; text-align: right; font-variant-numeric: tabular-nums; font-weight: 550; }
+/* A number sits in a fixed cell, right-aligned, with its unit in a fixed cell
+   beside it: 9 -> 10, 99 -> 100 %, KiB -> MiB change text, never the layout. */
+.egd-resource-figure { display: flex; align-items: baseline; justify-content: flex-end; column-gap: 3px; }
+.egd-resource-figure-text { display: block; }
+.egd-resource-cell { flex: none; white-space: nowrap; }
+.egd-resource-figure-text .egd-resource-cell { white-space: normal; }
+.egd-resource-cell-num { width: 4ch; text-align: right; }
+.egd-resource-cell-unit { width: 5ch; text-align: left; }
+.egd-resource-figure-size .egd-resource-cell-unit,
+.egd-resource-figure-range .egd-resource-cell-unit { width: 3.5ch; }
+.egd-resource-figure-percent .egd-resource-cell-unit { width: 1.5ch; }
+.egd-resource-cell-label,
+.egd-resource-cell-sep { color: var(--egd-on-surface-variant); font-weight: 500; }
+/* Two speeds always take two lines, so a longer speed cannot wrap the row. */
+.egd-resource-figure-pair { display: grid; grid-template-columns: auto 4ch 5ch; justify-content: end; column-gap: 3px; row-gap: 2px; }
+/* Words instead of the two speeds keep the same two-line height. */
+.egd-resource-figure-pair-status { display: block; min-height: calc(2.9em + 2px); }
+.egd-resource-figure-pair-status .egd-resource-cell { white-space: normal; }
 /* Below the opened metric: all four at a glance, in words. */
 .egd-resource-overview-title { margin: 12px 0 0; color: var(--egd-on-surface-variant); font-weight: 600; }
 .egd-resource-detail .egd-resource-overview { margin-top: 5px; }
@@ -9529,6 +9547,8 @@ button.egd-codex-message-avatar.egd-profile-avatar-photo { padding: 0; backgroun
   cursor: default;
 }
 .egd-usage-meter:hover { background: var(--egd-hover); }
+/* 9% -> 10% -> 100% stays in one right-aligned cell; the Chat head does not shift. */
+.egd-usage-text { min-width: 4ch; text-align: right; }
 .egd-usage-ring {
   position: relative;
   display: inline-grid;

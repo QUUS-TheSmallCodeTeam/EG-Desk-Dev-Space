@@ -4,6 +4,7 @@ import { readFile } from 'node:fs/promises'
 import { runInNewContext } from 'node:vm'
 import { createSystemResourceMonitor, parseMacDefaultInterface, parseMacNetworkCounters,
   parseMacDiskCounters, parseLinuxDefaultInterface, parseLinuxNetworkCounters, parseLinuxDiskCounters } from './system-resource-monitor.mjs'
+import * as ResourceReadout from '../overlay/resources/EGDeskResourceReadout.sys.mjs'
 
 test('macOS parsers select only the default interface link counters, not repeated protocol rows', () => {
   assert.equal(parseMacDefaultInterface('route to: default\n  interface: en0\n flags: <UP>\n'), 'en0')
@@ -108,11 +109,14 @@ test('gadget renders measured read/write rates and retains storage detail when I
   assert.ok(start >= 0 && end > start)
   class Element {
     constructor(tag, attrs = {}, ...children) {
-      this.tag = tag; this.attrs = { ...attrs }; this.children = children.filter(Boolean); this.textContent = ''
+      this.tag = tag; this.attrs = { ...attrs }; this.children = children.filter(Boolean); this.text = null
       this.hidden = Boolean(attrs.hidden); this.onclick = attrs.onclick
       this.toggles = {}; this.classList = { toggle: (name, value) => { this.toggles[name] = value } }
       this.style = { setProperty() {} }
     }
+    // A written text replaces the node's children, as in the DOM.
+    get textContent() { return this.text ?? this.children.filter(child => typeof child === 'string').join('') }
+    set textContent(value) { this.text = String(value); this.children = [] }
     appendChild(child) { this.children.push(child) }
     replaceChildren(...children) { this.children = children }
     setAttribute(name, value) { this.attrs[name] = value }
@@ -139,6 +143,7 @@ test('gadget renders measured read/write rates and retains storage detail when I
     network: { status: 'ok', rxBytesPerSecond: 3072, txBytesPerSecond: 4096 },
   }
   const context = { document, window, performance: { now: () => clock }, AbortController,
+    ChromeUtils: { importESModule: () => ResourceReadout },
     el: (tag, attrs, ...children) => new Element(tag, attrs, ...children),
     fetch: async (_url, { signal }) => {
       calls++
@@ -154,17 +159,20 @@ test('gadget renders measured read/write rates and retains storage detail when I
   const [cpu, , disk, network, detail] = gadget.children
   // The bar shows rings only; each number is read in the popup's four-row overview.
   for (const button of [cpu, disk, network]) assert.equal(button.children.length, 1)
-  const overviewRows = () => detail.children.at(-1).children.map(row => [row.children[0].children[0], row.children[1].textContent])
+  // A value is drawn as fixed cells (number | unit); read them left to right.
+  const valueText = value => value.children.map(cell => cell.textContent).filter(Boolean).join(' ')
+  const overviewRows = () => detail.children.at(-1).children.map(row => [row.children[0].children[0], valueText(row.children[1])])
+  const detailRow = label => valueText(detail.children[2].children.find(row => row.children[0].children[0] === label).children[1])
   assert.equal(cpu.title, 'CPU · 25%')
   assert.equal(disk.children[0].toggles['egd-resource-unmeasured'], true) // No made-up disk utilization arc.
-  assert.match(disk.attrs['aria-label'], /읽기 1 KiB\/s, 쓰기 2 KiB\/s/)
+  assert.match(disk.attrs['aria-label'], /읽기 1\.00 KiB\/s, 쓰기 2\.00 KiB\/s/)
   assert.deepEqual([...timers.values()].map(timer => timer.delay), [1000])
   disk.onclick({ stopPropagation() {} })
   assert.equal(detail.children.at(-2).children[0], '전체 자원')
-  assert.deepEqual(overviewRows(), [['CPU', '25%'], ['메모리', '60%'],
-    ['디스크', '읽기 1 KiB/s · 쓰기 2 KiB/s'], ['네트워크', '수신 3 KiB/s · 송신 4 KiB/s']])
+  assert.deepEqual(overviewRows(), [['CPU', '25 %'], ['메모리', '60 %'],
+    ['디스크', '읽기 1.00 KiB/s 쓰기 2.00 KiB/s'], ['네트워크', '수신 3.00 KiB/s 송신 4.00 KiB/s']])
   const textOf = node => [node.textContent, ...node.children.flatMap(child => typeof child === 'string' ? [child] : textOf(child))]
-  assert.ok(textOf(detail).includes('1 KiB / 2 KiB'))
+  assert.equal(detailRow('저장 공간'), '1.00 KiB / 2.00 KiB')
   payload.diskIo = { status: 'unsupported', readBytesPerSecond: null, writeBytesPerSecond: null }
   payload.network = { status: 'unsupported', rxBytesPerSecond: null, txBytesPerSecond: null }
   clock = 1000
@@ -175,7 +183,8 @@ test('gadget renders measured read/write rates and retains storage detail when I
   assert.match(disk.attrs['aria-label'], /이 환경에서는 지원하지 않음/)
   assert.match(network.attrs['aria-label'], /이 환경에서는 지원하지 않음/)
   assert.ok(textOf(detail).includes('이 환경에서는 지원하지 않음'))
-  assert.ok(textOf(detail).includes('1 KiB / 2 KiB'))
+  assert.equal(detailRow('읽기'), '이 환경에서는 지원하지 않음')
+  assert.equal(detailRow('저장 공간'), '1.00 KiB / 2.00 KiB')
   payload.diskIo.status = 'unavailable'; payload.network.status = 'unavailable'; clock = 2000
   const [nextId, next] = [...timers.entries()][0]; timers.delete(nextId); next.fn()
   await new Promise(resolve => setImmediate(resolve))
@@ -187,14 +196,14 @@ test('gadget renders measured read/write rates and retains storage detail when I
   await new Promise(resolve => setImmediate(resolve))
   document.hidden = true; listeners.get('visibilitychange')()
   await new Promise(resolve => setImmediate(resolve))
-  assert.equal(overviewRows()[0][1], '25%')
+  assert.equal(overviewRows()[0][1], '25 %')
   assert.equal(timers.size, 0) // No hidden polling and no false failure on abort.
   document.hidden = false; waitForAbort = false; payload.diskIo.status = 'ok'
   payload.diskIo.readBytesPerSecond = 512; payload.diskIo.writeBytesPerSecond = 1024
   listeners.get('visibilitychange')()
   await new Promise(resolve => setImmediate(resolve))
   assert.equal(calls, 5)
-  assert.equal(overviewRows()[2][1], '읽기 512 B/s · 쓰기 1 KiB/s')
+  assert.equal(overviewRows()[2][1], '읽기 512 B/s 쓰기 1.00 KiB/s')
 })
 
 test('one-second samples re-read CPU, network and disk I/O, while storage capacity is cached', async () => {

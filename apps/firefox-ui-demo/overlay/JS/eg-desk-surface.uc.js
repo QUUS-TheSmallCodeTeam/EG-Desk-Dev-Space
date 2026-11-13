@@ -9994,6 +9994,9 @@
   // Values come only from the protected local bridge; unavailable is not zero.
   // The bar shows rings only (approved .eg-resources); every number is read in the
   // popup a ring opens: that metric's rows, then all four at a glance.
+  // Numbers sit in fixed cells and a new sample only rewrites the text that changed
+  // (EGDeskResourceReadout): no rebuilt rows, no neighbour pushed by a longer value.
+  const ResourceReadout = ChromeUtils.importESModule('chrome://userchrome/content/EGDeskResourceReadout.sys.mjs');
   let resourceGadget = null;
   function buildResourceGadget() {
     if (resourceGadget) return resourceGadget;
@@ -10020,58 +10023,82 @@
     const requestTimeoutMs = 2500;
     const buttons = new Map();
     const overviewValues = new Map();
+    const rings = new Map();
+    const put = ResourceReadout.createWriteGate();
+    const makeCell = (cell) => el('span', { class: `egd-resource-cell egd-resource-cell-${cell.kind}` }, cell.text);
     const overview = el('dl', { class: 'egd-resource-overview', 'aria-label': '전체 자원 한눈에 보기' });
     const metricReady = (metric) => metric?.status === 'ok';
     const numeric = (value) => typeof value === 'number' && Number.isFinite(value) && value >= 0;
-    const size = (bytes) => {
-      if (!numeric(bytes)) return '—';
-      if (bytes >= 1024 ** 3) return `${(bytes / 1024 ** 3).toFixed(1)} GiB`;
-      if (bytes >= 1024 ** 2) return `${(bytes / 1024 ** 2).toFixed(1)} MiB`;
-      if (bytes < 1024) return `${Math.round(bytes)} B`;
-      return `${Math.round(bytes / 1024)} KiB`;
-    };
-    const rate = (bytes) => numeric(bytes) ? `${size(bytes)}/s` : '—';
-    const percent = (metric) => metricReady(metric) && numeric(metric.percent)
-      ? `${Math.round(metric.percent)}%` : '—';
+    const sizeParts = (bytes) => ResourceReadout.sizeParts(bytes);
+    const percentParts = (metric) => metricReady(metric) ? ResourceReadout.percentParts(metric.percent) : null;
+    const words = (text) => ResourceReadout.textValue(text);
+    const sizeOf = (bytes) => ResourceReadout.amountValue(sizeParts(bytes));
+    const rateOf = (bytes) => ResourceReadout.amountValue(sizeParts(bytes), '/s');
+    const percentOf = (metric) => ResourceReadout.percentValue(percentParts(metric));
+    const rateText = (bytes) => ResourceReadout.amountText(sizeParts(bytes), '/s');
+    // 998 ms <-> 1001 ms every second: the number keeps its own cell too.
+    const interval = (metric) => ResourceReadout.amountValue(metricReady(metric) && numeric(metric.intervalMs)
+      ? { number: String(Math.round(metric.intervalMs)), unit: 'ms' } : null);
     const metricStatus = (metric) => {
       if (metric?.status === 'unsupported') return '이 환경에서는 지원하지 않음';
       if (metric?.status === 'warming' || (!metric && (pending || refreshOnResume || document.hidden))) return '측정 준비 중';
       return '측정할 수 없음';
     };
     const title = (id) => id === 'memory' ? '메모리 사용(캐시 포함)' : specs.find(spec => spec.id === id)?.label || id;
+    // Each row is [label, value]; a value is fixed cells (number | unit) or plain words.
     const rows = (id, metric) => {
       if (id === 'disk') {
         const io = snapshot?.diskIo;
         return [
-          ['읽기', metricReady(io) ? rate(io.readBytesPerSecond) : metricStatus(io)],
-          ['쓰기', metricReady(io) ? rate(io.writeBytesPerSecond) : metricStatus(io)],
-          ['속도 측정 구간', metricReady(io) && numeric(io.intervalMs) ? `${Math.round(io.intervalMs)} ms` : '—'],
-          ['속도 대상', 'OS가 보고한 블록 장치'],
-          ['저장 공간', metricReady(metric) ? `${size(metric.usedBytes)} / ${size(metric.totalBytes)}` : metricStatus(metric)],
-          ['저장 공간 사용률', percent(metric)],
-          ['저장 공간 측정 시각', metricReady(metric) && Number.isFinite(Date.parse(metric.sampledAt))
-            ? new Date(metric.sampledAt).toLocaleTimeString('ko-KR') : '미확인'],
-          ['저장 공간 대상', metric?.target === 'profile-volume' ? 'EG-Desk 데이터 저장 볼륨' : '대상 미확인'],
+          ['읽기', metricReady(io) ? rateOf(io.readBytesPerSecond) : words(metricStatus(io))],
+          ['쓰기', metricReady(io) ? rateOf(io.writeBytesPerSecond) : words(metricStatus(io))],
+          ['속도 측정 구간', interval(io)],
+          ['속도 대상', words('OS가 보고한 블록 장치')],
+          ['저장 공간', metricReady(metric)
+            ? ResourceReadout.rangeValue(sizeParts(metric.usedBytes), sizeParts(metric.totalBytes)) : words(metricStatus(metric))],
+          ['저장 공간 사용률', percentOf(metric)],
+          ['저장 공간 측정 시각', words(metricReady(metric) && Number.isFinite(Date.parse(metric.sampledAt))
+            ? new Date(metric.sampledAt).toLocaleTimeString('ko-KR') : '미확인')],
+          ['저장 공간 대상', words(metric?.target === 'profile-volume' ? 'EG-Desk 데이터 저장 볼륨' : '대상 미확인')],
         ];
       }
-      if (!metricReady(metric)) return [['상태', metricStatus(metric)]];
+      if (!metricReady(metric)) return [['상태', words(metricStatus(metric))]];
       if (id === 'cpu') return [
-        ['사용률', percent(metric)],
-        ['기준', metric.basis === 'all-logical-cores' ? '전체 논리 코어' : '기준 미확인'],
-        ['측정 구간', numeric(metric.intervalMs) ? `${Math.round(metric.intervalMs)} ms` : '—'],
+        ['사용률', percentOf(metric)],
+        ['기준', words(metric.basis === 'all-logical-cores' ? '전체 논리 코어' : '기준 미확인')],
+        ['측정 구간', interval(metric)],
       ];
       if (id === 'memory') return [
-        ['사용량(캐시 포함)', size(metric.usedBytes)],
-        ['전체', size(metric.totalBytes)],
-        ['사용률', percent(metric)],
-        ['기준', metric.basis === 'total-minus-os-free' ? '전체 − OS 여유 메모리 (캐시 포함)' : '기준 미확인'],
+        ['사용량(캐시 포함)', sizeOf(metric.usedBytes)],
+        ['전체', sizeOf(metric.totalBytes)],
+        ['사용률', percentOf(metric)],
+        ['기준', words(metric.basis === 'total-minus-os-free' ? '전체 − OS 여유 메모리 (캐시 포함)' : '기준 미확인')],
       ];
       return [
-        ['수신', rate(metric.rxBytesPerSecond)],
-        ['송신', rate(metric.txBytesPerSecond)],
-        ['인터페이스', typeof metric.interface === 'string' && metric.interface ? metric.interface : '미확인'],
-        ['측정 구간', numeric(metric.intervalMs) ? `${Math.round(metric.intervalMs)} ms` : '—'],
+        ['수신', rateOf(metric.rxBytesPerSecond)],
+        ['송신', rateOf(metric.txBytesPerSecond)],
+        ['인터페이스', words(typeof metric.interface === 'string' && metric.interface ? metric.interface : '미확인')],
+        ['측정 구간', interval(metric)],
       ];
+    };
+    // "전체 자원" line of one metric: a percent, or two speeds on two fixed lines.
+    // An unmeasured percent keeps its cells with —; unmeasured speeds say why in the
+    // same two-line height, so the popup never changes height.
+    const throughputOf = (spec) => spec.id === 'disk' ? snapshot?.diskIo : snapshot?.[spec.id];
+    const rateLabels = (spec) => spec.id === 'disk' ? ['읽기', '쓰기'] : ['수신', '송신'];
+    const ratePair = (spec) => {
+      const throughput = throughputOf(spec);
+      return spec.id === 'disk'
+        ? [throughput?.readBytesPerSecond, throughput?.writeBytesPerSecond]
+        : [throughput?.rxBytesPerSecond, throughput?.txBytesPerSecond];
+    };
+    const overviewModel = (spec) => {
+      if (spec.id === 'cpu' || spec.id === 'memory') return percentOf(snapshot?.[spec.id]);
+      const throughput = throughputOf(spec);
+      if (!metricReady(throughput)) return ResourceReadout.pairStatusValue(metricStatus(throughput));
+      const [firstLabel, secondLabel] = rateLabels(spec);
+      const [firstRate, secondRate] = ratePair(spec);
+      return ResourceReadout.pairValue(firstLabel, sizeParts(firstRate), secondLabel, sizeParts(secondRate), '/s');
     };
     const discardStale = () => {
       if (!snapshot) return;
@@ -10079,47 +10106,60 @@
       const age = Date.now() - sampleTime;
       if (!Number.isFinite(sampleTime) || age > staleMs || age < -2000) snapshot = null;
     };
+    // The popup's parts are made once; a sample rewrites text in place.
+    const detailTitle = el('div', { class: 'egd-resource-detail-title' });
+    const detailScope = el('p', { class: 'egd-resource-detail-scope' });
+    const detailRows = el('dl', {});
+    let detailRowKey = null;
+    let detailValues = [];
+    for (const part of [detailTitle, detailScope, detailRows, el('div', { class: 'egd-resource-overview-title' }, '전체 자원'), overview]) {
+      detail.appendChild(part);
+    }
     const renderDetail = () => {
       if (!opened) return;
       const metric = snapshot?.[opened];
       const sampledAt = snapshot?.sampledAt && !Number.isNaN(Date.parse(snapshot.sampledAt))
         ? new Date(snapshot.sampledAt).toLocaleTimeString('ko-KR') : '측정 시각 미확인';
-      detail.replaceChildren(
-        el('div', { class: 'egd-resource-detail-title' }, title(opened)),
-        el('p', { class: 'egd-resource-detail-scope' }, `${opened === 'network' ? '기본 네트워크 연결' : '이 컴퓨터'} · ${sampledAt}`),
-        el('dl', {}, ...rows(opened, metric).map(([label, value]) =>
-          el('div', { class: 'egd-resource-detail-row' }, el('dt', {}, label), el('dd', {}, value)))),
-        el('div', { class: 'egd-resource-overview-title' }, '전체 자원'),
-        overview,
-      );
+      put('detail:title', title(opened), (text) => { detailTitle.textContent = text; });
+      put('detail:scope', `${opened === 'network' ? '기본 네트워크 연결' : '이 컴퓨터'} · ${sampledAt}`, (text) => { detailScope.textContent = text; });
+      const list = rows(opened, metric);
+      // Rows are rebuilt only when their labels change (another metric, or measured <-> not measured).
+      const rowKey = `${opened}\n${list.map(([label]) => label).join('\n')}`;
+      if (rowKey !== detailRowKey) {
+        detailRowKey = rowKey;
+        detailValues = list.map(() => el('dd', {}));
+        detailRows.replaceChildren(...list.map(([label], index) =>
+          el('div', { class: 'egd-resource-detail-row' }, el('dt', {}, label), detailValues[index])));
+      }
+      list.forEach(([, value], index) => ResourceReadout.syncValue(detailValues[index], value, makeCell));
     };
     const render = () => {
       discardStale();
       for (const spec of specs) {
         const button = buttons.get(spec.id);
         const metric = snapshot?.[spec.id];
-        const throughput = spec.id === 'disk' ? snapshot?.diskIo : metric;
         const isRate = spec.id === 'disk' || spec.id === 'network';
-        const firstRate = spec.id === 'disk' ? throughput?.readBytesPerSecond : throughput?.rxBytesPerSecond;
-        const secondRate = spec.id === 'disk' ? throughput?.writeBytesPerSecond : throughput?.txBytesPerSecond;
-        const firstLabel = spec.id === 'disk' ? '읽기' : '수신';
-        const secondLabel = spec.id === 'disk' ? '쓰기' : '송신';
+        const throughput = throughputOf(spec);
+        const [firstLabel, secondLabel] = rateLabels(spec);
+        const [firstRate, secondRate] = ratePair(spec);
         const value = isRate
-          ? metricReady(throughput) ? `${firstLabel} ${rate(firstRate)}, ${secondLabel} ${rate(secondRate)}` : metricStatus(throughput)
-          : percent(metric);
+          ? metricReady(throughput) ? `${firstLabel} ${rateText(firstRate)}, ${secondLabel} ${rateText(secondRate)}` : metricStatus(throughput)
+          : ResourceReadout.amountText(percentParts(metric));
         const label = spec.id === 'memory' ? '메모리 사용(캐시 포함)' : spec.label;
-        button.setAttribute('aria-label', `${label} ${value}, 상세 보기`);
-        button.title = `${label} · ${value}`;
-        overviewValues.get(spec.id).textContent = isRate && metricReady(throughput)
-          ? `${firstLabel} ${rate(firstRate)} · ${secondLabel} ${rate(secondRate)}` : value;
-        const ring = button.querySelector('.egd-resource-ring');
+        put(`${spec.id}:aria`, `${label} ${value}, 상세 보기`, (text) => button.setAttribute('aria-label', text));
+        put(`${spec.id}:title`, `${label} · ${value}`, (text) => { button.title = text; });
+        ResourceReadout.syncValue(overviewValues.get(spec.id), overviewModel(spec), makeCell);
+        const ring = rings.get(spec.id);
         if (!isRate) {
           const measured = metricReady(metric) && numeric(metric.percent);
-          ring.style.setProperty('--egd-resource-fill', measured ? `${Math.min(100, metric.percent)}%` : '0%');
-          ring.classList.toggle('egd-resource-unmeasured', !measured);
+          // Whole percent: the arc moves only when the number a person reads moves.
+          put(`${spec.id}:fill`, measured ? `${Math.round(Math.min(100, metric.percent))}%` : '0%',
+            (fill) => ring.style.setProperty('--egd-resource-fill', fill));
+          put(`${spec.id}:unmeasured`, !measured, (off) => ring.classList.toggle('egd-resource-unmeasured', off));
         } else {
           // Disk throughput has no utilization percentage: never paint a capacity arc.
-          ring.classList.toggle('egd-resource-unmeasured', spec.id === 'disk' || !metricReady(throughput));
+          put(`${spec.id}:unmeasured`, spec.id === 'disk' || !metricReady(throughput),
+            (off) => ring.classList.toggle('egd-resource-unmeasured', off));
         }
       }
       renderDetail();
@@ -10135,8 +10175,11 @@
     for (const spec of specs) {
       const ring = el('span', { class: `egd-resource-ring egd-resource-${spec.id} egd-resource-unmeasured`, 'aria-hidden': 'true' },
         spec.id === 'network' ? '↕' : null);
-      const overviewValue = el('dd', {}, '—');
+      rings.set(spec.id, ring);
+      const overviewValue = el('dd', {});
       overviewValues.set(spec.id, overviewValue);
+      ResourceReadout.syncValue(overviewValue, spec.id === 'disk' || spec.id === 'network'
+        ? ResourceReadout.pairStatusValue('측정 준비 중') : percentOf(null), makeCell);
       overview.appendChild(el('div', { class: 'egd-resource-detail-row' }, el('dt', {}, spec.label), overviewValue));
       const button = el('button', {
         type: 'button', class: `egd-resource-button egd-resource-button-${spec.id}`, title: `${title(spec.id)} · 측정 대기`,
@@ -26168,7 +26211,8 @@
 
     function apply() {
       layer.style.transform = `translate(${state.pan.x}px, ${state.pan.y}px) scale(${state.zoom})`;
-      zoomValue.textContent = Math.round(state.zoom * 100) + '%';
+      const zoomText = Math.round(state.zoom * 100) + '%';
+      if (zoomValue.textContent !== zoomText) zoomValue.textContent = zoomText;
       syncReturnButton();
       scheduleEdgeDots();
       syncCardFullscreenLayout();
