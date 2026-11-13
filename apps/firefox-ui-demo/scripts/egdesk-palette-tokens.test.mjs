@@ -179,11 +179,14 @@ test('badges are at least 10px and labels 11px; only initials inside 14-18px fac
     '.egd-codex-thread-menu-avatar 9px',
   ]);
   const size = selector => declarationsFor(selector)['font-size'];
-  for (const badge of ['.egd-rail-search-current', '.egd-codex-thread-session-pill', '.egd-codex-thread-unread',
-    '.egd-codex-thread-member-role']) assert.equal(size(badge), 'var(--egd-text-2xs)', badge);
+  for (const badge of ['.egd-rail-search-current', '.egd-codex-thread-session-pill', '.egd-codex-thread-unread']) {
+    assert.equal(size(badge), 'var(--egd-text-2xs)', badge);
+  }
   for (const label of ['.egd-codex-thread-menu-label', '.egd-codex-bubble-read']) {
     assert.equal(size(label), 'var(--egd-text-sm)', label);
   }
+  // The Board Thread member chips read their role at the 11px label size.
+  assert.equal(size('.egd-codex-thread-member-role'), '11px');
   // These already had a later, larger refinement; it still wins.
   assert.equal(size('.egd-codex-system-chip'), '10px');
   assert.equal(size('.egd-codex-log'), '11px');
