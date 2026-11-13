@@ -479,3 +479,19 @@ test('Board list panel CSS: the two starts keep a button frame above the shared 
   assert.match(rule('.egd-agenda-switch-empty-actions .egd-agenda-switch-action:active'), /background: var\(--egd-/);
   assert.match(rule('.egd-agenda-switch-empty-actions .egd-agenda-switch-action:focus-visible'), /outline: var\(--egd-focus-outline\);/);
 });
+
+test('Board list panel CSS: 저장 and 새 Board in the top row keep the same button frame as the two starts, above the shared edge-button reset', () => {
+  const reset = rule('.egd-edge button');
+  assert.match(reset, /background: transparent;/);
+  assert.match(reset, /border: none;/);
+  const top = rule('.egd-agenda-switch-actions .egd-agenda-switch-action');
+  assert.ok(top);
+  assert.equal(top, rule('.egd-agenda-switch-empty-actions .egd-agenda-switch-action'));
+  const primary = rule('.egd-agenda-switch-actions .egd-agenda-switch-action-primary');
+  assert.match(primary, /background: var\(--egd-primary-container\);/);
+  assert.equal(primary, rule('.egd-agenda-switch-empty-actions .egd-agenda-switch-action-primary'));
+  assert.match(rule('.egd-agenda-switch-actions .egd-agenda-switch-action:hover'), /background: var\(--egd-hover\);/);
+  assert.match(rule('.egd-agenda-switch-actions .egd-agenda-switch-action:active'), /background: var\(--egd-/);
+  assert.match(rule('.egd-agenda-switch-actions .egd-agenda-switch-action:focus-visible'), /outline: var\(--egd-focus-outline\);/);
+  assert.match(declaration('renderAgendaSwitcherPanel'), /class: 'egd-agenda-switch-actions' \},\s*el\('button', \{\s*class: 'egd-agenda-switch-action',/);
+});

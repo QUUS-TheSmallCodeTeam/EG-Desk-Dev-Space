@@ -3605,6 +3605,26 @@ button.egd-rail-focus-view {
   background: var(--egd-primary-container);
   color: var(--egd-primary);
 }
+/* 저장 and 새 Board in the panel's top row read as buttons, the same as the two
+   starts below: frame, fill and padding are said with two classes, above the
+   shared edge-button reset that would clear them. */
+.egd-agenda-switch-actions .egd-agenda-switch-action {
+  padding: 0 9px;
+  border: 1px solid var(--egd-outline);
+  background: var(--egd-surface-elevated);
+  color: var(--egd-on-surface);
+}
+.egd-agenda-switch-actions .egd-agenda-switch-action-primary {
+  border-color: color-mix(in srgb, var(--egd-primary) 24%, transparent);
+  background: var(--egd-primary-container);
+  color: var(--egd-primary);
+}
+.egd-agenda-switch-actions .egd-agenda-switch-action:hover { background: var(--egd-hover); }
+.egd-agenda-switch-actions .egd-agenda-switch-action:active { background: var(--egd-primary-container); }
+.egd-agenda-switch-actions .egd-agenda-switch-action:focus-visible {
+  outline: var(--egd-focus-outline);
+  outline-offset: var(--egd-focus-outline-offset);
+}
 
 .egd-agenda-switch-search {
   min-height: 32px;
