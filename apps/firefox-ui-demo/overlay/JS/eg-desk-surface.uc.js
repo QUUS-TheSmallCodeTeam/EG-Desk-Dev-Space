@@ -15939,6 +15939,9 @@
     // window, the yellow one opens a folded one.
     const syncWindowControls = () => {
       const maximized = root.classList.contains('egd-card-fullscreen');
+      // A window maximized from elsewhere is open, never left folded underneath:
+      // its content must hear the new size, and the yellow dot must say so.
+      if (maximized && isCollapsed()) { setCollapsed(false); return; }
       const maximizeLabel = maximized ? '원래 크기로' : '창 최대화';
       maximizeControl.setAttribute('title', maximizeLabel);
       maximizeControl.setAttribute('aria-label', maximizeLabel);

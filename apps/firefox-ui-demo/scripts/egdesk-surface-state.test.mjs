@@ -10288,6 +10288,23 @@ test('window frame: the green dot says what a press does now', () => {
     'maximize and restore are followed from the root class, without a call from the maximize code');
 });
 
+test('window frame: a folded window maximized from outside its own dots opens instead of staying folded', async () => {
+  const h = windowBoardMetadataHarness();
+  const shell = h.spawnDeskWindowShell({ id: 'fold-max', kind: 'file', activate: false }), { minimize, maximize } = shell.controls;
+  const sizes = []; shell.onResize(rect => sizes.push(rect)); await settle();
+  assert.equal(shell.setCollapsed(true), true);
+  const heard = sizes.length, dirty = h.effects.dirty;
+  // Maximize reached from elsewhere only changes the root class; the shell follows it.
+  shell.root.classList.add('egd-card-fullscreen'); shell.syncWindowControls();
+  assert.equal(shell.isCollapsed(), false, 'a maximized window is never left folded underneath');
+  assert.deepEqual([minimize.getAttribute('title'), minimize.getAttribute('aria-expanded')], ['창 접기', 'true']);
+  assert.deepEqual([maximize.getAttribute('title'), maximize.getAttribute('aria-pressed')], ['원래 크기로', 'true']);
+  assert.equal(sizes.length, heard + 1, 'the content hears its real size again');
+  assert.equal(h.effects.dirty, dirty + 1, 'opening is recorded once');
+  shell.syncWindowControls();
+  assert.equal(h.effects.dirty, dirty + 1, 'a second sync changes nothing');
+});
+
 test('Desk restore brings a folded window back folded, by its restored ID, without a new change mark', () => {
   const h = windowBoardMetadataHarness(), collision = 'existing-control';
   const existing = h.document.createElement('button'); existing.id = collision; h.document.documentElement.appendChild(existing);
