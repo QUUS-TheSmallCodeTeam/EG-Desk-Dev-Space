@@ -4442,7 +4442,7 @@
     for (const run of codexRuns(thread)) {
       rows.push(el('h4', { data: { runId: run.runId } }, codexRunLabel(run)));
       // AGENT-05: [현재 작업 화면] under a busy run's head while the Card it works on is open
-      // (absent where this block runs alone, as in tests). The panel itself never moves the camera.
+      // (absent where this block runs alone, as in tests). Drawing it moves nothing; pressing it does.
       const workScreen = typeof codexRunWorkScreenButton === 'function' ? codexRunWorkScreenButton(run) : null;
       if (workScreen) rows.push(workScreen);
       // AGENT-04: the ceiling this run was started under, named under its head.
