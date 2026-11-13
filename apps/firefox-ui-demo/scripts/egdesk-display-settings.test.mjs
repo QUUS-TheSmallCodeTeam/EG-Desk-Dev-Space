@@ -124,7 +124,8 @@ test('contrast and forced-colour overrides still beat a forced theme', () => {
 
 test('every other dark-only rule yields to forced light and has a forced-dark twin', () => {
   const others = rules.filter(rule => isDarkMedia(rule) && !rule.selectors.includes(':root'));
-  assert.ok(others.length >= 2, 'the inherited-ink rule and the search kind rule');
+  // The search kind rule left with its dark-only wash: result kinds now follow tokens in both schemes.
+  assert.ok(others.length >= 1, 'the inherited-ink rule');
   for (const rule of others) {
     const zero = rule.selectors.every(selector => selector.startsWith(':where(:root:not([data-egd-theme="light"])) '));
     const plain = rule.selectors.every(selector => selector.startsWith(':root:not([data-egd-theme="light"]) '));
@@ -164,7 +165,9 @@ test('a forced theme gives every floating EG-Desk panel the chosen ink instead o
 });
 
 test('"항상 줄이기" applies the same stillness as the system reduced-motion rule', () => {
-  const system = rules.filter(rule => rule.media.length === 1 && rule.media[0] === '(prefers-reduced-motion: reduce)'
+  const reduced = rule => rule.media.length === 1 && rule.media[0] === '(prefers-reduced-motion: reduce)';
+  // The system-wide rule names every EG-Desk element; narrower rules are checked below.
+  const system = rules.filter(rule => reduced(rule) && rule.selectors.includes('[class*="egd-"]')
     && rule.declarations.some(([name]) => name === 'transition'));
   assert.equal(system.length, 1);
   const prefix = ':root[data-egd-motion="reduce"] ';
@@ -178,6 +181,15 @@ test('"항상 줄이기" applies the same stillness as the system reduced-motion
     const b = rules.find(rule => rule.media.length === 0 && rule.selectors.includes(prefix + selector));
     assert.ok(a && b, selector);
     assert.deepEqual(b.declarations, a.declarations);
+  }
+  // A narrower rule needs its own forced twin unless it only repeats what the
+  // forced rule above already sets on every EG-Desk element.
+  for (const rule of rules.filter(rule => reduced(rule) && rule !== system[0])) {
+    const twin = rules.find(candidate => candidate.media.length === 0 && sameSelectors(candidate.selectors, rule.selectors.map(s => prefix + s)));
+    if (twin) assert.deepEqual(twin.declarations, rule.declarations);
+    else for (const [name, value] of rule.declarations) {
+      assert.ok(forced.declarations.some(([n, v]) => n === name && v === value), `forced twin missing for ${rule.selectors[0]} ${name}`);
+    }
   }
 });
 
