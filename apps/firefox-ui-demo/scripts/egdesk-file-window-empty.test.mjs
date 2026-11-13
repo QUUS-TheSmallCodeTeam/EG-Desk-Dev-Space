@@ -179,6 +179,10 @@ test('File window CSS uses the shared font, token buttons and inputs, and a cent
   assert.match(input, /background:\s*var\(--egd-surface-elevated\)/);
   assert.match(declarations('.egdesk-file-search-input:focus-visible'), /border-color:\s*var\(--egd-focus-border\)/);
 
+  // The connect group (18rem) and search (24rem) share one row in the default
+  // 696px window only while the toolbar's own padding stays at 8px.
+  assert.match(declarations('.egdesk-file-toolbar'), /gap:\s*10px;\s*padding:\s*8px;/);
+
   // Tabs: a strip on one bottom line, the selected tab marked by ink and an underline.
   assert.match(declarations('.egdesk-file-tabs'), /border-bottom:\s*1px solid var\(--egd-outline-variant\)/);
   assert.match(declarations('.egdesk-file-view .egdesk-file-tab'), /border-radius:\s*0/);
