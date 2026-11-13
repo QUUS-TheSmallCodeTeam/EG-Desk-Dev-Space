@@ -3262,7 +3262,7 @@ test('main-window topbar is edge-attached while controls remain non-draggable, w
   assert.doesNotMatch(surfaceSource, /id: 'egd-desk-entry'|if \(state\.surface\.mode === 'browser'\) return;/);
 });
 
-test('internal start page has plain-language copy and only its own chrome badge is hidden', () => {
+test('internal start page has plain-language copy and only its own chrome badge is hidden', async () => {
   const startUri = 'chrome://userchrome/content/egdesk-start.html';
   const startPage = readFileSync(new URL('../overlay/resources/egdesk-start.html', import.meta.url), 'utf8');
   assert.match(startPage, /<h1>웹에서 시작하세요<\/h1>/);
@@ -3285,17 +3285,29 @@ test('internal start page has plain-language copy and only its own chrome badge 
   assert.equal(visibleAddress('https://example.test/path'), 'https://example.test/path');
   const sync = compileFunction(`return function syncBrowserChrome() {${chromeBody}\n    }`,
     ['updateHistoryFlags', 'card', 'browserState', 'pageTitle', 'browserDisplayHost', 'pageStatus', 'EGDESK_START_URI',
-      'securityIcon', 'browserSecurityGlyph', 'document', 'urlInput', 'browserVisibleAddress', 'backButton', 'forwardButton', 'reloadButton']);
+      'securityIcon', 'browserSecurityGlyph', 'document', 'urlInput', 'browserVisibleAddress', 'backButton', 'forwardButton', 'reloadButton',
+      'BrowserChrome', 'applyBrowserToolbarButton']);
   const card = { classList: { toggle() {} }, dataset: {} };
-  const browserState = { uri: startUri, title: 'EG-Desk', security: 'chrome', loading: false,
+  const browserState = { uri: startUri, title: 'EG-Desk', security: 'site', loading: false,
     canGoBack: false, canGoForward: false };
+  const BrowserChrome = await import('../overlay/resources/EGDeskBrowserChrome.sys.mjs');
+  const applied = [];
+  const applyBrowserToolbarButton = (button, action) => {
+    applied.push(action);
+    button.title = BrowserChrome.browserNavButtonState(action, browserState).title;
+  };
   const pageTitle = { textContent: '', title: '' }, pageStatus = { hidden: false, textContent: '', title: '' };
   const securityIcon = { hidden: false, textContent: '', title: '', replaceChildren() {} }, urlInput = { value: startUri };
   const reloadButton = { dataset: { icon: 'reload' }, title: '', disabled: false, setAttribute() {} };
   const document = { activeElement: null };
+  const backButton = {}, forwardButton = {};
   const render = sync(() => {}, card, browserState, pageTitle, host, pageStatus, startUri,
-    securityIcon, () => '✓', document, urlInput, visibleAddress, {}, {}, reloadButton);
+    securityIcon, () => '✓', document, urlInput, visibleAddress, backButton, forwardButton, reloadButton,
+    BrowserChrome, applyBrowserToolbarButton);
   render();
+  assert.deepEqual(applied, ['back', 'forward', 'reload']);
+  assert.equal(backButton.title, '뒤로 갈 페이지 없음');
+  assert.equal(reloadButton.title, '새로고침');
   assert.equal(pageTitle.textContent, 'EG-Desk');
   assert.equal(pageStatus.hidden, true);
   assert.equal(pageStatus.textContent, '');
@@ -3304,15 +3316,21 @@ test('internal start page has plain-language copy and only its own chrome badge 
 
   browserState.uri = 'https://example.test/path';
   browserState.title = 'Example site';
-  browserState.security = 'Secure';
+  browserState.security = 'secure';
   render();
   assert.equal(pageTitle.textContent, 'Example site');
   assert.equal(pageStatus.hidden, false);
-  assert.equal(pageStatus.textContent, 'Secure');
+  assert.equal(pageStatus.textContent, '보안 연결');
   assert.equal(pageStatus.title, browserState.uri);
   assert.equal(securityIcon.hidden, false);
-  assert.equal(securityIcon.title, 'Secure');
+  assert.equal(securityIcon.title, '보안 연결');
   assert.equal(urlInput.value, browserState.uri);
+
+  browserState.uri = 'http://example.test/';
+  browserState.security = 'insecure';
+  render();
+  assert.equal(pageStatus.textContent, '보안되지 않음');
+  assert.equal(securityIcon.title, '보안되지 않음');
 });
 
 test('bounded visual hierarchy keeps Canvas chrome quiet and Browser and Chat content readable', () => {
@@ -3419,7 +3437,7 @@ function browserMenuHarness() {
     url => effects.push(['navigate', url]), () => effects.push('stop'), () => effects.push('reload'),
     () => false, () => effects.push('maximize'), effects, () => { holdEnds.push(effects.length); return false; },
     () => null);
-  const triggerBody = surfaceSource.match(/    const menuButton = el\('button', \{[\s\S]*?onclick: \(ev\) => \{([\s\S]*?)\n      \},\n    \}, deskIcon\('menu'\)\);/)?.[1];
+  const triggerBody = surfaceSource.match(/    const menuButton = browserToolbarButton\('menu', \{[\s\S]*?onclick: \(ev\) => \{([\s\S]*?)\n      \},\n    \}, deskIcon\('menu'\)\);/)?.[1];
   assert.ok(triggerBody, 'Browser menu trigger must remain directly testable');
   const clickTrigger = compileFunction(`return ev => {${triggerBody}\n      }`,
     ['browserCardControl', 'card', 'menuButton'])((_, command, ...args) => {

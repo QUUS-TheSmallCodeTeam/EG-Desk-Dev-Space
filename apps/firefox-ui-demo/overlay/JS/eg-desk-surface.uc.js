@@ -4773,25 +4773,18 @@
     return String(url || '') === EGDESK_START_URI ? '' : String(url || '');
   }
 
-  function browserSecurityLabel(url) {
-    try {
-      const parsed = new URL(String(url || ''));
-      if (parsed.protocol === 'https:') return 'Secure';
-      if (parsed.protocol === 'http:') return 'Not secure';
-      if (parsed.protocol === 'file:') return 'Local';
-      if (parsed.protocol === 'about:') return 'Firefox';
-      return parsed.protocol.replace(':', '') || 'Site';
-    } catch {
-      return 'Site';
-    }
+  // BRW-01 · UX-03: the Browser bar's Korean status text, button names and
+  // shortcuts. browserState.security holds the kind key ('secure' …), never
+  // display text.
+  const BrowserChrome = ChromeUtils.importESModule('chrome://userchrome/content/EGDeskBrowserChrome.sys.mjs');
+  const BrowserToolbarFocus = ChromeUtils.importESModule('chrome://userchrome/content/EGDeskFocusNavigation.sys.mjs');
+
+  function browserSecurityKind(url) {
+    return BrowserChrome.browserSecurityKind(url);
   }
 
   function browserSecurityGlyph(url) {
-    const label = browserSecurityLabel(url);
-    if (label === 'Secure') return deskIcon('lock');
-    if (label === 'Not secure') return deskIcon('alert');
-    if (label === 'Local') return deskIcon('file');
-    return deskIcon('browser');
+    return deskIcon(BrowserChrome.browserSecurityIconName(browserSecurityKind(url)));
   }
 
   function copyTextToClipboard(text) {
@@ -18140,7 +18133,7 @@
       cardId: card.id,
       uri,
       title: browserDisplayHost(uri),
-      security: browserSecurityLabel(uri),
+      security: browserSecurityKind(uri),
       loading: false,
       canGoBack: false,
       canGoForward: false,
@@ -18153,6 +18146,35 @@
     const controls = card?._browserControls;
     if (!controls || typeof controls[command] !== 'function') return null;
     return controls[command](...args);
+  }
+
+  // BRW-01: ⌘/Ctrl+L goes to the active Browser window's address and
+  // ⌘/Ctrl+T opens a new Browser window with the caret in its address.
+  // Firefox binds the same keys to its own (hidden) address bar and tab strip,
+  // so the key is taken — and kept from Firefox — only while the active Desk
+  // window is a Browser holding the focus. Any other focus (Chat, search, a
+  // terminal's Ctrl+L, another window) leaves the key exactly as it was.
+  function installBrowserShortcuts() {
+    const isMac = servicesRef().appinfo.OS === 'Darwin';
+    window.addEventListener('keydown', ev => {
+      const card = state.activeEntityId ? document.getElementById(state.activeEntityId) : null;
+      const activeIsBrowser = !!card?.isConnected && !card.hidden && card.classList.contains('egd-browser-card');
+      const focused = document.activeElement;
+      const focusInActiveBrowser = activeIsBrowser
+        && (!focused || focused === document.body || focused === document.documentElement || card.contains(focused));
+      const intent = BrowserChrome.browserShortcutIntent(ev, { isMac, activeIsBrowser, focusInActiveBrowser,
+        canOpenWindow: !state.cardFullscreen });
+      if (!intent) return;
+      ev.preventDefault();
+      ev.stopImmediatePropagation();
+      if (intent === 'focus-address') {
+        browserCardControl(card, 'focusAddress');
+        return;
+      }
+      // Same placement as the Dock's Browser button; the start page asks for an address.
+      const opened = spawnBrowserCard(EGDESK_START_URI, { openMode: 'new' });
+      if (opened) browserCardControl(opened, 'focusAddress');
+    }, true);
   }
 
   // This is the privileged-UI end of the Browser model-tool transport. It
@@ -20029,14 +20051,14 @@
       loading: true,
       canGoBack: false,
       canGoForward: false,
-      security: browserSecurityLabel(normalizedUrl),
+      security: browserSecurityKind(normalizedUrl),
       homeUrl: normalizeBrowserNavigationUri(options.homeUrl || 'https://duckduckgo.com'),
       history: [normalizedUrl],
       historyIndex: 0,
     };
 
     const pageTitle = el('div', { class: 'egd-card-page-title' }, browserState.title);
-    const pageStatus = el('div', { class: 'egd-card-page-status' }, 'Loading');
+    const pageStatus = el('div', { class: 'egd-card-page-status' }, BrowserChrome.browserStatusText(browserState));
     const environmentBadge = browserIdentity ? el('span', { class: 'egd-browser-environment',
       title: '분리 환경 이름입니다. 사이트 로그인 여부는 별도로 확인해야 합니다.',
       data: { testid: 'browser-environment' } }, browserIdentity.containerName || 'Chrome 분리 환경') : null;
@@ -20074,30 +20096,38 @@
     };
     const securityIcon = el('span', {
       class: 'egd-card-omnibox-icon egd-card-security',
-      title: browserState.security,
+      title: BrowserChrome.browserSecurityLabel(browserState.security),
     }, browserSecurityGlyph(normalizedUrl));
-    const backButton = el('button', {
+    // BRW-01: every icon button takes its name (aria-label) and tooltip from
+    // one view model. A turned-off button is aria-disabled, not disabled, so
+    // Back keeps the keyboard focus when history runs out.
+    const applyBrowserToolbarButton = (button, action) => {
+      const named = BrowserChrome.browserNavButtonState(action, browserState);
+      if (button.title !== named.title) button.title = named.title;
+      button.setAttribute('aria-label', named.label);
+      BrowserToolbarFocus.setItemDisabled(button, named.disabled);
+    };
+    const browserToolbarButton = (action, attrs, icon) => {
+      const button = el('button', { type: 'button', ...attrs }, icon);
+      applyBrowserToolbarButton(button, action);
+      return button;
+    };
+    const backButton = browserToolbarButton('back', {
       class: 'egd-card-nav-btn',
-      title: '뒤로',
-      disabled: true,
       onclick: (ev) => {
         ev.stopPropagation();
         browserCardControl(card, 'back');
       },
     }, deskIcon('back'));
-    const forwardButton = el('button', {
+    const forwardButton = browserToolbarButton('forward', {
       class: 'egd-card-nav-btn',
-      title: '앞으로',
-      disabled: true,
       onclick: (ev) => {
         ev.stopPropagation();
         browserCardControl(card, 'forward');
       },
     }, deskIcon('forward'));
-    const reloadButton = el('button', {
+    const reloadButton = browserToolbarButton('reload', {
       class: 'egd-card-nav-btn egd-card-reload',
-      title: '새로고침',
-      'aria-label': '새로고침',
       'aria-busy': 'false',
       data: { icon: 'reload' },
       onclick: (ev) => {
@@ -20105,26 +20135,22 @@
         browserCardControl(card, browserState.loading ? 'stop' : 'reload');
       },
     }, deskIcon('reload'));
-    const homeButton = el('button', {
+    const homeButton = browserToolbarButton('home', {
       class: 'egd-card-nav-btn',
-      title: '홈',
       onclick: (ev) => {
         ev.stopPropagation();
         browserCardControl(card, 'home');
       },
     }, deskIcon('home'));
-    const duplicateButton = el('button', {
+    const duplicateButton = browserToolbarButton('duplicate', {
       class: 'egd-card-nav-btn egd-card-duplicate',
-      title: '복제',
       onclick: (ev) => {
         ev.stopPropagation();
         browserCardControl(card, 'duplicate');
       },
     }, deskIcon('duplicate'));
-    const menuButton = el('button', {
+    const menuButton = browserToolbarButton('menu', {
       class: 'egd-card-menu',
-      title: '더보기',
-      'aria-label': '더보기',
       'aria-haspopup': 'menu',
       'aria-expanded': 'false',
       data: { testid: 'browser-menu' },
@@ -20152,6 +20178,12 @@
       duplicateButton,
       menuButton,
     );
+    // BRW-01 (APG toolbar): Tab enters the bar once; arrows, Home and End move
+    // inside it. The address field keeps its own arrow keys until the caret
+    // reaches an edge. Only the Browser's own controls rove: the resource
+    // gadget a maximized window borrows from the top bar keeps its Tab stops.
+    BrowserToolbarFocus.bindToolbar(deskWindow.slots.toolbar, { label: 'Browser 도구',
+      items: root => root.querySelectorAll('.egd-card-nav-btn, .egd-card-url, .egd-card-menu') });
     if (options.firstUse) card.dataset.testid = 'browser-card';
 
     // ---- Body → wrap (logical 1440×900) → XUL browser ----
@@ -21260,21 +21292,20 @@
       pageTitle.textContent = browserState.title || browserDisplayHost(browserState.uri);
       pageTitle.title = browserState.title || browserState.uri;
       pageStatus.hidden = isStartPage;
-      pageStatus.textContent = isStartPage ? '' : browserState.loading ? 'Loading' : browserState.security;
+      pageStatus.textContent = isStartPage ? '' : BrowserChrome.browserStatusText(browserState);
       pageStatus.title = isStartPage ? '' : browserState.uri;
       securityIcon.hidden = isStartPage;
       securityIcon.replaceChildren(browserSecurityGlyph(browserState.uri));
-      securityIcon.title = isStartPage ? '' : browserState.security;
+      securityIcon.title = isStartPage ? '' : BrowserChrome.browserSecurityLabel(browserState.security);
       if (document.activeElement !== urlInput) urlInput.value = browserVisibleAddress(browserState.uri);
-      backButton.disabled = !browserState.canGoBack;
-      forwardButton.disabled = !browserState.canGoForward;
+      applyBrowserToolbarButton(backButton, 'back');
+      applyBrowserToolbarButton(forwardButton, 'forward');
       const reloadAction = browserState.loading ? 'stop' : 'reload';
       if (reloadButton.dataset.icon !== reloadAction) {
         reloadButton.replaceChildren(deskIcon(reloadAction));
         reloadButton.dataset.icon = reloadAction;
       }
-      reloadButton.title = browserState.loading ? '중지' : '새로고침';
-      reloadButton.setAttribute('aria-label', reloadButton.title);
+      applyBrowserToolbarButton(reloadButton, 'reload');
       reloadButton.setAttribute('aria-busy', String(!!browserState.loading));
     };
     const setBrowserLoading = (loading) => {
@@ -21313,7 +21344,7 @@
         && requestedUri
         && requestedUri !== 'about:blank';
       if (nextUri && !isTransientInitialBlank) browserState.uri = nextUri;
-      browserState.security = browserSecurityLabel(browserState.uri);
+      browserState.security = browserSecurityKind(browserState.uri);
       browserState.title = readBrowserTitle();
       if (browserState.uri !== previousUri) {
         pushBrowserHistory(browserState.uri, { replace: options.replaceHistory });
@@ -21349,7 +21380,7 @@
       agentProjection.invalidate();
       const url = normalizeBrowserNavigationUri(rawUrl || browserState.uri || browserState.homeUrl);
       browserState.uri = url;
-      browserState.security = browserSecurityLabel(url);
+      browserState.security = browserSecurityKind(url);
       browserState.title = browserDisplayHost(url);
       urlInput.value = browserVisibleAddress(url);
       pushBrowserHistory(url, { replace: navOptions.replaceHistory });
@@ -21368,7 +21399,7 @@
         browserState.historyIndex -= 1;
         const url = browserState.history[browserState.historyIndex];
         browserState.uri = url;
-        browserState.security = browserSecurityLabel(url);
+        browserState.security = browserSecurityKind(url);
         browserState.title = browserDisplayHost(url);
         urlInput.value = browserVisibleAddress(url);
         bindCardSourceRef(card, sourceForBrowser(url));
@@ -21396,7 +21427,7 @@
         browserState.historyIndex += 1;
         const url = browserState.history[browserState.historyIndex];
         browserState.uri = url;
-        browserState.security = browserSecurityLabel(url);
+        browserState.security = browserSecurityKind(url);
         browserState.title = browserDisplayHost(url);
         urlInput.value = browserVisibleAddress(url);
         bindCardSourceRef(card, sourceForBrowser(url));
@@ -22135,8 +22166,16 @@
       try { panel.querySelector('.egd-browser-site-ask-allow')?.focus(); } catch {}
       timer = window.setTimeout(() => finish('pending'), Math.max(0, (Number.isFinite(deadlineMs) ? deadlineMs : Date.now()) - Date.now() - 500));
     });
+    // ⌘/Ctrl+L: the caret goes to this window's address with the text selected.
+    const focusBrowserAddress = () => {
+      if (!card.isConnected || card.hidden) return false;
+      urlInput.focus();
+      urlInput.select?.();
+      return true;
+    };
     card._browserControls = {
       getState: () => getBrowserStateSnapshot(),
+      focusAddress: focusBrowserAddress,
       sync: () => syncBrowserStateFromBrowser({ markDirtyOnLocationChange: false }),
       navigate: navigateBrowser,
       back: goBrowserBack,
@@ -25641,6 +25680,7 @@
       const semantic = installSemanticZoom(canvasViewport, canvasLayer);
       installCanvasPanZoom(canvasViewport, canvasLayer);
       installDeskCloseShortcut();
+      installBrowserShortcuts();
       installNativeGestureHelperBridge();
       state.codexBridge = installCodexBridge(legacyChatRecords);
       window.__egdesk = {
