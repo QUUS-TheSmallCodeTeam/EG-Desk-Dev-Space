@@ -188,7 +188,7 @@ test('memo sync is quiet: repeating it with nothing changed rewrites no text, so
   const api = Function(...Object.keys(scope), `let memoRelink = null;\n${surfaceFunction('syncMemoCardPosition')}\n${surfaceFunction('syncMemoLinkUi')}\nreturn { syncMemoCardPosition, syncMemoLinkUi };`)(...Object.values(scope));
   const sync = () => { api.syncMemoCardPosition(root); api.syncMemoLinkUi(root); };
   sync();
-  assert.deepEqual([root.dataset.memoAnchor, badge.textContent, root._memoMissing.row.hidden], ['attached', '📎 Card', true]);
+  assert.deepEqual([root.dataset.memoAnchor, badge.textContent, root._memoMissing.row.hidden], ['attached', '📎 창', true]);
   writes.length = 0;
   sync();
   assert.deepEqual(writes, [], 'an unchanged attached memo writes nothing');

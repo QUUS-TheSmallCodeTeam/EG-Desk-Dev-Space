@@ -15860,7 +15860,7 @@ test('the way back to Chat stays until used and brings the Chat back like the Do
   const cue = show(chat);
   assert.equal(cue.attributes.id, 'egd-chat-return');
   assert.equal(cue.attributes.role, 'group');
-  assert.equal(cue.attributes['aria-label'], '채팅으로 돌아가기');
+  assert.equal(cue.attributes['aria-label'], '대화로 돌아가기');
   assert.ok(cue.className.includes('egd-edge'));
   const button = cue.children[0];
   assert.equal(button.dataset.testid, 'chat-return');

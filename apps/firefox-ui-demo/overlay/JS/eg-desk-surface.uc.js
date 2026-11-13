@@ -8514,7 +8514,9 @@
     const chatLog = () => chatCard.querySelector?.('.egd-codex-messages') || null;
     const origin = kept || ChatCanvasLinks.chatReturnOrigin({ pan: state.panTarget, zoom: state.zoomTarget,
       threadId: state.codex?.activeThreadId, scrollTop: chatLog()?.scrollTop });
-    const cue = el('div', { id: 'egd-chat-return', class: 'egd-edge egd-frosted', role: 'group', 'aria-label': '채팅으로 돌아가기' });
+    // The way back has one name: the group, its button and its close button all read it.
+    const returnLabel = '대화로 돌아가기';
+    const cue = el('div', { id: 'egd-chat-return', class: 'egd-edge egd-frosted', role: 'group', 'aria-label': returnLabel });
     cue._chatCard = chatCard;
     cue._origin = origin;
     const chatListeners = new AbortController();
@@ -8545,9 +8547,9 @@
         const log = plan.scrollTop !== null ? chatLog() : null;
         if (log) log.scrollTop = plan.scrollTop;
       },
-    }, deskIcon('chat'), el('span', {}, '대화로 돌아가기')));
+    }, deskIcon('chat'), el('span', {}, returnLabel)));
     cue.appendChild(el('button', {
-      type: 'button', class: 'egd-chat-return-close', title: '닫기', 'aria-label': '채팅으로 돌아가기 닫기', data: { testid: 'chat-return-close' },
+      type: 'button', class: 'egd-chat-return-close', title: '닫기', 'aria-label': `${returnLabel} 닫기`, data: { testid: 'chat-return-close' },
       onclick: (ev) => { ev.stopPropagation(); dismiss(); },
     }, deskIcon('close')));
     document.documentElement.appendChild(cue);

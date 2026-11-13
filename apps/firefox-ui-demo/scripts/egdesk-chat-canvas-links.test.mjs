@@ -356,11 +356,11 @@ test('the way back stays until used, closed or the Chat is back, and returns to 
   const cue = show(chat);
   assert.equal(cue.attributes.id, 'egd-chat-return');
   assert.equal(cue.attributes.role, 'group');
-  assert.equal(cue.attributes['aria-label'], '채팅으로 돌아가기');
+  assert.equal(cue.attributes['aria-label'], '대화로 돌아가기');
   const back = cue.testid('chat-return'), close = cue.testid('chat-return-close');
-  assert.equal(back.textContent, '채팅으로 돌아가기');
+  assert.equal(back.textContent, '대화로 돌아가기');
   assert.equal(back.attributes.title, '떠나기 전 화면과 대화 위치로 돌아갑니다');
-  assert.equal(close.attributes['aria-label'], '채팅으로 돌아가기 닫기');
+  assert.equal(close.attributes['aria-label'], '대화로 돌아가기 닫기');
   assert.equal(close.attributes.title, '닫기');
   assert.deepEqual(timers, [], 'no timer takes it away');
 
