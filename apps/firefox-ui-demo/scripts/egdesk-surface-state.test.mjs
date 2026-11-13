@@ -9,6 +9,7 @@ import { initialSurfaceMode, shouldFocusInitialBrowser, planBoardProjection, sna
 import * as Surface from '../overlay/resources/EGDeskSurfaceState.sys.mjs';
 import * as Memo from '../overlay/resources/EGDeskMemoState.sys.mjs';
 import * as BoardMembership from '../overlay/resources/EGDeskBoardMembership.sys.mjs';
+import * as BoardLifecycle from '../overlay/resources/EGDeskBoardLifecycle.sys.mjs';
 import * as MinimapLayout from '../overlay/resources/EGDeskCanvasLayout.sys.mjs';
 import * as Chat from '../overlay/resources/EGDeskChatState.sys.mjs';
 import * as ThreadRouting from '../overlay/resources/EGDeskThreadRouting.sys.mjs';
@@ -20463,7 +20464,7 @@ function requestProjectUiHarness({ target, read, roomRead, roomSave, resizeObser
   const deps = { ...constants, state, document, el, epochScope, ChatState: Chat, getCodexThreadById: getThread, updateThreadById: update, codexThreadRuntimeConfig: () => ({}), emit() {},
     setActiveThread: id => { if (!getThread(null, id)) return false; state.codex.activeThreadId = id; return true; },
     getCodexThreadDraft: (codex, id) => codex.threadDrafts[id] || '', refreshConversation() {},
-    coerceAgendaStore: () => ({ agendas: {}, meta: {} }),
+    coerceAgendaStore: () => ({ agendas: {}, meta: {} }), BoardLifecycle,
     refreshBoardProject() {},
     window: { AbortController, ResizeObserver: resizeObserver, setTimeout(fn) { const id = ++timerSeq; timers.set(id, fn); return id; }, clearTimeout: id => timers.delete(id) },
     pickNativeRoomProjectDirectory: () => { assert.ok(pickFolder, 'only an explicit folder fixture supplies a native result'); return pickFolder(); },
