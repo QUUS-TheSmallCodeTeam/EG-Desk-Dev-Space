@@ -9846,6 +9846,61 @@ button.egd-result-card-back:focus-visible { outline: var(--egd-focus-outline); o
   white-space: nowrap;
 }
 .egd-memo-card[data-memo-anchor="missing"] .egd-memo-anchor { border-color: var(--egd-warning-ink); color: var(--egd-warning-ink); }
+/* '메모 #N' is never cut: the title keeps its width and the Board control gives way.
+   Folded (240px) it keeps only its chevron; its name stays in the tooltip. */
+.egd-memo-card .egd-memo-title { flex: 0 0 auto; }
+.egd-memo-card .egd-desk-window-board-menu-text { max-width: 96px; overflow: hidden; text-overflow: ellipsis; }
+.egd-memo-card[data-memo-expanded="false"] .egd-desk-window-board-menu-text { display: none; }
+/* In a Board the folded header has no room for the Board name next to the title;
+   the chevron's tooltip ('소속 Board ○○ · 바꾸기') keeps it. */
+.egd-memo-card[data-memo-expanded="false"] .egd-desk-window-board { display: none; }
+/* Memo → target window: a thin line in Canvas (world) coordinates, under the
+   windows. left/top are its memo end; width and rotation reach the window. */
+.egd-memo-tether {
+  position: absolute;
+  height: 1.5px;
+  margin-top: -0.75px;
+  border-radius: 1px;
+  background: var(--egd-on-surface-variant);
+  opacity: 0.6;
+  transform-origin: 0 50%;
+  pointer-events: none;
+}
+.egd-memo-tether::after {
+  content: '';
+  position: absolute;
+  top: 50%;
+  right: -3px;
+  width: 6px;
+  height: 6px;
+  margin-top: -3px;
+  border-radius: 50%;
+  background: inherit;
+}
+.egd-memo-tether[hidden] { display: none; }
+:root[data-egd-annotations-hidden="true"] .egd-memo-tether { display: none; }
+/* '대상 없음': the closed window's name with [다시 연결] [삭제]. */
+.egd-memo-missing { display: flex; flex: 0 0 auto; align-items: center; gap: 6px; min-width: 0; color: var(--egd-warning-ink); font-size: 11.5px; }
+.egd-memo-missing[hidden] { display: none; }
+.egd-memo-missing-label { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.egd-memo-missing button {
+  flex: 0 0 auto;
+  height: 22px;
+  padding: 0 8px;
+  border: 1px solid var(--egd-note-line);
+  border-radius: 6px;
+  background: var(--egd-surface-elevated);
+  color: var(--egd-on-surface);
+  font: 600 11.5px/1 var(--egd-font);
+  white-space: nowrap;
+  cursor: pointer;
+}
+.egd-memo-missing button:hover { border-color: var(--egd-primary); background: var(--egd-hover); }
+.egd-memo-missing button:disabled { opacity: var(--egd-opacity-disabled); cursor: default; }
+.egd-memo-missing button[aria-pressed="true"] { border-color: var(--egd-primary); color: var(--egd-primary); }
+.egd-memo-missing button[hidden] { display: none; }
+/* [다시 연결] is waiting for a window: every other window reads as a target. */
+:root[data-egd-memo-relinking="true"] .egd-canvas-card:not(.egd-memo-card) { cursor: crosshair; }
 .egd-memo-card .egd-desk-window-actions button {
   flex: 0 0 auto;
   min-height: 24px;
@@ -9928,8 +9983,12 @@ button.egd-memo-ask-send {
 button.egd-memo-ask-send:hover:not(:disabled) { border-color: var(--egd-primary); background: var(--egd-hover); }
 button.egd-memo-ask-send:disabled { opacity: var(--egd-opacity-disabled); cursor: default; }
 .egd-memo-ask-status { display: flex; flex-wrap: wrap; gap: 6px; color: var(--egd-warning-ink); font-size: 11.5px; }
-.egd-memo-ask-pending { display: inline-flex; align-items: center; gap: 6px; padding: 2px 8px; border: 1px solid var(--egd-note-line); border-radius: 999px; background: var(--egd-note-soft); }
+.egd-memo-ask-pending { display: inline-flex; flex-wrap: wrap; align-items: center; gap: 0 6px; box-sizing: border-box; max-width: 100%; padding: 2px 8px; border: 1px solid var(--egd-note-line); border-radius: 12px; background: var(--egd-note-soft); }
+.egd-memo-ask-elapsed { color: var(--egd-on-surface-variant); font-variant-numeric: tabular-nums; }
+button.egd-memo-ask-open { padding: 0 4px; border: 0; background: none; color: var(--egd-primary); font: 600 11.5px/1.4 var(--egd-font); cursor: pointer; }
+button.egd-memo-ask-open:hover { text-decoration: underline; }
 button.egd-memo-ask-cancel { padding: 0 4px; border: 0; background: none; color: var(--egd-primary); font: 600 11.5px/1.4 var(--egd-font); cursor: pointer; }
+button.egd-memo-ask-cancel:hover { text-decoration: underline; }
 .egd-codex-result-chip.egd-codex-result-chip-memo { color: var(--egd-on-surface-variant) !important; }
 
 /* CTX-03 '이것도 붙일까요?' above the input tray: a quiet, foldable list.

@@ -17698,6 +17698,7 @@
   // to a memo question comes back as a memo reply (D-K5); Chat keeps a chip.
   const MEMO_RUN_ENDED = ['failed', 'interrupted', 'cancelled', 'unavailable'];
   let memoAnchorObserver = null;
+  let memoRelink = null; // { root, stop } while [다시 연결] waits for a window
 
   function memoCards() {
     return Array.from(document.querySelectorAll('.egd-memo-card')).filter(root => root.isConnected && root._memoRecord);
@@ -17709,9 +17710,9 @@
     if (!layer) return [];
     return Array.from(layer.children)
       .filter(node => node.classList?.contains('egd-canvas-card') && !node.classList.contains('egd-memo-card') && !node.classList.contains('egd-board-missing'))
-      .map(card => ({ id: card.id, geometry: persistentEntityGeometry(card) }))
+      .map(card => ({ id: card.id, label: cardLabelForViewportRail(card), geometry: persistentEntityGeometry(card) }))
       .sort((a, b) => a.geometry.zIndex - b.geometry.zIndex)
-      .map(({ id, geometry }) => ({ id, rect: { x: geometry.x, y: geometry.y, width: geometry.width, height: geometry.height } }));
+      .map(({ id, label, geometry }) => ({ id, label, rect: { x: geometry.x, y: geometry.y, width: geometry.width, height: geometry.height } }));
   }
 
   function memoTargetLabel(memo) {
@@ -17725,18 +17726,40 @@
     if (memoAnchorObserver) return;
     const layer = document.getElementById('egd-canvas-layer');
     if (!layer) return;
-    let queued = 0;
+    let queued = 0, all = false;
+    const moved = new Set();
     const flush = () => {
       queued = 0;
-      for (const root of memoCards()) syncMemoCardPosition(root);
+      const full = all;
+      const roots = full ? memoCards() : Array.from(moved).filter(root => root.isConnected && root._memoRecord);
+      all = false;
+      moved.clear();
+      for (const root of roots) {
+        // A memo the user is dragging keeps its place; only its line follows.
+        if (!full) syncMemoTether(root);
+        else { if (!root._memoDragging) syncMemoCardPosition(root); syncMemoLinkUi(root); }
+      }
+      // A line whose memo left the Canvas without its own close goes with it.
+      if (full) for (const line of layer.querySelectorAll('.egd-memo-tether')) if (!line._memoRoot?.isConnected) line.remove();
     };
     memoAnchorObserver = new MutationObserver(records => {
-      if (queued) return;
-      const relevant = records.some(record => record.type === 'childList'
-        || (record.target?.parentNode === layer && !record.target.classList?.contains('egd-memo-card')));
-      if (relevant) queued = requestAnimationFrame(flush);
+      for (const record of records) {
+        const target = record.target;
+        if (record.type === 'childList') all = true;
+        else if (target?.parentNode !== layer || target.classList?.contains('egd-memo-tether')) continue;
+        else if (target.classList?.contains('egd-memo-card')) moved.add(target);
+        else all = true;
+      }
+      if (!queued && (all || moved.size)) queued = requestAnimationFrame(flush);
     });
     memoAnchorObserver.observe(layer, { childList: true, attributes: true, attributeFilter: ['style'], subtree: true });
+    // '답 기다리는 중 · N분째' keeps counting without re-rendering the memo.
+    window.setInterval?.(() => {
+      for (const node of document.querySelectorAll('.egd-memo-ask-elapsed')) {
+        const label = MemoState.memoWaitLabel(Number(node.dataset.askedAt), Date.now());
+        if (node.textContent !== label) node.textContent = label;
+      }
+    }, 30000);
   }
 
   // Place the memo where its anchor says: on its card when that card is on the
@@ -17778,7 +17801,10 @@
     const badge = root.querySelector('.egd-memo-anchor');
     if (badge) {
       const label = anchorState === 'attached' ? memoBadgeTargetLabel(memo) : '';
-      badge.textContent = anchorState === 'free' ? '위치 고정' : anchorState === 'missing' ? '대상 없음' : `📎 ${label || '카드'}`;
+      // Write only a changed text: the Canvas observer watches child changes
+      // and would run this sync again on every frame.
+      const text = anchorState === 'free' ? '위치 고정' : anchorState === 'missing' ? '대상 없음' : `📎 ${label || '카드'}`;
+      if (badge.textContent !== text) badge.textContent = text;
       badge.title = anchorState === 'missing' ? '이 메모가 붙어 있던 카드가 닫혔습니다. 마지막 위치에 남아 있습니다.' : anchorState === 'free' ? '캔버스 위치에 고정된 메모' : `${label || '카드'} 위에 붙은 메모 · 카드가 움직이면 따라갑니다`;
     }
   }
@@ -17790,12 +17816,122 @@
     root.dataset.memoExpanded = root._memoRecord?.expanded === true ? 'true' : 'false';
   }
 
+  // The thin line from a memo to the window it is pinned to, drawn in the
+  // Canvas layer (world coordinates) so pan and zoom carry it. No target, a
+  // closed target, or a memo lying on its target: no line.
+  function syncMemoTether(root) {
+    const layer = root?.parentNode;
+    if (!layer || layer.id !== 'egd-canvas-layer') return;
+    const memo = root._memoRecord;
+    const target = !root.hidden && root.dataset.memoAnchor === 'attached' && memo?.anchor?.kind === 'card'
+      ? document.getElementById(memo.anchor.cardId) : null;
+    const segment = target?.isConnected && target.parentNode === layer && !target.hidden
+      ? MemoState.memoTetherSegment(persistentEntityGeometry(root), persistentEntityGeometry(target)) : null;
+    let line = root._memoTether;
+    if (!segment) {
+      if (line && !line.hidden) line.hidden = true;
+      return;
+    }
+    if (!line?.isConnected) {
+      line = root._memoTether = el('div', { class: 'egd-memo-tether', 'aria-hidden': 'true', data: { testid: 'memo-tether', memoId: memo.id } });
+      line._memoRoot = root;
+      // Before its memo: above Board regions (kept first in the layer), under the windows.
+      layer.insertBefore(line, root);
+    }
+    if (line.hidden) line.hidden = false;
+    const next = { left: `${segment.x1}px`, top: `${segment.y1}px`, width: `${segment.length}px`, transform: `rotate(${segment.angle}deg)` };
+    for (const key of Object.keys(next)) if (line.style[key] !== next[key]) line.style[key] = next[key];
+  }
+
+  // What follows the anchor state on the memo: its line, and for '대상 없음'
+  // the row that names the closed window and offers [다시 연결] [삭제].
+  function syncMemoLinkUi(root) {
+    if (!root?._memoRecord) return;
+    syncMemoTether(root);
+    const parts = root._memoMissing;
+    if (!parts) return;
+    const anchor = root._memoRecord.anchor;
+    const anchorState = root.dataset.memoAnchor;
+    if (anchorState === 'attached') root._memoSeenTarget = memoTargetLabel(root._memoRecord) || root._memoSeenTarget || '';
+    const picking = memoRelink?.root === root;
+    parts.row.hidden = anchorState !== 'missing' && !picking;
+    const name = root._memoSeenTarget || (anchor?.kind === 'card' && anchor.label) || '';
+    // Text is written only when it changed (see syncMemoCardPosition).
+    const labelText = picking ? '연결할 창을 누르세요 · Esc 취소' : name ? `원래 창: ${name}` : '붙어 있던 창이 닫혔습니다';
+    if (parts.label.textContent !== labelText) parts.label.textContent = labelText;
+    parts.label.title = picking ? '' : name ? `이 메모가 붙어 있던 창: ${name} (닫힘)` : '';
+    const relinkText = picking ? '취소' : '다시 연결';
+    if (parts.relink.textContent !== relinkText) parts.relink.textContent = relinkText;
+    parts.relink.setAttribute('aria-pressed', String(picking));
+    parts.remove.hidden = picking;
+  }
+
+  // [다시 연결]: the next window the user presses becomes this memo's target.
+  // The memo stays where it is. Esc, the button again, or a press on empty
+  // Canvas leaves the memo as it was.
+  function toggleMemoRelink(root) {
+    const previous = memoRelink;
+    if (previous) previous.stop();
+    if (previous?.root === root || !root?.isConnected) return;
+    const picking = new AbortController();
+    const stop = () => {
+      picking.abort();
+      if (memoRelink?.root === root) memoRelink = null;
+      document.documentElement.removeAttribute('data-egd-memo-relinking');
+      if (root.isConnected) syncMemoLinkUi(root);
+    };
+    memoRelink = { root, stop };
+    document.documentElement.setAttribute('data-egd-memo-relinking', 'true');
+    window.addEventListener('keydown', (ev) => {
+      if (ev.key !== 'Escape') return;
+      ev.preventDefault(); ev.stopPropagation();
+      stop();
+      root._memoMissing?.relink.focus?.();
+    }, { capture: true, signal: picking.signal });
+    window.addEventListener('mousedown', (ev) => {
+      if (ev.button !== 0 || root.contains(ev.target)) return;
+      // This press only chooses the target: it does not also act inside that window.
+      ev.preventDefault(); ev.stopPropagation();
+      const swallow = new AbortController();
+      window.addEventListener('click', (click) => { click.preventDefault(); click.stopPropagation(); }, { capture: true, signal: swallow.signal });
+      window.addEventListener('mouseup', () => window.setTimeout(() => swallow.abort(), 0), { capture: true, once: true });
+      const card = ev.target?.closest?.('.egd-canvas-card');
+      stop();
+      if (!card || card.classList.contains('egd-memo-card') || card.classList.contains('egd-board-missing')) {
+        boardNotice('창을 누르지 않아 메모를 연결하지 않았습니다.');
+        return;
+      }
+      try {
+        const rect = persistentEntityGeometry(card);
+        const next = MemoState.attachMemoToCard(root._memoRecord, { id: card.id, label: cardLabelForViewportRail(card),
+          rect: { x: rect.x, y: rect.y, width: rect.width, height: rect.height } }, { x: root.offsetLeft, y: root.offsetTop });
+        // An explicit choice may leave the restored Board's own members.
+        delete root._memoAnchorProjectionId;
+        updateMemoRecord(root, next, 'memo-relink');
+      } catch (error) { boardNotice(error.message); }
+    }, { capture: true, signal: picking.signal });
+    syncMemoLinkUi(root);
+  }
+
+  // [Chat에서 보기] on a waiting question: the conversation it was sent in.
+  function openMemoAskInChat(ask) {
+    const thread = (state.codex.threads || []).find(item => item?.id && item.id === ask?.threadId) || memoAgentThread(ask?.agentId);
+    if (!thread) { boardNotice('이 질문을 보낸 대화를 찾을 수 없습니다. 대화방이 지워졌을 수 있습니다.'); return false; }
+    dismissChatReturnCue();
+    state.codex.hudView = 'conversation';
+    const chatCard = spawnCodexChatCard();
+    state.codexBridge?.selectThread(thread.id, { openConversation: true });
+    if (chatCard && !state.focusChatDockIfCompact?.(chatCard)) { focusCanvasCard(chatCard); revealOpenCanvasCard(chatCard); }
+    return true;
+  }
+
   function updateMemoRecord(root, next, reason = 'memo-change') {
     if (!root?.isConnected || !next || next === root._memoRecord) return;
     root._memoRecord = next;
     syncMemoCardFrame(root);
     renderMemoCard(root);
     syncMemoCardPosition(root);
+    syncMemoLinkUi(root);
     markAgendaDirty(reason, root);
   }
 
@@ -18054,8 +18190,13 @@
     const askStatus = root.querySelector('.egd-memo-ask-status');
     if (askStatus) {
       const sending = root.dataset.memoAsking === 'true';
+      const now = Date.now();
       const rows = pending.map((ask, index) => el('span', { class: 'egd-memo-ask-pending', data: { testid: 'memo-ask-pending', askId: ask.askId, agentId: ask.agentId } },
         `${pendingNames[index]} 답 기다리는 중`,
+        ...(ask.askedAt ? [el('time', { class: 'egd-memo-ask-elapsed', datetime: new Date(ask.askedAt).toISOString(), title: `${formatMessageTime(ask.askedAt)}에 물었습니다`,
+          data: { testid: 'memo-ask-elapsed', askedAt: String(ask.askedAt) } }, MemoState.memoWaitLabel(ask.askedAt, now))] : []),
+        el('button', { type: 'button', class: 'egd-memo-ask-open', title: '이 질문을 보낸 Chat 대화를 엽니다.', data: { testid: 'memo-ask-open' },
+          onclick: (ev) => { ev.stopPropagation(); openMemoAskInChat(ask); } }, 'Chat에서 보기'),
         el('button', { type: 'button', class: 'egd-memo-ask-cancel', title: '이 질문 기다리기를 멈춥니다. Chat의 대화는 남습니다.',
           onclick: (ev) => { ev.stopPropagation(); updateMemoRecord(root, MemoState.cancelMemoAsk(root._memoRecord, ask.askId), 'memo-ask-cancel'); } }, '기다리지 않기')));
       if (sending) rows.unshift(el('span', { class: 'egd-memo-ask-pending', data: { testid: 'memo-ask-sending' } }, '보내는 중…'));
@@ -18092,7 +18233,7 @@
       memo = options.record ? MemoState.normalizeMemoRecord(options.record, { now }) : MemoState.createMemoRecord({
         id: `memo-${now.toString(36)}-${Math.random().toString(36).slice(2, 8)}`,
         seq: MemoState.nextMemoSeq(memoCards().map(root => root._memoRecord)),
-        point: options.point, cards, text: options.text || '', now,
+        point: options.point, cards, target: options.target || null, text: options.text || '', now,
       });
     } catch (error) {
       // A saved record that cannot be read becomes a Board '구성원 다시 확인' placeholder, not a blank memo.
@@ -18197,16 +18338,29 @@
             && question.value === submittedQuestion) question.value = '';
       } }, 'Agent에게 묻기…');
     const askRow = el('div', { class: 'egd-memo-ask', data: { testid: 'memo-ask' } }, select, question, askButton);
-    shell.slots.content.appendChild(el('div', { class: 'egd-memo-body' }, textarea, status));
+    // '대상 없음': the window this memo was on is closed. Shown by syncMemoLinkUi.
+    const missingLabel = el('span', { class: 'egd-memo-missing-label', data: { testid: 'memo-missing-label' } });
+    const relinkButton = el('button', { type: 'button', class: 'egd-memo-relink', 'aria-pressed': 'false', data: { testid: 'memo-relink' },
+      title: '다음에 누르는 창에 이 메모를 연결합니다. 메모는 지금 자리에 그대로 있습니다.',
+      onclick: (ev) => { ev.stopPropagation(); toggleMemoRelink(root); } }, '다시 연결');
+    const removeButton = el('button', { type: 'button', class: 'egd-memo-remove', data: { testid: 'memo-remove' },
+      title: '이 메모를 닫아 지웁니다.',
+      onclick: (ev) => { ev.stopPropagation(); closeCanvasCard(root); } }, '삭제');
+    root._memoMissing = { row: el('div', { class: 'egd-memo-missing', role: 'group', 'aria-label': '대상이 없는 메모', hidden: true, data: { testid: 'memo-missing' } },
+      missingLabel, relinkButton, removeButton), label: missingLabel, relink: relinkButton, remove: removeButton };
+    shell.slots.content.appendChild(el('div', { class: 'egd-memo-body' }, root._memoMissing.row, textarea, status));
     shell.slots.content.appendChild(el('div', { class: 'egd-memo-detail' }, thread, replyInput, askStatus, askRow));
 
     // Dropping the memo elsewhere re-pins it to what is under its corner.
     let dragFrom = null;
-    const onHeaderDown = (ev) => { if (ev.button === 0) dragFrom = { left: root.offsetLeft, top: root.offsetTop }; };
+    // While the header is held the memo is the user's to place: a change
+    // elsewhere on the Canvas must not put it back on its anchor mid-drag.
+    const onHeaderDown = (ev) => { if (ev.button === 0) { dragFrom = { left: root.offsetLeft, top: root.offsetTop }; root._memoDragging = true; } };
     const onDrop = () => {
       if (!dragFrom) return;
       const moved = root.offsetLeft !== dragFrom.left || root.offsetTop !== dragFrom.top;
       dragFrom = null;
+      delete root._memoDragging;
       if (moved) repinMemoCard(root);
     };
     shell.slots.header.addEventListener('mousedown', onHeaderDown);
@@ -18215,6 +18369,8 @@
       shell.slots.header.removeEventListener('mousedown', onHeaderDown);
       window.removeEventListener('mouseup', onDrop);
       if (saveTimer) clearTimeout(saveTimer);
+      if (memoRelink?.root === root) memoRelink.stop();
+      root._memoTether?.remove();
     });
     syncMemoCardFrame(root);
     renderMemoCard(root);
@@ -18223,22 +18379,29 @@
     return root;
   }
 
-  // Dock [메모]: a memo on the selected card (its top-right corner) or at the
-  // middle of the visible Canvas, ready for typing.
+  // Dock [메모]: a new memo opens in an empty spot of the visible Canvas, never
+  // over another window (CNV-02 placement). With a window selected it opens
+  // just beside that window and stays attached to it (the line shows which);
+  // otherwise it is a free memo. Ready for typing.
   function spawnMemoFromDock() {
     const active = state.activeEntityId ? document.getElementById(state.activeEntityId) : null;
     const anchorCard = active?.classList.contains('egd-canvas-card') && !active.classList.contains('egd-memo-card') && !active.classList.contains('egd-board-missing') ? active : null;
     const folded = MemoState.MEMO_FRAME.folded;
-    let point;
+    const safe = safeViewportWorldRect();
+    const occupied = Array.from(document.querySelectorAll('.egd-canvas-card, .egd-canvas-shape, .egd-board-region')).map(persistentEntityGeometry);
+    let target = null, near = null;
     if (anchorCard) {
       const rect = persistentEntityGeometry(anchorCard);
-      point = { x: rect.x + Math.max(0, rect.width - folded.width - 16), y: rect.y + Math.min(Math.max(0, rect.height - 1), 48) };
-    } else {
-      const safe = safeViewportWorldRect();
-      point = { x: Math.round((safe.left + safe.right) / 2 - folded.width / 2), y: Math.round((safe.top + safe.bottom) / 2 - folded.height / 2) };
+      target = { id: anchorCard.id, label: cardLabelForViewportRail(anchorCard), rect: { x: rect.x, y: rect.y, width: rect.width, height: rect.height } };
+      // Preferred spot: right of the window, level with its top.
+      near = { x: rect.x + rect.width + 24 + folded.width / 2, y: rect.y + 48 + folded.height / 2 };
     }
-    const root = spawnMemoCard({ point });
+    const placement = SurfaceState.placeCanvasView({ size: folded, safe, occupied, anchor: near, gap: 24 });
+    const point = placement ? { x: placement.x, y: placement.y }
+      : { x: Math.round((safe.left + safe.right) / 2 - folded.width / 2), y: Math.round((safe.top + safe.bottom) / 2 - folded.height / 2) };
+    const root = spawnMemoCard({ point, target });
     focusCanvasCard(root);
+    revealPlacedCanvasCard(root, placement, { kind: 'memo' });
     root.querySelector('.egd-memo-text')?.focus();
     return root;
   }
