@@ -7940,7 +7940,8 @@
   function deleteSelectedEntities() {
     const selected = Array.from(document.querySelectorAll('.egd-entity-selected'));
     for (const entity of selected) {
-      if (entity.classList.contains('egd-canvas-card')) closeCanvasCard(entity);
+      // A Desk Window closes through its own gate (B31: a running Terminal asks first).
+      if (entity.classList.contains('egd-canvas-card')) { if (entity._deskWindowShell?.requestClose) entity._deskWindowShell.requestClose(); else closeCanvasCard(entity); }
       else {
         try { if (typeof entity._cleanup === 'function') entity._cleanup(); } catch {}
         entity.remove();
@@ -16913,7 +16914,13 @@
         if (confirmed !== true) return false;
         card._closeApproved = true;
         return closeCanvasCard(card, cleanup);
-      }).catch(error => { boardNotice(`파일 창을 유지했습니다: ${error.message}`); return false; });
+      }).catch(error => {
+        // A53: the notice names the kind of window that was kept, not always a File.
+        const kept = { __proto__: null, file: '파일 창', 'input-evidence': '자료 창', terminal: '터미널 창', memo: '메모 창',
+          browser: '브라우저 창', result: '결과 창' }[card.dataset?.deskWindowKind] || '창';
+        boardNotice(`${kept}을 유지했습니다: ${error.message}`);
+        return false;
+      });
     }
     if (isCardFullscreen(card)) exitCardFullscreen(card, { restoreRect: false });
     unregisterSourceRefCard(card);
@@ -17092,7 +17099,7 @@
     }
 
     const identity = el('div', { class: 'egd-desk-window-identity' });
-    identity.appendChild(deskIcon({ browser: 'browser', ontology: 'ontology', file: 'file', 'input-evidence': 'file', result: 'result', memo: 'note' }[kind] || 'square', 'egd-ui-icon egd-window-kind-icon'));
+    identity.appendChild(deskIcon({ browser: 'browser', ontology: 'ontology', file: 'file', 'input-evidence': 'file', result: 'result', memo: 'note', terminal: 'terminal' }[kind] || 'square', 'egd-ui-icon egd-window-kind-icon'));
     const boardMetadata = el('span', { class: 'egd-desk-window-board', role: 'note', hidden: true, data: { testid: 'window-board' } });
     // CNV-03: the Board control after the name. It opens '넣기 / 빼기'; without a
     // recorded owner it says '소속 없음' so the bar never implies a Board.
@@ -27004,22 +27011,17 @@
       RunResult,
       TAG,
       allocCardSeq,
-      bindCardSourceRef,
       boardCloseRequests,
       boardNotice,
-      canvasZoom,
       chatBindingNonce,
       chatInputSourceForView,
       cloneJson,
-      closeCanvasCard,
       completeAgendaClose,
       el,
       focusCanvasCard,
       focusOpenSourceCard,
       getCodexThreadById,
       getProjectTarget,
-      installCardHeaderFullscreenToggle,
-      isCardFullscreen,
       makeSourceRef,
       markAgendaDirty,
       openBoardProjectFileAt,

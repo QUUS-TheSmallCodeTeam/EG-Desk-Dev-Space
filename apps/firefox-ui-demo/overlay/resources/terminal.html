@@ -5,16 +5,23 @@
   <title>EG-Desk Terminal</title>
   <link rel="stylesheet" href="chrome://userchrome/content/vendor/xterm.min.css">
   <style>
+    /* The host Terminal window owns these values (--egd-terminal-* on
+       .egd-terminal-card); egdesk-terminal-init.js copies them in. The
+       fallbacks are the same approved dark pair for a page opened alone. */
+    :root {
+      --egd-terminal-bg: #262925; --egd-terminal-ink: #EDECE7; --egd-terminal-muted: #B5B9AE;
+      --egd-terminal-line: #41463F; --egd-terminal-control: #363934; --egd-terminal-control-line: #4A4E47;
+    }
     * { margin: 0; padding: 0; box-sizing: border-box; }
-    html, body { width: 100%; height: 100%; background: #1a1a2e; overflow: hidden; }
+    html, body { width: 100%; height: 100%; background: var(--egd-terminal-bg); overflow: hidden; }
     body { display: flex; flex-direction: column; }
     #terminal-toolbar {
       flex: 0 0 auto; display: flex; align-items: center; gap: 8px;
-      min-height: 34px; padding: 5px 8px; color: #c9ccd8;
-      font: 12px system-ui, sans-serif; border-bottom: 1px solid #303348;
+      min-height: 34px; padding: 5px 8px; color: var(--egd-terminal-muted);
+      font: 12px system-ui, sans-serif; border-bottom: 1px solid var(--egd-terminal-line);
     }
     #terminal-toolbar select, #terminal-toolbar button {
-      color: inherit; background: #24273b; border: 1px solid #454963;
+      color: inherit; background: var(--egd-terminal-control); border: 1px solid var(--egd-terminal-control-line);
       border-radius: 4px; padding: 3px 6px; font: inherit;
     }
     #terminal-toolbar :disabled { opacity: .5; }
@@ -24,7 +31,7 @@
     #terminal-container .xterm { height: 100%; }
     #status-overlay {
       position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%);
-      color: #c0c3d0; font-family: monospace; font-size: 13px;
+      color: var(--egd-terminal-ink); font-family: monospace; font-size: 13px;
       text-align: center; pointer-events: none; z-index: 10; max-width: 90%;
     }
     .hidden { display: none !important; }
