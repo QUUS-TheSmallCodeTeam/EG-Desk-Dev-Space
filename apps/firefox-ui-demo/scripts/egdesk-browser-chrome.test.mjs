@@ -70,7 +70,7 @@ test('Browser shortcuts fire only for the accelerator while a Browser window hol
   assert.equal(browserShortcutIntent({ ...key('l', { metaKey: true }), key: 'ㅣ' }, mac), 'focus-address');
   assert.equal(browserShortcutIntent({ ...key('t', { metaKey: true }), key: 'ㅅ' }, mac), 'new-browser');
 
-  // The other platform's modifier, extra modifiers, IME composition and key repeat are left alone.
+  // The other platform's modifier, extra modifiers and IME composition are left alone.
   assert.equal(browserShortcutIntent(key('l', { ctrlKey: true }), mac), null);
   assert.equal(browserShortcutIntent(key('l', { metaKey: true }), pc), null);
   assert.equal(browserShortcutIntent(key('l', { metaKey: true, ctrlKey: true }), mac), null);
@@ -78,7 +78,9 @@ test('Browser shortcuts fire only for the accelerator while a Browser window hol
   assert.equal(browserShortcutIntent(key('t', { metaKey: true, altKey: true }), mac), null);
   assert.equal(browserShortcutIntent(key('t', { metaKey: true, isComposing: true }), mac), null);
   assert.equal(browserShortcutIntent(key('t', { metaKey: true, keyCode: 229 }), mac), null);
-  assert.equal(browserShortcutIntent(key('t', { metaKey: true, repeat: true }), mac), null);
+  // A held key stays claimed, so its repeats never fall through to Firefox's own (hidden) address bar and tabs.
+  assert.equal(browserShortcutIntent(key('t', { metaKey: true, repeat: true }), mac), 'new-browser');
+  assert.equal(browserShortcutIntent(key('l', { metaKey: true, repeat: true }), mac), 'focus-address');
   assert.equal(browserShortcutIntent(key('k', { metaKey: true }), mac), null);
   assert.equal(browserShortcutIntent(key('l'), mac), null);
 
@@ -197,6 +199,14 @@ test('Browser shortcut handler leaves the key alone unless the view model claims
   ev = press('t');
   assert.deepEqual(calls, [['spawn', 'start:uri', 'new'], ['b2', 'focusAddress']]);
   assert.equal(ev.prevented && ev.stopped, true);
+
+  // Holding the key: the repeats are kept from Firefox and do nothing more (no second window).
+  calls.length = 0;
+  for (const letter of ['l', 't']) {
+    ev = press(letter, { repeat: true });
+    assert.equal(ev.prevented && ev.stopped, true, `held ${letter} stays with the Desk`);
+  }
+  assert.deepEqual(calls, []);
 
   // A maximized window covers the Desk: no unseen window opens, the address shortcut still works.
   calls.length = 0;

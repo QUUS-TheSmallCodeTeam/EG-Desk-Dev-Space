@@ -18167,6 +18167,8 @@
       if (!intent) return;
       ev.preventDefault();
       ev.stopImmediatePropagation();
+      // A held key: its repeats stay away from Firefox and do nothing more.
+      if (ev.repeat) return;
       if (intent === 'focus-address') {
         browserCardControl(card, 'focusAddress');
         return;

@@ -75,13 +75,15 @@ export function browserAddressFieldState({ isMac = false } = {}) {
  * Only the platform accelerator alone counts, and only while the active Desk
  * window is a Browser that holds the focus — every other case leaves the key
  * to whoever had it (a terminal's Ctrl+L, a text field, Firefox itself).
+ * A held key (event.repeat) is still claimed: the caller keeps the repeats from
+ * Firefox and acts only on the first press.
  */
 export function browserShortcutIntent(event, {
   isMac = false, activeIsBrowser = false, focusInActiveBrowser = false, canOpenWindow = true,
 } = {}) {
   if (!event || !activeIsBrowser || !focusInActiveBrowser) return null;
   const accelerator = isMac ? event.metaKey && !event.ctrlKey : event.ctrlKey && !event.metaKey;
-  if (!accelerator || event.shiftKey || event.altKey || event.isComposing || event.keyCode === 229 || event.repeat) return null;
+  if (!accelerator || event.shiftKey || event.altKey || event.isComposing || event.keyCode === 229) return null;
   const letter = String(event.key || '').toLowerCase();
   if (event.code === 'KeyL' || letter === 'l') return 'focus-address';
   // A maximized window covers the Desk: a new window would open unseen behind it.
