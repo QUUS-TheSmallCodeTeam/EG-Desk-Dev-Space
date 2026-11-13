@@ -201,7 +201,7 @@ test('the 새 카드 menu holds the moved windows, the drawing tools and the mar
   assert.match(menuSource, /DockLayout\.dockMenuMove\(\{/, 'arrow keys follow the layout view model');
   assert.match(menuSource, /document\.addEventListener\('pointerdown', onPointerDown, true\);/, 'a click outside closes the menu');
   assert.match(menuSource, /document\.removeEventListener\('pointerdown', onPointerDown, true\);/, 'closing lets go of the outside-click watch');
-  const buildSource = source.slice(source.indexOf('  function buildDock() {'), source.indexOf('  // ============ Left: Preset Bag'));
+  const buildSource = source.slice(source.indexOf('  function buildDock() {'), source.indexOf('  // ============ Left: Desk rail'));
   assert.match(buildSource, /dock\.appendChild\(makeGroup\(DOCK_LEFT, 'left'\)\);\n\s*dock\.appendChild\(divider\(\)\);\n\s*const toolGroup = makeGroup\(DOCK_CENTER, 'center'\);\n\s*const createButton = makeButton\(DockLayout\.DOCK_NEW_CARD, 'menu'\);/);
 });
 
