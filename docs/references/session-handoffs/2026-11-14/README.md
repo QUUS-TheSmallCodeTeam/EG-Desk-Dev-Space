@@ -432,6 +432,22 @@ Firefox를 한 번 띄워(격리 프로필) 고친 것 8가지를 다시 봤다.
 - 비전 문서(`EGDESK_PRODUCT_VISION_AND_DEV_TODO.md`)의 체크박스는 바꾸지 않았다. 이번 라운드에 '완료'로 올린 항목이 없다.
 - `.claude/wm/file-map.json`에는 이번 라운드의 새 모듈·테스트·이 폴더를 반영하지 않았다.
 
+### 터미널 창 윗줄 상태 — 원인 조사 (05:43~05:49, 코드 읽기만, 고치지 않음)
+
+- 증상: 터미널 연결이 실패한 뒤에도 창 윗줄 상태가 "연결 중"으로 남는다(05:3x 실화면에서 2회 확인). 안쪽 셸 줄은 "연결 실패", 가운데는 "터미널을 연결하지 못했습니다"로 바뀐다.
+- 코드로 기각한 것: 안쪽 화면이 실패를 알리지 않음(`egdesk-terminal-init.js`의 `showDisconnected()`가 문구를 바꾸기 전에 'terminal-disconnected'를 보낸다) / 자동 재연결 루프(재연결은 처음 그릴 때·가운데 문구·셸 버튼 세 곳뿐) / 윗줄 글자가 다른 요소(윗줄 상태는 `EGDeskSurfaceTerminal.mjs`의 sessionText 하나) / 옛 모듈 캐시(옛 버전도 메시지를 받으면 "연결 끊김"으로 바꾼다).
+- 남은 추정: 부모 창이 안쪽 화면의 메시지를 처리하지 못한다 — `EGDeskSurfaceTerminal.mjs`의 메시지 수신(`onTerminalReady`) 첫 줄 출처 검사 `ev.source !== termBrowser.contentWindow`에서 버려지거나, 메시지가 부모 창까지 오지 않을 가능성. 단위 테스트(`scripts/egdesk-terminal-window.test.mjs`)는 가짜 window로 직접 호출해 이 경계를 검사하지 않는다.
+- 이 추정이 맞으면 실제 앱에서 함께 안 될 수 있는 것: 연결 뒤 셸 이름 표시와 자동 포커스, 터미널 안을 눌렀을 때 창 활성화, 명령 결과 칩, 새 터미널 열기.
+- 다음 확인(실화면 1회): 터미널 창을 연 채 Browser Console에서 아래를 실행한 뒤 가운데 문구를 눌러 다시 연결한다. 'msg'가 한 줄도 안 찍히면 메시지가 부모 창까지 오지 않는 것, 찍히는데 끝이 false면 출처 검사가 버리는 것(비교를 실제 환경에 맞게 고치고 그 경계를 재현하는 테스트 추가), true인데도 윗줄이 그대로면 이 분석을 다시 본다.
+
+```js
+const f = document.querySelector('.egd-terminal-card iframe');
+console.log('same parent', f.contentWindow.parent === window);
+window.addEventListener('message', e => console.log('msg', e.data?.type, e.source === f.contentWindow));
+```
+
+- 브랜치 `uiux/polish-3b-terminal-header`는 만들어졌지만 변경·커밋이 없다(원인 미확정이라 고치지 않음).
+
 ## 참고 — 작업 내부 기록
 
 여기부터는 작업한 쪽의 구분(작업 묶음 이름, 브랜치, 감사 번호)이다. 이어받는 작업자용이다.
