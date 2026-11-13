@@ -12225,18 +12225,15 @@
     // CHAT-07 peek: GET /profiles/:id per Agent, keyed by the active revision asked for.
     const agentProfileDetails = new Map();
     // AGENT-05 / D-A3: avatar photos by asset id, each read once per session from
-    // GET /profiles/avatar-images/:id. Null until (or unless) the bytes arrive —
-    // a photo that cannot be read leaves the initial standing; it is not retried.
-    const avatarImages = new Map();
-    const avatarImage = (assetId) => {
-      if (!AgentIdentityView.isAvatarAssetId(assetId)) return null;
-      if (avatarImages.has(assetId)) return avatarImages.get(assetId);
-      avatarImages.set(assetId, null);
-      fetchJson(`/profiles/avatar-images/${encodeURIComponent(assetId)}`)
-        .then((payload) => { avatarImages.set(assetId, AgentIdentityView.agentAvatarImageSource(payload, assetId)); emit(); })
-        .catch(() => {});
-      return null;
-    };
+    // GET /profiles/avatar-images/:id. Null until the bytes arrive — the initial
+    // stands in. A read that fails (the bridge was not up yet) is tried again
+    // after a wait, three more times at most; then the initial stays.
+    const avatarImages = AgentIdentityView.createAvatarImageCache({
+      load: (assetId) => fetchJson(`/profiles/avatar-images/${encodeURIComponent(assetId)}`),
+      onChange: () => emit(),
+      setTimer: (run, delay) => window.setTimeout(run, delay),
+    });
+    const avatarImage = (assetId) => avatarImages.get(assetId);
     const loadProfileCatalog = () => {
       if (profileCatalogLoad) return profileCatalogLoad;
       if (codexProfileCatalog.status !== 'ready') codexProfileCatalog = { status: 'loading', profiles: [] };
