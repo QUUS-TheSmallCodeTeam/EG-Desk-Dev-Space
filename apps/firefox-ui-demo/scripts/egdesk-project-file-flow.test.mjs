@@ -455,6 +455,9 @@ test('ambiguous run failure stays unknown and command settings cannot change the
   h.projects.set('board-a', project('a', [typed])); await h.view.openProject(project('a', [typed]));
   h.find('.egdesk-file-project-check').click(); await settle();
   assert.match(h.find('.egdesk-file-check-result').textContent, /확인|unknown/i);
+  assert.equal(h.find('.egdesk-file-check-unconfirmed').textContent, '검사가 끝까지 실행됐는지 확인하지 못했습니다.',
+    'File states the unconfirmed ending itself; the shared card headline only describes the output');
+  assert.equal(h.find('.egdesk-run-result').getAttribute('data-outcome'), 'unknown');
   h.service.setProjectScripts = async request => { h.calls.push(['delayed-scripts', request]); return saved.promise; };
   h.find('.egdesk-file-script-settings-button').click(); h.find('.egdesk-file-script-name').value = 'A 수정';
   h.find('.egdesk-file-script-save').click(); await settle();
