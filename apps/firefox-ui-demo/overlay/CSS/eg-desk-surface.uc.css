@@ -3134,7 +3134,9 @@ button.egd-rail-focus-view {
 /* 기록 상태: quiet text beside the name; only a failure asks for attention.
    It gives up its room first when the left group runs out of width. */
 .egd-rail-record-status {
-  flex: 0 100 auto;
+  /* 줄어드는 폭은 비율로 나뉜다. 차이가 작으면 Board 이름과 배지도 1px씩 깎여 말줄임이 붙으므로
+     기록 상태가 사실상 전부 떠안게 크게 둔다. */
+  flex: 0 10000 auto;
   min-width: 0;
   display: inline-flex;
   align-items: center;
@@ -3221,6 +3223,17 @@ button.egd-rail-focus-view {
     transform: translateX(-50%);
   }
   .egd-rail-right { margin-left: auto; }
+}
+
+/* 창을 크게 보는 동안 왼쪽 묶음에는 '○○ · 크게 보는 중'과 [집중 보기]가 더해진다. 검색은 창 가운데를
+   지키므로 자리는 왼쪽 안에서 낸다: 조용한 기록 상태 → Board 이름 → 배지 순서로 양보한다.
+   기록 상태가 통째로 들어가지 못하는 폭에서는 '이 PC에 …'로 남기지 않고 자리를 비운다(실패 알림은 남는다). */
+@media (min-width: 1200px) {
+  :root.egd-card-fullscreen-active .egd-rail-switcher { flex-shrink: 10000; }
+  :root.egd-card-fullscreen-active .egd-rail-record-status:not([data-state="failed"]) { flex-shrink: 100000000; }
+}
+@media (max-width: 1599px) {
+  :root.egd-card-fullscreen-active .egd-rail-record-status:not([data-state="failed"]) { display: none; }
 }
 
 #egd-rail-search-results {
