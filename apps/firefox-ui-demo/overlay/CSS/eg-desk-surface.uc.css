@@ -5654,38 +5654,85 @@
 .egd-file-card-mount { flex: 1; min-height: 0; overflow: hidden; }
 .egd-file-card-title { flex: 1 1 0%; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .egd-file-card-state { flex: 0 0 auto; white-space: nowrap; opacity: .7; margin-left: 10px; font-size: 11px; }
-.egd-file-chat-attach { border: 1px solid color-mix(in srgb, var(--egd-on-surface) 28%, transparent); border-radius: 6px; padding: 2px 8px; background: transparent; color: inherit; font: 11px sans-serif; white-space: nowrap; cursor: pointer; }
+.egd-file-chat-attach { border: 1px solid var(--egd-outline); border-radius: 7px; padding: 2px 9px; background: transparent; color: var(--egd-on-surface-variant); font: 600 11.5px/1.4 var(--egd-font); white-space: nowrap; cursor: pointer; }
+.egd-file-chat-attach:hover:not(:disabled) { background: var(--egd-hover); color: var(--egd-on-surface); }
+.egd-file-chat-attach:focus-visible { outline: var(--egd-focus-outline); outline-offset: var(--egd-focus-outline-offset); }
 .egd-file-chat-attach:disabled { opacity: var(--egd-opacity-disabled); cursor: default; }
 .egd-file-card-notice { padding: 8px 12px; font-size: 12px; background: var(--egd-note-soft); color: var(--egd-warning-ink); }
 .egd-file-card-notice[hidden] { display: none; }
-.egdesk-file-view { display: grid; height: 100%; min-height: 0; grid-template-columns: 220px minmax(0, 1fr); grid-template-rows: auto minmax(0, 1fr) auto auto; color: var(--egd-on-surface); background: var(--egd-surface); font: 13px/1.5 sans-serif; }
-.egdesk-file-toolbar { grid-column: 1 / -1; display: flex; align-items: center; gap: 10px; padding: 8px; border-bottom: 1px solid color-mix(in srgb, var(--egd-on-surface) 16%, transparent); }
-.egdesk-file-search { display: flex; gap: 5px; flex: 1; align-items: center; }
+.egdesk-file-view { display: grid; height: 100%; min-height: 0; grid-template-columns: 220px minmax(0, 1fr); grid-template-rows: auto minmax(0, 1fr) auto auto; color: var(--egd-on-surface); background: var(--egd-surface-elevated); font: 13px/1.5 var(--egd-font); }
+.egdesk-file-view [hidden] { display: none !important; }
+.egdesk-file-visually-hidden { position: absolute !important; width: 1px; height: 1px; margin: -1px; padding: 0; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
+/* Before a folder is connected: one line and its connect buttons, centred as a pair. */
+.egdesk-file-empty { grid-column: 1 / -1; grid-row: 1; align-self: end; padding: 16px 24px 12px; text-align: center; }
+.egdesk-file-empty-hint { margin: 0; color: var(--egd-on-surface-variant); overflow-wrap: anywhere; }
+.egdesk-file-view[data-file-state="empty"] { grid-template-columns: minmax(0, 1fr); grid-template-rows: minmax(0, 1fr) minmax(0, 1fr) auto auto; }
+.egdesk-file-view[data-file-state="empty"] .egdesk-file-toolbar { grid-row: 2; align-self: start; justify-content: center; padding: 0 24px 16px; border-bottom: 0; }
+.egdesk-file-view[data-file-state="empty"] .egdesk-file-connections { flex-direction: column; }
+.egdesk-file-view[data-file-state="empty"] .egdesk-file-connect { min-height: 34px; padding: 6px 20px; border-color: var(--egd-primary); background: var(--egd-primary); color: var(--egd-on-primary); font-size: 13px; }
+.egdesk-file-view[data-file-state="empty"] .egdesk-file-connect:hover:not(:disabled),
+.egdesk-file-view[data-file-state="empty"] .egdesk-file-connect:active:not(:disabled) { background: var(--egd-primary-strong); border-color: var(--egd-primary-strong); }
+.egdesk-file-view[data-file-state="empty"] .egdesk-file-project-connect { border-color: transparent; background: transparent; color: var(--egd-on-surface-variant); }
+.egdesk-file-view[data-file-state="empty"] .egdesk-file-project-connect:hover:not(:disabled) { background: var(--egd-hover); color: var(--egd-on-surface); }
+/* A restored working copy without its folder has no tree column. */
+.egdesk-file-view[data-file-state="unconnected"] { grid-template-columns: minmax(0, 1fr); }
+.egdesk-file-view[data-file-state="unconnected"] .egdesk-file-workspace { grid-column: 1; }
+.egdesk-file-toolbar { grid-column: 1 / -1; display: flex; align-items: center; gap: 10px; padding: 8px; border-bottom: 1px solid var(--egd-outline-variant); }
+.egdesk-file-search { display: flex; gap: 6px; flex: 1; align-items: center; }
 .egdesk-file-search-label { display: flex; gap: 6px; align-items: center; flex: 1; }
-.egdesk-file-search-input { width: 100%; min-width: 50px; }
-.egdesk-file-tree-panel { grid-column: 1; grid-row: 2; overflow: auto; border-right: 1px solid color-mix(in srgb, var(--egd-on-surface) 16%, transparent); padding: 8px; }
+.egdesk-file-search-input { box-sizing: border-box; width: 100%; min-width: 50px; min-height: 28px; padding: 4px 9px; border: 1px solid var(--egd-outline); border-radius: 7px; color: var(--egd-on-surface); background: var(--egd-surface-elevated); font: 12px/1.4 var(--egd-font); appearance: none; }
+.egdesk-file-search-input::placeholder { color: var(--egd-on-surface-variant); opacity: 1; }
+.egdesk-file-search-input:focus-visible { border-color: var(--egd-focus-border); outline: var(--egd-focus-outline); outline-offset: var(--egd-focus-outline-offset); }
+.egdesk-file-tree-panel { grid-column: 1; grid-row: 2; overflow: auto; border-right: 1px solid var(--egd-outline-variant); padding: 0 8px 8px; background: var(--egd-window-alt); }
 .egdesk-file-tree-heading { font-size: 13px; margin: 0 0 6px; }
+/* '파일 / 변경' is a tab strip on one line: the selected tab carries the ink and the underline. */
+/* 4px above the tabs: the scrolling panel must not clip a tab's focus ring. */
+.egdesk-file-tabs { display: flex; gap: 2px; margin: 0 -8px 8px; padding: 4px 8px 0; border-bottom: 1px solid var(--egd-outline-variant); }
+.egdesk-file-view .egdesk-file-tab { min-height: 32px; margin-bottom: -1px; padding: 4px 10px; border: 0; border-bottom: 2px solid transparent; border-radius: 0; background: transparent; color: var(--egd-on-surface-variant); }
+.egdesk-file-view .egdesk-file-tab:hover:not(:disabled) { background: transparent; color: var(--egd-on-surface); }
+.egdesk-file-view .egdesk-file-tab[aria-selected="true"] { border-bottom-color: var(--egd-primary); color: var(--egd-on-surface); }
 .egdesk-file-tree, .egdesk-file-tree-group { padding-left: 14px; list-style: none; }
-.egdesk-file-tree-item { cursor: pointer; overflow-wrap: anywhere; padding: 3px 0; }
+.egdesk-file-tree { margin: 0; padding-left: 0; }
+.egdesk-file-tree-item { cursor: pointer; overflow-wrap: anywhere; padding: 3px 6px; border-radius: 6px; }
+.egdesk-file-tree-item:hover:not([aria-disabled="true"]):not(:has(.egdesk-file-tree-item:hover)) { background: var(--egd-hover); }
 .egdesk-file-tree-item:focus-visible { outline: var(--egd-focus-outline); outline-offset: var(--egd-focus-outline-offset); }
 .egdesk-file-tree-item[aria-disabled="true"] { opacity: var(--egd-opacity-disabled); cursor: default; }
 .egdesk-file-search-results:empty { display: none; }
-.egdesk-file-search-results:not(:empty) { grid-column: 1; grid-row: 2; align-self: end; max-height: 42%; overflow: auto; padding: 8px; background: var(--egd-surface); border-top: 1px solid var(--egd-outline); z-index: 1; }
-.egdesk-file-search-result { display: block; width: 100%; text-align: left; }
-.egdesk-file-workspace { grid-column: 2; grid-row: 2; display: flex; flex-direction: column; min-height: 0; overflow: auto; padding: 10px; }
-.egdesk-file-title { font-size: 15px; margin: 0 0 6px; }
-.egdesk-file-details { font-size: 11px; overflow-wrap: anywhere; margin-bottom: 5px; }
-.egdesk-file-editor-label { display: flex; flex-direction: column; flex: 1; min-height: 180px; gap: 5px; }
-.egdesk-file-editor { flex: 1; min-height: 160px; width: 100%; box-sizing: border-box; resize: none; white-space: pre; overflow: auto; font: 13px/1.55 ui-monospace, monospace; color: inherit; background: var(--egd-surface-elevated); border: 1px solid var(--egd-outline); border-radius: 6px; padding: 10px; }
-.egdesk-file-viewer { overflow: auto; flex: 1; padding: 10px; }
-.egdesk-file-actions { display: flex; flex-wrap: wrap; gap: 5px; margin-top: 8px; }
-.egdesk-file-view button { font: inherit; border: 1px solid var(--egd-outline); border-radius: 5px; color: inherit; background: var(--egd-surface-elevated); padding: 4px 7px; cursor: pointer; }
+.egdesk-file-search-results:not(:empty) { grid-column: 1; grid-row: 2; align-self: end; max-height: 42%; overflow: auto; padding: 8px; background: var(--egd-surface-elevated); border-top: 1px solid var(--egd-outline); z-index: 1; }
+.egdesk-file-search-heading { margin: 0 0 6px; font-size: 12px; color: var(--egd-on-surface-variant); }
+.egdesk-file-view .egdesk-file-search-result { display: block; width: 100%; margin-bottom: 4px; text-align: left; font-weight: 500; overflow-wrap: anywhere; }
+.egdesk-file-workspace { grid-column: 2; grid-row: 2; display: flex; flex-direction: column; min-height: 0; overflow: auto; padding: 12px 14px; }
+.egdesk-file-title { font-size: 15px; font-weight: 650; margin: 0 0 6px; }
+.egdesk-file-details { font-size: 12px; color: var(--egd-on-surface-variant); overflow-wrap: anywhere; margin-bottom: 6px; }
+.egdesk-file-details-summary { cursor: pointer; }
+.egdesk-file-details-summary:focus-visible { outline: var(--egd-focus-outline); outline-offset: var(--egd-focus-outline-offset); }
+.egdesk-file-editor-label { display: flex; flex-direction: column; flex: 1; min-height: 180px; gap: 5px; font-size: 12px; color: var(--egd-on-surface-variant); }
+.egdesk-file-editor { flex: 1; min-height: 160px; width: 100%; box-sizing: border-box; resize: none; white-space: pre; overflow: auto; font: 13px/1.55 ui-monospace, monospace; color: var(--egd-on-surface); background: var(--egd-surface-elevated); border: 1px solid var(--egd-outline); border-radius: 7px; padding: 10px; }
+.egdesk-file-editor:focus-visible { border-color: var(--egd-focus-border); outline: var(--egd-focus-outline); outline-offset: var(--egd-focus-outline-offset); }
+.egdesk-file-viewer { overflow: auto; flex: 1; padding: 10px 0; color: var(--egd-on-surface-variant); }
+.egdesk-file-actions { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 10px; }
+.egdesk-file-view button { box-sizing: border-box; min-height: 28px; padding: 4px 11px; border: 1px solid var(--egd-outline); border-radius: 7px; color: var(--egd-on-surface); background: var(--egd-surface-elevated); font: 600 12px/1.4 var(--egd-font); cursor: pointer; }
+.egdesk-file-view button:hover:not(:disabled):not([aria-disabled="true"]) { background: var(--egd-hover); }
+.egdesk-file-view button:active:not(:disabled):not([aria-disabled="true"]) { background: var(--egd-primary-container); }
+.egdesk-file-view button:focus-visible,
+.egdesk-file-script-fields input:focus-visible { outline: var(--egd-focus-outline); outline-offset: var(--egd-focus-outline-offset); }
 .egdesk-file-view button:disabled { opacity: var(--egd-opacity-disabled); cursor: default; }
-.egdesk-file-view [hidden] { display: none !important; }
+.egdesk-file-view button[aria-disabled="true"] { opacity: var(--egd-opacity-disabled); cursor: default; }
+/* '이름 / 내용' and the change scope are single-choice groups: the chosen one is tinted. */
+.egdesk-file-view .egdesk-file-search-mode[aria-checked="true"],
+.egdesk-file-view .egdesk-file-change-scope[aria-checked="true"] { border-color: var(--egd-focus-border); background: var(--egd-primary-container); }
+.egdesk-file-change-scopes { display: flex; flex-wrap: wrap; gap: 5px; margin-bottom: 6px; }
+.egdesk-file-change-summary { margin: 6px 0; font-size: 12px; color: var(--egd-on-surface-variant); overflow-wrap: anywhere; }
+.egdesk-file-change-list { margin: 0; padding: 0; list-style: none; }
+.egdesk-file-view .egdesk-file-change-row { display: flex; align-items: baseline; gap: 6px; width: 100%; margin-bottom: 4px; text-align: left; font-weight: 500; }
+.egdesk-file-change-path { flex: 1 1 auto; min-width: 0; overflow-wrap: anywhere; }
+.egdesk-file-change-counts { flex: 0 0 auto; color: var(--egd-on-surface-variant); white-space: nowrap; }
 .egdesk-file-review pre, .egdesk-file-check-result pre { white-space: pre-wrap; overflow-wrap: anywhere; font-size: 12px; padding: 8px; }
 .egdesk-file-hunk-before { background: var(--egd-danger-bg); }
 .egdesk-file-hunk-after { background: var(--egd-success-bg); }
 .egdesk-file-status, .egdesk-file-error { grid-column: 1 / -1; margin: 0; padding: 5px 10px; font-size: 12px; }
+.egdesk-file-status { color: var(--egd-on-surface-variant); border-top: 1px solid var(--egd-outline-variant); }
+.egdesk-file-status:empty { display: none; }
 .egdesk-file-error { background: var(--egd-danger-bg); color: var(--egd-danger-ink); }
 
 /* Shared plain-DOM RunResult contract, independent of the File/Chat host. */
