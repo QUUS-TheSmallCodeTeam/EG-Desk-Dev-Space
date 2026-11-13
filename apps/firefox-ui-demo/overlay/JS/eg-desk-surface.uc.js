@@ -17066,6 +17066,26 @@
   // ============ Settings Canvas Card ============
   // 계정 view models (SUB-05/SUB-01): bridge snapshots → rows and confirmation copy.
   const AccountSettingsView = ChromeUtils.importESModule('chrome://userchrome/content/EGDeskAccountSettingsView.sys.mjs');
+  // 계정 메뉴 keys (A37): Down or Up on the menu button opens the menu, and
+  // Up/Down/Home/End move between its items. Closing on Escape or on a click
+  // outside is the 'settings-account-menu' Escape layer.
+  const AccountMenuFocus = ChromeUtils.importESModule('chrome://userchrome/content/EGDeskFocusNavigation.sys.mjs');
+  function handleAccountMenuKeydown(ev) {
+    const menu = ev.target?.closest?.('.egd-settings-account-menu');
+    if (!menu || ev.isComposing || ev.altKey || ev.ctrlKey || ev.metaKey) return false;
+    const intent = AccountMenuFocus.compositeKeyIntent(ev.key, { orientation: 'vertical', homeEnd: menu.open === true });
+    if (!intent) return false;
+    const items = [...menu.querySelectorAll('[role="menuitem"]')];
+    const index = AccountMenuFocus.nextCompositeIndex({
+      count: items.length, current: items.indexOf(document.activeElement), intent, isSkipped: i => items[i].disabled === true,
+    });
+    if (index < 0) return false;
+    ev.preventDefault();
+    menu.open = true;
+    items[index].focus({ preventScroll: true });
+    return true;
+  }
+  window.addEventListener('keydown', handleAccountMenuKeydown);
   // 계정: the real ChatGPT sign-in, plan and usage from the bridge.
   // Agent 관리: Agent Profiles in the local profile store (/profiles).
   function settingsProfileAccountKey() {
@@ -24718,6 +24738,11 @@
       menu.remove();
       if (restoreFocus && menu._returnTo?.isConnected) menu._returnTo.focus?.();
     };
+    // Escape closes these from anywhere on the screen, in the shared order (UX-06).
+    registerEscapeLayer({ id: 'placement-menu', kind: 'menu', isOpen: () => !!placementMenu,
+      contains: target => !!placementMenu?.contains?.(target), dismiss: () => closePlacementMenu({ restoreFocus: true }) });
+    registerEscapeLayer({ id: 'placement-dialog', kind: 'dialog', isOpen: () => !!placementDialog,
+      contains: target => !!placementDialog?.contains?.(target), dismiss: () => closePlacementDialog({ restoreFocus: true }) });
     const openPlacementMenu = (clientX, clientY, card) => {
       closePlacementMenu();
       const chosen = selectedCards();

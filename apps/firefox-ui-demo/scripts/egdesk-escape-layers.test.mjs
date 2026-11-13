@@ -4,6 +4,7 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { test } from 'node:test';
 import * as EscapeLayerStack from '../overlay/resources/EGDeskLayerStack.sys.mjs';
+import * as AccountMenuFocus from '../overlay/resources/EGDeskFocusNavigation.sys.mjs';
 
 const surfaceSource = readFileSync(new URL('../overlay/JS/eg-desk-surface.uc.js', import.meta.url), 'utf8');
 const CHAT_MENU_OPENER = '.egd-codex-thread-menu-trigger-active, .egd-codex-message-menu-trigger-active, '
@@ -86,6 +87,9 @@ test('the surface registers every Escape layer through one channel and listens i
   assert.equal(surfaceSource.split("ChromeUtils.importESModule('chrome://userchrome/content/EGDeskLayerStack.sys.mjs')").length - 1, 1);
   assert.equal(surfaceSource.split('\n  installEscapeLayers();\n').length - 1, 1);
   assert.match(surfaceSource, /\n  function registerEscapeLayer\(layer\) \{\n    const id = escapeLayers\.push\(layer\);/);
+  // The right-click placement menu and its number dialog register where they live.
+  assert.match(surfaceSource, /registerEscapeLayer\(\{ id: 'placement-menu', kind: 'menu', isOpen: \(\) => !!placementMenu,/);
+  assert.match(surfaceSource, /registerEscapeLayer\(\{ id: 'placement-dialog', kind: 'dialog', isOpen: \(\) => !!placementDialog,/);
 });
 
 test('Escape closes one thing per press: menu, confirmation, search, minimap, peeked Chat, then the fullscreen View', () => {
@@ -252,4 +256,64 @@ test('the Settings account menu closes on Escape with focus back on its button, 
   assert.equal(event.defaultPrevented, true);
   assert.deepEqual(log, ['focus:account-menu-button']);
   assert.ok(state.cardFullscreen);
+});
+
+test('the Settings account menu opens from its button with Down or Up and moves between items with the arrow keys', () => {
+  const start = surfaceSource.indexOf('  function handleAccountMenuKeydown(ev) {');
+  const end = surfaceSource.indexOf('\n  }\n', start);
+  assert.ok(start > 0 && end > start, 'handleAccountMenuKeydown is present');
+  assert.equal(surfaceSource.split("window.addEventListener('keydown', handleAccountMenuKeydown);").length - 1, 1);
+  const document = { activeElement: null };
+  const handle = new Function('document', 'AccountMenuFocus', `${surfaceSource.slice(start, end + 4)}\n  return handleAccountMenuKeydown;`)(document, AccountMenuFocus);
+  const item = (name, disabled = false) => {
+    const self = { name, disabled, closest: selector => selector === '.egd-settings-account-menu' ? menu : null, focus() { document.activeElement = self; } };
+    return self;
+  };
+  const items = [item('refresh'), item('switch', true), item('logout')];
+  const menu = { open: false, querySelectorAll: selector => selector === '[role="menuitem"]' ? items : [] };
+  const summary = item('button');
+  const key = (target, name, extra = {}) => {
+    const event = { key: name, target, defaultPrevented: false, preventDefault() { this.defaultPrevented = true; }, ...extra };
+    return { used: handle(event), event };
+  };
+
+  // Home and End on the closed button do nothing; Down opens and lands on the first item.
+  document.activeElement = summary;
+  assert.equal(key(summary, 'Home').used, false);
+  assert.equal(menu.open, false);
+  const opened = key(summary, 'ArrowDown');
+  assert.equal(opened.used, true);
+  assert.equal(opened.event.defaultPrevented, true);
+  assert.equal(menu.open, true);
+  assert.equal(document.activeElement.name, 'refresh');
+  // A disabled item is skipped; the ends wrap around.
+  key(items[0], 'ArrowDown');
+  assert.equal(document.activeElement.name, 'logout');
+  key(items[2], 'ArrowDown');
+  assert.equal(document.activeElement.name, 'refresh');
+  key(items[0], 'ArrowUp');
+  assert.equal(document.activeElement.name, 'logout');
+  key(items[2], 'Home');
+  assert.equal(document.activeElement.name, 'refresh');
+  key(items[0], 'End');
+  assert.equal(document.activeElement.name, 'logout');
+  // Up on the closed button opens on the last item.
+  menu.open = false;
+  document.activeElement = summary;
+  key(summary, 'ArrowUp');
+  assert.equal(menu.open, true);
+  assert.equal(document.activeElement.name, 'logout');
+  // Other keys, modified keys, Korean composing and keys outside the menu are left alone.
+  for (const [target, name, extra] of [[items[2], 'Enter'], [items[2], 'ArrowRight'], [items[2], 'ArrowDown', { metaKey: true }],
+    [items[2], 'ArrowDown', { isComposing: true }], [{ closest: () => null }, 'ArrowDown']]) {
+    const result = key(target, name, extra);
+    assert.equal(result.used, false, name);
+    assert.equal(result.event.defaultPrevented, false, name);
+  }
+  assert.equal(document.activeElement.name, 'logout');
+  // Every item disabled (an account action is running): the key is not used.
+  for (const entry of items) entry.disabled = true;
+  menu.open = false;
+  assert.equal(key(summary, 'ArrowDown').used, false);
+  assert.equal(menu.open, false);
 });
