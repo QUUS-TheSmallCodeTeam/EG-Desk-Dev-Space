@@ -481,6 +481,9 @@
     const generation = ++connectionGeneration;
     const current = () => !unloaded && !closeRequested && generation === connectionGeneration;
     statusEl.textContent = ptyId ? '같은 터미널 세션 연결 확인 중…' : '터미널 연결 중…';
+    // The window bar and the shell line say the same thing as the middle of the window.
+    try { window.parent.postMessage({ type: 'terminal-connecting' }, '*'); } catch {}
+    if (!sessionInfo) shellLabel.textContent = '연결 준비 중';
     statusEl.classList.remove('hidden');
     statusEl.style.pointerEvents = 'none';
     statusEl.onclick = null;
@@ -577,6 +580,7 @@
         else {
           // One Korean line; the raw transport error stays folded under '자세히'.
           showDisconnected('터미널을 연결하지 못했습니다. 눌러서 다시 연결합니다.');
+          if (!sessionInfo) shellLabel.textContent = '연결 실패';
           showStatusDetail(error.message);
         }
         return false;

@@ -339,6 +339,10 @@ test('a lost connection is told to the window, and the bar says so until the ses
   const h = await terminalWindow({ api: { ptyId: 'pty-9', isConnected: () => true } });
   try {
     const session = h.shell.slots.identity.children[1];
+    h.message({ type: 'terminal-disconnected' });
+    assert.equal(session.textContent, '연결 실패', 'a session that never came up failed to connect');
+    h.message({ type: 'terminal-connecting' });
+    assert.equal(session.textContent, '연결 중', 'pressing to reconnect says connecting again');
     h.message({ type: 'terminal-ready', shellLabel: 'zsh' });
     h.message({ type: 'terminal-disconnected' });
     assert.equal(session.textContent, '연결 끊김');
