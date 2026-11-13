@@ -35,8 +35,13 @@ export function presentationBadge(label, mode) {
   const raw = String(label || '').replace(/\s+/g, ' ').trim();
   const name = TYPE_LABEL_KO[raw] || raw || '창';
   const focus = mode === 'focus';
+  const shortName = shortBadgeName(name);
+  const stateText = ` · ${focus ? MODE_COPY.focus : MODE_COPY.maximized}`;
   return {
-    text: `${shortBadgeName(name)} · ${focus ? MODE_COPY.focus : MODE_COPY.maximized}`,
+    text: `${shortName}${stateText}`,
+    // The two halves, so a narrow top bar can shorten the name and keep the state words whole.
+    name: shortName,
+    state: stateText,
     title: `${name} 창을 ${focus ? '집중 보기 중' : '크게 보는 중'} — 누르면 원래 크기로 돌아갑니다`,
   };
 }

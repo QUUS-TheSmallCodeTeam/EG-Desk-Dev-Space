@@ -8944,13 +8944,20 @@
       const badge = presentation.querySelector('.egd-rail-card-badge');
       if (card?.isConnected) {
         const copy = MaximizeHud.presentationBadge(presentationBadgeLabel(card), state.cardFullscreen.mode);
-        badge.textContent = copy.text;
+        // 자리가 좁으면 이름만 줄이고 '· 크게 보는 중'은 끝까지 보이게 둘로 나눠 넣는다.
+        if (badge.dataset.badgeText !== copy.text) {
+          badge.dataset.badgeText = copy.text;
+          badge.replaceChildren(
+            el('span', { class: 'egd-rail-card-badge-name' }, copy.name),
+            el('span', { class: 'egd-rail-card-badge-state' }, copy.state));
+        }
         badge.title = copy.title;
         badge.setAttribute('aria-label', copy.title);
         presentation.hidden = false;
         syncMaximizeHudEdge();
       } else {
         badge.textContent = '';
+        delete badge.dataset.badgeText;
         presentation.hidden = true;
       }
     }

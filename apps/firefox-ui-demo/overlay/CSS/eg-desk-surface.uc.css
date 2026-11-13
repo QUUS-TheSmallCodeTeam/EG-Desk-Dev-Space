@@ -3119,14 +3119,25 @@ button.egd-rail-focus-view {
   -moz-window-dragging: no-drag;
 }
 button.egd-rail-card-badge {
-  display: inline-block;
-  /* 긴 창 이름은 문구를 만들 때 이미 줄인다. 여기서는 뒤의 '크게 보는 중'이 잘리지 않게 넉넉히 둔다. */
+  display: inline-flex;
+  align-items: center;
+  flex: 0 1 auto;
+  min-width: 0;
+  /* 긴 창 이름은 문구를 만들 때 이미 줄인다. 자리가 더 좁으면 이름만 더 줄이고 뒤의 '크게 보는 중'은 남긴다. */
   max-width: 280px;
   line-height: 19px;
   border: 1px solid color-mix(in srgb, var(--egd-primary) 22%, var(--egd-surface-elevated));
   background: var(--egd-primary-container);
   color: var(--egd-primary);
 }
+.egd-rail-card-badge-name {
+  flex: 0 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  white-space: pre;
+  text-overflow: ellipsis;
+}
+.egd-rail-card-badge-state { flex: 0 0 auto; white-space: pre; }
 button.egd-rail-focus-view {
   flex: 0 0 auto;
   border: 1px solid var(--egd-outline);
@@ -3244,11 +3255,16 @@ button.egd-rail-focus-view {
    지키므로 자리는 왼쪽 안에서 낸다: 조용한 기록 상태 → Board 이름 → 배지 순서로 양보한다.
    기록 상태가 통째로 들어가지 못하는 폭에서는 '이 PC에 …'로 남기지 않고 자리를 비운다(실패 알림은 남는다). */
 @media (min-width: 1200px) {
-  :root.egd-card-fullscreen-active .egd-rail-switcher { flex-shrink: 10000; }
+  :root.egd-card-fullscreen-active .egd-rail-switcher { flex-shrink: 10000; min-width: max-content; }
+  /* Board 이름은 'EG'처럼 토막 나지 않는다. 남는 자리가 모자라면 배지 속 창 이름이 대신 줄어든다. */
+  :root.egd-card-fullscreen-active .egd-rail-agenda-name { flex: 0 0 auto; }
   :root.egd-card-fullscreen-active .egd-rail-record-status:not([data-state="failed"]) { flex-shrink: 100000000; }
 }
 @media (max-width: 1599px) {
   :root.egd-card-fullscreen-active .egd-rail-record-status:not([data-state="failed"]) { display: none; }
+}
+@media (min-width: 1200px) and (max-width: 1599px) {
+  :root.egd-card-fullscreen-active .egd-rail-agenda-name { max-width: 96px; }
 }
 
 #egd-rail-search-results {
