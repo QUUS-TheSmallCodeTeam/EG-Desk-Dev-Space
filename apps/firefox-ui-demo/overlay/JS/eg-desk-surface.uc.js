@@ -17116,7 +17116,7 @@
     };
     const controlObserver = typeof MutationObserver === 'function' ? new MutationObserver(syncMaximizeControl) : null;
     controlObserver?.observe(card, { attributes: true, attributeFilter: ['class'] });
-    const header = el('div', { class: 'egd-card-header' },
+    const header = el('div', { class: 'egd-card-header egd-desk-window-header' },
       el('div', { class: 'egd-card-topbar egd-desk-window-titlebar' },
         el('div', { class: 'egd-card-dots-shell' },
           el('div', { class: 'egd-card-dots' }, closeControl, maximizeControl),

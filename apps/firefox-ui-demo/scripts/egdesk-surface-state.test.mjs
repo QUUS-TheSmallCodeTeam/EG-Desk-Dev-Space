@@ -9712,6 +9712,8 @@ test('Settings window frame: a named title row, two working dots and resize from
   // Title row: grip, the Settings icon and the Korean window name.
   const titlebar = byClass('egd-desk-window-titlebar')[0];
   assert.ok(titlebar, 'Settings uses the shared title row class');
+  assert.equal(titlebar.parentNode.className, 'egd-card-header egd-desk-window-header', 'the header is one title row high, with no empty band under it');
+  assert.equal(cssDeclarationsFor(surfaceCss, '.egd-desk-window-header')['min-height'], '32px');
   assert.equal(byClass('egd-settings-title')[0].textContent, '설정');
   assert.deepEqual(settingsNodes(titlebar, node => !!node.dataset.icon).map(node => node.dataset.icon), ['grip', 'settings']);
   assert.equal(byClass('egd-window-grip')[0].getAttribute('aria-hidden'), 'true');
