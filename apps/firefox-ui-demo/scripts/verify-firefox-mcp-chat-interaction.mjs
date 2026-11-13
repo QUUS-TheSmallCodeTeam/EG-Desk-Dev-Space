@@ -920,7 +920,7 @@ async function main() {
       const messageCount = thread.messages.length;
       const draft = 'Keep this exact fixture draft across Canvas and HUD';
       const first = await h.type(draft);
-      h.must(firstCard.querySelector('button[title="우측 패널로 이동"]'), 'move-to-HUD button').click();
+      h.must(firstCard.querySelector('button[title="오른쪽 패널로 옮기기"]'), 'move-to-HUD button').click();
       await h.frame();
       const hud = { ...h.read(), dockMode: h.api.state.codex.chatDockMode,
         open: h.api.state.hudOpen, app: h.api.state.hudApp,

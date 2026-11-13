@@ -1169,9 +1169,17 @@
   box-sizing: border-box;
   min-width: 320px;
   min-height: 420px;
-  overflow: hidden;
+  /* The resize zones reach past the edge, as on other Desk Windows; the bar
+     and the body round their own corners instead of the window clipping them. */
+  overflow: visible;
   border-radius: 12px;
   background: var(--egd-chat-room);
+}
+
+/* The Chat View bar and, under it, the Board membership chip. */
+.egd-chat-card-head {
+  flex: none;
+  min-width: 0;
 }
 
 .egd-chat-card-header {
@@ -1180,26 +1188,44 @@
   align-items: center;
   justify-content: space-between;
   gap: 10px;
-  padding: 0 12px 0 13px;
+  padding: 0 12px;
   border-bottom: 1px solid var(--egd-chat-outline);
+  border-radius: 8px 8px 0 0;
   background: var(--egd-chat-paper);
   cursor: move;
   user-select: none;
   flex-shrink: 0;
 }
+.egd-chat-card-head > .egd-board-suggest { border-top: 0; border-bottom: 1px solid var(--egd-chat-outline-soft); }
 
+/* dots · grip · icon · name take the room; the Board and the action keep the right. */
 .egd-chat-card-title-group {
-  display: inline-flex;
+  display: flex;
+  flex: 1 1 auto;
   align-items: center;
   min-width: 0;
   gap: 7px;
 }
 
 .egd-chat-card-title {
-  font-size: 11px;
+  min-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  font-size: 12px;
   font-weight: 600;
-  color: var(--egd-on-surface-variant);
+  color: var(--egd-on-surface);
 }
+
+.egd-chat-card .egd-desk-window-control:focus-visible {
+  outline: var(--egd-focus-outline);
+  outline-offset: var(--egd-focus-outline-offset);
+}
+.egd-chat-card .egd-desk-window-control:not(.egd-desk-window-control-disabled):hover { filter: brightness(0.9); }
+/* Chat keeps its scrollbar and composer edge free: the zones lean outward. */
+.egd-chat-card > .egd-card-resize-hit-e { right: -8px; width: 12px; }
+.egd-chat-card > .egd-card-resize-hit-w { left: -8px; width: 12px; }
+.egd-chat-card > .egd-card-resize-hit-s { bottom: -8px; height: 12px; }
 
 .egd-chat-card-actions {
   display: inline-flex;
@@ -1249,6 +1275,7 @@
   overflow: hidden;
   padding: 0;
   display: flex;
+  border-radius: 0 0 8px 8px;
   background: var(--egd-chat-room);
 }
 
@@ -7437,7 +7464,7 @@
   background: var(--egd-chat-paper);
   border-bottom-color: var(--egd-chat-outline-soft);
 }
-.egd-chat-card-title { font-size: 11px; font-weight: 600; letter-spacing: .01em; color: var(--egd-on-surface-variant); }
+.egd-chat-card-title { font-size: 12px; font-weight: 600; letter-spacing: .01em; color: var(--egd-on-surface); }
 .egd-chat-card-action { border-radius: 6px; font-size: 11px; }
 .egd-codex-chat-shell {
   font-family: var(--egd-font, "Segoe UI", system-ui, sans-serif);

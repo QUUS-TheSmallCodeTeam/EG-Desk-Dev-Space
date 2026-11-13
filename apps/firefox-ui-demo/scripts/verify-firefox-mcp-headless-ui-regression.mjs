@@ -1035,7 +1035,7 @@ async function chatRoundTrip(harness, size, deadlineMs, result, priorThreadId) {
     { issues: canvasComposerClearanceIssues(canvasClearance), composer: canvasClearance.composerRect,
       zoom: canvasClearance.zoomRect, overlapArea: canvasClearance.composerZoomOverlapArea,
       beforeWorld: canvas.world, afterWorld: canvasClearance.world });
-  await safeClick(harness, `${canvasSelector} button[title="우측 패널로 이동"]`,
+  await safeClick(harness, `${canvasSelector} button[title="오른쪽 패널로 옮기기"]`,
     'Canvas Chat to HUD', size, deadlineMs, result);
   let previousHud = null;
   const hud = await waitFor(harness, observeChat, value => {

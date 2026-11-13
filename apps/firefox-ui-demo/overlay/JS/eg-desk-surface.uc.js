@@ -4707,6 +4707,7 @@
     check: [['path', { d: 'm4 12 5 5L20 6' }]],
     send: [['path', { d: 'M12 19V5m-5 5 5-5 5 5' }]],
     detach: [['path', { d: 'M13 4.5h6.5V11M19.5 4.5 10 14' }], ['path', { d: 'M19.5 14.5V18a1.5 1.5 0 0 1-1.5 1.5H6A1.5 1.5 0 0 1 4.5 18V6A1.5 1.5 0 0 1 6 4.5h3.5' }]],
+    sidepanel: [['rect', { x: '3.5', y: '4.5', width: '17', height: '15', rx: '2' }], ['path', { d: 'M14.5 4.5v15' }], ['path', { d: 'M6.5 12h4.5M9 9.8l2.2 2.2L9 14.2' }]],
     result: [['rect', { x: '5', y: '3', width: '14', height: '18', rx: '2' }], ['path', { d: 'M9 8h6M9 12h6M9 16h3' }]],
     account: [['circle', { cx: '12', cy: '8', r: '3' }], ['path', { d: 'M5.5 20a6.5 6.5 0 0 1 13 0' }]],
     computer: [['rect', { x: '3', y: '4', width: '18', height: '12', rx: '2' }], ['path', { d: 'M8 20h8M12 16v4' }]],
@@ -15546,9 +15547,14 @@
     const safe = safeViewportRect({ avoidHud: true });
     const placement = resolveCanvasCardPlacement('chat', { anchorClientX, anchorClientY, avoidHud: true });
     const { width, height } = placement;
+    // The Chat window keeps its own header element but follows the Desk Window
+    // Shell's View bar: dots · grip · icon · name · Board · actions, the same
+    // classes, and the same Board control and resize hit zones.
+    const ChatFrame = ChromeUtils.importESModule('chrome://userchrome/content/EGDeskChatFrame.sys.mjs');
     const card = el('div', {
       id,
-      class: 'egd-canvas-card egd-chat-card',
+      class: 'egd-canvas-card egd-desk-window egd-chat-card',
+      data: { deskWindowKind: 'chat' },
       style: {
         top: Math.round(placement.y) + 'px',
         left: Math.round(placement.x) + 'px',
@@ -15558,34 +15564,87 @@
       },
     });
 
+    const closeControl = el('span', {
+      class: 'egd-card-dot egd-card-dot-close egd-desk-window-control',
+      role: 'button',
+      tabindex: '0',
+      title: '창 닫기',
+      'aria-label': '창 닫기',
+      onclick: (ev) => { ev.stopPropagation(); closeCanvasCard(card, cleanup); },
+    });
+    const minimizeControl = el('span', {
+      class: 'egd-card-dot egd-card-dot-min egd-desk-window-control egd-desk-window-control-disabled',
+      'aria-disabled': 'true',
+      title: '창 최소화는 아직 지원되지 않음',
+    });
+    const maximizeControl = el('span', {
+      class: 'egd-card-dot egd-card-dot-max egd-desk-window-control',
+      role: 'button',
+      tabindex: '0',
+      title: '창 최대화',
+      'aria-label': '창 최대화',
+      onclick: (ev) => { ev.stopPropagation(); toggleCardFullscreen(card); },
+    });
+    for (const control of [closeControl, maximizeControl]) {
+      control.addEventListener('keydown', (ev) => {
+        if (ev.key !== 'Enter' && ev.key !== ' ') return;
+        ev.preventDefault();
+        control.click();
+      });
+    }
+    const titleLabel = el('div', { class: 'egd-chat-card-title' }, ChatFrame.CHAT_FRAME_HOME_TITLE);
+    // CNV-03: the recorded Board after the name, and the same '넣기 / 빼기' menu.
+    const boardMetadata = el('span', { class: 'egd-desk-window-board', role: 'note', hidden: true, data: { testid: 'window-board' } });
+    const boardMenuText = el('span', { class: 'egd-desk-window-board-menu-text' }, '소속 없음');
+    const boardMenu = el('button', {
+      type: 'button', class: 'egd-desk-window-board-menu', title: '소속 없음 · Board에 넣기', 'aria-label': '소속 없음 · Board에 넣기',
+      'aria-haspopup': 'menu', 'aria-expanded': 'false',
+      data: { testid: 'window-board-menu', owned: 'none', noWindowDrag: 'true' },
+      onclick: (ev) => { ev.stopPropagation(); state.toggleViewBoardMenu?.(card, ev.currentTarget); },
+    }, boardMenuText, deskIcon('chevron', 'egd-ui-icon egd-desk-window-board-menu-icon'));
+    boardMenu._text = boardMenuText;
     const header = el('div', { class: 'egd-chat-card-header' },
+      el('div', { class: 'egd-card-dots-shell' },
+        el('div', { class: 'egd-card-dots' }, closeControl, minimizeControl, maximizeControl),
+      ),
       el('div', { class: 'egd-chat-card-title-group' },
         el('span', { class: 'egd-window-grip', 'aria-hidden': 'true' }, deskIcon('grip')),
         deskIcon('chat', 'egd-ui-icon egd-window-kind-icon'),
-        el('div', { class: 'egd-chat-card-title' }, '채팅'),
+        titleLabel,
       ),
+      boardMetadata,
+      boardMenu,
       el('div', { class: 'egd-chat-card-actions' },
         el('button', {
+          type: 'button',
           class: 'egd-chat-card-action',
-          title: '우측 패널로 이동',
+          title: '오른쪽 패널로 옮기기',
+          'aria-label': '오른쪽 패널로 옮기기',
+          data: { testid: 'chat-move-to-panel' },
           onclick: (ev) => {
             ev.stopPropagation();
             dockCodexChatToHud();
           },
-        }, '우측'),
-        el('button', {
-          class: 'egd-chat-card-action',
-          title: '닫기',
-          onclick: (ev) => {
-            ev.stopPropagation();
-            closeCanvasCard(card, cleanup);
-          },
-        }, deskIcon('close')),
+        }, deskIcon('sidepanel')),
       ),
     );
+    // The bar and, under it, the '○○에 넣을까요?' chip when a Board offers membership.
+    const head = el('div', { class: 'egd-chat-card-head' }, header);
     const body = el('div', { class: 'egd-chat-card-body' });
-    card.appendChild(header);
+    const resizeHits = DESK_WINDOW_RESIZE_HITS.map(({ cls, edges }) => el('div', {
+      class: `egd-card-resize-hit ${cls}`,
+      data: { edges: JSON.stringify(edges) },
+    }));
+    card.appendChild(head);
     card.appendChild(body);
+    for (const hit of resizeHits) card.appendChild(hit);
+    // What the shared Board functions read from a Desk Window.
+    card._deskWindowShell = {
+      root: card, boardMetadata, boardMenu, resizeHits,
+      slots: { header: head, topbar: header, content: body },
+      focus: () => focusCanvasCard(card),
+      requestClose: () => closeCanvasCard(card, cleanup),
+    };
 
     const host = document.getElementById('egd-canvas-layer') || document.documentElement;
     host.appendChild(card);
@@ -15595,6 +15654,20 @@
     markAgendaDirty('create-chat-card', card);
     setActiveEntity(card);
     revealPlacedCanvasCard(card, placement);
+    syncDeskWindowBoardMetadata(card);
+    // D-V2: opened inside a Board region, the window is only offered membership.
+    const quietOpen = !!(state.agenda?.suppressDirty || state.agenda?.restoreInProgress || state.surface?.restoring);
+    if (!quietOpen) setTimeout(() => { if (card.isConnected && !card.dataset.projectionId) state.offerBoardMembership?.(card, 'open'); }, 0);
+
+    // The name is the open conversation; on the room list it is the window's own.
+    const syncChatFrameTitle = (codex) => {
+      if (!codex) return;
+      const open = codex.activeThreadId ? getCodexThreadById(codex, codex.activeThreadId) : null;
+      const name = ChatFrame.chatFrameTitle({ thread: open, view: normalizeHudView(codex.hudView) });
+      if (titleLabel.textContent !== name.text) titleLabel.textContent = name.text;
+      if (titleLabel.title !== name.text) titleLabel.title = name.text;
+    };
+    let unsubscribeFrameTitle = null;
 
     const syncChatCardLayoutMode = () => {
       const compact = card.getBoundingClientRect().width < 680;
@@ -15609,6 +15682,8 @@
         mode: 'canvas',
         onMoveToHud: () => dockCodexChatToHud(),
       });
+      // Subscribed after the Chat view, so the name follows what it just drew.
+      unsubscribeFrameTitle = state.codexBridge.subscribe(syncChatFrameTitle);
     }
 
     const routeWheelToCanvas = (ev) => {
@@ -15637,12 +15712,40 @@
     header.addEventListener('mousedown', (ev) => {
       if (startPanIfNeeded(ev)) return;
       if (isCardFullscreen(card)) return;
-      if (ev.button !== 0 || ev.target.closest('button')) return;
+      if (ev.button !== 0 || ev.target.closest('input, button, .egd-card-dot, [data-no-window-drag]')) return;
       focusCard();
       drag = { x: ev.clientX, y: ev.clientY, left: card.offsetLeft, top: card.offsetTop };
       ev.preventDefault();
     });
     installCardHeaderFullscreenToggle(card, header);
+    // Eight edges resize the window down to its CSS minimum, as on other Desk Windows.
+    let resize = null;
+    for (const hit of resizeHits) {
+      hit.addEventListener('mousedown', (ev) => {
+        if (startPanIfNeeded(ev)) return;
+        if (ev.button !== 0 || isCardFullscreen(card)) return;
+        focusCard();
+        const style = window.getComputedStyle(card);
+        // The Dock fit may show the window shorter than its saved height; the
+        // person resizes what they see, so the drag starts from the shown size.
+        const height = card.offsetHeight;
+        if (card.style.maxHeight) {
+          card.style.height = height + 'px';
+          card.style.maxHeight = '';
+        }
+        resize = {
+          edges: JSON.parse(hit.dataset.edges),
+          x: ev.clientX, y: ev.clientY,
+          left: card.offsetLeft, top: card.offsetTop, width: card.offsetWidth, height,
+          limits: {
+            minWidth: parsePxNumber(style.minWidth, ChatFrame.CHAT_FRAME_MIN_WIDTH) || ChatFrame.CHAT_FRAME_MIN_WIDTH,
+            minHeight: parsePxNumber(style.minHeight, ChatFrame.CHAT_FRAME_MIN_HEIGHT) || ChatFrame.CHAT_FRAME_MIN_HEIGHT,
+          },
+        };
+        ev.preventDefault();
+        ev.stopPropagation();
+      });
+    }
     body.addEventListener('wheel', routeWheelToCanvas, { passive: false });
     for (const target of [card, header, body]) {
       target.addEventListener('mousedown', () => activateCard(), true);
@@ -15651,19 +15754,34 @@
     card.addEventListener('focusin', () => activateCard());
     const onMove = (ev) => {
       const s = canvasZoom();
+      if (resize) {
+        const next = ChatFrame.resizeFrameRect(resize, resize.edges, (ev.clientX - resize.x) / s, (ev.clientY - resize.y) / s, resize.limits);
+        card.style.left = next.left + 'px';
+        card.style.top = next.top + 'px';
+        card.style.width = next.width + 'px';
+        card.style.height = next.height + 'px';
+        return;
+      }
       if (!drag) return;
       card.style.left = (drag.left + (ev.clientX - drag.x) / s) + 'px';
       card.style.top = (drag.top + (ev.clientY - drag.y) / s) + 'px';
     };
     const onUp = () => {
       if (drag) markAgendaDirty('move-chat-card', card);
+      if (resize) markAgendaDirty('resize-chat-card', card);
+      // D-V3: a drop into a Board region offers membership; a plain press does not.
+      if (drag && (card.offsetLeft !== drag.left || card.offsetTop !== drag.top)) state.offerBoardMembership?.(card, 'drop');
       drag = null;
+      resize = null;
     };
     window.addEventListener('mousemove', onMove);
     window.addEventListener('mouseup', onUp);
 
     const cleanup = () => {
       body?._codexCleanup?.();
+      unsubscribeFrameTitle?.();
+      unsubscribeFrameTitle = null;
+      dismissBoardMembershipSuggestion(card);
       try { chatCardResizeObserver.disconnect(); } catch {}
       window.removeEventListener('mousemove', onMove);
       window.removeEventListener('mouseup', onUp);
