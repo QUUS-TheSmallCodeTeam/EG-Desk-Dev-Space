@@ -205,6 +205,7 @@ export function createTerminalZone(deps) {
       setTimeout(focusTerminal, 0);
     }, true);
     // 최초 연결 완료 시 자동 포커스 (terminal.html이 terminal-ready postMessage 발송)
+    let everConnected = false;
     const onTerminalReady = (ev) => {
       if (ev.source !== termBrowser.contentWindow) return;
       if (ev.data?.type === 'terminal-activate') {
@@ -228,13 +229,16 @@ export function createTerminalZone(deps) {
         }
       }
       if (ev.data?.type === 'terminal-ready') {
+        everConnected = true;
         const label = ev.data.shellLabel;
         sessionText.textContent = typeof label === 'string' && label && label.length <= 80 ? label : '실행 중';
         if (activate && state.activeEntityId === card.id) focusTerminal();
       }
       if (ev.data?.type === 'terminal-exit-confirmed') { sessionText.textContent = '종료됨'; dismissCloseConfirm(); }
       if (ev.data?.type === 'terminal-no-session') sessionText.textContent = '세션 없음';
-      if (ev.data?.type === 'terminal-disconnected') sessionText.textContent = '연결 끊김';
+      // A session that never came up failed to connect; one that was running lost its connection.
+      if (ev.data?.type === 'terminal-disconnected') sessionText.textContent = everConnected ? '연결 끊김' : '연결 실패';
+      if (ev.data?.type === 'terminal-connecting') sessionText.textContent = '연결 중';
       if (['terminal-ready', 'terminal-exit-confirmed', 'terminal-no-session'].includes(ev.data?.type)
           && boardCloseRequests.has(card.dataset.projectionId)) {
         void completeAgendaClose({ projectionId: card.dataset.projectionId });
