@@ -1104,17 +1104,21 @@ test('window dots stay quiet until the title row is hovered or focused, with one
   const dot = declarationsFor('.egd-card-dot');
   assert.equal(dot.width, '10px'); assert.equal(dot.height, '10px');
   assert.equal(declarationsFor('.egd-card-dots').gap, '8px', 'contract: 10px dots on an 8px gap');
-  assert.equal(dot.background, 'color-mix(in srgb, var(--egd-on-surface-variant) 32%, transparent)', 'resting dots carry no hue');
+  assert.equal(dot['background-color'], 'color-mix(in srgb, var(--egd-on-surface-variant) 32%, transparent)', 'resting dots carry no hue');
   for (const kind of ['close', 'min', 'max']) {
     const own = declarationsFor(`.egd-card-dot-${kind}`);
     assert.deepEqual(Object.keys(own), ['--egd-window-dot-live'], `${kind} only names its live colour`);
   }
-  const live = rulesFor('.egd-card-dot:focus-visible').find(rule => new Map(rule.declarations).has('background'));
+  const live = rulesFor('.egd-card-dot:focus-visible').find(rule => new Map(rule.declarations).has('background-color'));
   assert.ok(live, 'live colour rule');
+  // Browser clips its dot inside a 29px press box; a background shorthand in a
+  // stronger dot rule would reset that clip and paint the whole box.
+  assert.equal(declarationsFor('.egd-browser-card .egd-desk-window-control')['background-clip'], 'padding-box');
+  for (const rule of [...rulesFor('.egd-card-dot'), live]) assert.equal(new Map(rule.declarations).has('background'), false, 'dot colours never use the background shorthand');
   assert.ok(live.selectors.includes(':is(.egd-card-header, .egd-chat-card-header, .egd-window-dots-host):is(:hover, :has(:is(.egd-card-dot, button):focus-visible)) .egd-card-dot'),
     'any title row lights its dots on hover or keyboard focus');
   assert.ok(live.selectors.every(selector => !selector.includes(':focus-within')), 'a focus placed by script after a drag does not keep the dots lit');
-  assert.equal(new Map(live.declarations).get('background'), 'var(--egd-window-dot-live, var(--egd-on-surface-variant))');
+  assert.equal(new Map(live.declarations).get('background-color'), 'var(--egd-window-dot-live, var(--egd-on-surface-variant))');
   // 10px dot + 7px above and below = 24px tall; 4px each side stays inside the 8px gap.
   const press = declarationsFor('.egd-card-dot::before');
   assert.equal(press.inset, '-7px -4px'); assert.equal(press.position, 'absolute');

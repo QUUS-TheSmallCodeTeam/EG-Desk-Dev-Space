@@ -1682,7 +1682,9 @@
   border-radius: 50%;
   display: inline-block;
   cursor: pointer;
-  background: color-mix(in srgb, var(--egd-on-surface-variant) 32%, transparent);
+  /* background-color, not the shorthand: Browser clips its dot inside a larger
+     press box, and a shorthand here would reset that clip. */
+  background-color: color-mix(in srgb, var(--egd-on-surface-variant) 32%, transparent);
   transition: background-color .12s ease;
 }
 .egd-card-dot[hidden] { display: none; }
@@ -1707,7 +1709,7 @@
 :is(.egd-card-header, .egd-chat-card-header, .egd-window-dots-host):is(:hover, :has(:is(.egd-card-dot, button):focus-visible)) .egd-card-dot,
 .egd-card-dots:hover > .egd-card-dot,
 .egd-card-dot:focus-visible {
-  background: var(--egd-window-dot-live, var(--egd-on-surface-variant));
+  background-color: var(--egd-window-dot-live, var(--egd-on-surface-variant));
 }
 .egd-card-dot:is(:hover, :active) { filter: brightness(.9); }
 .egd-card-dot:focus-visible,
