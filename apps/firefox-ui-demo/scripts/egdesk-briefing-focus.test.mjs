@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
 import test from 'node:test';
 import * as BriefingState from '../overlay/resources/EGDeskBriefingState.sys.mjs';
 
@@ -160,4 +161,39 @@ test('a late receipt after the briefing connection changed does not edit the rec
   assert.equal(await pending, false);
   assert.equal(h.record.comments[0].resolved, false);
   assert.equal(h.record.resolving?.[commentId], undefined, 'the in-flight mark never outlives its request');
+});
+
+// ------------------------------------------------------------------- styles
+
+const css = readFileSync(new URL('../overlay/CSS/eg-desk-surface.uc.css', import.meta.url), 'utf8');
+const cssBetween = (start, end) => {
+  const from = css.indexOf(start), to = css.indexOf(end, from);
+  assert.ok(from >= 0 && to > from, `${start} … ${end}`);
+  return css.slice(from, to);
+};
+
+test('step focus styles: sage ring on the step windows, the rest recede, and nothing takes pointer input', () => {
+  const focus = cssBetween('/* CNV-07 step focus.', '.egd-semantic-cluster {');
+  assert.doesNotMatch(focus, /#[0-9a-f]{3,8}\b|rgba?\(|hsla?\(/i, 'approved tokens only');
+  assert.doesNotMatch(focus, /pointer-events|display:\s*none|visibility/, 'the other windows and the Dock stay usable');
+  assert.match(focus, /\[data-egd-briefing-target="true"\]:not\(\.egd-card-fullscreen\) \{\s*box-shadow: 0 0 0 calc\(3px \/ var\(--egd-camera-zoom, 1\)\) var\(--egd-primary\)/,
+    'the ring keeps its on-screen width at any zoom and leaves the selection outline alone');
+  assert.match(focus, /\[data-egd-briefing-focus="spotlight"\] \.egd-canvas-card:not\(\[data-egd-briefing-target="true"\]\):not\(\.egd-card-fullscreen, \.egd-entity-active, :hover, :focus-within\) \{\s*opacity: 0\.5;/,
+    'a window the reader points at, works in or has selected is never dimmed');
+  assert.match(focus, /\[data-egd-chrome-mode="briefing"\] :is\(#egd-dock, #egd-preset-bag\):not\(:hover, :focus-within\) \{ opacity: 0\.55; \}/);
+  const wide = focus.slice(focus.indexOf('@media (min-width: 56.0625rem)'), focus.indexOf('@media (prefers-contrast: more)'));
+  assert.match(wide, /#egd-dock:not\(:hover, :focus-within\) \{ scale: 0\.9; transform-origin: 0 100%; \}/, 'the centred Dock shrinks in place');
+  assert.equal((focus.match(/scale:/g) || []).length, 2, 'only the wide layout shrinks the Dock and the rail');
+  const forced = focus.slice(focus.indexOf('@media (forced-colors: active)'));
+  assert.equal((forced.match(/opacity: 1;/g) || []).length, 2, 'forced colours never fade a window or the Dock');
+});
+
+test('resume and comment card styles use approved tokens only', () => {
+  const panel = cssBetween('/* Re-entry: the step last read', '#egd-answer-briefing .egd-briefing-body[hidden]');
+  assert.doesNotMatch(panel, /#[0-9a-f]{3,8}\b|rgba?\(|hsla?\(/i);
+  for (const selector of ['.egd-briefing-resume', '.egd-briefing-comment', '.egd-briefing-comment-head', '.egd-briefing-comment-number',
+    '.egd-briefing-comment-target', '.egd-briefing-comment-state', '.egd-briefing-comment-body', '.egd-briefing-comment-status',
+    '.egd-briefing-comment-actions', '.egd-briefing-comment[data-state="resolved"]']) {
+    assert.ok(panel.includes(`#egd-answer-briefing ${selector}`), selector);
+  }
 });
