@@ -365,3 +365,27 @@ test('the Desk button shows only in first-run focus and the line stays out of fu
   assert.ok(mine, 'first-run CSS block');
   assert.doesNotMatch(mine, /#[0-9A-Fa-f]{3,8}\b|rgba?\(/, 'tokens only');
 });
+
+test('once the Desk is open, other root class changes no longer read the Browser pages', () => {
+  const h = harness();
+  h.install();
+  h.state.surface.initialBrowserFocus = false; h.rootClasses.delete('egd-initial-browser-focus');
+  h.observed().fn();
+  let reads = 0;
+  const browser = h.card._xulBrowser;
+  Object.defineProperty(h.card, '_xulBrowser', { get() { reads++; return browser; } });
+  h.rootClasses.add('egd-card-fullscreen-active');
+  h.observed().fn();
+  h.rootClasses.delete('egd-card-fullscreen-active');
+  h.observed().fn();
+  assert.equal(reads, 0, 'first run follows its own class only');
+});
+
+test('the first Browser fills the screen without a selection edge around it', () => {
+  const selected = ':root.egd-initial-browser-focus .egd-browser-card.egd-card-fullscreen:is(.egd-entity-active, .egd-entity-selected)';
+  const rule = selector => surfaceCss.match(new RegExp(`^${selector.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')} \\{([^}]+)\\}`, 'm'))?.[1] || '';
+  assert.match(rule(selected), /outline: 0/);
+  assert.match(rule(`${selected}::after`), /display: none/);
+  // The general focused-Browser rule (selection painted inward) stays for every other fullscreen Browser.
+  assert.match(surfaceCss, /^\.egd-browser-card\.egd-card-fullscreen:is\(\.egd-entity-active, \.egd-entity-selected\)::after \{\n  content: "";/m);
+});

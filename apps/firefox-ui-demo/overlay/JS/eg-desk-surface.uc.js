@@ -25668,6 +25668,8 @@
 
   function syncFirstRunFocus() {
     const focused = document.documentElement.classList.contains('egd-initial-browser-focus');
+    // The Desk is already open: the other root classes are not first run's business.
+    if (!focused && !firstRun.focused) return;
     if (focused) ensureDeskEntryButton(document.getElementById(state.surface.browserCardId));
     syncStartPageDeskEntry();
     if (firstRun.focused && !focused && !firstRun.entered) {

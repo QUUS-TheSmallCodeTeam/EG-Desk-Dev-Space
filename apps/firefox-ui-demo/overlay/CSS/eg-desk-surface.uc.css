@@ -562,6 +562,13 @@
 }
 /* First run: the labelled Desk button on the first Browser's header, and the
    one quiet Codex line under the top bar after the first Desk entry. */
+/* The first Browser is the whole screen, so no selection edge frames it. */
+:root.egd-initial-browser-focus .egd-browser-card.egd-card-fullscreen:is(.egd-entity-active, .egd-entity-selected) {
+  outline: 0;
+}
+:root.egd-initial-browser-focus .egd-browser-card.egd-card-fullscreen:is(.egd-entity-active, .egd-entity-selected)::after {
+  display: none;
+}
 .egd-first-run-desk { display: none; }
 :root.egd-initial-browser-focus .egd-browser-card.egd-card-fullscreen .egd-first-run-desk {
   display: inline-flex;
