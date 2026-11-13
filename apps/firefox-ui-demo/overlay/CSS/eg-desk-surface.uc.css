@@ -1754,6 +1754,19 @@
   color: var(--egd-on-surface-variant);
 }
 
+/* BRW-01: a turned-off toolbar button keeps the keyboard focus
+   (aria-disabled), so it needs the same turned-off look as :disabled. */
+.egd-card-nav-btn[aria-disabled="true"] {
+  opacity: var(--egd-opacity-disabled);
+  cursor: default;
+}
+
+.egd-card-nav-btn[aria-disabled="true"]:hover,
+.egd-card-nav-btn[aria-disabled="true"]:active {
+  background: transparent;
+  color: var(--egd-on-surface-variant);
+}
+
 .egd-card-omnibox {
   flex: 1;
   min-width: 0;
@@ -1899,12 +1912,15 @@
   outline-offset: var(--egd-focus-outline-offset);
 }
 
+/* Approved desktop style (.eg-address): a 25px field with a 5px corner, a
+   soft line and the bar's own tone. The row keeps its height; the field sits
+   centred in it. */
 .egd-browser-card .egd-card-omnibox {
-  height: 30px;
-  padding: 0 9px;
+  height: 25px;
+  padding: 0 8px;
   border-color: var(--egd-outline-variant);
-  border-radius: 6px;
-  background: var(--egd-surface-elevated);
+  border-radius: 5px;
+  background: var(--egd-window-alt);
 }
 
 .egd-browser-card .egd-card-omnibox:focus-within {
@@ -1958,7 +1974,9 @@
   height: calc(15px * var(--egd-browser-ui-scale));
 }
 .egd-browser-card[data-egd-browser-presentation] .egd-card-omnibox {
-  height: calc(30px * var(--egd-browser-ui-scale));
+  height: calc(25px * var(--egd-browser-ui-scale));
+  padding-inline: calc(8px * var(--egd-browser-ui-scale));
+  border-radius: calc(5px * var(--egd-browser-ui-scale));
 }
 .egd-browser-card[data-egd-browser-presentation] .egd-card-omnibox-icon {
   font-size: calc(12px * var(--egd-browser-ui-scale));
