@@ -7669,7 +7669,8 @@
 }
 .egd-codex-chat-main[data-compact-composer="true"] .egd-codex-messages { padding: 12px 16px; }
 .egd-codex-chat-main[data-compact-composer="true"] .egd-codex-footer { padding: 4px 11px 10px; }
-.egd-codex-chat-main[data-compact-composer="true"] .egd-codex-input-row { padding: 8px 10px; gap: 4px; }
+/* A short Chat frames the draft no fatter than a tall one (the one-line box below). */
+.egd-codex-chat-main[data-compact-composer="true"] .egd-codex-input-row { padding: 3px 5px 3px 7px; gap: 4px; }
 .egd-codex-chat-main[data-compact-composer="true"] .egd-codex-footer .egd-chat-input-tray { padding-bottom: 3px; }
 
 /* Existing Chat-specific layers below keep their own density and runtime state. */
@@ -7764,8 +7765,10 @@
 .egd-codex-footer { padding: 7px 11px 10px; gap: 0; border-top: 1px solid var(--egd-chat-outline-soft); }
 .egd-codex-input-row { gap: 8px; padding: 8px 9px; border: 1px solid var(--egd-outline); border-radius: 8px; background: var(--egd-window-alt); box-shadow: none; }
 .egd-codex-input-row:focus-within { border-color: var(--egd-primary); box-shadow: 0 0 0 2px color-mix(in srgb, var(--egd-primary) 12%, transparent); }
-/* DSN-04: line height and the six-line cap follow the font (24px and 144px at 15px). */
-.egd-codex-input { min-height: 40px; max-height: 9.6em; padding: 3px 2px 0; font-size: 15px; line-height: 1.6; color: var(--egd-on-surface); }
+/* Approved composer: the draft reads at the bubble's 12px/1.52 and starts as one 35px line
+   (18px of text between 8px paddings). The autosize grows it to 140px, then it scrolls.
+   DSN-04: the line height stays relative to the font. */
+.egd-codex-input { box-sizing: border-box; min-height: 35px; max-height: 140px; padding: 8px 2px; font-size: 12px; line-height: 1.52; color: var(--egd-on-surface); }
 .egd-codex-input::placeholder { color: var(--egd-on-surface-variant); }
 .egd-codex-diagnostics-toggle { min-height: 32px; padding: 0 8px; border-radius: 6px; background: var(--egd-window-alt); color: var(--egd-on-surface-variant); font-size: 12px; }
 #egd-hud[data-app="chat"] .egd-codex-diagnostics-toggle {
@@ -7785,7 +7788,8 @@
   grid-template-areas: "attachments draft actions";
   align-items: end;
   gap: 6px;
-  padding: 5px 7px;
+  /* The 35px draft line and the 34px send button set the height; the box only frames them. */
+  padding: 3px 5px 3px 7px;
 }
 .egd-codex-chat-shell .egd-codex-footer .egd-chat-input-tray {
   grid-area: attachments;
@@ -7807,6 +7811,44 @@
 .egd-codex-chat-shell .egd-codex-input-row:has(.egd-chat-input-chip) {
   grid-template-areas: "attachments attachments attachments" "draft draft actions";
 }
+/* CHAT-03 '@' list: who this Board Thread can call, floating just above the composer. */
+.egd-codex-footer:has(> .egd-codex-mention-menu) { position: relative; }
+.egd-codex-mention-menu {
+  position: absolute;
+  left: 11px;
+  bottom: 100%;
+  z-index: 3;
+  box-sizing: border-box;
+  min-width: 168px;
+  max-width: min(280px, calc(100% - 22px));
+  max-height: 148px;
+  margin-bottom: 4px;
+  padding: 4px;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  scrollbar-width: thin;
+  border: 1px solid var(--egd-outline);
+  border-radius: 8px;
+  background: var(--egd-surface-elevated);
+  box-shadow: var(--egd-shadow);
+  color: var(--egd-on-surface);
+  font: 12px/1.4 var(--egd-font);
+}
+.egd-codex-mention-menu[hidden] { display: none; }
+.egd-codex-mention-option {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  min-height: 28px;
+  padding: 0 8px;
+  border-radius: 6px;
+  cursor: pointer;
+}
+.egd-codex-mention-option:hover { background: var(--egd-hover); }
+.egd-codex-mention-option[aria-selected="true"] { background: var(--egd-primary-container); }
+.egd-codex-mention-option-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 600; }
+.egd-codex-mention-option-hint { flex: none; color: var(--egd-on-surface-variant); font-size: 11px; }
 .egd-codex-chat-shell .egd-codex-run-status { min-height: 36px; padding: 3px 12px; }
 
 /* Local host resources: rings only (approved .eg-resources 118x39); numbers
