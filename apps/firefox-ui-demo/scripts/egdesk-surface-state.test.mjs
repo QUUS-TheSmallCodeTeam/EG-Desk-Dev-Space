@@ -11635,7 +11635,9 @@ test('dark scheme maps every approved light-dark pair onto the --egd-* tokens', 
     'native controls follow the scheme; Browser page, Terminal and Ontology are not repainted');
   assert.doesNotMatch(dark, /ontology|terminal/);
   const terminal = surfaceCss.slice(surfaceCss.indexOf('/* ============ Terminal Card'), surfaceCss.indexOf('/* ============ Ontology Map Card'));
-  assert.ok(terminal.includes('#151923') && terminal.includes('#27313A'), 'the Terminal keeps its dark palette');
+  // A23: still dark in both schemes, now from the approved dark pair instead of blue navy.
+  assert.ok(terminal.includes('--egd-terminal-bg: #262925;') && terminal.includes('--egd-terminal-ink: #EDECE7;'), 'the Terminal keeps its dark palette');
+  assert.ok(!terminal.includes('#151923') && !terminal.includes('#27313A'), 'the blue navy pair is gone');
   assert.match(surfaceSource, /browserEl\.style\.background = 'var\(--egd-surface\)';/);
   assert.match(surfaceSource, /xulBrowser\.style\.cssText = 'width:100%; height:100%; background:#fff; display:block;';/, 'site content is not repainted');
 });

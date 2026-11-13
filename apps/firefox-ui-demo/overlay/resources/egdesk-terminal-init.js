@@ -10,6 +10,26 @@
   const shellLabel = document.getElementById('terminal-shell-label');
   const operationStatus = document.getElementById('terminal-operation-status');
 
+  // ---- Host colours (A23) ----
+  // The page cannot inherit the Desk stylesheet, so it reads the Terminal
+  // window's own tokens from the frame element that hosts it. Opened alone, the
+  // page keeps the fallbacks declared in terminal.html.
+  const TERMINAL_TOKENS = ['bg', 'ink', 'muted', 'line', 'control', 'control-line'];
+  const hostTokens = (() => {
+    const found = {};
+    try {
+      const frame = window.frameElement;
+      const hostStyle = frame ? window.parent.getComputedStyle(frame) : null;
+      for (const name of TERMINAL_TOKENS) {
+        const value = hostStyle?.getPropertyValue('--egd-terminal-' + name).trim();
+        if (!value) continue;
+        found[name] = value;
+        document.documentElement.style.setProperty('--egd-terminal-' + name, value);
+      }
+    } catch {}
+    return found;
+  })();
+
   // ---- xterm.js setup ----
   const term = new Terminal({
     cursorBlink: true,
@@ -18,8 +38,8 @@
     fontSize: 13,
     fontFamily: '"JetBrains Mono", "Fira Code", "SF Mono", Menlo, Monaco, "Courier New", monospace',
     theme: {
-      background: '#1a1a2e',
-      foreground: '#e0e0e0',
+      background: hostTokens.bg || '#262925',
+      foreground: hostTokens.ink || '#EDECE7',
       cursor: '#f8f8f2',
       selectionBackground: 'rgba(248,248,242,0.2)',
       black: '#21222c',

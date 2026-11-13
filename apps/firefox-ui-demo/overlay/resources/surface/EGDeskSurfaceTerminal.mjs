@@ -6,23 +6,18 @@ export function createTerminalZone(deps) {
     RunResult,
     TAG,
     allocCardSeq,
-    bindCardSourceRef,
     boardCloseRequests,
     boardNotice,
-    canvasZoom,
-    closeCanvasCard,
     completeAgendaClose,
     el,
     focusCanvasCard,
-    installCardHeaderFullscreenToggle,
-    isCardFullscreen,
     makeSourceRef,
-    markAgendaDirty,
     openBoardProjectFileAt,
     raiseCardZ,
     resolveCanvasCardPlacement,
     revealPlacedCanvasCard,
     setActiveEntity,
+    spawnDeskWindowShell,
     state,
   } = deps;
 
@@ -36,6 +31,15 @@ export function createTerminalZone(deps) {
         || typeof state.panCanvasByWheel !== 'function') return false;
     state.panCanvasByWheel(event);
     return true;
+  }
+
+  // B31: closing the window ends the session with it, so only a session that
+  // is still running asks first. A frame that never connected has nothing to lose.
+  function terminalCloseNeedsConfirm(api) {
+    try {
+      if (!api) return false;
+      return (typeof api.ptyId === 'string' && api.ptyId !== '') || api.isConnected?.() === true;
+    } catch { return false; }
   }
 
   // ============ Terminal Canvas Card ============
@@ -53,9 +57,20 @@ export function createTerminalZone(deps) {
       scope: 'local-pty',
     });
     const placement = resolveCanvasCardPlacement('terminal');
-    const card = el('div', {
+    // The shared Desk Window bar: dots, grip, kind icon, name, Board control.
+    const shell = spawnDeskWindowShell({
       id,
-      class: 'egd-canvas-card egd-terminal-card',
+      kind: 'terminal',
+      className: 'egd-terminal-card',
+      headerClassName: 'egd-terminal-header',
+      bodyClassName: 'egd-terminal-body',
+      activate,
+      sourceRef,
+      minWidth: 400,
+      minHeight: 300,
+      createDirtyReason: 'create-terminal-card',
+      moveDirtyReason: 'move-terminal-card',
+      resizeDirtyReason: 'resize-terminal-card',
       style: {
         top: placement.y + 'px',
         left: placement.x + 'px',
@@ -64,28 +79,21 @@ export function createTerminalZone(deps) {
         zIndex: String(raiseCardZ()),
       },
     });
+    const card = shell.root;
+    const body = shell.slots.content;
+    if (reveal) revealPlacedCanvasCard(card, placement);
 
-    // ---- Header ----
-    const header = el('div', { class: 'egd-card-header egd-terminal-header' },
-      el('div', { class: 'egd-card-topbar' },
-        el('div', { class: 'egd-card-dots-shell' },
-          el('div', { class: 'egd-card-dots' },
-            el('span', { class: 'egd-card-dot egd-card-dot-close', onclick: (ev) => { ev.stopPropagation(); closeCanvasCard(card, cleanupCard); } }),
-            el('span', { class: 'egd-card-dot egd-card-dot-min' }),
-            el('span', { class: 'egd-card-dot egd-card-dot-max' }),
-          ),
-        ),
-        el('div', { class: 'egd-terminal-title' }, '>_ Terminal'),
-      ),
-    );
+    // ---- Header: name and session state ----
+    const title = el('strong', { class: 'egd-terminal-title', title: '터미널' }, '터미널');
+    const sessionText = el('span', { class: 'egd-terminal-session', role: 'status', data: { testid: 'terminal-session' } }, '연결 중');
+    shell.slots.identity.appendChild(title);
+    shell.slots.identity.appendChild(sessionText);
     // CODE-06: the latest test/build result of a command typed here, as a chip.
     const runChip = el('button', { type: 'button', class: 'egd-terminal-run-chip', hidden: true, 'aria-expanded': 'false',
       title: '최근 명령 결과 보기/숨기기', data: { testid: 'terminal-run-chip' },
       onclick: (ev) => { ev.stopPropagation(); runResultPanel.hidden = !runResultPanel.hidden; runChip.setAttribute('aria-expanded', String(!runResultPanel.hidden)); } });
-    header.querySelector('.egd-card-topbar').appendChild(runChip);
+    shell.slots.actions.appendChild(runChip);
 
-    // ---- Body with XUL browser ----
-    const body = el('div', { class: 'egd-card-body egd-terminal-body' });
     // ---- Result of a typed test/build command (CODE-06) ----
     // The bridge reads this session's own output; nothing is run for the card
     // (D-X6). The shared result card renders above the terminal; a failure's
@@ -126,32 +134,22 @@ export function createTerminalZone(deps) {
       runChip.setAttribute('aria-expanded', 'true');
     };
 
-    // ---- Resize hit zones ----
-    const resizeHits = [
-      { cls: 'egd-card-resize-hit-n',  edges: { top: true } },
-      { cls: 'egd-card-resize-hit-e',  edges: { right: true } },
-      { cls: 'egd-card-resize-hit-s',  edges: { bottom: true } },
-      { cls: 'egd-card-resize-hit-w',  edges: { left: true } },
-      { cls: 'egd-card-resize-hit-nw', edges: { top: true, left: true } },
-      { cls: 'egd-card-resize-hit-ne', edges: { top: true, right: true } },
-      { cls: 'egd-card-resize-hit-se', edges: { bottom: true, right: true } },
-      { cls: 'egd-card-resize-hit-sw', edges: { bottom: true, left: true } },
-    ].map(({ cls, edges }) => el('div', {
-      class: `egd-card-resize-hit ${cls}`,
-      data: { edges: JSON.stringify(edges) },
-    }));
+    // ---- Close confirmation (B31) ----
+    // Shown under the bar only while a session is running. 취소, Esc, or a
+    // press elsewhere keeps the window and the session exactly as they are.
+    const closeCancel = el('button', { type: 'button', class: 'egd-terminal-close-confirm-cancel', title: '닫지 않고 터미널로 돌아가기',
+      data: { testid: 'terminal-close-cancel' },
+      onclick: (ev) => { ev.stopPropagation(); dismissCloseConfirm({ restoreFocus: true }); } }, '취소');
+    const closeGo = el('button', { type: 'button', class: 'egd-terminal-close-confirm-go', title: '터미널 세션을 종료하고 창 닫기',
+      data: { testid: 'terminal-close-go' },
+      onclick: (ev) => { ev.stopPropagation(); closeTerminalNow(); } }, '종료하고 닫기');
+    const closeConfirm = el('div', { class: 'egd-terminal-close-confirm', role: 'alertdialog', 'aria-label': '터미널 닫기 확인', hidden: true,
+      data: { testid: 'terminal-close-confirm' } },
+      el('span', { class: 'egd-terminal-close-confirm-text' }, '터미널 세션도 함께 종료됩니다. 닫을까요?'),
+      closeCancel, closeGo);
 
-    card.appendChild(header);
-    card.appendChild(runResultPanel);
-    card.appendChild(body);
-    for (const hit of resizeHits) card.appendChild(hit);
-
-    const host = document.getElementById('egd-canvas-layer') || document.documentElement;
-    host.appendChild(card);
-    bindCardSourceRef(card, sourceRef);
-    markAgendaDirty('create-terminal-card', card);
-    if (activate) setActiveEntity(card);
-    if (reveal) revealPlacedCanvasCard(card, placement);
+    card.insertBefore(runResultPanel, body);
+    card.insertBefore(closeConfirm, body);
 
     // ---- Use iframe for terminal.html to isolate keyboard events ----
     const query = [];
@@ -159,7 +157,7 @@ export function createTerminalZone(deps) {
     if (!activate) query.push('autofocus=0');
     const termBrowser = el('iframe', {
       src: TERMINAL_HTML_URL + (query.length ? '?' + query.join('&') : ''),
-      style: { width: '100%', height: '100%', border: '0', background: '#1a1a2e', display: 'block' },
+      style: { width: '100%', height: '100%', border: '0', display: 'block' },
     });
     let disposeCloseShortcut = null;
     const onTerminalFrameLoad = () => {
@@ -178,22 +176,12 @@ export function createTerminalZone(deps) {
     termBrowser.addEventListener('load', onTerminalFrameLoad);
     body.appendChild(termBrowser);
     // ---- Card interactions ----
+    // Presses on the card itself are focused by the shared window shell; the
+    // frame reports its own presses through 'terminal-activate'.
     const activateCard = () => {
       if (state.panModifier) return;
       setActiveEntity(card);
     };
-    const focusCard = () => {
-      focusCanvasCard(card);
-    };
-    const startPanIfNeeded = (ev) => {
-      if (!state.panModifier || ev.button !== 0) return false;
-      if (typeof state.startCanvasPanDrag !== 'function') return false;
-      state.startCanvasPanDrag(ev);
-      return true;
-    };
-    for (const target of [card, header]) {
-      target.addEventListener('mousedown', () => activateCard(), true);
-    }
     // ---- Keyboard focus handoff ----
     // chrome 문서에서는 iframe 요소 자체가 chrome activeElement가 되어야
     // 키 이벤트가 서브문서(xterm)로 라우팅된다. xterm의 in-frame focus만으로는
@@ -206,8 +194,10 @@ export function createTerminalZone(deps) {
         termBrowser.contentWindow?.terminalAPI?.focus?.();
       } catch {}
     };
-    card.addEventListener('mousedown', () => {
+    card.addEventListener('mousedown', (ev) => {
       if (state.panModifier) return;
+      // The close question and the bar's own controls keep their focus.
+      if (ev?.target?.closest?.('.egd-terminal-close-confirm, button, .egd-card-dot')) return;
       // xterm의 mousedown preventDefault 이후에 포커스가 잡히도록 defer
       setTimeout(focusTerminal, 0);
     }, true);
@@ -215,6 +205,8 @@ export function createTerminalZone(deps) {
     const onTerminalReady = (ev) => {
       if (ev.source !== termBrowser.contentWindow) return;
       if (ev.data?.type === 'terminal-activate') {
+        // A press inside the terminal is a press outside the close question.
+        dismissCloseConfirm();
         if (state.activeEntityId !== card.id) activateCard();
         return;
       }
@@ -234,9 +226,11 @@ export function createTerminalZone(deps) {
       }
       if (ev.data?.type === 'terminal-ready') {
         const label = ev.data.shellLabel;
-        if (typeof label === 'string' && label.length <= 80) header.querySelector('.egd-terminal-title').textContent = '>_ ' + label;
+        sessionText.textContent = typeof label === 'string' && label && label.length <= 80 ? label : '실행 중';
         if (activate && state.activeEntityId === card.id) focusTerminal();
       }
+      if (ev.data?.type === 'terminal-exit-confirmed') { sessionText.textContent = '종료됨'; dismissCloseConfirm(); }
+      if (ev.data?.type === 'terminal-no-session') sessionText.textContent = '세션 없음';
       if (['terminal-ready', 'terminal-exit-confirmed', 'terminal-no-session'].includes(ev.data?.type)
           && boardCloseRequests.has(card.dataset.projectionId)) {
         void completeAgendaClose({ projectionId: card.dataset.projectionId });
@@ -244,79 +238,51 @@ export function createTerminalZone(deps) {
     };
     window.addEventListener('message', onTerminalReady);
 
-    // ---- Header drag (move) ----
-    let drag = null;
-    header.addEventListener('mousedown', (ev) => {
-      if (startPanIfNeeded(ev)) return;
-      if (isCardFullscreen(card)) return;
-      if (ev.target.closest('.egd-card-dot')) return;
-      focusCard();
-      drag = { x: ev.clientX, y: ev.clientY, left: card.offsetLeft, top: card.offsetTop };
-      ev.preventDefault();
-    });
-    installCardHeaderFullscreenToggle(card, header);
-
-    // ---- Resize ----
-    let resize = null;
-    const MIN_W = 400;
-    const MIN_H = 300;
-    for (const hit of resizeHits) {
-      hit.addEventListener('mousedown', (ev) => {
-        if (startPanIfNeeded(ev)) return;
-        if (isCardFullscreen(card)) return;
-        focusCard();
-        const edges = JSON.parse(hit.dataset.edges);
-        resize = {
-          x: ev.clientX, y: ev.clientY,
-          left: card.offsetLeft, top: card.offsetTop,
-          width: card.offsetWidth, height: card.offsetHeight,
-          edges,
-        };
-        ev.preventDefault();
-        ev.stopPropagation();
-      });
+    // ---- Close: ask first while a session is running ----
+    const closeWindow = shell.requestClose;
+    const frameApi = () => { try { return termBrowser.contentWindow?.terminalAPI || null; } catch { return null; } };
+    const onPressOutsideConfirm = (ev) => {
+      if (closeConfirm.contains?.(ev.target) || ev.target?.closest?.('.egd-card-dot-close')) return;
+      dismissCloseConfirm();
+    };
+    function dismissCloseConfirm({ restoreFocus = false } = {}) {
+      if (closeConfirm.hidden) return;
+      closeConfirm.hidden = true;
+      document.removeEventListener('mousedown', onPressOutsideConfirm, true);
+      if (restoreFocus) focusTerminal();
     }
-
-    const onMouseMove = (ev) => {
-      if (drag) {
-        const dx = ev.clientX - drag.x;
-        const dy = ev.clientY - drag.y;
-        const s = canvasZoom();
-        card.style.left = (drag.left + dx / s) + 'px';
-        card.style.top = (drag.top + dy / s) + 'px';
+    function closeTerminalNow() {
+      dismissCloseConfirm();
+      return closeWindow();
+    }
+    function requestTerminalClose() {
+      if (!terminalCloseNeedsConfirm(frameApi())) return closeTerminalNow();
+      if (closeConfirm.hidden) {
+        closeConfirm.hidden = false;
+        document.addEventListener('mousedown', onPressOutsideConfirm, true);
       }
-      if (resize) {
-        const s = canvasZoom();
-        const dx = (ev.clientX - resize.x) / s;
-        const dy = (ev.clientY - resize.y) / s;
-        const e = resize.edges;
-        let newW = resize.width;
-        let newH = resize.height;
-        let newL = resize.left;
-        let newT = resize.top;
-        if (e.right)  newW = Math.max(MIN_W, resize.width + dx);
-        if (e.left)   { newW = Math.max(MIN_W, resize.width - dx); newL = resize.left + (resize.width - newW); }
-        if (e.bottom) newH = Math.max(MIN_H, resize.height + dy);
-        if (e.top)    { newH = Math.max(MIN_H, resize.height - dy); newT = resize.top + (resize.height - newH); }
-        card.style.width = newW + 'px';
-        card.style.height = newH + 'px';
-        card.style.left = newL + 'px';
-        card.style.top = newT + 'px';
-      }
-    };
-    const onMouseUp = () => {
-      if (drag) markAgendaDirty('move-terminal-card', card);
-      if (resize) markAgendaDirty('resize-terminal-card', card);
-      drag = null;
-      resize = null;
-    };
-    document.addEventListener('mousemove', onMouseMove);
-    document.addEventListener('mouseup', onMouseUp);
+      focusCanvasCard(card);
+      closeCancel.focus?.();
+      return false;
+    }
+    closeConfirm.addEventListener('keydown', (ev) => {
+      if (ev.key !== 'Escape') return;
+      ev.preventDefault();
+      ev.stopPropagation();
+      dismissCloseConfirm({ restoreFocus: true });
+    });
+    // The close shortcut reads shell.requestClose; the red dot is caught here
+    // on its way down, so both ask the same question.
+    shell.requestClose = requestTerminalClose;
+    shell.slots.topbar.addEventListener('click', (ev) => {
+      if (!ev.target?.closest?.('.egd-card-dot-close')) return;
+      ev.stopPropagation();
+      requestTerminalClose();
+    }, true);
 
     // ---- Cleanup ----
     const cleanupCard = () => {
-      document.removeEventListener('mousemove', onMouseMove);
-      document.removeEventListener('mouseup', onMouseUp);
+      document.removeEventListener('mousedown', onPressOutsideConfirm, true);
       window.removeEventListener('message', onTerminalReady);
       termBrowser.removeEventListener('load', onTerminalFrameLoad);
       disposeCloseShortcut?.();
@@ -335,7 +301,7 @@ export function createTerminalZone(deps) {
     };
 
     console.warn(TAG, 'terminal card spawned (chrome:// + node bridge :39218)', id);
-    card._cleanup = cleanupCard;
+    shell.registerCleanup(cleanupCard);
     card._termBrowser = termBrowser;
     card._closeOwnedRuntime = async () => {
       const api = termBrowser.contentWindow?.terminalAPI;

@@ -370,7 +370,7 @@ test('real ESM factories and actual installer use one frozen dependency object w
   const installed = await install(core, await importModules());
   const required = sorted(new Set(zones.flatMap(zone => factoryDeps(read(modulePath(zone))))));
   assert.deepEqual(installerDeps(core), required, 'installer supplies exactly the actual factory dependency union');
-  assert.equal(required.length, 35, 'stage1 plus explicit project target, Terminal Card callbacks and the CODE-06 result card (RunResult, openBoardProjectFileAt)');
+  assert.equal(required.length, 30, 'stage1 plus explicit project target, Terminal Card callbacks and the CODE-06 result card (RunResult, openBoardProjectFileAt); the Terminal window now takes its frame, drag, resize and close from the shared Desk Window shell');
   assert.equal(installed.received[1].deps.getProjectTarget, installed.bindings.getProjectTarget);
   assert.equal(installed.received[1].deps.spawnTerminalCard, installed.forwards.spawnTerminalCard);
   const api = readBootApi(core, installed.forwards);
@@ -571,6 +571,7 @@ test('actual Terminal Card background options keep Canvas representation without
     const node = (tag, props = {}, ...children) => {
       const value = { tag, ...props, className: props.class || '', style: props.style || {}, dataset: props.data || {}, children: [], listeners: new Map(),
         appendChild(child) { this.children.push(child); child.parent = this; return child; },
+        insertBefore(child, before) { const at = this.children.indexOf(before); this.children.splice(at < 0 ? this.children.length : at, 0, child); child.parent = this; return child; },
         addEventListener(type, callback) { const list = this.listeners.get(type) || []; list.push(callback); this.listeners.set(type, list); },
         removeEventListener() {},
         querySelector(selector) { return this.children.find(child => child.className.split(' ').includes(selector.slice(1)))
@@ -583,7 +584,23 @@ test('actual Terminal Card background options keep Canvas representation without
     };
     const host = node('main');
     const deps = Object.fromEntries(factoryDeps(read('resources/surface/EGDeskSurfaceTerminal.mjs')).map(name => [name, () => {}]));
-    Object.assign(deps, { TAG: 'unit', allocCardSeq: () => 1, el: node, raiseCardZ: () => 2,
+    // The shared Desk Window shell, reduced to what a kind adapter receives:
+    // it owns the Canvas mount, the saved-record mark and activation.
+    const shellCalls = [];
+    const fakeShell = options => {
+      shellCalls.push(options);
+      const root = node('div', { id: options.id, class: `egd-canvas-card egd-desk-window ${options.className}`, style: options.style });
+      const slots = { topbar: node('div', { class: 'egd-card-topbar' }), identity: node('div', { class: 'egd-desk-window-identity' }),
+        actions: node('div', { class: 'egd-desk-window-actions' }), content: node('div', { class: `egd-card-body ${options.bodyClassName}` }) };
+      slots.header = node('div', { class: `egd-card-header ${options.headerClassName}` }, slots.topbar);
+      slots.topbar.appendChild(slots.identity); slots.topbar.appendChild(slots.actions);
+      root.appendChild(slots.header); root.appendChild(slots.content);
+      host.appendChild(root);
+      deps.markAgendaDirty(options.createDirtyReason, root);
+      if (options.activate !== false) deps.setActiveEntity(root);
+      return { root, slots, requestClose: () => events.push('shell-close'), registerCleanup: dispose => { root._cleanup = dispose; } };
+    };
+    Object.assign(deps, { TAG: 'unit', allocCardSeq: () => 1, el: node, raiseCardZ: () => 2, spawnDeskWindowShell: fakeShell,
       makeSourceRef: (kind, details) => ({ kind, ...details }), resolveCanvasCardPlacement: () => ({ x: 1, y: 2, width: 400, height: 300 }),
       setActiveEntity: card => { events.push('activate'); state.activeEntityId = card.id; },
       revealPlacedCanvasCard: () => events.push('reveal'),
@@ -595,6 +612,12 @@ test('actual Terminal Card background options keep Canvas representation without
       for (const [key, value] of Object.entries(globals)) Object.defineProperty(globalThis, key, { configurable: true, writable: true, value });
       const card = createTerminalZone(deps).spawnTerminalCard(options);
       assert.equal(host.children.includes(card), true, 'background execution remains a real Canvas Card');
+      assert.equal(shellCalls.length, 1, 'one shared Desk Window per Terminal');
+      assert.equal(shellCalls[0].kind, 'terminal');
+      assert.equal(shellCalls[0].activate, options.activate !== false, 'the shell, not the adapter, activates');
+      assert.deepEqual([shellCalls[0].createDirtyReason, shellCalls[0].moveDirtyReason, shellCalls[0].resizeDirtyReason],
+        ['create-terminal-card', 'move-terminal-card', 'resize-terminal-card'], 'saved-record reasons stay the Terminal ones');
+      assert.deepEqual(shellCalls[0].sourceRef, { kind: 'terminal-session', id: card.id, scope: 'local-pty' });
       assert.equal(events.filter(event => event === 'persist-card').length, 1);
       assert.equal(events.includes('activate'), options.activate !== false);
       assert.equal(state.activeEntityId, options.activate !== false ? card.id : 'previous-active-card');

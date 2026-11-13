@@ -15911,7 +15911,7 @@
     }
 
     const identity = el('div', { class: 'egd-desk-window-identity' });
-    identity.appendChild(deskIcon({ browser: 'browser', ontology: 'ontology', file: 'file', 'input-evidence': 'file', result: 'result', memo: 'note' }[kind] || 'square', 'egd-ui-icon egd-window-kind-icon'));
+    identity.appendChild(deskIcon({ browser: 'browser', ontology: 'ontology', file: 'file', 'input-evidence': 'file', result: 'result', memo: 'note', terminal: 'terminal' }[kind] || 'square', 'egd-ui-icon egd-window-kind-icon'));
     const boardMetadata = el('span', { class: 'egd-desk-window-board', role: 'note', hidden: true, data: { testid: 'window-board' } });
     // CNV-03: the Board control after the name. It opens '넣기 / 빼기'; without a
     // recorded owner it says '소속 없음' so the bar never implies a Board.
@@ -25797,22 +25797,17 @@
       RunResult,
       TAG,
       allocCardSeq,
-      bindCardSourceRef,
       boardCloseRequests,
       boardNotice,
-      canvasZoom,
       chatBindingNonce,
       chatInputSourceForView,
       cloneJson,
-      closeCanvasCard,
       completeAgendaClose,
       el,
       focusCanvasCard,
       focusOpenSourceCard,
       getCodexThreadById,
       getProjectTarget,
-      installCardHeaderFullscreenToggle,
-      isCardFullscreen,
       makeSourceRef,
       markAgendaDirty,
       openBoardProjectFileAt,

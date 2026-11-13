@@ -449,13 +449,14 @@ test('production Card routes a shell request to a separate Card and rejects othe
   const body = surfaceSource.match(/    const onTerminalReady = \(ev\) => \{([\s\S]*?)\n    \};/)?.[1];
   assert.ok(body, 'exercise the production iframe-message boundary');
   let wheelHandler;
-  const ownFrame = { terminalAPI: { setWheelHandler: handler => { wheelHandler = handler; } } }, opened = [], title = { textContent: '' };
+  const ownFrame = { terminalAPI: { setWheelHandler: handler => { wheelHandler = handler; } } }, opened = [], sessionText = { textContent: '' };
+  let dismissed = 0;
   const card = { id: 'terminal', dataset: {} }, state = { activeEntityId: card.id, panModifier: false };
   let focused = 0;
   const handler = compileFunction('return ev => {' + body + '\n};',
-    ['termBrowser', 'spawnTerminalCard', 'header', 'focusTerminal', 'boardCloseRequests', 'card', 'completeAgendaClose', 'activate',
+    ['termBrowser', 'spawnTerminalCard', 'sessionText', 'dismissCloseConfirm', 'focusTerminal', 'boardCloseRequests', 'card', 'completeAgendaClose', 'activate',
       'state', 'activateCard', 'routeTerminalFrameWheel', 'TAG'])(
-    { contentWindow: ownFrame }, options => opened.push(options), { querySelector: () => title },
+    { contentWindow: ownFrame }, options => opened.push(options), sessionText, () => dismissed++,
     () => focused++, new Set(), card, () => assert.fail('no Board close is pending'), true,
     state, () => { if (!state.panModifier) state.activeEntityId = card.id; }, routeTerminalFrameWheel, 'test');
   handler({ source: {}, data: { type: 'terminal-new-session', shellId: 'cmd' } });
@@ -465,15 +466,17 @@ test('production Card routes a shell request to a separate Card and rejects othe
   assert.deepEqual(opened, [{ shellId: 'cmd' }]);
   assert.equal(focused, 0);
   handler({ source: ownFrame, data: { type: 'terminal-ready', shellLabel: 'CMD' } });
-  assert.equal(title.textContent, '>_ CMD'); assert.equal(focused, 1);
+  assert.equal(sessionText.textContent, 'CMD', 'the shell name is the session state beside the window name'); assert.equal(focused, 1);
   assert.equal(typeof wheelHandler, 'function');
   state.activeEntityId = 'different-card';
   handler({ source: ownFrame, data: { type: 'terminal-ready', shellLabel: 'CMD' } });
   assert.equal(focused, 1, 'late terminal ready cannot steal focus from another card');
   handler({ source: {}, data: { type: 'terminal-activate' } });
   assert.equal(state.activeEntityId, 'different-card', 'another iframe cannot activate this card');
+  assert.equal(dismissed, 0, 'another iframe cannot withdraw this window\'s close question');
   handler({ source: ownFrame, data: { type: 'terminal-activate' } });
   assert.equal(state.activeEntityId, card.id);
+  assert.equal(dismissed, 1, 'a press inside the terminal withdraws the close question');
   state.activeEntityId = 'different-card'; state.panModifier = true;
   handler({ source: ownFrame, data: { type: 'terminal-activate' } });
   assert.equal(state.activeEntityId, 'different-card', 'pan modifier does not activate');
