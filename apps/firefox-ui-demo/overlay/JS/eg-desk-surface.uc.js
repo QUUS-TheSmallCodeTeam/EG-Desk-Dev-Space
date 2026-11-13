@@ -7825,38 +7825,57 @@
       fontPx: parsePxNumber(window.getComputedStyle(body).fontSize, 14) };
   }
 
-  // Shown for a few seconds when a View opened from Chat took the camera
-  // alone. Pressing it brings that Chat back the way the Dock's Chat does; it
-  // leaves once the Chat is back by any way (Dock, a click into the Chat).
-  const CHAT_RETURN_CUE_MS = 6000;
+  // The way back to the Chat a View was opened from, shown when that View took
+  // the camera alone. It stays until used, closed (its [닫기] or Esc inside
+  // it) or the Chat is back by any way (Dock, a click into the Chat). Pressing
+  // it returns to the view and conversation scroll the user left; when the
+  // Chat is no longer in that view it is brought back the way the Dock's Chat
+  // does. Call it before the camera moves away.
+  const ChatCanvasLinks = ChromeUtils.importESModule('chrome://userchrome/content/EGDeskChatCanvasLinks.sys.mjs');
   function dismissChatReturnCue() {
     document.getElementById('egd-chat-return')?._dismiss?.();
   }
 
   function showChatReturnCue(chatCard) {
     document.getElementById('egd-chat-return')?._dismiss?.();
-    const cue = el('div', { id: 'egd-chat-return', class: 'egd-edge egd-frosted', role: 'status' });
+    const chatLog = () => chatCard.querySelector?.('.egd-codex-messages') || null;
+    const origin = ChatCanvasLinks.chatReturnOrigin({ pan: state.panTarget, zoom: state.zoomTarget,
+      threadId: state.codex?.activeThreadId, scrollTop: chatLog()?.scrollTop });
+    const cue = el('div', { id: 'egd-chat-return', class: 'egd-edge egd-frosted', role: 'group', 'aria-label': '채팅으로 돌아가기' });
     const chatListeners = new AbortController();
-    let timer = 0;
     const dismiss = () => {
-      if (timer) window.clearTimeout(timer);
-      timer = 0;
       chatListeners.abort();
       cue.remove();
     };
     cue._dismiss = dismiss;
     for (const type of ['mousedown', 'focusin']) chatCard.addEventListener(type, dismiss, { capture: true, signal: chatListeners.signal });
+    cue.addEventListener('keydown', (ev) => {
+      if (ev.key !== 'Escape') return;
+      ev.preventDefault();
+      ev.stopPropagation();
+      dismiss();
+    });
     cue.appendChild(el('button', {
-      type: 'button', class: 'egd-chat-return-button', data: { testid: 'chat-return' },
+      type: 'button', class: 'egd-chat-return-button', title: '떠나기 전 화면과 대화 위치로 돌아갑니다', data: { testid: 'chat-return' },
       onclick: (ev) => {
         ev.stopPropagation();
         dismiss();
         if (!chatCard.isConnected) return;
-        if (!state.focusChatDockIfCompact?.(chatCard)) focusCanvasCard(chatCard);
+        const plan = ChatCanvasLinks.chatReturnPlan(origin, { activeThreadId: state.codex?.activeThreadId,
+          chat: persistentEntityGeometry(chatCard), safe: safeViewportRect() });
+        if (plan.camera) {
+          state.setCanvasViewportTarget?.(plan.camera);
+          focusCanvasCard(chatCard);
+        } else if (!state.focusChatDockIfCompact?.(chatCard)) focusCanvasCard(chatCard);
+        const log = plan.scrollTop !== null ? chatLog() : null;
+        if (log) log.scrollTop = plan.scrollTop;
       },
     }, deskIcon('chat'), el('span', {}, '채팅으로 돌아가기')));
+    cue.appendChild(el('button', {
+      type: 'button', class: 'egd-chat-return-close', title: '닫기', 'aria-label': '채팅으로 돌아가기 닫기', data: { testid: 'chat-return-close' },
+      onclick: (ev) => { ev.stopPropagation(); dismiss(); },
+    }, deskIcon('close')));
     document.documentElement.appendChild(cue);
-    timer = window.setTimeout(dismiss, CHAT_RETURN_CUE_MS);
     return cue;
   }
 

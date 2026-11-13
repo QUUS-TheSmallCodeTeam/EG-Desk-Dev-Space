@@ -965,12 +965,15 @@
 .egd-portable-files { display: flex; flex-direction: column; gap: 4px; }
 .egd-store-panel button.egd-portable-file { grid-template-columns: 1fr; }
 /* A short way back to the Chat that opened a View the camera now shows alone.
-   It sits above the Dock and leaves once the Chat is back. */
+   It sits above the Dock and stays until used, closed or the Chat is back. */
 #egd-chat-return {
   left: 50%;
   bottom: 70px;
   transform: translateX(-50%);
   z-index: 100100;
+  display: flex;
+  align-items: center;
+  gap: 2px;
   padding: 3px;
   border-radius: 9px;
   background: var(--egd-surface-elevated);
@@ -989,6 +992,17 @@
 }
 #egd-chat-return .egd-chat-return-button:hover { background: var(--egd-hover); color: var(--egd-on-surface); }
 #egd-chat-return .egd-chat-return-button:focus-visible { outline: var(--egd-focus-outline); outline-offset: var(--egd-focus-outline-offset); }
+#egd-chat-return .egd-chat-return-close {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  min-height: 32px;
+  border-radius: 6px;
+  color: var(--egd-on-surface-variant);
+}
+#egd-chat-return .egd-chat-return-close:hover { background: var(--egd-hover); color: var(--egd-on-surface); }
+#egd-chat-return .egd-chat-return-close:focus-visible { outline: var(--egd-focus-outline); outline-offset: var(--egd-focus-outline-offset); }
 #egd-chat-return .egd-ui-icon { width: 15px; height: 15px; }
 
 :root.egd-pan-ready #egd-canvas-viewport,
