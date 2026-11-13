@@ -1975,6 +1975,19 @@ export function chatThreadReadiness(thread, context = {}) {
       ? 'Claude 연결 설정을 확인해 주세요' : 'Claude 연결을 확인해 주세요' };
 }
 
+// A local receipt may be reused only while the same identifiable Claude CLI
+// account occupies the same selected slot. This is a UI fence, not a grant:
+// the Context service still verifies the durable account and room binding.
+export function claudeInputReceiptOwner(thread, context = {}) {
+  if (chatThreadEngineId(thread, context) !== 'claude' || !chatThreadReadiness(thread, context).ready) return null;
+  const profileId = chatThreadEngineProfileId(thread, context);
+  const row = engineRows(context.engines).find(entry => entry.id === 'claude');
+  const profiles = (Array.isArray(row?.profiles) ? row.profiles : []).filter(profile => profile?.active === true && profile.id === profileId);
+  const auth = profiles.length === 1 ? profiles[0].auth : null;
+  const account = identityText(auth?.account).toLowerCase(), method = identityText(auth?.method);
+  return account && method ? JSON.stringify([profileId, method, account]) : null;
+}
+
 // ReasoningEffort is a model-advertised string (SDK type: minimal|low|medium|high|xhigh).
 // Without a model list the picker offers the common three; '기본' sends nothing so the model default applies.
 export const CHAT_EFFORT_CHOICES = Object.freeze([

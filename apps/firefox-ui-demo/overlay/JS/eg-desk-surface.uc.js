@@ -2857,8 +2857,9 @@
   function createAcceptedReceiptWatch(threadId, { valid, subscribe }) {
     try {
       const initial = getCodexThreadById(state.codex, threadId), auth = state.codex.authStatus;
-      const accountKey = ChatState.codexAccountKey(auth);
-      if (!initial || !accountKey || state.codex.codexAccountKey !== accountKey || state.codex.activeThreadId !== threadId) throw new Error('unverified owner');
+      const claude = ChatState.chatThreadEngineId(initial, state.codex) === 'claude';
+      const accountKey = claude ? ChatState.claudeInputReceiptOwner(initial, state.codex) : ChatState.codexAccountKey(auth);
+      if (!initial || !accountKey || !claude && state.codex.codexAccountKey !== accountKey || state.codex.activeThreadId !== threadId) throw new Error('unverified owner');
       const base = () => {
         const thread = getCodexThreadById(state.codex, threadId), currentAuth = state.codex.authStatus;
         if (!thread) return null;
@@ -2868,9 +2869,9 @@
           [profile.id, profile.active, profile.auth?.status, profile.auth?.method, profile.auth?.account]);
         return JSON.stringify([thread.id, thread.type, thread.profileEnabled, thread.agentProfileId,
           ChatState.clientThreadBinding(thread), engineId, ChatState.chatThreadEngineProfileId(thread, state.codex),
-          engine?.status, engine?.statusReason, profiles, state.codex.codexAccountKey,
-          currentAuth?.accountId, currentAuth?.accountEmail, currentAuth?.authMode, currentAuth?.isLoggedIn,
-          currentAuth?.identityStatus, currentAuth?.access?.state, state.codex.connected,
+          engine?.status, engine?.statusReason, profiles, claude ? ChatState.claudeInputReceiptOwner(thread, state.codex) : [state.codex.codexAccountKey,
+            currentAuth?.accountId, currentAuth?.accountEmail, currentAuth?.authMode, currentAuth?.isLoggedIn,
+            currentAuth?.identityStatus, currentAuth?.access?.state, state.codex.connected],
           state.codex.activeThreadId, state.codex.activityRoomGeneration || 0]);
       };
       const binding = thread => JSON.stringify([thread.bindingState, thread.bindingAccountKey, thread.retainedNativeBinding || null]);
@@ -2886,7 +2887,8 @@
           } else if (!native && !current) {
             if (binding(thread) !== originalBinding) invalid = true;
           } else if (!native) {
-            if (thread.bindingState !== 'verified' || thread.bindingAccountKey !== accountKey || thread.retainedNativeBinding) invalid = true;
+            if ((claude ? !['server-verified', 'server-check-required'].includes(thread.bindingState)
+              : thread.bindingState !== 'verified' || thread.bindingAccountKey !== accountKey) || thread.retainedNativeBinding) invalid = true;
             else { native = current; nativeBinding = binding(thread); }
           } else if (current !== native || binding(thread) !== nativeBinding) invalid = true;
         } catch { invalid = true; }
@@ -2904,14 +2906,19 @@
   function rememberAcceptedInputReceipt(thread, result, requestId, run) {
     try {
       const request = state.codex.chatProtocol?.requests?.[requestId], accountKey = ChatState.codexAccountKey(state.codex.authStatus);
+      const route = ChatState.chatContextRequestScope(thread, state.codex);
+      const claude = route.engineId === 'claude', claudeOwner = claude && ChatState.claudeInputReceiptOwner(thread, state.codex);
+      const ownerMatches = claude ? !!claudeOwner && request?.engineId === 'claude' && run?.engineId === 'claude'
+        && run.engineProfileId === route.engineProfileId && (!result?.engineId || result.engineId === 'claude')
+        && (!result?.engineProfileId || result.engineProfileId === route.engineProfileId)
+        : !!accountKey && state.codex.codexAccountKey === accountKey && request?.accountKey === accountKey && run?.accountKey === accountKey;
       if (!thread || !request || !run || result?.accepted !== true || result.durable !== true || result.duplicate === true
           || result.requestId !== requestId || result.clientThreadId !== ChatState.clientThreadBinding(thread)
-          || typeof result.localMessageId !== 'string' || !result.localMessageId || !accountKey
+          || typeof result.localMessageId !== 'string' || !result.localMessageId || !ownerMatches
           || typeof result.localConversationId !== 'string' || !result.localConversationId
           || typeof result.localRunId !== 'string' || !result.localRunId
           || thread.localConversationId && thread.localConversationId !== result.localConversationId
           || run.localRunId && run.localRunId !== result.localRunId
-          || state.codex.codexAccountKey !== accountKey || request.accountKey !== accountKey || run.accountKey !== accountKey
           || request.localThreadId !== thread.id || run.localThreadId !== thread.id || run.requestId !== requestId
           || request.clientThreadId !== result.clientThreadId || run.clientThreadId !== result.clientThreadId
           || ['conversationId', 'runId', 'answerId'].some(key => !result[key] || result[key] !== run[key] || result[key] !== request[key])
@@ -2931,6 +2938,7 @@
       request.acceptedInputLocalConversationId = result.localConversationId;
       request.acceptedInputLocalRunId = result.localRunId;
       run.acceptedInputMessageId = result.localMessageId;
+      if (claude) request.acceptedInputClaudeOwner = run.acceptedInputClaudeOwner = claudeOwner;
       return true;
     } catch { return false; }
   }
@@ -2940,8 +2948,12 @@
       const route = ChatState.chatContextRequestScope(thread, state.codex), accountKey = ChatState.codexAccountKey(state.codex.authStatus);
       const run = state.codex.chatProtocol?.runs?.[ChatState.runKey(identity.conversationId, identity.runId)];
       const request = run?.requestId && state.codex.chatProtocol?.requests?.[run.requestId];
-      if (!run || !request || !accountKey || state.codex.codexAccountKey !== accountKey || request.status !== 'accepted'
-          || run.submissionOwnerCaptured !== true || run.accountKey !== accountKey || request.accountKey !== accountKey
+      const claude = route.engineId === 'claude', claudeOwner = claude && ChatState.claudeInputReceiptOwner(thread, state.codex);
+      const ownerMatches = claude ? !!claudeOwner && request?.engineId === 'claude' && run?.engineId === 'claude'
+        && run.engineProfileId === route.engineProfileId && request.acceptedInputClaudeOwner === claudeOwner && run.acceptedInputClaudeOwner === claudeOwner
+        : !!accountKey && state.codex.codexAccountKey === accountKey && run?.accountKey === accountKey && request?.accountKey === accountKey;
+      if (!run || !request || !ownerMatches || request.status !== 'accepted'
+          || run.submissionOwnerCaptured !== true
           || run.requestId !== request.requestId || run.localThreadId !== thread.id || request.localThreadId !== thread.id
           || run.clientThreadId !== route.clientThreadId || request.clientThreadId !== route.clientThreadId
           || route.conversationId !== identity.conversationId || request.acceptedInputReceiptConflict
@@ -2973,10 +2985,19 @@
   // answer's own run. A source's latest packet is never a substitute.
   function inputDeliveryProof(threadId, reference, identity, briefingId = null, packetId = null) {
     try {
-      const answer = visibleInputAnswer(getCodexThreadById(state.codex, threadId), reference, identity, briefingId);
+      const thread = getCodexThreadById(state.codex, threadId);
+      const answer = visibleInputAnswer(thread, reference, identity, briefingId);
       if (!answer) return null;
       const records = [...(answer.contextPackets || []), ...(answer.contextEvents || [])
         .filter(event => event.event === 'context.read.completed').map(event => event.details)];
+      let runRecords = null;
+      if (ChatState.chatThreadEngineId(thread, state.codex) === 'claude') {
+        const receipt = acceptedInputReceipt(thread, identity);
+        if (!receipt || !historyReadReferenceCurrent(threadId, reference, receipt)) return null;
+        const run = state.codex.chatProtocol?.runs?.[ChatState.runKey(identity.conversationId, identity.runId)];
+        runRecords = [...(run?.contextPackets || []), ...(run?.contextEvents || [])
+          .filter(event => event.event === 'context.read.completed').map(event => event.details)];
+      }
       const proofs = new Map();
       for (const item of records) {
         if (!item || item.sourceId !== reference.sourceId || typeof item.packetId !== 'string' || !item.packetId
@@ -2985,6 +3006,12 @@
             || item.deliveryStatus !== 'sent-to-app-server') continue;
         const proof = { packetId: item.packetId, sourceId: item.sourceId, receiptId: item.receiptId, hash: item.hash,
           mode: item.mode, coverage: item.coverage, deliveryStatus: item.deliveryStatus };
+        if (runRecords) {
+          const matching = runRecords.filter(record => record?.packetId === item.packetId);
+          if (!matching.length || matching.some(record => JSON.stringify({ packetId: record.packetId, sourceId: record.sourceId,
+            receiptId: record.receiptId, hash: record.hash, mode: record.mode, coverage: record.coverage,
+            deliveryStatus: record.deliveryStatus }) !== JSON.stringify(proof))) continue;
+        }
         const prior = proofs.get(item.packetId);
         if (prior && JSON.stringify(prior) !== JSON.stringify(proof)) return null;
         proofs.set(item.packetId, proof);
@@ -3077,13 +3104,15 @@
     try {
       const thread = getCodexThreadById(state.codex, threadId), auth = state.codex.authStatus;
       const accountKey = ChatState.codexAccountKey(auth), access = auth?.access?.state;
-      if (!thread || state.codex.activeThreadId !== threadId || state.codex.connected !== true || !accountKey
-          || state.codex.codexAccountKey !== accountKey || ['permissionDenied', 'authFailed', 'loginRequired', 'loginInProgress'].includes(access)
-          || !ChatState.canResumeNativeThread(thread, auth, state.codex) || !reference?.contextScope
+      if (!thread || state.codex.activeThreadId !== threadId || !ChatState.canResumeNativeThread(thread, auth, state.codex) || !reference?.contextScope
           || !reference.sourceId || reference.snapshotId !== reference.sourceId || !reference.hash
           || ['requestId', 'localMessageId', 'conversationId', 'runId', 'answerId'].some(key => !receipt?.[key])) return false;
       const scope = ChatState.chatContextRequestScope(thread, state.codex), origin = reference.contextScope;
-      if (scope.engineId !== 'codex' || scope.conversationId !== receipt.conversationId
+      const claude = scope.engineId === 'claude';
+      if (claude ? !ChatState.claudeInputReceiptOwner(thread, state.codex)
+        : scope.engineId !== 'codex' || state.codex.connected !== true || !accountKey || state.codex.codexAccountKey !== accountKey
+          || ['permissionDenied', 'authFailed', 'loginRequired', 'loginInProgress'].includes(access)) return false;
+      if (scope.conversationId !== receipt.conversationId
           || ['engineId', 'engineProfileId', 'clientThreadId'].some(key => origin[key] !== scope[key])
           || Object.hasOwn(origin, 'conversationId') && origin.conversationId !== scope.conversationId
           || reference.clientThreadId !== scope.clientThreadId || reference.engine?.engineId !== scope.engineId
@@ -3108,8 +3137,10 @@
     const accountKey = ChatState.codexAccountKey(state.codex.authStatus);
     let scope = null;
     try { scope = ChatState.chatContextRequestScope(thread, state.codex); } catch {}
-    const eligible = scope?.engineId === 'codex' && accountKey && state.codex.codexAccountKey === accountKey
-      && ChatState.canResumeNativeThread(thread, state.codex.authStatus)
+    const claude = scope?.engineId === 'claude';
+    const eligible = (claude ? !!ChatState.claudeInputReceiptOwner(thread, state.codex)
+      : scope?.engineId === 'codex' && accountKey && state.codex.codexAccountKey === accountKey)
+      && ChatState.canResumeNativeThread(thread, state.codex.authStatus, state.codex)
       && !!message.conversationId && scope.conversationId === message.conversationId;
     // A first-send capture has no native CID yet. It is eligible for a read
     // only through its own accepted request and projected user-message receipt;
@@ -3143,7 +3174,9 @@
         } catch { return false; }
       };
       const firstMatches = firstSendReferences.filter(item => matches(item, true));
-      const original = eligible && (local.find(item => matches(item, false)) || (firstMatches.length === 1 ? firstMatches[0] : null));
+      const sameAnswerMatches = claude ? firstSendReferences.filter(item => matches(item, !Object.hasOwn(item.contextScope || {}, 'conversationId'))) : [];
+      const original = eligible && (claude ? (sameAnswerMatches.length === 1 ? sameAnswerMatches[0] : null)
+        : local.find(item => matches(item, false)) || (firstMatches.length === 1 ? firstMatches[0] : null));
       const joined = { ...reference, localSource: cloneJson(original?.localSource || null) };
       if (original) joined.contextScope = cloneJson(original.contextScope);
       else delete joined.contextScope;
@@ -13637,15 +13670,36 @@
         const nonce = state.codex.inputInspectNonce = (state.codex.inputInspectNonce || 0) + 1;
         const activeRoom = state.codex.activeThreadId, roomGeneration = state.codex.activityRoomGeneration || 0;
         const priorPanel = document.getElementById('egd-codex-input-panel');
-        const stored = await this.readInput(reference, { ...options, threadId, isCurrent: stillCurrent,
+        // Keep the Claude receipt fence latched across the handoff from the
+        // async read to the inspector's own panel-lifetime subscription.
+        const scopedClaude = !!options.historyReceipt && ChatState.chatThreadEngineId(thread, state.codex) === 'claude';
+        const pendingProof = scopedClaude && options.packetId
+          ? inputDeliveryProof(threadId, reference, options.historyReceipt, null, options.packetId) : null;
+        if (scopedClaude && options.packetId && !pendingProof) return;
+        let pendingInvalid = false, publishing = false, unsubscribePending = () => {};
+        const pendingCurrent = () => {
+          if (pendingInvalid) return false;
+          try {
+            if ((!publishing && !stillCurrent()) || state.codex.activeThreadId !== activeRoom
+                || (state.codex.activityRoomGeneration || 0) !== roomGeneration
+                || !historyReadReferenceCurrent(threadId, reference, options.historyReceipt)
+                || pendingProof && JSON.stringify(inputDeliveryProof(threadId, reference, options.historyReceipt, null, options.packetId)) !== JSON.stringify(pendingProof)) pendingInvalid = true;
+          } catch { pendingInvalid = true; }
+          return !pendingInvalid;
+        };
+        if (scopedClaude) unsubscribePending = this.subscribe(pendingCurrent);
+        try {
+        const stored = await this.readInput(reference, { ...options, threadId, isCurrent: scopedClaude ? pendingCurrent : stillCurrent,
           includeAnswerDelivery: !!(options.briefingScope || options.historyReceipt) });
-        if (!stored || !stillCurrent() || state.codex.inputInspectNonce !== nonce || state.codex.activeThreadId !== activeRoom
+        if (!stored || !(scopedClaude ? pendingCurrent() : stillCurrent()) || state.codex.inputInspectNonce !== nonce || state.codex.activeThreadId !== activeRoom
             || (state.codex.activityRoomGeneration || 0) !== roomGeneration
             || document.getElementById('egd-codex-input-panel') !== priorPanel) return;
         const snapshot = InputContext.storedSnapshotForView(stored, reference);
         const sourceChange = ChatState.chatThreadEngineId(thread, state.codex) === 'codex'
           ? { state: 'loading', sourceId: snapshot.id, conversationId: thread.conversationId || '' } : null;
+        publishing = true;
         const panel = openChatInputPanel(threadId, { snapshots: [snapshot], sourceChange });
+        if (scopedClaude && !pendingCurrent()) { panel?.remove(); return; }
         if ((options.briefingScope || options.historyReceipt) && panel) {
           const owner = options.briefingScope ? state.codex.briefingSession : null;
           const identity = owner?.identity || options.historyReceipt, briefingId = owner?.briefing?.id || null;
@@ -13721,6 +13775,7 @@
         // This optional metadata request never gates immutable source reading
         // or pagination and never rerenders the inspector when it settles.
         if (sourceChange) void this.refreshInputSourceChange(threadId, reference, snapshot, stored.capture, panel, nonce);
+        } finally { unsubscribePending(); }
       },
       async refreshInputSourceChange(threadId, reference, snapshot, capture, panel, nonce) {
         const node = panel?.querySelector('[data-testid="chat-input-source-change"]');
@@ -14943,6 +14998,16 @@
         const selectedInputs = submittedDraft.inputSources;
         let submittedWasCleared = false;
         let inputReferences;
+        // Preserve the specific foreign-engine/room refusal before the more
+        // restrictive Briefing provenance check. This never authorizes a send.
+        try {
+          const scope = ChatState.chatContextRequestScope(activeThread, state.codex);
+          for (const reference of submittedDraft.briefingInputs) InputContext.assertInputContextScope(reference, scope);
+        } catch (error) {
+          if (sendOwnerCurrent()) updateThreadById(activeThread.id, thread => ({ ...thread,
+            sendError: `자료를 준비하지 못해 전송하지 않았습니다: ${error.message}` }));
+          epochScope.finish(token); emit(); return;
+        }
         if (submittedDraft.briefingInputs.length) {
           try { briefingProof = await this.prepareBriefingInputSend(activeThread.id, submittedDraft, token, sendOwnerCurrent); }
           catch { briefingProof = null; }
@@ -15032,7 +15097,9 @@
             ...(engineId === 'claude' ? { engineProfileId: token.profile } : {}) }));
           state.codex.recentEngineId = engineId;
           const authorProfile = activeThread.profileEnabled ? codexThreadAgentProfile(activeThread) : null;
-          ChatState.registerChatRequest(protocol, { requestId, clientThreadId: ChatState.clientThreadBinding(activeThread), localThreadId: activeThread.id, conversationId: activeThread.conversationId, authorName: authorProfile ? authorProfile.name : engineId === 'claude' ? 'Claude' : 'Codex', ...(authorProfile?.avatar ? { authorAvatar: authorProfile.avatar } : {}) }, state.codex.authStatus, engineId);
+          ChatState.registerChatRequest(protocol, { requestId, clientThreadId: ChatState.clientThreadBinding(activeThread), localThreadId: activeThread.id, conversationId: activeThread.conversationId,
+            ...(engineId === 'claude' ? { engineProfileId: token.profile } : {}),
+            authorName: authorProfile ? authorProfile.name : engineId === 'claude' ? 'Claude' : 'Codex', ...(authorProfile?.avatar ? { authorAvatar: authorProfile.avatar } : {}) }, state.codex.authStatus, engineId);
           appendMessageToThread(activeThread.id, createCodexMessage('user', content, 'submitting', {
             readBy: [SELF_MEMBER], requestId, inputReferences,
           }), { countUnread: false });
@@ -15047,7 +15114,7 @@
           state.codex.draft = getCodexThreadDraft(state.codex, state.codex.activeThreadId);
         };
         if (!briefingProof) { registerPending(); emit(); }
-        let receiptWatch = null;
+        let receiptWatch = null, responseRoutingMismatch = false;
         try {
           const runtimeConfig = codexThreadRuntimeConfig(activeThread);
           runtimeConfig.engineId = engineId;
@@ -15101,7 +15168,21 @@
           if (briefingProof) emit();
           const result = await pendingSend;
           if (!epochScope.valid(token) || ChatState.clientThreadBinding(getCodexThreadById(state.codex, activeThread.id)) !== ChatState.clientThreadBinding(activeThread)) return { requestId, accepted: false, status: 'unconfirmed' };
-          const run = ChatState.acceptChatRequest(protocol, result, requestId);
+          if (engineId === 'claude' && result?.accepted === true
+              && ([result.engineId, result.engine?.id, result.engine?.engineId].some(id => id != null && id !== engineId)
+                || [result.engineProfileId, result.engine?.engineProfileId].some(id => id != null && id !== token.profile))) {
+            // The backend said accepted, but attributed that acceptance to a
+            // different route. Do not bind it, clear the draft or retry it.
+            responseRoutingMismatch = true;
+            throw Object.assign(new Error('접수된 실행의 엔진 또는 계정 연결이 요청과 일치하지 않습니다. 상태를 확인해 주세요.'),
+              { dispatchStatus: 'unknown', resumeRequired: true });
+          }
+          // The accepted response may omit its engine routing. Retain the
+          // request's selected Claude slot only when the response omits it;
+          // any explicit contradictory engine remains subject to the reducer.
+          const acceptedResult = engineId === 'claude' ? { ...result,
+            engineId: result.engineId ?? engineId, engineProfileId: result.engineProfileId ?? token.profile } : result;
+          const run = ChatState.acceptChatRequest(protocol, acceptedResult, requestId);
           if (run) {
             try {
               if (receiptWatch.current(result) && (!options.memoAskReservation || options.memoAskReservation.current())) {
@@ -15136,6 +15217,27 @@
             if (briefingProof && sendOwnerCurrent()) updateThreadById(activeThread.id, thread => ({ ...thread,
               sendError: thread.sendError || '고정 근거와 대화 연결을 확인하지 못해 전송하지 않았습니다.' }));
             return { requestId, accepted: false, status: 'failed' };
+          }
+          if (responseRoutingMismatch) {
+            // A separately correlated same-engine SSE can already have proved
+            // acceptance. Do not downgrade that run because the HTTP reply is
+            // contradictory; the reply itself supplies no receipt proof.
+            const observed = request.runId && protocol.runs[ChatState.runKey(request.conversationId, request.runId)];
+            const eventAccepted = request.status === 'accepted' && request.engineId === 'claude' && observed?.submissionOwnerCaptured === true
+              && request.engineProfileId === token.profile && observed.engineId === 'claude'
+              && (observed.engineProfileId == null || observed.engineProfileId === token.profile)
+              && receiptWatch?.current({ conversationId: observed.conversationId }) === true && observed.requestId === requestId
+              && observed.localThreadId === activeThread.id && observed.clientThreadId === ChatState.clientThreadBinding(activeThread)
+              && observed.conversationId === request.conversationId && observed.runId === request.runId
+              && observed.answerId === request.answerId && observed.answerId === ChatState.runKey(observed.conversationId, observed.runId);
+            if (!eventAccepted) request.status = 'unconfirmed';
+            updateThreadById(activeThread.id, thread => ({ ...thread,
+              sendError: eventAccepted ? `실행 접수는 확인됐지만 응답의 연결 정보가 일치하지 않습니다. 자동으로 다시 보내지 않습니다. ${error.message}`
+                : `접수 여부를 확인하지 못했습니다. 자동으로 다시 보내지 않습니다. ${error.message}`,
+              messages: eventAccepted ? thread.messages : thread.messages.map(message => message.role === 'user' && message.requestId === requestId
+                ? { ...message, status: 'unconfirmed' } : message),
+            }));
+            return { requestId, accepted: eventAccepted, status: eventAccepted ? 'accepted' : 'unconfirmed' };
           }
           if (error.code === 'BROWSER_TOOLS_UNAVAILABLE') {
             error.message = '이 대화는 Browser 조작 도구가 등록되기 전에 만들어졌습니다. 기존 기록과 초안은 유지됩니다. 새 Chat을 만든 뒤 Browser에서 이번 실행의 조작 대상을 다시 선택해 주세요.';

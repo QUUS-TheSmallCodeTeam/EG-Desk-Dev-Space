@@ -5,6 +5,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { compileFunction } from 'node:vm';
 import { Readable } from 'node:stream';
+import { webcrypto } from 'node:crypto';
 import { readSurfaceSource } from './egdesk-surface-source.mjs';
 import * as ChatState from '../overlay/resources/EGDeskChatState.sys.mjs';
 import * as ChatRunResult from '../overlay/resources/EGDeskChatRunResult.sys.mjs';
@@ -108,8 +109,13 @@ class Node {
     });
   }
   closest(selector) { for (let node = this; node; node = node.parentElement) if (node.matches(selector)) return node; return null; }
-  querySelectorAll(selector) { return this.children.flatMap(node => [...(node.matches(selector) ? [node] : []), ...node.querySelectorAll(selector)]); }
+  querySelectorAll(selector) {
+    const space = selector.indexOf(' ');
+    if (space > 0) return this.querySelectorAll(selector.slice(0, space)).flatMap(node => node.querySelectorAll(selector.slice(space + 1)));
+    return this.children.flatMap(node => [...(node.matches(selector) ? [node] : []), ...node.querySelectorAll(selector)]);
+  }
   querySelector(selector) { return this.querySelectorAll(selector)[0] || null; }
+  focus() { this.ownerDocument.activeElement = this; }
   get textContent() { return this.text + this.children.map(node => node.textContent).join(''); }
   set textContent(value) { this.replaceChildren(); this.text = String(value); }
   fire(type, data = {}) { return Promise.all((this.events[type] || []).map(fn => fn({ target: this, preventDefault() {}, stopPropagation() {}, ...data }))); }
@@ -120,7 +126,7 @@ const attributes = node => all(node).map(item => ({ attributes: item.attributes,
 const choose = async (node, checked = true) => { node.checked = checked; await node.fire('change'); };
 const type = async (node, text) => { node.value = text; await node.fire('input'); };
 
-function surface({ run = null, thread = {}, auth = {}, fetchJson = async () => ({ accepted: false }), ensureReady = async () => true, nativeReady = false,
+function surface({ run = null, thread = {}, auth = {}, fetchJson = async () => ({ accepted: false }), ensureReady = async () => true, nativeReady = false, realProjection = false,
   realCapture = false, captureChatInputs = async () => assert.fail('unexpected live capture'),
   captureManagedFileInput = async () => assert.fail('unexpected managed file') } = {}) {
   const root = new Node('root');
@@ -128,7 +134,7 @@ function surface({ run = null, thread = {}, auth = {}, fetchJson = async () => (
     createElement: tag => Object.assign(new Node(tag), { ownerDocument: document }),
     createElementNS: (namespaceURI, tag) => Object.assign(new Node(tag), { ownerDocument: document, namespaceURI }),
     createTextNode: text => new Node('#text', text), getElementById: id => root.querySelector(`#${id}`),
-    querySelectorAll: selector => root.querySelectorAll(selector) };
+    querySelectorAll: selector => root.querySelectorAll(selector), querySelector: selector => root.querySelector(selector) };
   const initial = { id: 'ui', clientThreadId: 'ui', engineId: 'claude', messages: [], inputSources: [], briefingInputs: [], ...thread };
   const protocol = ChatState.createChatProtocolState();
   if (run) protocol.runs[ChatState.runKey(run.conversationId, run.runId)] = run;
@@ -141,8 +147,8 @@ function surface({ run = null, thread = {}, auth = {}, fetchJson = async () => (
   const effects = { emits: 0, capture: [], requests: [], projectRequests: [], ready: 0, timers: 0, synced: [], logs: [], revoked: [] };
   const epochScope = ChatState.createChatEpochScope();
   const userInputDrafts = new Map();
-  const globals = { ChatState, ChatRunResult, ChatChangeReview, InputContext, document, state, protocol, userInputDrafts, epochScope, effects,
-    window: { AbortController, setTimeout: () => 1, clearTimeout() {} }, queueMicrotask,
+  const globals = { ChatState, ChatRunResult, ChatChangeReview, InputContext, document, state, protocol, userInputDrafts, epochScope, effects, realProjection,
+    window: { AbortController, crypto: webcrypto, setTimeout: () => 1, clearTimeout() {} }, queueMicrotask,
     captureChatInputs, captureManagedFileInput, boardNotice: text => effects.logs.push(text),
     SELF_MEMBER: 'self', cloneJson: clone, formatMessageTime: String, contextBoardTitle: () => '',
     openChatFileReference: () => assert.fail('unexpected file open'), currentViewportAgendaLabel: () => '',
@@ -153,7 +159,12 @@ function surface({ run = null, thread = {}, auth = {}, fetchJson = async () => (
     captureThreadInputs: async (item, inputs) => { effects.capture.push(clone(inputs)); return inputs.map(input => ({ snapshotId: `capture-${input.id}`, sourceId: input.id })); },
     browserToolSelectedSources: () => [], rootSseReady: () => ({ sourceReady: true }),
     codexThreadAgentProfile: () => null, codexThreadRuntimeConfig: () => ({}),
-    syncProtocolRun: value => effects.synced.push(value), expireContextSuggestions: () => assert.fail('unexpected context expiry'),
+    syncProtocolRun: value => {
+      effects.synced.push(value);
+      if (realProjection) globals.updateThreadById(value.localThreadId, thread => ({ ...thread,
+        ...ChatState.nativeBindingForRun(thread, value), conversationId: value.conversationId,
+        messages: ChatState.projectRunMessages(thread.messages, value) }));
+    }, expireContextSuggestions: () => assert.fail('unexpected context expiry'),
     revokeBrowserToolRunImmediately: (run, item) => effects.revoked.push([run.runId, item.id]),
     setTimeout: () => { effects.timers++; assert.fail('automatic timer'); }, setInterval: () => assert.fail('automatic timer'),
     console: Object.fromEntries(['log', 'warn', 'error', 'debug', 'info'].map(name => [name, (...values) => effects.logs.push(values)])),
@@ -171,7 +182,8 @@ function surface({ run = null, thread = {}, auth = {}, fetchJson = async () => (
     'buildThreadSubtitle', 'createCodexThread', 'defaultCodexThreads',
     'chatRequestProjectSelection', 'chatRoomProjectState', 'chatRoomProjectSendBlock', 'memoAskRuntimeIdentity',
     'createAcceptedReceiptWatch', 'rememberAcceptedInputReceipt', 'acceptedInputReceipt', 'visibleInputAnswer',
-    'briefingInputReferences', 'historyReadReferenceCurrent', 'inputDeliveryProof',
+    'briefingInputReferences', 'historyReadReferenceCurrent', 'inputDeliveryProof', 'inputDeliveryMatches',
+    'inputAuthorizationFailure', 'invalidateInputReadOnDenial', 'openChatInputPanel', 'briefingRangeIssue',
     'createChatProjectScope', 'normalizeChatRoomProjectDefault', 'snapshotChatRoomProjectExpectation', 'chatRoomProjectExpectation', 'chatRoomProjectTargetsMatch',
     'codexRuns', 'codexRunLabel', 'codexUserInputBlock', 'pruneUserInputDrafts', 'contextResolverRecordSection',
     'codexSubAgentSection', 'codexActivityDetailTarget', 'codexCommandInfo', 'createCodexActivityReadScope',
@@ -190,17 +202,17 @@ function surface({ run = null, thread = {}, auth = {}, fetchJson = async () => (
     const listeners = new Set();
     ${bridgeWatchSource}
     ${bridgeNormalizeSource}
-    const emit = () => { effects.emits++; for (const watch of memoReadWatches.values()) observeMemoReadWatch(watch); ${bridgeNotifySource} };
+    const emit = () => { effects.emits++; if (realProjection) normalizeThreads(); for (const watch of memoReadWatches.values()) observeMemoReadWatch(watch); ${bridgeNotifySource} };
     ${bridgeNoticeSource}
     ${source.match(/^  const userInputDraftKey = .*;$/m)[0]}
-    const bridge = { ${['subscribe', 'captureManualSendOwner', 'createActivityReadScope', 'createProjectScope', 'readRoomProjectDefault', 'prepareRoomProjectSend', 'prepareBriefingInputSend', 'replyApproval', 'replyUserInput', 'sendMessage', 'captureInputs', 'readInput', 'setThreadEngine', 'interrupt'].map(methodSource).join(',\n')} };
+    const bridge = { ${['subscribe', 'captureManualSendOwner', 'createActivityReadScope', 'createProjectScope', 'readRoomProjectDefault', 'prepareRoomProjectSend', 'prepareBriefingInputSend', 'replyApproval', 'replyUserInput', 'sendMessage', 'captureInputs', 'inspectInput', 'readInput', 'setThreadEngine', 'interrupt'].map(methodSource).join(',\n')} };
     return { ...bridge, render: renderCodexActivityPanel, question: codexUserInputBlock, serialize: serializeDeskSnapshot,
       refresh: refreshConversation, workingRow: codexAgentWorkingRow, projectBlock: chatRoomProjectSendBlock,
-      notify: emit, listenerCount: () => listeners.size, el,
+      notify: emit, syncRun: syncProtocolRun, listenerCount: () => listeners.size, el,
       visibleAnswer: visibleInputAnswer, deliveryProof: inputDeliveryProof,
       historyCurrent: historyReadReferenceCurrent, inputReceipt: acceptedInputReceipt };`, globals);
   state.codexBridge = { ...api, refreshConversation: () => {} };
-  return { ...api, state, protocol, effects, epochScope, drafts: userInputDrafts, document, root,
+  return { ...api, state, protocol, effects, epochScope, drafts: userInputDrafts, document, root, window:globals.window,
     thread: () => state.codex.threads[0], panel: () => document.getElementById('egd-codex-activity-panel') };
 }
 
@@ -521,12 +533,8 @@ test('Reader progress stays in the existing activity/typing UI and only Main del
   event('context.read.completed',{sourceId:'immutable-source',packetId:'delivered-range',complete:false});
   ui.render();
   const receipts=nodes(ui.panel(),'chat-delivered-input-open');
-  assert.equal(receipts.length,1);
-  assert.equal(receipts[0].dataset.packetId,'delivered-range');
-  const inspected=[];
-  ui.state.codexBridge.inspectInput=(...args)=>inspected.push(args);
-  await receipts[0].fire('click');
-  assert.deepEqual(inspected[0],['ui',run.contextCaptures[0],{packetId:'delivered-range'}]);
+  assert.equal(receipts.length,0,'a bare completion event without an accepted input and delivery receipt is not proof');
+  assert.doesNotMatch(JSON.stringify(attributes(ui.panel())),/delivered-range/,'an unverified packet ID is not exposed in the DOM');
   assert.deepEqual(ChatState.projectRunMessages([],run),[]);
 });
 
@@ -967,7 +975,7 @@ test('unbound Claude chat rejects A capture intent under B before delayed SSE, u
 // Synthetic capacity evidence exercises the positive contract, not the installed
 // Claude provider's readiness. Actual authority, planning, storage, HTTP and UI
 // functions run; a Reader or live native process must never run during preflight.
-async function contextSurface(t,{contents=['complete small source'],capacityKnown=true,readerReady=true,beforeSend,allowDelivery=false}={}){
+async function contextSurface(t,{contents=['complete small source'],capacityKnown=true,readerReady=true,beforeSend,beforeRead,allowDelivery=false}={}){
   const dir=mkdtempSync(join(tmpdir(),'egdesk-ui-reader-'));
   t.after(()=>rmSync(dir,{recursive:true,force:true}));
   const store=new ImmutableContextStore({dataDir:dir,allowedRoots:[dir]});
@@ -1009,6 +1017,10 @@ async function contextSurface(t,{contents=['complete small source'],capacityKnow
     fetch:async(url,options={})=>{
       const path=new URL(url).pathname;
       if(path==='/chat/send')await beforeSend?.(h,contexts);
+      if(path.startsWith('/context/captures/') && (!options.method || options.method==='GET')) {
+        await beforeRead?.(url,options);
+        if(options.signal?.aborted)throw Object.assign(new Error('aborted'),{name:'AbortError'});
+      }
       const req=Readable.from(options.body?[Buffer.from(options.body)]:[]);
       Object.assign(req,{method:options.method||'GET',url,headers:{host:'127.0.0.1:39218','content-type':'application/json'},
         socket:{remoteAddress:'127.0.0.1'}});
@@ -1020,14 +1032,15 @@ async function contextSurface(t,{contents=['complete small source'],capacityKnow
   });
   const selected=contents.map((_,index)=>({id:`selected-${index}`,kind:'browser',label:`Source ${index}`,
     sourceRef:{viewId:`card-${index}`,uri:`https://source.invalid/${index}`,profileId:'site-profile',accountId:'different-site-user@source.invalid'}}));
-  const ui=surface({realCapture:true,auth:{isLoggedIn:false},thread:{inputSources:selected},fetchJson,
+  const ui=surface({realCapture:true,realProjection:true,auth:{isLoggedIn:false},thread:{inputSources:selected},fetchJson,
     captureChatInputs:async([input])=>[InputContext.inputSnapshot(input,{text:contents[selected.findIndex(row=>row.id===input.id)],url:input.sourceRef.uri})]});
   ui.state.codex.connected=false;ui.state.codex.engines[0].status='offline';
+  ui.subscribe(()=>{})(); // The live bridge normalizes its initial threads before a user can send.
   return{ui,h,contexts,store,plans,replies,selected};
 }
 
-test('Claude delivered packet with a real local receipt remains visible only for its own source', async t => {
-  const {ui,h,contexts,store,replies,selected}=await contextSurface(t,{contents:['SYNTHETIC_SOURCE'],capacityKnown:true,allowDelivery:true});
+async function deliveredClaudeFixture(t,options={}) {
+  const {ui,h,contexts,store,replies,selected}=await contextSurface(t,{contents:['SYNTHETIC_SOURCE'],capacityKnown:true,allowDelivery:true,...options});
   await ui.sendMessage();
   const capture=replies.find(row=>row.path==='/context/captures').body.captures[0];
   const run=[...h.chat.runs.values()][0];
@@ -1046,19 +1059,167 @@ test('Claude delivered packet with a real local receipt remains visible only for
     [run.conversationId,run.runId,run.answerId]);
   const origin={engineId:'claude',engineProfileId:'claude-default',clientThreadId:'ui'};
   const reference=InputContext.capturedInputReference(selected[0],capture,origin);
-  const thread=ui.thread(); thread.conversationId=run.conversationId; thread.engineProfileId='claude-default';
+  // Project the actual runtime's events and a synthetic assistant message for
+  // this same run. The receipt/capture/packet come from the real local store.
+  h.chat.emit(run,'message.started',{messageId:'synthetic-assistant',text:'synthetic answer'},'synthetic-assistant');
+  for(const event of h.events) ChatState.reduceChatEvent(ui.protocol,event,['codex','claude']);
+  const thread=ui.thread();
   const identity={conversationId:run.conversationId,runId:run.runId,answerId:run.answerId};
-  const answer={role:'assistant',...identity,contextCaptures:[reference],contextPackets:[packet]};
-  thread.messages.push(answer);
   const displayed=ui.protocol.runs[ChatState.runKey(run.conversationId,run.runId)];
-  assert.ok(displayed); Object.assign(displayed,identity,{engineId:'claude',contextCaptures:[reference],contextPackets:[packet]});
+  assert.ok(displayed); thread.messages=ChatState.projectRunMessages(thread.messages,displayed);
+  const answer=thread.messages.find(row=>row.role==='assistant');
+  const accepted=ui.inputReceipt(thread,identity);
+  assert.ok(accepted,'the actual durable send supplies the same-run user receipt');
   assert.equal(ui.visibleAnswer(thread,reference,identity),answer);
   assert.equal(ui.deliveryProof('ui',reference,identity,null,packet.packetId)?.receiptId,packet.receiptId);
   assert.equal(ui.deliveryProof('ui',{...reference,sourceId:'other-source'},identity,null,packet.packetId),null,
     'a receipt for another source never authorizes this packet');
+  return {ui,h,run,displayed,reference,identity,packet};
+}
+
+test('Claude delivered packet with a real local receipt remains visible only for its own source', async t => {
+  const {ui,run}=await deliveredClaudeFixture(t);
   ui.state.codex.activityThreadId='ui'; ui.render();
-  assert.equal(nodes(ui.panel(),'chat-delivered-input-open').length,1,
+  const buttons=nodes(ui.panel(),'chat-delivered-input-open');
+  assert.equal(buttons.length,1,
     'a same-run server-issued Claude delivery remains discoverable without a Codex login');
+  assert.equal(buttons[0].dataset.packetId,undefined,'the unverified packet ID is not placed on the button');
+  await buttons[0].fire('click');
+  const panel=ui.document.getElementById('egd-codex-input-panel');
+  assert.ok(panel,`the production inspector opened the local source: ${JSON.stringify(ui.effects.logs)}`);
+  assert.equal(nodes(panel,'chat-input-delivery').length,1,'the exact stored delivery survived the production proof and hash checks');
+  assert.match(panel.textContent,/SYNTHETIC_SOURCE/);
+  const reads=ui.effects.requests.filter(row=>row.path.startsWith('/context/captures/'));
+  assert.equal(reads.length,2,'the inspector performs the scoped source read and exact packet read');
+  assert.ok(reads.every(row=>row.path.includes('engineId=claude') && row.path.includes('engineProfileId=claude-default')
+    && row.path.includes(`conversationId=${encodeURIComponent(run.conversationId)}`)));
+});
+
+test('Claude delivery refuses foreign account, profile, room, answer, source, hash and receipt without fetching',async t=>{
+  for(const kind of ['account','profile','room','answer','run','source','source hash','packet hash','delivery receipt','user receipt']) await t.test(kind,async t=>{
+    const {ui,displayed}=await deliveredClaudeFixture(t);
+    ui.state.codex.activityThreadId='ui';ui.render();
+    const originalButton=nodes(ui.panel(),'chat-delivered-input-open')[0];assert.ok(originalButton);
+    const answer=ui.thread().messages.find(row=>row.role==='assistant');
+    const completed=answer.contextEvents.find(row=>row.event==='context.read.completed').details;
+    const request=ui.protocol.requests[displayed.requestId], profile=ui.state.codex.engines[1].profiles[0];
+    const marker=`FOREIGN_${kind.replaceAll(' ','_').toUpperCase()}`;
+    let restore;
+    if(kind==='account') { const old=profile.auth.account;profile.auth.account=marker;restore=()=>{profile.auth.account=old;}; }
+    else if(kind==='profile') { const old=ui.thread().engineProfileId;ui.thread().engineProfileId=marker;restore=()=>{ui.thread().engineProfileId=old;}; }
+    else if(kind==='room') {
+      ui.state.codex.threads.push({id:marker,clientThreadId:marker,engineId:'claude',messages:[],inputSources:[],briefingInputs:[]});
+      ui.state.codex.activeThreadId=marker;ui.state.codex.activityRoomGeneration=(ui.state.codex.activityRoomGeneration||0)+1;
+      restore=()=>{ui.state.codex.activeThreadId='ui';ui.state.codex.threads=ui.state.codex.threads.filter(row=>row.id!==marker);};
+    } else {
+      const target=kind==='answer'||kind==='run'?answer:kind==='source'||kind==='source hash'?answer.contextCaptures[0]
+        :kind==='user receipt'?request:completed;
+      const key=({answer:'answerId',run:'runId',source:'sourceId','source hash':'hash','packet hash':'hash',
+        'delivery receipt':'receiptId','user receipt':'acceptedInputMessageId'})[kind];
+      const old=target[key];target[key]=marker;restore=()=>{target[key]=old;};
+    }
+    const before=ui.effects.requests.length;
+    ui.notify();ui.render();
+    assert.equal(nodes(ui.panel(),'chat-delivered-input-open').length,0,`${kind}: no receipt control`);
+    await originalButton.fire('click');
+    assert.equal(ui.effects.requests.length,before,`${kind}: the stale control makes no unauthorized request`);
+    assert.equal(ui.document.getElementById('egd-codex-input-panel'),null);
+    assert.doesNotMatch(JSON.stringify(attributes(ui.root))+ui.root.textContent,new RegExp(marker));
+    assert.equal(JSON.stringify(ui.state).includes('SYNTHETIC_SOURCE'),false,`${kind}: source payload was not copied into state`);
+    restore();ui.notify();
+    assert.equal(JSON.stringify(ui.state).includes(marker),false,`${kind}: foreign identifier was not retained`);
+  });
+});
+
+test('delayed Claude delivery read cannot revive after an account or room round trip',async t=>{
+  for(const kind of ['account','room']) await t.test(kind,async t=>{
+    let release,entered;
+    const gate=new Promise(resolve=>{release=resolve;});
+    const waiting=new Promise(resolve=>{entered=resolve;});
+    const {ui}=await deliveredClaudeFixture(t,{beforeRead:async()=>{entered();await gate;}});
+    ui.state.codex.activityThreadId='ui';ui.render();
+    const button=nodes(ui.panel(),'chat-delivered-input-open')[0];assert.ok(button);
+    const opening=button.fire('click');await waiting;
+    const profile=ui.state.codex.engines[1].profiles[0],account=profile.auth.account;
+    if(kind==='account') profile.auth.account='FOREIGN_ASYNC_ACCOUNT';
+    else {
+      ui.state.codex.threads.push({id:'foreign-async-room',engineId:'claude',messages:[],inputSources:[],briefingInputs:[]});
+      ui.state.codex.activeThreadId='foreign-async-room';ui.state.codex.activityRoomGeneration=(ui.state.codex.activityRoomGeneration||0)+1;
+    }
+    ui.notify();
+    if(kind==='account') profile.auth.account=account;
+    else {ui.state.codex.activeThreadId='ui';ui.state.codex.activityRoomGeneration++;}
+    ui.notify();release();await opening;
+    assert.equal(ui.document.getElementById('egd-codex-input-panel'),null);
+    assert.equal(ui.effects.requests.filter(row=>row.path.startsWith('/context/captures/')).length,1,'an invalidated first read cannot trigger the packet read');
+    assert.doesNotMatch(ui.root.textContent,/SYNTHETIC_SOURCE|FOREIGN_ASYNC_ACCOUNT|foreign-async-room/);
+    assert.equal(JSON.stringify(ui.state.codex.chatProtocol).includes('SYNTHETIC_SOURCE'),false);
+  });
+});
+
+test('Claude receipt fence survives hash verification and the read-to-panel handoff',async t=>{
+  for(const phase of ['hash','post-read']) for(const kind of ['account','room']) await t.test(`${phase}: ${kind} round trip`,async t=>{
+    let release,entered;
+    const gate=new Promise(resolve=>{release=resolve;});
+    const waiting=new Promise(resolve=>{entered=resolve;});
+    const {ui,packet}=await deliveredClaudeFixture(t);
+    if(phase==='hash') ui.window.crypto={subtle:{digest:async(...args)=>{entered();await gate;return webcrypto.subtle.digest(...args);}}};
+    else {
+      const realRead=ui.readInput;
+      ui.state.codexBridge.readInput=async function(...args) {
+        const result=await realRead.apply(this,args);
+        assert.ok(result?.delivered,'the real scoped source and packet reads and hash verification have completed');
+        entered();await gate;return result;
+      };
+    }
+    ui.state.codex.activityThreadId='ui';ui.render();
+    const opening=nodes(ui.panel(),'chat-delivered-input-open')[0].fire('click');
+    await waiting;
+    assert.equal(ui.effects.requests.filter(row=>row.path.startsWith('/context/captures/')).length,2,
+      'the source and exact packet reads have both reached the real local HTTP handler');
+    const profile=ui.state.codex.engines[1].profiles[0],account=profile.auth.account;
+    if(kind==='account') profile.auth.account='FOREIGN_GAP_ACCOUNT';
+    else {
+      ui.state.codex.threads.push({id:'foreign-gap-room',engineId:'claude',messages:[],inputSources:[],briefingInputs:[]});
+      ui.state.codex.activeThreadId='foreign-gap-room';ui.state.codex.activityRoomGeneration=(ui.state.codex.activityRoomGeneration||0)+1;
+    }
+    ui.notify();
+    if(kind==='account') profile.auth.account=account;
+    else {ui.state.codex.activeThreadId='ui';ui.state.codex.activityRoomGeneration++;}
+    ui.notify();release();await opening;
+    assert.equal(ui.document.getElementById('egd-codex-input-panel'),null,'nothing was published after the observed scope change');
+    const rendered=JSON.stringify(attributes(ui.root))+ui.root.textContent;
+    assert.equal(rendered.includes('SYNTHETIC_SOURCE'),false);
+    assert.equal(rendered.includes(packet.packetId),false);
+    assert.equal(rendered.includes(packet.receiptId),false);
+    assert.equal(JSON.stringify(ui.state.codex.chatProtocol).includes('SYNTHETIC_SOURCE'),false);
+  });
+});
+
+test('Claude receipt fence catches the microtask between completed digest read and inspector mount',async t=>{
+  const {ui,packet}=await deliveredClaudeFixture(t);
+  const profile=ui.state.codex.engines[1].profiles[0],account=profile.auth.account;
+  let switched=false,listenersAtSwitch=null;
+  ui.window.crypto={subtle:{digest:(...args)=>{
+    const pending=webcrypto.subtle.digest(...args);
+    pending.then(()=>queueMicrotask(()=>{
+      // Registered before the production await: this runs after readInput's
+      // digest continuation and cleanup, but before inspectInput resumes.
+      listenersAtSwitch=ui.listenerCount();switched=true;
+      profile.auth.account='FOREIGN_MICROTASK_ACCOUNT';ui.notify();
+      profile.auth.account=account;ui.notify();
+    }));
+    return pending;
+  }}};
+  ui.state.codex.activityThreadId='ui';ui.render();
+  await nodes(ui.panel(),'chat-delivered-input-open')[0].fire('click');
+  assert.equal(switched,true);
+  assert.equal(listenersAtSwitch,1,'the read watcher has cleaned up while the inspector handoff watcher remains');
+  assert.equal(ui.document.getElementById('egd-codex-input-panel'),null);
+  const rendered=JSON.stringify(attributes(ui.root))+ui.root.textContent;
+  assert.equal(rendered.includes('SYNTHETIC_SOURCE'),false);
+  assert.equal(rendered.includes(packet.packetId),false);assert.equal(rendered.includes(packet.receiptId),false);
+  assert.equal(JSON.stringify(ui.state.codex.chatProtocol).includes('SYNTHETIC_SOURCE'),false);
 });
 
 test('real Context capability and pure planning admit direct, large and aggregate UI selections without preflight Reader execution',async t=>{
@@ -1632,7 +1793,7 @@ test('Claude quota errors never borrow Codex account resets, while Codex keeps i
 
 test('unsupported Claude Context descriptor blocks capture/send without changing draft or selections', async () => {
   for (const selection of [{ inputSources: [{ ...fileInput(), resolverRef: 'ref' }] },
-    { briefingInputs: [{ snapshotId: 'briefing' }] }, { picked: ['context-choice'] },
+    { inputSources: [fileInput('ordinary-source')] }, { picked: ['context-choice'] },
     {inputSources:[{...fileInput(),kind:'browser',browserToolPermission:'interact'}]}]) {
     const ui = surface({ realCapture:true, thread: { ...selection }, auth: { isLoggedIn: false },
       fetchJson:async()=>{throw Object.assign(new Error('old bridge'),{status:404});} });
@@ -1654,6 +1815,13 @@ test('unsupported Claude Context descriptor blocks capture/send without changing
   assert.equal(ChatState.claudeContextSendErrorText('UNKNOWN'), null);
   assert.equal(ChatState.claudeContextSendErrorText('CLAUDE_CONTEXT_UNSUPPORTED'),
     '현재 Claude 연결에서는 선택한 자료를 사용할 수 없어 보내지 않았습니다. 자료를 제외한 뒤 다시 보내세요.');
+  const invalid = { snapshotId: 'briefing' };
+  const ui = surface({thread:{briefingInputs:[invalid]},auth:{isLoggedIn:false}});
+  await ui.sendMessage();
+  assert.match(ui.thread().sendError,/브리핑 근거의 출처와 접근 권한/);
+  assert.deepEqual(ui.thread().briefingInputs,[invalid]);
+  assert.equal(ui.state.codex.threadDrafts.ui,'  keep my draft  ');
+  assert.deepEqual(ui.effects.requests,[],'invalid briefing provenance never reaches the backend');
 });
 
 test('plain Claude send carries explicit intent without implicit Codex Context or fallback', async () => {
@@ -1671,6 +1839,93 @@ test('plain Claude send carries explicit intent without implicit Codex Context o
   assert.equal(Object.hasOwn(send[0].body, 'contextResolution'), false);
   assert.equal(ui.thread().engineId, 'claude');
   assert.equal(ui.state.codex.threadDrafts.ui, '  keep my draft  ', 'definite refusal restores the original text');
+});
+
+test('real Claude run.started without a profile survives a conflicting accepted HTTP response only for its captured owner',async t=>{
+  for(const kind of ['same owner','explicit foreign event profile','foreign request profile','account round trip','profile round trip','room round trip']) await t.test(kind,async t=>{
+    const h=await runtime(t,{store:true,initialSend:false});let ui;
+    ui=surface({realProjection:true,auth:{isLoggedIn:false},fetchJson:async(path,options)=>{
+      assert.equal(path,'/chat/send');
+      const result=await h.chat.send(JSON.parse(options.body));
+      const run=h.chat.runs.get(`${result.conversationId}/${result.runId}`);assert.ok(run);
+      h.chat.emit(run,'run.started',{});
+      const event=h.events.at(-1);
+      assert.equal(event.event,'run.started');assert.equal(event.engineId,'claude');
+      assert.equal(Object.hasOwn(event,'engineProfileId'),false,'the production emitter does not add a profile');
+      // The conflict case modifies only the delivered event to test an
+      // explicit future/invalid profile; the ordinary case is the real shape.
+      const delivered=kind==='explicit foreign event profile'?{...event,engineProfileId:'foreign-slot'}:event;
+      const observed=ChatState.reduceChatEvent(ui.protocol,delivered,['claude']);assert.ok(observed);
+      assert.equal(observed.engineProfileId,kind==='explicit foreign event profile'?'foreign-slot':undefined);
+      if(kind!=='explicit foreign event profile') ui.syncRun(observed);
+      ui.notify();
+      const request=ui.protocol.requests[event.requestId];
+      assert.equal(request.status,'accepted','the same-request SSE was reduced before the HTTP response');
+      assert.equal(request.engineProfileId,'claude-default','the profile is captured with the original request');
+      ui.state.codex.threadDrafts.ui='newer draft';ui.state.codex.threadDraftRevisions.ui++;
+      ui.thread().inputSources=[fileInput('newer')];
+      if(kind==='foreign request profile') request.engineProfileId='foreign-slot';
+      if(kind==='account round trip') {
+        const auth=ui.state.codex.engines[1].profiles[0].auth,original=auth.account;
+        auth.account='foreign@example.invalid';ui.notify();auth.account=original;ui.notify();
+      }
+      if(kind==='profile round trip') {
+        ui.thread().engineProfileId='foreign-slot';ui.notify();ui.thread().engineProfileId='claude-default';ui.notify();
+      }
+      if(kind==='room round trip') {
+        ui.state.codex.threads.push({id:'foreign-room',engineId:'claude',messages:[],inputSources:[],briefingInputs:[]});
+        ui.state.codex.activeThreadId='foreign-room';ui.state.codex.activityRoomGeneration=(ui.state.codex.activityRoomGeneration||0)+1;ui.notify();
+        ui.state.codex.activeThreadId='ui';ui.state.codex.activityRoomGeneration++;ui.notify();
+      }
+      return {...result,engineId:'codex'};
+    }});
+    ui.subscribe(()=>{})();
+    const result=await ui.sendMessage(),expected=kind==='same owner'?'accepted':'unconfirmed';
+    assert.deepEqual({accepted:result.accepted,status:result.status},{accepted:kind==='same owner',status:expected});
+    const request=Object.values(ui.protocol.requests)[0];
+    assert.equal(request.status,expected);assert.equal(request.acceptedInputMessageId,undefined);
+    assert.equal(ui.state.codex.threadDrafts.ui,'newer draft');assert.deepEqual(ui.thread().inputSources,[fileInput('newer')]);
+    await ui.sendMessage();
+    assert.equal(ui.effects.requests.filter(row=>row.path==='/chat/send').length,1);
+    assert.equal(h.transports[0].sent.length,1);assert.equal(ui.effects.timers,0);
+  });
+});
+
+test('foreign Claude HTTP route withholds its receipt without downgrading an independently accepted SSE',async t=>{
+  for(const [kind,foreign] of [
+    ['engine',{engineId:'FOREIGN_ENGINE'}],['profile',{engineProfileId:'FOREIGN_PROFILE'}],
+    ['nested engine',{engine:{id:'FOREIGN_ENGINE'}}],['nested profile',{engine:{engineProfileId:'FOREIGN_PROFILE'}}],
+  ]) for(const eventFirst of [false,true]) await t.test(`${kind}; ${eventFirst?'prior same-engine event':'no prior event'}`,async()=>{
+    const inputs=[fileInput('keep')];let ui;
+    ui=surface({thread:{inputSources:inputs},fetchJson:async(path,options)=>{
+      assert.equal(path,'/chat/send');const requestId=JSON.parse(options.body).requestId;
+      if(eventFirst) {
+        ChatState.reduceChatEvent(ui.protocol,{type:'chat.event',v:2,event:'run.started',streamId:'own-stream',seq:1,
+          engineId:'claude',engineProfileId:'claude-default',clientThreadId:'ui',requestId,
+          conversationId:'own-conversation',runId:'own-run',answerId:'own-conversation/own-run',details:{}},['claude']);
+        ui.state.codex.threadDrafts.ui='newer draft';ui.state.codex.threadDraftRevisions.ui++;
+        ui.thread().inputSources=[fileInput('newer')];
+      }
+      return {accepted:true,durable:true,requestId,clientThreadId:'ui',conversationId:'FOREIGN_CONVERSATION',
+        runId:'FOREIGN_RUN',answerId:'FOREIGN_CONVERSATION/FOREIGN_RUN',localConversationId:'FOREIGN_LOCAL_CONVERSATION',
+        localRunId:'FOREIGN_LOCAL_RUN',localMessageId:'FOREIGN_MESSAGE',...foreign};
+    }});
+    ui.subscribe(()=>{})(); // Production normalizes the thread before the send watch is installed.
+    const result=await ui.sendMessage();
+    assert.deepEqual({accepted:result.accepted,status:result.status},eventFirst?{accepted:true,status:'accepted'}:{accepted:false,status:'unconfirmed'});
+    assert.equal(ui.state.codex.threadDrafts.ui,eventFirst?'newer draft':'  keep my draft  ');
+    assert.deepEqual(ui.thread().inputSources,eventFirst?[fileInput('newer')]:inputs);
+    assert.equal(ui.thread().engineId,'claude');assert.equal(ui.thread().engineProfileId,'claude-default');
+    assert.equal(Object.values(ui.protocol.requests)[0].status,eventFirst?'accepted':'unconfirmed');
+    assert.ok(Object.values(ui.protocol.requests).every(request=>!request.acceptedInputMessageId));
+    assert.equal(JSON.stringify(ui.state).includes('FOREIGN_'),false,'the conflicting response IDs never enter state');
+    assert.doesNotMatch(ui.thread().sendError,/FOREIGN_/);
+    ui.state.codex.activityThreadId='ui';ui.render();
+    assert.doesNotMatch(JSON.stringify(attributes(ui.root))+ui.root.textContent,/FOREIGN_/,'the conflicting response IDs never reach the DOM');
+    await ui.sendMessage();
+    assert.equal(ui.effects.requests.filter(row=>row.path==='/chat/send').length,1,'neither an unknown outcome nor an accepted run is automatically retried');
+    assert.equal(ui.effects.timers,0);
+  });
 });
 
 test('Codex plain send keeps its Context capability and selection payload', async () => {
@@ -1701,7 +1956,7 @@ test('Claude unavailable engine/profile gates send and resume without borrowing 
 test('backend Context HTTP409 maps fixed text and safely restores text and selections without resend', async () => {
   for (const engineId of ['claude', 'codex']) {
     const inputs = engineId === 'codex' ? [fileInput()] : [];
-    const briefings = engineId === 'codex' ? [{ snapshotId: 'briefing' }] : [];
+    const briefings = [];
     const ui = surface({ thread: { engineId, inputSources: inputs, briefingInputs: briefings }, fetchJson: async () => {
       throw Object.assign(new Error('PRIVATE_BACKEND_DETAIL'), { code: 'CLAUDE_CONTEXT_UNSUPPORTED', status: 409, accepted: false });
     } });
