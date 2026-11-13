@@ -1083,19 +1083,42 @@ test('active and selected cards keep a blue selection edge across zoom and compa
   assert.equal(readRootProperties(surfaceCss, { forcedColors: true })['--egd-card-selection'], 'Highlight');
 });
 
-test('resource strip keeps readable compact values and a neutral disk glyph', () => {
+test('resource strip shows approved 22px rings only, with a neutral disk glyph', () => {
   const env = { scheme: 'light' };
   const gadget = declarationsFor('.egd-resource-gadget', env);
   const button = declarationsFor('.egd-resource-gadget .egd-resource-button', env);
-  const readout = declarationsFor('.egd-resource-readout', env);
+  const ring = declarationsFor('.egd-resource-ring', env);
   const disk = declarationsFor('.egd-resource-disk.egd-resource-unmeasured', env);
+  // Approved .eg-resources: 4 x 26px buttons + 3 x 2px gaps + 2 x 3px padding + 2 x 1px border = 118px.
   assert.equal(gadget.width, 'max-content');
-  assert.equal(button.display, 'inline-flex');
-  assert.equal(readout['flex-direction'], 'column');
+  assert.deepEqual([gadget.height, gadget.gap, gadget.padding, gadget['border-radius']], ['39px', '2px', '3px', '10px']);
+  assert.deepEqual([button.display, button.width, button.height, button.padding], ['inline-flex', '26px', '28px', '0']);
+  assert.deepEqual([ring.width, ring.height], ['22px', '22px']);
+  assert.equal(declarationsFor('.egd-resource-ring::after', env).inset, '2.2px');
   assert.equal(disk.background, 'transparent');
   assert.match(disk.border, /solid var\(--egd-on-surface-variant\)/);
-  assert.match(surfaceCss, /\.egd-rail-right \.egd-resource-gadget \{ display: grid; grid-template-columns: repeat\(2, max-content\)/);
+  // No text readouts beside the rings, at any width: numbers live in the popup.
+  assert.doesNotMatch(surfaceCss, /\.egd-resource-(readout|value)\b/);
+  assert.doesNotMatch(surfaceCss, /\.egd-resource-gadget \{ display: grid/);
+  assert.equal(declarationsFor('.egd-resource-overview-title', env).color, 'var(--egd-on-surface-variant)');
+  assert.match(surfaceCss, /\.egd-rail-right \.egd-resource-button \{ width: 22px; height: 24px; \}/);
   assert.match(surfaceCss, /\.egd-rail-right \{ flex: 0 1 auto; min-width: 0; overflow-x: auto;/);
+});
+
+test('top bar centres search on the window and paints the approved account circle', () => {
+  const wide = rule => rule.media.includes('(min-width: 1200px)');
+  const center = new Map(rulesFor('.egd-rail-center').find(wide).declarations);
+  assert.deepEqual([center.get('position'), center.get('left'), center.get('width'), center.get('transform')],
+    ['absolute', '50%', 'min(420px, 42%)', 'translateX(-50%)']);
+  assert.equal(new Map(rulesFor('.egd-rail-left').find(wide).declarations).get('max-width'), 'calc(50% - 224px)');
+  assert.equal(new Map(rulesFor('.egd-rail-right').find(wide).declarations).get('margin-left'), 'auto');
+  const avatar = declarationsFor('.egd-rail-avatar', { scheme: 'light' });
+  assert.deepEqual([avatar.width, avatar.height, avatar.background, avatar.color],
+    ['28px', '28px', 'var(--egd-account)', 'var(--egd-surface-elevated)']);
+  assert.equal(readRootProperties(surfaceCss, { scheme: 'light' })['--egd-account'].toLowerCase(), '#496780');
+  assert.equal(readRootProperties(surfaceCss, { scheme: 'dark' })['--egd-account'].toLowerCase(), '#6c879b');
+  assert.equal(readRootProperties(surfaceCss, { forcedColors: true })['--egd-account'], 'CanvasText');
+  assert.ok(CONTRAST_REQUIREMENTS.some(([kind, fg, bg]) => kind === 'border' && fg === '--egd-surface-elevated' && bg === '--egd-account'));
 });
 
 test('Focus resource layout reserves unscaled space and keeps its details inside the viewport', () => {

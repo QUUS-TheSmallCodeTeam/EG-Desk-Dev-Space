@@ -25,6 +25,7 @@
   --egd-wood-line: #958879;
   --egd-wood-veil: rgba(245, 243, 239, .73);
   --egd-topbar: #F9F8F4;
+  --egd-account: #496780; /* approved .eg-account */
   --egd-window-alt: #F9F9F6;
   --egd-hover: #E8EAE3;
   --egd-user-bubble: #E6EBE3;
@@ -115,6 +116,7 @@
     --egd-wood-line: #A39987;
     --egd-wood-veil: rgba(36, 42, 40, .82);
     --egd-topbar: #2D302C;
+    --egd-account: #6C879B; /* approved .eg-account (dark) */
     --egd-window-alt: #30342F;
     --egd-hover: #414840;
     --egd-user-bubble: #485748;
@@ -168,6 +170,7 @@
     --egd-surface-elevated: Canvas;
     --egd-window-alt: Canvas;
     --egd-topbar: Canvas;
+    --egd-account: CanvasText;
     --egd-on-surface: CanvasText;
     --egd-on-surface-variant: CanvasText;
     --egd-secondary: CanvasText;
@@ -2513,6 +2516,44 @@
 }
 .egd-rail-chevron .egd-ui-icon { width: 12px; height: 12px; }
 
+/* 기록 상태: quiet text beside the name; only a failure asks for attention.
+   It gives up its room first when the left group runs out of width. */
+.egd-rail-record-status {
+  flex: 0 100 auto;
+  min-width: 0;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  overflow: hidden;
+  color: var(--egd-on-surface-variant);
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+.egd-rail-record-status[hidden] { display: none; }
+.egd-rail-record-text { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.egd-rail-record-status[data-state="failed"] { flex-shrink: 0; overflow: visible; color: var(--egd-danger-ink); font-weight: 600; }
+.egd-rail-record-retry {
+  min-height: 22px;
+  padding: 0 8px;
+  border: 1px solid color-mix(in srgb, var(--egd-danger-ink) 30%, transparent);
+  border-radius: 6px;
+  background: var(--egd-danger-bg);
+  color: var(--egd-danger-ink);
+  font: inherit;
+  cursor: pointer;
+  transition: background 0.15s;
+  -moz-window-dragging: no-drag;
+}
+.egd-rail-record-retry[hidden] { display: none; }
+.egd-rail-record-retry:hover { background: var(--egd-hover); }
+.egd-rail-record-retry:active { background: var(--egd-outline-variant); }
+.egd-rail-record-retry:focus-visible { outline: var(--egd-focus-outline); outline-offset: var(--egd-focus-outline-offset); }
+/* Below the width where search is centred, the quiet time gives its room to search. */
+@media (max-width: 1199px) {
+  .egd-rail-record-status:not([data-state="failed"]) { display: none; }
+}
+
 .egd-rail-search {
   display: flex;
   align-items: center;
@@ -2550,6 +2591,21 @@
   color: var(--egd-on-surface-variant);
   background: var(--egd-outline-variant);
   border-radius: 4px;
+}
+
+/* Approved .eg-search: on a wide window the search sits on the window's own
+   centre, whatever the two side groups measure. Narrower windows keep the
+   flexible middle so the three groups never overlap. */
+@media (min-width: 1200px) {
+  .egd-rail-left { min-width: 0; max-width: calc(50% - 224px); }
+  .egd-rail-switcher { flex: 0 1 auto; min-width: 0; }
+  .egd-rail-center {
+    position: absolute;
+    left: 50%;
+    width: min(420px, 42%);
+    transform: translateX(-50%);
+  }
+  .egd-rail-right { margin-left: auto; }
 }
 
 #egd-rail-search-results {
@@ -3162,11 +3218,12 @@
 }
 
 .egd-rail-avatar {
-  width: 30px;
-  height: 30px;
+  flex: none;
+  width: 28px;
+  height: 28px;
   border-radius: 50%;
-  background: var(--egd-primary);
-  color: var(--egd-on-primary);
+  background: var(--egd-account);
+  color: var(--egd-surface-elevated);
   font-size: 12px;
   font-weight: 600;
   display: inline-flex;
@@ -7585,7 +7642,8 @@
 }
 .egd-codex-chat-shell .egd-codex-run-status { min-height: 36px; padding: 3px 12px; }
 
-/* Local host resources: one compact strip, details only on activation. */
+/* Local host resources: rings only (approved .eg-resources 118x39); numbers
+   are read in the popup a ring opens. */
 .egd-resource-gadget {
   position: relative;
   box-sizing: border-box;
@@ -7654,20 +7712,6 @@
   border-radius: inherit;
   pointer-events: none;
 }
-@media (max-width: 1000px) {
-  .egd-browser-card.egd-card-fullscreen .egd-resource-gadget {
-    display: grid;
-    grid-template-columns: repeat(2, max-content);
-    grid-template-rows: repeat(2, 18px);
-    height: 38px;
-    gap: 0 3px;
-  }
-  .egd-browser-card.egd-card-fullscreen .egd-resource-button {
-    height: 18px;
-    justify-content: flex-start;
-  }
-  .egd-browser-card.egd-card-fullscreen .egd-resource-detail { top: 42px; }
-}
 @media (max-width: 700px) {
   .egd-browser-card.egd-card-fullscreen .egd-desk-window-toolbar {
     display: grid;
@@ -7684,13 +7728,12 @@
 }
 .egd-resource-gadget .egd-resource-button {
   flex: 0 0 auto;
-  width: auto;
-  height: 30px;
+  width: 26px;
+  height: 28px;
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  gap: 3px;
-  padding: 0 3px;
+  padding: 0;
   border-radius: 6px;
   color: var(--egd-on-surface-variant);
   font: 600 10px/1.05 var(--egd-font);
@@ -7703,40 +7746,38 @@
   display: grid;
   place-items: center;
   flex: none;
-  width: 15px;
-  height: 15px;
+  width: 22px;
+  height: 22px;
   border-radius: 50%;
   background: conic-gradient(var(--egd-on-surface-variant) var(--egd-resource-fill, 0%), var(--egd-outline) 0);
 }
 .egd-resource-ring::after {
   content: "";
   position: absolute;
-  inset: 2px;
+  inset: 2.2px;
   border-radius: 50%;
   background: var(--egd-surface-elevated);
 }
 .egd-resource-ring.egd-resource-unmeasured { background: var(--egd-outline); }
-.egd-resource-readout { display: flex; min-width: 0; flex-direction: column; align-items: flex-start; gap: 1px; font-variant-numeric: tabular-nums; }
-.egd-resource-value { display: block; max-width: 9ch; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.egd-resource-value-secondary:empty { display: none; }
 /* Disk throughput has no percent: use a neutral drive glyph, not a capacity arc. */
 .egd-resource-disk.egd-resource-unmeasured {
   box-sizing: border-box;
-  width: 15px;
-  height: 13px;
-  border: 1.5px solid var(--egd-on-surface-variant);
-  border-radius: 3px;
+  width: 20px;
+  height: 16px;
+  border: 2px solid var(--egd-on-surface-variant);
+  border-radius: 4px;
   background: transparent;
 }
-.egd-resource-disk::after { inset: auto 2px 2px; height: 1px; border-radius: 0; background: var(--egd-on-surface-variant); }
+.egd-resource-disk::after { inset: auto 3px 2px; height: 2px; border-radius: 0; background: var(--egd-on-surface-variant); }
 .egd-resource-network {
   box-sizing: border-box;
-  width: 15px;
-  height: 15px;
-  border: 1px solid var(--egd-outline);
+  width: 20px;
+  height: 20px;
+  border: 2px solid var(--egd-outline);
   background: transparent;
-  font: 600 10px/1 var(--egd-font);
+  font: 600 11px/1 var(--egd-font);
 }
+.egd-resource-network.egd-resource-unmeasured { background: transparent; opacity: var(--egd-opacity-disabled); }
 .egd-resource-network::after { display: none; }
 .egd-resource-detail {
   position: absolute;
@@ -7761,6 +7802,9 @@
 .egd-resource-detail-row { display: flex; justify-content: space-between; gap: 10px; padding: 7px 0; border-bottom: 1px solid var(--egd-outline-variant); }
 .egd-resource-detail-row dt { color: var(--egd-on-surface-variant); }
 .egd-resource-detail-row dd { margin: 0; text-align: right; font-variant-numeric: tabular-nums; font-weight: 550; }
+/* Below the opened metric: all four at a glance, in words. */
+.egd-resource-overview-title { margin: 12px 0 0; color: var(--egd-on-surface-variant); font-weight: 600; }
+.egd-resource-detail .egd-resource-overview { margin-top: 5px; }
 
 /* Zoom begins 109px above the bottom; keep the narrow HUD 8px clear of it. */
 @media (max-width: 700px) {
@@ -7812,8 +7856,10 @@
   .egd-rail-center { flex: 0 1 32px; }
   .egd-rail-search { box-sizing: border-box; gap: 4px; padding-inline: 5px; }
   .egd-rail-right { flex: 1 1 0; }
-  .egd-rail-right .egd-resource-gadget { display: grid; grid-template-columns: repeat(2, max-content); grid-template-rows: repeat(2, 18px); height: 44px; gap: 0 3px; }
-  .egd-rail-right .egd-resource-button { height: 18px; justify-content: flex-start; font-size: 9px; }
+  /* Rings stay one row on a phone-width window; only their size steps down. */
+  .egd-rail-right .egd-resource-gadget { height: 34px; gap: 1px; padding: 2px; }
+  .egd-rail-right .egd-resource-button { width: 22px; height: 24px; }
+  .egd-rail-right .egd-resource-ring:not(.egd-resource-disk) { width: 18px; height: 18px; }
 }
 
 /* Agent Profile avatars: emoji or initial on the six approved palette tones

@@ -8044,7 +8044,8 @@
 
   function viewportBoardLabel(resolution = viewportBoardResolution()) {
     const projection = resolution.primaryId != null ? state.boards.projections[resolution.primaryId] : null;
-    if (!projection) return { text: 'Board 없음', title: '화면에 보이는 Board가 없습니다' };
+    // With no Board in view the top bar shows the product name, as in the approved style.
+    if (!projection) return { text: 'EG-Desk', title: '화면에 보이는 Board가 없습니다' };
     const names = resolution.visibleIds.map(id => state.boards.projections[id]?.title).filter(Boolean);
     return {
       text: resolution.extraCount > 0 ? `${projection.title} · +${resolution.extraCount}` : projection.title,
@@ -8072,6 +8073,30 @@
       viewportBoardSyncAt = Date.now();
       syncViewportBoardName();
     }, wait);
+  }
+
+  // 기록 상태: beside the top-bar name, the clock time of the last real write of
+  // this Desk to this PC, or a failure with [다시 기록]. Nothing shows before a write.
+  const RecordStatus = ChromeUtils.importESModule('chrome://userchrome/content/EGDeskRecordStatus.sys.mjs');
+  let deskRecordStatus = RecordStatus.RECORD_STATUS_INITIAL;
+  function noteDeskRecord(saved) {
+    deskRecordStatus = RecordStatus.nextRecordStatus(deskRecordStatus, { saved, at: Date.now() });
+    syncDeskRecordStatus();
+  }
+
+  function syncDeskRecordStatus() {
+    const status = document.querySelector('.egd-rail-record-status');
+    if (!status) return;
+    const view = RecordStatus.recordStatusView(deskRecordStatus);
+    const text = status.querySelector('.egd-rail-record-text');
+    if (text.textContent !== view.text) text.textContent = view.text;
+    if (status.title !== view.title) status.title = view.title;
+    status.dataset.state = view.state;
+    status.hidden = view.hidden;
+    status.querySelector('.egd-rail-record-retry').hidden = !view.retry;
+    // Only a failure is announced; the quiet time must not interrupt a screen reader every minute.
+    if (view.state === 'failed') status.setAttribute('role', 'alert');
+    else status.removeAttribute('role');
   }
 
   function cardLabelForViewportRail(card) {
@@ -8124,6 +8149,9 @@
     if (saveBtn) saveBtn.hidden = !state.agenda.dirty;
     const restoreBtn = document.querySelector('.egd-rail-restore-btn');
     if (restoreBtn) restoreBtn.hidden = !state.agenda.hasSavedState;
+    // 'Board 닫기' acts on an open Board; with none on the Desk it would do nothing.
+    const closeBoardBtn = document.querySelector('.egd-rail-close-agenda-btn');
+    if (closeBoardBtn) closeBoardBtn.hidden = Object.keys(state.boards.projections).length === 0;
     const focusedFile = Boolean(state.activeEntityId
       && document.getElementById(state.activeEntityId)?.classList.contains('egd-file-card'));
     const fileRailItem = document.querySelector('#egd-preset-bag .egd-bag-file');
@@ -9061,12 +9089,14 @@
 
   // Four compact host-resource readouts live in viewport chrome, never in Canvas or Chat.
   // Values come only from the protected local bridge; unavailable is not zero.
+  // The bar shows rings only (approved .eg-resources); every number is read in the
+  // popup a ring opens: that metric's rows, then all four at a glance.
   let resourceGadget = null;
   function buildResourceGadget() {
     if (resourceGadget) return resourceGadget;
     const specs = [
-      { id: 'cpu', label: 'CPU', shortLabel: 'CPU' },
-      { id: 'memory', label: '메모리', shortLabel: 'RAM' },
+      { id: 'cpu', label: 'CPU' },
+      { id: 'memory', label: '메모리' },
       { id: 'disk', label: '디스크' },
       { id: 'network', label: '네트워크' },
     ];
@@ -9086,7 +9116,8 @@
     const staleMs = 4000;
     const requestTimeoutMs = 2500;
     const buttons = new Map();
-    const readouts = new Map();
+    const overviewValues = new Map();
+    const overview = el('dl', { class: 'egd-resource-overview', 'aria-label': '전체 자원 한눈에 보기' });
     const metricReady = (metric) => metric?.status === 'ok';
     const numeric = (value) => typeof value === 'number' && Number.isFinite(value) && value >= 0;
     const size = (bytes) => {
@@ -9097,14 +9128,6 @@
       return `${Math.round(bytes / 1024)} KiB`;
     };
     const rate = (bytes) => numeric(bytes) ? `${size(bytes)}/s` : '—';
-    // Tight readouts use binary K/M/G; the tooltip and detail spell out KiB/MiB/GiB.
-    const compactRate = (bytes) => {
-      if (!numeric(bytes)) return '—';
-      if (bytes >= 1024 ** 3) return `${Number((bytes / 1024 ** 3).toFixed(1))}G/s`;
-      if (bytes >= 1024 ** 2) return `${Number((bytes / 1024 ** 2).toFixed(1))}M/s`;
-      if (bytes >= 1024) return `${Math.round(bytes / 1024)}K/s`;
-      return `${Math.round(bytes)}B/s`;
-    };
     const percent = (metric) => metricReady(metric) && numeric(metric.percent)
       ? `${Math.round(metric.percent)}%` : '—';
     const metricStatus = (metric) => {
@@ -9163,6 +9186,8 @@
         el('p', { class: 'egd-resource-detail-scope' }, `${opened === 'network' ? '기본 네트워크 연결' : '이 컴퓨터'} · ${sampledAt}`),
         el('dl', {}, ...rows(opened, metric).map(([label, value]) =>
           el('div', { class: 'egd-resource-detail-row' }, el('dt', {}, label), el('dd', {}, value)))),
+        el('div', { class: 'egd-resource-overview-title' }, '전체 자원'),
+        overview,
       );
     };
     const render = () => {
@@ -9182,12 +9207,8 @@
         const label = spec.id === 'memory' ? '메모리 사용(캐시 포함)' : spec.label;
         button.setAttribute('aria-label', `${label} ${value}, 상세 보기`);
         button.title = `${label} · ${value}`;
-        const readout = readouts.get(spec.id);
-        readout.first.textContent = isRate
-          ? `${spec.id === 'disk' ? 'R' : '↓'} ${metricReady(throughput) ? compactRate(firstRate) : '—'}`
-          : `${spec.shortLabel} ${value}`;
-        readout.second.textContent = isRate
-          ? `${spec.id === 'disk' ? 'W' : '↑'} ${metricReady(throughput) ? compactRate(secondRate) : '—'}` : '';
+        overviewValues.get(spec.id).textContent = isRate && metricReady(throughput)
+          ? `${firstLabel} ${rate(firstRate)} · ${secondLabel} ${rate(secondRate)}` : value;
         const ring = button.querySelector('.egd-resource-ring');
         if (!isRate) {
           const measured = metricReady(metric) && numeric(metric.percent);
@@ -9211,10 +9232,9 @@
     for (const spec of specs) {
       const ring = el('span', { class: `egd-resource-ring egd-resource-${spec.id} egd-resource-unmeasured`, 'aria-hidden': 'true' },
         spec.id === 'network' ? '↕' : null);
-      const first = el('span', { class: 'egd-resource-value egd-resource-value-primary' }, '—');
-      const second = el('span', { class: 'egd-resource-value egd-resource-value-secondary' });
-      const readout = el('span', { class: 'egd-resource-readout', 'aria-hidden': 'true' }, first, second);
-      readouts.set(spec.id, { first, second });
+      const overviewValue = el('dd', {}, '—');
+      overviewValues.set(spec.id, overviewValue);
+      overview.appendChild(el('div', { class: 'egd-resource-detail-row' }, el('dt', {}, spec.label), overviewValue));
       const button = el('button', {
         type: 'button', class: `egd-resource-button egd-resource-button-${spec.id}`, title: `${title(spec.id)} · 측정 대기`,
         'aria-label': `${title(spec.id)} 측정 대기, 상세 보기`,
@@ -9227,7 +9247,7 @@
           for (const [id, control] of buttons) control.setAttribute('aria-expanded', String(id === opened));
           render();
         },
-      }, ring, readout);
+      }, ring);
       buttons.set(spec.id, button);
       gadget.appendChild(button);
     }
@@ -9318,6 +9338,16 @@
         el('span', { class: 'egd-rail-card-badge', hidden: true }),
         el('span', { class: 'egd-rail-chevron' }, deskIcon('chevron')),
       ),
+      el('span', { class: 'egd-rail-record-status', hidden: true, data: { state: 'none' } },
+        el('span', { class: 'egd-rail-record-text' }),
+        el('button', {
+          type: 'button', class: 'egd-rail-record-retry', hidden: true, title: '이 PC에 다시 기록', 'aria-label': '이 PC에 다시 기록',
+          onclick: (ev) => {
+            ev.stopPropagation();
+            if (!persistDeskSession({ reason: 'explicit' })) boardNotice('이 PC에 기록하지 못했습니다. 잠시 후 다시 시도해 주세요.');
+          },
+        }, '다시 기록'),
+      ),
     );
 
     const searchInput = el('input', {
@@ -9368,8 +9398,9 @@
       }, deskIcon('recovery')),
       el('button', {
         class: 'egd-rail-icon egd-rail-close-agenda-btn',
-        title: 'Board 닫기',
+        title: '선택한 Board 닫기',
         'aria-label': '선택한 Board 닫기',
+        hidden: Object.keys(state.boards.projections).length === 0,
         onclick: (ev) => {
           ev.stopPropagation();
           closeCurrentAgenda();
@@ -9383,7 +9414,8 @@
         onclick: (ev) => { ev.stopPropagation(); toggleDeskMenu(ev.currentTarget); },
       }, deskIcon('menu')),
       el('button', { id: 'egd-recovery-open', class: 'egd-rail-icon', 'aria-label': '복구 기록', title: '복구 기록', hidden: true, onclick: () => openDeskRecoveryEntry() }, deskIcon('recovery')),
-      el('button', { class: 'egd-rail-icon', title: '알림 연결 전', 'aria-label': '알림 연결 전', disabled: 'true' }, deskIcon('alert')),
+      // Notifications are not connected yet: the bell stays out of the bar until it has something to say.
+      el('button', { class: 'egd-rail-icon egd-rail-notice-btn', title: '알림', 'aria-label': '알림', hidden: true, disabled: 'true' }, deskIcon('alert')),
       buildResourceGadget(),
       el('div', { class: 'egd-rail-avatar', title: '로컬 Desk', 'aria-label': '로컬 Desk' }, deskIcon('account')),
     );
@@ -9392,6 +9424,7 @@
     rail.appendChild(center);
     rail.appendChild(right);
     queueMicrotask(syncViewportAgendaRail);
+    queueMicrotask(syncDeskRecordStatus);
     return rail;
   }
 
@@ -25762,6 +25795,7 @@
     // The preference value stays the fallback on every save; a ready Desk store
     // also keeps this Desk as a recovery point (offline, 503 or timeout: preferences only).
     const saved = writeSurfacePref(DESK_SESSION_PREF, snapshot);
+    noteDeskRecord(saved);
     void deskStoreSync().saveDesk(snapshot, { reason: options?.reason === 'explicit' ? 'explicit' : 'autosave' });
     return saved;
   }
