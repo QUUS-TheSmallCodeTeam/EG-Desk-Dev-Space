@@ -224,7 +224,9 @@ test('the unavailable platform reason appears on the disabled Browser menu entry
     browserCookieImportSupport: () => ({ supported: false, reason: 'platform-unsupported' }),
     browserCookieImportReasonMessage: f.api.browserCookieImportReasonMessage,
     spawnBrowserCard() {}, copyTextToClipboard() {}, navigateBrowser() {}, stopBrowser() {}, reloadBrowser() {},
-    isCardFullscreen: () => false, toggleCardFullscreen() {}, endAgentHold() {}, openFirefoxBrowserLibrary() {}, openFirefoxBrowserImport() {} };
+    isCardFullscreen: () => false, toggleCardFullscreen() {}, endAgentHold() {}, openFirefoxBrowserLibrary() {}, openFirefoxBrowserImport() {},
+    // BRW-11: the menu asks whether this conversation holds a standing grant on the Card; none here.
+    browserToolGrantFor: () => null };
   const code = section('  function el(', '\n  function svgEl(') +
     section('    const duplicateBrowser = () => spawnBrowserCard(', '    const selectBrowserForChat =') +
     '\n    const selectBrowserForChat = () => {};\n' + section('    const showBrowserMenu =', '\n    card._browserState =');
