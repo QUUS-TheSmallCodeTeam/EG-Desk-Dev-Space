@@ -4954,6 +4954,11 @@ button.egd-codex-work-screen,
   cursor: pointer;
 }
 #egd-codex-activity-panel button.egd-codex-work-screen { margin: 0 0 6px; }
+/* [따라보기] in the record's head: filled while on, so its state reads without the words. */
+#egd-codex-activity-panel button.egd-codex-follow-toggle { cursor: pointer; white-space: nowrap; }
+#egd-codex-activity-panel button.egd-codex-follow-toggle:hover { border-color: var(--egd-focus-border); background: var(--egd-hover); color: var(--egd-on-surface); }
+#egd-codex-activity-panel button.egd-codex-follow-toggle[aria-pressed="true"] { border-color: var(--egd-primary); background: var(--egd-primary); color: var(--egd-on-primary); }
+#egd-codex-activity-panel button.egd-codex-follow-toggle:focus-visible { outline: var(--egd-focus-outline); outline-offset: var(--egd-focus-outline-offset); }
 /* Beside a read's '당시 읽은 내용': two separate buttons, a breath apart. */
 #egd-codex-activity-panel button + button.egd-codex-work-screen { margin-left: 6px; }
 button.egd-codex-work-screen:hover,

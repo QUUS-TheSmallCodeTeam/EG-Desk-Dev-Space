@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import {
   WORK_SCREEN_LABEL, chatReturnOrigin, chatReturnPlan, runWorkScreen, suggestionHighlight,
+  workScreenFollowStart, workScreenFollowStep, workScreenFollowToggle,
 } from '../overlay/resources/EGDeskChatCanvasLinks.sys.mjs';
 
 const surfaceSource = readFileSync(new URL('../overlay/JS/eg-desk-surface.uc.js', import.meta.url), 'utf8');
@@ -198,6 +199,115 @@ test('a read in the activity record offers 당시 읽은 내용 and, while the m
   assert.match(surfaceCss, /^#egd-codex-activity-panel button \+ button\.egd-codex-work-screen \{ margin-left: 6px; \}/m);
 });
 
+// ---- 따라보기 (B47) ----
+
+test('따라보기 is off until pressed, moves only when the Agent changes Card, and ends on the user\'s own camera move', () => {
+  const off = { on: false, threadId: null, cardId: null, cameraRevision: 0 };
+  assert.deepEqual(workScreenFollowStep(undefined, { threadId: 't1', busy: true, targetCardId: 'card-a' }), { follow: off, moveTo: null, ended: null }, 'never on by itself');
+  const started = workScreenFollowStart({ threadId: 't1', targetCardId: 'card-a', cameraRevision: 4 });
+  assert.deepEqual(started, { on: true, threadId: 't1', cardId: 'card-a', cameraRevision: 4 });
+  assert.deepEqual(workScreenFollowStart({ threadId: '' }), off);
+  const now = { threadId: 't1', busy: true, cameraRevision: 4 };
+  // Same Card: nothing moves.
+  assert.deepEqual(workScreenFollowStep(started, { ...now, targetCardId: 'card-a' }), { follow: started, moveTo: null, ended: null });
+  // The Agent went to another Card: one move there, remembered.
+  const moved = workScreenFollowStep(started, { ...now, targetCardId: 'card-b' });
+  assert.deepEqual(moved, { follow: { ...started, cardId: 'card-b' }, moveTo: 'card-b', ended: null });
+  assert.equal(workScreenFollowStep(moved.follow, { ...now, targetCardId: 'card-b' }).moveTo, null);
+  // Between Cards (no target for a moment) it waits where it is.
+  assert.deepEqual(workScreenFollowStep(moved.follow, { ...now, targetCardId: null }), { follow: moved.follow, moveTo: null, ended: null });
+  // The user panned or zoomed: off, and it does not come back.
+  const panned = workScreenFollowStep(moved.follow, { ...now, cameraRevision: 5, targetCardId: 'card-a' });
+  assert.deepEqual(panned, { follow: off, moveTo: null, ended: 'camera' });
+  assert.deepEqual(workScreenFollowStep(panned.follow, { ...now, cameraRevision: 5, targetCardId: 'card-a' }), { follow: off, moveTo: null, ended: null });
+  // Another conversation in the record (or the record closed), or the work is over.
+  assert.equal(workScreenFollowStep(started, { ...now, threadId: 't2', targetCardId: 'card-b' }).ended, 'room');
+  assert.equal(workScreenFollowStep(started, { ...now, threadId: null }).ended, 'room');
+  assert.deepEqual(workScreenFollowStep(started, { ...now, busy: false, targetCardId: 'card-b' }), { follow: off, moveTo: null, ended: 'idle' });
+  // Started with nowhere to go yet: the first Card the Agent takes is followed.
+  const waiting = workScreenFollowStart({ threadId: 't1', cameraRevision: 4 });
+  assert.equal(workScreenFollowStep(waiting, { ...now, targetCardId: 'card-a' }).moveTo, 'card-a');
+});
+
+test('the 따라보기 toggle is drawn only when there is something to follow, and says its state in words', () => {
+  const on = workScreenFollowStart({ threadId: 't1', targetCardId: 'card-a', cameraRevision: 0 });
+  assert.equal(workScreenFollowToggle(null, { threadId: 't1', available: false }), null);
+  assert.deepEqual(workScreenFollowToggle(null, { threadId: 't1', available: true }),
+    { pressed: false, label: '따라보기: 꺼짐', title: 'Agent가 작업하는 창이 바뀌면 화면이 따라갑니다. 화면을 직접 움직이면 꺼집니다.' });
+  assert.deepEqual(workScreenFollowToggle(on, { threadId: 't1', available: false }),
+    { pressed: true, label: '따라보기: 켜짐', title: 'Agent가 작업하는 창을 따라 화면이 이동합니다. 화면을 직접 움직이면 꺼집니다.' });
+  assert.equal(workScreenFollowToggle(on, { threadId: 't2', available: false }), null, 'another conversation never shows it as on');
+  assert.equal(workScreenFollowToggle(on, { threadId: 't2', available: true }).pressed, false);
+});
+
+test('따라보기 in the activity record: one press starts it, the Agent\'s next Card is followed without taking the selection, a user pan ends it', () => {
+  const doc = fakeDocument();
+  const el = elFor(doc);
+  const calls = [];
+  const intervals = new Map();
+  let nextInterval = 0;
+  const windowStub = { setInterval: (fn, ms) => { intervals.set(++nextInterval, { fn, ms }); return nextInterval; }, clearInterval: id => intervals.delete(id) };
+  const state = { canvasUserCameraRevision: 2, codex: { activityThreadId: 't1' } };
+  const thread = { id: 't1' };
+  let runs = [{ runId: 'run-1', busy: true, card: 'card-a' }];
+  const start = surfaceSource.indexOf('  let workScreenFollow = ChatCanvasLinks.workScreenFollowStart();');
+  const end = surfaceSource.indexOf('\n  }\n', surfaceSource.indexOf('  function codexWorkScreenFollowToggle(thread) {')) + 4;
+  assert.ok(start > 0 && end > start);
+  let renders = 0;
+  const api = compileFunction(`${surfaceSource.slice(start, end)}\nreturn { toggle: codexWorkScreenFollowToggle, step: stepWorkScreenFollow, follow: () => workScreenFollow };`,
+    ['ChatCanvasLinks', 'ChatState', 'state', 'window', 'document', 'el', 'codexRuns', 'codexRunWorkScreen', 'getCodexThreadById', 'goToRunWorkScreen', 'renderCodexActivityPanel'])(
+    { workScreenFollowStart, workScreenFollowStep, workScreenFollowToggle }, { isRunBusy: run => run.busy }, state, windowStub, doc, el,
+    () => runs, run => run.busy && run.card ? { cardId: run.card } : null, (codex, id) => id === 't1' ? thread : null,
+    (cardId, options) => calls.push(['go', cardId, options]), () => { renders += 1; });
+
+  const offButton = api.toggle(thread);
+  assert.equal(offButton.textContent, '따라보기: 꺼짐');
+  assert.equal(offButton.attributes['aria-pressed'], 'false');
+  assert.equal(offButton.dataset.testid, 'chat-work-screen-follow');
+  assert.ok(offButton.attributes.title.includes('화면을 직접 움직이면 꺼집니다'));
+  assert.deepEqual([calls, intervals.size], [[], 0], 'drawing the toggle follows nothing');
+  offButton.dispatch('click');
+  assert.deepEqual(calls, [['go', 'card-a', { activate: false }]], 'the press goes to where the Agent works now, without selecting it');
+  assert.deepEqual([[...intervals.values()].map(item => item.ms), renders], [[1000], 1]);
+  const onButton = api.toggle(thread);
+  assert.deepEqual([onButton.textContent, onButton.attributes['aria-pressed']], ['따라보기: 켜짐', 'true']);
+
+  // Same Card: nothing. The Agent takes another Card: one move, found by the slow look.
+  const tick = [...intervals.values()][0].fn;
+  tick();
+  assert.equal(calls.length, 1);
+  runs = [{ runId: 'run-1', busy: true, card: 'card-b' }];
+  tick();
+  assert.deepEqual(calls.at(-1), ['go', 'card-b', { activate: false }]);
+  assert.equal(renders, 1, 'a move redraws nothing');
+  // The user pans: it ends, the timer stops, the record redraws its toggle, and nothing follows after.
+  state.canvasUserCameraRevision = 3;
+  runs = [{ runId: 'run-1', busy: true, card: 'card-a' }];
+  tick();
+  assert.deepEqual([calls.length, intervals.size, renders, api.follow().on], [2, 0, 2, false]);
+  assert.equal(api.toggle(thread).textContent, '따라보기: 꺼짐');
+
+  // Pressed while on: off at once. Without a work screen and off: no toggle at all.
+  api.toggle(thread).dispatch('click');
+  assert.equal(intervals.size, 1);
+  api.toggle(thread).dispatch('click');
+  assert.deepEqual([intervals.size, api.follow().on], [0, false]);
+  runs = [{ runId: 'run-1', busy: false, card: 'card-a' }];
+  assert.equal(api.toggle(thread), null);
+  // The work ends while it is on: it turns itself off.
+  runs = [{ runId: 'run-2', busy: true, card: 'card-a' }];
+  api.toggle(thread).dispatch('click');
+  runs = [{ runId: 'run-2', busy: false, card: 'card-a' }];
+  assert.equal(api.step(), true);
+  assert.deepEqual([api.follow().on, intervals.size], [false, 0]);
+
+  const panel = declaration('renderCodexActivityPanel') || '';
+  assert.match(panel, /const followToggle = typeof codexWorkScreenFollowToggle === 'function' \? codexWorkScreenFollowToggle\(thread\) : null;\n\s*panel\.replaceChildren\(el\('header', \{\}, el\('strong', \{\}, '활동 기록'\), followToggle, el\('button', \{/);
+  assert.match(declaration('goToRunWorkScreen'), /if \(activate\) focusCanvasCard\(card\);/, 'following never takes the selection or the keyboard');
+  assert.match(surfaceCss, /^#egd-codex-activity-panel button\.egd-codex-follow-toggle\[aria-pressed="true"\] \{[^}]*var\(--egd-primary\)[^}]*\}/m);
+  assert.match(surfaceCss, /^#egd-codex-activity-panel button\.egd-codex-follow-toggle:focus-visible \{ outline: var\(--egd-focus-outline\);/m);
+});
+
 // ---- 채팅으로 돌아가기 (B44) ----
 
 test('chatReturnOrigin keeps the camera and the conversation scroll it left from', () => {
@@ -262,6 +372,16 @@ test('the way back stays until used, closed or the Chat is back, and returns to 
   assert.equal(chat.log.scrollTop, 640);
   assert.equal(cue.removed, true);
   assert.deepEqual(chat.listeners.mousedown, [], 'its Chat listeners go with it');
+
+  // A second move away from the same Chat keeps the first view as the place to return to.
+  calls.length = 0;
+  state.panTarget = { x: 24, y: 76 }; state.zoomTarget = 0.9;
+  const first = show(chat);
+  state.panTarget = { x: -2000, y: -900 }; state.zoomTarget = 0.6;
+  const again = show(chat);
+  assert.equal(first.removed, true);
+  again.testid('chat-return').dispatch('click');
+  assert.deepEqual(calls[0], ['camera', { pan: { x: 24, y: 76 }, zoom: 0.9 }]);
 
   // Closed by the user: nothing moves.
   calls.length = 0;

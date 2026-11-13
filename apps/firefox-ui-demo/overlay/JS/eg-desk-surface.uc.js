@@ -4587,7 +4587,9 @@
     // Reconcile only on actual replacement, after the IME return. Keyed readers
     // survive unrelated SSE updates; disappeared or invalidated ones retire.
     replaceCodexActivityDetails(detailsView);
-    panel.replaceChildren(el('header', {}, el('strong', {}, '활동 기록'), el('button', {
+    // BRW-13: [따라보기] sits in the head while there is a work screen to follow (absent where this block runs alone, as in tests).
+    const followToggle = typeof codexWorkScreenFollowToggle === 'function' ? codexWorkScreenFollowToggle(thread) : null;
+    panel.replaceChildren(el('header', {}, el('strong', {}, '활동 기록'), followToggle, el('button', {
       'aria-label': '활동 상태 다시 확인', onclick: () => state.codexBridge.refreshConversation(thread.id),
     }, '새로고침'), el('button', {
       'aria-label': '활동 기록 닫기', onclick: () => {
@@ -7847,11 +7849,16 @@
   }
 
   function showChatReturnCue(chatCard) {
-    document.getElementById('egd-chat-return')?._dismiss?.();
+    // A second move away from the same Chat (another work screen) keeps the first view as the place to return to.
+    const standing = document.getElementById('egd-chat-return');
+    const kept = standing?._chatCard === chatCard ? standing._origin : null;
+    standing?._dismiss?.();
     const chatLog = () => chatCard.querySelector?.('.egd-codex-messages') || null;
-    const origin = ChatCanvasLinks.chatReturnOrigin({ pan: state.panTarget, zoom: state.zoomTarget,
+    const origin = kept || ChatCanvasLinks.chatReturnOrigin({ pan: state.panTarget, zoom: state.zoomTarget,
       threadId: state.codex?.activeThreadId, scrollTop: chatLog()?.scrollTop });
     const cue = el('div', { id: 'egd-chat-return', class: 'egd-edge egd-frosted', role: 'group', 'aria-label': '채팅으로 돌아가기' });
+    cue._chatCard = chatCard;
+    cue._origin = origin;
     const chatListeners = new AbortController();
     const dismiss = () => {
       chatListeners.abort();
@@ -7905,11 +7912,12 @@
 
   // The camera goes to that Card on this press only. It is framed with the
   // Chat when both stay readable; otherwise the way back to the Chat stays up.
-  function goToRunWorkScreen(cardId) {
+  function goToRunWorkScreen(cardId, { activate = true } = {}) {
     const card = cardId ? document.getElementById(cardId) : null;
-    if (!card?.isConnected) { boardNotice('작업 화면을 찾지 못했습니다. 창이 닫혔을 수 있습니다.'); return false; }
+    if (!card?.isConnected) { if (activate) boardNotice('작업 화면을 찾지 못했습니다. 창이 닫혔을 수 있습니다.'); return false; }
     const chatCard = state.codex.chatCardEntityId ? document.getElementById(state.codex.chatCardEntityId) : null;
-    focusCanvasCard(card);
+    // A press selects the Card; [따라보기] only brings it into view, so typing elsewhere keeps its focus.
+    if (activate) focusCanvasCard(card);
     revealOpenCanvasCard(card, { kind: card.classList.contains('egd-browser-card') ? 'browser' : 'view', opener: chatCard });
     return true;
   }
@@ -7927,6 +7935,62 @@
       data: { testid: 'chat-source-work-screen', cardId: viewId },
       onclick: (ev) => { ev.stopPropagation(); goToRunWorkScreen(viewId); },
     }, deskIcon('browser'), el('span', {}, ChatCanvasLinks.WORK_SCREEN_LABEL));
+  }
+
+  // [따라보기] in the activity record's head (BRW-13). Off until pressed. While
+  // on, the camera goes to the Card the conversation's Agent works on each time
+  // that Card changes; the user's own pan or zoom, another conversation in the
+  // record, or the end of the work turns it off. It hands over no input.
+  let workScreenFollow = ChatCanvasLinks.workScreenFollowStart();
+  let workScreenFollowTimer = 0;
+  function codexThreadWorkScreen(thread) {
+    for (const run of [...codexRuns(thread)].reverse()) {
+      const view = codexRunWorkScreen(run);
+      if (view) return view;
+    }
+    return null;
+  }
+
+  // One look: true when [따라보기] just ended, so its toggle needs a redraw.
+  function stepWorkScreenFollow() {
+    if (!workScreenFollow.on) return false;
+    const thread = getCodexThreadById(state.codex, state.codex.activityThreadId);
+    const step = ChatCanvasLinks.workScreenFollowStep(workScreenFollow, { threadId: thread?.id || null,
+      busy: !!thread && codexRuns(thread).some(ChatState.isRunBusy), targetCardId: thread ? codexThreadWorkScreen(thread)?.cardId || null : null,
+      cameraRevision: state.canvasUserCameraRevision || 0 });
+    workScreenFollow = step.follow;
+    if (step.moveTo) goToRunWorkScreen(step.moveTo, { activate: false });
+    if (!workScreenFollow.on && workScreenFollowTimer) { window.clearInterval(workScreenFollowTimer); workScreenFollowTimer = 0; }
+    return step.ended !== null;
+  }
+
+  function codexWorkScreenFollowToggle(thread) {
+    stepWorkScreenFollow();
+    const target = codexThreadWorkScreen(thread);
+    const view = ChatCanvasLinks.workScreenFollowToggle(workScreenFollow, { threadId: thread.id, available: !!target });
+    if (!view) return null;
+    return el('button', {
+      type: 'button', class: 'egd-codex-follow-toggle', 'aria-pressed': String(view.pressed), title: view.title,
+      data: { testid: 'chat-work-screen-follow', focusKey: 'work-screen-follow' },
+      onclick: (ev) => {
+        ev.stopPropagation();
+        if (workScreenFollowTimer) { window.clearInterval(workScreenFollowTimer); workScreenFollowTimer = 0; }
+        if (view.pressed) workScreenFollow = ChatCanvasLinks.workScreenFollowStart();
+        else {
+          const now = codexThreadWorkScreen(thread);
+          workScreenFollow = ChatCanvasLinks.workScreenFollowStart({ threadId: thread.id, targetCardId: now?.cardId || null,
+            cameraRevision: state.canvasUserCameraRevision || 0 });
+          if (workScreenFollow.on) {
+            if (now) goToRunWorkScreen(now.cardId, { activate: false });
+            // The Agent can take another Card without a new record line; a slow look catches that and the user's own camera move.
+            workScreenFollowTimer = window.setInterval(() => { if (stepWorkScreenFollow()) renderCodexActivityPanel(); }, 1000);
+          }
+        }
+        renderCodexActivityPanel();
+        // The head is redrawn with the record; the toggle keeps the focus it was pressed with.
+        document.getElementById('egd-codex-activity-panel')?.querySelector?.('.egd-codex-follow-toggle')?.focus({ preventScroll: true });
+      },
+    }, view.label);
   }
 
   function codexRunWorkScreenButton(run, { busy, testid = 'chat-run-work-screen' } = {}) {

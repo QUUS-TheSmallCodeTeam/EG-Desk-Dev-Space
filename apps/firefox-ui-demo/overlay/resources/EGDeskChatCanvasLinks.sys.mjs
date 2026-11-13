@@ -32,6 +32,49 @@ export function runWorkScreen(run, bindings, { busy = false, cancelled = null, c
   return { cardId: best.cardId, label: WORK_SCREEN_LABEL, title, ariaLabel: `${WORK_SCREEN_LABEL} · ${title}` };
 }
 
+const FOLLOW_OFF = Object.freeze({ on: false, threadId: null, cardId: null, cameraRevision: 0 });
+
+/**
+ * [따라보기] turned on by the user's press for one conversation: it starts at
+ * the Card that conversation's Agent works on now (the caller goes there once,
+ * as that press asked) and remembers the camera the user last set.
+ */
+export function workScreenFollowStart({ threadId = null, targetCardId = null, cameraRevision = 0 } = {}) {
+  if (typeof threadId !== 'string' || !threadId) return { ...FOLLOW_OFF };
+  return { on: true, threadId, cardId: typeof targetCardId === 'string' && targetCardId ? targetCardId : null,
+    cameraRevision: Number.isSafeInteger(cameraRevision) ? cameraRevision : 0 };
+}
+
+/**
+ * One look at a running [따라보기]. It ends — never restarts by itself — when
+ * the user moved the camera ('camera'), the record shows another conversation
+ * or closed ('room'), or no run is busy any more ('idle'). While on, `moveTo`
+ * names a Card only when the Agent went to a different one than last time.
+ */
+export function workScreenFollowStep(follow, { threadId = null, busy = false, targetCardId = null, cameraRevision = 0 } = {}) {
+  if (follow?.on !== true) return { follow: { ...FOLLOW_OFF }, moveTo: null, ended: null };
+  const end = ended => ({ follow: { ...FOLLOW_OFF }, moveTo: null, ended });
+  if (follow.threadId !== threadId) return end('room');
+  if (follow.cameraRevision !== cameraRevision) return end('camera');
+  if (busy !== true) return end('idle');
+  if (typeof targetCardId === 'string' && targetCardId && targetCardId !== follow.cardId) {
+    return { follow: { ...follow, cardId: targetCardId }, moveTo: targetCardId, ended: null };
+  }
+  return { follow, moveTo: null, ended: null };
+}
+
+/**
+ * The [따라보기] toggle in the activity record's head: null (not drawn) unless
+ * it is on for this conversation or there is a work screen to follow.
+ */
+export function workScreenFollowToggle(follow, { threadId = null, available = false } = {}) {
+  const pressed = follow?.on === true && follow.threadId === threadId;
+  if (!pressed && available !== true) return null;
+  return { pressed, label: pressed ? '따라보기: 켜짐' : '따라보기: 꺼짐',
+    title: pressed ? 'Agent가 작업하는 창을 따라 화면이 이동합니다. 화면을 직접 움직이면 꺼집니다.'
+      : 'Agent가 작업하는 창이 바뀌면 화면이 따라갑니다. 화면을 직접 움직이면 꺼집니다.' };
+}
+
 /**
  * What '채팅으로 돌아가기' returns to: the camera the user left and where the
  * conversation was scrolled. Taken before the camera moves away.
