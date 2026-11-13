@@ -283,3 +283,78 @@ test('suggestionHighlight: the Card to outline follows the hovered or focused ro
   assert.deepEqual(suggestionHighlight(undefined, { type: 'enter', ref: 7 }), none);
   assert.deepEqual(suggestionHighlight({ ref: 'card-a' }, null), { ref: 'card-a' });
 });
+
+test('a recommended material row outlines its Card while hovered or keyboard-focused, and nothing else changes', () => {
+  // Minimal nodes: class list, closest/matches/contains by hand.
+  const classes = () => { const set = new Set(); return { add: name => set.add(name), remove: name => set.delete(name), contains: name => set.has(name), set }; };
+  const card = (id, selector = '.egd-canvas-card, .egd-canvas-shape') => ({ id, isConnected: true, classList: classes(), matches: query => query === selector });
+  const cardsById = { 'card-a': card('card-a'), 'card-b': card('card-b'), 'egd-hud': card('egd-hud', '#egd-hud') };
+  const doc = { activeElement: null, getElementById: id => cardsById[id] || null, listeners: {}, addEventListener(type, fn, capture) { this.listeners[type] = [fn, capture]; } };
+  const makeRow = ref => {
+    const row = { dataset: { ref }, isConnected: true, hovered: false, parts: new Set() };
+    row.closest = query => query === '.egd-context-suggest-row' ? row : null;
+    row.contains = node => node === row || row.parts.has(node);
+    row.matches = query => query === ':hover' ? row.hovered : false;
+    row.part = (focusVisible = false) => { const part = { closest: row.closest, matches: query => query === ':focus-visible' ? focusVisible : false }; row.parts.add(part); return part; };
+    return row;
+  };
+  const outside = { closest: () => null, matches: () => false };
+  const block = surfaceSource.slice(surfaceSource.indexOf('  const contextSuggestOutline = { ref: null, row: null };'),
+    surfaceSource.indexOf("  for (const type of ['mouseover', 'mouseout', 'focusin', 'focusout']) document.addEventListener(type, contextSuggestOutlineEvent, true);"));
+  assert.ok(block.includes('function contextSuggestOutlineEvent(ev)'));
+  const { contextSuggestOutlineEvent: fire, contextSuggestOutline: held } = compileFunction(`${block}\nreturn { contextSuggestOutlineEvent, contextSuggestOutline };`,
+    ['document', 'ChatCanvasLinks'])(doc, { suggestionHighlight });
+  const outlined = () => Object.values(cardsById).filter(item => item.classList.contains('egd-entity-suggested')).map(item => item.id);
+
+  const rowA = makeRow('card-a'), rowB = makeRow('card-b');
+  fire({ type: 'mouseover', target: rowA.part() });
+  assert.deepEqual(outlined(), ['card-a']);
+  fire({ type: 'mouseout', target: rowA.part(), relatedTarget: rowA.part() });
+  assert.deepEqual(outlined(), ['card-a'], 'moving inside the row keeps it');
+  fire({ type: 'mouseover', target: rowB.part() });
+  assert.deepEqual(outlined(), ['card-b'], 'one Card at a time');
+  fire({ type: 'mouseout', target: rowB.part(), relatedTarget: outside });
+  assert.deepEqual([outlined(), held.ref, held.row], [[], null, null], 'only while the pointer is on the row');
+
+  // Keyboard focus outlines; a click's focus alone does not.
+  fire({ type: 'focusin', target: rowA.part(false) });
+  assert.deepEqual(outlined(), []);
+  const focusedA = rowA.part(true);
+  fire({ type: 'focusin', target: focusedA });
+  assert.deepEqual(outlined(), ['card-a']);
+  // The pointer visits another row and leaves: the keyboard's row takes the outline back.
+  doc.activeElement = focusedA;
+  fire({ type: 'mouseover', target: rowB.part() });
+  fire({ type: 'mouseout', target: rowB.part(), relatedTarget: outside });
+  assert.deepEqual(outlined(), ['card-a']);
+  fire({ type: 'focusout', target: focusedA, relatedTarget: outside });
+  assert.deepEqual(outlined(), []);
+  doc.activeElement = null;
+  // Focus leaving a row the pointer still rests on keeps the outline.
+  fire({ type: 'mouseover', target: rowB.part() });
+  rowB.hovered = true;
+  fire({ type: 'focusout', target: rowB.part(), relatedTarget: outside });
+  assert.deepEqual(outlined(), ['card-b']);
+  rowB.hovered = false;
+
+  // The Chat redrew and the row is gone: the next move anywhere else drops the outline.
+  rowB.isConnected = false;
+  fire({ type: 'mouseover', target: outside });
+  assert.deepEqual([outlined(), held.ref], [[], null]);
+  // A row whose Card is closed, or whose ref is not a Canvas object, outlines nothing.
+  fire({ type: 'mouseover', target: makeRow('card-gone').part() });
+  fire({ type: 'mouseover', target: makeRow('egd-hud').part() });
+  assert.deepEqual([outlined(), held.ref], [[], null]);
+  fire({ type: 'mouseover', target: outside });
+  assert.deepEqual(outlined(), []);
+
+  // Wiring and style: document-level listeners (rows are redrawn), no camera call, tokens only.
+  assert.doesNotMatch(block, /setCanvasPanTarget|setCanvasViewportTarget|focusCanvasCard|revealOpenCanvasCard|setActiveEntity/, 'the camera and selection stay as they are');
+  assert.match(surfaceSource, /  for \(const type of \['mouseover', 'mouseout', 'focusin', 'focusout'\]\) document\.addEventListener\(type, contextSuggestOutlineEvent, true\);/);
+  assert.match(declaration('buildContextSuggestions'), /class: `egd-context-suggest-row egd-context-suggest-row-\$\{row\.mode\}`,[^]*?data: \{ testid: 'chat-context-candidate', ref: row\.ref, mode: row\.mode \}/,
+    'each row names its Card by ref');
+  const rule = surfaceCss.match(/^\.egd-canvas-card\.egd-entity-suggested,\n\.egd-canvas-shape\.egd-entity-suggested \{([^}]+)\}/m)?.[1] || '';
+  assert.match(rule, /outline: calc\(2px \/ var\(--egd-camera-zoom, 1\)\) dashed var\(--egd-card-selection\);/);
+  assert.match(rule, /outline-offset: calc\(3px \/ var\(--egd-camera-zoom, 1\)\);/);
+  assert.doesNotMatch(rule, /#[0-9a-f]{3,8}\b|rgba?\(/i, 'tokens only');
+});

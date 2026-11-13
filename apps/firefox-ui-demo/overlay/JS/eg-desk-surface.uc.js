@@ -7920,6 +7920,47 @@
     }, deskIcon('browser'), el('span', {}, view.label));
   }
 
+  // "가까이 있는 것 = 관련 있는 것": while the pointer or keyboard focus is on a
+  // recommended material row in Chat, the Card that row names is outlined on
+  // the Canvas. It lasts only that long and never moves the camera — a Card
+  // outside the view simply stays there. The rows are redrawn with the Chat,
+  // so this listens on the document and drops an outline whose row is gone.
+  const contextSuggestOutline = { ref: null, row: null };
+  function applyContextSuggestOutline(next, row = null) {
+    const ref = next?.ref || null;
+    if (contextSuggestOutline.ref !== ref) {
+      if (contextSuggestOutline.ref) document.getElementById(contextSuggestOutline.ref)?.classList.remove('egd-entity-suggested');
+      const card = ref ? document.getElementById(ref) : null;
+      const shown = card?.isConnected && card.matches?.('.egd-canvas-card, .egd-canvas-shape') ? card : null;
+      shown?.classList.add('egd-entity-suggested');
+      contextSuggestOutline.ref = shown ? ref : null;
+    }
+    contextSuggestOutline.row = contextSuggestOutline.ref ? row : null;
+  }
+
+  function contextSuggestOutlineEvent(ev) {
+    const rowOf = node => node?.closest?.('.egd-context-suggest-row') || null;
+    const row = rowOf(ev.target);
+    const keyboardRow = () => {
+      const focused = document.activeElement;
+      return focused?.matches?.(':focus-visible') ? rowOf(focused) : null;
+    };
+    let event = null, source = row;
+    if (ev.type === 'mouseover' || ev.type === 'focusin') {
+      // A click's focus is not a wish to see the Card; keyboard focus is.
+      if (row && (ev.type === 'mouseover' || ev.target.matches?.(':focus-visible'))) event = { type: 'enter', ref: row.dataset.ref };
+      else if (!row && contextSuggestOutline.row && !contextSuggestOutline.row.isConnected) event = { type: 'clear' };
+    } else if (row && !row.contains(ev.relatedTarget)) {
+      // Focus moving on does not end an outline the pointer still holds.
+      if (ev.type === 'focusout' && row.matches?.(':hover')) return;
+      // The pointer left: the row the keyboard is on, if any, takes the outline back.
+      source = ev.type === 'mouseout' ? keyboardRow() : null;
+      event = source?.isConnected ? { type: 'enter', ref: source.dataset.ref } : { type: 'leave', ref: row.dataset.ref };
+    }
+    if (event) applyContextSuggestOutline(ChatCanvasLinks.suggestionHighlight({ ref: contextSuggestOutline.ref }, event), source);
+  }
+  for (const type of ['mouseover', 'mouseout', 'focusin', 'focusout']) document.addEventListener(type, contextSuggestOutlineEvent, true);
+
   function resolveFloatingMenuPlacement(anchorRect, menuWidth = 152, menuHeight = 156) {
     const margin = 8;
     const viewportW = window.innerWidth || 1280;

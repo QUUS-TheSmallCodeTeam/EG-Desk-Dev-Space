@@ -1290,6 +1290,16 @@
   display: none;
 }
 
+/* A recommended material row in Chat is hovered or keyboard-focused: the Card
+   it names shows where it sits on the Canvas. Dashed and set off from the
+   edge so it never reads as a selection; a selected Card keeps its selection
+   border inside it. Kept on screen at 2px whatever the camera zoom. */
+.egd-canvas-card.egd-entity-suggested,
+.egd-canvas-shape.egd-entity-suggested {
+  outline: calc(2px / var(--egd-camera-zoom, 1)) dashed var(--egd-card-selection);
+  outline-offset: calc(3px / var(--egd-camera-zoom, 1));
+}
+
 .egd-canvas-card.egd-card-fullscreen {
   border-radius: 8px;
   min-width: 0;
