@@ -6481,7 +6481,7 @@
 
 .egd-ontology-minimap-context-coordinate {
   color: rgba(76, 61, 110, 0.76);
-  font-size: 9px;
+  font-size: var(--egd-text-2xs);
   font-weight: 700;
   white-space: nowrap;
 }
@@ -6502,7 +6502,7 @@
   justify-content: center;
   gap: 2px;
   min-width: 0;
-  font-size: 9px;
+  font-size: var(--egd-text-2xs);
   font-weight: 700;
   white-space: nowrap;
 }

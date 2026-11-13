@@ -219,3 +219,28 @@ test('the Ontology map draws its physical layer in sage; the virtual layer keeps
   assert.ok(rules.some(rule => rule.selectors.includes('.egd-ontology-card') && rule.media.length === 0
     && rule.declarations.some(([name]) => name === '--egd-primary-strong')));
 });
+
+test('room list avatars keep dark initials readable on every tone, in both schemes', () => {
+  for (const scheme of schemes) {
+    const properties = readRootProperties(surfaceCss, { scheme });
+    for (let tone = 0; tone < ChatState.PROFILE_AVATAR_PALETTE.length; tone += 1) {
+      const face = declarationsFor(`.egd-profile-avatar-tone-${tone}`, { scheme });
+      assert.equal(face.color, 'var(--egd-avatar-ink)', `tone ${tone}`);
+      const ratio = contrastRatio(resolveColor(face.color, properties), resolveColor(face.background, properties));
+      assert.ok(ratio >= 4.5, `${scheme} tone ${tone}: ${ratio}`);
+    }
+  }
+});
+
+test('the Ontology minimap legend and position text are at least the 10px badge step', () => {
+  for (const selector of ['.egd-ontology-minimap-legend-item', '.egd-ontology-minimap-context-coordinate']) {
+    assert.equal(declarationsFor(selector)['font-size'], 'var(--egd-text-2xs)', selector);
+  }
+  // Four legend entries (6px mark, 2px gap, two Hangul letters) still fit the 168px minimap.
+  const minimapWidth = parseFloat(declarationsFor('.egd-ontology-minimap').width);
+  const legend = declarationsFor('.egd-ontology-minimap-legend');
+  const [, sidePadding] = legend.padding.split(' ').map(parseFloat);
+  const column = (minimapWidth - 2 - 2 * sidePadding - 3 * parseFloat(legend.gap)) / 4;
+  assert.ok(column >= 6 + 2 + 2 * 10, `legend column ${column}px`);
+  assert.ok(parseFloat(legend['min-height']) - 12 >= 13, 'one 10px line fits the legend strip');
+});
