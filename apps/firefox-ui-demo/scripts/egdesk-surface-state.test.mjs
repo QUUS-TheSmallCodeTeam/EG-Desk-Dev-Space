@@ -19446,13 +19446,15 @@ test('Desk autosave saves with the last generation, retries a 409 once as the De
 test('persistDeskSession writes the preference value every time and also hands the Desk to the store', () => {
   const writes = [];
   const saves = [];
+  const recorded = [];
   const surfaceState = { surface: { restoring: false, recoveryProtected: false }, codex: { legacyChatBackupRequired: false } };
   const snapshot = storeDesk();
   const persist = compileFunction(`${storeDeclaration('persistDeskSession')}\nreturn persistDeskSession;`,
-    ['SurfaceState', 'state', 'document', 'writeSurfacePref', 'DESK_SESSION_PREF', 'serializeDeskSnapshot', 'deskStoreSync'])(
+    ['SurfaceState', 'state', 'document', 'writeSurfacePref', 'DESK_SESSION_PREF', 'serializeDeskSnapshot', 'deskStoreSync', 'noteDeskRecord'])(
     Surface, surfaceState, { getElementById: id => (id === 'egd-canvas-layer' ? {} : null) },
     (key, value) => { writes.push([key, value]); return true; }, 'egdesk.deskSession.v1', () => snapshot,
-    () => ({ saveDesk: (state, options) => { saves.push([state, options]); return Promise.resolve({ stored: 'prefs' }); } }));
+    () => ({ saveDesk: (state, options) => { saves.push([state, options]); return Promise.resolve({ stored: 'prefs' }); } }),
+    saved => recorded.push(saved));
   assert.equal(persist(), true);
   assert.equal(persist({ reason: 'explicit' }), true);
   assert.equal(persist({ type: 'unload' }), true, 'the unload listener passes an event');
@@ -19463,6 +19465,7 @@ test('persistDeskSession writes the preference value every time and also hands t
   assert.equal(persist(), false);
   assert.equal(writes.length, 3);
   assert.equal(saves.length, 3, 'nothing is saved anywhere while a Desk is being drawn');
+  assert.deepEqual(recorded, [true, true, true], 'the top-bar record status hears each real write, and only those');
 
   // A store that just became ready receives the Desk as it is now.
   const observed = [];

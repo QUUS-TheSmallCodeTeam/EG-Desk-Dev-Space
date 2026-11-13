@@ -2489,6 +2489,43 @@
 }
 .egd-rail-chevron .egd-ui-icon { width: 12px; height: 12px; }
 
+/* 기록 상태: quiet text beside the name; only a failure asks for attention.
+   It gives up its room first when the left group runs out of width. */
+.egd-rail-record-status {
+  flex: 0 100 auto;
+  min-width: 0;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  overflow: hidden;
+  color: var(--egd-on-surface-variant);
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+.egd-rail-record-status[hidden] { display: none; }
+.egd-rail-record-text { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.egd-rail-record-status[data-state="failed"] { flex-shrink: 0; overflow: visible; color: var(--egd-danger-ink); font-weight: 600; }
+.egd-rail-record-retry {
+  min-height: 22px;
+  padding: 0 8px;
+  border: 1px solid color-mix(in srgb, var(--egd-danger-ink) 30%, transparent);
+  border-radius: 6px;
+  background: var(--egd-danger-bg);
+  color: var(--egd-danger-ink);
+  font: inherit;
+  cursor: pointer;
+  transition: background 0.15s;
+  -moz-window-dragging: no-drag;
+}
+.egd-rail-record-retry[hidden] { display: none; }
+.egd-rail-record-retry:hover { background: var(--egd-hover); }
+.egd-rail-record-retry:active { background: var(--egd-outline-variant); }
+.egd-rail-record-retry:focus-visible { outline: var(--egd-focus-outline); outline-offset: var(--egd-focus-outline-offset); }
+@media (max-width: 1000px) {
+  .egd-rail-record-status:not([data-state="failed"]) { display: none; }
+}
+
 .egd-rail-search {
   display: flex;
   align-items: center;

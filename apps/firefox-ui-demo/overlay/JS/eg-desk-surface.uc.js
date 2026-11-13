@@ -7958,6 +7958,30 @@
     }, wait);
   }
 
+  // 기록 상태: beside the top-bar name, the clock time of the last real write of
+  // this Desk to this PC, or a failure with [다시 기록]. Nothing shows before a write.
+  const RecordStatus = ChromeUtils.importESModule('chrome://userchrome/content/EGDeskRecordStatus.sys.mjs');
+  let deskRecordStatus = RecordStatus.RECORD_STATUS_INITIAL;
+  function noteDeskRecord(saved) {
+    deskRecordStatus = RecordStatus.nextRecordStatus(deskRecordStatus, { saved, at: Date.now() });
+    syncDeskRecordStatus();
+  }
+
+  function syncDeskRecordStatus() {
+    const status = document.querySelector('.egd-rail-record-status');
+    if (!status) return;
+    const view = RecordStatus.recordStatusView(deskRecordStatus);
+    const text = status.querySelector('.egd-rail-record-text');
+    if (text.textContent !== view.text) text.textContent = view.text;
+    if (status.title !== view.title) status.title = view.title;
+    status.dataset.state = view.state;
+    status.hidden = view.hidden;
+    status.querySelector('.egd-rail-record-retry').hidden = !view.retry;
+    // Only a failure is announced; the quiet time must not interrupt a screen reader every minute.
+    if (view.state === 'failed') status.setAttribute('role', 'alert');
+    else status.removeAttribute('role');
+  }
+
   function cardLabelForViewportRail(card) {
     if (!card) return 'Card';
     if (card.classList.contains('egd-terminal-card')) return 'Terminal';
@@ -9197,6 +9221,16 @@
         el('span', { class: 'egd-rail-card-badge', hidden: true }),
         el('span', { class: 'egd-rail-chevron' }, deskIcon('chevron')),
       ),
+      el('span', { class: 'egd-rail-record-status', hidden: true, data: { state: 'none' } },
+        el('span', { class: 'egd-rail-record-text' }),
+        el('button', {
+          type: 'button', class: 'egd-rail-record-retry', hidden: true, title: '이 PC에 다시 기록', 'aria-label': '이 PC에 다시 기록',
+          onclick: (ev) => {
+            ev.stopPropagation();
+            if (!persistDeskSession({ reason: 'explicit' })) boardNotice('이 PC에 기록하지 못했습니다. 잠시 후 다시 시도해 주세요.');
+          },
+        }, '다시 기록'),
+      ),
     );
 
     const searchInput = el('input', {
@@ -9273,6 +9307,7 @@
     rail.appendChild(center);
     rail.appendChild(right);
     queueMicrotask(syncViewportAgendaRail);
+    queueMicrotask(syncDeskRecordStatus);
     return rail;
   }
 
@@ -25526,6 +25561,7 @@
     // The preference value stays the fallback on every save; a ready Desk store
     // also keeps this Desk as a recovery point (offline, 503 or timeout: preferences only).
     const saved = writeSurfacePref(DESK_SESSION_PREF, snapshot);
+    noteDeskRecord(saved);
     void deskStoreSync().saveDesk(snapshot, { reason: options?.reason === 'explicit' ? 'explicit' : 'autosave' });
     return saved;
   }
