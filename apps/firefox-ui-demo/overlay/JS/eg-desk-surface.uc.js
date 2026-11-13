@@ -17917,6 +17917,25 @@
           ...ceilingNotes.map((note) => el('div', { class: 'egd-settings-ceiling-note', role: 'note', data: { testid: 'settings-agent-ceiling-note' } }, note)))
         : el('div', { class: 'egd-settings-form-hint', data: { testid: 'settings-agent-ceiling-off' } }, ChatState.TOOL_CEILING_OFF_TEXT),
       errorFor('toolCeiling') ? el('div', { class: 'egd-settings-field-error', role: 'alert' }, errorFor('toolCeiling').message) : null);
+      // AGENT-02 [예시로 채우기]: fills only the blanks of a new Agent's draft in
+      // place. Nothing is saved until [초안 저장].
+      const exampleFillRow = () => {
+        const view = ChatState.profileExampleFill(form);
+        return el('div', { class: 'egd-settings-example-row' },
+          el('button', {
+            class: 'egd-settings-btn', type: 'button', disabled: view.disabled ? 'true' : null, data: { testid: 'settings-agent-example-fill' },
+            onclick: () => {
+              const fill = ChatState.profileExampleFill(form);
+              if (!fill.disabled) {
+                Object.assign(form, fill.patch);
+                agents.notice = fill.notice;
+                agents.focusField = Object.keys(fill.patch)[0];
+              }
+              renderAgentsTab();
+            },
+          }, view.label),
+          el('p', { class: 'egd-settings-form-hint', data: { testid: 'settings-agent-example-note' } }, view.note));
+      };
       const section = el('section', { class: 'egd-settings-section egd-settings-agent-form', data: { testid: 'settings-agent-form' } },
         el('button', { class: 'egd-settings-link', onclick: () => {
           if (agents.profileId) void openProfile(agents.profileId); else { agents.mode = 'list'; renderAgentsTab(); }
@@ -17928,6 +17947,7 @@
         noticeLine(),
         agents.keptForm ? el('button', { class: 'egd-settings-btn', data: { testid: 'settings-agent-restore-kept' },
           onclick: () => { agents.form = agents.keptForm; agents.keptForm = null; agents.notice = null; renderAgentsTab(); } }, '내 수정 다시 넣기') : null,
+        agents.profileId ? null : exampleFillRow(),
         field('name', '담당자 이름 (필수)', nameInput),
         field('avatar', '아바타', el('div', { class: 'egd-settings-avatar-editor' }, preview,
           el('div', { class: 'egd-settings-avatar-controls' },

@@ -5909,7 +5909,10 @@
    what EG-Desk keeps. */
 .egd-settings-choice-note { margin-top: 6px; }
 .egd-settings-choice-note + .egd-settings-form-hint { margin-top: 2px; }
-.egd-settings-reset-row { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 12px; margin-top: 8px; }
+.egd-settings-reset-row, .egd-settings-example-row { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 12px; margin-top: 8px; }
+/* Agent 만들기 [예시로 채우기]: the form's own gap already spaces it. */
+.egd-settings-example-row { margin-top: 0; }
+.egd-settings-example-row .egd-settings-form-hint { margin: 0; }
 .egd-settings-data-list { display: flex; flex-direction: column; gap: 8px; }
 .egd-settings-data-row {
   display: flex;

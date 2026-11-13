@@ -1642,6 +1642,23 @@ export function profileFormFromBody(body = null) {
   };
 }
 
+/**
+ * AGENT-02 [예시로 채우기]: a starting draft for the three blanks a new Agent
+ * needs first. Only blanks are filled, so typed text is never replaced, and
+ * nothing is saved or activated: `patch` is for the caller to put on the form.
+ */
+export function profileExampleFill(form = {}) {
+  const label = '예시로 채우기';
+  const patch = {}, filled = [];
+  if (!formLine(form?.name)) { patch.name = '자료 정리 담당'; filled.push('담당자 이름'); }
+  if (!formList(form?.expertise).length) { patch.expertise = ['회의 자료 요점 정리', '주간 보고 초안 쓰기']; filled.push('맡길 일'); }
+  if (!formBlock(form?.speechNotes)) { patch.speechNotes = '결론을 먼저 말하고 근거는 짧게 덧붙입니다.'; filled.push('말투 메모'); }
+  if (!filled.length) return { label, disabled: true, patch, filled, notice: null, note: '담당자 이름·맡길 일·말투 메모가 이미 채워져 있습니다.' };
+  return { label, disabled: false, patch, filled,
+    note: '빈칸에만 본보기를 넣습니다. [초안 저장]을 누르기 전에는 저장되지 않습니다.',
+    notice: `예시를 채웠습니다: ${filled.join(' · ')}. 고친 뒤 [초안 저장]을 눌러야 저장됩니다.` };
+}
+
 /** Korean field errors as {field, message} records, plus the request body when valid. */
 export function validateProfileForm(form = {}) {
   const limits = PROFILE_FORM_LIMITS;
