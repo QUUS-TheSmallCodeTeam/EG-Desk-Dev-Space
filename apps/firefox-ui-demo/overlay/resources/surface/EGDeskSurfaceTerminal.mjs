@@ -33,6 +33,20 @@ export function createTerminalZone(deps) {
     return true;
   }
 
+  // Firefox chrome postMessage hides MessageEvent.source. Authenticate the
+  // current owned document through its API key, never through origin alone.
+  // A fresh document publishes a fresh key, so queued pre-reload events fail.
+  function terminalHostMessageMatches(event, frame, expectedUrl) {
+    const key = event.data?.hostEventKey;
+    if (event.origin !== 'chrome://userchrome' || typeof key !== 'string' || !key) return false;
+    try {
+      return frame.isConnected && !!frame.contentWindow
+        && (event.source === null || event.source === frame.contentWindow)
+        && frame.contentDocument?.documentURI === expectedUrl
+        && frame.contentWindow.terminalAPI?.hostEventKey === key;
+    } catch { return false; }
+  }
+
   // B31: closing the window ends the session with it, so only a session that
   // is still running asks first. A frame that never connected has nothing to lose.
   function terminalCloseNeedsConfirm(api) {
@@ -158,10 +172,12 @@ export function createTerminalZone(deps) {
     const query = [];
     if (requestedShellId) query.push('shellId=' + encodeURIComponent(requestedShellId));
     if (!activate) query.push('autofocus=0');
+    const terminalUrl = TERMINAL_HTML_URL + (query.length ? '?' + query.join('&') : '');
     const termBrowser = el('iframe', {
-      src: TERMINAL_HTML_URL + (query.length ? '?' + query.join('&') : ''),
+      src: terminalUrl,
       style: { width: '100%', height: '100%', border: '0', display: 'block' },
     });
+    let terminalDisposed = false;
     let disposeCloseShortcut = null;
     const onTerminalFrameLoad = () => {
       disposeCloseShortcut?.();
@@ -207,7 +223,7 @@ export function createTerminalZone(deps) {
     // 최초 연결 완료 시 자동 포커스 (terminal.html이 terminal-ready postMessage 발송)
     let everConnected = false;
     const onTerminalReady = (ev) => {
-      if (ev.source !== termBrowser.contentWindow) return;
+      if (terminalDisposed || !terminalHostMessageMatches(ev, termBrowser, terminalUrl)) return;
       if (ev.data?.type === 'terminal-activate') {
         // A press inside the terminal is a press outside the close question.
         dismissCloseConfirm();
@@ -220,6 +236,7 @@ export function createTerminalZone(deps) {
         if (typeof shellId === 'string' && /^[a-z][a-z0-9-]{0,31}$/.test(shellId)) spawnTerminalCard({ shellId });
         return;
       }
+      if (ev.data?.type === 'terminal-api-ready') { everConnected = false; sessionText.textContent = '연결 중'; }
       if (ev.data?.type === 'terminal-api-ready' || ev.data?.type === 'terminal-ready') {
         try {
           termBrowser.contentWindow?.terminalAPI?.setWheelHandler?.(
@@ -290,6 +307,7 @@ export function createTerminalZone(deps) {
 
     // ---- Cleanup ----
     const cleanupCard = () => {
+      terminalDisposed = true;
       document.removeEventListener('mousedown', onPressOutsideConfirm, true);
       window.removeEventListener('message', onTerminalReady);
       termBrowser.removeEventListener('load', onTerminalFrameLoad);

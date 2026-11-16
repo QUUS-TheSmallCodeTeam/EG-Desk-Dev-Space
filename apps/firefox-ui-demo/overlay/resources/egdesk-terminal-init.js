@@ -10,6 +10,15 @@
   const shellLabel = document.getElementById('terminal-shell-label');
   const operationStatus = document.getElementById('terminal-operation-status');
 
+  // This key belongs to this document, not the reusable iframe WindowProxy.
+  const hostEventKey = window.crypto.randomUUID();
+  function notifyTerminalHost(message) {
+    try {
+      window.parent.postMessage({ ...message, hostEventKey }, '*');
+      return true;
+    } catch { return false; }
+  }
+
   // ---- Host colours (A23) ----
   // The page cannot inherit the Desk stylesheet, so it reads the Terminal
   // window's own tokens from the frame element that hosts it. Opened alone, the
@@ -150,7 +159,7 @@
   function showDisconnected(message) {
     if (closeRequested) { renderCloseState({ phase: 'offline', error: message }); return; }
     // The window bar shows the session state; tell it the connection is lost.
-    try { window.parent.postMessage({ type: 'terminal-disconnected' }, '*'); } catch {}
+    try { notifyTerminalHost({ type: 'terminal-disconnected' }); } catch {}
     statusEl.textContent = message || '연결이 끊겼습니다. 눌러서 다시 연결합니다.';
     statusEl.classList.remove('hidden');
     statusEl.style.pointerEvents = 'auto';
@@ -175,7 +184,7 @@
       receiveTerminalOutput(result.data, sessionAtRead);
       // CODE-06: a test/build result the bridge read from this session's own output.
       if (result.runResult && typeof result.runResult === 'object') {
-        try { window.parent.postMessage({ type: 'terminal-run-result', sessionId: sessionAtRead, runResult: result.runResult }, '*'); } catch {}
+        try { notifyTerminalHost({ type: 'terminal-run-result', sessionId: sessionAtRead, runResult: result.runResult }); } catch {}
       }
       if (terminalExitEvidence(result, sessionAtRead)) {
         invalidateScriptRun();
@@ -205,7 +214,7 @@
   }
 
   function notifyTerminalExit() {
-    try { window.parent.postMessage({ type: 'terminal-exit-confirmed' }, '*'); } catch {}
+    try { notifyTerminalHost({ type: 'terminal-exit-confirmed' }); } catch {}
   }
 
   function renderCloseState(closeState) {
@@ -360,6 +369,7 @@
 
   function exposeTerminalApi() {
     window.terminalAPI = {
+      get hostEventKey() { return hostEventKey; },
       closeForBoard,
       runScript,
       closeState: () => terminalCloser.snapshot(),
@@ -482,7 +492,7 @@
     const current = () => !unloaded && !closeRequested && generation === connectionGeneration;
     statusEl.textContent = ptyId ? '같은 터미널 세션 연결 확인 중…' : '터미널 연결 중…';
     // The window bar and the shell line say the same thing as the middle of the window.
-    try { window.parent.postMessage({ type: 'terminal-connecting' }, '*'); } catch {}
+    try { notifyTerminalHost({ type: 'terminal-connecting' }); } catch {}
     if (!sessionInfo) shellLabel.textContent = '연결 준비 중';
     statusEl.classList.remove('hidden');
     statusEl.style.pointerEvents = 'none';
@@ -555,8 +565,8 @@
         writeQueue.bind(ptyId);
         statusEl.classList.add('hidden');
         shellButton.textContent = '새 터미널 열기';
-        window.parent.postMessage({ type: 'terminal-ready', ptyId,
-          shellId: sessionInfo?.shellId, shellLabel: sessionInfo?.shellLabel }, '*');
+        notifyTerminalHost({ type: 'terminal-ready', ptyId,
+          shellId: sessionInfo?.shellId, shellLabel: sessionInfo?.shellLabel });
         readTimer = setInterval(readTerminalOutput, 80);
         void readTerminalOutput();
         // An embedded terminal must not steal focus from a different card while
@@ -567,7 +577,7 @@
         if (spawnPhase === 'pending') spawnPhase = definiteSpawnRejection(error) ? 'rejected' : 'unknown';
         if (!current()) {
           if (closeRequested && !unloaded && spawnPhase === 'rejected') {
-            window.parent.postMessage({ type: 'terminal-no-session' }, '*');
+            notifyTerminalHost({ type: 'terminal-no-session' });
           }
           return false;
         }
@@ -593,7 +603,7 @@
   shellButton.addEventListener('click', () => {
     if (ptyId || sessionInfo) {
       if (!shellCatalog?.shells.some(shell => shell.id === shellSelect.value && shell.available)) return;
-      window.parent.postMessage({ type: 'terminal-new-session', shellId: shellSelect.value }, '*');
+      notifyTerminalHost({ type: 'terminal-new-session', shellId: shellSelect.value });
     } else if (!unloaded && !closeRequested) {
       void connectBridge().catch(reportAsyncError);
     }
@@ -612,7 +622,7 @@
   // 프레임 내부 어디를 클릭해도 xterm으로 포커스 복귀
   // (chrome host의 프레임 포커스 핸드오프는 부모(eg-desk-surface)가 담당)
   const activateTerminalCard = () => {
-    if (!unloaded) window.parent.postMessage({ type: 'terminal-activate' }, '*');
+    if (!unloaded) notifyTerminalHost({ type: 'terminal-activate' });
   };
   window.addEventListener('mousedown', event => {
     activateTerminalCard();
@@ -663,7 +673,7 @@
 
   // ---- Cleanup on unload ----
   exposeTerminalApi();
-  window.parent.postMessage({ type: 'terminal-api-ready' }, '*');
+  notifyTerminalHost({ type: 'terminal-api-ready' });
   window.addEventListener('unload', () => {
     unloaded = true;
     frameWheelHandler = null;

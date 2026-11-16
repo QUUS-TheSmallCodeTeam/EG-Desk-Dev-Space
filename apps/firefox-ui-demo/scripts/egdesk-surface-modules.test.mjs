@@ -579,7 +579,10 @@ test('actual Terminal Card background options keep Canvas representation without
         focus() { events.push('frame-focus'); },
       };
       for (const child of children) if (child && typeof child === 'object') value.appendChild(child);
-      if (tag === 'iframe') value.contentWindow = { terminalAPI: { focus: () => events.push('terminal-focus') } };
+      if (tag === 'iframe') {
+        value.isConnected = true; value.contentDocument = { documentURI: props.src };
+        value.contentWindow = { terminalAPI: { hostEventKey: 'document-key', focus: () => events.push('terminal-focus') } };
+      }
       return value;
     };
     const host = node('main');
@@ -623,19 +626,20 @@ test('actual Terminal Card background options keep Canvas representation without
       assert.equal(state.activeEntityId, options.activate !== false ? card.id : 'previous-active-card');
       assert.equal(events.includes('reveal'), options.reveal !== false);
       assert.equal(new URL(card._termBrowser.src).searchParams.get('autofocus'), options.activate === false ? '0' : null);
-      messages.get('message')({ source: {}, data: { type: 'terminal-ready' } });
+      const deliver = event => messages.get('message')({ origin: 'chrome://userchrome', ...event, data: { hostEventKey: 'document-key', ...event.data } });
+      deliver({ source: {}, data: { type: 'terminal-ready' } });
       assert.equal(events.includes('frame-focus'), false, 'foreign frame cannot focus this Card');
-      messages.get('message')({ source: card._termBrowser.contentWindow, data: { type: 'terminal-ready', shellLabel: 'zsh' } });
+      deliver({ source: card._termBrowser.contentWindow, data: { type: 'terminal-ready', shellLabel: 'zsh' } });
       assert.equal(events.includes('frame-focus'), options.activate !== false);
       assert.equal(events.includes('terminal-focus'), options.activate !== false);
       const focusCount = events.filter(event => event.endsWith('-focus')).length;
       state.activeEntityId = 'different-card';
-      messages.get('message')({ source: card._termBrowser.contentWindow, data: { type: 'terminal-ready' } });
+      deliver({ source: card._termBrowser.contentWindow, data: { type: 'terminal-ready' } });
       assert.equal(events.filter(event => event.endsWith('-focus')).length, focusCount,
         'late ready cannot steal focus from another active Card');
       if (options.activate === false) {
         state.activeEntityId = card.id;
-        messages.get('message')({ source: card._termBrowser.contentWindow, data: { type: 'terminal-ready' } });
+        deliver({ source: card._termBrowser.contentWindow, data: { type: 'terminal-ready' } });
         assert.equal(events.filter(event => event.endsWith('-focus')).length, 0,
           'background creation never requests ready focus, even if selected later');
       }

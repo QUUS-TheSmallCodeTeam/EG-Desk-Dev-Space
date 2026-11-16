@@ -105,6 +105,11 @@ async function terminalWindow({ api } = {}) {
   const deps = Object.fromEntries(names.map(name => [name, () => {}]));
   Object.assign(deps, {
     TAG: 'unit', el: makeNode, allocCardSeq: () => 7, raiseCardZ: () => 3, state, boardCloseRequests: new Set(),
+    completeAgendaClose: () => { events.push('board-close'); },
+    RunResult: {
+      summarizeRunResult: () => { events.push('run-result'); return { outcome: 'passed', headline: '완료' }; },
+      renderRunResultCard: () => makeNode('div'),
+    },
     makeSourceRef: (kind, details) => ({ kind, ...details }),
     resolveCanvasCardPlacement: () => ({ x: 10, y: 20, width: 640, height: 400 }),
     setActiveEntity: card => { state.activeEntityId = card.id; },
@@ -127,11 +132,11 @@ async function terminalWindow({ api } = {}) {
       return shell;
     },
   });
-  const frameWindow = { terminalAPI: api ? { focus: () => events.push('terminal-focus'), kill: async () => { events.push('session-killed'); return { ok: true }; }, ...api } : undefined };
+  const frameWindow = { terminalAPI: api ? { hostEventKey: '00000000-0000-4000-8000-000000000001', focus: () => events.push('terminal-focus'), kill: async () => { events.push('session-killed'); return { ok: true }; }, ...api } : undefined };
   const el = deps.el;
   deps.el = (tag, props, ...children) => {
     const node = el(tag, props, ...children);
-    if (tag === 'iframe') { node.contentWindow = frameWindow; node.src = props.src; }
+    if (tag === 'iframe') { node.contentWindow = frameWindow; node.src = props.src; node.contentDocument = { documentURI: props.src }; }
     return node;
   };
   const globals = {
@@ -146,8 +151,12 @@ async function terminalWindow({ api } = {}) {
   const restore = () => { for (const [key, descriptor] of saved) { if (descriptor) Object.defineProperty(globalThis, key, descriptor); else delete globalThis[key]; } };
   let card;
   try { card = createTerminalZone(deps).spawnTerminalCard({}); } catch (error) { restore(); throw error; }
-  const message = data => messages.get('message')?.({ source: frameWindow, data });
-  return { card, host, events, state, shell, shellOptions, closeDot, documentListeners, message, restore,
+  const frame = card.find('iframe');
+  const hostEventKey = frameWindow.terminalAPI?.hostEventKey;
+  const receiver = messages.get('message');
+  const directMessage = (data, envelope = {}) => receiver({ source: frameWindow, origin: 'chrome://userchrome', ...envelope, data: { hostEventKey, ...data } });
+  const message = (data, envelope = {}) => messages.get('message') && directMessage(data, envelope);
+  return { card, host, events, state, shell, shellOptions, closeDot, documentListeners, message, restore, frame, hostEventKey, directMessage, boardCloseRequests: deps.boardCloseRequests,
     confirm: card.find('.egd-terminal-close-confirm'), cancel: card.find('.egd-terminal-close-confirm-cancel'),
     go: card.find('.egd-terminal-close-confirm-go') };
 }
@@ -324,17 +333,17 @@ test('the frame page takes the host window colours when it is framed and keeps i
 test('a lost connection is told to the window, and the bar says so until the session is back', async () => {
   const body = initializer.match(/^  function showDisconnected\(message\) \{([\s\S]*?)^  \}/m)?.[1];
   assert.ok(body, 'exercise the production frame-page boundary');
-  const show = compileFunction(body, ['message', 'closeRequested', 'renderCloseState', 'statusEl', 'connectBridge', 'window']);
+  const show = compileFunction(body, ['message', 'closeRequested', 'renderCloseState', 'statusEl', 'connectBridge', 'notifyTerminalHost']);
   const posted = [], closeStates = [];
   const statusEl = { textContent: '', style: {}, classList: { remove() {} } };
-  const parent = { postMessage: value => posted.push(value) };
-  show('연결이 끊겼습니다.', false, state => closeStates.push(state), statusEl, () => {}, { parent });
+  const notify = value => posted.push(value);
+  show('연결이 끊겼습니다.', false, state => closeStates.push(state), statusEl, () => {}, notify);
   assert.deepEqual(posted, [{ type: 'terminal-disconnected' }]);
   assert.equal(statusEl.textContent, '연결이 끊겼습니다.');
-  show('연결이 끊겼습니다.', true, state => closeStates.push(state), statusEl, () => {}, { parent });
+  show('연결이 끊겼습니다.', true, state => closeStates.push(state), statusEl, () => {}, notify);
   assert.equal(posted.length, 1, 'a window that is already closing reports its close state instead');
   assert.equal(closeStates.length, 1);
-  show('연결이 끊겼습니다.', false, () => {}, statusEl, () => {}, { parent: { postMessage() { throw new Error('gone'); } } });
+  show('연결이 끊겼습니다.', false, () => {}, statusEl, () => {}, () => { throw new Error('gone'); });
 
   const h = await terminalWindow({ api: { ptyId: 'pty-9', isConnected: () => true } });
   try {
@@ -377,4 +386,87 @@ test('a close that is refused names the kind of window that was kept', async () 
     [false, false, false, false, false]);
   assert.deepEqual(notices, ['터미널 창을 유지했습니다: 사유', '파일 창을 유지했습니다: 사유', '메모 창을 유지했습니다: 사유',
     '창을 유지했습니다: 사유', '창을 유지했습니다: 사유']);
+});
+
+
+test('privileged null-source events update the header before load and follow the current document key after reload', async () => {
+  const h = await terminalWindow({ api: { ptyId: null, isConnected: () => false } });
+  try {
+    const status = h.shell.slots.identity.children[1];
+    const deliver = data => h.message(data, { source: null });
+    deliver({ type: 'terminal-api-ready' });
+    deliver({ type: 'terminal-connecting' });
+    deliver({ type: 'terminal-disconnected' });
+    assert.equal(status.textContent, '연결 실패', 'no load handshake is needed for the first failure');
+    deliver({ type: 'terminal-connecting' });
+    assert.equal(status.textContent, '연결 중');
+    deliver({ type: 'terminal-ready', shellLabel: 'zsh' });
+    assert.equal(status.textContent, 'zsh');
+    deliver({ type: 'terminal-disconnected' });
+    assert.equal(status.textContent, '연결 끊김');
+    // WindowProxy and URL stay the same; the loaded document/API do not.
+    const newKey = '00000000-0000-4000-8000-000000000002';
+    h.frame.contentDocument = { documentURI: h.frame.src };
+    h.frame.contentWindow.terminalAPI = { hostEventKey: newKey };
+    deliver({ type: 'terminal-ready', shellLabel: 'old document' });
+    assert.equal(status.textContent, '연결 끊김', 'a queued old-document event cannot authenticate after reload');
+    deliver({ type: 'terminal-api-ready', hostEventKey: newKey });
+    deliver({ type: 'terminal-disconnected', hostEventKey: newKey });
+    assert.equal(status.textContent, '연결 실패', 'the new document starts a new connection lifecycle');
+  } finally { h.restore(); }
+});
+
+test('unauthenticated terminal messages cannot change UI, spawn a card, expose a result, dismiss a question or close a Board', async () => {
+  const h = await terminalWindow({ api: { ptyId: 'pty-9', isConnected: () => true } });
+  try {
+    h.card.dataset.projectionId = 'board-qa'; h.boardCloseRequests.add('board-qa');
+    dispatch(h.closeDot, 'click'); h.state.activeEntityId = 'another-card';
+    const before = [...h.events], status = h.shell.slots.identity.children[1];
+    const payloads = [
+      { type: 'terminal-ready', shellLabel: 'forged' }, { type: 'terminal-api-ready' },
+      { type: 'terminal-disconnected' }, { type: 'terminal-exit-confirmed' }, { type: 'terminal-no-session' },
+      { type: 'terminal-activate' }, { type: 'terminal-new-session', shellId: 'cmd' },
+      { type: 'terminal-run-result', runResult: { output: 'forged result' } },
+    ];
+    const unchanged = () => {
+      assert.deepEqual(h.events, before); assert.equal(h.host.children.length, 1);
+      assert.equal(h.state.activeEntityId, 'another-card'); assert.equal(h.confirm.hidden, false);
+      assert.equal(status.textContent, '연결 중'); assert.equal(h.card.find('.egd-terminal-run-result').hidden, true);
+    };
+    for (const envelope of [{ source: {} }, { source: undefined },
+      ...['null', 'https://example.invalid', 'chrome://browser', 'chrome://userchrome.evil'].map(origin => ({ source: null, origin }))]) {
+      for (const payload of payloads) h.message(payload, envelope);
+      unchanged();
+    }
+    for (const hostEventKey of [undefined, null, '', 'other-card-key']) {
+      for (const payload of payloads) h.message({ ...payload, hostEventKey }, { source: null });
+      unchanged();
+    }
+    const current = h.frame.contentDocument;
+    for (const replacement of [null, { documentURI: 'https://example.invalid/' },
+      { documentURI: 'chrome://userchrome/content/other.html' }, { documentURI: h.frame.src + '?other=1' }]) {
+      h.frame.contentDocument = replacement;
+      for (const source of [null, h.frame.contentWindow]) for (const payload of payloads) h.message(payload, { source });
+      unchanged();
+    }
+    Object.defineProperty(h.frame, 'contentDocument', { configurable: true, get() { throw new Error('dead frame'); } });
+    for (const payload of payloads) h.message(payload, { source: null }); unchanged();
+    Object.defineProperty(h.frame, 'contentDocument', { configurable: true, writable: true, value: current });
+    const parent = h.frame.parent; h.frame.parent = null;
+    for (const payload of payloads) h.message(payload, { source: null }); unchanged();
+    h.frame.parent = parent;
+    const api = h.frame.contentWindow.terminalAPI; delete h.frame.contentWindow.terminalAPI;
+    for (const payload of payloads) h.message(payload, { source: null }); unchanged();
+    h.frame.contentWindow.terminalAPI = api;
+  } finally { h.restore(); }
+});
+
+test('cleanup revokes a captured terminal receiver even before a queued event can run', async () => {
+  const h = await terminalWindow({ api: { ptyId: null, isConnected: () => false } });
+  try {
+    h.shell.requestClose(); const before = [...h.events];
+    h.directMessage({ type: 'terminal-new-session', shellId: 'cmd' }, { source: null });
+    h.directMessage({ type: 'terminal-ready', shellLabel: 'stale' }, { source: null });
+    assert.deepEqual(h.events, before); assert.equal(h.host.children.length, 0);
+  } finally { h.restore(); }
 });

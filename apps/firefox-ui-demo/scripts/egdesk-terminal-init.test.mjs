@@ -258,7 +258,8 @@ async function uiFixture({ search = '', platform = 'win32', transport = 'conpty'
     const status = value.httpStatus || 200;
     return { ok: status >= 200 && status < 300, status, json: async () => value };
   };
-  const window = { location: { search }, parent: { postMessage: value => messages.push(value) },
+  const hostEventKey = crypto.randomUUID();
+  const window = { location: { search }, crypto: { randomUUID: () => hostEventKey }, parent: { postMessage: value => messages.push(value) },
     setTimeout: timeouts?.set || setTimeout, addEventListener: (type, fn) => windowListeners.set(type, fn) };
   const document = { getElementById: id => elements[id], createElement: () => new Element() };
   const source = initializer.replace("await import('chrome://userchrome/content/EGDeskTerminalState.sys.mjs')", 'TerminalState')
@@ -270,7 +271,7 @@ async function uiFixture({ search = '', platform = 'win32', transport = 'conpty'
     fn => frames.push(fn), class { constructor(fn) { observer = this; this.callback = fn; } observe() {} disconnect() { this.disconnected = true; } },
     timeouts?.set || setTimeout, timeouts?.clear || clearTimeout, fn => { intervals.set(++intervalId, fn); return intervalId; }, id => intervals.delete(id),
     AbortController, URLSearchParams, { warn: (...args) => warnings.push(args) });
-  const h = { elements, requests, messages, term, window, intervals, warnings, observer,
+  const h = { elements, requests, messages, term, window, intervals, warnings, observer, hostEventKey,
     api: window.terminalAPI, boot: async () => { await frames.shift()(); await settle(); },
     event: (type, event = {}) => windowListeners.get(type)?.(event) };
   return h;
@@ -287,7 +288,7 @@ test('shell selection opens a separate CMD Card without killing or switching Pow
   h.elements['terminal-shell-select'].dispatch('change');
   assert.equal(h.requests.length, before);
   h.elements['terminal-shell-start'].dispatch('click');
-  assert.deepEqual(h.messages.at(-1), { type: 'terminal-new-session', shellId: 'cmd' });
+  assert.deepEqual(h.messages.at(-1), { type: 'terminal-new-session', shellId: 'cmd', hostEventKey: h.hostEventKey });
   assert.equal(h.requests.filter(item => item.route === '/terminal/spawn').length, 1);
   assert.equal(h.requests.filter(item => item.route === '/terminal/kill').length, 0);
   assert.equal(h.api.sessionInfo().shellId, 'powershell');
@@ -458,32 +459,38 @@ test('production Card routes a shell request to a separate Card and rejects othe
   let dismissed = 0;
   const card = { id: 'terminal', dataset: {} }, state = { activeEntityId: card.id, panModifier: false };
   let focused = 0;
-  const handler = compileFunction('return ev => {' + body + '\n};',
+  const matchSource = surfaceSource.match(/^  function terminalHostMessageMatches\(event, frame, expectedUrl\) \{[\s\S]*?^  \}/m)?.[0];
+  assert.ok(matchSource);
+  const matches = compileFunction(matchSource + '\nreturn terminalHostMessageMatches;')();
+  const terminalUrl = 'chrome://userchrome/content/terminal.html';
+  ownFrame.terminalAPI.hostEventKey = 'document-key';
+  const handler = compileFunction('let everConnected = false; return ev => {' + body + '\n};',
     ['termBrowser', 'spawnTerminalCard', 'sessionText', 'dismissCloseConfirm', 'focusTerminal', 'boardCloseRequests', 'card', 'completeAgendaClose', 'activate',
-      'state', 'activateCard', 'routeTerminalFrameWheel', 'TAG'])(
-    { contentWindow: ownFrame }, options => opened.push(options), sessionText, () => dismissed++,
+      'state', 'activateCard', 'routeTerminalFrameWheel', 'TAG', 'terminalHostMessageMatches', 'terminalUrl', 'terminalDisposed'])(
+    { contentWindow: ownFrame, contentDocument: { documentURI: terminalUrl }, isConnected: true }, options => opened.push(options), sessionText, () => dismissed++,
     () => focused++, new Set(), card, () => assert.fail('no Board close is pending'), true,
-    state, () => { if (!state.panModifier) state.activeEntityId = card.id; }, routeTerminalFrameWheel, 'test');
-  handler({ source: {}, data: { type: 'terminal-new-session', shellId: 'cmd' } });
-  handler({ source: ownFrame, data: { type: 'terminal-new-session', shellId: '/bin/zsh' } });
+    state, () => { if (!state.panModifier) state.activeEntityId = card.id; }, routeTerminalFrameWheel, 'test', matches, terminalUrl, false);
+  const deliver = event => handler({ origin: 'chrome://userchrome', ...event, data: { hostEventKey: 'document-key', ...event.data } });
+  deliver({ source: {}, data: { type: 'terminal-new-session', shellId: 'cmd' } });
+  deliver({ source: ownFrame, data: { type: 'terminal-new-session', shellId: '/bin/zsh' } });
   assert.deepEqual(opened, []);
-  handler({ source: ownFrame, data: { type: 'terminal-new-session', shellId: 'cmd' } });
+  deliver({ source: ownFrame, data: { type: 'terminal-new-session', shellId: 'cmd' } });
   assert.deepEqual(opened, [{ shellId: 'cmd' }]);
   assert.equal(focused, 0);
-  handler({ source: ownFrame, data: { type: 'terminal-ready', shellLabel: 'CMD' } });
+  deliver({ source: ownFrame, data: { type: 'terminal-ready', shellLabel: 'CMD' } });
   assert.equal(sessionText.textContent, 'CMD', 'the shell name is the session state beside the window name'); assert.equal(focused, 1);
   assert.equal(typeof wheelHandler, 'function');
   state.activeEntityId = 'different-card';
-  handler({ source: ownFrame, data: { type: 'terminal-ready', shellLabel: 'CMD' } });
+  deliver({ source: ownFrame, data: { type: 'terminal-ready', shellLabel: 'CMD' } });
   assert.equal(focused, 1, 'late terminal ready cannot steal focus from another card');
-  handler({ source: {}, data: { type: 'terminal-activate' } });
+  deliver({ source: {}, data: { type: 'terminal-activate' } });
   assert.equal(state.activeEntityId, 'different-card', 'another iframe cannot activate this card');
   assert.equal(dismissed, 0, 'another iframe cannot withdraw this window\'s close question');
-  handler({ source: ownFrame, data: { type: 'terminal-activate' } });
+  deliver({ source: ownFrame, data: { type: 'terminal-activate' } });
   assert.equal(state.activeEntityId, card.id);
   assert.equal(dismissed, 1, 'a press inside the terminal withdraws the close question');
   state.activeEntityId = 'different-card'; state.panModifier = true;
-  handler({ source: ownFrame, data: { type: 'terminal-activate' } });
+  deliver({ source: ownFrame, data: { type: 'terminal-activate' } });
   assert.equal(state.activeEntityId, 'different-card', 'pan modifier does not activate');
 });
 
@@ -856,4 +863,20 @@ test('actual write and read transports time out, settle unknown, and invalidate 
     assert.equal((await h.api.write('must not replay')).skipped, true);
     assert.equal(h.requests.filter(item => item.route === '/terminal/write').length, 1);
   }
+});
+
+
+test('each terminal document publishes its own key before its first host event and binds every event to it', async () => {
+  const first = await uiFixture();
+  assert.equal(first.api.hostEventKey, first.hostEventKey);
+  assert.deepEqual(first.messages[0], { type: 'terminal-api-ready', hostEventKey: first.api.hostEventKey });
+  await first.boot();
+  first.elements['terminal-shell-select'].value = 'cmd';
+  first.elements['terminal-shell-start'].dispatch('click');
+  first.event('mousedown', {});
+  assert.ok(first.messages.length >= 4);
+  assert.ok(first.messages.every(message => message.hostEventKey === first.api.hostEventKey));
+  const second = await uiFixture();
+  assert.notEqual(second.api.hostEventKey, first.api.hostEventKey, 'a reload cannot reuse the previous document key');
+  assert.match(second.api.hostEventKey, /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/);
 });
