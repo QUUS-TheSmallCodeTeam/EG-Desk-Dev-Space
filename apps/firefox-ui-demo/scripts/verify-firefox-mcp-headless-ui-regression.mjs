@@ -18,7 +18,10 @@ export const VIEWPORTS = Object.freeze([
 // The approved eight-button Dock. 파일·개발 (IDE)·온톨로지·설정 and the drawing
 // tools open from the 새 카드 menu (#egd-dock-menu).
 const DOCK_IDS = Object.freeze(['chat', 'memo', 'browser', 'terminal', 'select', 'hand', 'create', 'trash']);
-const ZOOM_LABELS = Object.freeze(['Canvas 축소', 'Canvas 확대', '열린 창 전체 보기', '이동하기 전에 보던 자리로 돌아가기']);
+// The return control is disabled (title '돌아갈 자리가 없습니다 — …') until a view is remembered, so its
+// stable identity is data-testid, not its state-dependent label.
+export const ZOOM_RETURN_ID = 'canvas-view-return';
+const ZOOM_LABELS = Object.freeze(['Canvas 축소', 'Canvas 확대', '열린 창 전체 보기', ZOOM_RETURN_ID]);
 const DRAFT = 'EG-Desk headless QA draft — never send';
 export const NARROW_CHAT_SAMPLE = ' QA600';
 export const NARROW_CHAT_WHEEL_LIMIT = 4;
@@ -51,11 +54,11 @@ export function assertBeforeDeadline(deadlineMs, now = Date.now()) {
     'deadline reached; no further QA action');
 }
 
-export function targetIssues(target) {
+export function targetIssues(target, { allowDisabled = false } = {}) {
   if (!target) return ['missing'];
   const issues = [];
   if (!target.visible) issues.push('hidden');
-  if (target.disabled || target.readOnly) issues.push('disabled-or-readonly');
+  if ((target.disabled && !allowDisabled) || target.readOnly) issues.push('disabled-or-readonly');
   if (!target.inViewport) issues.push('outside-viewport');
   if (target.hitCount !== 9) issues.push(`hit-points-${target.hitCount ?? 'missing'}-of-9`);
   return issues;
@@ -253,7 +256,7 @@ export async function observeTargets(harness, selector) {
       const hit = document.elementFromPoint(rect.left + rect.width * fx, rect.top + rect.height * fy);
       if (hit && (hit === node || node.contains(hit))) hitCount++;
     }
-    return { id: node.dataset.id || node.getAttribute('aria-label') || node.title || node.id || null,
+    return { id: node.dataset.testid === 'canvas-view-return' ? 'canvas-view-return' : node.dataset.id || node.getAttribute('aria-label') || node.title || node.id || null,
       title: node.title || '', ariaLabel: node.getAttribute('aria-label') || '',
       visible: !!visible, disabled: !!node.disabled, readOnly: !!node.readOnly,
       inViewport, hitCount, rect: { x: rect.x, y: rect.y, width: rect.width, height: rect.height } };
@@ -913,9 +916,12 @@ async function scanControls(harness, size, deadlineMs, result, stage) {
     { expected, observed: observed.map(item => item.id) });
     for (const id of expected) {
       const items = observed.filter(item => item.id === id);
+      // The return control is legitimately disabled with nothing remembered; a disabled one is
+      // checked for geometry only. Other controls must stay enabled.
+      const issues = targetIssues(items[0], { allowDisabled: id === ZOOM_RETURN_ID });
       record(result, `${stage}: ${name} ${id} 3x3 in-viewport hit target`,
-        items.length === 1 && targetIssues(items[0]).length === 0,
-        { issues: targetIssues(items[0]), rect: items[0]?.rect });
+        items.length === 1 && issues.length === 0,
+        { issues, rect: items[0]?.rect, disabled: items[0]?.disabled });
     }
   }
   const create = dock.find(item => item.id === 'create');

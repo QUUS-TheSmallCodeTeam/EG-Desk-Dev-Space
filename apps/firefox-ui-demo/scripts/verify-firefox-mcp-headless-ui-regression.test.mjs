@@ -931,6 +931,14 @@ test('Dock observer detects occlusion at the rounded dispatch pixel even when al
 
 test('headless regression targets the shown File editor and expects the 4th Zoom control', () => {
   const source = readFileSync(new URL('./verify-firefox-mcp-headless-ui-regression.mjs', import.meta.url), 'utf8');
-  assert.ok(source.includes("'이동하기 전에 보던 자리로 돌아가기'"));
+  assert.ok(source.includes("ZOOM_RETURN_ID = 'canvas-view-return'") && !source.includes("'이동하기 전에 보던 자리로 돌아가기'"));
   assert.ok(source.includes('readShownFileEditor(card)') && !source.includes(".egdesk-file-editor'"));
+});
+
+test('targetIssues tolerates a disabled control only when allowed', async () => {
+  const { targetIssues } = await import('./verify-firefox-mcp-headless-ui-regression.mjs');
+  const t = { visible: true, disabled: true, readOnly: false, inViewport: true, hitCount: 9 };
+  assert.deepEqual(targetIssues(t), ['disabled-or-readonly']);
+  assert.deepEqual(targetIssues(t, { allowDisabled: true }), []);
+  assert.deepEqual(targetIssues({ ...t, hitCount: 8 }, { allowDisabled: true }), ['hit-points-8-of-9']);
 });
