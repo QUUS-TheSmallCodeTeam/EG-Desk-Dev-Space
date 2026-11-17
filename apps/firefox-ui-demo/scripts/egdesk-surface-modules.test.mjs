@@ -14,7 +14,16 @@ const zones = [
   { key: 'ontology', file: 'EGDeskSurfaceOntology.mjs', factory: 'createOntologyZone', method: 'spawnOntologyMapCard' },
   { key: 'fileCard', file: 'EGDeskSurfaceFileCard.mjs', factory: 'createFileCardZone', method: 'spawnFileCard' },
   { key: 'terminal', file: 'EGDeskSurfaceTerminal.mjs', factory: 'createTerminalZone', method: 'spawnTerminalCard' },
+  // CNV-05: no surfaceForward; core reaches it through surfaceZones.annotation?.
+  { key: 'annotation', file: 'EGDeskSurfaceAnnotation.mjs', factory: 'createAnnotationZone', method: 'receivePublishedAnnotation', forwarded: false },
 ];
+const forwardedZones = zones.filter(zone => zone.forwarded !== false);
+const zoneInterface = {
+  fileCard: ['spawnFileCard', 'openVerifiedRunFile', 'openBoardProjectFile', 'openBoardProjectFileAt', 'onWorkflowEvent'],
+  annotation: ['receivePublishedAnnotation', 'annotationChipsForAnswer', 'annotationRecordsForCard', 'restoreCardAnnotations',
+    'annotationCanvasRecords', 'restoreCanvasAnnotations', 'acceptAnnotationSet', 'dismissAnnotationSet', 'getAnnotationSet',
+    'listAnnotationSets', 'annotationTarget', 'revealAnnotationSet', 'emphasizeAnnotationSet', 'refreshAnnotations'],
+};
 const modulePath = zone => `resources/surface/${zone.file}`;
 const sorted = values => [...values].sort();
 const own = (object, name) => Object.hasOwn(object, name);
@@ -128,7 +137,7 @@ async function install(script, namespaces, { transformNamespace = (_, namespace)
   const coreNames = namesAtCoreScope(script);
   for (const name of dependencies) assert.ok(coreNames.has(name), `installer dependency ${name} is declared by core`);
   const forwards = forwardsIn(script);
-  const expectedForwards = zones.map(zone => [zone.method, zone.key, zone.method]);
+  const expectedForwards = forwardedZones.map(zone => [zone.method, zone.key, zone.method]);
   expectedForwards.splice(2, 0, ['openBoardProjectFile', 'fileCard', 'openBoardProjectFile'],
     ['openBoardProjectFileAt', 'fileCard', 'openBoardProjectFileAt'], ['openVerifiedRunFile', 'fileCard', 'openVerifiedRunFile']);
   assert.deepEqual(forwards.map(({ binding, zone, method }) => [binding, zone, method]),
@@ -172,7 +181,7 @@ async function install(script, namespaces, { transformNamespace = (_, namespace)
             const api = target[name](strictDeps);
             const expected = factoryDeps(read(modulePath(zone)));
             assert.deepEqual(sorted(reads), expected, `${zone.file}: actual factory reads exactly its declared deps`);
-            assert.deepEqual(Object.keys(api), zone.key === 'fileCard' ? [zone.method, 'openVerifiedRunFile', 'openBoardProjectFile', 'openBoardProjectFileAt', 'onWorkflowEvent'] : [zone.method], `${zone.file}: actual returned interface`);
+            assert.deepEqual(Object.keys(api), zoneInterface[zone.key] || [zone.method], `${zone.file}: actual returned interface`);
             assert.equal(typeof api[zone.method], 'function');
             if (zone.key === 'fileCard') assert.equal(typeof api.onWorkflowEvent, 'function', 'File watcher receiver is callable');
             received.push({ zone, deps, api, reads });
@@ -336,7 +345,7 @@ test('stage1 source loader includes exact current module sources, once each and 
   const files = surfaceModuleFiles(core);
   assert.deepEqual(files, zones.map(modulePath));
   assert.deepEqual(sorted(readdirSync(new URL('resources/surface/', overlay)).filter(file => file.endsWith('.mjs'))),
-    sorted(zones.map(zone => zone.file)), 'stage1 has exactly three production window modules');
+    sorted(zones.map(zone => zone.file)), 'exactly the stage1 window modules plus the CNV-05 annotation layer');
   assert.equal(readSurfaceSource(), [core, ...files.map(read)].join('\n'));
   for (const zone of zones) {
     assert.equal((readSurfaceSource().match(new RegExp(`  function ${zone.method}\\(`, 'g')) || []).length, 1);
@@ -370,7 +379,7 @@ test('real ESM factories and actual installer use one frozen dependency object w
   const installed = await install(core, await importModules());
   const required = sorted(new Set(zones.flatMap(zone => factoryDeps(read(modulePath(zone))))));
   assert.deepEqual(installerDeps(core), required, 'installer supplies exactly the actual factory dependency union');
-  assert.equal(required.length, 30, 'stage1 plus explicit project target, Terminal Card callbacks and the CODE-06 result card (RunResult, openBoardProjectFileAt); the Terminal window now takes its frame, drag, resize and close from the shared Desk Window shell');
+  assert.equal(required.length, 33, 'CNV-05 annotation layer (AnnotationState, revealOpenCanvasCard, scheduleDeskSessionSave), stage1 plus explicit project target, Terminal Card callbacks and the CODE-06 result card (RunResult, openBoardProjectFileAt); the Terminal window now takes its frame, drag, resize and close from the shared Desk Window shell');
   assert.equal(installed.received[1].deps.getProjectTarget, installed.bindings.getProjectTarget);
   assert.equal(installed.received[1].deps.spawnTerminalCard, installed.forwards.spawnTerminalCard);
   const api = readBootApi(core, installed.forwards);
@@ -381,7 +390,7 @@ test('real ESM factories and actual installer use one frozen dependency object w
 
 test('every actual surfaceForward resolves late and preserves arguments, results, receiver and errors', async () => {
   const installed = await install(core, await importModules());
-  for (const zone of zones) {
+  for (const zone of forwardedZones) {
     assert.equal(typeof installed.surfaceZones[zone.key][zone.method], 'function', 'factory supplied the actual renderer');
     // Enter the real renderer and stop at its first injected dependency. No DOM
     // fixture or copied renderer is needed to prove the forwarding connection.

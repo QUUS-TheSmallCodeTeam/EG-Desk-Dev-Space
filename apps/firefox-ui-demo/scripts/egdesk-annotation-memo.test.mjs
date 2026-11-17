@@ -1918,3 +1918,69 @@ test('memo focus: a failed pending ask does not take synthetic focus from anothe
     } finally { project.release(); }
   });
 });
+
+// CNV-05 screen connection: thin hooks in the core, the layer in
+// overlay/resources/surface/EGDeskSurfaceAnnotation.mjs.
+const cnv05Core = readFileSync(new URL('../overlay/JS/eg-desk-surface.uc.js', import.meta.url), 'utf8');
+const cnv05Css = readFileSync(new URL('../overlay/CSS/eg-desk-surface.uc.css', import.meta.url), 'utf8');
+const cnv05Block = (start, end) => {
+  const from = cnv05Core.indexOf(start);
+  const to = cnv05Core.indexOf(end, from + start.length);
+  assert.ok(from >= 0 && to > from, `${start} block`);
+  return cnv05Core.slice(from, to);
+};
+
+test('annotation wiring: cards carry kept marks, every restore path puts them back, the Desk keeps free Canvas sets', () => {
+  assert.match(cnv05Core, /const AnnotationState = ChromeUtils\.importESModule\('chrome:\/\/userchrome\/content\/EGDeskAnnotationState\.sys\.mjs'\);/);
+  assert.match(cnv05Core, /surfaceZones\.annotation = load\('EGDeskSurfaceAnnotation\.mjs'\)\.createAnnotationZone\(deps\);/);
+  assert.match(cnv05Block('  function serializeCardState(card) {', '  function serializeShapeState('), /\.\.\.\(typeof surfaceZones === 'undefined' \? \{\} : cardAnnotationField\(card\)\),/);
+  assert.match(cnv05Block('  function cardAnnotationField(card) {', '\n  }\n'), /annotationRecordsForCard\(card\)[\s\S]*\{ annotations: records \}/);
+  assert.match(cnv05Block('  function restoreCardFromState(cardState) {', '  function restoreShapeFromState('),
+    /applyPersistentEntityGeometry\(card, cardState\.geometry\);\n    if \(typeof surfaceZones !== 'undefined'\) surfaceZones\.annotation\?\.restoreCardAnnotations\(card, cardState\.annotations\);/);
+  const mount = cnv05Block('  function mountBoardMember(projection, member, options = {}) {', '    view.dataset.boardId = projection.boardId;');
+  assert.match(mount, /if \(!view\._savedBoardMember && typeof surfaceZones !== 'undefined'\) surfaceZones\.annotation\?\.restoreCardAnnotations\(view, record\.annotations\);/,
+    'a Board or Desk member gets its marks back; a placeholder keeps them in its saved record');
+  assert.match(cnv05Block('  function serializeDeskSnapshot() {', '      groups: cloneJson('), /annotations: \(typeof surfaceZones === 'undefined' \? null : surfaceZones\.annotation\?\.annotationCanvasRecords\(\)\) \|\| \[\],/);
+  assert.match(cnv05Core, /restoreShapeFromState\(shapeState, \{ reservedIds \}\)\);\n      if \(typeof surfaceZones !== 'undefined'\) surfaceZones\.annotation\?\.restoreCanvasAnnotations\(records\.annotations\);/);
+});
+
+test('annotation wiring: the chat event draws the proposal without a camera move and the answer gets a chip', () => {
+  const receiver = cnv05Block("        case 'chat.event': {", "        case 'auth-status':");
+  assert.match(receiver, /if \(run && event\.event === 'annotation\.published' && typeof surfaceZones !== 'undefined'\) surfaceZones\.annotation\?\.receivePublishedAnnotation\(run, event\.details\);/);
+  assert.ok(receiver.indexOf("'annotation.published'") < receiver.indexOf('syncProtocolRun(run)'), 'the set exists before the answer redraws with its chip');
+  const module = readFileSync(new URL('../overlay/resources/surface/EGDeskSurfaceAnnotation.mjs', import.meta.url), 'utf8');
+  const receive = module.slice(module.indexOf('  function receivePublishedAnnotation('), module.indexOf('  function annotationRestoredId('));
+  assert.doesNotMatch(receive, /focusCanvasCard|revealOpenCanvasCard|markAgendaDirty|scheduleDeskSessionSave/, 'D-K1: arrival moves nothing and saves nothing');
+  assert.match(cnv05Core, /const annotationChips = \(typeof surfaceZones === 'undefined' \? null : surfaceZones\.annotation\?\.annotationChipsForAnswer\(message, activeThread\)\) \|\| \[\];/);
+  assert.match(cnv05Core, /if \(annotationChips\.length\) resultRow\.append\(\.\.\.annotationChips\);/);
+});
+
+test('annotation CSS: marks never take a press, proposals are dashed, and the screen-wide hide covers them', () => {
+  assert.match(cnv05Css, /\.egd-annotation-layer \{[^}]*pointer-events: none;/);
+  assert.match(cnv05Css, /\.egd-annotation-bar \{[^}]*pointer-events: auto;/);
+  assert.match(cnv05Css, /\.egd-annotation-bar-proposed \{[^}]*border-style: dashed;/);
+  assert.match(cnv05Css, /\.egd-annotation-label\[data-status="proposed"\] \{ border-style: dashed; \}/);
+  const hide = cnv05Css.slice(cnv05Css.indexOf(':root[data-egd-annotations-hidden="true"] .egd-annotation-layer'));
+  assert.match(hide, /^:root\[data-egd-annotations-hidden="true"\] \.egd-annotation-layer,\n:root\[data-egd-annotations-hidden="true"\] \.egd-annotation-bars,\n:root\[data-egd-annotations-hidden="true"\] \.egd-annotation-bar \{\n  visibility: hidden !important;\n  pointer-events: none !important;\n\}/);
+  // The toggle stays one root attribute set by the Dock and never saved.
+  assert.match(cnv05Core, /document\.documentElement\.dataset\.egdAnnotationsHidden = 'true';/);
+  assert.doesNotMatch(cnv05Block('  function serializeDeskSnapshot() {', '      boardProjections:'), /annotationsHidden|egdAnnotationsHidden/);
+});
+
+test('annotation: a card record with kept marks survives Board save and reopen with new view ids', () => {
+  const kept = Annotation.annotationSetForBoard(Annotation.acceptAnnotations(Annotation.normalizeAnnotationSet(agentSet()), { current: observation() }));
+  const snapshot = deepFreeze({ agenda: { id: 'board-a', memberCardIds: ['egd-card-7'] },
+    cards: [{ id: 'egd-card-7', type: 'browser', runtimeState: { uri: 'https://example.com/' }, annotations: [kept] }], shapes: [] });
+  const projection = planBoardProjection(snapshot, 'projection-a');
+  const liveId = projection.idMap['egd-card-7'];
+  const live = { id: liveId, type: 'browser', runtimeState: { uri: 'https://example.com/' }, annotations: [{ ...kept, targetCardId: liveId }] };
+  const saved = snapshotBoardProjection(projection, { [liveId]: live }, 5);
+  assert.equal(saved.cards[0].id, 'egd-card-7');
+  assert.equal(saved.cards[0].annotations.length, 1);
+  assert.deepEqual(privateKeysIn(saved.cards[0].annotations), []);
+  // The screen puts the set on whichever card the record mounts as.
+  const restored = Annotation.restoreAnnotationSet(saved.cards[0].annotations[0]);
+  assert.equal(restored.id, kept.id, 'the set id survives, so a later Briefing can still name it');
+  assert.deepEqual(restored.items.map(item => item.status), kept.items.map(item => item.status));
+  assert.equal(snapshotBoardProjection(projection, {}, 6).cards[0].annotations.length, 1, 'an unmounted member keeps its saved marks');
+});

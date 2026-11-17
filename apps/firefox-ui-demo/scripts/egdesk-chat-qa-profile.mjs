@@ -30,6 +30,7 @@ export const QA_STAGE1_MODULES = Object.freeze([
   'resources/surface/EGDeskSurfaceOntology.mjs',
   'resources/surface/EGDeskSurfaceFileCard.mjs',
   'resources/surface/EGDeskSurfaceTerminal.mjs',
+  'resources/surface/EGDeskSurfaceAnnotation.mjs',
 ]);
 
 function refuse(reason) {

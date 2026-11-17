@@ -26,6 +26,7 @@
   const ProfileTransfer = ChromeUtils.importESModule('chrome://userchrome/content/EGDeskProfileTransfer.sys.mjs');
   const ProfileTransferView = ChromeUtils.importESModule('chrome://userchrome/content/EGDeskProfileTransferView.sys.mjs');
   const MemoState = ChromeUtils.importESModule('chrome://userchrome/content/EGDeskMemoState.sys.mjs');
+  const AnnotationState = ChromeUtils.importESModule('chrome://userchrome/content/EGDeskAnnotationState.sys.mjs');
   const AgentIdentityView = ChromeUtils.importESModule('chrome://userchrome/content/EGDeskAgentIdentityView.sys.mjs');
   const CanvasLayout = ChromeUtils.importESModule('chrome://userchrome/content/EGDeskCanvasLayout.sys.mjs');
   const BROWSER_AGENT_ACTOR_NAME = 'EGDeskBrowserAgentRuntime';
@@ -5291,7 +5292,16 @@
       geometry: persistentEntityGeometry(card),
       sourceRef: cleanSourceRef(card._sourceRef),
       runtimeState: runtimeStateForCard(card, type),
+      ...(typeof surfaceZones === 'undefined' ? {} : cardAnnotationField(card)),
     };
+  }
+
+  // CNV-05: the AI marks kept on a card travel with its record (proposals
+  // never do). The hooks check for the zone table because extracted-function
+  // test sandboxes run these paths without it.
+  function cardAnnotationField(card) {
+    const records = surfaceZones.annotation?.annotationRecordsForCard(card) || [];
+    return records.length ? { annotations: records } : {};
   }
 
   function serializeShapeState(shape) {
@@ -5339,6 +5349,7 @@
       shapes: Array.from(document.querySelectorAll('.egd-canvas-shape'))
         .map(serializeShapeState)
         .filter(Boolean),
+      annotations: (typeof surfaceZones === 'undefined' ? null : surfaceZones.annotation?.annotationCanvasRecords()) || [],
       groups: cloneJson(state.canvasGroups || []),
       surface: { mode: state.surface.mode, browserCardId: state.surface.browserCardId,
         initialBrowserFocus: !!state.surface.initialBrowserFocus,
@@ -5550,6 +5561,7 @@
       record.type === 'browser' && view._sourceRef ? view._sourceRef : record.sourceRef);
     if (options.newTerminal) { view.dataset.runtimeContinuity = 'new-session'; registerSourceRefCard(view); }
     applyPersistentEntityGeometry(view, geometry);
+    if (!view._savedBoardMember && typeof surfaceZones !== 'undefined') surfaceZones.annotation?.restoreCardAnnotations(view, record.annotations);
     view.dataset.boardId = projection.boardId;
     view.dataset.projectionId = projection.id;
     view.dataset.memberId = member.sourceId;
@@ -6373,6 +6385,7 @@
     if (cardState.sourceRef) bindCardSourceRef(card,
       cardState.type === 'browser' && card._sourceRef ? card._sourceRef : cardState.sourceRef);
     applyPersistentEntityGeometry(card, cardState.geometry);
+    if (typeof surfaceZones !== 'undefined') surfaceZones.annotation?.restoreCardAnnotations(card, cardState.annotations);
     return card;
   }
 
@@ -6489,6 +6502,7 @@
         rememberRestoredId(cardState.id, view);
       }
       for (const shapeState of records.shapes || []) rememberRestoredId(shapeState.id, restoreShapeFromState(shapeState, { reservedIds }));
+      if (typeof surfaceZones !== 'undefined') surfaceZones.annotation?.restoreCanvasAnnotations(records.annotations);
       if (!options.merge) {
         state.boards = snapshot.boardProjections
           ? (restoredIds.size ? cloneJson(snapshot.boardProjections) : snapshot.boardProjections)
@@ -12655,10 +12669,12 @@
               onclick: keepAsCard,
             }, el('span', { class: 'egd-codex-result-label' }, '카드로 보기')) : null;
             const memoChip = memoChipForAnswer(message);   // CNV-06: the answer that joined a memo
-            const resultRow = resultChips || cardChip || memoChip || outputChips.length ? resultChips || el('div', { class: 'egd-codex-result-chips' }) : null;
+            const annotationChips = (typeof surfaceZones === 'undefined' ? null : surfaceZones.annotation?.annotationChipsForAnswer(message, activeThread)) || [];   // CNV-05
+            const resultRow = resultChips || cardChip || memoChip || outputChips.length || annotationChips.length ? resultChips || el('div', { class: 'egd-codex-result-chips' }) : null;
             if (outputChips.length) resultRow.prepend(...outputChips);
             if (cardChip) resultRow.appendChild(cardChip);
             if (memoChip) resultRow.appendChild(memoChip);
+            if (annotationChips.length) resultRow.append(...annotationChips);
             const briefingControl = BriefingState.validBriefing(message.briefing) ? el('button', {
               class: 'egd-codex-result-chip', data: { testid: 'briefing-open', answerId: message.answerId },
               onclick: (ev) => openAnswerBriefing(activeThread, message,
@@ -14425,6 +14441,8 @@
           if (event.v === 2) {
             if (!ChatState.canAdmitChatEvent(protocol, state.codex.threads, event)) return;
             const run = ChatState.reduceChatEvent(protocol, event, ChatState.knownChatEngineIds(state.codex.engines));
+            // CNV-05 / D-K1: an Agent's marks appear over their card at once; the camera stays.
+            if (run && event.event === 'annotation.published' && typeof surfaceZones !== 'undefined') surfaceZones.annotation?.receivePublishedAnnotation(run, event.details);
             // CHAT-06 Await: an Agent proposed a plan; its approval card goes under this run's answer.
             if (run && event.event === 'plan.proposed') planProposalFrame(run, event.details);
             if (run) { syncProtocolRun(run); emit(); }
@@ -28945,6 +28963,7 @@
   function surfaceForward(zone, name) { return (...args) => surfaceZones[zone][name](...args); }
   function installSurfaceZones() {
     const deps = Object.freeze({
+      AnnotationState,
       FileCardState,
       ONTOLOGY_GRAPH_URL,
       RunResult,
@@ -28967,7 +28986,9 @@
       openChatInputPanel,
       raiseCardZ,
       resolveCanvasCardPlacement,
+      revealOpenCanvasCard,
       revealPlacedCanvasCard,
+      scheduleDeskSessionSave,
       setActiveEntity,
       singletonSourceRef,
       spawnDeskWindowShell,
@@ -28980,6 +29001,7 @@
     surfaceZones.ontology = load('EGDeskSurfaceOntology.mjs').createOntologyZone(deps);
     surfaceZones.fileCard = load('EGDeskSurfaceFileCard.mjs').createFileCardZone(deps);
     surfaceZones.terminal = load('EGDeskSurfaceTerminal.mjs').createTerminalZone(deps);
+    surfaceZones.annotation = load('EGDeskSurfaceAnnotation.mjs').createAnnotationZone(deps);
   }
   try { installSurfaceZones(); } catch (err) { console.error(TAG, 'surface zone install failed', err); }
 
