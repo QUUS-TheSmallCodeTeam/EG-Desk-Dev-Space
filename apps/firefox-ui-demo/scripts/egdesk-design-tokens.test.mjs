@@ -850,7 +850,7 @@ test('approved Chat refinement keeps accessible composer and real HUD actions', 
   assert.match(surfaceScript, /class: 'egd-hud-close',[^]*?'aria-label': '닫기'[^]*?toggleHUD\(null\)[^]*?deskIcon\('close'\)/);
   assert.match(surfaceScript, /data: \{ testid: 'chat-attach-open' \}/);
   assert.match(surfaceScript, /renderEngineChip\(activeThread\)/);
-  assert.match(surfaceScript, /codexUsageRing\(codex\.authStatus\)/);
+  assert.match(surfaceScript, /chatHeadUsageRing\(activeEngine, codex\)/);
 });
 
 test('the actual composer button and keyboard handlers dispatch once with their room owner', async t => {

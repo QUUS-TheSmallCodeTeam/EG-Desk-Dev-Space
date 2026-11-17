@@ -355,12 +355,24 @@
 
   // ChatGPT usage in the resource-monitor ring shape. Nothing reported shows a
   // grey '확인 안 됨', never an invented 0%; the reset time is in the title.
-  function codexUsageRing(auth, className = '') {
-    const view = ChatState.usageRingView(auth);
+  function codexUsageRing(auth, className = '', onOpen = null) {
+    return usageMeter(ChatState.usageRingView(auth), { className, onOpen, testid: 'chat-usage-ring' });
+  }
+  // SUB-03 (Claude) and SUB-01: the Chat head ring shows the room's engine
+  // usage, and pressing it opens Settings 계정 where the account menu is.
+  function chatHeadUsageRing(activeEngine, codex) {
+    const onOpen = () => spawnSettingsCard({ tab: 'account' });
+    if (activeEngine?.engineId === 'claude') {
+      return usageMeter(AccountSettingsView.claudeUsageView(codex.engines), { onOpen, testid: 'chat-claude-usage-ring' });
+    }
+    return codexUsageRing(codex.authStatus, '', onOpen);
+  }
+  function usageMeter(view, { className = '', onOpen = null, testid } = {}) {
     if (!view) return null;
-    return el('span', {
-      class: `egd-usage-meter egd-usage-${view.level}${view.stale ? ' egd-usage-stale' : ''}${className ? ` ${className}` : ''}`,
-      role: 'img', 'aria-label': view.label, title: view.title, data: { testid: 'chat-usage-ring', level: view.level },
+    return el(onOpen ? 'button' : 'span', {
+      class: `egd-usage-meter egd-usage-${view.level}${view.stale ? ' egd-usage-stale' : ''}${onOpen ? ' egd-usage-meter-button' : ''}${className ? ` ${className}` : ''}`,
+      ...(onOpen ? { type: 'button', 'aria-label': `${view.label} · 계정 메뉴 열기`, onclick: onOpen } : { role: 'img', 'aria-label': view.label }),
+      title: view.title, data: { testid, level: view.level },
     }, el('span', {
       class: 'egd-usage-ring', 'aria-hidden': 'true',
       style: view.percent === null ? null : `--egd-usage-fill: ${view.percent}%`,
@@ -11651,10 +11663,12 @@
           el('span', { class: `egd-codex-chrome-indicator egd-codex-chrome-indicator-${indicatorState}` }),
           el('div', { class: 'egd-codex-chrome-status' },
             statusBridge ? el('span', { class: `egd-codex-system-chip egd-codex-system-chip-${indicatorState}` }, statusBridge) : null,
-            statusAccount !== statusBridge ? el('span', {
-              class: `egd-codex-system-chip${accountChipTone ? ` egd-codex-system-chip-${accountChipTone}` : ''}`,
-              title: activeEngine.engineId === 'codex' ? access.detail : null,
+            // SUB-01: the chip opens Settings 계정 (account menu, Claude login and API-key choice).
+            statusAccount !== statusBridge ? el('button', {
+              class: `egd-codex-system-chip egd-codex-system-chip-button${accountChipTone ? ` egd-codex-system-chip-${accountChipTone}` : ''}`,
+              type: 'button', title: [activeEngine.engineId === 'codex' ? access.detail : null, '계정 메뉴 열기'].filter(Boolean).join(' · '),
               data: { testid: 'chat-account-access', state: activeEngine.engineId === 'codex' ? access.state : 'engine' },
+              onclick: () => spawnSettingsCard({ tab: 'account' }),
             }, statusAccount) : null,
           ),
         ),
@@ -12259,7 +12273,7 @@
               el('div', { class: 'egd-codex-conversation-hud-badges' }, buildCodexThreadKindBadge(activeThread), buildCodexSessionBadge(activeThread, codexBridge)),
             ),
             renderEngineChip(activeThread),
-            codexUsageRing(codex.authStatus),
+            chatHeadUsageRing(activeEngine, codex),
             el('button', {
               class: `egd-codex-conversation-menu-trigger${threadMenuOpen ? ' egd-codex-conversation-menu-trigger-active' : ''}`,
               title: '채팅방 메뉴',
@@ -12443,7 +12457,7 @@
               buildCodexSessionBadge(activeThread, codexBridge)),
             renderReturnToDm(activeThread),
             renderEngineChip(activeThread),
-            codexUsageRing(codex.authStatus),
+            chatHeadUsageRing(activeEngine, codex),
             el('button', {
               class: 'egd-codex-conversation-menu-trigger',
               'aria-label': '채팅방 메뉴',
@@ -16648,6 +16662,23 @@
           }
         } finally { epochScope.finish(token); }
       },
+      // SUB-08/SUB-15 Claude rows: a forced CLI re-check, the Terminal login
+      // line and the API-key-in-environment choice. The claude CLI keeps its
+      // own login; these never carry a credential (D-S1, D-S4).
+      async refreshClaudeEngine() {
+        const result = await fetchJson('/engines/claude/refresh', { method: 'POST' });
+        if (result?.engine?.id === 'claude') update({ engines: [...(state.codex.engines || []).filter(row => row.id !== 'claude'), result.engine] });
+        return result?.engine ?? null;
+      },
+      claudeLoginCommand(method = 'claudeai') {
+        return fetchJson(`/engines/claude/login-command?method=${encodeURIComponent(method)}`);
+      },
+      async claudeApiKeyEnv(confirm) {
+        const result = await fetchJson('/engines/claude/api-key-env', typeof confirm === 'boolean'
+          ? { method: 'POST', body: JSON.stringify({ confirm }) } : {});
+        if (result?.engine?.id === 'claude') update({ engines: [...(state.codex.engines || []).filter(row => row.id !== 'claude'), result.engine] });
+        return result;
+      },
       async startLogin() {
         const token = epochScope.begin();
         try {
@@ -19549,12 +19580,47 @@
       accountAction = { action, phase: outcome.phase, text: outcome.text };
       renderAccountTab();
     };
+    // SUB-08/SUB-15 Claude card actions; the result line stays until the next one.
+    let claudeAction = null;
+    let claudeKeyEnv = null;
+    const runClaudeAction = async (action) => {
+      const api = bridge();
+      if (!api || claudeAction?.phase === 'running') return;
+      claudeAction = { action, phase: 'running' };
+      renderAccountTab();
+      try {
+        if (action === 'login') {
+          const outcome = await AccountSettingsView.runClaudeLoginInTerminal({
+            requestCommand: (method) => api.claudeLoginCommand(method),
+            openTerminal: () => spawnTerminalCard(),
+          });
+          claudeAction = { action, ...outcome };
+        } else if (action === 'keyConfirm' || action === 'keyDecline') {
+          claudeKeyEnv = await api.claudeApiKeyEnv(action === 'keyConfirm');
+          claudeAction = { action, phase: 'done', text: action === 'keyConfirm'
+            ? 'API 키를 빼고 Claude 구독 로그인으로 실행합니다.' : 'Claude를 실행하지 않습니다. 키를 지우거나 다시 확인한 뒤 선택해 주세요.' };
+          if (action === 'keyDecline') claudeKeyEnv = null;
+        } else if (api.refreshClaudeEngine) {
+          await api.refreshClaudeEngine();
+          claudeAction = null;
+        } else {
+          await api.refreshAuthStatus();
+          claudeAction = null;
+        }
+      } catch (error) {
+        claudeAction = { action, phase: 'error', text: `Claude 상태를 바꾸지 못했습니다: ${error?.message || '연결 프로그램 오류'}` };
+      }
+      renderAccountTab();
+    };
     const renderAccountTab = () => {
       if (activeTab !== 'account') return;
       const codex = state.codex;
       const auth = codex.authStatus || {};
       const loginBusy = Boolean(codex.isStartingLogin || auth.loginInProgress);
       const connection = AccountSettingsView.settingsConnectionView({ connected: codex.connected, bridgeState: codexBridgeNotice(codex).state });
+      // SUB-13 range badge (D-S6: shown, never blocking); SUB-15 '종량 과금' for an API-key codex login.
+      const codexVersion = codex.connected ? AccountSettingsView.engineVersionBadge(codex.engines, 'codex') : null;
+      const codexBilling = codex.connected ? AccountSettingsView.codexBillingLabel(auth, codex.engines) : null;
       const section = el('section', { class: 'egd-settings-section', 'aria-label': 'ChatGPT 계정' },
         el('div', { class: 'egd-settings-section-title' }, 'ChatGPT 계정'));
       // A confirmation stands only while the account it names is still signed in.
@@ -19576,7 +19642,12 @@
             el('div', { class: 'egd-settings-account-title' }, loginBusy ? '로그인 진행 중' : '로그인되어 있지 않습니다'),
             el('div', { class: 'egd-settings-account-sub' }, loginBusy
               ? '브라우저 카드에서 ChatGPT 로그인을 마치면 여기에 계정이 보입니다.'
-              : 'ChatGPT 계정으로 로그인하면 대화를 시작하고 사용 한도를 확인할 수 있습니다.')),
+              : 'ChatGPT 계정으로 로그인하면 대화를 시작하고 사용 한도를 확인할 수 있습니다.'),
+            codexBilling ? el('div', { class: 'egd-settings-account-sub', data: { testid: 'settings-codex-billing' } },
+              '이 Mac의 codex는 OpenAI API 키로 로그인되어 있습니다. EG-Desk 대화는 ChatGPT 구독 로그인으로만 시작합니다.',
+              el('span', { class: 'egd-settings-plan-badge egd-settings-billing-badge' }, codexBilling)) : null,
+            codexVersion ? el('span', { class: `egd-settings-plan-badge egd-settings-version-badge egd-settings-version-badge-${codexVersion.tone}`, title: codexVersion.title,
+              data: { testid: 'settings-codex-version-badge', status: codexVersion.status } }, codexVersion.label) : null),
           el('button', {
             class: 'egd-settings-btn egd-settings-btn-primary', disabled: loginBusy ? 'true' : null,
             onclick: () => { accountAction = null; bridge()?.startLogin(); },
@@ -19605,7 +19676,9 @@
           el('div', { class: 'egd-settings-account-copy' },
             el('div', { class: 'egd-settings-account-title' }, email || '이메일 확인 안 됨'),
             el('div', { class: 'egd-settings-account-sub' }, 'ChatGPT로 로그인됨',
-              el('span', { class: 'egd-settings-plan-badge', data: { testid: 'settings-plan' } }, plan ? `${plan} 요금제` : '요금제 확인 안 됨'))),
+              el('span', { class: 'egd-settings-plan-badge', data: { testid: 'settings-plan' } }, plan ? `${plan} 요금제` : '요금제 확인 안 됨'),
+              codexVersion ? el('span', { class: `egd-settings-plan-badge egd-settings-version-badge egd-settings-version-badge-${codexVersion.tone}`, title: codexVersion.title,
+                data: { testid: 'settings-codex-version-badge', status: codexVersion.status } }, codexVersion.label) : null)),
           menu));
         if (accountAction?.phase === 'confirm') {
           const confirm = AccountSettingsView.accountActionConfirm(accountAction.action, { email, busy: accountAction.busy });
@@ -19647,10 +19720,16 @@
         }, accountAction.text));
       }
       // Claude (D-S1): the CLI's own login as the bridge last reported it —
-      // subscription, API key, external provider or signed out. '다시 확인' reads
-      // /v1/state again; the bridge re-runs its static check there.
+      // subscription, API key, external provider or signed out. '다시 확인'
+      // forces the bridge's static check (POST /engines/claude/refresh, SUB-08);
+      // '로그인' types `claude auth login` into a Terminal card, where the person
+      // finishes Anthropic's own login. EG-Desk never touches the credential.
       const claude = ChatState.claudeSettingsView(codex.engines, { connected: codex.connected });
       const claudeAccount = AccountSettingsView.claudeAccountView(codex.engines, { connected: codex.connected });
+      const claudeVersion = codex.connected ? AccountSettingsView.engineVersionBadge(codex.engines, 'claude') : null;
+      const claudeUsage = codex.connected ? AccountSettingsView.claudeUsageView(codex.engines) : null;
+      const claudeKeyConfirm = codex.connected ? AccountSettingsView.claudeApiKeyEnvConfirm(codex.engines, claudeKeyEnv) : null;
+      const claudeBusy = claudeAction?.phase === 'running';
       const claudeSection = el('section', { class: 'egd-settings-section', 'aria-label': 'Claude' },
         el('div', { class: 'egd-settings-section-title' }, 'Claude'),
         el('div', { class: 'egd-settings-account-card', data: { testid: 'settings-claude-account', state: claudeAccount.status } },
@@ -19659,11 +19738,46 @@
           el('div', { class: 'egd-settings-account-copy' },
             el('div', { class: 'egd-settings-account-title' }, claudeAccount.title),
             el('div', { class: 'egd-settings-account-sub' }, claudeAccount.sub,
-              claudeAccount.methodLabel ? el('span', { class: 'egd-settings-plan-badge', data: { testid: 'settings-claude-method', method: claudeAccount.method || 'unknown' } }, claudeAccount.methodLabel) : null)),
+              claudeAccount.methodLabel ? el('span', { class: 'egd-settings-plan-badge', data: { testid: 'settings-claude-method', method: claudeAccount.method || 'unknown' } }, claudeAccount.methodLabel) : null,
+              claudeAccount.billingLabel ? el('span', { class: 'egd-settings-plan-badge egd-settings-billing-badge', data: { testid: 'settings-claude-billing' } }, claudeAccount.billingLabel) : null,
+              claudeVersion ? el('span', { class: `egd-settings-plan-badge egd-settings-version-badge egd-settings-version-badge-${claudeVersion.tone}`, title: claudeVersion.title,
+                data: { testid: 'settings-claude-version-badge', status: claudeVersion.status } }, claudeVersion.label) : null)),
+          claudeAccount.login
+            ? el('button', { class: 'egd-settings-btn egd-settings-btn-primary', type: 'button', disabled: claudeBusy ? 'true' : null, data: { testid: 'settings-claude-login' },
+              title: 'Terminal 카드에서 claude auth login 을 실행합니다', onclick: () => { void runClaudeAction('login'); } }, claudeBusy && claudeAction.action === 'login' ? '터미널 여는 중…' : '로그인')
+            : null,
           claudeAccount.action === 'refresh'
-            ? el('button', { class: 'egd-settings-btn', type: 'button', data: { testid: 'settings-claude-refresh' }, onclick: () => bridge()?.refreshAuthStatus() }, '다시 확인')
+            ? el('button', { class: 'egd-settings-btn', type: 'button', disabled: claudeBusy ? 'true' : null, data: { testid: 'settings-claude-refresh' },
+              onclick: () => { void runClaudeAction('refresh'); } }, claudeBusy && claudeAction.action === 'refresh' ? '확인 중…' : '다시 확인')
             : null),
         claudeAccount.hint ? el('p', { class: 'egd-settings-section-sub egd-settings-account-hint', data: { testid: 'settings-claude-hint' } }, claudeAccount.hint) : null,
+        claudeKeyConfirm ? el('div', {
+          class: `egd-settings-account-confirm egd-settings-account-confirm-${claudeKeyConfirm.tone}`, role: 'group', 'aria-label': claudeKeyConfirm.title,
+          data: { testid: 'settings-claude-key-confirm' },
+        },
+        el('div', { class: 'egd-settings-account-confirm-title' }, claudeKeyConfirm.title,
+          el('span', { class: 'egd-settings-plan-badge egd-settings-billing-badge' }, claudeKeyConfirm.billingLabel)),
+        ...claudeKeyConfirm.lines.map((line) => el('div', { class: 'egd-settings-account-confirm-line' }, line)),
+        el('div', { class: 'egd-settings-account-confirm-actions' },
+          el('button', { class: 'egd-settings-btn egd-settings-btn-primary', type: 'button', disabled: claudeBusy ? 'true' : null, data: { testid: 'settings-claude-key-confirm-ok' },
+            onclick: () => { void runClaudeAction('keyConfirm'); } }, claudeKeyConfirm.confirmLabel),
+          el('button', { class: 'egd-settings-btn', type: 'button', disabled: claudeBusy ? 'true' : null, data: { testid: 'settings-claude-key-confirm-cancel' },
+            onclick: () => { void runClaudeAction('keyDecline'); } }, claudeKeyConfirm.cancelLabel))) : null,
+        claudeUsage ? el('div', {
+          class: `egd-settings-usage egd-usage-${claudeUsage.level}${claudeUsage.stale ? ' egd-usage-stale' : ''}`,
+          data: { testid: 'settings-claude-usage', level: claudeUsage.level }, title: claudeUsage.title,
+        },
+        el('span', { class: 'egd-usage-ring egd-usage-ring-large', 'aria-hidden': 'true', style: claudeUsage.percent === null ? null : `--egd-usage-fill: ${claudeUsage.percent}%` }),
+        el('div', { class: 'egd-settings-usage-copy' },
+          el('div', { class: 'egd-settings-usage-title' }, claudeUsage.level === 'unknown' ? '사용 한도 확인 안 됨'
+            : [claudeUsage.windowLabel, claudeUsage.percentLabel].filter(Boolean).join(' · ') || claudeUsage.text),
+          el('div', { class: 'egd-settings-usage-sub' }, claudeUsage.level === 'unknown' ? 'Claude로 대화하면 사용량이 보고됩니다.' : claudeUsage.resetLabel || '초기화 시각 확인 안 됨'),
+          claudeUsage.stale ? el('div', { class: 'egd-settings-usage-note' }, '확인한 지 오래되어 실제와 다를 수 있습니다.') : null,
+          claudeUsage.level === 'limit' ? el('div', { class: 'egd-settings-usage-note egd-settings-usage-note-strong' }, '한도에 도달했습니다. 초기화 뒤에도 자동으로 이어가지 않습니다.') : null)) : null,
+        claudeAction && claudeAction.phase !== 'running' ? el('div', {
+          class: `egd-settings-account-result egd-settings-account-result-${claudeAction.phase}`, role: claudeAction.phase === 'error' ? 'alert' : 'status',
+          data: { testid: 'settings-claude-result', phase: claudeAction.phase, action: claudeAction.action },
+        }, claudeAction.text) : null,
         el('div', { class: 'egd-settings-pending-line', data: { testid: 'settings-claude', auth: claude.authStatus, state: claude.engineStatus } },
           el('div', { data: { testid: 'settings-claude-auth' } }, claude.authText),
           el('div', { data: { testid: 'settings-claude-engine' } }, claude.engineText),

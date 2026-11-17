@@ -10885,3 +10885,12 @@ button.egd-memo-ask-cancel:hover { text-decoration: underline; }
 .egd-codex-context-resolver-list li { display: flex; flex-wrap: wrap; align-items: baseline; gap: 0 8px; }
 .egd-codex-context-resolver-name { overflow-wrap: anywhere; }
 .egd-codex-context-resolver-reason, .egd-codex-context-resolver-score { color: var(--egd-on-surface-variant); font-size: 11.5px; }
+
+/* SUB-13 version range and SUB-15 per-use billing badges (Settings 계정). */
+.egd-settings-version-badge-warning { border-color: color-mix(in srgb, var(--egd-warning-ink) 26%, transparent); background: color-mix(in srgb, var(--egd-warning-ink) 10%, transparent); color: var(--egd-warning-ink); }
+.egd-settings-version-badge-danger { border-color: var(--egd-danger-line); background: var(--egd-danger-bg); color: var(--egd-danger-ink); }
+.egd-settings-billing-badge { border-color: var(--egd-danger-line); background: var(--egd-danger-bg); color: var(--egd-danger-ink); margin-inline-start: 6px; }
+/* SUB-01: the Chat head account chip and usage ring open Settings 계정. */
+.egd-usage-meter-button, .egd-codex-system-chip-button { appearance: none; margin: 0; font-family: inherit; cursor: pointer; }
+.egd-usage-meter-button { border: 0; background: transparent; }
+.egd-usage-meter-button:focus-visible, .egd-codex-system-chip-button:focus-visible { outline: var(--egd-focus-outline); outline-offset: var(--egd-focus-outline-offset); }
