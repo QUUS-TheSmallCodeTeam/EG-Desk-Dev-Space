@@ -126,3 +126,15 @@ test('surface wiring: header keys, attention sets, roving groups and the tooltip
   assert.ok(css.includes('#egd-key-tooltip'), 'tooltip style');
   assert.ok(css.includes('.egd-visually-hidden'), 'live status is visually hidden');
 });
+
+test('CNV-03 inferred default: Canvas shapes are never Board members; inside a Board area they show by position', () => {
+  const add = surfaceJs.slice(surfaceJs.indexOf('  function addViewToBoard(view, projectionId) {'), surfaceJs.indexOf('  function removeViewFromBoard('));
+  assert.match(add, /if \(view\.classList\.contains\('egd-canvas-shape'\)\) return false;\n    const kind = 'card';/);
+  const chooser = surfaceJs.slice(surfaceJs.indexOf('  function showBoardScopeChooser() {'), surfaceJs.indexOf('    const commitScope = memberIds => {'));
+  assert.match(chooser, /\.filter\(view => !view\.classList\.contains\('egd-canvas-shape'\)\)\.map\(view => view\.id\)/);
+  // Old Board records with shape members still restore.
+  assert.match(surfaceJs, /if \(member\.kind === 'shape'\) view = restoreShapeFromState\(/);
+  const doc = readFileSync(new URL('../docs/VIEWPORT_LAYOUT_INTERACTION_MODEL.md', import.meta.url), 'utf8');
+  assert.match(doc, /## Board Membership of Shapes and Keyboard Placement/);
+  assert.match(doc, /Canvas shapes      -> never Board members/);
+});

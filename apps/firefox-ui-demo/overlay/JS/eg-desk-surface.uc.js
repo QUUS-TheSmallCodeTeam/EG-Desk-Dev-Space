@@ -5714,7 +5714,10 @@
     const target = state.boards.projections[projectionId];
     if (!view?.isConnected || !target) return false;
     if (view.dataset.projectionId === target.id) return true;
-    const kind = view.classList.contains('egd-canvas-shape') ? 'shape' : 'card';
+    // CNV-03: a Canvas shape is never a Board member; inside a Board area it is
+    // shown there by position only (see showBoardScopeChooser).
+    if (view.classList.contains('egd-canvas-shape')) return false;
+    const kind = 'card';
     const record = viewBoardRecord(view);
     if (!record) { boardNotice('이 화면은 Board에 넣을 수 없습니다.'); return false; }
     const change = BoardMembership.planMembershipChange(state.boards.projections,
@@ -8057,7 +8060,12 @@
 
   function showBoardScopeChooser() {
     document.getElementById('egd-board-scope')?.remove();
-    const selectedIds = Array.from(document.querySelectorAll('.egd-entity-selected')).map(view => view.id);
+    // CNV-03 (D-V1~V3, inferred default): Canvas shapes are not Board members.
+    // A new Board takes only the selected windows; a shape lying inside the
+    // Board's area is seen there by its position and is saved with the Desk.
+    // Older Boards that saved shapes as members still restore them (kind 'shape').
+    const selectedIds = Array.from(document.querySelectorAll('.egd-entity-selected'))
+      .filter(view => !view.classList.contains('egd-canvas-shape')).map(view => view.id);
     const name = el('input', { 'aria-label': 'Board 이름', placeholder: 'Board 이름' });
     const dialog = el('div', { id: 'egd-board-scope', class: 'egd-edge egd-frosted', role: 'dialog', 'aria-label': '새 Board 저장 범위' },
       el('h3', {}, '새 Board'), name,
