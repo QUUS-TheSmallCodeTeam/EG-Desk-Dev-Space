@@ -285,3 +285,43 @@ test('the bridge client calls the Claude routes and the Settings card uses them'
   assert.match(settings, /api\.claudeApiKeyEnv\(action === 'keyConfirm'\)/);
   assert.doesNotMatch(settings, /settings-claude-refresh' \}, onclick: \(\) => bridge\(\)\?\.refreshAuthStatus\(\)/, 'the Claude check is no longer the generic state read');
 });
+
+test('SUB-11 profile list: label, shared/owned marker, remove only for owned inactive, Codex extras 준비 중', () => {
+  const engines = [
+    { id: 'claude', profiles: [
+      { id: 'claude-default', label: 'Claude', owned: false, active: true, auth: { status: 'signedIn' } },
+      { id: 'claude-ab12', label: '회사', owned: true, active: false },
+      { id: 'claude-ab12', label: '중복', owned: true },
+      { id: 'codex-zz', label: '남의 것', owned: true }] },
+    { id: 'codex', profiles: [
+      { id: 'codex-default', label: 'ChatGPT', owned: false, active: true },
+      { id: 'codex-cd34', label: '개인', owned: true, status: 'notYet' }] },
+  ];
+  const claude = View.engineProfilesView(engines, 'claude', { connected: true });
+  assert.deepEqual(claude.rows.map(row => [row.id, row.label, row.marker, row.canRemove]), [
+    ['claude-default', 'Claude', View.ENGINE_PROFILE_MARKERS.shared, false],
+    ['claude-ab12', '회사', View.ENGINE_PROFILE_MARKERS.owned, true]]);
+  assert.equal(claude.canAdd, true);
+  const codex = View.engineProfilesView(engines, 'codex', { connected: true });
+  assert.equal(codex.rows[1].authText, '준비 중');
+  assert.equal(codex.rows[1].canActivate, false);
+  assert.equal(View.engineProfilesView(engines, 'claude', { connected: false }).rows.length, 0);
+});
+
+test('SUB-11 profile login line: only the official CLI login for a private folder is accepted', () => {
+  const line = "CLAUDE_CONFIG_DIR='/Users/a/profiles/claude-ab12' claude auth login --claudeai";
+  assert.equal(View.engineProfileLoginLine({ line, env: 'CLAUDE_CONFIG_DIR', engine: 'claude' }), line);
+  assert.equal(View.engineProfileLoginLine({ line: `${line}; rm -rf ~`, env: 'CLAUDE_CONFIG_DIR', engine: 'claude' }), null);
+  assert.equal(View.engineProfileLoginLine({ line, env: 'CODEX_HOME', engine: 'claude' }), null);
+  assert.match(View.engineProfileErrorText({ code: 'ENGINE_PROFILE_DEFAULT' }), /지울 수 없습니다/);
+});
+
+test('SUB-11 profile login types the line into a terminal', async () => {
+  const line = "CLAUDE_CONFIG_DIR='/Users/a/p/claude-ab12' claude auth login --claudeai";
+  const written = [];
+  const result = await View.runEngineProfileLoginInTerminal({
+    requestCommand: async () => ({ line, env: 'CLAUDE_CONFIG_DIR', engine: 'claude' }),
+    openTerminal: () => ({}), terminalApi: () => ({ isConnected: () => true, write: async value => { written.push(value); } }), sleep: async () => {} });
+  assert.equal(result.phase, 'started');
+  assert.deepEqual(written, [`${line}\r`]);
+});
