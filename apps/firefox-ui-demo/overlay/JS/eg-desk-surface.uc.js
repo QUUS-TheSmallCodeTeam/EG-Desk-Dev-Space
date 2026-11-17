@@ -4134,18 +4134,9 @@
   // CODE-05 D-X2 stage 2. The Chat row hands over only the retained change
   // rows; the File Card re-verifies the run origin (openVerifiedRunFile),
   // re-reads each file and owns every revert through the D-X1 conditional write.
-  async function openAppliedChangeReview({ target, changes, readOrigin, isCurrent } = {}) {
-    const rows = Array.isArray(changes) ? changes.map(row => ({ ...row })) : [];
-    const kindOf = row => typeof row?.kind === 'string' ? row.kind : row?.kind?.type;
-    const first = rows.find(row => kindOf(row) !== 'delete' && typeof (row.movePath || row.path) === 'string');
-    if (!first || typeof isCurrent !== 'function') return { status: 'unavailable' };
-    const opened = await openVerifiedRunFile({ target, location: { path: first.movePath || first.path, line: 1 }, readOrigin, isCurrent });
-    if (opened?.status !== 'opened') return opened || { status: 'unavailable' };
-    const view = document.getElementById(opened.cardId)?._fileView;
-    if (typeof view?.showChangeReview !== 'function') return { status: 'unavailable' };
-    if (isCurrent(target) !== true) return { status: 'stale' };
-    await view.showChangeReview(rows);
-    return opened;
+  // Deletion-only changes open the verified folder alone (EGDeskSurfaceFileCard).
+  function openAppliedChangeReview(request = {}) {
+    return openVerifiedRunReview(request);
   }
 
   // One account/binding scope per visible activity view. Only retained-output
@@ -18621,6 +18612,7 @@
   const openBoardProjectFile = surfaceForward('fileCard', 'openBoardProjectFile');
   const openBoardProjectFileAt = surfaceForward('fileCard', 'openBoardProjectFileAt');
   const openVerifiedRunFile = surfaceForward('fileCard', 'openVerifiedRunFile');
+  const openVerifiedRunReview = surfaceForward('fileCard', 'openVerifiedRunReview');
 
   function getProjectTarget() {
     // Resolve only on an explicit File Board connection or IDE entry.

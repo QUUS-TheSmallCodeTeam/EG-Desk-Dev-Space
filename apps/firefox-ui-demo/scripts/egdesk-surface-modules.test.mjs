@@ -130,7 +130,7 @@ async function install(script, namespaces, { transformNamespace = (_, namespace)
   const forwards = forwardsIn(script);
   const expectedForwards = zones.map(zone => [zone.method, zone.key, zone.method]);
   expectedForwards.splice(2, 0, ['openBoardProjectFile', 'fileCard', 'openBoardProjectFile'],
-    ['openBoardProjectFileAt', 'fileCard', 'openBoardProjectFileAt'], ['openVerifiedRunFile', 'fileCard', 'openVerifiedRunFile']);
+    ['openBoardProjectFileAt', 'fileCard', 'openBoardProjectFileAt'], ['openVerifiedRunFile', 'fileCard', 'openVerifiedRunFile'], ['openVerifiedRunReview', 'fileCard', 'openVerifiedRunReview']);
   assert.deepEqual(forwards.map(({ binding, zone, method }) => [binding, zone, method]),
     expectedForwards, 'every stage1 forwarding declaration');
   const footer = installerSource(script);
@@ -172,7 +172,7 @@ async function install(script, namespaces, { transformNamespace = (_, namespace)
             const api = target[name](strictDeps);
             const expected = factoryDeps(read(modulePath(zone)));
             assert.deepEqual(sorted(reads), expected, `${zone.file}: actual factory reads exactly its declared deps`);
-            assert.deepEqual(Object.keys(api), zone.key === 'fileCard' ? [zone.method, 'openVerifiedRunFile', 'openBoardProjectFile', 'openBoardProjectFileAt', 'onWorkflowEvent'] : [zone.method], `${zone.file}: actual returned interface`);
+            assert.deepEqual(Object.keys(api), zone.key === 'fileCard' ? [zone.method, 'openVerifiedRunFile', 'openVerifiedRunReview', 'openBoardProjectFile', 'openBoardProjectFileAt', 'onWorkflowEvent'] : [zone.method], `${zone.file}: actual returned interface`);
             assert.equal(typeof api[zone.method], 'function');
             if (zone.key === 'fileCard') assert.equal(typeof api.onWorkflowEvent, 'function', 'File watcher receiver is callable');
             received.push({ zone, deps, api, reads });

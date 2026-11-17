@@ -118,13 +118,16 @@ export function createFileCardZone(deps) {
   // readOrigin is the activity's account/epoch-bound GET reader. The target's
   // itemId stays in that local fence, never in the server origin query. No
   // supplied path, Board, cached origin or picker can authorize this opening.
+  // location {rootOnly: true} opens just the verified run folder (CODE-05: a
+  // change that only deleted files has no file left to open).
   async function openVerifiedRunFile({ target, location, readOrigin, isCurrent, signal } = {}) {
+    if (location?.rootOnly === true) location = { rootOnly: true, path: null, line: 1 };
     if (!['conversationId', 'runId', 'itemId'].every(key => validRunId(target?.[key]))
-        || !absoluteRunPath(location?.path) || !Number.isSafeInteger(location?.line) || location.line < 1
+        || !(location?.rootOnly === true || absoluteRunPath(location?.path)) || !Number.isSafeInteger(location?.line) || location.line < 1
         || location.column != null && (!Number.isSafeInteger(location.column) || location.column < 1)
         || typeof readOrigin !== 'function' || typeof isCurrent !== 'function') return { status: 'unavailable' };
     const selected = Object.freeze(Object.fromEntries(['conversationId', 'runId', 'itemId'].map(key => [key, target[key]])));
-    const place = Object.freeze({ path: location.path, line: location.line, column: location.column ?? null });
+    const place = Object.freeze({ path: location.path, line: location.line, column: location.column ?? null, rootOnly: location.rootOnly === true });
     const current = () => {
       try { return !signal?.aborted && isCurrent(selected) === true; } catch { return false; }
     };
@@ -152,6 +155,26 @@ export function createFileCardZone(deps) {
     const ready = await card._fileReady;
     if (!current() || !card.isConnected || card.dataset.closeState || card._fileOpenStatus === 'stale') return { status: 'stale' };
     return ready === true && card._fileOpenStatus === 'opened' ? { status: 'opened', cardId: card.id } : { status: 'unavailable' };
+  }
+
+  // CODE-05 D-X2 stage 2 entry from a Chat change row: the retained rows open
+  // in a File Card that re-verified the run origin. The first surviving file
+  // is opened; a change that only deleted files opens the verified folder
+  // alone so the deletions can still be reviewed (nothing is restored).
+  async function openVerifiedRunReview({ target, changes, readOrigin, isCurrent } = {}) {
+    const rows = Array.isArray(changes) ? changes.map(row => ({ ...row })) : [];
+    const kindOf = row => typeof row?.kind === 'string' ? row.kind : row?.kind?.type;
+    const pathOf = row => row?.movePath || row?.kind?.move_path || row?.path;
+    if (!rows.length || typeof isCurrent !== 'function' || rows.some(row => typeof row?.path !== 'string' || !row.path)) return { status: 'unavailable' };
+    const first = rows.find(row => kindOf(row) !== 'delete' && typeof pathOf(row) === 'string');
+    const location = first ? { path: pathOf(first), line: 1 } : { rootOnly: true };
+    const opened = await openVerifiedRunFile({ target, location, readOrigin, isCurrent });
+    if (opened?.status !== 'opened') return opened || { status: 'unavailable' };
+    const view = document.getElementById(opened.cardId)?._fileView;
+    if (typeof view?.showChangeReview !== 'function') return { status: 'unavailable' };
+    if (isCurrent(target) !== true) return { status: 'stale' };
+    await view.showChangeReview(rows);
+    return { ...opened, ...(first ? {} : { deletionsOnly: true }) };
   }
 
   let boardProjectOpening = null, boardProjectRequest = 0, boardProjectPicker = null;
@@ -507,18 +530,19 @@ export function createFileCardZone(deps) {
           rootHandle = { rootId: origin.rootId, directoryId: origin.directoryId, displayPath: origin.displayPath,
             name: origin.displayPath.split(/[\\/]/).filter(Boolean).at(-1) || '실행 폴더' };
           if (!scope.isCurrent() || !await view.openRoot(rootHandle, { project: null, scope }) || !scope.isCurrent()
-              || !await view.openAt(location, { scope }) || !scope.isCurrent() || view.snapshot().rootId !== origin.rootId) {
+              || (!location.rootOnly && !await view.openAt(location, { scope })) || !scope.isCurrent() || view.snapshot().rootId !== origin.rootId) {
             throw new Error('실행 파일을 여는 동안 연결이 바뀌었습니다.');
           }
-          runFileOrigin = Object.freeze({ rootId: origin.rootId, fileId: view.snapshot().fileId });
+          runFileOrigin = location.rootOnly ? null : Object.freeze({ rootId: origin.rootId, fileId: view.snapshot().fileId });
           notice.replaceChildren(
-            el('p', {}, '현재 파일 · 이전 실행의 출력에서 열었습니다. 당시 내용과 다를 수 있습니다.'),
-            el('p', {}, `경로 · ${location.path}`),
+            el('p', {}, location.rootOnly ? '실행 폴더 · 이전 실행의 변경을 검토하려고 열었습니다. 지운 파일은 여기서 되살리지 않습니다.'
+              : '현재 파일 · 이전 실행의 출력에서 열었습니다. 당시 내용과 다를 수 있습니다.'),
+            el('p', {}, location.rootOnly ? `폴더 · ${origin.displayPath}` : `경로 · ${location.path}`),
             el('details', {},
               el('summary', {}, '출처 상세'),
               el('p', {}, `이전 실행 · ${target.runId}`),
               el('p', {}, `원래 대화 · ${target.conversationId} · 명령 항목 · ${target.itemId}`),
-              el('p', {}, `당시 행 참조 · ${location.line}행${location.column ? ` ${location.column}열` : ''}. 현재 파일의 행·열과 일치하지 않을 수 있습니다.`)));
+              ...(location.rootOnly ? [] : [el('p', {}, `당시 행 참조 · ${location.line}행${location.column ? ` ${location.column}열` : ''}. 현재 파일의 행·열과 일치하지 않을 수 있습니다.`)])));
           notice.style.overflowWrap = 'anywhere';
           notice.hidden = false;
           originOpened = true; card._fileOpenStatus = 'opened';
@@ -632,5 +656,5 @@ export function createFileCardZone(deps) {
     }
   }
 
-  return { spawnFileCard, openVerifiedRunFile, openBoardProjectFile, openBoardProjectFileAt, onWorkflowEvent };
+  return { spawnFileCard, openVerifiedRunFile, openVerifiedRunReview, openBoardProjectFile, openBoardProjectFileAt, onWorkflowEvent };
 }
