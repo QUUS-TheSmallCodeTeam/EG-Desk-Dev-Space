@@ -192,6 +192,17 @@ test('lifecycle: disable, archive, restore and soft delete keep every revision',
   assert.equal(store.restore(draft.id).lifecycle, 'draft')
 })
 
+test('AGENT-08: the list names each Agent’s saved engine from its active revision, else its draft, else null', t => {
+  const { open } = fixture(t)
+  const store = open()
+  const plain = store.createDraft({ ...rio(), model: null })
+  const claude = store.createDraft({ ...rio(), name: '클로', model: { engine: 'claude', modelId: 'claude-sonnet', effort: null } })
+  store.activate(claude.id, 1, null)
+  store.saveDraft(claude.id, { ...rio(), name: '클로', model: { engine: 'codex', modelId: 'gpt-agent', effort: null } }, 1)
+  const engines = Object.fromEntries(store.list({ includeArchived: true }).profiles.map(item => [item.id, item.engine]))
+  assert.deepEqual(engines, { [plain.id]: null, [claude.id]: 'claude' }, 'an unactivated draft does not move the active engine')
+})
+
 test('example templates seed once as active template revisions and never return after deletion', t => {
   const { open, handles } = fixture(t)
   const store = open()

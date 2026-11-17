@@ -1668,8 +1668,10 @@ export class CodexChatRuntime {
     // AGENT-04: the binding hash covers the ceiling, so the fingerprint already names it.
     // AGENT-08: it covers the Agent's model too ({ engine, modelId, effort } or null).
     const agentModel = resolved.model
-    const model = agentModel && typeof agentModel === 'object' && typeof agentModel.engine === 'string' && idText(agentModel.modelId)
-      ? { engine: agentModel.engine, modelId: agentModel.modelId, effort: idText(agentModel.effort) ? agentModel.effort : null } : null
+    // modelId null: the Agent names only its engine and keeps that engine's default model.
+    const modelId = idText(agentModel?.modelId) ? agentModel.modelId : null
+    const model = agentModel && typeof agentModel === 'object' && typeof agentModel.engine === 'string'
+      ? { engine: agentModel.engine, modelId, effort: modelId && idText(agentModel.effort) ? agentModel.effort : null } : null
     return { binding: { profileId: binding.profileId, revision: binding.revision, hash: binding.hash }, developerInstructions: instructions, toolCeiling: effectiveToolCeiling(resolved.toolCeiling), model }
   }
 
@@ -1702,7 +1704,7 @@ export class CodexChatRuntime {
   modelSelection(body, profileRun = null, engineId = 'codex') {
     if (body.model !== undefined || body.effort !== undefined) return { model: body.model, effort: body.effort, source: 'request' }
     const agent = profileRun?.model
-    if (agent && agent.engine === engineId) return { model: agent.modelId, effort: agent.effort ?? undefined, source: 'agent' }
+    if (agent && agent.engine === engineId && agent.modelId) return { model: agent.modelId, effort: agent.effort ?? undefined, source: 'agent' }
     return { model: undefined, effort: undefined, source: null }
   }
 

@@ -231,17 +231,21 @@ function agentProfiles(engines) {
       if (!Object.hasOwn(engines, id)) throw Object.assign(new Error('missing'), { code: 'PROFILE_NOT_FOUND', httpStatus: 404 })
       const engine = engines[id]
       return { binding: { profileId: id, revision: 1, hash: `hash-${id}` }, developerInstructions: `${id} instructions`, toolCeiling: null,
-        model: engine ? { engine, modelId: `${engine}-agent-model`, effort: null } : null }
+        model: typeof engine === 'object' ? engine : engine ? { engine, modelId: `${engine}-agent-model`, effort: null } : null }
     },
   }
 }
 
 test('a new room runs on the engine its Agent saved; a bound room, an explicit engine and an Agent without one keep their engine', async () => {
-  const { chat, calls, runOf } = twoEngines({ profiles: agentProfiles({ 'agent-claude': 'claude', 'agent-codex': 'codex', 'agent-plain': null }) })
+  const { chat, calls, runOf } = twoEngines({ profiles: agentProfiles({ 'agent-claude': 'claude', 'agent-codex': 'codex', 'agent-plain': null,
+    'agent-claude-default': { engine: 'claude', modelId: null, effort: null } }) })
   const claudeRoom = await chat.send({ message: 'New room', profileId: 'agent-claude' })
   assert.equal(runOf(claudeRoom).engine.id, 'claude')
   assert.equal(calls.find(call => call[1] === 'turn/start')[0], 'claude')
   assert.equal(calls.find(call => call[1] === 'turn/start')[2].model, 'claude-agent-model', 'the Agent model applies on its own engine')
+  const engineOnly = await chat.send({ message: 'Engine only', profileId: 'agent-claude-default' })
+  assert.equal(runOf(engineOnly).engine.id, 'claude')
+  assert.equal(calls.filter(call => call[1] === 'turn/start').at(-1)[2].model, undefined, 'an engine-only Agent keeps that engine default model')
   assert.equal(runOf(await chat.send({ message: 'Plain', profileId: 'agent-plain' })).engine.id, 'codex', 'no saved engine keeps the default')
   assert.equal(runOf(await chat.send({ message: 'Named', profileId: 'agent-claude', engineId: 'codex' })).engine.id, 'codex', 'an engine named in the send wins')
   assert.equal(chat.requestEngine({ profileId: 'agent-claude', profileEnabled: false }), 'codex', 'profiles turned off name no engine')

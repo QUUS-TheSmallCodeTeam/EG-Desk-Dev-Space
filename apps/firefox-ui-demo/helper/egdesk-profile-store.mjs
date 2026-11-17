@@ -187,10 +187,13 @@ function model(value) {
   if (value === undefined || value === null) return null
   shape(value, ['engine', 'modelId', 'effort'], 'model')
   if (!['codex', 'claude'].includes(value.engine)) fail('INVALID_PROFILE', 'model.engine must be codex or claude')
-  if (typeof value.modelId !== 'string' || !/^[A-Za-z0-9][A-Za-z0-9._:/@+-]{0,127}$/.test(value.modelId)) fail('INVALID_PROFILE', 'model.modelId is invalid')
+  // AGENT-08: modelId null keeps the engine's own default model; the engine still decides who answers.
+  const modelId = value.modelId === undefined ? null : value.modelId
+  if (modelId !== null && (typeof modelId !== 'string' || !/^[A-Za-z0-9][A-Za-z0-9._:/@+-]{0,127}$/.test(modelId))) fail('INVALID_PROFILE', 'model.modelId is invalid')
   const effort = value.effort === undefined ? null : value.effort
   if (effort !== null && !REASONING_EFFORTS.has(effort)) fail('INVALID_PROFILE', 'model.effort is not supported')
-  return { engine: value.engine, modelId: value.modelId, effort }
+  if (effort !== null && modelId === null) fail('INVALID_PROFILE', 'model.effort needs a model.modelId')
+  return { engine: value.engine, modelId, effort }
 }
 /** Fixed five keys in fixed order, or null for no ceiling. */
 export function normalizeToolCeiling(value) {
@@ -845,6 +848,8 @@ export function openProfileStore({ dataDir, ownerHash, defaultToolPreset = DEFAU
       id: shown.id, lifecycle: shown.lifecycle, origin: shown.origin,
       activeRevision: shown.activeRevision, headRevision: shown.headRevision, hasDraft: shown.hasDraft,
       name: body.name, role: body.role, avatar: body.avatar,
+      // AGENT-08: a new room with this Agent runs on its saved engine.
+      engine: body.model?.engine ?? null,
       // The list carries only the nearest origin; GET /profiles/:id has the whole chain.
       latestSource: shown.source.at(-1) ?? null, reviewRequired: shown.reviewRequired,
       createdAt: shown.createdAt, updatedAt: shown.updatedAt,
