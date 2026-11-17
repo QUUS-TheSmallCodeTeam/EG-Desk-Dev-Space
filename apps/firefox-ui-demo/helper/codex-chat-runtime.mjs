@@ -18,6 +18,7 @@ import { DEFAULT_COMPUTER_CONTROL_POLICY, loadComputerControlOffOverrides, norma
 import { RunOutputStore } from './codex-run-outputs.mjs'
 import { claudeRpcThreadId } from './claude-engine-adapter.mjs'
 import { CLAUDE_RATE_LIMIT_WINDOWS } from './claude-stream-translate.mjs'
+import { CLAUDE_BOUNDED_POLICIES, claudeBoundedThreadOverrides, verifyClaudeBoundedThread } from './egdesk-claude-bounded.mjs'
 import { publicEpochMs } from './codex-account-usage.mjs'
 // Read tools work with an observe grant; interaction tools still require the
 // provider's Card, same-site, focus and wait-budget checks on every call.
@@ -854,6 +855,10 @@ export class CodexChatRuntime {
 
   assertEngineContext(body, engineId) {
     if (engineId !== 'claude') return
+    // SUB-10: live Browser actor selections of a browserBounded run are the
+    // Browser provider's to check (same as Codex), not Context attachments.
+    if (body.executionPolicy?.mode === BROWSER_BOUNDED && Array.isArray(body.selectedSources) && body.selectedSources.length &&
+        body.selectedSources.every(source => source?.browserToolSelection != null)) body = { ...body, selectedSources: [] }
     const nonempty = value => value != null && (!Array.isArray(value) || value.length > 0)
     const capabilities = body.contextCapabilities
     const resolution = body.contextResolution
@@ -877,7 +882,7 @@ export class CodexChatRuntime {
     // unrelated provider exclusion, including during manifest verification.
     if (engineId === 'claude' && provider === this.contexts) return typeof provider.getAuthority === 'function'
     return engineId !== 'claude' || (provider !== this.contexts &&
-      !['egdesk-context-v1', 'egdesk-browser', 'egdesk-plan', COMPUTER_PROVIDER_ID].includes(provider.providerId))
+      !['egdesk-context-v1', 'egdesk-plan', COMPUTER_PROVIDER_ID].includes(provider.providerId))
   }
 
   // Which engine, version and engine account slot ran a turn; stored with the
@@ -1407,7 +1412,8 @@ export class CodexChatRuntime {
     if (qaOutputMarkers && (body.message.includes(qaOutputMarkers[0]) || instructions.includes(qaOutputMarkers[0]))) {
       throw chatError('QA_PRIVATE_MARKER_SPOILED', 'The first QA fixture marker must be absent from model-visible request text', 400)
     }
-    if (requestedPolicy && !this.qaReady()) throw chatError('QA_POLICY_UNAVAILABLE', 'Bounded execution requires a verified native policy contract', 503)
+    if (requestedPolicy && engineId !== 'claude' && !this.qaReady()) throw chatError('QA_POLICY_UNAVAILABLE', 'Bounded execution requires a verified native policy contract', 503)
+    if (requestedPolicy && engineId === 'claude' && !CLAUDE_BOUNDED_POLICIES.includes(requestedPolicy)) throw chatError('QA_POLICY_UNAVAILABLE', 'Claude supports only the bounded Browser policy', 503)
     if (requestedPolicy && !this.engines.get(engineId).capabilities().has('boundedQa')) throw chatError('QA_POLICY_UNAVAILABLE', 'This AI engine cannot prove bounded execution', 503)
     if (qaMarkers && requestedPolicy && requestedPolicy !== READ_ONLY_QA) throw chatError('QA_COMMAND_POLICY_REQUIRED', 'Native QA command receipt requires readOnlyQa policy', 400)
     if (body.effort !== undefined && (!idText(body.effort) || !body.effort.trim())) throw chatError('INVALID_EFFORT', 'Invalid reasoning effort')
@@ -1973,8 +1979,8 @@ export class CodexChatRuntime {
     if (this.store && engine.id === 'claude' && this.engineOwnerHash(engine.id, context.engine.engineProfileId) !== context.ownerHash) {
       throw Object.assign(chatError('ACCOUNT_CHANGED', 'AI engine account changed before dispatch', 409), { definite: true })
     }
-    if (bounded && !this.qaReady()) throw chatError('QA_POLICY_UNAVAILABLE', 'Bounded execution requires a verified native policy contract', 503)
-    const qaOverrides = bounded ? await loadQaThreadOverrides(this.request, {
+    if (bounded && engine.id !== 'claude' && !this.qaReady()) throw chatError('QA_POLICY_UNAVAILABLE', 'Bounded execution requires a verified native policy contract', 503)
+    const qaOverrides = bounded && engine.id === 'claude' ? claudeBoundedThreadOverrides(policy) : bounded ? await loadQaThreadOverrides(this.request, {
       threadId: context.conversationId && this.loadedThreads.has(context.conversationId) ? context.conversationId : null,
       cwd: overrides.cwd || this.threads.get(context.conversationId)?.cwd || null,
     }) : null
@@ -2102,9 +2108,13 @@ export class CodexChatRuntime {
       if (context.stateless) this.threadSessions.set(cid, { stateless: true, forkedFrom: null })
       let qaReceipt = null
       if (bounded) {
-        qaReceipt = verifyQaNativeThread(result, policy)
-        // A terminal 'none' ceiling sent shell_tool false (loadCeilingThreadOverrides); confirm it.
-        qaReceipt = await verifyQaMcpIsolation(this.request, cid, qaReceipt, { shellOff: ceilingNarrows(ceiling) && ceiling.terminal === 'none' })
+        // SUB-10: Claude proves its bounded launch itself (egdesk-claude-bounded).
+        if (engine.id === 'claude') qaReceipt = verifyClaudeBoundedThread(result, policy)
+        else {
+          qaReceipt = verifyQaNativeThread(result, policy)
+          // A terminal 'none' ceiling sent shell_tool false (loadCeilingThreadOverrides); confirm it.
+          qaReceipt = await verifyQaMcpIsolation(this.request, cid, qaReceipt, { shellOff: ceilingNarrows(ceiling) && ceiling.terminal === 'none' })
+        }
       } else context.ceilingNotices.push(...ceilingReportNotices(ceiling, await verifyCeilingNativeThread(this.request, ceiling, result, cid)))
       if (computerExtra) await this.verifyComputerControl(cid, computerExtra)
       if (epoch !== this.epochOf(engine.id)) throw chatError('ACCOUNT_CHANGED', 'Codex account changed', 409)
@@ -2319,7 +2329,8 @@ export class CodexChatRuntime {
       if (epoch !== this.epochOf(engineId)) throw chatError('CONTEXT_CHANGED', 'Codex connection or account changed', 409)
       if (result?.thread?.id !== cid) throw chatError('THREAD_MISMATCH', 'Codex resumed a different thread', 502)
       let qaReceipt = null
-      if (policy) {
+      if (policy && engineId === 'claude') qaReceipt = verifyClaudeBoundedThread(result, policy)
+      else if (policy) {
         qaReceipt = verifyQaNativeThread(result, policy)
         qaReceipt = await verifyQaMcpIsolation(this.request, cid, qaReceipt, { shellOff })
       }
@@ -2410,8 +2421,8 @@ export class CodexChatRuntime {
     this.locks.add(cid)
     try {
       const bounded = [READ_ONLY_QA, BROWSER_BOUNDED, FIXTURE_BROWSER_QA].includes(boundPolicy)
-      if (bounded && !this.qaReady()) throw chatError('QA_POLICY_UNAVAILABLE', 'Bounded execution requires a verified native policy contract', 503)
-      const qaOverrides = bounded ? await loadQaThreadOverrides(this.request, {
+      if (bounded && engineId !== 'claude' && !this.qaReady()) throw chatError('QA_POLICY_UNAVAILABLE', 'Bounded execution requires a verified native policy contract', 503)
+      const qaOverrides = bounded && engineId === 'claude' ? claudeBoundedThreadOverrides(boundPolicy) : bounded ? await loadQaThreadOverrides(this.request, {
         threadId: this.loadedThreads.has(cid) ? cid : null,
         cwd: this.threads.get(cid)?.cwd || null,
       }) : {}

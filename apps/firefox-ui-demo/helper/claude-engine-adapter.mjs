@@ -50,6 +50,7 @@ import {
 import { createClaudePermissionBroker } from './claude-engine-permissions.mjs'
 import { EGDESK_MCP_SERVER_NAME, createEgdeskClaudeMcp, egdeskAllowedToolsRule, egdeskMcpConfig } from './egdesk-claude-mcp.mjs'
 import { applyClaudeRateLimit, createClaudeTranslator } from './claude-stream-translate.mjs'
+import { CLAUDE_BOUNDED_MIN_VERSION, CLAUDE_BOUNDED_POLICIES, claudeBoundedInitViolation, claudeBoundedLaunch } from './egdesk-claude-bounded.mjs'
 import { CLAUDE_MCP_OUTPUT_LIMIT_TOKENS, claudeParentLimitEnv, createClaudeProcessBudget } from './egdesk-claude-limits.mjs'
 
 export const CLAUDE_ENGINE_ID = 'claude'
@@ -57,12 +58,13 @@ export const CLAUDE_ENGINE_ID = 'claude'
 // What the runtime and the screen may rely on (ENGINE_CAPABILITIES names).
 // Not offered: nativeHistory (the CLI gives no past turns back; local history
 // is the record), approvals.tool (only Bash/PowerShell and file edits get a
-// card; other tools that would ask are refused), boundedQa, ephemeralThreads,
+// card; other tools that would ask are refused), ephemeralThreads,
 // threadFork. Model and effort per turn restart the process with --resume.
+// boundedQa covers only browserBounded (SUB-10, egdesk-claude-bounded).
 export const CLAUDE_CAPABILITIES = Object.freeze([
   'stream', 'resume', 'interrupt', 'approvals.command', 'approvals.fileChange',
   'userInput', 'userInput.multiSelect', 'subagents', 'dynamicTools',
-  'modelSelect.perTurn', 'effortSelect.perTurn', 'usage.rateLimits',
+  'modelSelect.perTurn', 'effortSelect.perTurn', 'usage.rateLimits', 'boundedQa',
 ])
 
 export const CLAUDE_ADAPTER_DEFAULTS = Object.freeze({
@@ -275,7 +277,12 @@ export function createClaudeEngineAdapter(options = {}) {
   // Thread settings: cwd, model, effort, Agent instructions, EG-Desk tools.
   function specFrom(params, previous = null) {
     const p = plainObject(params) || {}
-    const spec = previous ? { ...previous } : { cwd: defaultCwd, model: null, effort: null, appendPrompt: null, tools: [] }
+    const spec = previous ? { ...previous } : { cwd: defaultCwd, model: null, effort: null, appendPrompt: null, tools: [], bounded: null }
+    // SUB-10: the runtime's bounded Browser policy; it never widens back on resume.
+    if (p.egdeskBoundedPolicy !== undefined && p.egdeskBoundedPolicy !== null) {
+      if (!CLAUDE_BOUNDED_POLICIES.includes(p.egdeskBoundedPolicy)) throw definite(chatError('QA_POLICY_UNAVAILABLE', 'Claude supports only the bounded Browser policy', 503))
+      spec.bounded = p.egdeskBoundedPolicy
+    }
     if (p.cwd !== undefined && p.cwd !== null) {
       if (!isAbsolute(p.cwd)) throw definite(chatError('INVALID_CWD', 'The working folder must be an absolute path', 400))
       spec.cwd = p.cwd
@@ -399,7 +406,22 @@ export function createClaudeEngineAdapter(options = {}) {
     statusChanged()
   }
 
+  const boundedDescriptor = spec => spec.bounded
+    ? { egdeskBounded: { mode: spec.bounded, builtinTools: 'none', permissionMode: 'dontAsk', mcp: 'egdesk-only', restricted: true } }
+    : {}
+
   function onProcessMessage(session, proc, message) {
+    if (proc.blocked) return // a bounded process that failed its init check: nothing it says is accepted
+    if (proc.bounded && message?.type === 'system' && message.subtype === 'init') {
+      const violation = claudeBoundedInitViolation(message, { serverName: EGDESK_MCP_SERVER_NAME })
+      if (violation) {
+        proc.blocked = true
+        proc.gateCode = 'CLAUDE_BOUNDED_UNVERIFIED'
+        void proc.transport.close({ graceMs: 0 }).catch(() => {})
+        return
+      }
+      proc.boundedVerified = true
+    }
     // D-S2: hooks are off (--settings disableAllHooks, no SDK hooks). A hook
     // event means a managed or otherwise unswitchable hook ran for this build.
     if (message?.type === 'system' && typeof message.subtype === 'string' && message.subtype.startsWith('hook_')) isolation.hookEvents++
@@ -440,11 +462,16 @@ export function createClaudeEngineAdapter(options = {}) {
       const check = status()
       const spec = session.spec
       const helpChecked = coreVersion(check.version) && compareVersions(coreVersion(check.version), CLAUDE_HELP_CHECKED_VERSION) >= 0
+      if (spec.bounded && !(coreVersion(check.version) && compareVersions(coreVersion(check.version), CLAUDE_BOUNDED_MIN_VERSION) >= 0)) {
+        lease.release()
+        throw definite(chatError('QA_POLICY_UNAVAILABLE', `A bounded Browser conversation needs Claude ${CLAUDE_BOUNDED_MIN_VERSION} or newer`, 503))
+      }
       const threadId = session.threadId
       const proc = {
         transport: null, exited: false, gateCode: null, mcpPending: new Map(), // rpc id → control request id
         lease, engineBuild: typeof check.version === 'string' ? check.version : null,
-        flags: { cwd: spec.cwd, model: spec.model, effort: spec.effort, appendPrompt: spec.appendPrompt, tools: spec.tools },
+        bounded: spec.bounded || null, blocked: false, boundedVerified: false,
+        flags: { cwd: spec.cwd, model: spec.model, effort: spec.effort, appendPrompt: spec.appendPrompt, tools: spec.tools, bounded: spec.bounded || null },
         broker: createClaudePermissionBroker({ threadId, egdeskServer: EGDESK_MCP_SERVER_NAME, offerSessionGrant: true,
           nextRpcId: () => nextRpcId(threadId, 'perm') }),
         mcp: createEgdeskClaudeMcp({ threadId, tools: spec.tools, serverName: EGDESK_MCP_SERVER_NAME,
@@ -459,17 +486,23 @@ export function createClaudeEngineAdapter(options = {}) {
         minVersion, requiredCapabilities, apiKeyEnvPolicy: apiKeyConfirmed ? 'strip' : 'stop', env, platform, inherit,
         model: spec.model, effort: spec.effort, appendPrompt: spec.appendPrompt,
         ...(helpChecked ? { permissionMode: 'manual', systemPromptSnapshot: 'off' } : {}),
+        ...(spec.bounded ? claudeBoundedLaunch() : {}),
         ...(session.hasHistory ? { resume: threadId } : { sessionId: threadId }),
         mcpConfig: hasTools ? egdeskMcpConfig(EGDESK_MCP_SERVER_NAME) : null,
         allowedTools: hasTools ? [egdeskAllowedToolsRule(EGDESK_MCP_SERVER_NAME)] : null,
         controlHandlers: {
           can_use_tool: (request, { requestId }) => {
+            // dontAsk already denies; a bounded process never shows an approval card.
+            if (proc.blocked || (proc.bounded && !String(request?.tool_name || '').startsWith(`mcp__${EGDESK_MCP_SERVER_NAME}__`))) {
+              return { response: { behavior: 'deny', message: 'This bounded Browser conversation has EG-Desk tools only', interrupt: false } }
+            }
             const routed = proc.broker.request({ kind: 'canUseTool', requestId, subtype: 'can_use_tool', request }, { turnId: turnOf(), cwd: spec.cwd })
             if (routed.write) return { write: routed.write }
             if (routed.serverRequest) { clearIdle(session); deliver('serverRequest', routed.serverRequest) }
             return undefined
           },
           mcp_message: (request, { requestId }) => {
+            if (proc.blocked) return { error: 'This Claude process failed its bounded policy check' }
             const routed = proc.mcp.handle({ kind: 'mcpMessage', requestId, request }, { turnId: turnOf() })
             if (routed.write) return { write: routed.write }
             if (routed.serverRequest) {
@@ -531,7 +564,7 @@ export function createClaudeEngineAdapter(options = {}) {
 
   // Process flags fixed at spawn; a turn that changes one restarts with --resume.
   const flagsDiffer = (flags, spec) => flags.cwd !== spec.cwd || flags.model !== spec.model || flags.effort !== spec.effort
-    || flags.appendPrompt !== spec.appendPrompt || flags.tools !== spec.tools
+    || flags.appendPrompt !== spec.appendPrompt || flags.tools !== spec.tools || flags.bounded !== (spec.bounded || null)
 
   function syncStatus() {
     const ready = isReady()
@@ -579,7 +612,7 @@ export function createClaudeEngineAdapter(options = {}) {
       if (!UUID.test(threadId)) throw new TypeError('randomUUID must return a UUID')
       // The process starts with the first turn, which also carries the effort.
       newSession(threadId, spec, false)
-      return { thread: { id: threadId, ephemeral: false, cwd: spec.cwd }, cwd: spec.cwd, model: spec.model }
+      return { thread: { id: threadId, ephemeral: false, cwd: spec.cwd }, cwd: spec.cwd, model: spec.model, ...boundedDescriptor(spec) }
     },
 
     async resumeThread(params = {}) {
@@ -602,7 +635,7 @@ export function createClaudeEngineAdapter(options = {}) {
         session = newSession(threadId, specFrom(params), true)
       }
       session.lastUsedAt = now()
-      return { thread: { id: threadId, turns: [], cwd: session.spec.cwd }, cwd: session.spec.cwd, model: session.spec.model }
+      return { thread: { id: threadId, turns: [], cwd: session.spec.cwd }, cwd: session.spec.cwd, model: session.spec.model, ...boundedDescriptor(session.spec) }
     },
 
     async releaseThread(threadId) {
