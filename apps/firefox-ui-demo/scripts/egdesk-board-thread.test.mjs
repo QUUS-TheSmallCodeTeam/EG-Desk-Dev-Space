@@ -1,0 +1,222 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
+import { compileFunction } from 'node:vm';
+import * as ChatState from '../overlay/resources/EGDeskChatState.sys.mjs';
+import * as InputContext from '../overlay/resources/EGDeskInputContext.sys.mjs';
+import * as BoardThread from '../overlay/resources/EGDeskBoardThread.sys.mjs';
+import * as ThreadMembers from '../overlay/resources/EGDeskThreadMembers.sys.mjs';
+import { boardMentions as runtimeMentions, boardMembers as runtimeMembers } from '../helper/codex-chat-runtime.mjs';
+
+const surfaceScript = readFileSync(new URL('../overlay/JS/eg-desk-surface.uc.js', import.meta.url), 'utf8');
+const surfaceCss = readFileSync(new URL('../overlay/CSS/eg-desk-surface.uc.css', import.meta.url), 'utf8');
+const ID_D = 'designer';
+const ID_V = 'verifier';
+const room = (extra = {}) => ({
+  id: 'room-1', clientBindingId: 'room-1', type: 'group', title: 'Board Thread', engineId: 'codex',
+  participants: ['나', '디자이너', '검증 담당', 'Codex'],
+  participantRoles: { 나: 'owner', 디자이너: 'member', '검증 담당': 'admin', Codex: 'member' },
+  participantAgents: { 디자이너: { profileId: ID_D, avatar: null }, '검증 담당': { profileId: ID_V, avatar: null }, Codex: { profileId: null, avatar: null } },
+  messages: [], inputSources: [], briefingInputs: [], ...extra,
+});
+
+test('D-M2 mentions: the screen reads @이름 the same way the bridge does', () => {
+  const thread = room({ participants: ['나', '디자인', '디자인 리뷰어'], participantAgents: { 디자인: { profileId: 'short' }, '디자인 리뷰어': { profileId: 'long' } } });
+  const store = BoardThread.boardStoreMembers(thread);
+  for (const message of ['@디자인 리뷰어 봐 주세요', '@디자인, @디자인 리뷰어 둘 다', 'mail@디자인 아님', '[리뷰](agent://long) 그리고 @디자인', '(@디자인) 확인', '@디자인님']) {
+    assert.deepEqual(BoardThread.boardMentions(message, thread).map(agent => agent.profileId), runtimeMentions(message, runtimeMembers(store)), message);
+  }
+});
+
+test('room members go to the chat store as room_members and come back as the same room', () => {
+  const thread = room();
+  const members = BoardThread.boardStoreMembers(thread);
+  assert.deepEqual(members, [
+    { kind: 'user', role: 'owner' },
+    { kind: 'agent', profileId: ID_D, label: '디자이너', role: 'member' },
+    { kind: 'agent', profileId: ID_V, label: '검증 담당', role: 'admin' },
+    { kind: 'agent', label: 'Codex', role: 'member' },
+  ]);
+  assert.deepEqual(BoardThread.boardStoreMembers({ ...thread, type: 'dm' }), [], 'an Agent DM has no Board members');
+  // What the store answers (memberKey, addedAt, label null for the person) reads back as no change.
+  const saved = members.map((member, index) => ({ memberKey: member.kind === 'user' ? 'user' : member.profileId ? `agent:${member.profileId}` : 'legacy:x', profileId: null, label: null, addedAt: index, ...member }));
+  assert.equal(BoardThread.threadFieldsFromStoreMembers(thread, saved), null);
+  assert.equal(BoardThread.boardMembersSync(thread, { members: saved, saved: true }), null);
+  // Another window added an Agent: the room shows it, faces captured here are kept.
+  const withFace = room({ participantAgents: { ...room().participantAgents, 디자이너: { profileId: ID_D, avatar: { kind: 'emoji', value: '🦉', color: '#a9c5a9' } } } });
+  const sync = BoardThread.boardMembersSync(withFace, { members: [...saved.slice(0, 2), { memberKey: 'agent:writer', kind: 'agent', profileId: 'writer', label: '작가', role: 'member' }] });
+  assert.deepEqual(sync.restore.participants, ['나', '디자이너', '작가']);
+  assert.deepEqual(sync.restore.participantRoles, { 나: 'owner', 디자이너: 'member', 작가: 'member' });
+  assert.deepEqual(sync.restore.participantAgents.디자이너.avatar, { kind: 'emoji', value: '🦉', color: '#a9c5a9' });
+  assert.deepEqual(sync.restore.participantAgents.작가, { profileId: 'writer', avatar: null });
+  // The store has none yet: the Desk members move in once.
+  assert.deepEqual(BoardThread.boardMembersSync(thread, { members: [], saved: false }), { save: members });
+  assert.deepEqual(BoardThread.boardMembersRequest(thread, 'room-1'), { clientThreadId: 'room-1', members });
+});
+
+test('D-M2 routing: a mention or an Agent Lead goes to /chat/board/send; a plain-Codex Lead with no mention keeps /chat/send', () => {
+  const thread = room({ messages: [
+    { role: 'user', content: '어제 시안', status: 'complete' },
+    { role: 'assistant', content: '확인했어요', authorName: '디자이너', status: 'complete' },
+    { role: 'user', content: '보내는 중', status: 'submitting' },
+  ] });
+  const base = { message: '그냥 질문', requestId: 'req-1', clientThreadId: 'room-1', profileEnabled: false, conversationId: 'native-room', model: 'gpt-x' };
+  assert.equal(BoardThread.boardSendPlan(thread, base), null, 'no mention, plain Codex: only the room answers, as before');
+  assert.equal(BoardThread.boardSendPlan(thread, { ...base, message: '@Codex 봐 줘' }), null, 'the plain Codex has no Agent of its own');
+  assert.equal(BoardThread.boardSendPlan({ ...thread, type: 'dm' }, { ...base, message: '@디자이너 봐 줘' }), null);
+
+  const mentioned = BoardThread.boardSendPlan(thread, { ...base, message: '@검증 담당 @디자이너 봐 줘', stateless: true });
+  assert.equal(mentioned.path, '/chat/board/send');
+  assert.deepEqual(mentioned.mentioned, [ID_V, ID_D]);
+  for (const key of ['conversationId', 'profileEnabled', 'stateless', 'profileId', 'leadProfileId']) assert.ok(!(key in mentioned.body), key);
+  assert.deepEqual([mentioned.body.message, mentioned.body.requestId, mentioned.body.clientThreadId, mentioned.body.model], ['@검증 담당 @디자이너 봐 줘', 'req-1', 'room-1', 'gpt-x']);
+  assert.deepEqual(mentioned.body.members, BoardThread.boardStoreMembers(thread));
+  assert.deepEqual(mentioned.body.recentMessages, [{ role: 'user', text: '어제 시안', author: '나' }, { role: 'agent', text: '확인했어요', author: '디자이너' }]);
+
+  const lead = BoardThread.boardSendPlan(thread, { ...base, profileEnabled: true, profileId: ID_D, profileRevision: 3 });
+  assert.deepEqual([lead.body.leadProfileId, lead.body.profileId, lead.body.profileRevision], [ID_D, ID_D, 3], 'with no mention the room\'s Agent answers as Lead');
+  assert.deepEqual(BoardThread.boardSendPlan(thread, { ...base, message: '@디자이너 이 페이지', executionPolicy: { mode: 'browserBounded' } }), { error: 'BOARD_BROWSER_BOUNDED' });
+  assert.equal(BoardThread.boardSendPlan(thread, { ...base, profileEnabled: true, profileId: ID_D, executionPolicy: { mode: 'browserBounded' } }), null,
+    'a Browser-bounded send with no mention stays the ordinary single send');
+  assert.match(BoardThread.boardSendErrorText('BOARD_CONCURRENCY_LIMIT'), /2명까지/);
+  assert.equal(BoardThread.boardSendErrorText('OTHER'), null);
+});
+
+test('board send answers split into the Lead\'s run, the other members\' runs and each recipient\'s chip state', () => {
+  const answer = { accepted: true, requestId: 'req-1', clientThreadId: 'room-1', recipients: [
+    { profileId: ID_D, reason: 'lead', clientThreadId: 'room-1', requestId: 'req-1', status: 'started', conversationId: 'c-room', runId: 'r-1' },
+    { profileId: ID_V, label: '검증 담당', reason: 'mentioned', clientThreadId: 'board-member:v', requestId: 'req-1~v', status: 'started', conversationId: 'c-v', runId: 'r-2' },
+    { profileId: 'writer', reason: 'mentioned', clientThreadId: 'board-member:w', requestId: 'req-1~w', status: 'deferred', code: 'BOARD_CONCURRENCY_LIMIT' },
+  ] };
+  const outcome = BoardThread.boardSendOutcome(answer, 'req-1', { now: 5 });
+  assert.deepEqual(outcome.lead, { accepted: true, requestId: 'req-1', clientThreadId: 'room-1', conversationId: 'c-room', runId: 'r-1' });
+  assert.deepEqual(outcome.members.map(row => row.profileId), [ID_V]);
+  assert.deepEqual(Object.fromEntries(Object.entries(outcome.routes).map(([id, route]) => [id, route.status])), { [ID_D]: 'started', [ID_V]: 'started', writer: 'deferred' });
+  assert.equal(outcome.failure.code, 'BOARD_CONCURRENCY_LIMIT');
+  const none = BoardThread.boardSendOutcome({ accepted: false, recipients: [{ profileId: ID_V, status: 'failed', code: 'PROFILE_NOT_FOUND', requestId: 'x' }] }, 'req-1');
+  assert.deepEqual([none.accepted, none.lead, none.members.length, none.failure.code], [false, null, 0, 'PROFILE_NOT_FOUND']);
+  const request = BoardThread.boardMemberRequest(answer.recipients[1], room(), { profiles: [{ id: ID_V, name: '검증 담당', avatar: null }] });
+  assert.deepEqual(request, { requestId: 'req-1~v', clientThreadId: 'board-member:v', localThreadId: 'room-1', conversationId: 'c-v', authorName: '검증 담당' });
+});
+
+test('each member\'s state (작업 중 · 막힘 · 완료) comes from the run attributed to it, else the last board send', () => {
+  const run = (profileId, status, extra = {}) => BoardThread.noteBoardRun({ status, requestId: `req-${profileId}`, ...extra }, { profileId, reason: 'mentioned' });
+  assert.deepEqual(BoardThread.boardMemberState(ID_D, { runs: [run(ID_D, 'running')] }), { kind: 'active', label: '작업 중' });
+  assert.deepEqual(BoardThread.boardMemberState(ID_D, { runs: [run(ID_D, 'completed')] }), { kind: 'done', label: '완료' });
+  assert.deepEqual(BoardThread.boardMemberState(ID_D, { runs: [run(ID_D, 'failed')] }), { kind: 'blocked', label: '막힘' });
+  assert.deepEqual(BoardThread.boardMemberState(ID_D, { runs: [run(ID_D, 'running')], connectedRunView: () => ({ state: 'approval' }) }), { kind: 'waiting', label: '승인 대기' });
+  assert.equal(BoardThread.boardMemberState(ID_D, { runs: [run(ID_D, 'running')], connectedRunView: () => null }), null, 'disconnected: no guess');
+  assert.deepEqual(BoardThread.boardMemberState(ID_V, { routes: { [ID_V]: { status: 'deferred', requestId: 'req-2' } } }), { kind: 'waiting', label: '차례 대기' });
+  // A newer refused send outranks an older finished run.
+  assert.deepEqual(BoardThread.boardMemberState(ID_D, { runs: [run(ID_D, 'completed')], routes: { [ID_D]: { status: 'failed', requestId: 'req-new' } } }), { kind: 'blocked', label: '막힘' });
+  assert.equal(BoardThread.boardMemberState(ID_D, { runs: [run(ID_V, 'running')] }), null);
+  const member = BoardThread.noteBoardRun({}, { profileId: ID_V, reason: 'mentioned', roomClientThreadId: 'room-1' }, { member: true });
+  assert.deepEqual([member.board, BoardThread.isBoardMemberRun(member)], [{ profileId: ID_V, reason: 'mentioned', roomClientThreadId: 'room-1' }, true]);
+
+  // The chips and the floating Chat head read the same states.
+  const runs = [run(ID_D, 'running', { authorName: '디자이너' }), run(ID_V, 'failed', { authorName: '검증 담당' })];
+  const chips = ThreadMembers.memberChipViews(room(), { runs, limit: 8 }).chips;
+  assert.deepEqual(chips.map(chip => [chip.name, chip.status?.label || null]), [['나', null], ['디자이너', '작업 중'], ['검증 담당', '막힘'], ['Codex', null]]);
+  const hud = ThreadMembers.hudMemberRowView(room(), { runs, limit: 2 });
+  assert.deepEqual([hud.faces.map(chip => chip.name), hud.more, hud.summary, hud.label], [['디자이너', '검증 담당'], 1, '디자이너 작업 중 · 검증 담당 막힘', '참여 Agent 3명']);
+  assert.equal(ThreadMembers.hudMemberRowView(room({ participants: ['나'] }), {}), null);
+});
+
+// ── Screen wiring, cut from the surface source ──
+function sendHarness({ thread, reply }) {
+  const state = { codex: { activeThreadId: thread.id, activityRoomGeneration: 1, threads: [thread], threadDrafts: { [thread.id]: thread.draft }, threadDraftRevisions: { [thread.id]: 1 },
+    authStatus: { isLoggedIn: true, authMode: 'chatgpt', accountEmail: 'fixture@example.test', identityStatus: 'known' }, connected: true, liveRevision: 0 } };
+  const protocol = ChatState.createChatProtocolState();
+  state.codex.chatProtocol = protocol;
+  state.codex.codexAccountKey = ChatState.codexAccountKey(state.codex.authStatus);
+  const calls = [], synced = [];
+  const getCodexThreadById = (_codex, id) => state.codex.threads.find(item => item.id === id) || null;
+  const updateThreadById = (id, update) => { state.codex.threads = state.codex.threads.map(item => item.id === id ? update(item) : item); return getCodexThreadById(null, id); };
+  const deps = { state, ChatState, InputContext, BoardThread, protocol, memoAskSendReservations: new Map(),
+    getActiveCodexThread: codex => getCodexThreadById(codex, codex.activeThreadId), getCodexThreadById, getCodexThreadDraft: (codex, id) => codex.threadDrafts[id] || '',
+    clearMemoManualSendNotice: () => false, showMemoManualSendNotice: () => {}, threadBusy: () => false, chatRoomProjectSendBlock: () => null,
+    chatRequestProjectDisplays: new Map(), epochScope: ChatState.createChatEpochScope(), ensureNativeReadyForSend: async () => true, updateThreadById, emit() {},
+    captureThreadInputs: async () => [], codexThreadAgentProfile: () => ({ name: '디자이너' }), SELF_MEMBER: '나',
+    createCodexMessage: (role, content, status, options) => ({ role, content, status, ...options }),
+    appendMessageToThread: (id, message) => updateThreadById(id, item => ({ ...item, messages: [...item.messages, message] })),
+    codexThreadRuntimeConfig: current => (current.profileEnabled ? { profileId: ID_D, profileRevision: 2 } : {}), browserToolSelectedSources: () => [], rootSseReady: () => ({ sourceReady: true }),
+    chatRoomProjectState: () => null, normalizeChatRoomProjectDefault: value => value, CHAT_ROOM_PROJECT_UNAVAILABLE: 'project unavailable',
+    CHAT_REQUEST_PROJECT_INVALID: 'project invalid', codexProfileCatalog: { status: 'ready', profiles: [{ id: ID_V, name: '검증 담당', avatar: null }] },
+    fetchJson: async (path, options) => { calls.push([path, JSON.parse(options.body)]); return reply(path, JSON.parse(options.body)); },
+    syncProtocolRun: run => synced.push(run),
+  };
+  state.codexBridge = { prepareRoomProjectSend: async () => ({}) };
+  const cut = (from, to) => {
+    const start = surfaceScript.indexOf(from), end = surfaceScript.indexOf(to, start);
+    assert.ok(start >= 0 && end > start, from);
+    return surfaceScript.slice(start, end);
+  };
+  const receiptNames = ['createAcceptedReceiptWatch', 'rememberAcceptedInputReceipt'];
+  Object.assign(deps, compileFunction(`${receiptNames.map(name => cut(`  function ${name}(`, '\n  }\n') + '\n  }').join('\n')}\nreturn { ${receiptNames.join(', ')} };`,
+    ['state', 'ChatState', 'getCodexThreadById'])(state, ChatState, getCodexThreadById));
+  deps.watchMemoRead = compileFunction(`${cut('    const memoReadWatches = new Map();', '    const confirmedLegacyImports')}\nreturn watchMemoRead;`,
+    ['state', 'ChatState', 'getCodexThreadById', 'memoAskRuntimeIdentity'])(state, ChatState, getCodexThreadById, () => null);
+  deps.snapshotChatRoomProjectExpectation = () => null;
+  deps.acceptBoardSend = compileFunction(`${cut('    function acceptBoardSend(', '\n    // One catalog read at a time;')}\nreturn acceptBoardSend;`, Object.keys(deps))(...Object.values(deps));
+  const send = compileFunction(`return { ${cut('      async sendMessage(', '\n      },\n')}\n      } };`, Object.keys(deps))(...Object.values(deps)).sendMessage;
+  const listeners = new Set();
+  return { state, protocol, calls, synced, send: () => send.call({ subscribe(listener) { listeners.add(listener); return () => listeners.delete(listener); } }, {}),
+    thread: () => getCodexThreadById(null, thread.id) };
+}
+
+test('the real composer send: an @mention in a Board Thread goes to /chat/board/send and each member\'s run shows in the room', async () => {
+  const h = sendHarness({ thread: room({ draft: '@검증 담당 확인해 주세요', profileEnabled: true }), reply: (path, body) => ({
+    accepted: true, requestId: body.requestId, clientThreadId: body.clientThreadId, recipients: [
+      { profileId: ID_V, label: '검증 담당', reason: 'mentioned', clientThreadId: 'board-member:v', requestId: `${body.requestId}~v`, status: 'started', conversationId: 'c-v', runId: 'r-v' }],
+  }) });
+  // The room's own project check is a fixture: the room has no project.
+  const result = await h.send();
+  assert.deepEqual(h.calls.map(([path]) => path), ['/chat/board/send']);
+  const body = h.calls[0][1];
+  assert.deepEqual([body.leadProfileId, 'conversationId' in body, 'profileEnabled' in body], [ID_D, false, false]);
+  assert.deepEqual(result, { requestId: body.requestId, accepted: true });
+  const sent = h.thread().messages.find(message => message.role === 'user');
+  assert.equal(sent.status, 'complete', 'only a mentioned member answers: the room\'s own request is done');
+  assert.equal(h.thread().boardRoutes[ID_V].status, 'started');
+  const memberRun = h.protocol.runs[ChatState.runKey('c-v', 'r-v')];
+  assert.deepEqual([memberRun.localThreadId, memberRun.authorName, memberRun.boardMember, memberRun.board.profileId], ['room-1', '검증 담당', true, ID_V]);
+  assert.equal(h.synced.at(-1), memberRun);
+  assert.equal(h.thread().conversationId, undefined, 'a member\'s answer never rebinds the room');
+  // A later event of that member is admitted (its request is known) and keeps the attribution.
+  assert.ok(ChatState.canAdmitChatEvent(h.protocol, h.state.codex.threads, { requestId: `${body.requestId}~v`, clientThreadId: 'board-member:v', conversationId: 'c-v' }));
+});
+
+test('the real composer send: no mention with an Agent Lead answers in the room; a refusal says why in Korean', async () => {
+  const lead = sendHarness({ thread: room({ draft: '정리해 주세요', profileEnabled: true }), reply: (path, body) => ({
+    accepted: true, requestId: body.requestId, clientThreadId: body.clientThreadId, recipients: [
+      { profileId: ID_D, reason: 'lead', clientThreadId: body.clientThreadId, requestId: body.requestId, status: 'started', conversationId: 'c-room', runId: 'r-1' }],
+  }) });
+  const accepted = await lead.send();
+  assert.equal(accepted.accepted, true);
+  const run = lead.protocol.runs[ChatState.runKey('c-room', 'r-1')];
+  assert.deepEqual([run.localThreadId, run.board.profileId, run.boardMember], ['room-1', ID_D, undefined]);
+
+  const plain = sendHarness({ thread: room({ draft: '그냥 질문' }), reply: () => ({ accepted: true, conversationId: 'c-plain', runId: 'r-plain' }) });
+  await plain.send();
+  assert.deepEqual(plain.calls.map(([path]) => path), ['/chat/send'], 'a plain-Codex Lead with no mention keeps the ordinary send');
+
+  const busy = sendHarness({ thread: room({ draft: '@검증 담당 확인', profileEnabled: true }), reply: (path, body) => ({
+    accepted: false, requestId: body.requestId, clientThreadId: body.clientThreadId, recipients: [
+      { profileId: ID_V, reason: 'mentioned', clientThreadId: 'board-member:v', requestId: `${body.requestId}~v`, status: 'deferred', code: 'BOARD_CONCURRENCY_LIMIT' }],
+  }) });
+  const refused = await busy.send();
+  assert.equal(refused.accepted, false);
+  assert.match(busy.thread().sendError, /2명까지 동시에/);
+  assert.equal(busy.thread().boardRoutes[ID_V].status, 'deferred');
+});
+
+test('screen wiring: member changes are saved to the store, opening a Board Thread reads them back, the HUD head draws the member row', () => {
+  assert.match(surfaceScript, /if \(selected\?\.type === 'group'\) void syncBoardMembers\(threadId\);/);
+  assert.equal((surfaceScript.match(/void saveBoardMembers\((?:threadId|targetId)\);/g) || []).length, 3, 'invite, remove and role change');
+  assert.match(surfaceScript, /fetchJson\(BoardThread\.BOARD_MEMBERS_PATH, \{ method: 'POST'/);
+  assert.match(surfaceScript, /activeThread\.type === 'group' \? renderHudMemberRow\(activeThread\) : null/);
+  assert.match(surfaceScript, /data: \{ testid: 'chat-hud-members' \}/);
+  assert.match(surfaceScript, /event\.event === 'run\.started' && event\.details\?\.board\) BoardThread\.noteBoardRun\(run, event\.details\.board\)/);
+  assert.match(surfaceScript, /\.\.\.\(boardMemberRun \? \{\} : \{ conversationId: run\.conversationId \}\)/);
+  assert.match(surfaceCss, /\.egd-codex-hud-members \{/);
+});

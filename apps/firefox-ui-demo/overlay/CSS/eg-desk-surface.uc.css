@@ -6199,6 +6199,42 @@ button.egd-bag-header.egd-bag-header-muted { color: var(--egd-on-surface-variant
 .egd-codex-thread-member-status-blocked { background: var(--egd-danger-ink); }
 .egd-codex-thread-member-status-done { background: var(--egd-success-ink); }
 
+/* CHAT-10: the floating Chat head's member row: small faces with status dots and one line of states. */
+.egd-codex-hud-members {
+  display: flex;
+  align-items: center;
+  gap: 3px;
+  min-width: 0;
+}
+.egd-codex-hud-member {
+  position: relative;
+  display: inline-flex;
+  flex: none;
+}
+.egd-codex-hud-member .egd-codex-hud-member-face {
+  width: 16px;
+  height: 16px;
+  min-width: 16px;
+  margin: 0;
+  border-radius: 50%;
+  font-size: 10px;
+  overflow: hidden;
+}
+.egd-codex-hud-member .egd-codex-thread-member-status {
+  width: 6px;
+  height: 6px;
+  right: -1px;
+  bottom: -1px;
+}
+.egd-codex-hud-members-more { flex: none; color: var(--egd-on-surface-variant); }
+.egd-codex-hud-members-summary {
+  min-width: 0;
+  margin-left: 3px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .egd-codex-thread-member-name {
   max-width: 102px;
   overflow: hidden;

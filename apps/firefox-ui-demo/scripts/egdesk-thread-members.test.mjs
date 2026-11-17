@@ -150,15 +150,16 @@ const cut = (from, to) => {
 function memberBridge({ catalog = { status: 'ready', profiles: CATALOG }, threads } = {}) {
   const state = { codex: { activeThreadId: 'room-1', threads: threads || [room()], memberMenu: null, threadMenu: { threadId: 'room-1' },
     engineMenu: { threadId: 'room-1' }, messageMenu: {}, agentPeek: {} } };
-  const calls = { emit: 0, catalogLoads: 0 };
+  const calls = { emit: 0, catalogLoads: 0, saved: [] };
   const source = `return { ${cut('      toggleInviteMenu(threadId, anchorEl = null) {', '      toggleEngineMenu(threadId, anchorEl = null) {')}
     ${cut('      removeFromThread(threadId, memberName) {', '      async refreshAuthStatus() {')} };`;
   const bridge = compileFunction(source, ['state', 'getCodexThreadById', 'updateThreadById', 'emit', 'resolveFloatingMenuPlacement',
-    'loadProfileCatalog', 'ThreadMembers', 'codexProfileCatalog', 'SELF_MEMBER', 'buildThreadSubtitle'])(
+    'loadProfileCatalog', 'ThreadMembers', 'codexProfileCatalog', 'SELF_MEMBER', 'buildThreadSubtitle', 'saveBoardMembers'])(
     state, (codex, id) => codex.threads.find(thread => thread.id === id) || null,
     (id, update) => { state.codex.threads = state.codex.threads.map(thread => (thread.id === id ? update(thread) : thread)); },
     () => { calls.emit += 1; }, rect => ({ left: rect.right - 248, top: rect.bottom + 6 }), () => { calls.catalogLoads += 1; },
-    ThreadMembers, catalog, '나', (type, participants) => `멤버 ${participants.length}명`);
+    ThreadMembers, catalog, '나', (type, participants) => `멤버 ${participants.length}명`,
+    async (threadId) => { calls.saved.push([threadId, [...(state.codex.threads.find(thread => thread.id === threadId)?.participants || [])]]); return true; });
   return { state, bridge, calls, thread: () => state.codex.threads[0] };
 }
 
@@ -192,6 +193,8 @@ test('B01 화면 배선: 초대는 목록을 열 뿐이고, 고른 Agent만 그 
   assert.deepEqual([h.thread().participants, h.thread().participantAgents], [['나', 'Codex'], { Codex: { profileId: null, avatar: null } }]);
   h.bridge.removeFromThread('room-1', 'Codex');
   assert.deepEqual(h.thread().participants, ['나', 'Codex'], 'a room keeps two members');
+  // CHAT-10: every change the room accepts is written to the chat store (room_members); refused ones are not.
+  assert.deepEqual(h.calls.saved, [['room-1', ['나', '디자인 리뷰어']], ['room-1', ['나', '디자인 리뷰어', 'Codex']], ['room-1', ['나', 'Codex']]]);
 
   const dm = memberBridge({ threads: [{ id: 'room-1', type: 'dm', participants: ['나', 'Codex'] }] });
   dm.bridge.toggleInviteMenu('room-1');
