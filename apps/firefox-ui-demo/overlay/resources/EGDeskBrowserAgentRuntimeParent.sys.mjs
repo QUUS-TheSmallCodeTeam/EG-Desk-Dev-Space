@@ -52,6 +52,7 @@ const RECEIPT_KEYS = new Set(["Enter", "Escape", "Tab", "ArrowUp", "ArrowDown", 
   "ArrowRight", "Backspace", "Space"]);
 const FILL_ROUTES = new Set(["dom-value-setter", "dom-editor-replace"]);
 const FILL_EVENTS = new Set(["beforeinput", "input", "change"]);
+const POINTER_API_ROUTES = new Set(["synthesizeMouseEvent", "sendMouseEvent", "sendMouseEventToWindow"]);
 export function browserToolDispatchReceiptFields(actionType, diagnostics) {
   if (!diagnostics || typeof diagnostics !== "object" || Array.isArray(diagnostics)) return {};
   if (actionType === "fill") {
@@ -76,6 +77,33 @@ export function browserToolDispatchReceiptFields(actionType, diagnostics) {
     }
     return { inputRoute: "dom-scroll-api", scrollMode: diagnostics.mode,
       ...(diagnostics.mode === "into-view" ? { targetInView: diagnostics.targetInView === true } : {}) };
+  }
+  // BRW-10 (REA 웹1): trusted pointer press. Points are CSS px numbers only.
+  if (actionType === "pointer-click") {
+    const point = value => value && typeof value === "object" && Number.isFinite(value.x) && Number.isFinite(value.y)
+      ? { x: value.x, y: value.y } : null;
+    const input = point(diagnostics.point), display = point(diagnostics.displayPoint);
+    if (diagnostics.inputRoute !== "trusted-pointer" || diagnostics.trustedInput !== true ||
+        !POINTER_API_ROUTES.has(diagnostics.apiRoute) || !input || !display) return {};
+    return { inputRoute: "trusted-pointer", apiRoute: diagnostics.apiRoute, trustedInput: true,
+      point: input, displayPoint: display,
+      ...Object.fromEntries(["moveDispatched", "downDispatched", "upDispatched", "compensatedUp",
+        "targetPointerObserved", "targetClickObserved"].map(key => [key, diagnostics[key] === true])),
+      eventsTrusted: typeof diagnostics.eventsTrusted === "boolean" ? diagnostics.eventsTrusted : null };
+  }
+  // BRW-10 (REA 웹2): trusted typing. The length is reported, never the text.
+  if (actionType === "type-text") {
+    if (diagnostics.inputRoute !== "trusted-text-input" || diagnostics.trustedInput !== true ||
+        diagnostics.focusPolicy !== "already-focused" ||
+        !(diagnostics.key === null || RECEIPT_KEYS.has(diagnostics.key)) ||
+        !Number.isSafeInteger(diagnostics.textLength) || diagnostics.textLength < 0) return {};
+    return { inputRoute: "trusted-text-input", trustedInput: true, textLength: diagnostics.textLength, key: diagnostics.key,
+      ...Object.fromEntries(["textCommitted", "keyDispatched", "targetInputObserved", "targetKeyObserved"]
+        .map(key => [key, diagnostics[key] === true])),
+      keydownConsumed: typeof diagnostics.keydownConsumed === "boolean" ? diagnostics.keydownConsumed : null,
+      eventsTrusted: typeof diagnostics.eventsTrusted === "boolean" ? diagnostics.eventsTrusted : null,
+      documentHasFocus: typeof diagnostics.documentHasFocus === "boolean" ? diagnostics.documentHasFocus : null,
+      focusPolicy: "already-focused" };
   }
   if (actionType === "press") {
     if (diagnostics.inputRoute !== "dom-keyboard-event" || diagnostics.trustedInput !== false ||

@@ -1,5 +1,6 @@
 import { captureDocumentText } from './EGDeskInputContext.sys.mjs';
 import { isSensitiveAutocomplete } from './EGDeskScreenshotMask.sys.mjs';
+import { POINTER_MIN_REMAINING_MS, planPointerPress } from './EGDeskBrowserPointer.sys.mjs';
 
 // Guarded key set. Events are synthetic (untrusted): Gecko runs no default
 // action for them, so only Enter's implicit form submission is emulated.
@@ -41,6 +42,8 @@ const MUTATION_OPTIONS = Object.freeze({ subtree: true, childList: true, attribu
 const SETTLE_RESPONSE_MARGIN_MS = 500;
 // The only dispatch phases a guarded refusal may claim (helper contract B).
 const DISPATCH_PHASES = new Set(["not-dispatched", "dispatched", "unknown"]);
+// BRW-10 (REA 웹1·웹2, D-B4): the separate "press / type like a person" routes.
+const TRUSTED_INPUT_ACTIONS = new Set(["pointer-click", "type-text"]);
 // BRW-06/08 extra candidates beyond INTERACTIVE_SELECTOR, as in agent-browser
 // cli/src/native/snapshot.rs find_cursor_interactive_elements (Apache-2.0):
 // cursor:pointer or onclick elements, labels that wrap a hidden radio or
@@ -564,6 +567,17 @@ export class EGDeskBrowserAgentRuntimeChild extends JSWindowActorChild {
     return identity;
   }
 
+  // Page full zoom of this tab (BrowsingContext.fullZoom), when readable. A
+  // pointer press compares it with the observed value (BRW-10); absent means
+  // unreadable, and devicePixelRatio (which carries full zoom) still decides.
+  zoomState() {
+    try {
+      const zoom = (this.browsingContext?.top || this.browsingContext)?.fullZoom;
+      if (typeof zoom === "number" && Number.isFinite(zoom) && zoom > 0) return { zoom: Math.round(zoom * 1000) / 1000 };
+    } catch {}
+    return {};
+  }
+
   // Registrable domain from Gecko's Public Suffix List; null for IP,
   // single-label or unavailable data, which limits scope to the exact origin.
   siteForHost(host) {
@@ -1056,6 +1070,7 @@ export class EGDeskBrowserAgentRuntimeChild extends JSWindowActorChild {
     return {
       ...state,
       ...this.documentIdentity(),
+      ...this.zoomState(),
       ...this.qaPerformDiagnostics(options),
       url: this.contentWindow.location.href,
       title: doc.title || "",
@@ -1347,6 +1362,56 @@ export class EGDeskBrowserAgentRuntimeChild extends JSWindowActorChild {
     this.assertSameTarget(target, action.ref, guard.target);
     if (action.type === "press") this.assertKeyTarget(action, guard, target);
     if (action.type === "click") this.assertTopmost(target, "Browser target is obscured");
+    if (action.type === "pointer-click") this.pointerPlanFor(target, guard);
+    if (action.type === "type-text") this.assertTypeTarget(action, guard, target);
+  }
+
+  // BRW-10 (REA 웹1): the point a guarded pointer press uses, from the
+  // observed bounds only, while the observed frame (document, revision,
+  // viewport, DPR, zoom, top scroll) still holds; then the same hit test as a
+  // click, at that point. Throws before any input otherwise.
+  pointerPlanFor(target, guard) {
+    if (!guard.target?.bounds) throw new Error("Browser pointer input refused [target-bounds-unreadable]; observe again");
+    const frames = [];
+    for (let frame = this.frameByDocument.get(target.ownerDocument); frame; frame = frame.parent) {
+      frames.unshift(this.frameContentOffset(frame.frameElement));
+    }
+    const live = { ...this.observationState(), ...this.zoomState(), scroll: this.scrollState() };
+    const observed = { documentId: guard.documentId, revision: guard.revision, viewport: guard.viewport,
+      ...(guard.pointer?.zoom !== undefined ? { zoom: guard.pointer.zoom } : {}), scroll: guard.pointer?.scroll };
+    const plan = planPointerPress({ observed, live, bounds: guard.target.bounds,
+      liveRect: this.viewportRect(target), frameOffsets: frames });
+    if (!plan.ok) throw new Error(`Browser pointer input refused [${plan.reason}]; observe again`);
+    const hit = this.hitTest(target, plan.inputPoint);
+    if (!hit.topmost) {
+      const blocker = hit.blocker ? this.describeNode(hit.blocker) : "";
+      throw Object.assign(new Error(`Browser target is obscured${blocker ? ` by ${blocker}` : ""}; observe again`),
+        blocker ? { obscuredBy: blocker } : {});
+    }
+    if (!this.pointerSender(this.windowFor(target))) {
+      throw new Error("Browser pointer input is unavailable in this Firefox; use egdesk_browser_click or the native user path");
+    }
+    return plan;
+  }
+
+  // BRW-10 (REA 웹2): typing goes to the element that already has the focus
+  // in its own document; EG-Desk never moves focus to make it so.
+  assertTypeTarget(action, guard, target) {
+    const tag = String(target.tagName || "").toLowerCase();
+    if (!this.isFillableControl(target) || tag === "select") {
+      throw new Error("Browser target is not a text field or editor; observe again");
+    }
+    if (typeof action.text !== "string" || action.text.length > MAX_FILL_TEXT) {
+      throw new Error("Browser typed text exceeds the bounded input; use the native user path");
+    }
+    if (action.key != null && !Object.hasOwn(GUARDED_KEYS, action.key)) throw new Error("Browser key is outside the guarded key set");
+    if (!action.text && action.key == null) throw new Error("Browser typing needs text or a key");
+    if (guard.focusedRef !== action.ref || this.deepActiveElement(this.document) !== target) {
+      throw new Error("Browser key target is not focused; EG-Desk never moves focus");
+    }
+    if (!this.createTextInputProcessor()) {
+      throw new Error("Browser text input is unavailable in this Firefox; use the native user path");
+    }
   }
 
   // Refuses a click that would land on something else, and says what: a short
@@ -1435,8 +1500,8 @@ export class EGDeskBrowserAgentRuntimeChild extends JSWindowActorChild {
   // bottom-up like Playwright injectedScript.ts expectHitTarget (Apache-2.0):
   // the target is topmost in its own tree, each shadow host in its tree, and
   // each frame element in its parent document at the translated point.
-  hitTest(target) {
-    const point = this.inViewCenter(target.getBoundingClientRect(), this.windowFor(target));
+  hitTest(target, startPoint = null) {
+    const point = startPoint || this.inViewCenter(target.getBoundingClientRect(), this.windowFor(target));
     if (!point) return { topmost: false, blocker: null, reason: "outside-viewport" };
     let { x, y } = point, node = target;
     for (let depth = 0; depth < 32; depth++) {
@@ -1680,6 +1745,119 @@ export class EGDeskBrowserAgentRuntimeChild extends JSWindowActorChild {
     return { usedWindowUtils: false, dispatchScope: "dom-fallback", x, y, eventResults };
   }
 
+  // Which Gecko chrome API turns CSS px in this window into trusted mouse
+  // input, by feature detection: Window.synthesizeMouseEvent [ChromeOnly]
+  // (Firefox 153 ESR / 159), nsIDOMWindowUtils.sendMouseEvent, then
+  // sendMouseEventToWindow (ESR 140). Gecko maps the point with the pres
+  // context, so page zoom and DPR are applied there. null when none exists.
+  // Not run in this repository's tests against a real Gecko (REA §7).
+  pointerSender(view) {
+    if (typeof view?.synthesizeMouseEvent === "function") {
+      return { route: "synthesizeMouseEvent", send: (type, x, y, buttons) => view.synthesizeMouseEvent(type, x, y,
+        { button: 0, buttons, clickCount: type === "mousemove" ? 0 : 1 }, { toWindow: true }) };
+    }
+    let utils = null;
+    try { utils = view?.windowUtils || null; } catch {}
+    if (typeof utils?.sendMouseEvent === "function") {
+      return { route: "sendMouseEvent", send: (type, x, y) => utils.sendMouseEvent(type, x, y, 0, type === "mousemove" ? 0 : 1, 0) };
+    }
+    if (typeof utils?.sendMouseEventToWindow === "function") {
+      return { route: "sendMouseEventToWindow",
+        send: (type, x, y) => utils.sendMouseEventToWindow(type, x, y, 0, type === "mousemove" ? 0 : 1, 0) };
+    }
+    return null;
+  }
+
+  // Target-side listeners for a trusted input receipt: which events reached
+  // the target (or inside it) and whether every one was trusted. Capture-only,
+  // never cancel, removed in finally.
+  watchTargetEvents(target, names) {
+    const seen = Object.fromEntries(names.map(name => [name, false]));
+    let trusted = null;
+    const listener = event => {
+      seen[event?.type] = true;
+      trusted = (trusted ?? true) && event?.isTrusted === true;
+    };
+    for (const name of names) target.addEventListener?.(name, listener, true);
+    return { seen, get trusted() { return trusted; },
+      stop() { for (const name of names) target.removeEventListener?.(name, listener, true); } };
+  }
+
+  // BRW-10 (REA 웹1): one move -> down -> up at the planned point. If the
+  // down was sent and the up was not, one up is sent in finally (a release,
+  // not a cancel). Never retried; never a fallback for a DOM click (EG-01).
+  guardedPointerClick(target, action, guard) {
+    const plan = this.pointerPlanFor(target, guard);
+    const sender = this.pointerSender(this.windowFor(target));
+    const { x, y } = plan.inputPoint;
+    const watch = this.watchTargetEvents(target, ["pointerdown", "mousedown", "mouseup", "click"]);
+    let moveDispatched = false, downAttempted = false, downDispatched = false, upDispatched = false, compensatedUp = false;
+    this.markFirstEvent();
+    try {
+      sender.send("mousemove", x, y, 0);
+      moveDispatched = true;
+      downAttempted = true;
+      sender.send("mousedown", x, y, 1);
+      downDispatched = true;
+      sender.send("mouseup", x, y, 0);
+      upDispatched = true;
+    } finally {
+      if (downAttempted && !upDispatched) {
+        try { sender.send("mouseup", x, y, 0); compensatedUp = true; } catch {}
+      }
+      watch.stop();
+    }
+    return { ok: true, ref: action.ref, dispatchDiagnostics: { inputRoute: "trusted-pointer", apiRoute: sender.route,
+      trustedInput: true, point: plan.inputPoint, displayPoint: plan.displayPoint, moveDispatched, downDispatched,
+      upDispatched, compensatedUp, targetPointerObserved: watch.seen.pointerdown || watch.seen.mousedown,
+      targetClickObserved: watch.seen.click, eventsTrusted: watch.trusted } };
+  }
+
+  // nsITextInputProcessor for one window, or null where unavailable.
+  createTextInputProcessor() {
+    try {
+      const Cc = globalThis.Cc ?? globalThis.Components?.classes, Ci = globalThis.Ci ?? globalThis.Components?.interfaces;
+      if (!Cc || !Ci?.nsITextInputProcessor) return null;
+      return Cc["@mozilla.org/text-input-processor;1"]?.createInstance(Ci.nsITextInputProcessor) || null;
+    } catch { return null; }
+  }
+
+  // BRW-10 (REA 웹2): text through the focused element's own text input
+  // path (commitCompositionWith, so editors receive real beforeinput/input),
+  // then at most one guarded key (TIP keydown/keyup; the browser runs its
+  // default action, e.g. Enter submits). No Enter emulation, no focus move.
+  // A busy transaction (the person composing with an IME) sends nothing.
+  guardedType(target, action, guard) {
+    const view = this.windowFor(target);
+    const tip = this.createTextInputProcessor();
+    if (!tip) throw new Error("Browser text input is unavailable in this Firefox; use the native user path");
+    const text = String(action.text ?? "");
+    const watch = this.watchTargetEvents(target, ["beforeinput", "input", "keydown"]);
+    let textCommitted = false, keydownConsumed = null, keyDispatched = false;
+    try {
+      if (!tip.beginInputTransaction(view, () => true)) {
+        throw new Error("Browser text input is busy (an input method is composing); observe again");
+      }
+      this.markFirstEvent();
+      if (text) textCommitted = tip.commitCompositionWith(text) !== false;
+      if (action.key != null) {
+        const spec = GUARDED_KEYS[action.key];
+        const event = new view.KeyboardEvent("", { key: spec.key, code: spec.code, keyCode: spec.keyCode });
+        const flags = Number(tip.keydown(event)) || 0;
+        keyDispatched = true;
+        keydownConsumed = (flags & (tip.KEYDOWN_IS_CONSUMED ?? 1)) !== 0;
+        tip.keyup(event);
+      }
+    } finally { watch.stop(); }
+    let documentHasFocus = null;
+    try { documentHasFocus = target.ownerDocument?.hasFocus?.() ?? null; } catch {}
+    return { ok: true, ref: action.ref, dispatchDiagnostics: { inputRoute: "trusted-text-input", trustedInput: true,
+      textCommitted, textLength: text.length, key: action.key ?? null, keyDispatched, keydownConsumed,
+      targetInputObserved: watch.seen.input || watch.seen.beforeinput, targetKeyObserved: watch.seen.keydown,
+      eventsTrusted: watch.trusted, documentHasFocus: typeof documentHasFocus === "boolean" ? documentHasFocus : null,
+      focusPolicy: guard.focusedRef === action.ref ? "already-focused" : null } };
+  }
+
   perform(action = {}, options = {}) {
     const type = action.type || action.action || "snapshot";
     // Any other guarded action ends the "just filled" key-input eligibility.
@@ -1701,6 +1879,12 @@ export class EGDeskBrowserAgentRuntimeChild extends JSWindowActorChild {
     const target = this.targetFor(action);
     if (!target) throw new Error(`Browser agent target not found: ${action.ref || action.selector || ""}`);
     if (type === "press" && options.guard) return this.guardedPress(target, action, options.guard);
+    // BRW-10: guarded only, and never scrolled first (the observed point must hold).
+    if (type === "pointer-click" || type === "type-text") {
+      if (!options.guard) throw new Error(`Unsupported browser agent action: ${type}`);
+      return type === "pointer-click" ? this.guardedPointerClick(target, action, options.guard)
+        : this.guardedType(target, action, options.guard);
+    }
     target.scrollIntoView?.({ block: "center", inline: "center" });
 
     if (type === "click") {
@@ -1777,6 +1961,11 @@ export class EGDeskBrowserAgentRuntimeChild extends JSWindowActorChild {
         this.assertGuard(action, options.guard);
         // A reconcile answered while approval was pending fenced this request.
         if (this.isFenced(keys)) throw new Error("Browser action was reconciled as never sent; observe again");
+        // REA 웹8 (b): a multi-step trusted input starts only if it can finish
+        // inside the budget; refused here, before perform, it was never sent.
+        if (TRUSTED_INPUT_ACTIONS.has(action.type) && this.remainingMs(lease, budgetDeadline) < POINTER_MIN_REMAINING_MS) {
+          throw new Error("Browser input budget is too short for a trusted input sequence; observe again");
+        }
       }
       const navigation = guarded ? this.watchNavigation() : null;
       try {

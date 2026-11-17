@@ -9852,7 +9852,8 @@ test('Settings, avatar and usage CSS use approved tokens only', () => {
 
 test('Browser scroll/press are wired into the Card dispatch allow-list and receipt', () => {
   assert.match(surfaceSource, /const BrowserAgentReceipts = ChromeUtils\.importESModule\('chrome:\/\/userchrome\/content\/EGDeskBrowserAgentRuntimeParent\.sys\.mjs'\);/);
-  assert.match(surfaceSource, /\['navigate', 'click', 'fill', 'scroll', 'press'\]\.includes\(request\.action\?\.type\)/);
+  // BRW-10 appends the trusted pointer press and typing routes to the same list.
+  assert.match(surfaceSource, /\['navigate', 'click', 'fill', 'scroll', 'press', 'pointer-click', 'type-text'\]\.includes\(request\.action\?\.type\)/);
   assert.match(surfaceSource, /request\.action\.selector \|\| \(!\['navigate', 'scroll'\]\.includes\(request\.action\.type\) && !request\.action\.ref\)/);
   assert.match(surfaceSource, /BrowserAgentReceipts\.browserToolDispatchReceiptFields\(action\.type, result\?\.result\?\.dispatchDiagnostics\)/);
 });

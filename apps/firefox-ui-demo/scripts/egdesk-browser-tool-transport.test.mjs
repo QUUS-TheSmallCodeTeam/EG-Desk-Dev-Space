@@ -1914,3 +1914,37 @@ test('S1 wait_text activity recording never stores the sought text', async () =>
   assert.equal(recorded.action.type, 'wait')
   assert.equal(JSON.stringify(recorded).includes('SECRET_WAIT_NEEDLE'), false)
 })
+
+test('BRW-10: the UI accepts guarded pointer-click and type-text acts and returns only the Parent-filtered route fields', async () => {
+  const f = fixture()
+  const bound = await f.dispatch(f.req('bind', { selection: f.selection() }))
+  const diagnostics = {
+    'pointer-click': { inputRoute: 'trusted-pointer', apiRoute: 'synthesizeMouseEvent', trustedInput: true,
+      point: { x: 50, y: 25 }, displayPoint: { x: 250, y: 125 }, moveDispatched: true, downDispatched: true, upDispatched: true,
+      compensatedUp: false, targetPointerObserved: true, targetClickObserved: true, eventsTrusted: true, label: 'LEAK' },
+    'type-text': { inputRoute: 'trusted-text-input', trustedInput: true, textLength: 2, key: null, textCommitted: true,
+      keyDispatched: false, targetInputObserved: true, targetKeyObserved: false, keydownConsumed: null, eventsTrusted: true,
+      documentHasFocus: true, focusPolicy: 'already-focused', text: 'LEAK' },
+  }
+  const queries = []
+  let projected = null
+  f.card._browserControls.toolPrepareAgentProjection = lease => { projected = lease.displayPoint }
+  for (const [type, extra] of [['pointer-click', {}], ['type-text', { text: 'hi' }]]) {
+    connectCardTools(f, { query: async (method, payload) => {
+      queries.push({ method, payload })
+      return { ok: true, result: { dispatchDiagnostics: diagnostics[type] }, after: { documentId: 'doc-1' }, observation: null }
+    } })
+    const result = await f.dispatch(f.req('act', { binding: bound.binding, callId: `call-${type}`,
+      guard: { documentId: 'doc-1', revision: 2, viewport: { width: 720, height: 480, devicePixelRatio: 1 },
+        target: { ref: 'el_1', bounds: { x: 90, y: 80, width: 180, height: 80 } } },
+      action: { type, ref: 'el_1', ...extra } }))
+    assert.equal(result.status, 'acted', type)
+    assert.equal(queries.at(-1).payload.action.type, type)
+    assert.equal(JSON.stringify(result.receipt.dispatchReceipt).includes('LEAK'), false, `${type}: no page text or typed text`)
+    assert.equal(result.receipt.dispatchReceipt.inputRoute, diagnostics[type].inputRoute)
+    assert.equal(result.receipt.dispatchReceipt.trustedInput, true)
+    assert.equal(result.receipt.dispatchReceipt.clickInputRoute, undefined, `${type} is not reported as a DOM click`)
+    assert.deepEqual(projected, { x: 25, y: 25 }, `${type}: the Agent dot points at the observed target`)
+  }
+  assert.equal(queries.length, 2, 'one actor query per request; nothing retried')
+})
