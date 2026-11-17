@@ -157,9 +157,17 @@ export function shiftClickSelection(selectedIds = [], pressedIds = [], activeId 
 // keep their own dot; the rest fold into one "+N" dot that leads to the
 // nearest of them. Dots on one side are spread so they never stack.
 
+// priority(id): 0 for the window a Briefing is reading, 1 for a window an
+// Agent is working in, 2 (default) for the rest (UX-05). On each side those
+// keep their own dot first; distance orders Views of the same rank.
 export function edgeDotModel(indicators = [], {
-  perSide = EDGE_DOTS_PER_SIDE, gap = EDGE_DOT_GAP_PX, titles = null, bounds = null,
+  perSide = EDGE_DOTS_PER_SIDE, gap = EDGE_DOT_GAP_PX, titles = null, bounds = null, priority = null,
 } = {}) {
+  const rankOf = id => {
+    if (typeof priority !== 'function') return 2;
+    const value = Number(priority(id));
+    return Number.isFinite(value) ? value : 2;
+  };
   // The caller's Map is made in the window, another global than this module,
   // where `instanceof Map` is false; it is read by its get method instead.
   const windowOf = id => {
@@ -173,7 +181,8 @@ export function edgeDotModel(indicators = [], {
     const list = (Array.isArray(indicators) ? indicators : [])
       .filter(item => item?.side === side && item.id != null && finite(item.x, item.y))
       .map((item, index) => ({ item, index }))
-      .sort((a, b) => (a.item.distance ?? Infinity) - (b.item.distance ?? Infinity) || a.index - b.index)
+      .map(entry => ({ ...entry, rank: rankOf(entry.item.id) }))
+      .sort((a, b) => a.rank - b.rank || (a.item.distance ?? Infinity) - (b.item.distance ?? Infinity) || a.index - b.index)
       .map(entry => entry.item);
     if (!list.length) continue;
     const single = list.length <= keep ? list : list.slice(0, keep - 1);

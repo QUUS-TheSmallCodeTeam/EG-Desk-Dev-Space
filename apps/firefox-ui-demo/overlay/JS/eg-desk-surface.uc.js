@@ -6543,7 +6543,7 @@
       // UX-06: windows saved folded come back folded, without a new change mark.
       for (const savedId of MinimapLayout.normalizeCollapsedIds(snapshot.desk?.collapsedViewIds)) {
         const view = document.getElementById(restoredIds.get(savedId) || savedId);
-        if (view && restoredViews.includes(view)) view._deskWindowShell?.setCollapsed?.(true, { quiet: true });
+        if (view && restoredViews.includes(view)) (view._deskWindowShell?.setCollapsed || view._setWindowCollapsed)?.(true, { quiet: true });
       }
       const activeId = snapshot.desk?.activeCardId;
       const active = activeId ? document.getElementById(restoredIds.get(activeId) || activeId) : null;
@@ -19510,7 +19510,7 @@
     });
 
     // Same title row as every Desk window: dots, grip, icon and the name '설정'.
-    // Settings does not fold, so it shows no yellow dot.
+    // UX-06: the yellow dot folds Settings to its title row like other windows.
     const closeControl = el('span', {
       class: 'egd-card-dot egd-card-dot-close egd-desk-window-control', role: 'button', tabindex: '0',
       title: '창 닫기', 'aria-label': '창 닫기',
@@ -19519,9 +19519,30 @@
     const maximizeControl = el('span', {
       class: 'egd-card-dot egd-card-dot-max egd-desk-window-control', role: 'button', tabindex: '0',
       title: '창 최대화', 'aria-label': '창 최대화', 'aria-pressed': 'false',
-      onclick: (ev) => { ev.stopPropagation(); toggleCardFullscreen(card); syncMaximizeControl(); },
+      onclick: (ev) => { ev.stopPropagation(); if (isCollapsed()) setCollapsed(false); toggleCardFullscreen(card); syncMaximizeControl(); },
     });
-    for (const control of [closeControl, maximizeControl]) {
+    const isCollapsed = () => !!card.classList?.contains('egd-card-collapsed');
+    const minimizeControl = el('span', {
+      class: 'egd-card-dot egd-card-dot-min egd-desk-window-control', role: 'button', tabindex: '0',
+      title: '창 접기', 'aria-label': '창 접기', 'aria-expanded': 'true',
+      onclick: (ev) => { ev.stopPropagation(); setCollapsed(!isCollapsed()); },
+    });
+    // Folding a maximized Settings first returns it to its size; Desk save and
+    // restore keep the fold (collapsedViewIds) through card._setWindowCollapsed.
+    const setCollapsed = (collapsed, { quiet = false } = {}) => {
+      const next = !!collapsed;
+      if (next === isCollapsed()) return next;
+      if (next && isCardFullscreen(card)) toggleCardFullscreen(card);
+      card.classList.toggle('egd-card-collapsed', next);
+      const label = next ? '창 펼치기' : '창 접기';
+      minimizeControl.setAttribute('title', label);
+      minimizeControl.setAttribute('aria-label', label);
+      minimizeControl.setAttribute('aria-expanded', String(!next));
+      if (!quiet) markAgendaDirty(next ? 'collapse-settings-window' : 'expand-settings-window', card);
+      return next;
+    };
+    card._setWindowCollapsed = setCollapsed;
+    for (const control of [closeControl, minimizeControl, maximizeControl]) {
       control.addEventListener('keydown', (ev) => {
         if (ev.key !== 'Enter' && ev.key !== ' ') return;
         ev.preventDefault(); ev.stopPropagation(); control.click();
@@ -19541,7 +19562,7 @@
     const header = el('div', { class: 'egd-card-header egd-desk-window-header' },
       el('div', { class: 'egd-card-topbar egd-desk-window-titlebar' },
         el('div', { class: 'egd-card-dots-shell' },
-          el('div', { class: 'egd-card-dots' }, closeControl, maximizeControl),
+          el('div', { class: 'egd-card-dots' }, closeControl, minimizeControl, maximizeControl),
         ),
         el('span', { class: 'egd-window-grip', 'aria-hidden': 'true' }, deskIcon('grip')),
         el('div', { class: 'egd-desk-window-identity' },
@@ -26287,6 +26308,19 @@
   // and dot placement are EGDeskViewportExtras; this is the screen side.
   const ViewportExtras = ChromeUtils.importESModule('chrome://userchrome/content/EGDeskViewportExtras.sys.mjs');
 
+  // UX-05: windows that matter now. Briefing target: a window whose semantic
+  // proxy the Briefing is on (data-briefing-active). Agent working: a Browser
+  // window whose Agent badge controls are showing (BRW-13 / AGENT-05).
+  function windowAttentionSets(cards = []) {
+    const briefingIds = new Set(), agentIds = new Set();
+    for (const card of cards) {
+      if (!card?.id) continue;
+      if (card.dataset?.briefingActive === 'true' || card.querySelector?.('[data-briefing-active="true"]')) briefingIds.add(card.id);
+      if (card.querySelector?.('.egd-browser-agent-hand:not([hidden]), .egd-browser-agent-identity:not([hidden])')) agentIds.add(card.id);
+    }
+    return { briefingIds, agentIds };
+  }
+
   function installCanvasPanZoom(viewport, layer) {
     const zoomValue = el('button', { type: 'button', class: 'egd-zoom-value', 'aria-live': 'off',
       'aria-label': 'Canvas 배율 직접 입력', title: '배율 직접 입력 (1~400%)', data: { testid: 'canvas-zoom-value' } }, '100%');
@@ -26523,7 +26557,9 @@
         const points = CanvasLayout.edgeIndicators(cards.map(card => ({ id: card.id, rect: persistentEntityGeometry(card) })),
           { viewport: box, pan: state.pan, zoom: state.zoom, inset: 6, limit: ViewportExtras.EDGE_DOT_TARGET_LIMIT });
         const titles = new Map(points.map(point => [point.id, minimapEntityTitle(document.getElementById(point.id))]));
-        dots = ViewportExtras.edgeDotModel(points, { titles,
+        // UX-05: the window a Briefing is reading, then windows an Agent is working in, keep their own dot first.
+        const sets = windowAttentionSets(cards);
+        dots = ViewportExtras.edgeDotModel(points, { titles, priority: id => SurfaceKeys.windowPriorityRank(id, sets),
           bounds: { left: safe.left + 6, top: safe.top + 6, right: safe.right - 6, bottom: safe.bottom - 6 } });
       }
       const live = new Set(dots.map(dot => dot.key));
@@ -27264,6 +27300,49 @@
       const nodes = next.ids.map(id => document.getElementById(id)).filter(node => node?.isConnected);
       if (!nodes.length) return;
       setSelectedEntities(state.expandCanvasSelection(nodes), document.getElementById(next.activeId));
+    }, true);
+    // UX-05 (D-V5): a focused window header moves its window with the arrow
+    // keys on the 24px grid (Shift 5 cells, Option/Alt 1px without the grid),
+    // and Shift+Space adds it to or takes it out of the selection, the
+    // keyboard path of Shift+click. Each press is one layout undo step.
+    const keyStatus = el('div', { id: 'egd-window-key-status', class: 'egd-visually-hidden', role: 'status', 'aria-live': 'polite' });
+    document.documentElement.appendChild(keyStatus);
+    window.addEventListener('keydown', ev => {
+      const header = ev.target;
+      if (ev.defaultPrevented || !header?.matches?.(HEADER_SELECTOR)) return;
+      const card = cardOf(header);
+      if (!card || card.parentNode !== layer || isCardFullscreen(card)) return;
+      const action = SurfaceKeys.windowHeaderKeyAction(ev);
+      if (!action) return;
+      ev.preventDefault();
+      ev.stopPropagation();
+      if (action.type === 'select-toggle') {
+        const pressed = [card.id, ...CanvasLayout.expandCanvasGroupSelection(state.canvasGroups, [card.id])];
+        const next = ViewportExtras.shiftClickSelection(selectedCards().map(node => node.id), pressed, state.activeEntityId || null);
+        const nodes = next.ids.map(id => document.getElementById(id)).filter(node => node?.isConnected);
+        if (nodes.length) setSelectedEntities(state.expandCanvasSelection(nodes), document.getElementById(next.activeId));
+        const picked = card.classList.contains('egd-entity-selected');
+        keyStatus.textContent = picked ? `선택에 더함 · 선택 ${nodes.length}개` : `선택에서 뺌 · 선택 ${nodes.length}개`;
+        return;
+      }
+      const start = rectOf(card);
+      const snap = state.canvasSnapEnabled !== false;
+      const point = SurfaceKeys.windowKeyMove(start, action, { grid: CanvasLayout.CANVAS_GRID_PX, snap });
+      if (!point) return;
+      const dx = point.x - start.x, dy = point.y - start.y;
+      // A selected window moves with the rest of the selection; group mates always come along.
+      const ids = card.classList.contains('egd-entity-selected') ? selectedCards().map(node => node.id) : [card.id];
+      const moving = [...new Set([...ids, ...CanvasLayout.expandCanvasGroupSelection(state.canvasGroups, ids)])];
+      const items = moving.map(id => document.getElementById(id)).filter(node => node?.isConnected && !isCardFullscreen(node))
+        .map(node => { const before = rectOf(node); return { id: node.id, before, after: { ...before, x: before.x + dx, y: before.y + dy } }; });
+      if (!history.record({ label: 'move', items })) return;
+      for (const item of items) {
+        const node = document.getElementById(item.id);
+        applyPersistentEntityGeometry(node, item.after);
+        markAgendaDirty('move-card', node);
+      }
+      scheduleGroupFrames();
+      keyStatus.textContent = SurfaceKeys.windowKeyMoveStatus(point, { snap, free: action.free });
     }, true);
     // Option/Alt releases the snap for as long as it is held, even mid-drag.
     window.addEventListener('pointermove', ev => {
@@ -28766,10 +28845,38 @@
   // Dock, the top bar and the Canvas view bar. One listener on the window, so
   // it does not depend on how those bars are built; Tab order is unchanged and
   // a control that handles the key itself keeps it.
+  // DSN-04: each Dock group, each top-bar section, the view bar and each
+  // window title bar is one group: one Tab stop (roving tabindex), arrows
+  // move inside it. The nearest group around the focused button wins.
   const ArrowRowNavigation = ChromeUtils.importESModule('chrome://userchrome/content/EGDeskFocusNavigation.sys.mjs');
-  const ARROW_ROW_ROOTS = '#egd-dock, #egd-desk-rail, #egd-zoom-indicator';
+  const ARROW_ROW_ROOTS = '.egd-dock-group, #egd-dock, .egd-rail-section, #egd-desk-rail, #egd-zoom-indicator, .egd-card-topbar';
   const ARROW_ROW_ITEMS = 'button, [role="button"]';
-  const ARROW_ROW_POPUPS = '[role="menu"], [role="listbox"], [role="dialog"], [role="tablist"], [role="radiogroup"]';
+  const ARROW_ROW_POPUPS = '[role="menu"], [role="listbox"], [role="dialog"], [role="tablist"], [role="radiogroup"], [role="toolbar"]';
+
+  // The buttons one group moves between: visible, not inside a popup or an
+  // inner toolbar of its own, and not inside a nested group.
+  function arrowRowItems(root) {
+    return [...root.querySelectorAll(ARROW_ROW_ITEMS)].filter(item => item.closest(ARROW_ROW_ROOTS) === root
+      && !(item.closest(ARROW_ROW_POPUPS) && item.closest(ARROW_ROW_POPUPS) !== root)
+      && !item.hidden && item.getClientRects().length > 0);
+  }
+
+  // Roving tabindex: tabindex 0 stays on the focused (or last focused, or
+  // first usable) button of the group and every other one gets -1.
+  function syncRovingGroup(root, focused = null) {
+    if (!root?.isConnected) return;
+    const items = arrowRowItems(root);
+    if (focused && items.includes(focused)) root._egdRovingLast = focused;
+    const stop = SurfaceKeys.rovingStop({ count: items.length, focused: items.indexOf(focused),
+      lastFocused: items.indexOf(root._egdRovingLast), isSkipped: index => items[index].disabled === true });
+    items.forEach((item, index) => { const next = index === stop ? 0 : -1; if (item.tabIndex !== next) item.tabIndex = next; });
+  }
+
+  function syncRovingGroupsWithin(container) {
+    if (!container?.querySelectorAll) return;
+    const groups = [...(container.matches?.(ARROW_ROW_ROOTS) ? [container] : []), ...container.querySelectorAll(ARROW_ROW_ROOTS)];
+    for (const group of groups) syncRovingGroup(group, group.contains(document.activeElement) ? document.activeElement : null);
+  }
 
   function handleArrowRowKeydown(ev) {
     if (ev.defaultPrevented || ev.altKey || ev.ctrlKey || ev.metaKey || ev.shiftKey) return;
@@ -28777,9 +28884,8 @@
     const target = ev.target;
     if (!intent || !target?.matches?.(ARROW_ROW_ITEMS)) return;
     const root = target.closest(ARROW_ROW_ROOTS);
-    if (!root || target.closest(ARROW_ROW_POPUPS)) return;
-    const items = [...root.querySelectorAll(ARROW_ROW_ITEMS)]
-      .filter(item => !item.closest(ARROW_ROW_POPUPS) && item.getClientRects().length > 0);
+    if (!root || (target.closest(ARROW_ROW_POPUPS) && target.closest(ARROW_ROW_POPUPS) !== root)) return;
+    const items = arrowRowItems(root);
     const next = ArrowRowNavigation.nextCompositeIndex({
       count: items.length, current: items.indexOf(target), intent,
       isSkipped: index => items[index].disabled === true,
@@ -28787,13 +28893,103 @@
     if (next < 0 || items[next] === target) return;
     ev.preventDefault();
     ev.stopPropagation();
+    syncRovingGroup(root, items[next]);
     items[next].focus();
+  }
+
+  // DSN-04: the control's name next to it while it has keyboard focus
+  // (mouse hover keeps the native title). Hidden on blur, a press or Escape.
+  function keyboardTooltipNode() {
+    let tip = document.getElementById('egd-key-tooltip');
+    if (!tip) {
+      tip = el('div', { id: 'egd-key-tooltip', role: 'tooltip', hidden: true, data: { testid: 'key-tooltip' } });
+      document.documentElement.appendChild(tip);
+    }
+    return tip;
+  }
+  function hideKeyboardTooltip() {
+    const tip = document.getElementById('egd-key-tooltip');
+    if (tip && !tip.hidden) tip.hidden = true;
+  }
+  function showKeyboardTooltip(target) {
+    let visible = false;
+    try { visible = target.matches(':focus-visible'); } catch {}
+    if (!visible) { hideKeyboardTooltip(); return; }
+    const name = SurfaceKeys.keyboardTooltipText({ ariaLabel: target.getAttribute('aria-label'), title: target.getAttribute('title'),
+      text: target.textContent });
+    if (!SurfaceKeys.keyboardTooltipNeeded({ name, visibleText: target.textContent })) { hideKeyboardTooltip(); return; }
+    const tip = keyboardTooltipNode();
+    tip.textContent = name;
+    tip.hidden = false;
+    const box = target.getBoundingClientRect();
+    const at = SurfaceKeys.keyboardTooltipPosition({ left: box.left, top: box.top, width: box.width, height: box.height },
+      { width: tip.offsetWidth, height: tip.offsetHeight }, { width: window.innerWidth, height: window.innerHeight });
+    tip.dataset.side = at.side;
+    tip.style.left = `${at.left}px`;
+    tip.style.top = `${at.top}px`;
+  }
+
+  function handleRovingFocusIn(ev) {
+    const target = ev.target;
+    const root = target?.matches?.(ARROW_ROW_ITEMS) ? target.closest(ARROW_ROW_ROOTS) : null;
+    if (!root) { hideKeyboardTooltip(); return; }
+    syncRovingGroup(root, target);
+    showKeyboardTooltip(target);
+  }
+
+  // Window title rows: the header itself is the window's keyboard handle
+  // (UX-05 arrows move the window) and its buttons are one roving group.
+  function prepareWindowKeyboard(card) {
+    const header = card?.querySelector?.(':scope > .egd-card-header, :scope > .egd-chat-card-header');
+    if (header && !header.hasAttribute('tabindex')) header.setAttribute('tabindex', '0');
+    if (header && !header.hasAttribute('aria-description')) {
+      header.setAttribute('aria-roledescription', '창 머리');
+      header.setAttribute('aria-description', SurfaceKeys.WINDOW_HEADER_KEY_HINT);
+    }
+    for (const group of card?.querySelectorAll?.('.egd-card-topbar') || []) syncRovingGroup(group);
   }
 
   function installArrowRowKeys() {
     try { window.__egdeskArrowRowKeysCleanup?.(); } catch {}
+    const hideOnKey = ev => { if (ev.key === 'Escape' || ev.key === 'Enter' || ev.key === ' ') hideKeyboardTooltip(); };
     window.addEventListener('keydown', handleArrowRowKeydown);
-    window.__egdeskArrowRowKeysCleanup = () => window.removeEventListener('keydown', handleArrowRowKeydown);
+    window.addEventListener('keydown', hideOnKey, true);
+    window.addEventListener('focusin', handleRovingFocusIn, true);
+    window.addEventListener('focusout', hideKeyboardTooltip, true);
+    window.addEventListener('mousedown', hideKeyboardTooltip, true);
+    // Bars re-render their buttons; a new button must not become a second Tab stop.
+    const observers = [];
+    for (const id of ['egd-dock', 'egd-desk-rail', 'egd-zoom-indicator']) {
+      const bar = document.getElementById(id);
+      if (!bar) continue;
+      syncRovingGroupsWithin(bar);
+      let queued = 0;
+      const observer = new MutationObserver(() => {
+        if (queued) return;
+        queued = requestAnimationFrame(() => { queued = 0; syncRovingGroupsWithin(bar); });
+      });
+      observer.observe(bar, { childList: true, subtree: true, attributes: true, attributeFilter: ['hidden', 'disabled'] });
+      observers.push(observer);
+    }
+    const layer = document.getElementById('egd-canvas-layer');
+    for (const card of layer?.querySelectorAll(':scope > .egd-canvas-card') || []) prepareWindowKeyboard(card);
+    if (layer) {
+      const cardObserver = new MutationObserver(records => {
+        for (const record of records) for (const node of record.addedNodes) {
+          if (node.classList?.contains('egd-canvas-card')) prepareWindowKeyboard(node);
+        }
+      });
+      cardObserver.observe(layer, { childList: true });
+      observers.push(cardObserver);
+    }
+    window.__egdeskArrowRowKeysCleanup = () => {
+      window.removeEventListener('keydown', handleArrowRowKeydown);
+      window.removeEventListener('keydown', hideOnKey, true);
+      window.removeEventListener('focusin', handleRovingFocusIn, true);
+      window.removeEventListener('focusout', hideKeyboardTooltip, true);
+      window.removeEventListener('mousedown', hideKeyboardTooltip, true);
+      for (const observer of observers) observer.disconnect();
+    };
   }
 
   function boot() {
