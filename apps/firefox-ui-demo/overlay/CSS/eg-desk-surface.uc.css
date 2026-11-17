@@ -11206,6 +11206,9 @@ button.egd-memo-ask-cancel:hover { text-decoration: underline; }
 .egd-annotation-item { display: flex; align-items: center; gap: 4px; }
 .egd-annotation-item-name { flex: 1; min-width: 0; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
 .egd-annotation-item-state { color: var(--egd-on-surface-variant); }
+/* CNV-05 per-card hide (not saved): the marks go, the bar stays to bring them back. */
+.egd-annotation-layer[data-card-hidden="true"] { visibility: hidden !important; }
+.egd-annotation-action[aria-pressed="true"] { border-color: var(--egd-primary); }
 /* 표식·메모 숨기기 covers AI marks too: screen-wide, not saved. */
 :root[data-egd-annotations-hidden="true"] .egd-annotation-layer,
 :root[data-egd-annotations-hidden="true"] .egd-annotation-bars,

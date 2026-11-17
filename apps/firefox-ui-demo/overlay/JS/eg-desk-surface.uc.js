@@ -13935,16 +13935,21 @@
     const CONTEXT_SUGGEST_FAILED = '자료 추천을 지금 불러오지 못했어요. 필요한 자료는 ＋ 첨부로 붙여 주세요.';
     let contextSuggestTimer = 0;
     let contextSuggestSeq = 0;
+    const contextSourceTrailing = new Map();
     function forgetContextSuggestions() {
       window.clearTimeout(contextSuggestTimer);
       contextSuggestTimer = 0;
       contextSuggestSeq++;
       state.contextSuggest = { unsupportedUntil: 0, byThread: {} };
       state.contextSourceChanges = {};
+      for (const timer of contextSourceTrailing.values()) window.clearTimeout(timer);
+      contextSourceTrailing.clear();
     }
     // CTX-04 '바뀜': this room's tracked sources, at most every 15 s per room
     // and scope. Ids, kinds and reason codes only; redraws only on a change.
-    function refreshContextSources(threadId) {
+    // A run event that can change sources ({ signal: true }) inside the window
+    // leaves one trailing read for when the window ends.
+    function refreshContextSources(threadId, { signal = false } = {}) {
       const thread = getCodexThreadById(state.codex, threadId);
       if (!thread?.conversationId || ChatState.nativeBindingHeld(thread) || ChatState.chatThreadEngineId(thread, state.codex) !== 'codex'
           || !state.codex.connected || !state.codex.authStatus?.isLoggedIn) return;
@@ -13953,7 +13958,18 @@
       if (!scope?.conversationId) return;
       const store = state.contextSourceChanges || (state.contextSourceChanges = {});
       const key = JSON.stringify(scope), cached = store[threadId];
-      if (cached?.key === key && (cached.loading || Date.now() - cached.at < 15000)) return;
+      const plan = InputContext.contextSourceRefreshPlan({ cached, key, now: Date.now(), signal, trailing: contextSourceTrailing.has(threadId) });
+      if (!plan.read) {
+        if (plan.delayMs !== null) {
+          contextSourceTrailing.set(threadId, window.setTimeout(() => {
+            contextSourceTrailing.delete(threadId);
+            refreshContextSources(threadId, { signal: true });
+          }, plan.delayMs + 50));
+        }
+        return;
+      }
+      window.clearTimeout(contextSourceTrailing.get(threadId));
+      contextSourceTrailing.delete(threadId);
       const entry = { index: cached?.key === key ? cached.index : null, key, conversationId: scope.conversationId, loading: true, at: Date.now() };
       store[threadId] = entry;
       const query = Object.entries(scope).map(([name, value]) => `${name}=${encodeURIComponent(value)}`).join('&');
@@ -14938,6 +14954,8 @@
             // CHAT-06 Await: an Agent proposed a plan; its approval card goes under this run's answer.
             if (run && event.event === 'plan.proposed') planProposalFrame(run, event.details);
             if (run) { syncProtocolRun(run); emit(); }
+            // CTX-04: tool results can change tracked sources; '바뀜' reads again (still at most every 15 s).
+            if (run?.localThreadId && InputContext.contextSourceRefreshSignal(event.event)) refreshContextSources(run.localThreadId, { signal: true });
           }
           return;
         }
@@ -15148,9 +15166,19 @@
       rootSseReady,
       // BRW-04: a user's Browser card arrived at a new top-level location. The
       // bridge hears origin + path, and a finished sign-in when an open gate matches.
-      reportBrowserLocation(cardId, url) {
+      reportBrowserLocation(cardId, url, options = {}) {
         if (!state.codex.connected) return [];
-        return browserWorkflow.location(cardId, url);
+        return browserWorkflow.location(cardId, url, options);
+      },
+      // A top-level load finished, and a page-opened popup closed (by its page
+      // or by 대표님): the bridge decides whether that finished a sign-in (D-B11).
+      reportBrowserLoaded(cardId, url, options = {}) {
+        if (!state.codex.connected) return [];
+        return browserWorkflow.loaded(cardId, url, options);
+      },
+      reportBrowserPopupClosed(cardId, url, options = {}) {
+        if (!state.codex.connected) return [];
+        return browserWorkflow.popupClosed(cardId, url, options);
       },
       // BRW-13: 대표님 took a Browser Card back from this room's run. One local
       // system line in that room; nothing is sent and nothing is saved.
@@ -18564,6 +18592,7 @@
       });
     }
     if (isCardFullscreen(card)) exitCardFullscreen(card, { restoreRect: false });
+    try { card._reportPopupClosed?.('user'); } catch {}
     unregisterSourceRefCard(card);
     try {
       if (typeof cleanup === 'function') cleanup();
@@ -18576,6 +18605,25 @@
     syncOntologyPresentationState();
     markAgendaDirty('close-card', card);
     return true;
+  }
+
+  // CU-05: Ctrl+Alt+Shift+. stops every Agent input while this window has focus.
+  // Taken in capture before anything else sees it; the OS-wide hotkey is not here.
+  function installEmergencyStopShortcut() {
+    const shortcut = HostActivityView.createEmergencyStopShortcut({
+      post: (body) => {
+        if (!state.codexBridge?.hostControl) throw Object.assign(new Error('bridge unavailable'), { code: 'BRIDGE_UNAVAILABLE' });
+        return state.codexBridge.hostControl(body);
+      },
+      notify: (notice) => boardNotice(notice.text),
+    });
+    const onKeyDown = (ev) => {
+      if (!shortcut.keydown(ev)) return;
+      ev.preventDefault();
+      ev.stopImmediatePropagation();
+    };
+    window.addEventListener('keydown', onKeyDown, true);
+    return () => window.removeEventListener('keydown', onKeyDown, true);
   }
 
   function installDeskCloseShortcut() {
@@ -23729,6 +23777,8 @@
     });
     const card = deskWindow.root;
     if (browserIdentity) card._browserIdentity = cloneJson(browserIdentity);
+    // BRW-04: a popup a page opened keeps the card it came from for workflow events.
+    if (typeof options.popupOpenerCardId === 'string' && options.popupOpenerCardId !== id) card._popupOpenerCardId = options.popupOpenerCardId;
     if (!options.background) revealPlacedCanvasCard(card, placement, { kind: 'browser', opener: options.opener });
 
     const urlInput = el('input', {
@@ -25057,7 +25107,17 @@
     };
     const reportBrowserLocation = (uri) => {
       if (card.dataset.codexRole === 'auth' || !card.isConnected) return;
-      try { state.codexBridge?.reportBrowserLocation?.(card.id, uri); } catch {}
+      try { state.codexBridge?.reportBrowserLocation?.(card.id, uri, { openerCardId: card._popupOpenerCardId || null }); } catch {}
+    };
+    const reportBrowserLoaded = () => {
+      if (card.dataset.codexRole === 'auth' || !card.isConnected) return;
+      try { state.codexBridge?.reportBrowserLoaded?.(card.id, readArrivedBrowserUri(), { openerCardId: card._popupOpenerCardId || null }); } catch {}
+    };
+    // Once per popup card: 'page' when the site's own window.close() asked, else 'user'.
+    card._reportPopupClosed = (closedBy) => {
+      if (!card._popupOpenerCardId || card._popupCloseReported || card.dataset.codexRole === 'auth') return;
+      card._popupCloseReported = true;
+      try { state.codexBridge?.reportBrowserPopupClosed?.(card.id, readArrivedBrowserUri(), { openerCardId: card._popupOpenerCardId, closedBy }); } catch {}
     };
     const syncBrowserStateFromBrowser = (options = {}) => {
       reportBrowserLocation(readArrivedBrowserUri());
@@ -25990,10 +26050,24 @@
         reportBrowserLocation(location?.spec || '');
         enforceAgentNavigationGuard(location?.spec || '');
       },
-      onStateChange() {}, onProgressChange() {}, onStatusChange() {}, onSecurityChange() {}, onContentBlockingEvent() {},
+      onStateChange(webProgress, _request, stateFlags) {
+        if (webProgress && webProgress.isTopLevel === false) return;
+        const flags = Ci.nsIWebProgressListener;
+        if ((stateFlags & flags.STATE_STOP) && (stateFlags & flags.STATE_IS_WINDOW)) reportBrowserLoaded();
+      },
+      onProgressChange() {}, onStatusChange() {}, onSecurityChange() {}, onContentBlockingEvent() {},
     };
     card._browserLocationListener = browserLocationListener;
-    try { xulBrowser.webProgress?.addProgressListener(browserLocationListener, Ci.nsIWebProgress.NOTIFY_LOCATION); } catch {}
+    try { xulBrowser.webProgress?.addProgressListener(browserLocationListener, Ci.nsIWebProgress.NOTIFY_LOCATION | Ci.nsIWebProgress.NOTIFY_STATE_WINDOW); } catch {}
+    // BRW-03/04: only a script's own window.close() becomes DOMWindowClose; a
+    // page-opened popup card then closes and reports closedBy 'page'.
+    const onBrowserWindowClose = (ev) => {
+      if (!card._popupOpenerCardId || !card.isConnected || ev.target !== xulBrowser) return;
+      try { ev.preventDefault(); ev.stopPropagation(); } catch {}
+      card._reportPopupClosed('page');
+      closeCanvasCard(card);
+    };
+    try { xulBrowser.addEventListener('DOMWindowClose', onBrowserWindowClose, true); } catch {}
     for (const eventName of ['FullZoomChange', 'TextZoomChange']) {
       xulBrowser.addEventListener(eventName, onBrowserPageZoom, true);
     }
@@ -26137,6 +26211,7 @@
         try { xulBrowser.removeEventListener(eventName, onBrowserLoadDone, true); } catch {}
       }
       try { xulBrowser.removeEventListener('DOMTitleChanged', onBrowserTitle, true); } catch {}
+      try { xulBrowser.removeEventListener('DOMWindowClose', onBrowserWindowClose, true); } catch {}
       for (const eventName of ['FullZoomChange', 'TextZoomChange']) {
         xulBrowser.removeEventListener(eventName, onBrowserPageZoom, true);
       }
@@ -26212,6 +26287,7 @@
           privateBrowsingId: sourceAttributes.privateBrowsingId } } : {}),
         ...(options.deferInitialLoad ? { deferInitialLoad: true } : {}), ...(source?._sourceRef ? { sourceRef: source._sourceRef } : {}),
         ...(source?._browserIdentity ? { browserIdentity: source._browserIdentity } : {}),
+        ...(source?.id ? { popupOpenerCardId: source.id } : {}),
         ...(openWindowInfo ? { openWindowInfo } : {}) });
     } catch {
       try { openWindowInfo?.cancel?.(); } catch {}
@@ -30072,6 +30148,7 @@
       installCanvasPanZoom(canvasViewport, canvasLayer);
       installEmptyCanvasHint(canvasViewport, canvasLayer);
       installDeskCloseShortcut();
+      installEmergencyStopShortcut();
       installBrowserShortcuts();
       installNativeGestureHelperBridge();
       state.codexBridge = installCodexBridge(legacyChatRecords);

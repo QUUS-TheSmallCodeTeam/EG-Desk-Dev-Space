@@ -22,7 +22,8 @@ const zoneInterface = {
   fileCard: ['spawnFileCard', 'openVerifiedRunFile', 'openVerifiedRunReview', 'openBoardProjectFile', 'openBoardProjectFileAt', 'onWorkflowEvent', 'onBoardProjectChanged'],
   annotation: ['receivePublishedAnnotation', 'annotationChipsForAnswer', 'annotationRecordsForCard', 'restoreCardAnnotations',
     'annotationCanvasRecords', 'restoreCanvasAnnotations', 'acceptAnnotationSet', 'dismissAnnotationSet', 'getAnnotationSet',
-    'listAnnotationSets', 'annotationTarget', 'revealAnnotationSet', 'emphasizeAnnotationSet', 'refreshAnnotations'],
+    'listAnnotationSets', 'annotationTarget', 'revealAnnotationSet', 'emphasizeAnnotationSet', 'refreshAnnotations',
+    'annotationHidden', 'setAnnotationHidden'],
 };
 const modulePath = zone => `resources/surface/${zone.file}`;
 const sorted = values => [...values].sort();

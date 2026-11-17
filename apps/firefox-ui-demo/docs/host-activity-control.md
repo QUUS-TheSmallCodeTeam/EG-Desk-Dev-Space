@@ -22,4 +22,4 @@
 - 코드: `helper/egdesk-host-control.mjs`, `helper/egdesk-host-input-gate.mjs`, `overlay/resources/EGDeskHostActivityView.sys.mjs`
 
 ## 입력 게이트 (CU-05, 순수 상태 기계)
-닫힌 채 시작. 감시 신호(1.5초) 없음·늦음·순번 역행, 모르는 입력권 상태, 중지 요청, Ctrl+Alt+Shift+. 는 게이트를 닫고 차례를 올림. 다시 열기는 지금 차례 번호 + 새 신호 + 아는 상태가 있어야 하며, 열 때 새 차례를 발급해 이전 표는 다시 통과하지 못함. 실제 전역 단축키와 별도 감시 프로세스는 입력 모니터링 권한이 필요해 아직 없음. 지금은 관찰 도우미의 살아 있음 신호가 감시 신호를 대신함.
+닫힌 채 시작. 감시 신호(1.5초) 없음·늦음·순번 역행, 모르는 입력권 상태, 중지 요청, Ctrl+Alt+Shift+. 는 게이트를 닫고 차례를 올림. 다시 열기는 지금 차례 번호 + 새 신호 + 아는 상태가 있어야 하며, 열 때 새 차례를 발급해 이전 표는 다시 통과하지 못함. EG-Desk 창에 초점이 있을 때 Ctrl+Alt+Shift+.(물리 키 Period, Command 뗀 상태)를 누르면 화면이 `POST /host/control {action:'emergencyStop'}`을 보냄(`createEmergencyStopShortcut`, 결과는 보드 알림). 실제 전역 단축키(다른 앱에 초점이 있을 때)와 별도 감시 프로세스는 입력 모니터링 권한이 필요해 아직 없음. 지금은 관찰 도우미의 살아 있음 신호가 감시 신호를 대신함.

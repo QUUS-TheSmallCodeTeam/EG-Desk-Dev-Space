@@ -4,7 +4,9 @@ import { mkdtemp, rm } from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
 import { createAwaitGateRouter, gateCardMatches, gateMatchesEvent, globMatch, pathWithin } from './egdesk-await-router.mjs'
-import { createWorkflowEventBus } from './egdesk-event-bus.mjs'
+import { createWorkflowEventBus, createWorkflowEventHttpHandler } from './egdesk-event-bus.mjs'
+import { Readable } from 'node:stream'
+import { createBrowserWorkflowReporter } from '../overlay/resources/EGDeskSurfaceState.sys.mjs'
 import { openTaskGraph } from './egdesk-task-graph.mjs'
 import { openTaskStore } from './egdesk-task-store.mjs'
 
@@ -320,4 +322,33 @@ test('BRW-04 (D-B11): through the bus, a popup close alone waits; the opener fol
   await until(() => native.starts.length === 1)
   const login = task(graph, value.graphId, 'import').gates.find(gate => gate.gateId === 'login')
   assert.deepEqual([login.status, login.satisfiedBy, login.satisfiedAt], ['satisfied', 'browser.loaded', event.at])
+})
+
+test('BRW-04 (D-B11): the screen reporter bodies pass POST /events/browser and a self-closed popup plus an opener load opens the gate', async () => {
+  const { native, graph, bus } = await wired()
+  const handler = createWorkflowEventHttpHandler({ bus, owner: OWNER })
+  const statuses = []
+  const post = async body => {
+    const req = Readable.from([Buffer.from(JSON.stringify(body))])
+    Object.assign(req, { method: 'POST', url: '/events/browser', socket: { remoteAddress: '127.0.0.1' },
+      headers: { host: '127.0.0.1:39218', 'content-type': 'application/json' } })
+    const res = { status: null, setHeader() {}, writeHead(status) { this.status = status }, end() {} }
+    await handler(req, res)
+    statuses.push(res.status)
+    await bus.flush()
+  }
+  const reporter = createBrowserWorkflowReporter({ post })
+  const value = spec([['import', [], [{ gateId: 'login', kind: 'oauth', origin: 'http://app.example.test', pathPrefix: '/oauth/callback', cardId: 'egd-browser-card-2' }]]], 'screen-popup')
+  await graph.submitGraph(value)
+  await graph.activateGraph(scope(value))
+  reporter.location('egd-browser-card-2', 'http://app.example.test/home')
+  reporter.location('egd-browser-card-5', 'http://idp.test/signin?state=x', { openerCardId: 'egd-browser-card-2' })
+  reporter.popupClosed('egd-browser-card-5', 'http://idp.test/signin', { openerCardId: 'egd-browser-card-2', closedBy: 'page' })
+  await reporter.settled()
+  assert.equal(native.starts.length, 0, 'the close alone waits')
+  reporter.loaded('egd-browser-card-2', 'http://app.example.test/home')
+  await reporter.settled()
+  assert.deepEqual(statuses, [202, 202, 202, 202], 'every screen body is accepted as is')
+  await until(() => native.starts.length === 1)
+  assert.equal(task(graph, value.graphId, 'import').gates[0].satisfiedBy, 'browser.loaded')
 })

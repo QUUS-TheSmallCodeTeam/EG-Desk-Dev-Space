@@ -269,6 +269,47 @@ export function hostControlRequest(action, state) {
   return { path: HOST_CONTROL_PATH, body: { action, epoch: state.lease.epoch, gateEpoch: state.gate?.epoch ?? null } };
 }
 
+// CU-05 in-app emergency stop: Ctrl+Alt+Shift+. while the EG-Desk window has
+// focus (the OS-wide hotkey needs input monitoring and is not here). The same
+// test as helper/egdesk-host-input-gate.mjs isEmergencyStopChord: the physical
+// key (code 'Period') decides, key '.' or '>' only when code is absent, and
+// Command must be up. A held key's repeats never send twice.
+export const EMERGENCY_STOP_LABEL = 'Ctrl+Alt+Shift+.';
+export const EMERGENCY_STOP_REQUEST = Object.freeze({ path: HOST_CONTROL_PATH, body: Object.freeze({ action: 'emergencyStop' }) });
+export function isEmergencyStopChord(event) {
+  if (!event || typeof event !== 'object') return false;
+  const flag = name => event[`${name}Key`] === true || event[name] === true;
+  if (!flag('ctrl') || !flag('alt') || !flag('shift') || flag('meta')) return false;
+  if (typeof event.code === 'string' && event.code) return event.code === 'Period';
+  return event.key === '.' || event.key === '>';
+}
+
+/**
+ * createEmergencyStopShortcut({ post, notify }) → { keydown(event), busy() }.
+ * keydown returns true when it took the chord (the caller then consumes the
+ * event); post(body) sends POST /host/control; notify({tone,text}) shows the
+ * Korean outcome. One request at a time; repeats of a held chord are taken but
+ * not sent again.
+ */
+export function createEmergencyStopShortcut({ post, notify = () => {} } = {}) {
+  let inFlight = false;
+  const say = notice => { try { notify(notice); } catch {} };
+  return {
+    keydown(event) {
+      if (!isEmergencyStopChord(event)) return false;
+      if (event.repeat === true || inFlight) return true;
+      if (typeof post !== 'function') { say({ tone: 'error', text: '연결이 없어 긴급 중지를 보내지 못했습니다.' }); return true; }
+      inFlight = true;
+      Promise.resolve().then(() => post({ ...EMERGENCY_STOP_REQUEST.body }))
+        .then(result => say({ tone: 'status', text: `긴급 중지(${EMERGENCY_STOP_LABEL}): ${hostControlResultText('emergencyStop', result)}` }),
+          error => say({ tone: 'error', text: `긴급 중지를 보내지 못했습니다. ${hostControlErrorText(error)}` }))
+        .finally(() => { inFlight = false; });
+      return true;
+    },
+    busy: () => inFlight,
+  };
+}
+
 /** Korean text for a failed control request. */
 export function hostControlErrorText(error) {
   const code = typeof error?.code === 'string' ? error.code : '';
