@@ -1,4 +1,5 @@
 import { createHash, randomUUID } from 'node:crypto'
+import { CURRENT_ACTION_GATE_POLICY, actionGate, classifyAction } from './egdesk-browser-action-classifier.mjs'
 import { DEFAULT_NAVIGATION_POLICY, evaluateNavigation, normalizeNavigationPolicy, sitePatternsFromInput } from './egdesk-browser-url-policy.mjs'
 
 // Lane A/native adapter: chrome /chat/send includes selectedSources from the
@@ -101,6 +102,14 @@ export const BROWSER_TOOL_SPECS = [
   // BRW-09 (D-B6): appended; read-only, allowed with an observe grant.
   spec('egdesk_browser_screenshot', 'Capture the visible viewport of one selected Browser Card as an image (JPEG, longest edge up to 1280 pixels) for pictures, charts and layout that text observation cannot show. Password and other sensitive fields, payment autocomplete fields, other-site or unreadable frames and embedded objects are painted over before the image leaves the browser, and maskedRegions lists each covered box in Browser surface-local CSS pixels (image pixel = CSS pixel x imageScale). When a box cannot be trusted or the page changed during capture, no image is sent and reason says why; observe and try again. Image pixels are never input coordinates: observe again and use element refs before any action. Read-only; never acts on the page.',
     { cardId: base.cardId }, ['cardId']),
+  // BRW-10 (REA 웹1·웹2, D-B4): appended; egdesk_browser_click and
+  // egdesk_browser_press keep their schemas and behaviour.
+  spec('egdesk_browser_pointer_click', 'Press an observed element like a person: one trusted pointer move, button down and button up at the centre of its observed bounds, for menus and buttons that react to pointerdown, mousedown or hover and ignore egdesk_browser_click. Use it only after egdesk_browser_click on the same element was dispatched and the page did not change at all; observe again first, then call this once for that element. The point comes only from the fresh observation and is used only while the page, its scroll position, the viewport size, devicePixelRatio and page zoom are unchanged; otherwise it is refused before input. It is never retried and never replaces a click on its own. It moves the page\'s own focus to the pressed element, may let the page open a popup or download as after a person\'s click, and a press that would land on another element is refused with obscuredBy. Requires the exact target precondition and a testable postcondition; a dispatched press is not proof of an external effect.',
+    { ...base, ref: { type: 'string' }, expectedTarget: target, postcondition },
+    ['cardId', 'observationId', 'expectedRevision', 'ref', 'expectedTarget', 'postcondition']),
+  spec('egdesk_browser_type', 'Type text like a person into the observed text field or editor that already has the focus in its page (observe focusedElement; egdesk_browser_pointer_click on a field focuses it), through the browser\'s own text input path, then optionally press one key the same way (key; the browser runs that key\'s default action, so Enter may submit a form). EG-Desk never moves focus; an unfocused, password or sensitive target is refused. Text goes in at the caret and does not replace the existing value (use egdesk_browser_fill to replace). Up to 8000 characters, or empty text with a key. Requires a fresh observation, exact target precondition and a testable postcondition; never retried.',
+    { ...base, ref: { type: 'string' }, expectedTarget: target, text: { type: 'string' }, key: { type: 'string', enum: PRESS_KEYS }, postcondition },
+    ['cardId', 'observationId', 'expectedRevision', 'ref', 'expectedTarget', 'text', 'postcondition']),
 ]
 const SPEC_BY_NAME = new Map(BROWSER_TOOL_SPECS.map(item => [item.name, item]))
 // Tool classes for the runtime and provider (1-R imports these instead of
@@ -110,7 +119,8 @@ export const BROWSER_READ_TOOL_NAMES = Object.freeze(['egdesk_browser_observe', 
   'egdesk_browser_list_cards', 'egdesk_browser_screenshot'])
 export const BROWSER_INTERACTION_TOOL_NAMES = Object.freeze(['egdesk_browser_navigate', 'egdesk_browser_click',
   'egdesk_browser_fill', 'egdesk_browser_scroll', 'egdesk_browser_press', 'egdesk_browser_wait',
-  'egdesk_browser_request_site', 'egdesk_browser_open_card', 'egdesk_browser_close_card', 'egdesk_browser_history'])
+  'egdesk_browser_request_site', 'egdesk_browser_open_card', 'egdesk_browser_close_card', 'egdesk_browser_history',
+  'egdesk_browser_pointer_click', 'egdesk_browser_type'])
 const READ_TOOLS = new Set(BROWSER_READ_TOOL_NAMES)
 
 function reject(code, message) { throw Object.assign(new Error(message), { code }) }
@@ -291,7 +301,7 @@ function validateArgs(tool, args) {
     }
     return
   }
-  if (!validPostcondition(args.postcondition, tool === 'egdesk_browser_fill' ? MAX_FILL_TEXT : 512)) {
+  if (!validPostcondition(args.postcondition, ['egdesk_browser_fill', 'egdesk_browser_type'].includes(tool) ? MAX_FILL_TEXT : 512)) {
     reject('INVALID_BROWSER_TOOL', 'Fresh observation and postcondition are required')
   }
   if (tool === 'egdesk_browser_navigate') {
@@ -304,7 +314,24 @@ function validateArgs(tool, args) {
       JSON.stringify(args.text).length + JSON.stringify(args.postcondition.value).length > MAX_FILL_REQUEST_JSON)) {
     reject('INVALID_BROWSER_TOOL', 'Fill requires text up to 8000 characters and a target-value postcondition')
   }
+  if (tool === 'egdesk_browser_type' && (typeof args.text !== 'string' || args.text.length > MAX_FILL_TEXT ||
+      (Object.hasOwn(args, 'key') && !PRESS_KEYS.includes(args.key)) || (!args.text && !Object.hasOwn(args, 'key')) ||
+      JSON.stringify(args.text).length + JSON.stringify(args.postcondition.value).length > MAX_FILL_REQUEST_JSON)) {
+    reject('INVALID_BROWSER_TOOL', 'Type requires text up to 8000 characters (or a guarded key) and a postcondition')
+  }
 }
+// BRW-10 (D-B4): the click that makes a pointer press eligible was dispatched,
+// read back on the same document and changed nothing: no DOM mutation
+// (same revision), same URL, no fetch/XHR while it settled, no dialog.
+function clickHadNoEffect(observed, after, observation) {
+  const settle = observation?.settle
+  return record(after) && after.documentId === observed.documentId && after.url === observed.url &&
+    after.revision === observed.revision && record(settle) && ['quiet', 'cap'].includes(settle.endedBy) &&
+    Array.isArray(settle.requests) && settle.requests.length === 0 && !settle.moreRequests
+}
+const POINTER_API_ROUTES = new Set(['synthesizeMouseEvent', 'sendMouseEvent', 'sendMouseEventToWindow'])
+// The tools the action classifier gates, as for click (D-B3 policy hook).
+const GATED_TOOLS = new Set(['egdesk_browser_click', 'egdesk_browser_pointer_click', 'egdesk_browser_type'])
 function validSnapshot(snapshot, cardId) {
   return record(snapshot) && snapshot.cardId === cardId &&
     short(snapshot.documentId, 160) && Number.isSafeInteger(snapshot.revision) &&
@@ -396,7 +423,8 @@ function cardSummary(binding) {
     ...(card.openedFrom ? { openedFrom: card.openedFrom } : {}) }))
 }
 
-export function createBrowserToolService({ sendToUi, getOwnerKey, timeoutMs = 15000, now = Date.now, clock = sameClock } = {}) {
+export function createBrowserToolService({ sendToUi, getOwnerKey, timeoutMs = 15000, now = Date.now, clock = sameClock,
+  actionGatePolicy = CURRENT_ACTION_GATE_POLICY } = {}) {
   if (typeof sendToUi !== 'function' || typeof getOwnerKey !== 'function' || typeof clock !== 'function' ||
       !Number.isSafeInteger(timeoutMs) || timeoutMs < 1000 || timeoutMs > 60000) {
     throw new TypeError('Browser tool service requires UI transport, current account provider and bounded timeout')
@@ -515,7 +543,7 @@ export function createBrowserToolService({ sendToUi, getOwnerKey, timeoutMs = 15
         if (prepared.ownerKey !== getOwnerKey()) reject('BROWSER_OWNER_CHANGED', 'Engine account changed during Browser binding')
         adoptNavigationPolicy(binding, response)
         binding.cards.set(card.cardId, { ...card, ui: response.binding, observation: null,
-          busy: false, uncertain: false, uncertainAction: null, pendingTransition: null, lastFill: null })
+          busy: false, uncertain: false, uncertainAction: null, pendingTransition: null, lastFill: null, noEffectClick: null })
       }
       if (binding.closed || closedRuns.has(run.answerId) || prepared.ownerKey !== getOwnerKey() || run.status !== 'inProgress') {
         reject('BROWSER_RUN_ENDED', 'Browser run or account ended before binding completed')
@@ -546,6 +574,7 @@ export function createBrowserToolService({ sendToUi, getOwnerKey, timeoutMs = 15
       !transition.wasAlreadyTrue && checkPostcondition(transition.condition, snapshot, transition.ref))
     if (transitionRecovered) { card.uncertain = false; card.uncertainAction = null; card.pendingTransition = null }
     if (card.lastFill && card.lastFill.documentId !== snapshot.documentId) card.lastFill = null
+    if (card.noEffectClick && card.noEffectClick.documentId !== snapshot.documentId) card.noEffectClick = null
     card.observation = { id: randomUUID(), snapshot }
     return { navigationPostconditionReobserved: transitionRecovered && transition.actionType === 'navigate',
       documentTransitionPostconditionReobserved: transitionRecovered,
@@ -724,7 +753,12 @@ export function createBrowserToolService({ sendToUi, getOwnerKey, timeoutMs = 15
     if (tool === 'egdesk_browser_request_site') return requestSite(run, binding, card, args)
     if (tool === 'egdesk_browser_open_card') return openCard(run, binding, card, args)
     if (tool === 'egdesk_browser_close_card') return closeCard(run, binding, card)
-    if (card.uncertain) reject('BROWSER_OUTCOME_UNKNOWN', 'A prior Browser action has an unknown outcome; select the context again')
+    // D-B4: the one exception to the lock is a pointer press on the element
+    // whose DOM click was dispatched and changed nothing (checked below).
+    const pointerAfterClick = tool === 'egdesk_browser_pointer_click' && card.noEffectClick?.ref === args.ref
+    if (card.uncertain && !(pointerAfterClick && card.uncertainAction?.action === 'click')) {
+      reject('BROWSER_OUTCOME_UNKNOWN', 'A prior Browser action has an unknown outcome; select the context again')
+    }
     const observed = card.observation
     if (!observed || observed.id !== args.observationId || observed.snapshot.revision !== args.expectedRevision) reject('BROWSER_OBSERVATION_STALE', 'Observe this Browser Card again before acting')
     if (tool === 'egdesk_browser_history') return historyMove(run, binding, card, args, observed)
@@ -733,6 +767,35 @@ export function createBrowserToolService({ sendToUi, getOwnerKey, timeoutMs = 15
       const original = observed.snapshot.interactiveElements.find(item => item.ref === args.ref)
       if (!original || !sameTarget(original, args.expectedTarget) ||
           (tool !== 'egdesk_browser_scroll' && original.disabled)) reject('BROWSER_TARGET_STALE', 'Target precondition does not match the observed element')
+      // Same classifier gate for click and the trusted routes; the default
+      // policy allows every class (today's grant covers guarded actions).
+      if (GATED_TOOLS.has(tool)) {
+        const judged = classifyAction({ mode: tool === 'egdesk_browser_type' && args.key === 'Enter' ? 'enter' : 'activate',
+          label: original.label, role: original.role, tag: original.tag, url: observed.snapshot.url })
+        const gate = actionGate(judged, actionGatePolicy)
+        if (gate !== 'allow') {
+          throw Object.assign(new Error('This action is the person\'s step or needs their confirmation; nothing was sent'),
+            { code: 'BROWSER_ACTION_NEEDS_PERSON', dispatchPhase: 'not-dispatched', dispatched: false,
+              actionCategory: judged.category, actionGate: gate })
+        }
+      }
+    }
+    // BRW-10 (D-B4): a pointer press only follows a no-effect DOM click on the
+    // same element and document, from an observation taken after that click.
+    let pointerBounds = null
+    if (tool === 'egdesk_browser_pointer_click') {
+      const prior = card.noEffectClick
+      if (!pointerAfterClick || prior.documentId !== observed.snapshot.documentId || !sameTarget(prior.target, args.expectedTarget)) {
+        reject('BROWSER_POINTER_NEEDS_CLICK_FIRST', 'A pointer press is only for an element whose egdesk_browser_click was dispatched and changed nothing; click it first, then observe again')
+      }
+      if (!validScroll(observed.snapshot.scroll)) reject('BROWSER_OBSERVATION_STALE', 'Observe this Browser Card again; the observation has no scroll position')
+      pointerBounds = observed.snapshot.interactiveElements.find(item => item.ref === args.ref)?.bounds
+      if (!record(pointerBounds) || !elementInView(observed.snapshot, args.ref)) {
+        reject('BROWSER_TARGET_STALE', 'The observed element has no bounds inside the viewport; scroll it into view and observe again')
+      }
+    }
+    if (tool === 'egdesk_browser_type' && (observed.snapshot.focusedElement?.ref || null) !== args.ref) {
+      reject('BROWSER_PRESS_TARGET_NOT_FOCUSED', 'Typing needs the observed focused element; EG-Desk never moves focus')
     }
     // D-B1: the current site by default, plus the sites this conversation
     // allowed. An allowed other site is dispatched by EG-Desk chrome, since the
@@ -765,11 +828,20 @@ export function createBrowserToolService({ sendToUi, getOwnerKey, timeoutMs = 15
     // not retried automatically; the next action requires a new observation.
     card.observation = null
     if (!(tool === 'egdesk_browser_press' && card.lastFill?.ref === args.ref)) card.lastFill = null
+    // One pointer press per no-effect click; any other dispatch ends it too.
+    // A press proven never sent gives it back (nothing was spent but the observation).
+    const eligibility = tool === 'egdesk_browser_pointer_click' ? card.noEffectClick : null
+    const clickLock = eligibility ? { uncertain: card.uncertain, uncertainAction: card.uncertainAction,
+      pendingTransition: card.pendingTransition } : null
+    card.noEffectClick = null
     card.busy = true
     const action = tool === 'egdesk_browser_navigate' ? { type: 'navigate', url: args.url } :
       tool === 'egdesk_browser_click' ? { type: 'click', ref: args.ref } :
       tool === 'egdesk_browser_fill' ? { type: 'fill', ref: args.ref, text: args.text } :
       tool === 'egdesk_browser_press' ? { type: 'press', ref: args.ref, key: args.key } :
+      tool === 'egdesk_browser_pointer_click' ? { type: 'pointer-click', ref: args.ref } :
+      tool === 'egdesk_browser_type' ? { type: 'type-text', ref: args.ref, text: args.text,
+        ...(Object.hasOwn(args, 'key') ? { key: args.key } : {}) } :
       containerScroll ? { type: 'scroll', ref: args.ref, direction: args.direction, amount: args.amount || 'page' } :
       byRef ? { type: 'scroll', ref: args.ref } : { type: 'scroll', direction: args.direction, amount: args.amount || 'page' }
     const condition = args.postcondition || null
@@ -782,7 +854,7 @@ export function createBrowserToolService({ sendToUi, getOwnerKey, timeoutMs = 15
       card.uncertain = true
       card.uncertainAction = { action: action.type, timing: { ...trace } }
       if (action.type === 'navigate' ||
-          (['click', 'press'].includes(action.type) && condition && ['url', 'visible-text'].includes(condition.kind))) {
+          (['click', 'press', 'pointer-click', 'type-text'].includes(action.type) && condition && ['url', 'visible-text'].includes(condition.kind))) {
         card.pendingTransition = { condition, ref: args.ref || null,
           priorDocumentId: observed.snapshot.documentId, actionType: action.type, wasAlreadyTrue }
       }
@@ -800,6 +872,8 @@ export function createBrowserToolService({ sendToUi, getOwnerKey, timeoutMs = 15
       if (card.uncertainAction) card.uncertainAction.dispatched = outcome.dispatched
       if (outcome.dispatched === false) {
         card.uncertain = false; card.uncertainAction = null; card.pendingTransition = null
+        // The no-effect click's own lock stays; only the unsent press is undone.
+        if (eligibility) { Object.assign(card, clickLock); card.noEffectClick = eligibility }
         throw Object.assign(new Error('Browser action was not sent; observe this Browser Card again before trying it'),
           { code: 'BROWSER_OBSERVATION_STALE', dispatchPhase: 'not-dispatched', dispatched: false,
             reconcile: outcome.summary, timing: { ...trace } })
@@ -813,7 +887,10 @@ export function createBrowserToolService({ sendToUi, getOwnerKey, timeoutMs = 15
       // observed; Firefox chrome compares them with the live document.
       ...(Object.hasOwn(observed.snapshot, 'innerWindowId') ? { innerWindowId: observed.snapshot.innerWindowId } : {}),
       ...(Object.hasOwn(observed.snapshot, 'browsingContextId') ? { browsingContextId: observed.snapshot.browsingContextId } : {}),
-      ...(args.expectedTarget ? { target: args.expectedTarget } : {}),
+      // A pointer press uses the observed bounds, never the model's copy.
+      ...(args.expectedTarget ? { target: pointerBounds ? { ...args.expectedTarget, bounds: { ...pointerBounds } } : args.expectedTarget } : {}),
+      ...(pointerBounds ? { pointer: { scroll: { x: observed.snapshot.scroll.x, y: observed.snapshot.scroll.y },
+        ...(Object.hasOwn(observed.snapshot, 'zoom') ? { zoom: observed.snapshot.zoom } : {}) } } : {}),
       ...(action.type === 'navigate' ? { navigationScope,
         ...(navigationScope === 'allowed-site' ? { allowedSites: [...binding.navigationPolicy.allow] } : {}) } : {}),
       ...(action.type === 'scroll' ? { scroll: observed.snapshot.scroll } : {}),
@@ -841,6 +918,7 @@ export function createBrowserToolService({ sendToUi, getOwnerKey, timeoutMs = 15
       // Not sent: only this observation is spent; no lock, no retry. The
       // model re-observes and may decide again under a new call ID.
       if (provenNotDispatched(response) && !dialog) {
+        if (eligibility) card.noEffectClick = eligibility
         throw Object.assign(new Error('Browser action was not sent; observe this Browser Card again before trying it'),
           { code: 'BROWSER_OBSERVATION_STALE', dispatchPhase: 'not-dispatched', dispatched: false, timing: { ...trace },
             ...(obscuredBy ? { obscuredBy } : {}) })
@@ -869,7 +947,17 @@ export function createBrowserToolService({ sendToUi, getOwnerKey, timeoutMs = 15
         validScroll(after.scroll) && (!containerScroll || validContainerScroll(dispatchReceipt.containerScroll)))) &&
       (action.type !== 'press' || (dispatchReceipt.inputRoute === 'dom-keyboard-event' &&
         dispatchReceipt.key === args.key && dispatchReceipt.trustedInput === false &&
-        dispatchReceipt.targetKeyObserved === true && dispatchReceipt.focusPolicy === pressPolicy))
+        dispatchReceipt.targetKeyObserved === true && dispatchReceipt.focusPolicy === pressPolicy)) &&
+      // BRW-10: a full move/down/up reached the target, with no release
+      // compensation; typing went through the focused element's input path.
+      (action.type !== 'pointer-click' || (dispatchReceipt.inputRoute === 'trusted-pointer' &&
+        dispatchReceipt.trustedInput === true && POINTER_API_ROUTES.has(dispatchReceipt.apiRoute) &&
+        dispatchReceipt.downDispatched === true && dispatchReceipt.upDispatched === true &&
+        dispatchReceipt.compensatedUp === false && dispatchReceipt.targetPointerObserved === true)) &&
+      (action.type !== 'type-text' || (dispatchReceipt.inputRoute === 'trusted-text-input' &&
+        dispatchReceipt.trustedInput === true && dispatchReceipt.focusPolicy === 'already-focused' &&
+        dispatchReceipt.key === (action.key ?? null) && (action.key == null || dispatchReceipt.keyDispatched === true) &&
+        (!action.text || (dispatchReceipt.textCommitted === true && dispatchReceipt.targetInputObserved === true))))
     const common = { cardId: card.cardId, action: action.type, dispatchReceipt: dispatchReceipt || null,
       after: after || null, observation: response.receipt.observation || null, timing: { ...trace },
       ...(dialog ? { dialog } : {}) }
@@ -909,6 +997,13 @@ export function createBrowserToolService({ sendToUi, getOwnerKey, timeoutMs = 15
     // A page dialog still open after the action leaves the outcome unknown.
     const matched = !wasAlreadyTrue && readbackIsCurrent && !dialog && checkPostcondition(condition, after, args.ref)
     if (!matched) markUnknown()
+    if (!matched && action.type === 'click' && !wasAlreadyTrue && readbackIsCurrent && !dialog &&
+        clickHadNoEffect(observed.snapshot, after, response.receipt.observation)) {
+      card.noEffectClick = { ref: args.ref, documentId: observed.snapshot.documentId, target: { ...args.expectedTarget } }
+    }
+    // The press reached what the no-effect click could not: the Card's lock
+    // from that click ends with an observed postcondition.
+    if (matched && action.type === 'pointer-click') { card.uncertain = false; card.uncertainAction = null; card.pendingTransition = null }
     if (matched && action.type === 'fill') card.lastFill = { ref: args.ref, documentId: observed.snapshot.documentId }
     return { status: matched ? 'postcondition-observed' : 'postcondition-unverified', ...common,
       postcondition: { ...condition, matched, wasAlreadyTrue },
@@ -1063,7 +1158,7 @@ export function createBrowserToolService({ sendToUi, getOwnerKey, timeoutMs = 15
     const binding = bindings.get(run?.answerId) || pendingBindings.get(run?.answerId)
     if (!binding) return []
     binding.closed = true
-    for (const card of binding.cards.values()) { card.observation = null; card.lastFill = null }
+    for (const card of binding.cards.values()) { card.observation = null; card.lastFill = null; card.noEffectClick = null }
     return cancelCards(binding)
   }
   function reset() {

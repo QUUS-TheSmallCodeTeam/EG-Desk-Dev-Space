@@ -46,7 +46,7 @@ function publicBrowserErrorDetail(error) {
 const SUCCESS_STATUSES = new Set(['observed', 'postcondition-observed', 'wait-condition-met',
   'cards-listed', 'site-allowed', 'card-opened', 'card-closed', 'history-dispatched', 'screenshot-observed'])
 const PUBLIC_INPUT_ROUTES = new Set(['dom-click-no-pointerdown', 'dom-scroll-api', 'dom-keyboard-event',
-  'dom-value-setter', 'dom-editor-replace', 'chrome-load-uri', 'chrome-history'])
+  'dom-value-setter', 'dom-editor-replace', 'chrome-load-uri', 'chrome-history', 'trusted-pointer', 'trusted-text-input'])
 
 export function createCodexBrowserToolProvider({ transport, getOwnerKey, schemaReady = () => true, fixtureQa = null, service = createBrowserToolService({ sendToUi: request => transport.sendToUi(request), getOwnerKey }) }) {
   if (!transport || typeof transport.hasClient !== 'function' || typeof getOwnerKey !== 'function') throw new TypeError('Browser provider requires a bounded UI transport and account identity')

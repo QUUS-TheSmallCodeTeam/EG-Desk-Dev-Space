@@ -565,7 +565,7 @@ test('selected Browser interaction belongs to one native run despite inherited s
   assert.deepEqual(h.calls.find(call => call.method === 'thread/start').params.dynamicTools.map(spec => spec.name),
     ['egdesk_browser_observe', 'egdesk_browser_navigate', 'egdesk_browser_click', 'egdesk_browser_fill', 'egdesk_browser_scroll', 'egdesk_browser_press', 'egdesk_browser_wait', 'egdesk_browser_wait_text',
       'egdesk_browser_list_cards', 'egdesk_browser_request_site', 'egdesk_browser_open_card', 'egdesk_browser_close_card', 'egdesk_browser_history',
-      'egdesk_browser_screenshot'])
+      'egdesk_browser_screenshot', 'egdesk_browser_pointer_click', 'egdesk_browser_type'])
   assert.equal(first.executionPolicy.browserEffects, 'selected-card-observe-click-fill-this-run')
   assert.equal(h.chat.threads.get(first.conversationId).qaReceipt.browserEffects, 'observe-only-selected-card')
   assert.deepEqual(h.calls.find(call => call.method === 'turn/start').params.sandboxPolicy,

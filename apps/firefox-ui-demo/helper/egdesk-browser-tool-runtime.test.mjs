@@ -101,13 +101,13 @@ test('only explicitly selected Browser sources expose tools; read-only never gra
     postcondition: { kind: 'visible-text', value: 'Count: 1' },
   } }), { code: 'BROWSER_INTERACTION_NOT_GRANTED' })
   assert.equal(f.actionCalls, 0)
-  assert.equal(BROWSER_TOOL_SPECS.length, 14)
+  assert.equal(BROWSER_TOOL_SPECS.length, 16)
 })
 
 test('fresh observed target dispatches once and returns DOM post-observation, never external success', async () => {
   const f = fixture()
   const prepared = f.service.prepare({ selectedSources: [source()] })
-  assert.equal(f.service.specs(prepared).length, 14)
+  assert.equal(f.service.specs(prepared).length, 16)
   await f.service.bind(run, prepared)
   const observed = await f.service.dispatch(run, { tool: 'egdesk_browser_observe', arguments: { cardId: 'browser-1' } })
   const args = { cardId: 'browser-1', observationId: observed.observationId, expectedRevision: 3,
@@ -593,7 +593,7 @@ const actorReceipt = (extra = {}) => ({ actor: 'JSWindowActor', eventDispatched:
 const scrollReceipt = (mode = 'document', extra = {}) => actorReceipt({ inputRoute: 'dom-scroll-api', scrollMode: mode, ...extra })
 const keyReceipt = (key, focusPolicy, extra = {}) => actorReceipt({ inputRoute: 'dom-keyboard-event', key,
   trustedInput: false, targetKeyObserved: true, keydownDefaultPrevented: false, defaultActionEmulated: null, focusPolicy, ...extra })
-function guardedFixture({ timeoutMs, clock } = {}) {
+function guardedFixture({ timeoutMs, clock, actionGatePolicy } = {}) {
   let current = guardedSnapshot()
   let onAct = () => { throw new Error('unexpected act') }
   let onWait = null
@@ -615,7 +615,7 @@ function guardedFixture({ timeoutMs, clock } = {}) {
     throw new Error('unexpected UI request')
   }
   const service = createBrowserToolService({ sendToUi, getOwnerKey: () => 'engine-account-1',
-    ...(timeoutMs ? { timeoutMs } : {}), ...(clock ? { clock } : {}) })
+    ...(timeoutMs ? { timeoutMs } : {}), ...(clock ? { clock } : {}), ...(actionGatePolicy ? { actionGatePolicy } : {}) })
   let sequence = 0
   const dispatch = (tool, args, callId = `guarded-call-${++sequence}`) => service.dispatch(run, { tool, callId, arguments: args })
   const observe = () => dispatch('egdesk_browser_observe', { cardId: 'browser-1' })
@@ -1256,13 +1256,14 @@ test('tool classes are exported for the chat runtime; wait_text is appended and 
   assert.deepEqual(BROWSER_READ_TOOL_NAMES, ['egdesk_browser_observe', 'egdesk_browser_wait_text', 'egdesk_browser_list_cards', 'egdesk_browser_screenshot'])
   assert.deepEqual(BROWSER_INTERACTION_TOOL_NAMES, ['egdesk_browser_navigate', 'egdesk_browser_click', 'egdesk_browser_fill',
     'egdesk_browser_scroll', 'egdesk_browser_press', 'egdesk_browser_wait',
-    'egdesk_browser_request_site', 'egdesk_browser_open_card', 'egdesk_browser_close_card', 'egdesk_browser_history'])
+    'egdesk_browser_request_site', 'egdesk_browser_open_card', 'egdesk_browser_close_card', 'egdesk_browser_history',
+    'egdesk_browser_pointer_click', 'egdesk_browser_type'])
   assert.throws(() => BROWSER_READ_TOOL_NAMES.push('x'), TypeError, 'frozen for importers')
   const names = BROWSER_TOOL_SPECS.map(item => item.name)
   assert.deepEqual(names, ['egdesk_browser_observe', 'egdesk_browser_navigate', 'egdesk_browser_click', 'egdesk_browser_fill',
     'egdesk_browser_scroll', 'egdesk_browser_press', 'egdesk_browser_wait', 'egdesk_browser_wait_text',
     'egdesk_browser_list_cards', 'egdesk_browser_request_site', 'egdesk_browser_open_card', 'egdesk_browser_close_card', 'egdesk_browser_history',
-    'egdesk_browser_screenshot'])
+    'egdesk_browser_screenshot', 'egdesk_browser_pointer_click', 'egdesk_browser_type'])
   assert.deepEqual([...BROWSER_READ_TOOL_NAMES, ...BROWSER_INTERACTION_TOOL_NAMES].sort(), [...names].sort(),
     'every Browser tool is in exactly one class')
   // sha256 of [name, inputSchema] for the seven tools at d7aac51: native
@@ -1669,4 +1670,266 @@ test('history moves are dispatched by chrome from a fresh observation and spend 
   const again = await f.observe()
   assert.equal((await f.dispatch('egdesk_browser_history', { ...args, observationId: again.observationId, action: 'reload' })).status, 'history-dispatched')
   assert.equal(f.of('history').length, 2)
+})
+
+// ---- BRW-10 (REA 웹1·웹2, D-B4) and BRW-12: trusted pointer press and typing ----
+import { RECOMMENDED_ACTION_GATE_POLICY } from './egdesk-browser-action-classifier.mjs'
+
+const quietSettle = { waitedMs: 520, endedBy: 'quiet', domChanges: 0, requests: [] }
+// The DOM click went out and changed nothing: same document, URL and revision, quiet settle.
+const noEffectClick = (f, request, observation = { visibleTextChanged: false, settle: quietSettle }) => ({
+  requestId: request.requestId, status: 'acted', receipt: { dispatchReceipt: actorReceipt({
+    clickInputRoute: 'dom-click-no-pointerdown', targetClickObserved: true }), after: f.current, observation } })
+const pointerReceipt = (extra = {}) => actorReceipt({ inputRoute: 'trusted-pointer', apiRoute: 'synthesizeMouseEvent',
+  trustedInput: true, point: { x: 52, y: 45 }, displayPoint: { x: 52, y: 45 }, moveDispatched: true, downDispatched: true,
+  upDispatched: true, compensatedUp: false, targetPointerObserved: true, targetClickObserved: true, eventsTrusted: true, ...extra })
+const pointerArgs = (seen, extra = {}) => ({ ...clickArgs(seen), ...extra })
+async function afterNoEffectClick(options = {}) {
+  const f = guardedFixture(options)
+  await f.bind()
+  f.current = guardedSnapshot({ zoom: 1.25, innerWindowId: 41, browsingContextId: 7 })
+  const seen = await f.observe()
+  f.setAct(request => noEffectClick(f, request))
+  const click = await f.dispatch('egdesk_browser_click', clickArgs(seen))
+  assert.equal(click.status, 'postcondition-unverified')
+  return { f, seen: await f.observe() }
+}
+
+test('BRW-10: the press and typing tools are appended with their own schemas; click and press keep theirs', () => {
+  const names = BROWSER_TOOL_SPECS.map(item => item.name)
+  assert.deepEqual(names.slice(-2), ['egdesk_browser_pointer_click', 'egdesk_browser_type'])
+  const pointer = BROWSER_TOOL_SPECS.find(item => item.name === 'egdesk_browser_pointer_click')
+  const typing = BROWSER_TOOL_SPECS.find(item => item.name === 'egdesk_browser_type')
+  const click = BROWSER_TOOL_SPECS.find(item => item.name === 'egdesk_browser_click')
+  assert.deepEqual(pointer.inputSchema, click.inputSchema, 'same arguments as click; no coordinates from the model')
+  assert.deepEqual(typing.inputSchema.required, ['cardId', 'observationId', 'expectedRevision', 'ref', 'expectedTarget', 'text', 'postcondition'])
+  assert.deepEqual(typing.inputSchema.properties.key.enum, BROWSER_TOOL_SPECS.find(item => item.name === 'egdesk_browser_press').inputSchema.properties.key.enum)
+  assert.equal(Object.hasOwn(pointer.inputSchema.properties, 'x'), false)
+  assert.match(pointer.description, /only after egdesk_browser_click on the same element/)
+  assert.match(pointer.description, /never retried and never replaces a click on its own/)
+  assert.match(typing.description, /EG-Desk never moves focus/)
+  assert.ok(BROWSER_INTERACTION_TOOL_NAMES.includes('egdesk_browser_pointer_click'))
+  assert.ok(!BROWSER_READ_TOOL_NAMES.includes('egdesk_browser_type'))
+})
+
+test('BRW-10: a pointer press needs a dispatched DOM click on that element that changed nothing', async () => {
+  const f = guardedFixture()
+  await f.bind()
+  let seen = await f.observe()
+  await assert.rejects(f.dispatch('egdesk_browser_pointer_click', pointerArgs(seen)), { code: 'BROWSER_POINTER_NEEDS_CLICK_FIRST' })
+  assert.equal(f.acts().length, 0, 'never chosen on its own')
+  // A click that changed the DOM (revision moved) or fetched something is not "no effect".
+  for (const [label, reply] of [
+    ['mutation', request => { f.current = guardedSnapshot({ revision: 4 }); return noEffectClick(f, request) }],
+    ['request', request => noEffectClick(f, request, { settle: { ...quietSettle, requests: [{ path: '/api', type: 'fetch' }] } })],
+    ['no settle', request => noEffectClick(f, request, { visibleTextChanged: false })],
+    ['navigation', request => noEffectClick(f, request, { settle: { ...quietSettle, endedBy: 'navigation-started' } })],
+  ]) {
+    const g = guardedFixture()
+    await g.bind()
+    const before = await g.observe()
+    g.setAct(request => { const answer = reply.call(null, request); return { ...answer, receipt: { ...answer.receipt, after: label === 'mutation' ? guardedSnapshot({ revision: 4 }) : g.current } } })
+    assert.equal((await g.dispatch('egdesk_browser_click', clickArgs(before))).status, 'postcondition-unverified', label)
+    const again = await g.observe()
+    await assert.rejects(g.dispatch('egdesk_browser_pointer_click', pointerArgs(again)), { code: 'BROWSER_OUTCOME_UNKNOWN' }, label)
+    assert.equal(g.acts().length, 1, label)
+  }
+  // Another element than the one clicked.
+  const { f: h, seen: after } = await afterNoEffectClick()
+  await assert.rejects(h.dispatch('egdesk_browser_pointer_click', { ...pointerArgs(after), ref: 'el_2',
+    expectedTarget: targetOf(after, 'el_2') }), { code: 'BROWSER_OUTCOME_UNKNOWN' })
+  seen = after
+  assert.equal(h.acts().length, 1)
+})
+
+test('BRW-10: after a no-effect click and a fresh observation, one press goes out with observed bounds, scroll and zoom', async () => {
+  const { f, seen } = await afterNoEffectClick()
+  await assert.rejects(f.dispatch('egdesk_browser_click', clickArgs(seen)), { code: 'BROWSER_OUTCOME_UNKNOWN' },
+    'the click itself stays locked: it is never retried')
+  f.setAct(request => {
+    f.current = guardedSnapshot({ text: ['Count: 1'], zoom: 1.25 })
+    return { requestId: request.requestId, status: 'acted', receipt: { dispatchReceipt: pointerReceipt(), after: f.current,
+      observation: { visibleTextChanged: true, settle: quietSettle } } }
+  })
+  // The model's copy of bounds is ignored; the guard carries the observed bounds.
+  const args = pointerArgs(seen, { expectedTarget: { ...targetOf(seen, 'el_1'), bounds: { x: 500, y: 500, width: 1, height: 1 } } })
+  const result = await f.dispatch('egdesk_browser_pointer_click', args)
+  assert.equal(result.status, 'postcondition-observed')
+  assert.equal(result.action, 'pointer-click')
+  assert.equal(result.dispatchReceipt.inputRoute, 'trusted-pointer')
+  assert.equal(result.externalEffectVerified, false)
+  const request = f.acts().at(-1)
+  assert.deepEqual(request.action, { type: 'pointer-click', ref: 'el_1' })
+  assert.deepEqual(request.guard.target.bounds, { x: 12, y: 30, width: 80, height: 30 })
+  assert.deepEqual(request.guard.pointer, { scroll: { x: 0, y: 0 }, zoom: 1.25 })
+  assert.deepEqual([request.guard.innerWindowId, request.guard.browsingContextId], [41, 7], 'doc-id cross-check passes through')
+  assert.equal(request.guard.revision, seen.snapshot.revision)
+  // The press reached the goal: the Card is free again, and no second press is offered.
+  const next = await f.observe()
+  assert.equal(next.uncertainAction, undefined)
+  await assert.rejects(f.dispatch('egdesk_browser_pointer_click', pointerArgs(next)), { code: 'BROWSER_POINTER_NEEDS_CLICK_FIRST' })
+})
+
+test('BRW-10: the press is spent once; an unverified, compensated or untargeted press keeps the Card locked', async () => {
+  for (const [label, receipt, text] of [
+    ['no effect', pointerReceipt(), ['Count: 0']],
+    ['compensated up', pointerReceipt({ upDispatched: false, compensatedUp: true }), ['Count: 1']],
+    ['missed target', pointerReceipt({ targetPointerObserved: false }), ['Count: 1']],
+    ['untrusted route', pointerReceipt({ inputRoute: 'dom-click-no-pointerdown' }), ['Count: 1']],
+    ['unknown api', pointerReceipt({ apiRoute: 'dispatchEvent' }), ['Count: 1']],
+  ]) {
+    const { f, seen } = await afterNoEffectClick()
+    f.setAct(request => ({ requestId: request.requestId, status: 'acted', receipt: { dispatchReceipt: receipt,
+      after: guardedSnapshot({ text, zoom: 1.25, innerWindowId: 41, browsingContextId: 7 }), observation: { settle: quietSettle } } }))
+    assert.equal((await f.dispatch('egdesk_browser_pointer_click', pointerArgs(seen))).status, 'postcondition-unverified', label)
+    const again = await f.observe()
+    assert.equal(again.uncertainAction.action, 'pointer-click', label)
+    await assert.rejects(f.dispatch('egdesk_browser_pointer_click', pointerArgs(again)), { code: 'BROWSER_OUTCOME_UNKNOWN' }, label)
+    assert.equal(f.acts().length, 2, `${label}: one click and one press, nothing resent`)
+  }
+})
+
+test('BRW-10: a press the actor refused before input keeps the click lock and gives the one press back', async () => {
+  const { f, seen } = await afterNoEffectClick()
+  f.setAct(request => notSent(request, { error: 'Browser pointer input refused [zoom-changed]; observe again',
+    timing: { performCallsBefore: 3, performCallsAfter: 3 } }))
+  const refused = await f.dispatch('egdesk_browser_pointer_click', pointerArgs(seen)).catch(error => error)
+  assert.equal(refused.code, 'BROWSER_OBSERVATION_STALE')
+  assert.equal(refused.dispatchPhase, 'not-dispatched')
+  const again = await f.observe()
+  assert.equal(again.uncertainAction.action, 'click', 'still locked by the click')
+  await assert.rejects(f.dispatch('egdesk_browser_click', clickArgs(again)), { code: 'BROWSER_OUTCOME_UNKNOWN' })
+  f.setAct(request => ({ requestId: request.requestId, status: 'acted', receipt: { dispatchReceipt: pointerReceipt(),
+    after: guardedSnapshot({ text: ['Count: 1'] }), observation: { settle: quietSettle } } }))
+  assert.equal((await f.dispatch('egdesk_browser_pointer_click', pointerArgs(again))).status, 'postcondition-observed')
+  // An actor refusal that cannot prove "never sent" spends the press.
+  const second = await afterNoEffectClick()
+  second.f.setAct(request => ({ requestId: request.requestId, status: 'rejected', error: 'perform threw', dispatchPhase: 'dispatched',
+    timing: { performCallsBefore: 3, performCallsAfter: 4, performEnterMs: 5 } }))
+  assert.equal((await second.f.dispatch('egdesk_browser_pointer_click', pointerArgs(second.seen)).catch(error => error)).code,
+    'BROWSER_ACTION_UNVERIFIED')
+  const locked = await second.f.observe()
+  await assert.rejects(second.f.dispatch('egdesk_browser_pointer_click', pointerArgs(locked)), { code: 'BROWSER_OUTCOME_UNKNOWN' })
+})
+
+test('BRW-12 (R-01): a lost press is reconciled once with seq, call ID and doc IDs; it is never resent', async t => {
+  t.mock.timers.enable({ apis: ['setTimeout'] })
+  const lose = async answer => {
+    const { f, seen } = await afterNoEffectClick()
+    f.setAct(() => new Promise(() => {}))
+    f.setReconcile(request => ({ requestId: request.requestId, status: 'reconciled', reconcile: answer(request) }))
+    const pending = f.dispatch('egdesk_browser_pointer_click', pointerArgs(seen), 'lost-press')
+    await flushHandoff()
+    t.mock.timers.tick(15000)
+    return { f, seen, error: await pending.catch(caught => caught) }
+  }
+  const fenced = await lose(request => ({ version: 1, callId: request.callId, entered: false, fenced: true,
+    documentId: request.guard.documentId }))
+  assert.equal(fenced.error.dispatchPhase, 'not-dispatched')
+  const [press] = fenced.f.acts().slice(-1)
+  const [question] = fenced.f.reconciles()
+  assert.equal(press.callId, 'lost-press')
+  assert.equal(question.callId, 'lost-press')
+  assert.equal(question.actSeq, press.seq, 'the question names the press by its run sequence')
+  assert.ok(press.seq > fenced.f.acts()[0].seq, 'seq rises across the click and the press')
+  assert.ok(Number.isFinite(press.sentAtMs))
+  assert.deepEqual(question.guard, { documentId: 'document-1', innerWindowId: 41, browsingContextId: 7 })
+  assert.equal(Object.hasOwn(question, 'action'), false)
+  const after = await fenced.f.observe()
+  assert.equal(after.uncertainAction.action, 'click', 'a fenced press leaves the click lock in place')
+  assert.equal(fenced.f.acts().length, 2, 'no resend')
+  // Entered, or any unproven answer: dispatched/unknown, locked, no second press.
+  for (const [label, answer, phase] of [
+    ['entered', request => ({ callId: request.callId, entered: true, documentId: request.guard.documentId }), 'dispatched'],
+    ['other document', request => ({ callId: request.callId, entered: false, fenced: true, documentId: 'document-9' }), 'unknown'],
+    ['performing timing', request => ({ callId: request.callId, entered: false, fenced: true, documentId: request.guard.documentId,
+      timing: { performEnterMs: 3 } }), 'unknown'],
+  ]) {
+    const lost = await lose(answer)
+    assert.equal(lost.error.code, 'BROWSER_UI_TIMEOUT', label)
+    assert.equal(lost.error.dispatchPhase, phase, label)
+    const again = await lost.f.observe()
+    assert.equal(again.uncertainAction.action, 'pointer-click', label)
+    assert.ok(Number.isFinite(again.uncertainAction.timing.timedOutAtMs), `${label}: same-clock timeout stamp`)
+    await assert.rejects(lost.f.dispatch('egdesk_browser_pointer_click', pointerArgs(again)), { code: 'BROWSER_OUTCOME_UNKNOWN' }, label)
+    assert.equal(lost.f.acts().length, 2, label)
+  }
+})
+
+const typeReceipt = (extra = {}) => actorReceipt({ inputRoute: 'trusted-text-input', trustedInput: true, textLength: 5, key: null,
+  textCommitted: true, keyDispatched: false, targetInputObserved: true, targetKeyObserved: false, keydownConsumed: null,
+  eventsTrusted: true, documentHasFocus: true, focusPolicy: 'already-focused', ...extra })
+const focusedSearch = () => guardedSnapshot({ focusedElement: { ref: 'el_2', role: 'searchbox', label: 'Search', value: '' } })
+const typeArgs = (seen, extra = {}) => ({ cardId: 'browser-1', observationId: seen.observationId, expectedRevision: seen.snapshot.revision,
+  ref: 'el_2', expectedTarget: targetOf(seen, 'el_2'), text: 'hello', postcondition: { kind: 'target-value', value: 'hello' }, ...extra })
+const typedSnapshot = value => guardedSnapshot({ focusedElement: { ref: 'el_2', role: 'searchbox', label: 'Search', value },
+  interactiveElements: guardedSnapshot().interactiveElements.map(item => item.ref === 'el_2' ? { ...item, value } : item) })
+
+test('BRW-10: typing needs the observed focused element and sends text (and an optional key) once', async () => {
+  const f = guardedFixture()
+  await f.bind()
+  let seen = await f.observe()
+  await assert.rejects(f.dispatch('egdesk_browser_type', typeArgs(seen)), { code: 'BROWSER_PRESS_TARGET_NOT_FOCUSED' })
+  assert.equal(f.acts().length, 0)
+  f.current = focusedSearch()
+  seen = await f.observe()
+  for (const bad of [{ text: '' }, { text: 'x'.repeat(8001) }, { key: 'F5' }, { text: 1 }]) {
+    await assert.rejects(f.dispatch('egdesk_browser_type', typeArgs(seen, bad)), { code: 'INVALID_BROWSER_TOOL' })
+  }
+  f.setAct(request => { f.current = typedSnapshot('hello'); return f.acted(request, f.current, typeReceipt()) })
+  const typed = await f.dispatch('egdesk_browser_type', typeArgs(seen))
+  assert.equal(typed.status, 'postcondition-observed')
+  assert.deepEqual(f.acts()[0].action, { type: 'type-text', ref: 'el_2', text: 'hello' })
+  assert.equal(f.acts()[0].guard.focusedRef, 'el_2')
+  assert.equal(f.acts()[0].guard.pointer, undefined, 'typing carries no coordinates')
+  // Text and Enter: the receipt must name the same key; the browser ran its default action.
+  seen = await f.observe()
+  f.setAct(request => { f.current = typedSnapshot('hello world'); return f.acted(request, f.current,
+    typeReceipt({ textLength: 6, key: 'Enter', keyDispatched: true, keydownConsumed: false })) })
+  assert.equal((await f.dispatch('egdesk_browser_type', typeArgs(seen, { text: ' world', key: 'Enter',
+    postcondition: { kind: 'target-value', value: 'hello world' } }))).status, 'postcondition-observed')
+  assert.deepEqual(f.acts()[1].action, { type: 'type-text', ref: 'el_2', text: ' world', key: 'Enter' })
+})
+
+test('BRW-10: a typing receipt that does not match the request stays unverified and locks the Card', async () => {
+  for (const [label, receipt, extra] of [
+    ['no input event', typeReceipt({ targetInputObserved: false }), {}],
+    ['wrong key', typeReceipt({ key: 'Tab', keyDispatched: true }), { key: 'Enter' }],
+    ['key not sent', typeReceipt({ key: 'Enter', keyDispatched: false }), { key: 'Enter' }],
+    ['untrusted', typeReceipt({ trustedInput: false }), {}],
+    ['focus policy', typeReceipt({ focusPolicy: 'after-fill' }), {}],
+  ]) {
+    const f = guardedFixture()
+    await f.bind()
+    f.current = focusedSearch()
+    const seen = await f.observe()
+    f.setAct(request => { f.current = typedSnapshot('hello'); return f.acted(request, f.current, receipt) })
+    assert.equal((await f.dispatch('egdesk_browser_type', typeArgs(seen, extra))).status, 'postcondition-unverified', label)
+    const again = await f.observe()
+    assert.equal(again.uncertainAction.action, 'type-text', label)
+    await assert.rejects(f.dispatch('egdesk_browser_type', typeArgs(again, extra)), { code: 'BROWSER_OUTCOME_UNKNOWN' }, label)
+  }
+})
+
+test('BRW-10: click, pointer press and typing share the action-classifier gate; the default policy allows all', async () => {
+  const pay = guardedSnapshot({ interactiveElements: [{ ref: 'el_1', role: 'button', label: 'Pay now', href: '', value: '',
+    tag: 'button', disabled: false, bounds: { x: 12, y: 30, width: 80, height: 30 } }] })
+  const gated = guardedFixture({ actionGatePolicy: RECOMMENDED_ACTION_GATE_POLICY })
+  await gated.bind()
+  gated.current = pay
+  let seen = await gated.observe()
+  const refused = await gated.dispatch('egdesk_browser_click', clickArgs(seen)).catch(error => error)
+  assert.equal(refused.code, 'BROWSER_ACTION_NEEDS_PERSON')
+  assert.equal(refused.dispatchPhase, 'not-dispatched')
+  assert.deepEqual([refused.actionCategory, refused.actionGate], ['pay', 'user-step'])
+  await assert.rejects(gated.dispatch('egdesk_browser_pointer_click', pointerArgs(seen)), { code: 'BROWSER_ACTION_NEEDS_PERSON' })
+  assert.equal(gated.acts().length, 0)
+  seen = await gated.observe()
+  assert.equal(seen.uncertainAction, undefined, 'a gated action never locks')
+  const open = guardedFixture()
+  await open.bind()
+  open.current = pay
+  seen = await open.observe()
+  open.setAct(request => clicked(open, request))
+  assert.equal((await open.dispatch('egdesk_browser_click', clickArgs(seen))).status, 'postcondition-observed')
 })
