@@ -10890,6 +10890,18 @@ button.egd-memo-ask-cancel:hover { text-decoration: underline; }
 .egd-context-suggest-note { flex-basis: 100%; color: var(--egd-warning-ink); font-size: 11.5px; }
 .egd-context-suggest-row-excluded { cursor: default; opacity: .62; }
 .egd-context-suggest-row-excluded:hover { background: transparent; }
+/* CTX-03 '추천 안 함' beside a suggestion row, and the Settings list (D-R2). */
+.egd-context-suggest-item { display: flex; align-items: flex-start; gap: 4px; }
+.egd-context-suggest-item > .egd-context-suggest-row { flex: 1 1 auto; min-width: 0; }
+.egd-context-suggest-never { flex: 0 0 auto; margin-top: 2px; padding: 2px 6px; font-size: 11px; color: var(--egd-on-surface-variant); background: transparent; border: 1px solid var(--egd-outline); border-radius: 5px; cursor: pointer; white-space: nowrap; }
+.egd-context-suggest-never:hover { background: var(--egd-hover); }
+.egd-settings-context-suggest-list-title { margin-top: 10px; font-size: 12px; font-weight: 600; }
+.egd-settings-context-suggest-list { margin: 4px 0; padding: 0; list-style: none; display: flex; flex-direction: column; gap: 4px; }
+.egd-settings-context-suggest-entry { display: flex; align-items: center; gap: 8px; }
+.egd-settings-context-suggest-entry-label { flex: 1 1 auto; min-width: 0; overflow-wrap: anywhere; font-size: 12px; }
+.egd-settings-context-suggest-empty { color: var(--egd-on-surface-variant); font-size: 12px; }
+.egd-settings-context-suggest-add { display: flex; gap: 6px; align-items: center; }
+.egd-settings-context-suggest-input { flex: 1 1 auto; min-width: 0; }
 .egd-context-suggest-row-excluded .egd-context-suggest-note { color: var(--egd-on-surface-variant); }
 .egd-context-suggest-actions { display: flex; flex-wrap: wrap; align-items: center; justify-content: flex-end; gap: 6px; }
 .egd-context-suggest-hint { margin-right: auto; color: var(--egd-on-surface-variant); font-size: 11.5px; }

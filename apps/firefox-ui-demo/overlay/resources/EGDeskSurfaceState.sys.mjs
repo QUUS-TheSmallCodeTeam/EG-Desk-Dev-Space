@@ -140,6 +140,9 @@ export function contextResolverSignals({
     if (accountScope) item.accountScope = accountScope;
     if (view.permission === 'allowed' || view.permission === 'denied') item.permission = view.permission;
     if (typeof view.signedIn === 'boolean') item.signedIn = view.signedIn;
+    // CTX-03 'never suggest': the screen matches its own list and sends only
+    // this boolean; the site, URL and folder path never leave the screen.
+    if (view.userExcluded === true) item.userExcluded = true;
     const boardId = signalToken(view.boardId);
     if (boardId) item.boardId = boardId;
     if (view.focused === true && !focusTaken) { item.focused = true; focusTaken = true; }
