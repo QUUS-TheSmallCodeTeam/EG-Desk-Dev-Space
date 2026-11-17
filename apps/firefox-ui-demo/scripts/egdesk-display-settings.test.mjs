@@ -312,3 +312,21 @@ test('a screen-mode choice saves the merged setting, redraws, and keeps focus on
   assert.equal(key(radios.children[0], 'Escape'), 0, 'Esc still reaches the window');
   assert.equal(saved.length, before);
 });
+
+// DSN-01: EG-Desk's own pages inside frames. The start page follows the
+// chosen screen mode (the Desk copies data-egd-theme onto it); the Terminal is
+// dark under every mode (A23), native controls included; popup-test.html is a
+// test fixture page, not shown to the user.
+test('EG-Desk pages inside frames: the start page follows the screen mode, the Terminal stays dark', async () => {
+  const { readdirSync, readFileSync: readText } = await import('node:fs');
+  const resources = new URL('../overlay/resources/', import.meta.url);
+  const pages = readdirSync(resources).filter(name => name.endsWith('.html')).sort();
+  assert.deepEqual(pages, ['egdesk-start.html', 'popup-test.html', 'terminal.html'], 'a new frame page needs a screen-mode rule here');
+  const start = readText(new URL('egdesk-start.html', resources), 'utf8');
+  assert.match(start, /color-scheme: light dark;/);
+  assert.match(start, /:root\[data-egd-theme="light"\] \{ color-scheme: light; \}/);
+  assert.match(start, /:root\[data-egd-theme="dark"\] \{ color-scheme: dark; \}/);
+  const terminal = readText(new URL('terminal.html', resources), 'utf8');
+  assert.match(terminal, /:root \{\s*color-scheme: dark;/);
+  assert.doesNotMatch(terminal, /data-egd-theme|light-dark/);
+});

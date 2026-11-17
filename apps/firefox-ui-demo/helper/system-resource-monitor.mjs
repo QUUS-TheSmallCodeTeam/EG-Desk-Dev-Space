@@ -182,6 +182,76 @@ async function readLinuxDiskCounters({ signal } = {}) {
   return parseLinuxDiskCounters(stats, names)
 }
 
+// Windows (CNV-08). One PowerShell call per counter kind; byte counts are
+// emitted as strings so 64-bit totals keep full precision through JSON, and
+// ConvertTo-Json output does not depend on the display language (unlike
+// `netstat -e`). Real Windows measurement has not been run yet; any failure
+// or timeout falls back to 'unavailable' like the other platforms.
+// PowerShell starts slower than route/netstat, so Windows reads get longer.
+const WINDOWS_COUNTER_TIMEOUT_MS = 3_000
+export const WINDOWS_NETWORK_SCRIPT = [
+  "$r = @(Get-NetRoute -DestinationPrefix '0.0.0.0/0' -ErrorAction SilentlyContinue | Select-Object InterfaceAlias, @{n='Metric';e={[string]($_.RouteMetric + $_.InterfaceMetric)}})",
+  "$s = @(Get-NetAdapterStatistics -ErrorAction SilentlyContinue | Select-Object Name, @{n='ReceivedBytes';e={[string]$_.ReceivedBytes}}, @{n='SentBytes';e={[string]$_.SentBytes}})",
+  '@{ routes = $r; stats = $s } | ConvertTo-Json -Compress -Depth 3',
+].join('; ')
+export const WINDOWS_DISK_SCRIPT = [
+  "@(Get-CimInstance Win32_PerfRawData_PerfDisk_PhysicalDisk -ErrorAction Stop | Where-Object { $_.Name -ne '_Total' } |",
+  "Select-Object Name, @{n='ReadBytes';e={[string]$_.DiskReadBytesPersec}}, @{n='WriteBytes';e={[string]$_.DiskWriteBytesPersec}}) | ConvertTo-Json -Compress",
+].join(' ')
+
+const asList = value => value == null ? [] : Array.isArray(value) ? value : [value]
+const parseJson = text => { try { return JSON.parse(text) } catch { return undefined } }
+const countText = value => typeof value === 'string' && /^\d{1,20}$/.test(value) ? BigInt(value) : null
+
+// The lowest route+interface metric wins, like the route the system would use.
+export function parseWindowsNetworkCounters(output) {
+  if (typeof output !== 'string') return null
+  const data = parseJson(output.trim())
+  if (!data || typeof data !== 'object') return null
+  let best = null
+  for (const route of asList(data.routes)) {
+    const alias = route?.InterfaceAlias, metric = Number(route?.Metric)
+    if (typeof alias !== 'string' || !alias || !Number.isSafeInteger(metric) || metric < 0) continue
+    if (!best || metric < best.metric) best = { alias, metric }
+  }
+  if (!best) return null
+  const row = asList(data.stats).find(item => item?.Name === best.alias)
+  const rxBytes = countText(row?.ReceivedBytes), txBytes = countText(row?.SentBytes)
+  return rxBytes === null || txBytes === null ? null : { interface: best.alias, rxBytes, txBytes }
+}
+
+// Raw PhysicalDisk counters are cumulative byte totals per disk ("0 C:").
+// _Total is excluded so no disk is counted twice; one unreadable row fails all.
+export function parseWindowsDiskCounters(output) {
+  if (typeof output !== 'string') return null
+  const rows = asList(parseJson(output.trim()))
+  const devices = []
+  for (const row of rows) {
+    const id = row?.Name
+    if (typeof id !== 'string' || !id || id === '_Total') return null
+    const readBytes = countText(row.ReadBytes), writeBytes = countText(row.WriteBytes)
+    if (readBytes === null || writeBytes === null || devices.some(device => device.id === id)) return null
+    devices.push({ id, readBytes, writeBytes })
+  }
+  return devices.length ? devices : null
+}
+
+async function runWindowsScript(script, signal) {
+  const { stdout } = await execFileAsync('powershell.exe', ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-Command', script], {
+    encoding: 'utf8', timeout: WINDOWS_COUNTER_TIMEOUT_MS, maxBuffer: 256 * 1024, signal, windowsHide: true,
+  })
+  return stdout
+}
+const readWindowsNetworkCounters = async ({ signal } = {}) => parseWindowsNetworkCounters(await runWindowsScript(WINDOWS_NETWORK_SCRIPT, signal))
+const readWindowsDiskCounters = async ({ signal } = {}) => parseWindowsDiskCounters(await runWindowsScript(WINDOWS_DISK_SCRIPT, signal))
+
+const DEFAULT_NETWORK_READERS = { darwin: readMacNetworkCounters, linux: readLinuxNetworkCounters, win32: readWindowsNetworkCounters }
+const DEFAULT_DISK_IO_READERS = { darwin: readMacDiskCounters, linux: readLinuxDiskCounters, win32: readWindowsDiskCounters }
+
+// Scope (CNV-08, inferred default 2026-11-17): every figure is for the whole
+// PC ('host', shown as 전체 자원). There is no EG-Desk-only section yet; app
+// values (Firefox and helper processes) wait for the owner's scope decision.
+
 export function createSystemResourceMonitor({
   profilePath,
   platform = process.platform,
@@ -189,8 +259,8 @@ export function createSystemResourceMonitor({
   readTotalMemory = () => os.totalmem(),
   readFreeMemory = () => os.freemem(),
   readDisk = path => statfs(path, { bigint: true }),
-  readNetwork = platform === 'darwin' ? readMacNetworkCounters : readLinuxNetworkCounters,
-  readDiskIo = platform === 'darwin' ? readMacDiskCounters : readLinuxDiskCounters,
+  readNetwork = DEFAULT_NETWORK_READERS[platform] ?? readLinuxNetworkCounters,
+  readDiskIo = DEFAULT_DISK_IO_READERS[platform] ?? readLinuxDiskCounters,
   now = () => Date.now(),
   monotonicNow = () => performance.now(),
   minIntervalMs = SAMPLE_INTERVAL_MS,
@@ -205,7 +275,8 @@ export function createSystemResourceMonitor({
   let cachedDisk = null, cachedDiskAt = -Infinity
   let pendingDiskReads = 0
   const abort = new AbortController()
-  const countersSupported = platform === 'darwin' || platform === 'linux'
+  const countersSupported = platform === 'darwin' || platform === 'linux' || platform === 'win32'
+  const counterTimeoutMs = platform === 'win32' ? WINDOWS_COUNTER_TIMEOUT_MS : COUNTER_TIMEOUT_MS
 
   // A timed-out or non-cooperative reader cannot accumulate concurrent work.
   // The timestamp belongs to the counter read, not a slower storage statfs.
@@ -225,7 +296,7 @@ export function createSystemResourceMonitor({
           clearTimeout(timer)
           resolve(value)
         }
-        const timer = setTimeout(() => { controller.abort(); finish(null) }, COUNTER_TIMEOUT_MS)
+        const timer = setTimeout(() => { controller.abort(); finish(null) }, counterTimeoutMs)
         Promise.resolve().then(() => closed ? null : reader({ signal: controller.signal })).then(
           counters => {
             pending = false

@@ -3507,7 +3507,9 @@ test('bounded visual hierarchy keeps Canvas chrome quiet and Browser and Chat co
   assert.match(rule('.egd-codex-thread-item'), /background:\s*transparent/);
   assert.match(rule('.egd-codex-thread-item-active'), /background:\s*var\(--egd-primary-container\)/);
   assert.match(rule('.egd-codex-message-stack'), /max-width:\s*min\(86%, 640px\)/);
-  assert.match(rule('.egd-codex-bubble'), /font-size:\s*14\.5px;\s*line-height:\s*1\.48/);
+  // DSN-03: the overridden 14.5px/1.48 first paint is gone; the approved rule alone sets it.
+  assert.doesNotMatch(rule('.egd-codex-bubble'), /font-size/);
+  assert.match(css, /^\.egd-codex-bubble \{ padding: 9px 11px; font-size: 12px; line-height: 1\.52;/m);
   assert.match(rule('.egd-codex-input'), /min-height:\s*40px/);
   const composerOverrides = [...css.matchAll(/^\.egd-codex-input \{([^}]+)\}/gm)];
   assert.match(composerOverrides.at(-1)?.[1] || '', /box-sizing:\s*border-box;\s*min-height:\s*35px;\s*max-height:\s*140px;[^}]*font-size:\s*12px;\s*line-height:\s*1\.52;/,
@@ -12161,9 +12163,11 @@ test('hard-coded light and white colours outside the tokens are down to a short 
     assert.match(badge, /--egd-type-ink: (var|color-mix)\([^;#]+;/, `${kind} ink is a token`);
     assert.match(badge, /background: color-mix\(in srgb, var\(--egd-type-ink\) 10%, var\(--egd-surface-elevated\)\);/, `${kind} wash follows its ink in both schemes`);
   }
-  // Near-black literals are shadows, the close-guard scrim or the invisible resize hit area.
+  // Near-black literals are shadows or the invisible resize hit area; the close-guard
+  // scrim and the notice/recovery shadows are tokens now (DSN-02), so only a few remain.
   const black = declarations.filter(({ literal }) => Math.max(...channels(literal).slice(0, 3)) <= 60);
-  assert.ok(black.length > 5);
+  assert.ok(black.length > 0, 'the scan still sees the remaining black shadows');
+  assert.match(surfaceCss, /\.egd-agenda-close-guard \{[^}]*background: var\(--egd-scrim\);/);
   for (const { head, property, literal } of black) {
     const alpha = channels(literal)[3];
     assert.ok(/shadow|filter/.test(property) || (property === 'background' && alpha <= .3), `${head} ${property}: ${literal}`);

@@ -3,7 +3,8 @@ import assert from 'node:assert/strict'
 import { readFile } from 'node:fs/promises'
 import { runInNewContext } from 'node:vm'
 import { createSystemResourceMonitor, parseMacDefaultInterface, parseMacNetworkCounters,
-  parseMacDiskCounters, parseLinuxDefaultInterface, parseLinuxNetworkCounters, parseLinuxDiskCounters } from './system-resource-monitor.mjs'
+  parseMacDiskCounters, parseLinuxDefaultInterface, parseLinuxNetworkCounters, parseLinuxDiskCounters,
+  parseWindowsNetworkCounters, parseWindowsDiskCounters, WINDOWS_NETWORK_SCRIPT, WINDOWS_DISK_SCRIPT } from './system-resource-monitor.mjs'
 import * as ResourceReadout from '../overlay/resources/EGDeskResourceReadout.sys.mjs'
 
 test('macOS parsers select only the default interface link counters, not repeated protocol rows', () => {
@@ -421,7 +422,7 @@ test('failed or unsupported reads are null with status and do not disclose diagn
 
   let called = false
   const other = createSystemResourceMonitor({
-    profilePath: '/not-opened-in-test', platform: 'win32',
+    profilePath: '/not-opened-in-test', platform: 'freebsd',
     readCpus: () => [], readTotalMemory: () => 100, readFreeMemory: () => 50,
     readDisk: async () => { throw new Error('unsupported') },
     readNetwork: async () => { called = true },
@@ -474,5 +475,69 @@ test('a never-resolving readDisk cannot hold inFlight forever or accumulate unli
     tick += 10_000
   }
   assert.equal(reads, 2)
+  monitor.close()
+})
+
+// CNV-08: Windows output fixtures in the shape the PowerShell scripts emit
+// (ConvertTo-Json -Compress, byte counts as strings). Real Windows is NOT-RUN.
+test('Windows network parser picks the lowest-metric default route and keeps 64-bit byte counts', () => {
+  const output = JSON.stringify({
+    routes: [{ InterfaceAlias: '이더넷', Metric: '35' }, { InterfaceAlias: 'Wi-Fi', Metric: '25' }],
+    stats: [
+      { Name: '이더넷', ReceivedBytes: '10', SentBytes: '20' },
+      { Name: 'Wi-Fi', ReceivedBytes: '18446744073709551000', SentBytes: '987654321' },
+    ],
+  })
+  assert.deepEqual(parseWindowsNetworkCounters(output + '\r\n'),
+    { interface: 'Wi-Fi', rxBytes: 18446744073709551000n, txBytes: 987654321n })
+  // A single route and adapter come out as objects, not arrays.
+  assert.deepEqual(parseWindowsNetworkCounters('{"routes":{"InterfaceAlias":"이더넷 2","Metric":"5"},"stats":{"Name":"이더넷 2","ReceivedBytes":"1","SentBytes":"2"}}'),
+    { interface: '이더넷 2', rxBytes: 1n, txBytes: 2n })
+  for (const bad of ['', 'not json', '{"routes":[],"stats":[]}', '{"routes":{"InterfaceAlias":"x","Metric":"1"},"stats":[]}',
+    '{"routes":{"InterfaceAlias":"x","Metric":"1"},"stats":{"Name":"x","ReceivedBytes":"-1","SentBytes":"2"}}',
+    '{"routes":{"InterfaceAlias":"x","Metric":"1"},"stats":{"Name":"x","ReceivedBytes":12,"SentBytes":"2"}}',
+    '{"routes":{"InterfaceAlias":"x","Metric":"bad"},"stats":{"Name":"x","ReceivedBytes":"1","SentBytes":"2"}}']) {
+    assert.equal(parseWindowsNetworkCounters(bad), null, bad)
+  }
+  assert.equal(parseWindowsNetworkCounters(null), null)
+})
+
+test('Windows disk parser sums nothing itself: one entry per physical disk, _Total and bad rows rejected', () => {
+  assert.deepEqual(parseWindowsDiskCounters('[{"Name":"0 C:","ReadBytes":"1000","WriteBytes":"2000"},{"Name":"1 D:","ReadBytes":"3","WriteBytes":"4"}]'), [
+    { id: '0 C:', readBytes: 1000n, writeBytes: 2000n }, { id: '1 D:', readBytes: 3n, writeBytes: 4n },
+  ])
+  assert.deepEqual(parseWindowsDiskCounters('{"Name":"0 C:","ReadBytes":"5","WriteBytes":"6"}'), [{ id: '0 C:', readBytes: 5n, writeBytes: 6n }])
+  for (const bad of ['', '[]', 'null', '[{"Name":"_Total","ReadBytes":"1","WriteBytes":"1"}]',
+    '[{"Name":"0 C:","ReadBytes":"1"}]', '[{"Name":"0 C:","ReadBytes":"1","WriteBytes":"1"},{"Name":"0 C:","ReadBytes":"1","WriteBytes":"1"}]']) {
+    assert.equal(parseWindowsDiskCounters(bad), null, bad)
+  }
+})
+
+test('the Windows scripts read locale-independent JSON and leave _Total out', () => {
+  assert.match(WINDOWS_NETWORK_SCRIPT, /Get-NetRoute -DestinationPrefix '0\.0\.0\.0\/0'/)
+  assert.match(WINDOWS_NETWORK_SCRIPT, /Get-NetAdapterStatistics/)
+  assert.match(WINDOWS_NETWORK_SCRIPT, /ConvertTo-Json -Compress/)
+  assert.match(WINDOWS_DISK_SCRIPT, /Win32_PerfRawData_PerfDisk_PhysicalDisk/)
+  assert.match(WINDOWS_DISK_SCRIPT, /\$_\.Name -ne '_Total'/)
+  assert.doesNotMatch(WINDOWS_NETWORK_SCRIPT + WINDOWS_DISK_SCRIPT, /netstat|typeperf/)
+})
+
+test('on Windows, parsed counters become PC-wide network and disk rates', async () => {
+  let tick = 0, rx = 1_000n, read = 0n
+  const monitor = createSystemResourceMonitor({
+    profilePath: '/not-opened-in-test', platform: 'win32', minIntervalMs: 0,
+    monotonicNow: () => tick, readCpus: () => [], readTotalMemory: () => 100, readFreeMemory: () => 50,
+    readDisk: async () => ({ bsize: 1n, blocks: 100n, bfree: 50n }),
+    readNetwork: async () => parseWindowsNetworkCounters(JSON.stringify({
+      routes: { InterfaceAlias: 'Wi-Fi', Metric: '25' }, stats: { Name: 'Wi-Fi', ReceivedBytes: String(rx), SentBytes: '0' } })),
+    readDiskIo: async () => parseWindowsDiskCounters(JSON.stringify([{ Name: '0 C:', ReadBytes: String(read), WriteBytes: '0' }])),
+  })
+  const first = await monitor.sample()
+  assert.deepEqual([first.network.status, first.diskIo.status, first.scope], ['warming', 'warming', 'host'])
+  tick = 5_000; rx += 50_000n; read += 10_000n
+  const second = await monitor.sample()
+  assert.deepEqual([second.network.status, second.network.interface, second.network.rxBytesPerSecond], ['ok', 'Wi-Fi', 10_000])
+  assert.deepEqual([second.diskIo.status, second.diskIo.readBytesPerSecond, second.diskIo.writeBytesPerSecond], ['ok', 2_000, 0])
+  assert.equal(second.app, undefined, 'PC 전체 only: no EG-Desk app section yet')
   monitor.close()
 })

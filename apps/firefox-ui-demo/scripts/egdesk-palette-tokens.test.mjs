@@ -247,3 +247,60 @@ test('the Ontology minimap legend and position text are at least the 10px badge 
   assert.ok(column >= 6 + 2 + 2 * 10, `legend column ${column}px`);
   assert.ok(parseFloat(legend['min-height']) - 12 >= 13, 'one 10px line fits the legend strip');
 });
+
+test('no rule repeats an earlier rule with the same selector and the same declarations', () => {
+  const seen = new Set();
+  const repeated = [];
+  for (const rule of rules) {
+    const key = JSON.stringify([rule.media, rule.selectors, rule.declarations]);
+    if (seen.has(key)) repeated.push(rule.selectors.join(', '));
+    seen.add(key);
+  }
+  assert.deepEqual(repeated, []);
+});
+
+test('notices, the recovery bar and the close guard take their shadow and scrim from tokens', () => {
+  assert.equal(declarationsFor('#egd-board-notice')['box-shadow'], 'var(--egd-shadow)');
+  assert.equal(declarationsFor('#egd-desk-recovery')['box-shadow'], 'var(--egd-shadow)');
+  for (const scheme of schemes) {
+    assert.equal(declarationsFor('.egd-agenda-close-guard', { scheme })['background'], 'var(--egd-scrim)');
+    assert.ok(readRootProperties(surfaceCss, { scheme })['--egd-scrim'], `${scheme} scrim token`);
+  }
+});
+
+// DSN-03: the pairs recorded in docs/EGDESK_DESIGN_CONTRAST.md stay at 4.5:1 or more.
+const TEXT_PAIRS = [
+  ['--egd-on-surface', '--egd-surface'], ['--egd-on-surface', '--egd-surface-elevated'],
+  ['--egd-on-surface', '--egd-window-alt'], ['--egd-on-surface', '--egd-topbar'],
+  ['--egd-on-surface', '--egd-user-bubble'], ['--egd-on-surface', '--egd-note'],
+  ['--egd-on-surface-variant', '--egd-surface'], ['--egd-on-surface-variant', '--egd-surface-elevated'],
+  ['--egd-on-surface-variant', '--egd-window-alt'], ['--egd-primary', '--egd-surface-elevated'],
+  ['--egd-primary', '--egd-primary-container'], ['--egd-on-primary', '--egd-primary'],
+  ['--egd-danger-ink', '--egd-danger-bg'], ['--egd-success-ink', '--egd-success-bg'],
+  ['--egd-warning-ink', '--egd-surface-elevated'],
+];
+
+test('main text and background token pairs keep 4.5:1 in both schemes, as the contrast doc records', () => {
+  const doc = readFileSync(new URL('../docs/EGDESK_DESIGN_CONTRAST.md', import.meta.url), 'utf8');
+  for (const scheme of schemes) {
+    const props = readRootProperties(surfaceCss, { scheme });
+    for (const [ink, paper] of TEXT_PAIRS) {
+      const bg = resolveColor(props[paper], props);
+      const fg = compositeOver(resolveColor(props[ink], props), bg);
+      const ratio = contrastRatio(fg, bg);
+      assert.ok(ratio >= 4.5, `${scheme} ${ink} on ${paper}: ${ratio.toFixed(2)}`);
+      assert.ok(doc.includes(`${formatHex(fg)} / ${formatHex(bg)} | ${ratio.toFixed(2)}`), `${scheme} ${ink} on ${paper} is recorded`);
+    }
+  }
+});
+
+test('step-off text sizes are snapped to the approved scale', () => {
+  const offStep = [];
+  for (const rule of rules) {
+    if (rule.selectors.some(selector => /egd-host-activity/.test(selector))) continue; // newest package, left as is
+    for (const [name, value] of rule.declarations) {
+      if ((name === 'font-size' || name === 'font') && /(^|\s)(12\.5|13\.5|14\.5|19)px/.test(value)) offStep.push(`${rule.selectors.join(', ')} ${name}: ${value}`);
+    }
+  }
+  assert.deepEqual(offStep, []);
+});
