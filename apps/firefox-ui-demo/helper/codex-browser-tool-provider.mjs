@@ -3,6 +3,8 @@ import { chatError } from './codex-chat-values.mjs'
 import { classifyPublicToolError } from './codex-tool-errors.mjs'
 import { fixtureSnapshotMatches } from './codex-browser-fixture-qa.mjs'
 import { NAVIGATION_REASON_TEXT } from './egdesk-browser-url-policy.mjs'
+import { BROWSER_REFLEX_TOOL_NAME, BROWSER_REFLEX_TOOL_SPEC, reflexResultForModel, runBrowserReflex } from './egdesk-browser-reflex.mjs'
+import { randomUUID } from 'node:crypto'
 
 const BROWSER_BOUNDED = 'browserBounded'
 const READ_ONLY_QA = 'readOnlyQa'
@@ -45,10 +47,24 @@ function publicBrowserErrorDetail(error) {
 }
 const SUCCESS_STATUSES = new Set(['observed', 'postcondition-observed', 'wait-condition-met',
   'cards-listed', 'site-allowed', 'card-opened', 'card-closed', 'history-dispatched', 'screenshot-observed'])
+// DECISION_MODEL_CONTEXT_SETUP.md §3.3: the reflex tool is appended after the
+// unchanged BROWSER_TOOL_SPECS (their schemas are in thread manifest hashes),
+// and only while a decision key is configured and the mode is 'on'.
+function reflexEnabled(decision) {
+  try { return Boolean(decision) && decision.mode?.() === 'on' && decision.configured?.() === true }
+  catch { return false }
+}
+function reflexStepError(text) {
+  let code = 'TOOL_FAILED'
+  try { const parsed = JSON.parse(text); if (typeof parsed?.error?.code === 'string') code = parsed.error.code } catch {}
+  const error = new Error('Browser reflex step failed')
+  error.code = code
+  return error
+}
 const PUBLIC_INPUT_ROUTES = new Set(['dom-click-no-pointerdown', 'dom-scroll-api', 'dom-keyboard-event',
   'dom-value-setter', 'dom-editor-replace', 'chrome-load-uri', 'chrome-history', 'trusted-pointer', 'trusted-text-input'])
 
-export function createCodexBrowserToolProvider({ transport, getOwnerKey, schemaReady = () => true, fixtureQa = null, service = createBrowserToolService({ sendToUi: request => transport.sendToUi(request), getOwnerKey }) }) {
+export function createCodexBrowserToolProvider({ transport, getOwnerKey, schemaReady = () => true, fixtureQa = null, decision = null, runReflex = runBrowserReflex, service = createBrowserToolService({ sendToUi: request => transport.sendToUi(request), getOwnerKey }) }) {
   if (!transport || typeof transport.hasClient !== 'function' || typeof getOwnerKey !== 'function') throw new TypeError('Browser provider requires a bounded UI transport and account identity')
   let resetting = 0
   const fixtureAttestations = new Map()
@@ -109,7 +125,10 @@ export function createCodexBrowserToolProvider({ transport, getOwnerKey, schemaR
     // Advertise available specs; runtime narrows the original native catalog
     // using its safety envelope and first explicit selection. A later send
     // cannot expand that catalog. Per-run UI binding remains actual authority.
-    specs() { return schemaReady() ? BROWSER_TOOL_SPECS : [] },
+    specs() {
+      if (!schemaReady()) return []
+      return reflexEnabled(decision) ? [...BROWSER_TOOL_SPECS, BROWSER_REFLEX_TOOL_SPEC] : BROWSER_TOOL_SPECS
+    },
     requireThread(threadId, prepared) {
       if (prepared && !this.runtime.browserRegisteredThreads.has(threadId)) {
         throw chatError('BROWSER_TOOLS_UNAVAILABLE', 'This native thread predates Browser tools; keep its history and choose an explicit new conversation', 409)
@@ -136,6 +155,7 @@ export function createCodexBrowserToolProvider({ transport, getOwnerKey, schemaR
       }
     },
     async dispatch(run, event) {
+      if (event?.tool === BROWSER_REFLEX_TOOL_NAME) return this.dispatchReflex(run, event)
       try {
         if (run.executionPolicy?.mode === BROWSER_BOUNDED) {
           const card = run.browserBinding?.cards?.find(item => item.cardId === event.arguments?.cardId)
@@ -226,6 +246,37 @@ export function createCodexBrowserToolProvider({ transport, getOwnerKey, schemaR
           ...(selected?.cardEpoch ? { targetCardEpoch: selected.cardEpoch } : {}) }, event.callId)
         return { success: false, contentItems: [{ type: 'inputText', text: JSON.stringify({ error: { ...failure, ...publicBrowserErrorDetail(error) } }) }] }
       }
+    },
+    // Each reflex step goes through this provider's own dispatch for the same
+    // run with a fresh callId, so grants, the action gate and receipts apply.
+    async dispatchReflex(run, event) {
+      if (!reflexEnabled(decision)) {
+        return { success: false, contentItems: [{ type: 'inputText', text: JSON.stringify({ error: { code: 'BROWSER_REFLEX_UNAVAILABLE', message: 'The Browser reflex is not enabled' } }) }] }
+      }
+      const args = event.arguments && typeof event.arguments === 'object' ? event.arguments : {}
+      let step = 0
+      const callTool = async (name, toolArgs) => {
+        if (typeof name !== 'string' || !name.startsWith('egdesk_browser_') || name === BROWSER_REFLEX_TOOL_NAME) {
+          const error = new Error('Browser reflex may call only Browser tools'); error.code = 'BROWSER_REFLEX_SCOPE'; throw error
+        }
+        step++
+        const output = await this.dispatch(run, { tool: name, arguments: toolArgs,
+          callId: `${event.callId || 'reflex'}.reflex-${step}-${randomUUID()}`, namespace: event.namespace || null })
+        const text = output?.contentItems?.[0]?.text ?? ''
+        if (!output?.success) throw reflexStepError(text)
+        return JSON.parse(text)
+      }
+      let result
+      try {
+        result = await runReflex({ cardId: args.cardId, goal: args.goal,
+          ...(args.values !== undefined ? { values: args.values } : {}),
+          ...(args.maxSteps !== undefined ? { maxSteps: args.maxSteps } : {}),
+          callTool, client: decision.client || null })
+      } catch (error) {
+        const failure = classifyPublicToolError(error, { browser: true })
+        return { success: false, contentItems: [{ type: 'inputText', text: JSON.stringify({ error: failure }) }] }
+      }
+      return { success: result?.outcome !== 'invalid', contentItems: [{ type: 'inputText', text: reflexResultForModel(result || {}) }] }
     },
     async cancelRun(run) {
       fixtureAttestations.delete(run.answerId)
