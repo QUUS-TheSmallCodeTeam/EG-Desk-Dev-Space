@@ -9779,8 +9779,9 @@ test('usage ring shows reported ChatGPT usage, grey 확인 안 됨 when nothing 
   const old = Chat.usageRingView({ isLoggedIn: true, rateLimits: limits, usage: usageDisplay(limits, now + 16 * 60_000) });
   assert.equal(old.stale, true);
   assert.match(old.title, /확인한 지 오래되어 실제와 다를 수 있음/);
-  // Both Chat heads carry the ring; the CSS draws unknown as a grey track.
-  assert.equal(surfaceSource.match(/codexUsageRing\(codex\.authStatus\)/g)?.length, 2);
+  // Both Chat heads carry the ring (the room's engine; SUB-03 Claude); the CSS draws unknown as a grey track.
+  assert.equal(surfaceSource.match(/^ +chatHeadUsageRing\(activeEngine, codex\),$/gm)?.length, 2);
+  assert.match(surfaceSource, /return codexUsageRing\(codex\.authStatus, '', onOpen\);/);
   const css = readFileSync(new URL('../overlay/CSS/eg-desk-surface.uc.css', import.meta.url), 'utf8');
   assert.match(css, /\.egd-usage-unknown \.egd-usage-ring \{ background: var\(--egd-outline\); \}/);
 });
@@ -15390,7 +15391,7 @@ test('engine controls: header chip, new-room choices, locked-room panel and effo
 
   const older = renderers({ ...codex, engines: null }).renderEnginePanel(fresh);
   assert.equal(older.children.some(child => child.className === 'egd-codex-engine-efforts'), false, 'no effort picker before capabilities are known');
-  for (const pattern of [/renderEngineChip\(activeThread\),\n            codexUsageRing\(codex\.authStatus\),/g]) {
+  for (const pattern of [/renderEngineChip\(activeThread\),\n            chatHeadUsageRing\(activeEngine, codex\),/g]) {
     assert.equal(surfaceSource.match(pattern)?.length, 2, 'both Chat heads show the engine chip next to the usage meter');
   }
   assert.match(surfaceSource, /showSession \? buildCodexSessionBadge\(thread, codexBridge\) : null,\s*showEngine \? renderEngineBadge\(thread\) : null,/);
@@ -25573,4 +25574,115 @@ test('room override UI: pending Save blocks duplicate and Cancel, while a newer 
   assert.equal(h.writes.length, 1); assert.equal(h.part('chat-room-project-editor'), null);
   assert.equal(h.state.codex.threadDrafts.room, 'new request words'); assert.deepEqual(h.thread().requestProjectTarget, requestProjectB());
   assert.equal(h.timers.size, 0);
+});
+
+// SUB-08 / SUB-03 (Claude) / SUB-13 / SUB-15 on the production Settings card:
+// '다시 확인' forces the Claude check, '로그인' types the bridge's login line
+// into a Terminal card, an API key in the environment asks first, and the
+// version range and Claude usage are shown. Fakes only: no bridge, CLI or shell.
+test('Settings Claude card: forced re-check, Terminal login, API key confirmation, version badges and Claude usage', async () => {
+  const document = settingsFakeDocument();
+  const { el, codexProfileAvatar } = compileFunction(`${declaration('el')}\n${declaration('codexProfileAvatar')}\nreturn { el, codexProfileAvatar };`, ['document', 'ChatState'])(document, Chat);
+  const now = Date.now();
+  const calls = [];
+  const listeners = new Set();
+  const state = { codex: { connected: true, isStartingLogin: false, authStatus: { isLoggedIn: false, authMode: 'apikey' }, recentEngineId: 'codex', threads: [],
+    engines: [claudeSettingsFixture({ auth: { status: 'signedOut' } })] } };
+  const emit = () => { for (const listener of listeners) listener(state.codex); };
+  const written = [];
+  const terminalApi = { isConnected: () => true, write: data => { written.push(data); } };
+  state.codexBridge = {
+    subscribe(listener) { listeners.add(listener); listener(state.codex); return () => listeners.delete(listener); },
+    profileCatalog: () => ({ status: 'ready', profiles: [] }), loadProfiles: () => Promise.resolve(),
+    refreshAuthStatus() { calls.push(['refreshAuth']); },
+    async refreshClaudeEngine() { calls.push(['refreshClaude']); return null; },
+    async claudeLoginCommand(method) { calls.push(['loginCommand', method]); return { method, line: `claude auth login --${method}`, billing: 'subscription' }; },
+    async claudeApiKeyEnv(confirm) { calls.push(['apiKeyEnv', confirm]); return { detected: ['ANTHROPIC_API_KEY'], confirmed: confirm === true }; },
+  };
+  const spawnTerminalCard = () => { calls.push(['terminal']); return { isConnected: true, _termBrowser: { contentWindow: { terminalAPI: terminalApi } } }; };
+  const deps = { singletonSourceRef: () => ({ kind: 'settings-card' }), focusOpenSourceCard: () => null, cardSeq: 0,
+    resolveCanvasCardPlacement: () => ({ x: 100, y: 80, width: 600, height: 500, inView: true }), revealPlacedCanvasCard() {}, el, cardZ: 0,
+    closeCanvasCard() {}, state, ChatState: Chat, codexProfileAvatar, document, window: { setTimeout: () => 0, confirm: () => false },
+    bindCardSourceRef() {}, markAgendaDirty() {}, setActiveEntity() {}, isCardFullscreen: () => false,
+    focusCanvasCard() {}, installCardHeaderFullscreenToggle() {}, canvasZoom: () => 1, ...settingsTransferDeps(document, state),
+    AccountSettingsView, codexBridgeNotice: settingsBridgeNotice, deskIcon: settingsDeskIcon(document), toggleCardFullscreen() {}, spawnTerminalCard };
+  const card = compileFunction(`${declaration('spawnSettingsCard')}\nreturn spawnSettingsCard;`, Object.keys(deps))(...Object.values(deps))();
+  const byTestid = id => settingsNodes(card, node => node.dataset.testid === id)[0];
+  assert.deepEqual(calls, [], 'opening Settings sends nothing');
+
+  // SUB-15: an API-key codex login is labelled 종량 과금; nothing asks for a key.
+  assert.match(byTestid('settings-codex-billing').textContent, /종량 과금/);
+  assert.doesNotMatch(card.textContent, /API 키 입력|키를 입력/);
+
+  // SUB-08 login: the bridge's line, typed into a Terminal card with Enter.
+  assert.ok(byTestid('settings-claude-login'));
+  byTestid('settings-claude-login').fire('click');
+  await settle();
+  assert.deepEqual(calls, [['loginCommand', 'claudeai'], ['terminal']]);
+  assert.deepEqual(written, ['claude auth login --claudeai\r']);
+  assert.equal(byTestid('settings-claude-result').dataset.phase, 'started');
+  assert.match(byTestid('settings-claude-result').textContent, /다시 확인/);
+
+  // SUB-08 '다시 확인' is the forced Claude check, not the generic /v1/state read.
+  calls.length = 0;
+  byTestid('settings-claude-refresh').fire('click');
+  await settle();
+  assert.deepEqual(calls, [['refreshClaude']]);
+
+  // SUB-13 badges: Claude untested, Codex unsupported.
+  state.codex.engines = [
+    { id: 'codex', label: 'Codex', status: 'ready', version: '0.150.0', versionStatus: 'unsupported', installed: true, profiles: [] },
+    claudeSettingsFixture()];
+  state.codex.authStatus = { isLoggedIn: true, accountEmail: 'owner@example.test', planType: 'pro' };
+  emit();
+  assert.equal(byTestid('settings-claude-version-badge').textContent, '확인 안 된 버전');
+  assert.equal(byTestid('settings-codex-version-badge').textContent, '지원 버전 아님');
+  assert.equal(byTestid('settings-codex-version-badge').dataset.status, 'unsupported');
+  assert.equal(byTestid('settings-codex-billing'), undefined, 'a ChatGPT login is not per-use billing');
+
+  // SUB-03 Claude usage from engines[].profiles[].usage.
+  const rate = { primary: { usedPercent: 37, windowMinutes: 300, resetsAt: now + 3600_000 }, secondary: null, observedAt: now };
+  const withUsage = claudeSettingsFixture();
+  withUsage.profiles[0].usage = { ...usageDisplay(rate, now), windows: [], autoResume: false };
+  state.codex.engines = [withUsage];
+  emit();
+  assert.equal(byTestid('settings-claude-usage').dataset.level, 'ok');
+  assert.match(byTestid('settings-claude-usage').textContent, /5시간 한도 · 37% 사용/);
+
+  // SUB-15 confirmation: usage-billing warning, then the helper's confirm (strip) choice.
+  const keyed = claudeSettingsFixture();
+  keyed.statusReason = 'CLAUDE_API_KEY_DETECTED';
+  state.codex.engines = [keyed];
+  emit();
+  const confirmBox = byTestid('settings-claude-key-confirm');
+  assert.match(confirmBox.textContent, /종량제/);
+  assert.match(confirmBox.textContent, /claude에 넘기지 않습니다/);
+  calls.length = 0;
+  byTestid('settings-claude-key-confirm-ok').fire('click');
+  await settle();
+  assert.deepEqual(calls, [['apiKeyEnv', true]]);
+  assert.equal(byTestid('settings-claude-key-confirm'), undefined, 'confirmed for this helper run');
+  assert.match(byTestid('settings-claude-result').textContent, /구독 로그인으로 실행/);
+});
+
+test('Chat head: the account chip and the usage ring open Settings 계정 (SUB-01); a Claude room shows Claude usage', () => {
+  const chip = surfaceSource.slice(surfaceSource.indexOf("data: { testid: 'chat-account-access'"), surfaceSource.indexOf("data: { testid: 'chat-account-access'") + 300);
+  assert.match(chip, /onclick: \(\) => spawnSettingsCard\(\{ tab: 'account' \}\)/);
+  const ring = declaration('chatHeadUsageRing');
+  assert.match(ring, /spawnSettingsCard\(\{ tab: 'account' \}\)/);
+  assert.match(ring, /AccountSettingsView\.claudeUsageView\(codex\.engines\)/);
+  const document = settingsFakeDocument();
+  const opened = [];
+  const { el } = compileFunction(`${declaration('el')}\nreturn { el };`, ['document', 'ChatState'])(document, Chat);
+  const fns = compileFunction(`${declaration('codexUsageRing')}\n${ring}\n${declaration('usageMeter')}\nreturn { chatHeadUsageRing };`,
+    ['el', 'ChatState', 'AccountSettingsView', 'spawnSettingsCard'])(el, Chat, AccountSettingsView, options => opened.push(options));
+  const claude = fns.chatHeadUsageRing({ engineId: 'claude' }, { engines: [claudeSettingsFixture()], authStatus: { isLoggedIn: true } });
+  assert.equal(claude.tagName, 'BUTTON');
+  assert.equal(claude.dataset.testid, 'chat-claude-usage-ring');
+  assert.equal(claude.dataset.level, 'unknown', 'no Claude usage reported yet reads 확인 안 됨');
+  claude.fire('click');
+  assert.deepEqual(opened, [{ tab: 'account' }]);
+  const codex = fns.chatHeadUsageRing({ engineId: 'codex' }, { engines: [], authStatus: { isLoggedIn: true } });
+  assert.equal(codex.dataset.testid, 'chat-usage-ring');
+  assert.equal(fns.chatHeadUsageRing({ engineId: 'claude' }, { engines: [claudeSettingsFixture({ auth: { status: 'signedOut' } })], authStatus: {} }), null);
 });
