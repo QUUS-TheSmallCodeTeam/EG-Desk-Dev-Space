@@ -258,3 +258,23 @@ node apps/firefox-ui-demo/scripts/verify-firefox-mcp-browser-agent-observation.m
 ```
 
 It verifies the initial snapshot and element refs, click and Hangul fill diffs, notification summaries, action and notification history order and limits, and `egdesk:browser-agent-action` event payloads. It does not exercise the guarded tool path.
+
+## Trusted press and typing (BRW-10, REA 웹1·웹2, D-B4) — 2026-11-17
+
+- `egdesk_browser_pointer_click` (action `pointer-click`): one move → down → up at the centre of the
+  element's *observed* bounds, through `window.synthesizeMouseEvent` (153 ESR / 159), else
+  `windowUtils.sendMouseEvent`, else `sendMouseEventToWindow` (ESR 140). The point is planned by
+  `helper/egdesk-browser-pointer.mjs` (mirrored in `overlay/resources/EGDeskBrowserPointer.sys.mjs`)
+  and used only while document, revision, viewport, devicePixelRatio, page zoom
+  (`BrowsingContext.fullZoom`, reported as snapshot `zoom`) and top scroll still match; same-origin
+  frames get frame-local input points. A sent down without an up gets one compensating up.
+  Offered only once, after a dispatched `egdesk_browser_click` on the same element changed nothing
+  (same revision and URL, quiet settle, no fetch) and a fresh observation. Never automatic, never retried.
+- `egdesk_browser_type` (action `type-text`): `nsITextInputProcessor.commitCompositionWith(text)` into
+  the already-focused field or editor, then at most one guarded key via TIP keydown/keyup (the browser
+  runs the default action; no Enter emulation). A busy transaction (IME composing) sends nothing.
+- Both refuse before perform when less than 400 ms of budget is left (REA 웹8 b), share click's
+  classifier gate, postcondition, reconcile and receipt rules. Receipts carry route, API, points and
+  event flags, never typed text.
+- NOT verified in a real Firefox: whether the events are trusted and activate, page focus side effects,
+  Chat focus, inactive-card TIP delivery, DPR/zoom mapping (REA §7).

@@ -22109,7 +22109,7 @@
   // Last-observed target geometry is display-only. Never feed this point back
   // into input, hit testing, scrolling, actor guards or reference generation.
   function browserToolDisplayPoint(action, guard) {
-    if (!['click', 'fill'].includes(action?.type) || !action.ref || guard?.target?.ref !== action.ref) return null;
+    if (!['click', 'fill', 'pointer-click', 'type-text'].includes(action?.type) || !action.ref || guard?.target?.ref !== action.ref) return null;
     const bounds = guard.target.bounds;
     const width = guard.viewport?.width, height = guard.viewport?.height;
     if (!bounds || ![bounds.x, bounds.y, bounds.width, bounds.height, width, height].every(Number.isFinite) ||
@@ -22137,7 +22137,7 @@
     } catch { return false; }
   }
   function createBrowserAgentProjection({ card, marker, current, scheduler = window, now = () => Date.now() }) {
-    let generation = 0, active = null, frame = 0, timer = 0, disposed = false;
+    let generation = 0, active = null, frame = 0, timer = 0, disposed = false, lastPoint = null;
     const hide = () => {
       if (frame) scheduler.cancelAnimationFrame(frame);
       if (timer) scheduler.clearTimeout(timer);
@@ -22166,9 +22166,19 @@
           card.dataset.egdAgentActivity = 'true';
           const point = lease.displayPoint;
           if (point && [point.x, point.y].every(value => Number.isFinite(value) && value >= 0 && value <= 100)) {
+            // BRW-13 (REA 5, inferred): glide from this Card's last point; CSS
+            // eases left/top over 200 ms, none with reduced motion. Display
+            // only: input never waits for it and arrival is never evidence.
+            if (lastPoint) {
+              marker.style.left = `${lastPoint.x}%`;
+              marker.style.top = `${lastPoint.y}%`;
+              marker.hidden = false;
+              try { marker.getBoundingClientRect?.(); } catch {}
+            }
             marker.style.left = `${point.x}%`;
             marker.style.top = `${point.y}%`;
             marker.hidden = false;
+            lastPoint = { x: point.x, y: point.y };
           }
           const check = () => {
             if (active !== lease) return;
@@ -22536,7 +22546,7 @@
       }
       if (request.kind !== 'act' || authorized.permission !== 'interact') throw new Error('Browser interaction was not selected');
       if (browserToolRemainingBudget(request, receivedAtMs) <= 0) throw new Error('Browser action budget expired before dispatch');
-      if (!['navigate', 'click', 'fill', 'scroll', 'press'].includes(request.action?.type) || !request.guard ||
+      if (!['navigate', 'click', 'fill', 'scroll', 'press', 'pointer-click', 'type-text'].includes(request.action?.type) || !request.guard ||
           request.action.selector || (!['navigate', 'scroll'].includes(request.action.type) && !request.action.ref)) {
         throw new Error('Unsupported or unguarded Browser action');
       }
@@ -22577,7 +22587,7 @@
         diagnosticPhase = 'actor';
         // D-B1 for links and redirects: whatever a navigate, click or key press
         // makes the page commit next is judged by the Card's commit guard.
-        if (['navigate', 'click', 'press'].includes(request.action.type)) {
+        if (['navigate', 'click', 'press', 'pointer-click', 'type-text'].includes(request.action.type)) {
           try { card._browserControls.toolSetNavigationGuard?.({ fromUrl: request.guard.url,
             allowed: (to, from) => browserToolNavigationAllowed(request.clientThreadId, to, from) }); } catch {}
         }
@@ -25545,7 +25555,7 @@
         ...(action.type === 'click' && result?.result?.clickDiagnostics?.dispatchScope
           ? { clickInputRoute: result.result.clickDiagnostics.dispatchScope,
             targetClickObserved: result.result.clickDiagnostics.targetClickObserved === true } : {}),
-        ...(['scroll', 'press', 'fill'].includes(action.type)
+        ...(['scroll', 'press', 'fill', 'pointer-click', 'type-text'].includes(action.type)
           ? BrowserAgentReceipts.browserToolDispatchReceiptFields(action.type, result?.result?.dispatchDiagnostics) : {}) },
         after: documentStillCurrent ? { cardId: card.id, ...result.after } : null,
         observation: documentStillCurrent ? result.observation : null,

@@ -266,3 +266,145 @@ test('Browser address field follows the approved shape and nav buttons keep a 32
   const offHover = declarations('.egd-card-nav-btn[aria-disabled="true"]:hover,\n.egd-card-nav-btn[aria-disabled="true"]:active');
   assert.equal(offHover.background, 'transparent');
 });
+
+// BRW-01 regression (2026-11-17): the real toolbar binding (EGDeskFocusNavigation)
+// driving the six buttons and the address field through the shared view model.
+// Names, tooltips, off states and focus behaviour together, on a small fake DOM.
+const FocusNavigation = await import('../overlay/resources/EGDeskFocusNavigation.sys.mjs');
+
+function toolbarFixture() {
+  const doc = { activeElement: null };
+  doc.body = { tagName: 'BODY' };
+  doc.activeElement = doc.body;
+  const listeners = new Map();
+  const attrsOf = () => {
+    const attrs = new Map();
+    return {
+      attrs,
+      getAttribute: name => attrs.has(name) ? attrs.get(name) : null,
+      setAttribute: (name, value) => attrs.set(name, String(value)),
+      removeAttribute: name => attrs.delete(name),
+      hasAttribute: name => attrs.has(name),
+    };
+  };
+  const root = { tagName: 'DIV', ownerDocument: doc, ...attrsOf(),
+    addEventListener: (type, fn, capture) => listeners.set(`${type}:${!!capture}`, fn), removeEventListener() {} };
+  const item = (action, tagName = 'BUTTON') => {
+    const el = { action, tagName, type: tagName === 'INPUT' ? 'text' : 'button', ownerDocument: doc, parentNode: root,
+      isConnected: true, hidden: false, tabIndex: 0, disabled: false, clicks: 0, value: '', selectionStart: 0, selectionEnd: 0,
+      ...attrsOf(), focus() { doc.activeElement = el; }, click() { el.clicks++; } };
+    return el;
+  };
+  const buttons = Object.fromEntries(['back', 'forward', 'reload', 'home'].map(action => [action, item(action)]));
+  const url = item('url', 'INPUT');
+  buttons.duplicate = item('duplicate');
+  buttons.menu = item('menu');
+  const items = [buttons.back, buttons.forward, buttons.reload, buttons.home, url, buttons.duplicate, buttons.menu];
+  const browserState = { canGoBack: false, canGoForward: false, loading: false };
+  // Same steps as the surface's applyBrowserToolbarButton (pinned above).
+  const apply = () => {
+    for (const [action, button] of Object.entries(buttons)) {
+      const state = browserNavButtonState(action, browserState);
+      button.title = state.title;
+      button.setAttribute('aria-label', state.label);
+      FocusNavigation.setItemDisabled(button, state.disabled);
+    }
+    const field = browserAddressFieldState({ isMac: true });
+    url.title = field.title;
+    url.setAttribute('aria-label', field.label);
+  };
+  apply();
+  const binding = FocusNavigation.bindToolbar(root, { label: 'Browser 도구', items: () => items });
+  const event = (type, extra = {}) => ({ type, defaultPrevented: false, altKey: false, ctrlKey: false, metaKey: false, shiftKey: false,
+    stopped: false, preventDefault() { this.defaultPrevented = true; }, stopPropagation() { this.stopped = true; }, ...extra });
+  const key = (target, value) => { const ev = event('keydown', { key: value, target }); listeners.get('keydown:false')(ev); return ev; };
+  const click = target => { const ev = event('click', { target }); listeners.get('click:true')(ev); if (!ev.defaultPrevented) target.click(); return ev; };
+  const focusIn = target => { target.focus(); listeners.get('focusin:false')(event('focusin', { target })); };
+  return { doc, root, buttons, url, items, browserState, apply, binding, key, click, focusIn };
+}
+
+test('BRW-01: every toolbar control has a unique Korean name, a tooltip, and the off reason only when off', () => {
+  const t = toolbarFixture();
+  const names = t.items.map(el => el.getAttribute('aria-label'));
+  assert.equal(new Set(names).size, names.length, 'no two controls share a name');
+  for (const el of t.items) {
+    const name = el.getAttribute('aria-label');
+    assert.ok(name && name.trim(), `${el.action} has a name`);
+    assert.doesNotMatch(name, /[A-Za-z]{3,}/, `${el.action} name is Korean`);
+    assert.ok(el.title.startsWith(name), `${el.action} tooltip starts with its name`);
+    assert.equal(el.disabled, false, `${el.action} never uses native disabled (keeps focus)`);
+  }
+  assert.equal(t.root.getAttribute('role'), 'toolbar');
+  assert.equal(t.root.getAttribute('aria-label'), 'Browser 도구');
+  // Off: Back and Forward say why, keep their names, and are aria-disabled only.
+  for (const action of ['back', 'forward']) {
+    const button = t.buttons[action];
+    assert.equal(button.getAttribute('aria-disabled'), 'true', action);
+    assert.notEqual(button.title, button.getAttribute('aria-label'), `${action} tooltip gives the reason`);
+    assert.match(button.title, /없음$/);
+  }
+  for (const action of ['reload', 'home', 'duplicate', 'menu']) {
+    assert.equal(t.buttons[action].getAttribute('aria-disabled'), null, action);
+    assert.equal(t.buttons[action].title, t.buttons[action].getAttribute('aria-label'), `${action} tooltip is its name`);
+  }
+  // History arrives: on, same name, the tooltip is the name again.
+  t.browserState.canGoBack = true;
+  t.apply();
+  assert.deepEqual([t.buttons.back.getAttribute('aria-label'), t.buttons.back.title, t.buttons.back.getAttribute('aria-disabled')],
+    ['뒤로', '뒤로', null]);
+  // Loading swaps Reload to Stop in name and tooltip, and back again.
+  t.browserState.loading = true;
+  t.apply();
+  assert.deepEqual([t.buttons.reload.getAttribute('aria-label'), t.buttons.reload.title], ['중지', '중지']);
+  t.browserState.loading = false;
+  t.apply();
+  assert.equal(t.buttons.reload.getAttribute('aria-label'), '새로고침');
+  assert.equal(t.url.title, '주소 또는 검색어 (⌘L)');
+});
+
+test('BRW-01: one Tab stop; arrows, Home and End move inside and stop on off buttons without pressing them', () => {
+  const t = toolbarFixture();
+  assert.deepEqual(t.items.map(el => el.tabIndex), [0, -1, -1, -1, -1, -1, -1], 'one Tab stop, on the first control even when it is off');
+  t.focusIn(t.buttons.back);
+  t.key(t.buttons.back, 'ArrowRight');
+  assert.equal(t.doc.activeElement, t.buttons.forward, 'an off button still takes focus (focusableWhenDisabled)');
+  assert.deepEqual(t.items.map(el => el.tabIndex), [-1, 0, -1, -1, -1, -1, -1], 'roving tab stop follows focus');
+  const enter = t.key(t.buttons.forward, 'Enter');
+  assert.equal(enter.defaultPrevented, true, 'Enter on an off button does nothing');
+  const pressed = t.click(t.buttons.forward);
+  assert.equal(pressed.defaultPrevented, true);
+  assert.equal(t.buttons.forward.clicks, 0, 'a click on an off button never reaches its handler');
+  t.key(t.buttons.forward, 'End');
+  assert.equal(t.doc.activeElement, t.buttons.menu);
+  t.key(t.buttons.menu, 'ArrowRight');
+  assert.equal(t.doc.activeElement, t.buttons.back, 'wraps around');
+  t.key(t.buttons.back, 'Home');
+  assert.equal(t.doc.activeElement, t.buttons.back);
+  t.key(t.buttons.back, 'ArrowLeft');
+  assert.equal(t.doc.activeElement, t.buttons.menu);
+  assert.equal(t.click(t.buttons.reload).defaultPrevented, false);
+  assert.equal(t.buttons.reload.clicks, 1, 'an on button is pressed normally');
+});
+
+test('BRW-01: the address field keeps arrows while its caret is inside; focus stays when Back turns off under it', () => {
+  const t = toolbarFixture();
+  t.focusIn(t.url);
+  t.url.value = 'example.test';
+  t.url.selectionStart = t.url.selectionEnd = 3;
+  const inside = t.key(t.url, 'ArrowRight');
+  assert.equal(inside.defaultPrevented, false, 'the caret moves, not the focus');
+  assert.equal(t.doc.activeElement, t.url);
+  t.url.selectionStart = t.url.selectionEnd = t.url.value.length;
+  t.key(t.url, 'ArrowRight');
+  assert.equal(t.doc.activeElement, t.buttons.duplicate, 'at the end of the text the arrow leaves the field');
+  // Back is focused and turns off (history ran out): focus and the tab stop stay on it.
+  t.browserState.canGoBack = true;
+  t.apply();
+  t.focusIn(t.buttons.back);
+  t.browserState.canGoBack = false;
+  t.apply();
+  t.binding.sync();
+  assert.equal(t.doc.activeElement, t.buttons.back);
+  assert.equal(t.buttons.back.tabIndex, 0);
+  assert.equal(t.buttons.back.getAttribute('aria-disabled'), 'true');
+});

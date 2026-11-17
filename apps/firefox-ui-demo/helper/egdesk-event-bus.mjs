@@ -19,10 +19,14 @@ import { guardBridgeRequest, readJsonBody, sendJson, setBridgeCors } from './cod
  */
 export const WORKFLOW_TOPICS = Object.freeze([
   'terminal.exit', 'auth.changed', 'file.changed', 'browser.navigated', 'browser.oauthCompleted', 'user.action',
+  // BRW-04 (D-B11, inferred): a card finished loading its document, and a
+  // popup card closed (by its page or by the person), naming its opener.
+  'browser.loaded', 'browser.popupClosed',
 ])
 const SOURCES = new Map([
   ['terminal.exit', 'terminal'], ['auth.changed', 'auth'], ['file.changed', 'file'],
   ['browser.navigated', 'browser'], ['browser.oauthCompleted', 'browser'], ['user.action', 'manual'],
+  ['browser.loaded', 'browser'], ['browser.popupClosed', 'browser'],
 ])
 const ID = /^[A-Za-z0-9][A-Za-z0-9._:/-]*$/
 const CONTROL = /[\u0000-\u001f\u007f]/
@@ -110,6 +114,16 @@ const NORMALIZERS = {
   },
   'browser.navigated': payload => browserCardLocation(payload),
   'browser.oauthCompleted': payload => browserCardLocation(payload),
+  'browser.loaded': payload => browserCardLocation(payload),
+  // The popup's last location, its opener (required) and who closed it.
+  'browser.popupClosed': payload => {
+    exactKeys(payload, ['cardId', 'origin', 'path', 'openerCardId', 'closedBy'])
+    const cardId = opaque(payload.cardId, 'cardId')
+    const openerCardId = openerCardOf(payload.openerCardId, cardId)
+    if (!openerCardId) fail('openerCardId is required for a popup')
+    if (payload.closedBy !== 'page' && payload.closedBy !== 'user') fail('closedBy must be page or user')
+    return { cardId, ...originPath(payload, 'browser location'), openerCardId, closedBy: payload.closedBy }
+  },
   'user.action': payload => {
     exactKeys(payload, ['graphId', 'taskId', 'gateId'])
     return { graphId: opaque(payload.graphId, 'graphId', 256), taskId: opaque(payload.taskId, 'taskId', 256), gateId: opaque(payload.gateId, 'gateId', 256) }
@@ -123,6 +137,8 @@ function summaryOf(topic, payload) {
     case 'file.changed': return `File ${payload.change === 'rename' ? 'added, moved or removed' : 'changed'}: ${payload.relativePath}`
     case 'browser.navigated': return `Browser opened ${payload.origin}${payload.path}`
     case 'browser.oauthCompleted': return `Browser sign-in finished at ${payload.origin}${payload.path}`
+    case 'browser.loaded': return `Browser loaded ${payload.origin}${payload.path}`
+    case 'browser.popupClosed': return payload.closedBy === 'page' ? 'Browser popup closed itself' : 'Browser popup closed by the user'
     case 'user.action': return 'Continued by the user'
     default: return ''
   }
@@ -230,13 +246,17 @@ export function createWorkflowEventBus({ maxRecent = 256, maxQueue = 256, maxPer
 
 /**
  * Browser card events from the screen, and catch-up after an SSE reconnect.
- * POST /events/browser {cardId, kind:'navigated'|'oauthCompleted', url, openerCardId?}
+ * POST /events/browser {cardId, kind:'navigated'|'oauthCompleted'|'loaded'|'popupClosed', url, openerCardId?, closedBy?}
+ *   popupClosed (BRW-04, D-B11): url is the popup's last location, openerCardId
+ *   is required and closedBy is 'page' (window.close by the site) or 'user'.
  *   -> 202 {accepted, event:{seq,id,topic,origin,path,openerCardId?}}
  *   openerCardId (BRW-04): sent only by a popup card, naming the card its popup
  *   chain started from; omit it (or send null) for an ordinary card.
  * GET  /events/recent?since=SEQ -> {seq, oldestSeq, events}
  * Loopback + Origin guarded; URLs are reduced to origin + path before publishing.
  */
+const BROWSER_KINDS = Object.freeze({ navigated: 'browser.navigated', oauthCompleted: 'browser.oauthCompleted',
+  loaded: 'browser.loaded', popupClosed: 'browser.popupClosed' })
 export function createWorkflowEventHttpHandler({ bus, owner, port = 39218, maxBrowserEventsPerSecond = 20, now = Date.now }) {
   if (!bus?.publish) throw new TypeError('Workflow event bus is required')
   let window = { start: 0, count: 0 }
@@ -259,8 +279,10 @@ export function createWorkflowEventHttpHandler({ bus, owner, port = 39218, maxBr
       }
       if (req.method !== 'POST') throw workflowEventError('WORKFLOW_METHOD', 'Use POST', 405)
       const body = await readJsonBody(req, { maxBytes: 16 * 1024 })
-      exactKeys(body, ['cardId', 'kind', 'url'], ['openerCardId'])
-      if (body.kind !== 'navigated' && body.kind !== 'oauthCompleted') fail('kind must be navigated or oauthCompleted')
+      exactKeys(body, ['cardId', 'kind', 'url'], ['openerCardId', 'closedBy'])
+      const topic = BROWSER_KINDS[body.kind]
+      if (!topic) fail('kind must be navigated, oauthCompleted, loaded or popupClosed')
+      if ((body.kind === 'popupClosed') !== Object.hasOwn(body, 'closedBy')) fail('closedBy belongs to popupClosed only')
       const location = publicBrowserLocation(body.url)
       const cardId = opaque(body.cardId, 'cardId')
       const openerCardId = openerCardOf(body.openerCardId, cardId)
@@ -268,8 +290,9 @@ export function createWorkflowEventHttpHandler({ bus, owner, port = 39218, maxBr
       if (at - window.start >= 1000) window = { start: at, count: 0 }
       if (window.count >= maxBrowserEventsPerSecond) throw workflowEventError('WORKFLOW_RATE_LIMIT', 'Too many browser events', 429)
       window.count += 1
-      const event = bus.publish({ topic: body.kind === 'navigated' ? 'browser.navigated' : 'browser.oauthCompleted', owner,
-        payload: { cardId, ...location, ...(openerCardId ? { openerCardId } : {}) } })
+      const event = bus.publish({ topic, owner,
+        payload: { cardId, ...location, ...(openerCardId ? { openerCardId } : {}),
+          ...(body.kind === 'popupClosed' ? { closedBy: body.closedBy } : {}) } })
       if (!event) throw workflowEventError('WORKFLOW_RATE_LIMIT', 'Too many workflow events', 429)
       sendJson(res, 202, { accepted: true, event: { seq: event.seq, id: event.id, topic: event.topic, origin: event.payload.origin, path: event.payload.path,
         ...(event.payload.openerCardId ? { openerCardId: event.payload.openerCardId } : {}) } })

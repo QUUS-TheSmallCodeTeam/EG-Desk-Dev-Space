@@ -57,7 +57,10 @@
 const ID = /^[A-Za-z0-9][A-Za-z0-9._:/-]*$/;
 const TASK_STATES = new Set(['running', 'completed', 'failed', 'cancelled']);
 const GATE_KINDS = new Set(['userAction', 'oauth', 'file', 'terminalExit']);
-const GATE_EVIDENCE_TOPICS = new Set(['terminal.exit', 'file.changed', 'browser.oauthCompleted', 'user.action']);
+// browser.navigated / browser.loaded only ever arrive through the BRW-04
+// popup rule (egdesk-await-router.mjs popupLoginFollowUp), never alone.
+const GATE_EVIDENCE_TOPICS = new Set(['terminal.exit', 'file.changed', 'browser.oauthCompleted', 'user.action',
+  'browser.navigated', 'browser.loaded']);
 const MAX_GATES = 8;
 const MAX_GATE_WAIT_MS = 7 * 24 * 60 * 60 * 1000;
 export const MAX_GATE_CHOICES = 6;

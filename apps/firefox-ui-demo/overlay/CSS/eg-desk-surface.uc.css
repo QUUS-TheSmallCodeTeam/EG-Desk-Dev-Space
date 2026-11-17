@@ -534,6 +534,12 @@
   user-select: none;
 }
 .egd-browser-agent-target[hidden] { display: none !important; }
+/* BRW-13 (REA 5, inferred): the dot glides from the Card's previous target
+   (200 ms ease-out). Reduced motion places it at once through the shared
+   [class*="egd-"] transition: none rule below. Display only. */
+.egd-browser-agent-target {
+  transition: left 200ms cubic-bezier(0.2, 0, 0, 1), top 200ms cubic-bezier(0.2, 0, 0, 1);
+}
 /* BRW-05 (D-B1): the person's answer to one more site, asked on the Card the
    Agent works in. Tokens only, so dark follows the token block. */
 .egd-browser-site-ask {

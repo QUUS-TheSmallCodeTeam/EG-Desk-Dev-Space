@@ -1996,3 +1996,310 @@ test('behaviour fixture pages cover pointer div, inner scroll, closed shadow, co
   assert.throws(() => browserBehaviorFixtureHtml('unknown', marker), /Unknown/)
   assert.throws(() => browserBehaviorFixtureHtml('dialogs', 'short<script>'), /marker is invalid/)
 })
+
+// ---- BRW-10 (REA 웹1·웹2) and BRW-08: trusted pointer press and typing in the actor ----
+// Listeners by event name on a fake element; a fake Gecko API fires them as trusted.
+function trackEvents(el) {
+  const byName = new Map()
+  const baseAdd = el.addEventListener, baseRemove = el.removeEventListener
+  el.addEventListener = (name, fn, capture) => {
+    if (!byName.has(name)) byName.set(name, new Set())
+    byName.get(name).add(fn)
+    return baseAdd?.call(el, name, fn, capture)
+  }
+  el.removeEventListener = (name, fn, capture) => { byName.get(name)?.delete(fn); return baseRemove?.call(el, name, fn, capture) }
+  el.fire = (name, isTrusted = true) => { for (const fn of byName.get(name) || []) fn({ type: name, isTrusted, target: el }) }
+  el.listenerCount = () => [...byName.values()].reduce((sum, set) => sum + set.size, 0)
+  return el
+}
+// window.synthesizeMouseEvent stand-in: records calls and fires the target's events.
+function mouseApi(target, { failOn = null } = {}) {
+  const calls = []
+  const send = (type, x, y) => {
+    calls.push([type, x, y])
+    if (type === failOn) { failOn = null; throw new Error(`${type} failed`) }
+    const el = typeof target === 'function' ? target(x, y) : target
+    if (type === 'mousedown') { el.fire('pointerdown'); el.fire('mousedown') }
+    if (type === 'mouseup') { el.fire('mouseup'); el.fire('click') }
+    return true
+  }
+  const api = { calls, seen: [], synthesizeMouseEvent: (type, x, y, data, options) => { api.seen.push({ data, options }); return send(type, x, y) },
+    sendMouseEvent: (type, x, y) => send(type, x, y), sendMouseEventToWindow: (type, x, y) => send(type, x, y) }
+  return api
+}
+const pointerGuard = (snapshot, target, extra = {}) => ({ ...guardFrom(snapshot, target),
+  pointer: { scroll: { x: snapshot.scroll.x, y: snapshot.scroll.y }, ...(Object.hasOwn(snapshot, 'zoom') ? { zoom: snapshot.zoom } : {}) }, ...extra })
+
+test('pointer press: one move, down and up at the observed centre through window.synthesizeMouseEvent, no focus or scroll call', async () => {
+  const f = localDocumentFixture()
+  trackEvents(f.button)
+  let scrolled = 0
+  f.button.scrollIntoView = () => { scrolled++ }
+  const api = mouseApi(f.button)
+  f.win.synthesizeMouseEvent = api.synthesizeMouseEvent
+  f.win.windowUtils = { sendMouseEvent() { throw new Error('the first available API is used') } }
+  f.actor.browsingContext = { fullZoom: 1.25 }
+  const before = f.actor.snapshot()
+  assert.equal(before.zoom, 1.25, 'observation reports the page zoom')
+  const button = before.interactiveElements.find(item => item.role === 'button')
+  const result = await f.actor.act({ type: 'pointer-click', ref: button.ref }, guarded(pointerGuard(before, button)))
+  assert.deepEqual(api.calls, [['mousemove', 70, 46], ['mousedown', 70, 46], ['mouseup', 70, 46]])
+  assert.deepEqual(api.seen.map(entry => entry.options), [{ toWindow: true }, { toWindow: true }, { toWindow: true }])
+  assert.deepEqual(api.seen.map(entry => entry.data), [{ button: 0, buttons: 0, clickCount: 0 },
+    { button: 0, buttons: 1, clickCount: 1 }, { button: 0, buttons: 0, clickCount: 1 }])
+  assert.deepEqual(result.result.dispatchDiagnostics, { inputRoute: 'trusted-pointer', apiRoute: 'synthesizeMouseEvent',
+    trustedInput: true, point: { x: 70, y: 46 }, displayPoint: { x: 70, y: 46 }, moveDispatched: true, downDispatched: true,
+    upDispatched: true, compensatedUp: false, targetPointerObserved: true, targetClickObserved: true, eventsTrusted: true })
+  assert.equal(f.focusCalls, 0)
+  assert.equal(scrolled, 0, 'the observed point must hold: no scrollIntoView first')
+  assert.equal(f.button.listenerCount(), 0, 'receipt listeners are removed')
+  assert.equal(f.actor.actorPerformCalls, 1)
+})
+
+test('pointer press falls back to sendMouseEvent, then sendMouseEventToWindow; with none it is refused before perform', async () => {
+  for (const [route, utils] of [['sendMouseEvent', api => ({ sendMouseEvent: api.sendMouseEvent })],
+    ['sendMouseEventToWindow', api => ({ sendMouseEventToWindow: api.sendMouseEventToWindow })]]) {
+    const f = localDocumentFixture()
+    trackEvents(f.button)
+    const api = mouseApi(f.button)
+    f.win.windowUtils = utils(api)
+    const before = f.actor.snapshot()
+    const button = before.interactiveElements.find(item => item.role === 'button')
+    const result = await f.actor.act({ type: 'pointer-click', ref: button.ref }, guarded(pointerGuard(before, button)))
+    assert.equal(result.result.dispatchDiagnostics.apiRoute, route)
+    assert.equal(api.calls.length, 3, route)
+  }
+  const f = localDocumentFixture()
+  const before = f.actor.snapshot()
+  const button = before.interactiveElements.find(item => item.role === 'button')
+  const refusal = await guardedAct(f, { type: 'pointer-click', ref: button.ref }, guarded(pointerGuard(before, button)))
+  assert.equal(refusal.dispatchPhase, 'not-dispatched')
+  assert.match(refusal.error, /pointer input is unavailable/)
+  assert.equal(f.actor.actorPerformCalls, 0)
+  assert.equal(f.clicks, 0, 'never falls back to a DOM click')
+})
+
+test('pointer press refuses before perform when zoom, DPR, viewport, scroll, bounds or budget no longer hold', async () => {
+  for (const reason of ['zoom-changed', 'device-pixel-ratio-changed', 'viewport-changed', 'scroll-changed',
+    'target-moved', 'target-bounds-unreadable', 'zoom-unread', 'budget', 'obscured', 'unguarded']) {
+    const f = localDocumentFixture()
+    trackEvents(f.button)
+    const api = mouseApi(f.button)
+    f.win.synthesizeMouseEvent = api.synthesizeMouseEvent
+    f.actor.browsingContext = { fullZoom: 1 }
+    const before = f.actor.snapshot()
+    const button = before.interactiveElements.find(item => item.role === 'button')
+    const guard = pointerGuard(before, button)
+    const options = guarded(guard)
+    let message = reason
+    if (reason === 'zoom-changed') f.actor.browsingContext.fullZoom = 1.1
+    if (reason === 'zoom-unread') { delete guard.pointer.zoom; message = 'zoom-changed' }
+    if (reason === 'device-pixel-ratio-changed') f.win.devicePixelRatio = 2
+    if (reason === 'viewport-changed') { f.win.innerWidth = 800; message = 'stale' }
+    if (reason === 'scroll-changed') f.win.scrollY = 40
+    if (reason === 'target-moved') f.button.getBoundingClientRect = () => ({ left: 20, top: 60, width: 100, height: 32 })
+    if (reason === 'target-bounds-unreadable') delete guard.target.bounds
+    if (reason === 'budget') { options.lease.deadlineMs = Date.now() + 300; message = 'budget is too short' }
+    if (reason === 'obscured') { f.actor.document.elementFromPoint = () => f.input; message = 'obscured' }
+    if (reason === 'device-pixel-ratio-changed') message = 'stale'
+    if (reason === 'unguarded') {
+      assert.throws(() => f.actor.perform({ type: 'pointer-click', ref: button.ref }, {}), /Unsupported browser agent action/)
+      assert.equal(api.calls.length, 0)
+      continue
+    }
+    const refusal = await guardedAct(f, { type: 'pointer-click', ref: button.ref }, options)
+    assert.equal(refusal.dispatchPhase, 'not-dispatched', reason)
+    assert.match(refusal.error, new RegExp(message), reason)
+    assert.deepEqual(api.calls, [], `${reason}: no input`)
+    assert.equal(f.actor.actorPerformCalls, 0, reason)
+  }
+})
+
+test('pointer press: a failed up after a sent down gets one compensating up; the outcome is dispatched, never retried', async () => {
+  const f = localDocumentFixture()
+  trackEvents(f.button)
+  const api = mouseApi(f.button, { failOn: 'mouseup' })
+  f.win.synthesizeMouseEvent = api.synthesizeMouseEvent
+  const before = f.actor.snapshot()
+  const button = before.interactiveElements.find(item => item.role === 'button')
+  const refusal = await guardedAct(f, { type: 'pointer-click', ref: button.ref }, guarded(pointerGuard(before, button)))
+  assert.equal(refusal.dispatchPhase, 'dispatched')
+  assert.deepEqual(api.calls.map(call => call[0]), ['mousemove', 'mousedown', 'mouseup', 'mouseup'],
+    'exactly one release after the failed up; no second press')
+  assert.equal(f.button.listenerCount(), 0)
+  // A failed down is also released once (it may have reached the page).
+  const g = localDocumentFixture()
+  trackEvents(g.button)
+  const downFails = mouseApi(g.button, { failOn: 'mousedown' })
+  g.win.synthesizeMouseEvent = downFails.synthesizeMouseEvent
+  const seen = g.actor.snapshot()
+  const target = seen.interactiveElements.find(item => item.role === 'button')
+  assert.equal((await guardedAct(g, { type: 'pointer-click', ref: target.ref }, guarded(pointerGuard(seen, target)))).dispatchPhase, 'dispatched')
+  assert.deepEqual(downFails.calls.map(call => call[0]), ['mousemove', 'mousedown', 'mouseup'])
+})
+
+test('BRW-08: pointer press reaches a same-origin frame with frame-local input and a shadow target through its host', async () => {
+  const x = frameFixture()
+  trackEvents(x.same.button)
+  const frameApi = mouseApi(x.same.button)
+  x.same.doc.defaultView = { synthesizeMouseEvent: frameApi.synthesizeMouseEvent }
+  let seen = x.actor.snapshot()
+  const frameButton = byLabel(seen, 'Frame send')
+  assert.deepEqual(frameButton.bounds, { x: 210, y: 110, width: 80, height: 30 })
+  const pressed = await x.actor.act({ type: 'pointer-click', ref: frameButton.ref }, guarded(pointerGuard(seen, frameButton)))
+  assert.deepEqual(frameApi.calls.map(call => call.slice(1)), [[50, 25], [50, 25], [50, 25]], 'the frame window gets its own point')
+  assert.deepEqual(pressed.result.dispatchDiagnostics.displayPoint, { x: 250, y: 125 })
+  assert.deepEqual(pressed.result.dispatchDiagnostics.point, { x: 50, y: 25 })
+
+  seen = x.actor.snapshot()
+  const again = byLabel(seen, 'Frame send')
+  x.coverFrame(true)
+  const covered = await guardedAct(x, { type: 'pointer-click', ref: again.ref }, guarded(pointerGuard(seen, again)))
+  assert.equal(covered.dispatchPhase, 'not-dispatched')
+  assert.match(covered.obscuredBy, /^button/)
+  assert.equal(frameApi.calls.length, 3)
+  x.coverFrame(false)
+
+  trackEvents(x.shadowButton)
+  const topApi = mouseApi(x.shadowButton)
+  x.win.synthesizeMouseEvent = topApi.synthesizeMouseEvent
+  seen = x.actor.snapshot()
+  const shadow = byLabel(seen, 'Shadow save')
+  const result = await x.actor.act({ type: 'pointer-click', ref: shadow.ref }, guarded(pointerGuard(seen, shadow)))
+  assert.deepEqual(topApi.calls[1], ['mousedown', 80, 220])
+  assert.equal(result.result.dispatchDiagnostics.targetPointerObserved, true)
+})
+
+// nsITextInputProcessor stand-in: writes committed text into the focused field.
+function textInputProcessor(target, { begin = true, consumeKeydown = false } = {}) {
+  const log = []
+  return { log, KEYDOWN_IS_CONSUMED: 1,
+    beginInputTransaction(win, callback) { log.push(['begin', typeof callback]); return begin },
+    commitCompositionWith(text) {
+      log.push(['commit', text])
+      target.fire('beforeinput')
+      if ('value' in target) target.value += text
+      else target.textContent = `${target.textContent || ''}${text}`
+      target.fire('input')
+      return true
+    },
+    keydown(event) { log.push(['keydown', event.key, event.code, event.keyCode]); target.fire('keydown'); return consumeKeydown ? 1 : 0 },
+    keyup(event) { log.push(['keyup', event.key]) } }
+}
+function typingFixture(options) {
+  const f = interactionFixture()
+  trackEvents(f.input)
+  f.input.value = 'abc'
+  f.actor.document.activeElement = f.input
+  const tip = textInputProcessor(f.input, options)
+  f.actor.createTextInputProcessor = () => tip
+  return { f, tip }
+}
+
+test('typing commits text and one guarded key through the text input processor of the focused field, never focusing', async () => {
+  const { f, tip } = typingFixture()
+  const before = f.actor.snapshot()
+  const input = inputItem(before)
+  assert.equal(before.focusedElement.ref, input.ref)
+  const result = await f.actor.act({ type: 'type-text', ref: input.ref, text: ' 서울', key: 'Enter' }, guarded(guardFrom(before, input)))
+  assert.equal(f.input.value, 'abc 서울', 'typed at the caret, not replaced')
+  assert.deepEqual(tip.log, [['begin', 'function'], ['commit', ' 서울'], ['keydown', 'Enter', 'Enter', 13], ['keyup', 'Enter']])
+  assert.deepEqual(result.result.dispatchDiagnostics, { inputRoute: 'trusted-text-input', trustedInput: true, textCommitted: true,
+    textLength: 3, key: 'Enter', keyDispatched: true, keydownConsumed: false, targetInputObserved: true, targetKeyObserved: true,
+    eventsTrusted: true, documentHasFocus: null, focusPolicy: 'already-focused' })
+  assert.deepEqual(f.keyEvents, [], 'no synthetic KeyboardEvent dispatch and no Enter emulation')
+  assert.equal(f.submits, 0)
+  assert.equal(f.focusCalls, 0)
+  assert.equal(f.input.listenerCount(), 0)
+})
+
+test('typing is refused before perform without focus, for a sensitive or non-text target, past 8000 characters or without TIP', async () => {
+  for (const reason of ['unfocused', 'guard-focus', 'password', 'button', 'too-long', 'no-tip', 'bad-key', 'empty', 'budget']) {
+    const { f, tip } = typingFixture()
+    const before = f.actor.snapshot()
+    let target = inputItem(before)
+    let action = { type: 'type-text', ref: target.ref, text: 'hi' }
+    const guard = guardFrom(before, target)
+    const options = guarded(guard)
+    if (reason === 'unfocused') f.actor.document.activeElement = f.actor.document.body
+    if (reason === 'guard-focus') guard.focusedRef = null
+    if (reason === 'password') { f.input.type = 'password'; f.input.getAttribute = name => name === 'type' ? 'password' : null }
+    if (reason === 'button') {
+      target = before.interactiveElements.find(item => item.role === 'button')
+      action = { type: 'type-text', ref: target.ref, text: 'hi' }
+      Object.assign(options, guarded(guardFrom(before, target)))
+    }
+    if (reason === 'too-long') action.text = 'x'.repeat(8001)
+    if (reason === 'no-tip') f.actor.createTextInputProcessor = () => null
+    if (reason === 'bad-key') action.key = 'F5'
+    if (reason === 'empty') action.text = ''
+    if (reason === 'budget') options.lease.deadlineMs = Date.now() + 200
+    const refusal = await guardedAct(f, action, options)
+    assert.equal(refusal.dispatchPhase, 'not-dispatched', reason)
+    assert.deepEqual(tip.log, [], `${reason}: nothing reached the text input processor`)
+    assert.equal(f.actor.actorPerformCalls, 0, reason)
+  }
+})
+
+test('typing: a busy input transaction (the person composing) sends no text and reports a dispatched-phase refusal', async () => {
+  const { f, tip } = typingFixture({ begin: false })
+  const before = f.actor.snapshot()
+  const input = inputItem(before)
+  const refusal = await guardedAct(f, { type: 'type-text', ref: input.ref, text: 'hi' }, guarded(guardFrom(before, input)))
+  assert.match(refusal.error, /input method is composing/)
+  assert.equal(refusal.dispatchPhase, 'dispatched', 'perform was entered, so the helper keeps it unknown (EG-01)')
+  assert.deepEqual(tip.log, [['begin', 'function']])
+  assert.equal(f.input.value, 'abc')
+})
+
+test('BRW-08: typing reaches a focused contenteditable editor and long values stay bounded by fingerprint', async () => {
+  const e = editorFixture()
+  trackEvents(e.editor)
+  e.editor.textContent = ''
+  e.f.actor.document.activeElement = e.editor
+  const tip = textInputProcessor(e.editor)
+  e.f.actor.createTextInputProcessor = () => tip
+  let seen = e.f.actor.snapshot()
+  const editor = seen.interactiveElements.find(item => item.label === 'Message body')
+  assert.equal(seen.focusedElement.ref, editor.ref)
+  const typed = await e.f.actor.act({ type: 'type-text', ref: editor.ref, text: 'Hello' }, guarded(guardFrom(seen, editor)))
+  assert.equal(typed.result.dispatchDiagnostics.targetInputObserved, true)
+  assert.deepEqual(tip.log.map(entry => entry[0]), ['begin', 'commit'])
+  assert.equal(e.selectionCalls, 0)
+  assert.equal(e.editor.focusCalls, 0)
+
+  const { f } = typingFixture()
+  f.input.value = ''
+  seen = f.actor.snapshot()
+  const long = 'k'.repeat(8000)
+  await f.actor.act({ type: 'type-text', ref: inputItem(seen).ref, text: long }, guarded(guardFrom(seen, inputItem(seen))))
+  const after = f.actor.snapshot()
+  assert.equal(inputItem(after).value, boundedFieldValue(long), 'the observation shows prefix, length and fingerprint')
+  assert.equal(inputItem(after).value.includes(long), false)
+})
+
+test('Parent receipt filter copies only fixed pointer and typing fields, never text', () => {
+  const { browserToolDispatchReceiptFields } = parentModule
+  const pointer = { inputRoute: 'trusted-pointer', apiRoute: 'synthesizeMouseEvent', trustedInput: true, point: { x: 1.5, y: 2 },
+    displayPoint: { x: 201.5, y: 102 }, moveDispatched: true, downDispatched: true, upDispatched: true, compensatedUp: false,
+    targetPointerObserved: true, targetClickObserved: 'yes', eventsTrusted: true, label: 'Pay now', html: '<b>x</b>' }
+  assert.deepEqual(browserToolDispatchReceiptFields('pointer-click', pointer), { inputRoute: 'trusted-pointer',
+    apiRoute: 'synthesizeMouseEvent', trustedInput: true, point: { x: 1.5, y: 2 }, displayPoint: { x: 201.5, y: 102 },
+    moveDispatched: true, downDispatched: true, upDispatched: true, compensatedUp: false, targetPointerObserved: true,
+    targetClickObserved: false, eventsTrusted: true })
+  for (const bad of [{ apiRoute: 'dispatchEvent' }, { trustedInput: false }, { point: { x: Number.NaN, y: 1 } },
+    { inputRoute: 'dom-click-no-pointerdown' }, { displayPoint: null }]) {
+    assert.deepEqual(browserToolDispatchReceiptFields('pointer-click', { ...pointer, ...bad }), {})
+  }
+  const typing = { inputRoute: 'trusted-text-input', trustedInput: true, textLength: 5, key: 'Enter', textCommitted: true,
+    keyDispatched: true, targetInputObserved: true, targetKeyObserved: true, keydownConsumed: false, eventsTrusted: true,
+    documentHasFocus: false, focusPolicy: 'already-focused', text: 'SECRET_TYPED_TEXT' }
+  const copied = browserToolDispatchReceiptFields('type-text', typing)
+  assert.equal(JSON.stringify(copied).includes('SECRET'), false)
+  assert.deepEqual(copied, { inputRoute: 'trusted-text-input', trustedInput: true, textLength: 5, key: 'Enter',
+    textCommitted: true, keyDispatched: true, targetInputObserved: true, targetKeyObserved: true, keydownConsumed: false,
+    eventsTrusted: true, documentHasFocus: false, focusPolicy: 'already-focused' })
+  for (const bad of [{ key: 'F5' }, { focusPolicy: 'after-fill' }, { textLength: -1 }, { trustedInput: false }]) {
+    assert.deepEqual(browserToolDispatchReceiptFields('type-text', { ...typing, ...bad }), {})
+  }
+})

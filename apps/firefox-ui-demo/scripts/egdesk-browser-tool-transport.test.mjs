@@ -1914,3 +1914,81 @@ test('S1 wait_text activity recording never stores the sought text', async () =>
   assert.equal(recorded.action.type, 'wait')
   assert.equal(JSON.stringify(recorded).includes('SECRET_WAIT_NEEDLE'), false)
 })
+
+test('BRW-10: the UI accepts guarded pointer-click and type-text acts and returns only the Parent-filtered route fields', async () => {
+  const f = fixture()
+  const bound = await f.dispatch(f.req('bind', { selection: f.selection() }))
+  const diagnostics = {
+    'pointer-click': { inputRoute: 'trusted-pointer', apiRoute: 'synthesizeMouseEvent', trustedInput: true,
+      point: { x: 50, y: 25 }, displayPoint: { x: 250, y: 125 }, moveDispatched: true, downDispatched: true, upDispatched: true,
+      compensatedUp: false, targetPointerObserved: true, targetClickObserved: true, eventsTrusted: true, label: 'LEAK' },
+    'type-text': { inputRoute: 'trusted-text-input', trustedInput: true, textLength: 2, key: null, textCommitted: true,
+      keyDispatched: false, targetInputObserved: true, targetKeyObserved: false, keydownConsumed: null, eventsTrusted: true,
+      documentHasFocus: true, focusPolicy: 'already-focused', text: 'LEAK' },
+  }
+  const queries = []
+  let projected = null
+  f.card._browserControls.toolPrepareAgentProjection = lease => { projected = lease.displayPoint }
+  for (const [type, extra] of [['pointer-click', {}], ['type-text', { text: 'hi' }]]) {
+    connectCardTools(f, { query: async (method, payload) => {
+      queries.push({ method, payload })
+      return { ok: true, result: { dispatchDiagnostics: diagnostics[type] }, after: { documentId: 'doc-1' }, observation: null }
+    } })
+    const result = await f.dispatch(f.req('act', { binding: bound.binding, callId: `call-${type}`,
+      guard: { documentId: 'doc-1', revision: 2, viewport: { width: 720, height: 480, devicePixelRatio: 1 },
+        target: { ref: 'el_1', bounds: { x: 90, y: 80, width: 180, height: 80 } } },
+      action: { type, ref: 'el_1', ...extra } }))
+    assert.equal(result.status, 'acted', type)
+    assert.equal(queries.at(-1).payload.action.type, type)
+    assert.equal(JSON.stringify(result.receipt.dispatchReceipt).includes('LEAK'), false, `${type}: no page text or typed text`)
+    assert.equal(result.receipt.dispatchReceipt.inputRoute, diagnostics[type].inputRoute)
+    assert.equal(result.receipt.dispatchReceipt.trustedInput, true)
+    assert.equal(result.receipt.dispatchReceipt.clickInputRoute, undefined, `${type} is not reported as a DOM click`)
+    assert.deepEqual(projected, { x: 25, y: 25 }, `${type}: the Agent dot points at the observed target`)
+  }
+  assert.equal(queries.length, 2, 'one actor query per request; nothing retried')
+})
+
+test('BRW-13 (REA 5): the Agent dot glides from the Card\'s previous target and never delays input', async () => {
+  const p = projectionFixture()
+  const moves = []
+  const marker = { hidden: true, layoutReads: 0, style: {
+    set left(value) { moves.push(['left', value]) }, set top(value) { moves.push(['top', value]) } },
+  getBoundingClientRect() { this.layoutReads++; moves.push(['layout']); return {} } }
+  const projection = new Function('browserToolActionLeases', 'browserToolRunBindings', 'browserToolCardLeases',
+    'browserToolCancelledRuns', 'browserToolStoppedRuns', `${between('  function browserToolDisplayPoint(action, guard) {',
+      '  function browserToolAuthorizePhysicalAction(')}\nreturn createBrowserAgentProjection`)(
+    p.f.actionLeases, p.f.runBindings, p.f.leases, p.f.cancelled, p.f.stoppedRuns)({ card: p.f.card, marker,
+    current: () => true, scheduler: { setTimeout: () => 1, clearTimeout() {}, requestAnimationFrame: () => 1, cancelAnimationFrame() {} },
+    now: p.f.now })
+  const lease = point => ({ card: p.f.card, deadlineMs: p.f.now() + 5000, displayPoint: point })
+  projection.prepare(lease({ x: 10, y: 20 })).show()
+  assert.deepEqual(moves, [['left', '10%'], ['top', '20%']], 'the first target appears in place')
+  assert.equal(marker.layoutReads, 0)
+  moves.length = 0
+  projection.prepare(lease({ x: 60, y: 40 })).show()
+  assert.deepEqual(moves, [['left', '10%'], ['top', '20%'], ['layout'], ['left', '60%'], ['top', '40%']],
+    'the next one starts where the last ended, so CSS eases the move')
+  assert.equal(marker.hidden, false)
+  // A request without a point moves nothing and keeps the last point for the next glide.
+  moves.length = 0
+  projection.prepare(lease(null)).show()
+  assert.deepEqual(moves, [])
+  projection.prepare(lease({ x: 5, y: 5 })).show()
+  assert.deepEqual(moves.slice(0, 2), [['left', '60%'], ['top', '40%']])
+})
+
+test('BRW-13 (REA 5): the glide is a 150-250 ms ease on left/top and is off with reduced motion', () => {
+  const css = readFileSync(new URL('../overlay/CSS/eg-desk-surface.uc.css', import.meta.url), 'utf8')
+  const rule = css.match(/\n\.egd-browser-agent-target \{\n  transition: ([^;]+);\n\}/)?.[1]
+  assert.ok(rule, 'transition rule on the Agent dot')
+  for (const part of rule.split(/,\s*(?=left|top)/)) {
+    const [, property, ms] = part.trim().match(/^(left|top) (\d+)ms cubic-bezier\(/) || []
+    assert.ok(property, part)
+    assert.ok(Number(ms) >= 150 && Number(ms) <= 250, `${property} ${ms}ms`)
+  }
+  // The shared reduced-motion block turns every egd- transition off, the dot included.
+  const reduced = css.match(/@media \(prefers-reduced-motion: reduce\) \{([\s\S]*?)\n\}/)?.[1] || ''
+  assert.match(reduced, /\[class\*="egd-"\][\s\S]*transition: none !important;/)
+  assert.match(css, /\.egd-browser-agent-target \{[^}]*pointer-events: none !important;/, 'still never takes input')
+})
