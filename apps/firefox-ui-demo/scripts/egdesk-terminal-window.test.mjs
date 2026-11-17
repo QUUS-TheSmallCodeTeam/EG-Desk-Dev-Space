@@ -426,7 +426,7 @@ test('unauthenticated terminal messages cannot change UI, spawn a card, expose a
     const before = [...h.events], status = h.shell.slots.identity.children[1];
     const payloads = [
       { type: 'terminal-ready', shellLabel: 'forged' }, { type: 'terminal-api-ready' },
-      { type: 'terminal-disconnected' }, { type: 'terminal-exit-confirmed' }, { type: 'terminal-no-session' },
+      { type: 'terminal-connecting' }, { type: 'terminal-disconnected' }, { type: 'terminal-exit-confirmed' }, { type: 'terminal-no-session' },
       { type: 'terminal-activate' }, { type: 'terminal-new-session', shellId: 'cmd' },
       { type: 'terminal-run-result', runResult: { output: 'forged result' } },
     ];
