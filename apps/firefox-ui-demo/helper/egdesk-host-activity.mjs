@@ -13,12 +13,8 @@
 // pattern OpenAI's focus restore leaves. Only app names, bundle ids and pids
 // are kept: no window titles, typed text, keys, coordinates or call content.
 //
-// Bridge handoff (not wired here; codex-bridge-server.mjs belongs to another
-// worker):
-//   const activity = createHostActivity()
-//   createHostAgent({ ..., onEvent: e => { const row = activity.noteHostEvent(e); if (row) sse('host.activity', row) } })
-//   on runtime emit 'computer.used' details → activity.noteComputerUse(details) → sse('host.activity', row)
-//   GET /host/activity → { rows: activity.list(), summary: activity.summary(), agent: agent.status() }
+// Bridge wiring: egdesk-host-control.mjs (host helper events, lease and gate
+// events, chat computer.used; GET /host/activity, SSE 'host.activity').
 // CU-01/02 also keep who holds the input, from the lease and the input gate:
 // - 'control'        the lease changed hands, yielded, stopped, or the gate closed/opened
 // - 'command'        an EG-Desk Agent action's receipt (phase, app, code, step count)
