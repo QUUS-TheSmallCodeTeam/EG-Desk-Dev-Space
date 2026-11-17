@@ -480,7 +480,10 @@ test('installer guards reject missing/wrong deps, wrong imports, factory mismatc
     assert.notEqual(wrongCallback, core);
     await assert.rejects(() => install(wrongCallback, namespaces), new RegExp(`core reference identity: ${callback}`));
   }
-  const wrongGlobal = core.replace("{ global: 'current' }", "{ global: 'shared' }");
+  // Target the zone loader itself: pure rule modules above it also load with { global: 'current' }.
+  const zoneLoader = "const load = (file) => ChromeUtils.importESModule(SURFACE_MODULE_BASE + file, { global: 'current' });";
+  assert.ok(core.includes(zoneLoader), 'zone loader line present');
+  const wrongGlobal = core.replace(zoneLoader, zoneLoader.replace("{ global: 'current' }", "{ global: 'shared' }"));
   assert.notEqual(wrongGlobal, core);
   await assert.rejects(() => install(wrongGlobal, namespaces), /window-scoped import/);
   const wrongFile = core.replace("load('EGDeskSurfaceTerminal.mjs')", "load('EGDeskSurfaceMissing.mjs')");

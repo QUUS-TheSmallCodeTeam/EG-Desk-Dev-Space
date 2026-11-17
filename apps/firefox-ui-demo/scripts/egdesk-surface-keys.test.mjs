@@ -117,7 +117,7 @@ test('UX-05 priority: Briefing target first, then Agent-working windows, order o
 });
 
 test('surface wiring: header keys, attention sets, roving groups and the tooltip are hooked in', () => {
-  assert.match(surfaceJs, /const SurfaceKeys = ChromeUtils\.importESModule\('chrome:\/\/userchrome\/content\/surface\/EGDeskSurfaceKeys\.mjs'\);/);
+  assert.match(surfaceJs, /const SurfaceKeys = ChromeUtils\.importESModule\('chrome:\/\/userchrome\/content\/surface\/EGDeskSurfaceKeys\.mjs', \{ global: 'current' \}\);/);
   assert.match(surfaceJs, /const action = SurfaceKeys\.windowHeaderKeyAction\(ev\);/);
   assert.match(surfaceJs, /SurfaceKeys\.windowKeyMove\(start, action, \{ grid: CanvasLayout\.CANVAS_GRID_PX, snap \}\)/);
   assert.match(surfaceJs, /history\.record\(\{ label: 'move', items \}\)/);
