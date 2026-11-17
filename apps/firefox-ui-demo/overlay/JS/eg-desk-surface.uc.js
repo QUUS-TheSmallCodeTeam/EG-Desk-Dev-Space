@@ -7650,7 +7650,7 @@
           title: railSearchUrlTitle(uri),
           subtitle: `${agendaTitle} · 저장된 Browser`,
           active: false,
-          execute: () => spawnBrowserCard(uri, { openMode: 'focus-existing' }),
+          execute: () => spawnBrowserCard(uri, { openMode: 'focus-existing', applySiteDefault: true }),
         });
       }
     }
@@ -7709,7 +7709,7 @@
       title: railSearchLooksLikeNavigation(q) ? url : `웹에서 "${q}" 검색`,
       subtitle: '새 Browser 카드로 열기',
       active: false,
-      execute: () => spawnBrowserCard(url, { openMode: 'new' }),
+      execute: () => spawnBrowserCard(url, { openMode: 'new', applySiteDefault: true }),
     };
   }
 
@@ -11271,7 +11271,7 @@
   }
 
   function openUrlInBrowserCard(url, options = {}) {
-    const card = spawnBrowserCard(url, { openMode: options.openMode || 'focus-existing' });
+    const card = spawnBrowserCard(url, { openMode: options.openMode || 'focus-existing', applySiteDefault: true });
     setActiveEntity(card);
     return card;
   }
@@ -22532,6 +22532,201 @@
     return identity;
   }
 
+  // BRW-02: per-card account context and the remembered per-site default.
+  // Contexts are Firefox containers; nothing moves cookies between them.
+  // The site map lives next to the identity registry in this profile because
+  // a browserIdentityKey only means something in the profile that minted it.
+  function browserAccountContextModule() {
+    return ChromeUtils.importESModule('chrome://userchrome/content/EGDeskBrowserAccountContext.sys.mjs');
+  }
+
+  function browserSiteBaseDomain(host) {
+    return servicesRef().eTLD.getBaseDomainFromHost(host);
+  }
+
+  function browserAccountContexts() {
+    try {
+      const identity = browserIdentityModule();
+      const identityService = identity.resolveContextualIdentityService(uri => ChromeUtils.importESModule(uri));
+      if (!identityService) return [];
+      const listed = identity.createBrowserIdentityAdapter({ identityService, services: servicesRef() }).listContainers();
+      if (listed?.supported !== true || !Array.isArray(listed.containers)) return [];
+      const entries = browserIdentityRegistry()?.entries || {};
+      return listed.containers.filter(item => item.kind === 'container').map(item => ({ kind: 'container',
+        userContextId: item.userContextId, name: item.name,
+        browserIdentityKey: Object.hasOwn(entries, String(item.userContextId)) ? entries[String(item.userContextId)] : null }));
+    } catch { return []; }
+  }
+
+  // A registered container keeps its key; an unregistered one is registered
+  // only on an explicit pick, so open cards never lose their binding.
+  function browserIdentityForContext(userContextId, name, { register = false } = {}) {
+    const registry = browserIdentityRegistry();
+    const key = registry?.entries?.[String(userContextId)];
+    if (key) {
+      const identity = { version: 1, userContextId, profileScopeId: registry.profileScopeId,
+        browserIdentityKey: key, containerName: typeof name === 'string' && name.trim() ? name.trim().slice(0, 100) : '분리 환경' };
+      return browserIdentityUsable(identity) ? identity : null;
+    }
+    return register ? registerImportedBrowserIdentity(userContextId, name) : null;
+  }
+
+  function browserSiteDefaults() {
+    const registry = browserIdentityRegistry();
+    let raw = '';
+    try { raw = servicesRef().prefs.getStringPref(browserSiteDefaultsPref(), ''); } catch {}
+    return browserAccountContextModule().normalizeSiteDefaults(raw, { profileScopeId: registry?.profileScopeId });
+  }
+
+  function browserSiteDefaultsPref() { return browserAccountContextModule().SITE_DEFAULTS_PREF; }
+
+  function saveBrowserSiteDefaults(store) {
+    if (!store?.profileScopeId) return false;
+    try { servicesRef().prefs.setStringPref(browserSiteDefaultsPref(), JSON.stringify(store)); return true; }
+    catch { return false; }
+  }
+
+  // Only user-initiated opens ask for this; popups, restores and Agent cards keep their own context.
+  function browserSiteDefaultIdentity(url) {
+    try {
+      const contexts = browserAccountContexts();
+      const usable = new Map(contexts.filter(item => item.browserIdentityKey).map(item => [item.browserIdentityKey, item]));
+      const resolved = browserAccountContextModule().resolveSiteDefault(browserSiteDefaults(), url,
+        { baseDomain: browserSiteBaseDomain, usableKeys: new Set(usable.keys()) });
+      if (resolved.reason === 'context-unavailable') {
+        boardNotice(`${resolved.site}에 기억한 계정 환경을 찾지 못해 기본 환경으로 열었습니다.`);
+        return null;
+      }
+      if (resolved.mode !== 'always' || resolved.context.kind !== 'container') return null;
+      const item = usable.get(resolved.context.browserIdentityKey);
+      return browserIdentityForContext(item.userContextId, item.name);
+    } catch { return null; }
+  }
+
+  // Without content access, a beforeunload handler counts as entered input;
+  // an unreadable or user-touched page counts as unknown. Both ask first.
+  function browserCardFormState(card) {
+    try {
+      const windowContext = card._xulBrowser?.browsingContext?.currentWindowGlobal;
+      if (!windowContext) return 'unknown';
+      if (windowContext.hasBeforeUnload === true) return 'entered';
+      return windowContext.hasBeenUserGestureActivated === false ? 'clean' : 'unknown';
+    } catch { return 'unknown'; }
+  }
+
+  function browserCardUserContextId(card) {
+    try { return browserIdentityModule().browserUserContextId(card._xulBrowser); } catch { return null; }
+  }
+
+  // Reopen the same URL in the chosen context at the card's frame, carry its
+  // Board membership over, then close the old card. Grants end (D-B3).
+  function switchBrowserCardAccount(card, target) {
+    const current = browserCardUserContextId(card);
+    const url = card._browserState?.uri || '';
+    const plan = browserAccountContextModule().planAccountSwitch({ currentUserContextId: current,
+      targetUserContextId: target.userContextId, url, formState: browserCardFormState(card) });
+    if (plan.action === 'unchanged') return card;
+    if (plan.action === 'blocked') { boardNotice(plan.message || '이 Browser의 계정 환경을 바꿀 수 없습니다.'); return null; }
+    if (plan.action === 'confirm' && !window.confirm(plan.message)) return null;
+    let identity = null;
+    try {
+      if (target.userContextId !== 0) identity = browserIdentityForContext(target.userContextId, target.label, { register: true });
+      if (target.userContextId !== 0 && !identity) throw new Error('unusable');
+    } catch { boardNotice('선택한 계정 환경을 확인할 수 없어 바꾸지 않았습니다.'); return null; }
+    if (isCardFullscreen(card)) exitCardFullscreen(card, { preserveCamera: true });
+    const frame = persistentEntityGeometry(card);
+    const projection = Object.values(state.boards?.projections || {}).find(item =>
+      (item.members || []).some(member => member?.viewId === card.id));
+    const member = projection?.members.find(item => item?.viewId === card.id) || null;
+    let next;
+    try {
+      next = spawnBrowserCard(url, { openMode: 'new', ...(identity ? { browserIdentity: identity } : {}),
+        placement: { x: frame.x, y: frame.y, width: frame.width, height: frame.height } });
+    } catch { boardNotice('새 계정 환경으로 다시 열지 못해 원래 Browser를 유지했습니다.'); return null; }
+    if (frame.zIndex) next.style.zIndex = String(frame.zIndex);
+    if (member && !(remapRestoredBoardMember(projection, member, next.id) && (bindViewToBoard(next, projection, member), true))) {
+      try { closeCanvasCard(next); } catch {}
+      boardNotice('Board 연결을 옮기지 못해 원래 Browser를 유지했습니다.');
+      return null;
+    }
+    if (member) syncDeskWindowBoardMetadata(next);
+    try { revokeBrowserToolGrants({ cardId: card.id }); } catch {}
+    card._closeApproved = true;
+    closeCanvasCard(card);
+    markAgendaDirty('switch-browser-account', next);
+    setActiveEntity(next);
+    return next;
+  }
+
+  function setBrowserSiteDefaultForCard(card, remember) {
+    const AccountContext = browserAccountContextModule();
+    const site = AccountContext.siteKeyForUrl(card._browserState?.uri || '', browserSiteBaseDomain);
+    const store = browserSiteDefaults();
+    if (!site || !store.profileScopeId) { boardNotice('이 사이트의 계정 기억을 저장할 수 없습니다.'); return false; }
+    const id = browserCardUserContextId(card);
+    const context = id === 0 ? { kind: 'default' } : card._browserIdentity?.userContextId === id
+      ? { kind: 'container', browserIdentityKey: card._browserIdentity.browserIdentityKey } : null;
+    try {
+      const nextStore = AccountContext.setSiteDefault(store, site,
+        remember && context ? { mode: 'always', context } : { mode: 'ask' });
+      if (!saveBrowserSiteDefaults(nextStore)) throw new Error('save');
+    } catch { boardNotice('이 사이트의 계정 기억을 저장하지 못했습니다.'); return false; }
+    boardNotice(remember ? `${site}은(는) 다음부터 이 계정 환경으로 엽니다.` : `${site}의 계정 기억을 지웠습니다. 다음부터 기본 환경으로 엽니다.`);
+    return true;
+  }
+
+  function browserAccountPicker(card) {
+    try {
+      return browserAccountContextModule().accountPickerModel({ currentUserContextId: browserCardUserContextId(card),
+        contexts: browserAccountContexts(), url: card._browserState?.uri || '', baseDomain: browserSiteBaseDomain,
+        store: browserSiteDefaults() });
+    } catch {
+      return { summary: '계정: 확인할 수 없는 환경', note: '계정 환경을 확인하지 못했습니다.', items: [], remember: null };
+    }
+  }
+
+  function openBrowserAccountMenu(card, anchor) {
+    document.querySelector('.egd-browser-account-menu')?.remove();
+    const model = browserAccountPicker(card);
+    let panel;
+    const close = ({ restoreFocus = false } = {}) => {
+      window.removeEventListener('mousedown', panel._outsideHandler, true);
+      panel.remove();
+      if (restoreFocus && anchor?.isConnected) anchor.focus();
+    };
+    const row = (label, attrs, action) => el('button', { type: 'button', class: 'egd-browser-menu-item', ...attrs,
+      onmousedown: ev => { if (ev.button === 0) { ev.preventDefault(); ev.currentTarget.focus(); } },
+      onclick: ev => { ev.stopPropagation(); close(); action(); } }, label);
+    const items = model.items.map(item => row(item.remembered ? `${item.label} · 이 사이트 기본` : item.label,
+      { role: 'menuitemradio', 'aria-checked': String(item.checked), data: { testid: 'browser-account-option', userContextId: String(item.userContextId) } },
+      () => switchBrowserCardAccount(card, item)));
+    const remember = model.remember ? row(model.remember.label,
+      { role: 'menuitemcheckbox', 'aria-checked': String(model.remember.checked), class: 'egd-browser-menu-item egd-browser-account-remember',
+        title: '끄면 이 사이트는 기본 환경으로 열리고, 카드에서 계정을 직접 고릅니다.', data: { testid: 'browser-account-remember' } },
+      () => setBrowserSiteDefaultForCard(card, !model.remember.checked)) : null;
+    const rect = anchor.getBoundingClientRect();
+    const count = items.length + (remember ? 2 : 1);
+    const pos = resolveFloatingMenuPlacement(rect, 220, count * 30 + 24);
+    panel = el('div', { class: 'egd-browser-menu egd-browser-account-menu egd-edge egd-frosted', role: 'menu',
+      'aria-label': model.summary, data: { testid: 'browser-account-menu' },
+      style: { left: Math.round(pos.left) + 'px', top: Math.round(pos.top) + 'px' } },
+    el('div', { class: 'egd-browser-account-note', role: 'presentation' }, model.note), ...items, remember);
+    panel._outsideHandler = ev => { if (!panel.contains(ev.target)) close(); };
+    panel.addEventListener('keydown', ev => {
+      const enabled = Array.from(panel.querySelectorAll('button'));
+      const at = enabled.indexOf(document.activeElement);
+      if (ev.key === 'Escape') { ev.preventDefault(); ev.stopPropagation(); close({ restoreFocus: true }); return; }
+      const nextIndex = ev.key === 'ArrowDown' ? (at + 1) % enabled.length : ev.key === 'ArrowUp' ? (at - 1 + enabled.length) % enabled.length : -1;
+      if (nextIndex < 0) return;
+      ev.preventDefault();
+      enabled[nextIndex]?.focus();
+    });
+    document.documentElement.appendChild(panel);
+    (items.find(node => node.getAttribute('aria-checked') === 'true') || items[0])?.focus();
+    window.setTimeout(() => { if (panel.isConnected) window.addEventListener('mousedown', panel._outsideHandler, true); }, 0);
+    return panel;
+  }
+
   function browserCookieImportSourceAllowed(card) {
     if (!card?.isConnected || card.dataset?.codexRole === 'auth' || !card._xulBrowser?.isConnected || !browserImportAllowed()) return false;
     try {
@@ -23156,7 +23351,7 @@
               cardIsEmpty: browserLibraryCardIsEmpty,
               openCard: (url, { background }) => {
                 if (!background && state.cardFullscreen) exitCardFullscreen(null, { preserveCamera: true });
-                return spawnBrowserCard(url, { openMode: 'new', background });
+                return spawnBrowserCard(url, { openMode: 'new', background, applySiteDefault: true });
               },
               navigateCard: (card, url) => browserCardControl(card, 'navigate', url) ? card : null,
               revealCard: card => {
@@ -23207,7 +23402,9 @@
   function spawnBrowserCard(initialUrl = 'https://duckduckgo.com', options = {}) {
     const normalizedUrl = normalizeBrowserNavigationUri(initialUrl);
     const identityRequired = Object.hasOwn(options, 'browserIdentity') || options.sourceRef?.browserIdentityRequired === true || !!options.sourceRef?.browserIdentityKey;
-    const browserIdentity = identityRequired ? options.browserIdentity : null;
+    // BRW-02: a user-opened site follows its remembered account context, if any.
+    const browserIdentity = identityRequired ? options.browserIdentity
+      : options.applySiteDefault === true ? browserSiteDefaultIdentity(normalizedUrl) : null;
     if (identityRequired && !browserIdentityUsable(browserIdentity)) {
       throw new Error('저장된 분리 환경을 확인할 수 없어 기본 환경으로 열지 않았습니다.');
     }
@@ -23224,7 +23421,7 @@
     // The first Browser fills the window at the world origin; any other opens in an empty spot.
     const placement = options.firstUse
       ? { x: 0, y: 0, width: window.innerWidth, height: window.innerHeight, inView: true }
-      : resolveCanvasCardPlacement('browser');
+      : options.placement ? { ...options.placement, inView: true } : resolveCanvasCardPlacement('browser');
     const deskWindow = spawnDeskWindowShell({
       id,
       kind: 'browser',
@@ -24825,6 +25022,10 @@
           cookieImportSupported ? 'Chrome 프로필을 선택해 쿠키를 새 분리 환경으로 가져옵니다.' : cookieImportUnavailable,
           ev => openBrowserCookieImport(card, anchor, ev),
           { testid: 'browser-cookie-import', disabled: !cookieImportSupported }),
+        // BRW-02: which account context this card runs in; picking one reopens it in place.
+        ...(typeof browserAccountPicker === 'function' ? [item(browserAccountPicker(card).summary + '…',
+          '이 Browser가 쓰는 계정 환경을 보고 바꿉니다. 같은 자리에서 다시 열립니다.',
+          () => openBrowserAccountMenu(card, anchor), { testid: 'browser-account' })] : []),
         item('다른 브라우저에서 가져오기…', 'Firefox 가져오기 창 열기', () => openFirefoxBrowserImport(),
           { testid: 'browser-library-import', nativeWindow: true }),
       ];
