@@ -324,3 +324,58 @@ test('Briefing API: a stable id resolves to its card and layer; reads are copies
   assert.equal(h.zone.listAnnotationSets({ includeDismissed: true }).length, 1);
   assert.equal(h.zone.revealAnnotationSet('ann-1'), false);
 });
+
+test('CNV-05 per-card hide: the bar toggle hides every mark on that card only, keeps the bar, saves nothing, and the chip shows it again', t => {
+  const h = setup(); t.after(h.restore);
+  const card = h.browserCard();
+  const other = h.browserCard('egd-card-8');
+  let seq = 0;
+  const idOf = () => ['ann-1', 'ann-2', 'ann-3'][seq++];
+  const publish = (cardId) => h.zone.receivePublishedAnnotation(run, { annotation: normalizeAnnotationArguments({
+    cardId, targetKind: 'browser', summary: '표시', units: 'viewportPx', grounding: 'dom',
+    observation: { documentId: 'doc-1', revision: 4, viewport: { width: 1000, height: 800 }, scroll: { x: 0, y: 0 } },
+    items: [{ id: 'a', type: 'box', rect: { x: 10, y: 10, w: 50, h: 50 } }] }, { run: { runId: 'turn-1', answerId: 'answer-7' }, now: 1, newId: idOf }) });
+  assert.equal(publish('egd-card-7'), 'ann-1');
+  assert.equal(publish('egd-card-7'), 'ann-2');
+  assert.equal(publish('egd-card-8'), 'ann-3');
+  button(h, 'annotation-accept', 'ann-1').click();
+  const dirtyBefore = h.calls.dirty.length, saveBefore = h.calls.save;
+  const recordsBefore = JSON.stringify(h.zone.annotationRecordsForCard(card));
+  const toggle = button(h, 'annotation-card-hide', 'ann-1');
+  assert.deepEqual([toggle.textContent, toggle.getAttribute('aria-pressed'), toggle.getAttribute('aria-label')], ['숨기기', 'false', '이 카드 표식 숨기기']);
+  toggle.click();
+  const layerOf = id => h.doc.getElementById(`egd-annotation-${id}`);
+  assert.deepEqual(['ann-1', 'ann-2', 'ann-3'].map(id => layerOf(id).dataset.cardHidden ?? null), ['true', 'true', null],
+    'both sets on this card hide, the other card keeps its marks');
+  assert.deepEqual(['ann-1', 'ann-2', 'ann-3'].map(id => h.zone.annotationHidden(id)), [true, true, false]);
+  assert.ok(bar(h, 'ann-1') && bar(h, 'ann-2'), 'the bars stay so the marks can come back');
+  assert.equal(bar(h, 'ann-2').querySelector('[data-testid="annotation-hidden-note"]').textContent, '이 카드의 표식을 숨겼습니다');
+  const back = button(h, 'annotation-card-hide', 'ann-2');
+  assert.deepEqual([back.textContent, back.getAttribute('aria-pressed')], ['다시 보기', 'true']);
+  assert.equal(button(h, 'annotation-accept', 'ann-2') !== null, true, 'a hidden proposal can still be accepted or dismissed');
+  assert.deepEqual([h.calls.dirty.length, h.calls.save], [dirtyBefore, saveBefore], 'hiding is not a Board or session change');
+  assert.equal(JSON.stringify(h.zone.annotationRecordsForCard(card)), recordsBefore, 'nothing about hiding is saved');
+  back.click();
+  assert.deepEqual(['ann-1', 'ann-2'].map(id => layerOf(id).dataset.cardHidden ?? null), [null, null]);
+  h.zone.setAnnotationHidden('ann-3', true);
+  assert.equal(layerOf('ann-3').dataset.cardHidden, 'true');
+  assert.equal(h.zone.revealAnnotationSet('ann-3'), true);
+  assert.equal(layerOf('ann-3').dataset.cardHidden ?? null, null, 'opening a set from its chip shows that card again');
+  assert.ok(other);
+});
+
+test('CNV-05 per-card hide on a free Canvas set hides only that set; the CSS hides marks, not the bar', async t => {
+  const h = setup(); t.after(h.restore);
+  const set = normalizeAnnotationArguments({ summary: '정리할 곳', items: [{ type: 'ellipse', rect: { x: 0, y: 0, w: 30, h: 20 } }] },
+    { now: 1, newId: () => 'ann-canvas' });
+  h.zone.receivePublishedAnnotation(run, { annotation: set });
+  const toggle = button(h, 'annotation-card-hide', 'ann-canvas');
+  assert.equal(toggle.getAttribute('aria-label'), '이 표식 숨기기');
+  toggle.click();
+  assert.equal(h.doc.getElementById('egd-annotation-ann-canvas').dataset.cardHidden, 'true');
+  assert.equal(bar(h, 'ann-canvas').querySelector('[data-testid="annotation-hidden-note"]').textContent, '이 표식을 숨겼습니다');
+  const { readFileSync } = await import('node:fs');
+  const css = readFileSync(new URL('../overlay/CSS/eg-desk-surface.uc.css', import.meta.url), 'utf8');
+  assert.match(css, /\.egd-annotation-layer\[data-card-hidden="true"\] \{ visibility: hidden !important; \}/);
+  assert.doesNotMatch(css, /\.egd-annotation-bar\[data-card-hidden/, 'the bar stays to bring the marks back');
+});

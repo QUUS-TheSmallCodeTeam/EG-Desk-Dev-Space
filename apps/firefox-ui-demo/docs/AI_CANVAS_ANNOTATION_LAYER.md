@@ -392,6 +392,7 @@ Minimum behavior:
 - Annotation selection should not focus the underlying browser/card unless explicitly requested.
 - Annotation hover can show label, confidence, and source run.
 - Annotation can be hidden/shown per card or per Board.
+  - Implemented (2026-11-17): screen-wide via 표식·메모 숨기기; per card via the set bar's 숨기기/다시 보기 toggle (every AI mark on that card; a free Canvas set hides only itself). Neither is saved; opening a set from its chat chip shows it again.
 
 Suggested controls:
 

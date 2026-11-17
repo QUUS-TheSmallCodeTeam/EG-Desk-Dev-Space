@@ -10,7 +10,11 @@
 // a free Canvas set. A chip under the answer points at the set (D-K4). Marks
 // are display only: pointer events pass through to the card under them and
 // their geometry is never an input coordinate. The screen-wide hide toggle
-// (root data-egd-annotations-hidden) hides them through CSS.
+// (root data-egd-annotations-hidden) hides them through CSS. Each bar also
+// has a per-card toggle ('이 카드 표식 숨기기'): it hides every AI mark on that
+// card (a free Canvas set: only that set) and keeps the bar so it can come
+// back. Like the screen-wide toggle it is never saved; opening a set from its
+// chat chip shows it again.
 //
 // Stable id and API for Answer Briefing: every set keeps the id the helper
 // gave it (restored sets keep their saved id unless another live set holds
@@ -33,6 +37,8 @@ export function createAnnotationZone(deps) {
   const ANNOTATION_RESTORE_LIMIT = 64;
   const ANNOTATION_SUMMARY_MAX = 160;
   const annotationEntries = new Map();
+  // Per-card hide (not saved): card elements, so a closed card's state goes with it.
+  const annotationHiddenCards = new WeakSet();
   let annotationResizeObserver = null;
 
   const annotationSafeId = (id) => String(id).replace(/[^A-Za-z0-9_-]/g, '-');
@@ -182,6 +188,23 @@ export function createAnnotationZone(deps) {
     return stack;
   }
 
+  function annotationIsHidden(entry, card = annotationCard(entry)) {
+    return entry.set.space === 'card' ? !!card && annotationHiddenCards.has(card) : !!entry.hidden;
+  }
+
+  function annotationSetHidden(entry, hidden) {
+    const card = annotationCard(entry);
+    if (entry.set.space === 'card') {
+      if (!card) return false;
+      if (hidden) annotationHiddenCards.add(card); else annotationHiddenCards.delete(card);
+      refreshAnnotations(card);
+    } else {
+      entry.hidden = !!hidden;
+      annotationRender(entry);
+    }
+    return true;
+  }
+
   function annotationRender(entry) {
     const status = AnnotationState.annotationSetStatus(entry.set);
     const card = annotationCard(entry);
@@ -219,7 +242,7 @@ export function createAnnotationZone(deps) {
       role: 'img',
       'aria-label': `${entry.summary} · ${AnnotationState.annotationSummaryText(entry.set)}`,
       data: { testid: 'annotation-layer', annotationSetId: entry.set.id, status, freshness: freshness.status,
-        ...(entry.emphasis ? { emphasis: 'true' } : {}) },
+        ...(entry.emphasis ? { emphasis: 'true' } : {}), ...(annotationIsHidden(entry, card) ? { cardHidden: 'true' } : {}) },
     }, svg, ...labels);
     if (entry.layer?.isConnected && entry.layer.parentNode === markHost) entry.layer.replaceWith(layer);
     else { entry.layer?.remove(); markHost.appendChild(layer); }
@@ -249,12 +272,14 @@ export function createAnnotationZone(deps) {
     const proposed = status === 'proposed' || status === 'partial';
     const counts = AnnotationState.annotationCounts(entry.set);
     const hiddenCount = projection.items.filter(item => !item.visible).length;
+    const cardHidden = annotationIsHidden(entry);
     const badge = proposed ? (status === 'partial' ? 'AI 제안 · 일부 받음' : 'AI 제안') : '표식';
     const bar = el('div', {
       class: `egd-annotation-bar${proposed ? ' egd-annotation-bar-proposed' : ''}`,
       role: 'group',
       'aria-label': `${badge}: ${entry.summary}`,
-      data: { testid: 'annotation-bar', annotationSetId: entry.set.id, status, freshness: freshness.status },
+      data: { testid: 'annotation-bar', annotationSetId: entry.set.id, status, freshness: freshness.status,
+        ...(cardHidden ? { cardHidden: 'true' } : {}) },
       // A press on the bar never reaches the card under it.
       onpointerdown: (ev) => ev.stopPropagation(),
       onmousedown: (ev) => ev.stopPropagation(),
@@ -265,6 +290,8 @@ export function createAnnotationZone(deps) {
     bar.appendChild(head);
     if (freshness.reason) bar.appendChild(el('p', { class: 'egd-annotation-note', data: { testid: 'annotation-freshness' } }, freshness.reason));
     if (hiddenCount) bar.appendChild(el('p', { class: 'egd-annotation-note' }, `지금 화면 밖 표식 ${hiddenCount}개`));
+    if (cardHidden) bar.appendChild(el('p', { class: 'egd-annotation-note', data: { testid: 'annotation-hidden-note' } },
+      entry.set.space === 'card' ? '이 카드의 표식을 숨겼습니다' : '이 표식을 숨겼습니다'));
     if (entry.notice) bar.appendChild(el('p', { class: 'egd-annotation-note egd-annotation-notice', role: 'status', data: { testid: 'annotation-notice' } }, entry.notice));
     const actions = el('div', { class: 'egd-annotation-actions' });
     if (proposed) {
@@ -282,6 +309,10 @@ export function createAnnotationZone(deps) {
     } else {
       actions.appendChild(annotationButton('지우기', 'annotation-dismiss', () => annotationDismiss(entry.set.id)));
     }
+    const hideWhat = entry.set.space === 'card' ? '이 카드 표식' : '이 표식';
+    actions.appendChild(annotationButton(cardHidden ? '다시 보기' : '숨기기', 'annotation-card-hide',
+      () => annotationSetHidden(entry, !cardHidden), { 'aria-pressed': String(cardHidden),
+        'aria-label': cardHidden ? `${hideWhat} 다시 보기` : `${hideWhat} 숨기기`, title: '저장되지 않습니다' }));
     bar.appendChild(actions);
     if (proposed && entry.expanded) {
       const list = el('ul', { class: 'egd-annotation-items', data: { testid: 'annotation-items' } });
@@ -507,6 +538,8 @@ export function createAnnotationZone(deps) {
   function revealAnnotationSet(setId, options = {}) {
     const target = annotationTarget(setId);
     if (!target) return false;
+    const entry = annotationEntries.get(setId);
+    if (annotationIsHidden(entry, target.card)) annotationSetHidden(entry, false);
     if (target.card) {
       focusCanvasCard(target.card);
       revealOpenCanvasCard(target.card, { opener: options.opener || null, kind: 'annotation' });
@@ -546,5 +579,7 @@ export function createAnnotationZone(deps) {
     revealAnnotationSet,
     emphasizeAnnotationSet,
     refreshAnnotations,
+    annotationHidden: (setId) => { const entry = annotationEntries.get(setId); return entry ? annotationIsHidden(entry) : false; },
+    setAnnotationHidden: (setId, hidden) => { const entry = annotationEntries.get(setId); return entry ? annotationSetHidden(entry, hidden) : false; },
   };
 }
