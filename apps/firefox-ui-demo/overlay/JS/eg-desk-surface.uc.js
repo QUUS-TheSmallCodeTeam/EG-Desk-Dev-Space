@@ -18589,6 +18589,25 @@
     return true;
   }
 
+  // CU-05: Ctrl+Alt+Shift+. stops every Agent input while this window has focus.
+  // Taken in capture before anything else sees it; the OS-wide hotkey is not here.
+  function installEmergencyStopShortcut() {
+    const shortcut = HostActivityView.createEmergencyStopShortcut({
+      post: (body) => {
+        if (!state.codexBridge?.hostControl) throw Object.assign(new Error('bridge unavailable'), { code: 'BRIDGE_UNAVAILABLE' });
+        return state.codexBridge.hostControl(body);
+      },
+      notify: (notice) => boardNotice(notice.text),
+    });
+    const onKeyDown = (ev) => {
+      if (!shortcut.keydown(ev)) return;
+      ev.preventDefault();
+      ev.stopImmediatePropagation();
+    };
+    window.addEventListener('keydown', onKeyDown, true);
+    return () => window.removeEventListener('keydown', onKeyDown, true);
+  }
+
   function installDeskCloseShortcut() {
     const isMac = servicesRef().appinfo.OS === 'Darwin';
     const pending = new WeakSet();
@@ -29892,6 +29911,7 @@
       installCanvasPanZoom(canvasViewport, canvasLayer);
       installEmptyCanvasHint(canvasViewport, canvasLayer);
       installDeskCloseShortcut();
+      installEmergencyStopShortcut();
       installBrowserShortcuts();
       installNativeGestureHelperBridge();
       state.codexBridge = installCodexBridge(legacyChatRecords);

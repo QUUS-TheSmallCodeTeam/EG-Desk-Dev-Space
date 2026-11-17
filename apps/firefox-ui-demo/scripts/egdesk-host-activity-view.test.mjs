@@ -148,3 +148,59 @@ test('the surface opens the view from the 컴퓨터 조작 settings section and 
   assert.match(source, /settings-computer-host-activity/);
   assert.match(source, /kind: 'host-activity'/);
 });
+
+// ============ CU-05 in-app emergency stop chord ============
+
+test('CU-05: the in-app stop chord matches the helper gate exactly: Ctrl+Alt+Shift by physical Period, Command up', async () => {
+  const { isEmergencyStopChord, EMERGENCY_STOP_CHORD } = await import('../helper/egdesk-host-input-gate.mjs');
+  assert.equal(View.EMERGENCY_STOP_LABEL, EMERGENCY_STOP_CHORD.label);
+  const cases = [];
+  for (const ctrlKey of [true, false]) for (const altKey of [true, false]) for (const shiftKey of [true, false]) for (const metaKey of [true, false]) {
+    for (const [code, key] of [['Period', '>'], ['Period', '≥'], ['Comma', '.'], ['', '.'], ['', '>'], [undefined, ','], ['KeyQ', '.']]) {
+      cases.push({ ctrlKey, altKey, shiftKey, metaKey, code, key });
+    }
+  }
+  for (const event of [...cases, null, 'x', {}]) assert.equal(View.isEmergencyStopChord(event), isEmergencyStopChord(event), JSON.stringify(event));
+  assert.equal(View.isEmergencyStopChord({ ctrlKey: true, altKey: true, shiftKey: true, metaKey: false, code: 'Period', key: '˘' }), true,
+    'the character macOS Alt makes does not matter');
+  assert.equal(View.isEmergencyStopChord({ ctrlKey: true, altKey: true, shiftKey: true, metaKey: true, code: 'Period' }), false, 'Command held: never');
+  assert.deepEqual(View.EMERGENCY_STOP_REQUEST, { path: '/host/control', body: { action: 'emergencyStop' } });
+});
+
+test('CU-05: the chord posts one emergencyStop at a time, says the result in Korean, and other keys pass through', async () => {
+  const posts = [], notices = [];
+  let release;
+  const shortcut = View.createEmergencyStopShortcut({
+    post: body => { posts.push(body); return new Promise(resolve => { release = resolve; }); },
+    notify: notice => notices.push(notice) });
+  const chord = { ctrlKey: true, altKey: true, shiftKey: true, metaKey: false, code: 'Period', key: '>' };
+  assert.equal(shortcut.keydown({ ...chord, code: 'KeyW' }), false, 'not the chord: untouched');
+  assert.equal(shortcut.keydown(chord), true);
+  await Promise.resolve();
+  assert.deepEqual(posts, [{ action: 'emergencyStop' }], 'no epoch needed: stop is always allowed');
+  assert.equal(shortcut.keydown({ ...chord, repeat: true }), true, 'a repeat is taken but not sent');
+  assert.equal(shortcut.keydown(chord), true, 'a second press while the first is in flight is not sent');
+  assert.equal(posts.length, 1);
+  release({ ack: { notDispatched: 2 } });
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(shortcut.busy(), false);
+  assert.deepEqual(notices.at(-1), { tone: 'status', text: '긴급 중지(Ctrl+Alt+Shift+.): 모든 Agent 입력을 멈췄습니다. 보내지 않은 동작 2개를 버렸습니다.' });
+  const failing = View.createEmergencyStopShortcut({ post: async () => { throw Object.assign(new Error('x'), { status: 502 }); }, notify: notice => notices.push(notice) });
+  failing.keydown(chord);
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(notices.at(-1).tone, 'error');
+  assert.match(notices.at(-1).text, /^긴급 중지를 보내지 못했습니다\./);
+  const offline = View.createEmergencyStopShortcut({ post: null, notify: notice => notices.push(notice) });
+  assert.equal(offline.keydown(chord), true);
+  assert.equal(notices.at(-1).text, '연결이 없어 긴급 중지를 보내지 못했습니다.');
+});
+
+test('CU-05: the EG-Desk window takes the chord in capture, consumes it and posts through the bridge host control', () => {
+  const source = readSurfaceSource();
+  const install = source.match(/  function installEmergencyStopShortcut\(\) \{\n([\s\S]*?)\n  \}\n/)?.[1] || '';
+  assert.match(install, /HostActivityView\.createEmergencyStopShortcut\(/);
+  assert.match(install, /return state\.codexBridge\.hostControl\(body\);/);
+  assert.match(install, /if \(!shortcut\.keydown\(ev\)\) return;\n      ev\.preventDefault\(\);\n      ev\.stopImmediatePropagation\(\);/);
+  assert.match(install, /window\.addEventListener\('keydown', onKeyDown, true\);/);
+  assert.match(source, /      installDeskCloseShortcut\(\);\n      installEmergencyStopShortcut\(\);/);
+});
