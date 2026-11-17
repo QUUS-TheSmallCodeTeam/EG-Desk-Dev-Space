@@ -1287,6 +1287,31 @@
   // event carried metadata only, so the press is a GET round trip to the
   // bridge. A Claude room has no publish route (captures and packets only),
   // so it shows no chip.
+  // CHAT-05: an answer without a briefing can ask its Agent for one. The
+  // request only goes into this room's composer draft (kept draft + new line,
+  // like the top search request); it is never sent automatically.
+  function buildBriefingRequestControl(thread, message) {
+    const offer = ChatState.nativeBindingHeld(thread) ? null : BriefingState.briefingRequestOffer(thread, message);
+    if (!offer) return null;
+    return el('button', {
+      class: 'egd-codex-result-chip', type: 'button', title: offer.title,
+      data: { testid: 'briefing-request', answerId: message.answerId || '', messageId: message.id || '' },
+      onclick: ev => {
+        ev.preventDefault(); ev.stopPropagation();
+        const bridge = state.codexBridge;
+        if (!bridge) return;
+        bridge.setDraft(RailSearchView.mergeAskDraft(getCodexThreadDraft(state.codex, thread.id), offer.text), thread.id);
+        window.requestAnimationFrame(() => {
+          const composer = Array.from(document.querySelectorAll('.egd-codex-input'))
+            .find(input => input.dataset.threadId === thread.id && !input.disabled);
+          if (!composer) return;
+          composer.focus({ preventScroll: true });
+          composer.setSelectionRange(composer.value.length, composer.value.length);
+        });
+      },
+    }, offer.label);
+  }
+
   function buildCodexOutputChips(message, thread) {
     if (message?.role !== 'assistant' || ChatState.nativeBindingHeld(thread) || thread?.engineId === 'claude') return [];
     return (message.outputs || []).map(ChatState.publishedOutputRecord).filter(Boolean).map(output => el('button', {
@@ -12744,6 +12769,7 @@
               onclick: (ev) => openAnswerBriefing(activeThread, message,
                 { trustedZeroDetail: ev.isTrusted && ev.detail === 0, opener: ev.currentTarget }),
             }, '브리핑 보기') : null;
+            const briefingRequest = briefingControl ? null : buildBriefingRequestControl(activeThread, message);
             const bubble = el('div', {
               class: [
                 'egd-codex-bubble',
@@ -12796,6 +12822,7 @@
             const computerLine = message.role === 'assistant' && message.runId && lastAnswerOfRun.get(message.runId) === message.id
               ? computerUseLine(roomRuns.findLast(run => run.runId === message.runId)) : null;
             const messageStack = el('div', { class: 'egd-codex-message-stack' }, roleLabel, messageLine, answerFold, computerLine, resultRow, briefingControl, meta);
+            if (briefingRequest) messageStack.insertBefore(briefingRequest, meta?.parentNode === messageStack ? meta : null);
             // CHAT-03: the @이름 chips sit right under the bubble, '스레드로 보냄' just above the time.
             if (mentionRow) messageStack.insertBefore(mentionRow, messageLine.nextSibling);
             if (sentChip) messageStack.insertBefore(sentChip, meta);

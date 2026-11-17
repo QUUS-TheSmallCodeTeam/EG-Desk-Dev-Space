@@ -42,6 +42,33 @@ export function validBriefing(briefing) {
       && (step.emphasis === undefined || BRIEFING_EMPHASIS.includes(step.emphasis)));
 }
 
+// CHAT-05 '브리핑 요청': an answer without a briefing offers to ask its Agent
+// for one. Only a draft is written (fixed wording naming the answer); nothing
+// is sent. Offered for a finished Codex answer in a conversation whose context
+// tools are registered (the publish tool exists there); never for Claude rooms.
+export const BRIEFING_REQUEST_LABEL = '브리핑 요청';
+const BRIEFING_REQUEST_EXCERPT = 40;
+function answerExcerpt(text) {
+  let fenced = false;
+  for (const raw of String(text || '').split('\n')) {
+    if (/^\s*(```|~~~)/.test(raw)) { fenced = !fenced; continue; }
+    if (fenced) continue;
+    const line = raw.replace(/^\s*(?:#{1,6}\s+|>\s*|[-*+]\s+|\d+[.)]\s+)/, '').replace(/[*_`~]|\[([^\]]*)\]\([^)]*\)/g, (match, label) => label ?? '').trim();
+    if (line) return line.length > BRIEFING_REQUEST_EXCERPT ? `${line.slice(0, BRIEFING_REQUEST_EXCERPT).trimEnd()}…` : line;
+  }
+  return '';
+}
+export function briefingRequestOffer(thread, message) {
+  if (!thread || thread.engineId === 'claude' || thread.contextToolsAvailable !== true || message?.role !== 'assistant'
+      || ['streaming', 'error', 'failed'].includes(message.status) || validBriefing(message.briefing)) return null;
+  const excerpt = answerExcerpt(message.content);
+  if (!excerpt) return null;
+  return {
+    label: BRIEFING_REQUEST_LABEL, title: '이 답변을 단계별로 따라볼 브리핑을 Agent에게 요청하는 초안을 입력칸에 넣습니다 (전송하지 않음)',
+    text: `[브리핑 요청] 이 답변("${excerpt}")을 Canvas에서 단계별로 따라볼 수 있게 답변 브리핑으로 게시해 주세요. 단계마다 근거 자료나 Canvas 영역을 대상으로 지정해 주세요.`,
+  };
+}
+
 export function beginBriefing(briefing, viewport) {
   if (!validBriefing(briefing)) throw new Error('검증 가능한 브리핑 단계가 없습니다.');
   return { briefing: copy(briefing), index: 0, previousView: copy(viewport) };

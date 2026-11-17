@@ -600,3 +600,17 @@ test('a comment block leaves the draft with its joining blank line; text the per
   assert.deepEqual(Briefing.briefingInputsForRefs(inputs, refs, messages).map(item => item.sourceId), ['source-a', 'source-b']);
   assert.deepEqual(Briefing.briefingInputsForRefs(inputs, [], messages), []);
 });
+
+// CHAT-05 '브리핑 요청' (inferred: draft only, fixed wording, no auto-send).
+test('an answer without a briefing offers a fixed request draft naming the answer; nothing else does', () => {
+  const thread = { id: 't', engineId: 'codex', contextToolsAvailable: true };
+  const answer = { role: 'assistant', status: 'complete', content: '```js\nx\n```\n## **주문 합계** 비교 결과를 정리했습니다. 이 문장은 길어서 잘립니다 계속 계속\n본문' };
+  const offer = Briefing.briefingRequestOffer(thread, answer);
+  assert.equal(offer.label, '브리핑 요청');
+  assert.match(offer.title, /전송하지 않음/);
+  assert.equal(offer.text, '[브리핑 요청] 이 답변("주문 합계 비교 결과를 정리했습니다. 이 문장은 길어서 잘립니다 계속 계…")을 Canvas에서 단계별로 따라볼 수 있게 답변 브리핑으로 게시해 주세요. 단계마다 근거 자료나 Canvas 영역을 대상으로 지정해 주세요.');
+  assert.equal(Briefing.briefingRequestOffer(thread, { ...answer, briefing: multiBriefing() }), null, 'a briefing already exists: 브리핑 보기 instead');
+  for (const [label, t, m] of [['Claude room', { ...thread, engineId: 'claude' }, answer], ['no publish tool', { ...thread, contextToolsAvailable: false }, answer],
+    ['user message', thread, { ...answer, role: 'user' }], ['streaming', thread, { ...answer, status: 'streaming' }], ['failed', thread, { ...answer, status: 'failed' }],
+    ['empty', thread, { ...answer, content: '  ' }]]) assert.equal(Briefing.briefingRequestOffer(t, m), null, label);
+});
