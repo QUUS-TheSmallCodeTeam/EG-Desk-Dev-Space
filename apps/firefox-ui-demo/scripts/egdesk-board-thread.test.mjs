@@ -123,7 +123,7 @@ test('each member\'s state (작업 중 · 막힘 · 완료) comes from the run a
 });
 
 // ── Screen wiring, cut from the surface source ──
-function sendHarness({ thread, reply }) {
+function sendHarness({ thread, reply, early = () => [] }) {
   const state = { codex: { activeThreadId: thread.id, activityRoomGeneration: 1, threads: [thread], threadDrafts: { [thread.id]: thread.draft }, threadDraftRevisions: { [thread.id]: 1 },
     authStatus: { isLoggedIn: true, authMode: 'chatgpt', accountEmail: 'fixture@example.test', identityStatus: 'known' }, connected: true, liveRevision: 0 } };
   const protocol = ChatState.createChatProtocolState();
@@ -144,7 +144,15 @@ function sendHarness({ thread, reply }) {
     CHAT_REQUEST_PROJECT_INVALID: 'project invalid', codexProfileCatalog: { status: 'ready', profiles: [{ id: ID_V, name: '검증 담당', avatar: null }] },
     fetchJson: async (path, options) => { calls.push([path, JSON.parse(options.body)]); return reply(path, JSON.parse(options.body)); },
     syncProtocolRun: run => synced.push(run),
+    boardEarlyEvents: BoardThread.createBoardEarlyEvents(), replayed: [],
   };
+  // The live stream's chat.event path, as far as admission goes: an unknown request is held for a pending board send.
+  deps.handleEvent = event => {
+    if (!ChatState.canAdmitChatEvent(protocol, state.codex.threads, event)) { deps.boardEarlyEvents.hold(event); return; }
+    deps.replayed.push(ChatState.reduceChatEvent(protocol, event));
+  };
+  const realFetch = deps.fetchJson;
+  deps.fetchJson = async (path, options) => { for (const event of early(JSON.parse(options.body))) deps.handleEvent(event); return realFetch(path, options); };
   state.codexBridge = { prepareRoomProjectSend: async () => ({}) };
   const cut = (from, to) => {
     const start = surfaceScript.indexOf(from), end = surfaceScript.indexOf(to, start);
@@ -160,7 +168,7 @@ function sendHarness({ thread, reply }) {
   deps.acceptBoardSend = compileFunction(`${cut('    function acceptBoardSend(', '\n    // One catalog read at a time;')}\nreturn acceptBoardSend;`, Object.keys(deps))(...Object.values(deps));
   const send = compileFunction(`return { ${cut('      async sendMessage(', '\n      },\n')}\n      } };`, Object.keys(deps))(...Object.values(deps)).sendMessage;
   const listeners = new Set();
-  return { state, protocol, calls, synced, send: () => send.call({ subscribe(listener) { listeners.add(listener); return () => listeners.delete(listener); } }, {}),
+  return { state, protocol, calls, synced, deps, send: () => send.call({ subscribe(listener) { listeners.add(listener); return () => listeners.delete(listener); } }, {}),
     thread: () => getCodexThreadById(null, thread.id) };
 }
 
@@ -219,4 +227,78 @@ test('screen wiring: member changes are saved to the store, opening a Board Thre
   assert.match(surfaceScript, /event\.event === 'run\.started' && event\.details\?\.board\) BoardThread\.noteBoardRun\(run, event\.details\.board\)/);
   assert.match(surfaceScript, /\.\.\.\(boardMemberRun \? \{\} : \{ conversationId: run\.conversationId \}\)/);
   assert.match(surfaceCss, /\.egd-codex-hud-members \{/);
+});
+
+test('CHAT-10 (a): a member\'s events that arrive before the board send\'s answer are held, then replayed once its run is registered', async () => {
+  const chatEvent = (requestId, seq, event, details = {}) => ({ type: 'chat.event', v: 2, streamId: 's-1', seq, event, requestId, clientThreadId: 'board-member:v',
+    conversationId: 'c-v', runId: 'r-v', engineId: 'codex', ts: '2026-11-17T00:00:00Z', details });
+  const h = sendHarness({ thread: room({ draft: '@검증 담당 확인해 주세요', profileEnabled: true }),
+    early: body => [
+      chatEvent(`${body.requestId}~v`, 1, 'run.started', { board: { profileId: ID_V, reason: 'mentioned', roomClientThreadId: 'room-1' } }),
+      chatEvent(`${body.requestId}~v`, 2, 'message.completed', { messageId: 'm-v', text: '확인했습니다' }),
+      chatEvent('someone-else~x', 3, 'message.completed', { messageId: 'm-x', text: '남의 것' }),
+    ],
+    reply: (path, body) => ({ accepted: true, requestId: body.requestId, clientThreadId: body.clientThreadId, recipients: [
+      { profileId: ID_V, label: '검증 담당', reason: 'mentioned', clientThreadId: 'board-member:v', requestId: `${body.requestId}~v`, status: 'started', conversationId: 'c-v', runId: 'r-v' }] }) });
+  const result = await h.send();
+  assert.equal(result.accepted, true);
+  assert.equal(h.deps.replayed.length, 2, 'both of the member\'s early events replayed, the stranger\'s dropped');
+  const run = h.protocol.runs[ChatState.runKey('c-v', 'r-v')];
+  assert.equal(run.messages.find(message => message.id === 'm-v')?.content, '확인했습니다');
+  assert.equal(run.boardMember, true);
+  assert.equal(h.deps.boardEarlyEvents.size(h.calls[0][1].requestId), 0, 'the send is no longer pending');
+});
+
+test('CHAT-10 (a): the early-event buffer is per pending send, bounded and short-lived', () => {
+  let clock = 0;
+  const buffer = BoardThread.createBoardEarlyEvents({ max: 3, ttlMs: 1000, now: () => clock });
+  assert.equal(buffer.hold({ requestId: 'req-1~a' }), false, 'nothing pending: not held');
+  buffer.open('req-1'); buffer.open('req-2');
+  assert.equal(buffer.hold({ requestId: 'req-1' }), false, 'the Lead\'s own request is registered before sending');
+  assert.equal(buffer.hold({ requestId: 'req-10~a' }), false, 'another request that only shares a prefix');
+  for (let seq = 1; seq <= 5; seq++) assert.equal(buffer.hold({ requestId: 'req-1~a', seq }), true);
+  assert.equal(buffer.hold({ requestId: 'req-2~b', seq: 9 }), true);
+  assert.deepEqual(buffer.release('req-1').map(event => event.seq), [3, 4, 5], 'only the latest few are kept');
+  assert.deepEqual(buffer.release('req-1'), [], 'released once');
+  clock = 5000;
+  assert.deepEqual(buffer.release('req-2'), [], 'held events expire');
+  buffer.open('req-3'); buffer.hold({ requestId: 'req-3~c' }); buffer.close('req-3');
+  assert.deepEqual(buffer.release('req-3'), [], 'a failed send drops what it held');
+});
+
+test('CHAT-10 (b): after a restart the other members\' stored answers come back into the room, once, by time', () => {
+  const events = [{ event: 'message.completed' }, { event: 'board.routed', details: { requestId: 'req-1', recipients: [
+    { profileId: ID_D, reason: 'lead', clientThreadId: 'room-1', status: 'started' },
+    { profileId: ID_V, label: '검증 담당', reason: 'mentioned', clientThreadId: 'board-member:v', status: 'started', conversationId: 'c-v', runId: 'r-v' },
+    { profileId: 'writer', label: '작가', reason: 'mentioned', clientThreadId: 'board-member:w', status: 'deferred' }] } }];
+  const routed = BoardThread.boardRoutedMembers(events);
+  assert.deepEqual([...routed], [['board-member:v', { profileId: ID_V, label: '검증 담당' }]], 'only a member that started, in its own conversation');
+  assert.equal(BoardThread.isBoardMemberThreadId('board-member:v'), true);
+  assert.equal(BoardThread.isBoardMemberThreadId('room-1'), false);
+  const thread = room({ messages: [
+    { id: 'u1', role: 'user', content: '@검증 담당 확인', status: 'complete', createdAt: '2026-11-17T10:00:00Z', localSeq: 1 },
+    { id: 'a1', role: 'assistant', content: '디자이너 답', status: 'complete', createdAt: '2026-11-17T10:05:00Z', localSeq: 4 },
+  ] });
+  const stored = [
+    { id: 'mu', localMessageId: 'mu', role: 'user', content: '@검증 담당 확인', status: 'complete', createdAt: '2026-11-17T10:00:00Z', localSeq: 1 },
+    { id: 'mv', localMessageId: 'mv', role: 'assistant', content: '검증했습니다', status: 'complete', createdAt: '2026-11-17T10:02:00Z', localSeq: 2, runId: 'r-v' },
+    { id: 'mz', localMessageId: 'mz', role: 'assistant', content: '', status: 'complete', createdAt: '2026-11-17T10:03:00Z' },
+  ];
+  const profiles = [{ id: ID_V, name: '검증 담당', avatar: { kind: 'emoji', value: '🦉', color: '#a9c5a9' } }];
+  const folded = BoardThread.foldBoardMemberAnswers(thread, stored, routed.get('board-member:v'), { profiles });
+  assert.deepEqual(folded.map(message => message.id), ['u1', 'mv', 'a1'], 'the member\'s copy of the person\'s message stays out; its answer sits by time');
+  const answer = folded[1];
+  assert.deepEqual([answer.authorName, answer.authorAvatar?.value, answer.boardMemberProfileId, 'localSeq' in answer], ['검증 담당', '🦉', ID_V, false]);
+  assert.deepEqual(BoardThread.foldBoardMemberAnswers({ ...thread, messages: folded }, stored, routed.get('board-member:v'), { profiles }).map(message => message.id),
+    ['u1', 'mv', 'a1'], 'read twice, shown once');
+});
+
+test('CHAT-10 robustness wiring: early events held and replayed, member conversations folded into their room, never shown as rooms', () => {
+  assert.match(surfaceScript, /if \(!ChatState\.canAdmitChatEvent\(protocol, state\.codex\.threads, event\)\) \{ boardEarlyEvents\.hold\(event\); return; \}/);
+  assert.match(surfaceScript, /for \(const early of boardEarlyEvents\.release\(requestId\)\) handleEvent\(early\);/);
+  assert.match(surfaceScript, /if \(boardPlan\) boardEarlyEvents\.open\(requestId\);/);
+  assert.match(surfaceScript, /\.finally\(\(\) => boardEarlyEvents\.close\(requestId\)\)/);
+  assert.match(surfaceScript, /if \(!BoardThread\.isBoardMemberThreadId\(summary\.clientThreadId\)\) await loadLocalHistoryThread\(summary\);/);
+  assert.match(surfaceScript, /if \(BoardThread\.isBoardMemberThreadId\(summary\.clientThreadId\)\) await restoreBoardMemberAnswers\(summary\);/);
+  assert.match(surfaceScript, /BoardThread\.boardRoutedMembers\(normalized\.events\)\) boardMemberRooms\.set\(/);
 });

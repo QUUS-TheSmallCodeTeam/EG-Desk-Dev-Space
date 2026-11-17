@@ -267,3 +267,83 @@ const SEND_ERROR_TEXT = Object.freeze({
 });
 /** Korean text for a refused Board Thread send, or null for other codes. */
 export const boardSendErrorText = code => (own(SEND_ERROR_TEXT, code) ? SEND_ERROR_TEXT[code] : null);
+
+// CHAT-10 robustness (a): a member's run events can arrive before the HTTP
+// answer of /chat/board/send names its run. The bridge names a member's
+// request `${roomRequestId}~<hash>`, so while that send is pending its
+// members' events are held (bounded per send, short TTL) and replayed once
+// the runs are registered. Anything else is not held.
+const EARLY_EVENTS_MAX = 64;
+const EARLY_EVENTS_TTL_MS = 15000;
+const memberRequestOf = (requestId, roomRequestId) => typeof requestId === 'string' && typeof roomRequestId === 'string' && roomRequestId
+  && requestId.startsWith(`${roomRequestId.slice(0, 200)}~`);
+
+export function createBoardEarlyEvents({ max = EARLY_EVENTS_MAX, ttlMs = EARLY_EVENTS_TTL_MS, now = () => Date.now() } = {}) {
+  const pending = new Map();  // room requestId → [{ event, at }]
+  const prune = rows => { const cutoff = now() - ttlMs; while (rows.length && rows[0].at < cutoff) rows.shift(); return rows; };
+  return {
+    open(requestId) { if (typeof requestId === 'string' && requestId && !pending.has(requestId)) pending.set(requestId, []); },
+    /** true when the event was kept for a pending board send. */
+    hold(event) {
+      for (const [requestId, rows] of pending) {
+        if (!memberRequestOf(event?.requestId, requestId)) continue;
+        prune(rows).push({ event, at: now() });
+        if (rows.length > max) rows.splice(0, rows.length - max);
+        return true;
+      }
+      return false;
+    },
+    /** The held events of this send in arrival order (expired ones dropped); the send is no longer pending. */
+    release(requestId) { const rows = pending.get(requestId) || []; pending.delete(requestId); return prune(rows).map(row => row.event); },
+    close(requestId) { pending.delete(requestId); },
+    size(requestId) { return pending.has(requestId) ? prune(pending.get(requestId)).length : 0; },
+  };
+}
+
+// CHAT-10 robustness (b): after a restart the other members' answers live
+// only in their own conversations (board-member:…). The room's history keeps
+// a 'board.routed' line naming each member's conversation; those answers are
+// read back from the local store and shown in the room again.
+const MEMBER_THREAD_PREFIX = 'board-member:';
+export const isBoardMemberThreadId = id => typeof id === 'string' && id.startsWith(MEMBER_THREAD_PREFIX);
+
+/** memberClientThreadId → { profileId, label } from a room's 'board.routed' history events. */
+export function boardRoutedMembers(events) {
+  const found = new Map();
+  for (const event of Array.isArray(events) ? events : []) {
+    if (event?.event !== 'board.routed') continue;
+    for (const row of Array.isArray(event.details?.recipients) ? event.details.recipients : []) {
+      if (!row || !isBoardMemberThreadId(row.clientThreadId) || !isProfileId(row.profileId) || row.status !== 'started') continue;
+      found.set(row.clientThreadId, { profileId: row.profileId, label: label(row.label) || null });
+    }
+  }
+  return found;
+}
+
+const timeOf = value => (typeof value === 'number' ? value : typeof value === 'string' ? Date.parse(value) : NaN);
+const sameMessage = (a, b) => [['localMessageId', 'localMessageId'], ['id', 'id']].some(([x, y]) => a[x] && a[x] === b[y])
+  || !!(a.runId && a.runId === b.runId && a.role === b.role && a.boardMemberProfileId && a.boardMemberProfileId === b.boardMemberProfileId);
+
+/**
+ * The room's messages with one member's stored answers folded in: only that
+ * member's finished answers (its copy of the person's message stays out),
+ * under its own name and face, placed by time, never twice.
+ */
+export function foldBoardMemberAnswers(roomThread, memberMessages, member, { profiles = [] } = {}) {
+  const current = Array.isArray(roomThread?.messages) ? roomThread.messages : [];
+  if (!member || !isProfileId(member.profileId)) return current;
+  const who = boardMemberRequest({ profileId: member.profileId, label: member.label }, roomThread || {}, { profiles });
+  const messages = [...current];
+  for (const stored of Array.isArray(memberMessages) ? memberMessages : []) {
+    if (stored?.role !== 'assistant' || !['complete', 'completed'].includes(stored.status ?? 'complete') || !text(stored.content)) continue;
+    const { localSeq: _seq, ...rest } = stored;
+    const answer = { ...rest, authorName: who.authorName, ...(who.authorAvatar ? { authorAvatar: who.authorAvatar } : {}),
+      boardMemberProfileId: member.profileId, localHistory: true };
+    if (messages.some(message => sameMessage(answer, message) || sameMessage(message, answer))) continue;
+    const at = timeOf(answer.createdAt);
+    let index = messages.length;
+    if (Number.isFinite(at)) { const after = messages.findIndex(message => timeOf(message.createdAt) > at); if (after >= 0) index = after; }
+    messages.splice(index, 0, answer);
+  }
+  return messages;
+}

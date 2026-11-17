@@ -14557,6 +14557,8 @@
     // CHAT-10: a /chat/board/send answer. Every recipient's outcome goes on the
     // room (its chip state); each other member's run is shown in this room
     // under its own name, and the Lead's run comes back as a /chat/send answer.
+    // CHAT-10: members' events that beat the board send's answer, replayed once their runs are registered.
+    const boardEarlyEvents = BoardThread.createBoardEarlyEvents();
     function acceptBoardSend(threadId, answer, requestId) {
       const outcome = BoardThread.boardSendOutcome(answer, requestId);
       const room = getCodexThreadById(state.codex, threadId);
@@ -14571,6 +14573,7 @@
         BoardThread.noteBoardRun(run, boardOf(row), { member: true });
         syncProtocolRun(run);
       }
+      for (const early of boardEarlyEvents.release(requestId)) handleEvent(early);
       if (outcome.lead) {
         BoardThread.noteBoardRun(ChatState.acceptChatRequest(protocol, outcome.lead, requestId), boardOf(recipients.find(row => row.requestId === requestId)));
         return outcome.lead;
@@ -14670,6 +14673,29 @@
       emit();
     }
 
+    // CHAT-10: a Board member's own conversation (board-member:…) is not a room of
+    // its own. Its stored answers come back into the room that asked it (the room's
+    // 'board.routed' lines name it), read from the local store only.
+    const boardMemberRooms = new Map();
+    async function restoreBoardMemberAnswers(summary) {
+      const member = boardMemberRooms.get(summary.clientThreadId);
+      if (!member || !getCodexThreadById(state.codex, member.roomId)) return;
+      const messages = [];
+      try {
+        for (let afterSeq = 0, pages = 0; pages < 20; pages++) {
+          const page = await fetchJson(`/chat/history?clientThreadId=${encodeURIComponent(summary.clientThreadId)}&afterSeq=${encodeURIComponent(afterSeq)}&limit=100`);
+          const normalized = ChatState.normalizeLocalHistoryPage({ ...page, thread: { ...summary, ...(page.thread || {}) } }, summary.clientThreadId);
+          if (!normalized) break;
+          messages.push(...normalized.messages);
+          const next = Number(normalized.nextCursor);
+          if (!normalized.hasMore || !Number.isSafeInteger(next) || next <= afterSeq) break;
+          afterSeq = next;
+        }
+      } catch { return; } // The room keeps what it shows; the next load reads again.
+      updateThreadById(member.roomId, room => ({ ...room,
+        messages: BoardThread.foldBoardMemberAnswers(room, messages, member, { profiles: codexProfileCatalog.profiles }) }));
+      emit();
+    }
     async function loadLocalHistoryThread(summary) {
       const clientThreadId = summary.clientThreadId;
       let afterSeq = 0;
@@ -14699,6 +14725,7 @@
         if (current?.localConversationId && current.localConversationId !== normalized.localConversationId) throw new Error('로컬 기록의 채팅방 식별자가 바뀌었습니다.');
         updateThreadById(clientThreadId, () => ({ ...ChatState.hydrateLocalChatThread(current, normalized, { liveFenceRevision }),
           routing: ThreadRouting.routingWithEvents(current?.routing, normalized.events) }));
+        for (const [memberThreadId, member] of BoardThread.boardRoutedMembers(normalized.events)) boardMemberRooms.set(memberThreadId, { ...member, roomId: clientThreadId });
         emit();
         if (!normalized.hasMore) return;
         const nextSeq = Number(normalized.nextCursor);
@@ -14765,7 +14792,8 @@
             for (const importId of acknowledged.values()) confirmedLegacyImports.add(importId);
           }
           stage = 'history';
-          for (const summary of summaries) await loadLocalHistoryThread(summary);
+          for (const summary of summaries) if (!BoardThread.isBoardMemberThreadId(summary.clientThreadId)) await loadLocalHistoryThread(summary);
+          for (const summary of summaries) if (BoardThread.isBoardMemberThreadId(summary.clientThreadId)) await restoreBoardMemberAnswers(summary);
           const backupFailed = state.codex.legacyChatBackupRequired && !state.codex.legacyChatBackupKey;
           state.codex.localHistoryStatus = backupFailed ? 'error' : 'ready';
           state.codex.localHistoryError = backupFailed ? '기존 채팅 기록의 백업을 확인하지 못했습니다. 원본 저장값은 유지됩니다.' : null;
@@ -15008,7 +15036,7 @@
           return;
         case 'chat.event': {
           if (event.v === 2) {
-            if (!ChatState.canAdmitChatEvent(protocol, state.codex.threads, event)) return;
+            if (!ChatState.canAdmitChatEvent(protocol, state.codex.threads, event)) { boardEarlyEvents.hold(event); return; }
             const run = ChatState.reduceChatEvent(protocol, event, ChatState.knownChatEngineIds(state.codex.engines));
             if (run && event.event === 'run.started' && event.details?.board) BoardThread.noteBoardRun(run, event.details.board);  // CHAT-10: who answered
             // CNV-05 / D-K1: an Agent's marks appear over their card at once; the camera stays.
@@ -17639,9 +17667,11 @@
           // CHAT-10 (D-M2): an @mention or an Agent Lead in a Board Thread goes to /chat/board/send.
           const boardPlan = engineId === 'codex' && activeThread.type === 'group' ? BoardThread.boardSendPlan(activeThread, chatRequest, { selfName: SELF_MEMBER }) : null;
           if (boardPlan?.error) throw Object.assign(new Error(BoardThread.boardSendErrorText(boardPlan.error)), { status: 400, code: boardPlan.error, accepted: false });
+          if (boardPlan) boardEarlyEvents.open(requestId);
           const pendingSend = boardPlan
             ? fetchJson(boardPlan.path, { method: 'POST', signal: token.signal, body: JSON.stringify(boardPlan.body) })
               .then(answer => epochScope.valid(token) ? acceptBoardSend(activeThread.id, answer, requestId) : answer)
+              .finally(() => boardEarlyEvents.close(requestId))
             : fetchJson('/chat/send', {
               method: 'POST',
               signal: token.signal,

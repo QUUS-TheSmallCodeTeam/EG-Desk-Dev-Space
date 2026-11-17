@@ -5399,6 +5399,8 @@ function localHistoryThreadLoaderHarness(state, records, fetchJson) {
     const getCodexThreadById = (codex, id) => codex.threads.find(thread => thread.id === id);
     const updateThreadById = (id, update) => { state.codex.threads = state.codex.threads.map(thread => thread.id === id ? update(thread) : thread); };
     const emit = () => {};
+    const BoardThread = { boardRoutedMembers: () => new Map() };
+    const codexProfileCatalog = { profiles: [] };
     ${surfaceSource.slice(start, end)}
     return { list: listLocalHistoryThreads, read: loadLocalHistoryThread };
   `, ['state', 'legacyHistoryRecords', 'ChatState', 'ThreadRouting', 'fetchJson']);
@@ -5469,6 +5471,8 @@ function localHistoryLoaderHarness({ state, list, post, read = async () => {}, r
       browserTransportId = null; browserTransportSource = null;
     };
     const attachBrowserToolTransport = () => () => {};
+    const BoardThread = { isBoardMemberThreadId: id => String(id).startsWith('board-member:') };
+    const restoreBoardMemberAnswers = async () => {};
     function queueLocalHistoryRetry() {${retryBody}\n    }
     async function loadLocalHistory(legacyRecords = [], { force = false } = {}) {${loadBody}\n    }
     function onReady(event = { data: '{}' }) {${readyBody}\n    }
