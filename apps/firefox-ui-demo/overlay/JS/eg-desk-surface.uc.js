@@ -28846,7 +28846,8 @@
   function openPortableExport({ scope = 'desk', boardId = null, boardTitle = null } = {}) {
     if (!portableExportReady()) return null;
     portableOpener = document.activeElement instanceof Element ? document.activeElement : null;
-    return portableFlow().openExport({ scope, boardId, boardTitle });
+    return portableFlow().openExport({ scope, boardId, boardTitle,
+      extras: { attachments: portableSupportState.attachments === true, fileDrafts: portableSupportState.fileDrafts === true } });
   }
 
   function openPortableImport() {
@@ -29027,6 +29028,8 @@
       el('div', { class: 'egd-store-preview', role: 'region', 'aria-label': done.title, data: { testid: 'portable-done' } },
         done.where ? el('strong', { class: 'egd-portable-where' }, done.where) : null,
         el('p', {}, done.summary),
+        Array.isArray(done.received) && done.received.length ? el('ul', { class: 'egd-portable-received', 'aria-label': '가져온 것', data: { testid: 'portable-received' } },
+          ...done.received.map(line => el('li', {}, line))) : null,
         ...done.notes.map(note => el('p', { class: 'egd-portable-note', data: { testid: 'portable-note' } }, note))),
       el('div', { class: 'egd-store-actions' }, ...extra,
         el('button', { type: 'button', class: 'egd-store-primary', data: { focusKey: 'done', testid: 'portable-done-close', autofocus: 'true' }, onclick: () => actions.onClose?.() }, '닫기')),
@@ -29044,8 +29047,18 @@
       const chats = el('input', { type: 'checkbox', disabled: busy, data: { field: 'includeChats', focusKey: 'field-includeChats', testid: 'portable-include-chats' } });
       chats.checked = typeof typed.includeChats === 'boolean' ? typed.includeChats : view.includeChats === true;
       const warning = el('p', { class: 'egd-portable-warning', role: 'note', data: { testid: 'portable-plain-warning' } }, PortableState.PORTABLE_PLAIN_WARNING);
+      // RT-03 opt-in extras (D-R3): shown only when the bridge supports them, always unchecked at first.
+      const extraCheck = (name, testid) => {
+        if (view.extras?.[name.replace(/^include(.)/, (_, c) => c.toLowerCase())] !== true) return null;
+        const input = el('input', { type: 'checkbox', disabled: busy, data: { field: name, focusKey: `field-${name}`, testid } });
+        input.checked = typeof typed[name] === 'boolean' ? typed[name] : view[name] === true;
+        return input;
+      };
+      const attachments = extraCheck('includeAttachments', 'portable-include-attachments');
+      const fileDrafts = extraCheck('includeFileDrafts', 'portable-include-file-drafts');
       const submit = el('button', { type: 'button', class: 'egd-store-primary', disabled: busy, data: { focusKey: 'submit', testid: 'portable-export-submit' },
-        onclick: () => actions.onSubmitExport?.({ passphrase: pass.input.value, confirm: confirm.input.value, includeChats: chats.checked }) });
+        onclick: () => actions.onSubmitExport?.({ passphrase: pass.input.value, confirm: confirm.input.value, includeChats: chats.checked,
+          ...(attachments ? { includeAttachments: attachments.checked } : {}), ...(fileDrafts ? { includeFileDrafts: fileDrafts.checked } : {}) }) });
       const sync = () => {
         const plain = !pass.input.value;
         warning.hidden = !plain;
@@ -29062,6 +29075,8 @@
           : 'Desk와 저장된 Board를 .egdesk 파일 하나로 저장합니다. 다른 PC나 다른 EG-Desk에서 가져오면 새 사본으로 들어갑니다.'),
         el('label', { class: 'egd-portable-check' }, chats, el('span', {}, '대화 기록 포함'),
           el('small', {}, '꺼 두면 대화 내용은 파일에 넣지 않습니다.')),
+        attachments ? el('label', { class: 'egd-portable-check' }, attachments, el('span', {}, '첨부 포함'), el('small', {}, PortableState.PORTABLE_EXTRAS_HINT)) : null,
+        fileDrafts ? el('label', { class: 'egd-portable-check' }, fileDrafts, el('span', {}, '파일 초안 포함'), el('small', {}, '원본 파일이 아니라 편집 중인 초안만 넣습니다.')) : null,
         pass.row, confirm.row, warning,
         el('p', { class: 'egd-store-panel-copy egd-portable-small' }, '파일은 EG-Desk 내보내기 폴더에 저장되고, 같은 이름의 파일은 덮어쓰지 않습니다. 비밀번호·계정 정보는 넣지 않습니다.'),
         view.step === 'saving' ? status('지금 화면을 먼저 저장하는 중…') : view.step === 'exporting' ? status('파일을 만드는 중…') : null,
@@ -29096,7 +29111,8 @@
         el('div', { class: 'egd-store-preview', role: 'region', 'aria-label': '파일 내용', data: { testid: 'portable-preview' } },
           el('strong', {}, preview.headline || ''),
           el('p', { data: { testid: 'portable-preview-summary' } }, preview.summary || ''),
-          view.source?.fileName ? el('p', { class: 'egd-portable-small' }, view.source.fileName) : null),
+          view.source?.fileName ? el('p', { class: 'egd-portable-small' }, view.source.fileName) : null,
+          ...(Array.isArray(preview.notes) ? preview.notes : []).map(note => el('p', { class: 'egd-portable-note', data: { testid: 'portable-preview-note' } }, note))),
         preview.effect ? el('p', { class: `egd-portable-effect egd-portable-effect-${preview.effect.tone}`, role: preview.effect.tone === 'warning' ? 'alert' : 'note',
           data: { testid: 'portable-effect', tone: preview.effect.tone } }, preview.effect.text) : null,
         view.step === 'importing' ? status('가져오는 중…') : null,

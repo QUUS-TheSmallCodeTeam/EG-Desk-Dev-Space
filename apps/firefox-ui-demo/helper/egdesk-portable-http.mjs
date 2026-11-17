@@ -37,8 +37,8 @@ function exportInput(body) {
   if (!['desk', 'board'].includes(body.scope)) throw httpError('PORTABLE_HTTP_INPUT', 'scope must be desk or board')
   if (body.scope === 'board' ? typeof body.boardId !== 'string' || !body.boardId : body.boardId !== undefined) throw httpError('PORTABLE_HTTP_INPUT', 'boardId is required for a Board export only')
   const include = body.include ?? {}
-  fields(include, ['chats', 'profiles'])
-  if (Object.values(include).some(value => typeof value !== 'boolean')) throw httpError('PORTABLE_HTTP_INPUT', 'include.chats and include.profiles must be true or false')
+  fields(include, ['chats', 'profiles', 'attachments', 'fileDrafts'])
+  if (Object.values(include).some(value => typeof value !== 'boolean')) throw httpError('PORTABLE_HTTP_INPUT', 'include.chats, include.profiles, include.attachments and include.fileDrafts must be true or false')
   return { scope: body.scope, ...(body.scope === 'board' ? { boardId: body.boardId } : {}), include, passphrase: passphraseField(body.passphrase) }
 }
 function sourceInput(body, withMode) {
@@ -56,7 +56,7 @@ function sourceInput(body, withMode) {
  * handlePortableHttp(req, url, {service, readJson, send, port}) → true when it owned the URL.
  * service: createPortableService(...) or () => service.
  * GET  /v1/portable/exports            → {folder, displayPath, files: [{fileName, bytes, modifiedAt, fileRef}]}
- * POST /v1/portable/export {scope: 'desk'|'board', boardId?, include?: {chats, profiles}, passphrase?}
+ * POST /v1/portable/export {scope: 'desk'|'board', boardId?, include?: {chats, profiles, attachments, fileDrafts}, passphrase?}
  *                                       → 201 {fileName, bytes, encrypted, contents, folder, displayPath, fileRef, redacted}
  * POST /v1/portable/inspect {fileRef: {exportFile} | bundle: base64, passphrase?}
  *                                       → 200 summary | 200 {encrypted: true, locked: true, bytes} without a passphrase
@@ -107,7 +107,7 @@ export async function handlePortableHttp(req, url, { service, readJson = readJso
  * desk/chat/profiles: () => store (null while unavailable). appDataDir is the
  * fallback export folder parent when ~/Downloads does not exist.
  */
-export function createPortableHttpHandler({ desk, chat, profiles, appDataDir, port = 39218, ...options } = {}) {
-  const service = createPortableService({ desk, chat, profiles, location: () => portableExportLocation({ appDataDir }), ...options })
+export function createPortableHttpHandler({ desk, chat, profiles, attachments = null, fileDrafts = null, appDataDir, port = 39218, ...options } = {}) {
+  const service = createPortableService({ desk, chat, profiles, attachments, fileDrafts, location: () => portableExportLocation({ appDataDir }), ...options })
   return (req, res, url) => handlePortableHttp(req, url, { service, port, send: (status, data) => sendJson(res, status, data) })
 }

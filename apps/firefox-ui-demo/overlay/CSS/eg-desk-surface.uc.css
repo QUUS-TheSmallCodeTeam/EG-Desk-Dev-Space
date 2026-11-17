@@ -1312,6 +1312,7 @@
 .egd-portable-input[aria-invalid="true"] { border-color: var(--egd-note-line); }
 .egd-portable-check { display: grid; grid-template-columns: auto 1fr; align-items: center; column-gap: 8px; row-gap: 2px; font-weight: 600; }
 .egd-portable-check small { grid-column: 2; color: var(--egd-on-surface-variant); font-weight: 400; font-size: 12px; }
+.egd-portable-received { margin: 4px 0 0; padding-inline-start: 18px; display: grid; gap: 2px; }
 .egd-portable-warning, .egd-portable-effect {
   margin: 0;
   padding: 8px 10px;

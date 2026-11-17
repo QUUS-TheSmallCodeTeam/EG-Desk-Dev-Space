@@ -31,6 +31,7 @@ export async function openEGDeskManagedDraftStore({ directory, ownerScope } = {}
   const insert = db.prepare('INSERT OR IGNORE INTO drafts (id, head, payload) VALUES (?, ?, ?)')
   const select = db.prepare('SELECT payload FROM drafts WHERE id = ?')
   const update = db.prepare('UPDATE drafts SET head = ?, payload = ? WHERE id = ? AND head = ?')
+  const listAll = db.prepare('SELECT payload FROM drafts ORDER BY id LIMIT ?')
   let closed = false
   const ensureOpen = () => { if (closed) fail('STORE_CLOSED', 'Managed draft store is closed') }
   return {
@@ -48,6 +49,16 @@ export async function openEGDeskManagedDraftStore({ directory, ownerScope } = {}
       const record = JSON.parse(row.payload)
       validRecord(record)
       return record
+    },
+    // RT-03 export: read-only listing, capped; a corrupt row is skipped, never repaired here.
+    async list({ limit = 1000 } = {}) {
+      ensureOpen()
+      const max = Number.isSafeInteger(limit) && limit > 0 ? Math.min(limit, 10_000) : 1000
+      const records = []
+      for (const row of listAll.all(max)) {
+        try { const record = JSON.parse(row.payload); validRecord(record); records.push(record) } catch { /* skipped */ }
+      }
+      return records
     },
     async compareAndSwap(id, expectedHead, next) {
       ensureOpen(); validRecord(next)

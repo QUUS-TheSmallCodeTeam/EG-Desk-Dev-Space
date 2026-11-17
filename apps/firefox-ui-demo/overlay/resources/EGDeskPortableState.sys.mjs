@@ -1,15 +1,17 @@
 // RT-03 .egdesk export and import, as the screen sees them. The bridge owns
 // the files (helper 2f9b030, egdesk-portable-http.mjs):
 //   GET  /v1/state capabilities.portable: ['export', 'inspect', 'import-as-new',
-//        'passphrase', 'exports-list'], or ['local-store-unavailable'];
+//        'passphrase', 'exports-list', 'attachments'?, 'file-drafts'?], or ['local-store-unavailable'];
 //        an older bridge sends none and answers the routes 404.
 //   GET  /v1/portable/exports → { folder, displayPath, files: [{ fileName, bytes, modifiedAt, fileRef }] }
-//   POST /v1/portable/export { scope: 'desk'|'board', boardId?, include: { chats, profiles }, passphrase? }
-//        → 201 { fileName, bytes, encrypted, contents, folder, displayPath, fileRef, redacted }
+//   POST /v1/portable/export { scope: 'desk'|'board', boardId?, include: { chats, profiles, attachments?, fileDrafts? }, passphrase? }
+//        → 201 { fileName, bytes, encrypted, contents, omitted, folder, displayPath, fileRef, redacted }
+//        attachments (context captures) and fileDrafts are sent only when chosen
+//        (D-R3: off by default), so an older bridge never sees the new fields.
 //   POST /v1/portable/inspect { fileRef | bundle (base64), passphrase? }
 //        → 200 summary, or { encrypted: true, locked: true, bytes } without the passphrase
 //   POST /v1/portable/import { fileRef | bundle, passphrase?, mode: 'asNew' }
-//        → 201 { mode, encrypted, verified, contents, desk, boards, chats, profiles, redacted }
+//        → 201 { mode, encrypted, verified, contents, desk, boards, chats, profiles, attachments, fileDrafts, redacted }
 //   failures: { code, error, reason?, encrypted?, locked?, written? }.
 // Import never overwrites: what already exists stays, and a taken ID makes a
 // new copy. A passphrase is used for the requests that need it and never
@@ -24,6 +26,8 @@ export const PORTABLE_MAX_FILE_BYTES = 64 * 1024 * 1024;
 export const PORTABLE_EXTENSION = '.egdesk';
 export const PORTABLE_PLAIN_WARNING = '암호 없이 저장하면 파일을 가진 누구나 내용을 볼 수 있습니다.';
 export const PORTABLE_NEW_ENGINE_NOTE = '가져온 대화는 이어서 말하면 새 엔진 대화로 시작합니다.';
+export const PORTABLE_DRAFT_NOTE = '파일 초안은 원본 파일과 연결하지 않은 초안으로 들어왔습니다. 원본에 저장하려면 파일 창에서 다시 연결해 주세요.';
+export const PORTABLE_EXTRAS_HINT = '꺼 두면 넣지 않습니다. 비밀번호·키·토큰이 든 파일과 너무 큰 파일은 켜도 빠집니다.';
 
 /** What the connected bridge supports; an older bridge (no list) supports nothing. */
 export function portableSupport(bridgeState) {
@@ -32,6 +36,7 @@ export function portableSupport(bridgeState) {
   return {
     export: has('export'), inspect: has('inspect'), importAsNew: has('import-as-new') && has('inspect'),
     passphrase: has('passphrase'), exportsList: has('exports-list'), storeUnavailable: has('local-store-unavailable'),
+    attachments: has('attachments'), fileDrafts: has('file-drafts'),
   };
 }
 
@@ -41,7 +46,7 @@ const passphraseLength = text => Array.from(text).length;
  * An empty passphrase means a plain file (the screen shows PORTABLE_PLAIN_WARNING).
  * Profiles never travel from the screen (include.profiles false).
  */
-export function portableExportRequest({ scope, boardId = null, includeChats = false, passphrase = '', confirm = '' } = {}) {
+export function portableExportRequest({ scope, boardId = null, includeChats = false, includeAttachments = false, includeFileDrafts = false, passphrase = '', confirm = '' } = {}) {
   if (scope !== 'desk' && scope !== 'board') return { error: { field: null, text: '무엇을 내보낼지 알 수 없습니다.' } };
   if (scope === 'board' && (typeof boardId !== 'string' || !boardId)) return { error: { field: null, text: '내보낼 Board를 찾지 못했습니다.' } };
   const secret = typeof passphrase === 'string' ? passphrase : '';
@@ -52,7 +57,8 @@ export function portableExportRequest({ scope, boardId = null, includeChats = fa
   }
   return {
     method: 'POST', path: '/v1/portable/export',
-    body: { scope, ...(scope === 'board' ? { boardId } : {}), include: { chats: includeChats === true, profiles: false }, ...(secret ? { passphrase: secret } : {}) },
+    body: { scope, ...(scope === 'board' ? { boardId } : {}), include: { chats: includeChats === true, profiles: false,
+      ...(includeAttachments === true ? { attachments: true } : {}), ...(includeFileDrafts === true ? { fileDrafts: true } : {}) }, ...(secret ? { passphrase: secret } : {}) },
   };
 }
 
@@ -117,7 +123,24 @@ const titleText = value => typeof value === 'string' && value.trim() ? value.tri
 export function portableContentsText(contents) {
   const parts = [`Board ${count(contents?.boards)}개`, `카드 ${count(contents?.cards)}개`, `대화 ${count(contents?.chats)}개`];
   if (count(contents?.profiles)) parts.push(`Agent ${count(contents.profiles)}개`);
+  if (count(contents?.attachments)) parts.push(`첨부 ${count(contents.attachments)}개`);
+  if (count(contents?.fileDrafts)) parts.push(`파일 초안 ${count(contents.fileDrafts)}개`);
   return parts.join(' · ');
+}
+const OMIT_TEXT = { secret: '비밀값이 들어 있어', 'too-large': '너무 커서', limit: '개수·용량 한도를 넘어', unreadable: '읽지 못해', 'unsafe-name': '이름이 안전하지 않아' };
+/** One note per omitted kind: '첨부 3개는 빼고 저장했습니다(비밀값이 들어 있어 2개, 너무 커서 1개).' Names never reach the text. */
+export function portableOmittedNotes(omitted, { verb = '빼고 저장했습니다' } = {}) {
+  const notes = [];
+  for (const [key, label] of [['attachments', '첨부'], ['fileDrafts', '파일 초안']]) {
+    const list = Array.isArray(omitted?.[key]) ? omitted[key] : [];
+    const total = Array.isArray(omitted?.[key]) ? list.length : count(omitted?.[key]);
+    if (!total) continue;
+    const reasons = {};
+    for (const item of list) if (OMIT_TEXT[item?.reason]) reasons[item.reason] = (reasons[item.reason] || 0) + 1;
+    const detail = Object.entries(reasons).map(([reason, n]) => `${OMIT_TEXT[reason]} ${n}개`).join(', ');
+    notes.push(`${label} ${total}개는 ${verb}${detail ? `(${detail})` : ''}.`);
+  }
+  return notes;
 }
 const scopeText = contents => contents?.scope === 'board' ? `Board '${titleText(contents.title) || 'Board'}'` : 'Desk 전체';
 
@@ -148,6 +171,8 @@ export function portablePreviewView(summary, { fileName = null } = {}) {
     locked: false, fileName, scope: summary.scope === 'board' ? 'board' : 'desk', replacesDesk,
     headline: scopeText(summary),
     summary: [portableContentsText(summary), made ? `${made}에 만듦` : null, summary.encrypted ? '암호로 잠김' : '암호 없음'].filter(Boolean).join(' · '),
+    notes: [...portableOmittedNotes(summary.omitted, { verb: '만들 때 빠졌습니다' }),
+      ...(count(summary.fileDrafts) ? ['파일 초안은 원본 파일과 연결하지 않은 새 초안으로 들어옵니다. 원본 파일은 바꾸지 않습니다.'] : [])],
     effect: replacesDesk
       ? { tone: 'warning', text: '가져오면 지금 Desk 화면이 이 파일의 Desk로 바뀝니다. 지금 화면은 먼저 복구 기록에 남기고, Board와 대화는 새 사본으로 더합니다.' }
       : { tone: 'info', text: '지금 화면은 그대로 두고, 들어 있는 Board와 대화를 새 사본으로 더합니다.' },
@@ -164,6 +189,7 @@ export function portableExportDoneView(result, { saved = true } = {}) {
   const hidden = redactedCount(result?.redacted);
   if (hidden) notes.push(`비밀번호·계정 정보처럼 이 PC에만 있어야 하는 값 ${hidden}개는 빼고 저장했습니다.`);
   if (count(result?.contents?.chatsOmitted)) notes.push(`대화가 많아 ${count(result.contents.chatsOmitted)}개는 넣지 못했습니다.`);
+  notes.push(...portableOmittedNotes(result?.omitted));
   if (!saved) notes.push('화면의 마지막 변경을 먼저 저장하지 못해, 그 변경은 파일에 빠졌을 수 있습니다.');
   return {
     title: '내보냈습니다', where, fileName: titleText(result?.fileName),
@@ -177,6 +203,8 @@ export function portableImportDoneView(result, { redrawn = true } = {}) {
   const boards = Array.isArray(result?.boards) ? result.boards : [];
   const chats = Array.isArray(result?.chats) ? result.chats : [];
   const profiles = Array.isArray(result?.profiles) ? result.profiles : [];
+  const attachments = Array.isArray(result?.attachments) ? result.attachments : [];
+  const fileDrafts = Array.isArray(result?.fileDrafts) ? result.fileDrafts : [];
   const notes = [];
   const copies = boards.filter(item => item?.idChanged === true).length + chats.filter(item => item?.idChanged === true).length;
   if (copies) notes.push(`같은 ID가 있어 새 사본(${copies}개)으로 들어왔습니다.`);
@@ -185,12 +213,23 @@ export function portableImportDoneView(result, { redrawn = true } = {}) {
   const skipped = profiles.filter(item => item?.status === 'duplicate').length;
   if (added) notes.push(`Agent ${added}개를 더했습니다.`);
   if (skipped) notes.push(`이미 있는 Agent ${skipped}개는 건너뛰었습니다.`);
+  if (attachments.length) notes.push(`첨부 ${attachments.length}개를 새 사본으로 더했습니다.`);
+  if (fileDrafts.length) notes.push(PORTABLE_DRAFT_NOTE);
   if (result?.desk && !redrawn) notes.push('가져온 Desk를 화면에 다시 그리지 못했습니다. 복구 기록에서 열 수 있습니다.');
   if (result?.verified === false) notes.push('가져온 내용을 다시 열어 확인하지 못했습니다. Board 목록과 복구 기록에서 확인해 주세요.');
   return {
     title: '가져왔습니다',
     summary: [scopeText(result?.contents), portableContentsText(result?.contents)].join(' · '),
     deskReplaced: !!result?.desk, boards: boards.length, chats: chats.length, notes,
+    // What came in, one line per kind that has any (the import summary list).
+    received: [
+      result?.desk ? 'Desk 화면' : null,
+      boards.length ? `Board ${boards.length}개` : null,
+      chats.length ? `대화 ${chats.length}개` : null,
+      added ? `Agent ${added}개 (검토 필요 초안)` : null,
+      attachments.length ? `첨부 ${attachments.length}개` : null,
+      fileDrafts.length ? `파일 초안 ${fileDrafts.length}개 (원본과 연결 안 됨)` : null,
+    ].filter(Boolean),
   };
 }
 
@@ -210,6 +249,9 @@ const ERROR_TEXT = {
   PORTABLE_EXPORT_NAME_TAKEN: '같은 이름의 파일이 너무 많습니다. 내보내기 폴더를 정리한 뒤 다시 시도해 주세요.',
   BOARD_NOT_FOUND: '이 Board가 아직 저장소에 없습니다. Board를 저장한 뒤 다시 시도해 주세요.',
   PORTABLE_LOOPBACK_REQUIRED: '이 컴퓨터의 EG-Desk에서만 할 수 있습니다.',
+  PORTABLE_ENTRY_UNSAFE: '파일 안의 첨부나 파일 초안이 안전하지 않아(폴더 경로가 든 이름, 내용 불일치, 비밀값 파일) 아무것도 가져오지 않았습니다.',
+  PORTABLE_ATTACHMENT_STORE_UNAVAILABLE: '첨부는 Codex 계정에 로그인한 상태에서만 내보내거나 가져올 수 있습니다. 아무것도 바꾸지 않았습니다.',
+  PORTABLE_DRAFT_STORE_UNAVAILABLE: '지금은 파일 초안 저장소를 쓸 수 없어 진행하지 못했습니다. 아무것도 바꾸지 않았습니다.',
   // This screen's own refusal: the Desk as it is now could not be kept in 복구 기록 first.
   PORTABLE_DESK_NOT_KEPT: '지금 Desk를 복구 기록에 먼저 남기지 못해 가져오지 않았습니다. 연결을 확인한 뒤 다시 시도해 주세요.',
 };
@@ -222,7 +264,9 @@ export function portableErrorText(error, { action = 'import' } = {}) {
     const parts = [written.desk ? 'Desk' : null,
       Array.isArray(written.boards) && written.boards.length ? `Board ${written.boards.length}개` : null,
       Array.isArray(written.chats) && written.chats.length ? `대화 ${written.chats.length}개` : null,
-      Array.isArray(written.profiles) && written.profiles.length ? `Agent ${written.profiles.length}개` : null].filter(Boolean);
+      Array.isArray(written.profiles) && written.profiles.length ? `Agent ${written.profiles.length}개` : null,
+      Array.isArray(written.attachments) && written.attachments.length ? `첨부 ${written.attachments.length}개` : null,
+      Array.isArray(written.fileDrafts) && written.fileDrafts.length ? `파일 초안 ${written.fileDrafts.length}개` : null].filter(Boolean);
     return `가져오다 멈췄습니다. ${parts.length ? `${parts.join(' · ')}는 이미 들어왔습니다. ` : ''}Board 목록과 복구 기록을 확인해 주세요.`;
   }
   if (code && ERROR_TEXT[code]) return ERROR_TEXT[code];
@@ -251,12 +295,12 @@ export function createPortableFlow({ request, saveBeforeExport = async () => ({ 
   beforeImport = async () => {}, applyImported = async () => ({ redrawn: true }), afterImport = () => {}, onState = () => {} } = {}) {
   if (typeof request !== 'function') throw new TypeError('request is required');
   const closed = () => ({ open: false, mode: null, step: 'closed', busy: false, scope: null, boardId: null, boardTitle: null,
-    includeChats: false, error: null, errorField: null, files: null, filesStatus: 'idle', source: null, preview: null, done: null, exportsList: false });
+    includeChats: false, includeAttachments: false, includeFileDrafts: false, extras: { attachments: false, fileDrafts: false }, error: null, errorField: null, files: null, filesStatus: 'idle', source: null, preview: null, done: null, exportsList: false });
   let state = closed();
   // Held only between inspect and import of one locked file; never in a snapshot.
   let secret = '';
   let generation = 0;
-  const snapshot = () => ({ ...state, files: state.files && { ...state.files, rows: state.files.rows.map(row => ({ ...row })) },
+  const snapshot = () => ({ ...state, extras: { ...state.extras }, files: state.files && { ...state.files, rows: state.files.rows.map(row => ({ ...row })) },
     source: state.source && { kind: state.source.kind, fileName: state.source.fileName }, preview: state.preview && { ...state.preview },
     done: state.done && { ...state.done, notes: [...state.done.notes] } });
   const publish = patch => { state = { ...state, ...patch }; try { onState(snapshot()); } catch { /* A listener never breaks the flow. */ } return snapshot(); };
@@ -271,19 +315,23 @@ export function createPortableFlow({ request, saveBeforeExport = async () => ({ 
       status, code: typeof body?.code === 'string' ? body.code : null, encrypted: body?.encrypted === true, written: body?.written ?? null, action });
   };
 
-  function openExport({ scope = 'desk', boardId = null, boardTitle = null } = {}) {
+  // extras: which opt-in kinds the bridge supports (portableSupport); both start unchecked (D-R3).
+  function openExport({ scope = 'desk', boardId = null, boardTitle = null, extras = null } = {}) {
     generation++;
     secret = '';
     return publish({ ...closed(), open: true, mode: 'export', step: 'form', scope: scope === 'board' ? 'board' : 'desk',
+      extras: { attachments: extras?.attachments === true, fileDrafts: extras?.fileDrafts === true },
       boardId: scope === 'board' ? boardId : null, boardTitle: scope === 'board' ? titleText(boardTitle) || 'Board' : null });
   }
 
-  async function submitExport({ passphrase = '', confirm = '', includeChats = false } = {}) {
+  async function submitExport({ passphrase = '', confirm = '', includeChats = false, includeAttachments = false, includeFileDrafts = false } = {}) {
     if (state.mode !== 'export' || state.busy || state.step !== 'form') return snapshot();
-    const spec = portableExportRequest({ scope: state.scope, boardId: state.boardId, includeChats, passphrase, confirm });
-    if (spec.error) return publish({ includeChats: includeChats === true, error: spec.error.text, errorField: spec.error.field });
+    // A kind the bridge does not support is never requested, whatever the screen sent.
+    const chosen = { includeChats: includeChats === true, includeAttachments: includeAttachments === true && state.extras.attachments, includeFileDrafts: includeFileDrafts === true && state.extras.fileDrafts };
+    const spec = portableExportRequest({ scope: state.scope, boardId: state.boardId, ...chosen, passphrase, confirm });
+    if (spec.error) return publish({ ...chosen, error: spec.error.text, errorField: spec.error.field });
     const epoch = ++generation;
-    publish({ busy: true, step: 'saving', includeChats: includeChats === true, error: null, errorField: null });
+    publish({ busy: true, step: 'saving', ...chosen, error: null, errorField: null });
     let saved = false;
     try { saved = (await saveBeforeExport({ scope: state.scope, boardId: state.boardId }))?.saved !== false; } catch { saved = false; }
     if (epoch !== generation) return snapshot();

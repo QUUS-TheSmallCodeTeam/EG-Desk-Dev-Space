@@ -8,6 +8,7 @@ import { publicText } from './codex-chat-values.mjs'
 import { PRIVATE_KEYS } from './egdesk-chat-store.mjs'
 import { MAX_BOARDS, MAX_BOARD_BODY_BYTES, MAX_DESK_STATE_BYTES } from './egdesk-desk-store.mjs'
 import { PortableBundleError, createEGDeskPortableBundle, loadEGDeskPortableDependencies } from './egdesk-portable-bundle.mjs'
+import { EXTRA_KIND, collectPortableExtras, matchExtrasManifest, parseExtraEntry, summarizeExtras, validateExtrasManifest, writePortableAttachments, writePortableDrafts } from './egdesk-portable-extras.mjs'
 import { MAX_PROFILES, PROFILE_TEMPLATES, normalizeProfileBody, profileHash, withoutAvatarImage } from './egdesk-profile-store.mjs'
 
 // RT-03: the .egdesk portable bundle wired to the local Desk, chat and profile
@@ -36,7 +37,9 @@ const MAX_CHAT_TITLE = 1000
 const MAX_LISTED_CONVERSATIONS = 10_000
 const MIN_REMAP_ID = 8
 const KIND = Object.freeze({ root: 'egdesk.portable.root', board: 'egdesk.portable.board', chat: 'egdesk.portable.chat', profile: 'egdesk.portable.profile' })
-const CHILD_TYPE = Object.freeze({ board: 'board', chat: 'chat', profile: 'artifact' })
+// Attachments and File drafts (opt-in, D-R3) travel as 'artifact' nodes too.
+const CHILD_TYPE = Object.freeze({ board: 'board', chat: 'chat', profile: 'artifact', attachment: 'artifact', fileDraft: 'artifact' })
+const CHILD_LABEL = Object.freeze({ board: 'Board', chat: 'Chat', profile: 'Profile', attachment: 'Attachment', fileDraft: 'File draft' })
 const EXPORT_FILE = /^(?!\.)[^\\/:*?"<>|\u0000-\u001f]{1,200}\.egdesk$/u
 const BOARD_ID = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/
 const MACHINE_PATH = /(?:^|[\s("'])(?:\/[^\s]|~\/|[A-Za-z]:[\\/]|file:\/\/|\\\\[^\s])/i
@@ -231,6 +234,15 @@ async function readExportFile(directory, name, maxBytes) {
 }
 
 // ── Export: read the stores into an in-memory, pinned graph ──
+/** Every string under a 'draftId' key in a Board/Desk body (File cards keep their working copy there). */
+function draftIdsIn(body, found = new Set(), depth = 0) {
+  if (depth > 100 || !body || typeof body !== 'object') return found
+  for (const [key, child] of Object.entries(body)) {
+    if (key === 'draftId' && typeof child === 'string' && child) found.add(child)
+    else draftIdsIn(child, found, depth + 1)
+  }
+  return found
+}
 function chatThreadIdsIn(body) {
   const ids = new Set()
   for (const card of Array.isArray(body?.cards) ? body.cards : []) {
@@ -298,10 +310,10 @@ function exportDeskState(state, includeChats, counts) {
   return value
 }
 
-function collectExport({ desk, chat, profiles, scope, boardId, include, limits, now }) {
+async function collectExport({ desk, chat, profiles, attachments, fileDrafts, scope, boardId, include, limits, now }) {
   const counts = { privateFields: 0, identifiers: 0, maskedTexts: 0 }
   const exportedAt = now()
-  const model = { scope, exportedAt, include, desk: null, board: null, boards: [], chats: [], profiles: [] }
+  const model = { scope, exportedAt, include, desk: null, board: null, boards: [], chats: [], profiles: [], attachments: [], fileDrafts: [], extras: null }
   let threadIds = null, rootTitle = 'Desk', bytes = 0
   const encoded = []
   const add = (type, title, payload) => {
@@ -322,10 +334,18 @@ function collectExport({ desk, chat, profiles, scope, boardId, include, limits, 
     if (current.state === null && !boards.length) fail('PORTABLE_NOTHING_TO_EXPORT', 'There is no Desk or saved Board to export', 409)
     model.desk = current.state === null ? null : exportDeskState(current.state, include.chats, counts)
   }
+  // Opt-in extras (D-R3: off unless asked). Read before the root so its
+  // manifest can list what was included and what was left out.
+  const boardIds = scope === 'board' ? new Set([boardId]) : new Set(desk.listBoards().boards.map(item => item.boardId))
+  const extras = (include.attachments || include.fileDrafts)
+    ? await collectPortableExtras({ attachments, fileDrafts, include, scope, boardIds,
+      threadIds: scope === 'board' ? threadIds : null, draftIds: scope === 'board' ? draftIdsIn(model.board.body) : null })
+    : { entries: [], manifest: { attachments: null, fileDrafts: null } }
+  model.extras = extras.manifest
   // The root goes first in the size budget; children follow.
   const rootPayload = scope === 'board'
-    ? { kind: KIND.root, v: 1, scope, exportedAt, include, board: model.board }
-    : { kind: KIND.root, v: 1, scope, exportedAt, include, desk: { state: model.desk } }
+    ? { kind: KIND.root, v: 1, scope, exportedAt, include, extras: extras.manifest, board: model.board }
+    : { kind: KIND.root, v: 1, scope, exportedAt, include, extras: extras.manifest, desk: { state: model.desk } }
   add('root', rootTitle, rootPayload)
   if (scope === 'desk') {
     for (const summary of desk.listBoards().boards) {
@@ -354,12 +374,16 @@ function collectExport({ desk, chat, profiles, scope, boardId, include, limits, 
       add('profile', payload.body.name, payload)
     }
   }
+  for (const entry of extras.entries) {
+    model[entry.type === 'attachment' ? 'attachments' : 'fileDrafts'].push(entry.payload)
+    add(entry.type, entry.title, entry.payload)
+  }
   return { model, encoded, counts, chatsOmitted, rootId: scope }
 }
 function exportGraph({ encoded, rootId }) {
   const objects = new Map()
   const nodes = new Map()
-  const index = { board: 0, chat: 0, profile: 0 }
+  const index = { board: 0, chat: 0, profile: 0, attachment: 0, fileDraft: 0 }
   const children = []
   let root = null
   for (const item of encoded) {
@@ -370,7 +394,7 @@ function exportGraph({ encoded, rootId }) {
       continue
     }
     const id = `${item.type}-${++index[item.type]}`
-    const fallback = `${item.type === 'board' ? 'Board' : item.type === 'chat' ? 'Chat' : 'Profile'} ${index[item.type]}`
+    const fallback = `${CHILD_LABEL[item.type]} ${index[item.type]}`
     nodes.set(id, { id, type: CHILD_TYPE[item.type], scopeRootId: rootId, title: manifestTitle(item.title, fallback), refs: [], objects: [{ sha256: hash, role: 'body' }] })
     children.push(id)
   }
@@ -484,9 +508,15 @@ function parseBundleContent(manifest, objects) {
   if (!root || root.type !== 'board') damaged('UNSUPPORTED_CONTENT')
   const top = readPayload(root, objects)
   if (top.kind !== KIND.root || !['desk', 'board'].includes(top.scope)) damaged('UNSUPPORTED_CONTENT')
-  if (!exactFields(top, ['kind', 'v', 'scope', 'exportedAt', 'include', top.scope]) || safeTime(top.exportedAt) === null
-      || !exactFields(top.include, ['chats', 'profiles']) || typeof top.include.chats !== 'boolean' || typeof top.include.profiles !== 'boolean') damaged('INVALID_CONTENT')
-  const model = { scope: top.scope, exportedAt: top.exportedAt, include: top.include, desk: null, board: null, boards: [], chats: [], profiles: [] }
+  // Files from before the opt-in extras have no 'extras' and a two-key include.
+  const legacy = !Object.hasOwn(top, 'extras')
+  const includeKeys = legacy ? ['chats', 'profiles'] : ['chats', 'profiles', 'attachments', 'fileDrafts']
+  if (!exactFields(top, ['kind', 'v', 'scope', 'exportedAt', 'include', ...(legacy ? [] : ['extras']), top.scope]) || safeTime(top.exportedAt) === null
+      || !exactFields(top.include, includeKeys) || includeKeys.some(key => typeof top.include[key] !== 'boolean')) damaged('INVALID_CONTENT')
+  const include = { attachments: false, fileDrafts: false, ...top.include }
+  const extras = legacy ? { attachments: null, fileDrafts: null } : top.extras
+  validateExtrasManifest(extras, include, damaged)
+  const model = { scope: top.scope, exportedAt: top.exportedAt, include, desk: null, board: null, boards: [], chats: [], profiles: [], attachments: [], fileDrafts: [], extras }
   const boardPayload = value => {
     if (!exactFields(value, ['boardId', 'title', 'body']) && !exactFields(value, ['kind', 'v', 'boardId', 'title', 'body'])) damaged('INVALID_CONTENT')
     if (typeof value.boardId !== 'string' || !isTitle(value.title) || !plain(value.body)) damaged('INVALID_CONTENT')
@@ -512,8 +542,13 @@ function parseBundleContent(manifest, objects) {
     } else if (node.type === 'artifact' && value.kind === KIND.profile) {
       if (!exactFields(value, ['kind', 'v', 'lifecycle', 'body']) || !['active', 'draft'].includes(value.lifecycle) || !plain(value.body)) damaged('INVALID_CONTENT')
       model.profiles.push(value)
+    } else if (node.type === 'artifact' && (value.kind === EXTRA_KIND.attachment || value.kind === EXTRA_KIND.fileDraft)) {
+      const entry = parseExtraEntry(value, damaged)
+      if (!include[entry.type === 'attachment' ? 'attachments' : 'fileDrafts']) damaged('MANIFEST_MISMATCH')
+      model[entry.type === 'attachment' ? 'attachments' : 'fileDrafts'].push(entry)
     } else damaged('UNSUPPORTED_CONTENT')
   }
+  matchExtrasManifest(extras, model.attachments, model.fileDrafts, damaged)
   if (hasPrivateKey(model.desk) || hasPrivateKey(model.board?.body) || model.boards.some(item => hasPrivateKey(item.body)) || model.chats.some(item => hasPrivateKey(item.runs))) {
     fail('PORTABLE_PRIVATE_FIELD', 'The file contains a private field (password, token, key); nothing was imported')
   }
@@ -529,6 +564,7 @@ export function summarizeContent(model) {
     desk: model.scope === 'desk' && model.desk !== null,
     boards: boards.length, cards: deskCards + boardCards, deskCards,
     chats: model.chats.length, profiles: model.profiles.length,
+    ...summarizeExtras(model),
   }
 }
 
@@ -549,8 +585,10 @@ function jsonBytes(value, max, code, name) {
   if (size > max) fail(code, `${name} exceeds ${max} bytes; nothing was imported`, 413)
 }
 /** Choose IDs, rewrite references and validate everything. Writes nothing. */
-function planImport(model, { desk, chat, profiles }) {
+function planImport(model, { desk, chat, profiles, attachments, fileDrafts }) {
   if (!desk) fail('PORTABLE_STORE_UNAVAILABLE', 'Local Desk storage is unavailable', 503)
+  if (model.attachments.length && typeof attachments?.importCopy !== 'function') fail('PORTABLE_ATTACHMENT_STORE_UNAVAILABLE', 'Attachment storage is unavailable; nothing was imported', 503)
+  if (model.fileDrafts.length && typeof fileDrafts?.importDraft !== 'function') fail('PORTABLE_DRAFT_STORE_UNAVAILABLE', 'File draft storage is unavailable; nothing was imported', 503)
   if (model.chats.length && !chat) fail('PORTABLE_CHAT_STORE_UNAVAILABLE', 'Local chat storage is unavailable', 503)
   if (model.profiles.length && !profiles) fail('PORTABLE_PROFILE_STORE_UNAVAILABLE', 'Local profile storage is unavailable', 503)
   const counts = { privateFields: 0, identifiers: 0, maskedTexts: 0 }
@@ -622,17 +660,20 @@ function planImport(model, { desk, chat, profiles }) {
     const added = profilePlans.filter(item => !item.duplicate).length
     if (listed.filter(item => item.lifecycle !== 'deleted').length + added > MAX_PROFILES) fail('PORTABLE_LIMIT', `At most ${MAX_PROFILES} profiles can be kept; nothing was imported`, 409)
   }
-  return { scope: model.scope, state, boards, chats: chatPlans, profiles: profilePlans, counts }
+  return { scope: model.scope, state, boards, chats: chatPlans, profiles: profilePlans, attachments: model.attachments, fileDrafts: model.fileDrafts, counts }
 }
-/** Desk (one transaction) → conversations → profiles. A later failure reports what was written. */
-function writeImport(plan, { desk, chat, profiles }) {
-  const written = { desk: null, boards: [], chats: [], profiles: [] }
+/** Desk (one transaction) → conversations → profiles → attachments → File drafts. A later failure reports what was written. */
+async function writeImport(plan, { desk, chat, profiles, attachments, fileDrafts }) {
+  const written = { desk: null, boards: [], chats: [], profiles: [], attachments: [], fileDrafts: [] }
   const partial = error => {
-    if (!written.desk && !written.boards.length && !written.chats.length && !written.profiles.length) return error
+    if (!written.desk && !written.boards.length && !written.chats.length && !written.profiles.length && !written.attachments.length && !written.fileDrafts.length) return error
     return Object.assign(new Error('The import stopped part way; the items listed in written were added'), { code: 'PORTABLE_IMPORT_PARTIAL', httpStatus: 500, written, reason: typeof error?.code === 'string' ? error.code : null })
   }
   try {
-    const result = desk.importPortable({ state: plan.state, boards: plan.boards.map(({ boardId, title, body }) => ({ boardId, title, body })) })
+    // Drafts first: File cards in the imported Desk/Boards then point at the new draft IDs.
+    const draftMap = await writePortableDrafts(plan, { fileDrafts }, written)
+    const state = remapTree(plan.state, draftMap)
+    const result = desk.importPortable({ state, boards: plan.boards.map(({ boardId, title, body }) => ({ boardId, title, body: remapTree(body, draftMap) })) })
     written.desk = result.desk ? { generation: result.desk.generation, unchanged: result.desk.unchanged } : null
     written.boards = result.boards.map((saved, index) => ({ boardId: saved.boardId, title: saved.title, sourceBoardId: plan.boards[index].sourceBoardId, idChanged: saved.boardId !== plan.boards[index].sourceBoardId }))
     for (const item of plan.chats) {
@@ -647,6 +688,7 @@ function writeImport(plan, { desk, chat, profiles }) {
       const created = profiles.importDraft(item.body, { format: 'egdesk' })
       written.profiles.push({ profileId: created.id, name: item.body.name, status: 'imported', active: false, reviewRequired: true })
     }
+    await writePortableAttachments(plan, { attachments }, written)
   } catch (error) { throw partial(error) }
   return written
 }
@@ -663,7 +705,7 @@ function verifyWritten(written, { desk, chat }) {
  * desk/chat/profiles: store or () => store (null = unavailable).
  * location: () => {directory, folder} (default portableExportLocation()).
  */
-export function createPortableService({ desk, chat, profiles, location = () => portableExportLocation(), dependencies, limits: limitOverrides = {}, now = Date.now, home = os.homedir() } = {}) {
+export function createPortableService({ desk, chat, profiles, attachments = null, fileDrafts = null, location = () => portableExportLocation(), dependencies, limits: limitOverrides = {}, now = Date.now, home = os.homedir() } = {}) {
   const limits = Object.freeze({ ...PORTABLE_LIMITS, ...limitOverrides })
   const resolve = value => typeof value === 'function' ? value() : value ?? null
   let loading = null
@@ -681,7 +723,7 @@ export function createPortableService({ desk, chat, profiles, location = () => p
     busy = true
     try { return await action() } finally { busy = false }
   }
-  const stores = () => ({ desk: resolve(desk), chat: resolve(chat), profiles: resolve(profiles) })
+  const stores = () => ({ desk: resolve(desk), chat: resolve(chat), profiles: resolve(profiles), attachments: resolve(attachments), fileDrafts: resolve(fileDrafts) })
 
   async function sourceBytes({ fileRef, bundle }) {
     if (fileRef !== undefined) return readExportFile(location().directory, fileRef.exportFile, limits.maxBundleBytes)
@@ -728,7 +770,7 @@ export function createPortableService({ desk, chat, profiles, location = () => p
       await service.cancelImport({ importId: preview.importId })
       return { encrypted, locked: false, bytes: source.length, formatVersion: `${stage.manifest.version.major}.${stage.manifest.version.minor}`, ...summary }
     }
-    stage.onCommit = async () => (written = writeImport(plan, context))
+    stage.onCommit = async () => (written = await writeImport(plan, context))
     const applied = await service.applyNewCopy({ importId: preview.importId })
     return { mode: 'asNew', encrypted, verified: applied.status === 'imported-and-reopened', contents: summary, ...applied.receipt, redacted: plan.counts }
   }
@@ -736,7 +778,8 @@ export function createPortableService({ desk, chat, profiles, location = () => p
   return {
     limits,
     async exportBundle({ scope, boardId, include = {}, passphrase } = {}) {
-      const chosen = { chats: include.chats === true, profiles: include.profiles === true }
+      // D-R3: attachments and File drafts stay out unless explicitly true.
+      const chosen = { chats: include.chats === true, profiles: include.profiles === true, attachments: include.attachments === true, fileDrafts: include.fileDrafts === true }
       const secret = typeof passphrase === 'string' && passphrase.length ? passphrase : null
       if (secret !== null && (Array.from(secret).length < MIN_PASSPHRASE_CHARS || secret.length > MAX_PASSPHRASE_CHARS)) {
         fail('PORTABLE_PASSPHRASE_TOO_SHORT', `A passphrase needs ${MIN_PASSPHRASE_CHARS}–${MAX_PASSPHRASE_CHARS} characters`)
@@ -744,7 +787,7 @@ export function createPortableService({ desk, chat, profiles, location = () => p
       return exclusive(async () => {
         const context = stores()
         if (!context.desk) fail('PORTABLE_STORE_UNAVAILABLE', 'Local Desk storage is unavailable', 503)
-        const collected = collectExport({ ...context, scope, boardId, include: chosen, limits, now })
+        const collected = await collectExport({ ...context, scope, boardId, include: chosen, limits, now })
         const graph = exportGraph(collected)
         const deps = await loadDependencies()
         const where = location()
@@ -762,6 +805,7 @@ export function createPortableService({ desk, chat, profiles, location = () => p
         return {
           fileName: receipt.fileName, bytes: receipt.size, encrypted: receipt.encrypted,
           contents: { ...summarizeContent(collected.model), chatsOmitted: collected.chatsOmitted },
+          omitted: { attachments: collected.model.extras.attachments?.omitted ?? [], fileDrafts: collected.model.extras.fileDrafts?.omitted ?? [] },
           folder: where.folder, displayPath: homeRelativePath(path.join(where.directory, receipt.fileName), home),
           fileRef: { exportFile: receipt.fileName }, redacted: collected.counts,
         }
