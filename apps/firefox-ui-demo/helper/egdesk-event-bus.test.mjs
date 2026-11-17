@@ -20,7 +20,8 @@ async function request(handler, method, url, body, headers = {}) {
 
 test('each topic has one fixed payload shape; extra fields, unknown topics and raw identifiers are refused', () => {
   const bus = createWorkflowEventBus()
-  assert.deepEqual([...WORKFLOW_TOPICS], ['terminal.exit', 'auth.changed', 'file.changed', 'browser.navigated', 'browser.oauthCompleted', 'user.action'])
+  assert.deepEqual([...WORKFLOW_TOPICS], ['terminal.exit', 'auth.changed', 'file.changed', 'browser.navigated', 'browser.oauthCompleted', 'user.action',
+    'browser.loaded', 'browser.popupClosed'])
   const exit = bus.publish({ topic: 'terminal.exit', owner: OWNER, payload: { sessionId: 'term-1a2b', exitCode: 0 } })
   assert.deepEqual(exit.payload, { sessionId: 'term-1a2b', exitCode: 0, signal: null })
   assert.equal(exit.source, 'terminal')
@@ -187,4 +188,29 @@ test('browser events from the screen are rate-limited per second', async () => {
   assert.equal((await send()).status, 429)
   clock = 1000
   assert.equal((await send()).status, 202)
+})
+
+test('BRW-04 (D-B11): popupClosed names its opener and who closed it; loaded is a plain card location', async () => {
+  const bus = createWorkflowEventBus()
+  assert.ok(WORKFLOW_TOPICS.includes('browser.popupClosed') && WORKFLOW_TOPICS.includes('browser.loaded'))
+  const closed = bus.publish({ topic: 'browser.popupClosed', owner: OWNER, payload: { cardId: 'card-pop', origin: 'https://accounts.example',
+    path: '/signin', openerCardId: 'card-1', closedBy: 'page' } })
+  assert.equal(closed.summary, 'Browser popup closed itself')
+  for (const bad of [{ closedBy: 'script' }, { openerCardId: undefined }, { openerCardId: 'card-pop' }, { extra: 1 }]) {
+    const payload = { cardId: 'card-pop', origin: 'https://accounts.example', path: '/signin', openerCardId: 'card-1', closedBy: 'page', ...bad }
+    if (bad.openerCardId === undefined && 'openerCardId' in bad) delete payload.openerCardId
+    assert.throws(() => bus.publish({ topic: 'browser.popupClosed', owner: OWNER, payload }), { code: 'WORKFLOW_EVENT_INPUT' })
+  }
+  assert.equal(bus.publish({ topic: 'browser.loaded', owner: OWNER, payload: { cardId: 'card-1', origin: 'https://app.example', path: '/' } }).summary,
+    'Browser loaded https://app.example/')
+  const handler = createWorkflowEventHttpHandler({ bus, owner: OWNER })
+  const posted = await request(handler, 'POST', '/events/browser', { cardId: 'card-pop', kind: 'popupClosed', closedBy: 'user',
+    openerCardId: 'card-1', url: 'https://accounts.example/signin?token=SECRET' })
+  assert.equal(posted.status, 202)
+  assert.equal(posted.body.event.topic, 'browser.popupClosed')
+  assert.equal(bus.recent({ owner: OWNER }).events.at(-1).payload.closedBy, 'user')
+  assert.equal(JSON.stringify(bus.recent({ owner: OWNER })).includes('SECRET'), false)
+  assert.equal((await request(handler, 'POST', '/events/browser', { cardId: 'card-1', kind: 'loaded', url: 'https://app.example/home' })).body.event.topic, 'browser.loaded')
+  assert.equal((await request(handler, 'POST', '/events/browser', { cardId: 'card-1', kind: 'navigated', closedBy: 'page', url: 'https://app.example/' })).status, 400)
+  assert.equal((await request(handler, 'POST', '/events/browser', { cardId: 'card-pop', kind: 'popupClosed', url: 'https://a.example/', openerCardId: 'card-1' })).status, 400)
 })

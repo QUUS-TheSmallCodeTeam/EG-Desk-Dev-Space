@@ -272,3 +272,52 @@ test('a satisfied gate is journaled and survives a restart; the reloaded graph w
   await second.graph.resumeGraph(scope(value))
   assert.deepEqual(startedIds(second.native), ['a'])
 })
+
+// ---- BRW-04, D-B11 (inferred default): a popup that closes itself ----
+import { POPUP_LOGIN_FOLLOW_MS, popupLoginFollowUp } from './egdesk-await-router.mjs'
+
+test('BRW-04 (D-B11): a self-closed popup counts only with a later same-site navigation or load of its opener', () => {
+  const gate = { gateId: 'login', kind: 'oauth', origin: 'https://app.example.com', pathPrefix: '/oauth/callback', cardId: 'card-1' }
+  const close = (payload = {}, at = '2026-11-17T10:00:00.000Z') => ({ topic: 'browser.popupClosed', seq: 5, at,
+    payload: { cardId: 'card-pop', origin: 'https://accounts.idp.test', path: '/signin', openerCardId: 'card-1', closedBy: 'page', ...payload } })
+  const follow = (payload = {}, at = '2026-11-17T10:00:02.000Z', topic = 'browser.navigated') => ({ topic, seq: 6, at,
+    payload: { cardId: 'card-1', origin: 'https://www.example.com', path: '/dashboard', ...payload } })
+  assert.equal(popupLoginFollowUp(gate, close(), follow()), true, 'same site (registrable domain), any path')
+  assert.equal(popupLoginFollowUp(gate, close(), follow({}, undefined, 'browser.loaded')), true, 'a load counts too')
+  assert.equal(popupLoginFollowUp(gate, close({ closedBy: 'user' }), follow()), false, 'the person closing it is not a sign-in')
+  assert.equal(popupLoginFollowUp(gate, close(), follow({ origin: 'https://other.test' })), false, 'another site')
+  assert.equal(popupLoginFollowUp(gate, close(), follow({ cardId: 'card-2' })), false, 'another card')
+  assert.equal(popupLoginFollowUp(gate, close({ openerCardId: 'card-9' }), follow({ cardId: 'card-9' })), false, 'the gate names another card')
+  assert.equal(popupLoginFollowUp({ ...gate, cardId: undefined }, close({ openerCardId: 'card-9' }), follow({ cardId: 'card-9' })), true,
+    'a gate without a card takes the popup opener')
+  assert.equal(popupLoginFollowUp(gate, close(), follow({}, '2026-11-17T09:59:59.000Z')), false, 'before the close')
+  assert.equal(popupLoginFollowUp(gate, close(), { ...follow(), seq: 4 }), false, 'earlier in the stream')
+  assert.equal(popupLoginFollowUp(gate, close(), follow({}, new Date(Date.parse('2026-11-17T10:00:00.000Z') + POPUP_LOGIN_FOLLOW_MS + 1).toISOString())), false,
+    'too late')
+  assert.equal(popupLoginFollowUp(gate, close(), follow({}, undefined, 'browser.oauthCompleted')), false, 'oauthCompleted has its own rule')
+  assert.equal(popupLoginFollowUp({ ...gate, kind: 'file' }, close(), follow()), false)
+  // The close alone never matches a gate by the ordinary rule either.
+  assert.equal(gateMatchesEvent(gate, close()), false)
+  assert.equal(gateMatchesEvent(gate, follow()), false, 'a navigation alone still does not count')
+})
+
+test('BRW-04 (D-B11): through the bus, a popup close alone waits; the opener follow-up opens the gate and starts the task', async () => {
+  const { native, graph, publish } = await wired()
+  const value = spec([['import', [], [{ gateId: 'login', kind: 'oauth', origin: 'http://app.example.test', pathPrefix: '/oauth/callback', cardId: 'egd-browser-card-2' }]]], 'popup-close')
+  await graph.submitGraph(value)
+  await graph.activateGraph(scope(value))
+  await publish('browser.navigated', { cardId: 'egd-browser-card-2', origin: 'http://app.example.test', path: '/home' })
+  await publish('browser.popupClosed', { cardId: 'egd-browser-card-5', origin: 'http://idp.test', path: '/signin',
+    openerCardId: 'egd-browser-card-2', closedBy: 'user' })
+  await publish('browser.loaded', { cardId: 'egd-browser-card-2', origin: 'http://app.example.test', path: '/home' })
+  assert.equal(native.starts.length, 0, 'a close by the person is not a sign-in')
+  await publish('browser.popupClosed', { cardId: 'egd-browser-card-5', origin: 'http://idp.test', path: '/signin',
+    openerCardId: 'egd-browser-card-2', closedBy: 'page' })
+  assert.equal(native.starts.length, 0, 'the close alone does not count')
+  await publish('browser.loaded', { cardId: 'egd-browser-card-3', origin: 'http://app.example.test', path: '/home' })
+  assert.equal(native.starts.length, 0, 'another card')
+  const event = await publish('browser.loaded', { cardId: 'egd-browser-card-2', origin: 'http://app.example.test', path: '/home' })
+  await until(() => native.starts.length === 1)
+  const login = task(graph, value.graphId, 'import').gates.find(gate => gate.gateId === 'login')
+  assert.deepEqual([login.status, login.satisfiedBy, login.satisfiedAt], ['satisfied', 'browser.loaded', event.at])
+})

@@ -15,8 +15,21 @@
  *                manual "continue" fallback.
  * An expired gate (its expiresAt/timeoutMs ran out) no longer opens on its own
  * event; only that manual user.action continues it.
+ *
+ * BRW-04, D-B11 (inferred default, 2026-11-17): a sign-in popup that closes
+ * itself (browser.popupClosed, closedBy 'page') finishes an oauth gate only
+ * when, afterwards and within POPUP_LOGIN_FOLLOW_MS, its opener card shows a
+ * navigation or a load on the gate origin's site (registrable domain), or a
+ * browser.oauthCompleted arrives (the rule above). The close alone, a close by
+ * the person, a navigation before the close, another card or another site
+ * never count. A gate naming a card needs that card as the opener.
  */
-export const GATE_TOPICS = Object.freeze(['terminal.exit', 'file.changed', 'browser.oauthCompleted', 'user.action'])
+import { defaultSiteForHost } from './egdesk-browser-url-policy.mjs'
+
+export const POPUP_LOGIN_FOLLOW_MS = 30000
+const MAX_PENDING_POPUP_CLOSES = 64
+export const GATE_TOPICS = Object.freeze(['terminal.exit', 'file.changed', 'browser.oauthCompleted', 'user.action',
+  'browser.popupClosed', 'browser.navigated', 'browser.loaded'])
 
 const globCache = new Map()
 export function globMatch(glob, relativePath) {
@@ -78,6 +91,30 @@ export function gateMatchesEvent(gate, event, target = {}) {
   }
 }
 
+function siteOf(origin) {
+  try {
+    const url = new URL(origin)
+    return defaultSiteForHost(url.hostname) || url.origin
+  } catch { return null }
+}
+
+/**
+ * D-B11: does follow (browser.navigated / browser.loaded) after close
+ * (browser.popupClosed) finish this oauth gate? Pure; times are the events' at.
+ */
+export function popupLoginFollowUp(gate, close, follow, { windowMs = POPUP_LOGIN_FOLLOW_MS } = {}) {
+  if (gate?.kind !== 'oauth' || close?.topic !== 'browser.popupClosed' || close.payload?.closedBy !== 'page') return false
+  if (follow?.topic !== 'browser.navigated' && follow?.topic !== 'browser.loaded') return false
+  const opener = close.payload.openerCardId
+  if (typeof opener !== 'string' || follow.payload?.cardId !== opener) return false
+  if (gate.cardId !== undefined && gate.cardId !== opener) return false
+  const closedAt = Date.parse(close.at), followAt = Date.parse(follow.at)
+  if (!Number.isFinite(closedAt) || !Number.isFinite(followAt) || followAt < closedAt || followAt - closedAt > windowMs) return false
+  if (follow.seq !== undefined && close.seq !== undefined && !(follow.seq > close.seq)) return false
+  const site = siteOf(gate.origin)
+  return !!site && site === siteOf(follow.payload.origin)
+}
+
 /**
  * createAwaitGateRouter({ graph, bus, owner }) -> { route(event), drain(), close() }
  * graph needs openGates() and satisfyGate(); events are routed one at a time.
@@ -85,17 +122,33 @@ export function gateMatchesEvent(gate, event, target = {}) {
 export function createAwaitGateRouter({ graph, bus, owner }) {
   if (typeof graph?.openGates !== 'function' || typeof graph?.satisfyGate !== 'function') throw new TypeError('Task graph with gates is required')
   let tail = Promise.resolve()
+  // Self-closed popups waiting for their opener's follow-up, by opener card.
+  const popupCloses = new Map()
   async function route(event) {
     const satisfied = []
+    if (event.topic === 'browser.popupClosed') {
+      // Recorded only; the close alone never satisfies a gate (D-B11).
+      if (event.payload?.closedBy === 'page') {
+        popupCloses.delete(event.payload.openerCardId)
+        popupCloses.set(event.payload.openerCardId, event)
+        while (popupCloses.size > MAX_PENDING_POPUP_CLOSES) popupCloses.delete(popupCloses.keys().next().value)
+      }
+      return satisfied
+    }
+    const close = event.topic === 'browser.navigated' || event.topic === 'browser.loaded'
+      ? popupCloses.get(event.payload?.cardId) : null
+    if (close && Date.parse(event.at) - Date.parse(close.at) > POPUP_LOGIN_FOLLOW_MS) popupCloses.delete(event.payload.cardId)
     for (const open of graph.openGates()) {
       if (open.expired === true && event.topic !== 'user.action') continue
-      if (!gateMatchesEvent(open.gate, event, open)) continue
+      if (!gateMatchesEvent(open.gate, event, open) && !(close && popupLoginFollowUp(open.gate, close, event))) continue
       try {
         await graph.satisfyGate({ graphId: open.graphId, taskId: open.taskId, gateId: open.gate.gateId,
           evidence: { eventId: event.id, topic: event.topic, at: event.at } })
         satisfied.push({ graphId: open.graphId, taskId: open.taskId, gateId: open.gate.gateId })
       } catch { /* a gate closed meanwhile (cancelled graph, started task) stays as it is */ }
     }
+    // One close finishes at most one follow-up.
+    if (close && satisfied.length) popupCloses.delete(event.payload.cardId)
     return satisfied
   }
   const unsubscribe = bus.subscribe({ owner, topics: [...GATE_TOPICS] }, event => {
