@@ -367,6 +367,10 @@ export function createFileCardZone(deps) {
     let ownedRunner = null;
     let followBoardProject = null, boardFollow = Promise.resolve();
     card._fileRecord = cloneJson(options.record || FileCardState.fileCardRecord(null));
+    // AGENT-05: the verified project root this card shows, read by the File
+    // card Agent badge (display only, never file or run authority).
+    Object.defineProperty(card, '_fileAgentScope', { configurable: true, get: () => projectConnection && !rootNeedsReconnect
+      ? { projectId: projectConnection.projectId, rootId: projectConnection.rootId, rootPath: projectConnection.displayPath } : null });
     boardProjectHandlers.set(card, boardId => {
       // One follow at a time per card; a later change waits for the earlier one.
       const next = boardFollow.then(() => followBoardProject ? followBoardProject(boardId) : 'skip', () => followBoardProject ? followBoardProject(boardId) : 'skip');

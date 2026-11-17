@@ -140,3 +140,68 @@ export function cardAgentIdentityView(badge, identity = null, remembered = null)
   if (!current) return { shown: false, name: '', avatar: null, remember: mode === 'recent' ? remembered : null };
   return { shown: true, name: current.name, avatar: current.avatar || null, remember: current };
 }
+
+// ── AGENT-05: the Agent badge on a File card ──
+// A run's file changes name absolute paths; a File card connected to a
+// verified project knows its root's absolute path. A card shows the Agent of
+// a run only when that run ran in the same project (projectId and rootId) and
+// one of its paths lies inside the card's root. A card opened on a picked
+// folder, another project, or a root that needs reconnecting shows nothing:
+// the badge never tells a run about cards outside its own project.
+const MAX_TOUCHED_PATHS = 200;
+const absolutePath = value => {
+  if (typeof value !== 'string' || value.length > 4096 || !value.startsWith('/') || /[\u0000-\u001f\u007f\\]/.test(value)) return null;
+  const parts = value.split('/').slice(1);
+  if (value.endsWith('/') && value !== '/') parts.pop();
+  if (parts.some(part => !part || part === '.' || part === '..')) return null;
+  return `/${parts.join('/')}`.normalize('NFC');
+};
+const idText = value => typeof value === 'string' && value.length > 0 && value.length <= 512 && !value.includes('\0');
+
+/** Absolute paths a run's file changes name: fileChange activity details and verified file refs, deduplicated. */
+export function runTouchedPaths(run) {
+  const paths = [];
+  const add = value => { const path = absolutePath(value); if (path && !paths.includes(path) && paths.length < MAX_TOUCHED_PATHS) paths.push(path); };
+  for (const activity of Array.isArray(run?.activities) ? run.activities : []) {
+    if (activity?.kind !== 'fileChange') continue;
+    for (const change of Array.isArray(activity.detail?.changes) ? activity.detail.changes : []) add(change?.path);
+    for (const ref of Array.isArray(activity.sourceRefs) ? activity.sourceRefs : []) if (ref?.type === 'file') add(ref.target?.path);
+  }
+  return paths;
+}
+
+/** The path below `root`, or null when it is not inside it (segment-wise; the root itself is not a file inside). */
+export function pathInsideRoot(root, path) {
+  const base = absolutePath(root), target = absolutePath(path);
+  if (!base || !target) return null;
+  const prefix = base === '/' ? '/' : `${base}/`;
+  return target.startsWith(prefix) && target.length > prefix.length ? target.slice(prefix.length) : null;
+}
+
+/**
+ * One badge per File card. runs: [{ runId, name, avatar, busy, project: { projectId, rootId } | null, paths }]
+ * (paths from runTouchedPaths); cards: [{ cardId, scope: { projectId, rootId, rootPath } | null }].
+ * A busy run wins over a finished one, then the run listed first. `files`
+ * names up to three touched files below the root; `count` counts them all.
+ */
+export function fileCardAgentBadges(runs, cards) {
+  const badges = [];
+  for (const card of Array.isArray(cards) ? cards : []) {
+    const scope = card?.scope;
+    if (!idText(card?.cardId) || !idText(scope?.projectId) || !idText(scope?.rootId) || !absolutePath(scope?.rootPath)) continue;
+    let best = null;
+    for (const run of Array.isArray(runs) ? runs : []) {
+      if (!run || run.project?.projectId !== scope.projectId || run.project?.rootId !== scope.rootId) continue;
+      const inside = (Array.isArray(run.paths) ? run.paths : []).map(path => pathInsideRoot(scope.rootPath, path)).filter(Boolean);
+      if (!inside.length) continue;
+      const candidate = { run, inside, busy: run.busy === true };
+      if (!best || (candidate.busy && !best.busy)) best = candidate;
+    }
+    if (!best) continue;
+    const name = typeof best.run.name === 'string' && best.run.name.trim() ? best.run.name.trim() : 'Codex';
+    badges.push({ cardId: card.cardId, runId: typeof best.run.runId === 'string' ? best.run.runId : '', name,
+      avatar: displayProfileAvatar(best.run.avatar), busy: best.busy, count: best.inside.length, files: best.inside.slice(0, 3),
+      text: `${name} · 파일 ${best.inside.length}개 ${best.busy ? '작업 중' : '작업함'}` });
+  }
+  return badges;
+}

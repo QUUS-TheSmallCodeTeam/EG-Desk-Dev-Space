@@ -175,7 +175,7 @@ test('badges are at least 10px and labels 11px; only initials inside 14-18px fac
   }
   assert.deepEqual(small, [
     '.egd-card-security 8px',
-    '.egd-browser-card .egd-browser-agent-face 8px',
+    '.egd-browser-card .egd-browser-agent-face 8px', '.egd-file-agent-chip .egd-browser-agent-face 8px',
     '.egd-codex-thread-menu-avatar 9px',
   ]);
   const size = selector => declarationsFor(selector)['font-size'];

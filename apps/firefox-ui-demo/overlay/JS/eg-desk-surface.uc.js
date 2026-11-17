@@ -361,6 +361,50 @@
       el('span', { class: 'egd-browser-agent-name' }, view.name)] : []));
   }
 
+  // AGENT-05: the Agent badge in a File card head — the Agent of a run in
+  // progress whose file changes lie inside the card's verified project root,
+  // only when the run's room runs in that same project (fileCardAgentBadges).
+  // Display only; a card on a picked folder or needing reconnect shows none.
+  function refreshFileCardAgentBadges() {
+    const fileCards = [...(document.querySelectorAll?.('.egd-file-card') || [])];
+    if (!fileCards.length) return;
+    const runs = [];
+    for (const thread of state.codex.threads || []) {
+      const entry = chatRoomProjectState(thread);
+      const project = entry?.status === 'ready' && entry.value?.status === 'connected' ? entry.value.project : null;
+      if (!project) continue;
+      const room = thread.profileEnabled === true ? codexThreadAgentProfile(thread) : null;
+      for (const run of codexRuns(thread)) {
+        if (!ChatState.isRunBusy(run)) continue;
+        runs.push({ runId: run.runId, busy: true, name: run.authorName || room?.name || 'Codex', avatar: run.authorAvatar || room?.avatar || null,
+          project: { projectId: project.projectId, rootId: project.rootId }, paths: AgentIdentityView.runTouchedPaths(run) });
+      }
+    }
+    const badges = new Map(AgentIdentityView.fileCardAgentBadges(runs, fileCards.map(card => ({ cardId: card.id, scope: card._fileAgentScope || null })))
+      .map(badge => [badge.cardId, badge]));
+    for (const card of fileCards) {
+      const badge = badges.get(card.id) || null;
+      let chip = card.querySelector('.egd-file-agent-chip');
+      if (!badge && !chip) continue;
+      if (!chip) {
+        const status = card.querySelector('.egd-file-card-state');
+        if (!status) continue;
+        chip = el('span', { class: 'egd-file-agent-chip', data: { testid: 'file-card-agent' } });
+        status.after(chip);
+      }
+      const face = badge ? codexMessageAvatarFace(badge.avatar, badge.name) : null;
+      const signature = badge ? [badge.text, face.photo || face.text, face.toneClass, ...badge.files].join('\u0000') : '';
+      if (chip.dataset.agentSignature === signature) continue;
+      chip.dataset.agentSignature = signature;
+      chip.hidden = !badge;
+      chip.title = badge ? `${badge.text}\n${badge.files.join('\n')}${badge.count > badge.files.length ? `\n외 ${badge.count - badge.files.length}개` : ''}` : '';
+      chip.replaceChildren(...(badge ? [
+        el('span', { class: `egd-profile-avatar egd-browser-agent-face egd-profile-avatar-tone-${face.tone}${face.photo ? ' egd-profile-avatar-photo' : ''}`, 'aria-hidden': 'true' },
+          face.photo ? el('img', { class: 'egd-profile-avatar-image', src: face.photo, alt: '', draggable: 'false' }) : face.text),
+        el('span', { class: 'egd-browser-agent-name' }, badge.text)] : []));
+    }
+  }
+
   // ChatGPT usage in the resource-monitor ring shape. Nothing reported shows a
   // grey '확인 안 됨', never an invented 0%; the reset time is in the title.
   function codexUsageRing(auth, className = '', onOpen = null) {
@@ -14286,6 +14330,7 @@
         try { listener(state.codex); } catch (error) { console.warn(TAG, 'codex listener failed', error); }
       }
       renderCodexActivityPanel();
+      if (typeof refreshFileCardAgentBadges === 'function') refreshFileCardAgentBadges();
       scheduleDeskSessionSave();
     };
     const update = (patch) => {

@@ -7194,6 +7194,15 @@ button.egd-codex-message-activity:focus-visible { outline: var(--egd-focus-outli
 .egd-file-card-mount { flex: 1; min-height: 0; overflow: hidden; }
 .egd-file-card-title { flex: 1 1 0%; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .egd-file-card-state { flex: 0 0 auto; white-space: nowrap; opacity: .7; margin-left: 10px; font-size: 11px; }
+/* AGENT-05: the Agent of a run changing files in this card's project root. */
+.egd-file-agent-chip {
+  display: inline-flex; flex: 0 1 auto; align-items: center; gap: 4px; min-width: 0; max-width: 180px; height: 20px;
+  margin-left: 8px; padding: 0 7px 0 3px; border: 1px solid var(--egd-outline); border-radius: 999px;
+  background: var(--egd-surface-elevated); color: var(--egd-on-surface); font: 600 11px/1 var(--egd-font); white-space: nowrap;
+}
+.egd-file-agent-chip[hidden] { display: none; }
+.egd-file-agent-chip .egd-browser-agent-face { width: 14px; height: 14px; font-size: 8px; }
+.egd-file-agent-chip .egd-browser-agent-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
 .egd-file-chat-attach { border: 1px solid var(--egd-outline); border-radius: 7px; padding: 2px 9px; background: transparent; color: var(--egd-on-surface-variant); font: 600 11.5px/1.4 var(--egd-font); white-space: nowrap; cursor: pointer; }
 .egd-file-chat-attach:hover:not(:disabled) { background: var(--egd-hover); color: var(--egd-on-surface); }
 .egd-file-chat-attach:focus-visible { outline: var(--egd-focus-outline); outline-offset: var(--egd-focus-outline-offset); }
