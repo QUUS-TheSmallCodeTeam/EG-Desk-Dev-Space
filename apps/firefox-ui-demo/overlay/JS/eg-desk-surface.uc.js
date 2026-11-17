@@ -18867,6 +18867,7 @@
       ? document.getElementById(memo.anchor.cardId) : null;
     const segment = target?.isConnected && target.parentNode === layer && !target.hidden
       ? MemoState.memoTetherSegment(persistentEntityGeometry(root), persistentEntityGeometry(target)) : null;
+    syncMemoExtraLinkLines(root, layer);
     let line = root._memoTether;
     if (!segment) {
       if (line && !line.hidden) line.hidden = true;
@@ -18881,6 +18882,119 @@
     if (line.hidden) line.hidden = false;
     const next = { left: `${segment.x1}px`, top: `${segment.y1}px`, width: `${segment.length}px`, transform: `rotate(${segment.angle}deg)` };
     for (const key of Object.keys(next)) if (line.style[key] !== next[key]) line.style[key] = next[key];
+  }
+
+  // CNV-06: a memo with extra links (memo.links) draws one dashed line to each
+  // open window it links to, next to the solid line to the window it sits on.
+  // Lines are reused by key and dropped when their link or window goes.
+  function syncMemoExtraLinkLines(root, layer) {
+    const lines = root._memoLinkLines || (root._memoLinkLines = new Map());
+    const memo = root._memoRecord;
+    const wanted = typeof MemoLink === 'undefined' || root.hidden || !memo?.links?.length ? []
+      : MemoLink.memoLinkLines({ ...memo, anchor: null }, {
+        memoRect: persistentEntityGeometry(root), segment: MemoState.memoTetherSegment,
+        rectOf: id => {
+          const card = document.getElementById(id);
+          return card?.isConnected && card.parentNode === layer && !card.hidden && !card.classList.contains('egd-memo-card')
+            ? persistentEntityGeometry(card) : null;
+        },
+      });
+    const live = new Set(wanted.map(item => item.key));
+    for (const [key, node] of lines) if (!live.has(key) || !node.isConnected) { node.remove(); lines.delete(key); }
+    for (const item of wanted) {
+      let node = lines.get(item.key);
+      if (!node) {
+        node = el('div', { class: 'egd-memo-tether', 'aria-hidden': 'true', data: { testid: 'memo-link-line', kind: item.kind, memoId: memo.id, targetId: item.targetId } });
+        node._memoRoot = root;
+        layer.insertBefore(node, root);
+        lines.set(item.key, node);
+      }
+      const next = { left: `${item.segment.x1}px`, top: `${item.segment.y1}px`, width: `${item.segment.length}px`, transform: `rotate(${item.segment.angle}deg)` };
+      for (const key of Object.keys(next)) if (node.style[key] !== next[key]) node.style[key] = next[key];
+    }
+  }
+
+  // [연결] menu on the memo bar: take the memo off its window (it stays where
+  // it is), cut an extra link, or link one more window from a keyboard list.
+  function toggleMemoLinkMenu(root, anchor) {
+    const menu = root._memoLinkMenu;
+    if (!menu) return;
+    if (!menu.hidden) { menu.hidden = true; anchor?.setAttribute('aria-expanded', 'false'); return; }
+    const memo = root._memoRecord;
+    const titleOf = id => { const card = document.getElementById(id); return card && !card.classList.contains('egd-memo-card') ? cardLabelForViewportRail(card) : ''; };
+    const close = () => { menu.hidden = true; anchor?.setAttribute('aria-expanded', 'false'); };
+    const items = MemoLink.memoUnlinkChoices(memo, { titleOf }).map(choice => el('button', {
+      type: 'button', role: 'menuitem', title: choice.title, data: { testid: 'memo-unlink', kind: choice.kind, targetId: choice.targetId },
+      onclick: (ev) => {
+        ev.stopPropagation();
+        close();
+        try {
+          const next = choice.kind === 'anchor'
+            ? MemoState.detachMemo(root._memoRecord, { x: root.offsetLeft, y: root.offsetTop })
+            : MemoState.unlinkMemo(root._memoRecord, choice.targetId);
+          updateMemoRecord(root, next, 'memo-unlink');
+        } catch (error) { boardNotice(error.message); }
+        anchor?.focus?.();
+      },
+    }, choice.label));
+    items.push(el('button', { type: 'button', role: 'menuitem', data: { testid: 'memo-link-more' },
+      title: '목록에서 고른 창으로도 선을 잇습니다. 메모는 지금 창에 그대로 붙어 있습니다.',
+      onclick: (ev) => { ev.stopPropagation(); close(); toggleMemoRelink(root, { keyboard: true, mode: 'link' }); } }, '다른 창도 잇기…'));
+    menu.replaceChildren(...items);
+    menu.hidden = false;
+    anchor?.setAttribute('aria-expanded', 'true');
+    items[0]?.focus?.();
+  }
+
+  // The keyboard path of [다시 연결] / [다른 창도 잇기]: open windows nearest
+  // the memo first; arrows move, Enter picks, Escape (the 'memo-relink'
+  // layer) cancels.
+  function renderMemoRelinkList(root, mode, stop) {
+    const list = root._memoRelinkList;
+    if (!list || typeof MemoLink === 'undefined') return;
+    const candidates = MemoLink.memoRelinkCandidates(root._memoRecord, memoAnchorCandidates(), { memoRect: persistentEntityGeometry(root) })
+      .filter(row => mode !== 'link' || !row.current);
+    const buttons = candidates.map(row => el('button', { type: 'button', role: 'option', 'aria-selected': 'false',
+      data: { testid: 'memo-relink-choice', cardId: row.id },
+      onclick: (ev) => {
+        ev.stopPropagation();
+        const card = document.getElementById(row.id);
+        stop();
+        if (card) relinkMemoTo(root, card, mode);
+      } }, row.label));
+    list.replaceChildren(...(buttons.length ? buttons : [el('p', { class: 'egd-memo-thread-empty' }, '이을 수 있는 창이 없습니다.')]));
+    list.setAttribute('aria-label', mode === 'link' ? '선을 이을 창' : '메모를 연결할 창');
+    list.hidden = false;
+    list.onkeydown = (ev) => {
+      const index = buttons.indexOf(document.activeElement);
+      const next = SurfaceKeys.rovingNextIndex(ev.key, { count: buttons.length, current: index });
+      if (next == null || index < 0) return;
+      ev.preventDefault();
+      ev.stopPropagation();
+      buttons[next].focus();
+    };
+    buttons[0]?.focus?.();
+  }
+
+  // Pin the memo (anchor) or add a line (link) to the chosen window.
+  function relinkMemoTo(root, card, mode = 'anchor') {
+    if (!card || card.classList.contains('egd-memo-card') || card.classList.contains('egd-board-missing')) {
+      boardNotice('창을 누르지 않아 메모를 연결하지 않았습니다.');
+      return false;
+    }
+    try {
+      if (mode === 'link') {
+        updateMemoRecord(root, MemoState.linkMemo(root._memoRecord, card.id, cardLabelForViewportRail(card)), 'memo-link');
+        return true;
+      }
+      const rect = persistentEntityGeometry(card);
+      const next = MemoState.attachMemoToCard(root._memoRecord, { id: card.id, label: cardLabelForViewportRail(card),
+        rect: { x: rect.x, y: rect.y, width: rect.width, height: rect.height } }, { x: root.offsetLeft, y: root.offsetTop });
+      // An explicit choice may leave the restored Board's own members.
+      delete root._memoAnchorProjectionId;
+      updateMemoRecord(root, next, 'memo-relink');
+      return true;
+    } catch (error) { boardNotice(error.message); return false; }
   }
 
   // What follows the anchor state on the memo: its line, and for '대상 없음'
@@ -18909,7 +19023,9 @@
   // [다시 연결]: the next window the user presses becomes this memo's target.
   // The memo stays where it is. Esc, the button again, or a press on empty
   // Canvas leaves the memo as it was.
-  function toggleMemoRelink(root) {
+  // { keyboard: true } (Enter/Space on the button, or [다른 창도 잇기]) also
+  // opens a list of windows to pick from; mode 'link' adds a line instead.
+  function toggleMemoRelink(root, { keyboard = false, mode = 'anchor' } = {}) {
     const previous = memoRelink;
     if (previous) previous.stop();
     if (previous?.root === root || !root?.isConnected) return;
@@ -18918,9 +19034,10 @@
       picking.abort();
       if (memoRelink?.root === root) memoRelink = null;
       document.documentElement.removeAttribute('data-egd-memo-relinking');
+      if (root._memoRelinkList) { root._memoRelinkList.hidden = true; root._memoRelinkList.replaceChildren?.(); }
       if (root.isConnected) syncMemoLinkUi(root);
     };
-    memoRelink = { root, stop };
+    memoRelink = { root, stop, mode };
     document.documentElement.setAttribute('data-egd-memo-relinking', 'true');
     window.addEventListener('keydown', (ev) => {
       if (ev.key !== 'Escape') return;
@@ -18937,20 +19054,10 @@
       window.addEventListener('mouseup', () => window.setTimeout(() => swallow.abort(), 0), { capture: true, once: true });
       const card = ev.target?.closest?.('.egd-canvas-card');
       stop();
-      if (!card || card.classList.contains('egd-memo-card') || card.classList.contains('egd-board-missing')) {
-        boardNotice('창을 누르지 않아 메모를 연결하지 않았습니다.');
-        return;
-      }
-      try {
-        const rect = persistentEntityGeometry(card);
-        const next = MemoState.attachMemoToCard(root._memoRecord, { id: card.id, label: cardLabelForViewportRail(card),
-          rect: { x: rect.x, y: rect.y, width: rect.width, height: rect.height } }, { x: root.offsetLeft, y: root.offsetTop });
-        // An explicit choice may leave the restored Board's own members.
-        delete root._memoAnchorProjectionId;
-        updateMemoRecord(root, next, 'memo-relink');
-      } catch (error) { boardNotice(error.message); }
+      relinkMemoTo(root, card, mode);
     }, { capture: true, signal: picking.signal });
     syncMemoLinkUi(root);
+    if (keyboard) renderMemoRelinkList(root, mode, stop);
   }
 
   // [Chat에서 보기] on a waiting question: the conversation it was sent in.
@@ -19144,7 +19251,10 @@
     if (!found) return;
     const root = roots.find(item => item._memoRecord === found.memo);
     if (MEMO_RUN_ENDED.includes(run.status)) {
-      updateMemoRecord(root, MemoState.cancelMemoAsk(found.memo, found.ask.askId), 'memo-ask-ended');
+      // CNV-06: a failure keeps a row with [다시 묻기]; a cancelled run just closes the ask.
+      const failed = typeof MemoLink !== 'undefined' && MemoLink.memoAskEndStatus(run.status) === 'failed';
+      updateMemoRecord(root, failed ? MemoState.failMemoAsk(found.memo, found.ask.askId)
+        : MemoState.cancelMemoAsk(found.memo, found.ask.askId), failed ? 'memo-ask-failed' : 'memo-ask-ended');
       return;
     }
     const reply = MemoState.memoReplyFromRun(run);
@@ -19239,11 +19349,28 @@
           onclick: (ev) => { ev.stopPropagation(); openMemoAskInChat(ask); } }, 'Chat에서 보기'),
         el('button', { type: 'button', class: 'egd-memo-ask-cancel', title: '이 질문 기다리기를 멈춥니다. Chat의 대화는 남습니다.',
           onclick: (ev) => { ev.stopPropagation(); updateMemoRecord(root, MemoState.cancelMemoAsk(root._memoRecord, ask.askId), 'memo-ask-cancel'); } }, '기다리지 않기')));
+      // CNV-06: a question whose answer failed: [다시 묻기] asks the same Agent
+      // again with the memo as it is now; [닫기] drops the row.
+      const failedRows = typeof MemoLink === 'undefined' ? [] : MemoLink.memoFailedAskRows(memo, { nameOf: id => codexAgentProfile(id)?.name || '' });
+      for (const failure of failedRows) rows.push(el('span', { class: 'egd-memo-ask-pending egd-memo-ask-failed', role: 'status',
+        data: { testid: 'memo-ask-failed', askId: failure.askId, agentId: failure.agentId } }, failure.text,
+        el('button', { type: 'button', class: 'egd-memo-ask-retry', title: failure.retryTitle, data: { testid: 'memo-ask-retry' }, disabled: sending,
+          onclick: async (ev) => {
+            ev.stopPropagation();
+            const name = codexAgentProfile(failure.agentId)?.name || undefined;
+            const questionInput = root.querySelector('.egd-memo-ask-question');
+            if (await askMemoAgent(root, { agentId: failure.agentId, agentName: name, question: questionInput?.value || '' })) {
+              updateMemoRecord(root, MemoState.clearFailedMemoAsk(root._memoRecord, failure.askId), 'memo-ask-retry');
+            }
+          } }, failure.retry),
+        el('button', { type: 'button', class: 'egd-memo-ask-dismiss', data: { testid: 'memo-ask-dismiss' },
+          onclick: (ev) => { ev.stopPropagation(); updateMemoRecord(root, MemoState.clearFailedMemoAsk(root._memoRecord, failure.askId), 'memo-ask-dismiss'); } },
+        failure.dismiss)));
       if (sending) rows.unshift(el('span', { class: 'egd-memo-ask-pending', data: { testid: 'memo-ask-sending' } }, '보내는 중…'));
       if (root._memoAskNotice) rows.unshift(el('span', { class: 'egd-memo-ask-pending', role: 'status',
         data: { testid: 'memo-ask-notice' } }, root._memoAskNotice));
       askStatus.replaceChildren(...rows);
-      askStatus.hidden = !sending && !pending.length && !root._memoAskNotice;
+      askStatus.hidden = !sending && !pending.length && !root._memoAskNotice && !failedRows.length;
     }
     const askButton = root.querySelector('.egd-memo-ask-send');
     const select = root.querySelector('.egd-memo-ask-agent');
@@ -19303,6 +19430,11 @@
       type: 'button', class: 'egd-memo-resolve egd-desk-window-action', data: { testid: 'memo-resolve', noWindowDrag: 'true' },
       onclick: (ev) => { ev.stopPropagation(); updateMemoRecord(root, MemoState.setMemoResolved(root._memoRecord, !root._memoRecord.resolved), 'memo-resolve'); },
     }, '해결'));
+    if (typeof MemoLink !== 'undefined') shell.slots.actions.appendChild(el('button', {
+      type: 'button', class: 'egd-memo-links egd-desk-window-action', 'aria-haspopup': 'menu', 'aria-expanded': 'false',
+      title: '이 메모의 연결 끊기 · 다른 창도 잇기', data: { testid: 'memo-links', noWindowDrag: 'true' },
+      onclick: (ev) => { ev.stopPropagation(); toggleMemoLinkMenu(root, ev.currentTarget); },
+    }, '연결'));
     shell.slots.actions.appendChild(el('button', {
       type: 'button', class: 'egd-memo-toggle egd-desk-window-action', data: { testid: 'memo-toggle', noWindowDrag: 'true' },
       onclick: (ev) => { ev.stopPropagation(); updateMemoRecord(root, MemoState.setMemoExpanded(root._memoRecord, !root._memoRecord.expanded), 'memo-toggle'); },
@@ -19382,13 +19514,17 @@
     const missingLabel = el('span', { class: 'egd-memo-missing-label', data: { testid: 'memo-missing-label' } });
     const relinkButton = el('button', { type: 'button', class: 'egd-memo-relink', 'aria-pressed': 'false', data: { testid: 'memo-relink' },
       title: '다음에 누르는 창에 이 메모를 연결합니다. 메모는 지금 자리에 그대로 있습니다.',
-      onclick: (ev) => { ev.stopPropagation(); toggleMemoRelink(root); } }, '다시 연결');
+      // A keyboard press (Enter/Space gives detail 0) also opens the window list.
+      onclick: (ev) => { ev.stopPropagation(); toggleMemoRelink(root, { keyboard: ev.detail === 0 }); } }, '다시 연결');
     const removeButton = el('button', { type: 'button', class: 'egd-memo-remove', data: { testid: 'memo-remove' },
       title: '이 메모를 닫아 지웁니다.',
       onclick: (ev) => { ev.stopPropagation(); closeCanvasCard(root); } }, '삭제');
     root._memoMissing = { row: el('div', { class: 'egd-memo-missing', role: 'group', 'aria-label': '대상이 없는 메모', hidden: true, data: { testid: 'memo-missing' } },
       missingLabel, relinkButton, removeButton), label: missingLabel, relink: relinkButton, remove: removeButton };
-    shell.slots.content.appendChild(el('div', { class: 'egd-memo-body' }, root._memoMissing.row, textarea, status));
+    // CNV-06: the window list for [다시 연결] from the keyboard, and the [연결] menu.
+    root._memoRelinkList = el('div', { class: 'egd-memo-relink-list', role: 'listbox', hidden: true, data: { testid: 'memo-relink-list' } });
+    root._memoLinkMenu = el('div', { class: 'egd-memo-unlink-menu', role: 'menu', 'aria-label': '메모 연결', hidden: true, data: { testid: 'memo-link-menu' } });
+    shell.slots.content.appendChild(el('div', { class: 'egd-memo-body' }, root._memoMissing.row, root._memoRelinkList, root._memoLinkMenu, textarea, status));
     shell.slots.content.appendChild(el('div', { class: 'egd-memo-detail' }, thread, replyInput, askStatus, askRow));
 
     // Dropping the memo elsewhere re-pins it to what is under its corner.
@@ -19411,6 +19547,7 @@
       if (saveTimer) clearTimeout(saveTimer);
       if (memoRelink?.root === root) memoRelink.stop();
       root._memoTether?.remove();
+      for (const line of root._memoLinkLines?.values() || []) line.remove();
     });
     syncMemoCardFrame(root);
     renderMemoCard(root);
