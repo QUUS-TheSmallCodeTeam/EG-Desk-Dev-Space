@@ -5558,6 +5558,28 @@
     return 'card';
   }
 
+  // CHAT-01: the Board-saved chat card carries a reference to its conversation
+  // and Agent: ids and a revision number only, never prompts, tokens or messages.
+  function chatCardThreadBinding(thread) {
+    const clientThreadId = ChatState.localClientThreadId(thread);
+    if (!clientThreadId) return null;
+    const saved = ChatState.roomAgentRecord(thread.agent);
+    const profileId = thread.profileEnabled === true && typeof thread.agentProfileId === 'string' ? thread.agentProfileId : null;
+    const revision = profileId && saved?.profileId === profileId ? saved.revision : null;
+    return { clientThreadId, agent: profileId ? { profileId, revision } : null };
+  }
+
+  // An older record has no binding and keeps the current conversation.
+  function restoreChatCardThreadBinding(binding) {
+    const id = typeof binding?.clientThreadId === 'string' ? binding.clientThreadId : null;
+    const thread = id ? getCodexThreadById(state.codex, id) : null;
+    if (!thread) return;
+    state.codex.activeThreadId = thread.id;
+    // A room that already picks an Agent keeps it; thread.agent stays the store record.
+    const fields = ChatState.restoredRoomAgentFields(thread, { agent: binding.agent });
+    if (fields.profileEnabled) Object.assign(thread, { profileEnabled: true, agentProfileId: fields.agentProfileId });
+  }
+
   function runtimeStateForCard(card, type) {
     if (type === 'file') return cloneJson(card._fileRecord || { version: 1 });
     if (type === 'input-evidence') return { reference: cloneJson(card._inputReference) };
@@ -5573,9 +5595,11 @@
       };
     }
     if (type === 'chat') {
+      const binding = chatCardThreadBinding(getCodexThreadById(state.codex, state.codex.activeThreadId));
       return {
         activeThreadId: state.codex.activeThreadId || null,
         chatDockMode: state.codex.chatDockMode || 'canvas',
+        ...(binding ? { threadBinding: binding } : {}),
       };
     }
     if (type === 'ontology') {
@@ -6678,6 +6702,7 @@
     } else if (cardState.type === 'ontology') {
       card = spawnOntologyMapCard(runtime);
     } else if (cardState.type === 'chat') {
+      restoreChatCardThreadBinding(runtime.threadBinding);
       card = spawnCodexChatCard();
     } else if (cardState.type === 'terminal') {
       card = spawnTerminalCard();
