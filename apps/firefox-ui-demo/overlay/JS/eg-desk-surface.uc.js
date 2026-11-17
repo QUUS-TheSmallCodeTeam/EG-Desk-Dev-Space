@@ -8995,6 +8995,7 @@
     return () => { if (id) escapeLayers.remove(id); };
   }
 
+  let forwardingEscape = false;
   function installEscapeLayers() {
     const within = selector => target => !!target?.closest?.(selector);
     const byId = id => document.getElementById(id);
@@ -9111,6 +9112,43 @@
       isOpen: () => fullscreenView() && state.cardFullscreen.mode !== 'focus',
       dismiss: () => exitCardFullscreen(),
     });
+    // Surfaces that keep their own Escape handler (Browser 더보기 menu, Agent
+    // activity popover, resource detail, export/import dialog, Chat project
+    // panel): the layer hands one Escape to that handler, so they still close
+    // in the registry's order and only when they are the top layer.
+    const forwardEscape = node => {
+      if (!node || forwardingEscape) return;
+      forwardingEscape = true;
+      try { node.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true })); }
+      finally { forwardingEscape = false; }
+    };
+    const query = selector => document.querySelector(selector);
+    registerEscapeLayer({
+      id: 'browser-menu', kind: 'menu',
+      isOpen: () => !!query('.egd-browser-menu[role="menu"]'), contains: within('.egd-browser-menu'),
+      dismiss: () => forwardEscape(query('.egd-browser-menu[role="menu"]')),
+    });
+    registerEscapeLayer({
+      id: 'browser-agent-timeline', kind: 'popover',
+      isOpen: () => !!query('.egd-browser-agent-timeline'), contains: within('.egd-browser-agent-timeline'),
+      dismiss: () => forwardEscape(query('.egd-browser-agent-timeline')),
+    });
+    registerEscapeLayer({
+      id: 'resource-detail', kind: 'popover',
+      isOpen: () => { const detail = byId('egd-resource-detail'); return !!detail && !detail.hidden; },
+      contains: within('#egd-resource-detail'),
+      dismiss: () => forwardEscape(document),
+    });
+    registerEscapeLayer({
+      id: 'portable-dialog', kind: 'dialog',
+      isOpen: () => !!byId('egd-portable-dialog'), contains: within('#egd-portable-dialog'),
+      dismiss: () => forwardEscape(byId('egd-portable-dialog')),
+    });
+    registerEscapeLayer({
+      id: 'chat-input-panel', kind: 'panel',
+      isOpen: () => !!byId('egd-codex-input-panel'), contains: within('#egd-codex-input-panel'),
+      dismiss: () => forwardEscape(byId('egd-codex-input-panel')),
+    });
     // [다시 연결] on a memo waits for a window press; Escape cancels it.
     registerEscapeLayer({
       id: 'memo-relink', kind: 'popover',
@@ -9128,7 +9166,7 @@
       return 'chrome';
     };
     const onEscape = (ev, phase) => {
-      if (ev.key !== 'Escape') return;
+      if (ev.key !== 'Escape' || forwardingEscape) return;
       const target = ev.target;
       const zone = zoneOf(target);
       const route = EscapeLayerStack.escapeRoute({
@@ -17823,6 +17861,28 @@
     return true;
   }
 
+  // UX-06: Agent 칩(또는 앞으로 붙을 알림)을 누르면, 크게 보는 중에는 채팅을 엿보기로
+  // 겹쳐 연다(누를 때까지 열려 있는 'dock' 출처). 크게 보는 중이 아니면 false를 돌려주고
+  // 부른 쪽이 평소처럼 채팅을 연다. 집중 보기에서는 채팅을 겹치지 않는다(D-V6).
+  function peekChatForAttention() {
+    const fullscreen = state.cardFullscreen;
+    if (!fullscreen || fullscreen.mode === 'focus') return false;
+    return openMaximizeHudPeek('dock');
+  }
+  state.peekChatForAttention = peekChatForAttention;
+
+  function openChatForAgentChip() {
+    if (peekChatForAttention()) return true;
+    if (state.cardFullscreen?.mode === 'focus') return false;
+    if (state.codex.chatDockMode === 'canvas' || state.codex.chatCardEntityId) {
+      const chatCard = spawnCodexChatCard();
+      if (chatCard) { focusCanvasCard(chatCard); revealOpenCanvasCard(chatCard); }
+      return !!chatCard;
+    }
+    if (!(state.hudOpen && state.hudApp === 'chat')) toggleHUD('chat', '채팅', { preserveConversation: true });
+    return true;
+  }
+
   // Esc 층(esc-stack)과 바깥 클릭이 부르는 닫기. 엿보기가 아니면 아무것도 하지 않는다.
   function closeMaximizeHudPeek() {
     if (state.cardFullscreen?.hudMode !== 'peek') return false;
@@ -17937,6 +17997,18 @@
       if (card?.contains(target) || !target.closest('.egd-edge')) closeMaximizeHudPeek();
     }, true);
     // Esc는 Esc 층 한 곳(installEscapeLayers의 'chat-peek')에서만 엿보기를 닫는다.
+    // Browser 창의 Agent 칩: 누르거나 Enter/Space로 그 Agent가 일하는 채팅을 본다.
+    const agentChipFrom = target => target?.closest?.('.egd-browser-agent-identity:not([hidden])') || null;
+    window.addEventListener('click', (ev) => {
+      if (ev.button !== 0 || !agentChipFrom(ev.target)) return;
+      ev.stopPropagation();
+      openChatForAgentChip();
+    }, true);
+    window.addEventListener('keydown', (ev) => {
+      if ((ev.key !== 'Enter' && ev.key !== ' ') || ev.isComposing || !agentChipFrom(ev.target)) return;
+      ev.preventDefault();
+      openChatForAgentChip();
+    });
     // Option(Alt)+초록 점 = 집중 보기. 창 점 자체의 동작(크게 보기)은 그대로 둔다.
     window.addEventListener('click', (ev) => {
       if (!ev.altKey || ev.button !== 0) return;
@@ -22755,7 +22827,9 @@
     });
     const agentBadgeStatus = el('span', { class: 'egd-browser-agent-status', role: 'status' }, agentBadge);
     // AGENT-05: the Agent's face and name beside the badge while it works on this Card.
-    const agentIdentityChip = el('span', { class: 'egd-browser-agent-identity', hidden: true, data: { testid: 'browser-agent-identity' } });
+    // UX-06: the chip opens that Agent's Chat (a peek while this window is maximized).
+    const agentIdentityChip = el('span', { class: 'egd-browser-agent-identity', hidden: true, role: 'button', tabindex: '0',
+      'aria-label': 'Agent 채팅 보기', data: { testid: 'browser-agent-identity' } });
     agentBadgeStatus.prepend(agentIdentityChip);
     const agentHandButton = el('button', {
       type: 'button', class: 'egd-browser-agent-hand', hidden: true, data: { testid: 'browser-agent-pause', action: '' },

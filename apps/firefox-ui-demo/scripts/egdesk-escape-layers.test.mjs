@@ -54,13 +54,14 @@ function mountEscapeLayers() {
   const names = ['window', 'document', 'state', 'EscapeLayerStack', 'escapeLayers', 'registerEscapeLayer', 'boardRegionMenu', 'deskMenu',
     'closeBoardRegionMenu', 'closeDeskMenu', 'closeMinimapStack', 'closeAgendaCloseGuard', 'closeRailSearchPanel', 'closeAgendaSwitcher',
     'closeBoardHistoryPanel', 'closeDeskHistoryPanel', 'closeDeskMinimap', 'setHudPresentationHidden', 'exitCardFullscreen',
-    'SurfaceKeys', 'closeMaximizeHudPeek', 'memoRelink'];
+    'SurfaceKeys', 'closeMaximizeHudPeek', 'memoRelink', 'forwardingEscape', 'KeyboardEvent'];
   const relink = { current: null };
   const install = new Function(...names, `${surfaceSource.slice(start, end)}\n  return installEscapeLayers;`)(
     window, document, state, EscapeLayerStack, escapeLayers, registerEscapeLayer, null, null,
     closer('board-menu'), closer('desk-menu'), closer('minimap-stack'), closer('close-guard'), closer('rail-search'), closer('board-switcher'),
     closer('board-history'), closer('desk-history'), closer('minimap'), closer('hud-hidden'), closer('fullscreen'),
-    SurfaceKeys, closer('chat-peek'), null);
+    SurfaceKeys, closer('chat-peek'), null, false,
+    class { constructor(type, init) { Object.assign(this, { type, ...init, defaultPrevented: false }); } preventDefault() { this.defaultPrevented = true; } stopPropagation() {} });
   install();
   const fire = (type, capture, event) => { for (const entry of listeners) if (entry.type === type && entry.capture === capture) entry.handler(event); };
   // One key press travels capture → the focused element's own handler → bubble.
@@ -80,7 +81,8 @@ function mountEscapeLayers() {
 test('the surface registers every Escape layer through one channel and listens in one place', () => {
   const { escapeLayers, listeners } = mountEscapeLayers();
   for (const id of ['chat-menu', 'settings-account-menu', 'board-menu', 'desk-menu', 'minimap-stack', 'board-close-guard',
-    'minimap', 'desk-history', 'board-history', 'board-switcher', 'rail-search', 'chat-peek', 'focus-view', 'view-fullscreen', 'memo-relink']) {
+    'minimap', 'desk-history', 'board-history', 'board-switcher', 'rail-search', 'chat-peek', 'focus-view', 'view-fullscreen', 'memo-relink',
+    'browser-menu', 'browser-agent-timeline', 'resource-detail', 'portable-dialog', 'chat-input-panel']) {
     assert.equal(escapeLayers.has(id), true, id);
   }
   assert.equal(escapeLayers.size(), 0);
@@ -373,4 +375,28 @@ test('UX-06: Escape ends 집중 보기, also from a focused page that left the k
   press(node('div'));
   assert.ok(state.cardFullscreen);
   assert.deepEqual(log, ['close:fullscreen', 'close:fullscreen']);
+});
+
+test('UX-06: surfaces with their own Escape handler get one forwarded Escape when they are the top layer', () => {
+  const { ids, node, press, state } = mountEscapeLayers();
+  const received = [];
+  const panel = node('section');
+  panel.dispatchEvent = event => { received.push(event.key); ids.delete('egd-portable-dialog'); return true; };
+  ids.set('egd-portable-dialog', panel);
+  state.cardFullscreen = { cardId: 'card-1', mode: 'maximized', hudMode: 'hidden' };
+  const event = press(node('div'));
+  assert.deepEqual(received, ['Escape'], 'the dialog got its own Escape');
+  assert.equal(event.defaultPrevented, true);
+  assert.ok(state.cardFullscreen, 'the View under it stays large');
+  // Resource detail listens on the document: it is a small popover, so it closes before the minimap.
+  assert.equal(SurfaceKeys.escapeTierOf(SurfaceKeys.escapeLayerSpec('resource-detail').kind), 'menu');
+  assert.equal(SurfaceKeys.escapeTierOf(SurfaceKeys.escapeLayerSpec('chat-input-panel').kind), 'panel');
+});
+
+test('UX-06: the Browser Agent chip opens a peek while maximized and the normal Chat otherwise', () => {
+  const peek = surfaceSource.slice(surfaceSource.indexOf('  function peekChatForAttention() {'), surfaceSource.indexOf('  // Esc 층(esc-stack)과 바깥 클릭이 부르는 닫기.'));
+  assert.match(peek, /if \(!fullscreen \|\| fullscreen\.mode === 'focus'\) return false;\n    return openMaximizeHudPeek\('dock'\);/);
+  assert.match(peek, /function openChatForAgentChip\(\) \{\n    if \(peekChatForAttention\(\)\) return true;/);
+  assert.match(surfaceSource, /class: 'egd-browser-agent-identity', hidden: true, role: 'button', tabindex: '0',/);
+  assert.match(surfaceSource, /state\.peekChatForAttention = peekChatForAttention;/);
 });
