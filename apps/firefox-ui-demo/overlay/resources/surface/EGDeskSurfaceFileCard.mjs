@@ -591,6 +591,8 @@ export function createFileCardZone(deps) {
           runCheck: typeof spawnTerminalCard === 'function' ? runCheck : undefined,
           projectChecksOnly: true,
           onState: publish,
+          // CODE-04: CodeMirror needs this window's globals, so it loads here (global: 'current').
+          loadCodeEditor: () => ChromeUtils.importESModule('chrome://userchrome/content/vendor/codemirror/codemirror.bundle.mjs', { global: 'current' }),
         });
         card._fileView = view;
         view.element.inert = !!options.record || !!runFile;
@@ -677,7 +679,8 @@ export function createFileCardZone(deps) {
               notice.textContent = `프로젝트 연결 확인 필요 · ${error.message} 이전 파일과 작업사본은 유지했습니다. 보드 프로젝트 연결에서 다시 확인하세요.`;
             }
           }
-          const scroller = view.element.querySelector('.egdesk-file-editor-label:not([hidden]) .egdesk-file-editor, .egdesk-file-viewer:not([hidden])');
+          // CODE-04: CodeMirror's scroller when it replaced the textarea.
+          const scroller = view.element.querySelector('.egdesk-file-editor-label:not([hidden]) .cm-scroller, .egdesk-file-editor-label:not([hidden]) .egdesk-file-editor:not([hidden]), .egdesk-file-viewer:not([hidden])');
           if (scroller) scroller.scrollTop = options.record.scrollTop || 0;
           card.dataset.restored = 'true';
         }
