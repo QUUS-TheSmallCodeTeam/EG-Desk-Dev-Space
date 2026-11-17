@@ -97,8 +97,9 @@ export function briefingResumeOffer(memory, briefing) {
 }
 
 // CHAT-05: one saved comment as a card — number, what it is about, and its
-// open/resolved state. Only the state change the helper really supports
-// (resolve / reopen) is offered; a saved comment keeps its text.
+// open/resolved state, with the changes the helper keeps for it: resolve /
+// reopen, rewrite (by revision), delete, and taking it back out of the Chat
+// draft it was put in.
 export function briefingCommentRow(comment, { targetText = '' } = {}) {
   const resolved = comment?.resolved === true, title = `의견 #${comment?.seq}`;
   return {
@@ -107,8 +108,12 @@ export function briefingCommentRow(comment, { targetText = '' } = {}) {
     resolveLabel: resolved ? '다시 열기' : '해결됨으로 표시',
     resolveTitle: resolved ? `${title}을 다시 열기` : `${title}을 해결됨으로 표시`,
     collapsed: resolved,
+    edited: Number.isSafeInteger(comment?.revision) && comment.revision > 1, editedLabel: '수정됨',
+    editLabel: '편집', editTitle: `${title} 편집`, deleteLabel: '삭제', deleteTitle: `${title} 삭제`,
+    excludeLabel: '초안에서 빼기', excludeTitle: `${title}을 Chat 초안에서 빼기`,
   };
 }
+export const commentRevision = comment => Number.isSafeInteger(comment?.revision) && comment.revision > 0 ? comment.revision : 1;
 
 export function resolveBriefingTargets(step, { references = [], artifacts = [], views = [], identity = {} } = {}) {
   return briefingStepTargets(step).map(target => {
@@ -354,6 +359,33 @@ export function addBriefingCommentRef(refs = [], draft) {
   return [...list, { commentId: draft.commentId, commentSeq: draft.commentSeq, briefingId: draft.briefingId, stepId: draft.stepId }];
 }
 
+// CHAT-05: the reverse of attaching — one inserted block leaves the draft
+// (with the blank line that joined it), the rest of the draft stays as typed.
+// Text the person changed no longer matches and is left alone.
+export function briefingDraftWithout(draft, inserted) {
+  const text = typeof draft === 'string' ? draft : '';
+  if (typeof inserted !== 'string' || !inserted || !text.includes(inserted)) return text;
+  for (const block of [`\n\n${inserted}`, `${inserted}\n\n`, inserted]) {
+    const at = text.indexOf(block);
+    if (at >= 0) return text.slice(0, at) + text.slice(at + block.length);
+  }
+  return text;
+}
+export function removeBriefingCommentRef(refs = [], commentId) {
+  return (Array.isArray(refs) ? refs : []).filter(ref => ref?.commentId !== commentId).map(copy);
+}
+// Pinned evidence stays in the draft only while a remaining comment's step
+// points at it (the send path requires every pinned input to have one).
+export function briefingInputsForRefs(inputs = [], refs = [], messages = []) {
+  const needed = new Set();
+  for (const ref of Array.isArray(refs) ? refs : []) {
+    const answer = (Array.isArray(messages) ? messages : []).find(item => item?.role === 'assistant' && item.briefing?.id === ref?.briefingId);
+    const step = answer?.briefing?.steps?.find(item => item?.id === ref.stepId);
+    for (const target of briefingStepTargets(step)) if (target.sourceId) needed.add(target.sourceId);
+  }
+  return (Array.isArray(inputs) ? inputs : []).filter(reference => needed.has(reference?.sourceId)).map(copy);
+}
+
 // GET /context/briefings/:id/comments → comments of this briefing in number order.
 export function normalizeBriefingComments(value, briefingId) {
   const list = Array.isArray(value?.comments) ? value.comments : Array.isArray(value) ? value : [];
@@ -393,7 +425,8 @@ export function verifiedBriefingComment(value, session, request = null) {
       || ['conversationId', 'runId', 'answerId'].some(key => !briefing[key] || value[key] !== briefing[key])
       || !Array.isArray(value.sourceIds) || new Set(value.sourceIds).size !== value.sourceIds.length
       || value.sourceIds.some(id => typeof id !== 'string' || !commentSources(step).includes(id))
-      || value.clientRequestId !== undefined && !commentUuid(value.clientRequestId)) throw commentFailure();
+      || value.clientRequestId !== undefined && !commentUuid(value.clientRequestId)
+      || value.revision !== undefined && (!Number.isSafeInteger(value.revision) || value.revision < 1)) throw commentFailure();
   if (request && (value.clientRequestId !== request.clientRequestId || value.stepId !== request.stepId
       || !sameSources(value.sourceIds, request.sourceIds || commentSources(step)))) throw commentFailure();
   return copy(value);
@@ -413,7 +446,7 @@ export function verifiedBriefingComments(value, session) {
 // One record is retained by the bridge for this owner/conversation/step across
 // presentation close/reopen. Late callbacks never edit it; a new GET reconciles
 // the original request UUID. No text-based save recovery and no automatic POST retry.
-export function createBriefingComments({ session, record, request, current, include, included, makeId, changed = () => {} }) {
+export function createBriefingComments({ session, record, request, current, include, included, exclude = null, makeId, changed = () => {} }) {
   const origin = { briefing: copy(session.briefing), index: session.index }, step = currentBriefingStep(origin);
   const anchor = JSON.stringify([origin.briefing.id, origin.briefing.conversationId, origin.briefing.runId, origin.briefing.answerId, origin.index, step]);
   const unknownMessage = '이전 의견의 저장 여부를 확인하지 못했습니다. 같은 의견으로 저장을 다시 시도할 수 있습니다.';
@@ -423,12 +456,20 @@ export function createBriefingComments({ session, record, request, current, incl
     : phase === 'failed' ? '이전 의견을 저장하지 못했습니다. 입력과 연결을 확인해 주세요.' : '';
   const live = () => !disposed && current();
   const notify = () => { if (live()) changed(view()); };
+  // A higher revision is a rewrite of the same comment (same number, step,
+  // request and evidence); a lower one is an older read and never wins. A list
+  // read never drops a comment this window knows: one deleted elsewhere leaves
+  // when the helper says so for it (BRIEFING_COMMENT_DELETED), or on reopen.
   const merge = rows => {
+    const deleted = record.deletedIds ||= [];
     const combined = new Map((record.comments || []).map(row => [row.id, row]));
     for (const row of rows) {
+      if (deleted.includes(row.id)) continue;
       const prior = combined.get(row.id);
-      if (prior && (['seq', 'stepId', 'text', 'clientRequestId'].some(key => prior[key] !== row[key])
-          || !sameSources(prior.sourceIds, row.sourceIds))) throw commentFailure();
+      if (prior && (['seq', 'stepId', 'clientRequestId'].some(key => prior[key] !== row[key])
+          || !sameSources(prior.sourceIds, row.sourceIds)
+          || commentRevision(prior) === commentRevision(row) && prior.text !== row.text)) throw commentFailure();
+      if (prior && commentRevision(prior) > commentRevision(row)) continue;
       combined.set(row.id, row);
     }
     record.comments = verifiedBriefingComments({ briefingId: origin.briefing.id, comments: [...combined.values()] }, origin);
@@ -440,14 +481,16 @@ export function createBriefingComments({ session, record, request, current, incl
     comments: (record.comments || []).filter(row => row.stepId === step.id).map(row => ({ ...copy(row),
       included: included(row), draftError: record.draftErrors?.[row.id] || null,
       ...(record.resolving?.[row.id] ? { stateBusy: true } : {}),
-      ...(record.stateErrors?.[row.id] ? { stateError: record.stateErrors[row.id] } : {}) })) });
+      ...(record.changing?.[row.id] ? { changeBusy: record.changing[row.id] } : {}),
+      ...(record.stateErrors?.[row.id] ? { stateError: record.stateErrors[row.id] } : {}) })),
+    canDiscard: record.attempt?.phase !== 'saving' && (!!String(record.text || '').trim() || ['unknown', 'failed'].includes(record.attempt?.phase)) });
   // Only the resolved state of a saved comment may change (the helper keeps
   // its text and anchor). The row changes after the helper's own receipt for
   // this same comment, never optimistically.
   const setResolved = async (id, resolved) => {
     if (!live() || typeof resolved !== 'boolean') return false;
     const row = record.comments?.find(item => item.id === id && item.stepId === step.id);
-    if (!row || record.resolving?.[id]) return false;
+    if (!row || record.resolving?.[id] || record.changing?.[id]) return false;
     (record.resolving ||= {})[id] = true;
     if (record.stateErrors) delete record.stateErrors[id];
     notify();
@@ -460,6 +503,7 @@ export function createBriefingComments({ session, record, request, current, incl
       return true;
     } catch (error) {
       if (!live()) return false;
+      if (error?.code === 'BRIEFING_COMMENT_DELETED') { forget(id); phase = 'idle'; message = `의견 #${row.seq}은 이미 삭제되었습니다.`; return false; }
       (record.stateErrors ||= {})[id] = resolved ? '해결됨으로 바꾸지 못했습니다. 다시 시도해 주세요.' : '다시 열지 못했습니다. 다시 시도해 주세요.';
       return false;
     } finally { delete record.resolving[id]; notify(); }
@@ -533,7 +577,7 @@ export function createBriefingComments({ session, record, request, current, incl
       // A rejected validation/authority request did not save; a lost response,
       // timeout, 5xx or invalid success receipt may have committed already.
       const rejected = [400, 401, 404, 405, 413].includes(error.status)
-        || ['INVALID_BRIEFING_COMMENT', 'BRIEFING_STEP_UNKNOWN', 'BRIEFING_COMMENT_LIMIT', 'BRIEFING_COMMENT_CONFLICT',
+        || ['INVALID_BRIEFING_COMMENT', 'BRIEFING_STEP_UNKNOWN', 'BRIEFING_COMMENT_LIMIT', 'BRIEFING_COMMENT_CONFLICT', 'BRIEFING_COMMENT_DELETED',
           'CONTEXT_THREAD_REQUIRED', 'CONTEXT_THREAD_MISMATCH', 'CONTEXT_TOOL_UNSUPPORTED', 'NATIVE_BINDING_MISMATCH', 'NATIVE_ACCOUNT_MISMATCH',
           'NATIVE_ACCOUNT_UNVERIFIED', 'ENGINE_PROFILE_MISMATCH', 'IDENTITY_REQUIRED'].includes(error.code);
       attempt.phase = rejected ? 'failed' : 'unknown'; phase = attempt.phase;
@@ -576,7 +620,94 @@ export function createBriefingComments({ session, record, request, current, incl
     const attempt = record.attempt = { body: copy(body), anchor, editRevision: record.editRevision || 0, phase: 'saving' };
     return postAttempt(attempt, false);
   };
+  // Rewrite / delete one saved comment of this step. Like resolve, the row
+  // changes only after the helper's own receipt for this comment. A comment
+  // already put in the Chat draft is taken back out first (its old text would
+  // otherwise be sent); nothing is sent or re-added automatically.
+  const change = async (id, kind, payload) => {
+    if (!live()) return false;
+    const row = record.comments?.find(item => item.id === id && item.stepId === step.id);
+    if (!row || record.resolving?.[id] || record.changing?.[id]) return false;
+    (record.changing ||= {})[id] = kind;
+    if (record.stateErrors) delete record.stateErrors[id];
+    notify();
+    let refreshAfter = false;
+    try {
+      const response = await request('POST', { ...payload, revision: commentRevision(row) }, id, kind);
+      if (!live()) return false;
+      const wasIncluded = (() => { try { return included(row); } catch { return false; } })();
+      if (kind === 'edit') {
+        const saved = verifiedBriefingComment(response?.comment, origin);
+        if (saved.id !== id || commentRevision(saved) < commentRevision(row)) throw commentFailure();
+        merge([saved]);
+      } else {
+        const receipt = response?.deleted;
+        if (receipt?.id !== id || receipt.deleted !== true || receipt.briefingId !== origin.briefing.id || receipt.seq !== row.seq) throw commentFailure();
+        forget(id);
+      }
+      let excluded = false;
+      if (wasIncluded && typeof exclude === 'function') { try { excluded = exclude(row, origin) !== false; } catch {} }
+      phase = 'idle';
+      message = kind === 'edit'
+        ? `의견 #${row.seq}을 고쳤습니다.` + (wasIncluded ? excluded ? ' Chat 초안의 수정 전 의견은 뺐습니다. 다시 포함할 수 있습니다.' : ' Chat 초안에는 수정 전 의견이 남아 있습니다.' : '')
+        : `의견 #${row.seq}을 삭제했습니다.` + (wasIncluded ? excluded ? ' Chat 초안에서도 뺐습니다.' : ' Chat 초안에는 아직 남아 있습니다.' : '');
+      return true;
+    } catch (error) {
+      if (!live()) return false;
+      // Deleted elsewhere: the row leaves (a delete has nothing left to do).
+      if (error?.code === 'BRIEFING_COMMENT_DELETED') { forget(id); phase = 'idle'; message = `의견 #${row.seq}은 이미 삭제되었습니다.`; return kind === 'delete'; }
+      refreshAfter = error?.code === 'BRIEFING_COMMENT_CONFLICT';
+      (record.stateErrors ||= {})[id] = error?.code === 'BRIEFING_COMMENT_CONFLICT'
+        ? '다른 곳에서 먼저 바뀌었습니다. 저장된 의견을 다시 확인해 주세요.'
+        : kind === 'edit' ? '의견을 고치지 못했습니다. 다시 시도해 주세요.' : '의견을 삭제하지 못했습니다. 다시 시도해 주세요.';
+      return false;
+    } finally {
+      if (record.changing) delete record.changing[id];
+      notify();
+      if (refreshAfter && live()) void refresh();
+    }
+  };
+  const forget = id => {
+    record.comments = (record.comments || []).filter(row => row.id !== id);
+    (record.deletedIds ||= []).push(id);
+    if (record.draftErrors) delete record.draftErrors[id];
+  };
+  const editComment = (id, text) => {
+    const cleaned = String(text ?? '').trim();
+    if (!cleaned || cleaned.length > BRIEFING_COMMENT_MAX) {
+      if (live()) { (record.stateErrors ||= {})[id] = !cleaned ? '고친 의견을 입력해 주세요.' : `단계 의견은 ${BRIEFING_COMMENT_MAX}자까지 남길 수 있습니다.`; notify(); }
+      return Promise.resolve(false);
+    }
+    const row = record.comments?.find(item => item.id === id);
+    if (row && row.text === cleaned) return Promise.resolve(true);
+    return change(id, 'edit', { text: cleaned });
+  };
+  // Take a comment already put in the Chat draft back out (draft only; the
+  // saved comment stays).
+  const excludeRow = id => {
+    if (!live() || typeof exclude !== 'function') return false;
+    const row = record.comments?.find(item => item.id === id && item.stepId === step.id);
+    if (!row || !included(row)) return false;
+    let done = false;
+    try { done = exclude(row, origin) !== false; } catch {}
+    phase = 'idle';
+    message = done ? `의견 #${row.seq}을 Chat 초안에서 뺐습니다. 저장된 의견은 그대로입니다.` : `의견 #${row.seq}을 Chat 초안에서 빼지 못했습니다. 초안을 직접 확인해 주세요.`;
+    notify(); return done;
+  };
+  // Throw away the comment being written (and an unconfirmed or refused save
+  // attempt). Never while a save is in flight; never touches saved comments.
+  const discardDraft = () => {
+    if (!live() || record.attempt?.phase === 'saving') return false;
+    const unconfirmed = record.attempt?.phase === 'unknown';
+    if (!String(record.text || '').trim() && !['unknown', 'failed'].includes(record.attempt?.phase)) return false;
+    record.text = ''; record.editRevision = (record.editRevision || 0) + 1;
+    if (['unknown', 'failed'].includes(record.attempt?.phase)) record.attempt = null;
+    phase = 'idle';
+    message = unconfirmed ? '저장 여부를 확인하지 못한 의견을 버렸습니다. 이미 저장되었다면 저장된 의견 목록에 다시 나타납니다.' : '쓰던 의견을 버렸습니다.';
+    notify(); return true;
+  };
   return { view, refresh, submit, retry, include: attach, setResolved, notify,
+    editComment, deleteComment: id => change(id, 'delete', {}), discardDraft, exclude: excludeRow,
     edit(text) { if (live() && record.text !== String(text)) { record.text = String(text); record.editRevision = (record.editRevision || 0) + 1; } },
     dispose() { if (disposed) return; disposed = true; if (record.attempt?.phase === 'saving') { record.attempt.phase = 'unknown'; record.attempt.recoveryVisible = true; } },
   };

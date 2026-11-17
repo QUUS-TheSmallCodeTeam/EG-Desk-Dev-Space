@@ -582,3 +582,21 @@ test('a retained retry never borrows a newly presented step target even under th
   assert.equal(changed.view().canRetry, false); assert.match(changed.view().message, /원래 단계·근거/);
   await changed.retry(); assert.equal(requests, 0); assert.equal(JSON.stringify(h.record.attempt.body), before);
 });
+
+// CHAT-05: taking a saved comment back out of the unsent Chat draft.
+test('a comment block leaves the draft with its joining blank line; text the person changed is left alone', () => {
+  const block = '[두 자료 비교 · 1단계 · 의견 #1]\n의견: 확인';
+  assert.equal(Briefing.briefingDraftWithout(`내 문장\n\n${block}`, block), '내 문장');
+  assert.equal(Briefing.briefingDraftWithout(`${block}\n\n뒤 문장`, block), '뒤 문장');
+  assert.equal(Briefing.briefingDraftWithout(block, block), '');
+  assert.equal(Briefing.briefingDraftWithout('직접 고친 초안', block), '직접 고친 초안');
+  assert.equal(Briefing.briefingDraftWithout('초안', ''), '초안');
+  const refs = [{ commentId: 'c1', briefingId: 'brief-multi', stepId: 'both' }, { commentId: 'c2', briefingId: 'brief-multi', stepId: 'only-b' }];
+  assert.deepEqual(Briefing.removeBriefingCommentRef(refs, 'c1').map(ref => ref.commentId), ['c2']);
+  const messages = [{ role: 'assistant', briefing: multiBriefing() }];
+  const inputs = [{ sourceId: 'source-a' }, { sourceId: 'source-b' }];
+  assert.deepEqual(Briefing.briefingInputsForRefs(inputs, refs.slice(1), messages).map(item => item.sourceId), ['source-b'],
+    'evidence only the removed comment needed leaves with it');
+  assert.deepEqual(Briefing.briefingInputsForRefs(inputs, refs, messages).map(item => item.sourceId), ['source-a', 'source-b']);
+  assert.deepEqual(Briefing.briefingInputsForRefs(inputs, [], messages), []);
+});

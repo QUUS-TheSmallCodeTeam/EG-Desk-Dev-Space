@@ -6978,6 +6978,16 @@ button.egd-codex-message-activity:focus-visible { outline: var(--egd-focus-outli
 #egd-answer-briefing .egd-briefing-comment-status { margin: 0; color: var(--egd-on-surface-variant); font-size: 11px; }
 #egd-answer-briefing .egd-briefing-comment-actions { display: flex; flex-wrap: wrap; gap: 4px; }
 #egd-answer-briefing .egd-briefing-comment-actions > button { margin: 0; }
+/* CHAT-05: rewrite in place under the head line; delete asks twice. */
+#egd-answer-briefing .egd-briefing-comment-editor { display: flex; flex-wrap: wrap; gap: 4px; }
+#egd-answer-briefing .egd-briefing-comment-editor[hidden],
+#egd-answer-briefing .egd-briefing-comment-body[hidden],
+#egd-answer-briefing .egd-briefing-comment-actions > button[hidden] { display: none; }
+#egd-answer-briefing .egd-briefing-comment-editor > textarea { flex: 1 1 100%; box-sizing: border-box; min-width: 0; }
+#egd-answer-briefing [data-testid="briefing-comment-delete"][data-confirm="true"] {
+  border-color: var(--egd-danger-line); color: var(--egd-danger-ink);
+}
+#egd-answer-briefing .egd-briefing-comment-actions > button[aria-disabled="true"] { opacity: 0.6; cursor: default; }
 /* A resolved comment stays in place, quieter: neutral edge, clamped text. */
 #egd-answer-briefing .egd-briefing-comment[data-state="resolved"] { border-inline-start-color: var(--egd-outline); background: var(--egd-surface); }
 #egd-answer-briefing .egd-briefing-comment[data-state="resolved"] .egd-briefing-comment-body {

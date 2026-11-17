@@ -3812,8 +3812,9 @@
     };
     const query = Object.entries(route).map(([key, value]) => `${key}=${encodeURIComponent(value)}`).join('&');
     // commentId selects the helper's state route of one saved comment
-    // (POST { resolved }); without it this is the briefing's list/add route.
-    const request = async (method, body, commentId = null) => {
+    // (POST { resolved }, or action 'edit' / 'delete' — CHAT-05); without it
+    // this is the briefing's list/add route.
+    const request = async (method, body, commentId = null, action = null) => {
       if (!current()) throw new Error('브리핑 연결이 바뀌었습니다.');
       const controller = new window.AbortController();
       let timer, stop;
@@ -3823,7 +3824,7 @@
         controller.abort(); reject(new Error('응답을 확인하지 못했습니다.'));
       }, 10000); });
       try {
-        const path = commentId ? `/context/briefing-comments/${encodeURIComponent(commentId)}`
+        const path = commentId ? `/context/briefing-comments/${encodeURIComponent(commentId)}${['edit', 'delete'].includes(action) ? `/${action}` : ''}`
           : `/context/briefings/${encodeURIComponent(session.briefing.id)}/comments`;
         const response = await Promise.race([fetchJson(`${path}?${query}`,
           { method, signal: controller.signal, ...(method === 'POST' ? { body: JSON.stringify(body) } : {}) }), cancelled, timeout]);
@@ -3834,16 +3835,79 @@
     return { current, dispose, request, key: JSON.stringify([account, route, session.briefing.id, session.briefing.steps[index].id]) };
   }
 
+  // CHAT-05: per-comment changes beyond resolve. Edit opens an editor under
+  // the text; delete asks for a second press on the same button (no dialog).
+  function mountBriefingCommentChanges(item, getController, noteInteraction, body) {
+    const id = item.id;
+    const input = el('textarea', { rows: '2', maxlength: String(BriefingState.BRIEFING_COMMENT_MAX), 'aria-label': `의견 #${item.seq} 고치기`,
+      data: { testid: 'briefing-comment-edit-input', commentId: id } });
+    const saveEdit = el('button', { type: 'button', data: { testid: 'briefing-comment-edit-save', commentId: id } }, '고친 의견 저장');
+    const cancelEdit = el('button', { type: 'button', data: { testid: 'briefing-comment-edit-cancel', commentId: id } }, '취소');
+    const editor = el('div', { class: 'egd-briefing-comment-editor', hidden: 'true', data: { testid: 'briefing-comment-editor', commentId: id } }, input, saveEdit, cancelEdit);
+    const exclude = el('button', { type: 'button', hidden: 'true', data: { testid: 'briefing-comment-exclude', commentId: id } }, '초안에서 빼기');
+    const edit = el('button', { type: 'button', data: { testid: 'briefing-comment-edit', commentId: id } }, '편집');
+    const remove = el('button', { type: 'button', data: { testid: 'briefing-comment-delete', commentId: id } }, '삭제');
+    const busy = node => node.getAttribute('aria-disabled') === 'true';
+    const closeEditor = () => { editor.hidden = true; body.hidden = false; edit.setAttribute('aria-expanded', 'false'); };
+    const disarm = () => { delete remove.dataset.confirm; };
+    let card = BriefingState.briefingCommentRow(item);
+    for (const event of ['focus', 'keydown', 'compositionstart', 'compositionupdate', 'beforeinput', 'input', 'select']) input.addEventListener(event, noteInteraction);
+    exclude.addEventListener('click', () => { if (!busy(exclude)) { noteInteraction(); getController()?.exclude?.(id); } });
+    edit.addEventListener('click', () => {
+      if (busy(edit)) return;
+      noteInteraction(); disarm();
+      if (!editor.hidden) { closeEditor(); return; }
+      input.value = item.text; editor.hidden = false; body.hidden = true; edit.setAttribute('aria-expanded', 'true');
+      input.focus?.({ preventScroll: true });
+    });
+    cancelEdit.addEventListener('click', () => { noteInteraction(); closeEditor(); edit.focus?.({ preventScroll: true }); });
+    saveEdit.addEventListener('click', async () => {
+      if (busy(saveEdit)) return;
+      noteInteraction();
+      if (await getController()?.editComment?.(id, input.value)) { closeEditor(); edit.focus?.({ preventScroll: true }); }
+    });
+    remove.addEventListener('click', () => {
+      if (busy(remove)) return;
+      noteInteraction();
+      if (remove.dataset.confirm !== 'true') { remove.dataset.confirm = 'true'; paint(item, card, false); return; }
+      disarm(); void getController()?.deleteComment?.(id);
+    });
+    remove.addEventListener('blur', () => { if (remove.dataset.confirm === 'true') { disarm(); paint(item, card, false); } });
+    function paint(next, nextCard, preparing) {
+      item = next; card = nextCard;
+      const changing = next.changeBusy || (next.stateBusy ? 'resolve' : null);
+      const label = (node, value) => { if (node.textContent !== value) node.textContent = value; };
+      exclude.hidden = !next.included;
+      label(exclude, card.excludeLabel); exclude.setAttribute('title', card.excludeTitle); exclude.setAttribute('aria-label', card.excludeTitle);
+      label(edit, card.editLabel + (card.edited ? ` · ${card.editedLabel}` : ''));
+      edit.setAttribute('title', card.editTitle); edit.setAttribute('aria-label', card.editTitle);
+      const confirming = remove.dataset.confirm === 'true';
+      label(remove, next.changeBusy === 'delete' ? '삭제 중' : confirming ? '삭제 확인' : card.deleteLabel);
+      remove.setAttribute('title', confirming ? `${card.deleteTitle} — 한 번 더 누르면 삭제합니다` : card.deleteTitle);
+      remove.setAttribute('aria-label', confirming ? `${card.title} 삭제 확인` : card.deleteTitle);
+      label(saveEdit, next.changeBusy === 'edit' ? '저장 중' : '고친 의견 저장');
+      // aria-disabled keeps keyboard focus on the same button while busy.
+      for (const node of [exclude, edit, remove, saveEdit]) {
+        const off = !!changing || (node !== exclude && preparing);
+        node.setAttribute('aria-disabled', String(off));
+        node.setAttribute('aria-busy', String(!!changing && node !== exclude));
+      }
+    }
+    return { editor, buttons: [exclude, edit, remove], paint };
+  }
+
   function mountBriefingComments(session, panel) {
     const comment = el('textarea', { rows: '2', 'aria-label': '현재 브리핑 단계 의견', placeholder: '이 단계에 대한 의견',
       maxlength: String(BriefingState.BRIEFING_COMMENT_MAX), data: { testid: 'briefing-comment' } });
     const save = el('button', { type: 'button', data: { testid: 'briefing-comment-attach' } }, '의견 저장 후 Chat 초안에 포함');
+    // CHAT-05: throw away the comment being written (never a saved one).
+    const discard = el('button', { type: 'button', data: { testid: 'briefing-comment-discard' } }, '쓰던 의견 버리기');
     const statusMessage = el('p', { role: 'status', 'aria-live': 'polite', data: { testid: 'briefing-comment-status-message' } });
     const originalBody = el('p', { data: { testid: 'briefing-comment-unconfirmed-body' }, style: { whiteSpace: 'pre-wrap', overflowWrap: 'anywhere' } });
     const retry = el('button', { type: 'button', data: { testid: 'briefing-comment-retry' },
       onmousedown: event => { if (event.button === 0 && !event.ctrlKey) event.preventDefault(); } }, '이전 의견 저장 재시도');
     const original = el('section', { hidden: 'true', data: { testid: 'briefing-comment-unconfirmed' } }, el('strong', {}, '저장 미확정 의견'), originalBody, retry);
-    const status = el('section', { data: { testid: 'briefing-comment-status' } }, statusMessage, original);
+    const status = el('section', { data: { testid: 'briefing-comment-status' } }, statusMessage, original, discard);
     const listStatus = el('p', { role: 'status', data: { testid: 'briefing-comment-list-status' } });
     const list = el('div', { data: { testid: 'briefing-comment-list' } });
     const refresh = el('button', { type: 'button', data: { testid: 'briefing-comment-refresh' } }, '저장된 의견 다시 확인');
@@ -3852,7 +3916,10 @@
     let controller;
     const noteInteraction = () => { if (session.interaction) session.interaction.revision++; };
     for (const event of ['focus', 'keydown', 'compositionstart', 'compositionupdate', 'beforeinput', 'select']) comment.addEventListener(event, noteInteraction);
-    comment.addEventListener('input', () => { noteInteraction(); controller?.edit(comment.value); });
+    comment.addEventListener('input', () => {
+      noteInteraction(); controller?.edit(comment.value);
+      if (controller) discard.disabled = !controller.view().canDiscard;
+    });
     const paint = view => {
       if (!panel.isConnected) return;
       const scroller = panel._briefingScrollContainer?.() || panel;
@@ -3867,6 +3934,9 @@
       original.hidden = view.originalText === null; text(originalBody, view.originalText || '');
       retry.disabled = !view.canRetry || !!session.preparing; retry.dataset.clientRequestId = view.clientRequestId;
       save.disabled = view.pending || !!session.preparing; text(save, view.unconfirmed ? '저장 여부 확인' : '의견 저장 후 Chat 초안에 포함');
+      discard.disabled = !view.canDiscard;
+      // A comment deleted here or elsewhere leaves the list.
+      for (const [id, row] of rows) if (!view.comments.some(item => item.id === id)) { row.root.remove(); rows.delete(id); }
       // Native disabled blurs a keyboard-focused button. Keep this same node
       // focusable while busy; the activation guard below owns repeat clicks.
       const loading = view.listState === 'loading';
@@ -3912,15 +3982,20 @@
               if (resolve.getAttribute('aria-disabled') === 'true') return;
               noteInteraction(); void controller.setResolved(item.id, resolve.dataset.resolved !== 'true');
             } }) : null;
+          // CHAT-05: take it back out of the Chat draft, rewrite it in place,
+          // or delete it (a second press confirms). Each waits for the helper.
+          const changeActions = mountBriefingCommentChanges(item, () => controller, noteInteraction, body);
           const root = el('section', { class: 'egd-briefing-comment', data: { testid: 'briefing-comment-row', commentId: item.id, commentSeq: String(item.seq), stepId: item.stepId, clientRequestId: item.clientRequestId || '' } },
             el('div', { class: 'egd-briefing-comment-head' }, el('strong', { class: 'egd-briefing-comment-number' }, `의견 #${item.seq}`), target, stateText),
-            body, draftStatus, el('div', { class: 'egd-briefing-comment-actions' }, button, resolve));
+            body, changeActions.editor, draftStatus, el('div', { class: 'egd-briefing-comment-actions' }, button, resolve, ...changeActions.buttons));
           const next = [...rows.values()].filter(existing => Number(existing.root.dataset.commentSeq) > item.seq)
             .sort((a, b) => Number(a.root.dataset.commentSeq) - Number(b.root.dataset.commentSeq))[0];
-          row = { root, target, draftStatus, button, stateText, resolve }; rows.set(item.id, row);
+          row = { root, target, draftStatus, button, stateText, resolve, body, changes: changeActions }; rows.set(item.id, row);
           if (next) list.insertBefore(root, next.root); else list.appendChild(root);
         }
         text(row.target, targetText);
+        if (row.body.textContent !== item.text) row.body.textContent = item.text;
+        row.changes.paint(item, BriefingState.briefingCommentRow(item, { targetText }), !!session.preparing);
         text(row.draftStatus, item.stateError || (item.included ? 'Chat 초안에 포함됨 · 아직 전송하지 않음' : item.draftError
           || (unverified ? '근거를 다시 확인한 뒤 초안에 포함할 수 있습니다.' : '저장됨 · 초안에 포함하지 않음')));
         row.button.disabled = item.included || !!session.preparing;
@@ -3946,13 +4021,18 @@
       comment.value = controller.view().text;
       save.addEventListener('click', () => { void controller.submit(comment.value); });
       retry.addEventListener('click', () => { void controller.retry(); });
+      discard.addEventListener('click', () => {
+        if (discard.disabled) return;
+        noteInteraction();
+        if (controller.discardDraft?.()) comment.value = '';
+      });
       refresh.addEventListener('click', () => {
         if (refresh.disabled || refresh.getAttribute('aria-disabled') === 'true') return;
         void controller.refresh();
       });
       paint(controller.view()); void controller.refresh();
     } catch (error) {
-      save.disabled = true; refresh.disabled = true; retry.disabled = true; status.dataset.state = 'unavailable'; statusMessage.textContent = error.message;
+      save.disabled = true; discard.disabled = true; refresh.disabled = true; retry.disabled = true; status.dataset.state = 'unavailable'; statusMessage.textContent = error.message;
       refresh.setAttribute('aria-disabled', 'true'); refresh.setAttribute('aria-busy', 'false');
       list.dataset.state = 'unavailable';
     }
@@ -15892,7 +15972,8 @@
             this.attachBriefingComment(session.threadId, draft, selected, () => {
               try { return JSON.stringify(verifiedSelection()) === JSON.stringify(selected); } catch { return false; }
             });
-          } });
+          },
+          exclude: row => this.detachBriefingComment(session.threadId, row.id) });
         // The record is already keyed to this original account/route/step.
         // Preserve the textarea's currently visible text at teardown, even if
         // the authorization fence has just invalidated during composition.
@@ -16017,6 +16098,22 @@
           .map(ref => ref.commentId === comment.commentId ? { ...ref, draftText: comment.text } : ref);
         updateThreadById(threadId, item => ({ ...item, briefingInputs: [...inputs.values()], briefingCommentRefs: refs }));
         this.setDraft(`${current ? `${current}\n\n` : ''}${comment.text}`, threadId);
+        emit();
+        return true;
+      },
+      // CHAT-05: take one saved comment back out of the unsent Chat draft — its
+      // inserted block, its reference and the pinned evidence only it needed.
+      detachBriefingComment(threadId, commentId) {
+        const thread = getCodexThreadById(state.codex, threadId);
+        if (!thread || thread.preparingInput || ChatState.nativeBindingHeld(thread)) return false;
+        const ref = thread.briefingCommentRefs?.find(item => item.commentId === commentId);
+        if (!ref) return false;
+        const current = getCodexThreadDraft(state.codex, threadId);
+        const next = BriefingState.briefingDraftWithout(current, ref.draftText);
+        const refs = BriefingState.removeBriefingCommentRef(thread.briefingCommentRefs, commentId);
+        const inputs = BriefingState.briefingInputsForRefs(thread.briefingInputs, refs, thread.messages);
+        updateThreadById(threadId, item => ({ ...item, briefingCommentRefs: refs, briefingInputs: inputs }));
+        if (next !== current) this.setDraft(next, threadId);
         emit();
         return true;
       },

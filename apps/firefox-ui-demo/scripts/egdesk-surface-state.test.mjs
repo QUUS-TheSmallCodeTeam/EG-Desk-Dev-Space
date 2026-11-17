@@ -121,11 +121,11 @@ function savedBriefingUiHarness({ respond, engineId = 'codex', verified = true, 
   const optionalMinimapDefinitions = ['acceptedInputReceipt', 'visibleInputAnswer', 'historyReadReferenceCurrent', 'briefingReadReferenceCurrent',
     'rememberBriefingMinimapEvidence', 'clearMinimapBriefingSearchLabels', 'clearBriefingMinimapDisplay']
     .filter(name => surfaceSource.includes(`  function ${name}(`)).map(declaration).join('\n');
-  const actual = compileFunction(`${['el', 'chatBindingNonce', 'getCodexThreadById', 'getCodexThreadDraft', 'briefingInputReferences', 'briefingRangeIssue', 'createBriefingCommentScope', 'mountBriefingComments', 'renderAnswerBriefing', 'closeAnswerBriefing'].map(declaration).join('\n')}\n${optionalMinimapDefinitions}
+  const actual = compileFunction(`${['el', 'chatBindingNonce', 'getCodexThreadById', 'getCodexThreadDraft', 'briefingInputReferences', 'briefingRangeIssue', 'createBriefingCommentScope', 'mountBriefingCommentChanges', 'mountBriefingComments', 'renderAnswerBriefing', 'closeAnswerBriefing'].map(declaration).join('\n')}\n${optionalMinimapDefinitions}
     ${surfaceSource.slice(openerStart, openerEnd + 4)}
     return { openAnswerBriefing, mountBriefingComments, renderAnswerBriefing, closeAnswerBriefing,
       rememberEvidence: typeof rememberBriefingMinimapEvidence === 'function' ? rememberBriefingMinimapEvidence : null,
-      bridge: { ${['createBriefingPreparationScope(', 'createBriefingComments(', 'attachBriefingComment(', 'setDraft('].map(method).join(',\n')} } };`, Object.keys(deps))(...Object.values(deps));
+      bridge: { ${['createBriefingPreparationScope(', 'createBriefingComments(', 'attachBriefingComment(', 'detachBriefingComment(', 'setDraft('].map(method).join(',\n')} } };`, Object.keys(deps))(...Object.values(deps));
   const bridge = state.codexBridge = actual.bridge;
   bridge.subscribe = fn => { listeners.add(fn); fn(state.codex); return () => listeners.delete(fn); };
   // Only source materialization is deferred by this adapter. The opener,
@@ -549,6 +549,59 @@ test('Briefing saved UI: a saved comment is a card whose resolve action posts on
   h.click('briefing-comment-resolve'); await settle();
   assert.deepEqual(h.requests.at(-1).body, { resolved: false }); assert.equal(card.dataset.state, 'open');
   assert.equal(resolve.textContent, '해결됨으로 표시');
+  h.close();
+});
+
+test('Briefing saved UI: a saved comment can be taken out of the draft, rewritten and deleted on its own routes (CHAT-05)', async () => {
+  let saved = null, deleted = false;
+  const h = await verifiedSavedBriefingUiHarness({ respond: (call, { row, list }) => {
+    if (call.url.split('?')[0].endsWith('/edit')) { saved = { ...saved, text: call.body.text, revision: call.body.revision + 1 }; return Promise.resolve({ comment: saved }); }
+    if (call.url.split('?')[0].endsWith('/delete')) { deleted = true; return Promise.resolve({ deleted: { id: saved.id, briefingId: saved.briefingId, stepId: saved.stepId, seq: saved.seq, deleted: true, deletedAt: 1 } }); }
+    if (call.options.method === 'POST') { saved = row({ text: call.body.text, clientRequestId: call.body.clientRequestId }); return Promise.resolve({ comment: saved }); }
+    return Promise.resolve(saved && !deleted ? list(saved) : list());
+  } });
+  h.type('새 의견'); h.click('briefing-comment-attach'); await settle();
+  const included = h.state.codex.threadDrafts['room-a'];
+  assert.match(included, /의견 #1/);
+  const exclude = h.part('briefing-comment-exclude');
+  assert.equal(exclude.hidden, false, 'a comment in the draft offers to take it back out');
+  const before = h.requests.length;
+  h.click('briefing-comment-exclude'); await settle();
+  assert.equal(h.requests.length, before, 'taking it out of the draft is local only');
+  assert.doesNotMatch(h.state.codex.threadDrafts['room-a'] || '', /의견 #1/);
+  assert.equal(h.thread().briefingCommentRefs.length, 0);
+  assert.equal(exclude.hidden, true);
+  assert.equal(h.part('briefing-comment-include').disabled, false, 'it can be put back');
+
+  h.click('briefing-comment-edit');
+  const editor = h.part('briefing-comment-editor'), input = h.part('briefing-comment-edit-input');
+  assert.equal(editor.hidden, false); assert.equal(input.value, '새 의견'); assert.equal(h.part('briefing-comment-body').hidden, true);
+  input.value = '고친 의견'; h.click('briefing-comment-edit-save'); await settle();
+  const edit = h.requests.at(-1);
+  assert.equal(edit.url.split('?')[0], `/context/briefing-comments/${saved.id}/edit`);
+  assert.deepEqual(edit.body, { text: '고친 의견', revision: 1 });
+  assert.equal(editor.hidden, true); assert.equal(h.part('briefing-comment-body').textContent, '고친 의견');
+  assert.equal(h.part('briefing-comment-edit').textContent, '편집 · 수정됨');
+
+  const remove = h.part('briefing-comment-delete'), count = h.requests.length;
+  h.click('briefing-comment-delete'); await settle();
+  assert.equal(h.requests.length, count, 'the first press only asks to confirm');
+  assert.equal(remove.textContent, '삭제 확인');
+  h.click('briefing-comment-delete'); await settle();
+  assert.equal(h.requests.at(-1).url.split('?')[0], `/context/briefing-comments/${saved.id}/delete`);
+  assert.deepEqual(h.requests.at(-1).body, { revision: 2 });
+  assert.equal(h.part('briefing-comment-row'), undefined, 'the deleted card leaves the list');
+  h.close();
+});
+
+test('Briefing saved UI: discarding the comment being written clears only the input', async () => {
+  const h = await verifiedSavedBriefingUiHarness({ respond: (call, { list }) => Promise.resolve(list()) });
+  assert.equal(h.part('briefing-comment-discard').disabled, true);
+  h.type('버릴 의견');
+  h.click('briefing-comment-discard'); await settle();
+  assert.equal(h.part('briefing-comment').value, '');
+  assert.equal(h.requests.filter(call => call.options.method === 'POST').length, 0);
+  assert.match(h.part('briefing-comment-status-message').textContent, /쓰던 의견을 버렸습니다/);
   h.close();
 });
 
