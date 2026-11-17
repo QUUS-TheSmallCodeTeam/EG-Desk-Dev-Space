@@ -2579,8 +2579,8 @@
       el('button', { class: 'egd-chat-project-open', type: 'button', 'aria-label': description, title: description, 'aria-haspopup': 'dialog',
         data: { testid: 'chat-project-open' }, onclick: () => openChatRequestProjectPanel(thread.id) },
       el('span', { data: { testid: 'chat-project-source', source } }, sourceLabel), detail ? ` · ${detail}` : null),
-      selection.target || selection.invalid ? el('button', { class: 'egd-chat-project-remove', type: 'button', 'aria-label': '이번 요청 지정 해제', data: { testid: 'chat-project-remove' },
-        disabled: pending ? 'true' : null, onclick: () => { void bridge.clearRequestProjectTarget(thread.id); } }, '×') : null);
+      selection.target || selection.invalid ? el('button', { class: 'egd-chat-project-remove', type: 'button', 'aria-label': '이번 요청 지정 해제', title: '이번 요청 지정 해제', data: { testid: 'chat-project-remove' },
+        disabled: pending ? 'true' : null, onclick: () => { void bridge.clearRequestProjectTarget(thread.id); } }, '해제') : null);
   }
 
   function buildChatInputTray(thread, bridge) {
@@ -2601,13 +2601,13 @@
             }
             catch (error) { boardNotice(error.message); }
           } }, `${source.label}${source.kind === 'browser' && source.browserToolPermission === 'interact' ? ' · 이번 Chat 조작 허용' : ''} · 미전송`),
-        el('button', { type: 'button', 'aria-label': `첨부 제거: ${source.label}`, data: { testid: 'chat-attachment-remove' },
-          onclick: () => bridge.removeInputSource(thread.id, source.id) }, '×')));
+        el('button', { type: 'button', 'aria-label': `첨부 제거: ${source.label}`, title: '첨부 제거', data: { testid: 'chat-attachment-remove' },
+          onclick: () => bridge.removeInputSource(thread.id, source.id) }, '빼기')));
     }
     for (const reference of thread.briefingInputs || []) {
       tray.appendChild(el('div', { class: 'egd-chat-input-chip', data: { testid: 'chat-briefing-input', sourceId: reference.sourceId } },
         el('button', { type: 'button', 'aria-label': '브리핑의 고정 근거 확인', onclick: () => bridge.inspectInput(thread.id, reference) }, '브리핑 근거 · 미전송'),
-        el('button', { type: 'button', 'aria-label': '브리핑 근거 첨부 제거', onclick: () => bridge.removeBriefingInput(thread.id, reference.sourceId) }, '×')));
+        el('button', { type: 'button', 'aria-label': '브리핑 근거 첨부 제거', title: '브리핑 근거 첨부 제거', onclick: () => bridge.removeBriefingInput(thread.id, reference.sourceId) }, '빼기')));
     }
     const scope = typeof bridge.refreshContextSources === 'function' ? buildChatSendScope(thread, bridge) : null;
     if (scope) tray.appendChild(scope);
@@ -2733,9 +2733,9 @@
     const store = state.contextSuggest;
     const entry = store?.byThread?.[thread.id];
     if (!entry || entry.dismissed || Date.now() < (store.unsupportedUntil || 0) || !state.codex?.authStatus?.isLoggedIn) return null;
-    const close = el('button', { type: 'button', class: 'egd-context-suggest-close', 'aria-label': '자료 추천 닫기', title: '닫기',
+    const close = el('button', { type: 'button', class: 'egd-context-suggest-close', 'aria-label': '자료 추천 닫기', title: '자료 추천 닫기',
       data: { testid: 'chat-context-suggest-close', focusKey: `ctx-close:${thread.id}` },
-      onclick: () => bridge.dismissContextSuggestions(thread.id) }, '×');
+      onclick: () => bridge.dismissContextSuggestions(thread.id) }, '닫기');
     if (!entry.resolution) {
       if (entry.status !== 'error' || !entry.error) return null;
       return el('section', { class: 'egd-context-suggest egd-context-suggest-error', role: 'status',
@@ -7885,7 +7885,7 @@
     if (state.codex.chatDockMode === 'canvas' || state.codex.chatCardEntityId) {
       spawnCodexChatCard();
     } else if (!(state.hudOpen && state.hudApp === 'chat')) {
-      toggleHUD('chat', '채팅');
+      toggleHUD('chat', '대화');
     }
     state.codexBridge?.selectThread?.(threadId, { openConversation: true });
     return true;
@@ -11407,7 +11407,7 @@
       el('div', { class: 'egd-hud-title-group' },
         el('span', { class: 'egd-hud-chat-identity', 'aria-hidden': 'true' },
           deskIcon('grip'), deskIcon('chat')),
-        el('span', { class: 'egd-hud-title' }, '채팅')),
+        el('span', { class: 'egd-hud-title' }, '대화')),
       el('div', { class: 'egd-hud-header-actions' },
         el('button', {
           class: 'egd-hud-maximize-pin', type: 'button', 'aria-pressed': 'false',
@@ -12697,8 +12697,8 @@
           conversation.appendChild(el('div', { class: 'egd-codex-conversation-hud-head' },
             el('button', {
               class: 'egd-codex-conversation-back',
-              title: '목록 홈으로',
-              'aria-label': '대화 목록으로 돌아가기',
+              title: '대화 목록으로',
+              'aria-label': '대화 목록으로',
               onclick: () => codexBridge.setHudView('list'),
             }, deskIcon('back')),
             el('div', { class: 'egd-codex-conversation-hud-center' },
@@ -12812,12 +12812,12 @@
                 class: `egd-codex-thread-member-menu-item${role === 'admin' ? ' egd-codex-thread-member-menu-item-active' : ''}`,
                 type: 'button', role: 'menuitemradio', 'aria-checked': String(role === 'admin'), data: { focusKey: 'thread-member-menu-admin' },
                 onclick: act(() => codexBridge.setThreadMemberRole(activeThread.id, member, 'admin')),
-              }, el('span', {}, '관리자'), role === 'admin' ? deskIcon('check', 'egd-codex-thread-member-menu-check') : null),
+              }, el('span', {}, '관리자'), role === 'admin' ? el('span', { class: 'egd-codex-thread-member-menu-current', title: '지금 역할' }, deskIcon('check', 'egd-codex-thread-member-menu-check')) : null),
               el('button', {
                 class: `egd-codex-thread-member-menu-item${role === 'member' ? ' egd-codex-thread-member-menu-item-active' : ''}`,
                 type: 'button', role: 'menuitemradio', 'aria-checked': String(role === 'member'), data: { focusKey: 'thread-member-menu-member' },
                 onclick: act(() => codexBridge.setThreadMemberRole(activeThread.id, member, 'member')),
-              }, el('span', {}, '멤버'), role === 'member' ? deskIcon('check', 'egd-codex-thread-member-menu-check') : null),
+              }, el('span', {}, '멤버'), role === 'member' ? el('span', { class: 'egd-codex-thread-member-menu-current', title: '지금 역할' }, deskIcon('check', 'egd-codex-thread-member-menu-check')) : null),
               el('button', {
                 class: 'egd-codex-thread-member-menu-item egd-codex-thread-member-menu-item-danger',
                 type: 'button', role: 'menuitem', data: { focusKey: 'thread-member-menu-remove' },
@@ -12883,7 +12883,8 @@
           conversation.appendChild(el('div', { class: 'egd-codex-thread-active-head' },
             el('button', {
               class: 'egd-codex-conversation-back',
-              'aria-label': '대화 목록으로 돌아가기',
+              title: '대화 목록으로',
+              'aria-label': '대화 목록으로',
               onclick: () => codexBridge.setHudView('list'),
             }, deskIcon('back')),
             el('div', { class: 'egd-codex-thread-active-title' }, activeThread.title,
@@ -15963,7 +15964,7 @@
         state.codex.activeThreadId = threadId;
         state.codex.hudView = 'conversation';
         emit();
-        if (!state.hudOpen && state.codex.chatDockMode !== 'canvas') toggleHUD('chat', '채팅');
+        if (!state.hudOpen && state.codex.chatDockMode !== 'canvas') toggleHUD('chat', '대화');
       },
       // CTX-03 '이것도 붙일까요?'.
       requestContextSuggestions(threadId, options = {}) { requestContextSuggestions(threadId, options); },
@@ -17770,7 +17771,7 @@
     state.hudApp = appId;
     hud.dataset.app = appId;
     hud.classList.remove('egd-hud-hidden');
-    hud.querySelector('.egd-hud-title').textContent = appId === 'chat' ? '채팅' : appLabel;
+    hud.querySelector('.egd-hud-title').textContent = appId === 'chat' ? '대화' : appLabel;
     syncHudViewportFit();
     syncMaximizeHudAfterToggle(options);
     body.textContent = '';
@@ -17811,7 +17812,7 @@
     }
     state.codex.chatDockMode = 'hud';
     state.codex.chatCardEntityId = null;
-    toggleHUD('chat', '채팅', { preserveConversation: true });
+    toggleHUD('chat', '대화', { preserveConversation: true });
   }
 
   const CHAT_ZOOM_GAP = 8;
@@ -18423,7 +18424,7 @@
     if (!fullscreen || fullscreen.mode === 'focus') return false;
     if (fullscreen.hudMode === 'hidden' && !state.hudOpen) {
       if (!maximizeHudPeekAvailable()) return false;
-      toggleHUD('chat', '채팅', { preserveConversation: true, maximizeHudSource: source });
+      toggleHUD('chat', '대화', { preserveConversation: true, maximizeHudSource: source });
       return state.cardFullscreen?.hudMode !== 'hidden';
     }
     applyMaximizeHudEvent(source === 'edge' ? 'edge-dwell' : 'dock-open');
@@ -18448,7 +18449,7 @@
       if (chatCard) { focusCanvasCard(chatCard); revealOpenCanvasCard(chatCard); }
       return !!chatCard;
     }
-    if (!(state.hudOpen && state.hudApp === 'chat')) toggleHUD('chat', '채팅', { preserveConversation: true });
+    if (!(state.hudOpen && state.hudApp === 'chat')) toggleHUD('chat', '대화', { preserveConversation: true });
     return true;
   }
 

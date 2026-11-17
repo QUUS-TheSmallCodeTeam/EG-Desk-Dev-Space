@@ -9032,7 +9032,7 @@ button.egd-codex-message-activity:focus-visible { outline: var(--egd-focus-outli
 .egd-codex-footer [data-testid="chat-attach-open"] { background: transparent; border-color: transparent; padding-inline: 3px; color: var(--egd-on-surface-variant); }
 .egd-codex-footer .egd-chat-input-chip { min-width: 0; border: 1px solid var(--egd-outline-variant); border-radius: 6px; background: var(--egd-window-alt); }
 .egd-codex-footer .egd-chat-input-chip button { border: 0; border-radius: 5px; background: transparent; }
-.egd-codex-footer .egd-chat-input-chip button:last-child { flex: 0 0 32px; padding-inline: 5px; color: var(--egd-on-surface-variant); }
+.egd-codex-footer .egd-chat-input-chip button:last-child { flex: 0 0 32px; padding-inline: 4px; color: var(--egd-on-surface-variant); font-size: 11px; white-space: nowrap; }  /* UX-03: two-syllable Korean '빼기'/'해제' fits the 32px basis */
 
 /* Request project: the only button is an opener, not the chip's 32px remove action. */
 .egd-codex-footer .egd-chat-input-chip.egd-chat-project-target {
@@ -11029,7 +11029,7 @@ button.egd-memo-ask-cancel:hover { text-decoration: underline; }
 .egd-context-suggest-toggle:hover, .egd-context-suggest-close:hover { background: var(--egd-hover); }
 .egd-context-suggest-count { color: var(--egd-on-surface-variant); font-weight: 400; }
 .egd-context-suggest-board { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--egd-on-surface-variant); }
-.egd-context-suggest-close { flex: 0 0 auto; width: 28px; height: 28px; margin-left: auto; padding: 0; border: 0; border-radius: 6px; background: transparent; color: var(--egd-on-surface-variant); }
+.egd-context-suggest-close { flex: 0 0 auto; min-width: 28px; height: 28px; margin-left: auto; padding: 0 6px; font-size: 11px; white-space: nowrap; border: 0; border-radius: 6px; background: transparent; color: var(--egd-on-surface-variant); }
 .egd-context-suggest-body { display: flex; flex-direction: column; gap: 4px; }
 .egd-context-suggest-list { display: flex; flex-direction: column; gap: 2px; max-height: 132px; overflow-y: auto; }
 .egd-context-suggest-row { display: flex; align-items: flex-start; gap: 8px; padding: 4px 6px; border-radius: 6px; cursor: pointer; }
