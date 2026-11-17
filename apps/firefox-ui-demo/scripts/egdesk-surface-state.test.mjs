@@ -22502,7 +22502,8 @@ test('Chat retained details integration: actual activity/approval DOM opens only
   assert.equal(h.result().querySelector('.egdesk-run-result').getAttribute('data-outcome'), 'passed');
   assert.equal(h.panel().querySelectorAll('.egdesk-diff-view').length, 2);
   assert.deepEqual(h.decisions, []);
-  assert.equal(h.panel().testid('chat-approval-changes').querySelectorAll('button').length, 0, 'diff adds no decision/FileView controls');
+  // Only the diff view's display toggle (한 줄로/나란히 보기, CODE-05) is a button.
+  assert.equal(h.panel().testid('chat-approval-changes').querySelectorAll('button').filter(button => !/^egdesk-diff-layout-/.test(button.className)).length, 0, 'diff adds no decision/FileView controls');
   const choice = h.panel().querySelectorAll('[data-testid="chat-approval-choice"]').find(node => node.dataset.decision === 'decline');
   await choice.click();
   assert.deepEqual(h.decisions, [{ approvalId: h.pending.approvalId, conversationId: h.run.conversationId, runId: h.run.runId, decision: 'decline' }]);
