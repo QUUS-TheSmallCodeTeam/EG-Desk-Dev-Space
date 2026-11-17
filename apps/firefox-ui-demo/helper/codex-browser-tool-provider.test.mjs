@@ -497,3 +497,65 @@ test('a Card the Agent opened joins the run binding and leaves it when closed; o
   assert.equal((await provider.dispatch(run, { tool: 'egdesk_browser_observe', callId: 'o-4', arguments: { cardId: 'card-2' } })).success, false)
   assert.equal(f.events.filter(event => event.event === 'browser.card.closed').length, 1)
 })
+
+test('egdesk_browser_reflex is appended only with a decision key and mode on; dispatch runs each step through the provider', async () => {
+  const { BROWSER_TOOL_SPECS } = await import('./egdesk-browser-tool-runtime.mjs')
+  const { BROWSER_REFLEX_TOOL_SPEC } = await import('./egdesk-browser-reflex.mjs')
+  const { specManifestEntries, verifiedManifestOwners } = await import('./codex-native-tool-manifest.mjs')
+  const transport = { runs: new Map(), hasClient: () => true, bindRun() {}, unbindRun() {}, reset() {} }
+  const baseline = createCodexBrowserToolProvider({ transport, getOwnerKey: () => 'codex:account-1', service: {} })
+  const before = JSON.stringify(baseline.specs())
+  let mode = 'off', configured = true
+  const dispatched = [], events = []
+  const service = { dispatch: async (run, event) => { dispatched.push({ tool: event.tool, callId: event.callId, args: event.arguments })
+    return { status: 'observed', cardId: 'card-1', observationId: 'observation-1', snapshot: { cardId: 'card-1' }, externalEffectVerified: false } } }
+  const reflexCalls = []
+  const runReflex = async input => {
+    reflexCalls.push(input)
+    const first = await input.callTool('egdesk_browser_observe', { cardId: input.cardId })
+    await input.callTool('egdesk_browser_observe', { cardId: input.cardId })
+    await assert.rejects(input.callTool('egdesk_browser_reflex', { cardId: input.cardId, goal: 'x' }), error => error.code === 'BROWSER_REFLEX_SCOPE')
+    return { outcome: 'done', observationId: first.observationId, steps: [{ actions: [] }, { actions: [] }], decisions: 1, secret: 'step log stays out' }
+  }
+  const provider = createCodexBrowserToolProvider({ transport, getOwnerKey: () => 'codex:account-1', service, runReflex,
+    decision: { mode: () => mode, configured: () => configured, client: { name: 'fake-client' } } })
+  provider.runtime = { browserRegisteredThreads: new Set(), currentEpoch: () => 7, emit: (run, event, detail) => events.push({ event, detail }) }
+  // Off (or advisory, or on without a key): byte-identical to today.
+  assert.equal(JSON.stringify(provider.specs()), before)
+  assert.equal(provider.specs(), BROWSER_TOOL_SPECS)
+  mode = 'advisory'; assert.equal(JSON.stringify(provider.specs()), before)
+  mode = 'on'; configured = false; assert.equal(JSON.stringify(provider.specs()), before)
+  const run = { runId: 'run-1', answerId: 'answer-1', executionPolicy: { mode: 'browserBounded' }, browserBinding: { cards: [{ cardId: 'card-1', permission: 'interact' }] } }
+  const refused = await provider.dispatch(run, { tool: 'egdesk_browser_reflex', callId: 'call-0', arguments: { cardId: 'card-1', goal: 'find docs' } })
+  assert.equal(refused.success, false)
+  assert.match(refused.contentItems[0].text, /BROWSER_REFLEX_UNAVAILABLE/)
+  assert.equal(reflexCalls.length, 0)
+  // On + key: appended after the unchanged specs.
+  configured = true
+  const specs = provider.specs()
+  assert.deepEqual(specs.map(spec => spec.name), [...BROWSER_TOOL_SPECS.map(spec => spec.name), 'egdesk_browser_reflex'])
+  assert.equal(specs.at(-1), BROWSER_REFLEX_TOOL_SPEC)
+  assert.equal(JSON.stringify(specs.slice(0, -1)), before)
+  const output = await provider.dispatch(run, { tool: 'egdesk_browser_reflex', callId: 'call-1', arguments: { cardId: 'card-1', goal: 'find docs', maxSteps: 3 } })
+  assert.equal(output.success, true)
+  assert.deepEqual(JSON.parse(output.contentItems[0].text), { outcome: 'done', observationId: 'observation-1', steps: 2, decisions: 1 })
+  assert.equal(reflexCalls[0].client.name, 'fake-client')
+  assert.equal(reflexCalls[0].maxSteps, 3)
+  assert.deepEqual(dispatched.map(item => item.tool), ['egdesk_browser_observe', 'egdesk_browser_observe'])
+  const callIds = dispatched.map(item => item.callId)
+  assert.equal(new Set([...callIds, 'call-1']).size, 3)
+  assert.ok(callIds.every(id => id.startsWith('call-1.reflex-')))
+  // Same receipts as direct calls, under the fresh callIds.
+  assert.deepEqual(events.filter(item => item.event === 'browser.tool.completed').map(item => item.detail.callId), callIds)
+  // The action gate still applies: an ungranted Card fails inside the step.
+  const ungranted = await provider.dispatch({ ...run, browserBinding: { cards: [] } }, { tool: 'egdesk_browser_reflex', callId: 'call-2', arguments: { cardId: 'card-1', goal: 'x' } })
+  assert.equal(ungranted.success, false)
+  assert.match(ungranted.contentItems[0].text, /BROWSER_CARD_NOT_SELECTED|BROWSER_|TOOL/)
+  // A manifest recorded while off still verifies against the on catalog.
+  const manifestOf = list => list.flatMap(spec => specManifestEntries(spec, 'egdesk-browser'))
+  const ownersOf = list => new Map(list.map(spec => [`\0${spec.name}`, provider]))
+  const recorded = manifestOf(baseline.specs())
+  assert.equal(verifiedManifestOwners(recorded, manifestOf(specs), ownersOf(specs)).status, 'verified')
+  mode = 'off'
+  assert.equal(verifiedManifestOwners(recorded, manifestOf(provider.specs()), ownersOf(provider.specs())).status, 'verified')
+})
