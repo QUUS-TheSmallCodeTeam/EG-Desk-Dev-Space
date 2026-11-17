@@ -20342,11 +20342,12 @@ test('CU-01 Settings: a choice the bridge could not save reads 이번 실행에�
 
 // ============ RT-03 .egdesk 내보내기 / 가져오기 over the bridge ============
 test('RT-03 support: only a bridge that lists export or import shows the menus; an older bridge shows none', () => {
-  const none = { export: false, inspect: false, importAsNew: false, passphrase: false, exportsList: false, storeUnavailable: false };
+  const none = { export: false, inspect: false, importAsNew: false, passphrase: false, exportsList: false, storeUnavailable: false, attachments: false, fileDrafts: false };
   for (const older of [null, undefined, {}, { capabilities: {} }, { capabilities: { portable: 'export' } }]) assert.deepEqual(Portable.portableSupport(older), none);
   assert.deepEqual(Portable.portableSupport({ capabilities: { portable: ['local-store-unavailable'] } }), { ...none, storeUnavailable: true });
   assert.deepEqual(Portable.portableSupport({ capabilities: { portable: ['export', 'inspect', 'import-as-new', 'passphrase', 'exports-list'] } }),
-    { export: true, inspect: true, importAsNew: true, passphrase: true, exportsList: true, storeUnavailable: false });
+    { export: true, inspect: true, importAsNew: true, passphrase: true, exportsList: true, storeUnavailable: false, attachments: false, fileDrafts: false });
+  assert.deepEqual(Portable.portableSupport({ capabilities: { portable: ['export', 'attachments', 'file-drafts'] } }).attachments, true);
   assert.equal(Portable.portableSupport({ capabilities: { portable: ['import-as-new'] } }).importAsNew, false, 'import needs the check first');
 
   // The production rail Desk menu lists what the bridge supports; with nothing it does not open.
@@ -20759,6 +20760,76 @@ test('RT-03 production dialog: plain-file warning, passphrase twice, the check b
   assert.ok(css.includes('#egd-portable-dialog {') && css.includes('.egd-portable-warning'));
   assert.doesNotMatch(css, /#[0-9a-f]{3,8}\b|rgba?\(/i);
   assert.match(surfaceCss, /#egd-desk-minimap, #egd-portable-dialog\) \{\n    color-scheme: dark;/);
+});
+
+test('RT-03 extras: attachments and File drafts are opt-in checkboxes (D-R3), omitted entries are explained, and the import lists what came in', async () => {
+  // Request bodies: the new keys travel only when chosen, so an older bridge never sees them.
+  assert.deepEqual(Portable.portableExportRequest({ scope: 'desk' }).body.include, { chats: false, profiles: false });
+  assert.deepEqual(Portable.portableExportRequest({ scope: 'desk', includeAttachments: true, includeFileDrafts: true }).body.include, { chats: false, profiles: false, attachments: true, fileDrafts: true });
+  assert.deepEqual(Portable.portableExportRequest({ scope: 'desk', includeAttachments: 'yes' }).body.include, { chats: false, profiles: false });
+
+  // The flow never asks for a kind the bridge does not support.
+  const sent = [];
+  const request = async (method, path, body) => { sent.push(body); return { status: 201, body: { fileName: 'a.egdesk', bytes: 10, encrypted: false, displayPath: '~/Downloads/EG-Desk/a.egdesk',
+    contents: { scope: 'desk', boards: 1, cards: 2, chats: 0, profiles: 0, attachments: 2, fileDrafts: 1 },
+    omitted: { attachments: [{ name: '.env', reason: 'secret' }, { name: 'big.bin', reason: 'too-large' }, { name: null, reason: 'secret' }], fileDrafts: [] } } }; };
+  const flow = Portable.createPortableFlow({ request });
+  let view = flow.openExport({ scope: 'desk' });
+  assert.deepEqual([view.extras, view.includeAttachments, view.includeFileDrafts], [{ attachments: false, fileDrafts: false }, false, false]);
+  await flow.submitExport({ includeAttachments: true, includeFileDrafts: true });
+  assert.deepEqual(sent.pop().include, { chats: false, profiles: false }, 'unsupported kinds are dropped');
+  flow.openExport({ scope: 'desk', extras: { attachments: true, fileDrafts: true } });
+  view = await flow.submitExport({ includeAttachments: true, includeFileDrafts: false });
+  assert.deepEqual(sent.pop().include, { chats: false, profiles: false, attachments: true });
+  assert.equal(view.done.summary, 'Desk 전체 · Board 1개 · 카드 2개 · 대화 0개 · 첨부 2개 · 파일 초안 1개 · 10바이트 · 암호 없음');
+  assert.ok(view.done.notes.includes('첨부 3개는 빼고 저장했습니다(비밀값이 들어 있어 2개, 너무 커서 1개).'));
+  assert.ok(view.done.notes.every(note => !note.includes('.env') && !note.includes('big.bin')), 'file names of left-out entries never reach the screen');
+
+  // The check before import counts extras and says drafts are not tied to originals.
+  const preview = Portable.portablePreviewView({ encrypted: false, locked: false, scope: 'board', title: 'Alpha', exportedAt: Date.now(), boards: 1, cards: 1, chats: 0, profiles: 0,
+    attachments: 1, fileDrafts: 2, omitted: { attachments: 1, fileDrafts: 0 } });
+  assert.match(preview.summary, /첨부 1개 · 파일 초안 2개/);
+  assert.deepEqual(preview.notes, ['첨부 1개는 만들 때 빠졌습니다.', '파일 초안은 원본 파일과 연결하지 않은 새 초안으로 들어옵니다. 원본 파일은 바꾸지 않습니다.']);
+
+  // The import summary of what came in.
+  const done = Portable.portableImportDoneView({ verified: true, desk: null, contents: { scope: 'board', title: 'Alpha', boards: 1, cards: 1, chats: 0, profiles: 1, attachments: 2, fileDrafts: 1 },
+    boards: [{ boardId: 'b', idChanged: false }], chats: [], profiles: [{ status: 'imported' }],
+    attachments: [{ id: 'c1', name: 'a.txt', bytes: 3 }, { id: 'c2', name: 'b.png', bytes: 4 }], fileDrafts: [{ draftId: 'd1', name: 'plan.md', status: 'draft', original: 'not-connected' }] });
+  assert.deepEqual(done.received, ['Board 1개', 'Agent 1개 (검토 필요 초안)', '첨부 2개', '파일 초안 1개 (원본과 연결 안 됨)']);
+  assert.ok(done.notes.includes(Portable.PORTABLE_DRAFT_NOTE) && done.notes.includes('첨부 2개를 새 사본으로 더했습니다.'));
+  assert.match(Portable.portableErrorText({ code: 'PORTABLE_ENTRY_UNSAFE', status: 400 }), /아무것도 가져오지 않았습니다/);
+  assert.match(Portable.portableErrorText({ code: 'PORTABLE_ATTACHMENT_STORE_UNAVAILABLE', status: 503 }), /로그인/);
+  assert.equal(Portable.portableErrorText({ code: 'PORTABLE_IMPORT_PARTIAL', status: 500, written: { boards: [{}], attachments: [{}], fileDrafts: [{}] } }),
+    '가져오다 멈췄습니다. Board 1개 · 첨부 1개 · 파일 초안 1개는 이미 들어왔습니다. Board 목록과 복구 기록을 확인해 주세요.');
+
+  // Production dialog: two unchecked checkboxes only when supported; values reach submit; the received list renders.
+  const document = settingsFakeDocument();
+  const { portableDialogView } = compileFunction(`${declaration('el')}\n${declaration('portableDialogView')}\nreturn { portableDialogView };`, ['document', 'PortableState', 'deskIcon'])(document, Portable, () => document.createElement('svg'));
+  const nodes = (root, testid) => settingsNodes({ children: root.children }, node => node.dataset.testid === testid);
+  const actions = [];
+  const base = { open: true, busy: false, error: null, errorField: null, files: null, filesStatus: 'idle', source: null, preview: null, done: null, exportsList: false, includeChats: false, mode: 'export', step: 'form', scope: 'desk' };
+  const plainForm = portableDialogView({ ...base, extras: { attachments: false, fileDrafts: false } }, { onSubmitExport: values => actions.push(values) });
+  assert.deepEqual([nodes(plainForm, 'portable-include-attachments').length, nodes(plainForm, 'portable-include-file-drafts').length], [0, 0]);
+  nodes(plainForm, 'portable-export-submit')[0].fire('click');
+  assert.deepEqual(actions.pop(), { passphrase: '', confirm: '', includeChats: false }, 'an older bridge gets the old request');
+  const form = portableDialogView({ ...base, extras: { attachments: true, fileDrafts: true } }, { onSubmitExport: values => actions.push(values) });
+  const [attach] = nodes(form, 'portable-include-attachments');
+  const [drafts] = nodes(form, 'portable-include-file-drafts');
+  assert.deepEqual([attach.checked, drafts.checked], [false, false], 'both start off (D-R3)');
+  attach.checked = true;
+  nodes(form, 'portable-export-submit')[0].fire('click');
+  assert.deepEqual(actions.pop(), { passphrase: '', confirm: '', includeChats: false, includeAttachments: true, includeFileDrafts: false });
+  const screen = form.children.map(child => child?.textContent || '').join(' ');
+  assert.match(screen, /첨부 포함/);
+  assert.match(screen, /파일 초안 포함/);
+  const kept = portableDialogView({ ...base, extras: { attachments: true, fileDrafts: true } }, { typed: { includeAttachments: true, includeFileDrafts: true } });
+  assert.deepEqual([nodes(kept, 'portable-include-attachments')[0].checked, nodes(kept, 'portable-include-file-drafts')[0].checked], [true, true], 'typed checks survive a redraw');
+  const imported = portableDialogView({ ...base, mode: 'import', step: 'done', done }, {});
+  assert.equal(nodes(imported, 'portable-received')[0].textContent, 'Board 1개Agent 1개 (검토 필요 초안)첨부 2개파일 초안 1개 (원본과 연결 안 됨)');
+  const checked = portableDialogView({ ...base, mode: 'import', step: 'preview', source: { kind: 'export', fileName: 'a.egdesk' }, preview }, {});
+  assert.equal(nodes(checked, 'portable-preview-note').length, 2);
+  // The Desk/Board menu passes the bridge's support into the flow.
+  assert.match(storeDeclaration('openPortableExport') || '', /extras: \{ attachments: portableSupportState\.attachments === true, fileDrafts: portableSupportState\.fileDrafts === true \}/);
 });
 
 test('RT-03 the store waits for a Board save in flight before an export reads it', async t => {
