@@ -3,11 +3,12 @@ import assert from 'node:assert/strict'
 import { createHash } from 'node:crypto'
 import { readFileSync, readdirSync, realpathSync, rmSync, writeFileSync, mkdirSync } from 'node:fs'
 import path from 'node:path'
+import { PassThrough, Readable } from 'node:stream'
 import { createPrivateQaTempDirectory } from '../scripts/egdesk-qa-platform.mjs'
 import { openChatStore } from './egdesk-chat-store.mjs'
 import { DECISION_CREDENTIAL_FILE } from './egdesk-decision-credential.mjs'
 import { openDeskStore } from './egdesk-desk-store.mjs'
-import { loadEGDeskPortableDependencies } from './egdesk-portable-bundle.mjs'
+import { createEGDeskPortableBundle, loadEGDeskPortableDependencies } from './egdesk-portable-bundle.mjs'
 import { EXTRA_KIND, PORTABLE_EXTRA_LIMITS, collectPortableExtras, isSafeEntryName, matchExtrasManifest, parseExtraEntry, secretReason, validateExtrasManifest } from './egdesk-portable-extras.mjs'
 import { createPortableService } from './egdesk-portable-service.mjs'
 import { openProfileStore } from './egdesk-profile-store.mjs'
@@ -207,4 +208,57 @@ test('Board File cards follow an imported draft to its new ID; Desk exports ask 
   assert.equal(card.runtimeState.fileView.draftId, 'draft-1')
   await a.service.exportBundle({ scope: 'desk', include: { fileDrafts: true } })
   assert.deepEqual(providers.listCalls.at(-1)[1], { scope: 'desk', boardIds: ['agenda-x-0001'], threadIds: null, draftIds: null })
+})
+
+/** Writes a bundle by hand (root payload + children), as an older or hostile exporter would. */
+async function craftBundle(rootPayload, children = []) {
+  const objects = new Map()
+  const nodes = new Map()
+  const put = value => { const bytes = Buffer.from(JSON.stringify(value)); const hash = sha(bytes); objects.set(hash, bytes); return hash }
+  const refs = children.map((payload, index) => {
+    const id = `artifact-${index + 1}`
+    nodes.set(id, { id, type: 'artifact', scopeRootId: 'board', title: `Item ${index + 1}`, refs: [], objects: [{ sha256: put(payload), role: 'body' }] })
+    return id
+  })
+  nodes.set('board', { id: 'board', type: 'board', scopeRootId: 'board', title: 'Board', refs, objects: [{ sha256: put(rootPayload), role: 'body' }] })
+  const provider = { openExportSnapshot: async () => ({
+    getNode: async id => nodes.get(id) ?? null,
+    listEvents: async () => [{ id: 'exported', ownerId: 'board', kind: 'state', at: T0 }],
+    getObjectMeta: async hash => objects.has(hash) ? { size: objects.get(hash).length, portableApproved: true, scopeRootId: 'board' } : null,
+    openObject: async hash => Readable.from([objects.get(hash)]),
+    close: async () => {},
+  }) }
+  const service = createEGDeskPortableBundle({ objectProvider: provider, importStore: { beginStage: async () => { throw new Error('no') }, reopenRepresentative: async () => false }, codec: dependencies.codec, envelope: dependencies.envelope })
+  const plan = await service.planExport({ rootIds: ['board'] })
+  const writable = new PassThrough()
+  const parts = []
+  writable.on('data', part => parts.push(Buffer.from(part)))
+  await service.exportPlan({ planId: plan.planId, sink: { atomicPublish: true, stagingProtection: 'encrypted', writable, publish: async () => ({}), abort: async () => {} } })
+  return Buffer.concat(parts).toString('base64')
+}
+const legacyRoot = (extra = {}) => ({ kind: 'egdesk.portable.root', v: 1, scope: 'board', exportedAt: T0, include: { chats: false, profiles: false },
+  board: { boardId: 'agenda-old-0001', title: 'Old', body: board('agenda-old-0001') }, ...extra })
+
+test('a file from before the extras (no manifest, two-key include) still imports', needsBundle, async t => {
+  const b = machine(t, 'legacy')
+  const imported = await b.service.importBundle({ bundle: await craftBundle(legacyRoot()), mode: 'asNew' })
+  assert.deepEqual([imported.boards.map(item => item.boardId), imported.attachments, imported.fileDrafts], [['agenda-old-0001'], [], []])
+})
+
+test('a hand-made file with a traversal name, a wrong hash or an unlisted entry is refused whole; nothing is written', needsBundle, async t => {
+  const b = machine(t, 'hostile')
+  const data = Buffer.from('owned')
+  const entry = over => ({ kind: EXTRA_KIND.fileDraft, v: 1, name: 'x.md', sourceId: null, bytes: data.length, sha256: sha(data), text: 'owned', ...over })
+  const root = included => legacyRoot({ include: { chats: false, profiles: false, attachments: false, fileDrafts: true },
+    extras: { attachments: null, fileDrafts: { included, omitted: [] } } })
+  const cases = [
+    [root([{ name: 'x.md', bytes: 5, sha256: sha(data) }]), entry({ name: '../../.zshrc' }), 'PORTABLE_ENTRY_UNSAFE'],
+    [root([{ name: 'x.md', bytes: 5, sha256: sha(data) }]), entry({ text: 'other' }), 'PORTABLE_ENTRY_UNSAFE'],
+    [root([]), entry(), 'PORTABLE_FILE_DAMAGED'],
+    [legacyRoot(), entry(), 'PORTABLE_FILE_DAMAGED'],
+  ]
+  for (const [rootPayload, child, code] of cases) {
+    await assert.rejects(b.service.importBundle({ bundle: await craftBundle(rootPayload, [child]), mode: 'asNew' }), error => error.code === code, code)
+  }
+  assert.deepEqual([b.desk.listBoards().boards, b.providers.imported.drafts], [[], []])
 })
