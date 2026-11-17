@@ -47,3 +47,15 @@ test('BRW-08 checks pass a complete observation and name each missing case', () 
   }
   assert.ok(brw08Failures(undefined).length >= 5, 'no data is a failure, not a pass');
 });
+
+test('harness: escaped chars regex, privileged context argument, chrome:// remount', async () => {
+  const { readFileSync } = await import('node:fs');
+  const assert = (await import('node:assert/strict')).default;
+  for (const name of ['verify-firefox-mcp-browser-agent-observation.mjs', 'verify-firefox-mcp-shapes.mjs']) {
+    const source = readFileSync(new URL(`./${name}`, import.meta.url), 'utf8');
+    assert.ok(source.includes('context: privilegedContext'), name);
+  }
+  const source = readFileSync(new URL('./verify-firefox-mcp-browser-agent-observation.mjs', import.meta.url), 'utf8');
+  assert.ok(source.includes('match(/\\\\[(\\\\d+) chars/)'));
+  assert.ok(source.includes("'chrome://userscripts/content/eg-desk-surface.uc.js'"));
+});

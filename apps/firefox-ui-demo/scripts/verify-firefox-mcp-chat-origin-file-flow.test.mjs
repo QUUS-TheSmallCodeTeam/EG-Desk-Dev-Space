@@ -404,3 +404,8 @@ test('origin verifier: observation is read-only and actions remain native; share
   assert.doesNotMatch(factory, /bindRunProjectOrigin\s*\(|INSERT INTO run_project_origins|new RunOutputStore|createServer|\.listen\(/,
     'No manually seeded origin DTO or parallel synthetic output store');
 });
+
+test('origin File observation reads the shown editor (CodeMirror when present, else textarea)', () => {
+  const source = readFileSync(new URL('./verify-firefox-mcp-chat-origin-file-flow.mjs', import.meta.url), 'utf8');
+  assert.ok(source.includes('readShownFileEditor(card)') && source.includes('file-code-editor'));
+});

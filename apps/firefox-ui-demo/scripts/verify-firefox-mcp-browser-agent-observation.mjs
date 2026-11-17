@@ -12,7 +12,7 @@ const SCREENSHOT_PATH = process.argv[2] || '/tmp/egdesk-browser-agent-observatio
 
 const jsSourcePath = fileURLToPath(new URL('../overlay/JS/eg-desk-surface.uc.js', import.meta.url));
 const cssSourcePath = fileURLToPath(new URL('../overlay/CSS/eg-desk-surface.uc.css', import.meta.url));
-const jsSourceUrl = pathToFileURL(jsSourcePath).href;
+const jsSourceUrl = 'chrome://userscripts/content/eg-desk-surface.uc.js';
 const cssText = readFileSync(cssSourcePath, 'utf8');
 
 // BRW-08 headless fixture cases (2026-11-17): a same-origin iframe, an open
@@ -187,12 +187,14 @@ function parseToolJson(text) {
   return JSON.parse(jsonText);
 }
 
+let privilegedContext = null;
+
 async function callTool(name, args = {}, timeoutMs = 45000) {
   let toolArgs = args;
   // firefox-devtools-mcp >= 0.7: evaluate_privileged_script takes `function`
   // (callable string) instead of `expression`. Wrap legacy IIFE expressions.
   if (name === 'evaluate_privileged_script' && typeof toolArgs.expression === 'string') {
-    toolArgs = { function: `() => (\n${toolArgs.expression}\n)` };
+    toolArgs = { context: privilegedContext, function: `() => (\n${toolArgs.expression}\n)` };
   }
   return request('tools/call', { name, arguments: toolArgs }, timeoutMs);
 }
@@ -277,6 +279,7 @@ async function main() {
   const contextText = resultText(contexts);
   const contextMatch = contextText.match(/\s([0-9a-f-]{36}): chrome:\/\/browser\/content\/browser\.xhtml/);
   if (!contextMatch) throw new Error(`Firefox chrome context not found.\n${contextText}`);
+  privilegedContext = contextMatch[1];
   await callTool('select_privileged_context', { contextId: contextMatch[1] });
 
   const remount = parseToolJson(resultText(await callTool('evaluate_privileged_script', {
@@ -337,7 +340,7 @@ async function main() {
         brw08.editorFillOk = brw08.editor ? await actOk({ type: 'fill', ref: brw08.editor.ref, value: 'Edited body' }) : false;
         brw08.fillLongNoteOk = brw08.longNote ? await actOk({ type: 'fill', ref: brw08.longNote.ref, value: 'x'.repeat(8000) }) : false;
         const longAfter = (await api.browserAgent.snapshot(card.id)).interactiveElements.find((item) => item.label === 'Long note');
-        brw08.longNoteAfterLength = Number(String(longAfter?.value || '').match(/\[(\d+) chars/)?.[1] || 0);
+        brw08.longNoteAfterLength = Number(String(longAfter?.value || '').match(/\\[(\\d+) chars/)?.[1] || 0);
         // The original history/notification checks below count from here.
         api.browserAgent.clearHistory(card.id);
         actionEvents.length = 0;

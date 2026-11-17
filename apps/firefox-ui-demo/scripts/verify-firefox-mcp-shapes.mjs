@@ -92,12 +92,14 @@ function parseToolJson(text) {
   return JSON.parse(jsonText);
 }
 
+let privilegedContext = null;
+
 async function callTool(name, args = {}) {
   let toolArgs = args;
   // firefox-devtools-mcp >= 0.7: evaluate_privileged_script takes `function`
   // (callable string) instead of `expression`. Wrap legacy IIFE expressions.
   if (name === 'evaluate_privileged_script' && typeof toolArgs.expression === 'string') {
-    toolArgs = { function: `() => (
+    toolArgs = { context: privilegedContext, function: `() => (
 ${toolArgs.expression}
 )` };
   }
@@ -119,6 +121,7 @@ async function main() {
     throw new Error(`Firefox chrome context not found.\n${contextText}`);
   }
 
+  privilegedContext = contextMatch[1];
   await callTool('select_privileged_context', { contextId: contextMatch[1] });
 
   const result = resultText(await callTool('evaluate_privileged_script', {

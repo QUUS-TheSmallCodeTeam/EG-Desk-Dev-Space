@@ -12,6 +12,7 @@ import { FirefoxMcpChatHarness } from './firefox-mcp-chat-harness.mjs';
 import { parseCli, assertBeforeDeadline, observeGuard, observeFirstUse, resizeHeadless,
   waitStableViewport, waitFor, observeTargets, targetIssues, captureHeadlessScreenshot } from './verify-firefox-mcp-headless-ui-regression.mjs';
 import { parseProjectTerminalWrite } from './egdesk-project-file-fixture.mjs';
+import { chromeWithFileEditor, resolveShownFileEditor } from './egdesk-qa-file-editor.mjs';
 
 export const PROJECT_VIEWPORTS = Object.freeze([{ width: 1280, height: 800 }, { width: 600, height: 600 }]);
 export const PROJECT_CAPTURE_STAGES = Object.freeze(['connected-fileview', 'typed-command-editor', 'readable-result', 'terminal-output']);
@@ -685,6 +686,8 @@ export function assertProjectWatchEvidence(proof) {
   assert.ok(before.editor.value.length > 0);
   assert.equal(before.editor.selectionStart, 0);
   assert.equal(before.editor.selectionEnd, before.editor.value.length);
+  assert.ok(['codemirror', 'textarea'].includes(before.editor.mode), 'the shown editor surface is identified');
+  assert.equal(before.editor.shownText, before.editor.value, 'the shown editor displays the working-copy model text');
   assert.ok(bridgeBefore.clients > 0);
   assert.equal(event.topic, 'file.changed');
   assert.equal(event.payload?.rootId, before.snapshot.rootId);
@@ -1823,12 +1826,15 @@ export async function runProjectFileFlow({ harness, result, check }, { profile, 
   await ensureFileDetail((await observeProjectUi(harness)).cardId);
   await click(`${card} [role="treeitem"][data-relative-path="qa-project.txt"]`, 'open owned original in FileView');
   await waitUi(value => value.editor === proof.initial.originalText && !!value.snapshot?.draftId);
-  await type(field('file-editor'), `${proof.initial.originalText}Uncommitted working-copy edit\n`);
+  // Type into the editor actually shown (CodeMirror content, else textarea).
+  const shownEditor = await resolveShownFileEditor(harness, card);
+  proof.editorMode = shownEditor.mode;
+  await type(shownEditor.input, `${proof.initial.originalText}Uncommitted working-copy edit\n`);
   await waitUi(value => value.snapshot?.originalDirty === true);
   await click(field('file-project-check'), 'dirty original must block before terminal spawn/write');
   proof.uiDirty = await waitUi(value => value.status.includes('원본에 저장하지 않은 변경'));
   proof.dirty = await state();
-  await type(field('file-editor'), proof.initial.originalText);
+  await type(shownEditor.input, proof.initial.originalText);
   await click(field('file-save-copy'), 'save restored working copy only');
   await waitUi(value => !value.snapshot?.dirty && !value.snapshot?.originalDirty && value.editor === proof.initial.originalText);
   proof.restored = await state();
@@ -1910,11 +1916,11 @@ export async function projectWatchJson(route, { method = 'GET', body, token, env
   }
 }
 
-async function observeWatchUi(harness) {
-  return chrome(harness, () => {
+export async function observeWatchUi(harness) {
+  return chromeWithFileEditor(harness, () => {
     const cards = [...document.querySelectorAll('[data-testid="file-card"]')];
     const card = cards.length === 1 ? cards[0] : null;
-    const editor = card?.querySelector('[data-testid="file-editor"]');
+    const editor = card ? readShownFileEditor(card) : null;
     const folder = card?.querySelector('[role="treeitem"][data-relative-path="qa-expanded"]');
     const created = [...(card?.querySelectorAll('[role="treeitem"][data-relative-path="qa-expanded/qa-watch-created.txt"]') || [])];
     const item = created.length === 1 ? created[0] : null;
@@ -1924,8 +1930,8 @@ async function observeWatchUi(harness) {
       style.visibility === 'visible' && !item.closest('[hidden], [inert], [aria-hidden="true"]');
     return { count: cards.length, cardId: card?.id || null, snapshot: card?._fileView?.snapshot?.() || null,
       folderExpanded: folder?.getAttribute('aria-expanded') === 'true', createdCount: created.length, createdVisible: visible,
-      editor: editor ? { value: editor.value, selectionStart: editor.selectionStart, selectionEnd: editor.selectionEnd,
-        focused: document.activeElement === editor } : null };
+      editor: editor ? { mode: editor.mode, value: editor.value, shownText: editor.shownText, selectionStart: editor.selectionStart,
+        selectionEnd: editor.selectionEnd, focused: editor.focused } : null };
   });
 }
 
@@ -2015,7 +2021,10 @@ export async function runProjectFileWatcherFlow({ harness, result, check }, { pr
   await waitFor(harness, observeWatchUi, value => value.folderExpanded, deadlineMs);
   await click(`${card} [role="treeitem"][data-relative-path="qa-project.txt"]`, 'open owned working copy');
   await waitFor(harness, observeWatchUi, value => !!value.snapshot?.draftId, deadlineMs);
-  const editor = `${card} ${testid('file-editor')}`;
+  // Native input goes to the editor actually shown (CodeMirror content, else textarea).
+  const shownEditor = await resolveShownFileEditor(harness, card);
+  const editor = shownEditor.input;
+  proof.editorMode = shownEditor.mode;
   const text = 'Owned watcher QA: unsaved working copy stays selected.';
   await click(editor, 'focus working copy');
   assertBeforeDeadline(deadlineMs); await harness.press('meta+a', editor);

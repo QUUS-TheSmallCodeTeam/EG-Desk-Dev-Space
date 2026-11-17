@@ -14,7 +14,9 @@ import { assertProjectEnvironment, assertProjectFlowEvidence, PROJECT_VIEWPORTS,
   assertChatProjectReviewScroll, assertChatRoomReadReceipt, roomFolderPreviewVisible,
   assertRoomFolderResponse, assertRoomFolderUiEvidence, assertProjectWatchEnvironment,
   assertProjectWatchEvidence, awaitProjectWatchDeadline, runProjectWatcherCli, projectWatchScope,
-  guardProjectWatchHarness, projectWatchJson, waitWatcherFileUi } from './verify-firefox-mcp-project-file-flow.mjs';
+  guardProjectWatchHarness, projectWatchJson, waitWatcherFileUi, observeWatchUi } from './verify-firefox-mcp-project-file-flow.mjs';
+import { fakeFileCard } from './egdesk-qa-file-editor.test.mjs';
+import { runInNewContext } from 'node:vm';
 import { parseCli } from './verify-firefox-mcp-headless-ui-regression.mjs';
 import { terminalScriptLine } from '../overlay/resources/EGDeskTerminalState.sys.mjs';
 
@@ -165,7 +167,7 @@ test('late MCP results are rejected and a cancelled fixture POST remains unknown
 test('watcher receipt requires correlated real event, SSE client, same folder re-list and undisturbed editor', () => {
   const snapshot = { rootId: 'root', projectId: null, fileId: 'file', draftId: 'draft', sourceRevision: 'rev',
     sourceConnection: 'connected', bufferRevision: 1, savedRevision: 0, dirty: false, originalDirty: true };
-  const editor = { value: 'draft', selectionStart: 0, selectionEnd: 5, focused: true };
+  const editor = { mode: 'codemirror', value: 'draft', shownText: 'draft', selectionStart: 0, selectionEnd: 5, focused: true };
   const before = { cardId: 'card', snapshot, folderExpanded: true, createdCount: 0, createdVisible: false, editor };
   const after = { ...structuredClone(before), createdCount: 1, createdVisible: true };
   const event = { id: 'event', sequence: 10, topic: 'file.changed', payload: { rootId: 'root',
@@ -185,7 +187,13 @@ test('watcher receipt requires correlated real event, SSE client, same folder re
   const visibleTarget = { visible: true, inViewport: true, hitCount: 9, disabled: false, readOnly: false };
   const proof = { before, after, fixtureBefore, fixtureAfter, bridgeBefore, bridgeAfter, event, broadcast, screenshots, visibleTarget };
   assert.equal(assertProjectWatchEvidence(proof), true);
+  const textarea = structuredClone(proof);
+  for (const side of [textarea.before, textarea.after]) side.editor.mode = 'textarea';
+  assert.equal(assertProjectWatchEvidence(textarea), true, 'textarea fallback is accepted as the shown editor');
   for (const corrupt of [
+    p => { p.before.editor.mode = p.after.editor.mode = null; },
+    p => { p.before.editor.shownText = p.after.editor.shownText = 'stale'; },
+    p => p.after.editor.mode = 'textarea',
     p => p.event.payload.rootId = 'other', p => p.broadcast.clients = 0,
     p => p.fixtureAfter.watchEvents = [], p => p.fixtureAfter.fileRequests[1].status = 403,
     p => p.fixtureAfter.fileRequests[1].sequence = 9, p => p.fixtureAfter.fileRequests[1].request.directoryId = 'other',
@@ -194,6 +202,36 @@ test('watcher receipt requires correlated real event, SSE client, same folder re
     p => p.after.snapshot.draftId = 'different', p => p.fixtureAfter.currentOriginalSha256 = 'changed',
     p => p.bridgeAfter.runs.push({}), p => p.screenshots[0].visualPass = true,
   ]) { const invalid = structuredClone(proof); corrupt(invalid); assert.throws(() => assertProjectWatchEvidence(invalid)); }
+});
+
+test('watch observation reads the shown editor: CodeMirror content when mounted, else the textarea', async () => {
+  for (const mode of ['codemirror', 'textarea']) {
+    const fake = fakeFileCard({ mode, text: 'draft', focus: mode === 'codemirror' ? 'content' : 'textarea',
+      selection: ({ lines }) => ({ startContainer: lines[0].textNode, startOffset: 0, endContainer: lines[0].textNode, endOffset: 5 }) });
+    fake.textarea.selectionStart = 0; fake.textarea.selectionEnd = 5;
+    Object.assign(fake.card, { id: 'card', querySelectorAll: () => [] });
+    const card = fake.card, base = card.querySelector;
+    card.querySelector = selector => selector.includes('treeitem') ? null : base(selector);
+    const harness = { evaluateChrome: source => runInNewContext(`(${source})()`, {
+      document: { querySelectorAll: selector => selector === '[data-testid="file-card"]' ? [card] : [], activeElement: fake.doc.activeElement },
+      getComputedStyle: () => ({}), innerWidth: 800, innerHeight: 600 }) };
+    const value = await observeWatchUi(harness);
+    assert.deepEqual(JSON.parse(JSON.stringify(value.editor)), { mode, value: 'draft', shownText: 'draft', selectionStart: 0, selectionEnd: 5, focused: true });
+    // A hidden textarea's own focus/selection is not the shown editor's.
+    if (mode === 'codemirror') {
+      fake.doc.activeElement = fake.textarea;
+      assert.equal((await observeWatchUi(harness)).editor.focused, false);
+    }
+  }
+});
+
+test('project and watcher flows type only into the resolved shown editor, never the hidden textarea selector', () => {
+  const source = fs.readFileSync(new URL('./verify-firefox-mcp-project-file-flow.mjs', import.meta.url), 'utf8');
+  assert.ok(!source.includes("type(field('file-editor')"));
+  assert.ok(!source.includes("testid('file-editor')"));
+  assert.equal(source.match(/await resolveShownFileEditor\(harness, card\)/g)?.length, 2);
+  assert.equal(source.match(/await type\(shownEditor\.input, /g)?.length, 2);
+  assert.ok(source.includes('const editor = shownEditor.input;'));
 });
 
 test('data-ready FileView at compact semantic zoom requires native projection focus, never unhiding DOM', () => {
