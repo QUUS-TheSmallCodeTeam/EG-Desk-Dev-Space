@@ -36,8 +36,10 @@ const TARGET_KEYS = ['sourceId', 'artifactId', 'viewId', 'range']
 // CNV-07 Canvas-area target (egdesk_publish_briefing_regions only).
 const REGION_KEYS = ['canvasRect', 'label']
 export const BRIEFING_REGION_LIMITS = Object.freeze({ coordinate: 10_000_000, size: 1_000_000, label: 80 })
-// Reserved for CNV-05 annotation sets: recognised and refused until they exist.
-export const BRIEFING_RESERVED_TARGET_KEYS = Object.freeze(['annotationSetId'])
+// CNV-05 annotation set target (egdesk_publish_briefing_regions only): the
+// set's stable id in the annotation tool's bounded token format. The helper
+// keeps no Canvas state, so the screen resolves it (missing → '찾을 수 없음').
+export const BRIEFING_ANNOTATION_SET_ID = /^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$/
 const EMPHASIS = ['spotlight', 'outline']
 // A value that is only a locator (absolute/home path, drive path, UNC path,
 // file: or scheme URL) instead of the content itself.
@@ -109,9 +111,9 @@ const tools = [
   // CHAT-05/CNV-07: one step can light up several pieces of evidence together.
   ['egdesk_publish_briefing_multi', 'Publish a proposed Answer Briefing whose steps each light up 1–6 validated immutable targets together while the rest of the Canvas is dimmed. Prefer this over egdesk_publish_briefing. This does not move the camera, execute actions or start another model turn. Use sourceId/artifactId from bound context, never paths or URLs. viewId is a UI hint, never authority. emphasis "spotlight" (default) dims everything else; "outline" only outlines the targets.', { title: { type: 'string' }, steps: { type: 'array', minItems: 1, maxItems: 20, items: { type: 'object', additionalProperties: false, required: ['id', 'text', 'targets', 'fallback'], properties: { id: { type: 'string' }, text: { type: 'string' }, fallback: { type: 'string' }, emphasis: { type: 'string', enum: ['spotlight', 'outline'] }, targets: { type: 'array', minItems: 1, maxItems: 6, items: { type: 'object', additionalProperties: false, properties: { sourceId: { type: 'string' }, artifactId: { type: 'string' }, viewId: { type: 'string' }, range: { type: 'object', additionalProperties: false, properties: { startLine: { type: 'integer' }, endLine: { type: 'integer' } }, required: ['startLine', 'endLine'] } } } } } } } }, ['title', 'steps']],
   // CNV-07: the same multi-target briefing whose targets may also be a Canvas
-  // area (canvasRect, Canvas coordinates). annotationSetId is reserved for the
-  // CNV-05 annotation sets so that tool keeps this schema; it is rejected now.
-  ['egdesk_publish_briefing_regions', 'Publish a proposed Answer Briefing like egdesk_publish_briefing_multi, where a target may also be an area of the Canvas. A target is either bound evidence (sourceId/artifactId from bound context, optional viewId hint and line range) or canvasRect {x, y, width, height} in Canvas coordinates with an optional short label, never both. Never paths or URLs. annotationSetId is reserved and not accepted yet. This does not move the camera, execute actions or start another model turn.', { title: { type: 'string' }, steps: { type: 'array', minItems: 1, maxItems: 20, items: { type: 'object', additionalProperties: false, required: ['id', 'text', 'targets', 'fallback'], properties: { id: { type: 'string' }, text: { type: 'string' }, fallback: { type: 'string' }, emphasis: { type: 'string', enum: ['spotlight', 'outline'] }, targets: { type: 'array', minItems: 1, maxItems: 6, items: { type: 'object', additionalProperties: false, properties: { sourceId: { type: 'string' }, artifactId: { type: 'string' }, viewId: { type: 'string' }, range: { type: 'object', additionalProperties: false, properties: { startLine: { type: 'integer' }, endLine: { type: 'integer' } }, required: ['startLine', 'endLine'] }, canvasRect: { type: 'object', additionalProperties: false, properties: { x: { type: 'number' }, y: { type: 'number' }, width: { type: 'number' }, height: { type: 'number' } }, required: ['x', 'y', 'width', 'height'] }, label: { type: 'string' }, annotationSetId: { type: 'string' } } } } } } } }, ['title', 'steps']],
+  // area (canvasRect, Canvas coordinates) or a CNV-05 annotation set
+  // (annotationSetId alone, resolved by the screen).
+  ['egdesk_publish_briefing_regions', 'Publish a proposed Answer Briefing like egdesk_publish_briefing_multi, where a target may also be an area of the Canvas. A target is either bound evidence (sourceId/artifactId from bound context, optional viewId hint and line range) or canvasRect {x, y, width, height} in Canvas coordinates with an optional short label, or annotationSetId alone (the id egdesk_publish_annotation returned as setId), never mixed. Never paths or URLs. This does not move the camera, execute actions or start another model turn.', { title: { type: 'string' }, steps: { type: 'array', minItems: 1, maxItems: 20, items: { type: 'object', additionalProperties: false, required: ['id', 'text', 'targets', 'fallback'], properties: { id: { type: 'string' }, text: { type: 'string' }, fallback: { type: 'string' }, emphasis: { type: 'string', enum: ['spotlight', 'outline'] }, targets: { type: 'array', minItems: 1, maxItems: 6, items: { type: 'object', additionalProperties: false, properties: { sourceId: { type: 'string' }, artifactId: { type: 'string' }, viewId: { type: 'string' }, range: { type: 'object', additionalProperties: false, properties: { startLine: { type: 'integer' }, endLine: { type: 'integer' } }, required: ['startLine', 'endLine'] }, canvasRect: { type: 'object', additionalProperties: false, properties: { x: { type: 'number' }, y: { type: 'number' }, width: { type: 'number' }, height: { type: 'number' } }, required: ['x', 'y', 'width', 'height'] }, label: { type: 'string' }, annotationSetId: { type: 'string' } } } } } } } }, ['title', 'steps']],
   // CHAT-08. When/when-not and "do not repeat it in chat" follow the
   // createDocument tool guidance of vercel/chatbot (Apache-2.0, pattern only:
   // lib/ai/tools/create-document.ts, lib/ai/prompts.ts).
@@ -834,7 +836,12 @@ export class ContextRuntime {
   }
 
   async briefingTarget(run, binding, target, assertActive, { regions = false } = {}) {
-    if (regions && plainObject(target) && BRIEFING_RESERVED_TARGET_KEYS.some(key => Object.hasOwn(target, key))) reject('INVALID_BRIEFING_TARGET', 'Annotation set targets are not supported yet', 400)
+    if (regions && plainObject(target) && Object.hasOwn(target, 'annotationSetId')) {
+      if (Object.keys(target).length !== 1 || typeof target.annotationSetId !== 'string' || !BRIEFING_ANNOTATION_SET_ID.test(target.annotationSetId)) {
+        reject('INVALID_BRIEFING_TARGET', 'An annotation set target has annotationSetId only: 1–128 letters, digits, _ . : or -', 400)
+      }
+      return { annotationSetId: target.annotationSetId }
+    }
     if (regions && plainObject(target) && Object.hasOwn(target, 'canvasRect')) return this.briefingRegion(target)
     if (!target || typeof target !== 'object' || Object.keys(target).some(key => !TARGET_KEYS.includes(key))) reject('INVALID_BRIEFING_TARGET', 'Briefing targets must use validated IDs, not paths or URLs', 400)
     if (target.range != null && Object.hasOwn(target.range, 'endLine') && !Number.isInteger(target.range.endLine)) {
@@ -874,6 +881,7 @@ export class ContextRuntime {
       for (const value of step.targets) {
         const target = await this.briefingTarget(run, binding, value, assertActive, { regions })
         const key = target.canvasRect ? JSON.stringify(['canvasRect', target.canvasRect.x, target.canvasRect.y, target.canvasRect.width, target.canvasRect.height])
+          : target.annotationSetId ? JSON.stringify(['annotationSet', target.annotationSetId])
           : JSON.stringify([target.sourceId, target.range?.startLine ?? null, target.range?.endLine ?? null])
         if (seen.has(key)) reject('INVALID_BRIEFING_TARGET', 'A step names the same evidence twice', 400)
         seen.add(key)

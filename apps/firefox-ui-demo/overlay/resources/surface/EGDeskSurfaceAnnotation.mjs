@@ -493,6 +493,33 @@ export function createAnnotationZone(deps) {
     return list;
   }
 
+  // The Canvas place a set occupies (Canvas world pixels): its card's window
+  // for a card set, the bounds of its visible marks for a free Canvas set.
+  const annotationPx = (value, fallback) => {
+    const number = parseFloat(value);
+    return Number.isFinite(number) ? number : (Number.isFinite(fallback) ? fallback : NaN);
+  };
+  function annotationCanvasRect(entry, card) {
+    let rect;
+    if (card) {
+      rect = { x: annotationPx(card.style?.left, card.offsetLeft ?? 0), y: annotationPx(card.style?.top, card.offsetTop ?? 0),
+        width: annotationPx(card.style?.width, card.offsetWidth), height: annotationPx(card.style?.height, card.offsetHeight) };
+    } else {
+      const points = [];
+      for (const item of AnnotationState.projectAnnotationSet(entry.set, { x: 0, y: 0, width: 1, height: 1 }, undefined).items) {
+        if (item.rect) points.push([item.rect.x, item.rect.y], [item.rect.x + item.rect.width, item.rect.y + item.rect.height]);
+        else if (item.line) points.push([item.line.x1, item.line.y1], [item.line.x2, item.line.y2]);
+        else if (item.point) points.push([item.point.x, item.point.y]);
+      }
+      const xs = points.map(point => point[0]).filter(Number.isFinite), ys = points.map(point => point[1]).filter(Number.isFinite);
+      if (!xs.length || !ys.length) return null;
+      const x = Math.min(...xs), y = Math.min(...ys);
+      // A lone point or a straight line still gets a visible area.
+      rect = { x, y, width: Math.max(24, Math.max(...xs) - x), height: Math.max(24, Math.max(...ys) - y) };
+    }
+    return ['x', 'y', 'width', 'height'].every(key => Number.isFinite(rect[key])) && rect.width > 0 && rect.height > 0 ? rect : null;
+  }
+
   // Where a set is drawn, for an Answer Briefing step that targets it.
   function annotationTarget(setId) {
     const entry = annotationEntries.get(setId);
@@ -500,7 +527,8 @@ export function createAnnotationZone(deps) {
     const card = annotationCard(entry);
     if (entry.set.space === 'card' && !card) return null;
     return { setId: entry.set.id, space: entry.set.space, cardId: card?.id ?? null, card: card || null,
-      layer: entry.layer?.isConnected ? entry.layer : null,
+      layer: entry.layer?.isConnected ? entry.layer : null, rect: annotationCanvasRect(entry, card),
+      summary: entry.summary,
       itemIds: entry.set.items.filter(item => item.status !== 'dismissed').map(item => item.id) };
   }
 

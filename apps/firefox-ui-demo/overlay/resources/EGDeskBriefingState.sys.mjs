@@ -26,8 +26,11 @@ export function briefingStepTargets(step) {
 export const briefingEmphasis = step => step?.emphasis === 'outline' ? 'outline' : 'spotlight';
 
 // CNV-07 target kinds. 'canvasRect' is a Canvas area (egdesk_publish_briefing_
-// regions); 'annotationSet' is reserved for CNV-05 annotation sets and is
-// resolved as unsupported until those exist — add its resolution here.
+// regions); 'annotationSet' is a CNV-05 annotation set by its stable id,
+// resolved through the screen's annotation layer (annotationTarget).
+// The same bounded id format as the helper's annotation tool tokens.
+export const BRIEFING_ANNOTATION_SET_ID = /^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$/;
+export const briefingAnnotationSetIdValid = id => typeof id === 'string' && BRIEFING_ANNOTATION_SET_ID.test(id);
 export const BRIEFING_TARGET_KINDS = Object.freeze(['source', 'artifact', 'canvasRect', 'annotationSet']);
 export function briefingTargetKind(target) {
   if (!isTarget(target)) return null;
@@ -39,6 +42,11 @@ export function briefingTargetKind(target) {
 }
 // The Canvas place a resolved target occupies: its open window, or its area.
 export const briefingTargetGeometry = item => item?.view?.geometry ?? item?.region ?? null;
+// An annotation set names itself by the set's summary when the screen knows it.
+export function briefingAnnotationLabel(target, resolved = null, index = 0) {
+  const summary = typeof resolved?.annotation?.summary === 'string' ? resolved.annotation.summary.replace(/\s+/g, ' ').trim().slice(0, 80) : '';
+  return { name: summary || `표식 묶음 ${index + 1}`, rangeText: '표식 묶음' };
+}
 export function briefingRegionLabel(target, index = 0) {
   const label = typeof target?.label === 'string' && target.label.trim() ? target.label.trim() : `Canvas 영역 ${index + 1}`;
   return { name: label, rangeText: 'Canvas 영역' };
@@ -111,17 +119,25 @@ export const briefingChromeMode = session => session?.briefing ? 'briefing' : nu
 // Canvas is only outlined: nothing is dimmed for it.
 export function briefingStepFocus(session, resolved = [], { overview = false, cards = [] } = {}) {
   const chromeMode = briefingChromeMode(session);
-  if (!chromeMode) return { chromeMode: null, emphasis: null, targetIds: [], dimOthers: false, regions: [] };
+  if (!chromeMode) return { chromeMode: null, emphasis: null, targetIds: [], dimOthers: false, regions: [], annotationSetIds: [] };
   const available = (Array.isArray(resolved) ? resolved : []).filter(item => item?.status === 'available');
-  const regions = available.filter(item => finiteRect(item.region)).map(item => ({ ...item.region,
-    ...(typeof item.target?.label === 'string' && item.target.label.trim() ? { label: item.target.label.trim() } : {}) }));
+  // An annotation set on a card is shown by its window's emphasis and its own
+  // marks; only a free Canvas set also gets the area outline.
+  const regions = available.filter(item => finiteRect(item.region) && !item.annotation?.cardId).map(item => {
+    const label = typeof item.target?.label === 'string' && item.target.label.trim() ? item.target.label.trim()
+      : item.annotation ? briefingAnnotationLabel(item.target, item).name : '';
+    return { ...item.region, ...(label ? { label } : {}) };
+  });
+  const annotationSetIds = [...new Set(available.filter(item => item.annotation && typeof item.target?.annotationSetId === 'string')
+    .map(item => item.target.annotationSetId))];
   const targetIds = [...new Set([
     ...available.filter(item => typeof item.view?.id === 'string' && item.view.id).map(item => item.view.id),
+    ...available.filter(item => typeof item.annotation?.cardId === 'string' && item.annotation.cardId).map(item => item.annotation.cardId),
     ...(Array.isArray(cards) ? cards : []).filter(card => typeof card?.id === 'string' && card.id && finiteRect(card.geometry)
       && regions.some(region => overlaps(region, card.geometry))).map(card => card.id),
   ])];
   const emphasis = targetIds.length ? overview ? 'spotlight' : briefingEmphasis(currentBriefingStep(session)) : regions.length ? 'outline' : null;
-  return { chromeMode, emphasis, targetIds, dimOthers: emphasis === 'spotlight', regions };
+  return { chromeMode, emphasis, targetIds, dimOthers: emphasis === 'spotlight', regions, annotationSetIds };
 }
 
 // CHAT-05/CNV-07 re-entry: the step last read, per answer, kept by the caller
@@ -169,10 +185,26 @@ export function briefingCommentRow(comment, { targetText = '' } = {}) {
 }
 export const commentRevision = comment => Number.isSafeInteger(comment?.revision) && comment.revision > 0 ? comment.revision : 1;
 
-export function resolveBriefingTargets(step, { references = [], artifacts = [], views = [], identity = {} } = {}) {
+// annotations: the screen's annotation layer API (annotationTarget(setId) →
+// { setId, rect, summary, … } | null). Without it an annotation set target
+// stays unsupported (helper-side or test readers that have no Canvas).
+export function resolveBriefingTargets(step, { references = [], artifacts = [], views = [], identity = {}, annotations = null } = {}) {
   return briefingStepTargets(step).map(target => {
     const kind = briefingTargetKind(target);
-    if (kind === 'annotationSet') return { target, status: 'unsupported', reason: '표식 묶음 대상은 아직 지원하지 않습니다.' };
+    if (kind === 'annotationSet') {
+      if (!briefingAnnotationSetIdValid(target.annotationSetId) || Object.keys(target).some(key => key !== 'annotationSetId')) {
+        return { target, status: 'unsupported', reason: '표식 묶음을 확인할 수 없습니다.' };
+      }
+      if (typeof annotations?.annotationTarget !== 'function') return { target, status: 'unsupported', reason: '표식 묶음 대상은 이 화면에서 지원하지 않습니다.' };
+      let found = null;
+      try { found = annotations.annotationTarget(target.annotationSetId); } catch { found = null; }
+      if (!found || found.setId !== target.annotationSetId) {
+        return { target, status: 'missing', annotationMissing: true, reason: '표식 묶음을 찾을 수 없습니다. 지워졌거나 대상 창이 닫혔습니다.' };
+      }
+      const rect = found.rect;
+      if (!finiteRect(rect)) return { target, annotation: found, status: 'missing', annotationMissing: true, reason: '표식 묶음의 위치를 찾을 수 없습니다.' };
+      return { target, annotation: found, status: 'available', region: { x: rect.x, y: rect.y, width: rect.width, height: rect.height } };
+    }
     if (kind === 'canvasRect') {
       const rect = target.canvasRect;
       if (!finiteRect(rect) || ['sourceId', 'artifactId', 'viewId', 'range'].some(key => Object.hasOwn(target, key))) {
@@ -405,14 +437,16 @@ export function briefingMinimapRegions(session, resolvedSteps = [], { viewport =
     const step = session.briefing.steps[index], resolved = Array.isArray(resolvedSteps[index]) ? resolvedSteps[index] : [];
     let areaNumber = 0;
     for (const target of briefingStepTargets(step)) {
-      if (briefingTargetKind(target) !== 'canvasRect') continue;
+      const kind = briefingTargetKind(target);
+      if (kind !== 'canvasRect' && kind !== 'annotationSet') continue;
       areaNumber++;
       const item = resolved.find(entry => entry?.target === target);
       if (item?.status !== 'available' || !finiteRect(item.region)) continue;
       const rect = { x: item.region.x, y: item.region.y, width: item.region.width, height: item.region.height };
       const offscreen = viewport ? briefingOffscreenDirection(rect, viewport) : null;
       regions.push({ stepId: step.id, stepNumber: index + 1, relativeStep: index - session.index, current: index === session.index,
-        areaNumber, rect, label: briefingRegionLabel(target, areaNumber - 1).name, offscreen });
+        areaNumber, rect, label: (kind === 'annotationSet' ? briefingAnnotationLabel(target, item, areaNumber - 1) : briefingRegionLabel(target, areaNumber - 1)).name,
+        ...(kind === 'annotationSet' ? { kind, annotationSetId: target.annotationSetId } : {}), offscreen });
     }
   }
   return regions;

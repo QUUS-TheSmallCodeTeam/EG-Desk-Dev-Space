@@ -2852,7 +2852,8 @@
       return [{ id: card.id, sourceId: reference?.sourceId, hash: reference?.hash, evidenceKey,
         geometry: persistentEntityGeometry(card), sourceMatches: !!card._inputEvidenceLoaded, revisionMatches: !!card._inputEvidenceLoaded }];
     });
-    return BriefingState.resolveBriefingTargets(step, { references: session.references, artifacts: session.artifacts, views, identity: session.identity })
+    return BriefingState.resolveBriefingTargets(step, { references: session.references, artifacts: session.artifacts, views, identity: session.identity,
+      annotations: (typeof surfaceZones === 'undefined' ? null : surfaceZones.annotation || null) })   // CNV-07: annotation-set targets via the CNV-05 layer
       .map(item => {
         const reason = briefingRangeIssue(item.target);
         return reason ? { ...item, status: 'unsupported', reason } : item;
@@ -2925,6 +2926,11 @@
       if (targets.has(card.id)) { if (card.dataset.egdBriefingTarget !== 'true') card.dataset.egdBriefingTarget = 'true'; }
       else if (card.dataset.egdBriefingTarget) delete card.dataset.egdBriefingTarget;
     }
+    // The step's annotation sets are emphasized; the previous step's lose it.
+    const annotations = (typeof surfaceZones === 'undefined' ? null : surfaceZones.annotation || null), emphasized = syncBriefingFocus._annotationSets ||= new Set();
+    const nextSets = new Set(focus.annotationSetIds || []);
+    for (const id of emphasized) if (!nextSets.has(id)) { try { annotations?.emphasizeAnnotationSet(id, false); } catch {} emphasized.delete(id); }
+    for (const id of nextSets) { try { if (annotations?.emphasizeAnnotationSet(id, true)) emphasized.add(id); } catch {} }
     return focus;
   }
 
@@ -2984,7 +2990,8 @@
     const camera = briefingFitCamera(bounds, safe, panel?.getBoundingClientRect());
     if (!camera) return false;
     state.setCanvasViewportTarget?.(camera);
-    const firstView = resolved.find(item => item.status === 'available' && item.view?.id)?.view.id;
+    const firstView = resolved.find(item => item.status === 'available' && item.view?.id)?.view.id
+      || resolved.find(item => item.status === 'available' && item.annotation?.cardId)?.annotation.cardId;
     if (firstView) focusCanvasCard(document.getElementById(firstView));
     return true;
   }
@@ -3668,6 +3675,11 @@
         const { name, rangeText } = BriefingState.briefingRegionLabel(requested, index);
         return { name, rangeText, identity: `${name} · ${rangeText}`, capture: JSON.stringify(['canvasRect', requested.canvasRect]) };
       }
+      if (BriefingState.briefingTargetKind(requested) === 'annotationSet') {
+        // CNV-07: an annotation set names itself by its summary on the Canvas.
+        const { name, rangeText } = BriefingState.briefingAnnotationLabel(requested, target, index);
+        return { name, rangeText, identity: `${name} · ${rangeText}`, capture: JSON.stringify(['annotationSet', requested.annotationSetId]) };
+      }
       const verified = target.status === 'available' && !!target.view?.id;
       const named = verified ? [target.reference?.localSource?.label, target.reference?.label, target.artifact?.label,
         requested.sourceId, requested.artifactId].find(value => typeof value === 'string' && value.trim()) : null;
@@ -3765,7 +3777,7 @@
         if (row.rangeNode.textContent !== description.rangeText) row.rangeNode.textContent = description.rangeText;
         row.suffixNode.textContent = suffix; row.suffixNode.hidden = !suffix;
         const hashMatches = !!target.reference && (!target.target.hash || target.target.hash === target.reference.hash);
-        const stateLabel = unsupported ? '지원 안 됨' : target.region ? '표시 중' : target.status === 'available' ? '열림' : target.status === 'stale' ? '일치 확인 필요'
+        const stateLabel = unsupported ? '지원 안 됨' : target.annotationMissing ? '찾을 수 없음' : target.region ? '표시 중' : target.status === 'available' ? '열림' : target.status === 'stale' ? '일치 확인 필요'
           : session.preparing && hashMatches ? '준비 중' : '확인 필요';
         if (row.stateText.textContent !== stateLabel) row.stateText.textContent = stateLabel;
         const actionLabel = target.reference && !hashMatches ? '연결된 입력 보기' : '당시 입력 보기';
@@ -9704,7 +9716,8 @@
     const session = state.codex?.briefingSession;
     try {
       if (!session || session.threadId !== state.codex.activeThreadId || state.codex.briefingSession !== session) return [];
-      const resolvedSteps = session.briefing.steps.map((step, index) => Math.abs(index - session.index) > 1 ? [] : BriefingState.resolveBriefingTargets(step));
+      const annotations = (typeof surfaceZones === 'undefined' ? null : surfaceZones.annotation || null);
+      const resolvedSteps = session.briefing.steps.map((step, index) => Math.abs(index - session.index) > 1 ? [] : BriefingState.resolveBriefingTargets(step, { annotations }));
       return BriefingState.briefingMinimapRegions(session, resolvedSteps, { viewport: model.viewport });
     } catch { return []; }
   }
@@ -9715,7 +9728,8 @@
 
   function minimapBriefingRegionLabel(region) {
     const position = region.relativeStep === -1 ? '이전' : region.relativeStep === 1 ? '다음' : '현재';
-    return `${position} ${region.stepNumber}단계 · Canvas 영역 · ${region.label}${minimapOffscreenText(region.offscreen)}`;
+    const kindText = region.kind === 'annotationSet' ? '표식 묶음' : 'Canvas 영역';
+    return `${position} ${region.stepNumber}단계 · ${kindText} · ${region.label}${minimapOffscreenText(region.offscreen)}`;
   }
 
   function minimapBriefingEvidenceLabel(item) {

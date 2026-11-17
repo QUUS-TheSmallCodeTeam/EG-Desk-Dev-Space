@@ -15,29 +15,29 @@ const available = id => ({ status: 'available', view: { id } });
 
 test('the current step names the windows to keep clear and whether the rest recedes', () => {
   const focus = BriefingState.briefingStepFocus(begin(0), [available('card-a'), { status: 'missing' }, available('card-a'), available('card-b')]);
-  assert.deepEqual(focus, { chromeMode: 'briefing', emphasis: 'spotlight', targetIds: ['card-a', 'card-b'], dimOthers: true, regions: [] });
+  assert.deepEqual(focus, { chromeMode: 'briefing', emphasis: 'spotlight', targetIds: ['card-a', 'card-b'], dimOthers: true, regions: [], annotationSetIds: [] });
 });
 
 test('an outline step rings its windows without dimming the others', () => {
   const focus = BriefingState.briefingStepFocus(begin(1), [available('card-a')]);
-  assert.deepEqual(focus, { chromeMode: 'briefing', emphasis: 'outline', targetIds: ['card-a'], dimOthers: false, regions: [] });
+  assert.deepEqual(focus, { chromeMode: 'briefing', emphasis: 'outline', targetIds: ['card-a'], dimOthers: false, regions: [], annotationSetIds: [] });
 });
 
 test('a step with no open window emphasizes nothing and never dims the whole Canvas', () => {
   for (const resolved of [[], undefined, [{ status: 'missing', view: { id: 'card-a' } }, { status: 'available', view: {} }, { status: 'stale' }]]) {
     assert.deepEqual(BriefingState.briefingStepFocus(begin(2), resolved),
-      { chromeMode: 'briefing', emphasis: null, targetIds: [], dimOthers: false, regions: [] });
+      { chromeMode: 'briefing', emphasis: null, targetIds: [], dimOthers: false, regions: [], annotationSetIds: [] });
   }
 });
 
 test('the whole-briefing overview keeps every briefing window clear, whatever one step asked for', () => {
   const focus = BriefingState.briefingStepFocus(begin(1), [available('card-a'), available('card-c')], { overview: true });
-  assert.deepEqual(focus, { chromeMode: 'briefing', emphasis: 'spotlight', targetIds: ['card-a', 'card-c'], dimOthers: true, regions: [] });
+  assert.deepEqual(focus, { chromeMode: 'briefing', emphasis: 'spotlight', targetIds: ['card-a', 'card-c'], dimOthers: true, regions: [], annotationSetIds: [] });
 });
 
 test('without a briefing there is no chrome mode and nothing to emphasize', () => {
   assert.deepEqual(BriefingState.briefingStepFocus(null, [available('card-a')]),
-    { chromeMode: null, emphasis: null, targetIds: [], dimOthers: false, regions: [] });
+    { chromeMode: null, emphasis: null, targetIds: [], dimOthers: false, regions: [], annotationSetIds: [] });
 });
 
 // CNV-07 Canvas areas (canvasRect targets). Fields added above: regions[] (intentional).
@@ -46,14 +46,14 @@ test('a Canvas area keeps the windows it overlaps clear and is outlined; over em
   const cards = [{ id: 'inside', geometry: { x: 50, y: 50, width: 200, height: 200 } }, { id: 'outside', geometry: { x: 300, y: 0, width: 50, height: 50 } },
     { id: 'touching', geometry: { x: 100, y: 0, width: 20, height: 20 } }, { id: 'bad', geometry: { x: 0, y: 0, width: 0, height: 5 } }];
   assert.deepEqual(BriefingState.briefingStepFocus(begin(0), [area], { cards }),
-    { chromeMode: 'briefing', emphasis: 'spotlight', targetIds: ['inside'], dimOthers: true, regions: [{ x: 0, y: 0, width: 100, height: 100, label: '왼쪽 묶음' }] });
+    { chromeMode: 'briefing', emphasis: 'spotlight', targetIds: ['inside'], dimOthers: true, regions: [{ x: 0, y: 0, width: 100, height: 100, label: '왼쪽 묶음' }], annotationSetIds: [] });
   assert.deepEqual(BriefingState.briefingStepFocus(begin(0), [area], { cards: [cards[1]] }),
-    { chromeMode: 'briefing', emphasis: 'outline', targetIds: [], dimOthers: false, regions: [{ x: 0, y: 0, width: 100, height: 100, label: '왼쪽 묶음' }] },
+    { chromeMode: 'briefing', emphasis: 'outline', targetIds: [], dimOthers: false, regions: [{ x: 0, y: 0, width: 100, height: 100, label: '왼쪽 묶음' }], annotationSetIds: [] },
     'an area over empty Canvas never dims every window');
   assert.deepEqual(BriefingState.briefingStepFocus(begin(0), [available('card-a'), area], { cards }).targetIds, ['card-a', 'inside']);
 });
 
-test('target kinds: evidence, artifact, Canvas area, and the reserved annotation set which never resolves yet', () => {
+test('target kinds: evidence, artifact, Canvas area, and an annotation set that needs the screen annotation layer', () => {
   assert.equal(BriefingState.briefingTargetKind({ sourceId: 's' }), 'source');
   assert.equal(BriefingState.briefingTargetKind({ artifactId: 'a' }), 'artifact');
   assert.equal(BriefingState.briefingTargetKind({ canvasRect: { x: 0, y: 0, width: 1, height: 1 } }), 'canvasRect');
@@ -65,12 +65,51 @@ test('target kinds: evidence, artifact, Canvas area, and the reserved annotation
   const resolved = BriefingState.resolveBriefingTargets(step);
   assert.deepEqual(resolved.map(item => item.status), ['available', 'unsupported', 'unsupported', 'unsupported']);
   assert.deepEqual(resolved[0].region, { x: -5, y: 2, width: 40, height: 30 });
-  assert.match(resolved[1].reason, /표식 묶음 대상은 아직 지원하지 않습니다/);
+  // Without the screen's annotation layer (no `annotations` reader) a set stays unsupported.
+  assert.match(resolved[1].reason, /표식 묶음 대상은 이 화면에서 지원하지 않습니다/);
   assert.deepEqual(BriefingState.briefingBounds(resolved), { x: -5, y: 2, width: 40, height: 30 }, 'the camera fits Canvas areas too');
   assert.deepEqual(BriefingState.briefingScreenRects(resolved, { zoom: 2, pan: { x: 10, y: 0 } }), [{ x: 0, y: 4, width: 80, height: 60 }]);
   assert.deepEqual(BriefingState.briefingRegionLabel({ canvasRect: {}, label: ' 표 ' }, 0), { name: '표', rangeText: 'Canvas 영역' });
   assert.deepEqual(BriefingState.briefingRegionLabel({ canvasRect: {} }, 2), { name: 'Canvas 영역 3', rangeText: 'Canvas 영역' });
   assert.equal(BriefingState.validBriefing({ id: 'b', steps: [step] }), true);
+});
+
+test('CNV-07: an annotation set target resolves through annotationTarget — region for focus and camera fit, missing as 찾을 수 없음', () => {
+  const sets = new Map([['ann-1', { setId: 'ann-1', rect: { x: 100, y: 50, width: 200, height: 100 }, summary: ' 로그인  버튼 ' }],
+    ['ann-norect', { setId: 'ann-norect', rect: null }]]);
+  const asked = [];
+  const annotations = { annotationTarget: id => { asked.push(id); return sets.get(id) || null; } };
+  const step = { id: 's', text: 'T', targets: [{ annotationSetId: 'ann-1' }, { annotationSetId: 'ann-gone' }, { annotationSetId: 'ann-norect' },
+    { annotationSetId: '../bad id' }, { annotationSetId: 'ann-1', label: 'x' }, { canvasRect: { x: 400, y: 0, width: 10, height: 10 } }] };
+  const resolved = BriefingState.resolveBriefingTargets(step, { annotations });
+  assert.deepEqual(resolved.map(item => item.status), ['available', 'missing', 'missing', 'unsupported', 'unsupported', 'available']);
+  assert.deepEqual(asked, ['ann-1', 'ann-gone', 'ann-norect'], 'an id outside the bounded format is never looked up');
+  assert.deepEqual(resolved[0].region, { x: 100, y: 50, width: 200, height: 100 });
+  assert.equal(resolved[1].annotationMissing, true);
+  assert.match(resolved[1].reason, /표식 묶음을 찾을 수 없습니다/);
+  assert.deepEqual(BriefingState.briefingBounds(resolved), { x: 100, y: 0, width: 310, height: 150 }, 'the camera fits the set with the other targets');
+  assert.deepEqual(BriefingState.briefingAnnotationLabel(step.targets[0], resolved[0], 0), { name: '로그인 버튼', rangeText: '표식 묶음' });
+  assert.deepEqual(BriefingState.briefingAnnotationLabel(step.targets[1], resolved[1], 1), { name: '표식 묶음 2', rangeText: '표식 묶음' });
+  assert.equal(BriefingState.briefingAnnotationSetIdValid('x'.repeat(129)), false);
+  assert.equal(BriefingState.resolveBriefingTargets(step, { annotations: { annotationTarget: () => { throw new Error('boom'); } } })[0].status, 'missing');
+  const session = { briefing: { id: 'b', steps: [step] }, index: 0 };
+  const regions = BriefingState.briefingMinimapRegions(session, [resolved]);
+  assert.deepEqual(regions.map(region => [region.kind ?? 'canvasRect', region.label, region.areaNumber]),
+    [['annotationSet', '로그인 버튼', 1], ['canvasRect', 'Canvas 영역 6', 6]], 'annotation sets get minimap marks too');
+  assert.equal(regions[0].annotationSetId, 'ann-1');
+});
+
+test('CNV-07: the step emphasizes its annotation sets; a card set marks its window, a free set gets the area outline', () => {
+  const cardSet = { target: { annotationSetId: 'ann-card' }, status: 'available', annotation: { setId: 'ann-card', cardId: 'card-x', summary: '버튼' },
+    region: { x: 0, y: 0, width: 50, height: 50 } };
+  const freeSet = { target: { annotationSetId: 'ann-free' }, status: 'available', annotation: { setId: 'ann-free', cardId: null, summary: '정리할 곳' },
+    region: { x: 500, y: 0, width: 30, height: 30 } };
+  const gone = { target: { annotationSetId: 'ann-gone' }, status: 'missing', annotationMissing: true };
+  const focus = BriefingState.briefingStepFocus(begin(0), [cardSet, freeSet, gone]);
+  assert.deepEqual(focus.annotationSetIds, ['ann-card', 'ann-free']);
+  assert.deepEqual(focus.targetIds, ['card-x']);
+  assert.deepEqual(focus.regions, [{ x: 500, y: 0, width: 30, height: 30, label: '정리할 곳' }]);
+  assert.deepEqual(BriefingState.briefingStepFocus(null, [cardSet]).annotationSetIds, [], 'no emphasis once the briefing ends');
 });
 
 test('a briefing left in the middle offers that step again, by number', () => {

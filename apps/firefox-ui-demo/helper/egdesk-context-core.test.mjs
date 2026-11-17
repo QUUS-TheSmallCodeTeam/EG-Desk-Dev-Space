@@ -2083,8 +2083,8 @@ test('a saved comment can be edited by revision and deleted to a tombstone; numb
 })
 
 
-// CNV-07: Canvas-area briefing targets, and the reserved annotation-set kind.
-test('the regions briefing tool accepts Canvas areas beside evidence and refuses malformed areas and annotation sets', async t => {
+// CNV-07: Canvas-area and annotation-set briefing targets.
+test('the regions briefing tool accepts Canvas areas and annotation sets beside evidence and refuses malformed ones', async t => {
   const h = await harness(t)
   const a = await h.capture('Evidence A')
   const run = await h.start([a.sourceId])
@@ -2117,13 +2117,26 @@ test('the regions briefing tool accepts Canvas areas beside evidence and refuses
     ['extra', { canvasRect: { ...rect, z: 1 } }], ['missing', { canvasRect: { x: 0, y: 0, width: 10 } }],
     ['both', { canvasRect: rect, sourceId: a.sourceId }], ['path-label', { canvasRect: rect, label: '/Users/me/secret' }],
     ['url-label', { canvasRect: rect, label: 'https://example.com' }], ['long-label', { canvasRect: rect, label: 'x'.repeat(81) }],
-    ['blank-label', { canvasRect: rect, label: ' ' }], ['annotation', { annotationSetId: 'set-1' }],
-    ['annotation-mixed', { annotationSetId: 'set-1', canvasRect: rect }],
+    ['blank-label', { canvasRect: rect, label: ' ' }],
+    // annotation set targets are accepted now (below); only malformed ones are refused.
+    ['annotation-mixed', { annotationSetId: 'set-1', canvasRect: rect }], ['annotation-label', { annotationSetId: 'set-1', label: '묶음' }],
+    ['annotation-source', { annotationSetId: 'set-1', sourceId: a.sourceId }], ['annotation-empty', { annotationSetId: '' }],
+    ['annotation-path', { annotationSetId: '../set' }], ['annotation-space', { annotationSetId: 'set 1' }],
+    ['annotation-long', { annotationSetId: 'a'.repeat(129) }], ['annotation-number', { annotationSetId: 7 }],
   ]) assert.equal(await refused(target, id), 'INVALID_BRIEFING_TARGET', id)
   assert.equal(await refused({ canvasRect: rect }, 'multi-has-no-areas', 'egdesk_publish_briefing_multi'), 'INVALID_BRIEFING_TARGET', 'only the new tool knows Canvas areas')
+  assert.equal(await refused({ annotationSetId: 'ann-1' }, 'multi-has-no-sets', 'egdesk_publish_briefing_multi'), 'INVALID_BRIEFING_TARGET', 'only the regions tool knows annotation sets')
+  const withSet = await h.tool(run, 'egdesk_publish_briefing_regions', { title: 'Sets', steps: [{ id: 's', text: 'T', fallback: 'F',
+    targets: [{ annotationSetId: 'ann-0b2f:1' }, { canvasRect: rect }, { sourceId: a.sourceId }] }] }, 'with-set')
+  assert.equal(withSet.result.success, true, 'an annotation set target by its stable id')
+  const setBriefing = toolJson(withSet).briefing
+  assert.deepEqual(setBriefing.steps[0].targets[0], { annotationSetId: 'ann-0b2f:1' }, 'stored as the id only; the screen resolves it')
+  assert.deepEqual(setBriefing.steps[0].target, { annotationSetId: 'ann-0b2f:1' })
+  const setTwice = await h.tool(run, 'egdesk_publish_briefing_regions', { title: 'Dup', steps: [{ id: 's', text: 'T', fallback: 'F', targets: [{ annotationSetId: 'ann-1' }, { annotationSetId: 'ann-1' }] }] }, 'set-dup')
+  assert.equal(setTwice.result.success, false, 'the same set twice in one step is refused')
   const twice = await h.tool(run, 'egdesk_publish_briefing_regions', { title: 'Dup', steps: [{ id: 's', text: 'T', fallback: 'F', targets: [{ canvasRect: rect }, { canvasRect: rect, label: '같은 곳' }] }] }, 'dup')
   assert.equal(twice.result.success, false, 'the same area twice in one step is refused')
-  assert.equal(h.events.filter(e => e.event === 'briefing.published').length, 1)
+  assert.equal(h.events.filter(e => e.event === 'briefing.published').length, 2)
 })
 
 test('a conversation recorded before a context tool was added keeps verifying; a changed or missing recorded tool does not', async t => {

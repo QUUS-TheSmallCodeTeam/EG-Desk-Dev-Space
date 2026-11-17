@@ -284,6 +284,7 @@ test('free Canvas set: drawn in Canvas world pixels, saved with the Desk session
   assert.equal(layer.parentNode, h.layer);
   const ellipse = layer.querySelector('.egd-annotation-mark-ellipse');
   assert.deepEqual(['cx', 'cy', 'rx', 'ry'].map(k => ellipse.getAttribute(k)), ['1350', '60', '150', '100']);
+  assert.deepEqual(h.zone.annotationTarget('ann-canvas').rect, { x: 1200, y: -40, width: 300, height: 200 }, 'a free set: the bounds of its marks');
   const controls = bar(h, 'ann-canvas');
   assert.equal(controls.parentNode, h.layer);
   assert.deepEqual([controls.style.left, controls.style.top], ['1200px', '-40px']);
@@ -310,9 +311,12 @@ test('Briefing API: a stable id resolves to its card and layer; reads are copies
   assert.deepEqual(h.zone.listAnnotationSets({ cardId: 'egd-card-7' }), [
     { id: 'ann-1', status: 'proposed', summary: '로그인 버튼 위치', cardId: 'egd-card-7', space: 'card', itemCount: 3, freshness: 'current' }]);
   assert.deepEqual(h.zone.listAnnotationSets({ cardId: 'other' }), []);
+  Object.assign(card.style, { left: '120px', top: '-30px', width: '640px', height: '480px' });
   const target = h.zone.annotationTarget('ann-1');
   assert.deepEqual([target.setId, target.space, target.cardId, target.card, target.layer.id, target.itemIds],
     ['ann-1', 'card', 'egd-card-7', card, 'egd-annotation-ann-1', ['login', 'hint', 'point']]);
+  assert.deepEqual(target.rect, { x: 120, y: -30, width: 640, height: 480 }, 'a card set points the briefing camera at its window');
+  assert.equal(target.summary, '로그인 버튼 위치');
   assert.equal(h.zone.emphasizeAnnotationSet('ann-1', true), true);
   assert.equal(target.layer.dataset.emphasis, 'true');
   h.zone.emphasizeAnnotationSet('ann-1', false);
