@@ -7,7 +7,7 @@
 // engines[] rows with profiles[].auth from claude-engine-auth (SUB-08), the
 // bridge connection notice (RT-05) and the chat protocol runs (SUB-02). A
 // value the bridge did not report reads '확인 안 됨', never a guess.
-import { isRunBusy, runsForThread, requestBelongsToThread } from './EGDeskChatState.sys.mjs';
+import { isRunBusy, runsForThread, requestBelongsToThread, usageRingView } from './EGDeskChatState.sys.mjs';
 
 const EMAIL = /^[^\s@]+@[^\s@]+$/;
 const text = value => typeof value === 'string' ? value.trim() : '';
@@ -147,7 +147,7 @@ const CLAUDE_LOGIN_HINT = 'Terminal에서 claude auth login 을 실행해 Anthro
  * bridge) | 'noReport' | 'notInstalled' | 'signedIn' | 'signedOut' | 'unknown'.
  */
 export function claudeAccountView(engines, { connected = false } = {}) {
-  const base = { methodLabel: null, method: null, account: null, planType: null, hint: null };
+  const base = { methodLabel: null, method: null, account: null, planType: null, hint: null, billingLabel: null };
   if (connected !== true) {
     return { ...base, status: 'disconnected', title: '연결 안 됨', sub: 'EG-Desk 연결 프로그램에 닿지 않아 Claude 로그인 상태를 확인할 수 없습니다.', action: null };
   }
@@ -169,10 +169,147 @@ export function claudeAccountView(engines, { connected = false } = {}) {
       sub: account || (method === 'claudeai' ? '계정 이메일 확인 안 됨' : '로그인됨'),
       methodLabel: method ? CLAUDE_METHOD_LABELS[method] : '로그인 방식 확인 안 됨',
       planType: method === 'claudeai' && text(auth.planType) ? text(auth.planType).slice(0, 40) : null,
+      billingLabel: engineBillingLabel(auth),
     };
   }
   if (auth?.status === 'signedOut') {
-    return { ...base, status: 'signedOut', title: '로그인되어 있지 않습니다', sub: 'Claude 구독이나 API 키로 로그인하면 Claude 엔진을 쓸 수 있습니다.', hint: CLAUDE_LOGIN_HINT, action: 'refresh' };
+    return { ...base, status: 'signedOut', title: '로그인되어 있지 않습니다', sub: 'Claude 구독이나 API 키로 로그인하면 Claude 엔진을 쓸 수 있습니다.', hint: CLAUDE_LOGIN_HINT, action: 'refresh', login: true };
   }
   return { ...base, status: 'unknown', title: '로그인 상태 확인 안 됨', sub: 'claude 명령이 예상한 형식으로 답하지 않았습니다. 다시 확인하거나 Terminal에서 claude auth status 를 실행해 보세요.', action: 'refresh' };
 }
+
+const activeProfile = (engines, engineId) => {
+  const rows = (Array.isArray(engines) ? engines : []).filter(row => object(row) && row.id === engineId);
+  const row = rows.length === 1 ? rows[0] : null;
+  const profiles = (Array.isArray(row?.profiles) ? row.profiles : []).filter(profile => object(profile) && profile.active === true);
+  return { row, profile: profiles.length === 1 ? profiles[0] : null };
+};
+
+/**
+ * SUB-15 label: a profile paid by an API key is billed per use. Codex reports
+ * the app-server authMode ('apikey'), engines[] rows the public method
+ * ('apiKey'). EG-Desk never takes or stores an engine key (D-S4); this only
+ * names what the CLI's own login already is.
+ */
+export function engineBillingLabel(auth) {
+  if (!object(auth)) return null;
+  return auth.method === 'apiKey' || auth.authMode === 'apikey' || auth.authMode === 'apiKey' ? '종량 과금' : null;
+}
+
+/** The Codex profile's billing badge from the live auth or the engines[] row. */
+export function codexBillingLabel(auth, engines) {
+  return engineBillingLabel(auth) || engineBillingLabel(activeProfile(engines, 'codex').profile?.auth);
+}
+
+const ENGINE_NAMES = Object.freeze({ codex: 'Codex', claude: 'Claude' });
+
+/**
+ * SUB-13 version badge from the bridge's versionStatus (engine-registry,
+ * egdesk-native-capabilities policy). 'supported' and unknown show nothing;
+ * the badge explains, it never blocks (D-S6: the Codex connection stays as it is).
+ */
+export function engineVersionBadge(engines, engineId) {
+  if (!Object.hasOwn(ENGINE_NAMES, engineId)) return null;
+  const { row } = activeProfile(engines, engineId);
+  if (!row || row.installed === false) return null;
+  const version = typeof row.version === 'string' && /^\d{1,9}\.\d{1,9}\.\d{1,9}(?:[-+][0-9A-Za-z.-]{1,40})?$/.test(row.version) ? row.version : null;
+  const name = ENGINE_NAMES[engineId];
+  const which = version ? `${name} ${version}` : `이 ${name}`;
+  if (row.versionStatus === 'unsupported') {
+    return { engineId, status: 'unsupported', tone: 'danger', label: '지원 버전 아님', version,
+      title: `${which}은(는) EG-Desk가 지원하는 최소 버전보다 낮습니다. 대화가 실패할 수 있으니 ${name}를 업데이트해 주세요.` };
+  }
+  if (row.versionStatus === 'untested') {
+    return { engineId, status: 'untested', tone: 'warning', label: '확인 안 된 버전', version,
+      title: `${which}은(는) EG-Desk에서 아직 확인하지 않은 버전입니다. 대화는 계속되지만 일부 표시가 다를 수 있습니다.` };
+  }
+  return null;
+}
+
+/**
+ * SUB-03 (Claude): the Claude profile's usage (claude-engine-adapter usage(),
+ * engines[].profiles[].usage) in the same ring shape as the ChatGPT one.
+ * null while Claude is not signed in; '확인 안 됨' before the first report.
+ */
+export function claudeUsageView(engines) {
+  const { profile } = activeProfile(engines, 'claude');
+  if (profile?.auth?.status !== 'signedIn') return null;
+  const usage = object(profile.usage) ? profile.usage : null;
+  const view = usageRingView({ isLoggedIn: true, usage, rateLimits: null });
+  if (!view) return null;
+  return {
+    ...view,
+    windowLabel: typeof usage?.windowLabel === 'string' ? usage.windowLabel : null,
+    percentLabel: typeof usage?.percentLabel === 'string' ? usage.percentLabel : null,
+    creditsRequired: usage?.creditsRequired === true,
+    label: `Claude ${view.label}`, title: `Claude · ${view.title}`,
+  };
+}
+
+const CLAUDE_KEY_ENV_NAMES = Object.freeze(['ANTHROPIC_API_KEY', 'ANTHROPIC_AUTH_TOKEN']);
+
+/**
+ * SUB-15 confirmation (D-S4): an Anthropic key in EG-Desk's environment stops
+ * Claude starts until the person chooses. `apiKeyEnv` is the
+ * /engines/claude/api-key-env answer (variable names only, never values).
+ * Confirm = run on the subscription with the key left out (the helper's
+ * 'strip' policy, this helper run only); cancel = keep Claude stopped.
+ */
+export function claudeApiKeyEnvConfirm(engines, apiKeyEnv = null) {
+  const { row } = activeProfile(engines, 'claude');
+  const confirmed = apiKeyEnv?.confirmed === true;
+  if (confirmed || row?.statusReason !== 'CLAUDE_API_KEY_DETECTED') return null;
+  const names = (Array.isArray(apiKeyEnv?.detected) ? apiKeyEnv.detected : []).filter(name => CLAUDE_KEY_ENV_NAMES.includes(name));
+  const which = names.length ? names.join(', ') : 'Anthropic API 키 변수';
+  return {
+    tone: 'warning', billingLabel: '종량제', names,
+    title: 'Anthropic API 키가 설정되어 있습니다',
+    lines: [
+      `EG-Desk 환경에 ${which}가 있습니다. 이 키로 Claude를 실행하면 구독 한도가 아니라 쓴 만큼 요금이 붙는 종량제로 과금됩니다.`,
+      'EG-Desk는 이 키를 claude에 넘기지 않습니다. 계속하면 키를 빼고 이 Mac의 Claude 구독 로그인으로만 실행합니다. 이 선택은 EG-Desk 연결 프로그램을 다시 켤 때까지 유지됩니다.',
+      'EG-Desk는 API 키를 받거나 저장하지 않습니다.',
+    ],
+    confirmLabel: '키 빼고 구독으로 실행', cancelLabel: '실행하지 않음',
+  };
+}
+
+// The two lines claude-engine-auth claudeLoginTerminalCommand() can return;
+// nothing else from the bridge is ever typed into a shell.
+const CLAUDE_LOGIN_LINES = Object.freeze({ claudeai: 'claude auth login --claudeai', console: 'claude auth login --console' });
+
+/**
+ * SUB-08 login button: asks the bridge for the login line
+ * (GET /engines/claude/login-command), opens a Terminal card and types the
+ * line + Enter there. The person finishes Anthropic's own login in that
+ * terminal; the CLI keeps the credential and EG-Desk never sees it.
+ * Injected: requestCommand(method) → bridge answer, openTerminal() → card,
+ * terminalApi(card) → its terminalAPI or null, sleep(ms), now().
+ * Returns { phase: 'started' | 'error', text }.
+ */
+export async function runClaudeLoginInTerminal({ requestCommand, openTerminal, terminalApi = card => card?._termBrowser?.contentWindow?.terminalAPI ?? null,
+  sleep = ms => new Promise(resolve => setTimeout(resolve, ms)), now = Date.now, method = 'claudeai', timeoutMs = 15000 } = {}) {
+  let command;
+  try { command = await requestCommand(method); } catch (error) {
+    return { phase: 'error', text: `로그인 명령을 받지 못했습니다: ${text(error?.message) || '연결 프로그램 오류'}` };
+  }
+  const line = Object.hasOwn(CLAUDE_LOGIN_LINES, command?.method) && command?.line === CLAUDE_LOGIN_LINES[command.method] ? command.line : null;
+  if (!line) return { phase: 'error', text: '연결 프로그램이 알 수 없는 로그인 명령을 보냈습니다. 터미널에 입력하지 않았습니다.' };
+  let card;
+  try { card = openTerminal(); } catch { card = null; }
+  if (!card) return { phase: 'error', text: '터미널 카드를 열지 못했습니다.' };
+  const started = now();
+  let api = null;
+  while (now() - started < timeoutMs) {
+    try { api = terminalApi(card); } catch { api = null; }
+    if (typeof api?.write === 'function' && api.isConnected?.() === true) break;
+    api = null;
+    if (card.isConnected === false) break;
+    await sleep(50);
+  }
+  if (!api) return { phase: 'error', text: `터미널 준비를 확인하지 못했습니다. 터미널에서 ${line} 을 직접 실행해 주세요.` };
+  try { await api.write(`${line}\r`); } catch {
+    return { phase: 'error', text: `터미널에 입력하지 못했습니다. 터미널에서 ${line} 을 직접 실행해 주세요.` };
+  }
+  return { phase: 'started', text: '터미널에서 Anthropic 공식 로그인을 마친 뒤 다시 확인을 눌러 주세요. EG-Desk는 로그인 정보를 보관하지 않습니다.' };
+}
+

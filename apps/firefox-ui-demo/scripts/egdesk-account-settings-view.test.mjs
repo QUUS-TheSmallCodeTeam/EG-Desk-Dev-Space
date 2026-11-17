@@ -189,3 +189,99 @@ test('the Settings card wires the account menu, the confirmation and the Claude 
     assert.ok(css.includes(rule), `CSS rule ${rule}`);
   }
 });
+
+// SUB-13 / SUB-03 (Claude) / SUB-15 / SUB-08 view models.
+import { usageDisplay } from '../helper/codex-account-usage.mjs';
+import { claudeLoginTerminalCommand } from '../helper/claude-engine-auth.mjs';
+import { describeCodexEngine } from '../helper/codex-engine-adapter.mjs';
+
+const claudeEngine = (check = {}, live = { minVersion: '2.1.205' }) => publicEngineRow(describeClaudeEngine({
+  installed: true, version: '2.1.300', versionStatus: 'supported',
+  auth: { status: 'signedIn', method: 'claudeai', account: 'me@example.com', label: 'Claude Max' }, ...check }, live));
+
+test('version badge names unsupported and untested ranges and stays quiet otherwise (SUB-13)', () => {
+  const codex = versionStatus => publicEngineRow(describeCodexEngine({ ready: true, version: '0.162.1', versionStatus, auth: { isLoggedIn: true } }));
+  assert.equal(View.engineVersionBadge([codex('supported')], 'codex'), null);
+  assert.equal(View.engineVersionBadge([codex(null)], 'codex'), null, 'an unknown version is not a warning');
+  const untested = View.engineVersionBadge([codex('untested')], 'codex');
+  assert.deepEqual([untested.label, untested.tone, untested.status], ['확인 안 된 버전', 'warning', 'untested']);
+  assert.match(untested.title, /Codex 0\.162\.1/);
+  assert.match(untested.title, /대화는 계속되지만/, 'D-S6: the badge explains, it does not block');
+  const below = View.engineVersionBadge([claudeEngine({ version: '2.1.204', versionStatus: 'unsupported' })], 'claude');
+  assert.deepEqual([below.label, below.tone], ['지원 버전 아님', 'danger']);
+  assert.match(below.title, /업데이트/);
+  assert.equal(View.engineVersionBadge([claudeEngine({ installed: false, version: null, versionStatus: 'unsupported' })], 'claude'), null);
+  assert.equal(View.engineVersionBadge([codex('untested')], 'gemini'), null);
+});
+
+test('Claude usage comes from the engines[] profile usage in the ChatGPT ring shape (SUB-03)', () => {
+  const now = Date.now();
+  assert.equal(View.claudeUsageView([claudeEngine({ auth: { status: 'signedOut' } })]), null, 'nothing while signed out');
+  const unknown = View.claudeUsageView([claudeEngine()]);
+  assert.deepEqual([unknown.level, unknown.percent, unknown.text], ['unknown', null, '확인 안 됨'], 'never an invented 0%');
+  const row = claudeEngine();
+  const rate = { primary: { usedPercent: 81, windowMinutes: 10080, resetsAt: now + 86_400_000 }, secondary: { usedPercent: 12, windowMinutes: 300, resetsAt: now + 3_600_000 }, observedAt: now };
+  row.profiles[0].usage = { ...usageDisplay(rate, now), windows: [], creditsRequired: false, autoResume: false };
+  const warn = View.claudeUsageView([row]);
+  assert.deepEqual([warn.level, warn.percent, warn.percentLabel, warn.windowLabel], ['warn', 81, '81% 사용', '주간 한도']);
+  assert.match(warn.title, /^Claude · 주간 한도 · 81% 사용/);
+  const hit = claudeEngine();
+  hit.profiles[0].usage = usageDisplay({ ...rate, reachedType: 'rate_limit_reached', usageAllowed: false }, now);
+  assert.deepEqual([View.claudeUsageView([hit]).level, View.claudeUsageView([hit]).text], ['limit', '한도']);
+});
+
+test('API key profiles read 종량 과금 and the env-key confirmation shows names only (SUB-15, D-S4)', () => {
+  assert.equal(View.engineBillingLabel({ method: 'apiKey' }), '종량 과금');
+  assert.equal(View.engineBillingLabel({ method: 'claudeai' }), null);
+  assert.equal(View.codexBillingLabel({ isLoggedIn: false, authMode: 'apikey' }, []), '종량 과금');
+  const codexApiKey = publicEngineRow(describeCodexEngine({ ready: true, auth: { isLoggedIn: false, authMode: 'apikey' } }));
+  assert.equal(View.codexBillingLabel({}, [codexApiKey]), '종량 과금', 'from the engines[] Codex profile');
+  assert.equal(View.codexBillingLabel({ isLoggedIn: true, authMode: 'chatgpt' }, []), null);
+  assert.equal(View.claudeAccountView([claudeEngine({ auth: { status: 'signedIn', method: 'apiKey' } })], { connected: true }).billingLabel, '종량 과금');
+
+  const plain = claudeEngine();
+  assert.equal(View.claudeApiKeyEnvConfirm([plain]), null, 'no key, no question');
+  const keyed = publicEngineRow(describeClaudeEngine({ installed: true, version: '2.1.300', versionStatus: 'supported',
+    auth: { status: 'signedIn', method: 'claudeai' } }, { minVersion: '2.1.205', apiKeyEnv: { detected: ['ANTHROPIC_API_KEY'], confirmed: false } }));
+  assert.equal(keyed.statusReason, 'CLAUDE_API_KEY_DETECTED');
+  const ask = View.claudeApiKeyEnvConfirm([keyed], { detected: ['ANTHROPIC_API_KEY', 'sk-ant-secret-value'], confirmed: false });
+  assert.deepEqual(ask.names, ['ANTHROPIC_API_KEY'], 'only the known variable names, never a value');
+  assert.doesNotMatch(ask.lines.join(' '), /sk-ant/);
+  assert.match(ask.lines[0], /종량제/);
+  assert.match(ask.lines[1], /넘기지 않습니다/);
+  assert.deepEqual([ask.confirmLabel, ask.cancelLabel], ['키 빼고 구독으로 실행', '실행하지 않음']);
+  assert.equal(View.claudeApiKeyEnvConfirm([keyed], { detected: ['ANTHROPIC_API_KEY'], confirmed: true }), null);
+});
+
+test('Terminal login types only the helper login line and reports a stuck terminal (SUB-08)', async () => {
+  const typed = [];
+  const card = { isConnected: true, _termBrowser: { contentWindow: { terminalAPI: { isConnected: () => true, write: data => typed.push(data) } } } };
+  const ok = await View.runClaudeLoginInTerminal({ requestCommand: async method => claudeLoginTerminalCommand(method), openTerminal: () => card });
+  assert.equal(ok.phase, 'started');
+  assert.deepEqual(typed, ['claude auth login --claudeai\r']);
+  let opened = 0;
+  const odd = await View.runClaudeLoginInTerminal({ requestCommand: async () => ({ method: 'claudeai', line: 'claude auth login --claudeai; rm -rf ~' }), openTerminal: () => { opened++; return card; } });
+  assert.equal(odd.phase, 'error');
+  assert.equal(opened, 0, 'an unexpected line never reaches a terminal');
+  const failed = await View.runClaudeLoginInTerminal({ requestCommand: async () => { throw new Error('404 Not Found'); }, openTerminal: () => card });
+  assert.match(failed.text, /로그인 명령을 받지 못했습니다: 404/);
+  let clock = 0;
+  const stuck = await View.runClaudeLoginInTerminal({ requestCommand: async () => claudeLoginTerminalCommand(), openTerminal: () => ({ isConnected: true }),
+    terminalApi: () => null, sleep: async () => { clock += 1000; }, now: () => clock, timeoutMs: 3000 });
+  assert.equal(stuck.phase, 'error');
+  assert.match(stuck.text, /claude auth login --claudeai 을 직접 실행/);
+});
+
+test('the bridge client calls the Claude routes and the Settings card uses them', () => {
+  const source = readSurfaceSource();
+  assert.match(source, /fetchJson\('\/engines\/claude\/refresh', \{ method: 'POST' \}\)/);
+  assert.match(source, /fetchJson\(`\/engines\/claude\/login-command\?method=\$\{encodeURIComponent\(method\)\}`\)/);
+  assert.match(source, /fetchJson\('\/engines\/claude\/api-key-env'/);
+  const start = source.indexOf('  function spawnSettingsCard(');
+  const settings = source.slice(start, source.indexOf('\n  function resolveBrowserCard(', start));
+  assert.match(settings, /AccountSettingsView\.runClaudeLoginInTerminal\(/);
+  assert.match(settings, /openTerminal: \(\) => spawnTerminalCard\(\)/);
+  assert.match(settings, /await api\.refreshClaudeEngine\(\)/);
+  assert.match(settings, /api\.claudeApiKeyEnv\(action === 'keyConfirm'\)/);
+  assert.doesNotMatch(settings, /settings-claude-refresh' \}, onclick: \(\) => bridge\(\)\?\.refreshAuthStatus\(\)/, 'the Claude check is no longer the generic state read');
+});
