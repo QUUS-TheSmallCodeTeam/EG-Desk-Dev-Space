@@ -22,9 +22,22 @@ const copy = value => JSON.parse(JSON.stringify(value))
 // subscription ownerKey or process-local epoch, even from an internal caller.
 const engineProvenance = engine => ({ engineId: engine.engineId, ...(small(engine.engineProfileId) ? { engineProfileId: engine.engineProfileId } : {}) })
 const RECORD_KINDS = ['sources', 'blobs', 'bindings', 'packets', 'briefings', 'readers', 'scratch', 'deliveries', 'threads', 'outputs', 'briefing-comments']
-// Everything else is write-once. A briefing comment keeps its text and anchor;
-// only its resolved state may change (CHAT-05).
+// Everything else is write-once. A briefing comment keeps its anchor; its
+// resolved state and (by revision) its text may change, and delete leaves a
+// tombstone without text (CHAT-05).
 const MUTABLE_KINDS = new Set(['briefing-comments'])
+
+// A conversation keeps the context tools it was started with. Tools added
+// later (only new conversations receive them) do not invalidate it, but every
+// recorded tool must still exist with the exact same schema, for the same
+// engine and profile.
+function manifestCovers(current, recorded) {
+  const { tools: currentTools, ...currentEngine } = current || {}
+  const { tools: recordedTools, ...recordedEngine } = recorded || {}
+  if (JSON.stringify(currentEngine) !== JSON.stringify(recordedEngine) || !Array.isArray(currentTools) || !Array.isArray(recordedTools) || !recordedTools.length) return false
+  return recordedTools.every(tool => currentTools.some(entry => entry?.name === tool?.name && entry.schemaHash === tool.schemaHash))
+    && new Set(recordedTools.map(tool => tool?.name)).size === recordedTools.length
+}
 
 export function appDataDirectory(env = process.env, home = os.homedir(), platform = os.platform()) {
   if (env.EGDESK_DATA_DIR) {
@@ -184,7 +197,7 @@ export class ImmutableContextStore {
     try {
       const record = await this.getRecord(ownerKey, 'threads', id)
       return record.conversationId === conversationId && record.toolsVersion === 1 &&
-        (!manifest || (record.toolManifest ? JSON.stringify(record.toolManifest) === JSON.stringify(manifest) : manifest.engineId === 'codex'))
+        (!manifest || (record.toolManifest ? manifestCovers(manifest, record.toolManifest) : manifest.engineId === 'codex'))
     } catch (error) { if (error.code === 'CONTEXT_NOT_FOUND') return false; throw error }
   }
 

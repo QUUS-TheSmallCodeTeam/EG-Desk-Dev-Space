@@ -28,6 +28,8 @@ function routing(value = {}) {
  * GET  /context/sources?conversationId= CTX-04 attached sources of a conversation
  *   -> {conversationId, sources: [{sourceId, kind, viewId?, state: 'active'|'stale', reason, changedAt, announcedAt}]}
  * GET  /context/packets/:id             adds resolver and staleSources [{sourceId, reason, changedAt}]
+ * POST /context/briefing-comments/:id/edit   CHAT-05 {text, revision} -> {comment} (revision + 1)
+ * POST /context/briefing-comments/:id/delete {revision} -> {deleted: {id, briefingId, stepId, seq, deleted, deletedAt}}
  * plus captures, outputs and briefing comments below.
  */
 export function createContextHttpHandler(context, ensureAuth, { port = 39218 } = {}) {
@@ -112,6 +114,20 @@ export function createContextHttpHandler(context, ensureAuth, { port = 39218 } =
         const result = await context.resolveBriefingComment(comment[1], await readJsonBody(req, { maxBytes: COMMENT_MAX_BYTES }), authority)
         context.assertBriefingCommentAuthority(authority)
         sendJson(res, 200, { comment: result })
+        return true
+      }
+      // CHAT-05: rewrite or delete one saved comment. Loopback/Origin guarded
+      // like other person-owned settings; body names the revision it saw.
+      const change = url.pathname.match(/^\/context\/briefing-comments\/([\da-f-]{36})\/(edit|delete)$/i)
+      if (change) {
+        if (!guardBridgeRequest(req, port)) { sendJson(res, 403, { error: 'Trusted loopback origin is required', code: 'CONTEXT_LOOPBACK_REQUIRED' }); return true }
+        if (req.method !== 'POST') { sendJson(res, 405, { error: `Use POST to ${change[2].toLowerCase()} a comment`, code: 'METHOD_NOT_ALLOWED' }); return true }
+        const body = await readJsonBody(req, { maxBytes: COMMENT_MAX_BYTES })
+        const result = change[2].toLowerCase() === 'edit'
+          ? { comment: await context.editBriefingComment(change[1], body, authority) }
+          : { deleted: await context.deleteBriefingComment(change[1], body, authority) }
+        context.assertBriefingCommentAuthority(authority)
+        sendJson(res, 200, result)
         return true
       }
       const match = url.pathname.match(/^\/context\/(captures|packets|briefings)\/([\da-f-]{36})$/i)

@@ -1304,6 +1304,31 @@
   // event carried metadata only, so the press is a GET round trip to the
   // bridge. A Claude room has no publish route (captures and packets only),
   // so it shows no chip.
+  // CHAT-05: an answer without a briefing can ask its Agent for one. The
+  // request only goes into this room's composer draft (kept draft + new line,
+  // like the top search request); it is never sent automatically.
+  function buildBriefingRequestControl(thread, message) {
+    const offer = ChatState.nativeBindingHeld(thread) ? null : BriefingState.briefingRequestOffer(thread, message);
+    if (!offer) return null;
+    return el('button', {
+      class: 'egd-codex-result-chip', type: 'button', title: offer.title,
+      data: { testid: 'briefing-request', answerId: message.answerId || '', messageId: message.id || '' },
+      onclick: ev => {
+        ev.preventDefault(); ev.stopPropagation();
+        const bridge = state.codexBridge;
+        if (!bridge) return;
+        bridge.setDraft(RailSearchView.mergeAskDraft(getCodexThreadDraft(state.codex, thread.id), offer.text), thread.id);
+        window.requestAnimationFrame(() => {
+          const composer = Array.from(document.querySelectorAll('.egd-codex-input'))
+            .find(input => input.dataset.threadId === thread.id && !input.disabled);
+          if (!composer) return;
+          composer.focus({ preventScroll: true });
+          composer.setSelectionRange(composer.value.length, composer.value.length);
+        });
+      },
+    }, offer.label);
+  }
+
   function buildCodexOutputChips(message, thread) {
     if (message?.role !== 'assistant' || ChatState.nativeBindingHeld(thread) || thread?.engineId === 'claude') return [];
     return (message.outputs || []).map(ChatState.publishedOutputRecord).filter(Boolean).map(output => el('button', {
@@ -2886,7 +2911,10 @@
           : briefingResolvedTargets(session);
       } catch { resolved = []; }
     }
-    const focus = BriefingState.briefingStepFocus(session, resolved, { overview: !!session?.semanticOverview });
+    const cards = session ? Array.from(document.querySelectorAll('.egd-canvas-card'))
+      .filter(card => card.id && !card.classList.contains('egd-memo-card')).map(card => ({ id: card.id, geometry: persistentEntityGeometry(card) })) : [];
+    const focus = BriefingState.briefingStepFocus(session, resolved, { overview: !!session?.semanticOverview, cards });
+    syncBriefingRegions(focus.regions);
     if (focus.chromeMode) root.dataset.egdChromeMode = focus.chromeMode;
     else if (root.dataset.egdChromeMode === 'briefing') delete root.dataset.egdChromeMode;
     if (focus.emphasis) root.dataset.egdBriefingFocus = focus.emphasis; else delete root.dataset.egdBriefingFocus;
@@ -2896,6 +2924,24 @@
       else if (card.dataset.egdBriefingTarget) delete card.dataset.egdBriefingTarget;
     }
     return focus;
+  }
+
+  // CNV-07: a Canvas area of the step is outlined in Canvas coordinates
+  // (drawn in the card layer, so it pans and zooms with the Canvas). Display
+  // only: it never takes pointer input and is never saved with the Desk.
+  function syncBriefingRegions(regions = []) {
+    const layer = document.getElementById('egd-canvas-layer');
+    const existing = layer ? Array.from(layer.querySelectorAll(':scope > .egd-briefing-region')) : [];
+    const signature = JSON.stringify(regions);
+    if (layer && layer._briefingRegionSignature === signature && existing.length === regions.length) return;
+    for (const node of existing) node.remove();
+    if (!layer) return;
+    layer._briefingRegionSignature = signature;
+    for (const [index, region] of regions.entries()) {
+      layer.appendChild(el('div', { class: 'egd-briefing-region', 'aria-hidden': 'true', data: { testid: 'briefing-region-outline', index: String(index) },
+        style: { left: region.x + 'px', top: region.y + 'px', width: region.width + 'px', height: region.height + 'px' } },
+      region.label ? el('span', { class: 'egd-briefing-region-label' }, region.label) : null));
+    }
   }
 
   function briefingFitCamera(bounds, safe, panel) {
@@ -2936,7 +2982,8 @@
     const camera = briefingFitCamera(bounds, safe, panel?.getBoundingClientRect());
     if (!camera) return false;
     state.setCanvasViewportTarget?.(camera);
-    focusCanvasCard(document.getElementById(resolved.find(item => item.status === 'available')?.view.id));
+    const firstView = resolved.find(item => item.status === 'available' && item.view?.id)?.view.id;
+    if (firstView) focusCanvasCard(document.getElementById(firstView));
     return true;
   }
 
@@ -3614,6 +3661,11 @@
     if (session.preparing) body.appendChild(preparingNotice);
     const describeTarget = (target, index) => {
       const requested = target.target || {}, range = requested.range;
+      if (BriefingState.briefingTargetKind(requested) === 'canvasRect') {
+        // CNV-07: a Canvas area names itself by its label, never a range.
+        const { name, rangeText } = BriefingState.briefingRegionLabel(requested, index);
+        return { name, rangeText, identity: `${name} · ${rangeText}`, capture: JSON.stringify(['canvasRect', requested.canvasRect]) };
+      }
       const verified = target.status === 'available' && !!target.view?.id;
       const named = verified ? [target.reference?.localSource?.label, target.reference?.label, target.artifact?.label,
         requested.sourceId, requested.artifactId].find(value => typeof value === 'string' && value.trim()) : null;
@@ -3665,7 +3717,7 @@
             state.codexBridge.inspectInput(session.threadId, target.reference, { ...target.target.range, isCurrent, briefingScope: session.preparationScope });
           } }, contents, actionText);
         body.appendChild(row.inspect);
-      } else body.appendChild(el('div', { class: 'egd-briefing-evidence-row', data: { testid: 'briefing-evidence-unavailable' } }, contents));
+      } else body.appendChild(el('div', { class: 'egd-briefing-evidence-row', data: { testid: target.region ? 'briefing-region' : 'briefing-evidence-unavailable' } }, contents));
       body.appendChild(row.end); evidenceRows.push(row);
     }
     panel._briefingSession = session;
@@ -3711,7 +3763,7 @@
         if (row.rangeNode.textContent !== description.rangeText) row.rangeNode.textContent = description.rangeText;
         row.suffixNode.textContent = suffix; row.suffixNode.hidden = !suffix;
         const hashMatches = !!target.reference && (!target.target.hash || target.target.hash === target.reference.hash);
-        const stateLabel = unsupported ? '지원 안 됨' : target.status === 'available' ? '열림' : target.status === 'stale' ? '일치 확인 필요'
+        const stateLabel = unsupported ? '지원 안 됨' : target.region ? '표시 중' : target.status === 'available' ? '열림' : target.status === 'stale' ? '일치 확인 필요'
           : session.preparing && hashMatches ? '준비 중' : '확인 필요';
         if (row.stateText.textContent !== stateLabel) row.stateText.textContent = stateLabel;
         const actionLabel = target.reference && !hashMatches ? '연결된 입력 보기' : '당시 입력 보기';
@@ -3885,8 +3937,9 @@
     };
     const query = Object.entries(route).map(([key, value]) => `${key}=${encodeURIComponent(value)}`).join('&');
     // commentId selects the helper's state route of one saved comment
-    // (POST { resolved }); without it this is the briefing's list/add route.
-    const request = async (method, body, commentId = null) => {
+    // (POST { resolved }, or action 'edit' / 'delete' — CHAT-05); without it
+    // this is the briefing's list/add route.
+    const request = async (method, body, commentId = null, action = null) => {
       if (!current()) throw new Error('브리핑 연결이 바뀌었습니다.');
       const controller = new window.AbortController();
       let timer, stop;
@@ -3896,7 +3949,7 @@
         controller.abort(); reject(new Error('응답을 확인하지 못했습니다.'));
       }, 10000); });
       try {
-        const path = commentId ? `/context/briefing-comments/${encodeURIComponent(commentId)}`
+        const path = commentId ? `/context/briefing-comments/${encodeURIComponent(commentId)}${['edit', 'delete'].includes(action) ? `/${action}` : ''}`
           : `/context/briefings/${encodeURIComponent(session.briefing.id)}/comments`;
         const response = await Promise.race([fetchJson(`${path}?${query}`,
           { method, signal: controller.signal, ...(method === 'POST' ? { body: JSON.stringify(body) } : {}) }), cancelled, timeout]);
@@ -3907,16 +3960,79 @@
     return { current, dispose, request, key: JSON.stringify([account, route, session.briefing.id, session.briefing.steps[index].id]) };
   }
 
+  // CHAT-05: per-comment changes beyond resolve. Edit opens an editor under
+  // the text; delete asks for a second press on the same button (no dialog).
+  function mountBriefingCommentChanges(item, getController, noteInteraction, body) {
+    const id = item.id;
+    const input = el('textarea', { rows: '2', maxlength: String(BriefingState.BRIEFING_COMMENT_MAX), 'aria-label': `의견 #${item.seq} 고치기`,
+      data: { testid: 'briefing-comment-edit-input', commentId: id } });
+    const saveEdit = el('button', { type: 'button', data: { testid: 'briefing-comment-edit-save', commentId: id } }, '고친 의견 저장');
+    const cancelEdit = el('button', { type: 'button', data: { testid: 'briefing-comment-edit-cancel', commentId: id } }, '취소');
+    const editor = el('div', { class: 'egd-briefing-comment-editor', hidden: 'true', data: { testid: 'briefing-comment-editor', commentId: id } }, input, saveEdit, cancelEdit);
+    const exclude = el('button', { type: 'button', hidden: 'true', data: { testid: 'briefing-comment-exclude', commentId: id } }, '초안에서 빼기');
+    const edit = el('button', { type: 'button', data: { testid: 'briefing-comment-edit', commentId: id } }, '편집');
+    const remove = el('button', { type: 'button', data: { testid: 'briefing-comment-delete', commentId: id } }, '삭제');
+    const busy = node => node.getAttribute('aria-disabled') === 'true';
+    const closeEditor = () => { editor.hidden = true; body.hidden = false; edit.setAttribute('aria-expanded', 'false'); };
+    const disarm = () => { delete remove.dataset.confirm; };
+    let card = BriefingState.briefingCommentRow(item);
+    for (const event of ['focus', 'keydown', 'compositionstart', 'compositionupdate', 'beforeinput', 'input', 'select']) input.addEventListener(event, noteInteraction);
+    exclude.addEventListener('click', () => { if (!busy(exclude)) { noteInteraction(); getController()?.exclude?.(id); } });
+    edit.addEventListener('click', () => {
+      if (busy(edit)) return;
+      noteInteraction(); disarm();
+      if (!editor.hidden) { closeEditor(); return; }
+      input.value = item.text; editor.hidden = false; body.hidden = true; edit.setAttribute('aria-expanded', 'true');
+      input.focus?.({ preventScroll: true });
+    });
+    cancelEdit.addEventListener('click', () => { noteInteraction(); closeEditor(); edit.focus?.({ preventScroll: true }); });
+    saveEdit.addEventListener('click', async () => {
+      if (busy(saveEdit)) return;
+      noteInteraction();
+      if (await getController()?.editComment?.(id, input.value)) { closeEditor(); edit.focus?.({ preventScroll: true }); }
+    });
+    remove.addEventListener('click', () => {
+      if (busy(remove)) return;
+      noteInteraction();
+      if (remove.dataset.confirm !== 'true') { remove.dataset.confirm = 'true'; paint(item, card, false); return; }
+      disarm(); void getController()?.deleteComment?.(id);
+    });
+    remove.addEventListener('blur', () => { if (remove.dataset.confirm === 'true') { disarm(); paint(item, card, false); } });
+    function paint(next, nextCard, preparing) {
+      item = next; card = nextCard;
+      const changing = next.changeBusy || (next.stateBusy ? 'resolve' : null);
+      const label = (node, value) => { if (node.textContent !== value) node.textContent = value; };
+      exclude.hidden = !next.included;
+      label(exclude, card.excludeLabel); exclude.setAttribute('title', card.excludeTitle); exclude.setAttribute('aria-label', card.excludeTitle);
+      label(edit, card.editLabel + (card.edited ? ` · ${card.editedLabel}` : ''));
+      edit.setAttribute('title', card.editTitle); edit.setAttribute('aria-label', card.editTitle);
+      const confirming = remove.dataset.confirm === 'true';
+      label(remove, next.changeBusy === 'delete' ? '삭제 중' : confirming ? '삭제 확인' : card.deleteLabel);
+      remove.setAttribute('title', confirming ? `${card.deleteTitle} — 한 번 더 누르면 삭제합니다` : card.deleteTitle);
+      remove.setAttribute('aria-label', confirming ? `${card.title} 삭제 확인` : card.deleteTitle);
+      label(saveEdit, next.changeBusy === 'edit' ? '저장 중' : '고친 의견 저장');
+      // aria-disabled keeps keyboard focus on the same button while busy.
+      for (const node of [exclude, edit, remove, saveEdit]) {
+        const off = !!changing || (node !== exclude && preparing);
+        node.setAttribute('aria-disabled', String(off));
+        node.setAttribute('aria-busy', String(!!changing && node !== exclude));
+      }
+    }
+    return { editor, buttons: [exclude, edit, remove], paint };
+  }
+
   function mountBriefingComments(session, panel) {
     const comment = el('textarea', { rows: '2', 'aria-label': '현재 브리핑 단계 의견', placeholder: '이 단계에 대한 의견',
       maxlength: String(BriefingState.BRIEFING_COMMENT_MAX), data: { testid: 'briefing-comment' } });
     const save = el('button', { type: 'button', data: { testid: 'briefing-comment-attach' } }, '의견 저장 후 Chat 초안에 포함');
+    // CHAT-05: throw away the comment being written (never a saved one).
+    const discard = el('button', { type: 'button', data: { testid: 'briefing-comment-discard' } }, '쓰던 의견 버리기');
     const statusMessage = el('p', { role: 'status', 'aria-live': 'polite', data: { testid: 'briefing-comment-status-message' } });
     const originalBody = el('p', { data: { testid: 'briefing-comment-unconfirmed-body' }, style: { whiteSpace: 'pre-wrap', overflowWrap: 'anywhere' } });
     const retry = el('button', { type: 'button', data: { testid: 'briefing-comment-retry' },
       onmousedown: event => { if (event.button === 0 && !event.ctrlKey) event.preventDefault(); } }, '이전 의견 저장 재시도');
     const original = el('section', { hidden: 'true', data: { testid: 'briefing-comment-unconfirmed' } }, el('strong', {}, '저장 미확정 의견'), originalBody, retry);
-    const status = el('section', { data: { testid: 'briefing-comment-status' } }, statusMessage, original);
+    const status = el('section', { data: { testid: 'briefing-comment-status' } }, statusMessage, original, discard);
     const listStatus = el('p', { role: 'status', data: { testid: 'briefing-comment-list-status' } });
     const list = el('div', { data: { testid: 'briefing-comment-list' } });
     const refresh = el('button', { type: 'button', data: { testid: 'briefing-comment-refresh' } }, '저장된 의견 다시 확인');
@@ -3925,7 +4041,10 @@
     let controller;
     const noteInteraction = () => { if (session.interaction) session.interaction.revision++; };
     for (const event of ['focus', 'keydown', 'compositionstart', 'compositionupdate', 'beforeinput', 'select']) comment.addEventListener(event, noteInteraction);
-    comment.addEventListener('input', () => { noteInteraction(); controller?.edit(comment.value); });
+    comment.addEventListener('input', () => {
+      noteInteraction(); controller?.edit(comment.value);
+      if (controller) discard.disabled = !controller.view().canDiscard;
+    });
     const paint = view => {
       if (!panel.isConnected) return;
       const scroller = panel._briefingScrollContainer?.() || panel;
@@ -3940,6 +4059,9 @@
       original.hidden = view.originalText === null; text(originalBody, view.originalText || '');
       retry.disabled = !view.canRetry || !!session.preparing; retry.dataset.clientRequestId = view.clientRequestId;
       save.disabled = view.pending || !!session.preparing; text(save, view.unconfirmed ? '저장 여부 확인' : '의견 저장 후 Chat 초안에 포함');
+      discard.disabled = !view.canDiscard;
+      // A comment deleted here or elsewhere leaves the list.
+      for (const [id, row] of rows) if (!view.comments.some(item => item.id === id)) { row.root.remove(); rows.delete(id); }
       // Native disabled blurs a keyboard-focused button. Keep this same node
       // focusable while busy; the activation guard below owns repeat clicks.
       const loading = view.listState === 'loading';
@@ -3985,15 +4107,20 @@
               if (resolve.getAttribute('aria-disabled') === 'true') return;
               noteInteraction(); void controller.setResolved(item.id, resolve.dataset.resolved !== 'true');
             } }) : null;
+          // CHAT-05: take it back out of the Chat draft, rewrite it in place,
+          // or delete it (a second press confirms). Each waits for the helper.
+          const changeActions = mountBriefingCommentChanges(item, () => controller, noteInteraction, body);
           const root = el('section', { class: 'egd-briefing-comment', data: { testid: 'briefing-comment-row', commentId: item.id, commentSeq: String(item.seq), stepId: item.stepId, clientRequestId: item.clientRequestId || '' } },
             el('div', { class: 'egd-briefing-comment-head' }, el('strong', { class: 'egd-briefing-comment-number' }, `의견 #${item.seq}`), target, stateText),
-            body, draftStatus, el('div', { class: 'egd-briefing-comment-actions' }, button, resolve));
+            body, changeActions.editor, draftStatus, el('div', { class: 'egd-briefing-comment-actions' }, button, resolve, ...changeActions.buttons));
           const next = [...rows.values()].filter(existing => Number(existing.root.dataset.commentSeq) > item.seq)
             .sort((a, b) => Number(a.root.dataset.commentSeq) - Number(b.root.dataset.commentSeq))[0];
-          row = { root, target, draftStatus, button, stateText, resolve }; rows.set(item.id, row);
+          row = { root, target, draftStatus, button, stateText, resolve, body, changes: changeActions }; rows.set(item.id, row);
           if (next) list.insertBefore(root, next.root); else list.appendChild(root);
         }
         text(row.target, targetText);
+        if (row.body.textContent !== item.text) row.body.textContent = item.text;
+        row.changes.paint(item, BriefingState.briefingCommentRow(item, { targetText }), !!session.preparing);
         text(row.draftStatus, item.stateError || (item.included ? 'Chat 초안에 포함됨 · 아직 전송하지 않음' : item.draftError
           || (unverified ? '근거를 다시 확인한 뒤 초안에 포함할 수 있습니다.' : '저장됨 · 초안에 포함하지 않음')));
         row.button.disabled = item.included || !!session.preparing;
@@ -4019,13 +4146,18 @@
       comment.value = controller.view().text;
       save.addEventListener('click', () => { void controller.submit(comment.value); });
       retry.addEventListener('click', () => { void controller.retry(); });
+      discard.addEventListener('click', () => {
+        if (discard.disabled) return;
+        noteInteraction();
+        if (controller.discardDraft?.()) comment.value = '';
+      });
       refresh.addEventListener('click', () => {
         if (refresh.disabled || refresh.getAttribute('aria-disabled') === 'true') return;
         void controller.refresh();
       });
       paint(controller.view()); void controller.refresh();
     } catch (error) {
-      save.disabled = true; refresh.disabled = true; retry.disabled = true; status.dataset.state = 'unavailable'; statusMessage.textContent = error.message;
+      save.disabled = true; discard.disabled = true; refresh.disabled = true; retry.disabled = true; status.dataset.state = 'unavailable'; statusMessage.textContent = error.message;
       refresh.setAttribute('aria-disabled', 'true'); refresh.setAttribute('aria-busy', 'false');
       list.dataset.state = 'unavailable';
     }
@@ -9503,6 +9635,27 @@
     } catch { return empty(); }
   }
 
+  // CNV-07: Canvas areas of the previous/current/next step for the minimap.
+  // They are the briefing's own Canvas places (no evidence read involved);
+  // only the presentation on screen for the open room shows them.
+  function briefingMinimapRegionModel(model) {
+    const session = state.codex?.briefingSession;
+    try {
+      if (!session || session.threadId !== state.codex.activeThreadId || state.codex.briefingSession !== session) return [];
+      const resolvedSteps = session.briefing.steps.map((step, index) => Math.abs(index - session.index) > 1 ? [] : BriefingState.resolveBriefingTargets(step));
+      return BriefingState.briefingMinimapRegions(session, resolvedSteps, { viewport: model.viewport });
+    } catch { return []; }
+  }
+
+  function minimapOffscreenText(direction) {
+    return direction ? ` · 화면 밖 ${BriefingState.BRIEFING_OFFSCREEN_TEXT[direction] || ''}`.trimEnd() : '';
+  }
+
+  function minimapBriefingRegionLabel(region) {
+    const position = region.relativeStep === -1 ? '이전' : region.relativeStep === 1 ? '다음' : '현재';
+    return `${position} ${region.stepNumber}단계 · Canvas 영역 · ${region.label}${minimapOffscreenText(region.offscreen)}`;
+  }
+
   function minimapBriefingEvidenceLabel(item) {
     const position = item.relativeStep === -1 ? '이전' : item.relativeStep === 1 ? '다음' : '현재';
     const name = [item.reference?.localSource?.label, item.reference?.label]
@@ -9521,25 +9674,36 @@
     if (!map || !details || !list || !model) return;
     const plan = briefingMinimapModel(model);
     const visible = new Map(model.entities.map(item => [item.entity.id, item]));
+    // CNV-07: a step target outside the screen is marked as such on the map.
+    const offscreenById = new Map(plan.markers.map(marker => [marker.viewId, BriefingState.briefingOffscreenDirection(marker.geometry, model.viewport)]));
     const projected = plan.markers.flatMap(marker => {
       const item = visible.get(marker.viewId);
       if (!item) return [];
       const left = model.offsetX + (marker.x - model.bounds.left) * model.scale;
       const top = model.offsetY + (marker.y - model.bounds.top) * model.scale;
-      return Number.isFinite(left) && Number.isFinite(top) ? [{ ...marker, left, top }] : [];
+      return Number.isFinite(left) && Number.isFinite(top) ? [{ ...marker, left, top, offscreen: offscreenById.get(marker.viewId) }] : [];
+    });
+    // Areas may lie beyond the map's extent: they sit on its nearest edge.
+    const areas = briefingMinimapRegionModel(model).flatMap(region => {
+      const box = SurfaceState.minimapBox({ left: region.rect.x, top: region.rect.y, width: region.rect.width, height: region.rect.height }, model, 4);
+      const width = Math.min(box.width, model.mapWidth), height = Math.min(box.height, model.mapHeight);
+      const left = Math.min(Math.max(box.left, 0), model.mapWidth - width), top = Math.min(Math.max(box.top, 0), model.mapHeight - height);
+      return [left, top, width, height].every(Number.isFinite)
+        ? [{ ...region, box: { left, top, width, height }, clamped: left !== box.left || top !== box.top }] : [];
     });
     // Dense markers may share a visual badge, but its anchor is always one
     // real card, never the midpoint of several unrelated pieces of evidence.
     const groups = [];
     for (const marker of projected) {
       let group = groups.find(item => Math.abs(item.left - marker.left) < 12 && Math.abs(item.top - marker.top) < 12);
-      if (!group) { group = { left: marker.left, top: marker.top, viewId: marker.viewId, entries: [] }; groups.push(group); }
+      if (!group) { group = { left: marker.left, top: marker.top, viewId: marker.viewId, entries: [], offscreen: marker.offscreen }; groups.push(group); }
+      else if (!marker.offscreen) group.offscreen = null;
       group.entries.push(...marker.entries);
     }
     let layer = map.querySelector('.egd-minimap-briefing-layer');
     if (!layer) { layer = el('div', { class: 'egd-minimap-briefing-layer', 'aria-hidden': 'true' }); map.appendChild(layer); }
-    const markerSignature = JSON.stringify(groups.map(group => [group.viewId, group.left, group.top,
-      group.entries.map(entry => [entry.stepNumber, entry.relativeStep])]));
+    const markerSignature = JSON.stringify([groups.map(group => [group.viewId, group.left, group.top, group.offscreen || null,
+      group.entries.map(entry => [entry.stepNumber, entry.relativeStep])]), areas.map(area => [area.stepNumber, area.relativeStep, area.box, area.clamped, area.offscreen])]);
     if (layer._briefingSignature !== markerSignature) {
       layer._briefingSignature = markerSignature;
       layer.replaceChildren(...groups.map(group => {
@@ -9550,22 +9714,31 @@
           seen.add(key);
           return [el('span', { class: 'egd-minimap-briefing-number', data: { relativeStep: String(entry.relativeStep) } }, String(entry.stepNumber))];
         });
-        return el('span', { class: 'egd-minimap-briefing-marker', data: { testid: 'minimap-briefing-marker', viewId: group.viewId },
+        return el('span', { class: 'egd-minimap-briefing-marker', data: { testid: 'minimap-briefing-marker', viewId: group.viewId, offscreen: String(!!group.offscreen) },
           style: { left: group.left + 'px', top: group.top + 'px' } }, ...badges);
-      }));
+      }), ...areas.map(area => el('span', { class: 'egd-minimap-briefing-region',
+        data: { testid: 'minimap-briefing-region', stepNumber: String(area.stepNumber), relativeStep: String(area.relativeStep),
+          offscreen: String(!!area.offscreen), clamped: String(area.clamped) },
+        style: { left: area.box.left + 'px', top: area.box.top + 'px', width: area.box.width + 'px', height: area.box.height + 'px' } },
+      el('span', { class: 'egd-minimap-briefing-number', data: { relativeStep: String(area.relativeStep) } }, String(area.stepNumber)))));
     }
-    const rows = plan.items.map(item => ({ item, label: minimapBriefingEvidenceLabel(item) }));
-    const listSignature = JSON.stringify(rows.map(({ item, label }) => [item.viewId, item.stepId, item.evidenceNumber, label]));
+    const rows = plan.items.map(item => ({ item, label: minimapBriefingEvidenceLabel(item) + minimapOffscreenText(offscreenById.get(item.viewId)) }));
+    const areaRows = areas.map(area => ({ area, label: minimapBriefingRegionLabel(area) }));
+    const listSignature = JSON.stringify([rows.map(({ item, label }) => [item.viewId, item.stepId, item.evidenceNumber, label]),
+      areaRows.map(({ area, label }) => [area.stepId, area.areaNumber, label])]);
     if (list._briefingSignature !== listSignature) {
       list._briefingSignature = listSignature;
       list.replaceChildren(...rows.map(({ item, label }) => el('li', {
         data: { testid: 'minimap-briefing-row', viewId: item.viewId, stepNumber: String(item.stepNumber),
-          evidenceNumber: String(item.evidenceNumber), relativeStep: String(item.relativeStep) },
+          evidenceNumber: String(item.evidenceNumber), relativeStep: String(item.relativeStep), offscreen: String(!!offscreenById.get(item.viewId)) },
+      }, label)), ...areaRows.map(({ area, label }) => el('li', {
+        data: { testid: 'minimap-briefing-region-row', stepNumber: String(area.stepNumber), relativeStep: String(area.relativeStep),
+          areaNumber: String(area.areaNumber), offscreen: String(!!area.offscreen) },
       }, label)));
     }
     // Keep an already-focused summary/list in place when permission disappears;
     // its private rows and count have nevertheless been removed immediately.
-    const hidden = !rows.length && !details.contains(document.activeElement);
+    const hidden = !rows.length && !areaRows.length && !details.contains(document.activeElement);
     if (details.hidden !== hidden) {
       details.hidden = hidden;
       // Showing or hiding the disclosure can change the compact map's CSS
@@ -12821,6 +12994,7 @@
               onclick: (ev) => openAnswerBriefing(activeThread, message,
                 { trustedZeroDetail: ev.isTrusted && ev.detail === 0, opener: ev.currentTarget }),
             }, '브리핑 보기') : null;
+            const briefingRequest = briefingControl ? null : buildBriefingRequestControl(activeThread, message);
             const bubble = el('div', {
               class: [
                 'egd-codex-bubble',
@@ -12873,6 +13047,7 @@
             const computerLine = message.role === 'assistant' && message.runId && lastAnswerOfRun.get(message.runId) === message.id
               ? computerUseLine(roomRuns.findLast(run => run.runId === message.runId)) : null;
             const messageStack = el('div', { class: 'egd-codex-message-stack' }, roleLabel, messageLine, answerFold, computerLine, resultRow, briefingControl, meta);
+            if (briefingRequest) messageStack.insertBefore(briefingRequest, meta?.parentNode === messageStack ? meta : null);
             // CHAT-03: the @이름 chips sit right under the bubble, '스레드로 보냄' just above the time.
             if (mentionRow) messageStack.insertBefore(mentionRow, messageLine.nextSibling);
             if (sentChip) messageStack.insertBefore(sentChip, meta);
@@ -16171,7 +16346,8 @@
             this.attachBriefingComment(session.threadId, draft, selected, () => {
               try { return JSON.stringify(verifiedSelection()) === JSON.stringify(selected); } catch { return false; }
             });
-          } });
+          },
+          exclude: row => this.detachBriefingComment(session.threadId, row.id) });
         // The record is already keyed to this original account/route/step.
         // Preserve the textarea's currently visible text at teardown, even if
         // the authorization fence has just invalidated during composition.
@@ -16296,6 +16472,22 @@
           .map(ref => ref.commentId === comment.commentId ? { ...ref, draftText: comment.text } : ref);
         updateThreadById(threadId, item => ({ ...item, briefingInputs: [...inputs.values()], briefingCommentRefs: refs }));
         this.setDraft(`${current ? `${current}\n\n` : ''}${comment.text}`, threadId);
+        emit();
+        return true;
+      },
+      // CHAT-05: take one saved comment back out of the unsent Chat draft — its
+      // inserted block, its reference and the pinned evidence only it needed.
+      detachBriefingComment(threadId, commentId) {
+        const thread = getCodexThreadById(state.codex, threadId);
+        if (!thread || thread.preparingInput || ChatState.nativeBindingHeld(thread)) return false;
+        const ref = thread.briefingCommentRefs?.find(item => item.commentId === commentId);
+        if (!ref) return false;
+        const current = getCodexThreadDraft(state.codex, threadId);
+        const next = BriefingState.briefingDraftWithout(current, ref.draftText);
+        const refs = BriefingState.removeBriefingCommentRef(thread.briefingCommentRefs, commentId);
+        const inputs = BriefingState.briefingInputsForRefs(thread.briefingInputs, refs, thread.messages);
+        updateThreadById(threadId, item => ({ ...item, briefingCommentRefs: refs, briefingInputs: inputs }));
+        if (next !== current) this.setDraft(next, threadId);
         emit();
         return true;
       },

@@ -4322,6 +4322,34 @@ button.egd-rail-focus-view {
   z-index: 4;
 }
 
+/* CNV-07: a Canvas area named by a briefing step, drawn in the card layer.
+   The line keeps its on-screen width at any zoom; it never takes input. */
+.egd-briefing-region {
+  position: absolute;
+  box-sizing: border-box;
+  border: calc(2px / var(--egd-camera-zoom, 1)) dashed var(--egd-primary);
+  border-radius: calc(8px / var(--egd-camera-zoom, 1));
+  background: var(--egd-primary-container);
+  background: color-mix(in srgb, var(--egd-primary-container) 35%, transparent);
+  pointer-events: none;
+  z-index: 0;
+}
+.egd-briefing-region-label {
+  position: absolute;
+  left: 0;
+  bottom: 100%;
+  padding: 0 calc(6px / var(--egd-camera-zoom, 1));
+  border-radius: calc(6px / var(--egd-camera-zoom, 1));
+  background: var(--egd-primary);
+  color: var(--egd-surface-elevated);
+  font: 600 calc(11px / var(--egd-camera-zoom, 1)) / 1.5 var(--egd-font, system-ui);
+  white-space: nowrap;
+}
+@media (forced-colors: active) {
+  .egd-briefing-region { border-color: Highlight; background: transparent; }
+  .egd-briefing-region-label { background: Canvas; color: CanvasText; border: 1px solid Highlight; }
+}
+
 /* Briefing numbers mark individual open cards; the existing map still owns
    pointer input and its normal camera gestures. */
 .egd-minimap-briefing-layer {
@@ -4354,6 +4382,31 @@ button.egd-rail-focus-view {
   color: var(--egd-surface-elevated);
 }
 .egd-minimap-briefing-number[data-relative-step="1"] { border-style: dashed; }
+/* CNV-07: a step's Canvas area on the map (on the map's edge when it lies
+   beyond it), and a ring on any step target outside the screen. */
+.egd-minimap-briefing-region {
+  position: absolute;
+  box-sizing: border-box;
+  border: 1px dashed var(--egd-primary);
+  border-radius: 3px;
+  pointer-events: none;
+}
+.egd-minimap-briefing-region > .egd-minimap-briefing-number {
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  transform: translate(-50%, -50%);
+}
+.egd-minimap-briefing-region[data-relative-step="0"] { border-style: solid; }
+.egd-minimap-briefing-region[data-clamped="true"] { border-width: 2px; }
+:is(.egd-minimap-briefing-marker, .egd-minimap-briefing-region)[data-offscreen="true"] .egd-minimap-briefing-number {
+  outline: 2px solid var(--egd-primary);
+  outline-offset: 1px;
+}
+@media (forced-colors: active) {
+  .egd-minimap-briefing-region { border-color: Highlight; }
+  :is(.egd-minimap-briefing-marker, .egd-minimap-briefing-region)[data-offscreen="true"] .egd-minimap-briefing-number { outline-color: Highlight; }
+}
 .egd-minimap-briefing {
   margin-top: 6px;
   color: var(--egd-on-surface-variant);
@@ -7048,6 +7101,16 @@ button.egd-codex-message-activity:focus-visible { outline: var(--egd-focus-outli
 #egd-answer-briefing .egd-briefing-comment-status { margin: 0; color: var(--egd-on-surface-variant); font-size: 11px; }
 #egd-answer-briefing .egd-briefing-comment-actions { display: flex; flex-wrap: wrap; gap: 4px; }
 #egd-answer-briefing .egd-briefing-comment-actions > button { margin: 0; }
+/* CHAT-05: rewrite in place under the head line; delete asks twice. */
+#egd-answer-briefing .egd-briefing-comment-editor { display: flex; flex-wrap: wrap; gap: 4px; }
+#egd-answer-briefing .egd-briefing-comment-editor[hidden],
+#egd-answer-briefing .egd-briefing-comment-body[hidden],
+#egd-answer-briefing .egd-briefing-comment-actions > button[hidden] { display: none; }
+#egd-answer-briefing .egd-briefing-comment-editor > textarea { flex: 1 1 100%; box-sizing: border-box; min-width: 0; }
+#egd-answer-briefing [data-testid="briefing-comment-delete"][data-confirm="true"] {
+  border-color: var(--egd-danger-line); color: var(--egd-danger-ink);
+}
+#egd-answer-briefing .egd-briefing-comment-actions > button[aria-disabled="true"] { opacity: var(--egd-opacity-disabled); cursor: default; }
 /* A resolved comment stays in place, quieter: neutral edge, clamped text. */
 #egd-answer-briefing .egd-briefing-comment[data-state="resolved"] { border-inline-start-color: var(--egd-outline); background: var(--egd-surface); }
 #egd-answer-briefing .egd-briefing-comment[data-state="resolved"] .egd-briefing-comment-body {

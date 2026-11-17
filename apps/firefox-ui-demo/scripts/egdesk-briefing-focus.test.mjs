@@ -15,29 +15,62 @@ const available = id => ({ status: 'available', view: { id } });
 
 test('the current step names the windows to keep clear and whether the rest recedes', () => {
   const focus = BriefingState.briefingStepFocus(begin(0), [available('card-a'), { status: 'missing' }, available('card-a'), available('card-b')]);
-  assert.deepEqual(focus, { chromeMode: 'briefing', emphasis: 'spotlight', targetIds: ['card-a', 'card-b'], dimOthers: true });
+  assert.deepEqual(focus, { chromeMode: 'briefing', emphasis: 'spotlight', targetIds: ['card-a', 'card-b'], dimOthers: true, regions: [] });
 });
 
 test('an outline step rings its windows without dimming the others', () => {
   const focus = BriefingState.briefingStepFocus(begin(1), [available('card-a')]);
-  assert.deepEqual(focus, { chromeMode: 'briefing', emphasis: 'outline', targetIds: ['card-a'], dimOthers: false });
+  assert.deepEqual(focus, { chromeMode: 'briefing', emphasis: 'outline', targetIds: ['card-a'], dimOthers: false, regions: [] });
 });
 
 test('a step with no open window emphasizes nothing and never dims the whole Canvas', () => {
   for (const resolved of [[], undefined, [{ status: 'missing', view: { id: 'card-a' } }, { status: 'available', view: {} }, { status: 'stale' }]]) {
     assert.deepEqual(BriefingState.briefingStepFocus(begin(2), resolved),
-      { chromeMode: 'briefing', emphasis: null, targetIds: [], dimOthers: false });
+      { chromeMode: 'briefing', emphasis: null, targetIds: [], dimOthers: false, regions: [] });
   }
 });
 
 test('the whole-briefing overview keeps every briefing window clear, whatever one step asked for', () => {
   const focus = BriefingState.briefingStepFocus(begin(1), [available('card-a'), available('card-c')], { overview: true });
-  assert.deepEqual(focus, { chromeMode: 'briefing', emphasis: 'spotlight', targetIds: ['card-a', 'card-c'], dimOthers: true });
+  assert.deepEqual(focus, { chromeMode: 'briefing', emphasis: 'spotlight', targetIds: ['card-a', 'card-c'], dimOthers: true, regions: [] });
 });
 
 test('without a briefing there is no chrome mode and nothing to emphasize', () => {
   assert.deepEqual(BriefingState.briefingStepFocus(null, [available('card-a')]),
-    { chromeMode: null, emphasis: null, targetIds: [], dimOthers: false });
+    { chromeMode: null, emphasis: null, targetIds: [], dimOthers: false, regions: [] });
+});
+
+// CNV-07 Canvas areas (canvasRect targets). Fields added above: regions[] (intentional).
+test('a Canvas area keeps the windows it overlaps clear and is outlined; over empty Canvas nothing is dimmed', () => {
+  const area = { status: 'available', target: { canvasRect: { x: 0, y: 0, width: 100, height: 100 }, label: ' 왼쪽 묶음 ' }, region: { x: 0, y: 0, width: 100, height: 100 } };
+  const cards = [{ id: 'inside', geometry: { x: 50, y: 50, width: 200, height: 200 } }, { id: 'outside', geometry: { x: 300, y: 0, width: 50, height: 50 } },
+    { id: 'touching', geometry: { x: 100, y: 0, width: 20, height: 20 } }, { id: 'bad', geometry: { x: 0, y: 0, width: 0, height: 5 } }];
+  assert.deepEqual(BriefingState.briefingStepFocus(begin(0), [area], { cards }),
+    { chromeMode: 'briefing', emphasis: 'spotlight', targetIds: ['inside'], dimOthers: true, regions: [{ x: 0, y: 0, width: 100, height: 100, label: '왼쪽 묶음' }] });
+  assert.deepEqual(BriefingState.briefingStepFocus(begin(0), [area], { cards: [cards[1]] }),
+    { chromeMode: 'briefing', emphasis: 'outline', targetIds: [], dimOthers: false, regions: [{ x: 0, y: 0, width: 100, height: 100, label: '왼쪽 묶음' }] },
+    'an area over empty Canvas never dims every window');
+  assert.deepEqual(BriefingState.briefingStepFocus(begin(0), [available('card-a'), area], { cards }).targetIds, ['card-a', 'inside']);
+});
+
+test('target kinds: evidence, artifact, Canvas area, and the reserved annotation set which never resolves yet', () => {
+  assert.equal(BriefingState.briefingTargetKind({ sourceId: 's' }), 'source');
+  assert.equal(BriefingState.briefingTargetKind({ artifactId: 'a' }), 'artifact');
+  assert.equal(BriefingState.briefingTargetKind({ canvasRect: { x: 0, y: 0, width: 1, height: 1 } }), 'canvasRect');
+  assert.equal(BriefingState.briefingTargetKind({ annotationSetId: 'set', canvasRect: {} }), 'annotationSet');
+  assert.equal(BriefingState.briefingTargetKind('x'), null);
+  assert.deepEqual(BriefingState.BRIEFING_TARGET_KINDS, ['source', 'artifact', 'canvasRect', 'annotationSet']);
+  const step = { id: 's', text: 'T', targets: [{ canvasRect: { x: -5, y: 2, width: 40, height: 30 } }, { annotationSetId: 'set-1' },
+    { canvasRect: { x: 0, y: 0, width: 0, height: 3 } }, { canvasRect: { x: 0, y: 0, width: 3, height: 3 }, sourceId: 'mixed' }] };
+  const resolved = BriefingState.resolveBriefingTargets(step);
+  assert.deepEqual(resolved.map(item => item.status), ['available', 'unsupported', 'unsupported', 'unsupported']);
+  assert.deepEqual(resolved[0].region, { x: -5, y: 2, width: 40, height: 30 });
+  assert.match(resolved[1].reason, /표식 묶음 대상은 아직 지원하지 않습니다/);
+  assert.deepEqual(BriefingState.briefingBounds(resolved), { x: -5, y: 2, width: 40, height: 30 }, 'the camera fits Canvas areas too');
+  assert.deepEqual(BriefingState.briefingScreenRects(resolved, { zoom: 2, pan: { x: 10, y: 0 } }), [{ x: 0, y: 4, width: 80, height: 60 }]);
+  assert.deepEqual(BriefingState.briefingRegionLabel({ canvasRect: {}, label: ' 표 ' }, 0), { name: '표', rangeText: 'Canvas 영역' });
+  assert.deepEqual(BriefingState.briefingRegionLabel({ canvasRect: {} }, 2), { name: 'Canvas 영역 3', rangeText: 'Canvas 영역' });
+  assert.equal(BriefingState.validBriefing({ id: 'b', steps: [step] }), true);
 });
 
 test('a briefing left in the middle offers that step again, by number', () => {
@@ -92,10 +125,15 @@ test('forgetting a briefing removes its offer, and the memory stays bounded', ()
 test('a comment row model carries number, state and the actions that are really available', () => {
   const open = BriefingState.briefingCommentRow({ id: 'c1', seq: 3, text: '확인 필요', resolved: false, included: false }, { targetText: '주문 표 · 2–5행' });
   assert.deepEqual(open, { number: '#3', title: '의견 #3', target: '주문 표 · 2–5행', state: 'open', stateLabel: '',
-    resolveLabel: '해결됨으로 표시', resolveTitle: '의견 #3을 해결됨으로 표시', collapsed: false });
-  const done = BriefingState.briefingCommentRow({ id: 'c1', seq: 3, text: '확인 필요', resolved: true, included: true }, { targetText: '' });
+    resolveLabel: '해결됨으로 표시', resolveTitle: '의견 #3을 해결됨으로 표시', collapsed: false, edited: false, editedLabel: '수정됨',
+    editLabel: '편집', editTitle: '의견 #3 편집', deleteLabel: '삭제', deleteTitle: '의견 #3 삭제',
+    excludeLabel: '초안에서 빼기', excludeTitle: '의견 #3을 Chat 초안에서 빼기' });
+  // Edit, delete and take-out-of-draft are offered too (CHAT-05); a rewritten comment says so.
+  const done = BriefingState.briefingCommentRow({ id: 'c1', seq: 3, text: '확인 필요', resolved: true, included: true, revision: 2 }, { targetText: '' });
   assert.deepEqual(done, { number: '#3', title: '의견 #3', target: '이 단계의 설명', state: 'resolved', stateLabel: '해결됨',
-    resolveLabel: '다시 열기', resolveTitle: '의견 #3을 다시 열기', collapsed: true });
+    resolveLabel: '다시 열기', resolveTitle: '의견 #3을 다시 열기', collapsed: true, edited: true, editedLabel: '수정됨',
+    editLabel: '편집', editTitle: '의견 #3 편집', deleteLabel: '삭제', deleteTitle: '의견 #3 삭제',
+    excludeLabel: '초안에서 빼기', excludeTitle: '의견 #3을 Chat 초안에서 빼기' });
 });
 
 // ----------------------------------------------------- comment resolve / reopen
@@ -161,6 +199,122 @@ test('a late receipt after the briefing connection changed does not edit the rec
   assert.equal(await pending, false);
   assert.equal(h.record.comments[0].resolved, false);
   assert.equal(h.record.resolving?.[commentId], undefined, 'the in-flight mark never outlives its request');
+});
+
+// ------------------------------------------- comment edit / delete / discard (CHAT-05)
+
+function changeHarness(transport, { inDraft = false } = {}) {
+  const calls = [], excluded = [], record = { text: '', comments: [savedRow()] };
+  let draft = inDraft;
+  const controller = BriefingState.createBriefingComments({ session: BriefingState.beginBriefing(commentBriefing, {}), record,
+    current: () => true, makeId: () => '10000000-0000-4000-8000-000000000001',
+    request: async (method, body, id, action) => { calls.push({ method, body, id, action }); return transport(method, body, id, action); },
+    included: () => draft, include: () => { draft = true; },
+    exclude: row => { excluded.push(row.id); draft = false; return true; }, changed: () => {} });
+  return { controller, calls, excluded, record };
+}
+
+test('editing a saved comment sends its revision, keeps number and step, and takes the old text out of the Chat draft', async () => {
+  const h = changeHarness((_m, body) => ({ comment: savedRow({ text: body.text, revision: 2, editedAt: 5 }) }), { inDraft: true });
+  assert.equal(await h.controller.editComment(commentId, '  고친 의견  '), true);
+  assert.deepEqual(h.calls, [{ method: 'POST', body: { text: '고친 의견', revision: 1 }, id: commentId, action: 'edit' }]);
+  const row = h.controller.view().comments[0];
+  assert.equal(row.text, '고친 의견');
+  assert.equal(row.revision, 2);
+  assert.equal(row.seq, 1);
+  assert.deepEqual(h.excluded, [commentId], 'the unsent old text is never left to be sent as if current');
+  assert.match(h.controller.view().message, /수정 전 의견은 뺐습니다/);
+  assert.equal(await h.controller.editComment(commentId, '고친 의견'), true, 'an unchanged text sends nothing');
+  assert.equal(h.calls.length, 1);
+  assert.equal(await h.controller.editComment(commentId, ' '), false);
+  assert.match(h.controller.view().comments[0].stateError, /입력해 주세요/);
+  assert.equal(h.calls.length, 1);
+});
+
+test('a stale edit or delete keeps the row, says so, and reads the list again', async () => {
+  const conflict = Object.assign(new Error('changed'), { code: 'BRIEFING_COMMENT_CONFLICT', status: 409 });
+  const h = changeHarness((method, _body, _id, action) => {
+    if (method === 'GET') return { briefingId: 'brief-multi', comments: [savedRow({ text: '다른 창에서 고침', revision: 2 })] };
+    throw conflict;
+  });
+  assert.equal(await h.controller.editComment(commentId, '내 수정'), false);
+  assert.match(h.controller.view().comments[0].stateError, /다른 곳에서 먼저 바뀌었습니다/);
+  await new Promise(resolve => setTimeout(resolve, 0));
+  assert.equal(h.calls.at(-1).method, 'GET');
+  assert.equal(h.controller.view().comments[0].text, '다른 창에서 고침', 'the newer revision from the list wins');
+  assert.equal(h.controller.view().comments[0].changeBusy, undefined);
+});
+
+test('deleting removes the row only after the receipt, also from the Chat draft, and a later list read cannot bring it back', async () => {
+  const h = changeHarness((method, body, id, action) => method === 'GET'
+    ? { briefingId: 'brief-multi', comments: [savedRow()] }
+    : { deleted: { id, briefingId: 'brief-multi', stepId: 'both', seq: 1, deleted: true, deletedAt: 9 } }, { inDraft: true });
+  const pending = h.controller.deleteComment(commentId);
+  assert.equal(h.controller.view().comments[0].changeBusy, 'delete', 'the row shows the delete in flight');
+  assert.equal(await h.controller.setResolved(commentId, true), false, 'no other change while deleting');
+  assert.equal(await pending, true);
+  assert.deepEqual(h.calls[0], { method: 'POST', body: { revision: 1 }, id: commentId, action: 'delete' });
+  assert.deepEqual(h.controller.view().comments, []);
+  assert.deepEqual(h.excluded, [commentId]);
+  assert.match(h.controller.view().message, /삭제했습니다\. Chat 초안에서도 뺐습니다/);
+  await h.controller.refresh();
+  assert.deepEqual(h.controller.view().comments, [], 'a list read that raced the delete does not resurrect it');
+});
+
+test('a list read never drops a known comment; one deleted elsewhere leaves when the helper says so for it', async () => {
+  const deleted = Object.assign(new Error('gone'), { code: 'BRIEFING_COMMENT_DELETED', status: 404 });
+  const h = changeHarness(method => { if (method === 'GET') return { briefingId: 'brief-multi', comments: [] }; throw deleted; });
+  await h.controller.refresh();
+  assert.equal(h.controller.view().comments.length, 1, 'an empty or partial list is not a delete receipt');
+  assert.equal(await h.controller.editComment(commentId, '고침'), false);
+  assert.deepEqual(h.controller.view().comments, []);
+  assert.match(h.controller.view().message, /이미 삭제되었습니다/);
+  const resolve = changeHarness(() => { throw deleted; });
+  assert.equal(await resolve.controller.setResolved(commentId, true), false);
+  assert.deepEqual(resolve.controller.view().comments, []);
+});
+
+test('a refused or unknown delete keeps the row; an already deleted comment is simply gone', async () => {
+  const offline = changeHarness(() => { throw new Error('offline'); });
+  assert.equal(await offline.controller.deleteComment(commentId), false);
+  assert.match(offline.controller.view().comments[0].stateError, /삭제하지 못했습니다/);
+  const mismatched = changeHarness((_m, _b, id) => ({ deleted: { id, briefingId: 'brief-multi', seq: 7, deleted: true } }));
+  assert.equal(await mismatched.controller.deleteComment(commentId), false, 'a receipt for another number is not this delete');
+  assert.equal(mismatched.controller.view().comments.length, 1);
+  const gone = changeHarness(() => { throw Object.assign(new Error('gone'), { code: 'BRIEFING_COMMENT_DELETED', status: 404 }); });
+  assert.equal(await gone.controller.deleteComment(commentId), true);
+  assert.deepEqual(gone.controller.view().comments, []);
+});
+
+test('taking a comment out of the Chat draft leaves the saved comment; discarding throws away only the comment being written', async () => {
+  const h = changeHarness(() => assert.fail('no request'), { inDraft: true });
+  assert.equal(h.controller.exclude(commentId), true);
+  assert.equal(h.controller.view().comments.length, 1);
+  assert.match(h.controller.view().message, /Chat 초안에서 뺐습니다\. 저장된 의견은 그대로입니다/);
+  assert.equal(h.controller.exclude(commentId), false, 'nothing to take out any more');
+  assert.equal(h.controller.view().canDiscard, false);
+  assert.equal(h.controller.discardDraft(), false);
+  h.controller.edit('쓰던 의견');
+  assert.equal(h.controller.view().canDiscard, true);
+  assert.equal(h.controller.discardDraft(), true);
+  assert.equal(h.controller.view().text, '');
+  assert.equal(h.record.comments.length, 1, 'saved comments are untouched');
+  assert.match(h.controller.view().message, /쓰던 의견을 버렸습니다/);
+});
+
+test('discarding an unconfirmed save drops the attempt, never while a save is in flight', async () => {
+  let release;
+  const h = changeHarness(method => method === 'GET' ? { briefingId: 'brief-multi', comments: [savedRow()] }
+    : new Promise((resolve, reject) => { release = () => reject(new Error('lost')); }));
+  h.controller.edit('미확정 의견');
+  const saving = h.controller.submit('미확정 의견');
+  assert.equal(h.controller.discardDraft(), false, 'a save in flight is not thrown away');
+  release(); await saving;
+  assert.equal(h.controller.view().unconfirmed, true);
+  assert.equal(h.controller.discardDraft(), true);
+  assert.equal(h.record.attempt, null);
+  assert.equal(h.controller.view().unconfirmed, false);
+  assert.match(h.controller.view().message, /저장 여부를 확인하지 못한 의견을 버렸습니다/);
 });
 
 // ------------------------------------------------------------------- styles

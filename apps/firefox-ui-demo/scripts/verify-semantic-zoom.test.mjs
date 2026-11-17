@@ -223,7 +223,11 @@ function briefingSemanticHarness({ width = 720, height = 600, zoom = .0467171717
     },
     chatBindingNonce: () => `presentation-${++nonce}`, boardNotice: () => {},
   };
+  // CNV-07 Canvas areas: production geometry and region outlines.
+  deps.persistentEntityGeometry ||= production('persistentEntityGeometry', deps);
+  deps.syncBriefingRegions = production('syncBriefingRegions', deps);
   deps.syncBriefingFocus = production('syncBriefingFocus', deps);
+  deps.mountBriefingCommentChanges = production('mountBriefingCommentChanges', deps);
   const code = ['installSemanticOutlineDrag', 'installSemanticZoom', 'renderAnswerBriefing', 'closeAnswerBriefing', 'openAnswerBriefing'].map(functionSource);
   assert.ok(code.every(Boolean));
   const api = compileFunction(`${code.join('\n')}\nreturn { installSemanticZoom, renderAnswerBriefing, closeAnswerBriefing, openAnswerBriefing };`,
