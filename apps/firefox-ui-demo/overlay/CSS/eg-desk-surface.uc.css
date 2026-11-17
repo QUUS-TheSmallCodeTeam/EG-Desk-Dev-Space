@@ -10430,6 +10430,10 @@ button.egd-plan-confirm-go[aria-disabled="true"] { opacity: var(--egd-opacity-di
   line-height: 1.5;
 }
 .egd-settings-detail-list .egd-settings-ceiling-note { margin-top: 6px; }
+/* AGENT-08 답할 엔진: the choice, the model it keeps, and the engine's readiness. */
+.egd-settings-engine-pick { display: flex; flex-direction: column; align-items: flex-start; gap: 6px; }
+.egd-settings-engine-pick .egd-settings-ceiling-note { align-self: stretch; }
+.egd-settings-engine-note-blocked { border-color: var(--egd-warning); font-weight: 600; }
 
 /* AGENT-02 사용 준비: what the newest version still leaves empty, never a gate. */
 .egd-settings-readiness {

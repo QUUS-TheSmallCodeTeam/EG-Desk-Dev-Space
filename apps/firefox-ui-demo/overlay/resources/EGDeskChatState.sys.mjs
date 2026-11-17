@@ -1424,8 +1424,22 @@ export function normalizeProfileCatalog(payload) {
     return [{ id: row.id, lifecycle: row.lifecycle, origin: PROFILE_ORIGINS.includes(row.origin) ? row.origin : 'user',
       activeRevision: revision(row.activeRevision), headRevision: revision(row.headRevision), hasDraft: row.hasDraft === true,
       name: row.name.trim().slice(0, 40), role: typeof row.role === 'string' ? row.role.trim().slice(0, 80) : '',
-      avatar: displayProfileAvatar(row.avatar), updatedAt: Number.isFinite(row.updatedAt) ? row.updatedAt : null }];
+      avatar: displayProfileAvatar(row.avatar), updatedAt: Number.isFinite(row.updatedAt) ? row.updatedAt : null,
+      // AGENT-08: the engine the Agent saved (null: the room's or recent engine).
+      engine: isEngineId(row.engine) ? row.engine : null }];
   });
+}
+/** AGENT-08: catalog profile id → saved engine, for chatThreadEngineId. */
+export function profileEngineMap(profiles) {
+  const map = {};
+  for (const profile of Array.isArray(profiles) ? profiles : []) if (isProfileId(profile?.id) && isEngineId(profile.engine)) map[profile.id] = profile.engine;
+  return map;
+}
+/** The engine saved by the room's selected stored Agent, or null. */
+export function chatThreadAgentEngineId(thread, profileEngines) {
+  if (thread?.profileEnabled !== true || !isProfileId(thread.agentProfileId) || !profileEngines || typeof profileEngines !== 'object') return null;
+  const engine = Object.hasOwn(profileEngines, thread.agentProfileId) ? profileEngines[thread.agentProfileId] : null;
+  return isEngineId(engine) ? engine : null;
 }
 export const profileRunnable = profile => !!profile && profile.lifecycle === 'active' && Number.isSafeInteger(profile.activeRevision);
 
@@ -1725,6 +1739,40 @@ export function validateProfileForm(form = {}) {
 }
 
 /**
+ * AGENT-08 (D-S1·D-A4): which subscription engine answers for this Agent.
+ * '정하지 않음' saves model null (the room's pick or the recent engine). A
+ * new engine drops the old engine's model, so the engine's own default runs;
+ * the same engine keeps the saved model and effort.
+ */
+export const PROFILE_ENGINE_OPTIONS = Object.freeze([
+  { value: 'none', label: '정하지 않음' }, { value: 'codex', label: 'Codex' }, { value: 'claude', label: 'Claude' },
+]);
+export function profileFormEngine(form) {
+  const engine = form?.model?.engine;
+  return engine === 'codex' || engine === 'claude' ? engine : 'none';
+}
+export function applyProfileFormEngine(form, engine) {
+  if (engine !== 'codex' && engine !== 'claude') return { ...form, model: null };
+  if (profileFormEngine(form) === engine) return { ...form, model: copy(form.model) };
+  return { ...form, model: { engine, modelId: null, effort: null } };
+}
+/** The note under the engine choice: the engine's last reported readiness, from the bridge's engines[] (Settings projection). */
+export function profileEngineNote(form, { engines = null, auth = null, connected = true } = {}) {
+  const engine = profileFormEngine(form);
+  if (engine === 'none') return { engine, ready: null, text: '방에서 고른 엔진이나 최근에 쓴 엔진으로 답합니다.', modelText: null };
+  const modelId = typeof form?.model?.modelId === 'string' && form.model.modelId ? form.model.modelId : null;
+  const modelText = modelId ? `모델: ${modelId}` : `모델: ${engine === 'claude' ? 'Claude' : 'Codex'} 기본 모델`;
+  const lead = '새 대화는 이 엔진으로 답하고, 이미 시작한 대화는 원래 엔진을 유지합니다.';
+  if (connected !== true) return { engine, ready: null, modelText, text: `${lead} EG-Desk에 연결되지 않아 엔진 상태는 확인할 수 없습니다.` };
+  const choice = chatEngineChoices(engines, auth).find(row => row.id === engine) || null;
+  if (engine === 'codex') return { engine, ready: !!auth?.isLoggedIn, modelText, text: `${lead} Codex: ${choice?.note || '로그인 필요'}` };
+  const claude = claudeSettingsView(engines, { connected: true });
+  const ready = !!choice?.selectable && claude.engineStatus === 'ready' && claude.authStatus === 'signedIn';
+  return { engine, ready, modelText, text: ready ? `${lead} Claude: 사용 가능` :
+    `${lead} Claude: ${choice?.note || '연결 안 됨'} · ${claude.authText}. 준비되기 전에는 이 Agent의 새 대화가 시작 전에 멈춥니다.` };
+}
+
+/**
  * AGENT-02 사용 준비: what a saved body still leaves empty. It never blocks
  * 사용 시작; the list names the gaps and the missing count goes beside it.
  */
@@ -1809,7 +1857,8 @@ function diffValueText(field, value) {
   }
   if (field === 'personality.tone') return PROFILE_TONE_OPTIONS.find(option => option.value === value)?.label || '확인 안 됨';
   if (field === 'avatar') return value?.kind === 'emoji' ? `이모지 ${value.value}` : `이니셜 ${value?.value ?? ''}`;
-  if (field === 'model') return typeof value?.modelId === 'string' ? value.modelId : '확인 안 됨';
+  if (field === 'model') return typeof value?.modelId === 'string' ? value.modelId
+    : value?.engine === 'codex' || value?.engine === 'claude' ? `${value.engine === 'claude' ? 'Claude' : 'Codex'} 기본 모델` : '확인 안 됨';
   if (Array.isArray(value)) return value.length ? value.join(', ') : '없음';
   const text = String(value);
   return text ? (text.length > 300 ? `${text.slice(0, 300)}…` : text) : '비어 있음';
@@ -1935,11 +1984,19 @@ export function chatEngineChoices(engines, auth = null) {
 /** A room is tied to its engine once it has a conversation, a held record, or any message (D3). */
 export const chatThreadEngineLocked = thread => !!thread && (!!thread.conversationId || !!thread.retainedNativeBinding
   || (Array.isArray(thread.messages) && thread.messages.length > 0));
-/** The room's engine: its locked one (older rooms are Codex), else its pick, else the app-wide recent engine (D4). */
-export function chatThreadEngineId(thread, { recentEngineId = null, engines = null } = {}) {
+/**
+ * The room's engine: its locked one (older rooms are Codex), else its pick,
+ * else the engine its selected Agent saved (AGENT-08), else the app-wide
+ * recent engine (D4). profileEngines maps a catalog profile id to its engine.
+ */
+export function chatThreadEngineId(thread, { recentEngineId = null, engines = null, profileEngines = null } = {}) {
   // An unavailable explicit choice still expresses intent; the server refuses it.
   if (isEngineId(thread?.engineId)) return thread.engineId;
   if (chatThreadEngineLocked(thread)) return isEngineId(thread.engineId) ? thread.engineId : DEFAULT_CHAT_ENGINE_ID;
+  // The Agent's saved engine is intent too: an offline one is refused by the
+  // server rather than answered by another engine; the room can still pick.
+  const agentEngine = chatThreadAgentEngineId(thread, profileEngines);
+  if (agentEngine) return agentEngine;
   const choices = chatEngineChoices(engines);
   return [thread?.engineId, recentEngineId].find(id => choices.some(choice => choice.id === id && choice.selectable)) || DEFAULT_CHAT_ENGINE_ID;
 }

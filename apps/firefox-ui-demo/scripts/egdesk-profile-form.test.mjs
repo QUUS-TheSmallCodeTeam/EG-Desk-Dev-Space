@@ -595,3 +595,37 @@ test('malformed diff values never render object coercions and empty values still
     }
   }
 });
+
+test('AGENT-08 답할 엔진: the form picks Codex, Claude or none, keeps a same-engine model, and notes Claude readiness', () => {
+  const form = profileFormFromBody(savedBody());
+  assert.equal(ChatState.profileFormEngine(form), 'codex');
+  assert.deepEqual(ChatState.applyProfileFormEngine(form, 'codex').model, { engine: 'codex', modelId: 'gpt-5.5', effort: 'high' }, 'the same engine keeps the model');
+  const claudeForm = ChatState.applyProfileFormEngine(form, 'claude');
+  assert.deepEqual(claudeForm.model, { engine: 'claude', modelId: null, effort: null }, 'another engine starts on its own default model');
+  assert.deepEqual(form.model, { engine: 'codex', modelId: 'gpt-5.5', effort: 'high' }, 'the form passed in is not changed');
+  const saved = checked(claudeForm);
+  assert.deepEqual(normalizeProfileBody(saved).model, { engine: 'claude', modelId: null, effort: null }, 'the store accepts an engine-only choice');
+  assert.equal(checked(ChatState.applyProfileFormEngine(form, 'none')).model, null);
+  assert.throws(() => normalizeProfileBody({ ...saved, model: { engine: 'claude', modelId: null, effort: 'high' } }), error => error.code === 'INVALID_PROFILE', 'an effort needs a model');
+  assert.notEqual(profileHash(saved), profileHash(checked(form)), 'the engine is part of the revision hash');
+
+  const claudeReady = [{ id: 'codex' }, { id: 'claude', status: 'ready', version: '2.1.300', profiles: [{ id: 'claude-default', active: true, auth: { status: 'signedIn' } }] }];
+  const claudePending = [{ id: 'codex' }, { id: 'claude', status: 'decisionPending' }];
+  const ready = ChatState.profileEngineNote(claudeForm, { engines: claudeReady });
+  assert.deepEqual([ready.ready, ready.modelText], [true, '모델: Claude 기본 모델']);
+  assert.match(ready.text, /Claude: 사용 가능$/);
+  const pending = ChatState.profileEngineNote(claudeForm, { engines: claudePending });
+  assert.equal(pending.ready, false);
+  assert.match(pending.text, /연결 방식 결정 대기/);
+  assert.match(pending.text, /시작 전에 멈춥니다/);
+  assert.equal(ChatState.profileEngineNote(claudeForm, { engines: claudeReady, connected: false }).ready, null, 'no claim while disconnected');
+  const codex = ChatState.profileEngineNote(form, { engines: claudeReady, auth: { isLoggedIn: true, planType: 'pro' } });
+  assert.deepEqual([codex.ready, codex.modelText], [true, '모델: gpt-5.5']);
+  assert.match(ChatState.profileEngineNote({ model: null }).text, /최근에 쓴 엔진/);
+  assert.equal(ChatState.profileDiffRows([{ field: 'model', before: { engine: 'codex', modelId: 'gpt-5.5', effort: null }, after: { engine: 'claude', modelId: null, effort: null } }])[0].after, 'Claude 기본 모델');
+
+  const source = readSurfaceSource();
+  assert.match(source, /const engineSection = field\('model', '답할 엔진'/);
+  assert.match(source, /form\.model = ChatState\.applyProfileFormEngine\(form, option\.value\)\.model/);
+  assert.match(source, /engineSection,\n {8}ceilingSection,/);
+});

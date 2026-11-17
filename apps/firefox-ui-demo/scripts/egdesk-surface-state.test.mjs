@@ -15344,6 +15344,21 @@ test('a started room keeps its engine; a new room follows its pick, then the app
   const connected = [{ id: 'codex' }, { id: 'claude', status: 'ready' }];
   assert.equal(Chat.chatThreadEngineId(fresh, { recentEngineId: 'claude', engines: connected }), 'claude', 'D4: recent engine');
   assert.equal(Chat.chatThreadEngineId({ ...fresh, engineId: 'codex' }, { recentEngineId: 'claude', engines: connected }), 'codex', 'the room pick wins');
+  // AGENT-08: a new room with a stored Agent follows the engine that Agent saved.
+  const profileEngines = Chat.profileEngineMap(Chat.normalizeProfileCatalog({ profiles: [
+    { id: 'prof-claude', lifecycle: 'active', activeRevision: 1, headRevision: 1, name: '클로', engine: 'claude' },
+    { id: 'prof-plain', lifecycle: 'active', activeRevision: 1, headRevision: 1, name: '기본', engine: null },
+    { id: 'prof-odd', lifecycle: 'active', activeRevision: 1, headRevision: 1, name: '이상', engine: 'Claude!' }] }));
+  assert.deepEqual(profileEngines, { 'prof-claude': 'claude' }, 'only a well-formed saved engine is kept');
+  const agentRoom = { ...fresh, profileEnabled: true, agentProfileId: 'prof-claude' };
+  assert.equal(Chat.chatThreadEngineId(agentRoom, { engines: engineRowsFixture, profileEngines }), 'claude',
+    'the Agent engine is intent even while Claude is unavailable; the bridge refuses rather than Codex answering');
+  assert.equal(Chat.chatThreadEngineId({ ...agentRoom, engineId: 'codex' }, { profileEngines }), 'codex', 'the room pick still wins');
+  assert.equal(Chat.chatThreadEngineId({ ...agentRoom, messages: [{ id: 'm' }] }, { profileEngines }), 'codex', 'a started room is never moved');
+  assert.equal(Chat.chatThreadEngineId({ ...agentRoom, profileEnabled: false }, { recentEngineId: 'claude', engines: connected, profileEngines }), 'claude', 'without an Agent the recent engine applies');
+  assert.equal(Chat.chatThreadEngineId({ ...fresh, profileEnabled: true, agentProfileId: 'prof-plain' }, { engines: connected, profileEngines }), 'codex');
+  const request = Chat.buildChatRequest(agentRoom, 'hi', 'req-1', { engineId: Chat.chatThreadEngineId(agentRoom, { profileEngines }), profileId: 'prof-claude' });
+  assert.deepEqual([request.engineId, request.profileId], ['claude', 'prof-claude'], 'the new room send names the Agent engine');
 
   const view = Chat.chatEngineChipView({ id: 'r', messages: [{ id: 'm' }], effort: 'high' },
     { engines: engineRowsFixture, auth: signedInPro, engineConfiguration: { effectiveModel: 'gpt-5.5' } });
