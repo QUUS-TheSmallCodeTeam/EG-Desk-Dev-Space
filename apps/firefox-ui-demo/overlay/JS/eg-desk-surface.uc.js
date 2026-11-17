@@ -26354,7 +26354,28 @@
     }
   }
 
+  // Firefox's default browser.link.open_newwindow.restriction (2) diverts only
+  // feature-less window.open calls to the browserDOMWindow; calls with
+  // width/height features open a real chrome window and bypass the card route.
+  // 0 sends every content-initiated window.open through browserDOMWindow.
+  function popupRestrictionPlan(prefState) {
+    if (!prefState || prefState.hasUserValue === true) return null;
+    return prefState.defaultValue === 0 ? null : { name: 'browser.link.open_newwindow.restriction', value: 0 };
+  }
+
+  function applyPopupRestrictionPlan() {
+    try {
+      const branch = Services.prefs.getDefaultBranch('');
+      const name = 'browser.link.open_newwindow.restriction';
+      const plan = popupRestrictionPlan({
+        hasUserValue: Services.prefs.prefHasUserValue(name),
+        defaultValue: branch.getIntPref(name, 2) });
+      if (plan) branch.setIntPref(plan.name, plan.value);
+    } catch (e) { console.warn(TAG, 'popup restriction pref not applied', e); }
+  }
+
   function installPopupCapture() {
+    applyPopupRestrictionPlan();
     const BDW = {
       QueryInterface: ChromeUtils.generateQI(['nsIBrowserDOMWindow']),
 
