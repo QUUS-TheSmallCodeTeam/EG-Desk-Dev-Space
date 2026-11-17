@@ -264,6 +264,17 @@ test('CodeMirror takes over the textarea and mirrors user edits into it', async 
   assert.deepEqual(h.events, ['input'])
 })
 
+test('a click on CodeMirror text cannot activate the wrapping label; panel controls still can', () => {
+  const h = adapterFixture({ loadBundle: () => null })
+  const text = h.document.createElement('div'), checkbox = h.document.createElement('input')
+  h.host.append(text, checkbox)
+  const clickOn = target => { let prevented = false; for (const listener of h.host.listeners.get('click')) listener({ target, preventDefault() { prevented = true } }); return prevented }
+  text.closest = () => null
+  checkbox.closest = selector => selector.includes('input') ? checkbox : null
+  assert.equal(clickOn(text), true)
+  assert.equal(clickOn(checkbox), false)
+})
+
 test('opening another file resets the text and undo history without reporting input', async () => {
   const f = fakeBundle()
   const h = adapterFixture({ loadBundle: () => f.bundle })

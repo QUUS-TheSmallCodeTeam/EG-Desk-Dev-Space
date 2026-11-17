@@ -603,7 +603,7 @@ export function createFileCardZone(deps) {
           '.egdesk-file-connect': 'file-connect-root', '.egdesk-file-tree': 'file-tree', '.egdesk-file-search-input': 'file-search',
           '.egdesk-file-project-connect': 'file-project-connect', '.egdesk-file-script-settings-button': 'file-script-settings',
           '.egdesk-file-project-check': 'file-project-check', '.egdesk-file-check-result': 'file-check-result',
-          '.egdesk-file-editor': 'file-editor', '.egdesk-file-review-button': 'file-review',
+          '.egdesk-file-editor': 'file-editor', '.egdesk-file-code-editor': 'file-code-editor', '.egdesk-file-review-button': 'file-review',
           '.egdesk-file-save-button': 'file-save-copy', '.egdesk-file-save-as-button': 'file-save-as', '.egdesk-file-reconnect-button': 'file-reconnect-source',
         })) view.element.querySelector(selector)?.setAttribute('data-testid', testid);
         if (runFile) {

@@ -146,6 +146,12 @@ export function createEGDeskCodeEditor({ textarea, host, label = '텍스트 작�
   let languageSlot = null
   let readOnlySlot = null
   host.hidden = true
+  // The File view wraps the editor in a <label> for the textarea's name. A
+  // click on CodeMirror's text must not run that label's activation (moving
+  // focus to the hidden textarea); panel controls keep their own behavior.
+  host.addEventListener?.('click', event => {
+    if (!event.target?.closest?.('input, button, select, textarea, a, label')) event.preventDefault?.()
+  })
   textarea.addEventListener?.('compositionstart', () => { textareaComposing = true })
   textarea.addEventListener?.('compositionend', () => { textareaComposing = false })
 
