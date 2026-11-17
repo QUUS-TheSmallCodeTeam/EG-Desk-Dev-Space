@@ -12,6 +12,7 @@ Firefox에서는 `chrome://userchrome/content/vendor/…`로 읽힌다(설치 �
 | xterm.js (`@xterm/xterm`) | 5.5.0 | MIT | jsDelivr `/npm/@xterm/xterm@5.5.0/lib/xterm.js`, `/css/xterm.css` (파일 머리말 기준) | `terminal.html` |
 | `@xterm/addon-fit` | 0.10.0 | MIT | jsDelivr `/npm/@xterm/addon-fit@0.10.0/lib/addon-fit.js` | `terminal.html` |
 | `@xterm/addon-web-links` | 0.11.0 | MIT | jsDelivr `/npm/@xterm/addon-web-links@0.11.0/lib/addon-web-links.js` | `terminal.html` |
+| CodeMirror 6 (`codemirror` 묶음) | 6.0.2 (아래 표의 개별 버전) | MIT | npm 배포본 12개를 esbuild로 한 파일로 묶음 | `EGDeskCodeEditor.sys.mjs`(File view 편집기) |
 
 ## jsdiff 9.0.0 (`vendor/jsdiff/`)
 
@@ -116,6 +117,58 @@ LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 ```
+
+## CodeMirror 6 (`vendor/codemirror/`)
+
+D-X5(편집기 기준)는 아직 대표 결정 전이다. 조사 문서(coding-surface-framework-research.md) 권고와 xterm·jsdiff 선례에 따라 **추론으로** CodeMirror 6을 넣었다(2026-11-17).
+
+- 넣은 파일: `codemirror/codemirror.bundle.mjs`(축소 ESM 한 파일, 외부 import 없음), `codemirror/build-entry.mjs`(묶을 때 쓴 입구 파일, Firefox에서는 읽지 않음), `codemirror/LICENSE`(묶음에 든 패키지 26개의 라이선스 전문, 모두 MIT, Copyright (C) Marijn Haverbeke and others).
+- 묶음 파일은 고치지 않는다. 버전을 바꿀 때는 아래 명령으로 다시 묶어 통째로 바꾸고 이 표를 함께 고친다. `scripts/egdesk-code-editor.test.mjs`가 해시를 이 표와 대조한다.
+- Firefox에서는 창 전역으로 읽는다: `ChromeUtils.importESModule('chrome://userchrome/content/vendor/codemirror/codemirror.bundle.mjs', { global: 'current' })`. CodeMirror는 `document`·`window`·`requestAnimationFrame`을 쓰므로 공유 시스템 전역으로 읽으면 안 된다. 읽기에 실패하면 File view는 기존 textarea로 동작한다.
+- esbuild 0.21.5(저장소 루트 `node_modules/.bin/esbuild`), `--target=firefox115 --minify --legal-comments=none`. 크기 605,082바이트.
+
+직접 고정한 패키지(`npm install --save-exact`):
+
+| 패키지 | 버전 | 라이선스 |
+|---|---|---|
+| `codemirror` | 6.0.2 | MIT |
+| `@codemirror/state` | 6.7.6 | MIT |
+| `@codemirror/view` | 6.43.15 | MIT |
+| `@codemirror/commands` | 6.11.1 | MIT |
+| `@codemirror/language` | 6.13.1 | MIT |
+| `@codemirror/search` | 6.7.2 | MIT |
+| `@codemirror/lang-javascript` | 6.2.5 | MIT |
+| `@codemirror/lang-json` | 6.0.2 | MIT |
+| `@codemirror/lang-css` | 6.3.1 | MIT |
+| `@codemirror/lang-html` | 6.4.12 | MIT |
+| `@codemirror/lang-markdown` | 6.5.2 | MIT |
+| `@codemirror/lang-python` | 6.2.1 | MIT |
+
+함께 묶인 하위 패키지(npm이 고른 버전, 모두 MIT): `@codemirror/autocomplete` 6.20.4, `@codemirror/lint` 6.9.8, `@lezer/common` 1.5.5, `@lezer/lr` 1.4.12, `@lezer/highlight` 1.2.5, `@lezer/javascript` 1.5.6, `@lezer/json` 1.0.3, `@lezer/css` 1.3.9, `@lezer/html` 1.3.13, `@lezer/markdown` 1.8.1, `@lezer/python` 1.1.19, `style-mod` 4.1.5, `w3c-keyname` 2.2.8, `crelt` 1.0.7, `@marijn/find-cluster-break` 1.0.4.
+
+| 파일 | sha256 |
+|---|---|
+| `codemirror/codemirror.bundle.mjs` | `f47286d31353f7dd6e6764f249d0ef45e9c278fe5a1f24daad547d6a7fe409c0` |
+| `codemirror/build-entry.mjs` | `4d9aea418ad7bd05030c443f6418fd5766adf24a38d35fee6dc57b8b21f5ff8b` |
+| `codemirror/LICENSE` | `6370c13ed220bd6c0dc3191ab5919e826e39088c5e9a2320ff92964444bd959b` |
+
+다시 묶는 명령(저장소 밖 임시 폴더, 저장소 package.json은 건드리지 않음):
+
+```sh
+mkdir -p /tmp/egdw-codemirror/build && cd /tmp/egdw-codemirror/build
+echo '{"name":"egd-cm-build","private":true,"type":"module"}' > package.json
+npm install --ignore-scripts --no-audit --no-fund --save-exact \
+  codemirror@6.0.2 @codemirror/state@6.7.6 @codemirror/view@6.43.15 @codemirror/commands@6.11.1 \
+  @codemirror/language@6.13.1 @codemirror/search@6.7.2 @codemirror/lang-javascript@6.2.5 \
+  @codemirror/lang-json@6.0.2 @codemirror/lang-css@6.3.1 @codemirror/lang-html@6.4.12 \
+  @codemirror/lang-markdown@6.5.2 @codemirror/lang-python@6.2.1
+cp <repo>/apps/firefox-ui-demo/overlay/resources/vendor/codemirror/build-entry.mjs entry.mjs
+<repo>/node_modules/.bin/esbuild entry.mjs --bundle --format=esm --minify --legal-comments=none \
+  --target=firefox115 --outfile=codemirror.bundle.mjs
+shasum -a 256 codemirror.bundle.mjs
+```
+
+하위 패키지 버전이 위 목록과 다르면 해시가 달라진다. 같은 해시가 필요하면 위 하위 패키지 버전도 `npm install`에 함께 고정한다.
 
 ## 패턴만 따른 것 (코드 복사 없음, 추적용)
 
