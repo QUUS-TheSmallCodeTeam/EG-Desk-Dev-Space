@@ -24,6 +24,22 @@ export function createFileCardZone(deps) {
   // Only cards created by this zone can receive a watcher event. Weak keys
   // avoid retaining a closed File or its prior root binding.
   const fileWatchHandlers = new WeakMap();
+  // CODE-02: cards bound to a Board's project folder follow that Board when
+  // its folder changes. Same weak, zone-owned registry as the watcher.
+  const boardProjectHandlers = new WeakMap();
+
+  // The host says only "this Board's folder may have changed". Each bound
+  // card re-reads the Board through the helper itself; the caller passes no
+  // project, root or path, so nothing here can be steered to another folder.
+  async function onBoardProjectChanged(boardId) {
+    if (typeof boardId !== 'string' || !boardId) return [];
+    const pending = [];
+    for (const card of document.querySelectorAll('.egd-file-card')) {
+      const handler = boardProjectHandlers.get(card);
+      if (handler) pending.push(Promise.resolve().then(() => handler(boardId)).catch(() => 'failed'));
+    }
+    return (await Promise.all(pending)).filter(result => result !== 'skip');
+  }
 
   async function onWorkflowEvent(frame, streamCurrent) {
     if (frame?.type !== 'workflow.event' || frame.v !== 1 || frame.event?.topic !== 'file.changed' ||
@@ -349,7 +365,14 @@ export function createFileCardZone(deps) {
     let projectConnection = null;
     let projectReference = FileCardState.fileCardRecord(null, {}, options.record?.project).project || null;
     let ownedRunner = null;
+    let followBoardProject = null, boardFollow = Promise.resolve();
     card._fileRecord = cloneJson(options.record || FileCardState.fileCardRecord(null));
+    boardProjectHandlers.set(card, boardId => {
+      // One follow at a time per card; a later change waits for the earlier one.
+      const next = boardFollow.then(() => followBoardProject ? followBoardProject(boardId) : 'skip', () => followBoardProject ? followBoardProject(boardId) : 'skip');
+      boardFollow = next.catch(() => {});
+      return next;
+    });
     fileWatchHandlers.set(card, async (change, streamCurrent) => {
       const binding = rootHandle, boundProject = projectConnection, boundTarget = projectTarget,
         boundReference = projectReference, boundView = view, service = fileService, boundRun = watcherRunBinding;
@@ -462,6 +485,64 @@ export function createFileCardZone(deps) {
           }
           rememberProject(project, bound);
           return project;
+        };
+        // CODE-02 (D-X3): the Board's folder changed (picked again, replaced or
+        // detached). A card opened on that Board's project follows it: clean
+        // cards open the new folder; a card with unsaved work keeps its folder
+        // and offers a separate card (never overwrite another project's draft,
+        // same rule as chooseProject). Detach leaves the files shown but stops
+        // treating them as the Board's project until a folder is picked again.
+        const followNotice = (text, action = null) => {
+          notice.replaceChildren(el('p', {}, text), ...(action ? [action] : []));
+          notice.hidden = false;
+        };
+        followBoardProject = async boardId => {
+          const boundTarget = projectTarget, boundProject = projectConnection, boundView = view;
+          if (!boundTarget || boundTarget.boardId !== boardId || watcherRunBinding || restoring || !boundView
+              || !card.isConnected || card.dataset.closeState) return 'skip';
+          const unchanged = () => card.isConnected && !card.dataset.closeState && view === boundView
+            && projectTarget === boundTarget && projectConnection === boundProject;
+          let latest;
+          try { latest = await service.openProject({ boardId }); } catch { return unchanged() ? 'unavailable' : 'stale'; }
+          if (!unchanged()) return 'stale';
+          const next = latest?.source === 'board' ? latest.project : null;
+          const validNext = next?.status === 'connected' && ['projectId', 'rootId', 'directoryId'].every(key => typeof next[key] === 'string' && next[key]);
+          if (validNext && boundProject && next.projectId === boundProject.projectId && next.rootId === boundProject.rootId) {
+            if (next.displayPath !== boundProject.displayPath || rootNeedsReconnect) { rememberProject(next, boundTarget); publish(boundView.snapshot()); }
+            return 'same';
+          }
+          const label = boundTarget.title ? `Board ‘${boundTarget.title}’` : 'Board';
+          if (!validNext) {
+            if (!boundProject) return 'same';
+            // Keep the Board link so a folder picked later is followed again.
+            projectConnection = null; projectReference = null; rootNeedsReconnect = true;
+            followNotice(next?.status === 'reconnect-required'
+              ? `${label}의 프로젝트 폴더를 다시 선택해야 합니다. 이 카드는 이전 폴더 내용을 보여 주지만 Board 프로젝트로 쓰지 않습니다.`
+              : `${label}의 프로젝트 폴더 연결이 해제되었습니다. 이 카드는 이전 폴더 내용을 보여 주지만 Board 프로젝트로 쓰지 않습니다.`);
+            publish(boundView.snapshot());
+            return 'detached';
+          }
+          const current = boundView.snapshot();
+          if (current.dirty || current.originalDirty) {
+            const name = next.title || next.name || '새 폴더';
+            const open = el('button', { type: 'button', class: 'egd-file-card-follow-open', data: { testid: 'file-card-follow-open' }, onclick: async event => {
+              event.stopPropagation();
+              const verified = (await service.openProject({ boardId }).catch(() => null))?.project;
+              if (verified?.status !== 'connected' || verified.projectId !== next.projectId || verified.rootId !== next.rootId) {
+                followNotice(`${label}의 프로젝트 폴더가 다시 바뀌었습니다. Board 메뉴에서 확인하세요.`); return;
+              }
+              const other = spawnFileCard({ openMode: 'new', project: verified, projectTarget: boundTarget });
+              if (await other._fileReady) notice.hidden = true;
+            } }, '새 File 카드에서 열기');
+            followNotice(`${label}의 프로젝트 폴더가 ‘${name}’(으)로 바뀌었습니다. 저장하지 않은 작업사본이 있어 이 카드는 이전 폴더를 유지합니다.`, open);
+            return 'kept-dirty';
+          }
+          rememberProject(next, boundTarget);
+          const opened = await boundView.openProject(next);
+          if (!card.isConnected || view !== boundView) return 'stale';
+          if (opened) followNotice(`${label}의 프로젝트 폴더가 바뀌어 ‘${next.title || next.name || '프로젝트'}’을(를) 열었습니다.`);
+          publish(boundView.snapshot());
+          return opened ? 'followed' : 'unavailable';
         };
         const terminalApiFor = async terminalCard => {
           const started = Date.now();
@@ -656,5 +737,5 @@ export function createFileCardZone(deps) {
     }
   }
 
-  return { spawnFileCard, openVerifiedRunFile, openVerifiedRunReview, openBoardProjectFile, openBoardProjectFileAt, onWorkflowEvent };
+  return { spawnFileCard, openVerifiedRunFile, openVerifiedRunReview, openBoardProjectFile, openBoardProjectFileAt, onWorkflowEvent, onBoardProjectChanged };
 }

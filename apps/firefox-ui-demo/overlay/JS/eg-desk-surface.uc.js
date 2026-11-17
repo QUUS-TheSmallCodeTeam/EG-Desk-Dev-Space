@@ -2105,7 +2105,11 @@
       const projections = boardProjectionsFor(boardId);
       const saved = projections.find(item => item.project)?.project || null;
       const presentation = Object.freeze({ ...boardProjectPresentation(saved, failed ? null : live), at: Date.now(), failed });
+      const previous = boardProjectPresentations.get(boardId);
       boardProjectPresentations.set(boardId, presentation);
+      // CODE-02: open File cards on this Board re-read and follow its folder.
+      const folderKey = value => JSON.stringify([value?.status, value?.projectId ?? null, value?.displayPath ?? null]);
+      if (previous && !failed && folderKey(previous) !== folderKey(presentation)) void followBoardProjectInFileCards(boardId);
       for (const projection of projections) {
         adoptBoardProjectReference(projection, presentation);
         const region = document.getElementById(projection.id);
@@ -18613,6 +18617,7 @@
   const openBoardProjectFileAt = surfaceForward('fileCard', 'openBoardProjectFileAt');
   const openVerifiedRunFile = surfaceForward('fileCard', 'openVerifiedRunFile');
   const openVerifiedRunReview = surfaceForward('fileCard', 'openVerifiedRunReview');
+  const followBoardProjectInFileCards = surfaceForward('fileCard', 'onBoardProjectChanged');
 
   function getProjectTarget() {
     // Resolve only on an explicit File Board connection or IDE entry.
