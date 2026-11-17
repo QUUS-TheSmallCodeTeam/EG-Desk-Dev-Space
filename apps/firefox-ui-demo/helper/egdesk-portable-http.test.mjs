@@ -109,7 +109,7 @@ test('a Desk exports without chats, inspects, imports on another machine under t
   assert.equal(out.status, 201)
   assert.match(out.data.fileName, /^EG-Desk-Desk-20261024-153012\.egdesk$/)
   assert.equal(out.data.encrypted, false)
-  assert.deepEqual(out.data.contents, { scope: 'desk', exportedAt: T0, title: null, desk: true, boards: 2, cards: 5, deskCards: 2, chats: 0, profiles: 0, chatsOmitted: 0 })
+  assert.deepEqual(out.data.contents, { scope: 'desk', exportedAt: T0, title: null, desk: true, boards: 2, cards: 5, deskCards: 2, chats: 0, profiles: 0, attachments: 0, fileDrafts: 0, omitted: { attachments: 0, fileDrafts: 0 }, chatsOmitted: 0 })
   assert.deepEqual([out.data.folder, out.data.displayPath, out.data.fileRef], ['custom', `~/exports/${out.data.fileName}`, { exportFile: out.data.fileName }])
   assert.deepEqual(readdirSync(a.exportDir), [out.data.fileName], 'no temp file is left beside the export')
   const file = path.join(a.exportDir, out.data.fileName)
@@ -122,7 +122,7 @@ test('a Desk exports without chats, inspects, imports on another machine under t
 
   const inspected = await a.api('POST', '/v1/portable/inspect', { fileRef: out.data.fileRef })
   assert.equal(inspected.status, 200)
-  assert.deepEqual(inspected.data, { encrypted: false, locked: false, bytes: out.data.bytes, formatVersion: '1.0', scope: 'desk', exportedAt: T0, title: null, desk: true, boards: 2, cards: 5, deskCards: 2, chats: 0, profiles: 0 })
+  assert.deepEqual(inspected.data, { encrypted: false, locked: false, bytes: out.data.bytes, formatVersion: '1.0', scope: 'desk', exportedAt: T0, title: null, desk: true, boards: 2, cards: 5, deskCards: 2, chats: 0, profiles: 0, attachments: 0, fileDrafts: 0, omitted: { attachments: 0, fileDrafts: 0 } })
 
   // Another machine: nothing collides, so the Board IDs stay and the Desk becomes generation 1.
   const b = device(t, 'desk-b')
@@ -161,7 +161,7 @@ test('a Board exports with its chat and profiles; import adds a new conversation
   const out = await a.api('POST', '/v1/portable/export', { scope: 'board', boardId: 'agenda-alpha-001', include: { chats: true, profiles: true } })
   assert.equal(out.status, 201)
   assert.match(out.data.fileName, /^EG-Desk-Board-Alpha-계획-20261024-153012\.egdesk$/)
-  assert.deepEqual(out.data.contents, { scope: 'board', exportedAt: T0, title: 'Alpha 계획', desk: false, boards: 1, cards: 2, deskCards: 0, chats: 1, profiles: 1, chatsOmitted: 0 })
+  assert.deepEqual(out.data.contents, { scope: 'board', exportedAt: T0, title: 'Alpha 계획', desk: false, boards: 1, cards: 2, deskCards: 0, chats: 1, profiles: 1, attachments: 0, fileDrafts: 0, omitted: { attachments: 0, fileDrafts: 0 }, chatsOmitted: 0 })
   const bytes = readFileSync(path.join(a.exportDir, out.data.fileName))
   assert.ok(has(bytes, 'Summarize the plan') && has(bytes, 'Reviewer Kim'))
   for (const secret of ['hunter2', 'owner-hash-SECRET', 'native-thread-1', 'native-run-1', '/Users/someone/project', 'codex-default']) assert.equal(has(bytes, secret), false, secret)
@@ -410,7 +410,7 @@ test('HTTP contract: loopback guard, routes, methods, fields, unavailable stores
   assert.deepEqual([hostile.status, hostile.data.code], [403, 'PORTABLE_LOOPBACK_REQUIRED'])
   assert.deepEqual((await api('GET', '/v1/portable/nope')).status, 404)
   assert.deepEqual([(await api('GET', '/v1/portable/export')).status, (await api('POST', '/v1/portable/exports', {})).status], [405, 405])
-  for (const body of [{ scope: 'board' }, { scope: 'desk', boardId: 'agenda-x' }, { scope: 'desk', extra: 1 }, { scope: 'everything' }, { scope: 'desk', include: { chats: 'yes' } }, { scope: 'desk', include: { files: true } }, { scope: 'desk', passphrase: 12345678 }]) {
+  for (const body of [{ scope: 'board' }, { scope: 'desk', boardId: 'agenda-x' }, { scope: 'desk', extra: 1 }, { scope: 'everything' }, { scope: 'desk', include: { chats: 'yes' } }, { scope: 'desk', include: { files: true } }, { scope: 'desk', include: { attachments: 'yes' } }, { scope: 'desk', include: { fileDrafts: 1 } }, { scope: 'desk', passphrase: 12345678 }]) {
     const answer = await api('POST', '/v1/portable/export', body)
     assert.deepEqual([answer.status, answer.data.code], [400, 'PORTABLE_HTTP_INPUT'], JSON.stringify(body))
   }
