@@ -4,6 +4,7 @@ import { spawn } from 'node:child_process';
 import { readFileSync } from 'node:fs';
 import { createServer } from 'node:http';
 import { fileURLToPath, pathToFileURL } from 'node:url';
+import { boundedFieldValue } from '../helper/egdesk-browser-tool-runtime.mjs';
 
 const MCP_PACKAGE = process.env.EGDESK_FIREFOX_MCP_PACKAGE || '@mozilla/firefox-devtools-mcp-moz@latest';
 const MARIONETTE_PORT = process.env.EGDESK_MARIONETTE_PORT || '2828';
@@ -14,7 +15,17 @@ const cssSourcePath = fileURLToPath(new URL('../overlay/CSS/eg-desk-surface.uc.c
 const jsSourceUrl = pathToFileURL(jsSourcePath).href;
 const cssText = readFileSync(cssSourcePath, 'utf8');
 
-const pageHtml = `<!doctype html>
+// BRW-08 headless fixture cases (2026-11-17): a same-origin iframe, an open
+// shadow root, a contenteditable editor and a field holding a long value sit
+// beside the original reveal/fill page. The page is exported (with the checks
+// below) so a node test can pin it without Firefox; main() runs only when
+// this file is executed, never on import.
+export const LONG_NOTE_VALUE = `${'Long note line. '.repeat(24)}end`;
+export const frameHtml = `<!doctype html>
+<html><head><meta charset="utf-8"><title>Embedded compose</title></head>
+<body><button id="frame-send" type="button">Frame send</button>
+<input id="frame-note" aria-label="Frame note"></body></html>`;
+export const pageHtml = `<!doctype html>
 <html>
   <head>
     <meta charset="utf-8">
@@ -32,8 +43,21 @@ const pageHtml = `<!doctype html>
       <input id="query" name="query" placeholder="Search note">
       <button id="reveal" type="button">Reveal details</button>
       <section id="details" aria-live="polite"></section>
+      <section id="brw08">
+        <iframe id="compose-frame" title="Compose" src="/agent-observation/frame" width="320" height="120"></iframe>
+        <x-widget id="widget"></x-widget>
+        <div id="editor" contenteditable="true" aria-label="Message body">Draft body</div>
+        <label for="long-note">Long note</label>
+        <textarea id="long-note" name="long-note" aria-label="Long note">${LONG_NOTE_VALUE}</textarea>
+      </section>
     </main>
     <script>
+      customElements.define('x-widget', class extends HTMLElement {
+        connectedCallback() {
+          if (this.shadowRoot) return;
+          this.attachShadow({ mode: 'open' }).innerHTML = '<button type="button">Shadow save</button>';
+        }
+      });
       document.getElementById('reveal').addEventListener('click', () => {
         document.title = 'Agent Observation Updated';
         document.getElementById('details').innerHTML = '<p>Details ready for the agent</p><button id="continue" type="button">Continue</button>';
@@ -48,6 +72,11 @@ let pageUrl = '';
 function startFixtureServer() {
   return new Promise((resolve, reject) => {
     const server = createServer((request, response) => {
+      if (request.url === '/agent-observation/frame') {
+        response.writeHead(200, { 'cache-control': 'no-store', 'content-type': 'text/html; charset=utf-8' });
+        response.end(frameHtml);
+        return;
+      }
       if (request.url !== '/' && request.url !== '/agent-observation') {
         response.writeHead(404, { 'content-type': 'text/plain; charset=utf-8' });
         response.end('Not found');
@@ -68,7 +97,14 @@ function startFixtureServer() {
   });
 }
 
-const proc = spawn('npx', [
+let proc = null;
+let nextId = 1;
+let stdoutBuffer = '';
+let stderrBuffer = '';
+const pending = new Map();
+
+function startMcp() {
+proc = spawn('npx', [
   '-y',
   MCP_PACKAGE,
   '--connectExisting',
@@ -77,11 +113,6 @@ const proc = spawn('npx', [
   '--enablePrivilegedContext',
   '--enableScript',
 ], { stdio: ['pipe', 'pipe', 'pipe'] });
-
-let nextId = 1;
-let stdoutBuffer = '';
-let stderrBuffer = '';
-const pending = new Map();
 
 proc.stdout.on('data', (chunk) => {
   stdoutBuffer += chunk.toString();
@@ -111,6 +142,7 @@ proc.on('exit', (code, signal) => {
   }
   pending.clear();
 });
+}
 
 function request(method, params = {}, timeoutMs = 45000) {
   const id = nextId++;
@@ -209,7 +241,29 @@ function remountExpression(styleId) {
   })()`;
 }
 
+/**
+ * BRW-08 checks over the first observation of the fixture page: what the
+ * privileged script reports as check.brw08. Returns the failed case names.
+ */
+export function brw08Failures(brw08) {
+  const failures = [];
+  const frame = brw08?.frameButton;
+  if (!frame || !/^f\d+\/el_\d+$/.test(String(frame.ref || ''))) failures.push('iframe element ref with frame path');
+  if (!brw08?.frameInput || !/^f\d+\//.test(String(brw08.frameInput.ref || ''))) failures.push('iframe field ref');
+  if (!brw08?.shadowButton?.ref) failures.push('open shadow root element');
+  const editor = brw08?.editor;
+  if (!editor?.ref || !/^\[editor text hidden: \d+ chars, #[0-9a-f]{14}\]$/.test(String(editor.value || ''))) failures.push('contenteditable editor value hidden by length and fingerprint');
+  const long = brw08?.longNote;
+  if (!long?.ref || long.value !== boundedFieldValue(LONG_NOTE_VALUE)) failures.push('long value as prefix, length and fingerprint');
+  if (String(long?.value || '').includes(LONG_NOTE_VALUE)) failures.push('long value never shown whole');
+  if (brw08?.fillLongNoteOk !== true || brw08?.longNoteAfterLength !== 8000) failures.push('long fill up to 8000 characters');
+  if (brw08?.editorFillOk !== true) failures.push('editor fill');
+  if (brw08?.shadowClickOk !== true || brw08?.frameClickOk !== true) failures.push('frame and shadow click');
+  return failures;
+}
+
 async function main() {
+  startMcp();
   pageUrl = await startFixtureServer();
 
   await request('initialize', {
@@ -272,6 +326,22 @@ async function main() {
 
         const reveal = before.interactiveElements.find((item) => item.label === 'Reveal details');
         const input = before.interactiveElements.find((item) => item.label === 'Search note' || item.label === 'query');
+        // BRW-08: frame, shadow, editor and long value, from the same first observation.
+        const byLabel = (label) => before.interactiveElements.find((item) => item.label === label) || null;
+        const pick = (item) => item ? { ref: item.ref, role: item.role, tag: item.tag, value: item.value } : null;
+        const brw08 = { frameButton: pick(byLabel('Frame send')), frameInput: pick(byLabel('Frame note')),
+          shadowButton: pick(byLabel('Shadow save')), editor: pick(byLabel('Message body')), longNote: pick(byLabel('Long note')) };
+        const actOk = async (action) => { try { return (await api.browserAgent.act(card.id, action, { settleMs: 50 })).ok === true; } catch { return false; } };
+        brw08.frameClickOk = brw08.frameButton ? await actOk({ type: 'click', ref: brw08.frameButton.ref }) : false;
+        brw08.shadowClickOk = brw08.shadowButton ? await actOk({ type: 'click', ref: brw08.shadowButton.ref }) : false;
+        brw08.editorFillOk = brw08.editor ? await actOk({ type: 'fill', ref: brw08.editor.ref, value: 'Edited body' }) : false;
+        brw08.fillLongNoteOk = brw08.longNote ? await actOk({ type: 'fill', ref: brw08.longNote.ref, value: 'x'.repeat(8000) }) : false;
+        const longAfter = (await api.browserAgent.snapshot(card.id)).interactiveElements.find((item) => item.label === 'Long note');
+        brw08.longNoteAfterLength = Number(String(longAfter?.value || '').match(/\[(\d+) chars/)?.[1] || 0);
+        // The original history/notification checks below count from here.
+        api.browserAgent.clearHistory(card.id);
+        actionEvents.length = 0;
+
         const clickResult = await api.browserAgent.act(card.id, { type: 'click', ref: reveal.ref }, { settleMs: 250 });
         const afterClick = clickResult.after;
         const continueButton = afterClick.interactiveElements.find((item) => item.label === 'Continue');
@@ -343,6 +413,7 @@ async function main() {
           clearResult,
           historyAfterClearLength: historyAfterClear.length,
           eventSummary,
+          brw08,
           cleanupCardCount: document.querySelectorAll('.egd-canvas-card').length,
         };
       });
@@ -380,6 +451,7 @@ async function main() {
   if (!check.eventSummary?.[1]?.notificationSummary?.includes('한글 입력')) failures.push('event notification summary');
   if (check.clearResult?.removed !== 2 || check.historyAfterClearLength !== 0) failures.push('clear history');
   if (check.cleanupCardCount !== 0) failures.push('cleanup');
+  failures.push(...brw08Failures(check.brw08).map((name) => `BRW-08 ${name}`));
   if (failures.length) {
     throw new Error(`Browser agent observation verification failed (${failures.join(', ')}): ${JSON.stringify(check, null, 2)}`);
   }
@@ -396,7 +468,8 @@ async function main() {
   }, null, 2));
 }
 
-main().catch((error) => {
+const isMain = process.argv[1] && pathToFileURL(process.argv[1]).href === import.meta.url;
+if (isMain) main().catch((error) => {
   console.error(error.stack || error.message || String(error));
   if (stderrBuffer.trim()) {
     console.error('\n[MCP stderr]');
@@ -405,6 +478,6 @@ main().catch((error) => {
   process.exitCode = 1;
 }).finally(() => {
   fixtureServer?.close();
-  proc.stdin.end();
-  setTimeout(() => proc.kill('SIGTERM'), 500);
+  proc?.stdin.end();
+  setTimeout(() => proc?.kill('SIGTERM'), 500);
 });
