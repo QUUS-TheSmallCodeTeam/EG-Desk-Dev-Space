@@ -817,7 +817,21 @@ export class CodexChatRuntime {
       this.engines.resolve({ requested, bound })
       if (verifyAccount) this.assertNativeAccount(thread.clientThreadId, boundCid, bound, binding)
     }
-    return this.engines.resolve({ requested, bound })
+    // AGENT-08 (D-S1·D-A4): a new room with no engine named runs on the
+    // engine its Agent saved. A room that already has a conversation or an
+    // engine keeps it; the registry still refuses an engine that is offline.
+    const agentEngine = requested == null && !boundCid && !bound ? this.agentEngine(body) : null
+    return this.engines.resolve({ requested: requested ?? agentEngine, bound })
+  }
+
+  // The engine the selected Agent's active (or named) revision saved, or null.
+  // A missing or unreadable profile names nothing here; send refuses it with
+  // its own code when it resolves the profile.
+  agentEngine(body = {}) {
+    if (body.profileId === undefined || body.profileId === null || body.profileEnabled === false || !this.profiles) return null
+    let engine
+    try { engine = this.profiles.runProfile(body.profileId, body.profileRevision ?? undefined)?.model?.engine } catch { return null }
+    return typeof engine === 'string' && engine ? engine : null
   }
 
   // Server-only Context authority. Routing hints are not identity: never copy
@@ -1677,7 +1691,7 @@ export class CodexChatRuntime {
     try { this.store[write]({ clientThreadId, profileId, revision, ts: this.now() }) } catch {}
   }
 
-  // AGENT-08 (D-A4 recommendation, confirmation pending): which model and
+  // AGENT-08 (D-A4, decided 2026-10-24): which model and
   // effort a send runs with. A model or effort named in the send — the screen
   // sends the room's pick — wins; otherwise the Agent's saved model when it is
   // for this engine; otherwise nothing, so Codex keeps its own default. Model
