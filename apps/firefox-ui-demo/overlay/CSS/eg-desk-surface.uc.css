@@ -10922,8 +10922,8 @@ button.egd-memo-ask-cancel:hover { text-decoration: underline; }
   inset: 0;
   display: grid;
   place-items: center;
-  font: 700 9px/10px var(--egd-font);
-  color: rgba(0, 0, 0, 0.62);
+  font: 700 var(--egd-text-2xs)/10px var(--egd-font);
+  color: color-mix(in srgb, var(--egd-on-surface) 72%, transparent);
   opacity: 0;
 }
 .egd-card-dot-close::after { content: '×'; }
