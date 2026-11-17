@@ -323,3 +323,84 @@ test('panel: scope chips, the widen button and the request row are real buttons 
   }
   assert.match(surfaceSource, /placeholder: '검색 또는 AI에게 요청\.\.\.'/, 'the promise on the field stays, now kept');
 });
+
+// ------------------------------------------- UX-04 remainder (2026-11-17)
+
+test('paging: 6 rows first with the request row last, [더 보기] adds 6, and a short list has no button', () => {
+  const ask = row('ask', 't-codex');
+  const found = Array.from({ length: 13 }, (_, index) => row('history', `h${index}`));
+  const first = RailSearchView.pageResults([...found, ask]);
+  assert.equal(RailSearchView.RAIL_SEARCH_PAGE_ROWS, 6);
+  assert.deepEqual(first.rows.map(item => item.key), ['history:h0', 'history:h1', 'history:h2', 'history:h3', 'history:h4', 'ask:t-codex']);
+  assert.deepEqual([first.hidden, first.moreLabel], [8, '더 보기 (8개)']);
+  const second = RailSearchView.pageResults([...found, ask], RailSearchView.nextVisibleLimit(6));
+  assert.deepEqual([second.rows.length, second.rows.at(-1).type, second.hidden], [12, 'ask', 2]);
+  const third = RailSearchView.pageResults([...found, ask], RailSearchView.nextVisibleLimit(12));
+  assert.deepEqual([third.rows.length, third.hidden, third.moreLabel], [14, 0, null]);
+  assert.deepEqual(RailSearchView.pageResults(found.slice(0, 6)).hidden, 0, 'without a request row all 6 places are found rows');
+  assert.deepEqual(RailSearchView.pageResults([ask]).rows, [ask]);
+  for (const bad of [undefined, 0, 3, 7.5, 'x']) assert.equal(RailSearchView.pageResults(found, bad).rows.length, 6);
+  assert.equal(RailSearchView.nextVisibleLimit(undefined), 12);
+});
+
+test('IME: a composing key or the Enter that commits it never runs a row; a later Enter does', () => {
+  const hold = RailSearchView.imeHoldsKey;
+  assert.equal(hold({ key: 'Enter', isComposing: true }), true);
+  assert.equal(hold({ key: 'Enter', keyCode: 229 }), true);
+  assert.equal(hold({ key: 'Enter', composing: true }), true);
+  assert.equal(hold({ key: 'Enter', endedAt: 1000, now: 1030 }), true, 'compositionend arrived just before its Enter');
+  assert.equal(hold({ key: 'Enter', endedAt: 1000, now: 1000 + RailSearchView.RAIL_SEARCH_IME_COMMIT_GUARD_MS }), false);
+  assert.equal(hold({ key: 'ArrowDown', endedAt: 1000, now: 1010 }), false, 'only Enter is held after the composition');
+  assert.equal(hold({ key: 'Enter' }), false);
+
+  const ask = row('ask', 't-codex');
+  const kb = keyboard({ results: [ask] });
+  assert.equal(kb.press('Enter', { isComposing: true }).prevented, false);
+  assert.equal(kb.press('Enter', { keyCode: 229 }).prevented, false);
+  assert.equal(kb.press('Enter', { ctrlKey: true, isComposing: true }).prevented, false, 'the request shortcut waits too');
+  assert.equal(kb.press('ArrowDown', { isComposing: true }).prevented, false);
+  assert.deepEqual(kb.calls, [], 'nothing ran while composing');
+  assert.equal(kb.press('Enter').prevented, true);
+  assert.deepEqual(kb.calls, [['execute', 'ask:t-codex']]);
+  const source = declaration('handleRailSearchKeydown');
+  assert.ok(source.indexOf('RailSearchView.imeHoldsKey') < source.indexOf("ev.key === 'Escape'"), 'the IME check comes before every key');
+  assert.match(surfaceSource, /oncompositionstart: \(\) => \{ searchInput\._egdImeComposing = true; \}/);
+  assert.match(surfaceSource, /oncompositionend: \(\) => \{ searchInput\._egdImeComposing = false; searchInput\._egdImeEndedAt = Date\.now\(\); \}/);
+});
+
+test('panel: [더 보기] is a button under the rows that shows 6 more and keeps the request row last', () => {
+  const ask = { ...RailSearchView.askRow('정리', RailSearchView.askRecipient({ threads: [codex] })), execute: () => true };
+  const found = Array.from({ length: 9 }, (_, index) => row('history', `h${index}`));
+  const state = { railSearch: { query: '정리', scope: 'all', activeIndex: 0, visibleLimit: 6, moreCount: 0 } };
+  const panel = { nodes: [], contains: () => false, replaceChildren(...nodes) { this.nodes = nodes; }, querySelectorAll: () => [] };
+  const { renderRailSearchPanel } = compile(['renderRailSearchPanel'], {
+    state, RailSearchView, el: fakeEl,
+    document: { activeElement: null, getElementById: () => panel },
+    SurfaceState: { railSearchSectionLabel: type => type },
+    buildRailSearchResults: () => {
+      const page = RailSearchView.pageResults([...found, ask], state.railSearch.visibleLimit);
+      state.railSearch.moreCount = page.hidden;
+      return page.rows;
+    },
+    setRailSearchScope: () => {}, updateRailSearchActiveRow: () => {}, updateRailSearchPanelPlacement: () => {}, executeRailSearchResult: () => {},
+  });
+  renderRailSearchPanel(panel);
+  const rows = () => collect(panel.nodes, 'egd-rail-search-result');
+  const more = () => collect(panel.nodes, 'egd-rail-search-more');
+  assert.deepEqual([rows().length, rows().at(-1).dataset.type], [6, 'ask']);
+  assert.deepEqual(more().map(node => [textOf(node), node.props.type]), [['더 보기 (4개)', 'button']]);
+  click(more()[0]);
+  assert.equal(state.railSearch.visibleLimit, 12);
+  assert.deepEqual([rows().length, rows().at(-1).dataset.type], [10, 'ask']);
+  assert.deepEqual(more(), [], 'everything is shown, so the button is gone');
+});
+
+test('wiring: [지우기] clears the words only and keeps the scope; paging resets on a new query or scope', () => {
+  assert.match(surfaceSource, /class: 'egd-rail-search-clear',[\s\S]{0,400}setRailSearchQuery\(''\)[\s\S]{0,120}\}, '지우기'\)/);
+  const clear = surfaceSource.slice(surfaceSource.indexOf("class: 'egd-rail-search-clear'"), surfaceSource.indexOf("}, '지우기')"));
+  assert.doesNotMatch(clear, /scope/i, 'the scope is not touched');
+  assert.match(surfaceCss, /\.egd-rail-search-input:placeholder-shown ~ \.egd-rail-search-clear \{ display: none; \}/);
+  assert.match(declaration('setRailSearchQuery'), /!== state\.railSearch\.query\) state\.railSearch\.visibleLimit = RailSearchView\.RAIL_SEARCH_PAGE_ROWS/);
+  assert.match(declaration('setRailSearchScope'), /state\.railSearch\.visibleLimit = RailSearchView\.RAIL_SEARCH_PAGE_ROWS/);
+  assert.match(declaration('buildRailSearchResults'), /RailSearchView\.pageResults\(all, state\.railSearch\.visibleLimit\)/);
+});

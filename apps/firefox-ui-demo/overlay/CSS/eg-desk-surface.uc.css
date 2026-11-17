@@ -3234,6 +3234,24 @@ button.egd-rail-focus-view {
   color: var(--egd-on-surface);
 }
 .egd-rail-search-input::placeholder { color: var(--egd-on-surface-variant); }
+/* UX-04 [지우기]: shown only while the field has words. */
+.egd-rail-search-clear {
+  flex: none;
+  padding: 2px 6px;
+  border: none;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--egd-on-surface-variant);
+  font: inherit;
+  font-size: 11px;
+  cursor: pointer;
+}
+.egd-rail-search-input:placeholder-shown ~ .egd-rail-search-clear { display: none; }
+.egd-rail-search-clear:hover { background: var(--egd-outline-variant); color: var(--egd-on-surface); }
+.egd-rail-search-clear:focus-visible {
+  outline: var(--egd-focus-outline);
+  outline-offset: var(--egd-focus-outline-offset);
+}
 .egd-rail-kbd {
   padding: 2px 6px;
   font-size: 11px;
@@ -3329,7 +3347,8 @@ button.egd-rail-focus-view {
 }
 
 #egd-rail-search-results .egd-rail-search-scope:focus-visible,
-#egd-rail-search-results .egd-rail-search-empty-action:focus-visible {
+#egd-rail-search-results .egd-rail-search-empty-action:focus-visible,
+#egd-rail-search-results .egd-rail-search-more:focus-visible {
   outline: var(--egd-focus-outline);
   outline-offset: var(--egd-focus-outline-offset);
 }
@@ -3523,6 +3542,23 @@ button.egd-rail-focus-view {
 }
 
 #egd-rail-search-results .egd-rail-search-empty-action:hover {
+  background: color-mix(in srgb, var(--egd-primary) 8%, transparent);
+}
+
+/* UX-04 [더 보기]: under the rows, adds 6 more found rows. */
+#egd-rail-search-results .egd-rail-search-more {
+  display: block;
+  width: calc(100% - 16px);
+  min-height: 28px;
+  margin: 4px 8px 6px;
+  border: 1px solid var(--egd-outline);
+  border-radius: 8px;
+  background: transparent;
+  color: var(--egd-primary);
+  font-size: 12px;
+  font-weight: 600;
+}
+#egd-rail-search-results .egd-rail-search-more:hover {
   background: color-mix(in srgb, var(--egd-primary) 8%, transparent);
 }
 

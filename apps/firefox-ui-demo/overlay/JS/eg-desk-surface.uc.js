@@ -577,6 +577,8 @@
       scope: 'all',
       open: false,
       activeIndex: 0,
+      visibleLimit: 6,   // UX-04: 6 rows, [더 보기] adds 6
+      moreCount: 0,
       fileQuery: '',
       fileResults: [],
       fileLoading: false,
@@ -7960,7 +7962,7 @@
 
   function buildRailSearchResults(query = state.railSearch.query) {
     const q = railSearchQuery(query);
-    return RailSearchView.composeResults({
+    const all = RailSearchView.composeResults({
       scope: state.railSearch.scope,
       local: [
         ...buildRailSearchAgendaResults(q),
@@ -7974,6 +7976,10 @@
       navigation: railSearchLooksLikeNavigation(q),
       limit: 14,
     });
+    // UX-04: 6 rows first, the request row keeps the last place; [더 보기] adds 6.
+    const page = RailSearchView.pageResults(all, state.railSearch.visibleLimit);
+    state.railSearch.moreCount = page.hidden;
+    return page.rows;
   }
 
   function updateRailSearchActiveRow(panel = document.getElementById('egd-rail-search-results')) {
@@ -8026,6 +8032,7 @@
     if (next === RailSearchView.normalizeScope(state.railSearch.scope)) return;
     state.railSearch.scope = next;
     state.railSearch.activeIndex = 0;
+    state.railSearch.visibleLimit = RailSearchView.RAIL_SEARCH_PAGE_ROWS;
     renderRailSearchPanel();
   }
 
@@ -8106,7 +8113,21 @@
           : result.hint ? el('span', { class: 'egd-rail-search-hint' }, result.hint) : null,
       ));
     });
-    panel.replaceChildren(scopes, el('div', { class: 'egd-rail-search-list' }, ...children));
+    const moreLabel = state.railSearch.moreCount > 0 ? `더 보기 (${state.railSearch.moreCount}개)` : null;
+    const more = moreLabel ? el('button', {
+      type: 'button',
+      class: 'egd-rail-search-more',
+      title: `찾은 결과 ${RailSearchView.RAIL_SEARCH_PAGE_ROWS}개 더 보기`,
+      onmousedown: keepPointerFocus,
+      onclick: (ev) => {
+        ev.preventDefault();
+        ev.stopPropagation();
+        state.railSearch.visibleLimit = RailSearchView.nextVisibleLimit(state.railSearch.visibleLimit);
+        renderRailSearchPanel(panel);
+        panel.querySelector?.('.egd-rail-search-more')?.focus({ preventScroll: true });
+      },
+    }, moreLabel) : null;
+    panel.replaceChildren(scopes, el('div', { class: 'egd-rail-search-list' }, ...children), ...(more ? [more] : []));
     if (focusedScope) {
       Array.from(panel.querySelectorAll('.egd-rail-search-scope'))
         .find((chip) => chip.dataset.scope === focusedScope)?.focus({ preventScroll: true });
@@ -8141,6 +8162,7 @@
   }
 
   function setRailSearchQuery(query, options = {}) {
+    if (String(query || '') !== state.railSearch.query) state.railSearch.visibleLimit = RailSearchView.RAIL_SEARCH_PAGE_ROWS;
     state.railSearch.query = String(query || '');
     if (options.resetActive !== false) state.railSearch.activeIndex = 0;
     const input = document.querySelector('.egd-rail-search-input');
@@ -8150,6 +8172,9 @@
   }
 
   function handleRailSearchKeydown(ev, input) {
+    // UX-04: a key of a Korean IME composition (or its committing Enter) never runs a row.
+    if (RailSearchView.imeHoldsKey({ key: ev.key, isComposing: ev.isComposing, keyCode: ev.keyCode,
+      composing: input?._egdImeComposing === true, endedAt: input?._egdImeEndedAt || 0, now: Date.now() })) return;
     const q = railSearchQuery(input?.value || state.railSearch.query);
     if (ev.key === 'Escape') {
       if (state.railSearch.open) {
@@ -10734,6 +10759,8 @@
       value: state.railSearch.query,
       onfocus: () => openRailSearchPanel(),
       oninput: (ev) => setRailSearchQuery(ev.target.value),
+      oncompositionstart: () => { searchInput._egdImeComposing = true; },
+      oncompositionend: () => { searchInput._egdImeComposing = false; searchInput._egdImeEndedAt = Date.now(); },
       onkeydown: (ev) => {
         try {
           handleRailSearchKeydown(ev, searchInput);
@@ -10747,6 +10774,21 @@
       el('div', { class: 'egd-rail-search' },
         el('span', { class: 'egd-rail-search-icon' }, deskIcon('search')),
         searchInput,
+        // UX-04 [지우기]: clears the words only; the chosen scope stays. Hidden while empty (CSS).
+        el('button', {
+          type: 'button',
+          class: 'egd-rail-search-clear',
+          title: '검색어 지우기 (찾기 범위는 유지)',
+          data: { testid: 'rail-search-clear' },
+          onmousedown: (ev) => { ev.preventDefault(); ev.stopPropagation(); },
+          onclick: (ev) => {
+            ev.preventDefault();
+            ev.stopPropagation();
+            searchInput.value = '';
+            setRailSearchQuery('');
+            searchInput.focus({ preventScroll: true });
+          },
+        }, '지우기'),
         el('span', { class: 'egd-rail-kbd' }, '⌘K'),
       ),
     );

@@ -88,3 +88,28 @@ export function emptyState({ scope, results = [] } = {}) {
     ? { message: '결과 없음', widenLabel: null }
     : { message: `'${scopeLabel(id)}' 범위에서 찾은 것이 없습니다`, widenLabel: '범위를 전체로' };
 }
+
+// The panel shows 6 rows at first and [더 보기] adds 6 more. The request row
+// keeps its last place on every page (it counts as one of the rows).
+export const RAIL_SEARCH_PAGE_ROWS = 6;
+export function pageResults(results = [], visibleLimit = RAIL_SEARCH_PAGE_ROWS) {
+  const limit = Number.isInteger(visibleLimit) && visibleLimit >= RAIL_SEARCH_PAGE_ROWS ? visibleLimit : RAIL_SEARCH_PAGE_ROWS;
+  const list = Array.isArray(results) ? results.filter(Boolean) : [];
+  const ask = list.find(result => result.type === 'ask') || null;
+  const found = list.filter(result => result !== ask);
+  const room = ask ? limit - 1 : limit;
+  const rows = [...found.slice(0, room), ...(ask ? [ask] : [])];
+  const hidden = Math.max(0, found.length - room);
+  return { rows, hidden, moreLabel: hidden ? `더 보기 (${hidden}개)` : null };
+}
+export const nextVisibleLimit = visibleLimit =>
+  (Number.isInteger(visibleLimit) && visibleLimit >= RAIL_SEARCH_PAGE_ROWS ? visibleLimit : RAIL_SEARCH_PAGE_ROWS) + RAIL_SEARCH_PAGE_ROWS;
+
+// Korean (and other) IME: a key that belongs to the composition never runs a
+// row. Gecko may deliver compositionend just before the committing Enter, so
+// an Enter right after the composition ended is held too.
+export const RAIL_SEARCH_IME_COMMIT_GUARD_MS = 80;
+export function imeHoldsKey({ key, isComposing = false, keyCode = 0, composing = false, endedAt = 0, now = 0 } = {}) {
+  if (isComposing || keyCode === 229 || composing) return true;
+  return key === 'Enter' && Number.isFinite(endedAt) && endedAt > 0 && now - endedAt >= 0 && now - endedAt < RAIL_SEARCH_IME_COMMIT_GUARD_MS;
+}
