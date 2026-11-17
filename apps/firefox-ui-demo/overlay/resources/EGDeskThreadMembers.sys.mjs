@@ -4,6 +4,7 @@
 // { profileId, avatar } — profileId null for the plain Codex. Pure display
 // models and thread fields: no DOM, no fetch. Inviting starts no run.
 import { agentWorkingView, displayProfileAvatar, isProfileId, isRunBusy, profileRunnable } from './EGDeskChatState.sys.mjs';
+import { boardMemberState } from './EGDeskBoardThread.sys.mjs';
 
 export const BASE_AGENT_NAME = 'Codex';
 const SELF_NAME = '나';
@@ -107,8 +108,10 @@ function memberStatus(runs, labels, { roomAgentName, connected }) {
 /**
  * The member chips of a Board Thread: face (the saved Agent's, else the one
  * captured at invite, else the name's letter), name, role, and a status only
- * when a run of that Agent in this room says so. `more` counts the members
- * past `limit`.
+ * when a run of that Agent in this room says so: first a run the bridge
+ * attributed to that Agent (run.board) or the last Board send's outcome for
+ * it (thread.boardRoutes: '차례 대기' when deferred, '막힘' when refused), else
+ * the last run it spoke as. `more` counts the members past `limit`.
  */
 export function memberChipViews(thread, { profiles = [], runs = [], roomAgentName = BASE_AGENT_NAME, connected = true, selfName = SELF_NAME, limit = 4 } = {}) {
   if (thread?.type !== 'group') return { chips: [], more: 0 };
@@ -122,7 +125,9 @@ export function memberChipViews(thread, { profiles = [], runs = [], roomAgentNam
     const label = text(profile?.name) || name;
     const given = thread.participantRoles?.[name];
     const role = own(ROLE_LABELS, given) ? given : self ? 'owner' : 'member';
-    const status = self ? null : memberStatus(runs, label === name ? [name] : [name, label], { roomAgentName: text(roomAgentName) || BASE_AGENT_NAME, connected });
+    const boardStatus = self || !link?.profileId ? null : boardMemberState(link.profileId, {
+      runs, routes: thread.boardRoutes || {}, connectedRunView: run => agentWorkingView(run, { connected }) });
+    const status = self ? null : boardStatus || memberStatus(runs, label === name ? [name] : [name, label], { roomAgentName: text(roomAgentName) || BASE_AGENT_NAME, connected });
     const manageable = !self;
     return {
       name, label, self, role, roleLabel: ROLE_LABELS[role], manageable,
@@ -133,4 +138,20 @@ export function memberChipViews(thread, { profiles = [], runs = [], roomAgentNam
     };
   });
   return { chips, more: Math.max(0, names.length - limit) };
+}
+
+/**
+ * CHAT-10: the member row in the floating Chat's head. The Agents only (the
+ * person is always there): up to `limit` faces with their status dots, how
+ * many more, and one line naming who is working, waiting, blocked or done.
+ * The full chips, roles and '초대' stay in the Chat window's member row.
+ */
+export function hudMemberRowView(thread, { limit = 5, ...options } = {}) {
+  const selfName = options.selfName || SELF_NAME;
+  const { chips } = memberChipViews(thread, { ...options, selfName, limit: Number.POSITIVE_INFINITY });
+  const agents = chips.filter(chip => !chip.self);
+  if (!agents.length) return null;
+  const faces = agents.slice(0, Math.max(1, limit));
+  const summary = agents.filter(chip => chip.status).map(chip => `${chip.label} ${chip.status.label}`).join(' · ');
+  return { faces, more: agents.length - faces.length, summary: summary || null, label: `참여 Agent ${agents.length}명` };
 }

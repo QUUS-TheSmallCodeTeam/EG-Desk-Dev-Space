@@ -1,6 +1,7 @@
 import { chatError, publicErrorKind, publicText, validateChatCwd } from './codex-chat-values.mjs'
 import { applyRateLimitsUpdate, normalizeRateLimits } from './codex-account-usage.mjs'
 import { ACCESS_FAILURE_KINDS, accessCause, accessFailureScope, publicAccessFailure, publicAuthIdentityKey } from './codex-auth-state.mjs'
+import { BOARD_MEMBERS_PATH, readBoardMembers, writeBoardMembers } from './egdesk-board-members.mjs'
 
 // Verified Firefox chrome and local CLI callers can omit Origin.
 // Ordinary web origins must match this loopback service; never echo arbitrary origins.
@@ -156,6 +157,25 @@ export function createChatHttpHandler(chat, ensureAuth, history = chat) {
         sendJson(res, 200, url.pathname === '/chat/run-changes' ? chat.runChanges(query) : chat.commandOutput(query))
       } catch (error) {
         sendJson(res, error.httpStatus || 500, { code: typeof error.code === 'string' ? error.code : 'RUN_OUTPUT_ERROR', error: publicText(error.message, 2000) })
+      }
+      return true
+    }
+    // CHAT-10: a Board room's members in the chat store (egdesk-board-members.mjs).
+    // Local-store only like /chat/rooms/agent: no engine account check.
+    if (url.pathname === BOARD_MEMBERS_PATH && (req.method === 'GET' || req.method === 'POST')) {
+      if (!guardBridgeRequest(req)) {
+        sendJson(res, 403, { code: 'BOARD_MEMBERS_LOOPBACK_REQUIRED', error: 'Untrusted Board members request origin' })
+        return true
+      }
+      try {
+        if (req.method === 'GET') {
+          if ([...url.searchParams.keys()].some(key => key !== 'clientThreadId') || url.searchParams.getAll('clientThreadId').length !== 1) {
+            throw chatError('INVALID_BOARD_MEMBERS', 'Exactly one clientThreadId is required', 400)
+          }
+          sendJson(res, 200, readBoardMembers(chat, url.searchParams.get('clientThreadId')))
+        } else sendJson(res, 200, writeBoardMembers(chat, await readJsonBody(req, { maxBytes: 65536 })))
+      } catch (error) {
+        sendJson(res, error.httpStatus || 500, { code: typeof error.code === 'string' ? error.code : 'BOARD_MEMBERS_ERROR', error: publicText(error.message, 2000) })
       }
       return true
     }

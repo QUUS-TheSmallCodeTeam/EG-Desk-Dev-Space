@@ -11,6 +11,7 @@
   const RecoveryState = ChromeUtils.importESModule('chrome://userchrome/content/EGDeskRecoveryState.sys.mjs');
   const ChatState = ChromeUtils.importESModule('chrome://userchrome/content/EGDeskChatState.sys.mjs');
   const ThreadRouting = ChromeUtils.importESModule('chrome://userchrome/content/EGDeskThreadRouting.sys.mjs');
+  const BoardThread = ChromeUtils.importESModule('chrome://userchrome/content/EGDeskBoardThread.sys.mjs');
   const ChatRunResult = ChromeUtils.importESModule('chrome://userchrome/content/EGDeskChatRunResult.sys.mjs');
   const RunResult = ChromeUtils.importESModule('chrome://userchrome/content/EGDeskRunResult.sys.mjs');
   const ChatChangeReview = ChromeUtils.importESModule('chrome://userchrome/content/EGDeskChatChangeReview.sys.mjs');
@@ -12306,6 +12307,26 @@
       if (conversation && activeThread) {
         if (mode === 'hud' || activeThread.type === 'dm') {
           const threadMenuOpen = Boolean(codex.threadMenu && codex.threadMenu.threadId === activeThread.id);
+          // CHAT-10: the floating Chat's head names the room's Agents with their faces and
+          // states (ThreadMembers.hudMemberRowView); names only when nothing more is known.
+          const renderHudMemberRow = (thread) => {
+            const roomProfile = thread.profileEnabled === true ? codexThreadAgentProfile(thread) : null;
+            const row = ThreadMembers.hudMemberRowView(thread, {
+              profiles: codexProfileCatalog.profiles, runs: codexRuns(thread), roomAgentName: roomProfile?.name || 'Codex',
+              connected: activeEngine.engineId === 'claude' ? activeEngine.ready : codex.connected, selfName: SELF_MEMBER,
+            });
+            if (!row) return el('div', { class: 'egd-codex-conversation-hud-sub' }, (thread.participants || []).join(' · '));
+            return el('div', { class: 'egd-codex-conversation-hud-sub egd-codex-hud-members', role: 'group', 'aria-label': row.label, data: { testid: 'chat-hud-members' } },
+              ...row.faces.map((chip) => {
+                const face = codexMessageAvatarFace(chip.avatar, chip.label);
+                return el('span', { class: 'egd-codex-hud-member', title: chip.title, data: { testid: 'chat-hud-member', status: chip.status?.kind || 'none' } },
+                  el('span', { class: `egd-codex-message-avatar egd-codex-hud-member-face${face.toneClass}`, 'aria-hidden': 'true' },
+                    face.photo ? el('img', { class: 'egd-profile-avatar-image', src: face.photo, alt: '', draggable: 'false' }) : face.text),
+                  chip.status ? el('span', { class: `egd-codex-thread-member-status egd-codex-thread-member-status-${chip.status.kind}`, role: 'img', 'aria-label': `${chip.label} ${chip.status.label}` }) : null);
+              }),
+              row.more ? el('span', { class: 'egd-codex-hud-members-more' }, `+${row.more}`) : null,
+              el('span', { class: 'egd-codex-hud-members-summary' }, row.summary || row.faces.map(chip => chip.label).join(' · ')));
+          };
           conversation.appendChild(el('div', { class: 'egd-codex-conversation-hud-head' },
             el('button', {
               class: 'egd-codex-conversation-back',
@@ -12315,9 +12336,7 @@
             }, deskIcon('back')),
             el('div', { class: 'egd-codex-conversation-hud-center' },
               el('div', { class: 'egd-codex-conversation-hud-title' }, activeThread.title),
-              activeThread.type === 'group'
-                ? el('div', { class: 'egd-codex-conversation-hud-sub' }, (activeThread.participants || []).join(' · '))
-                : null,
+              activeThread.type === 'group' ? renderHudMemberRow(activeThread) : null,
               el('div', { class: 'egd-codex-conversation-hud-badges' }, buildCodexThreadKindBadge(activeThread), buildCodexSessionBadge(activeThread, codexBridge)),
             ),
             renderEngineChip(activeThread),
@@ -13526,10 +13545,12 @@
       if (ChatState.nativeBindingHeld(getCodexThreadById(state.codex, threadId))) return;
       run.localThreadId = threadId;
       const liveRevision = liveEvent ? ++state.codex.liveRevision : null;
+      // CHAT-10: a Board member's answer shows in the room but never rebinds the room's own conversation.
+      const boardMemberRun = run.boardMember === true;  // BoardThread.isBoardMemberRun
       const thread = updateThreadById(threadId, current => ({
-        ...current, conversationId: run.conversationId, sendError: null,
-        ...(run.engineProfileId || run.engine?.engineProfileId ? { engineProfileId: run.engineProfileId || run.engine.engineProfileId } : {}),
-        ...ChatState.nativeBindingForRun(current, run),
+        ...current, ...(boardMemberRun ? {} : { conversationId: run.conversationId }), sendError: null,
+        ...(!boardMemberRun && (run.engineProfileId || run.engine?.engineProfileId) ? { engineProfileId: run.engineProfileId || run.engine.engineProfileId } : {}),
+        ...(boardMemberRun ? {} : ChatState.nativeBindingForRun(current, run)),
         contextToolsAvailable: current.contextToolsAvailable === true || Array.isArray(run.contextCaptures),
         messages: (liveEvent ? ChatState.projectRunMessages(current.messages, run)
           : ChatState.mergeLocalChatMessages(current.messages, ChatState.projectRunMessages(current.messages, run))).map(message =>
@@ -13537,7 +13558,7 @@
             ? { ...message, liveRevision, localHistory: false } : message),
       }));
       for (const message of run.messages) bindMessageToThread(message.id, threadId);
-      if (thread) markUserMessagesReadBy(threadId, thread.profileEnabled ? codexThreadAgentProfile(thread).name : 'Codex');
+      if (thread) markUserMessagesReadBy(threadId, boardMemberRun && run.authorName ? run.authorName : thread.profileEnabled ? codexThreadAgentProfile(thread).name : 'Codex');
       attachMemoRepliesFromRun(run);   // CNV-06: a memo question's answer joins its memo (D-K5)
     }
 
@@ -14113,6 +14134,65 @@
       return response.json();
     };
 
+    // CHAT-10: a Board Thread's members live in the chat store (room_members,
+    // GET/POST /chat/board/members) under the room's durable ID. Opening the
+    // room reads them back; a room the store has none for yet moves its Desk
+    // members in once. A save that did not reach the bridge is tried again on
+    // the next open instead of being replaced by the store's older list.
+    const boardMembersChecked = new Set(), boardMembersUnsaved = new Set();
+    async function saveBoardMembers(threadId) {
+      const thread = getCodexThreadById(state.codex, threadId);
+      const clientThreadId = ChatState.localClientThreadId(thread);
+      if (!BoardThread.isBoardRoom(thread) || !clientThreadId) return false;
+      try {
+        await fetchJson(BoardThread.BOARD_MEMBERS_PATH, { method: 'POST', body: JSON.stringify(BoardThread.boardMembersRequest(thread, clientThreadId, { selfName: SELF_MEMBER })) });
+        boardMembersUnsaved.delete(clientThreadId);
+        return true;
+      } catch { boardMembersUnsaved.add(clientThreadId); return false; }
+    }
+    async function syncBoardMembers(threadId) {
+      const thread = getCodexThreadById(state.codex, threadId);
+      const clientThreadId = ChatState.localClientThreadId(thread);
+      if (!BoardThread.isBoardRoom(thread) || !clientThreadId || boardMembersChecked.has(clientThreadId)) return;
+      boardMembersChecked.add(clientThreadId);
+      if (boardMembersUnsaved.has(clientThreadId)) { await saveBoardMembers(threadId); return; }
+      try {
+        const answer = await fetchJson(`${BoardThread.BOARD_MEMBERS_PATH}?clientThreadId=${encodeURIComponent(clientThreadId)}`);
+        const plan = BoardThread.boardMembersSync(getCodexThreadById(state.codex, threadId), answer, { selfName: SELF_MEMBER });
+        if (plan?.restore) {
+          updateThreadById(threadId, current => ({ ...current, ...plan.restore, subtitle: buildThreadSubtitle(current.type, plan.restore.participants) }));
+          emit();
+        } else if (plan?.save) await saveBoardMembers(threadId);
+      } catch { boardMembersChecked.delete(clientThreadId); } // The Desk list stays; the next open asks again.
+    }
+    // CHAT-10: a /chat/board/send answer. Every recipient's outcome goes on the
+    // room (its chip state); each other member's run is shown in this room
+    // under its own name, and the Lead's run comes back as a /chat/send answer.
+    function acceptBoardSend(threadId, answer, requestId) {
+      const outcome = BoardThread.boardSendOutcome(answer, requestId);
+      const room = getCodexThreadById(state.codex, threadId);
+      if (!room) return { accepted: false, code: 'CONVERSATION_NOT_FOUND' };
+      updateThreadById(threadId, current => ({ ...current, boardRoutes: { ...(current.boardRoutes || {}), ...outcome.routes } }));
+      const recipients = Array.isArray(answer?.recipients) ? answer.recipients : [];
+      const boardOf = row => ({ profileId: row.profileId, reason: row.reason, roomClientThreadId: answer?.clientThreadId });
+      for (const row of outcome.members) {
+        ChatState.registerChatRequest(protocol, BoardThread.boardMemberRequest(row, room, { profiles: codexProfileCatalog.profiles }), state.codex.authStatus);
+        const run = ChatState.acceptChatRequest(protocol, { accepted: true, requestId: row.requestId, clientThreadId: row.clientThreadId,
+          conversationId: row.conversationId, runId: row.runId }, row.requestId);
+        BoardThread.noteBoardRun(run, boardOf(row), { member: true });
+        syncProtocolRun(run);
+      }
+      if (outcome.lead) {
+        BoardThread.noteBoardRun(ChatState.acceptChatRequest(protocol, outcome.lead, requestId), boardOf(recipients.find(row => row.requestId === requestId)));
+        return outcome.lead;
+      }
+      if (outcome.accepted) return { accepted: true, boardOnly: true, requestId };
+      const code = outcome.failure?.code || answer?.code || 'BOARD_SEND_FAILED';
+      return { accepted: false, code, error: BoardThread.boardSendErrorText(code) || outcome.failure?.error || '보내지 못했습니다.',
+        ...(typeof outcome.failure?.dispatchStatus === 'string' ? { dispatchStatus: outcome.failure.dispatchStatus } : {}),
+        ...(typeof outcome.failure?.resumeRequired === 'boolean' ? { resumeRequired: outcome.failure.resumeRequired } : {}) };
+    }
+
     // One catalog read at a time; a bridge without the profile store leaves
     // rooms on the built-in definitions instead of inventing Agents.
     let profileCatalogLoad = null;
@@ -14532,6 +14612,7 @@
           if (event.v === 2) {
             if (!ChatState.canAdmitChatEvent(protocol, state.codex.threads, event)) return;
             const run = ChatState.reduceChatEvent(protocol, event, ChatState.knownChatEngineIds(state.codex.engines));
+            if (run && event.event === 'run.started' && event.details?.board) BoardThread.noteBoardRun(run, event.details.board);  // CHAT-10: who answered
             // CHAT-06 Await: an Agent proposed a plan; its approval card goes under this run's answer.
             if (run && event.event === 'plan.proposed') planProposalFrame(run, event.details);
             if (run) { syncProtocolRun(run); emit(); }
@@ -16577,6 +16658,7 @@
           ? options.memoAsk === true ? ensureNativeReadyForSend(selected, { joinExisting: true }) : refreshConversation(selected, true)
           : null;
         const roomProject = this.refreshRoomProjectDefault(threadId, { joinCurrentRead: options.memoAsk === true });
+        if (selected?.type === 'group') void syncBoardMembers(threadId);  // CHAT-10: members read back from the chat store
         emit();
         return Promise.all([conversation, roomProject]);
       },
@@ -16698,6 +16780,7 @@
         state.codex.memberMenu = null;
         state.codex.threadMenu = null;
         emit();
+        void saveBoardMembers(threadId);  // CHAT-10: the store keeps the room's members
       },
       cycleThreadMemberRole(threadId, memberName) {
         const thread = getCodexThreadById(state.codex, threadId);
@@ -16718,6 +16801,7 @@
         state.codex.memberMenu = null;
         state.codex.threadMenu = null;
         emit();
+        void saveBoardMembers(threadId);  // CHAT-10: the store keeps the room's members
       },
       // CHAT-10: '초대' adds the Agent picked from the saved list (or the plain
       // Codex) under its own name and face. It only joins the room: no run
@@ -16737,6 +16821,7 @@
             const fields = ThreadMembers.invitedThreadFields(current, choice, { selfName: SELF_MEMBER });
             return fields ? { ...current, ...fields, subtitle: buildThreadSubtitle(current.type, fields.participants) } : current;
           });
+          void saveBoardMembers(targetId);  // CHAT-10: the store keeps the room's members
         }
         emit();
       },
@@ -17104,14 +17189,27 @@
             if (memoSendBlocked()) { epochScope.finish(token); return; }
             registerPending();
           }
-          const pendingSend = fetchJson('/chat/send', {
-            method: 'POST',
-            signal: token.signal,
-            body: JSON.stringify(chatRequest),
-          });
+          // CHAT-10 (D-M2): an @mention or an Agent Lead in a Board Thread goes to /chat/board/send.
+          const boardPlan = engineId === 'codex' && activeThread.type === 'group' ? BoardThread.boardSendPlan(activeThread, chatRequest, { selfName: SELF_MEMBER }) : null;
+          if (boardPlan?.error) throw Object.assign(new Error(BoardThread.boardSendErrorText(boardPlan.error)), { status: 400, code: boardPlan.error, accepted: false });
+          const pendingSend = boardPlan
+            ? fetchJson(boardPlan.path, { method: 'POST', signal: token.signal, body: JSON.stringify(boardPlan.body) })
+              .then(answer => epochScope.valid(token) ? acceptBoardSend(activeThread.id, answer, requestId) : answer)
+            : fetchJson('/chat/send', {
+              method: 'POST',
+              signal: token.signal,
+              body: JSON.stringify(chatRequest),
+            });
           if (briefingProof) emit();
           const result = await pendingSend;
           if (!epochScope.valid(token) || ChatState.clientThreadBinding(getCodexThreadById(state.codex, activeThread.id)) !== ChatState.clientThreadBinding(activeThread)) return { requestId, accepted: false, status: 'unconfirmed' };
+          if (result?.boardOnly === true) {
+            // Only mentioned members answer, each in its own conversation: the room's own request is done.
+            if (protocol.requests[requestId]) protocol.requests[requestId].status = 'accepted';
+            updateThreadById(activeThread.id, thread => ({ ...thread, sendError: null,
+              messages: thread.messages.map(message => message.role === 'user' && message.requestId === requestId ? { ...message, status: 'complete' } : message) }));
+            return { requestId, accepted: true };
+          }
           if (engineId === 'claude' && result?.accepted === true
               && ([result.engineId, result.engine?.id, result.engine?.engineId].some(id => id != null && id !== engineId)
                 || [result.engineProfileId, result.engine?.engineProfileId].some(id => id != null && id !== token.profile))) {
@@ -17191,6 +17289,8 @@
           } else if (['PROJECT_TARGET_CHANGED', 'PROJECT_WORKSPACE_CHANGED', 'PROJECT_INHERITANCE_UNAVAILABLE', 'PROJECT_ASSOCIATION_BROKEN', 'PROJECT_RECONNECT_REQUIRED'].includes(error.code)) {
             error.message = '실행 프로젝트 연결이 바뀌었거나 사용할 수 없습니다. 프로젝트 상세에서 Board와 전체 위치를 다시 확인하세요. 자동으로 다른 폴더에서 실행하지 않습니다.';
           }
+          // CHAT-10: a refused Board Thread send says why in Korean.
+          if (activeThread.type === 'group' && BoardThread.boardSendErrorText(error.code)) error.message = BoardThread.boardSendErrorText(error.code);
           const profileText = ChatState.profileSendErrorText(error.code) || ChatState.chatStatelessErrorText(error.code)
             || ChatState.computerControlSendErrorText(error.code) || ChatState.chatModelSendErrorText(error.code);
           if (profileText) error.message = profileText;
