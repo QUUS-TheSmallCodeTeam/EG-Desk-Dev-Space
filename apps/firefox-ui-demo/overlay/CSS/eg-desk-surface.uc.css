@@ -2669,6 +2669,44 @@
   background: var(--egd-card-hover-bg);
 }
 
+/* BRW-02: the card's account context picker. The checked row is the context
+   the card runs in; the note says a name is not proof of a site login. */
+.egd-browser-account-menu {
+  width: 220px;
+}
+
+.egd-browser-account-note {
+  padding: 4px 9px 6px;
+  color: var(--egd-on-surface-variant);
+  font-size: 10px;
+  line-height: 1.4;
+}
+
+.egd-browser-account-menu .egd-browser-menu-item[aria-checked="true"] {
+  color: var(--egd-primary);
+}
+
+.egd-browser-account-menu .egd-browser-menu-item[role="menuitemradio"][aria-checked="true"]::before {
+  content: "✓ ";
+}
+
+.egd-browser-account-remember::before {
+  content: "☐ ";
+}
+
+.egd-browser-account-remember[aria-checked="true"]::before {
+  content: "☑ ";
+}
+
+.egd-browser-account-remember {
+  border-top: 1px solid var(--egd-outline);
+  border-radius: 0 0 6px 6px;
+  font-weight: 500;
+  white-space: normal;
+  line-height: 1.35;
+  padding-block: 6px;
+}
+
 /* BRW-13: who acts on a Browser Card. A quiet pill in the title row (the only
    status region), one text button beside it, and a timeline popover. Tokens
    only, so dark follows the token block. */
