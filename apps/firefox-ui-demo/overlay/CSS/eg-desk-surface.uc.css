@@ -5058,7 +5058,7 @@ button.egd-bag-header.egd-bag-header-muted { color: var(--egd-on-surface-variant
 }
 /* UX-06: Agent 알림 한 줄. 상단 바 아래, 누르면 채팅 엿보기를 연다. */
 #egd-attention-notice {
-  position: fixed; top: 52px; left: 50%; transform: translateX(-50%); z-index: 2147483000;
+  position: fixed; top: 52px; /* fallback; the screen sets top from #egd-desk-rail's rect */ left: 50%; transform: translateX(-50%); z-index: 2147483000;
   display: flex; gap: 8px; align-items: center; max-width: min(480px, 80vw);
   padding: 6px 12px; border: 1px solid var(--egd-outline); border-radius: 999px;
   background: var(--egd-topbar); box-shadow: var(--egd-shadow); cursor: pointer; font-size: 12px;

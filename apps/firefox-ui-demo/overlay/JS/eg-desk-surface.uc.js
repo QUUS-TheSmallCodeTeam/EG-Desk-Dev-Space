@@ -9597,6 +9597,7 @@
     line.textContent = notice.count > 1 ? `${notice.line} 외 ${notice.count - 1}건` : notice.line;
     node.append(name, line);
     node.setAttribute('aria-label', notice.label);
+    node.style.top = `${SurfaceAttention.attentionNoticeTop(byId('egd-desk-rail')?.getBoundingClientRect())}px`;
     node.dataset.count = String(notice.count);
   }
   function dismissAttentionNotice() {
@@ -9608,9 +9609,17 @@
     dismissAttentionNotice();
     if (!state.peekChatForAttention?.() && !(state.hudOpen && state.hudApp === 'chat')) toggleHUD('chat', '대화', { preserveConversation: true });
   }
+  // The run's room: its Board Thread member names, else the room's selected Agent profile.
+  function attentionAgentNameFor(run) {
+    const thread = run?.localThreadId ? getCodexThreadById(state.codex, run.localThreadId) : null;
+    let members = null;
+    try { members = thread ? ThreadRouting.threadAgentNames(thread, SELF_MEMBER).map(label => ({ kind: 'agent', label })) : null; } catch { members = null; }
+    const roomProfile = thread?.profileEnabled === true ? codexThreadAgentProfile(thread) : null;
+    return SurfaceAttention.attentionAgentName({ run, members, roomProfile });
+  }
   state.noteChatAttention = (event, run) => {
     const next = SurfaceAttention.noteChatEvent(attentionModel, event, {
-      chatVisible: chatVisibleForAttention(), agentName: run?.agentName || run?.profileName || null });
+      chatVisible: chatVisibleForAttention(), agentName: attentionAgentNameFor(run) });
     if (next === attentionModel) return;
     attentionModel = next;
     renderAttentionNotice();
