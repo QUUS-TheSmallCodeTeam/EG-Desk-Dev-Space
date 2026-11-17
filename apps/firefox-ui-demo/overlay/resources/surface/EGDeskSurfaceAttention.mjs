@@ -79,3 +79,24 @@ export function attentionNotice(model) {
     label: `${latest.agentName}: ${line}${more} Chat 열기`,
   });
 }
+
+// Which Agent name the notice shows, from what the chat event's run carries:
+// the run's own name, then the room's Board Thread member for the run's Agent
+// profile, then the room's selected Agent profile. 'Agent' stays the fallback.
+// sources: { run, members (Board Thread room members), roomProfile ({ name }) }.
+export function attentionAgentName({ run = null, members = null, roomProfile = null } = {}) {
+  const clean = value => (typeof value === 'string' && value.trim() ? value.trim() : null);
+  const direct = clean(run?.agentName) || clean(run?.profileName);
+  if (direct) return direct;
+  const profileId = clean(run?.agentProfileId) || clean(run?.agentId);
+  const agents = Array.isArray(members) ? members.filter(member => member?.kind === 'agent' && clean(member.label)) : [];
+  const member = (profileId && agents.find(entry => entry.profileId === profileId)) || (agents.length === 1 ? agents[0] : null);
+  return clean(member?.label) || clean(roomProfile?.name) || 'Agent';
+}
+
+// Where the notice sits: just under the top bar's bottom edge (its real rect),
+// 52px when the bar is not there to measure.
+export function attentionNoticeTop(topBarRect, gap = 8) {
+  const bottom = Number(topBarRect?.bottom);
+  return Number.isFinite(bottom) && bottom > 0 ? Math.round(bottom + gap) : 52;
+}

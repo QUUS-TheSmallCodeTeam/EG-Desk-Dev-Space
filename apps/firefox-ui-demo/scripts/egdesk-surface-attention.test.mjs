@@ -51,3 +51,17 @@ test('UX-06 attention: wired into the surface through the peek hook and the Esc 
   assert.ok(css.indexOf('#egd-attention-notice {') > 0 && css.indexOf('#egd-attention-notice {') < css.indexOf(':root.egd-maximize-hud-peek #egd-hud {'),
     'CSS sits next to the Chat peek rules');
 });
+
+test('UX-06 attention: Agent name from the run, room members or room profile; top from the top bar', () => {
+  assert.equal(Attention.attentionAgentName({ run: { agentName: ' Mina ' } }), 'Mina');
+  const members = [{ kind: 'user', role: 'owner' }, { kind: 'agent', profileId: 'p-a', label: 'Ara' }, { kind: 'agent', profileId: 'p-b', label: 'Bo' }];
+  assert.equal(Attention.attentionAgentName({ run: { agentProfileId: 'p-b' }, members }), 'Bo');
+  assert.equal(Attention.attentionAgentName({ run: {}, members: [{ kind: 'agent', label: 'Solo' }] }), 'Solo');
+  assert.equal(Attention.attentionAgentName({ run: {}, members, roomProfile: { name: 'Room' } }), 'Room');
+  assert.equal(Attention.attentionAgentName({ run: null }), 'Agent');
+  assert.equal(Attention.attentionNoticeTop({ bottom: 44.4 }), 52);
+  assert.equal(Attention.attentionNoticeTop({ bottom: 60 }), 68);
+  assert.equal(Attention.attentionNoticeTop(null), 52);
+  assert.match(surfaceJs, /agentName: attentionAgentNameFor\(run\)/);
+  assert.match(surfaceJs, /node\.style\.top = `\$\{SurfaceAttention\.attentionNoticeTop\(byId\('egd-desk-rail'\)\?\.getBoundingClientRect\(\)\)\}px`/);
+});
