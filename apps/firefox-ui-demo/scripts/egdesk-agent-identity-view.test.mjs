@@ -5,6 +5,7 @@ import {
   AVATAR_IMAGE_MAX_BYTES, agentAvatarImageSource, agentAvatarView, agentWorkingRows, cardAgentIdentityView,
   isAvatarAssetId, messageAuthorAvatar, resolveCardAgentIdentity,
 } from '../overlay/resources/EGDeskAgentIdentityView.sys.mjs';
+import { fileCardAgentBadges, pathInsideRoot, runTouchedPaths } from '../overlay/resources/EGDeskAgentIdentityView.sys.mjs';
 
 const ASSET = `img-${'a'.repeat(64)}`;
 const PHOTO = { kind: 'image', value: 'V', color: '#252a26', assetId: ASSET };
@@ -112,4 +113,58 @@ test('ChatState keeps photo references where the Chat reads avatars: catalog row
   assert.deepEqual(ChatState.displayProfileAvatar(EMOJI), EMOJI);
   const peek = ChatState.agentPeekView({ author: '탐색 담당', authorAvatar: PHOTO, profile: null });
   assert.deepEqual(peek.avatar, PHOTO);
+});
+
+test('File card Agent badge: a run touches only the File cards of its own verified project, inside the root', () => {
+  const run = {
+    runId: 'turn-1',
+    activities: [
+      { kind: 'fileChange', detail: { changes: [{ path: '/work/app/src/a.js', kind: 'update' }, { path: '/work/app/src/a.js', kind: 'update' }, { path: '/work/app-other/x.js' }] },
+        sourceRefs: [{ type: 'file', target: { path: '/work/app/README.md' } }] },
+      { kind: 'fileChange', detail: { changes: [{ path: '/work/app/../etc/passwd' }, { path: 'relative/b.js' }, { path: '/work/app/./c.js' }, { path: 7 }] } },
+      { kind: 'commandExecution', detail: { changes: [{ path: '/work/app/cmd.js' }] } },
+    ],
+  };
+  const paths = runTouchedPaths(run);
+  assert.deepEqual(paths, ['/work/app/src/a.js', '/work/app-other/x.js', '/work/app/README.md'], 'deduplicated absolute paths; traversal, relative and non-file rows dropped');
+  assert.equal(pathInsideRoot('/work/app', '/work/app-other/x.js'), null, 'a sibling folder with the same prefix is outside');
+  assert.equal(pathInsideRoot('/work/app/', '/work/app/src/a.js'), 'src/a.js');
+  assert.equal(pathInsideRoot('/work/app', '/work/app'), null, 'the root itself is not a file inside it');
+
+  const project = { projectId: 'proj-1', rootId: 'root-1' };
+  const scope = { ...project, rootPath: '/work/app' };
+  const runs = [
+    { runId: 'done', name: '리뷰어', avatar: { kind: 'initial', value: 'R', color: '#252a26' }, busy: false, project, paths: ['/work/app/old.js'] },
+    { runId: 'turn-1', name: '리오', avatar: EMOJI, busy: true, project, paths },
+    { runId: 'elsewhere', name: '다른 방', busy: true, project: { projectId: 'proj-2', rootId: 'root-2' }, paths: ['/work/app/src/a.js'] },
+  ];
+  const cards = [
+    { cardId: 'file-a', scope },
+    { cardId: 'file-picked', scope: null },
+    { cardId: 'file-other-root', scope: { ...project, rootId: 'root-9', rootPath: '/work/app' } },
+    { cardId: 'file-sub', scope: { ...project, rootPath: '/work/app/src' } },
+    { cardId: 'file-bad-path', scope: { ...project, rootPath: 'work/app' } },
+  ];
+  const badges = fileCardAgentBadges(runs, cards);
+  assert.deepEqual(badges.map(badge => [badge.cardId, badge.runId, badge.name, badge.busy, badge.count, badge.files]), [
+    ['file-a', 'turn-1', '리오', true, 2, ['src/a.js', 'README.md']],
+    ['file-sub', 'turn-1', '리오', true, 1, ['a.js']],
+  ], 'a busy run wins; a picked folder, another root and an unverified path show nothing; another project never matches');
+  assert.equal(badges[0].text, '리오 · 파일 2개 작업 중');
+  assert.deepEqual(badges[0].avatar, EMOJI);
+  const finished = fileCardAgentBadges([runs[0]], [{ cardId: 'file-a', scope }]);
+  assert.equal(finished[0].text, '리뷰어 · 파일 1개 작업함');
+  assert.deepEqual(fileCardAgentBadges([{ ...runs[1], project: null }], [{ cardId: 'file-a', scope }]), [], 'a run without a verified project sees no File card');
+  assert.deepEqual(fileCardAgentBadges(null, null), []);
+});
+
+test('File card Agent badge wiring: the File card exposes only its verified project root and the Chat refresh draws the chip', async () => {
+  const { readFile } = await import('node:fs/promises');
+  const surface = await readFile(new URL('../overlay/JS/eg-desk-surface.uc.js', import.meta.url), 'utf8');
+  const fileCard = await readFile(new URL('../overlay/resources/surface/EGDeskSurfaceFileCard.mjs', import.meta.url), 'utf8');
+  assert.match(fileCard, /Object\.defineProperty\(card, '_fileAgentScope', \{ configurable: true, get: \(\) => projectConnection && !rootNeedsReconnect/);
+  assert.match(surface, /AgentIdentityView\.fileCardAgentBadges\(runs, fileCards\.map\(card => \(\{ cardId: card\.id, scope: card\._fileAgentScope \|\| null \}\)\)\)/);
+  assert.match(surface, /const project = entry\?\.status === 'ready' && entry\.value\?\.status === 'connected' \? entry\.value\.project : null;/);
+  assert.match(surface, /if \(!ChatState\.isRunBusy\(run\)\) continue;/);
+  assert.match(surface, /renderCodexActivityPanel\(\);\n {6}if \(typeof refreshFileCardAgentBadges === .function.\) refreshFileCardAgentBadges\(\);/);
 });
