@@ -182,6 +182,8 @@ async function main() {
         mouse(viewport, 'mousedown', x, y);
         const editor = document.querySelector('.egd-canvas-shape-label[data-editing="true"] .egd-canvas-shape-label-text');
         if (!editor) throw new Error('label tool did not open a text field');
+        window.focus();
+        editor.focus();
         editor.textContent = text;
         editor.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }));
       };
