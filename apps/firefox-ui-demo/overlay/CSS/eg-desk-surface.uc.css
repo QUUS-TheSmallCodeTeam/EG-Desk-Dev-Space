@@ -3276,6 +3276,24 @@ button.egd-rail-focus-view {
   color: var(--egd-on-surface);
 }
 .egd-rail-search-input::placeholder { color: var(--egd-on-surface-variant); }
+/* UX-04 [지우기]: shown only while the field has words. */
+.egd-rail-search-clear {
+  flex: none;
+  padding: 2px 6px;
+  border: none;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--egd-on-surface-variant);
+  font: inherit;
+  font-size: 11px;
+  cursor: pointer;
+}
+.egd-rail-search-input:placeholder-shown ~ .egd-rail-search-clear { display: none; }
+.egd-rail-search-clear:hover { background: var(--egd-outline-variant); color: var(--egd-on-surface); }
+.egd-rail-search-clear:focus-visible {
+  outline: var(--egd-focus-outline);
+  outline-offset: var(--egd-focus-outline-offset);
+}
 .egd-rail-kbd {
   padding: 2px 6px;
   font-size: 11px;
@@ -3371,7 +3389,8 @@ button.egd-rail-focus-view {
 }
 
 #egd-rail-search-results .egd-rail-search-scope:focus-visible,
-#egd-rail-search-results .egd-rail-search-empty-action:focus-visible {
+#egd-rail-search-results .egd-rail-search-empty-action:focus-visible,
+#egd-rail-search-results .egd-rail-search-more:focus-visible {
   outline: var(--egd-focus-outline);
   outline-offset: var(--egd-focus-outline-offset);
 }
@@ -3565,6 +3584,23 @@ button.egd-rail-focus-view {
 }
 
 #egd-rail-search-results .egd-rail-search-empty-action:hover {
+  background: color-mix(in srgb, var(--egd-primary) 8%, transparent);
+}
+
+/* UX-04 [더 보기]: under the rows, adds 6 more found rows. */
+#egd-rail-search-results .egd-rail-search-more {
+  display: block;
+  width: calc(100% - 16px);
+  min-height: 28px;
+  margin: 4px 8px 6px;
+  border: 1px solid var(--egd-outline);
+  border-radius: 8px;
+  background: transparent;
+  color: var(--egd-primary);
+  font-size: 12px;
+  font-weight: 600;
+}
+#egd-rail-search-results .egd-rail-search-more:hover {
   background: color-mix(in srgb, var(--egd-primary) 8%, transparent);
 }
 
@@ -8974,7 +9010,7 @@ button.egd-codex-message-activity:focus-visible { outline: var(--egd-focus-outli
 .egd-codex-footer [data-testid="chat-attach-open"] { background: transparent; border-color: transparent; padding-inline: 3px; color: var(--egd-on-surface-variant); }
 .egd-codex-footer .egd-chat-input-chip { min-width: 0; border: 1px solid var(--egd-outline-variant); border-radius: 6px; background: var(--egd-window-alt); }
 .egd-codex-footer .egd-chat-input-chip button { border: 0; border-radius: 5px; background: transparent; }
-.egd-codex-footer .egd-chat-input-chip button:last-child { flex: 0 0 32px; padding-inline: 5px; color: var(--egd-on-surface-variant); }
+.egd-codex-footer .egd-chat-input-chip button:last-child { flex: 0 0 32px; padding-inline: 4px; color: var(--egd-on-surface-variant); font-size: 11px; white-space: nowrap; }  /* UX-03: two-syllable Korean '빼기'/'해제' fits the 32px basis */
 
 /* Request project: the only button is an opener, not the chip's 32px remove action. */
 .egd-codex-footer .egd-chat-input-chip.egd-chat-project-target {
@@ -10970,7 +11006,7 @@ button.egd-memo-ask-cancel:hover { text-decoration: underline; }
 .egd-context-suggest-toggle:hover, .egd-context-suggest-close:hover { background: var(--egd-hover); }
 .egd-context-suggest-count { color: var(--egd-on-surface-variant); font-weight: 400; }
 .egd-context-suggest-board { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--egd-on-surface-variant); }
-.egd-context-suggest-close { flex: 0 0 auto; width: 28px; height: 28px; margin-left: auto; padding: 0; border: 0; border-radius: 6px; background: transparent; color: var(--egd-on-surface-variant); }
+.egd-context-suggest-close { flex: 0 0 auto; min-width: 28px; height: 28px; margin-left: auto; padding: 0 6px; font-size: 11px; white-space: nowrap; border: 0; border-radius: 6px; background: transparent; color: var(--egd-on-surface-variant); }
 .egd-context-suggest-body { display: flex; flex-direction: column; gap: 4px; }
 .egd-context-suggest-list { display: flex; flex-direction: column; gap: 2px; max-height: 132px; overflow-y: auto; }
 .egd-context-suggest-row { display: flex; align-items: flex-start; gap: 8px; padding: 4px 6px; border-radius: 6px; cursor: pointer; }

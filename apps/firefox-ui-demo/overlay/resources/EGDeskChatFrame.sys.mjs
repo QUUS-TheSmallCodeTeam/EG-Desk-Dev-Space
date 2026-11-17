@@ -3,7 +3,7 @@
 // Desk Window Shell's bar (dots · grip · icon · name · Board · actions) and
 // its eight resize edges, so these rules mirror the shell's.
 
-export const CHAT_FRAME_HOME_TITLE = '채팅';
+export const CHAT_FRAME_HOME_TITLE = '대화';
 export const CHAT_FRAME_MIN_WIDTH = 320;
 export const CHAT_FRAME_MIN_HEIGHT = 420;
 

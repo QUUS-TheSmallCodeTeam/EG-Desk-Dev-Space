@@ -45,9 +45,27 @@ test('B70 the way back to a conversation has one name', () => {
   assert.ok(surfaceJs.includes("agents.profileId ? '← Agent 상세로' : '← Agent 목록으로'"));
 });
 
-test('B27 the side Chat panel is titled 채팅, not 코덱스 채팅', () => {
+// 2026-11-17 UX-03: the window title follows the Dock button '대화' (was '채팅'),
+// so the same window has one name; the internal app id stays 'chat'.
+test('B27 the side Chat panel is titled 대화 like its Dock button, not 코덱스 채팅 or 채팅', () => {
   assert.equal(occurrences(surfaceJs, '코덱스 채팅'), 0);
-  assert.ok(surfaceJs.includes("textContent = appId === 'chat' ? '채팅' : appLabel;"));
+  assert.ok(surfaceJs.includes("textContent = appId === 'chat' ? '대화' : appLabel;"));
+  assert.ok(surfaceJs.includes("el('span', { class: 'egd-hud-title' }, '대화')"));
+  assert.equal(occurrences(surfaceJs, "toggleHUD('chat', '채팅'"), 0);
+});
+
+// 2026-11-17 UX-03: the Chat-area controls that were a bare × or a hover-less
+// ✓ now carry Korean words, and both back buttons have one name.
+test('UX-03 Chat input chips, suggestion close, member menu check and the back button read in Korean', () => {
+  assert.equal(occurrences(surfaceJs, "}, '×')"), 0, 'no bare × button text remains');
+  assert.ok(surfaceJs.includes("onclick: () => bridge.removeInputSource(thread.id, source.id) }, '빼기')"));
+  assert.ok(surfaceJs.includes("onclick: () => bridge.removeBriefingInput(thread.id, reference.sourceId) }, '빼기')"));
+  assert.ok(surfaceJs.includes("onclick: () => { void bridge.clearRequestProjectTarget(thread.id); } }, '해제')"));
+  assert.ok(surfaceJs.includes("onclick: () => bridge.dismissContextSuggestions(thread.id) }, '닫기')"));
+  assert.ok(surfaceJs.includes("'aria-label': '자료 추천 닫기', title: '자료 추천 닫기'"));
+  assert.equal(occurrences(surfaceJs, "title: '지금 역할' }, deskIcon('check', 'egd-codex-thread-member-menu-check')"), 2);
+  assert.equal(occurrences(surfaceJs, '대화 목록으로 돌아가기'), 0);
+  assert.equal(occurrences(surfaceJs, "title: '대화 목록으로',\n              'aria-label': '대화 목록으로',"), 2);
 });
 
 test('A36 an unnamed window and a system message fall back to Korean words', () => {

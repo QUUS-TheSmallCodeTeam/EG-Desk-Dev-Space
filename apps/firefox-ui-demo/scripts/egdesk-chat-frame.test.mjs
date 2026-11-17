@@ -19,7 +19,7 @@ test('the bar names the open conversation, and the window itself on the room lis
     { text: CHAT_FRAME_HOME_TITLE, conversation: false }, 'the room list is not a conversation');
   for (const input of [undefined, {}, { view: 'conversation' }, { thread: { title: '   ' }, view: 'conversation' },
     { thread: { title: 42 }, view: 'conversation' }]) {
-    assert.equal(chatFrameTitle(input).text, '채팅', 'no name is never guessed');
+    assert.equal(chatFrameTitle(input).text, '대화', 'no name is never guessed (2026-11-17: window title follows the Dock button 대화)');
     assert.equal(chatFrameTitle(input).conversation, false);
   }
 });

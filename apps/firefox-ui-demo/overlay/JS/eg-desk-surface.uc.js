@@ -578,6 +578,8 @@
       scope: 'all',
       open: false,
       activeIndex: 0,
+      visibleLimit: 6,   // UX-04: 6 rows, [더 보기] adds 6
+      moreCount: 0,
       fileQuery: '',
       fileResults: [],
       fileLoading: false,
@@ -2578,8 +2580,8 @@
       el('button', { class: 'egd-chat-project-open', type: 'button', 'aria-label': description, title: description, 'aria-haspopup': 'dialog',
         data: { testid: 'chat-project-open' }, onclick: () => openChatRequestProjectPanel(thread.id) },
       el('span', { data: { testid: 'chat-project-source', source } }, sourceLabel), detail ? ` · ${detail}` : null),
-      selection.target || selection.invalid ? el('button', { class: 'egd-chat-project-remove', type: 'button', 'aria-label': '이번 요청 지정 해제', data: { testid: 'chat-project-remove' },
-        disabled: pending ? 'true' : null, onclick: () => { void bridge.clearRequestProjectTarget(thread.id); } }, '×') : null);
+      selection.target || selection.invalid ? el('button', { class: 'egd-chat-project-remove', type: 'button', 'aria-label': '이번 요청 지정 해제', title: '이번 요청 지정 해제', data: { testid: 'chat-project-remove' },
+        disabled: pending ? 'true' : null, onclick: () => { void bridge.clearRequestProjectTarget(thread.id); } }, '해제') : null);
   }
 
   function buildChatInputTray(thread, bridge) {
@@ -2600,13 +2602,13 @@
             }
             catch (error) { boardNotice(error.message); }
           } }, `${source.label}${source.kind === 'browser' && source.browserToolPermission === 'interact' ? ' · 이번 Chat 조작 허용' : ''} · 미전송`),
-        el('button', { type: 'button', 'aria-label': `첨부 제거: ${source.label}`, data: { testid: 'chat-attachment-remove' },
-          onclick: () => bridge.removeInputSource(thread.id, source.id) }, '×')));
+        el('button', { type: 'button', 'aria-label': `첨부 제거: ${source.label}`, title: '첨부 제거', data: { testid: 'chat-attachment-remove' },
+          onclick: () => bridge.removeInputSource(thread.id, source.id) }, '빼기')));
     }
     for (const reference of thread.briefingInputs || []) {
       tray.appendChild(el('div', { class: 'egd-chat-input-chip', data: { testid: 'chat-briefing-input', sourceId: reference.sourceId } },
         el('button', { type: 'button', 'aria-label': '브리핑의 고정 근거 확인', onclick: () => bridge.inspectInput(thread.id, reference) }, '브리핑 근거 · 미전송'),
-        el('button', { type: 'button', 'aria-label': '브리핑 근거 첨부 제거', onclick: () => bridge.removeBriefingInput(thread.id, reference.sourceId) }, '×')));
+        el('button', { type: 'button', 'aria-label': '브리핑 근거 첨부 제거', title: '브리핑 근거 첨부 제거', onclick: () => bridge.removeBriefingInput(thread.id, reference.sourceId) }, '빼기')));
     }
     const scope = typeof bridge.refreshContextSources === 'function' ? buildChatSendScope(thread, bridge) : null;
     if (scope) tray.appendChild(scope);
@@ -2732,9 +2734,9 @@
     const store = state.contextSuggest;
     const entry = store?.byThread?.[thread.id];
     if (!entry || entry.dismissed || Date.now() < (store.unsupportedUntil || 0) || !state.codex?.authStatus?.isLoggedIn) return null;
-    const close = el('button', { type: 'button', class: 'egd-context-suggest-close', 'aria-label': '자료 추천 닫기', title: '닫기',
+    const close = el('button', { type: 'button', class: 'egd-context-suggest-close', 'aria-label': '자료 추천 닫기', title: '자료 추천 닫기',
       data: { testid: 'chat-context-suggest-close', focusKey: `ctx-close:${thread.id}` },
-      onclick: () => bridge.dismissContextSuggestions(thread.id) }, '×');
+      onclick: () => bridge.dismissContextSuggestions(thread.id) }, '닫기');
     if (!entry.resolution) {
       if (entry.status !== 'error' || !entry.error) return null;
       return el('section', { class: 'egd-context-suggest egd-context-suggest-error', role: 'status',
@@ -2853,7 +2855,8 @@
       return [{ id: card.id, sourceId: reference?.sourceId, hash: reference?.hash, evidenceKey,
         geometry: persistentEntityGeometry(card), sourceMatches: !!card._inputEvidenceLoaded, revisionMatches: !!card._inputEvidenceLoaded }];
     });
-    return BriefingState.resolveBriefingTargets(step, { references: session.references, artifacts: session.artifacts, views, identity: session.identity })
+    return BriefingState.resolveBriefingTargets(step, { references: session.references, artifacts: session.artifacts, views, identity: session.identity,
+      annotations: (typeof surfaceZones === 'undefined' ? null : surfaceZones.annotation || null) })   // CNV-07: annotation-set targets via the CNV-05 layer
       .map(item => {
         const reason = briefingRangeIssue(item.target);
         return reason ? { ...item, status: 'unsupported', reason } : item;
@@ -2926,6 +2929,11 @@
       if (targets.has(card.id)) { if (card.dataset.egdBriefingTarget !== 'true') card.dataset.egdBriefingTarget = 'true'; }
       else if (card.dataset.egdBriefingTarget) delete card.dataset.egdBriefingTarget;
     }
+    // The step's annotation sets are emphasized; the previous step's lose it.
+    const annotations = (typeof surfaceZones === 'undefined' ? null : surfaceZones.annotation || null), emphasized = syncBriefingFocus._annotationSets ||= new Set();
+    const nextSets = new Set(focus.annotationSetIds || []);
+    for (const id of emphasized) if (!nextSets.has(id)) { try { annotations?.emphasizeAnnotationSet(id, false); } catch {} emphasized.delete(id); }
+    for (const id of nextSets) { try { if (annotations?.emphasizeAnnotationSet(id, true)) emphasized.add(id); } catch {} }
     return focus;
   }
 
@@ -2985,7 +2993,8 @@
     const camera = briefingFitCamera(bounds, safe, panel?.getBoundingClientRect());
     if (!camera) return false;
     state.setCanvasViewportTarget?.(camera);
-    const firstView = resolved.find(item => item.status === 'available' && item.view?.id)?.view.id;
+    const firstView = resolved.find(item => item.status === 'available' && item.view?.id)?.view.id
+      || resolved.find(item => item.status === 'available' && item.annotation?.cardId)?.annotation.cardId;
     if (firstView) focusCanvasCard(document.getElementById(firstView));
     return true;
   }
@@ -3669,6 +3678,11 @@
         const { name, rangeText } = BriefingState.briefingRegionLabel(requested, index);
         return { name, rangeText, identity: `${name} · ${rangeText}`, capture: JSON.stringify(['canvasRect', requested.canvasRect]) };
       }
+      if (BriefingState.briefingTargetKind(requested) === 'annotationSet') {
+        // CNV-07: an annotation set names itself by its summary on the Canvas.
+        const { name, rangeText } = BriefingState.briefingAnnotationLabel(requested, target, index);
+        return { name, rangeText, identity: `${name} · ${rangeText}`, capture: JSON.stringify(['annotationSet', requested.annotationSetId]) };
+      }
       const verified = target.status === 'available' && !!target.view?.id;
       const named = verified ? [target.reference?.localSource?.label, target.reference?.label, target.artifact?.label,
         requested.sourceId, requested.artifactId].find(value => typeof value === 'string' && value.trim()) : null;
@@ -3766,7 +3780,7 @@
         if (row.rangeNode.textContent !== description.rangeText) row.rangeNode.textContent = description.rangeText;
         row.suffixNode.textContent = suffix; row.suffixNode.hidden = !suffix;
         const hashMatches = !!target.reference && (!target.target.hash || target.target.hash === target.reference.hash);
-        const stateLabel = unsupported ? '지원 안 됨' : target.region ? '표시 중' : target.status === 'available' ? '열림' : target.status === 'stale' ? '일치 확인 필요'
+        const stateLabel = unsupported ? '지원 안 됨' : target.annotationMissing ? '찾을 수 없음' : target.region ? '표시 중' : target.status === 'available' ? '열림' : target.status === 'stale' ? '일치 확인 필요'
           : session.preparing && hashMatches ? '준비 중' : '확인 필요';
         if (row.stateText.textContent !== stateLabel) row.stateText.textContent = stateLabel;
         const actionLabel = target.reference && !hashMatches ? '연결된 입력 보기' : '당시 입력 보기';
@@ -7872,7 +7886,7 @@
     if (state.codex.chatDockMode === 'canvas' || state.codex.chatCardEntityId) {
       spawnCodexChatCard();
     } else if (!(state.hudOpen && state.hudApp === 'chat')) {
-      toggleHUD('chat', '채팅');
+      toggleHUD('chat', '대화');
     }
     state.codexBridge?.selectThread?.(threadId, { openConversation: true });
     return true;
@@ -7949,7 +7963,7 @@
 
   function buildRailSearchResults(query = state.railSearch.query) {
     const q = railSearchQuery(query);
-    return RailSearchView.composeResults({
+    const all = RailSearchView.composeResults({
       scope: state.railSearch.scope,
       local: [
         ...buildRailSearchAgendaResults(q),
@@ -7963,6 +7977,10 @@
       navigation: railSearchLooksLikeNavigation(q),
       limit: 14,
     });
+    // UX-04: 6 rows first, the request row keeps the last place; [더 보기] adds 6.
+    const page = RailSearchView.pageResults(all, state.railSearch.visibleLimit);
+    state.railSearch.moreCount = page.hidden;
+    return page.rows;
   }
 
   function updateRailSearchActiveRow(panel = document.getElementById('egd-rail-search-results')) {
@@ -8015,6 +8033,7 @@
     if (next === RailSearchView.normalizeScope(state.railSearch.scope)) return;
     state.railSearch.scope = next;
     state.railSearch.activeIndex = 0;
+    state.railSearch.visibleLimit = RailSearchView.RAIL_SEARCH_PAGE_ROWS;
     renderRailSearchPanel();
   }
 
@@ -8095,7 +8114,21 @@
           : result.hint ? el('span', { class: 'egd-rail-search-hint' }, result.hint) : null,
       ));
     });
-    panel.replaceChildren(scopes, el('div', { class: 'egd-rail-search-list' }, ...children));
+    const moreLabel = state.railSearch.moreCount > 0 ? `더 보기 (${state.railSearch.moreCount}개)` : null;
+    const more = moreLabel ? el('button', {
+      type: 'button',
+      class: 'egd-rail-search-more',
+      title: `찾은 결과 ${RailSearchView.RAIL_SEARCH_PAGE_ROWS}개 더 보기`,
+      onmousedown: keepPointerFocus,
+      onclick: (ev) => {
+        ev.preventDefault();
+        ev.stopPropagation();
+        state.railSearch.visibleLimit = RailSearchView.nextVisibleLimit(state.railSearch.visibleLimit);
+        renderRailSearchPanel(panel);
+        panel.querySelector?.('.egd-rail-search-more')?.focus({ preventScroll: true });
+      },
+    }, moreLabel) : null;
+    panel.replaceChildren(scopes, el('div', { class: 'egd-rail-search-list' }, ...children), ...(more ? [more] : []));
     if (focusedScope) {
       Array.from(panel.querySelectorAll('.egd-rail-search-scope'))
         .find((chip) => chip.dataset.scope === focusedScope)?.focus({ preventScroll: true });
@@ -8130,6 +8163,7 @@
   }
 
   function setRailSearchQuery(query, options = {}) {
+    if (String(query || '') !== state.railSearch.query) state.railSearch.visibleLimit = RailSearchView.RAIL_SEARCH_PAGE_ROWS;
     state.railSearch.query = String(query || '');
     if (options.resetActive !== false) state.railSearch.activeIndex = 0;
     const input = document.querySelector('.egd-rail-search-input');
@@ -8139,6 +8173,9 @@
   }
 
   function handleRailSearchKeydown(ev, input) {
+    // UX-04: a key of a Korean IME composition (or its committing Enter) never runs a row.
+    if (RailSearchView.imeHoldsKey({ key: ev.key, isComposing: ev.isComposing, keyCode: ev.keyCode,
+      composing: input?._egdImeComposing === true, endedAt: input?._egdImeEndedAt || 0, now: Date.now() })) return;
     const q = railSearchQuery(input?.value || state.railSearch.query);
     if (ev.key === 'Escape') {
       if (state.railSearch.open) {
@@ -9705,7 +9742,8 @@
     const session = state.codex?.briefingSession;
     try {
       if (!session || session.threadId !== state.codex.activeThreadId || state.codex.briefingSession !== session) return [];
-      const resolvedSteps = session.briefing.steps.map((step, index) => Math.abs(index - session.index) > 1 ? [] : BriefingState.resolveBriefingTargets(step));
+      const annotations = (typeof surfaceZones === 'undefined' ? null : surfaceZones.annotation || null);
+      const resolvedSteps = session.briefing.steps.map((step, index) => Math.abs(index - session.index) > 1 ? [] : BriefingState.resolveBriefingTargets(step, { annotations }));
       return BriefingState.briefingMinimapRegions(session, resolvedSteps, { viewport: model.viewport });
     } catch { return []; }
   }
@@ -9716,7 +9754,8 @@
 
   function minimapBriefingRegionLabel(region) {
     const position = region.relativeStep === -1 ? '이전' : region.relativeStep === 1 ? '다음' : '현재';
-    return `${position} ${region.stepNumber}단계 · Canvas 영역 · ${region.label}${minimapOffscreenText(region.offscreen)}`;
+    const kindText = region.kind === 'annotationSet' ? '표식 묶음' : 'Canvas 영역';
+    return `${position} ${region.stepNumber}단계 · ${kindText} · ${region.label}${minimapOffscreenText(region.offscreen)}`;
   }
 
   function minimapBriefingEvidenceLabel(item) {
@@ -10721,6 +10760,8 @@
       value: state.railSearch.query,
       onfocus: () => openRailSearchPanel(),
       oninput: (ev) => setRailSearchQuery(ev.target.value),
+      oncompositionstart: () => { searchInput._egdImeComposing = true; },
+      oncompositionend: () => { searchInput._egdImeComposing = false; searchInput._egdImeEndedAt = Date.now(); },
       onkeydown: (ev) => {
         try {
           handleRailSearchKeydown(ev, searchInput);
@@ -10734,6 +10775,21 @@
       el('div', { class: 'egd-rail-search' },
         el('span', { class: 'egd-rail-search-icon' }, deskIcon('search')),
         searchInput,
+        // UX-04 [지우기]: clears the words only; the chosen scope stays. Hidden while empty (CSS).
+        el('button', {
+          type: 'button',
+          class: 'egd-rail-search-clear',
+          title: '검색어 지우기 (찾기 범위는 유지)',
+          data: { testid: 'rail-search-clear' },
+          onmousedown: (ev) => { ev.preventDefault(); ev.stopPropagation(); },
+          onclick: (ev) => {
+            ev.preventDefault();
+            ev.stopPropagation();
+            searchInput.value = '';
+            setRailSearchQuery('');
+            searchInput.focus({ preventScroll: true });
+          },
+        }, '지우기'),
         el('span', { class: 'egd-rail-kbd' }, '⌘K'),
       ),
     );
@@ -11352,7 +11408,7 @@
       el('div', { class: 'egd-hud-title-group' },
         el('span', { class: 'egd-hud-chat-identity', 'aria-hidden': 'true' },
           deskIcon('grip'), deskIcon('chat')),
-        el('span', { class: 'egd-hud-title' }, '채팅')),
+        el('span', { class: 'egd-hud-title' }, '대화')),
       el('div', { class: 'egd-hud-header-actions' },
         el('button', {
           class: 'egd-hud-maximize-pin', type: 'button', 'aria-pressed': 'false',
@@ -12642,8 +12698,8 @@
           conversation.appendChild(el('div', { class: 'egd-codex-conversation-hud-head' },
             el('button', {
               class: 'egd-codex-conversation-back',
-              title: '목록 홈으로',
-              'aria-label': '대화 목록으로 돌아가기',
+              title: '대화 목록으로',
+              'aria-label': '대화 목록으로',
               onclick: () => codexBridge.setHudView('list'),
             }, deskIcon('back')),
             el('div', { class: 'egd-codex-conversation-hud-center' },
@@ -12757,12 +12813,12 @@
                 class: `egd-codex-thread-member-menu-item${role === 'admin' ? ' egd-codex-thread-member-menu-item-active' : ''}`,
                 type: 'button', role: 'menuitemradio', 'aria-checked': String(role === 'admin'), data: { focusKey: 'thread-member-menu-admin' },
                 onclick: act(() => codexBridge.setThreadMemberRole(activeThread.id, member, 'admin')),
-              }, el('span', {}, '관리자'), role === 'admin' ? deskIcon('check', 'egd-codex-thread-member-menu-check') : null),
+              }, el('span', {}, '관리자'), role === 'admin' ? el('span', { class: 'egd-codex-thread-member-menu-current', title: '지금 역할' }, deskIcon('check', 'egd-codex-thread-member-menu-check')) : null),
               el('button', {
                 class: `egd-codex-thread-member-menu-item${role === 'member' ? ' egd-codex-thread-member-menu-item-active' : ''}`,
                 type: 'button', role: 'menuitemradio', 'aria-checked': String(role === 'member'), data: { focusKey: 'thread-member-menu-member' },
                 onclick: act(() => codexBridge.setThreadMemberRole(activeThread.id, member, 'member')),
-              }, el('span', {}, '멤버'), role === 'member' ? deskIcon('check', 'egd-codex-thread-member-menu-check') : null),
+              }, el('span', {}, '멤버'), role === 'member' ? el('span', { class: 'egd-codex-thread-member-menu-current', title: '지금 역할' }, deskIcon('check', 'egd-codex-thread-member-menu-check')) : null),
               el('button', {
                 class: 'egd-codex-thread-member-menu-item egd-codex-thread-member-menu-item-danger',
                 type: 'button', role: 'menuitem', data: { focusKey: 'thread-member-menu-remove' },
@@ -12828,7 +12884,8 @@
           conversation.appendChild(el('div', { class: 'egd-codex-thread-active-head' },
             el('button', {
               class: 'egd-codex-conversation-back',
-              'aria-label': '대화 목록으로 돌아가기',
+              title: '대화 목록으로',
+              'aria-label': '대화 목록으로',
               onclick: () => codexBridge.setHudView('list'),
             }, deskIcon('back')),
             el('div', { class: 'egd-codex-thread-active-title' }, activeThread.title,
@@ -15936,7 +15993,7 @@
         state.codex.activeThreadId = threadId;
         state.codex.hudView = 'conversation';
         emit();
-        if (!state.hudOpen && state.codex.chatDockMode !== 'canvas') toggleHUD('chat', '채팅');
+        if (!state.hudOpen && state.codex.chatDockMode !== 'canvas') toggleHUD('chat', '대화');
       },
       // CTX-03 '이것도 붙일까요?'.
       requestContextSuggestions(threadId, options = {}) { requestContextSuggestions(threadId, options); },
@@ -17743,7 +17800,7 @@
     state.hudApp = appId;
     hud.dataset.app = appId;
     hud.classList.remove('egd-hud-hidden');
-    hud.querySelector('.egd-hud-title').textContent = appId === 'chat' ? '채팅' : appLabel;
+    hud.querySelector('.egd-hud-title').textContent = appId === 'chat' ? '대화' : appLabel;
     syncHudViewportFit();
     syncMaximizeHudAfterToggle(options);
     body.textContent = '';
@@ -17784,7 +17841,7 @@
     }
     state.codex.chatDockMode = 'hud';
     state.codex.chatCardEntityId = null;
-    toggleHUD('chat', '채팅', { preserveConversation: true });
+    toggleHUD('chat', '대화', { preserveConversation: true });
   }
 
   const CHAT_ZOOM_GAP = 8;
@@ -18396,7 +18453,7 @@
     if (!fullscreen || fullscreen.mode === 'focus') return false;
     if (fullscreen.hudMode === 'hidden' && !state.hudOpen) {
       if (!maximizeHudPeekAvailable()) return false;
-      toggleHUD('chat', '채팅', { preserveConversation: true, maximizeHudSource: source });
+      toggleHUD('chat', '대화', { preserveConversation: true, maximizeHudSource: source });
       return state.cardFullscreen?.hudMode !== 'hidden';
     }
     applyMaximizeHudEvent(source === 'edge' ? 'edge-dwell' : 'dock-open');
@@ -18421,7 +18478,7 @@
       if (chatCard) { focusCanvasCard(chatCard); revealOpenCanvasCard(chatCard); }
       return !!chatCard;
     }
-    if (!(state.hudOpen && state.hudApp === 'chat')) toggleHUD('chat', '채팅', { preserveConversation: true });
+    if (!(state.hudOpen && state.hudApp === 'chat')) toggleHUD('chat', '대화', { preserveConversation: true });
     return true;
   }
 
