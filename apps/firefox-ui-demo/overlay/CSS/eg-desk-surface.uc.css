@@ -7262,6 +7262,11 @@ button.egd-codex-message-activity:focus-visible { outline: var(--egd-focus-outli
 .egdesk-file-editor-label { display: flex; flex-direction: column; flex: 1; min-height: 180px; gap: 5px; font-size: 12px; color: var(--egd-on-surface-variant); }
 .egdesk-file-editor { flex: 1; min-height: 160px; width: 100%; box-sizing: border-box; resize: none; white-space: pre; overflow: auto; font: 13px/1.55 ui-monospace, monospace; color: var(--egd-on-surface); background: var(--egd-surface-elevated); border: 1px solid var(--egd-outline); border-radius: 7px; padding: 10px; }
 .egdesk-file-editor:focus-visible { border-color: var(--egd-focus-border); outline: var(--egd-focus-outline); outline-offset: var(--egd-focus-outline-offset); }
+/* CODE-04: CodeMirror 6 host; colors come from --egd-* tokens in EGDeskCodeEditor.sys.mjs. */
+.egdesk-file-code-editor { flex: 1; min-height: 160px; display: flex; flex-direction: column; overflow: hidden; border: 1px solid var(--egd-outline); border-radius: 7px; background: var(--egd-surface-elevated); }
+.egdesk-file-code-editor[hidden] { display: none; }
+.egdesk-file-code-editor .cm-editor { flex: 1; min-height: 0; }
+.egdesk-file-code-editor:focus-within { border-color: var(--egd-focus-border); outline: var(--egd-focus-outline); outline-offset: var(--egd-focus-outline-offset); }
 .egdesk-file-viewer { overflow: auto; flex: 1; padding: 10px 0; color: var(--egd-on-surface-variant); }
 .egdesk-file-actions { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 10px; }
 .egdesk-file-view button { box-sizing: border-box; min-height: 28px; padding: 4px 11px; border: 1px solid var(--egd-outline); border-radius: 7px; color: var(--egd-on-surface); background: var(--egd-surface-elevated); font: 600 12px/1.4 var(--egd-font); cursor: pointer; }

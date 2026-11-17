@@ -591,6 +591,8 @@ export function createFileCardZone(deps) {
           runCheck: typeof spawnTerminalCard === 'function' ? runCheck : undefined,
           projectChecksOnly: true,
           onState: publish,
+          // CODE-04: CodeMirror needs this window's globals, so it loads here (global: 'current').
+          loadCodeEditor: () => ChromeUtils.importESModule('chrome://userchrome/content/vendor/codemirror/codemirror.bundle.mjs', { global: 'current' }),
         });
         card._fileView = view;
         view.element.inert = !!options.record || !!runFile;
@@ -601,7 +603,7 @@ export function createFileCardZone(deps) {
           '.egdesk-file-connect': 'file-connect-root', '.egdesk-file-tree': 'file-tree', '.egdesk-file-search-input': 'file-search',
           '.egdesk-file-project-connect': 'file-project-connect', '.egdesk-file-script-settings-button': 'file-script-settings',
           '.egdesk-file-project-check': 'file-project-check', '.egdesk-file-check-result': 'file-check-result',
-          '.egdesk-file-editor': 'file-editor', '.egdesk-file-review-button': 'file-review',
+          '.egdesk-file-editor': 'file-editor', '.egdesk-file-code-editor': 'file-code-editor', '.egdesk-file-review-button': 'file-review',
           '.egdesk-file-save-button': 'file-save-copy', '.egdesk-file-save-as-button': 'file-save-as', '.egdesk-file-reconnect-button': 'file-reconnect-source',
         })) view.element.querySelector(selector)?.setAttribute('data-testid', testid);
         if (runFile) {
@@ -677,7 +679,8 @@ export function createFileCardZone(deps) {
               notice.textContent = `프로젝트 연결 확인 필요 · ${error.message} 이전 파일과 작업사본은 유지했습니다. 보드 프로젝트 연결에서 다시 확인하세요.`;
             }
           }
-          const scroller = view.element.querySelector('.egdesk-file-editor-label:not([hidden]) .egdesk-file-editor, .egdesk-file-viewer:not([hidden])');
+          // CODE-04: CodeMirror's scroller when it replaced the textarea.
+          const scroller = view.element.querySelector('.egdesk-file-editor-label:not([hidden]) .cm-scroller, .egdesk-file-editor-label:not([hidden]) .egdesk-file-editor:not([hidden]), .egdesk-file-viewer:not([hidden])');
           if (scroller) scroller.scrollTop = options.record.scrollTop || 0;
           card.dataset.restored = 'true';
         }

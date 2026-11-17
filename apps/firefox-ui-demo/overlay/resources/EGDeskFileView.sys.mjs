@@ -1,3 +1,5 @@
+import { createEGDeskCodeEditor, loadEGDeskCodeEditorBundle } from './EGDeskCodeEditor.sys.mjs'
+
 export const EGDESK_FILE_CLIENT_ENDPOINTS = Object.freeze({
   openPickerChannel: '/v1/files/picker/channel',
   beginPicker: '/v1/files/picker/begin', completePicker: '/v1/files/picker/complete',
@@ -267,7 +269,7 @@ export function egdeskFileViewRegions({ connected = false, hasFile = false, edit
 // result card; resolvePath lights up openAt({path, line}); showChangeReview()
 // hosts the after-apply change review (D-X2). parts = {diffView, runResult,
 // changeReview} may inject the display modules (null turns one off).
-export function createEGDeskFileView({ document, service, chooseRoot, chooseProject, getProjectTarget, chooseSaveAs, runCheck, projectChecksOnly = false, onState = () => {}, fileChangeDelayMs = 250, parts = {} }) {
+export function createEGDeskFileView({ document, service, chooseRoot, chooseProject, getProjectTarget, chooseSaveAs, runCheck, projectChecksOnly = false, onState = () => {}, fileChangeDelayMs = 250, parts = {}, loadCodeEditor = () => loadEGDeskCodeEditorBundle(document) }) {
   if (!document?.createElement || !service || !['listDirectory', 'search', 'readFile', 'createDraft', 'updateDraft', 'saveDraft', 'saveAs', 'diffDraft'].every(name => typeof service[name] === 'function')) {
     throw new Error('File view requires a document and file-service callbacks')
   }
@@ -417,8 +419,13 @@ export function createEGDeskFileView({ document, service, chooseRoot, chooseProj
   const editorLabel = el('label', 'egdesk-file-editor-label', '텍스트 작업사본')
   const editor = el('textarea', 'egdesk-file-editor')
   editor.setAttribute('spellcheck', 'false')
-  editorLabel.append(editor)
+  // CODE-04: CodeMirror 6 replaces the textarea once its bundle loads; the
+  // textarea stays the text model (editor.value) and the fallback editor.
+  const codeEditorHost = el('div', 'egdesk-file-code-editor')
+  editorLabel.append(editor, codeEditorHost)
   editorLabel.hidden = true
+  const codeEditor = createEGDeskCodeEditor({ textarea: editor, host: codeEditorHost, loadBundle: loadCodeEditor, timers })
+  const codeEditorReady = codeEditor.mount()
   const viewer = el('div', 'egdesk-file-viewer')
   viewer.hidden = true
   const actions = el('div', 'egdesk-file-actions')
@@ -631,7 +638,7 @@ export function createEGDeskFileView({ document, service, chooseRoot, chooseProj
     checkButton.hidden = projectChecksOnly || !!activeProject
   }
   const dirty = () => !!draft && (editor.value !== draft.text || draft.bufferRevision !== draft.savedRevision)
-  const snapshot = () => ({ rootId: activeRoot?.rootId || null, projectId: activeProject?.projectId || null, fileId: activeFileId, draftId: draft?.id || null, sourceRevision: readReceipt?.diskRevision || null, sourceConnection: sourceDisconnected ? 'reconnect-required' : 'connected', bufferRevision: draft?.bufferRevision ?? null, savedRevision: draft?.savedRevision ?? null, dirty: dirty(), originalDirty: !!draft && typeof draft.baseText === 'string' && editor.value !== draft.baseText, scrollTop: editorLabel.hidden ? viewer.scrollTop : editor.scrollTop })
+  const snapshot = () => ({ rootId: activeRoot?.rootId || null, projectId: activeProject?.projectId || null, fileId: activeFileId, draftId: draft?.id || null, sourceRevision: readReceipt?.diskRevision || null, sourceConnection: sourceDisconnected ? 'reconnect-required' : 'connected', bufferRevision: draft?.bufferRevision ?? null, savedRevision: draft?.savedRevision ?? null, dirty: dirty(), originalDirty: !!draft && typeof draft.baseText === 'string' && editor.value !== draft.baseText, scrollTop: editorLabel.hidden ? viewer.scrollTop : codeEditor.scrollTop })
 
   function markCheckStale() {
     projectRevision++
@@ -1057,20 +1064,7 @@ export function createEGDeskFileView({ document, service, chooseRoot, chooseProj
   // results, later activity/result links). Only on an explicit user action.
   function revealLine(lineNumber) {
     if (!draft || editorLabel.hidden || !Number.isInteger(lineNumber) || lineNumber < 1) return false
-    const text = editor.value
-    let start = 0
-    let line = 1
-    while (line < lineNumber) {
-      const next = text.indexOf('\n', start)
-      if (next < 0) break
-      start = next + 1
-      line++
-    }
-    const end = text.indexOf('\n', start) < 0 ? text.length : text.indexOf('\n', start)
-    const lineHeight = Number.parseFloat(document.defaultView?.getComputedStyle?.(editor)?.lineHeight) || 18
-    editor.scrollTop = Math.max(0, (line - 1) * lineHeight - (editor.clientHeight || 0) / 3)
-    editor.focus()
-    editor.setSelectionRange?.(start, end)
+    const line = codeEditor.revealLine(lineNumber)
     announce(`${line}행으로 이동했습니다.`)
     return true
   }
@@ -1139,9 +1133,10 @@ export function createEGDeskFileView({ document, service, chooseRoot, chooseProj
     if (read.kind === 'text') {
       draft = nextDraft
       draftsByFile.set(fileId, draft)
-      editor.value = draft.text
+      codeEditor.setLanguage(read.name)
+      codeEditor.setText(draft.text)
       setEditable(true)
-      if (focus) editor.focus()
+      if (focus) codeEditor.focus()
       announce(disconnected ? '작업사본을 열었습니다. 원본을 다시 연결하세요.' : '작업사본을 열었습니다. 원본은 유지됩니다.')
     } else {
       draft = null
@@ -1201,9 +1196,13 @@ export function createEGDeskFileView({ document, service, chooseRoot, chooseProj
     if (draft?.id === currentDraft.id && editor.value !== draft.text) return flush()
   }
 
-  editor.addEventListener('compositionstart', () => { composing = true })
-  editor.addEventListener('compositionend', () => { composing = false; compositionEndedAt = Date.now(); scheduleFlush() })
-  editor.addEventListener('input', () => { localRevision++; markCheckStale(); announce('저장되지 않은 변경이 있습니다.'); if (!composing) scheduleFlush() })
+  const onEditorCompositionStart = () => { composing = true }
+  const onEditorCompositionEnd = () => { composing = false; compositionEndedAt = Date.now(); scheduleFlush() }
+  const onEditorInput = () => { localRevision++; markCheckStale(); announce('저장되지 않은 변경이 있습니다.'); if (!composing) scheduleFlush() }
+  for (const [type, listener] of [['compositionstart', onEditorCompositionStart], ['compositionend', onEditorCompositionEnd], ['input', onEditorInput]]) {
+    editor.addEventListener(type, listener)
+    codeEditor.on(type, listener)
+  }
   function scheduleFlush() { if (timer) timers.clearTimeout(timer); timer = timers.setTimeout(() => { timer = null; act(flush) }, 250) }
 
   // Working copy vs the original it was opened from. With EGDeskDiffView the
@@ -1322,7 +1321,7 @@ export function createEGDeskFileView({ document, service, chooseRoot, chooseProj
     if (!present(generation) || draft?.id !== targetDraftId) return
     const latestText = editor.value
     await openFile(result.resourceId)
-    if (latestText !== sentText) { editor.value = latestText; localRevision++; await flush() }
+    if (latestText !== sentText) { codeEditor.setText(latestText, { keepHistory: true }); localRevision++; await flush() }
     announce(`새 파일 ${result.targetName} 저장됨${latestText !== sentText ? ' · 새 변경 있음' : ''}`)
   }
 
@@ -1691,12 +1690,13 @@ export function createEGDeskFileView({ document, service, chooseRoot, chooseProj
     catch (cause) { showError(cause); return false }
     if (fileChangeTimer) { timers.clearTimeout(fileChangeTimer); fileChangeTimer = null }
     pendingFolders.clear()
-    disposed = true; token(); treeGeneration++; root.remove(); return true
+    disposed = true; token(); treeGeneration++; codeEditor.destroy(); root.remove(); return true
   }
   return { element: root, openRoot, openFile, reconnectSource, captureRef, restoreDraft: async ({ fileId, draftId }) => {
     const saved = fileId ? null : await service.readDraft({ draftId })
     return openFile(fileId || saved.fileId, draftId, { focus: false })
   }, snapshot, flush, close, dispose: close,
   onFileChanged, flushFileChanges, revealLine, refreshGitStatus, refreshChanges, showTab: selectTab,
-  saveOriginal, openProject, setProjectScripts, openAt, showChangeReview, check }
+  saveOriginal, openProject, setProjectScripts, openAt, showChangeReview, check,
+  codeEditorReady, setReadOnly: value => codeEditor.setReadOnly(value), get editorMode() { return codeEditor.mode } }
 }

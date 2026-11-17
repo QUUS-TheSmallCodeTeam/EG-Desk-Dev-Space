@@ -1,0 +1,13 @@
+// EG-Desk CodeMirror 6 bundle entry (see overlay/resources/vendor/VENDOR.md).
+export { EditorState, Compartment } from '@codemirror/state'
+export { EditorView, keymap, lineNumbers, highlightActiveLineGutter, highlightSpecialChars, drawSelection, highlightActiveLine } from '@codemirror/view'
+export { history, defaultKeymap, historyKeymap, undo, redo, indentWithTab } from '@codemirror/commands'
+export { search, searchKeymap, highlightSelectionMatches, openSearchPanel } from '@codemirror/search'
+export { syntaxHighlighting, defaultHighlightStyle, HighlightStyle, bracketMatching, indentOnInput, foldGutter, foldKeymap } from '@codemirror/language'
+export { tags } from '@lezer/highlight'
+export { javascript } from '@codemirror/lang-javascript'
+export { json } from '@codemirror/lang-json'
+export { css } from '@codemirror/lang-css'
+export { html } from '@codemirror/lang-html'
+export { markdown } from '@codemirror/lang-markdown'
+export { python } from '@codemirror/lang-python'
