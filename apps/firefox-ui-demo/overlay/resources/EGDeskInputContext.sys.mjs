@@ -394,6 +394,23 @@ export function sourceChangeIndex(response, conversationId) {
   return Object.freeze({ conversationId, byView });
 }
 
+// When to read GET /context/sources again for one room: at most once per
+// CONTEXT_SOURCE_REFRESH_MS. A draw asks plainly (skipped inside the window);
+// a run event that can change sources (a tool result, a context read, a
+// change notice, the end of the run) asks with signal: inside the window it
+// leaves one trailing read for when the window ends, so the change is still
+// picked up without a second read inside the window.
+export const CONTEXT_SOURCE_REFRESH_MS = 15000;
+export const CONTEXT_SOURCE_REFRESH_EVENTS = Object.freeze(['activity.completed', 'context.read.completed', 'context.sources.changed', 'run.completed']);
+export const contextSourceRefreshSignal = eventName => CONTEXT_SOURCE_REFRESH_EVENTS.includes(eventName);
+export function contextSourceRefreshPlan({ cached = null, key, now, signal = false, trailing = false, intervalMs = CONTEXT_SOURCE_REFRESH_MS } = {}) {
+  if (!cached || cached.key !== key) return { read: true, delayMs: null };
+  const elapsed = now - cached.at;
+  if (!cached.loading && (elapsed >= intervalMs || elapsed < 0)) return { read: true, delayMs: null };
+  if (!signal || trailing) return { read: false, delayMs: null };
+  return { read: false, delayMs: Math.max(0, intervalMs - Math.max(0, elapsed)) };
+}
+
 // Stable comparison key: redraw only when what the chips show changes.
 export const sourceChangeIndexKey = index => index
   ? JSON.stringify([index.conversationId, [...index.byView.values()].filter(entry => entry.state === 'stale').map(entry => [entry.viewId, entry.reason, entry.changedAt]).sort()])

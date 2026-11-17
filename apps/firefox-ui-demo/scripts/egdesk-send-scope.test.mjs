@@ -149,3 +149,42 @@ return { buildChatInputTray };`, Object.keys(deps))(...Object.values(deps))
   assert.equal(other.byTestid('chat-attachment')[0].dataset.changed, undefined)
   assert.equal(api.buildChatInputTray(thread, {}).byTestid('chat-send-scope').length, 0)
 })
+
+// ============ CTX-04 run-time refresh: tool results ask again, still at most every 15 s ============
+
+test('CTX-04 refresh plan: a draw reads once per 15 s; a run signal inside the window leaves one trailing read', () => {
+  const key = '{"conversationId":"c1"}';
+  const plan = InputContext.contextSourceRefreshPlan;
+  assert.equal(InputContext.CONTEXT_SOURCE_REFRESH_MS, 15000);
+  assert.deepEqual(plan({ cached: null, key, now: 0 }), { read: true, delayMs: null }, 'first read');
+  assert.deepEqual(plan({ cached: { key: 'other', at: 0 }, key, now: 1 }), { read: true, delayMs: null }, 'another scope reads at once');
+  const cached = { key, at: 10_000, loading: false };
+  assert.deepEqual(plan({ cached, key, now: 14_000 }), { read: false, delayMs: null }, 'a draw inside the window waits');
+  assert.deepEqual(plan({ cached, key, now: 14_000, signal: true }), { read: false, delayMs: 11_000 }, 'a tool result inside the window: one read when it ends');
+  assert.deepEqual(plan({ cached, key, now: 14_000, signal: true, trailing: true }), { read: false, delayMs: null }, 'never a second trailing read');
+  assert.deepEqual(plan({ cached, key, now: 25_000, signal: true }), { read: true, delayMs: null }, 'after the window a signal reads at once');
+  assert.deepEqual(plan({ cached, key, now: 25_000 }), { read: true, delayMs: null });
+  assert.deepEqual(plan({ cached: { ...cached, loading: true }, key, now: 40_000 }), { read: false, delayMs: null }, 'one read in flight at a time');
+  assert.deepEqual(plan({ cached: { ...cached, loading: true }, key, now: 12_000, signal: true }), { read: false, delayMs: 13_000 },
+    'a signal during a read can postdate it: read again when the window ends');
+  for (const name of ['activity.completed', 'context.read.completed', 'context.sources.changed', 'run.completed']) {
+    assert.equal(InputContext.contextSourceRefreshSignal(name), true, name);
+  }
+  for (const name of ['message.delta', 'message.completed', 'run.started', 'plan.updated', undefined]) {
+    assert.equal(InputContext.contextSourceRefreshSignal(name), false, String(name));
+  }
+});
+
+test('CTX-04 refresh wiring: the bridge cache uses the plan, keeps one trailing timer per room, and run tool results signal it', () => {
+  const source = readSurfaceSource();
+  const fn = source.match(/    function refreshContextSources\(threadId, \{ signal = false \} = \{\}\) \{\n([\s\S]*?)\n    \}\n/)?.[1] || '';
+  assert.match(fn, /InputContext\.contextSourceRefreshPlan\(\{ cached, key, now: Date\.now\(\), signal, trailing: contextSourceTrailing\.has\(threadId\) \}\)/);
+  assert.match(fn, /contextSourceTrailing\.set\(threadId, window\.setTimeout\(\(\) => \{\n            contextSourceTrailing\.delete\(threadId\);\n            refreshContextSources\(threadId, \{ signal: true \}\);/);
+  assert.ok(fn.indexOf('window.clearTimeout(contextSourceTrailing.get(threadId));') < fn.indexOf('fetchJson(`/context/sources?'),
+    'a read now replaces a pending trailing read');
+  assert.doesNotMatch(fn, /Date\.now\(\) - cached\.at < 15000/, 'one rule: the plan');
+  assert.match(source, /if \(run\?\.localThreadId && InputContext\.contextSourceRefreshSignal\(event\.event\)\) refreshContextSources\(run\.localThreadId, \{ signal: true \}\);/);
+  const forget = source.match(/    function forgetContextSuggestions\(\) \{\n([\s\S]*?)\n    \}\n/)?.[1] || '';
+  assert.match(forget, /for \(const timer of contextSourceTrailing\.values\(\)\) window\.clearTimeout\(timer\);\n      contextSourceTrailing\.clear\(\);/,
+    'an account or bridge change drops pending reads');
+});

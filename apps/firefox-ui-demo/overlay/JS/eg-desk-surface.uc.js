@@ -13935,16 +13935,21 @@
     const CONTEXT_SUGGEST_FAILED = '자료 추천을 지금 불러오지 못했어요. 필요한 자료는 ＋ 첨부로 붙여 주세요.';
     let contextSuggestTimer = 0;
     let contextSuggestSeq = 0;
+    const contextSourceTrailing = new Map();
     function forgetContextSuggestions() {
       window.clearTimeout(contextSuggestTimer);
       contextSuggestTimer = 0;
       contextSuggestSeq++;
       state.contextSuggest = { unsupportedUntil: 0, byThread: {} };
       state.contextSourceChanges = {};
+      for (const timer of contextSourceTrailing.values()) window.clearTimeout(timer);
+      contextSourceTrailing.clear();
     }
     // CTX-04 '바뀜': this room's tracked sources, at most every 15 s per room
     // and scope. Ids, kinds and reason codes only; redraws only on a change.
-    function refreshContextSources(threadId) {
+    // A run event that can change sources ({ signal: true }) inside the window
+    // leaves one trailing read for when the window ends.
+    function refreshContextSources(threadId, { signal = false } = {}) {
       const thread = getCodexThreadById(state.codex, threadId);
       if (!thread?.conversationId || ChatState.nativeBindingHeld(thread) || ChatState.chatThreadEngineId(thread, state.codex) !== 'codex'
           || !state.codex.connected || !state.codex.authStatus?.isLoggedIn) return;
@@ -13953,7 +13958,18 @@
       if (!scope?.conversationId) return;
       const store = state.contextSourceChanges || (state.contextSourceChanges = {});
       const key = JSON.stringify(scope), cached = store[threadId];
-      if (cached?.key === key && (cached.loading || Date.now() - cached.at < 15000)) return;
+      const plan = InputContext.contextSourceRefreshPlan({ cached, key, now: Date.now(), signal, trailing: contextSourceTrailing.has(threadId) });
+      if (!plan.read) {
+        if (plan.delayMs !== null) {
+          contextSourceTrailing.set(threadId, window.setTimeout(() => {
+            contextSourceTrailing.delete(threadId);
+            refreshContextSources(threadId, { signal: true });
+          }, plan.delayMs + 50));
+        }
+        return;
+      }
+      window.clearTimeout(contextSourceTrailing.get(threadId));
+      contextSourceTrailing.delete(threadId);
       const entry = { index: cached?.key === key ? cached.index : null, key, conversationId: scope.conversationId, loading: true, at: Date.now() };
       store[threadId] = entry;
       const query = Object.entries(scope).map(([name, value]) => `${name}=${encodeURIComponent(value)}`).join('&');
@@ -14938,6 +14954,8 @@
             // CHAT-06 Await: an Agent proposed a plan; its approval card goes under this run's answer.
             if (run && event.event === 'plan.proposed') planProposalFrame(run, event.details);
             if (run) { syncProtocolRun(run); emit(); }
+            // CTX-04: tool results can change tracked sources; '바뀜' reads again (still at most every 15 s).
+            if (run?.localThreadId && InputContext.contextSourceRefreshSignal(event.event)) refreshContextSources(run.localThreadId, { signal: true });
           }
           return;
         }
