@@ -1948,3 +1948,47 @@ test('BRW-10: the UI accepts guarded pointer-click and type-text acts and return
   }
   assert.equal(queries.length, 2, 'one actor query per request; nothing retried')
 })
+
+test('BRW-13 (REA 5): the Agent dot glides from the Card\'s previous target and never delays input', async () => {
+  const p = projectionFixture()
+  const moves = []
+  const marker = { hidden: true, layoutReads: 0, style: {
+    set left(value) { moves.push(['left', value]) }, set top(value) { moves.push(['top', value]) } },
+  getBoundingClientRect() { this.layoutReads++; moves.push(['layout']); return {} } }
+  const projection = new Function('browserToolActionLeases', 'browserToolRunBindings', 'browserToolCardLeases',
+    'browserToolCancelledRuns', 'browserToolStoppedRuns', `${between('  function browserToolDisplayPoint(action, guard) {',
+      '  function browserToolAuthorizePhysicalAction(')}\nreturn createBrowserAgentProjection`)(
+    p.f.actionLeases, p.f.runBindings, p.f.leases, p.f.cancelled, p.f.stoppedRuns)({ card: p.f.card, marker,
+    current: () => true, scheduler: { setTimeout: () => 1, clearTimeout() {}, requestAnimationFrame: () => 1, cancelAnimationFrame() {} },
+    now: p.f.now })
+  const lease = point => ({ card: p.f.card, deadlineMs: p.f.now() + 5000, displayPoint: point })
+  projection.prepare(lease({ x: 10, y: 20 })).show()
+  assert.deepEqual(moves, [['left', '10%'], ['top', '20%']], 'the first target appears in place')
+  assert.equal(marker.layoutReads, 0)
+  moves.length = 0
+  projection.prepare(lease({ x: 60, y: 40 })).show()
+  assert.deepEqual(moves, [['left', '10%'], ['top', '20%'], ['layout'], ['left', '60%'], ['top', '40%']],
+    'the next one starts where the last ended, so CSS eases the move')
+  assert.equal(marker.hidden, false)
+  // A request without a point moves nothing and keeps the last point for the next glide.
+  moves.length = 0
+  projection.prepare(lease(null)).show()
+  assert.deepEqual(moves, [])
+  projection.prepare(lease({ x: 5, y: 5 })).show()
+  assert.deepEqual(moves.slice(0, 2), [['left', '60%'], ['top', '40%']])
+})
+
+test('BRW-13 (REA 5): the glide is a 150-250 ms ease on left/top and is off with reduced motion', () => {
+  const css = readFileSync(new URL('../overlay/CSS/eg-desk-surface.uc.css', import.meta.url), 'utf8')
+  const rule = css.match(/\n\.egd-browser-agent-target \{\n  transition: ([^;]+);\n\}/)?.[1]
+  assert.ok(rule, 'transition rule on the Agent dot')
+  for (const part of rule.split(/,\s*(?=left|top)/)) {
+    const [, property, ms] = part.trim().match(/^(left|top) (\d+)ms cubic-bezier\(/) || []
+    assert.ok(property, part)
+    assert.ok(Number(ms) >= 150 && Number(ms) <= 250, `${property} ${ms}ms`)
+  }
+  // The shared reduced-motion block turns every egd- transition off, the dot included.
+  const reduced = css.match(/@media \(prefers-reduced-motion: reduce\) \{([\s\S]*?)\n\}/)?.[1] || ''
+  assert.match(reduced, /\[class\*="egd-"\][\s\S]*transition: none !important;/)
+  assert.match(css, /\.egd-browser-agent-target \{[^}]*pointer-events: none !important;/, 'still never takes input')
+})

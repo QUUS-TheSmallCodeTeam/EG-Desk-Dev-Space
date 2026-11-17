@@ -21261,7 +21261,7 @@
     } catch { return false; }
   }
   function createBrowserAgentProjection({ card, marker, current, scheduler = window, now = () => Date.now() }) {
-    let generation = 0, active = null, frame = 0, timer = 0, disposed = false;
+    let generation = 0, active = null, frame = 0, timer = 0, disposed = false, lastPoint = null;
     const hide = () => {
       if (frame) scheduler.cancelAnimationFrame(frame);
       if (timer) scheduler.clearTimeout(timer);
@@ -21290,9 +21290,19 @@
           card.dataset.egdAgentActivity = 'true';
           const point = lease.displayPoint;
           if (point && [point.x, point.y].every(value => Number.isFinite(value) && value >= 0 && value <= 100)) {
+            // BRW-13 (REA 5, inferred): glide from this Card's last point; CSS
+            // eases left/top over 200 ms, none with reduced motion. Display
+            // only: input never waits for it and arrival is never evidence.
+            if (lastPoint) {
+              marker.style.left = `${lastPoint.x}%`;
+              marker.style.top = `${lastPoint.y}%`;
+              marker.hidden = false;
+              try { marker.getBoundingClientRect?.(); } catch {}
+            }
             marker.style.left = `${point.x}%`;
             marker.style.top = `${point.y}%`;
             marker.hidden = false;
+            lastPoint = { x: point.x, y: point.y };
           }
           const check = () => {
             if (active !== lease) return;
