@@ -25,6 +25,7 @@
 // through without being recorded; stats() holds counters with fixed keys only.
 
 import { publicText } from './codex-chat-values.mjs'
+import { CLAUDE_MCP_OUTPUT_LIMIT_TOKENS, claudeToolResultBound } from './egdesk-claude-limits.mjs'
 
 export const EGDESK_MCP_SERVER_NAME = 'egdesk'
 // Newest first. The CLI's requested version is echoed when listed here.
@@ -132,7 +133,21 @@ export function callToolResultFromResponse(result, error) {
 }
 
 /**
- * createEgdeskClaudeMcp({ threadId, tools, serverName?, serverVersion?, nextRpcId?, limits? })
+ * SUB-09 MCP output limit: a result whose token upper bound
+ * (claudeToolResultBound) exceeds the MAX_MCP_OUTPUT_TOKENS EG-Desk gave the
+ * process is replaced by a tool error. Nothing is clipped; the model reads
+ * why and may ask for a narrower read (e.g. egdesk_read_source with a range).
+ */
+export function boundedCallToolResult(result, limitTokens = CLAUDE_MCP_OUTPUT_LIMIT_TOKENS) {
+  const bound = claudeToolResultBound(result)
+  if (bound <= limitTokens) return { result, bound, limited: false }
+  const text = JSON.stringify({ error: { code: 'EGDESK_TOOL_OUTPUT_LIMIT',
+    message: `The tool result (upper bound ${bound} tokens) exceeds the ${limitTokens} token tool-output limit; nothing was clipped. Request a narrower range or use a source Reader.` } })
+  return { result: { content: [{ type: 'text', text }], isError: true }, bound, limited: true }
+}
+
+/**
+ * createEgdeskClaudeMcp({ threadId, tools, serverName?, serverVersion?, nextRpcId?, limits?, outputLimitTokens? })
  * One per Claude session. `tools` is the thread's EG-Desk catalog (the specs
  * the runtime passed as dynamicTools to startThread).
  *   handle(controlMessage, { turnId })  → { write?: controlResponse, serverRequest?: {id, method:'item/tool/call', params} }
@@ -144,8 +159,9 @@ export function callToolResultFromResponse(result, error) {
  *   owns(rpcId) / listTools() / stats()
  * rpcIds are strings `claude:<threadId>:mcp:<n>` unless nextRpcId is given.
  */
-export function createEgdeskClaudeMcp({ threadId, tools = [], serverName = EGDESK_MCP_SERVER_NAME, serverVersion = '1', nextRpcId = null, limits = {} } = {}) {
+export function createEgdeskClaudeMcp({ threadId, tools = [], serverName = EGDESK_MCP_SERVER_NAME, serverVersion = '1', nextRpcId = null, limits = {}, outputLimitTokens = CLAUDE_MCP_OUTPUT_LIMIT_TOKENS } = {}) {
   if (!idText(threadId)) throw new TypeError('createEgdeskClaudeMcp requires a threadId')
+  if (!Number.isSafeInteger(outputLimitTokens) || outputLimitTokens <= 0) throw new TypeError('createEgdeskClaudeMcp requires a positive outputLimitTokens')
   const L = { ...EGDESK_MCP_LIMITS, ...limits }
   const server = serverToken(serverName)
   if (!server) throw new TypeError('createEgdeskClaudeMcp requires a server name token')
@@ -154,7 +170,7 @@ export function createEgdeskClaudeMcp({ threadId, tools = [], serverName = EGDES
   const makeId = typeof nextRpcId === 'function' ? nextRpcId : () => `claude:${threadId}:mcp:${++counter}`
   const pending = new Map() // rpcId → { requestId, jsonId, cancelled }
   const byRequest = new Map() // control request_id → rpcId
-  const stats = { messages: 0, methods: {}, refused: 0, cancelled: 0, abandoned: 0, skippedTools: catalog.skipped }
+  const stats = { messages: 0, methods: {}, refused: 0, cancelled: 0, abandoned: 0, skippedTools: catalog.skipped, outputLimited: 0 }
 
   const bump = method => { const key = COUNTED_METHODS.has(method) ? method : 'other'; stats.methods[key] = (stats.methods[key] || 0) + 1 }
   const reply = (requestId, mcpResponse) => ({ type: 'control_response', response: { subtype: 'success', request_id: requestId, response: { mcp_response: mcpResponse } } })
@@ -223,7 +239,9 @@ export function createEgdeskClaudeMcp({ threadId, tools = [], serverName = EGDES
       pending.delete(rpcId)
       byRequest.delete(entry.requestId)
       if (entry.cancelled) return { write: fail(entry.requestId, entry.jsonId, REQUEST_CANCELLED, 'Request cancelled') }
-      return { write: ok(entry.requestId, entry.jsonId, callToolResultFromResponse(result, error)) }
+      const bounded = boundedCallToolResult(callToolResultFromResponse(result, error), outputLimitTokens)
+      if (bounded.limited) stats.outputLimited++
+      return { write: ok(entry.requestId, entry.jsonId, bounded.result) }
     },
     cancel(requestId) {
       const rpcId = byRequest.get(requestId)
@@ -242,6 +260,7 @@ export function createEgdeskClaudeMcp({ threadId, tools = [], serverName = EGDES
     },
     owns: rpcId => pending.has(rpcId),
     listTools: () => structuredClone(catalog.tools),
+    outputLimitTokens: () => outputLimitTokens,
     stats: () => JSON.parse(JSON.stringify(stats)),
   }
 }

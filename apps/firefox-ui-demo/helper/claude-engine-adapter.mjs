@@ -50,6 +50,7 @@ import {
 import { createClaudePermissionBroker } from './claude-engine-permissions.mjs'
 import { EGDESK_MCP_SERVER_NAME, createEgdeskClaudeMcp, egdeskAllowedToolsRule, egdeskMcpConfig } from './egdesk-claude-mcp.mjs'
 import { applyClaudeRateLimit, createClaudeTranslator } from './claude-stream-translate.mjs'
+import { CLAUDE_MCP_OUTPUT_LIMIT_TOKENS, claudeParentLimitEnv, createClaudeProcessBudget } from './egdesk-claude-limits.mjs'
 
 export const CLAUDE_ENGINE_ID = 'claude'
 
@@ -70,6 +71,7 @@ export const CLAUDE_ADAPTER_DEFAULTS = Object.freeze({
   interruptMs: 10_000, // the interrupt control request
   interruptSettleMs: 15_000, // backstop: a turn still open after this is ended by closing the process
   maxSessions: 500, // remembered conversations (records only; no process)
+  usageTimeoutMs: 3000, // get_context_usage control request (Reader capacity evidence)
 })
 
 // `--permission-mode manual` and `--system-prompt-snapshot off` were checked
@@ -153,6 +155,10 @@ export function claudeTurnContent({ input, additionalContext = null } = {}) {
  *   minVersion, requiredCapabilities[]   run gates (version before spawn, init.capabilities on system/init)
  *   residentLimit, idleTimeoutMs, interruptMs, interruptSettleMs, maxSessions
  *   onStatusChange()      called when the public row may have changed (bridge: engineStatus.check())
+ *   processBudget         egdesk-claude-limits budget shared with the Reader (SUB-09: one Claude
+ *                         process limit across parents and Readers); own budget when omitted
+ *   mcpOutputLimitTokens  MAX_MCP_OUTPUT_TOKENS given to each parent and enforced by its EG-Desk MCP
+ *   collectContextUsage   false skips the get_context_usage observations (Reader capacity evidence)
  *   resolveExecutable, createTransport, transportOptions, randomUUID, now, setTimer, clearTimer   (tests)
  *
  * Besides the EngineAdapter methods: owns(rpcId), syncStatus(), apiKeyEnv(),
@@ -170,9 +176,12 @@ export function createClaudeEngineAdapter(options = {}) {
     randomUUID = nodeRandomUUID, now = Date.now, getEpoch = () => 0,
     setTimer = (fn, ms) => { const timer = setTimeout(fn, ms); timer.unref?.(); return timer },
     clearTimer = timer => clearTimeout(timer),
+    mcpOutputLimitTokens = CLAUDE_MCP_OUTPUT_LIMIT_TOKENS, collectContextUsage = true,
   } = options
   const limits = { ...CLAUDE_ADAPTER_DEFAULTS }
   for (const key of Object.keys(limits)) if (Number.isSafeInteger(options[key]) && options[key] > 0) limits[key] = options[key]
+  const processBudget = options.processBudget || createClaudeProcessBudget({ total: Math.max(3, limits.residentLimit), parent: limits.residentLimit })
+  const limitEnv = claudeParentLimitEnv(mcpOutputLimitTokens)
   const isAbsolute = value => typeof value === 'string' && value.length <= 4096 && !value.includes('\0') && (platform === 'win32' ? path.win32.isAbsolute(value) : path.posix.isAbsolute(value))
   if (!isAbsolute(defaultCwd)) throw new TypeError('createClaudeEngineAdapter requires an absolute defaultCwd')
 
@@ -189,6 +198,8 @@ export function createClaudeEngineAdapter(options = {}) {
   let lastReady = false
   let lastOwner = null
   let ownerEpoch = 0 // includes signed-out/back-in to the same owner
+  let baseline = null // newest pre-first-message get_context_usage observation (Reader evidence)
+  const isolation = { hookEvents: 0, hookCallbacks: 0 } // D-S2 evidence: must stay 0 with hooks off
 
   const deliver = (kind, value) => { for (const sink of [...sinks]) { try { sink[kind]?.(CLAUDE_ENGINE_ID, value) } catch {} } }
   const statusChanged = () => { try { onStatusChange() } catch {} }
@@ -317,6 +328,24 @@ export function createClaudeEngineAdapter(options = {}) {
     if (!proc) return
     await proc.transport.close(closeOptions).catch(() => {})
     if (session.proc === proc) session.proc = null
+    if (proc.transport.state?.() === 'exited') proc.lease?.release()
+  }
+
+  // SUB-09 capacity evidence: this conversation's own native usage, never a
+  // model-name table. Kept only while the same owner/process answered it.
+  async function collectUsage(session, proc, basis) {
+    if (!collectContextUsage || proc.exited || session.proc !== proc) return null
+    const owner = ownerKey(), epoch = ownerEpoch
+    let usage
+    try { usage = await proc.transport.request('get_context_usage', {}, { timeoutMs: limits.usageTimeoutMs }) } catch { return null }
+    if (!plainObject(usage) || owner === null || owner !== ownerKey() || epoch !== ownerEpoch || session.proc !== proc || proc.exited) return null
+    let copy
+    try { copy = structuredClone(usage) } catch { return null }
+    const observation = Object.freeze({ threadId: session.threadId, ownerKey: owner, engineBuild: proc.engineBuild,
+      usage: copy, observedAt: now(), mcpOutputLimitTokens: proc.mcp.outputLimitTokens(), basis })
+    session.observation = observation
+    if (basis === 'baseline') baseline = observation
+    return observation
   }
 
   // Two resident processes at most; the longest-idle one makes room.
@@ -331,8 +360,24 @@ export function createClaudeEngineAdapter(options = {}) {
     for (const entry of idle.slice(0, live.length - limits.residentLimit + 1)) await closeProcess(entry, { graceMs: 2000 })
   }
 
+  // SUB-09: the process budget shared with source Readers. An idle parent
+  // gives its slot up; a busy one (or Readers holding the rest) means BUSY.
+  async function leaseProcess(session) {
+    let lease = processBudget.tryAcquire('parent')
+    if (lease) return lease
+    const idle = [...sessions.values()].filter(entry => entry !== session && entry.proc && !entry.starting && !entry.activeTurn && !entry.turnStarting && !pendingOf(entry.proc))
+      .sort((a, b) => a.lastUsedAt - b.lastUsedAt)
+    if (idle.length) {
+      await closeProcess(idle[0], { graceMs: 2000 })
+      lease = processBudget.tryAcquire('parent')
+    }
+    if (!lease) throw definite(engineError('ENGINE_BUSY', 'Every Claude process slot (conversations and source Readers) is in use; wait for one to finish'))
+    return lease
+  }
+
   function onProcessExit(session, proc) {
     proc.exited = true
+    proc.lease?.release()
     for (const notification of proc.broker.abortAll()) deliver('notification', notification)
     proc.mcp.abortAll()
     proc.mcpPending.clear()
@@ -355,6 +400,9 @@ export function createClaudeEngineAdapter(options = {}) {
   }
 
   function onProcessMessage(session, proc, message) {
+    // D-S2: hooks are off (--settings disableAllHooks, no SDK hooks). A hook
+    // event means a managed or otherwise unswitchable hook ran for this build.
+    if (message?.type === 'system' && typeof message.subtype === 'string' && message.subtype.startsWith('hook_')) isolation.hookEvents++
     if (message?.type === 'system' && message.subtype === 'init') {
       session.hasHistory = true
       const init = proc.transport.info().init
@@ -374,6 +422,7 @@ export function createClaudeEngineAdapter(options = {}) {
         session.lastUsedAt = now()
         clearSettle(session)
         scheduleIdle(session)
+        void collectUsage(session, proc, 'turn')
       }
     }
   }
@@ -383,26 +432,29 @@ export function createClaudeEngineAdapter(options = {}) {
     if (session.starting) return session.starting
     session.starting = (async () => {
       await makeRoom(session)
-      assertDispatch()
+      const lease = await leaseProcess(session)
+      try { assertDispatch() } catch (error) { lease.release(); throw error }
       let executablePath = null
       try { executablePath = resolveExecutable(env, { platform }) } catch {}
-      if (!executablePath) throw definite(engineError('ENGINE_NOT_INSTALLED'), 'CLAUDE_NOT_FOUND')
+      if (!executablePath) { lease.release(); throw definite(engineError('ENGINE_NOT_INSTALLED'), 'CLAUDE_NOT_FOUND') }
       const check = status()
       const spec = session.spec
       const helpChecked = coreVersion(check.version) && compareVersions(coreVersion(check.version), CLAUDE_HELP_CHECKED_VERSION) >= 0
       const threadId = session.threadId
       const proc = {
         transport: null, exited: false, gateCode: null, mcpPending: new Map(), // rpc id → control request id
+        lease, engineBuild: typeof check.version === 'string' ? check.version : null,
         flags: { cwd: spec.cwd, model: spec.model, effort: spec.effort, appendPrompt: spec.appendPrompt, tools: spec.tools },
         broker: createClaudePermissionBroker({ threadId, egdeskServer: EGDESK_MCP_SERVER_NAME, offerSessionGrant: true,
           nextRpcId: () => nextRpcId(threadId, 'perm') }),
         mcp: createEgdeskClaudeMcp({ threadId, tools: spec.tools, serverName: EGDESK_MCP_SERVER_NAME,
-          nextRpcId: () => nextRpcId(threadId, 'mcp') }),
+          nextRpcId: () => nextRpcId(threadId, 'mcp'), outputLimitTokens: mcpOutputLimitTokens }),
       }
       const hasTools = proc.mcp.listTools().length > 0
       const turnOf = () => session.activeTurn?.turnId ?? null
       proc.transport = createTransport({
         ...transportOptions,
+        extraEnv: { ...(plainObject(transportOptions.extraEnv) || {}), ...limitEnv },
         executablePath, cwd: spec.cwd, version: typeof check.version === 'string' ? check.version : null,
         minVersion, requiredCapabilities, apiKeyEnvPolicy: apiKeyConfirmed ? 'strip' : 'stop', env, platform, inherit,
         model: spec.model, effort: spec.effort, appendPrompt: spec.appendPrompt,
@@ -420,8 +472,24 @@ export function createClaudeEngineAdapter(options = {}) {
           mcp_message: (request, { requestId }) => {
             const routed = proc.mcp.handle({ kind: 'mcpMessage', requestId, request }, { turnId: turnOf() })
             if (routed.write) return { write: routed.write }
-            if (routed.serverRequest) { proc.mcpPending.set(routed.serverRequest.id, requestId); clearIdle(session); deliver('serverRequest', routed.serverRequest) }
+            if (routed.serverRequest) {
+              proc.mcpPending.set(routed.serverRequest.id, requestId)
+              clearIdle(session)
+              // A source read is admitted against this conversation's usage
+              // measured now, not after the previous turn (Reader evidence).
+              if (routed.serverRequest.params?.tool === 'egdesk_read_source' && collectContextUsage) {
+                void collectUsage(session, proc, 'tool-call').finally(() => {
+                  if (proc.mcpPending.has(routed.serverRequest.id)) deliver('serverRequest', routed.serverRequest)
+                })
+              } else deliver('serverRequest', routed.serverRequest)
+            }
             return undefined
+          },
+          hook_callback: () => {
+            // EG-Desk registers no SDK hooks (initialize hooks: null).
+            isolation.hookCallbacks++
+            isolation.hookEvents++
+            return { error: 'EG-Desk registers no hooks' }
           },
         },
         onControlCancel: (requestId, subtype, reason) => {
@@ -447,9 +515,11 @@ export function createClaudeEngineAdapter(options = {}) {
       try {
         await proc.transport.start()
         assertDispatch()
+        if (!session.hasHistory) void collectUsage(session, proc, 'baseline')
       } catch (error) {
         if (session.proc === proc) session.proc = null
         await proc.transport.close({ graceMs: 0 }).catch(() => {})
+        lease.release()
         if (error?.definite === true) throw error
         throw claudeStartError(error)
       }
@@ -469,6 +539,8 @@ export function createClaudeEngineAdapter(options = {}) {
     const accountChanged = lastReady && ready && owner !== lastOwner
     if (!ready || accountChanged) {
       ownerEpoch++
+      baseline = null
+      for (const session of sessions.values()) session.observation = null
       for (const session of sessions.values()) void closeProcess(session, { graceMs: 0 })
     }
     if (accountChanged) deliver('connection', { ready: false })
@@ -675,6 +747,19 @@ export function createClaudeEngineAdapter(options = {}) {
       return apiKeyEnv()
     },
     usage: usageRow,
+    /** SUB-09 Reader evidence: this conversation's newest native get_context_usage (frozen) or null. */
+    contextObservation(threadId) {
+      const session = typeof threadId === 'string' ? sessions.get(threadId.toLowerCase()) : null
+      const observation = session?.observation
+      return observation && observation.ownerKey === ownerKey() ? observation : null
+    },
+    baselineObservation: () => (baseline && baseline.ownerKey === ownerKey() ? baseline : null),
+    async collectContextUsage(threadId) {
+      const session = typeof threadId === 'string' ? sessions.get(threadId.toLowerCase()) : null
+      return session?.proc ? collectUsage(session, session.proc, session.hasHistory ? 'turn' : 'baseline') : null
+    },
+    isolationEvents: () => ({ ...isolation }),
+    processBudget: () => processBudget,
     stats: () => ({
       sessions: sessions.size, residentProcesses: liveCount(),
       activeTurns: [...sessions.values()].filter(session => session.activeTurn).length,

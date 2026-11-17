@@ -257,7 +257,9 @@ test('a new conversation starts claude on its first turn with the isolation flag
   assert.equal(opts.env.ENABLE_CLAUDEAI_MCP_SERVERS, 'false')
   assert.equal(opts.env.HOME, '/Users/test', 'login stays shared')
   const child = h.children[0]
-  assert.deepEqual(child.written.map(message => message.type === 'control_request' ? message.request.subtype : message.type), ['initialize', 'user'])
+  // SUB-09: the pre-first-message usage baseline (Reader capacity evidence) rides the same control channel.
+  assert.deepEqual(child.written.map(message => message.type === 'control_request' ? message.request.subtype : message.type), ['initialize', 'get_context_usage', 'user'])
+  assert.equal(opts.env.MAX_MCP_OUTPUT_TOKENS, '10000', 'the MCP output ceiling EG-Desk enforces is the one the CLI applies')
   assert.deepEqual(child.userLines()[0].message, { role: 'user', content: 'Reply with exactly: ok' })
   assert.deepEqual(h.methods(), ['turn/started'])
   assert.equal(h.events.notifications[0].params.turn.id, turn.turn.id)
