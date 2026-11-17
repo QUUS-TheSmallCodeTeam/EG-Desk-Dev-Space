@@ -233,6 +233,7 @@ export function createDeviceLock({ lockPath, now = Date.now, pid = process.pid, 
  *   (not-dispatched), let a running action stop at its next checkpoint, run its
  *   cleanups (release held keys and buttons) and only then resolve the ACK.
  *   Input already sent is not reported as cancelled.
+ * - takeOver(): [일시중지 · 내가 쓰기], a takeover asked for on screen.
  * - handBack({target}): [Agent에게 돌려주기]. Without a target it ends a
  *   takeover and every stop; with one it resumes that app only.
  * - revoke(code), setInputMonitor(ok), status().
@@ -504,6 +505,22 @@ export function createHostLease({
     return { ok: true, status: snapshot() }
   }
 
+  // [일시중지 · 내가 쓰기] from the host-activity view (CU-01): the person
+  // takes the Mac on purpose. Like a takeover by input: actions not yet sent
+  // are dropped, a running one stops at its next checkpoint, and only
+  // handBack() gives it back. control.yielded says reason 'user-request'.
+  function takeOver() {
+    const t = now()
+    lastHuman = t
+    yielded = true
+    moveDistance = 0
+    if (state === 'ai' || state === 'ready') setState('user', CODES.USER_INTERVENTION)
+    const dropped = flushQueues(CODES.USER_INTERVENTION)
+    emit({ type: 'control.yielded', reason: 'user-request', epoch, at: t })
+    emitState()
+    return { ok: true, notDispatched: dropped, status: snapshot(t) }
+  }
+
   async function stopApp(target) {
     const lane = hostLaneKey(target)
     if (!lane) throw new TypeError('stopApp needs a target app')
@@ -643,5 +660,5 @@ export function createHostLease({
     })
   }
 
-  return { begin, checkpoint, end, run, observeInput, handBack, stopApp, stopAll, revoke, setInputMonitor, status }
+  return { begin, checkpoint, end, run, observeInput, handBack, takeOver, stopApp, stopAll, revoke, setInputMonitor, status }
 }
