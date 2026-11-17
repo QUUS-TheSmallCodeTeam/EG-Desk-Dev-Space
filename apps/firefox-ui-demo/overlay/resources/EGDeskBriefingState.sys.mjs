@@ -25,6 +25,25 @@ export function briefingStepTargets(step) {
 }
 export const briefingEmphasis = step => step?.emphasis === 'outline' ? 'outline' : 'spotlight';
 
+// CNV-07 target kinds. 'canvasRect' is a Canvas area (egdesk_publish_briefing_
+// regions); 'annotationSet' is reserved for CNV-05 annotation sets and is
+// resolved as unsupported until those exist — add its resolution here.
+export const BRIEFING_TARGET_KINDS = Object.freeze(['source', 'artifact', 'canvasRect', 'annotationSet']);
+export function briefingTargetKind(target) {
+  if (!isTarget(target)) return null;
+  if (Object.hasOwn(target, 'annotationSetId')) return 'annotationSet';
+  if (Object.hasOwn(target, 'canvasRect')) return 'canvasRect';
+  if (target.sourceId) return 'source';
+  if (target.artifactId) return 'artifact';
+  return null;
+}
+// The Canvas place a resolved target occupies: its open window, or its area.
+export const briefingTargetGeometry = item => item?.view?.geometry ?? item?.region ?? null;
+export function briefingRegionLabel(target, index = 0) {
+  const label = typeof target?.label === 'string' && target.label.trim() ? target.label.trim() : `Canvas 영역 ${index + 1}`;
+  return { name: label, rangeText: 'Canvas 영역' };
+}
+
 function validStepTargets(step) {
   if (step.targets !== undefined) {
     return Array.isArray(step.targets) && step.targets.length > 0 && step.targets.length <= BRIEFING_MAX_TARGETS && step.targets.every(isTarget);
@@ -87,14 +106,22 @@ export const briefingChromeMode = session => session?.briefing ? 'briefing' : nu
 // points at keep full contrast, the rest recede for a spotlight step. resolved
 // is resolveBriefingTargets(current step), or of every step for the overview.
 // No open target means no emphasis at all: the Canvas is never dimmed whole.
-export function briefingStepFocus(session, resolved = [], { overview = false } = {}) {
+// A Canvas area keeps the open windows it overlaps (cards: [{id, geometry}])
+// at full contrast and is outlined itself (regions). An area over empty
+// Canvas is only outlined: nothing is dimmed for it.
+export function briefingStepFocus(session, resolved = [], { overview = false, cards = [] } = {}) {
   const chromeMode = briefingChromeMode(session);
-  if (!chromeMode) return { chromeMode: null, emphasis: null, targetIds: [], dimOthers: false };
-  const targetIds = [...new Set((Array.isArray(resolved) ? resolved : [])
-    .filter(item => item?.status === 'available' && typeof item.view?.id === 'string' && item.view.id)
-    .map(item => item.view.id))];
-  const emphasis = !targetIds.length ? null : overview ? 'spotlight' : briefingEmphasis(currentBriefingStep(session));
-  return { chromeMode, emphasis, targetIds, dimOthers: emphasis === 'spotlight' };
+  if (!chromeMode) return { chromeMode: null, emphasis: null, targetIds: [], dimOthers: false, regions: [] };
+  const available = (Array.isArray(resolved) ? resolved : []).filter(item => item?.status === 'available');
+  const regions = available.filter(item => finiteRect(item.region)).map(item => ({ ...item.region,
+    ...(typeof item.target?.label === 'string' && item.target.label.trim() ? { label: item.target.label.trim() } : {}) }));
+  const targetIds = [...new Set([
+    ...available.filter(item => typeof item.view?.id === 'string' && item.view.id).map(item => item.view.id),
+    ...(Array.isArray(cards) ? cards : []).filter(card => typeof card?.id === 'string' && card.id && finiteRect(card.geometry)
+      && regions.some(region => overlaps(region, card.geometry))).map(card => card.id),
+  ])];
+  const emphasis = targetIds.length ? overview ? 'spotlight' : briefingEmphasis(currentBriefingStep(session)) : regions.length ? 'outline' : null;
+  return { chromeMode, emphasis, targetIds, dimOthers: emphasis === 'spotlight', regions };
 }
 
 // CHAT-05/CNV-07 re-entry: the step last read, per answer, kept by the caller
@@ -144,6 +171,15 @@ export const commentRevision = comment => Number.isSafeInteger(comment?.revision
 
 export function resolveBriefingTargets(step, { references = [], artifacts = [], views = [], identity = {} } = {}) {
   return briefingStepTargets(step).map(target => {
+    const kind = briefingTargetKind(target);
+    if (kind === 'annotationSet') return { target, status: 'unsupported', reason: '표식 묶음 대상은 아직 지원하지 않습니다.' };
+    if (kind === 'canvasRect') {
+      const rect = target.canvasRect;
+      if (!finiteRect(rect) || ['sourceId', 'artifactId', 'viewId', 'range'].some(key => Object.hasOwn(target, key))) {
+        return { target, status: 'unsupported', reason: 'Canvas 영역을 확인할 수 없습니다.' };
+      }
+      return { target, status: 'available', region: { x: rect.x, y: rect.y, width: rect.width, height: rect.height } };
+    }
     if (target.sourceId) {
       const reference = references.find(item => item.sourceId === target.sourceId);
       if (!reference) return { target, status: 'missing', reason: '이 답변에 연결된 입력을 확인할 수 없습니다.' };
@@ -170,7 +206,7 @@ export function resolveBriefingTargets(step, { references = [], artifacts = [], 
 }
 
 export function briefingBounds(resolved) {
-  const rects = (resolved || []).filter(item => item.status === 'available').map(item => item.view.geometry).filter(finiteRect);
+  const rects = (resolved || []).filter(item => item.status === 'available').map(briefingTargetGeometry).filter(finiteRect);
   if (!rects.length) return null;
   const x = Math.min(...rects.map(rect => rect.x)), y = Math.min(...rects.map(rect => rect.y));
   return { x, y, width: Math.max(...rects.map(rect => rect.x + rect.width)) - x,
@@ -182,8 +218,8 @@ export function briefingBounds(resolved) {
 export function briefingScreenRects(resolved, camera) {
   const zoom = camera?.zoom, pan = camera?.pan;
   if (!Number.isFinite(zoom) || zoom <= 0 || !Number.isFinite(pan?.x) || !Number.isFinite(pan?.y)) return [];
-  return (resolved || []).filter(item => item.status === 'available' && finiteRect(item.view?.geometry)).map(item => {
-    const rect = item.view.geometry;
+  return (resolved || []).filter(item => item.status === 'available' && finiteRect(briefingTargetGeometry(item))).map(item => {
+    const rect = briefingTargetGeometry(item);
     return { x: rect.x * zoom + pan.x, y: rect.y * zoom + pan.y, width: rect.width * zoom, height: rect.height * zoom };
   });
 }

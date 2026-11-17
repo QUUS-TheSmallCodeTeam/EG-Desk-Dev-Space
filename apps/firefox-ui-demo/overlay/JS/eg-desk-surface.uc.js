@@ -2838,7 +2838,10 @@
           : briefingResolvedTargets(session);
       } catch { resolved = []; }
     }
-    const focus = BriefingState.briefingStepFocus(session, resolved, { overview: !!session?.semanticOverview });
+    const cards = session ? Array.from(document.querySelectorAll('.egd-canvas-card'))
+      .filter(card => card.id && !card.classList.contains('egd-memo-card')).map(card => ({ id: card.id, geometry: persistentEntityGeometry(card) })) : [];
+    const focus = BriefingState.briefingStepFocus(session, resolved, { overview: !!session?.semanticOverview, cards });
+    syncBriefingRegions(focus.regions);
     if (focus.chromeMode) root.dataset.egdChromeMode = focus.chromeMode;
     else if (root.dataset.egdChromeMode === 'briefing') delete root.dataset.egdChromeMode;
     if (focus.emphasis) root.dataset.egdBriefingFocus = focus.emphasis; else delete root.dataset.egdBriefingFocus;
@@ -2848,6 +2851,24 @@
       else if (card.dataset.egdBriefingTarget) delete card.dataset.egdBriefingTarget;
     }
     return focus;
+  }
+
+  // CNV-07: a Canvas area of the step is outlined in Canvas coordinates
+  // (drawn in the card layer, so it pans and zooms with the Canvas). Display
+  // only: it never takes pointer input and is never saved with the Desk.
+  function syncBriefingRegions(regions = []) {
+    const layer = document.getElementById('egd-canvas-layer');
+    const existing = layer ? Array.from(layer.querySelectorAll(':scope > .egd-briefing-region')) : [];
+    const signature = JSON.stringify(regions);
+    if (layer && layer._briefingRegionSignature === signature && existing.length === regions.length) return;
+    for (const node of existing) node.remove();
+    if (!layer) return;
+    layer._briefingRegionSignature = signature;
+    for (const [index, region] of regions.entries()) {
+      layer.appendChild(el('div', { class: 'egd-briefing-region', 'aria-hidden': 'true', data: { testid: 'briefing-region-outline', index: String(index) },
+        style: { left: region.x + 'px', top: region.y + 'px', width: region.width + 'px', height: region.height + 'px' } },
+      region.label ? el('span', { class: 'egd-briefing-region-label' }, region.label) : null));
+    }
   }
 
   function briefingFitCamera(bounds, safe, panel) {
@@ -2888,7 +2909,8 @@
     const camera = briefingFitCamera(bounds, safe, panel?.getBoundingClientRect());
     if (!camera) return false;
     state.setCanvasViewportTarget?.(camera);
-    focusCanvasCard(document.getElementById(resolved.find(item => item.status === 'available')?.view.id));
+    const firstView = resolved.find(item => item.status === 'available' && item.view?.id)?.view.id;
+    if (firstView) focusCanvasCard(document.getElementById(firstView));
     return true;
   }
 
@@ -3566,6 +3588,11 @@
     if (session.preparing) body.appendChild(preparingNotice);
     const describeTarget = (target, index) => {
       const requested = target.target || {}, range = requested.range;
+      if (BriefingState.briefingTargetKind(requested) === 'canvasRect') {
+        // CNV-07: a Canvas area names itself by its label, never a range.
+        const { name, rangeText } = BriefingState.briefingRegionLabel(requested, index);
+        return { name, rangeText, identity: `${name} · ${rangeText}`, capture: JSON.stringify(['canvasRect', requested.canvasRect]) };
+      }
       const verified = target.status === 'available' && !!target.view?.id;
       const named = verified ? [target.reference?.localSource?.label, target.reference?.label, target.artifact?.label,
         requested.sourceId, requested.artifactId].find(value => typeof value === 'string' && value.trim()) : null;
@@ -3617,7 +3644,7 @@
             state.codexBridge.inspectInput(session.threadId, target.reference, { ...target.target.range, isCurrent, briefingScope: session.preparationScope });
           } }, contents, actionText);
         body.appendChild(row.inspect);
-      } else body.appendChild(el('div', { class: 'egd-briefing-evidence-row', data: { testid: 'briefing-evidence-unavailable' } }, contents));
+      } else body.appendChild(el('div', { class: 'egd-briefing-evidence-row', data: { testid: target.region ? 'briefing-region' : 'briefing-evidence-unavailable' } }, contents));
       body.appendChild(row.end); evidenceRows.push(row);
     }
     panel._briefingSession = session;
@@ -3663,7 +3690,7 @@
         if (row.rangeNode.textContent !== description.rangeText) row.rangeNode.textContent = description.rangeText;
         row.suffixNode.textContent = suffix; row.suffixNode.hidden = !suffix;
         const hashMatches = !!target.reference && (!target.target.hash || target.target.hash === target.reference.hash);
-        const stateLabel = unsupported ? '지원 안 됨' : target.status === 'available' ? '열림' : target.status === 'stale' ? '일치 확인 필요'
+        const stateLabel = unsupported ? '지원 안 됨' : target.region ? '표시 중' : target.status === 'available' ? '열림' : target.status === 'stale' ? '일치 확인 필요'
           : session.preparing && hashMatches ? '준비 중' : '확인 필요';
         if (row.stateText.textContent !== stateLabel) row.stateText.textContent = stateLabel;
         const actionLabel = target.reference && !hashMatches ? '연결된 입력 보기' : '당시 입력 보기';

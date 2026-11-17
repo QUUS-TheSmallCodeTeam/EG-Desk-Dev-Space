@@ -4322,6 +4322,34 @@ button.egd-rail-focus-view {
   z-index: 4;
 }
 
+/* CNV-07: a Canvas area named by a briefing step, drawn in the card layer.
+   The line keeps its on-screen width at any zoom; it never takes input. */
+.egd-briefing-region {
+  position: absolute;
+  box-sizing: border-box;
+  border: calc(2px / var(--egd-camera-zoom, 1)) dashed var(--egd-primary);
+  border-radius: calc(8px / var(--egd-camera-zoom, 1));
+  background: var(--egd-primary-container);
+  background: color-mix(in srgb, var(--egd-primary-container) 35%, transparent);
+  pointer-events: none;
+  z-index: 0;
+}
+.egd-briefing-region-label {
+  position: absolute;
+  left: 0;
+  bottom: 100%;
+  padding: 0 calc(6px / var(--egd-camera-zoom, 1));
+  border-radius: calc(6px / var(--egd-camera-zoom, 1));
+  background: var(--egd-primary);
+  color: var(--egd-surface-elevated);
+  font: 600 calc(11px / var(--egd-camera-zoom, 1)) / 1.5 var(--egd-font, system-ui);
+  white-space: nowrap;
+}
+@media (forced-colors: active) {
+  .egd-briefing-region { border-color: Highlight; background: transparent; }
+  .egd-briefing-region-label { background: Canvas; color: CanvasText; border: 1px solid Highlight; }
+}
+
 /* Briefing numbers mark individual open cards; the existing map still owns
    pointer input and its normal camera gestures. */
 .egd-minimap-briefing-layer {
@@ -6987,7 +7015,7 @@ button.egd-codex-message-activity:focus-visible { outline: var(--egd-focus-outli
 #egd-answer-briefing [data-testid="briefing-comment-delete"][data-confirm="true"] {
   border-color: var(--egd-danger-line); color: var(--egd-danger-ink);
 }
-#egd-answer-briefing .egd-briefing-comment-actions > button[aria-disabled="true"] { opacity: 0.6; cursor: default; }
+#egd-answer-briefing .egd-briefing-comment-actions > button[aria-disabled="true"] { opacity: var(--egd-opacity-disabled); cursor: default; }
 /* A resolved comment stays in place, quieter: neutral edge, clamped text. */
 #egd-answer-briefing .egd-briefing-comment[data-state="resolved"] { border-inline-start-color: var(--egd-outline); background: var(--egd-surface); }
 #egd-answer-briefing .egd-briefing-comment[data-state="resolved"] .egd-briefing-comment-body {
