@@ -25926,3 +25926,38 @@ test('Chat head: the account chip and the usage ring open Settings 계정 (SUB-0
   assert.equal(codex.dataset.testid, 'chat-usage-ring');
   assert.equal(fns.chatHeadUsageRing({ engineId: 'claude' }, { engines: [claudeSettingsFixture({ auth: { status: 'signedOut' } })], authStatus: {} }), null);
 });
+
+test('CHAT-01 Board-saved chat card carries a thread and Agent binding reference without secrets', () => {
+  const sources = ['chatCardThreadBinding', 'restoreChatCardThreadBinding', 'runtimeStateForCard'].map(declaration);
+  assert.ok(sources.every(Boolean));
+  const make = threads => {
+    const state = { codex: { threads, activeThreadId: threads[0].id, chatDockMode: 'canvas' } };
+    const api = compileFunction(`${sources.join('\n')}\nreturn { runtimeStateForCard, restoreChatCardThreadBinding };`,
+      ['ChatState', 'state', 'getCodexThreadById', 'cloneJson'])(
+      Chat, state, (codex, id) => codex.threads.find(t => t.id === id) || null, v => structuredClone(v));
+    return { state, ...api };
+  };
+  const picked = { id: 'room-1', profileEnabled: true, agentProfileId: 'review-verifier', systemPrompt: 'SECRET prompt',
+    agent: { profileId: 'review-verifier', revision: 3, setAt: 99 }, messages: [{ text: 'hello token' }], clientBindingId: 'native-bind' };
+  const h = make([picked]);
+  const record = h.runtimeStateForCard({}, 'chat');
+  assert.deepEqual(record.threadBinding, { clientThreadId: 'room-1', agent: { profileId: 'review-verifier', revision: 3 } });
+  assert.equal(record.activeThreadId, 'room-1');
+  assert.doesNotMatch(JSON.stringify(record), /SECRET|token|native-bind/);
+  // No Agent picked: the reference names only the conversation.
+  const plain = make([{ id: 'room-2', profileEnabled: false, agentProfileId: null }]);
+  assert.deepEqual(plain.runtimeStateForCard({}, 'chat').threadBinding, { clientThreadId: 'room-2', agent: null });
+  // Reopen binds the same conversation and Agent.
+  const target = { id: 'room-3', profileEnabled: false, agentProfileId: null };
+  const re = make([{ id: 'room-0' }, target]);
+  re.restoreChatCardThreadBinding(record.threadBinding.clientThreadId === 'room-1' ? { clientThreadId: 'room-3', agent: { profileId: 'review-verifier', revision: 3 } } : null);
+  assert.equal(re.state.codex.activeThreadId, 'room-3');
+  assert.equal(target.profileEnabled, true);
+  assert.equal(target.agentProfileId, 'review-verifier');
+  assert.equal(target.agent, undefined);
+  // Older Board records (no binding) and unknown threads restore unchanged.
+  re.state.codex.activeThreadId = 'room-0';
+  re.restoreChatCardThreadBinding(undefined);
+  re.restoreChatCardThreadBinding({ clientThreadId: 'gone', agent: null });
+  assert.equal(re.state.codex.activeThreadId, 'room-0');
+});
