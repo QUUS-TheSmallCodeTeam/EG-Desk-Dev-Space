@@ -34,6 +34,7 @@ import { openDeskStore } from './egdesk-desk-store.mjs'
 import { openBridgeSettings } from './egdesk-bridge-settings.mjs'
 import { createDeskHttpHandler } from './egdesk-desk-http.mjs'
 import { createPortableHttpHandler } from './egdesk-portable-http.mjs'
+import { createContextAttachmentProvider, createManagedDraftProvider } from './egdesk-portable-providers.mjs'
 import { NativeReaderClient } from './egdesk-native-reader.mjs'
 import { ClaudeReaderClient, estimateClaudeReaderInput } from './egdesk-claude-reader.mjs'
 import { createClaudeReaderEvidence } from './egdesk-claude-capacity.mjs'
@@ -374,7 +375,10 @@ const handleProfileHttp = createProfileHttpHandler({ store: () => profileStore, 
 const handleDeskHttp = createDeskHttpHandler({ store: () => deskStore, port: BRIDGE_PORT })
 // RT-03 .egdesk export/inspect/import over the same local stores (signed out too).
 // Exports go to ~/Downloads/EG-Desk, or <app data>/exports without a Downloads folder.
-const handlePortableHttp = createPortableHttpHandler({ desk: () => deskStore, chat: () => chatStore, profiles: () => profileStore, appDataDir: dataDir, port: BRIDGE_PORT })
+// RT-03 opt-in extras: captures of the signed-in account and local File drafts (off unless asked, D-R3).
+const portableAttachments = createContextAttachmentProvider({ store: contextStore, ownerKey: () => publicAuthIdentityKey(authState) })
+const portableFileDrafts = createManagedDraftProvider({ directory: path.join(dataDir, 'file-drafts') })
+const handlePortableHttp = createPortableHttpHandler({ desk: () => deskStore, chat: () => chatStore, profiles: () => profileStore, attachments: portableAttachments, fileDrafts: portableFileDrafts, appDataDir: dataDir, port: BRIDGE_PORT })
 // Task graph (CHAT-06): /tasks/*, /task-sources; events (RT-06): /events/browser,
 // /events/recent; SSE workflow.event and task.graph frames on /events.
 workflow = await openWorkflowRuntime({
@@ -889,7 +893,7 @@ const bridgeServer = createServer(async (req, res) => {
         profiles: profileStore ? ['local-store', 'revisions', 'run-binding'] : ['local-store-unavailable'],
         engines: ['registry', 'thread-lock'],
         desk: deskStore ? ['local-store', 'generations', 'restore', 'board-revisions', 'board-revert', 'prefs-import'] : ['local-store-unavailable'],
-        portable: deskStore ? ['export', 'inspect', 'import-as-new', 'passphrase', 'exports-list'] : ['local-store-unavailable'],
+        portable: deskStore ? ['export', 'inspect', 'import-as-new', 'passphrase', 'exports-list', 'attachments', 'file-drafts'] : ['local-store-unavailable'],
       },
       bridge: bridgeBuildState(bridgeBuild, expectedOverlayBuild(req.headers, url.searchParams)),
       appServerReconnect: appServerBackoff.snapshot(),

@@ -8,7 +8,7 @@ import { publicText } from './codex-chat-values.mjs'
 import { PRIVATE_KEYS } from './egdesk-chat-store.mjs'
 import { MAX_BOARDS, MAX_BOARD_BODY_BYTES, MAX_DESK_STATE_BYTES } from './egdesk-desk-store.mjs'
 import { PortableBundleError, createEGDeskPortableBundle, loadEGDeskPortableDependencies } from './egdesk-portable-bundle.mjs'
-import { EXTRA_KIND, collectPortableExtras, matchExtrasManifest, parseExtraEntry, summarizeExtras, validateExtrasManifest, writePortableExtras } from './egdesk-portable-extras.mjs'
+import { EXTRA_KIND, collectPortableExtras, matchExtrasManifest, parseExtraEntry, summarizeExtras, validateExtrasManifest, writePortableAttachments, writePortableDrafts } from './egdesk-portable-extras.mjs'
 import { MAX_PROFILES, PROFILE_TEMPLATES, normalizeProfileBody, profileHash, withoutAvatarImage } from './egdesk-profile-store.mjs'
 
 // RT-03: the .egdesk portable bundle wired to the local Desk, chat and profile
@@ -234,6 +234,15 @@ async function readExportFile(directory, name, maxBytes) {
 }
 
 // ── Export: read the stores into an in-memory, pinned graph ──
+/** Every string under a 'draftId' key in a Board/Desk body (File cards keep their working copy there). */
+function draftIdsIn(body, found = new Set(), depth = 0) {
+  if (depth > 100 || !body || typeof body !== 'object') return found
+  for (const [key, child] of Object.entries(body)) {
+    if (key === 'draftId' && typeof child === 'string' && child) found.add(child)
+    else draftIdsIn(child, found, depth + 1)
+  }
+  return found
+}
 function chatThreadIdsIn(body) {
   const ids = new Set()
   for (const card of Array.isArray(body?.cards) ? body.cards : []) {
@@ -329,7 +338,8 @@ async function collectExport({ desk, chat, profiles, attachments, fileDrafts, sc
   // manifest can list what was included and what was left out.
   const boardIds = scope === 'board' ? new Set([boardId]) : new Set(desk.listBoards().boards.map(item => item.boardId))
   const extras = (include.attachments || include.fileDrafts)
-    ? await collectPortableExtras({ attachments, fileDrafts, include, scope, boardIds })
+    ? await collectPortableExtras({ attachments, fileDrafts, include, scope, boardIds,
+      threadIds: scope === 'board' ? threadIds : null, draftIds: scope === 'board' ? draftIdsIn(model.board.body) : null })
     : { entries: [], manifest: { attachments: null, fileDrafts: null } }
   model.extras = extras.manifest
   // The root goes first in the size budget; children follow.
@@ -660,7 +670,10 @@ async function writeImport(plan, { desk, chat, profiles, attachments, fileDrafts
     return Object.assign(new Error('The import stopped part way; the items listed in written were added'), { code: 'PORTABLE_IMPORT_PARTIAL', httpStatus: 500, written, reason: typeof error?.code === 'string' ? error.code : null })
   }
   try {
-    const result = desk.importPortable({ state: plan.state, boards: plan.boards.map(({ boardId, title, body }) => ({ boardId, title, body })) })
+    // Drafts first: File cards in the imported Desk/Boards then point at the new draft IDs.
+    const draftMap = await writePortableDrafts(plan, { fileDrafts }, written)
+    const state = remapTree(plan.state, draftMap)
+    const result = desk.importPortable({ state, boards: plan.boards.map(({ boardId, title, body }) => ({ boardId, title, body: remapTree(body, draftMap) })) })
     written.desk = result.desk ? { generation: result.desk.generation, unchanged: result.desk.unchanged } : null
     written.boards = result.boards.map((saved, index) => ({ boardId: saved.boardId, title: saved.title, sourceBoardId: plan.boards[index].sourceBoardId, idChanged: saved.boardId !== plan.boards[index].sourceBoardId }))
     for (const item of plan.chats) {
@@ -675,7 +688,7 @@ async function writeImport(plan, { desk, chat, profiles, attachments, fileDrafts
       const created = profiles.importDraft(item.body, { format: 'egdesk' })
       written.profiles.push({ profileId: created.id, name: item.body.name, status: 'imported', active: false, reviewRequired: true })
     }
-    await writePortableExtras(plan, { attachments, fileDrafts }, written)
+    await writePortableAttachments(plan, { attachments }, written)
   } catch (error) { throw partial(error) }
   return written
 }

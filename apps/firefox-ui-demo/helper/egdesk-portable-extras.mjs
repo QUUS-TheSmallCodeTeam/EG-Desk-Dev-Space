@@ -13,10 +13,12 @@ import { DECISION_CREDENTIAL_FILE } from './egdesk-decision-credential.mjs'
 // disconnected drafts, and never touches an original file.
 //
 // Provider contracts (all optional; missing = unavailable):
-//   attachments: { exportList({scope, boardIds}) → [{name, mime, size?, read() → bytes}],
+//   attachments: { exportList({scope, boardIds, threadIds, draftIds}) → [{name, mime, size?, read() → bytes}],
 //                  importCopy({name, mime, bytes, sha256}) → {id} }
-//   fileDrafts:  { exportList({scope, boardIds}) → [{name, text}],
+//   fileDrafts:  { exportList({scope, boardIds, threadIds, draftIds}) → [{id?, name, text}],
 //                  importDraft({name, text, sha256}) → {draftId} }
+// threadIds/draftIds: arrays of what the exported Board's cards refer to, or
+// null for a Desk export (everything this machine keeps).
 export const PORTABLE_EXTRA_LIMITS = Object.freeze({
   maxAttachments: 200,
   maxAttachmentBytes: 8 * 1024 * 1024,
@@ -31,6 +33,7 @@ const MAX_NAME_CHARS = 255
 const MAX_MIME_CHARS = 128
 const MIME = /^[a-z0-9][a-z0-9!#$&^_.+-]{0,63}\/[a-z0-9][a-z0-9!#$&^_.+-]{0,63}(?:;\s?charset=[a-z0-9_-]{1,32})?$/i
 const SHA256 = /^[0-9a-f]{64}$/
+const SOURCE_ID = /^[A-Za-z0-9][A-Za-z0-9._:-]{7,127}$/
 
 // File names that hold credentials. These never leave the machine even when
 // the user asked for attachments or drafts: bridge settings, the decision
@@ -81,12 +84,13 @@ async function readAttachment(item) {
  * Provider failures for one entry omit that entry ('unreadable'); a missing
  * provider for a requested kind fails the export (nothing is written).
  */
-export async function collectPortableExtras({ attachments, fileDrafts, include, scope, boardIds, limits = PORTABLE_EXTRA_LIMITS }) {
+export async function collectPortableExtras({ attachments, fileDrafts, include, scope, boardIds, threadIds = null, draftIds = null, limits = PORTABLE_EXTRA_LIMITS }) {
   const entries = []
+  const request = { scope, boardIds: [...boardIds], threadIds: threadIds && [...threadIds], draftIds: draftIds && [...draftIds] }
   const manifest = { attachments: null, fileDrafts: null }
   if (include.attachments) {
     if (!attachments?.exportList) fail('PORTABLE_ATTACHMENT_STORE_UNAVAILABLE', 'Attachment storage is unavailable', 503)
-    const listed = await attachments.exportList({ scope, boardIds: [...boardIds] })
+    const listed = await attachments.exportList(request)
     const section = { included: [], omitted: [] }
     let total = 0
     for (const item of Array.isArray(listed) ? listed : []) {
@@ -111,7 +115,7 @@ export async function collectPortableExtras({ attachments, fileDrafts, include, 
   }
   if (include.fileDrafts) {
     if (!fileDrafts?.exportList) fail('PORTABLE_DRAFT_STORE_UNAVAILABLE', 'File draft storage is unavailable', 503)
-    const listed = await fileDrafts.exportList({ scope, boardIds: [...boardIds] })
+    const listed = await fileDrafts.exportList(request)
     const section = { included: [], omitted: [] }
     let total = 0
     for (const item of Array.isArray(listed) ? listed : []) {
@@ -127,7 +131,9 @@ export async function collectPortableExtras({ attachments, fileDrafts, include, 
       total += bytes.length
       const hash = sha256(bytes)
       section.included.push({ name, bytes: bytes.length, sha256: hash })
-      entries.push({ type: 'fileDraft', title: name, payload: { kind: EXTRA_KIND.fileDraft, v: 1, name, bytes: bytes.length, sha256: hash, text: item.text } })
+      // sourceId lets Board File cards follow the draft to its new ID on import.
+      const sourceId = typeof item.id === 'string' && SOURCE_ID.test(item.id) ? item.id : null
+      entries.push({ type: 'fileDraft', title: name, payload: { kind: EXTRA_KIND.fileDraft, v: 1, name, sourceId, bytes: bytes.length, sha256: hash, text: item.text } })
     }
     manifest.fileDrafts = section
   }
@@ -171,15 +177,16 @@ export function parseExtraEntry(value, damaged, limits = PORTABLE_EXTRA_LIMITS) 
     return { type: 'attachment', name: value.name, mime: value.mime, bytes, sha256: value.sha256 }
   }
   if (value.kind === EXTRA_KIND.fileDraft) {
-    const keys = ['kind', 'v', 'name', 'bytes', 'sha256', 'text']
+    const keys = ['kind', 'v', 'name', 'sourceId', 'bytes', 'sha256', 'text']
     if (!plain(value) || Object.keys(value).length !== keys.length || !keys.every(key => Object.hasOwn(value, key))) damaged('INVALID_CONTENT')
     if (!isSafeEntryName(value.name)) unsafeEntry('UNSAFE_NAME')
     if (secretReason(value.name)) unsafeEntry('SECRET_ENTRY')
     if (typeof value.text !== 'string' || value.text.includes('\0') || !value.text.isWellFormed()) damaged('INVALID_CONTENT')
+    if (value.sourceId !== null && (typeof value.sourceId !== 'string' || !SOURCE_ID.test(value.sourceId))) damaged('INVALID_CONTENT')
     if (!Number.isSafeInteger(value.bytes) || value.bytes > limits.maxFileDraftBytes) unsafeEntry('ENTRY_TOO_LARGE')
     const bytes = Buffer.from(value.text, 'utf8')
     if (bytes.length !== value.bytes || typeof value.sha256 !== 'string' || sha256(bytes) !== value.sha256) unsafeEntry('HASH_MISMATCH')
-    return { type: 'fileDraft', name: value.name, text: value.text, sha256: value.sha256 }
+    return { type: 'fileDraft', name: value.name, sourceId: value.sourceId, text: value.text, sha256: value.sha256 }
   }
   return null
 }
@@ -199,14 +206,24 @@ export function summarizeExtras(model) {
     omitted: { attachments: omitted(model.extras?.attachments), fileDrafts: omitted(model.extras?.fileDrafts) },
   }
 }
-/** Writes new copies. Never passes a path, file ID or root to a provider, so an original cannot be targeted. */
-export async function writePortableExtras(model, { attachments, fileDrafts }, written) {
+/**
+ * Writes new copies. Never passes a path, file ID or root to a provider, so an
+ * original cannot be targeted. Drafts go first so the caller can point Board
+ * File cards at their new IDs (returned map: source draft ID → new draft ID).
+ */
+export async function writePortableDrafts(model, { fileDrafts }, written) {
+  const idMap = new Map()
+  for (const item of model.fileDrafts) {
+    const created = await fileDrafts.importDraft({ name: item.name, text: item.text, sha256: item.sha256 })
+    const draftId = typeof created?.draftId === 'string' ? created.draftId : null
+    if (item.sourceId && draftId) idMap.set(item.sourceId, draftId)
+    written.fileDrafts.push({ draftId, name: item.name, status: 'draft', original: 'not-connected' })
+  }
+  return idMap
+}
+export async function writePortableAttachments(model, { attachments }, written) {
   for (const item of model.attachments) {
     const created = await attachments.importCopy({ name: item.name, mime: item.mime, bytes: Buffer.from(item.bytes), sha256: item.sha256 })
     written.attachments.push({ id: typeof created?.id === 'string' ? created.id : null, name: item.name, bytes: item.bytes.length })
-  }
-  for (const item of model.fileDrafts) {
-    const created = await fileDrafts.importDraft({ name: item.name, text: item.text, sha256: item.sha256 })
-    written.fileDrafts.push({ draftId: typeof created?.draftId === 'string' ? created.draftId : null, name: item.name, status: 'draft', original: 'not-connected' })
   }
 }

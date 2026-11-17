@@ -107,7 +107,7 @@ export async function handlePortableHttp(req, url, { service, readJson = readJso
  * desk/chat/profiles: () => store (null while unavailable). appDataDir is the
  * fallback export folder parent when ~/Downloads does not exist.
  */
-export function createPortableHttpHandler({ desk, chat, profiles, appDataDir, port = 39218, ...options } = {}) {
-  const service = createPortableService({ desk, chat, profiles, location: () => portableExportLocation({ appDataDir }), ...options })
+export function createPortableHttpHandler({ desk, chat, profiles, attachments = null, fileDrafts = null, appDataDir, port = 39218, ...options } = {}) {
+  const service = createPortableService({ desk, chat, profiles, attachments, fileDrafts, location: () => portableExportLocation({ appDataDir }), ...options })
   return (req, res, url) => handlePortableHttp(req, url, { service, port, send: (status, data) => sendJson(res, status, data) })
 }
