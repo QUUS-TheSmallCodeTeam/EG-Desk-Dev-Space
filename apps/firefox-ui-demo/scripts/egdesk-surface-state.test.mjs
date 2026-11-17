@@ -3507,7 +3507,9 @@ test('bounded visual hierarchy keeps Canvas chrome quiet and Browser and Chat co
   assert.match(rule('.egd-codex-thread-item'), /background:\s*transparent/);
   assert.match(rule('.egd-codex-thread-item-active'), /background:\s*var\(--egd-primary-container\)/);
   assert.match(rule('.egd-codex-message-stack'), /max-width:\s*min\(86%, 640px\)/);
-  assert.match(rule('.egd-codex-bubble'), /font-size:\s*14\.5px;\s*line-height:\s*1\.48/);
+  // DSN-03: the overridden 14.5px/1.48 first paint is gone; the approved rule alone sets it.
+  assert.doesNotMatch(rule('.egd-codex-bubble'), /font-size/);
+  assert.match(css, /^\.egd-codex-bubble \{ padding: 9px 11px; font-size: 12px; line-height: 1\.52;/m);
   assert.match(rule('.egd-codex-input'), /min-height:\s*40px/);
   const composerOverrides = [...css.matchAll(/^\.egd-codex-input \{([^}]+)\}/gm)];
   assert.match(composerOverrides.at(-1)?.[1] || '', /box-sizing:\s*border-box;\s*min-height:\s*35px;\s*max-height:\s*140px;[^}]*font-size:\s*12px;\s*line-height:\s*1\.52;/,

@@ -6746,10 +6746,6 @@ button.egd-codex-message-activity:focus-visible { outline: var(--egd-focus-outli
   min-width: 0;
   max-width: 100%;
   flex: 0 1 auto;
-  padding: 11px 14px;
-  border-radius: 3px 15px 15px 15px;
-  font-size: 14.5px;
-  line-height: 1.48;
   color: var(--egd-on-surface);
   background: var(--egd-chat-paper);
   border: 0;
@@ -7540,7 +7536,7 @@ button.egd-codex-message-activity:focus-visible { outline: var(--egd-focus-outli
   overflow-wrap: anywhere;
 }
 .egd-settings-data-row[data-reset="here"] { border-color: var(--egd-outline); background: var(--egd-surface-elevated); }
-.egd-settings-data-title { font: 650 12.5px/1.4 var(--egd-font); color: var(--egd-on-surface); }
+.egd-settings-data-title { font: 650 var(--egd-text-lg)/1.4 var(--egd-font); color: var(--egd-on-surface); }
 .egd-settings-data-holds { color: var(--egd-on-surface); }
 .egd-settings-data-row .egd-settings-link { margin-top: 2px; }
 .egd-settings-badge {
@@ -7654,7 +7650,7 @@ button.egd-codex-message-activity:focus-visible { outline: var(--egd-focus-outli
   border-radius: 6px;
   background: transparent;
   color: var(--egd-on-surface);
-  font: 500 12.5px/1.4 var(--egd-font);
+  font: 500 var(--egd-text-base)/1.4 var(--egd-font);
   text-align: left;
   cursor: pointer;
 }
@@ -9076,7 +9072,7 @@ button.egd-codex-message-activity:focus-visible { outline: var(--egd-focus-outli
 .egd-codex-chat-shell .egd-codex-chat-main-list,
 #egd-hud[data-app="chat"] .egd-codex-chat-main-list { padding: 12px 14px 14px; }
 .egd-codex-thread-home-head { gap: 8px; padding: 6px 4px 8px; }
-.egd-codex-thread-home-title { font-size: 19px; font-weight: 650; letter-spacing: -.02em; }
+.egd-codex-thread-home-title { font-size: 17px; font-weight: 650; letter-spacing: -.02em; }
 .egd-codex-thread-home-sub,
 .egd-codex-thread-home-status { font-size: 11px; line-height: 1.5; }
 .egd-codex-thread-search { min-height: 35px; border-radius: 8px; background: var(--egd-window-alt); font-weight: 400; }
@@ -10025,7 +10021,7 @@ button.egd-codex-stateless-toggle:disabled { background: var(--egd-window-alt); 
 .egd-settings-mcp-list { display: flex; flex-direction: column; gap: 6px; margin: 0 0 8px; padding: 0; list-style: none; }
 .egd-settings-mcp-row { padding: 8px 10px; border: 1px solid var(--egd-outline-variant); border-radius: 9px; background: var(--egd-surface-elevated); }
 .egd-settings-mcp-head { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 6px; }
-.egd-settings-mcp-name { min-width: 0; font-size: 12.5px; font-weight: 600; overflow-wrap: anywhere; }
+.egd-settings-mcp-name { min-width: 0; font-size: var(--egd-text-base); font-weight: 600; overflow-wrap: anywhere; }
 .egd-settings-badge.egd-settings-mcp-kind { margin-left: 0; }
 .egd-settings-mcp-status { margin-left: auto; font-size: 11px; font-weight: 600; color: var(--egd-on-surface-variant); }
 .egd-settings-mcp-status-ok { color: var(--egd-success-ink); }
@@ -10245,7 +10241,7 @@ button.egd-task-reject[aria-disabled="true"] { opacity: var(--egd-opacity-disabl
   border-radius: 10px;
   background: var(--egd-surface-elevated);
   color: var(--egd-on-surface);
-  font: 12.5px/1.5 var(--egd-font);
+  font: var(--egd-text-base)/1.5 var(--egd-font);
 }
 .egd-plan-card-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
 .egd-plan-card-eyebrow { color: var(--egd-on-surface-variant); font: 600 11px/1.4 var(--egd-font); }
@@ -10255,7 +10251,7 @@ button.egd-task-reject[aria-disabled="true"] { opacity: var(--egd-opacity-disabl
 .egd-plan-card[data-status="rejected"] .egd-plan-card-status,
 .egd-plan-card[data-status="cancelled"] .egd-plan-card-status,
 .egd-plan-card[data-status="missing"] .egd-plan-card-status { color: var(--egd-on-surface-variant); }
-.egd-plan-card-title { font: 600 13.5px/1.45 var(--egd-font); overflow-wrap: anywhere; }
+.egd-plan-card-title { font: 600 var(--egd-text-lg)/1.45 var(--egd-font); overflow-wrap: anywhere; }
 .egd-plan-steps { display: flex; flex-direction: column; margin: 0; padding: 0; list-style: none; border-top: 1px solid var(--egd-outline-variant); }
 .egd-plan-step { display: flex; flex-direction: column; gap: 2px; padding: 8px 0; border-bottom: 1px solid var(--egd-outline-variant); }
 .egd-plan-step-head { display: flex; align-items: center; gap: 8px; }
