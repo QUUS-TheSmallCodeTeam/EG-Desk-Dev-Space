@@ -345,6 +345,16 @@ async function main() {
         api.browserAgent.clearHistory(card.id);
         actionEvents.length = 0;
 
+        // Headless Firefox gives no window/document focus unless the harness asks for it (BRW-08 focus checks).
+        const focusContent = () => {
+          window.focus();
+          const cardEl = document.getElementById(card.id);
+          const browserEl = card._browserControls?.toolBrowser?.() || cardEl?.querySelector('browser');
+          browserEl?.focus();
+          try { browserEl?.browsingContext?.top?.window?.focus?.(); } catch {}
+          return wait(100);
+        };
+        await focusContent();
         const clickResult = await api.browserAgent.act(card.id, { type: 'click', ref: reveal.ref }, { settleMs: 250 });
         const afterClick = clickResult.after;
         const continueButton = afterClick.interactiveElements.find((item) => item.label === 'Continue');
