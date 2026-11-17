@@ -32,6 +32,9 @@ import { openProfileStore } from './egdesk-profile-store.mjs'
 import { createProfileHttpHandler } from './egdesk-profile-http.mjs'
 import { openDeskStore } from './egdesk-desk-store.mjs'
 import { openBridgeSettings } from './egdesk-bridge-settings.mjs'
+import { createDecisionBudget, createDecisionClient } from './egdesk-decision-client.mjs'
+import { openDecisionCredentialStore } from './egdesk-decision-credential.mjs'
+import { createDecisionHttpHandler } from './egdesk-decision-http.mjs'
 import { createDeskHttpHandler } from './egdesk-desk-http.mjs'
 import { createPortableHttpHandler } from './egdesk-portable-http.mjs'
 import { NativeReaderClient } from './egdesk-native-reader.mjs'
@@ -196,6 +199,13 @@ try {
 // Never throws; a broken file is set aside and logged, and the bridge starts
 // with defaults (computerControl.persisted then tells the screen).
 const bridgeSettings = openBridgeSettings({ dataDir: path.join(dataDir, 'settings') })
+// Decision model (DECISION_MODEL_CONTEXT_SETUP.md): the OpenAI key lives in its
+// own 0600 file in the same private settings directory (never in .egdesk
+// exports); the mode is the bridge setting decisionContext ('off' unless chosen).
+// No local monthly cap until the owner picks one (§5.4). Never throws.
+const decisionCredentials = openDecisionCredentialStore({ dataDir: path.join(dataDir, 'settings') })
+const decisionBudget = createDecisionBudget({})
+const decisionClient = createDecisionClient({ getApiKey: () => decisionCredentials.getApiKey(), budget: decisionBudget })
 // RT-06/CHAT-06 workflow runtime (event bus, connected-root watcher, task
 // graph). Opened after Chat below. Keep roots registered during construction
 // until both the context tracker and workflow watcher can receive them.
@@ -382,6 +392,9 @@ const ensureChatAuth = createChatEngineAuth({ chat, refreshCodexAccount: refresh
 const handleChatHttp = createChatHttpHandler(chat, ensureChatAuth)
 const handleComputerControlHttp = createComputerControlHttpHandler(chat, { port: BRIDGE_PORT })
 const handleHostControlHttp = createHostControlHttpHandler(hostControl, { port: BRIDGE_PORT })
+// Settings → 결정 모델 · OpenAI Decisions: key status/save/remove and the mode (works signed out).
+const handleDecisionHttp = createDecisionHttpHandler({ store: decisionCredentials, verifyKey: key => decisionClient.verifyKey(key),
+  budget: decisionBudget, model: decisionClient.model, mode: bridgeSettings.decisionContext, port: BRIDGE_PORT })
 const handleOntologyHttp = createOntologyHttpHandler({ binding: () => ontologyBinding, store: ensureOntologyStore, runtime: sqliteRuntime, port: BRIDGE_PORT })
 const handleContextHttp = createContextHttpHandler(contexts, ensureChatAuth, { port: BRIDGE_PORT })
 // Like /chat/history, profiles stay editable while Codex is signed out.
@@ -1048,6 +1061,7 @@ const bridgeServer = createServer(async (req, res) => {
   }
 
   if (await handleComputerControlHttp(req, res, url)) return
+  if (await handleDecisionHttp(req, res, url)) return
   if (await handleProfileHttp(req, res, url)) return
   if (await handleDeskHttp(req, res, url)) return
   if (await handlePortableHttp(req, res, url)) return

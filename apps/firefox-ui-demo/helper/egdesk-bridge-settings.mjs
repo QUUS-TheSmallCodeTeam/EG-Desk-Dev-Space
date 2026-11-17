@@ -9,7 +9,8 @@ import { CONTEXT_SUGGEST_DEFAULT, normalizeContextSuggest } from './egdesk-conte
 // One small JSON file in a private directory:
 //   { "version": 1, "computerControlPolicy": "inherit" | "off",
 //     "contextSuggest": { "mode": "always" | "firstMessage" | "off",
-//                         "neverSuggest": [{ "kind": "site", "host": "bank.example.com" } | { "kind": "folder", "path": "/abs" }] } }
+//                         "neverSuggest": [{ "kind": "site", "host": "bank.example.com" } | { "kind": "folder", "path": "/abs" }] },
+//     "decisionContext": "off" | "advisory" | "on" }
 // - Missing file or missing field: the module default applies
 //   (DEFAULT_COMPUTER_CONTROL_POLICY in codex-computer-control.mjs,
 //   CONTEXT_SUGGEST_DEFAULT in egdesk-context-resolver.mjs: always suggest,
@@ -31,10 +32,15 @@ const errorCode = error => (typeof error?.code === 'string' && /^[A-Z0-9_]{1,32}
 const isPlainObject = value => Boolean(value) && typeof value === 'object' && !Array.isArray(value) && Object.getPrototypeOf(value) === Object.prototype
 
 const normalizedSuggest = value => { try { return normalizeContextSuggest(value) } catch { return null } }
+// Decision model context setup (DECISION_MODEL_CONTEXT_SETUP.md): 'off' (default,
+// today's behaviour), 'advisory' (decide and record, attach nothing), 'on'.
+export const DECISION_CONTEXT_MODES = Object.freeze(['off', 'advisory', 'on'])
+export const DECISION_CONTEXT_DEFAULT = 'off'
 /** Settings fields this build reads and writes, with their validity rule. */
 const FIELDS = Object.freeze({
   computerControlPolicy: value => COMPUTER_CONTROL_POLICIES.includes(value),
   contextSuggest: value => normalizedSuggest(value) !== null,
+  decisionContext: value => DECISION_CONTEXT_MODES.includes(value),
 })
 /** Fields kept in a normalized (frozen) form; others are stored as given. */
 const NORMALIZE = Object.freeze({ contextSuggest: normalizedSuggest })
@@ -207,6 +213,13 @@ export function openBridgeSettings({ dataDir, log = defaultLog, now = Date.now }
     get saved() { return store.get('contextSuggest') !== null },
     get persisted() { return writable },
     save: value => store.set('contextSuggest', value),
+  })
+  // Decision model mode: the saved choice, or 'off' when none is saved.
+  store.decisionContext = Object.freeze({
+    get mode() { return store.get('decisionContext') ?? DECISION_CONTEXT_DEFAULT },
+    get saved() { return store.get('decisionContext') !== null },
+    get persisted() { return writable },
+    save: mode => store.set('decisionContext', mode),
   })
   return store
 }

@@ -85,3 +85,35 @@ test('bad input, foreign origins and other paths are refused without verificatio
   assert.equal((await call('GET', '/decision/other')).handled, false)
   assert.deepEqual(verified, [])
 })
+
+test('decision mode: read, saved through the settings adapter, bad values refused, absent adapter answers 404', async t => {
+  const root = createPrivateQaTempDirectory('egdesk-decision-mode-test-')
+  t.after(() => rmSync(root, { recursive: true, force: true }))
+  const store = openDecisionCredentialStore({ dataDir: path.join(root, 'data'), log: () => {} })
+  let value = null, fail = false
+  const mode = { get mode() { return value ?? 'off' }, get saved() { return value !== null }, persisted: true,
+    save: next => { if (fail) return false; value = next; return true } }
+  const handler = createDecisionHttpHandler({ store, verifyKey: async () => ({ status: 'verified' }), mode })
+  const call = async (method, url, body, h = handler) => {
+    const res = fakeResponse()
+    const handled = await h(fakeRequest(method, url, body), res, new URL(url, 'http://127.0.0.1:39218'))
+    return { handled, status: res.status, data: res.body ? JSON.parse(res.body) : null }
+  }
+  const first = await call('GET', '/decision/mode')
+  assert.deepEqual(first.data, { mode: 'off', saved: false, persisted: true, modes: ['off', 'advisory', 'on'] })
+  assert.equal((await call('GET', '/decision/status')).data.mode, 'off')
+  const advisory = await call('POST', '/decision/mode', { mode: 'advisory' })
+  assert.equal(advisory.status, 200)
+  assert.equal(advisory.data.mode, 'advisory')
+  assert.equal(advisory.data.saved, true)
+  assert.equal((await call('GET', '/decision/status')).data.mode, 'advisory')
+  assert.equal((await call('POST', '/decision/mode', { mode: 'always' })).status, 400)
+  assert.equal((await call('DELETE', '/decision/mode')).status, 405)
+  fail = true
+  const failed = await call('POST', '/decision/mode', { mode: 'on' })
+  assert.equal(failed.status, 500)
+  assert.equal(failed.data.mode, 'advisory')
+  const bare = createDecisionHttpHandler({ store, verifyKey: async () => ({ status: 'verified' }) })
+  assert.equal((await call('GET', '/decision/mode', undefined, bare)).status, 404)
+  assert.equal((await call('GET', '/decision/status', undefined, bare)).data.mode, null)
+})
