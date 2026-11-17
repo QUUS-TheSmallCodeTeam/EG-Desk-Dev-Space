@@ -359,3 +359,99 @@ export function inputSnapshotView(doc, snapshot, { includeDelivered = true, sour
   if (snapshot.content.text !== null) root.appendChild(make('pre', snapshot.content.text, { tabindex: '0', 'aria-label': '당시 캡처 본문' }));
   return root;
 }
+
+// ── CTX-04: what changed since it was sent, and this send's scope ──
+// GET /context/sources lists, for one conversation, the sources the Agent
+// already received (ids, kinds, card ids, states, reason codes; never paths
+// or URLs). Read per card: a composer attachment of a card whose earlier
+// capture went stale shows '바뀜'; a stale card not attached again is named
+// in the pre-send preview, where it can be attached again. Absence is not
+// freshness: no entry means "not tracked", never "unchanged".
+const CHANGE_REASON_TEXT = Object.freeze({ fileChanged: '보낸 뒤 파일이 바뀜', navigated: '보낸 뒤 페이지가 바뀜' });
+export const SEND_SCOPE_TEXT = Object.freeze({
+  title: '이번에 Agent가 볼 자료',
+  none: '붙인 자료 없음 · 메시지만 보냅니다',
+  boundary: '고른 자료만 보냅니다. 보이는 화면이나 Desk 전체는 보내지 않습니다.',
+  changedNote: '바뀌었다는 사실만 알립니다(내용 없음). 다시 붙이면 지금 내용을 보냅니다.',
+  attachedChanged: '이전에 보낸 뒤 바뀜 · 이번에 지금 내용을 다시 캡처해 보냅니다',
+  remove: '빼기',
+  add: '다시 붙이기',
+});
+
+export function sourceChangeIndex(response, conversationId) {
+  if (!conversationId || response?.conversationId !== conversationId || !Array.isArray(response.sources)) return null;
+  const byView = new Map();
+  for (const source of response.sources.slice(0, 256)) {
+    if (!source || typeof source.viewId !== 'string' || !source.viewId || source.viewId.length > 300
+        || !['active', 'stale'].includes(source.state) || !['browser', 'file'].includes(source.kind)) continue;
+    const changedAt = source.state === 'stale' && Number.isFinite(source.changedAt) && source.changedAt >= 0 ? source.changedAt : null;
+    const entry = Object.freeze({ viewId: source.viewId, kind: source.kind, state: source.state, changedAt,
+      reason: source.state === 'stale' ? (CHANGE_REASON_TEXT[source.reason] ? source.reason : 'unknown') : null });
+    const previous = byView.get(source.viewId);
+    // One card can have several earlier captures: any stale one marks it, newest first.
+    if (!previous || (entry.state === 'stale' && (previous.state !== 'stale' || (entry.changedAt ?? 0) > (previous.changedAt ?? 0)))) byView.set(source.viewId, entry);
+  }
+  return Object.freeze({ conversationId, byView });
+}
+
+// Stable comparison key: redraw only when what the chips show changes.
+export const sourceChangeIndexKey = index => index
+  ? JSON.stringify([index.conversationId, [...index.byView.values()].filter(entry => entry.state === 'stale').map(entry => [entry.viewId, entry.reason, entry.changedAt]).sort()])
+  : null;
+
+export function sourceChangeText(entry) {
+  return entry?.state === 'stale' ? CHANGE_REASON_TEXT[entry.reason] || '보낸 뒤 원본이 바뀜' : '';
+}
+
+// '바뀜' for one composer attachment, or null.
+export function attachmentChange(source, index) {
+  const viewId = source?.sourceRef?.viewId;
+  const entry = viewId ? index?.byView?.get(viewId) : null;
+  if (entry?.state !== 'stale') return null;
+  return Object.freeze({ label: '바뀜', title: `${sourceChangeText(entry)} · ${SEND_SCOPE_TEXT.attachedChanged}`, reason: entry.reason, changedAt: entry.changedAt });
+}
+
+/**
+ * The pre-send preview: every attached source and briefing input (each can
+ * be removed) and every changed earlier source not attached now (each can be
+ * attached again while its card is on screen). labelFor(viewId) names a card;
+ * canAttach(viewId) says whether the screen can capture it now.
+ */
+export function sendScopePreview({ inputSources = [], briefingInputs = [], changeIndex = null, labelFor = () => null, canAttach = () => false } = {}) {
+  const items = [];
+  const attachedViews = new Set();
+  for (const source of Array.isArray(inputSources) ? inputSources : []) {
+    if (!source?.id) continue;
+    const viewId = source.sourceRef?.viewId || null;
+    if (viewId) attachedViews.add(viewId);
+    const changed = attachmentChange(source, changeIndex);
+    items.push(Object.freeze({ key: `source:${source.id}`, origin: 'attached', kind: source.kind || null, label: source.label || '자료',
+      note: changed ? SEND_SCOPE_TEXT.attachedChanged : '', changed: !!changed, action: 'remove', sourceId: source.id }));
+  }
+  for (const reference of Array.isArray(briefingInputs) ? briefingInputs : []) {
+    if (!reference?.sourceId) continue;
+    items.push(Object.freeze({ key: `briefing:${reference.sourceId}`, origin: 'briefing', kind: 'briefing', label: '브리핑 근거',
+      note: '', changed: false, action: 'remove', sourceId: reference.sourceId }));
+  }
+  const changed = [];
+  for (const entry of changeIndex?.byView?.values?.() || []) {
+    if (entry.state !== 'stale' || attachedViews.has(entry.viewId)) continue;
+    let available = false;
+    try { available = canAttach(entry.viewId) === true; } catch {}
+    let label = null;
+    try { label = labelFor(entry.viewId); } catch {}
+    changed.push(Object.freeze({ key: `changed:${entry.viewId}`, origin: 'changed', kind: entry.kind,
+      label: label || (entry.kind === 'browser' ? 'Browser' : '파일'), note: sourceChangeText(entry), changed: true,
+      action: available ? 'add' : null, viewId: entry.viewId, changedAt: entry.changedAt }));
+  }
+  changed.sort((a, b) => (b.changedAt ?? 0) - (a.changedAt ?? 0) || (a.viewId < b.viewId ? -1 : 1));
+  const sent = items.length;
+  return Object.freeze({
+    items: Object.freeze([...items, ...changed]),
+    sentCount: sent, changedCount: changed.length,
+    summary: sent ? `${SEND_SCOPE_TEXT.title} ${sent}개${changed.length ? ` · 보낸 뒤 바뀐 자료 ${changed.length}개` : ''}`
+      : changed.length ? `${SEND_SCOPE_TEXT.none} · 보낸 뒤 바뀐 자료 ${changed.length}개` : SEND_SCOPE_TEXT.none,
+    boundary: SEND_SCOPE_TEXT.boundary,
+    changedNote: changed.length ? SEND_SCOPE_TEXT.changedNote : '',
+  });
+}

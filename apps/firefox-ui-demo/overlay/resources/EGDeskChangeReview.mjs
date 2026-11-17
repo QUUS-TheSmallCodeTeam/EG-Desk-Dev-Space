@@ -216,6 +216,9 @@ const REASON_NOTES = Object.freeze({
   unavailable: '이 파일을 지금 읽을 수 없어 검토할 수 없습니다.',
   'edited-after-agent': 'Agent가 만든 뒤 내용이 바뀌어 삭제를 제안하지 않습니다.',
   'restore-not-available': '지운 파일은 여기서 되살리지 않습니다. 필요하면 새 파일로 저장하세요.',
+  'deleted-gone': '이 경로에 파일이 없는 것을 다시 확인했습니다. 지운 파일은 여기서 되살리지 않습니다. 필요하면 위 내용을 새 파일로 저장하세요.',
+  'deleted-present': '같은 경로에 파일이 다시 있습니다. 지금 파일은 Agent가 지운 내용과 다를 수 있어 여기서 고치지 않습니다.',
+  'deleted-unknown': '이 경로를 다시 확인하지 못했습니다. 지운 파일은 여기서 되살리지 않습니다.',
   drifted: 'Agent가 고친 뒤 파일이 또 바뀌어 덩어리를 찾지 못했습니다.',
   'no-changes': '되돌릴 변경이 없습니다.',
 })
@@ -243,7 +246,7 @@ export function createChangeReview({ document, service, rootId, changes = [], ma
   error.setAttribute('role', 'alert')
   error.hidden = true
   element.append(summary, undoButton, list, status, error)
-  const files = changes.slice(0, CHANGE_REVIEW_LIMITS.maxFiles).map(change => ({ change, fileId: null, text: null, sha256: null, target: null, chunks: [], chunkStatus: 'empty', actions: null, selected: new Set(), confirmDelete: false, removed: false, conflict: null, node: null }))
+  const files = changes.slice(0, CHANGE_REVIEW_LIMITS.maxFiles).map(change => ({ change, fileId: null, text: null, sha256: null, target: null, chunks: [], chunkStatus: 'empty', actions: null, selected: new Set(), confirmDelete: false, removed: false, conflict: null, deletion: null, node: null }))
   let lastRevert = null
   let disposed = false
 
@@ -254,7 +257,7 @@ export function createChangeReview({ document, service, rootId, changes = [], ma
     announce('작업에 실패했습니다. 파일은 그대로입니다.')
   }
   async function act(work) { error.hidden = true; try { await work() } catch (cause) { showError(cause) } }
-  const snapshot = () => ({ files: files.map(file => ({ path: file.target?.path || file.change?.path || '', change: file.target?.change || null, chunks: file.chunks.length, selected: [...file.selected], removed: file.removed, sha256: file.sha256, conflict: !!file.conflict })), canUndo: !!lastRevert })
+  const snapshot = () => ({ files: files.map(file => ({ path: file.target?.path || file.change?.path || '', change: file.target?.change || null, chunks: file.chunks.length, selected: [...file.selected], removed: file.removed, sha256: file.sha256, conflict: !!file.conflict, ...(file.deletion ? { deletion: file.deletion } : {}) })), canUndo: !!lastRevert })
   const shortHash = value => typeof value === 'string' && value ? value.slice(0, 12) : '확인 안 됨'
   // The helper's receipt (requested) and a fresh read of the file (observed)
   // are kept apart: the status line claims only what the re-read confirmed.
@@ -274,8 +277,14 @@ export function createChangeReview({ document, service, rootId, changes = [], ma
 
   async function loadFile(file) {
     file.selected.clear(); file.confirmDelete = false
-    file.fileId = null; file.text = null; file.sha256 = null
-    if (!isDeletion(file.change) && !file.removed) {
+    file.fileId = null; file.text = null; file.sha256 = null; file.deletion = null
+    if (isDeletion(file.change)) {
+      // A deletion has nothing to put back here (no overwrite, D-X1), but the
+      // review still shows what was removed and whether the path is really
+      // gone now — observed through the same root, never assumed.
+      try { file.deletion = (await service.resolvePath({ rootId, path: reviewPathOf(file.change) }))?.kind === 'file' ? 'present' : 'gone' }
+      catch (cause) { file.deletion = ['RESOURCE_UNAVAILABLE', 'UNKNOWN_RESOURCE', 'NOT_IN_ROOT'].includes(cause?.code) ? 'gone' : 'unknown' }
+    } else if (!file.removed) {
       try {
         const found = await service.resolvePath({ rootId, path: reviewPathOf(file.change) })
         if (found?.kind === 'file') {
@@ -336,7 +345,7 @@ export function createChangeReview({ document, service, rootId, changes = [], ma
       const diff = fileDiffFromTexts({ path, oldText: file.target.change === 'add' ? null : before ?? '', newText: file.text ?? '', change: ['rename', 'delete'].includes(file.target.change) ? file.target.change : undefined })
       node.append(renderDiffView({ document, files: [diff], openFiles: 1 }))
     }
-    const reason = file.actions?.reason
+    const reason = file.deletion ? `deleted-${file.deletion}` : file.actions?.reason
     if (reason && REASON_NOTES[reason]) node.append(el(document, 'p', 'egdesk-change-review-note', REASON_NOTES[reason]))
     if (file.chunkStatus === 'too-large' || file.chunkStatus === 'timeout' || file.chunkStatus === 'binary') node.append(el(document, 'p', 'egdesk-change-review-note', '이 파일은 덩어리별로 나누지 못했습니다.'))
     if (file.actions?.revertChunks) {
@@ -391,7 +400,8 @@ export function createChangeReview({ document, service, rootId, changes = [], ma
 
   function renderSummary() {
     const total = files.reduce((sum, file) => sum + file.chunks.length, 0)
-    summary.textContent = files.length ? `파일 ${files.length}개 · 덩어리 ${total}개` : '검토할 변경이 없습니다.'
+    const deleted = files.filter(file => file.target?.change === 'delete').length
+    summary.textContent = files.length ? `파일 ${files.length}개 · 덩어리 ${total}개${deleted ? ` · 삭제 ${deleted}개` : ''}` : '검토할 변경이 없습니다.'
     undoButton.hidden = !lastRevert
   }
 

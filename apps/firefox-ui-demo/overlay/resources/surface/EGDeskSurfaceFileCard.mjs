@@ -24,6 +24,22 @@ export function createFileCardZone(deps) {
   // Only cards created by this zone can receive a watcher event. Weak keys
   // avoid retaining a closed File or its prior root binding.
   const fileWatchHandlers = new WeakMap();
+  // CODE-02: cards bound to a Board's project folder follow that Board when
+  // its folder changes. Same weak, zone-owned registry as the watcher.
+  const boardProjectHandlers = new WeakMap();
+
+  // The host says only "this Board's folder may have changed". Each bound
+  // card re-reads the Board through the helper itself; the caller passes no
+  // project, root or path, so nothing here can be steered to another folder.
+  async function onBoardProjectChanged(boardId) {
+    if (typeof boardId !== 'string' || !boardId) return [];
+    const pending = [];
+    for (const card of document.querySelectorAll('.egd-file-card')) {
+      const handler = boardProjectHandlers.get(card);
+      if (handler) pending.push(Promise.resolve().then(() => handler(boardId)).catch(() => 'failed'));
+    }
+    return (await Promise.all(pending)).filter(result => result !== 'skip');
+  }
 
   async function onWorkflowEvent(frame, streamCurrent) {
     if (frame?.type !== 'workflow.event' || frame.v !== 1 || frame.event?.topic !== 'file.changed' ||
@@ -118,13 +134,16 @@ export function createFileCardZone(deps) {
   // readOrigin is the activity's account/epoch-bound GET reader. The target's
   // itemId stays in that local fence, never in the server origin query. No
   // supplied path, Board, cached origin or picker can authorize this opening.
+  // location {rootOnly: true} opens just the verified run folder (CODE-05: a
+  // change that only deleted files has no file left to open).
   async function openVerifiedRunFile({ target, location, readOrigin, isCurrent, signal } = {}) {
+    if (location?.rootOnly === true) location = { rootOnly: true, path: null, line: 1 };
     if (!['conversationId', 'runId', 'itemId'].every(key => validRunId(target?.[key]))
-        || !absoluteRunPath(location?.path) || !Number.isSafeInteger(location?.line) || location.line < 1
+        || !(location?.rootOnly === true || absoluteRunPath(location?.path)) || !Number.isSafeInteger(location?.line) || location.line < 1
         || location.column != null && (!Number.isSafeInteger(location.column) || location.column < 1)
         || typeof readOrigin !== 'function' || typeof isCurrent !== 'function') return { status: 'unavailable' };
     const selected = Object.freeze(Object.fromEntries(['conversationId', 'runId', 'itemId'].map(key => [key, target[key]])));
-    const place = Object.freeze({ path: location.path, line: location.line, column: location.column ?? null });
+    const place = Object.freeze({ path: location.path, line: location.line, column: location.column ?? null, rootOnly: location.rootOnly === true });
     const current = () => {
       try { return !signal?.aborted && isCurrent(selected) === true; } catch { return false; }
     };
@@ -152,6 +171,26 @@ export function createFileCardZone(deps) {
     const ready = await card._fileReady;
     if (!current() || !card.isConnected || card.dataset.closeState || card._fileOpenStatus === 'stale') return { status: 'stale' };
     return ready === true && card._fileOpenStatus === 'opened' ? { status: 'opened', cardId: card.id } : { status: 'unavailable' };
+  }
+
+  // CODE-05 D-X2 stage 2 entry from a Chat change row: the retained rows open
+  // in a File Card that re-verified the run origin. The first surviving file
+  // is opened; a change that only deleted files opens the verified folder
+  // alone so the deletions can still be reviewed (nothing is restored).
+  async function openVerifiedRunReview({ target, changes, readOrigin, isCurrent } = {}) {
+    const rows = Array.isArray(changes) ? changes.map(row => ({ ...row })) : [];
+    const kindOf = row => typeof row?.kind === 'string' ? row.kind : row?.kind?.type;
+    const pathOf = row => row?.movePath || row?.kind?.move_path || row?.path;
+    if (!rows.length || typeof isCurrent !== 'function' || rows.some(row => typeof row?.path !== 'string' || !row.path)) return { status: 'unavailable' };
+    const first = rows.find(row => kindOf(row) !== 'delete' && typeof pathOf(row) === 'string');
+    const location = first ? { path: pathOf(first), line: 1 } : { rootOnly: true };
+    const opened = await openVerifiedRunFile({ target, location, readOrigin, isCurrent });
+    if (opened?.status !== 'opened') return opened || { status: 'unavailable' };
+    const view = document.getElementById(opened.cardId)?._fileView;
+    if (typeof view?.showChangeReview !== 'function') return { status: 'unavailable' };
+    if (isCurrent(target) !== true) return { status: 'stale' };
+    await view.showChangeReview(rows);
+    return { ...opened, ...(first ? {} : { deletionsOnly: true }) };
   }
 
   let boardProjectOpening = null, boardProjectRequest = 0, boardProjectPicker = null;
@@ -326,7 +365,14 @@ export function createFileCardZone(deps) {
     let projectConnection = null;
     let projectReference = FileCardState.fileCardRecord(null, {}, options.record?.project).project || null;
     let ownedRunner = null;
+    let followBoardProject = null, boardFollow = Promise.resolve();
     card._fileRecord = cloneJson(options.record || FileCardState.fileCardRecord(null));
+    boardProjectHandlers.set(card, boardId => {
+      // One follow at a time per card; a later change waits for the earlier one.
+      const next = boardFollow.then(() => followBoardProject ? followBoardProject(boardId) : 'skip', () => followBoardProject ? followBoardProject(boardId) : 'skip');
+      boardFollow = next.catch(() => {});
+      return next;
+    });
     fileWatchHandlers.set(card, async (change, streamCurrent) => {
       const binding = rootHandle, boundProject = projectConnection, boundTarget = projectTarget,
         boundReference = projectReference, boundView = view, service = fileService, boundRun = watcherRunBinding;
@@ -440,6 +486,64 @@ export function createFileCardZone(deps) {
           rememberProject(project, bound);
           return project;
         };
+        // CODE-02 (D-X3): the Board's folder changed (picked again, replaced or
+        // detached). A card opened on that Board's project follows it: clean
+        // cards open the new folder; a card with unsaved work keeps its folder
+        // and offers a separate card (never overwrite another project's draft,
+        // same rule as chooseProject). Detach leaves the files shown but stops
+        // treating them as the Board's project until a folder is picked again.
+        const followNotice = (text, action = null) => {
+          notice.replaceChildren(el('p', {}, text), ...(action ? [action] : []));
+          notice.hidden = false;
+        };
+        followBoardProject = async boardId => {
+          const boundTarget = projectTarget, boundProject = projectConnection, boundView = view;
+          if (!boundTarget || boundTarget.boardId !== boardId || watcherRunBinding || restoring || !boundView
+              || !card.isConnected || card.dataset.closeState) return 'skip';
+          const unchanged = () => card.isConnected && !card.dataset.closeState && view === boundView
+            && projectTarget === boundTarget && projectConnection === boundProject;
+          let latest;
+          try { latest = await service.openProject({ boardId }); } catch { return unchanged() ? 'unavailable' : 'stale'; }
+          if (!unchanged()) return 'stale';
+          const next = latest?.source === 'board' ? latest.project : null;
+          const validNext = next?.status === 'connected' && ['projectId', 'rootId', 'directoryId'].every(key => typeof next[key] === 'string' && next[key]);
+          if (validNext && boundProject && next.projectId === boundProject.projectId && next.rootId === boundProject.rootId) {
+            if (next.displayPath !== boundProject.displayPath || rootNeedsReconnect) { rememberProject(next, boundTarget); publish(boundView.snapshot()); }
+            return 'same';
+          }
+          const label = boundTarget.title ? `Board ‘${boundTarget.title}’` : 'Board';
+          if (!validNext) {
+            if (!boundProject) return 'same';
+            // Keep the Board link so a folder picked later is followed again.
+            projectConnection = null; projectReference = null; rootNeedsReconnect = true;
+            followNotice(next?.status === 'reconnect-required'
+              ? `${label}의 프로젝트 폴더를 다시 선택해야 합니다. 이 카드는 이전 폴더 내용을 보여 주지만 Board 프로젝트로 쓰지 않습니다.`
+              : `${label}의 프로젝트 폴더 연결이 해제되었습니다. 이 카드는 이전 폴더 내용을 보여 주지만 Board 프로젝트로 쓰지 않습니다.`);
+            publish(boundView.snapshot());
+            return 'detached';
+          }
+          const current = boundView.snapshot();
+          if (current.dirty || current.originalDirty) {
+            const name = next.title || next.name || '새 폴더';
+            const open = el('button', { type: 'button', class: 'egd-file-card-follow-open', data: { testid: 'file-card-follow-open' }, onclick: async event => {
+              event.stopPropagation();
+              const verified = (await service.openProject({ boardId }).catch(() => null))?.project;
+              if (verified?.status !== 'connected' || verified.projectId !== next.projectId || verified.rootId !== next.rootId) {
+                followNotice(`${label}의 프로젝트 폴더가 다시 바뀌었습니다. Board 메뉴에서 확인하세요.`); return;
+              }
+              const other = spawnFileCard({ openMode: 'new', project: verified, projectTarget: boundTarget });
+              if (await other._fileReady) notice.hidden = true;
+            } }, '새 File 카드에서 열기');
+            followNotice(`${label}의 프로젝트 폴더가 ‘${name}’(으)로 바뀌었습니다. 저장하지 않은 작업사본이 있어 이 카드는 이전 폴더를 유지합니다.`, open);
+            return 'kept-dirty';
+          }
+          rememberProject(next, boundTarget);
+          const opened = await boundView.openProject(next);
+          if (!card.isConnected || view !== boundView) return 'stale';
+          if (opened) followNotice(`${label}의 프로젝트 폴더가 바뀌어 ‘${next.title || next.name || '프로젝트'}’을(를) 열었습니다.`);
+          publish(boundView.snapshot());
+          return opened ? 'followed' : 'unavailable';
+        };
         const terminalApiFor = async terminalCard => {
           const started = Date.now();
           while (card.isConnected && view.element.isConnected && terminalCard?.isConnected && Date.now() - started < 15000) {
@@ -507,18 +611,19 @@ export function createFileCardZone(deps) {
           rootHandle = { rootId: origin.rootId, directoryId: origin.directoryId, displayPath: origin.displayPath,
             name: origin.displayPath.split(/[\\/]/).filter(Boolean).at(-1) || '실행 폴더' };
           if (!scope.isCurrent() || !await view.openRoot(rootHandle, { project: null, scope }) || !scope.isCurrent()
-              || !await view.openAt(location, { scope }) || !scope.isCurrent() || view.snapshot().rootId !== origin.rootId) {
+              || (!location.rootOnly && !await view.openAt(location, { scope })) || !scope.isCurrent() || view.snapshot().rootId !== origin.rootId) {
             throw new Error('실행 파일을 여는 동안 연결이 바뀌었습니다.');
           }
-          runFileOrigin = Object.freeze({ rootId: origin.rootId, fileId: view.snapshot().fileId });
+          runFileOrigin = location.rootOnly ? null : Object.freeze({ rootId: origin.rootId, fileId: view.snapshot().fileId });
           notice.replaceChildren(
-            el('p', {}, '현재 파일 · 이전 실행의 출력에서 열었습니다. 당시 내용과 다를 수 있습니다.'),
-            el('p', {}, `경로 · ${location.path}`),
+            el('p', {}, location.rootOnly ? '실행 폴더 · 이전 실행의 변경을 검토하려고 열었습니다. 지운 파일은 여기서 되살리지 않습니다.'
+              : '현재 파일 · 이전 실행의 출력에서 열었습니다. 당시 내용과 다를 수 있습니다.'),
+            el('p', {}, location.rootOnly ? `폴더 · ${origin.displayPath}` : `경로 · ${location.path}`),
             el('details', {},
               el('summary', {}, '출처 상세'),
               el('p', {}, `이전 실행 · ${target.runId}`),
               el('p', {}, `원래 대화 · ${target.conversationId} · 명령 항목 · ${target.itemId}`),
-              el('p', {}, `당시 행 참조 · ${location.line}행${location.column ? ` ${location.column}열` : ''}. 현재 파일의 행·열과 일치하지 않을 수 있습니다.`)));
+              ...(location.rootOnly ? [] : [el('p', {}, `당시 행 참조 · ${location.line}행${location.column ? ` ${location.column}열` : ''}. 현재 파일의 행·열과 일치하지 않을 수 있습니다.`)])));
           notice.style.overflowWrap = 'anywhere';
           notice.hidden = false;
           originOpened = true; card._fileOpenStatus = 'opened';
@@ -632,5 +737,5 @@ export function createFileCardZone(deps) {
     }
   }
 
-  return { spawnFileCard, openVerifiedRunFile, openBoardProjectFile, openBoardProjectFileAt, onWorkflowEvent };
+  return { spawnFileCard, openVerifiedRunFile, openVerifiedRunReview, openBoardProjectFile, openBoardProjectFileAt, onWorkflowEvent, onBoardProjectChanged };
 }

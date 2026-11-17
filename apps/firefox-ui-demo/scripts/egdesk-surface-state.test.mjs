@@ -19294,7 +19294,7 @@ test('CTX-03 signals: screen ids, viewport fractions and account tokens only —
   assert.equal(Surface.contextVisibleArea({ left: 0, top: 0, width: 0, height: 10 }, { width: 100, height: 100 }), 0);
 
   // The production collector: Browser site, account, file path and card titles stay on the screen.
-  const sources = ['contextResolverKindForView', 'collectContextResolverSignals'].map(declaration);
+  const sources = ['contextResolverKindForView', 'collectContextResolverSignals', 'contextSuggestSourceOf'].map(declaration);
   assert.ok(sources.every(Boolean), 'the collector stays directly testable');
   const view = (id, classes, rect, extra = {}) => ({ id, isConnected: true, dataset: { projectionId: 'p1', ...(extra.dataset || {}) },
     classList: { contains: name => classes.includes(name) }, getBoundingClientRect: () => rect, ...extra });
@@ -19312,10 +19312,11 @@ test('CTX-03 signals: screen ids, viewport fractions and account tokens only —
   ];
   const doc = { querySelectorAll: selector => { assert.equal(selector, '.egd-browser-card, .egd-file-card, .egd-canvas-shape'); return views; },
     getElementById: id => views.find(item => item.id === id) || null };
-  const collect = compileFunction(`${sources.join('\n')}\nreturn collectContextResolverSignals;`, ['state', 'document', 'window', 'browserCardState', 'SurfaceState'])(
-    { boards: { projections: { p1: { boardId: 'agenda-sales', title: '영업' } }, activeProjectionId: 'p1' }, activeEntityId: 'egd-browser-1',
-      sourceRefs: { defaultProfileId: 'firefox-egdesk-default' } },
-    doc, { innerWidth: 1000, innerHeight: 800 }, card => ({ uri: uris[card.id] }), Surface);
+  const ContextSuggestSettings = await import('../overlay/resources/EGDeskContextSuggestSettings.sys.mjs');
+  const collectorState = { boards: { projections: { p1: { boardId: 'agenda-sales', title: '영업' } }, activeProjectionId: 'p1' }, activeEntityId: 'egd-browser-1',
+    sourceRefs: { defaultProfileId: 'firefox-egdesk-default' } };
+  const collect = compileFunction(`${sources.join('\n')}\nreturn collectContextResolverSignals;`, ['state', 'document', 'window', 'browserCardState', 'SurfaceState', 'ContextSuggestSettings'])(
+    collectorState, doc, { innerWidth: 1000, innerHeight: 800 }, card => ({ uri: uris[card.id] }), Surface, ContextSuggestSettings);
   const collected = collect({ id: 'room', inputSources: [{ kind: 'board-element', sourceRef: { viewId: 'egd-shape-3' } }, { kind: 'file', sourceRef: { path: '/Users/boss/a.txt' } }],
     messages: [{ inputReferences: [{ capturedAt: Date.now() - 60_000, localSource: { sourceRef: { viewId: 'egd-file-card-2', path: '/Users/boss/secret' } } }] }] });
   const wire = JSON.stringify(collected);
@@ -19329,7 +19330,17 @@ test('CTX-03 signals: screen ids, viewport fractions and account tokens only —
   assert.deepEqual(collected.recent.map(item => item.ref), ['egd-file-card-2']);
   assert.deepEqual(collected.account, { scopes: ['firefox-egdesk-default'] });
   assert.equal(collected.boardId, 'agenda-sales');
+  assert.equal(collected.firstMessage, false, 'a room with messages is past its first message');
   resolver.validateResolverSignals(JSON.parse(wire));
+  // CTX-03 never-suggest list: matched here, only a boolean goes out.
+  collectorState.contextSuggestSettings = { status: 'ready', value: { mode: 'always', neverSuggest: [{ kind: 'site', host: 'mail.example' }] } };
+  const excluded = collect({ id: 'room', inputSources: [], messages: [] });
+  const excludedWire = JSON.stringify(excluded);
+  assert.equal(excluded.visible.find(item => item.ref === 'egd-browser-1').userExcluded, true);
+  assert.equal(excluded.visible.filter(item => item.userExcluded).length, 1);
+  assert.equal(excluded.firstMessage, true);
+  for (const secret of ['mail.example', '/Users/']) assert.ok(!excludedWire.includes(secret), `${secret} never leaves the screen`);
+  resolver.validateResolverSignals(JSON.parse(excludedWire));
 });
 
 test('CTX-03 suggestions: Korean reasons, consent rows one at a time, excluded rows only say why, nothing ticked by itself', () => {
@@ -22503,7 +22514,8 @@ test('Chat retained details integration: actual activity/approval DOM opens only
   assert.equal(h.result().querySelector('.egdesk-run-result').getAttribute('data-outcome'), 'passed');
   assert.equal(h.panel().querySelectorAll('.egdesk-diff-view').length, 2);
   assert.deepEqual(h.decisions, []);
-  assert.equal(h.panel().testid('chat-approval-changes').querySelectorAll('button').length, 0, 'diff adds no decision/FileView controls');
+  // Only the diff view's display toggle (한 줄로/나란히 보기, CODE-05) is a button.
+  assert.equal(h.panel().testid('chat-approval-changes').querySelectorAll('button').filter(button => !/^egdesk-diff-layout-/.test(button.className)).length, 0, 'diff adds no decision/FileView controls');
   const choice = h.panel().querySelectorAll('[data-testid="chat-approval-choice"]').find(node => node.dataset.decision === 'decline');
   await choice.click();
   assert.deepEqual(h.decisions, [{ approvalId: h.pending.approvalId, conversationId: h.run.conversationId, runId: h.run.runId, decision: 'decline' }]);

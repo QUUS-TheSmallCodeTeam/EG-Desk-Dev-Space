@@ -515,7 +515,7 @@ async function cardFixture(t, { service = null } = {}) {
       terminalApis.push(api); card._termBrowser = { contentWindow: { terminalAPI: api } }; return card; },
     state: { codex: {} },
   });
-  return { ...h, document, runs, terminalOptions, terminalApis, notices, focused, presentations, openIde: () => zone.openBoardProjectFile(),
+  return { ...h, zone, document, runs, terminalOptions, terminalApis, notices, focused, presentations, openIde: () => zone.openBoardProjectFile(),
     dispatchWorkflow: (event, current) => zone.onWorkflowEvent(event, current),
     runStatus: value => { runStatus = value; }, setTarget: value => { target = value; }, pick: value => { nextPick = value; }, pickerCalls: () => pickerCalls,
     spawn: async options => {
@@ -1627,4 +1627,57 @@ test('File Card records remain backwards compatible and only persist opaque Boar
   assert.deepEqual(next.project, { projectId: 'project', boardId: 'board' });
   assert.doesNotMatch(JSON.stringify(next), /private|npm test/);
   assert.equal(Object.hasOwn(FileCardState.fileCardRecord(null, {}, { boardId: 'bad\0', projectId: 'project' }), 'project'), false);
+});
+
+// CODE-02: an open File card on a Board's project follows that Board when its
+// folder changes. The host passes only the boardId; each card re-reads it.
+test('a clean Board-project File card follows a Board folder change; other Boards and ordinary roots stay put', { timeout: 6000 }, async t => {
+  const h = await cardFixture(t);
+  const a = await h.spawn({ openMode: 'new', project: project('a'), projectTarget: { boardId: 'board-a', title: 'A' } });
+  const b = await h.spawn({ openMode: 'new', project: project('b'), projectTarget: { boardId: 'board-b', title: 'B' } });
+  const ordinary = await h.spawn({ openMode: 'new' });
+  assert.equal(a._fileView.snapshot().rootId, 'root-a');
+  h.projects.set('board-a', project('next'));
+  const results = await h.zone.onBoardProjectChanged('board-a');
+  assert.deepEqual(results, ['followed']);
+  assert.equal(a._fileView.snapshot().rootId, 'root-next');
+  assert.equal(a._fileView.snapshot().projectId, 'project-next');
+  assert.equal(a._fileRecord.project?.projectId, 'project-next');
+  assert.match(a.querySelector('.egd-file-card-notice').textContent, /Board ‘A’의 프로젝트 폴더가 바뀌어 ‘보드 next’을\(를\) 열었습니다/);
+  assert.equal(b._fileView.snapshot().rootId, 'root-b');
+  assert.equal(ordinary._fileView.snapshot().rootId, null);
+  // Same folder again → nothing reopened.
+  assert.deepEqual(await h.zone.onBoardProjectChanged('board-a'), ['same']);
+  assert.deepEqual(await h.zone.onBoardProjectChanged(''), []);
+  assert.deepEqual(h.writes, []);
+});
+
+test('a dirty Board-project File card keeps its folder and offers a separate card; detach stops it acting as the project', { timeout: 6000 }, async t => {
+  const h = await cardFixture(t);
+  const a = await h.spawn({ openMode: 'new', project: project('a'), projectTarget: { boardId: 'board-a', title: 'A' } });
+  a.querySelector('[role="treeitem"]')?.click?.();
+  await until(() => a._fileView.snapshot().fileId);
+  const editor = a.querySelector('.egdesk-file-editor');
+  editor.value = 'start edited'; editor.fire?.('input');
+  await until(() => a._fileView.snapshot().dirty);
+  h.projects.set('board-a', project('next'));
+  assert.deepEqual(await h.zone.onBoardProjectChanged('board-a'), ['kept-dirty']);
+  assert.equal(a._fileView.snapshot().rootId, 'root-a', 'unsaved work is never moved to another folder');
+  assert.match(a.querySelector('.egd-file-card-notice').textContent, /저장하지 않은 작업사본이 있어 이 카드는 이전 폴더를 유지합니다/);
+  const before = h.document.querySelectorAll('.egd-file-card').length;
+  a.querySelector('.egd-file-card-follow-open').click();
+  await until(() => h.document.querySelectorAll('.egd-file-card').length === before + 1);
+  const other = h.document.querySelectorAll('.egd-file-card').at(-1);
+  await other._fileReady;
+  assert.equal(other._fileView.snapshot().rootId, 'root-next');
+  // The new card follows a detach: files stay shown, no longer the Board project.
+  h.projects.delete('board-a');
+  const detached = await h.zone.onBoardProjectChanged('board-a');
+  assert.ok(detached.includes('detached'));
+  assert.match(other.querySelector('.egd-file-card-notice').textContent, /연결이 해제되었습니다/);
+  assert.equal(other._fileView.snapshot().rootId, 'root-next');
+  // Picking a folder again for the Board is followed again.
+  h.projects.set('board-a', project('again'));
+  assert.ok((await h.zone.onBoardProjectChanged('board-a')).includes('followed'));
+  assert.equal(other._fileView.snapshot().rootId, 'root-again');
 });

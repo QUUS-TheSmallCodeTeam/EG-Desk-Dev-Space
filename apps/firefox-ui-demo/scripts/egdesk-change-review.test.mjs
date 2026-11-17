@@ -161,3 +161,22 @@ test('a file the Agent created is removed only while unchanged, and its absence 
   assert.equal(h.review.element.querySelectorAll('.egdesk-change-review-delete').length, 0)
   assert.match(h.review.element.textContent, /삭제를 제안하지 않습니다/)
 })
+
+test('CODE-05: a deletion-only change is reviewable — the removed text is shown and the absence is observed, never restored', async () => {
+  const removed = { path: '/project/old.txt', kind: 'delete', diff: 'gone one\ngone two\n' }
+  const h = await open(new Map(), { changes: [removed] })
+  assert.deepEqual(h.review.snapshot().files.map(file => [file.path, file.change, file.chunks, file.deletion]), [[removed.path, 'delete', 0, 'gone']])
+  assert.match(h.review.element.querySelector('.egdesk-change-review-summary').textContent, /파일 1개 · 덩어리 0개 · 삭제 1개/)
+  assert.equal(h.review.element.querySelectorAll('.egdesk-diff-line-delete').length, 2)
+  assert.match(h.review.element.textContent, /파일이 없는 것을 다시 확인했습니다/)
+  assert.equal(h.review.element.querySelectorAll('.egdesk-change-review-revert').length, 0)
+  assert.equal(h.review.element.querySelectorAll('.egdesk-change-review-delete').length, 0)
+  assert.deepEqual([h.service.writes, h.service.deletes], [[], []])
+  // Same path holds a file again: reported, not touched.
+  const back = await open(new Map([[removed.path, 'someone else\n']]), { changes: [removed] })
+  assert.equal(back.review.snapshot().files[0].deletion, 'present')
+  assert.match(back.review.element.textContent, /같은 경로에 파일이 다시 있습니다/)
+  assert.deepEqual([back.service.writes, back.service.deletes], [[], []])
+  // The diff view inside the review offers the side-by-side toggle.
+  assert.ok(h.review.element.querySelector('.egdesk-diff-layout-split'))
+})

@@ -758,3 +758,66 @@ test('ordinary directory loading survives a newer file selection while an origin
   assert.equal(editor.value, 'managed draft only');
   assert.match(await fs.readFile(h.source, 'utf8'), /CURRENT_SOURCE/, 'flushing only updated the managed working copy');
 });
+
+// CODE-05: a change that only deleted files still enters the D-X2 stage 2
+// review. The verified run folder opens alone (no file), the deletion is
+// shown with its observed absence, and nothing is written or restored.
+async function withReviewParts(h) {
+  const ChangeReview = await import('../overlay/resources/EGDeskChangeReview.mjs');
+  const Diff = await import('../overlay/resources/EGDeskDiffView.sys.mjs');
+  const original = globalThis.ChromeUtils.importESModule;
+  h.document.getElementById ??= id => h.document.body.querySelectorAll('.egd-file-card').find(node => node.id === id) || null;
+  globalThis.ChromeUtils.importESModule = url => /EGDeskChangeReview\.mjs$/.test(url) ? ChangeReview
+    : /EGDeskDiffView\.sys\.mjs$/.test(url) ? Diff : original(url);
+  return h;
+}
+
+test('a deletion-only change opens the verified run folder alone and reviews the deletion without restoring it', async t => {
+  const h = await withReviewParts(await harness(t));
+  const gone = path.join(h.roots[0], 'removed-by-agent.txt');
+  const rows = [{ path: gone, kind: 'delete', movePath: null, diff: 'first removed line\nsecond removed line\n', omitted: null }];
+  const opened = await h.zone.openVerifiedRunReview({ target, changes: rows, readOrigin: h.readOrigin, isCurrent: h.current() });
+  assert.equal(opened.status, 'opened');
+  assert.equal(opened.deletionsOnly, true);
+  const card = h.document.getElementById?.(opened.cardId) || h.cards().find(node => node.id === opened.cardId);
+  assert.ok(card);
+  const snapshot = card._fileView.snapshot();
+  assert.equal(snapshot.rootId, h.projects[0].rootId);
+  assert.equal(snapshot.fileId, null, 'no file is opened for a deletion');
+  const notice = card.querySelector('.egd-file-card-notice');
+  assert.match(notice.textContent, /실행 폴더/);
+  assert.equal(notice.textContent.includes('당시 행 참조'), false);
+  const panel = card.querySelector('.egdesk-file-change-review-panel');
+  assert.equal(panel.hidden, false);
+  assert.match(panel.textContent, /삭제 1개/);
+  assert.match(panel.textContent, /removed-by-agent\.txt · 삭제/);
+  assert.match(panel.textContent, /파일이 없는 것을 다시 확인했습니다/);
+  assert.equal(panel.querySelectorAll('del').length, 2, 'the removed lines are shown');
+  assert.equal(panel.querySelectorAll('.egdesk-change-review-revert').length, 0);
+  assert.equal(h.requests.some(request => ['revertReviewed', 'deleteCreated', 'saveOriginal', 'createDraft'].includes(request.name)), false);
+  assert.equal(h.effects.git, 0); assert.equal(h.effects.pickers, 0); assert.equal(h.effects.network, 0);
+});
+
+test('a deletion whose path holds a file again is reported, and a mixed change still opens the surviving file', async t => {
+  const h = await withReviewParts(await harness(t));
+  const rows = [{ path: h.source, kind: 'delete', movePath: null, diff: 'old\n', omitted: null }];
+  const opened = await h.zone.openVerifiedRunReview({ target, changes: rows, readOrigin: h.readOrigin, isCurrent: h.current() });
+  assert.equal(opened.status, 'opened');
+  const card = h.cards().find(node => node.id === opened.cardId);
+  assert.match(card.querySelector('.egdesk-file-change-review-panel').textContent, /같은 경로에 파일이 다시 있습니다/);
+  const mixed = await h.zone.openVerifiedRunReview({ target, readOrigin: h.readOrigin, isCurrent: h.current(),
+    changes: [{ path: path.join(h.roots[0], 'gone.txt'), kind: 'delete', diff: 'x\n' },
+      { path: h.source, kind: 'update', diff: '@@ -2 +2 @@\n-OLD_SOURCE\n+CURRENT_SOURCE\n' }] });
+  assert.equal(mixed.status, 'opened');
+  assert.equal(mixed.deletionsOnly, undefined);
+  const mixedCard = h.cards().find(node => node.id === mixed.cardId);
+  assert.ok(mixedCard._fileView.snapshot().fileId, 'the surviving file is opened');
+  // Stale and malformed requests never open a Card.
+  const before = h.cards().length;
+  h.changeEpoch();
+  const stale = await h.zone.openVerifiedRunReview({ target, changes: rows, readOrigin: h.readOrigin, isCurrent: () => false });
+  assert.equal(stale.status, 'stale');
+  assert.equal((await h.zone.openVerifiedRunReview({ target, changes: [], readOrigin: h.readOrigin, isCurrent: h.current() })).status, 'unavailable');
+  assert.equal((await h.zone.openVerifiedRunReview({ target, changes: [{ kind: 'delete' }], readOrigin: h.readOrigin, isCurrent: h.current() })).status, 'unavailable');
+  assert.equal(h.cards().length, before);
+});

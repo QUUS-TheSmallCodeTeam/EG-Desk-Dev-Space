@@ -47,6 +47,9 @@ function documentFixture() {
 const target = Object.freeze({ conversationId: 'original-conversation', runId: 'original-run', itemId: 'approved-item' })
 const patch = label => `@@ -1 +1 @@\n-before\n+${label}\n`
 const item = (itemId = target.itemId, label = 'chosen change', files = null) => ({ itemId, status: 'inProgress', truncated: false, files: files || [{ path: '/original/project/app.txt', kind: 'update', movePath: null, diff: patch(label), omitted: null }] })
+// The diff view's own 한 줄로/나란히 보기 toggle (CODE-05) only switches the
+// display; every other button would be an action and stays forbidden.
+const actionButtons = node => node.querySelectorAll('button').filter(button => !/^egdesk-diff-layout-/.test(button.className))
 const packet = (items = [item()]) => ({ protocolVersion: 1, conversationId: target.conversationId, runId: target.runId, retained: true, items, turn: null })
 function fixture({ kind = 'approval', requestedTarget = target, ...options } = {}) {
   const document = documentFixture(), fetched = []
@@ -75,7 +78,8 @@ test('approval presentation selects the exact approved item before parsing and u
   assert.equal(h.node.querySelectorAll('.egdesk-diff-line-add').length, 1)
   assert.equal(h.node.querySelectorAll('.egdesk-diff-line-delete').length, 1)
   assert.equal(h.node.querySelector('.egdesk-diff-file-path').textContent, '/original/project/app.txt')
-  assert.equal(h.node.querySelectorAll('button').length, 0, 'no duplicate approval controls or file-opening buttons')
+  assert.equal(actionButtons(h.node).length, 0, 'no duplicate approval controls or file-opening buttons')
+  assert.deepEqual(h.node.querySelector('.egdesk-diff-layout').querySelectorAll('button').map(button => button.textContent), ['한 줄로 보기', '나란히 보기'])
   assert.equal(h.node.querySelectorAll('.egdesk-change-approval-actions').length, 0)
   assert.deepEqual(decisions, [])
 })
@@ -126,7 +130,7 @@ test('file omissions and missing diff text stay unavailable, never empty no-chan
     const status = h.node.querySelector('.egdesk-diff-file').getAttribute('data-status')
     assert.equal(status, ['fileLimit', 'runLimit'].includes(omitted) ? 'omitted' : 'unavailable')
     assert.doesNotMatch(h.node.textContent, /MUST_NOT_SHOW|내용 변경이 없습니다/)
-    assert.equal(h.node.querySelectorAll('button').length, 0)
+    assert.equal(actionButtons(h.node).length, 0)
   }
   assert.deepEqual(writes, [])
   assert.deepEqual(opened, [])
@@ -172,7 +176,7 @@ test('nonempty retained text without parsed changes is not an empty/no-change cl
     assert.doesNotMatch(h.node.textContent, /내용 변경이 없습니다|바뀐 파일이 없습니다|보존되지/)
     assert.equal(h.node.querySelector('.egdesk-diff-raw').textContent,
       diff.length > DIFF_VIEW_LIMITS.maxRawChars ? `${diff.slice(0, DIFF_VIEW_LIMITS.maxRawChars)}\n…` : diff)
-    assert.equal(h.node.querySelectorAll('button').length, 0)
+    assert.equal(actionButtons(h.node).length, 0)
   }
 })
 
@@ -216,7 +220,7 @@ test('valid hunkless rename, copy, mode and binary records remain visible as rec
     assert.doesNotMatch(h.node.textContent, /내용 변경이 없습니다|해석하지 못했습니다|보존되지/)
     if (record.text) assert.ok(h.node.textContent.includes(record.text))
     if (record.raw) assert.equal(h.node.querySelector('.egdesk-diff-raw')?.textContent, record.raw)
-    assert.equal(h.node.querySelectorAll('button').length, 0)
+    assert.equal(actionButtons(h.node).length, 0)
   }
 })
 
@@ -427,7 +431,7 @@ test('approval rendering never exposes decisions or file-open buttons even with 
   const h = fixture({ onDecision: value => dispatched.push(value), replyPending: value => dispatched.push(value),
     onOpenFile: value => dispatched.push(value), getVerifiedOrigin: () => ({ verified: true, conversationId: target.conversationId, runId: target.runId, rootId: 'original-root' }) })
   await h.open()
-  assert.equal(h.node.querySelectorAll('button').length, 0)
+  assert.equal(actionButtons(h.node).length, 0)
   await h.close()
   await h.open()
   assert.deepEqual(dispatched, [])

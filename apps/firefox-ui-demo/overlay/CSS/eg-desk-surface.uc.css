@@ -6475,6 +6475,29 @@ button.egd-codex-work-screen .egd-ui-icon { flex: none; width: 14px; height: 14p
 .egdesk-change-review .egdesk-diff-line-add { background: var(--egd-success-bg); }
 .egdesk-chat-change-review .egdesk-diff-line-delete,
 .egdesk-change-review .egdesk-diff-line-delete { background: var(--egd-danger-bg); }
+/* CODE-05 나란히 보기: the toggle next to the summary and the split rows. */
+.egdesk-chat-change-review .egdesk-diff-layout,
+.egdesk-change-review .egdesk-diff-layout { display: flex; flex-wrap: wrap; gap: 4px; margin: 4px 0; }
+.egdesk-chat-change-review .egdesk-diff-layout button[aria-pressed="true"],
+.egdesk-change-review .egdesk-diff-layout button[aria-pressed="true"] { background: var(--egd-note-soft); border-color: var(--egd-note-line); }
+.egdesk-chat-change-review .egdesk-diff-split,
+.egdesk-change-review .egdesk-diff-split { box-sizing: border-box; min-width: 100%; margin: 0; padding: 0; list-style: none; font: 12px/1.65 ui-monospace, monospace; }
+.egdesk-chat-change-review .egdesk-diff-split[hidden],
+.egdesk-change-review .egdesk-diff-split[hidden],
+.egdesk-chat-change-review .egdesk-diff-lines[hidden],
+.egdesk-change-review .egdesk-diff-lines[hidden] { display: none; }
+.egdesk-chat-change-review .egdesk-diff-split-row,
+.egdesk-change-review .egdesk-diff-split-row { display: grid; grid-template-columns: 4ch minmax(0, 1fr) 4ch minmax(0, 1fr); padding-inline: 4px 8px; }
+.egdesk-chat-change-review .egdesk-diff-split-row > .egdesk-diff-text,
+.egdesk-change-review .egdesk-diff-split-row > .egdesk-diff-text { overflow-x: auto; }
+.egdesk-chat-change-review .egdesk-diff-split-note,
+.egdesk-change-review .egdesk-diff-split-note { grid-column: 1 / -1; }
+.egdesk-chat-change-review .egdesk-diff-split-add,
+.egdesk-change-review .egdesk-diff-split-add { background: var(--egd-success-bg); }
+.egdesk-chat-change-review .egdesk-diff-split-delete,
+.egdesk-change-review .egdesk-diff-split-delete { background: var(--egd-danger-bg); }
+.egdesk-chat-change-review .egdesk-diff-split-empty,
+.egdesk-change-review .egdesk-diff-split-empty { background: var(--egd-window-alt); }
 .egdesk-chat-change-review-actions { display: flex; flex-direction: column; gap: 4px; align-items: flex-start; }
 .egdesk-chat-change-review-open { max-width: 100%; text-align: left; }
 /* Stage 2 (D-X2) review after apply: the File Card's 변경 검토 panel (EGDeskChangeReview). */
@@ -6910,6 +6933,17 @@ button.egd-codex-message-activity:focus-visible { outline: var(--egd-focus-outli
 .egd-chat-input-tray button, #egd-codex-input-panel button { font: inherit; color: inherit; border: 1px solid color-mix(in srgb, var(--egd-on-surface) 20%, transparent); background: transparent; border-radius: 7px; padding: 4px 7px; cursor: pointer; }
 .egd-chat-input-chip { display: flex; max-width: 100%; align-items: center; }
 .egd-chat-input-chip button:first-child { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* CTX-04 '바뀜' on an attachment and the pre-send scope preview. */
+.egd-chat-source-changed { flex: 0 0 auto; margin-inline: 4px 2px; padding: 0 5px; font-size: 11px; line-height: 16px; border-radius: 8px; background: var(--egd-note-soft); border: 1px solid var(--egd-note-line); white-space: nowrap; }
+.egd-chat-input-chip > .egd-chat-source-changed + button { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.egd-chat-send-scope { flex: 1 0 100%; min-width: 0; font-size: 12px; }
+.egd-chat-send-scope-summary { cursor: pointer; color: var(--egd-on-surface-variant); overflow-wrap: anywhere; }
+.egd-chat-send-scope-list { margin: 4px 0; padding: 0; list-style: none; display: flex; flex-direction: column; gap: 3px; }
+.egd-chat-send-scope-item { display: flex; align-items: center; gap: 6px; }
+.egd-chat-send-scope-text { flex: 1 1 auto; min-width: 0; display: flex; flex-wrap: wrap; align-items: center; gap: 2px 6px; overflow-wrap: anywhere; }
+.egd-chat-send-scope-note, .egd-chat-send-scope-boundary { color: var(--egd-on-surface-variant); font-size: 11px; }
+.egd-chat-send-scope-boundary { margin: 2px 0; }
+.egd-chat-send-scope-changed .egd-chat-send-scope-label { font-style: italic; }
 .egd-input-snapshot { border-top: 1px solid color-mix(in srgb, var(--egd-on-surface) 16%, transparent); padding: 8px 0; min-width: 0; }
 .egd-input-snapshot h4 { margin: 4px 0; }
 .egd-input-snapshot-status { margin: 4px 0; font-size: 12px; color: var(--egd-on-surface-variant); }
@@ -10867,6 +10901,18 @@ button.egd-memo-ask-cancel:hover { text-decoration: underline; }
 .egd-context-suggest-note { flex-basis: 100%; color: var(--egd-warning-ink); font-size: 11.5px; }
 .egd-context-suggest-row-excluded { cursor: default; opacity: .62; }
 .egd-context-suggest-row-excluded:hover { background: transparent; }
+/* CTX-03 '추천 안 함' beside a suggestion row, and the Settings list (D-R2). */
+.egd-context-suggest-item { display: flex; align-items: flex-start; gap: 4px; }
+.egd-context-suggest-item > .egd-context-suggest-row { flex: 1 1 auto; min-width: 0; }
+.egd-context-suggest-never { flex: 0 0 auto; margin-top: 2px; padding: 2px 6px; font-size: 11px; color: var(--egd-on-surface-variant); background: transparent; border: 1px solid var(--egd-outline); border-radius: 5px; cursor: pointer; white-space: nowrap; }
+.egd-context-suggest-never:hover { background: var(--egd-hover); }
+.egd-settings-context-suggest-list-title { margin-top: 10px; font-size: 12px; font-weight: 600; }
+.egd-settings-context-suggest-list { margin: 4px 0; padding: 0; list-style: none; display: flex; flex-direction: column; gap: 4px; }
+.egd-settings-context-suggest-entry { display: flex; align-items: center; gap: 8px; }
+.egd-settings-context-suggest-entry-label { flex: 1 1 auto; min-width: 0; overflow-wrap: anywhere; font-size: 12px; }
+.egd-settings-context-suggest-empty { color: var(--egd-on-surface-variant); font-size: 12px; }
+.egd-settings-context-suggest-add { display: flex; gap: 6px; align-items: center; }
+.egd-settings-context-suggest-input { flex: 1 1 auto; min-width: 0; }
 .egd-context-suggest-row-excluded .egd-context-suggest-note { color: var(--egd-on-surface-variant); }
 .egd-context-suggest-actions { display: flex; flex-wrap: wrap; align-items: center; justify-content: flex-end; gap: 6px; }
 .egd-context-suggest-hint { margin-right: auto; color: var(--egd-on-surface-variant); font-size: 11.5px; }

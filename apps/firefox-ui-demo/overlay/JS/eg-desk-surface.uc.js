@@ -16,6 +16,7 @@
   const ChatChangeReview = ChromeUtils.importESModule('chrome://userchrome/content/EGDeskChatChangeReview.sys.mjs');
   const Markdown = ChromeUtils.importESModule('chrome://userchrome/content/EGDeskMarkdown.sys.mjs');
   const InputContext = ChromeUtils.importESModule('chrome://userchrome/content/EGDeskInputContext.sys.mjs');
+  const ContextSuggestSettings = ChromeUtils.importESModule('chrome://userchrome/content/EGDeskContextSuggestSettings.sys.mjs');
   const BriefingState = ChromeUtils.importESModule('chrome://userchrome/content/EGDeskBriefingState.sys.mjs');
   const FileCardState = ChromeUtils.importESModule('chrome://userchrome/content/EGDeskFileCardState.sys.mjs');
   const BrowserAgentReceipts = ChromeUtils.importESModule('chrome://userchrome/content/EGDeskBrowserAgentRuntimeParent.sys.mjs');
@@ -2117,7 +2118,11 @@
       const projections = boardProjectionsFor(boardId);
       const saved = projections.find(item => item.project)?.project || null;
       const presentation = Object.freeze({ ...boardProjectPresentation(saved, failed ? null : live), at: Date.now(), failed });
+      const previous = boardProjectPresentations.get(boardId);
       boardProjectPresentations.set(boardId, presentation);
+      // CODE-02: open File cards on this Board re-read and follow its folder.
+      const folderKey = value => JSON.stringify([value?.status, value?.projectId ?? null, value?.displayPath ?? null]);
+      if (previous && !failed && folderKey(previous) !== folderKey(presentation)) void followBoardProjectInFileCards(boardId);
       for (const projection of projections) {
         adoptBoardProjectReference(projection, presentation);
         const region = document.getElementById(projection.id);
@@ -2549,8 +2554,12 @@
     const tray = el('div', { class: 'egd-chat-input-tray', data: { testid: 'chat-attachments', threadId: thread.id } });
     tray.appendChild(el('button', { type: 'button', 'aria-label': '자료 첨부', data: { testid: 'chat-attach-open' }, onclick: () => openChatInputPanel(thread.id) }, '＋ 첨부'));
     tray.appendChild(buildChatRequestProjectControl(thread, bridge));
+    const sourceChanges = typeof bridge.refreshContextSources === 'function' ? chatSourceChangeIndex(thread) : null;
     for (const source of thread.inputSources || []) {
-      tray.appendChild(el('div', { class: 'egd-chat-input-chip', data: { testid: 'chat-attachment', sourceId: source.id } },
+      // CTX-04: this card changed after the Agent last received it.
+      const changed = InputContext.attachmentChange(source, sourceChanges);
+      tray.appendChild(el('div', { class: 'egd-chat-input-chip', data: { testid: 'chat-attachment', sourceId: source.id, ...(changed ? { changed: 'true' } : {}) } },
+        changed ? el('span', { class: 'egd-chat-source-changed', title: changed.title, 'aria-label': changed.title, data: { testid: 'chat-attachment-changed' } }, changed.label) : null,
         el('button', { type: 'button', title: InputContext.inputSourceLocation(source), 'aria-label': `첨부 내용 확인: ${source.label}`,
           data: { testid: 'chat-attachment-inspect' }, onclick: async () => {
             try {
@@ -2567,7 +2576,35 @@
         el('button', { type: 'button', 'aria-label': '브리핑의 고정 근거 확인', onclick: () => bridge.inspectInput(thread.id, reference) }, '브리핑 근거 · 미전송'),
         el('button', { type: 'button', 'aria-label': '브리핑 근거 첨부 제거', onclick: () => bridge.removeBriefingInput(thread.id, reference.sourceId) }, '×')));
     }
+    const scope = typeof bridge.refreshContextSources === 'function' ? buildChatSendScope(thread, bridge) : null;
+    if (scope) tray.appendChild(scope);
     return tray;
+  }
+
+  // CTX-04: the room's change index from GET /context/sources (bridge cache).
+  function chatSourceChangeIndex(thread) {
+    const cached = state.contextSourceChanges?.[thread?.id];
+    return cached && thread.conversationId && cached.conversationId === thread.conversationId ? cached.index : null;
+  }
+
+  // CTX-04 pre-send preview: what this send gives the Agent (remove) and the
+  // earlier sources that changed since (attach again). Open state survives redraws.
+  const chatSendScopeOpen = new Set();
+  function buildChatSendScope(thread, bridge) {
+    bridge.refreshContextSources(thread.id);
+    const model = InputContext.sendScopePreview({ inputSources: thread.inputSources, briefingInputs: thread.briefingInputs,
+      changeIndex: chatSourceChangeIndex(thread), labelFor: viewId => contextCandidateLabel(document.getElementById(viewId)),
+      // Same side-effect-free check as the suggestion collector.
+      canAttach: viewId => !!contextResolverKindForView(document.getElementById(viewId)) });
+    if (!model.items.length) return null;
+    return ChatComposer.renderSendScope({ document, model, open: chatSendScopeOpen.has(thread.id),
+      onToggle: open => { if (open) chatSendScopeOpen.add(thread.id); else chatSendScopeOpen.delete(thread.id); },
+      onRemove: item => item.origin === 'briefing' ? bridge.removeBriefingInput(thread.id, item.sourceId) : bridge.removeInputSource(thread.id, item.sourceId),
+      onAdd: item => {
+        const source = chatInputSourceForView(document.getElementById(item.viewId));
+        if (!source) { boardNotice('이 자료는 지금 다시 붙일 수 없어요. 카드가 열려 있는지 확인하세요.'); return; }
+        bridge.addInputSources(thread.id, userSelectedChatSources(thread.id, [source]));
+      } });
   }
 
   // CTX-03 screen side of '이것도 붙일까요?'. The kind follows chatInputSourceForView
@@ -2618,7 +2655,8 @@
         item.accountScope = view._sourceRef?.profileId || state.sourceRefs.defaultProfileId;
         if (view._sourceRef?.accountId) item.signedIn = true;
       }
-      views.push(item);
+      // CTX-03 'never suggest': matched on this screen, sent as a boolean only.
+      views.push(ContextSuggestSettings.markSuggestSignal(item, contextSuggestSourceOf(view)));
     }
     const scopes = [state.sourceRefs.defaultProfileId];
     const explicit = [];
@@ -2638,9 +2676,20 @@
         if (kind && Number.isSafeInteger(at)) recent.push({ kind, ref, at });
       }
     }
-    return SurfaceState.contextResolverSignals({ views, explicit, recent, scopes, now,
+    return { ...SurfaceState.contextResolverSignals({ views, explicit, recent, scopes, now,
       activeBoardId: state.boards.projections[state.boards.activeProjectionId]?.boardId || null,
-      viewport: { width: window.innerWidth, height: window.innerHeight } });
+      viewport: { width: window.innerWidth, height: window.innerHeight } }),
+    // mode 'firstMessage' suggests only before the room's first message.
+    firstMessage: !(thread?.messages || []).length };
+  }
+
+  // The card's page or folder for the 'never suggest' list (CTX-03). Stays on screen.
+  function contextSuggestSourceOf(view) {
+    const kind = contextResolverKindForView(view);
+    const neverSuggest = state.contextSuggestSettings?.value?.neverSuggest || [];
+    if (kind === 'browser') return { kind, url: browserCardState(view)?.uri || '', neverSuggest };
+    if (kind === 'file') return { kind, folderPath: view._fileRecord?.root?.displayPath || null, neverSuggest };
+    return { kind, neverSuggest };
   }
 
   // Above the input tray. Nothing is ticked or attached by itself: plain rows
@@ -2687,7 +2736,9 @@
         bridge.setContextSuggestionPicked(thread.id, row.ref, check.checked);
         syncAddPicked();
       });
-      return el('label', { class: `egd-context-suggest-row egd-context-suggest-row-${row.mode}`,
+      const never = typeof bridge.neverSuggestContext === 'function'
+        ? ContextSuggestSettings.neverSuggestEntryForSource(contextSuggestSourceOf(document.getElementById(row.ref))) : null;
+      const label = el('label', { class: `egd-context-suggest-row egd-context-suggest-row-${row.mode}`,
         'aria-disabled': row.mode === 'excluded' ? 'true' : null,
         data: { testid: 'chat-context-candidate', ref: row.ref, mode: row.mode } },
       check,
@@ -2695,6 +2746,12 @@
         el('span', { class: 'egd-context-suggest-name' }, row.label),
         row.reasonText ? el('span', { class: 'egd-context-suggest-reason' }, row.reasonText) : null,
         row.note ? el('span', { class: 'egd-context-suggest-note', data: { testid: 'chat-context-candidate-note' } }, row.note) : null));
+      if (!never) return label;
+      // Beside the row, not inside its label: the checkbox keeps its own name.
+      return el('div', { class: 'egd-context-suggest-item' }, label,
+        el('button', { type: 'button', class: 'egd-context-suggest-never', title: '다음부터 추천하지 않기 · 설정 > 화면·입력에서 되돌릴 수 있어요',
+          data: { testid: 'chat-context-never-suggest', ref: row.ref, focusKey: `ctx-never:${thread.id}:${row.ref}` },
+          onclick: () => { void bridge.neverSuggestContext(thread.id, never); } }, ContextSuggestSettings.neverSuggestActionLabel(never)));
     });
     const head = el('div', { class: 'egd-context-suggest-head' },
       el('button', { type: 'button', class: 'egd-context-suggest-toggle', 'aria-expanded': String(!collapsed),
@@ -4146,18 +4203,9 @@
   // CODE-05 D-X2 stage 2. The Chat row hands over only the retained change
   // rows; the File Card re-verifies the run origin (openVerifiedRunFile),
   // re-reads each file and owns every revert through the D-X1 conditional write.
-  async function openAppliedChangeReview({ target, changes, readOrigin, isCurrent } = {}) {
-    const rows = Array.isArray(changes) ? changes.map(row => ({ ...row })) : [];
-    const kindOf = row => typeof row?.kind === 'string' ? row.kind : row?.kind?.type;
-    const first = rows.find(row => kindOf(row) !== 'delete' && typeof (row.movePath || row.path) === 'string');
-    if (!first || typeof isCurrent !== 'function') return { status: 'unavailable' };
-    const opened = await openVerifiedRunFile({ target, location: { path: first.movePath || first.path, line: 1 }, readOrigin, isCurrent });
-    if (opened?.status !== 'opened') return opened || { status: 'unavailable' };
-    const view = document.getElementById(opened.cardId)?._fileView;
-    if (typeof view?.showChangeReview !== 'function') return { status: 'unavailable' };
-    if (isCurrent(target) !== true) return { status: 'stale' };
-    await view.showChangeReview(rows);
-    return opened;
+  // Deletion-only changes open the verified folder alone (EGDeskSurfaceFileCard).
+  function openAppliedChangeReview(request = {}) {
+    return openVerifiedRunReview(request);
   }
 
   // One account/binding scope per visible activity view. Only retained-output
@@ -13556,6 +13604,30 @@
       contextSuggestTimer = 0;
       contextSuggestSeq++;
       state.contextSuggest = { unsupportedUntil: 0, byThread: {} };
+      state.contextSourceChanges = {};
+    }
+    // CTX-04 '바뀜': this room's tracked sources, at most every 15 s per room
+    // and scope. Ids, kinds and reason codes only; redraws only on a change.
+    function refreshContextSources(threadId) {
+      const thread = getCodexThreadById(state.codex, threadId);
+      if (!thread?.conversationId || ChatState.nativeBindingHeld(thread) || ChatState.chatThreadEngineId(thread, state.codex) !== 'codex'
+          || !state.codex.connected || !state.codex.authStatus?.isLoggedIn) return;
+      let scope;
+      try { scope = ChatState.chatContextRequestScope(thread, state.codex); } catch { return; }
+      if (!scope?.conversationId) return;
+      const store = state.contextSourceChanges || (state.contextSourceChanges = {});
+      const key = JSON.stringify(scope), cached = store[threadId];
+      if (cached?.key === key && (cached.loading || Date.now() - cached.at < 15000)) return;
+      const entry = { index: cached?.key === key ? cached.index : null, key, conversationId: scope.conversationId, loading: true, at: Date.now() };
+      store[threadId] = entry;
+      const query = Object.entries(scope).map(([name, value]) => `${name}=${encodeURIComponent(value)}`).join('&');
+      void fetchJson(`/context/sources?${query}`).then(response => {
+        if (state.contextSourceChanges?.[threadId] !== entry) return;
+        const index = InputContext.sourceChangeIndex(response, scope.conversationId);
+        const changed = InputContext.sourceChangeIndexKey(index) !== InputContext.sourceChangeIndexKey(entry.index);
+        Object.assign(entry, { index, loading: false, at: Date.now() });
+        if (changed) emit();
+      }, () => { if (state.contextSourceChanges?.[threadId] === entry) Object.assign(entry, { loading: false, at: Date.now() }); });
     }
     function requestContextSuggestions(threadId, { force = false, immediate = false } = {}) {
       if (!threadId || ChatState.chatThreadEngineId(getCodexThreadById(state.codex, threadId), state.codex) !== 'codex') return;
@@ -13572,6 +13644,27 @@
       const entry = state.contextSuggest?.byThread?.[threadId];
       if (entry) Object.assign(entry, { resolution: null, status: 'expired', key: null });
       requestContextSuggestions(threadId, { force: true, immediate: true });
+    }
+    // Loaded on first use; null when the bridge has no such route or fails.
+    async function loadContextSuggestSettings() {
+      state.contextSuggestSettings = { ...(state.contextSuggestSettings || {}), status: state.contextSuggestSettings?.value ? 'ready' : 'loading' };
+      try {
+        const value = ContextSuggestSettings.normalizeSuggestSettings(await fetchJson('/context/suggest-settings'));
+        state.contextSuggestSettings = value ? { status: 'ready', value, message: '' } : { status: 'error', value: null };
+        return value;
+      } catch (error) {
+        state.contextSuggestSettings = { status: error?.status === 404 ? 'unsupported' : 'error', value: null };
+        return null;
+      }
+    }
+    async function saveContextSuggestSettings(patch) {
+      const value = ContextSuggestSettings.normalizeSuggestSettings(await fetchJson('/context/suggest-settings', { method: 'POST', body: JSON.stringify(patch) }));
+      if (!value) throw new Error(ContextSuggestSettings.CONTEXT_SUGGEST_SETTINGS_TEXT.unavailable);
+      state.contextSuggestSettings = { status: 'ready', value,
+        message: value.persisted ? '' : ContextSuggestSettings.CONTEXT_SUGGEST_SETTINGS_TEXT.notPersisted };
+      // Suggestions on screen follow the new setting at once.
+      for (const threadId of Object.keys(state.contextSuggest?.byThread || {})) requestContextSuggestions(threadId, { force: true, immediate: true });
+      return value;
     }
     async function resolveContextSuggestions(threadId, force) {
       const store = state.contextSuggest;
@@ -15412,6 +15505,21 @@
       },
       // CTX-03 '이것도 붙일까요?'.
       requestContextSuggestions(threadId, options = {}) { requestContextSuggestions(threadId, options); },
+      // CTX-04 '바뀜' and the pre-send preview read this room's tracked sources.
+      refreshContextSources(threadId) { refreshContextSources(threadId); },
+      // CTX-03 D-R2 settings (helper GET/POST /context/suggest-settings).
+      loadContextSuggestSettings() { return loadContextSuggestSettings(); },
+      saveContextSuggestSettings(patch) { return saveContextSuggestSettings(patch); },
+      async neverSuggestContext(threadId, entry) {
+        const current = state.contextSuggestSettings?.value || await loadContextSuggestSettings();
+        if (!current) { boardNotice(ContextSuggestSettings.CONTEXT_SUGGEST_SETTINGS_TEXT.unavailable); return null; }
+        const next = ContextSuggestSettings.withNeverSuggest(current.neverSuggest, entry);
+        if (next.error === 'duplicate') { requestContextSuggestions(threadId, { force: true, immediate: true }); return current; }
+        if (next.error) { boardNotice(ContextSuggestSettings.CONTEXT_SUGGEST_SETTINGS_TEXT[next.error]); return null; }
+        const saved = await saveContextSuggestSettings(next);
+        if (saved) requestContextSuggestions(threadId, { force: true, immediate: true });
+        return saved;
+      },
       setContextSuggestionPicked(threadId, ref, picked) {
         const entry = state.contextSuggest?.byThread?.[threadId];
         if (!entry || typeof ref !== 'string') return;
@@ -18652,6 +18760,8 @@
   const openBoardProjectFile = surfaceForward('fileCard', 'openBoardProjectFile');
   const openBoardProjectFileAt = surfaceForward('fileCard', 'openBoardProjectFileAt');
   const openVerifiedRunFile = surfaceForward('fileCard', 'openVerifiedRunFile');
+  const openVerifiedRunReview = surfaceForward('fileCard', 'openVerifiedRunReview');
+  const followBoardProjectInFileCards = surfaceForward('fileCard', 'onBoardProjectChanged');
 
   function getProjectTarget() {
     // Resolve only on an explicit File Board connection or IDE entry.
@@ -20618,6 +20728,22 @@
         }, view.label),
         el('p', { class: 'egd-settings-form-hint', role: 'status', data: { testid: 'settings-display-reset-note' } }, view.note));
     };
+    // CTX-03 자료 추천 (D-R2): mode and the never-suggest list, owned by the helper.
+    const contextSuggestSettingsSection = () => {
+      const bridge = state.codexBridge;
+      if (typeof bridge?.loadContextSuggestSettings !== 'function') return null;
+      const view = state.contextSuggestSettings || { status: 'loading' };
+      if (!state.contextSuggestSettings) void bridge.loadContextSuggestSettings().then(() => renderDisplayTab());
+      const save = async patch => {
+        try { await bridge.saveContextSuggestSettings(patch); }
+        catch (error) { state.contextSuggestSettings = { ...state.contextSuggestSettings, message: error?.message || ContextSuggestSettings.CONTEXT_SUGGEST_SETTINGS_TEXT.unavailable }; }
+        renderDisplayTab();
+      };
+      return ContextSuggestSettings.renderContextSuggestSettings({ document, view,
+        onMode: mode => save({ mode }),
+        onRemove: entry => save(ContextSuggestSettings.withoutNeverSuggest(view.value?.neverSuggest, entry)),
+        onAdd: entry => { const next = ContextSuggestSettings.withNeverSuggest(view.value?.neverSuggest, entry); return next.error ? undefined : save(next); } });
+    };
     const renderDisplayTab = () => {
       if (activeTab !== 'display') return;
       const settings = readDisplaySettings();
@@ -20628,6 +20754,7 @@
         el('section', { class: 'egd-settings-section', 'aria-label': 'Chat 입력' },
           el('div', { class: 'egd-settings-section-title' }, 'Chat 입력'),
           el('p', { class: 'egd-settings-form-hint', data: { testid: 'settings-display-input-hint' } }, DisplaySettings.CHAT_INPUT_HINT)),
+        contextSuggestSettingsSection(),
         el('section', { class: 'egd-settings-section', 'aria-label': '화면 설정 되돌리기' },
           el('div', { class: 'egd-settings-section-title' }, '되돌리기'),
           displayResetRow(() => {
