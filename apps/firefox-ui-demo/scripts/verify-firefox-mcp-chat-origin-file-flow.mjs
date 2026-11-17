@@ -9,6 +9,7 @@ import { qaBridgeConfig, validateQaFixtureIsolation } from './egdesk-qa-fixture-
 import { assertQaFixtureManifest } from './egdesk-chat-qa-profile.mjs';
 import { chatOriginFileFixtureEnabled, CHAT_ORIGIN_FILE_SEED, CHAT_ORIGIN_FILE_STATE, CHAT_ORIGIN_FILE_CONTROL,
   CHAT_ORIGIN_FILE_TEXT, CHAT_ORIGIN_FILE_OUTPUT, CHAT_ORIGIN_FILE_BOARDS } from './egdesk-chat-origin-file-fixture.mjs';
+import { readShownFileEditor } from './egdesk-qa-file-editor.mjs';
 import { prepareRunOutputDesk, clickRunOutputControl, clickRunOutputSelector } from './verify-firefox-mcp-chat-run-outputs-flow.mjs';
 
 const hash = value => createHash('sha256').update(value).digest('hex');
@@ -213,6 +214,7 @@ export async function observeChatOriginFileUi(harness, target) {
   return harness.evaluateChrome(`() => {
     const editorVisible = ${originEditorVisible.toString()};
     const editorGeometry = ${readOriginEditorGeometry.toString()};
+    const readShownFileEditor = ${readShownFileEditor.toString()};
     const shown = node => {
       if (!node?.isConnected) return false;
       const r = node.getBoundingClientRect();
@@ -241,10 +243,10 @@ export async function observeChatOriginFileUi(harness, target) {
         notice: root?.querySelector(':scope > .egd-codex-activity-note[role="status"]')?.textContent || '',
         buttons: [...(root?.querySelectorAll('button.egdesk-run-result-location') || [])].map(node => ({ text: node.textContent, aria: node.getAttribute('aria-label'), disabled: node.disabled, visible: shown(node) })) },
       cards: [...document.querySelectorAll(${JSON.stringify(FILE_CARD)})].map(card => {
-        const notice = card.querySelector('[data-testid="file-card-notice"]'), view = card.querySelector('[data-testid="file-view"]'), editor = card.querySelector('[data-testid="file-editor"]'), badge = card.querySelector('[data-testid="file-card-status"]');
+        const notice = card.querySelector('[data-testid="file-card-notice"]'), view = card.querySelector('[data-testid="file-view"]'), textarea = card.querySelector('[data-testid="file-editor"]'), shownEditor = readShownFileEditor(card), editor = shownEditor?.mode === 'codemirror' ? shownEditor.scroller : textarea, badge = card.querySelector('[data-testid="file-card-status"]');
         const geometry = editorGeometry(editor);
         return { id: card.id, ready: !!card._fileReady, openStatus: card._fileOpenStatus, snapshot: card._fileView?.snapshot?.(), busy: view?.getAttribute('aria-busy'), inert: view?.inert,
-          editor: { value: editor?.value, visible: editorVisible(geometry), geometry }, badge: { text: badge?.textContent, visible: painted(badge) },
+          editor: { mode: shownEditor?.mode || null, value: textarea?.value, visible: editorVisible(geometry), geometry }, badge: { text: badge?.textContent, visible: painted(badge) },
           notice: { paragraphs: [...(notice?.querySelectorAll(':scope > p') || [])].map(node => ({ text: node.textContent, painted: painted(node) })),
             details: [...(notice?.querySelectorAll(':scope > details') || [])].map(node => ({ open: node.open, summary: node.querySelector('summary')?.textContent, text: node.textContent })) } };
       }) };
@@ -502,7 +504,7 @@ export async function runChatOriginFileFlow(options) {
       await click(`[id=${JSON.stringify(newCard.id)}] .egd-card-dot-max`);
       afterOpen = await observeChatOriginFileUi(harness, target);
       if (afterOpen.cards.find(card => card.id === newCard.id)?.editor.geometry?.scrollTop > 0) {
-        deadline(); await harness.scrollWithKey(`[id=${JSON.stringify(newCard.id)}] [data-testid="file-editor"]`, 'Home');
+        deadline(); await harness.scrollWithKey(`[id=${JSON.stringify(newCard.id)}] ${afterOpen.cards.find(card => card.id === newCard.id)?.editor.mode === 'codemirror' ? '[data-testid="file-code-editor"] .cm-content' : '[data-testid="file-editor"]'}`, 'Home');
       }
       afterOpen = await waitUntil(() => observeChatOriginFileUi(harness, target), value => {
         const current = value.cards.find(card => card.id === newCard.id);

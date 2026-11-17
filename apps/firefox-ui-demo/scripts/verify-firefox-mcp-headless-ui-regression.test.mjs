@@ -928,3 +928,9 @@ test('Dock observer detects occlusion at the rounded dispatch pixel even when al
   const [occluded] = await observeReachabilityDockPoint(harness);
   assert.equal(occluded.hitCount, 9); assert.equal(occluded.pointHit, false);
 });
+
+test('headless regression targets the shown File editor and expects the 4th Zoom control', () => {
+  const source = readFileSync(new URL('./verify-firefox-mcp-headless-ui-regression.mjs', import.meta.url), 'utf8');
+  assert.ok(source.includes("'이동하기 전에 보던 자리로 돌아가기'"));
+  assert.ok(source.includes('readShownFileEditor(card)') && !source.includes(".egdesk-file-editor'"));
+});

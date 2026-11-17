@@ -7,6 +7,7 @@ import { fileURLToPath } from 'node:url';
 import { FirefoxMcpChatHarness, captureQaScreenshot } from './firefox-mcp-chat-harness.mjs';
 import { assertQaFixtureManifest } from './egdesk-chat-qa-profile.mjs';
 import { chrome } from './egdesk-qa-ui-flow.mjs';
+import { chromeWithFileEditor } from './egdesk-qa-file-editor.mjs';
 
 export const VIEWPORTS = Object.freeze([
   { width: 800, height: 600 },
@@ -17,7 +18,7 @@ export const VIEWPORTS = Object.freeze([
 // The approved eight-button Dock. 파일·개발 (IDE)·온톨로지·설정 and the drawing
 // tools open from the 새 카드 menu (#egd-dock-menu).
 const DOCK_IDS = Object.freeze(['chat', 'memo', 'browser', 'terminal', 'select', 'hand', 'create', 'trash']);
-const ZOOM_LABELS = Object.freeze(['Canvas 축소', 'Canvas 확대', '열린 창 전체 보기']);
+const ZOOM_LABELS = Object.freeze(['Canvas 축소', 'Canvas 확대', '열린 창 전체 보기', '이동하기 전에 보던 자리로 돌아가기']);
 const DRAFT = 'EG-Desk headless QA draft — never send';
 export const NARROW_CHAT_SAMPLE = ' QA600';
 export const NARROW_CHAT_WHEEL_LIMIT = 4;
@@ -928,11 +929,11 @@ async function scanControls(harness, size, deadlineMs, result, stage) {
 // header must be painted and hit-testable; a semantic proxy or active ID alone
 // is not evidence that the File Card is visible.
 export async function observeIdeProjectCard(harness, cardId) {
-  return chrome(harness, ({ cardId: id }) => {
+  return chromeWithFileEditor(harness, ({ cardId: id }) => {
     const state = window.__egdesk?.state;
     const projection = state?.boards?.projections?.[state?.boards?.activeProjectionId];
     const card = document.getElementById(id), title = card?.querySelector('.egd-file-card-title');
-    const editor = card?.querySelector('.egdesk-file-editor');
+    const editor = card ? readShownFileEditor(card) : null;
     const rect = title?.getBoundingClientRect();
     const viewport = document.getElementById('egd-canvas-viewport')?.getBoundingClientRect();
     const inside = !!rect && !!viewport && rect.width > 0 && rect.height > 0 &&
@@ -952,7 +953,7 @@ export async function observeIdeProjectCard(harness, cardId) {
       reference: card?._fileRecord?.project || null, snapshot: card?._fileView?.snapshot() || null,
       activeEntityId: state?.activeEntityId || null, fileCount: document.querySelectorAll('.egd-file-card').length,
       terminalCount: document.querySelectorAll('.egd-terminal-card').length,
-      editor: editor ? { value: editor.value, start: editor.selectionStart, end: editor.selectionEnd } : null,
+      editor: editor ? { mode: editor.mode, value: editor.value, start: editor.selectionStart, end: editor.selectionEnd } : null,
       title: { inside, shown, hits, rect: rect && { left: rect.left, top: rect.top, right: rect.right, bottom: rect.bottom } } };
   }, { cardId });
 }
