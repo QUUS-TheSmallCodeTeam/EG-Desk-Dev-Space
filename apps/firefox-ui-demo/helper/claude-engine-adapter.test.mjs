@@ -203,7 +203,7 @@ test('the adapter meets the EngineAdapter contract and publishes a ready Claude 
   assert.deepEqual(row, {
     id: 'claude', label: 'Claude', status: 'ready', version: '2.1.300', versionSupported: null, versionStatus: 'untested', installed: true, isDefault: false,
     capabilities: [...CLAUDE_CAPABILITIES],
-    profiles: [{ id: 'claude-default', label: 'Claude Max', credentialStore: 'claude-cli', active: true,
+    profiles: [{ id: 'claude-default', label: 'Claude Max', credentialStore: 'claude-cli', active: true, owned: false, status: 'available',
       auth: { status: 'signedIn', method: 'claudeai', account: 'Owner@Example.com', planType: 'max' }, usage: null }],
     runtime: { residentProcesses: 0, residentLimit: 2, idleTimeoutMs: 300000 }, models: null,
   })
@@ -777,4 +777,39 @@ test('the chat runtime runs a Claude conversation end to end: answer, approval, 
   await h.adapter.dispose()
   assert.equal(chat.connectionOf('claude'), 'offline')
   await tick()
+})
+
+test('SUB-11: the active Engine Profile sets CLAUDE_CONFIG_DIR, its own account slot and the profile rows', async () => {
+  const owned = '/Users/test/Library/EG-Desk/settings/engines/claude-abcdef01'
+  let active = 'claude-abcdef01'
+  const list = () => [
+    { id: 'claude-default', label: 'Claude (이 컴퓨터 로그인)', owned: false, active: active === 'claude-default', configDir: null },
+    { id: 'claude-abcdef01', label: '회사', owned: true, active: active === 'claude-abcdef01', configDir: owned },
+  ]
+  const processes = []
+  const h = harness({ profiles: list, createTransport: options => {
+    processes.push(options)
+    return { start: async () => {}, sendUserMessage: () => true, close: async () => { options.onExit({ code: 0 }) }, info: () => ({ init: null }), interrupt: async () => {} }
+  } })
+  assert.equal(h.adapter.ownerKey(), 'claude:claudeai:owner@example.com@claude-abcdef01')
+  const row = publicEngineRow(h.adapter.describe())
+  assert.deepEqual(row.profiles.map(p => [p.id, p.active, p.owned, p.credentialStore, p.auth.status]), [
+    ['claude-default', false, false, 'claude-cli', 'unknown'], ['claude-abcdef01', true, true, 'egdesk-owned', 'signedIn'],
+  ])
+  assert.equal(JSON.stringify(row).includes(owned), false, 'no login folder path in the public row')
+  const first = await h.adapter.startThread()
+  await h.adapter.startTurn({ threadId: first.thread.id, input: [{ type: 'text', text: 'hi' }] })
+  assert.equal(processes[0].claudeConfigDir, owned)
+  active = 'claude-default'
+  assert.equal(h.adapter.ownerKey(), 'claude:claudeai:owner@example.com', 'the shared login keeps its unchanged slot')
+  const second = await h.adapter.startThread()
+  await h.adapter.startTurn({ threadId: second.thread.id, input: [{ type: 'text', text: 'hi' }] })
+  assert.equal(processes.at(-1).claudeConfigDir, undefined)
+  await h.adapter.dispose()
+})
+
+test('SUB-11: a broken profile source falls back to the shared login', () => {
+  const h = harness({ profiles: () => { throw new Error('boom') } })
+  assert.equal(h.adapter.ownerKey(), 'claude:claudeai:owner@example.com')
+  assert.deepEqual(publicEngineRow(h.adapter.describe()).profiles.map(p => p.id), ['claude-default'])
 })

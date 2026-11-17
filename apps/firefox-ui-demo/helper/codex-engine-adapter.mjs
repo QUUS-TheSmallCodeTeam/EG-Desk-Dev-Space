@@ -24,8 +24,15 @@ const VERSION_STATUSES = new Set(['supported', 'untested', 'unsupported'])
  * model/list catalog (codex-model-catalog.mjs) or null when unknown. No token,
  * credential location or executable path is read or returned.
  */
-export function describeCodexEngine({ ready = false, starting = false, blocked = false, version = null, versionSupported = null, versionStatus = null, installed = null, auth = null, usage = null, residentProcesses = 0, models = null } = {}) {
+export function describeCodexEngine({ ready = false, starting = false, blocked = false, version = null, versionSupported = null, versionStatus = null, installed = null, auth = null, usage = null, residentProcesses = 0, models = null, extraProfiles = [] } = {}) {
   const signedIn = auth?.isLoggedIn === true
+  // SUB-11: Codex is one shared app-server (one CODEX_HOME). Added ChatGPT
+  // profiles are listed as 'notYet' and never active until a per-profile
+  // app-server exists.
+  const added = (Array.isArray(extraProfiles) ? extraProfiles : []).filter(row => row && row.id !== CODEX_ENGINE_PROFILE_ID).map(row => ({
+    id: row.id, label: typeof row.label === 'string' ? row.label : null, credentialStore: 'egdesk-owned', active: false, owned: true, status: 'notYet',
+    auth: { status: 'unknown' }, usage: null,
+  }))
   return {
     id: CODEX_ENGINE_ID, label: 'Codex',
     status: blocked ? 'disabled' : ready ? (signedIn ? 'ready' : 'loginRequired') : starting ? 'starting' : 'offline',
@@ -37,7 +44,7 @@ export function describeCodexEngine({ ready = false, starting = false, blocked =
     installed: typeof installed === 'boolean' ? installed : publicVersion(version) ? true : null,
     capabilities: [...CODEX_CAPABILITIES],
     profiles: [{
-      id: CODEX_ENGINE_PROFILE_ID, label: 'ChatGPT', credentialStore: 'shared-user-default', active: true,
+      id: CODEX_ENGINE_PROFILE_ID, label: 'ChatGPT', credentialStore: 'shared-user-default', active: true, owned: false, status: 'available',
       auth: {
         status: signedIn ? 'signedIn' : auth?.loginInProgress === true ? 'signingIn' : auth ? 'signedOut' : 'unknown',
         method: AUTH_METHODS[auth?.authMode] || null,
@@ -45,7 +52,7 @@ export function describeCodexEngine({ ready = false, starting = false, blocked =
         planType: signedIn && typeof auth.planType === 'string' ? auth.planType : null,
       },
       usage: usage ?? null,
-    }],
+    }, ...added],
     runtime: { residentProcesses: Number.isSafeInteger(residentProcesses) && residentProcesses > 0 ? residentProcesses : 0, residentLimit: 1, idleTimeoutMs: null },
     models: Array.isArray(models) ? models : null,
   }

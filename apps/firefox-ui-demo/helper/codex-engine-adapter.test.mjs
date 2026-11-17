@@ -6,6 +6,7 @@ import {
   codexLoginStartParams, createCodexEngineAdapter, describeCodexEngine, isStaleLoginFailure,
 } from './codex-engine-adapter.mjs'
 import { ENGINE_STATUSES, validateEngineAdapter } from './engine-adapter.mjs'
+import { publicEngineRow } from './engine-registry.mjs'
 
 function recorded() {
   const calls = [], replies = []
@@ -72,7 +73,7 @@ test('Codex engine row reports status, version support, account slot and usage f
   assert.deepEqual(row, {
     id: 'codex', label: 'Codex', status: 'ready', version: '0.162.1', versionSupported: false, versionStatus: 'supported', installed: true,
     capabilities: [...CODEX_CAPABILITIES],
-    profiles: [{ id: 'codex-default', label: 'ChatGPT', credentialStore: 'shared-user-default', active: true,
+    profiles: [{ id: 'codex-default', label: 'ChatGPT', credentialStore: 'shared-user-default', active: true, owned: false, status: 'available',
       auth: { status: 'signedIn', method: 'chatgpt', account: 'owner@example.com', planType: 'pro' }, usage }],
     runtime: { residentProcesses: 1, residentLimit: 1, idleTimeoutMs: null },
     models: null,
@@ -184,4 +185,12 @@ test('bridge starts code entry from POST /auth/start { mode: device }, switches 
   assert.ok(completed.indexOf('if (isStaleLoginFailure(message.params, authState.authSessionId)) return') < completed.indexOf('clearInterval(loginPollTimer)'))
   assert.match(completed, /authSessionId: null,\n {8}authUrl: null,\n {8}verificationUrl: null,\n {8}userCode: null,/)
   at("auth: ['status', 'start', 'cancel', 'signout', 'usage', 'device-code'],")
+})
+
+test('SUB-11: added ChatGPT profiles are listed as notYet beside the shared login, never active', () => {
+  const row = publicEngineRow(describeCodexEngine({ ready: true, auth: { isLoggedIn: true, authMode: 'chatgpt', accountEmail: 'a@example.com' },
+    extraProfiles: [{ id: 'codex-abcdef01', label: '회사 ChatGPT' }, { id: 'codex-default', label: 'dup' }] }))
+  assert.deepEqual(row.profiles.map(p => [p.id, p.active, p.owned, p.status, p.credentialStore]), [
+    ['codex-default', true, false, 'available', 'shared-user-default'], ['codex-abcdef01', false, true, 'notYet', 'egdesk-owned'],
+  ])
 })

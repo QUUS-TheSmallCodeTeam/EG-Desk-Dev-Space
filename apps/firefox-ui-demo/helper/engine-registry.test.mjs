@@ -26,7 +26,7 @@ test('/v1/state engines lists runnable Codex as default and Claude as decision p
     {
       id: 'codex', label: 'Codex', status: 'ready', version: '0.162.1', versionSupported: false, versionStatus: 'supported', installed: true, isDefault: true,
       capabilities: [...CODEX_CAPABILITIES],
-      profiles: [{ id: 'codex-default', label: 'ChatGPT', credentialStore: 'shared-user-default', active: true,
+      profiles: [{ id: 'codex-default', label: 'ChatGPT', credentialStore: 'shared-user-default', active: true, owned: false, status: 'available',
         auth: { status: 'signedIn', method: 'chatgpt', account: 'owner@example.com', planType: 'pro' }, usage: { status: 'available', usedPercent: 20 } }],
       runtime: { residentProcesses: 1, residentLimit: 1, idleTimeoutMs: null },
       models: MODELS,
@@ -276,7 +276,7 @@ test('the listed-only Claude row carries the static CLI check but stays decision
   assert.deepEqual(claudeRow(), {
     id: 'claude', label: 'Claude', status: 'decisionPending', statusReason: 'SUB-12', version: '2.1.300', versionSupported: null, versionStatus: 'untested', installed: true, isDefault: false,
     capabilities: [],
-    profiles: [{ id: CLAUDE_ENGINE_PROFILE_ID, label: 'Claude Max', credentialStore: 'claude-cli', active: true,
+    profiles: [{ id: CLAUDE_ENGINE_PROFILE_ID, label: 'Claude Max', credentialStore: 'claude-cli', active: true, owned: false, status: 'available',
       auth: { status: 'signedIn', method: 'claudeai', account: 'owner@example.com', planType: 'max' }, usage: null }],
     runtime: { residentProcesses: 0, residentLimit: 2, idleTimeoutMs: 300000 }, models: null,
   })
