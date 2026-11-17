@@ -22621,6 +22621,8 @@
   // Reopen the same URL in the chosen context at the card's frame, carry its
   // Board membership over, then close the old card. Grants end (D-B3).
   function switchBrowserCardAccount(card, target) {
+    // A sign-in card for the Engine keeps the context its auth flow started in.
+    if (card?.dataset?.codexRole === 'auth') { boardNotice('로그인 진행 중인 Browser는 계정 환경을 바꿀 수 없습니다.'); return null; }
     const current = browserCardUserContextId(card);
     const url = card._browserState?.uri || '';
     const plan = browserAccountContextModule().planAccountSwitch({ currentUserContextId: current,

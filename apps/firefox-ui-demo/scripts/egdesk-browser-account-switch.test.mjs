@@ -134,6 +134,10 @@ test('failures keep the original card: spawn error, Board remap failure, same co
   assert.deepEqual(h.log.closed, ['egd-browser-card-2']);
   assert.match(h.log.notices[0], /Board 연결/);
   h = harness();
+  h.card.dataset.codexRole = 'auth';
+  assert.equal(h.api.switchBrowserCardAccount(h.card, { userContextId: 7, label: 'x' }), null);
+  assert.equal(h.log.spawned.length, 0);
+  h = harness();
   assert.equal(h.api.switchBrowserCardAccount(h.card, { userContextId: 0, label: '기본 환경' }), h.card);
   assert.equal(h.log.spawned.length, 0);
 });
