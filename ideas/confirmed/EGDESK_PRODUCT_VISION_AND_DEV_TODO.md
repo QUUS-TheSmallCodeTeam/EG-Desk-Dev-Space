@@ -44,8 +44,16 @@ Korean. Checked backlog items describe the underlying behavior.
   문자열 `Origin: null`은 403이었다. `POST /chat/send`는 0회였고
   기존 네이티브 run 1개와 파일 해시는 유지됐다. 전용 검증 런타임 정리도
   완료했다. 실제 사용자 계정 로그아웃과 새 OAuth는 시험하지 않았다.
-- Owner의 15개 질문은 열려 있다. Jev 초안은 채택되지 않았고 API 키나
-  네트워크 인프라 변경은 없었다.
+- Owner의 15개 질문은 아직 열려 있다. Jev 초안은 채택되지 않았다.
+  이번 라운드에 OpenAI Decisions API 키 저장소와 외부 API 클라이언트(결정
+  모델)가 추가됐다. 기본값은 꺼짐이며 키를 저장하고 모드를 설정했을 때만
+  동작한다. EG-Desk가 소유한 로그인 폴더를 쓰는 Engine Profile도 추가됐다.
+- 2026-11-18 상태(2026-11-17 22:40 ~ 2026-11-18 01:00 KST 라운드,
+  `claude/vision-gap-20261024`에 병합): Chat/Agent, 구독, 브라우저, computer
+  use, Canvas, 디자인, 코딩/컨텍스트, portable 영역의 패키지가 병합됐다.
+  `0b66e1b`에서 전체 회귀 225개 파일이 5,807건 통과, 실패 0건이었다.
+  headless 검증에서 RT-01, CHAT-01, BRW-03은 통과했고 BRW-08/CNV-04의
+  포커스 문제는 남아 있다. 실제 계정이나 실제 화면에서 검증한 항목은 없다.
 
 ## Current Product Frame
 
