@@ -23,6 +23,7 @@ import { publicEpochMs } from './codex-account-usage.mjs'
 // Read tools work with an observe grant; interaction tools still require the
 // provider's Card, same-site, focus and wait-budget checks on every call.
 import { BROWSER_INTERACTION_TOOL_NAMES, BROWSER_READ_TOOL_NAMES } from './egdesk-browser-tool-runtime.mjs'
+import { decisionContextActivity, prepareTurnContext } from './egdesk-context-setup.mjs'
 
 const TERMINAL = new Set(['completed', 'interrupted', 'failed'])
 const ITEM_STATUS = new Set(['inProgress', 'completed', 'failed', 'declined'])
@@ -613,7 +614,7 @@ function cleanNotification(method, p, engineId = 'codex') {
 }
 
 export class CodexChatRuntime {
-  constructor({ request, respond, engines = null, emit = () => {}, emitLegacy = () => {}, verifyFile = verifyLocalFile, now = Date.now, contexts = null, toolProviders = [], expectedProcessConfiguration = null, store = null, requireStore = false, getOwnerKey = () => null, qaReady = () => true, getNativeContractFingerprint = () => null, profiles = null, resolveProjectWorkspace = null, resolveRunProjectOrigin = null, mcpServerKind = null, computerControlPolicy = null, computerControlStore = null, onComputerControlChange = () => {}, hostLease = null, setTimer = (fn, ms) => setTimeout(fn, ms), clearTimer = handle => clearTimeout(handle) }) {
+  constructor({ request, respond, engines = null, emit = () => {}, emitLegacy = () => {}, verifyFile = verifyLocalFile, now = Date.now, contexts = null, toolProviders = [], expectedProcessConfiguration = null, store = null, requireStore = false, getOwnerKey = () => null, qaReady = () => true, getNativeContractFingerprint = () => null, profiles = null, resolveProjectWorkspace = null, resolveRunProjectOrigin = null, mcpServerKind = null, computerControlPolicy = null, computerControlStore = null, onComputerControlChange = () => {}, hostLease = null, setTimer = (fn, ms) => setTimeout(fn, ms), clearTimer = handle => clearTimeout(handle), decisionContext = null }) {
     Object.assign(this, { emitEvent: emit, emitLegacy, verifyFile, now, setTimer, clearTimer })
     if (resolveProjectWorkspace !== null && typeof resolveProjectWorkspace !== 'function') throw new TypeError('resolveProjectWorkspace must be a server-owned callback')
     this.resolveProjectWorkspace = resolveProjectWorkspace
@@ -709,6 +710,9 @@ export class CodexChatRuntime {
     this.storeHealthy = true
     this.expectedProcessConfiguration = expectedProcessConfiguration
     this.contexts = contexts
+    // Decision model context setup (DECISION_MODEL_CONTEXT_SETUP.md §3.1):
+    // { mode(): 'off'|'advisory'|'on', configured(): boolean, client, collect({ body, context }) → candidates, budgetMs? } or null.
+    this.decisionContext = decisionContext
     this.toolProviders = [...(contexts ? [contexts] : []), ...toolProviders]
     this.threadToolOwners = new Map()
     this.threadToolManifests = new Map()
@@ -1984,7 +1988,10 @@ export class CodexChatRuntime {
     // the turn's additionalContext, never in the person's saved message.
     // Bounded threads take none of them.
     const shares = bounded ? [] : this.pendingShares(context.clientThreadId)
-    const extraContext = bounded ? {} : { ...(context.extraContext || {}), ...(shares.length ? { egdesk_shared_messages: sharedMessagesBlock(shares) } : {}) }
+    // Decision model context setup: 'on' attaches the selected items, 'advisory' only records them.
+    const decision = bounded ? null : await this.prepareDecisionContext(body, context)
+    const decisionExtra = decision?.mode === 'on' ? decision.result.extraContext || {} : {}
+    const extraContext = bounded ? {} : { ...(context.extraContext || {}), ...decisionExtra, ...(shares.length ? { egdesk_shared_messages: sharedMessagesBlock(shares) } : {}) }
     const toolContext = this.additionalToolContext(preparedProviders)
     if (Object.keys(extraContext).some(key => toolContext && Object.hasOwn(toolContext, key))) throw chatError('INVALID_TOOL_PROVIDER', 'Tool providers returned conflicting native context keys', 500)
     const additionalContext = Object.keys(extraContext).length
@@ -2238,6 +2245,7 @@ export class CodexChatRuntime {
       for (const provider of preparedProviders.keys()) await this.callProvider(provider, 'bindRun', run, preparedProviders.get(provider), readerConfiguration, provider === this.contexts ? contextAuthority : undefined)
       if (epoch !== this.epochOf(engine.id)) throw chatError('ACCOUNT_CHANGED', 'Codex account or connection changed', 409)
       for (const notice of context.ceilingNotices) this.noteCeiling(run, notice.key, notice)
+      if (decision) this.noteDecisionContext(run, decision)
       // Notifications can precede the RPC response. Only the returned turn ID
       // may inherit this request's correlation; other turns remain unclaimed.
       while (pending.buffer.length) await this.apply(pending.buffer.shift())
@@ -3309,6 +3317,52 @@ export class CodexChatRuntime {
       this.dropElicitationTimer(id)
       if (approval.status === 'pending') try { this.respond(approval.rpcId, { action: 'cancel' }) } catch {}
     }
+  }
+
+  /**
+   * Pre-turn decision model context setup. Runs only when the mode is
+   * 'advisory' or 'on' and a key is saved; bounded within budgetMs (800 ms)
+   * under its own AbortController. Never throws: any failure is a fallback
+   * (today's behaviour) → { mode, result } or null when nothing ran.
+   */
+  async prepareDecisionContext(body, context) {
+    const setup = this.decisionContext
+    if (!setup?.client || typeof setup.collect !== 'function') return null
+    let mode
+    try {
+      mode = setup.mode()
+      if ((mode !== 'advisory' && mode !== 'on') || setup.configured() !== true) return null
+    } catch { return null }
+    const budgetMs = Number.isSafeInteger(setup.budgetMs) && setup.budgetMs > 0 ? setup.budgetMs : 800
+    const started = Date.now()
+    const controller = new AbortController()
+    let timer = null
+    const expired = new Promise(resolve => { timer = setTimeout(() => { controller.abort(); resolve(null) }, budgetMs) })
+    const work = (async () => {
+      const candidates = await setup.collect({ body, context, signal: controller.signal })
+      if (controller.signal.aborted) return { status: 'fallback', reason: 'timeout', selected: [], extraContext: {}, receipt: null }
+      return prepareTurnContext({ message: body.message, candidates: Array.isArray(candidates) ? candidates : [], client: setup.client,
+        timeoutMs: Math.max(1, budgetMs - (Date.now() - started)), signal: controller.signal, cacheScope: 'ctx' })
+    })().catch(() => ({ status: 'fallback', reason: 'unreachable', selected: [], extraContext: {}, receipt: null }))
+    try {
+      const result = await Promise.race([work, expired])
+      return { mode, result: result || { status: 'fallback', reason: 'timeout', selected: [], extraContext: {}, receipt: null } }
+    } catch { return null } finally { clearTimeout(timer) }
+  }
+
+  // One decision-context activity row: what the decision model chose, and in
+  // 'advisory' mode that nothing was attached. Nothing to show when it skipped.
+  noteDecisionContext(run, { mode, result }) {
+    if (!result || result.status === 'skipped') return
+    const activity = decisionContextActivity({ answerId: run.answerId, selected: result.selected || [], latencyMs: result.latencyMs ?? null, model: result.model ?? null })
+    const attached = mode === 'on' && result.status === 'ready'
+    if (result.status === 'fallback') activity.title = '컨텍스트 세팅 · 결정 모델 응답 없음'
+    else if (mode === 'advisory') activity.title = `컨텍스트 세팅(기록만) · 고른 자료 ${(result.selected || []).length}개`
+    activity.detail = { ...activity.detail, mode, outcome: result.status, attached, ...(result.reason ? { reason: result.reason } : {}),
+      ...(result.receipt ? { receipt: result.receipt } : {}) }
+    run.decisionContextReceipt = result.receipt || null
+    this.put(run, 'activities', activity)
+    this.emit(run, 'activity.completed', activity)
   }
 
   // One computer-control activity row (metadata and fixed wording only).
