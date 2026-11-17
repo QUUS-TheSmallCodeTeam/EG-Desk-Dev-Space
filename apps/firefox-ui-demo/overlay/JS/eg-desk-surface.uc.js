@@ -33,6 +33,8 @@
   // loads into this window like the surface zones (SURFACE_MODULE_BASE); only .sys.mjs is shared.
   const SurfaceKeys = ChromeUtils.importESModule('chrome://userchrome/content/surface/EGDeskSurfaceKeys.mjs', { global: 'current' });
   const MemoLink = ChromeUtils.importESModule('chrome://userchrome/content/surface/EGDeskSurfaceMemoLink.mjs', { global: 'current' });
+  // UX-06: which chat events need the person, one notice under the top bar (pure model).
+  const SurfaceAttention = ChromeUtils.importESModule('chrome://userchrome/content/surface/EGDeskSurfaceAttention.mjs', { global: 'current' });
   const AnnotationState = ChromeUtils.importESModule('chrome://userchrome/content/EGDeskAnnotationState.sys.mjs');
   const AgentIdentityView = ChromeUtils.importESModule('chrome://userchrome/content/EGDeskAgentIdentityView.sys.mjs');
   const CanvasLayout = ChromeUtils.importESModule('chrome://userchrome/content/EGDeskCanvasLayout.sys.mjs');
@@ -9538,6 +9540,60 @@
   }
   installEscapeLayers();
 
+  // UX-06: one compact notice under the top bar when an Agent needs the person
+  // (approval, an answer, a blocked run, or a run ended while the Chat is not
+  // visible). It never takes focus, makes no sound and is not saved.
+  // Click or Enter opens the Chat peek (state.peekChatForAttention); Esc dismisses it.
+  let attentionModel = SurfaceAttention.emptyAttention();
+  const chatVisibleForAttention = () => {
+    const hud = byId('egd-hud');
+    return !!(state.hudOpen && state.hudApp === 'chat' && hud && !hud.classList.contains('egd-hud-hidden'));
+  };
+  function renderAttentionNotice() {
+    const notice = SurfaceAttention.attentionNotice(attentionModel);
+    let node = byId('egd-attention-notice');
+    if (!notice) { node?.remove(); return; }
+    if (!node) {
+      node = document.createElement('div');
+      node.id = 'egd-attention-notice';
+      node.setAttribute('role', 'status');
+      node.setAttribute('aria-live', 'polite');
+      node.tabIndex = 0;
+      node.addEventListener('click', () => openAttentionNotice());
+      node.addEventListener('keydown', ev => { if (ev.key === 'Enter') { ev.preventDefault(); openAttentionNotice(); } });
+      document.documentElement.appendChild(node);
+    }
+    node.textContent = '';
+    const name = document.createElement('strong');
+    name.className = 'egd-attention-notice-agent';
+    name.textContent = notice.agentName;
+    const line = document.createElement('span');
+    line.className = 'egd-attention-notice-line';
+    line.textContent = notice.count > 1 ? `${notice.line} 외 ${notice.count - 1}건` : notice.line;
+    node.append(name, line);
+    node.setAttribute('aria-label', notice.label);
+    node.dataset.count = String(notice.count);
+  }
+  function dismissAttentionNotice() {
+    attentionModel = SurfaceAttention.dismissAttention();
+    renderAttentionNotice();
+    return true;
+  }
+  function openAttentionNotice() {
+    dismissAttentionNotice();
+    if (!state.peekChatForAttention?.() && !(state.hudOpen && state.hudApp === 'chat')) toggleHUD('chat', '대화', { preserveConversation: true });
+  }
+  state.noteChatAttention = (event, run) => {
+    const next = SurfaceAttention.noteChatEvent(attentionModel, event, {
+      chatVisible: chatVisibleForAttention(), agentName: run?.agentName || run?.profileName || null });
+    if (next === attentionModel) return;
+    attentionModel = next;
+    renderAttentionNotice();
+  };
+  registerEscapeLayer({ id: 'attention-notice', kind: 'popover',
+    isOpen: () => !!SurfaceAttention.attentionNotice(attentionModel), contains: target => !!target?.closest?.('#egd-attention-notice'),
+    dismiss: () => dismissAttentionNotice() });
+
   function viewportWorldRect() {
     const zoom = Math.max(0.001, state.zoomTarget || state.zoom || 1);
     return {
@@ -15089,6 +15145,7 @@
             // CHAT-06 Await: an Agent proposed a plan; its approval card goes under this run's answer.
             if (run && event.event === 'plan.proposed') planProposalFrame(run, event.details);
             if (run) { syncProtocolRun(run); emit(); }
+            state.noteChatAttention?.(event, run);
             // CTX-04: tool results can change tracked sources; '바뀜' reads again (still at most every 15 s).
             if (run?.localThreadId && InputContext.contextSourceRefreshSignal(event.event)) refreshContextSources(run.localThreadId, { signal: true });
           }
