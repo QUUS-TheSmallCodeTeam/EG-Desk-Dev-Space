@@ -12272,7 +12272,7 @@
 
       // The room's AI engine (SUB-07): a badge in the room list, a header chip
       // that opens the engine/model/effort panel, and the new-room choices.
-      const engineContext = { recentEngineId: codex.recentEngineId, engines: codex.engines,
+      const engineContext = { recentEngineId: codex.recentEngineId, engines: codex.engines, profileEngines: codex.profileEngines,
         auth: codex.authStatus, engineConfiguration: codex.engineConfiguration };
       const renderEngineBadge = (thread) => {
         const view = ChatState.chatEngineChipView(thread, engineContext);
@@ -14602,7 +14602,11 @@
       if (profileCatalogLoad) return profileCatalogLoad;
       if (codexProfileCatalog.status !== 'ready') codexProfileCatalog = { status: 'loading', profiles: [] };
       profileCatalogLoad = fetchJson('/profiles?includeArchived=true')
-        .then((payload) => { codexProfileCatalog = { status: 'ready', profiles: ChatState.normalizeProfileCatalog(payload) }; })
+        .then((payload) => {
+          codexProfileCatalog = { status: 'ready', profiles: ChatState.normalizeProfileCatalog(payload) };
+          // AGENT-08: a new room with a stored Agent runs on the engine it saved.
+          state.codex.profileEngines = ChatState.profileEngineMap(codexProfileCatalog.profiles);
+        })
         .catch(() => { codexProfileCatalog = { status: 'unavailable', profiles: [] }; })
         .finally(() => { profileCatalogLoad = null; emit(); });
       return profileCatalogLoad;
@@ -17408,7 +17412,7 @@
         const content = draftText.trim();
         // Keep explicit intent even when the engine's live availability changes.
         const engineId = ['codex', 'claude'].includes(activeThread?.engineId) ? activeThread.engineId
-          : ChatState.chatThreadEngineId(activeThread, { recentEngineId: state.codex.recentEngineId, engines: state.codex.engines });
+          : ChatState.chatThreadEngineId(activeThread, { recentEngineId: state.codex.recentEngineId, engines: state.codex.engines, profileEngines: state.codex.profileEngines });
         if (activeThread && engineId === 'claude' && (state.contextSuggest?.byThread?.[activeThread.id]?.picked?.length
             || activeThread.inputSources?.some(input => input.browserToolPermission === 'interact'))) {
           updateThreadById(activeThread.id, thread => ({ ...thread, sendError: ChatState.claudeContextSendErrorText('CLAUDE_CONTEXT_UNSUPPORTED') }));
@@ -21326,6 +21330,22 @@
           ...ceilingNotes.map((note) => el('div', { class: 'egd-settings-ceiling-note', role: 'note', data: { testid: 'settings-agent-ceiling-note' } }, note)))
         : el('div', { class: 'egd-settings-form-hint', data: { testid: 'settings-agent-ceiling-off' } }, ChatState.TOOL_CEILING_OFF_TEXT),
       errorFor('toolCeiling') ? el('div', { class: 'egd-settings-field-error', role: 'alert' }, errorFor('toolCeiling').message) : null);
+      // AGENT-08: which subscription engine answers for this Agent, with the
+      // engine's last reported readiness. Saved only with [초안 저장].
+      const engineNote = ChatState.profileEngineNote(form, { engines: state.codex.engines, auth: state.codex.authStatus, connected: state.codex.connected === true });
+      const engineSection = field('model', '답할 엔진', el('div', { class: 'egd-settings-engine-pick' },
+        el('div', { class: 'egd-settings-segmented', role: 'group', 'aria-label': '답할 엔진', id: fieldId('model'), tabindex: '-1', data: { testid: 'settings-agent-engine' } },
+          ...ChatState.PROFILE_ENGINE_OPTIONS.map((option) => {
+            const active = engineNote.engine === option.value;
+            return el('button', {
+              class: `egd-settings-segment${active ? ' egd-settings-segment-active' : ''}`, type: 'button', 'aria-pressed': String(active),
+              data: { testid: 'settings-agent-engine-option', engine: option.value },
+              onclick: () => { form.model = ChatState.applyProfileFormEngine(form, option.value).model; agents.focusField = 'model'; renderAgentsTab(); },
+            }, option.label);
+          })),
+        engineNote.modelText ? el('div', { class: 'egd-settings-form-hint', data: { testid: 'settings-agent-engine-model' } }, engineNote.modelText) : null,
+        el('div', { class: `egd-settings-ceiling-note${engineNote.ready === false ? ' egd-settings-engine-note-blocked' : ''}`, role: 'note',
+          data: { testid: 'settings-agent-engine-note', ready: String(engineNote.ready) } }, engineNote.text)));
       // AGENT-02 [예시로 채우기]: fills only the blanks of a new Agent's draft in
       // place. Nothing is saved until [초안 저장].
       const exampleFillRow = () => {
@@ -21378,6 +21398,7 @@
         field('instructions', '지침', textArea('instructions', limits.instructions, '이 Agent가 늘 지켜야 할 내용을 적어 주세요.', 6)),
         field('toolPreferences', '선호 도구 (표시용)', chipList('toolPreferences', limits.toolPreferences, limits.toolLength, '예: browser'),
           '표시용입니다. 실제로 쓸 수 있는 도구는 아래에서 정합니다.'),
+        engineSection,
         ceilingSection,
         el('div', { class: 'egd-settings-form-actions' },
           el('button', { class: 'egd-settings-btn', data: { testid: 'settings-agent-cancel' }, onclick: () => {

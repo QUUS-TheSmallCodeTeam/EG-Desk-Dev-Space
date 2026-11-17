@@ -224,6 +224,45 @@ test('losing the Codex process fails only Codex runs; the other engine keeps run
   await assert.rejects(chat.send({ message: 'Wrong engine', conversationId: claudeRun.conversationId, engineId: 'codex' }), error => error.code === 'ENGINE_MISMATCH')
 })
 
+// AGENT-08: a stand-in profile store whose Agents saved an engine (or none).
+function agentProfiles(engines) {
+  return {
+    runProfile(id) {
+      if (!Object.hasOwn(engines, id)) throw Object.assign(new Error('missing'), { code: 'PROFILE_NOT_FOUND', httpStatus: 404 })
+      const engine = engines[id]
+      return { binding: { profileId: id, revision: 1, hash: `hash-${id}` }, developerInstructions: `${id} instructions`, toolCeiling: null,
+        model: typeof engine === 'object' ? engine : engine ? { engine, modelId: `${engine}-agent-model`, effort: null } : null }
+    },
+  }
+}
+
+test('a new room runs on the engine its Agent saved; a bound room, an explicit engine and an Agent without one keep their engine', async () => {
+  const { chat, calls, runOf } = twoEngines({ profiles: agentProfiles({ 'agent-claude': 'claude', 'agent-codex': 'codex', 'agent-plain': null,
+    'agent-claude-default': { engine: 'claude', modelId: null, effort: null } }) })
+  const claudeRoom = await chat.send({ message: 'New room', profileId: 'agent-claude' })
+  assert.equal(runOf(claudeRoom).engine.id, 'claude')
+  assert.equal(calls.find(call => call[1] === 'turn/start')[0], 'claude')
+  assert.equal(calls.find(call => call[1] === 'turn/start')[2].model, 'claude-agent-model', 'the Agent model applies on its own engine')
+  const engineOnly = await chat.send({ message: 'Engine only', profileId: 'agent-claude-default' })
+  assert.equal(runOf(engineOnly).engine.id, 'claude')
+  assert.equal(calls.filter(call => call[1] === 'turn/start').at(-1)[2].model, undefined, 'an engine-only Agent keeps that engine default model')
+  assert.equal(runOf(await chat.send({ message: 'Plain', profileId: 'agent-plain' })).engine.id, 'codex', 'no saved engine keeps the default')
+  assert.equal(runOf(await chat.send({ message: 'Named', profileId: 'agent-claude', engineId: 'codex' })).engine.id, 'codex', 'an engine named in the send wins')
+  assert.equal(chat.requestEngine({ profileId: 'agent-claude', profileEnabled: false }), 'codex', 'profiles turned off name no engine')
+  assert.equal(chat.requestEngine({ profileId: 'missing' }), 'codex', 'an unreadable profile names no engine here')
+  await assert.rejects(chat.send({ message: 'Missing', profileId: 'missing' }), error => error.code === 'PROFILE_NOT_FOUND')
+  // A room already on Codex is never moved by switching to a Claude Agent.
+  const codexRoom = await chat.send({ message: 'Codex room', profileId: 'agent-codex' })
+  await chat.handleNotification({ method: 'turn/completed', params: { threadId: codexRoom.conversationId, turn: { id: codexRoom.runId, status: 'completed', items: [] } } })
+  const kept = await chat.send({ message: 'Switch Agent', conversationId: codexRoom.conversationId, profileId: 'agent-claude' })
+  assert.equal(runOf(kept).engine.id, 'codex')
+  assert.equal(calls.filter(call => call[1] === 'turn/start').at(-1)[2].model, undefined, 'the Claude Agent model is not sent to Codex')
+  // An Agent saved for an engine that is not connected is refused, never run on Codex instead.
+  const codexOnly = new CodexChatRuntime({ engines: [codexEngine([])], profiles: agentProfiles({ 'agent-claude': 'claude' }) })
+  codexOnly.setConnection(true)
+  await assert.rejects(codexOnly.send({ message: 'Hi', profileId: 'agent-claude' }), error => error.code === 'ENGINE_UNAVAILABLE' && error.httpStatus === 503)
+})
+
 test('a lost non-Codex engine and a Codex account reset each leave the other engine untouched', async () => {
   const { chat, legacy, lifecycle, runOf } = twoEngines()
   const codexRun = await chat.send({ message: 'Codex work' })

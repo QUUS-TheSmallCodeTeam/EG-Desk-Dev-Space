@@ -93,7 +93,7 @@ function markdownText(body) {
     ...(body.avatar?.kind === 'emoji' ? [`emoji: ${yamlQuote(body.avatar.value)}`] : []),
     ...(vibe ? [`vibe: ${yamlQuote(vibe)}`] : []),
     ...(tools ? [`tools: ${tools.join(', ')}`] : []),
-    ...(body.model?.engine === 'claude' ? [`model: ${yamlQuote(body.model.modelId)}`] : []),
+    ...(body.model?.engine === 'claude' && body.model.modelId ? [`model: ${yamlQuote(body.model.modelId)}`] : []),
     `egdesk: ${flow({ v: 1, ...structured })}`,
     '---',
   ]
@@ -109,7 +109,7 @@ function codexToml(body) {
     `description = ${tomlString(body.role || body.name)}`,
     `developer_instructions = ${tomlString(composeDeveloperInstructions(body))}`,
   ]
-  if (body.model?.engine === 'codex') {
+  if (body.model?.engine === 'codex' && body.model.modelId) {
     lines.push(`model = ${tomlString(body.model.modelId)}`)
     if (body.model.effort) lines.push(`model_reasoning_effort = ${tomlString(body.model.effort)}`)
   }
