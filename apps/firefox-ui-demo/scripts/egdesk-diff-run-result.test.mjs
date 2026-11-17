@@ -830,3 +830,61 @@ test('runResultFromCodexItem reads a Codex commandExecution item', () => {
   const fromCapture = Run.runResultFromCodexItem({ ...item, aggregatedOutput: null }, { projectRoot: ROOT, output: { head: '', tail: JEST } })
   assert.equal(fromCapture.headline, '12 통과 · 1 실패')
 })
+
+// ============================ CODE-05 나란히 보기 ============================
+
+test('sideBySideRows pairs a deleted run with the added run after it, keeps context on both sides and spans notes', () => {
+  const file = Diff.fileDiffFromTexts({ path: '/x', oldText: 'a\nb\nc\nd\ne', newText: 'a\nB\nC\nX\nd\ne\nf' })
+  const rows = Diff.sideBySideRows(file.hunks[0])
+  const shape = rows.map(row => [row.kind, row.left?.kind === 'note' ? 'note' : row.left?.oldLine ?? null, row.right?.kind === 'note' ? 'note' : row.right?.newLine ?? null])
+  assert.deepEqual(shape, [['context', 1, 1], ['change', 2, 2], ['change', 3, 3], ['change', null, 4], ['context', 4, 5],
+    ['change', 5, 6], ['change', null, 7], ['note', 'note', 'note']], 'the last line without a newline pairs with its replacement')
+  assert.equal(rows.at(-1).left.text, '파일 끝에 줄바꿈이 없습니다')
+  assert.equal(rows[0].left, rows[0].right)
+  // Every line of the hunk appears exactly once on its own side.
+  const lines = file.hunks[0].lines
+  assert.equal(rows.filter(row => row.left?.kind === 'delete').length, lines.filter(line => line.kind === 'delete').length)
+  assert.equal(rows.filter(row => row.right?.kind === 'add').length, lines.filter(line => line.kind === 'add').length)
+  const oneSided = Diff.sideBySideRows(Diff.fileDiffFromTexts({ path: '/y', oldText: 'a\nb', newText: 'a\nc\n' }).hunks[0])
+  assert.deepEqual(oneSided.map(row => [row.kind, !!row.left, !!row.right]), [['context', true, true], ['change', true, true], ['note', true, false]])
+  // Pure deletion and pure insertion leave the other side empty.
+  const deletion = Diff.sideBySideRows({ lines: [{ kind: 'delete', text: 'gone', oldLine: 4, newLine: null }] })
+  assert.deepEqual(deletion, [{ kind: 'change', left: { kind: 'delete', text: 'gone', oldLine: 4, newLine: null }, right: null }])
+  assert.deepEqual(Diff.sideBySideRows({ lines: [{ kind: 'add', text: 'new', oldLine: null, newLine: 1 }] })[0].left, null)
+  assert.deepEqual(Diff.sideBySideRows(null), [])
+})
+
+test('renderDiffView toggles every file between unified and side-by-side; split rows are built lazily with textContent only', () => {
+  const files = [Diff.fileDiffFromTexts({ path: `${ROOT}/a.txt`, oldText: 'one\ntwo\nthree\n', newText: 'one\nTWO\nthree\nfour\n' }),
+    Diff.fileDiffFromTexts({ path: `${ROOT}/b.txt`, oldText: 'x\n', newText: '<b>y</b>\n' })]
+  const view = Diff.renderDiffView({ document: fakeDocument, files, root: ROOT })
+  assert.equal(view.getAttribute('data-layout'), 'unified')
+  const toggle = all(view, 'egdesk-diff-layout')[0]
+  assert.equal(toggle.getAttribute('role'), 'group')
+  const [unified, split] = tags(toggle, 'button')
+  assert.deepEqual([unified.textContent, split.textContent], ['한 줄로 보기', '나란히 보기'])
+  assert.deepEqual([unified.getAttribute('aria-pressed'), split.getAttribute('aria-pressed')], ['true', 'false'])
+  assert.equal(all(view, 'egdesk-diff-split').length, 0, 'split rows are not built until asked')
+  split.click()
+  assert.equal(view.getAttribute('data-layout'), 'split')
+  assert.deepEqual([unified.getAttribute('aria-pressed'), split.getAttribute('aria-pressed')], ['false', 'true'])
+  const splits = all(view, 'egdesk-diff-split')
+  assert.equal(splits.length, 2)
+  assert.ok(splits.every(node => node.hidden === false))
+  assert.ok(all(view, 'egdesk-diff-lines').every(node => node.hidden === true))
+  const rows = all(splits[0], 'egdesk-diff-split-row')
+  assert.deepEqual(rows.map(row => row.getAttribute('data-kind')), ['context', 'change', 'context', 'change'])
+  assert.deepEqual(tags(rows[1], 'del').map(node => node.textContent), ['two'])
+  assert.deepEqual(tags(rows[1], 'ins').map(node => node.textContent), ['TWO'])
+  assert.equal(all(rows[3], 'egdesk-diff-split-empty').length, 1, 'an added line has an empty left side')
+  assert.equal(tags(splits[1], 'ins')[0].textContent, '<b>y</b>', 'text stays text')
+  unified.click()
+  assert.ok(splits.every(node => node.hidden === true))
+  assert.ok(all(view, 'egdesk-diff-lines').every(node => node.hidden === false))
+  split.click()
+  assert.equal(all(view, 'egdesk-diff-split').length, 2, 'switching back reuses the built rows')
+  // Starting in split; no toggle when nothing has hunks.
+  assert.equal(Diff.renderDiffView({ document: fakeDocument, files, layout: 'split' }).getAttribute('data-layout'), 'split')
+  const empty = Diff.renderDiffView({ document: fakeDocument, files: [{ ...files[0], hunks: [], status: 'binary' }] })
+  assert.equal(all(empty, 'egdesk-diff-layout').length, 0)
+})

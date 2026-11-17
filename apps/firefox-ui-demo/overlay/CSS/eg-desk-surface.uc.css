@@ -6475,6 +6475,29 @@ button.egd-codex-work-screen .egd-ui-icon { flex: none; width: 14px; height: 14p
 .egdesk-change-review .egdesk-diff-line-add { background: var(--egd-success-bg); }
 .egdesk-chat-change-review .egdesk-diff-line-delete,
 .egdesk-change-review .egdesk-diff-line-delete { background: var(--egd-danger-bg); }
+/* CODE-05 나란히 보기: the toggle next to the summary and the split rows. */
+.egdesk-chat-change-review .egdesk-diff-layout,
+.egdesk-change-review .egdesk-diff-layout { display: flex; flex-wrap: wrap; gap: 4px; margin: 4px 0; }
+.egdesk-chat-change-review .egdesk-diff-layout button[aria-pressed="true"],
+.egdesk-change-review .egdesk-diff-layout button[aria-pressed="true"] { background: var(--egd-note-soft); border-color: var(--egd-note-line); }
+.egdesk-chat-change-review .egdesk-diff-split,
+.egdesk-change-review .egdesk-diff-split { box-sizing: border-box; min-width: 100%; margin: 0; padding: 0; list-style: none; font: 12px/1.65 ui-monospace, monospace; }
+.egdesk-chat-change-review .egdesk-diff-split[hidden],
+.egdesk-change-review .egdesk-diff-split[hidden],
+.egdesk-chat-change-review .egdesk-diff-lines[hidden],
+.egdesk-change-review .egdesk-diff-lines[hidden] { display: none; }
+.egdesk-chat-change-review .egdesk-diff-split-row,
+.egdesk-change-review .egdesk-diff-split-row { display: grid; grid-template-columns: 4ch minmax(0, 1fr) 4ch minmax(0, 1fr); padding-inline: 4px 8px; }
+.egdesk-chat-change-review .egdesk-diff-split-row > .egdesk-diff-text,
+.egdesk-change-review .egdesk-diff-split-row > .egdesk-diff-text { overflow-x: auto; }
+.egdesk-chat-change-review .egdesk-diff-split-note,
+.egdesk-change-review .egdesk-diff-split-note { grid-column: 1 / -1; }
+.egdesk-chat-change-review .egdesk-diff-split-add,
+.egdesk-change-review .egdesk-diff-split-add { background: var(--egd-success-bg); }
+.egdesk-chat-change-review .egdesk-diff-split-delete,
+.egdesk-change-review .egdesk-diff-split-delete { background: var(--egd-danger-bg); }
+.egdesk-chat-change-review .egdesk-diff-split-empty,
+.egdesk-change-review .egdesk-diff-split-empty { background: var(--egd-window-alt); }
 .egdesk-chat-change-review-actions { display: flex; flex-direction: column; gap: 4px; align-items: flex-start; }
 .egdesk-chat-change-review-open { max-width: 100%; text-align: left; }
 /* Stage 2 (D-X2) review after apply: the File Card's 변경 검토 panel (EGDeskChangeReview). */

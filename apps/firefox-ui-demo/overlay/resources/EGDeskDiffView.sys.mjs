@@ -344,10 +344,54 @@ export function firstChangedLine(file) {
   return null
 }
 
+// Side-by-side rows for one hunk: the original on the left, the text after
+// on the right. A run of deleted lines is paired with the run of added lines
+// that follows it (a replaced block lines up row by row); context lines show
+// on both sides. A 'no newline' note belongs to the side of the line before
+// it and is listed after the block, so it never splits a replaced pair.
+// Pattern: the split view of GitHub/VS Code diff editors (re-implemented
+// here, no code copied).
+// → [{kind: 'context'|'change'|'note', left: line|null, right: line|null}]
+export function sideBySideRows(hunk) {
+  const rows = []
+  let deletes = []
+  let adds = []
+  let notes = { left: null, right: null }
+  let previous = null
+  const flush = () => {
+    const count = Math.max(deletes.length, adds.length)
+    for (let i = 0; i < count; i++) rows.push({ kind: 'change', left: deletes[i] || null, right: adds[i] || null })
+    if (notes.left || notes.right) rows.push({ kind: 'note', left: notes.left, right: notes.right })
+    deletes = []
+    adds = []
+    notes = { left: null, right: null }
+  }
+  for (const line of hunk?.lines || []) {
+    if (line.kind === 'delete') { if (adds.length) flush(); deletes.push(line) }
+    else if (line.kind === 'add') adds.push(line)
+    else if (line.kind === 'note') {
+      if (previous?.kind === 'delete') notes.left = line
+      else if (previous?.kind === 'add') notes.right = line
+      else { flush(); rows.push({ kind: 'note', left: line, right: line }) }
+      continue
+    } else { flush(); rows.push({ kind: 'context', left: line, right: line }) }
+    previous = line
+  }
+  flush()
+  return rows
+}
+
+export const DIFF_LAYOUTS = Object.freeze(['unified', 'split'])
+const LAYOUT_LABELS = Object.freeze({ unified: '한 줄로 보기', split: '나란히 보기' })
+
 // Plain DOM for one or more file diffs. Class names are the contract with the
 // surface CSS (egdesk-diff-*). Text only ever goes through textContent.
 // onOpenFile({path, line}) — optional; adds a '파일 열기' button per file.
-export function renderDiffView({ document, files, root = '', openFiles = 3, onOpenFile } = {}) {
+// layout 'unified' (default) | 'split'. When any file has hunks a toggle next
+// to the summary switches every file between the unified −/+ list and the
+// side-by-side view (나란히 보기); the split rows are built only when first
+// shown and both stay in the DOM, so switching back keeps what was read.
+export function renderDiffView({ document, files, root = '', openFiles = 3, onOpenFile, layout = 'unified' } = {}) {
   if (!document?.createElement) throw new TypeError('renderDiffView requires a document')
   const list = Array.isArray(files) ? files : []
   const el = (tag, className, text) => {
@@ -359,6 +403,29 @@ export function renderDiffView({ document, files, root = '', openFiles = 3, onOp
   const view = el('section', 'egdesk-diff-view')
   view.setAttribute('aria-label', '바뀐 줄 보기')
   view.append(el('p', 'egdesk-diff-summary', diffSummaryText(list)))
+  const hunkViews = []
+  let currentLayout = DIFF_LAYOUTS.includes(layout) ? layout : 'unified'
+  const layoutButtons = new Map()
+  const showLayout = next => {
+    currentLayout = next
+    view.setAttribute('data-layout', next)
+    for (const [name, button] of layoutButtons) button.setAttribute('aria-pressed', String(name === next))
+    for (const hunkView of hunkViews) hunkView.show(next)
+  }
+  if (list.some(file => file?.hunks?.length)) {
+    const toggle = el('div', 'egdesk-diff-layout')
+    toggle.setAttribute('role', 'group')
+    toggle.setAttribute('aria-label', '보기 방식')
+    for (const name of DIFF_LAYOUTS) {
+      const button = el('button', `egdesk-diff-layout-${name}`, LAYOUT_LABELS[name])
+      button.type = 'button'
+      button.setAttribute('data-layout', name)
+      button.addEventListener('click', () => showLayout(name))
+      layoutButtons.set(name, button)
+      toggle.append(button)
+    }
+    view.append(toggle)
+  }
   list.forEach((file, index) => {
     const details = el('details', 'egdesk-diff-file')
     details.setAttribute('data-change', file.change)
@@ -410,10 +477,42 @@ export function renderDiffView({ document, files, root = '', openFiles = 3, onOp
         lines.append(item)
       }
       block.append(lines)
+      let split = null
+      hunkViews.push({
+        show(name) {
+          if (name === 'split' && !split) { split = renderSplitLines(el, hunk); block.append(split) }
+          lines.hidden = name === 'split'
+          if (split) split.hidden = name !== 'split'
+        },
+      })
       details.append(block)
     }
     if (file.truncated) details.append(el('p', 'egdesk-diff-note egdesk-diff-truncated', `줄이 많아 처음 ${DIFF_VIEW_LIMITS.maxLinesPerFile}줄만 보여 줍니다.`))
     view.append(details)
   })
+  showLayout(currentLayout)
   return view
+}
+
+function renderSplitLines(el, hunk) {
+  const rows = el('ol', 'egdesk-diff-split')
+  rows.setAttribute('aria-label', '나란히 보기 · 왼쪽 원본, 오른쪽 바뀐 뒤')
+  const side = (line, which) => {
+    const number = el('span', `egdesk-diff-ln egdesk-diff-ln-${which}`, line ? String(which === 'old' ? line.oldLine : line.newLine) : '')
+    number.setAttribute('aria-hidden', 'true')
+    if (!line) return [number, el('span', 'egdesk-diff-split-empty')]
+    const tag = line.kind === 'add' ? 'ins' : line.kind === 'delete' ? 'del' : 'code'
+    const text = el(tag, `egdesk-diff-text egdesk-diff-split-${line.kind}`, line.text)
+    return [number, text]
+  }
+  for (const row of sideBySideRows(hunk)) {
+    const item = el('li', `egdesk-diff-split-row egdesk-diff-split-row-${row.kind}`)
+    item.setAttribute('data-kind', row.kind)
+    if (row.kind === 'note') {
+      const which = row.left && row.right ? '' : row.left ? '원본 · ' : '바뀐 뒤 · '
+      item.append(el('em', 'egdesk-diff-text egdesk-diff-split-note', `${which}${(row.left || row.right).text}`))
+    } else item.append(...side(row.left, 'old'), ...side(row.right, 'new'))
+    rows.append(item)
+  }
+  return rows
 }
