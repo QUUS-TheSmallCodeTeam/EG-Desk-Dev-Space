@@ -63,5 +63,16 @@ test('UX-06 attention: Agent name from the run, room members or room profile; to
   assert.equal(Attention.attentionNoticeTop({ bottom: 60 }), 68);
   assert.equal(Attention.attentionNoticeTop(null), 52);
   assert.match(surfaceJs, /agentName: attentionAgentNameFor\(run\)/);
-  assert.match(surfaceJs, /node\.style\.top = `\$\{SurfaceAttention\.attentionNoticeTop\(byId\('egd-desk-rail'\)\?\.getBoundingClientRect\(\)\)\}px`/);
+  assert.match(surfaceJs, /node\.style\.top = `\$\{SurfaceAttention\.attentionNoticeTop\(document\.getElementById\('egd-desk-rail'\)\?\.getBoundingClientRect\(\)\)\}px`/);
+});
+
+import { test as attentionScopeTest } from 'node:test';
+import attentionScopeAssert from 'node:assert/strict';
+import { readFileSync as attentionScopeRead } from 'node:fs';
+attentionScopeTest('attention notice never calls the escape-layer-scoped byId helper', () => {
+  const surface = attentionScopeRead(new URL('../overlay/JS/eg-desk-surface.uc.js', import.meta.url), 'utf8');
+  const start = surface.indexOf('function renderAttentionNotice'), hook = surface.indexOf('state.noteChatAttention =');
+  attentionScopeAssert.ok(start > 0 && hook > start, 'attention notice block');
+  const block = surface.slice(start - 600, hook + 1500);
+  attentionScopeAssert.doesNotMatch(block, /(^|[^\w.])byId\(/m, 'byId exists only inside installEscapeLayers; chat.event would throw');
 });

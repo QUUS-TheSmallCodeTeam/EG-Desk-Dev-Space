@@ -9571,12 +9571,12 @@
   // Click or Enter opens the Chat peek (state.peekChatForAttention); Esc dismisses it.
   let attentionModel = SurfaceAttention.emptyAttention();
   const chatVisibleForAttention = () => {
-    const hud = byId('egd-hud');
+    const hud = document.getElementById('egd-hud');
     return !!(state.hudOpen && state.hudApp === 'chat' && hud && !hud.classList.contains('egd-hud-hidden'));
   };
   function renderAttentionNotice() {
     const notice = SurfaceAttention.attentionNotice(attentionModel);
-    let node = byId('egd-attention-notice');
+    let node = document.getElementById('egd-attention-notice');
     if (!notice) { node?.remove(); return; }
     if (!node) {
       node = document.createElement('div');
@@ -9597,7 +9597,7 @@
     line.textContent = notice.count > 1 ? `${notice.line} 외 ${notice.count - 1}건` : notice.line;
     node.append(name, line);
     node.setAttribute('aria-label', notice.label);
-    node.style.top = `${SurfaceAttention.attentionNoticeTop(byId('egd-desk-rail')?.getBoundingClientRect())}px`;
+    node.style.top = `${SurfaceAttention.attentionNoticeTop(document.getElementById('egd-desk-rail')?.getBoundingClientRect())}px`;
     node.dataset.count = String(notice.count);
   }
   function dismissAttentionNotice() {
