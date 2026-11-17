@@ -313,3 +313,78 @@ export async function runClaudeLoginInTerminal({ requestCommand, openTerminal, t
   return { phase: 'started', text: '터미널에서 Anthropic 공식 로그인을 마친 뒤 다시 확인을 눌러 주세요. EG-Desk는 로그인 정보를 보관하지 않습니다.' };
 }
 
+
+// --- 결정 모델 · OpenAI Decisions (DECISION_MODEL_CONTEXT_SETUP.md) ---------
+// A section of its own, apart from the engine cards: the key for the decision
+// model, its verification result and the mode. The key is typed into a
+// password field the screen clears right after POST /decision/credential;
+// only the bridge's hint (…끝 4자) is ever shown.
+export const DECISION_SECTION_TITLE = '결정 모델 · OpenAI Decisions';
+export const DECISION_MODES = Object.freeze([
+  Object.freeze({ value: 'off', label: '끔', note: '지금처럼 추론 모델만 씁니다.' }),
+  Object.freeze({ value: 'advisory', label: '기록만', note: '결정 모델이 고른 자료를 활동 기록에만 남기고 붙이지 않습니다.' }),
+  Object.freeze({ value: 'on', label: '사용', note: '결정 모델이 고른 자료를 메시지와 함께 붙입니다.' }),
+]);
+export const DECISION_CREDIT_NOTE = 'ChatGPT Pro·Business 요금제의 API 크레딧은 연결한 API 조직의 project key에만 적용됩니다. Plus는 대상이 아닙니다.';
+const DECISION_VERIFICATION_TEXT = Object.freeze({
+  verified: '확인됨',
+  no_credit: '크레딧 없음 · 키는 저장했습니다. 크레딧이 생기면 바로 쓸 수 있습니다.',
+  rate_limited: '요청 한도에 걸림 · 키는 저장했습니다. 잠시 뒤 다시 확인됩니다.',
+  invalid_key: '키가 올바르지 않습니다',
+  model_unavailable: '이 키로는 결정 모델(gpt-6-luna)을 쓸 수 없습니다',
+  unreachable: 'OpenAI에 연결하지 못했습니다',
+  timeout: 'OpenAI가 제때 답하지 않았습니다',
+});
+
+/** Korean line for a /decision/credential verification status. */
+export function decisionVerificationText(status) {
+  return DECISION_VERIFICATION_TEXT[status] || DECISION_VERIFICATION_TEXT.unreachable;
+}
+
+/**
+ * decisionSettingsView(status, { connected }) → what the section shows.
+ * status: GET /decision/status (or null while unknown).
+ */
+export function decisionSettingsView(status, { connected = false } = {}) {
+  const known = connected && object(status);
+  const configured = known && status.configured === true;
+  const mode = known && DECISION_MODES.some(choice => choice.value === status.mode) ? status.mode : 'off';
+  const storeBroken = known && ['unreadable', 'unsupported', 'unavailable'].includes(status.store);
+  const hint = configured && typeof status.keyHint === 'string' ? status.keyHint : null;
+  const budget = known && object(status.budget) && Number.isSafeInteger(status.budget.inputTokens) ? status.budget : null;
+  return {
+    status: !known ? 'unknown' : configured ? 'configured' : 'empty',
+    keyLine: !known ? '확인할 수 없음 · 브리지 연결이 준비되면 다시 확인합니다.'
+      : configured ? `저장된 키 ${hint || ''}`.trim() : '저장된 키 없음',
+    storeNote: storeBroken ? '이 컴퓨터에서는 키를 저장할 수 없습니다.' : null,
+    canSave: known && !storeBroken,
+    canDelete: configured,
+    mode,
+    // Without a key only '끔' applies; the choice is kept for when one is saved.
+    modeEnabled: known && status.mode !== null && status.mode !== undefined,
+    modes: DECISION_MODES.map(choice => ({ ...choice, selected: choice.value === mode })),
+    modeNote: (DECISION_MODES.find(choice => choice.value === mode) || DECISION_MODES[0]).note
+      + (mode !== 'off' && known && !configured ? ' 키를 저장하면 적용됩니다.' : ''),
+    budgetLine: budget ? `이번 달 입력 ${budget.inputTokens.toLocaleString('en-US')} 토큰${Number.isSafeInteger(budget.cap) ? ` / 상한 ${budget.cap.toLocaleString('en-US')}` : ''}` : null,
+    creditNote: DECISION_CREDIT_NOTE,
+  };
+}
+
+/**
+ * decisionCredentialOutcome({ result?, error? }) → { phase: 'done'|'error', text }
+ * result: the 200 answer of POST /decision/credential; error: a failed request
+ * ({ status, code, verification }).
+ */
+export function decisionCredentialOutcome({ result = null, error = null } = {}) {
+  if (result && !error) {
+    const verification = typeof result.verification === 'string' ? result.verification : 'verified';
+    return { phase: verification === 'verified' ? 'done' : 'warning', verification, text: decisionVerificationText(verification) };
+  }
+  if (error?.code === 'DECISION_KEY_REJECTED') {
+    const verification = typeof error.verification === 'string' ? error.verification : 'unreachable';
+    return { phase: 'error', verification, text: `${decisionVerificationText(verification)} · 키를 저장하지 않았습니다.` };
+  }
+  if (error?.code === 'DECISION_KEY_INVALID') return { phase: 'error', verification: null, text: 'API 키 형식이 아닙니다. sk-로 시작하는 키를 붙여 넣어 주세요.' };
+  if (error?.code === 'DECISION_STORE_UNAVAILABLE' || error?.code === 'DECISION_STORE_FAILED') return { phase: 'error', verification: null, text: '이 컴퓨터에서 키를 저장하지 못했습니다.' };
+  return { phase: 'error', verification: null, text: '브리지에 연결하지 못했습니다. 잠시 뒤 다시 시도해 주세요.' };
+}

@@ -285,3 +285,40 @@ test('the bridge client calls the Claude routes and the Settings card uses them'
   assert.match(settings, /api\.claudeApiKeyEnv\(action === 'keyConfirm'\)/);
   assert.doesNotMatch(settings, /settings-claude-refresh' \}, onclick: \(\) => bridge\(\)\?\.refreshAuthStatus\(\)/, 'the Claude check is no longer the generic state read');
 });
+
+test('decision model section: unknown offline, key hint only, Korean verification, mode choices', async () => {
+  const View = await import('../overlay/resources/EGDeskAccountSettingsView.sys.mjs');
+  const offline = View.decisionSettingsView({ configured: true, keyHint: '…WXYZ', mode: 'on' }, { connected: false });
+  assert.equal(offline.status, 'unknown');
+  assert.equal(offline.canSave, false);
+  assert.equal(offline.modeEnabled, false);
+  assert.equal(offline.mode, 'off');
+  const empty = View.decisionSettingsView({ configured: false, store: 'missing', keyHint: null, mode: 'off', budget: { month: '2026-11', inputTokens: 0, cap: null } }, { connected: true });
+  assert.equal(empty.status, 'empty');
+  assert.equal(empty.keyLine, '저장된 키 없음');
+  assert.equal(empty.canSave, true);
+  assert.equal(empty.canDelete, false);
+  assert.deepEqual(empty.modes.map(m => [m.label, m.selected]), [['끔', true], ['기록만', false], ['사용', false]]);
+  assert.equal(empty.budgetLine, '이번 달 입력 0 토큰');
+  assert.match(empty.creditNote, /Pro·Business.*API 조직의 project key/);
+  const saved = View.decisionSettingsView({ configured: true, store: 'loaded', keyHint: '…WXYZ', mode: 'advisory' }, { connected: true });
+  assert.equal(saved.keyLine, '저장된 키 …WXYZ');
+  assert.equal(saved.canDelete, true);
+  assert.equal(saved.mode, 'advisory');
+  assert.equal(saved.modes.find(m => m.selected).label, '기록만');
+  assert.match(View.decisionSettingsView({ configured: false, mode: 'on' }, { connected: true }).modeNote, /키를 저장하면 적용됩니다/);
+  assert.equal(View.decisionSettingsView({ configured: false, store: 'unavailable', mode: 'off' }, { connected: true }).canSave, false);
+  assert.equal(View.decisionVerificationText('verified'), '확인됨');
+  assert.match(View.decisionVerificationText('no_credit'), /^크레딧 없음/);
+  assert.equal(View.decisionVerificationText('invalid_key'), '키가 올바르지 않습니다');
+  assert.match(View.decisionVerificationText('model_unavailable'), /쓸 수 없습니다/);
+  assert.match(View.decisionVerificationText('unreachable'), /연결하지 못했습니다/);
+  assert.match(View.decisionVerificationText('something-else'), /연결하지 못했습니다/);
+  assert.deepEqual(View.decisionCredentialOutcome({ result: { verification: 'verified' } }), { phase: 'done', verification: 'verified', text: '확인됨' });
+  assert.equal(View.decisionCredentialOutcome({ result: { verification: 'no_credit' } }).phase, 'warning');
+  const rejected = View.decisionCredentialOutcome({ error: { code: 'DECISION_KEY_REJECTED', verification: 'invalid_key' } });
+  assert.equal(rejected.phase, 'error');
+  assert.match(rejected.text, /키가 올바르지 않습니다 · 키를 저장하지 않았습니다/);
+  assert.match(View.decisionCredentialOutcome({ error: { code: 'DECISION_KEY_INVALID' } }).text, /형식/);
+  assert.match(View.decisionCredentialOutcome({ error: new Error('x') }).text, /브리지/);
+})

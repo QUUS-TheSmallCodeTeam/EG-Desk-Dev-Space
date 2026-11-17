@@ -18707,7 +18707,7 @@ test('production Settings 계정 tab: 컴퓨터 조작 shows the bridge value, p
   const h = computerControlSettingsHarness({ computerControl: { policy: 'inherit', verified: null },
     inheritedMcp: [{ name: 'cua_repl', enabled: true, status: 'connected', controlsExternal: true, kind: 'desktop' }] });
   const order = h.card.querySelector ? null : settingsNodes(h.card, node => node.tagName === 'SECTION').map(node => node.getAttribute('aria-label'));
-  assert.deepEqual(order, ['ChatGPT 계정', '컴퓨터 조작', '연결된 도구', 'Claude'], 'the row sits right above the connected tools');
+  assert.deepEqual(order, ['ChatGPT 계정', '컴퓨터 조작', '연결된 도구', 'Claude', '결정 모델 · OpenAI Decisions'], 'the row sits right above the connected tools');
   assert.equal(h.section().dataset.state, 'inherit', 'the default is what the bridge reports');
   const toggle = () => h.part('settings-computer-control-switch');
   assert.equal(toggle().getAttribute('role'), 'switch');
