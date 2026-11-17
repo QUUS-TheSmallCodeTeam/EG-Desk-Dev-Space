@@ -29,9 +29,10 @@
   const ProfileTransferView = ChromeUtils.importESModule('chrome://userchrome/content/EGDeskProfileTransferView.sys.mjs');
   const HostActivityView = ChromeUtils.importESModule('chrome://userchrome/content/EGDeskHostActivityView.sys.mjs');
   const MemoState = ChromeUtils.importESModule('chrome://userchrome/content/EGDeskMemoState.sys.mjs');
-  // DSN-04 · UX-05 · UX-06 keyboard rules and CNV-06 memo link rules (pure modules).
-  const SurfaceKeys = ChromeUtils.importESModule('chrome://userchrome/content/surface/EGDeskSurfaceKeys.mjs');
-  const MemoLink = ChromeUtils.importESModule('chrome://userchrome/content/surface/EGDeskSurfaceMemoLink.mjs');
+  // DSN-04 · UX-05 · UX-06 keyboard rules and CNV-06 memo link rules (pure modules). Plain .mjs
+  // loads into this window like the surface zones (SURFACE_MODULE_BASE); only .sys.mjs is shared.
+  const SurfaceKeys = ChromeUtils.importESModule('chrome://userchrome/content/surface/EGDeskSurfaceKeys.mjs', { global: 'current' });
+  const MemoLink = ChromeUtils.importESModule('chrome://userchrome/content/surface/EGDeskSurfaceMemoLink.mjs', { global: 'current' });
   const AnnotationState = ChromeUtils.importESModule('chrome://userchrome/content/EGDeskAnnotationState.sys.mjs');
   const AgentIdentityView = ChromeUtils.importESModule('chrome://userchrome/content/EGDeskAgentIdentityView.sys.mjs');
   const CanvasLayout = ChromeUtils.importESModule('chrome://userchrome/content/EGDeskCanvasLayout.sys.mjs');
