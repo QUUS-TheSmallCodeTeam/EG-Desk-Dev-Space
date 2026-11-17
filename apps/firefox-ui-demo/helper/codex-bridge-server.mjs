@@ -35,6 +35,7 @@ import { openBridgeSettings } from './egdesk-bridge-settings.mjs'
 import { createDecisionBudget, createDecisionClient } from './egdesk-decision-client.mjs'
 import { openDecisionCredentialStore } from './egdesk-decision-credential.mjs'
 import { createDecisionHttpHandler } from './egdesk-decision-http.mjs'
+import { collectDecisionCandidates } from './egdesk-decision-candidates.mjs'
 import { createDeskHttpHandler } from './egdesk-desk-http.mjs'
 import { createPortableHttpHandler } from './egdesk-portable-http.mjs'
 import { NativeReaderClient } from './egdesk-native-reader.mjs'
@@ -365,6 +366,15 @@ const chat = new CodexChatRuntime({
   computerControlStore: bridgeSettings.computerControl,
   onComputerControlChange: computerControl => broadcast({ type: 'computer.control', v: BRIDGE_PROTOCOL_VERSION, provider: PROVIDER_ID, computerControl, ts: Date.now() }),
   hostLease: hostControl.lease,
+  // Decision model context setup before each ordinary turn; nothing runs while
+  // the mode is 'off' (default) or no key is saved.
+  decisionContext: {
+    mode: () => bridgeSettings.decisionContext.mode,
+    configured: () => decisionCredentials.getApiKey() !== null,
+    client: decisionClient,
+    collect: async ({ body, context }) => (await collectDecisionCandidates({ body, clientThreadId: context.clientThreadId,
+      excludeMessageId: context.localMessageId, chatStore, deskStore, ontologyStore: ensureOntologyStore })).candidates,
+  },
 })
 // Claude conversation events reach the same runtime as app-server traffic.
 claudeEngine.subscribe({
