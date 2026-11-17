@@ -287,12 +287,15 @@ const CLAUDE_LOGIN_LINES = Object.freeze({ claudeai: 'claude auth login --claude
  * Returns { phase: 'started' | 'error', text }.
  */
 export async function runClaudeLoginInTerminal({ requestCommand, openTerminal, terminalApi = card => card?._termBrowser?.contentWindow?.terminalAPI ?? null,
-  sleep = ms => new Promise(resolve => setTimeout(resolve, ms)), now = Date.now, method = 'claudeai', timeoutMs = 15000 } = {}) {
+  sleep = ms => new Promise(resolve => setTimeout(resolve, ms)), now = Date.now, method = 'claudeai', timeoutMs = 15000,
+  checkLine = command => Object.hasOwn(CLAUDE_LOGIN_LINES, command?.method) && command?.line === CLAUDE_LOGIN_LINES[command.method] ? command.line : null,
+  startedText = '터미널에서 Anthropic 공식 로그인을 마친 뒤 다시 확인을 눌러 주세요. EG-Desk는 로그인 정보를 보관하지 않습니다.' } = {}) {
   let command;
   try { command = await requestCommand(method); } catch (error) {
     return { phase: 'error', text: `로그인 명령을 받지 못했습니다: ${text(error?.message) || '연결 프로그램 오류'}` };
   }
-  const line = Object.hasOwn(CLAUDE_LOGIN_LINES, command?.method) && command?.line === CLAUDE_LOGIN_LINES[command.method] ? command.line : null;
+  let line;
+  try { line = checkLine(command); } catch { line = null; }
   if (!line) return { phase: 'error', text: '연결 프로그램이 알 수 없는 로그인 명령을 보냈습니다. 터미널에 입력하지 않았습니다.' };
   let card;
   try { card = openTerminal(); } catch { card = null; }
@@ -310,7 +313,83 @@ export async function runClaudeLoginInTerminal({ requestCommand, openTerminal, t
   try { await api.write(`${line}\r`); } catch {
     return { phase: 'error', text: `터미널에 입력하지 못했습니다. 터미널에서 ${line} 을 직접 실행해 주세요.` };
   }
-  return { phase: 'started', text: '터미널에서 Anthropic 공식 로그인을 마친 뒤 다시 확인을 눌러 주세요. EG-Desk는 로그인 정보를 보관하지 않습니다.' };
+  return { phase: 'started', text: startedText };
+}
+
+// --- SUB-11 Engine Profiles (several ChatGPT / Claude accounts) ---
+// Rows come from the /v1/state engines[] row (profiles[]). The shared login
+// is the CLI's own (~/.claude, ~/.codex); an added profile has an EG-Desk-owned
+// private login folder and logs in through the official CLI in a Terminal
+// card. Switching is explicit and refused while a conversation runs; a chat
+// keeps the profile it started with.
+export const ENGINE_PROFILE_MARKERS = Object.freeze({ shared: '이 컴퓨터 로그인 공유', owned: 'EG-Desk 전용 로그인' });
+const PROFILE_AUTH_TEXT = Object.freeze({ signedIn: '로그인됨', signedOut: '로그인 필요', signingIn: '로그인 중', unknown: '확인 안 됨' });
+const PROFILE_ID = /^(codex|claude)-[a-z0-9]{1,40}$/;
+
+/**
+ * engineProfilesView(engines, engineId, { connected }) → { engineId, rows, canAdd, note }
+ * rows: [{ id, label, marker, owned, active, status, authText, canActivate, canRemove, canLogin }]
+ */
+export function engineProfilesView(engines, engineId, { connected = false } = {}) {
+  const name = ENGINE_NAMES[engineId] || engineId;
+  const row = connected === true ? (Array.isArray(engines) ? engines : []).find(candidate => object(candidate) && candidate.id === engineId) : null;
+  const seen = new Set();
+  const rows = (Array.isArray(row?.profiles) ? row.profiles : []).filter(profile => object(profile) && PROFILE_ID.test(profile.id) && profile.id.startsWith(`${engineId}-`) && !seen.has(profile.id) && seen.add(profile.id))
+    .map((profile) => {
+      const owned = profile.owned === true;
+      const notYet = profile.status === 'notYet';
+      const active = profile.active === true;
+      const auth = active && object(profile.auth) && Object.hasOwn(PROFILE_AUTH_TEXT, profile.auth.status) ? profile.auth.status : 'unknown';
+      return {
+        id: profile.id, owned, active,
+        label: text(profile.label).slice(0, 60) || (owned ? `${name} 계정` : name),
+        marker: owned ? ENGINE_PROFILE_MARKERS.owned : ENGINE_PROFILE_MARKERS.shared,
+        status: notYet ? 'notYet' : active ? 'active' : 'available',
+        authText: notYet ? '준비 중' : active ? `사용 중 · ${PROFILE_AUTH_TEXT[auth]}` : '선택하면 이 로그인으로 새 대화를 시작합니다',
+        canActivate: !active && !notYet,
+        canRemove: owned && !active,
+        canLogin: owned,
+      };
+    });
+  return {
+    engineId, rows, canAdd: connected === true && Boolean(row),
+    note: engineId === 'codex'
+      ? '추가한 ChatGPT 계정은 로그인 폴더만 준비됩니다. 계정별 Codex 실행은 아직 지원하지 않습니다.'
+      : '계정을 바꾸면 새 대화부터 적용됩니다. 진행 중인 대화는 시작한 계정에서 끝나고, 다른 계정으로 옮겨지지 않습니다.',
+  };
+}
+
+const PROFILE_LOGIN_LINE = /^(?:CLAUDE_CONFIG_DIR|CODEX_HOME)='\/[^'\r\n\0]{1,4000}' (?:claude auth login --(?:claudeai|console)|codex login)$/;
+/** The login line for an Engine Profile as the bridge sent it, or null if it is not one EG-Desk makes. */
+export function engineProfileLoginLine(command) {
+  const line = typeof command?.line === 'string' ? command.line : '';
+  if (Object.values(CLAUDE_LOGIN_LINES).includes(line) || line === 'codex login') return line;
+  if (!PROFILE_LOGIN_LINE.test(line)) return null;
+  const envName = line.startsWith('CLAUDE_CONFIG_DIR=') ? 'CLAUDE_CONFIG_DIR' : 'CODEX_HOME';
+  const engine = envName === 'CLAUDE_CONFIG_DIR' ? 'claude' : 'codex';
+  if (command.env !== envName || command.engine !== engine || !line.includes(engine === 'claude' ? ' claude auth login' : ' codex login')) return null;
+  return line;
+}
+
+/** Types an Engine Profile's login line into a Terminal card (official CLI login for that folder). */
+export function runEngineProfileLoginInTerminal({ requestCommand, ...options } = {}) {
+  return runClaudeLoginInTerminal({ ...options, requestCommand, checkLine: engineProfileLoginLine,
+    startedText: '터미널에서 공식 로그인을 마친 뒤 다시 확인을 눌러 주세요. 로그인 정보는 이 계정 전용 폴더에만 저장되고 EG-Desk는 읽지 않습니다.' });
+}
+
+/** Korean text for a refused profile change (bridge error codes). */
+export function engineProfileErrorText(error) {
+  const code = text(error?.code);
+  return {
+    ENGINE_PROFILE_BUSY: '진행 중인 대화가 있어 계정을 바꾸지 않았습니다. 끝난 뒤 다시 선택해 주세요.',
+    ENGINE_PROFILE_NOT_YET: 'Codex는 아직 계정을 하나만 쓸 수 있습니다.',
+    ENGINE_PROFILE_ACTIVE: '사용 중인 계정은 지울 수 없습니다. 다른 계정을 먼저 선택해 주세요.',
+    ENGINE_PROFILE_DEFAULT: '이 컴퓨터 로그인은 지울 수 없습니다.',
+    ENGINE_PROFILE_IN_USE: '이 계정으로 진행 중인 대화가 있어 지우지 않았습니다.',
+    ENGINE_PROFILE_LIMIT: '이 엔진에는 계정을 더 추가할 수 없습니다.',
+    INVALID_PROFILE_LABEL: '이름은 1~60자로 적어 주세요.',
+    ENGINE_PROFILES_UNAVAILABLE: '이 컴퓨터에 계정 설정을 저장할 수 없습니다.',
+  }[code] || `계정 설정을 바꾸지 못했습니다: ${text(error?.message) || '연결 프로그램 오류'}`;
 }
 
 

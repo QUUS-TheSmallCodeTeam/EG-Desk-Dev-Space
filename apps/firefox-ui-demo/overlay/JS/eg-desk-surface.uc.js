@@ -17341,6 +17341,19 @@
       claudeLoginCommand(method = 'claudeai') {
         return fetchJson(`/engines/claude/login-command?method=${encodeURIComponent(method)}`);
       },
+      // SUB-11 Engine Profiles (Settings rows); the folder and login are the CLI's own.
+      async addEngineProfile(engine, label) {
+        return fetchJson('/settings/engine-profiles', { method: 'POST', body: JSON.stringify({ engine, label }) });
+      },
+      async removeEngineProfile(id) {
+        return fetchJson(`/settings/engine-profiles?id=${encodeURIComponent(id)}`, { method: 'DELETE' });
+      },
+      async activateEngineProfile(engine, id) {
+        return fetchJson('/settings/engine-profiles/active', { method: 'POST', body: JSON.stringify({ engine, id }) });
+      },
+      engineProfileLoginCommand(id) {
+        return fetchJson(`/settings/engine-profiles/login-command?id=${encodeURIComponent(id)}`);
+      },
       async claudeApiKeyEnv(confirm) {
         const result = await fetchJson('/engines/claude/api-key-env', typeof confirm === 'boolean'
           ? { method: 'POST', body: JSON.stringify({ confirm }) } : {});
@@ -20507,6 +20520,54 @@
       }
       renderAccountTab();
     };
+    // SUB-11 profile list per engine: label + shared/owned marker, add (label only),
+    // remove (owned only), Terminal login for the private folder. Codex extras read '준비 중'.
+    let profileAction = null;
+    const runProfileAction = async (engineId, action, id, label) => {
+      const api = bridge();
+      if (!api || profileAction?.phase === 'running') return;
+      profileAction = { engineId, action, phase: 'running' };
+      renderAccountTab();
+      try {
+        if (action === 'add') {
+          const added = await api.addEngineProfile(engineId, label);
+          const outcome = await AccountSettingsView.runEngineProfileLoginInTerminal({
+            requestCommand: () => api.engineProfileLoginCommand(added.profile.id), openTerminal: () => spawnTerminalCard() });
+          profileAction = { engineId, action, ...outcome };
+        } else if (action === 'login') {
+          profileAction = { engineId, action, ...await AccountSettingsView.runEngineProfileLoginInTerminal({
+            requestCommand: () => api.engineProfileLoginCommand(id), openTerminal: () => spawnTerminalCard() }) };
+        } else {
+          if (action === 'remove') await api.removeEngineProfile(id); else await api.activateEngineProfile(engineId, id);
+          profileAction = null;
+        }
+        await api.refreshAuthStatus();
+      } catch (error) {
+        profileAction = { engineId, action, phase: 'error', text: AccountSettingsView.engineProfileErrorText(error) };
+      }
+      renderAccountTab();
+    };
+    const renderEngineProfiles = (engineId) => {
+      const view = AccountSettingsView.engineProfilesView(state.codex.engines, engineId, { connected: state.codex.connected });
+      if (!view.rows.length && !view.canAdd) return null;
+      const busy = profileAction?.phase === 'running';
+      const input = el('input', { class: 'egd-settings-input', type: 'text', maxlength: '60', placeholder: '새 계정 이름', data: { testid: `settings-profile-label-${engineId}` } });
+      const btn = (name, testid, onclick, primary) => el('button', { class: `egd-settings-btn${primary ? ' egd-settings-btn-primary' : ''}`, type: 'button', disabled: busy ? 'true' : null, data: { testid }, onclick }, name);
+      return el('div', { class: 'egd-settings-profiles', data: { testid: `settings-profiles-${engineId}` } },
+        ...view.rows.map((row) => el('div', { class: 'egd-settings-profile-row', data: { testid: 'settings-profile-row', profile: row.id, status: row.status } },
+          el('div', { class: 'egd-settings-account-copy' },
+            el('div', { class: 'egd-settings-account-title' }, row.label, el('span', { class: 'egd-settings-plan-badge', data: { testid: 'settings-profile-marker' } }, row.marker)),
+            el('div', { class: 'egd-settings-account-sub' }, row.authText)),
+          row.canActivate ? btn('사용', 'settings-profile-use', () => { void runProfileAction(engineId, 'activate', row.id); }) : null,
+          row.canLogin && row.status !== 'notYet' ? btn('로그인', 'settings-profile-login', () => { void runProfileAction(engineId, 'login', row.id); }) : null,
+          row.canRemove ? btn('삭제', 'settings-profile-remove', () => { void runProfileAction(engineId, 'remove', row.id); }) : null)),
+        view.canAdd ? el('div', { class: 'egd-settings-profile-add' }, input,
+          btn('계정 추가', 'settings-profile-add', () => { const label = input.value.trim(); if (label) void runProfileAction(engineId, 'add', null, label); }, true)) : null,
+        el('p', { class: 'egd-settings-section-sub' }, view.note),
+        profileAction && profileAction.engineId === engineId && profileAction.phase !== 'running' ? el('div', {
+          class: `egd-settings-account-result egd-settings-account-result-${profileAction.phase}`, role: profileAction.phase === 'error' ? 'alert' : 'status',
+          data: { testid: 'settings-profile-result', phase: profileAction.phase } }, profileAction.text) : null);
+    };
     const renderAccountTab = () => {
       if (activeTab !== 'account') return;
       const codex = state.codex;
@@ -20678,6 +20739,10 @@
           el('div', { data: { testid: 'settings-claude-engine' } }, claude.engineText),
           claude.connectionText ? el('div', { data: { testid: 'settings-claude-connection' } }, claude.connectionText) : null,
           claude.versionText ? el('div', { data: { testid: 'settings-claude-version' } }, claude.versionText) : null));
+      const claudeProfiles = renderEngineProfiles('claude');
+      if (claudeProfiles) claudeSection.appendChild(claudeProfiles);
+      const codexProfiles = connection.state === 'online' ? renderEngineProfiles('codex') : null;
+      if (codexProfiles) section.appendChild(codexProfiles);
       contentArea.replaceChildren(section, renderComputerControl(), renderConnectedTools(), claudeSection, renderDecisionModel());
     };
 

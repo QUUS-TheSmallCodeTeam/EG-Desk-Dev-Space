@@ -22,6 +22,7 @@ import { ImmutableContextStore, hashContent } from '../helper/egdesk-context-sto
 import { createContextHttpHandler } from '../helper/egdesk-context-http.mjs';
 import { createChatEngineAuth } from '../helper/codex-bridge-engine-auth.mjs';
 import { createChatHttpHandler } from '../helper/codex-bridge-http.mjs';
+import * as BoardThread from '../overlay/resources/EGDeskBoardThread.sys.mjs';
 
 // Execute the current production functions, including el() and the bridge
 // handlers. Firefox bootstrap, browser/OS input and real engines never run.
@@ -147,7 +148,7 @@ function surface({ run = null, thread = {}, auth = {}, fetchJson = async () => (
   const effects = { emits: 0, capture: [], requests: [], projectRequests: [], ready: 0, timers: 0, synced: [], logs: [], revoked: [] };
   const epochScope = ChatState.createChatEpochScope();
   const userInputDrafts = new Map();
-  const globals = { ChatState, ChatRunResult, ChatChangeReview, InputContext, document, state, protocol, userInputDrafts, epochScope, effects, realProjection,
+  const globals = { ChatState, BoardThread, ChatRunResult, ChatChangeReview, InputContext, document, state, protocol, userInputDrafts, epochScope, effects, realProjection,
     window: { AbortController, crypto: webcrypto, setTimeout: () => 1, clearTimeout() {} }, queueMicrotask,
     captureChatInputs, captureManagedFileInput, boardNotice: text => effects.logs.push(text),
     SELF_MEMBER: 'self', cloneJson: clone, formatMessageTime: String, contextBoardTitle: () => '',
@@ -223,7 +224,7 @@ function composer(ui) {
   // VM scope as the extracted production composer, just as in the app.
   const icons = `${functionSource('svgEl')}\n${between('  const DESK_ICON_SHAPES = {', '  function normalizeSourcePart(')}`;
   const controls = compile(`${functionSource('getCodexThreadDraft')}\n${icons}\n${block}\nreturn {input, sendButton, resizeComposer};`, {
-    document: ui.document, body: {}, el: ui.el, ChatState, activeThread: ui.thread(), codex: ui.state.codex, codexBridge: ui,
+    document: ui.document, body: {}, el: ui.el, ChatState, BoardThread, activeThread: ui.thread(), codex: ui.state.codex, codexBridge: ui,
     chatRoomProjectSendBlock: ui.projectBlock, composerViewport: viewport.instance,
     compositionInProgress: false,
   });
@@ -233,7 +234,7 @@ function composer(ui) {
 function emptyChat(ui) {
   const block = between('          const canStart = activeEngine.engineId', '        } else {\n          // Agent answers');
   const messages = ui.el('div');
-  compile(block, { el: ui.el, ChatState, activeThread: ui.thread(), codex: ui.state.codex,
+  compile(block, { el: ui.el, ChatState, BoardThread, activeThread: ui.thread(), codex: ui.state.codex,
     activeEngine: ChatState.chatThreadReadiness(ui.thread(), ui.state.codex), messages,
     codexBridge: { startLogin: () => assert.fail('Claude opened Codex login'), refreshAuthStatus: () => {} },
     renderEngineChoices: () => ui.el('div'), renderStatelessStart: () => ui.el('div') });
@@ -250,7 +251,7 @@ function accountLifecycle(ui) {
       setTimer: fn => { effects.timers.push(fn); return effects.timers.length; }, clearTimer() {} });
     ${between('    const handleEvent = (event) => {', '    const connect = async')}
     return {update, reset: resetThreadConversations, event: handleEvent};`, {
-    ChatState, state: ui.state, protocol: ui.protocol, userInputDrafts: ui.drafts, document: ui.document, effects,
+    ChatState, BoardThread, state: ui.state, protocol: ui.protocol, userInputDrafts: ui.drafts, document: ui.document, effects,
     epochScope: { ...ui.epochScope, reset: (scope, profile) => { effects.reset++; effects.resetScopes.push(scope); ui.epochScope.reset(scope, profile); } },
     clearBrowserToolTransport: () => effects.cleared++,
     resumedNativeBindings: new Set(), refreshing: new Map(), chatBindingNonce: () => 'new-codex-binding',
@@ -429,7 +430,7 @@ test('Claude does not schedule, request or display Codex Context suggestions', a
   const definitions = ['requestContextSuggestions', 'resolveContextSuggestions'].map(name => functionSource(name, '    ')).join('\n');
   const api = compile(`${functionSource('getCodexThreadById')}\n${functionSource('buildContextSuggestions')}\n${definitions}
     return {request:requestContextSuggestions, resolve:resolveContextSuggestions, render:buildContextSuggestions};`, {
-    state:ui.state, ChatState, window:{setTimeout:()=>assert.fail('Claude scheduled Codex Context'), clearTimeout:()=>{}},
+    state:ui.state, ChatState, BoardThread, window:{setTimeout:()=>assert.fail('Claude scheduled Codex Context'), clearTimeout:()=>{}},
     fetchJson:()=>assert.fail('Claude queried Codex Context') });
   ui.state.contextSuggest.byThread.ui = {picked:['selected'], resolution:{resolutionId:'unchanged'}};
   api.request('ui'); await api.resolve('ui', true);
@@ -455,7 +456,7 @@ test('real delayed Codex captures abort on account switch while an actual Claude
     const oldToken = ui.epochScope.begin();
     const posts = [];
     const capture = compile(`${functionSource('captureThreadInputs', '    ')}\nreturn captureThreadInputs;`, {
-      ChatState, InputContext, epochScope:ui.epochScope, state:ui.state,
+      ChatState, BoardThread, InputContext, epochScope:ui.epochScope, state:ui.state,
       getCodexThreadById: (state, id) => state.threads.find(thread => thread.id === id),
       captureChatInputs: () => new Promise(resolve => { finishCapture = () => resolve([{text:'ACCOUNT_A_CAPTURE'}]); }),
       captureManagedFileInput: () => new Promise(resolve => { finishCapture = () => resolve({text:'ACCOUNT_A_CAPTURE'}); }),
@@ -1013,7 +1014,7 @@ async function contextSurface(t,{contents=['complete small source'],capacityKnow
     getCodexAuth:()=>({isLoggedIn:false})});
   const contextHandler=createContextHttpHandler(contexts,async hints=>{h.chat.contextAuthority(hints);});
   const chatHandler=createChatHttpHandler(h.chat,auth);
-  const fetchJson=compile(`${between('    const fetchJson = async','\n\n    // One catalog read')}\nreturn fetchJson;`,{
+  const fetchJson=compile(`${between('    const fetchJson = async','\n\n    // One catalog read')}\nreturn fetchJson;`,{BoardThread,
     fetch:async(url,options={})=>{
       const path=new URL(url).pathname;
       if(path==='/chat/send')await beforeSend?.(h,contexts);
@@ -1305,7 +1306,7 @@ test('production engine popover reanchors to its fresh local chip across Canvas 
     const bridge = compile(`return {${toggleSource.slice(0,-1)}};`, {state:ui.state, emit:()=>{clicked.isConnected=false;},resolveFloatingMenuPlacement:geometry.place});
     bridge.toggleEngineMenu('ui', clicked);
     const renderers = compile(`${renderSource}\nreturn {chip:renderEngineChip,panel:renderEnginePanel};`, {
-      ChatState, codex:ui.state.codex, codexBridge:bridge, el:ui.el, deskIcon:()=>ui.el('span'),
+      ChatState, BoardThread, codex:ui.state.codex, codexBridge:bridge, el:ui.el, deskIcon:()=>ui.el('span'),
     });
     const menu = renderers.panel(ui.thread()), freshChip = renderers.chip(ui.thread());
     const anchorRect = {...scene.anchor};
@@ -1698,7 +1699,7 @@ async function reportLimit(h, extra = {}) {
 function chatNotices(ui, run, usage = null) {
   const block = between('        const rateLimit = ChatState.runRateLimitNotice(run);', "        if (pending?.status === 'unconfirmed')");
   const conversation = ui.el('div');
-  compile(block, { ChatState, run, conversation, el: ui.el, activeThread: ui.thread(),
+  compile(block, { ChatState, BoardThread, run, conversation, el: ui.el, activeThread: ui.thread(),
     codex: { authStatus: { usage } }, codexBridge: { retryRun: () => assert.fail('automatic resend'), startLogin: () => assert.fail('automatic login') } });
   return conversation;
 }
@@ -1995,7 +1996,7 @@ test('actual HTTP error reader and accepted:false responses remove only the refu
   const previous = { id: 'existing', role: 'user', content: 'earlier message', status: 'complete' };
   for (const httpError of [true, false]) {
     const payload = { accepted: false, code: 'CLAUDE_CONTEXT_UNSUPPORTED', error: 'PRIVATE_SERVER_DETAIL' };
-    const fetchJson = compile(`${between('    const fetchJson = async', '\n\n    // One catalog read')}\nreturn fetchJson;`, {
+    const fetchJson = compile(`${between('    const fetchJson = async', '\n\n    // One catalog read')}\nreturn fetchJson;`, {BoardThread,
       fetch: async () => ({ ok: !httpError, status: httpError ? 409 : 200,
         text: async () => JSON.stringify(payload), json: async () => payload }),
     });
@@ -2017,7 +2018,7 @@ test('real HTTP 422 binary rejection and durable rejected reply keep draft/selec
       ...(status===202?{duplicate:true,status:'rejected',conversationId:null,
         error:{...rejection,origin:'claude',kind:'unknown'}}:{error:rejection.message})};
     const sendBodies=[];
-    const fetchJson=compile(`${between('    const fetchJson = async','\n\n    // One catalog read')}\nreturn fetchJson;`,{
+    const fetchJson=compile(`${between('    const fetchJson = async','\n\n    // One catalog read')}\nreturn fetchJson;`,{BoardThread,
       fetch:async(url,options={})=>{
         const path=new URL(url).pathname;
         const body=options.body&&JSON.parse(options.body);
@@ -2054,7 +2055,7 @@ test('real HTTP uncertain failures retain their optimistic row and do not unlock
       error:{code:'TURN_START_FAILED',origin:'claude',message:'Fake lost native reply',kind:'unknown'}}},
     {status:202,payload:{accepted:false,dispatchStatus:'unknown',durable:true,duplicate:true,runId:null,conversationId:'exists',
       error:{code:'TURN_START_FAILED',origin:'claude',message:'lost reply',kind:'unknown'}}}]){
-    const fetchJson=compile(`${between('    const fetchJson = async','\n\n    // One catalog read')}\nreturn fetchJson;`,{
+    const fetchJson=compile(`${between('    const fetchJson = async','\n\n    // One catalog read')}\nreturn fetchJson;`,{BoardThread,
       fetch:async()=>{
         if(!failure)throw new Error('network disconnected');
         return{ok:failure.status<400,status:failure.status,text:async()=>JSON.stringify(failure.payload),json:async()=>failure.payload};
@@ -2115,7 +2116,7 @@ test('exact durable unknown with nested Context error is not a refusal, acceptan
 test('definite Claude failures remove only the optimistic row and an empty room can explicitly change engine',async()=>{
   for(const status of [409,202])for(const previous of [null,{id:'older',role:'user',content:'earlier accepted message',status:'complete'}]){
     const payload={accepted:false,dispatchStatus:'rejected',error:{code:'TURN_START_FAILED',message:'Dispatch definitely refused'},duplicate:status===202};
-    const fetchJson=compile(`${between('    const fetchJson = async','\n\n    // One catalog read')}\nreturn fetchJson;`,{
+    const fetchJson=compile(`${between('    const fetchJson = async','\n\n    // One catalog read')}\nreturn fetchJson;`,{BoardThread,
       fetch:async()=>({ok:status<400,status,text:async()=>JSON.stringify(payload),json:async()=>payload}),
     });
     const ui=surface({thread:{messages:previous?[clone(previous)]:[]},fetchJson});
@@ -2144,7 +2145,7 @@ test('actual reopened-store unknown replay without resumeRequired keeps the UI u
     throw Object.assign(new Error('Fake lost native reply'),{code:'CLAUDE_CONTEXT_READER_UNSUPPORTED',httpStatus:409});
   };
   let replay,restarted;
-  const fetchJson=compile(`${between('    const fetchJson = async','\n\n    // One catalog read')}\nreturn fetchJson;`,{
+  const fetchJson=compile(`${between('    const fetchJson = async','\n\n    // One catalog read')}\nreturn fetchJson;`,{BoardThread,
     fetch:async(url,options)=>{
       const body=JSON.parse(options.body);
       // Produce the real durable replay at the HTTP boundary. The UI makes

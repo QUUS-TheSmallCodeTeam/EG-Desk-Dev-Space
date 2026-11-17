@@ -8,6 +8,7 @@ import * as InputContext from '../overlay/resources/EGDeskInputContext.sys.mjs';
 import * as SurfaceState from '../overlay/resources/EGDeskSurfaceState.sys.mjs';
 import { CANVAS_SHAPE_TYPES, planBoardProjection, snapshotBoardProjection, remapMemberReferences } from '../overlay/resources/EGDeskSurfaceState.sys.mjs';
 import { PRIVATE_KEYS } from '../helper/egdesk-chat-store.mjs';
+import * as BoardThread from '../overlay/resources/EGDeskBoardThread.sys.mjs';
 
 const deepFreeze = value => {
   if (value && typeof value === 'object') { Object.values(value).forEach(deepFreeze); Object.freeze(value); }
@@ -769,7 +770,7 @@ function memoDispatchHarness({ active = 'dm-rio', existing = true, conversation 
   };
   const profile = { id: 'rio', name: 'Rio', label: 'Rio', category: 'synthetic', summary: '', capabilities: [], toolMode: null, systemPrompt: null };
   let mountingSyntheticCard = false;
-  const scope = { state, ChatState, InputContext, SurfaceState, MemoState: Memo, fetch, document, el: element,
+  const scope = { state, ChatState, BoardThread, InputContext, SurfaceState, MemoState: Memo, fetch, document, el: element,
     window: { AbortController, setTimeout: () => 0, clearTimeout() {}, EventSource: { OPEN: 1 },
       addEventListener() {}, removeEventListener() {} },
     MutationObserver: class { observe() {} disconnect() {} }, requestAnimationFrame: () => 0,
