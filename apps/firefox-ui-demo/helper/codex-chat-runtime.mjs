@@ -22,7 +22,13 @@ import { CLAUDE_BOUNDED_POLICIES, claudeBoundedThreadOverrides, verifyClaudeBoun
 import { publicEpochMs } from './codex-account-usage.mjs'
 // Read tools work with an observe grant; interaction tools still require the
 // provider's Card, same-site, focus and wait-budget checks on every call.
-import { BROWSER_INTERACTION_TOOL_NAMES, BROWSER_READ_TOOL_NAMES } from './egdesk-browser-tool-runtime.mjs'
+import { BROWSER_INTERACTION_TOOL_NAMES as BROWSER_STEP_TOOL_NAMES, BROWSER_READ_TOOL_NAMES } from './egdesk-browser-tool-runtime.mjs'
+import { BROWSER_REFLEX_TOOL_NAME } from './egdesk-browser-reflex.mjs'
+// The reflex only runs interaction steps, so it is visible and callable exactly
+// where interaction tools are, and only when the Browser provider lists it.
+const BROWSER_INTERACTION_TOOL_NAMES = Object.freeze([...BROWSER_STEP_TOOL_NAMES, BROWSER_REFLEX_TOOL_NAME])
+// Fixture QA allows only observe/click/fill; a reflex could run other steps.
+const FIXTURE_BROWSER_TOOL_NAMES = Object.freeze(['egdesk_browser_observe', 'egdesk_browser_click', 'egdesk_browser_fill'])
 import { decisionContextActivity, prepareTurnContext } from './egdesk-context-setup.mjs'
 
 const TERMINAL = new Set(['completed', 'interrupted', 'failed'])
@@ -956,7 +962,7 @@ export class CodexChatRuntime {
         if (policy === READ_ONLY_QA && !contextRead && !(browser && BROWSER_READ_TOOL_NAMES.includes(spec.name))) continue
         if (policy === BROWSER_BOUNDED && !contextRead && !(browser && (BROWSER_READ_TOOL_NAMES.includes(spec.name)
           || (browserInteraction && BROWSER_INTERACTION_TOOL_NAMES.includes(spec.name))))) continue
-        if (policy === FIXTURE_BROWSER_QA && !contextRead && !(browser && ['egdesk_browser_observe', 'egdesk_browser_click', 'egdesk_browser_fill'].includes(spec.name))) continue
+        if (policy === FIXTURE_BROWSER_QA && !contextRead && !(browser && FIXTURE_BROWSER_TOOL_NAMES.includes(spec.name))) continue
         // AGENT-04: a new thread's catalog never offers Browser tools the Agent may not use.
         if (browser && !ceilingAllowsBrowserTool(toolCeiling, spec.name)) continue
         const names = spec?.type === 'function' && typeof spec.name === 'string' ? [toolKey(null, spec.name)]
@@ -3056,7 +3062,7 @@ export class CodexChatRuntime {
           && BROWSER_INTERACTION_TOOL_NAMES.includes(event.tool)))
       if ((mode === READ_ONLY_QA && !contextRead && !(browser && BROWSER_READ_TOOL_NAMES.includes(event.tool))) ||
           (mode === BROWSER_BOUNDED && !contextRead && !boundedBrowser) ||
-          (mode === FIXTURE_BROWSER_QA && !contextRead && !(browser && ['egdesk_browser_observe', 'egdesk_browser_click', 'egdesk_browser_fill'].includes(event.tool))) ||
+          (mode === FIXTURE_BROWSER_QA && !contextRead && !(browser && FIXTURE_BROWSER_TOOL_NAMES.includes(event.tool))) ||
           (!mode && browser)) {
         this.respond(event.rpcId, null, { code: -32601, message: 'This run does not authorize the requested dynamic tool' })
         return
