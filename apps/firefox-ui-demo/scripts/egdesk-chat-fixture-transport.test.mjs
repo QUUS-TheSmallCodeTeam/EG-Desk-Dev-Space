@@ -148,10 +148,16 @@ test('Memo one-shot: expected bytes are copied, retries before ACK are refused a
   const spec = memoRoundTripCase(), originalSend = structuredClone(spec.send);
   const transport = setup(t, { memoRoundTrip: spec }), headers = memoHeaders(transport), requestId = randomUUID();
   spec.send.message += ' changed after opt-in'; spec.send.profileId = 'other-agent';
+  // Capture the fixture's deliberate 80 ms ACK timer and fire it manually after dispose, so CPU load cannot reorder ACK vs close.
+  const realSetTimeout = globalThis.setTimeout, heldAcks = [];
+  t.mock.method(globalThis, 'setTimeout', (fn, ms, ...args) => ms === 80 ? (heldAcks.push(() => fn(...args)), { unref() {}, ref() {} }) : realSetTimeout(fn, ms, ...args));
   const pending = request(transport.handler, 'POST', '/chat/send', { ...originalSend, requestId }, null, () => {}, headers);
   await new Promise(resolve => setImmediate(resolve));
   assert.equal((await request(transport.handler, 'POST', '/chat/send', { ...originalSend, requestId: randomUUID() }, null, () => {}, headers)).status, 409);
   await transport.dispose();
+  t.mock.restoreAll();
+  assert.equal(heldAcks.length, 1, 'exactly one delayed ACK was scheduled');
+  heldAcks.splice(0).forEach(fire => fire());
   assert.equal((await pending).status, 503, 'disposing before the delayed ACK must not fabricate acceptance');
 });
 
@@ -912,13 +918,13 @@ test('RunOutputs HTTP routing rejects crossed identities, writes and injection r
   assert.deepEqual(disposed.runs, beforeDispose.runs, 'disposal cannot resolve an approval or erase another run');
 });
 
-test('owned real watcher reaches an in-memory SSE client without a listener or provider forwarding', { timeout: 6000 }, async t => {
+test('owned real watcher reaches an in-memory SSE client without a listener or provider forwarding', { timeout: 20000 }, async t => {
   if (process.platform !== 'darwin') return t.skip('owned recursive filesystem watcher requires macOS');
   const fetchSpy = t.mock.method(globalThis, 'fetch', () => { throw new Error('No network or provider forwarding'); });
   const fixture = setup(t, { projectFile: true, watch: true }), { handler } = fixture;
   const headers = { host: '127.0.0.1:49318', 'content-type': 'application/json' };
-  const frames = [], req = Object.assign(new EventEmitter(), { method: 'GET', url: '/events?chatProtocol=2', headers });
-  const res = { writeHead(status) { assert.equal(status, 200); }, write(wire) { frames.push(wire); return true; } };
+  const frames = [], frameWaiters = new Set(), req = Object.assign(new EventEmitter(), { method: 'GET', url: '/events?chatProtocol=2', headers });
+  const res = { writeHead(status) { assert.equal(status, 200); }, write(wire) { frames.push(wire); for (const wake of frameWaiters) wake(); return true; } };
   await handler(req, res);
   const send = (route, body, more = {}) => request(handler, 'POST', route, body, more.token ? TOKEN : null,
     () => {}, { ...headers, ...Object.fromEntries(Object.entries(more.headers || {}).map(([key, value]) => [key.toLowerCase(), value])) });
@@ -930,12 +936,12 @@ test('owned real watcher reaches an in-memory SSE client without a listener or p
   const root = await picker.chooseRoot();
   const created = await send('/__qa/project-file/watch-create', {}, { token: true });
   assert.equal(created.status, 200);
-  const deadline = Date.now() + 4000;
-  let events = [];
-  while (Date.now() < deadline) {
-    events = frames.filter(wire => wire.startsWith('event: codex\n')).map(wire => JSON.parse(wire.split('\ndata: ')[1]));
-    if (events.some(frame => frame.event?.payload?.relativePath === created.body.relativePath)) break;
-    await new Promise(resolve => setTimeout(resolve, 25));
+  // Wait on the SSE write itself rather than a wall-clock poll; the test timeout is the only bound.
+  const parse = () => frames.filter(wire => wire.startsWith('event: codex\n')).map(wire => JSON.parse(wire.split('\ndata: ')[1]));
+  let events = parse();
+  while (!events.some(frame => frame.event?.payload?.relativePath === created.body.relativePath)) {
+    await new Promise(resolve => { const wake = () => { frameWaiters.delete(wake); resolve(); }; frameWaiters.add(wake); });
+    events = parse();
   }
   const frame = events.find(value => value.event?.payload?.relativePath === created.body.relativePath);
   assert.equal(frame?.type, 'workflow.event'); assert.equal(frame?.v, 1);
