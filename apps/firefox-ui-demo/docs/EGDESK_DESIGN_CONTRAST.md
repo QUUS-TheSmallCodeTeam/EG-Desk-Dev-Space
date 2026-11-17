@@ -29,3 +29,15 @@
 primary / primary-container(4.63)와 success-ink / success-bg(4.66)이다. 이 표에 없는 것: 경계선
 (`--egd-outline`은 장식용 가는 선이라 3:1 대상이 아니며, D-G3 (가)에 따라 대비 증가 설정에서만 진해진다),
 아바타 머리글자(별도 시험), Browser 웹페이지와 Terminal 본문(토큰 밖).
+
+## 화면 모드와 light-dark() (DSN-01, 2026-11-17 추론 결정)
+
+- EG-Desk 셸 CSS(`eg-desk-surface.uc.css`)의 `--egd-*` 토큰은 light-dark() 한 줄 정의로 합치지 않는다.
+  대비 검사기(`EGDeskDesignTokens.sys.mjs`)는 `var()`·`color-mix()`만 풀고 light-dark()를 풀지 못하며,
+  `scripts/egdesk-display-settings.test.mjs`는 시스템 어두움 블록과 '어둡게' 블록이 값마다 같은지 검사한다.
+  그림자 토큰은 어둡게에서 모양(번짐·거리)도 달라 색 하나로 바꿀 수 없다. 또 light-dark()는 쓰이는 요소의
+  color-scheme을 따르므로, 창 전체 color-scheme을 바꾸지 않는 지금 구조(Browser·Terminal·Ontology 제외)와 맞지 않는다.
+- light-dark()는 EG-Desk가 직접 그리는 frame 안 페이지에만 쓴다: 시작 페이지(`egdesk-start.html`)는
+  `color-scheme: light dark`와 light-dark() 쌍을 쓰고, Desk가 고른 화면 모드(`data-egd-theme`)를 옮겨 받는다.
+- Terminal 페이지(`terminal.html`)는 두 모드 모두 어둡게(결정 A23)이며 `color-scheme: dark`로 스크롤바·셸 선택 상자도 어둡다.
+- Browser 웹페이지는 화면 모드를 따르지 않는다(사이트 색 강제 변경 금지).

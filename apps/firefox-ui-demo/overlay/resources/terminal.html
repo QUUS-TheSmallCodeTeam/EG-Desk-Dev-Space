@@ -7,8 +7,11 @@
   <style>
     /* The host Terminal window owns these values (--egd-terminal-* on
        .egd-terminal-card); egdesk-terminal-init.js copies them in. The
-       fallbacks are the same approved dark pair for a page opened alone. */
+       fallbacks are the same approved dark pair for a page opened alone.
+       DSN-01 / A23: the Terminal is dark under every screen mode, so its own
+       scrollbars and the shell picker are dark too, whatever the Desk chose. */
     :root {
+      color-scheme: dark;
       --egd-terminal-bg: #262925; --egd-terminal-ink: #EDECE7; --egd-terminal-muted: #B5B9AE;
       --egd-terminal-line: #41463F; --egd-terminal-control: #363934; --egd-terminal-control-line: #4A4E47;
     }
