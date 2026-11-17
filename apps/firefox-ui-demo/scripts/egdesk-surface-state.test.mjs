@@ -15931,7 +15931,7 @@ test('BRW-04 (D-B11): loaded per finished load, popupClosed once with its opener
 test('BRW-04 (D-B11): a page-opened popup card keeps its opener, reports loads, and its close by the page or by 대표님', () => {
   const popup = surfaceSource.match(/  function spawnBrowserPopup\([\s\S]*?\n  \}\n/)?.[0] || '';
   assert.match(popup, /\.\.\.\(source\?\.id \? \{ popupOpenerCardId: source\.id \} : \{\}\),/, 'the opener is the verified source card');
-  assert.match(surfaceSource, /if \(typeof options\.popupOpenerCardId === 'string' && options\.popupOpenerCardId !== id\) card\._popupOpenerCardId = options\.popupOpenerCardId;/);
+  assert.match(surfaceSource, /if \(typeof options\.popupOpenerCardId === 'string' && options\.popupOpenerCardId !== id\) {\s*card\._popupOpenerCardId = options\.popupOpenerCardId;\s*card\.dataset\.openerCardId = options\.popupOpenerCardId;\s*}/, 'popup card exposes data-opener-card-id read by the BRW-03 opener-link check');
   assert.match(surfaceSource, /onStateChange\(webProgress, _request, stateFlags\) \{\n        if \(webProgress && webProgress\.isTopLevel === false\) return;\n        const flags = Ci\.nsIWebProgressListener;\n        if \(\(stateFlags & flags\.STATE_STOP\) && \(stateFlags & flags\.STATE_IS_WINDOW\)\) reportBrowserLoaded\(\);/,
     'one loaded per finished top-level window load');
   const closeFn = surfaceSource.match(/    card\._reportPopupClosed = \(closedBy\) => \{\n([\s\S]*?)\n    \};/)?.[1] || '';

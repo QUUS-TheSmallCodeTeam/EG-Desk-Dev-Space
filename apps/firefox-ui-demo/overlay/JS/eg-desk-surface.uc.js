@@ -24080,7 +24080,10 @@
     const card = deskWindow.root;
     if (browserIdentity) card._browserIdentity = cloneJson(browserIdentity);
     // BRW-04: a popup a page opened keeps the card it came from for workflow events.
-    if (typeof options.popupOpenerCardId === 'string' && options.popupOpenerCardId !== id) card._popupOpenerCardId = options.popupOpenerCardId;
+    if (typeof options.popupOpenerCardId === 'string' && options.popupOpenerCardId !== id) {
+      card._popupOpenerCardId = options.popupOpenerCardId;
+      card.dataset.openerCardId = options.popupOpenerCardId;
+    }
     if (!options.background) revealPlacedCanvasCard(card, placement, { kind: 'browser', opener: options.opener });
 
     const urlInput = el('input', {
