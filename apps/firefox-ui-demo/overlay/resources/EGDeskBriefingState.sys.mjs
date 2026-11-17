@@ -378,6 +378,46 @@ export function briefingMinimapEvidence(session, resolvedSteps = [], context = {
   return { markers, items };
 }
 
+// CNV-07: is a Canvas rectangle ({x, y, width, height}) outside the visible
+// part of the Canvas (viewport in Canvas coordinates: {left, top, right,
+// bottom})? Returns null when any part is visible, else the way to it.
+export function briefingOffscreenDirection(rect, viewport) {
+  if (!finiteRect(rect) || !['left', 'top', 'right', 'bottom'].every(key => Number.isFinite(viewport?.[key]))
+      || viewport.right <= viewport.left || viewport.bottom <= viewport.top) return null;
+  const horizontal = rect.x + rect.width <= viewport.left ? 'left' : rect.x >= viewport.right ? 'right' : '';
+  const vertical = rect.y + rect.height <= viewport.top ? 'up' : rect.y >= viewport.bottom ? 'down' : '';
+  if (!horizontal && !vertical) return null;
+  return [vertical, horizontal].filter(Boolean).join('-');
+}
+export const BRIEFING_OFFSCREEN_TEXT = Object.freeze({ left: '왼쪽', right: '오른쪽', up: '위쪽', down: '아래쪽',
+  'up-left': '왼쪽 위', 'up-right': '오른쪽 위', 'down-left': '왼쪽 아래', 'down-right': '오른쪽 아래' });
+
+// CNV-07: the Canvas areas of the previous, current and next step for the
+// minimap (resolvedSteps[i] = resolveBriefingTargets(steps[i])). An area is
+// the briefing's own Canvas place, not source evidence, so it needs no
+// evidence-read receipt; the caller still checks that this presentation is
+// the one on screen. viewport (optional) marks areas outside the screen.
+export function briefingMinimapRegions(session, resolvedSteps = [], { viewport = null } = {}) {
+  if (!validBriefing(session?.briefing) || !Number.isInteger(session.index) || session.index < 0
+      || session.index >= session.briefing.steps.length || !Array.isArray(resolvedSteps)) return [];
+  const regions = [];
+  for (let index = Math.max(0, session.index - 1); index <= Math.min(session.briefing.steps.length - 1, session.index + 1); index++) {
+    const step = session.briefing.steps[index], resolved = Array.isArray(resolvedSteps[index]) ? resolvedSteps[index] : [];
+    let areaNumber = 0;
+    for (const target of briefingStepTargets(step)) {
+      if (briefingTargetKind(target) !== 'canvasRect') continue;
+      areaNumber++;
+      const item = resolved.find(entry => entry?.target === target);
+      if (item?.status !== 'available' || !finiteRect(item.region)) continue;
+      const rect = { x: item.region.x, y: item.region.y, width: item.region.width, height: item.region.height };
+      const offscreen = viewport ? briefingOffscreenDirection(rect, viewport) : null;
+      regions.push({ stepId: step.id, stepNumber: index + 1, relativeStep: index - session.index, current: index === session.index,
+        areaNumber, rect, label: briefingRegionLabel(target, areaNumber - 1).name, offscreen });
+    }
+  }
+  return regions;
+}
+
 // CHAT-05: the comment itself is saved first (POST /context/briefings/:id/comments
 // with this body); the helper attaches the step's own evidence.
 export function briefingCommentRequest(session, comment, clientRequestId) {

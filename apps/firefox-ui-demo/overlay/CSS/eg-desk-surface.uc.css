@@ -4382,6 +4382,31 @@ button.egd-rail-focus-view {
   color: var(--egd-surface-elevated);
 }
 .egd-minimap-briefing-number[data-relative-step="1"] { border-style: dashed; }
+/* CNV-07: a step's Canvas area on the map (on the map's edge when it lies
+   beyond it), and a ring on any step target outside the screen. */
+.egd-minimap-briefing-region {
+  position: absolute;
+  box-sizing: border-box;
+  border: 1px dashed var(--egd-primary);
+  border-radius: 3px;
+  pointer-events: none;
+}
+.egd-minimap-briefing-region > .egd-minimap-briefing-number {
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  transform: translate(-50%, -50%);
+}
+.egd-minimap-briefing-region[data-relative-step="0"] { border-style: solid; }
+.egd-minimap-briefing-region[data-clamped="true"] { border-width: 2px; }
+:is(.egd-minimap-briefing-marker, .egd-minimap-briefing-region)[data-offscreen="true"] .egd-minimap-briefing-number {
+  outline: 2px solid var(--egd-primary);
+  outline-offset: 1px;
+}
+@media (forced-colors: active) {
+  .egd-minimap-briefing-region { border-color: Highlight; }
+  :is(.egd-minimap-briefing-marker, .egd-minimap-briefing-region)[data-offscreen="true"] .egd-minimap-briefing-number { outline-color: Highlight; }
+}
 .egd-minimap-briefing {
   margin-top: 6px;
   color: var(--egd-on-surface-variant);

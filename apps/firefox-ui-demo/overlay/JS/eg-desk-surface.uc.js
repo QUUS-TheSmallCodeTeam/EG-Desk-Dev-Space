@@ -9498,6 +9498,27 @@
     } catch { return empty(); }
   }
 
+  // CNV-07: Canvas areas of the previous/current/next step for the minimap.
+  // They are the briefing's own Canvas places (no evidence read involved);
+  // only the presentation on screen for the open room shows them.
+  function briefingMinimapRegionModel(model) {
+    const session = state.codex?.briefingSession;
+    try {
+      if (!session || session.threadId !== state.codex.activeThreadId || state.codex.briefingSession !== session) return [];
+      const resolvedSteps = session.briefing.steps.map((step, index) => Math.abs(index - session.index) > 1 ? [] : BriefingState.resolveBriefingTargets(step));
+      return BriefingState.briefingMinimapRegions(session, resolvedSteps, { viewport: model.viewport });
+    } catch { return []; }
+  }
+
+  function minimapOffscreenText(direction) {
+    return direction ? ` · 화면 밖 ${BriefingState.BRIEFING_OFFSCREEN_TEXT[direction] || ''}`.trimEnd() : '';
+  }
+
+  function minimapBriefingRegionLabel(region) {
+    const position = region.relativeStep === -1 ? '이전' : region.relativeStep === 1 ? '다음' : '현재';
+    return `${position} ${region.stepNumber}단계 · Canvas 영역 · ${region.label}${minimapOffscreenText(region.offscreen)}`;
+  }
+
   function minimapBriefingEvidenceLabel(item) {
     const position = item.relativeStep === -1 ? '이전' : item.relativeStep === 1 ? '다음' : '현재';
     const name = [item.reference?.localSource?.label, item.reference?.label]
@@ -9516,25 +9537,36 @@
     if (!map || !details || !list || !model) return;
     const plan = briefingMinimapModel(model);
     const visible = new Map(model.entities.map(item => [item.entity.id, item]));
+    // CNV-07: a step target outside the screen is marked as such on the map.
+    const offscreenById = new Map(plan.markers.map(marker => [marker.viewId, BriefingState.briefingOffscreenDirection(marker.geometry, model.viewport)]));
     const projected = plan.markers.flatMap(marker => {
       const item = visible.get(marker.viewId);
       if (!item) return [];
       const left = model.offsetX + (marker.x - model.bounds.left) * model.scale;
       const top = model.offsetY + (marker.y - model.bounds.top) * model.scale;
-      return Number.isFinite(left) && Number.isFinite(top) ? [{ ...marker, left, top }] : [];
+      return Number.isFinite(left) && Number.isFinite(top) ? [{ ...marker, left, top, offscreen: offscreenById.get(marker.viewId) }] : [];
+    });
+    // Areas may lie beyond the map's extent: they sit on its nearest edge.
+    const areas = briefingMinimapRegionModel(model).flatMap(region => {
+      const box = SurfaceState.minimapBox({ left: region.rect.x, top: region.rect.y, width: region.rect.width, height: region.rect.height }, model, 4);
+      const width = Math.min(box.width, model.mapWidth), height = Math.min(box.height, model.mapHeight);
+      const left = Math.min(Math.max(box.left, 0), model.mapWidth - width), top = Math.min(Math.max(box.top, 0), model.mapHeight - height);
+      return [left, top, width, height].every(Number.isFinite)
+        ? [{ ...region, box: { left, top, width, height }, clamped: left !== box.left || top !== box.top }] : [];
     });
     // Dense markers may share a visual badge, but its anchor is always one
     // real card, never the midpoint of several unrelated pieces of evidence.
     const groups = [];
     for (const marker of projected) {
       let group = groups.find(item => Math.abs(item.left - marker.left) < 12 && Math.abs(item.top - marker.top) < 12);
-      if (!group) { group = { left: marker.left, top: marker.top, viewId: marker.viewId, entries: [] }; groups.push(group); }
+      if (!group) { group = { left: marker.left, top: marker.top, viewId: marker.viewId, entries: [], offscreen: marker.offscreen }; groups.push(group); }
+      else if (!marker.offscreen) group.offscreen = null;
       group.entries.push(...marker.entries);
     }
     let layer = map.querySelector('.egd-minimap-briefing-layer');
     if (!layer) { layer = el('div', { class: 'egd-minimap-briefing-layer', 'aria-hidden': 'true' }); map.appendChild(layer); }
-    const markerSignature = JSON.stringify(groups.map(group => [group.viewId, group.left, group.top,
-      group.entries.map(entry => [entry.stepNumber, entry.relativeStep])]));
+    const markerSignature = JSON.stringify([groups.map(group => [group.viewId, group.left, group.top, group.offscreen || null,
+      group.entries.map(entry => [entry.stepNumber, entry.relativeStep])]), areas.map(area => [area.stepNumber, area.relativeStep, area.box, area.clamped, area.offscreen])]);
     if (layer._briefingSignature !== markerSignature) {
       layer._briefingSignature = markerSignature;
       layer.replaceChildren(...groups.map(group => {
@@ -9545,22 +9577,31 @@
           seen.add(key);
           return [el('span', { class: 'egd-minimap-briefing-number', data: { relativeStep: String(entry.relativeStep) } }, String(entry.stepNumber))];
         });
-        return el('span', { class: 'egd-minimap-briefing-marker', data: { testid: 'minimap-briefing-marker', viewId: group.viewId },
+        return el('span', { class: 'egd-minimap-briefing-marker', data: { testid: 'minimap-briefing-marker', viewId: group.viewId, offscreen: String(!!group.offscreen) },
           style: { left: group.left + 'px', top: group.top + 'px' } }, ...badges);
-      }));
+      }), ...areas.map(area => el('span', { class: 'egd-minimap-briefing-region',
+        data: { testid: 'minimap-briefing-region', stepNumber: String(area.stepNumber), relativeStep: String(area.relativeStep),
+          offscreen: String(!!area.offscreen), clamped: String(area.clamped) },
+        style: { left: area.box.left + 'px', top: area.box.top + 'px', width: area.box.width + 'px', height: area.box.height + 'px' } },
+      el('span', { class: 'egd-minimap-briefing-number', data: { relativeStep: String(area.relativeStep) } }, String(area.stepNumber)))));
     }
-    const rows = plan.items.map(item => ({ item, label: minimapBriefingEvidenceLabel(item) }));
-    const listSignature = JSON.stringify(rows.map(({ item, label }) => [item.viewId, item.stepId, item.evidenceNumber, label]));
+    const rows = plan.items.map(item => ({ item, label: minimapBriefingEvidenceLabel(item) + minimapOffscreenText(offscreenById.get(item.viewId)) }));
+    const areaRows = areas.map(area => ({ area, label: minimapBriefingRegionLabel(area) }));
+    const listSignature = JSON.stringify([rows.map(({ item, label }) => [item.viewId, item.stepId, item.evidenceNumber, label]),
+      areaRows.map(({ area, label }) => [area.stepId, area.areaNumber, label])]);
     if (list._briefingSignature !== listSignature) {
       list._briefingSignature = listSignature;
       list.replaceChildren(...rows.map(({ item, label }) => el('li', {
         data: { testid: 'minimap-briefing-row', viewId: item.viewId, stepNumber: String(item.stepNumber),
-          evidenceNumber: String(item.evidenceNumber), relativeStep: String(item.relativeStep) },
+          evidenceNumber: String(item.evidenceNumber), relativeStep: String(item.relativeStep), offscreen: String(!!offscreenById.get(item.viewId)) },
+      }, label)), ...areaRows.map(({ area, label }) => el('li', {
+        data: { testid: 'minimap-briefing-region-row', stepNumber: String(area.stepNumber), relativeStep: String(area.relativeStep),
+          areaNumber: String(area.areaNumber), offscreen: String(!!area.offscreen) },
       }, label)));
     }
     // Keep an already-focused summary/list in place when permission disappears;
     // its private rows and count have nevertheless been removed immediately.
-    const hidden = !rows.length && !details.contains(document.activeElement);
+    const hidden = !rows.length && !areaRows.length && !details.contains(document.activeElement);
     if (details.hidden !== hidden) {
       details.hidden = hidden;
       // Showing or hiding the disclosure can change the compact map's CSS

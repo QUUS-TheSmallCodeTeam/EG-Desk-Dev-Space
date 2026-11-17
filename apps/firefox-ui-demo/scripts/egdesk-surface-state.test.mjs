@@ -12706,7 +12706,8 @@ function minimapUiHarness({ document: suppliedDocument = null, state: suppliedSt
     'goToMinimapTarget', 'closeMinimapStack', 'openMinimapTargets', 'buildDeskMinimapEntityRows', 'refreshDeskMinimap',
     'closeDeskMinimap', 'installDeskMinimapPan', 'toggleDeskMinimap'];
   for (const name of ['briefingInputReferences', 'briefingRangeIssue', 'acceptedInputReceipt', 'visibleInputAnswer', 'historyReadReferenceCurrent', 'briefingReadReferenceCurrent',
-    'rememberBriefingMinimapEvidence', 'briefingMinimapModel', 'minimapBriefingEvidenceLabel', 'renderDeskMinimapBriefing',
+    'rememberBriefingMinimapEvidence', 'briefingMinimapModel', 'briefingMinimapRegionModel', 'minimapOffscreenText', 'minimapBriefingRegionLabel',
+    'minimapBriefingEvidenceLabel', 'renderDeskMinimapBriefing',
     'clearMinimapBriefingSearchLabels', 'renderMinimapBriefingSearchLabels']) {
     if (surfaceSource.includes(`  function ${name}(`)) names.push(name);
   }
