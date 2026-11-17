@@ -11127,3 +11127,44 @@ button.egd-memo-ask-cancel:hover { text-decoration: underline; }
 .egd-memo-relink-list[hidden] { display: none; }
 .egd-memo-ask-failed { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 8px; color: var(--egd-warning-ink); }
 .egd-memo-ask-failed::before { content: '!'; font-weight: 700; }
+
+/* CNV-05: AI marks over a card. Display only: the marks never take a press,
+   so the page under them keeps working; only the small bar is interactive.
+   A proposal is dotted with an 'AI 제안' badge (D-K1); a kept mark is solid. */
+.egd-annotation-layer { position: absolute; inset: 0; z-index: 4; pointer-events: none; overflow: visible; }
+.egd-annotation-layer-canvas { inset: auto; left: 0; top: 0; width: 0; height: 0; }
+.egd-annotation-svg { position: absolute; left: 0; top: 0; width: 100%; height: 100%; overflow: visible; }
+.egd-annotation-layer-canvas .egd-annotation-svg { width: 1px; height: 1px; }
+.egd-annotation-mark { fill: none; stroke: var(--egd-primary); stroke-linecap: round; stroke-linejoin: round; }
+.egd-annotation-mark-highlight { fill: color-mix(in srgb, var(--egd-primary) 18%, transparent); stroke: none; }
+.egd-annotation-mark-highlight[data-status="proposed"] { stroke: var(--egd-primary); stroke-dasharray: 2 3; }
+.egd-annotation-arrowhead { fill: var(--egd-primary); }
+.egd-annotation-layer[data-freshness="stale"], .egd-annotation-layer[data-freshness="unknown"] { opacity: .45; }
+.egd-annotation-layer[data-emphasis="true"] .egd-annotation-mark { stroke: var(--egd-primary-strong); filter: drop-shadow(0 0 3px color-mix(in srgb, var(--egd-primary) 55%, transparent)); }
+.egd-annotation-label { position: absolute; max-width: 40%; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; border: solid var(--egd-primary); background: var(--egd-surface-elevated); color: var(--egd-on-surface); font-weight: 600; line-height: 1.4; }
+.egd-annotation-label[data-status="proposed"] { border-style: dashed; }
+.egd-annotation-bars { position: absolute; top: 6px; right: 6px; z-index: 5; display: flex; flex-direction: column; align-items: flex-end; gap: 4px; max-width: min(320px, calc(100% - 12px)); pointer-events: none; }
+.egd-annotation-bar { pointer-events: auto; display: flex; flex-direction: column; gap: 4px; max-width: 100%; padding: 6px 8px; border: 1px solid var(--egd-outline); border-radius: var(--egd-radius-md); background: var(--egd-surface-elevated); color: var(--egd-on-surface); font-size: 12px; box-shadow: 0 2px 8px color-mix(in srgb, var(--egd-on-surface) 12%, transparent); }
+.egd-annotation-bar-proposed { border-style: dashed; border-color: var(--egd-primary); }
+.egd-annotation-bar-canvas { position: absolute; z-index: 5; transform: translateY(calc(-100% - 6px)); width: max-content; max-width: 320px; }
+.egd-annotation-bar-head { display: flex; align-items: baseline; gap: 6px; min-width: 0; }
+.egd-annotation-badge { flex: none; padding: 0 6px; border-radius: var(--egd-radius-xs); background: var(--egd-primary-container); color: var(--egd-on-surface); font-weight: 650; }
+.egd-annotation-summary { min-width: 0; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+.egd-annotation-note { margin: 0; color: var(--egd-on-surface-variant); font-size: 11.5px; }
+.egd-annotation-notice { color: var(--egd-warning-ink); }
+.egd-annotation-actions { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 4px; }
+.egd-annotation-action { min-height: 24px; padding: 1px 8px; border: 1px solid var(--egd-outline); border-radius: var(--egd-radius-sm); background: var(--egd-surface-elevated); color: var(--egd-on-surface); font: inherit; cursor: pointer; }
+.egd-annotation-action:hover:not(:disabled) { background: var(--egd-hover); border-color: var(--egd-primary); }
+.egd-annotation-action:disabled { cursor: default; opacity: var(--egd-opacity-disabled); }
+.egd-annotation-action:focus-visible { outline: var(--egd-focus-outline); outline-offset: var(--egd-focus-outline-offset); }
+.egd-annotation-items { display: flex; flex-direction: column; gap: 3px; margin: 0; padding: 0; list-style: none; }
+.egd-annotation-item { display: flex; align-items: center; gap: 4px; }
+.egd-annotation-item-name { flex: 1; min-width: 0; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+.egd-annotation-item-state { color: var(--egd-on-surface-variant); }
+/* 표식·메모 숨기기 covers AI marks too: screen-wide, not saved. */
+:root[data-egd-annotations-hidden="true"] .egd-annotation-layer,
+:root[data-egd-annotations-hidden="true"] .egd-annotation-bars,
+:root[data-egd-annotations-hidden="true"] .egd-annotation-bar {
+  visibility: hidden !important;
+  pointer-events: none !important;
+}
