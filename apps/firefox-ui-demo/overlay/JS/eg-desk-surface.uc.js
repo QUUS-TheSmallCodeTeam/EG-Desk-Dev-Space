@@ -26,6 +26,9 @@
   const ProfileTransfer = ChromeUtils.importESModule('chrome://userchrome/content/EGDeskProfileTransfer.sys.mjs');
   const ProfileTransferView = ChromeUtils.importESModule('chrome://userchrome/content/EGDeskProfileTransferView.sys.mjs');
   const MemoState = ChromeUtils.importESModule('chrome://userchrome/content/EGDeskMemoState.sys.mjs');
+  // DSN-04 · UX-05 · UX-06 keyboard rules and CNV-06 memo link rules (pure modules).
+  const SurfaceKeys = ChromeUtils.importESModule('chrome://userchrome/content/surface/EGDeskSurfaceKeys.mjs');
+  const MemoLink = ChromeUtils.importESModule('chrome://userchrome/content/surface/EGDeskSurfaceMemoLink.mjs');
   const AgentIdentityView = ChromeUtils.importESModule('chrome://userchrome/content/EGDeskAgentIdentityView.sys.mjs');
   const CanvasLayout = ChromeUtils.importESModule('chrome://userchrome/content/EGDeskCanvasLayout.sys.mjs');
   const BROWSER_AGENT_ACTOR_NAME = 'EGDeskBrowserAgentRuntime';
@@ -8987,6 +8990,8 @@
   // returned function when it closes by other means.
   function registerEscapeLayer(layer) {
     const id = escapeLayers.push(layer);
+    // Every layer is named in SurfaceKeys.ESCAPE_LAYER_REGISTRY with its tier.
+    try { SurfaceKeys.registeredEscapeLayer(layer.id, layer.kind); } catch (error) { console.error(TAG, error.message); }
     return () => { if (id) escapeLayers.remove(id); };
   }
 
@@ -9085,16 +9090,32 @@
       isOpen: () => !!state.railSearch?.open, contains: within('#egd-rail-search-results, .egd-rail-search'),
       dismiss: () => closeRailSearchPanel(),
     });
-    // Chat shown over a fullscreen View goes away before the View shrinks.
+    // Chat peeked over a fullscreen View goes away before the View shrinks.
+    // A pinned Chat sits beside the View, not over it: Escape passes on and
+    // the View goes back to its size with the pinned Chat still open (D-V6).
     registerEscapeLayer({
       id: 'chat-peek', kind: 'peek',
-      isOpen: () => fullscreenView() && hudShown(), contains: within('#egd-hud'),
-      dismiss: () => setHudPresentationHidden(true),
+      isOpen: () => fullscreenView() && hudShown() && SurfaceKeys.chatPeekEscapeOpen({
+        fullscreen: true, mode: state.cardFullscreen.mode, hudMode: state.cardFullscreen.hudMode }),
+      contains: within('#egd-hud'),
+      dismiss: () => closeMaximizeHudPeek(),
+    });
+    // 집중 보기 ends straight back to the original size.
+    registerEscapeLayer({
+      id: 'focus-view', kind: 'focus',
+      isOpen: () => fullscreenView() && state.cardFullscreen.mode === 'focus',
+      dismiss: () => exitCardFullscreen(),
     });
     registerEscapeLayer({
       id: 'view-fullscreen', kind: 'fullscreen',
-      isOpen: fullscreenView,
+      isOpen: () => fullscreenView() && state.cardFullscreen.mode !== 'focus',
       dismiss: () => exitCardFullscreen(),
+    });
+    // [다시 연결] on a memo waits for a window press; Escape cancels it.
+    registerEscapeLayer({
+      id: 'memo-relink', kind: 'popover',
+      isOpen: () => !!memoRelink, contains: target => !!memoRelink?.root?.contains?.(target),
+      dismiss: () => { const root = memoRelink?.root; memoRelink?.stop(); root?._memoMissing?.relink?.focus?.(); },
     });
 
     // A page, a terminal or a file frame owns its own Escape.
@@ -9117,7 +9138,16 @@
         kind: escapeLayers.top()?.kind ?? null,
         inside: escapeLayers.topContains(target),
       });
-      if (route.act) escapeLayers.handleEscape(ev);
+      if (route.act) { escapeLayers.handleEscape(ev); return; }
+      // 집중 보기 with a page focused: the page had the key first; one it left
+      // unused ends the focus view, as Escape leaves a browser's full screen.
+      if (phase !== 'bubble' || zone !== 'content') return;
+      const focus = SurfaceKeys.focusViewEscapeRoute({
+        key: ev.key, composing: ev.isComposing === true || ev.keyCode === 229, defaultPrevented: ev.defaultPrevented,
+        repeat: ev.repeat === true, mode: fullscreenView() ? state.cardFullscreen.mode : null,
+        initialBrowserFocus: !!state.surface?.initialBrowserFocus, topKind: escapeLayers.top()?.kind ?? null,
+      });
+      if (focus.act) { ev.preventDefault(); exitCardFullscreen(); }
     };
     window.addEventListener('keydown', ev => onEscape(ev, 'capture'), true);
     window.addEventListener('keydown', ev => onEscape(ev, 'bubble'), false);
@@ -17906,11 +17936,7 @@
       const card = document.getElementById(state.cardFullscreen.cardId);
       if (card?.contains(target) || !target.closest('.egd-edge')) closeMaximizeHudPeek();
     }, true);
-    // Esc: 채팅 안의 메뉴·입력이 먼저 쓰고 남긴 Esc만 받아 엿보기를 닫는다.
-    window.addEventListener('keydown', (ev) => {
-      if (ev.key !== 'Escape' || ev.defaultPrevented || ev.isComposing) return;
-      if (closeMaximizeHudPeek()) ev.preventDefault();
-    });
+    // Esc는 Esc 층 한 곳(installEscapeLayers의 'chat-peek')에서만 엿보기를 닫는다.
     // Option(Alt)+초록 점 = 집중 보기. 창 점 자체의 동작(크게 보기)은 그대로 둔다.
     window.addEventListener('click', (ev) => {
       if (!ev.altKey || ev.button !== 0) return;

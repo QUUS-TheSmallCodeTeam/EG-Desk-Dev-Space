@@ -335,8 +335,17 @@ function readBootApi(script, forwards = {}) {
 test('stage1 source loader includes exact current module sources, once each and in actual load order', () => {
   const files = surfaceModuleFiles(core);
   assert.deepEqual(files, zones.map(modulePath));
-  assert.deepEqual(sorted(readdirSync(new URL('resources/surface/', overlay)).filter(file => file.endsWith('.mjs'))),
+  // Window zones are the three factories below; any other .mjs here is a pure
+  // rule module the core imports directly (no factory, no deps, no load()).
+  const present = readdirSync(new URL('resources/surface/', overlay)).filter(file => file.endsWith('.mjs'));
+  assert.deepEqual(sorted(present.filter(file => zones.some(zone => zone.file === file))),
     sorted(zones.map(zone => zone.file)), 'stage1 has exactly three production window modules');
+  for (const file of present.filter(name => !zones.some(zone => zone.file === name))) {
+    const source = read(`resources/surface/${file}`);
+    assert.doesNotMatch(source, /^\s*import\s/m, `${file}: a pure module imports nothing`);
+    assert.doesNotMatch(source, /\bconst\s*\{[^}]*\}\s*=\s*deps\b/, `${file}: not a zone factory`);
+    assert.doesNotMatch(core, new RegExp(`load\\(\\s*['"]${file.replace('.', '\\.')}`), `${file}: not loaded as a zone`);
+  }
   assert.equal(readSurfaceSource(), [core, ...files.map(read)].join('\n'));
   for (const zone of zones) {
     assert.equal((readSurfaceSource().match(new RegExp(`  function ${zone.method}\\(`, 'g')) || []).length, 1);
