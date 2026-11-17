@@ -287,7 +287,11 @@ test('FileView uses document timers without module-global timers, preserving deb
   const source = await fs.readFile(new URL('../overlay/resources/EGDeskFileView.sys.mjs', import.meta.url), 'utf8')
   const context = vm.createContext({})
   assert.equal(vm.runInContext('typeof setTimeout + "/" + typeof clearTimeout', context), 'undefined/undefined')
-  const implementation = source.replace(/^export /gm, '').replaceAll('import.meta.url', JSON.stringify('file:///EGDeskFileView.sys.mjs'))
+  // The view imports the CodeMirror adapter; inline the real adapter (no imports of its own) so the
+  // view runs with its textarea fallback when no bundle loader is given, as in production.
+  const adapter = await fs.readFile(new URL('../overlay/resources/EGDeskCodeEditor.sys.mjs', import.meta.url), 'utf8')
+  const implementation = source.replace(/^import \{[^}]*\} from '\.\/EGDeskCodeEditor\.sys\.mjs'\n/m, () => adapter.replace(/^export /gm, '') + '\n')
+    .replace(/^export /gm, '').replaceAll('import.meta.url', JSON.stringify('file:///EGDeskFileView.sys.mjs'))
   const createView = new vm.Script(`${implementation}\n;createEGDeskFileView`).runInContext(context)
   const pending = new Map(), cleared = []
   let nextId = 0
