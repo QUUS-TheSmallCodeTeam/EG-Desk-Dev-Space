@@ -7,7 +7,7 @@ import { CodexChatRuntime } from './codex-chat-runtime.mjs'
 import { createChatEngineAuth } from './codex-bridge-engine-auth.mjs'
 import { codexDeviceLoginPatch, codexLoginInProgressResponse, codexLoginMode, codexLoginStartParams, createCodexEngineAdapter, describeCodexEngine, isStaleLoginFailure } from './codex-engine-adapter.mjs'
 import { EngineRegistry, createEngineStatusEmitter } from './engine-registry.mjs'
-import { claudeLoginTerminalCommand, createClaudeEngineStatus, resolveClaudeExecutable } from './claude-engine-auth.mjs'
+import { claudeLoginTerminalCommand, createClaudeEngineStatus, probeClaudeEngine, resolveClaudeExecutable } from './claude-engine-auth.mjs'
 import { createClaudeEngineAdapter } from './claude-engine-adapter.mjs'
 import { createModelCatalogSync } from './codex-model-catalog.mjs'
 import { BrowserToolTransport } from './codex-browser-tool-transport.mjs'
@@ -32,6 +32,8 @@ import { openProfileStore } from './egdesk-profile-store.mjs'
 import { createProfileHttpHandler } from './egdesk-profile-http.mjs'
 import { openDeskStore } from './egdesk-desk-store.mjs'
 import { openBridgeSettings } from './egdesk-bridge-settings.mjs'
+import { openEngineProfiles } from './egdesk-engine-profiles.mjs'
+import { createEngineProfilesHttpHandler } from './egdesk-engine-profiles-http.mjs'
 import { createDeskHttpHandler } from './egdesk-desk-http.mjs'
 import { createPortableHttpHandler } from './egdesk-portable-http.mjs'
 import { NativeReaderClient } from './egdesk-native-reader.mjs'
@@ -196,6 +198,15 @@ try {
 // Never throws; a broken file is set aside and logged, and the bridge starts
 // with defaults (computerControl.persisted then tells the screen).
 const bridgeSettings = openBridgeSettings({ dataDir: path.join(dataDir, 'settings') })
+// SUB-11 Engine Profiles: the shared CLI logins plus EG-Desk-owned login
+// folders (<appData>/settings/engines/<id>, 0700). Claude runs the active
+// one (CLAUDE_CONFIG_DIR); Codex stays on its one shared app-server ('notYet').
+const engineProfiles = openEngineProfiles({ dataDir: path.join(dataDir, 'settings') })
+const claudeProfileRows = () => engineProfiles.list('claude').map(row => ({ ...row, configDir: row.owned ? engineProfiles.configDir(row.id) : null }))
+const claudeProfileEnv = () => {
+  const dir = engineProfiles.configDir(engineProfiles.active('claude'))
+  return dir ? { ...process.env, CLAUDE_CONFIG_DIR: dir } : process.env
+}
 // RT-06/CHAT-06 workflow runtime (event bus, connected-root watcher, task
 // graph). Opened after Chat below. Keep roots registered during construction
 // until both the context tracker and workflow watcher can receive them.
@@ -289,6 +300,7 @@ const codexEngine = createCodexEngineAdapter({
     auth: authState, usage: usageDisplay(authState.rateLimits, Date.now()),
     residentProcesses: appServerProcess && appServerProcess.exitCode == null ? 1 : 0,
     models: modelCatalog.snapshot(),
+    extraProfiles: engineProfiles.list('codex').filter(row => row.owned),
   }),
 })
 // D-S1 (b) (2026-10-24): the installed, unmodified `claude`, one child
@@ -301,6 +313,7 @@ const claudeEngine = createClaudeEngineAdapter({
   defaultCwd: process.cwd(),
   onStatusChange: () => engineStatus.check(),
   processBudget: claudeProcessBudget,
+  profiles: claudeProfileRows,
 })
 if (process.env.EGDESK_CLAUDE_READER === 'live') claudeReaderEvidence = createClaudeReaderEvidence({ adapter: claudeEngine, snapshot: () => claudeEngineStatus.snapshot() })
 const engineRegistry = new EngineRegistry({ defaultEngineId: PROVIDER_ID })
@@ -318,6 +331,8 @@ const engineStatus = createEngineStatusEmitter({
 // never reads Keychain or credential files. A change re-gates the adapter;
 // becoming ready (or not) reaches Chat as a Claude connection change.
 const claudeEngineStatus = createClaudeEngineStatus({
+  // SUB-11: the static check reads the active profile's login folder.
+  probe: () => probeClaudeEngine({ env: claudeProfileEnv() }),
   onChange: () => {
     claudeEngine.syncStatus()
     engineStatus.check()
@@ -381,6 +396,19 @@ const inheritedMcp = createInheritedMcpSync({
 const ensureChatAuth = createChatEngineAuth({ chat, refreshCodexAccount: refreshAccountState, getCodexAuth: () => authState })
 const handleChatHttp = createChatHttpHandler(chat, ensureChatAuth)
 const handleComputerControlHttp = createComputerControlHttpHandler(chat, { port: BRIDGE_PORT })
+// SUB-11: switching the Claude profile waits until no Claude turn runs (a
+// running Run never moves); a new static check then re-gates the adapter.
+const handleEngineProfilesHttp = createEngineProfilesHttpHandler({
+  profiles: engineProfiles, port: BRIDGE_PORT,
+  busy: engine => engine === 'claude' && claudeEngine.stats().activeTurns > 0,
+  onChange: () => {
+    const recheck = () => claudeEngineStatus.refresh({ force: true }).catch(() => {})
+    recheck()
+    // A check already running (or just finished) still read the old folder.
+    setTimeout(recheck, 2500).unref?.()
+    engineStatus.check()
+  },
+})
 const handleHostControlHttp = createHostControlHttpHandler(hostControl, { port: BRIDGE_PORT })
 const handleOntologyHttp = createOntologyHttpHandler({ binding: () => ontologyBinding, store: ensureOntologyStore, runtime: sqliteRuntime, port: BRIDGE_PORT })
 const handleContextHttp = createContextHttpHandler(contexts, ensureChatAuth, { port: BRIDGE_PORT })
@@ -1048,6 +1076,7 @@ const bridgeServer = createServer(async (req, res) => {
   }
 
   if (await handleComputerControlHttp(req, res, url)) return
+  if (await handleEngineProfilesHttp(req, res, url)) return
   if (await handleProfileHttp(req, res, url)) return
   if (await handleDeskHttp(req, res, url)) return
   if (await handlePortableHttp(req, res, url)) return
