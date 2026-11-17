@@ -254,3 +254,57 @@ test('Reader integration preserves original quote identities/ranges despite JSON
   }
   assert.ok(record.packet.selectedSpans.some(span => span.quote.includes('"')))
 })
+
+// SUB-09: continuation cursor after a helper restart (a new SmartReadEngine on the same store).
+const restartOptions = (h, epoch) => {
+  const options = { ...h.options, ...strictOptions() }
+  options.authority = { ...options.authority, epoch }
+  options.capacity = { ...options.capacity, scope: { ...options.capacity.scope, epoch } }
+  return options
+}
+
+test('SUB-09 a restarted helper continues the same Reader session from its saved cursor without rereading completed fragments', async t => {
+  const h = await setup(t)
+  const before = new SmartReadEngine({ store: h.store, getReader: () => h.engine.reader, maxPartitionsPerCall: 2 })
+  const first = await before.read(restartOptions(h, 1))
+  assert.equal(first.packet.coverage.reviewedPartitions, 2)
+  const readerSessionId = first.packet.reader.sessionId
+  const readsBefore = h.reads.length
+  const lastEnd = h.reads.filter(read => !read.intent.startsWith('Integrate')).at(-1).range.endOffset
+  // Restart: memory is gone; the connection epoch is new.
+  const after = new SmartReadEngine({ store: h.store, getReader: () => h.engine.reader, maxPartitionsPerCall: 2 })
+  let record = await after.read({ ...restartOptions(h, 5), readerSessionId })
+  assert.equal(record.packet.reader.sessionId, readerSessionId)
+  assert.equal(record.packet.reader.restoredFrom, 'checkpoint')
+  assert.equal(h.reads[readsBefore].range.startOffset, lastEnd, 'continues at the next partition, not from the start')
+  assert.equal(record.packet.lineage.refines, first.packet.packetId)
+  while (record.packet.coverage.continuation) record = await after.read({ ...restartOptions(h, 5), readerSessionId })
+  assert.equal(record.packet.coverage.complete, true)
+  const coverage = await h.store.getRecord('owner', 'readers', record.packet.coverage.manifestId)
+  const fragments = []
+  for (const part of coverage.completed) fragments.push(JSON.parse((await h.store.getRecord('owner', 'readers', part.recordId)).inputPayload.text).sourceText)
+  assert.equal(fragments.join(''), h.text, 'every original range covered exactly once across the restart')
+})
+
+test('SUB-09 cursor restore refuses another conversation/profile, the same process and a tampered cursor', async t => {
+  const h = await setup(t)
+  const engine = new SmartReadEngine({ store: h.store, getReader: () => h.engine.reader, maxPartitionsPerCall: 2 })
+  const first = await engine.read(restartOptions(h, 1))
+  const readerSessionId = first.packet.reader.sessionId
+  engine.sessions.clear()
+  await assert.rejects(engine.read({ ...restartOptions(h, 1), readerSessionId }), { code: 'READER_SESSION_MISMATCH' }, 'same process: no revival')
+  const restarted = () => new SmartReadEngine({ store: h.store, getReader: () => h.engine.reader, maxPartitionsPerCall: 2 })
+  await assert.rejects(restarted().read({ ...restartOptions(h, 2), readerSessionId, run: { ...h.options.run, conversationId: 'other' } }), { code: 'READER_SESSION_MISMATCH' })
+  const otherProfile = restartOptions(h, 2)
+  otherProfile.authority = { ...otherProfile.authority, engineProfileId: 'other' }
+  otherProfile.capacity = { ...otherProfile.capacity, scope: { ...otherProfile.capacity.scope, engineProfileId: 'other' } }
+  await assert.rejects(restarted().read({ ...otherProfile, readerSessionId }), { code: 'READER_SESSION_MISMATCH' })
+  await assert.rejects(restarted().read({ ...restartOptions(h, 2), readerSessionId, engineId: 'codex' }), { code: 'READER_SESSION_MISMATCH' })
+  // A newer cursor whose completed fragment points at the wrong receipt is refused, not trusted.
+  const cursors = await h.store.listRecords('owner', 'readers', record => record.stage === 'reader-cursor' && record.readerSessionId === readerSessionId)
+  const latest = cursors.sort((a, b) => b.seq - a.seq)[0]
+  const { id: _id, ownerScope: _scope, ...copy } = latest
+  const swapped = [copy.completed[1], copy.completed[0]]
+  await h.store.putRecord('owner', 'readers', { ...copy, seq: latest.seq + 1, completed: swapped })
+  await assert.rejects(restarted().read({ ...restartOptions(h, 2), readerSessionId }), { code: 'READER_CURSOR_INVALID' })
+})

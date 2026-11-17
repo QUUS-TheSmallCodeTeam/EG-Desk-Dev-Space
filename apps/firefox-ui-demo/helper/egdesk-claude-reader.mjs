@@ -108,7 +108,7 @@ async function temporaryWorkspace() {
 export class ClaudeReaderClient {
   constructor({ getScope, snapshot, executablePath, getReadCapacity = () => null, getIsolationProof = () => null,
     readerPolicy = null, env = process.env, platform = process.platform, createTransport = createClaudeTransport,
-    createWorkspace = temporaryWorkspace, now = Date.now, limits = {}, transportOptions = {},
+    createWorkspace = temporaryWorkspace, now = Date.now, limits = {}, transportOptions = {}, processBudget = null,
   } = {}) {
     if (typeof getScope !== 'function' || typeof snapshot !== 'function' || typeof executablePath !== 'string' || !path.isAbsolute(executablePath)) {
       throw new TypeError('ClaudeReaderClient requires server scope, status and an absolute resolved executablePath')
@@ -117,7 +117,7 @@ export class ClaudeReaderClient {
       if (!Object.hasOwn(CLAUDE_READER_LIMITS, name) || !positive(value) || value > CLAUDE_READER_LIMITS[name]) throw new TypeError(`Invalid Reader safety limit: ${name}`)
     }
     Object.assign(this, { getScope, snapshot, executablePath, getReadCapacity, getIsolationProof, env, platform,
-      createTransport, createWorkspace, now, transportOptions, limits: Object.freeze({ ...CLAUDE_READER_LIMITS, ...limits }) })
+      createTransport, createWorkspace, now, transportOptions, processBudget, limits: Object.freeze({ ...CLAUDE_READER_LIMITS, ...limits }) })
     this.readerPolicy = readerPolicy ? Object.freeze(this.configuration(readerPolicy)) : null
     this.children = new Map()
   }
@@ -206,11 +206,15 @@ export class ClaudeReaderClient {
     if ([...this.children.values()].some(child => sameScope(scope, child.scope) && child.sessionId === input.readerSessionId)) {
       throw fail('READER_STOP_PENDING', 'Previous Reader process has not closed; no replacement was started')
     }
+    // SUB-09: one Claude process budget across parent conversations and
+    // Readers (egdesk-claude-limits). Its slot is returned only on confirmed exit.
+    const lease = this.processBudget ? this.processBudget.tryAcquire('reader') : null
+    if (this.processBudget && !lease) throw fail('READER_BUSY', 'Every Claude process slot (conversations and Readers) is in use; remaining source coverage must wait')
     let resolve, reject
     const done = new Promise((yes, no) => { resolve = yes; reject = no })
     done.catch(() => {})
     const child = { id: randomUUID(), scope, sessionId: input.readerSessionId, input, e, inputPayload,
-      resolve, reject, settled: false, sent: false, transport: null, workspace: null, closing: null,
+      resolve, reject, settled: false, sent: false, transport: null, workspace: null, closing: null, lease,
       init: null, result: null, events: 0, wireChars: 0, text: null, nativeCapacity: null }
     this.children.set(child.id, child)
     const abort = () => this.reject(child, fail('READ_CANCELLED', 'Reader cancelled; no packet was delivered'))
@@ -432,6 +436,7 @@ export class ClaudeReaderClient {
       }
       try { await child.workspace?.dispose() } catch { /* non-empty: preserve */ }
       this.children.delete(child.id)
+      child.lease?.release()
       return { nativeThreadId: child.id, status: 'closed' }
     })()
     return child.closing

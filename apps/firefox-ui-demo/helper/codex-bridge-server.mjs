@@ -36,6 +36,8 @@ import { createDeskHttpHandler } from './egdesk-desk-http.mjs'
 import { createPortableHttpHandler } from './egdesk-portable-http.mjs'
 import { NativeReaderClient } from './egdesk-native-reader.mjs'
 import { ClaudeReaderClient, estimateClaudeReaderInput } from './egdesk-claude-reader.mjs'
+import { createClaudeReaderEvidence } from './egdesk-claude-capacity.mjs'
+import { createClaudeProcessBudget } from './egdesk-claude-limits.mjs'
 import { ContextRuntime } from './egdesk-context-runtime.mjs'
 import { createContextHttpHandler } from './egdesk-context-http.mjs'
 import { buildCodexAppServerLaunch, inspectNativeCapabilities, preflightOwnedAppServer, resolveCodexExecutable, NATIVE_SCHEMA_VERSION } from './egdesk-native-capabilities.mjs'
@@ -214,8 +216,13 @@ const nativeReader = new NativeReaderClient({ request: (method, params) => appSe
 // verified tool-output/estimator and managed-policy evidence strict B3 needs.
 // No fixture, model-name table, caller window or Codex metadata is a substitute.
 // Wire authoritative exports here when available; ordinary chat/B2 stay ready.
-const getClaudeReadCapacity = () => null
-const getClaudeReaderIsolationProof = () => null
+// SUB-09: the parent conversation's native usage + applied MCP output limit
+// and the managed-policy/hook inventory (egdesk-claude-capacity). Live only
+// with EGDESK_CLAUDE_READER=live until a real subscription round trip is checked.
+const claudeProcessBudget = createClaudeProcessBudget()
+let claudeReaderEvidence = null
+const getClaudeReadCapacity = options => claudeReaderEvidence?.readCapacity(options) ?? null
+const getClaudeReaderIsolationProof = options => claudeReaderEvidence?.isolationProof(options) ?? null
 let claudeReaderClient = null
 const claudeReader = {
   estimateInput: estimateClaudeReaderInput,
@@ -228,7 +235,8 @@ const claudeReader = {
       const executablePath = resolveClaudeExecutable(process.env)
       if (!executablePath) throw chatError('ENGINE_NOT_INSTALLED', 'Claude Reader executable is unavailable', 409)
       claudeReaderClient = new ClaudeReaderClient({ executablePath, getScope: () => chat.contextAuthority({ engineId: 'claude' }),
-        snapshot: () => claudeEngineStatus.snapshot(), getReadCapacity: getClaudeReadCapacity, getIsolationProof: getClaudeReaderIsolationProof })
+        snapshot: () => claudeEngineStatus.snapshot(), getReadCapacity: getClaudeReadCapacity, getIsolationProof: getClaudeReaderIsolationProof,
+        processBudget: claudeProcessBudget })
     }
     return claudeReaderClient
   },
@@ -287,7 +295,9 @@ const claudeEngine = createClaudeEngineAdapter({
   refreshStatus: options => claudeEngineStatus.refresh(options),
   defaultCwd: process.cwd(),
   onStatusChange: () => engineStatus.check(),
+  processBudget: claudeProcessBudget,
 })
+if (process.env.EGDESK_CLAUDE_READER === 'live') claudeReaderEvidence = createClaudeReaderEvidence({ adapter: claudeEngine, snapshot: () => claudeEngineStatus.snapshot() })
 const engineRegistry = new EngineRegistry({ defaultEngineId: PROVIDER_ID })
 engineRegistry.register(codexEngine)
 engineRegistry.register(claudeEngine)

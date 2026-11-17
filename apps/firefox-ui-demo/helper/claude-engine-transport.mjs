@@ -347,7 +347,7 @@ export function buildClaudeArgs({
   model = null, effort = null, permissionMode = null, appendPrompt = null,
   sessionId = null, resume = null, allowedTools = null, disallowedTools = null, addDirs = null,
   tools = null, systemPromptSnapshot = null, readerIsolation = false, systemPrompt = null,
-  platform = process.platform,
+  bounded = false, platform = process.platform,
 } = {}) {
   const inheritance = plainObject(inherit) || {}
   const instructions = inheritance.instructions === true
@@ -374,6 +374,15 @@ export function buildClaudeArgs({
     includePartialMessages = false
     disallowedTools = ['mcp__*']
   } else if (systemPrompt != null) throw optionError('A replacement system prompt is only supported for the isolated Reader')
+  // SUB-10 browserBounded conversation (egdesk-claude-bounded): no built-in
+  // tool, nothing asked, only EG-Desk's MCP. Never relaxed by managed MCP.
+  if (bounded) {
+    if (readerIsolation) throw optionError('A Reader is not a bounded conversation')
+    if (managedMcpConfig) throw transportError('CLAUDE_BOUNDED_UNAVAILABLE', 'Managed MCP configuration cannot be bounded to EG-Desk tools')
+    if (!Array.isArray(tools) || tools.length || permissionMode !== 'dontAsk' || instructions || skills) {
+      throw optionError('A bounded conversation has no built-in tools, uses dontAsk and inherits no settings')
+    }
+  }
 
   const args = [
     '-p',
@@ -388,6 +397,7 @@ export function buildClaudeArgs({
   if (mcp) args.push('--mcp-config', JSON.stringify(mcp))
   if (!skills) args.push('--disable-slash-commands')
   if (includePartialMessages !== false) args.push('--include-partial-messages')
+  if (bounded) args.push('--restricted', '--no-chrome')
   if (readerIsolation) args.push(
     '--mcp-config', '{"mcpServers":{}}', '--restricted', '--safe-mode', '--no-chrome',
     '--no-session-persistence', '--max-turns', '1', `--system-prompt=${systemPrompt}`,

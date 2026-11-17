@@ -125,10 +125,66 @@ function verifyReaderReceipt(result, assigned) {
   }
 }
 
+// SUB-09 continuation cursor: the logical Reader session survives a helper
+// restart. After every completed fragment a write-once checkpoint records the
+// partition plan, completed receipts, merge levels and the next partition.
+// A later explicit continuation (same readerSessionId) in a NEW helper process
+// restores it only for the same engine/profile/conversation/source hash and
+// only when every completed fragment receipt still matches the pinned source.
+// The connection epoch is per process, so the restored session adopts the
+// current authority. A fragment that was in flight at the restart has no
+// receipt and is read again by that explicit call, never silently.
+const CURSOR_STAGE = 'reader-cursor'
+const cursorNode = node => ({ summary: node.summary, structure: node.structure, selectedSpans: node.selectedSpans, omittedSpanCount: node.omittedSpanCount || 0 })
+
 export class SmartReadEngine {
-  constructor({ store, reader, getReader, maxPartitionsPerCall = 4, partitionChars = 12000, now = Date.now }) {
-    Object.assign(this, { store, reader, getReader, maxPartitionsPerCall, partitionChars, now })
+  constructor({ store, reader, getReader, maxPartitionsPerCall = 4, partitionChars = 12000, now = Date.now, instanceId = randomUUID() }) {
+    Object.assign(this, { store, reader, getReader, maxPartitionsPerCall, partitionChars, now, instanceId })
     this.sessions = new Map()
+  }
+
+  async checkpoint(ownerKey, session, run) {
+    session.checkpoint = (session.checkpoint || 0) + 1
+    await this.store.putRecord(ownerKey, 'readers', { stage: CURSOR_STAGE, instanceId: this.instanceId, seq: session.checkpoint,
+      readerSessionId: session.id, engineId: session.engineId, engineProfileId: session.authority?.engineProfileId || null,
+      conversationId: session.conversationId, clientThreadId: run.clientThreadId || null, sourceId: session.sourceId, sourceHash: session.hash,
+      signature: session.signature, parts: session.parts, next: session.next, completed: session.completed, native: session.native,
+      levels: session.levels.map(level => (level || []).map(cursorNode)), revision: session.revision, packetId: session.packetId, createdAt: this.now() })
+  }
+
+  async restoreSession({ ownerKey, readerSessionId, engineId, authority, scopeKey, run, sourceId, manifest, text }) {
+    if (this.sessions.has(readerSessionId) || typeof this.store.listRecords !== 'function') return null
+    const cursors = await this.store.listRecords(ownerKey, 'readers', record => record.stage === CURSOR_STAGE && record.readerSessionId === readerSessionId)
+    const cursor = cursors.sort((a, b) => b.seq - a.seq)[0]
+    // Same process: an absent session was never restarted away; do not revive it.
+    if (!cursor || cursor.instanceId === this.instanceId) return null
+    if (cursor.engineId !== engineId || cursor.engineProfileId !== (authority?.engineProfileId || null) || cursor.conversationId !== run.conversationId ||
+        (cursor.clientThreadId || null) !== (run.clientThreadId || null) || cursor.sourceId !== sourceId || cursor.sourceHash !== manifest.hash) return null
+    if (!Array.isArray(cursor.parts) || !Number.isInteger(cursor.next) || cursor.next < 0 || cursor.next > cursor.parts.length ||
+        !Array.isArray(cursor.completed) || cursor.completed.length !== cursor.next) {
+      throw chatError('READER_CURSOR_INVALID', 'The saved Reader progress is inconsistent; start a new read of this source', 409)
+    }
+    for (const [index, part] of cursor.completed.entries()) {
+      const planned = cursor.parts[index]
+      let receipt = null
+      try { receipt = await this.store.getRecord(ownerKey, 'readers', part.recordId) } catch {}
+      let input = null
+      try { input = JSON.parse(receipt?.inputPayload?.text) } catch {}
+      if (!receipt || receipt.stage !== 'source-fragment' || receipt.readerSessionId !== readerSessionId || receipt.sourceHash !== manifest.hash ||
+          planned?.startOffset !== part.startOffset || planned?.endOffset !== part.endOffset ||
+          receipt.range?.startOffset !== part.startOffset || receipt.range?.endOffset !== part.endOffset ||
+          hashContent(receipt.inputPayload.text) !== receipt.inputPayload.hash ||
+          input?.sourceText !== text.slice(part.startOffset, part.endOffset)) {
+        throw chatError('READER_CURSOR_INVALID', 'A completed Reader fragment no longer matches the pinned source; start a new read', 409)
+      }
+    }
+    const session = { id: readerSessionId, ownerKey, authority, engineId, scopeKey, conversationId: run.conversationId, sourceId, hash: manifest.hash,
+      revision: cursor.revision || 0, packetId: cursor.packetId || null, signature: cursor.signature, parts: cursor.parts, next: cursor.next,
+      completed: cursor.completed, native: Array.isArray(cursor.native) ? cursor.native : [], levels: Array.isArray(cursor.levels) ? cursor.levels : [],
+      checkpoint: cursor.seq, restoredFrom: cursor.id }
+    if (this.sessions.size >= 32) throw chatError('READER_SESSION_LIMIT', 'Reader session limit reached', 429)
+    this.sessions.set(readerSessionId, session)
+    return session
   }
 
   async read({ ownerKey, run, sourceId, intent, query, range, readerSessionId, usage, model, effort, cwd, signal, assertActive, engineId = 'codex', authority, capacity, readerBudget, allowReader = true, readerUnavailableCode, forceReader = false, prepareOnly = false, emit = () => {} }) {
@@ -144,6 +200,10 @@ export class SmartReadEngine {
     let admission = readAdmission(selected, manifest.shape, usage, attachments)
     const reader = allowReader ? (this.getReader ? this.getReader(engineId) : engineId === 'codex' ? this.reader : null) : null
     const scopeKey = JSON.stringify([engineId, authority?.engineProfileId || null, authority?.epoch ?? null, run.clientThreadId || null])
+    if (readerSessionId && reader && !prepareOnly) {
+      await this.restoreSession({ ownerKey, readerSessionId, engineId, authority, scopeKey, run, sourceId, manifest, text })
+      assertActive()
+    }
     if (readerSessionId && reader) {
       const session = this.sessions.get(readerSessionId)
       if (!session || session.scopeKey !== scopeKey || session.ownerKey !== ownerKey || session.conversationId !== run.conversationId || session.sourceId !== sourceId || session.hash !== manifest.hash) {
@@ -269,6 +329,7 @@ export class SmartReadEngine {
           session.completed.push({ ...part, completedAt: this.now(), recordId })
           session.next++
           await addNode(result)
+          await this.checkpoint(ownerKey, session, run)
         }
         const nodes = session.levels.flat().filter(Boolean)
         let final = nodes.at(-1) || { summary: 'No matching captured text.', structure: [], selectedSpans: [] }
@@ -293,7 +354,7 @@ export class SmartReadEngine {
           omissionPolicy: { type: 'reader-summary', reason: admission.reason, sourceLimit: manifest.capture.coverage,
             selectedSpanLimit: 8, omittedSpanCount: final.omittedSpanCount || 0, sourceSpans: 'selected exact original quotations; full assigned coverage remains in the partition manifest' },
           lineage: { sourceId, rawHash: manifest.hash, projectionHash: manifest.payloads.projection.hash, transformations: manifest.transformations, refines: priorPacketId },
-          reader: { sessionId: session.id, revision: session.revision, engineId, purpose: 'source-reading',
+          reader: { sessionId: session.id, revision: session.revision, engineId, purpose: 'source-reading', ...(session.restoredFrom ? { restoredFrom: 'checkpoint' } : {}),
             limits: { maxPartitionsPerCall: this.maxPartitionsPerCall, maxReaderCallsPerWave: 32, inputBudget: Number.isFinite(inputBudget) ? inputBudget : null, partitionChars: this.partitionChars } }, admission,
         }
       } catch (error) {
@@ -328,6 +389,7 @@ export class SmartReadEngine {
       assertActive()
       if (readSession) {
         readSession.packetId = packetId
+        await this.checkpoint(ownerKey, readSession, run)
         emit('reader.completed', { readerSessionId: readSession.id, sourceId, coverage: packet.coverage, packetId, deliveryStatus: 'prepared' })
       }
       return record
