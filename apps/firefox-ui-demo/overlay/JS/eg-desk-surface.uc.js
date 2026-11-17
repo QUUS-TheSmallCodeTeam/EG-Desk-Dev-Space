@@ -27,6 +27,7 @@
   const BoardExport = ChromeUtils.importESModule('chrome://userchrome/content/EGDeskBoardExport.sys.mjs');
   const ProfileTransfer = ChromeUtils.importESModule('chrome://userchrome/content/EGDeskProfileTransfer.sys.mjs');
   const ProfileTransferView = ChromeUtils.importESModule('chrome://userchrome/content/EGDeskProfileTransferView.sys.mjs');
+  const HostActivityView = ChromeUtils.importESModule('chrome://userchrome/content/EGDeskHostActivityView.sys.mjs');
   const MemoState = ChromeUtils.importESModule('chrome://userchrome/content/EGDeskMemoState.sys.mjs');
   // DSN-04 · UX-05 · UX-06 keyboard rules and CNV-06 memo link rules (pure modules).
   const SurfaceKeys = ChromeUtils.importESModule('chrome://userchrome/content/surface/EGDeskSurfaceKeys.mjs');
@@ -4163,6 +4164,53 @@
       list.dataset.state = 'unavailable';
     }
     return { dispose: () => { controller?.captureClosingText?.(comment.value); controller?.dispose(); }, notify: () => controller?.notify() };
+  }
+
+  // CU-01: the host-activity Desk window (EGDeskHostActivityView): who drives
+  // this Mac outside the Desk, the timeline, and pause / stop / hand back.
+  // One at a time and live only: it is not saved with the Desk.
+  function openHostActivityCard() {
+    const open = document.querySelector('.egd-host-activity-card');
+    if (open) { revealOpenCanvasCard(open, { kind: 'host-activity' }); return open; }
+    const placement = resolveCanvasCardPlacement('host-activity');
+    const shell = spawnDeskWindowShell({ id: `egd-host-activity-${++cardSeq}`, kind: 'host-activity', className: 'egd-host-activity-card',
+      minWidth: 360, minHeight: 320,
+      style: { left: `${placement.x}px`, top: `${placement.y}px`, width: `${placement.width}px`, height: `${placement.height}px` } });
+    revealPlacedCanvasCard(shell.root, placement, { kind: 'host-activity' });
+    shell.slots.identity.appendChild(el('strong', {}, 'Desk 밖 조작'));
+    const dom = HostActivityView.createEGDeskHostActivityView({ document });
+    shell.slots.content.appendChild(dom.element);
+    let current = null, notice = null, busy = false, loads = 0;
+    const paint = () => {
+      if (!shell.root.isConnected) return;
+      dom.update(HostActivityView.hostActivityView(current, { connected: !!state.codex.connected, formatTime: formatMessageTime }), { onAction: (id) => { void act(id); }, notice, busy });
+    };
+    const load = async () => {
+      const mine = ++loads;
+      try {
+        const next = HostActivityView.normalizeHostActivity(await state.codexBridge?.hostActivity());
+        if (mine === loads && next) current = next;
+      } catch { notice = { tone: 'error', text: '관찰 상태를 불러오지 못했습니다. 연결을 확인해 주세요.' }; }
+      paint();
+    };
+    const act = async (action) => {
+      const request = HostActivityView.hostControlRequest(action, current);
+      if (!request || busy || !state.codexBridge?.hostControl) return;
+      busy = true; notice = null; paint();
+      try { notice = { tone: 'status', text: HostActivityView.hostControlResultText(action, await state.codexBridge.hostControl(request.body)) }; }
+      catch (error) { notice = { tone: 'error', text: HostActivityView.hostControlErrorText(error) }; }
+      busy = false;
+      await load();
+    };
+    const feed = (event) => {
+      const next = HostActivityView.reduceHostActivityEvent(current, event);
+      if (next !== current) { current = next; paint(); }
+    };
+    state.hostActivityFeed = feed;
+    shell.registerCleanup(() => { if (state.hostActivityFeed === feed) state.hostActivityFeed = null; dom.dispose(); });
+    paint();
+    void load();
+    return shell.root;
   }
 
   function spawnInputEvidence(reference, stored = null, options = {}) {
@@ -14871,6 +14919,11 @@
         case 'mcp.inherited':
           update({ inheritedMcp: Array.isArray(event.inheritedMcp) ? event.inheritedMcp : null });
           return;
+        // CU-01/02: a host-activity row or a new lease/gate state, for the open view.
+        case 'host.activity':
+        case 'host.control':
+          state.hostActivityFeed?.(event);
+          return;
         // CU-01: the computer control policy or its check changed.
         case 'computer.control':
           update({ computerControl: ChatState.normalizeComputerControl(event.computerControl) });
@@ -15805,6 +15858,9 @@
         return { signal: token.signal, current: () => epochScope.valid(token) && !token.signal.aborted,
           dispose: () => { token.controller.abort(); epochScope.finish(token); } };
       },
+      // CU-01/02 host-activity view: state with timeline, and one control.
+      hostActivity() { return fetchJson('/host/activity'); },
+      hostControl(body) { return fetchJson('/host/control', { method: 'POST', body: JSON.stringify(body) }); },
       // CU-01 Settings '컴퓨터 조작': the bridge answers with the policy it now
       // holds, which takes effect from the next message sent.
       async setComputerControl(policy) {
@@ -20521,7 +20577,12 @@
         change ? el('div', {
           class: `egd-settings-computer-change egd-settings-computer-change-${change.phase}`, role: change.phase === 'error' ? 'alert' : 'status',
           data: { testid: 'settings-computer-control-change', phase: change.phase },
-        }, change.text) : null);
+        }, change.text) : null,
+        // CU-01: open the host-activity Desk window (who drives this Mac, pause / stop).
+        el('button', {
+          class: 'egd-settings-btn', type: 'button', data: { testid: 'settings-computer-host-activity' },
+          onclick: () => { openHostActivityCard(); },
+        }, 'Desk 밖 조작 보기'));
     };
 
     // --- 연결된 도구 (CU-07): external tools ordinary Codex chats inherit from

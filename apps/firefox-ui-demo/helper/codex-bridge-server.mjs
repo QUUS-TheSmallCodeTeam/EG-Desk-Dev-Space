@@ -49,6 +49,8 @@ import { createAnnotationToolProvider } from './egdesk-annotation-tool-provider.
 import { openOntologyStore } from './egdesk-ontology-store.mjs'
 import { createOntologyHttpHandler, ontologyHealth, openBoundOntologyStore, readOntologyProfileBinding } from './egdesk-ontology-http.mjs'
 import { inspectSqliteRuntime } from './egdesk-sqlite-runtime.mjs'
+import { createHostAgent, resolveHostAgentExecutable } from './egdesk-host-agent.mjs'
+import { createHostControl, createHostControlHttpHandler } from './egdesk-host-control.mjs'
 
 const nodeRuntime = requireEGDeskNodeRuntime()
 
@@ -321,6 +323,15 @@ const claudeEngineStatus = createClaudeEngineStatus({
     engineStatus.check()
   },
 })
+// CU-01/02/05: this Mac's control lease behind the fail-closed input gate,
+// the observe-only host helper (started when the host-activity view first
+// asks) and the activity timeline. Lease events reach chat.noteHostControl.
+// No shutdown step: the helper exits on its stdin EOF when the bridge exits.
+const hostControl = createHostControl({
+  makeAgent: onEvent => createHostAgent({ executable: resolveHostAgentExecutable(), onEvent }),
+  onLeaseEvent: event => chat.noteHostControl(event),
+  emit: event => broadcast({ ...event, v: BRIDGE_PROTOCOL_VERSION, provider: PROVIDER_ID, ts: Date.now() }),
+})
 const chat = new CodexChatRuntime({
   engines: engineRegistry,
   contexts,
@@ -334,7 +345,7 @@ const chat = new CodexChatRuntime({
   qaReady: () => nativeCapabilities.qaReadOnly && appServerReady,
   getNativeContractFingerprint: () => nativeCapabilities.contractFingerprint,
   profiles: profileStore,
-  emit: event => { broadcast(event, 2); workflow?.onChatEvent(event) },
+  emit: event => { broadcast(event, 2); workflow?.onChatEvent(event); hostControl.onChatEvent(event) },
   emitLegacy: event => broadcast(event, 1),
   // CU-01: an MCP call's controlKind also reads the inherited classification
   // (declared below; a Computer Use marker makes node_repl 'computer').
@@ -343,6 +354,7 @@ const chat = new CodexChatRuntime({
   // /settings/computer-control changes and saves it.
   computerControlStore: bridgeSettings.computerControl,
   onComputerControlChange: computerControl => broadcast({ type: 'computer.control', v: BRIDGE_PROTOCOL_VERSION, provider: PROVIDER_ID, computerControl, ts: Date.now() }),
+  hostLease: hostControl.lease,
 })
 // Claude conversation events reach the same runtime as app-server traffic.
 claudeEngine.subscribe({
@@ -369,6 +381,7 @@ const inheritedMcp = createInheritedMcpSync({
 const ensureChatAuth = createChatEngineAuth({ chat, refreshCodexAccount: refreshAccountState, getCodexAuth: () => authState })
 const handleChatHttp = createChatHttpHandler(chat, ensureChatAuth)
 const handleComputerControlHttp = createComputerControlHttpHandler(chat, { port: BRIDGE_PORT })
+const handleHostControlHttp = createHostControlHttpHandler(hostControl, { port: BRIDGE_PORT })
 const handleOntologyHttp = createOntologyHttpHandler({ binding: () => ontologyBinding, store: ensureOntologyStore, runtime: sqliteRuntime, port: BRIDGE_PORT })
 const handleContextHttp = createContextHttpHandler(contexts, ensureChatAuth, { port: BRIDGE_PORT })
 // Like /chat/history, profiles stay editable while Codex is signed out.
@@ -1043,6 +1056,9 @@ const bridgeServer = createServer(async (req, res) => {
 
   // ── Terminal endpoints ──
   if (await handleTerminalHttp(req, res, url)) return
+
+  // ── CU-01/02 host activity and control lease (local, works signed out) ──
+  if (await handleHostControlHttp(req, res, url)) return
   sendJson(res, 404, { error: 'Not found' })
 })
 

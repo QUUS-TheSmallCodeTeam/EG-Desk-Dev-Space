@@ -13,13 +13,18 @@
 // pattern OpenAI's focus restore leaves. Only app names, bundle ids and pids
 // are kept: no window titles, typed text, keys, coordinates or call content.
 //
-// Bridge handoff (not wired here; codex-bridge-server.mjs belongs to another
-// worker):
-//   const activity = createHostActivity()
-//   createHostAgent({ ..., onEvent: e => { const row = activity.noteHostEvent(e); if (row) sse('host.activity', row) } })
-//   on runtime emit 'computer.used' details → activity.noteComputerUse(details) → sse('host.activity', row)
-//   GET /host/activity → { rows: activity.list(), summary: activity.summary(), agent: agent.status() }
-export const HOST_ACTIVITY_KINDS = Object.freeze(['front-app', 'service', 'codex-computer'])
+// Bridge wiring: egdesk-host-control.mjs (host helper events, lease and gate
+// events, chat computer.used; GET /host/activity, SSE 'host.activity').
+// CU-01/02 also keep who holds the input, from the lease and the input gate:
+// - 'control'        the lease changed hands, yielded, stopped, or the gate closed/opened
+// - 'command'        an EG-Desk Agent action's receipt (phase, app, code, step count)
+// Sizes and metadata only, like the rows above: never arguments, text or keys.
+export const HOST_ACTIVITY_KINDS = Object.freeze(['front-app', 'service', 'codex-computer', 'control', 'command'])
+const LEASE_STATES = new Set(['ready', 'user', 'ai', 'unavailable'])
+const RECEIPT_PHASES = new Set(['enqueued', 'dispatched', 'not-dispatched', 'finished', 'preempted', 'unknown', 'cleanup'])
+const CODE = /^[A-Z][A-Z0-9_]{0,63}$/
+const LANE = /^[^\0]{1,256}$/
+const count = value => (Number.isSafeInteger(value) && value >= 0 ? value : null)
 export const HOST_ACTIVITY_SSE_EVENT = 'host.activity'
 export const CODEX_COMPUTER_SERVICE = 'com.openai.sky.CUAService'
 // summary().controller: who is driving the computer as far as EG-Desk can see.
@@ -39,8 +44,8 @@ const sameApp = (a, b) => Boolean(a && b && (a.pid && b.pid ? a.pid === b.pid : 
 
 /**
  * createHostActivity({ now, limit, bounceWindowMs }) →
- * { noteHostEvent, noteComputerUse, list, summary, clear }.
- * noteHostEvent / noteComputerUse return the new row, or null when the input
+ * { noteHostEvent, noteComputerUse, noteControlEvent, list, summary, clear }.
+ * noteHostEvent / noteComputerUse / noteControlEvent return the new row, or null when the input
  * is not something this list records.
  */
 export function createHostActivity({ now = Date.now, limit = 500, bounceWindowMs = 3000 } = {}) {
@@ -112,10 +117,53 @@ export function createHostActivity({ now = Date.now, limit = 500, bounceWindowMs
     return insert({ seq: ++seq, at, kind: 'codex-computer', runId: details.runId, calls, active })
   }
 
+  /**
+   * The lease's onEvent (egdesk-host-lease) and the input gate's onChange
+   * (egdesk-host-input-gate, as { type: 'gate.state', status }). A lease
+   * control.state row is kept only when the state itself changed.
+   */
+  let leaseState = null, gateState = null
+  function noteControlEvent(event) {
+    if (!event || typeof event !== 'object') return null
+    const at = now()
+    if (event.type === 'control.state') {
+      const status = event.status
+      if (!status || !LEASE_STATES.has(status.state) || status.state === leaseState) return null
+      const previous = leaseState
+      leaseState = status.state
+      return insert({ seq: ++seq, at, kind: 'control', event: 'state', state: status.state, from: previous, epoch: count(status.epoch), yielded: status.yielded === true, reasons: Array.isArray(status.reasons) ? status.reasons.filter(reason => typeof reason === 'string').slice(0, 4) : [] })
+    }
+    if (event.type === 'control.yielded') {
+      return insert({ seq: ++seq, at, kind: 'control', event: 'yielded', reason: event.reason === 'user-request' ? 'user-request' : 'human-input', epoch: count(event.epoch) })
+    }
+    if (event.type === 'control.stopped') {
+      const app = typeof event.app === 'string' && LANE.test(event.app) ? event.app : null
+      return insert({ seq: ++seq, at, kind: 'control', event: 'stopped', scope: event.scope === 'app' ? 'app' : 'all', app, notDispatched: count(event.notDispatched) ?? 0, inFlight: count(event.inFlight) ?? 0, epoch: count(event.epoch) })
+    }
+    if (event.type === 'gate.state') {
+      const status = event.status
+      if (!status || !['open', 'closed'].includes(status.state)) return null
+      const key = `${status.state}:${status.epoch}`
+      if (key === gateState) return null
+      gateState = key
+      return insert({ seq: ++seq, at, kind: 'control', event: 'gate', state: status.state, reason: typeof status.reason === 'string' ? status.reason.slice(0, 32) : null, epoch: count(status.epoch) })
+    }
+    if (event.type === 'command.receipt') {
+      if (!RECEIPT_PHASES.has(event.phase) || event.phase === 'enqueued') return null
+      const app = typeof event.app === 'string' && LANE.test(event.app) ? event.app : null
+      const row = { seq: ++seq, at, kind: 'command', phase: event.phase, commandId: typeof event.commandId === 'string' ? event.commandId.slice(0, 128) : null, app }
+      if (typeof event.code === 'string' && CODE.test(event.code)) row.code = event.code
+      if (count(event.steps) !== null) row.steps = event.steps
+      return insert(row)
+    }
+    return null
+  }
+
   function list({ sinceAt = null, limit: count = 100 } = {}) {
     const n = Number.isSafeInteger(count) && count > 0 ? Math.min(count, limit) : 100
     const from = Number.isFinite(sinceAt) ? rows.filter(row => row.at > sinceAt) : rows
-    return from.slice(-n).map(row => ({ ...row, app: row.app ? { ...row.app } : row.app, previous: row.previous ? { ...row.previous } : row.previous }))
+    const copyOf = value => (value && typeof value === 'object' ? (Array.isArray(value) ? [...value] : { ...value }) : value)
+    return from.slice(-n).map(row => ({ ...row, app: copyOf(row.app), previous: copyOf(row.previous), ...(row.reasons ? { reasons: [...row.reasons] } : {}) }))
   }
 
   function summary() {
@@ -134,7 +182,8 @@ export function createHostActivity({ now = Date.now, limit = 500, bounceWindowMs
     service = { running: null, at: null }
     activeRuns.clear()
     runs.clear()
+    leaseState = gateState = null
   }
 
-  return { noteHostEvent, noteComputerUse, list, summary, clear }
+  return { noteHostEvent, noteComputerUse, noteControlEvent, list, summary, clear }
 }

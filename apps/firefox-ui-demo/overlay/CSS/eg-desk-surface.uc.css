@@ -11168,3 +11168,17 @@ button.egd-memo-ask-cancel:hover { text-decoration: underline; }
   visibility: hidden !important;
   pointer-events: none !important;
 }
+
+/* CU-01: the host-activity Desk window (EGDeskHostActivityView). */
+.egd-host-activity { display: flex; flex-direction: column; gap: 10px; padding: 12px; overflow: auto; height: 100%; box-sizing: border-box; font-size: 12.5px; }
+.egd-host-activity-banner { padding: 6px 8px; border: 1px solid var(--egd-danger-line); background: var(--egd-danger-bg); color: var(--egd-danger-ink); border-radius: 6px; }
+.egd-host-activity-facts { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 8px; }
+.egd-host-activity-fact { display: flex; flex-direction: column; gap: 2px; padding: 6px 8px; border: 1px solid var(--egd-line-strong); border-radius: 6px; }
+.egd-host-activity-fact[data-tone="danger"] { border-color: var(--egd-danger-line); }
+.egd-host-activity-fact-label, .egd-host-activity-fact-sub, .egd-host-activity-row-time, .egd-host-activity-row-detail, .egd-host-activity-note { color: var(--egd-on-surface-variant); font-size: 11.5px; }
+.egd-host-activity-actions { display: flex; flex-wrap: wrap; gap: 6px; }
+.egd-host-activity-action-danger { border-color: var(--egd-danger-line); color: var(--egd-danger-ink); }
+.egd-host-activity-rows { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 4px; }
+.egd-host-activity-row { display: grid; grid-template-columns: auto 1fr; column-gap: 8px; }
+.egd-host-activity-row-detail { grid-column: 2; }
+.egd-host-activity-note { margin: 0; }

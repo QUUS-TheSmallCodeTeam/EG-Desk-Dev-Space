@@ -480,3 +480,42 @@ test('options are checked and status carries only the fixed fields', () => {
   assert.deepEqual(Object.keys(lease.status()), ['state', 'epoch', 'waitMs', 'yielded', 'held', 'reasons', 'stoppedApps', 'activeCalls', 'holdMs', 'device', 'policy'])
   assert.equal(lease.status().device, 'off')
 })
+
+test('takeOver ([일시중지 · 내가 쓰기]) yields to the person on purpose: the running action stops, queued ones drop, only handBack resumes', async () => {
+  const { lease, events, advance } = harness()
+  const token = lease.begin('click', { target: TEXTEDIT })
+  let release
+  const queued = lease.run('click', { target: TEXTEDIT }, () => new Promise(resolve => { release = resolve }))
+  const dropped = lease.run('click', { target: TEXTEDIT }, () => 'never')
+  await flush()
+  const epochBefore = lease.status().epoch
+  const result = lease.takeOver()
+  assert.equal(result.ok, true)
+  assert.equal(result.notDispatched, 1, 'the second queued action never started')
+  assert.equal(result.status.state, 'user')
+  assert.equal(result.status.yielded, true)
+  assert.ok(result.status.epoch > epochBefore)
+  blocked(() => lease.checkpoint(token), C.USER_INTERVENTION)
+  const yieldedEvent = events.find(event => event.type === 'control.yielded')
+  assert.deepEqual([yieldedEvent.reason, yieldedEvent.epoch], ['user-request', result.status.epoch])
+  assert.deepEqual(Object.keys(yieldedEvent).sort(), ['at', 'epoch', 'reason', 'type'])
+  release('done')
+  assert.equal((await dropped).code, C.USER_INTERVENTION)
+  await queued
+  advance(60_000)
+  blocked(() => lease.begin('click', { target: TEXTEDIT }), C.USER_INTERVENTION)
+  assert.equal(lease.handBack().ok, true)
+  assert.equal(lease.status().state, 'ready')
+})
+
+test('takeOver while unavailable keeps it unavailable and still needs handBack once input returns', () => {
+  const { lease } = harness({ requireMonitor: true })
+  lease.setInputMonitor(false)
+  const result = lease.takeOver()
+  assert.equal(result.status.state, 'unavailable')
+  lease.setInputMonitor(true)
+  assert.equal(lease.status().state, 'user')
+  assert.equal(lease.status().yielded, true)
+  lease.handBack()
+  assert.equal(lease.status().state, 'ready')
+})

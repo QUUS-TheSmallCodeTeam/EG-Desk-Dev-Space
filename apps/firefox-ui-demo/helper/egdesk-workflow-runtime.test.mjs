@@ -220,7 +220,8 @@ test('the bridge opens the workflow runtime after Chat, mounts its routes behind
   assert.match(rootCallback, /workflow\?\.watchRoot\(root\)/)
   assert.ok(at('let workflow = null') < at('const chat = new CodexChatRuntime({'))
   assert.ok(at('  profiles: profileStore,') > at('const chat = new CodexChatRuntime({'))
-  at('  emit: event => { broadcast(event, 2); workflow?.onChatEvent(event) },')
+  // CU-01/02 also hands chat events to the host-activity timeline (computer.used).
+  at('  emit: event => { broadcast(event, 2); workflow?.onChatEvent(event); hostControl.onChatEvent(event) },')
   const open = at('workflow = await openWorkflowRuntime({')
   at("import { createChatEngineAuth } from './codex-bridge-engine-auth.mjs'")
   const auth = at('const ensureChatAuth = createChatEngineAuth({ chat, refreshCodexAccount: refreshAccountState, getCodexAuth: () => authState })')
