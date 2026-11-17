@@ -72,6 +72,7 @@
   --egd-success-ink: var(--egd-success);
   --egd-success-bg: color-mix(in srgb, var(--egd-success) 9%, var(--egd-surface-elevated));
   --egd-shadow: 0 12px 30px rgba(50, 45, 34, .13);
+  --egd-scrim: rgba(37, 42, 38, .28); /* modal backdrop, warm ink */
   --egd-chrome-shadow: 0 3px 14px rgba(31, 47, 52, .09);
   --egd-card-shadow: 0 4px 16px rgba(29, 44, 55, .12);
   --egd-card-shadow-active: 0 7px 21px rgba(29, 44, 55, .15);
@@ -157,6 +158,7 @@
     --egd-success-ink: color-mix(in srgb, var(--egd-success) 40%, var(--egd-on-surface));
     --egd-success-bg: color-mix(in srgb, var(--egd-success) 30%, var(--egd-surface-elevated));
     --egd-shadow: 0 16px 32px rgba(0, 0, 0, .25);
+    --egd-scrim: rgba(0, 0, 0, .45);
     --egd-chrome-shadow: 0 3px 14px rgba(0, 0, 0, .27);
     --egd-card-shadow: 0 4px 16px rgba(0, 0, 0, .33);
     --egd-card-shadow-active: 0 7px 21px rgba(0, 0, 0, .4);
@@ -206,6 +208,7 @@
   --egd-success-ink: color-mix(in srgb, var(--egd-success) 40%, var(--egd-on-surface));
   --egd-success-bg: color-mix(in srgb, var(--egd-success) 30%, var(--egd-surface-elevated));
   --egd-shadow: 0 16px 32px rgba(0, 0, 0, .25);
+  --egd-scrim: rgba(0, 0, 0, .45);
   --egd-chrome-shadow: 0 3px 14px rgba(0, 0, 0, .27);
   --egd-card-shadow: 0 4px 16px rgba(0, 0, 0, .33);
   --egd-card-shadow-active: 0 7px 21px rgba(0, 0, 0, .4);
@@ -1114,7 +1117,7 @@
 .egd-board-missing strong { overflow-wrap: anywhere; }
 .egd-board-missing button { padding: 5px 12px; border: 1px solid var(--egd-line-strong); border-radius: 5px; }
 .egd-board-missing pre { white-space: pre-wrap; overflow-wrap: anywhere; }
-#egd-board-notice, #egd-board-scope, #egd-placement-dialog { position: fixed; z-index: 100100; background: var(--egd-surface-elevated); color: var(--egd-on-surface); border: 1px solid var(--egd-outline); border-radius: 10px; padding: 18px; font: 13px/1.5 var(--egd-font); box-shadow: 0 8px 30px #0002; }
+#egd-board-notice, #egd-board-scope, #egd-placement-dialog { position: fixed; z-index: 100100; background: var(--egd-surface-elevated); color: var(--egd-on-surface); border: 1px solid var(--egd-outline); border-radius: 10px; padding: 18px; font: 13px/1.5 var(--egd-font); box-shadow: var(--egd-shadow); }
 #egd-board-notice {
   /* Keep passive status text away from the lower Chat composer and Dock. */
   top: 64px;
@@ -1154,7 +1157,7 @@
 .egd-placement-menu .egd-board-menu-item:disabled { opacity: var(--egd-opacity-disabled); cursor: default; }
 #egd-board-scope input { padding: 8px; width: 90%; border: 1px solid var(--egd-line-strong); border-radius: 5px; }
 #egd-board-scope button { padding: 6px 10px; margin: 5px 5px 0 0; border: 1px solid var(--egd-line-strong); border-radius: 5px; }
-#egd-desk-recovery { position: fixed; z-index: 100110; left: 50%; bottom: 92px; transform: translateX(-50%); width: min(540px, calc(100vw - 40px)); padding: 18px; background: var(--egd-note-soft); color: var(--egd-on-surface); border: 1px solid var(--egd-note-line); border-radius: 10px; box-shadow: 0 8px 28px #0002; font: 13px/1.55 var(--egd-font); }
+#egd-desk-recovery { position: fixed; z-index: 100110; left: 50%; bottom: 92px; transform: translateX(-50%); width: min(540px, calc(100vw - 40px)); padding: 18px; background: var(--egd-note-soft); color: var(--egd-on-surface); border: 1px solid var(--egd-note-line); border-radius: 10px; box-shadow: var(--egd-shadow); font: 13px/1.55 var(--egd-font); }
 #egd-desk-recovery button { margin: 10px 8px 0 0; padding: 7px 10px; border: 1px solid var(--egd-note-line); border-radius: 6px; }
 /* RT-07 / CTX-01 / CTX-02: '복구 기록' (Desk points), a Board's '버전 기록' and
    the Board conflict choice. Screen chrome over the Canvas, tokens only. */
@@ -4009,7 +4012,7 @@ button.egd-rail-focus-view {
   align-items: center;
   justify-content: center;
   padding: 24px;
-  background: rgba(22, 24, 26, 0.28);
+  background: var(--egd-scrim);
   backdrop-filter: blur(10px);
   -webkit-backdrop-filter: blur(10px);
 }
@@ -5352,12 +5355,6 @@ button.egd-bag-header.egd-bag-header-muted { color: var(--egd-on-surface-variant
   gap: 6px;
 }
 
-.egd-codex-thread-section-title {
-  font-size: 11px;
-  font-weight: 600;
-  color: var(--egd-on-surface-variant);
-}
-
 .egd-codex-thread-add {
   display: inline-flex;
   align-items: center;
@@ -6617,10 +6614,6 @@ button.egd-codex-work-screen .egd-ui-icon { flex: none; width: 14px; height: 14p
   justify-content: flex-start;
 }
 
-.egd-codex-message-row-grouped {
-  margin-top: -12px;
-}
-
 .egd-codex-message-avatar {
   width: 30px;
   height: 30px;
@@ -6657,14 +6650,6 @@ button.egd-codex-work-screen .egd-ui-icon { flex: none; width: 14px; height: 14p
 .egd-codex-message-row-assistant .egd-codex-message-stack,
 .egd-codex-message-row-system .egd-codex-message-stack {
   align-items: flex-start;
-}
-
-.egd-codex-message-role {
-  padding: 0 3px;
-  color: var(--egd-on-surface-variant);
-  font-size: 12px;
-  font-weight: 400;
-  line-height: 1.5;
 }
 
 .egd-codex-message-line {
@@ -6770,16 +6755,8 @@ button.egd-codex-message-activity:focus-visible { outline: var(--egd-focus-outli
   border: 0;
   box-shadow: none;
 }
-.egd-codex-bubble-user {
-  background: var(--egd-chat-mine);
-  border-radius: 15px 3px 15px 15px;
-}
 .egd-codex-bubble-assistant {
   background: var(--egd-chat-paper);
-}
-.egd-codex-bubble-error {
-  background: var(--egd-danger-bg);
-  color: var(--egd-danger-ink);
 }
 
 .egd-codex-bubble-user.egd-codex-bubble-grouped-prev {
@@ -6807,13 +6784,6 @@ button.egd-codex-message-activity:focus-visible { outline: var(--egd-focus-outli
   overflow-wrap: anywhere;
   user-select: text;
   -moz-user-select: text;
-}
-
-.egd-codex-bubble-read {
-  font-size: 11px;
-  font-weight: 600;
-  color: var(--egd-on-surface-variant);
-  white-space: nowrap;
 }
 
 .egd-codex-result-chips {
@@ -6883,12 +6853,6 @@ button.egd-codex-message-activity:focus-visible { outline: var(--egd-focus-outli
 .egd-codex-result-chip-output[data-state="opening"] .egd-codex-result-label { text-decoration: none; }
 .egd-codex-result-chip-output[data-state="unavailable"] { color: var(--egd-on-surface-variant) !important; }
 
-.egd-codex-streaming {
-  margin-top: 5px;
-  font-size: 10px;
-  color: var(--egd-on-surface-variant);
-}
-
 .egd-codex-diagnostics-shell {
   display: flex;
   flex-direction: column;
@@ -6944,15 +6908,6 @@ button.egd-codex-message-activity:focus-visible { outline: var(--egd-focus-outli
   gap: 5px;
   flex-wrap: wrap;
   margin-left: auto;
-}
-
-.egd-codex-error {
-  padding: 10px 12px;
-  border-radius: 10px;
-  background: var(--egd-danger-bg);
-  color: var(--egd-danger-ink);
-  font-size: 11px;
-  line-height: 1.5;
 }
 
 .egd-codex-error[data-testid="chat-binding-held"],
@@ -7297,11 +7252,6 @@ button.egd-codex-message-activity:focus-visible { outline: var(--egd-focus-outli
   border: 1px solid var(--egd-chat-outline);
 }
 
-.egd-codex-input-row:focus-within {
-  border-color: var(--egd-chat-frame);
-  box-shadow: 0 0 0 1px var(--egd-chat-frame);
-}
-
 .egd-codex-compose-actions {
   display: flex;
   justify-content: flex-end;
@@ -7324,10 +7274,6 @@ button.egd-codex-message-activity:focus-visible { outline: var(--egd-focus-outli
   overflow-y: auto;
   overscroll-behavior: contain;
   scrollbar-width: thin;
-}
-
-.egd-codex-input::placeholder {
-  color: var(--egd-on-surface-variant);
 }
 
 /* The enclosing composer carries the visible keyboard-focus ring. */
@@ -7366,11 +7312,6 @@ button.egd-codex-message-activity:focus-visible { outline: var(--egd-focus-outli
   align-items: center;
   gap: 6px;
 }
-.egd-codex-typing-dots {
-  display: inline-flex;
-  gap: 3px;
-  align-items: center;
-}
 .egd-codex-typing-dots span {
   width: 4px;
   height: 4px;
@@ -7401,9 +7342,6 @@ button.egd-codex-message-activity:focus-visible { outline: var(--egd-focus-outli
   display: inline-flex;
   font-size: 11px;
   line-height: 1;
-}
-.egd-codex-read-icon-read {
-  color: var(--egd-success-ink);
 }
 
 /* ============ Settings Canvas Card ============
@@ -8210,7 +8148,7 @@ button.egd-codex-message-activity:focus-visible { outline: var(--egd-focus-outli
 .egd-ontology-header-lens {
   margin-left: auto;
   padding-right: 0;
-  color: rgba(73, 80, 88, 0.66);
+  color: color-mix(in srgb, var(--egd-on-surface-variant) 80%, transparent);
   font: 700 10px var(--egd-font);
   letter-spacing: 0.02em;
   white-space: nowrap;
@@ -8273,7 +8211,7 @@ button.egd-codex-message-activity:focus-visible { outline: var(--egd-focus-outli
   right: 0;
   z-index: 2;
   pointer-events: none;
-  color: rgba(40, 47, 54, 0.76);
+  color: color-mix(in srgb, var(--egd-on-surface) 76%, transparent);
   font-family: var(--egd-font);
 }
 
@@ -8424,7 +8362,7 @@ button.egd-codex-message-activity:focus-visible { outline: var(--egd-focus-outli
   border: 1px solid rgba(205, 201, 194, 0.66);
   border-radius: 999px;
   background: rgba(255, 255, 255, 0.72);
-  color: rgba(55, 62, 69, 0.54);
+  color: color-mix(in srgb, var(--egd-on-surface-variant) 70%, transparent);
   font: 700 10px/1 var(--egd-font);
   letter-spacing: 0.01em;
   box-shadow: 0 5px 18px rgba(30, 38, 45, 0.05);
@@ -8434,7 +8372,7 @@ button.egd-codex-message-activity:focus-visible { outline: var(--egd-focus-outli
 
 .egd-ontology-stage:hover .egd-ontology-stage-hint {
   background: rgba(255, 255, 255, 0.90);
-  color: rgba(45, 52, 59, 0.72);
+  color: color-mix(in srgb, var(--egd-on-surface) 72%, transparent);
 }
 
 .egd-ontology-stage-zoom-label {
@@ -8447,7 +8385,7 @@ button.egd-codex-message-activity:focus-visible { outline: var(--egd-focus-outli
   border: 1px solid rgba(210, 206, 199, 0.76);
   border-radius: 8px;
   background: rgba(255, 255, 255, 0.78);
-  color: rgba(37, 44, 51, 0.86);
+  color: color-mix(in srgb, var(--egd-on-surface) 86%, transparent);
   font: 700 12px/30px var(--egd-font);
   text-align: center;
   box-shadow: 0 8px 22px rgba(30, 38, 45, 0.07);
@@ -8481,7 +8419,7 @@ button.egd-codex-message-activity:focus-visible { outline: var(--egd-focus-outli
   background: transparent;
   display: grid;
   place-items: center;
-  color: rgba(37, 44, 51, 0.76);
+  color: color-mix(in srgb, var(--egd-on-surface) 76%, transparent);
   font: 850 14px/1 var(--egd-font);
   cursor: pointer;
 }
@@ -9085,7 +9023,6 @@ button.egd-codex-message-activity:focus-visible { outline: var(--egd-focus-outli
 .egd-codex-connection-mismatch { border-color: var(--egd-danger-line); background: var(--egd-danger-bg); color: var(--egd-danger-ink); }
 .egd-codex-connection-row { display: flex; align-items: center; gap: 8px; }
 .egd-codex-connection-text { flex: 1 1 auto; min-width: 0; overflow-wrap: anywhere; }
-.egd-codex-connection-details { margin-top: 4px; }
 .egd-codex-connection-details summary { cursor: pointer; font-size: 11px; color: var(--egd-on-surface-variant); }
 .egd-codex-connection-details pre { margin: 4px 0 0; padding: 8px; border-radius: 6px; background: var(--egd-surface-elevated); color: var(--egd-on-surface-variant); font-size: 11px; line-height: 1.6; white-space: pre-wrap; overflow-wrap: anywhere; }
 /* A74/B38: the whole notice reads as one line — state · when it was checked ·

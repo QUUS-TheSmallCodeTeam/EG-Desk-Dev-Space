@@ -247,3 +247,23 @@ test('the Ontology minimap legend and position text are at least the 10px badge 
   assert.ok(column >= 6 + 2 + 2 * 10, `legend column ${column}px`);
   assert.ok(parseFloat(legend['min-height']) - 12 >= 13, 'one 10px line fits the legend strip');
 });
+
+test('no rule repeats an earlier rule with the same selector and the same declarations', () => {
+  const seen = new Set();
+  const repeated = [];
+  for (const rule of rules) {
+    const key = JSON.stringify([rule.media, rule.selectors, rule.declarations]);
+    if (seen.has(key)) repeated.push(rule.selectors.join(', '));
+    seen.add(key);
+  }
+  assert.deepEqual(repeated, []);
+});
+
+test('notices, the recovery bar and the close guard take their shadow and scrim from tokens', () => {
+  assert.equal(declarationsFor('#egd-board-notice')['box-shadow'], 'var(--egd-shadow)');
+  assert.equal(declarationsFor('#egd-desk-recovery')['box-shadow'], 'var(--egd-shadow)');
+  for (const scheme of schemes) {
+    assert.equal(declarationsFor('.egd-agenda-close-guard', { scheme })['background'], 'var(--egd-scrim)');
+    assert.ok(readRootProperties(surfaceCss, { scheme })['--egd-scrim'], `${scheme} scrim token`);
+  }
+});

@@ -12161,9 +12161,11 @@ test('hard-coded light and white colours outside the tokens are down to a short 
     assert.match(badge, /--egd-type-ink: (var|color-mix)\([^;#]+;/, `${kind} ink is a token`);
     assert.match(badge, /background: color-mix\(in srgb, var\(--egd-type-ink\) 10%, var\(--egd-surface-elevated\)\);/, `${kind} wash follows its ink in both schemes`);
   }
-  // Near-black literals are shadows, the close-guard scrim or the invisible resize hit area.
+  // Near-black literals are shadows or the invisible resize hit area; the close-guard
+  // scrim and the notice/recovery shadows are tokens now (DSN-02), so only a few remain.
   const black = declarations.filter(({ literal }) => Math.max(...channels(literal).slice(0, 3)) <= 60);
-  assert.ok(black.length > 5);
+  assert.ok(black.length > 0, 'the scan still sees the remaining black shadows');
+  assert.match(surfaceCss, /\.egd-agenda-close-guard \{[^}]*background: var\(--egd-scrim\);/);
   for (const { head, property, literal } of black) {
     const alpha = channels(literal)[3];
     assert.ok(/shadow|filter/.test(property) || (property === 'background' && alpha <= .3), `${head} ${property}: ${literal}`);
