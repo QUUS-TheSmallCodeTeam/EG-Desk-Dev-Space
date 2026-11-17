@@ -15943,6 +15943,21 @@
           throw error;
         }
       },
+      // Settings '결정 모델 · OpenAI Decisions': only the /decision/* routes.
+      // A refusal carries its code and the provider's verification status.
+      async decisionRequest(path, { method = 'GET', body } = {}) {
+        if (!/^\/decision\/(?:status|credential|mode)$/.test(path)) throw new Error('Invalid decision path');
+        const response = await fetch(`http://127.0.0.1:39218${path}`, { method, headers: { 'Content-Type': 'application/json' },
+          ...(body === undefined ? {} : { body: JSON.stringify(body) }) });
+        let payload = null;
+        try { payload = await response.json(); } catch {}
+        if (!response.ok) {
+          throw Object.assign(new Error(typeof payload?.error === 'string' ? payload.error : `${response.status}`), {
+            status: response.status, code: typeof payload?.code === 'string' ? payload.code : null,
+            verification: typeof payload?.verification === 'string' ? payload.verification : null });
+        }
+        return payload;
+      },
       createProfileTransferScope() {
         const token = epochScope.begin('codex');
         return { signal: token.signal, current: () => epochScope.valid(token) && !token.signal.aborted,
@@ -20633,7 +20648,7 @@
           el('div', { data: { testid: 'settings-claude-engine' } }, claude.engineText),
           claude.connectionText ? el('div', { data: { testid: 'settings-claude-connection' } }, claude.connectionText) : null,
           claude.versionText ? el('div', { data: { testid: 'settings-claude-version' } }, claude.versionText) : null));
-      contentArea.replaceChildren(section, renderComputerControl(), renderConnectedTools(), claudeSection);
+      contentArea.replaceChildren(section, renderComputerControl(), renderConnectedTools(), claudeSection, renderDecisionModel());
     };
 
     // --- 컴퓨터 조작 (CU-01 stage 1): whether ordinary EG-Desk chats keep the
@@ -20693,6 +20708,74 @@
           class: 'egd-settings-btn', type: 'button', data: { testid: 'settings-computer-host-activity' },
           onclick: () => { openHostActivityCard(); },
         }, 'Desk 밖 조작 보기'));
+    };
+
+    // --- 결정 모델 · OpenAI Decisions: key, verification and mode, apart from
+    // the engine cards. The key field is emptied right after the POST; only
+    // the bridge's hint is shown again. Read once per Settings visit.
+    const decision = { status: null, loaded: false, loading: false, busy: false, outcome: null };
+    const decisionApi = (path, init) => {
+      const api = bridge();
+      if (!api?.decisionRequest) return Promise.reject(Object.assign(new Error('Decision settings unavailable'), { status: 0 }));
+      return api.decisionRequest(path, init);
+    };
+    const redrawDecision = () => { if (activeTab === 'account') renderAccountTab(); };
+    const loadDecision = async () => {
+      if (decision.loading) return;
+      decision.loading = true;
+      try { decision.status = await decisionApi('/decision/status'); } catch { decision.status = null; }
+      decision.loading = false; decision.loaded = true;
+      redrawDecision();
+    };
+    const runDecision = async (work) => {
+      if (decision.busy) return;
+      decision.busy = true; redrawDecision();
+      try { await work(); } finally { decision.busy = false; redrawDecision(); }
+    };
+    const saveDecisionKey = (input) => runDecision(async () => {
+      const apiKey = input.value.trim();
+      input.value = '';
+      if (!apiKey) return;
+      try { const result = await decisionApi('/decision/credential', { method: 'POST', body: { apiKey } }); decision.status = result; decision.outcome = AccountSettingsView.decisionCredentialOutcome({ result }); }
+      catch (error) { decision.outcome = AccountSettingsView.decisionCredentialOutcome({ error }); }
+    });
+    const deleteDecisionKey = () => runDecision(async () => {
+      try { decision.status = await decisionApi('/decision/credential', { method: 'DELETE' }); decision.outcome = { phase: 'done', text: '키를 지웠습니다.' }; }
+      catch (error) { decision.outcome = AccountSettingsView.decisionCredentialOutcome({ error }); }
+    });
+    const setDecisionMode = (mode) => runDecision(async () => {
+      try { const result = await decisionApi('/decision/mode', { method: 'POST', body: { mode } }); decision.status = { ...(decision.status || {}), mode: result.mode }; decision.outcome = null; }
+      catch { decision.outcome = { phase: 'error', text: '모드를 저장하지 못했습니다.' }; }
+    });
+    const renderDecisionModel = () => {
+      if (!decision.loaded && !decision.loading) void loadDecision();
+      const view = AccountSettingsView.decisionSettingsView(decision.status, { connected: state.codex.connected });
+      const busy = decision.busy;
+      const input = el('input', { type: 'password', class: 'egd-settings-decision-input', autocomplete: 'off', spellcheck: 'false',
+        placeholder: 'sk-proj-…', 'aria-label': 'OpenAI API 키', disabled: !view.canSave || busy ? 'true' : null, data: { testid: 'settings-decision-key' },
+        onkeydown: (event) => { if (event.key === 'Enter') { event.preventDefault(); void saveDecisionKey(input); } } });
+      return el('section', { class: 'egd-settings-section egd-settings-decision', 'aria-label': AccountSettingsView.DECISION_SECTION_TITLE,
+        data: { testid: 'settings-decision', state: view.status, mode: view.mode } },
+        el('div', { class: 'egd-settings-section-title' }, AccountSettingsView.DECISION_SECTION_TITLE),
+        el('p', { class: 'egd-settings-section-sub' }, '자료 고르기 같은 객관식 판단을 맡는 별도 모델입니다. 답변은 지금처럼 Codex·Claude가 씁니다.'),
+        el('div', { class: 'egd-settings-decision-key-row' },
+          el('span', { class: 'egd-settings-decision-hint', data: { testid: 'settings-decision-hint' } }, view.keyLine),
+          view.canDelete ? el('button', { class: 'egd-settings-btn', type: 'button', disabled: busy ? 'true' : null, data: { testid: 'settings-decision-delete' },
+            onclick: () => { void deleteDecisionKey(); } }, '키 지우기') : null),
+        view.storeNote ? el('div', { class: 'egd-settings-decision-note', role: 'status' }, view.storeNote) : null,
+        el('div', { class: 'egd-settings-decision-key-row' }, input,
+          el('button', { class: 'egd-settings-btn egd-settings-btn-primary', type: 'button', disabled: !view.canSave || busy ? 'true' : null,
+            data: { testid: 'settings-decision-save' }, onclick: () => { void saveDecisionKey(input); } }, busy ? '확인하는 중…' : '확인 후 저장')),
+        decision.outcome ? el('div', { class: `egd-settings-decision-result egd-settings-decision-result-${decision.outcome.phase}`,
+          role: decision.outcome.phase === 'error' ? 'alert' : 'status', data: { testid: 'settings-decision-result', phase: decision.outcome.phase } }, decision.outcome.text) : null,
+        el('div', { class: 'egd-settings-decision-modes', role: 'radiogroup', 'aria-label': '결정 모델 모드' },
+          ...view.modes.map((choice) => el('button', { type: 'button', role: 'radio', 'aria-checked': String(choice.selected),
+            class: `egd-settings-decision-mode${choice.selected ? ' egd-settings-decision-mode-on' : ''}`,
+            disabled: !view.modeEnabled || busy ? 'true' : null, data: { testid: 'settings-decision-mode', mode: choice.value },
+            onclick: () => { if (!choice.selected) void setDecisionMode(choice.value); } }, choice.label))),
+        el('p', { class: 'egd-settings-section-sub', data: { testid: 'settings-decision-mode-note' } }, view.modeNote),
+        view.budgetLine ? el('p', { class: 'egd-settings-section-sub', data: { testid: 'settings-decision-budget' } }, view.budgetLine) : null,
+        el('p', { class: 'egd-settings-section-sub egd-settings-decision-note', data: { testid: 'settings-decision-credit-note' } }, view.creditNote));
     };
 
     // --- 연결된 도구 (CU-07): external tools ordinary Codex chats inherit from

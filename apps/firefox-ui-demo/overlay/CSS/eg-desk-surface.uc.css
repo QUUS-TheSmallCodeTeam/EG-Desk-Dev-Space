@@ -10672,6 +10672,29 @@ button.egd-codex-working-bubble:focus-visible { outline: var(--egd-focus-outline
 .egd-settings-computer-change { margin-top: 6px; font-size: 11.5px; color: var(--egd-on-surface-variant); }
 .egd-settings-computer-change-done { color: var(--egd-success-ink); }
 .egd-settings-computer-change-error { color: var(--egd-warning-ink); }
+/* Settings '결정 모델 · OpenAI Decisions': key field, result line and the
+   끔 · 기록만 · 사용 choice. Tokens only. */
+.egd-settings-decision-key-row { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 10px; margin-top: 6px; }
+.egd-settings-decision-hint { font-size: 12px; color: var(--egd-on-surface-variant); }
+.egd-settings-decision-input {
+  flex: 1 1 200px;
+  min-width: 0;
+  padding: 4px 8px;
+  border: 1px solid var(--egd-outline-variant);
+  border-radius: 7px;
+  background: var(--egd-window-alt);
+  color: inherit;
+  font: inherit;
+  font-size: 12px;
+}
+.egd-settings-decision-result { margin-top: 6px; font-size: 11.5px; color: var(--egd-on-surface-variant); }
+.egd-settings-decision-result-done { color: var(--egd-success-ink); }
+.egd-settings-decision-result-warning, .egd-settings-decision-result-error { color: var(--egd-warning-ink); }
+.egd-settings-decision-modes { display: inline-flex; margin-top: 8px; border: 1px solid var(--egd-outline-variant); border-radius: 999px; overflow: hidden; }
+.egd-settings-decision-mode { padding: 2px 12px; border: 0; background: transparent; color: var(--egd-on-surface-variant); font: inherit; font-size: 12px; cursor: pointer; }
+.egd-settings-decision-mode-on { background: var(--egd-success-bg); color: var(--egd-success-ink); font-weight: 600; }
+.egd-settings-decision-mode:disabled { opacity: var(--egd-opacity-disabled); cursor: default; }
+.egd-settings-decision-note { font-size: 11px; }
 .egd-settings-mcp-status-off { color: var(--egd-on-surface-variant); }
 .egd-settings-mcp-off { margin-top: 6px; font-size: 11px; color: var(--egd-on-surface-variant); }
 .egd-codex-activity-control {
