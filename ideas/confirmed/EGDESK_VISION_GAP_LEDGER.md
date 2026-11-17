@@ -24,6 +24,7 @@
 
 | 날짜 | 항목 | 상태 변화 | 근거 |
 |---|---|---|---|
+| 2026-11-18 | (조사) BRW-08 headless 포커스 탐침(`dc3f61d`) | 상태 유지(일부) | Reveal 클릭 직후 콘텐츠 `document.hasFocus()`는 false, 클릭 처리기 안의 `query.focus()` 직후에도 `activeElement`가 body라서 포커스 호출 자체가 거부된다. 카드 `<browser>`는 `docShellIsActive=true`인데 하네스의 `browserEl.focus()` 뒤에도 chrome 포커스는 body에 머물고 `focusedContentBrowsingContext`가 없다. 카드 `<browser>`가 chrome 포커스를 못 받는 이유(카드 컨테이너나 `-moz-user-focus` 추정)는 미확인이고, 실화면에서도 사람이 카드를 누르기 전에는 같은지 확인이 필요하다. CNV-04 라벨은 이번에 조사하지 못했다 |
 | 2026-11-18 | (회귀) 통합 `dc3f61d` 전체 `scripts`·`helper` | 기록 | 227파일 5817 통과 · 0 실패 · 14 건너뜀(37초, 동시성 4). 부하 타이밍 시험 3개는 `501bc4a`에서 고정 여유 대신 이벤트 대기로 바꿈 |
 | 2026-11-18 | (병합) CHAT-01 Board 저장 대화 결합 | 일부→완료 | `fa2717d`. Board 저장 시 Chat 카드에 `threadBinding`(clientThreadId, Agent profileId·revision, 비밀·본문 없음). 다시 열면 같은 대화로 전환, 방에 이미 고른 Agent가 있으면 그것을 유지. 예전 Board·사라진 대화는 기존대로 복원. 재시작 복원은 fixture headless 통과(앞 행), Board 다시 열기는 단위 시험만 |
 | 2026-11-18 | (병합) UX-06 Agent 알림 표면 | 일부→완료 | `d7634fd`·`88237ad`·`500e4d0`. 승인·입력 요청, 막힌 실행, Chat이 안 보일 때 끝난 실행만 알림 한 개(외 N건), 클릭·Enter로 Chat 엿보기, Esc 층 등록, 포커스 이동·소리·저장 없음. Agent 이름은 실행→방 멤버→방 Agent 순. 병합 리뷰에서 `byId` 범위 밖 호출(chat 이벤트마다 예외)을 찾아 `500e4d0`에서 고치고 범위 시험 추가. Firefox 실화면 미확인 |
