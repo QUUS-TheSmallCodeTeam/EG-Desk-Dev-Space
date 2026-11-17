@@ -41,6 +41,8 @@ const titleLocator = value => /:\/\/|^\s*(?:~[\\/]|[a-z]:[\\/]|\\\\|\/)/i.test(v
 const stepTargets = step => Array.isArray(step?.targets) && step.targets.length ? step.targets : step?.target ? [step.target] : []
 const withoutOwner = ({ ownerScope, ...record }) => record
 const publicComment = ({ ownerScope, requestDigest, ...record }) => record
+// Comments saved before editing existed carry no revision: they are revision 1.
+const commentRevision = record => Number.isSafeInteger(record?.revision) && record.revision > 0 ? record.revision : 1
 const commentRequestId = value => typeof value === 'string' && /^[\da-f]{8}-[\da-f]{4}-[\da-f]{4}-[\da-f]{4}-[\da-f]{12}$/i.test(value)
 const plainObject = value => Boolean(value) && typeof value === 'object' && !Array.isArray(value)
 const conversationOf = value => (typeof value === 'string' && value && value.length <= 512 ? value : null)
@@ -964,6 +966,7 @@ export class ContextRuntime {
       const previous = existing.find(record => typeof record.clientRequestId === 'string' && record.clientRequestId.toLowerCase() === clientRequestId.toLowerCase())
       if (previous) {
         if (previous.requestDigest !== requestDigest) reject('BRIEFING_COMMENT_CONFLICT', 'clientRequestId was already used for a different comment', 409)
+        if (previous.deleted === true) reject('BRIEFING_COMMENT_DELETED', 'This comment was deleted', 409)
         return publicComment(previous)
       }
       if (stepIndex < 0) reject('BRIEFING_STEP_UNKNOWN', 'This step is not part of the briefing', 404)
@@ -986,7 +989,7 @@ export class ContextRuntime {
     const ownerKey = this.assertBriefingCommentAuthority(authority)
     const briefing = await this.store.getRecord(ownerKey, 'briefings', briefingId)
     this.assertBriefingCommentAuthority(authority, briefing)
-    const comments = (await this.store.listRecords(ownerKey, 'briefing-comments', record => record.briefingId === briefing.id)).map(publicComment).sort((a, b) => a.seq - b.seq)
+    const comments = (await this.store.listRecords(ownerKey, 'briefing-comments', record => record.briefingId === briefing.id && record.deleted !== true)).map(publicComment).sort((a, b) => a.seq - b.seq)
     this.assertBriefingCommentAuthority(authority, briefing)
     return { briefingId: briefing.id, comments }
   }
@@ -996,11 +999,7 @@ export class ContextRuntime {
     const ownerKey = this.assertBriefingCommentAuthority(authority)
     const { resolved } = body
     return this.serialize('commentQueue', async () => {
-      this.assertBriefingCommentAuthority(authority)
-      const current = withoutOwner(await this.store.getRecord(ownerKey, 'briefing-comments', commentId))
-      this.assertBriefingCommentAuthority(authority, current)
-      const briefing = await this.store.getRecord(ownerKey, 'briefings', current.briefingId)
-      this.assertBriefingCommentAuthority(authority, briefing)
+      const { current, briefing } = await this.liveBriefingComment(ownerKey, commentId, authority)
       if (current.resolved === resolved) return publicComment(current)
       const now = this.now()
       const next = { ...current, resolved, resolvedAt: resolved ? now : null, updatedAt: now }
@@ -1008,6 +1007,65 @@ export class ContextRuntime {
       this.assertBriefingCommentAuthority(authority, briefing)
       return publicComment(next)
     })
+  }
+
+  // CHAT-05: the person may rewrite or remove their own saved comment. Both
+  // name the revision they saw (a missing revision on older records is 1), so
+  // a stale screen cannot overwrite a newer text. Delete keeps a tombstone
+  // without the text: numbers are never reused and a replayed add with the
+  // same request UUID cannot bring the comment back.
+  async editBriefingComment(commentId, body, authority) {
+    if (!plainObject(body) || Object.keys(body).some(key => !['text', 'revision'].includes(key))) reject('INVALID_BRIEFING_COMMENT', 'Send { text, revision }', 400)
+    const text = typeof body.text === 'string' ? body.text.trim() : ''
+    if (!text || text.length > BRIEFING_COMMENT_MAX) reject('INVALID_BRIEFING_COMMENT', `A comment needs 1–${BRIEFING_COMMENT_MAX} characters`, 400)
+    if (!Number.isSafeInteger(body.revision) || body.revision < 1) reject('INVALID_BRIEFING_COMMENT', 'revision must be the positive revision the screen shows', 400)
+    const { revision } = body
+    const ownerKey = this.assertBriefingCommentAuthority(authority)
+    return this.serialize('commentQueue', async () => {
+      const { current, briefing } = await this.liveBriefingComment(ownerKey, commentId, authority)
+      const currentRevision = commentRevision(current), publicValue = publicText(text, Infinity)
+      // A retried edit whose answer was lost finds its own text already saved.
+      if (current.text === publicValue) return publicComment(current)
+      if (revision !== currentRevision) reject('BRIEFING_COMMENT_CONFLICT', 'This comment changed since it was shown; read it again before editing', 409)
+      const now = this.now()
+      const next = { ...current, text: publicValue, revision: currentRevision + 1, editedAt: now, updatedAt: now }
+      await this.store.replaceRecord(ownerKey, 'briefing-comments', commentId, next)
+      this.assertBriefingCommentAuthority(authority, briefing)
+      return publicComment(next)
+    })
+  }
+
+  async deleteBriefingComment(commentId, body, authority) {
+    if (!plainObject(body) || Object.keys(body).some(key => key !== 'revision') || !Number.isSafeInteger(body.revision) || body.revision < 1) reject('INVALID_BRIEFING_COMMENT', 'Send { revision }', 400)
+    const { revision } = body
+    const ownerKey = this.assertBriefingCommentAuthority(authority)
+    return this.serialize('commentQueue', async () => {
+      this.assertBriefingCommentAuthority(authority)
+      const current = withoutOwner(await this.store.getRecord(ownerKey, 'briefing-comments', commentId))
+      this.assertBriefingCommentAuthority(authority, current)
+      const briefing = await this.store.getRecord(ownerKey, 'briefings', current.briefingId)
+      this.assertBriefingCommentAuthority(authority, briefing)
+      const receipt = record => ({ id: commentId, briefingId: record.briefingId, stepId: record.stepId, seq: record.seq, deleted: true, deletedAt: record.deletedAt })
+      // Deleting twice is the same request: the first receipt stands.
+      if (current.deleted === true) return receipt(current)
+      if (revision !== commentRevision(current)) reject('BRIEFING_COMMENT_CONFLICT', 'This comment changed since it was shown; read it again before deleting', 409)
+      const now = this.now()
+      const { text, ...kept } = current
+      const next = { ...kept, text: '', deleted: true, deletedAt: now, updatedAt: now }
+      await this.store.replaceRecord(ownerKey, 'briefing-comments', commentId, next)
+      this.assertBriefingCommentAuthority(authority, briefing)
+      return receipt(next)
+    })
+  }
+
+  async liveBriefingComment(ownerKey, commentId, authority) {
+    this.assertBriefingCommentAuthority(authority)
+    const current = withoutOwner(await this.store.getRecord(ownerKey, 'briefing-comments', commentId))
+    this.assertBriefingCommentAuthority(authority, current)
+    const briefing = await this.store.getRecord(ownerKey, 'briefings', current.briefingId)
+    this.assertBriefingCommentAuthority(authority, briefing)
+    if (current.deleted === true) reject('BRIEFING_COMMENT_DELETED', 'This comment was deleted', 404)
+    return { current, briefing }
   }
 
   dispatch(run, event) {

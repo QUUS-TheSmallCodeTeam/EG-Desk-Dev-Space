@@ -2018,3 +2018,65 @@ test('first Chat source inspection reports source-scoped bindings and delivery r
   assert.notEqual(namedLatestB.body.delivered.binding.answerId, a3.answerId)
   await finish(a3, 'answer-a3')
 })
+
+// CHAT-05: edit and delete of a saved step comment (guarded POST routes).
+test('a saved comment can be edited by revision and deleted to a tombstone; numbers are never reused', async t => {
+  const h = await commentHarness(t)
+  const local = (method, endpoint, body, extra = {}) => {
+    const req = jsonRequest(method, body)
+    req.url = endpoint; req.headers.host = '127.0.0.1:39218'; req.socket = { remoteAddress: '127.0.0.1' }
+    Object.assign(req.headers, extra)
+    const res = httpResponse()
+    return createContextHttpHandler(h.contexts, async () => {})(req, res, new URL(`http://localhost${endpoint}?${new URLSearchParams(h.route)}`)).then(() => res)
+  }
+  const add = h.body({ text: 'First thought' })
+  const first = (await h.request('POST', h.endpoint, add)).body.comment
+  const second = (await h.request('POST', h.endpoint, h.body({ stepId: 'a-only', text: 'Second', sourceIds: [h.a.sourceId] }))).body.comment
+  assert.equal(Object.hasOwn(first, 'revision'), false, 'an unedited comment keeps its original shape (revision 1)')
+  const edit = `/context/briefing-comments/${first.id}/edit`, remove = `/context/briefing-comments/${first.id}/delete`
+
+  assert.equal((await local('POST', edit, { text: 'x', revision: 1 }, { origin: 'https://evil.example' })).status, 403, 'foreign origin is refused')
+  assert.equal((await local('GET', edit)).status, 405)
+  for (const bad of [{ text: ' ', revision: 1 }, { text: 'x'.repeat(2001), revision: 1 }, { text: 'x' }, { text: 'x', revision: 0 }, { text: 'x', revision: 1, resolved: true }]) {
+    assert.equal((await local('POST', edit, bad)).status, 400, JSON.stringify(bad).slice(0, 60))
+  }
+  const edited = await local('POST', edit, { text: '  Rewritten thought  ', revision: 1 })
+  assert.equal(edited.status, 200)
+  assert.equal(edited.body.comment.text, 'Rewritten thought')
+  assert.equal(edited.body.comment.revision, 2)
+  assert.equal(edited.body.comment.seq, 1)
+  assert.equal(edited.body.comment.clientRequestId, add.clientRequestId)
+  assert.equal(typeof edited.body.comment.editedAt, 'number')
+  assert.deepEqual((await local('POST', edit, { text: 'Rewritten thought', revision: 1 })).body.comment, edited.body.comment, 'a retried edit finds its own text')
+  const stale = await local('POST', edit, { text: 'Stale screen', revision: 1 })
+  assert.equal(stale.status, 409)
+  assert.equal(stale.body.code, 'BRIEFING_COMMENT_CONFLICT')
+  assert.deepEqual((await h.request('POST', h.endpoint, add)).body.comment, edited.body.comment, 'replaying the original add returns the edited record')
+  const resolved = await h.request('POST', `/context/briefing-comments/${first.id}`, { resolved: true })
+  assert.equal(resolved.body.comment.text, 'Rewritten thought')
+
+  assert.equal((await local('POST', remove, { revision: 1 })).body.code, 'BRIEFING_COMMENT_CONFLICT', 'delete names the revision it saw')
+  assert.equal((await local('POST', remove, {})).status, 400)
+  const deleted = await local('POST', remove, { revision: 2 })
+  assert.equal(deleted.status, 200)
+  assert.deepEqual(Object.keys(deleted.body.deleted).sort(), ['briefingId', 'deleted', 'deletedAt', 'id', 'seq', 'stepId'])
+  assert.equal(deleted.body.deleted.deleted, true)
+  assert.deepEqual((await local('POST', remove, { revision: 2 })).body, deleted.body, 'deleting twice returns the first receipt')
+  assert.deepEqual((await h.request('GET', h.endpoint)).body.comments.map(item => item.id), [second.id])
+  const stored = await h.store.getRecord('email:a@example.com', 'briefing-comments', first.id)
+  assert.equal(stored.text, '', 'the tombstone keeps no comment text')
+  assert.equal(JSON.stringify(stored).includes('Rewritten'), false)
+  for (const [endpoint, body] of [[edit, { text: 'Back', revision: 2 }], [`/context/briefing-comments/${first.id}`, { resolved: false }]]) {
+    const response = endpoint === edit ? await local('POST', endpoint, body) : await h.request('POST', endpoint, body)
+    assert.equal(response.status, 404)
+    assert.equal(response.body.code, 'BRIEFING_COMMENT_DELETED')
+  }
+  const replay = await h.request('POST', h.endpoint, add)
+  assert.equal(replay.body.code, 'BRIEFING_COMMENT_DELETED', 'a replayed add cannot bring a deleted comment back')
+  const third = (await h.request('POST', h.endpoint, h.body({ text: 'Third' }))).body.comment
+  assert.equal(third.seq, 3, 'the deleted number is not reused')
+
+  h.changeOwner('email:b@example.com')
+  assert.equal((await local('POST', `/context/briefing-comments/${third.id}/edit`, { text: 'Takeover', revision: 1 })).status, 403)
+  assert.equal((await local('POST', `/context/briefing-comments/${third.id}/delete`, { revision: 1 })).status, 403)
+})

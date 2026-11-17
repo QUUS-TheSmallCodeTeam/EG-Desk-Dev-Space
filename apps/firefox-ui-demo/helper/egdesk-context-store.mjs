@@ -22,8 +22,9 @@ const copy = value => JSON.parse(JSON.stringify(value))
 // subscription ownerKey or process-local epoch, even from an internal caller.
 const engineProvenance = engine => ({ engineId: engine.engineId, ...(small(engine.engineProfileId) ? { engineProfileId: engine.engineProfileId } : {}) })
 const RECORD_KINDS = ['sources', 'blobs', 'bindings', 'packets', 'briefings', 'readers', 'scratch', 'deliveries', 'threads', 'outputs', 'briefing-comments']
-// Everything else is write-once. A briefing comment keeps its text and anchor;
-// only its resolved state may change (CHAT-05).
+// Everything else is write-once. A briefing comment keeps its anchor; its
+// resolved state and (by revision) its text may change, and delete leaves a
+// tombstone without text (CHAT-05).
 const MUTABLE_KINDS = new Set(['briefing-comments'])
 
 export function appDataDirectory(env = process.env, home = os.homedir(), platform = os.platform()) {
