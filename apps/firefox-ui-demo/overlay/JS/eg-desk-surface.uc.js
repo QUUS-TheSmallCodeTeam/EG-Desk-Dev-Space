@@ -15148,9 +15148,19 @@
       rootSseReady,
       // BRW-04: a user's Browser card arrived at a new top-level location. The
       // bridge hears origin + path, and a finished sign-in when an open gate matches.
-      reportBrowserLocation(cardId, url) {
+      reportBrowserLocation(cardId, url, options = {}) {
         if (!state.codex.connected) return [];
-        return browserWorkflow.location(cardId, url);
+        return browserWorkflow.location(cardId, url, options);
+      },
+      // A top-level load finished, and a page-opened popup closed (by its page
+      // or by 대표님): the bridge decides whether that finished a sign-in (D-B11).
+      reportBrowserLoaded(cardId, url, options = {}) {
+        if (!state.codex.connected) return [];
+        return browserWorkflow.loaded(cardId, url, options);
+      },
+      reportBrowserPopupClosed(cardId, url, options = {}) {
+        if (!state.codex.connected) return [];
+        return browserWorkflow.popupClosed(cardId, url, options);
       },
       // BRW-13: 대표님 took a Browser Card back from this room's run. One local
       // system line in that room; nothing is sent and nothing is saved.
@@ -18564,6 +18574,7 @@
       });
     }
     if (isCardFullscreen(card)) exitCardFullscreen(card, { restoreRect: false });
+    try { card._reportPopupClosed?.('user'); } catch {}
     unregisterSourceRefCard(card);
     try {
       if (typeof cleanup === 'function') cleanup();
@@ -23530,6 +23541,8 @@
     });
     const card = deskWindow.root;
     if (browserIdentity) card._browserIdentity = cloneJson(browserIdentity);
+    // BRW-04: a popup a page opened keeps the card it came from for workflow events.
+    if (typeof options.popupOpenerCardId === 'string' && options.popupOpenerCardId !== id) card._popupOpenerCardId = options.popupOpenerCardId;
     if (!options.background) revealPlacedCanvasCard(card, placement, { kind: 'browser', opener: options.opener });
 
     const urlInput = el('input', {
@@ -24858,7 +24871,17 @@
     };
     const reportBrowserLocation = (uri) => {
       if (card.dataset.codexRole === 'auth' || !card.isConnected) return;
-      try { state.codexBridge?.reportBrowserLocation?.(card.id, uri); } catch {}
+      try { state.codexBridge?.reportBrowserLocation?.(card.id, uri, { openerCardId: card._popupOpenerCardId || null }); } catch {}
+    };
+    const reportBrowserLoaded = () => {
+      if (card.dataset.codexRole === 'auth' || !card.isConnected) return;
+      try { state.codexBridge?.reportBrowserLoaded?.(card.id, readArrivedBrowserUri(), { openerCardId: card._popupOpenerCardId || null }); } catch {}
+    };
+    // Once per popup card: 'page' when the site's own window.close() asked, else 'user'.
+    card._reportPopupClosed = (closedBy) => {
+      if (!card._popupOpenerCardId || card._popupCloseReported || card.dataset.codexRole === 'auth') return;
+      card._popupCloseReported = true;
+      try { state.codexBridge?.reportBrowserPopupClosed?.(card.id, readArrivedBrowserUri(), { openerCardId: card._popupOpenerCardId, closedBy }); } catch {}
     };
     const syncBrowserStateFromBrowser = (options = {}) => {
       reportBrowserLocation(readArrivedBrowserUri());
@@ -25787,10 +25810,24 @@
         reportBrowserLocation(location?.spec || '');
         enforceAgentNavigationGuard(location?.spec || '');
       },
-      onStateChange() {}, onProgressChange() {}, onStatusChange() {}, onSecurityChange() {}, onContentBlockingEvent() {},
+      onStateChange(webProgress, _request, stateFlags) {
+        if (webProgress && webProgress.isTopLevel === false) return;
+        const flags = Ci.nsIWebProgressListener;
+        if ((stateFlags & flags.STATE_STOP) && (stateFlags & flags.STATE_IS_WINDOW)) reportBrowserLoaded();
+      },
+      onProgressChange() {}, onStatusChange() {}, onSecurityChange() {}, onContentBlockingEvent() {},
     };
     card._browserLocationListener = browserLocationListener;
-    try { xulBrowser.webProgress?.addProgressListener(browserLocationListener, Ci.nsIWebProgress.NOTIFY_LOCATION); } catch {}
+    try { xulBrowser.webProgress?.addProgressListener(browserLocationListener, Ci.nsIWebProgress.NOTIFY_LOCATION | Ci.nsIWebProgress.NOTIFY_STATE_WINDOW); } catch {}
+    // BRW-03/04: only a script's own window.close() becomes DOMWindowClose; a
+    // page-opened popup card then closes and reports closedBy 'page'.
+    const onBrowserWindowClose = (ev) => {
+      if (!card._popupOpenerCardId || !card.isConnected || ev.target !== xulBrowser) return;
+      try { ev.preventDefault(); ev.stopPropagation(); } catch {}
+      card._reportPopupClosed('page');
+      closeCanvasCard(card);
+    };
+    try { xulBrowser.addEventListener('DOMWindowClose', onBrowserWindowClose, true); } catch {}
     for (const eventName of ['FullZoomChange', 'TextZoomChange']) {
       xulBrowser.addEventListener(eventName, onBrowserPageZoom, true);
     }
@@ -25934,6 +25971,7 @@
         try { xulBrowser.removeEventListener(eventName, onBrowserLoadDone, true); } catch {}
       }
       try { xulBrowser.removeEventListener('DOMTitleChanged', onBrowserTitle, true); } catch {}
+      try { xulBrowser.removeEventListener('DOMWindowClose', onBrowserWindowClose, true); } catch {}
       for (const eventName of ['FullZoomChange', 'TextZoomChange']) {
         xulBrowser.removeEventListener(eventName, onBrowserPageZoom, true);
       }
@@ -26009,6 +26047,7 @@
           privateBrowsingId: sourceAttributes.privateBrowsingId } } : {}),
         ...(options.deferInitialLoad ? { deferInitialLoad: true } : {}), ...(source?._sourceRef ? { sourceRef: source._sourceRef } : {}),
         ...(source?._browserIdentity ? { browserIdentity: source._browserIdentity } : {}),
+        ...(source?.id ? { popupOpenerCardId: source.id } : {}),
         ...(openWindowInfo ? { openWindowInfo } : {}) });
     } catch {
       try { openWindowInfo?.cancel?.(); } catch {}

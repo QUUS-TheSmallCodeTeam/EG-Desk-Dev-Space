@@ -15859,18 +15859,72 @@ test('Browser location reports: one navigated per new location, a sign-in report
 test('Browser cards report their arrived location for user cards only, through the bridge, with no URL in logs', () => {
   const reportFn = surfaceSource.match(/    const reportBrowserLocation = \(uri\) => \{\n([\s\S]*?)\n    \};/)?.[1] || '';
   assert.match(reportFn, /if \(card\.dataset\.codexRole === 'auth' \|\| !card\.isConnected\) return;/, 'the Codex sign-in card is not a workflow Browser');
-  assert.match(reportFn, /state\.codexBridge\?\.reportBrowserLocation\?\.\(card\.id, uri\)/);
+  assert.match(reportFn, /state\.codexBridge\?\.reportBrowserLocation\?\.\(card\.id, uri, \{ openerCardId: card\._popupOpenerCardId \|\| null \}\)/);
   assert.match(surfaceSource, /const readArrivedBrowserUri = \(\) => \{\n      try \{ return xulBrowser\?\.currentURI\?\.spec \|\| ''; \} catch \{ return ''; \}\n    \};/,
     'the arrived location, never the requested src');
   assert.match(surfaceSource, /const syncBrowserStateFromBrowser = \(options = \{\}\) => \{\n      reportBrowserLocation\(readArrivedBrowserUri\(\)\);/);
   assert.match(surfaceSource, /onLocationChange\(webProgress, _request, location\) \{\n        if \(webProgress && webProgress\.isTopLevel === false\) return;\n        reportBrowserLocation\(location\?\.spec \|\| ''\);/);
-  assert.match(surfaceSource, /xulBrowser\.webProgress\?\.addProgressListener\(browserLocationListener, Ci\.nsIWebProgress\.NOTIFY_LOCATION\)/);
-  const bridgeMethod = surfaceSource.match(/      reportBrowserLocation\(cardId, url\) \{\n([\s\S]*?)\n      \},/)?.[1] || '';
-  assert.match(bridgeMethod, /if \(!state\.codex\.connected\) return \[\];\n        return browserWorkflow\.location\(cardId, url\);/);
+  assert.match(surfaceSource, /xulBrowser\.webProgress\?\.addProgressListener\(browserLocationListener, Ci\.nsIWebProgress\.NOTIFY_LOCATION \| Ci\.nsIWebProgress\.NOTIFY_STATE_WINDOW\)/);
+  const bridgeMethod = surfaceSource.match(/      reportBrowserLocation\(cardId, url, options = \{\}\) \{\n([\s\S]*?)\n      \},/)?.[1] || '';
+  assert.match(bridgeMethod, /if \(!state\.codex\.connected\) return \[\];\n        return browserWorkflow\.location\(cardId, url, options\);/);
   assert.match(surfaceSource, /post: \(body\) => fetchJson\('\/events\/browser', \{ method: 'POST', body: JSON\.stringify\(body\) \}\),/);
   assert.match(surfaceSource, /        case 'task\.graph':\n          browserWorkflow\.graph\(event\.graph\);\n          taskGraphFrame\(event\.graph\);\n          return;/);
   const onError = surfaceSource.match(/onError: \(error\) => \{([^\n]*)\},/)?.[1] || '';
   assert.ok(onError && !/url|uri|body/i.test(onError), 'a refused report logs its status, never the address');
+});
+
+test('BRW-04 (D-B11): loaded per finished load, popupClosed once with its opener and who closed it, origin + path only', async () => {
+  let clock = 0;
+  const posted = [];
+  const reporter = Surface.createBrowserWorkflowReporter({ post: async body => { posted.push(body); }, now: () => clock });
+  assert.deepEqual(reporter.loaded('egd-browser-card-1', 'https://app.example/home?x=SECRET'),
+    [{ cardId: 'egd-browser-card-1', kind: 'loaded', url: 'https://app.example/home' }]);
+  assert.deepEqual(reporter.loaded('egd-browser-card-1', 'https://app.example/home'), [], 'the same load seen twice folds');
+  clock = Surface.BROWSER_LOADED_REPEAT_MS;
+  assert.equal(reporter.loaded('egd-browser-card-1', 'https://app.example/home').length, 1, 'a later reload of the same page counts');
+  assert.deepEqual(reporter.loaded('egd-browser-card-1', 'about:blank'), []);
+  clock = 5000;
+  assert.deepEqual(reporter.location('egd-browser-card-5', 'https://idp.example/signin?state=s', { openerCardId: 'egd-browser-card-1' }),
+    [{ cardId: 'egd-browser-card-5', kind: 'navigated', url: 'https://idp.example/signin', openerCardId: 'egd-browser-card-1' }]);
+  assert.deepEqual(reporter.popupClosed('egd-browser-card-6', 'https://idp.example/x', { closedBy: 'page' }), [], 'no opener: not a popup');
+  assert.deepEqual(reporter.popupClosed('egd-browser-card-6', 'https://idp.example/x', { openerCardId: 'egd-browser-card-6', closedBy: 'page' }), []);
+  assert.deepEqual(reporter.popupClosed('egd-browser-card-6', 'https://idp.example/x', { openerCardId: 'egd-browser-card-1', closedBy: 'script' }), []);
+  assert.deepEqual(reporter.popupClosed('egd-browser-card-5', 'about:blank', { openerCardId: 'egd-browser-card-1', closedBy: 'page' }),
+    [{ cardId: 'egd-browser-card-5', kind: 'popupClosed', url: 'https://idp.example/signin', openerCardId: 'egd-browser-card-1', closedBy: 'page' }],
+    'an unreadable closing page falls back to its last reported location');
+  assert.deepEqual(reporter.popupClosed('egd-browser-card-5', 'https://idp.example/signin', { openerCardId: 'egd-browser-card-1', closedBy: 'user' }), [],
+    'one close per popup');
+  assert.deepEqual(reporter.loaded('egd-browser-card-5', 'https://idp.example/signin'), [], 'a closed popup reports no more loads');
+  assert.deepEqual(reporter.loaded('egd-browser-card-1', 'https://app.example/home'), [
+    { cardId: 'egd-browser-card-1', kind: 'loaded', url: 'https://app.example/home' }], 'the opener follow-up the bridge waits for');
+  await reporter.settled();
+  assert.deepEqual(posted.map(body => body.kind), ['loaded', 'loaded', 'navigated', 'popupClosed', 'loaded']);
+  assert.ok(posted.every(body => !/[?#]|SECRET/.test(body.url)));
+  clock = 20_000;
+  const burst = Array.from({ length: 20 }, (_, index) => reporter.loaded(`egd-browser-card-${10 + index}`, 'https://a.example/')).flat();
+  assert.equal(burst.length, Surface.BROWSER_EVENTS_PER_SECOND, 'loads share the per-second budget');
+});
+
+test('BRW-04 (D-B11): a page-opened popup card keeps its opener, reports loads, and its close by the page or by 대표님', () => {
+  const popup = surfaceSource.match(/  function spawnBrowserPopup\([\s\S]*?\n  \}\n/)?.[0] || '';
+  assert.match(popup, /\.\.\.\(source\?\.id \? \{ popupOpenerCardId: source\.id \} : \{\}\),/, 'the opener is the verified source card');
+  assert.match(surfaceSource, /if \(typeof options\.popupOpenerCardId === 'string' && options\.popupOpenerCardId !== id\) card\._popupOpenerCardId = options\.popupOpenerCardId;/);
+  assert.match(surfaceSource, /onStateChange\(webProgress, _request, stateFlags\) \{\n        if \(webProgress && webProgress\.isTopLevel === false\) return;\n        const flags = Ci\.nsIWebProgressListener;\n        if \(\(stateFlags & flags\.STATE_STOP\) && \(stateFlags & flags\.STATE_IS_WINDOW\)\) reportBrowserLoaded\(\);/,
+    'one loaded per finished top-level window load');
+  const closeFn = surfaceSource.match(/    card\._reportPopupClosed = \(closedBy\) => \{\n([\s\S]*?)\n    \};/)?.[1] || '';
+  assert.match(closeFn, /if \(!card\._popupOpenerCardId \|\| card\._popupCloseReported \|\| card\.dataset\.codexRole === 'auth'\) return;/);
+  assert.match(closeFn, /reportBrowserPopupClosed\?\.\(card\.id, readArrivedBrowserUri\(\), \{ openerCardId: card\._popupOpenerCardId, closedBy \}\)/);
+  const windowClose = surfaceSource.match(/    const onBrowserWindowClose = \(ev\) => \{\n([\s\S]*?)\n    \};/)?.[1] || '';
+  assert.match(windowClose, /card\._reportPopupClosed\('page'\);\n      closeCanvasCard\(card\);/, 'the site closed it: page, then the card closes');
+  assert.match(surfaceSource, /xulBrowser\.addEventListener\('DOMWindowClose', onBrowserWindowClose, true\)/);
+  assert.match(surfaceSource, /xulBrowser\.removeEventListener\('DOMWindowClose', onBrowserWindowClose, true\)/);
+  const closeCard = surfaceSource.match(/  function closeCanvasCard\(card, cleanup\) \{\n([\s\S]*?)\n  \}\n/)?.[1] || '';
+  assert.ok(closeCard.indexOf("card._reportPopupClosed?.('user')") > closeCard.indexOf('_closeApproved = true'),
+    'a close 대표님 confirmed is a user close; a page close was reported first and is not repeated');
+  for (const [name, call] of [['reportBrowserLoaded', 'loaded'], ['reportBrowserPopupClosed', 'popupClosed']]) {
+    const method = surfaceSource.match(new RegExp(`      ${name}\\(cardId, url, options = \\{\\}\\) \\{\\n([\\s\\S]*?)\\n      \\},`))?.[1] || '';
+    assert.match(method, new RegExp(`if \\(!state\\.codex\\.connected\\) return \\[\\];\\n        return browserWorkflow\\.${call}\\(cardId, url, options\\);`), name);
+  }
 });
 
 // ============ Polish: header buttons in dark, keyboard room rows, room search focus, artifact camera ============

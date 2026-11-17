@@ -639,7 +639,8 @@ export function bridgeConnectionNotice({
 }
 
 // Browser card events for workflow gates (BRW-04; helper contract: POST
-// /events/browser {cardId, kind:'navigated'|'oauthCompleted', url}, and task
+// /events/browser {cardId, kind:'navigated'|'oauthCompleted'|'loaded'|'popupClosed',
+// url, openerCardId?, closedBy?}, and task
 // SSE gates {kind:'oauth', origin, pathPrefix, cardId?, status}). Only an
 // http(s) top-level location leaves the screen, and only as origin + path: the
 // query, fragment and sign-in part never reach a body, state, log or data-*.
@@ -680,11 +681,25 @@ export function oauthGateMatches(gate, cardId, location) {
 
 // One report per new location of a card, sent in order. The bridge refuses more
 // than 20 a second; the screen stays under it and keeps room for a sign-in report.
+// A popup card names the card that opened it (openerCardId); a finished top-level
+// load is 'loaded' (one per load, repeats within BROWSER_LOADED_REPEAT_MS fold);
+// a popup's close is 'popupClosed' once, closedBy 'page' (window.close by the
+// site) or 'user' (D-B11: the bridge decides whether a close finished a sign-in).
 export const BROWSER_NAVIGATED_PER_SECOND = 8;
 export const BROWSER_EVENTS_PER_SECOND = 12;
+export const BROWSER_LOADED_REPEAT_MS = 1000;
 export function createBrowserWorkflowReporter({ post, now = Date.now, onError = null, maxCards = 256 } = {}) {
   const gatesByGraph = new Map();
   const lastLocation = new Map();
+  const lastLoaded = new Map();
+  const closedPopups = new Set();
+  const remember = (map, key, value) => {
+    map.delete(key);
+    map.set(key, value);
+    if (map.size > maxCards) map.delete(map.keys().next().value);
+  };
+  const openerOf = (openerCardId, cardId) => typeof openerCardId === 'string' && WORKFLOW_ID.test(openerCardId)
+    && openerCardId !== cardId ? openerCardId : null;
   let budget = { start: -Infinity, navigated: 0, total: 0 };
   let tail = Promise.resolve();
   const take = kind => {
@@ -694,6 +709,13 @@ export function createBrowserWorkflowReporter({ post, now = Date.now, onError = 
     budget.total += 1;
     if (kind === 'navigated') budget.navigated += 1;
     return true;
+  };
+  const send = events => {
+    const sent = events.filter(event => take(event.kind));
+    for (const event of sent) {
+      tail = tail.then(() => post(event)).catch(error => { try { onError?.(error); } catch {} });
+    }
+    return sent;
   };
   return {
     /** A task.graph frame: keeps that graph's open sign-in gates (none drops it). */
@@ -705,26 +727,46 @@ export function createBrowserWorkflowReporter({ post, now = Date.now, onError = 
     },
     openGateCount: () => [...gatesByGraph.values()].reduce((sum, gates) => sum + gates.length, 0),
     /** A card's arrived top-level URL; returns the bodies it sends. */
-    location(cardId, url) {
+    location(cardId, url, { openerCardId = null } = {}) {
       if (typeof cardId !== 'string' || !WORKFLOW_ID.test(cardId)) return [];
       const location = browserEventLocation(url);
       if (!location) return [];
       const shown = `${location.origin}${location.path}`;
       if (lastLocation.get(cardId) === shown) return [];
-      lastLocation.delete(cardId);
-      lastLocation.set(cardId, shown);
-      if (lastLocation.size > maxCards) lastLocation.delete(lastLocation.keys().next().value);
-      const events = [{ cardId, kind: 'navigated', url: shown }];
+      remember(lastLocation, cardId, shown);
+      const opener = openerOf(openerCardId, cardId);
+      const extra = opener ? { openerCardId: opener } : {};
+      const events = [{ cardId, kind: 'navigated', url: shown, ...extra }];
       if ([...gatesByGraph.values()].some(gates => gates.some(gate => oauthGateMatches(gate, cardId, location)))) {
-        events.push({ cardId, kind: 'oauthCompleted', url: shown });
+        events.push({ cardId, kind: 'oauthCompleted', url: shown, ...extra });
       }
-      const sent = events.filter(event => take(event.kind));
-      for (const event of sent) {
-        tail = tail.then(() => post(event)).catch(error => { try { onError?.(error); } catch {} });
-      }
+      return send(events);
+    },
+    /** A card's top-level page finished loading (a reload of the same page too). */
+    loaded(cardId, url, { openerCardId = null } = {}) {
+      if (typeof cardId !== 'string' || !WORKFLOW_ID.test(cardId) || closedPopups.has(cardId)) return [];
+      const location = browserEventLocation(url);
+      if (!location) return [];
+      const shown = `${location.origin}${location.path}`;
+      const at = now(), last = lastLoaded.get(cardId);
+      if (last && last.shown === shown && at - last.at >= 0 && at - last.at < BROWSER_LOADED_REPEAT_MS) return [];
+      const opener = openerOf(openerCardId, cardId);
+      const sent = send([{ cardId, kind: 'loaded', url: shown, ...(opener ? { openerCardId: opener } : {}) }]);
+      if (sent.length) remember(lastLoaded, cardId, { shown, at });
       return sent;
     },
-    forget(cardId) { lastLocation.delete(cardId); },
+    /** A popup card closed: once per card, only with its opener and a public last location. */
+    popupClosed(cardId, url, { openerCardId = null, closedBy = 'user' } = {}) {
+      if (typeof cardId !== 'string' || !WORKFLOW_ID.test(cardId) || closedPopups.has(cardId)) return [];
+      const opener = openerOf(openerCardId, cardId);
+      // The last reported location stands in when the closing page is no longer readable.
+      const location = browserEventLocation(url) || browserEventLocation(lastLocation.get(cardId));
+      if (!opener || !location || (closedBy !== 'page' && closedBy !== 'user')) return [];
+      closedPopups.add(cardId);
+      if (closedPopups.size > maxCards) closedPopups.delete(closedPopups.values().next().value);
+      return send([{ cardId, kind: 'popupClosed', url: `${location.origin}${location.path}`, openerCardId: opener, closedBy }]);
+    },
+    forget(cardId) { lastLocation.delete(cardId); lastLoaded.delete(cardId); },
     settled: () => tail,
   };
 }
