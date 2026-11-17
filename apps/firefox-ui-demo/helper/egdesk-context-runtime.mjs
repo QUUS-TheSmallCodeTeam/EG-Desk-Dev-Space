@@ -33,6 +33,11 @@ const MAX_OUTPUTS_PER_RUN = 8
 const MAX_COMMENTS_PER_BRIEFING = 200
 const OUTPUT_LIST_LIMIT = 50
 const TARGET_KEYS = ['sourceId', 'artifactId', 'viewId', 'range']
+// CNV-07 Canvas-area target (egdesk_publish_briefing_regions only).
+const REGION_KEYS = ['canvasRect', 'label']
+export const BRIEFING_REGION_LIMITS = Object.freeze({ coordinate: 10_000_000, size: 1_000_000, label: 80 })
+// Reserved for CNV-05 annotation sets: recognised and refused until they exist.
+export const BRIEFING_RESERVED_TARGET_KEYS = Object.freeze(['annotationSetId'])
 const EMPHASIS = ['spotlight', 'outline']
 // A value that is only a locator (absolute/home path, drive path, UNC path,
 // file: or scheme URL) instead of the content itself.
@@ -103,6 +108,10 @@ const tools = [
   // added as new tools, which only new conversations receive.
   // CHAT-05/CNV-07: one step can light up several pieces of evidence together.
   ['egdesk_publish_briefing_multi', 'Publish a proposed Answer Briefing whose steps each light up 1–6 validated immutable targets together while the rest of the Canvas is dimmed. Prefer this over egdesk_publish_briefing. This does not move the camera, execute actions or start another model turn. Use sourceId/artifactId from bound context, never paths or URLs. viewId is a UI hint, never authority. emphasis "spotlight" (default) dims everything else; "outline" only outlines the targets.', { title: { type: 'string' }, steps: { type: 'array', minItems: 1, maxItems: 20, items: { type: 'object', additionalProperties: false, required: ['id', 'text', 'targets', 'fallback'], properties: { id: { type: 'string' }, text: { type: 'string' }, fallback: { type: 'string' }, emphasis: { type: 'string', enum: ['spotlight', 'outline'] }, targets: { type: 'array', minItems: 1, maxItems: 6, items: { type: 'object', additionalProperties: false, properties: { sourceId: { type: 'string' }, artifactId: { type: 'string' }, viewId: { type: 'string' }, range: { type: 'object', additionalProperties: false, properties: { startLine: { type: 'integer' }, endLine: { type: 'integer' } }, required: ['startLine', 'endLine'] } } } } } } } }, ['title', 'steps']],
+  // CNV-07: the same multi-target briefing whose targets may also be a Canvas
+  // area (canvasRect, Canvas coordinates). annotationSetId is reserved for the
+  // CNV-05 annotation sets so that tool keeps this schema; it is rejected now.
+  ['egdesk_publish_briefing_regions', 'Publish a proposed Answer Briefing like egdesk_publish_briefing_multi, where a target may also be an area of the Canvas. A target is either bound evidence (sourceId/artifactId from bound context, optional viewId hint and line range) or canvasRect {x, y, width, height} in Canvas coordinates with an optional short label, never both. Never paths or URLs. annotationSetId is reserved and not accepted yet. This does not move the camera, execute actions or start another model turn.', { title: { type: 'string' }, steps: { type: 'array', minItems: 1, maxItems: 20, items: { type: 'object', additionalProperties: false, required: ['id', 'text', 'targets', 'fallback'], properties: { id: { type: 'string' }, text: { type: 'string' }, fallback: { type: 'string' }, emphasis: { type: 'string', enum: ['spotlight', 'outline'] }, targets: { type: 'array', minItems: 1, maxItems: 6, items: { type: 'object', additionalProperties: false, properties: { sourceId: { type: 'string' }, artifactId: { type: 'string' }, viewId: { type: 'string' }, range: { type: 'object', additionalProperties: false, properties: { startLine: { type: 'integer' }, endLine: { type: 'integer' } }, required: ['startLine', 'endLine'] }, canvasRect: { type: 'object', additionalProperties: false, properties: { x: { type: 'number' }, y: { type: 'number' }, width: { type: 'number' }, height: { type: 'number' } }, required: ['x', 'y', 'width', 'height'] }, label: { type: 'string' }, annotationSetId: { type: 'string' } } } } } } } }, ['title', 'steps']],
   // CHAT-08. When/when-not and "do not repeat it in chat" follow the
   // createDocument tool guidance of vercel/chatbot (Apache-2.0, pattern only:
   // lib/ai/tools/create-document.ts, lib/ai/prompts.ts).
@@ -809,7 +818,24 @@ export class ContextRuntime {
     return capture
   }
 
-  async briefingTarget(run, binding, target, assertActive) {
+  // A Canvas area is a place on the person's own Canvas, not evidence: it
+  // binds no source and needs no read authority, only a sane finite rectangle.
+  briefingRegion(target) {
+    if (Object.keys(target).some(key => !REGION_KEYS.includes(key))) reject('INVALID_BRIEFING_TARGET', 'A Canvas area target has canvasRect and an optional label only', 400)
+    const rect = target.canvasRect, { coordinate, size, label: labelMax } = BRIEFING_REGION_LIMITS
+    if (!plainObject(rect) || Object.keys(rect).length !== 4 || !['x', 'y', 'width', 'height'].every(key => Number.isFinite(rect[key]))
+      || Math.abs(rect.x) > coordinate || Math.abs(rect.y) > coordinate || !(rect.width > 0) || !(rect.height > 0) || rect.width > size || rect.height > size) {
+      reject('INVALID_BRIEFING_TARGET', 'canvasRect needs finite x, y and a positive width and height within Canvas limits', 400)
+    }
+    if (target.label !== undefined && (typeof target.label !== 'string' || !target.label.trim() || target.label.length > labelMax || titleLocator(target.label))) {
+      reject('INVALID_BRIEFING_TARGET', `A Canvas area label is 1–${labelMax} characters and never a path or URL`, 400)
+    }
+    return { canvasRect: { x: rect.x, y: rect.y, width: rect.width, height: rect.height }, ...(target.label !== undefined ? { label: publicText(target.label.trim(), Infinity) } : {}) }
+  }
+
+  async briefingTarget(run, binding, target, assertActive, { regions = false } = {}) {
+    if (regions && plainObject(target) && BRIEFING_RESERVED_TARGET_KEYS.some(key => Object.hasOwn(target, key))) reject('INVALID_BRIEFING_TARGET', 'Annotation set targets are not supported yet', 400)
+    if (regions && plainObject(target) && Object.hasOwn(target, 'canvasRect')) return this.briefingRegion(target)
     if (!target || typeof target !== 'object' || Object.keys(target).some(key => !TARGET_KEYS.includes(key))) reject('INVALID_BRIEFING_TARGET', 'Briefing targets must use validated IDs, not paths or URLs', 400)
     if (target.range != null && Object.hasOwn(target.range, 'endLine') && !Number.isInteger(target.range.endLine)) {
       reject('INVALID_BRIEFING_TARGET', 'A supplied briefing endLine must be an integer', 400)
@@ -829,7 +855,7 @@ export class ContextRuntime {
   // multiTarget (egdesk_publish_briefing_multi): each step keeps `target` (its
   // first target, for screens that read one) and the full `targets` list.
   // The original tool's step shape is stored unchanged.
-  async publish(run, args, assertActive = () => {}, { multiTarget = false } = {}) {
+  async publish(run, args, assertActive = () => {}, { multiTarget = false, regions = false } = {}) {
     const binding = this.assertBound(run, 'publishBriefing')
     if (typeof args.title !== 'string' || !args.title.trim() || args.title.length > 200 || !Array.isArray(args.steps) || !args.steps.length || args.steps.length > 20) reject('INVALID_BRIEFING', 'Briefing requires a title and 1–20 explicit presentation steps', 400)
     const steps = [], ids = new Set()
@@ -846,8 +872,9 @@ export class ContextRuntime {
       if (!Array.isArray(step.targets) || !step.targets.length || step.targets.length > BRIEFING_MAX_TARGETS) reject('INVALID_BRIEFING_TARGET', `Each step needs 1–${BRIEFING_MAX_TARGETS} targets`, 400)
       const targets = [], seen = new Set()
       for (const value of step.targets) {
-        const target = await this.briefingTarget(run, binding, value, assertActive)
-        const key = JSON.stringify([target.sourceId, target.range?.startLine ?? null, target.range?.endLine ?? null])
+        const target = await this.briefingTarget(run, binding, value, assertActive, { regions })
+        const key = target.canvasRect ? JSON.stringify(['canvasRect', target.canvasRect.x, target.canvasRect.y, target.canvasRect.width, target.canvasRect.height])
+          : JSON.stringify([target.sourceId, target.range?.startLine ?? null, target.range?.endLine ?? null])
         if (seen.has(key)) reject('INVALID_BRIEFING_TARGET', 'A step names the same evidence twice', 400)
         seen.add(key)
         targets.push(target)
@@ -1100,6 +1127,7 @@ export class ContextRuntime {
         else if (event.tool === 'egdesk_capture_output') result = { capture: await this.pinOutput(run, args.artifactId, assertActive) }
         else if (event.tool === 'egdesk_publish_briefing') result = { briefing: await this.publish(run, args, assertActive) }
         else if (event.tool === 'egdesk_publish_briefing_multi') result = { briefing: await this.publish(run, args, assertActive, { multiTarget: true }) }
+        else if (event.tool === 'egdesk_publish_briefing_regions') result = { briefing: await this.publish(run, args, assertActive, { multiTarget: true, regions: true }) }
         else if (event.tool === 'egdesk_publish_output') {
           // The model gets the identity back, never its own markdown echoed.
           const { output, unchanged } = await this.publishOutput(run, args, assertActive)

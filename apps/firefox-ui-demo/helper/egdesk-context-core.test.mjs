@@ -532,7 +532,8 @@ test('existing context tools keep their recorded schema hashes, so older convers
   const recorded = current.filter(entry => Object.keys(pinned).some(name => entry.key === `\0${name}`))
   const owners = new Map(current.map(entry => [entry.key, 'contexts']))
   assert.equal(verifiedManifestOwners(recorded, current, owners).status, 'verified')
-  assert.deepEqual(CONTEXT_TOOL_SPECS.slice(4).map(spec => spec.name), ['egdesk_publish_briefing_multi', 'egdesk_publish_output'])
+  // CNV-07 added egdesk_publish_briefing_regions as a new tool (only new conversations receive it).
+  assert.deepEqual(CONTEXT_TOOL_SPECS.slice(4).map(spec => spec.name), ['egdesk_publish_briefing_multi', 'egdesk_publish_briefing_regions', 'egdesk_publish_output'])
   const output = CONTEXT_TOOL_SPECS.find(spec => spec.name === 'egdesk_publish_output')
   assert.deepEqual(Object.keys(output.inputSchema.properties).sort(), ['markdown', 'outputKey', 'title'])
   assert.match(output.description, /do not repeat/i)
@@ -2079,4 +2080,63 @@ test('a saved comment can be edited by revision and deleted to a tombstone; numb
   h.changeOwner('email:b@example.com')
   assert.equal((await local('POST', `/context/briefing-comments/${third.id}/edit`, { text: 'Takeover', revision: 1 })).status, 403)
   assert.equal((await local('POST', `/context/briefing-comments/${third.id}/delete`, { revision: 1 })).status, 403)
+})
+
+
+// CNV-07: Canvas-area briefing targets, and the reserved annotation-set kind.
+test('the regions briefing tool accepts Canvas areas beside evidence and refuses malformed areas and annotation sets', async t => {
+  const h = await harness(t)
+  const a = await h.capture('Evidence A')
+  const run = await h.start([a.sourceId])
+  const multi = CONTEXT_TOOL_SPECS.find(spec => spec.name === 'egdesk_publish_briefing_multi')
+  assert.equal(hashContent(JSON.stringify(multi.inputSchema)).length, 64)
+  assert.equal(JSON.stringify(multi.inputSchema).includes('canvasRect'), false, 'the multi tool schema is unchanged')
+  const published = await h.tool(run, 'egdesk_publish_briefing_regions', { title: 'Layout', steps: [
+    { id: 'area', text: 'This corner of the Board', targets: [{ canvasRect: { x: -40, y: 20.5, width: 300, height: 200 }, label: '왼쪽 위 묶음' }], fallback: 'Look at the left top' },
+    { id: 'mixed', text: 'Evidence and its area', targets: [{ sourceId: a.sourceId }, { canvasRect: { x: 400, y: 0, width: 80, height: 60 } }], emphasis: 'outline', fallback: 'Open A' },
+  ] }, 'regions')
+  assert.equal(published.result.success, true)
+  const briefing = toolJson(published).briefing
+  assert.deepEqual(briefing.steps[0].targets, [{ canvasRect: { x: -40, y: 20.5, width: 300, height: 200 }, label: '왼쪽 위 묶음' }])
+  assert.deepEqual(briefing.steps[0].target, briefing.steps[0].targets[0])
+  assert.equal(briefing.steps[1].targets[0].hash, a.hash)
+  assert.deepEqual(briefing.steps[1].targets[1], { canvasRect: { x: 400, y: 0, width: 80, height: 60 } })
+  const stored = await h.store.getRecord('email:a@example.com', 'briefings', briefing.id)
+  assert.deepEqual(stored.steps[0].targets[0].canvasRect, { x: -40, y: 20.5, width: 300, height: 200 })
+
+  const refused = async (target, id, tool = 'egdesk_publish_briefing_regions') => {
+    const reply = await h.tool(run, tool, { title: 'Bad', steps: [{ id: 's', text: 'T', fallback: 'F', targets: [target] }] }, id)
+    assert.equal(reply.result.success, false, id)
+    return JSON.parse(reply.result.contentItems[0].text).error.code
+  }
+  const rect = { x: 0, y: 0, width: 10, height: 10 }
+  for (const [id, target] of [
+    ['zero', { canvasRect: { ...rect, width: 0 } }], ['negative', { canvasRect: { ...rect, height: -5 } }],
+    ['nan', { canvasRect: { ...rect, x: Number.NaN } }], ['string', { canvasRect: { ...rect, y: '10' } }],
+    ['far', { canvasRect: { ...rect, x: 1e8 } }], ['huge', { canvasRect: { ...rect, width: 2e6 } }],
+    ['extra', { canvasRect: { ...rect, z: 1 } }], ['missing', { canvasRect: { x: 0, y: 0, width: 10 } }],
+    ['both', { canvasRect: rect, sourceId: a.sourceId }], ['path-label', { canvasRect: rect, label: '/Users/me/secret' }],
+    ['url-label', { canvasRect: rect, label: 'https://example.com' }], ['long-label', { canvasRect: rect, label: 'x'.repeat(81) }],
+    ['blank-label', { canvasRect: rect, label: ' ' }], ['annotation', { annotationSetId: 'set-1' }],
+    ['annotation-mixed', { annotationSetId: 'set-1', canvasRect: rect }],
+  ]) assert.equal(await refused(target, id), 'INVALID_BRIEFING_TARGET', id)
+  assert.equal(await refused({ canvasRect: rect }, 'multi-has-no-areas', 'egdesk_publish_briefing_multi'), 'INVALID_BRIEFING_TARGET', 'only the new tool knows Canvas areas')
+  const twice = await h.tool(run, 'egdesk_publish_briefing_regions', { title: 'Dup', steps: [{ id: 's', text: 'T', fallback: 'F', targets: [{ canvasRect: rect }, { canvasRect: rect, label: '같은 곳' }] }] }, 'dup')
+  assert.equal(twice.result.success, false, 'the same area twice in one step is refused')
+  assert.equal(h.events.filter(e => e.event === 'briefing.published').length, 1)
+})
+
+test('a conversation recorded before a context tool was added keeps verifying; a changed or missing recorded tool does not', async t => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), 'egdesk-manifest-'))
+  t.after(() => rm(dir, { recursive: true, force: true }))
+  const store = new ImmutableContextStore({ dataDir: dir, allowedRoots: [dir] })
+  const owner = 'email:a@example.com'
+  const current = { engineId: 'codex', engineProfileId: 'codex-default', tools: [{ name: 'a', schemaHash: '1' }, { name: 'b', schemaHash: '2' }, { name: 'new', schemaHash: '3' }] }
+  await store.markNativeThread(owner, 'older', { ...current, tools: current.tools.slice(0, 2) })
+  assert.equal(await store.hasNativeTools(owner, 'older', current), true)
+  assert.equal(await store.hasNativeTools(owner, 'older', { ...current, tools: [{ name: 'a', schemaHash: 'changed' }, ...current.tools.slice(1)] }), false)
+  assert.equal(await store.hasNativeTools(owner, 'older', { ...current, tools: current.tools.slice(1) }), false, 'a recorded tool that disappeared')
+  assert.equal(await store.hasNativeTools(owner, 'older', { ...current, engineProfileId: 'other' }), false)
+  await store.markNativeThread(owner, 'empty', { ...current, tools: [] }).catch(() => {})
+  assert.equal(await store.hasNativeTools(owner, 'empty', current), false, 'an empty recorded manifest grants nothing')
 })
