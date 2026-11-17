@@ -5056,6 +5056,15 @@ button.egd-bag-header.egd-bag-header-muted { color: var(--egd-on-surface-variant
   opacity: 0;
   pointer-events: none;
 }
+/* UX-06: Agent 알림 한 줄. 상단 바 아래, 누르면 채팅 엿보기를 연다. */
+#egd-attention-notice {
+  position: fixed; top: 52px; left: 50%; transform: translateX(-50%); z-index: 2147483000;
+  display: flex; gap: 8px; align-items: center; max-width: min(480px, 80vw);
+  padding: 6px 12px; border: 1px solid var(--egd-outline); border-radius: 999px;
+  background: var(--egd-topbar); box-shadow: var(--egd-shadow); cursor: pointer; font-size: 12px;
+}
+#egd-attention-notice:focus-visible { outline: var(--egd-focus-outline); outline-offset: var(--egd-focus-outline-offset); }
+.egd-attention-notice-line { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 /* 크게 보는 동안의 채팅: 엿보기는 창 위에 겹쳐 뜨고(창 크기 불변), 고정은 옆에 붙는다. */
 :root.egd-maximize-hud-peek #egd-hud {
   border-color: color-mix(in srgb, var(--egd-primary) 34%, var(--egd-outline));

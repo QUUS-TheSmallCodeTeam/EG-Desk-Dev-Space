@@ -36,6 +36,7 @@ export const ESCAPE_LAYER_REGISTRY = Object.freeze([
   { id: 'browser-agent-timeline', kind: 'popover', label: 'Agent 활동 기록' },
   { id: 'resource-detail', kind: 'popover', label: '자원 사용량 상세' },
   { id: 'memo-relink', kind: 'popover', label: '메모 다시 연결' },
+  { id: 'attention-notice', kind: 'popover', label: 'Agent 알림' },
   { id: 'minimap-stack', kind: 'list', label: '미니맵 겹친 목록' },
   { id: 'board-close-guard', kind: 'confirm', label: 'Board 닫기 확인' },
   { id: 'placement-dialog', kind: 'dialog', label: '이동·크기 입력' },
