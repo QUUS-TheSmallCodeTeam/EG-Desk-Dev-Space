@@ -877,7 +877,7 @@ export class CodexChatRuntime {
     // unrelated provider exclusion, including during manifest verification.
     if (engineId === 'claude' && provider === this.contexts) return typeof provider.getAuthority === 'function'
     return engineId !== 'claude' || (provider !== this.contexts &&
-      !['egdesk-context-v1', 'egdesk-browser', 'egdesk-plan', COMPUTER_PROVIDER_ID].includes(provider.providerId))
+      !['egdesk-context-v1', 'egdesk-browser', 'egdesk-plan', 'egdesk-annotation', COMPUTER_PROVIDER_ID].includes(provider.providerId))
   }
 
   // Which engine, version and engine account slot ran a turn; stored with the

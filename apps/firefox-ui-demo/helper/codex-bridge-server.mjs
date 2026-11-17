@@ -43,6 +43,7 @@ import { createEGDeskFileMount, requireEGDeskNodeRuntime } from './egdesk-file-m
 import { createSystemResourceMonitor } from './system-resource-monitor.mjs'
 import { WORKFLOW_OWNER, openWorkflowRuntime } from './egdesk-workflow-runtime.mjs'
 import { createPlanToolProvider } from './egdesk-plan-tool-provider.mjs'
+import { createAnnotationToolProvider } from './egdesk-annotation-tool-provider.mjs'
 import { openOntologyStore } from './egdesk-ontology-store.mjs'
 import { createOntologyHttpHandler, ontologyHealth, openBoundOntologyStore, readOntologyProfileBinding } from './egdesk-ontology-http.mjs'
 import { inspectSqliteRuntime } from './egdesk-sqlite-runtime.mjs'
@@ -252,6 +253,8 @@ const browserProvider = createCodexBrowserToolProvider({ transport: browserTrans
 // egdesk_propose_plan on ordinary threads: plans wait for approval in the
 // workflow runtime opened below (null until then, so the tool answers unavailable).
 const planProvider = createPlanToolProvider({ plans: () => workflow?.plans ?? null, schemaReady: () => nativeCapabilities.schemaMatch && appServerReady })
+// CNV-05: egdesk_publish_annotation on ordinary threads (dotted '제안' over a card).
+const annotationProvider = createAnnotationToolProvider({ schemaReady: () => nativeCapabilities.schemaMatch && appServerReady })
 // The Codex models the signed-in account can choose (model/list, hidden ones
 // excluded), read after each ready connection and on every account change;
 // null while unknown or signed out. They fill the Codex engines[] row and
@@ -313,7 +316,7 @@ const chat = new CodexChatRuntime({
   contexts,
   resolveProjectWorkspace: request => localFiles.resolveProjectWorkspace(request),
   resolveRunProjectOrigin: request => localFiles.resolveRunProjectOrigin(request),
-  toolProviders: [browserProvider, planProvider],
+  toolProviders: [browserProvider, planProvider, annotationProvider],
   store: chatStore,
   requireStore: true,
   getOwnerKey: () => publicAuthIdentityKey(authState),
