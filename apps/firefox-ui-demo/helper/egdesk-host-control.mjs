@@ -61,7 +61,8 @@ export function createHostControl({
   let stateQueued = false
   const send = event => { try { emit(event) } catch {} }
   const activity = createHostActivity({ now, limit: activityLimit })
-  const row = value => { if (value) send({ type: HOST_ACTIVITY_SSE_EVENT, row: value }) }
+  // A new row can change the target app or the controller: the state follows.
+  const row = value => { if (value) { send({ type: HOST_ACTIVITY_SSE_EVENT, row: value }); queueState() } }
   // State frames are coalesced and sent after the current change settles, so
   // a lease reading the gate (or the reverse) never re-enters itself.
   const queueState = () => {
