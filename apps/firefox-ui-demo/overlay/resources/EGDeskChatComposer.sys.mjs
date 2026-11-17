@@ -100,3 +100,56 @@ export function mentionKeyAction(event, open) {
   if ((event.key === 'Enter' || event.key === 'Tab') && !event.shiftKey) return 'pick';
   return null;
 }
+
+// ── CTX-04 pre-send scope preview ──
+// One <details> above the input: what this send gives the Agent (each row
+// can be removed), and earlier sources that changed since they were sent
+// (each can be attached again). The model is EGDeskInputContext
+// sendScopePreview; the host owns removal and attaching. textContent only.
+export function renderSendScope({ document, model, open = false, onRemove, onAdd, onToggle } = {}) {
+  if (!document?.createElement) throw new TypeError('renderSendScope requires a document');
+  if (!model) return null;
+  const make = (tag, className, text) => {
+    const node = document.createElement(tag);
+    if (className) node.className = className;
+    if (text != null) node.textContent = text;
+    return node;
+  };
+  const details = make('details', 'egd-chat-send-scope');
+  details.setAttribute('data-testid', 'chat-send-scope');
+  details.setAttribute('data-count', String(model.sentCount));
+  details.setAttribute('data-changed', String(model.changedCount));
+  if (open) details.open = true;
+  const summary = make('summary', 'egd-chat-send-scope-summary', model.summary);
+  details.append(summary);
+  if (typeof onToggle === 'function') details.addEventListener('toggle', () => onToggle(details.open === true));
+  const list = make('ul', 'egd-chat-send-scope-list');
+  list.setAttribute('aria-label', '이번에 볼 자료');
+  for (const item of model.items) {
+    const row = make('li', `egd-chat-send-scope-item egd-chat-send-scope-${item.origin}`);
+    row.setAttribute('data-testid', 'chat-send-scope-item');
+    row.setAttribute('data-origin', item.origin);
+    const text = make('span', 'egd-chat-send-scope-text');
+    text.append(make('span', 'egd-chat-send-scope-label', item.label));
+    if (item.changed) {
+      const chip = make('span', 'egd-chat-source-changed', '바뀜');
+      chip.setAttribute('data-testid', 'chat-send-scope-changed');
+      text.append(chip);
+    }
+    if (item.note) text.append(make('span', 'egd-chat-send-scope-note', item.note));
+    row.append(text);
+    const handler = item.action === 'remove' ? onRemove : item.action === 'add' ? onAdd : null;
+    if (typeof handler === 'function') {
+      const button = make('button', `egd-chat-send-scope-${item.action}`, item.action === 'remove' ? '빼기' : '다시 붙이기');
+      button.type = 'button';
+      button.setAttribute('data-testid', `chat-send-scope-${item.action}`);
+      button.setAttribute('aria-label', `${item.label} ${item.action === 'remove' ? '빼기' : '다시 붙이기'}`);
+      button.addEventListener('click', () => handler(item));
+      row.append(button);
+    }
+    list.append(row);
+  }
+  details.append(list, make('p', 'egd-chat-send-scope-boundary', model.boundary));
+  if (model.changedNote) details.append(make('p', 'egd-chat-send-scope-boundary', model.changedNote));
+  return details;
+}

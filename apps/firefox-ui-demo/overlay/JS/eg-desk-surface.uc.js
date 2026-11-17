@@ -2542,8 +2542,12 @@
     const tray = el('div', { class: 'egd-chat-input-tray', data: { testid: 'chat-attachments', threadId: thread.id } });
     tray.appendChild(el('button', { type: 'button', 'aria-label': '자료 첨부', data: { testid: 'chat-attach-open' }, onclick: () => openChatInputPanel(thread.id) }, '＋ 첨부'));
     tray.appendChild(buildChatRequestProjectControl(thread, bridge));
+    const sourceChanges = typeof bridge.refreshContextSources === 'function' ? chatSourceChangeIndex(thread) : null;
     for (const source of thread.inputSources || []) {
-      tray.appendChild(el('div', { class: 'egd-chat-input-chip', data: { testid: 'chat-attachment', sourceId: source.id } },
+      // CTX-04: this card changed after the Agent last received it.
+      const changed = InputContext.attachmentChange(source, sourceChanges);
+      tray.appendChild(el('div', { class: 'egd-chat-input-chip', data: { testid: 'chat-attachment', sourceId: source.id, ...(changed ? { changed: 'true' } : {}) } },
+        changed ? el('span', { class: 'egd-chat-source-changed', title: changed.title, 'aria-label': changed.title, data: { testid: 'chat-attachment-changed' } }, changed.label) : null,
         el('button', { type: 'button', title: InputContext.inputSourceLocation(source), 'aria-label': `첨부 내용 확인: ${source.label}`,
           data: { testid: 'chat-attachment-inspect' }, onclick: async () => {
             try {
@@ -2560,7 +2564,35 @@
         el('button', { type: 'button', 'aria-label': '브리핑의 고정 근거 확인', onclick: () => bridge.inspectInput(thread.id, reference) }, '브리핑 근거 · 미전송'),
         el('button', { type: 'button', 'aria-label': '브리핑 근거 첨부 제거', onclick: () => bridge.removeBriefingInput(thread.id, reference.sourceId) }, '×')));
     }
+    const scope = typeof bridge.refreshContextSources === 'function' ? buildChatSendScope(thread, bridge) : null;
+    if (scope) tray.appendChild(scope);
     return tray;
+  }
+
+  // CTX-04: the room's change index from GET /context/sources (bridge cache).
+  function chatSourceChangeIndex(thread) {
+    const cached = state.contextSourceChanges?.[thread?.id];
+    return cached && thread.conversationId && cached.conversationId === thread.conversationId ? cached.index : null;
+  }
+
+  // CTX-04 pre-send preview: what this send gives the Agent (remove) and the
+  // earlier sources that changed since (attach again). Open state survives redraws.
+  const chatSendScopeOpen = new Set();
+  function buildChatSendScope(thread, bridge) {
+    bridge.refreshContextSources(thread.id);
+    const model = InputContext.sendScopePreview({ inputSources: thread.inputSources, briefingInputs: thread.briefingInputs,
+      changeIndex: chatSourceChangeIndex(thread), labelFor: viewId => contextCandidateLabel(document.getElementById(viewId)),
+      // Same side-effect-free check as the suggestion collector.
+      canAttach: viewId => !!contextResolverKindForView(document.getElementById(viewId)) });
+    if (!model.items.length) return null;
+    return ChatComposer.renderSendScope({ document, model, open: chatSendScopeOpen.has(thread.id),
+      onToggle: open => { if (open) chatSendScopeOpen.add(thread.id); else chatSendScopeOpen.delete(thread.id); },
+      onRemove: item => item.origin === 'briefing' ? bridge.removeBriefingInput(thread.id, item.sourceId) : bridge.removeInputSource(thread.id, item.sourceId),
+      onAdd: item => {
+        const source = chatInputSourceForView(document.getElementById(item.viewId));
+        if (!source) { boardNotice('이 자료는 지금 다시 붙일 수 없어요. 카드가 열려 있는지 확인하세요.'); return; }
+        bridge.addInputSources(thread.id, userSelectedChatSources(thread.id, [source]));
+      } });
   }
 
   // CTX-03 screen side of '이것도 붙일까요?'. The kind follows chatInputSourceForView
@@ -13558,6 +13590,30 @@
       contextSuggestTimer = 0;
       contextSuggestSeq++;
       state.contextSuggest = { unsupportedUntil: 0, byThread: {} };
+      state.contextSourceChanges = {};
+    }
+    // CTX-04 '바뀜': this room's tracked sources, at most every 15 s per room
+    // and scope. Ids, kinds and reason codes only; redraws only on a change.
+    function refreshContextSources(threadId) {
+      const thread = getCodexThreadById(state.codex, threadId);
+      if (!thread?.conversationId || ChatState.nativeBindingHeld(thread) || ChatState.chatThreadEngineId(thread, state.codex) !== 'codex'
+          || !state.codex.connected || !state.codex.authStatus?.isLoggedIn) return;
+      let scope;
+      try { scope = ChatState.chatContextRequestScope(thread, state.codex); } catch { return; }
+      if (!scope?.conversationId) return;
+      const store = state.contextSourceChanges || (state.contextSourceChanges = {});
+      const key = JSON.stringify(scope), cached = store[threadId];
+      if (cached?.key === key && (cached.loading || Date.now() - cached.at < 15000)) return;
+      const entry = { index: cached?.key === key ? cached.index : null, key, conversationId: scope.conversationId, loading: true, at: Date.now() };
+      store[threadId] = entry;
+      const query = Object.entries(scope).map(([name, value]) => `${name}=${encodeURIComponent(value)}`).join('&');
+      void fetchJson(`/context/sources?${query}`).then(response => {
+        if (state.contextSourceChanges?.[threadId] !== entry) return;
+        const index = InputContext.sourceChangeIndex(response, scope.conversationId);
+        const changed = InputContext.sourceChangeIndexKey(index) !== InputContext.sourceChangeIndexKey(entry.index);
+        Object.assign(entry, { index, loading: false, at: Date.now() });
+        if (changed) emit();
+      }, () => { if (state.contextSourceChanges?.[threadId] === entry) Object.assign(entry, { loading: false, at: Date.now() }); });
     }
     function requestContextSuggestions(threadId, { force = false, immediate = false } = {}) {
       if (!threadId || ChatState.chatThreadEngineId(getCodexThreadById(state.codex, threadId), state.codex) !== 'codex') return;
@@ -15435,6 +15491,8 @@
       },
       // CTX-03 '이것도 붙일까요?'.
       requestContextSuggestions(threadId, options = {}) { requestContextSuggestions(threadId, options); },
+      // CTX-04 '바뀜' and the pre-send preview read this room's tracked sources.
+      refreshContextSources(threadId) { refreshContextSources(threadId); },
       // CTX-03 D-R2 settings (helper GET/POST /context/suggest-settings).
       loadContextSuggestSettings() { return loadContextSuggestSettings(); },
       saveContextSuggestSettings(patch) { return saveContextSuggestSettings(patch); },

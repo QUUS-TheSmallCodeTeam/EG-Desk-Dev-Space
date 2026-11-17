@@ -6933,6 +6933,17 @@ button.egd-codex-message-activity:focus-visible { outline: var(--egd-focus-outli
 .egd-chat-input-tray button, #egd-codex-input-panel button { font: inherit; color: inherit; border: 1px solid color-mix(in srgb, var(--egd-on-surface) 20%, transparent); background: transparent; border-radius: 7px; padding: 4px 7px; cursor: pointer; }
 .egd-chat-input-chip { display: flex; max-width: 100%; align-items: center; }
 .egd-chat-input-chip button:first-child { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* CTX-04 '바뀜' on an attachment and the pre-send scope preview. */
+.egd-chat-source-changed { flex: 0 0 auto; margin-inline: 4px 2px; padding: 0 5px; font-size: 11px; line-height: 16px; border-radius: 8px; background: var(--egd-note-soft); border: 1px solid var(--egd-note-line); white-space: nowrap; }
+.egd-chat-input-chip > .egd-chat-source-changed + button { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.egd-chat-send-scope { flex: 1 0 100%; min-width: 0; font-size: 12px; }
+.egd-chat-send-scope-summary { cursor: pointer; color: var(--egd-on-surface-variant); overflow-wrap: anywhere; }
+.egd-chat-send-scope-list { margin: 4px 0; padding: 0; list-style: none; display: flex; flex-direction: column; gap: 3px; }
+.egd-chat-send-scope-item { display: flex; align-items: center; gap: 6px; }
+.egd-chat-send-scope-text { flex: 1 1 auto; min-width: 0; display: flex; flex-wrap: wrap; align-items: center; gap: 2px 6px; overflow-wrap: anywhere; }
+.egd-chat-send-scope-note, .egd-chat-send-scope-boundary { color: var(--egd-on-surface-variant); font-size: 11px; }
+.egd-chat-send-scope-boundary { margin: 2px 0; }
+.egd-chat-send-scope-changed .egd-chat-send-scope-label { font-style: italic; }
 .egd-input-snapshot { border-top: 1px solid color-mix(in srgb, var(--egd-on-surface) 16%, transparent); padding: 8px 0; min-width: 0; }
 .egd-input-snapshot h4 { margin: 4px 0; }
 .egd-input-snapshot-status { margin: 4px 0; font-size: 12px; color: var(--egd-on-surface-variant); }
