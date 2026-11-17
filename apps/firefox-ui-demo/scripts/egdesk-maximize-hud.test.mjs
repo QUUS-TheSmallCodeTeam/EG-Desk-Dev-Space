@@ -253,7 +253,9 @@ test('surface: peek timers use the shared constants, reduced motion is immediate
   assert.match(install, /MaximizeHud\.MAXIMIZE_HUD_PEEK_CLOSE_GRACE_MS/);
   assert.match(install, /'aria-label': '채팅 엿보기'/);
   assert.match(install, /집중 보기 종료/);
-  assert.match(install, /ev\.key !== 'Escape'/);
+  // UX-06: Escape closes the peek only through the one Escape layer registry.
+  assert.doesNotMatch(install, /ev\.key !== 'Escape'/);
+  assert.match(surfaceSource, /id: 'chat-peek', kind: 'peek',[\s\S]{0,240}SurfaceKeys\.chatPeekEscapeOpen\([\s\S]{0,200}dismiss: \(\) => closeMaximizeHudPeek\(\)/);
   // The edge strip, exit button and Chat panel are all #egd-* ids, so the one
   // global reduced-motion rule makes the peek appear and leave at once.
   const reduced = css.match(/@media \(prefers-reduced-motion: reduce\) \{\s*\[id\^="egd-"\], \[id\^="egd-"\] \*, \[id\^="egd-"\]::before,[^{]*\{([^}]+)\}/);

@@ -9914,9 +9914,24 @@ test('Settings window frame: a named title row, two working dots and resize from
   assert.deepEqual(settingsNodes(titlebar, node => !!node.dataset.icon).map(node => node.dataset.icon), ['grip', 'settings']);
   assert.equal(byClass('egd-window-grip')[0].getAttribute('aria-hidden'), 'true');
 
-  // Dots: close and maximize only. Settings does not fold, so there is no yellow dot.
-  const dots = byClass('egd-card-dot');
-  assert.deepEqual(dots.map(dot => dot.className), ['egd-card-dot egd-card-dot-close egd-desk-window-control', 'egd-card-dot egd-card-dot-max egd-desk-window-control']);
+  // Dots: close, fold and maximize. UX-06: Settings folds to its title row like other windows.
+  const allDots = byClass('egd-card-dot');
+  assert.deepEqual(allDots.map(dot => dot.className), ['egd-card-dot egd-card-dot-close egd-desk-window-control',
+    'egd-card-dot egd-card-dot-min egd-desk-window-control', 'egd-card-dot egd-card-dot-max egd-desk-window-control']);
+  const fold = allDots[1];
+  assert.deepEqual([fold.getAttribute('title'), fold.getAttribute('aria-expanded')], ['창 접기', 'true']);
+  const dotDirty = effects.dirty.length;
+  fold.click = () => fold.fire('click');
+  fold.fire('click');
+  assert.equal(card.classList.contains('egd-card-collapsed'), true);
+  assert.deepEqual([fold.getAttribute('title'), fold.getAttribute('aria-expanded')], ['창 펼치기', 'false']);
+  fold.fire('keydown', { key: 'Enter', preventDefault() {}, stopPropagation() {} });
+  assert.equal(card.classList.contains('egd-card-collapsed'), false);
+  assert.deepEqual(effects.dirty.slice(dotDirty), ['collapse-settings-window', 'expand-settings-window']);
+  assert.equal(card._setWindowCollapsed(true, { quiet: true }), true, 'restore folds it without a change mark');
+  card._setWindowCollapsed(false, { quiet: true });
+  assert.equal(effects.dirty.length, dotDirty + 2);
+  const dots = [allDots[0], allDots[2]];
   for (const dot of dots) {
     assert.equal(dot.getAttribute('role'), 'button'); assert.equal(dot.getAttribute('tabindex'), '0');
     assert.ok(dot.getAttribute('title')); assert.equal(dot.getAttribute('aria-label'), dot.getAttribute('title'));
@@ -9984,6 +9999,16 @@ function settingsFakeDocument() {
     focus(options) { doc.activeElement = this; this.focusOptions = options; }
     setSelectionRange(start, end, direction) { Object.assign(this, { selectionStart: start, selectionEnd: end, selectionDirection: direction }); this.scrollTop = 0; }
     fire(type, extra = {}) { for (const fn of this.listeners[type] || []) fn({ stopPropagation() {}, preventDefault() {}, currentTarget: this, target: this, ...extra }); }
+    set classList(value) { Object.defineProperty(this, 'classList', { value, writable: true, configurable: true }); }
+    get classList() {
+      const names = () => this.className.split(/\s+/).filter(Boolean);
+      const contains = name => names().includes(name);
+      const toggle = (name, force = !contains(name)) => {
+        this.className = force ? [...new Set([...names(), name])].join(' ') : names().filter(item => item !== name).join(' ');
+        return force;
+      };
+      return { contains, toggle, add: name => toggle(name, true), remove: name => toggle(name, false) };
+    }
   }
   Object.assign(doc, {
     createElement: tag => new FakeNode(tag),

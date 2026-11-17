@@ -8024,8 +8024,8 @@ button.egd-codex-message-activity:focus-visible { outline: var(--egd-focus-outli
   min-height: 32px;
   background: transparent;
 }
-/* A48: the Terminal cannot be folded, so the yellow dot is not shown at all. */
-.egd-terminal-card .egd-card-dot-min { display: none; }
+/* UX-06: the Terminal folds to its title row like every Desk window (the
+   session keeps running; the frame hears its size again when it opens). */
 .egd-terminal-title {
   flex: 0 1 auto;
   min-width: 0;
@@ -10976,3 +10976,91 @@ button.egd-memo-ask-cancel:hover { text-decoration: underline; }
 .egd-usage-meter-button, .egd-codex-system-chip-button { appearance: none; margin: 0; font-family: inherit; cursor: pointer; }
 .egd-usage-meter-button { border: 0; background: transparent; }
 .egd-usage-meter-button:focus-visible, .egd-codex-system-chip-button:focus-visible { outline: var(--egd-focus-outline); outline-offset: var(--egd-focus-outline-offset); }
+
+/* ============ Keyboard and status cues (DSN-04 · UX-05 · UX-06 · CNV-06) ============ */
+/* Spoken status (window moved by keys, selection count) without a visible box. */
+.egd-visually-hidden { position: absolute !important; width: 1px; height: 1px; margin: -1px; padding: 0; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
+
+/* DSN-04: the control's name beside it while it has keyboard focus. */
+#egd-key-tooltip {
+  position: fixed;
+  z-index: 2147483000;
+  max-width: 240px;
+  padding: 3px 7px;
+  border-radius: 6px;
+  background: var(--egd-on-surface);
+  color: var(--egd-surface-elevated);
+  font: 600 var(--egd-text-sm)/1.35 var(--egd-font);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  pointer-events: none;
+  box-shadow: var(--egd-chrome-shadow);
+}
+#egd-key-tooltip[hidden] { display: none; }
+
+/* UX-05: a window header that has keyboard focus is the window's move handle. */
+:is(.egd-card-header, .egd-chat-card-header):focus-visible {
+  outline: var(--egd-focus-outline);
+  outline-offset: var(--egd-focus-outline-offset);
+}
+
+/* DSN-04 no colour-only status: window dots show what they do (×, −, +) as
+   soon as they show their colour (hover or keyboard focus on the title row). */
+.egd-card-dot::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  font: 700 var(--egd-text-2xs)/10px var(--egd-font);
+  color: color-mix(in srgb, var(--egd-on-surface) 72%, transparent);
+  opacity: 0;
+}
+.egd-card-dot-close::after { content: '×'; }
+.egd-card-dot-min::after { content: '−'; }
+.egd-card-dot-max::after { content: '+'; }
+.egd-card-dot-min[aria-expanded="false"]::after { content: '+'; }
+.egd-card-dot-max[aria-pressed="true"]::after { content: '−'; }
+:is(.egd-card-topbar:hover, .egd-card-topbar:focus-within) .egd-card-dot::after { opacity: 1; }
+
+/* Status dots carry a shape as well as a colour: ready = filled, off = ring,
+   blocked / rejected = square, stopped = diamond. Their text label stays. */
+.egd-settings-status-dot-off { background: transparent; box-shadow: inset 0 0 0 1.5px var(--egd-outline); }
+.egd-codex-subagent-dot-active { background: transparent; box-shadow: inset 0 0 0 2px var(--egd-primary); }
+.egd-codex-subagent-dot-blocked { border-radius: 1px; }
+.egd-codex-subagent-dot-stopped { border-radius: 1px; transform: rotate(45deg) scale(0.85); }
+.egd-task-condition[data-state="rejected"] .egd-task-condition-dot,
+.egd-task-condition[data-state="expired"] .egd-task-condition-dot { border-radius: 1px; }
+.egd-task-condition[data-mine="true"][data-state="waiting"] .egd-task-condition-dot { background: transparent; box-shadow: inset 0 0 0 1.5px var(--egd-warning-ink); }
+
+/* DSN-04 larger text: list rows and view-bar buttons grow with the font
+   instead of clipping it. The Desk bars keep their approved geometry (their
+   rows already centre a larger glyph); the window title row grows by itself. */
+#egd-zoom-indicator button { min-height: max(28px, 2.3em); }
+.egd-board-menu-item { min-height: max(28px, 2.4em); line-height: 1.25; }
+.egd-memo-relink-list button,
+.egd-memo-unlink-menu button { min-height: max(26px, 2.2em); }
+
+/* CNV-06: extra links of a memo are dashed; the anchor line stays solid. */
+.egd-memo-tether[data-kind="link"] {
+  height: 0;
+  background: none;
+  border-top: 1.5px dashed var(--egd-on-surface-variant);
+}
+.egd-memo-unlink-menu,
+.egd-memo-relink-list {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  margin: 4px 0 0;
+  padding: 4px;
+  border: 1px solid var(--egd-outline);
+  border-radius: 8px;
+  background: var(--egd-surface-elevated);
+  box-shadow: var(--egd-chrome-shadow);
+}
+.egd-memo-unlink-menu[hidden],
+.egd-memo-relink-list[hidden] { display: none; }
+.egd-memo-ask-failed { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 8px; color: var(--egd-warning-ink); }
+.egd-memo-ask-failed::before { content: '!'; font-weight: 700; }

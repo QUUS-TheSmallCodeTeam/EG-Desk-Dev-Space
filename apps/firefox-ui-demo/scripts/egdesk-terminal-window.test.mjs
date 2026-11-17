@@ -271,13 +271,15 @@ test('the close shortcut asks the same question, and a window without a running 
   }
 });
 
-test('the shared shell gives the Terminal its kind icon, a working green dot and no yellow dot', () => {
+test('the shared shell gives the Terminal its kind icon, a working green dot and the shared fold dot', () => {
   const start = surface.indexOf('  function spawnDeskWindowShell(options = {}) {');
   const shellSource = surface.slice(start, surface.indexOf('\n  // ============ Canvas Shapes ============', start));
   assert.match(shellSource, /memo: 'note', terminal: 'terminal' \}\[kind\] \|\| 'square'/, 'the bar shows the terminal icon, not a square');
   // The green dot also opens a folded window first (the shared shell's fold).
   assert.match(shellSource, /class: 'egd-card-dot egd-card-dot-max egd-desk-window-control',[\s\S]*?title: '창 최대화',\s*'aria-label': '창 최대화',\s*'aria-pressed': 'false',\s*onclick: \(ev\) => \{\s*ev\.stopPropagation\(\);\s*if \(isCollapsed\(\)\) setCollapsed\(false\);\s*toggleCardFullscreen\(root\);\s*\},/);
-  assert.match(css, /\.egd-terminal-card \.egd-card-dot-min \{ display: none; \}/, 'a dot that cannot act is not shown');
+  // UX-06: the Terminal folds through the shared shell; its yellow dot is no longer hidden.
+  assert.doesNotMatch(css, /\.egd-terminal-card \.egd-card-dot-min \{ display: none; \}/, 'the Terminal shows the fold dot');
+  assert.doesNotMatch(surface.slice(surface.indexOf('  function spawnDeskWindowShell('), surface.indexOf('  function spawnDeskWindowShell(') + 200), /collapsible: false/);
   assert.doesNotMatch(terminalSource, /egd-card-dot-(?:min|max)/, 'the Terminal no longer draws its own dots');
 });
 

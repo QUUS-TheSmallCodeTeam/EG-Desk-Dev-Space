@@ -28,6 +28,9 @@
   const ProfileTransfer = ChromeUtils.importESModule('chrome://userchrome/content/EGDeskProfileTransfer.sys.mjs');
   const ProfileTransferView = ChromeUtils.importESModule('chrome://userchrome/content/EGDeskProfileTransferView.sys.mjs');
   const MemoState = ChromeUtils.importESModule('chrome://userchrome/content/EGDeskMemoState.sys.mjs');
+  // DSN-04 · UX-05 · UX-06 keyboard rules and CNV-06 memo link rules (pure modules).
+  const SurfaceKeys = ChromeUtils.importESModule('chrome://userchrome/content/surface/EGDeskSurfaceKeys.mjs');
+  const MemoLink = ChromeUtils.importESModule('chrome://userchrome/content/surface/EGDeskSurfaceMemoLink.mjs');
   const AgentIdentityView = ChromeUtils.importESModule('chrome://userchrome/content/EGDeskAgentIdentityView.sys.mjs');
   const CanvasLayout = ChromeUtils.importESModule('chrome://userchrome/content/EGDeskCanvasLayout.sys.mjs');
   const BROWSER_AGENT_ACTOR_NAME = 'EGDeskBrowserAgentRuntime';
@@ -5772,7 +5775,10 @@
     const target = state.boards.projections[projectionId];
     if (!view?.isConnected || !target) return false;
     if (view.dataset.projectionId === target.id) return true;
-    const kind = view.classList.contains('egd-canvas-shape') ? 'shape' : 'card';
+    // CNV-03: a Canvas shape is never a Board member; inside a Board area it is
+    // shown there by position only (see showBoardScopeChooser).
+    if (view.classList.contains('egd-canvas-shape')) return false;
+    const kind = 'card';
     const record = viewBoardRecord(view);
     if (!record) { boardNotice('이 화면은 Board에 넣을 수 없습니다.'); return false; }
     const change = BoardMembership.planMembershipChange(state.boards.projections,
@@ -6601,7 +6607,7 @@
       // UX-06: windows saved folded come back folded, without a new change mark.
       for (const savedId of MinimapLayout.normalizeCollapsedIds(snapshot.desk?.collapsedViewIds)) {
         const view = document.getElementById(restoredIds.get(savedId) || savedId);
-        if (view && restoredViews.includes(view)) view._deskWindowShell?.setCollapsed?.(true, { quiet: true });
+        if (view && restoredViews.includes(view)) (view._deskWindowShell?.setCollapsed || view._setWindowCollapsed)?.(true, { quiet: true });
       }
       const activeId = snapshot.desk?.activeCardId;
       const active = activeId ? document.getElementById(restoredIds.get(activeId) || activeId) : null;
@@ -8115,7 +8121,12 @@
 
   function showBoardScopeChooser() {
     document.getElementById('egd-board-scope')?.remove();
-    const selectedIds = Array.from(document.querySelectorAll('.egd-entity-selected')).map(view => view.id);
+    // CNV-03 (D-V1~V3, inferred default): Canvas shapes are not Board members.
+    // A new Board takes only the selected windows; a shape lying inside the
+    // Board's area is seen there by its position and is saved with the Desk.
+    // Older Boards that saved shapes as members still restore them (kind 'shape').
+    const selectedIds = Array.from(document.querySelectorAll('.egd-entity-selected'))
+      .filter(view => !view.classList.contains('egd-canvas-shape')).map(view => view.id);
     const name = el('input', { 'aria-label': 'Board 이름', placeholder: 'Board 이름' });
     const dialog = el('div', { id: 'egd-board-scope', class: 'egd-edge egd-frosted', role: 'dialog', 'aria-label': '새 Board 저장 범위' },
       el('h3', {}, '새 Board'), name,
@@ -9048,9 +9059,12 @@
   // returned function when it closes by other means.
   function registerEscapeLayer(layer) {
     const id = escapeLayers.push(layer);
+    // Every layer is named in SurfaceKeys.ESCAPE_LAYER_REGISTRY with its tier.
+    try { SurfaceKeys.registeredEscapeLayer(layer.id, layer.kind); } catch (error) { console.error(TAG, error.message); }
     return () => { if (id) escapeLayers.remove(id); };
   }
 
+  let forwardingEscape = false;
   function installEscapeLayers() {
     const within = selector => target => !!target?.closest?.(selector);
     const byId = id => document.getElementById(id);
@@ -9146,16 +9160,69 @@
       isOpen: () => !!state.railSearch?.open, contains: within('#egd-rail-search-results, .egd-rail-search'),
       dismiss: () => closeRailSearchPanel(),
     });
-    // Chat shown over a fullscreen View goes away before the View shrinks.
+    // Chat peeked over a fullscreen View goes away before the View shrinks.
+    // A pinned Chat sits beside the View, not over it: Escape passes on and
+    // the View goes back to its size with the pinned Chat still open (D-V6).
     registerEscapeLayer({
       id: 'chat-peek', kind: 'peek',
-      isOpen: () => fullscreenView() && hudShown(), contains: within('#egd-hud'),
-      dismiss: () => setHudPresentationHidden(true),
+      isOpen: () => fullscreenView() && hudShown() && SurfaceKeys.chatPeekEscapeOpen({
+        fullscreen: true, mode: state.cardFullscreen.mode, hudMode: state.cardFullscreen.hudMode }),
+      contains: within('#egd-hud'),
+      dismiss: () => closeMaximizeHudPeek(),
+    });
+    // 집중 보기 ends straight back to the original size.
+    registerEscapeLayer({
+      id: 'focus-view', kind: 'focus',
+      isOpen: () => fullscreenView() && state.cardFullscreen.mode === 'focus',
+      dismiss: () => exitCardFullscreen(),
     });
     registerEscapeLayer({
       id: 'view-fullscreen', kind: 'fullscreen',
-      isOpen: fullscreenView,
+      isOpen: () => fullscreenView() && state.cardFullscreen.mode !== 'focus',
       dismiss: () => exitCardFullscreen(),
+    });
+    // Surfaces that keep their own Escape handler (Browser 더보기 menu, Agent
+    // activity popover, resource detail, export/import dialog, Chat project
+    // panel): the layer hands one Escape to that handler, so they still close
+    // in the registry's order and only when they are the top layer.
+    const forwardEscape = node => {
+      if (!node || forwardingEscape) return;
+      forwardingEscape = true;
+      try { node.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true })); }
+      finally { forwardingEscape = false; }
+    };
+    const query = selector => document.querySelector(selector);
+    registerEscapeLayer({
+      id: 'browser-menu', kind: 'menu',
+      isOpen: () => !!query('.egd-browser-menu[role="menu"]'), contains: within('.egd-browser-menu'),
+      dismiss: () => forwardEscape(query('.egd-browser-menu[role="menu"]')),
+    });
+    registerEscapeLayer({
+      id: 'browser-agent-timeline', kind: 'popover',
+      isOpen: () => !!query('.egd-browser-agent-timeline'), contains: within('.egd-browser-agent-timeline'),
+      dismiss: () => forwardEscape(query('.egd-browser-agent-timeline')),
+    });
+    registerEscapeLayer({
+      id: 'resource-detail', kind: 'popover',
+      isOpen: () => { const detail = byId('egd-resource-detail'); return !!detail && !detail.hidden; },
+      contains: within('#egd-resource-detail'),
+      dismiss: () => forwardEscape(document),
+    });
+    registerEscapeLayer({
+      id: 'portable-dialog', kind: 'dialog',
+      isOpen: () => !!byId('egd-portable-dialog'), contains: within('#egd-portable-dialog'),
+      dismiss: () => forwardEscape(byId('egd-portable-dialog')),
+    });
+    registerEscapeLayer({
+      id: 'chat-input-panel', kind: 'panel',
+      isOpen: () => !!byId('egd-codex-input-panel'), contains: within('#egd-codex-input-panel'),
+      dismiss: () => forwardEscape(byId('egd-codex-input-panel')),
+    });
+    // [다시 연결] on a memo waits for a window press; Escape cancels it.
+    registerEscapeLayer({
+      id: 'memo-relink', kind: 'popover',
+      isOpen: () => !!memoRelink, contains: target => !!memoRelink?.root?.contains?.(target),
+      dismiss: () => { const root = memoRelink?.root; memoRelink?.stop(); root?._memoMissing?.relink?.focus?.(); },
     });
 
     // A page, a terminal or a file frame owns its own Escape.
@@ -9168,7 +9235,7 @@
       return 'chrome';
     };
     const onEscape = (ev, phase) => {
-      if (ev.key !== 'Escape') return;
+      if (ev.key !== 'Escape' || forwardingEscape) return;
       const target = ev.target;
       const zone = zoneOf(target);
       const route = EscapeLayerStack.escapeRoute({
@@ -9178,7 +9245,16 @@
         kind: escapeLayers.top()?.kind ?? null,
         inside: escapeLayers.topContains(target),
       });
-      if (route.act) escapeLayers.handleEscape(ev);
+      if (route.act) { escapeLayers.handleEscape(ev); return; }
+      // 집중 보기 with a page focused: the page had the key first; one it left
+      // unused ends the focus view, as Escape leaves a browser's full screen.
+      if (phase !== 'bubble' || zone !== 'content') return;
+      const focus = SurfaceKeys.focusViewEscapeRoute({
+        key: ev.key, composing: ev.isComposing === true || ev.keyCode === 229, defaultPrevented: ev.defaultPrevented,
+        repeat: ev.repeat === true, mode: fullscreenView() ? state.cardFullscreen.mode : null,
+        initialBrowserFocus: !!state.surface?.initialBrowserFocus, topKind: escapeLayers.top()?.kind ?? null,
+      });
+      if (focus.act) { ev.preventDefault(); exitCardFullscreen(); }
     };
     window.addEventListener('keydown', ev => onEscape(ev, 'capture'), true);
     window.addEventListener('keydown', ev => onEscape(ev, 'bubble'), false);
@@ -18032,6 +18108,28 @@
     return true;
   }
 
+  // UX-06: Agent 칩(또는 앞으로 붙을 알림)을 누르면, 크게 보는 중에는 채팅을 엿보기로
+  // 겹쳐 연다(누를 때까지 열려 있는 'dock' 출처). 크게 보는 중이 아니면 false를 돌려주고
+  // 부른 쪽이 평소처럼 채팅을 연다. 집중 보기에서는 채팅을 겹치지 않는다(D-V6).
+  function peekChatForAttention() {
+    const fullscreen = state.cardFullscreen;
+    if (!fullscreen || fullscreen.mode === 'focus') return false;
+    return openMaximizeHudPeek('dock');
+  }
+  state.peekChatForAttention = peekChatForAttention;
+
+  function openChatForAgentChip() {
+    if (peekChatForAttention()) return true;
+    if (state.cardFullscreen?.mode === 'focus') return false;
+    if (state.codex.chatDockMode === 'canvas' || state.codex.chatCardEntityId) {
+      const chatCard = spawnCodexChatCard();
+      if (chatCard) { focusCanvasCard(chatCard); revealOpenCanvasCard(chatCard); }
+      return !!chatCard;
+    }
+    if (!(state.hudOpen && state.hudApp === 'chat')) toggleHUD('chat', '채팅', { preserveConversation: true });
+    return true;
+  }
+
   // Esc 층(esc-stack)과 바깥 클릭이 부르는 닫기. 엿보기가 아니면 아무것도 하지 않는다.
   function closeMaximizeHudPeek() {
     if (state.cardFullscreen?.hudMode !== 'peek') return false;
@@ -18145,10 +18243,18 @@
       const card = document.getElementById(state.cardFullscreen.cardId);
       if (card?.contains(target) || !target.closest('.egd-edge')) closeMaximizeHudPeek();
     }, true);
-    // Esc: 채팅 안의 메뉴·입력이 먼저 쓰고 남긴 Esc만 받아 엿보기를 닫는다.
+    // Esc는 Esc 층 한 곳(installEscapeLayers의 'chat-peek')에서만 엿보기를 닫는다.
+    // Browser 창의 Agent 칩: 누르거나 Enter/Space로 그 Agent가 일하는 채팅을 본다.
+    const agentChipFrom = target => target?.closest?.('.egd-browser-agent-identity:not([hidden])') || null;
+    window.addEventListener('click', (ev) => {
+      if (ev.button !== 0 || !agentChipFrom(ev.target)) return;
+      ev.stopPropagation();
+      openChatForAgentChip();
+    }, true);
     window.addEventListener('keydown', (ev) => {
-      if (ev.key !== 'Escape' || ev.defaultPrevented || ev.isComposing) return;
-      if (closeMaximizeHudPeek()) ev.preventDefault();
+      if ((ev.key !== 'Enter' && ev.key !== ' ') || ev.isComposing || !agentChipFrom(ev.target)) return;
+      ev.preventDefault();
+      openChatForAgentChip();
     });
     // Option(Alt)+초록 점 = 집중 보기. 창 점 자체의 동작(크게 보기)은 그대로 둔다.
     window.addEventListener('click', (ev) => {
@@ -19010,6 +19116,7 @@
       ? document.getElementById(memo.anchor.cardId) : null;
     const segment = target?.isConnected && target.parentNode === layer && !target.hidden
       ? MemoState.memoTetherSegment(persistentEntityGeometry(root), persistentEntityGeometry(target)) : null;
+    syncMemoExtraLinkLines(root, layer);
     let line = root._memoTether;
     if (!segment) {
       if (line && !line.hidden) line.hidden = true;
@@ -19024,6 +19131,119 @@
     if (line.hidden) line.hidden = false;
     const next = { left: `${segment.x1}px`, top: `${segment.y1}px`, width: `${segment.length}px`, transform: `rotate(${segment.angle}deg)` };
     for (const key of Object.keys(next)) if (line.style[key] !== next[key]) line.style[key] = next[key];
+  }
+
+  // CNV-06: a memo with extra links (memo.links) draws one dashed line to each
+  // open window it links to, next to the solid line to the window it sits on.
+  // Lines are reused by key and dropped when their link or window goes.
+  function syncMemoExtraLinkLines(root, layer) {
+    const lines = root._memoLinkLines || (root._memoLinkLines = new Map());
+    const memo = root._memoRecord;
+    const wanted = typeof MemoLink === 'undefined' || root.hidden || !memo?.links?.length ? []
+      : MemoLink.memoLinkLines({ ...memo, anchor: null }, {
+        memoRect: persistentEntityGeometry(root), segment: MemoState.memoTetherSegment,
+        rectOf: id => {
+          const card = document.getElementById(id);
+          return card?.isConnected && card.parentNode === layer && !card.hidden && !card.classList.contains('egd-memo-card')
+            ? persistentEntityGeometry(card) : null;
+        },
+      });
+    const live = new Set(wanted.map(item => item.key));
+    for (const [key, node] of lines) if (!live.has(key) || !node.isConnected) { node.remove(); lines.delete(key); }
+    for (const item of wanted) {
+      let node = lines.get(item.key);
+      if (!node) {
+        node = el('div', { class: 'egd-memo-tether', 'aria-hidden': 'true', data: { testid: 'memo-link-line', kind: item.kind, memoId: memo.id, targetId: item.targetId } });
+        node._memoRoot = root;
+        layer.insertBefore(node, root);
+        lines.set(item.key, node);
+      }
+      const next = { left: `${item.segment.x1}px`, top: `${item.segment.y1}px`, width: `${item.segment.length}px`, transform: `rotate(${item.segment.angle}deg)` };
+      for (const key of Object.keys(next)) if (node.style[key] !== next[key]) node.style[key] = next[key];
+    }
+  }
+
+  // [연결] menu on the memo bar: take the memo off its window (it stays where
+  // it is), cut an extra link, or link one more window from a keyboard list.
+  function toggleMemoLinkMenu(root, anchor) {
+    const menu = root._memoLinkMenu;
+    if (!menu) return;
+    if (!menu.hidden) { menu.hidden = true; anchor?.setAttribute('aria-expanded', 'false'); return; }
+    const memo = root._memoRecord;
+    const titleOf = id => { const card = document.getElementById(id); return card && !card.classList.contains('egd-memo-card') ? cardLabelForViewportRail(card) : ''; };
+    const close = () => { menu.hidden = true; anchor?.setAttribute('aria-expanded', 'false'); };
+    const items = MemoLink.memoUnlinkChoices(memo, { titleOf }).map(choice => el('button', {
+      type: 'button', role: 'menuitem', title: choice.title, data: { testid: 'memo-unlink', kind: choice.kind, targetId: choice.targetId },
+      onclick: (ev) => {
+        ev.stopPropagation();
+        close();
+        try {
+          const next = choice.kind === 'anchor'
+            ? MemoState.detachMemo(root._memoRecord, { x: root.offsetLeft, y: root.offsetTop })
+            : MemoState.unlinkMemo(root._memoRecord, choice.targetId);
+          updateMemoRecord(root, next, 'memo-unlink');
+        } catch (error) { boardNotice(error.message); }
+        anchor?.focus?.();
+      },
+    }, choice.label));
+    items.push(el('button', { type: 'button', role: 'menuitem', data: { testid: 'memo-link-more' },
+      title: '목록에서 고른 창으로도 선을 잇습니다. 메모는 지금 창에 그대로 붙어 있습니다.',
+      onclick: (ev) => { ev.stopPropagation(); close(); toggleMemoRelink(root, { keyboard: true, mode: 'link' }); } }, '다른 창도 잇기…'));
+    menu.replaceChildren(...items);
+    menu.hidden = false;
+    anchor?.setAttribute('aria-expanded', 'true');
+    items[0]?.focus?.();
+  }
+
+  // The keyboard path of [다시 연결] / [다른 창도 잇기]: open windows nearest
+  // the memo first; arrows move, Enter picks, Escape (the 'memo-relink'
+  // layer) cancels.
+  function renderMemoRelinkList(root, mode, stop) {
+    const list = root._memoRelinkList;
+    if (!list || typeof MemoLink === 'undefined') return;
+    const candidates = MemoLink.memoRelinkCandidates(root._memoRecord, memoAnchorCandidates(), { memoRect: persistentEntityGeometry(root) })
+      .filter(row => mode !== 'link' || !row.current);
+    const buttons = candidates.map(row => el('button', { type: 'button', role: 'option', 'aria-selected': 'false',
+      data: { testid: 'memo-relink-choice', cardId: row.id },
+      onclick: (ev) => {
+        ev.stopPropagation();
+        const card = document.getElementById(row.id);
+        stop();
+        if (card) relinkMemoTo(root, card, mode);
+      } }, row.label));
+    list.replaceChildren(...(buttons.length ? buttons : [el('p', { class: 'egd-memo-thread-empty' }, '이을 수 있는 창이 없습니다.')]));
+    list.setAttribute('aria-label', mode === 'link' ? '선을 이을 창' : '메모를 연결할 창');
+    list.hidden = false;
+    list.onkeydown = (ev) => {
+      const index = buttons.indexOf(document.activeElement);
+      const next = SurfaceKeys.rovingNextIndex(ev.key, { count: buttons.length, current: index });
+      if (next == null || index < 0) return;
+      ev.preventDefault();
+      ev.stopPropagation();
+      buttons[next].focus();
+    };
+    buttons[0]?.focus?.();
+  }
+
+  // Pin the memo (anchor) or add a line (link) to the chosen window.
+  function relinkMemoTo(root, card, mode = 'anchor') {
+    if (!card || card.classList.contains('egd-memo-card') || card.classList.contains('egd-board-missing')) {
+      boardNotice('창을 누르지 않아 메모를 연결하지 않았습니다.');
+      return false;
+    }
+    try {
+      if (mode === 'link') {
+        updateMemoRecord(root, MemoState.linkMemo(root._memoRecord, card.id, cardLabelForViewportRail(card)), 'memo-link');
+        return true;
+      }
+      const rect = persistentEntityGeometry(card);
+      const next = MemoState.attachMemoToCard(root._memoRecord, { id: card.id, label: cardLabelForViewportRail(card),
+        rect: { x: rect.x, y: rect.y, width: rect.width, height: rect.height } }, { x: root.offsetLeft, y: root.offsetTop });
+      // An explicit choice may leave the restored Board's own members.
+      delete root._memoAnchorProjectionId;
+      updateMemoRecord(root, next, 'memo-relink');
+      return true;
+    } catch (error) { boardNotice(error.message); return false; }
   }
 
   // What follows the anchor state on the memo: its line, and for '대상 없음'
@@ -19052,7 +19272,9 @@
   // [다시 연결]: the next window the user presses becomes this memo's target.
   // The memo stays where it is. Esc, the button again, or a press on empty
   // Canvas leaves the memo as it was.
-  function toggleMemoRelink(root) {
+  // { keyboard: true } (Enter/Space on the button, or [다른 창도 잇기]) also
+  // opens a list of windows to pick from; mode 'link' adds a line instead.
+  function toggleMemoRelink(root, { keyboard = false, mode = 'anchor' } = {}) {
     const previous = memoRelink;
     if (previous) previous.stop();
     if (previous?.root === root || !root?.isConnected) return;
@@ -19061,9 +19283,10 @@
       picking.abort();
       if (memoRelink?.root === root) memoRelink = null;
       document.documentElement.removeAttribute('data-egd-memo-relinking');
+      if (root._memoRelinkList) { root._memoRelinkList.hidden = true; root._memoRelinkList.replaceChildren?.(); }
       if (root.isConnected) syncMemoLinkUi(root);
     };
-    memoRelink = { root, stop };
+    memoRelink = { root, stop, mode };
     document.documentElement.setAttribute('data-egd-memo-relinking', 'true');
     window.addEventListener('keydown', (ev) => {
       if (ev.key !== 'Escape') return;
@@ -19080,20 +19303,10 @@
       window.addEventListener('mouseup', () => window.setTimeout(() => swallow.abort(), 0), { capture: true, once: true });
       const card = ev.target?.closest?.('.egd-canvas-card');
       stop();
-      if (!card || card.classList.contains('egd-memo-card') || card.classList.contains('egd-board-missing')) {
-        boardNotice('창을 누르지 않아 메모를 연결하지 않았습니다.');
-        return;
-      }
-      try {
-        const rect = persistentEntityGeometry(card);
-        const next = MemoState.attachMemoToCard(root._memoRecord, { id: card.id, label: cardLabelForViewportRail(card),
-          rect: { x: rect.x, y: rect.y, width: rect.width, height: rect.height } }, { x: root.offsetLeft, y: root.offsetTop });
-        // An explicit choice may leave the restored Board's own members.
-        delete root._memoAnchorProjectionId;
-        updateMemoRecord(root, next, 'memo-relink');
-      } catch (error) { boardNotice(error.message); }
+      relinkMemoTo(root, card, mode);
     }, { capture: true, signal: picking.signal });
     syncMemoLinkUi(root);
+    if (keyboard) renderMemoRelinkList(root, mode, stop);
   }
 
   // [Chat에서 보기] on a waiting question: the conversation it was sent in.
@@ -19287,7 +19500,10 @@
     if (!found) return;
     const root = roots.find(item => item._memoRecord === found.memo);
     if (MEMO_RUN_ENDED.includes(run.status)) {
-      updateMemoRecord(root, MemoState.cancelMemoAsk(found.memo, found.ask.askId), 'memo-ask-ended');
+      // CNV-06: a failure keeps a row with [다시 묻기]; a cancelled run just closes the ask.
+      const failed = typeof MemoLink !== 'undefined' && MemoLink.memoAskEndStatus(run.status) === 'failed';
+      updateMemoRecord(root, failed ? MemoState.failMemoAsk(found.memo, found.ask.askId)
+        : MemoState.cancelMemoAsk(found.memo, found.ask.askId), failed ? 'memo-ask-failed' : 'memo-ask-ended');
       return;
     }
     const reply = MemoState.memoReplyFromRun(run);
@@ -19382,11 +19598,28 @@
           onclick: (ev) => { ev.stopPropagation(); openMemoAskInChat(ask); } }, 'Chat에서 보기'),
         el('button', { type: 'button', class: 'egd-memo-ask-cancel', title: '이 질문 기다리기를 멈춥니다. Chat의 대화는 남습니다.',
           onclick: (ev) => { ev.stopPropagation(); updateMemoRecord(root, MemoState.cancelMemoAsk(root._memoRecord, ask.askId), 'memo-ask-cancel'); } }, '기다리지 않기')));
+      // CNV-06: a question whose answer failed: [다시 묻기] asks the same Agent
+      // again with the memo as it is now; [닫기] drops the row.
+      const failedRows = typeof MemoLink === 'undefined' ? [] : MemoLink.memoFailedAskRows(memo, { nameOf: id => codexAgentProfile(id)?.name || '' });
+      for (const failure of failedRows) rows.push(el('span', { class: 'egd-memo-ask-pending egd-memo-ask-failed', role: 'status',
+        data: { testid: 'memo-ask-failed', askId: failure.askId, agentId: failure.agentId } }, failure.text,
+        el('button', { type: 'button', class: 'egd-memo-ask-retry', title: failure.retryTitle, data: { testid: 'memo-ask-retry' }, disabled: sending,
+          onclick: async (ev) => {
+            ev.stopPropagation();
+            const name = codexAgentProfile(failure.agentId)?.name || undefined;
+            const questionInput = root.querySelector('.egd-memo-ask-question');
+            if (await askMemoAgent(root, { agentId: failure.agentId, agentName: name, question: questionInput?.value || '' })) {
+              updateMemoRecord(root, MemoState.clearFailedMemoAsk(root._memoRecord, failure.askId), 'memo-ask-retry');
+            }
+          } }, failure.retry),
+        el('button', { type: 'button', class: 'egd-memo-ask-dismiss', data: { testid: 'memo-ask-dismiss' },
+          onclick: (ev) => { ev.stopPropagation(); updateMemoRecord(root, MemoState.clearFailedMemoAsk(root._memoRecord, failure.askId), 'memo-ask-dismiss'); } },
+        failure.dismiss)));
       if (sending) rows.unshift(el('span', { class: 'egd-memo-ask-pending', data: { testid: 'memo-ask-sending' } }, '보내는 중…'));
       if (root._memoAskNotice) rows.unshift(el('span', { class: 'egd-memo-ask-pending', role: 'status',
         data: { testid: 'memo-ask-notice' } }, root._memoAskNotice));
       askStatus.replaceChildren(...rows);
-      askStatus.hidden = !sending && !pending.length && !root._memoAskNotice;
+      askStatus.hidden = !sending && !pending.length && !root._memoAskNotice && !failedRows.length;
     }
     const askButton = root.querySelector('.egd-memo-ask-send');
     const select = root.querySelector('.egd-memo-ask-agent');
@@ -19446,6 +19679,11 @@
       type: 'button', class: 'egd-memo-resolve egd-desk-window-action', data: { testid: 'memo-resolve', noWindowDrag: 'true' },
       onclick: (ev) => { ev.stopPropagation(); updateMemoRecord(root, MemoState.setMemoResolved(root._memoRecord, !root._memoRecord.resolved), 'memo-resolve'); },
     }, '해결'));
+    if (typeof MemoLink !== 'undefined') shell.slots.actions.appendChild(el('button', {
+      type: 'button', class: 'egd-memo-links egd-desk-window-action', 'aria-haspopup': 'menu', 'aria-expanded': 'false',
+      title: '이 메모의 연결 끊기 · 다른 창도 잇기', data: { testid: 'memo-links', noWindowDrag: 'true' },
+      onclick: (ev) => { ev.stopPropagation(); toggleMemoLinkMenu(root, ev.currentTarget); },
+    }, '연결'));
     shell.slots.actions.appendChild(el('button', {
       type: 'button', class: 'egd-memo-toggle egd-desk-window-action', data: { testid: 'memo-toggle', noWindowDrag: 'true' },
       onclick: (ev) => { ev.stopPropagation(); updateMemoRecord(root, MemoState.setMemoExpanded(root._memoRecord, !root._memoRecord.expanded), 'memo-toggle'); },
@@ -19525,13 +19763,17 @@
     const missingLabel = el('span', { class: 'egd-memo-missing-label', data: { testid: 'memo-missing-label' } });
     const relinkButton = el('button', { type: 'button', class: 'egd-memo-relink', 'aria-pressed': 'false', data: { testid: 'memo-relink' },
       title: '다음에 누르는 창에 이 메모를 연결합니다. 메모는 지금 자리에 그대로 있습니다.',
-      onclick: (ev) => { ev.stopPropagation(); toggleMemoRelink(root); } }, '다시 연결');
+      // A keyboard press (Enter/Space gives detail 0) also opens the window list.
+      onclick: (ev) => { ev.stopPropagation(); toggleMemoRelink(root, { keyboard: ev.detail === 0 }); } }, '다시 연결');
     const removeButton = el('button', { type: 'button', class: 'egd-memo-remove', data: { testid: 'memo-remove' },
       title: '이 메모를 닫아 지웁니다.',
       onclick: (ev) => { ev.stopPropagation(); closeCanvasCard(root); } }, '삭제');
     root._memoMissing = { row: el('div', { class: 'egd-memo-missing', role: 'group', 'aria-label': '대상이 없는 메모', hidden: true, data: { testid: 'memo-missing' } },
       missingLabel, relinkButton, removeButton), label: missingLabel, relink: relinkButton, remove: removeButton };
-    shell.slots.content.appendChild(el('div', { class: 'egd-memo-body' }, root._memoMissing.row, textarea, status));
+    // CNV-06: the window list for [다시 연결] from the keyboard, and the [연결] menu.
+    root._memoRelinkList = el('div', { class: 'egd-memo-relink-list', role: 'listbox', hidden: true, data: { testid: 'memo-relink-list' } });
+    root._memoLinkMenu = el('div', { class: 'egd-memo-unlink-menu', role: 'menu', 'aria-label': '메모 연결', hidden: true, data: { testid: 'memo-link-menu' } });
+    shell.slots.content.appendChild(el('div', { class: 'egd-memo-body' }, root._memoMissing.row, root._memoRelinkList, root._memoLinkMenu, textarea, status));
     shell.slots.content.appendChild(el('div', { class: 'egd-memo-detail' }, thread, replyInput, askStatus, askRow));
 
     // Dropping the memo elsewhere re-pins it to what is under its corner.
@@ -19554,6 +19796,7 @@
       if (saveTimer) clearTimeout(saveTimer);
       if (memoRelink?.root === root) memoRelink.stop();
       root._memoTether?.remove();
+      for (const line of root._memoLinkLines?.values() || []) line.remove();
     });
     syncMemoCardFrame(root);
     renderMemoCard(root);
@@ -19725,7 +19968,7 @@
     });
 
     // Same title row as every Desk window: dots, grip, icon and the name '설정'.
-    // Settings does not fold, so it shows no yellow dot.
+    // UX-06: the yellow dot folds Settings to its title row like other windows.
     const closeControl = el('span', {
       class: 'egd-card-dot egd-card-dot-close egd-desk-window-control', role: 'button', tabindex: '0',
       title: '창 닫기', 'aria-label': '창 닫기',
@@ -19734,9 +19977,30 @@
     const maximizeControl = el('span', {
       class: 'egd-card-dot egd-card-dot-max egd-desk-window-control', role: 'button', tabindex: '0',
       title: '창 최대화', 'aria-label': '창 최대화', 'aria-pressed': 'false',
-      onclick: (ev) => { ev.stopPropagation(); toggleCardFullscreen(card); syncMaximizeControl(); },
+      onclick: (ev) => { ev.stopPropagation(); if (isCollapsed()) setCollapsed(false); toggleCardFullscreen(card); syncMaximizeControl(); },
     });
-    for (const control of [closeControl, maximizeControl]) {
+    const isCollapsed = () => !!card.classList?.contains('egd-card-collapsed');
+    const minimizeControl = el('span', {
+      class: 'egd-card-dot egd-card-dot-min egd-desk-window-control', role: 'button', tabindex: '0',
+      title: '창 접기', 'aria-label': '창 접기', 'aria-expanded': 'true',
+      onclick: (ev) => { ev.stopPropagation(); setCollapsed(!isCollapsed()); },
+    });
+    // Folding a maximized Settings first returns it to its size; Desk save and
+    // restore keep the fold (collapsedViewIds) through card._setWindowCollapsed.
+    const setCollapsed = (collapsed, { quiet = false } = {}) => {
+      const next = !!collapsed;
+      if (next === isCollapsed()) return next;
+      if (next && isCardFullscreen(card)) toggleCardFullscreen(card);
+      card.classList.toggle('egd-card-collapsed', next);
+      const label = next ? '창 펼치기' : '창 접기';
+      minimizeControl.setAttribute('title', label);
+      minimizeControl.setAttribute('aria-label', label);
+      minimizeControl.setAttribute('aria-expanded', String(!next));
+      if (!quiet) markAgendaDirty(next ? 'collapse-settings-window' : 'expand-settings-window', card);
+      return next;
+    };
+    card._setWindowCollapsed = setCollapsed;
+    for (const control of [closeControl, minimizeControl, maximizeControl]) {
       control.addEventListener('keydown', (ev) => {
         if (ev.key !== 'Enter' && ev.key !== ' ') return;
         ev.preventDefault(); ev.stopPropagation(); control.click();
@@ -19756,7 +20020,7 @@
     const header = el('div', { class: 'egd-card-header egd-desk-window-header' },
       el('div', { class: 'egd-card-topbar egd-desk-window-titlebar' },
         el('div', { class: 'egd-card-dots-shell' },
-          el('div', { class: 'egd-card-dots' }, closeControl, maximizeControl),
+          el('div', { class: 'egd-card-dots' }, closeControl, minimizeControl, maximizeControl),
         ),
         el('span', { class: 'egd-window-grip', 'aria-hidden': 'true' }, deskIcon('grip')),
         el('div', { class: 'egd-desk-window-identity' },
@@ -23049,7 +23313,9 @@
     });
     const agentBadgeStatus = el('span', { class: 'egd-browser-agent-status', role: 'status' }, agentBadge);
     // AGENT-05: the Agent's face and name beside the badge while it works on this Card.
-    const agentIdentityChip = el('span', { class: 'egd-browser-agent-identity', hidden: true, data: { testid: 'browser-agent-identity' } });
+    // UX-06: the chip opens that Agent's Chat (a peek while this window is maximized).
+    const agentIdentityChip = el('span', { class: 'egd-browser-agent-identity', hidden: true, role: 'button', tabindex: '0',
+      'aria-label': 'Agent 채팅 보기', data: { testid: 'browser-agent-identity' } });
     agentBadgeStatus.prepend(agentIdentityChip);
     const agentHandButton = el('button', {
       type: 'button', class: 'egd-browser-agent-hand', hidden: true, data: { testid: 'browser-agent-pause', action: '' },
@@ -26602,6 +26868,19 @@
   // and dot placement are EGDeskViewportExtras; this is the screen side.
   const ViewportExtras = ChromeUtils.importESModule('chrome://userchrome/content/EGDeskViewportExtras.sys.mjs');
 
+  // UX-05: windows that matter now. Briefing target: a window whose semantic
+  // proxy the Briefing is on (data-briefing-active). Agent working: a Browser
+  // window whose Agent badge controls are showing (BRW-13 / AGENT-05).
+  function windowAttentionSets(cards = []) {
+    const briefingIds = new Set(), agentIds = new Set();
+    for (const card of cards) {
+      if (!card?.id) continue;
+      if (card.dataset?.briefingActive === 'true' || card.querySelector?.('[data-briefing-active="true"]')) briefingIds.add(card.id);
+      if (card.querySelector?.('.egd-browser-agent-hand:not([hidden]), .egd-browser-agent-identity:not([hidden])')) agentIds.add(card.id);
+    }
+    return { briefingIds, agentIds };
+  }
+
   function installCanvasPanZoom(viewport, layer) {
     const zoomValue = el('button', { type: 'button', class: 'egd-zoom-value', 'aria-live': 'off',
       'aria-label': 'Canvas 배율 직접 입력', title: '배율 직접 입력 (1~400%)', data: { testid: 'canvas-zoom-value' } }, '100%');
@@ -26838,7 +27117,9 @@
         const points = CanvasLayout.edgeIndicators(cards.map(card => ({ id: card.id, rect: persistentEntityGeometry(card) })),
           { viewport: box, pan: state.pan, zoom: state.zoom, inset: 6, limit: ViewportExtras.EDGE_DOT_TARGET_LIMIT });
         const titles = new Map(points.map(point => [point.id, minimapEntityTitle(document.getElementById(point.id))]));
-        dots = ViewportExtras.edgeDotModel(points, { titles,
+        // UX-05: the window a Briefing is reading, then windows an Agent is working in, keep their own dot first.
+        const sets = windowAttentionSets(cards);
+        dots = ViewportExtras.edgeDotModel(points, { titles, priority: id => SurfaceKeys.windowPriorityRank(id, sets),
           bounds: { left: safe.left + 6, top: safe.top + 6, right: safe.right - 6, bottom: safe.bottom - 6 } });
       }
       const live = new Set(dots.map(dot => dot.key));
@@ -27579,6 +27860,49 @@
       const nodes = next.ids.map(id => document.getElementById(id)).filter(node => node?.isConnected);
       if (!nodes.length) return;
       setSelectedEntities(state.expandCanvasSelection(nodes), document.getElementById(next.activeId));
+    }, true);
+    // UX-05 (D-V5): a focused window header moves its window with the arrow
+    // keys on the 24px grid (Shift 5 cells, Option/Alt 1px without the grid),
+    // and Shift+Space adds it to or takes it out of the selection, the
+    // keyboard path of Shift+click. Each press is one layout undo step.
+    const keyStatus = el('div', { id: 'egd-window-key-status', class: 'egd-visually-hidden', role: 'status', 'aria-live': 'polite' });
+    document.documentElement.appendChild(keyStatus);
+    window.addEventListener('keydown', ev => {
+      const header = ev.target;
+      if (ev.defaultPrevented || !header?.matches?.(HEADER_SELECTOR)) return;
+      const card = cardOf(header);
+      if (!card || card.parentNode !== layer || isCardFullscreen(card)) return;
+      const action = SurfaceKeys.windowHeaderKeyAction(ev);
+      if (!action) return;
+      ev.preventDefault();
+      ev.stopPropagation();
+      if (action.type === 'select-toggle') {
+        const pressed = [card.id, ...CanvasLayout.expandCanvasGroupSelection(state.canvasGroups, [card.id])];
+        const next = ViewportExtras.shiftClickSelection(selectedCards().map(node => node.id), pressed, state.activeEntityId || null);
+        const nodes = next.ids.map(id => document.getElementById(id)).filter(node => node?.isConnected);
+        if (nodes.length) setSelectedEntities(state.expandCanvasSelection(nodes), document.getElementById(next.activeId));
+        const picked = card.classList.contains('egd-entity-selected');
+        keyStatus.textContent = picked ? `선택에 더함 · 선택 ${nodes.length}개` : `선택에서 뺌 · 선택 ${nodes.length}개`;
+        return;
+      }
+      const start = rectOf(card);
+      const snap = state.canvasSnapEnabled !== false;
+      const point = SurfaceKeys.windowKeyMove(start, action, { grid: CanvasLayout.CANVAS_GRID_PX, snap });
+      if (!point) return;
+      const dx = point.x - start.x, dy = point.y - start.y;
+      // A selected window moves with the rest of the selection; group mates always come along.
+      const ids = card.classList.contains('egd-entity-selected') ? selectedCards().map(node => node.id) : [card.id];
+      const moving = [...new Set([...ids, ...CanvasLayout.expandCanvasGroupSelection(state.canvasGroups, ids)])];
+      const items = moving.map(id => document.getElementById(id)).filter(node => node?.isConnected && !isCardFullscreen(node))
+        .map(node => { const before = rectOf(node); return { id: node.id, before, after: { ...before, x: before.x + dx, y: before.y + dy } }; });
+      if (!history.record({ label: 'move', items })) return;
+      for (const item of items) {
+        const node = document.getElementById(item.id);
+        applyPersistentEntityGeometry(node, item.after);
+        markAgendaDirty('move-card', node);
+      }
+      scheduleGroupFrames();
+      keyStatus.textContent = SurfaceKeys.windowKeyMoveStatus(point, { snap, free: action.free });
     }, true);
     // Option/Alt releases the snap for as long as it is held, even mid-drag.
     window.addEventListener('pointermove', ev => {
@@ -29081,10 +29405,38 @@
   // Dock, the top bar and the Canvas view bar. One listener on the window, so
   // it does not depend on how those bars are built; Tab order is unchanged and
   // a control that handles the key itself keeps it.
+  // DSN-04: each Dock group, each top-bar section, the view bar and each
+  // window title bar is one group: one Tab stop (roving tabindex), arrows
+  // move inside it. The nearest group around the focused button wins.
   const ArrowRowNavigation = ChromeUtils.importESModule('chrome://userchrome/content/EGDeskFocusNavigation.sys.mjs');
-  const ARROW_ROW_ROOTS = '#egd-dock, #egd-desk-rail, #egd-zoom-indicator';
+  const ARROW_ROW_ROOTS = '.egd-dock-group, #egd-dock, .egd-rail-section, #egd-desk-rail, #egd-zoom-indicator, .egd-card-topbar';
   const ARROW_ROW_ITEMS = 'button, [role="button"]';
-  const ARROW_ROW_POPUPS = '[role="menu"], [role="listbox"], [role="dialog"], [role="tablist"], [role="radiogroup"]';
+  const ARROW_ROW_POPUPS = '[role="menu"], [role="listbox"], [role="dialog"], [role="tablist"], [role="radiogroup"], [role="toolbar"]';
+
+  // The buttons one group moves between: visible, not inside a popup or an
+  // inner toolbar of its own, and not inside a nested group.
+  function arrowRowItems(root) {
+    return [...root.querySelectorAll(ARROW_ROW_ITEMS)].filter(item => item.closest(ARROW_ROW_ROOTS) === root
+      && !(item.closest(ARROW_ROW_POPUPS) && item.closest(ARROW_ROW_POPUPS) !== root)
+      && !item.hidden && item.getClientRects().length > 0);
+  }
+
+  // Roving tabindex: tabindex 0 stays on the focused (or last focused, or
+  // first usable) button of the group and every other one gets -1.
+  function syncRovingGroup(root, focused = null) {
+    if (!root?.isConnected) return;
+    const items = arrowRowItems(root);
+    if (focused && items.includes(focused)) root._egdRovingLast = focused;
+    const stop = SurfaceKeys.rovingStop({ count: items.length, focused: items.indexOf(focused),
+      lastFocused: items.indexOf(root._egdRovingLast), isSkipped: index => items[index].disabled === true });
+    items.forEach((item, index) => { const next = index === stop ? 0 : -1; if (item.tabIndex !== next) item.tabIndex = next; });
+  }
+
+  function syncRovingGroupsWithin(container) {
+    if (!container?.querySelectorAll) return;
+    const groups = [...(container.matches?.(ARROW_ROW_ROOTS) ? [container] : []), ...container.querySelectorAll(ARROW_ROW_ROOTS)];
+    for (const group of groups) syncRovingGroup(group, group.contains(document.activeElement) ? document.activeElement : null);
+  }
 
   function handleArrowRowKeydown(ev) {
     if (ev.defaultPrevented || ev.altKey || ev.ctrlKey || ev.metaKey || ev.shiftKey) return;
@@ -29092,9 +29444,8 @@
     const target = ev.target;
     if (!intent || !target?.matches?.(ARROW_ROW_ITEMS)) return;
     const root = target.closest(ARROW_ROW_ROOTS);
-    if (!root || target.closest(ARROW_ROW_POPUPS)) return;
-    const items = [...root.querySelectorAll(ARROW_ROW_ITEMS)]
-      .filter(item => !item.closest(ARROW_ROW_POPUPS) && item.getClientRects().length > 0);
+    if (!root || (target.closest(ARROW_ROW_POPUPS) && target.closest(ARROW_ROW_POPUPS) !== root)) return;
+    const items = arrowRowItems(root);
     const next = ArrowRowNavigation.nextCompositeIndex({
       count: items.length, current: items.indexOf(target), intent,
       isSkipped: index => items[index].disabled === true,
@@ -29102,13 +29453,103 @@
     if (next < 0 || items[next] === target) return;
     ev.preventDefault();
     ev.stopPropagation();
+    syncRovingGroup(root, items[next]);
     items[next].focus();
+  }
+
+  // DSN-04: the control's name next to it while it has keyboard focus
+  // (mouse hover keeps the native title). Hidden on blur, a press or Escape.
+  function keyboardTooltipNode() {
+    let tip = document.getElementById('egd-key-tooltip');
+    if (!tip) {
+      tip = el('div', { id: 'egd-key-tooltip', role: 'tooltip', hidden: true, data: { testid: 'key-tooltip' } });
+      document.documentElement.appendChild(tip);
+    }
+    return tip;
+  }
+  function hideKeyboardTooltip() {
+    const tip = document.getElementById('egd-key-tooltip');
+    if (tip && !tip.hidden) tip.hidden = true;
+  }
+  function showKeyboardTooltip(target) {
+    let visible = false;
+    try { visible = target.matches(':focus-visible'); } catch {}
+    if (!visible) { hideKeyboardTooltip(); return; }
+    const name = SurfaceKeys.keyboardTooltipText({ ariaLabel: target.getAttribute('aria-label'), title: target.getAttribute('title'),
+      text: target.textContent });
+    if (!SurfaceKeys.keyboardTooltipNeeded({ name, visibleText: target.textContent })) { hideKeyboardTooltip(); return; }
+    const tip = keyboardTooltipNode();
+    tip.textContent = name;
+    tip.hidden = false;
+    const box = target.getBoundingClientRect();
+    const at = SurfaceKeys.keyboardTooltipPosition({ left: box.left, top: box.top, width: box.width, height: box.height },
+      { width: tip.offsetWidth, height: tip.offsetHeight }, { width: window.innerWidth, height: window.innerHeight });
+    tip.dataset.side = at.side;
+    tip.style.left = `${at.left}px`;
+    tip.style.top = `${at.top}px`;
+  }
+
+  function handleRovingFocusIn(ev) {
+    const target = ev.target;
+    const root = target?.matches?.(ARROW_ROW_ITEMS) ? target.closest(ARROW_ROW_ROOTS) : null;
+    if (!root) { hideKeyboardTooltip(); return; }
+    syncRovingGroup(root, target);
+    showKeyboardTooltip(target);
+  }
+
+  // Window title rows: the header itself is the window's keyboard handle
+  // (UX-05 arrows move the window) and its buttons are one roving group.
+  function prepareWindowKeyboard(card) {
+    const header = card?.querySelector?.(':scope > .egd-card-header, :scope > .egd-chat-card-header');
+    if (header && !header.hasAttribute('tabindex')) header.setAttribute('tabindex', '0');
+    if (header && !header.hasAttribute('aria-description')) {
+      header.setAttribute('aria-roledescription', '창 머리');
+      header.setAttribute('aria-description', SurfaceKeys.WINDOW_HEADER_KEY_HINT);
+    }
+    for (const group of card?.querySelectorAll?.('.egd-card-topbar') || []) syncRovingGroup(group);
   }
 
   function installArrowRowKeys() {
     try { window.__egdeskArrowRowKeysCleanup?.(); } catch {}
+    const hideOnKey = ev => { if (ev.key === 'Escape' || ev.key === 'Enter' || ev.key === ' ') hideKeyboardTooltip(); };
     window.addEventListener('keydown', handleArrowRowKeydown);
-    window.__egdeskArrowRowKeysCleanup = () => window.removeEventListener('keydown', handleArrowRowKeydown);
+    window.addEventListener('keydown', hideOnKey, true);
+    window.addEventListener('focusin', handleRovingFocusIn, true);
+    window.addEventListener('focusout', hideKeyboardTooltip, true);
+    window.addEventListener('mousedown', hideKeyboardTooltip, true);
+    // Bars re-render their buttons; a new button must not become a second Tab stop.
+    const observers = [];
+    for (const id of ['egd-dock', 'egd-desk-rail', 'egd-zoom-indicator']) {
+      const bar = document.getElementById(id);
+      if (!bar) continue;
+      syncRovingGroupsWithin(bar);
+      let queued = 0;
+      const observer = new MutationObserver(() => {
+        if (queued) return;
+        queued = requestAnimationFrame(() => { queued = 0; syncRovingGroupsWithin(bar); });
+      });
+      observer.observe(bar, { childList: true, subtree: true, attributes: true, attributeFilter: ['hidden', 'disabled'] });
+      observers.push(observer);
+    }
+    const layer = document.getElementById('egd-canvas-layer');
+    for (const card of layer?.querySelectorAll(':scope > .egd-canvas-card') || []) prepareWindowKeyboard(card);
+    if (layer) {
+      const cardObserver = new MutationObserver(records => {
+        for (const record of records) for (const node of record.addedNodes) {
+          if (node.classList?.contains('egd-canvas-card')) prepareWindowKeyboard(node);
+        }
+      });
+      cardObserver.observe(layer, { childList: true });
+      observers.push(cardObserver);
+    }
+    window.__egdeskArrowRowKeysCleanup = () => {
+      window.removeEventListener('keydown', handleArrowRowKeydown);
+      window.removeEventListener('keydown', hideOnKey, true);
+      window.removeEventListener('focusin', handleRovingFocusIn, true);
+      window.removeEventListener('focusout', hideKeyboardTooltip, true);
+      window.removeEventListener('mousedown', hideKeyboardTooltip, true);
+      for (const observer of observers) observer.disconnect();
+    };
   }
 
   function boot() {

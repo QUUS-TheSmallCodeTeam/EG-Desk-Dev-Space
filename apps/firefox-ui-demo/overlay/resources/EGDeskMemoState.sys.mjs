@@ -43,7 +43,9 @@ export const MEMO_FRAME = Object.freeze({
   folded: Object.freeze({ width: 240, height: 160 }),
   expanded: Object.freeze({ width: 320, height: 280 }),
 });
-export const MEMO_ASK_STATUSES = Object.freeze(['pending', 'answered', 'cancelled']);
+// failed: the run ended without an answer (error, interrupted, unavailable);
+// the memo keeps a row with [다시 묻기] until the user closes it (CNV-06).
+export const MEMO_ASK_STATUSES = Object.freeze(['pending', 'answered', 'cancelled', 'failed']);
 // How far (world px) a memo may sit outside the window it is pinned to.
 export const MEMO_ANCHOR_REACH = 4000;
 
@@ -454,6 +456,37 @@ export function cancelMemoAsk(memo, askId, { now = Date.now() } = {}) {
   const asks = memo.asks.slice();
   asks[index] = { ...asks[index], status: 'cancelled' };
   return { ...memo, asks, updatedAt: Math.max(memo.updatedAt, now) };
+}
+
+// The run behind a pending question ended without an answer.
+export function failMemoAsk(memo, askId, { now = Date.now() } = {}) {
+  const index = memo.asks.findIndex(item => item.askId === askId && item.status === 'pending');
+  if (index < 0) return memo;
+  const asks = memo.asks.slice();
+  asks[index] = { ...asks[index], status: 'failed' };
+  return { ...memo, asks, updatedAt: Math.max(memo.updatedAt, now) };
+}
+
+// [닫기] or a successful [다시 묻기] on a failed question: no row any more.
+export function clearFailedMemoAsk(memo, askId, { now = Date.now() } = {}) {
+  const index = memo.asks.findIndex(item => item.askId === askId && item.status === 'failed');
+  if (index < 0) return memo;
+  const asks = memo.asks.slice();
+  asks[index] = { ...asks[index], status: 'cancelled' };
+  return { ...memo, asks, updatedAt: Math.max(memo.updatedAt, now) };
+}
+
+export const failedMemoAsks = memo => (memo?.asks || []).filter(item => item.status === 'failed');
+
+// [연결 끊기] on the anchor window: the memo stays where it is (point, world)
+// and is pinned to the Canvas, no longer following that window.
+export function detachMemo(memo, point, { now = Date.now() } = {}) {
+  if (memo?.anchor?.kind !== 'card') return memo;
+  const x = Number(point?.x), y = Number(point?.y);
+  const at = Number.isFinite(x) && Number.isFinite(y) ? { x, y } : memo.anchor.at;
+  const anchor = normAnchor({ kind: 'canvas', x: at?.x, y: at?.y });
+  if (!anchor) throw new Error('메모를 둘 자리가 없습니다.');
+  return { ...memo, anchor, updatedAt: Math.max(memo.updatedAt, now) };
 }
 
 export const pendingMemoAsks = memo => (memo?.asks || []).filter(item => item.status === 'pending');

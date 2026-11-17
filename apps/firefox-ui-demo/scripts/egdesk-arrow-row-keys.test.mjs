@@ -5,6 +5,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import * as FocusNavigation from '../overlay/resources/EGDeskFocusNavigation.sys.mjs';
+import * as SurfaceKeys from '../overlay/resources/surface/EGDeskSurfaceKeys.mjs';
 
 const surfaceJs = readFileSync(new URL('../overlay/JS/eg-desk-surface.uc.js', import.meta.url), 'utf8').replace(/\r\n/g, '\n');
 const from = surfaceJs.indexOf("  const ARROW_ROW_ROOTS = ");
@@ -12,7 +13,7 @@ const to = surfaceJs.indexOf('\n  function boot() {');
 assert.ok(from > 0 && to > from, 'arrow row block sits right above boot');
 const block = surfaceJs.slice(from, to);
 
-const ROOTS = '#egd-dock, #egd-desk-rail, #egd-zoom-indicator';
+const ROOTS = '.egd-dock-group, #egd-dock, .egd-rail-section, #egd-desk-rail, #egd-zoom-indicator, .egd-card-topbar';
 const ITEMS = 'button, [role="button"]';
 
 function harness() {
@@ -21,12 +22,16 @@ function harness() {
     addEventListener: (type, handler, capture) => listeners.push([type, handler, capture]),
     removeEventListener: (type, handler) => { const at = listeners.findIndex(row => row[0] === type && row[1] === handler); if (at >= 0) listeners.splice(at, 1); },
   };
-  const api = new Function('ArrowRowNavigation', 'window', `${block}\nreturn { handleArrowRowKeydown, installArrowRowKeys };`)(FocusNavigation, window);
+  const document = { activeElement: null, getElementById: () => null, documentElement: { appendChild() {} } };
+  const api = new Function('ArrowRowNavigation', 'SurfaceKeys', 'window', 'document', 'el', 'MutationObserver', 'requestAnimationFrame',
+    `${block}\nreturn { handleArrowRowKeydown, installArrowRowKeys, syncRovingGroup, handleRovingFocusIn };`)(
+    FocusNavigation, SurfaceKeys, window, document, () => ({}), class { observe() {} disconnect() {} }, () => 0);
   const focused = [];
-  const root = { items: [], querySelectorAll(selector) { assert.equal(selector, ITEMS); return this.items; } };
+  const root = { isConnected: true, items: [], querySelectorAll(selector) { assert.equal(selector, ITEMS); return this.items; } };
   const button = (name, { disabled = false, hidden = false, popup = false, inRow = true, isButton = true } = {}) => {
-    const node = { name, disabled, focus() { focused.push(name); },
-      matches: selector => { assert.equal(selector, ITEMS); return isButton; },
+    const node = { name, disabled, tabIndex: 0, focus() { focused.push(name); },
+      getAttribute: () => null, textContent: name,
+      matches: selector => { if (selector === ':focus-visible') return false; assert.equal(selector, ITEMS); return isButton; },
       closest: selector => (selector === ROOTS ? (inRow ? root : null) : (popup ? {} : null)),
       getClientRects: () => (hidden ? [] : [{}]) };
     if (inRow) root.items.push(node);
@@ -47,7 +52,8 @@ test('A65 the three bars are named and the listener is installed once at boot', 
   for (const id of ["id: 'egd-dock'", "id: 'egd-desk-rail'", "id: 'egd-zoom-indicator'"]) assert.ok(surfaceJs.includes(id), id);
   const h = harness();
   h.api.installArrowRowKeys(); h.api.installArrowRowKeys();
-  assert.deepEqual(h.listeners.map(row => [row[0], row[2]]), [['keydown', undefined]], 'one bubble-phase listener, so a control that handles the key itself keeps it');
+  assert.deepEqual(h.listeners.map(row => [row[0], row[2]]), [['keydown', undefined], ['keydown', true], ['focusin', true], ['focusout', true], ['mousedown', true]],
+    'the arrow listener stays bubble-phase, so a control that handles the key itself keeps it; roving and the tooltip listen in capture');
 });
 
 test('A65 Right and Left move one button, wrap at the ends, and skip disabled or hidden ones', () => {
@@ -90,4 +96,30 @@ test('A65 a lone button keeps the key so nothing is swallowed', () => {
   const event = h.press(only, 'ArrowRight');
   assert.deepEqual(h.focused, []);
   assert.equal(event.prevented, false);
+});
+
+test('DSN-04 roving tabindex: one Tab stop per group, it follows focus and arrow moves, and a disabled button never holds it', () => {
+  const h = harness();
+  const a = h.button('a', { disabled: true }), b = h.button('b'), c = h.button('c');
+  h.api.syncRovingGroup(h.root);
+  assert.deepEqual([a, b, c].map(node => node.tabIndex), [-1, 0, -1], 'the first usable button is the Tab stop');
+  h.api.handleRovingFocusIn({ target: c });
+  assert.deepEqual([a, b, c].map(node => node.tabIndex), [-1, -1, 0], 'focus moves the stop');
+  h.api.syncRovingGroup(h.root);
+  assert.deepEqual([a, b, c].map(node => node.tabIndex), [-1, -1, 0], 'a re-sync keeps the last focused button');
+  h.press(c, 'ArrowRight');
+  assert.deepEqual(h.focused, ['b']);
+  assert.deepEqual([a, b, c].map(node => node.tabIndex), [-1, 0, -1], 'an arrow move carries the stop');
+});
+
+test('DSN-04 groups: Dock groups, top-bar sections and window title bars are separate groups', () => {
+  for (const selector of ['.egd-dock-group', '.egd-rail-section', '.egd-card-topbar', '#egd-zoom-indicator']) assert.ok(ROOTS.split(', ').includes(selector), selector);
+  // The nearest group is found first: inner groups come before their bar in the list.
+  assert.ok(ROOTS.indexOf('.egd-dock-group') < ROOTS.indexOf('#egd-dock'));
+  assert.ok(ROOTS.indexOf('.egd-rail-section') < ROOTS.indexOf('#egd-desk-rail'));
+  assert.ok(surfaceJs.includes("el('div', { class: `egd-dock-group egd-dock-${kind}` })"), 'Dock groups exist');
+  assert.ok(surfaceJs.includes("el('div', { class: 'egd-rail-section egd-rail-left' }"), 'top-bar sections exist');
+  // Window header: focusable handle with the key hint.
+  assert.match(block, /header\.setAttribute\('tabindex', '0'\)/);
+  assert.match(block, /SurfaceKeys\.WINDOW_HEADER_KEY_HINT/);
 });

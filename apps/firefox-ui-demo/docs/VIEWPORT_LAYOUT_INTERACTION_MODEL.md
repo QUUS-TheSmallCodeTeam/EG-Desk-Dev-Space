@@ -549,6 +549,45 @@ serializeDeskSnapshot().groups / restoreDeskSession()
 
 ---
 
+## Board Membership of Shapes and Keyboard Placement
+
+CNV-03 (D-V1~V3, inferred default while the owner has not ruled on shapes):
+
+```text
+Board members      -> windows only (Browser, File, Chat, Terminal, memo, …):
+                      one window, one Board; shown on its title row;
+                      '○○에 넣기 / 빼기' and the drop suggestion apply
+Canvas shapes      -> never Board members: no title-row Board label, no
+                      넣기/빼기, no drop suggestion, not taken by
+                      [선택한 화면 N개 저장]
+a shape inside a Board area
+                   -> seen there because of where it lies (position only);
+                      it is saved with the Desk record (snapshot.shapes) and
+                      moves only when the user moves it
+older Board records with shape members (kind 'shape')
+                   -> still restore as before; nothing new is written that way
+```
+
+UX-05 keyboard placement (D-V5), from a focused window title row (Tab
+reaches the row; its buttons are the next Tab stop, arrows move between them):
+
+```text
+←↑→↓               -> one 24px grid cell (an off-grid window first lands on
+                      the grid line ahead); [맞춤] off: plain 24px steps
+Shift + arrow      -> five cells (120px)
+Option/Alt + arrow -> 1px, no grid (the same release as dragging)
+Shift + Space      -> add this window to the selection or take it out
+                      (the keyboard path of Shift+click)
+each press         -> one layout undo step; ⌘/Ctrl+Z on the row undoes it
+```
+
+Windows a Briefing is reading, then windows an Agent is working in, keep
+their own off-screen edge dot before the nearest others fold into '+N'.
+
+Rules: `overlay/resources/surface/EGDeskSurfaceKeys.mjs` (pure).
+
+---
+
 ## Interaction Ownership
 
 Input ownership is determined by gesture start, current viewport mode, and the

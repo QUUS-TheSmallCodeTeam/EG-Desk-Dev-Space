@@ -136,7 +136,7 @@ test('memo tether wiring: the line is drawn in the Canvas layer for an attached 
   const nodes = new Map([[target.id, target]]);
   const scope = { document: { getElementById: id => nodes.get(id) || null }, MemoState: Memo,
     persistentEntityGeometry: node => node.geometry, el: (tag, attrs) => fakeNode(attrs) };
-  const sync = Function(...Object.keys(scope), `${surfaceFunction('syncMemoTether')}\nreturn syncMemoTether;`)(...Object.values(scope));
+  const sync = Function(...Object.keys(scope), `${surfaceFunction('syncMemoExtraLinkLines')}\n${surfaceFunction('syncMemoTether')}\nreturn syncMemoTether;`)(...Object.values(scope));
   sync(root);
   const line = root._memoTether;
   assert.deepEqual(layer.children, [region, target, line, root], 'the line sits in the Canvas layer just before its memo: above Board regions, in world coordinates');
@@ -324,7 +324,7 @@ test('memo 대상 없음: the row names the closed window and [다시 연결] pi
     syncMemoTether() {}, memoTargetLabel: () => card.label,
     updateMemoRecord(target, next, reason) { target._memoRecord = next; target._reason = reason; target.dataset.memoAnchor = 'attached'; },
   };
-  const api = Function(...Object.keys(scope), `let memoRelink = null;\n${surfaceFunction('syncMemoLinkUi')}\n${surfaceFunction('toggleMemoRelink')}\nreturn { syncMemoLinkUi, toggleMemoRelink };`)(...Object.values(scope));
+  const api = Function(...Object.keys(scope), `let memoRelink = null;\n${surfaceFunction('syncMemoLinkUi')}\n${surfaceFunction('relinkMemoTo')}\n${surfaceFunction('toggleMemoRelink')}\nreturn { syncMemoLinkUi, toggleMemoRelink };`)(...Object.values(scope));
   const parts = root._memoMissing;
 
   api.syncMemoLinkUi(root);

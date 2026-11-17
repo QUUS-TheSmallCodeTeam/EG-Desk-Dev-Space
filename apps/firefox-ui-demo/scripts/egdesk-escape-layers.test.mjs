@@ -5,6 +5,7 @@ import { readFileSync } from 'node:fs';
 import { test } from 'node:test';
 import * as EscapeLayerStack from '../overlay/resources/EGDeskLayerStack.sys.mjs';
 import * as AccountMenuFocus from '../overlay/resources/EGDeskFocusNavigation.sys.mjs';
+import * as SurfaceKeys from '../overlay/resources/surface/EGDeskSurfaceKeys.mjs';
 
 const surfaceSource = readFileSync(new URL('../overlay/JS/eg-desk-surface.uc.js', import.meta.url), 'utf8');
 const CHAT_MENU_OPENER = '.egd-codex-thread-menu-trigger-active, .egd-codex-message-menu-trigger-active, '
@@ -52,11 +53,15 @@ function mountEscapeLayers() {
   const closer = name => (...args) => { log.push(`close:${name}`); return closers[name]?.(...args); };
   const names = ['window', 'document', 'state', 'EscapeLayerStack', 'escapeLayers', 'registerEscapeLayer', 'boardRegionMenu', 'deskMenu',
     'closeBoardRegionMenu', 'closeDeskMenu', 'closeMinimapStack', 'closeAgendaCloseGuard', 'closeRailSearchPanel', 'closeAgendaSwitcher',
-    'closeBoardHistoryPanel', 'closeDeskHistoryPanel', 'closeDeskMinimap', 'setHudPresentationHidden', 'exitCardFullscreen'];
+    'closeBoardHistoryPanel', 'closeDeskHistoryPanel', 'closeDeskMinimap', 'setHudPresentationHidden', 'exitCardFullscreen',
+    'SurfaceKeys', 'closeMaximizeHudPeek', 'memoRelink', 'forwardingEscape', 'KeyboardEvent'];
+  const relink = { current: null };
   const install = new Function(...names, `${surfaceSource.slice(start, end)}\n  return installEscapeLayers;`)(
     window, document, state, EscapeLayerStack, escapeLayers, registerEscapeLayer, null, null,
     closer('board-menu'), closer('desk-menu'), closer('minimap-stack'), closer('close-guard'), closer('rail-search'), closer('board-switcher'),
-    closer('board-history'), closer('desk-history'), closer('minimap'), closer('chat-peek'), closer('fullscreen'));
+    closer('board-history'), closer('desk-history'), closer('minimap'), closer('hud-hidden'), closer('fullscreen'),
+    SurfaceKeys, closer('chat-peek'), null, false,
+    class { constructor(type, init) { Object.assign(this, { type, ...init, defaultPrevented: false }); } preventDefault() { this.defaultPrevented = true; } stopPropagation() {} });
   install();
   const fire = (type, capture, event) => { for (const entry of listeners) if (entry.type === type && entry.capture === capture) entry.handler(event); };
   // One key press travels capture → the focused element's own handler → bubble.
@@ -70,13 +75,14 @@ function mountEscapeLayers() {
     if (!event.stopped) fire('keydown', false, event);
     return event;
   };
-  return { log, state, document, ids, selectors, node, closers, escapeLayers, listeners, press, fire };
+  return { log, state, document, ids, selectors, node, closers, escapeLayers, listeners, press, fire, relink };
 }
 
 test('the surface registers every Escape layer through one channel and listens in one place', () => {
   const { escapeLayers, listeners } = mountEscapeLayers();
   for (const id of ['chat-menu', 'settings-account-menu', 'board-menu', 'desk-menu', 'minimap-stack', 'board-close-guard',
-    'minimap', 'desk-history', 'board-history', 'board-switcher', 'rail-search', 'chat-peek', 'view-fullscreen']) {
+    'minimap', 'desk-history', 'board-history', 'board-switcher', 'rail-search', 'chat-peek', 'focus-view', 'view-fullscreen', 'memo-relink',
+    'browser-menu', 'browser-agent-timeline', 'resource-detail', 'portable-dialog', 'chat-input-panel']) {
     assert.equal(escapeLayers.has(id), true, id);
   }
   assert.equal(escapeLayers.size(), 0);
@@ -98,7 +104,7 @@ test('Escape closes one thing per press: menu, confirmation, search, minimap, pe
   ids.set('egd-hud', hud);
   ids.set('egd-desk-minimap', node('section'));
   ids.set('egd-agenda-close-guard', node('div'));
-  state.cardFullscreen = { cardId: 'card-1' };
+  state.cardFullscreen = { cardId: 'card-1', mode: 'maximized', hudMode: 'peek' };
   state.railSearch.open = true;
   state.codex.threadMenu = { threadId: 't1' };
   const opener = node('button');
@@ -107,7 +113,7 @@ test('Escape closes one thing per press: menu, confirmation, search, minimap, pe
   closers['close-guard'] = () => ids.delete('egd-agenda-close-guard');
   closers['rail-search'] = () => { state.railSearch.open = false; };
   closers.minimap = () => ids.delete('egd-desk-minimap');
-  closers['chat-peek'] = (hidden) => { hud.classList.hidden = hidden; };
+  closers['chat-peek'] = () => { state.cardFullscreen.hudMode = 'hidden'; hud.classList.hidden = true; return true; };
   closers.fullscreen = () => { state.cardFullscreen = null; return true; };
   const canvas = node('div');
 
@@ -316,4 +322,81 @@ test('the Settings account menu opens from its button with Down or Up and moves 
   menu.open = false;
   assert.equal(key(summary, 'ArrowDown').used, false);
   assert.equal(menu.open, false);
+});
+
+test('UX-06 registry: the screen registers exactly the layers SurfaceKeys names, each with its tier', () => {
+  const ids = [...surfaceSource.matchAll(/registerEscapeLayer\(\{\s*id: '([a-z-]+)', kind: '([a-z-]+)'/g)].map(match => [match[1], match[2]]);
+  assert.deepEqual(SurfaceKeys.escapeRegistryGaps(ids.map(([id]) => id)), { missing: [], unknown: [] });
+  for (const [id, kind] of ids) assert.equal(SurfaceKeys.escapeLayerSpec(id).kind, kind, id);
+  // The same tier order as the layer stack.
+  assert.deepEqual(SurfaceKeys.ESCAPE_TIERS, [...EscapeLayerStack.ESCAPE_ORDER]);
+  for (const layer of SurfaceKeys.ESCAPE_LAYER_REGISTRY) {
+    assert.equal(EscapeLayerStack.escapeRank(layer.kind), SurfaceKeys.ESCAPE_TIERS.indexOf(SurfaceKeys.escapeTierOf(layer.kind)), layer.id);
+  }
+  // The maximize peek has no Escape listener of its own any more.
+  assert.equal(surfaceSource.includes("if (closeMaximizeHudPeek()) ev.preventDefault();"), false);
+});
+
+test('UX-06: a pinned Chat is not closed by Escape; the View shrinks and the pinned Chat stays', () => {
+  const { log, state, ids, node, closers, press } = mountEscapeLayers();
+  ids.set('egd-hud', node('div'));
+  state.cardFullscreen = { cardId: 'card-1', mode: 'maximized', hudMode: 'pinned' };
+  closers.fullscreen = () => { state.cardFullscreen = null; return true; };
+  press(node('div'));
+  assert.deepEqual(log, ['close:fullscreen']);
+});
+
+test('UX-06: Escape ends 집중 보기, also from a focused page that left the key unused, never on the first-run focus screen', () => {
+  const { log, state, ids, node, closers, press } = mountEscapeLayers();
+  ids.set('egd-hud', node('div'));
+  closers.fullscreen = () => { state.cardFullscreen = null; return true; };
+  const enter = () => { state.cardFullscreen = { cardId: 'card-1', mode: 'focus', hudMode: 'hidden' }; };
+  enter();
+  assert.equal(press(node('div')).defaultPrevented, true);
+  assert.deepEqual(log, ['close:fullscreen']);
+  // A page (the <browser>) had the key first and used it: the focus view stays.
+  enter();
+  press(node('browser'), { own: event => event.preventDefault() });
+  assert.ok(state.cardFullscreen);
+  // The page left it unused: Escape ends the focus view.
+  const event = press(node('browser'));
+  assert.equal(event.defaultPrevented, true);
+  assert.equal(state.cardFullscreen, null);
+  // A maximized (not focus) View keeps the page's Escape as before.
+  state.cardFullscreen = { cardId: 'card-1', mode: 'maximized', hudMode: 'hidden' };
+  press(node('browser'));
+  assert.ok(state.cardFullscreen);
+  // Korean composing in a page, and the first-run Browser focus screen.
+  enter();
+  press(node('browser'), { isComposing: true });
+  assert.ok(state.cardFullscreen);
+  state.surface.initialBrowserFocus = true;
+  press(node('browser'));
+  press(node('div'));
+  assert.ok(state.cardFullscreen);
+  assert.deepEqual(log, ['close:fullscreen', 'close:fullscreen']);
+});
+
+test('UX-06: surfaces with their own Escape handler get one forwarded Escape when they are the top layer', () => {
+  const { ids, node, press, state } = mountEscapeLayers();
+  const received = [];
+  const panel = node('section');
+  panel.dispatchEvent = event => { received.push(event.key); ids.delete('egd-portable-dialog'); return true; };
+  ids.set('egd-portable-dialog', panel);
+  state.cardFullscreen = { cardId: 'card-1', mode: 'maximized', hudMode: 'hidden' };
+  const event = press(node('div'));
+  assert.deepEqual(received, ['Escape'], 'the dialog got its own Escape');
+  assert.equal(event.defaultPrevented, true);
+  assert.ok(state.cardFullscreen, 'the View under it stays large');
+  // Resource detail listens on the document: it is a small popover, so it closes before the minimap.
+  assert.equal(SurfaceKeys.escapeTierOf(SurfaceKeys.escapeLayerSpec('resource-detail').kind), 'menu');
+  assert.equal(SurfaceKeys.escapeTierOf(SurfaceKeys.escapeLayerSpec('chat-input-panel').kind), 'panel');
+});
+
+test('UX-06: the Browser Agent chip opens a peek while maximized and the normal Chat otherwise', () => {
+  const peek = surfaceSource.slice(surfaceSource.indexOf('  function peekChatForAttention() {'), surfaceSource.indexOf('  // Esc 층(esc-stack)과 바깥 클릭이 부르는 닫기.'));
+  assert.match(peek, /if \(!fullscreen \|\| fullscreen\.mode === 'focus'\) return false;\n    return openMaximizeHudPeek\('dock'\);/);
+  assert.match(peek, /function openChatForAgentChip\(\) \{\n    if \(peekChatForAttention\(\)\) return true;/);
+  assert.match(surfaceSource, /class: 'egd-browser-agent-identity', hidden: true, role: 'button', tabindex: '0',/);
+  assert.match(surfaceSource, /state\.peekChatForAttention = peekChatForAttention;/);
 });
