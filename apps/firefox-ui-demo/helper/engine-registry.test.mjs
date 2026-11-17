@@ -161,10 +161,17 @@ test('static bridge wiring: project lookup stays in the local file mount and con
   }
 })
 
-test('static bridge wiring: strict Claude Reader capacity and isolation stay unknown and cannot activate production reading', async () => {
+test('static bridge wiring: strict Claude Reader evidence comes only from the native collector, behind the live switch', async () => {
   const source = await readFile(new URL('./codex-bridge-server.mjs', import.meta.url), 'utf8')
-  assert.match(source, /const getClaudeReadCapacity = \(\) => null/)
-  assert.match(source, /const getClaudeReaderIsolationProof = \(\) => null/)
+  // SUB-09: no fixture or table; only createClaudeReaderEvidence over the real
+  // adapter, and only with EGDESK_CLAUDE_READER=live (real round trip pending).
+  assert.match(source, /const getClaudeReadCapacity = options => claudeReaderEvidence\?\.readCapacity\(options\) \?\? null/)
+  assert.match(source, /const getClaudeReaderIsolationProof = options => claudeReaderEvidence\?\.isolationProof\(options\) \?\? null/)
+  assert.match(source, /let claudeReaderEvidence = null/)
+  assert.equal(source.match(/claudeReaderEvidence = /g)?.length, 2, 'declared null, assigned once')
+  assert.match(source, /if \(process\.env\.EGDESK_CLAUDE_READER === 'live'\) claudeReaderEvidence = createClaudeReaderEvidence\(\{ adapter: claudeEngine, snapshot: \(\) => claudeEngineStatus\.snapshot\(\) \}\)/)
+  // Parent conversations and Readers share one process budget.
+  assert.equal(source.match(/processBudget: claudeProcessBudget/g)?.length, 2)
   assert.match(source, /if \(!getClaudeReadCapacity\(options\)\) return \{ ready: false, engineId: 'claude', code: 'ENGINE_CAPACITY_UNKNOWN' \}/)
   assert.match(source, /if \(!getClaudeReadCapacity\(options\)\) throw chatError\('ENGINE_CAPACITY_UNKNOWN'/)
 })
