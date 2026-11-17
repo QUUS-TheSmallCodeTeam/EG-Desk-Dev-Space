@@ -1568,7 +1568,7 @@
   margin: 0;
   padding: 0;
   border: 0;
-  border-radius: 11px;
+  border-radius: var(--egd-radius-lg);
   background: transparent;
   color: var(--egd-on-primary);
   font: 600 11px var(--egd-font);
@@ -1613,7 +1613,7 @@
   backdrop-filter: blur(20px) saturate(180%);
   -webkit-backdrop-filter: blur(20px) saturate(180%);
   border: var(--egd-frosted-border);
-  border-radius: 16px;
+  border-radius: var(--egd-radius-xl);
   box-shadow: var(--egd-frosted-shadow);
   font: 500 11px var(--egd-font, system-ui);
   color: var(--egd-on-surface-variant);
@@ -3635,7 +3635,7 @@ button.egd-rail-focus-view {
   color: var(--egd-on-primary);
   font-size: 10px;
   font-weight: 600;
-  border-radius: 16px;
+  border-radius: var(--egd-radius-xl);
   display: inline-flex;
   align-items: center;
   justify-content: center;
@@ -4892,7 +4892,7 @@ button.egd-rail-focus-view {
   width: 64px;
   height: auto;
   max-height: calc(100vh - 160px);
-  border-radius: 11px;
+  border-radius: var(--egd-radius-lg);
   padding: 10px 6px;
   display: flex;
   flex-direction: column;
@@ -5033,7 +5033,7 @@ button.egd-bag-header.egd-bag-header-muted { color: var(--egd-on-surface-variant
   /* Dock is 46px tall at bottom:12px; leave a 10px clear hit-test gap. */
   height: calc(100vh - 140px);
   max-height: 840px;
-  border-radius: 16px;
+  border-radius: var(--egd-radius-xl);
   padding: 9px;
   display: flex;
   flex-direction: column;
@@ -6694,7 +6694,7 @@ button.egd-codex-work-screen .egd-ui-icon { flex: none; width: 14px; height: 14p
   height: 30px;
   min-width: 30px;
   margin-top: 1px;
-  border-radius: 11px;
+  border-radius: var(--egd-radius-lg);
   display: inline-flex;
   align-items: center;
   justify-content: center;
@@ -7332,7 +7332,7 @@ button.egd-codex-message-activity:focus-visible { outline: var(--egd-focus-outli
   flex-direction: column;
   gap: 8px;
   padding: 9px 10px 8px;
-  border-radius: 11px;
+  border-radius: var(--egd-radius-lg);
   background: var(--egd-chat-paper);
   border: 1px solid var(--egd-chat-outline);
 }
@@ -7924,7 +7924,7 @@ button.egd-codex-message-activity:focus-visible { outline: var(--egd-focus-outli
   max-width: 100%;
   padding: 1px 8px;
   border: 1px solid var(--egd-outline);
-  border-radius: 11px;
+  border-radius: var(--egd-radius-lg);
   background: var(--egd-window-alt);
   font-size: 11.5px;
   line-height: 18px;
@@ -9632,7 +9632,7 @@ button.egd-codex-message-activity:focus-visible { outline: var(--egd-focus-outli
   width: 246px;
   padding: 15px 16px 14px;
   border: 1px solid var(--egd-outline);
-  border-radius: 11px;
+  border-radius: var(--egd-radius-lg);
   background: var(--egd-surface-elevated);
   color: var(--egd-on-surface);
   box-shadow: var(--egd-shadow);
