@@ -314,3 +314,10 @@ test('Chat version range: checked versions are supported, newer ones untested, o
   assert.equal(inspect('0.150.0').versionStatus, 'unsupported')
   assert.equal(inspectNativeCapabilities({ executable: '/selected/native', run: () => ({ status: 1, stdout: '' }) }).versionStatus, null)
 })
+
+test('SUB-11: codexHome becomes CODEX_HOME for the spawn and must be absolute', () => {
+  const listen = 'ws://127.0.0.1:39219'
+  assert.deepEqual(buildCodexAppServerLaunch({ env: {}, listen }).envOverrides, {})
+  assert.deepEqual(buildCodexAppServerLaunch({ env: {}, listen, codexHome: '/x/engines/codex-abcdef01' }).envOverrides, { CODEX_HOME: '/x/engines/codex-abcdef01' })
+  for (const bad of ['relative/dir', '/a\0b', 7]) assert.throws(() => buildCodexAppServerLaunch({ env: {}, listen, codexHome: bad }), { code: 'INVALID_CODEX_HOME' })
+})

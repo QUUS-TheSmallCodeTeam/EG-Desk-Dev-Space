@@ -407,3 +407,35 @@ test('a turn error names its own engine as origin, and a non-Codex child is neve
   assert.deepEqual(runOf(claudeRun).subAgents.map(row => row.threadId), ['claude-child'])
   assert.equal(calls.some(call => call[1] === 'thread/read'), false)
 })
+
+// SUB-11: a chat records the Engine Profile of its first send and never
+// silently continues on another (registry rule; HUM-ENGINE-001 inferred
+// default: a running Run never moves, the person switches explicitly).
+test('a chat bound to one Claude Engine Profile is never continued on another active profile', async () => {
+  await withStore('egdesk-runtime-engine-profile-', async store => {
+    const calls = []
+    let active = 'claude-abcdef01'
+    const claude = {
+      ...claudeLikeEngine(calls),
+      describe: () => ({ id: 'claude', status: 'ready', version: '2.1.300', profiles: [
+        { id: 'claude-default', active: active === 'claude-default' }, { id: 'claude-abcdef01', active: active === 'claude-abcdef01' }] }),
+      ownerKey: () => (active === 'claude-default' ? 'claude:claudeai:owner@example.com' : 'claude:claudeai:owner@example.com@claude-abcdef01'),
+    }
+    const chat = new CodexChatRuntime({ engines: [codexEngine(calls), claude], store, requireStore: true, getOwnerKey: () => OWNER_KEY })
+    chat.setConnection(true); chat.setConnection('claude', true)
+    const first = await chat.send({ message: 'Company account', clientThreadId: 'room-1', requestId: 'r1', engineId: 'claude' })
+    await chat.handleNotification({ method: 'turn/completed', params: { threadId: first.conversationId, turn: { id: first.runId, status: 'completed', items: [] } } })
+    const history = chat.getLocalHistory({ clientThreadId: 'room-1', limit: 500 })
+    assert.deepEqual([history.thread.engineId, history.thread.engineProfileId], ['claude', 'claude-abcdef01'])
+    assert.equal(history.runs[0].engine.engineProfileId, 'claude-abcdef01')
+    active = 'claude-default'
+    const sent = calls.length
+    await assert.rejects(chat.send({ message: 'Continue', clientThreadId: 'room-1', requestId: 'r2', conversationId: first.conversationId, engineId: 'claude' }),
+      error => ['NATIVE_ACCOUNT_MISMATCH', 'ENGINE_PROFILE_MISMATCH', 'ACCOUNT_CHANGED'].includes(error.code))
+    assert.equal(calls.slice(sent).some(call => call[1] === 'turn/start'), false, 'nothing ran on the other profile')
+    assert.throws(() => chat.contextAuthority({ engineId: 'claude', clientThreadId: 'room-1' }), error => ['NATIVE_ACCOUNT_MISMATCH', 'ENGINE_PROFILE_MISMATCH'].includes(error.code))
+    active = 'claude-abcdef01'
+    const back = await chat.send({ message: 'Continue', clientThreadId: 'room-1', requestId: 'r3', conversationId: first.conversationId, engineId: 'claude' })
+    assert.equal(back.accepted, true)
+  })
+})

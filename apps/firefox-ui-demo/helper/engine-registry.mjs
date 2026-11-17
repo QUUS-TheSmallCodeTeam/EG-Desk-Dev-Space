@@ -13,6 +13,8 @@ function publicProfile(profile) {
   return {
     id: token(profile?.id) || 'unknown', label: token(profile?.label) || null,
     credentialStore: token(profile?.credentialStore, 60), active: profile?.active === true,
+    // SUB-11: owned = an EG-Desk-owned private login folder; false = the shared CLI login.
+    owned: profile?.owned === true, status: profile?.status === 'notYet' ? 'notYet' : 'available',
     auth: {
       status: AUTH_STATUSES.has(auth?.status) ? auth.status : 'unknown',
       method: token(auth?.method, 60), account: token(auth?.account, 320), planType: token(auth?.planType, 60),
@@ -97,8 +99,12 @@ export function describeClaudeEngine({ version = null, versionStatus = null, ins
   const status = CLAUDE_AUTH_STATUSES.has(auth?.status) ? auth.status : 'unknown'
   const signedIn = status === 'signedIn'
   const live = connection && typeof connection === 'object' ? connection : null
-  const profiles = installed === true ? [{
-    id: CLAUDE_ENGINE_PROFILE_ID, label: signedIn && typeof auth.label === 'string' ? auth.label : 'Claude', credentialStore: 'claude-cli', active: true,
+  // SUB-11: the static check ran with the active profile's login folder, so
+  // its auth belongs to the active row; the other profiles are not checked.
+  const choices = Array.isArray(live?.profiles) && live.profiles.some(profile => profile?.active === true) ? live.profiles : [{ id: CLAUDE_ENGINE_PROFILE_ID, owned: false, active: true }]
+  const profiles = installed === true ? choices.map(choice => choice.active === true ? {
+    id: choice.id, label: signedIn && typeof auth.label === 'string' ? auth.label : typeof choice.label === 'string' && choice.owned ? choice.label : 'Claude',
+    credentialStore: choice.owned ? 'egdesk-owned' : 'claude-cli', active: true, owned: choice.owned === true, status: 'available',
     auth: {
       status,
       method: signedIn && typeof auth.method === 'string' ? auth.method : null,
@@ -106,7 +112,10 @@ export function describeClaudeEngine({ version = null, versionStatus = null, ins
       planType: signedIn && typeof auth.planType === 'string' ? auth.planType : null,
     },
     usage: live && live.usage && typeof live.usage === 'object' && !Array.isArray(live.usage) ? live.usage : null,
-  }] : []
+  } : {
+    id: choice.id, label: typeof choice.label === 'string' ? choice.label : null, credentialStore: choice.owned ? 'egdesk-owned' : 'claude-cli',
+    active: false, owned: choice.owned === true, status: 'available', auth: { status: 'unknown' }, usage: null,
+  }) : []
   const count = value => Number.isSafeInteger(value) && value >= 0 ? value : 0
   const runtime = live
     ? { residentProcesses: count(live.residentProcesses), residentLimit: count(live.residentLimit) || 2, idleTimeoutMs: Number.isSafeInteger(live.idleTimeoutMs) && live.idleTimeoutMs > 0 ? live.idleTimeoutMs : 300000 }

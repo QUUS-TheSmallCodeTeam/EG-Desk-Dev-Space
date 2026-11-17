@@ -161,6 +161,9 @@ export function claudeTurnContent({ input, additionalContext = null } = {}) {
  *                         process limit across parents and Readers); own budget when omitted
  *   mcpOutputLimitTokens  MAX_MCP_OUTPUT_TOKENS given to each parent and enforced by its EG-Desk MCP
  *   collectContextUsage   false skips the get_context_usage observations (Reader capacity evidence)
+ *   profiles              SUB-11 () → [{ id, label, owned, active, configDir }] (egdesk-engine-profiles
+ *                         list + configDir); the active one's configDir becomes CLAUDE_CONFIG_DIR of
+ *                         each new process. Omitted: the shared login only ('claude-default').
  *   resolveExecutable, createTransport, transportOptions, randomUUID, now, setTimer, clearTimer   (tests)
  *
  * Besides the EngineAdapter methods: owns(rpcId), syncStatus(), apiKeyEnv(),
@@ -179,6 +182,7 @@ export function createClaudeEngineAdapter(options = {}) {
     setTimer = (fn, ms) => { const timer = setTimeout(fn, ms); timer.unref?.(); return timer },
     clearTimer = timer => clearTimeout(timer),
     mcpOutputLimitTokens = CLAUDE_MCP_OUTPUT_LIMIT_TOKENS, collectContextUsage = true,
+    profiles = null,
   } = options
   const limits = { ...CLAUDE_ADAPTER_DEFAULTS }
   for (const key of Object.keys(limits)) if (Number.isSafeInteger(options[key]) && options[key] > 0) limits[key] = options[key]
@@ -206,6 +210,13 @@ export function createClaudeEngineAdapter(options = {}) {
   const deliver = (kind, value) => { for (const sink of [...sinks]) { try { sink[kind]?.(CLAUDE_ENGINE_ID, value) } catch {} } }
   const statusChanged = () => { try { onStatusChange() } catch {} }
   const status = () => { try { return snapshot() || {} } catch { return {} } }
+  // SUB-11: the Engine Profile list; a broken source means the shared login only.
+  const profileList = () => {
+    let rows = null
+    try { rows = typeof profiles === 'function' ? profiles() : null } catch { rows = null }
+    return Array.isArray(rows) && rows.some(row => row?.active === true) ? rows : [{ id: 'claude-default', owned: false, active: true, configDir: null }]
+  }
+  const activeProfile = () => profileList().find(row => row.active === true)
   const liveCount = () => [...sessions.values()].filter(session => session.proc || session.starting).length
 
   function nextRpcId(threadId, kind) {
@@ -240,6 +251,7 @@ export function createClaudeEngineAdapter(options = {}) {
       minVersion, capabilities: [...CLAUDE_CAPABILITIES],
       residentProcesses: liveCount(), residentLimit: limits.residentLimit, idleTimeoutMs: limits.idleTimeoutMs,
       gateFailure: gateFailure?.code ?? null, apiKeyEnv: apiKeyEnv(), usage: usageRow(), disposed,
+      profiles: profileList().map(({ id, label, owned, active }) => ({ id, label, owned: owned === true, active: active === true })),
     })
   }
 
@@ -254,7 +266,10 @@ export function createClaudeEngineAdapter(options = {}) {
     if (auth?.status !== 'signedIn') return null
     const method = typeof auth.method === 'string' ? auth.method : 'unknown'
     const who = typeof auth.account === 'string' && auth.account ? auth.account.toLowerCase() : typeof auth.label === 'string' ? auth.label : ''
-    return `claude:${method}:${who}`
+    // SUB-11: an EG-Desk-owned profile is its own account slot even for the
+    // same email, so a conversation bound to one never continues on another.
+    const profile = activeProfile()
+    return `claude:${method}:${who}${profile.owned === true ? `@${profile.id}` : ''}`
   }
 
   const isReady = () => describe().status === 'ready'
@@ -479,8 +494,10 @@ export function createClaudeEngineAdapter(options = {}) {
       }
       const hasTools = proc.mcp.listTools().length > 0
       const turnOf = () => session.activeTurn?.turnId ?? null
+      const profileDir = activeProfile().configDir
       proc.transport = createTransport({
         ...transportOptions,
+        ...(typeof profileDir === 'string' && profileDir ? { claudeConfigDir: profileDir } : {}),
         extraEnv: { ...(plainObject(transportOptions.extraEnv) || {}), ...limitEnv },
         executablePath, cwd: spec.cwd, version: typeof check.version === 'string' ? check.version : null,
         minVersion, requiredCapabilities, apiKeyEnvPolicy: apiKeyConfirmed ? 'strip' : 'stop', env, platform, inherit,

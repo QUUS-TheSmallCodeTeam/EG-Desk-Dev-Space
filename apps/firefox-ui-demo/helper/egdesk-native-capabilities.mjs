@@ -61,8 +61,15 @@ const REASONING_EFFORTS = new Set(['none', 'minimal', 'low', 'medium', 'high', '
 
 // These process-local overrides are an exact allowlist. No shell or config
 // file is changed. With all variables unset, argv is the old launch.
-export function buildCodexAppServerLaunch({ env = process.env, listen } = {}) {
+// SUB-11: codexHome (absolute, an EG-Desk-owned profile folder) is returned as
+// envOverrides.CODEX_HOME for the spawn. The bridge passes none today: Codex
+// runs one app-server on the shared ~/.codex login until per-profile
+// app-servers (own port, own process) are added.
+export function buildCodexAppServerLaunch({ env = process.env, listen, codexHome = null } = {}) {
   if (typeof listen !== 'string' || !listen) throw new TypeError('An app-server listen URL is required')
+  if (codexHome != null && (typeof codexHome !== 'string' || !path.isAbsolute(codexHome) || codexHome.includes('\0') || codexHome.length > 4096)) {
+    throw Object.assign(new Error('codexHome must be an absolute path'), { code: 'INVALID_CODEX_HOME' })
+  }
   const hasModel = Object.hasOwn(env, 'EGDESK_CODEX_MODEL')
   const hasEffort = Object.hasOwn(env, 'EGDESK_CODEX_EFFORT')
   const disableMemories = Object.hasOwn(env, 'EGDESK_CODEX_DISABLE_MEMORIES')
@@ -82,7 +89,7 @@ export function buildCodexAppServerLaunch({ env = process.env, listen } = {}) {
   if (hasEffort) args.push('-c', `model_reasoning_effort=${JSON.stringify(effort)}`)
   if (disableMemories) args.push('-c', 'features.memories=false')
   args.push('--listen', listen)
-  return { args, configuredModel: model, configuredEffort: effort, hasOverrides: hasModel || hasEffort, disableMemories }
+  return { args, configuredModel: model, configuredEffort: effort, hasOverrides: hasModel || hasEffort, disableMemories, envOverrides: codexHome ? { CODEX_HOME: codexHome } : {} }
 }
 
 export async function verifyCodexMemoryFeatureDisabled(request) {
