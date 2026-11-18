@@ -11,14 +11,15 @@ import {
   portableExportPassphrase, portableSourceBytes,
 } from './egdesk-portable-service.mjs'
 
-// Uses the existing .egdesk ZIP and optional encrypted envelope, but not the
-// Desk/Board graph format. Review has no store, source IDs, paths, or imports.
+// Uses the existing .egdesk ZIP and encrypted envelope, but not the Desk/Board
+// graph format. Only requests carrying a bearer code require encryption.
 const VERSION = 2
 const NAMES = ['manifest.json', 'events.jsonl', 'transcript.md']
 export const REVIEW_MAX_BUNDLE_BYTES = 256 * 1024
 export const REVIEW_TEXT_BYTES = Object.freeze({ recipient: 256, question: 2048, excerpt: 8192, expectedReply: 2048, answer: 8192 })
 const UUID_V4 = /^[a-f0-9]{8}-[a-f0-9]{4}-4[a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/
 const SHA256 = /^[a-f0-9]{64}$/
+const ASK_CODE = /egask1-[a-f0-9]{32}/
 const requestKeys = ['recipient', 'question', 'excerpt', 'expectedReply']
 const correlationKeys = ['requestId', 'requestDigest']
 const fail = (code, message, httpStatus = 400) => { throw Object.assign(new Error(message), { code, httpStatus }) }
@@ -34,14 +35,20 @@ function text(value, key) {
   if (/[\p{Cc}\p{Cf}\p{Cs}]/u.test(value.replace(/[\t\n]/g, ''))) invalid()
   value = value.trim()
   if ((!value && key !== 'excerpt') || Buffer.byteLength(value) > REVIEW_TEXT_BYTES[key] || (key === 'recipient' && /[\t\n\u2028\u2029]/u.test(value))) invalid()
-  if (secretReason('review.txt', value)) fail('PORTABLE_REVIEW_SECRET_LIKE', `Remove apparent credentials from the review ${key}`)
+  if (ASK_CODE.test(value) || secretReason('review.txt', value)) fail('PORTABLE_REVIEW_SECRET_LIKE', `Remove apparent credentials from the review ${key}`)
   return value
 }
 
 function reviewValue(source, onDisk, requestNonce) {
   if (source?.kind === 'request') {
-    if (!exact(source, ['kind', ...requestKeys, ...(onDisk ? correlationKeys : [])])) invalid()
+    const hasAskCode = Object.hasOwn(source, 'askCode')
+    if (!exact(source, ['kind', ...requestKeys, ...(onDisk ? correlationKeys : []), ...(hasAskCode ? ['askCode'] : [])])) invalid()
     const disclosed = Object.fromEntries(requestKeys.map(key => [key, text(source[key], key)]))
+    if (hasAskCode) {
+      const { askCode } = source
+      if (typeof askCode !== 'string' || askCode.length !== 39 || !ASK_CODE.test(askCode)) invalid()
+      disclosed.askCode = askCode
+    }
     const requestId = onDisk ? source.requestId : randomUUID()
     if (typeof requestId !== 'string' || !UUID_V4.test(requestId) || typeof requestNonce !== 'string' || !SHA256.test(requestNonce)) invalid()
     // The per-issue nonce stays in the request archive. A reply still carries a
@@ -75,7 +82,7 @@ async function collect(stream, signal) {
   }
   return Buffer.concat(parts, size)
 }
-async function readReview(codec, bytes, signal) {
+async function readReview(codec, bytes, encrypted, signal) {
   let index = 0
   let archive
   await codec.read(bytes, async entry => {
@@ -85,6 +92,7 @@ async function readReview(codec, bytes, signal) {
     const decoded = JSON.parse(content.toString('utf8'))
     const request = decoded?.review?.kind === 'request'
     if (!exact(decoded, ['format', 'version', 'review', ...(request ? ['requestNonce'] : [])]) || decoded.format !== FORMAT || decoded.version !== VERSION) invalidFile()
+    if (request && Object.hasOwn(decoded.review, 'askCode') && !encrypted) invalidFile()
     archive = archiveManifest(reviewValue(decoded.review, true, decoded.requestNonce), decoded.requestNonce)
     // Equality also rejects noncanonical text, duplicate JSON keys and non-UTF-8.
     if (!manifestBytes(archive).equals(content)) invalidFile()
@@ -126,16 +134,20 @@ export function createPortableReviewService({ location = () => portableExportLoc
     exportReview(input = {}, { signal } = {}) {
       return exclusive(async () => {
         if (!input || typeof input !== 'object' || Array.isArray(input)) invalid()
+        const requestNonce = input.review?.kind === 'request' ? randomBytes(32).toString('hex') : undefined
+        const review = reviewValue(input.review, false, requestNonce)
         let secret = null
         if ('passphrase' in input) {
           const passphrase = input.passphrase
           if (typeof passphrase !== 'string' || passphrase.length === 0) {
             fail('PORTABLE_HTTP_INPUT', 'passphrase must be non-empty text, or omitted for an unencrypted review')
           }
-          secret = portableExportPassphrase(passphrase)
+          secret = passphrase
         }
-        const requestNonce = input.review?.kind === 'request' ? randomBytes(32).toString('hex') : undefined
-        const review = reviewValue(input.review, false, requestNonce)
+        if (Object.hasOwn(review, 'askCode') && !secret?.trim()) {
+          fail('PORTABLE_REVIEW_ENCRYPTION_REQUIRED', 'A review request with a question code needs a passphrase')
+        }
+        secret = portableExportPassphrase(secret)
         const { codec, envelope } = await load()
         let sink
         try {
@@ -176,7 +188,7 @@ export function createPortableReviewService({ location = () => portableExportLoc
           try { bytes = await collect(classifyingEnvelope(envelope).decrypt(Readable.from([source]), secret, { signal }), signal) }
           catch (error) { cancelled(signal); throw mapReadError(error) }
         }
-        try { return { review: await readReview(codec, bytes, signal), encrypted, locked: false } }
+        try { return { review: await readReview(codec, bytes, encrypted, signal), encrypted, locked: false } }
         catch (error) {
           cancelled(signal)
           if (error?.code === 'PORTABLE_FILE_TOO_LARGE') fail('PORTABLE_FILE_TOO_LARGE', 'The review file exceeds the size limit', 413)

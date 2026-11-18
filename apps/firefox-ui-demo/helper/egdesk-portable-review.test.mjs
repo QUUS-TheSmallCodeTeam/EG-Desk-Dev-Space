@@ -194,6 +194,65 @@ async function makeZip(content, { events = '', extra = false } = {}) {
     ...(extra ? [[`objects/${'a'.repeat(64)}`, 'not approved']] : []),
   ].map(([name, value]) => ({ name, size: Buffer.byteLength(value), open: () => Readable.from([Buffer.from(value)]) })), { canonical: true }))
 }
+test('question codes are canonical, encrypted, digest-bound, and request-only', needsBundle, async t => {
+  const guest = install(t, 'ask-guest'), host = install(t, 'ask-host')
+  const service = createPortableReviewService({ location: guest.location, dependencies: deps })
+  const askCode = `egask1-${'0a'.repeat(16)}`
+  const review = { ...REQUEST, askCode }
+  for (const malformed of [undefined, null, '', ' '.repeat(39), ` ${askCode}`, `${askCode}\n`, askCode.toUpperCase(), askCode.slice(0, -1), `${askCode}a`, `${askCode.slice(0, -1)}z`]) {
+    await assert.rejects(service.exportReview({ review: { ...review, askCode: malformed }, passphrase: PASSPHRASE }), { code: 'PORTABLE_REVIEW_INPUT' })
+  }
+  for (const input of [{ review }, { review, passphrase: ' '.repeat(12) }]) {
+    const rejected = await guest.export(input)
+    assert.equal(rejected.status, 400)
+    assert.equal(rejected.data.code, 'PORTABLE_REVIEW_ENCRYPTION_REQUIRED')
+    assert.equal(JSON.stringify(rejected.data).includes(askCode), false)
+  }
+  assert.equal(existsSync(guest.directory), false)
+
+  const sent = (await guest.export({ review, passphrase: PASSPHRASE })).data
+  assert.equal(sent.encrypted, true)
+  const file = guest.read(sent.fileName)
+  assert.equal(file.includes(askCode), false)
+  assert.equal(JSON.stringify([sent.fileName, sent.displayPath, sent.fileRef]).includes(askCode), false)
+  assert.deepEqual((await host.inspect(bundle(file))).data, { encrypted: true, locked: true })
+  const unlocked = await host.inspect({ ...bundle(file), passphrase: PASSPHRASE })
+  assert.equal(unlocked.status, 200)
+  assert.equal(unlocked.data.review.askCode === askCode, true)
+  const { requestId, requestDigest } = sent.review
+  const manifest = await readManifest(await collect(deps.envelope.decrypt(Readable.from([file]), PASSPHRASE)))
+  const { requestNonce } = manifest
+  const { kind, ...fields } = review
+  assert.equal(requestDigest, sha(Buffer.from(JSON.stringify({ format: REVIEW_BUNDLE_FORMAT, version: 2, kind, requestId, requestNonce, ...fields }))))
+
+  // A canonical ZIP with the correct salted digest still cannot carry a code in cleartext,
+  // including when inspect is mistakenly provided a passphrase for the plaintext file.
+  const plain = await makeZip(JSON.stringify(manifest))
+  const differentCode = `egask1-${'b'.repeat(32)}`
+  const touched = await makeZip(JSON.stringify({ ...manifest, review: { ...sent.review, askCode: differentCode } }))
+  const sealedTamper = await collect(deps.envelope.encrypt(Readable.from([touched]), PASSPHRASE))
+  for (const input of [bundle(plain), { ...bundle(plain), passphrase: PASSPHRASE }, { ...bundle(sealedTamper), passphrase: PASSPHRASE }]) {
+    const rejected = await host.inspect(input)
+    assert.equal(rejected.data.code, 'PORTABLE_REVIEW_FILE_INVALID')
+    assert.equal(Object.hasOwn(rejected.data, 'review'), false)
+    assert.equal(JSON.stringify(rejected.data).includes(askCode), false)
+  }
+  const ordinary = createPortableService({ location: guest.location, dependencies: deps })
+  assert.deepEqual((await ordinary.listExports()).files, [])
+  await assert.rejects(ordinary.inspectBundle({ ...bundle(file), passphrase: PASSPHRASE }), { code: 'PORTABLE_REVIEW_HANDOFF' })
+  await assert.rejects(ordinary.importBundle({ ...bundle(file), passphrase: PASSPHRASE }), { code: 'PORTABLE_REVIEW_HANDOFF' })
+  assert.deepEqual(readdirSync(host.root), [])
+
+  const reply = { kind: 'reply', requestId, requestDigest, answer: 'Choose the shorter plan.' }
+  assert.equal((await host.export({ review: { ...reply, askCode }, passphrase: PASSPHRASE })).data.code, 'PORTABLE_REVIEW_INPUT')
+  assert.equal((await host.export({ review: { ...reply, answer: `Pasted code: ${askCode}` } })).data.code, 'PORTABLE_REVIEW_SECRET_LIKE')
+  const returned = (await host.export({ review: reply })).data
+  assert.equal(returned.encrypted, false)
+  assert.deepEqual(returned.review, reply)
+  assert.equal(host.read(returned.fileName).includes(askCode), false)
+  assert.deepEqual((await guest.inspect(bundle(host.read(returned.fileName)))).data, { review: reply, encrypted: false, locked: false })
+})
+
 async function genericBoardBundle() {
   const payload = Buffer.from('{"kind":"egdesk.portable.root","v":1,"scope":"board"}')
   const digest = sha(payload)
