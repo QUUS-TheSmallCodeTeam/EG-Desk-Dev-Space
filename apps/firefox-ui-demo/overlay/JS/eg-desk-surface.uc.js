@@ -24,6 +24,7 @@
   const BrowserGrant = ChromeUtils.importESModule('chrome://userchrome/content/EGDeskBrowserGrant.sys.mjs');
   const PortableState = ChromeUtils.importESModule('chrome://userchrome/content/EGDeskPortableState.sys.mjs');
   const ReviewHandoff = ChromeUtils.importESModule('chrome://userchrome/content/EGDeskReviewHandoff.sys.mjs');
+  const BoardAgentAsk = ChromeUtils.importESModule('chrome://userchrome/content/EGDeskBoardAgentAsk.sys.mjs');
   const TextFilePickers = ChromeUtils.importESModule('chrome://userchrome/content/EGDeskNativeFilePickers.sys.mjs');
   const BoardExport = ChromeUtils.importESModule('chrome://userchrome/content/EGDeskBoardExport.sys.mjs');
   const ProfileTransfer = ChromeUtils.importESModule('chrome://userchrome/content/EGDeskProfileTransfer.sys.mjs');
@@ -6239,13 +6240,15 @@
         () => openPortableExport({ scope: 'board', boardId: projection.boardId, boardTitle: projection.title })) : null,
       boardVersionHistoryReady() ? item('저장본을 .canvas로 내보내기…', '저장된 Board를 .canvas 파일로 내보내기', 'board-export-json-canvas',
         () => openBoardCanvasExport(projectionId)) : null,
+      boardAgentAskSupported && askBoard(projection) ? item('외부 질문에 쓸 Agent…', '이 Board의 외부 질문용 Agent 및 공개 발췌문 설정', 'board-agent-ask-policy',
+        () => openBoardAgentPolicy(anchor, projection)) : null,
       reviewHandoffReady() ? item('검토 요청 파일 만들기…', '직접 입력한 검토 요청을 로컬 파일로 만들기', 'board-review-request',
         () => openReviewDialog('request', anchor, projection)) : null,
       reviewHandoffReady() ? item('검토 회신 기록', '이 Board에 로컬로 추가한 검토 회신 보기', 'board-review-results',
         () => openReviewDialog('results', anchor, projection)) : null,
       item('Board 닫기', '이 Board 닫기', 'board-close', () => closeCurrentAgenda({ projectionId })),
     ].filter(Boolean);
-    const menuWidth = items.some(button => ['board-export-json-canvas', 'board-review-request'].includes(button.dataset.testid)) ? 232 : 152;
+    const menuWidth = items.some(button => ['board-export-json-canvas', 'board-review-request', 'board-agent-ask-policy'].includes(button.dataset.testid)) ? 232 : 152;
     const pos = resolveFloatingMenuPlacement(anchor.getBoundingClientRect(), menuWidth, items.length * 36 + 4);
     const menu = el('div', {
       class: 'egd-board-menu', role: 'menu', 'aria-label': `${projection.title} Board 작업`,
@@ -9524,6 +9527,11 @@
       isOpen: () => { const detail = byId('egd-resource-detail'); return !!detail && !detail.hidden; },
       contains: within('#egd-resource-detail'),
       dismiss: () => forwardEscape(document),
+    });
+    registerEscapeLayer({
+      id: 'board-agent-ask-dialog', kind: 'dialog',
+      isOpen: () => !!byId('egd-board-agent-ask-dialog'), contains: within('#egd-board-agent-ask-dialog'),
+      dismiss: () => closeBoardAgentAsk(),
     });
     registerEscapeLayer({
       id: 'review-dialog', kind: 'dialog',
@@ -29604,6 +29612,7 @@
   function invalidateReviewContext() {
     reviewContextEpoch++;
     reviewFlowRef?.invalidate();
+    boardAgentAskFlowRef?.invalidate();
   }
   function reviewBoard(projection) {
     if (!projection || blockedReviewBoardIds.has(projection.boardId) ||
@@ -29640,6 +29649,7 @@
     return reviewFlowRef;
   }
   function openReviewDialog(mode, anchor, projection) {
+    if (!closeBoardAgentAsk()) return;
     if (!reviewHandoffReady() || reviewFlowRef?.view()?.step === 'exporting') return;
     const board = mode === 'file' ? null : reviewBoard(projection);
     if (mode !== 'file' && !board) { boardNotice('저장되어 있고 지금 열려 있는 원래 Board에서 검토 작업을 시작해 주세요.'); return; }
@@ -29652,6 +29662,7 @@
     // A refused dismiss must leave the standing layer registered, so Escape
     // cannot fall through to anything under the file-write receipt.
     if (reviewFlowRef?.view()?.step === 'exporting') return false;
+    if (!closeBoardAgentAsk()) return false;
     reviewFlowRef?.close();
     const opener = reviewOpener;
     reviewOpener = null;
@@ -29663,7 +29674,7 @@
   function renderReviewDialog(view) {
     let panel = document.getElementById('egd-review-dialog');
     if (!view) { panel?.remove(); return; }
-    const typed = panel?.dataset.step === view.step ? Object.fromEntries([...panel.querySelectorAll('[data-field]:not([type=password])')]
+    const typed = panel?.dataset.step === view.step ? Object.fromEntries([...panel.querySelectorAll('[data-field]:not([type=password]), [data-field=askCode]')]
       .map(input => [input.dataset.field, input.type === 'checkbox' ? input.checked : input.value])) : {};
     const focusKey = panel?.dataset.step === view.step && panel.contains(document.activeElement) ? document.activeElement.dataset?.focusKey : null;
     if (!panel) {
@@ -29671,7 +29682,10 @@
         onmousedown: ev => ev.stopPropagation() });
       document.documentElement.appendChild(panel);
     }
-    const content = ReviewHandoff.reviewDialogContent(el, view, reviewFlow(), { typed, onClose: closeReviewDialog, reveal: revealPortableFile });
+    const content = ReviewHandoff.reviewDialogContent(el, view, reviewFlow(), { typed, onClose: closeReviewDialog, reveal: revealPortableFile,
+      askCodeEnabled: boardAgentAskSupported,
+      onBoardAgentAsk: boardAgentAskSupported && view.step === 'request-inspected' && view.review?.askCode && askBoard(activeBoardProjection())
+        ? ev => openBoardAgentQuestion(ev.currentTarget, view.review) : null });
     panel.dataset.step = view.step;
     panel.setAttribute('aria-label', content.title);
     panel.setAttribute('aria-busy', String(view.busy));
@@ -29682,6 +29696,86 @@
       || panel.querySelector('button:not([disabled])') || panel;
     focus.focus({ preventScroll: true });
     panel.scrollTop = 0;
+  }
+
+  // Use only a saved mounted Board, never a Board ID or name from the file.
+  let boardAgentAskSupported = false;
+  let boardAgentAskFlowRef = null;
+  let boardAgentAskOpener = null;
+  function askBoard(projection) {
+    if (!projection || !coerceAgendaStore().agendas[projection.boardId]) return null;
+    const board = reviewBoard(projection);
+    return board && isReviewBoardCurrent(board) ? { id: projection.boardId, title: board.title, identity: board } : null;
+  }
+  function isBoardAgentAskCurrent(binding) {
+    const { board, context, review } = binding;
+    return !!(boardAgentAskSupported && isReviewContextCurrent(context) && isReviewBoardCurrent(board.identity) &&
+      coerceAgendaStore().agendas[board.id] &&
+      (!review || (state.boards.activeProjectionId === board.identity.projection.id && reviewFlowRef?.view()?.step === 'request-inspected' &&
+        reviewFlowRef.view().review === review)));
+  }
+  function boardAgentAskFlow() {
+    if (!boardAgentAskFlowRef) {
+      boardAgentAskFlowRef = BoardAgentAsk.createBoardAgentAsk({
+        post: (path, body) => deskStoreRequest('POST', path, body, { timeoutMs: path.endsWith('/run') ? 65000 : 12000 }),
+        loadProfiles: async () => {
+          await state.codexBridge?.loadProfiles?.();
+          return codexProfileCatalog.status === 'ready' ? codexProfileCatalog.profiles.filter(ChatState.profileRunnable) : [];
+        },
+        isCurrent: isBoardAgentAskCurrent, onState: renderBoardAgentAsk,
+        onAnswer(binding, result) {
+          if (isBoardAgentAskCurrent(binding)) reviewFlowRef?.beginAgentReply(binding.review, binding.board.identity, result);
+        },
+      });
+      window.addEventListener('unload', () => boardAgentAskFlowRef?.close({ force: true }), { once: true });
+    }
+    return boardAgentAskFlowRef;
+  }
+  function openBoardAgentPolicy(anchor, projection) {
+    const board = askBoard(projection), context = reviewContext();
+    if (!boardAgentAskSupported || !board || !context || (reviewFlowRef?.view() && !closeReviewDialog())) return;
+    if (boardAgentAskFlowRef?.view()) return;
+    boardAgentAskOpener = anchor;
+    void boardAgentAskFlow().open({ board, context });
+  }
+  function openBoardAgentQuestion(anchor, review) {
+    const board = askBoard(activeBoardProjection()), context = reviewContext();
+    if (!board || !context || !review.askCode || !isBoardAgentAskCurrent({ board, context, review }) || boardAgentAskFlowRef?.view()) return;
+    boardAgentAskOpener = anchor;
+    void boardAgentAskFlow().open({ board, context, review });
+  }
+  function closeBoardAgentAsk() {
+    if (boardAgentAskFlowRef?.close() === false) return false;
+    return true;
+  }
+  function renderBoardAgentAsk(view) {
+    let panel = document.getElementById('egd-board-agent-ask-dialog');
+    const reviewPanel = document.getElementById('egd-review-dialog');
+    if (!view) {
+      panel?.remove();
+      if (reviewPanel) reviewPanel.inert = false;
+      const opener = boardAgentAskOpener;
+      boardAgentAskOpener = null;
+      if (opener?.isConnected) opener.focus({ preventScroll: true });
+      else (reviewPanel?.querySelector('[data-testid="review-reply"]') || document.getElementById('egd-desk-menu-open'))?.focus({ preventScroll: true });
+      return;
+    }
+    if (reviewPanel) reviewPanel.inert = true;
+    if (!panel) {
+      panel = el('section', { id: 'egd-board-agent-ask-dialog', class: 'egd-store-panel', role: 'dialog', tabindex: '-1',
+        data: { testid: 'board-agent-ask-dialog' }, onmousedown: ev => ev.stopPropagation() });
+      document.documentElement.appendChild(panel);
+    }
+    const content = BoardAgentAsk.boardAgentAskContent(el, view, boardAgentAskFlow(), closeBoardAgentAsk);
+    panel.setAttribute('aria-label', content.title);
+    panel.setAttribute('aria-busy', String(['loading', 'writing', 'preparing', 'running'].includes(view.step)));
+    panel.replaceChildren(...content.children);
+    const focus = [...panel.querySelectorAll('[data-focus-key]')].find(node => !node.disabled && node.dataset.focusKey === view.focusKey)
+      || panel.querySelector('input:checked, select, .egd-store-primary') || panel.querySelector('button:not([disabled])') || panel;
+    focus.focus({ preventScroll: true });
+    if (view.step === 'policy' && view.focusKey?.startsWith('excerpt-')) focus.scrollIntoView({ block: 'nearest' });
+    else if (panel.dataset.step !== view.step) panel.scrollTop = 0;
+    panel.dataset.step = view.step;
   }
 
   // ── RT-03: .egdesk 내보내기 / 가져오기 ──
@@ -29696,6 +29790,8 @@
   function portableBridgeObserved(bridgeState) {
     portableSupportState = PortableState.portableSupport(bridgeState);
     reviewSupported = ReviewHandoff.reviewHandoffSupported(bridgeState);
+    boardAgentAskSupported = BoardAgentAsk.boardAgentAskSupported(bridgeState);
+    boardAgentAskFlowRef?.invalidate();
     reviewFlowRef?.invalidate();
     syncPortableEntryPoints();
   }

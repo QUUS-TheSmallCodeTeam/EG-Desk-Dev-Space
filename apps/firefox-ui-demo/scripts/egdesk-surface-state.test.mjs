@@ -11786,15 +11786,16 @@ test('production Board [⋯] menu offers save, Chat attach and close for that Bo
   const window = { addEventListener: (type, fn) => windowListeners.set(type, fn), removeEventListener: type => windowListeners.delete(type) };
   // Without the bridge's Desk store (older bridge, offline) the menu stays as before.
   let storeReady = false;
+  let askReady = false, mounted = false;
   const placements = [];
   let portableReady = false;
-  const api = compileFunction(`let boardRegionMenu = null;\n${close}\n${toggle}\nreturn { toggleBoardRegionMenu, closeBoardRegionMenu, current: () => boardRegionMenu };`,
+  const api = compileFunction(`let boardRegionMenu = null, boardAgentAskSupported = false; \n${close}\n${toggle}\nreturn { toggleBoardRegionMenu(...args) { boardAgentAskSupported = askReady(); return toggleBoardRegionMenu(...args); }, closeBoardRegionMenu, current: () => boardRegionMenu };`,
     ['state', 'document', 'window', 'el', 'resolveFloatingMenuPlacement', 'saveBoardWithNotice', 'openBoardSaveAs', 'openChatInputPanel', 'closeCurrentAgenda', 'boardVersionHistoryReady', 'openBoardHistoryPanel',
-      'portableExportReady', 'openPortableExport', 'openBoardCanvasExport', 'boardProjectMenuItems', 'reviewHandoffReady'])(
+      'portableExportReady', 'openPortableExport', 'openBoardCanvasExport', 'boardProjectMenuItems', 'reviewHandoffReady', 'askReady', 'askBoard', 'openBoardAgentPolicy'])(
     state, dom.document, window, dom.el, (rect, width, height) => { placements.push([width, height]); return { left: 300.4, top: 120.6 }; },
     options => actions.push(['save', options]), projectionId => actions.push(['save-as', projectionId]), (threadId, options) => actions.push(['attach', threadId, options]),
     options => actions.push(['close', options]), () => storeReady, boardId => actions.push(['history', boardId]),
-    () => portableReady, options => actions.push(['export', options]), projectionId => actions.push(['canvas', projectionId]), () => [], () => false);
+    () => portableReady, options => actions.push(['export', options]), projectionId => actions.push(['canvas', projectionId]), () => [], () => false, () => askReady, () => mounted ? projection : null, (target, board) => actions.push(['ask-policy', target, board]));
   const anchor = dom.el('button', { data: { testid: 'board-menu' } });
   anchor.getBoundingClientRect = () => ({ left: 280, top: 90, right: 304, bottom: 114 });
   const menu = api.toggleBoardRegionMenu(projection.id, anchor);
@@ -11856,6 +11857,15 @@ test('production Board [⋯] menu offers save, Chat attach and close for that Bo
   assert.equal(api.current(), null);
   api.toggleBoardRegionMenu(projection.id, anchor).children[5].onclick({ stopPropagation() {} });
   assert.deepEqual(actions.at(-1), ['canvas', projection.id], 'the saved-copy action captures the clicked projection, not the active Board');
+  api.closeBoardRegionMenu();
+  askReady = true;
+  assert.equal(api.toggleBoardRegionMenu(projection.id, anchor).children.some(item => item.dataset.testid === 'board-agent-ask-policy'), false);
+  api.closeBoardRegionMenu();
+  mounted = true;
+  const askItem = api.toggleBoardRegionMenu(projection.id, anchor).children.find(item => item.dataset.testid === 'board-agent-ask-policy');
+  assert.equal(askItem.textContent, '외부 질문에 쓸 Agent…');
+  askItem.onclick({ stopPropagation() {} });
+  assert.deepEqual(actions.at(-1), ['ask-policy', anchor, projection]);
 });
 
 test('Board region and mark CSS use approved tokens: name tag only, 14px corners, 2px current Board', () => {

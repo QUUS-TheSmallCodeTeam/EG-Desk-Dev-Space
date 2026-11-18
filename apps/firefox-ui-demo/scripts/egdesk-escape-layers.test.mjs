@@ -55,7 +55,7 @@ function mountEscapeLayers() {
   const names = ['window', 'document', 'state', 'EscapeLayerStack', 'escapeLayers', 'registerEscapeLayer', 'boardRegionMenu', 'deskMenu',
     'closeBoardRegionMenu', 'closeDeskMenu', 'closeMinimapStack', 'closeAgendaCloseGuard', 'closeRailSearchPanel', 'closeAgendaSwitcher',
     'closeBoardHistoryPanel', 'closeDeskHistoryPanel', 'closeDeskMinimap', 'setHudPresentationHidden', 'exitCardFullscreen',
-    'SurfaceKeys', 'closeMaximizeHudPeek', 'memoRelink', 'forwardingEscape', 'KeyboardEvent'];
+    'SurfaceKeys', 'closeMaximizeHudPeek', 'memoRelink', 'forwardingEscape', 'closeBoardAgentAsk', 'KeyboardEvent'];
   const relink = { current: null };
   const closeStart = surfaceSource.indexOf('  function closeReviewDialog() {');
   const closeEnd = surfaceSource.indexOf('  function renderReviewDialog(', closeStart);
@@ -65,7 +65,10 @@ function mountEscapeLayers() {
     window, document, state, EscapeLayerStack, escapeLayers, registerEscapeLayer, null, null,
     closer('board-menu'), closer('desk-menu'), closer('minimap-stack'), closer('close-guard'), closer('rail-search'), closer('board-switcher'),
     closer('board-history'), closer('desk-history'), closer('minimap'), closer('hud-hidden'), closer('fullscreen'),
-    SurfaceKeys, closer('chat-peek'), null, false,
+    SurfaceKeys, closer('chat-peek'), null, false, () => {
+      if (!ids.has('egd-board-agent-ask-dialog')) return true;
+      ids.delete('egd-board-agent-ask-dialog'); log.push('close:board-agent-ask'); return true;
+    },
     class { constructor(type, init) { Object.assign(this, { type, ...init, defaultPrevented: false }); } preventDefault() { this.defaultPrevented = true; } stopPropagation() {} });
   install();
   const fire = (type, capture, event) => { for (const entry of listeners) if (entry.type === type && entry.capture === capture) entry.handler(event); };
@@ -476,4 +479,16 @@ test('UX-06: the Browser Agent chip opens a peek while maximized and the normal 
   assert.match(peek, /function openChatForAgentChip\(\) \{\n    if \(peekChatForAttention\(\)\) return true;/);
   assert.match(surfaceSource, /class: 'egd-browser-agent-identity', hidden: true, role: 'button', tabindex: '0',/);
   assert.match(surfaceSource, /state\.peekChatForAttention = peekChatForAttention;/);
+});
+
+test('Escape closes the focused Board Agent dialog without dismissing its parent review', () => {
+  const { ids, node, document, press } = mountEscapeLayers();
+  ids.set('egd-review-dialog', node('section'));
+  ids.set('egd-board-agent-ask-dialog', node('section'));
+  const field = node('textarea', ['#egd-board-agent-ask-dialog']);
+  document.activeElement = field;
+  assert.equal(press(field, { isComposing: true }).defaultPrevented, false);
+  assert.equal(press(field).defaultPrevented, true);
+  assert.equal(ids.has('egd-board-agent-ask-dialog'), false);
+  assert.equal(ids.has('egd-review-dialog'), true);
 });

@@ -11255,7 +11255,8 @@ button.egd-memo-ask-cancel:hover { text-decoration: underline; }
 .egd-host-activity-note { margin: 0; }
 
 /* Manual review files use plain text, never HTML or Board content. */
-#egd-review-dialog {
+#egd-review-dialog,
+#egd-board-agent-ask-dialog {
   left: 50%;
   top: 64px;
   transform: translateX(-50%);
@@ -11277,3 +11278,7 @@ button.egd-memo-ask-cancel:hover { text-decoration: underline; }
 .egd-review-password-fields { display: grid; gap: 10px; }
 .egd-review-password-fields[hidden] { display: none; }
 .egd-review-password-mode { display: flex; align-items: center; gap: 8px; }
+
+#egd-board-agent-ask-dialog { z-index: 100116; }
+#egd-board-agent-ask-dialog select { width: 100%; min-height: 32px; }
+#egd-board-agent-ask-dialog .egd-portable-check { white-space: normal; }

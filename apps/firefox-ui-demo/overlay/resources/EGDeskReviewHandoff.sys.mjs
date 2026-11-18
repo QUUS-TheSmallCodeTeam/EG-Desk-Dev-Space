@@ -4,9 +4,10 @@ import { bytesToBase64, PORTABLE_MIN_PASSPHRASE_CHARS, PORTABLE_MAX_PASSPHRASE_C
 export const REVIEW_EXTENSION = '.egdesk';
 export const REVIEW_MAX_FILE_BYTES = 256 * 1024;
 export const REVIEW_RECORD_LIMIT = 48;
-export const REVIEW_FIELDS = Object.freeze({ recipient: 256, question: 2048, excerpt: 8192, expectedReply: 2048, answer: 8192 });
-export const REVIEW_LABELS = Object.freeze({ recipient: '받는 사람 표기', question: '검토 질문', excerpt: '공유할 발췌문', expectedReply: '원하는 답변', answer: '회신 내용' });
+export const REVIEW_FIELDS = Object.freeze({ recipient: 256, question: 2048, excerpt: 8192, expectedReply: 2048, answer: 8192, askCode: 39 });
+export const REVIEW_LABELS = Object.freeze({ recipient: '받는 사람 표기', question: '검토 질문', excerpt: '공유할 발췌문', expectedReply: '원하는 답변', answer: '회신 내용', askCode: 'Board 질문 코드' });
 const requestFields = Object.keys(REVIEW_FIELDS).slice(0, 4);
+const askCodePattern = /^egask1-[0-9a-f]{32}$/;
 const idPattern = /^[a-f0-9]{8}-[a-f0-9]{4}-4[a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/;
 const digestPattern = /^[a-f0-9]{64}$/;
 const pairValid = value => typeof value?.requestId === 'string' && idPattern.test(value.requestId) &&
@@ -52,6 +53,10 @@ export function reviewRequestDraft(raw = {}) {
     if (result.error) return result;
     review[field] = result.value;
   }
+  if (raw?.askCode !== undefined && raw.askCode !== '') {
+    if (typeof raw.askCode !== 'string' || !askCodePattern.test(raw.askCode)) return { error: failure('공유받은 Board 질문 코드를 확인해 주세요.', 'askCode') };
+    review.askCode = raw.askCode;
+  }
   return { review };
 }
 
@@ -68,7 +73,7 @@ function canonicalReview(raw) {
   const parsed = raw.kind === 'request' ? reviewRequestDraft(raw) : raw.kind === 'reply' ? reviewReplyDraft(raw, raw.answer) : null;
   const review = parsed?.review;
   if (!review || Object.keys(review).some(key => raw[key] !== review[key])) return null;
-  if (Object.keys(raw).length !== (raw.kind === 'request' ? 7 : 4)) return null;
+  if (Object.keys(raw).length !== (raw.kind === 'request' ? 7 + (review.askCode ? 1 : 0) : 4)) return null;
   return Object.freeze({ ...review, ...pair(raw) });
 }
 
@@ -129,6 +134,7 @@ const noMatch = '이 프로필에서 만든 요청과 일치하지 않습니다.
 const duplicate = '이 요청의 회신은 이미 이 Board에 추가되어 있습니다.';
 function exportError(code) {
   if (code === 'PORTABLE_REVIEW_SECRET_LIKE') return '비밀번호·키·토큰처럼 보이는 내용이 있어 파일을 만들지 않았습니다. 해당 내용을 빼고 다시 확인해 주세요.';
+  if (code === 'PORTABLE_REVIEW_ENCRYPTION_REQUIRED') return 'Board 질문 코드가 있는 요청은 비어 있지 않은 파일 암호로 잠가 주세요.';
   if (code === 'PORTABLE_REVIEW_INPUT') return '검토 텍스트와 길이를 다시 확인해 주세요.';
   if (code === 'PORTABLE_PASSPHRASE_TOO_SHORT' || code === 'PORTABLE_PASSPHRASE_INVALID') return '파일 암호를 다시 확인해 주세요.';
   return '검토 파일 생성 결과를 확인하지 못했습니다. 다시 만들기 전에 내보내기 폴더를 확인해 주세요.';
@@ -219,7 +225,7 @@ export function createReviewFlow({ request, pickFile, getContext, isContextCurre
     const body = response?.body;
     if (response?.status === 200 && body?.locked === true && body.encrypted === true) { end(s, { step: 'locked' }); return; }
     const review = response?.status === 200 && body?.locked === false && typeof body.encrypted === 'boolean' ? canonicalReview(body.review) : null;
-    if (!review) {
+    if (!review || (review.askCode && !body.encrypted)) {
       const wrongPassword = body?.code === 'PORTABLE_PASSPHRASE_INVALID';
       if (!wrongPassword) s.source = null;
       end(s, { step: wrongPassword ? 'locked' : 'choose', error: failure(wrongPassword ? '암호가 맞지 않거나 파일이 손상되었습니다.' : '검토 요청 또는 회신 파일을 확인하지 못했습니다.', wrongPassword ? 'passphrase' : undefined) });
@@ -254,6 +260,20 @@ export function createReviewFlow({ request, pickFile, getContext, isContextCurre
     update(s, { step: 'reply-draft', review: s.inspected, requestReview: s.inspected, error: null });
     return true;
   }
+  function beginAgentReply(review, board, { answer, mode, decisionEgress, source }) {
+    const s = active;
+    if (!current(s, board) || s.view.step !== 'request-inspected' || s.inspected !== review || !s.inspected?.askCode) return false;
+    s.board = board;
+    const parsed = answer ? reviewReplyDraft(s.inspected, answer) : null;
+    const usable = parsed?.review?.answer === answer;
+    const answerSource = !answer ? '이 질문에 쓸 관련 공개 발췌문을 찾지 못했습니다. 직접 회신을 쓸 수 있습니다.' :
+      !usable ? '결과를 회신에 넣을 수 없습니다. 직접 회신을 써 주세요.' :
+      mode === 'draft' ? '전용 OpenAI API로 만든 초안입니다. 내용을 검토하고 내 회신으로 편집해 주세요.' :
+      'Board의 관련 공개 발췌문입니다. 생성된 답변이 아닙니다. 내용을 검토하고 내 회신으로 편집해 주세요.';
+    update(s, { step: 'reply-draft', review: usable ? parsed.review : s.inspected, requestReview: s.inspected, boardTitle: board.title,
+      answerSource: decisionEgress && source !== 'local' ? `${answerSource} 관련성 판단에 별도 Decisions API를 사용했습니다.` : answerSource, error: null });
+    return true;
+  }
   function previewReply(answer) {
     const s = active;
     if (!current(s) || s.view.step !== 'reply-draft' || s.inspected?.kind !== 'request') return false;
@@ -267,8 +287,11 @@ export function createReviewFlow({ request, pickFile, getContext, isContextCurre
     const s = active;
     if (!current(s) || !['request-preview', 'reply-preview'].includes(s.view.step) || !s.draft) return;
     const step = s.view.step, review = s.draft;
+    if (review.askCode && !passwordProtected) {
+      resetError(s, 'Board 질문 코드가 있는 요청은 파일 암호로 잠가 주세요.', 'passphrase'); return;
+    }
     if (passwordProtected) {
-      if (typeof passphrase !== 'string' || Array.from(passphrase).length < PORTABLE_MIN_PASSPHRASE_CHARS || passphrase.length > PORTABLE_MAX_PASSPHRASE_CHARS) {
+      if (typeof passphrase !== 'string' || (review.askCode && !passphrase.trim()) || Array.from(passphrase).length < PORTABLE_MIN_PASSPHRASE_CHARS || passphrase.length > PORTABLE_MAX_PASSPHRASE_CHARS) {
         resetError(s, '암호로 잠그려면 파일 암호를 8자 이상, 최대 1024자까지 입력해 주세요.', 'passphrase'); return;
       }
       if (passphrase !== confirm) { resetError(s, '두 암호가 같지 않습니다.', 'confirm'); return; }
@@ -302,7 +325,10 @@ export function createReviewFlow({ request, pickFile, getContext, isContextCurre
     if (!current(s) || s.view.busy) return;
     if (s.view.step === 'request-preview') update(s, { step: 'request-draft', review: s.draft, error: null });
     else if (s.view.step === 'reply-preview') update(s, { step: 'reply-draft', review: s.draft, error: null });
-    else if (s.view.step === 'reply-draft') update(s, { step: 'request-inspected', review: s.inspected, error: null });
+    else if (s.view.step === 'reply-draft') {
+      s.board = s.draft = null;
+      update(s, { step: 'request-inspected', review: s.inspected, boardTitle: null, answerSource: null, error: null });
+    }
     else if (['locked', 'request-inspected', 'reply-inspected'].includes(s.view.step)) {
       s.source = s.inspected = s.board = s.draft = null;
       update(s, { step: 'choose', review: null, error: null, message: null, canReturn: false, boardTitle: null });
@@ -330,7 +356,7 @@ export function createReviewFlow({ request, pickFile, getContext, isContextCurre
     catch { resetError(s, storeFailure); }
     return s.view;
   }
-  return { view, snapshot: view, openRequest, previewRequest, openFile, chooseFile, unlock, beginReply, previewReply,
+  return { view, snapshot: view, openRequest, previewRequest, openFile, chooseFile, unlock, beginReply, beginAgentReply, previewReply,
     exportFile, back, confirmReturn, openResults, close, invalidate: () => { if (active) current(active); } };
 }
 
@@ -339,7 +365,7 @@ const REVIEW_MANUAL_NOTE = '파일은 이 기기에만 만듭니다. 자동으�
 const REVIEW_PLAIN_NOTE = '암호 없이 만들면 파일을 가진 누구나 내용을 볼 수 있습니다.';
 
 // Rendering uses text nodes only, including angle brackets, markup, and line breaks.
-export function reviewDialogContent(el, view, flow, { typed = {}, onClose = flow.close, reveal = () => {} } = {}) {
+export function reviewDialogContent(el, view, flow, { typed = {}, onClose = flow.close, reveal = () => {}, askCodeEnabled = false, onBoardAgentAsk = null } = {}) {
   const { step, review, busy, error } = view;
   const action = (id, label, run, primary = false) => el('button', { type: 'button',
     class: primary ? 'egd-store-primary' : null, data: { testid: `review-${id}`, focusKey: id }, onclick: run }, label);
@@ -353,19 +379,19 @@ export function reviewDialogContent(el, view, flow, { typed = {}, onClose = flow
   const form = (fields, label, submitId, read, initial = {}, exportOptions = false) => {
     const inputs = {};
     const labels = fields.map(field => {
-      const password = ['passphrase', 'confirm'].includes(field);
+      const password = ['passphrase', 'confirm', 'askCode'].includes(field);
       const multiline = !password && field !== 'recipient';
       const caption = field === 'passphrase' ? '파일 암호' : field === 'confirm' ? '파일 암호 다시 입력' :
-        `${REVIEW_LABELS[field]}${field === 'excerpt' ? ' (선택)' : ''}`;
+        `${REVIEW_LABELS[field]}${['excerpt', 'askCode'].includes(field) ? ' (선택)' : ''}`;
       const input = el(multiline ? 'textarea' : 'input', {
         class: 'egd-portable-input', type: multiline ? null : (password ? 'password' : 'text'),
         rows: multiline ? (field === 'excerpt' || field === 'answer' ? 4 : 2) : null,
-        maxlength: password ? PORTABLE_MAX_PASSPHRASE_CHARS : REVIEW_FIELDS[field],
+        maxlength: password && field !== 'askCode' ? PORTABLE_MAX_PASSPHRASE_CHARS : REVIEW_FIELDS[field],
         autocomplete: 'off', spellcheck: password ? 'false' : null,
         'aria-invalid': error?.field === field ? 'true' : null,
         data: { field, testid: `review-${field}`, focusKey: field },
       });
-      input.value = (password ? '' : typed[field] ?? initial[field]) || '';
+      input.value = (field === 'passphrase' || field === 'confirm' ? '' : typed[field] ?? initial[field]) || '';
       inputs[field] = input;
       return el('label', { class: 'egd-portable-field' }, el('span', { class: 'egd-portable-field-label' }, caption), input);
     });
@@ -380,7 +406,8 @@ export function reviewDialogContent(el, view, flow, { typed = {}, onClose = flow
           plainWarning.hidden = lock.checked;
           if (!lock.checked) inputs.passphrase.value = inputs.confirm.value = '';
         } });
-      lock.checked = typed.passwordProtected === true;
+      lock.checked = review.askCode ? true : typed.passwordProtected === true;
+      lock.disabled = !!review.askCode;
       passwordFields.hidden = !lock.checked;
       plainWarning.hidden = lock.checked;
     }
@@ -388,7 +415,7 @@ export function reviewDialogContent(el, view, flow, { typed = {}, onClose = flow
       ev.preventDefault();
       const values = Object.fromEntries(Object.entries(inputs).map(([key, input]) => [key, input.value]));
       read(lock ? (lock.checked ? { ...values, passwordProtected: true } : { passwordProtected: false }) : values);
-    } }, ...(lock ? [el('label', { class: 'egd-review-password-mode' }, lock, '암호로 잠그기'), plainWarning, passwordFields] : labels),
+    } }, ...(lock ? [el('label', { class: 'egd-review-password-mode' }, lock, review.askCode ? '질문 코드가 있는 파일은 반드시 암호로 잠급니다' : '암호로 잠그기'), plainWarning, passwordFields] : labels),
     buttons(step !== 'request-draft' ? back() : null,
       el('button', { type: 'submit', class: 'egd-store-primary', data: { testid: `review-${submitId}`, focusKey: submitId } }, label)));
   };
@@ -397,11 +424,13 @@ export function reviewDialogContent(el, view, flow, { typed = {}, onClose = flow
   if (step === 'request-draft') {
     title = '검토 요청 만들기';
     content = [note('직접 입력한 공유 가능한 텍스트만 담습니다. Board, 카드, 페이지, 원본 파일은 읽거나 복사하지 않습니다. 비밀번호·키·토큰을 넣지 마세요.'),
-      note(REVIEW_AUTH_NOTE), form(requestFields, '요청 미리보기', 'preview', values => flow.previewRequest(values), review || {})];
+      note(REVIEW_AUTH_NOTE), askCodeEnabled ? note('Board 소유자가 별도로 공유한 일회용 코드가 있을 때만 넣으세요. 코드가 있는 요청은 반드시 암호로 잠급니다.') : null,
+      form(askCodeEnabled ? [...requestFields, 'askCode'] : requestFields, '요청 미리보기', 'preview', values => flow.previewRequest(values), review || {})];
   } else if (step === 'request-preview' || step === 'reply-preview') {
     const request = step === 'request-preview';
     title = request ? '검토 요청 미리보기' : '검토 회신 미리보기';
     content = [preview(review, request ? requestFields : ['answer']), note(REVIEW_MANUAL_NOTE),
+      review.askCode ? note('이 요청에는 일회용 Board 질문 코드가 들어 있습니다. 요청 파일과 파일 암호는 별도로 보내세요.', 'warning') : null,
       form(['passphrase', 'confirm'], request ? '요청 파일 만들기' : '회신 파일 만들기', 'export', values => void flow.exportFile(values), {}, true)];
   } else if (step === 'choose') {
     content = [note('직접 받은 .egdesk 검토 요청 또는 회신 파일을 엽니다. 미리보기만으로는 어느 Board도 바뀌지 않습니다.'),
@@ -413,9 +442,13 @@ export function reviewDialogContent(el, view, flow, { typed = {}, onClose = flow
   } else if (step === 'request-inspected' || step === 'reply-draft') {
     title = step === 'reply-draft' ? '검토 회신 작성' : '검토 요청 내용';
     const writing = step === 'reply-draft';
-    content = [note(REVIEW_AUTH_NOTE), preview(writing && review.kind === 'reply' ? view.requestReview : review, requestFields), writing
+    content = [note(REVIEW_AUTH_NOTE), preview(writing && review.kind === 'reply' ? view.requestReview : review, requestFields),
+      (writing ? view.requestReview : review)?.askCode ? note('일회용 Board 질문 코드가 들어 있습니다. 코드는 요청자의 신원을 확인하지 않습니다.') : null,
+      writing && view.answerSource ? note(`‘${view.boardTitle}’ Board · ${view.answerSource}`) : null,
+      !writing && review.askCode && askCodeEnabled && !onBoardAgentAsk ? note('Agent로 답변하려면 이 기기에서 설정한 Board를 활성화한 뒤 이 파일을 다시 열어 주세요. 지금은 직접 회신을 쓸 수 있습니다.') : null, writing
       ? form(['answer'], '회신 미리보기', 'preview', values => flow.previewReply(values.answer), review.kind === 'reply' ? review : {})
-      : buttons(back(), action('reply', '회신 쓰기…', () => flow.beginReply(), true))];
+      : buttons(back(), action('reply', '회신 쓰기…', () => flow.beginReply(), true),
+        onBoardAgentAsk ? action('board-agent-ask', '이 Board의 Agent로 답변 준비…', onBoardAgentAsk) : null)];
   } else if (step === 'reply-inspected') {
     title = '검토 회신 내용';
     content = [preview(review, ['answer']), note('파일만으로는 작성자를 확인할 수 없습니다.'), view.message ? status(view.message) : null,
