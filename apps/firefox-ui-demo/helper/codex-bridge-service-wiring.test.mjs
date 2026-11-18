@@ -277,6 +277,7 @@ async function harness(t, { constructionRoots = false, failingUnsubscribe = fals
       localFiles.close = async () => { lifecycle.push('files.close'); await close() }
       return localFiles
     },
+    boardAgentAsk: { close() {} },
     bridgeServer: { close: () => lifecycle.push('server.close') },
     systemResourceMonitor: { close: () => lifecycle.push('monitor.close') },
     codexEngine: { dispose: async () => lifecycle.push('codex.dispose') },

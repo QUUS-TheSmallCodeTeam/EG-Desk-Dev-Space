@@ -24,7 +24,7 @@ import { createTerminalRunWatch } from './egdesk-terminal-run-watch.mjs'
 import { createTerminalSessionFactory } from './terminal-platform.mjs'
 import { createTerminalHttpHandler } from './terminal-http.mjs'
 import { chatError, publicText } from './codex-chat-values.mjs'
-import { randomBytes } from 'node:crypto'
+import { createHmac, randomBytes } from 'node:crypto'
 import * as os from 'node:os'
 import path from 'node:path'
 import { ImmutableContextStore, appDataDirectory } from './egdesk-context-store.mjs'
@@ -41,6 +41,10 @@ import { MAX_ENGINE_PROFILES, openEngineProfiles } from './egdesk-engine-profile
 import { createEngineProfilesHttpHandler } from './egdesk-engine-profiles-http.mjs'
 import { createDeskHttpHandler } from './egdesk-desk-http.mjs'
 import { createPortableHttpHandler } from './egdesk-portable-http.mjs'
+import { createBoardAgentAskService } from './egdesk-board-agent-ask.mjs'
+import { createBoardAgentAskHttpHandler } from './egdesk-board-agent-ask-http.mjs'
+import { selectBoardAgentContext } from './egdesk-board-agent-context.mjs'
+import { createBoardAgentDraftTransport, BOARD_AGENT_DRAFT_INSTRUCTIONS, BOARD_AGENT_DRAFT_REPLY_STYLES } from './egdesk-board-agent-draft.mjs'
 import { createContextAttachmentProvider, createManagedDraftProvider } from './egdesk-portable-providers.mjs'
 import { NativeReaderClient } from './egdesk-native-reader.mjs'
 import { ClaudeReaderClient, estimateClaudeReaderInput } from './egdesk-claude-reader.mjs'
@@ -59,6 +63,15 @@ import { createOntologyHttpHandler, ontologyHealth, openBoundOntologyStore, read
 import { inspectSqliteRuntime } from './egdesk-sqlite-runtime.mjs'
 import { createHostAgent, resolveHostAgentExecutable } from './egdesk-host-agent.mjs'
 import { createHostControl, createHostControlHttpHandler } from './egdesk-host-control.mjs'
+
+// Optional independent Responses credential. Capture once and remove before
+// configuring or launching any engine, terminal or native subprocess.
+const boardAgentDraftConfig = Object.freeze({
+  apiKey: process.env.EGDESK_BOARD_AGENT_DRAFT_API_KEY,
+  model: process.env.EGDESK_BOARD_AGENT_DRAFT_MODEL,
+})
+delete process.env.EGDESK_BOARD_AGENT_DRAFT_API_KEY
+delete process.env.EGDESK_BOARD_AGENT_DRAFT_MODEL
 
 const nodeRuntime = requireEGDeskNodeRuntime()
 
@@ -470,6 +483,20 @@ const handleDeskHttp = createDeskHttpHandler({ store: () => deskStore, port: BRI
 // RT-03 opt-in extras: captures of the signed-in account and local File drafts (off unless asked, D-R3).
 const portableAttachments = createContextAttachmentProvider({ store: contextStore, ownerKey: () => publicAuthIdentityKey(authState) })
 const portableFileDrafts = createManagedDraftProvider({ directory: path.join(dataDir, 'file-drafts') })
+const boardAskBindingKey = randomBytes(32)
+const boardAgentAsk = createBoardAgentAskService({
+  desk: deskStore, profiles: profileStore, selectContext: selectBoardAgentContext,
+  decisionStatus: () => {
+    const key = decisionCredentials.getApiKey()
+    const mode = bridgeSettings.decisionContext.mode
+    if (!key || mode === 'off') return null
+    const bindingId = createHmac('sha256', boardAskBindingKey).update(JSON.stringify([key, decisionCredentials.savedAt(), mode, decisionClient.model])).digest('hex')
+    return { mode, model: decisionClient.model, client: decisionClient, bindingId }
+  },
+  draft: createBoardAgentDraftTransport({ readConfig: () => boardAgentDraftConfig.apiKey && boardAgentDraftConfig.apiKey !== decisionCredentials.getApiKey() ? boardAgentDraftConfig : null }),
+  draftPreview: replyStyle => `${BOARD_AGENT_DRAFT_INSTRUCTIONS}\n${BOARD_AGENT_DRAFT_REPLY_STYLES[replyStyle]}`,
+})
+const handleBoardAgentAskHttp = createBoardAgentAskHttpHandler({ service: boardAgentAsk, port: BRIDGE_PORT })
 const handlePortableHttp = createPortableHttpHandler({ desk: () => deskStore, chat: () => chatStore, profiles: () => profileStore, attachments: portableAttachments, fileDrafts: portableFileDrafts, appDataDir: dataDir, port: BRIDGE_PORT })
 // Task graph (CHAT-06): /tasks/*, /task-sources; events (RT-06): /events/browser,
 // /events/recent; SSE workflow.event and task.graph frames on /events.
@@ -988,6 +1015,7 @@ const bridgeServer = createServer(async (req, res) => {
         portable: [
           ...(deskStore ? ['export', 'inspect', 'import-as-new', 'passphrase', 'exports-list', 'attachments', 'file-drafts'] : ['local-store-unavailable']),
           ...(await handlePortableHttp.supportsReviewHandoff() ? ['reviewHandoff'] : []),
+          ...(boardAgentAsk.available() ? ['boardAgentAsk'] : []),
         ],
       },
       bridge: bridgeBuildState(bridgeBuild, expectedOverlayBuild(req.headers, url.searchParams)),
@@ -1135,6 +1163,7 @@ const bridgeServer = createServer(async (req, res) => {
   if (await handleEngineProfilesHttp(req, res, url)) return
   if (await handleProfileHttp(req, res, url)) return
   if (await handleDeskHttp(req, res, url)) return
+  if (await handleBoardAgentAskHttp(req, res, url)) return
   if (await handlePortableHttp(req, res, url)) return
   if (await handleContextHttp(req, res, url)) return
   if (await handleChatHttp(req, res, url)) return
@@ -1174,6 +1203,7 @@ let shuttingDown = false
 async function shutdown() {
   if (shuttingDown) return
   shuttingDown = true
+  boardAgentAsk.close()
   acceptingFileRoots = false
   pendingFileRoots.clear()
   try { detachContextServices() }

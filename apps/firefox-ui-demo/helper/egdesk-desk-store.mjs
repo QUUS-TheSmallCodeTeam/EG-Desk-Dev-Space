@@ -42,7 +42,7 @@ import { DAY_MS, DESK_AUTOSAVE_MERGE_MS, DESK_RETENTION, autosaveWindowMerges, p
 // - tldraw (tldraw license, pattern only): a schema version and ordered
 //   migrations (packages/store/src/lib/migrate.ts:55-106); document state kept
 //   apart from session state (TLSessionStateSnapshot.ts:83-130).
-const VERSION = 2
+const VERSION = 3
 export const MAX_DESK_STATE_BYTES = 4 * 1024 * 1024
 export const MAX_BOARD_BODY_BYTES = 4 * 1024 * 1024
 export const MAX_BOARDS = 500
@@ -400,6 +400,16 @@ const V2_UPGRADE = `
       BEGIN SELECT RAISE(ABORT, 'desk blobs are immutable'); END;
 `
 const V2_REQUIRED = [...V1_REQUIRED, 'desk_blobs', 'desk_blobs_fixed', 'board_search']
+// Private owner control; not part of any Board body, projection, journal, or export.
+const V3_UPGRADE = `
+    CREATE TABLE board_agent_ask_policies (
+      board_id TEXT PRIMARY KEY REFERENCES boards(board_id) ON DELETE CASCADE,
+      version TEXT NOT NULL, profile_id TEXT NOT NULL, profile_name TEXT NOT NULL,
+      profile_revision INTEGER NOT NULL CHECK (profile_revision > 0), profile_hash TEXT NOT NULL,
+      excerpts_json TEXT NOT NULL, public_instructions TEXT NOT NULL,
+      code_digest TEXT, code_expires INTEGER, code_used INTEGER NOT NULL DEFAULT 0 CHECK (code_used IN (0,1))
+    );
+`
 const V2_COLUMNS = ['window_start', 'stored_bytes', 'chat_refs_json']
 const SEARCH_FTS = "CREATE VIRTUAL TABLE board_search USING fts5(title, cards, notes, board_id UNINDEXED, tokenize='trigram')"
 const SEARCH_PLAIN = 'CREATE TABLE board_search (board_id TEXT PRIMARY KEY, title TEXT NOT NULL, cards TEXT NOT NULL, notes TEXT NOT NULL)'
@@ -463,18 +473,25 @@ function initialize(db, filename) {
   if (version === VERSION) {
     const names = found()
     const columns = new Set(db.prepare('PRAGMA table_info(desk_generations)').all().map(row => row.name))
-    if (V2_REQUIRED.some(name => !names.has(name)) || V2_COLUMNS.some(name => !columns.has(name))) fail('STORE_CORRUPT', 'Desk schema is incomplete; database was not reset', 500)
+    if ([...V2_REQUIRED, 'board_agent_ask_policies'].some(name => !names.has(name)) || V2_COLUMNS.some(name => !columns.has(name))) fail('STORE_CORRUPT', 'Desk schema is incomplete; database was not reset', 500)
     return
   }
   if (version === 1) {
     if (V1_REQUIRED.some(name => !found().has(name))) fail('STORE_CORRUPT', 'Desk schema is incomplete; database was not reset', 500)
     backup(db, filename, 1)
-    try { migrate(() => { db.exec(V2_UPGRADE); createSearch(db) }) }
+    try { migrate(() => { db.exec(V2_UPGRADE); createSearch(db); db.exec(V3_UPGRADE) }) }
     catch (error) { fail('STORE_MIGRATION_FAILED', 'Desk records could not be upgraded; the v1 database was kept unchanged', 500, { cause: error }) }
     return
   }
+  if (version === 2) {
+    if (V2_REQUIRED.some(name => !found().has(name))) fail('STORE_CORRUPT', 'Desk schema is incomplete; database was not reset', 500)
+    backup(db, filename, 2)
+    try { migrate(() => db.exec(V3_UPGRADE)) }
+    catch (error) { fail('STORE_MIGRATION_FAILED', 'Desk records could not be upgraded; the v2 database was kept unchanged', 500, { cause: error }) }
+    return
+  }
   if (version !== 0 || db.prepare("SELECT name FROM sqlite_master WHERE type='table' LIMIT 1").get()) fail('UNSUPPORTED_STORE_VERSION', 'Existing Desk database has an unsupported schema; database was not reset', 500)
-  migrate(() => { db.exec(V1_SCHEMA); db.exec(V2_UPGRADE); createSearch(db) })
+  migrate(() => { db.exec(V1_SCHEMA); db.exec(V2_UPGRADE); createSearch(db); db.exec(V3_UPGRADE) })
 }
 
 /**
@@ -534,6 +551,16 @@ export function openDeskStore({ dataDir, ownerScope, now = Date.now, utcOffsetMi
     dropBlobRef: db.prepare('UPDATE desk_blobs SET refs = refs - 1 WHERE hash=?'),
     deleteBlob: db.prepare('DELETE FROM desk_blobs WHERE hash=? AND refs <= 0'),
     board: db.prepare('SELECT * FROM boards WHERE board_id=?'),
+    boardHeadHash: db.prepare('SELECT hash FROM board_revisions WHERE board_id=? AND revision=?'),
+    askPolicy: db.prepare('SELECT * FROM board_agent_ask_policies WHERE board_id=?'),
+    putAskPolicy: db.prepare(`INSERT INTO board_agent_ask_policies (board_id,version,profile_id,profile_name,profile_revision,profile_hash,excerpts_json,public_instructions) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT(board_id) DO UPDATE SET version=excluded.version, profile_id=excluded.profile_id,
+      profile_name=excluded.profile_name, profile_revision=excluded.profile_revision,
+      profile_hash=excluded.profile_hash, excerpts_json=excluded.excerpts_json, public_instructions=excluded.public_instructions,
+      code_digest=NULL, code_expires=NULL, code_used=0`),
+    issueAskCode: db.prepare('UPDATE board_agent_ask_policies SET code_digest=?, code_expires=?, code_used=0 WHERE board_id=? AND version=?'),
+    consumeAskCode: db.prepare('UPDATE board_agent_ask_policies SET code_used=1 WHERE board_id=? AND version=? AND code_digest=? AND code_used=0 AND code_expires>?'),
+    dropAskPolicy: db.prepare('DELETE FROM board_agent_ask_policies WHERE board_id=?'),
     boards: db.prepare('SELECT * FROM boards ORDER BY updated DESC, board_id LIMIT ?'),
     boardCount: db.prepare('SELECT COUNT(*) AS n FROM boards'),
     insertBoard: db.prepare('INSERT INTO boards VALUES (?, ?, ?, 1, ?, ?, ?)'),
@@ -673,6 +700,11 @@ export function openDeskStore({ dataDir, ownerScope, now = Date.now, utcOffsetMi
     if (!row) fail('BOARD_NOT_FOUND', 'Board does not exist', 404)
     return row
   }
+  function requireAskBoard(id) {
+    const row = requireBoard(id)
+    if (row.lifecycle !== 'active') fail('BOARD_NOT_ACTIVE', 'Board is not active', 409)
+    return row
+  }
   function requireRevision(row, revision) {
     const found = q.revision.get(row.board_id, positive(revision, 'INVALID_BOARD_REVISION', 'revision'))
     if (!found) fail('BOARD_REVISION_NOT_FOUND', 'Board revision does not exist', 404)
@@ -802,6 +834,39 @@ export function openDeskStore({ dataDir, ownerScope, now = Date.now, utcOffsetMi
       ensureOpen()
       const row = q.board.get(boardId(id))
       return row ? { ...boardSummary(row), head: revisionRecord(q.revision.get(row.board_id, row.head_revision)) } : null
+    },
+    // Separate narrow API used only by the Board Agent ask service.
+    boardAgentAskIdentity(id) {
+      ensureOpen()
+      const row = requireAskBoard(id)
+      const hash = q.boardHeadHash.get(row.board_id, row.head_revision)?.hash
+      if (!hash) fail('STORE_CORRUPT', 'Board head metadata is unavailable', 500)
+      return { revision: row.head_revision, metadataVersion: row.metadata_version, hash }
+    },
+    boardAgentAskPolicy(id) {
+      ensureOpen()
+      const row = q.askPolicy.get(requireAskBoard(id).board_id)
+      return row ? { version: row.version, profileId: row.profile_id, profileName: row.profile_name,
+        profileRevision: row.profile_revision, profileHash: row.profile_hash, excerpts: parse(row.excerpts_json, 'Board ask policy'),
+        publicInstructions: row.public_instructions, codeDigest: row.code_digest, codeExpiresAt: row.code_expires, codeUsed: Boolean(row.code_used) } : null
+    },
+    writeBoardAgentAskPolicy(id, expectedVersion, next) {
+      ensureOpen()
+      return tx(() => {
+        const key = requireAskBoard(id).board_id
+        if ((q.askPolicy.get(key)?.version ?? null) !== expectedVersion) fail('BOARD_AGENT_ASK_POLICY_CONFLICT', 'Board ask policy changed; reload before editing', 409)
+        if (!next) { q.dropAskPolicy.run(key); return }
+        q.putAskPolicy.run(key, randomUUID(), next.profileId, next.profileName, next.profileRevision, next.profileHash, JSON.stringify(next.excerpts), next.publicInstructions)
+      })
+    },
+    issueBoardAgentAskCode(id, version, digest, expiresAt) {
+      ensureOpen()
+      const key = requireAskBoard(id).board_id
+      if (!q.issueAskCode.run(digest, expiresAt, key, version).changes) fail('BOARD_AGENT_ASK_POLICY_CONFLICT', 'Board ask policy changed; reload before editing', 409)
+    },
+    consumeBoardAgentAskCode(id, version, digest, at) {
+      ensureOpen()
+      return !!q.consumeAskCode.run(requireAskBoard(id).board_id, version, digest, at).changes
     },
     boardRevisions(id, { limit, before } = {}) {
       ensureOpen()

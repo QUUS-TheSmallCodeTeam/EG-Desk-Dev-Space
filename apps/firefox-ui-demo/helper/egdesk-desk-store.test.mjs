@@ -349,7 +349,7 @@ test('the Desk database is private (0600 file, 0700 directory) and everything su
   const raw = new DatabaseSync(filename, { readOnly: true })
   t.after(() => raw.close())
   assert.equal(raw.prepare('PRAGMA journal_mode').get().journal_mode, 'wal')
-  assert.equal(raw.prepare('PRAGMA user_version').get().user_version, 2)
+  assert.equal(raw.prepare('PRAGMA user_version').get().user_version, 3)
 })
 
 test('unsafe or unknown store files are refused without changing them', t => {
@@ -739,7 +739,7 @@ test('a v1 Desk database is backed up, then opens as v2 with every generation an
   assert.deepEqual(store.generation(1).state, state)
   store.close()
   const raw = new DatabaseSync(filename, { readOnly: true })
-  assert.equal(raw.prepare('PRAGMA user_version').get().user_version, 2)
+  assert.equal(raw.prepare('PRAGMA user_version').get().user_version, 3)
   assert.equal(raw.prepare('SELECT chat_refs_json FROM desk_generations WHERE generation=1').get().chat_refs_json, null)
   raw.close()
   const backup = `${filename}.v1.bak`
