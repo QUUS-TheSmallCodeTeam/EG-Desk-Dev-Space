@@ -18,8 +18,7 @@ const MAX_RECENT = 12;
 const MAX_RECENT_TEXT = 4000;
 const MAX_LABEL = 80;
 const ROLES = ['owner', 'admin', 'member'];
-const AGENT_LINK = /\[[^\]\n]{0,200}\]\((agent:\/\/[^)\n]*)\)/gi;
-const BEFORE_MENTION = /[\s([{"'“‘]/u;
+export const BOARD_ADDRESS_START = /[,;:\s([{"'“‘]/u;
 const AFTER_MENTION = /[\s.,!?;:)\]}"'”’·…]/u;
 // Fields /chat/board/send refuses or picks per member itself.
 const NOT_FOR_BOARD = ['conversationId', 'profileEnabled', 'executionPolicy', 'stateless', 'agentProfile', 'systemPrompt', 'toolMode', 'profileId', 'profileRevision'];
@@ -43,7 +42,8 @@ export function boardAgents(thread, { selfName = SELF_NAME } = {}) {
 export function boardRosterIdentity(members) {
   const keys = new Set();
   return members.flatMap(member => {
-    const kind = member.kind;
+    const kind = member?.kind;
+    if (kind !== 'agent' && kind !== 'user') return [];
     const profileId = kind === 'agent' && isProfileId(member.profileId) ? member.profileId : null;
     const name = kind === 'agent' ? label(member.label) || null : null;
     if (kind === 'agent' && !profileId && !name) return [];
@@ -55,6 +55,56 @@ export function boardRosterIdentity(members) {
   });
 }
 
+const HANDLE = /@(?:[\p{L}\p{N}_]|-+[\p{L}\p{N}_])[\p{L}\p{N}\p{M}_-]*(?:\.[\p{L}\p{N}\p{M}_-]+)*/uy;
+const RESERVED = /@(all|everyone)(?![\p{L}\p{N}\p{M}_-])/iuy;
+const INLINE_LITERALS = /<[^>\n]*>|"(?:[^"\\\r\n]|\\[^\r\n])*"@[\p{L}\p{N}_.-]+|\[[^\]\n]*\]\(https?:\/\/[^)\n]*\)|(?:[a-z][a-z\d+.-]*:\/\/|www\.)[^\s<>"'`]+/giu;
+const BOARD_SPANS = new RegExp(INLINE_LITERALS.source + '|\\[[^\\]\\n]{0,200}\\]\\((agent:\\/\\/[^)\\n]*)\\)', 'giu');
+const escaped = (value, index) => {
+  let start = index;
+  while (start > 0 && value[start - 1] === '\\') start--;
+  return (index - start) % 2 !== 0;
+};
+const mask = length => '\0'.repeat(length);
+
+// Deliberately smaller than a Markdown parser: line fences (even unclosed)
+// and equal-length backtick spans. Masking preserves offsets and cannot make
+// a name span quoted code or add a boundary where none existed in the source.
+function boardCodeMasked(value) {
+  const maskInline = span => {
+    const runs = [...span.matchAll(/`+/gu)];
+    const nextAt = new Map(), closes = [];
+    for (let i = runs.length - 1; i >= 0; i--) {
+      closes[i] = nextAt.get(runs[i][0].length);
+      nextAt.set(runs[i][0].length, i);
+    }
+    let at = 0, output = '';
+    for (let i = 0; i < runs.length; i++) {
+      const open = runs[i], closeIndex = closes[i];
+      if (closeIndex === undefined || escaped(span, open.index)) continue;
+      const close = runs[closeIndex], end = close.index + close[0].length;
+      output += span.slice(at, open.index) + mask(end - open.index);
+      at = end;
+      i = closeIndex;
+    }
+    return output + span.slice(at);
+  };
+  let fence = null, offset = 0, start = 0, result = '';
+  for (const line of value.split('\n')) {
+    const marker = /^[ \t]*(?:>[ \t]*)*(?:(?:[-+*]|\d{1,9}[.)])[ \t]+)?(`{3,}|~{3,})(.*)$/u.exec(line.replace(/\r$/u, ''));
+    const end = Math.min(value.length, offset + line.length + 1);
+    if (fence || marker) {
+      result += maskInline(value.slice(start, offset)) + mask(end - offset);
+      start = end;
+      const closes = fence && marker && marker[1][0] === fence[0] && marker[1].length >= fence.length && /^\s*$/u.test(marker[2]);
+      fence = closes ? null : fence || marker[1];
+    }
+    offset = end;
+  }
+  return result + maskInline(value.slice(start));
+}
+
+export const boardLiteralMasked = value => boardCodeMasked(value).replace(INLINE_LITERALS, literal => mask(literal.length));
+
 /** Both the composer and helper classify addresses; neither rewrites message text. */
 export function boardAddresses(message, members) {
   const agents = boardRosterIdentity(members).filter(([kind]) => kind === 'agent').map(([, profileId, name]) => ({ profileId, name }));
@@ -62,37 +112,40 @@ export function boardAddresses(message, members) {
   const found = new Map();
   let invalid = false;
   const note = (agent, index) => {
-    const key = agent.profileId || `name:${agent.name}`;
+    const key = agent.profileId ? 'agent:' + agent.profileId : 'name:' + agent.name;
     if (!found.has(key) || found.get(key).index > index) found.set(key, { agent, index });
   };
-  const masked = value.replace(/`[^`]*`|<[^>\n]*>/g, literal => ' '.repeat(literal.length))
-    .replace(AGENT_LINK, (link, url, index) => {
+  const masked = boardCodeMasked(value)
+    .replace(BOARD_SPANS, (link, url, index) => {
+      if (!url) return mask(link.length);
+      if (link.includes('\0') || escaped(value, index)) return mask(link.length);
       const id = url.slice('agent://'.length).split(/[/?#]/)[0];
       const agent = /^[^\s]+$/u.test(url) && agents.find(candidate => candidate.profileId === id);
       if (agent) note(agent, index); else invalid = true;
-      return ' '.repeat(link.length);
-    }).replace(/\[[^\]\n]*\]\(https?:\/\/[^)\n]*\)/gi, literal => ' '.repeat(literal.length)).split('');
-  const beforeMention = at => at === 0 || BEFORE_MENTION.test(masked[at - 1]);
-  const afterMention = at => (at === masked.length || AFTER_MENTION.test(masked[at])) && !(masked[at] === '.' && /[\p{L}\p{N}_]/u.test(masked[at + 1] || ''));
-  for (const match of masked.join('').matchAll(/@(everyone|all)(?![\p{L}\p{N}_-])/giu)) {
-    if (beforeMention(match.index) && afterMention(match.index + match[0].length)) invalid = true;
-  }
-  for (const name of [...new Set(agents.map(agent => agent.name).filter(Boolean))].sort((a, b) => b.length - a.length)) {
-    const token = '@' + name;
-    for (let at = 0; at + token.length <= masked.length; at++) {
-      if (masked[at] !== '@' || !beforeMention(at) || !afterMention(at + token.length) || token.split('').some((char, offset) => masked[at + offset] !== char)) continue;
+      return mask(link.length);
+    });
+  const before = at => at === 0 || BOARD_ADDRESS_START.test(value[at - 1]);
+  const after = at => (at === value.length || AFTER_MENTION.test(value[at])) && !(value[at] === '.' && /[\p{L}\p{N}\p{M}_-]/u.test(value.slice(at + 1, at + 3)));
+  const names = [...new Set(agents.map(agent => agent.name).filter(name => name && !name.includes('@')))].sort((a, b) => b.length - a.length);
+  for (let at = masked.indexOf('@'); at !== -1; at = masked.indexOf('@', at + 1)) {
+    if (!before(at)) continue;
+    RESERVED.lastIndex = at;
+    const reserved = RESERVED.exec(masked);
+    if (reserved && after(at + reserved[0].length)) { invalid = true; continue; }
+    HANDLE.lastIndex = at;
+    const handle = HANDLE.exec(masked);
+    if (!handle) continue;
+    const name = names.find(name => masked.startsWith('@' + name, at) && after(at + 1 + name.length));
+    if (name) {
+      if (name === SELF_NAME) { invalid = true; continue; }
       const matches = agents.filter(agent => agent.name === name);
       if (matches.length === 1) note(matches[0], at); else invalid = true;
-      masked.fill(' ', at, at + token.length);
+      at += name.length;
+      continue;
     }
-  }
-  // A leading handle is deliberate. Once an address was found, other bare
-  // handles in the address prefix are deliberate too; prose and emails aren't.
-  const remaining = masked.join('');
-  if (/^\s*@[\p{L}\p{N}_-]/u.test(remaining)) {
-    const at = remaining.search(/\S/u);
-    const first = Math.min(...[...found.values()].map(entry => entry.index));
-    if (/^[\s,;:()\[\]]*$/u.test(value.slice(0, at)) || (first < at && !/[\p{L}\p{N}]/u.test(remaining.slice(first, at)))) invalid = true;
+    // Unknown addresses use a bounded single handle. No inference from @,
+    // punctuation-only strings or the several words of an unrecognized label.
+    if (after(at + handle[0].length)) invalid = true;
   }
   return { invalid, mentioned: [...found.values()].sort((a, b) => a.index - b.index).map(entry => entry.agent) };
 }
@@ -113,10 +166,12 @@ export function boardStoreMembers(thread, { selfName = SELF_NAME } = {}) {
     const self = name === selfName;
     const role = ROLES.includes(roles[name]) ? roles[name] : self ? 'owner' : 'member';
     const profileId = !self && own(links, name) && isProfileId(links[name]?.profileId) ? links[name].profileId : null;
-    const key = self ? 'user' : profileId ? `agent:${profileId}` : `label:${clean}`;
+    const alias = own(thread.boardRosterAliases, name) ? thread.boardRosterAliases[name] : null;
+    const storedLabel = alias?.profileId === profileId && own(alias, 'label') ? label(alias.label) || null : clean;
+    const key = self ? 'user' : profileId ? `agent:${profileId}` : `label:${storedLabel}`;
     if (keys.has(key) || (self && keys.has('user'))) continue;
     keys.add(key);
-    members.push(self ? { kind: 'user', role } : profileId ? { kind: 'agent', profileId, label: clean, role } : { kind: 'agent', label: clean, role });
+    members.push(self ? { kind: 'user', role } : profileId ? { kind: 'agent', profileId, ...(storedLabel !== null ? { label: storedLabel } : {}), role } : { kind: 'agent', label: storedLabel, role });
   }
   return members;
 }
@@ -127,42 +182,58 @@ export function boardStoreMembers(thread, { selfName = SELF_NAME } = {}) {
  * captured at invite are kept; the person reads as `selfName`.
  */
 export function threadFieldsFromStoreMembers(thread, members, { selfName = SELF_NAME } = {}) {
-  if (!isBoardRoom(thread) || !Array.isArray(members) || !members.length) return null;
+  if (!isBoardRoom(thread) || !Array.isArray(members)) return null;
+  const roster = boardRosterIdentity(members);
   const before = linksOf(thread);
   const avatarFor = (name, profileId) => {
-    const match = own(before, name) ? before[name] : Object.values(before).find(link => profileId && link?.profileId === profileId);
+    const sameName = own(before, name) ? before[name] : null;
+    const match = profileId
+      ? (sameName?.profileId === profileId ? sameName : Object.values(before).find(link => link?.profileId === profileId))
+      : (sameName?.profileId ? null : sameName);
     return displayProfileAvatar(match?.avatar) || null;
   };
-  const participants = [], participantRoles = {}, participantAgents = {};
-  for (const member of members) {
-    if (!member || typeof member !== 'object') continue;
-    const name = member.kind === 'user' ? selfName : label(member.label) || (isProfileId(member.profileId) ? member.profileId : '');
-    if (!name || participants.includes(name)) continue;
-    participants.push(name);
-    participantRoles[name] = ROLES.includes(member.role) ? member.role : member.kind === 'user' ? 'owner' : 'member';
-    if (member.kind === 'agent') participantAgents[name] = { profileId: isProfileId(member.profileId) ? member.profileId : null, avatar: avatarFor(name, member.profileId) };
+  const participants = [], roles = [], agents = [], aliases = [], counts = new Map();
+  for (const [kind, , name] of roster) {
+    if (kind === 'agent' && name) counts.set(name, (counts.get(name) ?? 0) + 1);
   }
-  if (!participants.length) return null;
-  const next = { participants, participantRoles, participantAgents };
-  const same = JSON.stringify(namesOf(thread)) === JSON.stringify(participants)
-    && JSON.stringify(boardStoreMembers(thread, { selfName })) === JSON.stringify(boardStoreMembers({ type: 'group', ...next }, { selfName }));
+  // The native store keys profiles by ID, not label. The presenter needs
+  // unique string keys; give collisions/nameless rows display aliases only.
+  // Keep the canonical labels separately so strict roster equality and
+  // address resolution never mistake an alias for a new routable name.
+  const occupied = new Set([selfName, ...counts.keys()]);
+  for (const [kind, profileId, storedLabel, role] of roster) {
+    const self = kind === 'user';
+    let name = self ? selfName : storedLabel;
+    if (!self && (!name || name === selfName || counts.get(name) > 1)) {
+      const base = (storedLabel || 'Agent') + ' · ' + (profileId || '이전 멤버');
+      name = base;
+      for (let n = 2; occupied.has(name); n++) name = base + ' (' + n + ')';
+      occupied.add(name);
+      aliases.push([name, { profileId, label: storedLabel }]);
+    }
+    participants.push(name);
+    roles.push([name, role]);
+    if (!self) agents.push([name, { profileId, avatar: avatarFor(storedLabel ?? name, profileId) }]);
+  }
+  const next = { participants, participantRoles: Object.fromEntries(roles), participantAgents: Object.fromEntries(agents) };
+  if (aliases.length || own(thread, 'boardRosterAliases')) next.boardRosterAliases = Object.fromEntries(aliases);
+  const same = JSON.stringify(thread.participants ?? []) === JSON.stringify(participants)
+    && JSON.stringify(boardRosterIdentity(boardStoreMembers(thread, { selfName }))) === JSON.stringify(roster)
+    && (participants.length || (!Object.keys(thread.participantRoles ?? {}).length && !Object.keys(before).length && !Object.keys(thread.boardRosterAliases ?? {}).length));
   return same ? null : next;
 }
 
-/**
- * What to do with a GET /chat/board/members answer when the room opens:
- * { restore: thread fields } when the store has members that differ from the
- * screen, { save: members } when the store has none yet (the Desk pref's
- * members move into it once), or null.
- */
-export function boardMembersSync(thread, answer, { selfName = SELF_NAME } = {}) {
-  if (!isBoardRoom(thread) || !answer || typeof answer !== 'object') return null;
-  const saved = Array.isArray(answer.members) ? answer.members : [];
-  if (saved.length) {
+/** Reconcile an authoritative roster or seed a room whose roster was never saved. */
+export function boardMembersSync(thread, answer, { selfName = SELF_NAME, legacySavedIsThreadExistence = false } = {}) {
+  if (!isBoardRoom(thread) || !Array.isArray(answer?.members)) return null;
+  const saved = answer.members;
+  const authoritative = saved.length || answer.rosterSaved === true
+    || (answer.rosterSaved !== false && answer.saved === true && !legacySavedIsThreadExistence);
+  if (authoritative) {
     const restore = threadFieldsFromStoreMembers(thread, saved, { selfName });
     return restore ? { restore } : null;
   }
-  if (answer.rosterSaved === true) return null; // An explicitly emptied roster is not an uninitialized room.
+  if (answer.saved !== false && answer.rosterSaved !== false) return null;
   const members = boardStoreMembers(thread, { selfName });
   return members.length ? { save: members } : null;
 }
@@ -285,14 +356,17 @@ export function boardSendOutcome(result, requestId, { now = Date.now() } = {}) {
     ...(leadRow.duplicate ? { duplicate: true } : {}),
   } : null;
   const members = rows.filter(row => row !== leadRow && row.status === 'started' && row.conversationId && row.runId && typeof row.requestId === 'string');
-  const routes = {};
+  const uncertain = row => row.status === 'unknown' || row.dispatchStatus === 'unknown' || row.resumeRequired === true;
+  const routes = Object.create(null);
   for (const row of rows) {
-    routes[row.profileId] = { status: ['started', 'deferred', 'failed'].includes(row.status) ? row.status : 'failed',
+    routes[row.profileId] = { status: uncertain(row) ? 'unknown' : ['started', 'deferred', 'failed'].includes(row.status) ? row.status : 'failed',
+      ...(typeof row.dispatchStatus === 'string' ? { dispatchStatus: row.dispatchStatus } : {}),
+      ...(typeof row.resumeRequired === 'boolean' ? { resumeRequired: row.resumeRequired } : {}),
       reason: row.reason === 'mentioned' ? 'mentioned' : 'lead', requestId: typeof row.requestId === 'string' ? row.requestId : null,
       code: typeof row.code === 'string' ? row.code : null, at: now };
   }
   return { accepted: result?.accepted === true && rows.some(row => row.status === 'started'), lead, members, routes,
-    failure: rows.find(row => row.status !== 'started') || null };
+    unknown: rows.find(uncertain) || null, failure: rows.find(row => row.status !== 'started' && !uncertain(row)) || null };
 }
 
 /** The pending request a member's answer is shown under: in this room, as that Agent. */
@@ -341,6 +415,7 @@ export function boardMemberState(profileId, { runs = [], routes = {}, connectedR
     return null;
   }
   if (!route) return null;
+  if (route.status === 'unknown') return { kind: 'waiting', label: '접수 미확인' };
   if (route.status === 'deferred') return { kind: 'waiting', label: '차례 대기' };
   if (route.status === 'failed') return { kind: 'blocked', label: '막힘' };
   if (route.status === 'started') return { kind: 'active', label: '작업 중' };

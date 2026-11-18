@@ -8,7 +8,9 @@ import {
 } from '../overlay/resources/EGDeskChatComposer.sys.mjs';
 import { mentionSpans, threadAgentNames } from '../overlay/resources/EGDeskThreadRouting.sys.mjs';
 
-const board = { id: 'room-b', type: 'group', participants: ['나', '코덱스 어시스턴트', '디자인 리뷰어', 'Rio'] };
+const board = { id: 'room-b', type: 'group', participants: ['나', '코덱스 어시스턴트', '디자인 리뷰어', 'Rio', '옛 멤버', 'Codex'],
+  participantAgents: { '코덱스 어시스턴트': { profileId: 'helper' }, '디자인 리뷰어': { profileId: 'design' }, Rio: { profileId: 'rio' } } };
+const profiles = ['helper', 'design', 'rio'].map(id => ({ id, lifecycle: 'active', activeRevision: 1 }));
 const dm = { id: 'room-a', type: 'dm', participants: ['나', 'Rio'] };
 const names = mentionNames(board);
 const at = (text, caret = text.length) => mentionQueryAt(text, caret, names);
@@ -16,13 +18,17 @@ const step = (prev, text, extra = {}) => nextMention(prev, { names, text, caret:
 
 // ------------------------------------------------------------------ who can be called
 
-test('candidates: a Board Thread offers its Agents and then 나; an Agent DM offers nobody', () => {
-  assert.deepEqual(names, ['코덱스 어시스턴트', '디자인 리뷰어', 'Rio', '나']);
-  assert.deepEqual(names.slice(0, -1), threadAgentNames(board), 'the same Agent names the sent bubble chips use');
+test('candidates: a Board Thread offers only routable linked names; a DM offers nobody', () => {
+  assert.deepEqual(names, ['코덱스 어시스턴트', '디자인 리뷰어', 'Rio']);
   assert.deepEqual(mentionNames(dm), []);
   assert.deepEqual(mentionNames(null), []);
-  assert.deepEqual(mentionNames({ type: 'group', participants: ['나', 'Rio', 'Rio', '', null] }), ['Rio', '나']);
-  assert.deepEqual(mentionNames({ type: 'group', participants: ['대표', 'Rio'] }, '대표'), ['Rio', '대표']);
+  assert.deepEqual(mentionNames({ ...board, participants: ['나', 'Rio', 'Rio', '', null] }), ['Rio']);
+  assert.deepEqual(mentionNames({ ...board, participants: ['대표', 'Rio'] }, '대표'), ['Rio']);
+  assert.deepEqual(mentionNames(board, '나', { profiles: [profiles[0], { ...profiles[2], lifecycle: 'archived' }] }), ['코덱스 어시스턴트']);
+  assert.deepEqual(mentionNames({ ...board, engineId: 'claude' }), []);
+  assert.deepEqual(mentionNames({ ...board, participants: ['나', 'Codex', '옛 멤버'] }), []);
+  assert.deepEqual(mentionNames({ ...board, participants: ['나', 'all', 'Rio'],
+    participantAgents: { ...board.participantAgents, all: { profileId: 'design' } } }), ['Rio']);
 });
 
 // ------------------------------------------------------------------ the '@…' at the caret
@@ -33,6 +39,9 @@ test('query: an @ at the start or after a space opens; an @ inside a word or an 
   assert.deepEqual(at('첫 줄\n@R'), { start: 4, end: 6, query: 'R' });
   assert.deepEqual(at('(@R'), { start: 1, end: 3, query: 'R' });
   assert.equal(at('mail@R'), null);
+  assert.equal(at('https://:@Rio'), null);
+  assert.equal(at('`@Rio`', 5), null);
+  assert.equal(at('~~~js\n@Rio'), null);
   assert.equal(at('안녕'), null);
   assert.equal(at(''), null);
   assert.equal(at('@R\n다음 줄'), null, 'the @ belongs to the line the caret is on');
@@ -69,7 +78,7 @@ test('state: typing @ opens the list on its first row and typing narrows it', ()
   assert.equal(state.open, true);
   assert.deepEqual(state.items.map(item => [item.name, item.kind, item.label, item.hint]), [
     ['코덱스 어시스턴트', 'agent', '@코덱스 어시스턴트', 'Agent'], ['디자인 리뷰어', 'agent', '@디자인 리뷰어', 'Agent'],
-    ['Rio', 'agent', '@Rio', 'Agent'], ['나', 'user', '@나', '대표님']]);
+    ['Rio', 'agent', '@Rio', 'Agent']]);
   assert.equal(state.index, 0);
   state = moveMention(state, 1);
   assert.equal(state.index, 1);
@@ -100,7 +109,7 @@ test('state: the list does not open during Korean composition, but an open list 
 
 test('state: arrows wrap, Escape keeps this @ closed until another @ is typed', () => {
   let state = step(emptyMention(), '@');
-  assert.equal(moveMention(state, -1).index, 3);
+  assert.equal(moveMention(state, -1).index, 2);
   assert.equal(moveMention(moveMention(state, -1), 1).index, 0);
   assert.equal(moveMention(emptyMention(), 1).index, 0);
   state = dismissMention(state);
@@ -130,7 +139,7 @@ test('choose: what is inserted is what the sent bubble reads as a call', () => {
   for (const name of names) {
     const { text } = applyMention('@', step(emptyMention(), '@'), name);
     const spans = mentionSpans(`${text}확인 부탁`, { agentNames: threadAgentNames(board) });
-    assert.deepEqual(spans.map(span => [span.kind, span.name]), [[name === '나' ? 'user' : 'agent', name]]);
+    assert.deepEqual(spans.map(span => [span.kind, span.name]), [['agent', name]]);
   }
 });
 
@@ -182,8 +191,8 @@ function mentionHarness({ thread = board, value = '', memory = {} } = {}) {
   assert.ok(start >= 0 && end > start, 'production @ list');
   const elStart = surfaceSource.indexOf('  function el(tag, props = {}, ...children) {');
   const elSource = surfaceSource.slice(elStart, surfaceSource.indexOf('\n  }\n', elStart) + 4);
-  const mount = vm.runInNewContext(`(function (document, ChatComposer, SELF_MEMBER) {\n${elSource}\n${surfaceSource.slice(start, end + 4)}\nreturn mountComposerMention; })`)(
-    document, { MENTION_LIST_LABEL, mentionNames, emptyMention, nextMention, moveMention, dismissMention, applyMention, mentionKeyAction }, '나');
+  const mount = vm.runInNewContext(`(function (document, ChatComposer, SELF_MEMBER, codexProfileCatalog) {\n${elSource}\n${surfaceSource.slice(start, end + 4)}\nreturn mountComposerMention; })`)(
+    document, { MENTION_LIST_LABEL, mentionNames, emptyMention, nextMention, moveMention, dismissMention, applyMention, mentionKeyAction }, '나', { status: 'ready', profiles });
   const changes = [];
   const attach = (text = value) => {
     const input = new FakeNode('textarea', document);
@@ -208,12 +217,12 @@ test('screen: @ in a Board Thread lists the room; ↓ and Enter put the name in 
   assert.equal(c.input._mentionKeydown({ key: 'Enter' }), false, 'no list: Enter stays the send key');
   h.type(c, '@');
   assert.equal(c.menu.hidden, false);
-  assert.deepEqual(h.rows(c), [['@코덱스 어시스턴트Agent', 'true'], ['@디자인 리뷰어Agent', 'false'], ['@RioAgent', 'false'], ['@나대표님', 'false']]);
+  assert.deepEqual(h.rows(c), [['@코덱스 어시스턴트Agent', 'true'], ['@디자인 리뷰어Agent', 'false'], ['@RioAgent', 'false']]);
   assert.equal(c.input.getAttribute('aria-activedescendant'), c.menu.children[0].id);
   const down = { key: 'ArrowDown', preventDefault() { this.prevented = true; }, stopPropagation() {} };
   assert.equal(c.input._mentionKeydown(down), true);
   assert.equal(down.prevented, true);
-  assert.deepEqual(h.rows(c).map(row => row[1]), ['false', 'true', 'false', 'false']);
+  assert.deepEqual(h.rows(c).map(row => row[1]), ['false', 'true', 'false']);
   assert.equal(c.input.getAttribute('aria-activedescendant'), c.menu.children[1].id);
   const enter = { key: 'Enter', preventDefault() { this.prevented = true; }, stopPropagation() {} };
   assert.equal(c.input._mentionKeydown(enter), true, 'Enter chooses; the composer must not send');
@@ -233,10 +242,10 @@ test('screen: Tab and a click choose too; the click keeps the caret in the draft
   assert.equal(c.input._mentionKeydown({ key: 'Tab', preventDefault() {}, stopPropagation() {} }), true);
   assert.equal(c.input.value, '검토 @Rio ');
   h.type(c, '검토 @Rio @');
-  const row = c.menu.children[3];
+  const row = c.menu.children[1];
   assert.equal(row.fire('mousedown').defaultPrevented, true, 'the composer keeps focus');
   row.fire('click');
-  assert.equal(c.input.value, '검토 @Rio @나 ');
+  assert.equal(c.input.value, '검토 @Rio @디자인 리뷰어 ');
   assert.equal(c.menu.hidden, true);
 });
 
@@ -285,7 +294,7 @@ test('screen: a redraw of the Chat keeps the open list and its highlighted row; 
   assert.equal(second.menu.hidden, true, 'nothing shows until the caret is back');
   second.input._syncMention();
   assert.equal(second.menu.hidden, false);
-  assert.deepEqual(h.rows(second).map(row => row[1]), ['false', 'true', 'false', 'false']);
+  assert.deepEqual(h.rows(second).map(row => row[1]), ['false', 'true', 'false']);
   const direct = mentionHarness({ thread: dm }).attach('@');
   assert.equal(direct.mention, null);
   assert.equal(direct.input._mentionKeydown, undefined);
@@ -297,7 +306,7 @@ test('wiring: the composer mounts the list for its room, redraws resync it, and 
   assert.match(surfaceSource, /newInput\.setSelectionRange\(inputState\.start, inputState\.end, inputState\.direction\);\n\s+newInput\._syncMention\?\.\(\);/);
   assert.match(surfaceSource, /if \(input\._mentionKeydown\?\.\(ev\)\) return;\n\s+if \(ev\.key !== 'Enter' \|\| ev\.shiftKey \|\| ev\.altKey\) return;/);
   assert.match(surfaceSource, /title: `Enter 전송 · Shift\+Enter 줄바꿈\$\{activeThread\.type === 'group' \? ' · @로 Agent 부르기' : ''\}`,/, 'a Board Thread composer says @ calls an Agent');
-  assert.match(surfaceSource, /title: item\.kind === 'user' \? '나를 가리키는 이름을 넣습니다' : `\$\{item\.name\}에게 말합니다\. 부른 Agent만 답합니다\.`/);
+  assert.match(surfaceSource, /\$\{item\.name\}을\(를\) 답변 대상으로 선택합니다\./);
   const rule = selector => surfaceCss.match(new RegExp(`^${selector.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')} \\{([^}]+)\\}`, 'm'))?.[1] || '';
   assert.match(rule('.egd-codex-mention-menu'), /position: absolute;[^}]*bottom: 100%;[^}]*background: var\(--egd-surface-elevated\);[^}]*box-shadow: var\(--egd-shadow\);/);
   assert.match(rule('.egd-codex-mention-menu[hidden]'), /display: none;/);

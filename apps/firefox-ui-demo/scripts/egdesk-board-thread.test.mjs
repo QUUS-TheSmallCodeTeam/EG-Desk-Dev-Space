@@ -5,6 +5,7 @@ import { compileFunction } from 'node:vm';
 import * as ChatState from '../overlay/resources/EGDeskChatState.sys.mjs';
 import * as InputContext from '../overlay/resources/EGDeskInputContext.sys.mjs';
 import * as BoardThread from '../overlay/resources/EGDeskBoardThread.sys.mjs';
+import { mentionNames } from '../overlay/resources/EGDeskChatComposer.sys.mjs';
 import * as ThreadMembers from '../overlay/resources/EGDeskThreadMembers.sys.mjs';
 import { boardMentions as runtimeMentions, boardMembers as runtimeMembers } from '../helper/codex-chat-runtime.mjs';
 
@@ -126,7 +127,7 @@ test('each member\'s state (작업 중 · 막힘 · 완료) comes from the run a
 // ── Screen wiring, cut from the surface source ──
 function sendHarness({ thread, reply, early = () => [], beforeReplay = () => {} }) {
   const state = { codex: { activeThreadId: thread.id, activityRoomGeneration: 1, threads: [thread], threadDrafts: { [thread.id]: thread.draft }, threadDraftRevisions: { [thread.id]: 1 },
-    authStatus: { isLoggedIn: true, authMode: 'chatgpt', accountEmail: 'fixture@example.test', identityStatus: 'known' }, connected: true, liveRevision: 0 } };
+    authStatus: { isLoggedIn: true, authMode: 'chatgpt', accountEmail: 'fixture@example.test', identityStatus: 'known' }, connected: true, liveRevision: 0, boardDeliverySupported: true } };
   const protocol = ChatState.createChatProtocolState();
   state.codex.chatProtocol = protocol;
   state.codex.codexAccountKey = ChatState.codexAccountKey(state.codex.authStatus);
@@ -168,6 +169,9 @@ function sendHarness({ thread, reply, early = () => [], beforeReplay = () => {} 
   deps.watchMemoRead = compileFunction(`${cut('    const memoReadWatches = new Map();', '    const confirmedLegacyImports')}\nreturn watchMemoRead;`,
     ['state', 'ChatState', 'getCodexThreadById', 'memoAskRuntimeIdentity'])(state, ChatState, getCodexThreadById, () => null);
   deps.snapshotChatRoomProjectExpectation = () => null;
+  const plannerNames = ['chatSendEngineId', 'boardBrowserSourcesKey', 'boardComposerInputState', 'boardComposerDelivery'];
+  Object.assign(deps, compileFunction(plannerNames.map(name => cut('  function ' + name + '(', '\n  }\n') + '\n  }').join('\n')
+    + '\nreturn { ' + plannerNames.join(', ') + ' };', Object.keys(deps))(...Object.values(deps)));
   deps.acceptBoardSend = compileFunction(`${cut('    function acceptBoardSend(', '\n    // One catalog read at a time;')}\nreturn acceptBoardSend;`, Object.keys(deps))(...Object.values(deps));
   const send = compileFunction(`return { ${cut('      async sendMessage(', '\n      },\n')}\n      } };`, Object.keys(deps))(...Object.values(deps)).sendMessage;
   const listeners = new Set();
@@ -420,14 +424,85 @@ test('Board intent reports exact ordered identities, real default engine, and a 
   assert.equal(plan('@검증 담당', { contextResolution: { resolutionId: 'room-only', chosen: ['file'] } }).code, 'BOARD_CONTEXT_SCOPE');
 });
 
-test('Board refuses deliberate unresolved recipients without interpreting literal inline text', () => {
-  const thread = room();
-  for (const message of ['@없는사람 확인', '@디자이너 @없는사람 확인', '@디자이너 @Codex 확인', '@all 검토', '그런데 @everyone 검토',
-    '[지운 Agent](agent://gone) 검토', '@디자이너와 [지운 Agent](agent://gone) 검토', '[@오류](agent://) 확인']) {
+test('Board rejects stale or mixed addresses in Korean prose, never narrows the requested recipients', () => {
+  const thread = room({ participants: ['나', '물결'], participantAgents: { 물결: { profileId: 'water' } } });
+  for (const message of ['@삭제된이름 확인', '확인해줘 @삭제된이름', '@물결 @없는이름', '@물결 확인 후 @없는이름', '확인,@삭제된이름',
+    '@물결 @Codex 확인', '@all 검토', '그런데 @EVERYONE 검토', '@나 확인', '@물결님', '@물결2', '@물결.dev',
+    '[지운 Agent](agent://gone) 검토', '@물결 [지운 Agent](agent://gone) 검토', '[@오류](agent://) 확인']) {
     assert.equal(BoardThread.boardDeliveryIntent(thread, message).code, 'BOARD_UNRESOLVED_ADDRESS', message);
   }
-  for (const message of ['person@host.example 연락', 'abc@디자이너.com 연락', '문장 중 @없는사람 기호', 'https://example.com/@디자이너',
-    '[@디자이너](https://example.com/) 링크', '`@everyone` 문자열', '(@) 기호', '@ 디자이너를 표시합니다']) {
+  assert.deepEqual(BoardThread.boardDeliveryIntent(thread, '확인해줘 (@물결), [이전 이름](agent://water)').recipients.map(row => row.profileId), ['water']);
+  const renamed = { ...thread, ...BoardThread.threadFieldsFromStoreMembers(thread, [{ kind: 'agent', profileId: 'water', label: '파도' }]) };
+  assert.equal(BoardThread.boardDeliveryIntent(renamed, '확인해줘 @물결').code, 'BOARD_UNRESOLVED_ADDRESS');
+  assert.deepEqual(BoardThread.boardDeliveryIntent(renamed, '@파도 확인').expectedBoardDelivery.recipientIds, ['water']);
+});
+
+test('literal mail, URLs, and code never route or narrow Board sends', () => {
+  const thread = room();
+  for (const message of ['person@host.example 연락', 'abc@디자이너.com 연락', '"메일 @없는이름"@example.com 연락',
+    'https://example.com/@디자이너', 'https://:@디자이너.example/', 'ftp://:@없는이름.example/',
+    '[@디자이너](https://example.com/) 링크', '<[@디자이너](agent://designer)> 문자열',
+    '`@everyone` 문자열', '`` ` @디자이너 [@디자이너](agent://designer) ``',
+    '```js\r\n@디자이너 @없는이름\r\n```', '~~~js\n[@디자이너](agent://designer)\n~~~~',
+    '다음 예시\n> ```\n> @디자이너 @all\n> ```', '- ~~~js\n  @디자이너\n  ~~~', '~~~\n@디자이너',
+    '(@) 기호', '@ 디자이너를 표시합니다', '@# 기호', '@$ 기호', '리터럴 \\@디자이너', 'word@디자이너']) {
     assert.equal(BoardThread.boardDeliveryIntent(thread, message).route, 'room', message);
   }
+  const mixed = BoardThread.boardDeliveryIntent(thread, 'person@host.example, `@없는이름` 및 https://:@없는이름.example/ 확인 @디자이너');
+  assert.deepEqual(mixed.expectedBoardDelivery.recipientIds, [ID_D]);
+  assert.deepEqual(BoardThread.boardDeliveryIntent(thread, '~~~\n@검증 담당\n~~~\n@디자이너').expectedBoardDelivery.recipientIds, [ID_D]);
+});
+
+test('opening an explicitly empty roster clears stale local names and leaves ordinary sends usable', () => {
+  const thread = room();
+  for (const answer of [{ saved: true, members: [] }, { saved: true, rosterSaved: true, members: [] }]) {
+    const sync = BoardThread.boardMembersSync(thread, answer);
+    assert.deepEqual(sync, { restore: { participants: [], participantRoles: {}, participantAgents: {} } });
+    const reopened = { ...thread, ...sync.restore };
+    assert.deepEqual(BoardThread.boardDeliveryIntent(reopened, '확인해 줘').expectedBoardDelivery.roster, []);
+    assert.equal(BoardThread.boardDeliveryIntent(reopened, '확인해 줘').route, 'room');
+    assert.equal(BoardThread.boardDeliveryIntent(reopened, '@디자이너 확인').code, 'BOARD_UNRESOLVED_ADDRESS');
+    assert.equal(BoardThread.boardMembersSync(reopened, answer), null);
+  }
+  assert.ok(BoardThread.boardMembersSync(thread, { saved: false, rosterSaved: false, members: [] }).save);
+  assert.equal(BoardThread.boardMembersSync(thread, { saved: true, members: [] }, { legacySavedIsThreadExistence: true }), null);
+});
+
+test('native duplicate, self-colliding and missing labels round-trip without inventing speaking identities', () => {
+  const saved = [
+    { kind: 'agent', profileId: 'a', label: '물결', role: 'admin' },
+    { kind: 'agent', profileId: 'b', label: '물결', role: 'member' },
+    { kind: 'agent', label: '물결', role: 'member' },
+    { kind: 'agent', profileId: 'c', label: null, role: 'owner' },
+    { kind: 'agent', profileId: 'd', label: '나', role: 'member' },
+    { kind: 'user', label: null, role: 'owner' },
+    { kind: 'agent', profileId: 'e', label: '물결 · a' },
+  ];
+  const thread = room();
+  const restored = BoardThread.threadFieldsFromStoreMembers(thread, saved);
+  let reopened = JSON.parse(JSON.stringify({ ...thread, ...restored }));
+  assert.equal(new Set(reopened.participants).size, saved.length);
+  assert.deepEqual(BoardThread.boardRosterIdentity(BoardThread.boardStoreMembers(reopened)), BoardThread.boardRosterIdentity(saved));
+  assert.equal(BoardThread.threadFieldsFromStoreMembers(reopened, saved), null);
+  assert.equal(BoardThread.boardDeliveryIntent(reopened, '그냥 질문').route, 'room');
+  assert.equal(BoardThread.boardDeliveryIntent(reopened, '@물결').code, 'BOARD_UNRESOLVED_ADDRESS');
+  assert.equal(BoardThread.boardDeliveryIntent(reopened, '@나').code, 'BOARD_UNRESOLVED_ADDRESS');
+  assert.deepEqual(mentionNames(reopened), ['물결 · a']);
+  assert.deepEqual(BoardThread.boardDeliveryIntent(reopened, '[대상](agent://c)').expectedBoardDelivery.recipientIds, ['c']);
+  reopened = { ...reopened, ...ThreadMembers.invitedThreadFields(reopened, { name: '새 Agent', profileId: 'f' }) };
+  assert.deepEqual(BoardThread.boardRosterIdentity(BoardThread.boardStoreMembers(reopened)).slice(0, saved.length), BoardThread.boardRosterIdentity(saved));
+});
+
+test('an unknown dispatch row is not a rejection even when other recipients fail or start', () => {
+  const failed = { profileId: ID_D, status: 'failed', code: 'PROFILE_NOT_FOUND' };
+  const uncertain = { profileId: ID_V, status: 'failed', dispatchStatus: 'unknown', resumeRequired: true, requestId: 'r~v' };
+  const started = { profileId: 'writer', status: 'started', requestId: 'r~w', runId: 'native-run', conversationId: 'native-thread' };
+  const outcome = BoardThread.boardSendOutcome({ accepted: true, recipients: [failed, uncertain, started] }, 'r');
+  assert.equal(outcome.unknown, uncertain);
+  assert.equal(outcome.failure, failed);
+  assert.deepEqual(outcome.members, [started]);
+  assert.equal(outcome.routes[ID_V].status, 'unknown');
+  assert.equal(outcome.routes[ID_V].dispatchStatus, 'unknown');
+  assert.equal(outcome.routes[ID_V].resumeRequired, true);
+  assert.deepEqual(BoardThread.boardMemberState(ID_V, outcome), { kind: 'waiting', label: '접수 미확인' });
 });
