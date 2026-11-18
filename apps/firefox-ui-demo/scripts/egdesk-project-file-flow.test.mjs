@@ -431,22 +431,57 @@ for (const selection of ['none', 'text', 'binary']) {
   });
 }
 
-test('dirty original blocks execution; edits and folder changes make the fixed run receipt visibly stale', async t => {
+test('dirty draft requires explicit disk-only confirmation; the fixed run receipt becomes stale on folder changes', async t => {
   const completion = deferred(), runs = [];
   const h = viewFixture(t, { runCheck: request => { runs.push(request); return completion.promise; } });
   await h.view.openProject(project('a', [typed])); await h.view.openFile('file-dir-a');
   const editor = h.find('.egdesk-file-editor'); editor.value = 'dirty'; editor.fire('input');
   h.find('.egdesk-file-project-check').click(); await settle();
   assert.equal(runs.length, 0); assert.match(h.find('.egdesk-file-status').textContent, /검사는 디스크 파일만 사용합니다/);
-  editor.value = 'start'; editor.fire('input'); await h.view.flush();
+  const cancelled = h.find('.egdesk-file-check-confirm-disk');
+  assert.equal(cancelled.textContent, '디스크 버전으로 검사 실행');
+  assert.match(h.find('.egdesk-file-check-confirmation').textContent, /작업사본의 내용은 검사에 포함되지 않으며 그대로 유지됩니다/);
+  assert.equal(h.find('.egdesk-file-check-command').textContent, typed.command);
+  assert.equal(h.document.activeElement, h.find('.egdesk-file-check-cancel'));
+  h.find('.egdesk-file-check-cancel').click(); cancelled.click(); await settle();
+  assert.equal(runs.length, 0); assert.equal(h.find('.egdesk-file-check-result').hidden, true);
+  assert.equal(editor.value, 'dirty'); assert.equal(h.drafts.get(h.view.snapshot().draftId).text, 'dirty');
+  h.find('.egdesk-file-save-button').click(); await settle();
+  assert.equal(h.view.snapshot().dirty, false, 'saving the managed draft does not change the disk file');
   h.find('.egdesk-file-project-check').click(); await settle();
-  assert.equal(runs.length, 1); assert.equal(h.find('.egdesk-file-project-check').disabled, true);
+  assert.equal(runs.length, 0, 'a saved working copy that differs from disk still requires confirmation');
+  editor.value = 'later draft edits'; editor.fire('input');
+  const confirm = h.find('.egdesk-file-check-confirm-disk'); confirm.click(); confirm.click(); await settle();
+  assert.deepEqual(runs, [{ projectId: 'project-a', rootId: 'root-a', script: typed }]);
+  assert.equal(h.find('.egdesk-file-project-check').disabled, true);
+  assert.equal(editor.value, 'later draft edits');
+  assert.equal(h.drafts.get(h.view.snapshot().draftId).text, 'later draft edits');
+  assert.deepEqual(h.writes, ['updateDraft', 'saveDraft', 'updateDraft'], 'the check never writes a source or new file');
   h.view.onFileChanged({ rootId: 'root-a', relativePath: 'source.txt' });
   await h.view.openProject(project('b', [typed]));
   completion.resolve({ status: 'completed', exitCode: 0, output: 'done\n' }); await settle();
   assert.equal(runs[0].rootId, 'root-a');
   assert.match(h.find('.egdesk-file-check-context').textContent, /\/verified\/a/);
+  assert.match(h.find('.egdesk-file-check-source').textContent, /디스크 파일 \(작업사본 제외\)/);
   assert.equal(h.find('.egdesk-file-check-stale').hidden, false);
+});
+
+test('changing a saved command or project invalidates an outstanding disk confirmation', async t => {
+  const runs = [], changed = { ...typed, command: 'npm run changed' };
+  const h = viewFixture(t, { runCheck: async request => { runs.push(request); return { summary: 'done' }; } });
+  await h.view.openProject(project('a', [typed])); await h.view.openFile('file-dir-a');
+  const editor = h.find('.egdesk-file-editor'); editor.value = 'dirty'; editor.fire('input');
+  await h.view.check();
+  const oldCommand = h.find('.egdesk-file-check-confirm-disk');
+  h.view.setProjectScripts([changed]);
+  assert.equal(h.find('.egdesk-file-check-confirm-disk'), null);
+  oldCommand.click(); await settle();
+  await h.view.check();
+  const oldProject = h.find('.egdesk-file-check-confirm-disk');
+  await h.view.openProject(project('b', [changed]));
+  assert.equal(h.find('.egdesk-file-check-confirm-disk'), null);
+  oldProject.click(); await settle();
+  assert.deepEqual(runs, []);
 });
 
 test('ambiguous run failure stays unknown and command settings cannot change the pending target', async t => {

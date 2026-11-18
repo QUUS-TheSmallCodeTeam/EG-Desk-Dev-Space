@@ -20929,6 +20929,7 @@ test('RT-03 extras: attachments and File drafts are opt-in checkboxes (D-R3), om
     attachments: [{ id: 'c1', name: 'a.txt', bytes: 3 }, { id: 'c2', name: 'b.png', bytes: 4 }], fileDrafts: [{ draftId: 'd1', name: 'plan.md', status: 'draft', original: 'not-connected' }] });
   assert.deepEqual(done.received, ['Board 1개', 'Agent 1개 (검토 필요 초안)', '첨부 2개', '파일 초안 1개 (원본과 연결 안 됨)']);
   assert.ok(done.notes.includes(Portable.PORTABLE_DRAFT_NOTE) && done.notes.includes('첨부 2개를 새 사본으로 더했습니다.'));
+  assert.match(Portable.PORTABLE_DRAFT_NOTE, /원본과 비교하려면.*다시 연결해도 원본은 덮어쓰지 않습니다/);
   assert.match(Portable.portableErrorText({ code: 'PORTABLE_ENTRY_UNSAFE', status: 400 }), /아무것도 가져오지 않았습니다/);
   assert.match(Portable.portableErrorText({ code: 'PORTABLE_ATTACHMENT_STORE_UNAVAILABLE', status: 503 }), /로그인/);
   assert.equal(Portable.portableErrorText({ code: 'PORTABLE_IMPORT_PARTIAL', status: 500, written: { boards: [{}], attachments: [{}], fileDrafts: [{}] } }),

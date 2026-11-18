@@ -215,8 +215,8 @@ const CHANGE_LABELS = Object.freeze({ add: '새 파일', update: '수정', delet
 const REASON_NOTES = Object.freeze({
   unavailable: '이 파일을 지금 읽을 수 없어 검토할 수 없습니다.',
   'edited-after-agent': 'Agent가 만든 뒤 내용이 바뀌어 삭제를 제안하지 않습니다.',
-  'restore-not-available': '지운 파일은 여기서 되살리지 않습니다. 필요하면 새 파일로 저장하세요.',
-  'deleted-gone': '이 경로에 파일이 없는 것을 다시 확인했습니다. 지운 파일은 여기서 되살리지 않습니다. 필요하면 위 내용을 새 파일로 저장하세요.',
+  'restore-not-available': '지운 파일은 여기서 되살리지 않습니다.',
+  'deleted-gone': '이 경로에 파일이 없는 것을 다시 확인했습니다. 지운 파일은 여기서 되살리지 않습니다.',
   'deleted-present': '같은 경로에 파일이 다시 있습니다. 지금 파일은 Agent가 지운 내용과 다를 수 있어 여기서 고치지 않습니다.',
   'deleted-unknown': '이 경로를 다시 확인하지 못했습니다. 지운 파일은 여기서 되살리지 않습니다.',
   drifted: 'Agent가 고친 뒤 파일이 또 바뀌어 덩어리를 찾지 못했습니다.',
@@ -248,7 +248,7 @@ export function createChangeReview({ document, service, rootId, changes = [], al
   error.setAttribute('role', 'alert')
   error.hidden = true
   element.append(summary)
-  if (!canRevert && !canDelete) element.append(el(document, 'p', 'egdesk-change-review-read-only', '이 외부 원본을 안전하게 변경할 수 없어 비교만 표시합니다. 파일을 열어 작업사본을 저장하거나 새 파일로 저장하세요.'))
+  if (!canRevert && !canDelete) element.append(el(document, 'p', 'egdesk-change-review-read-only', '이 외부 원본을 변경하지 않고 비교만 표시합니다.'))
   element.append(undoButton, list, status, error)
   const files = changes.slice(0, CHANGE_REVIEW_LIMITS.maxFiles).map(change => ({ change, fileId: null, text: null, sha256: null, target: null, chunks: [], chunkStatus: 'empty', actions: null, selected: new Set(), confirmDelete: false, removed: false, conflict: null, deletion: null, node: null }))
   let lastRevert = null
