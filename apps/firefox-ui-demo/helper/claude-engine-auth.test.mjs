@@ -188,6 +188,29 @@ test('status holder joins a running check, skips fresh ones, and announces only 
   assert.equal(status.snapshot().auth.status, 'signedOut')
 })
 
+test('a Claude profile switch drops the old login immediately and never joins an old probe', async () => {
+  let id = 'claude-default', clock = 1000
+  const pending = [], published = []
+  const status = createClaudeEngineStatus({ getProfileId: () => id, now: () => clock,
+    probe: slot => new Promise(resolve => pending.push({ slot, resolve })), onChange: next => published.push(next.auth?.account) })
+  const result = account => ({ installed: true, version: '2.1.300', versionStatus: 'untested', checkedAt: clock,
+    auth: account ? { status: 'signedIn', account } : { status: 'signedOut' } })
+  const first = status.refresh()
+  pending[0].resolve(result('shared@example.test')); await first
+  id = 'claude-bbbb'
+  assert.equal(status.snapshot().auth, null, 'the shared account is not displayed or ready for B even inside the minimum interval')
+  const checkingB = status.refresh({ force: true })
+  id = 'claude-default'; const checkingA = status.refresh()
+  id = 'claude-bbbb'; const latestB = status.refresh()
+  assert.deepEqual(pending.map(p => p.slot), ['claude-default', 'claude-bbbb', 'claude-default', 'claude-bbbb'])
+  pending[3].resolve(result(null)); await latestB
+  pending[2].resolve(result('shared@example.test')); await checkingA
+  pending[1].resolve(result('stale-b@example.test')); await checkingB
+  assert.equal(status.snapshot().auth.status, 'signedOut'); assert.deepEqual(published, ['shared@example.test', undefined])
+  clock += 2500; const signedIn = status.refresh({ force: true }); pending[4].resolve(result('owned@example.test')); await signedIn
+  assert.equal(status.snapshot().auth.account, 'owned@example.test')
+});
+
 test('a failing probe or listener never breaks the holder', async () => {
   let clock = 10
   const status = createClaudeEngineStatus({ probe: async () => { throw new Error('/private/path') }, now: () => clock, onChange: () => { throw new Error('listener') } })

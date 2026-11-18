@@ -226,9 +226,11 @@ const decisionClient = createDecisionClient({ getApiKey: () => decisionCredentia
 // one (CLAUDE_CONFIG_DIR); Codex stays on its one shared app-server ('notYet').
 const engineProfiles = openEngineProfiles({ dataDir: path.join(dataDir, 'settings'), isolatedCodex: true })
 const claudeProfileRows = () => engineProfiles.list('claude').map(row => ({ ...row, configDir: row.owned ? engineProfiles.configDir(row.id) : null }))
-const claudeProfileEnv = () => {
-  const dir = engineProfiles.configDir(engineProfiles.active('claude'))
-  return dir ? { ...process.env, CLAUDE_CONFIG_DIR: dir } : process.env
+const claudeProfileEnv = profileId => {
+  if (profileId === 'claude-default') return process.env
+  const dir = engineProfiles.configDir(profileId)
+  if (!dir) throw new Error('Claude account folder unavailable')
+  return { ...process.env, CLAUDE_CONFIG_DIR: dir }
 }
 // RT-06/CHAT-06 workflow runtime (event bus, connected-root watcher, task
 // graph). Opened after Chat below. Keep roots registered during construction
@@ -366,7 +368,8 @@ const engineStatus = createEngineStatusEmitter({
 // becoming ready (or not) reaches Chat as a Claude connection change.
 const claudeEngineStatus = createClaudeEngineStatus({
   // SUB-11: the static check reads the active profile's login folder.
-  probe: () => probeClaudeEngine({ env: claudeProfileEnv() }),
+  getProfileId: () => engineProfiles.active('claude'),
+  probe: profileId => probeClaudeEngine({ env: claudeProfileEnv(profileId) }),
   onChange: () => {
     claudeEngine.syncStatus()
     engineStatus.check()
@@ -458,10 +461,10 @@ const handleEngineProfilesHttp = createEngineProfilesHttpHandler({
   },
   onChange: () => {
     codexProfileServers.reconcile()
-    const recheck = () => claudeEngineStatus.refresh({ force: true }).catch(() => {})
-    recheck()
-    // A check already running (or just finished) still read the old folder.
-    setTimeout(recheck, 2500).unref?.()
+    // The new slot is unverified until its own probe returns. Retire the old
+    // owner immediately, even if both slots later report the same address.
+    claudeEngine.syncStatus()
+    void claudeEngineStatus.refresh({ force: true }).catch(() => {})
     engineStatus.check()
   },
 })

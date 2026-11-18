@@ -104,7 +104,7 @@ export function describeClaudeEngine({ version = null, versionStatus = null, ins
   // its auth belongs to the active row; the other profiles are not checked.
   const choices = Array.isArray(live?.profiles) && live.profiles.some(profile => profile?.active === true) ? live.profiles : [{ id: CLAUDE_ENGINE_PROFILE_ID, owned: false, active: true }]
   const profiles = installed === true ? choices.map(choice => choice.active === true ? {
-    id: choice.id, label: signedIn && typeof auth.label === 'string' ? auth.label : typeof choice.label === 'string' && choice.owned ? choice.label : 'Claude',
+    id: choice.id, label: choice.owned && typeof choice.label === 'string' ? choice.label : signedIn && typeof auth.label === 'string' ? auth.label : 'Claude',
     credentialStore: choice.owned ? 'egdesk-owned' : 'claude-cli', active: true, owned: choice.owned === true, status: 'available',
     auth: {
       status,

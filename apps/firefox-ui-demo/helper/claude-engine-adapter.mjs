@@ -201,6 +201,7 @@ export function createClaudeEngineAdapter(options = {}) {
   let gateFailure = null // { code, version } from a refused system/init; cleared when the version changes
   let rate = null // applyClaudeRateLimit state (display only, D-S5)
   let billing = null // 'subscription' | 'apiKey' from the last system/init apiKeySource
+  let usageOwner = null // usage and billing belong to one signed-in slot
   let lastReady = false
   let lastOwner = null
   let ownerEpoch = 0 // includes signed-out/back-in to the same owner
@@ -210,11 +211,19 @@ export function createClaudeEngineAdapter(options = {}) {
   const deliver = (kind, value) => { for (const sink of [...sinks]) { try { sink[kind]?.(CLAUDE_ENGINE_ID, value) } catch {} } }
   const statusChanged = () => { try { onStatusChange() } catch {} }
   const status = () => { try { return snapshot() || {} } catch { return {} } }
-  // SUB-11: the Engine Profile list; a broken source means the shared login only.
+  // No profile integration means the shared CLI. An unavailable configured
+  // selection is different: it must never launch that CLI in place of a slot.
   const profileList = () => {
-    let rows = null
-    try { rows = typeof profiles === 'function' ? profiles() : null } catch { rows = null }
-    return Array.isArray(rows) && rows.some(row => row?.active === true) ? rows : [{ id: 'claude-default', owned: false, active: true, configDir: null }]
+    if (profiles == null) return [{ id: 'claude-default', owned: false, active: true, configDir: null }]
+    let rows
+    try { rows = profiles() } catch { return [] }
+    if (!Array.isArray(rows)) return []
+    const chosen = rows.filter(row => row?.active === true)
+    if (chosen.length !== 1 || rows.filter(row => row?.id === chosen[0].id).length !== 1) return []
+    const slot = chosen[0]
+    const valid = slot.id === 'claude-default' ? slot.owned !== true && slot.configDir == null
+      : /^claude-[a-z0-9]{1,40}$/.test(slot.id) && slot.owned === true && isAbsolute(slot.configDir)
+    return valid ? rows.filter(row => row && typeof row.id === 'string') : []
   }
   const activeProfile = () => profileList().find(row => row.active === true)
   const liveCount = () => [...sessions.values()].filter(session => session.proc || session.starting).length
@@ -227,7 +236,7 @@ export function createClaudeEngineAdapter(options = {}) {
   }
 
   function usageRow() {
-    if (!rate && !billing) return null
+    if ((!rate && !billing) || !usageOwner || usageOwner !== ownerKey()) return null
     const row = name => {
       const hit = rate?.windows.find(entry => entry.window === name)
       return hit ? { usedPercent: hit.usedPercent, windowMinutes: hit.windowMinutes, resetsAt: hit.resetsAt } : null
@@ -247,12 +256,14 @@ export function createClaudeEngineAdapter(options = {}) {
   function describe() {
     const check = status()
     if (gateFailure && gateFailure.version !== (check.version ?? null)) gateFailure = null
-    return describeClaudeEngine(check, {
+    const choices = profileList()
+    const row = describeClaudeEngine(choices.length ? check : { ...check, auth: null }, {
       minVersion, capabilities: [...CLAUDE_CAPABILITIES],
       residentProcesses: liveCount(), residentLimit: limits.residentLimit, idleTimeoutMs: limits.idleTimeoutMs,
       gateFailure: gateFailure?.code ?? null, apiKeyEnv: apiKeyEnv(), usage: usageRow(), disposed,
-      profiles: profileList().map(({ id, label, owned, active }) => ({ id, label, owned: owned === true, active: active === true })),
+      profiles: choices.map(({ id, label, owned, active }) => ({ id, label, owned: owned === true, active: active === true })),
     })
+    return choices.length ? row : { ...row, status: disposed ? 'disabled' : 'offline', statusReason: 'profileUnavailable', profiles: [] }
   }
 
   function apiKeyEnv() {
@@ -269,6 +280,7 @@ export function createClaudeEngineAdapter(options = {}) {
     // SUB-11: an EG-Desk-owned profile is its own account slot even for the
     // same email, so a conversation bound to one never continues on another.
     const profile = activeProfile()
+    if (!profile) return null
     return `claude:${method}:${who}${profile.owned === true ? `@${profile.id}` : ''}`
   }
 
@@ -278,6 +290,7 @@ export function createClaudeEngineAdapter(options = {}) {
     if (disposed) throw definite(engineError('ENGINE_UNAVAILABLE', 'Claude has been stopped in this EG-Desk session'))
     const row = describe()
     if (row.status === 'ready') return
+    if (row.statusReason === 'profileUnavailable') throw definite(chatError('ENGINE_PROFILE_UNAVAILABLE', 'Check the selected Claude account before starting a conversation', 409))
     if (row.status === 'notInstalled') throw definite(engineError('ENGINE_NOT_INSTALLED'))
     if (row.status === 'versionUnsupported') throw definite(engineError('ENGINE_VERSION_UNSUPPORTED'), row.statusReason || null)
     if (row.status === 'loginRequired') throw definite(engineError('ENGINE_LOGIN_REQUIRED', 'Sign in to Claude first (claude auth login)'))
@@ -440,16 +453,22 @@ export function createClaudeEngineAdapter(options = {}) {
     // D-S2: hooks are off (--settings disableAllHooks, no SDK hooks). A hook
     // event means a managed or otherwise unswitchable hook ran for this build.
     if (message?.type === 'system' && typeof message.subtype === 'string' && message.subtype.startsWith('hook_')) isolation.hookEvents++
+    const mayRecordUsage = () => {
+      if (session.proc !== proc || proc.exited || proc.ownerEpoch !== ownerEpoch || !proc.owner || proc.owner !== ownerKey()) return false
+      if (usageOwner !== proc.owner) { usageOwner = proc.owner; rate = null; billing = null }
+      return true
+    }
     if (message?.type === 'system' && message.subtype === 'init') {
       session.hasHistory = true
       const init = proc.transport.info().init
-      if (init) {
+      if (init && mayRecordUsage()) {
         const next = init.billsApiKey ? 'apiKey' : 'subscription'
         if (next !== billing) { billing = next; statusChanged() }
       }
     } else if (message?.type === 'result' || message?.type === 'assistant') session.hasHistory = true
     for (const event of session.translator.translate(message)) {
       if (event.method === 'egdesk/engine/rateLimit') {
+        if (!mayRecordUsage()) continue
         rate = applyClaudeRateLimit(rate, event.params, now())
         statusChanged()
       }
@@ -483,7 +502,7 @@ export function createClaudeEngineAdapter(options = {}) {
       }
       const threadId = session.threadId
       const proc = {
-        transport: null, exited: false, gateCode: null, mcpPending: new Map(), // rpc id → control request id
+        transport: null, exited: false, gateCode: null, owner: ownerKey(), ownerEpoch, mcpPending: new Map(), // rpc id → control request id
         lease, engineBuild: typeof check.version === 'string' ? check.version : null,
         bounded: spec.bounded || null, blocked: false, boundedVerified: false,
         flags: { cwd: spec.cwd, model: spec.model, effort: spec.effort, appendPrompt: spec.appendPrompt, tools: spec.tools, bounded: spec.bounded || null },
@@ -494,7 +513,9 @@ export function createClaudeEngineAdapter(options = {}) {
       }
       const hasTools = proc.mcp.listTools().length > 0
       const turnOf = () => session.activeTurn?.turnId ?? null
-      const profileDir = activeProfile().configDir
+      const profile = activeProfile()
+      if (!profile) { lease.release(); throw definite(chatError('ENGINE_PROFILE_UNAVAILABLE', 'Selected Claude account unavailable', 409)) }
+      const profileDir = profile.configDir
       proc.transport = createTransport({
         ...transportOptions,
         ...(typeof profileDir === 'string' && profileDir ? { claudeConfigDir: profileDir } : {}),
@@ -589,6 +610,7 @@ export function createClaudeEngineAdapter(options = {}) {
     const accountChanged = lastReady && ready && owner !== lastOwner
     if (!ready || accountChanged) {
       ownerEpoch++
+      rate = null; billing = null; usageOwner = null
       baseline = null
       for (const session of sessions.values()) session.observation = null
       for (const session of sessions.values()) void closeProcess(session, { graceMs: 0 })

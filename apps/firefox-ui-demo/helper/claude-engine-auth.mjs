@@ -229,34 +229,46 @@ export function claudeLoginTerminalCommand(method = 'claudeai') {
 const NOT_CHECKED = Object.freeze({ installed: null, version: null, versionStatus: null, auth: null, checkedAt: null })
 
 /**
- * Holds the last check for the bridge. refresh() joins a running check;
+ * Holds the last check for the selected profile. refresh() joins a check in
+ * the same selection only. A switch drops cached and in-flight evidence;
  * maxAgeMs skips a fresh enough one (automatic checks); force re-checks unless
  * one finished within minIntervalMs ('check again' button). onChange(snapshot)
  * runs only when the public part changed.
  */
-export function createClaudeEngineStatus({ probe = probeClaudeEngine, onChange = () => {}, now = Date.now, minIntervalMs = CLAUDE_STATUS_MIN_INTERVAL_MS } = {}) {
-  let current = { ...NOT_CHECKED }
-  let running = null
+export function createClaudeEngineStatus({ probe = () => probeClaudeEngine(), getProfileId = () => 'claude-default', onChange = () => {}, now = Date.now, minIntervalMs = CLAUDE_STATUS_MIN_INTERVAL_MS } = {}) {
+  let selection = null
+  const active = () => {
+    let id = null
+    try { const value = getProfileId(); if (typeof value === 'string' && /^claude-[a-z0-9]{1,40}$/.test(value)) id = value } catch {}
+    if (!selection || selection.id !== id) selection = { id, current: { ...NOT_CHECKED }, running: null }
+    return selection
+  }
+  const snapshot = () => {
+    const { current } = active()
+    return { ...current, auth: current.auth ? { ...current.auth } : null }
+  }
   const publicPart = snapshot => JSON.stringify({ installed: snapshot.installed, version: snapshot.version, versionStatus: snapshot.versionStatus, auth: snapshot.auth })
-  const run = () => {
-    running = (async () => {
+  const run = entry => {
+    entry.running = (async () => {
       let next
-      try { next = await probe() } catch { next = { installed: null, version: null, versionStatus: null, auth: null, checkedAt: now() } }
-      const changed = publicPart(next) !== publicPart(current)
-      current = { ...NOT_CHECKED, ...next, checkedAt: Number.isFinite(next?.checkedAt) ? next.checkedAt : now() }
+      try { next = await probe(entry.id) } catch { next = { ...NOT_CHECKED, checkedAt: now() } }
+      if (active() !== entry) return snapshot() // including A → B → A
+      const changed = publicPart(next) !== publicPart(entry.current)
+      entry.current = { ...NOT_CHECKED, ...next, checkedAt: Number.isFinite(next?.checkedAt) ? next.checkedAt : now() }
       if (changed) { try { onChange(snapshot()) } catch {} }
       return snapshot()
-    })().finally(() => { running = null })
-    return running
+    })().finally(() => { entry.running = null })
+    return entry.running
   }
-  const snapshot = () => ({ ...current, auth: current.auth ? { ...current.auth } : null })
   return {
     snapshot,
     refresh({ force = false, maxAgeMs = CLAUDE_STATUS_MAX_AGE_MS } = {}) {
-      if (running) return running
-      const age = current.checkedAt === null ? Infinity : now() - current.checkedAt
+      const entry = active()
+      if (!entry.id) return Promise.resolve(snapshot())
+      if (entry.running) return entry.running
+      const age = entry.current.checkedAt === null ? Infinity : now() - entry.current.checkedAt
       if (age < (force ? minIntervalMs : maxAgeMs)) return Promise.resolve(snapshot())
-      return run()
+      return run(entry)
     },
   }
 }

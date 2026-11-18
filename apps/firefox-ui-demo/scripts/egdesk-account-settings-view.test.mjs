@@ -272,9 +272,24 @@ test('Terminal login types only the helper login line and reports a stuck termin
   assert.match(stuck.text, /claude auth login --claudeai 을 직접 실행/);
 });
 
+test('changing the displayed account while its Terminal connects writes nothing; subscription cannot change to console', async () => {
+  const id = 'claude-ab123456', line = `CLAUDE_CONFIG_DIR='/sample/engines/${id}' claude auth login --claudeai`;
+  const command = { engine: 'claude', profileId: id, env: 'CLAUDE_CONFIG_DIR', line };
+  let current = true, opened = 0, written = 0;
+  const opts = { engineId: 'claude', profileId: id, requestCommand: async () => command, isCurrent: () => current,
+    openTerminal: () => { opened++; return {}; }, terminalApi: () => ({ isConnected: () => !current, write: () => { written++; } }), sleep: async () => { current = false; } };
+  assert.equal((await View.runEngineProfileLoginInTerminal(opts)).phase, 'error');
+  assert.deepEqual([opened, written], [1, 0]);
+  current = true;
+  for (const wrong of [{ ...command, line: line.replace('--claudeai', '--console') }, { ...command, profileId: 'claude-other' }]) {
+    assert.equal((await View.runEngineProfileLoginInTerminal({ ...opts, requestCommand: async () => wrong })).phase, 'error');
+  }
+  assert.deepEqual([opened, written], [1, 0]);
+});
+
 test('the bridge client calls the Claude routes and the Settings card uses them', () => {
   const source = readSurfaceSource();
-  assert.match(source, /fetchJson\('\/engines\/claude\/refresh', \{ method: 'POST' \}\)/);
+  assert.match(source, /fetchJson\('\/engines\/claude\/refresh', \{ method: 'POST', signal: token\.signal \}\)/);
   assert.match(source, /fetchJson\(`\/engines\/claude\/login-command\?method=\$\{encodeURIComponent\(method\)\}`\)/);
   assert.match(source, /fetchJson\('\/engines\/claude\/api-key-env'/);
   const start = source.indexOf('  function spawnSettingsCard(');

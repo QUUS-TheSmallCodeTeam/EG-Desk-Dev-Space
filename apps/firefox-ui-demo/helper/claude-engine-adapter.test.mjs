@@ -796,6 +796,7 @@ test('SUB-11: the active Engine Profile sets CLAUDE_CONFIG_DIR, its own account 
   assert.deepEqual(row.profiles.map(p => [p.id, p.active, p.owned, p.credentialStore, p.auth.status]), [
     ['claude-default', false, false, 'claude-cli', 'unknown'], ['claude-abcdef01', true, true, 'egdesk-owned', 'signedIn'],
   ])
+  assert.equal(row.profiles.find(p => p.active).label, '회사', 'the configured slot keeps its name after login');
   assert.equal(JSON.stringify(row).includes(owned), false, 'no login folder path in the public row')
   const first = await h.adapter.startThread()
   await h.adapter.startTurn({ threadId: first.thread.id, input: [{ type: 'text', text: 'hi' }] })
@@ -808,8 +809,31 @@ test('SUB-11: the active Engine Profile sets CLAUDE_CONFIG_DIR, its own account 
   await h.adapter.dispose()
 })
 
-test('SUB-11: a broken profile source falls back to the shared login', () => {
-  const h = harness({ profiles: () => { throw new Error('boom') } })
-  assert.equal(h.adapter.ownerKey(), 'claude:claudeai:owner@example.com')
-  assert.deepEqual(publicEngineRow(h.adapter.describe()).profiles.map(p => p.id), ['claude-default'])
+test('Claude usage and billing observations do not move to another slot with the same signed-in address', async () => {
+  let selected = 'claude-default'
+  const profiles = () => [{ id: 'claude-default', active: selected === 'claude-default', owned: false, configDir: null },
+    { id: 'claude-bbbb', active: selected === 'claude-bbbb', owned: true, configDir: '/fixture/engines/claude-bbbb' }]
+  const h = harness({ profiles }); h.adapter.syncStatus()
+  const { threadId, child } = await firstTurn(h)
+  const notice = { type: 'rate_limit_event', session_id: threadId, rate_limit_info: { status: 'rejected', rateLimitType: 'five_hour', resetsAt: Math.floor(Date.now() / 1000) + 3600 } }
+  child.send(notice); await until(() => h.adapter.usage()?.rejected)
+  selected = 'claude-bbbb'
+  assert.equal(h.adapter.usage(), null, 'the old usage is not evidence for the new slot')
+  child.send(notice); await tick(); h.adapter.syncStatus()
+  assert.equal(publicEngineRow(h.adapter.describe()).profiles.find(p => p.active).usage, null)
+  await h.adapter.dispose()
+})
+
+test('SUB-11: a configured Claude slot that cannot be resolved never falls back to the shared login', async () => {
+  const shared = { id: 'claude-default', owned: false, active: true, configDir: null }
+  const owned = { id: 'claude-ab12', owned: true, active: true, configDir: '/fixture/engines/claude-ab12' }
+  for (const profiles of [() => { throw new Error('unavailable') }, () => [], () => [shared, owned],
+    () => [owned, { ...owned, active: false }], () => [{ ...owned, configDir: null }], () => [{ ...owned, configDir: 'relative' }]]) {
+    const h = harness({ profiles, createTransport: () => assert.fail('an unavailable slot must not start a transport') })
+    assert.equal(h.adapter.ownerKey(), null); assert.equal(h.adapter.isReady(), false)
+    assert.deepEqual(publicEngineRow(h.adapter.describe()).profiles, [])
+    await assert.rejects(h.adapter.startThread({}), { code: 'ENGINE_PROFILE_UNAVAILABLE', definite: true })
+    await h.adapter.dispose()
+  }
+  const h = harness(); assert.equal(h.adapter.ownerKey(), 'claude:claudeai:owner@example.com', 'no profile integration explicitly means shared CLI'); await h.adapter.dispose()
 })

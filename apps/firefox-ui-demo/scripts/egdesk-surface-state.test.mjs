@@ -25982,6 +25982,26 @@ test('Settings Claude card: forced re-check, Terminal login, API key confirmatio
   assert.equal(byTestid('settings-claude-result').dataset.phase, 'started');
   assert.match(byTestid('settings-claude-result').textContent, /다시 확인/);
 
+  // The same top card now describes the selected EG-Desk-only slot, not the shared CLI.
+  const sharedRow = state.codex.engines[0];
+  const ownedId = 'claude-bb123456';
+  const ownedRow = { ...sharedRow, profiles: [{ ...sharedRow.profiles[0], active: false },
+    { ...sharedRow.profiles[0], id: ownedId, label: '검증 계정 B', owned: true, credentialStore: 'egdesk-owned' }] };
+  const ownedLine = `CLAUDE_CONFIG_DIR='/fixture/engines/${ownedId}' claude auth login --claudeai`;
+  state.codexBridge.engineProfileLoginCommand = async id => { calls.push(['profileCommand', id]); return { engine: 'claude', profileId: id, env: 'CLAUDE_CONFIG_DIR', line: ownedLine }; };
+  state.codex.engines = [ownedRow]; emit(); calls.length = 0; written.length = 0;
+  byTestid('settings-claude-login').fire('click'); await settle();
+  assert.deepEqual(calls, [['profileCommand', ownedId], ['terminal']]); assert.deepEqual(written, [ownedLine + '\r']);
+  assert.match(byTestid('settings-claude-account').textContent, /검증 계정 B/);
+  // An old button and an in-flight response must not open a Terminal after a switch.
+  let release;
+  state.codexBridge.engineProfileLoginCommand = () => new Promise(resolve => { release = resolve; });
+  const oldButton = byTestid('settings-claude-login'); calls.length = 0; written.length = 0;
+  oldButton.fire('click'); await settle(); state.codex.engines = [sharedRow]; emit();
+  release({ engine: 'claude', profileId: ownedId, env: 'CLAUDE_CONFIG_DIR', line: ownedLine }); await settle();
+  oldButton.fire('click'); await settle();
+  assert.deepEqual(calls, []); assert.deepEqual(written, [], 'no switch to the shared login');
+
   // SUB-08 '다시 확인' is the forced Claude check, not the generic /v1/state read.
   calls.length = 0;
   byTestid('settings-claude-refresh').fire('click');

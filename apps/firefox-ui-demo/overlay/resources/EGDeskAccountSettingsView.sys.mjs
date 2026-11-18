@@ -173,7 +173,13 @@ export function claudeAccountView(engines, { connected = false } = {}) {
     };
   }
   if (auth?.status === 'signedOut') {
-    return { ...base, status: 'signedOut', title: '로그인되어 있지 않습니다', sub: 'Claude 구독이나 API 키로 로그인하면 Claude 엔진을 쓸 수 있습니다.', hint: CLAUDE_LOGIN_HINT, action: 'refresh', login: true };
+    const shared = profile.id === 'claude-default' && profile.owned !== true;
+    const owned = profile.owned === true && profile.id !== 'claude-default' && /^claude-[a-z0-9]{1,40}$/.test(profile.id);
+    return { ...base, status: 'signedOut', title: '로그인되어 있지 않습니다',
+      sub: owned ? `${text(profile.label).slice(0, 60) || 'Claude'} · EG-Desk 전용 로그인` : 'Claude 구독이나 API 키로 로그인하면 Claude 엔진을 쓸 수 있습니다.',
+      hint: owned ? '로그인을 눌러 이 계정 전용 Terminal에서 공식 인증을 마친 뒤 다시 확인을 눌러 주세요. 컴퓨터의 공유 로그인은 바뀌지 않습니다.'
+        : shared ? CLAUDE_LOGIN_HINT : '사용할 계정을 확인한 뒤 다시 확인을 눌러 주세요.',
+      action: 'refresh', login: shared || owned, loginProfileId: shared || owned ? profile.id : null };
   }
   return { ...base, status: 'unknown', title: '로그인 상태 확인 안 됨', sub: 'claude 명령이 예상한 형식으로 답하지 않았습니다. 다시 확인하거나 Terminal에서 claude auth status 를 실행해 보세요.', action: 'refresh' };
 }
@@ -288,8 +294,11 @@ const CLAUDE_LOGIN_LINES = Object.freeze({ claudeai: 'claude auth login --claude
  */
 export async function runClaudeLoginInTerminal({ requestCommand, openTerminal, terminalApi = card => card?._termBrowser?.contentWindow?.terminalAPI ?? null,
   sleep = ms => new Promise(resolve => setTimeout(resolve, ms)), now = Date.now, method = 'claudeai', timeoutMs = 15000,
-  checkLine = command => Object.hasOwn(CLAUDE_LOGIN_LINES, command?.method) && command?.line === CLAUDE_LOGIN_LINES[command.method] ? command.line : null,
+  isCurrent = () => true,
+  checkLine = command => Object.hasOwn(CLAUDE_LOGIN_LINES, method) && command?.method === method && command.line === CLAUDE_LOGIN_LINES[method] ? command.line : null,
   startedText = '터미널에서 Anthropic 공식 로그인을 마친 뒤 다시 확인을 눌러 주세요. EG-Desk는 로그인 정보를 보관하지 않습니다.' } = {}) {
+  const changed = () => ({ phase: 'error', text: '로그인할 계정이나 연결 상태가 바뀌어 명령을 입력하지 않았습니다. 현재 계정에서 다시 눌러 주세요.' });
+  if (!isCurrent()) return changed();
   let command;
   try { command = await requestCommand(method); } catch (error) {
     return { phase: 'error', text: `로그인 명령을 받지 못했습니다: ${text(error?.message) || '연결 프로그램 오류'}` };
@@ -297,18 +306,21 @@ export async function runClaudeLoginInTerminal({ requestCommand, openTerminal, t
   let line;
   try { line = checkLine(command); } catch { line = null; }
   if (!line) return { phase: 'error', text: '연결 프로그램이 알 수 없는 로그인 명령을 보냈습니다. 터미널에 입력하지 않았습니다.' };
+  if (!isCurrent()) return changed();
   let card;
   try { card = openTerminal(); } catch { card = null; }
   if (!card) return { phase: 'error', text: '터미널 카드를 열지 못했습니다.' };
   const started = now();
   let api = null;
   while (now() - started < timeoutMs) {
+    if (!isCurrent()) return changed();
     try { api = terminalApi(card); } catch { api = null; }
     if (typeof api?.write === 'function' && api.isConnected?.() === true) break;
     api = null;
     if (card.isConnected === false) break;
     await sleep(50);
   }
+  if (!isCurrent()) return changed();
   if (!api) return { phase: 'error', text: `터미널 준비를 확인하지 못했습니다. 터미널에서 ${line} 을 직접 실행해 주세요.` };
   try { await api.write(`${line}\r`); } catch {
     return { phase: 'error', text: `터미널에 입력하지 못했습니다. 터미널에서 ${line} 을 직접 실행해 주세요.` };
@@ -379,8 +391,11 @@ export function engineProfileLoginLine(command, { engineId, profileId } = {}) {
 }
 
 /** Types an Engine Profile's login line into a Terminal card (official CLI login for that folder). */
-export function runEngineProfileLoginInTerminal({ requestCommand, engineId, profileId, ...options } = {}) {
-  return runClaudeLoginInTerminal({ ...options, requestCommand, checkLine: command => engineProfileLoginLine(command, { engineId, profileId }),
+export function runEngineProfileLoginInTerminal({ requestCommand, engineId, profileId, method = 'claudeai', ...options } = {}) {
+  return runClaudeLoginInTerminal({ ...options, method, requestCommand, checkLine: command => {
+    const line = engineProfileLoginLine(command, { engineId, profileId });
+    return line && (engineId !== 'claude' || Object.hasOwn(CLAUDE_LOGIN_LINES, method) && line.endsWith(CLAUDE_LOGIN_LINES[method])) ? line : null;
+  },
     startedText: '터미널에서 공식 로그인을 마친 뒤 다시 확인을 눌러 주세요. 로그인 정보는 이 계정 전용 폴더에만 저장되고 EG-Desk는 읽지 않습니다.' });
 }
 

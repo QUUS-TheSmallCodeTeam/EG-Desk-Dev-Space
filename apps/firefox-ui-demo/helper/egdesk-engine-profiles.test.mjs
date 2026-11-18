@@ -158,7 +158,7 @@ test('the bridge wires the profile store into Claude spawns, the static check, t
   const source = await readFile(new URL('./codex-bridge-server.mjs', import.meta.url), 'utf8')
   assert.match(source, /const engineProfiles = openEngineProfiles\(\{ dataDir: path\.join\(dataDir, 'settings'\), isolatedCodex: true \}\)/)
   assert.match(source, /createClaudeEngineAdapter\(\{[\s\S]*?profiles: claudeProfileRows,\n\}\)/)
-  assert.match(source, /probe: \(\) => probeClaudeEngine\(\{ env: claudeProfileEnv\(\) \}\)/)
+  assert.match(source, /getProfileId: \(\) => engineProfiles\.active\('claude'\),\s*probe: profileId => probeClaudeEngine\(\{ env: claudeProfileEnv\(profileId\) \}\)/)
   assert.match(source, /extraProfiles: engineProfiles\.list\('codex'\)\.filter\(row => row\.owned\)/)
   assert.match(source, /busy: engine => engine === 'claude' && claudeEngine\.stats\(\)\.activeTurns > 0/)
   assert.match(source, /if \(await handleEngineProfilesHttp\(req, res, url\)\) return/)

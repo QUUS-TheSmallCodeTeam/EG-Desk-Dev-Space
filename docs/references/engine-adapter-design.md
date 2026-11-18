@@ -441,7 +441,7 @@ PRAGMA user_version = 2;
 공통 실행 조건 [제안, 근거 공식]:
 - 구독 프로필로 실행할 때는 env에서 `ANTHROPIC_API_KEY`·`ANTHROPIC_AUTH_TOKEN`·`CLAUDE_CODE_OAUTH_TOKEN`을 뺀다. `-p`에서는 `ANTHROPIC_API_KEY`가 있으면 항상 그것을 쓴다 [공식 인증 우선순위].
 - `--permission-mode`를 항상 명시한다. 2.1.302부터 `-p` 기본이 Manual로 바뀐다 [공식]. 이 Mac의 2.1.300 `--help` 선택지는 `acceptEdits·auto·bypassPermissions·manual·dontAsk·plan`이다 [공식 `--help`].
-- 계정 슬롯은 `CLAUDE_CONFIG_DIR`로 나눈다. 디렉터리마다 로그인·Keychain 항목이 따로 있다 [공식](D5).
+- 계정 슬롯은 `CLAUDE_CONFIG_DIR`로 나눈다. 설정 → 계정의 Claude 카드에서 ‘로그인’을 누르면 표시된 슬롯을 대상으로 한다. 공유 슬롯은 기본 CLI 로그인, 전용 슬롯은 그 계정의 폴더를 지정한 공식 CLI 로그인이다. 터미널 입력 전에 선택이 바뀌면 중단한다. ‘다시 확인’과 첫 일반 채팅은 같은 선택을 쓰며, 슬롯을 바꾸면 이전 인증 캐시와 늦은 확인 결과는 쓰지 않는다. 전용 계정을 확인할 수 없을 때 공유 로그인으로 대체하지 않는다.
 
 권고 [제안]: 번역 계층은 SDKMessage 형태를 기준으로 만들고, 전송 모듈은 결정 후 하나만 구현한다. 정책 문구 기준으로는 (b)가 (b')보다 해석 부담이 작고, 구현 편의는 (b')가 크다. (2026-10-24 갱신) (b)를 골라도 승인·질문·EG-Desk 도구는 SDK와 같은 stdio 제어 통로로 하므로 (b')와 구현 차이는 '줄 읽기·쓰기를 직접 하느냐'뿐이다. 이전 권고(승인은 MCP `--permission-prompt-tool`, 질문은 EG-Desk 질문 도구로 대체)는 쓰지 않는다. MCP prompt tool은 '사용자 상호작용 필요' MCP 도구를 승인하지 못한다는 공식 cli-reference 문구도 근거다(레퍼런스 채택 지도 3.1).
 
@@ -544,7 +544,7 @@ Main 개발자 선에서 정할 것(대표님 결정 불필요): 일반 도구 �
 
 ### 14.3 격리와 실행 플래그 (D-S2·D-S4)
 
-- 항상: `-p --output-format stream-json --input-format stream-json --verbose --permission-prompt-tool stdio --settings {"disableAllHooks":true} --setting-sources= --strict-mcp-config --disable-slash-commands --include-partial-messages`, env는 허용 목록 + `ENABLE_CLAUDEAI_MCP_SERVERS=false`, API 키 변수는 넘기지 않는다. HOME·`CLAUDE_CONFIG_DIR`은 그대로라 로그인을 공유한다. [공식 `--help` 2.1.300 · 코드]
+- 항상: `-p --output-format stream-json --input-format stream-json --verbose --permission-prompt-tool stdio --settings {"disableAllHooks":true} --setting-sources= --strict-mcp-config --disable-slash-commands --include-partial-messages`, env는 허용 목록 + `ENABLE_CLAUDEAI_MCP_SERVERS=false`, API 키 변수는 넘기지 않는다. 공유 슬롯만 기존 CLI 환경의 로그인을 쓴다. EG-Desk 전용 슬롯은 상태 확인과 실행 모두 그 슬롯의 `CLAUDE_CONFIG_DIR`을 지정한다. [공식 `--help` 2.1.300 · 코드]
 - 2.1.300 이상에만: `--permission-mode manual`('바꾸기 전에 늘 묻기', 읽기 도구는 묻지 않음 — claude-agent-acp `session-mode.ts:358-362`), `--system-prompt-snapshot=off`(대화 중 Agent 지침이 바뀌어도 재개에서 반영). 더 낮은 버전은 이 두 플래그를 받는지 확인하지 않았다.
 - 도구가 있을 때만: `--mcp-config {"mcpServers":{"egdesk":{"type":"sdk","name":"egdesk"}}}`, `--allowedTools mcp__egdesk`.
 - CLAUDE.md·skills는 어댑터 옵션 `inherit: { instructions, skills }` 자리만 있고 bridge는 끈 채로 둔다.

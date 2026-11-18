@@ -17891,9 +17891,16 @@
       // line and the API-key-in-environment choice. The claude CLI keeps its
       // own login; these never carry a credential (D-S1, D-S4).
       async refreshClaudeEngine() {
-        const result = await fetchJson('/engines/claude/refresh', { method: 'POST' });
-        if (result?.engine?.id === 'claude') update({ engines: [...(state.codex.engines || []).filter(row => row.id !== 'claude'), result.engine] });
-        return result?.engine ?? null;
+        const token = epochScope.begin();
+        const before = state.codex.engines?.find(row => row.id === 'claude');
+        try {
+          const result = await fetchJson('/engines/claude/refresh', { method: 'POST', signal: token.signal });
+          const rows = state.codex.engines || [];
+          if (epochScope.valid(token) && state.codex.connected && result?.engine?.id === 'claude' && rows.find(row => row.id === 'claude') === before) {
+            update({ engines: before ? rows.map(row => row === before ? result.engine : row) : [...rows, result.engine] });
+          }
+          return result?.engine ?? null;
+        } finally { epochScope.finish(token); }
       },
       claudeLoginCommand(method = 'claudeai') {
         return fetchJson(`/engines/claude/login-command?method=${encodeURIComponent(method)}`);
@@ -21143,17 +21150,22 @@
     // SUB-08/SUB-15 Claude card actions; the result line stays until the next one.
     let claudeAction = null;
     let claudeKeyEnv = null;
-    const runClaudeAction = async (action) => {
+    const runClaudeAction = async (action, loginProfileId = null) => {
       const api = bridge();
       if (!api || claudeAction?.phase === 'running') return;
       claudeAction = { action, phase: 'running' };
       renderAccountTab();
       try {
         if (action === 'login') {
-          const outcome = await AccountSettingsView.runClaudeLoginInTerminal({
-            requestCommand: (method) => api.claudeLoginCommand(method),
-            openTerminal: () => spawnTerminalCard(),
-          });
+          // Pin the account named by the clicked card, not whichever account
+          // happens to be active when the command or the Terminal is ready.
+          const isCurrent = () => Boolean(loginProfileId) && bridge() === api &&
+            AccountSettingsView.claudeAccountView(state.codex.engines, { connected: state.codex.connected }).loginProfileId === loginProfileId;
+          const options = { isCurrent, openTerminal: () => spawnTerminalCard() };
+          const outcome = loginProfileId === 'claude-default'
+            ? await AccountSettingsView.runClaudeLoginInTerminal({ ...options, requestCommand: method => api.claudeLoginCommand(method) })
+            : await AccountSettingsView.runEngineProfileLoginInTerminal({ ...options, engineId: 'claude', profileId: loginProfileId,
+              requestCommand: () => api.engineProfileLoginCommand(loginProfileId) });
           claudeAction = { action, ...outcome };
         } else if (action === 'keyConfirm' || action === 'keyDecline') {
           claudeKeyEnv = await api.claudeApiKeyEnv(action === 'keyConfirm');
@@ -21359,7 +21371,7 @@
                 data: { testid: 'settings-claude-version-badge', status: claudeVersion.status } }, claudeVersion.label) : null)),
           claudeAccount.login
             ? el('button', { class: 'egd-settings-btn egd-settings-btn-primary', type: 'button', disabled: claudeBusy ? 'true' : null, data: { testid: 'settings-claude-login' },
-              title: 'Terminal 카드에서 claude auth login 을 실행합니다', onclick: () => { void runClaudeAction('login'); } }, claudeBusy && claudeAction.action === 'login' ? '터미널 여는 중…' : '로그인')
+              title: '이 계정의 Terminal 카드에서 Claude 공식 로그인을 시작합니다', onclick: () => { void runClaudeAction('login', claudeAccount.loginProfileId); } }, claudeBusy && claudeAction.action === 'login' ? '터미널 여는 중…' : '로그인')
             : null,
           claudeAccount.action === 'refresh'
             ? el('button', { class: 'egd-settings-btn', type: 'button', disabled: claudeBusy ? 'true' : null, data: { testid: 'settings-claude-refresh' },
