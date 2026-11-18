@@ -8656,7 +8656,7 @@ test('Chat pending scroll intent preserves the rendered viewport across SSE rere
     '};',
     'const unsubscribe = () => {};',
     'const composerObserver = null;',
-    'let compositionInProgress = false, deferredCodex = null;',
+    'let compositionInProgress = false, finishBoardComposition = null, deferredCodex = null;',
     'const onDocumentMouseDown = () => {}, onViewportMutate = () => {};',
     'const cleanup = () => {',
     cleanup,
@@ -16138,7 +16138,7 @@ test('the room search keeps focus and caret across each filtered render and wait
   const elFor = compileFunction(`return function el(tag, props = {}, ...children) {${elBody}\n};`, ['document'])(inertDOM());
   const wire = (codex) => {
     const queries = [], renders = [], tasks = [];
-    const api = compileFunction(['let compositionInProgress = false, deferredCodex = null;', searchSource,
+    const api = compileFunction(['let compositionInProgress = false, finishBoardComposition = null, deferredCodex = null;', searchSource,
       'return { input: threadSearch, composing: () => compositionInProgress, defer: value => { deferredCodex = value; }, deferred: () => deferredCodex };'].join('\n'),
     ['el', 'codex', 'codexBridge', 'threadTop', 'render', 'queueMicrotask'])(
       elFor, codex, { setThreadQuery(value) { queries.push(value); codex.threadQuery = value; } }, { appendChild() {} },
@@ -21297,7 +21297,7 @@ function requestProjectUiHarness({ target, read, roomRead, roomSave, resizeObser
   };
 }
 
-function requestProjectSendHarness({ group = null, target, capture, reply, roomRead, sharedState = null, sourceDocument = null, sourceRead = null, memoAgentRoom = false, ready = async () => true, onEmit = () => {}, selectBrowserSources = () => [], inputSources = [{ id: 'attachment', kind: 'board-element', label: 'Selected element', sourceRef: { viewId: 'element-a' } }] } = {}) {
+function requestProjectSendHarness({ group = null, actualBoardOutcome = false, target, capture, reply, roomRead, sharedState = null, sourceDocument = null, sourceRead = null, memoAgentRoom = false, ready = async () => true, onEmit = () => {}, selectBrowserSources = () => [], inputSources = [{ id: 'attachment', kind: 'board-element', label: 'Selected element', sourceRef: { viewId: 'element-a' } }] } = {}) {
   const constants = requestProjectSurfaceConstants();
   const state = sharedState || { codex: { activeThreadId: 'room', threads: [{ id: 'room', clientBindingId: 'original-wire-room', profileEnabled: false,
     messages: [], inputSources, briefingInputs: [], ...(group || {}), ...(memoAgentRoom ? { type: 'dm', profileEnabled: true, agentProfileId: 'fixture-agent' } : {}),
@@ -21356,6 +21356,11 @@ function requestProjectSendHarness({ group = null, target, capture, reply, roomR
   const memoScopeBridge = { createProjectScope: id => deps.createChatProjectScope(id, epoch),
     createMemoAskScope: requestProjectBridgeMethod('createMemoAskScope', deps) };
   Object.assign(deps, productionBoardComposer(deps));
+  if (actualBoardOutcome) {
+    const begin = surfaceSource.indexOf('    function acceptBoardSend(');
+    const end = surfaceSource.indexOf('\n    }', begin);
+    deps.acceptBoardSend = compileFunction(surfaceSource.slice(begin, end + 6) + '\nreturn acceptBoardSend;', Object.keys(deps))(...Object.values(deps));
+  }
   const send = requestProjectBridgeMethod('sendMessage', deps);
   const captureManualSendOwner = requestProjectBridgeMethod('captureManualSendOwner', deps);
   const setTarget = requestProjectBridgeMethod('setRequestProjectTarget', deps);
@@ -21372,6 +21377,7 @@ function requestProjectSendHarness({ group = null, target, capture, reply, roomR
     projectScope: () => { const scope = deps.createChatProjectScope('room', epoch); scope.finish(); return scope; },
     setTarget: target => setTarget('room', target),
     preview: text => deps.boardComposerDelivery(getThread(null), text, state.codex),
+    inputState: () => deps.boardComposerInputState(state.codex, fixtureThreadId),
     updateThread: patch => update('room', thread => ({ ...thread, ...patch })),
     edit(text, target) {
       state.codex.threadDrafts.room = text; state.codex.threadDraftRevisions.room++;
@@ -26048,7 +26054,7 @@ test('CHAT-01 Board-saved chat card carries a thread and Agent binding reference
 });
 
 function productionBoardComposer(deps) {
-  const names = ['el', 'chatSendEngineId', 'boardBrowserSourcesKey', 'boardComposerDelivery', 'mountBoardComposerDestination'];
+  const names = ['el', 'chatSendEngineId', 'boardBrowserSourcesKey', 'boardComposerInputState', 'boardComposerDelivery', 'mountBoardComposerDestination'];
   return compileFunction(names.map(declaration).join('\n') + '\nreturn { ' + names.join(', ') + ' };', Object.keys(deps))(...Object.values(deps));
 }
 
@@ -26065,7 +26071,7 @@ test('Board composer executes Korean input and IME locally; disabled Enter expla
   const state = { codex };
   const body = document.createElement('div');
   const sends = [], drafts = [];
-  const source = surfaceSource.slice(surfaceSource.indexOf('      const allowComposer = Boolean(activeThread && isHudConversationView);'),
+  const source = 'let finishBoardComposition = null;\n' + surfaceSource.slice(surfaceSource.indexOf('      const allowComposer = Boolean(activeThread && isHudConversationView);'),
     surfaceSource.indexOf('      const shellClasses = ['));
   const deps = { document, state, body, activeThread, codex, BoardThread, ChatState: Chat, SELF_MEMBER: 'self', codexProfileCatalog: { profiles: [] },
     codexThreadRuntimeConfig: () => ({ profileId: 'prof-sol' }), isHudConversationView: true, activeIdentity: {},
@@ -26094,11 +26100,14 @@ test('Board composer executes Korean input and IME locally; disabled Enter expla
   type('정리해 줘'); assert.match(scopeBody.textContent, /확인할 카드/);
   assert.doesNotMatch(scopeBody.textContent, /null|undefined/);
   activeThread.inputSources = []; type('@솔빛 @물결 비교해 줘');
+  const liveIme = deps.boardComposerInputState(codex, activeThread.id);
+  const beforeIme = liveIme.revision;
   input.fire('compositionstart'); type('@없는이', { isComposing: true });
+  assert.equal(liveIme.revision, beforeIme + 1); assert.ok(liveIme.composing.has(input));
   assert.equal(destination.textContent, '답변: 솔빛, 물결');
   assert.equal(drafts.at(-1), '@솔빛 @물결 비교해 줘');
   input.fire('keydown', { key: 'Enter', isComposing: true }); input.fire('compositionend');
-  assert.equal(drafts.at(-1), '@없는이');
+  assert.equal(drafts.at(-1), '@없는이'); assert.equal(liveIme.revision, beforeIme + 2); assert.equal(liveIme.composing.size, 0);
   assert.equal(send.disabled, true);
   assert.match(find('board-chat-correction').textContent, /@|대상/);
   type('@없는이 다시');
@@ -26175,5 +26184,71 @@ test('Board submit stops when a live Browser source is dropped or changes scope'
     assert.deepEqual(h.calls.paths, []);
     assert.deepEqual(h.thread().inputSources, chosen);
     assert.equal(h.state.codex.threadDrafts.room, text);
+  }
+});
+
+test('Board submit stops on IME start even though the stored draft does not change', async () => {
+  const pending = requestProjectDeferred();
+  const h = requestProjectSendHarness({ group: boardComposerFixture(), inputSources: [], capture: () => pending.promise });
+  const text = '@물결 정리'; typeOrdinaryDraft(h, text);
+  const sending = h.send({ boardPreviewKey: h.preview(text).key });
+  await settle(); assert.equal(h.calls.capture, 1);
+  h.inputState().revision++; h.inputState().composing.add({ value: '@물결 정리ㅎ' });
+  pending.resolve([]);
+  assert.equal((await sending).accepted, false);
+  assert.deepEqual(h.calls.paths, []); assert.equal(h.state.codex.threadDrafts.room, text);
+  assert.match(h.thread().sendError, /바뀌어 보내지 않았습니다/);
+});
+
+test('Inherited Board limits change the preview and never claim new Browser authority', () => {
+  const h = requestProjectSendHarness({ group: boardComposerFixture({ profileEnabled: true, agentProfileId: 'prof-sol',
+    conversationId: 'bounded-native-room', executionBounded: true }), inputSources: [] });
+  const preview = h.preview('정리해 줘');
+  assert.equal(preview.intent.ok, true); assert.equal(preview.intent.route, 'room');
+  assert.equal(preview.intent.roomBlock, null); assert.equal(preview.inheritedBounded, true);
+  assert.equal(h.preview('@물결 정리해 줘').intent.code, 'BOARD_BROWSER_BOUNDED');
+});
+
+test('Definite late Board refusal leaves the submitted attachments and any newer draft alone', async () => {
+  for (const replace of [false, true]) {
+    const pending = requestProjectDeferred();
+    const sources = [{ id: 'board-1', kind: 'board-element', label: '선택한 카드' }];
+    const h = requestProjectSendHarness({ group: boardComposerFixture(), inputSources: sources, reply: () => pending.promise });
+    const text = '질문을 확인해 줘'; typeOrdinaryDraft(h, text);
+    const sending = h.send({ boardPreviewKey: h.preview(text).key });
+    await settle(); assert.equal(h.calls.provider.length, 1);
+    if (replace) h.edit('새로운 질문', null);
+    pending.resolve({ accepted: false, code: 'BOARD_DELIVERY_CHANGED' });
+    assert.equal((await sending).accepted, false);
+    assert.equal(h.state.codex.threadDrafts.room, replace ? '새로운 질문' : text);
+    assert.deepEqual(h.thread().inputSources, replace ? [{ id: 'new-attachment' }] : sources);
+    assert.equal(h.thread().messages.length, 0);
+  }
+});
+
+test('Board mixed started, failed and unknown outcomes explain exact names and never restore the batch', async () => {
+  for (const started of [true, false]) {
+    const group = boardComposerFixture({ participants: ['self', '솔빛', '물결', '여울'], participantAgents: {
+      솔빛: { profileId: 'prof-sol' }, 물결: { profileId: 'prof-mul' }, 여울: { profileId: 'prof-river' } } });
+    const h = requestProjectSendHarness({ group, actualBoardOutcome: true, inputSources: [], reply: body => ({
+      accepted: started, clientThreadId: body.clientThreadId, recipients: [
+        { profileId: 'prof-sol', status: 'failed', code: 'BOARD_PROFILE_UNAVAILABLE' },
+        { profileId: 'prof-mul', status: 'failed', code: 'CONTEXT_FAILED', dispatchStatus: 'unknown', resumeRequired: true },
+        ...(started ? [{ profileId: 'prof-river', status: 'started', requestId: 'member-req', clientThreadId: 'member-room', conversationId: 'member-native', runId: 'member-run' }]
+          : [{ profileId: 'prof-river', status: 'failed', code: 'BOARD_PROFILE_UNAVAILABLE' }]),
+      ],
+    }) });
+    const text = '@솔빛 @물결 @여울 함께 확인해 줘'; typeOrdinaryDraft(h, text);
+    const result = await h.send({ boardPreviewKey: h.preview(text).key });
+    assert.equal(result.accepted, started); if (!started) assert.equal(result.status, 'unconfirmed');
+    assert.equal(h.thread().boardSubmitNotice.unknown, true);
+    assert.match(h.thread().boardSubmitNotice.text, /접수 미확인: 물결/);
+    assert.match(h.thread().boardSubmitNotice.text, /거절: 솔빛/);
+    assert.match(h.thread().boardSubmitNotice.text, /활동 기록을 확인/);
+    if (started) assert.match(h.thread().boardSubmitNotice.text, /접수: 여울/);
+    assert.equal(h.state.codex.threadDrafts.room, ''); assert.deepEqual(h.calls.paths, ['/chat/board/send']);
+    typeOrdinaryDraft(h, text);
+    assert.equal(h.preview(text).intent.code, 'BOARD_SEND_UNCONFIRMED');
+    await h.send(); assert.equal(h.calls.provider.length, 1);
   }
 });
