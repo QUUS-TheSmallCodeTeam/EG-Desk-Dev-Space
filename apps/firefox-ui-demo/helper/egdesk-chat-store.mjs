@@ -623,6 +623,10 @@ export function openChatStore({ dataDir, ownerScope } = {}) {
   }
   // Replaces the room's member list in order; a member already in the room
   // keeps its saved addedAt unless a new one is given.
+  const emptyRosterKey = 'board-roster:explicit-empty'
+  function markEmptyRoster(row, ts) {
+    if (!q.event.get(row.local_conversation_id, emptyRosterKey)) appendCore(row, { eventKey: emptyRosterKey, ts, event: 'board.roster_empty' })
+  }
   function writeMembers(localId, members, ts) {
     const saved = new Map(db.prepare('SELECT member_key, added_at FROM room_members WHERE local_conversation_id=?').all(localId).map(row => [row.member_key, row.added_at]))
     db.prepare('DELETE FROM room_members WHERE local_conversation_id=?').run(localId)
@@ -797,9 +801,19 @@ export function openChatStore({ dataDir, ownerScope } = {}) {
       return tx(() => {
         const current = q.thread.get(row.client_thread_id)
         const same = current.agent_profile_id === input.profileId && (current.agent_profile_revision ?? null) === revision
-        if (!same) db.prepare('UPDATE threads SET agent_profile_id=?, agent_profile_revision=?, agent_set_at=? WHERE local_conversation_id=?').run(input.profileId, revision, input.profileId === null ? null : ts, row.local_conversation_id)
+        if (!same || current.agent_set_at == null) db.prepare('UPDATE threads SET agent_profile_id=?, agent_profile_revision=?, agent_set_at=? WHERE local_conversation_id=?').run(input.profileId, revision, ts, row.local_conversation_id)
         return { clientThreadId: row.client_thread_id, agent: thread(q.thread.get(row.client_thread_id)).agent }
       })
+    },
+    getRoomAgentObservation(clientThreadId) {
+      ensureOpen()
+      const row = q.thread.get(identifier(clientThreadId, 'clientThreadId'))
+      return row?.agent_set_at == null ? null : { profileId: row.agent_profile_id ?? null }
+    },
+    hasExplicitEmptyRoster(clientThreadId) {
+      ensureOpen()
+      const row = requireThread(clientThreadId)
+      return !!q.event.get(row.local_conversation_id, emptyRosterKey)
     },
     /** CHAT-10: the room's members in order: [{memberKey, kind, profileId, role, addedAt, label}]. */
     listRoomMembers(clientThreadId) { ensureOpen(); return roomAnswer(requireThread(clientThreadId)) },
@@ -815,7 +829,11 @@ export function openChatStore({ dataDir, ownerScope } = {}) {
       const members = checkedMembers(input.members)
       if (members.filter(member => member.kind === 'user').length > 1) fail('INVALID_CHAT_RECORD', 'A room has one person')
       const ts = stamp(input.ts)
-      return tx(() => { writeMembers(row.local_conversation_id, members, ts); return roomAnswer(row) })
+      return tx(() => {
+        writeMembers(row.local_conversation_id, members, ts)
+        if (!members.length) markEmptyRoster(row, ts)
+        return roomAnswer(row)
+      })
     },
     /** Add a member at the end, or change the role/label of one already there (addedAt and place kept). */
     addRoomMember(input) {
@@ -839,7 +857,9 @@ export function openChatStore({ dataDir, ownerScope } = {}) {
       const memberKey = identifier(input.memberKey, 'memberKey')
       return tx(() => {
         const removed = db.prepare('DELETE FROM room_members WHERE local_conversation_id=? AND member_key=?').run(row.local_conversation_id, memberKey).changes > 0
-        return { ...roomAnswer(row), removed }
+        const answer = roomAnswer(row)
+        if (removed && !answer.members.length) markEmptyRoster(row, row.updated_at)
+        return { ...answer, removed }
       })
     },
     listEvents(clientThreadId, { afterSeq = 0, limit = 100, refType, refId } = {}) {

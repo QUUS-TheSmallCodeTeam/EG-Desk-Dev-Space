@@ -65,10 +65,10 @@ test('D-M2 routing: a mention or an Agent Lead goes to /chat/board/send; a plain
   assert.equal(BoardThread.boardSendPlan(thread, { ...base, message: '@Codex 봐 줘' }), null, 'the plain Codex has no Agent of its own');
   assert.equal(BoardThread.boardSendPlan({ ...thread, type: 'dm' }, { ...base, message: '@디자이너 봐 줘' }), null);
 
-  const mentioned = BoardThread.boardSendPlan(thread, { ...base, message: '@검증 담당 @디자이너 봐 줘', stateless: true });
+  const mentioned = BoardThread.boardSendPlan(thread, { ...base, message: '@검증 담당 @디자이너 봐 줘' });
   assert.equal(mentioned.path, '/chat/board/send');
   assert.deepEqual(mentioned.mentioned, [ID_V, ID_D]);
-  for (const key of ['conversationId', 'profileEnabled', 'stateless', 'profileId', 'leadProfileId']) assert.ok(!(key in mentioned.body), key);
+  for (const key of ['conversationId', 'profileEnabled', 'stateless', 'profileId']) assert.ok(!(key in mentioned.body), key);
   assert.deepEqual([mentioned.body.message, mentioned.body.requestId, mentioned.body.clientThreadId, mentioned.body.model], ['@검증 담당 @디자이너 봐 줘', 'req-1', 'room-1', 'gpt-x']);
   assert.deepEqual(mentioned.body.members, BoardThread.boardStoreMembers(thread));
   assert.deepEqual(mentioned.body.recentMessages, [{ role: 'user', text: '어제 시안', author: '나' }, { role: 'agent', text: '확인했어요', author: '디자이너' }]);
@@ -389,4 +389,44 @@ test('Board restart scan stops at a stalled cursor and rejects a page with a dif
   assert.deepEqual(h.messages('room-2'), []);
   assert.equal(h.notices('room-1').length, 1);
   assert.equal(h.notices('room-2').length, 1);
+});
+
+test('Board intent reports exact ordered identities, real default engine, and a bounded board block', () => {
+  const thread = room({ messages: [
+    { role: 'user', content: '첫 질문', status: 'complete' },
+    { role: 'assistant', content: '답변', status: 'complete' },
+    { role: 'user', content: '포함하지 않음', status: 'failed' },
+  ] });
+  const plan = (message, options) => BoardThread.boardDeliveryIntent(thread, message, { supportsBoardDelivery: true, ...options });
+  assert.deepEqual(plan('[@검증 담당](agent://verifier) @디자이너').recipients.map(row => row.profileId), [ID_V, ID_D]);
+  assert.deepEqual(plan('@디자이너').roomBlock, { memberCount: 3, recentTurnCount: 2 });
+  assert.equal(plan('@Codex 확인').route, 'room');
+  assert.equal(plan('@Claude 확인', { engine: 'claude' }).recipients[0].label, 'Claude');
+  const lead = { profileEnabled: true, profileId: ID_D };
+  const bounded = plan('확인', { ...lead, browserScope: true });
+  assert.equal(bounded.route, 'room');
+  assert.equal(bounded.roomBlock, null);
+  assert.deepEqual(bounded.expectedBoardDelivery.recipientIds, [ID_D]);
+  assert.equal(plan('확인', { ...lead, engine: 'claude' }).code, 'BOARD_ENGINE_UNSUPPORTED');
+  assert.equal(plan('@디자이너', { browserScope: true }).code, 'BOARD_BROWSER_BOUNDED');
+  assert.equal(plan('@디자이너 @검증 담당', { stateless: true }).code, 'BOARD_STATELESS_UNSUPPORTED');
+  assert.equal(plan('@디자이너', { supportsBoardDelivery: false }).code, 'BOARD_DELIVERY_UNAVAILABLE');
+  assert.equal(plan('@Codex 확인', { supportsBoardDelivery: false }).expectedBoardDelivery, null);
+  const picked = [{ kind: 'file', title: '표.pdf', id: 'private' }];
+  assert.equal(plan('@디자이너', { selectedResources: picked }).code, 'BOARD_CONTEXT_SCOPE');
+  assert.deepEqual(plan('@디자이너', { ...lead, selectedResources: picked }).selectedResources, [{ kind: 'file', label: '표.pdf' }]);
+  assert.equal(plan('@검증 담당', { contextResolution: { resolutionId: 'room-only', chosen: [] } }).ok, true);
+  assert.equal(plan('@검증 담당', { contextResolution: { resolutionId: 'room-only', chosen: ['file'] } }).code, 'BOARD_CONTEXT_SCOPE');
+});
+
+test('Board refuses deliberate unresolved recipients without interpreting literal inline text', () => {
+  const thread = room();
+  for (const message of ['@없는사람 확인', '@디자이너 @없는사람 확인', '@디자이너 @Codex 확인', '@all 검토', '그런데 @everyone 검토',
+    '[지운 Agent](agent://gone) 검토', '@디자이너와 [지운 Agent](agent://gone) 검토', '[@오류](agent://) 확인']) {
+    assert.equal(BoardThread.boardDeliveryIntent(thread, message).code, 'BOARD_UNRESOLVED_ADDRESS', message);
+  }
+  for (const message of ['person@host.example 연락', 'abc@디자이너.com 연락', '문장 중 @없는사람 기호', 'https://example.com/@디자이너',
+    '[@디자이너](https://example.com/) 링크', '`@everyone` 문자열', '(@) 기호', '@ 디자이너를 표시합니다']) {
+    assert.equal(BoardThread.boardDeliveryIntent(thread, message).route, 'room', message);
+  }
 });

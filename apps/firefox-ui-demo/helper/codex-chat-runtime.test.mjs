@@ -2772,7 +2772,7 @@ test('Board rejected replay: cached failures do not consume slots needed by a ge
       { kind: 'agent', profileId: 'lead', label: 'Lead', role: 'admin' }, { kind: 'agent', profileId: 'coder', label: 'Coder' },
     ] }
   const first = projectClaudeHarness({ store, profiles, resolveProjectWorkspace: async () => projectWorkspace('two') })
-  assert.equal((await first.chat.sendBoard(body)).accepted, false)
+  assert.equal((await first.chat.sendBoard({ ...body, message: '@Lead @Coder check' })).accepted, false)
   store.close()
   store = openChatStore({ dataDir, ownerScope: 'board-replay-tests' })
   const reopened = projectClaudeHarness({ store, profiles, resolveProjectWorkspace: async () => projectWorkspace() })
@@ -3997,5 +3997,94 @@ test('D-M3: shared messages are copied with a line on both sides and reach the r
   } finally {
     try { store?.close() } catch {}
     await rm(dataDir, { recursive: true, force: true })
+  }
+})
+
+// Exercise the literal browser planner and the real runtime against the fake native model.
+const deliveryThread = (extra = {}) => ({ id: 'delivery-room', type: 'group', participants: ['나', '솔빛', '물결', 'Codex'],
+  participantAgents: { 솔빛: { profileId: 'sol' }, 물결: { profileId: 'water' } },
+  messages: Array.from({ length: 12 }, () => ({ role: 'user', content: '긴 대화 '.repeat(900), status: 'complete' })), ...extra })
+
+test('checked Board wire dispatches exact ordered profiles and strips only an empty room resolution for a non-Lead', async () => {
+  const { boardDeliveryIntent, boardSendPlan } = await import('../overlay/resources/EGDeskBoardThread.sys.mjs')
+  const h = r2Harness({ profiles: r2Profiles() })
+  const thread = deliveryThread({ profileEnabled: true, agentProfileId: 'sol' })
+  const body = { clientThreadId: thread.id, message: '[@물결](agent://water) @솔빛', engineId: 'codex', profileEnabled: true, profileId: 'sol',
+    contextResolution: { resolutionId: 'room-only', chosen: [] } }
+  const intent = boardDeliveryIntent(thread, body.message, body)
+  const plan = boardSendPlan(thread, body, { intent })
+  assert.deepEqual(intent.expectedBoardDelivery, plan.body.expectedBoardDelivery)
+  const authenticated = []
+  const outcome = await h.chat.sendBoard(plan.body, { authenticateRecipient: async candidate => { authenticated.push(candidate) } })
+  assert.deepEqual(outcome.recipients.map(row => [row.profileId, row.clientThreadId, row.status]), [
+    ['water', boardMemberThreadId(thread.id, 'water'), 'started'], ['sol', thread.id, 'started'],
+  ])
+  assert.deepEqual(authenticated.map(row => row.contextResolution), [undefined, body.contextResolution])
+  const turns = h.calls.filter(row => row.method === 'turn/start')
+  assert.equal(turns.length, 2)
+  for (const { params } of turns) {
+    assert.equal(params.input[0].text, body.message)
+    assert.equal((params.additionalContext.egdesk_board.value.match(/^\[나\]/gm) || []).length, intent.roomBlock.recentTurnCount)
+  }
+})
+
+test('Board helper rejects route, engine, ordered recipients, attached scopes, and deliberate unresolved mentions before auth/dispatch', async () => {
+  const { boardSendPlan } = await import('../overlay/resources/EGDeskBoardThread.sys.mjs')
+  const thread = deliveryThread(), h = r2Harness({ profiles: r2Profiles() })
+  const { body } = boardSendPlan(thread, { clientThreadId: thread.id, engineId: 'codex', message: '@솔빛 @물결' })
+  for (const [payload, code] of [
+    [{ ...body, message: '@솔빛' }, 'BOARD_DELIVERY_CHANGED'],
+    [{ ...body, message: '@물결 @솔빛' }, 'BOARD_DELIVERY_CHANGED'],
+    [{ ...body, message: '@솔빛 @모름' }, 'BOARD_UNRESOLVED_ADDRESS'],
+    [{ ...body, message: '@솔빛 [지운 Agent](agent://gone)' }, 'BOARD_UNRESOLVED_ADDRESS'],
+    [{ ...body, expectedBoardDelivery: { ...body.expectedBoardDelivery, route: 'room' } }, 'BOARD_DELIVERY_CHANGED'],
+    [{ ...body, expectedBoardDelivery: { ...body.expectedBoardDelivery, engine: 'claude' } }, 'BOARD_DELIVERY_CHANGED'],
+    [{ ...body, contextResolution: { resolutionId: 'room-only', chosen: ['resource'] } }, 'BOARD_CONTEXT_SCOPE'],
+    [{ ...body, contextSnapshotIds: ['resource'] }, 'BOARD_CONTEXT_SCOPE'],
+    [{ ...body, stateless: true }, 'INVALID_BOARD_SEND'],
+  ]) await assert.rejects(h.chat.sendBoard(payload, { authenticateRecipient: () => assert.fail('should not authenticate') }), { code })
+  await assert.rejects(h.chat.send(body), { code: 'BOARD_DELIVERY_CHANGED' })
+  assert.equal(h.calls.length, 0)
+})
+
+test('Board observes authoritative roster and Lead; async roster drift reports partial delivery, never an alternate recipient', async t => {
+  const { boardStoreMembers, boardSendPlan } = await import('../overlay/resources/EGDeskBoardThread.sys.mjs')
+  const dataDir = await mkdtemp(path.join(os.tmpdir(), 'egdesk-delivery-roster-'))
+  const store = openChatStore({ dataDir, ownerScope: 'delivery-tests' })
+  t.after(async () => { store.close(); await rm(dataDir, { recursive: true, force: true }) })
+  const thread = deliveryThread(), room = thread.id, members = boardStoreMembers(thread)
+  store.createConversation({ clientThreadId: room })
+  store.setRoomMembers({ clientThreadId: room, members })
+  const h = r2Harness({ store, profiles: r2Profiles() })
+  const make = (message, requestId) => boardSendPlan(thread, { message, requestId, clientThreadId: room, engineId: 'codex' }).body
+  const stale = make('@솔빛', 'stale')
+  store.setRoomMembers({ clientThreadId: room, members: members.filter(row => row.profileId !== 'sol') })
+  await assert.rejects(h.chat.sendBoard(stale), { code: 'BOARD_DELIVERY_CHANGED' })
+  store.setRoomMembers({ clientThreadId: room, members: [] })
+  await assert.rejects(h.chat.sendBoard(stale), { code: 'BOARD_DELIVERY_CHANGED' })
+  store.setRoomMembers({ clientThreadId: room, members })
+  store.setRoomAgent({ clientThreadId: room, profileId: 'water' })
+  await assert.rejects(h.chat.sendBoard(stale), { code: 'BOARD_DELIVERY_CHANGED' })
+  store.setRoomAgent({ clientThreadId: room, profileId: null })
+  assert.equal(h.calls.length, 0)
+  const sent = await h.chat.sendBoard(make('@솔빛 @물결', 'partial'), { authenticateRecipient: async candidate => {
+    if (candidate.profileId === 'water') store.setRoomMembers({ clientThreadId: room, members: members.filter(row => row.profileId !== 'water') })
+  } })
+  assert.deepEqual(sent.recipients.map(row => [row.profileId, row.status, row.code]), [['sol', 'started', undefined], ['water', 'failed', 'BOARD_DELIVERY_CHANGED']])
+  assert.equal(h.calls.filter(row => row.method === 'turn/start').length, 1)
+})
+
+test('checked ordinary Board routes retain actual Codex and Claude sends without injected Board history', async () => {
+  const { boardDeliveryIntent } = await import('../overlay/resources/EGDeskBoardThread.sys.mjs')
+  for (const engine of ['codex', 'claude']) {
+    const h = engine === 'codex' ? r2Harness() : projectClaudeHarness()
+    const thread = deliveryThread()
+    const message = engine === 'codex' ? '@Codex 봐 줘' : 'Claude의 평범한 방 메시지'
+    const intent = boardDeliveryIntent(thread, message, { engine })
+    const result = await h.chat.send({ engineId: engine, clientThreadId: thread.id, requestId: 'ordinary', message, expectedBoardDelivery: intent.expectedBoardDelivery })
+    assert.equal(result.accepted, true)
+    const turn = h.calls.find(row => row.method === 'turn/start')
+    assert.ok(turn)
+    assert.equal(turn.params?.additionalContext?.egdesk_board, undefined)
   }
 })
