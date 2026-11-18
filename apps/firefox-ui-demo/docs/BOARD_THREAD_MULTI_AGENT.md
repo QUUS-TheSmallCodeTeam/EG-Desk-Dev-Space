@@ -4,14 +4,17 @@ Decisions: D-M2 (only @mentioned Agents answer; with no mention only the Lead), 
 
 ## Where a Board Thread message goes
 
-`overlay/resources/EGDeskBoardThread.sys.mjs` `boardSendPlan` (pure), called from the composer send in `eg-desk-surface.uc.js`.
+The composer's recipient line and the submit path use the same pure `boardDeliveryIntent` in `overlay/resources/EGDeskBoardThread.sys.mjs`. Opening the scope details does not send or attach anything. `boardSendPlan` builds a routed request only after the draft passes this check. A bridge advertising `capabilities.boardDeliveryIntent` compares the expected route, room, roster and recipients to its own resolution; a stale plan is not permission to choose a replacement.
 
 | Message | Room Agent (Lead) | Route |
 |-|-|-|
 | `@이름` of an invited Agent (profile) | any | `POST /chat/board/send`: only the mentioned Agents answer |
 | no mention | an Agent profile | `POST /chat/board/send`: the Lead answers with the Board block |
 | no mention, or only `@Codex` | plain Codex | ordinary `POST /chat/send` (same single answer as before) |
-| `@이름` + a Browser-bounded selection | any | refused (`BOARD_BROWSER_BOUNDED`): the bridge's Board send takes no execution policy |
+| a targeted `@Agent` + a live Browser selection | any | refused: the Board dispatch path must not drop the Browser execution boundary |
+| a targeted `@Agent` in an unsupported engine or stateless mode | any | refused: do not send the same text as an ordinary engine turn or discard the selected mode |
+| `@all` or an unresolved deliberate Agent address | any | correct the address first; no broadcast or substitute recipient |
+| ordinary unaddressed engine message in a Claude room with no Agent Lead | plain room engine | ordinary `/chat/send`, not member fan-out |
 
 A Board member list is not a delivery list. Inviting an Agent does not send it a message, and a member label is not an authenticated employee. With no saved Agent Lead, an ordinary room send can still start a real engine turn; it is not a private note.
 
@@ -37,4 +40,4 @@ A routed request carries the room's members (`members`, same shape as the store)
 - Early member events are buffered per pending Board send (up to 64 for 15 seconds) and replayed in arrival order once the runs are registered. A handler failure is logged; that event is not retried, and it does not stop later events.
 - After a restart, the room's `board.routed` lines identify member conversations whose completed answers are folded back into the room. Each member scan reads at most 20 pages of 100 events per load. If it cannot reach the last page, only the owning room shows a partial-history notice; the scan does not fetch additional pages on its own.
 - While any member's run is busy the room's composer waits (same busy rule as a single run).
-- Not checked with a live Codex account or in Firefox.
+- Ordinary rooms and member-targeted routing were checked with synthetic members in isolated Firefox. The browser fixture captured outgoing requests without running a real model; separate helper tests exercise synthetic member dispatch. No live Codex/Claude account or real staff delivery is implied.
