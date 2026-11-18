@@ -2752,8 +2752,8 @@ test('CTX04 seed resume alone defaults an omitted profile without changing the l
 });
 
 test('CTX04 seed rejects rotated or crossed client pairs with the real resume 409 before provider work', async t => {
-  const [{ CodexChatRuntime }, { createChatHttpHandler }] = await Promise.all([
-    import('../helper/codex-chat-runtime.mjs'), import('../helper/codex-bridge-http.mjs'),
+  const [{ CodexChatRuntime }, { createChatHttpHandler }, { createChatEngineAuth }] = await Promise.all([
+    import('../helper/codex-chat-runtime.mjs'), import('../helper/codex-bridge-http.mjs'), import('../helper/codex-bridge-engine-auth.mjs'),
   ]);
   const { handler, ready } = setup(t, { sourceChangeSeed: true });
   await ready;
@@ -2768,13 +2768,15 @@ test('CTX04 seed rejects rotated or crossed client pairs with the real resume 40
     store: { getConversation: id => rows.find(row => row.clientThreadId === id) || null,
       getConversationByNative: () => { nativeFallbackReads++; throw new Error('Resume must not rebind by native ID'); } },
     request: forbiddenProvider, respond: forbiddenProvider });
-  const actualHandler = createChatHttpHandler(runtime, async () => {});
+  const ensureAuth = createChatEngineAuth({ chat: runtime, refreshCodexAccount: forbiddenProvider, getCodexAuth: forbiddenProvider });
+  const actualHandler = createChatHttpHandler(runtime, ensureAuth);
   const actual = (req, res) => actualHandler(req, res, new URL(req.url, 'http://fixture.invalid'));
   for (const clientThreadId of [`${a.clientThreadId}-binding-new-nonce`, b.clientThreadId]) {
     for (const profile of [{}, { engineProfileId: a.engineProfileId }]) {
       const body = { engineId: a.engineId, clientThreadId, conversationId: a.conversationId, ...profile };
+      await assert.rejects(runtime.resume(body), { httpStatus: 409, code: 'NATIVE_BINDING_MISMATCH' });
       const real = await request(actual, 'POST', '/chat/resume', body, null, () => {}, { 'content-type': 'application/json' });
-      assert.equal(real.status, 409); assert.equal(real.body.code, 'NATIVE_BINDING_MISMATCH');
+      assert.equal(real.status, 409, JSON.stringify(real.body)); assert.equal(real.body.code, 'NATIVE_BINDING_MISMATCH');
       const fixture = await request(handler, 'POST', '/chat/resume', body);
       assert.equal(fixture.status, real.status); assert.equal(fixture.body.code, real.body.code);
     }
@@ -2783,6 +2785,49 @@ test('CTX04 seed rejects rotated or crossed client pairs with the real resume 40
   const after = await fixtureState(handler);
   assert.deepEqual(after.observed.resumes, []); assert.deepEqual(after.observed.sends, []);
   assert.deepEqual(after.context, initial.context); assert.deepEqual(after.sourceChangeSeed, initial.sourceChangeSeed);
+});
+
+test('production resume arguments use the stored Codex profile even when the renderer omits engine and profile', async () => {
+  const [{ CodexChatRuntime }, { createChatHttpHandler }, { createChatEngineAuth }, { createCodexEngineAdapter }] = await Promise.all([
+    import('../helper/codex-chat-runtime.mjs'), import('../helper/codex-bridge-http.mjs'),
+    import('../helper/codex-bridge-engine-auth.mjs'), import('../helper/codex-engine-adapter.mjs'),
+  ]);
+  const route = { clientThreadId: 'test-ui', conversationId: 'test-native' };
+  const profileId = 'codex-test-owned', owner = 'email:owned@example.test';
+  const ownerHash = createHash('sha256').update(owner).digest('hex');
+  const calls = [];
+  const forbiddenShared = () => assert.fail('Resume must not fall back to the shared Codex account');
+  const adapter = createCodexEngineAdapter({ request: forbiddenShared, respond: forbiddenShared, profiles: {} });
+  // Same callable adapter surface as the bridge, but all status/RPCs are synthetic.
+  adapter.describe = () => ({ profiles: [{ id: 'codex-default', active: true }, { id: profileId, active: false, status: 'available' }] });
+  adapter.ensureReady = async (...args) => { assert.deepEqual(args, [profileId]); calls.push('ensure'); };
+  adapter.isReady = slot => slot === profileId;
+  adapter.ownerKey = slot => slot === profileId ? owner : forbiddenShared();
+  adapter.resumeThread = async (params, slot) => {
+    assert.equal(params.threadId, route.conversationId); assert.equal(slot, profileId);
+    calls.push('resume');
+    return { thread: { id: params.threadId, turns: [] } };
+  };
+  const row = { ...route, engineId: 'codex', engineProfileId: profileId };
+  const runtime = new CodexChatRuntime({ engines: [adapter], requireStore: true, getOwnerKey: forbiddenShared, store: {
+    getConversation: id => id === route.clientThreadId ? row : null,
+    getConversationByNative: () => assert.fail('Exact pair must not look up by native ID'),
+    listEvents: id => {
+      assert.equal(id, route.clientThreadId);
+      return { events: [{ event: 'native.thread.bound', details: { conversationId: route.conversationId, ownerHash,
+        engine: { id: 'codex', engineProfileId: profileId } } }] };
+    },
+  } });
+  const ensureAuth = createChatEngineAuth({ chat: runtime, refreshCodexAccount: forbiddenShared, getCodexAuth: forbiddenShared });
+  const handle = createChatHttpHandler(runtime, ensureAuth);
+  const handler = (req, res) => handle(req, res, new URL(req.url, 'http://fixture.invalid'));
+  for (const body of [route, { ...route, engineId: 'codex' }, { ...route, engineId: 'codex', engineProfileId: profileId }]) {
+    calls.length = 0;
+    const result = await request(handler, 'POST', '/chat/resume', body, null, () => {}, { 'content-type': 'application/json' });
+    assert.equal(result.status, 200, JSON.stringify(result.body));
+    assert.equal(result.body.conversationId, route.conversationId);
+    assert.deepEqual(calls, ['ensure', 'ensure', 'resume'], 'auth and runtime both select the durable slot');
+  }
 });
 
 test('CTX04 seed-only prelaunch Chat layout fits 1280x800 and 1366x768 reserved chrome while unseeded scene prefs stay absent', async t => {

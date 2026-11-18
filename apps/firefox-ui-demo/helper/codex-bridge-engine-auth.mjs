@@ -4,9 +4,9 @@ import { CODEX_ENGINE_PROFILE_ID } from './codex-engine-adapter.mjs'
 // Existing chats authenticate their durable route, never the default or an
 // untrusted hint. Agent resolution is enabled only for Chat send routes.
 export function createChatEngineAuth({ chat, refreshCodexAccount, getCodexAuth }) {
-  return async (body = {}, { useAgent = false, allowIsolated = useAgent } = {}) => {
+  return async (body = {}, { useAgent = false, allowIsolated = useAgent, requireClientPair = false } = {}) => {
     const route = verifyAccount => chat.requestEngineRoute
-      ? chat.requestEngineRoute(body, { verifyAccount, useAgent })
+      ? chat.requestEngineRoute(body, { verifyAccount, useAgent, requireClientPair })
       : { engineId: chat.requestEngine(body, { verifyAccount }), engineProfileId: null }
     const { engineId, engineProfileId } = route(false)
     chat.assertEngineContext(body, engineId)
