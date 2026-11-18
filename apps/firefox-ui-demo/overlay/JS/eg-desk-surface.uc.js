@@ -23342,17 +23342,6 @@
     } catch { return null; }
   }
 
-  // Without content access, a beforeunload handler counts as entered input;
-  // an unreadable or user-touched page counts as unknown. Both ask first.
-  function browserCardFormState(card) {
-    try {
-      const windowContext = card._xulBrowser?.browsingContext?.currentWindowGlobal;
-      if (!windowContext) return 'unknown';
-      if (windowContext.hasBeforeUnload === true) return 'entered';
-      return windowContext.hasBeenUserGestureActivated === false ? 'clean' : 'unknown';
-    } catch { return 'unknown'; }
-  }
-
   function browserCardUserContextId(card) {
     try { return browserIdentityModule().browserUserContextId(card._xulBrowser); } catch { return null; }
   }
@@ -23364,8 +23353,10 @@
     if (card?.dataset?.codexRole === 'auth') { boardNotice('로그인 진행 중인 Browser는 계정 환경을 바꿀 수 없습니다.'); return null; }
     const current = browserCardUserContextId(card);
     const url = card._browserState?.uri || '';
+    // Neither a missing beforeunload handler nor a false hasUserInteraction
+    // proves the page is clean (e.g. uncommitted IME input). Don't inspect content.
     const plan = browserAccountContextModule().planAccountSwitch({ currentUserContextId: current,
-      targetUserContextId: target.userContextId, url, formState: browserCardFormState(card) });
+      targetUserContextId: target.userContextId, url, formState: 'unknown' });
     if (plan.action === 'unchanged') return card;
     if (plan.action === 'blocked') { boardNotice(plan.message || '이 Browser의 계정 환경을 바꿀 수 없습니다.'); return null; }
     if (plan.action === 'confirm' && !window.confirm(plan.message)) return null;
