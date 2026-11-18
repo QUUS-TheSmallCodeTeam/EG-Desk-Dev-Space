@@ -61,5 +61,6 @@ test('harness: escaped chars regex, privileged context argument, chrome:// remou
   assert.ok(source.includes('const focusContent = () =>'));
   assert.ok(source.includes('await focusContent();'));
   const shapes = readFileSync(new URL('./verify-firefox-mcp-shapes.mjs', import.meta.url), 'utf8');
-  assert.ok(shapes.includes('editor.focus();'));
+  assert.ok(shapes.includes('Shape verification requires a visible Desk canvas'));
+  assert.ok(shapes.includes('shapes.serialize(shape)?.runtimeState.text !== value'));
 });
