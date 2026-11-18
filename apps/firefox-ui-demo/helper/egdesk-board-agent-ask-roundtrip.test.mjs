@@ -113,7 +113,8 @@ for (const mode of ['extract', 'draft']) test(`encrypted guest question and one 
   assert.equal(saved.policy.profileId, active.id)
   assert.equal(saved.policy.profileRevision, active.activeRevision)
   ask.policy({ boardId: wrongBoard.id, action: 'save', expectedVersion: null, profileId: active.id, excerpts: [], publicInstructions: '' })
-  const issue = () => ask.policy({ boardId: hostBoard.id, action: 'issue', expectedVersion: saved.policy.version })
+  const change = (action, expectedVersion) => ask.policy({ boardId: hostBoard.id, action, expectedVersion })
+  const issue = version => change('issue', version)
   const decisionEgress = mode === 'draft'
   const prepare = (request, boardId = hostBoard.id) => ask.prepare({ boardId, request, mode, decisionEgress })
   async function makeRequest(issued) {
@@ -135,7 +136,8 @@ for (const mode of ['extract', 'draft']) test(`encrypted guest question and one 
     assert.equal(manual.flow.previewReply('Human review is still available.'), true)
     assert.equal(manual.output(), undefined, 'manual preview does not run or export a reply')
   }
-  let issued = issue()
+  let issued = issue(saved.policy.version)
+  assert.notEqual(issued.policy.version, saved.policy.version, 'issuance advances the CAS version')
   const issuedCodes = [issued.askCode]
   assert.ok(/^egask1-[0-9a-f]{32}$/.test(issued.askCode), 'issuer produced a canonical code')
   noDisclosure(ask.policy({ boardId: hostBoard.id, action: 'get' }), [issued.askCode, PRIVATE_INSTRUCTIONS], 'policy read did not echo code or private instructions')
@@ -147,7 +149,12 @@ for (const mode of ['extract', 'draft']) test(`encrypted guest question and one 
     assert.equal(ask.policy({ boardId: hostBoard.id, action: 'get' }).policy.codeActive, false)
     await assertManual(old.bytes)
     assert.equal(outgoing.length, 0)
-    issued = issue()
+    const previousVersion = issued.policy.version
+    issued = issue(previousVersion)
+    assert.notEqual(issued.policy.version, previousVersion)
+    for (const action of ['issue', 'revoke']) {
+      assert.throws(() => change(action, previousVersion), { code: 'BOARD_AGENT_ASK_POLICY_CONFLICT' })
+    }
     issuedCodes.push(issued.askCode)
   }
   assert.equal(issued.policy.codeActive, true)
