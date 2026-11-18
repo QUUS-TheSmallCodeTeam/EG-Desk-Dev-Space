@@ -232,7 +232,7 @@ export function hostActivityView(state, { connected = true, formatTime = at => n
   } : null;
   const live = connected === true;
   const stopped = Boolean(lease?.reasons.includes('stopped'));
-  const handBackReady = live && lease?.epoch !== null && (lease?.yielded || stopped || gate?.state === 'closed');
+  const handBackReady = live && lease?.epoch != null && gate?.epoch != null && (lease.yielded || stopped || gate.state === 'closed');
   const actions = [
     { id: 'pause', label: HOST_ACTION_LABELS.pause, tone: 'default', enabled: live && Boolean(lease) && !lease.yielded,
       hint: '지금 하던 Agent 동작을 멈추고 사람이 Mac을 씁니다. [Agent에게 돌려주기]를 누를 때까지 Agent는 기다립니다.' },
@@ -265,8 +265,8 @@ export function hostControlRequest(action, state) {
     const bundleId = state.target?.bundleId;
     return bundleId ? { path: HOST_CONTROL_PATH, body: { action, target: { bundleId } } } : null;
   }
-  if (state.lease?.epoch === null || state.lease?.epoch === undefined) return null;
-  return { path: HOST_CONTROL_PATH, body: { action, epoch: state.lease.epoch, gateEpoch: state.gate?.epoch ?? null } };
+  if (state.lease?.epoch == null || state.gate?.epoch == null) return null;
+  return { path: HOST_CONTROL_PATH, body: { action, epoch: state.lease.epoch, gateEpoch: state.gate.epoch } };
 }
 
 // CU-05 in-app emergency stop: Ctrl+Alt+Shift+. while the EG-Desk window has
@@ -321,9 +321,9 @@ export function hostControlErrorText(error) {
 /** Korean text for a control answer the bridge accepted. */
 export function hostControlResultText(action, result) {
   if (action === 'handBack') {
+    if (result?.gateCode === 'INPUT_GATE_NO_HEARTBEAT') return '관찰 도우미 신호가 없어 돌려주지 못했습니다. 입력 게이트는 닫혀 있습니다.';
+    if (result?.gateCode) return '입력 게이트를 열 수 없어 돌려주지 못했습니다. 새 상태를 확인한 뒤 다시 눌러 주세요.';
     if (result?.ok === false) return result.code === 'INPUT_HELD' ? '키나 버튼이 눌려 있어 아직 돌려줄 수 없습니다.' : '돌려주지 못했습니다.';
-    if (result?.gateCode === 'INPUT_GATE_NO_HEARTBEAT') return '입력권은 돌려줬지만 관찰 도우미 신호가 없어 입력 게이트는 닫혀 있습니다.';
-    if (result?.gateCode) return '입력권은 돌려줬지만 입력 게이트는 닫혀 있습니다. 새 상태로 다시 눌러 주세요.';
     return 'Agent에게 돌려줬습니다.';
   }
   if (action === 'pause') return 'Agent를 멈췄습니다. 지금은 사람이 씁니다.';

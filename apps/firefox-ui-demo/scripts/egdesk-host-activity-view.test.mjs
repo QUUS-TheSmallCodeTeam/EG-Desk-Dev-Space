@@ -111,6 +111,20 @@ test('control requests carry the epochs the screen showed; the helper accepts th
   assert.ok(after.rows.some(row => row.title === '모든 Agent 입력 중지'));
 });
 
+test('handback requires two displayed epochs and reports a failed reopen as failure', async () => {
+  const { control, agent } = helperState({ monitor: true });
+  agent.alive = false;
+  await control.control({ action: 'stop' });
+  const state = View.normalizeHostActivity(control.state());
+  const incomplete = { ...state, gate: { ...state.gate, epoch: null } };
+  assert.equal(View.hostControlRequest('handBack', incomplete), null);
+  assert.equal(View.hostActivityView(incomplete).actions.find(action => action.id === 'handBack').enabled, false);
+  const request = View.hostControlRequest('handBack', state);
+  const result = await control.control(request.body);
+  assert.equal(result.ok, false);
+  assert.match(View.hostControlResultText('handBack', result), /관찰 도우미 신호가 없어 돌려주지 못했습니다/);
+});
+
 test('offline keeps the last rows but disables every control', () => {
   const { control } = helperState();
   const view = View.hostActivityView(View.normalizeHostActivity(control.state()), { connected: false });

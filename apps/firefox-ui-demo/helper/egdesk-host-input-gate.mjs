@@ -100,9 +100,8 @@ export function createHostInputGate({ now = () => performance.now(), heartbeatTi
   }
 
   // Re-check time and heartbeat; closes when the watchdog went quiet.
-  function refresh() {
+  function refresh(t = clock()) {
     if (state !== 'open') return false
-    const t = clock()
     if (lastBeatAt === null) { close('heartbeat-missing'); return true }
     if (!beatFresh(t)) { close('heartbeat-stale'); return true }
     return false
@@ -123,7 +122,12 @@ export function createHostInputGate({ now = () => performance.now(), heartbeatTi
       lastSeq = seq
     }
     const t = clock()
-    if (!Number.isFinite(t)) return close('error')
+    if (!Number.isFinite(t)) {
+      lastBeatAt = null
+      return close('error')
+    }
+    // A late heartbeat is fresh for a future open, not for the old ticket.
+    refresh(t)
     lastBeatAt = t
     return snapshot(t)
   }
@@ -154,6 +158,7 @@ export function createHostInputGate({ now = () => performance.now(), heartbeatTi
    */
   function open({ epoch: asked } = {}) {
     const t = clock()
+    refresh(t)
     if (!Number.isSafeInteger(asked) || asked !== epoch) return { ok: false, code: HOST_GATE_CODES.STALE_EPOCH, status: snapshot(t) }
     if (!beatFresh(t)) return { ok: false, code: HOST_GATE_CODES.NO_HEARTBEAT, status: snapshot(t) }
     if (!KNOWN_LEASE_STATES.has(leaseState)) return { ok: false, code: HOST_GATE_CODES.UNKNOWN_STATE, status: snapshot(t) }

@@ -65,6 +65,32 @@ test('a missing or stale heartbeat closes the gate at the next check', () => {
   assert.equal(gate.allows(ticket), false, 'a late heartbeat does not reopen by itself')
 })
 
+test('the next heartbeat detects the expired interval before it installs a fresh timestamp', () => {
+  const { gate, openNow, advance, changes } = rig()
+  const ticket = { epoch: openNow() }
+  advance(1500)
+  assert.equal(gate.heartbeat().epoch, ticket.epoch, 'a heartbeat at the inclusive limit keeps the ticket')
+  advance(1501)
+  const late = gate.heartbeat()
+  assert.deepEqual([late.state, late.reason, late.epoch, late.heartbeatAgeMs], ['closed', 'heartbeat-stale', ticket.epoch + 1, 0])
+  assert.equal(changes.at(-1).reason, 'heartbeat-stale')
+  assert.equal(gate.allows(ticket), false)
+  assert.equal(gate.open(ticket).code, HOST_GATE_CODES.STALE_EPOCH)
+  const fresh = gate.open({ epoch: late.epoch })
+  assert.equal(fresh.ok, true, 'the fresh heartbeat is usable by an explicit reopen')
+  assert.equal(gate.allows(ticket), false)
+  assert.equal(gate.allows(fresh.status.epoch), true)
+})
+
+test('open itself expires an open gate before validating the requested epoch', () => {
+  const { gate, openNow, advance } = rig()
+  const ticket = { epoch: openNow() }
+  advance(1501)
+  const result = gate.open(ticket)
+  assert.equal(result.code, HOST_GATE_CODES.STALE_EPOCH)
+  assert.deepEqual([result.status.state, result.status.reason, result.status.epoch], ['closed', 'heartbeat-stale', ticket.epoch + 1])
+})
+
 test('a lost watchdog closes at once; reopening still needs the explicit new epoch', () => {
   const { gate, openNow } = rig()
   const ticket = { epoch: openNow() }
