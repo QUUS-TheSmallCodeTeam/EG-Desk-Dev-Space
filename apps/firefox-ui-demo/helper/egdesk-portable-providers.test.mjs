@@ -89,6 +89,23 @@ test('context captures and File drafts travel through the real stores; imports a
   assert.equal(view.sourceConnection, 'reconnect-required', 'an imported draft is not tied to any original')
 })
 
+test('readable capture without its projection is omitted rather than exported from raw bytes', needsBundle, async t => {
+  const a = machine(t, 'missing-projection')
+  a.desk.saveBoard('agenda-x-0001', { body: { version: 1, cards: [], shapes: [] }, expectedRevision: null })
+  const name = 'Missing projection.txt'
+  const raw = Buffer.from('Synthetic original without a readable projection')
+  const hash = await a.context.blob(OWNER, raw)
+  const sourceId = randomUUID()
+  await a.context.putRecord(OWNER, 'sources', {
+    version: 1, sourceId, hash, storedAt: T0, label: name,
+    shape: { readable: true, format: 'text', mime: 'text/plain' },
+    payloads: { source: { hash, byteLength: raw.length }, projection: null },
+  }, sourceId)
+  const out = await a.service.exportBundle({ scope: 'desk', include: { attachments: true } })
+  assert.equal(out.contents.attachments, 0)
+  assert.deepEqual(out.omitted.attachments, [{ name, reason: 'unreadable' }])
+})
+
 test('signed out: attachments are unavailable and nothing is written', needsBundle, async t => {
   const a = machine(t, 'signed-out')
   a.desk.saveBoard('agenda-x-0001', { body: { version: 1, savedAt: T0, agenda: { id: 'agenda-x-0001', title: 'X', memberCardIds: [], contextBindings: [] }, cards: [], shapes: [] }, expectedRevision: null })

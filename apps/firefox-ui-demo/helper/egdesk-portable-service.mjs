@@ -111,7 +111,7 @@ function hasPrivateKey(value, depth = 0) {
   if (!value || typeof value !== 'object') return false
   return Object.entries(value).some(([key, child]) => PRIVATE_KEYS.has(keyName(key)) || hasPrivateKey(child, depth + 1))
 }
-/** Replace string values and object keys that equal an old ID (IDs of 8+ characters only). */
+/** Replace Board/thread IDs, leaving draft references for their separate ID map. */
 function remapTree(value, map) {
   if (!map.size) return value
   const visit = part => {
@@ -119,10 +119,25 @@ function remapTree(value, map) {
     if (Array.isArray(part)) return part.map(visit)
     if (!part || typeof part !== 'object') return part
     const copy = {}
-    for (const [key, child] of Object.entries(part)) define(copy, map.get(key) ?? key, visit(child))
+    for (const [key, child] of Object.entries(part)) {
+      if (key === 'draftId' && typeof child === 'string') define(copy, key, child)
+      else define(copy, map.get(key) ?? key, visit(child))
+    }
     return copy
   }
   return visit(value)
+}
+/** A source draft ID must never resolve against the importing machine's own drafts. */
+function remapDraftReferences(value, drafts) {
+  if (Array.isArray(value)) return value.map(item => remapDraftReferences(item, drafts))
+  if (!value || typeof value !== 'object') return value
+  const copy = {}
+  for (const [key, child] of Object.entries(value)) {
+    define(copy, key, key === 'draftId' && typeof child === 'string'
+      ? drafts.get(child) ?? null
+      : remapDraftReferences(child, drafts))
+  }
+  return copy
 }
 function manifestTitle(text, fallback) {
   if (typeof text !== 'string') return fallback
@@ -662,7 +677,7 @@ function planImport(model, { desk, chat, profiles, attachments, fileDrafts }) {
   }
   return { scope: model.scope, state, boards, chats: chatPlans, profiles: profilePlans, attachments: model.attachments, fileDrafts: model.fileDrafts, counts }
 }
-/** Desk (one transaction) → conversations → profiles → attachments → File drafts. A later failure reports what was written. */
+/** Drafts → Desk (one transaction) → conversations → profiles → attachments. A later failure reports what was written. */
 async function writeImport(plan, { desk, chat, profiles, attachments, fileDrafts }) {
   const written = { desk: null, boards: [], chats: [], profiles: [], attachments: [], fileDrafts: [] }
   const partial = error => {
@@ -672,8 +687,8 @@ async function writeImport(plan, { desk, chat, profiles, attachments, fileDrafts
   try {
     // Drafts first: File cards in the imported Desk/Boards then point at the new draft IDs.
     const draftMap = await writePortableDrafts(plan, { fileDrafts }, written)
-    const state = remapTree(plan.state, draftMap)
-    const result = desk.importPortable({ state, boards: plan.boards.map(({ boardId, title, body }) => ({ boardId, title, body: remapTree(body, draftMap) })) })
+    const state = remapDraftReferences(plan.state, draftMap)
+    const result = desk.importPortable({ state, boards: plan.boards.map(({ boardId, title, body }) => ({ boardId, title, body: remapDraftReferences(body, draftMap) })) })
     written.desk = result.desk ? { generation: result.desk.generation, unchanged: result.desk.unchanged } : null
     written.boards = result.boards.map((saved, index) => ({ boardId: saved.boardId, title: saved.title, sourceBoardId: plan.boards[index].sourceBoardId, idChanged: saved.boardId !== plan.boards[index].sourceBoardId }))
     for (const item of plan.chats) {

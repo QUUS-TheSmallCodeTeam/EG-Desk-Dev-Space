@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto'
 import path from 'node:path'
 import { openEGDeskManagedDraftStore } from './egdesk-managed-drafts.mjs'
-import { isSafeEntryName } from './egdesk-portable-extras.mjs'
+import { decodeAttachmentText, isSafeEntryName } from './egdesk-portable-extras.mjs'
 
 // RT-03 bridge adapters for the opt-in .egdesk extras (see
 // egdesk-portable-extras.mjs for the provider contract).
@@ -52,7 +52,10 @@ export function createContextAttachmentProvider({ store, ownerKey }) {
         return {
           name: attachmentFileName(record.label ?? record.source?.title, mime, taken), mime,
           ...(Number.isSafeInteger(size) ? { size } : {}),
-          read: () => store.readBlob(key, projection ? projection.hash : record.hash),
+          read: () => {
+            if (record.shape?.readable && !projection) throw new Error('Missing capture projection')
+            return store.readBlob(key, projection ? projection.hash : record.hash)
+          },
         }
       })
     },
@@ -60,8 +63,7 @@ export function createContextAttachmentProvider({ store, ownerKey }) {
       const key = owner()
       const hash = await store.blob(key, bytes)
       if (hash !== sha256) fail('PORTABLE_ENTRY_UNSAFE', 'Attachment hash changed while importing', 400)
-      let text = null
-      try { text = new TextDecoder('utf-8', { fatal: true }).decode(bytes); if (text.includes('\0')) text = null } catch { text = null }
+      const text = decodeAttachmentText(bytes)
       const sourceId = randomUUID()
       const now = Date.now()
       const source = { kind: 'portable-import', title: name }

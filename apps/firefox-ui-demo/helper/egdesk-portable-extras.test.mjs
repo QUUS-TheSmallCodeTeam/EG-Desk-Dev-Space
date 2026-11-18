@@ -53,6 +53,7 @@ function machine(t, name, providers = extrasProviders()) {
   return { dataDir, desk, exportDir, service, providers }
 }
 const board = id => ({ version: 1, savedAt: T0, agenda: { id, title: 'Extras', memberCardIds: ['n'], contextBindings: [] }, cards: [{ id: 'n', type: 'result', runtimeState: { text: 'note' } }], shapes: [] })
+const SYNTHETIC_CREDENTIAL = 'Bearer SYNTHETIC-NOT-A-CREDENTIAL'
 const NOTE = 'meeting note: ship on Friday'
 const DRAFT = 'export const plan = "draft words"\n'
 
@@ -140,6 +141,24 @@ test('secrets never travel: bridge settings, the decision credential key file, e
   assert.ok(has(bytes, Buffer.from('plain words').toString('base64')) && has(bytes, '# hello'), 'safe entries do travel')
 })
 
+test('attachment filtering uses textual bytes regardless of MIME and does not mutate safe bytes', async () => {
+  const text = Buffer.from(SYNTHETIC_CREDENTIAL)
+  const mislabeled = [
+    { name: 'capture.bin', mime: 'application/octet-stream', bytes: text },
+    { name: 'capture.png', mime: 'image/png', bytes: text },
+    { name: 'unknown', mime: 'not a MIME', bytes: text },
+  ]
+  const safe = [
+    { name: 'text.bin', mime: 'application/octet-stream', bytes: Buffer.from('Ordinary UTF-8: 안녕') },
+    { name: 'redacted.bin', mime: 'application/octet-stream', bytes: Buffer.from('Bearer [REDACTED]') },
+    { name: 'image.png', mime: 'image/png', bytes: Buffer.from([0x89, 0x50, 0x4e, 0x47, 0, 0x80]) },
+  ]
+  const providers = extrasProviders({ attachmentItems: [...mislabeled, ...safe] })
+  const { entries, manifest } = await collectPortableExtras({ ...providers, include: { attachments: true }, scope: 'desk', boardIds: [] })
+  assert.deepEqual(manifest.attachments.omitted, mislabeled.map(({ name }) => ({ name, reason: 'secret' })))
+  assert.deepEqual(entries.map(entry => parseExtraEntry(entry.payload, damaged)), safe.map(({ name, mime, bytes }) => ({ type: 'attachment', name, mime, bytes, sha256: sha(bytes) })))
+})
+
 test('entry names: plain file names only; traversal, absolute and drive paths are refused', () => {
   for (const name of ['note.txt', '회의록.md', 'a b (2).png']) assert.equal(isSafeEntryName(name), true, name)
   for (const name of ['../x', '..', '.', 'a/b', 'a\\b', '/etc/passwd', 'C:\\x', 'C:x', '~/x', '\\\\server\\x', 'x\u0000', '', ' x', 'a'.repeat(256)]) assert.equal(isSafeEntryName(name), false, JSON.stringify(name))
@@ -196,18 +215,31 @@ test('Board File cards follow an imported draft to its new ID; Desk exports ask 
   const providers = extrasProviders({ draftItems: [{ id: OLD, name: 'plan.mjs', text: DRAFT }] })
   const a = machine(t, 'remap-a', providers)
   const body = board('agenda-x-0001')
-  body.cards.push({ id: 'file-1', type: 'file', runtimeState: { fileView: { fileId: 'f-1', draftId: OLD } } })
-  body.agenda.memberCardIds.push('file-1')
+  const MISSING = 'agenda-x-0001'
+  body.cards.push({ id: 'file-1', type: 'file', runtimeState: { fileView: { fileId: 'f-1', draftId: OLD }, note: OLD } },
+    { id: 'file-2', type: 'file', runtimeState: { fileView: { fileId: 'f-2', draftId: MISSING } } })
+  body.agenda.memberCardIds.push('file-1', 'file-2')
   a.desk.saveBoard('agenda-x-0001', { body, expectedRevision: null })
   const out = await a.service.exportBundle({ scope: 'board', boardId: 'agenda-x-0001', include: { fileDrafts: true } })
-  assert.deepEqual(providers.listCalls[0][1].draftIds, [OLD])
+  assert.deepEqual(providers.listCalls[0][1].draftIds, [OLD, MISSING])
   const b = machine(t, 'remap-b', extrasProviders())
   const imported = await b.service.importBundle({ bundle: readFileSync(path.join(a.exportDir, out.fileName)).toString('base64'), mode: 'asNew' })
   assert.deepEqual(imported.fileDrafts.map(item => item.draftId), ['draft-1'])
-  const card = b.desk.board('agenda-x-0001').head.body.cards.find(item => item.id === 'file-1')
-  assert.equal(card.runtimeState.fileView.draftId, 'draft-1')
-  await a.service.exportBundle({ scope: 'desk', include: { fileDrafts: true } })
+  const copied = b.desk.board(imported.boards[0].boardId).head.body.cards
+  assert.deepEqual(copied.find(item => item.id === 'file-1').runtimeState, { fileView: { fileId: 'f-1', draftId: 'draft-1' }, note: OLD })
+  assert.equal(copied.find(item => item.id === 'file-2').runtimeState.fileView.draftId, null)
+  // A Board ID collision must not convert the dangling draft reference into a new Board ID.
+  const withoutDrafts = await a.service.exportBundle({ scope: 'board', boardId: 'agenda-x-0001' })
+  const importedAgain = await b.service.importBundle({ bundle: readFileSync(path.join(a.exportDir, withoutDrafts.fileName)).toString('base64'), mode: 'asNew' })
+  assert.notEqual(importedAgain.boards[0].boardId, MISSING)
+  assert.deepEqual(importedAgain.fileDrafts, [])
+  assert.deepEqual(b.desk.board(importedAgain.boards[0].boardId).head.body.cards.slice(1).map(item => item.runtimeState.fileView.draftId), [null, null])
+  a.desk.saveCurrent({ state: body, parentGeneration: null })
+  const deskOut = await a.service.exportBundle({ scope: 'desk', include: { fileDrafts: true } })
   assert.deepEqual(providers.listCalls.at(-1)[1], { scope: 'desk', boardIds: ['agenda-x-0001'], threadIds: null, draftIds: null })
+  const importedDesk = await b.service.importBundle({ bundle: readFileSync(path.join(a.exportDir, deskOut.fileName)).toString('base64'), mode: 'asNew' })
+  const deskDraftIds = b.desk.current().state.cards.slice(1).map(item => item.runtimeState.fileView.draftId)
+  assert.deepEqual(deskDraftIds, [importedDesk.fileDrafts[0].draftId, null])
 })
 
 /** Writes a bundle by hand (root payload + children), as an older or hostile exporter would. */
@@ -261,4 +293,31 @@ test('a hand-made file with a traversal name, a wrong hash or an unlisted entry 
     await assert.rejects(b.service.importBundle({ bundle: await craftBundle(rootPayload, [child]), mode: 'asNew' }), error => error.code === code, code)
   }
   assert.deepEqual([b.desk.listBoards().boards, b.providers.imported.drafts], [[], []])
+})
+
+
+test('credential-like extra content fails bundle inspection and import before either provider writes', needsBundle, async t => {
+  const b = machine(t, 'credential-prevalidation')
+  const entry = (name, text, options) => {
+    const bytes = Buffer.from(text)
+    return { v: 1, name, bytes: bytes.length, sha256: sha(bytes), ...options(bytes) }
+  }
+  const attachment = (name, text, mime) => entry(name, text, bytes => ({ kind: EXTRA_KIND.attachment, mime, data: bytes.toString('base64') }))
+  const draft = (name, text) => entry(name, text, () => ({ kind: EXTRA_KIND.fileDraft, sourceId: null, text }))
+  const manifest = ({ name, bytes, sha256 }) => ({ included: [{ name, bytes, sha256 }], omitted: [] })
+  const cases = [
+    [attachment('capture.bin', SYNTHETIC_CREDENTIAL, 'application/octet-stream'), draft('safe.md', NOTE)],
+    [attachment('capture.png', SYNTHETIC_CREDENTIAL, 'image/png'), draft('safe.md', NOTE)],
+    [attachment('capture.txt', SYNTHETIC_CREDENTIAL, 'text/plain'), draft('safe.md', NOTE)],
+    [attachment('safe.bin', NOTE, 'application/octet-stream'), draft('draft.md', SYNTHETIC_CREDENTIAL)],
+  ]
+  const refuses = error => error.code === 'PORTABLE_ENTRY_UNSAFE' && error.reason === 'SECRET_ENTRY'
+  for (const [capture, workingCopy] of cases) {
+    const root = legacyRoot({ include: { chats: false, profiles: false, attachments: true, fileDrafts: true },
+      extras: { attachments: manifest(capture), fileDrafts: manifest(workingCopy) } })
+    const bundle = await craftBundle(root, [capture, workingCopy])
+    await assert.rejects(b.service.inspectBundle({ bundle }), refuses)
+    await assert.rejects(b.service.importBundle({ bundle, mode: 'asNew' }), refuses)
+  }
+  assert.deepEqual([b.desk.listBoards().boards, b.providers.imported], [[], { attachments: [], drafts: [] }])
 })

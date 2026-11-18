@@ -69,6 +69,17 @@ export function secretReason(name, text = null) {
   if (typeof text === 'string' && publicText(text, Number.MAX_SAFE_INTEGER) !== text) return 'secret'
   return null
 }
+/** Portable text projections are UTF-8 without NUL; MIME is only metadata. */
+export function decodeAttachmentText(bytes) {
+  let text
+  try { text = new TextDecoder('utf-8', { fatal: true }).decode(bytes) } catch { return null }
+  return text.includes('\0') ? null : text
+}
+function attachmentSecretReason(name, mime, bytes) {
+  // Also retain the original scan for declared text whose UTF-8 is imperfect.
+  const text = decodeAttachmentText(bytes) ?? (TEXT_MIME.test(mime) ? bytes.toString('utf8') : null)
+  return secretReason(name, text)
+}
 const displayName = name => typeof name === 'string' && isSafeEntryName(name) ? name : null
 
 async function readAttachment(item) {
@@ -105,7 +116,7 @@ export async function collectPortableExtras({ attachments, fileDrafts, include, 
       if (bytes.length > limits.maxAttachmentBytes) { omit('too-large'); continue }
       if (total + bytes.length > limits.maxAttachmentsTotalBytes) { omit('limit'); continue }
       const mime = typeof item.mime === 'string' && MIME.test(item.mime) ? item.mime : 'application/octet-stream'
-      if (TEXT_MIME.test(mime) && secretReason(name, bytes.toString('utf8'))) { omit('secret'); continue }
+      if (attachmentSecretReason(name, mime, bytes)) { omit('secret'); continue }
       total += bytes.length
       const hash = sha256(bytes)
       section.included.push({ name, bytes: bytes.length, sha256: hash })
@@ -161,7 +172,7 @@ export function validateExtrasManifest(manifest, include, damaged, limits = PORT
 
 /**
  * Import side: one entry payload → {name, mime?, bytes(Buffer)|text, sha256}.
- * Rejects (whole import) unsafe names, secret names, wrong hashes or sizes.
+ * Rejects (whole import) unsafe names, credential-like content, wrong hashes or sizes.
  */
 export function parseExtraEntry(value, damaged, limits = PORTABLE_EXTRA_LIMITS) {
   if (value.kind === EXTRA_KIND.attachment) {
@@ -174,6 +185,7 @@ export function parseExtraEntry(value, damaged, limits = PORTABLE_EXTRA_LIMITS) 
     if (typeof value.data !== 'string' || value.data.length % 4 !== 0 || !/^[A-Za-z0-9+/]*={0,2}$/.test(value.data)) damaged('INVALID_CONTENT')
     const bytes = Buffer.from(value.data, 'base64')
     if (bytes.length !== value.bytes || typeof value.sha256 !== 'string' || sha256(bytes) !== value.sha256) unsafeEntry('HASH_MISMATCH')
+    if (attachmentSecretReason(value.name, value.mime, bytes)) unsafeEntry('SECRET_ENTRY')
     return { type: 'attachment', name: value.name, mime: value.mime, bytes, sha256: value.sha256 }
   }
   if (value.kind === EXTRA_KIND.fileDraft) {
@@ -186,6 +198,7 @@ export function parseExtraEntry(value, damaged, limits = PORTABLE_EXTRA_LIMITS) 
     if (!Number.isSafeInteger(value.bytes) || value.bytes > limits.maxFileDraftBytes) unsafeEntry('ENTRY_TOO_LARGE')
     const bytes = Buffer.from(value.text, 'utf8')
     if (bytes.length !== value.bytes || typeof value.sha256 !== 'string' || sha256(bytes) !== value.sha256) unsafeEntry('HASH_MISMATCH')
+    if (secretReason(value.name, value.text)) unsafeEntry('SECRET_ENTRY')
     return { type: 'fileDraft', name: value.name, sourceId: value.sourceId, text: value.text, sha256: value.sha256 }
   }
   return null
