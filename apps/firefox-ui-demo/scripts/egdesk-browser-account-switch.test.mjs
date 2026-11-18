@@ -16,14 +16,14 @@ const BRW02 = section('  // BRW-02: per-card account context and the remembered'
 const SCOPE = '11111111-2222-4333-8444-555555555555';
 const KEY7 = 'aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee';
 
-function harness({ formState = 'clean', confirm = true, spawnThrows = false, remapOk = true, containers = null,
-  registryEntries = { 7: KEY7 }, sitePref = '' } = {}) {
-  const log = { spawned: [], closed: [], notices: [], confirms: [], revoked: [], dirty: [], registered: [], bound: [] };
+function harness({ windowGlobal = { hasBeforeUnload: false, hasUserInteraction: false }, confirm = true,
+  spawnThrows = false, remapOk = true, containers = null, registryEntries = { 7: KEY7 }, sitePref = '' } = {}) {
+  const log = { spawned: [], closed: [], notices: [], confirms: [], revoked: [], dirty: [], registered: [], bound: [], prefWrites: [] };
   const prefs = new Map([[AccountContext.SITE_DEFAULTS_PREF, sitePref]]);
   const services = {
     prefs: {
       getStringPref: (name, fallback) => prefs.get(name) ?? fallback,
-      setStringPref: (name, value) => prefs.set(name, value),
+      setStringPref: (name, value) => { log.prefWrites.push(name); prefs.set(name, value); },
       getBoolPref: () => true,
     },
     eTLD: { getBaseDomainFromHost: host => host.split('.').slice(-2).join('.') },
@@ -35,8 +35,7 @@ function harness({ formState = 'clean', confirm = true, spawnThrows = false, rem
   };
   const browserFor = id => ({
     getAttribute: name => (name === 'usercontextid' && id ? String(id) : null),
-    browsingContext: { originAttributes: { userContextId: id },
-      currentWindowGlobal: { hasBeforeUnload: formState === 'entered', hasBeenUserGestureActivated: formState === 'unknown' } },
+    browsingContext: { originAttributes: { userContextId: id }, currentWindowGlobal: windowGlobal },
   });
   const card = { id: 'egd-browser-card-1', style: {}, dataset: {}, _xulBrowser: browserFor(0),
     _browserState: { uri: 'https://mail.example.com/inbox' } };
@@ -80,7 +79,7 @@ function harness({ formState = 'clean', confirm = true, spawnThrows = false, rem
     setActiveEntity() {},
   };
   runInNewContext(`${BRW02}\nglobalThis.api = { switchBrowserCardAccount, browserSiteDefaultIdentity,
-    setBrowserSiteDefaultForCard, browserAccountPicker, browserCardFormState };`, ctx);
+    setBrowserSiteDefaultForCard, browserAccountPicker };`, ctx);
   return { api: ctx.api, log, card, member, prefs };
 }
 
@@ -97,7 +96,8 @@ test('switching account reopens the same URL at the same frame and moves the Boa
   assert.deepEqual(log.bound, [['egd-browser-card-2', 'p1', 'm1']]);
   assert.deepEqual(log.revoked.map(query => ({ ...query })), [{ cardId: card.id }]);
   assert.deepEqual(log.closed, [card.id]);
-  assert.deepEqual(log.confirms, []);
+  assert.equal(log.confirms.length, 1);
+  assert.match(log.confirms[0], /입력한 내용이 있다면/);
   assert.deepEqual(log.dirty, ['switch-browser-account']);
 });
 
@@ -109,22 +109,53 @@ test('switching back to the default context passes no identity', () => {
   assert.equal(Object.hasOwn(log.spawned[0].options, 'browserIdentity'), false);
 });
 
-test('a page with entered or unreadable input asks before reload; declining keeps the card', () => {
-  for (const formState of ['entered', 'unknown']) {
-    const { api, log, card } = harness({ formState, confirm: false });
-    assert.equal(api.browserCardFormState(card), formState);
-    assert.equal(api.switchBrowserCardAccount(card, { userContextId: 7, label: 'x' }), null);
-    assert.equal(log.confirms.length, 1);
-    assert.equal(log.spawned.length, 0);
-    assert.equal(log.closed.length, 0);
+test('declining preserves the original account and prefs even with uncommitted composition and no interaction flag', () => {
+  const sitePref = JSON.stringify({ version: 1, profileScopeId: SCOPE,
+    sites: { 'example.com': { mode: 'always', context: { kind: 'container', browserIdentityKey: KEY7 } } } });
+  const { api, log, card, member, prefs } = harness({ confirm: false, sitePref });
+  card._xulBrowser.getAttribute = name => (name === 'usercontextid' ? '7' : null);
+  card._xulBrowser.browsingContext.originAttributes.userContextId = 7;
+  const identity = card._browserIdentity = { userContextId: 7, browserIdentityKey: KEY7 };
+  const browser = card._xulBrowser;
+
+  // The mock page receives compositionstart without a matching compositionend.
+  // Its parent WindowGlobal metadata is still false; the guard must not read content.
+  const pageInput = new EventTarget();
+  let composing = false;
+  let contentReads = 0;
+  pageInput.addEventListener('compositionstart', () => { composing = true; });
+  pageInput.addEventListener('compositionend', () => { composing = false; });
+  pageInput.dispatchEvent(new Event('compositionstart'));
+  Object.defineProperty(browser, 'contentDocument', { get: () => { contentReads++; throw new Error('remote content'); } });
+
+  assert.equal(api.switchBrowserCardAccount(card, { userContextId: 9, label: '개인' }), null);
+  assert.equal(log.confirms.length, 1);
+  assert.match(log.confirms[0], /입력한 내용이 있다면/);
+  for (const action of ['spawned', 'closed', 'registered', 'revoked', 'dirty', 'bound', 'prefWrites']) {
+    assert.deepEqual(log[action], [], `unexpected ${action}`);
   }
-  const { api, log, card } = harness({ formState: 'entered', confirm: true });
-  assert.ok(api.switchBrowserCardAccount(card, { userContextId: 7, label: 'x' }));
-  assert.match(log.confirms[0], /저장하지 않은 입력/);
-  assert.equal(log.closed.length, 1);
+  assert.equal(contentReads, 0);
+  assert.equal(composing, true);
+  assert.equal(card._xulBrowser, browser);
+  assert.equal(Identity.browserUserContextId(browser), 7);
+  assert.equal(card._browserIdentity, identity);
+  assert.equal(card._closeApproved, undefined);
+  assert.equal(member.viewId, card.id);
+  assert.equal(prefs.get(AccountContext.SITE_DEFAULTS_PREF), sitePref);
 });
 
-test('failures keep the original card: spawn error, Board remap failure, same context', () => {
+test('missing, ambiguous, or unreadable Gecko signals still require confirmation', () => {
+  for (const windowGlobal of [null, {}, { hasBeforeUnload: true, hasUserInteraction: true },
+    { get hasUserInteraction() { throw new Error('unavailable'); } }]) {
+    const { api, log, card } = harness({ windowGlobal, confirm: false });
+    assert.equal(api.switchBrowserCardAccount(card, { userContextId: 7, label: 'x' }), null);
+    assert.equal(log.confirms.length, 1);
+    assert.deepEqual(log.spawned, []);
+    assert.deepEqual(log.closed, []);
+  }
+});
+
+test('failures keep the original card: spawn error, Board remap failure, Engine sign-in', () => {
   let h = harness({ spawnThrows: true });
   assert.equal(h.api.switchBrowserCardAccount(h.card, { userContextId: 7, label: 'x' }), null);
   assert.deepEqual(h.log.closed, []);
@@ -137,9 +168,13 @@ test('failures keep the original card: spawn error, Board remap failure, same co
   h.card.dataset.codexRole = 'auth';
   assert.equal(h.api.switchBrowserCardAccount(h.card, { userContextId: 7, label: 'x' }), null);
   assert.equal(h.log.spawned.length, 0);
-  h = harness();
-  assert.equal(h.api.switchBrowserCardAccount(h.card, { userContextId: 0, label: '기본 환경' }), h.card);
-  assert.equal(h.log.spawned.length, 0);
+  assert.deepEqual(h.log.confirms, []);
+});
+
+test('picking the current context does not prompt, reopen, or write preferences', () => {
+  const { api, log, card } = harness({ windowGlobal: null, confirm: false });
+  assert.equal(api.switchBrowserCardAccount(card, { userContextId: 0, label: '기본 환경' }), card);
+  for (const effects of Object.values(log)) assert.deepEqual(effects, []);
 });
 
 test('an unregistered container is registered only on an explicit pick', () => {

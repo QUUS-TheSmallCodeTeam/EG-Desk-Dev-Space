@@ -52,6 +52,13 @@ sandbox-computer
 
 A browser profile is not a Desk. Browser profile, container, and account are runtime bindings inside a Browser Card, so one Desk/canvas can contain multiple browser profiles or accounts at once.
 
+Switching a Browser Card to another account context reopens its URL. The card
+asks first because browser metadata cannot establish that the page has no
+unsaved input, including uncommitted IME input. It does not inspect page text
+or composition state. Cancelling leaves the existing card, account context,
+and remembered site preference unchanged. Picking the current context does
+not reopen the card or ask for confirmation.
+
 ---
 
 <a id="agenda-model"></a>
