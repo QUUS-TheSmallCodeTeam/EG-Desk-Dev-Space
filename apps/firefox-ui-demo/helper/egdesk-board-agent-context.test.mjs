@@ -71,12 +71,15 @@ for (const mode of ['advisory', 'on']) {
   test(`${mode} sends only the question, approved excerpt text, opaque aliases, and fixed typed instructions`, async () => {
     const f = fixture()
     const actual = await f.select({ decisionEgress: true, ...excluded }, { mode, ...excluded })
-    assert.deepEqual(actual, { selectedIds: ['PRIVATE_SLICE_2'], outcome: 'decision' })
+    if (mode === 'advisory') assertLocal(f, actual)
+    else assert.deepEqual(actual, { selectedIds: ['PRIVATE_SLICE_2'], outcome: 'decision' })
     assert.equal(f.keyReads(), 1)
     assert.equal(f.calls.length, 1)
     const [{ url, request, payload }] = f.calls
     assert.equal(url, DECISIONS_ENDPOINT)
     assert.equal(request.method, 'POST')
+    assert.equal(request.redirect, 'error')
+    assert.equal(request.credentials, 'omit')
     assert.equal(request.headers.authorization, 'Bearer TEST_ONLY_KEY')
     assert.deepEqual(Object.keys(payload).sort(), ['input', 'model', 'questions'])
     assert.deepEqual(JSON.parse(payload.input), {
@@ -91,6 +94,18 @@ for (const mode of ['advisory', 'on']) {
     for (const sentinel of sentinels) assert.ok(!request.body.includes(sentinel), `body must not include ${sentinel}`)
   })
 }
+
+test('question codes accidentally pasted into selectable text are never evaluated', async () => {
+  for (const field of ['question', 'excerpt']) {
+    const f = fixture()
+    const nonLiveExample = `egask1-${'a'.repeat(32)}`
+    if (field === 'question') f.scope.question = nonLiveExample
+    else f.scope.allowedSlices[0].text = nonLiveExample
+    assert.deepEqual(await f.select({ question: f.scope.question, decisionEgress: true }, { mode: 'on' }), noSelection('invalid_scope'))
+    assert.equal(f.keyReads(), 0)
+    assert.equal(f.calls.length, 0)
+  }
+})
 
 test('local ranking uses stable normalized Unicode overlap and caps returned approved IDs', async () => {
   const f = fixture()

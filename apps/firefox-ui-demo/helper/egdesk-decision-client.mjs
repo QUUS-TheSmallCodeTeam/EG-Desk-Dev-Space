@@ -217,7 +217,7 @@ export function createDecisionClient({ getApiKey, fetchImpl = globalThis.fetch, 
     const started = clock()
     let response
     try {
-      response = await fetchImpl(endpoint, { method: 'POST', signal: controller.signal,
+      response = await fetchImpl(endpoint, { method: 'POST', redirect: 'error', credentials: 'omit', referrerPolicy: 'no-referrer', signal: controller.signal,
         headers: { 'content-type': 'application/json', authorization: `Bearer ${apiKey}` }, body: JSON.stringify(body) })
     } catch {
       if (timedOut) throw new DecisionError('timeout', 'The decision model did not answer in time', { retryable: true })

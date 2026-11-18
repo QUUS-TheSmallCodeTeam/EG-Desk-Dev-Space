@@ -19,7 +19,7 @@ const epoch = value => Number.isSafeInteger(value) && value >= 0
 const result = (outcome, selectedIds = []) => ({ selectedIds, outcome })
 
 function snapshotScope(scope, question) {
-  if (!text(question, limits.question) || Buffer.byteLength(question, 'utf8') > limits.question || !exact(scope, scopeFields)) return null
+  if (!text(question, limits.question) || /egask1-[a-f0-9]{32}/i.test(question) || Buffer.byteLength(question, 'utf8') > limits.question || !exact(scope, scopeFields)) return null
   const fields = Object.fromEntries(scopeFields.map(key => [key, data(scope, key)]))
   if (![fields.invocationId, fields.boardId, fields.grantId].every(id) ||
       !(id(fields.policyRevision) || epoch(fields.policyRevision)) || !epoch(fields.expiresAt) || fields.question !== question) return null
@@ -34,7 +34,7 @@ function snapshotScope(scope, question) {
     if (!exact(row, sliceFields)) return null
     const sliceId = data(row, 'id')
     const excerpt = data(row, 'text')
-    if (!id(sliceId) || seen.has(sliceId) || !text(excerpt, limits.sliceText)) return null
+    if (!id(sliceId) || seen.has(sliceId) || !text(excerpt, limits.sliceText) || /egask1-[a-f0-9]{32}/i.test(excerpt)) return null
     total += excerpt.length
     if (total > limits.totalText) return null
     seen.add(sliceId)
@@ -178,6 +178,7 @@ export async function selectBoardAgentContext(input, options) {
   }
   const final = checkpoint()
   if (final === 'invalid_scope' || final === 'cancelled') return result(final)
-  if (selected && !final) return result('decision', selected)
+  // Advisory may evaluate the disclosed candidates, but must never change the answer inputs.
+  if (selected && !final) return mode === 'advisory' ? result('local', local) : result('decision', selected)
   return result(unconfigured && !final ? 'local' : 'local_fallback', local)
 }
