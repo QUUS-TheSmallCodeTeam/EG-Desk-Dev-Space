@@ -136,7 +136,7 @@ function surface({ run = null, thread = {}, auth = {}, fetchJson = async () => (
     createElementNS: (namespaceURI, tag) => Object.assign(new Node(tag), { ownerDocument: document, namespaceURI }),
     createTextNode: text => new Node('#text', text), getElementById: id => root.querySelector(`#${id}`),
     querySelectorAll: selector => root.querySelectorAll(selector), querySelector: selector => root.querySelector(selector) };
-  const initial = { id: 'ui', clientThreadId: 'ui', engineId: 'claude', messages: [], inputSources: [], briefingInputs: [], ...thread };
+  const initial = { id: 'ui', clientThreadId: 'ui', type: 'dm', title: 'QA 대화', engineId: 'claude', messages: [], inputSources: [], briefingInputs: [], ...thread };
   const protocol = ChatState.createChatProtocolState();
   if (run) protocol.runs[ChatState.runKey(run.conversationId, run.runId)] = run;
   const state = { panTarget: {}, agenda: {}, surface: {}, boards: {}, contextSuggest: { byThread: {} }, codex: {
@@ -223,7 +223,7 @@ function composer(ui) {
   // Keep the real icon helper, its SVG builder and source shapes in the same
   // VM scope as the extracted production composer, just as in the app.
   const icons = `${functionSource('svgEl')}\n${between('  const DESK_ICON_SHAPES = {', '  function normalizeSourcePart(')}`;
-  const controls = compile(`${functionSource('getCodexThreadDraft')}\n${icons}\n${block}\nreturn {input, sendButton, resizeComposer};`, {
+  const controls = compile(`${functionSource('chatConversationIdentity')}\nconst activeIdentity = chatConversationIdentity(activeThread, null, ChatState.chatEngineChipView(activeThread, codex));\n${functionSource('getCodexThreadDraft')}\n${icons}\n${block}\nreturn {input, sendButton, resizeComposer};`, {
     document: ui.document, body: {}, el: ui.el, ChatState, BoardThread, activeThread: ui.thread(), codex: ui.state.codex, codexBridge: ui,
     chatRoomProjectSendBlock: ui.projectBlock, composerViewport: viewport.instance,
     compositionInProgress: false,
@@ -232,12 +232,12 @@ function composer(ui) {
   return { ...controls, viewport };
 }
 function emptyChat(ui) {
-  const block = between('          const canStart = activeEngine.engineId', '        } else {\n          // Agent answers');
+  const block = between("        if (!hasConversation && activeThread.type === 'dm') {", '        } else if (!hasConversation) {') + '\n}';
   const messages = ui.el('div');
   compile(block, { el: ui.el, ChatState, BoardThread, activeThread: ui.thread(), codex: ui.state.codex,
-    activeEngine: ChatState.chatThreadReadiness(ui.thread(), ui.state.codex), messages,
-    codexBridge: { startLogin: () => assert.fail('Claude opened Codex login'), refreshAuthStatus: () => {} },
-    renderEngineChoices: () => ui.el('div'), renderStatelessStart: () => ui.el('div') });
+    activeEngine: ChatState.chatThreadReadiness(ui.thread(), ui.state.codex), messages, hasConversation: false, authCard: null,
+    chatRequestProjectSelection: () => ({ invalid: false }), chatRoomProjectSendBlock: ui.projectBlock,
+    codexBridge: { startLogin: () => assert.fail('Claude opened Codex login'), refreshAuthStatus: () => {} } });
   return messages;
 }
 function accountLifecycle(ui) {
@@ -276,7 +276,7 @@ test('real send button and empty-chat content use Claude readiness with Codex of
   assert.equal(sendIcon.querySelector('path')?.getAttribute('d'), 'M12 19V5m-5 5 5-5 5 5');
   assert.equal(sendIcon.querySelector('rect'), null, 'the fallback square is not the send icon');
   const empty = emptyChat(ui);
-  assert.match(empty.textContent, /어떤 일을 함께할까요/);
+  assert.match(empty.textContent, /첫 메시지를 보내세요/);
   assert.doesNotMatch(empty.textContent, /Codex 연결|로그인 필요/);
   await controls.sendButton.fire('click');
   await new Promise(resolve => setImmediate(resolve));
@@ -1292,7 +1292,8 @@ test('production engine popover reanchors to its fresh local chip across Canvas 
     return {place:resolveFloatingMenuPlacement, position:positionChatEngineMenu};`, {window});
   const toggleSource = source.match(/^      toggleEngineMenu\([^]*?^      \},/m)?.[0];
   assert.ok(toggleSource);
-  const renderSource = between('      const engineContext = {', '      // CHAT-07: the profile peek');
+  const renderSource = between('      const engineContext = {', '      // CHAT-07: the profile peek') + '\n' +
+    between('      const renderStatelessStart = (thread) => {', '      const renderThreadSection =');
   const attachmentSource = between("      body.appendChild(el('div', { class: shellClasses }, ...contentChildren));", '      const msgEl = body.querySelector');
   for (const scene of [
     {name:'translated Canvas at 96%', x:-620, y:80, scale:.96, anchor:{left:845,right:913,top:202,bottom:226}},
@@ -1436,7 +1437,7 @@ test('offered session approval uses the real request builder; unknown and forged
   approval.choices = ['accept', 'decline', 'cancel', 'invented', '__proto__', 'toString', 'constructor'];
   ui.render();
   buttons = nodes(ui.panel(), 'chat-approval-choice');
-  assert.deepEqual(buttons.map(button => button.textContent), ['허용', '거절', '취소']);
+  assert.deepEqual(buttons.map(button => button.textContent), ['이번만 허용', '거절', '취소']);
   for (const decision of ['acceptForSession', 'invented', '__proto__', 'toString', 'constructor']) {
     assert.equal(ChatState.approvalRequestFor(run, approval.approvalId, decision), null);
     assert.equal(await ui.replyApproval({ ...run, approvalId: approval.approvalId, decision }), false);
@@ -1521,7 +1522,7 @@ test('backend ask ceiling offers only one-off approval and rejects a forged sess
   assert.ok(approval.choices.includes('accept'));
   assert.equal(approval.choices.includes('acceptForSession'), false);
   const run = uiRun(h), ui = surface({ run }); ui.render();
-  assert.deepEqual(nodes(ui.panel(), 'chat-approval-choice').map(button => button.textContent), ['허용', '거절', '취소']);
+  assert.deepEqual(nodes(ui.panel(), 'chat-approval-choice').map(button => button.textContent), ['이번만 허용', '거절', '취소']);
   await assert.rejects(h.chat.replyApproval({ ...h.result, approvalId: approval.approvalId, decision: 'acceptForSession' }), { code: 'INVALID_DECISION' });
   assert.equal(h.transports[0].replies.length, 0);
   const response = await h.chat.replyApproval(ChatState.approvalRequestFor(run, approval.approvalId, 'accept'));
