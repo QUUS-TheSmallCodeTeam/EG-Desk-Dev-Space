@@ -4024,7 +4024,9 @@ test('checked Board wire dispatches exact ordered profiles and strips only an em
   assert.equal(turns.length, 2)
   for (const { params } of turns) {
     assert.equal(params.input[0].text, body.message)
-    assert.equal((params.additionalContext.egdesk_board.value.match(/^\[나\]/gm) || []).length, intent.roomBlock.recentTurnCount)
+    const block = params.additionalContext.egdesk_board.value
+    assert.equal((block.match(/^\[나\]/gm) || []).length, 5, 'do not widen historical disclosure by truncating each quoted message')
+    assert.ok(block.length <= 24000)
   }
 })
 
@@ -4091,4 +4093,83 @@ test('checked ordinary Board routes retain actual Codex and Claude sends without
     assert.ok(turn)
     assert.equal(turn.params?.additionalContext?.egdesk_board, undefined)
   }
+})
+
+test('older no-expectation Board sends refuse conflicting explicit Lead or explicit default, before dispatch', async t => {
+  const { boardStoreMembers } = await import('../overlay/resources/EGDeskBoardThread.sys.mjs')
+  const dataDir = await mkdtemp(path.join(os.tmpdir(), 'egdesk-delivery-lead-'))
+  const store = openChatStore({ dataDir, ownerScope: 'delivery-tests' })
+  t.after(async () => { store.close(); await rm(dataDir, { recursive: true, force: true }) })
+  const thread = deliveryThread(), room = thread.id
+  store.createConversation({ clientThreadId: room })
+  const members = boardStoreMembers(thread)
+  store.setRoomMembers({ clientThreadId: room, members })
+  store.setRoomAgent({ clientThreadId: room, profileId: 'water' })
+  const h = r2Harness({ store, profiles: r2Profiles() })
+  const body = { clientThreadId: room, message: '확인해 줘', members }
+  await assert.rejects(h.chat.sendBoard({ ...body, leadProfileId: 'sol' }), { code: 'BOARD_DELIVERY_CHANGED' })
+  await assert.rejects(h.chat.sendBoard({ ...body, leadProfileId: null }), { code: 'BOARD_DELIVERY_CHANGED' })
+  store.setRoomAgent({ clientThreadId: room, profileId: null })
+  await assert.rejects(h.chat.sendBoard({ ...body, profileId: 'sol' }), { code: 'BOARD_DELIVERY_CHANGED' })
+  assert.equal(h.calls.length, 0)
+  store.setRoomAgent({ clientThreadId: room, profileId: 'water' })
+  const result = await h.chat.sendBoard(body)
+  assert.deepEqual(result.recipients.map(row => [row.profileId, row.status]), [['water', 'started']])
+})
+
+test('Board Agent eligibility is rechecked at native handoff, including drift after auth', async () => {
+  const { boardSendPlan } = await import('../overlay/resources/EGDeskBoardThread.sys.mjs')
+  let enabled = true
+  const profiles = { runProfile(id, revision) {
+    if (!enabled) throw Object.assign(new Error('disabled'), { code: 'PROFILE_NOT_RUNNABLE' })
+    return r2Profiles().runProfile(id, revision)
+  } }
+  const h = r2Harness({ profiles, request: async (method, params, defaults) => {
+    if (method === 'thread/start') enabled = false
+    return defaults(method, params)
+  } })
+  const thread = deliveryThread(), { body } = boardSendPlan(thread, { clientThreadId: thread.id, engineId: 'codex', message: '@솔빛' })
+  const result = await h.chat.sendBoard(body)
+  assert.deepEqual(result.recipients.map(row => [row.profileId, row.status, row.code, row.dispatchStatus]), [['sol', 'failed', 'BOARD_DELIVERY_CHANGED', 'rejected']])
+  assert.equal(h.calls.filter(row => row.method === 'turn/start').length, 0)
+})
+
+test('Board snapshots every member before first send; following active refuses drift but historically pinned Lead remains eligible', async () => {
+  const { boardSendPlan } = await import('../overlay/resources/EGDeskBoardThread.sys.mjs')
+  let next = 1
+  const profiles = { runProfile(id, revision = id === 'water' ? next : 1) {
+    return { ...r2Profiles().runProfile(id, revision), binding: { profileId: id, revision, hash: `${id}-${revision}` } }
+  } }
+  const h = r2Harness({ profiles, request: async (method, params, defaults) => {
+    if (method === 'turn/start') next = 2
+    return defaults(method, params)
+  } })
+  const thread = deliveryThread()
+  const { body } = boardSendPlan(thread, { clientThreadId: thread.id, engineId: 'codex', message: '@솔빛 @물결' })
+  const result = await h.chat.sendBoard(body)
+  assert.deepEqual(result.recipients.map(row => [row.profileId, row.status, row.code]), [['sol', 'started', undefined], ['water', 'failed', 'BOARD_DELIVERY_CHANGED']])
+  assert.equal(h.calls.filter(row => row.method === 'turn/start').length, 1)
+  const pinned = r2Harness({ profiles })
+  const pinnedThread = deliveryThread({ profileEnabled: true, agentProfileId: 'water' })
+  const accepted = await pinned.chat.sendBoard(boardSendPlan(pinnedThread, { clientThreadId: pinnedThread.id, engineId: 'codex', message: '확인',
+    profileEnabled: true, profileId: 'water', profileRevision: 1 }).body, { authenticateRecipient: async () => { next = 3 } })
+  assert.deepEqual(accepted.recipients.map(row => [row.profileId, row.status]), [['water', 'started']])
+  assert.equal(pinned.events.find(event => event.event === 'run.started').details.profileBinding.revision, 1)
+})
+
+test('Board reports a lost native response as uncertain without mislabeling a confirmed sibling', async () => {
+  const { boardSendPlan } = await import('../overlay/resources/EGDeskBoardThread.sys.mjs')
+  let dispatched = 0
+  const h = r2Harness({ profiles: r2Profiles(), request: async (method, params, defaults) => {
+    if (method === 'turn/start' && ++dispatched === 2) throw new Error('synthetic reply lost')
+    return defaults(method, params)
+  } })
+  const thread = deliveryThread(), { body } = boardSendPlan(thread, { clientThreadId: thread.id, engineId: 'codex', message: '@솔빛 @물결' })
+  const result = await h.chat.sendBoard(body)
+  assert.equal(result.accepted, true)
+  assert.deepEqual(result.recipients.map(row => [row.profileId, row.status, row.dispatchStatus, row.resumeRequired]), [
+    ['sol', 'started', undefined, undefined], ['water', 'failed', 'unknown', true],
+  ])
+  assert.ok(result.recipients[1].conversationId)
+  assert.equal(dispatched, 2)
 })
