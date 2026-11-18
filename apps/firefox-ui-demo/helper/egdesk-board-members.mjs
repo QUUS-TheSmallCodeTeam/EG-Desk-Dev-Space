@@ -5,7 +5,8 @@
 //   POST /chat/board/members { clientThreadId, members } → { accepted, clientThreadId, members }
 // Local-store reads/writes only: no engine, no turn, no account check. A room
 // that has never been sent is created by the first write (like /chat/share),
-// and reads as { members: [], saved: false } until then.
+// and reads as { members: [], saved: false } until then. `saved` describes
+// the roster, not the presence of a native chat conversation.
 import { chatError } from './codex-chat-values.mjs'
 
 export const BOARD_MEMBERS_PATH = '/chat/board/members'
@@ -38,9 +39,12 @@ export function readBoardMembers(chat, clientThreadId) {
   const id = roomId(clientThreadId)
   const store = boardStore(chat)
   try {
-    if (!store.getConversation(id)) return { clientThreadId: id, members: [], saved: false }
+    if (!store.getConversation(id)) return { clientThreadId: id, members: [], saved: false, rosterSaved: false }
     const answer = store.listRoomMembers(id)
-    return { ...answer, saved: true, ...(!answer.members.length && store.hasExplicitEmptyRoster?.(id) ? { rosterSaved: true } : {}) }
+    // A first engine send can create a conversation without ever setting its roster.
+    // Once explicitly cleared, an empty list is authoritative and must not be reseeded.
+    const rosterSaved = answer.members.length > 0 || store.hasExplicitEmptyRoster?.(id) === true
+    return { ...answer, saved: rosterSaved, rosterSaved }
   } catch (error) { throw storeFailure(error, 'read') }
 }
 

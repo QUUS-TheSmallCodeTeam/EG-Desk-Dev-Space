@@ -42,7 +42,7 @@ const members = [
 
 test('CHAT-10: a room never saved reads empty; the first write creates it and keeps members in order', (t) => {
   const { store, chat } = storeChat(t)
-  assert.deepEqual(readBoardMembers(chat, 'room-1'), { clientThreadId: 'room-1', members: [], saved: false })
+  assert.deepEqual(readBoardMembers(chat, 'room-1'), { clientThreadId: 'room-1', members: [], saved: false, rosterSaved: false })
   assert.equal(store.getConversation('room-1'), null, 'reading never creates the room')
   const written = writeBoardMembers(chat, { clientThreadId: 'room-1', members })
   assert.equal(written.accepted, true)
@@ -56,6 +56,19 @@ test('CHAT-10: a room never saved reads empty; the first write creates it and ke
   // The list read back can be written again as is (memberKey and addedAt kept).
   const again = writeBoardMembers(chat, { clientThreadId: 'room-1', members: read.members.slice(0, 2) })
   assert.deepEqual(again.members, read.members.slice(0, 2))
+})
+
+test('Board roster recovery distinguishes a native conversation with no saved roster from one explicitly cleared', (t) => {
+  const { store, chat } = storeChat(t)
+  const clientThreadId = 'synthetic-board'
+  store.createConversation({ clientThreadId, createdAt: T })
+  assert.deepEqual(readBoardMembers(chat, clientThreadId), { clientThreadId, members: [], saved: false, rosterSaved: false })
+  writeBoardMembers(chat, { clientThreadId, members })
+  assert.equal(readBoardMembers(chat, clientThreadId).rosterSaved, true)
+  writeBoardMembers(chat, { clientThreadId, members: [] })
+  for (let read = 0; read < 2; read++) {
+    assert.deepEqual(readBoardMembers(chat, clientThreadId), { clientThreadId, members: [], saved: true, rosterSaved: true })
+  }
 })
 
 test('CHAT-10: Board member writes refuse bad input plainly and never half-save', (t) => {

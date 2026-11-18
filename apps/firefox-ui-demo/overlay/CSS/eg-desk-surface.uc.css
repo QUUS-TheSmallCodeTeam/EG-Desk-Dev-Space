@@ -11394,7 +11394,7 @@ button.egd-memo-ask-cancel:hover { text-decoration: underline; }
 .egd-board-chat-scope:empty, .egd-board-chat-correction:empty { display: none; }
 .egd-board-chat-disclosure { flex: none; margin-inline-start: auto; color: var(--egd-on-surface-variant); }
 .egd-board-chat-disclosure > summary { cursor: pointer; font-size: 11px; white-space: nowrap; }
-.egd-board-chat-disclosure > summary:focus-visible { outline: 2px solid currentColor; outline-offset: 2px; }
+.egd-board-chat-disclosure > summary:focus-visible { outline: var(--egd-focus-outline); outline-offset: var(--egd-focus-outline-offset); }
 .egd-board-chat-scope-body { position: absolute; z-index: 4; inset-inline: 0; inset-block-end: 100%; max-height: 145px; overflow: auto; padding: 6px 9px; border: 1px solid var(--egd-outline-variant); border-radius: 6px; background: var(--egd-window-alt); color: var(--egd-on-surface); overflow-wrap: anywhere; }
 .egd-board-chat-scope-body ul { padding-inline-start: 19px; margin: 1px 0 5px; }
 .egd-board-chat-scope-body p { margin: 3px 0; }
