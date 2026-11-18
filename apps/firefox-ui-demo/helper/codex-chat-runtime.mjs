@@ -855,16 +855,20 @@ export class CodexChatRuntime {
     return this.requestEngineRoute(body, { ...options, legacyAgentEngine: true }).engineId
   }
 
-  requestEngineRoute(body = {}, { verifyAccount = true, useAgent = false, legacyAgentEngine = false, profileRun } = {}) {
+  requestEngineRoute(body = {}, { verifyAccount = true, useAgent = false, legacyAgentEngine = false, profileRun, requireClientPair = false } = {}) {
     if (this.requireStore) this.assertStore()
     const requested = this.requestedEngine(body)
     const cid = idText(body.conversationId)
     if (body.conversationId != null && !cid) throw chatError('INVALID_THREAD_ID', 'Invalid conversationId')
-    const clientThreadId = idText(body.clientThreadId) || idText(body.thread?.id)
+    if (requireClientPair && !cid) throw chatError('MISSING_THREAD_ID', 'conversationId is required')
+    const clientThreadId = idText(body.clientThreadId) || (!requireClientPair ? idText(body.thread?.id) : null)
+    if (requireClientPair && this.store && !clientThreadId) throw chatError('INVALID_CLIENT_THREAD_ID', 'clientThreadId is required to resume a durable chat', 400)
     let thread = this.store && clientThreadId ? this.store.getConversation(clientThreadId) : null
-    // Fork names its source conversation and a new destination client ID.
-    // Pairing is still enforced by send/resume/fork, not by this auth lookup.
-    if (this.store && cid && thread?.conversationId !== cid) thread = this.store.getConversationByNative?.(cid) || null
+    // Resume is for the exact durable pair, even during the pre-auth lookup.
+    // Fork instead names a source CID and a different destination client ID.
+    if (this.store && cid && thread?.conversationId !== cid) {
+      thread = requireClientPair ? null : this.store.getConversationByNative?.(cid) || null
+    }
     if (this.store && cid && !thread) throw chatError('NATIVE_BINDING_MISMATCH', 'Native conversation is not bound to a local chat', 409)
     const boundCid = cid || thread?.conversationId
     const binding = this.store && boundCid && thread ? this.readNativeBinding(thread.clientThreadId, boundCid) : null
@@ -2505,7 +2509,7 @@ export class CodexChatRuntime {
     if (this.requireStore) this.assertStore()
     const cid = idText(body.conversationId)
     if (!cid) throw chatError('MISSING_THREAD_ID', 'conversationId is required')
-    const { engineId, engineProfileId } = this.requestEngineRoute(body, { verifyAccount: false })
+    const { engineId, engineProfileId } = this.requestEngineRoute(body, { verifyAccount: false, requireClientPair: true })
     const slot = this.operationSlot(engineId, engineProfileId)
     if (slot) await this.slotAdapter(engineId).ensureReady(slot)
     let boundPolicy = this.threads.get(cid)?.executionPolicy || null

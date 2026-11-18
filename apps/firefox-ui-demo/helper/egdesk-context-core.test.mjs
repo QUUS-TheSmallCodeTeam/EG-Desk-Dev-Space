@@ -936,8 +936,10 @@ function changeCommentAuthority(h, change) {
   if (change === 'account') h.changeOwner('email:b@example.com')
   else if (change === 'epoch') h.chat.reset()
   else if (change === 'profile') {
-    const record = h.chat.engineRecord.bind(h.chat)
-    h.chat.engineRecord = engine => ({ ...record(engine), engineProfileId: 'changed-profile' })
+    // The pin comes from the durable checkpoint, not engineRecord's active default.
+    // Keep CID, engine, account and epoch unchanged; only the persisted pin disagrees.
+    h.chatStore.appendEvent({ clientThreadId: h.route.clientThreadId, eventKey: randomUUID(), ts: Date.now(), event: 'native.thread.bound',
+      details: { conversationId: h.route.conversationId, ownerHash: hashContent('email:a@example.com'), engine: { id: 'codex', engineProfileId: 'changed-profile' } } })
   } else if (change === 'CID') {
     const get = h.chatStore.getConversation.bind(h.chatStore)
     h.chatStore.getConversation = client => { const value = get(client); return value && client === h.route.clientThreadId ? { ...value, conversationId: 'changed-native' } : value }
@@ -946,6 +948,15 @@ function changeCommentAuthority(h, change) {
       details: { conversationId: h.route.conversationId, ownerHash: hashContent('email:b@example.com'), engine: { id: 'codex', engineProfileId: 'codex-default' } } })
   } else assert.fail(`Unknown authority change: ${change}`)
 }
+
+test('briefing comment authority does not replace a durable pin with the runtime default', async t => {
+  const h = await commentHarness(t)
+  const authority = h.authority()
+  const record = h.chat.engineRecord.bind(h.chat)
+  h.chat.engineRecord = (...args) => ({ ...record(...args), engineProfileId: 'different-default' })
+  assert.deepEqual(h.authority(), authority)
+  assert.equal((await h.contexts.addBriefingComment(h.briefing.id, h.body(), authority)).seq, 1)
+})
 
 test('comment queue entry revalidates account, epoch, profile, CID and durable checkpoint, including duplicate and no-op resolve', async t => {
   for (const change of ['account', 'epoch', 'profile', 'CID', 'checkpoint']) for (const operation of ['add', 'duplicate', 'resolve', 'resolve-noop']) await t.test(`${operation}/${change}`, { timeout: 5000 }, async t => {
