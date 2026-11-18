@@ -6,7 +6,7 @@ import { accountAccessState, normalizeNativeAuth, publicAuthIdentityKey, publicP
 import { usageDisplay } from './codex-account-usage.mjs'
 import { CodexChatRuntime } from './codex-chat-runtime.mjs'
 import { createChatEngineAuth } from './codex-bridge-engine-auth.mjs'
-import { codexDeviceLoginPatch, codexLoginInProgressResponse, codexLoginMode, codexLoginStartParams, createCodexEngineAdapter, describeCodexEngine, isStaleLoginFailure } from './codex-engine-adapter.mjs'
+import { CODEX_ENGINE_PROFILE_ID, codexDeviceLoginPatch, codexLoginInProgressResponse, codexLoginMode, codexLoginStartParams, createCodexEngineAdapter, describeCodexEngine, isStaleLoginFailure } from './codex-engine-adapter.mjs'
 import { EngineRegistry, createEngineStatusEmitter } from './engine-registry.mjs'
 import { claudeLoginTerminalCommand, createClaudeEngineStatus, probeClaudeEngine, resolveClaudeExecutable } from './claude-engine-auth.mjs'
 import { createClaudeEngineAdapter } from './claude-engine-adapter.mjs'
@@ -743,9 +743,9 @@ async function connectToAppServer() {
     experimentalApi: true,
     onNotification: message => {
       handleAppServerNotification(message)
-      if (!nativeReader.handleNotification(message)) void chat.handleNotification(message)
+      if (!nativeReader.handleNotification(message)) codexEngine.notify(message, CODEX_ENGINE_PROFILE_ID)
     },
-    onRequest: message => { if (!nativeReader.handleServerRequest(message)) void chat.handleServerRequest(message) },
+    onRequest: message => { if (!nativeReader.handleServerRequest(message)) codexEngine.serverRequest(message, CODEX_ENGINE_PROFILE_ID) },
   })
   rpc = connection
   socket.onopen = async () => {

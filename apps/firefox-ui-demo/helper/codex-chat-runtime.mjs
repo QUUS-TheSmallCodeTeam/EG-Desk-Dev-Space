@@ -10,7 +10,7 @@ import { browserRefusal, ceilingAllowsBrowserTool, ceilingAllowsComputerTool, ce
 import { HOST_CONTROL_POLICIES, HOST_LEASE_CODES, requiresHostControl } from './egdesk-host-lease.mjs'
 import { COMPUTER_ADAPTER_CODES, refusedResult } from './egdesk-computer-adapter.mjs'
 import { engineError } from './engine-adapter.mjs'
-import { createCodexEngineAdapter } from './codex-engine-adapter.mjs'
+import { CODEX_ENGINE_PROFILE_ID, createCodexEngineAdapter } from './codex-engine-adapter.mjs'
 import { EngineRegistry } from './engine-registry.mjs'
 import { assertModelSelection } from './codex-model-catalog.mjs'
 import { mcpControlKind, nativeMcpServerKind, strongerControlKind } from './codex-inherited-mcp.mjs'
@@ -768,8 +768,10 @@ export class CodexChatRuntime {
   assertReady(engineId = 'codex', engineProfileId = null) {
     if (engineProfileId && this.slotAdapter(engineId)) {
       this.assertEngineProfile(engineId, engineProfileId)
-      if (!this.engines.require(engineId).isReady(engineProfileId)) throw engineError('ENGINE_UNAVAILABLE', 'The selected AI engine account is offline')
-      return
+      if (engineId !== 'codex' || this.lifecycleSlot(engineId, engineProfileId)) {
+        if (!this.engines.require(engineId).isReady(engineProfileId)) throw engineError('ENGINE_UNAVAILABLE', 'The selected AI engine account is offline')
+        return
+      }
     }
     if (engineId !== 'codex') {
       if (this.connectionOf(engineId) !== 'ready') throw engineError('ENGINE_UNAVAILABLE', 'This AI engine is offline')
@@ -785,13 +787,17 @@ export class CodexChatRuntime {
   }
 
   connectionOf(engineId = 'codex') { return engineId === 'codex' ? this.connection : this.engineState(engineId).connection }
+  // The explicit default slot and legacy no-slot Codex use the same RPC.
+  // An owned Codex process must not inherit epochs from that shared RPC.
+  lifecycleSlot(engineId, slot) { return engineId === 'codex' && slot === CODEX_ENGINE_PROFILE_ID ? undefined : slot || undefined }
   epochOf(engineId = 'codex', slot = undefined) {
-    const epoch = engineId === 'codex' ? this.epoch : this.engineState(engineId).epoch
-    return epoch + (slot ? this.engineState(`${engineId}/${slot}`).epoch : 0)
+    slot = this.lifecycleSlot(engineId, slot)
+    if (engineId === 'codex') return slot ? this.engineState(`${engineId}/${slot}`).epoch : this.epoch
+    return this.engineState(engineId).epoch + (slot ? this.engineState(`${engineId}/${slot}`).epoch : 0)
   }
   runEpoch(run) { return this.epochOf(this.runEngine(run), this.threadOperationSlot(run.conversationId)) }
   runConnected(run) {
-    const engineId = this.runEngine(run), slot = this.threadOperationSlot(run.conversationId)
+    const engineId = this.runEngine(run), slot = this.lifecycleSlot(engineId, this.threadOperationSlot(run.conversationId))
     return slot ? this.engines.require(engineId).isReady(slot) : this.connectionOf(engineId) === 'ready'
   }
 
@@ -832,9 +838,16 @@ export class CodexChatRuntime {
     }
   }
   threadEngine(conversationId) { return this.threadEngines.get(conversationId) || 'codex' }
-  keyEngine(key) {
-    for (const [conversationId, engineId] of this.threadEngines) if (engineId !== 'codex' && key.startsWith(`${conversationId}/`)) return engineId
-    return 'codex'
+  lifecycleMatches(engineId, slot, candidateEngine, candidateSlot) {
+    return candidateEngine === engineId && (engineId === 'codex' || slot ? this.lifecycleSlot(engineId, candidateSlot) === slot : true)
+  }
+  lifecycleScope(engineId, slot) {
+    return { engineId, ...(slot ? { engineProfileId: slot } : engineId === 'codex' && this.slotAdapter(engineId) ? { engineProfileId: CODEX_ENGINE_PROFILE_ID } : {}) }
+  }
+  keyConversation(key) {
+    let threadId = null
+    for (const cid of this.threadEngines.keys()) if (key.startsWith(`${cid}/`) && (!threadId || cid.length > threadId.length)) threadId = cid
+    return threadId
   }
 
   // The engine a native conversation runs on. Unknown or pre-engine threads are Codex.
@@ -1232,39 +1245,45 @@ export class CodexChatRuntime {
     this.emitEvent(publicEvent)
   }
 
-  // Account change or sign-out of one engine (Codex by default). Other
-  // engines' runs, threads and pending requests stay; the event stream
-  // restarts, so viewers resync from the snapshot.
-  reset(engineId = 'codex') {
-    const codex = engineId === 'codex'
-    const own = [...this.runs].filter(([, run]) => this.runEngine(run) === engineId)
-    if (typeof this.contexts?.getAuthority === 'function') this.contexts.reset?.({ engineId })
-    if (codex) for (const provider of this.toolProviders) {
+  // Account change or sign-out affects only the named transport. The shared
+  // Codex transport includes both legacy and explicit codex-default bindings.
+  reset(engineId = 'codex', { engineProfileId = null } = {}) {
+    const slot = this.lifecycleSlot(engineId, engineProfileId)
+    const ownThread = cid => this.lifecycleMatches(engineId, slot, this.threadEngine(cid), this.threadOperationSlot(cid))
+    const own = [...this.runs].filter(([, run]) => ownThread(run.conversationId))
+    const globalProviders = engineId === 'codex' && !this.slotAdapter(engineId)
+    if (typeof this.contexts?.getAuthority === 'function') this.contexts.reset?.(this.lifecycleScope(engineId, slot))
+    if (globalProviders) for (const provider of this.toolProviders) {
       if (provider === this.contexts && typeof provider.getAuthority === 'function') continue
       provider.reset?.()
     }
     else for (const [, run] of own) for (const provider of this.toolProviders) try { provider.cancelRun?.(run) } catch {}
-    if (codex) this.epoch++
+    if (slot) this.engineState(`${engineId}/${slot}`).epoch++
+    else if (engineId === 'codex') this.epoch++
     else this.engineState(engineId).epoch++
     this.streamId = randomUUID()
     this.seq = 0
-    const ownThread = conversationId => this.threadEngine(conversationId) === engineId
     for (const map of [this.threads, this.threadResumeCwds, this.threadToolOwners, this.threadToolManifests, this.threadToolManifestStatus, this.threadSessions, this.pendingStarts, this.pendingResumes]) {
       for (const conversationId of [...map.keys()]) if (ownThread(conversationId)) map.delete(conversationId)
     }
     for (const set of [this.browserRegisteredThreads, this.loadedThreads, this.uncertainThreads, this.incompleteHistory]) {
       for (const conversationId of [...set]) if (ownThread(conversationId)) set.delete(conversationId)
     }
-    this.ownedRuns = new WeakSet([...this.runs.values()].filter(run => this.runEngine(run) !== engineId && this.ownedRuns.has(run)))
-    for (const [key] of own) this.runs.delete(key)
-    for (const map of [this.qaOutputMarkersByRun, this.rawMessages, this.visibleMessages, this.persistedRunStates]) {
-      for (const key of [...map.keys()]) if (this.keyEngine(key) === engineId) map.delete(key)
+    if (engineId === 'codex') {
+      const ownChild = cid => ownThread(this.childNotes.get(cid)?.parentThreadId || this.subAgentRun(cid)?.conversationId)
+      for (const cache of [this.childReads, this.childReadsPending, this.childLineEmits, this.childNotes]) {
+        for (const cid of [...cache.keys()]) if (ownChild(cid)) cache.delete(cid)
+      }
     }
-    for (const key of this.runOutputs.keys()) if (this.keyEngine(key) === engineId) this.runOutputs.forget(key)
-    // Child Agent threads are Codex threads.
-    if (codex) { this.childNotes.clear(); this.childReads.clear(); this.childReadsPending.clear(); this.childLineEmits.clear() }
-    this.forgetPendingRequests(engineId)
-    for (const [requestId, record] of [...this.requests]) if ((record.engineId || 'codex') === engineId) this.requests.delete(requestId)
+    for (const [key, run] of own) { this.ownedRuns.delete(run); this.runs.delete(key) }
+    for (const map of [this.qaOutputMarkersByRun, this.rawMessages, this.visibleMessages, this.persistedRunStates]) {
+      for (const key of [...map.keys()]) if (ownThread(this.keyConversation(key))) map.delete(key)
+    }
+    for (const key of this.runOutputs.keys()) if (ownThread(this.keyConversation(key))) this.runOutputs.forget(key)
+    this.forgetPendingRequests(engineId, ownThread)
+    for (const [requestId, record] of this.requests) {
+      if (this.lifecycleMatches(engineId, slot, record.engineId || 'codex', record.slot)) this.requests.delete(requestId)
+    }
     if (!this.runs.size) this.truncated = false
   }
 
@@ -1280,26 +1299,27 @@ export class CodexChatRuntime {
   setConnection(engineId, ready, options) {
     if (typeof engineId === 'boolean') [engineId, ready, options] = ['codex', engineId, ready]
     const { processLost = false, engineProfileId = null } = options || {}
-    const scopeMatches = cid => this.threadEngine(cid) === engineId && (!engineProfileId || (this.threadEngineProfile(cid) || this.engineRecord(engineId).engineProfileId) === engineProfileId)
+    const slot = this.lifecycleSlot(engineId, engineProfileId)
+    const scopeMatches = cid => this.lifecycleMatches(engineId, slot, this.threadEngine(cid), this.threadOperationSlot(cid))
     const codex = engineId === 'codex'
-    if (engineProfileId) this.engineState(`${engineId}/${engineProfileId}`).connection = ready ? 'ready' : 'offline'
+    const globalProviders = codex && !this.slotAdapter(engineId)
+    if (slot) this.engineState(`${engineId}/${slot}`).connection = ready ? 'ready' : 'offline'
     else if (codex) this.connection = ready ? 'ready' : 'offline'
     else this.engineState(engineId).connection = ready ? 'ready' : 'offline'
     if (ready) return
-    if (typeof this.contexts?.getAuthority === 'function') this.contexts.disconnect?.({ engineId, processLost, ...(engineProfileId ? { engineProfileId } : {}) })
-    if (engineProfileId) this.engineState(`${engineId}/${engineProfileId}`).epoch++
-    else if (codex) {
-      for (const provider of this.toolProviders) {
-        if (provider === this.contexts && typeof provider.getAuthority === 'function') continue
-        provider.disconnect?.({ processLost })
-      }
-      this.epoch++
-    } else this.engineState(engineId).epoch++
+    if (typeof this.contexts?.getAuthority === 'function') this.contexts.disconnect?.({ ...this.lifecycleScope(engineId, slot), processLost })
+    if (globalProviders) for (const provider of this.toolProviders) {
+      if (provider === this.contexts && typeof provider.getAuthority === 'function') continue
+      provider.disconnect?.({ processLost })
+    }
+    if (slot) this.engineState(`${engineId}/${slot}`).epoch++
+    else if (codex) this.epoch++
+    else this.engineState(engineId).epoch++
     for (const conversationId of [...this.loadedThreads]) if (scopeMatches(conversationId)) this.loadedThreads.delete(conversationId)
     for (const run of this.runs.values()) {
       if (!scopeMatches(run.conversationId)) continue
       // Tool providers keep serving the other engines; stop only this run.
-      if (!codex || engineProfileId) for (const provider of this.toolProviders) try { provider.cancelRun?.(run) } catch {}
+      if (!globalProviders) for (const provider of this.toolProviders) try { provider.cancelRun?.(run) } catch {}
       // A child Agent can outlive its parent turn; its last state is now unknown.
       this.updateSubAgentRows(run, (run.subAgents || []).filter(row => !SUBAGENT_DONE.has(row.state) && row.state !== 'unknown').map(row => ({ threadId: row.threadId, state: 'unknown', nativeStatus: null })), true)
       if (TERMINAL.has(run.status)) continue
@@ -1323,7 +1343,7 @@ export class CodexChatRuntime {
     }
     this.forgetPendingRequests(engineId, scopeMatches)
     for (const map of [this.qaOutputMarkersByRun, this.rawMessages, this.visibleMessages]) {
-      for (const key of [...map.keys()]) if (this.keyEngine(key) === engineId && (!engineProfileId || [...this.threadEngines.keys()].some(cid => key.startsWith(`${cid}/`) && scopeMatches(cid)))) map.delete(key)
+      for (const key of [...map.keys()]) if (scopeMatches(this.keyConversation(key))) map.delete(key)
     }
   }
 
@@ -1476,7 +1496,7 @@ export class CodexChatRuntime {
     let boundPolicy = this.threads.get(conversationId)?.executionPolicy || null
     // After a helper restart the binding, not the default engine or Codex's
     // connection state, determines both routing and the account to verify.
-    const profileRun = this.resolveProfile(body)
+    const profileRun = internal?.profileRun ?? this.resolveProfile(body)
     const route = this.requestEngineRoute(body, { verifyAccount: false, useAgent: true, profileRun })
     const { engineId, engineProfileId } = route
     if (engineProfileId) await this.slotAdapter(engineId)?.ensureReady(engineProfileId)
@@ -1673,7 +1693,7 @@ export class CodexChatRuntime {
       board: internal?.board?.record || null,
       extraContext: { ...(typeof internal?.board?.block === 'string' ? { egdesk_board: internal.board.block } : {}), ...(internal?.blocks || {}) },
     }
-    const record = { fingerprint, settled: false, promise: null, engineId: context.engine.id }
+    const record = { fingerprint, settled: false, promise: null, engineId: context.engine.id, slot }
     record.promise = this.startTurn(body, context).catch(error => {
       const failure = error instanceof Error ? error : new Error('Codex request failed')
       const contextRefusal = (context.engine.id === 'claude' && CLAUDE_CONTEXT_PRESTART_REFUSALS.has(failure.code))
@@ -2345,7 +2365,7 @@ export class CodexChatRuntime {
       const uncertain = Boolean(context.nativeTurnId || (turnStartAttempted && error.definite !== true && typeof error.code !== 'number'))
       if (epoch === this.epochOf(engine.id, slot) && uncertain) this.uncertainThreads.add(cid)
       if (context.nativeTurnId && epoch === this.epochOf(engine.id, slot)) {
-        for (const event of pending.buffer.splice(0)) if (event.method === 'dynamic' || event.method === 'approval') {
+        for (const event of pending.buffer.splice(0)) if ((event.method === 'dynamic' || event.method === 'approval') && this.eventRouteMatches(event.inbound)) {
           try { this.respond(event.rpcId, null, { code: -32000, message: 'Run binding failed; no tool authority was granted' }, this.threadOperationSlot(event.threadId)) } catch {}
         }
         const run = this.runs.get(runKey(cid, context.nativeTurnId))
@@ -2672,7 +2692,7 @@ export class CodexChatRuntime {
    *   profileId, memberKey, label, reason: 'mentioned'|'lead', clientThreadId,
    *   status: 'started'|'deferred'|'failed', requestId, conversationId, runId, code }] }
    */
-  async sendBoard(body) {
+  async sendBoard(body, { authenticateRecipient } = {}) {
     const room = idText(body.clientThreadId)
     if (!room?.trim()) throw chatError('INVALID_CLIENT_THREAD_ID', 'clientThreadId of the Board room is required', 400)
     if (typeof body.message !== 'string' || !body.message.trim()) throw chatError('EMPTY_MESSAGE', 'Message is required')
@@ -2710,11 +2730,14 @@ export class CodexChatRuntime {
       const record = { roomClientThreadId: room, memberKey: recipient.memberKey, profileId: recipient.profileId, label: recipient.label, reason: recipient.reason }
       try {
         const conversationId = this.boundConversation(target)
-        const accepted = await this.send({
+        const recipientBody = {
           ...rest, message: body.message, clientThreadId: target, requestId: memberRequestId, profileId: recipient.profileId,
           ...(conversationId ? { conversationId } : {}),
           ...(profileRevision != null && profileId === recipient.profileId ? { profileRevision } : {}),
-        }, { board: { record, block: boardContextBlock({ members, recipient, leadProfileId: lead, recentMessages }) } })
+        }
+        const profileRun = this.resolveProfile(recipientBody)
+        await authenticateRecipient?.(recipientBody, profileRun)
+        const accepted = await this.send(recipientBody, { profileRun, board: { record, block: boardContextBlock({ members, recipient, leadProfileId: lead, recentMessages }) } })
         // A durable replay returns its saved outcome, including refusals;
         // Promise fulfillment alone does not mean a native turn started.
         if (accepted?.accepted !== true) {
@@ -2908,7 +2931,6 @@ export class CodexChatRuntime {
     }
     if (!approval.choices.includes(body.decision)) throw chatError('INVALID_DECISION', 'Unsupported approval choice')
     const run = this.findRun(body)
-    this.assertReady(this.runEngine(run))
     if (TERMINAL.has(run.status)) throw chatError('STALE_APPROVAL', 'Run has ended', 409)
     const grants = body.decision === 'accept' || body.decision === 'acceptForSession'
     if (grants && !this.ownedRuns.has(run)) throw chatError('NATIVE_RUN_UNBOUND', 'This native run has no verified EG-Desk dispatch binding', 409)
@@ -2983,7 +3005,6 @@ export class CodexChatRuntime {
     }
     if (!['submit', 'skip'].includes(body.action)) throw chatError('INVALID_USER_INPUT_ANSWER', 'Unsupported answer action')
     const run = this.findRun(body)
-    this.assertReady(this.runEngine(run))
     if (TERMINAL.has(run.status)) throw chatError('STALE_USER_INPUT', 'Run has ended', 409)
     let answers = null
     if (body.action === 'submit') {
@@ -3011,23 +3032,37 @@ export class CodexChatRuntime {
     return BOUNDED_MODES.includes(run.executionPolicy?.mode) || BOUNDED_MODES.includes(this.threads.get(run.conversationId)?.executionPolicy)
   }
 
-  eventRouteMatches(message, engineId, slot) {
-    if (!engineId) return true // direct legacy/internal invocations
+  inboundEventRoute(message, engineId, slot) {
+    if (!engineId) return null // direct legacy/internal invocations
     const p = message.params || {}
-    const cid = idText(p.threadId || p.thread?.id)
-    const parent = idText(p.thread?.parentThreadId || p.parentThreadId)
-    const known = [cid, parent].find(id => id && this.threadEngines.has(id)) || this.subAgentRun(cid)?.conversationId
-    if (!known) return !slot
-    if (this.threadEngine(known) !== engineId) return false
-    const pinned = this.threadEngineProfile(known)
-    const active = this.engineRecord(engineId).engineProfileId
-    return (pinned || active) === (slot || active)
+    return { engineId, slot, epoch: this.epochOf(engineId, slot),
+      threadId: idText(p.threadId || p.thread?.id), parentThreadId: idText(p.thread?.parentThreadId || p.parentThreadId) }
+  }
+
+  eventRouteMatches(route) {
+    if (!route) return true
+    const { engineId, slot, epoch, threadId: cid, parentThreadId: parent } = route
+    if (epoch !== this.epochOf(engineId, slot)) return false
+    const childParent = this.subAgentRun(cid)?.conversationId || this.childNotes.get(cid)?.parentThreadId
+    const known = [cid, parent, childParent].filter(id => id && this.threadEngines.has(id))
+    const inboundSlot = engineId === 'codex' ? this.lifecycleSlot(engineId, slot) : slot
+    if (!known.length) return !inboundSlot
+    // Never resolve an untagged Codex event to a pinned owned slot, even
+    // when the remote thread and turn IDs happen to match.
+    return known.every(id => {
+      if (this.threadEngine(id) !== engineId) return false
+      if (engineId === 'codex') return this.lifecycleSlot(engineId, this.threadOperationSlot(id)) === inboundSlot
+      const active = this.engineRecord(engineId).engineProfileId
+      return (this.threadEngineProfile(id) || active) === (inboundSlot || active)
+    })
   }
 
   handleNotification(message, engineId, slot) {
-    if (!this.eventRouteMatches(message, engineId, slot)) return Promise.resolve()
+    const inbound = this.inboundEventRoute(message, engineId, slot)
+    if (!this.eventRouteMatches(inbound)) return Promise.resolve()
     const event = cleanNotification(message.method, message.params, engineId || this.threadEngine(idText(message.params?.threadId)))
     if (!event) return Promise.resolve()
+    event.inbound = inbound
     const output = privateOutput(message.method, message.params)
     if (output) event.privateOutput = output
     if (message.method === 'item/completed' && message.params?.item?.type === 'commandExecution') {
@@ -3044,31 +3079,32 @@ export class CodexChatRuntime {
   }
 
   handleServerRequest(message, engineId, slot) {
-    if (!this.eventRouteMatches(message, engineId, slot)) return Promise.resolve()
+    const inbound = this.inboundEventRoute(message, engineId, slot)
+    if (!this.eventRouteMatches(inbound)) return Promise.resolve()
     const p = message.params || {}
     if (message.method === 'item/tool/call') {
       if (typeof p.tool !== 'string' || typeof p.callId !== 'string' || JSON.stringify(p.arguments ?? {}).length > 65536) {
         this.respond(message.id, null, { code: -32602, message: 'Invalid dynamic tool request' }, slot || this.threadOperationSlot(idText(p.threadId)))
         return Promise.resolve()
       }
-      return this.enqueue({ method: 'dynamic', rpcId: message.id, threadId: idText(p.threadId), turnId: idText(p.turnId), callId: p.callId, tool: p.tool, namespace: p.namespace || null, arguments: p.arguments })
+      return this.enqueue({ method: 'dynamic', rpcId: message.id, inbound, threadId: idText(p.threadId), turnId: idText(p.turnId), callId: p.callId, tool: p.tool, namespace: p.namespace || null, arguments: p.arguments })
     }
     // D-C3: same approval envelope; the request is read once here and only
     // its public card and private answer plan travel on (memory only).
     if (message.method === ELICITATION_METHOD) return this.enqueue({
-      method: 'approval', nativeMethod: message.method, rpcId: message.id,
+      method: 'approval', nativeMethod: message.method, rpcId: message.id, inbound,
       threadId: idText(p.threadId), turnId: idText(p.turnId), itemId: null,
       serverName: typeof p.serverName === 'string' ? p.serverName : '', elicitation: computerElicitationRequest(p), choices: [],
     })
     // Keep the approval envelope so buffering, binding failure, unowned-run and
     // bounded-QA refusals apply unchanged. Invalid questions arrive as null.
     if (message.method === USER_INPUT_METHOD) return this.enqueue({
-      method: 'approval', nativeMethod: message.method, rpcId: message.id,
+      method: 'approval', nativeMethod: message.method, rpcId: message.id, inbound,
       threadId: idText(p.threadId), turnId: idText(p.turnId), itemId: idText(p.itemId),
       isBlocking: p.isBlocking !== false, questions: safeUserInputQuestions(p.questions), choices: [],
     })
     const event = {
-      method: 'approval', nativeMethod: message.method, rpcId: message.id,
+      method: 'approval', nativeMethod: message.method, rpcId: message.id, inbound,
       threadId: idText(p.threadId), turnId: idText(p.turnId), itemId: idText(p.itemId),
       reason: publicText(p.reason, 2000), command: publicText(p.command, 2000), cwd: publicText(p.cwd, 2000),
       nativeKind: p.kind ?? 'command',
@@ -3097,8 +3133,10 @@ export class CodexChatRuntime {
       }
       return Promise.resolve()
     }
-    const engineId = this.threadEngine(event.threadId)
-    const slot = this.threadOperationSlot(event.threadId)
+    const routeThread = this.threadEngines.has(event.threadId) ? event.threadId
+      : event.parentThreadId || this.subAgentRun(event.threadId)?.conversationId || this.childNotes.get(event.threadId)?.parentThreadId || event.threadId
+    const engineId = this.threadEngine(routeThread)
+    const slot = this.threadOperationSlot(routeThread)
     const epoch = this.epochOf(engineId, slot)
     this.queue = this.queue.then(() => epoch === this.epochOf(engineId, slot) ? this.apply(event) : undefined).catch(() => {
       const run = this.runs.get(runKey(event.threadId, event.turnId))
@@ -3111,6 +3149,9 @@ export class CodexChatRuntime {
   }
 
   async apply(event) {
+    // An initially unbound ID can become known while we are queued. Never
+    // let the new binding inherit a different transport's buffered event.
+    if (!this.eventRouteMatches(event.inbound)) return
     if (event.method === 'serverRequest/resolved') {
       for (const [id, approval] of this.pendingApprovals) if (approval.rpcId === event.requestId && approval.conversationId === event.threadId) {
         this.pendingApprovals.delete(id)
@@ -3133,7 +3174,7 @@ export class CodexChatRuntime {
     }
     const run = this.runs.get(runKey(event.threadId, event.turnId))
     if (!run || !this.ownedRuns.has(run)) {
-      if (event.method === 'approval' || event.method === 'dynamic') this.respond(event.rpcId, null, { code: -32601, message: 'No matching EG-Desk run' }, this.threadOperationSlot(event.threadId))
+      if (event.method === 'approval' || event.method === 'dynamic') this.respond(event.rpcId, null, { code: -32601, message: 'No matching EG-Desk run' }, event.inbound?.slot || this.threadOperationSlot(event.threadId))
       // A child Agent thread never gains authority; its parent row shows the stall.
       if (!run && event.method === 'approval' && event.nativeMethod !== USER_INPUT_METHOD) this.markSubAgentBlocked(event.threadId)
       // A child's own items never become a run; its parent row shows a short line.
@@ -3536,7 +3577,7 @@ export class CodexChatRuntime {
     // children until their row appears; other threads' statuses are ignored.
     const ownedParent = parentId => this.pendingStarts.has(parentId) || [...this.runs.values()].some(candidate => candidate.conversationId === parentId && this.ownedRuns.has(candidate))
     if (event.method === 'thread/started' ? !ownedParent(event.parentThreadId) : !this.childNotes.has(event.threadId)) return
-    const note = { ...this.childNotes.get(event.threadId) }
+    const note = { ...this.childNotes.get(event.threadId), ...(event.parentThreadId ? { parentThreadId: event.parentThreadId } : {}) }
     for (const [key, value] of Object.entries(update)) if (value != null && key !== 'create') note[key] = value
     this.childNotes.delete(event.threadId)
     this.childNotes.set(event.threadId, note)
@@ -3560,7 +3601,7 @@ export class CodexChatRuntime {
       if (epoch !== this.runEpoch(run) || !thread || thread.id !== threadId) return
       const identity = safeChildIdentity(thread)
       if (identity.nickname || identity.role) this.childReads.set(threadId, MAX_CHILD_READS)
-      return this.enqueue({ method: CHILD_READ, threadId, turnId: null, identity, status: safeThreadStatus(thread.status) })
+      return this.enqueue({ method: CHILD_READ, threadId, parentThreadId: run.conversationId, turnId: null, identity, status: safeThreadStatus(thread.status) })
     }).catch(() => {}).finally(() => this.childReadsPending.delete(threadId))
   }
 
@@ -3709,7 +3750,7 @@ export class CodexChatRuntime {
         row = { threadId: update.threadId, label: null, nickname: null, role: null, taskPreview: null, model: null, state: update.initialState || 'unknown', nativeStatus: null, waitingOn: [], message: null, lastTool: null, blocked: null, recent: [], updatedAt: this.now(), parentEnded: false }
         // What Codex already said about this child (thread/started, status).
         const note = this.childNotes.get(update.threadId)
-        if (note) {
+        if (note && (!note.parentThreadId || note.parentThreadId === run.conversationId)) {
           this.childNotes.delete(update.threadId)
           update = { ...Object.fromEntries(['nickname', 'role', 'nativeStatus', 'waitingOn'].filter(key => note[key] != null).map(key => [key, note[key]])), ...update }
         }

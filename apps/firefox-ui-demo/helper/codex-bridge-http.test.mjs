@@ -870,7 +870,7 @@ test('2-R routes: Board send, message sharing and sub-Agent hand-back reach thei
   const seen = []
   let auth = 0
   const chat = {
-    sendBoard: async body => { seen.push(['sendBoard', body]); return { accepted: true, requestId: 'b-1', clientThreadId: body.clientThreadId, recipients: [] } },
+    sendBoard: async (body, { authenticateRecipient }) => { await authenticateRecipient({ ...body, clientThreadId: 'member-thread', profileId: 'member' }); seen.push(['sendBoard', body]); return { accepted: true, requestId: 'b-1', clientThreadId: body.clientThreadId, recipients: [] } },
     shareMessages: body => { seen.push(['shareMessages', body]); return { accepted: true, shareId: 'share-1', messageCount: 1, attach: 'nextTurn' } },
     reassignSubAgent: async () => { throw Object.assign(new Error('Stop or wait for the current turn, then hand the task back'), { httpStatus: 409, code: 'RUN_IN_PROGRESS', stopRequired: true, conversationId: 'parent' }) },
   }
