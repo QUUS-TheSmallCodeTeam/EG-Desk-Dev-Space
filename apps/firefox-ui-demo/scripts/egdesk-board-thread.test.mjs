@@ -123,7 +123,7 @@ test('each member\'s state (작업 중 · 막힘 · 완료) comes from the run a
 });
 
 // ── Screen wiring, cut from the surface source ──
-function sendHarness({ thread, reply, early = () => [] }) {
+function sendHarness({ thread, reply, early = () => [], beforeReplay = () => {} }) {
   const state = { codex: { activeThreadId: thread.id, activityRoomGeneration: 1, threads: [thread], threadDrafts: { [thread.id]: thread.draft }, threadDraftRevisions: { [thread.id]: 1 },
     authStatus: { isLoggedIn: true, authMode: 'chatgpt', accountEmail: 'fixture@example.test', identityStatus: 'known' }, connected: true, liveRevision: 0 } };
   const protocol = ChatState.createChatProtocolState();
@@ -144,11 +144,13 @@ function sendHarness({ thread, reply, early = () => [] }) {
     CHAT_REQUEST_PROJECT_INVALID: 'project invalid', codexProfileCatalog: { status: 'ready', profiles: [{ id: ID_V, name: '검증 담당', avatar: null }] },
     fetchJson: async (path, options) => { calls.push([path, JSON.parse(options.body)]); return reply(path, JSON.parse(options.body)); },
     syncProtocolRun: run => synced.push(run),
-    boardEarlyEvents: BoardThread.createBoardEarlyEvents(), replayed: [],
+    boardEarlyEvents: BoardThread.createBoardEarlyEvents(), replayed: [], warnings: [], TAG: 'fixture',
+    console: { warn: (...args) => deps.warnings.push(args) },
   };
   // The live stream's chat.event path, as far as admission goes: an unknown request is held for a pending board send.
   deps.handleEvent = event => {
     if (!ChatState.canAdmitChatEvent(protocol, state.codex.threads, event)) { deps.boardEarlyEvents.hold(event); return; }
+    beforeReplay(event);
     deps.replayed.push(ChatState.reduceChatEvent(protocol, event));
   };
   const realFetch = deps.fetchJson;
@@ -229,20 +231,26 @@ test('screen wiring: member changes are saved to the store, opening a Board Thre
   assert.match(surfaceCss, /\.egd-codex-hud-members \{/);
 });
 
-test('CHAT-10 (a): a member\'s events that arrive before the board send\'s answer are held, then replayed once its run is registered', async () => {
+test('CHAT-10 (a): early member events replay in arrival order even if a handler throws', async () => {
+  const attempts = [];
+  const failure = new Error('fixture dispatch failure');
   const chatEvent = (requestId, seq, event, details = {}) => ({ type: 'chat.event', v: 2, streamId: 's-1', seq, event, requestId, clientThreadId: 'board-member:v',
     conversationId: 'c-v', runId: 'r-v', engineId: 'codex', ts: '2026-11-17T00:00:00Z', details });
   const h = sendHarness({ thread: room({ draft: '@검증 담당 확인해 주세요', profileEnabled: true }),
+    beforeReplay: event => { attempts.push(event.seq); if (event.seq === 2) throw failure; },
     early: body => [
       chatEvent(`${body.requestId}~v`, 1, 'run.started', { board: { profileId: ID_V, reason: 'mentioned', roomClientThreadId: 'room-1' } }),
-      chatEvent(`${body.requestId}~v`, 2, 'message.completed', { messageId: 'm-v', text: '확인했습니다' }),
-      chatEvent('someone-else~x', 3, 'message.completed', { messageId: 'm-x', text: '남의 것' }),
+      chatEvent(`${body.requestId}~v`, 2, 'message.delta', { messageId: 'm-v', delta: '확인' }),
+      chatEvent(`${body.requestId}~v`, 3, 'message.completed', { messageId: 'm-v', text: '확인했습니다' }),
+      chatEvent('someone-else~x', 4, 'message.completed', { messageId: 'm-x', text: '남의 것' }),
     ],
     reply: (path, body) => ({ accepted: true, requestId: body.requestId, clientThreadId: body.clientThreadId, recipients: [
       { profileId: ID_V, label: '검증 담당', reason: 'mentioned', clientThreadId: 'board-member:v', requestId: `${body.requestId}~v`, status: 'started', conversationId: 'c-v', runId: 'r-v' }] }) });
   const result = await h.send();
   assert.equal(result.accepted, true);
-  assert.equal(h.deps.replayed.length, 2, 'both of the member\'s early events replayed, the stranger\'s dropped');
+  assert.deepEqual(attempts, [1, 2, 3], 'the failed event is not retried and the unrelated event is not admitted');
+  assert.equal(h.deps.replayed.length, 2, 'both surrounding events are handled');
+  assert.deepEqual(h.deps.warnings, [['fixture', 'board member early event dispatch failed', failure]]);
   const run = h.protocol.runs[ChatState.runKey('c-v', 'r-v')];
   assert.equal(run.messages.find(message => message.id === 'm-v')?.content, '확인했습니다');
   assert.equal(run.boardMember, true);
@@ -295,10 +303,90 @@ test('CHAT-10 (b): after a restart the other members\' stored answers come back 
 
 test('CHAT-10 robustness wiring: early events held and replayed, member conversations folded into their room, never shown as rooms', () => {
   assert.match(surfaceScript, /if \(!ChatState\.canAdmitChatEvent\(protocol, state\.codex\.threads, event\)\) \{ boardEarlyEvents\.hold\(event\); return; \}/);
-  assert.match(surfaceScript, /for \(const early of boardEarlyEvents\.release\(requestId\)\) handleEvent\(early\);/);
   assert.match(surfaceScript, /if \(boardPlan\) boardEarlyEvents\.open\(requestId\);/);
   assert.match(surfaceScript, /\.finally\(\(\) => boardEarlyEvents\.close\(requestId\)\)/);
   assert.match(surfaceScript, /if \(!BoardThread\.isBoardMemberThreadId\(summary\.clientThreadId\)\) await loadLocalHistoryThread\(summary\);/);
-  assert.match(surfaceScript, /if \(BoardThread\.isBoardMemberThreadId\(summary\.clientThreadId\)\) await restoreBoardMemberAnswers\(summary\);/);
+  assert.match(surfaceScript, /if \(BoardThread\.isBoardMemberThreadId\(summary\.clientThreadId\)\) \{\s+const partialRoom = await restoreBoardMemberAnswers\(summary\);/);
   assert.match(surfaceScript, /BoardThread\.boardRoutedMembers\(normalized\.events\)\) boardMemberRooms\.set\(/);
+});
+
+function historyHarness({ summaries, routes, read }) {
+  const threads = [room(), room({ id: 'room-2' })];
+  const state = { codex: { threads, localHistoryBootReady: true } };
+  const restore = surfaceScript.match(/    const BOARD_MEMBER_HISTORY_MAX_PAGES[\s\S]*?(?=    async function loadLocalHistoryThread)/)?.[0];
+  const load = surfaceScript.match(/    async function loadLocalHistory\(legacyRecords[\s\S]*?(?=    const scheduleReconnect)/)?.[0];
+  const render = surfaceScript.match(/        if \(codex\.boardMemberHistoryPartialRooms\?\.has\(activeThread\.id\)\)[\s\S]*?(?=        const bindingHeld)/)?.[0];
+  assert.ok(restore && load && render);
+  const calls = [];
+  const deps = { state, ChatState, BoardThread, boardMemberRooms: routes, codexProfileCatalog: { profiles: [] },
+    listLocalHistoryThreads: async () => summaries,
+    getCodexThreadById: (codex, id) => codex.threads.find(thread => thread.id === id),
+    updateThreadById: (id, update) => { state.codex.threads = state.codex.threads.map(thread => thread.id === id ? update(thread) : thread); },
+    fetchJson: async path => {
+      const url = new URL(path, 'http://fixture.invalid');
+      assert.equal(url.pathname, '/chat/history');
+      assert.equal(url.searchParams.get('limit'), '100');
+      const id = url.searchParams.get('clientThreadId'), cursor = Number(url.searchParams.get('afterSeq'));
+      calls.push([id, cursor]);
+      return read(summaries.find(summary => summary.clientThreadId === id), cursor);
+    },
+    emit() {},
+  };
+  const boot = compileFunction(`let localLoadPromise, lastLocalLoadAt, legacyHistoryRecords, localRetryTimer, localAutoRetryEligible;
+    ${restore}\n${load}\nreturn loadLocalHistory;`, Object.keys(deps))(...Object.values(deps));
+  const present = compileFunction(`const notices = []; const conversation = { appendChild: node => notices.push(node) };
+    ${render}\nreturn notices;`, ['codex', 'activeThread', 'el']);
+  return { boot, calls, state, messages: id => deps.getCodexThreadById(state.codex, id).messages,
+    notices: id => present(state.codex, { id }, (_tag, props, text) => ({ props, text })) };
+}
+
+const memberSummary = id => ({ clientThreadId: `board-member:${id}`, localConversationId: `store-${id}` });
+const memberPage = (thread, cursor, hasMore, nextCursor = cursor + 100) => ({
+  protocolVersion: 1, thread, hasMore, nextCursor, events: [], messages: [
+    { localMessageId: `${thread.clientThreadId}-${cursor}`, role: 'assistant', text: `answer ${cursor}`, createdAt: 10000 - cursor },
+  ],
+});
+
+test('Board restart scan caps reads per member and reports partial answers only in the owning room', async () => {
+  const [long, sameRoom, otherRoom, unrouted] = ['long', 'same', 'other', 'unrouted'].map(memberSummary);
+  let lastPageHasMore = true;
+  const h = historyHarness({ summaries: [long, sameRoom, otherRoom, unrouted], routes: new Map([
+    [long.clientThreadId, { roomId: 'room-1', profileId: ID_V }],
+    [sameRoom.clientThreadId, { roomId: 'room-1', profileId: ID_D }],
+    [otherRoom.clientThreadId, { roomId: 'room-2', profileId: ID_D }],
+  ]), read: (summary, cursor) => memberPage(summary, cursor, summary === long && (cursor < 1900 || lastPageHasMore)) });
+  assert.equal(await h.boot(), true);
+  const expectedCalls = [...Array.from({ length: 20 }, (_, index) => [long.clientThreadId, index * 100]),
+    [sameRoom.clientThreadId, 0], [otherRoom.clientThreadId, 0]];
+  assert.deepEqual(h.calls, expectedCalls);
+  assert.equal(h.state.codex.localHistoryStatus, 'ready', 'unrelated history is not reported as a global failure');
+  assert.equal(h.messages('room-1').length, 21);
+  assert.equal(h.messages('room-1')[0].id, `${long.clientThreadId}-1900`, 'valid answers keep chronological display order');
+  assert.deepEqual(h.messages('room-2').map(message => message.id), [`${otherRoom.clientThreadId}-0`]);
+  assert.deepEqual(h.state.codex.threads.map(thread => thread.id), ['room-1', 'room-2']);
+  const [notice] = h.notices('room-1');
+  assert.equal(notice.props.role, 'status');
+  assert.match(notice.text, /멤버 답변 기록을 모두 불러오지 못했습니다/);
+  assert.deepEqual(h.notices('room-2'), []);
+
+  lastPageHasMore = false;
+  assert.equal(await h.boot(), true);
+  assert.deepEqual(h.calls.slice(expectedCalls.length), expectedCalls, 'a terminal twentieth page needs no extra read');
+  assert.deepEqual(h.notices('room-1'), [], 'a complete scan clears the notice');
+  assert.equal(h.messages('room-1').length, 21, 'a reload does not duplicate answers');
+});
+
+test('Board restart scan stops at a stalled cursor and rejects a page with a different thread identity', async () => {
+  const [stalled, wrong] = ['stalled', 'wrong'].map(memberSummary);
+  const h = historyHarness({ summaries: [stalled, wrong], routes: new Map([
+    [stalled.clientThreadId, { roomId: 'room-1', profileId: ID_V }],
+    [wrong.clientThreadId, { roomId: 'room-2', profileId: ID_D }],
+  ]), read: (summary, cursor) => summary === stalled ? memberPage(summary, cursor, true, cursor)
+    : memberPage({ ...summary, localConversationId: 'different-store-thread' }, cursor, false) });
+  assert.equal(await h.boot(), true);
+  assert.deepEqual(h.calls, [[stalled.clientThreadId, 0], [wrong.clientThreadId, 0]]);
+  assert.deepEqual(h.messages('room-1').map(message => message.id), [`${stalled.clientThreadId}-0`]);
+  assert.deepEqual(h.messages('room-2'), []);
+  assert.equal(h.notices('room-1').length, 1);
+  assert.equal(h.notices('room-2').length, 1);
 });
