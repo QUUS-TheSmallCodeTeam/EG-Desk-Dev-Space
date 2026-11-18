@@ -23,6 +23,7 @@
   const BrowserAgentReceipts = ChromeUtils.importESModule('chrome://userchrome/content/EGDeskBrowserAgentRuntimeParent.sys.mjs');
   const BrowserGrant = ChromeUtils.importESModule('chrome://userchrome/content/EGDeskBrowserGrant.sys.mjs');
   const PortableState = ChromeUtils.importESModule('chrome://userchrome/content/EGDeskPortableState.sys.mjs');
+  const ReviewHandoff = ChromeUtils.importESModule('chrome://userchrome/content/EGDeskReviewHandoff.sys.mjs');
   const TextFilePickers = ChromeUtils.importESModule('chrome://userchrome/content/EGDeskNativeFilePickers.sys.mjs');
   const BoardExport = ChromeUtils.importESModule('chrome://userchrome/content/EGDeskBoardExport.sys.mjs');
   const ProfileTransfer = ChromeUtils.importESModule('chrome://userchrome/content/EGDeskProfileTransfer.sys.mjs');
@@ -5494,6 +5495,8 @@
   }
 
   function clearAgendaStore() {
+    invalidateReviewContext();
+    try { reviewStore().reset(); } catch { return; }
     try {
       const prefs = servicesRef().prefs;
       if (prefs.prefHasUserValue(AGENDA_STORAGE_PREF)) prefs.clearUserPref(AGENDA_STORAGE_PREF);
@@ -5912,7 +5915,10 @@
   function selectBoardProjection(projectionId) {
     const projection = state.boards.projections[projectionId];
     if (!projection) return false;
-    if (state.boards.activeProjectionId !== projection.id) state.boardSelectionRevision = (state.boardSelectionRevision || 0) + 1;
+    if (state.boards.activeProjectionId !== projection.id) {
+      state.boardSelectionRevision = (state.boardSelectionRevision || 0) + 1;
+      invalidateReviewContext();
+    }
     state.boards.activeProjectionId = projection.id;
     state.agenda.activeAgendaId = projection.boardId;
     state.agenda.activeTitle = projection.title;
@@ -6233,9 +6239,13 @@
         () => openPortableExport({ scope: 'board', boardId: projection.boardId, boardTitle: projection.title })) : null,
       boardVersionHistoryReady() ? item('저장본을 .canvas로 내보내기…', '저장된 Board를 .canvas 파일로 내보내기', 'board-export-json-canvas',
         () => openBoardCanvasExport(projectionId)) : null,
+      reviewHandoffReady() ? item('검토 요청 파일 만들기…', '직접 입력한 검토 요청을 로컬 파일로 만들기', 'board-review-request',
+        () => openReviewDialog('request', anchor, projection)) : null,
+      reviewHandoffReady() ? item('검토 회신 기록', '이 Board에 로컬로 추가한 검토 회신 보기', 'board-review-results',
+        () => openReviewDialog('results', anchor, projection)) : null,
       item('Board 닫기', '이 Board 닫기', 'board-close', () => closeCurrentAgenda({ projectionId })),
     ].filter(Boolean);
-    const menuWidth = items.some(button => button.dataset.testid === 'board-export-json-canvas') ? 232 : 152;
+    const menuWidth = items.some(button => ['board-export-json-canvas', 'board-review-request'].includes(button.dataset.testid)) ? 232 : 152;
     const pos = resolveFloatingMenuPlacement(anchor.getBoundingClientRect(), menuWidth, items.length * 36 + 4);
     const menu = el('div', {
       class: 'egd-board-menu', role: 'menu', 'aria-label': `${projection.title} Board 작업`,
@@ -6799,6 +6809,7 @@
     if (!snapshot?.agenda?.id) return false;
     if (!canRestoreDeskSnapshotIdentity(snapshot, options)) return false;
     if (!options.merge && document.querySelector('.egd-canvas-card, .egd-canvas-shape')) return false;
+    invalidateReviewContext();
     state.agenda.restoreInProgress = true;
     state.agenda.suppressDirty = true;
     try {
@@ -6982,6 +6993,7 @@
     const projectionId = options.projectionId || state.boards.activeProjectionId;
     if (boardCloseInFlight.has(projectionId)) return boardCloseInFlight.get(projectionId);
     boardCloseRequests.add(projectionId);
+    invalidateReviewContext();
     const pending = finishAgendaClose({ ...options, projectionId }).finally(() => boardCloseInFlight.delete(projectionId));
     boardCloseInFlight.set(projectionId, pending);
     return pending;
@@ -7357,6 +7369,7 @@
     if (!entry) return false;
     const purge = () => {
       const result = BoardLifecycle.purgeBoard(coerceAgendaStore(), agendaId);
+      if (result?.ok && !forgetReviewBoards([agendaId])) return false;
       if (!writeBoardLifecycleStore(result, 'Board를 삭제하지 못했습니다. 휴지통에 그대로 있습니다.')) return false;
       syncViewportAgendaRail();
       boardDoneNotice(`'${result.title}' Board를 완전히 삭제했습니다.`);
@@ -9513,6 +9526,11 @@
       dismiss: () => forwardEscape(document),
     });
     registerEscapeLayer({
+      id: 'review-dialog', kind: 'dialog',
+      isOpen: () => !!byId('egd-review-dialog'), contains: within('#egd-review-dialog'),
+      dismiss: () => closeReviewDialog(),
+    });
+    registerEscapeLayer({
       id: 'portable-dialog', kind: 'dialog',
       isOpen: () => !!byId('egd-portable-dialog'), contains: within('#egd-portable-dialog'),
       dismiss: () => forwardEscape(byId('egd-portable-dialog')),
@@ -10965,7 +10983,7 @@
       // RT-03 Desk 메뉴: '내보내기…' and '가져오기…', shown only while the bridge supports .egdesk files.
       el('button', {
         id: 'egd-desk-menu-open', class: 'egd-rail-icon', title: 'Desk 작업', 'aria-label': 'Desk 작업',
-        'aria-haspopup': 'menu', 'aria-expanded': 'false', hidden: !portableExportReady() && !portableImportReady(), data: { testid: 'desk-menu' },
+        'aria-haspopup': 'menu', 'aria-expanded': 'false', hidden: !portableExportReady() && !portableImportReady() && !reviewHandoffReady(), data: { testid: 'desk-menu' },
         onclick: (ev) => { ev.stopPropagation(); toggleDeskMenu(ev.currentTarget); },
       }, deskIcon('menu')),
       el('button', { id: 'egd-recovery-open', class: 'egd-rail-icon', 'aria-label': '복구 기록', title: '복구 기록', hidden: true, onclick: () => openDeskRecoveryEntry() }, deskIcon('recovery')),
@@ -29537,6 +29555,131 @@
     return boardCanvasExportRef.start();
   }
 
+  // Manual review files are deliberately independent of portable Desk/Board
+  // snapshots, chats, browser sources, profile exports, and Agent actions.
+  const REVIEW_PREF = 'egdesk.review.handoff.local.v1';
+  let reviewSupported = false;
+  let reviewContextEpoch = 0;
+  let reviewFlowRef = null;
+  let reviewStoreRef = null;
+  let reviewOpener = null;
+  const blockedReviewBoardIds = new Set();
+
+  function reviewHandoffReady() { return reviewSupported; }
+  function reviewStore() {
+    if (!reviewStoreRef) reviewStoreRef = ReviewHandoff.createReviewStore({
+      read: () => servicesRef().prefs.getStringPref(REVIEW_PREF, ''),
+      write: (value) => {
+        const prefs = servicesRef().prefs;
+        prefs.setStringPref(REVIEW_PREF, value);
+        prefs.savePrefFile(null);
+        return true;
+      },
+    });
+    return reviewStoreRef;
+  }
+  function forgetReviewBoards(ids) {
+    if (!ids.length) return true;
+    try { reviewStore().forgetBoards(ids, key => JSON.parse(key)[0]); return true; }
+    catch {
+      for (const id of ids) blockedReviewBoardIds.add(id);
+      boardNotice('이 프로필의 검토 연결을 정리하지 못했습니다. 해당 Board에서 검토 기록을 사용하지 않습니다.');
+      return false;
+    }
+  }
+  function reviewProfilePath() {
+    try { return servicesRef().dirsvc.get('ProfD', Ci.nsIFile).path || null; }
+    catch { return null; }
+  }
+  function reviewContext() {
+    const profile = reviewProfilePath();
+    const canvas = document.getElementById('egd-canvas-layer');
+    if (!profile || !canvas?.isConnected || state.surface.restoring || state.agenda.restoreInProgress || window.closed) return null;
+    return { profile, canvas, boards: state.boards, activeId: state.boards.activeProjectionId, epoch: reviewContextEpoch };
+  }
+  function isReviewContextCurrent(old) {
+    const now = reviewContext();
+    return !!now && Object.keys(now).every(key => now[key] === old[key]);
+  }
+  function invalidateReviewContext() {
+    reviewContextEpoch++;
+    reviewFlowRef?.invalidate();
+  }
+  function reviewBoard(projection) {
+    if (!projection || blockedReviewBoardIds.has(projection.boardId) ||
+        state.boards.projections[projection.id] !== projection || boardCloseInFlight.has(projection.id)) return null;
+    const region = document.getElementById(projection.id);
+    if (!region?.isConnected || region.dataset.boardId !== projection.boardId ||
+        !region.closest('#egd-canvas-layer')) return null;
+    // The metadata identity is not taken from a portable snapshot. Binding to
+    // this projection alone would be too weak across closing/reopening Boards.
+    const meta = coerceAgendaStore().meta[projection.boardId];
+    if (!Number.isSafeInteger(meta?.createdAt) || BoardLifecycle.isBoardTrashed(meta)) return null;
+    return { id: JSON.stringify([projection.boardId, meta.createdAt]), title: projection.title, projection, region };
+  }
+  function findReviewBoard(localId) {
+    let id;
+    try { [id] = JSON.parse(localId); } catch { return null; }
+    const matches = boardProjectionsFor(id);
+    if (matches.length !== 1) return null;
+    const board = reviewBoard(matches[0]);
+    return board?.id === localId ? board : null;
+  }
+  function isReviewBoardCurrent(board) {
+    const checked = findReviewBoard(board.id);
+    return !!checked && checked.projection === board.projection && checked.region === board.region;
+  }
+  function reviewFlow() {
+    if (!reviewFlowRef) reviewFlowRef = ReviewHandoff.createReviewFlow({
+      supported: reviewHandoffReady,
+      request: (method, path, body, { signal }) => deskStoreRequest(method, path, body, { signal, timeoutMs: 30000 }),
+      pickFile: ({ signal }) => readPortableFile({ title: '열 검토 요청 또는 회신 파일', maxBytes: ReviewHandoff.REVIEW_MAX_FILE_BYTES, signal }),
+      getContext: reviewContext, isContextCurrent: isReviewContextCurrent, getBoard: findReviewBoard, isBoardCurrent: isReviewBoardCurrent,
+      store: reviewStore(), onState: renderReviewDialog,
+    });
+    return reviewFlowRef;
+  }
+  function openReviewDialog(mode, anchor, projection) {
+    if (!reviewHandoffReady() || reviewFlowRef?.view()?.step === 'exporting') return;
+    const board = mode === 'file' ? null : reviewBoard(projection);
+    if (mode !== 'file' && !board) { boardNotice('저장되어 있고 지금 열려 있는 원래 Board에서 검토 작업을 시작해 주세요.'); return; }
+    reviewOpener = anchor;
+    const flow = reviewFlow();
+    const view = mode === 'request' ? flow.openRequest(board) : mode === 'results' ? flow.openResults(board) : flow.openFile();
+    if (!view) boardNotice('현재 Desk에서 검토 작업을 시작하지 못했습니다. 다시 시도해 주세요.');
+  }
+  function closeReviewDialog() {
+    if (reviewFlowRef?.view()?.step === 'exporting') return;
+    reviewFlowRef?.close();
+    const opener = reviewOpener;
+    reviewOpener = null;
+    (opener?.isConnected ? opener : document.getElementById('egd-desk-menu-open'))?.focus();
+  }
+  function renderReviewDialog(view) {
+    let panel = document.getElementById('egd-review-dialog');
+    if (!view) { panel?.remove(); return; }
+    const typed = panel?.dataset.step === view.step ? Object.fromEntries([...panel.querySelectorAll('[data-field]:not([type=password])')]
+      .map(input => [input.dataset.field, input.value])) : {};
+    const focusKey = panel?.dataset.step === view.step && panel.contains(document.activeElement) ? document.activeElement.dataset?.focusKey : null;
+    if (!panel) {
+      panel = el('section', { id: 'egd-review-dialog', class: 'egd-store-panel', role: 'dialog', tabindex: '-1', data: { testid: 'review-dialog' },
+        onmousedown: ev => ev.stopPropagation(), onkeydown: ev => {
+          if (ev.key !== 'Escape') return;
+          ev.stopPropagation(); ev.preventDefault(); closeReviewDialog();
+        } });
+      document.documentElement.appendChild(panel);
+    }
+    const content = ReviewHandoff.reviewDialogContent(el, view, reviewFlow(), { typed, onClose: closeReviewDialog, reveal: revealPortableFile });
+    panel.dataset.step = view.step;
+    panel.setAttribute('aria-label', content.title);
+    panel.setAttribute('aria-busy', String(view.busy));
+    panel.replaceChildren(...content.children);
+    const focus = [...panel.querySelectorAll('[data-focus-key]')].find(node => node.dataset.focusKey === (view.error?.field || focusKey))
+      || panel.querySelector('[data-field], .egd-store-primary') || panel.querySelector('button:not([disabled])') || panel;
+    focus.focus({ preventScroll: true });
+    panel.scrollTop = 0;
+  }
+
   // ── RT-03: .egdesk 내보내기 / 가져오기 ──
   // The bridge writes and reads the files; this screen saves what is on screen
   // first, asks before importing, and redraws from the store right after an
@@ -29548,6 +29691,8 @@
   // Each /v1/state read (null for an older bridge): what it says about .egdesk files.
   function portableBridgeObserved(bridgeState) {
     portableSupportState = PortableState.portableSupport(bridgeState);
+    reviewSupported = ReviewHandoff.reviewHandoffSupported(bridgeState);
+    reviewFlowRef?.invalidate();
     syncPortableEntryPoints();
   }
   function portableExportReady() { return portableSupportState.export; }
@@ -29568,7 +29713,7 @@
 
   function syncPortableEntryPoints() {
     const opener = document.getElementById('egd-desk-menu-open');
-    if (opener) opener.hidden = !portableExportReady() && !portableImportReady();
+    if (opener) opener.hidden = !portableExportReady() && !portableImportReady() && !reviewHandoffReady();
     if (opener?.hidden) closeDeskMenu();
   }
 
@@ -29595,9 +29740,10 @@
     const items = [
       portableExportReady() ? item('내보내기…', 'Desk 전체를 .egdesk 파일로 내보내기', 'desk-export', () => openPortableExport({ scope: 'desk' })) : null,
       portableImportReady() ? item('가져오기…', '.egdesk 파일을 새 사본으로 가져오기', 'desk-import', () => openPortableImport()) : null,
+      reviewHandoffReady() ? item('검토 파일 열기…', '검토 요청 또는 회신 파일 열기', 'desk-review-open', () => openReviewDialog('file', anchor)) : null,
     ].filter(Boolean);
     if (!items.length) return null;
-    const pos = resolveFloatingMenuPlacement(anchor.getBoundingClientRect(), 152, items.length * 36 + 4);
+    const pos = resolveFloatingMenuPlacement(anchor.getBoundingClientRect(), reviewHandoffReady() ? 176 : 152, items.length * 36 + 4);
     const menu = el('div', {
       class: 'egd-board-menu', role: 'menu', 'aria-label': 'Desk 작업', data: { testid: 'desk-menu-list' },
       style: { left: `${Math.round(pos.left)}px`, top: `${Math.round(pos.top)}px` },
@@ -29663,19 +29809,20 @@
   }
 
   // '다른 파일 선택…': one .egdesk file, read here and sent to the bridge as base64.
-  function readPortableFile() {
+  function readPortableFile({ title = '가져올 EG-Desk 파일', maxBytes = PortableState.PORTABLE_MAX_FILE_BYTES, signal } = {}) {
     return new Promise((resolve, reject) => {
       try {
         const picker = Cc['@mozilla.org/filepicker;1'].createInstance(Ci.nsIFilePicker);
-        picker.init(window.browsingContext, '가져올 EG-Desk 파일', Ci.nsIFilePicker.modeOpen);
+        if (signal?.aborted) { resolve(null); return; }
+        picker.init(window.browsingContext, title, Ci.nsIFilePicker.modeOpen);
         picker.appendFilter('EG-Desk 파일', `*${PortableState.PORTABLE_EXTENSION}`);
         picker.appendFilters(Ci.nsIFilePicker.filterAll);
         picker.open(async (result) => {
           try {
-            if (result !== Ci.nsIFilePicker.returnOK || !picker.file) { resolve(null); return; }
+            if (signal?.aborted || result !== Ci.nsIFilePicker.returnOK || !picker.file) { resolve(null); return; }
             const file = picker.file;
-            if (file.fileSize > PortableState.PORTABLE_MAX_FILE_BYTES) throw Object.assign(new Error('too large'), { code: 'PORTABLE_FILE_TOO_LARGE' });
-            const bytes = await IOUtils.read(file.path, { maxBytes: PortableState.PORTABLE_MAX_FILE_BYTES + 1 });
+            if (file.fileSize > maxBytes) throw Object.assign(new Error('too large'), { code: 'PORTABLE_FILE_TOO_LARGE' });
+            const bytes = await IOUtils.read(file.path, { maxBytes: maxBytes + 1 });
             resolve({ fileName: file.leafName, bytes });
           } catch (error) { reject(error); }
         });
@@ -29708,6 +29855,10 @@
   // Right after the import: imported Boards join this PC's Board list, the
   // Desk is drawn from the store, and conversations and Agents are read again.
   async function applyPortableImport(result) {
+    invalidateReviewContext();
+    // An imported ID is never a local review provenance binding, even if a
+    // previous Board with the same identifier no longer exists on the bridge.
+    if (Array.isArray(result?.boards)) forgetReviewBoards(result.boards.map(row => row?.boardId).filter(Boolean));
     const sync = deskStoreSync();
     const reloaded = await sync.reloadAfterImport({ desk: !!result?.desk });
     const boards = Array.isArray(result?.boards) ? result.boards : [];
@@ -30066,6 +30217,7 @@
   // Draw a saved Desk in place of the current one. Chat rooms stay as they are now.
   async function redrawDeskFromState(snapshot) {
     if (!snapshot?.agenda?.id || !canRestoreDeskSnapshotIdentity(snapshot)) return false;
+    invalidateReviewContext();
     if (!(await clearCanvasEntitiesForRestore())) return false;
     closeBoardRegionMenu();
     for (const region of Array.from(document.querySelectorAll('.egd-board-region'))) {

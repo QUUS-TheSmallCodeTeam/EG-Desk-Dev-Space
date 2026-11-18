@@ -10383,7 +10383,7 @@ function windowBoardMetadataHarness() {
       if (Number.isFinite(geometry?.x)) view.style.left = `${geometry.x}px`;
       if (Number.isFinite(geometry?.y)) view.style.top = `${geometry.y}px`;
     },
-    selectBoardProjection: () => {}, scheduleDeskSessionSave: () => effects.deskSaves++, safeViewportWorldRect: () => ({}),
+    selectBoardProjection: () => {}, invalidateReviewContext: () => {}, scheduleDeskSessionSave: () => effects.deskSaves++, safeViewportWorldRect: () => ({}),
     boardNotice: () => {}, RecoveryState: Recovery, refreshDeskMinimap: () => {}, activeBoardProjection: () => null };
   const names = ['el', 'normalizeSourcePart', 'sourceRefKey', 'registerSourceRefCard', 'unregisterSourceRefCard', 'bindCardSourceRef',
     'deskWindowBoardIndex', 'syncDeskWindowBoardMetadata', 'syncAllDeskWindowBoardMetadata',
@@ -11790,11 +11790,11 @@ test('production Board [⋯] menu offers save, Chat attach and close for that Bo
   let portableReady = false;
   const api = compileFunction(`let boardRegionMenu = null;\n${close}\n${toggle}\nreturn { toggleBoardRegionMenu, closeBoardRegionMenu, current: () => boardRegionMenu };`,
     ['state', 'document', 'window', 'el', 'resolveFloatingMenuPlacement', 'saveBoardWithNotice', 'openBoardSaveAs', 'openChatInputPanel', 'closeCurrentAgenda', 'boardVersionHistoryReady', 'openBoardHistoryPanel',
-      'portableExportReady', 'openPortableExport', 'openBoardCanvasExport', 'boardProjectMenuItems'])(
+      'portableExportReady', 'openPortableExport', 'openBoardCanvasExport', 'boardProjectMenuItems', 'reviewHandoffReady'])(
     state, dom.document, window, dom.el, (rect, width, height) => { placements.push([width, height]); return { left: 300.4, top: 120.6 }; },
     options => actions.push(['save', options]), projectionId => actions.push(['save-as', projectionId]), (threadId, options) => actions.push(['attach', threadId, options]),
     options => actions.push(['close', options]), () => storeReady, boardId => actions.push(['history', boardId]),
-    () => portableReady, options => actions.push(['export', options]), projectionId => actions.push(['canvas', projectionId]), () => []);
+    () => portableReady, options => actions.push(['export', options]), projectionId => actions.push(['canvas', projectionId]), () => [], () => false);
   const anchor = dom.el('button', { data: { testid: 'board-menu' } });
   anchor.getBoundingClientRect = () => ({ left: 280, top: 90, right: 304, bottom: 114 });
   const menu = api.toggleBoardRegionMenu(projection.id, anchor);
@@ -20508,9 +20508,9 @@ test('RT-03 support: only a bridge that lists export or import shows the menus; 
   let support = { export: true, importAsNew: true };
   const actions = [];
   const api = compileFunction(`let deskMenu = null;\n${topLevelFunction('closeDeskMenu')}\n${topLevelFunction('toggleDeskMenu')}\nreturn { toggleDeskMenu, current: () => deskMenu };`,
-    ['document', 'window', 'el', 'resolveFloatingMenuPlacement', 'portableExportReady', 'portableImportReady', 'openPortableExport', 'openPortableImport'])(
+    ['document', 'window', 'el', 'resolveFloatingMenuPlacement', 'portableExportReady', 'portableImportReady', 'openPortableExport', 'openPortableImport', 'reviewHandoffReady', 'openReviewDialog'])(
     dom.document, window, dom.el, () => ({ left: 10, top: 40 }), () => support.export, () => support.importAsNew,
-    options => actions.push(['export', options]), () => actions.push(['import']));
+    options => actions.push(['export', options]), () => actions.push(['import']), () => !!support.review, (...args) => actions.push(['review', ...args]));
   const anchor = dom.el('button', { data: { testid: 'desk-menu' } });
   anchor.getBoundingClientRect = () => ({ left: 0, top: 0, right: 20, bottom: 20 });
   const menu = api.toggleDeskMenu(anchor);
@@ -20527,17 +20527,24 @@ test('RT-03 support: only a bridge that lists export or import shows the menus; 
   support = { export: false, importAsNew: false };
   assert.equal(api.toggleDeskMenu(anchor), null, 'an older bridge: no menu');
   // The rail button is hidden until the bridge says so, and follows each /v1/state read.
-  assert.match(surfaceSource, /id: 'egd-desk-menu-open', class: 'egd-rail-icon', title: 'Desk 작업', 'aria-label': 'Desk 작업',\n        'aria-haspopup': 'menu', 'aria-expanded': 'false', hidden: !portableExportReady\(\) && !portableImportReady\(\),/);
+  assert.match(surfaceSource, /id: 'egd-desk-menu-open', class: 'egd-rail-icon', title: 'Desk 작업', 'aria-label': 'Desk 작업',\n        'aria-haspopup': 'menu', 'aria-expanded': 'false', hidden: !portableExportReady\(\) && !portableImportReady\(\) && !reviewHandoffReady\(\),/);
   const opener = { hidden: true };
   let current = Portable.portableSupport(null);
-  const sync = compileFunction(`${topLevelFunction('syncPortableEntryPoints')}\nreturn syncPortableEntryPoints;`, ['document', 'portableExportReady', 'portableImportReady', 'closeDeskMenu'])(
-    { getElementById: id => (id === 'egd-desk-menu-open' ? opener : null) }, () => current.export, () => current.importAsNew, () => {});
+  const sync = compileFunction(`${topLevelFunction('syncPortableEntryPoints')}\nreturn syncPortableEntryPoints;`, ['document', 'portableExportReady', 'portableImportReady', 'closeDeskMenu', 'reviewHandoffReady'])(
+    { getElementById: id => (id === 'egd-desk-menu-open' ? opener : null) }, () => current.export, () => current.importAsNew, () => {}, () => !!support.review);
   current = Portable.portableSupport({ capabilities: { portable: ['export', 'inspect', 'import-as-new'] } });
   sync();
   assert.equal(opener.hidden, false);
   current = Portable.portableSupport(null);
   sync();
   assert.equal(opener.hidden, true);
+  support.review = true;
+  sync();
+  assert.equal(opener.hidden, false, 'review-only bridge can open the Desk menu without any Boards');
+  const reviewOnly = api.toggleDeskMenu(anchor);
+  assert.deepEqual(reviewOnly.children.map(item => item.dataset.testid), ['desk-review-open']);
+  reviewOnly.children[0].onclick({ stopPropagation() {} });
+  assert.deepEqual(actions.at(-1), ['review', 'file', anchor]);
   assert.match(surfaceSource, /        portableBridgeObserved\(bridgeState\);\n        void deskStoreBridgeObserved\(bridgeState\);/);
   assert.match(surfaceSource, /          portableBridgeObserved\(null\);\n          void deskStoreBridgeObserved\(null\);/);
 });
@@ -20795,11 +20802,11 @@ test('RT-03 production hooks: export saves the Desk or an unsaved Board first; i
   const bridge = { loadLocalHistory: (...args) => log.push(['history', ...args]), loadProfiles: () => log.push(['profiles']) };
   const api = compileFunction(`let portableImportHold = false;\n${sources.join('\n')}\nreturn { savePortableExportSource, holdDeskForImport, releaseDeskAfterImport, applyPortableImport, held: () => portableImportHold };`,
     ['deskStoreSync', 'SurfaceState', 'state', 'serializeDeskSnapshot', 'saveCurrentAgendaState', 'persistDeskSession', 'coerceAgendaStore', 'cloneJson',
-      'writeAgendaStoreAndSync', 'redrawDeskFromState', 'syncViewportAgendaRail'])(
+      'writeAgendaStoreAndSync', 'redrawDeskFromState', 'syncViewportAgendaRail', 'invalidateReviewContext', 'forgetReviewBoards'])(
     () => sync, Surface, { surface, boards: { projections }, codexBridge: bridge }, () => ({ snapshot: true }),
     options => { log.push(['saveBoard', options.projectionId]); return { agenda: { id: 'agenda-a' } }; }, () => log.push(['persist', surface.restoring]),
     () => agendaStore, value => JSON.parse(JSON.stringify(value)), store => { log.push(['writeList', Object.keys(store.agendas)]); return true; },
-    async snapshot => { log.push(['redraw', surface.restoring]); return true; }, () => log.push(['rail']));
+    async snapshot => { log.push(['redraw', surface.restoring]); return true; }, () => log.push(['rail']), () => {}, () => true);
 
   assert.deepEqual(await api.savePortableExportSource({ scope: 'desk' }), { saved: true });
   assert.deepEqual(await api.savePortableExportSource({ scope: 'board', boardId: 'agenda-a' }), { saved: true });
@@ -22498,8 +22505,8 @@ test('Board selection revision detects A to B to A without changing same-Board s
     a: { id: 'a', boardId: 'board-a', title: 'A' }, b: { id: 'b', boardId: 'board-b', title: 'B' },
   } }, agenda: {} };
   const select = compileFunction(declaration('selectBoardProjection') + '\nreturn selectBoardProjection;',
-    ['state', 'coerceAgendaStore', 'recentBoardProjectionIds', 'syncViewportAgendaRail'])(
-    state, () => ({ agendas: {} }), [], () => {});
+    ['state', 'coerceAgendaStore', 'recentBoardProjectionIds', 'syncViewportAgendaRail', 'invalidateReviewContext'])(
+    state, () => ({ agendas: {} }), [], () => {}, () => {});
   const getTarget = compileFunction(declaration('getProjectTarget') + '\nreturn getProjectTarget;',
     ['state', 'activeBoardProjection'])(state, () => state.boards.projections[state.boards.activeProjectionId] || null);
   select('a'); select('b'); select('a');

@@ -11253,3 +11253,24 @@ button.egd-memo-ask-cancel:hover { text-decoration: underline; }
 .egd-host-activity-row { display: grid; grid-template-columns: auto 1fr; column-gap: 8px; }
 .egd-host-activity-row-detail { grid-column: 2; }
 .egd-host-activity-note { margin: 0; }
+
+/* Manual review files use plain text, never HTML or Board content. */
+#egd-review-dialog {
+  left: 50%;
+  top: 64px;
+  transform: translateX(-50%);
+  width: min(560px, calc(100vw - 32px));
+  max-height: calc(100vh - 130px);
+}
+.egd-review-form, .egd-review-preview, .egd-review-results { display: grid; gap: 10px; margin: 0; }
+.egd-review-form textarea { min-height: 52px; padding-block: 6px; resize: vertical; }
+.egd-review-actions { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+.egd-review-preview > div, .egd-review-results li {
+  padding: 6px 10px;
+  border: 1px solid var(--egd-outline-variant);
+  border-radius: 8px;
+}
+.egd-review-preview dt, .egd-review-results time { color: var(--egd-on-surface-variant); font-size: 12px; font-weight: 600; }
+.egd-review-preview dd { margin: 3px 0 0; }
+.egd-review-value { white-space: pre-wrap; overflow-wrap: anywhere; unicode-bidi: plaintext; }
+.egd-review-results { padding-inline-start: 28px; }
