@@ -364,7 +364,7 @@ function fileFixture(t, { loadCodeEditor, saveOriginal } = {}) {
   const service = {
     listDirectory: async () => ({ entries: [{ id: 'file-1', name: 'app.js', kind: 'file' }], nextCursor: null }),
     search: async () => ({ matches: [], truncated: false }),
-    readFile: async () => ({ id: 'file-1', fileId: 'file-1', name: 'app.js', size: text.length, sha256: 'a'.repeat(64), diskRevision: 'rev-0', kind: 'text', text }),
+    readFile: async () => ({ id: 'file-1', fileId: 'file-1', name: 'app.js', size: text.length, sha256: (text === draft.baseText ? 'a' : 'b').repeat(64), diskRevision: 'rev-0', kind: 'text', text }),
     createDraft: async () => ({ ...draft }),
     updateDraft: async ({ text: next }) => { writes.push(next); draft.text = next; draft.head = 'h' + writes.length; draft.bufferRevision = writes.length; return { ...draft } },
     saveDraft: async () => ({ draft: { ...draft }, receipt: {} }), saveAs: async () => ({}), diffDraft: async () => ({ hunks: [] }),
@@ -401,7 +401,7 @@ test('File view: CodeMirror edits drive dirty state, the draft flush and jump-to
   assert.deepEqual(view.slotValue(1), [{ readOnly: true }, { editable: false }])
 })
 
-test('File view: SOURCE_CHANGED compare shows the CodeMirror text, never overwriting silently', async t => {
+test('File view: live comparison shows the CodeMirror text without invoking original save', async t => {
   const f = fakeBundle()
   const attempts = []
   const h = fileFixture(t, { loadCodeEditor: () => f.bundle, saveOriginal: async request => {
@@ -413,11 +413,12 @@ test('File view: SOURCE_CHANGED compare shows the CodeMirror text, never overwri
   await h.view.openFile('file-1')
   f.views[0].type('\nmine')
   h.setDisk('someone else')
-  assert.equal(await h.view.saveOriginal(), null)
-  assert.equal(attempts.length, 1)
-  assert.equal(attempts[0].expectedSourceHash, undefined, 'first save carries no overwrite permission')
-  assert.deepEqual(h.writes, ['line one\nline two\nline three\nmine'], 'flushed the CodeMirror text before saving')
-  const panel = h.view.element.querySelector('.egdesk-file-source-conflict')
+  assert.equal(await h.view.saveOriginal({ expectedSourceHash: 'b'.repeat(64) }), null)
+  assert.equal(attempts.length, 0)
+  h.view.element.querySelector('.egdesk-file-review-button').click()
+  await wait(20)
+  assert.deepEqual(h.writes, ['line one\nline two\nline three\nmine'], 'flushed the CodeMirror text before comparing')
+  const panel = h.view.element.querySelector('.egdesk-file-review')
   assert.equal(panel.hidden, false)
   assert.match(panel.textContent, /원본이 열 때와 다릅니다/)
   assert.match(panel.textContent, /mine/)

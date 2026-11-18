@@ -1108,114 +1108,50 @@ test('lineDiff reports separate edits as separate hunks and falls back to one bl
   assert.deepEqual(lineDiff('a\nb\nc\nd', 'a\nB\nc\nD', { maxEdits: 1 }), [{ baseStartLine: 2, baseLines: ['b', 'c', 'd'], currentStartLine: 2, currentLines: ['B', 'c', 'D'] }])
 })
 
-test('saveOriginal writes the working copy into the original, keeps the file mode, moves the handle and leaves no temporary file', async t => {
-  const { root, service, rootHandle } = await fixture(t)
-  const original = path.join(root, 'work.txt')
-  await fs.writeFile(original, 'first\nsecond\n')
-  await fs.chmod(original, 0o640)
-  const id = await fileId(service, rootHandle.directoryId, 'work.txt')
-  const opened = await service.createDraft({ fileId: id })
-  const edited = await service.updateDraft({ draftId: opened.id, expectedHead: opened.head, text: 'first\nchanged\n', operationId: 'edit-1' })
-  await assert.rejects(service.saveOriginal({ draftId: opened.id, expectedHead: opened.head, bufferRevision: 1, operationId: 'stale' }), { code: 'DRAFT_CONFLICT' })
-  await assert.rejects(service.saveOriginal({ draftId: opened.id, expectedHead: edited.head, bufferRevision: 0, operationId: 'old-buffer' }), { code: 'BUFFER_CONFLICT' })
-  await assert.rejects(service.saveOriginal({ draftId: opened.id, expectedHead: edited.head, bufferRevision: 1, operationId: 'bad-hash', expectedSourceHash: 'nope' }), { code: 'INVALID_HASH' })
-  const saved = await service.saveOriginal({ draftId: opened.id, expectedHead: edited.head, bufferRevision: 1, operationId: 'save-original' })
-  assert.equal(await fs.readFile(original, 'utf8'), 'first\nchanged\n')
-  if (process.platform !== 'win32') assert.equal((await fs.stat(original)).mode & 0o777, 0o640)
-  assert.deepEqual({ mode: saved.receipt.mode, written: saved.receipt.written, originalUpdated: saved.receipt.originalUpdated, sha256: saved.receipt.sha256 }, { mode: 'original', written: true, originalUpdated: true, sha256: sha('first\nchanged\n') })
-  assert.equal(saved.draft.sourceHash, sha('first\nchanged\n'))
-  assert.equal(saved.draft.baseText, 'first\nchanged\n')
-  assert.deepEqual((await service.diffDraft({ draftId: opened.id })).hunks, [])
-  assert.equal((await service.sourceStatus({ draftId: opened.id })).status, 'unchanged')
-  // The same handle still reads the new inode.
-  assert.equal((await service.readFile({ fileId: id })).text, 'first\nchanged\n')
-  assert.deepEqual(await leftovers(root), [])
-  // Saving again with nothing new passes without writing.
-  const again = await service.saveOriginal({ draftId: opened.id, expectedHead: saved.draft.head, bufferRevision: 1, operationId: 'save-again' })
-  assert.equal(again.receipt.written, false)
-  assert.equal(again.receipt.unchanged, true)
+test('original save fails closed without touching source or draft across external changes', async t => {
+  for (const scenario of ['unchanged', 'external write', 'external rename', 'external delete', 'same bytes']) {
+    const { root, service, rootHandle } = await fixture(t, { createOnlyAdapter: createOnlyFixture })
+    const source = path.join(root, 'source.txt')
+    await fs.writeFile(source, 'original\n')
+    const id = await fileId(service, rootHandle.directoryId, 'source.txt')
+    const opened = await service.createDraft({ fileId: id })
+    const edited = await service.updateDraft({ draftId: opened.id, expectedHead: opened.head, text: '최신 작업\n', operationId: 'edit' })
+    const input = { draftId: opened.id, expectedHead: edited.head, bufferRevision: edited.bufferRevision, operationId: 'blocked' }
+    let protectedPath = source, protectedBytes = 'original\n'
+    if (scenario === 'external write') { protectedBytes = 'external\n'; await fs.writeFile(source, protectedBytes) }
+    if (scenario === 'same bytes') { protectedBytes = edited.text; await fs.writeFile(source, protectedBytes) }
+    if (scenario === 'external rename') { protectedPath = path.join(root, 'moved.txt'); await fs.rename(source, protectedPath) }
+    if (scenario === 'external delete') { protectedPath = null; await fs.unlink(source) }
+    const before = protectedPath && await fs.stat(protectedPath)
+    for (const override of [{}, { force: true, expectedSourceHash: sha(protectedBytes) }]) {
+      await assert.rejects(service.saveOriginal({ ...input, ...override }), { code: 'SOURCE_MUTATION_UNAVAILABLE', details: { originalUpdated: false } }, scenario)
+    }
+    assert.deepEqual(await service.readDraft({ draftId: opened.id }), edited)
+    if (protectedPath) {
+      assert.equal(await fs.readFile(protectedPath, 'utf8'), protectedBytes)
+      assert.equal((await fs.stat(protectedPath)).ino, before.ino)
+    }
+    if (protectedPath !== source) await assert.rejects(fs.stat(source), { code: 'ENOENT' })
+    assert.deepEqual(await leftovers(root), [])
+    const managed = await service.saveDraft(input)
+    assert.equal(managed.receipt.originalUpdated, false)
+    const receipt = await service.saveAs({ draftId: opened.id, expectedHead: managed.draft.head, directoryId: rootHandle.directoryId, fileName: 'new.txt', operationId: 'export' })
+    assert.equal((await service.readFile({ fileId: receipt.resourceId })).text, edited.text)
+  }
 })
 
-test('saveOriginal never overwrites a changed original unless the user saw its hash; equal content passes', async t => {
+test('review revert, undo and delete refuse even the exact current source hash', async t => {
   const { root, service, rootHandle } = await fixture(t)
-  const original = path.join(root, 'notes.txt')
-  await fs.writeFile(original, 'v1\n')
-  const id = await fileId(service, rootHandle.directoryId, 'notes.txt')
-  const opened = await service.createDraft({ fileId: id })
-  const edited = await service.updateDraft({ draftId: opened.id, expectedHead: opened.head, text: 'mine\n', operationId: 'edit' })
-  // Another program rewrites the file in place (same inode).
-  const handle = await fs.open(original, 'r+'); await handle.truncate(0); await handle.write('theirs\n', 0); await handle.close()
-  await assert.rejects(service.saveOriginal({ draftId: opened.id, expectedHead: edited.head, bufferRevision: 1, operationId: 'blocked' }), error => {
-    assert.equal(error.code, 'SOURCE_CHANGED')
-    assert.deepEqual(error.details, { expectedSourceHash: sha('v1\n'), currentSourceHash: sha('theirs\n'), originalUpdated: false })
-    return true
-  })
-  assert.equal(await fs.readFile(original, 'utf8'), 'theirs\n')
-  assert.equal((await service.readDraft({ draftId: opened.id })).text, 'mine\n')
-  // Knowing overwrite after the comparison screen.
-  const overwritten = await service.saveOriginal({ draftId: opened.id, expectedHead: edited.head, bufferRevision: 1, operationId: 'overwrite', expectedSourceHash: sha('theirs\n') })
-  assert.equal(overwritten.receipt.written, true)
-  assert.equal(await fs.readFile(original, 'utf8'), 'mine\n')
-  // A changed original that already holds the working copy's bytes passes.
-  const next = await service.updateDraft({ draftId: opened.id, expectedHead: overwritten.draft.head, text: 'same everywhere\n', operationId: 'edit-2' })
-  await fs.writeFile(original, 'same everywhere\n')
-  const passed = await service.saveOriginal({ draftId: opened.id, expectedHead: next.head, bufferRevision: next.bufferRevision, operationId: 'pass' })
-  assert.deepEqual([passed.receipt.written, passed.receipt.unchanged], [false, true])
-  assert.equal(passed.draft.sourceHash, sha('same everywhere\n'))
-  assert.deepEqual(await leftovers(root), [])
-})
-
-test('saveOriginal refuses symlinks, hard links and drafts whose original is no longer connected', async t => {
-  const { root, store, service, rootHandle } = await fixture(t)
-  await fs.writeFile(path.join(root, 'linked.txt'), 'linked\n')
-  const linkedId = await fileId(service, rootHandle.directoryId, 'linked.txt')
-  await fs.link(path.join(root, 'linked.txt'), path.join(root, 'second-name.txt'))
-  const linkedDraft = await service.createDraft({ fileId: linkedId })
-  const linkedEdit = await service.updateDraft({ draftId: linkedDraft.id, expectedHead: linkedDraft.head, text: 'x\n', operationId: 'e' })
-  await assert.rejects(service.saveOriginal({ draftId: linkedDraft.id, expectedHead: linkedEdit.head, bufferRevision: 1, operationId: 's' }), { code: 'ORIGINAL_HARD_LINKED' })
-  assert.equal(await fs.readFile(path.join(root, 'second-name.txt'), 'utf8'), 'linked\n')
-
-  await fs.writeFile(path.join(root, 'plain.txt'), 'plain\n')
-  const plainId = await fileId(service, rootHandle.directoryId, 'plain.txt')
-  const plainDraft = await service.createDraft({ fileId: plainId })
-  const plainEdit = await service.updateDraft({ draftId: plainDraft.id, expectedHead: plainDraft.head, text: 'edited\n', operationId: 'e2' })
-  const outside = await fs.mkdtemp(path.join(os.tmpdir(), 'egdesk-save-outside-'))
-  t.after(() => fs.rm(outside, { recursive: true, force: true }))
-  await fs.writeFile(path.join(outside, 'target.txt'), 'outside\n')
-  await fs.rename(path.join(root, 'plain.txt'), path.join(root, 'plain-moved.txt'))
-  await fs.symlink(path.join(outside, 'target.txt'), path.join(root, 'plain.txt'))
-  await assert.rejects(service.saveOriginal({ draftId: plainDraft.id, expectedHead: plainEdit.head, bufferRevision: 1, operationId: 's2' }), { code: 'SYMLINK' })
-  assert.equal(await fs.readFile(path.join(outside, 'target.txt'), 'utf8'), 'outside\n')
-
-  // After a restart the handle is gone: reconnect first.
-  const restarted = createEGDeskFileService({ draftStore: store })
-  await assert.rejects(restarted.saveOriginal({ draftId: plainDraft.id, expectedHead: plainEdit.head, bufferRevision: 1, operationId: 's3' }), { code: 'SOURCE_RECONNECT_REQUIRED' })
-  assert.deepEqual(await leftovers(root), [])
-})
-
-test('review revert writes only against the hash the review read; a created file is removed only while unchanged', async t => {
-  const { root, service, rootHandle } = await fixture(t)
-  await fs.writeFile(path.join(root, 'agent.txt'), 'a\nAGENT\nc\n')
+  const source = path.join(root, 'agent.txt')
+  await fs.writeFile(source, 'agent text\n')
   const id = await fileId(service, rootHandle.directoryId, 'agent.txt')
   const before = await service.readFile({ fileId: id })
-  await assert.rejects(service.revertReviewed({ fileId: id, expectedSha256: 'x', text: 'a\n', operationId: 'r0' }), { code: 'INVALID_HASH' })
-  await assert.rejects(service.revertReviewed({ fileId: id, expectedSha256: before.sha256, text: 'bad\u0000', operationId: 'r0' }), { code: 'INVALID_TEXT' })
-  const reverted = await service.revertReviewed({ fileId: id, expectedSha256: before.sha256, text: 'a\nb\nc\n', operationId: 'r1' })
-  assert.deepEqual([reverted.written, reverted.sha256], [true, sha('a\nb\nc\n')])
-  assert.equal(await fs.readFile(path.join(root, 'agent.txt'), 'utf8'), 'a\nb\nc\n')
-  await assert.rejects(service.revertReviewed({ fileId: id, expectedSha256: before.sha256, text: 'a\nZ\nc\n', operationId: 'r2' }), { code: 'SOURCE_CHANGED' })
-  const same = await service.revertReviewed({ fileId: id, expectedSha256: before.sha256, text: 'a\nb\nc\n', operationId: 'r3' })
-  assert.equal(same.unchanged, true)
-
-  await fs.writeFile(path.join(root, 'created.txt'), 'made by agent\n')
-  const createdId = await fileId(service, rootHandle.directoryId, 'created.txt')
-  await fs.appendFile(path.join(root, 'created.txt'), 'user line\n')
-  await assert.rejects(service.deleteCreated({ fileId: createdId, expectedSha256: sha('made by agent\n'), operationId: 'd1' }), { code: 'SOURCE_CHANGED' })
-  assert.equal(await fs.readFile(path.join(root, 'created.txt'), 'utf8'), 'made by agent\nuser line\n')
-  const removed = await service.deleteCreated({ fileId: createdId, expectedSha256: sha('made by agent\nuser line\n'), operationId: 'd2' })
-  assert.equal(removed.deleted, true)
-  await assert.rejects(fs.stat(path.join(root, 'created.txt')), { code: 'ENOENT' })
-  await assert.rejects(service.readFile({ fileId: createdId }), { code: 'UNKNOWN_RESOURCE' })
+  for (const operationId of ['review-revert', 'review-undo']) {
+    await assert.rejects(service.revertReviewed({ fileId: id, expectedSha256: before.sha256, text: 'replacement\n', operationId }), { code: 'SOURCE_MUTATION_UNAVAILABLE', details: { originalUpdated: false } })
+  }
+  await assert.rejects(service.deleteCreated({ fileId: id, expectedSha256: before.sha256, operationId: 'delete' }), { code: 'SOURCE_MUTATION_UNAVAILABLE', details: { originalUpdated: false, deleted: false } })
+  assert.equal(await fs.readFile(source, 'utf8'), before.text)
+  assert.deepEqual(await leftovers(root), [])
 })
 
 test('resolvePath maps printed paths inside the root to handles and refuses anything outside', async t => {
@@ -1247,7 +1183,7 @@ test('resolvePath maps printed paths inside the root to handles and refuses anyt
 
 function originalUiFixture(overrides = {}, viewOptions = {}) {
   const calls = []
-  let current = { id: 'draft', fileId: 'file', name: 'source.txt', head: 'h0', text: 'start\n', baseText: 'start\n', bufferRevision: 0, savedRevision: 0, sourceHash: 'a'.repeat(64), sourceRevision: 'source-0' }
+  let current = { id: 'draft', fileId: 'file', name: 'source.txt', head: 'h0', text: 'start\n', baseText: 'start\n', bufferRevision: 0, savedRevision: 0, sourceHash: 'a'.repeat(64), sourceRevision: 'source-0', saveAsAvailable: true }
   let disk = { text: 'start\n', sha256: 'a'.repeat(64) }
   const service = {
     listDirectory: async () => ({ entries: [{ id: 'file', name: 'source.txt', kind: 'file' }], nextCursor: null }),
@@ -1256,7 +1192,7 @@ function originalUiFixture(overrides = {}, viewOptions = {}) {
     createDraft: async ({ fileId }) => ({ ...current, fileId }), readDraft: async () => ({ ...current }),
     updateDraft: async ({ text }) => { current = { ...current, text, head: `h${current.bufferRevision + 1}`, bufferRevision: current.bufferRevision + 1 }; return { ...current } },
     saveDraft: async () => ({ draft: { ...current }, receipt: {} }), saveAs: async () => ({}), diffDraft: async () => ({ bufferRevision: current.bufferRevision, hunks: [{ baseStartLine: 1, baseLines: ['start'], currentStartLine: 1, currentLines: [current.text.trim()] }] }),
-    saveOriginal: async body => { calls.push(['saveOriginal', body]); current = { ...current, baseText: current.text, sourceHash: 'c'.repeat(64), head: `${current.head}s` }; return { draft: { ...current }, receipt: { mode: 'original', written: true, unchanged: false, originalUpdated: true, sha256: 'c'.repeat(64), size: current.text.length } } },
+    saveOriginal: async body => { calls.push(['saveOriginal', body]); assert.fail('view must not call original save') },
     resolvePath: async ({ path: printed }) => { calls.push(['resolve', printed]); return { id: `file-${printed.replace(/[^a-z]/g, '')}`, kind: 'file', name: printed, relativePath: printed } },
     ...overrides(() => current, value => { disk = value }, calls),
   }
@@ -1266,37 +1202,32 @@ function originalUiFixture(overrides = {}, viewOptions = {}) {
   return { view, document, service, calls, setDisk: value => { disk = value } }
 }
 
-test('File view 원본에 저장 saves through the helper; a changed original opens the comparison before any overwrite', async () => {
-  let conflictOnce = true
-  const { view, calls, setDisk } = originalUiFixture((get, setDisk, calls) => ({
-    saveOriginal: async body => {
-      calls.push(['saveOriginal', body])
-      if (conflictOnce) { conflictOnce = false; throw Object.assign(new Error('changed'), { code: 'SOURCE_CHANGED', details: { expectedSourceHash: 'a'.repeat(64), currentSourceHash: 'd'.repeat(64), originalUpdated: false } }) }
-      return { draft: { ...get(), baseText: get().text, head: 'saved' }, receipt: { mode: 'original', written: true, unchanged: false, originalUpdated: true, sha256: 'e'.repeat(64), size: 5 } }
-    },
-  }), { parts: { diffView: DiffView } })
+test('File view compares the changed source without offering overwrite; explicit new-file export remains available', async () => {
+  const { view, calls, setDisk } = originalUiFixture((get, _setDisk, calls) => ({
+    createDraft: async ({ fileId }) => ({ ...get(), id: fileId === 'copy' ? 'copy-draft' : 'draft', fileId, saveAsAvailable: true }),
+    saveAs: async body => { calls.push(['saveAs', body, get().text]); return { targetName: 'copy.txt', resourceId: 'copy' } },
+  }), { parts: { diffView: DiffView }, chooseSaveAs: async options => { assert.equal(options.createOnly, true); return { directoryId: 'dest', fileName: 'copy.txt' } } })
   await view.openFile('file')
-  const saveOriginalButton = view.element.querySelector('.egdesk-file-save-original-button')
-  assert.equal(saveOriginalButton.hidden, false)
-  assert.equal(saveOriginalButton.disabled, false)
+  assert.equal(view.element.querySelector('.egdesk-file-save-original-button'), null)
+  assert.match(view.element.querySelector('.egdesk-file-source-save-notice').textContent, /안전하게 덮어쓸 수 없습니다/)
   const editor = view.element.querySelector('textarea')
   editor.value = 'mine\n'; editor.fire('input')
   setDisk({ text: 'theirs\n', sha256: 'd'.repeat(64) })
-  saveOriginalButton.click(); await settle(8)
-  const panel = view.element.querySelector('.egdesk-file-source-conflict')
-  assert.equal(panel.hidden, false)
-  assert.equal(panel.querySelector('.egdesk-file-source-conflict-heading').textContent, '원본이 열 때와 다릅니다')
-  assert.ok(panel.querySelector('.egdesk-diff-view'), 'the comparison uses EGDeskDiffView')
+  assert.equal(await view.saveOriginal({ force: true, expectedSourceHash: 'd'.repeat(64) }), null)
+  view.element.querySelector('.egdesk-file-review-button').click(); await settle(8)
+  const panel = view.element.querySelector('.egdesk-file-review')
+  assert.match(panel.querySelector('.egdesk-file-review-heading').textContent, /원본이 열 때와 다릅니다/)
   assert.deepEqual(panel.querySelectorAll('del').map(node => node.textContent), ['theirs'])
   assert.deepEqual(panel.querySelectorAll('ins').map(node => node.textContent), ['mine'])
-  assert.equal(calls.filter(call => call[0] === 'saveOriginal').length, 1)
-  assert.equal(calls.find(call => call[0] === 'saveOriginal')[1].expectedSourceHash, undefined)
-  panel.querySelector('.egdesk-file-source-conflict-overwrite').click(); await settle(8)
-  const saves = calls.filter(call => call[0] === 'saveOriginal')
-  assert.equal(saves.length, 2)
-  assert.equal(saves[1][1].expectedSourceHash, 'd'.repeat(64))
-  assert.equal(panel.hidden, true)
-  assert.equal(view.element.querySelector('.egdesk-file-status').textContent, '원본에 저장했습니다.')
+  assert.equal(panel.querySelector('.egdesk-file-source-conflict-overwrite'), null)
+  const exportButton = view.element.querySelector('.egdesk-file-save-as-button')
+  assert.equal(exportButton.disabled, false)
+  exportButton.click(); await settle(8)
+  assert.deepEqual(calls.filter(call => call[0] === 'saveOriginal'), [])
+  const [, sent, bytes] = calls.find(call => call[0] === 'saveAs')
+  assert.deepEqual([sent.fileName, bytes], ['copy.txt', 'mine\n'])
+  assert.equal(view.snapshot().fileId, 'copy')
+  assert.match(view.element.querySelector('.egdesk-file-status').textContent, /새 파일 copy.txt 저장됨/)
   await view.close()
 })
 
@@ -1345,7 +1276,7 @@ test('project 검사 runs a typed command, shows the result card, and failure lo
   view.setProjectScripts([{ id: 'test', name: '테스트', command: 'npm test', kind: 'test' }])
   projectCheck.click(); await settle(8)
   assert.equal(runs.length, 1)
-  assert.match(view.element.querySelector('.egdesk-file-status').textContent, /먼저 원본에 저장하세요/)
+  assert.match(view.element.querySelector('.egdesk-file-status').textContent, /검사는 디스크 파일만 사용합니다/)
   await view.close()
 })
 
@@ -1404,7 +1335,7 @@ test('approval card body shows the change and one decision for all of it', () =>
   assert.deepEqual(decisions, ['accept', 'decline'])
 })
 
-test('File view hosts the change review: chunk revert writes against the read hash, undo puts it back, a created file asks before removal', async () => {
+test('File view hosts read-only change review without invoking legacy revert, undo or delete callbacks', async () => {
   const files = new Map([['src/a.txt', 'a\nB\nc\nD\n'], ['src/new.txt', 'fresh\n']])
   const writes = []
   const service = {
@@ -1434,31 +1365,14 @@ test('File view hosts the change review: chunk revert writes against the read ha
   const panel = view.element.querySelector('.egdesk-file-change-review-panel')
   assert.equal(panel.hidden, false)
   assert.equal(panel.querySelector('.egdesk-change-review-summary').textContent, '파일 2개 · 덩어리 2개')
-  // Revert only the second chunk (d → D).
-  panel.querySelectorAll('.egdesk-change-review-revert')[1].click(); await settle(10)
-  assert.deepEqual(writes, [['revert', 'src/a.txt', 'a\nB\nc\nd\n']])
-  assert.equal(review.snapshot().canUndo, true)
-  panel.querySelector('.egdesk-change-review-undo').click(); await settle(10)
-  assert.deepEqual(writes.at(-1), ['revert', 'src/a.txt', 'a\nB\nc\nD\n'])
-  // A file changed meanwhile is re-read, not overwritten.
-  files.set('src/a.txt', 'a\nB\nc\nD\nuser\n')
-  panel.querySelectorAll('.egdesk-change-review-revert')[0].click(); await settle(10)
-  assert.equal(writes.length, 2)
-  assert.match(panel.querySelector('.egdesk-change-review-error').textContent, /열 때와 달라 쓰지 않았습니다\. 다시 읽은 내용과의 비교를 아래에 보여 줍니다/)
-  // The re-read is shown as a comparison of what the review read (−) against the file now (+); undo is gone with its baseline.
-  const conflict = panel.querySelector('.egdesk-change-review-conflict')
-  assert.ok(conflict, 'the comparison block is shown in the File view panel')
-  assert.match(conflict.textContent, new RegExp(`${sha('a\nB\nc\nD\n').slice(0, 12)} → ${sha('a\nB\nc\nD\nuser\n').slice(0, 12)}`))
-  assert.deepEqual(conflict.querySelectorAll('.egdesk-diff-line-add').map(line => line.querySelector('.egdesk-diff-text').textContent), ['user'])
-  assert.equal(review.snapshot().files[0].conflict, true)
-  assert.equal(review.snapshot().files[0].sha256, sha('a\nB\nc\nD\nuser\n'), 're-read, so the next write is checked against the file as it is now')
-  assert.equal(review.snapshot().canUndo, false)
-  // Created file: propose, confirm, remove.
-  panel.querySelector('.egdesk-change-review-delete').click(); await settle()
-  assert.equal(writes.some(write => write[0] === 'delete'), false, 'nothing is removed before confirmation')
-  panel.querySelector('.egdesk-change-review-delete-yes').click(); await settle(8)
-  assert.deepEqual(writes.at(-1), ['delete', 'src/new.txt', sha('fresh\n')])
-  assert.equal(review.snapshot().files[1].removed, true)
+  assert.match(panel.querySelector('.egdesk-change-review-read-only').textContent, /비교만 표시합니다/)
+  assert.ok(panel.querySelector('.egdesk-diff-view'))
+  for (const action of ['revert', 'delete', 'delete-yes']) assert.equal(panel.querySelector(`.egdesk-change-review-${action}`), null)
+  assert.equal(panel.querySelector('.egdesk-change-review-undo').hidden, true)
+  assert.equal(await review.revert(0, [1]), null)
+  assert.equal(await review.undoLastRevert(), null)
+  assert.equal(await review.deleteFile(1), null)
+  assert.deepEqual(writes, [])
   await view.close()
 })
 
