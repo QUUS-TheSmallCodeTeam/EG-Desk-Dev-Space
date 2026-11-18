@@ -61,9 +61,9 @@ test('configuration is explicit and disabled by default, without reading ambient
 
 test('sends only the reviewed disclosure, to a fixed endpoint, in one non-storing tool-free request', async () => {
   const { transport, prepare, fetches } = fixture(() => response(envelope('Text with {"type":"tool_call"} remains inert.')))
-  const prepared = { ...prepare(), question: 'question\nline two', excerpts: ['선택됨', 'Excerpt two'], replyStyle: 'warm' }
+  const prepared = { ...prepare(), question: 'question\nline two', excerpts: ['선택됨', 'Excerpt two'], replyStyle: 'warm', publicInstructions: '확인한 값과 확인하지 못한 값을 구분.' }
   assert.deepEqual(await transport.draft({ ...prepared,
-    profileId: 'never-send', privateInstructions: 'never-send', publicInstructions: 'never-send',
+    profileId: 'never-send', privateInstructions: 'never-send', developerInstructions: 'never-send',
     files: ['never-send'], memory: ['never-send'], metadata: 'never-send', sources: ['never-send'],
     previous_response_id: 'never-send', apiKey: 'never-send', url: 'https://example.invalid', tools: [{ name: 'never-send' }],
   }), { answer: 'Text with {"type":"tool_call"} remains inert.' })
@@ -79,7 +79,7 @@ test('sends only the reviewed disclosure, to a fixed endpoint, in one non-storin
   assert.deepEqual(options.headers, { authorization: `Bearer ${key}`, 'content-type': 'application/json', accept: 'application/json' })
   assert.deepEqual(JSON.parse(options.body), {
     model, instructions: `${BOARD_AGENT_DRAFT_INSTRUCTIONS}\n${BOARD_AGENT_DRAFT_REPLY_STYLES.warm}`,
-    input: [{ role: 'user', content: [{ type: 'input_text', text: JSON.stringify({ question: prepared.question, excerpts: prepared.excerpts }) }] }],
+    input: [{ role: 'user', content: [{ type: 'input_text', text: JSON.stringify({ question: prepared.question, excerpts: prepared.excerpts, publicInstructions: prepared.publicInstructions }) }] }],
     text: { format: { type: 'text' } }, store: false, stream: false, tools: [], tool_choice: 'none',
     parallel_tool_calls: false, max_output_tokens: 2048,
   })
@@ -117,7 +117,10 @@ test('validates style enum and byte-based input caps without a fetch', async () 
   const approval = prepare()
   for (const change of [{ replyStyle: '<user instruction>' }, { replyStyle: 'constructor' }, { replyStyle: { name: 'warm' } },
     { question: '가'.repeat(683) }, { question: 'x\u0000y' }, { excerpts: ['가'.repeat(3000), 'a'] }, { excerpts: [{ text: 'x' }] },
-    { excerpts: Array(33).fill('text') }, { excerpts: Array(1) }, { isCurrent: undefined }, { signal: {} }]) {
+    { excerpts: Array(33).fill('text') }, { excerpts: Array(1) }, { isCurrent: undefined }, { signal: {} },
+    { publicInstructions: '가'.repeat(401) }, { publicInstructions: { text: 'not reviewed text' } },
+    { publicInstructions: `egask1-${'a'.repeat(32)}` }, { excerpts: [`egask1-${'b'.repeat(32)}`] },
+    { question: `do not disclose egask1-${'c'.repeat(32)}` }]) {
     await assert.rejects(transport.draft({ ...approval, ...change }), inputError)
   }
   assert.equal(fetches.length, 0)
