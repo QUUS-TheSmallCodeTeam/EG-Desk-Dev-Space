@@ -593,7 +593,7 @@ const actorReceipt = (extra = {}) => ({ actor: 'JSWindowActor', eventDispatched:
 const scrollReceipt = (mode = 'document', extra = {}) => actorReceipt({ inputRoute: 'dom-scroll-api', scrollMode: mode, ...extra })
 const keyReceipt = (key, focusPolicy, extra = {}) => actorReceipt({ inputRoute: 'dom-keyboard-event', key,
   trustedInput: false, targetKeyObserved: true, keydownDefaultPrevented: false, defaultActionEmulated: null, focusPolicy, ...extra })
-function guardedFixture({ timeoutMs, clock, actionGatePolicy } = {}) {
+function guardedFixture({ timeoutMs, clock, actionGatePolicy, secondCard = false } = {}) {
   let current = guardedSnapshot()
   let onAct = () => { throw new Error('unexpected act') }
   let onWait = null
@@ -602,14 +602,17 @@ function guardedFixture({ timeoutMs, clock, actionGatePolicy } = {}) {
   const sendToUi = async request => {
     requests.push(request)
     if (request.kind === 'bind') return { requestId: request.requestId, status: 'bound', binding: {
-      cardId: 'browser-1', cardEpoch: 'card-epoch-1', profileId: 'firefox-default', accountId: 'fixture-account',
+      cardId: request.cardId, cardEpoch: 'card-epoch-1', profileId: 'firefox-default', accountId: 'fixture-account',
       userContextId: 0, url: 'https://example.test/local', engineAccountKey: 'codex:chatgpt:fixture@example.test', authorityEpoch: 0 } }
     if (request.kind === 'cancel') return { requestId: request.requestId, status: 'cancelled' }
     if (request.kind === 'observe' && request.options?.wait) {
       return onWait ? onWait(request) : { requestId: request.requestId, status: 'observed',
         snapshot: { ...current, wait: { for: request.options.wait.for, outcome: 'met', elapsedMs: 5 } } }
     }
-    if (request.kind === 'observe') return { requestId: request.requestId, status: 'observed', snapshot: current }
+    if (request.kind === 'observe') return { requestId: request.requestId, status: 'observed', snapshot: { ...current, cardId: request.cardId } }
+    if (request.kind === 'history' && secondCard) return { requestId: request.requestId, status: 'acted',
+      receipt: { dispatchReceipt: { actor: 'chrome', inputRoute: 'chrome-history', historyAction: request.historyAction,
+        eventDispatched: true } } }
     if (request.kind === 'act') return onAct(request)
     if (request.kind === 'reconcile' && onReconcile) return onReconcile(request)
     throw new Error('unexpected UI request')
@@ -618,7 +621,7 @@ function guardedFixture({ timeoutMs, clock, actionGatePolicy } = {}) {
     ...(timeoutMs ? { timeoutMs } : {}), ...(clock ? { clock } : {}), ...(actionGatePolicy ? { actionGatePolicy } : {}) })
   let sequence = 0
   const dispatch = (tool, args, callId = `guarded-call-${++sequence}`) => service.dispatch(run, { tool, callId, arguments: args })
-  const observe = () => dispatch('egdesk_browser_observe', { cardId: 'browser-1' })
+  const observe = (cardId = 'browser-1') => dispatch('egdesk_browser_observe', { cardId })
   const acted = (request, after, dispatchReceipt) => ({ requestId: request.requestId, status: 'acted',
     receipt: { dispatchReceipt, after, observation: { visibleTextChanged: false } } })
   return { service, requests, dispatch, observe, acted,
@@ -627,7 +630,7 @@ function guardedFixture({ timeoutMs, clock, actionGatePolicy } = {}) {
     get current() { return current }, set current(value) { current = value },
     setAct(fn) { onAct = fn }, setWait(fn) { onWait = fn }, setReconcile(fn) { onReconcile = fn },
     reconciles: () => requests.filter(request => request.kind === 'reconcile'),
-    bind: () => service.bind(run, service.prepare({ selectedSources: [source()] })) }
+    bind: () => service.bind(run, service.prepare({ selectedSources: secondCard ? [source(), source('interact', 'browser-2')] : [source()] })) }
 }
 const targetOf = (seen, ref) => seen.snapshot.interactiveElements.find(item => item.ref === ref)
 
@@ -1742,6 +1745,58 @@ test('BRW-10: a pointer press needs a dispatched DOM click on that element that 
   assert.equal(h.acts().length, 1)
 })
 
+test('BRW-10: cap, contradictory observation and missing target-click evidence never qualify', async () => {
+  for (const variant of ['cap', 'mutation', 'text', 'no click']) {
+    const f = guardedFixture()
+    await f.bind()
+    const seen = await f.observe()
+    f.setAct(request => {
+      const settle = { ...quietSettle, endedBy: variant === 'cap' ? 'cap' : 'quiet', domChanges: variant === 'mutation' ? 1 : 0 }
+      const reply = noEffectClick(f, request, { visibleTextChanged: variant === 'text', settle })
+      if (variant === 'no click') reply.receipt.dispatchReceipt.targetClickObserved = false
+      return reply
+    })
+    await f.dispatch('egdesk_browser_click', clickArgs(seen))
+    await assert.rejects(f.dispatch('egdesk_browser_pointer_click', pointerArgs(await f.observe())),
+      { code: 'BROWSER_OUTCOME_UNKNOWN' }, variant)
+    assert.equal(f.acts().length, 1, variant)
+  }
+})
+
+test('BRW-10: an observation outside the original scope permanently spends fallback', async () => {
+  for (const changed of [{ url: 'https://example.test/local#other' }, { revision: 4 }, { documentId: 'document-2' }]) {
+    const { f } = await afterNoEffectClick()
+    const original = f.current
+    f.current = { ...original, ...changed }
+    await assert.rejects(f.dispatch('egdesk_browser_pointer_click', pointerArgs(await f.observe())), { code: 'BROWSER_OUTCOME_UNKNOWN' })
+    f.current = original
+    await assert.rejects(f.dispatch('egdesk_browser_pointer_click', pointerArgs(await f.observe())), { code: 'BROWSER_OUTCOME_UNKNOWN' })
+    assert.equal(f.acts().length, 1)
+  }
+})
+
+test('BRW-10: history on another Card invalidates fallback and blocks restoration by a delayed refusal', async () => {
+  for (const pressInFlight of [false, true]) {
+    const { f, seen } = await afterNoEffectClick({ secondCard: true })
+    const other = await f.observe('browser-2')
+    let press, refuse
+    if (pressInFlight) {
+      f.setAct(request => new Promise(resolve => { refuse = () => resolve(notSent(request)) }))
+      press = f.dispatch('egdesk_browser_pointer_click', pointerArgs(seen))
+      await flushHandoff()
+    }
+    const history = await f.dispatch('egdesk_browser_history', { cardId: 'browser-2', action: 'back',
+      expectedRevision: other.snapshot.revision, observationId: other.observationId })
+    assert.equal(history.status, 'history-dispatched')
+    if (pressInFlight) {
+      refuse()
+      await assert.rejects(press, { dispatchPhase: 'not-dispatched' })
+    }
+    await assert.rejects(f.dispatch('egdesk_browser_pointer_click', pointerArgs(await f.observe())), { code: 'BROWSER_OUTCOME_UNKNOWN' })
+    assert.equal(f.acts().length, pressInFlight ? 2 : 1)
+  }
+})
+
 test('BRW-10: after a no-effect click and a fresh observation, one press goes out with observed bounds, scroll and zoom', async () => {
   const { f, seen } = await afterNoEffectClick()
   await assert.rejects(f.dispatch('egdesk_browser_click', clickArgs(seen)), { code: 'BROWSER_OUTCOME_UNKNOWN' },
@@ -1796,12 +1851,21 @@ test('BRW-10: a press the actor refused before input keeps the click lock and gi
   const refused = await f.dispatch('egdesk_browser_pointer_click', pointerArgs(seen)).catch(error => error)
   assert.equal(refused.code, 'BROWSER_OBSERVATION_STALE')
   assert.equal(refused.dispatchPhase, 'not-dispatched')
+  await assert.rejects(f.dispatch('egdesk_browser_pointer_click', pointerArgs(seen)), { code: 'BROWSER_OBSERVATION_STALE' })
+  assert.equal(f.acts().length, 2, 'the refused press spent its observation')
   const again = await f.observe()
   assert.equal(again.uncertainAction.action, 'click', 'still locked by the click')
   await assert.rejects(f.dispatch('egdesk_browser_click', clickArgs(again)), { code: 'BROWSER_OUTCOME_UNKNOWN' })
   f.setAct(request => ({ requestId: request.requestId, status: 'acted', receipt: { dispatchReceipt: pointerReceipt(),
     after: guardedSnapshot({ text: ['Count: 1'] }), observation: { settle: quietSettle } } }))
   assert.equal((await f.dispatch('egdesk_browser_pointer_click', pointerArgs(again))).status, 'postcondition-observed')
+  const changed = await afterNoEffectClick()
+  changed.f.setAct(request => notSent(request))
+  await assert.rejects(changed.f.dispatch('egdesk_browser_pointer_click', pointerArgs(changed.seen)), { dispatchPhase: 'not-dispatched' })
+  changed.f.current = { ...changed.f.current, url: 'https://example.test/local#different' }
+  await assert.rejects(changed.f.dispatch('egdesk_browser_pointer_click', pointerArgs(await changed.f.observe())),
+    { code: 'BROWSER_OUTCOME_UNKNOWN' })
+  assert.equal(changed.f.acts().length, 2)
   // An actor refusal that cannot prove "never sent" spends the press.
   const second = await afterNoEffectClick()
   second.f.setAct(request => ({ requestId: request.requestId, status: 'rejected', error: 'perform threw', dispatchPhase: 'dispatched',
@@ -1844,6 +1908,8 @@ test('BRW-12 (R-01): a lost press is reconciled once with seq, call ID and doc I
     ['other document', request => ({ callId: request.callId, entered: false, fenced: true, documentId: 'document-9' }), 'unknown'],
     ['performing timing', request => ({ callId: request.callId, entered: false, fenced: true, documentId: request.guard.documentId,
       timing: { performEnterMs: 3 } }), 'unknown'],
+    ['contradictory event evidence', request => ({ callId: request.callId, entered: false, fenced: true,
+      documentId: request.guard.documentId, timing: { firstEventAtMs: 3 } }), 'unknown'],
   ]) {
     const lost = await lose(answer)
     assert.equal(lost.error.code, 'BROWSER_UI_TIMEOUT', label)

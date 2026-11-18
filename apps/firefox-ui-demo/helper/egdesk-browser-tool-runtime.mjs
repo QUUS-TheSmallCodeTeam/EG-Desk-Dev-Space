@@ -104,7 +104,7 @@ export const BROWSER_TOOL_SPECS = [
     { cardId: base.cardId }, ['cardId']),
   // BRW-10 (REA 웹1·웹2, D-B4): appended; egdesk_browser_click and
   // egdesk_browser_press keep their schemas and behaviour.
-  spec('egdesk_browser_pointer_click', 'Press an observed element like a person: one trusted pointer move, button down and button up at the centre of its observed bounds, for menus and buttons that react to pointerdown, mousedown or hover and ignore egdesk_browser_click. Use it only after egdesk_browser_click on the same element was dispatched and the page did not change at all; observe again first, then call this once for that element. The point comes only from the fresh observation and is used only while the page, its scroll position, the viewport size, devicePixelRatio and page zoom are unchanged; otherwise it is refused before input. It is never retried and never replaces a click on its own. It moves the page\'s own focus to the pressed element, may let the page open a popup or download as after a person\'s click, and a press that would land on another element is refused with obscuredBy. Requires the exact target precondition and a testable postcondition; a dispatched press is not proof of an external effect.',
+  spec('egdesk_browser_pointer_click', 'Press an observed element like a person: one trusted pointer move, button down and button up at the centre of its observed bounds, for menus and buttons that react to pointerdown, mousedown or hover and ignore egdesk_browser_click. Use it only after egdesk_browser_click on the same element was dispatched and a quiet settle reported no observed effect. Observe again first: the document, exact URL and revision must still match, with no intervening state-changing Browser request in this run. The point comes only from the fresh observation and is used only while the page, its scroll position, the viewport size, devicePixelRatio and page zoom are unchanged; otherwise it is refused before input. It is never retried and never replaces a click on its own. It moves the page\'s own focus to the pressed element, may let the page open a popup or download as after a person\'s click, and a press that would land on another element is refused with obscuredBy. Requires the exact target precondition and a testable postcondition; neither a quiet settle nor a dispatched press proves anything about external effects.',
     { ...base, ref: { type: 'string' }, expectedTarget: target, postcondition },
     ['cardId', 'observationId', 'expectedRevision', 'ref', 'expectedTarget', 'postcondition']),
   spec('egdesk_browser_type', 'Type text like a person into the observed text field or editor that already has the focus in its page (observe focusedElement; egdesk_browser_pointer_click on a field focuses it), through the browser\'s own text input path, then optionally press one key the same way (key; the browser runs that key\'s default action, so Enter may submit a form). EG-Desk never moves focus; an unfocused, password or sensitive target is refused. Text goes in at the caret and does not replace the existing value (use egdesk_browser_fill to replace). Up to 8000 characters, or empty text with a key. Requires a fresh observation, exact target precondition and a testable postcondition; never retried.',
@@ -320,14 +320,19 @@ function validateArgs(tool, args) {
     reject('INVALID_BROWSER_TOOL', 'Type requires text up to 8000 characters (or a guarded key) and a postcondition')
   }
 }
-// BRW-10 (D-B4): the click that makes a pointer press eligible was dispatched,
-// read back on the same document and changed nothing: no DOM mutation
-// (same revision), same URL, no fetch/XHR while it settled, no dialog.
+function sameClickScope(left, right) {
+  return ['documentId', 'url', 'revision', 'innerWindowId', 'browsingContextId']
+    .every(key => left[key] === right[key])
+}
+// BRW-10 (D-B4): a bounded actor report, not proof that a click had no
+// delayed, unobserved or external effect. Hitting the cap is not quiet.
 function clickHadNoEffect(observed, after, observation) {
   const settle = observation?.settle
-  return record(after) && after.documentId === observed.documentId && after.url === observed.url &&
-    after.revision === observed.revision && record(settle) && ['quiet', 'cap'].includes(settle.endedBy) &&
-    Array.isArray(settle.requests) && settle.requests.length === 0 && !settle.moreRequests
+  return sameClickScope(observed, after) && observation?.visibleTextChanged === false &&
+    !['urlChanged', 'titleChanged', 'focusedElementChanged', 'interactiveChanged'].some(key => observation[key] === true) &&
+    record(settle) && settle.endedBy === 'quiet' && settle.domChanges === 0 &&
+    Array.isArray(settle.requests) && settle.requests.length === 0 &&
+    (!Object.hasOwn(settle, 'moreRequests') || settle.moreRequests === 0)
 }
 const POINTER_API_ROUTES = new Set(['synthesizeMouseEvent', 'sendMouseEvent', 'sendMouseEventToWindow'])
 // The tools the action classifier gates, as for click (D-B3 policy hook).
@@ -392,13 +397,16 @@ function uiTiming(value) {
 // EGQ8: only an explicit, uncontradicted refusal before input frees the Card.
 // 'dispatched', 'unknown', a missing or malformed phase, any sign that the
 // actor entered perform, or a partial perform count keeps the outcome unknown (EG-01).
-function provenNotDispatched(response) {
-  const timing = response.timing ?? {}
+function noPerformEvidence(timing = {}) {
+  if (!record(timing)) return false
   const counts = [timing.performCallsBefore, timing.performCallsAfter]
-  return response.status === 'rejected' && response.dispatchPhase === 'not-dispatched' && record(timing) &&
-    response.receipt?.dispatchReceipt?.eventDispatched !== true &&
-    ['performEnterMs', 'performExitMs', 'firstEventAtMs'].every(key => timing[key] == null) &&
-    (counts.every(count => count === undefined) || (Number.isSafeInteger(counts[0]) && counts[1] === counts[0]))
+  return ['performEnterMs', 'performExitMs', 'firstEventAtMs'].every(key => timing[key] == null) &&
+    (counts.every(count => count === undefined) ||
+      (Number.isSafeInteger(counts[0]) && counts[0] >= 0 && counts[1] === counts[0]))
+}
+function provenNotDispatched(response) {
+  return response.status === 'rejected' && response.dispatchPhase === 'not-dispatched' &&
+    response.receipt?.dispatchReceipt?.eventDispatched !== true && noPerformEvidence(response.timing)
 }
 
 // D-B1: the conversation's navigation rule as the UI reports it beside a bind,
@@ -433,6 +441,18 @@ export function createBrowserToolService({ sendToUi, getOwnerKey, timeoutMs = 15
   const pendingBindings = new Map()
   const closedRuns = new Set()
   const preparedRuns = new WeakSet()
+
+  // Spend eligibility across the run before sending a state-changing request.
+  // A delayed reply must not mint or restore it across a later dispatch.
+  function beginMutation(binding) {
+    binding.mutationGeneration = (binding.mutationGeneration || 0) + 1
+    for (const card of binding.cards.values()) card.noEffectClick = null
+    return binding.mutationGeneration
+  }
+
+  function narrowPointerFallback(card, snapshot) {
+    if (card.noEffectClick && !sameClickScope(card.noEffectClick.scope, snapshot)) card.noEffectClick = null
+  }
 
   function cancelCards(binding) {
     return Promise.allSettled(binding.selectedCards.map(card => requestUi({ kind: 'cancel',
@@ -574,7 +594,7 @@ export function createBrowserToolService({ sendToUi, getOwnerKey, timeoutMs = 15
       !transition.wasAlreadyTrue && checkPostcondition(transition.condition, snapshot, transition.ref))
     if (transitionRecovered) { card.uncertain = false; card.uncertainAction = null; card.pendingTransition = null }
     if (card.lastFill && card.lastFill.documentId !== snapshot.documentId) card.lastFill = null
-    if (card.noEffectClick && card.noEffectClick.documentId !== snapshot.documentId) card.noEffectClick = null
+    narrowPointerFallback(card, snapshot)
     card.observation = { id: randomUUID(), snapshot }
     return { navigationPostconditionReobserved: transitionRecovered && transition.actionType === 'navigate',
       documentTransitionPostconditionReobserved: transitionRecovered,
@@ -698,13 +718,12 @@ export function createBrowserToolService({ sendToUi, getOwnerKey, timeoutMs = 15
     const dialog = dialogOf(response?.dialog)
     if (response?.status !== 'reconciled' || !record(answer) ||
         (answer.callId !== callId && !(actRequestId && answer.requestId === actRequestId))) return unknown('unrecognized-answer')
-    const timing = record(answer.timing) ? answer.timing : {}
     if (answer.entered === true) {
       return { dispatched: true, ...(dialog ? { dialog } : {}),
         summary: { answered: true, entered: true, performing: answer.performing === true } }
     }
     if (answer.entered === false && answer.fenced === true && answer.documentId === guard.documentId &&
-        ['performEnterMs', 'performExitMs'].every(key => timing[key] == null) && !dialog) {
+        (answer.performing === undefined || answer.performing === false) && noPerformEvidence(answer.timing) && !response.dialog) {
       return { dispatched: false, summary: { answered: true, entered: false, fenced: true } }
     }
     return unknown(answer.entered === 'unknown' && ['other-document', 'record-evicted'].includes(answer.reason)
@@ -739,6 +758,7 @@ export function createBrowserToolService({ sendToUi, getOwnerKey, timeoutMs = 15
       const response = await observeRequest(run, binding, card, SCREENSHOT_OBSERVE_OPTIONS, trace)
       if (binding.closed || binding.ownerKey !== getOwnerKey()) reject('BROWSER_RUN_ENDED', 'Browser run ended during observation')
       const snapshot = observationFrom(response, card.cardId)
+      narrowPointerFallback(card, snapshot)
       if (!validScreenshot(snapshot.screenshot)) reject('BROWSER_OBSERVATION_UNAVAILABLE', 'The selected Browser did not return a verifiable screenshot')
       const { send, ...screenshot } = snapshot.screenshot
       return { status: send ? 'screenshot-observed' : 'screenshot-withheld', cardId: card.cardId,
@@ -755,11 +775,13 @@ export function createBrowserToolService({ sendToUi, getOwnerKey, timeoutMs = 15
     if (tool === 'egdesk_browser_close_card') return closeCard(run, binding, card)
     // D-B4: the one exception to the lock is a pointer press on the element
     // whose DOM click was dispatched and changed nothing (checked below).
-    const pointerAfterClick = tool === 'egdesk_browser_pointer_click' && card.noEffectClick?.ref === args.ref
+    const observed = card.observation
+    const prior = card.noEffectClick
+    const pointerAfterClick = tool === 'egdesk_browser_pointer_click' && prior?.ref === args.ref &&
+      (!observed || sameClickScope(prior.scope, observed.snapshot)) && sameTarget(prior.target, args.expectedTarget)
     if (card.uncertain && !(pointerAfterClick && card.uncertainAction?.action === 'click')) {
       reject('BROWSER_OUTCOME_UNKNOWN', 'A prior Browser action has an unknown outcome; select the context again')
     }
-    const observed = card.observation
     if (!observed || observed.id !== args.observationId || observed.snapshot.revision !== args.expectedRevision) reject('BROWSER_OBSERVATION_STALE', 'Observe this Browser Card again before acting')
     if (tool === 'egdesk_browser_history') return historyMove(run, binding, card, args, observed)
     const byRef = Object.hasOwn(args, 'ref')
@@ -781,11 +803,10 @@ export function createBrowserToolService({ sendToUi, getOwnerKey, timeoutMs = 15
       }
     }
     // BRW-10 (D-B4): a pointer press only follows a no-effect DOM click on the
-    // same element and document, from an observation taken after that click.
+    // same ref and scope, from an observation taken after that click.
     let pointerBounds = null
     if (tool === 'egdesk_browser_pointer_click') {
-      const prior = card.noEffectClick
-      if (!pointerAfterClick || prior.documentId !== observed.snapshot.documentId || !sameTarget(prior.target, args.expectedTarget)) {
+      if (!pointerAfterClick) {
         reject('BROWSER_POINTER_NEEDS_CLICK_FIRST', 'A pointer press is only for an element whose egdesk_browser_click was dispatched and changed nothing; click it first, then observe again')
       }
       if (!validScroll(observed.snapshot.scroll)) reject('BROWSER_OBSERVATION_STALE', 'Observe this Browser Card again; the observation has no scroll position')
@@ -828,12 +849,11 @@ export function createBrowserToolService({ sendToUi, getOwnerKey, timeoutMs = 15
     // not retried automatically; the next action requires a new observation.
     card.observation = null
     if (!(tool === 'egdesk_browser_press' && card.lastFill?.ref === args.ref)) card.lastFill = null
-    // One pointer press per no-effect click; any other dispatch ends it too.
-    // A press proven never sent gives it back (nothing was spent but the observation).
-    const eligibility = tool === 'egdesk_browser_pointer_click' ? card.noEffectClick : null
+    // One dispatched press per no-effect click. A proven refusal may restore
+    // only the original scope; it never restores the spent observation.
+    const eligibility = pointerAfterClick ? prior : null
     const clickLock = eligibility ? { uncertain: card.uncertain, uncertainAction: card.uncertainAction,
       pendingTransition: card.pendingTransition } : null
-    card.noEffectClick = null
     card.busy = true
     const action = tool === 'egdesk_browser_navigate' ? { type: 'navigate', url: args.url } :
       tool === 'egdesk_browser_click' ? { type: 'click', ref: args.ref } :
@@ -849,6 +869,13 @@ export function createBrowserToolService({ sendToUi, getOwnerKey, timeoutMs = 15
     // Scroll changes only the viewport, which the next observation reports in
     // full; its unknown outcome needs re-observation but does not lock the Card.
     const trace = {}
+    const mutationGeneration = beginMutation(binding)
+    // Restore only eligibility to be checked by the next valid observation, never input permission.
+    const restoreFallback = () => {
+      if (!eligibility || binding.closed || binding.ownerKey !== getOwnerKey() || run.status !== 'inProgress') return
+      Object.assign(card, clickLock)
+      if (binding.mutationGeneration === mutationGeneration) card.noEffectClick = eligibility
+    }
     const markUnknown = () => {
       if (action.type === 'scroll') return
       card.uncertain = true
@@ -873,7 +900,7 @@ export function createBrowserToolService({ sendToUi, getOwnerKey, timeoutMs = 15
       if (outcome.dispatched === false) {
         card.uncertain = false; card.uncertainAction = null; card.pendingTransition = null
         // The no-effect click's own lock stays; only the unsent press is undone.
-        if (eligibility) { Object.assign(card, clickLock); card.noEffectClick = eligibility }
+        restoreFallback()
         throw Object.assign(new Error('Browser action was not sent; observe this Browser Card again before trying it'),
           { code: 'BROWSER_OBSERVATION_STALE', dispatchPhase: 'not-dispatched', dispatched: false,
             reconcile: outcome.summary, timing: { ...trace } })
@@ -917,8 +944,8 @@ export function createBrowserToolService({ sendToUi, getOwnerKey, timeoutMs = 15
       const obscuredBy = obscuredByOf(response)
       // Not sent: only this observation is spent; no lock, no retry. The
       // model re-observes and may decide again under a new call ID.
-      if (provenNotDispatched(response) && !dialog) {
-        if (eligibility) card.noEffectClick = eligibility
+      if (provenNotDispatched(response) && !response.dialog) {
+        restoreFallback()
         throw Object.assign(new Error('Browser action was not sent; observe this Browser Card again before trying it'),
           { code: 'BROWSER_OBSERVATION_STALE', dispatchPhase: 'not-dispatched', dispatched: false, timing: { ...trace },
             ...(obscuredBy ? { obscuredBy } : {}) })
@@ -997,9 +1024,12 @@ export function createBrowserToolService({ sendToUi, getOwnerKey, timeoutMs = 15
     // A page dialog still open after the action leaves the outcome unknown.
     const matched = !wasAlreadyTrue && readbackIsCurrent && !dialog && checkPostcondition(condition, after, args.ref)
     if (!matched) markUnknown()
-    if (!matched && action.type === 'click' && !wasAlreadyTrue && readbackIsCurrent && !dialog &&
+    if (!matched && action.type === 'click' && !wasAlreadyTrue && readbackIsCurrent && !response.dialog &&
+        binding.mutationGeneration === mutationGeneration &&
         clickHadNoEffect(observed.snapshot, after, response.receipt.observation)) {
-      card.noEffectClick = { ref: args.ref, documentId: observed.snapshot.documentId, target: { ...args.expectedTarget } }
+      const { documentId, url, revision, innerWindowId, browsingContextId } = observed.snapshot
+      card.noEffectClick = { ref: args.ref, scope: { documentId, url, revision, innerWindowId, browsingContextId },
+        target: { ...args.expectedTarget } }
     }
     // The press reached what the no-effect click could not: the Card's lock
     // from that click ends with an observed postcondition.
@@ -1018,6 +1048,7 @@ export function createBrowserToolService({ sendToUi, getOwnerKey, timeoutMs = 15
     const site = sitePatternsFromInput(args.site)
     if (!site.ok) reject('INVALID_BROWSER_TOOL', 'Site request needs a host or http(s) URL')
     if (binding.refusedSites.has(site.site)) reject('BROWSER_NAVIGATE_OUT_OF_SCOPE', 'The person refused that site in this run; do not ask again')
+    beginMutation(binding)
     const trace = {}
     const pending = requestUi({ kind: 'allow-site', runId: binding.runId, clientThreadId: binding.clientThreadId,
       cardId: card.cardId, binding: card.ui, site: site.site, patterns: [...site.patterns] }, binding, run, trace,
@@ -1051,6 +1082,7 @@ export function createBrowserToolService({ sendToUi, getOwnerKey, timeoutMs = 15
     const fromUrl = card.observation?.snapshot?.url ?? card.ui?.url ?? null
     const navigation = navigationDecision(binding, fromUrl, args.url)
     if (!navigation.allowed) rejectNavigation(navigation)
+    beginMutation(binding)
     const trace = {}
     const pending = requestUi({ kind: 'open-card', runId: binding.runId, clientThreadId: binding.clientThreadId,
       cardId: card.cardId, binding: card.ui, url: args.url, permission: card.permission,
@@ -1083,6 +1115,7 @@ export function createBrowserToolService({ sendToUi, getOwnerKey, timeoutMs = 15
   // Card is never closed by the Agent.
   async function closeCard(run, binding, card) {
     if (card.openedByAgent !== true) reject('BROWSER_CARD_NOT_AGENT_OPENED', 'Only a Browser Card this run opened can be closed by the Agent')
+    beginMutation(binding)
     const trace = {}
     card.busy = true
     const pending = requestUi({ kind: 'close-card', runId: binding.runId, clientThreadId: binding.clientThreadId,
@@ -1101,6 +1134,7 @@ export function createBrowserToolService({ sendToUi, getOwnerKey, timeoutMs = 15
   // result is the dispatch only; the observation is spent and the Card is not
   // locked, because the next observation shows wherever the move landed.
   async function historyMove(run, binding, card, args, observed) {
+    beginMutation(binding)
     card.observation = null
     card.lastFill = null
     card.busy = true
