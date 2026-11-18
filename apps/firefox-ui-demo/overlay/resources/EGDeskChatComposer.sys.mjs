@@ -5,20 +5,25 @@
 // the writing side: which names the room offers, which '@…' the caret is in,
 // what the list shows and what choosing a row puts in the draft. Pure — the
 // surface script owns the textarea and the list element.
-import { threadAgentNames } from './EGDeskThreadRouting.sys.mjs';
+import { BOARD_ADDRESS_START, boardAddresses, boardLiteralMasked, boardStoreMembers } from './EGDeskBoardThread.sys.mjs';
+import { profileRunnable } from './EGDeskChatState.sys.mjs';
 
 export const MENTION_LIST_LABEL = '부를 대상';
 export const MAX_MENTION_QUERY = 40;
-const AGENT_HINT = 'Agent', USER_HINT = '대표님';
-// Same boundary as EGDeskThreadRouting.mentionSpans: '@' starts a call only at
-// the start of the text or after a space, bracket or quote ('mail@…' is not one).
-const BEFORE_OK = /[\s([{"'“‘]/u;
+const AGENT_HINT = 'Agent';
 const fold = value => String(value).toLocaleLowerCase();
 
-// Who '@' can call here: the room's Agents, then the person. Nobody outside a Board Thread.
-export function mentionNames(thread, selfMember = '나') {
-  if (thread?.type !== 'group') return [];
-  return [...new Set([...threadAgentNames(thread, selfMember).filter(name => typeof name === 'string' && name.trim()), selfMember])];
+// Offer only selections that produce a single explicit profile address. The
+// room-engine fallback is not a person to call; nor are self or legacy names.
+export function mentionNames(thread, selfMember = '나', { profiles } = {}) {
+  if (thread?.type !== 'group' || thread.engineId === 'claude') return [];
+  const members = boardStoreMembers(thread, { selfName: selfMember });
+  const runnable = Array.isArray(profiles) ? new Set(profiles.filter(profileRunnable).map(profile => profile.id)) : null;
+  return members.flatMap(({ profileId, label: name }) => {
+    if (!profileId || !name || name === selfMember || (runnable && !runnable.has(profileId))) return [];
+    const { invalid, mentioned } = boardAddresses('@' + name, members);
+    return !invalid && mentioned.length === 1 && mentioned[0].profileId === profileId ? [name] : [];
+  });
 }
 
 // Names that start with the query first, then names that contain it.
@@ -40,7 +45,8 @@ export function mentionQueryAt(text, caret, names = []) {
   const lineStart = source.lastIndexOf('\n', end - 1) + 1;
   const start = source.lastIndexOf('@', end - 1);
   if (start < lineStart) return null;
-  if (start > 0 && !BEFORE_OK.test(source[start - 1])) return null;
+  if (start > 0 && !BOARD_ADDRESS_START.test(source[start - 1])) return null;
+  if (boardLiteralMasked(source)[start] !== '@') return null;
   const query = source.slice(start + 1, end);
   if ([...query].length > MAX_MENTION_QUERY) return null;
   if (/\s/u.test(query) && !(names || []).some(name => fold(name).startsWith(fold(query)))) return null;
@@ -62,12 +68,11 @@ export function nextMention(prev, { names = [], text = '', caret = 0, selectionE
   if (!mention) return emptyMention();
   const dismissedStart = before.dismissedStart === mention.start ? before.dismissedStart : null;
   const matches = mentionMatches(names, mention.query);
-  const selfName = names[names.length - 1];
   const open = dismissedStart === null && matches.length > 0 && (before.open || !composing);
   const sameQuery = before.start === mention.start && before.query === mention.query;
   return {
     open, ...mention, dismissedStart,
-    items: open ? matches.map(name => ({ name, kind: name === selfName ? 'user' : 'agent', label: `@${name}`, hint: name === selfName ? USER_HINT : AGENT_HINT })) : [],
+    items: open ? matches.map(name => ({ name, kind: 'agent', label: `@${name}`, hint: AGENT_HINT })) : [],
     index: sameQuery ? Math.max(0, Math.min(before.index, Math.max(0, matches.length - 1))) : 0,
   };
 }
