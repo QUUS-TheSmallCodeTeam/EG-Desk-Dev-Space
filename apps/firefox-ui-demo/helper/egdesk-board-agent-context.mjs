@@ -1,7 +1,8 @@
+import { Buffer } from 'node:buffer'
 import { types } from 'node:util'
 
 export const BOARD_AGENT_CONTEXT_LIMITS = Object.freeze({
-  question: 2_000, slices: 32, sliceText: 4_000, totalText: 24_000, id: 200, selected: 6, timeoutMs: 1_000,
+  question: 2_048, slices: 32, sliceText: 4_000, totalText: 24_000, id: 200, selected: 6, timeoutMs: 1_000,
 })
 
 const scopeFields = ['invocationId', 'boardId', 'grantId', 'policyRevision', 'expiresAt', 'question', 'allowedSlices']
@@ -18,7 +19,7 @@ const epoch = value => Number.isSafeInteger(value) && value >= 0
 const result = (outcome, selectedIds = []) => ({ selectedIds, outcome })
 
 function snapshotScope(scope, question) {
-  if (!text(question, limits.question) || !exact(scope, scopeFields)) return null
+  if (!text(question, limits.question) || Buffer.byteLength(question, 'utf8') > limits.question || !exact(scope, scopeFields)) return null
   const fields = Object.fromEntries(scopeFields.map(key => [key, data(scope, key)]))
   if (![fields.invocationId, fields.boardId, fields.grantId].every(id) ||
       !(id(fields.policyRevision) || epoch(fields.policyRevision)) || !epoch(fields.expiresAt) || fields.question !== question) return null
@@ -49,11 +50,20 @@ function sameScope(scope, snapshot) {
       id === snapshot.allowedSlices[i].id && text === snapshot.allowedSlices[i].text)
 }
 
-const words = text => new Set(text.normalize('NFKC').toLowerCase().match(/[\p{L}\p{N}\p{M}]+/gu) ?? [])
+const stopWords = new Set(('a an and are as at be by can do for from has how i in is it me of on or please show tell that the this to was were what when where which who why will with ' +
+  '그 그리고 어떤 어느 어디 어디서 언제 언제인가요 언제예요 무엇 무엇인가요 무슨 어떻게 왜 알려 알려줘 알려주세요 혹시').split(' '))
+const koreanParticle = /^([가-힣]{2,}?)(?:에서는|에서도|으로는|으로도|까지는|에서|에게|으로|에도|에는|과는|와는|까지|부터|처럼|만큼|은|는|이|가|을|를|에|의|와|과|도|만)$/u
+
+function words(text) {
+  const tokens = text.normalize('NFKC').toLowerCase().match(/[\p{L}\p{N}\p{M}]+/gu) ?? []
+  return new Set(tokens.filter(word => !stopWords.has(word)).map(word => koreanParticle.exec(word)?.[1] ?? word)
+    .filter(word => word.length > 1 && !stopWords.has(word)))
+}
 
 function localRank(question, slices) {
   const query = words(question)
   return slices.map((slice, index) => ({ index, score: [...words(slice.text)].reduce((n, word) => n + Number(query.has(word)), 0) }))
+    .filter(({ score }) => score > 0)
     .sort((a, b) => b.score - a.score || a.index - b.index)
     .slice(0, limits.selected).map(({ index }) => slices[index].id)
 }
@@ -77,7 +87,7 @@ function decisionRank(response, candidates) {
     if (!exact(answer, ['type', 'probability']) || data(answer, 'type') !== 'predicate') return null
     const score = data(answer, 'probability')
     if (typeof score !== 'number' || !Number.isFinite(score) || score < 0 || score > 1) return null
-    ranked.push({ id, index, score })
+    if (score >= 0.6) ranked.push({ id, index, score })
   }
   return ranked.sort((a, b) => b.score - a.score || a.index - b.index)
     .slice(0, limits.selected).map(({ id }) => id)

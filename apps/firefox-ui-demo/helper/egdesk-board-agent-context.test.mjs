@@ -20,7 +20,7 @@ function fixture({ getApiKey, fetchResponse } = {}) {
     invocationId: 'PRIVATE_INVOCATION', boardId: 'PRIVATE_BOARD', grantId: 'PRIVATE_GRANT', policyRevision: 'PRIVATE_REVISION',
     question, expiresAt: 25_000, allowedSlices: [
       { id: 'PRIVATE_SLICE_1', text: 'Release review is on Wednesday.' },
-      { id: 'PRIVATE_SLICE_2', text: 'The team calendar has a Thursday appointment.' },
+      { id: 'PRIVATE_SLICE_2', text: 'The team calendar has a separate release appointment on Thursday.' },
     ],
   }
   const calls = []
@@ -71,7 +71,7 @@ for (const mode of ['advisory', 'on']) {
   test(`${mode} sends only the question, approved excerpt text, opaque aliases, and fixed typed instructions`, async () => {
     const f = fixture()
     const actual = await f.select({ decisionEgress: true, ...excluded }, { mode, ...excluded })
-    assert.deepEqual(actual, { selectedIds: ['PRIVATE_SLICE_2', 'PRIVATE_SLICE_1'], outcome: 'decision' })
+    assert.deepEqual(actual, { selectedIds: ['PRIVATE_SLICE_2'], outcome: 'decision' })
     assert.equal(f.keyReads(), 1)
     assert.equal(f.calls.length, 1)
     const [{ url, request, payload }] = f.calls
@@ -96,13 +96,62 @@ test('local ranking uses stable normalized Unicode overlap and caps returned app
   const f = fixture()
   const q = 'ＲＥＶＩＥＷ 날짜'
   f.scope.question = q
-  f.scope.allowedSlices = Array.from({ length: 9 }, (_, i) => ({ id: `id-${i}`, text: 'Unrelated text' }))
+  f.scope.allowedSlices = Array.from({ length: 9 }, (_, i) => ({ id: `id-${i}`, text: 'The review' }))
   f.scope.allowedSlices[8].text = 'review 날짜 review 날짜'
   f.scope.allowedSlices[7].text = '날짜'
+  f.scope.allowedSlices[6].text = 'Unrelated text'
   const actual = await f.select({ question: q })
-  assert.deepEqual(actual, { selectedIds: ['id-8', 'id-7', 'id-0', 'id-1', 'id-2', 'id-3'], outcome: 'local' })
+  assert.deepEqual(actual, { selectedIds: ['id-8', 'id-0', 'id-1', 'id-2', 'id-3', 'id-4'], outcome: 'local' })
   assert.deepEqual(await f.select({ question: q }), actual)
   assert.equal(f.keyReads(), 0)
+})
+
+test('local Korean ranking matches informative words across particles, not shared question boilerplate', async () => {
+  const f = fixture()
+  const q = '출시 검토는 언제인가요? 알려주세요.'
+  f.scope.question = q
+  f.scope.allowedSlices = [
+    { id: 'unrelated', text: '서버 점검은 언제인가요? 알려주세요.' },
+    { id: 'topic', text: '출시 일정은 미정입니다.' },
+    { id: 'best', text: '출시 검토를 수요일 오후에 진행합니다.' },
+  ]
+  assert.deepEqual(await f.select({ question: q }), { selectedIds: ['best', 'topic'], outcome: 'local' })
+  f.scope.allowedSlices = [f.scope.allowedSlices[0]]
+  assert.deepEqual(await f.select({ question: q }), noSelection('local'))
+  assert.equal(f.keyReads(), 0)
+})
+
+test('canonical question is bounded in UTF-8 bytes and reaches Decisions uncut at the exact limit', async () => {
+  const f = fixture()
+  const q = '출'.repeat(682) + 'ab'
+  f.scope.question = q
+  const enabled = { decisionEgress: true }
+  assert.equal(Buffer.byteLength(q), limits.question)
+  assert.equal((await f.select({ ...enabled, question: q }, { mode: 'on' })).outcome, 'decision')
+  assert.equal(JSON.parse(f.calls[0].payload.input).question, q)
+  f.scope.question = q + 'c'
+  assert.deepEqual(await f.select({ ...enabled, question: f.scope.question }, { mode: 'on' }), noSelection('invalid_scope'))
+  assert.equal(f.calls.length, 1)
+})
+
+test('eight workflow excerpts of 1,500 UTF-16 units fit the selector with a six-result cap', async () => {
+  const f = fixture()
+  const excerpt = 'release review ' + 'x'.repeat(1_485)
+  assert.equal(excerpt.length, 1_500)
+  f.scope.allowedSlices = Array.from({ length: 8 }, (_, i) => ({ id: `workflow-${i}`, text: excerpt }))
+  const local = await f.select()
+  assert.deepEqual(local.selectedIds, f.scope.allowedSlices.slice(0, 6).map(({ id }) => id))
+  const decision = await f.select({ decisionEgress: true }, { mode: 'on' })
+  assert.deepEqual(decision.selectedIds, f.scope.allowedSlices.slice(1, 7).map(({ id }) => id))
+  assert.equal(JSON.parse(f.calls[0].payload.input).candidates.length, 8)
+})
+
+test('well-formed low Decisions relevance returns no excerpts and does not escalate to local picks', async () => {
+  const f = fixture({ fetchResponse: payload => ({ ok: true, text: async () => JSON.stringify({
+    answers: payload.questions.map(({ name }) => ({ name, type: 'predicate', probability: 0.4 })),
+  }) }) })
+  assertLocal(f, await f.select())
+  assert.deepEqual(await f.select({ decisionEgress: true }, { mode: 'on' }), noSelection('decision'))
 })
 
 test('empty scope is valid but cannot call Decisions, even if enabled', async () => {
