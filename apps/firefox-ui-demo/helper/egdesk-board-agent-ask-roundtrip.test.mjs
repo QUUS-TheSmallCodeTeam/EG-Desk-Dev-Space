@@ -26,6 +26,7 @@ const PRIVATE_INSTRUCTIONS = 'Synthetic full host instructions that must stay on
 const PRIVATE_BOARD = 'Synthetic host planning card that was not approved for sharing.'
 const GUIDANCE = 'Use one brief sentence.'
 const EXCERPT = 'The rehearsal will take place in the atrium on Friday.'
+const IRRELEVANT = 'A catering invoice totals seventy synthetic credits.'
 const QUESTION = 'Where is the rehearsal?'
 const GUEST_TEXT = 'Synthetic guest disclosure for the human reviewer only.'
 const DRAFT_ANSWER = 'The rehearsal is in the atrium.'
@@ -93,7 +94,7 @@ for (const mode of ['extract', 'draft']) test(`encrypted guest question and one 
     const body = JSON.parse(init.body)
     outgoing.push({ kind: 'decision', url, body, ownKeyOnly: init.headers.authorization === `Bearer ${DECISION_KEY}` })
     return { ok: true, status: 200, text: async () => JSON.stringify({
-      model: DECISION_MODEL, answers: body.questions.map(({ name, type }) => ({ name, type, probability: 0.97 })),
+      model: DECISION_MODEL, answers: body.questions.map(({ name, type }) => ({ name, type, probability: name === 'c1' ? 0.97 : 0.03 })),
     }) }
   } })
   const draft = createBoardAgentDraftTransport({ readConfig: () => ({ apiKey: DRAFT_KEY, model: DRAFT_MODEL }), fetchImpl: async (url, init) => {
@@ -108,7 +109,7 @@ for (const mode of ['extract', 'draft']) test(`encrypted guest question and one 
     draftPreview: style => `${BOARD_AGENT_DRAFT_INSTRUCTIONS}\n${BOARD_AGENT_DRAFT_REPLY_STYLES[style]}`,
   })
   t.after(() => ask.close())
-  const saved = ask.policy({ boardId: hostBoard.id, action: 'save', expectedVersion: null, profileId: active.id, excerpts: [EXCERPT], publicInstructions: GUIDANCE })
+  const saved = ask.policy({ boardId: hostBoard.id, action: 'save', expectedVersion: null, profileId: active.id, excerpts: [EXCERPT, IRRELEVANT], publicInstructions: GUIDANCE })
   assert.equal(saved.policy.profileId, active.id)
   assert.equal(saved.policy.profileRevision, active.activeRevision)
   ask.policy({ boardId: wrongBoard.id, action: 'save', expectedVersion: null, profileId: active.id, excerpts: [], publicInstructions: '' })
@@ -172,7 +173,7 @@ for (const mode of ['extract', 'draft']) test(`encrypted guest question and one 
   assert.throws(() => prepare(ordinaryRequest), { code: 'BOARD_AGENT_ASK_CODE_REQUIRED' })
   const preview = prepare(checked.review)
   assert.equal(preview.mode, mode)
-  exactJson(preview.excerpts, [EXCERPT], 'preview lists the approved text only')
+  exactJson(preview.excerpts, [EXCERPT, IRRELEVANT], 'preview lists the approved text only')
   noDisclosure(preview, [issued.askCode, requestId, requestDigest, PRIVATE_BOARD, PRIVATE_INSTRUCTIONS, DECISION_KEY, DRAFT_KEY], 'preview leaks private data')
   assert.equal(outgoing.length, 0, 'inspect and preview never invoke a provider')
   assert.equal(ask.policy({ boardId: hostBoard.id, action: 'get' }).policy.codeActive, true)
@@ -194,8 +195,9 @@ for (const mode of ['extract', 'draft']) test(`encrypted guest question and one 
     assert.equal(f.url, 'https://api.openai.com/v1/responses')
     assert.ok(d.ownKeyOnly && f.ownKeyOnly, 'only each provider’s dedicated fixture key is sent, exclusively in authorization')
     noDisclosure(outgoing, [...privateValues, requestId, requestDigest], 'provider JSON leaked unapproved data')
-    exactJson(JSON.parse(d.body.input), { question: QUESTION, candidates: [{ alias: 'c1', text: EXCERPT }] }, 'Decision sees only question and approved aliases')
-    exactJson(JSON.parse(f.body.input[0].content[0].text), { question: QUESTION, excerpts: [EXCERPT], publicInstructions: GUIDANCE }, 'draft sees approved guidance only as user data')
+    exactJson(JSON.parse(d.body.input), { question: QUESTION, candidates: [{ alias: 'c1', text: EXCERPT }, { alias: 'c2', text: IRRELEVANT }] }, 'Decision sees the question and both approved candidates')
+    noDisclosure(f.body, [IRRELEVANT], 'draft receives no owner-approved but unselected text')
+    exactJson(JSON.parse(f.body.input[0].content[0].text), { question: QUESTION, excerpts: [EXCERPT], publicInstructions: GUIDANCE }, 'draft sees only selected evidence and approved guidance as user data')
     assert.ok(!f.body.instructions.includes(GUIDANCE), 'public guidance is not developer authority')
     assert.deepEqual([f.body.tools, f.body.store, f.body.tool_choice], [[], false, 'none'])
   }
@@ -203,7 +205,7 @@ for (const mode of ['extract', 'draft']) test(`encrypted guest question and one 
   // they must survive in the reply and the guest registry, but not in provider JSON.
   const reply = await host.service.exportReview({ review: { kind: 'reply', requestId, requestDigest, answer } })
   const replyFile = host.file(reply)
-  noDisclosure(replyFile, privateValues, 'reply file leaked unapproved data')
+  noDisclosure(replyFile, [...privateValues, IRRELEVANT], 'reply file leaked unapproved data')
   assert.equal(reply.encrypted, false)
   const entryNames = []
   await dependencies.codec.read(replyFile, async entry => {
@@ -233,5 +235,5 @@ for (const mode of ['extract', 'draft']) test(`encrypted guest question and one 
   assert.equal(guest.profiles.list().profiles.length, 0, 'guest never imports an Agent')
   assert.equal(md(JSON.stringify(host.profiles.get(active.id))), originalProfile, 'profile unchanged')
   assert.deepEqual(allHeads(), headsBefore, 'no Board revision or edit rights transferred')
-  noDisclosure(guest.read(), privateValues, 'guest registry leaked unapproved data')
+  noDisclosure(guest.read(), [...privateValues, IRRELEVANT], 'guest registry leaked unapproved data')
 })
