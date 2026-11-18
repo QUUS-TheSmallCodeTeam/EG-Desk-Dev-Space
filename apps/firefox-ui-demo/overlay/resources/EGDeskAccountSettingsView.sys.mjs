@@ -293,7 +293,7 @@ const CLAUDE_LOGIN_LINES = Object.freeze({ claudeai: 'claude auth login --claude
  * Returns { phase: 'started' | 'error', text }.
  */
 export async function runClaudeLoginInTerminal({ requestCommand, openTerminal, terminalApi = card => card?._termBrowser?.contentWindow?.terminalAPI ?? null,
-  sleep = ms => new Promise(resolve => setTimeout(resolve, ms)), now = Date.now, method = 'claudeai', timeoutMs = 15000,
+  sleep = null, now = Date.now, method = 'claudeai', timeoutMs = 15000,
   isCurrent = () => true,
   checkLine = command => Object.hasOwn(CLAUDE_LOGIN_LINES, method) && command?.method === method && command.line === CLAUDE_LOGIN_LINES[method] ? command.line : null,
   startedText = '터미널에서 Anthropic 공식 로그인을 마친 뒤 다시 확인을 눌러 주세요. EG-Desk는 로그인 정보를 보관하지 않습니다.' } = {}) {
@@ -310,6 +310,10 @@ export async function runClaudeLoginInTerminal({ requestCommand, openTerminal, t
   let card;
   try { card = openTerminal(); } catch { card = null; }
   if (!card) return { phase: 'error', text: '터미널 카드를 열지 못했습니다.' };
+  // Firefox system modules do not have a window-global setTimeout. The
+  // Terminal's own chrome window supplies the timer while its PTY connects.
+  const ownerWindow = card.ownerDocument?.defaultView;
+  const wait = sleep || (typeof ownerWindow?.setTimeout === 'function' ? ms => new Promise(resolve => ownerWindow.setTimeout(resolve, ms)) : null);
   const started = now();
   let api = null;
   while (now() - started < timeoutMs) {
@@ -317,8 +321,8 @@ export async function runClaudeLoginInTerminal({ requestCommand, openTerminal, t
     try { api = terminalApi(card); } catch { api = null; }
     if (typeof api?.write === 'function' && api.isConnected?.() === true) break;
     api = null;
-    if (card.isConnected === false) break;
-    await sleep(50);
+    if (card.isConnected === false || !wait) break;
+    try { await wait(50); } catch { break; }
   }
   if (!isCurrent()) return changed();
   if (!api) return { phase: 'error', text: `터미널 준비를 확인하지 못했습니다. 터미널에서 ${line} 을 직접 실행해 주세요.` };

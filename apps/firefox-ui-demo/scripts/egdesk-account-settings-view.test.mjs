@@ -272,6 +272,16 @@ test('Terminal login types only the helper login line and reports a stuck termin
   assert.match(stuck.text, /claude auth login --claudeai 을 직접 실행/);
 });
 
+test('login waits for an asynchronously connected Terminal using its Firefox window timer', async () => {
+  let ready = false, waits = 0;
+  const writes = [];
+  const card = { isConnected: true, ownerDocument: { defaultView: { setTimeout(callback, ms) {
+    assert.equal(ms, 50); waits++; ready = true; queueMicrotask(callback);
+  } } }, _termBrowser: { contentWindow: { terminalAPI: { isConnected: () => ready, write: line => writes.push(line) } } } };
+  const result = await View.runClaudeLoginInTerminal({ requestCommand: async () => claudeLoginTerminalCommand('claudeai'), openTerminal: () => card, timeoutMs: 150 });
+  assert.deepEqual([result.phase, waits, writes], ['started', 1, ['claude auth login --claudeai\r']]);
+});
+
 test('changing the displayed account while its Terminal connects writes nothing; subscription cannot change to console', async () => {
   const id = 'claude-ab123456', line = `CLAUDE_CONFIG_DIR='/sample/engines/${id}' claude auth login --claudeai`;
   const command = { engine: 'claude', profileId: id, env: 'CLAUDE_CONFIG_DIR', line };
