@@ -358,13 +358,16 @@ test('a load finishing during textarea IME composition waits for it to end', asy
 
 function fileFixture(t, { loadCodeEditor, saveOriginal } = {}) {
   const writes = []
-  let text = 'line one\nline two\nline three'
+  let text = 'line one\nline two\nline three', kind = 'text', readError = null
   const draft = { id: 'draft-1', fileId: 'file-1', rootId: 'root-1', name: 'app.js', head: 'h0', text, baseText: text, bufferRevision: 0, savedRevision: 0,
     sourceHash: 'a'.repeat(64), sourceRevision: 'rev-0', saveAsAvailable: false }
   const service = {
     listDirectory: async () => ({ entries: [{ id: 'file-1', name: 'app.js', kind: 'file' }], nextCursor: null }),
     search: async () => ({ matches: [], truncated: false }),
-    readFile: async () => ({ id: 'file-1', fileId: 'file-1', name: 'app.js', size: text.length, sha256: (text === draft.baseText ? 'a' : 'b').repeat(64), diskRevision: 'rev-0', kind: 'text', text }),
+    readFile: async () => {
+      if (readError) throw Object.assign(new Error(readError), { code: readError })
+      return { id: 'file-1', fileId: 'file-1', name: 'app.js', size: text.length, sha256: (text === draft.baseText ? 'a' : 'b').repeat(64), diskRevision: 'rev-0', kind, text: kind === 'text' ? text : null }
+    },
     createDraft: async () => ({ ...draft }),
     updateDraft: async ({ text: next }) => { writes.push(next); draft.text = next; draft.head = 'h' + writes.length; draft.bufferRevision = writes.length; return { ...draft } },
     saveDraft: async () => ({ draft: { ...draft }, receipt: {} }), saveAs: async () => ({}), diffDraft: async () => ({ hunks: [] }),
@@ -374,7 +377,7 @@ function fileFixture(t, { loadCodeEditor, saveOriginal } = {}) {
   const view = FileView.createEGDeskFileView({ document, service, parts: { diffView: null, runResult: null, changeReview: null }, loadCodeEditor })
   document.body.append(view.element)
   t.after(() => view.close())
-  return { view, writes, document, setDisk: value => { text = value } }
+  return { view, writes, document, setDisk: (value, type = 'text') => { text = value; kind = type }, failRead: code => { readError = code } }
 }
 const wait = ms => new Promise(resolve => setTimeout(resolve, ms))
 
@@ -421,9 +424,35 @@ test('File view: live comparison shows the CodeMirror text without invoking orig
   const panel = h.view.element.querySelector('.egdesk-file-review')
   assert.equal(panel.hidden, false)
   assert.match(panel.textContent, /원본이 열 때와 다릅니다/)
+  assert.match(panel.textContent, /현재 디스크 원본 ↔ 작업사본/)
   assert.match(panel.textContent, /mine/)
   assert.match(panel.textContent, /someone else/)
 })
+
+for (const [scenario, changeDisk, note, disconnects] of [
+  ['unchanged live text', () => {}, /방금 읽은 디스크 내용/, false],
+  ['non-text disk', h => h.setDisk('bytes', 'binary-or-invalid-utf8'), /텍스트로 비교할 수 없습니다/, false],
+  ['oversized disk', h => h.failRead('FILE_TOO_LARGE'), /너무 커서 읽을 수 없습니다/, false],
+  ['unavailable disk', h => h.failRead('RESOURCE_UNAVAILABLE'), /현재 원본을 읽을 수 없습니다/, true],
+]) {
+  test('File view: comparison states its actual source for ' + scenario, async t => {
+    const h = fileFixture(t)
+    await h.view.openRoot({ rootId: 'root-1', directoryId: 'dir-1', name: 'proj' })
+    await h.view.openFile('file-1')
+    changeDisk(h)
+    h.view.element.querySelector('.egdesk-file-review-button').click()
+    await wait(20)
+    const panel = h.view.element.querySelector('.egdesk-file-review')
+    assert.equal(panel.hidden, false)
+    assert.match(panel.querySelector('.egdesk-file-review-note').textContent, note)
+    const label = scenario === 'unchanged live text' ? '현재 디스크 원본' : '보관된 기준본'
+    assert.equal(panel.querySelector('.egdesk-file-review-heading').textContent, '변경 비교 · ' + label + ' ↔ 작업사본')
+    assert.equal(panel.querySelector('.egdesk-file-no-changes').textContent, label + '과 작업사본 사이에 내용 차이가 없습니다.')
+    if (scenario !== 'unchanged live text') assert.match(panel.textContent, /디스크 변경 여부는 이 비교로 알 수 없습니다/)
+    assert.equal(h.view.snapshot().sourceConnection, disconnects ? 'reconnect-required' : 'connected')
+    assert.deepEqual(h.writes, [])
+  })
+}
 
 test('File view: without the bundle the textarea fallback still edits and saves', async t => {
   const h = fileFixture(t, {})

@@ -162,6 +162,18 @@ test('a file the Agent created is removed only while unchanged, and its absence 
   assert.match(h.review.element.textContent, /삭제를 제안하지 않습니다/)
 })
 
+test('read-only change review does not suggest creating a file when no save capability is known', async () => {
+  const deleted = { path: '/project/gone.txt', kind: 'delete', oldText: 'removed\n' }
+  const service = fakeService(new Map([[change.path, AGENT]]))
+  const review = createChangeReview({ document, service, rootId: 'root-1', changes: [change, deleted] })
+  await review.load()
+  assert.match(review.element.querySelector('.egdesk-change-review-read-only').textContent, /비교만 표시합니다/)
+  assert.match(review.element.textContent, /지운 파일은 여기서 되살리지 않습니다/)
+  assert.doesNotMatch(review.element.textContent, /새 파일로 저장/)
+  assert.deepEqual(service.writes, [])
+  assert.deepEqual(service.deletes, [])
+})
+
 test('CODE-05: a deletion-only change is reviewable — the removed text is shown and the absence is observed, never restored', async () => {
   const removed = { path: '/project/old.txt', kind: 'delete', diff: 'gone one\ngone two\n' }
   const h = await open(new Map(), { changes: [removed] })

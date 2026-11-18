@@ -603,6 +603,12 @@ export function createEGDeskFileView({ document, service, chooseRoot, chooseProj
     viewer.hidden = !editorLabel.hidden || (!activeFileId && !!hasResult)
   }
   const showCheckPanel = () => { checkPanel.hidden = false; refreshViewerVisibility() }
+  const hideDiskCheckConfirmation = () => {
+    if (!checkPanel.querySelector('.egdesk-file-check-confirm-disk')) return
+    checkPanel.replaceChildren()
+    checkPanel.hidden = true
+    refreshViewerVisibility()
+  }
   const refreshRegions = () => {
     const regions = egdeskFileViewRegions({ connected: !!activeRoot, hasFile: !!activeFileId, editable: !editorLabel.hidden })
     root.dataset.fileState = regions.state
@@ -880,6 +886,7 @@ export function createEGDeskFileView({ document, service, chooseRoot, chooseProj
       if (!present(generation) || !scopeCurrent(scope)) return false
     }
     treeGeneration++
+    hideDiskCheckConfirmation()
     markCheckStale()
     scriptPanel.hidden = true
     activeProject = project !== undefined ? project : activeProject?.rootId === rootHandle.rootId ? activeProject : null
@@ -1123,6 +1130,7 @@ export function createEGDeskFileView({ document, service, chooseRoot, chooseProj
     setTitle(read.name)
     meta.textContent = `${read.size == null ? '원본 위치 확인 필요' : `${read.size} byte`} · SHA-256 ${read.sha256}`
     reviewPanel.hidden = true
+    hideDiskCheckConfirmation()
     checkPanel.hidden = true
     if (!keepChangeDiff) changeDiffPanel.hidden = true
     if (read.kind === 'text') {
@@ -1200,52 +1208,56 @@ export function createEGDeskFileView({ document, service, chooseRoot, chooseProj
   }
   function scheduleFlush() { if (timer) timers.clearTimeout(timer); timer = timers.setTimeout(() => { timer = null; act(flush) }, 250) }
 
-  // Compare with the live source when still connected, or with the saved
-  // baseline when the source is unavailable. Neither path authorizes writing.
+  // The displayed left side is either a fresh disk read or the stored baseline.
+  // A baseline comparison never says anything about the unread disk contents.
   async function review() {
     if (!draft) return
     const generation = operation
     const targetDraftId = draft.id
+    const current = () => present(generation) && draft?.id === targetDraftId
     await flush()
-    if (!present(generation) || draft?.id !== targetDraftId) return
+    if (!current()) return
     let live = null
-    let missing = sourceDisconnected
-    if (!missing && typeof draft.baseText === 'string') {
-      try { live = await service.readFile({ fileId: activeFileId }) }
-      catch (cause) {
-        if (!present(generation) || draft?.id !== targetDraftId) return
-        if (!['RESOURCE_CHANGED', 'RESOURCE_UNAVAILABLE', 'UNKNOWN_RESOURCE', 'UNKNOWN_ROOT', 'ROOT_CHANGED', 'ROOT_UNAVAILABLE', 'SYMLINK', 'ROOT_ESCAPE'].includes(cause?.code)) throw cause
-        sourceDisconnected = true
-        setEditable(true)
-        missing = true
+    let unavailable = '현재 원본을 읽을 수 없습니다.'
+    if (!sourceDisconnected) {
+      try {
+        const read = await service.readFile({ fileId: activeFileId })
+        if (read?.kind === 'text' && typeof read.text === 'string') live = read
+        else unavailable = '현재 원본을 텍스트로 비교할 수 없습니다.'
+      } catch (cause) {
+        if (!current()) return
+        if (cause?.code === 'FILE_TOO_LARGE') unavailable = '현재 원본이 너무 커서 읽을 수 없습니다.'
+        if (['RESOURCE_CHANGED', 'RESOURCE_UNAVAILABLE', 'UNKNOWN_RESOURCE', 'UNKNOWN_ROOT', 'ROOT_CHANGED', 'ROOT_UNAVAILABLE', 'SYMLINK', 'ROOT_ESCAPE', 'WRONG_KIND'].includes(cause?.code)) {
+          sourceDisconnected = true
+          setEditable(true)
+        }
       }
     }
-    if (!present(generation) || draft?.id !== targetDraftId) return
-    const liveChanged = live?.kind === 'text' && live.sha256 !== draft.sourceHash
-    const diffView = typeof draft.baseText === 'string' ? await part('diffView') : null
-    if (!present(generation) || draft?.id !== targetDraftId) return
-    const heading = () => el('h3', 'egdesk-file-review-heading', liveChanged ? '변경 비교 · 원본이 열 때와 다릅니다' : `변경 비교 · 버퍼 ${draft.bufferRevision}`)
-    const note = () => el('p', 'egdesk-file-review-note', liveChanged ? '지금 원본과 작업사본을 비교합니다. 원본에는 쓰지 않습니다.' : '현재 원본을 읽을 수 없어 작업사본을 열 때의 내용과 비교합니다.')
-    if (diffView || liveChanged) {
-      const before = liveChanged ? live.text : draft.baseText
-      reviewPanel.replaceChildren(heading())
-      if (liveChanged || missing) reviewPanel.append(note())
-      if (before === draft.text) reviewPanel.append(el('p', 'egdesk-file-no-changes', '원본과 비교한 변경이 없습니다.'))
-      else if (diffView) {
+    if (!current()) return
+    const diffView = (live || typeof draft.baseText === 'string') ? await part('diffView') : null
+    if (!current()) return
+    const label = live ? '현재 디스크 원본' : '보관된 기준본'
+    const comparison = `${label} ↔ 작업사본`
+    const liveChanged = !!live?.sha256 && !!draft.sourceHash && live.sha256 !== draft.sourceHash
+    const note = live ? (liveChanged ? '원본이 열 때와 다릅니다. ' : '') + '방금 읽은 디스크 내용과 비교합니다. 원본에는 쓰지 않습니다.'
+      : `${unavailable} 작업사본에 보관된 기준본과 비교하며, 디스크 변경 여부는 이 비교로 알 수 없습니다.`
+    const before = live ? live.text : draft.baseText
+    let changes = []
+    const renderHunks = hunks => hunkSections(hunks, { before: label, after: '현재 작업사본', heading: hunk => `${label} ${hunk.baseStartLine}행 ↔ 작업사본 ${hunk.currentStartLine}행` })
+    if (typeof before !== 'string' || before !== draft.text) {
+      if (diffView) {
         const file = diffView.fileDiffFromTexts({ path: draft.name || readReceipt?.name || '', oldText: before, newText: draft.text, change: 'update' })
-        reviewPanel.append(diffView.renderDiffView({ document, files: [file], openFiles: 1 }))
-      } else reviewPanel.append(...hunkSections([{ baseStartLine: 1, baseLines: before.split('\n'), currentStartLine: 1, currentLines: draft.text.split('\n') }], { before: '지금 원본', after: '내 작업사본', heading: () => '지금 원본 ↔ 내 작업사본' }))
-      reviewPanel.hidden = false
-      announce('변경 비교')
-      return
+        changes = [diffView.renderDiffView({ document, files: [file], openFiles: 1 })]
+      } else if (live && live.text !== draft.baseText) {
+        changes = renderHunks([{ baseStartLine: 1, baseLines: live.text.split('\n'), currentStartLine: 1, currentLines: draft.text.split('\n') }])
+      } else {
+        const diff = await service.diffDraft({ draftId: targetDraftId })
+        if (!current()) return
+        changes = renderHunks(diff.hunks)
+      }
     }
-    const diff = await service.diffDraft({ draftId: targetDraftId })
-    if (!present(generation) || draft?.id !== targetDraftId) return
-    reviewPanel.replaceChildren()
-    reviewPanel.append(el('h3', 'egdesk-file-review-heading', `변경 비교 · 버퍼 ${diff.bufferRevision}`))
-    if (missing) reviewPanel.append(note())
-    if (!diff.hunks.length) reviewPanel.append(el('p', 'egdesk-file-no-changes', '원본과 비교한 변경이 없습니다.'))
-    reviewPanel.append(...hunkSections(diff.hunks, { before: '원본 내용', after: '현재 작업사본 내용', heading: hunk => `원본 ${hunk.baseStartLine}행 ↔ 현재 ${hunk.currentStartLine}행` }))
+    reviewPanel.replaceChildren(el('h3', 'egdesk-file-review-heading', `변경 비교 · ${comparison}`), el('p', 'egdesk-file-review-note', note),
+      ...(changes.length ? changes : [el('p', 'egdesk-file-no-changes', `${label}과 작업사본 사이에 내용 차이가 없습니다.`)]))
     reviewPanel.hidden = false
     announce('변경 비교')
   }
@@ -1380,21 +1392,56 @@ export function createEGDeskFileView({ document, service, chooseRoot, chooseProj
     }
     const script = chosen || (scripts.length === 1 ? scripts[0] : null)
     if (!script) { showScriptChooser(scripts); return }
-    if (!scripts.some(saved => saved.id === script.id && saved.name === script.name && saved.command === script.command)) {
+    const scriptIsCurrent = () => activeProject?.scripts.some(saved => saved.id === script.id && saved.name === script.name && saved.command === script.command)
+    if (!scriptIsCurrent()) {
       announce('검사 명령이 바뀌었습니다. 저장된 명령을 다시 선택하세요.'); return
     }
     const projectId = activeProject.projectId, rootId = activeRoot?.rootId
-    const generation = treeGeneration
-    if (draft) {
-      await flush()
-      if (draft && typeof draft.baseText === 'string' && (editor.value !== draft.text || draft.text !== draft.baseText)) {
-        announce('원본에 저장하지 않은 변경이 있습니다. 검사는 디스크 파일만 사용합니다. 작업사본은 새 파일로 저장할 수 있지만 프로젝트 원본은 바뀌지 않습니다.')
-        return
-      }
+    const generation = operation, rootGeneration = treeGeneration
+    const current = () => present(generation) && rootGeneration === treeGeneration && activeRoot?.rootId === rootId && activeProject?.projectId === projectId && scriptIsCurrent() && !checking
+    const finishTyping = () => {
+      if (!composing) return true
+      announce('입력을 마친 후 검사하세요.')
+      return false
     }
-    if (disposed || generation !== treeGeneration || activeProject?.projectId !== projectId || checking) return
+    if (!finishTyping()) return
+    if (draft) await flush()
+    if (!current() || !finishTyping()) return
+    if (draft && (dirty() || editor.value !== draft.baseText)) {
+      const warning = '검사는 디스크 파일만 사용합니다. 작업사본의 내용은 검사에 포함되지 않으며 그대로 유지됩니다.'
+      const cancel = button('취소', 'egdesk-file-check-cancel', () => {
+        if (checkPanel.hidden || !checkPanel.contains(cancel)) return
+        hideDiskCheckConfirmation()
+        projectCheckButton.focus()
+        announce('검사를 취소했습니다.')
+      })
+      const confirm = button('디스크 버전으로 검사 실행', 'egdesk-file-check-confirm-disk', () => act(async () => {
+        const confirmationCurrent = () => current() && !checkPanel.hidden && checkPanel.contains(confirm)
+        if (!confirmationCurrent() || !finishTyping()) return
+        confirm.disabled = true
+        try {
+          await flush()
+          if (confirmationCurrent() && finishTyping()) await runProjectCheck(script, projectId, rootId)
+        } finally { confirm.disabled = false }
+      }))
+      const confirmation = el('div', 'egdesk-file-check-confirmation')
+      confirmation.setAttribute('role', 'group')
+      confirmation.setAttribute('aria-label', warning)
+      confirmation.append(el('p', 'egdesk-file-check-confirm-note', warning), el('p', 'egdesk-file-check-command-name', script.name),
+        el('code', 'egdesk-file-check-command', script.command), cancel, confirm)
+      checkReceipt = null
+      checkPanel.replaceChildren(el('h3', 'egdesk-file-check-heading', '디스크 버전으로 검사할까요?'), confirmation)
+      showCheckPanel()
+      cancel.focus()
+      announce(warning)
+      return
+    }
+    await runProjectCheck(script, projectId, rootId)
+  }
+
+  async function runProjectCheck(script, projectId, rootId) {
     const receipt = { projectId, rootId, projectTitle: activeProject.title || activeRoot?.name || projectId,
-      cwd: activeRoot?.displayPath || null, revision: projectRevision, bufferRevision: draft?.bufferRevision ?? null, stale: false }
+      cwd: activeRoot?.displayPath || null, revision: projectRevision, stale: false }
     checkReceipt = receipt
     checking = true; refreshProjectCheck()
     checkPanel.replaceChildren(el('h3', 'egdesk-file-check-heading', `검사 중 · ${script.name}`))
@@ -1448,7 +1495,7 @@ export function createEGDeskFileView({ document, service, chooseRoot, chooseProj
     const fullPath = el('p', 'egdesk-file-check-cwd', `실행 폴더 · ${receipt.cwd || '확인되지 않음'}`)
     fullPath.setAttribute('data-testid', 'file-check-cwd')
     context.append(locationToggle, projectLabel, fullPath)
-    if (receipt.bufferRevision != null) context.append(el('p', 'egdesk-file-check-buffer-revision', `작업사본 버전 ${receipt.bufferRevision}`))
+    context.append(el('p', 'egdesk-file-check-source', '검사 대상 · 실행 위치의 디스크 파일 (작업사본 제외)'))
     if (runResult) {
       const summary = runResult.summarizeRunResult({ command: result.command || script.command, exitCode: result.exitCode, status: result.status, durationMs: result.durationMs, output: result.output ?? '', cwd: receipt.cwd, projectRoot: receipt.cwd })
       const card = runResult.renderRunResultCard({ document, result: summary, onOpenLocation: location => act(() => {
@@ -1529,6 +1576,7 @@ export function createEGDeskFileView({ document, service, chooseRoot, chooseProj
 
   function setProjectScripts(scripts) {
     if (!activeProject) return false
+    hideDiskCheckConfirmation()
     markCheckStale()
     activeProject = { ...activeProject, scripts: Array.isArray(scripts) ? scripts.map(script => ({ ...script })) : [] }
     refreshProjectCheck()

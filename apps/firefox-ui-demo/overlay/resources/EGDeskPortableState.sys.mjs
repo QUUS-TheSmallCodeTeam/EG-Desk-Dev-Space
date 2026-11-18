@@ -26,7 +26,7 @@ export const PORTABLE_MAX_FILE_BYTES = 64 * 1024 * 1024;
 export const PORTABLE_EXTENSION = '.egdesk';
 export const PORTABLE_PLAIN_WARNING = '암호 없이 저장하면 파일을 가진 누구나 내용을 볼 수 있습니다.';
 export const PORTABLE_NEW_ENGINE_NOTE = '가져온 대화는 이어서 말하면 새 엔진 대화로 시작합니다.';
-export const PORTABLE_DRAFT_NOTE = '파일 초안은 원본 파일과 연결하지 않은 초안으로 들어왔습니다. 원본에 저장하려면 파일 창에서 다시 연결해 주세요.';
+export const PORTABLE_DRAFT_NOTE = '파일 초안은 원본과 연결되지 않은 작업사본으로 가져왔습니다. 원본과 비교하려면 파일 창에서 다시 연결하세요. 다시 연결해도 원본은 덮어쓰지 않습니다.';
 export const PORTABLE_EXTRAS_HINT = '꺼 두면 넣지 않습니다. 비밀번호·키·토큰이 든 파일과 너무 큰 파일은 켜도 빠집니다.';
 
 /** What the connected bridge supports; an older bridge (no list) supports nothing. */
