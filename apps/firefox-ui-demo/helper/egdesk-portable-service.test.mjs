@@ -7,6 +7,7 @@ import { createHash } from 'node:crypto'
 import { Readable, Writable } from 'node:stream'
 import { createEGDeskPortableBundle } from './egdesk-portable-bundle.mjs'
 import { createPortableService } from './egdesk-portable-service.mjs'
+import { openProfileStore } from './egdesk-profile-store.mjs'
 
 // Tiny test-only codec: it exercises the real portable service and bundle
 // validation without installing/copying ZIP or crypto dependencies. This is
@@ -85,16 +86,22 @@ function assertUnbound(record) {
 
 // Create a valid bundle containing unredacted synthetic authority fields to
 // exercise the import guard independently of the export guard.
-async function rawSyntheticBundle(rawState) {
-  const payload = Buffer.from(JSON.stringify({ kind: 'egdesk.portable.root', v: 1, scope: 'desk', exportedAt: at,
-    include: { chats: false, profiles: false }, desk: { state: rawState } }))
-  const hash = createHash('sha256').update(payload).digest('hex')
-  const node = { id: 'desk', type: 'board', scopeRootId: 'desk', title: 'Desk', refs: [],
-    objects: [{ sha256: hash, role: 'body' }] }
+async function rawSyntheticBundle(rawState, profileBody = null) {
+  const nodes = new Map(), objects = new Map()
+  function add(id, type, title, value, refs = []) {
+    const payload = Buffer.from(JSON.stringify(value))
+    const hash = createHash('sha256').update(payload).digest('hex')
+    objects.set(hash, payload)
+    nodes.set(id, { id, type, scopeRootId: 'desk', title, refs, objects: [{ sha256: hash, role: 'body' }] })
+  }
+  const refs = profileBody ? ['profile-1'] : []
+  add('desk', 'board', 'Desk', { kind: 'egdesk.portable.root', v: 1, scope: 'desk', exportedAt: at,
+    include: { chats: false, profiles: Boolean(profileBody) }, desk: { state: rawState } }, refs)
+  if (profileBody) add('profile-1', 'artifact', profileBody.name, { kind: 'egdesk.portable.profile', v: 1, lifecycle: 'active', body: profileBody })
   const bundle = createEGDeskPortableBundle({ codec, objectProvider: { async openExportSnapshot() {
-    return { getNode: async id => id === 'desk' ? node : null, listEvents: async () => [],
-      getObjectMeta: async id => id === hash ? { size: payload.length, portableApproved: true, scopeRootId: 'desk' } : null,
-      openObject: async () => Readable.from([payload]), close: async () => {} }
+    return { getNode: async id => nodes.get(id) ?? null, listEvents: async () => [],
+      getObjectMeta: async id => objects.has(id) ? { size: objects.get(id).length, portableApproved: true, scopeRootId: 'desk' } : null,
+      openObject: async id => Readable.from([objects.get(id)]), close: async () => {} }
   } }, importStore: { beginStage: async () => null, reopenRepresentative: async () => false } })
   const plan = await bundle.planExport({ rootIds: ['desk'] })
   const chunks = []
@@ -165,4 +172,38 @@ test('standalone Board export and import also retain an unbound required identit
   const imported = await service(target).importBundle({ bundle: bytes.toString('base64'), mode: 'asNew' })
   assert.equal(imported.verified, true)
   assertUnbound(target.board('board-qa').head.body.cards[0])
+})
+
+test('portable Agent slot fields are excluded on export and discarded before import deduplication', async t => {
+  const root = tempDir(t)
+  const source = openProfileStore({ dataDir: root, ownerHash: 'synthetic-portable-source' })
+  const target = openProfileStore({ dataDir: root, ownerHash: 'synthetic-portable-target' })
+  t.after(() => { source.close(); target.close() })
+  const model = { engine: 'claude', modelId: 'sonnet', effort: 'high' }
+  const pinned = { name: 'Synthetic Agent', model: { ...model, engineProfileId: 'claude-abcdef01' } }
+  const local = source.createDraft(pinned)
+  source.activate(local.id, 1, null)
+  // Mimic a destination that already knows the same spelling but must not
+  // treat that existing, locally bound Agent as a duplicate of the import.
+  const collision = target.createDraft(pinned)
+  const service = (desk, profiles) => createPortableService({ desk, profiles, dependencies, now: () => at, home: root,
+    location: () => ({ directory: path.join(root, 'exports'), folder: 'custom' }) })
+  const exported = await service(deskStore(state()), source).exportBundle({ scope: 'desk', include: { profiles: true } })
+  const bytes = fs.readFileSync(path.join(root, 'exports', exported.fileName))
+  const payloads = JSON.parse(bytes.toString('utf8')).map(entry => Buffer.from(entry.data, 'base64').toString('utf8'))
+  assert.ok(payloads.some(payload => payload.includes('egdesk.portable.profile')))
+  assert.ok(payloads.every(payload => !payload.includes('engineProfileId') && !payload.includes('claude-abcdef01')))
+  assert.equal(source.runProfile(local.id).model.engineProfileId, 'claude-abcdef01')
+
+  const importer = service(deskStore(), target)
+  const forged = await rawSyntheticBundle(state(), pinned)
+  const result = await importer.importBundle({ bundle: forged.toString('base64'), mode: 'asNew' })
+  assert.equal(result.verified, true)
+  const [item] = result.profiles
+  assert.deepEqual([item.status, item.active, item.reviewRequired], ['imported', false, true])
+  assert.deepEqual(target.get(item.profileId).head.body.model, model)
+  assert.equal(target.get(collision.id).head.body.model.engineProfileId, 'claude-abcdef01')
+  const repeated = await importer.importBundle({ bundle: bytes.toString('base64'), mode: 'asNew' })
+  assert.equal(repeated.profiles[0].status, 'duplicate')
+  assert.equal(target.list().profiles.length, 2)
 })

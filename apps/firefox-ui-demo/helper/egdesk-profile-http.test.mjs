@@ -353,3 +353,41 @@ test('avatar photos upload as plain base64, come back cleaned, and stay out of e
   const crossSite = await api('POST', '/profiles/avatar-images', { mediaType: 'image/png', imageBase64: original.toString('base64') }, { origin: 'https://example.com' })
   assert.deepEqual([crossSite.status, crossSite.data.code], [403, 'PROFILE_LOOPBACK_REQUIRED'])
 })
+
+test('profile HTTP accepts exact engine slots and rejects malformed or cross-engine slots without saving', async t => {
+  const { open } = fixture(t)
+  const store = open('synthetic-http-owner')
+  const api = (...args) => call({ store }, ...args)
+  const { data: created, status } = await api('POST', '/profiles', {
+    body: body({ model: { engine: 'claude', engineProfileId: 'claude-default' } }),
+  })
+  assert.equal(status, 201)
+  const { id } = created
+  assert.deepEqual(created.profile.head.body.model, { engine: 'claude', modelId: null, effort: null, engineProfileId: 'claude-default' })
+  for (const engineProfileId of ['codex-default', 'codex-abcdef01', 'claude-abc', 'claude-ABCDEF01', 'claude-abcdef01\n',
+    'claude-' + 'x'.repeat(33), ' claude-default', '/synthetic/path', '', null, {}, 8]) {
+    const payload = body({ model: { engine: 'claude', engineProfileId } })
+    for (const result of [await api('POST', '/profiles', { body: payload }),
+      await api('PUT', `/profiles/${id}/draft`, { body: payload, expectedRevision: 1 })]) {
+      assert.deepEqual([result.status, result.data.code], [400, 'INVALID_PROFILE'])
+      assert.match(result.data.error, /model\.engineProfileId/)
+    }
+  }
+  for (const field of ['configDir', 'credentialStore', 'accessToken']) {
+    const result = await api('PUT', `/profiles/${id}/draft`, {
+      body: body({ model: { engine: 'claude', engineProfileId: 'claude-default', [field]: 'synthetic-private-value' } }), expectedRevision: 1,
+    })
+    assert.deepEqual([result.status, result.data.code], [400, 'INVALID_PROFILE'])
+    assert.doesNotMatch(result.data.error, /synthetic-private-value/)
+  }
+  assert.equal(store.list().profiles.length, 1)
+  assert.equal(store.get(id).headRevision, 1)
+  const edit = await api('PUT', `/profiles/${id}/draft`, {
+    body: body({ model: { engine: 'codex', engineProfileId: 'codex-abcd1234' } }), expectedRevision: 1,
+  })
+  assert.deepEqual([edit.status, edit.data.revision, edit.data.profile.head.body.model.engineProfileId], [200, 2, 'codex-abcd1234'])
+  for (const payload of [body(), body({ model: null })]) {
+    const result = await api('POST', '/profiles', { body: payload })
+    assert.deepEqual([result.status, result.data.profile.head.body.model], [201, null])
+  }
+})

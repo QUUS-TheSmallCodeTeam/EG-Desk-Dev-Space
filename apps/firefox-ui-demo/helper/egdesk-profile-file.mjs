@@ -1,6 +1,6 @@
 import { Buffer } from 'node:buffer'
 import {
-  AVATAR_PALETTE, TOOL_CEILING_AXES, composeDeveloperInstructions, normalizeProfileBody, withoutAvatarImage,
+  AVATAR_PALETTE, TOOL_CEILING_AXES, composeDeveloperInstructions, normalizeProfileBody, portableProfileBody,
 } from './egdesk-profile-store.mjs'
 
 // AGENT-02·04 (D-A2): one Agent as a file other tools read, and another tool's
@@ -128,13 +128,14 @@ export function agentFileName(name, format = 'md') {
 
 /**
  * One saved body as a file → {format, filename, mediaType, text, omitted}.
- * omitted lists what the file leaves out on purpose (today: 'avatarImage').
+ * omitted lists what the file leaves out on purpose ('avatarImage', 'engineProfileId').
  */
 export function exportAgentFile(input, format = 'md') {
   if (!AGENT_EXPORT_FORMATS.includes(format)) fileFail('INVALID_AGENT_FILE_FORMAT', `format must be one of ${AGENT_EXPORT_FORMATS.join(', ')}`)
   const saved = normalizeProfileBody(input)
   const omitted = saved.avatar?.kind === 'image' ? ['avatarImage'] : []
-  const body = withoutAvatarImage(saved)
+  if (saved.model?.engineProfileId) omitted.push('engineProfileId')
+  const body = portableProfileBody(saved)
   return { format, filename: agentFileName(body.name, format), mediaType: MEDIA_TYPES[format], text: format === 'md' ? markdownText(body) : codexToml(body), omitted }
 }
 export const exportAgentMarkdown = input => exportAgentFile(input, 'md')
@@ -353,7 +354,8 @@ export function importAgentFile(text, { filename } = {}) {
     const { v, ...rest } = value
     flavor = 'egdesk'
     if (rest.avatar?.kind === 'image') note('avatar', 'photo-not-included')
-    structured = withoutAvatarImage(normalizeProfileBody({ ...rest, name, instructions: '' }))
+    structured = portableProfileBody(normalizeProfileBody({ ...rest, name, instructions: '' }))
+    if (rest.model?.engineProfileId) note('model.engineProfileId', 'local-slot-not-included')
     instructions = userInstructions(markdown, structured)
     if (instructions === null) {
       // Changed in another tool: the text is the instructions, and the fields
