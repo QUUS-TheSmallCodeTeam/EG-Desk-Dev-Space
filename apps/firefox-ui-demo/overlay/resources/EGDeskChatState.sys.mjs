@@ -177,7 +177,10 @@ function sameLocalMessage(a, b) {
   for (const field of ['conversationId', 'runId']) {
     if (a[field] && b[field] && a[field] !== b[field]) return false;
   }
-  if (a.localMessageId && b.localMessageId && a.localMessageId === b.localMessageId) return true;
+  if (a.localMessageId && b.localMessageId) {
+    if (a.localMessageId === b.localMessageId) return true;
+    if (a.localHistory === true && b.localHistory === true) return false; // distinct stored items, even if a provider reused its item ID
+  }
   if (a.id && b.id && a.id === b.id) return true;
   const nativeA = a.providerItemId || a.messageId;
   const nativeB = b.providerItemId || b.messageId;
@@ -347,13 +350,54 @@ export function mergeLocalChatRuns(current = [], persisted = []) {
   return runs;
 }
 
+// A stored answer names its LOCAL run; the public native IDs live on that
+// run's checkpoint/events. Only copy these three display identifiers, never
+// execution context, outputs, account data, or the latest run in the room.
+const HISTORY_ANSWER_IDS = ['conversationId', 'runId', 'answerId'];
+function compatibleAnswerIds(current, evidence) {
+  const ids = {};
+  for (const key of HISTORY_ANSWER_IDS) {
+    const id = evidence[key];
+    if (typeof id !== 'string' || !id) continue;
+    if (current[key] && current[key] !== id) return null;
+    ids[key] = id;
+  }
+  return ids;
+}
+export function fillHistoryAnswerIds(message, evidence) {
+  if (message.role !== 'assistant' || typeof evidence?.runId !== 'string' || !evidence.runId) return message;
+  const ids = compatibleAnswerIds(message, evidence);
+  return ids ? { ...message, ...ids } : message;
+}
+const inHistoryScope = (row, thread) => row && (!row.clientThreadId || row.clientThreadId === thread.clientThreadId)
+  && (!row.localConversationId || row.localConversationId === thread.localConversationId);
+function historyRunOrigins(page) {
+  const origins = new Map();
+  const add = (localRunId, row) => {
+    if (typeof localRunId !== 'string' || !localRunId || !inHistoryScope(row, page.thread)) return;
+    const previous = origins.get(localRunId);
+    if (previous === null) return; // contradictory evidence stays unresolved
+    const ids = compatibleAnswerIds(previous || {}, row);
+    origins.set(localRunId, ids && { ...previous, ...ids });
+  };
+  for (const run of Array.isArray(page.runs) ? page.runs : []) add(run?.localRunId, run);
+  for (const event of Array.isArray(page.events) ? page.events : []) {
+    if (!inHistoryScope(event, page.thread) || !event.localRunId) continue;
+    add(event.localRunId, { runId: event.runId });
+    const run = event.details?.run;
+    if (run && (!run.localRunId || run.localRunId === event.localRunId)) add(event.localRunId, run);
+  }
+  return origins;
+}
+
 // This is the only v1 HTTP-to-UI adapter. Historical events are retained as
 // data, never dispatched through reduceChatEvent (which would replay effects).
 export function normalizeLocalHistoryPage(page, clientThreadId) {
   if (page?.protocolVersion !== 1 || !page.thread || page.thread.clientThreadId !== clientThreadId) return null;
   const localConversationId = page.thread.localConversationId;
   if (typeof localConversationId !== 'string' || !localConversationId) return null;
-  const asMessage = (message, event = {}) => ({
+  const origins = historyRunOrigins(page);
+  const asMessage = (message, event = {}) => fillHistoryAnswerIds({
     ...copy(message),
     localMessageId: message.localMessageId || event.localMessageId || undefined,
     localRunId: message.localRunId || event.localRunId || undefined,
@@ -363,7 +407,9 @@ export function normalizeLocalHistoryPage(page, clientThreadId) {
     content: message.content ?? message.text ?? '',
     localSeq: event.seq ?? message.localSeq,
     localHistory: true,
-  });
+  }, inHistoryScope(message, page.thread) && inHistoryScope(event, page.thread)
+    && (!event.localRunId || !message.localRunId || event.localRunId === message.localRunId)
+    ? origins.get(message.localRunId || event.localRunId) : null);
   const asRun = (run, event = {}) => ({
     ...copy(run), ...localComputerFields(run, event), ...localRateLimitFields(run, event, page.thread),
     localRunId: run.localRunId || event.localRunId || undefined,

@@ -9,7 +9,7 @@
 // - The room's members as the chat store keeps them (GET/POST
 //   /chat/board/members, chat-store v3 room_members) and back.
 // Pure: no DOM, no fetch. The helper shares the same recipient classifier.
-import { clientThreadBinding, displayProfileAvatar, isProfileId, isRunBusy } from './EGDeskChatState.sys.mjs';
+import { clientThreadBinding, displayProfileAvatar, fillHistoryAnswerIds, isProfileId, isRunBusy } from './EGDeskChatState.sys.mjs';
 
 export const BOARD_SEND_PATH = '/chat/board/send';
 export const BOARD_MEMBERS_PATH = '/chat/board/members';
@@ -520,7 +520,16 @@ export function foldBoardMemberAnswers(roomThread, memberMessages, member, { pro
     const { localSeq: _seq, ...rest } = stored;
     const answer = { ...rest, authorName: who.authorName, ...(who.authorAvatar ? { authorAvatar: who.authorAvatar } : {}),
       boardMemberProfileId: member.profileId, localHistory: true };
-    if (messages.some(message => sameMessage(answer, message))) continue;
+    const match = messages.findIndex(message => sameMessage(answer, message));
+    if (match >= 0) {
+      const previous = messages[match];
+      // An earlier page (or its Desk copy) may predate the run checkpoint.
+      // Enrich only the very same member, stored item and local run; never
+      // replace the visible row, its author, or its cache/history provenance.
+      if (previous.boardMemberProfileId === member.profileId && previous.localMessageId && previous.localMessageId === answer.localMessageId
+          && previous.localRunId && previous.localRunId === answer.localRunId) messages[match] = fillHistoryAnswerIds(previous, answer);
+      continue;
+    }
     const at = timeOf(answer.createdAt);
     let index = messages.length;
     if (Number.isFinite(at)) { const after = messages.findIndex(message => timeOf(message.createdAt) > at); if (after >= 0) index = after; }

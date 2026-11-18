@@ -1,13 +1,15 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { readFileSync } from 'node:fs';
+import { readFileSync, rmSync } from 'node:fs';
 import { compileFunction } from 'node:vm';
 import * as ChatState from '../overlay/resources/EGDeskChatState.sys.mjs';
 import * as InputContext from '../overlay/resources/EGDeskInputContext.sys.mjs';
 import * as BoardThread from '../overlay/resources/EGDeskBoardThread.sys.mjs';
 import { mentionNames } from '../overlay/resources/EGDeskChatComposer.sys.mjs';
 import * as ThreadMembers from '../overlay/resources/EGDeskThreadMembers.sys.mjs';
-import { boardMentions as runtimeMentions, boardMembers as runtimeMembers } from '../helper/codex-chat-runtime.mjs';
+import { boardMentions as runtimeMentions, boardMembers as runtimeMembers, CodexChatRuntime } from '../helper/codex-chat-runtime.mjs';
+import { openChatStore } from '../helper/egdesk-chat-store.mjs';
+import { createPrivateQaTempDirectory } from './egdesk-qa-platform.mjs';
 
 const surfaceScript = readFileSync(new URL('../overlay/JS/eg-desk-surface.uc.js', import.meta.url), 'utf8');
 const surfaceCss = readFileSync(new URL('../overlay/CSS/eg-desk-surface.uc.css', import.meta.url), 'utf8');
@@ -367,6 +369,55 @@ test('restoring a Board member preserves each completed item in a run and skips 
     thread = restore(thread, history); // overlapping pages or a second open must not repeat either row
     assert.deepEqual(thread.messages.map(m => [m.localMessageId, m.content, m.boardMemberProfileId]),
       [['local-checking', '먼저 확인한 내용', ID_V], ['local-final', '최종 답변', ID_V]]);
+  }
+});
+
+test('a later member page fills only the same stored answer and preserves the cached row', () => {
+  const member = { profileId: ID_V, label: ID_V };
+  const cached = { boardMemberProfileId: ID_V, id: 'view', localMessageId: 'stored', localRunId: 'local-run', content: '내 화면', role: 'assistant' };
+  const later = { ...cached, id: 'stored', content: '저장소', localHistory: true, runId: 'turn', conversationId: 'member-native' };
+  const fold = row => BoardThread.foldBoardMemberAnswers(room({ messages: [row] }), [later], member);
+  assert.deepEqual(fold(cached), [{ ...cached, runId: 'turn', conversationId: 'member-native' }]);
+  for (const original of [{ ...cached, localRunId: 'old-run' }, { ...cached, runId: 'another-turn' }, { ...cached, boardMemberProfileId: ID_D }]) {
+    assert.deepEqual(fold(original), [original], 'a different origin must not be patched');
+  }
+});
+
+test('cache-free Board replies retain their own run through a reopened SQLite history page', t => {
+  const dataDir = createPrivateQaTempDirectory('egdesk-board-origin-');
+  const open = () => openChatStore({ dataDir, ownerScope: 'fixture-only' });
+  let store;
+  t.after(() => { try { store?.close(); } finally { rmSync(dataDir, { recursive: true, force: true }); } });
+  store = open();
+  const members = [ID_V, ID_D].map(profileId => ({ profileId, label: profileId, clientThreadId: `board-member:${profileId}` }));
+  for (const { profileId, clientThreadId } of members) {
+    store.createConversation({ clientThreadId });
+    const runId = `turn-${profileId}`, conversationId = `conversation-${profileId}`;
+    const messages = (profileId === ID_V ? ['commentary', 'final_answer'] : ['final_answer']).map(phase => ({
+      id: phase, messageId: phase, role: 'assistant', status: 'complete', phase, text: '같은 내용', localMessageId: `stored-${profileId}-${phase}`,
+    })); // Both members reuse the provider's item ID and even the same local run key in different conversations.
+    store.appendEvent({ clientThreadId, event: 'run.completed', eventKey: 'completed', ts: 1,
+      localRunId: 'local-run', runId, details: {}, runCheckpoint: { clientThreadId, conversationId, runId, answerId: `${conversationId}/${runId}`,
+        localRunId: 'local-run', status: 'completed', messages } });
+  }
+  store.close(); store = open();
+  const chat = new CodexChatRuntime({ store, request: () => assert.fail('history contacted the engine'), respond: () => {} });
+  let restored = room();
+  for (let load = 0; load < 2; load++) for (const member of members) {
+    const page = chat.getLocalHistory({ clientThreadId: member.clientThreadId });
+    const history = ChatState.normalizeLocalHistoryPage(page, member.clientThreadId);
+    restored = { ...restored, messages: BoardThread.foldBoardMemberAnswers(restored, history.messages, member) };
+  }
+  assert.equal(restored.messages.length, 3);
+  for (const member of members) {
+    const rows = restored.messages.filter(m => m.boardMemberProfileId === member.profileId);
+    assert.deepEqual(rows.map(m => m.phase), member.profileId === ID_V ? ['commentary', 'final_answer'] : ['final_answer']);
+    for (const m of rows) {
+      const conversationId = `conversation-${member.profileId}`, runId = `turn-${member.profileId}`;
+      assert.deepEqual([m.conversationId, m.runId, m.answerId], [conversationId, runId, `${conversationId}/${runId}`]);
+      assert.deepEqual([m.localHistory, m.id, m.localMessageId, m.providerItemId, m.authorName],
+        [true, `stored-${member.profileId}-${m.phase}`, m.id, m.phase, member.label]);
+    }
   }
 });
 

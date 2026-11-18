@@ -5042,6 +5042,26 @@ test('local history adapter retains public run context and never replays histori
   assert.equal(page.runs[0].pendingApprovals[0].stale, undefined);
 });
 
+test('history answer origin uses a scoped stored run or event, never a guess or conflicting identity', () => {
+  const thread = { clientThreadId: 'room', localConversationId: 'store-room' };
+  const message = { localMessageId: 'm', localRunId: 'lr', messageId: 'item', role: 'assistant', text: '답변' };
+  const run = { ...thread, localRunId: 'lr', runId: 'turn', conversationId: 'native', answerId: 'answer' };
+  const checkpoint = { seq: 3, event: 'message.checkpoint', localRunId: 'lr', localMessageId: 'm', runId: 'turn', details: { message } };
+  const read = (runs, events, row = message) => Chat.normalizeLocalHistoryPage({ protocolVersion: 1, thread, runs, events, messages: [row] }, thread.clientThreadId).messages[0];
+  assert.deepEqual([read([run], []).runId, read([], [checkpoint]).runId], ['turn', 'turn'], 'projection and event-only evidence work independently');
+  assert.equal(read([], [checkpoint]).conversationId, undefined, 'a flat event does not prove a native conversation ID');
+  for (const unknown of [read([], []), read([{ ...run, localRunId: 'other' }], []), read([{ ...run, clientThreadId: 'elsewhere' }], []),
+    read([{ ...run, localConversationId: 'other-store' }], []), read([run], [{ ...checkpoint, runId: 'different-turn' }]),
+    read([run, { ...run, answerId: 'other-answer' }], []), read([run], [], { ...message, localRunId: undefined })]) {
+    assert.deepEqual([unknown.runId, unknown.conversationId, unknown.answerId], [undefined, undefined, undefined]);
+  }
+  const reusedItem = Chat.normalizeLocalHistoryPage({ protocolVersion: 1, thread, runs: [], events: [], messages: [message,
+    { ...message, localRunId: 'older', localMessageId: 'other-stored' }] }, 'room');
+  assert.deepEqual(reusedItem.messages.map(m => m.id), ['m', 'other-stored'], 'distinct stored answers survive even before a run checkpoint is available');
+  const explicit = read([run], [], { ...message, runId: 'original' });
+  assert.deepEqual([explicit.runId, explicit.conversationId, explicit.answerId], ['original', undefined, undefined], 'do not replace an existing different identity or mix in its other fields');
+});
+
 test('paged local run Briefing binds to its final assistant by run identity, not local message ID', () => {
   const conversationId = 'qa-native-conversation-1150bb86da5e';
   const runId = 'qa-native-run-1150bb86da5e';
