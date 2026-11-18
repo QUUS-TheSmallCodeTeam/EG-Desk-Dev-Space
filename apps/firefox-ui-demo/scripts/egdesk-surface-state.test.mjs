@@ -26048,7 +26048,7 @@ test('CHAT-01 Board-saved chat card carries a thread and Agent binding reference
 });
 
 function productionBoardComposer(deps) {
-  const names = ['el', 'chatSendEngineId', 'boardComposerDelivery', 'mountBoardComposerDestination'];
+  const names = ['el', 'chatSendEngineId', 'boardBrowserSourcesKey', 'boardComposerDelivery', 'mountBoardComposerDestination'];
   return compileFunction(names.map(declaration).join('\n') + '\nreturn { ' + names.join(', ') + ' };', Object.keys(deps))(...Object.values(deps));
 }
 
@@ -26160,5 +26160,20 @@ test('Board submit fails closed when a confirmed destination changes in flight',
     assert.equal(h.state.codex.threadDrafts.room, changed === 'draft' ? '@솔빛 초안 변경' : text);
     if (changed === 'sources') assert.equal(h.thread().inputSources[0]?.id, 'new');
     if (!['engine', 'lead'].includes(changed)) assert.match(h.thread().sendError, /바뀌어 보내지 않았습니다/, changed);
+  }
+});
+
+test('Board submit stops when a live Browser source is dropped or changes scope', async () => {
+  const browser = (id, host) => ({ id, kind: 'browser', label: id, selectedByUser: true, browserToolPermission: 'observe',
+    sourceRef: { viewId: id, uri: 'https://' + host + '.example/' } });
+  const chosen = [browser('first', 'one'), browser('second', 'two')];
+  for (const live of [[chosen[0]], [chosen[0], browser('second', 'changed')]]) {
+    const h = requestProjectSendHarness({ group: boardComposerFixture(), inputSources: chosen, selectBrowserSources: () => live });
+    const text = '읽을 자료를 정리해 줘'; typeOrdinaryDraft(h, text);
+    assert.equal(h.preview(text).intent.ok, true);
+    assert.equal((await h.send({ boardPreviewKey: h.preview(text).key })).accepted, false);
+    assert.deepEqual(h.calls.paths, []);
+    assert.deepEqual(h.thread().inputSources, chosen);
+    assert.equal(h.state.codex.threadDrafts.room, text);
   }
 });

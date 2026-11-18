@@ -12135,13 +12135,21 @@
       : ChatState.chatThreadEngineId(thread, { recentEngineId: codex.recentEngineId, engines: codex.engines, profileEngines: codex.profileEngines });
   }
 
+  function boardBrowserSourcesKey(sources) {
+    return JSON.stringify(sources.map(source => [source.id, source.browserToolPermission,
+      source.sourceRef?.viewId, source.sourceRef?.uri, source.sourceRef?.profileId, source.sourceRef?.accountId,
+      source.browserToolIdentity?.cardEpoch, source.browserToolIdentity?.userContextId,
+      source.browserToolIdentity?.engineAccountKey, source.browserToolIdentity?.authorityEpoch]));
+  }
+
   function boardComposerDelivery(thread, message, codex, wire = null) {
     const runtime = codexThreadRuntimeConfig(thread);
     const engine = chatSendEngineId(thread, codex);
     const inputSources = thread.inputSources || [];
     const briefingInputs = thread.briefingInputs || [];
-    const browserScope = engine !== 'claude' && inputSources.some(input => input.kind === 'browser'
+    const selectedBrowserInputs = engine === 'claude' ? [] : inputSources.filter(input => input.kind === 'browser'
       && input.selectedByUser === true && ['observe', 'interact'].includes(input.browserToolPermission));
+    const browserScope = selectedBrowserInputs.length > 0;
     const contextResolution = engine === 'claude' ? null : ChatState.contextResolutionForSend(state.contextSuggest?.byThread?.[thread.id], inputSources,
       { now: Date.now(), accountKey: ChatState.codexAccountKey(codex.authStatus) || null });
     const options = {
@@ -12165,7 +12173,7 @@
       thread.participants, thread.participantRoles, thread.participantAgents, contextResolution, thread.cwd,
       inputSources, briefingInputs, thread.requestProjectTarget,
       intent.route === 'board' ? BoardThread.boardRecentMessages(thread, options) : null]);
-    return { intent, options, key, routeKey, browserScope };
+    return { intent, options, key, routeKey, browserSourcesKey: boardBrowserSourcesKey(selectedBrowserInputs) };
   }
 
   function mountBoardComposerDestination(thread, memory) {
@@ -17990,7 +17998,7 @@
             const view = boardComposerDelivery(activeThread, draftText, state.codex);
             if (!view.intent.ok) return reportBoardBlock(view.intent.error);
             if (options.boardPreviewKey != null && options.boardPreviewKey !== view.key) return reportBoardBlock();
-            submittedBoard = Object.freeze({ key: view.key, routeKey: view.routeKey, message: draftText, browserScope: view.browserScope });
+            submittedBoard = Object.freeze({ key: view.key, routeKey: view.routeKey, message: draftText, browserSourcesKey: view.browserSourcesKey });
           } catch { return reportBoardBlock(); }
         }
         if (activeThread && engineId === 'claude' && (state.contextSuggest?.byThread?.[activeThread.id]?.picked?.length
@@ -18132,7 +18140,7 @@
           epochScope.finish(token);
           return;
         }
-        if (submittedBoard && submittedBoard.browserScope !== (selectedBrowserSources.length > 0)) return stopStaleBoard();
+        if (submittedBoard && submittedBoard.browserSourcesKey !== boardBrowserSourcesKey(selectedBrowserSources)) return stopStaleBoard();
         const browserSseStatus = rootSseReady();
         const selectedBrowserTransportId = browserSseStatus.browserTransportId;
         if (selectedBrowserSources.length && !browserSseStatus.sourceReady) {
