@@ -2,7 +2,7 @@ import { guardBridgeRequest, readJsonBody, sendJson } from './codex-bridge-http.
 import { BoardAskError, boardAskPublicError } from './egdesk-board-agent-ask.mjs'
 
 const ROOT = '/v1/board-agent-ask'
-const limits = { policy: 80 * 1024, prepare: 80 * 1024, run: 256, cancel: 256 }
+const limits = { policy: 80 * 1024, prepare: 80 * 1024, run: 256, cancel: 256, lifecycle: 1024 }
 
 export function createBoardAgentAskHttpHandler({ service, port = 39218 } = {}) {
   return async (req, res, url) => {

@@ -42,7 +42,7 @@ import { DAY_MS, DESK_AUTOSAVE_MERGE_MS, DESK_RETENTION, autosaveWindowMerges, p
 // - tldraw (tldraw license, pattern only): a schema version and ordered
 //   migrations (packages/store/src/lib/migrate.ts:55-106); document state kept
 //   apart from session state (TLSessionStateSnapshot.ts:83-130).
-const VERSION = 3
+const VERSION = 4
 export const MAX_DESK_STATE_BYTES = 4 * 1024 * 1024
 export const MAX_BOARD_BODY_BYTES = 4 * 1024 * 1024
 export const MAX_BOARDS = 500
@@ -410,6 +410,16 @@ const V3_UPGRADE = `
       code_digest TEXT, code_expires INTEGER, code_used INTEGER NOT NULL DEFAULT 0 CHECK (code_used IN (0,1))
     );
 `
+// Overlay trash/purge can leave the saved Board row intact. Keep the fence
+// separately from the Board lifecycle, history and portable representation.
+const V4_UPGRADE = `
+    CREATE TABLE board_agent_ask_lifecycle (
+      board_id TEXT PRIMARY KEY REFERENCES boards(board_id) ON DELETE CASCADE,
+      lifecycle TEXT NOT NULL CHECK (lifecycle IN ('active','trash','purge')),
+      version TEXT NOT NULL
+    );
+`
+const V3_REQUIRED = [...V2_REQUIRED, 'board_agent_ask_policies']
 const V2_COLUMNS = ['window_start', 'stored_bytes', 'chat_refs_json']
 const SEARCH_FTS = "CREATE VIRTUAL TABLE board_search USING fts5(title, cards, notes, board_id UNINDEXED, tokenize='trigram')"
 const SEARCH_PLAIN = 'CREATE TABLE board_search (board_id TEXT PRIMARY KEY, title TEXT NOT NULL, cards TEXT NOT NULL, notes TEXT NOT NULL)'
@@ -473,25 +483,32 @@ function initialize(db, filename) {
   if (version === VERSION) {
     const names = found()
     const columns = new Set(db.prepare('PRAGMA table_info(desk_generations)').all().map(row => row.name))
-    if ([...V2_REQUIRED, 'board_agent_ask_policies'].some(name => !names.has(name)) || V2_COLUMNS.some(name => !columns.has(name))) fail('STORE_CORRUPT', 'Desk schema is incomplete; database was not reset', 500)
+    if ([...V3_REQUIRED, 'board_agent_ask_lifecycle'].some(name => !names.has(name)) || V2_COLUMNS.some(name => !columns.has(name))) fail('STORE_CORRUPT', 'Desk schema is incomplete; database was not reset', 500)
     return
   }
   if (version === 1) {
     if (V1_REQUIRED.some(name => !found().has(name))) fail('STORE_CORRUPT', 'Desk schema is incomplete; database was not reset', 500)
     backup(db, filename, 1)
-    try { migrate(() => { db.exec(V2_UPGRADE); createSearch(db); db.exec(V3_UPGRADE) }) }
+    try { migrate(() => { db.exec(V2_UPGRADE); createSearch(db); db.exec(V3_UPGRADE); db.exec(V4_UPGRADE) }) }
     catch (error) { fail('STORE_MIGRATION_FAILED', 'Desk records could not be upgraded; the v1 database was kept unchanged', 500, { cause: error }) }
     return
   }
   if (version === 2) {
     if (V2_REQUIRED.some(name => !found().has(name))) fail('STORE_CORRUPT', 'Desk schema is incomplete; database was not reset', 500)
     backup(db, filename, 2)
-    try { migrate(() => db.exec(V3_UPGRADE)) }
+    try { migrate(() => { db.exec(V3_UPGRADE); db.exec(V4_UPGRADE) }) }
     catch (error) { fail('STORE_MIGRATION_FAILED', 'Desk records could not be upgraded; the v2 database was kept unchanged', 500, { cause: error }) }
     return
   }
+  if (version === 3) {
+    if (V3_REQUIRED.some(name => !found().has(name))) fail('STORE_CORRUPT', 'Desk schema is incomplete; database was not reset', 500)
+    backup(db, filename, 3)
+    try { migrate(() => db.exec(V4_UPGRADE)) }
+    catch (error) { fail('STORE_MIGRATION_FAILED', 'Desk records could not be upgraded; the v3 database was kept unchanged', 500, { cause: error }) }
+    return
+  }
   if (version !== 0 || db.prepare("SELECT name FROM sqlite_master WHERE type='table' LIMIT 1").get()) fail('UNSUPPORTED_STORE_VERSION', 'Existing Desk database has an unsupported schema; database was not reset', 500)
-  migrate(() => { db.exec(V1_SCHEMA); db.exec(V2_UPGRADE); createSearch(db); db.exec(V3_UPGRADE) })
+  migrate(() => { db.exec(V1_SCHEMA); db.exec(V2_UPGRADE); createSearch(db); db.exec(V3_UPGRADE); db.exec(V4_UPGRADE) })
 }
 
 /**
@@ -558,9 +575,12 @@ export function openDeskStore({ dataDir, ownerScope, now = Date.now, utcOffsetMi
       profile_name=excluded.profile_name, profile_revision=excluded.profile_revision,
       profile_hash=excluded.profile_hash, excerpts_json=excluded.excerpts_json, public_instructions=excluded.public_instructions,
       code_digest=NULL, code_expires=NULL, code_used=0`),
-    issueAskCode: db.prepare('UPDATE board_agent_ask_policies SET code_digest=?, code_expires=?, code_used=0 WHERE board_id=? AND version=?'),
+    issueAskCode: db.prepare('UPDATE board_agent_ask_policies SET version=?, code_digest=?, code_expires=?, code_used=0 WHERE board_id=? AND version=?'),
     consumeAskCode: db.prepare('UPDATE board_agent_ask_policies SET code_used=1 WHERE board_id=? AND version=? AND code_digest=? AND code_used=0 AND code_expires>?'),
     dropAskPolicy: db.prepare('DELETE FROM board_agent_ask_policies WHERE board_id=?'),
+    askLifecycle: db.prepare('SELECT lifecycle,version FROM board_agent_ask_lifecycle WHERE board_id=?'),
+    putAskLifecycle: db.prepare(`INSERT INTO board_agent_ask_lifecycle VALUES (?, ?, ?)
+      ON CONFLICT(board_id) DO UPDATE SET lifecycle=excluded.lifecycle,version=excluded.version`),
     boards: db.prepare('SELECT * FROM boards ORDER BY updated DESC, board_id LIMIT ?'),
     boardCount: db.prepare('SELECT COUNT(*) AS n FROM boards'),
     insertBoard: db.prepare('INSERT INTO boards VALUES (?, ?, ?, 1, ?, ?, ?)'),
@@ -700,9 +720,13 @@ export function openDeskStore({ dataDir, ownerScope, now = Date.now, utcOffsetMi
     if (!row) fail('BOARD_NOT_FOUND', 'Board does not exist', 404)
     return row
   }
+  function askLifecycle(row) {
+    const state = q.askLifecycle.get(row.board_id)
+    return state ? { lifecycle: state.lifecycle, version: state.version } : { lifecycle: 'active', version: null }
+  }
   function requireAskBoard(id) {
     const row = requireBoard(id)
-    if (row.lifecycle !== 'active') fail('BOARD_NOT_ACTIVE', 'Board is not active', 409)
+    if (row.lifecycle !== 'active' || askLifecycle(row).lifecycle !== 'active') fail('BOARD_NOT_ACTIVE', 'Board is not active', 409)
     return row
   }
   function requireRevision(row, revision) {
@@ -859,14 +883,32 @@ export function openDeskStore({ dataDir, ownerScope, now = Date.now, utcOffsetMi
         q.putAskPolicy.run(key, randomUUID(), next.profileId, next.profileName, next.profileRevision, next.profileHash, JSON.stringify(next.excerpts), next.publicInstructions)
       })
     },
-    issueBoardAgentAskCode(id, version, digest, expiresAt) {
+    issueBoardAgentAskCode(id, expectedVersion, newVersion, digest, expiresAt) {
       ensureOpen()
-      const key = requireAskBoard(id).board_id
-      if (!q.issueAskCode.run(digest, expiresAt, key, version).changes) fail('BOARD_AGENT_ASK_POLICY_CONFLICT', 'Board ask policy changed; reload before editing', 409)
+      tx(() => {
+        const key = requireAskBoard(id).board_id
+        if (!q.issueAskCode.run(newVersion, digest, expiresAt, key, expectedVersion).changes) fail('BOARD_AGENT_ASK_POLICY_CONFLICT', 'Board ask policy changed; reload before editing', 409)
+      })
     },
     consumeBoardAgentAskCode(id, version, digest, at) {
       ensureOpen()
-      return !!q.consumeAskCode.run(requireAskBoard(id).board_id, version, digest, at).changes
+      return tx(() => !!q.consumeAskCode.run(requireAskBoard(id).board_id, version, digest, at).changes)
+    },
+    boardAgentAskLifecycle(id, action, expectedVersion) {
+      ensureOpen()
+      if (action === 'get') return { ...askLifecycle(requireBoard(id)), changed: false }
+      return tx(() => {
+        const row = requireBoard(id)
+        const before = askLifecycle(row)
+        const lifecycle = action === 'restore' ? 'active' : action
+        if (lifecycle === before.lifecycle) return { ...before, changed: false }
+        if (before.version !== expectedVersion) fail('BOARD_AGENT_ASK_LIFECYCLE_CONFLICT', 'Board ask lifecycle changed; reload before editing', 409)
+        if (before.lifecycle === 'purge' || (action === 'restore' && row.lifecycle !== 'active')) fail('BOARD_NOT_ACTIVE', 'Board is not active', 409)
+        const version = randomUUID()
+        q.putAskLifecycle.run(row.board_id, lifecycle, version)
+        q.dropAskPolicy.run(row.board_id)
+        return { lifecycle, version, changed: true }
+      })
     },
     boardRevisions(id, { limit, before } = {}) {
       ensureOpen()

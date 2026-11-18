@@ -1,4 +1,4 @@
-import { createHash, randomBytes, timingSafeEqual } from 'node:crypto'
+import { createHash, randomBytes, randomUUID, timingSafeEqual } from 'node:crypto'
 import { secretReason } from './egdesk-portable-extras.mjs'
 import { REVIEW_TEXT_BYTES } from './egdesk-portable-review.mjs'
 
@@ -46,7 +46,7 @@ const sameValue = (a, b) => JSON.stringify(a) === JSON.stringify(b)
 // An explicit model route is a subscription binding, even if its model name happens
 // to match the API model. Never quietly change its payer, account or provider.
 const compatibleDraft = active => !!active && active.body.model == null
-const knownStore = new Set(['BOARD_NOT_FOUND', 'BOARD_NOT_ACTIVE', 'INVALID_BOARD_ID', 'INVALID_PROFILE_ID', 'BOARD_AGENT_ASK_POLICY_CONFLICT'])
+const knownStore = new Set(['BOARD_NOT_FOUND', 'BOARD_NOT_ACTIVE', 'INVALID_BOARD_ID', 'INVALID_PROFILE_ID', 'BOARD_AGENT_ASK_POLICY_CONFLICT', 'BOARD_AGENT_ASK_LIFECYCLE_CONFLICT'])
 const validateExcerpts = excerpts => {
   if (!Array.isArray(excerpts) || excerpts.length > 8) invalid()
   return excerpts.map(excerpt => txt(excerpt, 1500))
@@ -99,9 +99,13 @@ export function createBoardAgentAskService({ desk, profiles, selectContext, deci
       if (!existing || !sameProfile(profileFor(existing.profileId), existing)) fail('POLICY_REQUIRED', 'Save a current Board ask policy before issuing a code', 409)
       const askCode = 'egask1-' + randomBytes(16).toString('hex')
       const expiresAt = now() + CODE_TTL
-      desk.issueBoardAgentAskCode(boardId, expectedVersion, codeDigest(boardId, expectedVersion, askCode), expiresAt)
+      const version = randomUUID()
+      desk.issueBoardAgentAskCode(boardId, expectedVersion, version, codeDigest(boardId, version, askCode), expiresAt)
       abortBoard(boardId)
-      return { ...describe(boardId), askCode, expiresAt }
+      const updated = describe(boardId)
+      // A different bridge process could have changed the policy after commit.
+      if (updated.policy?.version !== version) fail('POLICY_CONFLICT', 'Board ask policy changed; reload before editing', 409)
+      return { ...updated, askCode, expiresAt }
     }
     let next = null
     if (action === 'save') {
@@ -114,6 +118,17 @@ export function createBoardAgentAskService({ desk, profiles, selectContext, deci
     desk.writeBoardAgentAskPolicy(boardId, expectedVersion, next)
     abortBoard(boardId)
     return describe(boardId)
+  }
+  function lifecycle(input) {
+    if (closed || !desk) unavailable()
+    shape(input, ['boardId', 'action', 'expectedVersion'], ['boardId', 'action'])
+    const { boardId, action, expectedVersion = null } = input
+    if (!['get', 'trash', 'purge', 'restore'].includes(action) ||
+        (expectedVersion !== null && (typeof expectedVersion !== 'string' || !VERSION.test(expectedVersion))) ||
+        (action === 'get' && Object.hasOwn(input, 'expectedVersion'))) invalid()
+    const result = desk.boardAgentAskLifecycle(boardId, action, expectedVersion)
+    if (action !== 'get' && result.lifecycle !== 'active') abortBoard(boardId)
+    return result
   }
   function prepare(input, { signal } = {}) {
     checkAvailable()
@@ -230,7 +245,7 @@ export function createBoardAgentAskService({ desk, profiles, selectContext, deci
     running.get(input.ticket)?.controller.abort()
     return { cancelled: true }
   }
-  return { available, policy, prepare, run, cancel, close() { closed = true; pending.clear(); for (const item of running.values()) item.controller.abort() } }
+  return { available, policy, lifecycle, prepare, run, cancel, close() { closed = true; pending.clear(); for (const item of running.values()) item.controller.abort() } }
 }
 
 export function boardAskPublicError(error) {
