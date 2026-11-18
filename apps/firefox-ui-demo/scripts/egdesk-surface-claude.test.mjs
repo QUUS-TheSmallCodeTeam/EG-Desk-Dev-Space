@@ -223,7 +223,7 @@ function composer(ui) {
   // Keep the real icon helper, its SVG builder and source shapes in the same
   // VM scope as the extracted production composer, just as in the app.
   const icons = `${functionSource('svgEl')}\n${between('  const DESK_ICON_SHAPES = {', '  function normalizeSourcePart(')}`;
-  const controls = compile(`${functionSource('chatConversationIdentity')}\nconst activeIdentity = chatConversationIdentity(activeThread, null, ChatState.chatEngineChipView(activeThread, codex));\n${functionSource('getCodexThreadDraft')}\n${icons}\n${block}\nreturn {input, sendButton, resizeComposer};`, {
+  const controls = compile(`${functionSource('chatConversationIdentity')}\nconst activeIdentity = chatConversationIdentity(activeThread, null, ChatState.chatEngineChipView(activeThread, codex));\n${functionSource('getCodexThreadDraft')}\n${functionSource('mountBoardComposerDestination')}\n${icons}\n${block}\nreturn {input, sendButton, resizeComposer};`, {
     document: ui.document, body: {}, el: ui.el, ChatState, BoardThread, activeThread: ui.thread(), codex: ui.state.codex, codexBridge: ui,
     chatRoomProjectSendBlock: ui.projectBlock, composerViewport: viewport.instance,
     compositionInProgress: false,

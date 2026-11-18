@@ -818,7 +818,9 @@ function chatComposerFixture({ reply, inputSources = [], captureInputs = null } 
   const composerStart = surfaceScript.indexOf('            const manualOwner = ');
   const composerEnd = surfaceScript.indexOf('            let composerWidth = 0;', composerStart);
   assert.ok(composerStart >= 0 && composerEnd > composerStart, 'production composer event handlers');
-  const composer = compileFunction(`let compositionInProgress = false, deferredCodex = null;\n${surfaceScript.slice(composerStart, composerEnd)}\nreturn { input, sendButton, manualOwner, blockedSend };`,
+  const destinationMount = surfaceScript.match(/^  function mountBoardComposerDestination\([^]*?^  \}/m);
+  assert.ok(destinationMount, 'production Board destination mount; not active in this ordinary room');
+  const composer = compileFunction(`${destinationMount[0]}\nlet compositionInProgress = false, deferredCodex = null;\n${surfaceScript.slice(composerStart, composerEnd)}\nreturn { input, sendButton, manualOwner, blockedSend };`,
     ['activeThread', 'codex', 'ChatState', 'el', 'deskIcon', 'getCodexThreadDraft', 'composerViewport', 'codexBridge', 'body', 'activeIdentity'])(
     activeThread, state.codex, ChatState, el, name => ({ icon: name }), draft, { cancel() {} }, codexBridge, {}, { composerLabel: '메시지 입력: 합성 방' });
   return { ...composer, state, protocol, reservations, requests, owners, notices, pending: () => pending };
