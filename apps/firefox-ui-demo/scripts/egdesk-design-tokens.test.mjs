@@ -818,7 +818,7 @@ function chatComposerFixture({ reply, inputSources = [], captureInputs = null } 
   const composerStart = surfaceScript.indexOf('            const manualOwner = ');
   const composerEnd = surfaceScript.indexOf('            let composerWidth = 0;', composerStart);
   assert.ok(composerStart >= 0 && composerEnd > composerStart, 'production composer event handlers');
-  const composer = compileFunction(`let compositionInProgress = false, deferredCodex = null;\n${surfaceScript.slice(composerStart, composerEnd)}\nreturn { input, sendButton, manualOwner };`,
+  const composer = compileFunction(`let compositionInProgress = false, deferredCodex = null;\n${surfaceScript.slice(composerStart, composerEnd)}\nreturn { input, sendButton, manualOwner, blockedSend };`,
     ['activeThread', 'codex', 'ChatState', 'el', 'deskIcon', 'getCodexThreadDraft', 'composerViewport', 'codexBridge', 'body', 'activeIdentity'])(
     activeThread, state.codex, ChatState, el, name => ({ icon: name }), draft, { cancel() {} }, codexBridge, {}, { composerLabel: '메시지 입력: 합성 방' });
   return { ...composer, state, protocol, reservations, requests, owners, notices, pending: () => pending };
@@ -930,7 +930,10 @@ test('a disabled send also blocks keyboard dispatch', () => {
   const h = chatComposerFixture();
   assert.equal(h.sendButton.props.disabled, 'true', 'disabled until real layout evaluates readiness');
   h.sendButton.disabled = true;
+  h.sendButton.title = '기본 프로젝트 확인 필요';
   h.input.events.keydown({ key: 'Enter', preventDefault() {} });
+  assert.equal(h.blockedSend.props.role, 'status');
+  assert.equal(h.blockedSend.textContent, '기본 프로젝트 확인 필요');
   assert.equal(h.owners.length, 0);
   assert.equal(h.requests.length, 0);
 });

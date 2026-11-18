@@ -1245,7 +1245,7 @@
         class: 'egd-codex-message-activity', type: 'button', title: '이 답변의 실행 내역 보기', 'aria-label': '이 답변의 실행 내역 보기',
         data: { testid: 'chat-answer-activity', runId: message.runId || '', focusKey: `answer-activity-${message.id}` },
         onclick: (ev) => { ev.stopPropagation(); onOpenActivity(); },
-      }, el('span', { class: 'egd-codex-message-activity-dots', 'aria-hidden': 'true' }, el('span'), el('span'), el('span'))));
+      }, thread?.type === 'dm' ? '기록' : el('span', { class: 'egd-codex-message-activity-dots', 'aria-hidden': 'true' }, el('span'), el('span'), el('span'))));
     }
     if (children.length === 0) return null;
     return el('div', { class: `egd-codex-message-meta${onOpenActivity ? ' egd-codex-message-meta-foot' : ''}` }, ...children);
@@ -11870,7 +11870,7 @@
     };
     const item = line => /^ {0,3}(?:([0-9]{1,9})[.)]|[-+*])[ \t]+(\S.*)$/.exec(line);
     const heading = line => /^ {0,3}(#{1,6})[ \t]+(\S.*)$/.exec(line);
-    const fence = line => /^ {0,3}([`~]{3,})(.*)$/.exec(line);
+    const fence = line => /^ {0,3}(`{3,}(?![`~])|~{3,}(?![`~]))(.*)$/.exec(line);
     for (let i = 0; i < lines.length;) {
       const line = lines[i];
       if (!line.trim()) { i++; continue; }
@@ -11882,6 +11882,14 @@
         for (; end < lines.length; end++) {
           const close = fence(lines[end]);
           if (close && close[1].startsWith(mark.repeat(count)) && !close[2].trim()) break;
+        }
+        if (end >= lines.length) {
+          // Keep the incomplete block as typed; resume at the next paragraph.
+          end = i + 1;
+          while (end < lines.length && lines[end].trim()) end++;
+          container.appendChild(el('p', {}, lines.slice(i, end).join('\n')));
+          i = end;
+          continue;
         }
         const source = lines.slice(i, end + 1).join('\n');
         if (end < lines.length && mark === '`' && count === 3 && /^[-\w+]*\s*$/.test(delimiter[2])) {
@@ -12453,6 +12461,10 @@
                   }, '코드 복사'),
                 )
               : null,
+            isHudConversationView && activeThread?.type === 'dm' ? el('button', {
+              class: 'egd-codex-chip egd-codex-chip-subtle', type: 'button',
+              data: { testid: 'chat-auth-refresh' }, onclick: () => codexBridge.refreshAuthStatus(),
+            }, '상태 새로고침') : null,
           )
         : null;
 
@@ -13423,7 +13435,8 @@
             const groupedWithPrevious = groupRole(previous) === message.role && codexMessageAuthorLabel(previous) === author && previousDelta < 120000;
             const groupedWithNext = groupRole(next) === message.role && codexMessageAuthorLabel(next) === author && nextDelta < 120000;
             const parts = extractCodexResultLinks(message);
-            const content = el('div', { class: 'egd-codex-bubble-content egd-codex-richtext' });
+            const content = el('div', { class: 'egd-codex-bubble-content egd-codex-richtext',
+              data: activeThread.type === 'dm' && message.role === 'assistant' && parts.text?.length > 320 ? { roomy: 'true' } : null });
             // CHAT-08: a very long finished answer reads as a folded preview; the whole
             // answer stays in the message and opens here or as a result card.
             const fold = message.role === 'assistant' && message.status !== 'streaming' ? ChatState.longAnswerView(parts.text) : null;
@@ -13808,6 +13821,7 @@
               data: { testid: 'chat-send' },
               onclick: () => { if (!compositionInProgress) void codexBridge.sendMessage({ manualOwner }); },
             }, deskIcon('send'));
+            const blockedSend = el('p', { class: 'egd-codex-send-blocked', role: 'status', data: { testid: 'chat-send-blocked' } });
             input.value = getCodexThreadDraft(codex, activeThread.id);
             const resizeComposer = (preserveViewport = true) => {
               if (!input.isConnected) return;
@@ -13856,10 +13870,13 @@
               const roomProjectBlock = chatRoomProjectSendBlock(activeThread);
               sendButton.disabled = ChatState.nativeBindingHeld(activeThread) || nativeSendHeld || activeThread.preparingInput || codex.isSending || !input.value.trim() || !readiness.ready || invalidProject || !!roomProjectBlock;
               sendButton.title = ChatState.nativeBindingHeld(activeThread) || nativeSendHeld ? '보관된 연결을 현재 계정에 자동 연결하지 않습니다'
-                : invalidProject ? CHAT_REQUEST_PROJECT_INVALID : roomProjectBlock || readiness.reason || '보내기';
+                : invalidProject ? CHAT_REQUEST_PROJECT_INVALID : roomProjectBlock || readiness.reason
+                  || (activeThread.preparingInput ? '첨부를 준비하는 중입니다.' : codex.isSending ? '요청을 보내는 중입니다.' : '보내기');
+              if (!sendButton.disabled) blockedSend.textContent = '';
             };
             input.addEventListener('input', () => {
               composerViewport.cancel(input);
+              blockedSend.textContent = '';
               codexBridge.setDraft(input.value, activeThread.id);
               resizeComposer(false);
             });
@@ -13871,7 +13888,12 @@
               if (ev.key !== 'Enter' || ev.shiftKey || ev.altKey) return;
               if (ev.isComposing || compositionInProgress || ev.keyCode === 229) return;
               ev.preventDefault();
-              if (!ev.repeat && !sendButton.disabled) void codexBridge.sendMessage({ manualOwner });
+              if (ev.repeat) return;
+              if (sendButton.disabled) {
+                if (input.value.trim()) blockedSend.textContent = sendButton.title || '아직 보낼 수 없습니다.';
+                return;
+              }
+              void codexBridge.sendMessage({ manualOwner });
             });
             input.addEventListener('compositionstart', () => { composerViewport.cancel(input); compositionInProgress = true; });
             input.addEventListener('compositionend', () => {
@@ -13922,6 +13944,7 @@
                   sendButton,
                 ),
               ),
+              blockedSend,
               mention?.menu,
             );
           })()

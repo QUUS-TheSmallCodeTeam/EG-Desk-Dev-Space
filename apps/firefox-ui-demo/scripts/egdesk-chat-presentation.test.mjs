@@ -364,3 +364,39 @@ test('the actual notice region keeps independent alerts and actions reachable', 
   assert.deepEqual(region.children.slice(1).map(child => child.dataset.testid), ids);
   assert.match(source, /currentNotices\.scrollTop = noticeScroll\.top/);
 });
+
+test('DM label names the real recipient, including a long saved name, while Board does not point at one agent', () => {
+  const src = between('  function chatConversationIdentity(', '\n  function usageMeter(');
+  const identity = compileFunction(`${src}\nreturn chatConversationIdentity;`, [])();
+  const title = '전시회 준비'.repeat(20);
+  const name = '자료 정리 담당'.repeat(20);
+  const dm = identity({ type: 'dm', title }, { name }, { label: 'Claude' });
+  assert.equal(dm.title, title);
+  assert.equal(dm.recipient, name);
+  assert.equal(dm.showRecipient, true);
+  assert.equal(dm.composerLabel, `메시지 입력: ${title} · 받는 사람 ${name}`);
+  assert.equal(identity({ type: 'dm', title: 'Claude' }, null, { label: 'Claude' }).showRecipient, false);
+  assert.equal(identity({ type: 'dm', title }, { name: '없는 Agent', lifecycle: 'missing' }, { label: 'Codex' }).recipient, null);
+  assert.equal(identity({ type: 'group', title }, { name }, { label: 'Claude' }).composerLabel, `메시지 입력: ${title}`);
+});
+
+test('the DM composer responds to its pane width, keeping scope and controls on separate tracks when needed', () => {
+  assert.match(css, /container: egd-dm-chat \/ inline-size/);
+  assert.match(css, /@container egd-dm-chat \(max-width: 480px\) \{[^{}]*\.egd-codex-input-row[^{}]*\{\s*grid-template-areas: "attachments attachments attachments" "draft draft actions"/);
+  assert.match(css, /\.egd-codex-input-row:has\([^{}]+\.egd-chat-send-scope\) \{\s*grid-template-areas: "attachments attachments attachments" "draft draft actions"/);
+  assert.match(css, /\.egd-codex-conversation-recipient \{[^}]*min-width: 0;[^}]*text-overflow: ellipsis/);
+});
+
+
+test('DM login has exactly one recovery control in either the empty prompt or the active auth card', () => {
+  const card = between('      const authCard = authCardNeeded', '\n      const sortThreads');
+  const render = compileFunction(card+'\nreturn authCard;', ['el','authCardNeeded','authUsesDeviceCode','authLaunchUrl','isHudConversationView','activeThread','codexBridge']);
+  let refreshed = 0;
+  const active = render(el, true, false, null, true, { type: 'dm' }, { refreshAuthStatus: () => refreshed++ });
+  const refresh = descendants(active).filter(node => node.props.data?.testid === 'chat-auth-refresh');
+  assert.equal(refresh.length, 1);
+  refresh[0].props.onclick();
+  assert.equal(refreshed, 1);
+  const empty = between("        if (!hasConversation && activeThread.type === 'dm')", '        } else if (!hasConversation) {');
+  assert.match(empty, /needsLogin && !authCard \? el/);
+});

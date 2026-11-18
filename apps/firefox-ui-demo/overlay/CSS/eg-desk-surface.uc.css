@@ -11356,7 +11356,6 @@ button.egd-memo-ask-cancel:hover { text-decoration: underline; }
 .egd-codex-chat-main[data-kind="dm"] .egd-codex-send:disabled {
   background: var(--egd-chat-outline-soft);
   color: var(--egd-on-surface-variant);
-  opacity: 1;
 }
 .egd-codex-chat-main[data-kind="dm"] .egd-codex-run-status { flex-wrap: wrap; }
 .egd-codex-chat-main[data-kind="dm"] .egd-codex-run-status button { max-width: 100%; white-space: normal; overflow-wrap: anywhere; }
@@ -11379,3 +11378,10 @@ button.egd-memo-ask-cancel:hover { text-decoration: underline; }
   .egd-codex-conversation-hud-head[data-kind="dm"] .egd-codex-conversation-hud-badges { flex-wrap: wrap; row-gap: 2px; }
   .egd-codex-conversation-recipient { flex-basis: 100%; }
 }
+.egd-codex-chat-main[data-kind="dm"] .egd-codex-message-stack:has(.egd-codex-bubble-content[data-roomy="true"]) {
+  width: min(calc(100% - 32px), 540px);
+}
+.egd-codex-chat-main[data-kind="dm"] .egd-codex-bubble-assistant:has(.egd-codex-bubble-content[data-roomy="true"]) { flex: 1 1 auto; }
+.egd-codex-chat-main[data-kind="dm"] button.egd-codex-message-activity { width: auto; min-width: 32px; min-height: 28px; padding-inline: 6px; }
+.egd-codex-send-blocked { margin: 4px 0 0; font-size: 12px; line-height: 1.5; color: var(--egd-warning-ink); overflow-wrap: anywhere; }
+.egd-codex-send-blocked:empty { margin: 0; }

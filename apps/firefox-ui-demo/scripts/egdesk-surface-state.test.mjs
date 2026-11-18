@@ -4597,6 +4597,39 @@ test('safe web Markdown and bare links retain the existing Browser-card callback
   assert.deepEqual(opened, ['https://example.test/a_b?q=c_d']);
 });
 
+test('finished DM Korean content builds semantic blocks without reinterpreting code or unsafe links', () => {
+  const root = markdownDOM();
+  const make = (tag, attributes, ...children) => {
+    const node = root.ownerDocument.createElement(tag);
+    for (const [key, value] of Object.entries(attributes || {})) node.setAttribute(key, value);
+    for (const child of children) node.appendChild(typeof child === 'string' ? root.ownerDocument.createTextNode(child) : child);
+    return node;
+  };
+  const draw = compileFunction(declaration('appendChatAnswerBlocks') + '\nreturn appendChatAnswerBlocks;', ['el', 'Markdown'])(make, Markdown);
+  const fence = String.fromCharCode(96).repeat(3);
+  draw(root, ['## 내일 전시회 준비', '', '**오전 9시 전까지** 확인하세요.', '', '1. **전시물:** 안내판 확인', '2. 장비 확인', '', '- 보조 자료', '', fence+'js', '# untouched', '  **literal**', fence, '', '마지막 문장 <img src=x>'].join('\n'), {});
+  assert.equal(root.all('h5')[0].textContent, '내일 전시회 준비');
+  assert.deepEqual(root.all('li').map(node => node.textContent), ['전시물: 안내판 확인', '장비 확인', '보조 자료']);
+  assert.equal(root.all('ol').length, 1);
+  assert.equal(root.all('ul').length, 1);
+  assert.deepEqual(root.all('strong').map(node => node.textContent), ['오전 9시 전까지', '전시물:']);
+  assert.equal(root.all('pre')[0].textContent, '# untouched\n  **literal**');
+  assert.equal(root.all('img').length, 0);
+  assert.match(root.textContent, /<img src=x>/);
+  const incomplete = markdownDOM();
+  draw(incomplete, fence+'js\n## 이것은 제목이 아닙니다', {});
+  assert.equal(incomplete.all('h5').length, 0);
+  assert.match(incomplete.textContent, /## 이것은 제목이 아닙니다/);
+  const following = markdownDOM();
+  draw(following, fence+'js\n# 원문\n\n1. 이어지는 문단', {});
+  assert.match(following.textContent, /# 원문/);
+  assert.equal(following.all('li')[0].textContent, '이어지는 문단');
+  const mixed = markdownDOM();
+  draw(mixed, fence+'~~~\n\n- 정상 목록', {});
+  assert.equal(mixed.all('pre').length, 0);
+  assert.equal(mixed.all('li')[0].textContent, '정상 목록');
+});
+
 test('actual overlay rich-text path supplies the same-answer artifact scope and preserves held bindings', () => {
   const body = surfaceSource.match(/  function appendRichText\(container, text, message, thread\) \{([\s\S]*?)\n  \}/)?.[1];
   assert.ok(body);
@@ -22770,6 +22803,12 @@ test('Chat retained details integration: actual activity/approval DOM opens only
   assert.equal(h.result().getAttribute('data-state'), 'closed');
   assert.equal(h.panel().testid('chat-activity-changes').querySelector('details').open, false);
   assert.equal(h.panel().testid('chat-approval-changes').querySelector('details').open, false);
+  const approval = h.panel().testid('chat-approval');
+  assert.match(approval.textContent, /승인 필요/);
+  const decisionButtons = approval.querySelectorAll('[data-testid="chat-approval-choice"]');
+  assert.deepEqual(decisionButtons.map(button => button.dataset.approvalId), decisionButtons.map(() => h.pending.approvalId));
+  assert.ok(decisionButtons.every(button => !button.textContent.includes('모두')));
+  assert.deepEqual(h.decisions, [], 'displaying the drawer does not decide');
   const storedBefore = JSON.stringify(h.state.codex);
   await h.openResult(); await h.openChanges(); await h.openChanges('approval');
   assert.equal(JSON.stringify(h.state.codex), storedBefore, 'retained text and view state never enter persisted Chat state');
