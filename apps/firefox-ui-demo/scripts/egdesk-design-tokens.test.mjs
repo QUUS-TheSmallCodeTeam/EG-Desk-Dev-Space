@@ -819,8 +819,8 @@ function chatComposerFixture({ reply, inputSources = [], captureInputs = null } 
   const composerEnd = surfaceScript.indexOf('            let composerWidth = 0;', composerStart);
   assert.ok(composerStart >= 0 && composerEnd > composerStart, 'production composer event handlers');
   const composer = compileFunction(`let compositionInProgress = false, deferredCodex = null;\n${surfaceScript.slice(composerStart, composerEnd)}\nreturn { input, sendButton, manualOwner };`,
-    ['activeThread', 'codex', 'ChatState', 'el', 'deskIcon', 'getCodexThreadDraft', 'composerViewport', 'codexBridge', 'body'])(
-    activeThread, state.codex, ChatState, el, name => ({ icon: name }), draft, { cancel() {} }, codexBridge, {});
+    ['activeThread', 'codex', 'ChatState', 'el', 'deskIcon', 'getCodexThreadDraft', 'composerViewport', 'codexBridge', 'body', 'activeIdentity'])(
+    activeThread, state.codex, ChatState, el, name => ({ icon: name }), draft, { cancel() {} }, codexBridge, {}, { composerLabel: '메시지 입력: 합성 방' });
   return { ...composer, state, protocol, reservations, requests, owners, notices, pending: () => pending };
 }
 
@@ -837,7 +837,7 @@ test('approved Chat refinement keeps accessible composer and real HUD actions', 
   assert.equal(send['min-width'], '34px');
   assert.equal(send['min-height'], '34px');
   const { input: composer, sendButton } = chatComposerFixture();
-  assert.equal(composer.props['aria-label'], '합성 방에 보낼 메시지');
+  assert.equal(composer.props['aria-label'], '메시지 입력: 합성 방');
   assert.match(composer.props['aria-description'], /^Enter로 전송, Shift와 Enter로 줄바꿈$/);
   assert.equal(composer.props.title, 'Enter 전송 · Shift+Enter 줄바꿈');
   assert.equal(composer.props.data.testid, 'chat-composer');
@@ -924,6 +924,15 @@ test('composer does not dispatch for Shift+Enter line breaks, other keys, modifi
   h.input.events.keydown({ key: 'Enter', preventDefault() {} });
   assert.equal((await h.pending()).accepted, true);
   assert.equal(h.requests.length, 1);
+});
+
+test('a disabled send also blocks keyboard dispatch', () => {
+  const h = chatComposerFixture();
+  assert.equal(h.sendButton.props.disabled, 'true', 'disabled until real layout evaluates readiness');
+  h.sendButton.disabled = true;
+  h.input.events.keydown({ key: 'Enter', preventDefault() {} });
+  assert.equal(h.owners.length, 0);
+  assert.equal(h.requests.length, 0);
 });
 
 test('a held Enter sends once and an open @ list takes Enter before the send', async () => {

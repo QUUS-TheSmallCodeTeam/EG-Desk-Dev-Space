@@ -13259,7 +13259,7 @@
           const needsLogin = activeEngine.engineId === 'codex' && !codex.authStatus.isLoggedIn;
           const projectBlock = chatRequestProjectSelection(activeThread).invalid ? CHAT_REQUEST_PROJECT_INVALID : chatRoomProjectSendBlock(activeThread);
           const bindingBlocked = ChatState.nativeBindingHeld(activeThread) || (activeThread.conversationId && !ChatState.canResumeNativeThread(activeThread, codex.authStatus, codex));
-          const title = authCard ? '로그인 확인 중' : needsLogin ? '로그인 후 대화를 시작하세요'
+          const title = authCard ? '로그인 필요' : needsLogin ? '로그인 후 대화를 시작하세요'
             : !activeEngine.ready ? activeEngine.reason : bindingBlocked ? '이 대화의 연결을 확인해 주세요'
               : projectBlock ? '실행 프로젝트 확인 필요' : '첫 메시지를 보내세요';
           const detail = authCard || needsLogin || !activeEngine.ready || bindingBlocked ? null
@@ -14453,6 +14453,8 @@
       // stays closed for the same screen, and another account starts empty.
       store.byThread[threadId] = { ...(previous || {}), key: body, accountKey, seq, status: 'loading',
         dismissed: sameAsked && previous.dismissed === true,
+        // Recommendations are supplemental; a DM keeps its transcript first.
+        collapsed: previous?.collapsed ?? (thread.type === 'dm'),
         ...(previous && previous.accountKey !== accountKey ? { resolution: null, picked: [] } : {}) };
       let next;
       try {

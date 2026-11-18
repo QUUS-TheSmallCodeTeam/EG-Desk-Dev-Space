@@ -200,8 +200,7 @@ test("an answer's time line carries the '…' that opens its record", () => {
 
 test('the status line steps aside by state, stays in the page, and keeps a way into the record', () => {
   assert.match(surfaceSource, /quiet: String\(statusQuiet\) \},/);
-  assert.match(surfaceSource, /const answerHoldsRecord = !run \|\| activeThread\.messages\.some\(message => message\.role === 'assistant' && message\.runId === run\.runId\);\n\s+const statusQuiet = answerHoldsRecord && ChatStatusView\.statusRowQuiet\(\{/,
-    "the line only hides when the run's own answer carries the way into its record");
+  assert.match(surfaceSource, /const statusQuiet = workingInLog \|\| \(answerHoldsRecord && ChatStatusView\.statusRowQuiet\(\{/);
   assert.match(css, /\.egd-codex-run-status\[data-quiet="true"\] \{ display: none; \}/);
   assert.match(surfaceSource, /ChatStatusView\.uncertainStatusText\(statusText, codex\.bridgeCheckedAt\)/);
   assert.match(surfaceSource, /data: \{ testid: 'chat-run-scope', completeness: resultScope\.completeness \} \}, `결과 범위: \$\{resultScope\.text\}`\)/);

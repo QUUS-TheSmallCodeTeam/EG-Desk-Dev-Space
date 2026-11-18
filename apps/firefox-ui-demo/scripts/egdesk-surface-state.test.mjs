@@ -9839,9 +9839,8 @@ test('usage ring shows reported ChatGPT usage, grey 확인 안 됨 when nothing 
   const old = Chat.usageRingView({ isLoggedIn: true, rateLimits: limits, usage: usageDisplay(limits, now + 16 * 60_000) });
   assert.equal(old.stale, true);
   assert.match(old.title, /확인한 지 오래되어 실제와 다를 수 있음/);
-  // Both Chat heads carry the ring (the room's engine; SUB-03 Claude); the CSS draws unknown as a grey track.
-  assert.equal(surfaceSource.match(/^ +chatHeadUsageRing\(activeEngine, codex\),$/gm)?.length, 2);
-  assert.match(surfaceSource, /return codexUsageRing\(codex\.authStatus, '', onOpen\);/);
+  assert.match(surfaceSource, /chatHeadUsageRing\(activeEngine, codex, activeThread\.type === 'dm' \? 'warning' : 'all'\)/);
+  assert.match(surfaceSource, /chatHeadUsageRing\(ChatState\.chatThreadReadiness\(thread, codex\), codex, 'routine'\)/);
   const css = readFileSync(new URL('../overlay/CSS/eg-desk-surface.uc.css', import.meta.url), 'utf8');
   assert.match(css, /\.egd-usage-unknown \.egd-usage-ring \{ background: var\(--egd-outline\); \}/);
 });
@@ -15524,9 +15523,7 @@ test('engine controls: header chip, new-room choices, locked-room panel and effo
 
   const older = renderers({ ...codex, engines: null }).renderEnginePanel(fresh);
   assert.equal(older.children.some(child => child.className === 'egd-codex-engine-efforts'), false, 'no effort picker before capabilities are known');
-  for (const pattern of [/renderEngineChip\(activeThread\),\n            chatHeadUsageRing\(activeEngine, codex\),/g]) {
-    assert.equal(surfaceSource.match(pattern)?.length, 2, 'both Chat heads show the engine chip next to the usage meter');
-  }
+  assert.equal(surfaceSource.match(/renderEngineChip\(activeThread\),/g)?.length, 2, 'both Chat heads retain the engine settings');
   assert.match(surfaceSource, /showSession \? buildCodexSessionBadge\(thread, codexBridge\) : null,\s*showEngine \? renderEngineBadge\(thread\) : null,/);
   const identityStart = surfaceSource.indexOf('          const labelKey = value =>', end);
   const identityEnd = surfaceSource.indexOf('          const avatarInitial =', identityStart);
@@ -25958,6 +25955,11 @@ test('Chat head: the account chip and the usage ring open Settings 계정 (SUB-0
   assert.equal(claude.tagName, 'BUTTON');
   assert.equal(claude.dataset.testid, 'chat-claude-usage-ring');
   assert.equal(claude.dataset.level, 'unknown', 'no Claude usage reported yet reads 확인 안 됨');
+  assert.match(claude.textContent, /사용량 미확인/);
+  assert.equal(fns.chatHeadUsageRing({ engineId: 'claude' }, { engines: [claudeSettingsFixture()] }, 'warning'), null);
+  const limited = { authStatus: { isLoggedIn: true, usage: { level: 'limit' } } };
+  assert.equal(fns.chatHeadUsageRing({ engineId: 'codex' }, limited, 'warning').dataset.level, 'limit');
+  assert.equal(fns.chatHeadUsageRing({ engineId: 'codex' }, limited, 'routine'), null);
   claude.fire('click');
   assert.deepEqual(opened, [{ tab: 'account' }]);
   const codex = fns.chatHeadUsageRing({ engineId: 'codex' }, { engines: [], authStatus: { isLoggedIn: true } });
