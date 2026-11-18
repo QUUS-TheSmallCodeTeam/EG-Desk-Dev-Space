@@ -13,6 +13,7 @@ The composer's recipient line and the submit path use the same pure `boardDelive
 | no mention, or only `@Codex` | plain Codex | ordinary `POST /chat/send` (same single answer as before) |
 | a targeted `@Agent` + a live Browser selection | any | refused: the Board dispatch path must not drop the Browser execution boundary |
 | a targeted `@Agent` in an unsupported engine or stateless mode | any | refused: do not send the same text as an ordinary engine turn or discard the selected mode |
+| selected room attachments or chosen suggestions on a Board member request | any | accepted for validation only when the sole target is the room's Lead; otherwise refused (`BOARD_CONTEXT_SCOPE`), never copied to a separate member conversation |
 | `@all` or an unresolved deliberate Agent address | any | correct the address first; no broadcast or substitute recipient |
 | ordinary unaddressed engine message in a Claude room with no Agent Lead | plain room engine | ordinary `/chat/send`, not member fan-out |
 
