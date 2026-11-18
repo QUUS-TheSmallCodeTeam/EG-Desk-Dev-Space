@@ -32,9 +32,9 @@ function fakeRequest(method, url, body, headers = {}) {
   req.socket = { remoteAddress: '127.0.0.1' }
   return req
 }
-async function call(service, method, url, body, headers) {
+async function call(service, method, url, body, headers, { reviewService, signal } = {}) {
   const sent = []
-  const handled = await handlePortableHttp(fakeRequest(method, url, body, headers), new URL(url, 'http://127.0.0.1:39218'), { service, send: (status, data) => sent.push({ status, data }) })
+  const handled = await handlePortableHttp(fakeRequest(method, url, body, headers), new URL(url, 'http://127.0.0.1:39218'), { service, reviewService, signal, send: (status, data) => sent.push({ status, data }) })
   assert.ok(sent.length <= 1)
   return { handled, status: sent[0]?.status, data: sent[0]?.data }
 }
@@ -505,4 +505,187 @@ test('the bridge mounts portable routes after Desk routes, behind the loopback g
   assert.ok(mount < at('if (await handleContextHttp(req, res, url)) return'))
   assert.ok(mount < at('if (await handleChatHttp(req, res, url)) return'))
   at("        portable: deskStore ? ['export', 'inspect', 'import-as-new', 'passphrase', 'exports-list', 'attachments', 'file-drafts'] : ['local-store-unavailable'],")
+})
+
+test('review handoff returns only the approved answer to the issuing Board after explicit confirmation', needsBundle, async t => {
+  const { createReviewFlow, createReviewStore } = await import('../overlay/resources/EGDeskReviewHandoff.sys.mjs')
+  const { createPortableReviewService } = await import('./egdesk-portable-review.mjs')
+  const { REVIEW_BUNDLE_FORMAT } = await import('./egdesk-portable-bundle.mjs')
+  const a = device(t, 'review-sender')
+  const b = device(t, 'review-recipient')
+  const original = { id: 'agenda-alpha-001', title: 'Original review Board' }
+  const unrelated = { id: 'agenda-beta-002', title: 'Unrelated review Board' }
+  const sameIdOnB = { id: original.id, title: 'Independent Board on recipient profile' }
+  const privateBoardText = 'Synthetic sender notes intentionally not selected for sharing'
+  const privateRecipientText = 'Synthetic recipient working notes intentionally not approved'
+  const privateChatText = 'Synthetic sender chat not selected for sharing'
+  const privateBinding = 'synthetic-local-account-binding-review-fixture'
+  const requestText = {
+    recipient: 'Schedule reviewer', question: 'Does the Friday sequence work?',
+    excerpt: 'Friday: rehearsal, then a retrospective.', expectedReply: 'Give the recommended order.',
+  }
+  const answer = 'Keep rehearsal first. Move the retrospective to Monday. 다음 주 월요일.'
+  const passphrase = 'synthetic review file phrase'
+  const exportRoute = '/v1/portable/review/export'
+  const inspectRoute = '/v1/portable/review/inspect'
+
+  for (const [machine, board, text] of [[a, original, privateBoardText], [a, unrelated, 'Unrelated fixture note'], [b, sameIdOnB, privateRecipientText]]) {
+    machine.desk.saveBoard(board.id, { expectedRevision: null, body: boardBody(board.id, board.title, [
+      { id: 'card-note', type: 'result', runtimeState: { text } },
+    ]) })
+  }
+  const current = deskState()
+  Object.assign(current.chat.threads[0], { bindingAccountKey: privateBinding, messages: [{ role: 'user', text: privateChatText }] })
+  current.chat.codexAccountKey = privateBinding
+  a.desk.saveCurrent({ state: current, parentGeneration: null })
+  const originalHead = a.desk.board(original.id).head
+  const unrelatedHead = a.desk.board(unrelated.id).head
+  assert.equal(originalHead.body.cards[0].runtimeState.text, privateBoardText)
+  assert.equal(a.desk.current().state.chat.threads[0].bindingAccountKey, privateBinding)
+
+  // The same in-process HTTP fixture as other portable tests, plus the real
+  // review service used by the mount. Each browser profile owns one private pref.
+  function profile(machine, boardList) {
+    const prefsFile = path.join(machine.dataDir, 'review-pref.json')
+    const read = () => existsSync(prefsFile) ? readFileSync(prefsFile, 'utf8') : ''
+    const write = value => writeFileSync(prefsFile, value, { mode: 0o600 })
+    const reviewService = createPortableReviewService({
+      dependencies, home: machine.dataDir, location: () => ({ directory: machine.exportDir, folder: 'custom' }),
+    })
+    const boards = new Map(boardList.map(board => [board.id, board]))
+    const context = Object.freeze({})
+    const calls = []
+    const api = async (method, route, body, signal) => {
+      const result = await machine.api(method, route, body, undefined, { reviewService, signal })
+      calls.push({ method, route, body, ...result })
+      return { status: result.status, body: result.data }
+    }
+    return { read, calls, api, openModel() {
+      let pickedFile
+      let state
+      const flow = createReviewFlow({
+        request: (method, route, body, { signal }) => api(method, route, body, signal),
+        pickFile: async () => ({ bytes: await readFile(pickedFile) }),
+        getContext: () => context, isContextCurrent: candidate => candidate === context,
+        getBoard: id => boards.get(id), isBoardCurrent: board => boards.get(board.id) === board,
+        store: createReviewStore({ read, write }), onState: next => { state = next },
+      })
+      return { flow, state: () => state, async pick(file) {
+        pickedFile = file
+        flow.openFile()
+        await flow.chooseFile()
+        return state
+      } }
+    } }
+  }
+  async function assertArchive(bytes, review) {
+    const entries = new Map()
+    await dependencies.codec.read(bytes, async entry => { entries.set(entry.name, await collect(entry.bytes())) })
+    assert.deepEqual([...entries.keys()], ['manifest.json', 'events.jsonl', 'transcript.md'])
+    assert.deepEqual(JSON.parse(entries.get('manifest.json')), { format: REVIEW_BUNDLE_FORMAT, version: 1, review })
+    assert.equal(entries.get('events.jsonl').length, 0)
+    assert.equal(entries.get('transcript.md').length, 0)
+  }
+  const sender = profile(a, [original, unrelated])
+  const recipient = profile(b, [sameIdOnB])
+  let senderModel = sender.openModel()
+  const recipientModel = recipient.openModel()
+
+  senderModel.flow.openRequest(original)
+  assert.equal(senderModel.flow.previewRequest(requestText), true)
+  const requestDraft = { kind: 'request', ...requestText }
+  assert.deepEqual(senderModel.state().review, requestDraft)
+  assert.equal(sender.read(), '', 'request preview has not recorded an issue')
+  assert.equal(sender.calls.length, 0)
+  await senderModel.flow.exportFile({ passphrase, confirm: passphrase })
+  assert.equal(senderModel.state().step, 'exported')
+  assert.equal(senderModel.state().warning, null)
+  const requestFile = path.join(a.exportDir, senderModel.state().fileName)
+  const requestBytes = readFileSync(requestFile)
+  const issued = sender.calls[0].data.review
+  const { requestId, requestDigest } = issued
+  assert.match(requestId, /^[a-f0-9-]{36}$/)
+  assert.match(requestDigest, /^[a-f0-9]{64}$/)
+  assert.deepEqual(issued, { ...requestDraft, requestId, requestDigest })
+  const issuedPref = sender.read()
+  assert.notEqual(issuedPref, '')
+
+  assert.equal((await recipientModel.pick(requestFile)).step, 'locked')
+  assert.deepEqual(recipient.calls[0].data, { encrypted: true, locked: true })
+  await recipientModel.flow.unlock(passphrase)
+  assert.equal(recipientModel.state().step, 'request-inspected')
+  assert.deepEqual(recipientModel.state().review, issued)
+  assert.equal(recipientModel.flow.beginReply(), true)
+  assert.equal(recipientModel.flow.previewReply(answer), true)
+  const reply = { kind: 'reply', requestId, requestDigest, answer }
+  assert.deepEqual(recipientModel.state().review, reply)
+  assert.equal(recipient.calls.length, 2, 'previewing the reply does not export it')
+  assert.equal(existsSync(b.exportDir), false)
+  await recipientModel.flow.exportFile()
+  assert.equal(recipientModel.state().step, 'exported')
+  const replyName = recipientModel.state().fileName
+  assert.deepEqual(readdirSync(b.exportDir), [replyName])
+  const replyFile = path.join(b.exportDir, replyName)
+  const replyBytes = readFileSync(replyFile)
+  assert.deepEqual(recipient.calls[2].data.review, reply)
+  assert.equal(recipient.read(), '', 'replying never issues or attaches on the recipient profile')
+  await assertArchive(replyBytes, reply)
+  await assertArchive(await collect(dependencies.envelope.decrypt(Readable.from([requestBytes]), passphrase)), issued)
+
+  // A valid reply sharing the request ID but not its digest is still unknown.
+  const unknownReply = { ...reply, requestDigest: (requestDigest[0] === 'a' ? 'b' : 'a') + requestDigest.slice(1), answer: 'Unknown reply fixture.' }
+  const unknownExport = await sender.api('POST', exportRoute, { review: unknownReply })
+  assert.equal(unknownExport.status, 201)
+  const unknownFile = path.join(a.exportDir, unknownExport.body.fileName)
+  const unknown = await senderModel.pick(unknownFile)
+  assert.deepEqual([unknown.step, unknown.canReturn, unknown.review], ['reply-inspected', false, unknownReply])
+  assert.equal(senderModel.flow.confirmReturn(), false)
+  assert.equal(sender.read(), issuedPref)
+
+  const preview = await senderModel.pick(replyFile)
+  assert.deepEqual([preview.step, preview.boardTitle, preview.canReturn, preview.review], ['reply-inspected', original.title, true, reply])
+  assert.equal(sender.read(), issuedPref, 'inspecting the reply has not stored the answer')
+  assert.deepEqual(senderModel.flow.openResults(original).results, [])
+  assert.deepEqual(senderModel.flow.openResults(unrelated).results, [])
+  assert.equal((await senderModel.pick(replyFile)).canReturn, true)
+  assert.equal(senderModel.flow.confirmReturn(), true)
+  assert.equal(senderModel.state().step, 'returned')
+  senderModel.flow.close()
+  assert.equal(senderModel.state(), null)
+
+  senderModel = sender.openModel()
+  const results = () => senderModel.flow.openResults(original).results.map(result => result.answer)
+  assert.deepEqual(results(), [answer], 'new flow and store load the actual answer from local prefs')
+  assert.deepEqual(senderModel.flow.openResults(unrelated).results, [])
+  assert.deepEqual(recipientModel.flow.openResults(sameIdOnB).results, [])
+  const acceptedPref = sender.read()
+  const duplicate = await senderModel.pick(replyFile)
+  assert.deepEqual([duplicate.step, duplicate.canReturn, duplicate.review], ['reply-inspected', false, reply])
+  assert.equal(senderModel.flow.confirmReturn(), false)
+  assert.equal(sender.read(), acceptedPref)
+
+  assert.equal(recipient.read(), '')
+  assert.deepEqual(results(), [answer])
+  assert.deepEqual(senderModel.flow.openResults(unrelated).results, [])
+  assert.deepEqual(a.desk.board(original.id).head, originalHead)
+  assert.deepEqual(a.desk.board(unrelated.id).head, unrelatedHead)
+
+  const requestUpload = { bundle: requestBytes.toString('base64') }
+  const replyUpload = { bundle: replyBytes.toString('base64') }
+  assert.deepEqual(sender.calls.map(({ method, route, body, handled, status }) => [method, route, body, handled, status]), [
+    ['POST', exportRoute, { review: requestDraft, passphrase }, true, 201],
+    ['POST', exportRoute, { review: unknownReply }, true, 201],
+    ['POST', inspectRoute, upload(unknownFile), true, 200],
+    ...Array.from({ length: 3 }, () => ['POST', inspectRoute, replyUpload, true, 200]),
+  ])
+  assert.deepEqual(recipient.calls.map(({ method, route, body, handled, status }) => [method, route, body, handled, status]), [
+    ['POST', inspectRoute, requestUpload, true, 200],
+    ['POST', inspectRoute, { ...requestUpload, passphrase }, true, 200],
+    ['POST', exportRoute, { review: reply }, true, 201],
+  ])
+  const responses = Buffer.from(JSON.stringify([...sender.calls, ...recipient.calls].map(call => call.data)))
+  for (const undisclosed of [privateBoardText, privateRecipientText, privateChatText, privateBinding, 'bindingAccountKey', passphrase]) {
+    assert.equal(has(responses, undisclosed), false, 'helper responses never echo private source data or the file phrase')
+    assert.equal(has(Buffer.from(acceptedPref), undisclosed), false, 'private source data and the file phrase never enter the review preference')
+  }
 })
