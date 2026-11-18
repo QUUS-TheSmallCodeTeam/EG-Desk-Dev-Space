@@ -583,7 +583,13 @@ test('review handoff returns only the approved answer to the issuing Board after
     const entries = new Map()
     await dependencies.codec.read(bytes, async entry => { entries.set(entry.name, await collect(entry.bytes())) })
     assert.deepEqual([...entries.keys()], ['manifest.json', 'events.jsonl', 'transcript.md'])
-    assert.deepEqual(JSON.parse(entries.get('manifest.json')), { format: REVIEW_BUNDLE_FORMAT, version: 1, review })
+    const manifest = JSON.parse(entries.get('manifest.json'))
+    const metadata = {}
+    if (review.kind === 'request') {
+      assert.match(manifest.requestNonce, /^[a-f0-9]{64}$/)
+      metadata.requestNonce = manifest.requestNonce
+    }
+    assert.deepEqual(manifest, { format: REVIEW_BUNDLE_FORMAT, version: 2, review, ...metadata })
     assert.equal(entries.get('events.jsonl').length, 0)
     assert.equal(entries.get('transcript.md').length, 0)
   }

@@ -48,6 +48,8 @@ const KIND = Object.freeze({ root: 'egdesk.portable.root', board: 'egdesk.portab
 const CHILD_TYPE = Object.freeze({ board: 'board', chat: 'chat', profile: 'artifact', attachment: 'artifact', fileDraft: 'artifact' })
 const CHILD_LABEL = Object.freeze({ board: 'Board', chat: 'Chat', profile: 'Profile', attachment: 'Attachment', fileDraft: 'File draft' })
 export const REVIEW_FILE_PREFIX = 'EG-Desk-Review-'
+// Match the generated lowercase UUIDv4 and any create-only collision suffix (2–99).
+const REVIEW_EXPORT_FILE = /^EG-Desk-Review-[a-f0-9]{8}-[a-f0-9]{4}-4[a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}(?: \((?:[2-9]|[1-9][0-9])\))?\.egdesk$/
 const EXPORT_FILE = /^(?!\.)[^\\/:*?"<>|\u0000-\u001f]{1,200}\.egdesk$/u
 const BOARD_ID = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/
 const MACHINE_PATH = /(?:^|[\s("'])(?:\/[^\s]|~\/|[A-Za-z]:[\\/]|file:\/\/|\\\\[^\s])/i
@@ -853,7 +855,7 @@ export function createPortableService({ desk, chat, profiles, attachments = null
       catch (error) { if (error.code !== 'ENOENT') throw error }
       const files = []
       for (const entry of entries) {
-        if (!entry.isFile() || !EXPORT_FILE.test(entry.name) || entry.name.startsWith(REVIEW_FILE_PREFIX)) continue
+        if (!entry.isFile() || !EXPORT_FILE.test(entry.name) || REVIEW_EXPORT_FILE.test(entry.name)) continue
         const info = await fsp.lstat(path.join(where.directory, entry.name)).catch(() => null)
         if (!info?.isFile()) continue
         files.push({ fileName: entry.name, bytes: info.size, modifiedAt: Math.floor(info.mtimeMs), fileRef: { exportFile: entry.name } })

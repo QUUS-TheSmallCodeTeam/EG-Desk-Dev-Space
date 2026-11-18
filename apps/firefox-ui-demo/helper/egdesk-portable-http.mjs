@@ -46,7 +46,8 @@ function exportInput(body) {
 }
 function reviewExportInput(body) {
   fields(body, ['review', 'passphrase'], ['review'])
-  return { review: body.review, passphrase: passphraseField(body.passphrase) }
+  // Preserve presence and type: only omission opts into a plaintext review.
+  return body
 }
 function sourceInput(body, withMode) {
   fields(body, withMode ? ['fileRef', 'bundle', 'passphrase', 'mode'] : ['fileRef', 'bundle', 'passphrase'], withMode ? ['mode'] : [])

@@ -1,4 +1,4 @@
-import { createHash, randomUUID } from 'node:crypto'
+import { createHash, randomBytes, randomUUID } from 'node:crypto'
 import os from 'node:os'
 import path from 'node:path'
 import { Readable } from 'node:stream'
@@ -13,7 +13,7 @@ import {
 
 // Uses the existing .egdesk ZIP and optional encrypted envelope, but not the
 // Desk/Board graph format. Review has no store, source IDs, paths, or imports.
-const VERSION = 1
+const VERSION = 2
 const NAMES = ['manifest.json', 'events.jsonl', 'transcript.md']
 export const REVIEW_MAX_BUNDLE_BYTES = 256 * 1024
 export const REVIEW_TEXT_BYTES = Object.freeze({ recipient: 256, question: 2048, excerpt: 8192, expectedReply: 2048, answer: 8192 })
@@ -38,15 +38,17 @@ function text(value, key) {
   return value
 }
 
-function reviewValue(source, onDisk) {
+function reviewValue(source, onDisk, requestNonce) {
   if (source?.kind === 'request') {
     if (!exact(source, ['kind', ...requestKeys, ...(onDisk ? correlationKeys : [])])) invalid()
     const disclosed = Object.fromEntries(requestKeys.map(key => [key, text(source[key], key)]))
     const requestId = onDisk ? source.requestId : randomUUID()
-    // Correlation, not authentication. Domain separation fixes the v1 digest
-    // definition; JSON keys here are emitted in one fixed order.
-    const requestDigest = createHash('sha256').update(JSON.stringify({ format: FORMAT, version: VERSION, kind: 'request', ...disclosed })).digest('hex')
-    if (typeof requestId !== 'string' || !UUID_V4.test(requestId) || (onDisk && source.requestDigest !== requestDigest)) invalid()
+    if (typeof requestId !== 'string' || !UUID_V4.test(requestId) || typeof requestNonce !== 'string' || !SHA256.test(requestNonce)) invalid()
+    // The per-issue nonce stays in the request archive. A reply still carries a
+    // binding to these exact fields, but not a content fingerprint someone can
+    // recompute from a text guess. Neither the ID nor digest authenticates anyone.
+    const requestDigest = createHash('sha256').update(JSON.stringify({ format: FORMAT, version: VERSION, kind: 'request', requestId, requestNonce, ...disclosed })).digest('hex')
+    if (onDisk && source.requestDigest !== requestDigest) invalid()
     return { kind: 'request', requestId, requestDigest, ...disclosed }
   }
   if (source?.kind !== 'reply' || !exact(source, ['kind', ...correlationKeys, 'answer'])) invalid()
@@ -54,10 +56,11 @@ function reviewValue(source, onDisk) {
   if (typeof requestId !== 'string' || !UUID_V4.test(requestId) || typeof requestDigest !== 'string' || !SHA256.test(requestDigest)) invalid()
   return { kind: 'reply', requestId, requestDigest, answer: text(source.answer, 'answer') }
 }
-const manifest = review => Buffer.from(JSON.stringify({ format: FORMAT, version: VERSION, review }))
-function zip(codec, review, signal) {
+const archiveManifest = (review, requestNonce) => ({ format: FORMAT, version: VERSION, review, ...(review.kind === 'request' ? { requestNonce } : {}) })
+const manifestBytes = archive => Buffer.from(JSON.stringify(archive))
+function zip(codec, archive, signal) {
   return codec.encode(NAMES.map((name, index) => {
-    const bytes = index === 0 ? manifest(review) : Buffer.alloc(0)
+    const bytes = index === 0 ? manifestBytes(archive) : Buffer.alloc(0)
     return { name, size: bytes.length, open: () => Readable.from([bytes]) }
   }), { signal, canonical: true })
 }
@@ -74,21 +77,22 @@ async function collect(stream, signal) {
 }
 async function readReview(codec, bytes, signal) {
   let index = 0
-  let review
+  let archive
   await codec.read(bytes, async entry => {
     if (entry.name !== NAMES[index++] || (entry.name !== NAMES[0] && entry.size !== 0)) invalidFile()
     const content = await collect(entry.bytes(), signal)
     if (entry.name !== NAMES[0]) return
     const decoded = JSON.parse(content.toString('utf8'))
-    if (!exact(decoded, ['format', 'version', 'review']) || decoded.format !== FORMAT || decoded.version !== VERSION) invalidFile()
-    review = reviewValue(decoded.review, true)
+    const request = decoded?.review?.kind === 'request'
+    if (!exact(decoded, ['format', 'version', 'review', ...(request ? ['requestNonce'] : [])]) || decoded.format !== FORMAT || decoded.version !== VERSION) invalidFile()
+    archive = archiveManifest(reviewValue(decoded.review, true, decoded.requestNonce), decoded.requestNonce)
     // Equality also rejects noncanonical text, duplicate JSON keys and non-UTF-8.
-    if (!manifest(review).equals(content)) invalidFile()
+    if (!manifestBytes(archive).equals(content)) invalidFile()
   }, { signal, budget: { maxEntries: 3, maxUncompressedBytes: REVIEW_MAX_BUNDLE_BYTES, maxRatio: 100 } })
   // Decline hidden archive data too: no extra entries, ZIP comments, local
   // records, padding or incidental metadata beyond the fixed encoder profile.
-  if (!review || !(await collect(zip(codec, review, signal), signal)).equals(bytes)) invalidFile()
-  return review
+  if (!archive || !(await collect(zip(codec, archive, signal), signal)).equals(bytes)) invalidFile()
+  return archive.review
 }
 
 export function createPortableReviewService({ location = () => portableExportLocation(), home = os.homedir(), dependencies } = {}) {
@@ -119,14 +123,23 @@ export function createPortableReviewService({ location = () => portableExportLoc
         return Boolean(location().directory && codec?.encode && codec?.read && envelope?.encrypt && envelope?.decrypt && envelope?.isEncryptedPrefix)
       } catch { return false }
     },
-    exportReview({ review: input, passphrase } = {}, { signal } = {}) {
+    exportReview(input = {}, { signal } = {}) {
       return exclusive(async () => {
-        const review = reviewValue(input, false)
-        const secret = portableExportPassphrase(checkedPassphrase(passphrase))
+        if (!input || typeof input !== 'object' || Array.isArray(input)) invalid()
+        let secret = null
+        if ('passphrase' in input) {
+          const passphrase = input.passphrase
+          if (typeof passphrase !== 'string' || passphrase.length === 0) {
+            fail('PORTABLE_HTTP_INPUT', 'passphrase must be non-empty text, or omitted for an unencrypted review')
+          }
+          secret = portableExportPassphrase(passphrase)
+        }
+        const requestNonce = input.review?.kind === 'request' ? randomBytes(32).toString('hex') : undefined
+        const review = reviewValue(input.review, false, requestNonce)
         const { codec, envelope } = await load()
         let sink
         try {
-          const archive = zip(codec, review, signal)
+          const archive = zip(codec, archiveManifest(review, requestNonce), signal)
           const output = secret ? envelope.encrypt(archive, secret, { signal }) : archive
           // Prepare only bounded bytes in memory before touching the file system.
           const bytes = await collect(output, signal)

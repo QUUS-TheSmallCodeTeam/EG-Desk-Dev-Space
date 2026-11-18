@@ -17,6 +17,14 @@ const REQUEST = { kind: 'request', recipient: 'Reviewer B', question: 'Which pla
 const PASSPHRASE = 'synthetic-file-key'
 const sha = bytes => createHash('sha256').update(bytes).digest('hex')
 const bundle = bytes => ({ bundle: bytes.toString('base64') })
+async function readManifest(bytes) {
+  let manifest
+  await deps.codec.read(bytes, async entry => {
+    const content = await collect(entry.bytes())
+    if (entry.name === 'manifest.json') manifest = JSON.parse(content)
+  })
+  return manifest
+}
 async function collect(stream) { const parts = []; for await (const part of stream) parts.push(part); return Buffer.concat(parts) }
 
 function request(method, route, body, headers) {
@@ -67,7 +75,6 @@ test('two signed-out installs manually hand off a request and reply without touc
   assert.match(review.requestId, /^[a-f0-9-]{36}$/)
   const { requestId, requestDigest, ...disclosed } = review
   assert.deepEqual(disclosed, REQUEST)
-  assert.equal(requestDigest, sha(Buffer.from(JSON.stringify({ format: REVIEW_BUNDLE_FORMAT, version: 1, ...REQUEST }))))
   assert.equal(displayPath, `~/exports/${fileName}`)
   assert.equal(encrypted, false)
   assert.match(fileName, /^EG-Desk-Review-[a-f0-9-]+\.egdesk$/)
@@ -75,12 +82,18 @@ test('two signed-out installs manually hand off a request and reply without touc
   const file = a.read(fileName)
   assert.equal(file.includes(fixture), false)
   let i = 0
+  let requestNonce
   await deps.codec.read(file, async entry => {
     const bytes = await collect(entry.bytes())
     assert.equal(entry.name, ['manifest.json', 'events.jsonl', 'transcript.md'][i++])
-    if (entry.name === 'manifest.json') assert.deepEqual(JSON.parse(bytes), { format: REVIEW_BUNDLE_FORMAT, version: 1, review })
-    else assert.equal(bytes.length, 0)
+    if (entry.name === 'manifest.json') {
+      const manifest = JSON.parse(bytes)
+      requestNonce = manifest.requestNonce
+      assert.match(requestNonce, /^[a-f0-9]{64}$/)
+      assert.deepEqual(manifest, { format: REVIEW_BUNDLE_FORMAT, version: 2, review, requestNonce })
+    } else assert.equal(bytes.length, 0)
   })
+  assert.equal(requestDigest, sha(Buffer.from(JSON.stringify({ format: REVIEW_BUNDLE_FORMAT, version: 2, kind: 'request', requestId, requestNonce, ...disclosed }))))
   assert.deepEqual((await a.inspect({ fileRef })).data, { review, encrypted: false, locked: false })
   assert.deepEqual((await b.inspect(bundle(file))).data, { review, encrypted: false, locked: false })
   assert.deepEqual(readdirSync(b.root), [])
@@ -101,7 +114,24 @@ test('two signed-out installs manually hand off a request and reply without touc
   const repeated = (await a.export({ review: REQUEST })).data
   assert.notEqual(repeated.fileName, fileName)
   assert.notEqual(repeated.review.requestId, requestId)
-  assert.equal(repeated.review.requestDigest, requestDigest)
+  assert.notEqual(repeated.review.requestDigest, requestDigest)
+  const repeatedManifest = await readManifest(a.read(repeated.fileName))
+  assert.match(repeatedManifest.requestNonce, /^[a-f0-9]{64}$/)
+  assert.notEqual(repeatedManifest.requestNonce, requestNonce)
+  // A plaintext reply to an encrypted request must not expose its text or nonce.
+  const confidential = (await a.export({ review: REQUEST, passphrase: PASSPHRASE })).data
+  const confidentialBytes = a.read(confidential.fileName)
+  const confidentialArchive = await readManifest(await collect(deps.envelope.decrypt(Readable.from([confidentialBytes]), PASSPHRASE)))
+  assert.equal(confidentialBytes.includes(confidentialArchive.requestNonce), false)
+  assert.deepEqual((await b.inspect({ ...bundle(confidentialBytes), passphrase: PASSPHRASE })).data, { review: confidential.review, encrypted: true, locked: false })
+  const approved = { ...answer, requestId: confidential.review.requestId, requestDigest: confidential.review.requestDigest }
+  const plainReply = (await b.export({ review: approved })).data
+  assert.deepEqual(plainReply.review, approved)
+  assert.deepEqual(await readManifest(b.read(plainReply.fileName)), { format: REVIEW_BUNDLE_FORMAT, version: 2, review: approved })
+  for (const value of [REQUEST.recipient, REQUEST.question, REQUEST.excerpt, REQUEST.expectedReply, confidentialArchive.requestNonce]) {
+    assert.equal(b.read(plainReply.fileName).includes(value), false)
+    assert.equal(JSON.stringify(plainReply).includes(value), false)
+  }
   assert.deepEqual(a.read(fileName), file)
 })
 
@@ -131,6 +161,31 @@ test('invalid and cancelled operations and untrusted origins perform no writes',
   assert.deepEqual(readdirSync(a.root), [])
   const optional = await a.export({ review: { ...REQUEST, excerpt: ' ' } })
   assert.equal(optional.data.review.excerpt, '')
+})
+
+test('only omission opts into plaintext at the HTTP and direct service boundaries', needsBundle, async t => {
+  const a = install(t, 'passphrase-presence')
+  const service = createPortableReviewService({ location: a.location, dependencies: deps })
+  for (const passphrase of ['', null, 0, false, {}, []]) {
+    const response = await a.export({ review: REQUEST, passphrase })
+    assert.equal(response.status, 400)
+    assert.equal(response.data.code, 'PORTABLE_HTTP_INPUT')
+    await assert.rejects(service.exportReview({ review: REQUEST, passphrase }), { code: 'PORTABLE_HTTP_INPUT' })
+  }
+  await assert.rejects(service.exportReview({ review: REQUEST, passphrase: undefined }), { code: 'PORTABLE_HTTP_INPUT' })
+  assert.equal(existsSync(a.directory), false)
+  assert.equal((await service.exportReview({ review: REQUEST })).encrypted, false)
+  assert.equal((await a.export({ review: REQUEST })).data.encrypted, false)
+})
+
+test('the generic export listing hides only generated review names and collision variants', needsBundle, async t => {
+  const a = install(t, 'listing')
+  const { fileName } = (await a.export({ review: REQUEST })).data
+  const copyName = suffix => fileName.replace(/\.egdesk$/, suffix + '.egdesk')
+  const ordinaryNames = ['EG-Desk-Review-Notes-20261024-153012.egdesk', 'EG-Desk-Board-Review-20261024-153012.egdesk', copyName(' (1)'), copyName(' (100)'), copyName('-20261024-153012')]
+  for (const name of [...ordinaryNames, copyName(' (2)'), copyName(' (99)')]) writeFileSync(path.join(a.directory, name), 'Synthetic fixture')
+  const ordinary = createPortableService({ location: a.location, dependencies: deps })
+  assert.deepEqual((await ordinary.listExports()).files.map(file => file.fileName).sort(), ordinaryNames.sort())
 })
 
 async function makeZip(content, { events = '', extra = false } = {}) {
@@ -169,14 +224,23 @@ test('reject opposite formats and hidden file data without imports or writes', n
     await deps.codec.read(board, async entry => { const data = await collect(entry.bytes()); if (entry.name === 'manifest.json') out = JSON.parse(data) })
     return out
   })()
-  const review = output.review
-  const content = JSON.stringify({ format: REVIEW_BUNDLE_FORMAT, version: 1, review })
+  const manifest = await readManifest(valid)
+  const { review, requestNonce } = manifest
+  const content = JSON.stringify(manifest)
+  const { requestId, requestDigest, ...disclosed } = review
+  const legacyDigest = sha(Buffer.from(JSON.stringify({ format: REVIEW_BUNDLE_FORMAT, version: 1, ...disclosed })))
   const mutated = await Promise.all([
     makeZip(JSON.stringify({ ...boardManifest, review })),
-    makeZip(JSON.stringify({ format: REVIEW_BUNDLE_FORMAT, version: 1, review, identity: 'hidden' })),
-    makeZip(JSON.stringify({ format: REVIEW_BUNDLE_FORMAT, version: 1, review: { ...review, account: 'hidden' } })),
-    makeZip(content.replace('"version":1', '"version":99,"version":1')),
-    makeZip(content.replace(review.requestDigest, 'f'.repeat(64))),
+    makeZip(JSON.stringify({ ...manifest, identity: 'hidden' })),
+    makeZip(JSON.stringify({ ...manifest, review: { ...review, account: 'hidden' } })),
+    makeZip(content.replace('"version":2', '"version":99,"version":2')),
+    makeZip(content.replace(requestDigest, 'f'.repeat(64))),
+    makeZip(content.replace(requestNonce, 'f'.repeat(64))),
+    makeZip(JSON.stringify({ ...manifest, review: { ...review, question: 'Altered after export?' } })),
+    makeZip(JSON.stringify({ ...manifest, review: { ...review, requestId: 'b4b5a680-ce82-414d-b1b9-042d3ef10191' } })),
+    makeZip(JSON.stringify({ format: REVIEW_BUNDLE_FORMAT, version: 2, review })),
+    makeZip(JSON.stringify({ format: REVIEW_BUNDLE_FORMAT, version: 1, review: { ...review, requestDigest: legacyDigest } })),
+    makeZip(JSON.stringify({ ...manifest, review: { kind: 'reply', requestId, requestDigest, answer: 'Fixture reply' } })),
     makeZip(content, { events: 'hidden' }),
     makeZip(content, { extra: true }),
   ])
