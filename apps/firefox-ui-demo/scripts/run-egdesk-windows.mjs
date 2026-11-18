@@ -50,10 +50,12 @@ export function mergeNormalPreferences(original) {
     .map(([key, value]) => 'user_pref(' + JSON.stringify(key) + ', ' + JSON.stringify(value) + ');').join('\n') + '\n';
 }
 
+const retiredBoardDraftVariable = /^EGDESK_BOARD_AGENT_DRAFT_(API_KEY|MODEL)$/i;
+
 export function normalChildEnvironment(env, { dataDir, codex, root, profile }) {
   if (typeof profile !== 'string' || !path.isAbsolute(profile)) throw new Error('A validated absolute Firefox profile is required');
   const clean = Object.fromEntries(Object.entries(env).filter(([key]) =>
-    !/^(?:EGDESK_QA_|EGDESK_BROWSER_FIXTURE_QA(?:_|$)|MOZ_REMOTE_ALLOW_SYSTEM_ACCESS$|MOZ_MARIONETTE$|EGDESK_MARIONETTE_PORT$|EGDESK_FIREFOX_PROFILE$|EGDESK_ONTOLOGY_PROFILE_PATH$|EGDESK_DATA_DIR$|EGDESK_CONTEXT_ROOTS$|EGDESK_CODEX_BIN$|EGDESK_CODEX_MODEL$|EGDESK_CODEX_EFFORT$|EGDESK_CODEX_DISABLE_MEMORIES$)/i.test(key)));
+    !retiredBoardDraftVariable.test(key) && !/^(?:EGDESK_QA_|EGDESK_BROWSER_FIXTURE_QA(?:_|$)|MOZ_REMOTE_ALLOW_SYSTEM_ACCESS$|MOZ_MARIONETTE$|EGDESK_MARIONETTE_PORT$|EGDESK_FIREFOX_PROFILE$|EGDESK_ONTOLOGY_PROFILE_PATH$|EGDESK_DATA_DIR$|EGDESK_CONTEXT_ROOTS$|EGDESK_CODEX_BIN$|EGDESK_CODEX_MODEL$|EGDESK_CODEX_EFFORT$|EGDESK_CODEX_DISABLE_MEMORIES$)/i.test(key)));
   return { ...clean, EGDESK_DATA_DIR: dataDir, EGDESK_CONTEXT_ROOTS: root, EGDESK_FIREFOX_PROFILE: profile,
     EGDESK_CODEX_BIN: codex, EGDESK_CODEX_DISABLE_MEMORIES: '1' };
 }
@@ -547,6 +549,10 @@ function assertPinnedWindowsRuntime() {
 }
 
 async function windowsEntrypoint() {
+  // Before pinned re-exec, probes and children. Windows env names ignore case.
+  for (const key of Object.keys(process.env)) {
+    if (retiredBoardDraftVariable.test(key)) delete process.env[key];
+  }
   if (process.platform === 'win32') {
     const expected = pinnedNodeExecutable({ platform: 'win32' });
     if (!fs.existsSync(expected)) throw new Error(`Pinned project Node is missing; run node "${path.join(appRoot, 'scripts', 'install-egdesk-node.mjs')}" first`);

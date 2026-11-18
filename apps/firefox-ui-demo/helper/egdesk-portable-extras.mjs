@@ -2,6 +2,7 @@ import { createHash } from 'node:crypto'
 import path from 'node:path'
 import { publicText } from './codex-chat-values.mjs'
 import { DECISION_CREDENTIAL_FILE } from './egdesk-decision-credential.mjs'
+import { BOARD_AGENT_DRAFT_CONFIG_FILE } from './egdesk-board-agent-draft-config.mjs'
 
 // RT-03 opt-in extras for the .egdesk bundle: attachments (context captures)
 // and File drafts (managed working copies). Both are OFF unless the export
@@ -37,11 +38,12 @@ const SOURCE_ID = /^[A-Za-z0-9][A-Za-z0-9._:-]{7,127}$/
 
 // File names that hold credentials. These never leave the machine even when
 // the user asked for attachments or drafts: bridge settings, the decision
-// credential key file, env files, private keys, keychains and token stores.
+// credential and Board draft key files, env files, private keys and token stores.
+const credentialName = name => new RegExp(`^${name.replace(/[.]/g, '\\.')}`, 'i')
 const SECRET_NAMES = [
   /^\.env(?:\..*)?$/i, /^\.?netrc$/i, /^\.npmrc$/i, /^\.pypirc$/i, /^\.git-credentials$/i,
   /^id_(?:rsa|dsa|ecdsa|ed25519)(?:\.pub)?$/i, /\.(?:pem|key|p12|pfx|jks|keystore|keychain(?:-db)?|kdbx|ppk|asc|gpg)$/i,
-  /^bridge-settings\.json/i, new RegExp(`^${DECISION_CREDENTIAL_FILE.replace(/[.]/g, '\\.')}`, 'i'),
+  /^bridge-settings\.json/i, credentialName(DECISION_CREDENTIAL_FILE), credentialName(BOARD_AGENT_DRAFT_CONFIG_FILE),
   /^auth\.json$/i, /^credentials(?:\.[a-z]+)?$/i, /^(?:client[_-]?)?secrets?(?:\.[a-z]+)?$/i,
   /^(?:access[_-]?|refresh[_-]?|api[_-]?)?tokens?(?:\.(?:json|txt|ya?ml|env))?$/i, /^cookies(?:\.sqlite)?$/i, /^logins\.json$/i, /^key[34]\.db$/i,
 ]

@@ -267,9 +267,8 @@ test('real loopback HTTP checks origin, content type, bounds and dispatches four
   assert.equal((await send('policy', body)).status, 409)
 })
 
-test('production wiring isolates the draft credential before constructing launch env and mounts all four actions', () => {
+test('production wiring mounts all four actions', () => {
   const source = readFileSync(new URL('./codex-bridge-server.mjs', import.meta.url), 'utf8')
-  assert.ok(source.indexOf('delete process.env.EGDESK_BOARD_AGENT_DRAFT_API_KEY') < source.indexOf('const appServerLaunch'))
   assert.match(source, /createBoardAgentAskService\(\{[\s\S]*?selectContext: selectBoardAgentContext/)
   assert.match(source, /if \(await handleBoardAgentAskHttp\(req, res, url\)\) return/)
   assert.match(source, /boardAgentAsk\.available\(\) \? \['boardAgentAsk'\]/)

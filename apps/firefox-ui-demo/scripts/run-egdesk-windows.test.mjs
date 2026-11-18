@@ -47,16 +47,17 @@ test('normal preferences disable automation while preserving unrelated Desk and 
   assert.equal(merged, mergeNormalPreferences(merged));
 });
 
-test('normal child environment removes QA and remote-control settings without shell interpolation', () => {
+test('normal child environment removes QA, remote-control and retired Board draft settings', () => {
   const profile = path.resolve('validated profile');
   const env = normalChildEnvironment({ Path: 'installed node', USERPROFILE: 'normal user',
     MOZ_REMOTE_ALLOW_SYSTEM_ACCESS: '1', moz_marionette: '1', EGDESK_QA_REAL_TURN: '1',
     EGDESK_QA_FIXTURE_TOKEN: 'private sentinel', EGDESK_BROWSER_FIXTURE_QA_URL: 'http://qa',
     EGDESK_MARIONETTE_PORT: '2828', EGDESK_DATA_DIR: 'temporary fixture', egdesk_firefox_profile: 'untrusted',
     EGDESK_ONTOLOGY_PROFILE_PATH: 'untrusted obsolete override',
-    EGDESK_CODEX_MODEL: 'qa override', egdesk_codex_disable_memories: '0' },
+    EGDESK_CODEX_MODEL: 'qa override', egdesk_codex_disable_memories: '0',
+    eGdEsK_BoArD_AgEnT_dRaFt_ApI_kEy: 'retired-synthetic-sentinel', EGDESK_BOARD_AGENT_DRAFT_MODEL: 'retired model' },
   { dataDir: 'persistent data', codex: 'installed native', root: 'repository', profile });
-  for (const name of Object.keys(env)) assert.ok(!/^(MOZ_|EGDESK_QA_|EGDESK_BROWSER_FIXTURE_QA)/i.test(name));
+  for (const name of Object.keys(env)) assert.ok(!/^(MOZ_|EGDESK_QA_|EGDESK_BROWSER_FIXTURE_QA|EGDESK_BOARD_AGENT_DRAFT_)/i.test(name));
   assert.equal(env.EGDESK_DATA_DIR, 'persistent data');
   assert.equal(env.EGDESK_CODEX_BIN, 'installed native');
   assert.equal(env.EGDESK_CODEX_DISABLE_MEMORIES, '1');

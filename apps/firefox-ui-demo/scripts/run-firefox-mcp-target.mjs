@@ -142,7 +142,8 @@ export async function launchQaFirefox({ profile, executable, mode = 'automation'
   const ports = qaAutomationPorts(marionette, remote);
   if (mode === 'automation') await Promise.all([requireFreePort(ports.marionette), requireFreePort(ports.remote)]);
   const canonical = prepareQaFirefox(profile, { mode, ...ports });
-  const env = { ...process.env };
+  const env = Object.fromEntries(Object.entries(process.env).filter(([name]) =>
+    !/^EGDESK_BOARD_AGENT_DRAFT_(API_KEY|MODEL)$/i.test(name)));
   delete env.MOZ_REMOTE_ALLOW_SYSTEM_ACCESS; delete env.MOZ_MARIONETTE;
   const args = ['-profile', canonical, '--no-remote', '--purgecaches'];
   if (mode === 'automation') {

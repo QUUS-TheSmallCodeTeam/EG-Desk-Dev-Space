@@ -7,6 +7,7 @@ import { PassThrough, Readable } from 'node:stream'
 import { createPrivateQaTempDirectory } from '../scripts/egdesk-qa-platform.mjs'
 import { openChatStore } from './egdesk-chat-store.mjs'
 import { DECISION_CREDENTIAL_FILE } from './egdesk-decision-credential.mjs'
+import { BOARD_AGENT_DRAFT_CONFIG_FILE } from './egdesk-board-agent-draft-config.mjs'
 import { openDeskStore } from './egdesk-desk-store.mjs'
 import { createEGDeskPortableBundle, loadEGDeskPortableDependencies } from './egdesk-portable-bundle.mjs'
 import { EXTRA_KIND, PORTABLE_EXTRA_LIMITS, collectPortableExtras, isSafeEntryName, matchExtrasManifest, parseExtraEntry, secretReason, validateExtrasManifest } from './egdesk-portable-extras.mjs'
@@ -109,16 +110,17 @@ test('opt-in export carries sha256 per entry and a manifest; import writes new c
   assert.equal(b.providers.imported.drafts[0].text, DRAFT)
 })
 
-test('secrets never travel: bridge settings, the decision credential key file, env files and token text are omitted', needsBundle, async t => {
+test('secrets never travel: bridge settings, the decision and Board draft credential files, env files and token text are omitted', needsBundle, async t => {
   const dir = createPrivateQaTempDirectory('egdesk-portable-extras-secrets-')
   t.after(() => rmSync(dir, { recursive: true, force: true }))
   const KEY = 'sk-proj-SECRETDECISIONKEY1234567890'
   const BRIDGE = '{"engines":{"claude":{"apiKey":"BRIDGE-SECRET-VALUE"}}}'
   writeFileSync(path.join(dir, DECISION_CREDENTIAL_FILE), JSON.stringify({ version: 1, apiKey: KEY }))
+  writeFileSync(path.join(dir, BOARD_AGENT_DRAFT_CONFIG_FILE), '{"apiKey":"board-fixture-only-synthetic"}')
   writeFileSync(path.join(dir, 'bridge-settings.json'), BRIDGE)
   const fromDisk = name => ({ name, mime: 'application/json', read: async () => readFileSync(path.join(dir, name)) })
   const providers = extrasProviders({
-    attachmentItems: [fromDisk(DECISION_CREDENTIAL_FILE), fromDisk('bridge-settings.json'),
+    attachmentItems: [fromDisk(DECISION_CREDENTIAL_FILE), fromDisk(BOARD_AGENT_DRAFT_CONFIG_FILE), fromDisk('bridge-settings.json'),
       { name: '.env', mime: 'text/plain', read: async () => Buffer.from('OPENAI_API_KEY=abc') },
       { name: 'id_ed25519', mime: 'application/octet-stream', read: async () => Buffer.from('PRIVATE-KEY-BYTES') },
       { name: 'auth.json', mime: 'application/json', read: async () => Buffer.from('{"tokens":"AUTH-SECRET"}') },
@@ -130,7 +132,7 @@ test('secrets never travel: bridge settings, the decision credential key file, e
   a.desk.saveBoard('agenda-x-0001', { body: board('agenda-x-0001'), expectedRevision: null })
   const out = await a.service.exportBundle({ scope: 'desk', include: { attachments: true, fileDrafts: true, chats: true, profiles: true } })
   assert.deepEqual(out.omitted.attachments.map(item => [item.name, item.reason]), [
-    [DECISION_CREDENTIAL_FILE, 'secret'], ['bridge-settings.json', 'secret'], ['.env', 'secret'], ['id_ed25519', 'secret'], ['auth.json', 'secret'], ['call.txt', 'secret']])
+    [DECISION_CREDENTIAL_FILE, 'secret'], [BOARD_AGENT_DRAFT_CONFIG_FILE, 'secret'], ['bridge-settings.json', 'secret'], ['.env', 'secret'], ['id_ed25519', 'secret'], ['auth.json', 'secret'], ['call.txt', 'secret']])
   assert.deepEqual(out.omitted.fileDrafts, [{ name: 'config.mjs', reason: 'secret' }])
   assert.deepEqual([out.contents.attachments, out.contents.fileDrafts], [1, 1])
   const bytes = readFileSync(path.join(a.exportDir, out.fileName))
@@ -164,6 +166,7 @@ test('entry names: plain file names only; traversal, absolute and drive paths ar
   for (const name of ['../x', '..', '.', 'a/b', 'a\\b', '/etc/passwd', 'C:\\x', 'C:x', '~/x', '\\\\server\\x', 'x\u0000', '', ' x', 'a'.repeat(256)]) assert.equal(isSafeEntryName(name), false, JSON.stringify(name))
   assert.equal(secretReason('tokens.css'), null, 'design tokens are not secrets')
   assert.equal(secretReason('token.json'), 'secret')
+  assert.equal(secretReason(BOARD_AGENT_DRAFT_CONFIG_FILE.toUpperCase() + '.tmp'), 'secret')
 })
 
 test('import validation rejects traversal, absolute paths, hash and size mismatches and manifest drift', () => {
@@ -175,6 +178,7 @@ test('import validation rejects traversal, absolute paths, hash and size mismatc
   refuses(entry({ name: '/Users/someone/.zshrc' }), 'UNSAFE_NAME')
   refuses(entry({ name: 'C:\\Windows\\x.dll' }), 'UNSAFE_NAME')
   refuses(entry({ name: DECISION_CREDENTIAL_FILE }), 'SECRET_ENTRY')
+  refuses(entry({ name: BOARD_AGENT_DRAFT_CONFIG_FILE }), 'SECRET_ENTRY')
   refuses(entry({ sha256: sha(Buffer.from('other')) }), 'HASH_MISMATCH')
   refuses(entry({ bytes: 4 }), 'HASH_MISMATCH')
   refuses(entry({ bytes: PORTABLE_EXTRA_LIMITS.maxAttachmentBytes + 1 }), 'ENTRY_TOO_LARGE')

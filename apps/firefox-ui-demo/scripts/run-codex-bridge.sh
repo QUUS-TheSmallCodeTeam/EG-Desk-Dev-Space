@@ -1,6 +1,9 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# Retired prerelease Board draft variables must not reach any child process.
+unset EGDESK_BOARD_AGENT_DRAFT_API_KEY EGDESK_BOARD_AGENT_DRAFT_MODEL
+
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(dirname "$SCRIPT_DIR")"
 BRIDGE_ENTRY="$REPO_ROOT/helper/codex-bridge-server.mjs"

@@ -45,6 +45,7 @@ import { createBoardAgentAskService } from './egdesk-board-agent-ask.mjs'
 import { createBoardAgentAskHttpHandler } from './egdesk-board-agent-ask-http.mjs'
 import { selectBoardAgentContext } from './egdesk-board-agent-context.mjs'
 import { createBoardAgentDraftTransport, BOARD_AGENT_DRAFT_INSTRUCTIONS, BOARD_AGENT_DRAFT_REPLY_STYLES } from './egdesk-board-agent-draft.mjs'
+import { createBoardAgentDraftConfigReader } from './egdesk-board-agent-draft-config.mjs'
 import { createContextAttachmentProvider, createManagedDraftProvider } from './egdesk-portable-providers.mjs'
 import { NativeReaderClient } from './egdesk-native-reader.mjs'
 import { ClaudeReaderClient, estimateClaudeReaderInput } from './egdesk-claude-reader.mjs'
@@ -64,14 +65,10 @@ import { inspectSqliteRuntime } from './egdesk-sqlite-runtime.mjs'
 import { createHostAgent, resolveHostAgentExecutable } from './egdesk-host-agent.mjs'
 import { createHostControl, createHostControlHttpHandler } from './egdesk-host-control.mjs'
 
-// Optional independent Responses credential. Capture once and remove before
-// configuring or launching any engine, terminal or native subprocess.
-const boardAgentDraftConfig = Object.freeze({
-  apiKey: process.env.EGDESK_BOARD_AGENT_DRAFT_API_KEY,
-  model: process.env.EGDESK_BOARD_AGENT_DRAFT_MODEL,
-})
-delete process.env.EGDESK_BOARD_AGENT_DRAFT_API_KEY
-delete process.env.EGDESK_BOARD_AGENT_DRAFT_MODEL
+// Ignore prerelease variables; do not pass them on in direct bridge launches.
+for (const name of Object.keys(process.env)) {
+  if (/^EGDESK_BOARD_AGENT_DRAFT_(API_KEY|MODEL)$/i.test(name)) delete process.env[name]
+}
 
 const nodeRuntime = requireEGDeskNodeRuntime()
 
@@ -493,7 +490,7 @@ const boardAgentAsk = createBoardAgentAskService({
     const bindingId = createHmac('sha256', boardAskBindingKey).update(JSON.stringify([key, decisionCredentials.savedAt(), mode, decisionClient.model])).digest('hex')
     return { mode, model: decisionClient.model, client: decisionClient, bindingId }
   },
-  draft: createBoardAgentDraftTransport({ readConfig: () => boardAgentDraftConfig.apiKey && boardAgentDraftConfig.apiKey !== decisionCredentials.getApiKey() ? boardAgentDraftConfig : null }),
+  draft: createBoardAgentDraftTransport({ readConfig: createBoardAgentDraftConfigReader({ dataDir, getDecisionApiKey: () => decisionCredentials.getApiKey() }) }),
   draftPreview: replyStyle => `${BOARD_AGENT_DRAFT_INSTRUCTIONS}\n${BOARD_AGENT_DRAFT_REPLY_STYLES[replyStyle]}`,
 })
 const handleBoardAgentAskHttp = createBoardAgentAskHttpHandler({ service: boardAgentAsk, port: BRIDGE_PORT })
