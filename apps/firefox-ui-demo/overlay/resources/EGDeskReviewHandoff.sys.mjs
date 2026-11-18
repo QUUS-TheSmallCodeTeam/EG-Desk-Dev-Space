@@ -260,7 +260,7 @@ export function createReviewFlow({ request, pickFile, getContext, isContextCurre
     update(s, { step: 'reply-draft', review: s.inspected, requestReview: s.inspected, error: null });
     return true;
   }
-  function beginAgentReply(review, board, { answer, mode, decisionEgress, source }) {
+  function beginAgentReply(review, board, { answer, decisionEgress, source }) {
     const s = active;
     if (!current(s, board) || s.view.step !== 'request-inspected' || s.inspected !== review || !s.inspected?.askCode) return false;
     s.board = board;
@@ -268,7 +268,7 @@ export function createReviewFlow({ request, pickFile, getContext, isContextCurre
     const usable = parsed?.review?.answer === answer;
     const answerSource = !answer ? '이 질문에 쓸 관련 공개 발췌문을 찾지 못했습니다. 직접 회신을 쓸 수 있습니다.' :
       !usable ? '결과를 회신에 넣을 수 없습니다. 직접 회신을 써 주세요.' :
-      mode === 'draft' ? '전용 OpenAI API로 만든 초안입니다. 내용을 검토하고 내 회신으로 편집해 주세요.' :
+      source === 'draft' ? '전용 OpenAI API로 만든 초안입니다. 내용을 검토하고 내 회신으로 편집해 주세요.' :
       'Board의 관련 공개 발췌문입니다. 생성된 답변이 아닙니다. 내용을 검토하고 내 회신으로 편집해 주세요.';
     update(s, { step: 'reply-draft', review: usable ? parsed.review : s.inspected, requestReview: s.inspected, boardTitle: board.title,
       answerSource: decisionEgress && source !== 'local' ? `${answerSource} 관련성 판단에 별도 Decisions API를 사용했습니다.` : answerSource, error: null });

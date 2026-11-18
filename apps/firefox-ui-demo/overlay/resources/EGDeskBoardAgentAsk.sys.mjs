@@ -159,10 +159,10 @@ export function createBoardAgentAsk({ post, loadProfiles, isCurrent, onState, on
     const expiry = toDate(p?.expiresAt);
     if (!isText(p?.ticket) || !Number.isFinite(expiry) || expiry <= now() || p.mode !== mode || p.decisionEgress !== decisionEgress ||
       p.question !== s.binding.review.question || p.profileName !== policy.profileName || p.profileRevision !== policy.profileRevision ||
-      !validExcerpts(p.excerpts) || p.excerpts.some(value => !policy.excerpts.includes(value)) ||
+      !validExcerpts(p.excerpts) || JSON.stringify(p.excerpts) !== JSON.stringify(policy.excerpts) ||
       !Object.hasOwn(styles, p.replyStyle) || p.publicInstructions !== (mode === 'draft' ? policy.publicInstructions : '') ||
       (mode === 'draft' ? p.provider !== 'openai' || p.draftModel !== availability.model || p.model !== p.draftModel : p.draftModel !== null || p.model !== p.decisionModel) ||
-      (decisionEgress ? !isText(p.decisionModel) || JSON.stringify(p.excerpts) !== JSON.stringify(policy.excerpts) : p.decisionModel !== null) ||
+      (decisionEgress ? !isText(p.decisionModel) || p.provider !== 'openai' : p.decisionModel !== null) ||
       (p.policyVersion != null && p.policyVersion !== policy.version)) {
       cancelTicket(p?.ticket);
       update(s, { step: 'stopped', error: stale }); return;
@@ -232,11 +232,12 @@ export function boardAgentAskContent(el, view, flow, onClose) {
       policy ? text(`저장됨: ${policy.profileName} · 버전 ${policy.profileRevision}${policy.stale ? ' (다시 선택하고 저장해야 사용할 수 있음)' : ''}`, policy.stale ? 'warning' : 'copy') : null,
       view.message ? status(view.message) : null,
       !view.profiles.length ? status('선택할 수 있는 활성 Agent가 없습니다.') : null,
+      text('공개해도 되는 답변 지침만 직접 입력하세요. Agent의 비공개 지침은 사용하지 않습니다.'),
       el('div', { class: 'egd-review-form' }, el('label', { class: 'egd-portable-field' }, '고정할 Agent', select), ...inputs,
         el('label', { class: 'egd-portable-field' }, '공개 답변 지침 (선택, 초안에만 사용, UTF-8 1,200바이트)', instructions)),
       row(inputs.length < MAX_EXCERPTS ? button('add-excerpt', '발췌문 칸 추가', flow.addExcerpt) : null,
         policy ? button('revoke', '설정 해제', flow.revoke) : null, button('save', '설정 저장', flow.save, true)),
-      policy && !policy.stale ? text(policy.codeActive ? '사용 가능한 일회용 코드가 있습니다.' : '사용 가능한 질문 코드가 없습니다.') : null,
+      policy && !policy.stale ? text(policy.codeActive ? `사용 가능한 일회용 코드가 있습니다. 만료: ${new Date(policy.codeExpiresAt).toLocaleString('ko-KR')}` : '사용 가능한 질문 코드가 없습니다.') : null,
       policy && !policy.stale ? text('코드를 가진 사람은 누구든 질문을 한 번 제출할 수 있습니다. 신원은 확인하지 않습니다. 비용이 드는 API는 Board 소유자가 별도로 확인하고 실행할 때만 사용합니다. 코드를 다시 만들거나 설정을 저장·해제하면 기존 코드는 무효가 됩니다.') : null,
       policy && !policy.stale ? row(button('issue', policy.codeActive ? '기존 코드를 무효화하고 다시 만들기' : '일회용 질문 코드 만들기', flow.issue)) : null];
   } else if (step === 'issued') {
@@ -259,7 +260,7 @@ export function boardAgentAskContent(el, view, flow, onClose) {
       decision.checked = view.decisionEgress;
       content = [list(display('고정 Agent', `${policy.profileName} · 버전 ${policy.profileRevision}`)),
         mode('extract', '관련 공개 발췌문만 찾기 (이 기기에서 처리, 문장 생성 안 함)'),
-        draftAvailable(availability) ? mode('draft', `OpenAI로 초안 만들기 · ${availability.model}`) : text('OpenAI 초안: 전용 키 또는 모델이 설정되어 있지 않습니다.'),
+        draftAvailable(availability) ? mode('draft', `OpenAI로 초안 만들기 · ${availability.model}`) : text('OpenAI 초안: 이 Agent의 고정 버전에서 전용 API 경로를 사용할 수 없습니다.'),
         availability.decision ? el('label', { class: 'egd-portable-check' }, decision, '별도 Decisions API에 질문과 공개 발췌문을 보내 관련성을 판단하도록 허용') : null,
         row(button('prepare', '이 Board와 Agent로 실행 내용 확인', flow.prepare, true))];
     }
@@ -270,8 +271,8 @@ export function boardAgentAskContent(el, view, flow, onClose) {
         ...(p.excerpts.length ? p.excerpts.map((value, i) => display(`승인된 공개 발췌문 ${i + 1}`, value)) : [display('공개 발췌문', '없음')]),
         p.mode === 'draft' ? display('공개 답변 말투', styles[p.replyStyle]) : null,
         p.mode === 'draft' && p.publicInstructions ? display('공개 답변 지침', p.publicInstructions) : null),
-      p.mode === 'draft' ? text(`OpenAI의 ${p.draftModel} 모델이 표시된 질문·관련 공개 발췌문·공개 말투 및 지침을 봅니다. Board 운영 쪽의 전용 API 키로 비용을 부담하며, 개인 Chat·CLI와 구독 사용량을 쓰지 않습니다.`, 'warning') : text('관련 공개 발췌문을 원문 그대로 찾습니다. 새 답변 문장을 만들지 않습니다.'),
-      p.decisionEgress ? text(`관련성 판단을 위해 별도 Decisions API (${p.decisionModel})에 표시된 질문과 공개 발췌문 전부를 보냅니다. Board 운영 쪽의 Decisions API 설정을 사용합니다.`, 'warning') : text(p.mode === 'extract' ? '외부 API로 보내지 않습니다.' : '별도 Decisions API에는 보내지 않습니다.'),
+      p.mode === 'draft' ? text(`OpenAI의 ${p.draftModel} 모델이 표시된 질문·공개 발췌문 전부·공개 말투 및 지침을 봅니다. Board 운영 쪽의 전용 API 키로 비용을 부담하며, 개인 Chat·CLI와 구독 사용량을 쓰지 않습니다.`, 'warning') : text('관련 공개 발췌문을 원문 그대로 찾습니다. 새 답변 문장을 만들지 않습니다.'),
+      p.decisionEgress ? text(`관련성 판단을 위해 별도 OpenAI Decisions API (${p.decisionModel})에 표시된 질문과 공개 발췌문 전부를 보냅니다. Board 운영 쪽의 Decisions API 설정을 사용합니다.`, 'warning') : text(p.mode === 'extract' ? '외부 API로 보내지 않습니다.' : '별도 Decisions API에는 보내지 않습니다.'),
       text('실행해도 회신 파일을 만들거나 전달하지 않습니다. 결과를 회신 작성 창에서 확인하고 편집할 수 있습니다.'),
       step === 'running' ? status('한 번 실행 중… 닫으면 결과를 회신에 넣지 않습니다.') : row(button('back', '뒤로', flow.back), button('run', '이 내용으로 한 번 실행', flow.run, true))];
   } else if (step === 'done') content = [status(view.message)];

@@ -40,7 +40,7 @@ function harness({ policy = basePolicy, services = availability } = {}) {
         const decisionModel = body.decisionEgress ? 'fake-decision' : null;
         prepared = { ticket: 'test-ticket', expiresAt: 2000, mode: body.mode, decisionEgress: body.decisionEgress,
           profileName: policy.profileName, profileRevision: policy.profileRevision, model: draftModel ?? decisionModel,
-          provider: draft ? 'openai' : null, draftModel, decisionModel, question: body.request.question, excerpts: policy.excerpts,
+          provider: draft || decisionModel ? 'openai' : null, draftModel, decisionModel, question: body.request.question, excerpts: policy.excerpts,
           replyStyle: 'concise', publicInstructions: draft ? policy.publicInstructions : '', ...h.changed };
         return respond(prepared);
       }
