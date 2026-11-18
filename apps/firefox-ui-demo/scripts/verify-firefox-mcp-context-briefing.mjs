@@ -144,6 +144,7 @@ export async function contextQaJson(route, deadlineMs,
   const abort = () => controller.abort(signal.reason);
   if (signal?.aborted) abort(); else signal?.addEventListener('abort', abort, { once: true });
   const timer = setTimeout(() => controller.abort(new Error('Context HTTP deadline reached')), end - now());
+  let bodyRead = false;
   try {
     controller.signal.throwIfAborted();
     const response = await fetchImpl(qaBridgeUrl(route, env), { method, redirect: 'error', signal: controller.signal,
@@ -151,11 +152,17 @@ export async function contextQaJson(route, deadlineMs,
       ...(body ? { body: JSON.stringify(body) } : {}) });
     controller.signal.throwIfAborted(); assertBeforeDeadline(end, now());
     const value = await readContextBeforeDeadline(() => response.json(), end, { now, timeoutMs: 5000 });
+    bodyRead = true;
     controller.signal.throwIfAborted(); assertBeforeDeadline(end, now());
     if (includeHttpStatus) return { httpStatus: response.status, body: value };
     assert.ok(response.ok, `${route.split('?')[0]} failed (${response.status}): ${value.code || value.error || 'request failed'}`);
     return value;
-  } finally { clearTimeout(timer); signal?.removeEventListener('abort', abort); }
+  } finally {
+    // The read deadline can win before the HTTP timer or parent cancellation.
+    // Do not detach the last signal owner while an unfinished body is still reading.
+    if (!bodyRead && !controller.signal.aborted) controller.abort(new Error('Context HTTP observation stopped'));
+    clearTimeout(timer); signal?.removeEventListener('abort', abort);
+  }
 }
 
 export function guardContextHarness(harness, deadlineMs, { now = Date.now, diagnostics } = {}) {

@@ -89,8 +89,10 @@ test('CTX04 failure diagnostics retain bounded existing-read scalars and stack, 
   const diagnostics = {}, value = { observedAt: Date.now(), count: 1, visible: true, clipped: true, hits: 0,
     rect: { x: 2, y: 3, width: 40, height: 20 }, sourceText: 'PRIVATE_SOURCE', packetText: 'PRIVATE_PAYLOAD',
     sourceMetadata: 'PRIVATE_SOURCE_METADATA', scope: { roomId: 'room-A', owner: 'PRIVATE_OWNER', auth: 'PRIVATE_AUTH' }, token: 'PRIVATE_TOKEN' };
-  await assert.rejects(waitContextBeforeDeadline(async () => value, () => false, Date.now() + 25,
-    { diagnostics, label: 'initial-ready', selector: '[data-testid="target"]', phase: 'before-input' }), /did not arrive/);
+  // This checks the retained observation, not whether the OS schedules a poll within 25 ms.
+  let clock = 100;
+  await assert.rejects(waitContextBeforeDeadline(async () => value, () => { clock = 125; return false; }, 125,
+    { now: () => clock, diagnostics, label: 'initial-ready', selector: '[data-testid="target"]', phase: 'before-input' }), /did not arrive/);
   const failure = diagnostics.records[0];
   assert.equal(failure.status, 'failed'); assert.equal(failure.last.hits, 0); assert.equal(failure.last.clipped, true);
   assert.equal(failure.label, 'initial-ready'); assert.equal(failure.phase, 'before-input'); assert.match(failure.stack, /waitContextBeforeDeadline/);
@@ -121,8 +123,9 @@ test('CTX04 the same nine probes retain bounded top-hit identities and child hit
   assert.deepEqual(observation.hitSamples.slice(0, 6).map(point => point.hit.id), Array(6).fill('egd-preset-bag'));
   assert.deepEqual(observation.hitSamples.slice(6).map(point => [point.matched, point.hit.tag]), [[true, 'svg'], [true, 'svg'], [true, 'button']]);
   const diagnostics = {};
-  await assert.rejects(waitContextBeforeDeadline(async () => observation, value => value.hits === 9, Date.now() + 25,
-    { diagnostics, label: 'same-nine-probes' }), /did not arrive/);
+  let clock = 100;
+  await assert.rejects(waitContextBeforeDeadline(async () => observation, value => { clock = 125; return value.hits === 9; }, 125,
+    { now: () => clock, diagnostics, label: 'same-nine-probes' }), /did not arrive/);
   assert.deepEqual(diagnostics.records[0].last.hitSamples, observation.hitSamples);
   const oversized = summarizeContextObservation({ hitSamples: Array(30).fill({ x: 1, y: 2, matched: false,
     hit: { tag: 't'.repeat(100), id: 'i'.repeat(300), class: 'c'.repeat(500), textContent: 'PRIVATE', value: 'PRIVATE' }, text: 'PRIVATE' }) });
@@ -197,6 +200,15 @@ test('Comments failure state skips unowned/expired reads and masks failed or for
     assert.equal(result.error, original.message); assert.equal(result.failureState.status, 'failed'); assert.equal(calls, 1);
     assert.equal(signal.aborted, false); assert.equal(result.failureState.summary, undefined); assert.doesNotMatch(JSON.stringify(result), /PRIVATE|foreign/);
   }
+});
+
+test('CTX04 releases unfinished HTTP bodies even when the clock reaches its limit before a timer can fire', async () => {
+  let clock = 100; let received; let reads = 0;
+  await assert.rejects(contextQaJson('/__qa/state', 125, { env: ENV, now: () => clock,
+    fetchImpl: async (_url, { signal }) => { received = signal; clock = 125; return { ok: true, json: () => { reads++; } }; },
+  }), /deadline/);
+  assert.equal(reads, 0);
+  assert.equal(received.aborted, true);
 });
 
 test('Comments failure state aborts hung HTTP/body within remaining budget and discards every late result', { timeout: 10000 }, async () => {
