@@ -729,6 +729,7 @@
       boardMove: null,
       localHistoryStatus: 'idle',
       localHistoryError: null,
+      boardMemberHistoryPartialRooms: new Set(),
       localHistoryBootReady: false,
       legacyChatBackupKey: null,
       legacyChatBackupRequired: false,
@@ -13385,6 +13386,9 @@
         if (codex.localHistoryStatus === 'error' && codex.localHistoryError && !connectionNotice) conversation.appendChild(el('p', {
           class: 'egd-codex-error', role: 'status', data: { testid: 'chat-local-history-error' },
         }, codex.localHistoryError)); // A74: while the connection line is up it holds this under '자세히'.
+        if (codex.boardMemberHistoryPartialRooms?.has(activeThread.id)) conversation.appendChild(el('p', {
+          class: 'egd-codex-run-status', role: 'status', data: { testid: 'chat-board-member-history-partial' },
+        }, '이 방의 멤버 답변 기록을 모두 불러오지 못했습니다. 표시된 대화는 유지됩니다.'));
         const bindingHeld = ChatState.nativeBindingHeld(activeThread);
         if (bindingHeld) conversation.appendChild(el('div', {
           class: 'egd-codex-error', role: 'status', data: { testid: 'chat-binding-held', bindingState: activeThread.bindingState },
@@ -13489,7 +13493,7 @@
         if (editedDraftNotice?.current()) conversation.appendChild(el('div', {
           class: 'egd-codex-error egd-codex-send-notice', role: 'status', data: { testid: 'chat-edited-draft-notice' },
         }, '입력이 바뀌어 확인 중이던 요청은 보내지 않았습니다. 내용을 확인한 뒤 직접 다시 보내세요.'));
-        const noticeIds = new Set(['chat-edited-draft-notice', 'chat-local-history-coverage', 'chat-local-history-error', 'chat-binding-held',
+        const noticeIds = new Set(['chat-edited-draft-notice', 'chat-local-history-coverage', 'chat-local-history-error', 'chat-board-member-history-partial', 'chat-binding-held',
           'chat-agent-unavailable', 'chat-run-rate-limit', 'chat-run-error', 'chat-reconcile', 'chat-send-notice', 'chat-memo-send-blocked']);
         const notices = Array.from(conversation.children).filter(node => noticeIds.has(node.dataset.testid));
         if (notices.length) {
@@ -14708,7 +14712,10 @@
         BoardThread.noteBoardRun(run, boardOf(row), { member: true });
         syncProtocolRun(run);
       }
-      for (const early of boardEarlyEvents.release(requestId)) handleEvent(early);
+      for (const early of boardEarlyEvents.release(requestId)) {
+        try { handleEvent(early); }
+        catch (error) { console.warn(TAG, 'board member early event dispatch failed', error); }
+      }
       if (outcome.lead) {
         BoardThread.noteBoardRun(ChatState.acceptChatRequest(protocol, outcome.lead, requestId), boardOf(recipients.find(row => row.requestId === requestId)));
         return outcome.lead;
@@ -14812,24 +14819,29 @@
     // its own. Its stored answers come back into the room that asked it (the room's
     // 'board.routed' lines name it), read from the local store only.
     const boardMemberRooms = new Map();
+    const BOARD_MEMBER_HISTORY_MAX_PAGES = 20;
+    // Return the owning room ID if its member scan did not reach the last page.
     async function restoreBoardMemberAnswers(summary) {
       const member = boardMemberRooms.get(summary.clientThreadId);
-      if (!member || !getCodexThreadById(state.codex, member.roomId)) return;
+      if (!member || !getCodexThreadById(state.codex, member.roomId)) return null;
       const messages = [];
+      let complete = false;
       try {
-        for (let afterSeq = 0, pages = 0; pages < 20; pages++) {
+        for (let afterSeq = 0, pages = 0; pages < BOARD_MEMBER_HISTORY_MAX_PAGES; pages++) {
           const page = await fetchJson(`/chat/history?clientThreadId=${encodeURIComponent(summary.clientThreadId)}&afterSeq=${encodeURIComponent(afterSeq)}&limit=100`);
-          const normalized = ChatState.normalizeLocalHistoryPage({ ...page, thread: { ...summary, ...(page.thread || {}) } }, summary.clientThreadId);
-          if (!normalized) break;
+          const normalized = ChatState.normalizeLocalHistoryPage(page, summary.clientThreadId);
+          if (!normalized || normalized.localConversationId !== summary.localConversationId) return member.roomId;
           messages.push(...normalized.messages);
+          if (!normalized.hasMore) { complete = true; break; }
           const next = Number(normalized.nextCursor);
-          if (!normalized.hasMore || !Number.isSafeInteger(next) || next <= afterSeq) break;
+          if (!Number.isSafeInteger(next) || next <= afterSeq) break;
           afterSeq = next;
         }
-      } catch { return; } // The room keeps what it shows; the next load reads again.
+      } catch { return member.roomId; } // The room keeps what it shows; the next load reads again.
       updateThreadById(member.roomId, room => ({ ...room,
         messages: BoardThread.foldBoardMemberAnswers(room, messages, member, { profiles: codexProfileCatalog.profiles }) }));
       emit();
+      return complete ? null : member.roomId;
     }
     async function loadLocalHistoryThread(summary) {
       const clientThreadId = summary.clientThreadId;
@@ -14928,7 +14940,12 @@
           }
           stage = 'history';
           for (const summary of summaries) if (!BoardThread.isBoardMemberThreadId(summary.clientThreadId)) await loadLocalHistoryThread(summary);
-          for (const summary of summaries) if (BoardThread.isBoardMemberThreadId(summary.clientThreadId)) await restoreBoardMemberAnswers(summary);
+          const partialRooms = new Set();
+          for (const summary of summaries) if (BoardThread.isBoardMemberThreadId(summary.clientThreadId)) {
+            const partialRoom = await restoreBoardMemberAnswers(summary);
+            if (partialRoom) partialRooms.add(partialRoom);
+          }
+          state.codex.boardMemberHistoryPartialRooms = partialRooms;
           const backupFailed = state.codex.legacyChatBackupRequired && !state.codex.legacyChatBackupKey;
           state.codex.localHistoryStatus = backupFailed ? 'error' : 'ready';
           state.codex.localHistoryError = backupFailed ? '기존 채팅 기록의 백업을 확인하지 못했습니다. 원본 저장값은 유지됩니다.' : null;

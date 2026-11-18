@@ -32,7 +32,7 @@ The request carries the room's members (`members`, same shape as the store), the
 
 ## Known limits
 
-- A member's events that arrive before the send's HTTP answer are not admitted (its request is not known yet); the run shows as 작업 중 from the answer and settles on later events.
-- After a restart, other members' answers are in their own conversations' history, not the room's (the room keeps the bridge's `board.routed` line).
+- Early member events are buffered per pending Board send (up to 64 for 15 seconds) and replayed in arrival order once the runs are registered. A handler failure is logged; that event is not retried, and it does not stop later events.
+- After a restart, the room's `board.routed` lines identify member conversations whose completed answers are folded back into the room. Each member scan reads at most 20 pages of 100 events per load. If it cannot reach the last page, only the owning room shows a partial-history notice; the scan does not fetch additional pages on its own.
 - While any member's run is busy the room's composer waits (same busy rule as a single run).
 - Not checked with a live Codex account or in Firefox.
