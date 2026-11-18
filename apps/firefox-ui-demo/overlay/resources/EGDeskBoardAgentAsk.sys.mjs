@@ -34,10 +34,10 @@ export function createBoardAgentAsk({ post, loadProfiles, isCurrent, onState, on
     s.view = { ...s.view, ...delta };
     onState(s.view);
   }
-  async function call(path, body) {
+  async function call(path, body, reportCode = false) {
     try {
       const response = await post(`${route}${path}`, body);
-      return response?.status >= 200 && response.status < 300 ? response.body : null;
+      return response?.status >= 200 && response.status < 300 ? response.body : reportCode ? { errorCode: response?.body?.code } : null;
     } catch { return null; }
   }
   const cancelTicket = ticket => { if (isText(ticket)) void call('cancel', { ticket }); };
@@ -154,8 +154,11 @@ export function createBoardAgentAsk({ post, loadProfiles, isCurrent, onState, on
     update(s, { step: 'preparing', error: null });
     // Do not abort the prepare response: a ticket that arrives after Escape
     // or a Board change still needs best-effort cancellation, never a run.
-    const p = await call('prepare', { boardId: s.binding.board.id, request: s.binding.review, mode, decisionEgress });
+    const p = await call('prepare', { boardId: s.binding.board.id, request: s.binding.review, mode, decisionEgress }, true);
     if (!forStep(s, 'preparing')) { cancelTicket(p?.ticket); return; }
+    if (p?.errorCode === 'BOARD_AGENT_ASK_CODE_INVALID' || p?.errorCode === 'BOARD_AGENT_ASK_CODE_REQUIRED') {
+      update(s, { step: 'stopped', error: '이 Board에서 쓸 수 없는 질문 코드입니다. 이미 사용했거나 만료되었을 수 있습니다. 직접 회신은 계속 쓸 수 있습니다.' }); return;
+    }
     const expiry = toDate(p?.expiresAt);
     if (!isText(p?.ticket) || !Number.isFinite(expiry) || expiry <= now() || p.mode !== mode || p.decisionEgress !== decisionEgress ||
       p.question !== s.binding.review.question || p.profileName !== policy.profileName || p.profileRevision !== policy.profileRevision ||
@@ -271,7 +274,7 @@ export function boardAgentAskContent(el, view, flow, onClose) {
         ...(p.excerpts.length ? p.excerpts.map((value, i) => display(`승인된 공개 발췌문 ${i + 1}`, value)) : [display('공개 발췌문', '없음')]),
         p.mode === 'draft' ? display('공개 답변 말투', styles[p.replyStyle]) : null,
         p.mode === 'draft' && p.publicInstructions ? display('공개 답변 지침', p.publicInstructions) : null),
-      p.mode === 'draft' ? text(`OpenAI의 ${p.draftModel} 모델이 표시된 질문·공개 발췌문 전부·공개 말투 및 지침을 봅니다. Board 운영 쪽의 전용 API 키로 비용을 부담하며, 개인 Chat·CLI와 구독 사용량을 쓰지 않습니다.`, 'warning') : text('관련 공개 발췌문을 원문 그대로 찾습니다. 새 답변 문장을 만들지 않습니다.'),
+      p.mode === 'draft' ? text(`OpenAI의 ${p.draftModel} 모델이 표시된 질문·공개 말투와 지침·표시된 공개 발췌문 중 관련 항목만 봅니다. Board 운영 쪽의 전용 API 키로 비용을 부담하며, 개인 Chat·CLI와 구독 사용량을 쓰지 않습니다.`, 'warning') : text('관련 공개 발췌문을 원문 그대로 찾습니다. 새 답변 문장을 만들지 않습니다.'),
       p.decisionEgress ? text(`관련성 판단을 위해 별도 OpenAI Decisions API (${p.decisionModel})에 표시된 질문과 공개 발췌문 전부를 보냅니다. Board 운영 쪽의 Decisions API 설정을 사용합니다.`, 'warning') : text(p.mode === 'extract' ? '외부 API로 보내지 않습니다.' : '별도 Decisions API에는 보내지 않습니다.'),
       text('실행해도 회신 파일을 만들거나 전달하지 않습니다. 결과를 회신 작성 창에서 확인하고 편집할 수 있습니다.'),
       step === 'running' ? status('한 번 실행 중… 닫으면 결과를 회신에 넣지 않습니다.') : row(button('back', '뒤로', flow.back), button('run', '이 내용으로 한 번 실행', flow.run, true))];
