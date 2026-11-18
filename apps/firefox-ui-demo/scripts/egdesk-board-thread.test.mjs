@@ -306,6 +306,70 @@ test('CHAT-10 (b): after a restart the other members\' stored answers come back 
     ['u1', 'mv', 'a1'], 'read twice, shown once');
 });
 
+test('two addressed Board members keep separate authors through live replies and repeated history loads', () => {
+  const requested = room({ messages: [{ id: 'question', role: 'user', content: '@디자이너 @검증 담당 확인' }] });
+  const { recipients } = BoardThread.boardDeliveryIntent(requested, requested.messages[0].content);
+  assert.deepEqual(recipients.map(r => r.profileId), [ID_D, ID_V]);
+  const members = recipients.map(({ profileId, label }) => ({ profileId, label, reason: 'mentioned',
+    requestId: `request~${profileId}`, clientThreadId: `board-member:${profileId}`, conversationId: `conversation-${profileId}`, runId: `run-${profileId}` }));
+  const sharedText = '확인했습니다', itemId = 'item-1'; // Provider item IDs are scoped to a turn; identical text is not an identity either.
+  for (const order of [members, [...members].reverse()]) {
+    let thread = { ...requested }, seq = 0;
+    const state = ChatState.createChatProtocolState();
+    for (const member of members) {
+      ChatState.registerChatRequest(state, BoardThread.boardMemberRequest(member, thread), { isLoggedIn: true });
+      const run = ChatState.acceptChatRequest(state, { accepted: true, ...member }, member.requestId);
+      BoardThread.noteBoardRun(run, member, { member: true });
+      assert.equal(run.localThreadId, thread.id);
+    }
+    const checkAuthors = () => {
+      const answers = thread.messages.filter(m => m.role === 'assistant');
+      assert.equal(answers.length, 2);
+      for (const member of members) {
+        const answer = answers.find(m => m.conversationId === member.conversationId && m.runId === member.runId);
+        assert.deepEqual([answer?.authorName, answer?.content, answer?.localMessageId], [member.label, sharedText, `stored-${member.profileId}`]);
+      }
+      assert.equal(thread.messages.filter(m => m.role === 'user').length, 1);
+    };
+    for (const event of ['message.delta', 'message.completed']) for (const member of order) {
+      const { conversationId, runId, requestId, clientThreadId, profileId } = member;
+      const run = ChatState.reduceChatEvent(state, { type: 'chat.event', v: 2, provider: 'codex', engineId: 'codex', streamId: 'fixture',
+        seq: ++seq, ts: seq, event, requestId, clientThreadId, conversationId, runId, localRunId: `local-${profileId}`,
+        localMessageId: `stored-${profileId}`, itemId, details: event === 'message.delta' ? { messageId: itemId, delta: '확인' } : { messageId: itemId, text: sharedText } });
+      assert.ok(run);
+      thread = { ...thread, messages: ChatState.projectRunMessages(thread.messages, run) };
+    }
+    checkAuthors();
+    for (let load = 0; load < 2; load++) {
+      for (const member of [...order].reverse()) {
+        const id = `stored-${member.profileId}`;
+        const history = [{ id, localMessageId: id, providerItemId: itemId, role: 'assistant', status: 'complete', content: sharedText,
+          conversationId: member.conversationId, runId: member.runId, localSeq: 1, createdAt: 5 }];
+        thread = { ...thread, messages: BoardThread.foldBoardMemberAnswers(thread, history, member) };
+      }
+      checkAuthors();
+    }
+  }
+});
+
+test('restoring a Board member preserves each completed item in a run and skips only the same stored item', () => {
+  const member = { profileId: ID_V, label: '검증 담당' };
+  const history = ['checking', 'final'].map((item, i) => ({ id: `local-${item}`, localMessageId: `local-${item}`,
+    providerItemId: item, role: 'assistant', phase: i ? 'final_answer' : 'commentary', status: 'complete', content: i ? '최종 답변' : '먼저 확인한 내용',
+    runId: 'one-run', conversationId: 'member-conversation', localSeq: i + 1, createdAt: i + 1 }));
+  const restore = (thread, page) => ({ ...thread, messages: BoardThread.foldBoardMemberAnswers(thread, page, member) });
+  const legacy = history.map(({ localMessageId, ...record }) => record);
+  let legacyRoom = restore(room(), legacy);
+  legacyRoom = restore(legacyRoom, legacy);
+  assert.deepEqual(legacyRoom.messages.map(m => m.providerItemId), ['checking', 'final'], 'distinct known provider items in a legacy run');
+  for (const order of [history, [...history].reverse()]) {
+    let thread = restore(room(), order);
+    thread = restore(thread, history); // overlapping pages or a second open must not repeat either row
+    assert.deepEqual(thread.messages.map(m => [m.localMessageId, m.content, m.boardMemberProfileId]),
+      [['local-checking', '먼저 확인한 내용', ID_V], ['local-final', '최종 답변', ID_V]]);
+  }
+});
+
 test('CHAT-10 robustness wiring: early events held and replayed, member conversations folded into their room, never shown as rooms', () => {
   assert.match(surfaceScript, /if \(!ChatState\.canAdmitChatEvent\(protocol, state\.codex\.threads, event\)\) \{ boardEarlyEvents\.hold\(event\); return; \}/);
   assert.match(surfaceScript, /if \(boardPlan\) boardEarlyEvents\.open\(requestId\);/);

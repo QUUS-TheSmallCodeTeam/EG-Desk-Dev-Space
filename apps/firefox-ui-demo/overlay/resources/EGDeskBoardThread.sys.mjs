@@ -493,8 +493,17 @@ export function boardRoutedMembers(events) {
 }
 
 const timeOf = value => (typeof value === 'number' ? value : typeof value === 'string' ? Date.parse(value) : NaN);
-const sameMessage = (a, b) => [['localMessageId', 'localMessageId'], ['id', 'id']].some(([x, y]) => a[x] && a[x] === b[y])
-  || !!(a.runId && a.runId === b.runId && a.role === b.role && a.boardMemberProfileId && a.boardMemberProfileId === b.boardMemberProfileId);
+const MESSAGE_IDENTITY_FIELDS = ['providerItemId', 'runId', 'conversationId', 'boardMemberProfileId'];
+function sameMessage(a, b) {
+  // A single member turn can persist both commentary and a final answer. Once both
+  // records identify their stored item, a shared run must not override that identity.
+  if (a.localMessageId && b.localMessageId) return a.localMessageId === b.localMessageId;
+  // Legacy rows may lack a store ID. Do not infer equality across known different
+  // items, runs, member conversations or authors (provider item IDs are not global).
+  if (MESSAGE_IDENTITY_FIELDS.some(key => a[key] && b[key] && a[key] !== b[key])) return false;
+  if (a.id && a.id === b.id) return true;
+  return !!(a.runId && a.runId === b.runId && a.role === b.role && a.boardMemberProfileId && a.boardMemberProfileId === b.boardMemberProfileId);
+}
 
 /**
  * The room's messages with one member's stored answers folded in: only that
@@ -511,7 +520,7 @@ export function foldBoardMemberAnswers(roomThread, memberMessages, member, { pro
     const { localSeq: _seq, ...rest } = stored;
     const answer = { ...rest, authorName: who.authorName, ...(who.authorAvatar ? { authorAvatar: who.authorAvatar } : {}),
       boardMemberProfileId: member.profileId, localHistory: true };
-    if (messages.some(message => sameMessage(answer, message) || sameMessage(message, answer))) continue;
+    if (messages.some(message => sameMessage(answer, message))) continue;
     const at = timeOf(answer.createdAt);
     let index = messages.length;
     if (Number.isFinite(at)) { const after = messages.findIndex(message => timeOf(message.createdAt) > at); if (after >= 0) index = after; }
