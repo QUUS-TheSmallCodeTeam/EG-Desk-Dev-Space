@@ -11,7 +11,7 @@ import { publicText } from './codex-chat-values.mjs'
 // which the person runs in a Terminal card (the official CLI login).
 const ROUTE = '/settings/engine-profiles'
 
-export function createEngineProfilesHttpHandler({ profiles, busy = () => false, inUse = () => false, onChange = () => {}, port = 39218 } = {}) {
+export function createEngineProfilesHttpHandler({ profiles, busy = () => false, inUse = () => false, refresh = null, onChange = () => {}, port = 39218 } = {}) {
   const store = () => (typeof profiles === 'function' ? profiles() : profiles)
   const list = () => ({ profiles: store().list(), persisted: store().writable === true })
   const changed = () => { try { onChange() } catch {} }
@@ -27,8 +27,8 @@ export function createEngineProfilesHttpHandler({ profiles, busy = () => false, 
         const body = await readJsonBody(req, { maxBytes: 2048 })
         const profile = store().add({ engine: body.engine, label: body.label })
         changed()
-        const login = store().loginCommand(profile.id)
-        sendJson(res, 200, { profile, login: { line: login.line, env: login.env }, ...list() })
+        const login = profile.runnable ? store().loginCommand(profile.id) : null
+        sendJson(res, 200, { profile, login: login && { line: login.line, env: login.env, engine: login.engine, profileId: login.profileId }, ...list() })
         return true
       }
       if (url.pathname === ROUTE && req.method === 'DELETE') {
@@ -42,6 +42,16 @@ export function createEngineProfilesHttpHandler({ profiles, busy = () => false, 
         store().setActive(body.engine, body.id, { busy })
         changed()
         sendJson(res, 200, list())
+        return true
+      }
+      if (url.pathname === `${ROUTE}/refresh` && req.method === 'POST' && refresh) {
+        const { id } = await readJsonBody(req, { maxBytes: 1024 })
+        const profile = store().get(id)
+        if (!profile?.owned || profile.engine !== 'codex' || !profile.runnable) {
+          sendJson(res, 404, { code: 'ENGINE_PROFILE_NOT_FOUND', error: 'Unknown or unavailable Codex profile' })
+          return true
+        }
+        sendJson(res, 200, { engine: await refresh(id) })
         return true
       }
       if (url.pathname === `${ROUTE}/login-command` && req.method === 'GET') {

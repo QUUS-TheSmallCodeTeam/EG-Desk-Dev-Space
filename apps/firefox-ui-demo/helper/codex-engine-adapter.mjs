@@ -3,10 +3,11 @@
 // pass-through: the same native method, the same params object and the same
 // call order the runtime used before adapters existed. Calls are not wrapped
 // in async functions, so a synchronous failure stays synchronous.
+import { publicAuthIdentityKey } from './codex-auth-state.mjs'
 import { chatError } from './codex-chat-values.mjs'
 
 export const CODEX_ENGINE_ID = 'codex'
-// The one shared login (CODEX_HOME) the bridge uses today (SUB-11).
+// The shared login remains the default; owned profiles are explicit routes.
 export const CODEX_ENGINE_PROFILE_ID = 'codex-default'
 export const CODEX_CAPABILITIES = Object.freeze([
   'stream', 'resume', 'nativeHistory', 'interrupt', 'approvals.command', 'approvals.fileChange',
@@ -24,14 +25,11 @@ const VERSION_STATUSES = new Set(['supported', 'untested', 'unsupported'])
  * model/list catalog (codex-model-catalog.mjs) or null when unknown. No token,
  * credential location or executable path is read or returned.
  */
-export function describeCodexEngine({ ready = false, starting = false, blocked = false, version = null, versionSupported = null, versionStatus = null, installed = null, auth = null, usage = null, residentProcesses = 0, models = null, extraProfiles = [] } = {}) {
+export function describeCodexEngine({ ready = false, starting = false, blocked = false, version = null, versionSupported = null, versionStatus = null, installed = null, auth = null, usage = null, residentProcesses = 0, models = null, extraProfiles = [], residentLimit = 1 } = {}) {
   const signedIn = auth?.isLoggedIn === true
-  // SUB-11: Codex is one shared app-server (one CODEX_HOME). Added ChatGPT
-  // profiles are listed as 'notYet' and never active until a per-profile
-  // app-server exists.
   const added = (Array.isArray(extraProfiles) ? extraProfiles : []).filter(row => row && row.id !== CODEX_ENGINE_PROFILE_ID).map(row => ({
-    id: row.id, label: typeof row.label === 'string' ? row.label : null, credentialStore: 'egdesk-owned', active: false, owned: true, status: 'notYet',
-    auth: { status: 'unknown' }, usage: null,
+    id: row.id, label: typeof row.label === 'string' ? row.label : null, credentialStore: 'egdesk-owned', active: false, owned: true,
+    status: row.runnable === true ? 'available' : 'notYet', auth: profileAuth(row.auth), usage: null, models: row.models ?? null,
   }))
   return {
     id: CODEX_ENGINE_ID, label: 'Codex',
@@ -45,16 +43,21 @@ export function describeCodexEngine({ ready = false, starting = false, blocked =
     capabilities: [...CODEX_CAPABILITIES],
     profiles: [{
       id: CODEX_ENGINE_PROFILE_ID, label: 'ChatGPT', credentialStore: 'shared-user-default', active: true, owned: false, status: 'available',
-      auth: {
-        status: signedIn ? 'signedIn' : auth?.loginInProgress === true ? 'signingIn' : auth ? 'signedOut' : 'unknown',
-        method: AUTH_METHODS[auth?.authMode] || null,
-        account: signedIn && typeof auth.accountEmail === 'string' ? auth.accountEmail : null,
-        planType: signedIn && typeof auth.planType === 'string' ? auth.planType : null,
-      },
+      auth: profileAuth(auth),
       usage: usage ?? null,
     }, ...added],
-    runtime: { residentProcesses: Number.isSafeInteger(residentProcesses) && residentProcesses > 0 ? residentProcesses : 0, residentLimit: 1, idleTimeoutMs: null },
+    runtime: { residentProcesses: Number.isSafeInteger(residentProcesses) && residentProcesses > 0 ? residentProcesses : 0, residentLimit, idleTimeoutMs: null },
     models: Array.isArray(models) ? models : null,
+  }
+}
+
+function profileAuth(auth) {
+  const signedIn = auth?.isLoggedIn === true
+  return {
+    status: signedIn ? 'signedIn' : auth?.loginInProgress === true ? 'signingIn' : auth ? 'signedOut' : 'unknown',
+    method: AUTH_METHODS[auth?.authMode] || null,
+    account: signedIn && typeof auth.accountEmail === 'string' ? auth.accountEmail : null,
+    planType: signedIn && typeof auth.planType === 'string' ? auth.planType : null,
   }
 }
 
@@ -122,40 +125,58 @@ export function isStaleLoginFailure(params, currentLoginId) {
   return params?.success !== true && typeof params?.loginId === 'string' && params.loginId !== currentLoginId
 }
 
-export function createCodexEngineAdapter({ request, respond, getOwnerKey = () => null, isReady = () => true, describe = null, refresh = null, getModels = () => null } = {}) {
+export function createCodexEngineAdapter({ request, respond, getOwnerKey = () => null, isReady = () => true,
+  describe = null, refresh = null, getModels = () => null, profiles = null } = {}) {
   const sinks = new Set()
-  const deliver = (kind, value) => { for (const sink of [...sinks]) sink[kind]?.(CODEX_ENGINE_ID, value) }
-  const models = () => { try { const list = getModels(); return Array.isArray(list) ? list : null } catch { return null } }
+  const deliver = (kind, value, profileId) => {
+    for (const sink of [...sinks]) {
+      if (profileId === undefined) sink[kind]?.(CODEX_ENGINE_ID, value)
+      else sink[kind]?.(CODEX_ENGINE_ID, value, profileId)
+    }
+  }
+  const shared = id => id == null || id === CODEX_ENGINE_PROFILE_ID
+  const unavailable = () => chatError('ENGINE_PROFILE_NOT_FOUND', 'Unknown or unavailable Codex profile', 404)
+  const scoped = () => { if (!profiles) throw unavailable(); return profiles }
+  const call = (method, params, id) => shared(id) ? request(method, params) : scoped().request(id, method, params)
+  const ready = id => shared(id) ? isReady() === true : profiles?.snapshot(id)?.auth?.isLoggedIn === true
+  const models = id => {
+    try { const list = shared(id) ? getModels() : profiles?.snapshot(id)?.models; return Array.isArray(list) ? list : null }
+    catch { return null }
+  }
+  const summary = () => describe ? describe() : describeCodexEngine({ ready: ready(), models: models() })
   return {
     id: CODEX_ENGINE_ID,
-    describe: () => describe ? describe() : describeCodexEngine({ ready: isReady(), models: models() }),
-    refresh: async () => refresh ? refresh() : (describe ? describe() : describeCodexEngine({ ready: isReady(), models: models() })),
-    // Optional ('modelSelect.perTurn'): the models a turn may name, or null
-    // when unknown; the runtime checks a requested model and effort against it.
+    describe: summary,
+    refresh: async id => {
+      if (!shared(id)) { await scoped().refresh(id, { restartSignedOut: true }); return summary() }
+      return refresh ? refresh() : summary()
+    },
+    ...(profiles ? { ensureReady: id => shared(id) ? Promise.resolve() : profiles.ensureReady(id) } : {}),
     models,
     capabilities: () => new Set(CODEX_CAPABILITIES),
-    // One shared login today, so every engine profile names the same account.
-    ownerKey: () => getOwnerKey(),
-    isReady: () => isReady() === true,
-    startThread: params => request('thread/start', params),
-    resumeThread: params => request('thread/resume', params),
-    releaseThread: threadId => request('thread/unsubscribe', { threadId }),
-    startTurn: params => request('turn/start', params),
-    interruptTurn: (threadId, turnId) => request('turn/interrupt', { threadId, turnId }),
-    forkThread: params => request('thread/fork', params),
-    // Arity is preserved: callers distinguish a result from a JSON-RPC error.
-    respond: (id, result, error) => error === undefined ? respond(id, result) : respond(id, result, error),
-    // Codex-only escape hatch: config/read, bounded-QA proofs and the
-    // Context Reader keep talking to app-server directly.
-    request: (method, params) => request(method, params),
+    ownerKey: id => shared(id) ? getOwnerKey() : publicAuthIdentityKey(profiles?.snapshot(id)?.auth),
+    isReady: ready,
+    startThread: (params, id) => call('thread/start', params, id),
+    resumeThread: (params, id) => call('thread/resume', params, id),
+    releaseThread: (threadId, id) => call('thread/unsubscribe', { threadId }, id),
+    startTurn: (params, id) => call('turn/start', params, id),
+    interruptTurn: (threadId, turnId, id) => call('turn/interrupt', { threadId, turnId }, id),
+    forkThread: (params, id) => call('thread/fork', params, id),
+    // Preserve legacy shared-RPC response arity and reject old scoped ids even
+    // if accidentally called without a profile.
+    respond: (rpcId, result, error, id) => {
+      if (!shared(id)) return scoped().respond(id, rpcId, result, error)
+      if (typeof rpcId === 'string' && rpcId.startsWith('codex-profile:')) throw unavailable()
+      return error === undefined ? respond(rpcId, result) : respond(rpcId, result, error)
+    },
+    request: call,
     subscribe(sink) {
       sinks.add(sink)
       return () => { sinks.delete(sink) }
     },
-    // The bridge feeds app-server traffic in; subscribers receive it tagged.
-    notify: message => deliver('notification', message),
-    serverRequest: message => deliver('serverRequest', message),
-    connection: state => deliver('connection', { ready: state?.ready === true, ...(state?.processLost ? { processLost: true } : {}) }),
-    dispose: async () => { sinks.clear() },
+    notify: (message, id) => deliver('notification', message, id),
+    serverRequest: (message, id) => deliver('serverRequest', message, id),
+    connection: (state, id) => deliver('connection', { ready: state?.ready === true, ...(state?.processLost ? { processLost: true } : {}) }, id),
+    dispose: async () => { await profiles?.dispose(); sinks.clear() },
   }
 }

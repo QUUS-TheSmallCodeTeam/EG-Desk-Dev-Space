@@ -362,3 +362,32 @@ test('SUB-11 profile login types the line into a terminal', async () => {
   assert.equal(result.phase, 'started');
   assert.deepEqual(written, [`${line}\r`]);
 });
+
+test('available owned Codex profiles display their own auth and never globally activate', () => {
+  const codex = View.engineProfilesView([{ id: 'codex', profiles: [
+    { id: 'codex-default', active: true, auth: { status: 'signedOut' } },
+    { id: 'codex-12345678', owned: true, status: 'available', auth: { status: 'signedIn' } },
+    { id: 'codex-87654321', owned: true, status: 'notYet' },
+  ] }], 'codex', { connected: true });
+  assert.deepEqual(codex.rows.map(r => [r.authText, r.canActivate, r.canLogin]), [
+    ['사용 중 · 로그인 필요', false, false], ['로그인됨', false, true], ['준비 중', false, false],
+  ]);
+});
+
+test('isolated Codex terminal allowlist verifies slot metadata and the command home', async () => {
+  const profileId = 'codex-12345678', engineId = 'codex';
+  const line = `env -i HOME="$HOME" PATH="$PATH" CODEX_HOME='/tmp/settings/engines/${profileId}' codex -c cli_auth_credentials_store=file login`;
+  const command = { line, env: 'CODEX_HOME', engine: engineId, profileId };
+  const expected = { engineId, profileId };
+  assert.equal(View.engineProfileLoginLine(command, expected), line);
+  assert.equal(View.engineProfileLoginLine(command), null);
+  for (const wrong of [
+    { ...command, profileId: 'codex-87654321' }, { ...command, line: line.replace(profileId, 'codex-87654321') },
+    { ...command, line: 'codex login' }, { ...command, line: `${line}; echo wrong` }, { ...command, line: `${line}\n` },
+  ]) assert.equal(View.engineProfileLoginLine(wrong, expected), null);
+  const written = [];
+  const result = await View.runEngineProfileLoginInTerminal({ ...expected, requestCommand: async () => command,
+    openTerminal: () => ({}), terminalApi: () => ({ isConnected: () => true, write: async value => { written.push(value); } }) });
+  assert.equal(result.phase, 'started');
+  assert.deepEqual(written, [`${line}\r`]);
+});

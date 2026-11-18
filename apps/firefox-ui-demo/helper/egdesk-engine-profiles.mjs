@@ -13,9 +13,8 @@ import { isOwnedAndPrivate } from './egdesk-private-files.mjs'
 //   <dataDir>/engines/<id> (0700). The official CLI logs in there
 //   (CLAUDE_CONFIG_DIR=… claude auth login / CODEX_HOME=… codex login);
 //   EG-Desk never reads the credential inside.
-// - Claude can run an added profile (CLAUDE_CONFIG_DIR per spawned process).
-//   Codex is one shared app-server process today, so an added Codex profile
-//   is kept and shown as 'notYet' (runnable: false) and cannot be made active.
+// - Owned Codex profiles use isolated stdio app-servers when dispatch is wired.
+//   They can be selected per Agent, never set as the global Codex login.
 // - A damaged file is set aside (engine-profiles.json.corrupt-<time>-<id>) and
 //   the defaults apply; a newer version is left untouched and not overwritten.
 // - Writes are atomic (private temp file, fsync, rename), mode 0600.
@@ -108,7 +107,7 @@ const shellQuote = value => `'${String(value).replace(/'/g, `'\\''`)}'`
  *   ('notYet') and any change while busy() (a running Run never moves).
  * store.loginCommand(id, method?) → { line, env, configDir }
  */
-export function openEngineProfiles({ dataDir, log = defaultLog, now = Date.now, randomId = () => randomBytes(6).toString('hex') } = {}) {
+export function openEngineProfiles({ dataDir, log = defaultLog, now = Date.now, randomId = () => randomBytes(6).toString('hex'), isolatedCodex = false } = {}) {
   const say = message => { try { log(message) } catch {} }
   let status = 'unavailable', writable = false, dir = null, file = null, enginesDir = null
   let profiles = [], active = {}
@@ -174,17 +173,36 @@ export function openEngineProfiles({ dataDir, log = defaultLog, now = Date.now, 
   const engineOf = id => (isDefault(id) ? id.split('-')[0] : find(id)?.engine ?? null)
   const activeId = engine => (engine === 'claude' && active.claude && find(active.claude) ? active.claude : DEFAULT_ENGINE_PROFILE_IDS[engine])
 
+  function assertPrivateDir(target) {
+    const stat = lstatSync(target)
+    if (!stat.isDirectory() || stat.isSymbolicLink() || realpathSync.native(target) !== target || !isOwnedAndPrivate(target, stat, 0o077)) {
+      throw Object.assign(new Error('not private'), { code: 'NOT_PRIVATE' })
+    }
+    return stat
+  }
+
+  function ownedCodexHome(id) {
+    if (!isolatedCodex || find(id)?.engine !== 'codex') throw profileError('ENGINE_PROFILE_NOT_FOUND', 'Unknown or unavailable Codex profile', 404)
+    const home = ownedDir(id)
+    try {
+      assertPrivateDir(enginesDir)
+      const stat = assertPrivateDir(home)
+      return { home, identity: `${stat.dev}:${stat.ino}` }
+    } catch { throw profileError('ENGINE_PROFILE_HOME_UNAVAILABLE', 'The private Codex profile folder is unavailable', 409) }
+  }
+
   function view(engine, id) {
     const row = isDefault(id) ? { id, engine, label: DEFAULT_LABELS[engine], owned: false } : find(id)
-    const runnable = !row.owned || engine === 'claude'
+    let runnable = !row.owned || engine === 'claude'
+    if (!runnable && isolatedCodex) { try { ownedCodexHome(row.id); runnable = true } catch {} }
     return { id: row.id, engine, label: row.label, owned: row.owned, runnable, status: runnable ? 'available' : 'notYet', active: activeId(engine) === row.id }
   }
 
   function ensurePrivateDir(target) {
     mkdirSync(enginesDir, { recursive: true, mode: 0o700 })
+    assertPrivateDir(enginesDir)
     mkdirSync(target, { recursive: false, mode: 0o700 })
-    const stat = lstatSync(target)
-    if (!stat.isDirectory() || stat.isSymbolicLink() || !isOwnedAndPrivate(target, stat, 0o077)) throw Object.assign(new Error('not private'), { code: 'NOT_PRIVATE' })
+    assertPrivateDir(target)
   }
 
   const store = {
@@ -200,6 +218,7 @@ export function openEngineProfiles({ dataDir, log = defaultLog, now = Date.now, 
       if (!find(id)) throw profileError('ENGINE_PROFILE_NOT_FOUND', 'Unknown engine profile', 404)
       return ownedDir(id)
     },
+    ownedCodexHome,
     active: engine => activeId(engine),
     add({ engine, label } = {}) {
       if (!PROFILE_ENGINES.includes(engine)) throw profileError('INVALID_ENGINE', 'Unknown AI engine')
@@ -226,12 +245,12 @@ export function openEngineProfiles({ dataDir, log = defaultLog, now = Date.now, 
       if (inUse(id)) throw profileError('ENGINE_PROFILE_IN_USE', 'A conversation is running on this profile', 409)
       commit(profiles.filter(entry => entry.id !== id), active)
       // The CLI's login inside goes with it; a failure only leaves a private folder.
-      try { rmSync(ownedDir(id), { recursive: true, force: true }) } catch (error) { say(`engine profile folder was not removed (${errorCode(error)})`) }
+      try { assertPrivateDir(enginesDir); rmSync(ownedDir(id), { recursive: true, force: true }) } catch (error) { say(`engine profile folder was not removed (${errorCode(error)})`) }
       return true
     },
     setActive(engine, id, { busy = () => false } = {}) {
       if (!PROFILE_ENGINES.includes(engine) || engineOf(id) !== engine) throw profileError('ENGINE_PROFILE_NOT_FOUND', 'Unknown engine profile', 404)
-      if (!view(engine, id).runnable) throw profileError('ENGINE_PROFILE_NOT_YET', 'Codex runs one shared login for now; added ChatGPT profiles cannot run yet', 409)
+      if (engine === 'codex' && !isDefault(id)) throw profileError(isolatedCodex ? 'ENGINE_PROFILE_AGENT_ONLY' : 'ENGINE_PROFILE_NOT_YET', 'Select this Codex profile from an Agent, not as the shared login', 409)
       if (activeId(engine) === id) return id
       if (busy(engine)) throw profileError('ENGINE_PROFILE_BUSY', 'A conversation is running; switch after it finishes', 409)
       const next = { ...active }
@@ -239,14 +258,19 @@ export function openEngineProfiles({ dataDir, log = defaultLog, now = Date.now, 
       commit(profiles, next)
       return id
     },
-    loginCommand(id, method = 'claudeai') {
+    loginCommand(id, method = undefined) {
       const engine = engineOf(id)
       if (!engine) throw profileError('ENGINE_PROFILE_NOT_FOUND', 'Unknown engine profile', 404)
+      if (engine === 'claude') method ??= 'claudeai'
       if (engine === 'claude' && !['claudeai', 'console'].includes(method)) throw profileError('CLAUDE_LOGIN_METHOD_INVALID', 'Unknown login method')
-      const configDir = isDefault(id) ? null : ownedDir(id)
+      const configDir = isDefault(id) ? null : engine === 'codex' ? ownedCodexHome(id).home : ownedDir(id)
       const envName = engine === 'claude' ? 'CLAUDE_CONFIG_DIR' : 'CODEX_HOME'
       const base = engine === 'claude' ? `claude auth login --${method}` : 'codex login'
-      return { profileId: id, engine, env: configDir ? envName : null, configDir, line: configDir ? `${envName}=${shellQuote(configDir)} ${base}` : base }
+      if (configDir && engine === 'codex' && /['\r\n\0]/.test(configDir)) throw profileError('ENGINE_PROFILE_HOME_UNAVAILABLE', 'The Codex login folder cannot be passed to Terminal', 409)
+      const line = !configDir ? base : engine === 'codex'
+        ? `env -i HOME="$HOME" PATH="$PATH" CODEX_HOME=${shellQuote(configDir)} codex -c cli_auth_credentials_store=file login`
+        : `${envName}=${shellQuote(configDir)} ${base}`
+      return { profileId: id, engine, env: configDir ? envName : null, configDir, line }
     },
   }
   return store

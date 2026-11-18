@@ -1,6 +1,6 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { chmodSync, existsSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs'
+import { chmodSync, existsSync, readdirSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs'
 import path from 'node:path'
 import { Readable } from 'node:stream'
 import { createPrivateQaTempDirectory } from '../scripts/egdesk-qa-platform.mjs'
@@ -16,7 +16,7 @@ function fixture(t) {
   const dataDir = path.join(root, 'settings')
   const logs = []
   let n = 0
-  const open = () => openEngineProfiles({ dataDir, log: line => logs.push(line), randomId: () => `abcdef0${++n}` })
+  const open = (options = {}) => openEngineProfiles({ dataDir, log: line => logs.push(line), randomId: () => `abcdef0${++n}`, ...options })
   return { dataDir, logs, open }
 }
 
@@ -69,7 +69,7 @@ test('Codex added profiles are kept but not runnable yet', t => {
   assert.equal(added.status, 'notYet')
   assert.equal(added.runnable, false)
   assert.throws(() => store.setActive('codex', added.id), { code: 'ENGINE_PROFILE_NOT_YET' })
-  assert.match(store.loginCommand(added.id).line, /^CODEX_HOME='.+' codex login$/)
+  assert.throws(() => store.loginCommand(added.id), { code: 'ENGINE_PROFILE_NOT_FOUND' })
 })
 
 test('remove refuses defaults and the active profile, then deletes the private folder', t => {
@@ -156,11 +156,45 @@ test('Settings routes add, switch, give the login line and remove profiles; a bu
 test('the bridge wires the profile store into Claude spawns, the static check, the Codex row and the Settings routes', async () => {
   const { readFile } = await import('node:fs/promises')
   const source = await readFile(new URL('./codex-bridge-server.mjs', import.meta.url), 'utf8')
-  assert.match(source, /const engineProfiles = openEngineProfiles\(\{ dataDir: path\.join\(dataDir, 'settings'\) \}\)/)
+  assert.match(source, /const engineProfiles = openEngineProfiles\(\{ dataDir: path\.join\(dataDir, 'settings'\), isolatedCodex: true \}\)/)
   assert.match(source, /createClaudeEngineAdapter\(\{[\s\S]*?profiles: claudeProfileRows,\n\}\)/)
   assert.match(source, /probe: \(\) => probeClaudeEngine\(\{ env: claudeProfileEnv\(\) \}\)/)
   assert.match(source, /extraProfiles: engineProfiles\.list\('codex'\)\.filter\(row => row\.owned\)/)
   assert.match(source, /busy: engine => engine === 'claude' && claudeEngine\.stats\(\)\.activeTurns > 0/)
   assert.match(source, /if \(await handleEngineProfilesHttp\(req, res, url\)\) return/)
-  assert.doesNotMatch(source, /CODEX_HOME/, 'Codex keeps the one shared app-server for now')
+  assert.match(source, /resolveHome: id => engineProfiles\.ownedCodexHome\(id\)/)
+})
+
+test('owned Codex slots remain Agent-only and produce separate checked login homes', posixOnly, async t => {
+  const { open } = fixture(t)
+  const store = open({ isolatedCodex: true })
+  const seen = []
+  const handle = createEngineProfilesHttpHandler({ profiles: store, refresh: async id => { seen.push(id); return { id: 'codex' } } })
+  const addedA = await call(handle, 'POST', '/settings/engine-profiles', { engine: 'codex', label: 'One' })
+  const addedB = await call(handle, 'POST', '/settings/engine-profiles', { engine: 'codex', label: 'Two' })
+  const a = addedA.body.profile.id, b = addedB.body.profile.id
+  assert.notEqual(a, b)
+  for (const added of [addedA, addedB]) {
+    const { profile, login } = added.body
+    assert.equal(added.status, 200)
+    assert.equal(profile.runnable, true)
+    assert.equal(profile.active, false)
+    const { home } = store.ownedCodexHome(profile.id)
+    assert.deepEqual(login, { engine: 'codex', profileId: profile.id, env: 'CODEX_HOME', line: `env -i HOME="$HOME" PATH="$PATH" CODEX_HOME='${home}' codex -c cli_auth_credentials_store=file login` })
+    assert.equal(JSON.stringify(profile).includes(home), false)
+  }
+  assert.equal(store.active('codex'), 'codex-default')
+  assert.throws(() => store.setActive('codex', a), { code: 'ENGINE_PROFILE_AGENT_ONLY' })
+  assert.throws(() => store.remove(a, { inUse: id => id === a }), { code: 'ENGINE_PROFILE_IN_USE' })
+  const refreshed = await call(handle, 'POST', '/settings/engine-profiles/refresh', { id: a })
+  assert.deepEqual(refreshed.body, { engine: { id: 'codex' } })
+  assert.equal((await call(handle, 'POST', '/settings/engine-profiles/refresh', { id: 'codex-default' })).status, 404)
+  assert.deepEqual(seen, [a])
+  const stale = store.ownedCodexHome(a).home
+  rmSync(stale, { recursive: true })
+  symlinkSync(store.ownedCodexHome(b).home, stale)
+  assert.throws(() => store.ownedCodexHome(a), { code: 'ENGINE_PROFILE_HOME_UNAVAILABLE' })
+  assert.throws(() => store.loginCommand(a), { code: 'ENGINE_PROFILE_HOME_UNAVAILABLE' })
+  assert.equal(store.get(a).runnable, false)
+  assert.equal(store.get(b).runnable, true)
 })

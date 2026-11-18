@@ -339,41 +339,48 @@ export function engineProfilesView(engines, engineId, { connected = false } = {}
       const owned = profile.owned === true;
       const notYet = profile.status === 'notYet';
       const active = profile.active === true;
-      const auth = active && object(profile.auth) && Object.hasOwn(PROFILE_AUTH_TEXT, profile.auth.status) ? profile.auth.status : 'unknown';
+      const isolatedCodex = engineId === 'codex' && owned;
+      const auth = (active || isolatedCodex) && object(profile.auth) && Object.hasOwn(PROFILE_AUTH_TEXT, profile.auth.status) ? profile.auth.status : 'unknown';
       return {
         id: profile.id, owned, active,
         label: text(profile.label).slice(0, 60) || (owned ? `${name} 계정` : name),
         marker: owned ? ENGINE_PROFILE_MARKERS.owned : ENGINE_PROFILE_MARKERS.shared,
         status: notYet ? 'notYet' : active ? 'active' : 'available',
-        authText: notYet ? '준비 중' : active ? `사용 중 · ${PROFILE_AUTH_TEXT[auth]}` : '선택하면 이 로그인으로 새 대화를 시작합니다',
-        canActivate: !active && !notYet,
+        authText: notYet ? '준비 중' : active ? `사용 중 · ${PROFILE_AUTH_TEXT[auth]}` : isolatedCodex ? PROFILE_AUTH_TEXT[auth] : '선택하면 이 로그인으로 새 대화를 시작합니다',
+        canActivate: !active && !notYet && !isolatedCodex,
         canRemove: owned && !active,
-        canLogin: owned,
+        canLogin: owned && !notYet,
       };
     });
   return {
     engineId, rows, canAdd: connected === true && Boolean(row),
     note: engineId === 'codex'
-      ? '추가한 ChatGPT 계정은 로그인 폴더만 준비됩니다. 계정별 Codex 실행은 아직 지원하지 않습니다.'
+      ? '추가한 ChatGPT 계정은 Agent별로 선택할 수 있습니다. 이 컴퓨터의 기본 로그인은 바뀌지 않습니다.'
       : '계정을 바꾸면 새 대화부터 적용됩니다. 진행 중인 대화는 시작한 계정에서 끝나고, 다른 계정으로 옮겨지지 않습니다.',
   };
 }
 
-const PROFILE_LOGIN_LINE = /^(?:CLAUDE_CONFIG_DIR|CODEX_HOME)='\/[^'\r\n\0]{1,4000}' (?:claude auth login --(?:claudeai|console)|codex login)$/;
-/** The login line for an Engine Profile as the bridge sent it, or null if it is not one EG-Desk makes. */
-export function engineProfileLoginLine(command) {
+const CLAUDE_PROFILE_LOGIN_LINE = /^CLAUDE_CONFIG_DIR='(\/[^'\r\n\0]{1,4000})' claude auth login --(?:claudeai|console)$/;
+const CODEX_PROFILE_LOGIN_LINE = /^env -i HOME="\$HOME" PATH="\$PATH" CODEX_HOME='(\/[^'\r\n\0]{1,4000})' codex -c cli_auth_credentials_store=file login$/;
+/** The login command must match both the allowlist and the requested account. */
+export function engineProfileLoginLine(command, { engineId, profileId } = {}) {
   const line = typeof command?.line === 'string' ? command.line : '';
-  if (Object.values(CLAUDE_LOGIN_LINES).includes(line) || line === 'codex login') return line;
-  if (!PROFILE_LOGIN_LINE.test(line)) return null;
-  const envName = line.startsWith('CLAUDE_CONFIG_DIR=') ? 'CLAUDE_CONFIG_DIR' : 'CODEX_HOME';
-  const engine = envName === 'CLAUDE_CONFIG_DIR' ? 'claude' : 'codex';
-  if (command.env !== envName || command.engine !== engine || !line.includes(engine === 'claude' ? ' claude auth login' : ' codex login')) return null;
-  return line;
+  if (engineId && command?.engine !== engineId || profileId && command?.profileId !== profileId) return null;
+  if (Object.values(CLAUDE_LOGIN_LINES).includes(line)) return !profileId || profileId === 'claude-default' ? line : null;
+  if (line === 'codex login') return !profileId || profileId === 'codex-default' ? line : null;
+  const codexHome = CODEX_PROFILE_LOGIN_LINE.exec(line)?.[1];
+  if (codexHome) {
+    if (engineId !== 'codex' || !/^codex-[a-z0-9]{8,32}$/.test(profileId) || command.env !== 'CODEX_HOME') return null;
+    return codexHome.endsWith('/engines/' + profileId) ? line : null;
+  }
+  const claudeHome = CLAUDE_PROFILE_LOGIN_LINE.exec(line)?.[1];
+  if (!claudeHome || command.env !== 'CLAUDE_CONFIG_DIR' || command.engine !== 'claude') return null;
+  return !profileId || claudeHome.endsWith('/engines/' + profileId) ? line : null;
 }
 
 /** Types an Engine Profile's login line into a Terminal card (official CLI login for that folder). */
-export function runEngineProfileLoginInTerminal({ requestCommand, ...options } = {}) {
-  return runClaudeLoginInTerminal({ ...options, requestCommand, checkLine: engineProfileLoginLine,
+export function runEngineProfileLoginInTerminal({ requestCommand, engineId, profileId, ...options } = {}) {
+  return runClaudeLoginInTerminal({ ...options, requestCommand, checkLine: command => engineProfileLoginLine(command, { engineId, profileId }),
     startedText: '터미널에서 공식 로그인을 마친 뒤 다시 확인을 눌러 주세요. 로그인 정보는 이 계정 전용 폴더에만 저장되고 EG-Desk는 읽지 않습니다.' });
 }
 

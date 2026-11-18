@@ -190,7 +190,7 @@ export function createChatHttpHandler(chat, ensureAuth, history = chat) {
       const isSafetyResponse = url.pathname === '/chat/interrupt'
         || (url.pathname === '/chat/approval' && ['decline', 'cancel'].includes(body.decision))
         || (url.pathname === '/chat/user-input' && body.action === 'skip')
-      if (!isSafetyResponse && !LOCAL_WRITES.has(url.pathname)) await ensureAuth(body)
+      if (!isSafetyResponse && !LOCAL_WRITES.has(url.pathname)) await ensureAuth(body, { useAgent: SENDS.has(url.pathname), allowIsolated: true })
       const action = CHAT_ACTIONS[url.pathname]
       if (typeof chat[action] !== 'function') throw Object.assign(new Error('This bridge does not offer that chat action'), { code: 'CHAT_ACTION_UNAVAILABLE', httpStatus: 501 })
       const result = await chat[action](body)

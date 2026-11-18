@@ -19,6 +19,7 @@ function publicProfile(profile) {
       status: AUTH_STATUSES.has(auth?.status) ? auth.status : 'unknown',
       method: token(auth?.method, 60), account: token(auth?.account, 320), planType: token(auth?.planType, 60),
     },
+    ...(Object.hasOwn(profile || {}, 'models') ? { models: publicModelRows(profile.models) } : {}),
     usage: profile?.usage && typeof profile.usage === 'object' && !Array.isArray(profile.usage) ? JSON.parse(JSON.stringify(profile.usage)) : null,
   }
 }

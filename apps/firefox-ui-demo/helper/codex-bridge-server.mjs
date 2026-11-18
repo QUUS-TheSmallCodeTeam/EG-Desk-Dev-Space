@@ -1,5 +1,6 @@
 import { createServer } from 'node:http'
 import { spawn } from 'node:child_process'
+import { createCodexProfileAppServers } from './codex-profile-app-servers.mjs'
 import { AppServerRpc } from './codex-app-server-rpc.mjs'
 import { accountAccessState, normalizeNativeAuth, publicAuthIdentityKey, publicPlanType, usageRefreshDue } from './codex-auth-state.mjs'
 import { usageDisplay } from './codex-account-usage.mjs'
@@ -36,7 +37,7 @@ import { createDecisionBudget, createDecisionClient } from './egdesk-decision-cl
 import { openDecisionCredentialStore } from './egdesk-decision-credential.mjs'
 import { createDecisionHttpHandler } from './egdesk-decision-http.mjs'
 import { collectDecisionCandidates } from './egdesk-decision-candidates.mjs'
-import { openEngineProfiles } from './egdesk-engine-profiles.mjs'
+import { MAX_ENGINE_PROFILES, openEngineProfiles } from './egdesk-engine-profiles.mjs'
 import { createEngineProfilesHttpHandler } from './egdesk-engine-profiles-http.mjs'
 import { createDeskHttpHandler } from './egdesk-desk-http.mjs'
 import { createPortableHttpHandler } from './egdesk-portable-http.mjs'
@@ -213,7 +214,7 @@ const decisionClient = createDecisionClient({ getApiKey: () => decisionCredentia
 // SUB-11 Engine Profiles: the shared CLI logins plus EG-Desk-owned login
 // folders (<appData>/settings/engines/<id>, 0700). Claude runs the active
 // one (CLAUDE_CONFIG_DIR); Codex stays on its one shared app-server ('notYet').
-const engineProfiles = openEngineProfiles({ dataDir: path.join(dataDir, 'settings') })
+const engineProfiles = openEngineProfiles({ dataDir: path.join(dataDir, 'settings'), isolatedCodex: true })
 const claudeProfileRows = () => engineProfiles.list('claude').map(row => ({ ...row, configDir: row.owned ? engineProfiles.configDir(row.id) : null }))
 const claudeProfileEnv = () => {
   const dir = engineProfiles.configDir(engineProfiles.active('claude'))
@@ -300,10 +301,18 @@ const modelCatalog = createModelCatalogSync({
   identity: () => modelAccountKey(authState),
   onChange: () => engineStatus.check(),
 })
+const codexProfileServers = createCodexProfileAppServers({
+  resolveHome: id => engineProfiles.ownedCodexHome(id),
+  onNotification: (id, message) => codexEngine.notify(message, id),
+  onServerRequest: (id, message) => codexEngine.serverRequest(message, id),
+  onConnection: (id, state) => codexEngine.connection(state, id),
+  onChange: () => engineStatus.check(),
+})
 // Each adapter owns its responses; the chat runtime routes engine RPC IDs.
 const codexEngine = createCodexEngineAdapter({
   request: (method, params) => appServerRequest(method, params),
   respond: nativeRespond,
+  profiles: codexProfileServers,
   getOwnerKey: () => publicAuthIdentityKey(authState),
   isReady: () => appServerReady,
   getModels: () => modelCatalog.snapshot(),
@@ -312,9 +321,10 @@ const codexEngine = createCodexEngineAdapter({
     version: nativeCapabilities.version, versionSupported: nativeCapabilities.version ? nativeCapabilities.schemaMatch : null,
     versionStatus: nativeCapabilities.versionStatus ?? null,
     auth: authState, usage: usageDisplay(authState.rateLimits, Date.now()),
-    residentProcesses: appServerProcess && appServerProcess.exitCode == null ? 1 : 0,
+    residentProcesses: (appServerProcess && appServerProcess.exitCode == null ? 1 : 0) + codexProfileServers.residentCount(),
+    residentLimit: MAX_ENGINE_PROFILES,
     models: modelCatalog.snapshot(),
-    extraProfiles: engineProfiles.list('codex').filter(row => row.owned),
+    extraProfiles: engineProfiles.list('codex').filter(row => row.owned).map(row => ({ ...row, ...codexProfileServers.snapshot(row.id) })),
   }),
 })
 // D-S1 (b) (2026-10-24): the installed, unmodified `claude`, one child
@@ -394,6 +404,13 @@ const chat = new CodexChatRuntime({
       excludeMessageId: context.localMessageId, chatStore, deskStore, ontologyStore: ensureOntologyStore })).candidates,
   },
 })
+// Owned Codex events reach only Chat on their originating profile, never
+// the shared Reader, WebSocket, default account state, or inherited MCP sync.
+codexEngine.subscribe({
+  notification: (engineId, message, engineProfileId) => { void chat.handleNotification(message, engineId, engineProfileId) },
+  serverRequest: (engineId, message, engineProfileId) => { void chat.handleServerRequest(message, engineId, engineProfileId) },
+  connection: (engineId, state, engineProfileId) => { chat.setConnection(engineId, state.ready, { processLost: state.processLost, engineProfileId }) },
+})
 // Claude conversation events reach the same runtime as app-server traffic.
 claudeEngine.subscribe({
   notification: (_engineId, message) => { void chat.handleNotification(message) },
@@ -424,7 +441,13 @@ const handleComputerControlHttp = createComputerControlHttpHandler(chat, { port:
 const handleEngineProfilesHttp = createEngineProfilesHttpHandler({
   profiles: engineProfiles, port: BRIDGE_PORT,
   busy: engine => engine === 'claude' && claudeEngine.stats().activeTurns > 0,
+  inUse: id => [...chat.threads].some(([cid, thread]) => thread.engineProfileId === id && chat.conversationBusy(cid)),
+  refresh: async id => {
+    await codexEngine.refresh(id)
+    return engineRegistry.publicEngines().find(row => row.id === 'codex') ?? null
+  },
   onChange: () => {
+    codexProfileServers.reconcile()
     const recheck = () => claudeEngineStatus.refresh({ force: true }).catch(() => {})
     recheck()
     // A check already running (or just finished) still read the old folder.
@@ -1154,6 +1177,8 @@ async function shutdown() {
   catch { console.error('[egdesk-codex-bridge] context services did not detach cleanly') }
   bridgeServer.close()
   systemResourceMonitor.close()
+  try { await codexEngine.dispose() }
+  catch { console.error('[egdesk-codex-bridge] Owned Codex conversations did not close cleanly') }
   try { await claudeEngine.dispose() }
   catch { console.error('[egdesk-codex-bridge] Claude conversations did not close cleanly') }
   try { await workflow?.close() }
@@ -1178,6 +1203,7 @@ process.on('exit', () => {
   try { detachContextServices() } catch {}
   systemResourceMonitor.close()
   workflow?.files.close()
+  codexProfileServers.killAll()
   rpc?.close()
   try { appServerSocket?.close(); } catch {}
   try { appServerProcess?.kill(); } catch {}
