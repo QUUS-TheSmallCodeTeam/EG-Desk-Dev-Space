@@ -625,7 +625,100 @@ test('AGENT-08 답할 엔진: the form picks Codex, Claude or none, keeps a same
   assert.equal(ChatState.profileDiffRows([{ field: 'model', before: { engine: 'codex', modelId: 'gpt-5.5', effort: null }, after: { engine: 'claude', modelId: null, effort: null } }])[0].after, 'Claude 기본 모델');
 
   const source = readSurfaceSource();
-  assert.match(source, /const engineSection = field\('model', '답할 엔진'/);
+  assert.match(source, /const engineSection = renderAgentModelEditor\(form, field\)/);
   assert.match(source, /form\.model = ChatState\.applyProfileFormEngine\(form, option\.value\)\.model/);
   assert.match(source, /engineSection,\n {8}ceilingSection,/);
+});
+
+test('Agent Settings preserves an explicit account while loading, disconnected or deleted, and saves an intentional replacement', async () => {
+  const savedModel = { engine: 'codex', engineProfileId: 'codex-deadbeef', modelId: 'old-model', effort: 'high' };
+  const body = { ...savedBody(), model: savedModel };
+  let head = { revision: 4, hash: 'a'.repeat(64), body };
+  const detail = { id: 'account-editor', lifecycle: 'draft', activeRevision: null, headRevision: 4, active: null, head, hasDraft: true };
+  const saves = [];
+  const { portableSettingsHarness, settingsButton, settingsNodes, settle } = imageSettingsHarness();
+  const h = portableSettingsHarness({ initialDetail: detail, respond: async (path, options) => {
+    if (path === '/profiles/account-editor') return structuredClone(detail);
+    if (path === '/profiles/account-editor/revisions') return { revisions: [] };
+    assert.equal(path, '/profiles/account-editor/draft');
+    assert.equal(options.method, 'PUT');
+    const request = JSON.parse(options.body);
+    assert.equal(request.expectedRevision, head.revision);
+    saves.push(request);
+    head = { ...head, revision: head.revision + 1, body: request.body };
+    Object.assign(detail, { headRevision: head.revision, head });
+    return { id: detail.id, revision: head.revision, profile: detail };
+  } });
+  const edit = async () => { settingsButton(h.card, '편집').fire('click'); await settle(); };
+  const save = async () => { h.part('settings-agent-save').fire('click'); await settle(); };
+  const options = key => h.part(key).children.map(option => [option.getAttribute('value'), option.getAttribute('disabled')]);
+  const pick = (key, value) => { const control = h.part(key); control.value = value; control.fire('change'); };
+  const acct = 'settings-agent-engineProfileId', model = 'settings-agent-modelId', effort = 'settings-agent-effort';
+  await settle(); await edit();
+  assert.equal(h.part(acct).value, savedModel.engineProfileId);
+  assert.deepEqual(options(acct), [['', null], [savedModel.engineProfileId, 'true']]);
+  assert.match(h.part(acct).parentNode.textContent, /아직 계정 목록/);
+  const name = h.document.getElementById(`${h.card.getAttribute('id')}-profile-name`);
+  name.value = '계정과 무관한 수정'; name.fire('input'); name.focus();
+  h.state.codex.connected = false; h.emit();
+  assert.match(h.part(acct).parentNode.textContent, /연결되지 않아/);
+  const codex = { id: 'codex', status: 'ready', models: [{ id: 'shared-only', supportedEfforts: ['low'] }], profiles: [
+    { id: 'codex-default', active: true, label: '공유 계정', auth: { status: 'signedIn' } },
+    { id: 'codex-00112233', owned: true, label: '새 계정', status: 'available', auth: { status: 'signedIn' }, models: [
+      { id: 'owned-model', displayName: 'Owned Model', supportedEfforts: ['high', 'xhigh', 'future-effort'] },
+      { id: 'other-model', supportedEfforts: ['low'] },
+    ] },
+    { id: 'codex-ffee9988', owned: true, label: '준비 중 계정', status: 'notYet' },
+    { id: 'claude-00001111', owned: true, label: '다른 엔진' },
+  ] };
+  Object.assign(h.state.codex, { connected: true, engines: [codex] }); h.emit();
+  assert.match(h.part(acct).parentNode.textContent, /목록에 없는 저장 계정/);
+  assert.equal(h.part(acct).value, savedModel.engineProfileId);
+  assert.deepEqual(options(acct).map(([value]) => value), ['', savedModel.engineProfileId, 'codex-default', 'codex-00112233']);
+  assert.equal(h.document.activeElement, name, 'the asynchronous editor refresh preserves unrelated typing');
+  await save();
+  assert.deepEqual(saves[0].body.model, savedModel);
+  assert.equal(saves[0].body.name, '계정과 무관한 수정');
+
+  await edit();
+  pick(acct, 'codex-00112233');
+  assert.equal(h.part(model).value, 'old-model', 'account picks do not silently change a model');
+  assert.deepEqual(options(model).map(([value]) => value), ['', 'old-model', 'owned-model', 'other-model'], 'no shared account models leak into the owned picker');
+  pick(model, 'owned-model');
+  assert.deepEqual(options(effort).map(([value]) => value), ['', 'high', 'xhigh']);
+  pick(effort, 'xhigh');
+  await save();
+  assert.deepEqual(saves[1].body.model, { engine: 'codex', engineProfileId: 'codex-00112233', modelId: 'owned-model', effort: 'xhigh' });
+  await edit();
+  assert.deepEqual([h.part(acct).value, h.part(model).value, h.part(effort).value], ['codex-00112233', 'owned-model', 'xhigh']);
+  pick(acct, 'codex-default');
+  await save();
+  assert.equal(saves[2].body.model.engineProfileId, 'codex-default', 'explicit shared account is not inherit');
+  await edit();
+  pick(acct, '');
+  await save();
+  assert.equal(Object.hasOwn(saves[3].body.model, 'engineProfileId'), false, 'inherit omits the slot');
+  await edit();
+  pick(acct, 'codex-00112233');
+  settingsNodes(h.card, node => node.dataset.testid === 'settings-agent-engine-option' && node.dataset.engine === 'claude')[0].fire('click');
+  assert.match(h.part('settings-agent-binding-cleared').textContent, /이전 계정 지정을 해제/);
+  assert.equal(h.part(acct).value, '');
+  await save();
+  assert.deepEqual(saves[4].body.model, { engine: 'claude', modelId: null, effort: null });
+  assert.deepEqual(saves.map(save => save.expectedRevision), [4, 5, 6, 7, 8]);
+});
+
+test('Agent form never borrows the active catalog when the pinned slot has no catalog yet', () => {
+  const form = profileFormFromBody({ model: { engine: 'codex', engineProfileId: 'codex-00112233', modelId: 'remembered', effort: 'high' } });
+  const models = [{ id: 'shared-only', supportedEfforts: ['low'] }];
+  const profile = { id: 'codex-00112233', owned: true, status: 'available', models: null };
+  const engines = [{ id: 'codex', models, profiles: [{ id: 'codex-default', active: true }, profile] }];
+  const context = { connected: true, engines };
+  const view = ChatState.profileModelFormView(form, context);
+  assert.deepEqual([view.accountState, view.modelState, view.models, view.effort], ['selected', 'unknown', [], 'high']);
+  assert.equal(ChatState.applyProfileModelFormPick(form, 'modelId', 'shared-only', context), form);
+  profile.status = 'notYet';
+  assert.equal(ChatState.profileModelFormView(form, context).accountState, 'unavailable');
+  assert.equal(ChatState.applyProfileModelFormPick(form, 'engineProfileId', profile.id, context), form);
+  assert.deepEqual(validateProfileForm({ ...form, name: 'Agent' }).body.model, form.model);
 });

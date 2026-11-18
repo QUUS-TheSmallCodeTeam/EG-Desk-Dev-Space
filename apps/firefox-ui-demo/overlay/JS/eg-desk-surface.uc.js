@@ -17507,6 +17507,17 @@
       engineProfileLoginCommand(id) {
         return fetchJson(`/settings/engine-profiles/login-command?id=${encodeURIComponent(id)}`);
       },
+      async refreshEngineProfile(id) {
+        const token = epochScope.begin();
+        const before = state.codex.engines?.find(row => row.id === 'codex');
+        const result = await fetchJson('/settings/engine-profiles/refresh', { method: 'POST', body: JSON.stringify({ id }), signal: token.signal });
+        const rows = state.codex.engines || [];
+        // A newer SSE or connection snapshot wins over a late refresh response.
+        if (epochScope.valid(token) && state.codex.connected && result?.engine?.id === 'codex' && rows.find(row => row.id === 'codex') === before) {
+          update({ engines: before ? rows.map(row => row === before ? result.engine : row) : [...rows, result.engine] });
+        }
+        return result;
+      },
       async claudeApiKeyEnv(confirm) {
         const result = await fetchJson('/engines/claude/api-key-env', typeof confirm === 'boolean'
           ? { method: 'POST', body: JSON.stringify({ confirm }) } : {});
@@ -20674,7 +20685,7 @@
       renderAccountTab();
     };
     // SUB-11 profile list per engine: label + shared/owned marker, add (label only),
-    // remove (owned only), Terminal login for the private folder. Codex extras read '준비 중'.
+    // remove (owned only), and official Terminal login for the private folder.
     let profileAction = null;
     const runProfileAction = async (engineId, action, id, label) => {
       const api = bridge();
@@ -20684,12 +20695,17 @@
       try {
         if (action === 'add') {
           const added = await api.addEngineProfile(engineId, label);
-          const outcome = await AccountSettingsView.runEngineProfileLoginInTerminal({
-            requestCommand: () => api.engineProfileLoginCommand(added.profile.id), openTerminal: () => spawnTerminalCard() });
+          const id = added.profile.id;
+          const outcome = added.profile.status === 'notYet' ? { phase: 'done', text: '계정을 추가했지만 이 계정의 실행은 아직 지원되지 않습니다.' }
+            : await AccountSettingsView.runEngineProfileLoginInTerminal({ engineId, profileId: id,
+              requestCommand: () => api.engineProfileLoginCommand(id), openTerminal: () => spawnTerminalCard() });
           profileAction = { engineId, action, ...outcome };
         } else if (action === 'login') {
-          profileAction = { engineId, action, ...await AccountSettingsView.runEngineProfileLoginInTerminal({
+          profileAction = { engineId, action, ...await AccountSettingsView.runEngineProfileLoginInTerminal({ engineId, profileId: id,
             requestCommand: () => api.engineProfileLoginCommand(id), openTerminal: () => spawnTerminalCard() }) };
+        } else if (action === 'refresh') {
+          await api.refreshEngineProfile(id);
+          profileAction = null;
         } else {
           if (action === 'remove') await api.removeEngineProfile(id); else await api.activateEngineProfile(engineId, id);
           profileAction = null;
@@ -20713,6 +20729,8 @@
             el('div', { class: 'egd-settings-account-sub' }, row.authText)),
           row.canActivate ? btn('사용', 'settings-profile-use', () => { void runProfileAction(engineId, 'activate', row.id); }) : null,
           row.canLogin && row.status !== 'notYet' ? btn('로그인', 'settings-profile-login', () => { void runProfileAction(engineId, 'login', row.id); }) : null,
+          engineId === 'codex' && row.owned && row.status !== 'notYet' && bridge()?.refreshEngineProfile
+            ? btn('다시 확인', 'settings-profile-refresh', () => { void runProfileAction(engineId, 'refresh', row.id); }) : null,
           row.canRemove ? btn('삭제', 'settings-profile-remove', () => { void runProfileAction(engineId, 'remove', row.id); }) : null)),
         view.canAdd ? el('div', { class: 'egd-settings-profile-add' }, input,
           btn('계정 추가', 'settings-profile-add', () => { const label = input.value.trim(); if (label) void runProfileAction(engineId, 'add', null, label); }, true)) : null,
@@ -21439,6 +21457,7 @@
           detailRow('맡길 일', (body.expertise || []).length ? el('ul', { class: 'egd-settings-plain-list' }, ...body.expertise.map((item) => el('li', {}, item))) : '없음'),
           detailRow('지침', body.instructions ? el('div', { class: 'egd-settings-instructions' }, body.instructions) : '없음'),
           detailRow('선호 도구 (표시용)', chipRow(body.toolPreferences || [], '없음')),
+          detailRow('실행 모델', ChatState.profileModelSummary(body.model), { data: { testid: 'settings-agent-detail-model' } }),
           detailRow('쓸 수 있는 도구', ChatState.publicToolCeiling(body.toolCeiling)
             ? el('span', { data: { testid: 'settings-agent-ceiling-summary' } }, ChatState.toolCeilingSummary(body.toolCeiling),
               ...ChatState.toolCeilingNotes(body.toolCeiling).map((note) => el('span', { class: 'egd-settings-ceiling-note' }, note)))
@@ -21470,6 +21489,75 @@
       }
       section.appendChild(versions);
       contentArea.replaceChildren(section);
+    };
+
+    const agentModelContext = () => ({ engines: state.codex.engines, auth: state.codex.authStatus, connected: state.codex.connected === true });
+    let refreshAgentModelEditor = null;
+    const renderAgentModelEditor = (form, field) => {
+      const mount = el('div', { class: 'egd-settings-engine-pick' });
+      let lastView = '', changeNote = null;
+      const refresh = () => {
+        const context = agentModelContext();
+        const view = ChatState.profileModelFormView(form, context);
+        const note = ChatState.profileEngineNote(form, context);
+        const signature = JSON.stringify([view, note, changeNote, agents.busy]);
+        if (signature === lastView) return;
+        lastView = signature;
+        const focused = mount.contains(document.activeElement) ? document.activeElement.getAttribute('id') : null;
+        const select = (key, label, value, options, defaultLabel, fallbackLabel, hint) => {
+          const hintId = fieldId(key + '-hint');
+          const control = el('select', { class: 'egd-settings-form-input', id: fieldId(key), disabled: agents.busy ? 'true' : null,
+            'aria-describedby': hint ? hintId : null, data: { testid: 'settings-agent-' + key },
+            onchange: () => {
+              if (agents.busy) return;
+              form.model = ChatState.applyProfileModelFormPick(form, key, control.value || null, agentModelContext()).model;
+              changeNote = null;
+              lastView = '';
+              refresh();
+            } },
+          el('option', { value: '' }, defaultLabel),
+          value && !options.some(option => option.value === value) ? el('option', { value, disabled: 'true' }, fallbackLabel) : null,
+          ...options.map(option => el('option', { value: option.value }, option.label)));
+          control.value = value || '';
+          return field(key, label, el('div', {}, control,
+            hint ? el('div', { id: hintId, class: 'egd-settings-form-hint', role: 'status' }, hint) : null));
+        };
+        const accountHint = view && ({
+          missing: '계정 목록에 없는 저장 계정입니다. 직접 변경할 때까지 기존 지정을 유지합니다.',
+          unavailable: '현재 이 계정을 사용할 수 없습니다. 직접 변경할 때까지 기존 지정을 유지합니다.',
+          offline: '연결되지 않아 저장 계정을 확인할 수 없습니다. 기존 지정을 유지합니다.',
+          loading: '아직 계정 목록을 확인하지 못했습니다. 기존 지정을 유지합니다.',
+        })[view.accountState] || (view?.accountState === 'inherit' && !view.accountListReady ? '아직 계정 목록을 확인할 수 없습니다.' : null);
+        mount.replaceChildren(
+          field('model', '답할 엔진', el('div', { class: 'egd-settings-segmented', role: 'group', 'aria-label': '답할 엔진',
+            id: fieldId('model'), tabindex: '-1', data: { testid: 'settings-agent-engine' } },
+          ...ChatState.PROFILE_ENGINE_OPTIONS.map(option => el('button', {
+            class: 'egd-settings-segment' + (note.engine === option.value ? ' egd-settings-segment-active' : ''), type: 'button',
+            'aria-pressed': String(note.engine === option.value), id: fieldId('model-' + option.value), disabled: agents.busy ? 'true' : null,
+            data: { testid: 'settings-agent-engine-option', engine: option.value },
+            onclick: () => {
+              if (agents.busy || ChatState.profileFormEngine(form) === option.value) return;
+              changeNote = form.model?.engineProfileId ? '엔진을 바꿔 이전 계정 지정을 해제했습니다. 이 변경은 초안을 저장할 때 적용됩니다.' : null;
+              form.model = ChatState.applyProfileFormEngine(form, option.value).model;
+              refresh();
+            },
+          }, option.label))), view?.profileId ? '다른 엔진을 고르면 이 계정 지정이 해제됩니다.' : null),
+          changeNote ? el('div', { class: 'egd-settings-form-hint', role: 'status', data: { testid: 'settings-agent-binding-cleared' } }, changeNote) : null,
+          view ? select('engineProfileId', '답할 계정', view.profileId, view.accounts, '기본 계정 따르기',
+            '저장된 계정 · ' + view.profileId, accountHint) : null,
+          view ? select('modelId', '모델', view.modelId, view.models, '계정 기본 모델', '저장된 모델 · ' + view.modelId,
+            view.modelState === 'unavailable' ? '이 계정의 지원 목록에 없는 모델입니다. 저장 값을 유지합니다.'
+              : !view.models.length ? '이 계정의 모델 목록을 아직 확인할 수 없습니다.' : null) : null,
+          view && (view.efforts.length || view.effort) ? select('effort', '추론 강도', view.effort, view.efforts, '모델 기본 강도',
+            '저장된 강도 · ' + ChatState.chatEffortLabel(view.effort),
+            view.effort && !view.efforts.some(option => option.value === view.effort) ? '저장된 강도의 지원 여부를 확인할 수 없습니다.' : null) : null,
+          el('div', { class: 'egd-settings-ceiling-note' + (note.ready === false ? ' egd-settings-engine-note-blocked' : ''), role: 'note',
+            data: { testid: 'settings-agent-engine-note', ready: String(note.ready) } }, note.text));
+        if (focused) document.getElementById(focused)?.focus({ preventScroll: true });
+      };
+      refreshAgentModelEditor = refresh;
+      refresh();
+      return mount;
     };
 
     const renderAgentForm = () => {
@@ -21661,22 +21749,7 @@
           ...ceilingNotes.map((note) => el('div', { class: 'egd-settings-ceiling-note', role: 'note', data: { testid: 'settings-agent-ceiling-note' } }, note)))
         : el('div', { class: 'egd-settings-form-hint', data: { testid: 'settings-agent-ceiling-off' } }, ChatState.TOOL_CEILING_OFF_TEXT),
       errorFor('toolCeiling') ? el('div', { class: 'egd-settings-field-error', role: 'alert' }, errorFor('toolCeiling').message) : null);
-      // AGENT-08: which subscription engine answers for this Agent, with the
-      // engine's last reported readiness. Saved only with [초안 저장].
-      const engineNote = ChatState.profileEngineNote(form, { engines: state.codex.engines, auth: state.codex.authStatus, connected: state.codex.connected === true });
-      const engineSection = field('model', '답할 엔진', el('div', { class: 'egd-settings-engine-pick' },
-        el('div', { class: 'egd-settings-segmented', role: 'group', 'aria-label': '답할 엔진', id: fieldId('model'), tabindex: '-1', data: { testid: 'settings-agent-engine' } },
-          ...ChatState.PROFILE_ENGINE_OPTIONS.map((option) => {
-            const active = engineNote.engine === option.value;
-            return el('button', {
-              class: `egd-settings-segment${active ? ' egd-settings-segment-active' : ''}`, type: 'button', 'aria-pressed': String(active),
-              data: { testid: 'settings-agent-engine-option', engine: option.value },
-              onclick: () => { form.model = ChatState.applyProfileFormEngine(form, option.value).model; agents.focusField = 'model'; renderAgentsTab(); },
-            }, option.label);
-          })),
-        engineNote.modelText ? el('div', { class: 'egd-settings-form-hint', data: { testid: 'settings-agent-engine-model' } }, engineNote.modelText) : null,
-        el('div', { class: `egd-settings-ceiling-note${engineNote.ready === false ? ' egd-settings-engine-note-blocked' : ''}`, role: 'note',
-          data: { testid: 'settings-agent-engine-note', ready: String(engineNote.ready) } }, engineNote.text)));
+      const engineSection = renderAgentModelEditor(form, field);
       // AGENT-02 [예시로 채우기]: fills only the blanks of a new Agent's draft in
       // place. Nothing is saved until [초안 저장].
       const exampleFillRow = () => {
@@ -21753,6 +21826,7 @@
       if (renderedAgentForm) for (const [key, input] of chipInputs) formView(renderedAgentForm).chips.set(key, input.value);
       chipInputs.clear();
       renderedAgentForm = agents.mode === 'edit' ? agents.form : null;
+      refreshAgentModelEditor = null;
       if (agents.mode === 'edit' && agents.form) renderAgentForm();
       else if (agents.mode === 'detail') renderAgentDetail();
       else renderAgentList();
@@ -21916,8 +21990,8 @@
       void openProfile(profileId);
     };
 
-    // Live account and catalog changes re-render the list views only; an open
-    // form is never redrawn under the user's typing.
+    // Account/catalog changes refresh only the model editor inside an open
+    // form; leave unrelated controls (including text composition) untouched.
     let unsubscribeCodex = null;
     let subscribeAttempts = 0;
     let lastCodexSignature = '';
@@ -21948,6 +22022,7 @@
       if (signature === lastCodexSignature) return;
       lastCodexSignature = signature;
       if (activeTab === 'account') renderAccountTab();
+      else if (activeTab === 'agents' && agents.mode === 'edit') refreshAgentModelEditor?.();
       else if (agents.mode === 'list') renderAgentsTab();
     };
     const ensureCodexSubscription = () => {

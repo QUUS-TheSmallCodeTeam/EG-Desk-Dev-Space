@@ -1756,6 +1756,61 @@ export function applyProfileFormEngine(form, engine) {
   if (profileFormEngine(form) === engine) return { ...form, model: copy(form.model) };
   return { ...form, model: { engine, modelId: null, effort: null } };
 }
+/** Agent editor projection only. Catalog refreshes never write a draft. */
+export function profileModelFormView(form, { engines = null, connected = false } = {}) {
+  const engine = profileFormEngine(form);
+  if (engine === 'none') return null;
+  const model = form.model;
+  const profileId = model.engineProfileId || null;
+  const row = connected ? engineRows(engines).find(entry => entry.id === engine) : null;
+  const seen = new Set();
+  const profiles = (Array.isArray(row?.profiles) ? row.profiles : []).filter(profile =>
+    typeof profile?.id === 'string' && /^(codex|claude)-[a-z0-9]{1,40}$/.test(profile.id)
+    && profile.id.startsWith(`${engine}-`) && !seen.has(profile.id) && seen.add(profile.id));
+  const selected = profiles.find(profile => profile.id === profileId);
+  const active = profiles.filter(profile => profile.active === true);
+  const slot = profileId ? selected : active.length === 1 ? active[0] : null;
+  // The engine-level list belongs to the active account, never another slot.
+  const activeCatalog = !profileId || active.length === 1 && selected === active[0] ? row?.models : null;
+  const catalog = slot?.status === 'notYet' ? null : Array.isArray(slot?.models) ? slot.models
+    : profileId && slot?.owned && Object.hasOwn(slot, 'models') ? null : activeCatalog;
+  const models = chatModelCatalog([{ id: engine, models: catalog }], engine);
+  const modelId = model.modelId || null;
+  const chosenModel = models?.find(item => item.id === modelId);
+  // Agent bodies require an explicit model for effort, and support only the schema's tokens.
+  const efforts = (chosenModel?.supportedEfforts || []).filter(value => lookup(EFFORT_LABELS, value));
+  return {
+    engine, profileId, accountAuth: selected?.auth?.status || null,
+    accountState: !profileId ? 'inherit' : selected?.status === 'notYet' ? 'unavailable' : selected ? 'selected'
+      : profiles.length ? 'missing' : connected ? 'loading' : 'offline',
+    accounts: profiles.filter(profile => profile.status !== 'notYet').map(profile => ({ value: profile.id,
+      label: `${modelName(profile.label, profile.id)} · ${profile.owned === true ? 'EG-Desk 전용' : '공유 로그인'}` })),
+    accountListReady: profiles.length > 0,
+    modelId, models: (models || []).map(item => ({ value: item.id, label: item.displayName })),
+    modelState: !modelId ? 'default' : chosenModel ? 'selected' : Array.isArray(catalog) ? 'unavailable' : 'unknown',
+    effort: model.effort || null,
+    efforts: efforts.map(value => ({ value, label: chatEffortLabel(value, efforts) })),
+  };
+}
+
+/** Apply an offered pick. null explicitly inherits/resets; undefined is not a pick. */
+export function applyProfileModelFormPick(form, field, value, context) {
+  const view = profileModelFormView(form, context);
+  if (!view) return form;
+  const model = { ...form.model };
+  if (field === 'engineProfileId' && (value === null || view.accounts.some(option => option.value === value))) {
+    if (value === null) delete model.engineProfileId;
+    else model.engineProfileId = value;
+    // Keep model/effort on account changes; mark them if the new list cannot verify them.
+  } else if (field === 'modelId' && (value === null || view.models.some(option => option.value === value))) {
+    if (view.modelId === value) return form;
+    model.modelId = value;
+    if (!profileModelFormView({ model }, context).efforts.some(option => option.value === model.effort)) model.effort = null;
+  } else if (field === 'effort' && (value === null || view.efforts.some(option => option.value === value))) {
+    model.effort = value;
+  } else return form;
+  return { ...form, model };
+}
 /** The note under the engine choice: the engine's last reported readiness, from the bridge's engines[] (Settings projection). */
 export function profileEngineNote(form, { engines = null, auth = null, connected = true } = {}) {
   const engine = profileFormEngine(form);
@@ -1764,6 +1819,13 @@ export function profileEngineNote(form, { engines = null, auth = null, connected
   const modelText = modelId ? `모델: ${modelId}` : `모델: ${engine === 'claude' ? 'Claude' : 'Codex'} 기본 모델`;
   const lead = '새 대화는 이 엔진으로 답하고, 이미 시작한 대화는 원래 엔진을 유지합니다.';
   if (connected !== true) return { engine, ready: null, modelText, text: `${lead} EG-Desk에 연결되지 않아 엔진 상태는 확인할 수 없습니다.` };
+  if (form.model.engineProfileId) {
+    const { accountState, accountAuth } = profileModelFormView(form, { engines, connected });
+    const ready = accountState === 'missing' || accountState === 'unavailable' || accountAuth === 'signedOut' ? false
+      : accountAuth === 'signedIn' ? true : null;
+    return { engine, ready, modelText, text: `${lead} ${ready === true ? '지정 계정: 로그인됨.'
+      : accountAuth === 'signedOut' ? '지정 계정: 계정 설정에서 공식 로그인을 마쳐 주세요.' : ''}`.trim() };
+  }
   const choice = chatEngineChoices(engines, auth).find(row => row.id === engine) || null;
   if (engine === 'codex') return { engine, ready: !!auth?.isLoggedIn, modelText, text: `${lead} Codex: ${choice?.note || '로그인 필요'}` };
   const claude = claudeSettingsView(engines, { connected: true });
@@ -1839,6 +1901,16 @@ export function agentPeekView({ author = 'Codex', authorAvatar = null, profile =
     tools: pending || toolCeilingSummary(body.toolCeiling) };
 }
 
+/** Saved Agent model values, independent of live account availability. */
+export function profileModelSummary(model, { includeInheritedAccount = true } = {}) {
+  if (model == null) return '방 설정 따르기';
+  if (model.engine !== 'codex' && model.engine !== 'claude') return '확인 안 됨';
+  const engine = model.engine === 'claude' ? 'Claude' : 'Codex';
+  return [typeof model.modelId === 'string' ? (includeInheritedAccount ? `${engine} · ${model.modelId}` : model.modelId) : `${engine} 기본 모델`,
+    typeof model.engineProfileId === 'string' ? `지정 계정: ${model.engineProfileId}` : includeInheritedAccount ? '기본 계정 따르기' : null,
+    typeof model.effort === 'string' ? `추론 강도: ${chatEffortLabel(model.effort)}` : null].filter(Boolean).join(' · ');
+}
+
 const PROFILE_DIFF_LABELS = [['name', '담당자 이름'], ['avatar', '아바타'], ['role', '역할'], ['personality.tone', '말투'],
   ['personality.traits', '성격 특징'], ['personality.speechNotes', '말투 메모'],
   ['personality.examples', '말투 예시'], ['personality.avoid', '피할 표현'], ['expertise', '맡길 일'],
@@ -1857,8 +1929,7 @@ function diffValueText(field, value) {
   }
   if (field === 'personality.tone') return PROFILE_TONE_OPTIONS.find(option => option.value === value)?.label || '확인 안 됨';
   if (field === 'avatar') return value?.kind === 'emoji' ? `이모지 ${value.value}` : `이니셜 ${value?.value ?? ''}`;
-  if (field === 'model') return typeof value?.modelId === 'string' ? value.modelId
-    : value?.engine === 'codex' || value?.engine === 'claude' ? `${value.engine === 'claude' ? 'Claude' : 'Codex'} 기본 모델` : '확인 안 됨';
+  if (field === 'model') return profileModelSummary(value, { includeInheritedAccount: false });
   if (Array.isArray(value)) return value.length ? value.join(', ') : '없음';
   const text = String(value);
   return text ? (text.length > 300 ? `${text.slice(0, 300)}…` : text) : '비어 있음';
