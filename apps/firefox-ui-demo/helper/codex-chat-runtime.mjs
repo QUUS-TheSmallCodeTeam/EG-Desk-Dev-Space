@@ -491,7 +491,7 @@ function boardRecentMessages(value) {
   if (!Array.isArray(value) || value.length > MAX_BOARD_RECENT) throw invalid()
   return value.map(entry => {
     if (!plainRecord(entry) || !['user', 'agent'].includes(entry.role) || typeof entry.text !== 'string' || !entry.text.trim() || entry.text.length > 4000 ||
-        (entry.author != null && (typeof entry.author !== 'string' || entry.author.length > 80))) throw invalid()
+        (entry.author != null && (typeof entry.author !== 'string' || Array.from(entry.author).length > 80))) throw invalid()
     return { role: entry.role, author: entry.author ?? null, text: entry.text }
   })
 }
@@ -2746,7 +2746,8 @@ export class CodexChatRuntime {
     if (!room?.trim()) throw chatError('INVALID_CLIENT_THREAD_ID', 'clientThreadId of the Board room is required', 400)
     if (typeof body.message !== 'string' || !body.message.trim()) throw chatError('EMPTY_MESSAGE', 'Message is required')
     if (body.message.length > MAX_TEXT) throw chatError('MESSAGE_TOO_LONG', `Message exceeds ${MAX_TEXT} characters`)
-    if (body.conversationId != null || body.profileEnabled === false || body.executionPolicy != null || body.stateless === true) {
+    const strict = body.expectedBoardDelivery !== undefined
+    if (body.conversationId != null || body.profileEnabled === false || (!strict && (body.executionPolicy != null || body.stateless === true))) {
       throw chatError('INVALID_BOARD_SEND', 'A Board send picks each member\'s conversation and Agent itself', 400)
     }
     // Every recipient compares the same observation, including recipients
@@ -2762,7 +2763,6 @@ export class CodexChatRuntime {
       if (body.members && !boardSame(boardRosterIdentity(body.members), boardRosterIdentity(observation.members))) throw boardFailure()
       rawMembers = observation.members
     }
-    const strict = body.expectedBoardDelivery !== undefined
     const lead = strict ? body.leadProfileId : observation.lead ? observation.lead.profileId : body.leadProfileId ?? body.profileId ?? null
     if (lead !== null && !(typeof lead === 'string' && BOARD_PROFILE_ID.test(lead))) throw chatError('INVALID_BOARD_MEMBERS', 'leadProfileId must be an Agent profile ID or null', 400)
     if (strict && ((body.profileId ?? null) !== lead || (lead == null && body.profileRevision != null))) throw boardFailure()
@@ -2811,7 +2811,7 @@ export class CodexChatRuntime {
         checkBoard?.()
         const conversationId = this.boundConversation(target)
         const recipientBody = {
-          ...rest, message: body.message, clientThreadId: target, requestId: memberRequestId, profileId: recipient.profileId,
+          ...rest, ...(strict ? { engineId } : {}), message: body.message, clientThreadId: target, requestId: memberRequestId, profileId: recipient.profileId,
           ...(conversationId ? { conversationId } : {}),
           ...(profileRevision != null && profileId === recipient.profileId ? { profileRevision } : {}),
         }
