@@ -190,12 +190,17 @@ export function createChatHttpHandler(chat, ensureAuth, history = chat) {
       const isSafetyResponse = url.pathname === '/chat/interrupt'
         || (url.pathname === '/chat/approval' && ['decline', 'cancel'].includes(body.decision))
         || (url.pathname === '/chat/user-input' && body.action === 'skip')
-      if (!isSafetyResponse && !LOCAL_WRITES.has(url.pathname)) {
+      const boardSend = url.pathname === '/chat/board/send'
+      if (!isSafetyResponse && !boardSend && !LOCAL_WRITES.has(url.pathname)) {
         await ensureAuth(body, { useAgent: SENDS.has(url.pathname), allowIsolated: true, requireClientPair: url.pathname === '/chat/resume' })
       }
       const action = CHAT_ACTIONS[url.pathname]
       if (typeof chat[action] !== 'function') throw Object.assign(new Error('This bridge does not offer that chat action'), { code: 'CHAT_ACTION_UNAVAILABLE', httpStatus: 501 })
-      const result = await chat[action](body)
+      // Board owns member selection and the target conversation. Authenticate
+      // its exact dispatch body, not the room or any outer Agent hint.
+      const result = boardSend
+        ? await chat[action](body, { authenticateRecipient: (recipient, profileRun) => ensureAuth(recipient, { useAgent: true, allowIsolated: true, profileRun }) })
+        : await chat[action](body)
       // A new branch is created (201); a retried one answers with it (200).
       sendJson(res, SENDS.has(url.pathname) || url.pathname === '/chat/subagent/reassign' ? 202 : url.pathname === '/chat/fork' && !result?.duplicate ? 201 : 200, result)
     } catch (error) {
