@@ -12,7 +12,7 @@ const CODE_TTL = 7 * 24 * 60 * 60 * 1000
 const TICKET_TTL = 120_000
 const MAX_PENDING = 64
 const MAX_RUNNING = 4
-const DRAFT_EXCERPT_BYTES = 9000
+const MAX_SELECTED = 6 // six reviewed excerpts at ≤1,500 UTF-8 bytes each
 const TONES = ['plain', 'warm', 'concise', 'formal', 'playful']
 const invalid = () => fail('INPUT', 'Invalid Board Agent ask fields')
 const stale = () => fail('STALE', 'Approval is no longer current; review again', 409)
@@ -65,9 +65,9 @@ export function createBoardAgentAskService({ desk, profiles, selectContext, deci
     const status = decisionStatus?.()
     return status && ['on', 'advisory'].includes(status.mode) && status.model && status.bindingId && status.client ? status : null
   }
-  const readDraft = (active, excerpts) => {
+  const readDraft = active => {
     const status = draft?.status()
-    return compatibleDraft(active) && excerpts.reduce((total, excerpt) => total + Buffer.byteLength(excerpt), 0) <= DRAFT_EXCERPT_BYTES && status?.configured && status.model && status.bindingId ? status : null
+    return compatibleDraft(active) && status?.configured && status.model && status.bindingId ? status : null
   }
   const profileFor = id => pin(profiles.get(id))
   const sameProfile = (active, policy) => active?.revision === policy.profileRevision && active?.hash === policy.profileHash
@@ -75,7 +75,7 @@ export function createBoardAgentAskService({ desk, profiles, selectContext, deci
     const policy = desk.boardAgentAskPolicy(boardId)
     const active = policy && profileFor(policy.profileId)
     const current = !!policy && sameProfile(active, policy)
-    const draftStatus = current ? readDraft(active, policy.excerpts) : null
+    const draftStatus = current ? readDraft(active) : null
     const decision = readDecision()
     const codeActive = current && !!policy.codeDigest && !policy.codeUsed && policy.codeExpiresAt > now()
     return {
@@ -131,7 +131,7 @@ export function createBoardAgentAskService({ desk, profiles, selectContext, deci
     if (!sameProfile(active, policy)) fail('PROFILE_STALE', 'The pinned profile changed; save a current policy', 409)
     const d = decisionEgress ? readDecision() : null
     if (decisionEgress && !d) fail('DECISION_OFF', 'The dedicated Decision service is off', 409)
-    const f = mode === 'draft' ? readDraft(active, policy.excerpts) : null
+    const f = mode === 'draft' ? readDraft(active) : null
     if (mode === 'draft' && !f) fail('DRAFT_OFF', 'The dedicated draft service is off or conflicts with this pinned profile', 409)
     const excerpts = validateExcerpts(policy.excerpts)
     const replyStyle = TONES.includes(active.body.personality?.tone) ? active.body.personality.tone : 'plain'
@@ -163,7 +163,7 @@ export function createBoardAgentAskService({ desk, profiles, selectContext, deci
       const active = profileFor(item.profileId)
       if (active?.revision !== item.profileRevision || active.hash !== item.profileHash) return false
       const d = item.decisionEgress ? readDecision() : null
-      const f = item.mode === 'draft' ? readDraft(active, policy.excerpts) : null
+      const f = item.mode === 'draft' ? readDraft(active) : null
       return item.decisionMode === d?.mode && item.decisionModel === d?.model && item.decisionBinding === d?.bindingId && item.draftModel === f?.model && item.draftBinding === f?.bindingId
     } catch { return false }
   }
@@ -194,8 +194,8 @@ export function createBoardAgentAskService({ desk, profiles, selectContext, deci
         { mode: decision?.mode ?? 'off', client: decision?.client ?? null, now, signal: item.controller.signal,
           isCurrent: offered => offered === scope && current() })
       if (!current()) stale()
-      const picked = new Set(selected?.selectedIds ?? [])
-      const evidence = scope.allowedSlices.filter(slice => picked.has(slice.id)).map(slice => slice.text)
+      const allowed = new Map(scope.allowedSlices.map(slice => [slice.id, slice.text]))
+      const evidence = [...new Set(selected?.selectedIds ?? [])].filter(id => allowed.has(id)).slice(0, MAX_SELECTED).map(id => allowed.get(id))
       if (item.mode === 'extract' || evidence.length === 0) {
         const parts = []
         let bytes = 0
@@ -205,9 +205,9 @@ export function createBoardAgentAskService({ desk, profiles, selectContext, deci
         }
         return { mode: item.mode, answer: parts.join('\n\n'), source: selected?.outcome === 'decision' ? 'decision' : 'local', omittedCount: evidence.length - parts.length }
       }
-      // Draft always receives the same displayed full set, not a hidden or
-      // changing subset chosen by the decision service after approval.
-      const result = await draft.draft({ question: item.question, excerpts: [...item.excerpts], publicInstructions: item.publicInstructions,
+      // The preview authorizes an upper bound. Local or opted-in Decisions ranking can
+      // narrow it; unselected evidence is never sent to the drafting provider.
+      const result = await draft.draft({ question: item.question, excerpts: evidence, publicInstructions: item.publicInstructions,
         replyStyle: item.replyStyle, model: item.draftModel, bindingId: item.draftBinding, signal: item.controller.signal, isCurrent: current })
       if (!current()) stale()
       const answer = result?.answer ?? ''

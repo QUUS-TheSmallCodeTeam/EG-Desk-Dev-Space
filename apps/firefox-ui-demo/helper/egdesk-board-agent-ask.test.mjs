@@ -142,7 +142,8 @@ test('one-shot draft uses the displayed scope only; revocation/disconnect discar
     const result = f.run(preview, { signal: controller.signal })
     await Promise.resolve()
     const { signal, isCurrent, ...payload } = args
-    assert.deepEqual(payload, { question: preview.question, excerpts: preview.excerpts, publicInstructions: preview.publicInstructions,
+    assert.deepEqual(preview.excerpts, approved, 'owner reviews the full list the selection may draw from')
+    assert.deepEqual(payload, { question: preview.question, excerpts: [approved[0]], publicInstructions: preview.publicInstructions,
       replyStyle: preview.replyStyle, model: preview.model, bindingId: 'binding' })
     assert.equal(isCurrent(), true)
     if (revoke) f.service.policy({ boardId: BOARD, action: 'revoke', expectedVersion: policy.version })
