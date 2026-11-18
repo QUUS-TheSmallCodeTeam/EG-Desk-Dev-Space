@@ -39,7 +39,8 @@ export function readBoardMembers(chat, clientThreadId) {
   const store = boardStore(chat)
   try {
     if (!store.getConversation(id)) return { clientThreadId: id, members: [], saved: false }
-    return { ...store.listRoomMembers(id), saved: true }
+    const answer = store.listRoomMembers(id)
+    return { ...answer, saved: true, ...(!answer.members.length && store.hasExplicitEmptyRoster?.(id) ? { rosterSaved: true } : {}) }
   } catch (error) { throw storeFailure(error, 'read') }
 }
 

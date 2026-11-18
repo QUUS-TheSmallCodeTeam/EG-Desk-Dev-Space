@@ -8,9 +8,8 @@
 //   board send answer and the run.board attribution of run.started.
 // - The room's members as the chat store keeps them (GET/POST
 //   /chat/board/members, chat-store v3 room_members) and back.
-// Pure: no DOM, no fetch. The runtime's matching rules live in
-// helper/codex-chat-runtime.mjs (boardMentions, boardRecipients).
-import { displayProfileAvatar, isProfileId, isRunBusy } from './EGDeskChatState.sys.mjs';
+// Pure: no DOM, no fetch. The helper shares the same recipient classifier.
+import { clientThreadBinding, displayProfileAvatar, isProfileId, isRunBusy } from './EGDeskChatState.sys.mjs';
 
 export const BOARD_SEND_PATH = '/chat/board/send';
 export const BOARD_MEMBERS_PATH = '/chat/board/members';
@@ -19,7 +18,7 @@ const MAX_RECENT = 12;
 const MAX_RECENT_TEXT = 4000;
 const MAX_LABEL = 80;
 const ROLES = ['owner', 'admin', 'member'];
-const AGENT_LINK = /\[[^\]\n]{0,200}\]\((agent:\/\/[^)\s]{1,200})\)/g;
+const AGENT_LINK = /\[[^\]\n]{0,200}\]\((agent:\/\/[^)\n]*)\)/gi;
 const BEFORE_MENTION = /[\s([{"'“‘]/u;
 const AFTER_MENTION = /[\s.,!?;:)\]}"'”’·…]/u;
 // Fields /chat/board/send refuses or picks per member itself.
@@ -40,33 +39,66 @@ export function boardAgents(thread, { selfName = SELF_NAME } = {}) {
     .map(name => ({ name, profileId: own(links, name) && isProfileId(links[name]?.profileId) ? links[name].profileId : null }));
 }
 
-/**
- * The names the message @mentions, in order, as { name, profileId }. Same
- * rules as the bridge: [이름](agent://id) links, then plain @이름 with the
- * longest names first, so '@디자인 리뷰어' is not read as '@디자인'.
- */
-export function boardMentions(message, thread, { selfName = SELF_NAME } = {}) {
-  const agents = boardAgents(thread, { selfName });
+/** Ordered, normalized roster identity. It is an observation, not authority. */
+export function boardRosterIdentity(members) {
+  const keys = new Set();
+  return members.flatMap(member => {
+    const kind = member.kind;
+    const profileId = kind === 'agent' && isProfileId(member.profileId) ? member.profileId : null;
+    const name = kind === 'agent' ? label(member.label) || null : null;
+    if (kind === 'agent' && !profileId && !name) return [];
+    const role = ROLES.includes(member.role) ? member.role : kind === 'user' ? 'owner' : 'member';
+    const key = kind === 'user' ? 'user' : profileId ? `agent:${profileId}` : `name:${name}`;
+    if (keys.has(key)) return [];
+    keys.add(key);
+    return [[kind, profileId, name, role]];
+  });
+}
+
+/** Both the composer and helper classify addresses; neither rewrites message text. */
+export function boardAddresses(message, members) {
+  const agents = boardRosterIdentity(members).filter(([kind]) => kind === 'agent').map(([, profileId, name]) => ({ profileId, name }));
   const value = typeof message === 'string' ? message : '';
   const found = new Map();
-  const note = (agent, index) => { const key = agent.profileId || `name:${agent.name}`; if (!found.has(key)) found.set(key, { agent, index }); };
-  for (const match of value.matchAll(AGENT_LINK)) {
-    const id = match[1].slice('agent://'.length).split(/[/?#]/)[0];
-    const agent = agents.find(candidate => candidate.profileId === id);
-    if (agent) note(agent, match.index);
+  let invalid = false;
+  const note = (agent, index) => {
+    const key = agent.profileId || `name:${agent.name}`;
+    if (!found.has(key) || found.get(key).index > index) found.set(key, { agent, index });
+  };
+  const masked = value.replace(/`[^`]*`|<[^>\n]*>/g, literal => ' '.repeat(literal.length))
+    .replace(AGENT_LINK, (link, url, index) => {
+      const id = url.slice('agent://'.length).split(/[/?#]/)[0];
+      const agent = /^[^\s]+$/u.test(url) && agents.find(candidate => candidate.profileId === id);
+      if (agent) note(agent, index); else invalid = true;
+      return ' '.repeat(link.length);
+    }).replace(/\[[^\]\n]*\]\(https?:\/\/[^)\n]*\)/gi, literal => ' '.repeat(literal.length)).split('');
+  const beforeMention = at => at === 0 || BEFORE_MENTION.test(masked[at - 1]);
+  const afterMention = at => (at === masked.length || AFTER_MENTION.test(masked[at])) && !(masked[at] === '.' && /[\p{L}\p{N}_]/u.test(masked[at + 1] || ''));
+  for (const match of masked.join('').matchAll(/@(everyone|all)(?![\p{L}\p{N}_-])/giu)) {
+    if (beforeMention(match.index) && afterMention(match.index + match[0].length)) invalid = true;
   }
-  const masked = [...value.replace(AGENT_LINK, link => ' '.repeat(link.length))];
-  for (const agent of [...agents].sort((a, b) => [...b.name].length - [...a.name].length)) {
-    const token = [...`@${agent.name}`];
+  for (const name of [...new Set(agents.map(agent => agent.name).filter(Boolean))].sort((a, b) => b.length - a.length)) {
+    const token = '@' + name;
     for (let at = 0; at + token.length <= masked.length; at++) {
-      if (token.some((char, offset) => masked[at + offset] !== char)) continue;
-      const before = masked[at - 1], after = masked[at + token.length];
-      if ((before !== undefined && !BEFORE_MENTION.test(before)) || (after !== undefined && !AFTER_MENTION.test(after))) continue;
-      note(agent, at);
+      if (masked[at] !== '@' || !beforeMention(at) || !afterMention(at + token.length) || token.split('').some((char, offset) => masked[at + offset] !== char)) continue;
+      const matches = agents.filter(agent => agent.name === name);
+      if (matches.length === 1) note(matches[0], at); else invalid = true;
       masked.fill(' ', at, at + token.length);
     }
   }
-  return [...found.values()].sort((a, b) => a.index - b.index).map(entry => entry.agent);
+  // A leading handle is deliberate. Once an address was found, other bare
+  // handles in the address prefix are deliberate too; prose and emails aren't.
+  const remaining = masked.join('');
+  if (/^\s*@[\p{L}\p{N}_-]/u.test(remaining)) {
+    const at = remaining.search(/\S/u);
+    const first = Math.min(...[...found.values()].map(entry => entry.index));
+    if (/^[\s,;:()\[\]]*$/u.test(value.slice(0, at)) || (first < at && !/[\p{L}\p{N}]/u.test(remaining.slice(first, at)))) invalid = true;
+  }
+  return { invalid, mentioned: [...found.values()].sort((a, b) => a.index - b.index).map(entry => entry.agent) };
+}
+
+export function boardMentions(message, thread, { selfName = SELF_NAME } = {}) {
+  return boardAddresses(message, boardStoreMembers(thread, { selfName })).mentioned;
 }
 
 /** The room's members as chat-store room_members inputs, in the room's order. */
@@ -130,6 +162,7 @@ export function boardMembersSync(thread, answer, { selfName = SELF_NAME } = {}) 
     const restore = threadFieldsFromStoreMembers(thread, saved, { selfName });
     return restore ? { restore } : null;
   }
+  if (answer.rosterSaved === true) return null; // An explicitly emptied roster is not an uninitialized room.
   const members = boardStoreMembers(thread, { selfName });
   return members.length ? { save: members } : null;
 }
@@ -152,31 +185,89 @@ export function boardRecentMessages(thread, { selfName = SELF_NAME } = {}) {
   return rows.slice(-MAX_RECENT);
 }
 
-/**
- * Where this Board Thread message goes. null = the ordinary /chat/send (not a
- * Board Thread, or no mention and a plain-Codex Lead); { path, body } = POST
- * /chat/board/send; { error: code } = refused before sending.
- */
-export function boardSendPlan(thread, chatRequest, { selfName = SELF_NAME } = {}) {
+export const BOARD_PROJECT_DISCLOSURE = '연결된 프로젝트와 기존 대화, 실행 설정에 따른 자료가 답변에 추가로 사용될 수 있습니다.';
+const hasInput = value => value != null && (!Array.isArray(value) || value.length > 0);
+
+/** An empty suggestion response is only a room-scoped acknowledgement. */
+export const boardEmptyResolution = value => value != null && typeof value.resolutionId === 'string' && Array.isArray(value.chosen) && value.chosen.length === 0;
+export function boardHasScopedResources(input) {
+  return ['contextSnapshotIds', 'expectedContextScope', 'attachments', 'selectedSources', 'selectedResources', 'acceptedContextResources']
+    .some(key => hasInput(input[key])) || (hasInput(input.contextResolution) && !boardEmptyResolution(input.contextResolution));
+}
+
+/** Shared route classification from concrete room inputs, not authentication. */
+export function classifyBoardDelivery({ message, members, leadProfileId = null, engine = 'codex', browserBounded = false, stateless = false }) {
+  const roomEngine = engine === 'claude' ? 'Claude' : 'Codex';
+  const candidates = members.some(member => member.label === roomEngine) ? members : [...members, { kind: 'agent', label: roomEngine }];
+  const { mentioned, invalid } = boardAddresses(message, candidates);
+  const named = mentioned.filter(agent => agent.profileId);
+  const unlinked = mentioned.filter(agent => !agent.profileId);
+  const explicitEngine = !leadProfileId && unlinked.length === 1 && !named.length && unlinked[0].name === roomEngine;
+  if (invalid || (unlinked.length && !explicitEngine)) return { code: 'BOARD_UNRESOLVED_ADDRESS' };
+  if (named.length && browserBounded) return { code: 'BOARD_BROWSER_BOUNDED' };
+  if ((named.length || leadProfileId) && engine !== 'codex') return { code: 'BOARD_ENGINE_UNSUPPORTED' };
+  const route = !browserBounded && (named.length || leadProfileId) ? 'board' : 'room';
+  if (route === 'board' && stateless) return { code: 'BOARD_STATELESS_UNSUPPORTED' };
+  return { route, reason: named.length ? 'mentions' : leadProfileId ? 'lead' : 'room-engine', explicitEngine,
+    recipientIds: named.length ? named.map(agent => agent.profileId) : leadProfileId ? [leadProfileId] : [] };
+}
+
+/** The recipient preview and preflight; wire builders use this same result. */
+export function boardDeliveryIntent(thread, message, options = {}) {
+  if (!isBoardRoom(thread)) return null;
+  const selfName = options.selfName ?? SELF_NAME;
+  const clientThreadId = options.clientThreadId ?? clientThreadBinding(thread);
+  const engine = options.engine ?? options.engineId ?? thread.engineId ?? 'codex';
+  const profileEnabled = options.profileEnabled ?? thread.profileEnabled;
+  const candidate = own(options, 'profileId') ? options.profileId : thread.agentProfileId;
+  const leadProfileId = profileEnabled === true && isProfileId(candidate) ? candidate : null;
+  const members = boardStoreMembers(thread, { selfName });
+  const browserBounded = !!(options.browserScope || options.executionPolicy);
+  const stateless = options.stateless === true;
+  const plan = classifyBoardDelivery({ message, members, leadProfileId, engine, browserBounded, stateless });
+  const selected = options.selectedResources ?? options.acceptedContextResources ?? [];
+  const selectedResources = (Array.isArray(selected) ? selected : []).flatMap(resource => {
+    const name = label(resource?.label ?? resource?.title ?? resource?.name ?? resource);
+    return name ? [{ label: name, kind: label(resource?.kind) || '자료' }] : [];
+  });
+  let code = plan.code ?? null;
+  if (!code && members.length > 64) code = 'INVALID_BOARD_MEMBERS';
+  if (!code && plan.route === 'board' && options.supportsBoardDelivery === false) code = 'BOARD_DELIVERY_UNAVAILABLE';
+  if (!code && plan.route === 'board' && boardHasScopedResources(options) && !(plan.recipientIds.length === 1 && plan.recipientIds[0] === leadProfileId)) code = 'BOARD_CONTEXT_SCOPE';
+  const recipients = (plan.recipientIds ?? []).map(profileId => ({ profileId, engine, kind: 'agent',
+    label: members.find(member => member.profileId === profileId)?.label || label(options.profiles?.find?.(profile => profile?.id === profileId)?.name) || (profileId === leadProfileId && label(options.roomAgentName)) || 'Agent' }));
+  if (!code && !recipients.length) recipients.push({ profileId: null, engine, kind: 'room-engine', label: engine === 'claude' ? 'Claude' : 'Codex' });
+  const roomBlock = !code && plan.route === 'board' ? { memberCount: members.filter(member => member.kind === 'user' || member.profileId).length + (leadProfileId && !members.some(member => member.profileId === leadProfileId) ? 1 : 0), recentTurnCount: boardRecentMessages(thread, { selfName }).length } : null;
+  const expectedBoardDelivery = !code && options.supportsBoardDelivery !== false ? {
+    version: 1, clientThreadId, engine, route: plan.route, reason: plan.reason, leadProfileId,
+    recipientIds: plan.recipientIds, roster: boardRosterIdentity(members),
+  } : null;
+  return { ok: !code, code, error: boardSendErrorText(code), route: plan.route ?? null, reason: plan.reason ?? null,
+    recipients, roomBlock, selectedResources, projectDisclosure: BOARD_PROJECT_DISCLOSURE, expectedBoardDelivery };
+}
+
+/** null = ordinary /chat/send; Board preparation never silently falls back. */
+export function boardSendPlan(thread, chatRequest, options = {}) {
   if (!isBoardRoom(thread) || !chatRequest || typeof chatRequest.message !== 'string') return null;
-  const mentioned = boardMentions(chatRequest.message, thread, { selfName });
-  const routable = mentioned.filter(agent => agent.profileId);
-  const lead = chatRequest.profileEnabled === true && isProfileId(chatRequest.profileId) ? chatRequest.profileId : null;
-  // Only the plain Codex was mentioned (it has no Agent of its own): the room's own conversation answers.
-  if (mentioned.length && !routable.length && !lead) return null;
-  if (!routable.length && !lead) return null;
-  if (chatRequest.executionPolicy) return routable.length ? { error: 'BOARD_BROWSER_BOUNDED' } : null;
+  const selfName = options.selfName ?? SELF_NAME;
+  const intent = boardDeliveryIntent(thread, chatRequest.message, { ...options, ...chatRequest });
+  if (!intent.ok) return { error: intent.code };
+  if (options.intent && JSON.stringify(options.intent.expectedBoardDelivery) !== JSON.stringify(intent.expectedBoardDelivery)) return { error: 'BOARD_DELIVERY_CHANGED' };
+  if (intent.route !== 'board') return null;
   const body = {};
   for (const [key, value] of Object.entries(chatRequest)) if (!NOT_FOR_BOARD.includes(key)) body[key] = value;
+  body.engineId = intent.expectedBoardDelivery.engine;
+  body.expectedBoardDelivery = intent.expectedBoardDelivery;
   body.members = boardStoreMembers(thread, { selfName });
+  const lead = intent.expectedBoardDelivery.leadProfileId;
+  body.leadProfileId = lead;
   if (lead) {
-    body.leadProfileId = lead;
     body.profileId = lead;
     if (Number.isSafeInteger(chatRequest.profileRevision)) body.profileRevision = chatRequest.profileRevision;
   }
   const recent = boardRecentMessages(thread, { selfName });
   if (recent.length) body.recentMessages = recent;
-  return { path: BOARD_SEND_PATH, body, mentioned: routable.map(agent => agent.profileId) };
+  return { path: BOARD_SEND_PATH, body, mentioned: intent.reason === 'mentions' ? intent.expectedBoardDelivery.recipientIds : [] };
 }
 
 /**
@@ -257,6 +348,12 @@ export function boardMemberState(profileId, { runs = [], routes = {}, connectedR
 }
 
 const SEND_ERROR_TEXT = Object.freeze({
+  BOARD_DELIVERY_CHANGED: 'Board 참여자나 전송 대상이 바뀌었습니다. 방을 다시 열고 전송 대상을 확인해 주세요.',
+  BOARD_UNRESOLVED_ADDRESS: '확인할 수 없는 @대상이 있습니다. 방에 연결된 Agent를 다시 선택해 주세요. @all 또는 @everyone으로는 보낼 수 없습니다.',
+  BOARD_ENGINE_UNSUPPORTED: '현재 Claude Board에서는 @로 Agent를 부르거나 방의 Lead Agent에게 보낼 수 없습니다. 기본 Claude를 선택해 @없이 보내거나 Codex Board에서 다시 확인해 주세요.',
+  BOARD_DELIVERY_UNAVAILABLE: '현재 연결은 Board 전송 대상을 검증할 수 없습니다. EG-Desk 연결을 업데이트하고 다시 열어 주세요.',
+  BOARD_STATELESS_UNSUPPORTED: '기록 없이 시작할 때는 Board Agent에게 따로 보낼 수 없습니다. 기록 없이 시작을 끄거나 방의 기본 엔진으로 보내 주세요.',
+  BOARD_CONTEXT_SCOPE: '선택한 자료는 이 방의 대화에서만 사용할 수 있습니다. 자료를 빼거나 방의 Lead 한 명만 선택해 주세요.',
   BOARD_NO_RECIPIENT: '이 Board Thread에서 답할 Agent가 없습니다. @로 Agent를 부르거나 방의 Agent를 정해 주세요.',
   BOARD_MEMBERS_REQUIRED: '이 Board Thread의 참여자를 확인하지 못했습니다. 다시 보내 주세요.',
   INVALID_BOARD_MEMBERS: '이 Board Thread의 참여자 정보가 올바르지 않습니다. 참여자를 확인해 주세요.',
