@@ -2,6 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import * as Lifecycle from '../overlay/resources/EGDeskBoardLifecycle.sys.mjs';
+import { createReviewStore } from '../overlay/resources/EGDeskReviewHandoff.sys.mjs';
 import {
   isBoardTrashed, trashBoard, restoreBoard, purgeBoard, trashedBoardEntries, liveBoardIds,
   boardDeletePrompt, boardPurgePrompt, boardSavedNotice, boardCloseSummary, boardRenameResult, uniqueBoardTitle,
@@ -265,7 +266,15 @@ test('screen: every list of saved Boards skips the trash', () => {
 
 // A small stand-in for the chrome document: enough to run the production
 // delete / restore / permanent-delete functions cut out of the surface script.
-function lifecycleHarness(initialStore, { projections = {}, historyReady = false, writable = true } = {}) {
+function lifecycleHarness(initialStore, { projections = {}, historyReady = false, writable = true, reviewWritable = true } = {}) {
+  let reviewJson = '';
+  let reviewWrites = 0;
+  const review = createReviewStore({ read: () => reviewJson, write(value) {
+    if (!reviewWritable) return false;
+    reviewJson = value;
+    reviewWrites++;
+  } });
+  const blockedReviewBoardIds = new Set();
   let store = JSON.parse(JSON.stringify(initialStore));
   const attached = [];
   const notices = [];
@@ -293,6 +302,7 @@ function lifecycleHarness(initialStore, { projections = {}, historyReady = false
   };
   const deps = {
     document, el, BoardLifecycle: Lifecycle, state: { boards: { projections } },
+    reviewStore: () => review, blockedReviewBoardIds,
     coerceAgendaStore: () => JSON.parse(JSON.stringify(store)),
     writeAgendaStoreAndSync: next => { if (!writable) return false; store = JSON.parse(JSON.stringify(next)); return true; },
     boardNotice: message => notices.push(message), boardDoneNotice: message => notices.push(message), syncViewportAgendaRail: () => { rails += 1; },
@@ -300,9 +310,9 @@ function lifecycleHarness(initialStore, { projections = {}, historyReady = false
     agendaSwitcherRow: () => null, boardVersionHistoryReady: () => historyReady,
   };
   const names = ['closeBoardConfirm', 'showBoardConfirm', 'writeBoardLifecycleStore', 'focusBoardTrashToggle',
-    'moveAgendaToTrash', 'restoreAgendaFromTrash', 'purgeAgendaFromTrash', 'deleteAgenda'];
+    'moveAgendaToTrash', 'restoreAgendaFromTrash', 'purgeAgendaFromTrash', 'deleteAgenda', 'forgetReviewBoards'];
   const api = new Function(...Object.keys(deps), `let boardTrashOpen = false;\n${names.map(declaration).join('\n')}\nreturn { ${names.join(', ')}, trashOpen: () => boardTrashOpen };`)(...Object.values(deps));
-  return { ...api, document, notices, store: () => store, rails: () => rails, dialog: () => document.getElementById('egd-board-confirm') };
+  return { ...api, document, notices, review, blockedReviewBoardIds, reviewWrites: () => reviewWrites, seedReview: value => { reviewJson = value; }, store: () => store, rails: () => rails, dialog: () => document.getElementById('egd-board-confirm') };
 }
 const press = node => node.listeners.click({ stopPropagation() {}, target: node });
 
@@ -365,6 +375,58 @@ test('screen: restore returns the Board to the list; permanent delete asks once 
   assert.equal('c' in h.store().agendas, false);
   assert.equal('c' in h.store().meta, false);
   assert.match(h.notices.at(-1), /완전히 삭제했습니다/);
+});
+
+const reviewKey = id => JSON.stringify([id, 1]);
+function seedReviewLedger(h) {
+  const pair = index => ({ requestId: 'f7e41ccd-40bf-44fe-8dbf-11590f5d435' + index, requestDigest: 'a'.repeat(64) });
+  const rows = [['a', pair(1), '보존할 회신'], ['a-copy', pair(2), null], ['c', pair(3), '삭제할 회신'], ['c', pair(4), null]];
+  h.seedReview(JSON.stringify({ version: 1, rows: rows.map(([id, ids, answer], i) => ({ boardId: reviewKey(id), ...ids, answer, at: i })) }));
+  return { untouched: pair(1), prefix: pair(2), target: pair(3), pending: pair(4) };
+}
+
+test('purge: cancel keeps all local records; confirmed purge forgets only the removed Board', () => {
+  const h = lifecycleHarness(storeOf(['a', 'Board A', 0], ['c', 'Board C', 0, { deletedAt: 20 }]));
+  const { untouched, prefix, target, pending } = seedReviewLedger(h);
+  assert.equal(h.purgeAgendaFromTrash('c'), true);
+  press(h.dialog().find('cancel'));
+  assert.equal(h.reviewWrites(), 0);
+  assert.equal(h.review.find(target).answer, '삭제할 회신');
+  assert.equal(h.review.find(pending).answer, null);
+  assert.equal(h.purgeAgendaFromTrash('c'), true);
+  press(h.dialog().find('confirm'));
+  assert.equal(h.store().meta.c, undefined);
+  assert.equal(h.reviewWrites(), 1);
+  assert.equal(h.review.find(target), null);
+  assert.equal(h.review.find(pending), null);
+  assert.equal(h.review.find(untouched).answer, '보존할 회신');
+  assert.equal(h.review.find(prefix).boardId, reviewKey('a-copy'));
+  assert.deepEqual(h.review.results(reviewKey('c')), []);
+});
+
+test('purge: Board write failure preserves local review links and answers through both confirmation paths', () => {
+  for (const confirmed of [false, true]) {
+    const h = lifecycleHarness(storeOf(['c', 'Board C', 0, { deletedAt: 20 }]), { writable: false });
+    const { target, pending, untouched } = seedReviewLedger(h);
+    assert.equal(h.purgeAgendaFromTrash('c', { confirmed }), !confirmed);
+    if (!confirmed) press(h.dialog().find('confirm'));
+    assert.equal(Lifecycle.isBoardTrashed(h.store().meta.c), true);
+    assert.match(h.notices.at(-1), /삭제하지 못했습니다.*그대로/);
+    assert.equal(h.reviewWrites(), 0);
+    for (const ids of [target, pending, untouched]) assert.ok(h.review.find(ids));
+    assert.equal(h.review.results(reviewKey('c'))[0].answer, '삭제할 회신');
+  }
+});
+
+test('purge: cleanup failure is distinct from Board write failure and blocks only that Board', () => {
+  const h = lifecycleHarness(storeOf(['c', 'Board C', 0, { deletedAt: 20 }]), { reviewWritable: false });
+  const { target, untouched } = seedReviewLedger(h);
+  assert.equal(h.purgeAgendaFromTrash('c', { confirmed: true }), true);
+  assert.equal(h.store().meta.c, undefined);
+  assert.match(h.notices.at(-1), /Board를 완전히 삭제했지만.*로컬 검토 기록을 정리하지 못했습니다/);
+  assert.deepEqual([...h.blockedReviewBoardIds], ['c']);
+  assert.ok(h.review.find(target));
+  assert.equal(h.review.find(untouched).answer, '보존할 회신');
 });
 
 // The production name field and its commit, cut out of the surface script.

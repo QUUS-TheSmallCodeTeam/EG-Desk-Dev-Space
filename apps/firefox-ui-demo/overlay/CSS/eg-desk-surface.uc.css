@@ -11274,3 +11274,6 @@ button.egd-memo-ask-cancel:hover { text-decoration: underline; }
 .egd-review-preview dd { margin: 3px 0 0; }
 .egd-review-value { white-space: pre-wrap; overflow-wrap: anywhere; unicode-bidi: plaintext; }
 .egd-review-results { padding-inline-start: 28px; }
+.egd-review-password-fields { display: grid; gap: 10px; }
+.egd-review-password-fields[hidden] { display: none; }
+.egd-review-password-mode { display: flex; align-items: center; gap: 8px; }

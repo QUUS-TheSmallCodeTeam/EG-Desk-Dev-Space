@@ -40,6 +40,7 @@ export const ESCAPE_LAYER_REGISTRY = Object.freeze([
   { id: 'minimap-stack', kind: 'list', label: '미니맵 겹친 목록' },
   { id: 'board-close-guard', kind: 'confirm', label: 'Board 닫기 확인' },
   { id: 'placement-dialog', kind: 'dialog', label: '이동·크기 입력' },
+  { id: 'review-dialog', kind: 'dialog', label: '검토 파일' },
   { id: 'portable-dialog', kind: 'dialog', label: '내보내기·가져오기' },
   { id: 'chat-input-panel', kind: 'panel', label: 'Chat 프로젝트·자료 패널' },
   { id: 'minimap', kind: 'minimap', label: '미니맵' },

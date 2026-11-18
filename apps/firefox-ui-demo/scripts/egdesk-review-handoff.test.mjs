@@ -1,7 +1,8 @@
 #!/usr/bin/env node
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { createReviewFlow, createReviewStore, reviewDialogContent, reviewHandoffSupported, REVIEW_RECORD_LIMIT } from '../overlay/resources/EGDeskReviewHandoff.sys.mjs';
+import { runInNewContext } from 'node:vm';
+import { createReviewFlow, createReviewStore, reviewDialogContent, reviewHandoffSupported, REVIEW_RECORD_LIMIT, REVIEW_MAX_FILE_BYTES } from '../overlay/resources/EGDeskReviewHandoff.sys.mjs';
 
 const ID = 'f7e41ccd-40bf-44fe-8dbf-11590f5d4358';
 const DIGEST = 'c'.repeat(64);
@@ -38,7 +39,7 @@ function host({ disk = ledger(), withBoard = true } = {}) {
     },
   });
   let tree = [];
-  function panel() { tree = reviewDialogContent(fakeElement, flow.view(), flow).children; }
+  function panel(typed) { tree = reviewDialogContent(fakeElement, flow.view(), flow, { typed }).children; }
   const find = id => descendants(tree).find(node => node.props?.data?.testid === `review-${id}`);
   function field(id, value) { const input = find(id); assert.ok(input, id); input.value = value; }
   function click(id) {
@@ -48,7 +49,11 @@ function host({ disk = ledger(), withBoard = true } = {}) {
   }
   async function choose() { flow.openFile(); panel(); click('choose'); await tick(); panel(); }
   function compose(values = draft) { flow.openRequest(a); panel(); for (const [key, value] of Object.entries(values)) field(key, value); click('preview'); panel(); }
-  return { disk, store, a, b, boards, mock, flow, panel, find, click, field, choose, compose };
+  function lock(checked) {
+    const control = find('password-mode'); assert.ok(control);
+    control.checked = checked; control.props.onchange();
+  }
+  return { disk, store, a, b, boards, mock, flow, panel, find, click, field, lock, choose, compose, text: () => tree.map(text).join(' ') };
 }
 
 test('manual round trip: blank Board form, exact previews, two profiles and explicit durable return', async () => {
@@ -151,10 +156,10 @@ test('export receipt is not registered after context changes; a double-submit se
 test('optional excerpt, password retry without persistence, byte size, unsupported bridge and bounded records', async () => {
   const h = host(); h.compose({ ...draft, excerpt: '' });
   assert.equal(text(h.find('value-excerpt')), '');
-  h.field('passphrase', '다른-파일암호들이'); h.click('export'); h.panel();
-  assert.equal(h.mock.calls.length, 0);
-  assert.equal(h.find('passphrase').value, '');
   h.mock.locked = true; await h.choose(); assert.equal(h.flow.view().step, 'locked');
+  assert.match(h.text(), /암호로 잠긴 EG-Desk 파일/);
+  assert.match(h.text(), /암호를 입력해야 검토 요청 또는 회신 파일인지 확인/);
+  assert.equal(h.find('reply'), undefined);
   h.field('passphrase', 'wrong'); h.click('unlock'); await tick(); h.panel();
   assert.equal(h.flow.view().step, 'locked'); assert.equal(h.find('passphrase').value, '');
   h.field('passphrase', '공유파일-테스트'); h.click('unlock'); await tick();
@@ -169,4 +174,74 @@ test('optional excerpt, password retry without persistence, byte size, unsupport
   for (let i = 0; i <= REVIEW_RECORD_LIMIT; i++) h.store.issue(h.a.id, { ...pair, requestId: ID.slice(0, -4) + i.toString(16).padStart(4, '0') });
   assert.equal(h.store.find(first), null);
   assert.equal(JSON.parse(h.disk.serialized).rows.length, REVIEW_RECORD_LIMIT);
+});
+
+
+test('export UI omits plaintext passphrase; selected password mode refuses empty or mismatched values', async () => {
+  const h = host(); h.compose();
+  assert.equal(h.find('password-mode').checked, false);
+  h.lock(true);
+  h.click('export');
+  assert.equal(h.mock.calls.length, 0);
+  assert.equal(h.flow.view().error.field, 'passphrase');
+  assert.equal(h.flow.view().step, 'request-preview');
+  h.panel({ passwordProtected: true });
+  assert.equal(h.find('password-mode').checked, true);
+  h.field('passphrase', '암호-선택-테스트'); h.click('export');
+  assert.equal(h.flow.view().error.field, 'confirm');
+  assert.equal(h.mock.calls.length, 0);
+  h.lock(false);
+  assert.equal(h.find('passphrase').value, '', 'turning password mode off clears the password');
+  h.click('export'); await tick();
+  assert.deepEqual(h.mock.calls[0].body, { review: { kind: 'request', ...draft } });
+  assert.equal(Object.hasOwn(h.mock.calls[0].body, 'passphrase'), false);
+
+  const encrypted = host(); encrypted.compose(); encrypted.lock(true);
+  encrypted.field('passphrase', '암호-선택-테스트'); encrypted.field('confirm', '암호-선택-테스트');
+  encrypted.click('export'); await tick();
+  assert.equal(encrypted.flow.view().step, 'exported');
+  assert.equal(encrypted.flow.view().encrypted, true);
+  assert.equal(encrypted.mock.calls[0].body.passphrase, '암호-선택-테스트');
+});
+
+test('picker accepts genuine cross-realm octets, rejects impostors and limits the input before transport', async () => {
+  const h = host();
+  const otherRealm = runInNewContext('new Uint8Array([10, 20, 30])');
+  assert.equal(otherRealm instanceof Uint8Array, false, 'the native picker may return a different realm');
+  h.mock.picked = { bytes: otherRealm };
+  await h.choose();
+  assert.equal(h.flow.view().step, 'request-inspected');
+  assert.equal(h.mock.calls[0].body.bundle, 'ChQe');
+  const invalid = [new Uint16Array([1]), new Uint8ClampedArray([1]), new DataView(new ArrayBuffer(1)),
+    { [Symbol.toStringTag]: 'Uint8Array', length: 1, byteLength: 1, 0: 5 }, new Uint8Array(REVIEW_MAX_FILE_BYTES + 1),
+    Object.create(Uint8Array.prototype)];
+  for (const bytes of invalid) {
+    h.mock.picked = { bytes };
+    await h.choose();
+    assert.equal(h.flow.view().step, 'choose');
+    assert.ok(h.find('error'));
+  }
+  assert.equal(h.mock.calls.length, 1);
+});
+
+test('encrypted reply discloses local plaintext before confirmation and can be canceled without writing', async () => {
+  const h = host(); h.store.issue(h.a.id, request);
+  h.mock.incoming = reply;
+  h.mock.locked = true;
+  const inspect = async () => {
+    await h.choose();
+    h.field('passphrase', '공유파일-테스트'); h.click('unlock'); await tick(); h.panel();
+  };
+  await inspect();
+  assert.equal(h.flow.view().step, 'reply-inspected');
+  assert.match(h.text(), /Firefox 프로필에 평문으로 저장.*파일 암호는 이 로컬 기록을 보호하지 않습니다/);
+  assert.equal(h.disk.writes, 1);
+  h.click('back');
+  assert.equal(h.flow.view().step, 'choose');
+  assert.equal(h.disk.writes, 1);
+  assert.deepEqual(h.store.results(h.a.id), []);
+  await inspect();
+  h.click('return');
+  assert.equal(h.disk.writes, 2);
+  assert.equal(h.store.results(h.a.id)[0].answer, reply.answer);
 });

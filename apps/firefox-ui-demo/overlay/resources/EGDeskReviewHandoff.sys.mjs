@@ -14,6 +14,19 @@ const pairValid = value => typeof value?.requestId === 'string' && idPattern.tes
 const pair = ({ requestId, requestDigest }) => ({ requestId, requestDigest });
 const samePair = (a, b) => a.requestId === b.requestId && a.requestDigest === b.requestDigest;
 const encoder = new TextEncoder();
+// IOUtils can supply an octet array from a different Gecko realm. Native
+// TypedArray getters inspect internal slots rather than a caller-provided tag.
+const typedArrayProto = Object.getPrototypeOf(Uint8Array.prototype);
+const typedArrayBrand = Object.getOwnPropertyDescriptor(typedArrayProto, Symbol.toStringTag).get;
+const typedArrayByteLength = Object.getOwnPropertyDescriptor(typedArrayProto, 'byteLength').get;
+function copyReviewBytes(value) {
+  if (typedArrayBrand.call(value) !== 'Uint8Array') return null;
+  const length = typedArrayByteLength.call(value);
+  if (!length || length > REVIEW_MAX_FILE_BYTES) return null;
+  const bytes = new Uint8Array(length);
+  Uint8Array.prototype.set.call(bytes, value);
+  return bytes;
+}
 const failure = (text, field) => ({ text, field });
 
 export function reviewHandoffSupported(state) {
@@ -188,8 +201,8 @@ export function createReviewFlow({ request, pickFile, getContext, isContextCurre
       const picked = await pickFile({ signal });
       if (!current(s)) return;
       if (!picked || picked.cancelled) { end(s, { step: 'choose' }); return; }
-      const bytes = picked.bytes instanceof Uint8Array ? picked.bytes : null;
-      if (!bytes?.length || bytes.length > REVIEW_MAX_FILE_BYTES) { end(s, { step: 'choose', error: failure('검토 파일은 비어 있지 않아야 하며 최대 256 KiB입니다.') }); return; }
+      const bytes = copyReviewBytes(picked.bytes);
+      if (!bytes) { end(s, { step: 'choose', error: failure('검토 파일은 비어 있지 않아야 하며 최대 256 KiB입니다.') }); return; }
       s.source = { bundle: bytesToBase64(bytes) };
       await inspect(s, '', signal);
     } catch (error) {
@@ -250,26 +263,28 @@ export function createReviewFlow({ request, pickFile, getContext, isContextCurre
     update(s, { step: 'reply-preview', review: s.draft, error: null });
     return true;
   }
-  async function exportFile({ passphrase = '', confirm = '' } = {}) {
+  async function exportFile({ passphrase = '', confirm = '', passwordProtected = passphrase !== '' } = {}) {
     const s = active;
     if (!current(s) || !['request-preview', 'reply-preview'].includes(s.view.step) || !s.draft) return;
     const step = s.view.step, review = s.draft;
-    if (passphrase && (Array.from(passphrase).length < PORTABLE_MIN_PASSPHRASE_CHARS || passphrase.length > PORTABLE_MAX_PASSPHRASE_CHARS)) {
-      resetError(s, '파일 암호는 8자 이상, 최대 1024자입니다.', 'passphrase'); return;
+    if (passwordProtected) {
+      if (typeof passphrase !== 'string' || Array.from(passphrase).length < PORTABLE_MIN_PASSPHRASE_CHARS || passphrase.length > PORTABLE_MAX_PASSPHRASE_CHARS) {
+        resetError(s, '암호로 잠그려면 파일 암호를 8자 이상, 최대 1024자까지 입력해 주세요.', 'passphrase'); return;
+      }
+      if (passphrase !== confirm) { resetError(s, '두 암호가 같지 않습니다.', 'confirm'); return; }
     }
-    if (passphrase !== confirm) { resetError(s, '두 암호가 같지 않습니다.', 'confirm'); return; }
     if (review.kind === 'request') {
       try { store.check(); } catch { resetError(s, storeFailure); return; }
     }
     const signal = begin(s, 'exporting');
     if (!signal || signal.aborted || !current(s)) return;
     let response;
-    try { response = await request('POST', '/v1/portable/review/export', { review, ...(passphrase ? { passphrase } : {}) }, { signal }); }
+    try { response = await request('POST', '/v1/portable/review/export', { review, ...(passwordProtected ? { passphrase } : {}) }, { signal }); }
     catch { response = null; }
     if (!current(s)) return;
     const body = response?.body;
     const returned = response?.status === 201 ? canonicalReview(body?.review) : null;
-    if (!returned || Object.keys(review).some(key => returned[key] !== review[key]) || body.encrypted !== !!passphrase) {
+    if (!returned || Object.keys(review).some(key => returned[key] !== review[key]) || body.encrypted !== !!passwordProtected) {
       end(s, { step, error: failure(exportError(body?.code)) }); return;
     }
     let warning = null;
@@ -335,12 +350,12 @@ export function reviewDialogContent(el, view, flow, { typed = {}, onClose = flow
     el('div', {}, el('dt', {}, REVIEW_LABELS[field]), el('dd', {}, previewText(field, value[field])))));
   const buttons = (...children) => el('div', { class: 'egd-review-actions' }, ...children);
   const back = () => action('back', '뒤로', () => flow.back());
-  const form = (fields, label, submitId, read, initial = {}) => {
+  const form = (fields, label, submitId, read, initial = {}, exportOptions = false) => {
     const inputs = {};
     const labels = fields.map(field => {
       const password = ['passphrase', 'confirm'].includes(field);
       const multiline = !password && field !== 'recipient';
-      const caption = field === 'passphrase' ? (step === 'locked' ? '파일 암호' : '파일 암호 (선택)') : field === 'confirm' ? '파일 암호 다시 입력' :
+      const caption = field === 'passphrase' ? '파일 암호' : field === 'confirm' ? '파일 암호 다시 입력' :
         `${REVIEW_LABELS[field]}${field === 'excerpt' ? ' (선택)' : ''}`;
       const input = el(multiline ? 'textarea' : 'input', {
         class: 'egd-portable-input', type: multiline ? null : (password ? 'password' : 'text'),
@@ -354,10 +369,27 @@ export function reviewDialogContent(el, view, flow, { typed = {}, onClose = flow
       inputs[field] = input;
       return el('label', { class: 'egd-portable-field' }, el('span', { class: 'egd-portable-field-label' }, caption), input);
     });
+    let lock, passwordFields, plainWarning;
+    if (exportOptions) {
+      passwordFields = el('div', { id: 'egd-review-password-fields', class: 'egd-review-password-fields' }, ...labels);
+      plainWarning = note(REVIEW_PLAIN_NOTE, 'warning');
+      lock = el('input', { type: 'checkbox', 'aria-controls': 'egd-review-password-fields',
+        data: { field: 'passwordProtected', testid: 'review-password-mode', focusKey: 'passwordProtected' },
+        onchange: () => {
+          passwordFields.hidden = !lock.checked;
+          plainWarning.hidden = lock.checked;
+          if (!lock.checked) inputs.passphrase.value = inputs.confirm.value = '';
+        } });
+      lock.checked = typed.passwordProtected === true;
+      passwordFields.hidden = !lock.checked;
+      plainWarning.hidden = lock.checked;
+    }
     return el('form', { class: 'egd-review-form', onsubmit: ev => {
       ev.preventDefault();
-      read(Object.fromEntries(Object.entries(inputs).map(([key, input]) => [key, input.value])));
-    } }, ...labels, buttons(step !== 'request-draft' ? back() : null,
+      const values = Object.fromEntries(Object.entries(inputs).map(([key, input]) => [key, input.value]));
+      read(lock ? (lock.checked ? { ...values, passwordProtected: true } : { passwordProtected: false }) : values);
+    } }, ...(lock ? [el('label', { class: 'egd-review-password-mode' }, lock, '암호로 잠그기'), plainWarning, passwordFields] : labels),
+    buttons(step !== 'request-draft' ? back() : null,
       el('button', { type: 'submit', class: 'egd-store-primary', data: { testid: `review-${submitId}`, focusKey: submitId } }, label)));
   };
   let title = '검토 파일 열기';
@@ -369,14 +401,15 @@ export function reviewDialogContent(el, view, flow, { typed = {}, onClose = flow
   } else if (step === 'request-preview' || step === 'reply-preview') {
     const request = step === 'request-preview';
     title = request ? '검토 요청 미리보기' : '검토 회신 미리보기';
-    content = [preview(review, request ? requestFields : ['answer']), note(REVIEW_MANUAL_NOTE), note(REVIEW_PLAIN_NOTE, 'warning'),
-      form(['passphrase', 'confirm'], request ? '요청 파일 만들기' : '회신 파일 만들기', 'export', values => void flow.exportFile(values))];
+    content = [preview(review, request ? requestFields : ['answer']), note(REVIEW_MANUAL_NOTE),
+      form(['passphrase', 'confirm'], request ? '요청 파일 만들기' : '회신 파일 만들기', 'export', values => void flow.exportFile(values), {}, true)];
   } else if (step === 'choose') {
     content = [note('직접 받은 .egdesk 검토 요청 또는 회신 파일을 엽니다. 미리보기만으로는 어느 Board도 바뀌지 않습니다.'),
       buttons(action('choose', '검토 파일 선택…', () => void flow.chooseFile(), true))];
   } else if (step === 'locked') {
-    title = '암호로 잠긴 검토 파일';
-    content = [form(['passphrase'], '내용 미리보기', 'unlock', values => void flow.unlock(values.passphrase))];
+    title = '암호로 잠긴 EG-Desk 파일';
+    content = [note('암호를 입력해야 검토 요청 또는 회신 파일인지 확인할 수 있습니다.'),
+      form(['passphrase'], '내용 미리보기', 'unlock', values => void flow.unlock(values.passphrase))];
   } else if (step === 'request-inspected' || step === 'reply-draft') {
     title = step === 'reply-draft' ? '검토 회신 작성' : '검토 요청 내용';
     const writing = step === 'reply-draft';
@@ -387,6 +420,7 @@ export function reviewDialogContent(el, view, flow, { typed = {}, onClose = flow
     title = '검토 회신 내용';
     content = [preview(review, ['answer']), note('파일만으로는 작성자를 확인할 수 없습니다.'), view.message ? status(view.message) : null,
       view.canReturn ? note(`이 요청을 만든 ‘${view.boardTitle}’ Board에만 회신 내용을 로컬 기록으로 남깁니다. 카드나 원본은 바뀌지 않습니다.`) : null,
+      view.canReturn && view.encrypted ? note('추가하면 회신 내용이 이 Firefox 프로필에 평문으로 저장됩니다. 파일 암호는 이 로컬 기록을 보호하지 않습니다. 원하지 않으면 뒤로 가거나 창을 닫으세요.', 'warning') : null,
       buttons(back(), view.canReturn ? action('return', '원래 Board에 회신 추가', () => flow.confirmReturn(), true) : null)];
   } else if (step === 'returned') {
     title = '이 Board에 회신 추가됨';

@@ -7369,10 +7369,10 @@
     if (!entry) return false;
     const purge = () => {
       const result = BoardLifecycle.purgeBoard(coerceAgendaStore(), agendaId);
-      if (result?.ok && !forgetReviewBoards([agendaId])) return false;
       if (!writeBoardLifecycleStore(result, 'Board를 삭제하지 못했습니다. 휴지통에 그대로 있습니다.')) return false;
+      const cleaned = forgetReviewBoards([agendaId], 'Board를 완전히 삭제했지만, 이 프로필의 로컬 검토 기록을 정리하지 못했습니다.');
       syncViewportAgendaRail();
-      boardDoneNotice(`'${result.title}' Board를 완전히 삭제했습니다.`);
+      if (cleaned) boardDoneNotice(`'${result.title}' Board를 완전히 삭제했습니다.`);
       focusBoardTrashToggle();
       return true;
     };
@@ -29578,12 +29578,12 @@
     });
     return reviewStoreRef;
   }
-  function forgetReviewBoards(ids) {
+  function forgetReviewBoards(ids, failureMessage = '이 프로필의 검토 연결을 정리하지 못했습니다. 해당 Board에서 검토 기록을 사용하지 않습니다.') {
     if (!ids.length) return true;
     try { reviewStore().forgetBoards(ids, key => JSON.parse(key)[0]); return true; }
     catch {
       for (const id of ids) blockedReviewBoardIds.add(id);
-      boardNotice('이 프로필의 검토 연결을 정리하지 못했습니다. 해당 Board에서 검토 기록을 사용하지 않습니다.');
+      boardNotice(failureMessage);
       return false;
     }
   }
@@ -29649,24 +29649,26 @@
     if (!view) boardNotice('현재 Desk에서 검토 작업을 시작하지 못했습니다. 다시 시도해 주세요.');
   }
   function closeReviewDialog() {
-    if (reviewFlowRef?.view()?.step === 'exporting') return;
+    // A refused dismiss must leave the standing layer registered, so Escape
+    // cannot fall through to anything under the file-write receipt.
+    if (reviewFlowRef?.view()?.step === 'exporting') return false;
     reviewFlowRef?.close();
     const opener = reviewOpener;
     reviewOpener = null;
-    (opener?.isConnected ? opener : document.getElementById('egd-desk-menu-open'))?.focus();
+    const fallback = document.getElementById('egd-desk-menu-open');
+    const target = opener?.isConnected && !opener.hidden ? opener : fallback?.isConnected && !fallback.hidden ? fallback : null;
+    target?.focus({ preventScroll: true });
+    return true;
   }
   function renderReviewDialog(view) {
     let panel = document.getElementById('egd-review-dialog');
     if (!view) { panel?.remove(); return; }
     const typed = panel?.dataset.step === view.step ? Object.fromEntries([...panel.querySelectorAll('[data-field]:not([type=password])')]
-      .map(input => [input.dataset.field, input.value])) : {};
+      .map(input => [input.dataset.field, input.type === 'checkbox' ? input.checked : input.value])) : {};
     const focusKey = panel?.dataset.step === view.step && panel.contains(document.activeElement) ? document.activeElement.dataset?.focusKey : null;
     if (!panel) {
       panel = el('section', { id: 'egd-review-dialog', class: 'egd-store-panel', role: 'dialog', tabindex: '-1', data: { testid: 'review-dialog' },
-        onmousedown: ev => ev.stopPropagation(), onkeydown: ev => {
-          if (ev.key !== 'Escape') return;
-          ev.stopPropagation(); ev.preventDefault(); closeReviewDialog();
-        } });
+        onmousedown: ev => ev.stopPropagation() });
       document.documentElement.appendChild(panel);
     }
     const content = ReviewHandoff.reviewDialogContent(el, view, reviewFlow(), { typed, onClose: closeReviewDialog, reveal: revealPortableFile });
@@ -29674,8 +29676,10 @@
     panel.setAttribute('aria-label', content.title);
     panel.setAttribute('aria-busy', String(view.busy));
     panel.replaceChildren(...content.children);
-    const focus = [...panel.querySelectorAll('[data-focus-key]')].find(node => node.dataset.focusKey === (view.error?.field || focusKey))
-      || panel.querySelector('[data-field], .egd-store-primary') || panel.querySelector('button:not([disabled])') || panel;
+    const visible = node => !node.disabled && !node.closest('[hidden]');
+    const focus = [...panel.querySelectorAll('[data-focus-key]')].find(node => visible(node) && node.dataset.focusKey === (view.error?.field || focusKey))
+      || [...panel.querySelectorAll('[data-field], .egd-store-primary, button')].find(node => visible(node) && (node.dataset.field || node.classList.contains('egd-store-primary')))
+      || panel.querySelector('button:not([disabled])') || panel;
     focus.focus({ preventScroll: true });
     panel.scrollTop = 0;
   }

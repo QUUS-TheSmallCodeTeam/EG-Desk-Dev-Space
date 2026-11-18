@@ -6,6 +6,7 @@ import { test } from 'node:test';
 import * as EscapeLayerStack from '../overlay/resources/EGDeskLayerStack.sys.mjs';
 import * as AccountMenuFocus from '../overlay/resources/EGDeskFocusNavigation.sys.mjs';
 import * as SurfaceKeys from '../overlay/resources/surface/EGDeskSurfaceKeys.mjs';
+import { createReviewFlow, createReviewStore } from '../overlay/resources/EGDeskReviewHandoff.sys.mjs';
 
 const surfaceSource = readFileSync(new URL('../overlay/JS/eg-desk-surface.uc.js', import.meta.url), 'utf8');
 const CHAT_MENU_OPENER = '.egd-codex-thread-menu-trigger-active, .egd-codex-message-menu-trigger-active, '
@@ -48,7 +49,7 @@ function mountEscapeLayers() {
     },
   };
   const escapeLayers = EscapeLayerStack.createLayerStack({ rank: EscapeLayerStack.escapeRank });
-  const registerEscapeLayer = (layer) => { const id = escapeLayers.push(layer); return () => escapeLayers.remove(id); };
+  const registerEscapeLayer = (layer) => { SurfaceKeys.registeredEscapeLayer(layer.id, layer.kind); const id = escapeLayers.push(layer); return () => escapeLayers.remove(id); };
   const closers = {};
   const closer = name => (...args) => { log.push(`close:${name}`); return closers[name]?.(...args); };
   const names = ['window', 'document', 'state', 'EscapeLayerStack', 'escapeLayers', 'registerEscapeLayer', 'boardRegionMenu', 'deskMenu',
@@ -56,7 +57,11 @@ function mountEscapeLayers() {
     'closeBoardHistoryPanel', 'closeDeskHistoryPanel', 'closeDeskMinimap', 'setHudPresentationHidden', 'exitCardFullscreen',
     'SurfaceKeys', 'closeMaximizeHudPeek', 'memoRelink', 'forwardingEscape', 'KeyboardEvent'];
   const relink = { current: null };
-  const install = new Function(...names, `${surfaceSource.slice(start, end)}\n  return installEscapeLayers;`)(
+  const closeStart = surfaceSource.indexOf('  function closeReviewDialog() {');
+  const closeEnd = surfaceSource.indexOf('  function renderReviewDialog(', closeStart);
+  assert.ok(closeStart > 0 && closeEnd > closeStart);
+  const { install, setReview } = new Function(...names,     `${surfaceSource.slice(start, end)}\n${surfaceSource.slice(closeStart, closeEnd)}\nlet reviewFlowRef, reviewOpener;
+    return { install: installEscapeLayers, setReview(flow, opener) { reviewFlowRef = flow; reviewOpener = opener; } };`)(
     window, document, state, EscapeLayerStack, escapeLayers, registerEscapeLayer, null, null,
     closer('board-menu'), closer('desk-menu'), closer('minimap-stack'), closer('close-guard'), closer('rail-search'), closer('board-switcher'),
     closer('board-history'), closer('desk-history'), closer('minimap'), closer('hud-hidden'), closer('fullscreen'),
@@ -75,14 +80,14 @@ function mountEscapeLayers() {
     if (!event.stopped) fire('keydown', false, event);
     return event;
   };
-  return { log, state, document, ids, selectors, node, closers, escapeLayers, listeners, press, fire, relink };
+  return { log, state, document, ids, selectors, node, closers, escapeLayers, listeners, press, fire, relink, setReview };
 }
 
 test('the surface registers every Escape layer through one channel and listens in one place', () => {
   const { escapeLayers, listeners } = mountEscapeLayers();
   for (const id of ['chat-menu', 'settings-account-menu', 'board-menu', 'desk-menu', 'minimap-stack', 'board-close-guard',
     'minimap', 'desk-history', 'board-history', 'board-switcher', 'rail-search', 'chat-peek', 'focus-view', 'view-fullscreen', 'memo-relink',
-    'browser-menu', 'browser-agent-timeline', 'resource-detail', 'portable-dialog', 'chat-input-panel']) {
+    'browser-menu', 'browser-agent-timeline', 'resource-detail', 'review-dialog', 'portable-dialog', 'chat-input-panel']) {
     assert.equal(escapeLayers.has(id), true, id);
   }
   assert.equal(escapeLayers.size(), 0);
@@ -391,6 +396,78 @@ test('UX-06: surfaces with their own Escape handler get one forwarded Escape whe
   // Resource detail listens on the document: it is a small popover, so it closes before the minimap.
   assert.equal(SurfaceKeys.escapeTierOf(SurfaceKeys.escapeLayerSpec('resource-detail').kind), 'menu');
   assert.equal(SurfaceKeys.escapeTierOf(SurfaceKeys.escapeLayerSpec('chat-input-panel').kind), 'panel');
+});
+
+test('UX-06: actual review dialog sits between menus and panels, restores focus and leaves IME alone', () => {
+  const { log, state, document, ids, selectors, node, escapeLayers, press, setReview } = mountEscapeLayers();
+  const opener = node('button'); opener.name = 'review-opener';
+  const field = node('textarea', ['#egd-review-dialog']);
+  const flow = createReviewFlow({ getContext: () => ({}), isContextCurrent: () => true, onState: view => {
+    if (view) ids.set('egd-review-dialog', node('section'));
+    else ids.delete('egd-review-dialog');
+  } });
+  setReview(flow, opener);
+  flow.openFile();
+  state.railSearch.open = true;
+  state.codex.threadMenu = {};
+  selectors.set(CHAT_MENU_OPENER, node('button'));
+  assert.deepEqual(SurfaceKeys.escapeCloseOrder(['rail-search', 'review-dialog', 'chat-menu', 'portable-dialog']),
+    ['chat-menu', 'portable-dialog', 'review-dialog', 'rail-search']);
+  assert.equal(escapeLayers.top().id, 'chat-menu');
+  assert.equal(press(node()).defaultPrevented, true);
+  assert.equal(escapeLayers.top().id, 'review-dialog');
+  document.activeElement = field;
+  assert.equal(press(field, { isComposing: true }).defaultPrevented, false);
+  assert.equal(press(field, { repeat: true }).defaultPrevented, false);
+  assert.equal(flow.view().step, 'choose');
+  assert.equal(press(field).defaultPrevented, true);
+  assert.equal(flow.view(), null);
+  assert.equal(document.activeElement, opener);
+  assert.equal(log.at(-1), 'focus:review-opener');
+  assert.equal(escapeLayers.top().id, 'rail-search');
+});
+
+test('UX-06: busy review consumes repeated Escape without unregistering; stale review closes and focuses the Desk fallback', async () => {
+  const { log, state, document, ids, node, escapeLayers, press, setReview } = mountEscapeLayers();
+  const opener = node('button'); opener.name = 'board-review-opener';
+  const desk = node('button'); desk.name = 'desk-menu-opener';
+  ids.set('egd-desk-menu-open', desk);
+  const under = node('div');
+  let signal, release, epoch = 0;
+  const flow = createReviewFlow({ getContext: () => ({ epoch }), isContextCurrent: context => context.epoch === epoch,
+    isBoardCurrent: () => true, request: (_method, _path, _body, options) => {
+      signal = options.signal;
+      return new Promise(resolve => { release = resolve; });
+    }, store: createReviewStore({ read: () => '', write: () => assert.fail('stale export recorded') }),
+    onState: view => {
+      if (view) ids.set('egd-review-dialog', node('section'));
+      else ids.delete('egd-review-dialog');
+    } });
+  setReview(flow, opener);
+  flow.openRequest({ id: 'A', title: 'Board A' });
+  flow.previewRequest({ recipient: '담당', question: '질문', excerpt: '', expectedReply: '답변' });
+  const pending = flow.exportFile();
+  state.railSearch.open = true;
+  for (let i = 0; i < 2; i++) {
+    assert.equal(press(under).defaultPrevented, true);
+    assert.equal(flow.view().step, 'exporting');
+    assert.equal(escapeLayers.top().id, 'review-dialog');
+    assert.equal(escapeLayers.has('review-dialog'), true);
+  }
+  assert.equal(signal.aborted, false);
+  assert.equal(log.length, 0);
+  opener.isConnected = false;
+  epoch++;
+  flow.invalidate();
+  assert.equal(signal.aborted, true);
+  assert.equal(flow.view().step, 'stopped');
+  assert.equal(press(under).defaultPrevented, true);
+  assert.equal(flow.view(), null);
+  assert.equal(document.activeElement, desk);
+  assert.equal(escapeLayers.top().id, 'rail-search');
+  release({ status: 201 });
+  await pending;
+  assert.equal(flow.view(), null);
 });
 
 test('UX-06: the Browser Agent chip opens a peek while maximized and the normal Chat otherwise', () => {
