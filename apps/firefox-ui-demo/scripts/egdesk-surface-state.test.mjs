@@ -26252,3 +26252,22 @@ test('Board mixed started, failed and unknown outcomes explain exact names and n
     await h.send(); assert.equal(h.calls.provider.length, 1);
   }
 });
+
+test('Board member sync distinguishes legacy empty replies from a confirmed saved empty roster', async () => {
+  const start = surfaceSource.indexOf('    async function syncBoardMembers(');
+  const end = surfaceSource.indexOf('\n    }', start);
+  for (const [supported, response, restored] of [
+    [false, { saved: true, members: [] }, false],
+    [false, { saved: true, rosterSaved: true, members: [] }, true],
+    [true, { saved: true, members: [] }, true],
+  ]) {
+    let thread = boardComposerFixture({ id: 'room', clientBindingId: 'wire-room' });
+    const deps = { ChatState: Chat, BoardThread, SELF_MEMBER: 'self', state: { codex: { boardDeliverySupported: supported } },
+      boardMembersChecked: new Set(), boardMembersUnsaved: new Set(), getCodexThreadById: () => thread,
+      fetchJson: async () => response, saveBoardMembers: () => assert.fail('a saved response should never overwrite the store'),
+      updateThreadById: (_id, apply) => { thread = apply(thread); }, buildThreadSubtitle: () => '', emit() {} };
+    const sync = compileFunction(surfaceSource.slice(start, end + 6) + '\nreturn syncBoardMembers;', Object.keys(deps))(...Object.values(deps));
+    await sync('room');
+    assert.equal(thread.participants.includes('솔빛'), !restored);
+  }
+});
