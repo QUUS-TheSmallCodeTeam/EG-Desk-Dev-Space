@@ -8877,7 +8877,7 @@ function composerViewportHarness() {
     'let restoringComposerFocus = false, compositionInProgress = false, deferredCodex = null;',
     'const attach = () => { const input = body.querySelector(".egd-codex-input");',
     'const activeThread = { id: input.dataset.threadId, conversationId: null, preparingInput: false };',
-    'const sendButton = {};', resize, inputEvents,
+    'const sendButton = {}, blockedSend = {};', resize, inputEvents,
     'input.resize = resizeComposer; queueMicrotask(resizeComposer); };',
     'const render = (value, threadId, focused) => {', snapshot,
     'replace(value, threadId, focused); const activeThread = { id: threadId }; attach();', restore, '};',

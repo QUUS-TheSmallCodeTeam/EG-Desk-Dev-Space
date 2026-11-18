@@ -13872,7 +13872,6 @@
               sendButton.title = ChatState.nativeBindingHeld(activeThread) || nativeSendHeld ? '보관된 연결을 현재 계정에 자동 연결하지 않습니다'
                 : invalidProject ? CHAT_REQUEST_PROJECT_INVALID : roomProjectBlock || readiness.reason
                   || (activeThread.preparingInput ? '첨부를 준비하는 중입니다.' : codex.isSending ? '요청을 보내는 중입니다.' : '보내기');
-              if (!sendButton.disabled) blockedSend.textContent = '';
             };
             input.addEventListener('input', () => {
               composerViewport.cancel(input);
