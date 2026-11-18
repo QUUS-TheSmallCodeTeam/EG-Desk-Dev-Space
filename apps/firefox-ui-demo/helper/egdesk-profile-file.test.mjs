@@ -236,3 +236,24 @@ test('file names keep letters of any script', () => {
   assert.equal(agentFileName('...'), 'agent.md')
   assert.equal(agentFileName('가'.repeat(80)), `${'가'.repeat(60)}.md`)
 })
+
+test('Agent files omit local model slots even when an import explicitly names a valid slot', () => {
+  for (const engineProfileId of ['claude-default', 'claude-abcdef01']) {
+    const original = rio({ model: { ...rio().model, engineProfileId } })
+    const md = exportAgentMarkdown(original)
+    assert.deepEqual(md.omitted, ['engineProfileId'])
+    assert.doesNotMatch(md.text, /engineProfileId|claude-default|claude-abcdef01/)
+    assert.deepEqual(importAgentFile(md.text).body.model, rio().model)
+    const encoded = fieldOf(parts(md.text).head, 'egdesk')
+    const block = JSON.parse(encoded)
+    const text = id => md.text.replace(encoded, () => JSON.stringify({ ...block, model: { ...block.model, engineProfileId: id } }))
+    const incoming = importAgentFile(text(engineProfileId))
+    assert.deepEqual(incoming.body.model, rio().model)
+    assert.deepEqual(incoming.preview.model, rio().model)
+    assert.ok(incoming.preview.adjusted.some(item => item.field === 'model.engineProfileId'))
+    rejects(() => importAgentFile(text('codex-default')), 'INVALID_PROFILE')
+  }
+  const toml = exportCodexAgentToml(rio({ model: { engine: 'codex', modelId: 'gpt-5.5', engineProfileId: 'codex-default' } }))
+  assert.deepEqual(toml.omitted, ['engineProfileId'])
+  assert.doesNotMatch(toml.text, /engineProfileId|codex-default/)
+})

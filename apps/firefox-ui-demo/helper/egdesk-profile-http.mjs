@@ -54,6 +54,7 @@ function revisionParam(value, name) {
  * GET /profiles[?includeArchived=true]       → {profiles} (each with latestSource, reviewRequired)
  * POST /profiles {body, toolPreset?}         → 201 {id, revision, hash, unchanged, profile}
  *                                            toolPreset fills toolCeiling only when body has none
+ *                                            body.model.engineProfileId is an optional slot ID for body.model.engine
  * GET /profiles/tool-presets                 → {defaultPreset, presets: [{id, label, description, toolCeiling}]}
  * POST /profiles/import {text, filename?, dryRun?}
  *                                            → dryRun: 200 {dryRun: true, format, flavor, body, preview}, nothing written

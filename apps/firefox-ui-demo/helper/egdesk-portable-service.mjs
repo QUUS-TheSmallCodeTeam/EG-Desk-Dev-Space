@@ -9,7 +9,7 @@ import { PRIVATE_KEYS } from './egdesk-chat-store.mjs'
 import { MAX_BOARDS, MAX_BOARD_BODY_BYTES, MAX_DESK_STATE_BYTES } from './egdesk-desk-store.mjs'
 import { PortableBundleError, createEGDeskPortableBundle, loadEGDeskPortableDependencies } from './egdesk-portable-bundle.mjs'
 import { EXTRA_KIND, collectPortableExtras, matchExtrasManifest, parseExtraEntry, summarizeExtras, validateExtrasManifest, writePortableAttachments, writePortableDrafts } from './egdesk-portable-extras.mjs'
-import { MAX_PROFILES, PROFILE_TEMPLATES, normalizeProfileBody, profileHash, withoutAvatarImage } from './egdesk-profile-store.mjs'
+import { MAX_PROFILES, PROFILE_TEMPLATES, normalizeProfileBody, portableProfileBody, profileHash } from './egdesk-profile-store.mjs'
 
 // RT-03: the .egdesk portable bundle wired to the local Desk, chat and profile
 // stores. Export writes one file (optionally passphrase-encrypted with the
@@ -310,7 +310,7 @@ function exportProfiles(profiles) {
     if (!record) continue
     // Unchanged built-in examples exist on every install; edited ones travel.
     if (view.origin === 'template' && templates.get(view.id) === record.hash) continue
-    chosen.push({ kind: KIND.profile, v: 1, lifecycle: view.lifecycle === 'active' ? 'active' : 'draft', body: withoutAvatarImage(record.body) })
+    chosen.push({ kind: KIND.profile, v: 1, lifecycle: view.lifecycle === 'active' ? 'active' : 'draft', body: portableProfileBody(record.body) })
   }
   return chosen
 }
@@ -666,7 +666,7 @@ function planImport(model, { desk, chat, profiles, attachments, fileDrafts }) {
     const seen = new Set()
     profilePlans = model.profiles.map(item => {
       let body
-      try { body = normalizeProfileBody(item.body) } catch { damaged('INVALID_PROFILE_CONTENT') }
+      try { body = portableProfileBody(normalizeProfileBody(item.body)) } catch { damaged('INVALID_PROFILE_CONTENT') }
       const hash = profileHash(body)
       const duplicate = existing.has(hash) || seen.has(hash)
       seen.add(hash)

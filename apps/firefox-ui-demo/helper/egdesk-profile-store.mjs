@@ -4,6 +4,7 @@ import { constants, closeSync, lstatSync, mkdirSync, openSync, realpathSync } fr
 import path from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
 import { crc32, inflateSync } from 'node:zlib'
+import { DEFAULT_ENGINE_PROFILE_IDS, PROFILE_ENGINES } from './egdesk-engine-profiles.mjs'
 import { isOwnedAndPrivate } from './egdesk-private-files.mjs'
 
 // Local Agent Profile store. A profile has a stable ID and an append-only
@@ -185,15 +186,26 @@ function personality(value) {
 }
 function model(value) {
   if (value === undefined || value === null) return null
-  shape(value, ['engine', 'modelId', 'effort'], 'model')
-  if (!['codex', 'claude'].includes(value.engine)) fail('INVALID_PROFILE', 'model.engine must be codex or claude')
+  shape(value, ['engine', 'modelId', 'effort', 'engineProfileId'], 'model')
+  const { engine, engineProfileId } = value
+  if (!PROFILE_ENGINES.includes(engine)) fail('INVALID_PROFILE', 'model.engine must be codex or claude')
   // AGENT-08: modelId null keeps the engine's own default model; the engine still decides who answers.
   const modelId = value.modelId === undefined ? null : value.modelId
   if (modelId !== null && (typeof modelId !== 'string' || !/^[A-Za-z0-9][A-Za-z0-9._:/@+-]{0,127}$/.test(modelId))) fail('INVALID_PROFILE', 'model.modelId is invalid')
   const effort = value.effort === undefined ? null : value.effort
   if (effort !== null && !REASONING_EFFORTS.has(effort)) fail('INVALID_PROFILE', 'model.effort is not supported')
   if (effort !== null && modelId === null) fail('INVALID_PROFILE', 'model.effort needs a model.modelId')
-  return { engine: value.engine, modelId, effort }
+  // Store only a slot ID, never its directory or credentials. Match the owned
+  // ID format in egdesk-engine-profiles; availability is checked at runtime.
+  if (engineProfileId !== undefined) {
+    const prefix = engine + '-'
+    if (typeof engineProfileId !== 'string' || (engineProfileId !== DEFAULT_ENGINE_PROFILE_IDS[engine] &&
+      (!engineProfileId.startsWith(prefix) || !/^[a-z0-9]{8,32}$/.test(engineProfileId.slice(prefix.length))))) {
+      fail('INVALID_PROFILE', 'model.engineProfileId must be an engine profile ID for model.engine')
+    }
+  }
+  // Omission keeps the canonical JSON and hashes of existing revisions.
+  return { engine, modelId, effort, ...(engineProfileId === undefined ? {} : { engineProfileId }) }
 }
 /** Fixed five keys in fixed order, or null for no ceiling. */
 export function normalizeToolCeiling(value) {
@@ -232,6 +244,14 @@ export function withoutAvatarImage(body) {
   if (body?.avatar?.kind !== 'image') return body
   const { value, color } = body.avatar
   return { ...body, avatar: { kind: 'initial', value, color } }
+}
+
+/** A normalized body for another install: no image or local engine-slot binding. */
+export function portableProfileBody(body) {
+  const portable = withoutAvatarImage(body)
+  if (!portable.model || !Object.hasOwn(portable.model, 'engineProfileId')) return portable
+  const { engineProfileId, ...model } = portable.model
+  return { ...portable, model }
 }
 
 const TONE_DIRECTIVES = {
@@ -946,14 +966,14 @@ export function openProfileStore({ dataDir, ownerHash, defaultToolPreset = DEFAU
      * A body from outside this install: an .egdesk bundle ('egdesk') or one
      * Agent file ('md', with the flavor egdesk-profile-file.mjs detected). It is
      * always a draft with reviewRequired until the user activates a revision.
-     * A photo avatar never comes with it (photos are not exported), so one is
-     * kept as its initial. No tool preset is applied: the file's own ceiling stays.
+     * A photo avatar is kept as its initial; a machine-local engine slot is
+     * dropped. No tool preset is applied: the file's own ceiling stays.
      */
     importDraft(body, { format = 'egdesk', flavor } = {}) {
       ensureOpen()
       if (!IMPORT_FORMATS.includes(format)) fail('INVALID_PROFILE', 'Profile import format is not supported')
       if (flavor !== undefined && (format !== 'md' || !IMPORT_FLAVORS.includes(flavor))) fail('INVALID_PROFILE', 'Profile import flavor is not supported')
-      const normalized = withoutAvatarImage(normalizeProfileBody(body))
+      const normalized = portableProfileBody(normalizeProfileBody(body))
       const json = JSON.stringify(normalized), hash = digest(json)
       return tx(() => {
         const ts = now()
