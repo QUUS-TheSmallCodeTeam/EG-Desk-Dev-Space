@@ -13,7 +13,9 @@ Decisions: D-M2 (only @mentioned Agents answer; with no mention only the Lead), 
 | no mention, or only `@Codex` | plain Codex | ordinary `POST /chat/send` (same single answer as before) |
 | `@이름` + a Browser-bounded selection | any | refused (`BOARD_BROWSER_BOUNDED`): the bridge's Board send takes no execution policy |
 
-The request carries the room's members (`members`, same shape as the store), the Lead (`leadProfileId`) and the room's last 12 messages (`recentMessages`, quoted in the Board block). Mention matching is the bridge's (`boardMentions`); a test runs both on the same inputs.
+A Board member list is not a delivery list. Inviting an Agent does not send it a message, and a member label is not an authenticated employee. With no saved Agent Lead, an ordinary room send can still start a real engine turn; it is not a private note.
+
+A routed request carries the room's members (`members`, same shape as the store), the Lead (`leadProfileId`) and up to 12 eligible recent room messages (`recentMessages`, quoted in the Board block where the recipient's execution policy permits). This block does not contain every card or file on the Board. Manually attached material, suggested-but-unselected sources, the execution project and each target's existing runtime context are distinct. Displaying a recipient or resource in the composer does not grant that target new account, project or source permissions.
 
 ## What the room shows
 
