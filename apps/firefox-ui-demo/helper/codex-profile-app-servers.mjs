@@ -2,7 +2,7 @@ import { spawn } from 'node:child_process'
 import { AppServerRpc } from './codex-app-server-rpc.mjs'
 import { normalizeNativeAuth, publicAuthIdentityKey } from './codex-auth-state.mjs'
 import { readCodexModelCatalog } from './codex-model-catalog.mjs'
-import { chatError } from './codex-chat-values.mjs'
+import { chatError, publicErrorKind } from './codex-chat-values.mjs'
 import { buildCodexAppServerLaunch, preflightOwnedAppServer, resolveCodexExecutable } from './egdesk-native-capabilities.mjs'
 
 // No shared Codex env/auth, dotenv, provider/API/proxy overrides, or shell.
@@ -17,6 +17,17 @@ const offline = () => chatError('ENGINE_UNAVAILABLE', 'The selected Codex profil
 const loginRequired = () => chatError('ENGINE_LOGIN_REQUIRED', 'Sign in to the selected Codex profile first', 401)
 const RPC_LINE_LIMIT = 32 * 1024 * 1024
 const MAX_SERVER_REQUESTS = 4096
+const AUTH_REJECTION_MESSAGE = /^(?:request failed:\s*)?(?:401\s+)?(?:unauthori[sz]ed|(?:you are )?not (?:logged|signed) in|(?:please )?(?:log|sign) in again|(?:please )?re-?authenticate|authentication required|(?:your )?token (?:has )?expired)(?:[.!](?:\s+please\b[^\r\n]*)?)?$/i
+
+function isAuthRejection(error) {
+  if (error?.code === 401) return true
+  const info = error?.codexErrorInfo ?? error?.data?.codexErrorInfo
+  if (info != null) return publicErrorKind({ codexErrorInfo: info }) === 'auth'
+  // Untyped RPC errors can carry plain text. Require an auth declaration,
+  // not an auth-related word in a request, tool error, or other diagnostic.
+  const message = error?.message
+  return typeof message === 'string' && message.length <= 2000 && AUTH_REJECTION_MESSAGE.test(message.trim())
+}
 
 export function createCodexProfileAppServers({ resolveHome, env = process.env, cwd = process.cwd(), spawnChild = spawn,
   executable = () => resolveCodexExecutable(env), onNotification = () => {}, onServerRequest = () => {}, onConnection = () => {}, onChange = () => {} } = {}) {
@@ -30,10 +41,20 @@ export function createCodexProfileAppServers({ resolveHome, env = process.env, c
     clients.delete(client.id)
     client.rpc.close(offline())
     client.pending.clear()
+    client.nativeRequests.clear()
+    client.answered.clear()
     try { client.child.stdin.destroy() } catch {}
     if (kill) stopChild(client.child)
     onConnection(client.id, { ready: false, processLost: true })
     changed()
+  }
+
+  function rejectAuth(client) {
+    // Discard this process and its auth cache. Any in-flight check is now
+    // stale; only a new scoped handshake, account/read and catalog read can
+    // publish readiness again. No shared client or login is touched.
+    client.authRejected = true
+    close(client)
   }
 
   function stopChild(child) {
@@ -71,7 +92,8 @@ export function createCodexProfileAppServers({ resolveHome, env = process.env, c
     const child = spawnChild(executable(), [...plan.args, '-c', 'cli_auth_credentials_store=file'], {
       cwd, env: isolatedCodexEnv(env, plan.envOverrides.CODEX_HOME), shell: false, stdio: ['pipe', 'pipe', 'pipe'],
     })
-    const client = { id, home, identity, child, auth: null, models: null, check: null, pending: new Map() }
+    const client = { id, home, identity, child, auth: null, models: null, check: null, authRejected: false,
+      pending: new Map(), nativeRequests: new Map(), answered: new Set() }
     const rpc = client.rpc = new AppServerRpc({
       experimentalApi: true,
       send: payload => child.stdin.write(`${payload}\n`),
@@ -83,16 +105,21 @@ export function createCodexProfileAppServers({ resolveHome, env = process.env, c
           if (client.auth?.isLoggedIn) close(client)
           return
         }
+        const error = message.method === 'error' && message.params?.willRetry !== true ? message.params?.error
+          : message.method === 'turn/completed' ? message.params?.turn?.error : null
+        if (isAuthRejection(error)) { rejectAuth(client); return }
         if (!client.auth?.isLoggedIn) return
         if (message.method === 'serverRequest/resolved') {
-          const entry = [...client.pending].find(([, nativeId]) => nativeId === message.params?.requestId)
-          if (!entry) return
-          client.pending.delete(entry[0])
-          onNotification(id, { ...message, params: { ...message.params, requestId: entry[0] } })
+          const nativeId = message.params?.requestId, opaque = client.nativeRequests.get(nativeId)
+          if (!opaque) return
+          client.nativeRequests.delete(nativeId)
+          client.pending.delete(opaque)
+          client.answered.delete(nativeId)
+          onNotification(id, { ...message, params: { ...message.params, requestId: opaque } })
         } else onNotification(id, message)
       },
       onRequest: message => {
-        if (!current(client)) return
+        if (!current(client) || client.nativeRequests.has(message.id)) return
         if (!client.auth?.isLoggedIn || client.pending.size >= MAX_SERVER_REQUESTS) {
           if (rpc.ready) rpc.respond(message.id, undefined, { code: -32000, message: 'No ready EG-Desk profile session' })
           return
@@ -101,6 +128,7 @@ export function createCodexProfileAppServers({ resolveHome, env = process.env, c
         // new process or to the same native ID on a different profile.
         const opaque = `codex-profile:${++sequence}`
         client.pending.set(opaque, message.id)
+        client.nativeRequests.set(message.id, opaque)
         onServerRequest(id, { ...message, id: opaque })
       },
     })
@@ -122,7 +150,17 @@ export function createCodexProfileAppServers({ resolveHome, env = process.env, c
         if (newline > RPC_LINE_LIMIT) { close(client); return }
         const line = buffer.slice(0, newline)
         buffer = buffer.slice(newline + 1)
+        // Inspect only possible error frames: AppServerRpc preserves the
+        // caller's error but does not expose its structured wire data. Match
+        // outstanding client requests; unsolicited errors are not evidence.
+        let authRejected = false
+        if (line.includes('"error"')) {
+          let message
+          try { message = JSON.parse(line) } catch {}
+          authRejected = typeof message?.method !== 'string' && rpc.pending.has(message?.id) && isAuthRejection(message?.error)
+        }
         rpc.receive(line)
+        if (authRejected && current(client)) rejectAuth(client)
         if (!current(client)) return
       }
       if (buffer.length > RPC_LINE_LIMIT) close(client)
@@ -163,6 +201,7 @@ export function createCodexProfileAppServers({ resolveHome, env = process.env, c
         return { auth, models }
       } catch (error) {
         close(client)
+        if (client.authRejected) throw loginRequired()
         if (error?.httpStatus) throw error
         throw offline()
       }
@@ -189,6 +228,14 @@ export function createCodexProfileAppServers({ resolveHome, env = process.env, c
       if (!client.pending.has(rpcId)) throw chatError('ENGINE_PROFILE_MISMATCH', 'The request is not pending on this Codex profile', 403)
       const nativeId = client.pending.get(rpcId)
       client.pending.delete(rpcId)
+      // A reply ends the right to respond, not the correlation for the UI's
+      // later resolution event. Keep a bounded FIFO independent of active work.
+      client.answered.add(nativeId)
+      if (client.answered.size > MAX_SERVER_REQUESTS) {
+        const oldest = client.answered.values().next().value
+        client.answered.delete(oldest)
+        client.nativeRequests.delete(oldest)
+      }
       client.rpc.respond(nativeId, result, error)
     },
     snapshot(id) {
