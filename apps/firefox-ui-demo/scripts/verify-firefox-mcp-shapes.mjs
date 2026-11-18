@@ -106,6 +106,18 @@ ${toolArgs.expression}
   return request('tools/call', { name, arguments: toolArgs });
 }
 
+function prepareShapeDesk(api, root) {
+  // A fresh profile starts in the focused Browser. Synthetic events still
+  // reach hidden shapes, but hidden label text isn't readable as rendered text.
+  const startedInBrowser = !!api.state.surface.initialBrowserFocus;
+  api.surface.enterDesk();
+  if (api.state.surface.initialBrowserFocus || api.state.cardFullscreen
+    || root.classList.contains('egd-card-fullscreen-active') || root.dataset.egdAnnotationsHidden === 'true') {
+    throw new Error('Shape verification requires a visible Desk canvas');
+  }
+  return { startedInBrowser };
+}
+
 async function main() {
   await request('initialize', {
     protocolVersion: '2024-11-05',
@@ -176,23 +188,39 @@ async function main() {
         const last = points[points.length - 1];
         mouse(window, 'mouseup', last[0], last[1]);
       };
-      const label = (x, y, text) => {
+      const commitLabel = (shape, value) => {
+        const editor = shape?.querySelector('.egd-canvas-shape-label-text');
+        if (!editor || shape.dataset.editing !== 'true' || getComputedStyle(editor).visibility !== 'visible') {
+          throw new Error('Label did not open a visible text editor');
+        }
+        editor.textContent = value;
+        editor.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }));
+        if (!shape.isConnected || shape.dataset.editing === 'true' || editor.textContent !== value
+          || window.__egdesk.shapes.serialize(shape)?.runtimeState.text !== value) {
+          throw new Error('Label did not commit the expected text: ' + value);
+        }
+        return editor.textContent;
+      };
+      const label = (x, y) => {
         const viewport = document.getElementById('egd-canvas-viewport');
         clickTool('label');
         mouse(viewport, 'mousedown', x, y);
-        const editor = document.querySelector('.egd-canvas-shape-label[data-editing="true"] .egd-canvas-shape-label-text');
-        if (!editor) throw new Error('label tool did not open a text field');
-        window.focus();
-        editor.focus();
-        editor.textContent = text;
-        editor.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }));
+        const shape = document.querySelector('.egd-canvas-shape-label[data-editing="true"]');
+        const createdText = commitLabel(shape, '로그인');
+        clickTool('select');
+        shape.dispatchEvent(new MouseEvent('dblclick', { bubbles: true, cancelable: true, button: 0, view: window }));
+        return { createdText, editedText: commitLabel(shape, '로그인 버튼') };
       };
 
       let dragMoved = false;
       let deleteSelectedWorked = false;
       let roundTrip = null;
+      let deskSetup = null;
+      let labelEdit = null;
 
       return wait(200).then(() => {
+        const api = window.__egdesk;
+        deskSetup = (${prepareShapeDesk})(api, document.documentElement);
         document.querySelectorAll('.egd-canvas-shape').forEach((shape) => {
           if (typeof shape._cleanup === 'function') shape._cleanup();
           shape.remove();
@@ -233,20 +261,21 @@ async function main() {
         draw('arrow', 620, 560, 820, 610);
         pen([[860, 560], [880, 575], [905, 585], [930, 580], [955, 565], [975, 590]]);
         draw('highlight', 620, 640, 820, 680);
-        label(860, 650, '로그인 버튼');
-        clickTool('select');
-        // Board save path: serialize, remove and restore the four new marks.
-        const api = window.__egdesk;
+        labelEdit = label(860, 650);
+        // Shape records: serialize, remove and restore the four new marks.
         const fresh = ['arrow', 'path', 'highlight', 'label']
           .map((type) => document.querySelector('.egd-canvas-shape-' + type)).filter(Boolean);
         const before = fresh.map((shape) => api.shapes.serialize(shape));
         for (const shape of fresh) { shape._cleanup?.(); shape.remove(); }
-        const after = before.map((record) => api.shapes.serialize(api.shapes.restore(record)));
+        const restored = before.map((record) => api.shapes.restore(record));
+        const after = restored.map((shape) => api.shapes.serialize(shape));
         const comparable = (record) => record && JSON.stringify({ type: record.type, x: record.geometry.x, y: record.geometry.y,
           runtimeState: record.runtimeState });
         roundTrip = { count: fresh.length, same: before.every((record, index) => comparable(record) === comparable(after[index])),
           pathPoints: before.find((record) => record?.type === 'path')?.runtimeState.points.length || 0,
-          labelText: before.find((record) => record?.type === 'label')?.runtimeState.text || null };
+          labelText: before.find((record) => record?.type === 'label')?.runtimeState.text || null,
+          restoredLabelText: restored.find((shape) => shape?.dataset.shapeType === 'label')
+            ?.querySelector('.egd-canvas-shape-label-text')?.innerText || null };
         return wait(100);
       }).then(() => {
         const shapes = Array.from(document.querySelectorAll('.egd-canvas-shape')).map((shape) => {
@@ -269,6 +298,8 @@ async function main() {
           shapeCount: shapes.length,
           dragMoved,
           deleteSelectedWorked,
+          deskSetup,
+          labelEdit,
           roundTrip,
           types: shapes.map((shape) => shape.type),
           shapes,
@@ -283,9 +314,11 @@ async function main() {
   const missing = expectedTypes.filter((type) => !typeSet.has(type));
   const invalidSize = parsed.shapes.filter((shape) => shape.width < 12 || shape.height < 12);
   const roundTripOk = parsed.roundTrip?.count === 4 && parsed.roundTrip.same
-    && parsed.roundTrip.pathPoints >= 2 && parsed.roundTrip.labelText === '로그인 버튼';
+    && parsed.roundTrip.pathPoints >= 2 && parsed.roundTrip.labelText === '로그인 버튼'
+    && parsed.roundTrip.restoredLabelText === '로그인 버튼';
+  const labelEditOk = parsed.labelEdit?.createdText === '로그인' && parsed.labelEdit.editedText === '로그인 버튼';
   if (parsed.shapeCount !== expectedTypes.length || missing.length || invalidSize.length || !parsed.dragMoved
-    || !parsed.deleteSelectedWorked || !roundTripOk || parsed.activeTool !== 'select' || parsed.rootTool !== 'select') {
+    || !parsed.deleteSelectedWorked || !roundTripOk || !labelEditOk || parsed.activeTool !== 'select' || parsed.rootTool !== 'select') {
     throw new Error(`Shape verification failed: ${JSON.stringify({ parsed, missing, invalidSize }, null, 2)}`);
   }
 
