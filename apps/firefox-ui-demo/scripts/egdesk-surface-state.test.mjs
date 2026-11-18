@@ -13,6 +13,7 @@ import * as BoardMembership from '../overlay/resources/EGDeskBoardMembership.sys
 import * as BoardLifecycle from '../overlay/resources/EGDeskBoardLifecycle.sys.mjs';
 import * as MinimapLayout from '../overlay/resources/EGDeskCanvasLayout.sys.mjs';
 import * as Chat from '../overlay/resources/EGDeskChatState.sys.mjs';
+import * as BoardThread from '../overlay/resources/EGDeskBoardThread.sys.mjs';
 import * as ThreadRouting from '../overlay/resources/EGDeskThreadRouting.sys.mjs';
 import * as ChatRunResult from '../overlay/resources/EGDeskChatRunResult.sys.mjs';
 import * as ChatChangeReview from '../overlay/resources/EGDeskChatChangeReview.sys.mjs';
@@ -3888,7 +3889,7 @@ test('passive Board status stays off the lower Chat composer while its close con
   assert.equal(notice, null, 'the close button still dismisses the notice');
 });
 
-test('empty logged-in Chat uses plain first-message guidance while keeping title and auth fallback', async () => {
+test('empty group Chat guides the first message while keeping title and auth fallback', async () => {
   const body = surfaceSource.match(/          (const canStart = [\s\S]*?)\n          messages\.appendChild\(el\('div', \{ class: 'egd-codex-empty-state' \}, \.\.\.emptyChildren\)\);/)?.[1];
   assert.ok(body, 'exercise the production empty-state branches');
   const calls = [];
@@ -3904,7 +3905,7 @@ test('empty logged-in Chat uses plain first-message guidance while keeping title
   const emptyClasses = ['egd-codex-empty-eyebrow', 'egd-codex-empty-title', 'egd-codex-empty-sub'];
   assert.deepEqual(loggedIn.map(node => node.className), emptyClasses);
   assert.deepEqual(loggedIn.map(node => node.children[0]), [
-    '새 대화', '어떤 일을 함께할까요?', '질문을 하거나 자료를 첨부해 대화를 시작하세요.',
+    '새 대화', '어떤 일을 함께할까요?', '질문을 입력하고 아래에서 답변 대상을 확인하세요.',
   ]);
   assert.doesNotMatch(loggedIn[2].children[0], /Fresh|Codex 대화|· Codex/);
   const loggedOut = renderEmpty({ authStatus: { isLoggedIn: false } });
@@ -3941,7 +3942,7 @@ test('empty logged-in Chat uses plain first-message guidance while keeping title
 test('Chat composer starts compact but expands and scrolls for long requests', () => {
   const body = surfaceSource.match(/            const resizeComposer = \(preserveViewport = true\) => \{([\s\S]*?)\n            \};\n            input\.addEventListener\('input'/)?.[1];
   assert.ok(body);
-  const resize = compileFunction(`${declaration('createChatComposerViewport')}\nconst composerViewport = createChatComposerViewport({ schedule() {} });\nreturn function resizeComposer(preserveViewport = true) {${body}\n            }`,
+  const resize = compileFunction(`${declaration('createChatComposerViewport')}\nconst composerViewport = createChatComposerViewport({ schedule() {} });\nconst boardDestination = null, boardPreview = null;\nreturn function resizeComposer(preserveViewport = true) {${body}\n            }`,
     ['input', 'activeThread', 'ChatState', 'codex', 'sendButton', 'chatRoomProjectSendBlock']);
   const input = { isConnected: true, scrollHeight: 30, style: {}, value: 'draft',
     ownerDocument: { defaultView: { getComputedStyle: () => ({ maxHeight: '144px' }) } } };
@@ -8877,7 +8878,7 @@ function composerViewportHarness() {
     'let restoringComposerFocus = false, compositionInProgress = false, deferredCodex = null;',
     'const attach = () => { const input = body.querySelector(".egd-codex-input");',
     'const activeThread = { id: input.dataset.threadId, conversationId: null, preparingInput: false };',
-    'const sendButton = {}, blockedSend = {};', resize, inputEvents,
+    'const sendButton = {}, blockedSend = {}, boardDestination = null, boardPreview = null; let boardCompositionEnded = -Infinity;', resize, inputEvents,
     'input.resize = resizeComposer; queueMicrotask(resizeComposer); };',
     'const render = (value, threadId, focused) => {', snapshot,
     'replace(value, threadId, focused); const activeThread = { id: threadId }; attach();', restore, '};',
@@ -8941,7 +8942,7 @@ test('Chat composer reserves title, status and log space on compact cards', asyn
   const resizeBody = surfaceSource.match(/            const resizeComposer = \(preserveViewport = true\) => \{([\s\S]*?)\n            \};\n            input\.addEventListener\('input'/)?.[1];
   const observerBody = surfaceSource.match(/            let composerWidth = 0;[\s\S]*?            composerObserver\.observe\(body\);/)?.[0];
   assert.ok(resizeBody && observerBody, 'production composer resizing remains directly testable');
-  const bindResize = compileFunction(`${declaration('createChatComposerViewport')}\nconst composerViewport = createChatComposerViewport({ schedule() {} });\nreturn function resizeComposer(preserveViewport = true) {` + resizeBody + '\n}', [
+  const bindResize = compileFunction(`${declaration('createChatComposerViewport')}\nconst composerViewport = createChatComposerViewport({ schedule() {} });\nconst boardDestination = null, boardPreview = null;\nreturn function resizeComposer(preserveViewport = true) {` + resizeBody + '\n}', [
     'input', 'activeThread', 'ChatState', 'codex', 'sendButton', 'chatRoomProjectSendBlock',
   ]);
   const layout = ({ viewport = 385, notice = 26, noticeMargin = 0, taskHeight = 0 } = {}) => {
@@ -15566,7 +15567,6 @@ test('engine controls: header chip, new-room choices, locked-room panel and effo
     { profileLabel: null, showEngine: false, showSession: false }, 'a plain room does not grow redundant badges');
   assert.deepEqual(roomBadges({ title: '회의', profileEnabled: true }, { label: 'Rio' }, { engineId: 'claude', label: 'Claude' }, () => 'local'),
     { profileLabel: 'Rio', showEngine: true, showSession: true }, 'different Agent, engine and held-local identities remain visible');
-  assert.match(surfaceSource, /if \(\(canStart \|\| ChatState\.chatEngineChoices\(codex\.engines\)\.some\(choice => choice\.id === 'claude' && choice\.selectable\)\)\s*&& !ChatState\.chatThreadEngineLocked\(activeThread\)\) \{\n            messages\.appendChild\(el\('div', \{ class: 'egd-codex-engine-start'/);
 });
 
 test('only an empty room changes engine; effort changes apply to the next turn', () => {
@@ -16680,7 +16680,7 @@ test('branch menus and the 기록 없이 시작 switch: disabled with the reason
   assert.deepEqual(calls.splice(0), [['setThreadStateless', 'new', false]]);
   const older = renderers({ messageMenu: null, chatCapabilities: ['send'] }).renderStatelessStart(fresh);
   assert.deepEqual([older.children[0].getAttribute('disabled'), older.children[1].textContent], ['true', '지금 연결된 브리지는 기록 없이 시작을 지원하지 않습니다.']);
-  assert.match(surfaceSource, /renderEngineChoices\(activeThread\)\)\);\n            messages\.appendChild\(renderStatelessStart\(activeThread\)\);/, 'the switch sits under the engine choice');
+  assert.match(surfaceSource, /if \(canStart && \(stateless\.available \|\| stateless\.on\)\) messages\.appendChild\(renderStatelessStart\(activeThread\)\)/, 'the Board empty state hides the unsupported switch');
 
   // The message trigger sits on the open side of the bubble, and closes with the other menus.
   assert.match(surfaceSource, /message\.role === 'user' \? menuTrigger : null, bubble, message\.role === 'user' \? null : menuTrigger\);/);
@@ -16805,12 +16805,12 @@ test('bridge build marker: /v1/state carries the installed build, and a missing 
   assert.equal(Surface.bridgeConnectionNotice({ connected: true, bridge: fields({ bridge: { buildHash: 'd'.repeat(64), startedAt: 1, sourceMismatch: true } }).bridgeBuild }).text,
     '브리지 버전이 맞지 않습니다 · 다시 시작 필요');
 
-  assert.deepEqual(api.bridgeSessionFields(null), { chatCapabilities: null, inheritedMcp: null, computerControl: null });
-  assert.deepEqual(api.bridgeSessionFields({ capabilities: { chat: ['send', 'fork', 'stateless', 7] }, inheritedMcp: [{ name: 'x' }],
+  assert.deepEqual(api.bridgeSessionFields(null), { chatCapabilities: null, boardDeliverySupported: false, inheritedMcp: null, computerControl: null });
+  assert.deepEqual(api.bridgeSessionFields({ capabilities: { chat: ['send', 'fork', 'stateless', 7], boardDeliveryIntent: true }, inheritedMcp: [{ name: 'x' }],
     computerControl: { policy: 'inherit', verified: null } }),
-  { chatCapabilities: ['send', 'fork', 'stateless'], inheritedMcp: [{ name: 'x' }], computerControl: { policy: 'inherit', verified: null } });
+  { chatCapabilities: ['send', 'fork', 'stateless'], boardDeliverySupported: true, inheritedMcp: [{ name: 'x' }], computerControl: { policy: 'inherit', verified: null } });
   assert.deepEqual(api.bridgeSessionFields({ capabilities: {}, inheritedMcp: 'x', computerControl: { policy: 'maybe' } }),
-    { chatCapabilities: null, inheritedMcp: null, computerControl: null });
+    { chatCapabilities: null, boardDeliverySupported: false, inheritedMcp: null, computerControl: null });
   assert.equal((surfaceSource.match(/\.\.\.bridgeSessionFields\(bridgeState\),/g) || []).length, 2, 'connect and refresh both read them');
   assert.match(surfaceSource, /case 'mcp\.inherited':\n          update\(\{ inheritedMcp: Array\.isArray\(event\.inheritedMcp\) \? event\.inheritedMcp : null \}\);/,
     'the SSE codex event replaces the list');
@@ -19642,7 +19642,7 @@ test('CTX-03 suggestions: Korean reasons, consent rows one at a time, excluded r
   assert.deepEqual(store.contextSuggest.byThread.room.picked, ['egd-browser-1']);
 
   // Wiring: the area sits above the input row; the panel and the area share one attach path.
-  assert.match(surfaceSource, /return el\('div', \{ class: 'egd-codex-footer' \},\n              buildContextSuggestions\(activeThread, codexBridge\),\n              el\('div', \{ class: 'egd-codex-input-row' \},/);
+  assert.match(surfaceSource, /return el\('div', \{ class: 'egd-codex-footer' \},\n              buildContextSuggestions\(activeThread, codexBridge\),\n              boardDestination\?\.node,\n              el\('div', \{ class: 'egd-codex-input-row' \},/);
   assert.match(surfaceSource, /input\.addEventListener\('focus', \(\) => \{ if \(!restoringComposerFocus\) codexBridge\.requestContextSuggestions\?\.\(activeThread\.id\); \}\);/);
   assert.match(surfaceSource, /restoringComposerFocus = true;\n        try \{ newInput\.focus\(\{ preventScroll: true \}\); \} finally \{ restoringComposerFocus = false; \}/);
   assert.match(surfaceSource, /state\.codexBridge\.addInputSources\(threadId, userSelectedChatSources\(threadId, picked\.values\(\)\)\); close\(\);/);
@@ -21297,19 +21297,20 @@ function requestProjectUiHarness({ target, read, roomRead, roomSave, resizeObser
   };
 }
 
-function requestProjectSendHarness({ target, capture, reply, roomRead, sharedState = null, sourceDocument = null, sourceRead = null, memoAgentRoom = false, ready = async () => true, onEmit = () => {}, selectBrowserSources = () => [], inputSources = [{ id: 'attachment', kind: 'board-element', label: 'Selected element', sourceRef: { viewId: 'element-a' } }] } = {}) {
+function requestProjectSendHarness({ group = null, target, capture, reply, roomRead, sharedState = null, sourceDocument = null, sourceRead = null, memoAgentRoom = false, ready = async () => true, onEmit = () => {}, selectBrowserSources = () => [], inputSources = [{ id: 'attachment', kind: 'board-element', label: 'Selected element', sourceRef: { viewId: 'element-a' } }] } = {}) {
   const constants = requestProjectSurfaceConstants();
   const state = sharedState || { codex: { activeThreadId: 'room', threads: [{ id: 'room', clientBindingId: 'original-wire-room', profileEnabled: false,
-    messages: [], inputSources, briefingInputs: [], ...(memoAgentRoom ? { type: 'dm', profileEnabled: true, agentProfileId: 'fixture-agent' } : {}),
+    messages: [], inputSources, briefingInputs: [], ...(group || {}), ...(memoAgentRoom ? { type: 'dm', profileEnabled: true, agentProfileId: 'fixture-agent' } : {}),
     ...(target === undefined ? {} : { requestProjectTarget: target }) }],
     threadDrafts: { room: 'original words' }, threadDraftRevisions: { room: 1 }, authStatus: sessionAuth, connected: true },
   boards: {} };
   state.boards ||= {};
   Object.defineProperty(state.boards, 'activeProjectionId', { get() { assert.fail('sending must never infer an active Board target'); } });
+  if (group) state.codex.boardDeliverySupported = true;
   const fixtureThreadId = state.codex.activeThreadId;
   const getThread = (_codex, id = fixtureThreadId) => state.codex.threads.find(thread => thread.id === id) || null;
   const update = (id, action) => { state.codex.threads = state.codex.threads.map(thread => thread.id === id ? action(thread) : thread); };
-  const calls = { begin: 0, prepare: 0, capture: 0, provider: [] };
+  const calls = { begin: 0, prepare: 0, capture: 0, provider: [], ...(group && { paths: [] }) };
   const epoch = Chat.createChatEpochScope();
   const roomCalls = [], timers = new Map(); let timerId = 0;
   let roomReader = roomRead || (body => ({ ok: true, result: { roomId: body.roomId, inheritance: null, override: null, project: null, source: null, status: 'none' } }));
@@ -21325,15 +21326,17 @@ function requestProjectSendHarness({ target, capture, reply, roomRead, sharedSta
     codexThreadAgentProfile: () => null,
     appendMessageToThread: (id, message) => update(id, thread => ({ ...thread, messages: [...thread.messages, message] })),
     createCodexMessage: (role, content, status, options) => ({ id: 'message-' + role, role, content, status, ...options }),
-    SELF_MEMBER: 'self', codexThreadRuntimeConfig: () => ({}),
+    SELF_MEMBER: 'self', codexThreadRuntimeConfig: thread => thread.profileEnabled ? { profileId: thread.agentProfileId } : {},
+    BoardThread, codexProfileCatalog: { profiles: [] }, boardEarlyEvents: BoardThread.createBoardEarlyEvents(),
+    acceptBoardSend: (_id, answer, requestId) => ({ ...answer, requestId, boardOnly: answer.accepted }),
     fetchJson: async (path, options) => {
       if (sourceRead && path.startsWith('/context/')) return sourceRead(path, options);
       if (path === '/v1/files/projects/room-default') {
         const body = JSON.parse(options.body); roomCalls.push(body); return roomReader(body);
       }
-      assert.equal(path, '/chat/send');
+      assert.ok(path === '/chat/send' || group && path === '/chat/board/send');
       const body = JSON.parse(options.body);
-      calls.provider.push(body);
+      calls.paths?.push(path); calls.provider.push(body);
       return reply ? reply(body) : { accepted: true, conversationId: 'native', runId: 'run', answerId: 'native/run' };
     },
     syncProtocolRun() {}, browserToolSelectedSources: selectBrowserSources, rootSseReady: () => ({ sourceReady: true }), expireContextSuggestions() {},
@@ -21352,6 +21355,7 @@ function requestProjectSendHarness({ target, capture, reply, roomRead, sharedSta
   Object.assign(deps, productionManualSendNotice({ ...deps, epochScope: epoch }));
   const memoScopeBridge = { createProjectScope: id => deps.createChatProjectScope(id, epoch),
     createMemoAskScope: requestProjectBridgeMethod('createMemoAskScope', deps) };
+  Object.assign(deps, productionBoardComposer(deps));
   const send = requestProjectBridgeMethod('sendMessage', deps);
   const captureManualSendOwner = requestProjectBridgeMethod('captureManualSendOwner', deps);
   const setTarget = requestProjectBridgeMethod('setRequestProjectTarget', deps);
@@ -21367,6 +21371,8 @@ function requestProjectSendHarness({ target, capture, reply, roomRead, sharedSta
     setRoomReader: reader => { roomReader = reader; },
     projectScope: () => { const scope = deps.createChatProjectScope('room', epoch); scope.finish(); return scope; },
     setTarget: target => setTarget('room', target),
+    preview: text => deps.boardComposerDelivery(getThread(null), text, state.codex),
+    updateThread: patch => update('room', thread => ({ ...thread, ...patch })),
     edit(text, target) {
       state.codex.threadDrafts.room = text; state.codex.threadDraftRevisions.room++;
       update('room', thread => Chat.applyRequestProjectTarget({ ...thread, inputSources: [{ id: 'new-attachment' }] }, target));
@@ -26039,4 +26045,120 @@ test('CHAT-01 Board-saved chat card carries a thread and Agent binding reference
   re.restoreChatCardThreadBinding(undefined);
   re.restoreChatCardThreadBinding({ clientThreadId: 'gone', agent: null });
   assert.equal(re.state.codex.activeThreadId, 'room-0');
+});
+
+function productionBoardComposer(deps) {
+  const names = ['el', 'chatSendEngineId', 'boardComposerDelivery', 'mountBoardComposerDestination'];
+  return compileFunction(names.map(declaration).join('\n') + '\nreturn { ' + names.join(', ') + ' };', Object.keys(deps))(...Object.values(deps));
+}
+
+function boardComposerFixture(extra = {}) {
+  return { type: 'group', engineId: 'codex', participants: ['self', '솔빛', '물결'],
+    participantRoles: { 솔빛: 'member', 물결: 'member' },
+    participantAgents: { 솔빛: { profileId: 'prof-sol' }, 물결: { profileId: 'prof-mul' } }, ...extra };
+}
+
+test('Board composer executes Korean input and IME locally; disabled Enter explains without touching the draft or caret', () => {
+  const document = settingsFakeDocument();
+  const activeThread = boardComposerFixture({ id: 'room', profileEnabled: true, agentProfileId: 'prof-sol', messages: [] });
+  const codex = { connected: true, authStatus: sessionAuth, boardDeliverySupported: true };
+  const state = { codex };
+  const body = document.createElement('div');
+  const sends = [], drafts = [];
+  const source = surfaceSource.slice(surfaceSource.indexOf('      const allowComposer = Boolean(activeThread && isHudConversationView);'),
+    surfaceSource.indexOf('      const shellClasses = ['));
+  const deps = { document, state, body, activeThread, codex, BoardThread, ChatState: Chat, SELF_MEMBER: 'self', codexProfileCatalog: { profiles: [] },
+    codexThreadRuntimeConfig: () => ({ profileId: 'prof-sol' }), isHudConversationView: true, activeIdentity: {},
+    codexBridge: { setDraft: text => drafts.push(text), sendMessage: options => sends.push(options) },
+    getCodexThreadDraft: () => '', deskIcon: () => null, chatRoomProjectSendBlock: () => null, compositionInProgress: false,
+    composerViewport: { cancel() {}, snapshot() {} }, ResizeObserver: class { observe() {} }, composerObserver: null, queueMicrotask() {},
+    mountComposerMention: () => null, codexCurrentRun: () => null, inputState: { threadId: 'room' }, deferredCodex: null,
+    buildChatInputTray: () => null, buildContextSuggestions: () => null };
+  const createElement = document.createElement;
+  document.defaultView = { getComputedStyle: () => ({ minHeight: '35px', maxHeight: '80px' }) };
+  document.createElement = tag => Object.assign(createElement(tag), { ownerDocument: document, scrollHeight: 35 });
+  Object.assign(deps, productionBoardComposer(deps));
+  const rerender = compileFunction(source + '\nreturn footer;', Object.keys(deps));
+  const footer = rerender(...Object.values(deps));
+  const find = id => settingsNodes(footer, node => node.dataset.testid === id)[0];
+  const input = find('chat-composer'), send = find('chat-send'), destination = find('board-chat-destination');
+  const type = (value, additional = {}) => { input.value = value; input.setSelectionRange(value.length, value.length); input.fire('input', additional); };
+  type(''); assert.equal(destination.textContent, '답변: 솔빛');
+  type('@물결 정리해 줘'); assert.equal(destination.textContent, '답변: 물결');
+  type('@솔빛 @물결 비교해 줘'); assert.equal(destination.textContent, '답변: 솔빛, 물결');
+  assert.deepEqual(settingsNodes(footer, node => node.tagName === 'LI').map(node => node.textContent), ['솔빛', '물결']);
+  const scopeBody = settingsNodes(footer, node => node.className === 'egd-board-chat-scope-body')[0];
+  assert.doesNotMatch(scopeBody.textContent, /null|undefined/);
+  assert.match(scopeBody.textContent, /선택한 첨부 없음/);
+  activeThread.inputSources = [{ id: 'one', kind: 'board-element', label: '확인할 카드' }];
+  type('정리해 줘'); assert.match(scopeBody.textContent, /확인할 카드/);
+  assert.doesNotMatch(scopeBody.textContent, /null|undefined/);
+  activeThread.inputSources = []; type('@솔빛 @물결 비교해 줘');
+  input.fire('compositionstart'); type('@없는이', { isComposing: true });
+  assert.equal(destination.textContent, '답변: 솔빛, 물결');
+  assert.equal(drafts.at(-1), '@솔빛 @물결 비교해 줘');
+  input.fire('keydown', { key: 'Enter', isComposing: true }); input.fire('compositionend');
+  assert.equal(drafts.at(-1), '@없는이');
+  assert.equal(send.disabled, true);
+  assert.match(find('board-chat-correction').textContent, /@|대상/);
+  type('@없는이 다시');
+  // The committing Enter is suppressed; a later Enter announces the disabled reason.
+  return new Promise(resolve => setTimeout(resolve, 65)).then(() => {
+    input.fire('keydown', { key: 'Enter' });
+    assert.match(find('chat-send-blocked').textContent, /@|대상/);
+    assert.equal(input.value, '@없는이 다시'); assert.equal(input.selectionStart, input.value.length);
+    assert.deepEqual(sends, []);
+  });
+});
+
+test('Board submit preflight blocks invalid, old bridge, selected-scope, and Claude member drafts before capture', async () => {
+  for (const [text, options, extras] of [
+    ['@없는이 질문', {}, {}], ['@물결 질문', {}, { capability: false }],
+    ['@물결 질문', {}, { attachment: true }], ['@물결 질문', { engineId: 'claude' }, {}],
+  ]) {
+    const h = requestProjectSendHarness({ group: boardComposerFixture(options), inputSources: extras.attachment ? [{ id: 'board-1', kind: 'board-element', label: '선택한 카드' }] : [] });
+    if (extras.capability === false) h.state.codex.boardDeliverySupported = false;
+    typeOrdinaryDraft(h, text);
+    const queue = structuredClone(h.thread().inputSources);
+    assert.equal(h.preview(text).intent.ok, false);
+    assert.equal((await h.send()).accepted, false);
+    assert.equal(h.calls.prepare + h.calls.capture + h.calls.provider.length, 0);
+    assert.deepEqual(h.thread().inputSources, queue); assert.equal(h.state.codex.threadDrafts.room, text);
+    assert.equal(h.thread().messages.length, 0); assert.ok(h.thread().sendError);
+  }
+});
+
+test('Board submit uses the displayed room or member route and excludes the optimistic row from history', async () => {
+  for (const [text, path] of [['담당을 확인해 줘', '/chat/send'], ['@솔빛 @물결 담당을 확인해 줘', '/chat/board/send']]) {
+    const h = requestProjectSendHarness({ group: boardComposerFixture({ messages: [{ role: 'assistant', content: '이전 질문 답변', status: 'complete' }] }), inputSources: [] });
+    typeOrdinaryDraft(h, text);
+    const shown = h.preview(text);
+    assert.equal((await h.send({ boardPreviewKey: shown.key })).accepted, true);
+    assert.deepEqual(h.calls.paths, [path]);
+    assert.deepEqual(h.calls.provider[0].expectedBoardDelivery, shown.intent.expectedBoardDelivery);
+    if (path === '/chat/board/send') assert.deepEqual(h.calls.provider[0].recentMessages.map(row => row.text), ['이전 질문 답변']);
+  }
+});
+
+test('Board submit fails closed when a confirmed destination changes in flight', async () => {
+  for (const changed of ['roster', 'lead', 'engine', 'recent', 'draft', 'sources', 'capability']) {
+    const pending = requestProjectDeferred();
+    const h = requestProjectSendHarness({ group: boardComposerFixture(), inputSources: [], capture: () => pending.promise });
+    const text = '@물결 나중에 정리해 줘'; typeOrdinaryDraft(h, text);
+    const sending = h.send({ boardPreviewKey: h.preview(text).key });
+    await settle(); assert.equal(h.calls.capture, 1, changed);
+    if (changed === 'roster') h.updateThread({ participants: ['self', '솔빛'] });
+    if (changed === 'lead') h.updateThread({ profileEnabled: true, agentProfileId: 'prof-sol' });
+    if (changed === 'engine') h.updateThread({ engineId: 'claude' });
+    if (changed === 'recent') h.updateThread({ messages: [{ role: 'assistant', content: '새 대화', status: 'complete' }] });
+    if (changed === 'draft') typeOrdinaryDraft(h, '@솔빛 초안 변경');
+    if (changed === 'sources') h.updateThread({ inputSources: [{ id: 'new', kind: 'file', label: '선택 변경' }] });
+    if (changed === 'capability') h.state.codex.boardDeliverySupported = false;
+    pending.resolve([]);
+    assert.equal((await sending).accepted, false);
+    assert.deepEqual(h.calls.paths, [], changed); assert.equal(Object.keys(h.protocol.requests).length, 0, changed);
+    assert.equal(h.state.codex.threadDrafts.room, changed === 'draft' ? '@솔빛 초안 변경' : text);
+    if (changed === 'sources') assert.equal(h.thread().inputSources[0]?.id, 'new');
+    if (!['engine', 'lead'].includes(changed)) assert.match(h.thread().sendError, /바뀌어 보내지 않았습니다/, changed);
+  }
 });

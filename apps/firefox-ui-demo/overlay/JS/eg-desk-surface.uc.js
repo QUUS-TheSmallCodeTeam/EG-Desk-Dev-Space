@@ -726,6 +726,7 @@
       // /v1/state capabilities.chat ('stateless', 'fork') and inheritedMcp;
       // null until a bridge reports them (older bridges never do).
       chatCapabilities: null,
+      boardDeliverySupported: false,
       inheritedMcp: null,
       // CU-01: /v1/state computerControl { policy, verified }; null until a bridge reports it.
       computerControl: null,
@@ -12041,6 +12042,7 @@
     const chat = bridgeState?.capabilities?.chat;
     return {
       chatCapabilities: Array.isArray(chat) ? chat.filter((name) => typeof name === 'string') : null,
+      boardDeliverySupported: bridgeState?.capabilities?.boardDeliveryIntent === true,
       inheritedMcp: Array.isArray(bridgeState?.inheritedMcp) ? bridgeState.inheritedMcp : null,
       computerControl: ChatState.normalizeComputerControl(bridgeState?.computerControl),
     };
@@ -12127,6 +12129,85 @@
   // EGDeskChatComposer; this is the screen side. `memory` outlives a Chat redraw,
   // so the list and its highlighted row come back with the caret.
   const ChatComposer = ChromeUtils.importESModule('chrome://userchrome/content/EGDeskChatComposer.sys.mjs');
+  function chatSendEngineId(thread, codex) {
+    // Keep explicit intent even when the engine's live availability changes.
+    return ['codex', 'claude'].includes(thread?.engineId) ? thread.engineId
+      : ChatState.chatThreadEngineId(thread, { recentEngineId: codex.recentEngineId, engines: codex.engines, profileEngines: codex.profileEngines });
+  }
+
+  function boardComposerDelivery(thread, message, codex, wire = null) {
+    const runtime = codexThreadRuntimeConfig(thread);
+    const engine = chatSendEngineId(thread, codex);
+    const inputSources = thread.inputSources || [];
+    const briefingInputs = thread.briefingInputs || [];
+    const browserScope = engine !== 'claude' && inputSources.some(input => input.kind === 'browser'
+      && input.selectedByUser === true && ['observe', 'interact'].includes(input.browserToolPermission));
+    const contextResolution = engine === 'claude' ? null : ChatState.contextResolutionForSend(state.contextSuggest?.byThread?.[thread.id], inputSources,
+      { now: Date.now(), accountKey: ChatState.codexAccountKey(codex.authStatus) || null });
+    const options = {
+      clientThreadId: ChatState.clientThreadBinding(thread), engine, browserScope,
+      stateless: ChatState.chatStatelessStartView(thread, codex.chatCapabilities).on,
+      profileEnabled: thread.profileEnabled === true, profileId: runtime.profileId, profileRevision: runtime.profileRevision,
+      roomAgentName: thread.profileEnabled ? runtime.agentProfile?.name : null,
+      profiles: codexProfileCatalog.profiles, contextResolution,
+      attachments: [...inputSources, ...briefingInputs], selectedResources: [...inputSources, ...briefingInputs],
+      supportsBoardDelivery: codex.boardDeliverySupported === true, selfName: SELF_MEMBER,
+      ...(wire && { ...wire, browserScope: !!wire.executionPolicy }),
+    };
+    const intent = BoardThread.boardDeliveryIntent(thread, message.trim(), options);
+    // Expected wire identity does not by itself cover renderer-only source
+    // selections, no-Board routes, or edits to recent text with the same count.
+    const routeKey = JSON.stringify([intent.ok, intent.code, intent.route, intent.reason, intent.recipients,
+      intent.roomBlock, intent.expectedBoardDelivery]);
+    const key = JSON.stringify([message, routeKey, options.clientThreadId, thread.conversationId, engine,
+      ChatState.chatThreadEngineProfileId(thread, codex), options.supportsBoardDelivery, browserScope, options.stateless,
+      options.profileEnabled, thread.agentProfileId, runtime.profileId, runtime.profileRevision, options.roomAgentName,
+      thread.participants, thread.participantRoles, thread.participantAgents, contextResolution, thread.cwd,
+      inputSources, briefingInputs, thread.requestProjectTarget,
+      intent.route === 'board' ? BoardThread.boardRecentMessages(thread, options) : null]);
+    return { intent, options, key, routeKey, browserScope };
+  }
+
+  function mountBoardComposerDestination(thread, memory) {
+    if (thread.type !== 'group') return null;
+    if (memory.threadId !== thread.id) Object.assign(memory, { threadId: thread.id, expanded: false });
+    const destination = el('span', { class: 'egd-board-chat-destination', data: { testid: 'board-chat-destination' } });
+    const scope = el('span', { class: 'egd-board-chat-scope', data: { testid: 'board-chat-scope' } });
+    const correction = el('p', { class: 'egd-board-chat-correction', role: 'status', data: { testid: 'board-chat-correction' } });
+    const summary = el('summary', { 'aria-label': '답변 대상과 포함 범위 자세히 보기', data: { testid: 'board-chat-scope-details', threadId: thread.id, focusKey: 'board-chat-scope' } }, '자세히');
+    const detail = el('div', { class: 'egd-board-chat-scope-body' });
+    const disclosure = el('details', { class: 'egd-board-chat-disclosure', open: memory.expanded ? 'true' : null,
+      ontoggle: () => { if (disclosure.isConnected) memory.expanded = disclosure.open; } }, summary, detail);
+    const node = el('div', { class: 'egd-board-chat-route' }, el('div', { class: 'egd-board-chat-route-line' }, destination, scope, disclosure), correction);
+    let current = null;
+    const paint = (view) => {
+      if (current?.key === view.key) return current;
+      current = view;
+      const { intent } = view;
+      const names = intent.recipients.map(recipient => recipient.kind === 'room-engine' && recipient.engine === 'codex'
+        ? view.options.roomAgentName || recipient.label : recipient.label);
+      const destinationText = intent.ok && names.length ? `답변: ${names.join(', ')}` : '답변 대상 확인 필요';
+      destination.textContent = destinationText;
+      destination.title = destinationText;
+      const board = intent.roomBlock;
+      scope.textContent = !intent.ok ? '' : board ? `Board 맥락 · 최근 ${board.recentTurnCount}개 후보` : '이 대화로 요청';
+      correction.textContent = intent.ok ? '' : intent.error || '답변 대상을 확인하고 @ 목록에서 다시 선택해 주세요.';
+      disclosure.hidden = !intent.ok;
+      const attachments = view.options.attachments.length;
+      detail.replaceChildren(...[
+        el('ul', { 'aria-label': '전체 답변 대상' }, ...names.map(name => el('li', {}, name))),
+        el('p', {}, board ? 'Board 참여자 이름·역할과 최근 대화 최대 12개가 포함 후보입니다. 권한이나 실행 모드에 따라 빠질 수 있으며 Board 카드 전체를 붙이지 않습니다.'
+          : 'Board 참여자 목록과 최근 대화 발췌를 별도로 붙이지 않습니다. 기존 대화의 맥락은 계속 사용될 수 있습니다.'),
+        view.options.selectedResources.length && intent.selectedResources.length ? el('p', {}, `선택한 자료: ${intent.selectedResources.map(resource => resource.label).join(', ')}`) : null,
+        el('p', {}, attachments ? `선택한 첨부 ${attachments}개는 별도로 확인합니다. 프로젝트와 읽기 설정은 실행 모드에 따릅니다.`
+          : '선택한 첨부 없음.'),
+        intent.projectDisclosure ? el('p', {}, intent.projectDisclosure) : null,
+      ].filter(Boolean));
+      return current;
+    };
+    return { node, paint };
+  }
+
   function mountComposerMention(input, thread, memory, { onChange } = {}) {
     const names = ChatComposer.mentionNames(thread, SELF_MEMBER);
     if (!names.length) return null;
@@ -12143,7 +12224,7 @@
       menu.replaceChildren(...view.items.map((item, index) => {
         const option = el('div', { class: 'egd-codex-mention-option', id: `${menu.id}-${index}`, role: 'option',
           'aria-selected': String(index === view.index),
-          title: item.kind === 'user' ? '나를 가리키는 이름을 넣습니다' : `${item.name}에게 말합니다. 부른 Agent만 답합니다.`,
+          title: item.kind === 'user' ? '나를 가리키는 이름을 넣습니다' : `${item.name}을(를) 답변 대상으로 선택합니다.`,
           data: { testid: 'chat-mention-option', name: item.name, kind: item.kind } },
           el('span', { class: 'egd-codex-mention-option-name' }, item.label),
           el('span', { class: 'egd-codex-mention-option-hint' }, item.hint));
@@ -13295,8 +13376,8 @@
             el('div', { class: 'egd-codex-empty-title' }, canStart ? '어떤 일을 함께할까요?' : activeEngine.engineId === 'claude' ? activeEngine.reason : '로그인 필요'),
           ];
           if (canStart) {
-            emptyChildren.push(el('div', { class: 'egd-codex-empty-sub' }, activeEngine.engineId === 'claude'
-              ? '메시지를 입력해 대화를 시작하세요.' : '질문을 하거나 자료를 첨부해 대화를 시작하세요.'));
+            emptyChildren.push(el('div', { class: 'egd-codex-empty-sub' }, activeEngine.engineId === 'claude' || !codex.boardDeliverySupported
+              ? '질문을 입력하고 아래에서 답변 대상을 확인하세요.' : '그냥 쓰면 기본 답변 대상으로 요청합니다. 다른 Agent는 @ 목록에서 고르세요.'));
           }
           if (activeEngine.engineId === 'codex' && !codex.authStatus.isLoggedIn) {
             emptyChildren.push(el('div', { class: 'egd-codex-empty-actions' },
@@ -13312,14 +13393,9 @@
             ));
           }
           messages.appendChild(el('div', { class: 'egd-codex-empty-state' }, ...emptyChildren));
-          // A new room picks its AI before the first message; after that the room keeps it.
-          if ((canStart || ChatState.chatEngineChoices(codex.engines).some(choice => choice.id === 'claude' && choice.selectable))
-              && !ChatState.chatThreadEngineLocked(activeThread)) {
-            messages.appendChild(el('div', { class: 'egd-codex-engine-start', data: { testid: 'chat-engine-start' } },
-              el('div', { class: 'egd-codex-engine-section-label' }, '이 대화에 쓸 AI'),
-              renderEngineChoices(activeThread)));
-            messages.appendChild(renderStatelessStart(activeThread));
-          }
+          // The conversation header has the same engine choices in HUD and Canvas.
+          const stateless = ChatState.chatStatelessStartView(activeThread, codex.chatCapabilities);
+          if (canStart && (stateless.available || stateless.on)) messages.appendChild(renderStatelessStart(activeThread));
         } else {
           // Agent answers carry the Profile avatar captured at send; older answers
           // borrow the room's current Agent avatar only when the name still matches.
@@ -13725,7 +13801,10 @@
         if (editedDraftNotice?.current()) conversation.appendChild(el('div', {
           class: 'egd-codex-error egd-codex-send-notice', role: 'status', data: { testid: 'chat-edited-draft-notice' },
         }, '입력이 바뀌어 확인 중이던 요청은 보내지 않았습니다. 내용을 확인한 뒤 직접 다시 보내세요.'));
-        const noticeIds = new Set(['chat-edited-draft-notice', 'chat-local-history-coverage', 'chat-local-history-error', 'chat-board-member-history-partial', 'chat-binding-held',
+        if (activeThread.type === 'group' && activeThread.boardSubmitNotice) conversation.appendChild(el('div', {
+          class: 'egd-codex-run-status', role: 'status', data: { testid: 'board-chat-route-outcome' },
+        }, activeThread.boardSubmitNotice));
+        const noticeIds = new Set(['board-chat-route-outcome', 'chat-edited-draft-notice', 'chat-local-history-coverage', 'chat-local-history-error', 'chat-board-member-history-partial', 'chat-binding-held',
           'chat-agent-unavailable', 'chat-run-rate-limit', 'chat-run-error', 'chat-reconcile', 'chat-send-notice', 'chat-memo-send-blocked']);
         const notices = Array.from(conversation.children).filter(node => noticeIds.has(node.dataset.testid));
         if (notices.length) {
@@ -13813,19 +13892,26 @@
               title: `Enter 전송 · Shift+Enter 줄바꿈${activeThread.type === 'group' ? ' · @로 Agent 부르기' : ''}`,
               data: { threadId: activeThread.id, testid: 'chat-composer' },
             });
+            const boardDestination = mountBoardComposerDestination(activeThread, body._boardComposerDestination ||= {});
+            let boardPreview = null;
+            let boardCompositionEnded = -Infinity;
+            const submitComposer = () => {
+              if (!compositionInProgress) void codexBridge.sendMessage({ manualOwner, ...(boardPreview && { boardPreviewKey: boardPreview.key }) });
+            };
             const sendButton = el('button', {
               class: 'egd-codex-send',
               type: 'button', disabled: 'true',
               'aria-label': '메시지 보내기',
               title: '보내기',
               data: { testid: 'chat-send' },
-              onclick: () => { if (!compositionInProgress) void codexBridge.sendMessage({ manualOwner }); },
+              onclick: submitComposer,
             }, deskIcon('send'));
             const blockedSend = el('p', { class: 'egd-codex-send-blocked', role: 'status', data: { testid: 'chat-send-blocked' } });
             input.value = getCodexThreadDraft(codex, activeThread.id);
             const resizeComposer = (preserveViewport = true) => {
               if (!input.isConnected) return;
               const viewport = preserveViewport ? composerViewport.snapshot(input) : null;
+              if (boardDestination && !compositionInProgress) boardPreview = boardDestination.paint(boardComposerDelivery(activeThread, input.value, codex));
               input.style.height = 'auto';
               const main = input.closest?.('.egd-codex-chat-main');
               const footer = input.closest?.('.egd-codex-footer');
@@ -13868,21 +13954,23 @@
               let invalidProject = false;
               try { ChatState.normalizeRequestProjectTarget(activeThread.requestProjectTarget); } catch { invalidProject = true; }
               const roomProjectBlock = chatRoomProjectSendBlock(activeThread);
-              sendButton.disabled = ChatState.nativeBindingHeld(activeThread) || nativeSendHeld || activeThread.preparingInput || codex.isSending || !input.value.trim() || !readiness.ready || invalidProject || !!roomProjectBlock;
-              sendButton.title = ChatState.nativeBindingHeld(activeThread) || nativeSendHeld ? '보관된 연결을 현재 계정에 자동 연결하지 않습니다'
+              sendButton.disabled = ChatState.nativeBindingHeld(activeThread) || nativeSendHeld || activeThread.preparingInput || codex.isSending || !input.value.trim() || !readiness.ready || invalidProject || !!roomProjectBlock || boardPreview?.intent.ok === false;
+              sendButton.title = boardPreview?.intent.error || (ChatState.nativeBindingHeld(activeThread) || nativeSendHeld ? '보관된 연결을 현재 계정에 자동 연결하지 않습니다'
                 : invalidProject ? CHAT_REQUEST_PROJECT_INVALID : roomProjectBlock || readiness.reason
-                  || (activeThread.preparingInput ? '첨부를 준비하는 중입니다.' : codex.isSending ? '요청을 보내는 중입니다.' : '보내기');
+                  || (activeThread.preparingInput ? '첨부를 준비하는 중입니다.' : codex.isSending ? '요청을 보내는 중입니다.' : '보내기'));
             };
             input.addEventListener('input', () => {
               composerViewport.cancel(input);
               blockedSend.textContent = '';
-              codexBridge.setDraft(input.value, activeThread.id);
+              if (!boardDestination || !compositionInProgress) codexBridge.setDraft(input.value, activeThread.id);
               resizeComposer(false);
             });
             // Enter sends as in a messenger (Ctrl/⌘+Enter too); Shift+Enter keeps the
             // line break. A Korean syllable still in composition keeps its Enter, and an
             // open '@' list takes the key before the send does.
             input.addEventListener('keydown', (ev) => {
+              if (boardDestination && (ev.isComposing || compositionInProgress || ev.keyCode === 229
+                  || (ev.key === 'Enter' && Date.now() - boardCompositionEnded < 60))) return;
               if (input._mentionKeydown?.(ev)) return;
               if (ev.key !== 'Enter' || ev.shiftKey || ev.altKey) return;
               if (ev.isComposing || compositionInProgress || ev.keyCode === 229) return;
@@ -13892,11 +13980,12 @@
                 if (input.value.trim()) blockedSend.textContent = sendButton.title || '아직 보낼 수 없습니다.';
                 return;
               }
-              void codexBridge.sendMessage({ manualOwner });
+              submitComposer();
             });
             input.addEventListener('compositionstart', () => { composerViewport.cancel(input); compositionInProgress = true; });
             input.addEventListener('compositionend', () => {
               compositionInProgress = false;
+              boardCompositionEnded = Date.now();
               composerViewport.cancel(input);
               codexBridge.setDraft(input.value, activeThread.id);
               resizeComposer(false);
@@ -13934,6 +14023,7 @@
               ? '중지 확인 필요' : run.stopPending || run.stopRequested || run.status === 'stopping' ? '중지 요청 중' : '중지') : null;
             return el('div', { class: 'egd-codex-footer' },
               buildContextSuggestions(activeThread, codexBridge),
+              boardDestination?.node,
               el('div', { class: 'egd-codex-input-row' },
                 buildChatInputTray(activeThread, codexBridge),
                 input,
@@ -14941,11 +15031,20 @@
     // under its own name, and the Lead's run comes back as a /chat/send answer.
     // CHAT-10: members' events that beat the board send's answer, replayed once their runs are registered.
     const boardEarlyEvents = BoardThread.createBoardEarlyEvents();
-    function acceptBoardSend(threadId, answer, requestId) {
+    function acceptBoardSend(threadId, answer, requestId, plannedRecipients = []) {
       const outcome = BoardThread.boardSendOutcome(answer, requestId);
       const room = getCodexThreadById(state.codex, threadId);
       if (!room) return { accepted: false, code: 'CONVERSATION_NOT_FOUND' };
-      updateThreadById(threadId, current => ({ ...current, boardRoutes: { ...(current.boardRoutes || {}), ...outcome.routes } }));
+      const statusGroups = new Map();
+      for (const recipient of plannedRecipients) {
+        const state = outcome.routes[recipient.profileId]?.status;
+        const label = state === 'started' ? '접수' : state === 'deferred' ? '보류' : state === 'failed' ? '거절' : '접수 미확인';
+        if (!statusGroups.has(label)) statusGroups.set(label, []);
+        statusGroups.get(label).push(recipient.label);
+      }
+      const boardSubmitNotice = statusGroups.size === 1 && statusGroups.has('접수') ? null
+        : [...statusGroups].map(([label, names]) => `${label}: ${names.join(', ')}`).join(' · ');
+      updateThreadById(threadId, current => ({ ...current, boardSubmitNotice, boardRoutes: { ...(current.boardRoutes || {}), ...outcome.routes } }));
       const recipients = Array.isArray(answer?.recipients) ? answer.recipients : [];
       const boardOf = row => ({ profileId: row.profileId, reason: row.reason, roomClientThreadId: answer?.clientThreadId });
       for (const row of outcome.members) {
@@ -17839,7 +17938,7 @@
         const sendOwnerCurrent = () => !sendOwnerWatch || sendIdentityCurrent()
           && state.codex.activeThreadId === activeThread.id && (state.codex.activityRoomGeneration || 0) === sendRoomGeneration
           && ChatState.clientThreadBinding(getCodexThreadById(state.codex, activeThread.id)) === sendBinding;
-        let briefingProof = null;
+        let briefingProof = null, stopBoardWatch = null;
         try {
         let reservation = memoAskSendReservations.get(activeThread?.id);
         if (reservation && !reservation.scope.current()) {
@@ -17873,9 +17972,27 @@
         if (!memoSendCurrent()) return;
         const draftText = getCodexThreadDraft(state.codex, activeThread?.id || null);
         const content = draftText.trim();
-        // Keep explicit intent even when the engine's live availability changes.
-        const engineId = ['codex', 'claude'].includes(activeThread?.engineId) ? activeThread.engineId
-          : ChatState.chatThreadEngineId(activeThread, { recentEngineId: state.codex.recentEngineId, engines: state.codex.engines, profileEngines: state.codex.profileEngines });
+        const groupSend = activeThread?.type === 'group';
+        const engineId = groupSend ? chatSendEngineId(activeThread, state.codex)
+          : ['codex', 'claude'].includes(activeThread?.engineId) ? activeThread.engineId
+            : ChatState.chatThreadEngineId(activeThread, { recentEngineId: state.codex.recentEngineId, engines: state.codex.engines, profileEngines: state.codex.profileEngines });
+        const boardChanged = '답변 대상이나 포함 범위가 바뀌어 보내지 않았습니다. 초안을 확인하고 다시 보내세요.';
+        const reportBoardBlock = (message = boardChanged) => {
+          if (sendOwnerCurrent()) {
+            updateThreadById(activeThread.id, thread => ({ ...thread, sendError: message }));
+            emit();
+          }
+          return { accepted: false, status: 'failed' };
+        };
+        let submittedBoard = null;
+        if (groupSend && content) {
+          try {
+            const view = boardComposerDelivery(activeThread, draftText, state.codex);
+            if (!view.intent.ok) return reportBoardBlock(view.intent.error);
+            if (options.boardPreviewKey != null && options.boardPreviewKey !== view.key) return reportBoardBlock();
+            submittedBoard = Object.freeze({ key: view.key, routeKey: view.routeKey, message: draftText, browserScope: view.browserScope });
+          } catch { return reportBoardBlock(); }
+        }
         if (activeThread && engineId === 'claude' && (state.contextSuggest?.byThread?.[activeThread.id]?.picked?.length
             || activeThread.inputSources?.some(input => input.browserToolPermission === 'interact'))) {
           updateThreadById(activeThread.id, thread => ({ ...thread, sendError: ChatState.claudeContextSendErrorText('CLAUDE_CONTEXT_UNSUPPORTED') }));
@@ -17891,6 +18008,21 @@
           emit();
           return;
         }
+        let boardInvalidated = false;
+        const boardSendCurrent = () => {
+          if (!submittedBoard) return true;
+          if (boardInvalidated) return false;
+          try {
+            const thread = getCodexThreadById(state.codex, activeThread.id);
+            if (sendOwnerCurrent() && thread?.type === 'group'
+                && ChatState.chatDraftMatches(thread, getCodexThreadDraft(state.codex, thread.id), state.codex.threadDraftRevisions[thread.id] || 0, submittedDraft)
+                && !ChatState.nativeBindingHeld(thread) && ChatState.chatThreadReadiness(thread, state.codex).ready
+                && (!thread.conversationId || ChatState.canResumeNativeThread(thread, state.codex.authStatus, state.codex))
+                && boardComposerDelivery(thread, submittedBoard.message, state.codex).key === submittedBoard.key) return true;
+          } catch {}
+          boardInvalidated = true;
+          return false;
+        };
         const roomProjectBlock = chatRoomProjectSendBlock(activeThread);
         if (roomProjectBlock) { updateThreadById(activeThread.id, thread => ({ ...thread, sendError: roomProjectBlock })); emit(); return; }
         const submittedProjectDisplay = chatRequestProjectDisplays.get(activeThread.id);
@@ -17900,6 +18032,7 @@
           submittedRoomDefault = observed ? normalizeChatRoomProjectDefault(observed, ChatState.clientThreadBinding(activeThread)) : null;
         } catch { updateThreadById(activeThread.id, thread => ({ ...thread, sendError: CHAT_ROOM_PROJECT_UNAVAILABLE })); emit(); return; }
         const token = epochScope.begin(engineId, ChatState.chatThreadEngineProfileId(activeThread, state.codex));
+        if (submittedBoard && typeof this?.subscribe === 'function') stopBoardWatch = this.subscribe(boardSendCurrent);
         const failBriefingSend = () => {
           if (sendOwnerCurrent()) {
             updateThreadById(activeThread.id, thread => ({ ...thread,
@@ -17932,9 +18065,16 @@
             sendError: `자료를 준비하지 못해 전송하지 않았습니다: ${error.message}` }));
           epochScope.finish(token); emit(); return;
         }
+        const prepareOwnerCurrent = () => sendOwnerCurrent() && boardSendCurrent();
+        const stopStaleBoard = () => {
+          epochScope.finish(token);
+          return reportBoardBlock();
+        };
+        if (!boardSendCurrent()) return stopStaleBoard();
         if (submittedDraft.briefingInputs.length) {
-          try { briefingProof = await this.prepareBriefingInputSend(activeThread.id, submittedDraft, token, sendOwnerCurrent); }
+          try { briefingProof = await this.prepareBriefingInputSend(activeThread.id, submittedDraft, token, prepareOwnerCurrent); }
           catch { briefingProof = null; }
+          if (!boardSendCurrent()) return stopStaleBoard();
           if (!briefingProof || !briefingProof.current()) { failBriefingSend(); return; }
         }
         const clearAcceptedClaudeDraft = () => {
@@ -17945,9 +18085,11 @@
           state.codex.threadDrafts[activeThread.id] = '';
           state.codex.draft = getCodexThreadDraft(state.codex, state.codex.activeThreadId);
         };
+        if (!boardSendCurrent()) return stopStaleBoard();
         if (!await ensureNativeReadyForSend(activeThread) || !epochScope.valid(token) || !sendOwnerCurrent()) { epochScope.finish(token); return; }
         if (briefingProof && !briefingProof.current()) { failBriefingSend(); return; }
         if (memoSendBlocked()) { epochScope.finish(token); return; }
+        if (!boardSendCurrent()) return stopStaleBoard();
         const resumedThread = getCodexThreadById(state.codex, activeThread.id);
         if (!resumedThread || ChatState.clientThreadBinding(resumedThread) !== ChatState.clientThreadBinding(activeThread)
             || resumedThread.conversationId !== activeThread.conversationId || threadBusy(resumedThread)
@@ -17955,8 +18097,11 @@
         updateThreadById(activeThread.id, thread => ({ ...thread, preparingInput: true }));
         emit();
         try {
+          if (!boardSendCurrent()) return stopStaleBoard();
           if (engineId === 'claude' && !selectedInputs.length && submittedDraft.briefingInputs.length) await requireClaudeContext(activeThread, token);
-          inputReferences = [...await captureThreadInputs(activeThread, selectedInputs, token, sendOwnerCurrent), ...submittedDraft.briefingInputs];
+          if (!boardSendCurrent()) return stopStaleBoard();
+          inputReferences = [...await captureThreadInputs(activeThread, selectedInputs, token, prepareOwnerCurrent), ...submittedDraft.briefingInputs];
+          if (!boardSendCurrent()) return stopStaleBoard();
           for (const reference of inputReferences) if (reference.contextScope) InputContext.assertInputContextScope(reference, ChatState.chatContextRequestScope(activeThread, state.codex));
           if (!epochScope.valid(token) || !sendOwnerCurrent()) { epochScope.finish(token); return; }
           if (briefingProof && !briefingProof.current()) { failBriefingSend(); return; }
@@ -17966,6 +18111,7 @@
           const readiness = ChatState.chatThreadReadiness(current, state.codex);
           if (!readiness.ready) throw new Error(readiness.reason);
         } catch (error) {
+          if (!boardSendCurrent()) return stopStaleBoard();
           if (epochScope.valid(token) && sendOwnerCurrent()) updateThreadById(activeThread.id, thread => ({ ...thread,
             sendError: ChatState.claudeContextSendErrorText(error.code, engineId) || `자료를 준비하지 못해 전송하지 않았습니다: ${error.message}` }));
           epochScope.finish(token);
@@ -17973,6 +18119,7 @@
         } finally {
           if (epochScope.valid(token) && sendIdentityCurrent()) { updateThreadById(activeThread.id, thread => ({ ...thread, preparingInput: false })); emit(); }
         }
+        if (!boardSendCurrent()) return stopStaleBoard();
         const requestId = `request-${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
         // Claude B2 reads the selected immutable capture, not the live Browser
         // actor. An explicit interaction request was refused above, never dropped.
@@ -17985,6 +18132,7 @@
           epochScope.finish(token);
           return;
         }
+        if (submittedBoard && submittedBoard.browserScope !== (selectedBrowserSources.length > 0)) return stopStaleBoard();
         const browserSseStatus = rootSseReady();
         const selectedBrowserTransportId = browserSseStatus.browserTransportId;
         if (selectedBrowserSources.length && !browserSseStatus.sourceReady) {
@@ -17998,7 +18146,7 @@
         let expectedRoomProject = null;
         if (!submittedDraft.requestProjectTarget) {
           if (!defaultSendCurrent()) { epochScope.finish(token); return; }
-          const observed = await state.codexBridge.prepareRoomProjectSend(activeThread.id, submittedRoomDefault, sendOwnerCurrent, () => {
+          const observed = await state.codexBridge.prepareRoomProjectSend(activeThread.id, submittedRoomDefault, prepareOwnerCurrent, () => {
             const access = state.codex.authStatus?.access?.state;
             if (owner && !reservation && !options.memoAskReservation && editedDraftWatch?.current()
                 && (access == null || access === 'ok')
@@ -18007,6 +18155,7 @@
               showMemoManualSendNotice(getCodexThreadById(state.codex, activeThread.id), 'draft-edited');
             }
           });
+          if (!boardSendCurrent()) return stopStaleBoard();
           if (!observed || !defaultSendCurrent() || !sendOwnerCurrent()) { epochScope.finish(token); return; }
           if (memoSendBlocked()) { epochScope.finish(token); return; }
           try { expectedRoomProject = snapshotChatRoomProjectExpectation(observed, projectBinding); }
@@ -18017,7 +18166,7 @@
         if (briefingProof && !briefingProof.current()) { failBriefingSend(); return; }
         const registerPending = () => {
           // The first send ties the room to its engine (D3) and makes it the app's recent one (D4).
-          updateThreadById(activeThread.id, thread => ({ ...thread, engineId, sendError: null,
+          updateThreadById(activeThread.id, thread => ({ ...thread, engineId, sendError: null, ...(submittedBoard && { boardSubmitNotice: null }),
             ...(engineId === 'claude' ? { engineProfileId: token.profile } : {}) }));
           state.codex.recentEngineId = engineId;
           const authorProfile = activeThread.profileEnabled ? codexThreadAgentProfile(activeThread) : null;
@@ -18037,7 +18186,7 @@
           }
           state.codex.draft = getCodexThreadDraft(state.codex, state.codex.activeThreadId);
         };
-        if (!briefingProof) { registerPending(); emit(); }
+        if (!briefingProof && !submittedBoard) { registerPending(); emit(); }
         let receiptWatch = null, responseRoutingMismatch = false;
         try {
           const runtimeConfig = codexThreadRuntimeConfig(activeThread);
@@ -18082,26 +18231,43 @@
             emit();
             if (!briefingProof.current() || !defaultSendCurrent() || !sendOwnerCurrent()) { failBriefingSend(); return; }
             if (memoSendBlocked()) { epochScope.finish(token); return; }
-            registerPending();
+            if (!submittedBoard) registerPending();
           }
-          // CHAT-10 (D-M2): an @mention or an Agent Lead in a Board Thread goes to /chat/board/send.
-          const boardPlan = engineId === 'codex' && activeThread.type === 'group' ? BoardThread.boardSendPlan(activeThread, chatRequest, { selfName: SELF_MEMBER }) : null;
-          if (boardPlan?.error) throw Object.assign(new Error(BoardThread.boardSendErrorText(boardPlan.error)), { status: 400, code: boardPlan.error, accepted: false });
-          if (boardPlan) boardEarlyEvents.open(requestId);
+          let boardPlan = null, boardRecipients = [];
+          if (submittedBoard) {
+            // Finish planning from the original text and current eligible history,
+            // BEFORE adding the optimistic row or clearing the composer. There
+            // is no await/observer notification between this check and dispatch.
+            if (!boardSendCurrent()) return stopStaleBoard();
+            const thread = getCodexThreadById(state.codex, activeThread.id);
+            const final = boardComposerDelivery(thread, submittedBoard.message, state.codex, chatRequest);
+            if (!final.intent.ok) return reportBoardBlock(final.intent.error);
+            if (final.routeKey !== submittedBoard.routeKey) return stopStaleBoard();
+            boardPlan = BoardThread.boardSendPlan(thread, chatRequest, { ...final.options, intent: final.intent });
+            if (boardPlan?.error) return reportBoardBlock(BoardThread.boardSendErrorText(boardPlan.error) || boardChanged);
+            if ((final.intent.route === 'board') !== !!boardPlan) return stopStaleBoard();
+            if (!boardPlan && final.options.supportsBoardDelivery && final.intent.expectedBoardDelivery) {
+              chatRequest.expectedBoardDelivery = final.intent.expectedBoardDelivery;
+            }
+            boardRecipients = final.intent.recipients;
+            stopBoardWatch?.(); stopBoardWatch = null;
+            registerPending();
+            if (boardPlan) boardEarlyEvents.open(requestId);
+          }
           const pendingSend = boardPlan
             ? fetchJson(boardPlan.path, { method: 'POST', signal: token.signal, body: JSON.stringify(boardPlan.body) })
-              .then(answer => epochScope.valid(token) ? acceptBoardSend(activeThread.id, answer, requestId) : answer)
+              .then(answer => epochScope.valid(token) ? acceptBoardSend(activeThread.id, answer, requestId, boardRecipients) : answer)
               .finally(() => boardEarlyEvents.close(requestId))
             : fetchJson('/chat/send', {
               method: 'POST',
               signal: token.signal,
               body: JSON.stringify(chatRequest),
             });
-          if (briefingProof) emit();
+          if (briefingProof || submittedBoard) emit();
           const result = await pendingSend;
           if (!epochScope.valid(token) || ChatState.clientThreadBinding(getCodexThreadById(state.codex, activeThread.id)) !== ChatState.clientThreadBinding(activeThread)) return { requestId, accepted: false, status: 'unconfirmed' };
           if (result?.boardOnly === true) {
-            // Only mentioned members answer, each in its own conversation: the room's own request is done.
+            // At least one routed member was accepted, not necessarily all of them.
             if (protocol.requests[requestId]) protocol.requests[requestId].status = 'accepted';
             updateThreadById(activeThread.id, thread => ({ ...thread, sendError: null,
               messages: thread.messages.map(message => message.role === 'user' && message.requestId === requestId ? { ...message, status: 'complete' } : message) }));
@@ -18236,7 +18402,7 @@
           }
           return { requestId, accepted: request.status === 'accepted' && !!request.runId, status: request.status };
         } finally { receiptWatch?.dispose(); epochScope.finish(token); if (epochScope.valid(token)) emit(); }
-        } finally { briefingProof?.dispose(); editedDraftWatch?.release(); sendOwnerWatch?.release(); }
+        } finally { stopBoardWatch?.(); briefingProof?.dispose(); editedDraftWatch?.release(); sendOwnerWatch?.release(); }
       },
     };
   }

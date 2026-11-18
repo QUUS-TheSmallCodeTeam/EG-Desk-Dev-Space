@@ -11385,3 +11385,17 @@ button.egd-memo-ask-cancel:hover { text-decoration: underline; }
 .egd-codex-chat-main[data-kind="dm"] button.egd-codex-message-activity { width: auto; min-width: 32px; min-height: 28px; padding-inline: 6px; }
 .egd-codex-send-blocked { margin: 4px 0 0; font-size: 12px; line-height: 1.5; color: var(--egd-warning-ink); overflow-wrap: anywhere; }
 .egd-codex-send-blocked:empty { margin: 0; }
+
+/* Board Chat destination is one composer line until the user asks for detail. */
+.egd-board-chat-route { position: relative; min-width: 0; padding: 3px 0 5px; }
+.egd-board-chat-route-line { display: flex; align-items: baseline; gap: 8px; min-width: 0; font-size: 12px; line-height: 1.45; }
+.egd-board-chat-destination { flex: 0 1 auto; min-width: 0; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; font-weight: 600; }
+.egd-board-chat-scope { color: var(--egd-on-surface-variant); font-size: 11px; white-space: nowrap; }
+.egd-board-chat-scope:empty, .egd-board-chat-correction:empty { display: none; }
+.egd-board-chat-disclosure { flex: none; margin-inline-start: auto; color: var(--egd-on-surface-variant); }
+.egd-board-chat-disclosure > summary { cursor: pointer; font-size: 11px; white-space: nowrap; }
+.egd-board-chat-disclosure > summary:focus-visible { outline: 2px solid currentColor; outline-offset: 2px; }
+.egd-board-chat-scope-body { position: absolute; z-index: 4; inset-inline: 0; inset-block-end: 100%; max-height: 145px; overflow: auto; padding: 6px 9px; border: 1px solid var(--egd-outline-variant); border-radius: 6px; background: var(--egd-window-alt); color: var(--egd-on-surface); overflow-wrap: anywhere; }
+.egd-board-chat-scope-body ul { padding-inline-start: 19px; margin: 1px 0 5px; }
+.egd-board-chat-scope-body p { margin: 3px 0; }
+.egd-board-chat-correction { margin: 3px 0 0; color: var(--egd-warning-ink); font-size: 11px; line-height: 1.4; overflow-wrap: anywhere; }
