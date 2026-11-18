@@ -8,8 +8,8 @@ The composer's recipient line and the submit path use the same pure `boardDelive
 
 | Message | Room Agent (Lead) | Route |
 |-|-|-|
-| `@이름` of an invited Agent (profile) | any | `POST /chat/board/send`: only the mentioned Agents answer |
-| no mention | an Agent profile | `POST /chat/board/send`: the Lead answers with the Board block |
+| `@이름` of an invited profile on a supported Codex Board route | any | `POST /chat/board/send`: only the named Agents are requested, subject to each one's profile, account and concurrency checks |
+| no mention, supported unbounded Codex route | an Agent profile | `POST /chat/board/send`: only the Lead is requested; its policy determines whether the Board block is included |
 | no mention, or only `@Codex` | plain Codex | ordinary `POST /chat/send` (same single answer as before) |
 | a targeted `@Agent` + a live Browser selection | any | refused: the Board dispatch path must not drop the Browser execution boundary |
 | a targeted `@Agent` in an unsupported engine or stateless mode | any | refused: do not send the same text as an ordinary engine turn or discard the selected mode |
@@ -25,14 +25,14 @@ A routed request carries the room's members (`members`, same shape as the store)
 - The Lead answers in the room's own conversation. Each other member answers in its own conversation (`board-member:*`); the screen registers that run under the room (`localThreadId`) with the Agent's name and face, so its answer appears in the room as that Agent. It never rebinds the room's conversation (`run.boardMember`).
 - Every recipient's outcome is kept on the room (`thread.boardRoutes[profileId]`), and runs carry `run.board` (from the send answer and from `run.started` details).
 - Member chips and the floating Chat head show each Agent's state: 작업 중 · 승인 대기 · 답변 대기 · 막힘 · 완료, and 차례 대기 when the D-M4 limit deferred it.
-- Only mentioned members answering: the person's bubble is marked sent; there is no Lead run.
+- A member being requested is not proof that it started or answered. Partial acceptance, deferral, rejection and an unconfirmed start are different outcomes. An uncertain or partial batch must not be replayed as though nobody received it.
 
 ## Where members live
 
 `GET/POST /chat/board/members` (`helper/egdesk-board-members.mjs`, route block in `codex-bridge-http.mjs`) read and replace chat-store v3 `room_members` under the room's durable ID. No engine account check. A room never saved reads `{members: [], saved: false}`; the first write creates it.
 
 - Invite, remove and role change write the room's members to the store.
-- Opening a Board Thread reads them back: a different list in the store replaces the screen's (faces captured at invite are kept); an empty store receives the Desk members once. A save that did not reach the bridge is retried on the next open instead of being overwritten.
+- Opening a Board Thread reads them back: a different list in the store replaces the screen's (faces captured at invite are kept); a room whose roster has never been saved can receive its Desk members once. An explicitly cleared saved roster stays empty on reopen; the presence of a native conversation alone is not evidence of a saved roster. A save that did not reach the bridge is retried on the next open instead of being overwritten.
 - `thread.participants` / `participantAgents` stay in the Desk pref as the screen's copy.
 
 ## Known limits
