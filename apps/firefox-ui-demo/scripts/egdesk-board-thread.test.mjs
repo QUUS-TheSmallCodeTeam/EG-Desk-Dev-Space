@@ -68,6 +68,7 @@ test('D-M2 routing: a mention or an Agent Lead goes to /chat/board/send; a plain
   const mentioned = BoardThread.boardSendPlan(thread, { ...base, message: '@검증 담당 @디자이너 봐 줘' });
   assert.equal(mentioned.path, '/chat/board/send');
   assert.deepEqual(mentioned.mentioned, [ID_V, ID_D]);
+  assert.equal(mentioned.body.leadProfileId, null);
   for (const key of ['conversationId', 'profileEnabled', 'stateless', 'profileId']) assert.ok(!(key in mentioned.body), key);
   assert.deepEqual([mentioned.body.message, mentioned.body.requestId, mentioned.body.clientThreadId, mentioned.body.model], ['@검증 담당 @디자이너 봐 줘', 'req-1', 'room-1', 'gpt-x']);
   assert.deepEqual(mentioned.body.members, BoardThread.boardStoreMembers(thread));

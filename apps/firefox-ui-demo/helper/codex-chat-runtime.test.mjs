@@ -4041,10 +4041,14 @@ test('Board helper rejects route, engine, ordered recipients, attached scopes, a
     [{ ...body, expectedBoardDelivery: { ...body.expectedBoardDelivery, engine: 'claude' } }, 'BOARD_DELIVERY_CHANGED'],
     [{ ...body, contextResolution: { resolutionId: 'room-only', chosen: ['resource'] } }, 'BOARD_CONTEXT_SCOPE'],
     [{ ...body, contextSnapshotIds: ['resource'] }, 'BOARD_CONTEXT_SCOPE'],
-    [{ ...body, stateless: true }, 'INVALID_BOARD_SEND'],
+    [{ ...body, stateless: true }, 'BOARD_STATELESS_UNSUPPORTED'],
+    [{ ...body, executionPolicy: { mode: 'browserBounded' } }, 'BOARD_BROWSER_BOUNDED'],
   ]) await assert.rejects(h.chat.sendBoard(payload, { authenticateRecipient: () => assert.fail('should not authenticate') }), { code })
   await assert.rejects(h.chat.send(body), { code: 'BOARD_DELIVERY_CHANGED' })
   assert.equal(h.calls.length, 0)
+  const claude = projectClaudeHarness({ profiles: r2Profiles() })
+  await assert.rejects(claude.chat.sendBoard({ ...body, engineId: 'claude', expectedBoardDelivery: { ...body.expectedBoardDelivery, engine: 'claude' } }), { code: 'BOARD_ENGINE_UNSUPPORTED' })
+  assert.equal(claude.calls.length, 0)
 })
 
 test('Board observes authoritative roster and Lead; async roster drift reports partial delivery, never an alternate recipient', async t => {
