@@ -23,8 +23,8 @@
 import { performance } from 'node:perf_hooks'
 import { createHostActivity, HOST_ACTIVITY_SSE_EVENT } from './egdesk-host-activity.mjs'
 import { HOST_AGENT_INPUT_MONITOR } from './egdesk-host-agent.mjs'
-import { EMERGENCY_STOP_CHORD, createHostInputGate } from './egdesk-host-input-gate.mjs'
-import { createHostLease, hostLaneKey } from './egdesk-host-lease.mjs'
+import { EMERGENCY_STOP_CHORD, HOST_GATE_CODES, createHostInputGate } from './egdesk-host-input-gate.mjs'
+import { HOST_LEASE_CODES, createHostLease, hostLaneKey } from './egdesk-host-lease.mjs'
 import { guardBridgeRequest, readJsonBody, sendJson } from './codex-bridge-http.mjs'
 
 export const HOST_CONTROL_SSE_EVENT = 'host.control'
@@ -164,8 +164,8 @@ export function createHostControl({
 
   /**
    * One control from the view. stop, emergencyStop and pause never need an
-   * epoch (closing is always allowed). handBack needs the lease epoch the
-   * screen showed, and reopening a closed gate needs the gate epoch it showed.
+   * epoch (closing is always allowed). Every handBack needs both epochs
+   * the screen showed, even when it will not reopen the gate.
    */
   async function control(body = {}) {
     const action = body?.action
@@ -186,25 +186,31 @@ export function createHostControl({
       const ack = await lease.stopApp(target)
       return { ok: true, action, ack: { scope: ack.scope, app: ack.app, notDispatched: ack.notDispatched, inFlight: ack.inFlight, epoch: ack.epoch }, control: state({ rows: false }) }
     }
-    // handBack
+    // Bring the watchdog and lease up to date before comparing either epoch.
+    // This pulse can close an expired gate but cannot reopen one.
+    pulse()
     const leaseStatus = lease.status()
-    if (epochOf(body.epoch) === null || body.epoch !== leaseStatus.epoch) {
-      throw issue(HOST_CONTROL_CODES.STALE_EPOCH, 'The control state changed; look again before handing back', 409)
-    }
+    const gateStatus = gate.status()
+    const stale = () => issue(HOST_CONTROL_CODES.STALE_EPOCH, 'The control state changed; look again before handing back', 409)
+    if (epochOf(body.epoch) === null || body.epoch !== leaseStatus.epoch ||
+        epochOf(body.gateEpoch) === null || body.gateEpoch !== gateStatus.epoch) throw stale()
     if (body.target !== undefined && body.target !== null) {
       if (!hostLaneKey(target)) throw issue(HOST_CONTROL_CODES.INVALID_TARGET, 'handBack target needs target.bundleId')
       const result = lease.handBack({ target })
       return { ok: result.ok, action, control: state({ rows: false }) }
     }
-    const result = lease.handBack()
-    let gateCode = null
-    if (result.ok && !gate.isOpen()) {
-      pulse()
+    const reply = (ok, code = null, gateCode = null) => ({ ok, action, code, gateCode, control: state({ rows: false }) })
+    if (leaseStatus.held) return reply(false, HOST_LEASE_CODES.INPUT_HELD)
+    // Open before releasing any takeover/stops so a failed open cannot
+    // partially hand back. Held input has already been ruled out above.
+    if (!gateStatus.open) {
       const opened = gate.open({ epoch: body.gateEpoch })
-      gateCode = opened.code
+      if (opened.code === HOST_GATE_CODES.STALE_EPOCH) throw stale()
+      if (!opened.ok) return reply(false, null, opened.code)
     }
-    pulse()
-    return { ok: result.ok, action, code: result.code ?? null, gateCode, control: state({ rows: false }) }
+    const result = lease.handBack()
+    gate.noteLeaseStatus(result.status)
+    return reply(result.ok, result.code ?? null)
   }
 
   // The chat runtime's protocol-2 events: a Codex run's computer-control count.
