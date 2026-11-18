@@ -5,6 +5,7 @@ import { Readable, Transform } from 'node:stream'
 import { pipeline } from 'node:stream/promises'
 
 const FORMAT = 'egdesk'
+export const REVIEW_BUNDLE_FORMAT = 'egdesk.portable.review'
 const VERSION = { major: 1, minor: 0 }
 const SHA = /^[a-f0-9]{64}$/
 const MAGIC = Buffer.from('EGDESK-E1\n')
@@ -95,7 +96,7 @@ export function createEGDeskZipCodec({ yazl, yauzl }) {
   const reader = yauzl?.fromBufferPromise ? yauzl : yauzl?.default
   if (!ZipFile || !reader?.fromBufferPromise || !reader?.openPromise) fail('CODEC_UNAVAILABLE', 'yazl and yauzl 3.x are required')
 
-  function encode(entries, { signal } = {}) {
+  function encode(entries, { signal, canonical = false } = {}) {
     if (!Array.isArray(entries) || entries.length < 3 || entries.length > DEFAULT_BUDGET.maxEntries) fail('ARCHIVE_BUDGET', 'Invalid archive entry count')
     const seen = new Set()
     let expanded = 0
@@ -124,7 +125,9 @@ export function createEGDeskZipCodec({ yazl, yauzl }) {
     signal?.addEventListener('abort', onAbort, { once: true })
     output.once('close', () => { signal?.removeEventListener('abort', onAbort); stop() })
     for (const entry of entries) {
-      zip.addReadStreamLazy(entry.name, { size: entry.size, compress: false, mode: 0o100600, mtime: new Date('1980-01-01T00:00:00Z'), forceZip64Format: true }, callback => {
+      // Fixed DOS timestamp and no UT field: the review ZIP profile is timezone-independent.
+      const mtime = canonical ? new Date(1980, 0, 1, 12) : new Date('1980-01-01T00:00:00Z')
+      zip.addReadStreamLazy(entry.name, { size: entry.size, compress: false, mode: 0o100600, mtime, forceDosTimestamp: canonical, forceZip64Format: true }, callback => {
         Promise.resolve().then(() => entry.open()).then(source => {
           const stream = readableOf(source)
           stream.on('error', stop)
@@ -339,6 +342,7 @@ function canonicalManifest({ roots, nodes, objects, eventsSha256, transcriptSha2
 }
 
 function validateManifest(manifest) {
+  if (manifest?.format === REVIEW_BUNDLE_FORMAT) fail('REVIEW_HANDOFF', 'Review handoffs are not Board or Desk bundles')
   exactKeys(manifest, ['format', 'version', 'roots', 'nodes', 'objects', 'eventsSha256', 'transcriptSha256', 'excludedCount', 'contentSha256'])
   exactKeys(manifest.version, ['major', 'minor'])
   if (manifest.format !== FORMAT || manifest.version.major !== 1 || !Number.isInteger(manifest.version.minor) || manifest.version.minor < 0) fail('UNSUPPORTED_VERSION', 'Unsupported .egdesk bundle version')

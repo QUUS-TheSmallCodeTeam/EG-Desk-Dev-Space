@@ -504,5 +504,6 @@ test('the bridge mounts portable routes after Desk routes, behind the loopback g
   assert.ok(at('if (await handleDeskHttp(req, res, url)) return') < mount)
   assert.ok(mount < at('if (await handleContextHttp(req, res, url)) return'))
   assert.ok(mount < at('if (await handleChatHttp(req, res, url)) return'))
-  at("        portable: deskStore ? ['export', 'inspect', 'import-as-new', 'passphrase', 'exports-list', 'attachments', 'file-drafts'] : ['local-store-unavailable'],")
+  at("...(deskStore ? ['export', 'inspect', 'import-as-new', 'passphrase', 'exports-list', 'attachments', 'file-drafts'] : ['local-store-unavailable'])")
+  at("...(await handlePortableHttp.supportsReviewHandoff() ? ['reviewHandoff'] : [])")
 })

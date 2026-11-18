@@ -31,7 +31,14 @@ export const PORTABLE_LIMITS = Object.freeze({
   maxRunsPerChat: 1000,
 })
 export const MIN_PASSPHRASE_CHARS = 8
-const MAX_PASSPHRASE_CHARS = 1024
+export const MAX_PASSPHRASE_CHARS = 1024
+export function portableExportPassphrase(passphrase) {
+  const secret = typeof passphrase === 'string' && passphrase.length ? passphrase : null
+  if (secret !== null && (Array.from(secret).length < MIN_PASSPHRASE_CHARS || secret.length > MAX_PASSPHRASE_CHARS)) {
+    fail('PORTABLE_PASSPHRASE_TOO_SHORT', `A passphrase needs ${MIN_PASSPHRASE_CHARS}–${MAX_PASSPHRASE_CHARS} characters`)
+  }
+  return secret
+}
 const MAX_CHAT_IMPORT_BYTES = 64 * 1024 * 1024
 const MAX_CHAT_TITLE = 1000
 const MAX_LISTED_CONVERSATIONS = 10_000
@@ -40,6 +47,7 @@ const KIND = Object.freeze({ root: 'egdesk.portable.root', board: 'egdesk.portab
 // Attachments and File drafts (opt-in, D-R3) travel as 'artifact' nodes too.
 const CHILD_TYPE = Object.freeze({ board: 'board', chat: 'chat', profile: 'artifact', attachment: 'artifact', fileDraft: 'artifact' })
 const CHILD_LABEL = Object.freeze({ board: 'Board', chat: 'Chat', profile: 'Profile', attachment: 'Attachment', fileDraft: 'File draft' })
+export const REVIEW_FILE_PREFIX = 'EG-Desk-Review-'
 const EXPORT_FILE = /^(?!\.)[^\\/:*?"<>|\u0000-\u001f]{1,200}\.egdesk$/u
 const BOARD_ID = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/
 const MACHINE_PATH = /(?:^|[\s("'])(?:\/[^\s]|~\/|[A-Za-z]:[\\/]|file:\/\/|\\\\[^\s])/i
@@ -176,7 +184,7 @@ export function homeRelativePath(target, home = os.homedir()) {
   if (!relative || relative.startsWith('..') || path.isAbsolute(relative)) return null
   return `~/${relative.split(path.sep).join('/')}`
 }
-async function ensureExportDirectory(directory) {
+export async function ensureExportDirectory(directory) {
   await fsp.mkdir(directory, { recursive: true, mode: 0o700 })
   const info = await fsp.lstat(directory)
   if (!info.isDirectory() || info.isSymbolicLink()) fail('PORTABLE_EXPORT_FOLDER_UNSAFE', 'The export folder is not a plain folder', 500)
@@ -189,7 +197,7 @@ async function ensureExportDirectory(directory) {
  * Staged bytes are exactly the output bytes (ciphertext when a passphrase was
  * given), so staging is as protected as the published file.
  */
-async function createExportSink(directory, fileName) {
+export async function createExportSink(directory, fileName) {
   const tempPath = path.join(directory, `.egdesk-${randomUUID()}.part`)
   const handle = await fsp.open(tempPath, constants.O_CREAT | constants.O_EXCL | constants.O_WRONLY | (constants.O_NOFOLLOW || 0), 0o600)
   const writable = handle.createWriteStream({ flush: true })
@@ -230,10 +238,26 @@ async function publishCreateOnly(tempPath, directory, fileName) {
   }
   fail('PORTABLE_EXPORT_NAME_TAKEN', 'Too many exported files share this name', 409)
 }
+export async function portableSourceBytes({ fileRef, bundle }, location, maxBytes) {
+  if (fileRef !== undefined) return readExportFile(location().directory, fileRef.exportFile, maxBytes)
+  if (typeof bundle !== 'string') fail('PORTABLE_HTTP_INPUT', 'bundle must be base64 file bytes')
+  if (bundle.length > Math.ceil(maxBytes / 3) * 4 || bundle.length % 4 !== 0 || !/^[A-Za-z0-9+/]*={0,2}$/.test(bundle)) {
+    if (bundle.length > Math.ceil(maxBytes / 3) * 4) fail('PORTABLE_FILE_TOO_LARGE', `The file exceeds ${maxBytes} bytes`, 413)
+    fail('PORTABLE_HTTP_INPUT', 'bundle must be base64 file bytes')
+  }
+  const bytes = Buffer.from(bundle, 'base64')
+  if (!bytes.length) fail('PORTABLE_HTTP_INPUT', 'bundle is empty')
+  if (bytes.length > maxBytes) fail('PORTABLE_FILE_TOO_LARGE', `The file exceeds ${maxBytes} bytes`, 413)
+  return bytes
+}
+
 async function readExportFile(directory, name, maxBytes) {
   if (typeof name !== 'string' || !EXPORT_FILE.test(name) || name.includes('..')) fail('PORTABLE_HTTP_INPUT', 'fileRef.exportFile must be a .egdesk file name from the export folder')
   let handle
-  try { handle = await fsp.open(path.join(directory, name), constants.O_RDONLY | (constants.O_NOFOLLOW || 0)) }
+  try {
+    if (!(await fsp.lstat(directory)).isDirectory()) fail('PORTABLE_FILE_NOT_FOUND', 'The exported file was not found', 404)
+    handle = await fsp.open(path.join(directory, name), constants.O_RDONLY | (constants.O_NOFOLLOW || 0) | (constants.O_NONBLOCK || 0))
+  }
   catch (error) {
     if (['ENOENT', 'ELOOP', 'ENOTDIR', 'EISDIR'].includes(error.code)) fail('PORTABLE_FILE_NOT_FOUND', 'The exported file was not found', 404)
     throw error
@@ -242,9 +266,17 @@ async function readExportFile(directory, name, maxBytes) {
     const info = await handle.stat()
     if (!info.isFile()) fail('PORTABLE_FILE_NOT_FOUND', 'The exported file was not found', 404)
     if (info.size > maxBytes) fail('PORTABLE_FILE_TOO_LARGE', `The file exceeds ${maxBytes} bytes`, 413)
-    const bytes = await handle.readFile()
-    if (bytes.length > maxBytes) fail('PORTABLE_FILE_TOO_LARGE', `The file exceeds ${maxBytes} bytes`, 413)
-    return bytes
+    // Never let a concurrently growing file exceed the read budget.
+    const bytes = Buffer.allocUnsafe(info.size + 1)
+    let total = 0
+    while (total < bytes.length) {
+      const { bytesRead } = await handle.read(bytes, total, bytes.length - total, total)
+      if (!bytesRead) break
+      total += bytesRead
+    }
+    if (total > maxBytes) fail('PORTABLE_FILE_TOO_LARGE', `The file exceeds ${maxBytes} bytes`, 413)
+    if (total !== info.size) fail('PORTABLE_FILE_DAMAGED', 'The exported file changed while it was read')
+    return bytes.subarray(0, total)
   } finally { await handle.close() }
 }
 
@@ -441,7 +473,7 @@ const importOnlyProvider = { openExportSnapshot: async () => fail('PORTABLE_ERRO
 // ── Import: staged in memory, parsed, validated, then written ──
 const ENVELOPE_DAMAGE = new Set(['ENVELOPE_MAGIC', 'ENVELOPE_HEADER', 'ENVELOPE_POLICY', 'ENVELOPE_SIZE', 'ENVELOPE_TAG', 'ENVELOPE_TRAILING', 'TRUNCATED_ENVELOPE'])
 /** Decrypt errors become PASSWORD_REQUIRED, DECRYPT_FAILED (wrong passphrase or altered bytes) or stay as envelope damage. */
-function classifyingEnvelope(envelope) {
+export function classifyingEnvelope(envelope) {
   return {
     ...envelope,
     decrypt(source, password, options) {
@@ -484,18 +516,19 @@ function memoryStage(maxBytes) {
   }
   return stage
 }
-function mapReadError(error) {
+export function mapReadError(error) {
   if (typeof error?.httpStatus === 'number') return error
   const code = error?.code
   if (code === 'DECRYPT_FAILED') return Object.assign(new Error('The passphrase is wrong or the file was changed; nothing was imported'), { code: 'PORTABLE_PASSPHRASE_INVALID', httpStatus: 400, encrypted: true })
   if (code === 'PASSWORD_REQUIRED') return Object.assign(new Error('This file is locked with a passphrase'), { code: 'PORTABLE_PASSPHRASE_REQUIRED', httpStatus: 400, encrypted: true })
+  if (code === 'REVIEW_HANDOFF') return Object.assign(new Error('Open this file in Review handoff, not Board or Desk import'), { code: 'PORTABLE_REVIEW_HANDOFF', httpStatus: 400 })
   if (code === 'UNSUPPORTED_VERSION') return Object.assign(new Error('This file was made by a newer EG-Desk'), { code: 'PORTABLE_VERSION_UNSUPPORTED', httpStatus: 400 })
   if (code === 'MEMORY_BUDGET' || code === 'ARCHIVE_BUDGET') return Object.assign(new Error('The file content exceeds the import limit; nothing was imported'), { code: 'PORTABLE_FILE_TOO_LARGE', httpStatus: 413 })
   if (code === 'CRYPTO_UNAVAILABLE' || code === 'CODEC_UNAVAILABLE') return Object.assign(new Error('Portable bundle support is unavailable'), { code: 'PORTABLE_UNAVAILABLE', httpStatus: 503 })
   const reason = error instanceof PortableBundleError && typeof code === 'string' ? code : 'UNREADABLE_ARCHIVE'
   return Object.assign(new Error('The file is damaged or is not an EG-Desk bundle; nothing was imported'), { code: 'PORTABLE_FILE_DAMAGED', httpStatus: 400, reason })
 }
-function mapExportError(error) {
+export function mapExportError(error) {
   if (typeof error?.httpStatus === 'number') return error
   if (error?.code === 'MEMORY_BUDGET' || error?.code === 'ARCHIVE_BUDGET') return Object.assign(new Error('The export exceeds the bundle size limit; nothing was written'), { code: 'PORTABLE_EXPORT_TOO_LARGE', httpStatus: 413 })
   if (error?.code === 'CRYPTO_UNAVAILABLE' || error?.code === 'CODEC_UNAVAILABLE') return Object.assign(new Error('Portable bundle support is unavailable'), { code: 'PORTABLE_UNAVAILABLE', httpStatus: 503 })
@@ -740,20 +773,8 @@ export function createPortableService({ desk, chat, profiles, attachments = null
   }
   const stores = () => ({ desk: resolve(desk), chat: resolve(chat), profiles: resolve(profiles), attachments: resolve(attachments), fileDrafts: resolve(fileDrafts) })
 
-  async function sourceBytes({ fileRef, bundle }) {
-    if (fileRef !== undefined) return readExportFile(location().directory, fileRef.exportFile, limits.maxBundleBytes)
-    if (bundle.length > Math.ceil(limits.maxBundleBytes / 3) * 4 || bundle.length % 4 !== 0 || !/^[A-Za-z0-9+/]*={0,2}$/.test(bundle)) {
-      if (bundle.length > Math.ceil(limits.maxBundleBytes / 3) * 4) fail('PORTABLE_FILE_TOO_LARGE', `The file exceeds ${limits.maxBundleBytes} bytes`, 413)
-      fail('PORTABLE_HTTP_INPUT', 'bundle must be base64 file bytes')
-    }
-    const bytes = Buffer.from(bundle, 'base64')
-    if (!bytes.length) fail('PORTABLE_HTTP_INPUT', 'bundle is empty')
-    if (bytes.length > limits.maxBundleBytes) fail('PORTABLE_FILE_TOO_LARGE', `The file exceeds ${limits.maxBundleBytes} bytes`, 413)
-    return bytes
-  }
-
   async function openBundle(input, { apply }) {
-    const source = await sourceBytes(input)
+    const source = await portableSourceBytes(input, location, limits.maxBundleBytes)
     const deps = await loadDependencies()
     const encrypted = deps.envelope.isEncryptedPrefix(source)
     const passphrase = typeof input.passphrase === 'string' && input.passphrase ? input.passphrase : null
@@ -795,10 +816,7 @@ export function createPortableService({ desk, chat, profiles, attachments = null
     async exportBundle({ scope, boardId, include = {}, passphrase } = {}) {
       // D-R3: attachments and File drafts stay out unless explicitly true.
       const chosen = { chats: include.chats === true, profiles: include.profiles === true, attachments: include.attachments === true, fileDrafts: include.fileDrafts === true }
-      const secret = typeof passphrase === 'string' && passphrase.length ? passphrase : null
-      if (secret !== null && (Array.from(secret).length < MIN_PASSPHRASE_CHARS || secret.length > MAX_PASSPHRASE_CHARS)) {
-        fail('PORTABLE_PASSPHRASE_TOO_SHORT', `A passphrase needs ${MIN_PASSPHRASE_CHARS}–${MAX_PASSPHRASE_CHARS} characters`)
-      }
+      const secret = portableExportPassphrase(passphrase)
       return exclusive(async () => {
         const context = stores()
         if (!context.desk) fail('PORTABLE_STORE_UNAVAILABLE', 'Local Desk storage is unavailable', 503)
@@ -835,7 +853,7 @@ export function createPortableService({ desk, chat, profiles, attachments = null
       catch (error) { if (error.code !== 'ENOENT') throw error }
       const files = []
       for (const entry of entries) {
-        if (!entry.isFile() || !EXPORT_FILE.test(entry.name)) continue
+        if (!entry.isFile() || !EXPORT_FILE.test(entry.name) || entry.name.startsWith(REVIEW_FILE_PREFIX)) continue
         const info = await fsp.lstat(path.join(where.directory, entry.name)).catch(() => null)
         if (!info?.isFile()) continue
         files.push({ fileName: entry.name, bytes: info.size, modifiedAt: Math.floor(info.mtimeMs), fileRef: { exportFile: entry.name } })

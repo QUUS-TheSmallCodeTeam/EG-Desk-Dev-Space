@@ -1,5 +1,6 @@
 import { guardBridgeRequest, readJsonBody, sendJson } from './codex-bridge-http.mjs'
 import { publicText } from './codex-chat-values.mjs'
+import { REVIEW_MAX_BUNDLE_BYTES, createPortableReviewService } from './egdesk-portable-review.mjs'
 import { PORTABLE_LIMITS, createPortableService, portableExportLocation } from './egdesk-portable-service.mjs'
 
 // RT-03 portable .egdesk routes. Same contract as the Desk routes: loopback/
@@ -16,6 +17,8 @@ const ROUTES = {
   '/v1/portable/export': ['POST', 'export'],
   '/v1/portable/inspect': ['POST', 'inspect'],
   '/v1/portable/import': ['POST', 'import'],
+  '/v1/portable/review/export': ['POST', 'reviewExport'],
+  '/v1/portable/review/inspect': ['POST', 'reviewInspect'],
 }
 const EXTRA_FIELDS = ['reason', 'encrypted', 'locked', 'written']
 
@@ -41,6 +44,10 @@ function exportInput(body) {
   if (Object.values(include).some(value => typeof value !== 'boolean')) throw httpError('PORTABLE_HTTP_INPUT', 'include.chats, include.profiles, include.attachments and include.fileDrafts must be true or false')
   return { scope: body.scope, ...(body.scope === 'board' ? { boardId: body.boardId } : {}), include, passphrase: passphraseField(body.passphrase) }
 }
+function reviewExportInput(body) {
+  fields(body, ['review', 'passphrase'], ['review'])
+  return { review: body.review, passphrase: passphraseField(body.passphrase) }
+}
 function sourceInput(body, withMode) {
   fields(body, withMode ? ['fileRef', 'bundle', 'passphrase', 'mode'] : ['fileRef', 'bundle', 'passphrase'], withMode ? ['mode'] : [])
   if (withMode && body.mode !== 'asNew') throw httpError('PORTABLE_HTTP_INPUT', "mode must be 'asNew'")
@@ -60,10 +67,12 @@ function sourceInput(body, withMode) {
  *                                       → 201 {fileName, bytes, encrypted, contents, folder, displayPath, fileRef, redacted}
  * POST /v1/portable/inspect {fileRef: {exportFile} | bundle: base64, passphrase?}
  *                                       → 200 summary | 200 {encrypted: true, locked: true, bytes} without a passphrase
+ * POST /v1/portable/review/export {review, passphrase?} → 201 {review, fileName, displayPath, fileRef, encrypted}
+ * POST /v1/portable/review/inspect {fileRef | bundle, passphrase?} → 200 {review, encrypted, locked: false} or {encrypted: true, locked: true}
  * POST /v1/portable/import {fileRef | bundle, passphrase?, mode: 'asNew'}
  *                                       → 201 {mode, desk, boards, chats, profiles, contents, verified, redacted}
  */
-export async function handlePortableHttp(req, url, { service, readJson = readJsonBody, send, port = 39218 } = {}) {
+export async function handlePortableHttp(req, url, { service, reviewService, signal, readJson = readJsonBody, send, port = 39218 } = {}) {
   if (url.pathname !== '/v1/portable' && !url.pathname.startsWith('/v1/portable/')) return false
   if (typeof send !== 'function') throw new TypeError('send is required')
   if (!guardBridgeRequest(req, port)) {
@@ -76,13 +85,17 @@ export async function handlePortableHttp(req, url, { service, readJson = readJso
     if (req.method !== route[0]) throw httpError('METHOD_NOT_ALLOWED', 'Method not allowed for this portable endpoint', 405)
     if ([...url.searchParams.keys()].length) throw httpError('PORTABLE_HTTP_INPUT', 'Invalid portable query')
     const action = route[1]
-    const portable = typeof service === 'function' ? service() : service
-    const limit = action === 'export' ? SMALL_BODY : uploadBodyLimit(portable?.limits?.maxBundleBytes ?? PORTABLE_LIMITS.maxBundleBytes)
+    const isReview = action === 'reviewExport' || action === 'reviewInspect'
+    const portable = isReview ? reviewService : typeof service === 'function' ? service() : service
+    const limit = action === 'export' || action === 'reviewExport' ? SMALL_BODY
+      : uploadBodyLimit(isReview ? REVIEW_MAX_BUNDLE_BYTES : portable?.limits?.maxBundleBytes ?? PORTABLE_LIMITS.maxBundleBytes)
     const body = action === 'exports' ? null : await readJson(req, { maxBytes: limit })
     if (!portable) throw httpError('PORTABLE_UNAVAILABLE', 'Portable bundle support is unavailable', 503)
     if (action === 'exports') send(200, await portable.listExports())
     else if (action === 'export') send(201, await portable.exportBundle(exportInput(body)))
     else if (action === 'inspect') send(200, await portable.inspectBundle(sourceInput(body, false)))
+    else if (action === 'reviewExport') send(201, await portable.exportReview(reviewExportInput(body), { signal }))
+    else if (action === 'reviewInspect') send(200, await portable.inspectReview(sourceInput(body, false), { signal }))
     else send(201, await portable.importBundle(sourceInput(body, true)))
   } catch (error) {
     const known = typeof error.code === 'string' && Number.isInteger(error.httpStatus) && error.httpStatus >= 400 && error.httpStatus <= 599
@@ -108,6 +121,19 @@ export async function handlePortableHttp(req, url, { service, readJson = readJso
  * fallback export folder parent when ~/Downloads does not exist.
  */
 export function createPortableHttpHandler({ desk, chat, profiles, attachments = null, fileDrafts = null, appDataDir, port = 39218, ...options } = {}) {
-  const service = createPortableService({ desk, chat, profiles, attachments, fileDrafts, location: () => portableExportLocation({ appDataDir }), ...options })
-  return (req, res, url) => handlePortableHttp(req, url, { service, port, send: (status, data) => sendJson(res, status, data) })
+  const location = options.location ?? (() => portableExportLocation({ appDataDir }))
+  const service = createPortableService({ desk, chat, profiles, attachments, ...options, location, fileDrafts })
+  const reviewService = createPortableReviewService({ location, dependencies: options.dependencies, home: options.home })
+  const handler = async (req, res, url) => {
+    const send = (status, data) => { if (!res.destroyed) sendJson(res, status, data) }
+    if (!url.pathname.startsWith('/v1/portable/review/')) return handlePortableHttp(req, url, { service, port, send })
+    const controller = new AbortController()
+    const abort = () => controller.abort()
+    if (res.destroyed) abort()
+    res.once('close', abort)
+    try { return await handlePortableHttp(req, url, { reviewService, port, send, signal: controller.signal }) }
+    finally { res.off('close', abort) }
+  }
+  handler.supportsReviewHandoff = () => reviewService.supported()
+  return handler
 }

@@ -62,7 +62,7 @@ test('the real bridge build covers its helper modules, not tests or modules it n
   assert.ok(!names.some(name => name.endsWith('.test.mjs') || name.startsWith('../') || name.startsWith('node_modules/')))
   // The workflow runtime loads the task graph modules; the portable routes (RT-03) load the bundle library.
   for (const name of ['egdesk-workflow-runtime.mjs', 'egdesk-event-bus.mjs', 'egdesk-task-store.mjs']) assert.ok(names.includes(name), name)
-  for (const name of ['egdesk-portable-http.mjs', 'egdesk-portable-service.mjs', 'egdesk-portable-bundle.mjs']) assert.ok(names.includes(name), name)
+  for (const name of ['egdesk-portable-http.mjs', 'egdesk-portable-service.mjs', 'egdesk-portable-bundle.mjs', 'egdesk-portable-review.mjs']) assert.ok(names.includes(name), name)
   assert.equal(computeBridgeBuildHash(), computeBridgeBuildHash())
   assert.equal(BRIDGE_ENTRY, fileURLToPath(new URL('./codex-bridge-server.mjs', import.meta.url)))
 })
