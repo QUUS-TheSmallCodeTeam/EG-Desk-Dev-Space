@@ -11567,6 +11567,25 @@ test('production label editing is IME-safe and commits only settled text', () =>
   assert.deepEqual(dirty.at(-1), ['delete-shape', 'label-1']);
 });
 
+test('canvas shape verifier leaves first-use Browser fullscreen before any synthetic Canvas action', () => {
+  const source = readFileSync(new URL('./verify-firefox-mcp-shapes.mjs', import.meta.url), 'utf8');
+  const setup = source.match(/^function prepareShapeDesk\([^]*?\n\}/m)?.[0];
+  assert.ok(setup, 'the verifier has a visible Desk setup step');
+  const execute = compileFunction(setup + '\nreturn prepareShapeDesk;')();
+  const state = { surface: { initialBrowserFocus: true }, cardFullscreen: { cardId: 'first-browser' } };
+  let fullscreenStyling = true, entered = 0;
+  const root = { dataset: {}, classList: { contains: name => name === 'egd-card-fullscreen-active' && fullscreenStyling } };
+  const api = { state, surface: { enterDesk() { entered++; } } };
+  assert.throws(() => execute(api, root), /requires a visible Desk canvas/, 'do not synthesize input while the first Browser is still fullscreen');
+  api.surface.enterDesk = () => { entered++; state.surface.initialBrowserFocus = false; state.cardFullscreen = null; };
+  assert.throws(() => execute(api, root), /requires a visible Desk canvas/, 'a stale fullscreen class still hides labels');
+  state.surface.initialBrowserFocus = true;
+  api.surface.enterDesk = () => { entered++; state.surface.initialBrowserFocus = false; fullscreenStyling = false; };
+  assert.deepEqual(execute(api, root), { startedInBrowser: true });
+  assert.equal(entered, 3);
+  assert.match(source, /deskSetup = \(\$\{prepareShapeDesk\}\)\(api, document\.documentElement\);\s*document\.querySelectorAll\('\.egd-canvas-shape'\)/);
+});
+
 test('resolveViewportBoard ranks the Board in view and counts the others', () => {
   const viewport = { left: 0, top: 0, right: 1000, bottom: 800 };
   const region = (id, left, top, right, bottom) => ({ id, rect: { left, top, right, bottom } });
