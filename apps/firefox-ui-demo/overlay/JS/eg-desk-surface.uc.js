@@ -5397,11 +5397,29 @@
     }
   }
 
-  function writeAgendaStore(snapshot) {
+  function writeAgendaStore(snapshot, { durable = false } = {}) {
+    try { return writeAgendaPref(JSON.stringify(snapshot), durable); }
+    catch (error) { console.warn(TAG, 'agenda store serialization failed', error); return false; }
+  }
+
+  function writeAgendaPref(value, durable) {
+    let prefs, previous, written = false;
     try {
-      servicesRef().prefs.setStringPref(AGENDA_STORAGE_PREF, JSON.stringify(snapshot));
+      prefs = servicesRef().prefs;
+      if (durable) previous = prefs.prefHasUserValue(AGENDA_STORAGE_PREF) ? prefs.getStringPref(AGENDA_STORAGE_PREF) : null;
+      if (value === null) {
+        if (prefs.prefHasUserValue(AGENDA_STORAGE_PREF)) prefs.clearUserPref(AGENDA_STORAGE_PREF);
+      } else prefs.setStringPref(AGENDA_STORAGE_PREF, value);
+      written = true;
+      if (durable) prefs.savePrefFile(null);
       return true;
     } catch (error) {
+      if (durable && written) {
+        try {
+          if (previous === null) prefs.clearUserPref(AGENDA_STORAGE_PREF);
+          else prefs.setStringPref(AGENDA_STORAGE_PREF, previous);
+        } catch { /* Do not report success or remove review records. */ }
+      }
       console.warn(TAG, 'agenda store write failed', error);
       return false;
     }
@@ -5464,7 +5482,7 @@
     return activeSnapshot;
   }
 
-  function writeAgendaStoreAndSync(store) {
+  function writeAgendaStoreAndSync(store, options) {
     const nextStore = {
       ...createEmptyAgendaStore(),
       ...store,
@@ -5473,7 +5491,7 @@
       agendas: store?.agendas || {},
       meta: store?.meta || {},
     };
-    if (!writeAgendaStore(nextStore)) return false;
+    if (!writeAgendaStore(nextStore, options)) return false;
     updateAgendaMetaFromStore(nextStore);
     scheduleBoardRailSync();
     return true;
@@ -5496,18 +5514,21 @@
   }
 
   function clearAgendaStore() {
-    invalidateReviewContext();
-    try { reviewStore().reset(); } catch { return; }
-    try {
-      const prefs = servicesRef().prefs;
-      if (prefs.prefHasUserValue(AGENDA_STORAGE_PREF)) prefs.clearUserPref(AGENDA_STORAGE_PREF);
-    } catch (error) {
-      console.warn(TAG, 'agenda store clear failed', error);
-    }
-    state.agenda.hasSavedState = false;
-    state.agenda.lastSavedAt = null;
-    state.agenda.savedAgendaIds = [];
-    syncViewportAgendaRail();
+    const store = coerceAgendaStore();
+    const ids = savedBoardIds(store);
+    return coordinateBoardAskLifecycle(ids, 'purge', receipt => {
+      if (!writeAgendaPref(null, true)) {
+        boardNotice(receipt ? '외부 질문은 먼저 차단했지만, 저장한 Board를 지우지 못했습니다.' : '저장한 Board를 지우지 못했습니다.');
+        return false;
+      }
+      invalidateReviewContext();
+      if (ids.length) forgetReviewBoards(ids, 'Board는 지웠지만, 이 프로필의 로컬 검토 기록을 정리하지 못했습니다.');
+      state.agenda.hasSavedState = false;
+      state.agenda.lastSavedAt = null;
+      state.agenda.savedAgendaIds = [];
+      syncViewportAgendaRail();
+      return true;
+    }, { bulk: true });
   }
 
   function loadAgendaStoreMeta() {
@@ -6370,9 +6391,9 @@
 
   // A conflict never overwrites the stored head; the person chooses what happens next.
   async function syncBoardToStore(boardId, snapshot, title) {
-    const result = await deskStoreSync().saveBoard(boardId, snapshot, { title });
+    const result = await BoardAgentAsk.trackBoardAskLifecycleSave(boardId, () => deskStoreSync().saveBoard(boardId, snapshot, { title }));
     syncBoardCanvasExport();
-    if (result.conflict) showBoardConflict({ boardId, snapshot, title, headRevision: result.headRevision });
+    if (result.conflict && !BoardAgentAsk.boardAskLifecycleBusy(boardId)) showBoardConflict({ boardId, snapshot, title, headRevision: result.headRevision });
     else if (result.stored === 'both' && document.getElementById('egd-board-history')?.dataset.boardId === boardId) void loadBoardHistory();
     return result;
   }
@@ -7320,24 +7341,93 @@
     return dialog;
   }
 
-  function writeBoardLifecycleStore(result, failure) {
-    if (result?.ok && writeAgendaStoreAndSync(result.store)) return true;
+  function writeBoardLifecycleStore(result, failure, durable = false) {
+    if (result?.ok && writeAgendaStoreAndSync(result.store, { durable })) return true;
     boardNotice(failure);
     return false;
+  }
+
+  function savedBoardIds(store) {
+    return [...new Set([...Object.keys(store.agendas), ...Object.keys(store.meta)])].sort();
+  }
+
+  function boardLifecycleStamp(store, id) {
+    const saved = store.agendas[id], meta = store.meta[id];
+    if (!saved && !meta) return null;
+    return JSON.stringify([meta?.createdAt ?? saved?.savedAt ?? null, meta?.deletedAt ?? null, saved?.savedAt ?? null, meta?.updatedAt ?? null, !!saved]);
+  }
+
+  function boardAskLifecycleRequired() {
+    if (boardAgentAskEverSupported) return true;
+    try { return servicesRef().prefs.getBoolPref(BOARD_ASK_SEEN_PREF, false); }
+    catch { return false; }
+  }
+
+  function coordinateBoardAskLifecycle(ids, action, apply, { bulk = false, eligible = () => true, stamp } = {}) {
+    const before = coerceAgendaStore();
+    const stamps = ids.map(id => boardLifecycleStamp(before, id));
+    const valid = () => {
+      const store = coerceAgendaStore();
+      return eligible(store) && (!bulk || JSON.stringify(savedBoardIds(store)) === JSON.stringify(ids)) &&
+        ids.every((id, i) => stamps[i] !== null && boardLifecycleStamp(store, id) === stamps[i]);
+    };
+    if (!valid() || (stamp !== undefined && stamp !== stamps[0])) {
+      boardNotice(action === 'restore' ? 'Board를 복구하지 못했습니다. 휴지통 상태를 다시 확인해 주세요.' : 'Board 상태가 바뀌었습니다. 다시 확인한 뒤 시도해 주세요.');
+      return false;
+    }
+    if (!ids.length || !boardAskLifecycleRequired()) return apply(false);
+    const release = BoardAgentAsk.claimBoardAskLifecycle(ids);
+    if (!release) {
+      boardNotice('이 Board의 다른 작업을 확인하는 중입니다. 완료된 뒤 다시 시도해 주세요.');
+      return false;
+    }
+    boardAgentAskFlowRef?.invalidate();
+    const post = (path, body) => deskStoreRequest('POST', path, body);
+    const proceed = async () => {
+      await BoardAgentAsk.settleBoardAskLifecycleSaves(ids);
+      let blocked = false, restored = null;
+      for (const id of ids) {
+        const receipt = valid() ? await BoardAgentAsk.transitionBoardAskLifecycle(post, id, action, valid) : null;
+        if (receipt && !receipt.absent && action !== 'restore') blocked = true;
+        if (receipt?.changed && action === 'restore') restored = { id, version: receipt.version };
+        if (!receipt || !valid()) {
+          boardNotice(blocked
+            ? '일부 외부 질문은 차단했지만 Board 변경을 완료하지 못했습니다. Board 상태를 다시 확인해 주세요.'
+            : '외부 질문 설정 상태를 확인하지 못해 Board를 변경하지 않았습니다. 이 기기의 서비스 상태를 확인해 주세요.');
+          return false;
+        }
+      }
+      const success = apply(blocked);
+      if (!success && restored) await resetFailedBoardAskRestore(post, restored);
+      return success;
+    };
+    return proceed().finally(release);
+  }
+
+  function resetFailedBoardAskRestore(post, { id, version }) {
+    // A failed local restore must not leave a known new permission open. Do
+    // not retry or use a newer version owned by another window.
+    return Promise.resolve().then(() => post('/v1/board-agent-ask/lifecycle', { boardId: id, action: 'trash', expectedVersion: version }))
+      .catch(() => null);
   }
 
   function focusBoardTrashToggle() {
     document.querySelector('#egd-agenda-switcher .egd-agenda-switch-trash-toggle')?.focus?.();
   }
 
-  function moveAgendaToTrash(agendaId) {
-    const result = BoardLifecycle.trashBoard(coerceAgendaStore(), agendaId, Date.now());
-    if (!writeBoardLifecycleStore(result, 'Board를 휴지통으로 옮기지 못했습니다. 저장된 Board는 그대로 있습니다.')) return false;
-    boardTrashOpen = true;
-    syncViewportAgendaRail();
-    boardDoneNotice(`'${result.title}' Board를 휴지통으로 옮겼습니다. Board 목록 아래 휴지통에서 복구할 수 있습니다.`);
-    focusBoardTrashToggle();
-    return true;
+  function moveAgendaToTrash(agendaId, stamp) {
+    const eligible = store => !Object.values(state.boards.projections).some(projection => projection.boardId === agendaId) &&
+      BoardLifecycle.trashBoard(store, agendaId, Date.now()).ok;
+    return coordinateBoardAskLifecycle([agendaId], 'trash', receipt => {
+      const result = BoardLifecycle.trashBoard(coerceAgendaStore(), agendaId, Date.now());
+      const failure = 'Board를 휴지통으로 옮기지 못했습니다. 저장된 Board는 그대로 있습니다.';
+      if (!writeBoardLifecycleStore(result, receipt ? '외부 질문은 먼저 차단했습니다. ' + failure : failure, true)) return false;
+      boardTrashOpen = true;
+      syncViewportAgendaRail();
+      boardDoneNotice(`'${result.title}' Board를 휴지통으로 옮겼습니다. Board 목록 아래 휴지통에서 복구할 수 있습니다.`);
+      focusBoardTrashToggle();
+      return true;
+    }, { eligible, stamp });
   }
 
   // 보관함: only where the Board is listed changes. Nothing on the Desk moves or closes.
@@ -7356,29 +7446,35 @@
   }
 
   function restoreAgendaFromTrash(agendaId) {
-    const result = BoardLifecycle.restoreBoard(coerceAgendaStore(), agendaId, Date.now());
-    if (!writeBoardLifecycleStore(result, 'Board를 복구하지 못했습니다. 휴지통에 그대로 있습니다.')) return false;
-    syncViewportAgendaRail();
-    boardDoneNotice(result.renamed
-      ? `같은 이름의 Board가 있어 '${result.title}' 이름으로 복구했습니다. Board 목록에서 열 수 있습니다.`
-      : `'${result.title}' Board를 복구했습니다. Board 목록에서 열 수 있습니다.`);
-    const row = agendaSwitcherRow(agendaId);
-    if (row) row.focus?.(); else focusBoardTrashToggle();
-    return true;
+    const eligible = store => BoardLifecycle.isBoardTrashed(store.meta[agendaId]);
+    return coordinateBoardAskLifecycle([agendaId], 'restore', () => {
+      const result = BoardLifecycle.restoreBoard(coerceAgendaStore(), agendaId, Date.now());
+      if (!writeBoardLifecycleStore(result, 'Board를 복구하지 못했습니다. 휴지통에 그대로 있습니다.', true)) return false;
+      syncViewportAgendaRail();
+      boardDoneNotice(result.renamed
+        ? `같은 이름의 Board가 있어 '${result.title}' 이름으로 복구했습니다. Board 목록에서 열 수 있습니다.`
+        : `'${result.title}' Board를 복구했습니다. Board 목록에서 열 수 있습니다.`);
+      const row = agendaSwitcherRow(agendaId);
+      if (row) row.focus?.(); else focusBoardTrashToggle();
+      return true;
+    }, { eligible });
   }
 
   function purgeAgendaFromTrash(agendaId, options = {}) {
-    const entry = BoardLifecycle.trashedBoardEntries(coerceAgendaStore()).find(item => item.id === agendaId);
+    const store = coerceAgendaStore();
+    const stamp = boardLifecycleStamp(store, agendaId);
+    const entry = BoardLifecycle.trashedBoardEntries(store).find(item => item.id === agendaId);
     if (!entry) return false;
-    const purge = () => {
+    const purge = () => coordinateBoardAskLifecycle([agendaId], 'purge', receipt => {
       const result = BoardLifecycle.purgeBoard(coerceAgendaStore(), agendaId);
-      if (!writeBoardLifecycleStore(result, 'Board를 삭제하지 못했습니다. 휴지통에 그대로 있습니다.')) return false;
+      const failure = 'Board를 삭제하지 못했습니다. 휴지통에 그대로 있습니다.';
+      if (!writeBoardLifecycleStore(result, receipt ? '외부 질문은 먼저 차단했습니다. ' + failure : failure, true)) return false;
       const cleaned = forgetReviewBoards([agendaId], 'Board를 완전히 삭제했지만, 이 프로필의 로컬 검토 기록을 정리하지 못했습니다.');
       syncViewportAgendaRail();
       if (cleaned) boardDoneNotice(`'${result.title}' Board를 완전히 삭제했습니다.`);
       focusBoardTrashToggle();
       return true;
-    };
+    }, { stamp, eligible: store => BoardLifecycle.isBoardTrashed(store.meta[agendaId]) });
     if (options.confirmed === true) return purge();
     showBoardConfirm({
       kicker: '휴지통', danger: true, onConfirm: purge,
@@ -7542,8 +7638,9 @@
     const prompt = BoardLifecycle.boardDeletePrompt({
       title: snapshot?.agenda?.title || store.meta?.[agendaId]?.title, count: agendaCardCountForSnapshot(snapshot), open,
     });
-    if (options.confirmed === true) return prompt.canDelete ? moveAgendaToTrash(agendaId) : false;
-    showBoardConfirm({ kicker: '저장한 Board 삭제', ...prompt, onConfirm: prompt.canDelete ? () => moveAgendaToTrash(agendaId) : null });
+    const stamp = boardLifecycleStamp(store, agendaId);
+    if (options.confirmed === true) return prompt.canDelete ? moveAgendaToTrash(agendaId, stamp) : false;
+    showBoardConfirm({ kicker: '저장한 Board 삭제', ...prompt, onConfirm: prompt.canDelete ? () => moveAgendaToTrash(agendaId, stamp) : null });
     return true;
   }
 
@@ -29699,17 +29796,19 @@
   }
 
   // Use only a saved mounted Board, never a Board ID or name from the file.
+  const BOARD_ASK_SEEN_PREF = 'egdesk.boardAgentAsk.lifecycle.v1';
   let boardAgentAskSupported = false;
+  let boardAgentAskEverSupported = false;
   let boardAgentAskFlowRef = null;
   let boardAgentAskOpener = null;
   function askBoard(projection) {
-    if (!projection || !coerceAgendaStore().agendas[projection.boardId]) return null;
+    if (!projection || BoardAgentAsk.boardAskLifecycleBusy(projection.boardId) || !coerceAgendaStore().agendas[projection.boardId]) return null;
     const board = reviewBoard(projection);
     return board && isReviewBoardCurrent(board) ? { id: projection.boardId, title: board.title, identity: board } : null;
   }
   function isBoardAgentAskCurrent(binding) {
     const { board, context, review } = binding;
-    return !!(boardAgentAskSupported && isReviewContextCurrent(context) && isReviewBoardCurrent(board.identity) &&
+    return !!(boardAgentAskSupported && !BoardAgentAsk.boardAskLifecycleBusy(board.id) && isReviewContextCurrent(context) && isReviewBoardCurrent(board.identity) &&
       coerceAgendaStore().agendas[board.id] &&
       (!review || (state.boards.activeProjectionId === board.identity.projection.id && reviewFlowRef?.view()?.step === 'request-inspected' &&
         reviewFlowRef.view().review === review)));
@@ -29791,6 +29890,14 @@
     portableSupportState = PortableState.portableSupport(bridgeState);
     reviewSupported = ReviewHandoff.reviewHandoffSupported(bridgeState);
     boardAgentAskSupported = BoardAgentAsk.boardAgentAskSupported(bridgeState);
+    if (boardAgentAskSupported && !boardAgentAskEverSupported) {
+      boardAgentAskEverSupported = true;
+      try {
+        const prefs = servicesRef().prefs;
+        prefs.setBoolPref(BOARD_ASK_SEEN_PREF, true);
+        prefs.savePrefFile(null);
+      } catch { /* Still fail closed in this window if the bridge goes away. */ }
+    }
     boardAgentAskFlowRef?.invalidate();
     reviewFlowRef?.invalidate();
     syncPortableEntryPoints();

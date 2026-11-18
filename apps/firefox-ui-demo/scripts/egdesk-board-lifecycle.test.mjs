@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
+import * as BoardAgentAsk from '../overlay/resources/EGDeskBoardAgentAsk.sys.mjs';
 import * as Lifecycle from '../overlay/resources/EGDeskBoardLifecycle.sys.mjs';
 import { createReviewStore } from '../overlay/resources/EGDeskReviewHandoff.sys.mjs';
 import {
@@ -266,7 +267,7 @@ test('screen: every list of saved Boards skips the trash', () => {
 
 // A small stand-in for the chrome document: enough to run the production
 // delete / restore / permanent-delete functions cut out of the surface script.
-function lifecycleHarness(initialStore, { projections = {}, historyReady = false, writable = true, reviewWritable = true } = {}) {
+function lifecycleHarness(initialStore, { projections = {}, historyReady = false, writable = true, reviewWritable = true, bridgeSeen = false, host } = {}) {
   let reviewJson = '';
   let reviewWrites = 0;
   const review = createReviewStore({ read: () => reviewJson, write(value) {
@@ -278,6 +279,7 @@ function lifecycleHarness(initialStore, { projections = {}, historyReady = false
   let store = JSON.parse(JSON.stringify(initialStore));
   const attached = [];
   const notices = [];
+  const calls = [], events = [];
   let rails = 0;
   const document = {
     activeElement: null,
@@ -301,18 +303,23 @@ function lifecycleHarness(initialStore, { projections = {}, historyReady = false
     return node;
   };
   const deps = {
-    document, el, BoardLifecycle: Lifecycle, state: { boards: { projections } },
+    document, el, BoardLifecycle: Lifecycle, BoardAgentAsk,
+    state: { boards: { projections }, agenda: {} }, boardAgentAskEverSupported: false, BOARD_ASK_SEEN_PREF: 'test',
+    servicesRef: () => ({ prefs: { getBoolPref: () => bridgeSeen } }), boardAgentAskFlowRef: null,
+    deskStoreRequest: (method, path, body) => { calls.push({ method, path, body }); return host?.(body); },
+    invalidateReviewContext() {}, writeAgendaPref: () => { events.push('clear'); if (!writable) return false; store = storeOf(); return true; },
     reviewStore: () => review, blockedReviewBoardIds,
     coerceAgendaStore: () => JSON.parse(JSON.stringify(store)),
-    writeAgendaStoreAndSync: next => { if (!writable) return false; store = JSON.parse(JSON.stringify(next)); return true; },
+    writeAgendaStoreAndSync: (next, options) => { events.push(['write', options]); if (!writable) return false; store = JSON.parse(JSON.stringify(next)); return true; },
     boardNotice: message => notices.push(message), boardDoneNotice: message => notices.push(message), syncViewportAgendaRail: () => { rails += 1; },
     agendaCardCountForSnapshot: snapshot => (snapshot?.cards?.length || 0) + (snapshot?.shapes?.length || 0),
     agendaSwitcherRow: () => null, boardVersionHistoryReady: () => historyReady,
   };
   const names = ['closeBoardConfirm', 'showBoardConfirm', 'writeBoardLifecycleStore', 'focusBoardTrashToggle',
-    'moveAgendaToTrash', 'restoreAgendaFromTrash', 'purgeAgendaFromTrash', 'deleteAgenda', 'forgetReviewBoards'];
+    'moveAgendaToTrash', 'restoreAgendaFromTrash', 'purgeAgendaFromTrash', 'deleteAgenda', 'forgetReviewBoards', 'clearAgendaStore',
+    'savedBoardIds', 'boardLifecycleStamp', 'boardAskLifecycleRequired', 'coordinateBoardAskLifecycle', 'resetFailedBoardAskRestore'];
   const api = new Function(...Object.keys(deps), `let boardTrashOpen = false;\n${names.map(declaration).join('\n')}\nreturn { ${names.join(', ')}, trashOpen: () => boardTrashOpen };`)(...Object.values(deps));
-  return { ...api, document, notices, review, blockedReviewBoardIds, reviewWrites: () => reviewWrites, seedReview: value => { reviewJson = value; }, store: () => store, rails: () => rails, dialog: () => document.getElementById('egd-board-confirm') };
+  return { ...api, document, notices, review, calls, events, blockedReviewBoardIds, setStore: value => { store = structuredClone(value); }, reviewWrites: () => reviewWrites, seedReview: value => { reviewJson = value; }, store: () => store, rails: () => rails, dialog: () => document.getElementById('egd-board-confirm') };
 }
 const press = node => node.listeners.click({ stopPropagation() {}, target: node });
 
@@ -884,4 +891,155 @@ test('screen: a Board restored from the trash is listed as closed only, never as
   assert.equal(entries[0].title, '검증 Board', 'the row keeps its saved name, not the top bar label');
   // The row says one state: '닫힘' is not followed by '닫은 기록'.
   assert.match(declaration('renderAgendaSwitcherPanel'), /agendaEntryStatus\(entry\) === '닫힘' \? null : SurfaceState\.boardEntryRecencyLabel\(entry\)/);
+});
+
+const result = (status, body) => ({ status, body });
+const activeBoard = () => result(200, { lifecycle: 'active', version: null, changed: false });
+const missingBoard = () => result(404, { code: 'BOARD_NOT_FOUND' });
+function mockBoardAsk(initial = {}) {
+  const rows = new Map(Object.entries(initial));
+  let generation = 0;
+  function service({ boardId, action, expectedVersion }) {
+    const row = rows.get(boardId);
+    if (!row) return missingBoard();
+    if (action === 'get') return result(200, { lifecycle: row.lifecycle, version: row.version, changed: false });
+    const target = action === 'restore' ? 'active' : action;
+    if (expectedVersion !== row.version) return result(409, { code: 'BOARD_AGENT_ASK_LIFECYCLE_CONFLICT' });
+    if (row.lifecycle === 'purge' && target !== 'purge') return result(409, { code: 'BOARD_NOT_ACTIVE' });
+    const changed = target !== row.lifecycle;
+    if (changed) { row.lifecycle = target; row.version = 'version-' + ++generation; row.code = null; }
+    return result(200, { lifecycle: row.lifecycle, version: row.version, changed });
+  }
+  return { rows, service };
+}
+
+function gate() {
+  let resolve;
+  const promise = new Promise(r => { resolve = r; });
+  return { promise, resolve };
+}
+
+const pendingTick = () => new Promise(resolve => setImmediate(resolve));
+const lifecycleBodies = h => h.calls.map(call => {
+  assert.equal(call.method, 'POST');
+  assert.equal(call.path, '/v1/board-agent-ask/lifecycle');
+  return call.body;
+});
+
+test('Board ask: move confirm waits for the scoped tombstone; manual restore never restores its code', async () => {
+  const bridge = mockBoardAsk({ b: { lifecycle: 'active', version: null, code: 'old' }, a: { lifecycle: 'active', version: null, code: 'unrelated' } });
+  const deferred = gate();
+  const h = lifecycleHarness(storeOf(['a', 'Untouched'], ['b', 'With grant']), { bridgeSeen: true,
+    host: async body => { if (body.action === 'trash') await deferred.promise; return bridge.service(body); } });
+  h.deleteAgenda('b');
+  assert.equal(h.calls.length, 0, 'opening confirmation sends nothing');
+  press(h.dialog().find('confirm'));
+  await pendingTick();
+  assert.deepEqual(lifecycleBodies(h), [{ boardId: 'b', action: 'get' }, { boardId: 'b', action: 'trash', expectedVersion: null }]);
+  assert.equal(isBoardTrashed(h.store().meta.b), false);
+  assert.equal(h.rails(), 0);
+  assert.ok(BoardAgentAsk.boardAskLifecycleBusy('b'));
+  assert.equal(h.deleteAgenda('b', { confirmed: true }), false, 'repeated confirmation cannot start another request');
+  deferred.resolve(); await pendingTick();
+  assert.equal(isBoardTrashed(h.store().meta.b), true);
+  assert.equal(bridge.rows.get('b').code, null);
+  assert.equal(bridge.rows.get('a').code, 'unrelated');
+  assert.deepEqual(h.events, [['write', { durable: true }]]);
+  assert.ok(await h.restoreAgendaFromTrash('b'));
+  assert.equal(isBoardTrashed(h.store().meta.b), false);
+  assert.deepEqual(lifecycleBodies(h).slice(-2), [{ boardId: 'b', action: 'get' }, { boardId: 'b', action: 'restore', expectedVersion: 'version-1' }]);
+  assert.equal(bridge.rows.get('b').code, null);
+});
+
+test('Board ask: known absent is distinct from offline, generic missing, inactive, conflicted and malformed replies', async () => {
+  for (const [host, description] of [
+    [() => { throw Error('offline'); }, 'offline after support was seen'],
+    [() => result(404, { code: 'ROUTE_NOT_FOUND' }), 'older helper route after support was seen'],
+    [() => result(409, { code: 'BOARD_NOT_ACTIVE' }), 'not active is not proof of missing'],
+    [({action}) => action === 'get' ? activeBoard() : missingBoard(), 'row changed during revocation'],
+    [({action}) => action === 'get' ? activeBoard() : result(409, { code: 'BOARD_AGENT_ASK_LIFECYCLE_CONFLICT' }), 'concurrent version change'],
+    [({action}) => action === 'get' ? activeBoard() : result(200, { policy: null }), 'unconfirmed invalidation'],
+  ]) {
+    const h = lifecycleHarness(storeOf(['c', 'Trash', 0, { deletedAt: 20 }]), { bridgeSeen: true, host });
+    const { target } = seedReviewLedger(h);
+    assert.equal(await h.purgeAgendaFromTrash('c', { confirmed: true }), false, description);
+    assert.equal(h.events.length, 0);
+    assert.equal(h.review.find(target).answer, '삭제할 회신');
+    assert.equal(isBoardTrashed(h.store().meta.c), true);
+    assert.match(h.notices.at(-1), /Board를 변경하지 않았습니다/);
+  }
+  const absent = lifecycleHarness(storeOf(['b', 'Legacy saved Board']), { bridgeSeen: true, host: missingBoard });
+  assert.equal(await absent.deleteAgenda('b', { confirmed: true }), true);
+  assert.equal(absent.calls.length, 1);
+  assert.equal(isBoardTrashed(absent.store().meta.b), true);
+});
+
+test('Board ask: failed durable Board purge retains replies and explicitly reports the policy did get blocked', async () => {
+  const bridge = mockBoardAsk({ c: { lifecycle: 'trash', version: 'prior', code: 'old' } });
+  const h = lifecycleHarness(storeOf(['c', 'Trash', 0, { deletedAt: 20 }]), { bridgeSeen: true, host: bridge.service, writable: false });
+  const { target } = seedReviewLedger(h);
+  assert.equal(await h.purgeAgendaFromTrash('c', { confirmed: true }), false);
+  assert.equal(bridge.rows.get('c').lifecycle, 'purge');
+  assert.equal(bridge.rows.get('c').code, null);
+  assert.match(h.notices.at(-1), /외부 질문은 먼저 차단했습니다.*휴지통에 그대로/);
+  assert.equal(isBoardTrashed(h.store().meta.c), true);
+  assert.equal(h.reviewWrites(), 0);
+  assert.ok(h.review.find(target));
+  assert.equal(await h.restoreAgendaFromTrash('c'), false, 'terminal host purge cannot be downgraded by restore');
+  assert.equal(bridge.rows.get('c').lifecycle, 'purge');
+});
+
+test('Board ask: a stale confirmation or in-flight Board replacement does not operate on the new Board', async () => {
+  const old = storeOf(['b', 'Old Board']);
+  const newer = storeOf(['b', 'New Board', 0, { createdAt: 42 }]);
+  const h = lifecycleHarness(old, { bridgeSeen: true, host: activeBoard });
+  h.deleteAgenda('b'); h.setStore(newer); press(h.dialog().find('confirm'));
+  assert.equal(h.calls.length, 0);
+  h.setStore(old);
+  const deferred = gate();
+  const second = lifecycleHarness(old, { bridgeSeen: true, host: () => deferred.promise });
+  const pending = second.deleteAgenda('b', { confirmed: true });
+  await pendingTick();
+
+  second.setStore(newer); deferred.resolve(activeBoard());
+  assert.equal(await pending, false);
+  assert.deepEqual(lifecycleBodies(second), [{ boardId: 'b', action: 'get' }]);
+  assert.equal(isBoardTrashed(second.store().meta.b), false);
+});
+
+test('Board ask: bulk clear gates only the exact saved IDs and does not wipe replies on partial invalidation', async () => {
+  const bridge = mockBoardAsk({ a: { lifecycle: 'active', version: null, code: 'old' }, c: { lifecycle: 'trash', version: 'prior' }, unrelated: { lifecycle: 'active', version: null, code: 'keep' } });
+  const make = host => lifecycleHarness(storeOf(['a', 'One'], ['c', 'Two', 0, { deletedAt: 20 }]), { bridgeSeen: true, host });
+  const failed = make(body => body.boardId === 'c' ? result(503, {}) : bridge.service(body));
+  const { target } = seedReviewLedger(failed);
+  assert.equal(await failed.clearAgendaStore(), false);
+  assert.equal(failed.events.length, 0);
+  assert.ok(failed.review.find(target));
+  assert.match(failed.notices.at(-1), /일부 외부 질문은 차단했지만/);
+  const h = make(bridge.service);
+  const earlier = seedReviewLedger(h);
+  assert.equal(await h.clearAgendaStore(), true);
+  assert.deepEqual([...new Set(lifecycleBodies(h).map(body => body.boardId))], ['a', 'c']);
+  assert.equal(bridge.rows.get('unrelated').code, 'keep');
+  assert.deepEqual(h.events, ['clear']);
+  assert.equal(h.review.find(earlier.target), null);
+  assert.ok(h.review.find(earlier.prefix));
+});
+
+test('Board ask: delay missing-row check until earlier host saves settle; no later create is enqueued', async () => {
+  const bridge = mockBoardAsk();
+  const earlier = gate();
+  const saved = BoardAgentAsk.trackBoardAskLifecycleSave('waiting-board', async () => {
+    await earlier.promise;
+    bridge.rows.set('waiting-board', { lifecycle: 'active', version: null, code: null });
+  });
+  const h = lifecycleHarness(storeOf(['waiting-board', 'Pending']), { bridgeSeen: true, host: bridge.service });
+  const trash = h.deleteAgenda('waiting-board', { confirmed: true });
+  await pendingTick();
+  assert.equal(h.calls.length, 0);
+  const late = await BoardAgentAsk.trackBoardAskLifecycleSave('waiting-board', () => assert.fail('unexpected new host create'));
+  assert.equal(late.stored, 'local');
+  earlier.resolve(); await saved;
+  assert.equal(await trash, true);
+  assert.equal(bridge.rows.get('waiting-board').lifecycle, 'trash');
 });

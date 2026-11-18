@@ -289,3 +289,49 @@ export function boardAgentAskContent(el, view, flow, onClose) {
   view.error ? el('p', { role: 'alert', class: 'egd-store-panel-status egd-portable-error', data: { testid: 'board-agent-ask-error' } }, view.error) : null,
   ...content].filter(Boolean) };
 }
+
+// Shared by chrome windows in the same Firefox process. Helper lifecycle CAS
+// protects the cross-process boundary; this guards the intervening prefs write.
+const lifecycleWork = new Set();
+export const boardAskLifecycleBusy = id => lifecycleWork.has(id);
+export function claimBoardAskLifecycle(ids) {
+  if (ids.some(boardAskLifecycleBusy)) return null;
+  for (const id of ids) lifecycleWork.add(id);
+  return () => { for (const id of ids) lifecycleWork.delete(id); };
+}
+
+export async function transitionBoardAskLifecycle(post, boardId, action, current) {
+  const path = `${route}lifecycle`;
+  const expected = action === 'restore' ? 'active' : action;
+  try {
+    const state = await post(path, { boardId, action: 'get' });
+    if (!current()) return null;
+    if (state?.status === 404 && state.body?.code === 'BOARD_NOT_FOUND') return { absent: true };
+    const { lifecycle, version } = state?.body ?? {};
+    if (state?.status !== 200 || !['active', 'trash', 'purge'].includes(lifecycle) ||
+      !(version === null || isText(version))) return null;
+    if (lifecycle === expected) return { changed: false, version };
+    if (lifecycle === 'purge' || (action === 'restore' && lifecycle !== 'trash')) return null;
+    const result = await post(path, { boardId, action, expectedVersion: version });
+    if (result?.status !== 200 || result.body?.lifecycle !== expected || typeof result.body.changed !== 'boolean' ||
+      !isText(result.body.version)) return null;
+    return { changed: result.body.changed, version: result.body.version };
+  } catch { return null; }
+}
+
+const boardSaves = new Map();
+export function trackBoardAskLifecycleSave(id, save) {
+  // A Board confirmed for deletion cannot enqueue another background create.
+  if (boardAskLifecycleBusy(id)) return Promise.resolve({ stored: 'local' });
+  const pending = boardSaves.get(id) || new Set();
+  boardSaves.set(id, pending);
+  const operation = Promise.resolve().then(save).finally(() => {
+    pending.delete(operation);
+    if (!pending.size) boardSaves.delete(id);
+  });
+  pending.add(operation);
+  return operation;
+}
+export function settleBoardAskLifecycleSaves(ids) {
+  return Promise.allSettled(ids.flatMap(id => [...boardSaves.get(id) || []]));
+}

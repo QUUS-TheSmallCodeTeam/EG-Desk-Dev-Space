@@ -1,4 +1,5 @@
 import test from 'node:test';
+import * as BoardAgentAsk from '../overlay/resources/EGDeskBoardAgentAsk.sys.mjs';
 import assert from 'node:assert/strict';
 import { existsSync, readFileSync, rmSync } from 'node:fs';
 import { Readable } from 'node:stream';
@@ -20269,9 +20270,9 @@ test('Board saves keep versions: a 409 never overwrites, the list reads 직접 �
   // saveCurrentAgendaState hands each saved Board to the store; a conflict opens the choice.
   assert.match(storeDeclaration('saveCurrentAgendaState'), /if \(!writeAgendaStoreAndSync\(store\)\) return null;\n[^\n]*\n    void syncBoardToStore\(agendaId, snapshot, store\.meta\[agendaId\]\.title\);/);
   const shown = [];
-  const syncBoard = compileFunction(`let boardCanvasExportRef = null;\n${storeDeclaration('syncBoardCanvasExport')}\n${storeDeclaration('syncBoardToStore')}\nreturn syncBoardToStore;`, ['deskStoreSync', 'showBoardConflict', 'document', 'loadBoardHistory'])(
+  const syncBoard = compileFunction(`let boardCanvasExportRef = null;\n${storeDeclaration('syncBoardCanvasExport')}\n${storeDeclaration('syncBoardToStore')}\nreturn syncBoardToStore;`, ['deskStoreSync', 'showBoardConflict', 'document', 'loadBoardHistory', 'BoardAgentAsk'])(
     () => ({ saveBoard: async (boardId, body, options) => (boardId === 'agenda-a' ? { stored: 'prefs', conflict: true, headRevision: 6 } : { stored: 'both', revision: 2, options }) }),
-    conflict => shown.push(conflict), { getElementById: () => null }, () => shown.push('reload'));
+    conflict => shown.push(conflict), { getElementById: () => null }, () => shown.push('reload'), BoardAgentAsk);
   const body = storeBoard('agenda-a', '주간 보고', 7);
   await syncBoard('agenda-a', body, '주간 보고');
   await syncBoard('agenda-b', storeBoard('agenda-b', 'B'), 'B');
