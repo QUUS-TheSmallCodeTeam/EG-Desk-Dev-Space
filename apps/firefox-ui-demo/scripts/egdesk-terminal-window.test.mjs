@@ -421,9 +421,12 @@ test('privileged null-source events update the header before load and follow the
 test('unauthenticated terminal messages cannot change UI, spawn a card, expose a result, dismiss a question or close a Board', async () => {
   const h = await terminalWindow({ api: { ptyId: 'pty-9', isConnected: () => true } });
   try {
+    const status = h.shell.slots.identity.children[1];
+    h.message({ type: 'terminal-ready', shellLabel: 'zsh' });
+    assert.equal(status.textContent, 'zsh', 'a trusted ready event names the shell before the forged events arrive');
     h.card.dataset.projectionId = 'board-qa'; h.boardCloseRequests.add('board-qa');
     dispatch(h.closeDot, 'click'); h.state.activeEntityId = 'another-card';
-    const before = [...h.events], status = h.shell.slots.identity.children[1];
+    const before = [...h.events];
     const payloads = [
       { type: 'terminal-ready', shellLabel: 'forged' }, { type: 'terminal-api-ready' },
       { type: 'terminal-connecting' }, { type: 'terminal-disconnected' }, { type: 'terminal-exit-confirmed' }, { type: 'terminal-no-session' },
@@ -433,7 +436,7 @@ test('unauthenticated terminal messages cannot change UI, spawn a card, expose a
     const unchanged = () => {
       assert.deepEqual(h.events, before); assert.equal(h.host.children.length, 1);
       assert.equal(h.state.activeEntityId, 'another-card'); assert.equal(h.confirm.hidden, false);
-      assert.equal(status.textContent, '연결 중'); assert.equal(h.card.find('.egd-terminal-run-result').hidden, true);
+      assert.equal(status.textContent, 'zsh'); assert.equal(h.card.find('.egd-terminal-run-result').hidden, true);
     };
     for (const envelope of [{ source: {} }, { source: undefined },
       ...['null', 'https://example.invalid', 'chrome://browser', 'chrome://userchrome.evil'].map(origin => ({ source: null, origin }))]) {
