@@ -15065,7 +15065,9 @@
       if (boardMembersUnsaved.has(clientThreadId)) { await saveBoardMembers(threadId); return; }
       try {
         const answer = await fetchJson(`${BoardThread.BOARD_MEMBERS_PATH}?clientThreadId=${encodeURIComponent(clientThreadId)}`);
-        const plan = BoardThread.boardMembersSync(getCodexThreadById(state.codex, threadId), answer, { selfName: SELF_MEMBER });
+        const plan = BoardThread.boardMembersSync(getCodexThreadById(state.codex, threadId), answer, {
+          selfName: SELF_MEMBER, legacySavedIsThreadExistence: state.codex.boardDeliverySupported !== true,
+        });
         if (plan?.restore) {
           updateThreadById(threadId, current => ({ ...current, ...plan.restore, subtitle: buildThreadSubtitle(current.type, plan.restore.participants) }));
           emit();
