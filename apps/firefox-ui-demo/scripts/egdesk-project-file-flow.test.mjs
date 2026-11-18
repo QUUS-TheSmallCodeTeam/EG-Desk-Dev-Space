@@ -437,7 +437,7 @@ test('dirty original blocks execution; edits and folder changes make the fixed r
   await h.view.openProject(project('a', [typed])); await h.view.openFile('file-dir-a');
   const editor = h.find('.egdesk-file-editor'); editor.value = 'dirty'; editor.fire('input');
   h.find('.egdesk-file-project-check').click(); await settle();
-  assert.equal(runs.length, 0); assert.match(h.find('.egdesk-file-status').textContent, /먼저 원본에 저장/);
+  assert.equal(runs.length, 0); assert.match(h.find('.egdesk-file-status').textContent, /검사는 디스크 파일만 사용합니다/);
   editor.value = 'start'; editor.fire('input'); await h.view.flush();
   h.find('.egdesk-file-project-check').click(); await settle();
   assert.equal(runs.length, 1); assert.equal(h.find('.egdesk-file-project-check').disabled, true);

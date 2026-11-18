@@ -4,7 +4,7 @@ import { createHash } from 'node:crypto'
 import { createChangeReview } from '../overlay/resources/EGDeskChangeReview.mjs'
 
 // Stage 2 of D-X2 (적용 후 덩어리별 되돌리기) against a fake file service that
-// behaves like helper/egdesk-file-service.mjs revertReviewed/deleteCreated:
+// in-memory conditional mutation fixture, not a filesystem capability:
 // a write happens only when the file still hashes to what the screen read.
 // No real filesystem, network or provider is touched.
 class Node {
@@ -76,7 +76,7 @@ const change = { path: '/project/app.txt', kind: 'update', oldText: BEFORE, newT
 const open = async (files, options = {}) => {
   const service = fakeService(files, options)
   const states = []
-  const review = createChangeReview({ document, service, rootId: 'root-1', changes: options.changes || [change], makeOperationId: prefix => `${prefix}-1`, onState: state => states.push(state) })
+  const review = createChangeReview({ document, service, rootId: 'root-1', allowSourceMutations: true, changes: options.changes || [change], makeOperationId: prefix => `${prefix}-1`, onState: state => states.push(state) })
   await review.load()
   const status = () => review.element.querySelector('.egdesk-change-review-status').textContent
   return { service, review, states, status, files }

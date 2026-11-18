@@ -229,9 +229,11 @@ const REASON_NOTES = Object.freeze({
  * changes: change records (see reviewTargetFromChange); rootId: the project
  * root the paths belong to. onOpenFile({path, line}) — optional.
  */
-export function createChangeReview({ document, service, rootId, changes = [], makeOperationId, onState = () => {}, onOpenFile } = {}) {
+export function createChangeReview({ document, service, rootId, changes = [], allowSourceMutations = false, makeOperationId, onState = () => {}, onOpenFile } = {}) {
   if (!document?.createElement) throw new TypeError('createChangeReview requires a document')
-  if (!service || !['resolvePath', 'readFile', 'revertReviewed'].every(name => typeof service[name] === 'function')) throw new TypeError('createChangeReview requires file-service callbacks')
+  if (!service || !['resolvePath', 'readFile'].every(name => typeof service[name] === 'function')) throw new TypeError('createChangeReview requires file-service callbacks')
+  const canRevert = allowSourceMutations === true && typeof service.revertReviewed === 'function'
+  const canDelete = allowSourceMutations === true && typeof service.deleteCreated === 'function'
   const operationId = makeOperationId || (prefix => `${prefix}-${globalThis.crypto?.randomUUID?.() || `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`}`)
   const element = el(document, 'section', 'egdesk-change-review')
   element.setAttribute('aria-label', '변경 검토')
@@ -245,7 +247,9 @@ export function createChangeReview({ document, service, rootId, changes = [], ma
   const error = el(document, 'p', 'egdesk-change-review-error')
   error.setAttribute('role', 'alert')
   error.hidden = true
-  element.append(summary, undoButton, list, status, error)
+  element.append(summary)
+  if (!canRevert && !canDelete) element.append(el(document, 'p', 'egdesk-change-review-read-only', '이 외부 원본을 안전하게 변경할 수 없어 비교만 표시합니다. 파일을 열어 작업사본을 저장하거나 새 파일로 저장하세요.'))
+  element.append(undoButton, list, status, error)
   const files = changes.slice(0, CHANGE_REVIEW_LIMITS.maxFiles).map(change => ({ change, fileId: null, text: null, sha256: null, target: null, chunks: [], chunkStatus: 'empty', actions: null, selected: new Set(), confirmDelete: false, removed: false, conflict: null, deletion: null, node: null }))
   let lastRevert = null
   let disposed = false
@@ -348,7 +352,7 @@ export function createChangeReview({ document, service, rootId, changes = [], ma
     const reason = file.deletion ? `deleted-${file.deletion}` : file.actions?.reason
     if (reason && REASON_NOTES[reason]) node.append(el(document, 'p', 'egdesk-change-review-note', REASON_NOTES[reason]))
     if (file.chunkStatus === 'too-large' || file.chunkStatus === 'timeout' || file.chunkStatus === 'binary') node.append(el(document, 'p', 'egdesk-change-review-note', '이 파일은 덩어리별로 나누지 못했습니다.'))
-    if (file.actions?.revertChunks) {
+    if (canRevert && file.actions?.revertChunks) {
       const chunkList = el(document, 'ol', 'egdesk-change-review-chunks')
       chunkList.setAttribute('aria-label', '덩어리')
       for (const chunk of file.chunks) {
@@ -371,7 +375,7 @@ export function createChangeReview({ document, service, rootId, changes = [], ma
       revertSelected.disabled = !file.selected.size
       node.append(chunkList, revertSelected)
     }
-    if (file.actions?.deleteFile && typeof service.deleteCreated === 'function') {
+    if (canDelete && file.actions?.deleteFile) {
       if (!file.confirmDelete) {
         node.append(makeButton(document, '파일 삭제 제안', 'egdesk-change-review-delete', () => { file.confirmDelete = true; rerender(index); announce('삭제할지 확인해 주세요.') }))
       } else {
@@ -423,7 +427,7 @@ export function createChangeReview({ document, service, rootId, changes = [], ma
 
   async function revert(index, chunkIndexes) {
     const file = files[index]
-    if (!file?.actions?.revertChunks || !file.fileId || !chunkIndexes.length) return null
+    if (!canRevert || !file?.actions?.revertChunks || !file.fileId || !chunkIndexes.length) return null
     let text
     try { text = revertChunks(file.text, file.chunks, chunkIndexes) }
     catch (cause) { await reloadFile(index); throw cause }
@@ -445,7 +449,7 @@ export function createChangeReview({ document, service, rootId, changes = [], ma
   }
 
   async function undoLastRevert() {
-    if (!lastRevert) return null
+    if (!canRevert || !lastRevert) return null
     const { index, previousText, sha256 } = lastRevert
     const file = files[index]
     if (!file?.fileId) { lastRevert = null; renderSummary(); return null }
@@ -464,7 +468,7 @@ export function createChangeReview({ document, service, rootId, changes = [], ma
 
   async function deleteFile(index) {
     const file = files[index]
-    if (!file?.actions?.deleteFile || !file.fileId || typeof service.deleteCreated !== 'function') return null
+    if (!canDelete || !file?.actions?.deleteFile || !file.fileId) return null
     let result
     try { result = await service.deleteCreated({ fileId: file.fileId, expectedSha256: file.sha256, operationId: operationId('review-delete') }) }
     catch (cause) {

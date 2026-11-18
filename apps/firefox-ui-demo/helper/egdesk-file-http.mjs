@@ -85,11 +85,12 @@ function responseError(cause) {
   const code = cause?.code || 'FILE_SERVICE_ERROR'
   const conflicts = new Set(['DRAFT_CONFLICT', 'BUFFER_CONFLICT', 'TARGET_EXISTS', 'ROOT_CHANGED', 'RESOURCE_CHANGED', 'DRAFT_EXISTS', 'SOURCE_RECONNECT_CONFLICT', 'SOURCE_CHANGED', 'SOURCE_RECONNECT_REQUIRED', 'ORIGINAL_HARD_LINKED', 'PROJECT_RECONNECT_REQUIRED'])
   const missing = new Set(['UNKNOWN_ROOT', 'UNKNOWN_RESOURCE', 'UNKNOWN_DRAFT', 'UNKNOWN_CHANGE', 'RESOURCE_UNAVAILABLE', 'ROOT_UNAVAILABLE', 'UNKNOWN_PROJECT'])
+  const unavailable = new Set(['SAVE_AS_UNAVAILABLE', 'SOURCE_MUTATION_UNAVAILABLE'])
   const large = new Set(['FILE_TOO_LARGE', 'DIRECTORY_TOO_LARGE', 'BODY_TOO_LARGE'])
   const saveFailures = new Set(['SAVE_AS_INCOMPLETE', 'SAVE_AS_UNCERTAIN', 'SAVE_AS_FAILED', 'SAVE_UNCERTAIN', 'SAVE_FAILED'])
   const gitFailures = { GIT_UNAVAILABLE: 503, GIT_TIMEOUT: 504, GIT_FAILED: 500 }
   const known = cause instanceof FileSurfaceError || cause?.httpStatus || conflicts.has(code) || missing.has(code) || large.has(code)
-  const status = cause?.httpStatus || (conflicts.has(code) ? 409 : missing.has(code) ? 404 : large.has(code) ? 413 : code === 'SAVE_AS_UNAVAILABLE' ? 503 : saveFailures.has(code) ? 500 : code === 'UNSUPPORTED_EDIT' ? 415 : Object.hasOwn(gitFailures, code) && cause instanceof FileSurfaceError ? gitFailures[code] : cause instanceof FileSurfaceError ? 400 : 500)
+  const status = cause?.httpStatus || (conflicts.has(code) ? 409 : missing.has(code) ? 404 : large.has(code) ? 413 : unavailable.has(code) ? 503 : saveFailures.has(code) ? 500 : code === 'UNSUPPORTED_EDIT' ? 415 : Object.hasOwn(gitFailures, code) && cause instanceof FileSurfaceError ? gitFailures[code] : cause instanceof FileSurfaceError ? 400 : 500)
   return { status, body: { ok: false, code: known ? code : 'FILE_SERVICE_ERROR', error: known ? cause.message : 'The file operation could not be completed', ...(cause instanceof FileSurfaceError ? { details: cause.details } : {}) } }
 }
 

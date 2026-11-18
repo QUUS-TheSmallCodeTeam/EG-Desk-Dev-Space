@@ -193,19 +193,9 @@ export function lineDiff(before, after, { now = Date.now, maxEdits = DIFF_MAX_ED
  * creates fileName with O_EXCL and verifies bytes through that same descriptor.
  * No path-based fallback is safe against a concurrent parent-directory swap.
  *
- * D-X1 (대표님 결정 2026-10-24): the original file is written only by the
- * user's own save (saveOriginal) and by a revert during change review
- * (revertReviewed). Both are conditional: the file must still hash to the
- * value the user saw; if it differs but already holds exactly the new bytes
- * the save passes without writing; otherwise SOURCE_CHANGED returns both
- * hashes so the screen can show a comparison. Dirty-write rule after VS Code
- * src/vs/platform/files/common/fileService.ts:502-536 (MIT) — pattern only,
- * with a content hash instead of mtime/size. The write goes to a temporary
- * file in the same folder (O_CREAT|O_EXCL|O_NOFOLLOW), is synced, and is
- * renamed over the original; the handle's identity then moves to the new
- * inode. Limitation: rename is path-based; parent identity is re-checked just
- * before and the result verified just after, and a mismatch is reported as
- * SAVE_UNCERTAIN instead of retried.
+ * §17.D: no verified strong conditional replace backend is registered here.
+ * The legacy original-save and review-mutation endpoints refuse every write;
+ * checking a hash/identity before rename or unlink is not a conditional operation.
  */
 export function createEGDeskFileService({ draftStore, createOnlyAdapter, makeId = randomUUID, now = Date.now, onRootRegistered = null, gitReview = createEGDeskGitReview() } = {}) {
   if (!draftStore || !['create', 'get', 'compareAndSwap'].every(key => typeof draftStore[key] === 'function')) {
@@ -704,143 +694,34 @@ export function createEGDeskFileService({ draftStore, createOnlyAdapter, makeId 
   }
 
   // Exact bytes through one O_NOFOLLOW descriptor bound to `identity`.
-  async function exactRead(target, identity) {
-    let file
-    try { file = await fs.open(target, constants.O_RDONLY | (constants.O_NOFOLLOW || 0)) }
-    catch (error) { fail(error?.code === 'ELOOP' ? 'SYMLINK' : 'RESOURCE_UNAVAILABLE', 'The original file is missing or cannot be opened') }
-    try {
-      const before = await file.stat({ bigint: true })
-      if (!before.isFile() || !sameIdentity(before, identity)) fail('RESOURCE_CHANGED', 'Resource identity changed; reopen it')
-      if (before.size > BigInt(MAX_READ_BYTES)) fail('FILE_TOO_LARGE', 'File exceeds the 8 MiB exact-read limit', { size: sizeNumber(before), limit: MAX_READ_BYTES })
-      const bytes = await file.readFile()
-      const after = await file.stat({ bigint: true })
-      if (!sameIdentity(after, before) || after.size !== before.size || after.mtimeNs !== before.mtimeNs || bytes.length !== sizeNumber(after)) fail('RESOURCE_CHANGED', 'File changed during read')
-      return { bytes, stat: after, digest: hash(bytes) }
-    } finally { await file.close().catch(() => {}) }
+  function refuseSourceMutation(details = {}) {
+    fail('SOURCE_MUTATION_UNAVAILABLE', 'This external file cannot be safely changed here; keep the working copy or save it as a new file', { originalUpdated: false, ...details })
   }
 
-  function moveIdentity(resource, from, to) {
-    for (const [id, other] of resources) {
-      if (other.rootId === resource.rootId && other.relativePath === resource.relativePath && sameIdentity(other.identity, from)) resources.set(id, { ...other, identity: { dev: to.dev, ino: to.ino } })
-    }
-  }
-
-  async function syncDirectory(directory) {
-    let handle
-    try { handle = await fs.open(directory, constants.O_RDONLY | (constants.O_DIRECTORY || 0) | (constants.O_NOFOLLOW || 0)); await handle.sync() }
-    catch {} // Windows cannot open a directory; the rename is still complete.
-    finally { await handle?.close().catch(() => {}) }
-  }
-
-  // The D-X1 conditional write. Returns {written, unchanged, sha256, size,
-  // diskRevision}. Throws SOURCE_CHANGED (with both hashes) when the file no
-  // longer hashes to expectedSha256 and does not already hold `bytes`.
-  async function conditionalWrite(fileId, bytes, expectedSha256) {
-    const { root, resource, target, stat } = await checkedResource(fileId, 'file')
-    if (!stat.isFile()) fail('WRONG_KIND', 'Expected a regular file')
-    if (stat.nlink > 1n) fail('ORIGINAL_HARD_LINKED', 'This file has other hard links; save a copy with a new name instead', { originalUpdated: false })
-    if (bytes.length > MAX_READ_BYTES) fail('FILE_TOO_LARGE', 'Text exceeds the 8 MiB write limit', { size: bytes.length, limit: MAX_READ_BYTES })
-    const nextDigest = hash(bytes)
-    const unchanged = current => ({ written: false, unchanged: true, sha256: current.digest, size: current.bytes.length, diskRevision: revisionFor(current.stat, current.digest), originalUpdated: false })
-    const current = await exactRead(target, resource.identity)
-    if (current.digest !== expectedSha256) {
-      if (current.bytes.equals(bytes)) return unchanged(current)
-      fail('SOURCE_CHANGED', 'The original file changed after it was opened; compare before saving', { expectedSourceHash: expectedSha256, currentSourceHash: current.digest, originalUpdated: false })
-    }
-    if (current.bytes.equals(bytes)) return unchanged(current)
-    const directory = path.dirname(target)
-    const directoryStat = await fs.lstat(directory, { bigint: true }).catch(() => null)
-    const directoryReal = directoryStat ? await fs.realpath(directory).catch(() => null) : null
-    if (!directoryStat?.isDirectory() || directoryStat.isSymbolicLink() || !directoryReal || !inside(root.path, directoryReal)) fail('ROOT_ESCAPE', 'The file folder is outside its authorized root')
-    const temporary = path.join(directory, `.egdesk-save-${randomUUID().replace(/-/g, '').slice(0, 16)}.tmp`)
-    const mode = Number(stat.mode & 0o777n) || 0o644
-    let temporaryStat = null
-    let renamed = false
-    try {
-      const file = await fs.open(temporary, constants.O_CREAT | constants.O_EXCL | constants.O_WRONLY | (constants.O_NOFOLLOW || 0), mode)
-      try {
-        temporaryStat = await file.stat({ bigint: true })
-        await file.writeFile(bytes)
-        await file.chmod(mode).catch(() => {})
-        await file.sync()
-      } finally { await file.close() }
-      // Re-check right before replacing: same original bytes, same folder.
-      const again = await exactRead(target, resource.identity)
-      if (again.digest !== expectedSha256) fail('SOURCE_CHANGED', 'The original file changed while saving; compare before saving', { expectedSourceHash: expectedSha256, currentSourceHash: again.digest, originalUpdated: false })
-      const directoryAgain = await fs.lstat(directory, { bigint: true })
-      if (!sameIdentity(directoryAgain, directoryStat) || directoryAgain.isSymbolicLink()) fail('RESOURCE_CHANGED', 'The file folder changed while saving', { originalUpdated: false })
-      await fs.rename(temporary, target)
-      renamed = true
-    } catch (error) {
-      // Remove only the temporary file this call created (never a stranger's).
-      if (!renamed && temporaryStat) {
-        const leftover = await fs.lstat(temporary, { bigint: true }).catch(() => null)
-        if (leftover && sameIdentity(leftover, temporaryStat)) await fs.unlink(temporary).catch(() => {})
-      }
-      if (error instanceof FileSurfaceError) throw error
-      fail('SAVE_FAILED', 'The original file could not be saved', { originalUpdated: false })
-    }
-    await syncDirectory(directory)
-    const after = await fs.lstat(target, { bigint: true }).catch(() => null)
-    const real = after ? await fs.realpath(target).catch(() => null) : null
-    if (!after || after.isSymbolicLink() || !sameIdentity(after, temporaryStat) || !real || !inside(root.path, real)) {
-      fail('SAVE_UNCERTAIN', 'The save finished but the result could not be verified; check the file before saving again', { originalUpdated: null })
-    }
-    moveIdentity(resource, resource.identity, after)
-    return { written: true, unchanged: false, sha256: nextDigest, size: bytes.length, diskRevision: revisionFor(after, nextDigest), originalUpdated: true }
-  }
-
-  // User save of the working copy into the original (D-X1). expectedSourceHash
-  // is the disk hash the user saw on a comparison screen; without it the draft's
-  // own baseline is expected.
+  // Even an explicitly reviewed hash or forced request cannot make this
+  // uncoordinated external filesystem conditional. Do not touch the source.
   async function saveOriginal({ draftId, expectedHead, bufferRevision, operationId, expectedSourceHash }) {
     const draft = await requireDraft(draftId)
     if (typeof expectedHead !== 'string' || expectedHead !== draft.head) fail('DRAFT_CONFLICT', 'Draft head changed; refresh before saving', { currentHead: draft.head })
     if (bufferRevision !== draft.bufferRevision) fail('BUFFER_CONFLICT', 'A newer text buffer exists; it was not saved', { currentBufferRevision: draft.bufferRevision })
     if (typeof operationId !== 'string' || !operationId) fail('OPERATION_ID_REQUIRED', 'Operation ID is required')
-    const expected = expectedSourceHash == null ? draft.sourceHash : checkedHash(expectedSourceHash, 'expectedSourceHash')
-    if (!resources.has(draft.fileId)) fail('SOURCE_RECONNECT_REQUIRED', 'Reconnect the original file before saving to it', { originalUpdated: false })
-    const written = await conditionalWrite(draft.fileId, Buffer.from(draft.text, 'utf8'), expected)
-    const baseline = { baseText: draft.text, sourceHash: written.sha256, sourceRevision: written.diskRevision }
-    let saved = null
-    try { saved = await swapDraft(draft, expectedHead, { ...baseline, savedRevision: draft.bufferRevision, savedHash: written.sha256 }, operationId) }
-    catch (error) {
-      if (error?.code !== 'DRAFT_CONFLICT') throw error
-      // Newer typing landed while writing: keep that text, move only the
-      // source baseline so the next save compares against what is on disk.
-      const latest = await requireDraft(draftId).catch(() => null)
-      if (latest) saved = await swapDraft(latest, latest.head, baseline, operationId).catch(() => null)
-    }
-    return { draft: saved, receipt: { mode: 'original', savedRevision: draft.bufferRevision, sha256: written.sha256, size: written.size, written: written.written, unchanged: written.unchanged, originalUpdated: written.originalUpdated, draftUpdated: saved != null } }
+    if (expectedSourceHash != null) checkedHash(expectedSourceHash, 'expectedSourceHash')
+    refuseSourceMutation()
   }
 
-  // Change review revert (D-X1·D-X2): the screen computed `text` (the current
-  // file with chosen chunks put back) against the bytes hashing to
-  // expectedSha256. Text is never logged.
-  async function revertReviewed({ fileId, expectedSha256, text, operationId }) {
+  // Both review revert and undo/recover use this endpoint.
+  async function revertReviewed({ expectedSha256, text, operationId }) {
     checkedHash(expectedSha256, 'expectedSha256')
     checkedText(text)
     if (typeof operationId !== 'string' || !operationId) fail('OPERATION_ID_REQUIRED', 'Operation ID is required')
-    const written = await conditionalWrite(fileId, Buffer.from(text, 'utf8'), expectedSha256)
-    return { fileId, ...written }
+    refuseSourceMutation()
   }
 
-  // Remove a file an Agent created, only while it still hashes to what the
-  // Agent wrote (Zed action_log reject-created pattern, GPL — pattern only).
-  // The screen offers this after an explicit confirmation.
-  async function deleteCreated({ fileId, expectedSha256, operationId }) {
+  // The same check/use race exists for deleting a reviewed, newly added file.
+  async function deleteCreated({ expectedSha256, operationId }) {
     checkedHash(expectedSha256, 'expectedSha256')
     if (typeof operationId !== 'string' || !operationId) fail('OPERATION_ID_REQUIRED', 'Operation ID is required')
-    const { resource, target, stat } = await checkedResource(fileId, 'file')
-    if (!stat.isFile()) fail('WRONG_KIND', 'Expected a regular file')
-    if (stat.nlink > 1n) fail('ORIGINAL_HARD_LINKED', 'This file has other hard links and is not removed', { deleted: false })
-    const current = await exactRead(target, resource.identity)
-    if (current.digest !== expectedSha256) fail('SOURCE_CHANGED', 'The file changed after the Agent created it; it is kept', { expectedSourceHash: expectedSha256, currentSourceHash: current.digest, deleted: false })
-    const again = await fs.lstat(target, { bigint: true }).catch(() => null)
-    if (!again || again.isSymbolicLink() || !sameIdentity(again, resource.identity)) fail('RESOURCE_CHANGED', 'The file changed before removal; it is kept', { deleted: false })
-    await fs.unlink(target)
-    for (const [id, other] of resources) if (other.rootId === resource.rootId && other.relativePath === resource.relativePath) resources.delete(id)
-    return { fileId, deleted: true, sha256: current.digest }
+    refuseSourceMutation({ deleted: false })
   }
 
   return { registerRoot, listDirectory, search, searchContents, readFile, createDraft, readDraft, resolveCaptureSource, updateDraft, saveDraft, diffDraft, sourceStatus, reconnectDraft, saveAs, gitStatus, gitChanges, gitFileDiff,
