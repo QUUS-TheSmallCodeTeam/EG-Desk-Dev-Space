@@ -5042,6 +5042,19 @@ test('local history adapter retains public run context and never replays histori
   assert.equal(page.runs[0].pendingApprovals[0].stale, undefined);
 });
 
+test('a second history read does not duplicate a saved user or answer with a synthesized legacy ID', () => {
+  const page = Chat.normalizeLocalHistoryPage({ protocolVersion: 1, thread: { clientThreadId: 'room', localConversationId: 'store-room' },
+    messages: [{ localMessageId: 'stored-user', requestId: 'req', role: 'user', text: '질문', status: 'complete' },
+      { localMessageId: 'stored-answer', messageId: 'item', localRunId: 'lr', role: 'assistant', text: '답변', status: 'complete' }] }, 'room');
+  const saved = { id: 'room', messages: [{ id: 'ui-user', requestId: 'req', role: 'user', status: 'complete' },
+    { id: 'ui-answer', providerItemId: 'item', role: 'assistant', status: 'complete' }] };
+  const first = Chat.hydrateLocalChatThread(saved, page);
+  assert.ok(first.messages.every(m => m.localHistory && m.localMessageId.startsWith('legacy-message:')));
+  const second = Chat.hydrateLocalChatThread(first, page);
+  assert.deepEqual(second.messages, first.messages);
+  assert.deepEqual(second.messages.map(m => m.id), ['ui-user', 'ui-answer']);
+});
+
 test('history answer origin uses a scoped stored run or event, never a guess or conflicting identity', () => {
   const thread = { clientThreadId: 'room', localConversationId: 'store-room' };
   const message = { localMessageId: 'm', localRunId: 'lr', messageId: 'item', role: 'assistant', text: '답변' };

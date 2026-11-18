@@ -172,14 +172,17 @@ export function reconcileImportedLocalHistoryThread(current, page, record) {
   };
 }
 
-function sameLocalMessage(a, b) {
+function sameLocalMessage(a, b, sameStore = false) {
   if (!a || !b || (a.role || 'assistant') !== (b.role || 'assistant')) return false;
   for (const field of ['conversationId', 'runId']) {
     if (a[field] && b[field] && a[field] !== b[field]) return false;
   }
   if (a.localMessageId && b.localMessageId) {
     if (a.localMessageId === b.localMessageId) return true;
-    if (a.localHistory === true && b.localHistory === true) return false; // distinct stored items, even if a provider reused its item ID
+    // Within a store these are different items, even if a provider reused its ID.
+    // A screen row can carry a synthesized legacy ID AND localHistory after a
+    // merge, so that flag alone does not prove that its ID is from this store.
+    if (sameStore || (a.localRunId && b.localRunId && a.localRunId !== b.localRunId)) return false;
   }
   if (a.id && b.id && a.id === b.id) return true;
   const nativeA = a.providerItemId || a.messageId;
@@ -190,17 +193,17 @@ function sameLocalMessage(a, b) {
 
 // DB pages may arrive after a newer live event or optimistic send. Prefer the
 // current UI copy of a correlated message, and never match merely by text.
-export function mergeLocalChatMessages(current = [], persisted = [], { liveFenceRevision = 0 } = {}) {
+export function mergeLocalChatMessages(current = [], persisted = [], { liveFenceRevision = 0, sameStore = false } = {}) {
   const messages = [];
   for (const stored of Array.isArray(persisted) ? persisted : []) {
     if (!stored || typeof stored !== 'object') continue;
-    const index = messages.findIndex(message => sameLocalMessage(message, stored));
+    const index = messages.findIndex(message => sameLocalMessage(message, stored, true));
     if (index < 0) messages.push(copy(stored));
     else messages[index] = { ...messages[index], ...copy(stored) };
   }
   for (const live of Array.isArray(current) ? current : []) {
     if (!live || typeof live !== 'object') continue;
-    const index = messages.findIndex(message => sameLocalMessage(message, live));
+    const index = messages.findIndex(message => sameLocalMessage(message, live, sameStore));
     if (index < 0) messages.push(copy(live));
     else {
       const stored = messages[index];
@@ -435,14 +438,14 @@ export function normalizeLocalHistoryPage(page, clientThreadId) {
     }
     if (event.details?.message) {
       const item = asMessage(event.details.message, event);
-      const index = eventMessages.findIndex(previous => sameLocalMessage(previous, item));
+      const index = eventMessages.findIndex(previous => sameLocalMessage(previous, item, true));
       if (index < 0) eventMessages.push(item);
       else eventMessages[index] = { ...eventMessages[index], ...item };
     }
     if (event.details?.run) eventRuns.push(asRun(event.details.run, event));
   }
   const messages = mergeLocalChatMessages(eventMessages,
-    (Array.isArray(page.messages) ? page.messages : []).map(message => asMessage(message)).filter(message => !!message.id));
+    (Array.isArray(page.messages) ? page.messages : []).map(message => asMessage(message)).filter(message => !!message.id), { sameStore: true });
   const runs = mergeLocalChatRuns((Array.isArray(page.runs) ? page.runs : []).map(run => asRun(run)), eventRuns);
   const coverage = copy(page.coverage || null);
   const missingCheckpoint = page.projectionTruncated === true && events.some(event => !event.details?.message && !event.details?.run);
