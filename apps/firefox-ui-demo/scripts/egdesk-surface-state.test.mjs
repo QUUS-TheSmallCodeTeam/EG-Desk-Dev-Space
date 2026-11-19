@@ -8095,6 +8095,8 @@ function inspectorServerAuthority({ binding = true, owner = 'owner-a', profile =
   const store = {
     getConversation: id => id === row.clientThreadId ? row : null,
     getConversationByNative: id => id === row.conversationId ? row : null,
+    // This in-memory inspector fixture represents an ordinary, never-grounded history.
+    getNativeAudience: id => { assert.equal(id, row.conversationId); return null; },
     listEvents: () => ({ events: binding ? [{ event: 'native.thread.bound', details: {
       conversationId: conversation, ownerHash: createHash('sha256').update(owner).digest('hex'),
       engine: { id: 'codex', engineProfileId: profile },
