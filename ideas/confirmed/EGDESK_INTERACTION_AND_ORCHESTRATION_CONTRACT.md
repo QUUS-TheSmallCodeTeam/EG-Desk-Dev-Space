@@ -1262,6 +1262,8 @@ runtime/config/credential store를 사용한다. 이는 선택한 격리 전략�
 engine credential store에 두며 SQLite conversation row·snapshot payload·log·Answer
 Briefing·export에 넣지 않는다.
 
+**구독 연결 사용자의 비용 경로.** 의미 판정에는 별도로 허용된 Decisions API 자격을 쓰고, 생성 요청(공개 답변·요약·초안·백그라운드 교훈 포함)은 선택한 구독 계정에서 구독 인증과 가용 사용량을 확인해야 한다. API 키가 존재하거나 모델 이름이 같다는 이유로 생성 API·다른 비용 주체를 대체 경로로 쓰지 않는다. 구독 인증 또는 한도 확인이 안 되면 그 생성만 보류한다. 판정 키·크레딧·시간 예산의 실패는 선택 근거가 없는 상태로 처리할 수 있지만 구독 한도를 새로 부여하지 않는다. 구독 경로와 명시적인 별도 API 사용자는 같은 모드로 취급하지 않는다. [판정·생성 경계](../../apps/firefox-ui-demo/docs/DECISION_MODEL_CONTEXT_SETUP.md#billing-boundary)
+
 **로컬 기능판의 설정·재개 경계.** 앱의 계정 목록과 Agent 버전은 실행 프로필의 참조를 보관한다. 전용 Codex는 해당 `CODEX_HOME`와 별도 엔진 연결, Claude는 선택 프로필의 `CLAUDE_CONFIG_DIR`와 공식 CLI 인증을 사용한다. 둘을 같은 자격증명 저장소라고 가정하지 않는다. 기존 대화 재개는 단순 화면 복원이 아니다. 원래 엔진·계정 소유자·대화 귀속을 다시 확인하고, 바뀌었거나 확인되지 않으면 그 기록을 다른 사용자나 새 세션으로 조용히 재개하지 않는다. 설정 파일을 가져와도 기기 전용 계정 참조는 옮기지 않는다. [현재 계정 선택·로그인](./EGDESK_PRODUCT_INTERACTION_TRACE_ATLAS.md#atlas-local-accounts)
 
 아래는 **목표**인 browser 기반 login 경로다. 현재 별도 로그인 카드가 열린 것만으로 전용 쿠키 컨테이너나 EG-Desk가 제어하는 CLI 로그인 브라우저가 검증된 것은 아니다.
