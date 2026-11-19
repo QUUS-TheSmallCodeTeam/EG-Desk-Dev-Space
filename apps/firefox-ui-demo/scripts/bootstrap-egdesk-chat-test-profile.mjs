@@ -10,7 +10,7 @@ try {
   for (let i = 0; i < args.length; i += 2) {
     const name = args[i], value = args[i + 1];
     if (!['--loader-source', '--desk-recovery'].includes(name) || !value || seen.has(name)) {
-      throw new Error('Usage: node bootstrap-egdesk-chat-test-profile.mjs [--loader-source absolute-directory] [--desk-recovery corrupt|partial]');
+      throw new Error('Usage: node bootstrap-egdesk-chat-test-profile.mjs --loader-source absolute-directory [--desk-recovery corrupt|partial]');
     }
     seen.add(name);
     if (name === '--loader-source') loaderSource = value;
@@ -20,8 +20,8 @@ try {
       deskRecovery = value;
     }
   }
-  if (process.platform === 'win32' && !loaderSource) throw new Error('Windows QA requires --loader-source or EGDESK_QA_LOADER_SOURCE');
-  const result = bootstrapQaProfile({ deskRecovery, ...(loaderSource ? { loaderSource } : {}) });
+  if (!loaderSource) throw new Error('QA requires --loader-source or EGDESK_QA_LOADER_SOURCE; personal profiles are not searched');
+  const result = bootstrapQaProfile({ deskRecovery, loaderSource });
   process.stdout.write(`${JSON.stringify(result)}\n`);
 } catch (error) {
   console.error(error.message);
