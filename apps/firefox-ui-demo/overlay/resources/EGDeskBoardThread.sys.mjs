@@ -500,6 +500,36 @@ export function boardRoutedMembers(events) {
   return found;
 }
 
+// Read-only projection for the owning Board's activity panel. A route alone is
+// not proof of a particular run. Join a stored answer to its exact member run;
+// never merge a member's tool history, sources, inputs, messages or permissions.
+export function foldBoardMemberWork(room, messages, runs, member, scope) {
+  const current = Array.isArray(room?.localRuns) ? room.localRuns : [];
+  if (!isBoardRoom(room) || room.id !== member?.roomId || !isProfileId(member.profileId)
+      || !isBoardMemberThreadId(scope?.clientThreadId) || !scope.localConversationId) return current;
+  const result = [...current];
+  for (const r of runs || []) {
+    if (r?.localHistory !== true || !r.localRunId || !r.runId || !r.conversationId || r.answerId !== r.conversationId + '/' + r.runId
+        || r.localConversationId !== scope.localConversationId || r.clientThreadId !== scope.clientThreadId
+        || r.board?.roomClientThreadId !== room.id || r.board.profileId !== member.profileId
+        || (r.profileBinding && r.profileBinding.profileId !== member.profileId)) continue;
+    if (!messages.some(m => m.role === 'assistant' && !isChatWorkNote(m) && ['complete', 'completed'].includes(m.status)
+        && m.localMessageId && m.localRunId === r.localRunId && m.runId === r.runId && m.conversationId === r.conversationId && m.answerId === r.answerId)) continue;
+    const notes = (r.activities || []).filter(a => a?.kind === 'workNote' && a.status === 'completed' && typeof a.id === 'string'
+      && a.id.startsWith('work-note:') && typeof a.detail?.text === 'string').slice(-100)
+      .map(a => ({ id: a.id, kind: 'workNote', title: '작업 메모', status: 'completed', detail: { text: a.detail.text.slice(0, 4000) }, sourceRefs: [] }));
+    if (!notes.length) continue;
+    const view = { memberWorkHistory: true, localHistory: true, localThreadId: room.id, clientThreadId: scope.clientThreadId,
+      localConversationId: scope.localConversationId, localRunId: r.localRunId, conversationId: r.conversationId, runId: r.runId, answerId: r.answerId,
+      status: ['completed', 'failed', 'interrupted', 'cancelled'].includes(r.status) ? r.status : 'unavailable',
+      board: { profileId: member.profileId, roomClientThreadId: room.id }, activities: notes };
+    const index = result.findIndex(other => other.memberWorkHistory && other.localConversationId === view.localConversationId
+      && other.localRunId === view.localRunId && other.conversationId === view.conversationId && other.runId === view.runId);
+    if (index < 0) result.push(view); else result[index] = view;
+  }
+  return result;
+}
+
 const timeOf = value => (typeof value === 'number' ? value : typeof value === 'string' ? Date.parse(value) : NaN);
 const MESSAGE_IDENTITY_FIELDS = ['providerItemId', 'runId', 'conversationId', 'boardMemberProfileId'];
 function sameMessage(a, b) {

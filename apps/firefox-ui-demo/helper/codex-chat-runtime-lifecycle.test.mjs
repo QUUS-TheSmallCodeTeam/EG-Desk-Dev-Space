@@ -62,6 +62,7 @@ test('shared Codex disconnect and sign-out preserve owned runs, buffered work an
   const { pendingApprovals: [approval], pendingUserInputs: [input] } = await callbacks(chat, owned, OWNED, 'owned')
   assert.ok(approval && input)
   const [sharedEpoch, ownedEpoch, otherEpoch] = [SHARED, OWNED, OTHER].map(slot => chat.epochOf('codex', slot))
+  await chat.handleNotification({ method: 'item/started', params: { threadId: owned.conversationId, turnId: owned.runId, item: { id: 'answer', type: 'agentMessage', phase: 'final_answer', text: '' } } }, 'codex', OWNED)
   const queued = chat.handleNotification({ method: 'item/agentMessage/delta', params: { threadId: owned.conversationId, turnId: owned.runId, itemId: 'answer', delta: 'Still running' } }, 'codex', OWNED)
   f.sharedReady = false
   chat.setConnection(false)

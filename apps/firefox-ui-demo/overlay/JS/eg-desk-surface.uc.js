@@ -4941,7 +4941,7 @@
         const badge = ChatState.activityControlBadge(activity);
         const mcpDetail = ChatState.mcpCallDetailText(activity);
         const commandActivity = activity.kind === 'commandExecution';
-        const activityStatus = ({ inProgress: '진행 중', completed: '완료', failed: '실패', declined: '거절됨' })[activity.status] || activity.status || '';
+        const activityStatus = ({ inProgress: '진행 중', completed: '완료', failed: '실패', declined: '거절됨', interrupted: '중단됨', unknown: '상태 미확인' })[activity.status] || activity.status || '';
         const row = el('article', { class: `egd-codex-activity-row${ceiling ? ' egd-codex-activity-row-ceiling' : ''}`,
           data: { activityId: activity.id, status: activity.status, ...(ceiling ? { kind: 'toolCeiling' } : {}), ...(control ? { controlKind: control.kind } : {}) } },
           el('strong', {}, activity.title || (ceiling ? '도구 제한' : activity.kind) || '활동'),
@@ -4954,6 +4954,8 @@
         } else if (mcpDetail) {
           // Sizes and counts only ('인자 N바이트 · 화면 N장'); the call's content never reaches the screen.
           row.appendChild(el('p', { class: 'egd-codex-activity-sizes', data: { testid: 'chat-activity-sizes' } }, mcpDetail));
+        } else if (['workNote', 'unclassifiedOutput'].includes(activity.kind)) {
+          if (activity.detail?.text) row.appendChild(el('pre', {}, activity.detail.text));
         } else if (!commandActivity && activity.detail && typeof activity.detail === 'object') {
           for (const key of ['text', 'command', 'cwd', 'exitCode', 'durationMs', 'server', 'tool']) {
             const value = activity.detail[key];
@@ -15230,7 +15232,7 @@
     async function restoreBoardMemberAnswers(summary) {
       const member = boardMemberRooms.get(summary.clientThreadId);
       if (!member || !getCodexThreadById(state.codex, member.roomId)) return null;
-      const messages = [];
+      const messages = [], runs = new Map();
       let complete = false;
       try {
         for (let afterSeq = 0, pages = 0; pages < BOARD_MEMBER_HISTORY_MAX_PAGES; pages++) {
@@ -15238,14 +15240,21 @@
           const normalized = ChatState.normalizeLocalHistoryPage(page, summary.clientThreadId);
           if (!normalized || normalized.localConversationId !== summary.localConversationId) return member.roomId;
           messages.push(...normalized.messages);
+          for (const run of normalized.runs) if (run.localRunId && run.conversationId && run.runId) {
+            const key = JSON.stringify([run.localRunId, run.conversationId, run.runId]);
+            if (!runs.has(key) || (run.localSeq || 0) >= (runs.get(key).localSeq || 0)) runs.set(key, run);
+          }
           if (!normalized.hasMore) { complete = true; break; }
           const next = Number(normalized.nextCursor);
           if (!Number.isSafeInteger(next) || next <= afterSeq) break;
           afterSeq = next;
         }
       } catch { return member.roomId; } // The room keeps what it shows; the next load reads again.
+      if (boardMemberRooms.get(summary.clientThreadId) !== member) return member.roomId;
       updateThreadById(member.roomId, room => ({ ...room,
-        messages: BoardThread.foldBoardMemberAnswers(room, messages, member, { profiles: codexProfileCatalog.profiles }) }));
+        messages: BoardThread.foldBoardMemberAnswers(room, messages, member, { profiles: codexProfileCatalog.profiles }),
+        localRuns: BoardThread.foldBoardMemberWork(room, messages, [...runs.values()], member, summary),
+      }));
       emit();
       return complete ? null : member.roomId;
     }

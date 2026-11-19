@@ -400,7 +400,7 @@ test('cache-free Board replies retain their own run through a reopened SQLite hi
     })); // Both members reuse the provider's item ID and even the same local run key in different conversations.
     store.appendEvent({ clientThreadId, event: 'run.completed', eventKey: 'completed', ts: 1,
       localRunId: 'local-run', runId, details: {}, runCheckpoint: { clientThreadId, conversationId, runId, answerId: `${conversationId}/${runId}`,
-        localRunId: 'local-run', status: 'completed', messages } });
+        board: { roomClientThreadId: 'room-1', profileId }, localRunId: 'local-run', status: 'completed', messages } });
   }
   store.close(); store = open();
   const chat = new CodexChatRuntime({ store, request: () => assert.fail('history contacted the engine'), respond: () => {} });
@@ -410,9 +410,12 @@ test('cache-free Board replies retain their own run through a reopened SQLite hi
     const history = ChatState.normalizeLocalHistoryPage(page, member.clientThreadId);
     assert.ok(!history.messages.some(ChatState.isChatWorkNote));
     if (member.profileId === ID_V) assert.equal(history.runs[0].activities.find(a => a.kind === 'workNote')?.detail.text, '같은 내용');
-    restored = { ...restored, messages: BoardThread.foldBoardMemberAnswers(restored, history.messages, member) };
+    const owner = { ...member, roomId: restored.id };
+    restored = { ...restored, messages: BoardThread.foldBoardMemberAnswers(restored, history.messages, member),
+      localRuns: BoardThread.foldBoardMemberWork(restored, history.messages, history.runs, owner, history) };
   }
   assert.equal(restored.messages.length, 2);
+  assert.deepEqual(restored.localRuns.map(r => [r.board.profileId, r.activities.map(a => a.detail.text)]), [[ID_V, ['같은 내용']]]);
   for (const member of members) {
     const rows = restored.messages.filter(m => m.boardMemberProfileId === member.profileId);
     assert.deepEqual(rows.map(m => m.phase), ['final_answer']);
@@ -648,4 +651,18 @@ test('only confirmed room speech crosses the Board boundary; rendering or hiding
   const peek = ChatState.agentPeekView({ author: '디자이너', boardMemberProfileId: ID_D, memberSummary: { id: ID_V, role: 'PRIVATE_LEAD' }, threadType: 'group', profile: { id: ID_V, name: '검증 담당' }, modelText: 'PRIVATE_MODEL', detail: { active: { body: { instructions: 'PRIVATE_PERSONA' } } } });
   assert.deepEqual([peek.name, peek.profileId, peek.compact, peek.role], ['디자이너', ID_D, true, '이 답변의 작성자']);
   assert.doesNotMatch(JSON.stringify(peek), /PRIVATE_|검증 담당|Codex/);
+});
+
+test('cold Board work: require a routed Board, member, exact native and local run plus its published answer; copy only the note text', () => {
+  const scope = { clientThreadId: 'board-member:synthetic', localConversationId: 'local-member' }, owner = { roomId: 'room-1', profileId: ID_V };
+  const r = { ...scope, localHistory: true, localRunId: 'same', runId: 't', conversationId: 'c', answerId: 'c/t', board: { roomClientThreadId: 'room-1', profileId: ID_V },
+    activities: [{ id: 'work-note:1', kind: 'workNote', status: 'completed', detail: { text: '작업 메모', raw: 'PRIVATE' }, sourceRefs: ['PRIVATE'] }, { kind: 'commandExecution', detail: 'PRIVATE' }],
+    contextCaptures: ['PRIVATE'], messages: ['PRIVATE'], command: 'PRIVATE', status: 'completed' };
+  const m = { ...scope, localMessageId: 'a', localRunId: 'same', conversationId: 'c', runId: 't', answerId: 'c/t', role: 'assistant', phase: 'final_answer', status: 'complete' };
+  const fold = (thread = room(), answer = m, run = r, who = owner) => BoardThread.foldBoardMemberWork(thread, [answer], [run], who, scope);
+  const accepted = fold(); assert.equal(accepted.length, 1); assert.doesNotMatch(JSON.stringify(accepted), /PRIVATE/);
+  assert.deepEqual(fold(room({ localRuns: accepted })), accepted);
+  for (const change of [{ clientThreadId: 'DM' }, { localRunId: 'other' }, { runId: 'other' }, { localConversationId: 'other' }, { profileBinding: { profileId: ID_D } }, { board: {} }]) assert.deepEqual(fold(room(), m, { ...r, ...change }), []);
+  for (const change of [{ role: 'user' }, { phase: 'commentary' }, { status: 'streaming' }, { answerId: 'conflict' }]) assert.deepEqual(fold(room(), { ...m, ...change }), []);
+  assert.deepEqual(fold(room({ id: 'other-room' })), []); assert.deepEqual(fold(room({ type: 'dm' })), []);
 });

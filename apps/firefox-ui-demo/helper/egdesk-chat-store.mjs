@@ -873,6 +873,18 @@ export function openChatStore({ dataDir, ownerScope } = {}) {
       } else rows = db.prepare('SELECT * FROM events WHERE local_conversation_id=? AND seq>? ORDER BY seq LIMIT ?').all(row.local_conversation_id, afterSeq, limit + 1)
       return resultPage(rows, limit, 'events', eventRow => savedEvent(eventRow, db))
     },
+    // Internal point reads. No native call and no whole source history in a share.
+    getMessage(clientThreadId, localMessageId) {
+      ensureOpen(); const row = requireThread(clientThreadId)
+      const found = q.message.get(row.local_conversation_id, identifier(localMessageId, 'localMessageId'))
+      return found ? parse(found.public_json) : null
+    },
+    getAcceptedText(clientThreadId, requestId) {
+      ensureOpen(); const row = requireThread(clientThreadId)
+      const accepted = q.event.get(row.local_conversation_id, 'request:' + identifier(requestId, 'requestId') + ':accepted')
+      const m = accepted?.event === 'message.accepted' && parse(accepted.details_json)?.message
+      return m?.role === 'user' && typeof m.text === 'string' ? m.text : null
+    },
     listMessages(clientThreadId, { afterSeq = 0, limit = 100 } = {}) {
       ensureOpen(); page(afterSeq, limit)
       const row = requireThread(clientThreadId)

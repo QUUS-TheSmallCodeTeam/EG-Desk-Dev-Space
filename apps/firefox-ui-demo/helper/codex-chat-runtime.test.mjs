@@ -1134,6 +1134,7 @@ test('events received before turn/start response bind only to its actual turn an
   const h = harness({ request: async (method, params, chat, defaults) => {
     if (method !== 'turn/start') return defaults(method, params)
     await chat.handleNotification({ method: 'turn/started', params: { threadId: params.threadId, turn: { id: 'early-turn', status: 'inProgress', items: [] } } })
+    await chat.handleNotification({ method: 'item/started', params: { threadId: params.threadId, turnId: 'early-turn', item: { id: 'message-early', type: 'agentMessage', phase: 'final_answer', text: '' } } })
     await chat.handleNotification({ method: 'item/agentMessage/delta', params: { threadId: params.threadId, turnId: 'early-turn', itemId: 'message-early', delta: 'Hello ' } })
     return { turn: { id: 'early-turn', status: 'inProgress', items: [] } }
   } })
@@ -1511,9 +1512,10 @@ test('file approval shows proposed new paths without presenting them as existing
   assert.deepEqual(state.artifacts, [])
 })
 
-test('terminal interruption keeps received text when no item completion is delivered', async () => {
+test('terminal interruption keeps identified speech when no item completion is delivered', async () => {
   const h = harness()
   const run = await h.chat.send({ message: 'Work' })
+  await h.item(run, { id: 'partial', type: 'agentMessage', phase: 'final_answer', text: '' }, false)
   await h.notify('item/agentMessage/delta', { threadId: run.conversationId, turnId: run.runId, itemId: 'partial', delta: 'Partially finished' })
   await h.finish(run, 'interrupted')
   assert.equal(h.chat.snapshot().runs[0].messages[0].text, 'Partially finished')
@@ -1922,6 +1924,7 @@ test('active history preserves observed item completion and authoritative text, 
   } })
   const run = await h.chat.send({ message: 'Work' })
   await h.item(run, { id: 'finished-item', type: 'agentMessage', text: 'First item really completed.' })
+  await h.item(run, { id: 'partial-item', type: 'agentMessage', phase: 'final_answer', text: '' }, false)
   await h.notify('item/agentMessage/delta', { threadId: run.conversationId, turnId: run.runId, itemId: 'partial-item', delta: 'Second ' })
   const state = await h.chat.resume({ conversationId: run.conversationId })
   const finished = state.runs[0].messages.find(message => message.id === 'finished-item')
@@ -4328,4 +4331,63 @@ test('channel POV: changing the direct room into a Board during async preparatio
   store.setRoomMembers({ clientThreadId: 'changed', members: [{ kind: 'agent', memberKey: 'agent:sol', profileId: 'sol', label: 'A', role: 'member' }], ts: 2 }); release.resolve()
   await assert.rejects(pending, { code: 'CHAT_CHANNEL_CHANGED' }); assert.equal(h.calls.filter(c => c.method === 'turn/start').length, 0)
   assert.equal(store.getRequest({ clientThreadId: 'changed', requestId: 'queued' }).outcome.code, 'CHAT_CHANNEL_CHANGED')
+})
+
+test('plain chat: an early delta later identified as commentary never becomes speech or Decision input', async t => {
+  const store = r2Store(t), h = r2Harness({ store }), clientThreadId = 'plain'
+  const r = await h.chat.send({ clientThreadId, requestId: 'plain-1', message: '질문' })
+  const delta = (itemId, delta) => h.notify('item/agentMessage/delta', { threadId: r.conversationId, turnId: r.runId, itemId, delta })
+  await delta('work', 'WORK_ONLY '); await h.item(r, { type: 'agentMessage', id: 'work', text: '', phase: null }, false)
+  await h.item(r, { type: 'agentMessage', id: 'work', phase: 'commentary', text: 'WORK_ONLY' }); await delta('work', 'late ')
+  await h.item(r, { type: 'agentMessage', id: 'reply', phase: null, text: 'LEGACY_PUBLIC' }); await h.finish(r)
+  assert.deepEqual(h.chat.snapshot().runs[0].messages.map(m => m.text), ['LEGACY_PUBLIC'])
+  assert.deepEqual(store.listMessages(clientThreadId).messages.map(m => m.text), ['질문', 'LEGACY_PUBLIC'])
+  assert.ok(!h.events.some(e => e.itemId === 'work' && e.event.startsWith('message.')))
+  const { collectDecisionCandidates } = await import('./egdesk-decision-candidates.mjs')
+  const dc = await collectDecisionCandidates({ body: {}, clientThreadId, chatStore: store })
+  assert.deepEqual(dc.candidates.filter(c => c.kind === 'conversation').map(c => c.loadText()), ['질문', 'LEGACY_PUBLIC'])
+})
+
+test('unclassified interruption stays available as activity, a late positive speech start resumes safe streaming', async t => {
+  for (const kind of ['interrupted', 'processLost', 'final_answer']) await t.test(kind, async () => {
+    const h = r2Harness({ profiles: r2Profiles() }), r = await h.chat.send({ clientThreadId: 'room', profileId: 'sol', message: 'q', replyDestination: 'direct' })
+    const delta = text => h.notify('item/agentMessage/delta', { threadId: r.conversationId, turnId: r.runId, itemId: 'p', delta: text })
+    await h.item(r, { id: 'p', type: 'agentMessage', phase: null, text: '' }, false)
+    await delta('첫 조각 sk-unit'); assert.equal(h.events.some(e => e.event.startsWith('message.')), false)
+    if (kind === 'final_answer') await h.item(r, { id: 'p', type: 'agentMessage', phase: kind, text: '' }, false)
+    await delta('split 나머지 ')
+    if (kind === 'processLost') h.chat.setConnection(false, { processLost: true }); else await h.finish(r, 'interrupted')
+    const run = h.chat.snapshot().runs[0]
+    if (kind === 'final_answer') assert.deepEqual(run.messages.map(m => m.text), ['첫 조각 [REDACTED] 나머지 '])
+    else { assert.equal(run.messages.length, 0); assert.equal(run.activities.find(a => a.kind === 'unclassifiedOutput').detail.text, '첫 조각 [REDACTED] 나머지 ') }
+    assert.doesNotMatch(JSON.stringify([run, h.events, h.legacy]), /sk-unit|unitsplit/)
+  })
+})
+
+test('a native user item cannot post extra work input or replace the accepted human words with application context', async t => {
+  const store = r2Store(t), h = r2Harness({ store, profiles: r2Profiles() }), clientThreadId = 'input-origin'
+  const body = { clientThreadId, requestId: 'accepted-1', profileId: 'sol', replyDestination: 'direct', message: '제가 보낸 말' }
+  const r = await h.chat.send(body)
+  for (const [id, clientId] of [['extra', 'not-a-human'], ['echo', body.requestId], ['second-echo', body.requestId]]) {
+    await h.item(r, { id, type: 'userMessage', clientId, content: [{ type: 'text', text: 'ENGINE_ONLY' }] })
+  }
+  await h.finish(r)
+  assert.deepEqual(h.chat.snapshot().runs[0].messages.map(m => [m.id, m.text]), [['echo', body.message]])
+  assert.deepEqual(store.listMessages(clientThreadId).messages.map(m => m.text), [body.message])
+  assert.equal(store.getAcceptedText(clientThreadId, body.requestId), body.message)
+  assert.doesNotMatch(JSON.stringify(h.chat.getLocalHistory({ clientThreadId })), /ENGINE_ONLY/)
+})
+
+test('a queued pre-upgrade DM share never attaches a copied work note after restart; the selected speech stays an immutable copy', async t => {
+  const store = r2Store(t), from = 'source-old', to = 'room-old'
+  for (const clientThreadId of [from, to]) store.createConversation({ clientThreadId })
+  const rows = [['note', 'commentary', 'OLD_WORK'], ['speech', 'final_answer', 'OLD_SPEECH']]
+  for (const [id, phase, text] of rows) store.appendMessage({ clientThreadId: from, eventKey: id, localMessageId: id, ts: 1, message: { role: 'assistant', text, phase, status: 'complete' } })
+  store.appendEvent({ clientThreadId: to, eventKey: 'old-share', event: 'messages.shared.in', ts: 2,
+    details: { shareId: 'old-share', link: { clientThreadId: from, localMessageIds: ['note', 'speech'] }, messages: rows.map(([localMessageId,, text]) => ({ localMessageId, text, role: 'assistant' })) } })
+  store.appendMessage({ clientThreadId: from, eventKey: 'edit', localMessageId: 'speech', ts: 3, message: { role: 'assistant', text: 'EDITED', phase: 'final_answer', status: 'complete' } })
+  const h = r2Harness({ store }); await h.chat.send({ clientThreadId: to, message: '질문', requestId: 'new' })
+  const block = h.calls.find(c => c.method === 'turn/start').params.additionalContext.egdesk_shared_messages.value
+  assert.match(block, /OLD_SPEECH/); assert.doesNotMatch(block, /OLD_WORK|EDITED/)
+  assert.ok(store.listEvents(to).events.find(e => e.event === 'messages.shared.in').details.messages.some(m => m.text === 'OLD_WORK'), 'the original audit event is unchanged')
 })

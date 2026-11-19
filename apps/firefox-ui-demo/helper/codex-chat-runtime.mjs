@@ -552,6 +552,8 @@ const MAX_SHARED_MESSAGES = 20
 const MAX_SHARED_TEXT = 8000
 const MAX_SHARED_TOTAL = 40000
 const MAX_SHARE_CACHE = 256
+const shareableStoredRow = m => !!m && ['user', 'assistant'].includes(m.role) && !isChatWorkNote(m)
+  && !['streaming', 'submitting', 'unconfirmed', 'failed', 'error', 'interrupted', 'cancelled'].includes(m.status)
 
 /** The block a conversation's next turn reads for messages shared into it. */
 export function sharedMessagesBlock(shares) {
@@ -772,8 +774,8 @@ export class CodexChatRuntime {
     this.threads = new Map()
     this.loadedThreads = new Set()
     this.runs = new Map()
-    // A native delta does not identify its phase. A scoped Agent turn cannot publish it
-    // until the native item identifies speech; never guess from its words or item order.
+    // A native text delta is not evidence of speech. Per-run staging is bounded and
+    // deliberately absent from SSE, history, copied DTOs and model inputs.
     this.channelOutput = new WeakMap()
     this.rawMessages = new Map()
     this.visibleMessages = new Map()
@@ -1299,7 +1301,7 @@ export class CodexChatRuntime {
     else this.engineState(engineId).epoch++
     this.streamId = randomUUID()
     this.seq = 0
-    for (const map of [this.threads, this.threadResumeCwds, this.threadToolOwners, this.threadToolManifests, this.threadToolManifestStatus, this.threadSessions, this.pendingStarts, this.pendingResumes]) {
+    for (const map of [this.directChatBindings, this.threads, this.threadResumeCwds, this.threadToolOwners, this.threadToolManifests, this.threadToolManifestStatus, this.threadSessions, this.pendingStarts, this.pendingResumes]) {
       for (const conversationId of [...map.keys()]) if (ownThread(conversationId)) map.delete(conversationId)
     }
     for (const set of [this.browserRegisteredThreads, this.loadedThreads, this.uncertainThreads, this.incompleteHistory]) {
@@ -1359,6 +1361,7 @@ export class CodexChatRuntime {
       // A child Agent can outlive its parent turn; its last state is now unknown.
       this.updateSubAgentRows(run, (run.subAgents || []).filter(row => !SUBAGENT_DONE.has(row.state) && row.state !== 'unknown').map(row => ({ threadId: row.threadId, state: 'unknown', nativeStatus: null })), true)
       if (TERMINAL.has(run.status)) continue
+      this.closeHeldOutput(run, processLost ? 'failed' : 'unknown')
       run.status = processLost ? 'failed' : 'unknown'
       run.historyComplete = false
       run.error = publicError(processLost ? (codex ? 'Local Codex process exited' : 'Local AI engine process exited') : (codex ? 'Codex connection lost; resume to reconcile' : 'AI engine connection lost; resume to reconcile'), processLost ? 'RUNTIME_LOST' : 'CONNECTION_LOST')
@@ -1490,7 +1493,7 @@ export class CodexChatRuntime {
       const toolCeiling = context?.profileRun ? context.profileRun.toolCeiling : recordedToolCeiling(context?.toolCeiling)
       if (toolCeiling) run.toolCeiling = { ...toolCeiling }
     }
-    if (context?.channelKind || context?.profileRun?.binding || context?.profileBinding || run.board) this.channelOutput.set(run, { notes: new Set(), held: new Set(), overflow: false })
+    this.channelOutput.set(run, { notes: new Set(), held: new Map(), overflow: false, submittedText: context?.submittedText })
     this.runs.set(key, run)
     if (owned) this.ownedRuns.add(run)
     this.trimRuns()
@@ -1740,7 +1743,7 @@ export class CodexChatRuntime {
       conversationId, localConversationId: acceptedLocal?.localConversationId || null,
       localRunId: acceptedLocal?.localRunId || null,
       localMessageId: acceptedLocal?.localMessageId || null,
-      ownerHash: requestOwnerHash,
+      ownerHash: requestOwnerHash, submittedText: publicText(body.message),
       executionPolicy: requestedPolicy || boundPolicy,
       qaOutputMarkers: qaMarkers,
       policyUpgrade: Boolean(conversationId && requestedPolicy && !boundPolicy),
@@ -3056,19 +3059,10 @@ export class CodexChatRuntime {
     }
     if (body.shareId !== undefined && !idText(body.shareId)?.trim()) throw chatError('INVALID_SHARE', 'Invalid shareId', 400)
     if (!store.getConversation(from)) throw chatError('CONVERSATION_NOT_FOUND', 'The sending conversation must exist', 404)
-    const wanted = new Set(ids), found = new Map()
-    let cursor = 0
-    for (let page = 0; page < 1000 && found.size < wanted.size; page++) {
-      const result = store.listMessages(from, { afterSeq: cursor, limit: 100 })
-      for (const message of result.messages || []) if (wanted.has(message.localMessageId)) found.set(message.localMessageId, message)
-      if (!result.hasMore) break
-      if (!Number.isSafeInteger(result.nextCursor) || result.nextCursor <= cursor) throw chatError('CHAT_STORE_CORRUPT', 'Local message cursor did not advance', 500)
-      cursor = result.nextCursor
-    }
-    if (found.size !== wanted.size) throw chatError('MESSAGE_NOT_FOUND', 'A chosen message is not in that conversation', 404)
     const messages = ids.map(id => {
-      const message = found.get(id)
-      if (isChatWorkNote(message) || !['user', 'assistant'].includes(message.role)) throw chatError('MESSAGE_NOT_SHAREABLE', 'Only a conversation message can be shared, not a work note', 409)
+      const message = store.getMessage(from, id)
+      if (!message) throw chatError('MESSAGE_NOT_FOUND', 'A chosen message is not in that conversation', 404)
+      if (!shareableStoredRow(message)) throw chatError('MESSAGE_NOT_SHAREABLE', 'Only a conversation message can be shared, not a work note', 409)
       return { localMessageId: id, role: message.role === 'assistant' ? 'assistant' : 'user', text: publicText(typeof message.text === 'string' ? message.text : '', MAX_SHARED_TEXT) }
     })
     if (messages.reduce((sum, message) => sum + message.text.length, 0) > MAX_SHARED_TOTAL) throw chatError('SHARE_TOO_LARGE', `Shared messages exceed ${MAX_SHARED_TOTAL} characters`, 413)
@@ -3141,7 +3135,7 @@ export class CodexChatRuntime {
           for (const event of result.events || []) {
             const details = event.details || {}
             if (event.event === 'messages.shared.in' && idText(details.shareId) && Array.isArray(details.messages)) {
-              entry.set(details.shareId, { shareId: details.shareId, messages: details.messages.slice(0, MAX_SHARED_MESSAGES).filter(message => plainRecord(message) && typeof message.text === 'string') })
+              entry.set(details.shareId, details)
             } else if (event.event === 'messages.shared.attached' && Array.isArray(details.shareIds)) for (const id of details.shareIds) attached.add(id)
           }
           if (!result.hasMore) break
@@ -3149,6 +3143,18 @@ export class CodexChatRuntime {
           afterSeq = result.nextCursor
         }
         for (const id of attached) entry.delete(id)
+        // Historical copies did not record phase. Re-check *only* each selected
+        // origin's type; never substitute current source text for the saved copy.
+        for (const [id, d] of entry) {
+          const from = d.link?.clientThreadId, ids = d.link?.localMessageIds
+          const messages = !idText(from) || from === clientThreadId || !Array.isArray(ids) || !this.store.getConversation(from) ? []
+            : d.messages.slice(0, MAX_SHARED_MESSAGES).filter(m => {
+              if (!plainRecord(m) || typeof m.text !== 'string' || !idText(m.localMessageId) || !ids.includes(m.localMessageId)) return false
+              const source = this.store.getMessage(from, m.localMessageId)
+              return shareableStoredRow(source) && source.role === m.role
+            }).map(m => ({ localMessageId: m.localMessageId, role: m.role, text: publicText(m.text, MAX_SHARED_TEXT) }))
+          if (messages.length) entry.set(id, { shareId: id, messages }); else entry.delete(id)
+        }
       } catch { return [] }
       this.sharedInbox.set(clientThreadId, entry)
       while (this.sharedInbox.size > MAX_SHARE_CACHE) this.sharedInbox.delete(this.sharedInbox.keys().next().value)
@@ -4032,21 +4038,40 @@ export class CodexChatRuntime {
     if (announce) for (const row of changed) this.emit(run, 'subagent.updated', { subAgent: row })
   }
 
-  messageDelta(run, itemId, delta) {
-    let message = run.messages.find(m => m.id === itemId)
-    const channel = this.channelOutput.get(run)
-    if (channel?.notes.has(itemId) || message?.completionConfirmed) return
-    if (channel && this.runEngine(run) === 'codex' && (message?.phase !== 'final_answer' || channel.held.has(itemId) || channel.overflow)) {
-      // No raw pre-classification bytes are retained. If the beginning of a text was
-      // unclassified, wait for the entire authoritative item (also avoids split secrets).
-      if (channel.held.size < MAX_ITEMS) channel.held.add(itemId)
-      else channel.overflow = true
-      return
+  // A typed agentMessage is displayable output, not private reasoning. Until its
+  // audience is known, keep only a bounded prefix, transiently and keyed by run/item.
+  holdAgentText(run, id, text, snapshot = false) {
+    const c = this.channelOutput.get(run)
+    if (!c.held.has(id) && c.held.size >= MAX_ITEMS) { c.overflow = run.truncated = true; return }
+    const prior = c.held.get(id) || ''
+    const next = snapshot ? (text.startsWith(prior) ? text : prior) : prior + text.slice(0, MAX_TEXT + 1 - prior.length)
+    if (next.length > MAX_TEXT) run.truncated = true
+    c.held.set(id, next.slice(0, MAX_TEXT))
+  }
+
+  closeHeldOutput(run, status) {
+    // No authoritative item arrived. Preserve an interrupted fragment as activity,
+    // never manufacture a public answer. Never accept tool input or reasoning here.
+    const c = this.channelOutput.get(run)
+    for (const [id, raw] of c.held) {
+      const text = publicText(raw.length === MAX_TEXT ? raw.replace(/\S+$/, '') : raw, 4000)
+      if (!text) continue
+      const note = c.notes.has(id)
+      const a = { id: (note ? 'work-note:' : 'unclassified:') + id, kind: note ? 'workNote' : 'unclassifiedOutput',
+        title: note ? '작업 메모' : '발언 여부 미확인', status, detail: { text }, sourceRefs: [] }
+      this.put(run, 'activities', a); this.emit(run, 'activity.updated', { activity: a }, id)
     }
-    if (!message) {
-      message = { id: itemId, messageId: itemId, clientId: null, role: 'assistant', text: '', phase: null, status: 'streaming', completionConfirmed: false, localMessageId: run.localRunId ? localId('msg', run.localRunId, itemId) : null, createdAt: this.now() }
-      this.put(run, 'messages', message)
-      this.emit(run, 'message.started', { ...message }, itemId)
+    c.held.clear()
+  }
+
+  messageDelta(run, itemId, delta) {
+    const message = run.messages.find(m => m.id === itemId)
+    const channel = this.channelOutput.get(run)
+    if (message?.completionConfirmed) return
+    if (channel.notes.has(itemId) && run.activities.some(a => a.id === 'work-note:' + itemId && a.status === 'completed')) return
+    if (!message || channel.notes.has(itemId) || (this.runEngine(run) === 'codex' && message.phase !== 'final_answer')) {
+      this.holdAgentText(run, itemId, delta)
+      return
     }
     message.status = 'streaming'
     const key = `${run.answerId}/${itemId}`
@@ -4070,13 +4095,22 @@ export class CodexChatRuntime {
 
   async applyItem(run, item, completed, announce = true) {
     const epoch = this.runEpoch(run)
+    // The accepted request is the person's speech. Additional native inputs or
+    // an adapter echo containing application context must not impersonate them.
+    if (item.type === 'userMessage' && run.requestId) {
+      if (item.clientId !== run.requestId || run.messages.some(m => m.role === 'user' && m.id !== item.id)) return
+      const text = this.channelOutput.get(run)?.submittedText ?? this.store?.getAcceptedText?.(run.clientThreadId, run.requestId)
+      if (typeof text !== 'string') return
+      item = { ...item, text, truncated: false }
+    }
+    let staged = ''
     if (item.type === 'agentMessage') {
-      let channel = this.channelOutput.get(run)
-      if (item.phase === 'commentary' || channel?.notes.has(item.id)) {
-        if (!channel) this.channelOutput.set(run, channel = { notes: new Set(), held: new Set(), overflow: false })
+      const channel = this.channelOutput.get(run)
+      if (item.phase === 'commentary' || channel.notes.has(item.id)) {
         if (channel.notes.size < MAX_ITEMS) channel.notes.add(item.id)
-        else channel.overflow = true
-        channel.held.delete(item.id)
+        else channel.overflow = run.truncated = true
+        if (completed) channel.held.delete(item.id)
+        else this.holdAgentText(run, item.id, item.text || '', true)
         const a = chatWorkNoteActivity({ id: item.id, text: completed ? publicText(item.text, 4000) : '', status: completed ? 'complete' : 'streaming' })
         const prior = run.activities.find(row => row.id === a.id && row.kind === a.kind)
         if (prior?.status === 'completed' && (!completed || prior.detail?.text === a.detail.text)) return
@@ -4084,10 +4118,17 @@ export class CodexChatRuntime {
         if (announce) this.emit(run, completed ? 'activity.completed' : 'activity.started', { activity: a }, item.id)
         return
       }
-      if (channel && this.runEngine(run) === 'codex') {
-        if (!completed && (item.phase !== 'final_answer' || channel.held.has(item.id) || channel.overflow)) return
-        if (completed) channel.held.delete(item.id)
+      staged = channel.held.get(item.id) || ''
+      const priorPhase = run.messages.find(m => m.id === item.id)?.phase
+      // A phase-less Claude text start is already separated from thinking by its
+      // adapter. Codex may identify commentary only later. Once a staging bound is
+      // reached, never stream across the missing bytes or guess lost phase metadata.
+      if (!completed && (staged.length === MAX_TEXT || channel.overflow ||
+          this.runEngine(run) === 'codex' && (item.phase || priorPhase) !== 'final_answer')) {
+        this.holdAgentText(run, item.id, item.text || '', true); return
       }
+      if (channel.overflow && !item.phase && !priorPhase) return
+      channel.held.delete(item.id)
     }
     if (item.type === 'agentMessage' || item.type === 'userMessage') {
       const existing = run.messages.find(m => m.id === item.id)
@@ -4098,7 +4139,7 @@ export class CodexChatRuntime {
       run.truncated ||= Boolean(item.truncated) || Boolean(assistant && item.text.length > MAX_TEXT)
       const message = {
         id: item.id, messageId: item.id, clientId: assistant ? null : (item.clientId || null), role: assistant ? 'assistant' : 'user',
-        text: publicText(item.text), phase: item.phase || null, status: completed ? 'complete' : 'streaming',
+        text: publicText(item.text), phase: item.phase || existing?.phase || null, status: completed ? 'complete' : 'streaming',
         localMessageId: assistant ? (run.localRunId ? localId('msg', run.localRunId, item.id) : null)
           : item.clientId === run.requestId ? run.localMessageId || null : null,
         createdAt: existing?.createdAt || this.now(),
@@ -4107,17 +4148,20 @@ export class CodexChatRuntime {
       }
       if (assistant && !completed) {
         const key = `${run.answerId}/${item.id}`
-        const retained = this.rawMessages.get(key) ?? existing?.text ?? ''
+        const retained = this.rawMessages.get(key) ?? (staged || existing?.text || '')
         const incoming = item.text || ''
         // A newer partial snapshot can extend received text; an older/summary
         // snapshot must not shorten or replace it. Seed the next delta's prefix.
         const raw = incoming.startsWith(retained) ? incoming : retained
         this.rawMessages.set(key, raw)
-        message.text = publicText(raw, MAX_TEXT)
+        message.text = publicText(staged ? raw.replace(/\S+$/, '') : raw, MAX_TEXT)
       } else if (!completed && existing?.text) message.text = existing.text
       this.put(run, 'messages', message)
       if (assistant && announce) {
-        if (!existing) this.emit(run, 'message.started', { ...message }, item.id)
+        if (!existing) {
+          this.emit(run, 'message.started', { ...message }, item.id)
+          if (!completed && message.text) this.visibleMessages.set(`${run.answerId}/${item.id}`, message.text)
+        }
         if (completed) {
           const finalText = publicText(item.text, item.text.length)
           const previousText = this.visibleMessages.get(`${run.answerId}/${item.id}`) || existing?.text || ''
@@ -4234,6 +4278,7 @@ export class CodexChatRuntime {
     for (const item of turn.items) await this.applyItem(run, item, true)
     if (epoch !== this.runEpoch(run)) return
     if (!TERMINAL.has(turn.status)) return
+    this.closeHeldOutput(run, turn.status === 'completed' ? 'unknown' : turn.status)
     // A disconnect/interruption may omit item/completed. Retain received public
     // text, but never invent an answer or infer task success from that text.
     for (const message of [...run.messages]) if (message.role === 'assistant' && message.status === 'streaming') {

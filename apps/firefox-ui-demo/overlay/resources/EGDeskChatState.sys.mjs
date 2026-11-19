@@ -365,12 +365,15 @@ export function projectLocalRunRelations(messages, runs) {
   return projected;
 }
 
+function sameLocalRun(a, b) {
+  if (['localConversationId', 'clientThreadId', 'conversationId', 'runId'].some(key => a[key] && b[key] && a[key] !== b[key])) return false;
+  return !!(a.localRunId && a.localRunId === b.localRunId || a.conversationId && a.runId && a.conversationId === b.conversationId && a.runId === b.runId);
+}
 export function mergeLocalChatRuns(current = [], persisted = []) {
   const runs = (Array.isArray(current) ? current : []).map(copy);
   for (const incoming of Array.isArray(persisted) ? persisted : []) {
     if (!incoming?.localRunId && !(incoming?.conversationId && incoming?.runId)) continue;
-    const index = runs.findIndex(run => incoming.localRunId && run.localRunId === incoming.localRunId
-      || incoming.conversationId && incoming.runId && run.conversationId === incoming.conversationId && run.runId === incoming.runId);
+    const index = runs.findIndex(run => sameLocalRun(run, incoming));
     if (index < 0) runs.push(copy(incoming));
     else {
       const previous = runs[index];
@@ -1246,8 +1249,7 @@ export function mergeChatSnapshot(state, snapshot, clientThreadId) {
 export function runsForThread(state, thread) {
   if (!thread) return [];
   const live = Object.values(state.runs).filter(run => run.localThreadId === thread.id || run.clientThreadId === clientThreadBinding(thread) || (thread.conversationId && run.conversationId === thread.conversationId));
-  const stored = (thread.localRuns || []).filter(run => !live.some(current => current.localRunId && current.localRunId === run.localRunId
-    || current.conversationId && current.runId && current.conversationId === run.conversationId && current.runId === run.runId));
+  const stored = (thread.localRuns || []).filter(run => !live.some(current => sameLocalRun(current, run)));
   return [...stored, ...live];
 }
 
@@ -1414,6 +1416,7 @@ export function projectRunMessages(existing, run, now = Date.now()) {
   const ordinal = { user: 0, assistant: 0 };
   for (const incoming of chatSpeechOnly(run.messages) || []) {
     const role = incoming.role || 'assistant';
+    if (role === 'assistant' && notes.has('work-note:' + (incoming.providerItemId || incoming.messageId || incoming.id))) continue;
     const order = ordinal[role] || 0;
     ordinal[role] = order + 1;
     const sameTurn = message => message.runId === run.runId && (!message.conversationId || message.conversationId === run.conversationId);
