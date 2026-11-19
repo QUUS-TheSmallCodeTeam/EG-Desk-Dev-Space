@@ -31,7 +31,7 @@ import { BROWSER_REFLEX_TOOL_NAME } from './egdesk-browser-reflex.mjs'
 const BROWSER_INTERACTION_TOOL_NAMES = Object.freeze([...BROWSER_STEP_TOOL_NAMES, BROWSER_REFLEX_TOOL_NAME])
 // Fixture QA allows only observe/click/fill; a reflex could run other steps.
 const FIXTURE_BROWSER_TOOL_NAMES = Object.freeze(['egdesk_browser_observe', 'egdesk_browser_click', 'egdesk_browser_fill'])
-import { decisionContextActivity, prepareTurnContext } from './egdesk-context-setup.mjs'
+import { DECISION_CONTEXT_KEY, decisionContextActivity, prepareTurnContext } from './egdesk-context-setup.mjs'
 
 const TERMINAL = new Set(['completed', 'interrupted', 'failed'])
 const ITEM_STATUS = new Set(['inProgress', 'completed', 'failed', 'declined'])
@@ -2391,6 +2391,12 @@ export class CodexChatRuntime {
       assertPreparationActive()
       if (this.store && this.engineOwnerHash(engine.id, profileId) !== context.ownerHash) throw Object.assign(chatError('ACCOUNT_CHANGED', 'AI engine account changed before dispatch', 409), { definite: true })
       context.checkBoard?.()
+      // Selection/scoring can precede native thread preparation. Do not send an
+      // already assembled packet after its grant expires or is revoked.
+      if (decision?.result.mayDispatch && !decision.result.mayDispatch()) {
+        if (additionalContext) delete additionalContext[DECISION_CONTEXT_KEY]
+        decision.result = { status: 'fallback', reason: 'evidence_unavailable', selected: [], extraContext: {}, receipt: null }
+      }
       turnStartAttempted = context.turnStartAttempted = true
       const result = await engine.startTurn({
         threadId: cid,
@@ -3806,7 +3812,8 @@ export class CodexChatRuntime {
     let timer = null
     const expired = new Promise(resolve => { timer = setTimeout(() => { controller.abort(); resolve(null) }, budgetMs) })
     const work = (async () => {
-      const candidates = await setup.collect({ body, context, signal: controller.signal })
+      const memoryEvidenceFor = mode === 'on' ? this.directEvidenceReader(body, context, controller.signal) : null
+      const candidates = await setup.collect({ body, context, signal: controller.signal, memoryEvidenceFor })
       if (controller.signal.aborted) return { status: 'fallback', reason: 'timeout', selected: [], extraContext: {}, receipt: null }
       return prepareTurnContext({ message: body.message, candidates: Array.isArray(candidates) ? candidates : [], client: setup.client,
         timeoutMs: Math.max(1, budgetMs - (Date.now() - started)), signal: controller.signal, cacheScope: 'ctx' })
@@ -3815,6 +3822,37 @@ export class CodexChatRuntime {
       const result = await Promise.race([work, expired])
       return { mode, result: result || { status: 'fallback', reason: 'timeout', selected: [], extraContext: {}, receipt: null } }
     } catch { return null } finally { clearTimeout(timer) }
+  }
+
+  // A client-selected row is not authority. Current account, validated Agent,
+  // positive DM destination and a durable per-row grant must all agree.
+  directEvidenceReader(body, context, signal) {
+    if (!this.store || context.stateless || context.channelKind !== 'direct' || !context.localConversationId ||
+        context.board || body.boardId != null || Object.hasOwn(context, 'boardActor') || !context.profileRun?.binding?.profileId) return null
+    const engineId = context.engine.id, engineProfileId = context.route.engineProfileId
+    const slot = this.operationSlot(engineId, engineProfileId), epoch = this.epochOf(engineId, slot)
+    const scope = { ownerKey: this.engineOwnerKey(engineId, engineProfileId), agentId: context.profileRun.binding.profileId,
+      clientThreadId: context.clientThreadId }
+    if (!scope.ownerKey || ownerHash(scope.ownerKey) !== context.ownerHash) return null
+    return handle => {
+      const store = this.decisionContext.memoryEvidence
+      if (!store) return null
+      const mayRead = () => {
+        try {
+          if (signal.aborted || this.decisionContext.mode() !== 'on' || this.decisionContext.configured() !== true ||
+              this.epochOf(engineId, slot) !== epoch || this.engineOwnerKey(engineId, engineProfileId) !== scope.ownerKey ||
+              this.store.getConversation(scope.clientThreadId)?.agent?.profileId !== scope.agentId) return false
+          context.checkBoard?.()
+          return store.isActive(scope, handle) === true
+        } catch { return false }
+      }
+      if (!mayRead()) return null
+      return { mayRead, loadText: async () => {
+        if (!mayRead()) return null
+        const evidence = await store.read(scope, handle)
+        return evidence && mayRead() ? JSON.stringify(evidence) : null
+      } }
+    }
   }
 
   // One decision-context activity row: what the decision model chose, and in

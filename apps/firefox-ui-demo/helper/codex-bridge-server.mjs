@@ -38,6 +38,7 @@ import { createDecisionBudget, createDecisionClient } from './egdesk-decision-cl
 import { openDecisionCredentialStore } from './egdesk-decision-credential.mjs'
 import { createDecisionHttpHandler } from './egdesk-decision-http.mjs'
 import { collectDecisionCandidates } from './egdesk-decision-candidates.mjs'
+import { MemoryEvidenceStore } from './egdesk-memory-evidence.mjs'
 import { MAX_ENGINE_PROFILES, openEngineProfiles } from './egdesk-engine-profiles.mjs'
 import { createEngineProfilesHttpHandler } from './egdesk-engine-profiles-http.mjs'
 import { createDeskHttpHandler } from './egdesk-desk-http.mjs'
@@ -390,6 +391,7 @@ const hostControl = createHostControl({
   onLeaseEvent: event => chat.noteHostControl(event),
   emit: event => broadcast({ ...event, v: BRIDGE_PROTOCOL_VERSION, provider: PROVIDER_ID, ts: Date.now() }),
 })
+let memoryEvidenceStore = null
 const chat = new CodexChatRuntime({
   engines: engineRegistry,
   contexts,
@@ -419,7 +421,8 @@ const chat = new CodexChatRuntime({
     mode: () => bridgeSettings.decisionContext.mode,
     configured: () => decisionCredentials.getApiKey() !== null,
     client: decisionClient,
-    collect: async ({ body, context }) => (await collectDecisionCandidates({ body, clientThreadId: context.clientThreadId,
+    get memoryEvidence() { return memoryEvidenceStore ??= new MemoryEvidenceStore({ dataDir, captures: contextStore }) },
+    collect: async ({ body, context, memoryEvidenceFor }) => (await collectDecisionCandidates({ body, memoryEvidenceFor, clientThreadId: context.clientThreadId,
       excludeMessageId: context.localMessageId, chatStore, deskStore, ontologyStore: ensureOntologyStore })).candidates,
   },
 })
@@ -1226,6 +1229,7 @@ async function shutdown() {
   catch { console.error('[egdesk-codex-bridge] workflow runtime did not close cleanly') }
   try { await localFiles.close() }
   catch { console.error('[egdesk-codex-bridge] managed file store did not close cleanly') }
+  try { memoryEvidenceStore?.close() } catch {}
   try { chatStore?.close() }
   catch { console.error('[egdesk-codex-bridge] local chat store did not close cleanly') }
   try { profileStore?.close() }

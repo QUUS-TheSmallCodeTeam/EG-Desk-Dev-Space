@@ -83,3 +83,33 @@ Board 소유자가 활성 Agent 버전, 공개 발췌, 공개할 답변 작성 �
 - **서술형 초안**: 요청마다 별도 승인한다. 전용 OpenAI Responses 경로에 질문, 선택된 발췌, 공개 작성 지침, 제한된 말투만 보낸다. 개인 대화·파일·도구·이전 응답은 연결하지 않는다. 조건에 맞는 발췌나 전용 설정이 없으면 일반 Chat이나 구독 계정으로 대체하지 않는다. 특정 엔진/계정에 연결된 Agent도 다른 비용 주체로 바꾸지 않는다.
 
 초안 서비스는 기본 꺼짐이다. 운영자가 명시적으로 사용하기로 한 경우에만 `<앱 데이터 디렉터리>/settings/board-agent-draft-service.json`에 `version`(숫자 `1`), `provider`(`openai`), `apiKey`(별도 발급), `model`(허용된 정확한 모델 ID) 네 필드를 설정한다. 본 경로에서 허용한 모델은 `gpt-4.1-mini-2025-04-14`, `gpt-4.1-nano-2025-04-14`다. POSIX에서는 본인 소유의 `0700` 설정 폴더와 `0600` 파일을 사용한다. Windows에서는 같은 사용자와 시스템/관리자 외의 주체가 접근할 수 없도록 기존 보안 정책을 적용한다. 키는 환경변수·대화·Board·검토 파일에 넣지 않는다. 설정이 유효해 보인다는 표시는 실제 계정의 모델 사용권, 결제 주체 또는 연결 성공을 검증한 것이 아니다.
+
+## 장부 행에서 원본까지: 일반 Agent DM의 선택 근거
+
+`MemoryEvidenceStore`는 선택한 **장부 한 줄**을 같은 대화에서 캡처한 원본의 정확한 버전과 줄에 연결한다. `counted`는 ‘실사로 연결한 기록’이라는 뜻이지 시스템이 현물을 직접 보았다는 보증이 아니다. `posted`(처리 완료)와 `scheduled`(예정)는 다른 관계다. `copied`는 독립된 관측이 아니다. `present`는 질문의 현재 범위에 해당한다는 뜻이며 실측 여부와 독립적이다.
+
+**신뢰된 로컬 호출자용 API.** `scope`는 실제 대상 계정·Agent·DM을 확인하고, 소유자가 해당 범위의 원본 재사용을 허용한 뒤 만드는 `{ownerKey, agentId, clientThreadId}`다. HTTP/body/문서 안의 필드에서 만들면 안 된다. 이 패치는 권한을 발행하는 HTTP 엔드포인트, 자동 파일 수집기 또는 행 클릭 UI를 추가하지 않는다. `dataDir`는 앱 전용 디렉터리이고, `captures`는 기존 `ImmutableContextStore` 인스턴스다.
+
+```js
+const evidence = new MemoryEvidenceStore({ dataDir, captures })
+const line = (capture, n) => ({ sourceId: capture.sourceId, revision: capture.revision, startLine: n, endLine: n })
+const id = await evidence.bind(scope, {
+  ledger: line(ledgerCapture, 4),
+  sources: [{ relation: 'counted', ...line(stocktakeCapture, 12) },
+            { relation: 'posted', ...line(dispatchCapture, 2) },
+            { relation: 'coverage', ...line(movementWindowCapture, 1) }],
+  expiresAt, // 생략하면 명시적으로 해제할 때까지. 날짜를 모른다는 뜻이 아니다.
+})
+// 기존 selectedSources에 { id, kind: 'memory-evidence', label: '장부 행' }로 명시 선택한다.
+const trace = await evidence.read(scope, id) // 같은 권한으로 원본 줄·sourceId·revision을 확인. 불가하면 null.
+evidence.revoke(scope, id)                  // 영속 철회. 다시 동의할 땐 별도 bind로 새 ID를 발행한다.
+evidence.close()
+```
+
+선택은 권한이 아니다. `on`인 확인된 일반 DM에서만 원문을 늦게 로드한다. 판정 모델에는 일반 제목만 주고, 답변 모델에는 허용한 줄과 관계만 준다. 패킷이 잘리거나 원본이 없거나 철회됐다면 일부만 붙이지 않는다. 네이티브 턴에 넘기기 직전에도 권한을 검사한다. 파일명이 같은 새 캡처로 대체하지 않는다. Board나 과거 채널을 확인할 수 없는 대화에는 붙이지 않는다. 철회는 **향후 원본 읽기·새 전달**을 막는다. 이미 상대 엔진에 보낸 값이나 공개한 답변을 소급 지우지는 않는다. 기존 네이티브 대화의 히스토리는 이 원본 연결 권한과 별개다. 다른 Agent에 과거 입력까지 넘기지 않아야 할 때는 이전 네이티브 세션을 재사용하지 않는다.
+
+로컬 재현(프로젝트가 지원하는 Node 환경):
+
+```sh
+node --test apps/firefox-ui-demo/helper/egdesk-memory*.test.mjs
+```

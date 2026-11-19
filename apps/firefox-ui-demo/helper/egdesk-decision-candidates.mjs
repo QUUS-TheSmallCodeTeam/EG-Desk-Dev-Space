@@ -20,13 +20,27 @@ export const DEFAULT_RECENT_MESSAGES = 12
 const MESSAGE_PAGES = 5 // listMessages pages oldest first; read at most this many pages
 const MESSAGE_PAGE = 100
 
-function selectionCandidates(body) {
+// A memory handle is a selector, never a grant. Its client label/URL must not
+// fall back to an ordinary source, even when the host declines the read.
+const MEMORY_ROW = /^memrow:[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
+function selectionCandidates(body, memoryEvidenceFor) {
   const out = []
   const seen = new Set()
+  const memoryHandles = new Set()
   for (const [field, list] of [['selectedSources', body?.selectedSources], ['attachments', body?.attachments]]) {
     if (!Array.isArray(list)) continue
     for (const [index, item] of list.entries()) {
       if (!record(item)) continue
+      const handle = text(item.id)
+      if (handle.startsWith('memrow:') || item.kind === 'memory-evidence') {
+        if (field !== 'selectedSources' || !MEMORY_ROW.test(handle) || !memoryEvidenceFor || memoryHandles.size >= 8 || memoryHandles.has(handle)) continue
+        memoryHandles.add(handle)
+        const access = memoryEvidenceFor(handle)
+        if (access) out.push({ id: 'memory-selection:' + index, kind: 'source', title: '선택한 장부 행',
+          summary: '연결한 원본 기록', timeSlice: 'unknown', mandatory: true,
+          mayRead: access.mayRead, loadText: access.loadText })
+        continue
+      }
       const title = text(item.label) || text(item.title) || text(item.name) || text(item.url)
       if (!title) continue
       const key = text(item.id) || `${field}-${index}`
@@ -91,13 +105,13 @@ function boardCandidates(deskStore, boardId) {
  * bridge opens it lazily).
  */
 export async function collectDecisionCandidates({ body = {}, clientThreadId = null, excludeMessageId = null, chatStore = null, deskStore = null, ontologyStore = null,
-  maxMessages = DEFAULT_RECENT_MESSAGES } = {}) {
+  maxMessages = DEFAULT_RECENT_MESSAGES, memoryEvidenceFor = null } = {}) {
   const sources = { selected: 0, messages: 0, board: 0, ontology: 0 }
   const take = async (name, read) => {
     try { const list = await read(); sources[name] = list.length; return list }
     catch { sources[name] = -1; return [] }
   }
-  const selected = await take('selected', () => selectionCandidates(body))
+  const selected = await take('selected', () => selectionCandidates(body, memoryEvidenceFor))
   const board = await take('board', () => boardCandidates(deskStore, body?.boardId))
   const messages = await take('messages', () => recentMessageCandidates(chatStore, clientThreadId, maxMessages, excludeMessageId).slice(-maxMessages))
   const ontology = await take('ontology', async () => {
