@@ -891,6 +891,39 @@ export function openChatStore({ dataDir, ownerScope } = {}) {
       const found = q.message.get(row.local_conversation_id, identifier(localMessageId, 'localMessageId'))
       return found ? parse(found.public_json) : null
     },
+    // Private point read for an already-consented DM. Public projections/imports are not speech receipts.
+    // Return the original event time and exact delivered text, never the current projection or a work note.
+    speechSource({ clientThreadId, conversationId, agentId, ownerHash, localMessageId, role, seq = null }) {
+      ensureOpen(); const row = requireThread(clientThreadId), id = row.local_conversation_id
+      if (!conversationId || row.conversation_id !== conversationId || row.agent_profile_id !== agentId || !ownerHash ||
+          !['user','assistant'].includes(role) || !localMessageId || this.getNativeAudience(conversationId) !== agentId) return null
+      const message = q.message.get(id, localMessageId)
+      if (!message?.request_id) return null
+      const req = q.request.get(id, message.request_id), outcome = req && parse(req.outcome_json)
+      if (!req || !outcome?.accepted || outcome.dispatchStatus !== 'confirmed' || outcome.conversationId !== conversationId ||
+          outcome.accountIdentity?.ownerHash !== ownerHash || outcome.accountIdentity?.status !== 'verified' || !outcome.runId || !outcome.localRunId) return null
+      const native = db.prepare('SELECT run_id FROM native_runs WHERE local_conversation_id=? AND local_run_id=?').get(id, outcome.localRunId)
+      if (native?.run_id !== outcome.runId) return null
+      const m = parse(message.public_json)
+      if (m.role !== role || typeof m.text !== 'string' || !m.text.trim() || m.text.length > 2048 || !m.text.isWellFormed()) return null
+      let event, original
+      if (role === 'user') {
+        if (req.local_message_id !== localMessageId) return null
+        event = q.event.get(id, 'request:' + message.request_id + ':accepted')
+        if (event?.event !== 'message.accepted' || event.local_message_id !== localMessageId || event.ts !== req.accepted_at) return null
+        original = parse(event.message_json)
+      } else {
+        if (message.local_run_id !== outcome.localRunId || m.phase !== 'final_answer' || m.status !== 'complete' || m.completionConfirmed !== true || m.projectionTruncated) return null
+        if (!Number.isSafeInteger(seq) || seq <= 0) return null
+        event = q.eventSeq.get(id, seq)
+        if (!event || event.event !== 'message.completed' || event.local_run_id !== outcome.localRunId || event.run_id !== outcome.runId ||
+            event.request_id !== req.request_id || event.local_message_id !== localMessageId) return null
+        original = parse(event.details_json)
+        if (original.phase !== 'final_answer' || original.status !== 'complete' || original.completionConfirmed !== true || original.projectionTruncated) return null
+      }
+      if ((seq !== null && seq !== event.seq) || original?.role !== role || original.text !== m.text || !Number.isSafeInteger(event.ts) || event.ts < 0) return null
+      return { role, quote: original.text, seq: event.seq, spokenAt: event.ts }
+    },
     // Exact predecessor of the accepted request, not the last assistant row anywhere in the room.
     // No fallback across a user message, interrupted reply or unresolved import.
     previousPublicAnswerRun(clientThreadId, beforeMessageId) {

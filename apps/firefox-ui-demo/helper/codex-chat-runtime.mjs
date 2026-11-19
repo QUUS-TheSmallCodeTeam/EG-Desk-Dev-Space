@@ -31,6 +31,7 @@ import { BROWSER_REFLEX_TOOL_NAME } from './egdesk-browser-reflex.mjs'
 const BROWSER_INTERACTION_TOOL_NAMES = Object.freeze([...BROWSER_STEP_TOOL_NAMES, BROWSER_REFLEX_TOOL_NAME])
 // Fixture QA allows only observe/click/fill; a reflex could run other steps.
 const FIXTURE_BROWSER_TOOL_NAMES = Object.freeze(['egdesk_browser_observe', 'egdesk_browser_click', 'egdesk_browser_fill'])
+import { speechSegments } from './egdesk-speech-grounding.mjs'
 import { DECISION_CONTEXT_KEY, decisionContextActivity, evidenceForSpeaker, prepareTurnContext } from './egdesk-context-setup.mjs'
 
 const TERMINAL = new Set(['completed', 'interrupted', 'failed'])
@@ -754,6 +755,7 @@ export class CodexChatRuntime {
     this.contexts = contexts
     // Decision model context setup (DECISION_MODEL_CONTEXT_SETUP.md §3.1):
     // { mode(): 'off'|'advisory'|'on', configured(): boolean, client, collect({ body, context }) → candidates, budgetMs? } or null.
+    this.speechRuns = new WeakMap() // private runtime-only grants; never projected onto public runs
     this.decisionContext = decisionContext
     this.toolProviders = [...(contexts ? [contexts] : []), ...toolProviders]
     this.threadToolOwners = new Map()
@@ -1258,10 +1260,11 @@ export class CodexChatRuntime {
       localMessageId,
       ...(itemId ? { itemId } : {}), details: copy(details),
     }
+    let speechEventSeq = null
     if (this.store) {
       try {
         if (!this.storeHealthy) throw chatError('CHAT_STORE_UNAVAILABLE', 'Local chat history is unavailable', 503)
-        this.store.appendEvent({
+        const saved = this.store.appendEvent({
           eventKey: `${publicEvent.streamId}:${publicEvent.seq}`,
           clientThreadId: run.clientThreadId,
           ...(run.requestId ? { requestId: run.requestId } : {}),
@@ -1272,6 +1275,7 @@ export class CodexChatRuntime {
           event, details: publicEvent.details, ts: publicEvent.ts,
           runCheckpoint: copy(run),
         })
+        speechEventSeq = saved?.seq ?? null
         publicEvent.durable = true
       } catch {
         // The native turn may already be running. Never advertise an unrecorded
@@ -1281,6 +1285,8 @@ export class CodexChatRuntime {
         publicEvent.storageError = { code: 'CHAT_STORE_UNAVAILABLE', message: 'Local chat history is incomplete' }
       }
     }
+    if (publicEvent.durable && event === 'message.completed' && details.role === 'assistant' && localMessageId)
+      this.speechRuns.get(run)?.record(localMessageId, 'assistant', details.text, [], speechEventSeq)
     this.emitEvent(publicEvent)
   }
 
@@ -1747,7 +1753,7 @@ export class CodexChatRuntime {
       conversationId, localConversationId: acceptedLocal?.localConversationId || null,
       localRunId: acceptedLocal?.localRunId || null,
       localMessageId: acceptedLocal?.localMessageId || null,
-      ownerHash: requestOwnerHash, submittedText: publicText(body.message),
+      ownerHash: requestOwnerHash, submittedText: publicText(body.message), askedAt: acceptedLocal?.request?.acceptedAt ?? this.now(),
       executionPolicy: requestedPolicy || boundPolicy,
       qaOutputMarkers: qaMarkers,
       policyUpgrade: Boolean(conversationId && requestedPolicy && !boundPolicy),
@@ -2491,7 +2497,13 @@ export class CodexChatRuntime {
       for (const provider of preparedProviders.keys()) await this.callProvider(provider, 'bindRun', run, preparedProviders.get(provider), readerConfiguration, provider === this.contexts ? contextAuthority : undefined)
       if (epoch !== this.epochOf(engine.id, slot)) throw chatError('ACCOUNT_CHANGED', 'Codex account or connection changed', 409)
       for (const notice of context.ceilingNotices) this.noteCeiling(run, notice.key, notice)
-      if (decision?.mode === 'on' && decision.result.status === 'ready') decision.result.noteSent?.()
+      if (decision?.mode === 'on' && decision.result.status === 'ready') {
+        decision.result.noteSent?.()
+        if (Array.isArray(decision.result.speechInterpretations) && decision.speech?.allowed()) {
+          this.speechRuns.set(run, decision.speech)
+          decision.speech.record(context.localMessageId, 'user', body.message, decision.result.speechInterpretations)
+        }
+      }
       if (decision) this.noteDecisionContext(run, decision)
       // Notifications can precede the RPC response. Only the returned turn ID
       // may inherit this request's correlation; other turns remain unclaimed.
@@ -3854,21 +3866,80 @@ export class CodexChatRuntime {
     } catch { return null }
     const budgetMs = Number.isSafeInteger(setup.budgetMs) && setup.budgetMs > 0 ? setup.budgetMs : 800
     const started = Date.now()
-    const askedAt = this.now()
+    const askedAt = context.askedAt ?? this.now()
     const controller = new AbortController()
     let timer = null
     const expired = new Promise(resolve => { timer = setTimeout(() => { controller.abort(); resolve(null) }, budgetMs) })
+    let speech = null
     const work = (async () => {
+      speech = mode === 'on' ? this.directSpeech(body, context, controller.signal) : null
       const memoryEvidenceFor = mode === 'on' ? this.directEvidenceReader(body, context, controller.signal) : null
-      const candidates = await setup.collect({ body, context, signal: controller.signal, memoryEvidenceFor })
+      const candidates = await setup.collect({ body, context, signal: controller.signal, memoryEvidenceFor, speech })
       if (controller.signal.aborted) return { status: 'fallback', reason: 'timeout', selected: [], extraContext: {}, receipt: null }
-      return prepareTurnContext({ message: body.message, candidates: Array.isArray(candidates) ? candidates : [], client: setup.client, askedAt,
+      return prepareTurnContext({ message: body.message, candidates: Array.isArray(candidates) ? candidates : [], client: setup.client, askedAt, speech,
         timeoutMs: Math.max(1, budgetMs - (Date.now() - started)), signal: controller.signal, cacheScope: 'ctx' })
     })().catch(() => ({ status: 'fallback', reason: 'unreachable', selected: [], extraContext: {}, receipt: null }))
     try {
       const result = await Promise.race([work, expired])
-      return { mode, result: result || { status: 'fallback', reason: 'timeout', selected: [], extraContext: {}, receipt: null } }
+      return { mode, speech, result: result || { status: 'fallback', reason: 'timeout', selected: [], extraContext: {}, receipt: null } }
     } catch { return null } finally { clearTimeout(timer) }
+  }
+
+  // Only a previously established ordinary DM can opt in. Local author, exact native recipient and grant
+  // generation are independent of anything in a chat message or the decision model's output.
+  directSpeech(body, context, signal) {
+    try {
+      const cid = context.conversationId, thread = context.clientThreadId, profile = context.profileRun?.binding?.profileId
+      if (!cid || !profile || !context.localMessageId || !context.localRunId || !this.storeHealthy || context.channelKind !== 'direct' || context.stateless ||
+          context.board || body.boardId != null || Object.hasOwn(context,'boardActor') || typeof this.store?.speechSource !== 'function') return null
+      const dm = this.memoryDmAuthority({ clientThreadId: thread, conversationId: cid, expectedProfileId: profile })
+      const evidence = this.decisionContext.memoryEvidence, gen = evidence?.speechGrant?.(dm.scope)
+      if (!gen) return null
+      const allowed = () => { try {
+        if (signal.aborted || !this.storeHealthy || this.decisionContext.mode() !== 'on' || this.decisionContext.configured() !== true) return false
+        dm.assertCurrent(); context.checkBoard?.()
+        return evidence.speechGrant(dm.scope) === gen
+      } catch { return false } }
+      if (!allowed()) return null
+      const hash = s => createHash('sha256').update(s).digest('hex')
+      const source = (localMessageId, role, seq = null) => this.store.speechSource({ clientThreadId: thread, conversationId: cid, agentId: profile, ownerHash: context.ownerHash, localMessageId, role, seq })
+      const materialize = r => {
+        const s = source(r.localMessageId, r.role, r.seq)
+        if (!s || s.seq !== r.seq || s.spokenAt !== r.spokenAt || hash(s.quote) !== r.hash || r.interpretations.some(k => k.end > s.quote.length)) return null
+        return { role: s.role, speaker: s.role === 'user' ? 'user-in-this-DM' : 'this-Agent', quote: s.quote,
+          spokenAt: new Date(s.spokenAt).toISOString(), offsetMinutes: r.offsetMinutes, sequence: s.seq,
+          verification: 'utterance-only', interpretations: r.interpretations }
+      }
+      return { allowed, segments: speechSegments(body.message), candidate: () => {
+        if (!allowed()) return null
+        const refs = evidence.recentSpeech(dm.scope, gen)
+        if (!refs?.length) return null
+        let sentRefs = []
+        const active = () => { try { return allowed() && sentRefs.every(r => !!materialize(r)) } catch { return false } }
+        return { id: 'conversation:recent', kind: 'conversation', title: '이 DM에서 허용한 최근 발언',
+          summary: 'Current question refers to earlier remarks in this DM; select only for follow-up, comparison or recall.', timeSlice: 'unknown', mayRead: active,
+          loadText: () => {
+            if (!allowed()) return null
+            const utterances = [], selected = []
+            for (const r of refs.slice(-12).reverse()) {
+              if (r.localMessageId === context.localMessageId) continue
+              const rec = materialize(r); if (!rec) return null // not a partial chain after an unverified substitution
+              if (JSON.stringify([rec,...utterances]).length > 5200) break
+              utterances.unshift(rec); selected.unshift(r)
+            }
+            sentRefs = selected
+            return utterances.length && active() ? JSON.stringify({ kind: 'speech-record', version: 1, coverage: 'bounded-excerpts-not-event-coverage', utterances }) : null
+          } }
+      }, record: (localMessageId, role, exact, interpretations = [], seq = null) => {
+        try {
+          if (!allowed()) return
+          const s = source(localMessageId, role, seq)
+          if (!s || s.quote !== exact) return
+          evidence.rememberSpeech(dm.scope, gen, { localMessageId, role, seq: s.seq, spokenAt: s.spokenAt,
+            offsetMinutes: -new Date(s.spokenAt).getTimezoneOffset(), hash: hash(s.quote), interpretations })
+        } catch { /* Never change an accepted turn or persist unverified source text. */ }
+      } }
+    } catch { return null }
   }
 
   // A client-selected row is not authority. Current account, validated Agent,

@@ -45,7 +45,7 @@ async function newWorld(t, { count, out } = {}) {
     w.evidence = new MemoryEvidenceStore({ dataDir: path.join(dir, 'state'), captures: w.captures, now: () => w.clock })
     w.store = openChatStore({ dataDir: path.join(dir, 'chat'), ownerScope: 'synthetic-memev-qa' })
     const chat = new CodexChatRuntime({
-      store: w.store, requireStore: true, getOwnerKey: () => OWNER, profiles, resolveProjectWorkspace: async () => null,
+      now: () => w.clock, store: w.store, requireStore: true, getOwnerKey: () => OWNER, profiles, resolveProjectWorkspace: async () => null,
       request: async (method, params) => {
         await w.hooks.onNative?.(method)
         if (method === 'thread/start') return { thread: { id: `thread-${++w.threads}` }, cwd: '/work', model: 'synthetic' }
@@ -57,7 +57,7 @@ async function newWorld(t, { count, out } = {}) {
         const id = `turn-${++w.turnN}`
         const style = /왜/.test(JSON.stringify(params.input)) ? 'reason' : 'direct'
         const packet = params.additionalContext?.egdesk_decision_context?.value || ''
-        const { text, fields } = derive(packet, style)
+        const { text, fields } = w.hooks.reply?.(packet, style) ?? derive(packet, style)
         w.turns.push({ params, packet, fields, text })
         const timing = { threadId: params.threadId, turnId: id }
         setTimeout(async () => {
@@ -76,13 +76,13 @@ async function newWorld(t, { count, out } = {}) {
         client: { model: 'synthetic-decision', async decide(request) {
           w.decisionInputs.push(JSON.stringify(request.input)); await w.hooks.duringDecide?.()
           const answers = {}
-          for (const q of request.questions) answers[q.name] = q.type === 'choice'
+          for (const q of request.questions) answers[q.name] = w.hooks.choice?.(q, request) ?? (q.type === 'choice'
             ? { type: 'choice', choice: q.name === 'time_intent' ? 'present' : 'answer', confidence: 0.95, probabilities: [{ value: q.name === 'time_intent' ? 'present' : 'answer', probability: 0.95 }] }
-            : { type: 'predicate', probability: 0.02 } // relevance never selects: only the explicit (mandatory) handle can attach
+            : { type: 'predicate', probability: 0.02 }) // relevance never selects: only the explicit (mandatory) handle can attach
           return { answers, model: 'synthetic-decision', usage: { inputTokens: 1 }, latencyMs: 1 }
         } },
-        collect: async ({ body, context, memoryEvidenceFor }) => {
-          const list = (await collectDecisionCandidates({ body, clientThreadId: context.clientThreadId, excludeMessageId: context.localMessageId, chatStore: w.store, memoryEvidenceFor })).candidates
+        collect: async ({ body, context, memoryEvidenceFor, speech }) => {
+          const list = (await collectDecisionCandidates({ body, clientThreadId: context.clientThreadId, excludeMessageId: context.localMessageId, chatStore: w.store, memoryEvidenceFor, speech })).candidates
           w.collected.push({ message: body.message, ids: list.map(c => c.id), texts: list.map(c => `${c.title}|${c.summary}`) }); return list
         } },
     })
@@ -146,7 +146,7 @@ for (const [count, out] of [[30, 2], [37, 4], [44, 6]]) {
     }
     assert.ok(!w.decisionInputs.join('\n').match(/UNTRUSTED_LABEL|memrow:/), 'label/handle never reach the decision model catalog')
     assert.ok(!w.collected.at(-1).texts.join('\n').match(/NATIVE_WORK|UNTRUSTED_LABEL/))
-    assert.equal(w.collected.at(-1).ids.filter(i => i.startsWith('message:')).length, 2)
+    assert.ok(!w.collected.at(-1).ids.some(i => i.startsWith('message:') || i === 'conversation:recent'), 'a file grant does not opt in to speech')
     assertPublicClean(w)
   })
 }
@@ -258,7 +258,9 @@ test('mode off: no decision request, no resolver read; advisory: decision runs b
   const w = await newWorld(t, { count: 30, out: 2 }); const { handle } = await w.bindStandard()
   w.mode = 'off'; const off = await w.ask('지금 몇 개야?', handle)
   assert.equal(w.decisionInputs.length, 0); noPinned(off); assert.equal(off.params.additionalContext?.egdesk_decision_context, undefined)
-  w.mode = 'advisory'; const adv = await w.ask('지금 몇 개야?', handle)
+  w.mode = 'advisory'; const noCatalog = await w.ask('지금 몇 개야?', handle)
+  assert.equal(w.decisionInputs.length, 0, 'unconsented transcript is not an advisory catalog'); noPinned(noCatalog)
+  const adv = await w.ask('지금 몇 개야?', handle, {body:{attachments:[{id:'public',label:'선택한 문서'}]}})
   assert.ok(w.decisionInputs.length > 0); noPinned(adv); assert.equal(adv.params.additionalContext?.egdesk_decision_context, undefined)
   assert.doesNotMatch(w.decisionInputs.join('\n'), PINNED)
   w.mode = 'on'; assert.ok(hasPinned(await w.ask('지금 몇 개야?', handle)), 'same handle still valid when mode returns to on')
@@ -307,4 +309,48 @@ test('automatic match never chooses between two equally matching rows and is not
   noPinned(await w.ask('재고는?', null)); w.evidence.revoke(w.scope(), b.handle)
   assert.ok(hasPinned(await w.ask('재고는?', null)))
   noPinned(await w.ask('재고는?', b.handle)); assertPublicClean(w)
+})
+
+const recorded = packet => packet.split('\n').filter(l => l.startsWith('{')).map(l => JSON.parse(l)).find(p => p.kind === 'speech-record')?.utterances || []
+const speechChoice = (q, req) => {
+  if (q.type === 'predicate' && /^rel_/.test(q.name)) return {type:'predicate', probability:/[?？]/u.test(req.input.at(-1).content) ? 0.97 : 0.01}
+  const m = /^speech_(source|form|time)_(\d+)$/.exec(q.name); if (!m) return null
+  const now = req.input.at(-1).content.split('Message:\n').at(-1), n = Number(m[2]); let parts
+  if (now.includes('열렸다고 했어.')) parts = n === 0 ? ['attributed_report','assertion','past_unspecified'] : ['unspecified','plan','future_anchored']
+  else if (now.includes('직접 봤어.')) parts = ['self_reported_observation','assertion','past_anchored']
+  else if (now.includes('추정이야.')) parts = ['inference','assertion','unknown']
+  else parts = ['unknown','question','unknown']
+  const pick = parts[['source','form','time'].indexOf(m[1])]; assert.ok(q.choices.some(c => c.value === pick))
+  return { type:'choice', choice:pick, confidence:0.97, probabilities:[{value:pick,probability:0.97},{value:pick === 'unknown'?'unused':'unknown',probability:0.02}] }
+}
+for (const name of ['민지','하늘']) test(`everyday DM: ${name}'s report and a plan stay two claims; the event clock is not the chat clock`, async t => {
+  const w = await newWorld(t); w.clock = Date.UTC(2026,10,17,3); w.hooks.choice = speechChoice
+  await w.ask('PRECONSENT_CANARY: 이전에 나온 말.'); const grant=w.evidence.enableSpeech(w.scope()); assert.ok(grant)
+  const says = `${name}가 다리가 열렸다고 했어. 내일 직접 확인할 예정이야.`, question='직접 봤다는 거야?'
+  w.hooks.reply = packet => {const r = recorded(packet).find(x => x.role==='user' && x.interpretations.some(i => i.source==='attributed_report'))
+    const speaker = r?.quote.match(/^(.+?)가 /u)?.[1]; return {text:speaker && r.interpretations.some(i=>i.form==='plan') ? `${speaker}가 열렸다고 했고, 직접 확인은 그다음 날 예정이었어요.` : '직접 확인한 근거는 없어요.',fields:null} }
+  const stem = await w.ask(says); assert.doesNotMatch(stem.packet,/PRECONSENT_CANARY/)
+  const firstRefs=w.evidence.recentSpeech(w.scope(),grant); assert.deepEqual(firstRefs.map(x=>x.role),['user','assistant'])
+  w.clock+=86400000*2; w.restart(); const reply = await w.ask(question)
+  const rows=recorded(reply.packet), u=rows.find(x=>x.role==='user'); assert.equal(u.quote,says); assert.equal(u.spokenAt,'2026-11-17T03:00:00.000Z'); assert.equal(u.verification,'utterance-only')
+  assert.equal(reply.text,`${name}가 열렸다고 했고, 직접 확인은 그다음 날 예정이었어요.`)
+  assert.deepEqual(u.interpretations.map(i=>[u.quote.slice(i.start,i.end),i.source,i.form,i.time]),[[`${name}가 다리가 열렸다고 했어.`,'attributed_report','assertion','past_unspecified'],['내일 직접 확인할 예정이야.','unspecified','plan','future_anchored']]); assert.match(reply.packet,/2026-11-19T03:00:00.000Z/)
+  assert.deepEqual(rows.map(x=>x.role),['user','assistant']);assert.deepEqual(rows[1].interpretations,[]);assert.doesNotMatch(reply.packet,/PRECONSENT|NATIVE_WORK/)
+  assert.doesNotMatch(w.decisionInputs.at(-1), /다리가 열렸다고|직접 확인할 예정|직접 확인한 근거는/)
+  assert.doesNotMatch(JSON.stringify(w.rows().map(x=>x[1])),/speech-record|speech_source_|attributed_report|utterance-only/)
+  assert.ok(w.evidence.disableSpeech(w.scope(),grant)); w.restart(); const no = await w.ask(question); assert.deepEqual(recorded(no.packet),[]); assert.equal(no.text,'직접 확인한 근거는 없어요.')
+  const next = w.evidence.enableSpeech(w.scope()); assert.notEqual(grant,next);assert.deepEqual(w.evidence.recentSpeech(w.scope(),next),[])
+  const fresh = await w.ask('지금 무슨 말을 기억해?'); assert.doesNotMatch(fresh.packet,/PRECONSENT|다리가 열렸다고|직접 확인할 예정/)
+})
+
+test('everyday DM opt-in excludes plans as facts, assistant echo as a witness, mismatched Agent or thread, off, advisory, and a late revoke or rotated generation', async t => {
+  const w=await newWorld(t); w.hooks.choice=speechChoice; await w.ask('인사.'); const g=w.evidence.enableSpeech(w.scope());
+  await w.ask('어제 새 표지판을 직접 봤어.'); await w.ask('원인은 추정이야.'); const r=await w.ask('방금 확인한 건가?');
+  const rows=recorded(r.packet); assert.equal(rows.find(x=>x.quote.includes('표지판')).interpretations[0].source,'self_reported_observation');assert.equal(rows.find(x=>x.quote.includes('추정')).interpretations[0].source,'inference');assert.ok(rows.filter(x=>x.role==='assistant').every(x=>x.verification==='utterance-only' && !x.interpretations.length));
+  const other=await w.ask('표지판은?',null,{thread:'other-dm'}); assert.deepEqual(recorded(other.packet),[])
+  const otherAgent=await w.ask('표지판은?',null,{body:{profileId:'other'}}); assert.ok(otherAgent.error); assert.deepEqual(recorded(otherAgent.packet),[])
+  const board=await w.ask('표지판은?',null,{thread:'other-room',direct:false,body:{boardId:'b1'}}); assert.deepEqual(recorded(board.packet),[])
+  for (const mode of ['off','advisory']) { w.mode=mode; const no=await w.ask('이전 말은?'); assert.deepEqual(recorded(no.packet),[]);assert.doesNotMatch(no.packet,/표지판|원인은 추정/); }
+  w.mode='on'; let rotated=false; w.hooks.duringDecide=()=>{if (!rotated) {rotated=true;assert.ok(w.evidence.disableSpeech(w.scope(),g));w.evidence.enableSpeech(w.scope())}};
+  const late=await w.ask('다시 볼래?'); assert.ok(rotated);assert.deepEqual(recorded(late.packet),[]);assert.doesNotMatch(late.packet,/표지판|원인은 추정/)
 })

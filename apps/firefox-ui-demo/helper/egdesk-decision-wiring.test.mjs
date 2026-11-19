@@ -126,7 +126,7 @@ test('bounded execution policies never run the decision setup', async () => {
   assert.equal(h.decisionRows().length, 0)
 })
 
-test('collectDecisionCandidates reads selections, the Board, recent messages and the ontology; broken stores are skipped', async () => {
+test('collectDecisionCandidates reads permitted selections, the Board and the ontology; a raw transcript is never a capability', async () => {
   const messages = Array.from({ length: 15 }, (_, index) => ({ localMessageId: `m${index}`, role: index % 2 ? 'assistant' : 'user', text: `message ${index}` }))
   const chatStore = { listMessages: (id, { afterSeq }) => (afterSeq === 0 ? { messages: messages.slice(0, 10), hasMore: true, nextCursor: 10 } : { messages: messages.slice(10), hasMore: false, nextCursor: null }) }
   const deskStore = { board: id => (id === 'b1' ? { id: 'b1', title: '출시 Board', head: { body: { text: 'Board body' } } } : null) }
@@ -135,11 +135,11 @@ test('collectDecisionCandidates reads selections, the Board, recent messages and
     body: { boardId: 'b1', selectedSources: [{ id: 'src-1', label: 'Spec.pdf', kind: 'file' }], attachments: [{ title: 'No id' }, 'bad'] },
     clientThreadId: 'c1', excludeMessageId: 'm14', chatStore, deskStore, ontologyStore, maxMessages: 4,
   })
-  assert.deepEqual(sources, { selected: 2, messages: 4, board: 1, ontology: 1 })
-  assert.deepEqual(candidates.map(c => c.id), ['selected:src-1', 'selected:attachments-0', 'board:b1', 'message:m10', 'message:m11', 'message:m12', 'message:m13', 'ontology-snapshot:s1'])
+  assert.deepEqual(sources, { selected: 2, messages: 0, board: 1, ontology: 1 })
+  assert.deepEqual(candidates.map(c => c.id), ['selected:src-1', 'selected:attachments-0', 'board:b1', 'ontology-snapshot:s1'])
   assert.equal(await candidates.find(c => c.id === 'board:b1').loadText(), 'Board body')
   assert.equal(candidates.at(-1).timeSlice, 'planned')
   const broken = await collectDecisionCandidates({ body: { boardId: 'b1' }, clientThreadId: 'c1', chatStore: { listMessages: () => { throw new Error('x') } },
     deskStore: { board: () => { throw new Error('y') } }, ontologyStore: () => ({ readGraph: async () => { throw new Error('z') } }) })
-  assert.deepEqual(broken, { candidates: [], sources: { selected: 0, messages: -1, board: -1, ontology: -1 } })
+  assert.deepEqual(broken, { candidates: [], sources: { selected: 0, messages: 0, board: -1, ontology: -1 } })
 })

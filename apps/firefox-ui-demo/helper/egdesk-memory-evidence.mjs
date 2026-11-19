@@ -194,6 +194,54 @@ const v2Objects = `CREATE INDEX grants_by_scope ON grants(scope_key);
   CREATE INDEX discoverable_by_scope ON grants(scope_key) WHERE discovery_terms IS NOT NULL;
   CREATE TABLE turn_inputs(scope_key TEXT NOT NULL, run_key TEXT NOT NULL, id TEXT NOT NULL REFERENCES grants(id),
     PRIMARY KEY(scope_key, run_key, id)) WITHOUT ROWID, STRICT;`
+// A separate, private opt-in: document grants and old chat rows never create speech references.
+// One row is the entire generation. A compare-and-delete removes its whole bounded window atomically.
+const SPEECH_WINDOW = 12, SPEECH_SPANS = 6, SPEECH_TEXT = 20_000, SPEECH_JSON = 16_384
+const speechSchema = `CREATE TABLE speech_grants(scope_key TEXT PRIMARY KEY, generation TEXT NOT NULL UNIQUE,
+  refs TEXT NOT NULL CHECK(length(CAST(refs AS BLOB))<=${SPEECH_JSON}), seal TEXT NOT NULL) WITHOUT ROWID, STRICT`
+const speechSources = new Set(['self_reported_observation', 'attributed_report', 'inference', 'record_based', 'unspecified', 'unknown'])
+const speechForms = new Set(['assertion', 'plan', 'conditional', 'question', 'unknown'])
+const speechTimes = new Set(['past_anchored', 'past_unspecified', 'at_utterance', 'ongoing_no_end', 'future_anchored', 'future_unspecified', 'unknown'])
+const validGeneration = v => typeof v === 'string' && v.length === 36 && uuid.test(v)
+const speechSeal = (key, generation, refs) => sha(JSON.stringify(['speech-v1', key, generation, refs]))
+function denseValues(value, max) {
+  check(Array.isArray(value) && Object.getPrototypeOf(value) === Array.prototype && value.length <= max && Reflect.ownKeys(value).length === value.length + 1)
+  return Array.from({ length: value.length }, (_, i) => {
+    const d = Object.getOwnPropertyDescriptor(value, i); check(d?.enumerable && Object.hasOwn(d, 'value')); return d.value
+  })
+}
+function speechReference(v) {
+  fields(v, ['localMessageId', 'role', 'seq', 'spokenAt', 'offsetMinutes', 'hash', 'interpretations'])
+  const { localMessageId, role, seq, spokenAt, offsetMinutes, hash } = v
+  // Only IDs minted for the live public message path, not native/provider IDs or snapshot fallbacks.
+  check(typeof localMessageId === 'string' && localMessageId.length === 36 && /^msg-[0-9a-f]{32}$/.test(localMessageId))
+  check((role === 'user' || role === 'assistant') && positive(seq) && Number.isSafeInteger(spokenAt) && spokenAt >= 0 && Number.isFinite(new Date(spokenAt).getTime()))
+  check(Number.isInteger(offsetMinutes) && Math.abs(offsetMinutes) <= 840 && typeof hash === 'string' && hash.length === 64 && digest.test(hash))
+  let priorEnd = 0
+  const interpretations = denseValues(v.interpretations, SPEECH_SPANS).map(span => {
+    fields(span, ['start', 'end', 'source', 'form', 'time'])
+    const { start, end, source, form, time } = span
+    // UTF-16 half-open ranges. The caller must additionally verify against the exact public text; this store never receives that text.
+    check(Number.isSafeInteger(start) && Number.isSafeInteger(end) && priorEnd <= start && start < end && end <= SPEECH_TEXT)
+    check(speechSources.has(source) && speechForms.has(form) && speechTimes.has(time))
+    priorEnd = end; return { start, end, source, form, time }
+  })
+  return { localMessageId, role, seq, spokenAt, offsetMinutes, hash, interpretations }
+}
+function speechState(db, key, expected) {
+  const row = db?.prepare(`SELECT generation, CASE WHEN length(CAST(refs AS BLOB))<=${SPEECH_JSON} THEN refs END AS refs, seal
+    FROM speech_grants WHERE scope_key=?${expected === undefined ? '' : ' AND generation=?'}`).get(key, ...(expected === undefined ? [] : [expected]))
+  if (!row) return null
+  check(validGeneration(row.generation) && typeof row.refs === 'string' && row.seal === speechSeal(key, row.generation, row.refs))
+  const records = denseValues(JSON.parse(row.refs), SPEECH_WINDOW).map(speechReference)
+  check(records.every((record, i) => !i || records[i - 1].seq < record.seq) && new Set(records.map(r => r.localMessageId)).size === records.length && JSON.stringify(records) === row.refs)
+  return { generation: row.generation, records }
+}
+function speechWrite(db, fn) {
+  db.exec('BEGIN IMMEDIATE')
+  try { const result = fn(); db.exec('COMMIT'); return result }
+  catch (e) { if (db.isTransaction) db.exec('ROLLBACK'); throw e }
+}
 function runKey(value) {
   check(typeof value === 'string' && value.length >= 1 && value.length <= 256 && value.isWellFormed() && !/[\s\p{Cc}\p{Cf}]/u.test(value))
   return sha(value)
@@ -223,26 +271,34 @@ export class MemoryEvidenceStore {
     const { DatabaseSync } = require('node:sqlite')
     const db = new DatabaseSync(loc.file)
     try {
-      db.exec('PRAGMA trusted_schema=OFF; PRAGMA foreign_keys=ON; PRAGMA busy_timeout=50; PRAGMA synchronous=FULL;')
+      db.exec('PRAGMA trusted_schema=OFF; PRAGMA foreign_keys=ON; PRAGMA busy_timeout=50; PRAGMA synchronous=FULL; PRAGMA secure_delete=ON;')
       const version = () => db.prepare('PRAGMA user_version').get().user_version
       const ours = () => db.prepare('PRAGMA application_id').get().application_id === APP_ID
       if (loc.fresh) {
         db.exec(`BEGIN IMMEDIATE;
           CREATE TABLE grants(id TEXT PRIMARY KEY, scope_key TEXT NOT NULL, expires_at INTEGER, pins TEXT NOT NULL, discovery_label TEXT, discovery_terms TEXT) STRICT;
           CREATE TABLE revoked(id TEXT PRIMARY KEY REFERENCES grants(id)) STRICT;
-          ${v2Objects} PRAGMA application_id=${APP_ID}; PRAGMA user_version=2; COMMIT;`)
-      } else if (ours() && version() === 1) {
+          ${v2Objects} ${speechSchema}; PRAGMA application_id=${APP_ID}; PRAGMA user_version=3; COMMIT;`)
+      } else if (ours() && [1, 2].includes(version())) {
         db.exec('BEGIN IMMEDIATE')
-        if (version() === 1) { // Another process may already have migrated while this connection waited.
-          check(db.prepare('PRAGMA quick_check(1)').get().quick_check === 'ok' &&
-            db.prepare('PRAGMA table_info(grants)').all().map(c => c.name).join(',') === 'id,scope_key,expires_at,pins' &&
-            db.prepare('PRAGMA table_info(revoked)').all().map(c => c.name).join(',') === 'id')
-          db.exec(`ALTER TABLE grants ADD COLUMN discovery_label TEXT; ALTER TABLE grants ADD COLUMN discovery_terms TEXT;
-            ${v2Objects} PRAGMA user_version=2;`)
+        const from = version(), columns = table => db.prepare(`PRAGMA table_info(${table})`).all().map(c => c.name).join(',')
+        check(ours() && [1, 2, 3].includes(from)) // Recheck after acquiring the write lock.
+        if (from !== 3) {
+          check(db.prepare('PRAGMA quick_check(1)').get().quick_check === 'ok' && columns('revoked') === 'id' &&
+            !db.prepare("SELECT 1 FROM sqlite_schema WHERE type='trigger'").get() && !db.prepare('PRAGMA foreign_key_check').get())
+          if (from === 1) {
+            check(columns('grants') === 'id,scope_key,expires_at,pins')
+            db.exec(`ALTER TABLE grants ADD COLUMN discovery_label TEXT; ALTER TABLE grants ADD COLUMN discovery_terms TEXT;
+              ${v2Objects} PRAGMA user_version=2;`)
+          }
+          check(columns('grants') === 'id,scope_key,expires_at,pins,discovery_label,discovery_terms' && columns('turn_inputs') === 'scope_key,run_key,id' &&
+            db.prepare("SELECT count(*) AS n FROM sqlite_schema WHERE type='index' AND tbl_name='grants' AND name IN ('grants_by_scope','discoverable_by_scope')").get().n === 2)
+          db.exec(`${speechSchema}; PRAGMA user_version=3;`)
         }
         db.exec('COMMIT')
       }
-      check(ours() && version() === 2)
+      check(ours() && version() === 3 && db.prepare("SELECT sql FROM sqlite_schema WHERE name='speech_grants'").get()?.sql === speechSchema &&
+        !db.prepare("SELECT 1 FROM sqlite_schema WHERE type='trigger' AND tbl_name='speech_grants'").get())
       this.#db = db
       return db
     } catch (e) { if (db.isTransaction) db.exec('ROLLBACK'); db.close(); throw e }
@@ -353,6 +409,52 @@ export class MemoryEvidenceStore {
   }
   forTurn(scope, localRunId) {
     try { return this.#forTurn(authority(scope), runKey(localRunId)) } catch { return null }
+  }
+  // Internal host API only. Call rememberSpeech after checking the authoritative live event and exact public message.
+  speechGrant(scope) {
+    try { const s = authority(scope); return speechState(this.#database(), s.key)?.generation ?? null } catch { return null }
+  }
+  enableSpeech(scope) {
+    try {
+      const s = authority(scope), db = this.#database(true)
+      return speechWrite(db, () => {
+        const current = speechState(db, s.key)
+        if (current) return current.generation
+        const generation = randomUUID(), refs = '[]'
+        db.prepare('INSERT INTO speech_grants(scope_key,generation,refs,seal) VALUES(?,?,?,?)').run(s.key, generation, refs, speechSeal(s.key, generation, refs))
+        return generation
+      })
+    } catch { return null }
+  }
+  disableSpeech(scope, expectedGeneration) {
+    try {
+      const s = authority(scope); if (!validGeneration(expectedGeneration)) return false
+      // Still let the matching owner erase a generation with corrupt derived references.
+      return this.#database()?.prepare('DELETE FROM speech_grants WHERE scope_key=? AND generation=?').run(s.key, expectedGeneration).changes === 1
+    } catch { return false }
+  }
+  rememberSpeech(scope, generation, record) {
+    try {
+      const s = authority(scope); if (!validGeneration(generation)) return false
+      const ref = speechReference(record), db = this.#database(); if (!db) return false
+      return speechWrite(db, () => {
+        const state = speechState(db, s.key, generation); if (!state) return false
+        const records = state.records, prior = records.find(r => r.seq === ref.seq || r.localMessageId === ref.localMessageId)
+        if (prior) return JSON.stringify(prior) === JSON.stringify(ref) // Immutable exact retries only.
+        if (records.length === SPEECH_WINDOW && ref.seq < records[0].seq) return false
+        records.push(ref); records.sort((a, b) => a.seq - b.seq)
+        if (records.length > SPEECH_WINDOW) records.shift()
+        const refs = JSON.stringify(records)
+        return db.prepare('UPDATE speech_grants SET refs=?,seal=? WHERE scope_key=? AND generation=?')
+          .run(refs, speechSeal(s.key, generation, refs), s.key, generation).changes === 1
+      })
+    } catch { return false }
+  }
+  recentSpeech(scope, generation) {
+    try {
+      const s = authority(scope); if (!validGeneration(generation)) return []
+      return speechState(this.#database(), s.key, generation)?.records ?? []
+    } catch { return [] }
   }
   revoke(scope, selectionId) {
     try {

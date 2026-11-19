@@ -217,7 +217,7 @@ test('v1 migrates in place to v2 without changing grants, pins, expiry or tombst
   const added = await a.bind(S, { ...spec, discovery: { label: '수량', terms: ['몇 개'] } }); a.close()
   const raw = new DatabaseSync(file, { readOnly: true })
   try {
-    assert.equal(raw.prepare('PRAGMA user_version').get().user_version, 2)
+    assert.equal(raw.prepare('PRAGMA user_version').get().user_version, 3)
     for (const id of ids) assert.deepEqual({ ...raw.prepare('SELECT pins,discovery_label,discovery_terms FROM grants WHERE id=?').get(id) }, { pins, discovery_label: null, discovery_terms: null })
     assert.equal(raw.prepare('SELECT id FROM revoked').get().id, ids[1])
   } finally { raw.close() }

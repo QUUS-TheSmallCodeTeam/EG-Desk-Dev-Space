@@ -1,3 +1,4 @@
+import { SPEECH_RULES, speechQuestions, speechInterpretations } from './egdesk-speech-grounding.mjs'
 import { DecisionError } from './egdesk-decision-client.mjs'
 import { choiceQuestion, compactText, decisionThresholds, predicateQuestion, readChoice, readPredicate, sha256Hex, tableOptions, uniqueOptions } from './egdesk-decision-questions.mjs'
 
@@ -200,21 +201,25 @@ function cacheKey(scope, hash) {
  * message comes after it.
  */
 export async function prepareTurnContext({ message, candidates = [], client, thresholds: overrides, maxItems = 8, maxChars = 24000,
-  itemChars = 6000, timeoutMs, signal, cacheScope = 'ctx', askedAt = null } = {}) {
+  itemChars = 6000, timeoutMs, signal, cacheScope = 'ctx', askedAt = null, speech = null } = {}) {
   const thresholds = decisionThresholds(overrides)
   if (!client) return skipped('not_configured')
   if (typeof message !== 'string' || !message.trim()) return skipped('no_message')
   const normalized = normalizeAll(candidates)
-  if (!normalized.length) return skipped('no_candidates')
+  // Only the current message is already authorized for this classification. Never put earlier quotes into this call.
+  const activeSpeech = speech?.allowed() === true && Array.isArray(speech.segments)
+  const extraQuestions = activeSpeech ? speechQuestions(speech.segments) : []
+  if (!normalized.length && !activeSpeech) return skipped('no_candidates')
   const forced = normalized.filter(candidate => forcedReason(message, candidate))
   const rest = normalized.filter(candidate => !forcedReason(message, candidate))
-  const list = [...forced, ...rest].slice(0, MAX_CONTEXT_CANDIDATES)
+  const list = [...forced, ...rest].slice(0, MAX_CONTEXT_CANDIDATES - extraQuestions.length)
   const catalog = list.map((candidate, index) => catalogLine(candidate, index)).join('\n')
   const catalogHash = sha256Hex(catalog)
   const questions = [
     choiceQuestion('answer_type', 'What does the person need from this message?', tableOptions(ANSWER_TYPES)),
     choiceQuestion('time_intent', 'Which time does the message ask about?', tableOptions(TIME_INTENTS)),
     ...list.map((candidate, index) => predicateQuestion(`rel_${index}`, `Is catalog item #${index} needed to respond to the message?`)),
+    ...extraQuestions,
   ]
   const receipt = { useCase: 'context.setup', catalogHash, candidates: list.length, trimmed: normalized.length - list.length,
     questionCount: questions.length, thresholds }
@@ -224,7 +229,7 @@ export async function prepareTurnContext({ message, candidates = [], client, thr
       input: [
         { role: 'developer', content: CONTEXT_RULES },
         { role: 'user', content: [{ type: 'input_text', text: `Catalog:\n${catalog}`, prompt_cache_breakpoint: { mode: 'explicit' } }] },
-        { role: 'user', content: `Message:\n${message.trim()}` },
+        { role: 'user', content: `Message:\n${activeSpeech ? message : message.trim()}` },
       ],
       questions, promptCacheKey: cacheKey(cacheScope, catalogHash), timeoutMs, signal,
     })
@@ -254,15 +259,20 @@ export async function prepareTurnContext({ message, candidates = [], client, thr
     + 'Past or future with no date, active now with no end specified, and unknown even as to past/present/future are distinct. Never invent a date. '
     + 'Source verification confirms what a passage says; it does not turn a report or inference into a physical observation. A copy is not another count. A posted movement and a scheduled movement are not interchangeable. '
     + 'Give a supported quantity directly. Explain the basis only when asked, or a gap or conflict changes the answer.' : ''
-  const packet = items.length ? `${PACKET_HEAD}${evidenceRule}\n\n${items.map(item => item.block).join('\n\n')}` : null
-  const status = items.length ? 'ready' : 'empty'
+  const withSpeech = activeSpeech && speech.allowed()
+  const interpretations = withSpeech ? speechInterpretations(result.answers, speech.segments) : null
+  const speechRule = withSpeech ? '\n' + SPEECH_RULES + '\nQuestion clock: ' + (anchor ? anchor.toISOString() + ' (UTC offset minutes ' + (-anchor.getTimezoneOffset()) + ')' : 'unknown')
+    + '. Current user message: fallible semantic labels by UTF-16 offsets in its exact text: ' + JSON.stringify(interpretations) : ''
+  const packet = items.length || withSpeech ? [PACKET_HEAD + evidenceRule + speechRule, ...items.map(item => item.block)].join('\n\n') : null
+  const status = packet ? 'ready' : 'empty'
   return {
     status,
     answerType: answerType.state === 'accepted' ? answerType.value : null,
     timeIntent: timeIntent.state === 'accepted' ? timeIntent.value : null,
     selected: selectedSummary(items),
     // Process-local only; never copy callbacks or grant handles into receipts/history.
-    ...(guarded.length ? { mayDispatch: () => guarded.every(item => mayRead(item.candidate)),
+    ...(withSpeech ? { speechInterpretations: interpretations } : {}),
+    ...(guarded.length || withSpeech ? { mayDispatch: () => (!withSpeech || speech.allowed()) && guarded.every(item => mayRead(item.candidate)),
       noteSent: () => { for (const { candidate } of guarded) { try { candidate.noteSent?.() } catch {} } } } : {}),
     extraContext: packet ? { [DECISION_CONTEXT_KEY]: packet } : {},
     latencyMs: result.latencyMs,

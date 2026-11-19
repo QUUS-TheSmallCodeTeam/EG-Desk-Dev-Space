@@ -424,7 +424,7 @@ const chat = new CodexChatRuntime({
     configured: () => decisionCredentials.getApiKey() !== null,
     client: decisionClient,
     get memoryEvidence() { return getMemoryEvidence() },
-    collect: async ({ body, context, memoryEvidenceFor }) => (await collectDecisionCandidates({ body, memoryEvidenceFor, clientThreadId: context.clientThreadId,
+    collect: async ({ body, context, memoryEvidenceFor, speech }) => (await collectDecisionCandidates({ body, memoryEvidenceFor, speech, clientThreadId: context.clientThreadId,
       excludeMessageId: context.localMessageId, chatStore, deskStore, ontologyStore: ensureOntologyStore })).candidates,
   },
 })

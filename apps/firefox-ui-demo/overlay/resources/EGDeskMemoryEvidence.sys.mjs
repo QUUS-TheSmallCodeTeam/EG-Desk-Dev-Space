@@ -11,7 +11,7 @@ export function evidenceRoute(thread, codex) {
 
 const RELATIONS = new Map(Object.entries({ counted: '집계', posted: '전표 반영', coverage: '적용 범위', scheduled: '예정',
   recorded: '기록', copied: '그대로 인용', derived: '계산·도출' }));
-const actions = new Set(['state', 'preview', 'bind', 'read', 'revoke']);
+const actions = new Set(['state', 'preview', 'bind', 'read', 'revoke', 'speech-enable', 'speech-disable']);
 export function scopedEvidenceRequest({ fetchJson, route, signal, current }) {
   return async (action, fields = {}) => {
     if (!actions.has(action) || signal.aborted || !current()) throw new Error('닫힌 근거 패널');
@@ -33,13 +33,14 @@ export function mountEvidencePanel({ el, host, request, current, close, agentNam
   const control = (tag, key, name, extra = {}) => el(tag, { ...marker(key), 'aria-label': name, ...extra });
   const status = el('p', { ...marker('status'), role: 'status' });
   const note = el('p', { ...marker('mode') });
+  const speech = el('section', { ...marker('speech'), 'aria-label': '이 DM의 대화 발언' });
   const rows = el('section', { ...marker('rows'), 'aria-label': '허용한 행' });
   const trace = el('section', { ...marker('trace'), 'aria-label': '고정된 근거' });
   const form = el('section', { ...marker('form'), 'aria-label': '새 행 등록' });
   const exit = button('close', '닫기', () => close(true));
   const panel = el('section', { id: 'egd-memory-evidence', ...marker('panel'), role: 'dialog', 'aria-label': '기억 근거' },
     el('header', {}, el('strong', {}, '기억 근거'), exit),
-    el('div', { class: 'egd-codex-input-panel-body' }, status, note, rows, trace, form));
+    el('div', { class: 'egd-codex-input-panel-body' }, status, note, speech, rows, trace, form));
   const alive = () => panel.isConnected && current();
   panel.addEventListener('mousedown', ev => ev.stopPropagation());
   panel.addEventListener('keydown', ev => { if (ev.key === 'Escape') { ev.stopPropagation(); close(true); } });
@@ -150,7 +151,7 @@ export function mountEvidencePanel({ el, host, request, current, close, agentNam
     form.replaceChildren(el('h3', {}, '새 행 등록'), el('p', {}, '장부 한 줄과 근거 1~6개를 고르고 각각 미리보세요.'), busy); update();
   };
   async function load(message = '') {
-    const stamp = ++formEpoch; ++readEpoch; trace.replaceChildren(); rows.replaceChildren(); form.replaceChildren(); note.textContent = ''; captures = [];
+    const stamp = ++formEpoch; ++readEpoch; speech.replaceChildren(); trace.replaceChildren(); rows.replaceChildren(); form.replaceChildren(); note.textContent = ''; captures = [];
     status.textContent = '이 대화에 허용된 자료를 확인하는 중…';
     try {
       const state = await request('state'); if (!alive() || stamp !== formEpoch) return;
@@ -160,6 +161,21 @@ export function mountEvidencePanel({ el, host, request, current, close, agentNam
       const recent = permitted.find(row => row.id === state.recentId);
       rows.replaceChildren(...(recent ? [button('read-latest', '직전 답에 전달된 근거', () => read(recent))] : []), el('h3', {}, '현재 허용한 행'), ...(permitted.length ? permitted.map(row => button('read', row.label, () => read(row))) : [el('p', {}, '아직 허용한 행이 없습니다.')]));
       if (['off', 'advisory'].includes(state.decisionMode)) note.textContent = '현재 문맥 설정에서는 등록한 근거가 자동 첨부되지 않습니다. 문맥 설정이 켜짐(on)일 때만 첨부됩니다.';
+      if (typeof state.speechAllowed === 'boolean') {
+        const enabled = state.speechAllowed, action = enabled ? 'speech-disable' : 'speech-enable';
+        const toggle = button(action, enabled ? '대화 발언 허용 철회' : '이 DM의 다음 발언부터 허용', async ev => {
+          if (!alive() || stamp !== formEpoch || ev.currentTarget.disabled) return;
+          ev.currentTarget.disabled = true;
+          try {
+            const result = await request(action, enabled ? {} : { consent: true });
+            if (result?.speechAllowed !== !enabled) throw new Error('unconfirmed');
+            if (alive()) await load(enabled ? '최근 발언의 재사용 허용을 철회했습니다.' : '이제부터 이 DM에서 주고받는 발언을 사용할 수 있습니다.');
+          } catch { if (alive()) await load('변경 여부를 확인할 수 없어 현재 설정을 다시 읽었습니다.'); }
+        });
+        toggle.disabled = !enabled && state.decisionMode !== 'on';
+        speech.replaceChildren(el('h3', {}, '이 DM의 대화 발언'), el('p', {},
+          '허용하면 이후 보내는 메시지의 출처·시점을 판정 모델이 분류합니다. 이 Agent만 이 DM의 최근 발언을 다시 받습니다. 이전 대화나 작업 메모는 가져오지 않습니다. 철회해도 이미 보낸 대화는 지워지지 않습니다.'), toggle);
+      }
       buildForm(); status.textContent = message;
     } catch { if (alive() && stamp === formEpoch) { status.textContent = '이 대화의 허용 목록을 확인하지 못했습니다.'; rows.replaceChildren(button('retry', '다시 확인', () => load())); } }
   }

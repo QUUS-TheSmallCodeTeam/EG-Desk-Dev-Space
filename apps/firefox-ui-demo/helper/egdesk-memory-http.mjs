@@ -2,7 +2,7 @@ import { guardBridgeRequest, sendJson } from './codex-bridge-http.mjs'
 import { publicText } from './codex-chat-values.mjs'
 
 const ROOT = '/memory-evidence', ROUTE = ['clientThreadId', 'conversationId', 'expectedProfileId']
-const ACTIONS = new Map(Object.entries({ state: [], preview: ['pin'], bind: ['ledger', 'sources', 'label', 'terms', 'consent'], read: ['id'], revoke: ['id'] }))
+const ACTIONS = new Map(Object.entries({ state: [], preview: ['pin'], bind: ['ledger', 'sources', 'label', 'terms', 'consent'], read: ['id'], revoke: ['id'], 'speech-enable': ['consent'], 'speech-disable': [] }))
 const PIN = ['sourceId', 'revision', 'startLine', 'endLine']
 const RELATIONS = new Set(['counted', 'posted', 'recorded', 'copied', 'derived', 'scheduled', 'coverage'])
 const MAX_BODY = 8192, MAX_LIST = 32, MAX_LINES = 32, MAX_TEXT = 4000, MAX_BLOB = 2 * 1024 * 1024
@@ -42,6 +42,7 @@ function validate(action, b) {
   need(str(b.clientThreadId, 512) && str(b.conversationId, 512) && str(b.expectedProfileId, 80) && /^[a-z0-9][a-z0-9-]*$/.test(b.expectedProfileId), 400)
   if (action === 'read' || action === 'revoke') need(handle(b.id), 400)
   if (action === 'preview') need(pin(b.pin), 400)
+  if (action === 'speech-enable') need(b.consent === true, 400)
   if (action === 'bind') {
     need(b.consent === true && label(b.label, 80) && Array.isArray(b.terms) && b.terms.length <= 8 && b.terms.every(t => label(t, 48)) && new Set(b.terms.map(t => t.normalize('NFKC').toLowerCase())).size === b.terms.length, 400)
     need(pin(b.ledger, { ledger: true }) && Array.isArray(b.sources) && b.sources.length >= 1 && b.sources.length <= 6 && b.sources.every(p => pin(p, { source: true })), 400)
@@ -151,9 +152,23 @@ export function createMemoryEvidenceHttpHandler({ port = 39218, ensureAuth, reso
           need(handle(row?.id) && label(row.label, 80) && typeof row.automatic === 'boolean' && !ids.has(row.id)); ids.add(row.id)
           return { id: row.id, label: row.label, automatic: row.automatic }
         }), decisionMode: ['off', 'advisory', 'on'].includes(mode) ? mode : 'off' }
+        if (typeof evidence.speechGrant === 'function') result.speechAllowed = !!after(evidence.speechGrant(scope))
         const recent = resolved.recentEvidence?.()
         // Never invent an association from the displayed quantity or a row label.
         if (recent && ids.has(recent.id) && evidence.isActive(scope, recent.id) === true) result.recentId = recent.id
+      } else if (action === 'speech-enable' || action === 'speech-disable') {
+        // No awaiting between the final identity check, synchronous consent update and response.
+        need(after(await ensureAuth({ ...route })) !== false)
+        if (action === 'speech-enable') need(after(await getMode()) === 'on', 409)
+        current(); const prev = evidence.speechGrant(scope)
+        if (action === 'speech-enable') {
+          const generation = prev || evidence.enableSpeech(scope); need(generation && evidence.speechGrant(scope) === generation)
+          if (!prev) fresh = { cancel: () => evidence.disableSpeech(scope, generation) }
+          result = { speechAllowed: true }
+        } else {
+          if (prev) need(evidence.disableSpeech(scope, prev) === true)
+          need(!evidence.speechGrant(scope)); result = { speechAllowed: false }
+        }
       } else if (action === 'preview') {
         result = { text: lines(after(await projection(captures, ctx, b.pin)).text, b.pin) }
       } else if (action === 'bind') {
@@ -173,7 +188,7 @@ export function createMemoryEvidenceHttpHandler({ port = 39218, ensureAuth, reso
       }
       current(); sendJson(res, 200, result); fresh = null
     } catch (e) {
-      if (fresh) { try { await fresh.evidence.revoke(fresh.scope, fresh.id) } catch { /* No disclosure or retry with a different owner. */ } }
+      if (fresh) { try { if (fresh.cancel) fresh.cancel(); else await fresh.evidence.revoke(fresh.scope, fresh.id) } catch { /* No disclosure or retry with a different owner. */ } }
       sendJson(res, e instanceof Problem ? e.status : 404, PUBLIC_ERROR)
     }
     return true
