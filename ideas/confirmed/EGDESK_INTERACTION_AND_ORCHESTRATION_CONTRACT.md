@@ -2054,6 +2054,13 @@ Engine 서비스 통신, sandbox command, Browser, MCP, 커넥터의 제한을 �
 
 [DM 사용과 철회](./EGDESK_PRODUCT_INTERACTION_TRACE_ATLAS.md#atlas-local-memory) · [파일·기억 조각의 현재 입력과 제안 규격](../../apps/firefox-ui-demo/docs/DECISION_MODEL_CONTEXT_SETUP.md#memory-intake)
 
+<a id="tech-temporal-evidence"></a>
+##### 그때의 일을 물으면 그때의 기록을 조회한다 (설계·일반 DM 미연결)
+
+시간 분류는 단지 ‘과거’라는 꼬리표를 답에 붙이는 일이 아니다. 도구나 자료를 고르기 전에 인용된 원 발언, 그 발언이 관찰한 사건·시간 범위·계정·세션을 묶고 **어떤 질문을 증명할지** 정한다. 과거 보고 문구는 무엇이 보고됐는지, 당시의 서비스 사용량 관찰은 어느 범위에서 몇 %였는지, 당시 실행별 적용 기록은 어떤 모드가 실제로 쓰였는지에 각각 답한다. 현재 설정·가동 목록 또는 요청 당시 희망 설정만으로 과거 실제 적용이나 사용량의 원인을 확정하지 않는다. 특정 세션 확인과 기간 전체의 부재 증명은 요구하는 기록 범위가 다르다. 접근이 허용되지 않았거나 누락된 기록이 있으면 범위를 밝히고 보류한다. 기록 조회는 현재 해도 되지만, 그 대상은 질문이 가리킨 시점에 고정한다.
+
+조회 진행, 답변과 근거는 그 일을 요청한 대화·메시지·실행에 연결한다. 다른 질문 아래 이전 작업 상태를 표시하거나 진행 문구를 조회 완료 증거로 삼지 않는다. [문맥 조립](#tech-context-assembly) · [방 발언과 실행별 활동](#tech-room-speech) · [현재 같은 DM의 범위](#tech-session-topic-tree) · [가상 인수 예와 자료 선택](../../apps/firefox-ui-demo/docs/DECISION_MODEL_CONTEXT_SETUP.md#time-selects-evidence)
+
 <a id="tech-session-topic-tree"></a>
 ##### 같은 스레드의 토픽 소속과 필요한 대화 경로 (Codex 일반 DM 로컬 구현)
 

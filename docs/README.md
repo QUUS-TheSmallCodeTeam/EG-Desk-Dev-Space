@@ -11,6 +11,8 @@
 
 **제품 방향은** [EG-Desk 제품 비전과 개발 목표](../ideas/confirmed/EGDESK_PRODUCT_VISION_AND_DEV_TODO.md#vision-agent-channels)와 [MemBrain 원칙](../ideas/confirmed/EGDESK_PRODUCT_VISION_AND_DEV_TODO.md#vision-membrain)에서 확인합니다.
 
+**‘그때 쓴 실행 모드’를 묻는다면:** [예전 보고를 인용하는 사용자 예](../ideas/confirmed/EGDESK_PRODUCT_INTERACTION_TRACE_ATLAS.md#atlas-quoted-usage-time) · [시점에 따라 조회 기록을 고르는 설계와 현재 한계](../apps/firefox-ui-demo/docs/DECISION_MODEL_CONTEXT_SETUP.md#time-selects-evidence). 현재 작업자 목록에서 과거 모드를 알아내는 기능이 아닙니다.
+
 현재 진행 중인 제품 설계 검토는 **[연결된 사용 흐름과 UI 추천안](references/design-synthesis/egdesk-ux-realization-proposals.md#flow-first-use)**에서 시작합니다.
 9개 흐름에서 조작·입력·화면 반응·취소·복귀를 따라가고, 필요한 부분만 아래 문서로 이동하면 됩니다.
 
