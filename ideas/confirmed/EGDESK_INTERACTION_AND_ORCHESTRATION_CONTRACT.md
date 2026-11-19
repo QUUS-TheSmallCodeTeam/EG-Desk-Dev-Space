@@ -2048,6 +2048,15 @@ Engine 서비스 통신, sandbox command, Browser, MCP, 커넥터의 제한을 �
 
 [DM 사용과 철회](./EGDESK_PRODUCT_INTERACTION_TRACE_ATLAS.md#atlas-local-memory) · [파일·기억 조각의 현재 입력과 제안 규격](../../apps/firefox-ui-demo/docs/DECISION_MODEL_CONTEXT_SETUP.md#memory-intake)
 
+<a id="tech-session-topic-tree"></a>
+##### 같은 스레드의 토픽 소속과 필요한 대화 경로 (설계)
+
+토픽 트리는 **대화가 어디에 속하는지**, 종속 연결은 **지금 요청을 이해하려면 어느 발언·결정이 필요한지** 나타낸다. 이는 Task 실행 선후관계나 장기 기억 승격이 아니다. `threadId, topicId, parentTopicId?, originTurnRef`와 순서 있는 소속 턴으로 토픽을 식별한다. 한 토픽의 턴들은 시간상 붙어 있지 않아도 된다. 새 메시지는 아직 사용자 원문만 있다. 상위로 돌아가는 것은 기존 토픽에 다시 배정하는 일이지, 새 방이나 같은 이름의 새 토픽을 만드는 일이 아니다.
+
+의미 관계는 원문에 명시된 연결, 또는 그 근거를 볼 수 있는 판정자·답변 Agent가 지목한 연결에서 얻는다. 호스트는 현재 턴에서 필요한 부모 목적·하위 결정·복귀 지점을 **실제 턴 참조**로 검증·연결하고 문서를 평가하기 전에 시간순 원문 흐름을 조립한다. 같은 부모라는 이유만으로 모든 자식을 붙이지 않으며, 연결이 필요하다고 채택한 결정은 자료 키워드와 다르다는 이유로 다시 빼지 않는다. 소속과 필요 관계는 별도다. 서로 다른 후보를 구별할 단서가 없으면 관계를 확정하지 않는다. 순환·다른 스레드·누락·철회·입력 한도 초과는 더 넓은 이력으로 대체하지 않고 해당 경로를 미해결로 남긴다. 정정은 기존 근거를 지우지 않고 새 배정 리비전으로 기록한다.
+
+이 트리는 권한이 아니다. 현재 일반 DM에서 이전 발언 본문·발췌는 외부 Decision 후보 목록으로 보낼 수 없다. 권한 있는 수신자에게 허용된 원문만 열며 실제로 전달한 턴·자료 버전·범위와 보류분을 구분한다. 가지치기는 EG-Desk가 이번 턴에 붙일 입력에만 적용한다. 화면 이력 삭제, 네이티브 스레드 압축/재작성, 다른 방으로의 전달이 아니다. [원안·현재 구현과 인수 예시](../../apps/firefox-ui-demo/docs/DECISION_MODEL_CONTEXT_SETUP.md#session-topic-tree)
+
 ##### Memory·instruction 검증 record
 
 Memory는 `id,revision,owner,scope,conditions,sourceRefs,judgmentKind,reuseState,validUntil,consentRef,authorityEpoch`를 가진다. 모델은 후보 내용과 의미를 제안하고 System은 기록 권한·동의 조건·참조를 검사한다. Profile의 정책 변경은 Memory 본문·소유권 변경이 아니다.

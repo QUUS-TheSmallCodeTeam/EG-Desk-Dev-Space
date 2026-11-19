@@ -13,6 +13,8 @@
 <a id="checkpoint-local-20261119"></a>
 **2026-11-19 로컬 기능판 보충 (`4c78406`).** 위 11월 18일 통합 집계와 별도다. ‘Codex 추가 계정 준비 중’은 당시 화면이다. 이후 전용 Codex 계정의 공식 로그인·Agent 귀속, 선택한 Claude 계정의 로그인·상태·일반 채팅 경로가 연결됐다. 지원되는 Codex Board에서는 같은 발송의 다른 Agent가 공개한 발언을 진행 중인 턴에서 받을 수 있다. 일반 DM은 파일 버전·줄 및 별도로 동의한 이후의 발언을 같은 소유자·Agent·방에서만 재사용한다. [현재 사용법과 제한](./EGDESK_PRODUCT_INTERACTION_TRACE_ATLAS.md#atlas-local-guide) 참조. 이 기준의 격리 회귀는 6,140 통과·0 실패·14 건너뜀이다. 격리 Firefox의 합성 계정·공급자 결과이지 실제 계정 로그인, 모델의 판단 정확도, 모든 현장 자료의 진위 또는 원격 직원 초대의 검증이 아니다. 여기서 95개 항목의 상태를 일괄 승격하지 않는다.
 
+**2026-11-20 같은 세션의 토픽 배정·종속 경로: 설계, 일반 Chat 미연결.** 태화 원문에서 ‘부모 관계가 저장됨’과 ‘해당 관계로 원문을 복원해 자료 판정에 사용함’이 달랐음을 확인했다. 현재 기능은 후자가 아니다. [원문 위치·T75 복귀 사례](../../apps/firefox-ui-demo/docs/DECISION_MODEL_CONTEXT_SETUP.md#session-topic-tree) · [권한 및 인수 계약](./EGDESK_INTERACTION_AND_ORCHESTRATION_CONTRACT.md#tech-session-topic-tree). 위 집계는 바꾸지 않는다.
+
 **2026-10-29 검증 환경**: UI 검사는 사용자 프로필과 분리한 임시 프로필·합성 자료·headless Firefox로 수행했다. 실제 계정 로그인·provider 호출·전면 OS 입력·Windows/Linux 실행을 확인한 것은 아니다. 외부 OS 격리에서 개인 자료와 외부 네트워크를 차단했으나, 일부 선행 Firefox 시험은 중첩 실행을 위해 내부 content/RDD/socket/GMP sandbox를 비활성화한 조건이었다. 이는 설치된 사용자 앱의 설정 변경이나 기본 보안 설정에서의 제품 검증을 뜻하지 않는다. 마지막 Browser 제목줄 후보는 내부 보호를 유지한 채 재시도했으나 화면 측정 전 `sandbox_init() failed`·자식 `signal 11`·browsing context 소실로 종료됐다. 정확한 원인은 확정하지 않았으며 이 실행을 화면 통과로 집계하지 않는다. 소유 Firefox·fixture는 2026-10-29 06:49:52 KST에 종료했고 사용자 앱은 변경하지 않았다.
 
 **최종 중앙 회귀 — `c4944fd` 코드 기준**: helper·scripts 전체 4,249건 중 4,235 통과·실패 0·제외 14. 제외에는 별도 native 바이너리, opt-in 실환경 관찰, 특정 설치된 Codex 스키마, Windows 및 다운로드 경로 등이 포함된다. 제외 항목을 통과로 집계하지 않는다. 테스트 의존성 연결 보완 뒤 재실행한 수치이며, 아래 UI 인수 범위를 대체하지 않는다.
