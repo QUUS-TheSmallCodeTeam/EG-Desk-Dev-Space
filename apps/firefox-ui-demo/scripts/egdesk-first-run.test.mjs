@@ -105,6 +105,7 @@ test('the start page uses the approved light-dark pairs of the surface tokens', 
 test('the start page has a Desk 시작 button that stays hidden until the Desk says it is available', () => {
   assert.match(startPage, /<button id="start-desk" type="button">Desk 시작<\/button>/);
   assert.match(startPage, /자료와 도구를 펼치려면 Desk 시작을 누르세요\. 열어 둔 웹페이지는 그대로 남습니다\./);
+  assert.match(startPage, /트랙패드에서 축소해도 같은 페이지가 카드로 보입니다/);
   assert.match(startPage, /:root:not\(\[data-desk-entry="available"\]\) \.desk-entry \{ display: none; \}/);
   assert.match(startPage, /#start-desk:hover/);
   assert.match(startPage, /#start-desk:active/);

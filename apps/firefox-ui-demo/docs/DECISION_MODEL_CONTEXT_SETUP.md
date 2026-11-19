@@ -1,6 +1,6 @@
-# 결정 모델 컨텍스트 세팅·브라우저 반사 (구현 준비)
+# 결정 모델 컨텍스트 세팅·브라우저 반사
 
-**작성**: 2026-11-17 · **상태**: 기반 모듈 구현·단위 시험 완료, 실행 경로 미연결(기본 꺼짐)
+**작성**: 2026-11-17 · **현황**: 2026-11-19 로컬 기능판. 일반 Chat의 턴 전 선별과 조건부 브라우저 반사 도구는 연결됐다(기본 꺼짐). 시간선 분기·전이 도우미는 독립 시험 단계이며 사용자용 시뮬레이션 흐름은 없다. [현재 사용법](../../../ideas/confirmed/EGDESK_PRODUCT_INTERACTION_TRACE_ATLAS.md#atlas-local-accounts) · [제품 방향](../../../ideas/confirmed/EGDESK_PRODUCT_VISION_AND_DEV_TODO.md#vision-membrain)
 **관련**: [`ideas/brainstorming/JEV_INTEGRATION_SUGGESTIONS.md`](../../../ideas/brainstorming/JEV_INTEGRATION_SUGGESTIONS.md)(Jev 초안, 미채택) · [`BROWSER_AGENT_OBSERVATION_RUNTIME.md`](BROWSER_AGENT_OBSERVATION_RUNTIME.md)
 
 ## 1. 목적과 원칙
@@ -35,13 +35,13 @@
 ## 3. 흐름
 
 ### 3.1 턴 전 컨텍스트 세팅
-1. 후보 수집(코드): 선택 자료, Board 자료, 최근 대화, 시간선 스냅샷·문서. 제목·요약·시점만.
-2. 결정 요청 1회: `answer_type` choice + `time_intent` choice + 후보마다 `rel_i` predicate(최대 398개). 카탈로그는 명시 cache breakpoint 뒤 30분 캐시, 메시지는 그 뒤.
+1. 후보 수집(코드): 이번 요청의 권한과 채널에 맞는 선택 자료, Board 자료, 온톨로지 시간선 항목 등을 열거한다. 일반 DM의 허용된 발언·기억 근거는 일반 제목만 쓰고 과거 발언 본문·줄 발췌를 후보 목록에는 싣지 않는다. 현재 메시지와 각 후보의 설명이 외부 판정 입력이 될 수 있다.
+2. 결정 요청은 `answer_type`·`time_intent`와 후보의 `rel_i`를 묻는다. 발언 재사용에 별도로 동의한 일반 DM에서는 현재 메시지의 구간별 의미 문항도 한도 안에서 함께 구성한다. 보기 밖의 근거를 만들어내지 않는다.
 3. 선택(코드): 필수·메시지에 이름이 나온 자료는 점수와 무관하게 포함. 나머지는 임계값 이상. 현재 시점 질문에서 계획·가정 자료는 더 높은 기준(0.8). 거절은 불명.
 4. 원문 로드 → 자료마다 `[item id=… kind=… time=… status=… source=…]` 머리말 → `extraContext.egdesk_decision_context` 문자열.
 5. 추론 턴: 자료로 답하고 모자랄 때만 도구 사용.
 
-### 3.2 가정 분기와 시간선 전이
+### 3.2 가정 분기와 시간선 전이 (도우미 설계·시험, 사용자 흐름 미연결)
 - 분기: 기준 상태 choice → (의존) 그 기준에 속한 사실 predicate → 기준·사실·가정(사용자 원문)을 묶어 추론 1회.
 - 전이: 열린 계획 항목 choice + 전이 종류 choice. 완료·취소는 고정 문구로 확인 제안(추론 없음), 변경은 추론 필요.
 
@@ -51,16 +51,14 @@
 - 돌려주는 것: `needs_free_text`(쓸 문장 필요), `escalated`(버튼·탭은 기대 효과를 모델이 정해야 함, 불확실, 차단), `handoff`(로그인·2단계·봇 검사), `fallback`(결정 모델 불가).
 - 결제·권한·삭제·제출 요소는 후보에 들어가지 않는다. 비밀번호 역할 입력칸과 민감 라벨 입력칸도 제외.
 
-## 4. 연결 지점 (다음 단계)
+## 4. 연결된 경로와 남은 경계
 
-| 연결 | 위치 | 비고 |
+| 경로 | 현재 동작 | 확인할 구현 |
 |---|---|---|
-| 턴 전 세팅 | `helper/codex-chat-runtime.mjs` `startTurn`, provider `prepare` 루프(≈1955행) 뒤·`extraContext` 병합(≈1965행) 앞 | 결과를 `context.extraContext.egdesk_decision_context`로. bounded 정책은 extraContext를 버리므로 건너뜀. AbortSignal이 없어 `requestId` 기준 AbortController를 직접 둠. `RUN_IN_PROGRESS` 검사(≈2130행) 전에 끝나야 함 |
-| 활동 표시 | `ensureRun`(≈2175행) 뒤 `activity.completed`로 `decisionContextActivity` 행 emit | 기존 활동 기록 렌더링 재사용(`EGDeskChatState.sys.mjs` `reduceChatEvent`). 시점 칩은 새 렌더 필요 |
-| 반사 도구 | 브라우저 도구 provider(`helper/codex-browser-tool-provider.mjs`)에 추가 도구로 노출, 각 단계는 `service.dispatch(run, { tool, arguments, callId })` | 기존 `BROWSER_TOOL_SPECS` 스키마는 thread manifest 해시에 들어가므로 수정하지 않고 뒤에 추가 |
-| 키 경로 | `helper/codex-bridge-server.mjs` 핸들러 생성부(≈357~364행)·호출 순서(≈1025~1029행)에 `createDecisionHttpHandler` 추가, `openDecisionCredentialStore({ dataDir: <브리지 설정과 같은 디렉터리> })` | 키 파일은 `.egdesk` 내보내기 대상 저장소와 분리 |
-| 설정 화면 | `overlay/resources/EGDeskAccountSettingsView.sys.mjs`에 '결정 모델 · OpenAI Decisions' 구역(엔진 카드와 분리) | 입력 후 즉시 비우고 힌트(…끝 4자)만 표시 |
-| 후보 출처 | 대화: `openChatStore().listMessages`, Board: `openDeskStore().current()/searchBoards`, 온톨로지: `OntologyStore.readGraph()` → `candidatesFromOntologyGraph`, 선택 자료: 컨텍스트 capture manifest | 열린 Browser 카드 목록은 helper에 없음(overlay 보유) |
+| 일반 Chat | `off`는 Decisions를 부르지 않는다. 별도 키가 있을 때 `advisory`는 메시지·후보로 외부 선별 후 기록만, `on`은 허용된 선택 자료를 답변 입력에 붙일 수 있다. 제한된 턴은 이 경로를 쓰지 않는다. | `helper/codex-chat-runtime.mjs`, `helper/egdesk-decision-candidates.mjs` |
+| 브라우저 | 키와 `on`이 있고 해당 실행의 Browser 상호작용이 허용된 경우에만 `egdesk_browser_reflex`를 제공한다. 도구가 보인다고 행동 승인이나 성공 보장이 생기지 않는다. | `helper/codex-bridge-server.mjs`, `helper/codex-browser-tool-provider.mjs` |
+| 키 보관·설정 | `[설정] → [계정] → [결정 모델 · OpenAI Decisions]`. 키를 확인할 때 외부 요청을 하며 보관은 다른 로그인·번들과 분리한다. 사용량 표시는 결제 확인이 아니다. | `helper/egdesk-decision-http.mjs`, `overlay/resources/EGDeskAccountSettingsView.sys.mjs` |
+| 시뮬레이션 | 기준 상태와 계획 전이를 고르는 함수는 있으나 일반 사용자가 이 경로로 가정 분기를 생성·승격하는 화면은 없다. | `helper/egdesk-context-setup.mjs` |
 
 ## 5. Owner 결정이 필요한 것
 
@@ -71,7 +69,7 @@
 
 ## 6. 검증 상태
 
-- 단위 시험 40건 통과(가짜 API·실제 파일 시스템). 실제 OpenAI 호출, 실제 Firefox·계정·외부 사이트 검증은 실행하지 않았다(NOT-RUN).
+- 초기 11월 17일 기반 모듈: 단위 시험 40건 통과(가짜 API·로컬 파일 시스템). 이후 격리 Firefox로 일반 DM·Board와 기억 근거의 경로를 확인했다. 실제 OpenAI·구독 계정·외부 사이트 인수나 실제 모델 품질 검증은 아니다.
 - 한국어 판정 정확도, 서울 왕복 지연, `gpt-6-luna`의 토큰 context 한도는 실측 필요.
 
 ## Board의 일회 질문은 일반 채팅과 다르다
@@ -127,6 +125,8 @@ node --test apps/firefox-ui-demo/helper/egdesk-memory*.test.mjs
 
 **이름:** `MemBrain`은 작업명이다. `Membrain`이라는 영업 CRM이 이미 있어 공개 제품명으로는 혼동 소지가 있다. 상표권은 조사하지 않았다.
 
+<a id="memory-intake"></a>
+
 ## MemBrain에 파일과 기억 조각을 넣는 규약
 
 **파일은 판단의 원본이고, 기억 조각은 다음 판단에 재사용할 주장·교훈 하나다.** 업로드, 의미 해석, 저장 허용, 사용 허용은 서로 다른 일이다. 아래 공통 규약은 설계 계약이다. 모든 단계를 제공하는 범용 HTTP/MCP 쓰기 도구가 이미 있다는 뜻이 아니다.
@@ -143,7 +143,7 @@ node --test apps/firefox-ui-demo/helper/egdesk-memory*.test.mjs
 
 - **파일:** 인증된 로컬 `POST /context/captures`로 원본 버전을 고정한다. 일반 Agent DM에서 `기억 근거`를 열어 장부 한 줄과 근거 1~6개의 줄·관계를 미리 확인하고 허용하면 `POST /memory-evidence/bind`가 `memrow:…`를 반환한다. `read`·`revoke`는 같은 권한을 요구한다. **현재의 `bind`는 호출마다 새 ID를 만들며 범용 중복방지 영수증이 아니다.** 임의 파일 업로드나 일반 텍스트를 장기 기억으로 승격하는 API도 아니다.
 - **일반 대화:** 컨텍스트 설정이 `on`인 검증된 Agent DM에서 `기억 근거 → 이 DM의 다음 발언부터 허용`을 선택한다. `/memory-evidence/speech-enable`과 `/speech-disable`(같은 `/memory-evidence` 경로 아래)은 현재 Agent·방을 확인하고 동의를 열고 닫는다. 이전 대화는 소급하지 않는다. 파일 행의 동의로는 켜지지 않는다. 현재 메시지만 기존 판정 호출에서 문장별 의미를 제안받는다. 비공개 동의 저장소에는 원문 대신 로컬 메시지 ID·검증용 해시·발언 시각과 시차·해석 범위가 있는 최근 12개 참조만 유지한다. Agent 자신의 답변은 ‘이 Agent가 이렇게 말했다’일 뿐 독립 증인이 아니다.
-- **다음 턴:** 선별 모델에는 과거 발언의 본문·발췌가 없는 목록만 준다. 이전 대화가 필요하다고 선택된 경우에만 실제 답변 Agent가 같은 DM의 원본과 확인된 인용 범위를 받는다. 이 발췌는 해당 기간에 일어난 모든 사건의 완전한 기록이 아니다. 작업 메모·가져온 대화·다른 Agent·Board는 대상이 아니다. 끈 뒤 다시 켜면 새 동의이며 예전 참조는 되살리지 않는다. 시스템이 확인하는 것은 발언 원문과 그 수신 범위이지 그 사람이 말한 사건의 진위가 아니다.
+- **다음 턴:** 선별 모델에는 과거 발언의 본문·발췌가 없는 목록만 준다. 이전 대화가 필요하다고 선택된 경우에만 실제 답변 Agent가 같은 DM의 원본과 확인된 인용 범위를 받는다. 이 발췌는 해당 기간에 일어난 모든 사건의 완전한 기록이 아니다. 작업 메모·가져온 대화·다른 Agent·Board는 대상이 아니다. 발언 동의를 철회한 뒤 재허용하면 새 동의이며 예전 참조는 되살리지 않는다. 판정 모드만 바꾸는 것과 다르다. 이 경로는 기존 네이티브 대화 이력을 지우지 않는다. 시스템이 확인하는 것은 발언 원문과 그 수신 범위이지 그 사람이 말한 사건의 진위가 아니다.
 - **아직 설계:** 파일·발언을 임의의 의미 조각으로 **범용 등록**하는 API, 교훈 자동 승격, 공통 중복방지 영수증과 정정 관계 그래프. 위 필드는 제안 규격이지 현재 HTTP 요청에 임의로 넣어도 된다는 뜻이 아니다.
 
 ### 읽기/쓰기가 아니라 선택/생성이 모델의 경계다

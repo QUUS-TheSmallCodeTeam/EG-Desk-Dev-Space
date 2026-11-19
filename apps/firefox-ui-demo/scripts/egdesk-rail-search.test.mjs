@@ -25,6 +25,7 @@ test('scope: three choices, unknown values read as 전체', () => {
   assert.deepEqual(RailSearchView.RAIL_SEARCH_SCOPES.map(scope => [scope.id, scope.label]),
     [['all', '전체'], ['canvas', 'Canvas'], ['boards', '저장한 Board']]);
   assert.ok(RailSearchView.RAIL_SEARCH_SCOPES.every(scope => scope.title), 'every chip explains itself');
+  assert.match(RailSearchView.RAIL_SEARCH_SCOPES.find(scope => scope.id === 'all').title, /이 기기에서 먼저.*해당 행을 열 때만/);
   for (const value of [undefined, null, '', 'library', 'constructor']) assert.equal(RailSearchView.normalizeScope(value), 'all');
   assert.equal(RailSearchView.normalizeScope('boards'), 'boards');
   assert.equal(RailSearchView.scopeLabel('canvas'), 'Canvas');

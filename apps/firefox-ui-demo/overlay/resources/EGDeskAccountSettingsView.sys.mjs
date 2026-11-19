@@ -426,8 +426,8 @@ export function engineProfileErrorText(error) {
 export const DECISION_SECTION_TITLE = '결정 모델 · OpenAI Decisions';
 export const DECISION_MODES = Object.freeze([
   Object.freeze({ value: 'off', label: '끔', note: '지금처럼 추론 모델만 씁니다.' }),
-  Object.freeze({ value: 'advisory', label: '기록만', note: '결정 모델이 고른 자료를 활동 기록에만 남기고 붙이지 않습니다.' }),
-  Object.freeze({ value: 'on', label: '사용', note: '결정 모델이 고른 자료를 메시지와 함께 붙입니다.' }),
+  Object.freeze({ value: 'advisory', label: '기록만', note: '메시지와 후보 설명을 OpenAI에 보내 선별합니다. API 비용이 들 수 있으며, 결과는 활동 기록에만 남기고 답변에 붙이지 않습니다.' }),
+  Object.freeze({ value: 'on', label: '사용', note: '메시지와 후보 설명을 OpenAI에 보내 선별합니다. API 비용이 들 수 있으며, 허용된 선택 자료를 답변 입력에 붙입니다.' }),
 ]);
 export const DECISION_CREDIT_NOTE = 'ChatGPT Pro·Business 요금제의 API 크레딧은 연결한 API 조직의 project key에만 적용됩니다. Plus는 대상이 아닙니다.';
 const DECISION_VERIFICATION_TEXT = Object.freeze({

@@ -334,6 +334,8 @@ test('decision model section: unknown offline, key hint only, Korean verificatio
   assert.equal(saved.canDelete, true);
   assert.equal(saved.mode, 'advisory');
   assert.equal(saved.modes.find(m => m.selected).label, '기록만');
+  assert.match(saved.modeNote, /OpenAI에 보내.*API 비용.*기록에만.*붙이지 않습니다/);
+  assert.match(View.decisionSettingsView({ configured: true, mode: 'on' }, { connected: true }).modeNote, /OpenAI에 보내.*API 비용.*허용된 선택 자료를 답변 입력에 붙입니다/);
   assert.match(View.decisionSettingsView({ configured: false, mode: 'on' }, { connected: true }).modeNote, /키를 저장하면 적용됩니다/);
   assert.equal(View.decisionSettingsView({ configured: false, store: 'unavailable', mode: 'off' }, { connected: true }).canSave, false);
   assert.equal(View.decisionVerificationText('verified'), '확인됨');

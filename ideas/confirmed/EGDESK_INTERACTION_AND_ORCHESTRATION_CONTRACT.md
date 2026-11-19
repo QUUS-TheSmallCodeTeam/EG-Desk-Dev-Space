@@ -137,7 +137,7 @@ Board는 특정 업무를 진행할 수 있게 자료·도구·대화·배치·�
 앱 준비, Browser 안의 선택적 첫 사용 안내, 기존 세션 복원, EG-Desk 프로필 준비,
 Codex 인증은 각각 식별한다.
 최초 실행에는 이미 있는 Desk·Canvas의 동일 live Browser View를 카메라로 화면에
-맞춰 보여 준다. 별도 앱 시작 관문이나 `[Desk 시작]` 단계는 없다. Browser 안의 주소
+맞춰 보여 준다. 별도 앱 시작 관문은 없다. `[Desk 시작]`은 이미 열린 Desk의 주변을 드러내는 선택 조작이지 웹 사용을 위한 필수 단계가 아니다. Browser 안의 주소
 입력을 돕는 시작 페이지는 이 View의 콘텐츠로 허용한다. 주소 탐색은 바로 가능하며 주변
 Canvas·Sidebar·Dock만 집중 표시 동안 가린다. Desk를 보여 주기 위해 Engine 인증이나
 새 Browser·EG-Desk 프로필 생성을 강제하지 않는다. 초기 프로필 연결과 구독 Codex 호출은
@@ -707,8 +707,7 @@ report set은 전체 tool trace의 복사본이 아니지만, 선별 과정에�
 
 ## 5. 여러 Agent가 참여하는 공유 대화 context
 
-기본 Codex 대화와 사용자 생성 Agent의 담당자 방을 구분한다. 선택적 담당자 방의 상대
-정체성은 Agent Profile이 제공하지만, 방 history·Profile revision·실제 Agent Runtime·Run과 모델
+기본 Codex 대화와 사용자 생성 Agent의 담당자 방을 구분한다. 선택적 담당자 방은 상대 Agent에 연결되고 이름·성격·설정은 해당 Profile 버전에서 온다. 그 Agent에 귀속된 경험과 방의 history·Profile revision·실제 Agent Runtime·Run과 모델
 context는 서로 다른 identity와 수명주기를 가진다. 같은 담당자에게 여러 업무를 맡길 때
 history를 어떤 section·filter·업무 reference로 구분할지는 미결정 UI다.
 
@@ -734,6 +733,15 @@ contributor·범위·Task 상태·evidence·integration result를 Canvas 정본�
 정확한 대화 관계는 [HUM-CONV-001](../../docs/codex/egdesk-product-interaction-trace-atlas-editorial-ledger.md#hum-conv-001),
 생성·열기·공유·재진입 UI는 [Q-AI-12](../../docs/codex/egdesk-product-documentation-governance.md#atlas-q-ai-12)와
 관련 `Q-COL-*` 세부 항목에서 미결정으로 남는다.
+
+<a id="tech-room-speech"></a>
+### 5.1 같은 Agent의 채널과 공개 발언 전달
+
+Agent의 연속성과 채널의 기밀성은 함께 유지한다. 발화마다 소유 계정·Agent·채널·대화·실행을 식별한다. 화면에서 현재 선택한 방, 프로필 표시명, 다른 계정에서 우연히 같은 턴 번호가 나온 것은 답변 목적지가 아니다. 모델에는 누구로서 어디에 누구에게 말하는지와 공개 가능한 입력만 제공한다. 작업 메모·도구 출력·불확실한 항목을 공개 발언으로 재분류하지 않는다. 활동 기록은 해당 발언자와 실행에 붙고 다른 방에서 대신 열리지 않는다.
+
+Board의 구성원, 이번 요청 대상, 각 대상에게 허용된 자료를 따로 계산한다. 지원되는 Board 멤버 경로에서 명시한 Agent가 담당자보다 우선한다. 지목이 없으면 설정된 담당자만, 담당 Agent도 없으면 그 방의 일반 엔진 경로다. 모호한 지목·미지원 경로는 부분 전송이나 일반 대화로 대체하지 않는다. 접수 일부/미확인인 전송은 전체 재시도하지 않는다.
+
+한 번에 두 Agent를 명시한 지원 경로는 대상별 인증과 시작 접수를 순서대로 확인하되 앞 Agent의 답변 완료를 기다리지 않는다. 두 턴의 추론은 겹칠 수 있고 발언 순번은 강제하지 않는다. 이미 공개가 확인된 최종 발언만, 같은 발송 묶음에 속하고 아직 실행 중인 상대의 **원래 턴**에 외부 인용으로 넣을 수 있다. 그 인용은 사용자 명령이나 권한이 아니다. 수신자가 승인·응답 대기이거나 대상이 바뀌거나 끝난 경우, 재시작·불명확한 응답 때에는 새 호출·중단·재전송으로 메우지 않는다. 이 경로의 접수는 모델이 읽거나 반영했다는 증명이 아니다. 상대 발표 뒤 보낸 것과 발표 전에 보내고 확인만 늦게 온 것을 구별하며 이전 답을 고치지 않는다. 이 계약은 모든 엔진의 상시 그룹 토론이나 직원 초대를 선언하지 않는다. [사용자 조작](./EGDESK_PRODUCT_INTERACTION_TRACE_ATLAS.md#atlas-local-board)
 
 <a id="tech-coding-surface"></a>
 
@@ -1028,6 +1036,8 @@ TPM이나 Native Messaging을 모든 플랫폼의 필수 조건으로 만들지 
 하드웨어 출처 attestation도 구분한다. 새 인프라·클라우드·SSO·계정 도입이나 외부
 전송은 이 설계만으로 승인되지 않는다.
 
+**공유 설정과 일회 위임.** 설정 사본의 검토·활성화는 별도 Agent를 만드는 일이다. 계정 자격, 기기에 묶인 실행 계정 식별자, 원 Agent의 이력·DM은 전달하지 않는다. 파일로 검토를 요청할 때는 공개 질문·발췌와 원 요청/회신의 대응만 공유한다. 원래 Board에 회신을 반영하는 행위는 별도다. 한 번의 Board Agent 질문 권한은 열람이나 직원 신원 증명이 아니다. 소유자가 유효한 Board·Agent 버전·공개 범위를 확인하고 실행해야 하며 외부 선별·생성·비용 승인도 대체하지 못한다. 사람 초대·Board 권한 수락·철회와 기기 제어권은 각각 별도 경계다. [현재 사용자 경로](./EGDESK_PRODUCT_INTERACTION_TRACE_ATLAS.md#atlas-local-share)
+
 **신원과 실행 경계.** 요청 계정과 실제 담당자, 요청 PC와 실행 PC, Agent 실행체,
 Engine 계정, 업무 서비스·사이트 계정, OS 사용자를 구분해 각 행동에 결합한다.
 공유 Engine 또는 업무 계정은 해당 서비스 정책과 실제 격리가 허용하는 범위에서 사용할 수
@@ -1252,7 +1262,9 @@ runtime/config/credential store를 사용한다. 이는 선택한 격리 전략�
 engine credential store에 두며 SQLite conversation row·snapshot payload·log·Answer
 Briefing·export에 넣지 않는다.
 
-browser 기반 login 경로는 다음과 같다.
+**로컬 기능판의 설정·재개 경계.** 앱의 계정 목록과 Agent 버전은 실행 프로필의 참조를 보관한다. 전용 Codex는 해당 `CODEX_HOME`와 별도 엔진 연결, Claude는 선택 프로필의 `CLAUDE_CONFIG_DIR`와 공식 CLI 인증을 사용한다. 둘을 같은 자격증명 저장소라고 가정하지 않는다. 기존 대화 재개는 단순 화면 복원이 아니다. 원래 엔진·계정 소유자·대화 귀속을 다시 확인하고, 바뀌었거나 확인되지 않으면 그 기록을 다른 사용자나 새 세션으로 조용히 재개하지 않는다. 설정 파일을 가져와도 기기 전용 계정 참조는 옮기지 않는다. [현재 계정 선택·로그인](./EGDESK_PRODUCT_INTERACTION_TRACE_ATLAS.md#atlas-local-accounts)
+
+아래는 **목표**인 browser 기반 login 경로다. 현재 별도 로그인 카드가 열린 것만으로 전용 쿠키 컨테이너나 EG-Desk가 제어하는 CLI 로그인 브라우저가 검증된 것은 아니다.
 
 ```text
 Click [AI Engine 계정 연결]
@@ -1322,6 +1334,8 @@ Run/Task transition·Canvas relation·decision·export/import event는 SQLite에
 ### 15.1 이동 가능한 단일 `.egdesk` bundle
 
 **지원 UI trace**: [DATA-01](./EGDESK_PRODUCT_INTERACTION_TRACE_ATLAS.md#atlas-data-01)
+
+현재 로컬 기능판은 저장한 Board/Desk의 선택 내용을 미리 보고 새 사본으로 가져온다. 기기 전용 로그인·원본 파일 연결·실행 중인 프로세스·제어권은 복구하지 않는다. 자동 Desk 복구 기록은 화면 상태의 보존이고 기존 대화나 외부 효과를 되돌리지 않는다. 아래의 대상 병합과 조직 백업·복원은 이 기능만으로 제공됐다고 간주하지 않는다. [현재 열기·복구 절차](./EGDESK_PRODUCT_INTERACTION_TRACE_ATLAS.md#atlas-local-recovery)
 
 제품은 전송 가능한 단일 `.egdesk` 파일을 제공한다. 선택한 logical content는 다음과 같다.
 
@@ -2020,6 +2034,17 @@ EG-Desk read/tool gateway가 원문을 불변 저장한 뒤 named bounded result
 Engine 서비스 통신, sandbox command, Browser, MCP, 커넥터의 제한을 합쳐 하나의 네트워크 보장으로 표시하지 않는다. command proxy의 domain rule은 proxy가 실제 활성일 때만 집행된다. [공식 집행 범위](https://learn.chatgpt.com/docs/permissions#what-the-network-proxy-does-not-control).
 
 모든 실행 경로는 `operationId,target,authorityEpoch,limitEpoch`를 gateway에 제출한다. 미중개 native 도구는 제공 tool catalog에서 제외하고 해당 sandbox도 제한한다. `thread/shellCommand`, `process/spawn`처럼 sandbox 밖 경로를 제한 업무의 우회 실행에 사용하지 않는다. 특정 경로에서 정책을 집행할 수 없으면 그 capability만 unavailable로 표시한다. [App Server 실행 경계](https://learn.chatgpt.com/docs/app-server#api-overview).
+
+<a id="tech-membrain"></a>
+##### MemBrain: 기억 후보를 고르는 것과 원본을 검증하는 것
+
+- **시간·대상·근거:** 질문을 기준으로 삼을 시각·기간과, 원본의 관찰·발언·접수·효력 기간을 분리한다. 시간은 재사용할 주장 단위에서 해석한다. 날짜 없는 과거, 기한 없는 현재, 시기 미정인 미래, 시점 미상은 별도다. 대상이 물리적인가 디지털·가상인가, 실제 사건인가 계획·가정인가, 내용이 관측 보고·전언·복사·계산·추론 중 무엇인가는 독립 축이다. 무엇을 어디까지 확인했는지, 근거끼리 일치하는지·충돌하는지·모르는지는 그 출처와 별도로 보존한다. 원문 일치가 사건의 실제 발생이나 계획의 이행을 증명하지 않는다.
+- **제안과 권한:** 호스트가 허용된 후보를 구성하고 고정된 원문·보기에서 Decision Model이 선택·분류하거나 보류한다. 자유 서술, 새로운 가정의 전개, 여러 기록에 걸친 교훈은 생성형 모델이 제안할 수 있지만 직접 쓰지는 않는다. 문맥 선별, 외부 처리, 실제 자료 사용·저장 권한은 별개다. 누락·충돌·철회·미확인 상태는 더 넓은 원문 접근으로 대체하지 않는다.
+- **원본과 조각:** 파일은 원본 ID·리비전·줄 범위, 발언은 발화자·대화·순번·해당 원문 범위와 시점에 귀속한다. 하나의 발언에 전언과 자기 계획이 섞이면 나누고 불확실한 축은 남긴다. 일반 Agent DM의 파일 행 동의와 향후 발언 재사용 동의는 독립이다. 이 기억 입력 경로는 같은 소유자·Agent·DM에서 해당 동의 이후에 접수된 사용자 메시지와 완료된 Agent 발언만 대상으로 한다. 현재 메시지와 달리 이전 발언 본문은 선별 모델의 후보 목록에 나열하지 않는다. 요청 당시뿐 아니라 읽기·전달 직전에 재검사한다. 철회는 이 근거 경로의 조회·새 전달을 막지만 원본 캡처나 이미 전달한 원문·네이티브 대화를 삭제하지 않는다. 네이티브 이력 재개는 별도 경계다. 철회 뒤 재허용은 새 세대이며 옛 발언 참조를 되살리지 않는다. 판정 모드를 끄는 것만으로 동의 세대를 지우지 않는다.
+- **현재 관리 경로:** 인증된 로컬 브리지는 허용한 작업과 크기로 제한한 JSON `POST`만 받는다. 클라이언트의 방·프로필 ID는 조회 단서이지 권한이 아니다. 호스트가 실제 실행의 계정·Agent·DM 귀속을 재검사한다. 파일 등록과 발언 허용은 각각 명시적 동의를 요구한다. 원본 ID·버전·해시와 범위가 일치하고, 잘리지 않은 읽기 가능한 해당 방의 캡처만 채택한다.
+- **범용 입력 목표:** 제안은 근거·주장 유형·적용 조건·대상 범위를 갖는다. 같은 입력의 재시도와 실제 새 리비전을 구별하고, 정정·충돌·보완은 원본을 바꾸지 않고 연결한다. 복사된 보고는 독립 관측으로 세지 않는다. 등록 영수증은 기록 성공이지 진실 판정이 아니다. 장기 보존·다른 채널 공유에는 별도 권한이 필요하다. 이 범용 계약을 현행 파일 행 등록이 모두 구현한다는 뜻은 아니다.
+
+[DM 사용과 철회](./EGDESK_PRODUCT_INTERACTION_TRACE_ATLAS.md#atlas-local-memory) · [파일·기억 조각의 현재 입력과 제안 규격](../../apps/firefox-ui-demo/docs/DECISION_MODEL_CONTEXT_SETUP.md#memory-intake)
 
 ##### Memory·instruction 검증 record
 

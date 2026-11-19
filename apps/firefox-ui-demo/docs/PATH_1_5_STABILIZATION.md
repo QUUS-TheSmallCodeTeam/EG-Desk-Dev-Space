@@ -1,7 +1,7 @@
 # Firefox Shell Path 1.5 Stabilization
 
 **Date**: 2026-05-18
-**현황 갱신**: 2026-09-27 (KST; 검증 시작 2026-09-26)
+**현황 갱신**: 2026-11-19 (KST; 초기 검증 시작 2026-09-26)
 **Status**: 선정한 Firefox Shell 로컬 기반 구현·검증 완료; 제품 전체·Gecko 배포는 범위 밖
 **Scope**: `apps/firefox-ui-demo/`
 
@@ -89,7 +89,7 @@ OpenAI Decisions API 키 저장소와 외부 API 클라이언트(결정 모델)�
 - 2026-11-18 RT-01: 통과.
 - 2026-11-18 CHAT-01: 통과.
 - 2026-11-18 BRW-03: 통과.
-- 2026-11-18 BRW-08/CNV-04: 포커스 문제가 남아 있다.
+- 초기 2026-11-18 검사에서 BRW-08/CNV-04 모두 실패했다. 이후 Canvas가 보이는 Desk에서 CNV-04 라벨 편집·재편집과 구형 호환 Board 저장·재열기를 확인했다. 실제 IME·프로세스 재시작이나 BRW-08의 Browser 포커스까지 통과한 결과는 아니다. BRW-08은 일부다. [날짜별 원장](../../../ideas/confirmed/EGDESK_VISION_GAP_LEDGER.md#checkpoint-20261101-0801)
 
 검증 전용 런타임 정리는 완료됐으며 2829·6001·39218·39219 포트에
 리스너가 없음을 확인했다. 검증 프로필·증거·기존 artifact 파일은 보존됐다.

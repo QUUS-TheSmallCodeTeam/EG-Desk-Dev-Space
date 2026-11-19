@@ -3,7 +3,7 @@
 // draft. Pure: no DOM and no Chat state is touched here.
 
 export const RAIL_SEARCH_SCOPES = Object.freeze([
-  Object.freeze({ id: 'all', label: '전체', title: 'Board·Canvas·방문 기록·파일·Chat·웹에서 찾기' }),
+  Object.freeze({ id: 'all', label: '전체', title: '이 기기에서 먼저 찾습니다. 웹 검색이나 주소 이동은 해당 행을 열 때만 실행합니다.' }),
   Object.freeze({ id: 'canvas', label: 'Canvas', title: '지금 Canvas에 열려 있는 창에서만 찾기' }),
   Object.freeze({ id: 'boards', label: '저장한 Board', title: '저장한 Board와 그 안에 저장된 Browser에서만 찾기' }),
 ]);
