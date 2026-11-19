@@ -9,6 +9,7 @@
   const TAG = '[eg-desk-surface]';
   const SurfaceState = ChromeUtils.importESModule('chrome://userchrome/content/EGDeskSurfaceState.sys.mjs');
   const RecoveryState = ChromeUtils.importESModule('chrome://userchrome/content/EGDeskRecoveryState.sys.mjs');
+  const MemoryEvidence = ChromeUtils.importESModule('chrome://userchrome/content/EGDeskMemoryEvidence.sys.mjs');
   const ChatState = ChromeUtils.importESModule('chrome://userchrome/content/EGDeskChatState.sys.mjs');
   const ThreadRouting = ChromeUtils.importESModule('chrome://userchrome/content/EGDeskThreadRouting.sys.mjs');
   const BoardThread = ChromeUtils.importESModule('chrome://userchrome/content/EGDeskBoardThread.sys.mjs');
@@ -9664,6 +9665,11 @@
       isOpen: () => !!byId('egd-codex-input-panel'), contains: within('#egd-codex-input-panel'),
       dismiss: () => forwardEscape(byId('egd-codex-input-panel')),
     });
+    registerEscapeLayer({
+      id: 'memory-evidence', kind: 'panel',
+      isOpen: () => !!byId('egd-memory-evidence'), contains: within('#egd-memory-evidence'),
+      dismiss: () => forwardEscape(byId('egd-memory-evidence')),
+    });
     // [다시 연결] on a memo waits for a window press; Escape cancels it.
     registerEscapeLayer({
       id: 'memo-relink', kind: 'popover',
@@ -13174,7 +13180,9 @@
               activeThread.type === 'group' ? renderHudMemberRow(activeThread) : null,
               el('div', { class: 'egd-codex-conversation-hud-badges' }, buildCodexThreadKindBadge(activeThread), buildCodexSessionBadge(activeThread, codexBridge),
                 activeIdentity.showRecipient ? el('span', { class: 'egd-codex-conversation-recipient', title: `받는 사람: ${activeIdentity.recipient}`,
-                  data: { testid: 'chat-recipient' } }, el('span', { class: 'egd-chat-sr-only' }, '받는 사람: '), activeIdentity.recipient) : null),
+                  data: { testid: 'chat-recipient' } }, el('span', { class: 'egd-chat-sr-only' }, '받는 사람: '), activeIdentity.recipient) : null,
+                codexBridge.canOpenMemoryEvidence?.(activeThread) ? el('button', { type: 'button', 'aria-haspopup': 'dialog',
+                  data: { egMemory: 'open' }, onclick: ev => { if (ev.currentTarget.isConnected) codexBridge.openMemoryEvidence(activeThread.id, body); } }, '기억 근거') : null),
             ),
             renderEngineChip(activeThread),
             chatHeadUsageRing(activeEngine, codex, activeThread.type === 'dm' ? 'warning' : 'all'),
@@ -14210,6 +14218,7 @@
 
     unsubscribe = codexBridge.subscribe(render)
     body._codexCleanup = () => {
+      codexBridge.closeMemoryEvidence?.(body);
       unsubscribe?.();
       body._codexManualSendOwner?.release?.();
       body._codexManualSendOwner = null;
@@ -14314,6 +14323,7 @@
     let taskAnswers = null;
     const refreshing = new Map();
     const resumedNativeBindings = new Set();
+    let memoryEvidence = null; // One user-opened chrome panel per window; never serialized.
     // Track only live reads/intents. A changed identity stays invalid even if
     // it later changes back to the same visible values (ABA).
     const memoReadWatches = new Map();
@@ -16105,6 +16115,31 @@
       runState(threadId = state.codex.activeThreadId) {
         return cloneJson(ChatState.runsForThread(protocol, getCodexThreadById(state.codex, threadId)));
       },
+      canOpenMemoryEvidence(thread) { return !!MemoryEvidence.evidenceRoute(thread, state.codex); },
+      openMemoryEvidence(threadId, body) {
+        const thread = getCodexThreadById(state.codex, threadId), route = MemoryEvidence.evidenceRoute(thread, state.codex);
+        if (!route || !body?.isConnected) return;
+        memoryEvidence?.close();
+        const engine = ChatState.chatThreadEngineId(thread, state.codex), profile = ChatState.chatThreadEngineProfileId(thread, state.codex);
+        const generation = state.codex.activityRoomGeneration || 0, owner = watchMemoRead(threadId, { ownerOnly: true });
+        const token = epochScope.begin(engine, profile);
+        const session = { body, panel: null, current: () => memoryEvidence === session && body.isConnected && owner.current()
+            && (state.codex.activityRoomGeneration || 0) === generation && !token.signal.aborted && epochScope.valid(token)
+            && !!MemoryEvidence.evidenceRoute(getCodexThreadById(state.codex, threadId), state.codex),
+          close: (returnFocus = false) => {
+            if (memoryEvidence !== session) return;
+            const focus = returnFocus && session.current();
+            memoryEvidence = null; listeners.delete(sync); token.controller.abort(); epochScope.finish(token); owner.release(); session.panel?.remove();
+            if (focus) body.querySelector('[data-eg-memory="open"]')?.focus({ preventScroll: true });
+          } };
+        const sync = () => { if (!session.current()) session.close(); };
+        memoryEvidence = session; listeners.add(sync);
+        token.signal.addEventListener('abort', () => session.close(), { once: true });
+        const request = MemoryEvidence.scopedEvidenceRequest({ fetchJson, route, signal: token.signal, current: session.current });
+        try { session.panel = MemoryEvidence.mountEvidencePanel({ el, host: document.documentElement, request, current: session.current,
+          close: session.close, agentName: codexThreadAgentProfile(thread).name || '선택한' }); } catch { session.close(); }
+      },
+      closeMemoryEvidence(body) { if (memoryEvidence?.body === body) memoryEvidence.close(); },
       createActivityReadScope(threadId, onInvalidate) {
         return createCodexActivityReadScope(threadId, epochScope, fetchJson, onInvalidate);
       },

@@ -169,7 +169,7 @@
   :where(:root:not([data-egd-theme="light"])) :where(.egd-edge, .egd-canvas-card:not(.egd-browser-card, .egd-terminal-card, .egd-ontology-card),
     .egd-browser-card > .egd-card-header, #egd-board-notice, #egd-board-scope, #egd-desk-recovery,
     #egd-desk-history, #egd-board-history, #egd-board-conflict,
-    #egd-codex-input-panel, #egd-answer-briefing, #egd-rail-search-results, #egd-desk-minimap, #egd-portable-dialog) {
+    #egd-codex-input-panel, #egd-memory-evidence, #egd-answer-briefing, #egd-rail-search-results, #egd-desk-minimap, #egd-portable-dialog) {
     color-scheme: dark;
     color: var(--egd-on-surface);
   }
@@ -217,7 +217,7 @@
 :where(:root[data-egd-theme="dark"]) :where(.egd-edge, .egd-canvas-card:not(.egd-browser-card, .egd-terminal-card, .egd-ontology-card),
   .egd-browser-card > .egd-card-header, #egd-board-notice, #egd-board-scope, #egd-desk-recovery,
   #egd-desk-history, #egd-board-history, #egd-board-conflict,
-  #egd-codex-input-panel, #egd-answer-briefing, #egd-rail-search-results, #egd-desk-minimap, #egd-portable-dialog) {
+  #egd-codex-input-panel, #egd-memory-evidence, #egd-answer-briefing, #egd-rail-search-results, #egd-desk-minimap, #egd-portable-dialog) {
   color-scheme: dark;
   color: var(--egd-on-surface);
 }
@@ -225,7 +225,7 @@
 :where(:root[data-egd-theme="light"]) :where(.egd-edge, .egd-canvas-card:not(.egd-browser-card, .egd-terminal-card, .egd-ontology-card),
   .egd-browser-card > .egd-card-header, #egd-board-notice, #egd-board-scope, #egd-desk-recovery,
   #egd-desk-history, #egd-board-history, #egd-board-conflict,
-  #egd-codex-input-panel, #egd-answer-briefing, #egd-rail-search-results, #egd-desk-minimap, #egd-portable-dialog) {
+  #egd-codex-input-panel, #egd-memory-evidence, #egd-answer-briefing, #egd-rail-search-results, #egd-desk-minimap, #egd-portable-dialog) {
   color-scheme: light;
   color: var(--egd-on-surface);
 }
@@ -7033,7 +7033,7 @@ button.egd-codex-message-activity:focus-visible { outline: var(--egd-focus-outli
 }
 
 /* User-opened source picker/inspector; never a Canvas card or live source. */
-#egd-codex-input-panel {
+#egd-codex-input-panel, #egd-memory-evidence {
   position: fixed;
   top: 110px;
   right: 30px;
@@ -7052,7 +7052,7 @@ button.egd-codex-message-activity:focus-visible { outline: var(--egd-focus-outli
   box-shadow: var(--egd-shadow);
   font: 13px/1.5 sans-serif;
 }
-#egd-codex-input-panel header { display: flex; flex: 0 0 auto; align-items: center; justify-content: space-between; padding: 12px 16px; }
+#egd-codex-input-panel header, #egd-memory-evidence header { display: flex; flex: 0 0 auto; align-items: center; justify-content: space-between; padding: 12px 16px; }
 .egd-codex-input-panel-body { flex: 1 1 auto; overflow: auto; padding: 0 16px 16px; min-height: 0; min-width: 0; max-width: 100%; box-sizing: border-box; }
 .egd-codex-input-panel-footer { display: flex; flex: 0 0 auto; align-items: center; justify-content: space-between; gap: 8px; padding: 8px 16px; border-top: 1px solid var(--egd-outline-variant); }
 .egd-input-source-choice { display: grid; grid-template-columns: 18px minmax(0, 1fr); align-items: start; gap: 8px; padding: 8px 0; cursor: pointer; width: 100%; min-width: 0; max-width: 100%; box-sizing: border-box; }
@@ -11404,3 +11404,20 @@ button.egd-memo-ask-cancel:hover { text-decoration: underline; }
 .egd-board-chat-scope-body ul { padding-inline-start: 19px; margin: 1px 0 5px; }
 .egd-board-chat-scope-body p { margin: 3px 0; }
 .egd-board-chat-correction { margin: 3px 0 0; color: var(--egd-warning-ink); font-size: 11px; line-height: 1.4; overflow-wrap: anywhere; }
+
+/* User-opened DM memory panel; captured text stays literal and scrolls inside the panel. */
+[data-eg-memory="open"] { font: inherit; color: inherit; background: transparent; border: 0; padding: 2px 5px; border-radius: 4px; white-space: nowrap; cursor: pointer; }
+[data-eg-memory="open"]:hover { background: var(--egd-hover); }
+#egd-memory-evidence { top: min(10vh, 80px); right: min(3vw, 30px); width: min(520px, 94vw); max-width: 94vw; max-height: 82vh; }
+#egd-memory-evidence :is(fieldset, input, select) { box-sizing: border-box; min-width: 0; max-width: 100%; }
+#egd-memory-evidence :is(fieldset, [data-eg-memory="trace"]:not(:empty)) { border: 1px solid var(--egd-outline-variant); border-radius: 7px; padding: 8px; margin: 6px 0; }
+#egd-memory-evidence :is(input, select, button) { font: inherit; }
+#egd-memory-evidence button { margin: 2px; }
+#egd-memory-evidence button:not(:disabled) { cursor: pointer; }
+#egd-memory-evidence .egd-memory-field { display: grid; gap: 3px; margin: 6px 0; }
+#egd-memory-evidence .egd-memory-lines { display: flex; flex-wrap: wrap; gap: 12px; }
+#egd-memory-evidence .egd-memory-consent { display: flex; align-items: start; gap: 6px; margin: 10px 0; }
+#egd-memory-evidence .egd-memory-form-fields { padding: 0; border: 0; }
+#egd-memory-evidence small { display: block; overflow-wrap: anywhere; }
+#egd-memory-evidence pre { white-space: pre-wrap; overflow-wrap: anywhere; max-height: 9em; overflow: auto; user-select: text; }
+#egd-memory-evidence :is(pre, p):empty { display: none; }
