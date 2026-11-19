@@ -2057,6 +2057,8 @@ Engine 서비스 통신, sandbox command, Browser, MCP, 커넥터의 제한을 �
 
 이 트리는 권한이 아니다. 현재 일반 DM에서 이전 발언 본문·발췌는 외부 Decision 후보 목록으로 보낼 수 없다. 권한 있는 수신자에게 허용된 원문만 열며 실제로 전달한 턴·자료 버전·범위와 보류분을 구분한다. 가지치기는 EG-Desk가 이번 턴에 붙일 입력에만 적용한다. 화면 이력 삭제, 네이티브 스레드 압축/재작성, 다른 방으로의 전달이 아니다. [원안·현재 구현과 인수 예시](../../apps/firefox-ui-demo/docs/DECISION_MODEL_CONTEXT_SETUP.md#session-topic-tree)
 
+**일반 DM 전송 계약:** 이력 수용이 가능한 Decisions 엔드포인트와 제품 동의는 다른 층이다. 해당 방의 과거 대화 처리·전송 수신자와 범위를 허용한 경우, 호스트는 요청 당시 허용된 완성 턴의 원문쌍·기존 토픽 관계·현재 원문을 한 번에 넣고 배정과 필요한 선행 턴을 따로 물을 수 있다. 이 범위가 없으면 기본 선별에는 과거 본문·파생 제목·식별용 해시를 싣지 않는다. 현재 12발언 창은 전 세션 기억이 아니며, 동의 세대 밖으로 읽기를 확장하지 않는다. 현재 답변에 쓴 자료·구독 계정·사후 인덱스 커밋을 별도로 확인한다. [입력 형식·상태 전이·격리 통합 시험](../../apps/firefox-ui-demo/docs/DECISION_MODEL_CONTEXT_SETUP.md#membrain-turn-wire)
+
 ##### Memory·instruction 검증 record
 
 Memory는 `id,revision,owner,scope,conditions,sourceRefs,judgmentKind,reuseState,validUntil,consentRef,authorityEpoch`를 가진다. 모델은 후보 내용과 의미를 제안하고 System은 기록 권한·동의 조건·참조를 검사한다. Profile의 정책 변경은 Memory 본문·소유권 변경이 아니다.
