@@ -152,7 +152,7 @@ export function createMemoryEvidenceHttpHandler({ port = 39218, ensureAuth, reso
           need(handle(row?.id) && label(row.label, 80) && typeof row.automatic === 'boolean' && !ids.has(row.id)); ids.add(row.id)
           return { id: row.id, label: row.label, automatic: row.automatic }
         }), decisionMode: ['off', 'advisory', 'on'].includes(mode) ? mode : 'off' }
-        if (typeof evidence.speechGrant === 'function') result.speechAllowed = !!after(evidence.speechGrant(scope))
+        if (typeof evidence.speechConsentState === 'function') result.speechAllowed = after(evidence.speechConsentState(scope))
         const recent = resolved.recentEvidence?.()
         // Never invent an association from the displayed quantity or a row label.
         if (recent && ids.has(recent.id) && evidence.isActive(scope, recent.id) === true) result.recentId = recent.id
@@ -160,14 +160,13 @@ export function createMemoryEvidenceHttpHandler({ port = 39218, ensureAuth, reso
         // No awaiting between the final identity check, synchronous consent update and response.
         need(after(await ensureAuth({ ...route })) !== false)
         if (action === 'speech-enable') need(after(await getMode()) === 'on', 409)
-        current(); const prev = evidence.speechGrant(scope)
+        current()
         if (action === 'speech-enable') {
-          const generation = prev || evidence.enableSpeech(scope); need(generation && evidence.speechGrant(scope) === generation)
+          const prev = evidence.speechGrant(scope), generation = prev || evidence.enableSpeech(scope); need(generation && evidence.speechGrant(scope) === generation)
           if (!prev) fresh = { cancel: () => evidence.disableSpeech(scope, generation) }
           result = { speechAllowed: true }
         } else {
-          if (prev) need(evidence.disableSpeech(scope, prev) === true)
-          need(!evidence.speechGrant(scope)); result = { speechAllowed: false }
+          need(evidence.clearSpeech(scope) === true && evidence.speechConsentState(scope) === false); result = { speechAllowed: false }
         }
       } else if (action === 'preview') {
         result = { text: lines(after(await projection(captures, ctx, b.pin)).text, b.pin) }

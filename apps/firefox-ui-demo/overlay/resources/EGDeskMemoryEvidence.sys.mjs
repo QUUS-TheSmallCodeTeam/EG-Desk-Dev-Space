@@ -161,9 +161,10 @@ export function mountEvidencePanel({ el, host, request, current, close, agentNam
       const recent = permitted.find(row => row.id === state.recentId);
       rows.replaceChildren(...(recent ? [button('read-latest', '직전 답에 전달된 근거', () => read(recent))] : []), el('h3', {}, '현재 허용한 행'), ...(permitted.length ? permitted.map(row => button('read', row.label, () => read(row))) : [el('p', {}, '아직 허용한 행이 없습니다.')]));
       if (['off', 'advisory'].includes(state.decisionMode)) note.textContent = '현재 문맥 설정에서는 등록한 근거가 자동 첨부되지 않습니다. 문맥 설정이 켜짐(on)일 때만 첨부됩니다.';
-      if (typeof state.speechAllowed === 'boolean') {
-        const enabled = state.speechAllowed, action = enabled ? 'speech-disable' : 'speech-enable';
-        const toggle = button(action, enabled ? '대화 발언 허용 철회' : '이 DM의 다음 발언부터 허용', async ev => {
+      if (typeof state.speechAllowed === 'boolean' || state.speechAllowed === null) {
+        // An unreadable grant must not be presented as a clean opt-out. Offer only a verified removal.
+        const enabled = state.speechAllowed !== false, action = enabled ? 'speech-disable' : 'speech-enable';
+        const toggle = button(action, state.speechAllowed === null ? '상태 미확인 · 허용 철회' : enabled ? '대화 발언 허용 철회' : '이 DM의 다음 발언부터 허용', async ev => {
           if (!alive() || stamp !== formEpoch || ev.currentTarget.disabled) return;
           ev.currentTarget.disabled = true;
           try {

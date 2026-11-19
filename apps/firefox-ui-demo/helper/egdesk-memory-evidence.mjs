@@ -414,6 +414,17 @@ export class MemoryEvidenceStore {
   speechGrant(scope) {
     try { const s = authority(scope); return speechState(this.#database(), s.key)?.generation ?? null } catch { return null }
   }
+  // Management distinguishes missing from damaged or unreadable. A denied read is not proof of erasure.
+  speechConsentState(scope) {
+    try { const s = authority(scope); return Boolean(speechState(this.#database(), s.key)) } catch { return null }
+  }
+  clearSpeech(scope) {
+    try {
+      const s = authority(scope), db = this.#database(); if (!db) return true
+      return speechWrite(db, () => { db.prepare('DELETE FROM speech_grants WHERE scope_key=?').run(s.key)
+        return !db.prepare('SELECT 1 FROM speech_grants WHERE scope_key=?').get(s.key) })
+    } catch { return false }
+  }
   enableSpeech(scope) {
     try {
       const s = authority(scope), db = this.#database(true)

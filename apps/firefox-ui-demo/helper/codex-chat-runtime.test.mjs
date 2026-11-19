@@ -4320,7 +4320,7 @@ test('channel output: an out-of-order work note stays out of speech, explicit sh
   assert.throws(() => h.chat.shareMessages({ fromClientThreadId: id, toClientThreadId: 'target', localMessageIds: ['old-note'] }), { code: 'MESSAGE_NOT_SHAREABLE' })
   const { collectDecisionCandidates } = await import('./egdesk-decision-candidates.mjs')
   const dc = await collectDecisionCandidates({ body: {}, clientThreadId: id, chatStore: store })
-  assert.deepEqual(dc.candidates.filter(c => c.kind === 'conversation').map(c => c.loadText()), ['질문', 'PUBLIC_ANSWER'])
+  assert.deepEqual(dc.candidates.filter(c => c.kind === 'conversation'), [], 'an existing public message is not consent to recall')
 })
 
 test('channel POV: changing the direct room into a Board during async preparation cannot post the old direct turn', async t => {
@@ -4346,7 +4346,7 @@ test('plain chat: an early delta later identified as commentary never becomes sp
   assert.ok(!h.events.some(e => e.itemId === 'work' && e.event.startsWith('message.')))
   const { collectDecisionCandidates } = await import('./egdesk-decision-candidates.mjs')
   const dc = await collectDecisionCandidates({ body: {}, clientThreadId, chatStore: store })
-  assert.deepEqual(dc.candidates.filter(c => c.kind === 'conversation').map(c => c.loadText()), ['질문', 'LEGACY_PUBLIC'])
+  assert.deepEqual(dc.candidates.filter(c => c.kind === 'conversation'), [], 'an existing public message is not consent to recall')
 })
 
 test('unclassified interruption stays available as activity, a late positive speech start resumes safe streaming', async t => {

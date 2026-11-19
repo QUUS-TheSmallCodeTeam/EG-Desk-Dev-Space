@@ -122,7 +122,7 @@ for (const change of ['scope', 'auth']) test(`compensating revoke uses *original
 })
 
 test('speech consent is separate, authenticated, prospective and never returns the generation or changes global decision mode', async t => {
-  const w=await world(t); for (const k of ['speechGrant','enableSpeech','disableSpeech']) w.evidence[k]=w.store[k].bind(w.store)
+  const w=await world(t); for (const k of ['speechGrant','speechConsentState','clearSpeech','enableSpeech','disableSpeech']) w.evidence[k]=w.store[k].bind(w.store)
   assert.equal((await w.req('state')).body.speechAllowed,false)
   denied(await w.req('speech-enable',{consent:true}),409); w.mode='on'
   for (const b of [{},{consent:false},{consent:1},{consent:true,ownerKey:'another-owner'},{consent:true,includeHistory:true}]) denied(await w.req('speech-enable',b),400)
@@ -130,4 +130,5 @@ test('speech consent is separate, authenticated, prospective and never returns t
   const on=await w.req('speech-enable',{consent:true}); assert.equal(on.status,200); assert.deepEqual(on.body,{speechAllowed:true}); assert.equal((await w.req('state')).body.speechAllowed,true)
   const gen=w.store.speechGrant(w.scope);assert.ok(gen);assert.doesNotMatch(JSON.stringify((await w.req('state')).body),new RegExp(gen));
   w.mode='off'; const off=await w.req('speech-disable');assert.equal(off.status,200);assert.deepEqual(off.body,{speechAllowed:false});assert.equal(w.store.speechGrant(w.scope),null);assert.equal(w.mode,'off');
+  w.evidence.speechConsentState=()=>null; w.evidence.clearSpeech=()=>false; assert.equal((await w.req('state')).body.speechAllowed,null); denied(await w.req('speech-disable'),404);
 })
