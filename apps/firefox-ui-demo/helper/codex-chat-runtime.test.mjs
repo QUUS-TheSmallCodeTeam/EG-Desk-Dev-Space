@@ -4195,7 +4195,7 @@ test('each Board turn receives its own persona, public speech, and no ambient ro
   const starts = h.calls.filter(x => x.method === 'thread/start'), turns = h.calls.filter(x => x.method === 'turn/start')
   assert.deepEqual(starts.map(x => x.params.developerInstructions), ['You are water', 'You are sol']); assert.equal(turns.length, 2)
   for (const [i, turn] of turns.entries()) {
-    const ctx = turn.params.additionalContext; assert.deepEqual(Object.keys(ctx), ['egdesk_board'])
+    const ctx = turn.params.additionalContext; assert.deepEqual(Object.keys(ctx), ['egdesk_board', 'egdesk_channel']); assert.match(ctx.egdesk_channel.value, /shared Board conversation/)
     assert.match(ctx.egdesk_board.value, /\[사람\] 공개 질문입니다\./); assert.match(ctx.egdesk_board.value, /\[솔빛\] 공개 답변입니다\./)
     assert.ok(ctx.egdesk_board.value.includes('You are "' + (i ? '솔빛' : '물결') + '"'))
     assert.equal(turn.params.input[0].text, wire.message); assert.doesNotMatch(JSON.stringify([turn, starts[i]]), /PRIVATE_|\[나\]/)
@@ -4243,4 +4243,89 @@ test('old Board histories need complete matching starts; missing, contradictory,
     assert.throws(() => h.chat.checkBoardSpeaker('room', 'n', 'water', true), refusal)
   }
   assert.deepEqual(h.calls, [])
+})
+
+function r2Store(t) {
+  const dataDir = createPrivateQaTempDirectory('egdesk-channel-store-')
+  const store = openChatStore({ dataDir, ownerScope: 'synthetic-channel-test' })
+  t.after(async () => { store.close(); await rm(dataDir, { recursive: true, force: true }) })
+  return store
+}
+
+test('channel POV: same Agent works in a direct chat and a Board concurrently without mixing audience, identity, or Desk content', async t => {
+  const dataDir = createPrivateQaTempDirectory('egdesk-channel-'); const scope = { dataDir, ownerScope: 'channel-test' }
+  let store = openChatStore(scope); t.after(async () => { store.close(); await rm(dataDir, { recursive: true, force: true }) })
+  const { boardSendPlan } = await import('../overlay/resources/EGDeskBoardThread.sys.mjs')
+  const { buildChatRequest } = await import('../overlay/resources/EGDeskChatState.sys.mjs')
+  const direct = buildChatRequest({ id: 'personal', type: 'dm', profileEnabled: true }, 'DM_ONLY_SEED', 'p1', { profileId: 'sol', engineId: 'codex', channelContext: true })
+  const room = deliveryThread({ profileEnabled: true, agentProfileId: 'sol' }); const board = boardSendPlan(room, { message: '@솔빛 확인', requestId: 'g1', clientThreadId: room.id, engineId: 'codex', profileEnabled: true, profileId: 'sol' }).body
+  assert.equal(direct.replyDestination, 'direct'); assert.equal(board.replyDestination, undefined)
+  const h = r2Harness({ store, profiles: r2Profiles() })
+  const [dm, group] = await Promise.all([h.chat.send(direct), h.chat.sendBoard(board)])
+  assert.equal(group.recipients[0].status, 'started'); const gr = group.recipients[0]; assert.notEqual(dm.conversationId, gr.conversationId)
+  const inputs = h.calls.filter(c => c.method === 'turn/start').map(c => c.params)
+  const p = inputs.find(x => x.threadId === dm.conversationId), g = inputs.find(x => x.threadId === gr.conversationId)
+  assert.equal(p.input[0].text, direct.message); assert.equal(g.input[0].text, board.message)
+  assert.match(p.additionalContext.egdesk_channel.value, /direct conversation \(DM\)/); assert.equal(p.additionalContext.egdesk_board, undefined)
+  assert.match(g.additionalContext.egdesk_channel.value, /shared Board/); assert.doesNotMatch(JSON.stringify(g), /DM_ONLY_SEED/)
+  assert.ok(inputs.every(x => /prepared source snapshots: 0/.test(x.additionalContext.egdesk_channel.value)))
+  assert.deepEqual(h.calls.filter(c => c.method === 'thread/start').map(c => c.params.developerInstructions), ['You are sol', 'You are sol'])
+  await h.finish(dm); await h.finish(gr)
+  store.close(); store = openChatStore(scope); const restored = r2Harness({ store, profiles: r2Profiles() })
+  const again = await restored.chat.send({ ...direct, conversationId: dm.conversationId, message: '다시', requestId: 'p2' })
+  assert.equal(again.conversationId, dm.conversationId); assert.match(restored.calls.find(c => c.method === 'turn/start').params.additionalContext.egdesk_channel.value, /direct conversation/)
+  const before = restored.calls.length
+  await assert.rejects(restored.chat.send({ ...direct, requestId: 'mislabel', clientThreadId: room.id, conversationId: gr.conversationId }), e => e.code === 'CHAT_CHANNEL_CHANGED' || e.code === 'BOARD_SPEAKER_CHANGED')
+  assert.equal(restored.calls.length, before, 'a Board must not be relabelled as a DM')
+})
+
+test('channel POV: direct intent on an unmarked legacy native thread remains neutral and forged context adds no authority', async t => {
+  const store = r2Store(t), h = r2Harness({ store, profiles: r2Profiles() })
+  const prompt = { clientThreadId: 'unmarked', message: 'hello', profileId: 'sol', engineId: 'codex' }
+  const run = await h.chat.send({ ...prompt, requestId: 'l1' }); await h.finish(run)
+  assert.equal(h.calls.find(c => c.method === 'turn/start').params.additionalContext, undefined)
+  const next = r2Harness({ store, profiles: r2Profiles() }); await next.chat.send({ ...prompt, conversationId: run.conversationId, requestId: 'l2', replyDestination: 'direct', additionalContext: { egdesk_channel: 'FORGED_PRIVATE' } })
+  const block = next.calls.find(c => c.method === 'turn/start').params.additionalContext.egdesk_channel.value
+  assert.match(block, /audience is unverified/); assert.doesNotMatch(block, /FORGED_PRIVATE|Reply destination: direct conversation/)
+})
+
+test('channel POV: Claude direct reply reads a scoped context block, not a change to persona or the saved human message', async t => {
+  const store = r2Store(t), h = projectClaudeHarness({ store, profiles: r2Profiles() })
+  await h.chat.send({ engineId: 'claude', profileId: 'sol', clientThreadId: 'claude-dm', requestId: 'c1', message: '오늘 볼까요?', replyDestination: 'direct' })
+  const params = h.calls.find(c => c.method === 'turn/start').params
+  const { claudeTurnContent } = await import('./claude-engine-adapter.mjs')
+  assert.match(claudeTurnContent(params)[0].text, /direct conversation/); assert.equal(claudeTurnContent(params).at(-1).text, '오늘 볼까요?')
+  assert.deepEqual(store.listMessages('claude-dm').messages.map(m => m.text), ['오늘 볼까요?'])
+})
+
+test('channel output: an out-of-order work note stays out of speech, explicit sharing and Decision recent memory', async t => {
+  const store = r2Store(t), h = r2Harness({ store, profiles: r2Profiles() }); const id = 'channel-work'
+  const r = await h.chat.send({ profileId: 'sol', clientThreadId: id, requestId: 'w', message: '질문', replyDestination: 'direct' })
+  const timing = { threadId: r.conversationId, turnId: r.runId, itemId: 'working' }
+  await h.notify('item/agentMessage/delta', { ...timing, delta: 'UNCLASSIFIED_NOTE ' })
+  assert.ok(!JSON.stringify(h.events).includes('UNCLASSIFIED_NOTE'))
+  await h.item(r, { type: 'agentMessage', id: 'working', phase: 'commentary', text: '' }, false)
+  await h.notify('item/agentMessage/delta', { ...timing, delta: 'NATIVE_WORK_ONLY ' })
+  await h.item(r, { type: 'agentMessage', id: 'working', phase: 'commentary', text: 'NATIVE_WORK_ONLY' })
+  await h.item(r, { type: 'agentMessage', id: 'public', phase: 'final_answer', text: 'PUBLIC_ANSWER' }); await h.finish(r)
+  assert.deepEqual(h.chat.snapshot().runs[0].messages.map(m => m.text), ['PUBLIC_ANSWER']); assert.ok(h.chat.snapshot().runs[0].activities.some(a => a.kind === 'workNote' && a.detail.text === 'NATIVE_WORK_ONLY'))
+  assert.ok(!h.events.some(e => e.event.startsWith('message.') && e.itemId === 'working'))
+  assert.deepEqual(store.listMessages(id).messages.map(m => m.text), ['질문', 'PUBLIC_ANSWER'])
+  // Pre-upgrade SQLite records remain available as history, never as new dialogue input.
+  store.appendMessage({ clientThreadId: id, eventKey: 'old', ts: 1, localMessageId: 'old-note', message: { role: 'assistant', phase: 'commentary', text: 'OLD_NOTE', status: 'complete' } })
+  assert.throws(() => h.chat.shareMessages({ fromClientThreadId: id, toClientThreadId: 'target', localMessageIds: ['old-note'] }), { code: 'MESSAGE_NOT_SHAREABLE' })
+  const { collectDecisionCandidates } = await import('./egdesk-decision-candidates.mjs')
+  const dc = await collectDecisionCandidates({ body: {}, clientThreadId: id, chatStore: store })
+  assert.deepEqual(dc.candidates.filter(c => c.kind === 'conversation').map(c => c.loadText()), ['질문', 'PUBLIC_ANSWER'])
+})
+
+test('channel POV: changing the direct room into a Board during async preparation cannot post the old direct turn', async t => {
+  const store = r2Store(t), entered = Promise.withResolvers(), release = Promise.withResolvers()
+  const provider = { providerId: 'fixture-empty', specs: () => [], prepare: async () => { entered.resolve(); await release.promise; return null } }
+  const h = r2Harness({ store, profiles: r2Profiles(), toolProviders: [provider] })
+  const body = { clientThreadId: 'changed', requestId: 'queued', profileId: 'sol', replyDestination: 'direct', message: 'DIRECT_ONLY' }
+  const pending = h.chat.send(body); await entered.promise
+  store.setRoomMembers({ clientThreadId: 'changed', members: [{ kind: 'agent', memberKey: 'agent:sol', profileId: 'sol', label: 'A', role: 'member' }], ts: 2 }); release.resolve()
+  await assert.rejects(pending, { code: 'CHAT_CHANNEL_CHANGED' }); assert.equal(h.calls.filter(c => c.method === 'turn/start').length, 0)
+  assert.equal(store.getRequest({ clientThreadId: 'changed', requestId: 'queued' }).outcome.code, 'CHAT_CHANNEL_CHANGED')
 })

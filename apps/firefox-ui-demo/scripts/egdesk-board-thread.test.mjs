@@ -359,7 +359,7 @@ test('two addressed Board members keep separate authors through live replies and
 test('restoring a Board member preserves each completed item in a run and skips only the same stored item', () => {
   const member = { profileId: ID_V, label: '검증 담당' };
   const history = ['checking', 'final'].map((item, i) => ({ id: `local-${item}`, localMessageId: `local-${item}`,
-    providerItemId: item, role: 'assistant', phase: i ? 'final_answer' : 'commentary', status: 'complete', content: i ? '최종 답변' : '먼저 확인한 내용',
+    providerItemId: item, role: 'assistant', phase: i ? 'final_answer' : null, status: 'complete', content: i ? '최종 답변' : '먼저 확인한 내용',
     runId: 'one-run', conversationId: 'member-conversation', localSeq: i + 1, createdAt: i + 1 }));
   const restore = (thread, page) => ({ ...thread, messages: BoardThread.foldBoardMemberAnswers(thread, page, member) });
   const legacy = history.map(({ localMessageId, ...record }) => record);
@@ -408,12 +408,14 @@ test('cache-free Board replies retain their own run through a reopened SQLite hi
   for (let load = 0; load < 2; load++) for (const member of members) {
     const page = chat.getLocalHistory({ clientThreadId: member.clientThreadId });
     const history = ChatState.normalizeLocalHistoryPage(page, member.clientThreadId);
+    assert.ok(!history.messages.some(ChatState.isChatWorkNote));
+    if (member.profileId === ID_V) assert.equal(history.runs[0].activities.find(a => a.kind === 'workNote')?.detail.text, '같은 내용');
     restored = { ...restored, messages: BoardThread.foldBoardMemberAnswers(restored, history.messages, member) };
   }
-  assert.equal(restored.messages.length, 3);
+  assert.equal(restored.messages.length, 2);
   for (const member of members) {
     const rows = restored.messages.filter(m => m.boardMemberProfileId === member.profileId);
-    assert.deepEqual(rows.map(m => m.phase), member.profileId === ID_V ? ['commentary', 'final_answer'] : ['final_answer']);
+    assert.deepEqual(rows.map(m => m.phase), ['final_answer']);
     for (const m of rows) {
       const conversationId = `conversation-${member.profileId}`, runId = `turn-${member.profileId}`;
       assert.deepEqual([m.conversationId, m.runId, m.answerId], [conversationId, runId, `${conversationId}/${runId}`]);
@@ -638,8 +640,8 @@ test('only confirmed room speech crosses the Board boundary; rendering or hiding
   const request = { clientThreadId: 'room-1', requestId: 'public-only', message: '@디자이너 의견',
     systemPrompt: 'PRIVATE_PERSONA', qaOutputMarkers: ['PRIVATE_QA'], privateNotes: 'PRIVATE_NOTE', profileEnabled: false, recentMessages: [{ text: 'PRIVATE_HISTORY' }], engineProfileId: 'PRIVATE_SLOT' };
   const { body } = BoardThread.boardSendPlan(thread, request);
-  assert.deepEqual(body.recentMessages, [{ role: 'user', text: '공개 질문' }, { role: 'agent', author: '디자이너', text: '먼저 배경을 보겠습니다.' }, { role: 'agent', text: '이전 공개 답변' }]);
-  assert.equal(BoardThread.boardDeliveryIntent(thread, request.message).roomBlock.recentTurnCount, 3);
+  assert.deepEqual(body.recentMessages, [{ role: 'user', text: '공개 질문' }, { role: 'agent', text: '이전 공개 답변' }]);
+  assert.equal(BoardThread.boardDeliveryIntent(thread, request.message).roomBlock.recentTurnCount, 2);
   assert.doesNotMatch(JSON.stringify(body), /PRIVATE_/);
   const old = {id: 'same', role: 'assistant'}, other = { ...old, runId: 'different' };
   assert.equal(ChatState.answerForPeek([old, other], {messageId: 'same'}), null, 'an ambiguous old item cannot select a different speaker');

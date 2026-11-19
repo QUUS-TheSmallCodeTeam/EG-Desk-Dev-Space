@@ -9,7 +9,7 @@
 // - The room's members as the chat store keeps them (GET/POST
 //   /chat/board/members, chat-store v3 room_members) and back.
 // Pure: no DOM, no fetch. The helper shares the same recipient classifier.
-import { awaitResumeMessageView, clientThreadBinding, displayProfileAvatar, fillHistoryAnswerIds, isProfileId, isRunBusy } from './EGDeskChatState.sys.mjs';
+import { isChatWorkNote, awaitResumeMessageView, clientThreadBinding, displayProfileAvatar, fillHistoryAnswerIds, isProfileId, isRunBusy } from './EGDeskChatState.sys.mjs';
 
 export const BOARD_SEND_PATH = '/chat/board/send';
 export const BOARD_MEMBERS_PATH = '/chat/board/members';
@@ -252,7 +252,7 @@ export function boardMembersRequest(thread, clientThreadId, { selfName = SELF_NA
 export function boardRecentMessages(thread) {
   const rows = [];
   for (const message of Array.isArray(thread?.messages) ? thread.messages : []) {
-    if (!['user', 'assistant'].includes(message?.role) || !['complete', 'completed'].includes(message.status) || awaitResumeMessageView(message)) continue;
+    if (isChatWorkNote(message) || !['user', 'assistant'].includes(message?.role) || !['complete', 'completed'].includes(message.status) || awaitResumeMessageView(message)) continue;
     const body = text(message.content).slice(0, MAX_RECENT_TEXT).trim();
     if (!body) continue;
     // The recipient is not the person whose screen calls them '나'. Never invent an author for an old answer.
@@ -429,6 +429,7 @@ export function boardMemberState(profileId, { runs = [], routes = {}, connectedR
 }
 
 const SEND_ERROR_TEXT = Object.freeze({
+  CHAT_CHANNEL_CHANGED: '이 대화의 답변 목적지가 바뀌었습니다. 방과 받는 사람을 확인한 뒤 다시 보내 주세요.',
   BOARD_DELIVERY_CHANGED: 'Board 참여자나 전송 대상이 바뀌었습니다. 방을 다시 열고 전송 대상을 확인해 주세요.',
   BOARD_UNRESOLVED_ADDRESS: '확인할 수 없는 @대상이 있습니다. 방에 연결된 Agent를 다시 선택해 주세요. @all 또는 @everyone으로는 보낼 수 없습니다.',
   BOARD_ENGINE_UNSUPPORTED: '현재 Claude Board에서는 @로 Agent를 부르거나 방의 Lead Agent에게 보낼 수 없습니다. 기본 Claude를 선택해 @없이 보내거나 Codex Board에서 다시 확인해 주세요.',
@@ -502,7 +503,7 @@ export function boardRoutedMembers(events) {
 const timeOf = value => (typeof value === 'number' ? value : typeof value === 'string' ? Date.parse(value) : NaN);
 const MESSAGE_IDENTITY_FIELDS = ['providerItemId', 'runId', 'conversationId', 'boardMemberProfileId'];
 function sameMessage(a, b) {
-  // A single member turn can persist both commentary and a final answer. Once both
+  // One member turn can contain multiple published items. Once both
   // records identify their stored item, a shared run must not override that identity.
   if (a.localMessageId && b.localMessageId) return a.localMessageId === b.localMessageId;
   // Legacy rows may lack a store ID. Do not infer equality across known different
@@ -523,7 +524,7 @@ export function foldBoardMemberAnswers(roomThread, memberMessages, member, { pro
   const who = boardMemberRequest({ profileId: member.profileId, label: member.label }, roomThread || {}, { profiles });
   const messages = [...current];
   for (const stored of Array.isArray(memberMessages) ? memberMessages : []) {
-    if (stored?.role !== 'assistant' || !['complete', 'completed'].includes(stored.status ?? 'complete') || !text(stored.content)) continue;
+    if (isChatWorkNote(stored) || stored?.role !== 'assistant' || !['complete', 'completed'].includes(stored.status ?? 'complete') || !text(stored.content)) continue;
     const { localSeq: _seq, ...rest } = stored;
     const answer = { ...rest, authorName: who.authorName, ...(who.authorAvatar ? { authorAvatar: who.authorAvatar } : {}),
       boardMemberProfileId: member.profileId, localHistory: true };

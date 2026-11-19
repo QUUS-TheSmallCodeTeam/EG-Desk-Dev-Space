@@ -1,5 +1,29 @@
 // Pure reducer for the additive Codex chat protocol v2.
 const copy = value => value == null ? value : JSON.parse(JSON.stringify(value));
+// Provider commentary is a public work note, not a statement to the people in a chat.
+// Classify by typed metadata only. Never inspect the words to infer a phase or expose raw reasoning.
+export const isChatWorkNote = row => row?.role === 'assistant' && row.phase === 'commentary';
+export function chatSpeechOnly(rows) {
+  return Array.isArray(rows) && rows.some(isChatWorkNote) ? rows.filter(row => !isChatWorkNote(row)) : rows;
+}
+export function chatWorkNoteActivity(message) {
+  const itemId = message.providerItemId || message.messageId || message.id;
+  if (typeof itemId !== 'string' || !itemId) return null;
+  const done = ['complete', 'completed'].includes(message.status);
+  return { id: 'work-note:' + itemId, kind: 'workNote', title: '작업 메모', status: done ? 'completed' : 'inProgress',
+    detail: done ? { text: String(message.text ?? message.content ?? '').slice(0, 4000) } : {}, sourceRefs: [] };
+}
+// Also accept history from helpers that originally saved commentary as chat messages.
+export function separateChatWork(run) {
+  const messages = chatSpeechOnly(run?.messages);
+  if (!run || messages === run.messages) return run;
+  const activities = [...(run.activities || [])];
+  for (const note of run.messages.filter(isChatWorkNote)) {
+    const a = chatWorkNoteActivity(note);
+    if (a && !activities.some(row => row.id === a.id && row.kind === a.kind)) activities.push(a);
+  }
+  return { ...run, messages, activities };
+}
 export const isRunBusy = run => !!run && run.localHistory !== true && !['completed', 'interrupted', 'failed', 'cancelled', 'unavailable'].includes(run.status);
 export const runKey = (conversationId, runId) => `${conversationId}/${runId}`;
 export function createChatProtocolState() {
@@ -92,6 +116,12 @@ export function legacyPublicChatSnapshot(record) {
       status: message.status === 'completed' ? 'complete' : message.status || 'partial',
       createdAt: message.createdAt || null, provenance: copy(provenance) };
     if (message.phase) item.phase = message.phase;
+    if (isChatWorkNote(item)) {
+      const a = chatWorkNoteActivity({ ...item, id: item.id || localMessageId });
+      if (a) run.activities.push(a);
+      runs.set(localRunId, run);
+      continue;
+    }
     if (message.inputReferences?.length) item.inputReferences = copy(message.inputReferences);
     if (message.readBy?.length) item.readBy = copy(message.readBy);
     if (message.briefing) item.briefing = copy(message.briefing);
@@ -216,12 +246,13 @@ export function mergeLocalChatMessages(current = [], persisted = [], { liveFence
         : ['complete', 'completed'].includes(live.status) && !['complete', 'completed'].includes(stored.status);
       const preferLive = liveChangedDuringRead || liveNewer || !storedNewer;
       const merged = preferLive ? { ...stored, ...copy(live) } : { ...copy(live), ...stored };
+      if (isChatWorkNote(stored) || isChatWorkNote(live)) merged.phase = 'commentary';
       merged.id = live.id || stored.id;
       if (live.createdAt) merged.createdAt = live.createdAt;
       messages[index] = merged;
     }
   }
-  return messages.map((message, index) => ({ message, index })).sort((a, b) => {
+  return chatSpeechOnly(messages).map((message, index) => ({ message, index })).sort((a, b) => {
     const seqA = a.message.localSeq, seqB = b.message.localSeq;
     if (Number.isSafeInteger(seqA) && Number.isSafeInteger(seqB) && seqA !== seqB) return seqA - seqB;
     const timeA = a.message.createdAt, timeB = b.message.createdAt;
@@ -350,7 +381,7 @@ export function mergeLocalChatRuns(current = [], persisted = []) {
       runs[index] = previousNewer ? { ...copy(incoming), ...previous } : { ...previous, ...copy(incoming) };
     }
   }
-  return runs;
+  return runs.map(separateChatWork);
 }
 
 // A stored answer names its LOCAL run; the public native IDs live on that
@@ -710,6 +741,9 @@ export function buildChatRequest(thread, message, requestId, runtime = {}) {
     // the legacy systemPrompt envelope is only for bridges without profiles.
     if (isProfileId(runtime.profileId)) {
       body.profileId = runtime.profileId;
+      // An explicit direct *reply destination*, not an assertion of exclusive visibility.
+      // HUD/canvas location is deliberately absent; moving the view does not change the addressee.
+      if (thread.type === 'dm' && runtime.channelContext === true) body.replyDestination = 'direct';
       if (Number.isSafeInteger(runtime.profileRevision) && runtime.profileRevision > 0) body.profileRevision = runtime.profileRevision;
     } else for (const field of ['agentProfile', 'systemPrompt', 'toolMode']) if (runtime[field]) body[field] = runtime[field];
   }
@@ -1015,6 +1049,15 @@ export function reduceChatEvent(state, event, engineIds = [DEFAULT_CHAT_ENGINE_I
     const id = details.messageId || event.itemId;
     if (!id) return run;
     let message = run.messages.find(item => item.id === id);
+    // An older helper may still send a work note across message.*. Do not normalize it
+    // into speech, including its later untyped deltas in the same native item.
+    const knownNote = run.activities.find(a => a.kind === 'workNote' && a.id === 'work-note:' + id);
+    if (details.phase === 'commentary' || knownNote) {
+      if (message) run.messages = run.messages.filter(row => row !== message);
+      const note = chatWorkNoteActivity({ id, text: details.text, status: event.event === 'message.completed' ? 'complete' : 'streaming' });
+      if (!knownNote || event.event === 'message.completed') upsert(run.activities, note);
+      return run;
+    }
     if (!message) { message = { id, role: 'assistant', content: '', status: 'streaming', createdAt: event.ts }; run.messages.push(message); }
     // CHAT-03: the store's name for this bubble rides on the event, so a live answer can be moved without a reload.
     if (typeof event.localMessageId === 'string' && event.localMessageId && !message.localMessageId) message.localMessageId = event.localMessageId;
@@ -1360,14 +1403,16 @@ export function subAgentSummary(run) {
 export function projectRunMessages(existing, run, now = Date.now()) {
   const priorAnswer = existing.findLast(message => message.role === 'assistant'
     && message.runId === run.runId && message.conversationId === run.conversationId);
-  const messages = existing.map(message => run.requestId && message.requestId === run.requestId && message.role === 'user'
+  const notes = new Set((run.activities || []).filter(a => a.kind === 'workNote').map(a => a.id));
+  const messages = chatSpeechOnly(existing).filter(m => !(notes.size && m.role === 'assistant' && m.conversationId === run.conversationId
+    && m.runId === run.runId && notes.has('work-note:' + (m.providerItemId || m.messageId || m.id)))).map(message => run.requestId && message.requestId === run.requestId && message.role === 'user'
     ? { ...message, status: 'complete', conversationId: run.conversationId, runId: run.runId, answerId: run.answerId,
       // run.localMessageId may belong to a later assistant message event.
       // Only the separately checked live acceptance can name this user row.
       ...(run.acceptedInputMessageId && !message.localMessageId ? { localMessageId: run.acceptedInputMessageId } : {}) }
     : { ...message });
   const ordinal = { user: 0, assistant: 0 };
-  for (const incoming of run.messages || []) {
+  for (const incoming of chatSpeechOnly(run.messages) || []) {
     const role = incoming.role || 'assistant';
     const order = ordinal[role] || 0;
     ordinal[role] = order + 1;
@@ -1401,7 +1446,7 @@ export function projectRunMessages(existing, run, now = Date.now()) {
     last.contextEvents = copy(run.contextEvents !== undefined ? run.contextEvents : priorAnswer?.contextEvents || []);
     last.contextPackets = copy(run.contextPackets !== undefined ? run.contextPackets : priorAnswer?.contextPackets || []);
   }
-  return messages;
+  return chatSpeechOnly(messages);
 }
 
 // Agent Profiles (helper contract: /profiles). Screen-side mirror of the store

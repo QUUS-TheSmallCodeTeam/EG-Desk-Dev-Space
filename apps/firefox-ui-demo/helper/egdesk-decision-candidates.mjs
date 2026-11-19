@@ -1,3 +1,4 @@
+import { isChatWorkNote } from '../overlay/resources/EGDeskChatState.sys.mjs'
 import { candidatesFromOntologyGraph } from './egdesk-context-setup.mjs'
 
 // Candidate collection for the pre-turn context setup (DECISION_MODEL_CONTEXT_SETUP.md §3.1).
@@ -51,7 +52,7 @@ function recentMessageCandidates(chatStore, clientThreadId, limit, excludeId) {
   let after = 0
   for (let page = 0; page < MESSAGE_PAGES; page++) {
     const result = chatStore.listMessages(clientThreadId, { afterSeq: after, limit: MESSAGE_PAGE })
-    rows = rows.concat(Array.isArray(result?.messages) ? result.messages : []).slice(-(limit + 1))
+    rows = rows.concat((Array.isArray(result?.messages) ? result.messages : []).filter(m => !isChatWorkNote(m))).slice(-(limit + 1))
     if (!result?.hasMore || !Number.isSafeInteger(result.nextCursor)) break
     after = result.nextCursor
   }

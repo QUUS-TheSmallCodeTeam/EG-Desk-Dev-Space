@@ -63,6 +63,18 @@ The default chat should read like a messenger. Technical process is available, b
 
 ---
 
+## Agent, channel, work and speech
+
+The saved Agent is the speaker, not the chat window. One profile can participate in a direct chat and a Board at the same time. The channel belongs to the submitted turn; docking the view or focusing a different room cannot redirect its reply. The native conversations remain separate: identity continuity is not a grant to recall private dialogue across channels.
+
+For a named Agent on a supported unbounded route, the helper adds a per-turn `egdesk_channel` context alongside the normal persona. The block names the reply destination and describes only verified preparation facts: a resolved project workspace, number of prepared source snapshots, and batches of explicitly shared messages. A source being attached is not proof it was read; a plan is not an executed action. No screen coordinates, unrelated cards, private memories, or new tool permissions come from this block. A new direct reply explicitly selected by the UI is recorded at the native binding; old unmarked native histories are not retrospectively called DMs. The channel is not proof of who may access stored records. Claude translates the block into application-labelled input text; it is not a separate Claude system prompt.
+
+Typed assistant commentary is a **work note**: read its public progress text under the run's activity record, not in the conversation or a later Board excerpt. It is not raw model reasoning. Published final answers and compatible completed items from phase-less engines remain speech. The original historical event log is not rewritten. A chat with nothing new to say need not fill its transcript with work updates.
+
+This is the channel/speech boundary, not a global Agent memory, an autonomous follow-up scheduler or an active-turn steering implementation.
+
+---
+
 ## Two Entry Modes
 
 EG-Desk needs both person-like direct messages and Board-based work rooms.

@@ -10,7 +10,7 @@
 // those events into one `routing` view per room, builds the share request,
 // places the copied blocks in the timeline, and parses mentions the way the
 // helper's boardMentions does ([@이름](agent://id) or plain @이름).
-import { clientThreadBinding } from './EGDeskChatState.sys.mjs';
+import { clientThreadBinding, isChatWorkNote } from './EGDeskChatState.sys.mjs';
 
 const idText = value => typeof value === 'string' && value.trim() ? value : null;
 
@@ -26,6 +26,7 @@ export const MAX_SHARED_MESSAGES = 20; // helper/codex-chat-runtime.mjs MAX_SHAR
 
 const SHARE_ERROR_TEXT = Object.freeze({
   INVALID_SHARE: `메시지를 1개부터 ${MAX_SHARED_MESSAGES}개까지 골라 다른 대화방으로 옮길 수 있습니다.`,
+  MESSAGE_NOT_SHAREABLE: '작업 메모는 대화 발언으로 옮길 수 없습니다.',
   MESSAGE_NOT_FOUND: '아직 저장되지 않은 메시지가 있어 옮기지 못했습니다. 잠시 뒤 다시 시도해 주세요.',
   CONVERSATION_NOT_FOUND: '대화 기록을 이 기기에서 찾지 못해 옮기지 못했습니다.',
   SHARE_TOO_LARGE: '고른 메시지가 너무 길어 한 번에 옮길 수 없습니다. 더 적게 골라 주세요.',
@@ -40,7 +41,7 @@ export function shareErrorText(error) {
 // ── choosing ────────────────────────────────────────────────────────────────
 // Only finished people's and Agents' bubbles move; a streaming or refused one stays.
 export function shareableMessage(message) {
-  if (!message || !['user', 'assistant'].includes(message.role)) return false;
+  if (!message || isChatWorkNote(message) || !['user', 'assistant'].includes(message.role)) return false;
   if (typeof message.content !== 'string' || !message.content.trim()) return false;
   return !['streaming', 'submitting', 'unconfirmed', 'failed', 'error'].includes(message.status);
 }

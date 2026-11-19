@@ -5097,9 +5097,9 @@ test('paged local run Briefing binds to its final assistant by run identity, not
     coverage: { scope: 'egdesk-local', status: 'complete', reasons: [], nativeHistoryComplete: null },
     hasMore: false, nextCursor: null, projectionTruncated: false }, 'room');
   const restored = Chat.hydrateLocalChatThread(beforeRun, runPage);
-  assert.equal(restored.messages.length, 3);
-  assert.equal(restored.messages[1].briefing, undefined, 'commentary does not receive the final Answer Briefing');
-  const answer = restored.messages[2];
+  assert.equal(restored.messages.length, 2);
+  assert.ok(!restored.messages.some(Chat.isChatWorkNote));
+  const answer = restored.messages[1];
   assert.equal(answer.id, 'qa-answer-1150bb86da5e');
   assert.equal(answer.answerId, answerId);
   assert.notEqual(answer.answerId, answer.id);
@@ -5109,7 +5109,7 @@ test('paged local run Briefing binds to its final assistant by run identity, not
   assert.equal(Briefing.validBriefing(answer.briefing), true);
   assert.deepEqual(answer.contextCaptures, [{ sourceId: 'source-a', snapshotId: 'source-a', hash: 'fixed' }]);
   assert.deepEqual(answer.contextPackets, [{ packetId: 'packet-a' }]);
-  assert.equal(Chat.hydrateLocalChatThread(restored, runPage).messages.length, 3, 'repeat page adds no duplicate');
+  assert.equal(Chat.hydrateLocalChatThread(restored, runPage).messages.length, 2, 'repeat page adds no duplicate');
 });
 
 test('late local hydration preserves newer composer, native gate, in-flight UI and stable message relations', () => {
@@ -16839,12 +16839,12 @@ test('bridge build marker: /v1/state carries the installed build, and a missing 
   assert.equal(Surface.bridgeConnectionNotice({ connected: true, bridge: fields({ bridge: { buildHash: 'd'.repeat(64), startedAt: 1, sourceMismatch: true } }).bridgeBuild }).text,
     '브리지 버전이 맞지 않습니다 · 다시 시작 필요');
 
-  assert.deepEqual(api.bridgeSessionFields(null), { chatCapabilities: null, boardDeliverySupported: false, inheritedMcp: null, computerControl: null });
-  assert.deepEqual(api.bridgeSessionFields({ capabilities: { chat: ['send', 'fork', 'stateless', 7], boardDeliveryIntent: true }, inheritedMcp: [{ name: 'x' }],
+  assert.deepEqual(api.bridgeSessionFields(null), { chatCapabilities: null, boardDeliverySupported: false, channelContextSupported: false, inheritedMcp: null, computerControl: null });
+  assert.deepEqual(api.bridgeSessionFields({ capabilities: { chat: ['send', 'fork', 'stateless', 7], boardDeliveryIntent: true, channelContext: true }, inheritedMcp: [{ name: 'x' }],
     computerControl: { policy: 'inherit', verified: null } }),
-  { chatCapabilities: ['send', 'fork', 'stateless'], boardDeliverySupported: true, inheritedMcp: [{ name: 'x' }], computerControl: { policy: 'inherit', verified: null } });
+  { chatCapabilities: ['send', 'fork', 'stateless'], boardDeliverySupported: true, channelContextSupported: true, inheritedMcp: [{ name: 'x' }], computerControl: { policy: 'inherit', verified: null } });
   assert.deepEqual(api.bridgeSessionFields({ capabilities: {}, inheritedMcp: 'x', computerControl: { policy: 'maybe' } }),
-    { chatCapabilities: null, boardDeliverySupported: false, inheritedMcp: null, computerControl: null });
+    { chatCapabilities: null, boardDeliverySupported: false, channelContextSupported: false, inheritedMcp: null, computerControl: null });
   assert.equal((surfaceSource.match(/\.\.\.bridgeSessionFields\(bridgeState\),/g) || []).length, 2, 'connect and refresh both read them');
   assert.match(surfaceSource, /case 'mcp\.inherited':\n          update\(\{ inheritedMcp: Array\.isArray\(event\.inheritedMcp\) \? event\.inheritedMcp : null \}\);/,
     'the SSE codex event replaces the list');

@@ -5722,7 +5722,7 @@
       boardProjections: cloneJson(state.boards),
       chat: {
         threads: cloneJson(state.codex.threads.map(({ localRuns, localHistoryCoverage, ...thread }) => ({
-          ...normalizeChatRequestProjectDraft(thread), messages: (thread.messages || []).map(({ liveRevision, localHistory, localSeq, ...message }) => message),
+          ...normalizeChatRequestProjectDraft(thread), messages: ChatState.chatSpeechOnly(thread.messages || []).map(({ liveRevision, localHistory, localSeq, ...message }) => message),
         }))),
         activeThreadId: state.codex.activeThreadId,
         codexAccountKey: state.codex.codexAccountKey || null,
@@ -6851,7 +6851,7 @@
       if (!options.merge && Array.isArray(snapshot.chat?.threads)) {
         state.codex.chatProtocol.unobservedPreviousRun ||= !!snapshot.chat.unobservedPreviousRun;
         state.codex.threads = snapshot.chat.threads.map(thread => ChatState.reconcileNativeThread(
-          ChatState.detachNativeThread(normalizeChatRequestProjectDraft(thread), snapshot.chat.codexAccountKey || null, chatBindingNonce()), state.codex.authStatus));
+          ChatState.detachNativeThread({ ...normalizeChatRequestProjectDraft(thread), messages: ChatState.chatSpeechOnly(thread.messages) }, snapshot.chat.codexAccountKey || null, chatBindingNonce()), state.codex.authStatus));
         state.codex.activeThreadId = snapshot.chat.activeThreadId;
         state.codex.threadDrafts = { ...snapshot.chat.threadDrafts };
         state.codex.hudView = snapshot.chat.hudView || 'conversation';
@@ -12043,6 +12043,7 @@
     return {
       chatCapabilities: Array.isArray(chat) ? chat.filter((name) => typeof name === 'string') : null,
       boardDeliverySupported: bridgeState?.capabilities?.boardDeliveryIntent === true,
+      channelContextSupported: bridgeState?.capabilities?.channelContext === true,
       inheritedMcp: Array.isArray(bridgeState?.inheritedMcp) ? bridgeState.inheritedMcp : null,
       computerControl: ChatState.normalizeComputerControl(bridgeState?.computerControl),
     };
@@ -18283,6 +18284,7 @@
         try {
           const runtimeConfig = codexThreadRuntimeConfig(activeThread);
           runtimeConfig.engineId = engineId;
+          runtimeConfig.channelContext = state.codex.channelContextSupported === true;
           if (engineId === 'claude') runtimeConfig.engineProfileId = ChatState.chatThreadEngineProfileId(activeThread, state.codex);
           // The model and effort the panel shows: a listed model with its effort, or nothing for '기본 모델'.
           const sendingThread = getCodexThreadById(state.codex, activeThread.id) || activeThread;
