@@ -90,7 +90,7 @@ test('the surface registers every Escape layer through one channel and listens i
   const { escapeLayers, listeners } = mountEscapeLayers();
   for (const id of ['chat-menu', 'settings-account-menu', 'board-menu', 'desk-menu', 'minimap-stack', 'board-close-guard',
     'minimap', 'desk-history', 'board-history', 'board-switcher', 'rail-search', 'chat-peek', 'focus-view', 'view-fullscreen', 'memo-relink',
-    'browser-menu', 'browser-agent-timeline', 'resource-detail', 'review-dialog', 'portable-dialog', 'chat-input-panel']) {
+    'browser-menu', 'browser-agent-timeline', 'resource-detail', 'review-dialog', 'portable-dialog', 'chat-input-panel', 'memory-evidence']) {
     assert.equal(escapeLayers.has(id), true, id);
   }
   assert.equal(escapeLayers.size(), 0);
@@ -399,6 +399,18 @@ test('UX-06: surfaces with their own Escape handler get one forwarded Escape whe
   // Resource detail listens on the document: it is a small popover, so it closes before the minimap.
   assert.equal(SurfaceKeys.escapeTierOf(SurfaceKeys.escapeLayerSpec('resource-detail').kind), 'menu');
   assert.equal(SurfaceKeys.escapeTierOf(SurfaceKeys.escapeLayerSpec('chat-input-panel').kind), 'panel');
+});
+
+test('the memory evidence panel receives one Escape without closing the chat or the underlying view', () => {
+  const { ids, node, press, state } = mountEscapeLayers();
+  const panel = node('section'); const received = [];
+  panel.dispatchEvent = event => { received.push(event.key); ids.delete('egd-memory-evidence'); return true; };
+  ids.set('egd-memory-evidence', panel);
+  state.cardFullscreen = { cardId: 'card-1', mode: 'maximized', hudMode: 'hidden' };
+  assert.equal(SurfaceKeys.escapeTierOf(SurfaceKeys.escapeLayerSpec('memory-evidence').kind), 'panel');
+  assert.equal(press(node('div')).defaultPrevented, true);
+  assert.deepEqual(received, ['Escape']); assert.equal(ids.has('egd-memory-evidence'), false);
+  assert.ok(state.cardFullscreen);
 });
 
 test('UX-06: actual review dialog sits between menus and panels, restores focus and leaves IME alone', () => {

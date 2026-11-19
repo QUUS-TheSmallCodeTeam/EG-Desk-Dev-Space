@@ -2812,6 +2812,8 @@ test('production resume arguments use the stored Codex profile even when the ren
   const runtime = new CodexChatRuntime({ engines: [adapter], requireStore: true, getOwnerKey: forbiddenShared, store: {
     getConversation: id => id === route.clientThreadId ? row : null,
     getConversationByNative: () => assert.fail('Exact pair must not look up by native ID'),
+    // This synthetic store models an ordinary conversation, not a grounded DM.
+    getNativeAudience: id => { assert.equal(id, route.conversationId); return null; },
     listEvents: id => {
       assert.equal(id, route.clientThreadId);
       return { events: [{ event: 'native.thread.bound', details: { conversationId: route.conversationId, ownerHash,

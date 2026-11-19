@@ -45,6 +45,7 @@ export const ESCAPE_LAYER_REGISTRY = Object.freeze([
   { id: 'review-dialog', kind: 'dialog', label: '검토 파일' },
   { id: 'portable-dialog', kind: 'dialog', label: '내보내기·가져오기' },
   { id: 'chat-input-panel', kind: 'panel', label: 'Chat 프로젝트·자료 패널' },
+  { id: 'memory-evidence', kind: 'panel', label: 'Agent DM 기억 근거' },
   { id: 'minimap', kind: 'minimap', label: '미니맵' },
   { id: 'desk-history', kind: 'panel', label: 'Desk 기록' },
   { id: 'board-history', kind: 'panel', label: 'Board 기록' },
