@@ -3936,8 +3936,11 @@ export class CodexChatRuntime {
     }
     if (this.readNativeBinding(clientThreadId, conversationId).executionPolicy) deny()
     assertCurrent()
-    return { scope: { ownerKey: authority.ownerKey, clientThreadId, agentId: expectedProfileId }, assertCurrent,
-      validateCapture: async capture => {
+    const scope = { ownerKey: authority.ownerKey, clientThreadId, agentId: expectedProfileId }
+    return { scope, assertCurrent, recentEvidence: () => {
+      assertCurrent(); const run = this.store.previousPublicAnswerRun(clientThreadId, null)
+      return run ? this.decisionContext?.memoryEvidence?.forTurn(scope, run) ?? null : null
+    }, validateCapture: async capture => {
         assertCurrent()
         if (capture?.clientThreadId !== clientThreadId || (capture.engine && (capture.engine.engineId !== authority.engineId ||
             (capture.engine.engineProfileId ?? null) !== (authority.engineProfileId ?? null)))) deny()

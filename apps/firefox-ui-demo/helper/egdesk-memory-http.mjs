@@ -138,7 +138,8 @@ export function createMemoryEvidenceHttpHandler({ port = 39218, ensureAuth, reso
       validate(action, b)
       const route = { clientThreadId: b.clientThreadId, conversationId: b.conversationId }
       need(await ensureAuth({ ...route }) !== false)
-      const dmRoute = { ...route, expectedProfileId: b.expectedProfileId }, ctx = live(await resolveDm({ ...dmRoute }), dmRoute)
+      const dmRoute = { ...route, expectedProfileId: b.expectedProfileId }, resolved = await resolveDm({ ...dmRoute })
+      const ctx = live(resolved, dmRoute)
       const { scope, current, after } = ctx
       const evidence = action === 'preview' ? null : after(await getEvidence())
       let result
@@ -150,6 +151,9 @@ export function createMemoryEvidenceHttpHandler({ port = 39218, ensureAuth, reso
           need(handle(row?.id) && label(row.label, 80) && typeof row.automatic === 'boolean' && !ids.has(row.id)); ids.add(row.id)
           return { id: row.id, label: row.label, automatic: row.automatic }
         }), decisionMode: ['off', 'advisory', 'on'].includes(mode) ? mode : 'off' }
+        const recent = resolved.recentEvidence?.()
+        // Never invent an association from the displayed quantity or a row label.
+        if (recent && ids.has(recent.id) && evidence.isActive(scope, recent.id) === true) result.recentId = recent.id
       } else if (action === 'preview') {
         result = { text: lines(after(await projection(captures, ctx, b.pin)).text, b.pin) }
       } else if (action === 'bind') {

@@ -157,7 +157,8 @@ export function mountEvidencePanel({ el, host, request, current, close, agentNam
       if (!Array.isArray(state?.captures) || !Array.isArray(state.rows)) throw new Error('invalid state');
       captures = state.captures.filter(c => text(c?.sourceId) && text(c.revision) && text(c.label) && positive(c.lineCount));
       const permitted = state.rows.filter(row => text(row?.id) && text(row.label));
-      rows.replaceChildren(el('h3', {}, '현재 허용한 행'), ...(permitted.length ? permitted.map(row => button('read', row.label, () => read(row))) : [el('p', {}, '아직 허용한 행이 없습니다.')]));
+      const recent = permitted.find(row => row.id === state.recentId);
+      rows.replaceChildren(...(recent ? [button('read-latest', '직전 답에 전달된 근거', () => read(recent))] : []), el('h3', {}, '현재 허용한 행'), ...(permitted.length ? permitted.map(row => button('read', row.label, () => read(row))) : [el('p', {}, '아직 허용한 행이 없습니다.')]));
       if (['off', 'advisory'].includes(state.decisionMode)) note.textContent = '현재 문맥 설정에서는 등록한 근거가 자동 첨부되지 않습니다. 문맥 설정이 켜짐(on)일 때만 첨부됩니다.';
       buildForm(); status.textContent = message;
     } catch { if (alive() && stamp === formEpoch) { status.textContent = '이 대화의 허용 목록을 확인하지 못했습니다.'; rows.replaceChildren(button('retry', '다시 확인', () => load())); } }

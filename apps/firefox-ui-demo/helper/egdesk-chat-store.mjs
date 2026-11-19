@@ -894,9 +894,14 @@ export function openChatStore({ dataDir, ownerScope } = {}) {
     // Exact predecessor of the accepted request, not the last assistant row anywhere in the room.
     // No fallback across a user message, interrupted reply or unresolved import.
     previousPublicAnswerRun(clientThreadId, beforeMessageId) {
-      ensureOpen(); const row = requireThread(clientThreadId), current = q.message.get(row.local_conversation_id, beforeMessageId)
-      if (!current || parse(current.public_json)?.role !== 'user') return null
-      const prev = db.prepare('SELECT local_run_id, public_json FROM messages WHERE local_conversation_id=? AND last_seq<? ORDER BY last_seq DESC LIMIT 1').get(row.local_conversation_id, current.last_seq)
+      ensureOpen(); const row = requireThread(clientThreadId)
+      let beforeSeq = Number.MAX_SAFE_INTEGER
+      if (beforeMessageId !== null) {
+        const current = q.message.get(row.local_conversation_id, beforeMessageId)
+        if (!current || parse(current.public_json)?.role !== 'user') return null
+        beforeSeq = current.last_seq
+      }
+      const prev = db.prepare('SELECT local_run_id, public_json FROM messages WHERE local_conversation_id=? AND last_seq<? ORDER BY last_seq DESC LIMIT 1').get(row.local_conversation_id, beforeSeq)
       if (!prev) return null
       const m = parse(prev.public_json)
       return m.role === 'assistant' && m.phase === 'final_answer' && ['complete','completed','final'].includes(m.status) ? prev.local_run_id : null

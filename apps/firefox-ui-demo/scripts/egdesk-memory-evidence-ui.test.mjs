@@ -109,3 +109,13 @@ test('real Firefox bridge closes on engine epoch, owner or room switch; no publi
     d.resolve({ captures: [], rows: [{ id: 'private', label: 'STALE' }] }); await wait(); assert.doesNotMatch(panel.textContent, /STALE/);
   }
 });
+
+test('inspection of the last answer follows its exact active grant; it never guesses by number, label or list order', async () => {
+  const rows = [{ id: 'one', label: '같은 이름' }, { id: 'two', label: '같은 이름' }];
+  const base = { captures: [], rows, decisionMode: 'on' };
+  for (const [id, enabled] of [['two', true], ['withdrawn', false], [null, false]]) {
+    const { calls, f } = await fixture({ state: () => ({ ...base, recentId: id }), read: () => ({ trace: { version: 1, ledger: { ...captures[0], startLine: 1, endLine: 1, text:'고정 행' }, sources: [{...captures[1], startLine: 1, endLine: 1, relation:'counted', text:'직접 센 수량'}] } }) });
+    assert.equal(Boolean(f('read-latest')), enabled);
+    if (enabled) { await f('read-latest').fire(); assert.deepEqual(calls.at(-1), { action: 'read', body: { id: 'two' } }); }
+  }
+});
