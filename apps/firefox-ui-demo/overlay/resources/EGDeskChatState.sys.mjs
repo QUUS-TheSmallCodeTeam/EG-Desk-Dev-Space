@@ -26,6 +26,14 @@ export function separateChatWork(run) {
 }
 export const isRunBusy = run => !!run && run.localHistory !== true && !['completed', 'interrupted', 'failed', 'cancelled', 'unavailable'].includes(run.status);
 export const runKey = (conversationId, runId) => `${conversationId}/${runId}`;
+// A Board displays several native conversations. Never use the turn ID alone
+// to join answers, working bubbles or activity rows. This key is display-only.
+export function displayRunKey(record, requireConversation = false) {
+  if (typeof record?.runId !== 'string' || !record.runId) return null;
+  const conversation = typeof record.conversationId === 'string' && record.conversationId || null;
+  if (requireConversation && !conversation) return null;
+  return JSON.stringify([conversation, record.runId]);
+}
 export function createChatProtocolState() {
   return { requests: {}, runs: {}, streams: {}, histories: {}, streamGeneration: 0, connection: 'offline', unobservedPreviousRun: false };
 }

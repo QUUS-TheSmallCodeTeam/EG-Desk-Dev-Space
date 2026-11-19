@@ -74,6 +74,16 @@ test('agentWorkingRows: one bubble per busy run as its own Agent; held or discon
   assert.deepEqual(agentWorkingRows(null), []);
 });
 
+test('Board working rows keep both conversations with a reused turn ID; only duplicates in the same conversation collapse', () => {
+  const member = (conversationId, authorName) => ({ conversationId, runId: 'same', authorName, status: 'running' });
+  const a = member('native/a', '솔빛'), b = member('native/b', '물결');
+  assert.deepEqual(agentWorkingRows([a, b, a], { group: true }).map(row => [row.conversationId, row.runId, row.name, row.showName]),
+    [[a.conversationId, 'same', '솔빛', true], [b.conversationId, 'same', '물결', true]]);
+  assert.notEqual(ChatState.displayRunKey(a), ChatState.displayRunKey(b));
+  assert.notEqual(ChatState.displayRunKey({ conversationId: 'a/b', runId: 'c' }), ChatState.displayRunKey({ conversationId: 'a', runId: 'b/c' }));
+  assert.equal(ChatState.displayRunKey({ runId: 'same' }, true), null, 'a Board may not guess a missing conversation');
+});
+
 test('resolveCardAgentIdentity: the acting run names the Card Agent; reading loses to acting; no live run means no name', () => {
   const threads = { 'ct-a': { id: 't-a', profileEnabled: true }, 'ct-b': { id: 't-b', profileEnabled: false } };
   const runs = { 't-a': [{ runId: 'run-1', authorName: '탐색 담당', authorAvatar: PHOTO }, { runId: 'run-2' }], 't-b': [] };

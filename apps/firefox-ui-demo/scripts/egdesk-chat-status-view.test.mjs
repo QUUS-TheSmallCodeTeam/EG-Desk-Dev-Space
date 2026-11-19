@@ -171,9 +171,9 @@ test('the waiting bubble says what is asked and its button goes to answer it', (
   assert.equal(calls.at(-1), 'open', 'without its own target the button opens the run');
   // The conversation feeds the bubble from the run it belongs to, and focuses that request in the record.
   assert.match(surfaceSource, /const ask = \['approval', 'question'\]\.includes\(row\?\.state\) \? ChatStatusView\.waitingAsk\(run\) : null;/);
-  assert.match(surfaceSource, /onAnswer: \(\) => codexBridge\.openActivity\(activeThread\.id, \{ runId: run\.runId \|\| null, activityId: ask\.activityId \}\)/);
+  assert.match(surfaceSource, /onAnswer: \(\) => codexBridge\.openActivity\(activeThread\.id, \{ conversationId: run\.conversationId, runId: run\.runId, activityId: ask\.activityId \}\)/);
   assert.match(surfaceSource, /\.\.\.workingAskProps\(working, workingRun\),/);
-  assert.match(surfaceSource, /\.\.\.workingAskProps\(row, roomRuns\.find\(run => run\.runId === row\.runId\)\),/);
+  assert.match(surfaceSource, /\.\.\.workingAskProps\(row, runsByKey\.get\(displayKey\(row\)\)\),/);
 });
 
 test("an answer's time line carries the '…' that opens its record", () => {
@@ -193,7 +193,7 @@ test("an answer's time line carries the '…' that opens its record", () => {
   click(button);
   assert.equal(opened, 1);
   assert.ok(meta({ id: 'm3', role: 'assistant', runId: 'run-2' }, {}, () => {}), 'an answer without a time still reaches its record');
-  assert.match(surfaceSource, /ChatStatusView\.answerActivityShown\(message, lastAnswerOfRun\.get\(message\.runId\)\)\n\s+\? \(\) => codexBridge\.openActivity\(activeThread\.id, \{ runId: message\.runId \}\) : null\);/);
+  assert.match(surfaceSource, /ChatStatusView\.answerActivityShown\(message, lastAnswerOfRun\.get\(messageRunKey\)\)\n\s+\? \(\) => codexBridge\.openActivity\(activeThread\.id, \{ conversationId: message\.conversationId, runId: message\.runId \}\) : null\);/);
   assert.match(css, /button\.egd-codex-message-activity:hover \{[^}]*background: var\(--egd-hover\);/);
   assert.match(css, /button\.egd-codex-message-activity:focus-visible \{[^}]*outline: var\(--egd-focus-outline\);/);
 });

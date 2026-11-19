@@ -302,9 +302,10 @@
   // its bubble, outside it, as an answer's name sits.
   // A44: a run waiting on 대표님 adds `ask` — what it asks in one line and the
   // button that goes to answer it (the decision itself stays in the record).
-  function codexAgentWorkingRow(working, { runId = '', name = 'Codex', avatar = null, showName = false, onOpen, workScreen = null, ask = null, onAnswer } = {}) {
+  function codexAgentWorkingRow(working, { runId = '', conversationId = '', name = 'Codex', avatar = null, showName = false, onOpen, workScreen = null, ask = null, onAnswer } = {}) {
     const face = codexMessageAvatarFace(avatar, name);
-    return el('div', { class: 'egd-codex-working-row', data: { testid: 'chat-agent-working', runId, state: working.state } },
+    const focusId = conversationId ? ChatState.displayRunKey({ conversationId, runId }) : runId;
+    return el('div', { class: 'egd-codex-working-row', data: { testid: 'chat-agent-working', runId, conversationId, state: working.state } },
       el('span', { class: `egd-codex-message-avatar${face.toneClass}`, 'aria-hidden': 'true' },
         face.photo ? el('img', { class: 'egd-profile-avatar-image', src: face.photo, alt: '', draggable: 'false' }) : face.text),
       el('div', { class: 'egd-codex-working-stack' },
@@ -312,7 +313,7 @@
         el('button', {
           class: 'egd-codex-working-bubble', type: 'button', title: '활동 기록 열기',
           'aria-label': `${name} · ${working.text} · 활동 기록 열기`,
-          data: { testid: 'chat-agent-working-open', focusKey: `agent-working-${runId}` },
+          data: { testid: 'chat-agent-working-open', focusKey: `agent-working-${focusId}` },
           onclick: (ev) => { ev.stopPropagation(); onOpen?.(); },
         },
         el('span', { class: 'egd-codex-typing-dots', 'aria-hidden': 'true' }, el('span'), el('span'), el('span')),
@@ -324,7 +325,7 @@
             class: 'egd-codex-chip egd-codex-chip-primary egd-codex-working-ask-go', type: 'button',
             title: ask.kind === 'question' ? '활동 기록에서 답하기' : '활동 기록에서 확인하기',
             'aria-label': `${name} · ${ask.detail} · ${ask.actionLabel}`,
-            data: { testid: 'chat-agent-working-answer', focusKey: `agent-working-answer-${runId}` },
+            data: { testid: 'chat-agent-working-answer', focusKey: `agent-working-answer-${focusId}` },
             onclick: (ev) => { ev.stopPropagation(); (onAnswer || onOpen)?.(); },
           }, ask.actionLabel)) : null,
         // [현재 작업 화면] under the bubble, only when the caller found the Card this run works on.
@@ -1244,7 +1245,7 @@
     if (onOpenActivity) {
       children.push(el('button', {
         class: 'egd-codex-message-activity', type: 'button', title: '이 답변의 실행 내역 보기', 'aria-label': '이 답변의 실행 내역 보기',
-        data: { testid: 'chat-answer-activity', runId: message.runId || '', focusKey: `answer-activity-${message.id}` },
+        data: { testid: 'chat-answer-activity', runId: message.runId || '', conversationId: message.conversationId || '', focusKey: `answer-activity-${message.id}` },
         onclick: (ev) => { ev.stopPropagation(); onOpenActivity(); },
       }, thread?.type === 'dm' ? '기록' : el('span', { class: 'egd-codex-message-activity-dots', 'aria-hidden': 'true' }, el('span'), el('span'), el('span'))));
     }
@@ -1466,11 +1467,11 @@
     return ['활동 기록', approvals ? `승인 ${approvals}건` : '', questions ? `질문 ${questions}건` : '', blocked ? `막힘 ${blocked}건` : ''].filter(Boolean).join(' · ');
   }
 
-  // focus { activityId, runId }: the row to bring into view (CU-01 computer-use line).
+  // focus { conversationId, runId, activityId }: the row to bring into view (CU-01 computer-use line).
   function openCodexActivityPanel(threadId, focus = null) {
     if (state.codex.activityThreadId !== threadId) state.codex.activityRoomGeneration = (state.codex.activityRoomGeneration || 0) + 1;
     state.codex.activityThreadId = threadId;
-    state.codex.activityFocus = focus ? { threadId, activityId: focus.activityId || null, runId: focus.runId || null } : null;
+    state.codex.activityFocus = focus ? { threadId, conversationId: focus.conversationId || null, runId: focus.runId || null, activityId: focus.activityId || null } : null;
     renderCodexActivityPanel();
   }
 
@@ -4880,7 +4881,8 @@
     if (partialHistory) rows.push(el('p', { role: 'status', data: { testid: 'chat-history-status', complete: 'false' } }, '일부 기록만 표시됩니다. 이전 활동이나 메시지가 빠져 있을 수 있습니다.'));
     if (state.codex.chatProtocol.unobservedPreviousRun) rows.push(el('p', { role: 'status', data: { testid: 'chat-account-reset-status' } }, '이전 Codex 연결의 실행 종료는 확인되지 않았습니다. 로그아웃은 중지 확인이 아닙니다. 이전 계정에 다시 연결해 상태를 확인하세요.'));
     for (const run of codexRuns(thread)) {
-      rows.push(el('h4', { data: { runId: run.runId } }, codexRunLabel(run)));
+      const runData = { conversationId: run.conversationId || '', runId: run.runId || '' };
+      rows.push(el('h4', { data: runData }, codexRunLabel(run)));
       // AGENT-05: [현재 작업 화면] under a busy run's head while the Card it works on is open
       // (absent where this block runs alone, as in tests). Drawing it moves nothing; pressing it does.
       const workScreen = typeof codexRunWorkScreenButton === 'function' ? codexRunWorkScreenButton(run) : null;
@@ -4943,7 +4945,7 @@
         const commandActivity = activity.kind === 'commandExecution';
         const activityStatus = ({ inProgress: '진행 중', completed: '완료', failed: '실패', declined: '거절됨', interrupted: '중단됨', unknown: '상태 미확인' })[activity.status] || activity.status || '';
         const row = el('article', { class: `egd-codex-activity-row${ceiling ? ' egd-codex-activity-row-ceiling' : ''}`,
-          data: { activityId: activity.id, status: activity.status, ...(ceiling ? { kind: 'toolCeiling' } : {}), ...(control ? { controlKind: control.kind } : {}) } },
+          data: { ...runData, activityId: activity.id, status: activity.status, ...(ceiling ? { kind: 'toolCeiling' } : {}), ...(control ? { controlKind: control.kind } : {}) } },
           el('strong', {}, activity.title || (ceiling ? '도구 제한' : activity.kind) || '활동'),
           badge ? el('span', { class: `egd-codex-activity-control egd-codex-activity-control-${badge.kind}`, data: { testid: 'chat-activity-control' } }, badge.label) : null,
           el('span', {}, ceiling ? ceiling.statusLabel : commandActivity ? `명령 ${activityStatus || '상태 미확인'}` : activityStatus),
@@ -5051,8 +5053,13 @@
     const target = state.codex.activityFocus?.threadId === thread.id ? state.codex.activityFocus : null;
     if (target) {
       state.codex.activityFocus = null;
-      const node = [...body.querySelectorAll('[data-activity-id]')].find(item => target.activityId && item.dataset.activityId === target.activityId)
-        || [...body.querySelectorAll('h4[data-run-id]')].find(item => target.runId && item.dataset.runId === target.runId);
+      // An activity id can also repeat across account processes. Never fall
+      // back to the first row/head with that id, or to a neighbour's turn.
+      const key = ChatState.displayRunKey(target, thread.type === 'group');
+      const matches = node => key && ChatState.displayRunKey(node.dataset, thread.type === 'group') === key;
+      const heads = [...body.querySelectorAll('h4[data-run-id]')].filter(matches);
+      const items = target.activityId ? [...body.querySelectorAll('[data-activity-id]')].filter(item => matches(item) && item.dataset.activityId === target.activityId) : [];
+      const node = heads.length === 1 ? (items.length === 1 ? items[0] : heads[0]) : null;
       if (node) {
         node.classList.add('egd-codex-activity-focus');
         node.setAttribute('tabindex', '-1');
@@ -9198,7 +9205,7 @@
     if (!view) return null;
     return el('button', {
       type: 'button', class: 'egd-codex-work-screen', title: view.title, 'aria-label': view.ariaLabel,
-      data: { testid, runId: run.runId, cardId: view.cardId, focusKey: `work-screen:${testid}:${run.runId}` },
+      data: { testid, runId: run.runId, cardId: view.cardId, focusKey: `work-screen:${testid}:${JSON.stringify([run.clientThreadId, run.runId])}` },
       onclick: (ev) => { ev.stopPropagation(); goToRunWorkScreen(view.cardId); },
     }, deskIcon('browser'), el('span', {}, view.label));
   }
@@ -12846,7 +12853,7 @@
             codexBridge.closeAgentPeek();
             spawnSettingsCard({ tab: 'agents', ...(view.profileId ? { profileId: view.profileId } : {}) });
           },
-          onOpenActivity: () => { codexBridge.closeAgentPeek(); codexBridge.openActivity(thread.id, { runId: message.runId || null }); },
+          onOpenActivity: () => { codexBridge.closeAgentPeek(); codexBridge.openActivity(thread.id, { conversationId: message.conversationId, runId: message.runId }); },
         });
       };
 
@@ -13475,11 +13482,14 @@
           const workingAskProps = (row, run) => {
             const ask = ['approval', 'question'].includes(row?.state) ? ChatStatusView.waitingAsk(run) : null;
             return ask ? { ask: { ...ask, moreText: ChatStatusView.waitingMoreText(ask) },
-              onAnswer: () => codexBridge.openActivity(activeThread.id, { runId: run.runId || null, activityId: ask.activityId }) } : {};
+              onAnswer: () => codexBridge.openActivity(activeThread.id, { conversationId: run.conversationId, runId: run.runId, activityId: ask.activityId }) } : {};
           };
+          const displayKey = item => ChatState.displayRunKey(item, activeThread.type === 'group');
+          const runsByKey = new Map(roomRuns.map(run => [displayKey(run), run]).filter(([key]) => key));
           const lastAnswerOfRun = new Map();
           for (const message of activeThread.messages) {
-            if (message.role === 'assistant' && message.runId && !(message.status === 'streaming' && !message.content)) lastAnswerOfRun.set(message.runId, message.id);
+            const key = displayKey(message);
+            if (key && message.role === 'assistant' && !(message.status === 'streaming' && !message.content)) lastAnswerOfRun.set(key, message.id);
           }
           // AGENT-05: every busy run of this room gets its own bubble, so a Board
           // with several Agents at work shows each of them. The current run keeps
@@ -13489,17 +13499,19 @@
             connected: activeEngine.engineId === 'claude' ? activeEngine.ready : codex.connected, held: ChatState.nativeBindingHeld(activeThread),
             roomName: roomProfile?.name || 'Codex', roomAvatar: roomProfile?.avatar || null, group: activeThread.type === 'group',
           });
-          const currentWorkingRow = working ? workingRows.find(row => row.runId === (workingRun?.runId || '')) || null : null;
-          const otherWorkingRows = workingRows.filter(row => row.runId && row.runId !== (workingRun?.runId || ''));
-          const otherWorkingRunIds = new Set(otherWorkingRows.map(row => row.runId));
+          const workingKey = displayKey(workingRun);
+          const currentWorkingRow = working && workingKey ? workingRows.find(row => displayKey(row) === workingKey) || null : null;
+          const otherWorkingRows = workingRows.filter(row => displayKey(row) && displayKey(row) !== workingKey);
+          const workingKeys = new Set(otherWorkingRows.map(displayKey));
+          if (working && workingKey) workingKeys.add(workingKey);
           const computerUseLine = (run) => {
             const view = run ? ChatState.computerUseView(run, { formatTime: formatMessageTime }) : null;
             if (!view) return null;
             return el('button', {
               class: `egd-codex-computer-use${view.active ? ' egd-codex-computer-use-active' : ''}`, type: 'button',
               title: '활동 기록에서 보기', 'aria-label': view.label,
-              data: { testid: 'chat-computer-use', runId: run.runId || '', calls: String(view.calls), active: String(view.active) },
-              onclick: (ev) => { ev.stopPropagation(); codexBridge.openActivity(activeThread.id, { activityId: view.activityId, runId: run.runId }); },
+              data: { testid: 'chat-computer-use', conversationId: run.conversationId || '', runId: run.runId || '', calls: String(view.calls), active: String(view.active) },
+              onclick: (ev) => { ev.stopPropagation(); codexBridge.openActivity(activeThread.id, { conversationId: run.conversationId, runId: run.runId, activityId: view.activityId }); },
             }, deskIcon('computer', 'egd-codex-computer-use-mark'), el('span', { class: 'egd-codex-computer-use-text' }, view.text));
           };
           const appendControlNotices = (until = Infinity) => {
@@ -13607,8 +13619,7 @@
               bubble.appendChild(el('span', { class: 'egd-codex-message-time', role: 'status' }, ({ submitting: '보내는 중', unconfirmed: '접수 미확인', failed: '전송 거절됨' })[message.status]));
             }
             if (message.status === 'streaming' && message.role === 'assistant' && activeThread.profileEnabled === true && !ChatState.nativeBindingHeld(activeThread)
-              && !(message.runId && otherWorkingRunIds.has(message.runId))
-              && !(working && message.runId && message.runId === workingRun?.runId)) {
+              && !workingKeys.has(displayKey(message))) {
               bubble.appendChild(el('div', {
                 class: 'egd-codex-streaming',
                 role: 'status',
@@ -13620,9 +13631,10 @@
                 ? el('button', peekTriggerProps(message, author, 'egd-codex-message-role-name', `agent-peek-name-${message.id}`), author)
                 : author)
               : null;
+            const messageRunKey = displayKey(message);
             const meta = codexMessageTimeMeta(message, activeThread,
-              ChatStatusView.answerActivityShown(message, lastAnswerOfRun.get(message.runId))
-                ? () => codexBridge.openActivity(activeThread.id, { runId: message.runId }) : null);
+              ChatStatusView.answerActivityShown(message, lastAnswerOfRun.get(messageRunKey))
+                ? () => codexBridge.openActivity(activeThread.id, { conversationId: message.conversationId, runId: message.runId }) : null);
             // CHAT-03: a bubble already copied to a Board Thread says so and opens it.
             const sentMark = ThreadRouting.sharedOutMark(activeThread.routing, message);
             const sentChip = sentMark ? el('button', {
@@ -13641,8 +13653,8 @@
             const menuTrigger = renderMessageMenuTrigger(activeThread, message);
             const messageLine = el('div', { class: 'egd-codex-message-line' },
               selectBox, message.role === 'user' ? menuTrigger : null, bubble, message.role === 'user' ? null : menuTrigger);
-            const computerLine = message.role === 'assistant' && message.runId && lastAnswerOfRun.get(message.runId) === message.id
-              ? computerUseLine(roomRuns.findLast(run => run.runId === message.runId)) : null;
+            const computerLine = message.role === 'assistant' && messageRunKey && lastAnswerOfRun.get(messageRunKey) === message.id
+              ? computerUseLine(runsByKey.get(messageRunKey)) : null;
             const messageStack = el('div', { class: 'egd-codex-message-stack' }, roleLabel, messageLine, answerFold, computerLine, resultRow, briefingControl, meta);
             if (briefingRequest) messageStack.insertBefore(briefingRequest, meta?.parentNode === messageStack ? meta : null);
             // CHAT-03: the @이름 chips sit right under the bubble, '스레드로 보냄' just above the time.
@@ -13676,24 +13688,24 @@
           appendControlNotices();
           if (working) {
             messages.appendChild(codexAgentWorkingRow(working, {
-              runId: workingRun.runId || '', name: workingRun.authorName || roomProfile?.name || 'Codex',
+              conversationId: workingRun.conversationId, runId: workingRun.runId || '', name: workingRun.authorName || roomProfile?.name || 'Codex',
               avatar: workingRun.authorAvatar || roomProfile?.avatar || null, showName: !!currentWorkingRow?.showName,
               // The record opens on this run's head (CHAT-07 activity record, AGENT-05).
-              onOpen: () => codexBridge.openActivity(activeThread.id, { runId: workingRun.runId || null }),
+              onOpen: () => codexBridge.openActivity(activeThread.id, { conversationId: workingRun.conversationId, runId: workingRun.runId }),
               workScreen: typeof codexRunWorkScreenButton === 'function' ? codexRunWorkScreenButton(workingRun, { testid: 'chat-agent-work-screen' }) : null,
               ...workingAskProps(working, workingRun),
             }));
           }
           for (const row of otherWorkingRows) {
             messages.appendChild(codexAgentWorkingRow(row, {
-              runId: row.runId, name: row.name, avatar: row.avatar, showName: row.showName,
-              onOpen: () => codexBridge.openActivity(activeThread.id, { runId: row.runId }),
-              workScreen: typeof codexRunWorkScreenButton === 'function' ? codexRunWorkScreenButton({ runId: row.runId }, { busy: true, testid: 'chat-agent-work-screen' }) : null,
-              ...workingAskProps(row, roomRuns.find(run => run.runId === row.runId)),
+              conversationId: row.conversationId, runId: row.runId, name: row.name, avatar: row.avatar, showName: row.showName,
+              onOpen: () => codexBridge.openActivity(activeThread.id, { conversationId: row.conversationId, runId: row.runId }),
+              workScreen: typeof codexRunWorkScreenButton === 'function' ? codexRunWorkScreenButton(runsByKey.get(displayKey(row)), { busy: true, testid: 'chat-agent-work-screen' }) : null,
+              ...workingAskProps(row, runsByKey.get(displayKey(row))),
             }));
           }
           // A run with no answer shown yet keeps its count at the end of the conversation.
-          const unansweredLine = workingRun?.runId && !lastAnswerOfRun.has(workingRun.runId) ? computerUseLine(workingRun) : null;
+          const unansweredLine = workingKey && !lastAnswerOfRun.has(workingKey) ? computerUseLine(workingRun) : null;
           if (unansweredLine) messages.appendChild(el('div', { class: 'egd-codex-computer-use-row' }, unansweredLine));
           // CHAT-03: copies saved after the last bubble, or just moved and not saved yet, close the conversation.
           appendSharedBlocks(sharedPlacement.trailing);
@@ -13767,7 +13779,8 @@
         if (taskAttention.opened) codex.taskBoardOpen = true;
         const subAgents = ChatState.subAgentSummary(run);
         const resultScope = ChatStatusView.resultScope(run, subAgents.rows.map(({ display }) => display.status));
-        const answerHoldsRecord = !run || activeThread.messages.some(message => message.role === 'assistant' && message.runId === run.runId);
+        const statusRunKey = ChatState.displayRunKey(run, activeThread.type === 'group');
+        const answerHoldsRecord = !run || !!statusRunKey && activeThread.messages.some(message => message.role === 'assistant' && ChatState.displayRunKey(message, activeThread.type === 'group') === statusRunKey);
         const workingInLog = activeThread.type === 'dm' && hasConversation && !bindingHeld && !pending
           && !activeThread.preparingInput && !activeThread.resuming && statusText === '응답 중'
           && ChatState.agentWorkingView(run, { connected: activeEngine.engineId === 'claude' ? activeEngine.ready : codex.connected })?.state === 'working'

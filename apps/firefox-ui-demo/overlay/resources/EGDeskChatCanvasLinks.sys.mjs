@@ -8,19 +8,21 @@ export const WORK_SCREEN_LABEL = '현재 작업 화면';
 /**
  * [현재 작업 화면] for one run: the open Card that run is bound to right now.
  * `bindings` are the BRW-13 run bindings (`runId\0cardId\0epoch` → { binding,
- * permission }); a Card the run may act on wins over one it only reads, and
+ * permission, clientThreadId }); within this exact conversation, a Card the run may act on wins over one it only reads, and
  * among equals the one bound last. Null — no button — when the run is not
  * busy, has no binding, its binding was cancelled, or its Card is closed.
  * `cardFor(cardId)` answers { name } for an open Card, else null.
  */
 export function runWorkScreen(run, bindings, { busy = false, cancelled = null, cardFor = () => null } = {}) {
   const runId = typeof run?.runId === 'string' ? run.runId : '';
-  if (!runId || busy !== true || !bindings || typeof bindings[Symbol.iterator] !== 'function') return null;
+  const client = run?.clientThreadId;
+  if (typeof client !== 'string' || !client || !runId || busy !== true || !bindings || typeof bindings[Symbol.iterator] !== 'function') return null;
   let best = null;
   for (const entry of bindings) {
     const [key, bound] = Array.isArray(entry) ? entry : [];
     if (typeof key !== 'string' || key.split('\u0000')[0] !== runId || cancelled?.has?.(key)) continue;
-    const cardId = bound?.binding?.cardId;
+    if (bound?.clientThreadId !== client) continue;
+    const cardId = bound.binding?.cardId;
     if (typeof cardId !== 'string' || !cardId) continue;
     const card = cardFor(cardId);
     if (!card) continue;

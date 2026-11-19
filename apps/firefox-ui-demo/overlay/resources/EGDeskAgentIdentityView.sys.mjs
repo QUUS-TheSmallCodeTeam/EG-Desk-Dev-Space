@@ -3,7 +3,7 @@
 // '[···] Agent 작업 중' bubble per busy run, and the Agent chip on a Card
 // header. Pure display models: no DOM, no fetch. eg-desk-surface.uc.js draws
 // what these return.
-import { agentWorkingView, displayProfileAvatar, isRunBusy, profileAvatarView } from './EGDeskChatState.sys.mjs';
+import { agentWorkingView, displayRunKey, displayProfileAvatar, isRunBusy, profileAvatarView } from './EGDeskChatState.sys.mjs';
 
 export const AVATAR_ASSET_ID = /^img-[0-9a-f]{64}$/;
 // D-A3: the profile store keeps PNG, JPEG and WebP photos of 512KB at most.
@@ -96,9 +96,10 @@ export function agentWorkingRows(runs, { connected = true, held = false, roomNam
     if (!isRunBusy(run)) continue;
     const working = agentWorkingView(run, { connected });
     const runId = typeof run.runId === 'string' ? run.runId : '';
-    if (!working || (runId && seen.has(runId))) continue;
-    if (runId) seen.add(runId);
-    rows.push({ runId, name: authorName(run, roomName), avatar: displayProfileAvatar(run.authorAvatar) || displayProfileAvatar(roomAvatar),
+    const key = displayRunKey(run);
+    if (!working || (key && seen.has(key))) continue;
+    if (key) seen.add(key);
+    rows.push({ runId, conversationId: run.conversationId || null, name: authorName(run, roomName), avatar: displayProfileAvatar(run.authorAvatar) || displayProfileAvatar(roomAvatar),
       state: working.state, text: working.text });
   }
   const showName = group || new Set(rows.map(row => row.name)).size > 1;

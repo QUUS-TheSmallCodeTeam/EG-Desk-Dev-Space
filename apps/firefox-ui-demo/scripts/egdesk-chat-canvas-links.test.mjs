@@ -65,32 +65,43 @@ const cardFor = id => cards[id] || null;
 
 test('runWorkScreen: the open Card a busy run is bound to, the one it may act on first', () => {
   const bindings = new Map([
-    [key('run-1', 'card-b'), { binding: { cardId: 'card-b' }, permission: 'observe' }],
-    [key('run-1', 'card-a'), { binding: { cardId: 'card-a' }, permission: 'interact' }],
-    [key('run-2', 'card-b'), { binding: { cardId: 'card-b' }, permission: 'observe' }],
+    [key('run-1', 'card-b'), { clientThreadId: 'binding-a', binding: { cardId: 'card-b' }, permission: 'observe' }],
+    [key('run-1', 'card-a'), { clientThreadId: 'binding-a', binding: { cardId: 'card-a' }, permission: 'interact' }],
+    [key('run-2', 'card-b'), { clientThreadId: 'binding-a', binding: { cardId: 'card-b' }, permission: 'observe' }],
   ]);
-  assert.deepEqual(runWorkScreen({ runId: 'run-1' }, bindings, { busy: true, cardFor }), {
+  assert.deepEqual(runWorkScreen({ clientThreadId: 'binding-a', runId: 'run-1' }, bindings, { busy: true, cardFor }), {
     cardId: 'card-a', label: '현재 작업 화면', title: '견적서 검토 창으로 화면 이동', ariaLabel: '현재 작업 화면 · 견적서 검토 창으로 화면 이동' });
   assert.equal(WORK_SCREEN_LABEL, '현재 작업 화면');
   // A Card without a readable name is still a Browser window.
-  assert.equal(runWorkScreen({ runId: 'run-2' }, bindings, { busy: true, cardFor }).title, 'Browser 창으로 화면 이동');
+  assert.equal(runWorkScreen({ clientThreadId: 'binding-a', runId: 'run-2' }, bindings, { busy: true, cardFor }).title, 'Browser 창으로 화면 이동');
   // Two Cards with the same permission: the one bound last is where the Agent is now.
-  const two = new Map([[key('run-3', 'card-a'), { binding: { cardId: 'card-a' }, permission: 'interact' }],
-    [key('run-3', 'card-b'), { binding: { cardId: 'card-b' }, permission: 'interact' }]]);
-  assert.equal(runWorkScreen({ runId: 'run-3' }, two, { busy: true, cardFor }).cardId, 'card-b');
+  const two = new Map([[key('run-3', 'card-a'), { clientThreadId: 'binding-a', binding: { cardId: 'card-a' }, permission: 'interact' }],
+    [key('run-3', 'card-b'), { clientThreadId: 'binding-a', binding: { cardId: 'card-b' }, permission: 'interact' }]]);
+  assert.equal(runWorkScreen({ clientThreadId: 'binding-a', runId: 'run-3' }, two, { busy: true, cardFor }).cardId, 'card-b');
+});
+
+test('reused turn IDs cannot borrow a different conversation’s Browser Card', () => {
+  const bindings = new Map([
+    [key('same', 'card-a'), { clientThreadId: 'member-a', permission: 'interact', binding: { cardId: 'card-a' } }],
+    [key('same', 'card-b'), { clientThreadId: 'member-b', permission: 'observe', binding: { cardId: 'card-b' } }],
+  ]);
+  const screen = clientThreadId => runWorkScreen({ runId: 'same', clientThreadId }, bindings, { busy: true, cardFor });
+  assert.deepEqual([screen('member-a')?.cardId, screen('member-b')?.cardId, screen('absent'), screen(undefined)], ['card-a', 'card-b', null, null]);
+  bindings.delete(key('same', 'card-b'));
+  assert.equal(screen('member-b'), null);
 });
 
 test('runWorkScreen: no button without a live target', () => {
-  const bindings = new Map([[key('run-1', 'card-a'), { binding: { cardId: 'card-a' }, permission: 'interact' }]]);
-  assert.equal(runWorkScreen({ runId: 'run-1' }, bindings, { busy: false, cardFor }), null, 'a finished run is not working anywhere');
-  assert.equal(runWorkScreen({ runId: 'run-1' }, bindings, { cardFor }), null);
-  assert.equal(runWorkScreen({ runId: 'run-9' }, bindings, { busy: true, cardFor }), null, 'another run');
-  assert.equal(runWorkScreen({ runId: 'run-1' }, bindings, { busy: true, cardFor: () => null }), null, 'the Card was closed');
-  assert.equal(runWorkScreen({ runId: 'run-1' }, bindings, { busy: true, cardFor, cancelled: new Set([key('run-1', 'card-a')]) }), null, 'a cancelled binding');
-  assert.equal(runWorkScreen({ runId: 'run' }, new Map([[key('run-1', 'card-a'), { binding: { cardId: 'card-a' } }]]), { busy: true, cardFor }), null, 'a run id prefix never matches');
-  for (const bad of [null, {}, { runId: '' }, { runId: 7 }]) assert.equal(runWorkScreen(bad, bindings, { busy: true, cardFor }), null);
-  assert.equal(runWorkScreen({ runId: 'run-1' }, null, { busy: true, cardFor }), null);
-  assert.equal(runWorkScreen({ runId: 'run-1' }, new Map([[key('run-1', 'card-a'), null], [7, {}], [key('run-1', ''), { binding: {} }]]), { busy: true, cardFor }), null);
+  const bindings = new Map([[key('run-1', 'card-a'), { clientThreadId: 'binding-a', binding: { cardId: 'card-a' }, permission: 'interact' }]]);
+  assert.equal(runWorkScreen({ clientThreadId: 'binding-a', runId: 'run-1' }, bindings, { busy: false, cardFor }), null, 'a finished run is not working anywhere');
+  assert.equal(runWorkScreen({ clientThreadId: 'binding-a', runId: 'run-1' }, bindings, { cardFor }), null);
+  assert.equal(runWorkScreen({ clientThreadId: 'binding-a', runId: 'run-9' }, bindings, { busy: true, cardFor }), null, 'another run');
+  assert.equal(runWorkScreen({ clientThreadId: 'binding-a', runId: 'run-1' }, bindings, { busy: true, cardFor: () => null }), null, 'the Card was closed');
+  assert.equal(runWorkScreen({ clientThreadId: 'binding-a', runId: 'run-1' }, bindings, { busy: true, cardFor, cancelled: new Set([key('run-1', 'card-a')]) }), null, 'a cancelled binding');
+  assert.equal(runWorkScreen({ clientThreadId: 'binding-a', runId: 'run' }, new Map([[key('run-1', 'card-a'), { clientThreadId: 'binding-a', binding: { cardId: 'card-a' } }]]), { busy: true, cardFor }), null, 'a run id prefix never matches');
+  for (const bad of [null, {}, { clientThreadId: 'binding-a', runId: '' }, { runId: 7 }]) assert.equal(runWorkScreen(bad, bindings, { busy: true, cardFor }), null);
+  assert.equal(runWorkScreen({ clientThreadId: 'binding-a', runId: 'run-1' }, null, { busy: true, cardFor }), null);
+  assert.equal(runWorkScreen({ clientThreadId: 'binding-a', runId: 'run-1' }, new Map([[key('run-1', 'card-a'), null], [7, {}], [key('run-1', ''), { binding: {} }]]), { busy: true, cardFor }), null);
 });
 
 test('[현재 작업 화면] is drawn only for a busy run with an open Card and moves the camera only when pressed', () => {
@@ -100,7 +111,7 @@ test('[현재 작업 화면] is drawn only for a busy run with an open Card and 
   const browserCard = doc.register('egd-browser-card-3', doc.createElement('article'));
   browserCard.className = 'egd-canvas-card egd-browser-card';
   const chatCard = doc.register('egd-chat-card-1', doc.createElement('article'));
-  const bindings = new Map([[key('run-1', 'egd-browser-card-3'), { binding: { cardId: 'egd-browser-card-3' }, permission: 'interact' }]]);
+  const bindings = new Map([[key('run-1', 'egd-browser-card-3'), { clientThreadId: 'binding-a', binding: { cardId: 'egd-browser-card-3' }, permission: 'interact' }]]);
   const cancelled = new Map();
   const state = { codex: { chatCardEntityId: 'egd-chat-card-1' } };
   const parts = compileFunction(`${declaration('codexRunWorkScreen')}\n${declaration('goToRunWorkScreen')}\n${declaration('codexRunWorkScreenButton')}
@@ -111,41 +122,41 @@ test('[현재 작업 화면] is drawn only for a busy run with an open Card and 
     () => 'Browser', () => doc.createElement('svg'), message => calls.push(['notice', message]),
     card => calls.push(['focus', card.id]), (card, options) => calls.push(['reveal', card.id, options.kind, options.opener?.id || null]));
 
-  const button = parts.codexRunWorkScreenButton({ runId: 'run-1', status: 'running' });
+  const button = parts.codexRunWorkScreenButton({ clientThreadId: 'binding-a', runId: 'run-1', status: 'running' });
   assert.equal(button.tag, 'button');
   assert.equal(button.textContent, '현재 작업 화면');
   assert.equal(button.className, 'egd-codex-work-screen');
   assert.equal(button.attributes.title, 'Browser · example.com 창으로 화면 이동');
   assert.equal(button.attributes['aria-label'], '현재 작업 화면 · Browser · example.com 창으로 화면 이동');
-  assert.deepEqual({ ...button.dataset }, { testid: 'chat-run-work-screen', runId: 'run-1', cardId: 'egd-browser-card-3', focusKey: 'work-screen:chat-run-work-screen:run-1' });
+  assert.deepEqual({ ...button.dataset }, { testid: 'chat-run-work-screen', runId: 'run-1', cardId: 'egd-browser-card-3', focusKey: 'work-screen:chat-run-work-screen:["binding-a","run-1"]' });
   assert.deepEqual(calls, [], 'drawing it moves nothing');
   button.dispatch('click');
   assert.deepEqual(calls, [['focus', 'egd-browser-card-3'], ['reveal', 'egd-browser-card-3', 'browser', 'egd-chat-card-1']],
     'the Card is brought into view with its Chat as the opener, so the way back can stay up');
 
   // No target, no button: a finished run, a run without a Card, a cancelled binding, a closed Card.
-  assert.equal(parts.codexRunWorkScreenButton({ runId: 'run-1', status: 'completed' }), null);
-  assert.equal(parts.codexRunWorkScreenButton({ runId: 'run-2', status: 'running' }), null);
+  assert.equal(parts.codexRunWorkScreenButton({ clientThreadId: 'binding-a', runId: 'run-1', status: 'completed' }), null);
+  assert.equal(parts.codexRunWorkScreenButton({ clientThreadId: 'binding-a', runId: 'run-2', status: 'running' }), null);
   assert.equal(parts.codexRunWorkScreenButton({ status: 'running' }), null);
   cancelled.set(key('run-1', 'egd-browser-card-3'), true);
-  assert.equal(parts.codexRunWorkScreenButton({ runId: 'run-1', status: 'running' }), null);
+  assert.equal(parts.codexRunWorkScreenButton({ clientThreadId: 'binding-a', runId: 'run-1', status: 'running' }), null);
   cancelled.clear();
-  // The working bubble's rows carry only a run id and are busy by definition.
-  assert.equal(parts.codexRunWorkScreenButton({ runId: 'run-1' }, { busy: true, testid: 'chat-agent-work-screen' }).dataset.testid, 'chat-agent-work-screen');
-  assert.equal(parts.codexRunWorkScreenButton({ runId: 'run-1' }), null);
+  // The working bubble passes its actual run and is busy by definition.
+  assert.equal(parts.codexRunWorkScreenButton({ clientThreadId: 'binding-a', runId: 'run-1' }, { busy: true, testid: 'chat-agent-work-screen' }).dataset.testid, 'chat-agent-work-screen');
+  assert.equal(parts.codexRunWorkScreenButton({ clientThreadId: 'binding-a', runId: 'run-1' }), null);
   // The Card closed between the draw and the press: a plain sentence, no camera move.
   calls.length = 0;
-  const stale = parts.codexRunWorkScreenButton({ runId: 'run-1', status: 'running' });
+  const stale = parts.codexRunWorkScreenButton({ clientThreadId: 'binding-a', runId: 'run-1', status: 'running' });
   browserCard.isConnected = false;
   stale.dispatch('click');
   assert.deepEqual(calls, [['notice', '작업 화면을 찾지 못했습니다. 창이 닫혔을 수 있습니다.']]);
-  assert.equal(parts.codexRunWorkScreenButton({ runId: 'run-1', status: 'running' }), null);
+  assert.equal(parts.codexRunWorkScreenButton({ clientThreadId: 'binding-a', runId: 'run-1', status: 'running' }), null);
 
   // Wiring: under each run head in the activity record and under each working bubble; guarded where those blocks run alone.
   const panel = declaration('renderCodexActivityPanel') || '';
-  assert.match(panel, /rows\.push\(el\('h4', \{ data: \{ runId: run\.runId \} \}, codexRunLabel\(run\)\)\);\n(?:\s*\/\/[^\n]*\n)*\s*const workScreen = typeof codexRunWorkScreenButton === 'function' \? codexRunWorkScreenButton\(run\) : null;\n\s*if \(workScreen\) rows\.push\(workScreen\);/);
+  assert.match(panel, /rows\.push\(el\('h4', \{ data: runData \}, codexRunLabel\(run\)\)\);\n(?:\s*\/\/[^\n]*\n)*\s*const workScreen = typeof codexRunWorkScreenButton === 'function' \? codexRunWorkScreenButton\(run\) : null;\n\s*if \(workScreen\) rows\.push\(workScreen\);/);
   assert.match(surfaceSource, /workScreen: typeof codexRunWorkScreenButton === 'function' \? codexRunWorkScreenButton\(workingRun, \{ testid: 'chat-agent-work-screen' \}\) : null,/);
-  assert.match(surfaceSource, /workScreen: typeof codexRunWorkScreenButton === 'function' \? codexRunWorkScreenButton\(\{ runId: row\.runId \}, \{ busy: true, testid: 'chat-agent-work-screen' \}\) : null,/);
+  assert.match(surfaceSource, /workScreen: typeof codexRunWorkScreenButton === 'function' \? codexRunWorkScreenButton\(runsByKey\.get\(displayKey\(row\)\), \{ busy: true, testid: 'chat-agent-work-screen' \}\) : null,/);
   const row = compileFunction(`${declaration('codexMessageAvatarFace')}\n${declaration('codexAgentWorkingRow')}\nreturn codexAgentWorkingRow;`, ['document', 'el', 'ChatState'])(
     doc, el, { profileAvatarView: () => ({ kind: 'initial', text: 'C', tone: 0 }) });
   const withScreen = row({ state: 'working', text: 'Agent 작업 중' }, { runId: 'run-1', name: 'Codex', workScreen: button });

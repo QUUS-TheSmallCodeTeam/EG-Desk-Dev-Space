@@ -31,7 +31,7 @@ export function statusRowQuiet({
 /** The small '…' beside an answer's time: only the last answer of a run carries it. */
 export function answerActivityShown(message, lastAnswerId) {
   return message?.role === 'assistant' && typeof message.runId === 'string' && message.runId.length > 0
-    && lastAnswerId === message.id;
+    && typeof lastAnswerId === 'string' && !!lastAnswerId && lastAnswerId === message.id;
 }
 
 const liveApprovals = run => (Array.isArray(run?.pendingApprovals) ? run.pendingApprovals : [])

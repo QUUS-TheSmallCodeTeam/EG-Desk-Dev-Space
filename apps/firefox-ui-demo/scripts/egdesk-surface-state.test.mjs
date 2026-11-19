@@ -18719,7 +18719,7 @@ test('chat wiring: faces and names open the peek, the 작업 중 bubble closes t
   assert.match(peek, /modelText: recordedOnly \? '' : ChatState\.chatEngineChipView\(thread, engineContext\)\.text/, 'the model line is the engine chip value');
   assert.match(peek, /codexBridge\.agentProfileDetail\(profile\.id, profile\.revision\)/);
   assert.match(peek, /spawnSettingsCard\(\{ tab: 'agents', \.\.\.\(view\.profileId \? \{ profileId: view\.profileId \} : \{\}\) \}\)/);
-  assert.match(peek, /onOpenActivity: \(\) => \{ codexBridge\.closeAgentPeek\(\); codexBridge\.openActivity\(thread\.id, \{ runId: message\.runId \|\| null \}\); \}/);
+  assert.match(peek, /onOpenActivity: \(\) => \{ codexBridge\.closeAgentPeek\(\); codexBridge\.openActivity\(thread\.id, \{ conversationId: message\.conversationId, runId: message\.runId \}\); \}/);
   assert.match(peek, /onClose: \(\) => \{ codexBridge\.closeAgentPeek\(\); returnFocus\(\); \}/);
   assert.match(surfaceSource, /const avatar = message\.role === 'assistant' && !groupedWithPrevious\n              \? el\('button', peekTriggerProps\(message, author, avatarClass, `agent-peek-face-\$\{message\.id\}`\), avatarText\)/);
   assert.match(surfaceSource, /el\('button', peekTriggerProps\(message, author, 'egd-codex-message-role-name', `agent-peek-name-\$\{message\.id\}`\), author\)/);
@@ -18733,9 +18733,9 @@ test('chat wiring: faces and names open the peek, the 작업 중 bubble closes t
   assert.match(surfaceSource, /const working = ChatState\.nativeBindingHeld\(activeThread\) \? null : ChatState\.agentWorkingView\(workingRun,\s*\{ connected: activeEngine\.engineId === 'claude' \? activeEngine\.ready : codex\.connected \}\);/);
   assert.match(surfaceSource, /          appendControlNotices\(\);\n          if \(working\) \{\n            messages\.appendChild\(codexAgentWorkingRow\(working, \{/);
   // AGENT-05: the bubble opens the record at its own run, not just the room.
-  assert.match(surfaceSource, /onOpen: \(\) => codexBridge\.openActivity\(activeThread\.id, \{ runId: workingRun\.runId \|\| null \}\)/);
+  assert.match(surfaceSource, /onOpen: \(\) => codexBridge\.openActivity\(activeThread\.id, \{ conversationId: workingRun\.conversationId, runId: workingRun\.runId \}\)/);
   assert.match(surfaceSource, /for \(const row of otherWorkingRows\) \{\n            messages\.appendChild\(codexAgentWorkingRow\(row, \{/, 'every other busy run gets its own bubble');
-  assert.match(surfaceSource, /&& !\(working && message\.runId && message\.runId === workingRun\?\.runId\)\) \{/);
+  assert.match(surfaceSource, /&& !workingKeys\.has\(displayKey\(message\)\)\) \{/);
   assert.match(surfaceSource, /data: \{ testid: 'chat-run-status', status, runId: run\?\.runId \|\| ''/);
   // The activity record.
   const panel = declaration('renderCodexActivityPanel') || '';
@@ -20480,11 +20480,11 @@ test('CU-01 the line under an answer, the activity record line, and the size-onl
 });
 
 test('CU-01 production Chat: the line sits under the last shown answer of the run, opens its row, and the activity record says it once', () => {
-  assert.match(surfaceSource, /          const lastAnswerOfRun = new Map\(\);\n          for \(const message of activeThread\.messages\) \{\n            if \(message\.role === 'assistant' && message\.runId && !\(message\.status === 'streaming' && !message\.content\)\) lastAnswerOfRun\.set\(message\.runId, message\.id\);/);
+  assert.match(surfaceSource, /if \(key && message\.role === 'assistant' && !\(message\.status === 'streaming' && !message\.content\)\) lastAnswerOfRun\.set\(key, message\.id\);/);
   assert.match(surfaceSource, /const view = run \? ChatState\.computerUseView\(run, \{ formatTime: formatMessageTime \}\) : null;/);
-  assert.match(surfaceSource, /onclick: \(ev\) => \{ ev\.stopPropagation\(\); codexBridge\.openActivity\(activeThread\.id, \{ activityId: view\.activityId, runId: run\.runId \}\); \},/);
-  assert.match(surfaceSource, /const computerLine = message\.role === 'assistant' && message\.runId && lastAnswerOfRun\.get\(message\.runId\) === message\.id\n              \? computerUseLine\(roomRuns\.findLast\(run => run\.runId === message\.runId\)\) : null;/);
-  assert.match(surfaceSource, /const unansweredLine = workingRun\?\.runId && !lastAnswerOfRun\.has\(workingRun\.runId\) \? computerUseLine\(workingRun\) : null;/,
+  assert.match(surfaceSource, /onclick: \(ev\) => \{ ev\.stopPropagation\(\); codexBridge\.openActivity\(activeThread\.id, \{ conversationId: run\.conversationId, runId: run\.runId, activityId: view\.activityId \}\); \},/);
+  assert.match(surfaceSource, /const computerLine = message\.role === 'assistant' && messageRunKey && lastAnswerOfRun\.get\(messageRunKey\) === message\.id\n              \? computerUseLine\(runsByKey\.get\(messageRunKey\)\) : null;/);
+  assert.match(surfaceSource, /const unansweredLine = workingKey && !lastAnswerOfRun\.has\(workingKey\) \? computerUseLine\(workingRun\) : null;/,
     'a run with no answer shown yet keeps its count at the end');
   assert.match(surfaceSource, /openActivity\(threadId = state\.codex\.activeThreadId, focus = null\) \{ openCodexActivityPanel\(threadId, focus\); \},/);
   const panel = declaration('renderCodexActivityPanel') || '';
@@ -20496,10 +20496,10 @@ test('CU-01 production Chat: the line sits under the last shown answer of the ru
   const state = { codex: { activityThreadId: null, activityFocus: null } };
   const open = compileFunction(`${declaration('openCodexActivityPanel')}\nreturn openCodexActivityPanel;`, ['state', 'renderCodexActivityPanel'])(state,
     () => renders.push({ ...state.codex }));
-  open('thread-1', { activityId: 'cua-2', runId: 'turn-a' });
+  open('thread-1', { conversationId: 'native-a', activityId: 'cua-2', runId: 'turn-a' });
   open('thread-1');
   assert.deepEqual(renders, [
-    { activityThreadId: 'thread-1', activityFocus: { threadId: 'thread-1', activityId: 'cua-2', runId: 'turn-a' }, activityRoomGeneration: 1 },
+    { activityThreadId: 'thread-1', activityFocus: { threadId: 'thread-1', conversationId: 'native-a', activityId: 'cua-2', runId: 'turn-a' }, activityRoomGeneration: 1 },
     { activityThreadId: 'thread-1', activityFocus: null, activityRoomGeneration: 1 },
   ]);
   // The production working row carries the computer state for its colour.
@@ -22806,6 +22806,29 @@ function activityDetailsHarness({ fetchRead, approval = true, openFile } = {}) {
     async openChanges(kind = 'activity') { const node = panel().testid(kind === 'approval' ? 'chat-approval-changes' : 'chat-activity-changes'); await node.querySelector('summary').click(); return node; },
   };
 }
+
+test('Board activity panel focuses only the answer’s own conversation, even when both turn and activity IDs repeat', () => {
+  const h = activityDetailsHarness({ approval: false });
+  h.thread.type = 'group';
+  const a = h.run, b = { ...a, conversationId: 'second-native', clientThreadId: 'second-wire', activities: [] };
+  h.state.codex.chatProtocol.runs[Chat.runKey(b.conversationId, b.runId)] = b;
+  for (const run of [a, b]) run.activities = [{ id: 'shared-item', kind: 'workNote', detail: { text: 'note:' + run.conversationId } }];
+  const selected = () => h.panel().querySelector('.egd-codex-activity-focus');
+  for (const run of [b, a]) {
+    for (const activityId of [null, 'shared-item', 'absent']) {
+      h.openCodexActivityPanel(h.thread.id, { conversationId: run.conversationId, runId: run.runId, activityId });
+      const node = selected();
+      assert.ok(node && node === h.document.activeElement);
+      assert.deepEqual([node.tag, node.dataset.conversationId, node.dataset.runId], [activityId === 'shared-item' ? 'article' : 'h4', run.conversationId, run.runId]);
+      if (activityId === 'shared-item') assert.ok(node.textContent.includes('note:' + run.conversationId));
+    }
+  }
+  for (const conversationId of [null, '', 'third-native']) {
+    h.openCodexActivityPanel(h.thread.id, { conversationId, runId: a.runId, activityId: 'shared-item' });
+    assert.equal(selected(), null, 'no fallback by item or turn ID');
+  }
+  assert.deepEqual(h.calls, []); assert.deepEqual(h.decisions, []);
+});
 
 test('first-send Activity delivery control shows only a receipt for the visible answer', async t => {
   for (const scenario of ['verified A', 'unrelated B packet', 'missing accepted receipt', 'wrong account']) await t.test(scenario, async () => {
