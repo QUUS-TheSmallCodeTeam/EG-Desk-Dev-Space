@@ -39,6 +39,7 @@ import { openDecisionCredentialStore } from './egdesk-decision-credential.mjs'
 import { createDecisionHttpHandler } from './egdesk-decision-http.mjs'
 import { collectDecisionCandidates } from './egdesk-decision-candidates.mjs'
 import { MemoryEvidenceStore } from './egdesk-memory-evidence.mjs'
+import { createMemoryEvidenceHttpHandler } from './egdesk-memory-http.mjs'
 import { MAX_ENGINE_PROFILES, openEngineProfiles } from './egdesk-engine-profiles.mjs'
 import { createEngineProfilesHttpHandler } from './egdesk-engine-profiles-http.mjs'
 import { createDeskHttpHandler } from './egdesk-desk-http.mjs'
@@ -392,6 +393,7 @@ const hostControl = createHostControl({
   emit: event => broadcast({ ...event, v: BRIDGE_PROTOCOL_VERSION, provider: PROVIDER_ID, ts: Date.now() }),
 })
 let memoryEvidenceStore = null
+const getMemoryEvidence = () => memoryEvidenceStore ??= new MemoryEvidenceStore({ dataDir, captures: contextStore })
 const chat = new CodexChatRuntime({
   engines: engineRegistry,
   contexts,
@@ -421,7 +423,7 @@ const chat = new CodexChatRuntime({
     mode: () => bridgeSettings.decisionContext.mode,
     configured: () => decisionCredentials.getApiKey() !== null,
     client: decisionClient,
-    get memoryEvidence() { return memoryEvidenceStore ??= new MemoryEvidenceStore({ dataDir, captures: contextStore }) },
+    get memoryEvidence() { return getMemoryEvidence() },
     collect: async ({ body, context, memoryEvidenceFor }) => (await collectDecisionCandidates({ body, memoryEvidenceFor, clientThreadId: context.clientThreadId,
       excludeMessageId: context.localMessageId, chatStore, deskStore, ontologyStore: ensureOntologyStore })).candidates,
   },
@@ -482,6 +484,10 @@ const handleHostControlHttp = createHostControlHttpHandler(hostControl, { port: 
 const handleDecisionHttp = createDecisionHttpHandler({ store: decisionCredentials, verifyKey: key => decisionClient.verifyKey(key),
   budget: decisionBudget, model: decisionClient.model, mode: bridgeSettings.decisionContext, port: BRIDGE_PORT })
 const handleOntologyHttp = createOntologyHttpHandler({ binding: () => ontologyBinding, store: ensureOntologyStore, runtime: sqliteRuntime, port: BRIDGE_PORT })
+const handleMemoryEvidenceHttp = createMemoryEvidenceHttpHandler({ port: BRIDGE_PORT,
+  ensureAuth: hints => ensureChatAuth(hints, { allowIsolated: true, requireClientPair: true }),
+  resolveDm: hints => chat.memoryDmAuthority(hints), captures: contextStore, getEvidence: getMemoryEvidence,
+  getMode: () => bridgeSettings.decisionContext.mode })
 const handleContextHttp = createContextHttpHandler(contexts, ensureChatAuth, { port: BRIDGE_PORT })
 // Like /chat/history, profiles stay editable while Codex is signed out.
 const handleProfileHttp = createProfileHttpHandler({ store: () => profileStore, port: BRIDGE_PORT })
@@ -928,6 +934,8 @@ const bridgeServer = createServer(async (req, res) => {
     return
   }
   const route = url.pathname
+  // Private management has its own POST-only contract, including preflight.
+  if (route.startsWith('/memory-evidence/') && await handleMemoryEvidenceHttp(req, res, url)) return
 
   if (req.method === 'OPTIONS') {
     res.writeHead(204, {

@@ -644,6 +644,18 @@ export function openChatStore({ dataDir, ownerScope } = {}) {
       if (rows.length > 1) fail('NATIVE_MAPPING_CONFLICT', 'More than one local conversation claims this native thread', 409)
       return publicThread(rows[0] ?? null)
     },
+    // Internal point lookup, independent of the mutable selected Agent. One local chat
+    // binds exactly one native history. The event records no source, handle or text.
+    getNativeAudience(conversationId) {
+      ensureOpen()
+      const rows = q.native.all(identifier(conversationId, 'conversationId'))
+      if (rows.length > 1) fail('NATIVE_MAPPING_CONFLICT', 'Ambiguous native audience', 409)
+      const row = rows[0] && q.event.get(rows[0].local_conversation_id, 'native-dm-audience')
+      if (!row) return null
+      const profileId = parse(row.details_json)?.profileId
+      if (row.event !== 'native.audience.reserved' || typeof profileId !== 'string' || !PROFILE_ID.test(profileId)) fail('INVALID_CHAT_RECORD', 'Unverified native audience')
+      return profileId
+    },
     listConversations({ cursor = null, limit = 100 } = {}) {
       ensureOpen(); page(0, limit)
       let boundary = null
@@ -878,6 +890,16 @@ export function openChatStore({ dataDir, ownerScope } = {}) {
       ensureOpen(); const row = requireThread(clientThreadId)
       const found = q.message.get(row.local_conversation_id, identifier(localMessageId, 'localMessageId'))
       return found ? parse(found.public_json) : null
+    },
+    // Exact predecessor of the accepted request, not the last assistant row anywhere in the room.
+    // No fallback across a user message, interrupted reply or unresolved import.
+    previousPublicAnswerRun(clientThreadId, beforeMessageId) {
+      ensureOpen(); const row = requireThread(clientThreadId), current = q.message.get(row.local_conversation_id, beforeMessageId)
+      if (!current || parse(current.public_json)?.role !== 'user') return null
+      const prev = db.prepare('SELECT local_run_id, public_json FROM messages WHERE local_conversation_id=? AND last_seq<? ORDER BY last_seq DESC LIMIT 1').get(row.local_conversation_id, current.last_seq)
+      if (!prev) return null
+      const m = parse(prev.public_json)
+      return m.role === 'assistant' && m.phase === 'final_answer' && ['complete','completed','final'].includes(m.status) ? prev.local_run_id : null
     },
     getAcceptedText(clientThreadId, requestId) {
       ensureOpen(); const row = requireThread(clientThreadId)

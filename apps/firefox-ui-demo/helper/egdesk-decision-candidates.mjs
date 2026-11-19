@@ -38,7 +38,7 @@ function selectionCandidates(body, memoryEvidenceFor) {
         const access = memoryEvidenceFor(handle)
         if (access) out.push({ id: 'memory-selection:' + index, kind: 'source', title: '선택한 장부 행',
           summary: '연결한 원본 기록', timeSlice: 'unknown', mandatory: true,
-          mayRead: access.mayRead, loadText: access.loadText })
+          mayRead: access.mayRead, loadText: access.loadText, noteSent: access.noteSent })
         continue
       }
       const title = text(item.label) || text(item.title) || text(item.name) || text(item.url)
@@ -50,6 +50,13 @@ function selectionCandidates(body, memoryEvidenceFor) {
       out.push({ id, kind: 'source', title: clip(title, 200), summary: text(item.kind) ? `selected ${text(item.kind)}` : 'selected by the person',
         timeSlice: 'present', ...(text(item.url) ? { sourceRef: clip(text(item.url), 500) } : {}) })
     }
+  }
+  // Explicit selection wins, even if it is no longer usable. Never silently substitute another grant.
+  if (!body?.selectedSources?.length && !body?.attachments?.length && !body?.contextSnapshotIds?.length) {
+    const access = memoryEvidenceFor?.discover?.(body.message)
+    if (access) out.push({ id: 'memory-lookup:0', kind: 'source', title: '이 대화에서 허용한 기억',
+      summary: '질문과 일치하는 원본 기록', timeSlice: 'unknown', mandatory: true,
+      mayRead: access.mayRead, loadText: access.loadText, noteSent: access.noteSent })
   }
   return out
 }

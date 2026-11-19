@@ -1570,6 +1570,9 @@ export class CodexChatRuntime {
     else if (storedThread?.conversationId) this.assertNativeAccount(clientThreadId, storedThread.conversationId, engineId)
     this.assertEngineContext(body, engineId)
     this.assertReady(engineId, engineProfileId)
+    const checkAudience = (cid, reserve = false) => this.checkNativeAudience(cid, clientThreadId,
+      channelKind === 'direct' && !boardTurn && body.boardId == null && body.stateless !== true ? profileRun.binding.profileId : null, reserve)
+    if (boundId) checkAudience(boundId) // before acceptRequest/recordRoomAgent or applying new native instructions
     const slot = this.operationSlot(engineId, engineProfileId)
     if (typeof body.message !== 'string' || !body.message.trim()) throw chatError('EMPTY_MESSAGE', 'Message is required')
     if (body.message.length > MAX_TEXT) throw chatError('MESSAGE_TOO_LONG', `Message exceeds ${MAX_TEXT} characters`)
@@ -1671,7 +1674,7 @@ export class CodexChatRuntime {
       }
     }
     const lock = conversationId || `client:${clientThreadId || 'legacy'}`
-    if (this.locks.has(lock)) throw chatError('RUN_IN_PROGRESS', 'A request is already starting for this conversation', 409)
+    if (this.locks.has(lock) || (conversationId && this.locks.has(`client:${clientThreadId}`))) throw chatError('RUN_IN_PROGRESS', 'A request is already starting for this conversation', 409)
     if (this.locks.size >= MAX_RUNS) throw chatError('RUNTIME_BUSY', 'Too many pending requests', 429)
     const registered = !conversationId && clientThreadId ? [...this.threads.values()].find(t => t.clientThreadId === clientThreadId) : null
     if (registered) {
@@ -1759,7 +1762,7 @@ export class CodexChatRuntime {
       route,
       board: internal?.board?.record || null,
       ...(boardTurn ? { boardActor } : {}),
-      checkBoard, channelKind, peerDispatch: internal?.board?.peers,
+      checkBoard, checkAudience, channelKind, peerDispatch: internal?.board?.peers,
       extraContext: { ...(typeof internal?.board?.block === 'string' ? { egdesk_board: internal.board.block } : {}), ...(internal?.blocks || {}) },
     }
     const record = { fingerprint, settled: false, promise: null, engineId: context.engine.id, slot }
@@ -2086,6 +2089,28 @@ export class CodexChatRuntime {
     return executionPolicy
   }
 
+  // A committed reservation is sticky, including after an ambiguous native reply. Never
+  // infer the audience from a selected source, today's Decision mode, or the current Agent alone.
+  checkNativeAudience(cid, clientThreadId, directProfileId, reserve = false) {
+    if (!this.store && !reserve) return
+    const unavailable = () => Object.assign(chatError('CHAT_STORE_UNAVAILABLE', 'Could not verify the native conversation audience; no turn was started', 503), { definite: true })
+    const store = this.assertStore()
+    let pinned
+    try { pinned = store.getNativeAudience(cid) } catch { throw unavailable() }
+    if (pinned === null && !reserve) return
+    const thread = store.getConversation(clientThreadId)
+    if (!directProfileId || (pinned !== null && pinned !== directProfileId) || this.directChatBindings.get(cid) !== clientThreadId ||
+        thread?.conversationId !== cid || thread.stateless || thread.agent?.profileId !== directProfileId || this.isSavedBoardTarget(clientThreadId) || this.boardNativeSpeakers.has(cid)) {
+      throw Object.assign(chatError('NATIVE_AUDIENCE_LOCKED', 'Continue this native history in its original direct chat with the same Agent, or start a new chat', 409), { definite: true })
+    }
+    if (pinned === null) {
+      try {
+        store.appendEvent({ clientThreadId, eventKey: 'native-dm-audience', event: 'native.audience.reserved', ts: this.now(), details: { profileId: directProfileId } })
+        if (store.getNativeAudience(cid) !== directProfileId) throw unavailable()
+      } catch { throw unavailable() }
+    }
+  }
+
   persistNativeBinding(context, conversationId) {
     if (!this.store) return
     const identityHash = this.engineOwnerHash(context.engine.id, context.route.engineProfileId)
@@ -2236,6 +2261,7 @@ export class CodexChatRuntime {
       }
     }
     let cid = context.conversationId
+    const beforeResume = async () => { await assertWorkspaceCurrent(); context.checkAudience(cid) }
     if (cid) {
       if (context.policyUpgrade) {
         // thread/resume cannot replace a thread's persisted dynamicTools. Do
@@ -2254,7 +2280,7 @@ export class CodexChatRuntime {
       // Hydrate native history before deciding whether a new turn is safe.
       // This also supplies the historical cwd for profile-off config/read.
       const justRestored = !this.loadedThreads.has(cid)
-      if (justRestored) await this.restoreThread(cid, context.clientThreadId, qaOverrides || {}, { policy, beforeResume: assertWorkspaceCurrent })
+      if (justRestored) await this.restoreThread(cid, context.clientThreadId, qaOverrides || {}, { policy, beforeResume })
       if ([...this.runs.values()].some(run => run.conversationId === cid && !TERMINAL.has(run.status))) {
         throw chatError('RUN_IN_PROGRESS', 'This conversation already has an active or unreconciled turn', 409)
       }
@@ -2296,7 +2322,7 @@ export class CodexChatRuntime {
         const computerExtra = computerOff ? await this.computerControlOffOverrides(overrides.cwd || this.threads.get(cid)?.cwd || null, request) : null
         if (epoch !== this.epochOf(engine.id, slot)) throw chatError('CONTEXT_CHANGED', 'Codex connection or account changed', 409)
         // A bounded thread resumed with the ceiling's shell_tool false must read it back off.
-        const resumed = await this.restoreThread(cid, context.clientThreadId, mergeCeilingOverrides(mergeCeilingOverrides({ ...overrides, ...(qaOverrides || {}) }, extra), computerExtra?.overrides), { policy, shellOff: Boolean(extra) && ceiling?.terminal === 'none', beforeResume: assertWorkspaceCurrent })
+        const resumed = await this.restoreThread(cid, context.clientThreadId, mergeCeilingOverrides(mergeCeilingOverrides({ ...overrides, ...(qaOverrides || {}) }, extra), computerExtra?.overrides), { policy, shellOff: Boolean(extra) && ceiling?.terminal === 'none', beforeResume })
         if (!bounded) context.ceilingNotices.push(...ceilingReportNotices(ceiling, await verifyCeilingNativeThread(request, ceiling, resumed, cid)))
         if (computerExtra) {
           await this.verifyComputerControl(cid, computerExtra, request)
@@ -2393,7 +2419,12 @@ export class CodexChatRuntime {
       context.checkBoard?.()
       // Selection/scoring can precede native thread preparation. Do not send an
       // already assembled packet after its grant expires or is revoked.
-      if (decision?.result.mayDispatch && !decision.result.mayDispatch()) {
+      const guarded = decision?.mode === 'on' && !!decision.result.mayDispatch && !!additionalContext?.[DECISION_CONTEXT_KEY]
+      const reserve = guarded && decision.result.mayDispatch()
+      if (body.conversationId || reserve) context.checkAudience(cid, reserve)
+      // FULL SQLite commit can take time. A grant that expired during reservation
+      // still sends no private input; never release a committed history fence here.
+      if (guarded && (!reserve || !decision.result.mayDispatch())) {
         if (additionalContext) delete additionalContext[DECISION_CONTEXT_KEY]
         decision.result = { status: 'fallback', reason: 'evidence_unavailable', selected: [], extraContext: {}, receipt: null }
       }
@@ -2460,6 +2491,7 @@ export class CodexChatRuntime {
       for (const provider of preparedProviders.keys()) await this.callProvider(provider, 'bindRun', run, preparedProviders.get(provider), readerConfiguration, provider === this.contexts ? contextAuthority : undefined)
       if (epoch !== this.epochOf(engine.id, slot)) throw chatError('ACCOUNT_CHANGED', 'Codex account or connection changed', 409)
       for (const notice of context.ceilingNotices) this.noteCeiling(run, notice.key, notice)
+      if (decision?.mode === 'on' && decision.result.status === 'ready') decision.result.noteSent?.()
       if (decision) this.noteDecisionContext(run, decision)
       // Notifications can precede the RPC response. Only the returned turn ID
       // may inherit this request's correlation; other turns remain unclaimed.
@@ -2650,17 +2682,25 @@ export class CodexChatRuntime {
     const slot = this.operationSlot(engineId, engineProfileId)
     if (slot) await this.slotAdapter(engineId).ensureReady(slot)
     let boundPolicy = this.threads.get(cid)?.executionPolicy || null
+    // This endpoint restores to the exact local room, not to a new model turn. With no
+    // UI Agent hint, its saved Agent plus the original direct binding identify the audience.
+    const checkResumeAudience = () => this.checkNativeAudience(cid, body.clientThreadId,
+      body.stateless !== true && body.boardId == null && (body.roomId == null || body.roomId === body.clientThreadId) &&
+      body.expectedBoardDelivery === undefined && body.profileEnabled !== false &&
+      (body.replyDestination === undefined || body.replyDestination === 'direct')
+        ? (body.profileId === undefined ? this.store?.getConversation(body.clientThreadId)?.agent?.profileId : body.profileId) : null)
     if (this.store) {
       const clientThreadId = idText(body.clientThreadId)
       if (!clientThreadId) throw chatError('INVALID_CLIENT_THREAD_ID', 'clientThreadId is required to resume a durable chat', 400)
       const thread = this.store.getConversation(clientThreadId)
       if (!thread || thread.conversationId !== cid) throw chatError('NATIVE_BINDING_MISMATCH', 'Native conversation is not bound to this local chat', 409)
       boundPolicy = this.assertNativeAccount(clientThreadId, cid, engineId)
+      checkResumeAudience()
     }
     this.assertEngineContext(body, engineId)
     this.assertReady(engineId, engineProfileId)
     const epoch = this.epochOf(engineId, slot)
-    if (this.locks.has(cid) || this.pendingStarts.has(cid)) throw chatError('RUN_STARTING', 'Conversation request is still starting', 409)
+    if (this.locks.has(cid) || this.locks.has(`client:${body.clientThreadId}`) || this.pendingStarts.has(cid)) throw chatError('RUN_STARTING', 'Conversation request is still starting', 409)
     this.locks.add(cid)
     try {
       const bounded = [READ_ONLY_QA, BROWSER_BOUNDED, FIXTURE_BROWSER_QA].includes(boundPolicy)
@@ -2674,7 +2714,7 @@ export class CodexChatRuntime {
         this.loadedThreads.delete(cid)
         if (!['unsubscribed', 'notLoaded'].includes(detached?.status)) throw chatError('QA_POLICY_UNVERIFIED', 'Could not detach native QA thread before policy verification', 409)
       }
-      await this.restoreThread(cid, idText(body.clientThreadId), qaOverrides, { policy: boundPolicy })
+      await this.restoreThread(cid, idText(body.clientThreadId), qaOverrides, { policy: boundPolicy, beforeResume: checkResumeAudience })
       await this.queue
       // Revalidate previously retained links without claiming files were generated.
       for (const run of this.runs.values()) if (run.conversationId === cid) {
@@ -2737,10 +2777,16 @@ export class CodexChatRuntime {
     // The branch carries the source's native tools, so it inherits their record.
     const toolManifest = this.threadToolManifests.get(conversationId) ?? null
     const browserToolsRegistered = this.browserRegisteredThreads.has(conversationId)
+    // A fork has a different room and cannot carry a private audience. Serialize the
+    // native copy with first-turn reservation as well as continued sends on its source.
+    this.checkNativeAudience(conversationId, source.clientThreadId, null)
+    if (this.locks.has(conversationId) || this.locks.has(`client:${source.clientThreadId}`)) throw chatError('RUN_IN_PROGRESS', 'The source conversation is busy', 409)
+    this.locks.add(conversationId)
     this.locks.add(lock)
     try {
       const result = await engine.forkThread({ threadId: conversationId, ...(fromTurnId ? { lastTurnId: fromTurnId } : {}), excludeTurns: true, config: ordinaryThreadConfig() }, slot)
       if (epoch !== this.epochOf(engine.id, slot) || this.engineOwnerHash(engine.id, engineProfileId) !== identityHash) throw chatError('ACCOUNT_CHANGED', 'Codex account or connection changed', 409)
+      this.checkNativeAudience(conversationId, source.clientThreadId, null) // another store writer while the native copy was pending
       const cid = result?.thread?.id
       if (!idText(cid) || this.threadEngines.has(cid) || store.getConversationByNative(cid)) throw chatError('INVALID_THREAD_RESPONSE', 'Codex did not return a new thread ID', 502)
       if (result.thread.forkedFromId != null && result.thread.forkedFromId !== conversationId) throw chatError('THREAD_MISMATCH', 'Codex branched a different thread', 502)
@@ -2768,7 +2814,7 @@ export class CodexChatRuntime {
         if (providerIds.has(provider === this.contexts ? 'egdesk-context-v1' : provider.providerId)) await this.callProvider(provider, 'registerThread', cid)
       }
       return { accepted: true, durable: this.storeHealthy, conversationId: cid, clientThreadId, localConversationId: local.localConversationId, forkedFrom, engineId: engine.id }
-    } finally { this.locks.delete(lock) }
+    } finally { this.locks.delete(lock); this.locks.delete(conversationId) }
   }
 
   findRun(body) {
@@ -3808,6 +3854,7 @@ export class CodexChatRuntime {
     } catch { return null }
     const budgetMs = Number.isSafeInteger(setup.budgetMs) && setup.budgetMs > 0 ? setup.budgetMs : 800
     const started = Date.now()
+    const askedAt = this.now()
     const controller = new AbortController()
     let timer = null
     const expired = new Promise(resolve => { timer = setTimeout(() => { controller.abort(); resolve(null) }, budgetMs) })
@@ -3815,7 +3862,7 @@ export class CodexChatRuntime {
       const memoryEvidenceFor = mode === 'on' ? this.directEvidenceReader(body, context, controller.signal) : null
       const candidates = await setup.collect({ body, context, signal: controller.signal, memoryEvidenceFor })
       if (controller.signal.aborted) return { status: 'fallback', reason: 'timeout', selected: [], extraContext: {}, receipt: null }
-      return prepareTurnContext({ message: body.message, candidates: Array.isArray(candidates) ? candidates : [], client: setup.client,
+      return prepareTurnContext({ message: body.message, candidates: Array.isArray(candidates) ? candidates : [], client: setup.client, askedAt,
         timeoutMs: Math.max(1, budgetMs - (Date.now() - started)), signal: controller.signal, cacheScope: 'ctx' })
     })().catch(() => ({ status: 'fallback', reason: 'unreachable', selected: [], extraContext: {}, receipt: null }))
     try {
@@ -3834,7 +3881,7 @@ export class CodexChatRuntime {
     const scope = { ownerKey: this.engineOwnerKey(engineId, engineProfileId), agentId: context.profileRun.binding.profileId,
       clientThreadId: context.clientThreadId }
     if (!scope.ownerKey || ownerHash(scope.ownerKey) !== context.ownerHash) return null
-    return handle => {
+    const read = handle => {
       const store = this.decisionContext.memoryEvidence
       if (!store) return null
       const mayRead = () => {
@@ -3847,12 +3894,57 @@ export class CodexChatRuntime {
         } catch { return false }
       }
       if (!mayRead()) return null
-      return { mayRead, loadText: async () => {
+      return { mayRead, noteSent: () => {
+        if (mayRead()) store.rememberTurn?.(scope, context.localRunId, handle)
+      }, loadText: async () => {
         if (!mayRead()) return null
         const evidence = await store.read(scope, handle)
         return evidence && mayRead() ? JSON.stringify(evidence) : null
       } }
     }
+    read.discover = message => {
+      try {
+        if (typeof message !== 'string' || signal.aborted || !scope.agentId) return null
+        const store = this.decisionContext.memoryEvidence
+        if (!store) return null
+        const q = message.normalize('NFKC').trim()
+        // Bare requests for justification refer to the answer immediately before this question, even after restart.
+        // If the provenance is unavailable we do not silently choose another row by topic.
+        const followup = /^(?:왜(?:요|죠|\s*\d+(?:[.,]\d+)?\s*개(?:야|예요|인가요|죠)?)?|(?:그\s*)?근거(?:는|가\s*뭐야|가\s*뭐예요|를?\s*보여\s*줘)?|어떻게\s*계산(?:했어|했어요|한\s*거야))[?？!.\s]*$/u.test(q)
+        const prior = followup && this.store.previousPublicAnswerRun?.(scope.clientThreadId, context.localMessageId)
+        const match = followup ? prior && store.forTurn?.(scope, prior) : store.find?.(scope, q)
+        return match?.id ? read(match.id) : null
+      } catch { return null }
+    }
+    return read
+  }
+
+  // Trusted origin-management scope, independent of a client-supplied profile or channel label.
+  memoryDmAuthority({ clientThreadId, conversationId, expectedProfileId }) {
+    const deny = () => { throw chatError('MEMORY_DM_UNAVAILABLE', 'No verified Agent DM for this request', 403) }
+    if (!this.store || !clientThreadId || !conversationId || !expectedProfileId) deny()
+    const body = { clientThreadId, conversationId }
+    const route = this.requestEngineRoute(body, { requireClientPair: true })
+    const authority = this.contextAuthority(body, route)
+    const assertCurrent = () => {
+      const t = this.store.getConversation(clientThreadId), run = this.store.getLatestRun(clientThreadId)
+      if (!t || t.conversationId !== conversationId || t.stateless || t.forkedFrom || t.agent?.profileId !== expectedProfileId ||
+          this.directChatBindings.get(conversationId) !== clientThreadId || this.isSavedBoardTarget(clientThreadId) || this.boardNativeSpeakers.has(conversationId) ||
+          !run || run.conversationId !== conversationId || run.board || run.stateless || run.profileBinding?.profileId !== expectedProfileId ||
+          this.threads.get(conversationId)?.executionPolicy || this.engineOwnerKey(route.engineId, route.engineProfileId) !== authority.ownerKey ||
+          this.epochOf(route.engineId, this.operationSlot(route.engineId, route.engineProfileId)) !== authority.epoch) deny()
+    }
+    if (this.readNativeBinding(clientThreadId, conversationId).executionPolicy) deny()
+    assertCurrent()
+    return { scope: { ownerKey: authority.ownerKey, clientThreadId, agentId: expectedProfileId }, assertCurrent,
+      validateCapture: async capture => {
+        assertCurrent()
+        if (capture?.clientThreadId !== clientThreadId || (capture.engine && (capture.engine.engineId !== authority.engineId ||
+            (capture.engine.engineProfileId ?? null) !== (authority.engineProfileId ?? null)))) deny()
+        if (authority.engineId !== 'codex' && !capture.engine) deny()
+        await this.contexts?.validateCaptures?.(authority, [capture], body)
+        assertCurrent()
+      } }
   }
 
   // One decision-context activity row: what the decision model chose, and in

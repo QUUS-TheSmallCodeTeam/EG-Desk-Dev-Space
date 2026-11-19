@@ -43,3 +43,14 @@ test('final check covers every guarded attachment, even a grant that disappears 
   const r = await assemble([a, b]); assert.equal(r.status, 'ready'); assert.match(r.extraContext[DECISION_CONTEXT_KEY], /"v":"B"/)
   assert.equal(r.mayDispatch(), false); assert.doesNotMatch(JSON.stringify(r.receipt), /mayDispatch|memrow:|"v"/)
 })
+
+test('the reference clock belongs to the question, not the source or the ranking model', async () => {
+  const c = await entry({ mayRead: () => true, loadText: () => '{"record":"unchanged source"}' })
+  const old = await assemble(c, { askedAt: Date.UTC(2026,10,19,1) }), later = await assemble(c, { askedAt: Date.UTC(2026,10,20,1) })
+  assert.match(old.extraContext[DECISION_CONTEXT_KEY], /Question asked at 2026-11-19T01:00:00.000Z/)
+  assert.match(later.extraContext[DECISION_CONTEXT_KEY], /Question asked at 2026-11-20T01:00:00.000Z/)
+  assert.equal(old.receipt.catalogHash, later.receipt.catalogHash); assert.deepEqual(old.selected,later.selected)
+  assert.match(old.extraContext[DECISION_CONTEXT_KEY], /no date.*unknown even as to/)
+  const ordinary = await assemble([{ id: 'plain', title: 'plain', summary: 'ok', mandatory: true }], { askedAt: Date.UTC(2026,10,19,1) })
+  assert.doesNotMatch(ordinary.extraContext[DECISION_CONTEXT_KEY], /Question asked at/)
+})

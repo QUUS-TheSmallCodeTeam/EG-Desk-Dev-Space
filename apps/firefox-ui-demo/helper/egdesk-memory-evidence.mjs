@@ -41,9 +41,67 @@ function validatePin(v, source, stored) {
   if (stored) check(typeof v.projectionHash === 'string' && v.projectionHash.length === 64 && digest.test(v.projectionHash))
   return { ...(source ? { relation: v.relation } : {}), sourceId, revision, startLine, endLine, ...(stored ? { projectionHash: v.projectionHash } : {}) }
 }
+// Local opt-in aliases, never extracted from captures or inferred from previous messages.
+const MAX_ROWS = 64, MAX_TERMS = 8, MAX_TERM = 64, MAX_WORDS = 6
+const explicitLabel = '직접 선택한 근거'
+const words = /[\p{L}\p{M}\p{N}_]+(?:[-'’][\p{L}\p{M}\p{N}_]+)*/gu
+const hangulPhrase = /^[가-힣]+(?: [가-힣]+)*$/u
+const generic = new Set(('왜 왜요 왜냐면 뭐 뭐지 뭐야 뭔가 무엇 무엇을 뭔데 누가 누구 언제 어디 어떻게 얼마나 얼마 몇 개 갯 개수 그거 이거 저거 그건 이건 저건 그게 이게 그것 이것 저것 이 그 저 지금 오늘 어제 내일 방금 다시 그냥 좀 또 더 알려줘 알려 주세요 보여줘 해줘 말해줘 설명해줘 부탁해 네 아니요 맞아 그래 응 질문 내용 정보 근거 출처 이유 앞서 이전 다음 here there this that these those the a an it its is are be do did does why what how who where when which much many more yes no now today please show tell me help explain again details information source reason').split(' '))
+const suffixes = new Set(('은 는 이 가 을 를 도 만 의 에 엔 와 과 야 요 로 랑 에서 에선 에도 에는 에게 에게서 한테 께 께서 으로 으로는 로는 부터 까지 보다 처럼 이랑 이야 이에요 예요 인가 인가요 일까 일까요 이지 이죠 이나 이라도 이면 라면 은요 는요 이요 가요 만요 에서도 에서는').split(' '))
+const aliasKey = s => hangulPhrase.test(s) ? s.replaceAll(' ', '') : s
+function nonspecific(word) {
+  if (generic.has(word) || /^\p{Nd}+(?:개|명|건|원|일|시|분|초|달|월|년|회|번|items?)?$/u.test(word)) return true
+  for (let n = 1; n <= 3 && n < word.length; n++) if (suffixes.has(word.slice(-n)) && generic.has(word.slice(0, -n))) return true
+  return false
+}
+function userLabel(value) {
+  check(typeof value === 'string' && value.length <= 160 && value.isWellFormed() && !/[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]/u.test(value))
+  const label = value.normalize('NFC').trim()
+  check(label.length > 0 && label.length <= 80)
+  return label
+}
+function alias(value) {
+  check(typeof value === 'string' && value.length <= 128 && value.isWellFormed() && !/[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]/u.test(value))
+  const term = value.normalize('NFKC').toLowerCase().trim().replace(/\p{Zs}+/gu, ' ')
+  const parts = term.match(words) || [], key = aliasKey(term)
+  check(term.length <= MAX_TERM && parts.length >= 1 && parts.length <= MAX_WORDS && parts.join(' ') === term &&
+    /\p{L}/u.test(term) && (term.match(/[\p{L}\p{N}]/gu) || []).length >= (/[가-힣]/u.test(term) ? 2 : 3))
+  // A user may explicitly select the conventional count phrase, but never a lone interrogative or generic follow-up.
+  check(key === '몇개' || (!nonspecific(key) && parts.some(word => !nonspecific(word))))
+  return term
+}
+function discoveryMeta(meta) {
+  fields(meta, ['label', 'terms'])
+  const label = userLabel(meta.label), terms = []
+  check(Array.isArray(meta.terms) && meta.terms.length >= 1 && meta.terms.length <= MAX_TERMS)
+  for (let i = 0; i < meta.terms.length; i++) {
+    check(Object.hasOwn(meta.terms, i)); terms.push(alias(meta.terms[i]))
+  }
+  check(new Set(terms.map(aliasKey)).size === terms.length)
+  return { label, terms }
+}
+function messageKeys(value) {
+  check(typeof value === 'string' && value.length > 0 && value.length <= 2048 && value.isWellFormed() && !/[\u0000-\u0008\u000b\u000c\u000e-\u001f\p{Cf}]/u.test(value))
+  const text = value.normalize('NFKC').toLowerCase(), parts = [...text.matchAll(words)], keys = new Set()
+  check(parts.length <= 160)
+  for (let i = 0; i < parts.length; i++) {
+    let phrase = ''
+    for (let j = i; j < parts.length && j < i + MAX_WORDS; j++) {
+      if (j > i && !/^\p{Zs}+$/u.test(text.slice(parts[j - 1].index + parts[j - 1][0].length, parts[j].index))) break
+      const word = parts[j][0]; phrase += (j === i ? '' : ' ') + word
+      if (phrase.length > MAX_TERM + 9) break
+      keys.add(aliasKey(phrase))
+      // Only remove one whole, known particle/copula at the last word's edge; never search inside a token.
+      for (let n = 1; n <= 3 && n < word.length; n++) if (suffixes.has(word.slice(-n))) keys.add(aliasKey(phrase.slice(0, -n)))
+    }
+  }
+  return keys
+}
 function selection(v, stored = false) {
   const hasExpiry = !stored && v != null && Object.hasOwn(v, 'expiresAt')
-  fields(v, ['ledger', 'sources', ...(hasExpiry ? ['expiresAt'] : [])])
+  const hasDiscovery = !stored && v != null && Object.hasOwn(v, 'discovery')
+  fields(v, ['ledger', 'sources', ...(hasExpiry ? ['expiresAt'] : []), ...(hasDiscovery ? ['discovery'] : [])])
+  const discovery = hasDiscovery ? discoveryMeta(v.discovery) : null
   if (hasExpiry) check(positive(v.expiresAt)) // null, strings and an explicit undefined are not permanent grants.
   check(Array.isArray(v.sources) && v.sources.length >= 1 && v.sources.length <= MAX_SOURCES)
   const ledger = validatePin(v.ledger, false, stored), sources = []
@@ -60,7 +118,7 @@ function selection(v, stored = false) {
     }
     sources.push(p)
   }
-  return { ledger, sources, expiresAt: hasExpiry ? v.expiresAt : null }
+  return { ledger, sources, expiresAt: hasExpiry ? v.expiresAt : null, discovery }
 }
 function projectionHash(m, scope, pin) {
   check(m?.version === 1 && m.clientThreadId === scope.clientThreadId && m.sourceId === pin.sourceId && m.snapshotId === pin.sourceId &&
@@ -107,7 +165,7 @@ function location(dataDir, create) {
   if (!stat(dir) && create) mkdirSync(dir, { recursive: true, mode: 0o700 })
   const directory = stat(dir)
   if (!directory && !create) return null
-  check(directory?.isDirectory() && isOwnedAndPrivate(dir, directory, 0o077))
+  check(directory?.isDirectory() && isOwnedAndPrivate(dir, directory, 0o077) && (process.platform === 'win32' || (directory.mode & 0o200)))
   const file = path.join(dir, 'grants.sqlite')
   const safeFile = p => {
     const s = stat(p)
@@ -123,12 +181,31 @@ function location(dataDir, create) {
     try { closeSync(openSync(file, constants.O_CREAT | constants.O_EXCL | constants.O_RDWR | (constants.O_NOFOLLOW || 0), 0o600)); fresh = true }
     catch (e) { if (e.code !== 'EEXIST') throw e }
   }
-  check(safeFile(file))
+  const database = safeFile(file)
+  check(database && (process.platform === 'win32' || (database.mode & 0o200)))
   return { file, fresh }
 }
 const APP_ID = 0x4d455647 // MEVG
-const active = `FROM grants g WHERE g.id=? AND g.scope_key=? AND (g.expires_at IS NULL OR g.expires_at>?)
+const liveInScope = `g.scope_key=? AND (g.expires_at IS NULL OR g.expires_at>?)
   AND NOT EXISTS (SELECT 1 FROM revoked r WHERE r.id=g.id)`
+const active = `FROM grants g WHERE g.id=? AND ${liveInScope}`
+const metadata = 'g.id, g.discovery_label AS label, g.discovery_terms AS terms'
+const v2Objects = `CREATE INDEX grants_by_scope ON grants(scope_key);
+  CREATE INDEX discoverable_by_scope ON grants(scope_key) WHERE discovery_terms IS NOT NULL;
+  CREATE TABLE turn_inputs(scope_key TEXT NOT NULL, run_key TEXT NOT NULL, id TEXT NOT NULL REFERENCES grants(id),
+    PRIMARY KEY(scope_key, run_key, id)) WITHOUT ROWID, STRICT;`
+function runKey(value) {
+  check(typeof value === 'string' && value.length >= 1 && value.length <= 256 && value.isWellFormed() && !/[\s\p{Cc}\p{Cf}]/u.test(value))
+  return sha(value)
+}
+function decodeMeta(row) {
+  check(row && token(row.id))
+  if (row.label === null && row.terms === null) return { id: row.id, label: explicitLabel, automatic: false }
+  check(typeof row.terms === 'string' && row.terms.length <= MAX_TERMS * (MAX_TERM + 4))
+  const { label, terms } = discoveryMeta({ label: row.label, terms: JSON.parse(row.terms) })
+  return { id: row.id, label, automatic: true, terms }
+}
+function publicMeta(row) { const { id, label, automatic } = decodeMeta(row); return { id, label, automatic } }
 
 export class MemoryEvidenceStore {
   #dataDir; #captures; #now; #db; #closed = false
@@ -147,16 +224,28 @@ export class MemoryEvidenceStore {
     const db = new DatabaseSync(loc.file)
     try {
       db.exec('PRAGMA trusted_schema=OFF; PRAGMA foreign_keys=ON; PRAGMA busy_timeout=50; PRAGMA synchronous=FULL;')
+      const version = () => db.prepare('PRAGMA user_version').get().user_version
+      const ours = () => db.prepare('PRAGMA application_id').get().application_id === APP_ID
       if (loc.fresh) {
         db.exec(`BEGIN IMMEDIATE;
-          CREATE TABLE grants(id TEXT PRIMARY KEY, scope_key TEXT NOT NULL, expires_at INTEGER, pins TEXT NOT NULL) STRICT;
+          CREATE TABLE grants(id TEXT PRIMARY KEY, scope_key TEXT NOT NULL, expires_at INTEGER, pins TEXT NOT NULL, discovery_label TEXT, discovery_terms TEXT) STRICT;
           CREATE TABLE revoked(id TEXT PRIMARY KEY REFERENCES grants(id)) STRICT;
-          PRAGMA application_id=${APP_ID}; PRAGMA user_version=1; COMMIT;`)
+          ${v2Objects} PRAGMA application_id=${APP_ID}; PRAGMA user_version=2; COMMIT;`)
+      } else if (ours() && version() === 1) {
+        db.exec('BEGIN IMMEDIATE')
+        if (version() === 1) { // Another process may already have migrated while this connection waited.
+          check(db.prepare('PRAGMA quick_check(1)').get().quick_check === 'ok' &&
+            db.prepare('PRAGMA table_info(grants)').all().map(c => c.name).join(',') === 'id,scope_key,expires_at,pins' &&
+            db.prepare('PRAGMA table_info(revoked)').all().map(c => c.name).join(',') === 'id')
+          db.exec(`ALTER TABLE grants ADD COLUMN discovery_label TEXT; ALTER TABLE grants ADD COLUMN discovery_terms TEXT;
+            ${v2Objects} PRAGMA user_version=2;`)
+        }
+        db.exec('COMMIT')
       }
-      check(db.prepare('PRAGMA application_id').get().application_id === APP_ID && db.prepare('PRAGMA user_version').get().user_version === 1)
+      check(ours() && version() === 2)
       this.#db = db
       return db
-    } catch (e) { db.close(); throw e }
+    } catch (e) { if (db.isTransaction) db.exec('ROLLBACK'); db.close(); throw e }
   }
   async #materialize(scope, { ledger, sources }) {
     const project = async pin => {
@@ -188,8 +277,9 @@ export class MemoryEvidenceStore {
       const { pins } = await this.#materialize(s, spec)
       const db = this.#database(true), id = `memrow:${randomUUID()}`
       check(spec.expiresAt === null || spec.expiresAt > this.#time())
-      // Only opaque pins and scope digest, never text, capture metadata, or raw identity. INSERT never replaces an old grant.
-      db.prepare('INSERT INTO grants(id,scope_key,expires_at,pins) VALUES(?,?,?,?)').run(id, s.key, spec.expiresAt, JSON.stringify(pins))
+      // Only pins, scope digest and explicitly authored discovery metadata; never capture text or raw identity.
+      db.prepare('INSERT INTO grants(id,scope_key,expires_at,pins,discovery_label,discovery_terms) VALUES(?,?,?,?,?,?)')
+        .run(id, s.key, spec.expiresAt, JSON.stringify(pins), spec.discovery?.label ?? null, spec.discovery ? JSON.stringify(spec.discovery.terms) : null)
       return id
     } catch { fail() }
   }
@@ -208,6 +298,61 @@ export class MemoryEvidenceStore {
   }
   isActive(scope, selectionId) {
     try { return token(selectionId) && !!this.#lookup(authority(scope), selectionId, false) } catch { return false }
+  }
+  // Local only. Lists expose the authored label (or one constant), never pins, aliases, capture text, or credentials from a capture.
+  list(scope) {
+    try {
+      const s = authority(scope)
+      const rows = this.#database()?.prepare(`SELECT ${metadata} FROM grants g WHERE ${liveInScope} ORDER BY g.rowid DESC LIMIT ?`).all(s.key, this.#time(), MAX_ROWS)
+      return (rows || []).map(publicMeta)
+    } catch { return [] }
+  }
+  getMeta(scope, id) {
+    try {
+      if (!token(id)) return null
+      const s = authority(scope)
+      return publicMeta(this.#database()?.prepare(`SELECT ${metadata} ${active}`).get(id, s.key, this.#time()))
+    } catch { return null }
+  }
+  find(scope, message) {
+    try {
+      const s = authority(scope), keys = messageKeys(message)
+      if (!keys.size) return null
+      const rows = this.#database()?.prepare(`SELECT ${metadata} FROM grants g WHERE ${liveInScope} AND g.discovery_terms IS NOT NULL LIMIT ?`).all(s.key, this.#time(), MAX_ROWS + 1)
+      // Never hide a potential competitor behind a row limit or choose a recent grant to break a tie.
+      if (!rows?.length || rows.length > MAX_ROWS) return null
+      let winner = null
+      for (const row of rows) {
+        const { id, label, terms } = decodeMeta(row)
+        if (terms.some(term => keys.has(aliasKey(term)))) {
+          if (winner) return null
+          winner = { id, label }
+        }
+      }
+      return winner && this.#lookup(s, winner.id, false) ? winner : null
+    } catch { return null }
+  }
+  #forTurn(s, run) {
+    // Count all recorded handles, including now-inactive ones: an ambiguous run can never become unambiguous again.
+    const row = this.#database()?.prepare(`SELECT ${metadata} FROM grants g WHERE ${liveInScope} AND g.id=(
+      SELECT MIN(id) FROM turn_inputs WHERE scope_key=? AND run_key=? HAVING COUNT(*)=1)`).get(s.key, this.#time(), s.key, run)
+    if (!row) return null
+    const { id, label } = publicMeta(row); return { id, label }
+  }
+  rememberTurn(scope, localRunId, id) {
+    try {
+      if (!token(id)) return false
+      const s = authority(scope), run = runKey(localRunId), db = this.#database()
+      if (!db) return false
+      // A host-recorded input link, not a claim the model read, used or verified it. Two append-only entries suffice to mark permanent ambiguity.
+      db.prepare(`INSERT INTO turn_inputs(scope_key,run_key,id) SELECT ?,?,g.id ${active}
+        AND (SELECT COUNT(*) FROM turn_inputs WHERE scope_key=? AND run_key=?)<2 ON CONFLICT DO NOTHING`)
+        .run(s.key, run, id, s.key, this.#time(), s.key, run)
+      return this.#forTurn(s, run)?.id === id
+    } catch { return false }
+  }
+  forTurn(scope, localRunId) {
+    try { return this.#forTurn(authority(scope), runKey(localRunId)) } catch { return null }
   }
   revoke(scope, selectionId) {
     try {

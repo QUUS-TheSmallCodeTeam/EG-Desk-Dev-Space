@@ -97,10 +97,10 @@ async function newWorld(t, { count, out } = {}) {
     return { sourceId: m.sourceId, revision: m.revision }
   }
   // Binds only the authorised lines (line 2 of each capture), never the copy or neighbouring sensitive line.
-  w.bindStandard = async ({ thread = DM, agentId = AGENT, expiresAt, caps = null } = {}) => {
+  w.bindStandard = async ({ thread = DM, agentId = AGENT, expiresAt, discovery, caps = null } = {}) => {
     const c = caps || { ledger: await w.capture('ledger.jsonl'), count: await w.capture('count.jsonl'), post: await w.capture('post.jsonl'), cover: await w.capture('cover.jsonl') }
     const r = (x, relation) => ({ ...(relation ? { relation } : {}), sourceId: x.sourceId, revision: x.revision, startLine: 2, endLine: 2 })
-    const handle = await w.evidence.bind(w.scope(thread, agentId), { ledger: r(c.ledger), sources: [r(c.count, 'counted'), r(c.post, 'posted'), r(c.cover, 'coverage')], ...(expiresAt != null ? { expiresAt } : {}) })
+    const handle = await w.evidence.bind(w.scope(thread, agentId), { ...(discovery ? { discovery } : {}), ledger: r(c.ledger), sources: [r(c.count, 'counted'), r(c.post, 'posted'), r(c.cover, 'coverage')], ...(expiresAt != null ? { expiresAt } : {}) })
     return { handle, caps: c }
   }
   w.ask = async (message, handle, { thread = DM, direct = true, profile = true, body = {} } = {}) => {
@@ -228,11 +228,11 @@ test('identity + selection: direct identity comes from the verified profile/stor
   // two bound handles, only one selected: only that row's lines reach the model
   const t2 = await w.ask('지금 몇 개야?', a.handle); assert.match(t2.packet, /COUNT item=A qty=30/); assert.doesNotMatch(t2.packet, /qty=77/)
   const t3 = await w.ask('지금 몇 개야?', b.handle); assert.match(t3.packet, /COUNT item=A qty=77/); assert.doesNotMatch(t3.packet, /COUNT item=A qty=30/)
-  // a different profile id in the body for a thread owned by the stored agent cannot read the handle bound to sol
-  noPinned(await w.ask('지금 몇 개야?', a.handle, { body: { profileId: 'other-agent' } }))
-  // A body profileId is the UI's way to switch the thread's agent (profile transition), so the stored agent follows it;
-  // the security property is that a handle bound to sol never serves while the verified agent is another one.
-  assert.equal(w.store.getConversation(DM)?.agent?.profileId, 'other-agent')
+  // Native history can retain old inputs: do not even resume it as another Agent.
+  const before = w.turns.length
+  const foreign = await w.ask('지금 몇 개야?', a.handle, { body: { profileId: 'other-agent' } })
+  assert.equal(foreign.error, 'NATIVE_AUDIENCE_LOCKED'); assert.equal(w.turns.length, before)
+  assert.equal(w.store.getConversation(DM)?.agent?.profileId, AGENT)
   assert.ok(hasPinned(await w.ask('지금 몇 개야?', a.handle)))
   assertPublicClean(w)
 })
@@ -280,4 +280,29 @@ test('the actual Board send planner and lead dispatch do not resolve a DM source
   assert.match(w.turns[0].params.additionalContext.egdesk_channel.value, /shared Board/)
   for (let i = 0; i < 300 && !w.rows(room.id).some(([role]) => role === 'assistant'); i++) await new Promise(r => setTimeout(r, 5))
   assert.equal(w.rows(room.id).length, 2); assertPublicClean(w, room.id)
+})
+
+test('implicit retrieval: the same verified DM asks without any selected source, reopens the DB and cites only its preceding public answer', async t => {
+  const w = await newWorld(t)
+  await w.ask('안녕하세요', null)
+  const hints = { clientThreadId: DM, conversationId: w.conv[DM], expectedProfileId: AGENT }
+  const authority = w.chat.memoryDmAuthority(hints); assert.deepEqual(authority.scope, w.scope()); authority.assertCurrent()
+  assert.throws(() => w.chat.memoryDmAuthority({ ...hints, expectedProfileId: 'other' }))
+  assert.throws(() => w.chat.memoryDmAuthority({ ...hints, clientThreadId: 'not-the-DM' }))
+  const { handle } = await w.bindStandard({ discovery: { label: 'A창고 재고', terms: ['재고','몇 개'] } })
+  const a = await w.ask('지금 재고는 몇 개야?', null)
+  assert.equal(a.text, '지금 28개예요.'); assert.ok(hasPinned(a)); assert.doesNotMatch(w.decisionInputs.join('\n'), /A창고 재고|memrow:|COUNT item/)
+  w.restart(); const b = await w.ask('왜 28개야?', null)
+  assert.equal(b.text, '9시 실사에서 30개였고, 이후 2개가 출고됐어요.'); assert.deepEqual(a.fields, b.fields)
+  noPinned(await w.ask('점심 메뉴 알려줘', null)); noPinned(await w.ask('왜?', null))
+  assert.ok(w.evidence.revoke(w.scope(), handle)); w.restart(); const c = await w.ask('지금 재고는 몇 개야?', null)
+  assert.ok(!c.none); noPinned(c); assertPublicClean(w)
+})
+
+test('automatic match never chooses between two equally matching rows and is not a fallback for a different explicit selection', async t => {
+  const w = await newWorld(t); const d = { label: '창고 재고', terms: ['재고'] }
+  const a = await w.bindStandard({ discovery: d }); const b = await w.bindStandard({ discovery: { ...d, label: '다른 창고' }, caps: a.caps })
+  noPinned(await w.ask('재고는?', null)); w.evidence.revoke(w.scope(), b.handle)
+  assert.ok(hasPinned(await w.ask('재고는?', null)))
+  noPinned(await w.ask('재고는?', b.handle)); assertPublicClean(w)
 })
