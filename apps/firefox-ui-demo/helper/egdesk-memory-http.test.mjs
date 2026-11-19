@@ -30,8 +30,8 @@ async function world(t) {
   w.evidence = { list: s => { assert.deepEqual(s, w.scope); return w.list }, bind: (s, b) => store.bind(s, b), read: (s, id) => store.read(s, id), isActive: (s, id) => store.isActive(s, id), revoke: (s, id) => store.revoke(s, id) }
   w.handler = createMemoryEvidenceHttpHandler({ port: PORT, captures, getEvidence: () => w.evidence, getMode: () => w.mode,
     ensureAuth: async (...args) => { w.authCalls.push(args); if (!w.auth) throw new Error('/private/fixture-auth') },
-    resolveDm: async r => { w.resolved.push(r); return { scope: w.scope, assertCurrent() { if (!w.current) throw Error('fixture owner changed') },
-      validateCapture: async m => { w.seen.push(m.sourceId); if (m.engine?.engineId === 'denied') throw Error('private attachment'); await w.validate?.(m) } } },
+    resolveDm: async r => { w.resolved.push(r); if (w.dmDenied) return null; return { scope: w.scope, assertCurrent() { if (!w.current) throw Error('fixture owner changed') },
+      topicRecipient: w.topicRecipient, topicStartSeq: () => 7, topicAdjacent: w.topicAdjacent, validateCapture: async m => { w.seen.push(m.sourceId); if (m.engine?.engineId === 'denied') throw Error('private attachment'); await w.validate?.(m) } } },
   })
   w.req = (a, fields = {}, options) => request(w.handler, a, { ...ROUTE, ...fields }, options)
   w.cap = (text, name = '매출 장부', { owner = SCOPE.ownerKey, dm = SCOPE.clientThreadId, clipped = false, engine } = {}) => captures.capture(owner, dm, { id: 'ui-fx', label: name, kind: 'browser', sourceRef: { url: 'https://fixture.invalid/private', viewId: 'private-view' }, content: { text, truncated: clipped } }, { engine })
@@ -44,7 +44,7 @@ async function world(t) {
 
 test('guard every owned path including unknown; only canonical POST, JSON, bounded and strictly shaped input before auth', async t => {
   const w = await world(t), sid = { sourceId: randomUUID(), revision: 'a'.repeat(64), startLine: 1, endLine: 1 }
-  for (const a of ['state', 'preview', 'bind', 'read', 'revoke', 'unknown']) {
+  for (const a of ['state', 'preview', 'bind', 'read', 'revoke', 'topic-enable', 'topic-disable', 'unknown']) {
     for (const opts of [{ headers: { host: 'other.test:41917' } }, { headers: { origin: 'https://other.test' } }, { headers: { 'sec-fetch-site': 'same-site' } }, { remote: '192.0.2.1' }]) denied(await w.req(a, {}, opts), 403)
   }
   for (const [status, a, fields, opt] of [
@@ -131,4 +131,124 @@ test('speech consent is separate, authenticated, prospective and never returns t
   const gen=w.store.speechGrant(w.scope);assert.ok(gen);assert.doesNotMatch(JSON.stringify((await w.req('state')).body),new RegExp(gen));
   w.mode='off'; const off=await w.req('speech-disable');assert.equal(off.status,200);assert.deepEqual(off.body,{speechAllowed:false});assert.equal(w.store.speechGrant(w.scope),null);assert.equal(w.mode,'off');
   w.evidence.speechConsentState=()=>null; w.evidence.clearSpeech=()=>false; assert.equal((await w.req('state')).body.speechAllowed,null); denied(await w.req('speech-disable'),404);
+})
+
+const RECIPIENT = 'a'.repeat(64), OTHER_RECIPIENT = 'b'.repeat(64)
+// An injected sync store for route invariants and failure injection; real topic storage is covered by its own tests.
+function topicFixture(w) {
+  const state = { recipient: RECIPIENT, grant: null, unreadable: false, clearFailure: false, enables: [], compensations: [], clears: [] }
+  w.topicRecipient = () => state.lookup ? state.lookup() : state.recipient
+  Object.assign(w.evidence, {
+    topicState: () => state.unreadable ? null : state.grant,
+    topicConsentState: () => state.unreadable ? null : !!state.grant,
+    enableTopic: (scope, conversationId, recipient) => {
+      state.enables.push({ scope, conversationId, recipient })
+      assert.equal(state.grant, null)
+      const generation = randomUUID()
+      state.grant = { generation, conversationId, recipient, revision: 0, turns: [] }
+      state.afterEnable?.()
+      return generation
+    },
+    disableTopic: (scope, generation) => {
+      state.compensations.push({ scope, generation })
+      if (state.grant?.generation === generation) state.grant = null
+    },
+    clearTopic: scope => {
+      state.clears.push(scope)
+      if (state.clearFailure) return false
+      state.grant = null; state.unreadable = false; return true
+    },
+  })
+  return state
+}
+const topicPublic = body => Object.fromEntries(Object.entries(body).filter(([k]) => k.startsWith('topic')))
+
+test('topic routes require strict consent, auth, current DM, on mode and eligible recipient; state releases only bounded UI metadata', async t => {
+  const w = await world(t), fx = topicFixture(w)
+  for (const fields of [{}, { consent: false }, { consent: 'true' }, { consent: true, recipient: RECIPIENT }, { consent: true, generation: 'anything' }, { consent: true, includeHistory: true }]) denied(await w.req('topic-enable', fields), 400)
+  for (const fields of [{ consent: true }, { generation: 'anything' }, { recipient: RECIPIENT }]) denied(await w.req('topic-disable', fields), 400)
+  denied(await w.req('topic-enable', {}, { raw: JSON.stringify({ ...ROUTE, consent: true }).replace('{', '{"cons\\u0065nt":false,') }), 400)
+  assert.equal(w.authCalls.length, 0)
+  denied(await w.req('topic-enable', { consent: true }), 409)
+  w.mode = 'on'; w.auth = false
+  denied(await w.req('topic-enable', { consent: true }), 404); denied(await w.req('topic-disable'), 404)
+  w.auth = true; w.dmDenied = true
+  denied(await w.req('topic-enable', { consent: true }), 404); denied(await w.req('topic-disable'), 404)
+  w.dmDenied = false; w.current = false
+  denied(await w.req('topic-enable', { consent: true }), 404); denied(await w.req('topic-disable'), 404)
+  w.current = true
+  for (const recipient of [null, 'fixture-not-a-fingerprint', Promise.resolve(RECIPIENT)]) {
+    fx.recipient = recipient
+    denied(await w.req('topic-enable', { consent: true }), 409)
+    assert.deepEqual(topicPublic((await w.req('state')).body), { topicSupported: false, topicAllowed: false })
+  }
+  assert.deepEqual(fx.enables, []); assert.deepEqual(fx.clears, [])
+  fx.recipient = RECIPIENT
+  assert.deepEqual(topicPublic((await w.req('state')).body), { topicSupported: true, topicAllowed: false })
+  const on = await w.req('topic-enable', { consent: true }); assert.equal(on.status, 200); assert.deepEqual(on.body, { topicAllowed: true })
+  assert.deepEqual(fx.enables, [{ scope: SCOPE, conversationId: ROUTE.conversationId, recipient: RECIPIENT }])
+  for (let i = 0; i < 96; i++) fx.grant.turns.push({ text: 'topic-private-message' })
+  assert.deepEqual((await w.req('topic-enable', { consent: true })).body, { topicAllowed: true }); assert.equal(fx.enables.length, 1)
+  const state = (await w.req('state')).body
+  assert.deepEqual(topicPublic(state), { topicSupported: true, topicAllowed: true, topicCurrent: true, topicStored: 96 })
+  for (const secret of [RECIPIENT, fx.grant.generation, 'topic-private-message', SCOPE.ownerKey]) assert.ok(!JSON.stringify(state).includes(secret))
+  assert.equal(state.speechAllowed, undefined)
+  w.topicAdjacent = () => false
+  const paused = await w.req('state'); assert.equal(paused.body.topicPaused, true)
+  assert.ok(!('startSeq' in paused.body)); assert.ok(!('generation' in paused.body))
+  w.topicAdjacent = () => null; assert.equal((await w.req('state')).body.topicPaused, undefined)
+  w.topicAdjacent = () => true; assert.equal((await w.req('state')).body.topicPaused, undefined)
+})
+
+test('topic grants survive key mismatch but require verified explicit deletion; revoke survives mode-off or unavailable recipient', async t => {
+  const w = await world(t), fx = topicFixture(w); w.mode = 'on'
+  assert.equal((await w.req('topic-enable', { consent: true })).status, 200)
+  fx.recipient = OTHER_RECIPIENT
+  assert.deepEqual(topicPublic((await w.req('state')).body), { topicSupported: true, topicAllowed: true, topicCurrent: false, topicStored: 0 })
+  denied(await w.req('topic-enable', { consent: true }), 409); assert.equal(fx.enables.length, 1)
+  w.mode = 'off'; fx.lookup = () => { throw Error('unavailable recipient') }
+  assert.deepEqual(topicPublic((await w.req('state')).body), { topicSupported: false, topicAllowed: true, topicStored: 0 })
+  const off = await w.req('topic-disable'); assert.equal(off.status, 200); assert.deepEqual(off.body, { topicAllowed: false }); assert.equal(fx.grant, null)
+  assert.deepEqual(fx.clears, [SCOPE]); assert.equal(w.mode, 'off')
+  w.mode = 'on'; fx.lookup = null
+  assert.equal((await w.req('topic-enable', { consent: true })).status, 200); assert.equal(fx.grant.recipient, OTHER_RECIPIENT)
+  fx.grant.conversationId = 'old-conversation'
+  denied(await w.req('topic-enable', { consent: true }), 409)
+  assert.deepEqual(topicPublic((await w.req('state')).body), { topicSupported: true, topicAllowed: true, topicCurrent: false })
+  fx.unreadable = true; fx.clearFailure = true
+  assert.deepEqual(topicPublic((await w.req('state')).body), { topicSupported: true, topicAllowed: null })
+  denied(await w.req('topic-enable', { consent: true }), 409); denied(await w.req('topic-disable'), 404)
+  fx.clearFailure = false; assert.deepEqual((await w.req('topic-disable')).body, { topicAllowed: false }); assert.equal(fx.grant, null)
+  w.evidence.clearTopic = () => true; fx.unreadable = true
+  denied(await w.req('topic-disable'), 404)
+})
+
+for (const loss of ['owner', 'recipient']) test(`topic enable compensates original generation on ${loss} loss after commit`, async t => {
+  const w = await world(t), fx = topicFixture(w); w.mode = 'on'
+  let created
+  fx.afterEnable = () => {
+    created = fx.grant.generation
+    if (loss === 'owner') w.scope.ownerKey = 'different-owner'
+    else fx.recipient = OTHER_RECIPIENT
+  }
+  denied(await w.req('topic-enable', { consent: true }), loss === 'owner' ? 404 : 409)
+  assert.equal(fx.grant, null); assert.deepEqual(fx.compensations, [{ scope: SCOPE, generation: created }]); assert.ok(Object.isFrozen(fx.compensations[0].scope))
+})
+
+test('topic HTTP consent, key rotation and revoke use the real scoped store without enabling speech or file consent', async t => {
+  const w = await world(t); w.evidence = w.store; w.mode = 'on'
+  let recipient = RECIPIENT; w.topicRecipient = () => recipient
+  assert.equal((await w.req('topic-enable', { consent: true })).status, 200)
+  const grant = w.store.topicState(w.scope)
+  assert.equal(grant.recipient, RECIPIENT); assert.equal(grant.conversationId, ROUTE.conversationId); assert.deepEqual(grant.turns, [])
+  assert.equal(w.store.speechGrant(w.scope), null); assert.deepEqual(w.store.list(w.scope), [])
+  recipient = OTHER_RECIPIENT
+  denied(await w.req('topic-enable', { consent: true }), 409)
+  assert.equal(w.store.topicState(w.scope).generation, grant.generation)
+  w.mode = 'off'; recipient = null
+  assert.deepEqual((await w.req('topic-disable')).body, { topicAllowed: false }); assert.equal(w.store.topicState(w.scope), null)
+  w.mode = 'on'; recipient = OTHER_RECIPIENT
+  assert.equal((await w.req('topic-enable', { consent: true })).status, 200)
+  const next = w.store.topicState(w.scope)
+  assert.equal(next.recipient, OTHER_RECIPIENT); assert.notEqual(next.generation, grant.generation); assert.deepEqual(next.turns, [])
 })

@@ -610,6 +610,38 @@ export function openChatStore({ dataDir, ownerScope } = {}) {
     fail('LOCAL_RUN_ID_REQUIRED', 'Checkpoint requires localRunId, native runId, or requestId')
   }
 
+  function verifiedUtterance(store, { clientThreadId, conversationId, agentId, ownerHash, localMessageId, role, seq = null }, maxChars) {
+    ensureOpen(); const row = requireThread(clientThreadId), id = row.local_conversation_id
+    if (!conversationId || row.conversation_id !== conversationId || row.agent_profile_id !== agentId || !ownerHash ||
+        !['user','assistant'].includes(role) || !localMessageId || store.getNativeAudience(conversationId) !== agentId) return null
+    const message = q.message.get(id, localMessageId)
+    if (!message?.request_id) return null
+    const req = q.request.get(id, message.request_id), outcome = req && parse(req.outcome_json)
+    if (!req || !outcome?.accepted || outcome.dispatchStatus !== 'confirmed' || outcome.conversationId !== conversationId ||
+        outcome.accountIdentity?.ownerHash !== ownerHash || outcome.accountIdentity?.status !== 'verified' || !outcome.runId || !outcome.localRunId) return null
+    const native = db.prepare('SELECT run_id FROM native_runs WHERE local_conversation_id=? AND local_run_id=?').get(id, outcome.localRunId)
+    if (native?.run_id !== outcome.runId) return null
+    const m = parse(message.public_json)
+    if (m.role !== role || typeof m.text !== 'string' || !m.text.trim() || m.text.length > maxChars || !m.text.isWellFormed()) return null
+    let event, original
+    if (role === 'user') {
+      if (req.local_message_id !== localMessageId) return null
+      event = q.event.get(id, 'request:' + message.request_id + ':accepted')
+      if (event?.event !== 'message.accepted' || event.local_message_id !== localMessageId || event.ts !== req.accepted_at) return null
+      original = parse(event.message_json)
+    } else {
+      if (message.local_run_id !== outcome.localRunId || m.phase !== 'final_answer' || m.status !== 'complete' || m.completionConfirmed !== true || m.projectionTruncated) return null
+      if (!Number.isSafeInteger(seq) || seq <= 0) return null
+      event = q.eventSeq.get(id, seq)
+      if (!event || event.event !== 'message.completed' || event.local_run_id !== outcome.localRunId || event.run_id !== outcome.runId ||
+          event.request_id !== req.request_id || event.local_message_id !== localMessageId) return null
+      original = parse(event.details_json)
+      if (original.phase !== 'final_answer' || original.status !== 'complete' || original.completionConfirmed !== true || original.projectionTruncated) return null
+    }
+    if ((seq !== null && seq !== event.seq) || original?.role !== role || original.text !== m.text || !Number.isSafeInteger(event.ts) || event.ts < 0) return null
+    return { role, quote: original.text, seq: event.seq, spokenAt: event.ts, requestId: req.request_id, localRunId: outcome.localRunId, runId: outcome.runId }
+  }
+
   // ── Room Agent and members (v3) ──
   const memberOf = row => ({ memberKey: row.member_key, kind: row.kind, profileId: row.profile_id, role: row.role, addedAt: row.added_at, label: row.label })
   const membersOf = localId => db.prepare('SELECT * FROM room_members WHERE local_conversation_id=? ORDER BY position, member_key').all(localId).map(memberOf)
@@ -893,36 +925,47 @@ export function openChatStore({ dataDir, ownerScope } = {}) {
     },
     // Private point read for an already-consented DM. Public projections/imports are not speech receipts.
     // Return the original event time and exact delivered text, never the current projection or a work note.
-    speechSource({ clientThreadId, conversationId, agentId, ownerHash, localMessageId, role, seq = null }) {
-      ensureOpen(); const row = requireThread(clientThreadId), id = row.local_conversation_id
-      if (!conversationId || row.conversation_id !== conversationId || row.agent_profile_id !== agentId || !ownerHash ||
-          !['user','assistant'].includes(role) || !localMessageId || this.getNativeAudience(conversationId) !== agentId) return null
-      const message = q.message.get(id, localMessageId)
-      if (!message?.request_id) return null
-      const req = q.request.get(id, message.request_id), outcome = req && parse(req.outcome_json)
-      if (!req || !outcome?.accepted || outcome.dispatchStatus !== 'confirmed' || outcome.conversationId !== conversationId ||
-          outcome.accountIdentity?.ownerHash !== ownerHash || outcome.accountIdentity?.status !== 'verified' || !outcome.runId || !outcome.localRunId) return null
-      const native = db.prepare('SELECT run_id FROM native_runs WHERE local_conversation_id=? AND local_run_id=?').get(id, outcome.localRunId)
-      if (native?.run_id !== outcome.runId) return null
-      const m = parse(message.public_json)
-      if (m.role !== role || typeof m.text !== 'string' || !m.text.trim() || m.text.length > 2048 || !m.text.isWellFormed()) return null
-      let event, original
-      if (role === 'user') {
-        if (req.local_message_id !== localMessageId) return null
-        event = q.event.get(id, 'request:' + message.request_id + ':accepted')
-        if (event?.event !== 'message.accepted' || event.local_message_id !== localMessageId || event.ts !== req.accepted_at) return null
-        original = parse(event.message_json)
-      } else {
-        if (message.local_run_id !== outcome.localRunId || m.phase !== 'final_answer' || m.status !== 'complete' || m.completionConfirmed !== true || m.projectionTruncated) return null
-        if (!Number.isSafeInteger(seq) || seq <= 0) return null
-        event = q.eventSeq.get(id, seq)
-        if (!event || event.event !== 'message.completed' || event.local_run_id !== outcome.localRunId || event.run_id !== outcome.runId ||
-            event.request_id !== req.request_id || event.local_message_id !== localMessageId) return null
-        original = parse(event.details_json)
-        if (original.phase !== 'final_answer' || original.status !== 'complete' || original.completionConfirmed !== true || original.projectionTruncated) return null
-      }
-      if ((seq !== null && seq !== event.seq) || original?.role !== role || original.text !== m.text || !Number.isSafeInteger(event.ts) || event.ts < 0) return null
-      return { role, quote: original.text, seq: event.seq, spokenAt: event.ts }
+    speechSource(args) {
+      const rec = verifiedUtterance(this, args, 2048)
+      if (!rec) return null
+      const { role, quote, seq, spokenAt } = rec; return { role, quote, seq, spokenAt }
+    },
+    topicBoundary(clientThreadId) { ensureOpen(); return requireThread(clientThreadId).last_seq },
+    topicHistoryAdjacent(clientThreadId, afterSeq, beforeUserId) {
+      ensureOpen(); const room = requireThread(clientThreadId), id = room.local_conversation_id
+      const current = beforeUserId === null ? { first_seq: room.last_seq + 1 } : q.message.get(id, beforeUserId)
+      if (!current || !Number.isSafeInteger(afterSeq) || afterSeq < 0 || afterSeq >= current.first_seq) return false
+      // A lost reply may leave only the accepted event and a dispatching/unknown request,
+      // but no projected run. Neither a missing run nor a resume can prove a complete slice.
+      // Only a definite pre-start refusal or a durably failed/interrupted run is skippable.
+      const gap = db.prepare(`SELECT 1 FROM events e LEFT JOIN requests q ON q.local_conversation_id=e.local_conversation_id AND q.request_id=e.request_id
+        WHERE e.local_conversation_id=? AND e.event='message.accepted' AND e.seq>? AND e.seq<? AND NOT (
+          (COALESCE(json_extract(q.outcome_json,'$.dispatchStatus'),'')='rejected' AND json_extract(q.outcome_json,'$.accepted') IS 0) OR
+          (COALESCE(json_extract(q.outcome_json,'$.dispatchStatus'),'')='confirmed' AND EXISTS (SELECT 1 FROM events t WHERE t.local_conversation_id=e.local_conversation_id
+            AND t.request_id=e.request_id AND t.run_id=json_extract(q.outcome_json,'$.runId') AND t.local_run_id=json_extract(q.outcome_json,'$.localRunId')
+            AND t.event='run.completed' AND t.seq>e.seq AND t.seq<? AND json_extract(t.details_json,'$.status') IN ('failed','interrupted')))) LIMIT 1`)
+        .get(id, afterSeq, current.first_seq, current.first_seq)
+      return !gap && !db.prepare(`SELECT 1 FROM runs r WHERE r.local_conversation_id=? AND r.first_seq>? AND r.first_seq<?
+        AND COALESCE(json_extract(r.public_json,'$.status'),'unknown') NOT IN ('failed','interrupted','cancelled') AND NOT EXISTS(
+          SELECT 1 FROM events e WHERE e.local_conversation_id=r.local_conversation_id AND e.event='message.accepted' AND e.request_id=r.request_id AND e.seq<=?) LIMIT 1`)
+        .get(id, afterSeq, current.first_seq, afterSeq)
+    },
+    // A pair is one accepted request and its ONE live, confirmed final in a durably
+    // completed native run. A terminal snapshot, imported row or commentary alone is not proof.
+    topicPairSource({ clientThreadId, conversationId, agentId, ownerHash, user, assistant }) {
+      ensureOpen()
+      const scope = { clientThreadId, conversationId, agentId, ownerHash }
+      if (!user?.localMessageId || !assistant?.localMessageId || !Number.isSafeInteger(assistant.seq)) return null
+      const u = verifiedUtterance(this, { ...scope, localMessageId: user.localMessageId, role: 'user', seq: user.seq ?? null }, 20000)
+      const a = u && verifiedUtterance(this, { ...scope, localMessageId: assistant.localMessageId, role: 'assistant', seq: assistant.seq }, 20000)
+      if (!a || a.requestId !== u.requestId || a.localRunId !== u.localRunId || a.runId !== u.runId || a.seq <= u.seq) return null
+      const id = requireThread(clientThreadId).local_conversation_id, r = q.run.get(id, a.localRunId), run = r && parse(r.public_json)
+      if (!run || run.status !== 'completed' || run.engine?.id !== 'codex' || run.runId !== a.runId || run.requestId !== u.requestId ||
+          run.conversationId !== conversationId || run.profileBinding?.profileId !== agentId || run.board || run.stateless || run.truncated || run.error) return null
+      const finals = run.messages?.filter(m => m.role === 'assistant' && m.phase === 'final_answer')
+      if (finals?.length !== 1 || finals[0].localMessageId !== assistant.localMessageId || finals[0].completionConfirmed !== true || finals[0].text !== a.quote) return null
+      const terminal = db.prepare("SELECT seq,json_extract(details_json,'$.status') AS status FROM events WHERE local_conversation_id=? AND event='run.completed' AND local_run_id=? AND run_id=? AND request_id=? ORDER BY seq DESC LIMIT 1").get(id, u.localRunId, a.runId, u.requestId)
+      return terminal?.status === 'completed' && terminal.seq > a.seq ? { user: u, assistant: a } : null
     },
     // Exact predecessor of the accepted request, not the last assistant row anywhere in the room.
     // No fallback across a user message, interrupted reply or unresolved import.

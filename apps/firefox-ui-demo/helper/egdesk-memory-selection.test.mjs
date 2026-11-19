@@ -136,7 +136,7 @@ test('speech store: private consent generation, bounded exact references, CAS, t
     if (version === 2) assert.equal(s.forTurn(scope, 'old-run').id, legacyId)
     if (conflict) assert.equal(s.enableSpeech(scope), null)
     const raw = new DatabaseSync(dest, { readOnly: true }); try {
-      assert.equal(raw.prepare('PRAGMA user_version').get().user_version, conflict ? 1 : 3)
+      assert.equal(raw.prepare('PRAGMA user_version').get().user_version, conflict ? 1 : 4)
       assert.equal(raw.prepare('SELECT id FROM grants').get().id, legacyId)
       if (conflict) assert.equal(raw.prepare('PRAGMA table_info(grants)').all().length, 4)
       else assert.equal(raw.prepare('SELECT count(*) AS n FROM speech_grants').get().n, 0)

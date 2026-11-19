@@ -34,7 +34,7 @@ import { openProfileStore } from './egdesk-profile-store.mjs'
 import { createProfileHttpHandler } from './egdesk-profile-http.mjs'
 import { openDeskStore } from './egdesk-desk-store.mjs'
 import { openBridgeSettings } from './egdesk-bridge-settings.mjs'
-import { createDecisionBudget, createDecisionClient } from './egdesk-decision-client.mjs'
+import { createDecisionBudget, createDecisionClient, decisionTopicRecipient } from './egdesk-decision-client.mjs'
 import { openDecisionCredentialStore } from './egdesk-decision-credential.mjs'
 import { createDecisionHttpHandler } from './egdesk-decision-http.mjs'
 import { collectDecisionCandidates } from './egdesk-decision-candidates.mjs'
@@ -223,7 +223,8 @@ const bridgeSettings = openBridgeSettings({ dataDir: path.join(dataDir, 'setting
 // No local monthly cap until the owner picks one (§5.4). Never throws.
 const decisionCredentials = openDecisionCredentialStore({ dataDir: path.join(dataDir, 'settings') })
 const decisionBudget = createDecisionBudget({})
-const decisionClient = createDecisionClient({ getApiKey: () => decisionCredentials.getApiKey(), budget: decisionBudget })
+const recipientForDecisionKey = (key, endpoint, model) => decisionTopicRecipient(key, decisionCredentials.savedAt(), endpoint, model)
+const decisionClient = createDecisionClient({ getApiKey: () => decisionCredentials.getApiKey(), budget: decisionBudget, recipientForKey: recipientForDecisionKey })
 // SUB-11 Engine Profiles: the shared CLI logins plus EG-Desk-owned login
 // folders (<appData>/settings/engines/<id>, 0700). Claude runs the active
 // one (CLAUDE_CONFIG_DIR); Codex stays on its one shared app-server ('notYet').
@@ -423,6 +424,12 @@ const chat = new CodexChatRuntime({
     mode: () => bridgeSettings.decisionContext.mode,
     configured: () => decisionCredentials.getApiKey() !== null,
     client: decisionClient,
+    topicRecipient: ({ engineId, engineProfileId, ownerKey }) => {
+      if (engineId !== 'codex') return null
+      const auth = !engineProfileId || engineProfileId === CODEX_ENGINE_PROFILE_ID ? authState : codexProfileServers.snapshot(engineProfileId)?.auth
+      if (auth?.isLoggedIn !== true || auth.authMode !== 'chatgpt' || publicAuthIdentityKey(auth) !== ownerKey) return null
+      return recipientForDecisionKey(decisionCredentials.getApiKey(), undefined, decisionClient.model)
+    },
     get memoryEvidence() { return getMemoryEvidence() },
     collect: async ({ body, context, memoryEvidenceFor, speech }) => (await collectDecisionCandidates({ body, memoryEvidenceFor, speech, clientThreadId: context.clientThreadId,
       excludeMessageId: context.localMessageId, chatStore, deskStore, ontologyStore: ensureOntologyStore })).candidates,

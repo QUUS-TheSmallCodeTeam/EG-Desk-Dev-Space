@@ -15,6 +15,15 @@
 // decide: read-only judgements may retry once; an action choice must observe
 // again and ask a fresh question instead.
 
+import { createHmac } from 'node:crypto'
+
+// Private, domain-separated recipient identity. Never a renderer DTO, cache key or request field.
+// Bind the grant to the actual key revision, endpoint and model, not a displayed key suffix.
+export function decisionTopicRecipient(key, savedAt, endpoint = DECISIONS_ENDPOINT, model = DECISION_MODEL) {
+  if (typeof key !== 'string' || !key.trim() || !Number.isSafeInteger(savedAt) || savedAt < 0) return null
+  return createHmac('sha256', key).update(JSON.stringify(['egdesk:topic-history:v1', endpoint, model, savedAt])).digest('hex')
+}
+
 export const DECISIONS_ENDPOINT = 'https://api.openai.com/v1/decisions'
 export const DECISION_MODEL = 'gpt-6-luna'
 // Published request limits (create decision reference, 2026-11).
@@ -27,7 +36,7 @@ const NAME_MAX = 120
 const RESPONSE_MAX_BYTES = 4 * 1024 * 1024
 export const DEFAULT_DECISION_TIMEOUT_MS = 1500
 export const DECISION_ERROR_CODES = Object.freeze(['not_configured', 'invalid_request', 'invalid_key', 'no_credit',
-  'rate_limited', 'model_unavailable', 'server_error', 'bad_response', 'timeout', 'aborted', 'unreachable', 'budget_exceeded'])
+  'rate_limited', 'model_unavailable', 'server_error', 'bad_response', 'timeout', 'aborted', 'unreachable', 'budget_exceeded', 'evidence_unavailable'])
 // 429 bodies that mean the organization has no usable balance, not a rate limit.
 // credit_balance_exhausted: ChatGPT subscription API credits used up.
 // insufficient_quota: the long-standing OpenAI code for an exhausted quota.
@@ -198,38 +207,61 @@ async function readBody(response) {
  * client.verifyKey(apiKey, { timeoutMs?, signal? }) → { status: 'verified' | DecisionError code, retryable }
  */
 export function createDecisionClient({ getApiKey, fetchImpl = globalThis.fetch, endpoint = DECISIONS_ENDPOINT, model = DECISION_MODEL,
-  timeoutMs = DEFAULT_DECISION_TIMEOUT_MS, clock = () => performance.now(), budget = null } = {}) {
+  timeoutMs = DEFAULT_DECISION_TIMEOUT_MS, clock = () => performance.now(), budget = null, recipientForKey = null } = {}) {
   if (typeof getApiKey !== 'function') throw new TypeError('getApiKey must be a function')
   if (typeof fetchImpl !== 'function') throw new TypeError('fetchImpl must be a function')
 
-  async function post(apiKey, { input, questions, promptCacheKey = null, safetyIdentifier = null }, { timeoutMs: limit = timeoutMs, signal } = {}) {
+  async function post(apiKey, { input, questions, promptCacheKey = null, safetyIdentifier = null }, { timeoutMs: limit = timeoutMs, signal, authorizeDispatch } = {}) {
     validateDecisionRequest({ input, questions, promptCacheKey, safetyIdentifier })
     if (budget && !budget.canSpend()) throw new DecisionError('budget_exceeded', 'The local decision budget for this month is used up')
     const body = { model, input, questions, ...(promptCacheKey ? { prompt_cache_key: promptCacheKey } : {}),
       ...(safetyIdentifier ? { safety_identifier: safetyIdentifier } : {}) }
     // Cancelled before sending: no request leaves the machine.
     if (signal?.aborted) throw new DecisionError('aborted', 'The decision request was cancelled')
+    const historyRequest = questions.some(q => q.name === 'topic_route' || /^topic_need_/.test(q.name)) ||
+      (Array.isArray(input) && input.some(m => Array.isArray(m?.content) && m.content.some(p => p?.type === 'input_json' && p.data?.kind === 'session_topic_graph')))
+    const wire = JSON.stringify(body)
     const controller = new AbortController()
     let timedOut = false
     const timer = setTimeout(() => { timedOut = true; controller.abort() }, Math.max(1, limit))
     const onAbort = () => controller.abort()
     signal?.addEventListener?.('abort', onAbort, { once: true })
     const started = clock()
-    let response
+    let response, parsed
+    let denied = false
     try {
+      // getApiKey() may have yielded. Use the actual credential selected for THIS
+      // POST; finish serialization and all preparation before the last synchronous check.
+      if (historyRequest || authorizeDispatch !== undefined) {
+        let allowed = false
+        try {
+          const fp = recipientForKey?.(apiKey, endpoint, model)
+          if (fp && typeof fp.then === 'function') Promise.resolve(fp).catch(() => {})
+          if (typeof fp === 'string' && /^[a-f0-9]{64}$/.test(fp) && typeof authorizeDispatch === 'function') {
+            const decision = authorizeDispatch(fp)
+            if (decision && typeof decision.then === 'function') Promise.resolve(decision).catch(() => {})
+            allowed = decision === true
+          }
+        } catch { /* Unreadable/async authority is never permission to send. */ }
+        if (!allowed) { denied = true; throw new Error('denied') }
+      }
+      if (signal?.aborted) throw new Error('cancelled')
       response = await fetchImpl(endpoint, { method: 'POST', redirect: 'error', credentials: 'omit', referrerPolicy: 'no-referrer', signal: controller.signal,
-        headers: { 'content-type': 'application/json', authorization: `Bearer ${apiKey}` }, body: JSON.stringify(body) })
-    } catch {
+        headers: { 'content-type': 'application/json', authorization: `Bearer ${apiKey}` }, body: wire })
+      // A server can send headers promptly and then stall the body. Keep the
+      // timeout and the caller's cancellation wired until the response is read.
+      try { parsed = await readBody(response) }
+      catch (error) { throw error instanceof DecisionError ? error : new DecisionError('bad_response', 'The decision response could not be read') }
+    } catch (error) {
+      if (denied) throw new DecisionError('evidence_unavailable', 'The scoped history transfer is no longer authorized')
       if (timedOut) throw new DecisionError('timeout', 'The decision model did not answer in time', { retryable: true })
       if (signal?.aborted) throw new DecisionError('aborted', 'The decision request was cancelled')
+      if (error instanceof DecisionError) throw error
       throw new DecisionError('unreachable', 'The decision model could not be reached', { retryable: true })
     } finally {
       clearTimeout(timer)
       signal?.removeEventListener?.('abort', onAbort)
     }
-    let parsed
-    try { parsed = await readBody(response) }
-    catch (error) { throw error instanceof DecisionError ? error : new DecisionError('bad_response', 'The decision response could not be read') }
     if (!response.ok) {
       const failure = classifyDecisionFailure(response.status, parsed)
       throw new DecisionError(failure.code, `Decision request failed (${failure.code})`, { status: response.status, retryable: failure.retryable, apiCode: failure.apiCode })

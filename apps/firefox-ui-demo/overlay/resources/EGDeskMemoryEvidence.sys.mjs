@@ -11,7 +11,7 @@ export function evidenceRoute(thread, codex) {
 
 const RELATIONS = new Map(Object.entries({ counted: '집계', posted: '전표 반영', coverage: '적용 범위', scheduled: '예정',
   recorded: '기록', copied: '그대로 인용', derived: '계산·도출' }));
-const actions = new Set(['state', 'preview', 'bind', 'read', 'revoke', 'speech-enable', 'speech-disable']);
+const actions = new Set(['state', 'preview', 'bind', 'read', 'revoke', 'speech-enable', 'speech-disable', 'topic-enable', 'topic-disable']);
 export function scopedEvidenceRequest({ fetchJson, route, signal, current }) {
   return async (action, fields = {}) => {
     if (!actions.has(action) || signal.aborted || !current()) throw new Error('닫힌 근거 패널');
@@ -34,13 +34,14 @@ export function mountEvidencePanel({ el, host, request, current, close, agentNam
   const status = el('p', { ...marker('status'), role: 'status' });
   const note = el('p', { ...marker('mode') });
   const speech = el('section', { ...marker('speech'), 'aria-label': '이 DM의 대화 발언' });
+  const topic = el('section', { ...marker('topic'), 'aria-label': '이 DM의 주제 기억' });
   const rows = el('section', { ...marker('rows'), 'aria-label': '허용한 행' });
   const trace = el('section', { ...marker('trace'), 'aria-label': '고정된 근거' });
   const form = el('section', { ...marker('form'), 'aria-label': '새 행 등록' });
   const exit = button('close', '닫기', () => close(true));
   const panel = el('section', { id: 'egd-memory-evidence', ...marker('panel'), role: 'dialog', 'aria-label': '기억 근거' },
     el('header', {}, el('strong', {}, '기억 근거'), exit),
-    el('div', { class: 'egd-codex-input-panel-body' }, status, note, speech, rows, trace, form));
+    el('div', { class: 'egd-codex-input-panel-body' }, status, note, speech, topic, rows, trace, form));
   const alive = () => panel.isConnected && current();
   panel.addEventListener('mousedown', ev => ev.stopPropagation());
   panel.addEventListener('keydown', ev => { if (ev.key === 'Escape') { ev.stopPropagation(); close(true); } });
@@ -150,8 +151,42 @@ export function mountEvidencePanel({ el, host, request, current, close, agentNam
       el('span', {}, `이 DM에서 ${agentName} Agent가 찾을 말에 맞는 요청을 받으면, 선택한 줄을 다시 사용할 수 있도록 허용합니다.`)), bind);
     form.replaceChildren(el('h3', {}, '새 행 등록'), el('p', {}, '장부 한 줄과 근거 1~6개를 고르고 각각 미리보세요.'), busy); update();
   };
-  async function load(message = '') {
-    const stamp = ++formEpoch; ++readEpoch; speech.replaceChildren(); trace.replaceChildren(); rows.replaceChildren(); form.replaceChildren(); note.textContent = ''; captures = [];
+  const drawTopic = (state, stamp, returnFocus) => {
+    if (typeof state.topicSupported !== 'boolean') return;
+    const allowed = state.topicAllowed, revoke = allowed !== false, supported = state.topicSupported;
+    const modeOn = state.decisionMode === 'on', count = state.topicStored;
+    const full = Number.isSafeInteger(count) && count === 96;
+    const action = revoke ? 'topic-disable' : 'topic-enable';
+    const title = el('h3', { tabindex: '-1' }, '이 DM의 주제 기억');
+    const toggle = button(action, revoke ? '주제 기억 철회 및 삭제' : '다음 대화부터 주제 기억 허용', async ev => {
+      if (!alive() || stamp !== formEpoch || ev.currentTarget.disabled) return;
+      ev.currentTarget.disabled = true;
+      try {
+        const result = await request(action, revoke ? {} : { consent: true });
+        if (result?.topicAllowed !== !revoke) throw new Error('unconfirmed');
+        if (alive() && stamp === formEpoch) await load(revoke ? '주제 기억 허용을 철회하고 이 DM의 주제 기억을 삭제했습니다.' : '이 DM의 다음 대화부터 주제 기억을 허용합니다.', true);
+      } catch { if (alive() && stamp === formEpoch) await load('주제 기억 변경을 확인하지 못했습니다. 현재 상태를 확인한 뒤 다시 시도하세요.', true); }
+    });
+    toggle.disabled = !revoke && (!supported || !modeOn);
+    let guidance;
+    if (allowed !== true && allowed !== false) guidance = '허용 상태를 확인할 수 없습니다. 기존 허용과 기억을 지우려면 철회 및 삭제를 선택하세요.';
+    else if (allowed && state.topicCurrent === false) guidance = '이전 허용이 현재 전송 대상 또는 대화와 일치하지 않습니다. 계속하려면 철회 및 삭제한 뒤 다시 허용하세요.';
+    else if (!supported) guidance = '확인된 Codex DM에서 OpenAI API 키가 설정되어야 사용할 수 있습니다. Claude에서는 지원하지 않습니다.';
+    else if (!modeOn) guidance = '문맥 설정을 켜짐(on)으로 바꿔야 주제 기억을 사용할 수 있습니다.';
+    else if (allowed && full) guidance = '96쌍을 모두 저장해 이 구간의 주제 선별을 멈췄습니다. 새 대화부터 다시 시작하려면 철회 및 삭제한 뒤 다시 허용하세요.';
+    else if (allowed && state.topicPaused === true) guidance = '중간 대화의 연결을 확인할 수 없어 이전 주제 기억 사용을 멈췄습니다. 필요한 내용을 직접 적거나 철회 및 삭제한 뒤 다시 허용하세요.';
+    else if (allowed) guidance = '이 DM에서 주제 기억을 허용했습니다.';
+    else guidance = '이 DM에서 주제 기억을 허용하지 않았습니다.';
+    topic.replaceChildren(title,
+      el('p', {}, '최근 발언 재사용이나 파일 근거 허용과는 별도입니다. 이 DM에서 다음 대화부터 사용자 메시지와 Agent의 최종 답변을 한 쌍으로 묶어 이 기기에 최대 96쌍의 원문 위치와 주제 연결을 저장합니다. 기존 허용으로는 켜지지 않으며, 이전 대화는 소급해서 저장하지 않습니다.'),
+      el('p', {}, '새 주제와 필요한 근거를 고르기 위해 현재 메시지뿐 아니라 이전 사용자 메시지와 최종 답변의 원문도 설정된 OpenAI Decisions/API 프로젝트로 보낼 수 있습니다. 이때 허용 이후 저장한 대화쌍 전체가 대상입니다. 발언에 직접 인용한 내용도 포함됩니다. API 사용량이 발생합니다.'),
+      el('p', {}, '철회하면 이 DM의 주제 기억을 삭제합니다. 이미 API나 대화 엔진에 전달한 내용은 회수할 수 없습니다.'),
+      el('p', {}, guidance),
+      ...(revoke && Number.isSafeInteger(count) && count >= 0 && count <= 96 ? [el('p', {}, `저장한 대화: ${count}/96쌍`)] : []), toggle);
+    if (returnFocus) (toggle.disabled ? title : toggle).focus();
+  };
+  async function load(message = '', focusTopic = false) {
+    const stamp = ++formEpoch; ++readEpoch; speech.replaceChildren(); topic.replaceChildren(); trace.replaceChildren(); rows.replaceChildren(); form.replaceChildren(); note.textContent = ''; captures = [];
     status.textContent = '이 대화에 허용된 자료를 확인하는 중…';
     try {
       const state = await request('state'); if (!alive() || stamp !== formEpoch) return;
@@ -177,8 +212,9 @@ export function mountEvidencePanel({ el, host, request, current, close, agentNam
         speech.replaceChildren(el('h3', {}, '이 DM의 대화 발언'), el('p', {},
           '허용하면 이후 보내는 메시지의 출처·시점을 판정 모델이 분류합니다. 이 Agent만 이 DM의 최근 발언을 다시 받습니다. 이전 대화나 작업 메모는 가져오지 않습니다. 철회해도 이미 보낸 대화는 지워지지 않습니다.'), toggle);
       }
+      drawTopic(state, stamp, focusTopic);
       buildForm(); status.textContent = message;
-    } catch { if (alive() && stamp === formEpoch) { status.textContent = '이 대화의 허용 목록을 확인하지 못했습니다.'; rows.replaceChildren(button('retry', '다시 확인', () => load())); } }
+    } catch { if (alive() && stamp === formEpoch) { status.textContent = '이 대화의 허용 목록을 확인하지 못했습니다.'; const retry = button('retry', '다시 확인', () => load()); rows.replaceChildren(retry); if (focusTopic) retry.focus(); } }
   }
   void load(); return panel;
 }

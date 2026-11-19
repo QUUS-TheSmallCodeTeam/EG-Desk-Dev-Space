@@ -2,7 +2,7 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 import { createHash, randomUUID } from 'node:crypto'
 import { DatabaseSync } from 'node:sqlite'
-import { chmod, link, lstat, mkdir, mkdtemp, readFile, readdir, rm, symlink, writeFile } from 'node:fs/promises'
+import { chmod, link, lstat, mkdir, mkdtemp, readFile, readdir, rename, rm, symlink, writeFile } from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
 import { ImmutableContextStore } from './egdesk-context-store.mjs'
@@ -210,14 +210,14 @@ async function v1(f) {
   return { ids, spec, pins, file }
 }
 
-test('v1 migrates in place to v2 without changing grants, pins, expiry or tombstones; old grants never opt in', async t => {
+test('v1 migrates in place to v4 without changing grants, pins, expiry or tombstones; old grants never opt in', async t => {
   const f = await fixture(t), { ids, pins, spec, file } = await v1(f), a = f.make({ now: () => 100 })
   assert.deepEqual(a.list(S), [{ id: ids[0], label: labelOnly, automatic: false }]); assert.equal(a.find(S, 'month total 17'), null)
   assert.equal((await a.read(S, ids[0])).ledger.text, 'month total 17'); assert.equal(a.isActive(S, ids[1]), false); assert.equal(a.isActive(S, ids[2]), false)
   const added = await a.bind(S, { ...spec, discovery: { label: '수량', terms: ['몇 개'] } }); a.close()
   const raw = new DatabaseSync(file, { readOnly: true })
   try {
-    assert.equal(raw.prepare('PRAGMA user_version').get().user_version, 3)
+    assert.equal(raw.prepare('PRAGMA user_version').get().user_version, 4)
     for (const id of ids) assert.deepEqual({ ...raw.prepare('SELECT pins,discovery_label,discovery_terms FROM grants WHERE id=?').get(id) }, { pins, discovery_label: null, discovery_terms: null })
     assert.equal(raw.prepare('SELECT id FROM revoked').get().id, ids[1])
   } finally { raw.close() }
@@ -295,4 +295,167 @@ test('read-only v1 fails closed without rewriting it; migration errors roll back
     assert.equal(raw.prepare('SELECT count(*) AS n FROM revoked').get().n, 1); raw.exec('DROP INDEX grants_by_scope')
   } finally { raw.close() }
   assert.equal(a.isActive(S, ids[0]), true); assert.equal(a.isActive(S, ids[1]), false)
+})
+
+const topicRoom = 'native-room-fixture', topicRecipient = 'a'.repeat(64), alternateRecipient = 'b'.repeat(64)
+const msg = i => `msg-${i.toString(16).padStart(32, '0')}`
+const pair = (i, { topic = msg(i), parent = null, needs = [] } = {}) => ({
+  key: msg(i), topic, parent, needs,
+  user: { localMessageId: msg(i), seq: i * 3, hash: 'c'.repeat(64) },
+  assistant: { localMessageId: msg(i + 1000), seq: i * 3 + 1, hash: 'd'.repeat(64) },
+})
+
+test('v2 and v3 migrate without topic backfill or changing existing evidence and speech grants', async t => {
+  for (const version of [2, 3]) await t.test(`v${version}`, async t => {
+    const f = await fixture(t), a = f.make(), spec = await example(f), id = await a.bind(S, spec)
+    const speech = a.enableSpeech(S)
+    const ref = { role: 'user', localMessageId: msg(87), seq: 19, spokenAt: 123, offsetMinutes: 0, hash: 'c'.repeat(64), interpretations: [] }
+    assert.equal(a.rememberSpeech(S, speech, ref), true); assert.equal(a.rememberTurn(S, 'before-v4', id), true); a.close()
+    const raw = new DatabaseSync(dbPath(f))
+    try {
+      raw.exec(`DROP TABLE topic_grants; ${version === 2 ? 'DROP TABLE speech_grants;' : ''} PRAGMA user_version=${version}`)
+    } finally { raw.close() }
+    const b = f.make()
+    assert.equal(b.topicConsentState(S), false); assert.equal(b.topicState(S), null)
+    assert.equal(b.speechGrant(S), version === 2 ? null : speech)
+    if (version === 3) assert.deepEqual(b.recentSpeech(S, speech), [ref])
+    assert.equal(b.isActive(S, id), true); assert.deepEqual(b.forTurn(S, 'before-v4'), { id, label: labelOnly })
+    assert.ok(b.enableTopic(S, topicRoom, topicRecipient)); assert.deepEqual(b.topicState(S).turns, [])
+    assert.equal(b.speechGrant(S), version === 2 ? null : speech)
+  })
+})
+
+test('prospective topic consent pins the verified room and recipient, independent of speech, and erases by scoped generation', async t => {
+  const f = await fixture(t), a = f.make(), b = f.make(), other = { ...S, agentId: 'other-agent' }
+  assert.equal(a.topicConsentState(S), false); assert.equal(a.topicState(S), null); assert.equal(a.clearTopic(S), true)
+  assert.equal(a.topicConsentState(null), null); assert.equal(a.clearTopic(null), false)
+  for (const [room, recipient] of [['', topicRecipient], ['\ud800', topicRecipient], ['a\nb', topicRecipient], ['a'.repeat(513), topicRecipient], [topicRoom, 'Alice'], [topicRoom, topicRecipient.toUpperCase()], [topicRoom, `${topicRecipient}\n`]]) {
+    assert.equal(a.enableTopic(S, room, recipient), null)
+  }
+  await assert.rejects(lstat(dbPath(f)), { code: 'ENOENT' })
+  const g = a.enableTopic(S, topicRoom, topicRecipient)
+  assert.match(g, /^[\da-f-]{36}$/)
+  assert.equal(a.speechConsentState(S), false); assert.equal(a.topicConsentState(S), true)
+  assert.deepEqual(b.topicState(S), { generation: g, recipient: topicRecipient, conversationId: topicRoom, startSeq: 0, revision: 0, turns: [] })
+  assert.equal(b.enableTopic(S, topicRoom, topicRecipient), g)
+  assert.equal(b.enableTopic(S, 'different-native-room', topicRecipient), null)
+  assert.equal(b.enableTopic(S, topicRoom, alternateRecipient), null)
+  for (const key of Object.keys(S)) {
+    const scope = { ...S, [key]: `other-${key}` }
+    assert.equal(b.topicConsentState(scope), false); assert.equal(b.topicState(scope), null)
+    assert.equal(b.commitTopic(scope, g, 0, pair(1)), false); assert.equal(b.disableTopic(scope, g), false)
+  }
+  const otherGen = b.enableTopic(other, topicRoom, topicRecipient)
+  assert.notEqual(otherGen, g); assert.equal(b.commitTopic(other, otherGen, 0, pair(11)), true)
+  const speech = a.enableSpeech(S); assert.equal(a.clearSpeech(S), true)
+  assert.equal(a.topicConsentState(S), true); assert.equal(a.speechGrant(S), null); assert.equal(a.commitTopic(S, g, 0, pair(1)), true)
+  assert.equal(a.clearTopic(S), true); assert.equal(b.topicConsentState(S), false); assert.equal(a.speechGrant(S), null)
+  const next = b.enableTopic(S, 'different-native-room', alternateRecipient)
+  assert.ok(next); assert.notEqual(next, g); assert.deepEqual(a.topicState(S).turns, []); assert.equal(a.topicState(S).revision, 0)
+  assert.equal(a.disableTopic(S, g), false); assert.equal(a.commitTopic(S, g, 0, pair(2)), false)
+  const speechAgain = b.enableSpeech(S); assert.notEqual(speechAgain, speech)
+  assert.equal(a.disableTopic(S, next), true); assert.equal(a.disableTopic(S, next), false)
+  assert.equal(b.topicState(S), null); assert.equal(b.speechGrant(S), speechAgain)
+  assert.equal(b.topicState(other).generation, otherGen); assert.deepEqual(b.topicState(other).turns, [pair(11)])
+})
+
+test('topic graph reopens and appends complete immutable pairs with exact CAS retries and prior-only edges', async t => {
+  const f = await fixture(t), a = f.make(), b = f.make(), g = a.enableTopic(S, topicRoom, topicRecipient)
+  const first = pair(1), second = pair(2, { topic: msg(1), needs: [msg(1)] })
+  const next = pair(3, { parent: msg(1), needs: [msg(2), msg(1)] }), last = pair(4, { topic: msg(3), needs: [msg(3)] })
+  assert.equal(a.commitTopic(S, g, 0, first), true); assert.equal(b.commitTopic(S, g, 0, first), true)
+  assert.equal(b.commitTopic(S, g, 1, second), true); assert.equal(a.commitTopic(S, g, 1, next), false)
+  assert.equal(a.commitTopic(S, g, 2, next), true); assert.equal(b.commitTopic(S, g, 3, last), true)
+  assert.equal(a.commitTopic(S, g, 0, first), true); assert.equal(a.commitTopic(S, g, 1, first), false)
+  assert.equal(a.commitTopic(S, g, 0, { ...first, user: { ...first.user, hash: 'e'.repeat(64) } }), false)
+  a.close(); assert.equal(a.topicConsentState(S), null); assert.equal(a.clearTopic(S), false)
+  b.close()
+  const captures = { getCapture() { throw Error('no capture may be opened') }, readProjection() { throw Error('no content reads') } }
+  const c = f.make({ captures }), expected = { generation: g, recipient: topicRecipient, conversationId: topicRoom, startSeq: 0, revision: 4, turns: [first, second, next, last] }
+  assert.deepEqual(c.topicState(S), expected)
+  c.topicState(S).turns[0].user.hash = 'e'.repeat(64); assert.deepEqual(c.topicState(S), expected)
+  const raw = new DatabaseSync(dbPath(f), { readOnly: true })
+  try {
+    const row = raw.prepare('SELECT scope_key,turns FROM topic_grants').get()
+    assert.match(row.scope_key, /^[0-9a-f]{64}$/); assert.equal(row.turns, JSON.stringify(expected.turns)); assert.ok(Buffer.byteLength(row.turns) < 256 * 1024)
+  } finally { raw.close() }
+})
+
+test('topic graph rejects invalid shapes, authority handles, references and sequences without advancing the revision', async t => {
+  const f = await fixture(t), a = f.make(), g = a.enableTopic(S, topicRoom, topicRecipient)
+  const first = pair(1), second = pair(2, { topic: msg(1) }), third = pair(3)
+  assert.equal(a.commitTopic(S, g, 0, first), true); assert.equal(a.commitTopic(S, g, 1, second), true)
+  const accessor = { ...third }; Object.defineProperty(accessor, 'needs', { enumerable: true, get() { assert.fail('accessor read') } })
+  const needsWithProp = [msg(1)]; needsWithProp.extra = 1
+  const wrong = [null, {}, { ...third, title: 'answer text' }, accessor, { ...third, user: { ...third.user, text: 'not a reference' } },
+    { ...third, user: { ...third.user, localMessageId: msg(88) } }, { ...third, assistant: { ...third.assistant, localMessageId: third.key } },
+    { ...third, assistant: { ...third.assistant, localMessageId: first.assistant.localMessageId } },
+    { ...third, assistant: { ...third.assistant, localMessageId: first.key } }, { ...third, assistant: { ...third.assistant, hash: 'z'.repeat(64) } },
+    { ...third, assistant: { ...third.assistant, seq: third.user.seq } }, { ...third, user: { ...third.user, seq: second.assistant.seq } },
+    { ...third, user: { ...third.user, seq: '9' } }, { ...third, assistant: { ...third.assistant, seq: Number.MAX_SAFE_INTEGER + 1 } },
+    { ...third, needs: [third.key] }, { ...third, needs: [msg(87)] }, { ...third, needs: [first.assistant.localMessageId] },
+    { ...third, needs: [first.key, first.key] }, { ...third, needs: needsWithProp }, { ...third, needs: Array(1) },
+    { ...third, topic: msg(2) }, { ...third, topic: msg(5) }, { ...third, parent: msg(2) }, { ...third, parent: msg(3) },
+    { ...third, topic: msg(1), parent: msg(1) }, { ...third, parent: undefined }]
+  for (const row of wrong) assert.equal(a.commitTopic(S, g, 2, row), false)
+  for (const rev of [-1, '2', 1.5, 3, NaN]) assert.equal(a.commitTopic(S, g, rev, third), false)
+  assert.equal(a.commitTopic(S, randomUUID(), 2, third), false)
+  assert.deepEqual(a.topicState(S).turns, [first, second]); assert.equal(a.commitTopic(S, g, 2, third), true)
+})
+
+test('topic graph accepts at most 24 prior dependencies and 96 pairs without eviction', async t => {
+  const f = await fixture(t), a = f.make(), g = a.enableTopic(S, topicRoom, topicRecipient), expected = []
+  for (let i = 1; i <= 96; i++) {
+    if (i === 26) assert.equal(a.commitTopic(S, g, i - 1, pair(i, { needs: expected.map(r => r.key) })), false)
+    const row = pair(i, { needs: expected.slice(-24).map(r => r.key) })
+    assert.equal(a.commitTopic(S, g, i - 1, row), true); expected.push(row)
+  }
+  assert.equal(a.commitTopic(S, g, 96, pair(97)), false); assert.equal(a.commitTopic(S, g, 95, expected.at(-1)), true)
+  a.close(); const b = f.make(); assert.equal(b.topicState(S).revision, 96); assert.deepEqual(b.topicState(S).turns, expected)
+  assert.ok(Buffer.byteLength(JSON.stringify(expected)) < 256 * 1024)
+})
+
+test('topic corruption fails closed for bad binding/seal, resealed invalid graph, and excessive stored bytes; verified clear permits fresh consent', async t => {
+  const cases = [
+    ['seal', 'seal=?', '0'.repeat(64)], ['recipient', 'recipient=?', alternateRecipient], ['native room', 'conversation_id=?', 'altered-room'],
+    ['revision', 'revision=?', 2], ['resealed incorrect graph', null, [pair(1, { needs: [msg(3)] })]],
+    ['resealed unexpected shape', null, [{ ...pair(1), text: 'not a reference' }]],
+    ['resealed oversized payload', null, ' '.repeat(256 * 1024)],
+  ]
+  for (const [name, update, payload] of cases) await t.test(name, async t => {
+    const f = await fixture(t), a = f.make(), g = a.enableTopic(S, topicRoom, topicRecipient)
+    assert.equal(a.commitTopic(S, g, 0, pair(1)), true); a.close()
+    const raw = new DatabaseSync(dbPath(f))
+    try {
+      if (update) raw.prepare(`UPDATE topic_grants SET ${update}`).run(payload)
+      else {
+        const { scope_key } = raw.prepare('SELECT scope_key FROM topic_grants').get()
+        const turns = typeof payload === 'string' ? payload : JSON.stringify(payload)
+        const seal = createHash('sha256').update(JSON.stringify(['topic-v1', scope_key, g, topicRecipient, topicRoom, 0, 1, turns])).digest('hex')
+        raw.exec('PRAGMA ignore_check_constraints=ON')
+        raw.prepare('UPDATE topic_grants SET turns=?,seal=?').run(turns, seal)
+      }
+    } finally { raw.close() }
+    const b = f.make()
+    assert.equal(b.topicState(S), null); assert.equal(b.topicConsentState(S), null); assert.equal(b.enableTopic(S, topicRoom, topicRecipient), null)
+    assert.equal(b.commitTopic(S, g, 1, pair(2)), false)
+    assert.equal(b.clearTopic(S), true); assert.equal(b.topicConsentState(S), false)
+    const next = b.enableTopic(S, topicRoom, topicRecipient)
+    assert.ok(next); assert.notEqual(next, g); assert.deepEqual(b.topicState(S).turns, [])
+  })
+})
+
+test('inaccessible topic database is not mistaken for an absent grant', { skip: process.platform === 'win32' }, async t => {
+  const f = await fixture(t), a = f.make(), g = a.enableTopic(S, topicRoom, topicRecipient), file = dbPath(f)
+  await chmod(file, 0o400)
+  const b = f.make()
+  for (const store of [a, b]) {
+    assert.equal(store.topicState(S), null); assert.equal(store.topicConsentState(S), null); assert.equal(store.enableTopic(S, topicRoom, topicRecipient), null)
+    assert.equal(store.clearTopic(S), false); assert.equal(store.disableTopic(S, g), false); assert.equal(store.commitTopic(S, g, 0, pair(1)), false)
+  }
+  await chmod(file, 0o600); assert.equal(b.topicConsentState(S), true)
+  await rename(file, `${file}.moved`)
+  assert.equal(a.topicConsentState(S), null); assert.equal(a.clearTopic(S), false)
+  await rename(`${file}.moved`, file)
+  assert.equal(a.topicConsentState(S), true); assert.equal(a.topicState(S).generation, g)
 })

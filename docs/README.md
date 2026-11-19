@@ -5,7 +5,7 @@
 
 ## 지금 읽을 문서
 
-**실제 화면에서 따라 하려면** [현재 조작 빠른 안내](../ideas/confirmed/EGDESK_PRODUCT_INTERACTION_TRACE_ATLAS.md#atlas-local-guide)로 갑니다. [계정 추가와 Agent 연결](../ideas/confirmed/EGDESK_PRODUCT_INTERACTION_TRACE_ATLAS.md#atlas-local-accounts), [Board에서 둘에게 묻기](../ideas/confirmed/EGDESK_PRODUCT_INTERACTION_TRACE_ATLAS.md#atlas-local-board), [DM 기억 허용·철회](../ideas/confirmed/EGDESK_PRODUCT_INTERACTION_TRACE_ATLAS.md#atlas-local-memory), [검토 파일·질문권](../ideas/confirmed/EGDESK_PRODUCT_INTERACTION_TRACE_ATLAS.md#atlas-local-share), [중단 뒤 복구](../ideas/confirmed/EGDESK_PRODUCT_INTERACTION_TRACE_ATLAS.md#atlas-local-recovery)를 바로 볼 수 있습니다. 이 경로는 로컬 기능판 기준이며, 설계안이나 정식 배포를 뜻하지 않습니다.
+**실제 화면에서 따라 하려면** [현재 조작 빠른 안내](../ideas/confirmed/EGDESK_PRODUCT_INTERACTION_TRACE_ATLAS.md#atlas-local-guide)로 갑니다. [계정 추가와 Agent 연결](../ideas/confirmed/EGDESK_PRODUCT_INTERACTION_TRACE_ATLAS.md#atlas-local-accounts), [Board에서 둘에게 묻기](../ideas/confirmed/EGDESK_PRODUCT_INTERACTION_TRACE_ATLAS.md#atlas-local-board), [DM 기억 허용·철회](../ideas/confirmed/EGDESK_PRODUCT_INTERACTION_TRACE_ATLAS.md#atlas-local-memory), [같은 Codex DM에서 주제 이어가기](../ideas/confirmed/EGDESK_PRODUCT_INTERACTION_TRACE_ATLAS.md#atlas-local-topic-tree), [검토 파일·질문권](../ideas/confirmed/EGDESK_PRODUCT_INTERACTION_TRACE_ATLAS.md#atlas-local-share), [중단 뒤 복구](../ideas/confirmed/EGDESK_PRODUCT_INTERACTION_TRACE_ATLAS.md#atlas-local-recovery)를 바로 볼 수 있습니다. 이 경로는 로컬 기능판 기준이며, 설계안이나 정식 배포를 뜻하지 않습니다.
 
 **제품 방향은** [EG-Desk 제품 비전과 개발 목표](../ideas/confirmed/EGDESK_PRODUCT_VISION_AND_DEV_TODO.md#vision-agent-channels)와 [MemBrain 원칙](../ideas/confirmed/EGDESK_PRODUCT_VISION_AND_DEV_TODO.md#vision-membrain)에서 확인합니다.
 

@@ -1,8 +1,9 @@
 // Integration test: immutable source pins through the actual decision/turn/transcript path.
 // Real: CodexChatRuntime.send, turn/start params, ImmutableContextStore captures, MemoryEvidenceStore, chat SQLite, reopen.
-// Synthetic: provider (derives the number ONLY from packet source lines), decision client, profiles stub. No network/CLI/accounts.
+// Synthetic: answer provider (uses supplied evidence), fixture classification, transport and profiles. The production topic cases run the real Decisions client. No network/CLI/accounts.
 import test from 'node:test'
 import assert from 'node:assert/strict'
+import { createHash } from 'node:crypto'
 import os from 'node:os'
 import path from 'node:path'
 import { mkdtemp, rm, chmod, readdir, readFile } from 'node:fs/promises'
@@ -10,7 +11,7 @@ import { ImmutableContextStore } from './egdesk-context-store.mjs'
 import { MemoryEvidenceStore } from './egdesk-memory-evidence.mjs'
 import { CodexChatRuntime } from './codex-chat-runtime.mjs'
 import { openChatStore } from './egdesk-chat-store.mjs'
-import { createDecisionClient } from './egdesk-decision-client.mjs'
+import { createDecisionClient, DecisionError } from './egdesk-decision-client.mjs'
 import { choiceQuestion, predicateQuestion, readChoice } from './egdesk-decision-questions.mjs'
 import { collectDecisionCandidates } from './egdesk-decision-candidates.mjs'
 
@@ -60,12 +61,17 @@ async function newWorld(t, { count, out } = {}) {
         const style = /왜/.test(JSON.stringify(params.input)) ? 'reason' : 'direct'
         const packet = params.additionalContext?.egdesk_decision_context?.value || ''
         const { text, fields } = w.hooks.reply?.(packet, style) ?? derive(packet, style)
+        const terminal = w.hooks.nativeTerminal ?? 'completed'
         w.turns.push({ params, packet, fields, text })
         const timing = { threadId: params.threadId, turnId: id }
         setTimeout(async () => {
           const n = (m, p) => chat.handleNotification({ method: m, params: p })
           await n('item/started', { ...timing, item: { id: `w${id}`, type: 'agentMessage', phase: 'commentary', text: '' } })
           await n('item/completed', { ...timing, item: { id: `w${id}`, type: 'agentMessage', phase: 'commentary', text: `NATIVE_WORK_NOTE ${id}` } })
+          if (terminal !== 'completed') {
+            await n('turn/completed', { threadId: params.threadId, turn: { id, status: terminal, items: [] } })
+            return
+          }
           await n('item/started', { ...timing, item: { id: `a${id}`, type: 'agentMessage', phase: 'final_answer', text: '' } })
           await n('item/agentMessage/delta', { ...timing, itemId: `a${id}`, delta: text })
           await n('item/completed', { ...timing, item: { id: `a${id}`, type: 'agentMessage', phase: 'final_answer', text } })
@@ -75,8 +81,10 @@ async function newWorld(t, { count, out } = {}) {
       },
       respond: () => {}, emit: e => w.events.push(e), emitLegacy: () => {}, verifyFile: async () => null,
       decisionContext: { mode: () => w.mode, configured: () => true, budgetMs: 5000, memoryEvidence: w.evidence,
+        topicRecipient: () => w.hooks.topicRecipient?.() ?? null,
         client: { model: 'synthetic-decision', async decide(request) {
           w.decisionInputs.push(JSON.stringify(request.input)); await w.hooks.duringDecide?.(request)
+          if (w.hooks.resolveDecision) return w.hooks.resolveDecision(request)
           if (w.hooks.hasHistoryStage?.()) return w.hooks.resolveHistory(request)
           const answers = {}
           for (const q of request.questions) answers[q.name] = w.hooks.choice?.(q, request) ?? (q.type === 'choice'
@@ -113,7 +121,9 @@ async function newWorld(t, { count, out } = {}) {
       ...(w.conv[thread] ? { conversationId: w.conv[thread] } : {}), ...(profile ? { profileId: AGENT } : {}), ...(direct ? { replyDestination: 'direct' } : {}),
       ...(handle ? { selectedSources: [{ id: handle, label: 'UNTRUSTED_LABEL', kind: 'memory-evidence' }] } : {}), ...body }) } catch (e) { w.errors.push(e.code || e.message); return { packet: '', fields: null, params: {}, none: true, error: e.code || e.message } }
     w.conv[thread] ||= r.conversationId
-    for (let i = 0; i < 400 && !(w.turns.length > before && count() > rows); i++) await new Promise(r => setTimeout(r, 10))
+    const complete = () => w.hooks.nativeTerminal
+      ? w.store.getLatestRun(thread)?.status === w.hooks.nativeTerminal : count() > rows
+    for (let i = 0; i < 400 && !(w.turns.length > before && complete()); i++) await new Promise(r => setTimeout(r, 10))
     await new Promise(r => setTimeout(r, 30))
     return w.turns.length > before ? w.turns.at(-1) : { packet: '', fields: null, params: {}, none: true }
   }
@@ -358,8 +368,8 @@ test('everyday DM opt-in excludes plans as facts, assistant echo as a witness, m
   const late=await w.ask('다시 볼래?'); assert.ok(rotated);assert.deepEqual(recorded(late.packet),[]);assert.doesNotMatch(late.packet,/표지판|원인은 추정/)
 })
 
-// Proposed history-to-Decisions protocol installed in the harness ONLY. The production
-// bridge does not provide this consent/UI, picker, commit path, or database for topics.
+// Historical prototype installed in the harness ONLY. The separately tested
+// production topic path below does not use this file selector or the fixture's picker.
 // Real components: chat send + final ingestion + reopen, scoped original speech, immutable
 // file grants, decision wire encoder/decoder, private-packet dispatch fence. All text, the
 // separate egress grant and the semantic endpoint are synthetic. No external transport.
@@ -480,4 +490,543 @@ for(const [name,config,expected] of [
   for(const body of s.wires){assert.equal(body.input.at(-1).content,question);assert.equal(body.questions.filter(q=>q.name.startsWith('need_')).length,3);assert.doesNotMatch(JSON.stringify(body),/CHECKED=|DO_NOT_SEND|memrow:|PRECONSENT|NATIVE_WORK/)}
   assert.equal(a.text,expected?`${expected}건입니다.`:'범위가 확인되지 않았어요.');assert.equal(w.rows().at(-1)[1],a.text)
   const p=extractTopic(a.packet);if(expected){assert.equal(p.path.length,2);assert.match(p.path[0].user,/점검 대상/);assert.match(p.path[1].user,/^정정/);assert.doesNotMatch(a.packet,/표지 색|DO_NOT_SEND|PRECONSENT/)} else assert.equal(p,undefined)
+})
+
+// Production topic wiring, deliberately separate from the prototype above. The
+// test transport sees the request produced by send(); it never builds a graph,
+// calls append/commit, modifies candidates, or receives the fixture variant.
+const TOPIC_RECIPIENT = 'a3'.repeat(32)
+const OTHER_RECIPIENT = 'c7'.repeat(32)
+const PRE_TOPIC = 'PRECONSENT_LIVE_TOPIC: 비공개 이전 대화'
+const FAILED_TOPIC = 'FAILED_LIVE_TOPIC: 중단된 요청'
+const OUTSIDE_TOPIC = 'OTHER_DM_LIVE_TOPIC: 참고하지 말아야 할 다른 대화'
+const LIVE_ROOT = ['서가 목록부터 만들자.', '서가 1은 17권이고 서가 2는 43권이에요.']
+const LIVE_CHILD = ['서가에서 대여 계산을 별도로 다루자.', '대여 한도는 전체 권수의 절반을 버림해요.']
+const LIVE_SIBLING = ['서가에서 표지 전시를 별도로 다루자.', '전시용 표지에는 99권이라고 적어요.']
+const LIVE_RETURN = '대여 계산으로 돌아가자. 적용된 규칙대로 몇 권까지 빌릴 수 있어?'
+const LIVE_FOLLOW = '대여 계산의 지난 답을 다시 확인해 줘.'
+const LIVE_NOTE = /PRECONSENT_LIVE_TOPIC|FAILED_LIVE_TOPIC|OTHER_DM_LIVE_TOPIC|NATIVE_WORK_NOTE/
+const LIVE_META = /topic_route|topic_need_\d+|egdesk_decision_context|session_topic_(?:evidence|graph)|omittedPairs|"recipient"/
+const CORRECTION = /^정정: 서가 (1|2)만 이용할 수 있어\.$/u
+const decisionNames = body => body.questions.filter(q => /^topic_(?:route|need_\d+)$/u.test(q.name)).map(q => q.name)
+const textOfDecisionMessage = m => typeof m.content === 'string' ? m.content : m.content.map(x => x.text || '').join('')
+function topicWireHistory(body) {
+  const graphAt = body.input.findIndex(m => m.role === 'user' && Array.isArray(m.content) &&
+    m.content.some(x => x.type === 'input_json' && Array.isArray(x.data?.pairs)))
+  if (graphAt < 0) return null
+  const graph = body.input[graphAt].content.find(x => x.type === 'input_json' && Array.isArray(x.data?.pairs)).data
+  const quoted = body.input.slice(graphAt + 1, -1)
+  return { graph, quoted, pairs: graph.pairs.map((row, i) => ({ ...row,
+    u: textOfDecisionMessage(quoted[2 * i]), a: textOfDecisionMessage(quoted[2 * i + 1]),
+  })) }
+}
+function decideLiveTopic(body) {
+  const history = topicWireHistory(body)
+  const current = body.input.at(-1).content.replace(/^Message:\n/u, '')
+  const find = matcher => history?.pairs.find(p => matcher.test(p.u))
+  const root = find(/^서가 목록부터 만들자\./u), branch = find(/^서가에서 대여 계산을/u)
+  const correction = find(CORRECTION)
+  const split = /^서가에서 .+ 별도로 다루자\.$/u.test(current)
+  const back = /^대여 계산으로 돌아가자\./u.test(current)
+  const follow = /^대여 계산의 지난 답을/u.test(current)
+  const needed = follow ? find(/^대여 계산으로 돌아가자\./u) : back ? correction : null
+  const route = split && root ? `split_${root.alias}` : (back || follow) && branch ? `continue_${branch.alias}` : 'separate'
+  return body.questions.map(q => {
+    if (q.name === 'topic_route') return chosenAnswer(q, route)
+    const need = /^topic_need_(\d+)$/u.exec(q.name)
+    // Model identifies only the independent correction, not ancestry, from the
+    // input. Production must supply the routed pair and close over its ancestry.
+    if (need) return { type:'predicate', name:q.name,
+      probability:needed && history.pairs[Number(need[1])]?.alias === needed.alias ? .98 : .02 }
+    if (q.type === 'predicate') return { type:'predicate', name:q.name, probability:.02 }
+    return chosenAnswer(q, q.name === 'time_intent' ? 'present' : 'answer')
+  })
+}
+async function liveTopicWorld(t) {
+  const w = await newWorld(t)
+  w.liveAttempts = []; w.liveWires = []; w.recipient = TOPIC_RECIPIENT; w.transportRecipient = TOPIC_RECIPIENT
+  w.hooks.topicRecipient = () => w.recipient
+  w.hooks.resolveDecision = async request => {
+    const gated = typeof request.authorizeDispatch === 'function'
+    const attempt = { body:null, gated, allowed:!gated }; w.liveAttempts.push(attempt)
+    // Real request validation, bearer-key selection, last-moment guard, JSON wire,
+    // response decoder and budget boundary. Only the transport and model are synthetic.
+    const client = createDecisionClient({ model:'synthetic-decision', getApiKey:() => 'fixture-not-a-real-api-key',
+      recipientForKey:() => w.transportRecipient, fetchImpl:async (_endpoint, init) => {
+        const body = JSON.parse(init.body); attempt.body = body; w.liveWires.push(body)
+        const answers = decideLiveTopic(body)
+        const response = await w.hooks.topicResponse?.({ body, answers }) ?? { answers, model:'synthetic-decision' }
+        return { ok:true, status:200, text:async () => JSON.stringify(response) }
+      } })
+    return client.decide({ ...request, ...(gated ? { authorizeDispatch:fp => (attempt.allowed = request.authorizeDispatch(fp) === true) } : {}) })
+  }
+  return w
+}
+const topicState = w => w.evidence.topicState(w.scope())
+function topicEnable(w) {
+  w.evidence.enableTopic(w.scope(), w.conv[DM], w.recipient, w.store.topicBoundary(DM))
+  const s = topicState(w)
+  assert.ok(s?.generation); assert.equal(s.recipient, w.recipient)
+  assert.equal(s.conversationId, w.conv[DM]); assert.deepEqual(s.turns, [])
+  return s
+}
+async function topicSay(w, [user, assistant], options) {
+  w.hooks.reply = () => ({ text:assistant, fields:null })
+  return w.ask(user, null, options)
+}
+function assertTopicDecision(w, before, message, priorPairs) {
+  const attempts = w.liveAttempts.slice(before)
+  assert.equal(attempts.length, 1, 'one Decision request, not a separate history/routing call')
+  const [{ body, gated, allowed }] = attempts
+  assert.ok(gated && allowed, 'live synthetic recipient authorizes actual request dispatch')
+  assert.ok(w.liveWires.includes(body))
+  assert.deepEqual(body.input.at(-1), { role:'user', content:`Message:\n${message}` })
+  const { graph, quoted, pairs } = topicWireHistory(body)
+  const aliases = priorPairs.map((_, i) => `p${i}`)
+  assert.equal(graph.kind, 'session_topic_graph'); assert.equal(graph.complete, true); assert.equal(graph.omittedPairs, 0)
+  assert.deepEqual(pairs.map(p => p.alias), aliases)
+  assert.deepEqual(pairs.map(p => [p.u, p.a]), priorPairs, 'each prior authorized pair is exact and complete')
+  assert.deepEqual(quoted.map(m => m.role), priorPairs.flatMap(() => ['user', 'assistant']))
+  assert.deepEqual(decisionNames(body), ['topic_route', ...aliases.map((_, i) => `topic_need_${i}`)])
+  const serialized = JSON.stringify(body)
+  assert.doesNotMatch(JSON.stringify({ ...body, input:body.input.slice(0, -1) }), LIVE_NOTE)
+  return { graph, serialized, choices:body.questions.find(q => q.name === 'topic_route').choices.map(q => q.value) }
+}
+function assertTopicAppend(w, before, pair) {
+  const state = topicState(w)
+  assert.equal(state.generation, before.generation)
+  assert.equal(state.revision, before.revision + 1)
+  assert.deepEqual(state.turns.slice(0, -1), before.turns)
+  assert.equal(state.turns.length, before.turns.length + 1)
+  const row = state.turns.at(-1)
+  assert.ok(row.key && !before.turns.some(r => r.key === row.key))
+  const eventAt = seq => w.store.listEvents(DM, { afterSeq:seq - 1, limit:1 }).events.find(e => e.seq === seq)
+  const messages = w.store.listMessages(DM).messages
+  for (const [role, text] of [['user', pair[0]], ['assistant', pair[1]]]) {
+    const ref = row[role], accepted = eventAt(ref.seq)
+    assert.equal(accepted?.event, role === 'user' ? 'message.accepted' : 'message.completed')
+    assert.equal(accepted.localMessageId, ref.localMessageId)
+    assert.equal(messages.find(m => m.localMessageId === ref.localMessageId)?.text, text)
+    assert.equal(ref.hash, createHash('sha256').update(text).digest('hex'))
+  }
+  assert.ok(row.user.seq < row.assistant.seq)
+  assert.equal(eventAt(row.user.seq).requestId, eventAt(row.assistant.seq).requestId)
+  return row
+}
+const parsePacketObjects = packet => packet.split('\n').filter(line => line.startsWith('{')).map(line => JSON.parse(line))
+const liveEvidence = packet => parsePacketObjects(packet).find(p => p.kind === 'session_topic_evidence')
+// Only packet text drives the synthetic answer, not native session state, the
+// prior correction setting, a fallback answer keyed by the test, or fixture docs.
+function replyToLiveTopic(packet) {
+  const s = JSON.stringify(liveEvidence(packet)?.path ?? [])
+  const shelf = /정정: 서가 ([12])만 이용할 수 있어\./u.exec(s)?.[1]
+  const totals = /서가 1은 (\d+)권이고 서가 2는 (\d+)권이에요\./u.exec(s)
+  const rule = s.includes(LIVE_CHILD[1])
+  const n = shelf && totals && rule ? Math.floor(Number(totals[shelf]) / 2) : null
+  return { text:n === null ? '대여 한도를 알 수 없어요.' : `${n}권까지 빌릴 수 있어요.`, fields:null }
+}
+const assertLivePublic = w => {
+  // Pre-consent utterances remain in the original local transcript. They must
+  // never be copied into answer text, a private packet, or public metadata.
+  const texts = w.rows().filter(([role]) => role === 'assistant').map(([, text]) => text)
+  assert.doesNotMatch(texts.join('\n'), LIVE_NOTE)
+  assert.doesNotMatch(JSON.stringify(w.store.listMessages(DM).messages), LIVE_META)
+  assert.doesNotMatch(JSON.stringify(w.events.filter(e => String(e.event).startsWith('message.'))), LIVE_META)
+  assertPublicClean(w)
+}
+
+for (const [shelf, answer] of [[1, '8권까지 빌릴 수 있어요.'], [2, '21권까지 빌릴 수 있어요.']]) {
+  test(`production topics: split siblings, reopen, return and use the correction for shelf ${shelf}`, async t => {
+    const w = await liveTopicWorld(t)
+    await topicSay(w, [PRE_TOPIC, '이전 대화는 따로 남겨요.'])
+    const initial = topicEnable(w)
+    assert.ok(!w.evidence.speechGrant(w.scope()), 'topic transfer does not rely on the speech grant')
+    let n = w.liveAttempts.length
+    const first = await topicSay(w, LIVE_ROOT)
+    assert.ok(!first.none); assert.equal(w.liveAttempts.length, n, 'cold root needs no Decision request with no other candidates')
+    assert.doesNotMatch(first.packet, LIVE_NOTE)
+    const root = assertTopicAppend(w, initial, LIVE_ROOT)
+    assert.ok(root.topic); assert.equal(root.parent, null); assert.deepEqual(root.needs, [])
+
+    // Failed run really reaches native terminal ingestion. Its unpaired user
+    // remains local but must never become a graph row or an external quote.
+    w.hooks.nativeTerminal = 'failed'; n = w.liveAttempts.length
+    await w.ask(FAILED_TOPIC); delete w.hooks.nativeTerminal
+    assert.equal(w.store.getLatestRun(DM).status, 'failed')
+    assertTopicDecision(w, n, FAILED_TOPIC, [LIVE_ROOT])
+    assert.deepEqual(topicState(w).turns, [root])
+    await topicSay(w, [OUTSIDE_TOPIC, '다른 대화에만 남겨요.'], { thread:'other-topic-dm' })
+    assert.deepEqual(topicState(w).turns, [root])
+
+    const correction = [`정정: 서가 ${shelf}만 이용할 수 있어.`, '이용 범위를 접수했어요.']
+    const history = [LIVE_ROOT]
+    for (const pair of [LIVE_CHILD, LIVE_SIBLING, correction]) {
+      const state = topicState(w); n = w.liveAttempts.length
+      assert.ok(!(await topicSay(w, pair)).none)
+      const { serialized } = assertTopicDecision(w, n, pair[0], history)
+      assert.doesNotMatch(serialized, /"recipient"|"localMessageId"|egdesk_decision_context/)
+      assertTopicAppend(w, state, pair); history.push(pair)
+    }
+    const persisted = topicState(w)
+    const [, child, sibling, independent] = persisted.turns
+    assert.equal(child.parent, root.key); assert.equal(sibling.parent, root.key)
+    assert.equal(independent.parent, null); assert.deepEqual(independent.needs, [])
+    assert.equal(new Set(persisted.turns.map(row => row.topic)).size, 4, 'split siblings differ from each other and from separate roots')
+    w.restart(); assert.deepEqual(topicState(w), persisted)
+
+    w.hooks.reply = replyToLiveTopic; n = w.liveAttempts.length
+    const returned = await w.ask(LIVE_RETURN)
+    const { graph, serialized } = assertTopicDecision(w, n, LIVE_RETURN, history)
+    assert.deepEqual(graph.pairs.map(p => [p.alias, p.topic, p.parent, p.needs]), [
+      ['p0', 'p0', null, []], ['p1', 'p1', 'p0', []], ['p2', 'p2', 'p0', []], ['p3', 'p3', null, []],
+    ], 'routing input includes stored topology expressed only as per-request aliases')
+    assert.equal(returned.text, answer); assert.equal(w.rows().at(-1)[1], answer)
+    assert.equal(returned.params.additionalContext.egdesk_decision_context.kind, 'application')
+    const packet = liveEvidence(returned.packet)
+    assert.deepEqual(packet?.path.map(p => [p.alias, p.topic, p.parent, p.needs, p.userText, p.assistantText]), [
+      ['p0', 'p0', null, [], ...LIVE_ROOT], ['p1', 'p1', 'p0', [], ...LIVE_CHILD], ['p3', 'p3', null, [], ...correction],
+    ], 'answer path closes over ancestry and includes the independent chosen pair')
+    for (const quote of LIVE_SIBLING) assert.ok(!returned.packet.includes(quote), 'related but unneeded sibling is not given to the answerer')
+    assert.doesNotMatch(returned.packet, LIVE_NOTE)
+    for (const bytes of [serialized, returned.packet]) {
+      for (const id of [TOPIC_RECIPIENT, persisted.generation, persisted.conversationId,
+        ...persisted.turns.flatMap(row => [row.key, row.user.localMessageId, row.assistant.localMessageId, row.user.hash, row.assistant.hash])]) {
+        assert.ok(!bytes.includes(id), 'private storage identity is not model input')
+      }
+    }
+    const row = assertTopicAppend(w, persisted, [LIVE_RETURN, answer])
+    assert.equal(row.topic, child.topic); assert.equal(row.parent, null)
+    assert.deepEqual(row.needs, [independent.key])
+    const next = topicState(w); w.restart(); assert.deepEqual(topicState(w), next)
+
+    n = w.liveAttempts.length
+    const follow = await w.ask(LIVE_FOLLOW)
+    const followDecision = assertTopicDecision(w, n, LIVE_FOLLOW, [...history, [LIVE_RETURN, answer]])
+    assert.deepEqual(followDecision.graph.pairs[4], { alias:'p4', topic:'p1', parent:null, needs:['p3'] })
+    assert.deepEqual(followDecision.choices, ['continue_p0', 'split_p0', 'continue_p1', 'split_p1',
+      'continue_p2', 'split_p2', 'continue_p3', 'split_p3', 'separate', 'abstain'], 'continued turns are not new route origins')
+    assert.equal(follow.text, answer)
+    assert.deepEqual(liveEvidence(follow.packet)?.path.map(p => p.alias), ['p0', 'p1', 'p3', 'p4'],
+      'only the prior return is needed directly; its persisted dependency is traversed without reselecting it')
+    assert.deepEqual(assertTopicAppend(w, next, [LIVE_FOLLOW, answer]).needs, [row.key])
+    assertLivePublic(w)
+  })
+}
+
+async function withLiveRoot(t) {
+  const w = await liveTopicWorld(t)
+  await topicSay(w, [PRE_TOPIC, '이전 대화는 따로 남겨요.']); topicEnable(w)
+  assert.ok(!(await topicSay(w, LIVE_ROOT)).none)
+  assert.equal(topicState(w).turns.length, 1)
+  return w
+}
+function replaceTopicRoute(answers, value, confidence = .96) {
+  return answers.map(a => a.name === 'topic_route' ? { ...a, choice:value, confidence,
+    probabilities:[{ value, probability:confidence }] } : a)
+}
+function assertNoLiveTopicPrompt(turn) {
+  assert.ok(!turn.none, 'normal native chat still completes')
+  assert.doesNotMatch(turn.packet, LIVE_NOTE)
+  assert.equal(liveEvidence(turn.packet), undefined)
+  for (const quote of [...LIVE_ROOT, ...LIVE_CHILD, ...LIVE_SIBLING]) assert.ok(!turn.packet.includes(quote), quote)
+}
+
+for (const [name, response] of [
+  ['abstained route', ({ answers }) => ({ answers:replaceTopicRoute(answers, 'abstain') })],
+  ['unknown alias', ({ answers }) => ({ answers:replaceTopicRoute(answers, 'continue_p999') })],
+  ['low confidence route', ({ answers }) => ({ answers:replaceTopicRoute(answers, 'split_p0', .51) })],
+  ['missing dependency answer', ({ answers }) => ({ answers:answers.filter(a => a.name !== 'topic_need_0') })],
+  ['ambiguous dependency', ({ answers }) => ({ answers:answers.map(a => a.name === 'topic_need_0' ? { ...a, probability:.5 } : a) })],
+  ['invalid response body', () => ({ unrelated:[] })],
+  ['unavailable transport', () => { throw new DecisionError('unreachable', 'Synthetic outage') }],
+]) {
+  test(`production topics: ${name} neither attaches a topic packet nor commits a graph edge`, async t => {
+    const w = await withLiveRoot(t); const initial = topicState(w), n = w.liveAttempts.length
+    w.hooks.topicResponse = response
+    const turn = await topicSay(w, LIVE_CHILD)
+    assertTopicDecision(w, n, LIVE_CHILD[0], [LIVE_ROOT]); assertNoLiveTopicPrompt(turn)
+    assert.deepEqual(topicState(w), initial); assertLivePublic(w)
+  })
+}
+
+for (const phase of ['recipient mismatch at transport', 'clear before transport', 'rotate after transport', 'clear in native resume']) {
+  test(`production topics: ${phase} fences in-flight topic history`, async t => {
+    const w = await withLiveRoot(t); const initial = topicState(w)
+    const oldRows = w.rows(); let revoked = false
+    const clear = () => { revoked = true; w.evidence.clearTopic(w.scope()); assert.equal(topicState(w), null) }
+    if (phase === 'recipient mismatch at transport') w.transportRecipient = OTHER_RECIPIENT
+    if (phase === 'clear before transport') w.hooks.duringDecide = clear
+    if (phase === 'rotate after transport') w.hooks.topicResponse = () => { clear(); w.recipient = OTHER_RECIPIENT; topicEnable(w) }
+    if (phase === 'clear in native resume') {
+      w.restart(); w.hooks.onNative = method => { if (method === 'thread/resume') clear() }
+    }
+    const n = w.liveAttempts.length, sent = w.liveWires.length
+    const turn = await topicSay(w, LIVE_CHILD)
+    assertNoLiveTopicPrompt(turn)
+    const blocked = phase === 'recipient mismatch at transport' || phase === 'clear before transport'
+    assert.equal(w.liveAttempts.length - n, 1); assert.equal(w.liveAttempts.at(-1).allowed, !blocked)
+    assert.equal(w.liveWires.length - sent, blocked ? 0 : 1)
+    assert.deepEqual(w.rows().slice(0, oldRows.length), oldRows, 'revocation does not delete earlier local human-visible chat')
+    if (phase === 'recipient mismatch at transport') assert.deepEqual(topicState(w), initial)
+    else {
+      assert.ok(revoked, 'test reached the intended revocation seam')
+      if (phase === 'rotate after transport') {
+        const current = topicState(w)
+        assert.notEqual(current.generation, initial.generation); assert.deepEqual(current.turns, [])
+      } else assert.equal(topicState(w), null)
+    }
+    const state = topicState(w); w.restart(); assert.deepEqual(topicState(w), state)
+    assertLivePublic(w)
+  })
+}
+
+test('production topics: off, advisory, other thread, changed recipient and cleared grant do not transfer or append old pairs', async t => {
+  const w = await withLiveRoot(t), initial = topicState(w), n = w.liveWires.length
+  for (const mode of ['off', 'advisory']) {
+    w.mode = mode
+    const from = w.liveWires.length
+    const turn = await w.ask('서가 이야기 기억해?', null, { body:{ attachments:[{ id:'ordinary', label:'선택한 일반 문서' }] } })
+    assertNoLiveTopicPrompt(turn); assert.deepEqual(topicState(w), initial)
+    assert.equal(w.liveWires.length - from, mode === 'off' ? 0 : 1)
+    for (const wire of w.liveWires.slice(from)) {
+      assert.deepEqual(decisionNames(wire), []); assert.equal(topicWireHistory(wire), null)
+      assert.ok(!JSON.stringify(wire).includes(LIVE_ROOT[1]))
+    }
+  }
+  w.mode = 'on'
+  assertNoLiveTopicPrompt(await w.ask('지난 서가 이야기 계속하자.', null, { thread:'other-topic-dm' }))
+  assert.deepEqual(topicState(w), initial)
+  w.recipient = OTHER_RECIPIENT; w.transportRecipient = OTHER_RECIPIENT
+  assertNoLiveTopicPrompt(await w.ask('서가 이야기 다시 할까?')); assert.deepEqual(topicState(w), initial)
+  w.evidence.clearTopic(w.scope()); assert.equal(topicState(w), null)
+  w.restart(); assert.equal(topicState(w), null)
+  assertNoLiveTopicPrompt(await w.ask('옛날 서가 목록은?'))
+  const empty = topicEnable(w)
+  assert.notEqual(empty.generation, initial.generation)
+  const fresh = ['새 자료를 다루자.', '새 자료를 접수했어요.']
+  const cold = await topicSay(w, fresh); assertNoLiveTopicPrompt(cold)
+  assertTopicAppend(w, empty, fresh)
+  assert.equal(w.liveWires.length - n, 1, 'only the normal advisory catalog left the test transport')
+  assertLivePublic(w)
+})
+
+// Mixed-batch and prospective-consent production regressions. Test hooks only
+// supply synthetic model responses, timing, and one harmless scored candidate.
+const MIXED_SCORE_LABEL = 'MIXED_SCORE_LABEL'
+const MIXED_SCORE_VALUE = 'MIXED_SCORE_VALUE: must never reach native on a dropped batch'
+for (const [phase, hasFileGrant] of [['abstain', true], ['abstain', false], ['resume revoke', true], ['resume rekey', true]]) {
+  test(`production topics: mixed batch ${phase} keeps only independently granted file evidence (grant=${hasFileGrant})`, async t => {
+    const w = await withLiveRoot(t)
+    const initial = topicState(w), { handle } = await w.bindStandard()
+    if (!hasFileGrant) assert.ok(w.evidence.revoke(w.scope(), handle))
+    delete w.hooks.reply // stock answer is derived only from received file lines
+    w.hooks.stageHistory = ({ list }) => [...list, { id:'ordinary-scored', kind:'document', title:MIXED_SCORE_LABEL,
+      timeSlice:'present', summary:'Optional reference', loadText:() => MIXED_SCORE_VALUE }]
+    let scored = 0, resumed = 0
+    w.hooks.topicResponse = ({ body, answers }) => {
+      const catalog = body.input.flatMap(m => Array.isArray(m.content) ? m.content.map(c => c.text || '') : []).join('\n')
+      const index = catalog.match(/^#(\d+) \| [^\n]*\bMIXED_SCORE_LABEL\b/m)?.[1]
+      if (index !== undefined) scored++
+      const ranked = answers.map(a => a.name === `rel_${index}` ? { ...a, probability:.99 } : a)
+      return { answers:phase === 'abstain' ? replaceTopicRoute(ranked, 'abstain') : ranked }
+    }
+    if (phase !== 'abstain') {
+      w.restart()
+      w.hooks.onNative = method => {
+        if (method !== 'thread/resume' || resumed) return
+        resumed++
+        w.evidence.clearTopic(w.scope())
+        if (phase === 'resume rekey') {
+          w.recipient = OTHER_RECIPIENT; w.transportRecipient = OTHER_RECIPIENT
+          w.evidence.enableTopic(w.scope(), w.conv[DM], OTHER_RECIPIENT, w.store.topicBoundary(DM))
+        }
+      }
+    }
+    const n = w.liveAttempts.length
+    // This real current user message normally takes split_p0 in the existing
+    // semantic fixture; only the abstain case changes its topic answer.
+    const turn = await w.ask(LIVE_CHILD[0], handle)
+    assertTopicDecision(w, n, LIVE_CHILD[0], [LIVE_ROOT])
+    assert.equal(scored, 1, 'the discarded mixed batch actually voted yes on an optional item')
+    if (phase !== 'abstain') assert.equal(resumed, 1, 'revocation/rekey ran during native resume')
+    assertNoLiveTopicPrompt(turn)
+    assert.ok(!turn.packet.includes(MIXED_SCORE_LABEL) && !turn.packet.includes(MIXED_SCORE_VALUE))
+    if (hasFileGrant) {
+      assert.ok(hasPinned(turn)); assert.equal(turn.text, '지금 28개예요.')
+      assert.deepEqual(turn.fields.sources.map(s => s.relation), ['counted','posted','coverage'])
+      assert.doesNotMatch(turn.packet, /SENSITIVE_NEIGHBOR_TOKEN|COPY item|UNTRUSTED_LABEL|memrow:/)
+    } else {
+      noPinned(turn); assert.equal(turn.text, '알 수 없어요.')
+    }
+    if (phase === 'abstain') assert.deepEqual(topicState(w)?.turns, initial.turns)
+    else if (phase === 'resume revoke') assert.equal(topicState(w), null)
+    else {
+      assert.notEqual(topicState(w)?.generation, initial.generation)
+      assert.equal(topicState(w)?.recipient, OTHER_RECIPIENT)
+      assert.deepEqual(topicState(w)?.turns, [])
+    }
+    assertLivePublic(w)
+  })
+}
+
+for (const routeFailure of ['missing', 'ambiguous']) {
+  test(`production topics: a completed correction with route status ${routeFailure} pauses the old path through reopen`, async t => {
+    const w = await withLiveRoot(t), initial = topicState(w)
+    const correction = ['정정: 서가 2만 이용할 수 있어.', '서가 2로 정정했어요.']
+    w.hooks.topicResponse = ({ answers }) => ({ answers: routeFailure === 'missing'
+      ? answers.filter(a => a.name !== 'topic_route')
+      : answers.map(a => a.name === 'topic_route' ? { ...a, choice:'continue_p0', confidence:.9,
+        probabilities:[{ value:'continue_p0', probability:.9 }, { value:'separate', probability:.85 }] } : a) })
+    const n = w.liveAttempts.length
+    assertNoLiveTopicPrompt(await topicSay(w, correction))
+    assertTopicDecision(w, n, correction[0], [LIVE_ROOT])
+    assert.equal(w.store.getLatestRun(DM).status, 'completed')
+    assert.deepEqual(w.rows().slice(-2), [['user', correction[0]], ['assistant', correction[1]]])
+    const paused = topicState(w)
+    assert.deepEqual(paused?.turns, initial.turns, 'correction did not get a guessed edge')
+    delete w.hooks.topicResponse; w.restart()
+    assert.deepEqual(topicState(w), paused)
+    const before = w.liveAttempts.length
+    w.hooks.reply = replyToLiveTopic
+    const next = await w.ask(LIVE_RETURN, null, { body:{ attachments:[{ id:'ordinary-pause-check', label:'일반 첨부 메모' }] } })
+    assertNoLiveTopicPrompt(next); assert.equal(next.text, '대여 한도를 알 수 없어요.')
+    assert.equal(w.liveAttempts.length - before, 1, 'ordinary Decisions can still run')
+    const wire = w.liveAttempts.at(-1).body
+    assert.deepEqual(decisionNames(wire), []); assert.equal(topicWireHistory(wire), null)
+    for (const quote of [...LIVE_ROOT, ...correction]) assert.ok(!JSON.stringify(wire).includes(quote))
+    assert.deepEqual(topicState(w), paused)
+
+    assert.ok(w.evidence.clearTopic(w.scope()))
+    const fresh = topicEnable(w)
+    assert.notEqual(fresh.generation, initial.generation)
+    const newRoot = ['새 대여 선반을 정하자.', '새 대여 선반만 논의해요.']
+    const cold = w.liveAttempts.length
+    assertNoLiveTopicPrompt(await topicSay(w, newRoot))
+    assert.equal(w.liveAttempts.length, cold)
+    assertTopicAppend(w, fresh, newRoot)
+    const freshN = w.liveAttempts.length
+    const freshFollow = ['이제 새 대여 선반을 기록하자.', '새 기록을 추가했어요.']
+    assert.ok(!(await topicSay(w, freshFollow)).none)
+    const { serialized } = assertTopicDecision(w, freshN, freshFollow[0], [newRoot])
+    for (const quote of [...LIVE_ROOT, ...correction, LIVE_RETURN]) assert.ok(!serialized.includes(quote))
+    assertLivePublic(w)
+  })
+}
+
+test('production topics: enable during asynchronous preparation cannot backfill an already admitted request', async t => {
+  const w = await liveTopicWorld(t)
+  await topicSay(w, [PRE_TOPIC, '이전 대화는 따로 남겨요.'])
+  const beforeEnable = ['이미 접수된 메시지예요.', '이미 접수된 답이에요.']
+  let enabled, admission
+  w.hooks.stageHistory = async ({ list, body, context }) => {
+    await Promise.resolve()
+    if (body.message === beforeEnable[0]) {
+      admission = w.store.getAcceptedText(DM, context.requestId)
+      enabled = topicEnable(w)
+    }
+    return list
+  }
+  const n = w.liveAttempts.length
+  assertNoLiveTopicPrompt(await topicSay(w, beforeEnable))
+  delete w.hooks.stageHistory
+  assert.equal(admission, beforeEnable[0]); assert.ok(enabled)
+  assert.equal(w.store.getLatestRun(DM).status, 'completed')
+  assert.deepEqual(topicState(w), enabled); assert.equal(w.liveAttempts.length, n)
+  const first = ['권한이 생긴 뒤 처음 묻는 말이에요.', '새 대화의 시작이에요.']
+  assertNoLiveTopicPrompt(await topicSay(w, first))
+  assertTopicAppend(w, enabled, first)
+  const next = ['권한 이후 두 번째로 묻는 말이에요.', '두 번째 답이에요.']
+  const actual = w.liveAttempts.length
+  assert.ok(!(await topicSay(w, next)).none)
+  const { serialized } = assertTopicDecision(w, actual, next[0], [first])
+  for (const quote of beforeEnable) assert.ok(!serialized.includes(quote))
+  assertLivePublic(w)
+})
+
+test('production topics: revocation after a started native reply and before terminal ingestion prevents commit', async t => {
+  const w = await withLiveRoot(t), initial = topicState(w)
+  // run.configuration is emitted after native turn/start is acknowledged and
+  // the route is pending, but before any final answer is ingested.
+  let revoked, activeRun, fresh
+  w.events.push = function (...events) {
+    const count = Array.prototype.push.apply(this, events)
+    const configured = events.find(e => e.event === 'run.configuration' && e.clientThreadId === DM)
+    if (revoked === undefined && configured) {
+      activeRun = this.some(e => e.event === 'run.started' && e.runId === configured.runId) &&
+        !this.some(e => e.event === 'message.completed' && e.runId === configured.runId)
+      revoked = w.evidence.clearTopic(w.scope())
+      w.recipient = OTHER_RECIPIENT; w.transportRecipient = OTHER_RECIPIENT
+      w.evidence.enableTopic(w.scope(), w.conv[DM], OTHER_RECIPIENT, w.store.topicBoundary(DM))
+      fresh = topicState(w)
+    }
+    return count
+  }
+  const n = w.liveAttempts.length
+  const turn = await topicSay(w, LIVE_CHILD)
+  delete w.events.push
+  assertTopicDecision(w, n, LIVE_CHILD[0], [LIVE_ROOT])
+  assert.deepEqual(liveEvidence(turn.packet)?.path.map(p => p.alias), ['p0'])
+  assert.equal(activeRun, true); assert.equal(revoked, true)
+  assert.equal(w.store.getLatestRun(DM).status, 'completed')
+  assert.notEqual(fresh?.generation, initial.generation); assert.deepEqual(fresh?.turns, [])
+  assert.deepEqual(topicState(w), fresh)
+  w.restart(); assert.deepEqual(topicState(w), fresh)
+  assertLivePublic(w)
+})
+
+test('default Decisions wire, questions, cache key and number of calls are invariant to the existence of speech rows', async t => {
+  const w = await liveTopicWorld(t); await w.ask('초기 방을 확인해.'); const gen = w.evidence.enableSpeech(w.scope())
+  assert.ok(gen); assert.equal(topicState(w), null)
+  const prompt = '방금 한 말과 비교할래?'; const start = w.liveWires.length
+  await w.ask(prompt); assert.ok(w.evidence.recentSpeech(w.scope(), gen).length > 0)
+  await w.ask('DEFAULT_WIRE_CANARY: 아주 다른 내용으로 정정해.'); w.restart(); await w.ask(prompt)
+  assert.equal(w.liveWires.length - start, 3)
+  const empty = w.liveWires[start], populated = w.liveWires.at(-1)
+  assert.deepEqual(populated, empty)
+  assert.doesNotMatch(JSON.stringify(populated), /DEFAULT_WIRE_CANARY|conversation:recent|session_topic_|topic_(?:need|route)|이 DM에서 허용한 최근 발언/)
+})
+
+test('a durable uncertain dispatch without a run row cannot hide a topic gap after restart', async t => {
+  const w = await withLiveRoot(t), initial = topicState(w)
+  const req = 'lost-dispatch', localMessageId = 'msg-' + 'cd'.repeat(16), localRunId = 'run-uncertain'
+  w.store.acceptRequest({ clientThreadId:DM, requestId:req, fingerprint:'fixture-uncertain', ts:w.clock,
+    localMessageId, message:{ role:'user', text:'LOST_CORRECTION_CANARY', status:'accepted', localRunId, requestId:req } })
+  w.store.appendEvent({ clientThreadId:DM, eventKey:'dispatch:' + req, event:'run.dispatching', requestId:req,
+    localRunId, localMessageId, ts:w.clock, details:{ status:'dispatching' } })
+  w.store.recordRequestOutcome({ clientThreadId:DM, requestId:req, ts:w.clock, outcome:{ accepted:false, dispatchStatus:'unknown', conversationId:w.conv[DM], localRunId } })
+  assert.ok(!w.store.listRuns(DM).runs.some(r => r.localRunId === localRunId))
+  w.restart(); const before = w.liveWires.length
+  await w.ask('서가 수를 다시 알려 줘.'); assert.deepEqual(w.liveWires.slice(before).filter(topicWireHistory), [])
+  assert.deepEqual(topicState(w), initial)
+})
+
+test('a fresh question can return to a topic whose origin and correction are both outside the old 12-utterance window', async t => {
+  const w = await withLiveRoot(t), correction = ['정정: 서가 2만 이용할 수 있어.', '이용 범위를 접수했어요.']
+  await topicSay(w, LIVE_CHILD); await topicSay(w, correction)
+  const history = [LIVE_ROOT, LIVE_CHILD, correction]
+  for (let i = 0; i < 8; i++) {
+    const pair = [`별개 안건 ${i}의 임시 이름은?`, `관계 없는 별개 안건 ${i}예요.`]
+    await topicSay(w, pair); history.push(pair)
+  }
+  const prior = topicState(w); assert.equal(prior.turns.length, 11); assert.equal(w.evidence.speechGrant(w.scope()), null)
+  w.restart(); const start = w.liveAttempts.length; w.hooks.reply = replyToLiveTopic
+  const returned = await w.ask(LIVE_RETURN); assertTopicDecision(w, start, LIVE_RETURN, history)
+  assert.equal(returned.text, '21권까지 빌릴 수 있어요.')
+  assert.deepEqual(liveEvidence(returned.packet)?.path.map(p => p.alias), ['p0','p1','p2'])
+  assert.doesNotMatch(returned.packet, /임시 이름|별개 안건/); assert.deepEqual(topicState(w).turns.slice(0,-1), prior.turns)
+})
+
+test('the grant high-water mark survives reopen; a first successful but source-ineligible turn cannot be silently forgotten', async t => {
+  const w = await liveTopicWorld(t); await w.ask('허용 전에 남는 문장.'); const initial = topicEnable(w)
+  assert.equal(initial.startSeq, w.store.topicBoundary(DM))
+  w.hooks.nativeTerminal = 'completed'
+  // Beyond the original complete public final projection. Must not become an
+  // empty-history reset just because there is not yet a topic origin to compare to.
+  await topicSay(w, ['범위를 정정해.', '긴 답변 '.repeat(5000)])
+  assert.deepEqual(topicState(w).turns, [])
+  w.restart(); const count = w.liveWires.length
+  assertNoLiveTopicPrompt(await topicSay(w, LIVE_ROOT)); assert.deepEqual(topicState(w).turns, [])
+  assert.equal(w.liveWires.length, count)
+  w.evidence.clearTopic(w.scope()); const next = topicEnable(w); assert.ok(next.startSeq > initial.startSeq)
+  await topicSay(w, LIVE_ROOT); assertTopicAppend(w, next, LIVE_ROOT)
 })

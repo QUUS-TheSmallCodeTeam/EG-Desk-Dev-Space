@@ -122,7 +122,7 @@ function itemHeader(candidate) {
 }
 
 const PACKET_HEAD = [
-  'EG-Desk selected these items for this turn with a decision model.',
+  'EG-Desk is supplying these selected items for this turn.',
   'Time tags: present = applicable in the current interval, not necessarily directly observed; past = history; planned = decided but not done; hypothetical = what-if; unknown = untagged.',
   'Never state a planned or hypothetical item as a current fact. Use your own tools only when these items are not enough.',
 ].join('\n')
@@ -201,43 +201,64 @@ function cacheKey(scope, hash) {
  * message comes after it.
  */
 export async function prepareTurnContext({ message, candidates = [], client, thresholds: overrides, maxItems = 8, maxChars = 24000,
-  itemChars = 6000, timeoutMs, signal, cacheScope = 'ctx', askedAt = null, speech = null } = {}) {
+  itemChars = 6000, timeoutMs, signal, cacheScope = 'ctx', askedAt = null, speech = null, topic = null } = {}) {
   const thresholds = decisionThresholds(overrides)
   if (!client) return skipped('not_configured')
   if (typeof message !== 'string' || !message.trim()) return skipped('no_message')
-  const normalized = normalizeAll(candidates)
-  // Only the current message is already authorized for this classification. Never put earlier quotes into this call.
+  const all = normalizeAll(candidates)
+  // Existence of a prior utterance or linked answer is private, even without its
+  // body. It must not change the ordinary external catalog, questions or cache key.
+  const localSpeech = all.find(c => c.id === 'conversation:recent' && c.mayRead)
+  const localLookup = all.find(c => c.id === 'memory-lookup:0' && c.mayRead)
+  const normalized = all.filter(c => c.id !== 'conversation:recent' && c.id !== 'memory-lookup:0')
   const activeSpeech = speech?.allowed() === true && Array.isArray(speech.segments)
-  const extraQuestions = activeSpeech ? speechQuestions(speech.segments) : []
-  if (!normalized.length && !activeSpeech) return skipped('no_candidates')
+  const extraQuestions = activeSpeech ? [...speechQuestions(speech.segments), predicateQuestion('rel_recall', 'Does the current message refer back to earlier remarks, ask for recall or compare with a previous answer? Judge the wording, not whether such material exists.')] : []
+  const liveTopic = topic?.allowed() === true ? topic : null
+  const topicQuestions = liveTopic?.plan.questions || []
+  const cold = liveTopic && !topicQuestions.length ? liveTopic.plan.resolve({}) : null
+  // A first prospective pair is a local root. A private exact file match by itself
+  // also needs no external request or observable catalog entry.
+  const classify = normalized.length || activeSpeech || topicQuestions.length
+  if (!classify && !localLookup) return { ...skipped('no_candidates'), ...(cold ? { topicRoute: cold } : {}) }
   const forced = normalized.filter(candidate => forcedReason(message, candidate))
   const rest = normalized.filter(candidate => !forcedReason(message, candidate))
-  const list = [...forced, ...rest].slice(0, MAX_CONTEXT_CANDIDATES - extraQuestions.length)
+  const list = [...forced, ...rest].slice(0, MAX_CONTEXT_CANDIDATES - extraQuestions.length - topicQuestions.length)
   const catalog = list.map((candidate, index) => catalogLine(candidate, index)).join('\n')
   const catalogHash = sha256Hex(catalog)
   const questions = [
     choiceQuestion('answer_type', 'What does the person need from this message?', tableOptions(ANSWER_TYPES)),
     choiceQuestion('time_intent', 'Which time does the message ask about?', tableOptions(TIME_INTENTS)),
     ...list.map((candidate, index) => predicateQuestion(`rel_${index}`, `Is catalog item #${index} needed to respond to the message?`)),
-    ...extraQuestions,
+    ...extraQuestions, ...topicQuestions,
   ]
   const receipt = { useCase: 'context.setup', catalogHash, candidates: list.length, trimmed: normalized.length - list.length,
     questionCount: questions.length, thresholds }
-  let result
+  let result, discardJudgments = false
+  const emptyJudgments = { answers: {}, latencyMs: 0, usage: null, model: null }
   try {
-    result = await client.decide({
+    if (liveTopic && !liveTopic.allowed()) throw new DecisionError('evidence_unavailable', 'Scoped history is unavailable')
+    result = !classify ? { answers: {}, latencyMs: 0, usage: null, model: null } : await client.decide({
+      ...(topicQuestions.length ? { authorizeDispatch: liveTopic.authorizeDispatch } : {}),
       input: [
         { role: 'developer', content: CONTEXT_RULES },
         { role: 'user', content: [{ type: 'input_text', text: `Catalog:\n${catalog}`, prompt_cache_breakpoint: { mode: 'explicit' } }] },
-        { role: 'user', content: `Message:\n${activeSpeech ? message : message.trim()}` },
+        ...(topicQuestions.length ? liveTopic.plan.input : []),
+        { role: 'user', content: `Message:\n${activeSpeech || topicQuestions.length ? message : message.trim()}` },
       ],
       questions, promptCacheKey: cacheKey(cacheScope, catalogHash), timeoutMs, signal,
     })
   } catch (error) {
     const reason = failureCode(error)
-    return { status: 'fallback', reason, answerType: null, timeIntent: null, selected: [], extraContext: {}, latencyMs: null, model: null,
+    if (!topicQuestions.length) return { status: 'fallback', reason, answerType: null, timeIntent: null, selected: [], extraContext: {}, latencyMs: null, model: null,
       receipt: { ...receipt, outcome: 'fallback', reason } }
+    result = emptyJudgments; discardJudgments = true
   }
+  // Other answers in the batch can also reflect its history. Discard all derived
+  // scores if the grant/recipient or verified occurrences changed in flight.
+  const topicRoute = cold || (!discardJudgments && topicQuestions.length && liveTopic.allowed() ? liveTopic.plan.resolve(result.answers) : null)
+  if (topicQuestions.length && !topicRoute) { result = emptyJudgments; discardJudgments = true }
+  const independentFile = row => row.reason === 'mandatory' && row.candidate.mayRead &&
+    (row.candidate.id === 'memory-lookup:0' || /^memory-selection:[0-9]+$/.test(row.candidate.id))
   const answerType = readChoice(result.answers, 'answer_type', { minConfidence: thresholds.choice })
   const timeIntent = readChoice(result.answers, 'time_intent', { minConfidence: thresholds.choice })
   const presentOnly = timeIntent.state === 'accepted' && timeIntent.value === 'present'
@@ -247,7 +268,12 @@ export async function prepareTurnContext({ message, candidates = [], client, thr
     const reason = forcedReason(message, candidate) || (verdict.state === 'yes' ? 'scored' : null)
     return { candidate, probability: verdict.probability, reason, unknown: verdict.state === 'unknown' }
   })
-  const chosen = scored.filter(row => row.reason)
+  if (localLookup) scored.push({ candidate: localLookup, probability: null, reason: 'mandatory', unknown: false })
+  if (localSpeech && activeSpeech) {
+    const recall = readPredicate(result.answers, 'rel_recall', thresholds.relevant)
+    if (recall.state === 'yes') scored.push({ candidate: localSpeech, probability: recall.probability, reason: 'scored', unknown: false })
+  }
+  const chosen = scored.filter(row => row.reason && (!discardJudgments || independentFile(row)))
     .sort((a, b) => reasonRank(a.reason) - reasonRank(b.reason) || (b.probability ?? 0) - (a.probability ?? 0))
     .slice(0, Math.max(1, maxItems))
   const items = await assemble(chosen, { maxChars, itemChars })
@@ -259,11 +285,25 @@ export async function prepareTurnContext({ message, candidates = [], client, thr
     + 'Past or future with no date, active now with no end specified, and unknown even as to past/present/future are distinct. Never invent a date. '
     + 'Source verification confirms what a passage says; it does not turn a report or inference into a physical observation. A copy is not another count. A posted movement and a scheduled movement are not interchangeable. '
     + 'Give a supported quantity directly. Explain the basis only when asked, or a gap or conflict changes the answer.' : ''
+  // These exact mandatory file rows were identified by local authority alone. They
+  // remain useful if a topic grant changes after scoring or during native resume.
+  const fileItems = items.filter(independentFile)
+  const withoutTopic = () => {
+    const safe = fileItems.filter(item => mayRead(item.candidate))
+    if (!safe.length) return skipped('evidence_unavailable')
+    return { status: 'ready', selected: selectedSummary(safe), receipt: null, privateTopicBatch: true,
+      extraContext: { [DECISION_CONTEXT_KEY]: [PACKET_HEAD + evidenceRule, ...safe.map(item => item.block)].join('\n\n') },
+      mayDispatch: () => safe.every(item => mayRead(item.candidate)),
+      noteSent: () => { for (const item of safe) { try { item.candidate.noteSent?.() } catch {} } } }
+  }
+  if (discardJudgments) return withoutTopic()
   const withSpeech = activeSpeech && speech.allowed()
   const interpretations = withSpeech ? speechInterpretations(result.answers, speech.segments) : null
   const speechRule = withSpeech ? '\n' + SPEECH_RULES + '\nQuestion clock: ' + (anchor ? anchor.toISOString() + ' (UTC offset minutes ' + (-anchor.getTimezoneOffset()) + ')' : 'unknown')
     + '. Current user message: fallible semantic labels by UTF-16 offsets in its exact text: ' + JSON.stringify(interpretations) : ''
-  const packet = items.length || withSpeech ? [PACKET_HEAD + evidenceRule + speechRule, ...items.map(item => item.block)].join('\n\n') : null
+  const parts = items.length || withSpeech ? [PACKET_HEAD + evidenceRule + speechRule, ...items.map(item => item.block)] : []
+  if (topicRoute?.packet) parts.push(topicRoute.packet)
+  const packet = parts.join('\n\n') || null
   const status = packet ? 'ready' : 'empty'
   return {
     status,
@@ -272,7 +312,9 @@ export async function prepareTurnContext({ message, candidates = [], client, thr
     selected: selectedSummary(items),
     // Process-local only; never copy callbacks or grant handles into receipts/history.
     ...(withSpeech ? { speechInterpretations: interpretations } : {}),
-    ...(guarded.length || withSpeech ? { mayDispatch: () => (!withSpeech || speech.allowed()) && guarded.every(item => mayRead(item.candidate)),
+    ...(topicRoute ? { topicRoute } : {}),
+    ...(topicQuestions.length ? { privateTopicBatch: true, withoutTopic } : {}),
+    ...(guarded.length || withSpeech || topicQuestions.length ? { mayDispatch: () => (!topicQuestions.length || liveTopic.allowed()) && (!withSpeech || speech.allowed()) && guarded.every(item => mayRead(item.candidate)),
       noteSent: () => { for (const { candidate } of guarded) { try { candidate.noteSent?.() } catch {} } } } : {}),
     extraContext: packet ? { [DECISION_CONTEXT_KEY]: packet } : {},
     latencyMs: result.latencyMs,

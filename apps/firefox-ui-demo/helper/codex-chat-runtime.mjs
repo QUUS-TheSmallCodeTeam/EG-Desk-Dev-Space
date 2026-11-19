@@ -31,6 +31,7 @@ import { BROWSER_REFLEX_TOOL_NAME } from './egdesk-browser-reflex.mjs'
 const BROWSER_INTERACTION_TOOL_NAMES = Object.freeze([...BROWSER_STEP_TOOL_NAMES, BROWSER_REFLEX_TOOL_NAME])
 // Fixture QA allows only observe/click/fill; a reflex could run other steps.
 const FIXTURE_BROWSER_TOOL_NAMES = Object.freeze(['egdesk_browser_observe', 'egdesk_browser_click', 'egdesk_browser_fill'])
+import { planSessionTopic, SESSION_TOPIC_LIMITS } from './egdesk-session-topic.mjs'
 import { speechSegments } from './egdesk-speech-grounding.mjs'
 import { DECISION_CONTEXT_KEY, decisionContextActivity, evidenceForSpeaker, prepareTurnContext } from './egdesk-context-setup.mjs'
 
@@ -756,6 +757,8 @@ export class CodexChatRuntime {
     // Decision model context setup (DECISION_MODEL_CONTEXT_SETUP.md §3.1):
     // { mode(): 'off'|'advisory'|'on', configured(): boolean, client, collect({ body, context }) → candidates, budgetMs? } or null.
     this.speechRuns = new WeakMap() // private runtime-only grants; never projected onto public runs
+    this.topicIntakes = new WeakMap() // accepted local request -> prospective generation, never copied to checkpoints
+    this.topicRuns = new WeakMap() // live turn -> routing refs until one confirmed final + successful terminal event
     this.decisionContext = decisionContext
     this.toolProviders = [...(contexts ? [contexts] : []), ...toolProviders]
     this.threadToolOwners = new Map()
@@ -1287,6 +1290,13 @@ export class CodexChatRuntime {
     }
     if (publicEvent.durable && event === 'message.completed' && details.role === 'assistant' && localMessageId)
       this.speechRuns.get(run)?.record(localMessageId, 'assistant', details.text, [], speechEventSeq)
+    const topic = this.topicRuns.get(run)
+    if (topic && publicEvent.durable && event === 'message.completed' && details.role === 'assistant' && details.phase === 'final_answer' && details.completionConfirmed === true)
+      topic.final = { localMessageId, seq: speechEventSeq }
+    if (topic && event === 'run.completed') {
+      this.topicRuns.delete(run)
+      if (publicEvent.durable && details.status === 'completed' && topic.final) topic.commit(topic.final)
+    }
     this.emitEvent(publicEvent)
   }
 
@@ -1770,6 +1780,12 @@ export class CodexChatRuntime {
       ...(boardTurn ? { boardActor } : {}),
       checkBoard, checkAudience, channelKind, peerDispatch: internal?.board?.peers,
       extraContext: { ...(typeof internal?.board?.block === 'string' ? { egdesk_board: internal.board.block } : {}), ...(internal?.blocks || {}) },
+    }
+    if (acceptedLocal?.accepted) {
+      // Synchronous with acceptRequest. Enabling or rotating a grant during later
+      // workspace/tool preparation cannot make this already accepted turn eligible.
+      const intake = this.topicIntake(body, context)
+      if (intake) this.topicIntakes.set(context, intake)
     }
     const record = { fingerprint, settled: false, promise: null, engineId: context.engine.id, slot }
     record.promise = this.startTurn(body, context).catch(error => {
@@ -2425,15 +2441,28 @@ export class CodexChatRuntime {
       context.checkBoard?.()
       // Selection/scoring can precede native thread preparation. Do not send an
       // already assembled packet after its grant expires or is revoked.
-      const guarded = decision?.mode === 'on' && !!decision.result.mayDispatch && !!additionalContext?.[DECISION_CONTEXT_KEY]
-      const reserve = guarded && decision.result.mayDispatch()
-      if (body.conversationId || reserve) context.checkAudience(cid, reserve)
-      // FULL SQLite commit can take time. A grant that expired during reservation
-      // still sends no private input; never release a committed history fence here.
-      if (guarded && (!reserve || !decision.result.mayDispatch())) {
-        if (additionalContext) delete additionalContext[DECISION_CONTEXT_KEY]
-        decision.result = { status: 'fallback', reason: 'evidence_unavailable', selected: [], extraContext: {}, receipt: null }
+      const intake = this.topicIntakes.get(context)
+      const narrowDecision = () => {
+        const r = decision?.result
+        if (decision?.mode !== 'on' || !r) return null
+        if (r.mayDispatch && !r.mayDispatch()) {
+          const files = r.withoutTopic?.()
+          const safe = files?.mayDispatch?.() === true ? files : null
+          decision.result = safe || { status: 'fallback', reason: 'evidence_unavailable', selected: [], extraContext: {}, receipt: null }
+          if (additionalContext) {
+            if (safe) additionalContext[DECISION_CONTEXT_KEY] = { kind: 'application', value: safe.extraContext[DECISION_CONTEXT_KEY] }
+            else delete additionalContext[DECISION_CONTEXT_KEY]
+          }
+          return null
+        }
+        return r.topicRoute && intake?.current() ? r.topicRoute : null
       }
+      let topicRoute = narrowDecision()
+      const reserve = Boolean(topicRoute || (decision?.mode === 'on' && decision.result.mayDispatch && additionalContext?.[DECISION_CONTEXT_KEY]))
+      if (body.conversationId || reserve) context.checkAudience(cid, reserve)
+      // The synchronous reservation can still take time. After it we may only narrow
+      // the original result, never acquire new sources or transfer an existing grant.
+      if (reserve) topicRoute = narrowDecision()
       turnStartAttempted = context.turnStartAttempted = true
       const result = await engine.startTurn({
         threadId: cid,
@@ -2473,6 +2502,10 @@ export class CodexChatRuntime {
       }
       const run = this.ensureRun(cid, result?.turn?.id, context)
       if (!run) throw chatError('INVALID_TURN_RESPONSE', 'Codex did not return a turn ID', 502)
+      if (topicRoute && intake.current()) {
+        const { topic, parent, needs } = topicRoute // discard the plaintext packet at this boundary
+        this.topicRuns.set(run, { final: null, commit: final => intake.commit({ topic, parent, needs }, final) })
+      }
       // The turn has the shared copies now; they are not attached again.
       if (context.peerDispatch && !bounded) this.bindBoardPeerRun(context.peerDispatch, context, run, epoch)
       if (shares.length) this.markSharesAttached(context, shares, run)
@@ -3865,7 +3898,8 @@ export class CodexChatRuntime {
       if ((mode !== 'advisory' && mode !== 'on') || setup.configured() !== true) return null
     } catch { return null }
     const budgetMs = Number.isSafeInteger(setup.budgetMs) && setup.budgetMs > 0 ? setup.budgetMs : 800
-    const started = Date.now()
+    const started = performance.now(), deadline = started + budgetMs
+    const inBudget = () => performance.now() < deadline
     const askedAt = context.askedAt ?? this.now()
     const controller = new AbortController()
     let timer = null
@@ -3875,14 +3909,73 @@ export class CodexChatRuntime {
       speech = mode === 'on' ? this.directSpeech(body, context, controller.signal) : null
       const memoryEvidenceFor = mode === 'on' ? this.directEvidenceReader(body, context, controller.signal) : null
       const candidates = await setup.collect({ body, context, signal: controller.signal, memoryEvidenceFor, speech })
-      if (controller.signal.aborted) return { status: 'fallback', reason: 'timeout', selected: [], extraContext: {}, receipt: null }
-      return prepareTurnContext({ message: body.message, candidates: Array.isArray(candidates) ? candidates : [], client: setup.client, askedAt, speech,
-        timeoutMs: Math.max(1, budgetMs - (Date.now() - started)), signal: controller.signal, cacheScope: 'ctx' })
+      const topic = mode === 'on' ? this.topicIntakes.get(context)?.prepare(controller.signal, inBudget) : null
+      if (controller.signal.aborted || !inBudget()) return { status: 'fallback', reason: 'timeout', selected: [], extraContext: {}, receipt: null }
+      return prepareTurnContext({ message: body.message, candidates: Array.isArray(candidates) ? candidates : [], client: setup.client, askedAt, speech, topic,
+        timeoutMs: Math.max(1, Math.ceil(deadline - performance.now())), signal: controller.signal, cacheScope: 'ctx' })
     })().catch(() => ({ status: 'fallback', reason: 'unreachable', selected: [], extraContext: {}, receipt: null }))
     try {
       const result = await Promise.race([work, expired])
       return { mode, speech, result: result || { status: 'fallback', reason: 'timeout', selected: [], extraContext: {}, receipt: null } }
     } catch { return null } finally { clearTimeout(timer) }
+  }
+
+  // Local-only entry ticket. Saving ordinary history or selecting an Agent is not
+  // permission to disclose past utterances to a second provider/project.
+  topicIntake(body, context) {
+    try {
+      const setup = this.decisionContext, cid = context.conversationId, thread = context.clientThreadId
+      const key = context.localMessageId, agentId = context.profileRun?.binding?.profileId
+      if (!cid || !agentId || !key || !context.localRunId || !this.storeHealthy || context.engine.id !== 'codex' ||
+          context.channelKind !== 'direct' || context.executionPolicy || context.stateless || context.board || body.boardId != null ||
+          Object.hasOwn(context, 'boardActor') || setup?.mode() !== 'on' || setup.configured() !== true ||
+          typeof setup.topicRecipient !== 'function' || !this.store?.topicPairSource || this.store.getAcceptedText(thread, context.requestId) !== body.message) return null
+      const dm = this.memoryDmAuthority({ clientThreadId: thread, conversationId: cid, expectedProfileId: agentId })
+      const evidence = setup.memoryEvidence, recipient = dm.topicRecipient(), first = evidence?.topicState(dm.scope)
+      if (!recipient || !first || first.recipient !== recipient || first.conversationId !== cid || first.turns.length >= SESSION_TOPIC_LIMITS.rows) return null
+      const { generation, revision } = first
+      const sourceScope = { clientThreadId: thread, conversationId: cid, agentId, ownerHash: context.ownerHash }
+      if (ownerHash(dm.scope.ownerKey) !== context.ownerHash) return null
+      const state = () => { try {
+        if (!this.storeHealthy || setup.mode() !== 'on' || setup.configured() !== true || dm.topicRecipient() !== recipient ||
+            this.store.getAcceptedText(thread, context.requestId) !== body.message) return null
+        context.checkBoard?.()
+        const x = evidence.topicState(dm.scope)
+        if (x?.generation !== generation || x.revision !== revision || x.recipient !== recipient || x.conversationId !== cid) return null
+        // A completed but unindexed intervening turn could contain a correction.
+        // Never describe the old slice as complete or silently create a new root.
+        return this.store.topicHistoryAdjacent(thread, x.turns.at(-1)?.assistant.seq ?? x.startSeq, key) ? x : null
+      } catch { return null } }
+      const hash = text => createHash('sha256').update(text).digest('hex')
+      const pair = r => this.store.topicPairSource({ ...sourceScope, user: r.user, assistant: r.assistant })
+      const read = r => {
+        const p = pair(r)
+        return p && hash(p.user.quote) === r.user.hash && hash(p.assistant.quote) === r.assistant.hash ? p : null
+      }
+      const current = () => Boolean(state())
+      return { current, prepare: (signal, inBudget) => { try {
+        const x = !signal.aborted && inBudget() && state(); if (!x) return null
+        const turns = []
+        for (const r of x.turns) {
+          if (!inBudget()) return null
+          const p = read(r); if (!p) return null
+          turns.push({ key: r.key, topic: r.topic, parent: r.parent, needs: r.needs, userText: p.user.quote, assistantText: p.assistant.quote })
+        }
+        const plan = planSessionTopic({ turns, currentKey: key })
+        // The durable graph may contain corrections across topic boundaries. The live
+        // implementation refuses an incomplete window, even if a narrower experimental
+        // planner could route a fully shown branch inside it.
+        if (!plan || (turns.length && plan.questions.length !== turns.length + 1)) return null
+        const allowed = () => { try { return !signal.aborted && current() && x.turns.every(r => !!read(r)) } catch { return false } }
+        return { plan, allowed, authorizeDispatch: actualRecipient => actualRecipient === recipient && inBudget() && allowed() && inBudget() }
+      } catch { return null } }, commit: (route, final) => { try {
+        const x = state(); if (!x) return false
+        const p = pair({ user: { localMessageId: key }, assistant: final })
+        if (!p || p.user.quote !== body.message || !x.turns.every(r => !!read(r))) return false
+        const ref = (localMessageId, s) => ({ localMessageId, seq: s.seq, hash: hash(s.quote) })
+        return evidence.commitTopic(dm.scope, generation, revision, { key, ...route, user: ref(key, p.user), assistant: ref(final.localMessageId, p.assistant) }) === true
+      } catch { return false } } }
+    } catch { return null }
   }
 
   // Only a previously established ordinary DM can opt in. Local author, exact native recipient and grant
@@ -4008,7 +4101,14 @@ export class CodexChatRuntime {
     if (this.readNativeBinding(clientThreadId, conversationId).executionPolicy) deny()
     assertCurrent()
     const scope = { ownerKey: authority.ownerKey, clientThreadId, agentId: expectedProfileId }
-    return { scope, assertCurrent, recentEvidence: () => {
+    return { scope, assertCurrent, topicRecipient: () => {
+      assertCurrent()
+      if (route.engineId !== 'codex' || this.decisionContext?.configured() !== true) return null
+      const fp = this.decisionContext.topicRecipient?.(authority)
+      return typeof fp === 'string' && /^[0-9a-f]{64}$/.test(fp) ? fp : null
+    }, topicStartSeq: () => { assertCurrent(); return this.store.topicBoundary(clientThreadId) }, topicAdjacent: afterSeq => {
+      assertCurrent(); return this.conversationBusy(conversationId) ? null : this.store.topicHistoryAdjacent(clientThreadId, afterSeq, null)
+    }, recentEvidence: () => {
       assertCurrent(); const run = this.store.previousPublicAnswerRun(clientThreadId, null)
       return run ? this.decisionContext?.memoryEvidence?.forTurn(scope, run) ?? null : null
     }, validateCapture: async capture => {
@@ -4024,7 +4124,7 @@ export class CodexChatRuntime {
   // One decision-context activity row: what the decision model chose, and in
   // 'advisory' mode that nothing was attached. Nothing to show when it skipped.
   noteDecisionContext(run, { mode, result }) {
-    if (!result || result.status === 'skipped') return
+    if (!result || result.status === 'skipped' || result.privateTopicBatch) return
     const activity = decisionContextActivity({ answerId: run.answerId, selected: result.selected || [], latencyMs: result.latencyMs ?? null, model: result.model ?? null })
     const attached = mode === 'on' && result.status === 'ready'
     if (result.status === 'fallback') activity.title = '컨텍스트 세팅 · 결정 모델 응답 없음'

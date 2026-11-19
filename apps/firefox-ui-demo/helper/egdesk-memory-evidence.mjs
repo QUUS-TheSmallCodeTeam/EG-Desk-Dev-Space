@@ -154,7 +154,7 @@ function selectedLines(text, { startLine, endLine }) {
 }
 
 const stat = p => lstatSync(p, { throwIfNoEntry: false })
-function location(dataDir, create) {
+function location(dataDir, create, inspectRuntime = true) {
   let root = stat(dataDir)
   if (!root && !create) return null
   if (!root) { mkdirSync(dataDir, { recursive: true, mode: 0o700 }); root = stat(dataDir) }
@@ -175,7 +175,7 @@ function location(dataDir, create) {
   const existing = safeFile(file)
   for (const ext of ['-journal', '-wal', '-shm']) if (safeFile(file + ext)) check(existing)
   if (!existing && !create) return null
-  assertPatchedSqliteRuntime() // Never open or create a persistent SQLite file on an unsupported runtime.
+  if (inspectRuntime) assertPatchedSqliteRuntime() // Always required before opening a persistent SQLite file.
   let fresh = false
   if (!existing) {
     try { closeSync(openSync(file, constants.O_CREAT | constants.O_EXCL | constants.O_RDWR | (constants.O_NOFOLLOW || 0), 0o600)); fresh = true }
@@ -183,7 +183,7 @@ function location(dataDir, create) {
   }
   const database = safeFile(file)
   check(database && (process.platform === 'win32' || (database.mode & 0o200)))
-  return { file, fresh }
+  return { file, fresh, database }
 }
 const APP_ID = 0x4d455647 // MEVG
 const liveInScope = `g.scope_key=? AND (g.expires_at IS NULL OR g.expires_at>?)
@@ -237,7 +237,69 @@ function speechState(db, key, expected) {
   check(records.every((record, i) => !i || records[i - 1].seq < record.seq) && new Set(records.map(r => r.localMessageId)).size === records.length && JSON.stringify(records) === row.refs)
   return { generation: row.generation, records }
 }
-function speechWrite(db, fn) {
+// A separate prospective grant, pinned to the host's native DM and recipient.
+// One row holds the complete generation so commit and erasure are atomic. No message text enters this store.
+const TOPIC_LIMIT = 96, TOPIC_NEEDS = 24, TOPIC_JSON = 256 * 1024 - 1, TOPIC_ROOM_BYTES = 2048
+const topicSchema = `CREATE TABLE topic_grants(scope_key TEXT PRIMARY KEY, generation TEXT NOT NULL UNIQUE,
+  recipient TEXT NOT NULL CHECK(length(CAST(recipient AS BLOB))=64),
+  conversation_id TEXT NOT NULL CHECK(length(CAST(conversation_id AS BLOB)) BETWEEN 1 AND ${TOPIC_ROOM_BYTES}),
+  start_seq INTEGER NOT NULL CHECK(start_seq>=0), revision INTEGER NOT NULL CHECK(revision BETWEEN 0 AND ${TOPIC_LIMIT}),
+  turns TEXT NOT NULL CHECK(length(CAST(turns AS BLOB))<=${TOPIC_JSON}), seal TEXT NOT NULL) WITHOUT ROWID, STRICT`
+const isTopicRoom = v => typeof v === 'string' && v.length > 0 && v.length <= 512 && v.isWellFormed() && !/[\s\p{Cc}\p{Cf}]/u.test(v)
+const isLocalMessageId = v => typeof v === 'string' && v.length === 36 && /^msg-[0-9a-f]{32}$/.test(v)
+const isHash = v => typeof v === 'string' && v.length === 64 && digest.test(v)
+const isTopicRevision = v => Number.isSafeInteger(v) && v >= 0 && v <= TOPIC_LIMIT
+const topicSeal = (key, { generation, recipient, conversationId, startSeq, revision }, turns) =>
+  sha(JSON.stringify(['topic-v1', key, generation, recipient, conversationId, startSeq, revision, turns]))
+function topicMessage(v) {
+  fields(v, ['localMessageId', 'seq', 'hash'])
+  const { localMessageId, seq, hash } = v
+  check(isLocalMessageId(localMessageId) && positive(seq) && isHash(hash))
+  return { localMessageId, seq, hash }
+}
+function topicTurn(v) {
+  fields(v, ['key', 'topic', 'parent', 'needs', 'user', 'assistant'])
+  const { key, topic, parent } = v, needs = denseValues(v.needs, TOPIC_NEEDS)
+  const user = topicMessage(v.user), assistant = topicMessage(v.assistant)
+  check(isLocalMessageId(key) && isLocalMessageId(topic) && (parent === null || isLocalMessageId(parent)))
+  check(needs.every(isLocalMessageId) && new Set(needs).size === needs.length)
+  check(user.localMessageId === key && assistant.localMessageId !== key && user.seq < assistant.seq)
+  return { key, topic, parent, needs, user, assistant }
+}
+function validateTopicGraph(turns, startSeq) {
+  const keys = new Set(), roots = new Set(), messages = new Set()
+  let seq = startSeq
+  for (const row of turns) {
+    check(row.user.seq > seq && !messages.has(row.key) && !messages.has(row.assistant.localMessageId))
+    check(row.needs.every(key => keys.has(key)))
+    if (row.topic === row.key) {
+      check(row.parent === null || roots.has(row.parent))
+      roots.add(row.key)
+    } else check(row.parent === null && roots.has(row.topic))
+    seq = row.assistant.seq
+    keys.add(row.key); messages.add(row.key); messages.add(row.assistant.localMessageId)
+  }
+}
+function readTopicState(db, key) {
+  // Bound reads before decoding, including malformed values written outside this store.
+  const bounded = (name, limit) => `CASE WHEN length(CAST(${name} AS BLOB))<=${limit} THEN ${name} END`
+  const row = db?.prepare(`SELECT ${bounded('generation', 36)} AS generation, ${bounded('recipient', 64)} AS recipient,
+    ${bounded('conversation_id', TOPIC_ROOM_BYTES)} AS conversationId, start_seq AS startSeq, revision, ${bounded('turns', TOPIC_JSON)} AS turns,
+    ${bounded('seal', 64)} AS seal FROM topic_grants WHERE scope_key=?`).get(key)
+  if (!row) return null
+  const { generation, recipient, conversationId, startSeq, revision } = row
+  check(validGeneration(generation) && isHash(recipient) && isTopicRoom(conversationId) && Number.isSafeInteger(startSeq) && startSeq >= 0 && isTopicRevision(revision) &&
+    typeof row.turns === 'string' && row.seal === topicSeal(key, row, row.turns))
+  const turns = denseValues(JSON.parse(row.turns), TOPIC_LIMIT).map(topicTurn)
+  check(turns.length === revision && JSON.stringify(turns) === row.turns)
+  validateTopicGraph(turns, startSeq)
+  return { generation, recipient, conversationId, startSeq, revision, turns }
+}
+function topicSchemaIsCurrent(db) {
+  return db.prepare("SELECT sql FROM sqlite_schema WHERE name='topic_grants'").get()?.sql === topicSchema &&
+    !db.prepare("SELECT 1 FROM sqlite_schema WHERE type='trigger' AND tbl_name='topic_grants'").get()
+}
+function immediateWrite(db, fn) {
   db.exec('BEGIN IMMEDIATE')
   try { const result = fn(); db.exec('COMMIT'); return result }
   catch (e) { if (db.isTransaction) db.exec('ROLLBACK'); throw e }
@@ -256,7 +318,7 @@ function decodeMeta(row) {
 function publicMeta(row) { const { id, label, automatic } = decodeMeta(row); return { id, label, automatic } }
 
 export class MemoryEvidenceStore {
-  #dataDir; #captures; #now; #db; #closed = false
+  #dataDir; #captures; #now; #db; #dbLocation; #closed = false
   constructor({ dataDir, captures, now = Date.now } = {}) {
     check(typeof dataDir === 'string' && path.isAbsolute(dataDir) && !dataDir.includes('\0') && typeof now === 'function')
     check(typeof captures?.getCapture === 'function' && typeof captures.readProjection === 'function')
@@ -278,27 +340,30 @@ export class MemoryEvidenceStore {
         db.exec(`BEGIN IMMEDIATE;
           CREATE TABLE grants(id TEXT PRIMARY KEY, scope_key TEXT NOT NULL, expires_at INTEGER, pins TEXT NOT NULL, discovery_label TEXT, discovery_terms TEXT) STRICT;
           CREATE TABLE revoked(id TEXT PRIMARY KEY REFERENCES grants(id)) STRICT;
-          ${v2Objects} ${speechSchema}; PRAGMA application_id=${APP_ID}; PRAGMA user_version=3; COMMIT;`)
-      } else if (ours() && [1, 2].includes(version())) {
+          ${v2Objects} ${speechSchema}; ${topicSchema}; PRAGMA application_id=${APP_ID}; PRAGMA user_version=4; COMMIT;`)
+      } else if (ours() && [1, 2, 3].includes(version())) {
         db.exec('BEGIN IMMEDIATE')
         const from = version(), columns = table => db.prepare(`PRAGMA table_info(${table})`).all().map(c => c.name).join(',')
-        check(ours() && [1, 2, 3].includes(from)) // Recheck after acquiring the write lock.
-        if (from !== 3) {
+        check(ours() && [1, 2, 3, 4].includes(from)) // Recheck after acquiring the write lock.
+        if (from < 4) {
           check(db.prepare('PRAGMA quick_check(1)').get().quick_check === 'ok' && columns('revoked') === 'id' &&
             !db.prepare("SELECT 1 FROM sqlite_schema WHERE type='trigger'").get() && !db.prepare('PRAGMA foreign_key_check').get())
           if (from === 1) {
             check(columns('grants') === 'id,scope_key,expires_at,pins')
             db.exec(`ALTER TABLE grants ADD COLUMN discovery_label TEXT; ALTER TABLE grants ADD COLUMN discovery_terms TEXT;
-              ${v2Objects} PRAGMA user_version=2;`)
+              ${v2Objects}`)
           }
           check(columns('grants') === 'id,scope_key,expires_at,pins,discovery_label,discovery_terms' && columns('turn_inputs') === 'scope_key,run_key,id' &&
             db.prepare("SELECT count(*) AS n FROM sqlite_schema WHERE type='index' AND tbl_name='grants' AND name IN ('grants_by_scope','discoverable_by_scope')").get().n === 2)
-          db.exec(`${speechSchema}; PRAGMA user_version=3;`)
+          if (from < 3) db.exec(speechSchema)
+          check(db.prepare("SELECT sql FROM sqlite_schema WHERE name='speech_grants'").get()?.sql === speechSchema)
+          db.exec(`${topicSchema}; PRAGMA user_version=4;`)
         }
         db.exec('COMMIT')
       }
-      check(ours() && version() === 3 && db.prepare("SELECT sql FROM sqlite_schema WHERE name='speech_grants'").get()?.sql === speechSchema &&
-        !db.prepare("SELECT 1 FROM sqlite_schema WHERE type='trigger' AND tbl_name='speech_grants'").get())
+      check(ours() && version() === 4 && db.prepare("SELECT sql FROM sqlite_schema WHERE name='speech_grants'").get()?.sql === speechSchema &&
+        !db.prepare("SELECT 1 FROM sqlite_schema WHERE type='trigger' AND tbl_name='speech_grants'").get() && topicSchemaIsCurrent(db))
+      this.#dbLocation = loc
       this.#db = db
       return db
     } catch (e) { if (db.isTransaction) db.exec('ROLLBACK'); db.close(); throw e }
@@ -421,14 +486,14 @@ export class MemoryEvidenceStore {
   clearSpeech(scope) {
     try {
       const s = authority(scope), db = this.#database(); if (!db) return true
-      return speechWrite(db, () => { db.prepare('DELETE FROM speech_grants WHERE scope_key=?').run(s.key)
+      return immediateWrite(db, () => { db.prepare('DELETE FROM speech_grants WHERE scope_key=?').run(s.key)
         return !db.prepare('SELECT 1 FROM speech_grants WHERE scope_key=?').get(s.key) })
     } catch { return false }
   }
   enableSpeech(scope) {
     try {
       const s = authority(scope), db = this.#database(true)
-      return speechWrite(db, () => {
+      return immediateWrite(db, () => {
         const current = speechState(db, s.key)
         if (current) return current.generation
         const generation = randomUUID(), refs = '[]'
@@ -448,7 +513,7 @@ export class MemoryEvidenceStore {
     try {
       const s = authority(scope); if (!validGeneration(generation)) return false
       const ref = speechReference(record), db = this.#database(); if (!db) return false
-      return speechWrite(db, () => {
+      return immediateWrite(db, () => {
         const state = speechState(db, s.key, generation); if (!state) return false
         const records = state.records, prior = records.find(r => r.seq === ref.seq || r.localMessageId === ref.localMessageId)
         if (prior) return JSON.stringify(prior) === JSON.stringify(ref) // Immutable exact retries only.
@@ -467,6 +532,77 @@ export class MemoryEvidenceStore {
       return speechState(this.#database(), s.key, generation)?.records ?? []
     } catch { return [] }
   }
+  // Host-only API. Callers must verify the live DM, recipient and exact local messages before using these references.
+  topicState(scope) {
+    try { const { key } = authority(scope); return readTopicState(this.#topicDatabase(), key) } catch { return null }
+  }
+  topicConsentState(scope) {
+    try { const { key } = authority(scope); return Boolean(readTopicState(this.#topicDatabase(), key)) } catch { return null }
+  }
+  #topicDatabase(create = false) {
+    if (this.#dbLocation) {
+      // Do not read old consent from an open handle after the private file was moved or made inaccessible.
+      const opened = this.#dbLocation
+      const current = process.platform === 'win32' ? stat(opened.file) : location(this.#dataDir, false, false)?.database
+      check(current?.isFile() && current.nlink === 1 && opened.database.dev === current.dev && opened.database.ino === current.ino)
+      if (process.platform !== 'win32') check((current.mode & 0o600) === 0o600 && (stat(path.dirname(opened.file))?.mode & 0o700) === 0o700)
+    }
+    const db = this.#database(create)
+    if (db) check(topicSchemaIsCurrent(db))
+    return db
+  }
+  enableTopic(scope, conversationId, recipient, startSeq = 0) {
+    try {
+      const { key } = authority(scope)
+      if (!isTopicRoom(conversationId) || !isHash(recipient) || !Number.isSafeInteger(startSeq) || startSeq < 0) return null
+      const db = this.#topicDatabase(true)
+      return immediateWrite(db, () => {
+        const current = readTopicState(db, key)
+        if (current) return current.conversationId === conversationId && current.recipient === recipient ? current.generation : null
+        const generation = randomUUID(), revision = 0, turns = '[]'
+        db.prepare('INSERT INTO topic_grants(scope_key,generation,recipient,conversation_id,start_seq,revision,turns,seal) VALUES(?,?,?,?,?,?,?,?)')
+          .run(key, generation, recipient, conversationId, startSeq, revision, turns, topicSeal(key, { generation, recipient, conversationId, startSeq, revision }, turns))
+        return generation
+      })
+    } catch { return null }
+  }
+  #deleteTopic(key, generation) {
+    const db = this.#topicDatabase(); if (!db) return generation === undefined
+    return immediateWrite(db, () => {
+      const query = `FROM topic_grants WHERE scope_key=?${generation === undefined ? '' : ' AND generation=?'}`
+      const params = generation === undefined ? [key] : [key, generation]
+      const { changes } = db.prepare(`DELETE ${query}`).run(...params)
+      check(!db.prepare(`SELECT 1 ${query}`).get(...params))
+      return generation === undefined || changes === 1
+    })
+  }
+  clearTopic(scope) {
+    try { return this.#deleteTopic(authority(scope).key) } catch { return false }
+  }
+  disableTopic(scope, generation) {
+    try { return validGeneration(generation) && this.#deleteTopic(authority(scope).key, generation) } catch { return false }
+  }
+  commitTopic(scope, generation, expectedRevision, row) {
+    try {
+      const { key } = authority(scope)
+      if (!validGeneration(generation) || !isTopicRevision(expectedRevision)) return false
+      const turn = topicTurn(row), db = this.#topicDatabase(); if (!db) return false
+      return immediateWrite(db, () => {
+        const state = readTopicState(db, key)
+        if (!state || state.generation !== generation) return false
+        const prior = state.turns.findIndex(r => r.key === turn.key)
+        // A retry carries the original CAS token, even if later commits have advanced it.
+        if (prior !== -1) return prior === expectedRevision && JSON.stringify(state.turns[prior]) === JSON.stringify(turn)
+        if (state.revision !== expectedRevision || state.revision === TOPIC_LIMIT) return false
+        state.turns.push(turn); validateTopicGraph(state.turns, state.startSeq)
+        const turns = JSON.stringify(state.turns)
+        check(Buffer.byteLength(turns) <= TOPIC_JSON)
+        state.revision++
+        return db.prepare('UPDATE topic_grants SET revision=?,turns=?,seal=? WHERE scope_key=? AND generation=? AND revision=?')
+          .run(state.revision, turns, topicSeal(key, state, turns), key, generation, expectedRevision).changes === 1
+      })
+    } catch { return false }
+  }
   revoke(scope, selectionId) {
     try {
       if (!token(selectionId)) return false
@@ -476,5 +612,5 @@ export class MemoryEvidenceStore {
         ON CONFLICT(id) DO NOTHING`).run(selectionId, s.key).changes === 1
     } catch { return false }
   }
-  close() { this.#closed = true; this.#db?.close(); this.#db = null }
+  close() { this.#closed = true; this.#db?.close(); this.#db = null; this.#dbLocation = null }
 }

@@ -2,7 +2,7 @@ import { guardBridgeRequest, sendJson } from './codex-bridge-http.mjs'
 import { publicText } from './codex-chat-values.mjs'
 
 const ROOT = '/memory-evidence', ROUTE = ['clientThreadId', 'conversationId', 'expectedProfileId']
-const ACTIONS = new Map(Object.entries({ state: [], preview: ['pin'], bind: ['ledger', 'sources', 'label', 'terms', 'consent'], read: ['id'], revoke: ['id'], 'speech-enable': ['consent'], 'speech-disable': [] }))
+const ACTIONS = new Map(Object.entries({ state: [], preview: ['pin'], bind: ['ledger', 'sources', 'label', 'terms', 'consent'], read: ['id'], revoke: ['id'], 'speech-enable': ['consent'], 'speech-disable': [], 'topic-enable': ['consent'], 'topic-disable': [] }))
 const PIN = ['sourceId', 'revision', 'startLine', 'endLine']
 const RELATIONS = new Set(['counted', 'posted', 'recorded', 'copied', 'derived', 'scheduled', 'coverage'])
 const MAX_BODY = 8192, MAX_LIST = 32, MAX_LINES = 32, MAX_TEXT = 4000, MAX_BLOB = 2 * 1024 * 1024
@@ -42,7 +42,7 @@ function validate(action, b) {
   need(str(b.clientThreadId, 512) && str(b.conversationId, 512) && str(b.expectedProfileId, 80) && /^[a-z0-9][a-z0-9-]*$/.test(b.expectedProfileId), 400)
   if (action === 'read' || action === 'revoke') need(handle(b.id), 400)
   if (action === 'preview') need(pin(b.pin), 400)
-  if (action === 'speech-enable') need(b.consent === true, 400)
+  if (action === 'speech-enable' || action === 'topic-enable') need(b.consent === true, 400)
   if (action === 'bind') {
     need(b.consent === true && label(b.label, 80) && Array.isArray(b.terms) && b.terms.length <= 8 && b.terms.every(t => label(t, 48)) && new Set(b.terms.map(t => t.normalize('NFKC').toLowerCase())).size === b.terms.length, 400)
     need(pin(b.ledger, { ledger: true }) && Array.isArray(b.sources) && b.sources.length >= 1 && b.sources.length <= 6 && b.sources.every(p => pin(p, { source: true })), 400)
@@ -60,6 +60,32 @@ function live(dm, route) {
   const after = value => { current(); return value }
   current()
   return { scope, current, after, validate: async m => { current(); if (dm.validateCapture) need(after(await dm.validateCapture(m)) !== false) } }
+}
+function topicRecipient(dm, ctx) {
+  ctx.current()
+  let recipient
+  try { recipient = dm.topicRecipient?.() } catch { /* Unavailable is not an enable authority. */ }
+  ctx.current()
+  return hash(recipient) ? recipient : null
+}
+const topicMatches = (grant, route, recipient) => Boolean(grant?.generation && recipient && grant.recipient === recipient && grant.conversationId === route.conversationId)
+function publicTopicState(evidence, dm, ctx, route) {
+  const { scope, after } = ctx, recipient = topicRecipient(dm, ctx)
+  const allowed = after(evidence.topicConsentState(scope))
+  const grant = allowed === true ? after(evidence.topicState(scope)) : null
+  const topicAllowed = allowed === false ? false : grant?.generation && hash(grant.recipient) && str(grant.conversationId, 512) ? true : null
+  const result = { topicSupported: recipient !== null, topicAllowed }
+  if (topicAllowed === true) {
+    if (recipient) result.topicCurrent = topicMatches(grant, route, recipient)
+    if (grant.conversationId === route.conversationId && Array.isArray(grant.turns) && grant.turns.length <= 96) {
+      result.topicStored = grant.turns.length
+      if (result.topicCurrent && typeof dm.topicAdjacent === 'function') {
+        const contiguous = after(dm.topicAdjacent(grant.turns.at(-1)?.assistant?.seq ?? grant.startSeq))
+        if (contiguous === false) result.topicPaused = true
+      }
+    }
+  }
+  return result
 }
 function eligible(m, scope, p) {
   const bytes = n => Number.isSafeInteger(n) && n >= 0 && n <= MAX_BLOB
@@ -153,6 +179,7 @@ export function createMemoryEvidenceHttpHandler({ port = 39218, ensureAuth, reso
           return { id: row.id, label: row.label, automatic: row.automatic }
         }), decisionMode: ['off', 'advisory', 'on'].includes(mode) ? mode : 'off' }
         if (typeof evidence.speechConsentState === 'function') result.speechAllowed = after(evidence.speechConsentState(scope))
+        if (typeof evidence.topicConsentState === 'function') Object.assign(result, publicTopicState(evidence, resolved, ctx, route))
         const recent = resolved.recentEvidence?.()
         // Never invent an association from the displayed quantity or a row label.
         if (recent && ids.has(recent.id) && evidence.isActive(scope, recent.id) === true) result.recentId = recent.id
@@ -167,6 +194,30 @@ export function createMemoryEvidenceHttpHandler({ port = 39218, ensureAuth, reso
           result = { speechAllowed: true }
         } else {
           need(evidence.clearSpeech(scope) === true && evidence.speechConsentState(scope) === false); result = { speechAllowed: false }
+        }
+      } else if (action === 'topic-enable' || action === 'topic-disable') {
+        // No await between the final DM check, the synchronous store change and the response.
+        need(after(await ensureAuth({ ...route })) !== false)
+        if (action === 'topic-enable') {
+          need(after(await getMode()) === 'on', 409)
+          const recipient = topicRecipient(resolved, ctx); need(recipient, 409)
+          const allowed = after(evidence.topicConsentState(scope)), prev = after(evidence.topicState(scope))
+          // Never overwrite a different destination/conversation or an unreadable grant.
+          need((allowed === false && prev === null) || (allowed === true && topicMatches(prev, route, recipient)), 409)
+          let generation = prev?.generation
+          if (!prev) {
+            const startSeq = after(resolved.topicStartSeq?.()); need(positive(startSeq), 409)
+            generation = evidence.enableTopic(scope, b.conversationId, recipient, startSeq); need(generation)
+            fresh = { cancel: () => evidence.disableTopic(scope, generation) }
+          }
+          const grant = after(evidence.topicState(scope))
+          need(topicMatches(grant, route, recipient) && grant.generation === generation && after(evidence.topicConsentState(scope)) === true)
+          need(topicRecipient(resolved, ctx) === recipient, 409)
+          result = { topicAllowed: true }
+        } else {
+          current()
+          need(evidence.clearTopic(scope) === true && after(evidence.topicConsentState(scope)) === false && after(evidence.topicState(scope)) === null)
+          result = { topicAllowed: false }
         }
       } else if (action === 'preview') {
         result = { text: lines(after(await projection(captures, ctx, b.pin)).text, b.pin) }

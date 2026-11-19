@@ -26,7 +26,7 @@ class Node {
   remove() { if (this.parent) this.parent.children = this.parent.children.filter(c => c !== this); this.parent = null; }
   addEventListener(kind, fn) { (this.listeners[kind] ||= []).push(fn); }
   fire(type = 'click') { return Promise.all((this.listeners[type] || []).map(fn => fn({ currentTarget: this }))); }
-  focus() {}
+  focus() { this.focused = true; }
   get textContent() { return this.content + this.children.map(c => typeof c === 'string' ? c : c.textContent).join(''); }
   set textContent(t) { this.replaceChildren(); this.content = t; }
   set innerHTML(_) { assert.fail('captured text must never be parsed'); }
@@ -117,5 +117,52 @@ test('inspection of the last answer follows its exact active grant; it never gue
     const { calls, f } = await fixture({ state: () => ({ ...base, recentId: id }), read: () => ({ trace: { version: 1, ledger: { ...captures[0], startLine: 1, endLine: 1, text:'고정 행' }, sources: [{...captures[1], startLine: 1, endLine: 1, relation:'counted', text:'직접 센 수량'}] } }) });
     assert.equal(Boolean(f('read-latest')), enabled);
     if (enabled) { await f('read-latest').fire(); assert.deepEqual(calls.at(-1), { action: 'read', body: { id: 'two' } }); }
+  }
+});
+
+test('topic transport only adds fixed authenticated bridge POST paths, with ordinary routing hints', async () => {
+  const sent = [], controller = new AbortController(); let live = true;
+  const req = view.scopedEvidenceRequest({ route, signal: controller.signal, current: () => live, fetchJson: (url, init) => {
+    assert.equal(init.method, 'POST'); assert.equal(init.signal, controller.signal);
+    sent.push([url, JSON.parse(init.body)]); return { topicAllowed: url.endsWith('-enable') };
+  } });
+  assert.deepEqual(await req('topic-enable', { consent: true, expectedProfileId: 'wrong' }), { topicAllowed: true });
+  assert.deepEqual(await req('topic-disable'), { topicAllowed: false });
+  assert.deepEqual(sent, [['/memory-evidence/topic-enable', { ...route, consent: true }], ['/memory-evidence/topic-disable', route]]);
+  await assert.rejects(req('topic-enable/../state')); live = false; await assert.rejects(req('topic-disable'));
+  assert.equal(sent.length, 2);
+  const bridge = fs.readFileSync(new URL('../helper/codex-bridge-server.mjs', import.meta.url), 'utf8');
+  assert.match(bridge, /route\.startsWith\('\/memory-evidence\/'\) && await handleMemoryEvidenceHttp\(req, res, url\)/);
+});
+
+test('separate prospective topic opt-in discloses limits, original API messages and delivery limits; native buttons keep focus', async () => {
+  let allowed = false;
+  const { f, calls } = await fixture({
+    state: () => ({ captures: [], rows: [], decisionMode: 'on', speechAllowed: false, topicSupported: true, topicAllowed: allowed }),
+    'topic-enable': () => ({ topicAllowed: (allowed = true) }), 'topic-disable': () => ({ topicAllowed: (allowed = false) }),
+  });
+  const copy = f('topic').textContent;
+  for (const words of [/이 DM의 주제 기억/, /최근 발언 재사용이나 파일 근거 허용과는 별도/, /이 기기에 최대 96쌍/, /이전 대화는 소급해서 저장하지/, /이전 사용자 메시지와 최종 답변의 원문/, /OpenAI Decisions\/API 프로젝트/, /API 사용량/, /전달한 내용은 회수할 수 없/]) assert.match(copy, words);
+  assert.equal(f('topic-enable').tag, 'button'); assert.equal(f('topic-enable').props.type, 'button'); assert.equal(f('topic-enable').textContent, '다음 대화부터 주제 기억 허용');
+  assert.deepEqual(calls.map(c => c.action), ['state']); await f('topic-enable').fire();
+  assert.equal(f('topic-disable').textContent, '주제 기억 철회 및 삭제'); assert.ok(f('topic-disable').focused); assert.ok(f('speech-enable'));
+  await f('topic-disable').fire(); assert.ok(f('topic-enable').focused);
+  assert.deepEqual(calls.filter(c => c.action.startsWith('topic-')), [{ action: 'topic-enable', body: { consent: true } }, { action: 'topic-disable', body: {} }]);
+});
+
+test('revoke stays actionable with disabled mode, unavailable recipient, mismatch, unreadable state or full storage', async () => {
+  const base = { captures: [], rows: [], decisionMode: 'on', topicAllowed: true, topicSupported: true };
+  for (const [change, guidance] of [
+    [{ decisionMode: 'off' }, /문맥 설정을 켜짐/], [{ topicSupported: false }, /확인된 Codex DM/],
+    [{ topicCurrent: false }, /일치하지 않습니다/], [{ topicAllowed: null }, /허용 상태를 확인할 수 없습니다/],
+    [{ topicStored: 96 }, /저장한 대화: 96\/96쌍/], [{ topicPaused: true }, /중간 대화의 연결을 확인할 수 없어/],
+  ]) {
+    const { f } = await fixture({ state: () => ({ ...base, ...change }) });
+    assert.equal(f('topic-enable'), undefined); assert.equal(f('topic-disable').disabled, false); assert.match(f('topic').textContent, guidance);
+  }
+  for (const change of [{ decisionMode: 'off' }, { decisionMode: 'advisory' }, { topicSupported: false }]) {
+    const { f, calls } = await fixture({ state: () => ({ ...base, topicAllowed: false, ...change }) });
+    assert.equal(f('topic-disable'), undefined); assert.equal(f('topic-enable').disabled, true);
+    await f('topic-enable').fire(); assert.deepEqual(calls.map(c => c.action), ['state']);
   }
 });
