@@ -31,7 +31,7 @@ import { BROWSER_REFLEX_TOOL_NAME } from './egdesk-browser-reflex.mjs'
 const BROWSER_INTERACTION_TOOL_NAMES = Object.freeze([...BROWSER_STEP_TOOL_NAMES, BROWSER_REFLEX_TOOL_NAME])
 // Fixture QA allows only observe/click/fill; a reflex could run other steps.
 const FIXTURE_BROWSER_TOOL_NAMES = Object.freeze(['egdesk_browser_observe', 'egdesk_browser_click', 'egdesk_browser_fill'])
-import { DECISION_CONTEXT_KEY, decisionContextActivity, prepareTurnContext } from './egdesk-context-setup.mjs'
+import { DECISION_CONTEXT_KEY, decisionContextActivity, evidenceForSpeaker, prepareTurnContext } from './egdesk-context-setup.mjs'
 
 const TERMINAL = new Set(['completed', 'interrupted', 'failed'])
 const ITEM_STATUS = new Set(['inProgress', 'completed', 'failed', 'declined'])
@@ -3898,7 +3898,7 @@ export class CodexChatRuntime {
         if (mayRead()) store.rememberTurn?.(scope, context.localRunId, handle)
       }, loadText: async () => {
         if (!mayRead()) return null
-        const evidence = await store.read(scope, handle)
+        const evidence = evidenceForSpeaker(await store.read(scope, handle))
         return evidence && mayRead() ? JSON.stringify(evidence) : null
       } }
     }

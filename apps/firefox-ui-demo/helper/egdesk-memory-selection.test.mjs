@@ -1,7 +1,7 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { collectDecisionCandidates } from './egdesk-decision-candidates.mjs'
-import { DECISION_CONTEXT_KEY, prepareTurnContext } from './egdesk-context-setup.mjs'
+import { DECISION_CONTEXT_KEY, evidenceForSpeaker, prepareTurnContext } from './egdesk-context-setup.mjs'
 
 const handle = 'memrow:2d817f04-fb38-4dbc-8409-cf9f9ff69f22'
 const item = { id: handle, kind: 'memory-evidence', label: 'CLIENT_LABEL', url: 'https://example.invalid/CLIENT_URL' }
@@ -53,4 +53,12 @@ test('the reference clock belongs to the question, not the source or the ranking
   assert.match(old.extraContext[DECISION_CONTEXT_KEY], /no date.*unknown even as to/)
   const ordinary = await assemble([{ id: 'plain', title: 'plain', summary: 'ok', mandatory: true }], { askedAt: Date.UTC(2026,10,19,1) })
   assert.doesNotMatch(ordinary.extraContext[DECISION_CONTEXT_KEY], /Question asked at/)
+})
+
+test('identical quantity and time do not erase what is measured, copied, planned or inferred; a hash is proof of text, not the physical world', () => {
+  const make = relation => evidenceForSpeaker({version:1,ledger:{text:'장부 재고 30개'},sources:[{text:'재고 30개',relation}]})
+  const traces = ['counted','recorded','derived','copied','scheduled'].map(make)
+  assert.deepEqual(traces.map(t => t.sources[0].knowledgeKind), ['reported-observation','record-assertion','calculation-or-inference','same-origin-copy','plan-not-completion'])
+  for (const t of traces) assert.deepEqual(t.verification, { confirmed:'source-revision-and-lines', independentlyObservedPhysicalState:false })
+  assert.equal(make('unknown'), null)
 })

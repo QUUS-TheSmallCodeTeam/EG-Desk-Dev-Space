@@ -20,6 +20,17 @@ import { choiceQuestion, compactText, decisionThresholds, predicateQuestion, rea
 // Nothing here throws on a decision failure: callers get status 'fallback' and
 // run the turn as today.
 
+// The system checks the captured passage. What the passage in turn supports is a different claim.
+// This view is for the answering Agent only, not the ranking catalog, a grant or the human transcript.
+const evidenceKinds = Object.freeze({ counted: 'reported-observation', posted: 'posted-record', recorded: 'record-assertion',
+  copied: 'same-origin-copy', derived: 'calculation-or-inference', scheduled: 'plan-not-completion', coverage: 'coverage-assertion' })
+export function evidenceForSpeaker(trace) {
+  if (trace?.version !== 1 || !trace.ledger || !Array.isArray(trace.sources) || !trace.sources.length ||
+      trace.sources.some(s => !Object.hasOwn(evidenceKinds, s.relation))) return null
+  return { ...trace, verification: { confirmed: 'source-revision-and-lines', independentlyObservedPhysicalState: false },
+    sources: trace.sources.map(source => ({ ...source, knowledgeKind: evidenceKinds[source.relation] })) }
+}
+
 export const DECISION_CONTEXT_KEY = 'egdesk_decision_context' // extraContext key: ^[A-Za-z][A-Za-z0-9_]{0,63}$
 export const CONTEXT_CANDIDATE_KINDS = Object.freeze(['board', 'source', 'conversation', 'timeline', 'document'])
 export const TIME_SLICES = Object.freeze(['past', 'present', 'planned', 'hypothetical', 'unknown'])
@@ -241,7 +252,7 @@ export async function prepareTurnContext({ message, candidates = [], client, thr
     + (anchor ? 'Question asked at ' + anchor.toISOString() + ', local offset minutes east of UTC: ' + (-anchor.getTimezoneOffset()) + '. ' : '')
     + 'Use the interval the person asked about. A file capture time is not the time a physical count happened. '
     + 'Past or future with no date, active now with no end specified, and unknown even as to past/present/future are distinct. Never invent a date. '
-    + 'A copy is not another count. A posted movement and a scheduled movement are not interchangeable. '
+    + 'Source verification confirms what a passage says; it does not turn a report or inference into a physical observation. A copy is not another count. A posted movement and a scheduled movement are not interchangeable. '
     + 'Give a supported quantity directly. Explain the basis only when asked, or a gap or conflict changes the answer.' : ''
   const packet = items.length ? `${PACKET_HEAD}${evidenceRule}\n\n${items.map(item => item.block).join('\n\n')}` : null
   const status = items.length ? 'ready' : 'empty'
