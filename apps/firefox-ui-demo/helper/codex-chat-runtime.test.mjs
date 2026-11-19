@@ -4025,7 +4025,7 @@ test('checked Board wire dispatches exact ordered profiles and strips only an em
   for (const { params } of turns) {
     assert.equal(params.input[0].text, body.message)
     const block = params.additionalContext.egdesk_board.value
-    assert.equal((block.match(/^\[나\]/gm) || []).length, 5, 'do not widen historical disclosure by truncating each quoted message')
+    assert.equal((block.match(/^\[사람\]/gm) || []).length, 5, 'do not widen historical disclosure by truncating each quoted message')
     assert.ok(block.length <= 24000)
   }
 })
@@ -4172,4 +4172,75 @@ test('Board reports a lost native response as uncertain without mislabeling a co
   ])
   assert.ok(result.recipients[1].conversationId)
   assert.equal(dispatched, 2)
+})
+
+
+test('each Board turn receives its own persona, public speech, and no ambient room or test fields', async () => {
+  const { boardSendPlan } = await import('../overlay/resources/EGDeskBoardThread.sys.mjs')
+  const h = r2Harness({ profiles: r2Profiles() }); const thread = deliveryThread({ profileEnabled: true, agentProfileId: 'sol', messages: [
+    { role: 'user', content: '공개 질문입니다.', status: 'complete', authorName: '나' },
+    { role: 'assistant', content: '공개 답변입니다.', status: 'complete', authorName: '솔빛', hidden: { note: 'PRIVATE_MEMO' } },
+    { role: 'user', content: 'PRIVATE_DRAFT', status: 'unconfirmed' },
+    { role: 'user', content: '<egdesk-await-resume><plan>PRIVATE_PLAN</plan></egdesk-await-resume>', status: 'complete' },
+    { role: 'tool', content: 'PRIVATE_TOOL', status: 'complete' },
+  ] });
+  const wire = boardSendPlan(thread, { message: '@물결 @솔빛 표지 색은?', requestId: 'per-speaker', clientThreadId: thread.id, engineId: 'codex', profileEnabled: true, profileId: 'sol',
+    engineProfileId: 'codex-default', contextCapabilities: { read: true }, systemPrompt: 'PRIVATE_PERSONA' }).body
+  const candidates = []
+  const accepted = await h.chat.sendBoard({ ...wire, qaOutputMarkers: ['PRIVATE_QA'], notes: 'PRIVATE_NOTE', agentProfile: { name: 'PRIVATE_PERSONA' },
+    systemPrompt: 'PRIVATE_PERSONA', additionalContext: { other: 'PRIVATE_EXTRA' } }, { authenticateRecipient: async candidate => candidates.push(candidate) })
+  assert.deepEqual(accepted.recipients.map(x => x.status), ['started', 'started']); assert.equal(candidates.length, 2)
+  assert.deepEqual(candidates.map(x => [x.profileId, x.engineProfileId, x.contextCapabilities]), [['water', undefined, undefined], ['sol', 'codex-default', { read: true }]])
+  assert.doesNotMatch(JSON.stringify(candidates), /PRIVATE_/)
+  const starts = h.calls.filter(x => x.method === 'thread/start'), turns = h.calls.filter(x => x.method === 'turn/start')
+  assert.deepEqual(starts.map(x => x.params.developerInstructions), ['You are water', 'You are sol']); assert.equal(turns.length, 2)
+  for (const [i, turn] of turns.entries()) {
+    const ctx = turn.params.additionalContext; assert.deepEqual(Object.keys(ctx), ['egdesk_board'])
+    assert.match(ctx.egdesk_board.value, /\[사람\] 공개 질문입니다\./); assert.match(ctx.egdesk_board.value, /\[솔빛\] 공개 답변입니다\./)
+    assert.ok(ctx.egdesk_board.value.includes('You are "' + (i ? '솔빛' : '물결') + '"'))
+    assert.equal(turn.params.input[0].text, wire.message); assert.doesNotMatch(JSON.stringify([turn, starts[i]]), /PRIVATE_|\[나\]/)
+  }
+})
+
+test('a Board native speaker survives restart; changing a room preference cannot transfer its native history', async t => {
+  const { boardSendPlan, boardStoreMembers } = await import('../overlay/resources/EGDeskBoardThread.sys.mjs')
+  const dataDir = await mkdtemp(path.join(os.tmpdir(), 'egdesk-board-speaker-')); const scope = { dataDir, ownerScope: 'speaker-fixture' }
+  let store = openChatStore(scope); t.after(async () => { store.close(); await rm(dataDir, { recursive: true, force: true }) })
+  const thread = deliveryThread({ profileEnabled: true, agentProfileId: 'sol', messages: [] }); const room = thread.id
+  const plan = (who, message, requestId) => boardSendPlan({ ...thread, agentProfileId: who }, { clientThreadId: room, requestId, message, profileId: who, profileEnabled: true, engineId: 'codex' }).body
+  store.createConversation({ clientThreadId: room }); store.setRoomMembers({ clientThreadId: room, members: boardStoreMembers(thread) })
+  const h = r2Harness({ store, profiles: r2Profiles() }); const first = (await h.chat.sendBoard(plan('sol', '첫 표지', 'initial-speaker'))).recipients[0]
+  assert.equal(first.status, 'started'); await h.finish(first)
+  const refused = { code: 'BOARD_SPEAKER_CHANGED', definite: true }
+  assert.throws(() => h.chat.setRoomAgent({ clientThreadId: room, profileId: 'water' }), refused)
+  store.close(); store = openChatStore(scope)
+  const after = r2Harness({ store, profiles: r2Profiles(), request: (method, params, defaults) => method === 'thread/start' ? { thread: { id: 'separate-member' }, cwd: '/work' } : defaults(method, params) })
+  assert.throws(() => after.chat.setRoomAgent({ clientThreadId: room, profileId: 'water' }), refused)
+  // Simulate old or out-of-band edits to the *mutable* preference. Neither API should trust it as native authority.
+  store.setRoomAgent({ clientThreadId: room, profileId: 'water' })
+  await assert.rejects(after.chat.sendBoard(plan('water', '다음 표지', 'changed-strict')), refused)
+  await assert.rejects(after.chat.send({ clientThreadId: room, conversationId: first.conversationId, profileId: 'water', message: '다음 표지', requestId: 'changed-ordinary' }), refused)
+  await assert.rejects(after.chat.send({ clientThreadId: room, conversationId: first.conversationId, profileEnabled: false, message: '다음 표지', requestId: 'changed-plain' }), refused)
+  assert.deepEqual(after.calls, [], 'no release, resume or turn for another actor'); assert.equal(store.getRequest({ clientThreadId: room, requestId: 'changed-ordinary' }), null)
+  store.setRoomAgent({ clientThreadId: room, profileId: 'sol' })
+  const same = (await after.chat.sendBoard(plan('sol', '다시 이어서', 'same-speaker'))).recipients[0]; assert.equal(same.status, 'started'); assert.equal(same.conversationId, first.conversationId); await after.finish(same)
+  const other = (await after.chat.sendBoard(plan('sol', '@물결 공개 질문', 'separate-speaker'))).recipients[0]; assert.equal(other.status, 'started'); assert.notEqual(other.conversationId, same.conversationId); assert.equal(other.clientThreadId, boardMemberThreadId(room, 'water'))
+})
+
+
+test('old Board histories need complete matching starts; missing, contradictory, forked and mutable-only identities never resume', async t => {
+  const binding = { event: 'native.thread.bound', details: { conversationId: 'n', ownerHash: 'fixture' } }
+  const events = (id, actor, room = 'room') => [{ event: 'run.dispatching', requestId: id, localRunId: 'local-' + id },
+    { event: 'run.started', requestId: id, localRunId: 'local-' + id, runId: 'run-' + id, details: { board: { profileId: actor, roomClientThreadId: room }, profileBinding: { profileId: actor } } }]
+  const refusal = { code: 'BOARD_SPEAKER_CHANGED' }; const h = r2Harness()
+  for (const [log, valid] of [[events('one', 'sol'), true], [[...events('one', 'sol'), ...events('two', 'sol')], true], [events('one', 'sol').slice(0, 1), false],
+    [[...events('one', 'sol'), ...events('two', 'water')], false], [events('one', 'water', 'other'), false], [[], false],
+    [[...events('one', 'sol'), { event: 'run.dispatching', requestId: 'unknown', localRunId: 'unknown' }], false],
+    [[binding, ...events('one', 'sol')], false], [[...events('one', 'sol'), { ...binding, details: { ...binding.details, forkedFrom: { conversationId: 'old' } } }], false]]) {
+    h.chat.store = { listEvents: () => ({ events: [binding, ...log] }), getConversation: () => ({ agent: { profileId: 'sol' } }) }
+    h.chat.readNativeBinding('room', 'n')
+    if (valid) h.chat.checkBoardSpeaker('room', 'n', 'sol', true); else assert.throws(() => h.chat.checkBoardSpeaker('room', 'n', 'sol', true), refusal)
+    assert.throws(() => h.chat.checkBoardSpeaker('room', 'n', 'water', true), refusal)
+  }
+  assert.deepEqual(h.calls, [])
 })

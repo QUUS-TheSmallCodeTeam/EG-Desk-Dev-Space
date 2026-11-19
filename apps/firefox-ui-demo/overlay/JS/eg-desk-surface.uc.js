@@ -260,7 +260,7 @@
   function codexAgentPeekPanel(view, { left = 12, top = 12, onClose, onOpenSettings, onOpenActivity } = {}) {
     const face = codexMessageAvatarFace(view.avatar, view.name);
     const row = (label, value, testid) => el('div', { class: 'egd-codex-agent-peek-row', data: { testid } }, el('dt', {}, label), el('dd', {}, value));
-    const expertise = view.expertise.length > 3 ? `${view.expertise.slice(0, 3).join(' · ')} 외 ${view.expertise.length - 3}개`
+    const expertise = view.compact ? null : view.expertise.length > 3 ? `${view.expertise.slice(0, 3).join(' · ')} 외 ${view.expertise.length - 3}개`
       : view.expertise.length ? view.expertise.join(' · ') : view.expertiseEmpty;
     const panel = el('div', {
       class: 'egd-codex-agent-peek', role: 'dialog', 'aria-label': `${view.name} 프로필`, 'aria-busy': view.loading ? 'true' : null,
@@ -274,7 +274,7 @@
       el('div', { class: 'egd-codex-agent-peek-identity' },
         el('div', { class: 'egd-codex-agent-peek-name' }, view.name),
         el('div', { class: 'egd-codex-agent-peek-role' }, view.role))),
-    el('dl', { class: 'egd-codex-agent-peek-list' },
+    view.compact ? null : el('dl', { class: 'egd-codex-agent-peek-list' },
       row('말투', view.tone, 'chat-agent-peek-tone'),
       row('맡길 일', expertise, 'chat-agent-peek-expertise'),
       row('모델', view.model, 'chat-agent-peek-model'),
@@ -282,8 +282,8 @@
       row('이 대화 Board', view.board, 'chat-agent-peek-board')),
     view.note ? el('p', { class: 'egd-codex-agent-peek-note' }, view.note) : null,
     el('div', { class: 'egd-codex-agent-peek-actions' },
-      el('button', { class: 'egd-codex-chip', type: 'button', data: { testid: 'chat-agent-peek-settings', focusKey: 'agent-peek-settings' },
-        onclick: () => onOpenSettings?.() }, 'Agent 설정 열기'),
+      !view.compact || view.profileId ? el('button', { class: 'egd-codex-chip', type: 'button', data: { testid: 'chat-agent-peek-settings', focusKey: 'agent-peek-settings' },
+        onclick: () => onOpenSettings?.() }, 'Agent 설정 열기') : null,
       el('button', { class: 'egd-codex-chip egd-codex-chip-subtle', type: 'button', data: { testid: 'chat-agent-peek-activity', focusKey: 'agent-peek-activity' },
         onclick: () => onOpenActivity?.() }, '활동 기록 보기')));
     panel.addEventListener('keydown', (ev) => {
@@ -418,10 +418,10 @@
   function chatHeadUsageRing(activeEngine, codex, placement = 'all') {
     const claude = activeEngine?.engineId === 'claude';
     const view = claude ? AccountSettingsView.claudeUsageView(codex.engines) : ChatState.usageRingView(codex.authStatus);
-    if (!view) return null;
-    const warning = view.level === 'warn' || view.level === 'limit';
+    if (!view || view.level === 'unknown' && !view.creditsRequired) return null;
+    const warning = view.creditsRequired || view.level === 'warn' || view.level === 'limit';
     if (placement === 'warning' && !warning || placement === 'routine' && warning) return null;
-    return usageMeter({ ...view, text: view.level === 'unknown' ? '사용량 미확인' : `사용량 ${view.text}` }, {
+    return usageMeter({ ...view, text: view.creditsRequired ? '추가 사용량 필요' : `사용량 ${view.text}` }, {
       onOpen: () => spawnSettingsCard({ tab: 'account' }), testid: claude ? 'chat-claude-usage-ring' : 'chat-usage-ring',
     });
   }
@@ -1202,7 +1202,7 @@
 
   function codexMessageRoleLabel(role) {
     if (role === 'user') return SELF_MEMBER;
-    if (role === 'assistant') return 'Codex';
+    if (role === 'assistant') return 'Agent';
     if (role === 'system') return '시스템';
     return role || '메시지';
   }
@@ -12191,7 +12191,7 @@
       thread.participants, thread.participantRoles, thread.participantAgents, contextResolution, thread.cwd,
       inputSources, briefingInputs, thread.requestProjectTarget,
       intent.route === 'board' ? BoardThread.boardRecentMessages(thread, options) : null]);
-    return { intent, options, key, routeKey, inheritedBounded, browserSourcesKey: boardBrowserSourcesKey(selectedBrowserInputs) };
+    return { intent, options, key, routeKey, hasDraft: !!content, inheritedBounded, browserSourcesKey: boardBrowserSourcesKey(selectedBrowserInputs) };
   }
 
   function mountBoardComposerDestination(thread, memory) {
@@ -12212,7 +12212,7 @@
       const { intent } = view;
       const names = intent.recipients.map(recipient => recipient.kind === 'room-engine' && recipient.engine === 'codex'
         ? view.options.roomAgentName || recipient.label : recipient.label);
-      const destinationText = intent.ok && names.length ? `답변: ${names.join(', ')}` : '답변 대상 확인 필요';
+      const destinationText = intent.ok && names.length ? `${view.hasDraft === false ? '지목하지 않을 때' : '답변'}: ${names.join(', ')}` : '답변 대상 확인 필요';
       destination.textContent = destinationText;
       destination.title = destinationText;
       const board = intent.roomBlock;
@@ -12222,7 +12222,7 @@
       const attachments = view.options.attachments.length;
       detail.replaceChildren(...[
         el('ul', { 'aria-label': '전체 답변 대상' }, ...names.map(name => el('li', {}, name))),
-        el('p', {}, board ? 'Board 참여자 이름·역할과 최근 대화 최대 12개가 포함 후보입니다. 권한이나 실행 모드에 따라 빠질 수 있으며 Board 카드 전체를 붙이지 않습니다.'
+        el('p', {}, board ? '참여자 이름과 Lead, 이 방에 보낸 질문과 완료된 답변 중 최근 최대 12개를 보냅니다. 개인 대화, 작업 기록, Board 카드 전체는 발췌에 넣지 않습니다.'
           : 'Board 참여자 목록과 최근 대화 발췌를 별도로 붙이지 않습니다. 기존 대화의 맥락은 계속 사용될 수 있습니다.'),
         view.inheritedBounded ? el('p', {}, '기존 대화의 실행 제한이 유지됩니다. 첨부와 읽기 범위는 연결을 확인한 뒤 적용됩니다.') : null,
         view.options.selectedResources.length && intent.selectedResources?.length ? el('p', {}, `선택한 자료: ${intent.selectedResources.map(resource => resource.label).join(', ')}`) : null,
@@ -12667,6 +12667,7 @@
 
       const renderThreadMenu = (thread) => {
         const activeProfile = codexThreadAgentProfile(thread);
+        const lockedLead = thread.type === 'group' && !!(thread.conversationId || thread.retainedNativeBinding);
         const menuChildren = [
           el('button', {
             class: `egd-codex-thread-menu-item${thread.pinned ? ' egd-codex-thread-menu-item-active' : ''}`,
@@ -12677,7 +12678,7 @@
             onclick: () => codexBridge.renameThread(thread.id),
           }, '채팅방 이름 변경'),
           el('div', { class: 'egd-codex-thread-menu-label' }, 'Agent'),
-          el('button', {
+          ...(lockedLead ? [el('div', { class: 'egd-codex-thread-menu-note' }, '다른 Agent는 @로 부르세요. Lead를 바꾸려면 새 Board 대화에서 시작하세요.')] : [el('button', {
             class: `egd-codex-thread-menu-item${thread.profileEnabled !== true ? ' egd-codex-thread-menu-item-active' : ''}`, 'aria-label': '기본 Codex 선택',
             onclick: () => codexBridge.setThreadAgentProfile(thread.id, null),
           }, '기본 Codex'),
@@ -12689,7 +12690,7 @@
           profile.server ? codexProfileAvatar(profile.avatar, profile.name, 'egd-codex-thread-menu-avatar') : null,
           el('span', { class: 'egd-codex-thread-menu-profile-label' }, profile.label),
           el('span', { class: 'egd-codex-thread-menu-profile-name' }, profile.server ? profile.role || '' : profile.name),
-          )),
+          ))]),
           // The room's own Agent stays visible while it cannot be chosen again.
           thread.profileEnabled === true && activeProfile.server && activeProfile.revision === null
             ? el('div', { class: 'egd-codex-thread-menu-note', role: 'note' }, `${activeProfile.name} · 지금 쓸 수 없음`) : null,
@@ -12819,12 +12820,16 @@
       // settings load when it opens; the model line is the engine chip's text.
       const renderAgentPeek = (thread, message) => {
         const peek = codex.agentPeek || {};
-        const profile = thread.profileEnabled === true ? codexThreadAgentProfile(thread) : null;
-        const entry = profile?.server === true ? codexBridge.agentProfileDetail(profile.id, profile.revision) : null;
+        const author = codexMessageAuthorLabel(message);
+        const profile = thread.type === 'dm' && thread.profileEnabled === true ? codexThreadAgentProfile(thread) : null;
+        const recordedOnly = thread.type === 'group' || (profile ? profile.name !== author : !['Claude', 'Codex'].includes(author));
+        const entry = !recordedOnly && profile?.server === true ? codexBridge.agentProfileDetail(profile.id, profile.revision) : null;
         const view = ChatState.agentPeekView({
-          author: codexMessageAuthorLabel(message), authorAvatar: message.authorAvatar || null, profile,
+          author, authorAvatar: message.authorAvatar || null, profile, recordedOnly, boardMemberProfileId: message.boardMemberProfileId,
+          memberSummary: thread.type === 'group' && message.boardMemberProfileId && codexProfileCatalog.status === 'ready'
+            ? codexProfileCatalog.profiles.find(row => row.id === message.boardMemberProfileId) : null,
           detail: entry?.detail || null, detailStatus: entry?.status || 'idle',
-          modelText: ChatState.chatEngineChipView(thread, engineContext).text,
+          modelText: recordedOnly ? '' : ChatState.chatEngineChipView(thread, engineContext).text,
           boardTitle: state.agenda?.activeTitle || '', threadType: thread.type,
         });
         const returnFocus = () => {
@@ -12838,7 +12843,7 @@
             codexBridge.closeAgentPeek();
             spawnSettingsCard({ tab: 'agents', ...(view.profileId ? { profileId: view.profileId } : {}) });
           },
-          onOpenActivity: () => { codexBridge.closeAgentPeek(); codexBridge.openActivity(thread.id); },
+          onOpenActivity: () => { codexBridge.closeAgentPeek(); codexBridge.openActivity(thread.id, { runId: message.runId || null }); },
         });
       };
 
@@ -13434,17 +13439,17 @@
           const working = ChatState.nativeBindingHeld(activeThread) ? null : ChatState.agentWorkingView(workingRun,
             { connected: activeEngine.engineId === 'claude' ? activeEngine.ready : codex.connected });
           // CHAT-07: an answer's face and name open the profile peek; focus moves into it.
-          const peekOpenFor = (message) => codex.agentPeek?.threadId === activeThread.id && codex.agentPeek.messageId === message.id;
+          const peekOpenFor = (message) => codex.agentPeek?.threadId === activeThread.id && codex.agentPeek.answerKey === ChatState.answerPeekKey(message);
           const togglePeek = (message, ev) => {
             ev.stopPropagation();
             const opening = !peekOpenFor(message);
-            codexBridge.toggleAgentPeek(activeThread.id, message.id, ev.currentTarget);
+            codexBridge.toggleAgentPeek(activeThread.id, message.id, ev.currentTarget, ChatState.answerPeekKey(message));
             if (opening) body.querySelector('.egd-codex-agent-peek [data-focus-key]')?.focus({ preventScroll: true });
           };
           const peekTriggerProps = (message, author, className, focusKey) => ({
             class: `${className} egd-codex-agent-peek-trigger`, type: 'button',
             'aria-label': `${author} 프로필 보기`, 'aria-haspopup': 'dialog', 'aria-expanded': peekOpenFor(message) ? 'true' : 'false',
-            data: { testid: 'chat-agent-peek-open', focusKey, messageId: message.id || '' },
+            data: { testid: 'chat-agent-peek-open', focusKey: `${focusKey}:${ChatState.answerPeekKey(message)}`, messageId: message.id || '' },
             onclick: (ev) => togglePeek(message, ev),
           });
           // CHAT-06 Await: each plan card sits under the Agent answer that proposed it.
@@ -13536,8 +13541,8 @@
             const previousDelta = message.createdAt && previous?.createdAt ? Math.abs(message.createdAt - previous.createdAt) : Infinity;
             const nextDelta = message.createdAt && next?.createdAt ? Math.abs(next.createdAt - message.createdAt) : Infinity;
             const author = codexMessageAuthorLabel(message);
-            const groupedWithPrevious = groupRole(previous) === message.role && codexMessageAuthorLabel(previous) === author && previousDelta < 120000;
-            const groupedWithNext = groupRole(next) === message.role && codexMessageAuthorLabel(next) === author && nextDelta < 120000;
+            const groupedWithPrevious = groupRole(previous) === message.role && codexMessageAuthorLabel(previous) === author && previous?.boardMemberProfileId === message.boardMemberProfileId && previousDelta < 120000;
+            const groupedWithNext = groupRole(next) === message.role && codexMessageAuthorLabel(next) === author && next?.boardMemberProfileId === message.boardMemberProfileId && nextDelta < 120000;
             const parts = extractCodexResultLinks(message);
             const content = el('div', { class: 'egd-codex-bubble-content egd-codex-richtext',
               data: activeThread.type === 'dm' && message.role === 'assistant' && parts.text?.length > 320 ? { roomy: 'true' } : null });
@@ -13648,7 +13653,7 @@
               onclick: () => openCodexActivityPanel(activeThread.id),
             }, `첨부 입력 ${message.inputReferences.length}개 · 기록 보기`));
             // AGENT-05: the face is the photo (D-A3) once read, else the saved emoji/initial on its tone.
-            const face = codexMessageAvatarFace(AgentIdentityView.messageAuthorAvatar(message, author, roomProfile), author);
+            const face = codexMessageAvatarFace(AgentIdentityView.messageAuthorAvatar(message, author, activeThread.type === 'group' ? null : roomProfile), author);
             const avatarClass = `egd-codex-message-avatar${groupedWithPrevious ? ' egd-codex-message-avatar-spacer' : ''}${face.toneClass}`;
             const avatarText = groupedWithPrevious ? '' : face.photo ? el('img', { class: 'egd-profile-avatar-image', src: face.photo, alt: '', draggable: 'false' }) : face.text;
             const avatar = message.role === 'assistant' && !groupedWithPrevious
@@ -13703,7 +13708,7 @@
         el('button', { class: 'egd-codex-chip', type: 'button', data: { testid: 'chat-select-cancel' }, onclick: () => codexBridge.cancelMessageSelect() }, '취소')));
         conversation.appendChild(messages);
         if (codex.agentPeek?.threadId === activeThread.id) {
-          const peekMessage = activeThread.messages.find((message) => message.id === codex.agentPeek.messageId && message.role === 'assistant');
+          const peekMessage = ChatState.answerForPeek(activeThread.messages, codex.agentPeek);
           if (peekMessage) conversation.appendChild(renderAgentPeek(activeThread, peekMessage));
         }
         const menuMessage = codex.messageMenu?.threadId === activeThread.id
@@ -14116,6 +14121,7 @@
       // Rerender replaces the clicked chip. Anchor to this Chat surface's new
       // chip after attachment, when both Canvas/HUD geometry and menu size exist.
       positionChatEngineMenu(body.querySelector('.egd-codex-engine-panel'), body.querySelector('.egd-codex-engine-chip'));
+      positionChatEngineMenu(body.querySelector('.egd-codex-agent-peek'), body.querySelector('.egd-codex-agent-peek-trigger[aria-expanded="true"]'));
       const msgEl = body.querySelector(".egd-codex-messages");
       if (msgEl) {
         const sentNewMessage = msgEl.dataset.lastUserMessageId !== messageState?.lastUserMessageId;
@@ -14446,7 +14452,7 @@
             ? { ...message, liveRevision, localHistory: false } : message),
       }));
       for (const message of run.messages) bindMessageToThread(message.id, threadId);
-      if (thread) markUserMessagesReadBy(threadId, boardMemberRun && run.authorName ? run.authorName : thread.profileEnabled ? codexThreadAgentProfile(thread).name : 'Codex');
+      if (thread && run.authorName) markUserMessagesReadBy(threadId, run.authorName);
       attachMemoRepliesFromRun(run);   // CNV-06: a memo question's answer joins its memo (D-K5)
     }
 
@@ -15101,7 +15107,7 @@
           + (uncertain ? ' · 같은 요청을 다시 보내기 전에 활동 기록을 확인하세요.' : '') };
       updateThreadById(threadId, current => ({ ...current, boardSubmitNotice, boardRoutes: { ...(current.boardRoutes || {}), ...outcome.routes } }));
       const recipients = responseRows;
-      const boardOf = row => ({ profileId: row.profileId, reason: row.reason, roomClientThreadId: answer?.clientThreadId });
+      const boardOf = row => ({ profileId: row.profileId, label: row.label, reason: row.reason, roomClientThreadId: answer?.clientThreadId });
       for (const row of outcome.members) {
         ChatState.registerChatRequest(protocol, BoardThread.boardMemberRequest(row, room, { profiles: codexProfileCatalog.profiles }), state.codex.authStatus);
         const run = ChatState.acceptChatRequest(protocol, { accepted: true, requestId: row.requestId, clientThreadId: row.clientThreadId,
@@ -17261,6 +17267,8 @@
       },
       setThreadAgentProfile(threadId, profileId) {
         if (!threadId) return;
+        const bound = getCodexThreadById(state.codex, threadId);
+        if (bound?.type === 'group' && (bound.conversationId || bound.retainedNativeBinding)) return;
         if (profileId && !codexAgentProfileChoices().some((profile) => profile.id === profileId)) return;
         const normalizedProfileId = normalizeCodexAgentProfileId(profileId);
         const profile = codexAgentProfile(normalizedProfileId);
@@ -17635,15 +17643,15 @@
         return true;
       },
       // CHAT-07: one peek at a time, opened beside the face or name that was pressed.
-      toggleAgentPeek(threadId, messageId, anchorEl = null) {
+      toggleAgentPeek(threadId, messageId, anchorEl = null, answerKey = null) {
         if (!threadId || !messageId) return;
-        if (state.codex.agentPeek?.threadId === threadId && state.codex.agentPeek.messageId === messageId) {
+        if (state.codex.agentPeek?.threadId === threadId && state.codex.agentPeek.messageId === messageId && state.codex.agentPeek.answerKey === answerKey) {
           state.codex.agentPeek = null;
         } else {
           const rect = anchorEl?.getBoundingClientRect?.();
           // Left-aligned with the face: the anchor's right edge is pushed out by the panel width.
           const placement = rect ? resolveFloatingMenuPlacement({ top: rect.top, bottom: rect.bottom, right: rect.left + 288 }, 288, 300) : { left: 12, top: 12 };
-          state.codex.agentPeek = { threadId, messageId, ...placement, returnFocusKey: anchorEl?.dataset?.focusKey || null };
+          state.codex.agentPeek = { threadId, messageId, answerKey, ...placement, returnFocusKey: anchorEl?.dataset?.focusKey || null };
           state.codex.threadMenu = null;
           state.codex.memberMenu = null;
           state.codex.engineMenu = null;
@@ -21148,6 +21156,7 @@
       renderAccountTab();
     };
     // SUB-08/SUB-15 Claude card actions; the result line stays until the next one.
+    let claudeDetailsOpen = false;
     let claudeAction = null;
     let claudeKeyEnv = null;
     const runClaudeAction = async (action, loginProfileId = null) => {
@@ -21245,7 +21254,7 @@
       const auth = codex.authStatus || {};
       const loginBusy = Boolean(codex.isStartingLogin || auth.loginInProgress);
       const connection = AccountSettingsView.settingsConnectionView({ connected: codex.connected, bridgeState: codexBridgeNotice(codex).state });
-      // SUB-13 range badge (D-S6: shown, never blocking); SUB-15 '종량 과금' for an API-key codex login.
+      // Only an actionable Codex update recommendation (never a gate); SUB-15 '종량 과금' for an API-key codex login.
       const codexVersion = codex.connected ? AccountSettingsView.engineVersionBadge(codex.engines, 'codex') : null;
       const codexBilling = codex.connected ? AccountSettingsView.codexBillingLabel(auth, codex.engines) : null;
       const section = el('section', { class: 'egd-settings-section', 'aria-label': 'ChatGPT 계정' },
@@ -21301,9 +21310,9 @@
           el('span', { class: 'egd-profile-avatar egd-profile-avatar-tone-0 egd-settings-account-avatar', 'aria-hidden': 'true' },
             ChatState.profileAvatarView(null, email || 'C').text),
           el('div', { class: 'egd-settings-account-copy' },
-            el('div', { class: 'egd-settings-account-title' }, email || '이메일 확인 안 됨'),
+            el('div', { class: 'egd-settings-account-title' }, email || 'ChatGPT 계정'),
             el('div', { class: 'egd-settings-account-sub' }, 'ChatGPT로 로그인됨',
-              el('span', { class: 'egd-settings-plan-badge', data: { testid: 'settings-plan' } }, plan ? `${plan} 요금제` : '요금제 확인 안 됨'),
+              plan ? el('span', { class: 'egd-settings-plan-badge', data: { testid: 'settings-plan' } }, `${plan} 요금제`) : null,
               codexVersion ? el('span', { class: `egd-settings-plan-badge egd-settings-version-badge egd-settings-version-badge-${codexVersion.tone}`, title: codexVersion.title,
                 data: { testid: 'settings-codex-version-badge', status: codexVersion.status } }, codexVersion.label) : null)),
           menu));
@@ -21323,16 +21332,14 @@
         }
         const ring = ChatState.usageRingView(auth);
         const usage = auth.usage && typeof auth.usage === 'object' ? auth.usage : {};
-        const unknown = ring.level === 'unknown';
-        section.appendChild(el('div', {
+        if (ring.level !== 'unknown') section.appendChild(el('div', {
           class: `egd-settings-usage egd-usage-${ring.level}${ring.stale ? ' egd-usage-stale' : ''}`,
           data: { testid: 'settings-usage', level: ring.level }, title: ring.title,
         },
         el('span', { class: 'egd-usage-ring egd-usage-ring-large', 'aria-hidden': 'true', style: ring.percent === null ? null : `--egd-usage-fill: ${ring.percent}%` }),
         el('div', { class: 'egd-settings-usage-copy' },
-          el('div', { class: 'egd-settings-usage-title' }, unknown ? '사용 한도 확인 안 됨'
-            : [usage.windowLabel, usage.percentLabel].filter((part) => typeof part === 'string' && part).join(' · ') || ring.text),
-          el('div', { class: 'egd-settings-usage-sub' }, unknown ? '아직 보고된 사용량이 없습니다.' : ring.resetLabel || '초기화 시각 확인 안 됨'),
+          el('div', { class: 'egd-settings-usage-title' }, [usage.windowLabel, usage.percentLabel].filter((part) => typeof part === 'string' && part).join(' · ') || ring.text),
+          ring.resetLabel ? el('div', { class: 'egd-settings-usage-sub' }, ring.resetLabel) : null,
           ring.stale ? el('div', { class: 'egd-settings-usage-note' }, '확인한 지 오래되어 실제와 다를 수 있습니다.') : null,
           ring.level === 'limit' ? el('div', { class: 'egd-settings-usage-note egd-settings-usage-note-strong' }, '한도에 도달했습니다. 초기화 전까지는 새 요청이 거절될 수 있습니다.') : null)));
       }
@@ -21353,7 +21360,6 @@
       // finishes Anthropic's own login. EG-Desk never touches the credential.
       const claude = ChatState.claudeSettingsView(codex.engines, { connected: codex.connected });
       const claudeAccount = AccountSettingsView.claudeAccountView(codex.engines, { connected: codex.connected });
-      const claudeVersion = codex.connected ? AccountSettingsView.engineVersionBadge(codex.engines, 'claude') : null;
       const claudeUsage = codex.connected ? AccountSettingsView.claudeUsageView(codex.engines) : null;
       const claudeKeyConfirm = codex.connected ? AccountSettingsView.claudeApiKeyEnvConfirm(codex.engines, claudeKeyEnv) : null;
       const claudeBusy = claudeAction?.phase === 'running';
@@ -21366,12 +21372,10 @@
             el('div', { class: 'egd-settings-account-title' }, claudeAccount.title),
             el('div', { class: 'egd-settings-account-sub' }, claudeAccount.sub,
               claudeAccount.methodLabel ? el('span', { class: 'egd-settings-plan-badge', data: { testid: 'settings-claude-method', method: claudeAccount.method || 'unknown' } }, claudeAccount.methodLabel) : null,
-              claudeAccount.billingLabel ? el('span', { class: 'egd-settings-plan-badge egd-settings-billing-badge', data: { testid: 'settings-claude-billing' } }, claudeAccount.billingLabel) : null,
-              claudeVersion ? el('span', { class: `egd-settings-plan-badge egd-settings-version-badge egd-settings-version-badge-${claudeVersion.tone}`, title: claudeVersion.title,
-                data: { testid: 'settings-claude-version-badge', status: claudeVersion.status } }, claudeVersion.label) : null)),
+              claudeAccount.billingLabel ? el('span', { class: 'egd-settings-plan-badge egd-settings-billing-badge', data: { testid: 'settings-claude-billing' } }, claudeAccount.billingLabel) : null)),
           claudeAccount.login
             ? el('button', { class: 'egd-settings-btn egd-settings-btn-primary', type: 'button', disabled: claudeBusy ? 'true' : null, data: { testid: 'settings-claude-login' },
-              title: '이 계정의 Terminal 카드에서 Claude 공식 로그인을 시작합니다', onclick: () => { void runClaudeAction('login', claudeAccount.loginProfileId); } }, claudeBusy && claudeAction.action === 'login' ? '터미널 여는 중…' : '로그인')
+              title: '이 계정의 터미널에서 Claude 로그인을 시작합니다', onclick: () => { void runClaudeAction('login', claudeAccount.loginProfileId); } }, claudeBusy && claudeAction.action === 'login' ? '터미널 여는 중…' : '로그인')
             : null,
           claudeAccount.action === 'refresh'
             ? el('button', { class: 'egd-settings-btn', type: 'button', disabled: claudeBusy ? 'true' : null, data: { testid: 'settings-claude-refresh' },
@@ -21390,22 +21394,25 @@
             onclick: () => { void runClaudeAction('keyConfirm'); } }, claudeKeyConfirm.confirmLabel),
           el('button', { class: 'egd-settings-btn', type: 'button', disabled: claudeBusy ? 'true' : null, data: { testid: 'settings-claude-key-confirm-cancel' },
             onclick: () => { void runClaudeAction('keyDecline'); } }, claudeKeyConfirm.cancelLabel))) : null,
-        claudeUsage ? el('div', {
+        claudeUsage && (claudeUsage.level !== 'unknown' || claudeUsage.creditsRequired) ? el('div', {
           class: `egd-settings-usage egd-usage-${claudeUsage.level}${claudeUsage.stale ? ' egd-usage-stale' : ''}`,
           data: { testid: 'settings-claude-usage', level: claudeUsage.level }, title: claudeUsage.title,
         },
         el('span', { class: 'egd-usage-ring egd-usage-ring-large', 'aria-hidden': 'true', style: claudeUsage.percent === null ? null : `--egd-usage-fill: ${claudeUsage.percent}%` }),
         el('div', { class: 'egd-settings-usage-copy' },
-          el('div', { class: 'egd-settings-usage-title' }, claudeUsage.level === 'unknown' ? '사용 한도 확인 안 됨'
+          el('div', { class: 'egd-settings-usage-title' }, claudeUsage.creditsRequired ? 'Claude를 계속 사용하려면 추가 사용량이 필요합니다.'
             : [claudeUsage.windowLabel, claudeUsage.percentLabel].filter(Boolean).join(' · ') || claudeUsage.text),
-          el('div', { class: 'egd-settings-usage-sub' }, claudeUsage.level === 'unknown' ? 'Claude로 대화하면 사용량이 보고됩니다.' : claudeUsage.resetLabel || '초기화 시각 확인 안 됨'),
+          claudeUsage.resetLabel ? el('div', { class: 'egd-settings-usage-sub' }, claudeUsage.resetLabel) : null,
           claudeUsage.stale ? el('div', { class: 'egd-settings-usage-note' }, '확인한 지 오래되어 실제와 다를 수 있습니다.') : null,
           claudeUsage.level === 'limit' ? el('div', { class: 'egd-settings-usage-note egd-settings-usage-note-strong' }, '한도에 도달했습니다. 초기화 뒤에도 자동으로 이어가지 않습니다.') : null)) : null,
         claudeAction && claudeAction.phase !== 'running' ? el('div', {
           class: `egd-settings-account-result egd-settings-account-result-${claudeAction.phase}`, role: claudeAction.phase === 'error' ? 'alert' : 'status',
           data: { testid: 'settings-claude-result', phase: claudeAction.phase, action: claudeAction.action },
         }, claudeAction.text) : null,
-        el('div', { class: 'egd-settings-pending-line', data: { testid: 'settings-claude', auth: claude.authStatus, state: claude.engineStatus } },
+        el('details', { class: 'egd-settings-pending-line egd-settings-tech-details', open: claudeDetailsOpen || null,
+          ontoggle: event => { if (event.currentTarget.isConnected) claudeDetailsOpen = event.currentTarget.open; },
+          data: { testid: 'settings-claude', auth: claude.authStatus, state: claude.engineStatus } },
+          el('summary', {}, '기술 정보'),
           el('div', { data: { testid: 'settings-claude-auth' } }, claude.authText),
           el('div', { data: { testid: 'settings-claude-engine' } }, claude.engineText),
           claude.connectionText ? el('div', { data: { testid: 'settings-claude-connection' } }, claude.connectionText) : null,

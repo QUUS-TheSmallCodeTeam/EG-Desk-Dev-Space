@@ -134,17 +134,17 @@ export function accountActionOutcome(action, auth, { error = null, loginStarted 
 
 // claude-engine-auth public methods → what pays for a turn (D-S1/D-S4).
 const CLAUDE_METHOD_LABELS = Object.freeze({
-  claudeai: '구독 · Anthropic 공식 로그인',
-  apiKey: 'Anthropic API 키 · 사용량 과금',
+  claudeai: 'Claude 구독',
+  apiKey: 'Anthropic API 키',
   gateway: '사용자 지정 게이트웨이',
   external: '외부 클라우드 제공자',
 });
-const CLAUDE_LOGIN_HINT = 'Terminal에서 claude auth login 을 실행해 Anthropic 공식 로그인을 마친 뒤 다시 확인해 주세요. EG-Desk는 로그인 정보를 보관하지 않습니다.';
+const CLAUDE_LOGIN_HINT = '로그인을 눌러 터미널에서 Claude 로그인을 마친 뒤 다시 확인해 주세요. 이 컴퓨터의 Claude와 같은 로그인을 씁니다.';
 
 /**
  * The Claude account card from the bridge's engines[] row (profiles[].auth is
  * the allow-listed `claude auth status` answer). status: 'disconnected' (no
- * bridge) | 'noReport' | 'notInstalled' | 'signedIn' | 'signedOut' | 'unknown'.
+ * bridge) | 'noReport' | 'notInstalled' | 'unavailable' | 'signedIn' | 'signedOut' | 'unknown'.
  */
 export function claudeAccountView(engines, { connected = false } = {}) {
   const base = { methodLabel: null, method: null, account: null, planType: null, hint: null, billingLabel: null };
@@ -153,35 +153,39 @@ export function claudeAccountView(engines, { connected = false } = {}) {
   }
   const rows = (Array.isArray(engines) ? engines : []).filter(row => object(row) && row.id === 'claude');
   const row = rows.length === 1 ? rows[0] : null;
-  if (!row) return { ...base, status: 'noReport', title: 'Claude 보고 없음', sub: '연결 프로그램이 아직 Claude 엔진 상태를 보고하지 않았습니다.', action: 'refresh' };
+  if (!row) return { ...base, status: 'noReport', title: 'Claude 연결 확인 중', sub: '잠시 후 다시 확인해 주세요.', action: 'refresh' };
   if (row.installed === false || row.status === 'notInstalled') {
-    return { ...base, status: 'notInstalled', title: 'Claude CLI가 설치되어 있지 않습니다', sub: '이 Mac에 claude 명령을 설치하고 로그인하면 여기에 계정이 보입니다.', action: 'refresh' };
+    return { ...base, status: 'notInstalled', title: 'Claude Code 설치 필요', sub: '이 컴퓨터에 Claude Code를 설치한 뒤 다시 확인해 주세요.', action: 'refresh' };
   }
   const profiles = (Array.isArray(row.profiles) ? row.profiles : []).filter(profile => object(profile) && profile.active === true);
   const profile = profiles.length === 1 ? profiles[0] : null;
   const auth = object(profile?.auth) ? profile.auth : null;
+  const versionNotice = engineVersionBadge(engines, 'claude');
+  const blocked = versionNotice?.title || (row.status === 'disabled' ? 'Claude 연결이 중지됐습니다. 연결 프로그램을 다시 켠 뒤 확인해 주세요.'
+    : row.status === 'decisionPending' ? '아직 이 연결로는 Claude 대화를 시작할 수 없습니다.' : null);
   if (auth?.status === 'signedIn') {
     const method = Object.hasOwn(CLAUDE_METHOD_LABELS, auth.method) ? auth.method : null;
     const account = publicEmail(auth.account);
     const label = text(profile.label).slice(0, 80) || 'Claude';
     return {
-      status: 'signedIn', title: label, method, account, hint: null, action: 'refresh',
-      sub: account || (method === 'claudeai' ? '계정 이메일 확인 안 됨' : '로그인됨'),
-      methodLabel: method ? CLAUDE_METHOD_LABELS[method] : '로그인 방식 확인 안 됨',
+      status: blocked ? 'unavailable' : 'signedIn', title: label, method, account, hint: blocked || null, action: 'refresh',
+      sub: account || '로그인됨',
+      methodLabel: method ? CLAUDE_METHOD_LABELS[method] : null,
       planType: method === 'claudeai' && text(auth.planType) ? text(auth.planType).slice(0, 40) : null,
       billingLabel: engineBillingLabel(auth),
     };
   }
+  if (blocked) return { ...base, status: 'unavailable', title: 'Claude를 사용할 수 없습니다', sub: blocked, action: 'refresh' };
   if (auth?.status === 'signedOut') {
     const shared = profile.id === 'claude-default' && profile.owned !== true;
     const owned = profile.owned === true && profile.id !== 'claude-default' && /^claude-[a-z0-9]{1,40}$/.test(profile.id);
     return { ...base, status: 'signedOut', title: '로그인되어 있지 않습니다',
-      sub: owned ? `${text(profile.label).slice(0, 60) || 'Claude'} · EG-Desk 전용 로그인` : 'Claude 구독이나 API 키로 로그인하면 Claude 엔진을 쓸 수 있습니다.',
-      hint: owned ? '로그인을 눌러 이 계정 전용 Terminal에서 공식 인증을 마친 뒤 다시 확인을 눌러 주세요. 컴퓨터의 공유 로그인은 바뀌지 않습니다.'
+      sub: owned ? `${text(profile.label).slice(0, 60) || 'Claude'} · EG-Desk 전용 로그인` : 'Claude에 로그인하면 대화를 시작할 수 있습니다.',
+      hint: owned ? '로그인을 눌러 이 계정 전용 터미널에서 로그인을 마친 뒤 다시 확인해 주세요. 컴퓨터의 공유 로그인은 바뀌지 않습니다.'
         : shared ? CLAUDE_LOGIN_HINT : '사용할 계정을 확인한 뒤 다시 확인을 눌러 주세요.',
       action: 'refresh', login: shared || owned, loginProfileId: shared || owned ? profile.id : null };
   }
-  return { ...base, status: 'unknown', title: '로그인 상태 확인 안 됨', sub: 'claude 명령이 예상한 형식으로 답하지 않았습니다. 다시 확인하거나 Terminal에서 claude auth status 를 실행해 보세요.', action: 'refresh' };
+  return { ...base, status: 'unknown', title: '로그인 상태 확인 안 됨', sub: '이 계정의 로그인 상태를 다시 확인해 주세요.', action: 'refresh' };
 }
 
 const activeProfile = (engines, engineId) => {
@@ -209,27 +213,20 @@ export function codexBillingLabel(auth, engines) {
 
 const ENGINE_NAMES = Object.freeze({ codex: 'Codex', claude: 'Claude' });
 
-/**
- * SUB-13 version badge from the bridge's versionStatus (engine-registry,
- * egdesk-native-capabilities policy). 'supported' and unknown show nothing;
- * the badge explains, it never blocks (D-S6: the Codex connection stays as it is).
- */
+/** A compatibility check is not a failed login. Surface only an actionable result. */
 export function engineVersionBadge(engines, engineId) {
   if (!Object.hasOwn(ENGINE_NAMES, engineId)) return null;
   const { row } = activeProfile(engines, engineId);
   if (!row || row.installed === false) return null;
-  const version = typeof row.version === 'string' && /^\d{1,9}\.\d{1,9}\.\d{1,9}(?:[-+][0-9A-Za-z.-]{1,40})?$/.test(row.version) ? row.version : null;
-  const name = ENGINE_NAMES[engineId];
-  const which = version ? `${name} ${version}` : `이 ${name}`;
-  if (row.versionStatus === 'unsupported') {
-    return { engineId, status: 'unsupported', tone: 'danger', label: '지원 버전 아님', version,
-      title: `${which}은(는) EG-Desk가 지원하는 최소 버전보다 낮습니다. 대화가 실패할 수 있으니 ${name}를 업데이트해 주세요.` };
+  if (engineId === 'claude' && row.status === 'versionUnsupported') {
+    const title = row.statusReason === 'belowMinimum' ? '지금 버전으로는 대화를 시작할 수 없습니다. Claude Code를 업데이트한 뒤 다시 확인해 주세요.'
+      : row.statusReason === 'versionUnknown' ? 'Claude Code 버전을 읽을 수 없어 대화를 시작할 수 없습니다. 설치 상태를 확인한 뒤 다시 확인해 주세요.'
+        : '지금 설치된 Claude Code로는 대화를 시작할 수 없습니다. Claude Code를 업데이트한 뒤 다시 확인해 주세요.';
+    return { engineId, status: 'unsupported', tone: 'danger', label: row.statusReason === 'versionUnknown' ? '설치 확인 필요' : '업데이트 필요', title };
   }
-  if (row.versionStatus === 'untested') {
-    return { engineId, status: 'untested', tone: 'warning', label: '확인 안 된 버전', version,
-      title: `${which}은(는) EG-Desk에서 아직 확인하지 않은 버전입니다. 대화는 계속되지만 일부 표시가 다를 수 있습니다.` };
-  }
-  return null;
+  // D-S6: Codex still runs below the recommended minimum; don't imply a gate.
+  return engineId === 'codex' && row.versionStatus === 'unsupported'
+    ? { engineId, status: 'unsupported', tone: 'warning', label: 'Codex 업데이트 권장', title: '대화는 계속할 수 있지만 일부 기능이 동작하지 않을 수 있습니다.' } : null;
 }
 
 /**
@@ -248,7 +245,8 @@ export function claudeUsageView(engines) {
     windowLabel: typeof usage?.windowLabel === 'string' ? usage.windowLabel : null,
     percentLabel: typeof usage?.percentLabel === 'string' ? usage.percentLabel : null,
     creditsRequired: usage?.creditsRequired === true,
-    label: `Claude ${view.label}`, title: `Claude · ${view.title}`,
+    label: usage?.creditsRequired ? 'Claude 추가 사용량 필요' : `Claude ${view.label}`,
+    title: usage?.creditsRequired ? 'Claude를 계속 사용하려면 추가 사용량이 필요합니다.' : `Claude · ${view.title}`,
   };
 }
 
@@ -362,10 +360,11 @@ export function engineProfilesView(engines, engineId, { connected = false } = {}
         label: text(profile.label).slice(0, 60) || (owned ? `${name} 계정` : name),
         marker: owned ? ENGINE_PROFILE_MARKERS.owned : ENGINE_PROFILE_MARKERS.shared,
         status: notYet ? 'notYet' : active ? 'active' : 'available',
-        authText: notYet ? '준비 중' : active ? `사용 중 · ${PROFILE_AUTH_TEXT[auth]}` : isolatedCodex ? PROFILE_AUTH_TEXT[auth] : '선택하면 이 로그인으로 새 대화를 시작합니다',
+        authText: notYet ? '준비 중' : active ? '선택됨' : isolatedCodex ? PROFILE_AUTH_TEXT[auth] : '선택하면 이 로그인으로 새 대화를 시작합니다',
         canActivate: !active && !notYet && !isolatedCodex,
         canRemove: owned && !active,
-        canLogin: owned && !notYet,
+        // The active Claude account already owns the bound login action on its card.
+        canLogin: owned && !notYet && !(engineId === 'claude' && active),
       };
     });
   return {

@@ -9,7 +9,7 @@
 // - The room's members as the chat store keeps them (GET/POST
 //   /chat/board/members, chat-store v3 room_members) and back.
 // Pure: no DOM, no fetch. The helper shares the same recipient classifier.
-import { clientThreadBinding, displayProfileAvatar, fillHistoryAnswerIds, isProfileId, isRunBusy } from './EGDeskChatState.sys.mjs';
+import { awaitResumeMessageView, clientThreadBinding, displayProfileAvatar, fillHistoryAnswerIds, isProfileId, isRunBusy } from './EGDeskChatState.sys.mjs';
 
 export const BOARD_SEND_PATH = '/chat/board/send';
 export const BOARD_MEMBERS_PATH = '/chat/board/members';
@@ -20,8 +20,13 @@ const MAX_LABEL = 80;
 const ROLES = ['owner', 'admin', 'member'];
 export const BOARD_ADDRESS_START = /[,;:\s([{"'“‘]/u;
 const AFTER_MENTION = /[\s.,!?;:)\]}"'”’·…]/u;
-// Fields /chat/board/send refuses or picks per member itself.
-const NOT_FOR_BOARD = ['conversationId', 'profileEnabled', 'executionPolicy', 'stateless', 'agentProfile', 'systemPrompt', 'toolMode', 'profileId', 'profileRevision'];
+// A new field on a DM request is private to that path until explicitly reviewed for Board use.
+// The engine, target, persona, revision and conversation are resolved separately.
+const BOARD_TURN_FIELDS = ['message', 'cwd', 'model', 'effort', 'projectTarget', 'expectedRoomProject', 'boardId', 'roomId', 'engineProfileId',
+  'attachments', 'selectedSources', 'contextSnapshotIds', 'expectedContextScope', 'contextResolution', 'contextCapabilities'];
+export function boardTurnFields(input) {
+  return Object.fromEntries(BOARD_TURN_FIELDS.filter(key => own(input, key)).map(key => [key, input[key]]));
+}
 
 const text = value => (typeof value === 'string' ? value.trim() : '');
 const own = (object, key) => !!object && typeof object === 'object' && Object.prototype.hasOwnProperty.call(object, key);
@@ -243,14 +248,15 @@ export function boardMembersRequest(thread, clientThreadId, { selfName = SELF_NA
   return { clientThreadId, members: boardStoreMembers(thread, { selfName }) };
 }
 
-/** The room's last messages quoted in the Board block (oldest first, ≤ 12). */
-export function boardRecentMessages(thread, { selfName = SELF_NAME } = {}) {
+/** Only finished speech from this room, not a draft, activity, or the private XML behind a system line. */
+export function boardRecentMessages(thread) {
   const rows = [];
   for (const message of Array.isArray(thread?.messages) ? thread.messages : []) {
-    if (!['user', 'assistant'].includes(message?.role) || ['submitting', 'failed'].includes(message.status)) continue;
+    if (!['user', 'assistant'].includes(message?.role) || !['complete', 'completed'].includes(message.status) || awaitResumeMessageView(message)) continue;
     const body = text(message.content).slice(0, MAX_RECENT_TEXT).trim();
     if (!body) continue;
-    const author = label(message.role === 'user' ? selfName : message.authorName || 'Codex') || null;
+    // The recipient is not the person whose screen calls them '나'. Never invent an author for an old answer.
+    const author = message.role === 'assistant' ? label(message.authorName || message.author) : null;
     rows.push({ role: message.role === 'user' ? 'user' : 'agent', text: body, ...(author ? { author } : {}) });
   }
   return rows.slice(-MAX_RECENT);
@@ -308,7 +314,7 @@ export function boardDeliveryIntent(thread, message, options = {}) {
   const recipients = (plan.recipientIds ?? []).map(profileId => ({ profileId, engine, kind: 'agent',
     label: members.find(member => member.profileId === profileId)?.label || label(options.profiles?.find?.(profile => profile?.id === profileId)?.name) || (profileId === leadProfileId && label(options.roomAgentName)) || 'Agent' }));
   if (!code && !recipients.length) recipients.push({ profileId: null, engine, kind: 'room-engine', label: engine === 'claude' ? 'Claude' : 'Codex' });
-  const roomBlock = !code && plan.route === 'board' ? { memberCount: members.filter(member => member.kind === 'user' || member.profileId).length + (leadProfileId && !members.some(member => member.profileId === leadProfileId) ? 1 : 0), recentTurnCount: boardRecentMessages(thread, { selfName }).length } : null;
+  const roomBlock = !code && plan.route === 'board' ? { memberCount: members.filter(member => member.kind === 'user' || member.profileId).length + (leadProfileId && !members.some(member => member.profileId === leadProfileId) ? 1 : 0), recentTurnCount: boardRecentMessages(thread).length } : null;
   const expectedBoardDelivery = !code && options.supportsBoardDelivery !== false ? {
     version: 1, clientThreadId, engine, route: plan.route, reason: plan.reason, leadProfileId,
     recipientIds: plan.recipientIds, roster: boardRosterIdentity(members),
@@ -325,8 +331,8 @@ export function boardSendPlan(thread, chatRequest, options = {}) {
   if (!intent.ok) return { error: intent.code };
   if (options.intent && JSON.stringify(options.intent.expectedBoardDelivery) !== JSON.stringify(intent.expectedBoardDelivery)) return { error: 'BOARD_DELIVERY_CHANGED' };
   if (intent.route !== 'board') return null;
-  const body = {};
-  for (const [key, value] of Object.entries(chatRequest)) if (!NOT_FOR_BOARD.includes(key)) body[key] = value;
+  const body = { ...boardTurnFields(chatRequest), clientThreadId: chatRequest.clientThreadId, requestId: chatRequest.requestId };
+  if (!intent.recipients.some(recipient => recipient.profileId === intent.expectedBoardDelivery.leadProfileId)) delete body.engineProfileId;
   body.engineId = intent.expectedBoardDelivery.engine;
   body.expectedBoardDelivery = intent.expectedBoardDelivery;
   body.members = boardStoreMembers(thread, { selfName });
@@ -336,7 +342,7 @@ export function boardSendPlan(thread, chatRequest, options = {}) {
     body.profileId = lead;
     if (Number.isSafeInteger(chatRequest.profileRevision)) body.profileRevision = chatRequest.profileRevision;
   }
-  const recent = boardRecentMessages(thread, { selfName });
+  const recent = boardRecentMessages(thread);
   if (recent.length) body.recentMessages = recent;
   return { path: BOARD_SEND_PATH, body, mentioned: intent.reason === 'mentions' ? intent.expectedBoardDelivery.recipientIds : [] };
 }
@@ -374,7 +380,7 @@ export function boardMemberRequest(row, roomThread, { profiles = [] } = {}) {
   const profile = (Array.isArray(profiles) ? profiles : []).find(candidate => candidate?.id === row.profileId) || null;
   const links = linksOf(roomThread);
   const name = Object.keys(links).find(key => links[key]?.profileId === row.profileId) || null;
-  const authorName = text(profile?.name) || text(row.label) || name || 'Agent';
+  const authorName = text(row.label) || text(profile?.name) || name || 'Agent';
   const authorAvatar = displayProfileAvatar(profile?.avatar) || displayProfileAvatar(name ? links[name]?.avatar : null) || null;
   return { requestId: row.requestId, clientThreadId: row.clientThreadId, localThreadId: roomThread.id, conversationId: row.conversationId,
     authorName, ...(authorAvatar ? { authorAvatar } : {}) };
@@ -383,7 +389,7 @@ export function boardMemberRequest(row, roomThread, { profiles = [] } = {}) {
 /** Marks a run as one Board member's (from the send answer or run.started details.board). */
 export function noteBoardRun(run, board, { member = false } = {}) {
   if (!run || !board || typeof board !== 'object' || !isProfileId(board.profileId)) return run;
-  run.board = { profileId: board.profileId, reason: board.reason === 'mentioned' ? 'mentioned' : 'lead',
+  run.board = { profileId: board.profileId, ...(label(board.label) ? { label: label(board.label) } : {}), reason: board.reason === 'mentioned' ? 'mentioned' : 'lead',
     roomClientThreadId: typeof board.roomClientThreadId === 'string' ? board.roomClientThreadId : run.board?.roomClientThreadId || null };
   if (member) run.boardMember = true;
   return run;
@@ -427,6 +433,7 @@ const SEND_ERROR_TEXT = Object.freeze({
   BOARD_UNRESOLVED_ADDRESS: '확인할 수 없는 @대상이 있습니다. 방에 연결된 Agent를 다시 선택해 주세요. @all 또는 @everyone으로는 보낼 수 없습니다.',
   BOARD_ENGINE_UNSUPPORTED: '현재 Claude Board에서는 @로 Agent를 부르거나 방의 Lead Agent에게 보낼 수 없습니다. 기본 Claude를 선택해 @없이 보내거나 Codex Board에서 다시 확인해 주세요.',
   BOARD_DELIVERY_UNAVAILABLE: '현재 연결은 Board 전송 대상을 검증할 수 없습니다. EG-Desk 연결을 업데이트하고 다시 열어 주세요.',
+  BOARD_SPEAKER_CHANGED: '이전 답변과 같은 Agent인지 확인할 수 없어 대화를 이어가지 않았습니다. 다른 Agent는 @로 부르거나 새 Board 대화에서 시작해 주세요.',
   BOARD_STATELESS_UNSUPPORTED: '기록 없이 시작할 때는 Board Agent에게 따로 보낼 수 없습니다. 기록 없이 시작을 끄거나 방의 기본 엔진으로 보내 주세요.',
   BOARD_CONTEXT_SCOPE: '선택한 자료는 이 방의 대화에서만 사용할 수 있습니다. 자료를 빼거나 방의 Lead 한 명만 선택해 주세요.',
   BOARD_NO_RECIPIENT: '이 Board Thread에서 답할 Agent가 없습니다. @로 Agent를 부르거나 방의 Agent를 정해 주세요.',

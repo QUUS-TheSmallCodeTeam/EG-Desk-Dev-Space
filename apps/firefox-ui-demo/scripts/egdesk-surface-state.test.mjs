@@ -10223,6 +10223,8 @@ test('production Settings card renders the reported account and drives Agent edi
   emit();
   assert.match(text(), /연결 확인 중…/);
   const claude = () => settingsNodes(card, node => node.dataset.testid === 'settings-claude')[0];
+  assert.equal(claude().tagName, 'DETAILS');
+  assert.equal(claude().attributes.open, undefined, 'reported technical provenance starts collapsed');
   assert.equal(claude().dataset.auth, 'unknown');
   assert.equal(claude().dataset.state, 'unknown');
   assert.match(claude().textContent, /현재 상태는 확인할 수 없습니다/);
@@ -10321,8 +10323,7 @@ test('production Settings card renders the reported account and drives Agent edi
   delete state.codex.chatProtocol;
   state.codex.authStatus = { isLoggedIn: true, accountEmail: 'owner@example.test', planType: 'unknown' };
   emit();
-  assert.match(text(), /요금제 확인 안 됨/);
-  assert.match(text(), /사용 한도 확인 안 됨/);
+  assert.doesNotMatch(text(), /요금제 확인 안 됨|사용 한도 확인 안 됨/);
   assert.doesNotMatch(text(), /0%/, 'no invented zero');
 
   settingsButton(card, 'Agent 관리').fire('click');
@@ -15470,7 +15471,7 @@ test('engine choices: Codex is usable with its plan, Claude is listed but waits 
   const choices = Chat.chatEngineChoices(engineRowsFixture, signedInPro);
   assert.deepEqual(choices.map(({ id, label, selectable, account, note }) => ({ id, label, selectable, account, note })), [
     { id: 'codex', label: 'Codex', selectable: true, account: 'ChatGPT Pro', note: '사용 가능' },
-    { id: 'claude', label: 'Claude', selectable: false, account: null, note: '설치됨 2.1.300 · 연결 방식 결정 대기' },
+    { id: 'claude', label: 'Claude', selectable: false, account: null, note: '연결 방식 결정 대기' },
   ]);
   assert.deepEqual(Chat.chatEngineChoices(null, { isLoggedIn: false }).map(({ id, selectable, account, note }) => ({ id, selectable, account, note })),
     [{ id: 'codex', selectable: true, account: null, note: '로그인 필요' }], 'an older bridge shows Codex alone');
@@ -15557,7 +15558,7 @@ test('engine controls: header chip, new-room choices, locked-room panel and effo
   assert.equal(choices.props.role, 'radiogroup');
   assert.deepEqual(choices.children.map(row => [row.props.data.engine, row.props['aria-checked'], row.props.disabled, text(row)]), [
     ['codex', 'true', null, 'CodexChatGPT Pro · 사용 가능'],
-    ['claude', 'false', 'true', 'Claude설치됨 2.1.300 · 연결 방식 결정 대기'],
+    ['claude', 'false', 'true', 'Claude연결 방식 결정 대기'],
   ]);
   choices.children[0].props.onclick();
   assert.deepEqual(calls.pop(), ['setThreadEngine', 'new', 'codex']);
@@ -18521,9 +18522,9 @@ test('the profile peek shows the room Agent: role, 말투, 맡길 일, the engin
   assert.equal(plainTools.tools, '제한 없음');
   assert.equal(plainTools.note, '이 답변을 보낸 당시 이름: 예전 이름');
   // A plain Codex room has no Agent settings to open.
-  const codex = Chat.agentPeekView({ author: 'Codex', modelText: 'Codex · 기본 모델', boardTitle: '', threadType: 'group' });
+  const codex = Chat.agentPeekView({ author: 'Codex', modelText: 'Codex · 기본 모델', boardTitle: '', threadType: 'dm' });
   assert.deepEqual([codex.name, codex.role, codex.tools, codex.profileId, codex.board, codex.model],
-    ['Codex', '기본 Codex 대화 · 따로 정한 Agent 없음', '제한 없음', null, 'EG-Desk · Board Thread', 'Codex · 기본 모델']);
+    ['Codex', '기본 Codex 대화 · 따로 정한 Agent 없음', '제한 없음', null, 'EG-Desk · 지금 열린 Board', 'Codex · 기본 모델']);
   for (const shown of [view, loading, failed, codex]) {
     for (const text of [shown.tone, shown.tools, shown.board, shown.role]) assert.doesNotMatch(text, /observe|inherited|interact|toolCeiling|null|undefined/);
   }
@@ -18715,10 +18716,10 @@ test('the activity record names a run\'s ceiling under its head and reads ceilin
 
 test('chat wiring: faces and names open the peek, the 작업 중 bubble closes the log, and the record shows ceilings', () => {
   const peek = surfaceSource.match(/      const renderAgentPeek = \(thread, message\) => \{([\s\S]*?)\n      \};/)?.[1] || '';
-  assert.match(peek, /modelText: ChatState\.chatEngineChipView\(thread, engineContext\)\.text/, 'the model line is the engine chip value');
+  assert.match(peek, /modelText: recordedOnly \? '' : ChatState\.chatEngineChipView\(thread, engineContext\)\.text/, 'the model line is the engine chip value');
   assert.match(peek, /codexBridge\.agentProfileDetail\(profile\.id, profile\.revision\)/);
   assert.match(peek, /spawnSettingsCard\(\{ tab: 'agents', \.\.\.\(view\.profileId \? \{ profileId: view\.profileId \} : \{\}\) \}\)/);
-  assert.match(peek, /onOpenActivity: \(\) => \{ codexBridge\.closeAgentPeek\(\); codexBridge\.openActivity\(thread\.id\); \}/);
+  assert.match(peek, /onOpenActivity: \(\) => \{ codexBridge\.closeAgentPeek\(\); codexBridge\.openActivity\(thread\.id, \{ runId: message\.runId \|\| null \}\); \}/);
   assert.match(peek, /onClose: \(\) => \{ codexBridge\.closeAgentPeek\(\); returnFocus\(\); \}/);
   assert.match(surfaceSource, /const avatar = message\.role === 'assistant' && !groupedWithPrevious\n              \? el\('button', peekTriggerProps\(message, author, avatarClass, `agent-peek-face-\$\{message\.id\}`\), avatarText\)/);
   assert.match(surfaceSource, /el\('button', peekTriggerProps\(message, author, 'egd-codex-message-role-name', `agent-peek-name-\$\{message\.id\}`\), author\)/);
@@ -26008,14 +26009,15 @@ test('Settings Claude card: forced re-check, Terminal login, API key confirmatio
   await settle();
   assert.deepEqual(calls, [['refreshClaude']]);
 
-  // SUB-13 badges: Claude untested, Codex unsupported.
+  // No warning for a runnable, unlisted Claude; only an update recommendation for old Codex.
   state.codex.engines = [
     { id: 'codex', label: 'Codex', status: 'ready', version: '0.150.0', versionStatus: 'unsupported', installed: true, profiles: [] },
     claudeSettingsFixture()];
   state.codex.authStatus = { isLoggedIn: true, accountEmail: 'owner@example.test', planType: 'pro' };
   emit();
-  assert.equal(byTestid('settings-claude-version-badge').textContent, '확인 안 된 버전');
-  assert.equal(byTestid('settings-codex-version-badge').textContent, '지원 버전 아님');
+  assert.equal(byTestid('settings-claude-version-badge'), undefined);
+  assert.equal(byTestid('settings-claude-usage'), undefined);
+  assert.equal(byTestid('settings-codex-version-badge').textContent, 'Codex 업데이트 권장');
   assert.equal(byTestid('settings-codex-version-badge').dataset.status, 'unsupported');
   assert.equal(byTestid('settings-codex-billing'), undefined, 'a ChatGPT login is not per-use billing');
 
@@ -26055,19 +26057,15 @@ test('Chat head: the account chip and the usage ring open Settings 계정 (SUB-0
   const { el } = compileFunction(`${declaration('el')}\nreturn { el };`, ['document', 'ChatState'])(document, Chat);
   const fns = compileFunction(`${declaration('codexUsageRing')}\n${ring}\n${declaration('usageMeter')}\nreturn { chatHeadUsageRing };`,
     ['el', 'ChatState', 'AccountSettingsView', 'spawnSettingsCard'])(el, Chat, AccountSettingsView, options => opened.push(options));
-  const claude = fns.chatHeadUsageRing({ engineId: 'claude' }, { engines: [claudeSettingsFixture()], authStatus: { isLoggedIn: true } });
-  assert.equal(claude.tagName, 'BUTTON');
-  assert.equal(claude.dataset.testid, 'chat-claude-usage-ring');
-  assert.equal(claude.dataset.level, 'unknown', 'no Claude usage reported yet reads 확인 안 됨');
-  assert.match(claude.textContent, /사용량 미확인/);
-  assert.equal(fns.chatHeadUsageRing({ engineId: 'claude' }, { engines: [claudeSettingsFixture()] }, 'warning'), null);
+  assert.equal(fns.chatHeadUsageRing({ engineId: 'claude' }, { engines: [claudeSettingsFixture()] }), null, 'no unknown-usage badge');
+  assert.equal(fns.chatHeadUsageRing({ engineId: 'codex' }, { authStatus: { isLoggedIn: true } }), null);
+  const used = claudeSettingsFixture(); used.profiles[0].usage = { level: 'warn', percentLabel: '82% 사용' };
+  const ringButton = fns.chatHeadUsageRing({ engineId: 'claude' }, { engines: [used] }, 'warning');
+  assert.equal(ringButton.tagName, 'BUTTON'); assert.equal(ringButton.dataset.testid, 'chat-claude-usage-ring');
+  ringButton.fire('click'); assert.deepEqual(opened, [{ tab: 'account' }]);
   const limited = { authStatus: { isLoggedIn: true, usage: { level: 'limit' } } };
   assert.equal(fns.chatHeadUsageRing({ engineId: 'codex' }, limited, 'warning').dataset.level, 'limit');
   assert.equal(fns.chatHeadUsageRing({ engineId: 'codex' }, limited, 'routine'), null);
-  claude.fire('click');
-  assert.deepEqual(opened, [{ tab: 'account' }]);
-  const codex = fns.chatHeadUsageRing({ engineId: 'codex' }, { engines: [], authStatus: { isLoggedIn: true } });
-  assert.equal(codex.dataset.testid, 'chat-usage-ring');
   assert.equal(fns.chatHeadUsageRing({ engineId: 'claude' }, { engines: [claudeSettingsFixture({ auth: { status: 'signedOut' } })], authStatus: {} }), null);
 });
 
@@ -26142,7 +26140,7 @@ test('Board composer executes Korean input and IME locally; disabled Enter expla
   const find = id => settingsNodes(footer, node => node.dataset.testid === id)[0];
   const input = find('chat-composer'), send = find('chat-send'), destination = find('board-chat-destination');
   const type = (value, additional = {}) => { input.value = value; input.setSelectionRange(value.length, value.length); input.fire('input', additional); };
-  type(''); assert.equal(destination.textContent, '답변: 솔빛');
+  type(''); assert.equal(destination.textContent, '지목하지 않을 때: 솔빛');
   type('@물결 정리해 줘'); assert.equal(destination.textContent, '답변: 물결');
   type('@솔빛 @물결 비교해 줘'); assert.equal(destination.textContent, '답변: 솔빛, 물결');
   assert.deepEqual(settingsNodes(footer, node => node.tagName === 'LI').map(node => node.textContent), ['솔빛', '물결']);

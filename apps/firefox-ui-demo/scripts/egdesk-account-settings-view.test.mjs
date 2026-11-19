@@ -115,19 +115,20 @@ test('Claude card shows the CLI-reported subscription, API key or signed-out sta
   assert.equal(max.sub, 'me@example.com');
   assert.equal(max.account, 'me@example.com');
   assert.equal(max.method, 'claudeai');
-  assert.equal(max.methodLabel, '구독 · Anthropic 공식 로그인');
+  assert.equal(max.methodLabel, 'Claude 구독');
   assert.equal(max.planType, 'max');
   assert.equal(max.action, 'refresh');
   assert.equal(max.hint, null);
 
   const noEmail = View.claudeAccountView([claudeRow(claudeAuthFromCliStatus(JSON.stringify({ loggedIn: true, apiProvider: 'firstParty', subscriptionType: 'pro' })))], { connected: true });
-  assert.equal(noEmail.sub, '계정 이메일 확인 안 됨');
+  assert.equal(noEmail.sub, '로그인됨');
 
   const apiKey = View.claudeAccountView([claudeRow(claudeAuthFromCliStatus(JSON.stringify({ loggedIn: true, apiProvider: 'firstParty', apiKeySource: 'ANTHROPIC_API_KEY' })))], { connected: true });
   assert.equal(apiKey.status, 'signedIn');
   assert.equal(apiKey.title, 'Anthropic API key');
   assert.equal(apiKey.method, 'apiKey');
-  assert.equal(apiKey.methodLabel, 'Anthropic API 키 · 사용량 과금');
+  assert.equal(apiKey.methodLabel, 'Anthropic API 키');
+  assert.equal(apiKey.billingLabel, '종량 과금');
   assert.equal(apiKey.planType, null);
   assert.equal(apiKey.sub, '로그인됨');
 
@@ -138,8 +139,8 @@ test('Claude card shows the CLI-reported subscription, API key or signed-out sta
   const out = View.claudeAccountView([claudeRow(claudeAuthFromCliStatus(JSON.stringify({ loggedIn: false, authMethod: 'none' })))], { connected: true });
   assert.equal(out.status, 'signedOut');
   assert.equal(out.title, '로그인되어 있지 않습니다');
-  assert.match(out.hint, /claude auth login/);
-  assert.match(out.hint, /로그인 정보를 보관하지 않습니다/);
+  assert.match(out.hint, /터미널에서 Claude 로그인을 마친 뒤 다시 확인/);
+  assert.match(out.hint, /이 컴퓨터의 Claude와 같은 로그인/);
   assert.equal(out.methodLabel, null);
 
   const unknown = View.claudeAccountView([claudeRow({ status: 'unknown', method: null, label: null, account: null, planType: null })], { connected: true });
@@ -159,7 +160,7 @@ test('Claude card distinguishes no bridge, no report and no CLI', () => {
   assert.equal(View.claudeAccountView([signedIn, signedIn], { connected: true }).status, 'noReport', 'two Claude rows are not resolved by picking one');
   const missing = View.claudeAccountView([publicEngineRow(describeClaudeEngine({ installed: false }, { minVersion: '2.1.205' }))], { connected: true });
   assert.equal(missing.status, 'notInstalled');
-  assert.equal(missing.title, 'Claude CLI가 설치되어 있지 않습니다');
+  assert.equal(missing.title, 'Claude Code 설치 필요');
   assert.equal(View.claudeAccountView([{ ...signedIn, profiles: [] }], { connected: true }).status, 'unknown');
 });
 
@@ -199,19 +200,21 @@ const claudeEngine = (check = {}, live = { minVersion: '2.1.205' }) => publicEng
   installed: true, version: '2.1.300', versionStatus: 'supported',
   auth: { status: 'signedIn', method: 'claudeai', account: 'me@example.com', label: 'Claude Max' }, ...check }, live));
 
-test('version badge names unsupported and untested ranges and stays quiet otherwise (SUB-13)', () => {
+test('an unlisted CLI is not an account warning; only a real action is visible (SUB-13)', () => {
   const codex = versionStatus => publicEngineRow(describeCodexEngine({ ready: true, version: '0.162.1', versionStatus, auth: { isLoggedIn: true } }));
-  assert.equal(View.engineVersionBadge([codex('supported')], 'codex'), null);
-  assert.equal(View.engineVersionBadge([codex(null)], 'codex'), null, 'an unknown version is not a warning');
-  const untested = View.engineVersionBadge([codex('untested')], 'codex');
-  assert.deepEqual([untested.label, untested.tone, untested.status], ['확인 안 된 버전', 'warning', 'untested']);
-  assert.match(untested.title, /Codex 0\.162\.1/);
-  assert.match(untested.title, /대화는 계속되지만/, 'D-S6: the badge explains, it does not block');
-  const below = View.engineVersionBadge([claudeEngine({ version: '2.1.204', versionStatus: 'unsupported' })], 'claude');
-  assert.deepEqual([below.label, below.tone], ['지원 버전 아님', 'danger']);
-  assert.match(below.title, /업데이트/);
-  assert.equal(View.engineVersionBadge([claudeEngine({ installed: false, version: null, versionStatus: 'unsupported' })], 'claude'), null);
-  assert.equal(View.engineVersionBadge([codex('untested')], 'gemini'), null);
+  for (const status of ['supported', 'untested', null]) assert.equal(View.engineVersionBadge([codex(status)], 'codex'), null);
+  assert.equal(View.engineVersionBadge([codex('unsupported')], 'codex').label, 'Codex 업데이트 권장');
+  assert.equal(View.engineVersionBadge([claudeEngine({ versionStatus: 'untested' })], 'claude'), null);
+  const blocked = [claudeEngine({ version: '2.1.204', versionStatus: 'unsupported' }), claudeEngine({ version: null }),
+    claudeEngine({ versionStatus: 'untested' }, { minVersion: '2.1.205', gateFailure: 'CLAUDE_CAPABILITIES_MISSING' })];
+  for (const [index, row] of blocked.entries()) {
+    const view = View.claudeAccountView([row], { connected: true });
+    assert.equal(view.status, 'unavailable'); assert.equal(view.account, 'me@example.com');
+    assert.match(view.hint, index === 1 ? /설치 상태를 확인/ : /업데이트/); assert.equal(view.action, 'refresh');
+    assert.doesNotMatch(view.hint, /CAPABILITIES|엔진|CLI|예상한 형식/);
+    assert.ok(!view.login); assert.equal(View.claudeAccountView([row], { connected: false }).account, null);
+  }
+  assert.equal(View.engineVersionBadge([claudeEngine({ installed: false, version: null })], 'claude'), null);
 });
 
 test('Claude usage comes from the engines[] profile usage in the ChatGPT ring shape (SUB-03)', () => {
@@ -395,7 +398,7 @@ test('available owned Codex profiles display their own auth and never globally a
     { id: 'codex-87654321', owned: true, status: 'notYet' },
   ] }], 'codex', { connected: true });
   assert.deepEqual(codex.rows.map(r => [r.authText, r.canActivate, r.canLogin]), [
-    ['사용 중 · 로그인 필요', false, false], ['로그인됨', false, true], ['준비 중', false, false],
+    ['선택됨', false, false], ['로그인됨', false, true], ['준비 중', false, false],
   ]);
 });
 

@@ -1383,7 +1383,8 @@ export function projectRunMessages(existing, run, now = Date.now()) {
       ...previous, ...incoming, role, id: previous?.id || incoming.id,
       ...(role === 'user' && previous?.localMessageId ? { localMessageId: previous.localMessageId } : {}),
       providerItemId: incoming.id, content: incoming.content ?? incoming.text ?? '',
-      authorName: role === 'assistant' ? previous?.authorName || run.authorName || 'Codex' : previous?.authorName,
+      authorName: role === 'assistant' ? previous?.authorName || run.authorName || run.board?.label || undefined : previous?.authorName,
+      ...(role === 'assistant' && isProfileId(run.board?.profileId) ? { boardMemberProfileId: run.board.profileId } : {}),
       ...(role === 'assistant' ? { authorAvatar: displayProfileAvatar(previous?.authorAvatar || run.authorAvatar) } : {}),
       createdAt: previous?.createdAt || incoming.createdAt || now,
       conversationId: run.conversationId, runId: run.runId, answerId: run.answerId, artifacts: [], briefing: null, outputs: [], contextCaptures: [], contextEvents: [], contextPackets: [],
@@ -1919,17 +1920,30 @@ export function agentWorkingView(run, { connected = true } = {}) {
   return { state: 'working', text: 'Agent 작업 중' };
 }
 
+// Provider item IDs are turn-local. Two members can use the same ID and even the same words.
+export const answerPeekKey = message => JSON.stringify([message.id, message.conversationId || null, message.runId || null, message.boardMemberProfileId || null]);
+export function answerForPeek(messages, peek) {
+  const matches = messages.filter(row => row.role === 'assistant' && row.id === peek.messageId && (!peek.answerKey || answerPeekKey(row) === peek.answerKey));
+  return matches.length === 1 ? matches[0] : null;
+}
+
 /**
  * CHAT-07: what the profile peek shows for an answer's author. `profile` is
- * the room's Agent (null for a plain Codex room); `detail` is GET
- * /profiles/:id once loaded. The model line is the engine chip's own text.
+ * the matching DM Agent; `detail` is its opt-in profile read. Board peeks
+ * use only the recorded author and that ID's public catalog role, not the Lead's settings.
  */
-export function agentPeekView({ author = 'Codex', authorAvatar = null, profile = null, detail = null, detailStatus = 'idle',
-  modelText = '', boardTitle = '', threadType = 'dm' } = {}) {
+export function agentPeekView({ author = 'Agent', authorAvatar = null, profile = null, detail = null, detailStatus = 'idle',
+  modelText = '', boardTitle = '', threadType = 'dm', recordedOnly = false, boardMemberProfileId = null, memberSummary = null } = {}) {
   const board = `${boardTitle || 'EG-Desk'}${threadType === 'group' ? ' · Board Thread' : ' · 지금 열린 Board'}`;
   const base = { model: modelText || '확인 안 됨', board, profileId: null, loading: false, note: null, expertiseEmpty: '정하지 않음' };
+  if (threadType === 'group' || recordedOnly) {
+    // A Board answer identifies its author, not the room's current Lead/settings. Profile details are opt-in.
+    const profileId = isProfileId(boardMemberProfileId) ? boardMemberProfileId : null;
+    return { compact: true, name: author || 'Agent', avatar: displayProfileAvatar(authorAvatar), profileId,
+      role: profileId && memberSummary?.id === profileId ? formLine(memberSummary.role) || '이 답변의 작성자' : '이 답변의 작성자', loading: false };
+  }
   if (!profile) {
-    return { ...base, name: author || 'Codex', avatar: displayProfileAvatar(authorAvatar), role: '기본 Codex 대화 · 따로 정한 Agent 없음',
+    return { ...base, name: author || 'Agent', avatar: displayProfileAvatar(authorAvatar), role: ['Claude', 'Codex'].includes(author) ? `기본 ${author} 대화 · 따로 정한 Agent 없음` : '이 답변의 작성자',
       tone: '정하지 않음', expertise: [], tools: '제한 없음' };
   }
   const name = profile.name || author || 'Agent';
@@ -2094,10 +2108,9 @@ export function chatEngineChoices(engines, auth = null) {
         account: auth?.isLoggedIn ? `ChatGPT${plan ? ` ${plan}` : ''}` : null, note: auth?.isLoggedIn ? '사용 가능' : '로그인 필요' };
     }
     const status = lookup(ENGINE_STATUS_TEXT, row.status) ? row.status : 'offline';
-    const version = typeof row.version === 'string' && /^\d+\.\d+\.\d+$/.test(row.version) ? row.version : null;
     const text = lookup(ENGINE_STATUS_TEXT, status);
     return { id: row.id, label, selectable: RUNNABLE_ENGINE_STATUSES.includes(status), capabilities, account: null,
-      note: version && status !== 'notInstalled' ? `설치됨 ${version} · ${text}` : text };
+      note: text };
   });
 }
 

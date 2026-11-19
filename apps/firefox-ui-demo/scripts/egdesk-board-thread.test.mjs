@@ -75,7 +75,7 @@ test('D-M2 routing: a mention or an Agent Lead goes to /chat/board/send; a plain
   for (const key of ['conversationId', 'profileEnabled', 'stateless', 'profileId']) assert.ok(!(key in mentioned.body), key);
   assert.deepEqual([mentioned.body.message, mentioned.body.requestId, mentioned.body.clientThreadId, mentioned.body.model], ['@검증 담당 @디자이너 봐 줘', 'req-1', 'room-1', 'gpt-x']);
   assert.deepEqual(mentioned.body.members, BoardThread.boardStoreMembers(thread));
-  assert.deepEqual(mentioned.body.recentMessages, [{ role: 'user', text: '어제 시안', author: '나' }, { role: 'agent', text: '확인했어요', author: '디자이너' }]);
+  assert.deepEqual(mentioned.body.recentMessages, [{ role: 'user', text: '어제 시안' }, { role: 'agent', text: '확인했어요', author: '디자이너' }]);
 
   const lead = BoardThread.boardSendPlan(thread, { ...base, profileEnabled: true, profileId: ID_D, profileRevision: 3 });
   assert.deepEqual([lead.body.leadProfileId, lead.body.profileId, lead.body.profileRevision], [ID_D, ID_D, 3], 'with no mention the room\'s Agent answers as Lead');
@@ -329,7 +329,9 @@ test('two addressed Board members keep separate authors through live replies and
       assert.equal(answers.length, 2);
       for (const member of members) {
         const answer = answers.find(m => m.conversationId === member.conversationId && m.runId === member.runId);
-        assert.deepEqual([answer?.authorName, answer?.content, answer?.localMessageId], [member.label, sharedText, `stored-${member.profileId}`]);
+        assert.deepEqual([answer?.authorName, answer?.content, answer?.localMessageId, answer?.boardMemberProfileId],
+          [member.label, sharedText, `stored-${member.profileId}`, member.profileId]);
+        assert.equal(ChatState.answerForPeek(answers, { messageId: answer.id, answerKey: ChatState.answerPeekKey(answer) }), answer);
       }
       assert.equal(thread.messages.filter(m => m.role === 'user').length, 1);
     };
@@ -620,4 +622,28 @@ test('an unknown dispatch row is not a rejection even when other recipients fail
   assert.equal(outcome.routes[ID_V].dispatchStatus, 'unknown');
   assert.equal(outcome.routes[ID_V].resumeRequired, true);
   assert.deepEqual(BoardThread.boardMemberState(ID_V, outcome), { kind: 'waiting', label: '접수 미확인' });
+});
+
+test('only confirmed room speech crosses the Board boundary; rendering or hiding arbitrary strings is not the privacy boundary', () => {
+  const internal = '<egdesk-await-resume><plan>PRIVATE_PLAN</plan></egdesk-await-resume>';
+  const thread = room({ messages: [
+    { role: 'user', content: '공개 질문', status: 'complete', authorName: '나', inputReferences: [{ text: 'PRIVATE_INPUT' }] },
+    { role: 'user', content: internal, status: 'complete', requestId: 'scheduler-action' },
+    ...['submitting', 'unconfirmed', 'partial', 'failed', undefined].map(status => ({ role: 'user', status, content: 'PRIVATE_DRAFT' })),
+    ...['streaming', 'interrupted', 'failed', 'unavailable'].map(status => ({ role: 'assistant', status, authorName: '디자이너', content: 'PRIVATE_INCOMPLETE' })),
+    ...['system', 'tool', 'reasoning'].map(role => ({ role, status: 'complete', content: 'PRIVATE_ACTIVITY' })),
+    { role: 'assistant', authorName: '디자이너', status: 'complete', phase: 'commentary', content: '먼저 배경을 보겠습니다.', activities: [{ text: 'PRIVATE_ACTIVITY' }] },
+    { role: 'assistant', status: 'completed', content: '이전 공개 답변' },
+  ], privateNotes: 'PRIVATE_NOTE' });
+  const request = { clientThreadId: 'room-1', requestId: 'public-only', message: '@디자이너 의견',
+    systemPrompt: 'PRIVATE_PERSONA', qaOutputMarkers: ['PRIVATE_QA'], privateNotes: 'PRIVATE_NOTE', profileEnabled: false, recentMessages: [{ text: 'PRIVATE_HISTORY' }], engineProfileId: 'PRIVATE_SLOT' };
+  const { body } = BoardThread.boardSendPlan(thread, request);
+  assert.deepEqual(body.recentMessages, [{ role: 'user', text: '공개 질문' }, { role: 'agent', author: '디자이너', text: '먼저 배경을 보겠습니다.' }, { role: 'agent', text: '이전 공개 답변' }]);
+  assert.equal(BoardThread.boardDeliveryIntent(thread, request.message).roomBlock.recentTurnCount, 3);
+  assert.doesNotMatch(JSON.stringify(body), /PRIVATE_/);
+  const old = {id: 'same', role: 'assistant'}, other = { ...old, runId: 'different' };
+  assert.equal(ChatState.answerForPeek([old, other], {messageId: 'same'}), null, 'an ambiguous old item cannot select a different speaker');
+  const peek = ChatState.agentPeekView({ author: '디자이너', boardMemberProfileId: ID_D, memberSummary: { id: ID_V, role: 'PRIVATE_LEAD' }, threadType: 'group', profile: { id: ID_V, name: '검증 담당' }, modelText: 'PRIVATE_MODEL', detail: { active: { body: { instructions: 'PRIVATE_PERSONA' } } } });
+  assert.deepEqual([peek.name, peek.profileId, peek.compact, peek.role], ['디자이너', ID_D, true, '이 답변의 작성자']);
+  assert.doesNotMatch(JSON.stringify(peek), /PRIVATE_|검증 담당|Codex/);
 });

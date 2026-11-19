@@ -7573,6 +7573,11 @@ button.egd-codex-message-activity:focus-visible { outline: var(--egd-focus-outli
   color: var(--egd-on-surface-variant);
 }
 
+.egd-settings-tech-details { padding: 4px 0; border: 0; background: none; }
+.egd-settings-tech-details > summary { cursor: pointer; width: fit-content; }
+.egd-settings-tech-details > summary:focus-visible { outline: var(--egd-focus-outline); }
+.egd-settings-tech-details[open] > summary { margin-bottom: 6px; }
+
 .egd-settings-profiles { display: flex; flex-direction: column; gap: 8px; margin-top: 8px; }
 .egd-settings-profile-row, .egd-settings-profile-add { display: flex; align-items: center; gap: 8px; }
 .egd-settings-profile-add .egd-settings-input { flex: 1; min-width: 0; }

@@ -36,6 +36,13 @@ A routed request carries the room's members (`members`, same shape as the store)
 - Opening a Board Thread reads them back: a different list in the store replaces the screen's (faces captured at invite are kept); a room whose roster has never been saved can receive its Desk members once. An explicitly cleared saved roster stays empty on reopen; the presence of a native conversation alone is not evidence of a saved roster. A save that did not reach the bridge is retried on the next open instead of being overwritten.
 - `thread.participants` / `participantAgents` stay in the Desk pref as the screen's copy.
 
+## Speech, profiles and native history
+
+- In the transcript, the person's label can be **나**. In a member's input, the same person is **사람**. Only confirmed public user and assistant text is quoted (up to 12 entries, then the block size cap); an unknown assistant is **Agent**, never a guessed Lead or engine. An authored, completed commentary message is public speech. Reasoning, activity, unconfirmed text and the private input behind a plan-resume notice are not room speech.
+- An answer opens its own recorded author's identity. The Board never loads the Lead's full profile just because someone clicked another member's name. Test expectations and fixture identifiers belong in the test observer, not in the answer text.
+- Board turn fields are allow-listed at both the browser and helper. A member's account, conversations and tools are not inherited from the Lead. The room's chosen per-turn model/effort and project still apply as disclosed; this is not a stateless or account-free execution. Only the sole Lead can receive selected room sources.
+- An established native Board conversation belongs to its original speaker, independently of mutable room settings. A new Lead requires a new conversation; an @mention of a different member still uses that member's own conversation. A branch inherits the same speaker. Legacy named histories are eligible only with consistent starts for every recorded dispatch. Unknown or conflicting histories stay readable, not resumable as another speaker.
+
 ## Known limits
 
 - Early member events are buffered per pending Board send (up to 64 for 15 seconds) and replayed in arrival order once the runs are registered. A handler failure is logged; that event is not retried, and it does not stop later events.
