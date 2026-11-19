@@ -19303,7 +19303,7 @@ test('긴 답변: a very long finished answer folds to a preview; the whole text
 
 test("Chat: '카드로 보기' sits with the result chips, a long answer folds with '카드로 펼치기', and nothing moves by itself", () => {
   assert.match(surfaceSource, /const fold = message\.role === 'assistant' && message\.status !== 'streaming' \? ChatState\.longAnswerView\(parts\.text\) : null;/);
-  assert.match(surfaceSource, /const foldOpen = !!fold\?\.long && !!codex\.expandedAnswers\?\.\[`\$\{activeThread\.id\}\/\$\{message\.id\}`\];/);
+  assert.match(surfaceSource, /const foldOpen = !!fold\?\.long && !!codex\.expandedAnswers\?\.\[`\$\{activeThread\.id\}\/\$\{answerUiId\}`\];/);
   assert.match(surfaceSource, /const cardable = ChatState\.canKeepResultCard\(activeThread, message\);/);
   assert.match(surfaceSource, /openAnswerResultCard\(activeThread, message, \{ opener: ev\.currentTarget\?\.closest\?\.\('\.egd-chat-card'\) \|\| null \}\);/, 'the Chat card is the opener');
   assert.match(surfaceSource, /\}, '카드로 펼치기'\) : null,/);
@@ -19329,6 +19329,13 @@ test("Chat: '카드로 보기' sits with the result chips, a long answer folds w
   assert.deepEqual(state.codex.expandedAnswers, {}, 'folded again');
   toggle('', 'msg-a1', state, () => emits++);
   assert.equal(emits, 2);
+  const sameItem = { id: 'same-item', runId: 'same-turn', conversationId: 'member-a', boardMemberProfileId: 'a' };
+  const first = Chat.answerPeekKey(sameItem), second = Chat.answerPeekKey({ ...sameItem, conversationId: 'member-b', boardMemberProfileId: 'b' });
+  toggle('board', first, state, () => emits++);
+  toggle('board', second, state, () => emits++);
+  toggle('board', first, state, () => emits++);
+  assert.deepEqual(Object.keys(state.codex.expandedAnswers), ['board/' + second], 'collapsing one member must not collapse the other');
+  assert.ok(surfaceSource.includes('codexBridge.toggleAnswerFold(activeThread.id, answerUiId)'));
   assert.doesNotMatch(declaration('serializeDeskSnapshot') || '', /expandedAnswers|revealMessage/, 'opening in place is never saved');
 });
 

@@ -198,6 +198,18 @@ test("an answer's time line carries the '…' that opens its record", () => {
   assert.match(css, /button\.egd-codex-message-activity:focus-visible \{[^}]*outline: var\(--egd-focus-outline\);/);
 });
 
+test('Board answer controls keep their own keyboard focus identity when provider item and turn IDs repeat', () => {
+  const meta = new Function('el', 'codexReadMeta', 'formatMessageTime', 'ChatState', `${declaration('codexMessageTimeMeta')}\nreturn codexMessageTimeMeta;`)(node, () => null, () => '', Chat);
+  const a = { id: 'same', role: 'assistant', runId: 'shared', conversationId: 'native-a', boardMemberProfileId: 'a' };
+  const b = { ...a, conversationId: 'native-b', boardMemberProfileId: 'b' };
+  const thread = { type: 'group' }, opened = [];
+  const controls = [a, b].map(answer => byTestId(meta(answer, thread, () => opened.push(answer.conversationId)), 'chat-answer-activity')[0]);
+  assert.notEqual(controls[0].props.data.focusKey, controls[1].props.data.focusKey);
+  assert.deepEqual(controls.map(c => c.props.data.conversationId), ['native-a', 'native-b']);
+  controls.reverse().forEach(click); assert.deepEqual(opened, ['native-b', 'native-a']);
+  assert.equal(a.id, b.id, 'provider IDs are not rewritten');
+});
+
 test('the status line steps aside by state, stays in the page, and keeps a way into the record', () => {
   assert.match(surfaceSource, /quiet: String\(statusQuiet\) \},/);
   assert.match(surfaceSource, /const statusQuiet = workingInLog \|\| \(answerHoldsRecord && ChatStatusView\.statusRowQuiet\(\{/);

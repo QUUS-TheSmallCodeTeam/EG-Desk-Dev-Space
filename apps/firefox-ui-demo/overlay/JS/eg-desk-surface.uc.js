@@ -1245,7 +1245,7 @@
     if (onOpenActivity) {
       children.push(el('button', {
         class: 'egd-codex-message-activity', type: 'button', title: '이 답변의 실행 내역 보기', 'aria-label': '이 답변의 실행 내역 보기',
-        data: { testid: 'chat-answer-activity', runId: message.runId || '', conversationId: message.conversationId || '', focusKey: `answer-activity-${message.id}` },
+        data: { testid: 'chat-answer-activity', runId: message.runId || '', conversationId: message.conversationId || '', focusKey: `answer-activity-${thread?.type === 'group' ? ChatState.answerPeekKey(message) : message.id}` },
         onclick: (ev) => { ev.stopPropagation(); onOpenActivity(); },
       }, thread?.type === 'dm' ? '기록' : el('span', { class: 'egd-codex-message-activity-dots', 'aria-hidden': 'true' }, el('span'), el('span'), el('span'))));
     }
@@ -13564,7 +13564,10 @@
             // CHAT-08: a very long finished answer reads as a folded preview; the whole
             // answer stays in the message and opens here or as a result card.
             const fold = message.role === 'assistant' && message.status !== 'streaming' ? ChatState.longAnswerView(parts.text) : null;
-            const foldOpen = !!fold?.long && !!codex.expandedAnswers?.[`${activeThread.id}/${message.id}`];
+            // Native message IDs can repeat in two members’ conversations. Scope only
+            // transient UI state; provider IDs and stored references must not change.
+            const answerUiId = activeThread.type === 'group' && message.role === 'assistant' ? ChatState.answerPeekKey(message) : message.id;
+            const foldOpen = !!fold?.long && !!codex.expandedAnswers?.[`${activeThread.id}/${answerUiId}`];
             const shownText = fold?.long && !foldOpen ? fold.preview : parts.text;
             appendRichText(content, shownText || (message.status === 'streaming' ? '…' : ''), message, activeThread);
             // CHAT-04: only 대표님's press keeps an answer on the Canvas as a result card.
@@ -13582,7 +13585,7 @@
             }, '카드로 펼치기') : null,
             el('button', {
               class: 'egd-codex-answer-fold-toggle', type: 'button', 'aria-expanded': String(foldOpen), data: { testid: 'chat-answer-fold-toggle' },
-              onclick: (ev) => { ev.stopPropagation(); codexBridge.toggleAnswerFold(activeThread.id, message.id); },
+              onclick: (ev) => { ev.stopPropagation(); codexBridge.toggleAnswerFold(activeThread.id, answerUiId); },
             }, foldOpen ? '접기' : '여기서 모두 보기')) : null;
             const resultChips = buildCodexResultChips(message, activeThread, parts.links);
             const outputChips = buildCodexOutputChips(message, activeThread);
@@ -13675,7 +13678,7 @@
               ? el('button', peekTriggerProps(message, author, avatarClass, `agent-peek-face-${message.id}`), avatarText)
               : message.role !== 'user' ? el('div', { class: avatarClass, 'aria-hidden': 'true' }, avatarText) : null;
             messages.appendChild(el('div', {
-              data: { messageId: message.id, runId: message.runId || '', testid: 'chat-message', role: message.role },
+              data: { messageId: message.id, conversationId: message.conversationId || '', runId: message.runId || '', testid: 'chat-message', role: message.role },
               class: [
                 'egd-codex-message-row',
                 `egd-codex-message-row-${message.role || 'assistant'}`,
