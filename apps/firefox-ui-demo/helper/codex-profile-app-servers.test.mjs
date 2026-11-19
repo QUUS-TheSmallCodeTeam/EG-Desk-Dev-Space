@@ -285,20 +285,28 @@ test('Board peer steering is scoped to the checked process, never the shared fal
 // Production pool + JSON-RPC + slot-tagged notifications + runtime + SQLite.
 // Only the child process is synthetic. In particular neither chat.handleNotification nor
 // steerTurn is called by the test to simulate delivery. Each engine can reuse a turn id.
-async function scopedBoard(t, { missingB = false, threadId = slot => `board-${slot}` } = {}) {
+async function scopedBoard(t, { missingB = false, holdSteers = false, earlyFinals = false, threadId = slot => `board-${slot}` } = {}) {
   const dataDir = createPrivateQaTempDirectory('egdesk-board-slot-'), store = openChatStore({ dataDir, ownerScope: 'qa-slots' })
   const room = { id: 'two-accounts', type: 'group', participants: ['나','솔빛','물결'], participantAgents: { 솔빛: { profileId:'sol' }, 물결: { profileId:'water' } }, messages: [] }
   store.createConversation({clientThreadId:room.id}); store.setRoomMembers({ clientThreadId:room.id, members:boardStoreMembers(room), ts:1 })
+  const held = new Map()
   const published = [], received = [], ids = new Map([['sol',A],['water',B]]); let currentProof = 'a'.repeat(64)
   const h = fixture({ describeOwned: true, getBoardPeerContract: () => currentProof, reply(wire, child) {
     const slot = child.options.env.CODEX_HOME === '/private/one' ? A : B
     if (wire.method === 'thread/start') return { result: { thread:{id:threadId(slot)}, cwd:'/workspace' } }
-    if (wire.method === 'turn/start') return { result:{turn:{id:'turn-one', status:'inProgress', items:[]}} }
+    if (wire.method === 'turn/start') {
+      if (earlyFinals) child.emitRpc({ method: 'item/completed', params: { threadId: wire.params.threadId, turnId: 'turn-one',
+        item: { id: 'same-item', type: 'agentMessage', phase: 'final_answer', text: slot === A ? '청록입니다.' : '보라입니다.' } } })
+      return { result: { turn: { id: 'turn-one', status: 'inProgress', items: [] } } }
+    }
     if (wire.method !== 'turn/steer') return undefined
-    const post = published.find(e => e.event === 'message.completed' && e.details.phase === 'final_answer')
+    const quote = JSON.parse(wire.params.additionalContext.egdesk_board_peer.value)
+    const post = published.findLast(e => e.event === 'message.completed' && e.details.phase === 'final_answer'
+      && e.conversationId !== wire.params.threadId && e.details.text === quote.text)
     const saved = post && store.listEvents(post.clientThreadId).events.find(e => e.event === 'message.completed' && e.localMessageId === post.localMessageId)
     received.push({ slot, params:wire.params, posted:post?.durable === true, stored:saved?.details.text, publicText:post?.details.text,
       sourceStillRunning:post && !published.some(e => e.event === 'run.completed' && e.conversationId === post.conversationId && e.runId === post.runId) })
+    if (holdSteers) { held.set(slot, { child, id: wire.id, turnId: wire.params.expectedTurnId }); return null }
     return { result:{turnId:wire.params.expectedTurnId} }
   } })
   const profiles = { runProfile:id => ({ binding:{ profileId:id, revision:1, hash:`synthetic-${id}` }, developerInstructions:`identity:${id}`, model:{engine:'codex',engineProfileId:ids.get(id)} }) }
@@ -313,7 +321,13 @@ async function scopedBoard(t, { missingB = false, threadId = slot => `board-${sl
   const notify = async (r, method, params) => { childOf(r).emitRpc({method,params:{threadId:r.conversationId,turnId:r.runId,...params}}); await new Promise(resolve=>setImmediate(resolve)); await chat.queue }
   const say = (r,id,phase,text)=>notify(r,'item/completed',{item:{id,type:'agentMessage',phase,text}})
   const end = r=>notify(r,'turn/completed',{turn:{id:r.runId,status:'completed',items:[]}})
-  return {...h,chat,store,room,send,say,end,published,received,slotOf,childOf}
+  const acknowledge = async (recipient, response) => {
+    const slot = slotOf(recipient), rpc = held.get(slot)
+    assert.ok(rpc, 'a previously dispatched steer is pending on this transport'); held.delete(slot)
+    rpc.child.emitRpc({ id: rpc.id, ...(response || { result: { turnId: rpc.turnId } }) })
+    await new Promise(resolve => setImmediate(resolve)); await chat.queue
+  }
+  return {...h,chat,store,room,send,say,end,published,received,slotOf,childOf,acknowledge}
 }
 
 test('owned Board slots: the actual public final is committed and broadcast before the *other slot* receives it, not gated on speaker turn end', async t => {
@@ -358,4 +372,79 @@ test('owned Board slots: a newly returned colliding thread id is not rebound and
   assert.deepEqual(h.received, []); assert.deepEqual(h.shared, [])
   assert.equal(h.store.listMessages(a.clientThreadId).messages.filter(m => m.role === 'assistant').length, 1)
   assert.equal(h.store.listMessages(b.clientThreadId).messages.filter(m => m.role === 'assistant').length, 0)
+})
+
+test('owned Board slots: reciprocal dispatch is not evidence of consumption; record which recipient publication preceded send vs only acknowledgement', async t => {
+  for (const first of ['sol', 'water']) await t.test(first, async t => {
+    const h = await scopedBoard(t, { holdSteers: true }), { recipients } = await h.send()
+    const a = recipients.find(r => r.profileId === first), b = recipients.find(r => r !== a)
+    const words = r => r.profileId === 'sol' ? '청록색을 골랐습니다.' : '보라색을 골랐습니다.'
+    const receiptEvents = () => h.published.filter(e => e.details?.activity?.kind === 'boardPeerInput')
+    // Gates, not timers: both publish their own original words, and neither native
+    // turn ends nor acknowledges an input until both public messages are stored.
+    await h.say(b, 'note', 'commentary', '작업 메모는 발언이 아닙니다.')
+    await h.say(a, 'same-item', 'final_answer', words(a))
+    assert.deepEqual(h.received.map(s => s.slot), [h.slotOf(b)])
+    await h.say(b, 'same-item', 'final_answer', words(b))
+    assert.deepEqual(h.received.map(s => [s.slot, s.params.threadId, s.params.expectedTurnId, s.stored, s.sourceStillRunning]),
+      [[h.slotOf(b), b.conversationId, b.runId, words(a), true], [h.slotOf(a), a.conversationId, a.runId, words(b), true]])
+    assert.equal(receiptEvents().length, 0, 'no optimistic acknowledgement')
+    assert.notEqual(h.received[0].params.clientUserMessageId, h.received[1].params.clientUserMessageId)
+    // Ack in reverse order on the two transports; both native turn ids are equal.
+    await h.acknowledge(a); await h.acknowledge(b)
+    const expected = [[a.conversationId, 'sentAfterPublication'], [b.conversationId, 'ackAfterPublication']]
+    assert.deepEqual(receiptEvents().map(e => [e.conversationId, e.details.activity.detail.timing]), expected)
+    for (const [r, timing] of [[a, expected[0][1]], [b, expected[1][1]]]) {
+      const stored = h.store.listEvents(r.clientThreadId).events.filter(e => e.details?.activity?.kind === 'boardPeerInput')
+      assert.equal(stored.length, 1); assert.equal(stored[0].details.activity.detail.timing, timing)
+      assert.equal(stored[0].details.activity.status, 'completed'); assert.doesNotMatch(JSON.stringify(stored[0].details.activity), /청록색|보라색|작업 메모/)
+    }
+    await h.say(b, 'same-item', 'final_answer', words(b)) // duplicate callback
+    await h.say(a, 'second-item', 'final_answer', '제안은 여기까지입니다.') // legitimate second public utterance, no third steer
+    await h.end(a); await h.end(b)
+    assert.deepEqual(h.store.listMessages(b.clientThreadId).messages.filter(m => m.role === 'assistant').map(m => m.text), [words(b)])
+    assert.equal(h.received.length, 2); assert.equal(receiptEvents().length, 2); assert.deepEqual(h.shared, [])
+    for (const r of [a, b]) {
+      const methods = h.childOf(r).sent.map(row => row.method)
+      assert.deepEqual(['thread/start','turn/start','turn/steer','turn/interrupt'].map(m => methods.filter(x => x === m).length), [1,1,1,0])
+    }
+  })
+})
+
+test('owned Board slots: a withheld confirmation cannot append to a closed, lost or reassigned recipient', async t => {
+  for (const terminal of ['completed', 'slot-lost', 'account-changed']) await t.test(terminal, async t => {
+    const h = await scopedBoard(t, { holdSteers: true }), [a, b] = (await h.send()).recipients
+    await h.say(a, 'final', 'final_answer', '먼저 공개합니다.')
+    assert.equal(h.received.length, 1)
+    if (terminal === 'completed') await h.end(b)
+    else if (terminal === 'slot-lost') h.childOf(b).emit('close', 1)
+    else { h.accounts.set('/private/two', 'reassigned@example.invalid'); await assert.rejects(h.adapter.ensureReady(B), { code: 'ENGINE_LOGIN_REQUIRED' }) }
+    await h.acknowledge(b)
+    assert.ok(!h.published.some(e => e.details?.activity?.kind === 'boardPeerInput'))
+    assert.ok(!h.store.listEvents(b.clientThreadId).events.some(e => e.details?.activity?.kind === 'boardPeerInput'))
+    assert.equal(h.received.length, 1); assert.deepEqual(h.shared, [])
+    assert.ok(h.children.every(child => !child.sent.some(m => m.method === 'turn/interrupt')))
+  })
+})
+
+test('owned Board slots: both early public items survive correlation before the pair is armed; neither quote predates the recipient’s answer', async t => {
+  const h = await scopedBoard(t, { earlyFinals: true, holdSteers: true })
+  const stream = []
+  const append = h.store.appendEvent.bind(h.store)
+  h.store.appendEvent = event => {
+    const result = append(event)
+    if (event.event === 'board.routed' || event.event === 'message.completed' && event.details.phase === 'final_answer') stream.push(event.event)
+    return result
+  }
+  const { recipients } = await h.send()
+  assert.deepEqual(stream, ['message.completed', 'message.completed', 'board.routed'])
+  assert.deepEqual(recipients.map(r => r.status), ['started', 'started'])
+  assert.deepEqual(h.received.map(s => [s.slot, s.stored]), [[B, '청록입니다.'], [A, '보라입니다.']])
+  for (const r of recipients) {
+    await h.acknowledge(r)
+    assert.deepEqual(h.store.listEvents(r.clientThreadId).events.filter(e => e.details?.activity?.kind === 'boardPeerInput')
+      .map(e => e.details.activity.detail.timing), ['sentAfterPublication'])
+    await h.end(r)
+  }
+  assert.ok(h.children.every(child => child.sent.filter(m => m.method === 'turn/start').length === 1)); assert.deepEqual(h.shared, [])
 })

@@ -666,3 +666,26 @@ test('cold Board work: require a routed Board, member, exact native and local ru
   for (const change of [{ role: 'user' }, { phase: 'commentary' }, { status: 'streaming' }, { answerId: 'conflict' }]) assert.deepEqual(fold(room(), { ...m, ...change }), []);
   assert.deepEqual(fold(room({ id: 'other-room' })), []); assert.deepEqual(fold(room({ type: 'dm' })), []);
 });
+
+test('cold Board receipts rebuild only checked publication order, never stored display text or a claim of model use', () => {
+  const id = 'egdesk-peer:31234567-89ab-cdef-9876-111111111111';
+  const scope = { clientThreadId: 'board-member:synthetic', localConversationId: 'verified-member' };
+  const member = { roomId: 'room-1', profileId: ID_V };
+  const identity = { ...scope, localRunId: 'local-run', runId: 'turn', conversationId: 'thread', answerId: 'thread/turn' };
+  const answer = { ...identity, localMessageId: 'msg', role: 'assistant', phase: 'final_answer', status: 'complete' };
+  const record = (status, timing) => {
+    const activity = { id, kind: 'boardPeerInput', status, title: 'PRIVATE_TITLE', detail: { timing, text: 'PRIVATE_TEXT' }, sourceRefs: ['PRIVATE_REF'] };
+    const run = { ...identity, localHistory: true, status: 'completed', board: { roomClientThreadId: 'room-1', profileId: ID_V }, activities: [activity] };
+    return BoardThread.foldBoardMemberWork(room(), [answer], [run], member, scope)[0]?.activities[0];
+  };
+  for (const timing of ['sentAfterPublication', 'ackAfterPublication']) {
+    const receipt = record('completed', timing);
+    assert.deepEqual(receipt, BoardThread.boardPeerReceipt(id, 'completed', timing));
+    assert.equal(receipt.detail.timing, timing); assert.match(receipt.detail.text, /답변에 반영됐는지는 확인되지 않았습니다/);
+    assert.doesNotMatch(JSON.stringify(receipt), /PRIVATE_/);
+    for (const status of ['unknown', 'declined']) assert.deepEqual(record(status, timing), BoardThread.boardPeerReceipt(id, status));
+  }
+  assert.notEqual(record('completed', 'sentAfterPublication').detail.text, record('completed', 'ackAfterPublication').detail.text);
+  for (const timing of [undefined, 'PRIVATE_ORDER', { text: 'PRIVATE' }]) assert.deepEqual(record('completed', timing), BoardThread.boardPeerReceipt(id, 'completed'));
+  assert.equal(record('read', 'ackAfterPublication'), undefined);
+});

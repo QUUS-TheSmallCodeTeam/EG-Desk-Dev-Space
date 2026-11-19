@@ -502,11 +502,14 @@ export function boardRoutedMembers(events) {
 
 // Acceptance is a transport fact, not proof that an inference observed it. The
 // historical renderer reconstructs only this enum, never arbitrary stored detail.
-export function boardPeerReceipt(id, status) {
+export function boardPeerReceipt(id, status, timing = null) {
   if (typeof id !== 'string' || !/^egdesk-peer:[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/.test(id) || !['completed', 'declined', 'unknown'].includes(status)) return null;
-  const text = status === 'completed' ? '이 턴의 입력으로 접수됨. 답변에 반영됐는지는 확인되지 않았습니다.'
+  const order = status === 'completed' && ['sentAfterPublication', 'ackAfterPublication'].includes(timing) ? timing : null;
+  const text = order === 'sentAfterPublication' ? '이 Agent가 답변을 공개한 뒤에 상대 발언을 보냈고, 입력으로 접수됐습니다. 이후 답변에 반영됐는지는 확인되지 않았습니다.'
+    : order === 'ackAfterPublication' ? '입력은 이 Agent의 답변 공개 전에 보냈고, 접수 확인은 공개 뒤에 도착했습니다. 답변에 반영됐는지는 확인되지 않았습니다.'
+    : status === 'completed' ? '이 턴의 입력으로 접수됨. 답변에 반영됐는지는 확인되지 않았습니다.'
     : status === 'declined' ? '이 턴이 입력을 받지 않았습니다. 다시 보내지 않습니다.' : '이 턴의 입력 접수 여부를 확인하지 못했습니다. 다시 보내지 않습니다.';
-  return { id, kind: 'boardPeerInput', title: 'Board 발언 전달', status, detail: { text }, sourceRefs: [] };
+  return { id, kind: 'boardPeerInput', title: 'Board 발언 전달', status, detail: { text, ...(order ? { timing: order } : {}) }, sourceRefs: [] };
 }
 
 // Read-only projection for the owning Board's activity panel. A route alone is
@@ -527,7 +530,7 @@ export function foldBoardMemberWork(room, messages, runs, member, scope) {
     const notes = (r.activities || []).filter(a => a?.kind === 'workNote' && a.status === 'completed' && typeof a.id === 'string'
       && a.id.startsWith('work-note:') && typeof a.detail?.text === 'string').slice(-100)
       .map(a => ({ id: a.id, kind: 'workNote', title: '작업 메모', status: 'completed', detail: { text: a.detail.text.slice(0, 4000) }, sourceRefs: [] }));
-    const receipts = (r.activities || []).filter(a => a?.kind === 'boardPeerInput').slice(-1).map(a => boardPeerReceipt(a.id, a.status)).filter(Boolean);
+    const receipts = (r.activities || []).filter(a => a?.kind === 'boardPeerInput').slice(-1).map(a => boardPeerReceipt(a.id, a.status, a.detail?.timing)).filter(Boolean);
     if (!notes.length && !receipts.length) continue;
     const view = { memberWorkHistory: true, localHistory: true, localThreadId: room.id, clientThreadId: scope.clientThreadId,
       localConversationId: scope.localConversationId, localRunId: r.localRunId, conversationId: r.conversationId, runId: r.runId, answerId: r.answerId,
