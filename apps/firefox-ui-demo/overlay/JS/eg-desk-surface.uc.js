@@ -4954,7 +4954,7 @@
         } else if (mcpDetail) {
           // Sizes and counts only ('인자 N바이트 · 화면 N장'); the call's content never reaches the screen.
           row.appendChild(el('p', { class: 'egd-codex-activity-sizes', data: { testid: 'chat-activity-sizes' } }, mcpDetail));
-        } else if (['workNote', 'unclassifiedOutput'].includes(activity.kind)) {
+        } else if (['workNote', 'unclassifiedOutput', 'boardPeerInput'].includes(activity.kind)) {
           if (activity.detail?.text) row.appendChild(el('pre', {}, activity.detail.text));
         } else if (!commandActivity && activity.detail && typeof activity.detail === 'object') {
           for (const key of ['text', 'command', 'cwd', 'exitCode', 'durationMs', 'server', 'tool']) {

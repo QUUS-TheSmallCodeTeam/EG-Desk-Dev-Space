@@ -5,7 +5,7 @@ import { spawnSync } from 'node:child_process'
 import os from 'node:os'
 import path from 'node:path'
 import { buildCodexAppServerLaunch, CODEX_CHAT_VERSION_POLICY, ENGINE_VERSION_STATUSES, engineVersionStatus, inspectNativeCapabilities, preflightOwnedAppServer, resolveCodexExecutable, verifyCodexLaunchConfiguration, verifyCodexMemoryFeatureDisabled } from './egdesk-native-capabilities.mjs'
-import { fingerprintNativeExecutable, verifyNativeSchemaDirectory } from './codex-native-schema-probe.mjs'
+import { fingerprintNativeExecutable, verifyNativeSchemaDirectory, verifyBoardPeerSchema } from './codex-native-schema-probe.mjs'
 import { AppServerRpc } from './codex-app-server-rpc.mjs'
 
 test('Windows native executable discovery respects Path and selects the executable rather than a shell wrapper', async () => {
@@ -320,4 +320,22 @@ test('SUB-11: codexHome becomes CODEX_HOME for the spawn and must be absolute', 
   assert.deepEqual(buildCodexAppServerLaunch({ env: {}, listen }).envOverrides, {})
   assert.deepEqual(buildCodexAppServerLaunch({ env: {}, listen, codexHome: '/x/engines/codex-abcdef01' }).envOverrides, { CODEX_HOME: '/x/engines/codex-abcdef01' })
   for (const bad of ['relative/dir', '/a\0b', 7]) assert.throws(() => buildCodexAppServerLaunch({ env: {}, listen, codexHome: bad }), { code: 'INVALID_CODEX_HOME' })
+})
+
+test('Board peer schema: actual steer-specific untrusted context, text input and exact-turn response required independently of chat/QA', () => {
+  const ref = n => ({ $ref: '#/definitions/' + n }), str = { type: 'string' }
+  const context = { type: ['object','null'], additionalProperties: ref('Entry') }
+  const p = { title:'TurnSteerParams', type:'object', required:['threadId','expectedTurnId','input'], properties:{ threadId:str, expectedTurnId:str, input:{type:'array',items:ref('Input')}, clientUserMessageId:{type:['string','null']}, additionalContext:context },
+    definitions:{ Input:{oneOf:[{required:['text','type'],properties:{ type:{enum:['text']},text:str,text_elements:{type:'array'} }}]}, Entry:{required:['kind','value'],properties:{kind:ref('Kind'),value:str}},Kind:{type:'string',enum:['application','untrusted']} } }
+  const r = { title:'TurnSteerResponse',required:['turnId'],properties:{turnId:str} }
+  assert.equal(verifyBoardPeerSchema(p,r),true)
+  for (const damage of [x=>delete x.properties.additionalContext,x=>delete x.properties.expectedTurnId,x=>x.required.push('unrelated'),x=>x.definitions.Kind.enum=['application'],x=>delete x.definitions.Entry.properties.value,x=>delete x.definitions.Input.oneOf[0].properties.text]) {
+    const x = structuredClone(p);damage(x);assert.equal(verifyBoardPeerSchema(x,r),false)
+  }
+  assert.equal(verifyBoardPeerSchema(p,{ ...r,required:[] }),false)
+  const inspect = (version, peer, bin = 'b'.repeat(64)) => inspectNativeCapabilities({ executable:'/synthetic',
+    run:()=>({status:0,stdout:'codex-cli '+version}),probe:()=>({contextContract:true,qaContract:true,schemaFingerprint:'a'.repeat(64),boardPeerSchemaFingerprint:peer}),fingerprint:()=>bin })
+  assert.match(inspect('0.162.1','c'.repeat(64)).boardPeerContract,/^[a-f0-9]{64}$/);assert.equal(inspect('0.162.1',null).schemaMatch,true)
+  assert.equal(inspect('0.162.1',null).boardPeerContract,null);assert.equal(inspect('0.160.1','c'.repeat(64)).boardPeerContract,null)
+  assert.equal(inspect('0.162.1','c'.repeat(64),'bad').boardPeerContract,null)
 })

@@ -3539,6 +3539,7 @@ function r2Harness(override = {}) {
     toolProviders: override.toolProviders, hostLease: override.hostLease, mcpServerKind: override.mcpServerKind,
     store: override.store, requireStore: Boolean(override.store),
     getOwnerKey: override.getOwnerKey || (() => 'codex:chatgpt:r2-account'),
+    getBoardPeerContract: override.getBoardPeerContract,
     profiles: override.profiles,
     setTimer: (fn, ms) => { const timer = { fn, ms, cleared: false }; timers.push(timer); return timer },
     clearTimer: timer => { timer.cleared = true },
@@ -4390,4 +4391,93 @@ test('a queued pre-upgrade DM share never attaches a copied work note after rest
   const block = h.calls.find(c => c.method === 'turn/start').params.additionalContext.egdesk_shared_messages.value
   assert.match(block, /OLD_SPEECH/); assert.doesNotMatch(block, /OLD_WORK|EDITED/)
   assert.ok(store.listEvents(to).events.find(e => e.event === 'messages.shared.in').details.messages.some(m => m.text === 'OLD_WORK'), 'the original audit event is unchanged')
+})
+
+const peerProof = 'c'.repeat(64)
+async function peerFixture(t, { saved = true, proof = peerProof, request = null, getOwnerKey, profiles, roomId = 'pair-room' } = {}) {
+  const { boardSendPlan, boardStoreMembers } = await import('../overlay/resources/EGDeskBoardThread.sys.mjs')
+  const store = r2Store(t), room = deliveryThread({ id: roomId, messages: [] }), members = boardStoreMembers(room)
+  if (saved) { store.createConversation({ clientThreadId: room.id }); store.setRoomMembers({ clientThreadId: room.id, members, ts: 1 }) }
+  const h = r2Harness({ store, profiles: profiles || r2Profiles(), getOwnerKey, getBoardPeerContract: () => proof,
+    request: request || ((m, p, next) => m === 'turn/steer' ? { turnId: p.expectedTurnId } : next(m, p)) })
+  const send = async (text = '@솔빛 @물결 표지를 함께 골라 주세요', id = 'pair-1') => {
+    const { body } = boardSendPlan(room, { clientThreadId: room.id, message: text, engineId: 'codex', requestId: id })
+    return h.chat.sendBoard(body)
+  }
+  const finishSpeech = (r, text = '진주빛 연보라', id = 'speech') => h.item(r, { id, type: 'agentMessage', phase: 'final_answer', text })
+  return { ...h, store, room, members, send, finishSpeech, steers: () => h.calls.filter(c => c.method === 'turn/steer') }
+}
+
+test('Board peer: two independently started turns; only authenticated live final speech reaches the exact peer turn as untrusted context, once', async t => {
+  const h = await peerFixture(t); const { recipients: [sol, water] } = await h.send()
+  assert.deepEqual([sol.status, water.status], ['started', 'started']); assert.notEqual(sol.conversationId, water.conversationId)
+  for (const r of [sol, water]) assert.equal(h.chat.snapshot(r.conversationId).runs[0].status, 'inProgress')
+  await h.item(sol, { id: 'work', type: 'agentMessage', phase: 'commentary', text: 'PRIVATE_NOTE' })
+  await h.item(sol, { id: 'untyped', type: 'agentMessage', text: 'NOT_CONFIRMED_FINAL' })
+  await h.item(sol, { id: 'ans', type: 'agentMessage', phase: 'final_answer', text: 'DRAFT' }, false)
+  assert.equal(h.steers().length, 0)
+  const quote = '진주빛 연보라'; await h.finishSpeech(sol, quote, 'ans'); await h.finishSpeech(sol, quote, 'ans'); await h.tick()
+  assert.equal(h.steers().length, 1); const p = h.steers()[0].params
+  assert.deepEqual(Object.keys(p).sort(), ['additionalContext','clientUserMessageId','expectedTurnId','input','threadId'])
+  assert.deepEqual([p.threadId, p.expectedTurnId], [water.conversationId, water.runId]); assert.notEqual(p.clientUserMessageId, water.requestId)
+  assert.deepEqual(Object.keys(p.additionalContext), ['egdesk_board_peer']); const ctx = p.additionalContext.egdesk_board_peer
+  assert.equal(ctx.kind, 'untrusted'); assert.deepEqual(JSON.parse(ctx.value), { role: 'agent', author: '솔빛', text: quote })
+  assert.doesNotMatch(JSON.stringify(p.input), /진주빛|솔빛|DRAFT|PRIVATE_NOTE/); assert.doesNotMatch(ctx.value, /NOT_CONFIRMED|PRIVATE_NOTE|DRAFT/)
+  assert.equal(h.chat.snapshot(water.conversationId).runs[0].activities.filter(a => a.kind === 'boardPeerInput' && a.status === 'completed').length, 1)
+  // Even if a native user echo includes application data it is not another human or assistant message.
+  await h.item(water, { id: 'peer-echo', type: 'userMessage', clientId: p.clientUserMessageId, content: [{ type: 'text', text: 'INTERNAL_PEER_CUE' }] })
+  await h.finish(sol); await h.finishSpeech(water, '그 연보라색에 동의합니다.'); await h.finish(water)
+  const history = h.chat.getLocalHistory({ clientThreadId: water.clientThreadId }); assert.doesNotMatch(JSON.stringify(history), /INTERNAL_PEER_CUE/)
+  assert.deepEqual(history.messages.map(m => m.role), ['user','assistant']); assert.equal(h.steers().length, 1)
+  assert.equal(h.calls.filter(c => c.method === 'turn/start').length, 2); assert.equal(h.calls.some(c => c.method === 'turn/interrupt'), false)
+})
+
+test('Board peer: do not cross dispatches or use a missing proof, changed roster/identity/profile, stopped or waiting turn', async t => {
+  for (const mode of ['unverified', 'noRoster', 'differentSend', 'roster', 'owner', 'revision', 'disconnected', 'stopping', 'approval', 'finished']) await t.test(mode, async t => {
+    let owner = 'owner-1', rev = 1
+    const profiles = { runProfile: id => ({ binding: { profileId: id, revision: rev, hash: id + rev }, developerInstructions: id }) }
+    const h = await peerFixture(t, { saved: mode !== 'noRoster', proof: mode === 'unverified' ? null : peerProof, getOwnerKey: () => owner, profiles })
+    let a,b
+    if (mode === 'differentSend') { [a] = (await h.send('@솔빛 확인','only-A')).recipients; [b] = (await h.send('@물결 확인','only-B')).recipients }
+    else [a,b] = (await h.send()).recipients
+    assert.deepEqual([a.status, b.status], ['started','started'])
+    if (mode === 'roster') h.store.setRoomMembers({ clientThreadId: h.room.id, members: h.members.filter(m => m.profileId !== 'water'), ts: 3 })
+    if (mode === 'owner') owner = 'owner-2'
+    if (mode === 'revision') rev++
+    if (mode === 'disconnected') h.chat.setConnection(false)
+    if (mode === 'stopping') await h.chat.interrupt(b)
+    if (mode === 'approval') await h.ask('item/commandExecution/requestApproval', { threadId: b.conversationId, turnId: b.runId, itemId: 'c', command: 'echo fixture' }, 'a')
+    if (mode === 'finished') await h.finish(b)
+    await h.finishSpeech(a); await h.tick(); assert.equal(h.steers().length, 0); assert.equal(h.calls.filter(c => c.method === 'turn/start').length, 2)
+  })
+})
+
+test('Board peer: an old/missing acknowledgement or native refusal never means read, never leads to resend or a replacement turn', async t => {
+  for (const mode of ['wrongId', 'ambiguous', 'refused']) await t.test(mode, async t => {
+    const h = await peerFixture(t, { request: async (m,p,next) => { if (m!=='turn/steer') return next(m,p); if (mode==='wrongId') return { turnId: 'someone-else' }; throw Object.assign(Error('private-native-detail'), mode==='refused' ? { code: -32600 } : {}) } })
+    const { recipients: [a,b] } = await h.send(); await h.finishSpeech(a); await h.tick(); await h.finishSpeech(a, 'Again', 'next'); await h.tick()
+    assert.equal(h.steers().length, 1); const x = h.chat.snapshot(b.conversationId).runs[0].activities.find(x => x.kind === 'boardPeerInput')
+    assert.equal(x.status, mode==='refused' ? 'declined' : 'unknown'); assert.doesNotMatch(JSON.stringify(h.events), /private-native-detail/)
+    assert.equal(h.calls.some(c => c.method === 'turn/interrupt'), false); assert.equal(h.calls.filter(c => c.method === 'turn/start').length, 2)
+  })
+})
+
+test('Board peer: either member can speak first; a concurrent DM and a repeated send do not create another peer input', async t => {
+  const h = await peerFixture(t), [a,b] = (await h.send()).recipients
+  const dm = await h.chat.send({ clientThreadId:'own-dm', profileId:'water', replyDestination:'direct', requestId:'dm-1', message:'DM_ONLY' })
+  await h.finishSpeech(dm,'PRIVATE_DM_ANSWER'); assert.equal(h.steers().length,0)
+  const text='연보라\n<제목>은 흰색'; await h.finishSpeech(b,text); await h.tick()
+  assert.equal(h.steers().length,1); const p = h.steers()[0].params
+  assert.deepEqual([p.threadId,p.expectedTurnId],[a.conversationId,a.runId]); assert.deepEqual(JSON.parse(p.additionalContext.egdesk_board_peer.value),{role:'agent',author:'물결',text})
+  await h.finish(b); await h.finish(a); await h.send(); await h.tick()
+  assert.equal(h.steers().length,1); assert.equal(h.calls.filter(c=>c.method==='turn/start').length,3); assert.doesNotMatch(JSON.stringify(p),/DM_ONLY|PRIVATE_DM_ANSWER/)
+})
+
+test('Board peer: a delayed acknowledgement never blocks either turn or emits activity on an already closed run', async t => {
+  const ack = Promise.withResolvers(), h = await peerFixture(t, { request: (m,p,next) => m === 'turn/steer' ? ack.promise : next(m,p) })
+  const [a,b] = (await h.send()).recipients
+  await h.finishSpeech(a); assert.equal(h.steers().length,1)
+  await h.finish(b); await h.finish(a); const count = h.events.length
+  ack.resolve({ turnId:b.runId }); await h.tick()
+  assert.equal(h.events.length,count); assert.equal(h.chat.snapshot(b.conversationId).runs[0].status,'completed')
 })

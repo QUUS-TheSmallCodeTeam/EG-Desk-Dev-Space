@@ -5,13 +5,13 @@ import test from 'node:test'
 import { createCodexEngineAdapter, describeCodexEngine } from './codex-engine-adapter.mjs'
 import { createCodexProfileAppServers } from './codex-profile-app-servers.mjs'
 
-function fixture({ reply = () => undefined } = {}) {
+function fixture({ reply = () => undefined, getBoardPeerContract = () => null } = {}) {
   const homes = new Map([['codex-11111111', { home: '/private/one', identity: 'one' }], ['codex-22222222', { home: '/private/two', identity: 'two' }]])
   const accounts = new Map([['/private/one', 'one@example.org'], ['/private/two', null]])
   const children = [], events = [], shared = []
   let adapter
   const env = { PATH: '/system/bin', HOME: '/user', CODEX_HOME: '/default', OPENAI_API_KEY: 'fake', CODEX_ACCESS_TOKEN: 'fake', CODEX_API_KEY: 'fake', OPENAI_BASE_URL: 'fake', OTHER_TOKEN: 'fake' }
-  const pool = createCodexProfileAppServers({ env, cwd: '/workspace', executable: () => '/synthetic/codex',
+  const pool = createCodexProfileAppServers({ env, cwd: '/workspace', executable: () => '/synthetic/codex', getBoardPeerContract,
     resolveHome: id => { if (!homes.has(id)) throw Object.assign(new Error('No slot'), { code: 'NOT_FOUND' }); return homes.get(id) },
     spawnChild(executable, args, options) {
       const child = new EventEmitter(), home = options.env.CODEX_HOME
@@ -40,7 +40,7 @@ function fixture({ reply = () => undefined } = {}) {
     onServerRequest: (id, message) => adapter.serverRequest(message, id),
     onConnection: (id, state) => adapter.connection(state, id),
   })
-  adapter = createCodexEngineAdapter({ profiles: pool, request: (...args) => { shared.push(args); return 'default' }, respond: (...args) => shared.push(args), getOwnerKey: () => 'shared-owner', getModels: () => [{ id: 'shared-model' }] })
+  adapter = createCodexEngineAdapter({ profiles: pool, getBoardPeerContract: () => 'd'.repeat(64), request: (...args) => { shared.push(args); return 'default' }, respond: (...args) => shared.push(args), getOwnerKey: () => 'shared-owner', getModels: () => [{ id: 'shared-model' }] })
   adapter.subscribe({ notification: (...args) => events.push(args), serverRequest: (...args) => events.push(args), connection: (...args) => events.push(args) })
   return { pool, adapter, homes, accounts, children, events, env, shared }
 }
@@ -260,4 +260,17 @@ test('answered ID retention is bounded and a closed client cannot resolve or rep
     resolve(replacement, limit + 1)
     assert.equal(events.at(-1)[1].params.requestId, reused)
   } finally { await adapter.dispose() }
+})
+
+test('Board peer steering is scoped to the checked process, never the shared fallback or another account with missing proof', async () => {
+  let proof = 'a'.repeat(64)
+  const { pool, adapter, accounts, children, shared } = fixture({ getBoardPeerContract: bin => bin === '/synthetic/codex' ? proof : null })
+  try {
+    await adapter.ensureReady(A); proof = null; accounts.set('/private/two','two@example.invalid'); await adapter.ensureReady(B)
+    assert.equal(adapter.boardPeerContract(A), 'a'.repeat(64)); assert.equal(adapter.boardPeerContract(B), null)
+    const p = { threadId: 'c', expectedTurnId: 'r', clientUserMessageId: 'synthetic', input: [{ type: 'text', text: 'fixture', text_elements: [] }], additionalContext: { egdesk_board_peer: { kind: 'untrusted', value: 'public' } } }
+    await adapter.steerTurn(p, A, 'a'.repeat(64)); assert.equal(children[0].sent.filter(c => c.method === 'turn/steer').length, 1)
+    for (const [slot, wrong] of [[B,'a'],[B,'d'],[A,'d']]) assert.throws(() => adapter.steerTurn(p, slot, wrong.repeat(64)), { code: 'BOARD_PEER_UNSUPPORTED' })
+    assert.ok(!children[1].sent.some(c => c.method==='turn/steer')); assert.deepEqual(shared, [])
+  } finally { await pool.dispose() }
 })

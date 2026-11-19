@@ -55,6 +55,39 @@ export function fingerprintNativeExecutable(executable) {
   return hash.digest('hex')
 }
 
+// Optional, independent of ordinary context and QA. A stable schema which
+// omits experimental additionalContext is NOT a weaker peer delivery path.
+export function verifyBoardPeerSchema(params, response) {
+  if (params?.title !== 'TurnSteerParams' || response?.title !== 'TurnSteerResponse') return false
+  const resolve = s => {
+    const name = s?.$ref?.match(/^#\/definitions\/([A-Za-z0-9_]+)$/)?.[1]
+    return name ? params.definitions?.[name] : s
+  }
+  const shape = s => resolve(s?.allOf?.length === 1 ? s.allOf[0] : s)
+  const hasType = (s, type) => s?.type === type || Array.isArray(s?.type) && s.type.includes(type)
+  const p = params.properties || {}, map = p.additionalContext?.anyOf?.find(x => hasType(x, 'object')) || p.additionalContext
+  const entry = shape(map?.additionalProperties), kind = shape(entry?.properties?.kind)
+  const text = shape(p.input?.items)?.oneOf?.find(x => x.properties?.type?.enum?.length === 1 && x.properties.type.enum[0] === 'text')
+  return Boolean(requires(params, 'threadId', 'input', 'expectedTurnId') && params.required.every(k => ['threadId','input','expectedTurnId','additionalContext','clientUserMessageId'].includes(k))
+    && p.threadId?.type === 'string' && p.expectedTurnId?.type === 'string' && hasType(p.clientUserMessageId, 'string') && p.input?.type === 'array'
+    && requires(text, 'type', 'text') && text.properties?.text?.type === 'string' && text.properties?.text_elements?.type === 'array'
+    && text.required.every(k => ['type','text','text_elements'].includes(k)) && hasType(map, 'object') && requires(entry, 'kind', 'value')
+    && entry.required.every(k => ['kind','value'].includes(k)) && entry.properties?.value?.type === 'string' && kind?.type === 'string' && kind?.enum?.includes('untrusted')
+    && requires(response, 'turnId') && response.properties?.turnId?.type === 'string')
+}
+function optionalBoardPeerFingerprint(directory) {
+  try {
+    const digest = createHash('sha256')
+    const schemas = ['v2/TurnSteerParams.json', 'v2/TurnSteerResponse.json'].map(name => {
+      const filename = path.join(directory, name), stat = lstatSync(filename)
+      if (!stat.isFile() || stat.size > 5 * 1024 * 1024) throw Error('invalid optional schema')
+      const bytes = readFileSync(filename); digest.update(name).update('\0').update(bytes).update('\0')
+      return JSON.parse(bytes.toString('utf8'))
+    })
+    return verifyBoardPeerSchema(...schemas) ? digest.digest('hex') : null
+  } catch { return null }
+}
+
 export function verifyNativeSchemaDirectory(directory) {
   const schemas = new Map(), digest = createHash('sha256')
   try {
@@ -105,7 +138,7 @@ export function verifyNativeSchemaDirectory(directory) {
     start?.definitions?.AskForApproval?.oneOf?.some(item => item.enum?.includes('never')) &&
     readOnly(turn)?.properties?.type?.enum?.includes('readOnly') &&
     readOnly(turn)?.properties?.networkAccess?.type === 'boolean')
-  return { contextContract, qaContract, schemaFingerprint: digest.digest('hex') }
+  return { contextContract, qaContract, schemaFingerprint: digest.digest('hex'), boardPeerSchemaFingerprint: optionalBoardPeerFingerprint(directory) }
 }
 
 export function probeGeneratedNativeSchema({ executable, env, cwd, run }) {

@@ -126,7 +126,7 @@ export function isStaleLoginFailure(params, currentLoginId) {
 }
 
 export function createCodexEngineAdapter({ request, respond, getOwnerKey = () => null, isReady = () => true,
-  describe = null, refresh = null, getModels = () => null, profiles = null } = {}) {
+  describe = null, refresh = null, getModels = () => null, getBoardPeerContract = () => null, profiles = null } = {}) {
   const sinks = new Set()
   const deliver = (kind, value, profileId) => {
     for (const sink of [...sinks]) {
@@ -142,6 +142,12 @@ export function createCodexEngineAdapter({ request, respond, getOwnerKey = () =>
   const models = id => {
     try { const list = shared(id) ? getModels() : profiles?.snapshot(id)?.models; return Array.isArray(list) ? list : null }
     catch { return null }
+  }
+  const boardPeerContract = id => {
+    try {
+      const proof = ready(id) && (shared(id) ? getBoardPeerContract() : profiles?.boardPeerContract?.(id))
+      return typeof proof === 'string' && /^[a-f0-9]{64}$/.test(proof) ? proof : null
+    } catch { return null }
   }
   const summary = () => describe ? describe() : describeCodexEngine({ ready: ready(), models: models() })
   return {
@@ -160,6 +166,11 @@ export function createCodexEngineAdapter({ request, respond, getOwnerKey = () =>
     resumeThread: (params, id) => call('thread/resume', params, id),
     releaseThread: (threadId, id) => call('thread/unsubscribe', { threadId }, id),
     startTurn: (params, id) => call('turn/start', params, id),
+    boardPeerContract,
+    steerTurn(params, id, proof) {
+      if (!proof || proof !== boardPeerContract(id)) throw chatError('BOARD_PEER_UNSUPPORTED', 'No matching verified peer-input contract on this slot', 409)
+      return call('turn/steer', params, id)
+    },
     interruptTurn: (threadId, turnId, id) => call('turn/interrupt', { threadId, turnId }, id),
     forkThread: (params, id) => call('thread/fork', params, id),
     // Preserve legacy shared-RPC response arity and reject old scoped ids even

@@ -1,5 +1,6 @@
 import { createServer } from 'node:http'
 import { spawn } from 'node:child_process'
+import { fingerprintNativeExecutable } from './codex-native-schema-probe.mjs'
 import { createCodexProfileAppServers } from './codex-profile-app-servers.mjs'
 import { AppServerRpc } from './codex-app-server-rpc.mjs'
 import { accountAccessState, normalizeNativeAuth, publicAuthIdentityKey, publicPlanType, usageRefreshDue } from './codex-auth-state.mjs'
@@ -315,6 +316,10 @@ const modelCatalog = createModelCatalogSync({
 })
 const codexProfileServers = createCodexProfileAppServers({
   resolveHome: id => engineProfiles.ownedCodexHome(id),
+  // Bind proof to this dedicated process at launch, never borrow the shared
+  // RPC, owner or a new binary's contract for an already-running account slot.
+  getBoardPeerContract: bin => nativeCapabilities.boardPeerContract && bin === nativeCapabilities.executable
+    && fingerprintNativeExecutable(bin) === nativeCapabilities.binaryFingerprint ? nativeCapabilities.boardPeerContract : null,
   onNotification: (id, message) => codexEngine.notify(message, id),
   onServerRequest: (id, message) => codexEngine.serverRequest(message, id),
   onConnection: (id, state) => codexEngine.connection(state, id),
@@ -328,6 +333,7 @@ const codexEngine = createCodexEngineAdapter({
   getOwnerKey: () => publicAuthIdentityKey(authState),
   isReady: () => appServerReady,
   getModels: () => modelCatalog.snapshot(),
+  getBoardPeerContract: () => appServerReady ? nativeCapabilities.boardPeerContract : null,
   describe: () => describeCodexEngine({
     ready: appServerReady, starting: Boolean(appServerProcess) && !appServerReady, blocked: launchConfigBlocked,
     version: nativeCapabilities.version, versionSupported: nativeCapabilities.version ? nativeCapabilities.schemaMatch : null,

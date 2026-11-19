@@ -71,7 +71,7 @@ For a named Agent on a supported unbounded route, the helper adds a per-turn `eg
 
 Typed assistant commentary is a **work note**: read its public progress text under the run's activity record, not in the conversation or a later Board excerpt. It is not raw model reasoning. Published final answers and compatible completed items from phase-less engines remain speech. A Codex delta without a confirmed phase is held out of the transcript: completion can establish speech, and an interrupted fragment with no such evidence stays in activity as unclassified. Only an echo of the accepted request can bind its human row; the text comes from the original submission, never from application context echoed by the adapter. A queued share from an older version is checked against the selected source rows before the saved copies are attached. The original historical event log is not rewritten. A chat with nothing new to say need not fill its transcript with work updates.
 
-This is the channel/speech boundary, not a global Agent memory, an autonomous follow-up scheduler or an active-turn steering implementation.
+This is not a global Agent memory or an autonomous follow-up scheduler. The optional same-dispatch peer-input path in [Board Thread multi-Agent](BOARD_THREAD_MULTI_AGENT.md#peer-speech-during-the-same-active-turn) uses only a confirmed public answer and the recipient’s existing active turn; it grants no new authority.
 
 ---
 

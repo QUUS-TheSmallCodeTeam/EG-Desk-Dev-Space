@@ -500,6 +500,15 @@ export function boardRoutedMembers(events) {
   return found;
 }
 
+// Acceptance is a transport fact, not proof that an inference observed it. The
+// historical renderer reconstructs only this enum, never arbitrary stored detail.
+export function boardPeerReceipt(id, status) {
+  if (typeof id !== 'string' || !/^egdesk-peer:[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/.test(id) || !['completed', 'declined', 'unknown'].includes(status)) return null;
+  const text = status === 'completed' ? '이 턴의 입력으로 접수됨. 답변에 반영됐는지는 확인되지 않았습니다.'
+    : status === 'declined' ? '이 턴이 입력을 받지 않았습니다. 다시 보내지 않습니다.' : '이 턴의 입력 접수 여부를 확인하지 못했습니다. 다시 보내지 않습니다.';
+  return { id, kind: 'boardPeerInput', title: 'Board 발언 전달', status, detail: { text }, sourceRefs: [] };
+}
+
 // Read-only projection for the owning Board's activity panel. A route alone is
 // not proof of a particular run. Join a stored answer to its exact member run;
 // never merge a member's tool history, sources, inputs, messages or permissions.
@@ -518,11 +527,12 @@ export function foldBoardMemberWork(room, messages, runs, member, scope) {
     const notes = (r.activities || []).filter(a => a?.kind === 'workNote' && a.status === 'completed' && typeof a.id === 'string'
       && a.id.startsWith('work-note:') && typeof a.detail?.text === 'string').slice(-100)
       .map(a => ({ id: a.id, kind: 'workNote', title: '작업 메모', status: 'completed', detail: { text: a.detail.text.slice(0, 4000) }, sourceRefs: [] }));
-    if (!notes.length) continue;
+    const receipts = (r.activities || []).filter(a => a?.kind === 'boardPeerInput').slice(-1).map(a => boardPeerReceipt(a.id, a.status)).filter(Boolean);
+    if (!notes.length && !receipts.length) continue;
     const view = { memberWorkHistory: true, localHistory: true, localThreadId: room.id, clientThreadId: scope.clientThreadId,
       localConversationId: scope.localConversationId, localRunId: r.localRunId, conversationId: r.conversationId, runId: r.runId, answerId: r.answerId,
       status: ['completed', 'failed', 'interrupted', 'cancelled'].includes(r.status) ? r.status : 'unavailable',
-      board: { profileId: member.profileId, roomClientThreadId: room.id }, activities: notes };
+      board: { profileId: member.profileId, roomClientThreadId: room.id }, activities: [...notes, ...receipts] };
     const index = result.findIndex(other => other.memberWorkHistory && other.localConversationId === view.localConversationId
       && other.localRunId === view.localRunId && other.conversationId === view.conversationId && other.runId === view.runId);
     if (index < 0) result.push(view); else result[index] = view;

@@ -186,6 +186,10 @@ export function inspectNativeCapabilities({ executable, env = process.env, cwd =
     schemaMatch: contextContract, experimentalApi: true,
     dynamicTools: contextContract, readerReadOnly: contextContract,
     qaReadOnly: qaContract,
+    // This source version's handler validates expectedTurnId and enqueues the
+    // untrusted additional context. Never infer either fact from ordinary chat.
+    boardPeerContract: contextContract && version === '0.162.1' && /^[a-f0-9]{64}$/.test(proof?.boardPeerSchemaFingerprint || '')
+      ? createHash('sha256').update(contractFingerprint + '\0' + proof.boardPeerSchemaFingerprint).digest('hex') : null,
     binaryFingerprint: contextContract ? binaryFingerprint : null,
     schemaFingerprint: contextContract ? proof.schemaFingerprint : null,
     contractFingerprint,

@@ -30,7 +30,7 @@ function isAuthRejection(error) {
 }
 
 export function createCodexProfileAppServers({ resolveHome, env = process.env, cwd = process.cwd(), spawnChild = spawn,
-  executable = () => resolveCodexExecutable(env), onNotification = () => {}, onServerRequest = () => {}, onConnection = () => {}, onChange = () => {} } = {}) {
+  executable = () => resolveCodexExecutable(env), getBoardPeerContract = () => null, onNotification = () => {}, onServerRequest = () => {}, onConnection = () => {}, onChange = () => {} } = {}) {
   const clients = new Map(), stopping = new Set()
   let disposed = false, sequence = 0
   const current = client => clients.get(client.id) === client && !disposed
@@ -89,10 +89,13 @@ export function createCodexProfileAppServers({ resolveHome, env = process.env, c
   function launch(id, owned) {
     const { home, identity } = owned
     const plan = buildCodexAppServerLaunch({ env, listen: 'stdio://', codexHome: home })
-    const child = spawnChild(executable(), [...plan.args, '-c', 'cli_auth_credentials_store=file'], {
+    const bin = executable()
+    let boardPeerContract = null
+    try { boardPeerContract = getBoardPeerContract(bin) } catch { /* optional; chat remains available */ }
+    const child = spawnChild(bin, [...plan.args, '-c', 'cli_auth_credentials_store=file'], {
       cwd, env: isolatedCodexEnv(env, plan.envOverrides.CODEX_HOME), shell: false, stdio: ['pipe', 'pipe', 'pipe'],
     })
-    const client = { id, home, identity, child, auth: null, models: null, check: null, authRejected: false,
+    const client = { id, home, identity, child, boardPeerContract, auth: null, models: null, check: null, authRejected: false,
       pending: new Map(), nativeRequests: new Map(), answered: new Set() }
     const rpc = client.rpc = new AppServerRpc({
       experimentalApi: true,
@@ -222,6 +225,7 @@ export function createCodexProfileAppServers({ resolveHome, env = process.env, c
       if (!(await refresh(id)).auth.isLoggedIn) throw loginRequired()
       readyClient(id)
     },
+    boardPeerContract(id) { return readyClient(id).boardPeerContract },
     request(id, method, params) { return readyClient(id).rpc.request(method, params) },
     respond(id, rpcId, result, error) {
       const client = readyClient(id)
