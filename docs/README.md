@@ -9,6 +9,8 @@
 
 **다른 사람과 같은 보드를 쓰거나 서로의 Agent에게 맡길 때**: [현재 가능한 설정·질문 파일 교환](../ideas/confirmed/EGDESK_PRODUCT_INTERACTION_TRACE_ATLAS.md#atlas-local-share)과 [기존 보드 초대와 공용 보드 함께 만들기(설계)](../ideas/confirmed/EGDESK_PRODUCT_INTERACTION_TRACE_ATLAS.md#atlas-joint-board-start), [앞으로의 사용자 흐름: 배치·호스트 화면·동료 Agent](../ideas/confirmed/EGDESK_PRODUCT_INTERACTION_TRACE_ATLAS.md#atlas-shared-card-agents)을 구분합니다. [비전](../ideas/confirmed/EGDESK_PRODUCT_VISION_AND_DEV_TODO.md#vision-board-cross-agent) · [기술 계약](../ideas/confirmed/EGDESK_INTERACTION_AND_ORCHESTRATION_CONTRACT.md#tech-board-cross-agent) · [설계 제안과 미실행 인수 사례](../apps/firefox-ui-demo/docs/BOARD_COLLABORATION_AND_CROSS_AGENT_DESIGN.md#collab-checks)
 
+**공용 보드 입구:** [왼쪽 Desk에서 보는 것과 사람 초대로 보게 될 것](../ideas/confirmed/EGDESK_PRODUCT_INTERACTION_TRACE_ATLAS.md#atlas-board-entry-doors) · [진입·재진입 화면 모형](../sketches/board-collaboration-entry/README.md).
+
 **세 번째 참가자에게 배송 건만 넘기기:** [로컬에서 조작하는 가상 예](../sketches/board-collaboration-rehearsal/README.md). 실제 원격 협업·Agent 호출 기능과 구분합니다.
 
 **제품 방향은** [EG-Desk 제품 비전과 개발 목표](../ideas/confirmed/EGDESK_PRODUCT_VISION_AND_DEV_TODO.md#vision-agent-channels)와 [MemBrain 원칙](../ideas/confirmed/EGDESK_PRODUCT_VISION_AND_DEV_TODO.md#vision-membrain)에서 확인합니다.

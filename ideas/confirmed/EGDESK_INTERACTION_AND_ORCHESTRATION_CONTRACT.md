@@ -1046,6 +1046,10 @@ TPM이나 Native Messaging을 모든 플랫폼의 필수 조건으로 만들지 
 
 동료 Agent에게 부탁하는 권한은 위 다섯 범위와 독립적이다. 양방향 요청은 각각 **요청자·Board·Agent 소유자와 버전·Agent 실행 위치와 Engine 처리 계정·비용 부담 주체·업무를 수행할 카드/PC/사이트 계정·허용 자료/행동·결과 수신자·유효 기간**에 결합한다. Agent 소유자에게 요청자 자료를 자동 공개하거나, 요청자에게 소유자의 화면·비공개 DM/기억·로그인을 주지 않는다. 처리처와 실제로 열람 가능한 범위를 지킬 수 없으면 보내지 않는다. 재위임은 새 수신자에 대한 별도 판단이다. 입력권 회수·호스트 단절·계정 전환·외부 저장 결과 미확인은 다른 사람/Agent의 비슷한 계정으로 대체하거나 재실행할 이유가 아니다. [상태 변화·위임 조합·미실행 인수 사례](../../apps/firefox-ui-demo/docs/BOARD_COLLABORATION_AND_CROSS_AGENT_DESIGN.md#collab-layers) · [기존 신원·동시성·회수](#impl-e24-collaboration-authority) · [원격 연결·복구](#impl-e24-remote-transport)
 
+<a id="tech-board-entry-doors"></a>
+
+**진입 경로와 실제 첫 화면(설계).** 수신자에게 보낼 초대 미리보기, 권한 있는 사람의 수락, 첫 화면 접근 성공을 분리한다. 상세 설계의 ‘수락하고 참여’ 한 클릭은 수락과 첫 열기를 요청할 수 있지만, 열기 응답만 실패한 경우 수락이나 개설을 재실행하지 않는다. 현재 접근 가능한 기기·계정·리소스인지 열기 직전에 확인하고 요청한 사람의 해당 Canvas에서만 대상 제목으로 이동한다. 같은 Board를 다시 열면 새 복제본이나 다른 사람의 뷰포트를 만들지 않는다. 공동 개설의 제안자 화면은 상대의 수락만으로 이동하지 않는다. 받은 초대 목록에서 열기와 달리, 기존 Board 목록에 공용 행을 두는 것은 **이번 배치 제안**이다. 행·보드 제목·재진입은 현재의 Board 전체 접근권에 묶고, 단일 카드 권한만으로 비공개 부모·누락 카드 수·제목을 표시하지 않는다. 회수·만료 뒤 옛 바로가기나 첫 열기 재시도가 권한을 되살리지 않는다. [사용자 경로](./EGDESK_PRODUCT_INTERACTION_TRACE_ATLAS.md#atlas-board-entry-doors) · [기존 초대와 재진입](../../docs/references/design-synthesis/egdesk-ux-realization-proposals.md#ux-detail-e24-collaboration-invite)
+
 <a id="tech-shipping-handoff"></a>
 
 **세 번째 참가자로의 업무 인계(설계, 격리 모형만 검증).** 초대 수락·자료의 지정 공개·업무 인수·Agent 사용·결과 수신·회신을 별개로 기록한다. 멤버십만으로 자료나 그 파생 요약·알림을 내보내지 않으며, 한 수량과 차이를 조합해 제한된 수량을 복원하는 경우도 막는다. 업무 제공자와 계정·Agent 소유자는 같을 필요가 없다. 업무 범위 안에서 실제로 승인된 입력 필드와 결과 수신자만 사용한다. 권한 회수 뒤에 같은 사람·운송 참조가 다시 허용돼도 구 요청의 결과 공개 권한은 되살리지 않는다. 원본 제공자 이탈이 독립된 업무까지 취소하지 않으며, 이미 승인·발송된 배송 회신 보존과 실시간 원본 접근은 구별한다. [세 갈래로 조작하는 로컬 모형](../../sketches/board-collaboration-rehearsal/README.md) · [사용자 흐름](./EGDESK_PRODUCT_INTERACTION_TRACE_ATLAS.md#atlas-third-person-shipping)
