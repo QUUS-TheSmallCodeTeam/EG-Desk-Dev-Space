@@ -210,6 +210,8 @@ MemBrain은 온톨로지 전체의 새 이름이 아니다. Agent가 **언제의
 
 민재가 서윤의 정산 Agent로 **민재의 주문**을 검토하고, 동시에 서윤은 민재의 검수 Agent에 **서윤의 주문**을 맡길 수 있는 것이 목표다. 같은 Agent에게 **상대의 로그인된 주문**을 맡기는 것은 별도 범위다. 사용자에게는 ‘누가 부탁했나, 누구의 Agent가 어느 계정에서 무엇을 하나, 답은 누가 받나’가 드러나야 한다. 상대의 개인 대화·기억·구독을 통째로 빌리는 방식은 아니다. 원격 사람 초대, 카드 화면 동시 시청과 사람 간 Agent 직접 호출은 현재 로컬 기능이 아니다. [같은 사이트를 다르게 보는 사용 예](./EGDESK_PRODUCT_INTERACTION_TRACE_ATLAS.md#atlas-shared-card-agents) · [상태와 실행 권한의 기술 경계](./EGDESK_INTERACTION_AND_ORCHESTRATION_CONTRACT.md#tech-board-cross-agent)
 
+**새 사람이 들어와도 필요한 일만 넘긴다(목표).** 물류 담당 지우가 두 사람의 공용 Board에 합류해도 주문 원본이나 두 수량의 차이는 따라오지 않는다. 별도로 받은 배송 건을 자기 Agent나 사용이 허용된 동료 Agent와 처리하고, 허용된 수신자에게 집하 상태만 회신할 수 있어야 한다. [누가 무엇을 보는지 직접 비교하는 가상 예](../../sketches/board-collaboration-rehearsal/README.md)
+
 ### Coding Surface
 
 Terminal is an agent execution substrate and optional expert/debug view. The

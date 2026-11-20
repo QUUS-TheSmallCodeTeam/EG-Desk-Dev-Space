@@ -1,0 +1,140 @@
+<!doctype html>
+<html lang="ko"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; connect-src 'none'; base-uri 'none'; form-action 'none'; object-src 'none'"><title>출고 협업 | 세 번째 사람의 자리</title><style>
+:root{color-scheme:light dark;--paper:#f6f7f4;--surface:#fff;--ink:#17251f;--sub:#4c6056;--line:#c9d5cc;--accent:#126343;--soft:#e6f2e9;--call:#163f31;--on:#fff;--font:system-ui,-apple-system,'Apple SD Gothic Neo','Malgun Gothic',sans-serif}@media(prefers-color-scheme:dark){:root{--paper:#18221d;--surface:#202e27;--ink:#eef5ee;--sub:#b2c6b8;--line:#475b4e;--accent:#92dfb1;--soft:#253e31;--call:#bce6c9;--on:#14271c}}*{box-sizing:border-box}body{margin:0;background:var(--paper);color:var(--ink);font:15px/1.55 var(--font);word-break:keep-all;overflow-wrap:anywhere}main{max-width:920px;margin:0 auto;padding:clamp(16px,4vw,42px)}h1,h2,h3,p{margin:0}h1{font-size:clamp(25px,4.2vw,38px);letter-spacing:-.05em;line-height:1.2;margin:6px 0 10px}h2{font-size:clamp(20px,3vw,25px);letter-spacing:-.04em}h3{font-size:17px;letter-spacing:-.035em}.over,.label{font-size:12px;font-weight:650;letter-spacing:.02em;color:var(--accent)}.lead,.small{color:var(--sub)}.small{font-size:13px}.header{margin-bottom:23px}.controls{padding:15px 0 18px;border-block:1px solid var(--line)}.row{display:flex;flex-wrap:wrap;align-items:center;gap:6px 9px}.row.between{justify-content:space-between;gap:10px}.scenarios{margin:6px 0 12px}.flow{display:grid;grid-template-columns:1fr auto;gap:14px;align-items:center}.status{font-size:15px;font-weight:600}.roles{margin:18px 0 12px}.roles span{margin-right:5px}button{font:inherit;font-size:13px;font-weight:560;line-height:1.35;cursor:pointer;color:var(--ink);background:var(--surface);border:1px solid var(--line);border-radius:7px;padding:8px 12px;min-height:36px}button[aria-pressed=true]{background:var(--soft);color:var(--accent);border-color:var(--accent)}button.primary{background:var(--call);color:var(--on);border-color:var(--call)}button:disabled{opacity:.48;cursor:default}button:hover:not(:disabled){border-color:var(--accent)}button:focus-visible,summary:focus-visible{outline:3px solid var(--accent);outline-offset:3px}.board{background:var(--surface);border:1px solid var(--line);border-radius:12px;padding:clamp(16px,3vw,24px)}.board-head{padding-bottom:13px;border-bottom:1px solid var(--line)}.board-head p{margin-top:3px}.cards{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,170px),1fr));gap:10px;padding:14px 0 0}.tile{padding:12px 13px;border-left:3px solid var(--accent);background:var(--soft);border-radius:2px 7px 7px 2px}.tile p{margin-top:3px}.tile .label{font-size:11px}.updates{padding:10px 0 0;margin:0;list-style:none;color:var(--sub);font-size:13px}.updates li+li{margin-top:2px}.actions{margin-top:14px}.empty{margin:14px 0 0;color:var(--sub);font-size:13px}.foot{max-width:78ch;margin-top:17px}.scenariofoot{margin-top:6px}details{margin-top:12px}summary{cursor:pointer;color:var(--accent);font-weight:600;font-size:13px}.quiet{font-size:12px;color:var(--sub)}[hidden]{display:none!important}@media(max-width:500px){.flow{grid-template-columns:1fr}.flow .row{justify-content:flex-start}.controls{padding-block:12px}.board{padding:14px}.roles{margin-top:14px}}
+</style></head><body><main>
+<header class="header"><div class="over">EG-Desk • 공용 보드 리허설</div><h1>세 번째 사람의 자리</h1><p class="lead">물류 담당 지우가 배송 확인을 인계받습니다. 사람을 바꿔 보거나, 같은 일을 다른 순서로 진행해 보세요.</p></header>
+<section class="controls" aria-label="시연 조작대"><div class="label">연습할 장면</div><div id="scenes" class="row scenarios"></div><div class="flow"><div><div id="step" class="small"></div><p id="guide" class="status" aria-live="polite"></p></div><div class="row"><button id="next" class="primary" type="button">다음 단계</button><button id="reset" type="button">처음부터</button></div></div></section>
+<nav id="roles" class="row roles" aria-label="시연에서 볼 사람"><span class="small">누구의 화면?</span></nav>
+<section id="participant" class="board" aria-labelledby="boardtitle"><div class="board-head"><div id="identity" class="over"></div><h2 id="boardtitle"></h2><p id="boardlead" class="small"></p></div><div id="cards" class="cards"></div><p id="empty" class="empty" hidden>표시할 카드가 없습니다.</p><ul id="updates" class="updates" aria-label="내 알림"></ul><div id="actions" class="row actions" aria-label="이 사람이 할 수 있는 일"></div></section>
+<details><summary>결과 도착을 직접 진행하기</summary><p class="small">외부 모델 대신 누르는 연습용 버튼입니다. 참가자의 실행 권한이 아닙니다.</p><button id="arrival" type="button">가상 결과 도착</button></details>
+<p class="foot quiet">로컬 시연입니다. 모든 자료와 답은 가상이며 실제 계정·모델·ERP에 연결하지 않습니다. 한 HTML에서 역할을 바꾸는 화면은 실제 사용자 인증이나 데이터 격리를 뜻하지 않습니다. 새로고침하면 초기화됩니다.</p><noscript>시연을 조작하려면 로컬 브라우저에서 JavaScript를 켜 주세요.</noscript></main>
+<script id="fixture">
+// This is an offline rehearsal with synthetic data, not an authorization service.
+function makeRehearsal() {
+  const names = { minjae: '민재', seoyun: '서윤', jiu: '지우' };
+  const labels = {
+    join: '초대 수락하기', leave: '보드에서 나가기', shipping: '지우에게 배송 카드 공개',
+    withdraw: '배송 공개 회수', accept: '배송 확인 맡기', own: '내 배송 Agent에 묻기',
+    lend: '민재의 검수 Agent 한 번 허용', unlending: '검수 Agent 허가 회수',
+    borrowed: '민재의 검수 Agent에 묻기', finish: '가상 결과 도착', reply: '민재에게 배송 상태 회신',
+    erpOff: 'ERP 조회 연결 회수', closeView: '내 보드 창 닫기', reopen: '내 보드 창 다시 열기', invite: '지우 다시 초대',
+  };
+  const init = () => ({ jiu: false, invited: true, memberVersion: 0, ship: false, shipVersion: 0,
+    loan: 'none', loanVersion: 0, accepted: false, seoyun: true, sOpen: true, erp: true,
+    serial: 0, task: null, receipt: null });
+  const erpLive = s => s.seoyun && s.erp;
+  const fresh = (s,t) => !!t && s.jiu && s.ship && s.accepted && t.memberVersion === s.memberVersion && t.shipVersion === s.shipVersion && (t.worker === 'own' || (t.loanVersion === s.loanVersion && s.loan === 'spent'));
+  const pending = s => s.task?.status === 'pending';
+  const isMember = (s, actor) => actor === 'minjae' || (actor === 'seoyun' && s.seoyun) || (actor === 'jiu' && s.jiu);
+  function allowed(s, actor, verb) {
+    if (actor === 'simulation') return verb === 'finish' && pending(s);
+    if (!Object.hasOwn(names,actor)) return false;
+    switch (verb) {
+      case 'invite': return actor === 'minjae' && !s.jiu && !s.invited;
+      case 'join': return actor === 'jiu' && s.invited && !s.jiu;
+      case 'shipping': return actor === 'minjae' && s.jiu && !s.ship;
+      case 'withdraw': return actor === 'minjae' && s.jiu && s.ship;
+      case 'accept': return actor === 'jiu' && s.jiu && s.ship && !s.accepted;
+      case 'lend': return actor === 'minjae' && s.jiu && s.ship && s.loan === 'none';
+      case 'unlending': return actor === 'minjae' && s.jiu && s.loan !== 'none';
+      case 'own': case 'borrowed': return actor === 'jiu' && s.jiu && s.ship && s.accepted && !pending(s) && (verb === 'own' || s.loan === 'ready');
+      case 'reply': return actor === 'jiu' && s.task?.status === 'delivered' && fresh(s,s.task) && s.receipt?.id!==s.task.id;
+      case 'leave': return (actor === 'jiu' || actor === 'seoyun') && isMember(s,actor);
+      case 'erpOff': return actor === 'seoyun' && erpLive(s) && s.sOpen;
+      case 'closeView': return actor === 'seoyun' && s.seoyun && s.sOpen;
+      case 'reopen': return actor === 'seoyun' && s.seoyun && !s.sOpen;
+      default: return false;
+    }
+  }
+  // Each click uses the supplied actor. The reader switch and guide are demonstration controls only.
+  function step(s, actor, verb, completionId) {
+    if (!allowed(s,actor,verb)) return { ok:false,state:s };
+    const n={...s};
+    switch (verb) {
+      case 'join': n.jiu=true; n.invited=false; n.memberVersion++; break;
+      case 'invite': n.invited=true; break;
+      case 'shipping': n.ship=true; n.shipVersion++; break;
+      case 'withdraw': n.ship=false; n.shipVersion++; n.accepted=false; n.loan='none'; n.loanVersion++; break;
+      case 'accept': n.accepted=true; break;
+      case 'lend': n.loan='ready'; n.loanVersion++; break;
+      case 'unlending': n.loan='none'; n.loanVersion++; break;
+      case 'own': case 'borrowed':
+        n.serial++; n.task={id:n.serial,worker:verb,memberVersion:n.memberVersion,shipVersion:n.shipVersion,loanVersion:n.loanVersion,status:'pending',input:{shipment:'SH-42',fields:['pickupStatus']},to:'jiu'};
+        if(verb==='borrowed') n.loan='spent'; break;
+      case 'finish':
+        if(completionId!==s.task.id) return {ok:false,state:s};
+        if(fresh(s,s.task) && s.task.to==='jiu' && s.task.input.shipment==='SH-42' && s.task.input.fields.length===1 && s.task.input.fields[0]==='pickupStatus'){
+          n.task={...s.task,status:'delivered',output:{shipment:'SH-42',pickupStatus:'집하 준비됨'}};
+        } else {n.task={...s.task,status:'withheld'};} break;
+      case 'reply': n.receipt={id:s.task.id,shipment:s.task.output.shipment,pickupStatus:s.task.output.pickupStatus}; break;
+      case 'leave':
+        if(actor==='seoyun'){ n.seoyun=false; n.sOpen=false; }
+        else{ n.jiu=false; n.invited=false; n.memberVersion++; n.ship=false; n.shipVersion++; n.accepted=false; n.loan='none'; n.loanVersion++; n.task=null; }
+        break;
+      case 'erpOff': n.erp=false; break;
+      case 'closeView': n.sOpen=false; break;
+      case 'reopen': n.sOpen=true; break;
+    }
+    return {ok:true,state:n};
+  }
+  // All participant-facing surfaces are built from this projection, not by hiding rows with CSS.
+  function view(s, who) {
+    const o={heading:'',lead:'',cards:[],updates:[],actions:[]};
+    function card(label,title,copy) {o.cards.push({label,title,copy});}
+    if (!Object.hasOwn(names,who)){o.heading='이용할 수 없음';return o;}
+    if(!isMember(s,who)){
+      o.heading=who==='jiu'&&s.invited?'공용 보드 초대가 왔어요':'이 보드에 참여하고 있지 않아요';
+      o.lead=who==='jiu'&&s.invited?'수락하면 보드에 들어갑니다. 자료나 Agent 권한은 따로 받습니다.':'현재 받을 수 있는 카드나 알림이 없습니다.';
+    } else if(who==='seoyun' && !s.sOpen){
+      o.heading='보드 창을 닫았어요';o.lead='창 닫기는 멤버 탈퇴나 자료 연결 회수가 아닙니다.';
+    } else {
+      o.heading='출고 협업';o.lead=who==='jiu'?'내게 공개된 업무만 확인합니다.':'같은 보드에서 주문 대조와 배송 확인을 나누어 진행합니다.';
+      if(who!=='jiu'){
+        card('민재가 제공한 사본','발주서 · 주문 317','발주 수량 21개');
+        if(erpLive(s)){card('서윤이 허용한 조회','ERP · 주문 317','저장 수량 8개');card('두 자료로 계산','수량 대조','차이 13개 · 원인 확인');}
+        if(who==='minjae') card('민재의 배송 자료','출고 확인','운송 참조 SH-42');
+        if(who==='minjae'&&s.ship) o.updates.push(s.accepted?'지우가 배송 확인을 맡았습니다.':'배송 카드를 지우에게 공개했습니다. 아직 맡지 않았습니다.');
+        if(who==='minjae'&&s.receipt) {card('지우가 민재에게 회신','배송 확인 결과',s.receipt.shipment+' · '+s.receipt.pickupStatus);o.updates.push('지우의 배송 회신이 도착했습니다.');}
+      } else {
+        if(s.ship){card('민재가 지우에게 공개','배송 확인 요청','운송 참조 SH-42 · 집하 상태를 확인해 주세요.');o.updates.push(s.accepted?'지우가 배송 확인을 맡았습니다.':'배송 확인을 부탁받았습니다. 아직 맡지 않았습니다.');}
+        if(s.loan==='ready')o.updates.push('민재의 검수 Agent가 이 배송 건에 한해 한 번 허용됐습니다.');
+        if(s.task&&s.task.memberVersion===s.memberVersion){
+          if(s.task.status==='pending'){o.updates.push('요청 접수 · 아직 답이 없습니다.');}
+          if(s.task.status==='withheld' || (s.task.status==='delivered'&&!fresh(s,s.task))){o.updates.push('이 요청의 결과는 현재 열 수 없습니다.');}
+          if(s.task.status==='delivered' && fresh(s,s.task)){card('지우에게만 도착',s.task.worker==='own'?'지우의 배송 Agent 답변':'민재의 검수 Agent 답변',s.task.output.shipment+' · '+s.task.output.pickupStatus);o.updates.push(s.receipt?.id===s.task.id?'민재에게 회신했습니다.':'아직 민재에게 보낸 답이 아닙니다.');}
+        }
+      }
+      if(!o.cards.length) o.lead='아직 내게 공개된 업무 카드가 없습니다.';
+    }
+    o.actions=Object.keys(labels).filter(x=>allowed(s,who,x)); return o;
+  }
+  return {names,labels,init,step,view,allowed};
+}
+</script>
+<script id="rehearsal-ui">
+'use strict';
+const r=makeRehearsal(), el=id=>document.getElementById(id);
+// A guide action has an explicit actor. Showing a person's view is not that action.
+const play={
+ hand:{name:'배송 인계',intro:'민재가 공개한 배송 건만 지우에게 넘깁니다.',steps:[['jiu','join','jiu','지우가 합류했습니다. 아직 자료는 없습니다.'],['minjae','shipping','jiu','민재가 배송 카드만 공개했습니다.'],['jiu','accept','jiu','지우가 맡았습니다. 공개와 인수는 별개입니다.'],['minjae','lend','jiu','민재가 이 건에만 검수 Agent를 허용했습니다.'],['jiu','borrowed','jiu','요청을 받았습니다. 아직 답은 공개되지 않았습니다.'],['seoyun','leave','minjae','서윤이 나갔습니다. 독립된 배송 확인은 계속됩니다.'],['simulation','finish','jiu','지우에게 답이 도착했습니다. 민재에게는 아직 회신하지 않았습니다.'],['jiu','reply','minjae','민재에게 허용된 배송 상태만 도착했습니다.']]},
+ revoke:{name:'답이 오기 전 회수',intro:'시작된 작업이라도 늦은 답을 볼 수 있는지 확인합니다.',steps:[['jiu','join','jiu','지우가 들어왔습니다.'],['minjae','shipping','jiu','배송 카드를 공개했습니다.'],['jiu','accept','jiu','지우가 맡았습니다.'],['jiu','own','jiu','자기 배송 Agent에 물었습니다.'],['minjae','withdraw','jiu','민재가 공개를 회수했습니다. 지우는 아직 멤버입니다.'],['minjae','shipping','jiu','새로 공개했습니다. 이전 요청의 허가는 아닙니다.'],['jiu','accept','jiu','새 공개 범위에서 배송 건을 다시 맡았습니다.'],['simulation','finish','jiu','이전 요청의 늦은 답은 공개되지 않습니다.'],['jiu','own','jiu','새 요청을 시작했습니다.'],['simulation','finish','jiu','새 요청에서 확인한 답만 열립니다.']]},
+ rejoin:{name:'나갔다 다시 합류',intro:'같은 사람이 돌아와도 이전 카드나 답이 자동 복구되지는 않습니다.',steps:[['jiu','join','jiu','지우가 합류했습니다.'],['minjae','shipping','jiu','배송 카드를 공개했습니다.'],['jiu','accept','jiu','지우가 배송 확인을 맡았습니다.'],['jiu','own','jiu','자기 Agent에게 물었습니다.'],['simulation','finish','jiu','지우 개인에게 답이 도착했습니다.'],['jiu','leave','jiu','지우가 보드에서 나갔습니다.'],['minjae','invite','jiu','민재가 새 초대를 보냈습니다.'],['jiu','join','jiu','재합류했지만 새로 공개받은 카드는 없습니다.']]}
+};
+let state=r.init(), reader='jiu', scene='hand', index=0, free=false, message=play.hand.intro;
+function text(tag,v,cls){const e=document.createElement(tag);e.textContent=v;if(cls)e.className=cls;return e;}
+function button(name,id,fn){const b=text('button',name);b.type='button';b.dataset.key=id;b.addEventListener('click',fn);return b;}
+function clear(id){el(id).replaceChildren();}
+function restart(key){scene=key;state=r.init();reader='jiu';index=0;free=false;message=play[scene].intro;render();}
+function act(actor,verb){const res=r.step(state,actor,verb,verb==='finish'?state.task?.id:undefined);if(!res.ok)return false;state=res.state;return true;}
+function manual(actor,verb){if(!act(actor,verb))return;free=true;message=actor==='simulation'?'가상 결과를 처리했습니다. 해당 수신자의 화면을 확인하세요.':r.names[actor]+' · '+r.labels[verb];render();}
+function render(){
+  const sc=play[scene],v=r.view(state,reader);el('identity').textContent=r.names[reader]+'의 화면';el('boardtitle').textContent=v.heading;el('boardlead').textContent=v.lead;
+  clear('cards');for(const c of v.cards){const item=document.createElement('article');item.className='tile';item.append(text('div',c.label,'label'),text('h3',c.title),text('p',c.copy));el('cards').append(item);}el('empty').hidden=!!v.cards.length;
+  clear('updates');for(const u of v.updates)el('updates').append(text('li',u));clear('actions');for(const k of v.actions)el('actions').append(button(r.labels[k],k,()=>manual(reader,k)));
+  el('step').textContent=free?'자유 조작':sc.name+' · '+index+' / '+sc.steps.length;el('guide').textContent=message;el('next').disabled=free||index>=sc.steps.length;el('next').textContent=free?'안내 일시정지':index===sc.steps.length?'장면 완료':'다음 단계';el('arrival').disabled=!r.allowed(state,'simulation','finish');
+  for(const b of el('roles').querySelectorAll('button'))b.setAttribute('aria-pressed',String(b.dataset.key===reader));for(const b of el('scenes').querySelectorAll('button'))b.setAttribute('aria-pressed',String(b.dataset.key===scene));
+}
+for(const [k,x] of Object.entries(play))el('scenes').append(button(x.name,k,()=>restart(k)));
+for(const [k,x] of Object.entries(r.names))el('roles').append(button(x,k,()=>{reader=k;render();}));
+el('reset').addEventListener('click',()=>restart(scene));el('next').addEventListener('click',()=>{if(free||index>=play[scene].steps.length)return;const [actor,verb,target,why]=play[scene].steps[index];if(!act(actor,verb)){free=true;message='현재 상태로는 이 단계를 진행할 수 없습니다. 처음부터 다시 시작하세요.';}else{reader=target;message=why;index++;}render();});el('arrival').addEventListener('click',()=>manual('simulation','finish'));render();
+</script></body></html>
