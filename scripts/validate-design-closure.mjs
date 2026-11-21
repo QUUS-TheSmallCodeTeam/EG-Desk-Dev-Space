@@ -95,16 +95,73 @@ function validate() {
   ));
   let currentTrace = "";
   let inActionTable = false;
+  // Protected identifiers from the reviewed f308a77 baseline are a floor, not a row-count limit.
+  // A deliberate rename/removal needs review; a new indexed scenario or action does not need a code edit.
+  const protectedSteps = {
+    "L-01": 5,
+    "L-02": 4,
+    "L-03": 3,
+    "AG-01": 3,
+    "AG-02": 3,
+    "AG-03": 3,
+    "AG-04": 5,
+    "V-01": 3,
+    "V-02": ["이동","크기 조절","그룹화","포커스","집중 보기·최대화","닫기"],
+    "V-03": 10,
+    "DISC-01": 3,
+    "TOOL-01": 3,
+    "BROWSER-01": 5,
+    "BROWSER-02": 3,
+    "BROWSER-03": 3,
+    "BROWSER-04": 3,
+    "TOOL-02": 3,
+    "CHAT-01": 5,
+    "AGENT-01": 5,
+    "AGENT-02": 5,
+    "AGENT-03": 4,
+    "SYS-01": 3,
+    "AI-01": 3,
+    "AI-02": 3,
+    "READ-01": 4,
+    "READ-02": 3,
+    "READ-03": 3,
+    "ENGINE-01": 3,
+    "AI-03": 4,
+    "AI-04": 7,
+    "AI-05": ["1","1-a","1-b","1-c","1-d","1-e","2","3","4","5"],
+    "CANVAS-01": 3,
+    "AI-06": 3,
+    "AI-07": 3,
+    "AUTH-01": 3,
+    "CODE-01": ["1a","1b","1c","1d","2","3","4"],
+    "TERM-01": 3,
+    "ONT-01": 3,
+    "ONT-02": 3,
+    "COL-01": 5,
+    "CU-01": 6,
+    "DATA-01": 4,
+    "UX-01": 3,
+  };
+  const traceSteps = new Map();
   let actionCount = 0;
   let actionPlaceholderCount = 0;
   for (const line of texts.atlas.split(/\r?\n/)) {
     const heading = line.match(/^#### ([A-Z][A-Z0-9-]*-\d+)\./);
-    if (heading) { currentTrace = heading[1]; inActionTable = false; continue; }
+    if (heading) {
+      currentTrace = heading[1]; inActionTable = false;
+      if (traceSteps.has(currentTrace)) failures.push(`duplicate manual trace heading: ${currentTrace}`);
+      else traceSteps.set(currentTrace, new Set());
+      continue;
+    }
     if (currentTrace && line.startsWith("| ") && line.includes("제품 사용자 UI 행동")) { inActionTable = true; continue; }
     if (currentTrace && inActionTable && line.startsWith("| ")) {
       const row = cells(line);
       if (/^[-:]+$/.test(row[0])) continue;
       actionCount += 1;
+      const steps = traceSteps.get(currentTrace);
+      if (!row[0] || !row[1] || !row[2] || row.length < 7) failures.push(`incomplete manual action: ${currentTrace}/${row[0] || "?"}`);
+      if (steps.has(row[0])) failures.push(`duplicate manual action: ${currentTrace}/${row[0]}`);
+      steps.add(row[0]);
       if (/\b(?:Q|HUM)-[A-Z0-9]+-\d+\b|정할 컨트롤|정의된 컨트롤/.test(row[1] ?? "")) {
         actionPlaceholderCount += 1;
         pending.push(`${currentTrace}/${row[0]}: action points to an unresolved control placeholder`);
@@ -114,8 +171,21 @@ function validate() {
     if (inActionTable && line && !line.startsWith("|")) inActionTable = false;
     if (line.startsWith("## ")) currentTrace = "";
   }
-  // ATL-ED-0028 splits V-03's Chat/Canvas interaction into four explicit actions (+3).
-  if (actionCount !== 160) failures.push(`current manual must contain 160 action rows; found ${actionCount}`);
+  for (const [trace, spec] of Object.entries(protectedSteps)) {
+    const expectedSteps = Array.isArray(spec) ? spec : Array.from({length: spec}, (_, i) => String(i + 1));
+    for (const step of expectedSteps) if (!traceSteps.get(trace)?.has(step)) failures.push(`missing baseline manual action: ${trace}/${step}`);
+  }
+  const indexText = texts.atlas.split(/^## 7\. 기능별 사용 흐름 색인\s*$/m)[1] || "";
+  const indexTraces = tableRows(indexText, /^\d+$/).map(row => (row[1] || "").match(/^([A-Z][A-Z0-9-]*-\d+)(?=\s|$)/)?.[1] || "");
+  const indexed = new Set(indexTraces);
+  if (indexTraces.includes("") || !indexTraces.length) failures.push("invalid manual trace index");
+  for (const key of repeats(indexTraces)) failures.push(`duplicate manual index trace: ${key}`);
+  for (const key of indexed) if (!traceSteps.has(key)) failures.push(`manual index has no scenario: ${key}`);
+  for (const [key, steps] of traceSteps) {
+    if (!indexed.has(key)) failures.push(`manual scenario not indexed: ${key}`);
+    if (!texts.atlas.includes(`<a id="atlas-${key.toLowerCase()}"></a>`)) failures.push(`manual scenario has no stable anchor: ${key}`);
+    if (!steps.size) failures.push(`manual scenario has no actions: ${key}`);
+  }
   const expected = ids(between(texts.governance, "QUESTION-ROUTING-REGISTRY"), /^\| `(Q-[A-Z]+-\d+)` \|/gm);
   const questions = ids(texts.governance, /<a id="atlas-q-[^"]+"><\/a>`(Q-[A-Z]+-\d+)`/g);
   const hums = new Set(ids(texts.owner, /^#### (HUM-[A-Z]+-\d+) —/gm));
@@ -207,7 +277,7 @@ function validate() {
   if (!allowIncomplete) failures.push(...pending);
   return { design_complete: pending.length === 0 && failures.length === 0,
     question_count: expected.length, resolution_count: rows.length, status_counts: statusCounts,
-    manual_action_count: actionCount, action_placeholder_count: actionPlaceholderCount,
+    manual_trace_count: traceSteps.size, manual_action_count: actionCount, action_placeholder_count: actionPlaceholderCount,
     source_read_count: sourceRows.length, review_count: reviewRows.length, reviewed_document_count: fingerprintRows.length, implementation_evidence: "NOT-RUN",
     owner_open_topics: ownerStatus.filter((status) => status.startsWith("OPEN")).length,
     pending, failures };
