@@ -1,4 +1,4 @@
-import { randomUUID, createHash } from 'node:crypto'
+import { randomUUID, randomBytes, createHash, createHmac } from 'node:crypto'
 import { constants } from 'node:fs'
 import * as fs from 'node:fs/promises'
 import path from 'node:path'
@@ -203,6 +203,9 @@ export function createEGDeskFileService({ draftStore, createOnlyAdapter, makeId 
   }
   const roots = new Map()
   const resources = new Map()
+  // Owner/service-local comparison only; never accepted as a resource handle.
+  // A helper restart starts a new namespace even with the same draft store.
+  const sourceBindingKey = randomBytes(32)
   // Opaque change handles from gitChanges. Two list generations per root stay
   // valid so a click racing an automatic refresh still resolves.
   const changes = new Map()
@@ -535,8 +538,16 @@ export function createEGDeskFileService({ draftStore, createOnlyAdapter, makeId 
       const real = await fs.realpath(target)
       if (!inside((await checkedRoot(resource.rootId)).path, real)) fail('ROOT_ESCAPE', 'File resolved outside its authorized root')
       const digest = hash(bytes)
+      const diskRevision = revisionFor(after, digest)
       const text = decodedText(bytes)
-      return { fileId, name: path.basename(target), size: bytes.length, sha256: digest, diskRevision: revisionFor(after, digest), bytesBase64: bytes.toString('base64'), kind: text == null ? 'binary-or-invalid-utf8' : 'text', text }
+      // No continuity across aliases, changes observed during the exact read,
+      // or filesystems without a usable birth time to help detect inode reuse.
+      const sourceBinding = text != null && real === target && after.birthtimeNs > 0n && after.ctimeNs > 0n &&
+        [before, stat, currentPathStat].every(value => value.birthtimeNs === after.birthtimeNs && value.ctimeNs === after.ctimeNs)
+        ? createHmac('sha256', sourceBindingKey).update(JSON.stringify([
+            resource.rootId, resource.relativePath, diskRevision, String(after.birthtimeNs), String(after.ctimeNs),
+          ])).digest('hex') : null
+      return { fileId, name: path.basename(target), size: bytes.length, sha256: digest, diskRevision, bytesBase64: bytes.toString('base64'), kind: text == null ? 'binary-or-invalid-utf8' : 'text', text, ...(sourceBinding ? { sourceBinding } : {}) }
     } finally { await file.close() }
   }
 

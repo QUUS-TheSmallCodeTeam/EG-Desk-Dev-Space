@@ -568,6 +568,9 @@ export function createEGDeskFileView({ document, service, chooseRoot, chooseProj
   const itemAuthorities = new WeakMap()
   const itemBadges = new WeakMap()
   const draftsByFile = new Map()
+  // Scoped to this view's current tree binding; never persisted or populated
+  // by restoration, a run-origin open, or a Save As destination handle.
+  const treeDraftsBySource = new Map()
   const token = () => ++operation
   const present = generation => !disposed && generation === operation
   // Optional original-run fence. It is authority supplied by the caller, not
@@ -716,7 +719,11 @@ export function createEGDeskFileView({ document, service, chooseRoot, chooseProj
         children.hidden = expanded
       }) })
     } else {
-      item.addEventListener('click', event => { event.stopPropagation(); const id = itemHandles.get(item); act(() => pendingReconnect ? reconnectSource(id) : openFile(id)) })
+      item.addEventListener('click', event => {
+        event.stopPropagation()
+        const id = itemHandles.get(item)
+        act(() => pendingReconnect ? reconnectSource(id) : openFile(id, null, { treeRow: item }))
+      })
     }
     decorateItem(item)
     return item
@@ -895,7 +902,7 @@ export function createEGDeskFileView({ document, service, chooseRoot, chooseProj
     activeRoot = rootHandle
     if (!preserveDraft) { activeFileId = null; draft = null; readReceipt = null; sourceDisconnected = false; pendingReconnect = false }
     refreshRegions()
-    loadedGroups.clear(); pendingFolders.clear(); gitIndex = createEGDeskGitStateIndex([])
+    loadedGroups.clear(); pendingFolders.clear(); treeDraftsBySource.clear(); gitIndex = createEGDeskGitStateIndex([])
     if (fileChangeTimer) { timers.clearTimeout(fileChangeTimer); fileChangeTimer = null }
     tree.replaceChildren()
     searchResults.replaceChildren()
@@ -1071,11 +1078,13 @@ export function createEGDeskFileView({ document, service, chooseRoot, chooseProj
     return true
   }
 
-  async function openFile(fileId, restoredDraftId = null, { focus = true, keepChangeDiff = false, scope = null, operationGeneration = null } = {}) {
+  async function openFile(fileId, restoredDraftId = null, { focus = true, keepChangeDiff = false, scope = null, operationGeneration = null, treeRow = null } = {}) {
     const rootId = activeRoot?.rootId || null
     if (!scopeCurrent(scope) || scope && scope.rootId !== rootId) return false
     const generation = operationGeneration ?? token()
-    const current = () => openCurrent(generation, rootId, scope)
+    const selectedId = fileId
+    const current = () => openCurrent(generation, rootId, scope) &&
+      (!treeRow || (tree.contains(treeRow) && itemHandles.get(treeRow) === selectedId))
     const readOrStale = promise => Promise.resolve(promise).catch(cause => { if (current()) throw cause; return null })
     if (!current()) return false
     const restored = restoredDraftId && typeof service.readDraft === 'function' ? await readOrStale(service.readDraft({ draftId: restoredDraftId })) : null
@@ -1092,15 +1101,29 @@ export function createEGDeskFileView({ document, service, chooseRoot, chooseProj
     if (!current()) return false
     if (scope && read.fileId !== fileId) throw new Error('확인한 파일과 읽은 파일이 일치하지 않습니다.')
     let nextDraft = null
+    const treeBinding = treeRow && !scope && !restoredDraftId && read.fileId === selectedId && read.sourceBinding
     if (read.kind === 'text') {
+      const existing = treeBinding && treeDraftsBySource.get(treeBinding)
       const prior = draftsByFile.get(fileId)
+      const reopen = !prior && existing && existing.fileId !== selectedId && typeof service.readDraft === 'function'
+      if (reopen) {
+        // Revalidate both the old authority and the exact new read. Keep the
+        // draft on its original file ID instead of reconnecting it implicitly.
+        const authorized = await readOrStale(service.readFile({ fileId: existing.fileId }))
+        if (!current()) return false
+        if (authorized.fileId !== existing.fileId || authorized.sourceBinding !== treeBinding || authorized.diskRevision !== read.diskRevision) {
+          throw new Error('파일 연결 또는 내용이 읽는 동안 바뀌었습니다. 현재 파일 열기를 다시 선택하세요.')
+        }
+        fileId = existing.fileId
+      }
       if (restoredDraftId && typeof service.readDraft !== 'function') throw new Error('작업사본 재열기 기능이 연결되지 않았습니다.')
       nextDraft = await readOrStale(restored || (restoredDraftId ? service.readDraft({ draftId: restoredDraftId })
-        : prior && typeof service.readDraft === 'function' ? service.readDraft({ draftId: prior.id })
-          : prior || service.createDraft({ fileId })))
+        : reopen ? service.readDraft({ draftId: existing.id })
+          : prior && typeof service.readDraft === 'function' ? service.readDraft({ draftId: prior.id })
+            : prior || service.createDraft({ fileId })))
       if (!current()) return false
-      if (nextDraft.fileId !== fileId) throw new Error('작업사본과 파일 대상이 일치하지 않습니다.')
-      if (scope && (nextDraft.rootId !== rootId || nextDraft.sourceHash !== read.sha256 || nextDraft.sourceRevision !== read.diskRevision)) {
+      if (nextDraft.fileId !== fileId || (reopen && nextDraft.id !== existing.id)) throw new Error('작업사본과 파일 대상이 일치하지 않습니다.')
+      if ((scope || reopen) && (nextDraft.rootId !== rootId || nextDraft.sourceHash !== read.sha256 || nextDraft.sourceRevision !== read.diskRevision)) {
         throw new Error('파일 연결 또는 내용이 읽는 동안 바뀌었습니다. 현재 파일 열기를 다시 선택하세요.')
       }
     }
@@ -1136,6 +1159,11 @@ export function createEGDeskFileView({ document, service, chooseRoot, chooseProj
     if (read.kind === 'text') {
       draft = nextDraft
       draftsByFile.set(fileId, draft)
+      if (treeBinding && draft.rootId === rootId && draft.sourceHash === read.sha256 && draft.sourceRevision === read.diskRevision) {
+        const previous = treeDraftsBySource.get(treeBinding)
+        if (!treeDraftsBySource.has(treeBinding)) treeDraftsBySource.set(treeBinding, { id: draft.id, fileId })
+        else if (previous && (previous.id !== draft.id || previous.fileId !== fileId)) treeDraftsBySource.set(treeBinding, null)
+      }
       codeEditor.setLanguage(read.name)
       codeEditor.setText(draft.text)
       setEditable(true)

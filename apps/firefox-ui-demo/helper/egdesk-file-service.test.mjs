@@ -965,6 +965,113 @@ test('content search mode sends the untrimmed query, marks matches, and jumps to
   await view.close()
 })
 
+test('File tree watcher refresh reopens the exact managed draft after create-only Save As', async t => {
+  const { root, rootHandle, service, store } = await fixture(t, { createOnlyAdapter: createOnlyFixture, gitReview: {} })
+  const source = path.join(root, 'source.md')
+  const exported = path.join(root, 'copy.md')
+  const base = 'original\n'
+  const edited = 'original\n검토 기록\n'
+  await fs.writeFile(source, base)
+  const document = fakeDocument()
+  const view = createEGDeskFileView({ document, service, chooseSaveAs: async () => ({
+    // The native save picker authorizes the destination parent separately.
+    directoryId: (await service.registerRoot(root)).directoryId, fileName: 'copy.md',
+  }) })
+  document.body.append(view.element)
+  t.after(() => view.close())
+  const status = view.element.querySelector('.egdesk-file-status')
+  const waitFor = async predicate => {
+    for (let attempt = 0; attempt < 200 && !predicate(); attempt++) await new Promise(resolve => setTimeout(resolve, 5))
+    assert.ok(predicate(), status.textContent)
+  }
+  const editor = view.element.querySelector('textarea')
+  const row = name => treeItemNamed(view.element, name)
+  const refresh = async (name, selectedRoot = rootHandle) => {
+    assert.equal(view.onFileChanged({ rootId: selectedRoot.rootId, relativePath: name, change: 'rename' }), true)
+    await view.flushFileChanges()
+  }
+
+  await view.openRoot(rootHandle)
+  const originalRow = row('source.md')
+  originalRow.click(); await waitFor(() => editor.value === base)
+  const original = view.snapshot()
+  editor.value = edited; editor.fire('input')
+  view.element.querySelector('.egdesk-file-save-button').click()
+  await waitFor(() => view.snapshot().savedRevision === 1)
+  view.element.querySelector('.egdesk-file-save-as-button').click()
+  await waitFor(() => /새 파일 copy\.md 저장됨/.test(status.textContent))
+  assert.notEqual(view.snapshot().draftId, original.draftId)
+  assert.equal(await fs.readFile(exported, 'utf8'), edited)
+  assert.equal(await fs.readFile(source, 'utf8'), base)
+
+  await refresh('copy.md')
+  assert.equal(row('source.md'), originalRow, 'same DOM row may carry a fresh opaque handle')
+  assert.ok(row('copy.md'))
+  originalRow.click(); await waitFor(() => /작업사본을 열었습니다/.test(status.textContent))
+  assert.equal(view.snapshot().draftId, original.draftId)
+  assert.equal(view.snapshot().fileId, original.fileId, 'draft authority was not rebound')
+  assert.equal(view.snapshot().savedRevision, 1)
+  assert.equal(editor.value, edited)
+  assert.equal(store.records.size, 2, 'no duplicate draft for the original')
+
+  // A fresh tree binding must not resurrect the previous tree's draft, even
+  // when the helper still knows the same authorized opaque root.
+  await view.openRoot(rootHandle)
+  row('source.md').click(); await waitFor(() => editor.value === base)
+  assert.notEqual(view.snapshot().draftId, original.draftId)
+  const renewed = view.snapshot()
+
+  // Reauthorization of the same folder still issues a distinct root grant.
+  const otherRoot = await service.registerRoot(root)
+  await view.openRoot(otherRoot)
+  row('source.md').click(); await waitFor(() => editor.value === base)
+  assert.notEqual(view.snapshot().draftId, renewed.draftId)
+  assert.notEqual(view.snapshot().draftId, original.draftId)
+  await view.openRoot(rootHandle)
+  row('source.md').click(); await waitFor(() => editor.value === base)
+
+  // Keep the old inode alive so the same-bytes replacement cannot reuse it.
+  await fs.rename(source, path.join(root, 'moved.md'))
+  await fs.symlink('moved.md', source)
+  await refresh('source.md')
+  assert.equal(row('source.md').getAttribute('aria-disabled'), 'true')
+  const beforeMoveOpen = view.snapshot().fileId
+  row('moved.md').click(); await waitFor(() => view.snapshot().fileId !== beforeMoveOpen)
+  assert.equal(editor.value, base)
+  const moved = view.snapshot()
+  await fs.unlink(source)
+  await fs.writeFile(source, base)
+  await refresh('source.md')
+  row('source.md').click(); await waitFor(() => view.snapshot().fileId !== moved.fileId)
+  assert.notEqual(view.snapshot().draftId, original.draftId)
+  assert.equal(editor.value, base)
+  await assert.rejects(service.readFile({ fileId: original.fileId }), { code: 'RESOURCE_CHANGED' })
+  assert.equal((await service.readDraft({ draftId: original.draftId })).text, edited)
+})
+
+test('file read continuity is exact, opaque, and limited to one service/root grant', async t => {
+  const { root, rootHandle, service, store } = await fixture(t, { gitReview: {} })
+  const source = path.join(root, 'source.md')
+  await fs.writeFile(source, 'base')
+  const readTree = async (files, grant) => files.readFile({ fileId: await fileId(files, grant.directoryId, 'source.md') })
+  const first = await readTree(service, rootHandle)
+  const refreshed = await readTree(service, rootHandle)
+  assert.notEqual(first.fileId, refreshed.fileId, 'listing still issues a new opaque handle')
+  assert.match(first.sourceBinding, /^[a-f0-9]{64}$/)
+  assert.equal(first.sourceBinding, refreshed.sourceBinding)
+  await assert.rejects(service.readFile({ fileId: first.sourceBinding }), { code: 'UNKNOWN_RESOURCE' })
+  const separateRoot = await readTree(service, await service.registerRoot(root))
+  assert.notEqual(separateRoot.sourceBinding, first.sourceBinding)
+  const relaunched = createEGDeskFileService({ draftStore: store, gitReview: {} })
+  const independent = await readTree(relaunched, await relaunched.registerRoot(root))
+  assert.notEqual(independent.sourceBinding, first.sourceBinding)
+  await assert.rejects(relaunched.readFile({ fileId: first.fileId }), { code: 'UNKNOWN_RESOURCE' })
+  await fs.writeFile(source, 'different disk revision')
+  const changed = await readTree(service, rootHandle)
+  assert.notEqual(changed.diskRevision, first.diskRevision)
+  assert.notEqual(changed.sourceBinding, first.sourceBinding)
+})
+
 test('onFileChanged collects events, re-lists only loaded affected folders, keeps expanded folders, and refreshes git state once', async () => {
   const service = treeService()
   const document = fakeDocument()
