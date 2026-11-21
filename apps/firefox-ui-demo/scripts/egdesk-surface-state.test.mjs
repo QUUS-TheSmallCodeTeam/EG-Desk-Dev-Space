@@ -10459,7 +10459,7 @@ function windowBoardMetadataHarness() {
     'deskWindowBoardIndex', 'syncDeskWindowBoardMetadata', 'syncAllDeskWindowBoardMetadata',
     'refreshBoardRegion', 'retargetRestoredEntityId', 'installCardHeaderFullscreenToggle', 'spawnDeskWindowShell',
     'normalizeAgendaTitle', 'renameAgenda', 'allocateRestoredEntityId', 'canRemapRestoredBoardMember',
-    'syncRestoredMemoReferences', 'remapRestoredBoardMember', 'remapRestoredProjectionIds', 'mountBoardMember', 'openBoardSnapshot',
+    'syncRestoredMemoReferences', 'remapRestoredBoardMember', 'remapRestoredProjectionIds', 'mountBoardMember', 'openBoardSnapshot', 'safeLocalBoardSnapshot', 'restoreBoardGroups',
     'memoCards', 'memoAnchorCandidates', 'memoTargetLabel', 'syncMemoCardPosition',
     'cleanSourceRef', 'cardKindForPersistence', 'runtimeStateForCard', 'serializeCardState',
     'applyBoardMembershipPatches', 'bindViewToBoard', 'unbindViewFromBoard', 'markBoardMembershipDirty', 'viewBoardRecord',

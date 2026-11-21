@@ -11571,3 +11571,8 @@ button.egd-memo-ask-cancel:hover { text-decoration: underline; }
   .egd-joint-presentation-world > div > span { background: Canvas; color: CanvasText; }
 }
 .egd-arrange-map{position:relative;aspect-ratio:16/9;background:var(--egd-surface);border:1px solid var(--egd-outline)}.egd-arrange-map span{box-sizing:border-box;position:absolute;border:1px dashed var(--egd-primary);background:var(--egd-primary-container);overflow:hidden}
+
+#egd-board-scope { top: 12%; width: min(420px, calc(100vw - 56px)); max-height: 74vh; overflow: auto; }
+#egd-board-scope .egd-board-scope-choices { max-height: 28vh; overflow: auto; }
+#egd-board-scope .egd-board-scope-choices label { display: flex; align-items: center; gap: 8px; padding: 4px; overflow-wrap: anywhere; }
+#egd-board-scope input[type="checkbox"] { width: auto; flex: none; }

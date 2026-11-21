@@ -130,8 +130,8 @@ test('surface wiring: header keys, attention sets, roving groups and the tooltip
 test('CNV-03 inferred default: Canvas shapes are never Board members; inside a Board area they show by position', () => {
   const add = surfaceJs.slice(surfaceJs.indexOf('  function addViewToBoard(view, projectionId) {'), surfaceJs.indexOf('  function removeViewFromBoard('));
   assert.match(add, /if \(view\.classList\.contains\('egd-canvas-shape'\)\) return false;\n    const kind = 'card';/);
-  const chooser = surfaceJs.slice(surfaceJs.indexOf('  function showBoardScopeChooser() {'), surfaceJs.indexOf('    const commitScope = memberIds => {'));
-  assert.match(chooser, /\.filter\(view => !view\.classList\.contains\('egd-canvas-shape'\)\)\.map\(view => view\.id\)/);
+  const eligible = surfaceJs.slice(surfaceJs.indexOf('  function canSaveLocalBoardView(view)'), surfaceJs.indexOf('  function showBoardScopeChooser()'));
+  assert.match(eligible, /classList\.contains\('egd-canvas-card'\)/);
   // Old Board records with shape members still restore.
   assert.match(surfaceJs, /if \(member\.kind === 'shape'\) view = restoreShapeFromState\(/);
   const doc = readFileSync(new URL('../docs/VIEWPORT_LAYOUT_INTERACTION_MODEL.md', import.meta.url), 'utf8');

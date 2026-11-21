@@ -5735,7 +5735,7 @@
         .map(serializeShapeState)
         .filter(Boolean),
       annotations: (typeof surfaceZones === 'undefined' ? null : surfaceZones.annotation?.annotationCanvasRecords()) || [],
-      groups: cloneJson(state.canvasGroups || []),
+      groups: CanvasLayout.pruneCanvasGroups(state.canvasGroups, (state.groupableCanvasIds?.() || [])).groups,
       surface: { mode: state.surface.mode, browserCardId: state.surface.browserCardId,
         initialBrowserFocus: !!state.surface.initialBrowserFocus,
         recoveryBackupKey: state.surface.recoveryBackupKey || null, recoveryAcknowledged: !!state.surface.recoveryAcknowledged },
@@ -5798,6 +5798,69 @@
     return state.boards.projections[state.boards.activeProjectionId] || null;
   }
 
+  // Keep complete group subtrees only. Never add an unchecked View merely
+  // because it is grouped with an included View. Translate View and group IDs
+  // separately in both directions; the latter never stand for DOM entities.
+  function boardGroupsForMembers(ids, projection = null) {
+    const groups = CanvasLayout.normalizeCanvasGroups(state.canvasGroups);
+    const allowed = new Set(ids);
+    const complete = groups.filter(group => CanvasLayout.canvasGroupLeaves(groups, group.id).every(id => allowed.has(id)));
+    const viewMap = new Map((projection?.members || []).map(member => [member.viewId, member.sourceId]));
+    const groupMap = new Map(Object.entries(projection?.groupIdMap || {}).map(([source, live]) => [live, source]));
+    return CanvasLayout.remapCanvasGroups(complete, viewMap, id => groupMap.get(id) || id);
+  }
+
+  function restoreBoardGroups(projection) {
+    if (projection.jointAccess || !Array.isArray(projection.source?.groups) || !state.restoreCanvasGroups) return;
+    const viewMap = new Map(projection.members.map(member => [member.sourceId, member.viewId]));
+    const groups = CanvasLayout.pruneCanvasGroups(projection.source.groups, [...viewMap.keys()]).groups;
+    const taken = new Set((state.canvasGroups || []).map(group => group.id));
+    const groupMap = new Map();
+    for (const group of groups) {
+      let id;
+      do { id = 'egd-group-' + servicesRef().uuid.generateUUID().toString().replace(/[{}]/g, ''); }
+      while (taken.has(id));
+      taken.add(id); groupMap.set(group.id, id);
+    }
+    projection.groupIdMap = Object.fromEntries(groupMap);
+    state.restoreCanvasGroups(CanvasLayout.remapCanvasGroups(groups, viewMap, id => groupMap.get(id)), new Map(), { merge: true });
+  }
+
+  // Board saves are arrangements/references, not Desk continuity. Reuse the
+  // local store scrubber before either the preference write or version write.
+  function safeLocalBoardSnapshot(raw) {
+    if (!raw?.agenda?.id || /^joint-/.test(raw.agenda.id)) return null;
+    const copy = RecoveryState.storeSafeCopy(raw);
+    const local = record => record && record.type !== 'joint-item' && !record.jointAccess;
+    const excluded = new Set([...(copy.cards || []), ...(copy.shapes || [])].filter(record => !local(record)).map(record => record?.id));
+    copy.cards = (copy.cards || []).filter(local);
+    copy.shapes = (copy.shapes || []).filter(local);
+    const ids = new Set(copy.cards.map(record => record.id));
+    copy.agenda.memberCardIds = (copy.agenda.memberCardIds || []).filter(id => !excluded.has(id));
+    for (const record of copy.cards) {
+      if (record.type === 'chat' || record.type === 'terminal') {
+        record.runtimeState = {};
+        record.sourceRef = null;
+      } else if (record.type === 'browser') {
+        // A Board reopens a page, not an OAuth callback or live login.
+        const page = uri => {
+          try {
+            const url = new URL(uri);
+            if (!['https:', 'http:', 'file:', 'about:'].includes(url.protocol)) return null;
+            url.username = ''; url.password = ''; url.search = ''; url.hash = '';
+            return url.href;
+          } catch { return null; }
+        };
+        if (record.sourceRef?.uri) record.sourceRef.uri = page(record.sourceRef.uri);
+        if (record.runtimeState?.uri) record.runtimeState.uri = page(record.runtimeState.uri);
+      }
+    }
+    // These scopes only occur in Desk snapshots, never in a Saved Board.
+    const groups = Array.isArray(copy.groups) ? CanvasLayout.pruneCanvasGroups(copy.groups, [...ids]).groups : null;
+    return { version: copy.version, savedAt: copy.savedAt, agenda: copy.agenda,
+      cards: copy.cards, shapes: copy.shapes, ...(groups ? { groups } : {}) };
+  }
+
   function serializeAgendaSnapshot(options = {}) {
     const projection = !Array.isArray(options.memberIds) && state.boards.projections[options.projectionId || state.boards.activeProjectionId];
     if (projection?.jointAccess) return null;
@@ -5813,16 +5876,22 @@
           records[member.viewId] = record;
         }
       }
-      return SurfaceState.snapshotBoardProjection(projection, records);
+      const snapshot = SurfaceState.snapshotBoardProjection(projection, records);
+      snapshot.groups = boardGroupsForMembers(projection.members.map(member => member.viewId), projection);
+      return snapshot;
     }
     // A new Board requires an explicit member set, including an explicit empty set.
     if (!Array.isArray(options.memberIds) || !options.agendaId) return null;
-    const views = [...new Set(options.memberIds)].map(id => document.getElementById(id)).filter(v => v && !v.dataset?.jointManaged);
+    const memberIds = [...new Set(options.memberIds)];
+    if (typeof options.title !== 'string' || !options.title.trim() || options.title.trim().length > 80) return null;
+    const views = memberIds.map(id => document.getElementById(id));
+    if (!views.every(canSaveLocalBoardView)) return null;
     return {
       version: 1, savedAt: Date.now(),
-      agenda: { id: options.agendaId, title: options.title || 'Board', memberCardIds: views.filter(v => v.classList.contains('egd-canvas-card')).map(v => v.id), contextBindings: cloneJson(options.contextBindings || []) },
-      cards: views.filter(v => v.classList.contains('egd-canvas-card')).map(serializeCardState).filter(Boolean),
-      shapes: views.filter(v => v.classList.contains('egd-canvas-shape')).map(serializeShapeState).filter(Boolean),
+      agenda: { id: options.agendaId, title: options.title.trim(), memberCardIds: memberIds, contextBindings: [] },
+      cards: views.map(serializeCardState).filter(Boolean),
+      shapes: [],
+      groups: boardGroupsForMembers(memberIds),
     };
   }
 
@@ -6448,7 +6517,8 @@
     const store = coerceAgendaStore();
     const meta = store.meta[boardId] || {};
     const name = (typeof title === 'string' && title.trim()) || meta.title || body.agenda.title || 'Board';
-    const snapshot = { ...cloneJson(body), savedAt: Date.now() };
+    const snapshot = { ...safeLocalBoardSnapshot(body), savedAt: Date.now() };
+    if (!snapshot.agenda) return false;
     snapshot.agenda = { ...snapshot.agenda, title: name };
     store.agendas[boardId] = snapshot;
     store.meta[boardId] = { ...meta, id: boardId, title: name, createdAt: meta.createdAt || snapshot.savedAt, updatedAt: snapshot.savedAt };
@@ -6825,6 +6895,8 @@
   }
 
   function openBoardSnapshot(snapshot, options = {}) {
+    if (snapshot?.agenda?.id && !(options.jointAccess && typeof jointDesk !== 'undefined'
+      && jointDesk?.permits(snapshot.agenda.id, options.jointAccess))) snapshot = safeLocalBoardSnapshot(snapshot);
     if (!snapshot?.agenda?.id) { boardNotice('저장된 Board를 읽을 수 없습니다.'); return false; }
     let projection = Object.values(state.boards.projections).find(p => p.boardId === snapshot.agenda.id);
     if (!projection) {
@@ -6844,7 +6916,10 @@
       if (projection.jointAccess && options.offset && [options.offset.x,options.offset.y].every(Number.isFinite)) projection.offset={...options.offset};
       state.boards.projections[projection.id] = projection;
       state.agenda.suppressDirty = true;
-      try { for (const member of projection.members) mountBoardMember(projection, member); }
+      try {
+        for (const member of projection.members) mountBoardMember(projection, member);
+        restoreBoardGroups(projection);
+      }
       finally { state.agenda.suppressDirty = false; }
     } else {
       const missing = SurfaceState.missingProjectionMembers(projection, projection.members.map(member => document.getElementById(member.viewId)?.id).filter(Boolean));
@@ -7140,7 +7215,8 @@
   }
 
   function saveCurrentAgendaState(options = {}) {
-    const snapshot = serializeAgendaSnapshot(options);
+    const raw = serializeAgendaSnapshot(options);
+    const snapshot = safeLocalBoardSnapshot(raw);
     if (!snapshot) { boardNotice('저장할 Board를 선택하거나 새 Board의 포함 범위를 지정하세요.'); return null; }
     const store = coerceAgendaStore();
     const agendaId = snapshot.agenda.id;
@@ -7700,7 +7776,7 @@
   // Board list). The open Board, its saved copy and everything on the Desk stay where they are.
   function commitBoardSaveAs(projectionId, name) {
     const projection = state.boards.projections[projectionId];
-    const snapshot = projection ? serializeAgendaSnapshot({ projectionId }) : null;
+    const snapshot = projection ? safeLocalBoardSnapshot(serializeAgendaSnapshot({ projectionId })) : null;
     if (!snapshot) return { ok: false, message: '저장할 Board를 찾지 못했습니다. Board를 다시 선택해 주세요.' };
     const result = BoardLifecycle.saveBoardAs(coerceAgendaStore(), {
       snapshot, newId: newAgendaId(), title: name, sourceId: projection.boardId, now: Date.now(),
@@ -8735,29 +8811,80 @@
     return openBoardSnapshot(snapshot, options);
   }
 
+  function canSaveLocalBoardView(view) {
+    return !!(view?.isConnected && view.id && view.classList.contains('egd-canvas-card')
+      && !view.dataset.jointManaged && !state.boards.projections[view.dataset.projectionId]?.jointAccess
+      && view.dataset.codexRole !== 'auth' && !view._savedBoardMember
+      && !(typeof view._xulBrowser?.browsingContext?.originAttributes?.privateBrowsingId === 'number'
+        && view._xulBrowser.browsingContext.originAttributes.privateBrowsingId !== 0)
+      && view._browserIdentity?.privateBrowsingId !== 1 && cardKindForPersistence(view) !== 'card');
+  }
+
   function showBoardScopeChooser() {
     document.getElementById('egd-board-scope')?.remove();
-    // CNV-03 (D-V1~V3, inferred default): Canvas shapes are not Board members.
-    // A new Board takes only the selected windows; a shape lying inside the
-    // Board's area is seen there by its position and is saved with the Desk.
-    // Older Boards that saved shapes as members still restore them (kind 'shape').
-    const selectedIds = Array.from(document.querySelectorAll('.egd-entity-selected'))
-      .filter(view => !view.classList.contains('egd-canvas-shape')).map(view => view.id);
-    const name = el('input', { 'aria-label': 'Board 이름', placeholder: 'Board 이름' });
-    const dialog = el('div', { id: 'egd-board-scope', class: 'egd-edge egd-frosted', role: 'dialog', 'aria-label': '새 Board 저장 범위' },
-      el('h3', {}, '새 Board'), name,
-      typeof jointUI === 'function' ? el('button',{data:{testid:'joint-form'},onclick:()=>{dialog.remove();jointUI().propose(name.value.trim());}},'함께 만들기…') : null,
-      el('p', {}, '포함할 화면을 직접 선택하세요.'),
-      el('button', { 'aria-label': '빈 Board 저장', onclick: () => commitScope([]) }, '빈 Board 저장'),
-      el('button', { 'aria-label': '선택한 화면으로 Board 저장', disabled: selectedIds.length ? null : 'true', onclick: () => commitScope(selectedIds) }, `선택한 화면 ${selectedIds.length}개 저장`),
-      el('button', { onclick: () => dialog.remove() }, '취소'));
-    const commitScope = memberIds => {
-      if (!name.value.trim()) { name.focus(); name.setAttribute('aria-invalid', 'true'); return; }
-      const saved = saveCurrentAgendaState({ agendaId: newAgendaId(), title: name.value.trim(), memberIds });
-      if (saved) { dialog.remove(); boardDoneNotice(memberIds.length ? 'Board를 저장하고 그 자리에 묶었습니다.' : 'Board를 저장했습니다. Board 목록에서 열 수 있습니다.'); }
+    const returnFocus = document.activeElement;
+    // Canvas shapes belong to the Desk, not to a new Board. Legacy members still restore.
+    const candidates = () => Array.from(document.querySelectorAll('.egd-canvas-card')).filter(canSaveLocalBoardView);
+    const suggested = new Set(candidates().filter(view => view.classList.contains('egd-entity-selected')).map(view => view.id));
+    const included = new Set(suggested);
+    const name = el('input', { 'aria-label': 'Board 이름', 'aria-describedby': 'egd-board-scope-error',
+      placeholder: 'Board 이름', maxlength: '80', oninput: () => { name.removeAttribute('aria-invalid'); error.textContent = ''; } });
+    const error = el('p', { id: 'egd-board-scope-error', role: 'alert' });
+    const count = el('p', { role: 'status', 'aria-live': 'polite' });
+    const choices = el('div', { class: 'egd-board-scope-choices' });
+    const all = el('details', {}, el('summary', {}, '항목 추가 / 포함 변경'), choices);
+    const close = () => { dialog.remove(); if (returnFocus?.isConnected) returnFocus.focus(); };
+    const syncCount = () => { count.textContent = included.size ? `화면 ${included.size}개 저장` : '빈 Board로 저장'; };
+    const render = () => {
+      const available = candidates();
+      const live = new Set(available.map(view => view.id));
+      for (const id of included) if (!live.has(id)) included.delete(id);
+      choices.replaceChildren(...available.map((view, index) => {
+        const kind = cardKindForPersistence(view);
+        // Never surface the current private room name as a Board candidate label.
+        const text = kind === 'chat' ? 'Chat (배치만)' : cardLabelForViewportRail(view);
+        const checkbox = el('input', { type: 'checkbox', data: { testid: 'board-scope-member', viewId: view.id },
+          onchange: () => { if (checkbox.checked) included.add(view.id); else included.delete(view.id); syncCount(); } });
+        checkbox.checked = included.has(view.id);
+        return el('label', {}, checkbox, `${index + 1}. ${text}`);
+      }));
+      if (!available.length) choices.appendChild(el('p', {}, '포함할 수 있는 로컬 화면이 없습니다.'));
+      syncCount();
     };
+    const commitScope = ev => {
+      ev?.preventDefault();
+      const title = name.value.trim();
+      if (!title || title.length > 80) {
+        error.textContent = 'Board 이름을 1~80자로 입력하세요.';
+        name.setAttribute('aria-invalid', 'true'); name.focus(); return;
+      }
+      const live = new Set(candidates().map(view => view.id));
+      if ([...included].some(id => !live.has(id))) {
+        render(); error.textContent = '일부 화면을 포함할 수 없게 되었습니다. 포함 목록을 확인하고 다시 저장하세요.'; return;
+      }
+      const saved = saveCurrentAgendaState({ agendaId: newAgendaId(), title, memberIds: [...included] });
+      if (!saved) { error.textContent = '저장하지 못했습니다. 포함 범위를 유지했습니다. 다시 시도하세요.'; return; }
+      close();
+      boardDoneNotice(saved.cards?.length ? `화면 ${saved.cards.length}개를 Board로 저장했습니다.` : '빈 Board를 저장했습니다.');
+    };
+    const panel = el('form', { onsubmit: commitScope },
+      el('h3', { id: 'egd-board-scope-title' }, '새 Board'), name, error,
+      typeof jointUI === 'function' ? el('button', { type: 'button', data: { testid: 'joint-form' },
+        onclick: () => { close(); jointUI().propose(name.value.trim()); } }, '함께 만들기…') : null,
+      el('p', {}, '체크한 화면의 배치와 다시 열기 참조를 저장합니다. Chat 대화·방, 브라우저 로그인, 터미널 세션은 저장하지 않습니다.'),
+      el('button', { type: 'button', onclick: () => { included.clear(); render(); } }, '빈 Board'),
+      el('button', { type: 'button', disabled: suggested.size ? null : 'true',
+        onclick: () => { included.clear(); for (const id of suggested) included.add(id); render(); } }, '선택한 화면'),
+      all, count,
+      el('button', { type: 'submit', data: { testid: 'board-scope-save' } }, 'Board 저장'),
+      el('button', { type: 'button', onclick: close }, '취소'));
+    const dialog = el('div', { id: 'egd-board-scope', class: 'egd-edge egd-frosted', role: 'dialog',
+      'aria-labelledby': 'egd-board-scope-title', onkeydown: ev => {
+        if (ev.key === 'Escape' && !ev.isComposing) { ev.preventDefault(); ev.stopPropagation(); close(); }
+      } }, panel);
     document.documentElement.appendChild(dialog);
-    name.focus();
+    all.open = true;
+    render(); name.focus();
     return dialog;
   }
 
@@ -10795,6 +10922,8 @@
       closeDeskMinimap();
       return;
     }
+    if (state.cardFullscreen?.mode === 'focus' && state.surface?.initialBrowserFocus
+        && state.cardFullscreen.cardId === state.surface.browserCardId) return;
     const input = el('input', { type: 'search', class: 'egd-minimap-search', maxlength: String(MinimapLayout.MINIMAP_QUERY_MAX),
       'aria-label': '열린 Board와 화면 이름 검색', 'aria-controls': 'egd-minimap-search-results',
       'aria-describedby': 'egd-minimap-search-status', placeholder: '열린 Board와 화면 검색',
@@ -29468,6 +29597,13 @@
       const style = window.getComputedStyle(card);
       return { width: parsePxNumber(style.minWidth, 320) || 320, height: parsePxNumber(style.minHeight, 250) || 250 };
     };
+    const mayGroup = card => !!(card?.isConnected && card.classList.contains('egd-canvas-card')
+      && !card.dataset.jointManaged && !card.dataset.layoutManaged && !card.dataset.layoutFixed
+      && !card.dataset.shared && card.dataset.codexRole !== 'auth'
+      && !state.boards.projections[card.dataset.projectionId]?.jointAccess);
+    const groupableCards = () => liveCards().filter(mayGroup);
+    state.groupableCanvasIds = () => groupableCards().map(view => view.id);
+    const newGroupId = () => 'egd-group-' + servicesRef().uuid.generateUUID().toString().replace(/[{}]/g, '');
     const selectedCards = () => Array.from(document.querySelectorAll('.egd-canvas-card.egd-entity-selected'))
       .filter(card => card.isConnected && card.id && !isCardFullscreen(card));
     // The View bar (a card's title row) takes focus after a placement change so
@@ -29506,7 +29642,7 @@
     let frameRaf = 0;
     const renderGroupFrames = () => {
       frameRaf = 0;
-      const live = liveCards();
+      const live = groupableCards();
       const pruned = CanvasLayout.pruneCanvasGroups(state.canvasGroups, live.map(card => card.id));
       if (pruned.changed) state.canvasGroups = pruned.groups;
       const rects = new Map(live.map(card => [card.id, rectOf(card)]));
@@ -29545,9 +29681,8 @@
 
     // --- selection follows groups ---
     const selectGroupMembers = card => {
-      const group = CanvasLayout.canvasGroupOf(state.canvasGroups, card?.id);
-      if (!group) return;
-      for (const id of group.viewIds) {
+      if (!mayGroup(card)) return;
+      for (const id of CanvasLayout.expandCanvasGroupSelection(state.canvasGroups, [card.id])) {
         const node = document.getElementById(id);
         if (node && node !== card && node.isConnected) node.classList.add('egd-entity-selected');
       }
@@ -29608,7 +29743,7 @@
       if (!start) return;
       const memberIds = mode === 'move' ? CanvasLayout.expandCanvasGroupSelection(state.canvasGroups, [card.id]) : [card.id];
       const members = memberIds.map(id => document.getElementById(id))
-        .filter(node => node && node !== card && node.isConnected && node.classList.contains('egd-canvas-card') && !isCardFullscreen(node))
+        .filter(node => node !== card && mayGroup(node) && !isCardFullscreen(node))
         .map(node => ({ node, start: rectOf(node) })).filter(member => member.start);
       const moving = new Set([card, ...members.map(member => member.node)]);
       const ownRegion = card.dataset.projectionId || null;
@@ -29713,8 +29848,8 @@
       const dx = point.x - start.x, dy = point.y - start.y;
       // A selected window moves with the rest of the selection; group mates always come along.
       const ids = card.classList.contains('egd-entity-selected') ? selectedCards().map(node => node.id) : [card.id];
-      const moving = [...new Set([...ids, ...CanvasLayout.expandCanvasGroupSelection(state.canvasGroups, ids)])];
-      const items = moving.map(id => document.getElementById(id)).filter(node => node?.isConnected && !isCardFullscreen(node))
+      const moving = CanvasLayout.expandCanvasGroupSelection(state.canvasGroups, ids);
+      const items = moving.map(id => document.getElementById(id)).filter(node => mayGroup(node) && !isCardFullscreen(node))
         .map(node => { const before = rectOf(node); return { id: node.id, before, after: { ...before, x: before.x + dx, y: before.y + dy } }; });
       if (!history.record({ label: 'move', items })) return;
       for (const item of items) {
@@ -29753,17 +29888,16 @@
         boardNotice(`${verb} 배치가 그 뒤에 바뀌어서 건너뛰었습니다.`);
         return true;
       }
-      let touched = null;
       for (const item of result.rects) {
         const node = document.getElementById(item.id);
         if (!node?.isConnected || isCardFullscreen(node)) continue;
         applyPersistentEntityGeometry(node, { x: item.x, y: item.y, width: item.width, height: item.height });
         markAgendaDirty(result.label === 'resize' ? 'resize-card' : 'move-card', node);
-        touched = node;
       }
       if (Array.isArray(result.groups)) {
-        state.canvasGroups = CanvasLayout.normalizeCanvasGroups(result.groups);
-        markAgendaDirty('group-cards', touched);
+        state.canvasGroups = CanvasLayout.pruneCanvasGroups(result.groups, groupableCards().map(view => view.id)).groups;
+        for (const node of groupableCards()) if (node.dataset.projectionId) markAgendaDirty('group-cards', node);
+        scheduleDeskSessionSave();
       }
       scheduleGroupFrames();
       return true;
@@ -29787,7 +29921,7 @@
       const chosen = selectedCards();
       if (!chosen.length) return false;
       const ids = CanvasLayout.expandCanvasGroupSelection(state.canvasGroups, chosen.map(card => card.id));
-      const nodes = ids.map(id => document.getElementById(id)).filter(node => node?.isConnected && !isCardFullscreen(node));
+      const nodes = ids.map(id => document.getElementById(id)).filter(node => mayGroup(node) && !isCardFullscreen(node));
       const moving = new Set(nodes);
       const items = nodes.map(node => ({ id: node.id, rect: rectOf(node) }));
       // A Board region a chosen View belongs to is its home, not an obstacle.
@@ -29811,33 +29945,110 @@
       return true;
     };
 
-    // --- [그룹으로 묶기] / [그룹 해제] ---
-    const groupSelection = () => {
-      const chosen = selectedCards();
-      if (chosen.length < 2) return false;
-      const before = state.canvasGroups;
-      const result = CanvasLayout.createCanvasGroup(before, chosen.map(card => card.id));
+    // --- [그룹으로 묶기] / [그룹 해제] / [상위 그룹] ---
+    const saveGroupEdit = (before, result, label) => {
       if (!result.changed) return false;
       state.canvasGroups = result.groups;
-      history.record({ label: 'group', items: [], groups: { before, after: result.groups } });
-      markAgendaDirty('group-cards', chosen[0]);
+      history.record({ label, items: [], groups: { before, after: result.groups } });
+      const changedIds = new Set([...before, ...result.groups].filter(group =>
+        JSON.stringify(before.find(item => item.id === group.id)) !== JSON.stringify(result.groups.find(item => item.id === group.id)))
+        .flatMap(group => [...CanvasLayout.canvasGroupLeaves(before, group.id), ...CanvasLayout.canvasGroupLeaves(result.groups, group.id)]));
+      for (const id of changedIds) markAgendaDirty('group-cards', document.getElementById(id));
+      scheduleDeskSessionSave();
       scheduleGroupFrames();
       return true;
     };
-    const ungroupSelection = () => {
-      const chosen = selectedCards();
+    const selectedGroupMembers = () => {
+      const chosen = selectedCards().filter(mayGroup);
+      const selected = new Set(chosen.map(view => view.id));
+      const roots = new Set();
+      const viewIds = [];
+      for (const id of selected) {
+        const root = CanvasLayout.canvasRootGroup(state.canvasGroups, CanvasLayout.canvasGroupOf(state.canvasGroups, id));
+        if (!root) viewIds.push(id);
+        else if (CanvasLayout.canvasGroupLeaves(state.canvasGroups, root.id).every(key => selected.has(key))) roots.add(root.id);
+      }
+      return { viewIds, groupIds: [...roots] };
+    };
+    const groupSelection = () => {
+      const { viewIds, groupIds } = selectedGroupMembers();
       const before = state.canvasGroups;
-      const result = CanvasLayout.dissolveCanvasGroups(before, chosen.map(card => card.id));
-      if (!result.changed) return false;
-      state.canvasGroups = result.groups;
-      history.record({ label: 'ungroup', items: [], groups: { before, after: result.groups } });
-      markAgendaDirty('ungroup-cards', chosen[0] || null);
-      scheduleGroupFrames();
-      return true;
+      const result = CanvasLayout.createCanvasGroup(before, viewIds, { id: newGroupId(), groupIds });
+      if (saveGroupEdit(before, result, 'group')) return true;
+      boardNotice('서로 다른 화면 또는 그룹을 2개 이상 선택하세요. 그룹은 최대 8단계까지 묶을 수 있습니다.');
+      return false;
+    };
+    const ungroupSelection = () => {
+      const { groupIds } = selectedGroupMembers();
+      const before = state.canvasGroups;
+      return saveGroupEdit(before, CanvasLayout.dissolveCanvasGroups(before, [], { groupIds }), 'ungroup');
+    };
+    const openGroupEditor = () => {
+      closePlacementDialog();
+      const anchor = document.activeElement;
+      const status = el('p', { role: 'status', 'aria-live': 'polite' });
+      const groupSelect = el('select', { 'aria-label': '그룹', data: { testid: 'canvas-group-child' } });
+      const parentSelect = el('select', { 'aria-label': '상위 그룹', data: { testid: 'canvas-group-parent' } });
+      const members = el('ul', { 'aria-label': '그룹 내부 목록' });
+      const validGroups = () => CanvasLayout.pruneCanvasGroups(state.canvasGroups, groupableCards().map(view => view.id)).groups;
+      const groupLabel = (group, groups) => {
+        const title = CanvasLayout.canvasGroupLeaves(groups, group.id).slice(0, 2)
+          .map(id => document.getElementById(id)).filter(Boolean).map(cardLabelForViewportRail).join(', ');
+        return `그룹 ${groups.indexOf(group) + 1} · ${title}`;
+      };
+      const showMembers = () => {
+        const groups = validGroups();
+        const group = groups.find(item => item.id === groupSelect.value);
+        members.replaceChildren(...(group?.viewIds || []).map(id => el('li', {}, cardLabelForViewportRail(document.getElementById(id)))),
+          ...(group?.groupIds || []).map(id => el('li', {}, groupLabel(groups.find(item => item.id === id), groups))));
+        const parent = groups.find(item => item.groupIds?.includes(groupSelect.value));
+        if (parent) parentSelect.value = parent.id;
+      };
+      const render = (pick = groupSelect.value) => {
+        const groups = validGroups();
+        const option = group => el('option', { value: group.id }, groupLabel(group, groups));
+        groupSelect.replaceChildren(...groups.map(option));
+        if (groups.some(group => group.id === pick)) groupSelect.value = pick;
+        parentSelect.replaceChildren(el('option', { value: '' }, '상위 그룹 선택'), ...groups.map(option));
+        showMembers();
+      };
+      groupSelect.addEventListener('change', () => { parentSelect.value = ''; showMembers(); });
+      const edit = (action) => {
+        const before = state.canvasGroups;
+        const current = validGroups();
+        const childId = groupSelect.value, parentId = parentSelect.value;
+        if (!current.some(group => group.id === childId) || (action !== 'dissolve' && !current.some(group => group.id === parentId))) return;
+        const result = action === 'dissolve' ? CanvasLayout.dissolveCanvasGroups(current, [], { groupIds: [childId] })
+          : CanvasLayout.changeCanvasGroupParent(current, childId, parentId, { remove: action === 'remove' });
+        status.textContent = saveGroupEdit(before, result, action === 'dissolve' ? 'ungroup' : 'group')
+          ? '그룹 관계를 변경했습니다.' : '같은 그룹, 기존 소속, 순환 또는 최대 깊이를 확인하세요.';
+        render(childId);
+      };
+      const select = () => {
+        const groups = validGroups();
+        const nodes = CanvasLayout.canvasGroupLeaves(groups, groupSelect.value).map(id => document.getElementById(id)).filter(mayGroup);
+        if (nodes.length) setSelectedEntities(nodes, nodes[0]);
+        closePlacementDialog({ restoreFocus: true });
+      };
+      const button = (text, testid, onclick) => el('button', { type: 'button', data: { testid }, onclick }, text);
+      placementDialog = el('div', { id: 'egd-placement-dialog', role: 'dialog', 'aria-label': '상위 그룹',
+        style: { left: 'max(8px, calc(50vw - 140px))', top: '15vh', maxHeight: '70vh', overflow: 'auto' } },
+        el('h3', {}, '상위 그룹'), el('label', {}, '그룹 ', groupSelect), el('label', {}, '상위 그룹 ', parentSelect), members, status,
+        button('상위 그룹에 넣기', 'canvas-group-attach', () => edit('add')),
+        button('상위 그룹에서 빼기', 'canvas-group-detach', () => edit('remove')),
+        button('그룹 해제', 'canvas-group-dissolve', () => edit('dissolve')),
+        button('구성 화면 선택', 'canvas-group-select', select),
+        button('닫기', 'canvas-group-close', () => closePlacementDialog({ restoreFocus: true })));
+      placementDialog._returnTo = anchor?.isConnected ? anchor : viewport;
+      document.documentElement.appendChild(placementDialog);
+      render(selectedGroupMembers().groupIds[0]);
+      groupSelect.focus();
+      return placementDialog;
     };
     state.restoreCanvasGroups = (groups, restoredIds, { merge = false } = {}) => {
       const remapped = CanvasLayout.remapCanvasGroups(groups, restoredIds || new Map());
-      state.canvasGroups = merge ? CanvasLayout.normalizeCanvasGroups([...state.canvasGroups, ...remapped]) : remapped;
+      state.canvasGroups = CanvasLayout.pruneCanvasGroups(merge ? [...state.canvasGroups, ...remapped] : remapped,
+        groupableCards().map(view => view.id)).groups;
       if (!merge) history.clear();
       scheduleGroupFrames();
     };
@@ -30005,7 +30216,8 @@
       const count = chosen.length;
       const active = card || (state.activeEntityId ? document.getElementById(state.activeEntityId) : null);
       const target = active?.classList?.contains('egd-canvas-card') && active.isConnected && !isCardFullscreen(active) ? active : null;
-      const grouped = chosen.some(node => CanvasLayout.canvasGroupOf(state.canvasGroups, node.id));
+      const groupChoice = selectedGroupMembers();
+      const grouped = groupChoice.groupIds.length > 0;
       const item = (label, title, testid, action, disabled = false) => el('button', {
         type: 'button', class: 'egd-board-menu-item', role: 'menuitem', title, 'aria-label': title,
         disabled: disabled ? 'true' : null, data: { testid },
@@ -30015,7 +30227,9 @@
         item(`선택 ${count}개 겹침 없이 정리`, count >= 2 ? '선택한 창을 보이는 영역 안에서 24px 간격으로 다시 놓습니다'
           : '선택한 창을 보이는 영역 안에서 24px 간격으로 다시 놓습니다 — Shift를 누른 채 다른 창 머리를 누르면 여러 창을 함께 고릅니다',
         'placement-arrange', arrangeSelection, count < 1),
-        count >= 2 ? item('그룹으로 묶기', '선택한 창을 함께 움직이고 함께 선택되는 그룹으로 묶습니다', 'placement-group', groupSelection) : null,
+        count ? item('Board로 저장', '선택한 화면에서 새 Board 저장 범위를 편집합니다', 'placement-save-board', () => createNewAgenda()) : null,
+        groupChoice.viewIds.length + groupChoice.groupIds.length >= 2 ? item('그룹으로 묶기', '선택한 창을 함께 움직이고 함께 선택되는 그룹으로 묶습니다', 'placement-group', groupSelection) : null,
+        state.canvasGroups.length ? item('상위 그룹…', '상위 그룹과 내부 구성을 편집합니다', 'placement-parent-group', openGroupEditor) : null,
         grouped ? item('그룹 해제', '선택한 창이 속한 그룹을 풉니다', 'placement-ungroup', ungroupSelection) : null,
         target ? item('이동…', '창의 x, y를 숫자로 입력합니다', 'placement-move', () => openPlacementDialog(target, 'move')) : null,
         target ? item('크기…', '창의 너비와 높이를 숫자로 입력합니다', 'placement-size', () => openPlacementDialog(target, 'size')) : null,
