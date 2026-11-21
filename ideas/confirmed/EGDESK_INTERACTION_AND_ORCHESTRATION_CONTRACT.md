@@ -2670,6 +2670,8 @@ receipt에는 seeds·순회 관계·필수/선택 unit·source/hash·권위/권�
 
 <a id="impl-e24-collaboration-authority"></a>
 
+**통합 근거(좁은 부분):** [운영자 발급과 카드별 권한을 가진 Firefox Board](../../apps/firefox-ui-demo/docs/JOINT_BOARD_RUNTIME.md). 좌표 변경은 본문 수정·회신 버전과 분리하며, 수신 초대는 승인된 원문 버전과 제공자의 유효 참여에 묶는다. [선택형 배치 설계](../../apps/firefox-ui-demo/docs/DECISION_MODEL_CONTEXT_SETUP.md#board-presentation-choice)는 실행 권한 없는 보기만 돌려준다. [앱 공유 설계](../brainstorming/MINI_APP_ECOSYSTEM.md#npx-sharing)에서 패키지 배포·인스턴스 접근·업무 변경 권한은 별개다.
+
 #### 2. 협업 identity·grant·동시성·소유권
 
 **화면 연결**: [사용자 조작](../../docs/references/design-synthesis/egdesk-ux-realization-proposals.md#ux-detail-e24-collaboration-invite) · [사용자 조작](../../docs/references/design-synthesis/egdesk-ux-realization-proposals.md#ux-detail-e24-collaboration-manage)
