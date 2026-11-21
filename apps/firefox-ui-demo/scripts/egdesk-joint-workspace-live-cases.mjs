@@ -18,6 +18,7 @@ export async function verifyWorkspace({a,b,id,j,manage,hub,bounded,screenshot,bo
   await manageCard(a,title(type));await a.click(j('app-permission'));await a.click(j('confirm'));await closePanel(a);await b.see(sc+j('app-role'),'읽기 전용');assert.equal(await b.has(sc+j('app-change')),false);if(type==='shipment')await screenshot(b,'joint-team-item');await manageCard(a,title(type));await a.click(j('revoke'));await a.click(j('confirm'));await closePanel(a);await bounded(()=>b.has(sc.trim()),x=>!x,'revoke app '+ref);mark(type+' item reads, explicitly granted transition reaches both profiles, downgrades then disappears after revoke');
  }
  // Presentation and spatial audit use the same authorized Board, not a fixture HTML page.
- const extras=await import('./egdesk-joint-spatial-live-cases.mjs');await extras.verifySpatialCases({a,b,id,j,manage,hub,bounded,screenshot,boardTitle,store,mark,decisions,mode,resetByOpen,closePanel});
+ const extras=await import('./egdesk-joint-spatial-live-cases.mjs');if (process.env.EGDESK_QA_MATERIALS_ONLY !== '1') await extras.verifySpatialCases({a,b,id,j,manage,hub,bounded,screenshot,boardTitle,store,mark,decisions,mode,resetByOpen,closePanel});
+ await extras.verifyOverlappedMaterials({a,b,j,bounded,screenshot,store,taskTitle,privateTitle,resetByOpen,manageCard,grant,closePanel,mark});
  await closePanel(a);await closePanel(b);
 }

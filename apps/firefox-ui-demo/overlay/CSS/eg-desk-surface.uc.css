@@ -11564,3 +11564,17 @@ button.egd-memo-ask-cancel:hover { text-decoration: underline; }
 #egd-board-scope .egd-board-scope-choices { max-height: 28vh; overflow: auto; }
 #egd-board-scope .egd-board-scope-choices label { display: flex; align-items: center; gap: 8px; padding: 4px; overflow-wrap: anywhere; }
 #egd-board-scope input[type="checkbox"] { width: auto; flex: none; }
+
+/* The Board shortcut lives in screen chrome and is never part of the Canvas stack. */
+.egd-joint-rail-materials { flex: none; white-space: nowrap; -moz-window-dragging: no-drag; }
+.egd-joint-rail-materials[hidden] { display: none; }
+@media (max-width: 720px) {
+  .egd-rail-center:has(.egd-joint-rail-materials:not([hidden])) { flex: 1 0 auto; }
+  .egd-rail-center:has(.egd-joint-rail-materials:not([hidden])) .egd-rail-search { display: none; }
+}
+#egd-joint-panel { box-sizing: border-box; right: 12px; max-height: calc(100vh - 76px); }
+#egd-joint-panel .egd-joint-button:focus-visible { outline: var(--egd-focus-outline); outline-offset: var(--egd-focus-outline-offset); }
+.egd-joint-materials { display: grid; gap: 8px; padding: 0; margin: 0; list-style: none; }
+.egd-joint-material { padding: 9px; border: 1px solid var(--egd-outline); border-radius: 6px; overflow-wrap: anywhere; }
+.egd-joint-material h4, .egd-joint-material-edge { margin: 0 0 6px; }
+.egd-joint-material-edge { color: var(--egd-on-surface); line-height: 1.45; }

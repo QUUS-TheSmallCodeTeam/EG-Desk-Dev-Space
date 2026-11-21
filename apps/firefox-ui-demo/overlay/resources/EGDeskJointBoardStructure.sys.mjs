@@ -12,3 +12,22 @@ export function createBoardStructure({document:d,el,geometry,getBoard,byId,revea
  function toggle(p){const off=inspecting===p.id;clear();if(!off)inspecting=p.id;return !off;}
  return {clear,draw,jump,toggle,is:p=>inspecting===p?.id,leave:p=>{if(inspecting&&inspecting!==p?.id)clear();},removed:p=>{if(inspecting===p.id)clear();}};
 }
+
+// The viewport list is generated from the checked service projection, not Canvas windows.
+export function boardCardAction(card) {
+  return card.own ? 'manage' : card.replied ? null : card.claimed ? 'reply' : 'claim';
+}
+
+export function boardMaterials(el, board, actionButton) {
+  const cards = new Map(board.cards.map(card => [card.id, card]));
+  const links = new Map(board.links.filter(edge => cards.has(edge.child) && cards.has(edge.parent))
+    .map(edge => [edge.child, edge]));
+  return el('ul', {class:'egd-joint-materials', data:{testid:'joint-board-materials'}}, ...board.cards.map(card => {
+    const edge = links.get(card.id), target = edge && cards.get(edge.parent);
+    return el('li', {class:'egd-joint-material', data:{testid:'joint-material-row'}},
+      el('h4', {}, card.title),
+      target ? el('p', {class:'egd-joint-material-edge', data:{testid:'joint-material-edge'}},
+        card.title + (edge.kind === 'waits' ? ' → 완료를 기다리는 선행 자료: ' : ' → 참조하는 자료: ') + target.title) : null,
+      boardCardAction(card) ? actionButton(card, boardCardAction(card)) : el('small', {}, '회신 보냄'));
+  }));
+}

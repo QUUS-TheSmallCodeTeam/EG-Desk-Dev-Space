@@ -187,6 +187,52 @@ export async function verify({ executable, loaderSource, evidence }) {
       );
     };
     const has = (sel) => evaluate((q) => !!document.querySelector(q), sel);
+    const pointer = async (sel, index = 0) => {
+      await see(sel);
+      const proof = await evaluate((q,i) => {
+        const node = document.querySelectorAll(q)[i], r = node.getBoundingClientRect();
+        const x = Math.round(r.left + r.width / 2), y = Math.round(r.top + r.height / 2);
+        const hit = x >= 0 && x < innerWidth && y >= 0 && y < innerHeight && node.contains(document.elementFromPoint(x,y));
+        const observe = event => { window.__egdeskBoardProofPointer.trusted = node.contains(event.target) && event.isTrusted; };
+        window.__egdeskBoardProofPointer = {observe,trusted:false};
+        window.addEventListener('click', observe, true);
+        return {x,y,hit,viewport:[innerWidth,innerHeight]};
+      },sel,index);
+      try {
+        assert.equal(proof.hit,true,JSON.stringify(proof));
+        await h.clickPoint({x:proof.x,y:proof.y});
+      } finally {
+        proof.trusted = await evaluate(() => {
+          const {observe,trusted} = window.__egdeskBoardProofPointer;
+          window.removeEventListener('click',observe,true);
+          delete window.__egdeskBoardProofPointer;
+          return trusted;
+        });
+      }
+      assert.equal(proof.trusted,true,JSON.stringify(proof));
+      return proof;
+    };
+    const key = async (name, selector) => {
+      const proof = await evaluate((name,selector) => {
+        if (selector) document.querySelector(selector).focus();
+        const active = document.activeElement;
+        const engine = Cc['@mozilla.org/text-input-processor;1'].createInstance(Ci.nsITextInputProcessor);
+        if (!engine.beginInputTransactionForTests(window)) throw Error('No Gecko keyboard transaction');
+        let trusted = false, activation = false;
+        const down = e => {trusted = e.isTrusted && e.target === active;};
+        const click = e => {activation = e.isTrusted && e.target === active;};
+        window.addEventListener('keydown',down,true);
+        window.addEventListener('click',click,true);
+        engine.keydown(new KeyboardEvent('keydown',{key:name,code:name}));
+        engine.keyup(new KeyboardEvent('keyup',{key:name,code:name}));
+        window.removeEventListener('keydown',down,true);
+        window.removeEventListener('click',click,true);
+        return {key:name,trusted,activation,before:active?.dataset.testid};
+      },name,selector);
+      assert.equal(proof.trusted,true,JSON.stringify(proof));
+      if (name === 'Enter') assert.equal(proof.activation,true,JSON.stringify(proof));
+      return proof;
+    };
     const shut = async () => {
       await h.assertRemoteProfile();
       await evaluate(() => {
@@ -211,7 +257,7 @@ export async function verify({ executable, loaderSource, evidence }) {
         'actual Desk entry',
       );
     }
-    return { h, evaluate, see, click, fill, has, shut };
+    return { h, evaluate, see, click, fill, has, shut, pointer, key };
   }
   async function hub(x) {
     if (await x.has('#egd-joint-panel')) await x.click(j('panel-close'));
@@ -449,6 +495,8 @@ export async function verify({ executable, loaderSource, evidence }) {
     await b.click(j('accept'));
     await b.see('[data-joint-scope="single"]', taskTitle);
     assert.equal(await b.has(id('board-projection')), false);
+    assert.equal(await b.evaluate(() => document.querySelector('[data-testid="joint-board-structure"]').hidden), true);
+    assert.equal(await b.has(j('board-materials')), false);
     const single = store.view('receiver');
     assert.equal(single.boards.length, 0);
     assert.equal(single.singles.length, 1);

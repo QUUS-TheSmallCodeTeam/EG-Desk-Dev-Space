@@ -6356,6 +6356,7 @@
       },
     }, label);
     const items = projection.jointAccess ? [
+      item('구성/자료', '이 공용 Board의 자료와 관계 보기', 'joint-board-structure-menu', () => jointUI().openMaterials(projection, anchor)),
       item('이 보드 빠른 정리…','사진과 작업 목적을 검토해 내 배치만 정리','joint-presentation-open',()=>arrange().open(projection.id,anchor)),
       item('화면 겹침·입력 검사', '이 보드 자료의 잘림과 입력 도달성을 이 컴퓨터에서만 검사', 'joint-inspect-render', () => jointUI().audit.open(projection.boardId)),
       item('카드·사람 관리', '이 공용 Board의 공개 자료와 사람 관리', 'joint-board-manage', () => jointUI().panel('board', projection.boardId)),
@@ -6828,6 +6829,7 @@
       notice: boardNotice,
       allProjections,
       byId,
+      selected: () => state.boards.projections[state.boards.activeProjectionId],
       select:p=>selectBoardProjection(p.id),presentationSync:()=>arrangeUI?.sync(),
       dispose,
       removeProjection,
@@ -9729,6 +9731,7 @@
     }
     syncViewportBoardName();
     syncAllBoardRegionMarks();
+    jointDesk?.syncMaterialsControl();
     const switcher = document.querySelector('.egd-rail-switcher');
     if (switcher) switcher.classList.toggle('egd-rail-switcher-open', !!document.getElementById('egd-agenda-switcher'));
     const dirtyBadge = document.querySelector('.egd-rail-dirty-badge');
@@ -11364,7 +11367,15 @@
       },
     });
 
-    const center = el('div', { class: 'egd-rail-section egd-rail-center' },
+    const materials = el('button', {type:'button', class:'egd-joint-button egd-joint-rail-materials', hidden:true,
+      'aria-haspopup':'dialog', 'aria-label':'구성/자료', 'aria-expanded':'false', data:{testid:'joint-board-structure'},
+      onclick: ev => {
+        ev.stopPropagation();
+        closeAgendaSwitcher();
+        closeBoardRegionMenu();
+        jointDesk?.openMaterials(state.boards.projections[state.boards.activeProjectionId], ev.currentTarget);
+      }}, '구성/자료');
+    const center = el('div', { class: 'egd-rail-section egd-rail-center' }, materials,
       el('div', { class: 'egd-rail-search' },
         el('span', { class: 'egd-rail-search-icon' }, deskIcon('search')),
         searchInput,

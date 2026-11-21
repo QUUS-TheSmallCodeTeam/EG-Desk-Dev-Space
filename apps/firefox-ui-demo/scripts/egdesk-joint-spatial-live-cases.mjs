@@ -40,3 +40,91 @@ export async function verifyDeskPhoto({a,id,j,bounded,decisions,mode,mark,eviden
   assert.equal(proof.localMemo,true);assert.ok(proof.count>=3);assert.ok(proof.image?.startsWith('data:image/png;base64,')); if(evidence)fs.writeFileSync(path.join(evidence,'desk-approved-scope.png'),Buffer.from(proof.image.split(',')[1],'base64'));await a.click(p('decision-cancel'));await a.click(p('cancel'));assert.equal(decisions(),before);
   mark('Desk menu: locally saved personal memo plus authorized Board cards render in one reviewed PNG, cancelled without a model call');mode('off');
 }
+
+export async function verifyOverlappedMaterials({a,b,j,bounded,screenshot,store,taskTitle,privateTitle,resetByOpen,manageCard,grant,closePanel,mark}) {
+  const control = j('board-structure'), action = j('material-action'), list = j('board-materials');
+  const card = (who,title) => store.view(who).boards[0].cards.find(c => c.title === title);
+  const selected = (who,title) => `${action}[data-material-id="${card(who,title).id}"]`;
+  const active = x => x.evaluate(() => document.activeElement?.dataset.testid);
+  await grant(privateTitle);
+  await resetByOpen(a); await resetByOpen(b);
+  // Cover all four Board cards with one real, unrelated Desk memo. This is only a synthetic
+  // Canvas pose fixture; the Board surface, authorization and both input paths are product code.
+  const original = await a.evaluate(() => [...document.querySelectorAll('#egd-canvas-layer > [data-testid="joint-card"], #egd-canvas-layer > .egd-memo-card')].map(n => [n.id,n.style.cssText]));
+  await a.click('.egd-dock-btn[data-id="memo"]');
+  await a.see('.egd-memo-card');
+  const coverId = await a.evaluate(() => document.querySelector('#egd-canvas-layer > .egd-memo-card')?.id);
+  const overlap = await a.evaluate(() => {
+    const layer = document.getElementById('egd-canvas-layer'), r = layer.getBoundingClientRect();
+    const zoom = new DOMMatrix(getComputedStyle(layer).transform).a || 1;
+    const cards = [...layer.querySelectorAll('[data-testid="joint-card"]')], memo = layer.querySelector('.egd-memo-card');
+    const nodes = [...cards,memo];
+    nodes.forEach((n,i) => Object.assign(n.style, {left:Math.round((170-r.left)/zoom)+'px',top:Math.round((132-r.top)/zoom)+'px',width:Math.round((i===4?550:400)/zoom)+'px',height:Math.round((i===4?560:390)/zoom)+'px',zIndex:String(16000+i)}));
+    const probes = node => {
+      const b = node.getBoundingClientRect(), samples = [0.2,0.5,0.8].flatMap(x => [0.2,0.5,0.8].map(y => [b.left+x*b.width,b.top+y*b.height]));
+      return {hit:samples.filter(([x,y]) => node.contains(document.elementFromPoint(x,y))).length,total:samples.length};
+    };
+    return cards.map(n => ({card:probes(n),manage:probes(n.querySelector('[data-testid="joint-item-manage"]'))}));
+  });
+  assert.equal(overlap.length,4);
+  assert.ok(overlap.every(p => p.card.hit === 0 && p.manage.hit === 0),JSON.stringify(overlap));
+  const poses = () => [...document.querySelectorAll('#egd-canvas-layer > .egd-canvas-card')].map(n=>[n.id,n.style.cssText]);
+  const before = await a.evaluate(poses);
+  const pointer = await a.pointer(control);
+  const relation = privateTitle + ' → 완료를 기다리는 선행 자료: ' + taskTitle;
+  await a.see(j('material-edge'),relation);
+  assert.equal(await a.evaluate(() => document.querySelectorAll('[data-testid="joint-material-row"]').length),4);
+  await screenshot(a,'joint-four-overlap-materials');
+  await a.pointer(selected('sender',privateTitle));
+  await a.see(j('share'));
+  assert.equal(await a.evaluate(()=>document.querySelector('#egd-joint-panel h3')?.textContent),privateTitle);
+  await screenshot(a,'joint-four-overlap-selected-manage');
+  const escape = await a.key('Escape');
+  assert.equal(await a.has('#egd-joint-panel'),false);
+  assert.equal(await active(a),'joint-board-structure');
+  assert.deepEqual(await a.evaluate(poses),before);
+  // The fixed rail is keyboard reachable via normal tab traversal, not by dispatching to the button.
+  await a.key('Tab','.egd-rail-switcher');
+  for(let i=0;i<7 && await active(a)!=='joint-board-structure';i++) await a.key('Tab');
+  assert.equal(await active(a),'joint-board-structure');
+  const keyboard = await a.key('Enter');
+  await a.see(j('material-edge'),relation);
+  await a.key('Escape');
+  await resetByOpen(a);
+  await a.pointer(control); await a.see(j('material-edge'),relation);
+  await screenshot(a,'joint-four-materials-reopened');
+  await closePanel(a);
+  const recipient = await b.pointer(control);
+  await b.see(j('material-edge'),relation);
+  assert.equal(await b.has(`${action}[data-action="manage"]`),false);
+  const child = selected('partner',privateTitle);
+  await b.key('Enter',child); await b.see(j('material-claim-confirm'));
+  assert.equal(await b.evaluate(()=>document.querySelector('#egd-joint-panel h3')?.textContent),privateTitle);
+  await b.pointer(j('material-decline'));
+  await b.see(list);
+  assert.equal(card('partner',privateTitle).claimed,false);
+  assert.equal(await active(b),'joint-material-action');
+  await b.key('Enter'); await b.pointer(j('material-claim-confirm'));
+  await b.see(`${child}[data-action="reply"]`);
+  await b.key('Enter',child); await b.see(j('material-reply-text'));
+  await screenshot(b,'joint-materials-recipient-reply');
+  await manageCard(a,privateTitle); await a.click(j('revoke')); await a.click(j('confirm')); await closePanel(a);
+  await bounded(() => b.evaluate(title => {
+    const panel = document.getElementById('egd-joint-panel');
+    return !!panel?.querySelector('[data-testid="joint-board-materials"]') && !panel.textContent.includes(title)
+      && !panel.querySelector('[data-testid="joint-material-edge"]') && !panel.querySelector('[data-testid="joint-material-reply-text"]')
+      && panel.querySelectorAll('[data-testid="joint-material-row"]').length === 1 && panel.contains(document.activeElement);
+  },privateTitle),Boolean,'revocation purges stale reply and edge, updates list and restores safe focus');
+  await screenshot(b,'joint-materials-recipient-revoked');
+  await b.key('Escape'); await resetByOpen(b);
+  await b.pointer(control); await b.see(list,taskTitle);
+  assert.equal(await b.has(j('material-edge')),false);
+  assert.equal(await b.evaluate(t=>document.getElementById('egd-joint-panel').textContent.includes(t),privateTitle),false);
+  await closePanel(b);
+  await a.evaluate(styles => {for (const [id,style] of styles) {const n = document.getElementById(id); if (n) n.style.cssText = style;} return true;},original);
+  if (!original.some(([id]) => id === coverId)) await a.click('#' + coverId + ' .egd-card-dot-close');
+  const evidence=process.env.EGDESK_JOINT_EVIDENCE;
+  if(evidence)fs.writeFileSync(path.join(evidence,'board-materials-acceptance.json'),JSON.stringify({overlap,pointer,keyboard,escape,recipient,relation,selected:privateTitle,unchangedPoses:true,claimDeclined:true,replyOpened:true,revocationClearedReplyAndLink:true,reopen:true},null,2));
+  mark('4 owner cards and all manage targets: 0/9 Gecko hits each; fixed Board control hits and trusted input opens exact live action, with no geometry changes');
+  mark('recipient claim/decline/reply reaches selected card only; live endpoint revoke purges reply, title and edge, also after Board reopen');
+}

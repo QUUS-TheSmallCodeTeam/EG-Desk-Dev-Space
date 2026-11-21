@@ -7,7 +7,7 @@ import {
 import {appLabels,appStates,nextAppStates,isAppRef} from './EGDeskJointMiniappSchema.sys.mjs';
 import {createJointAudit} from './EGDeskJointSpatialAuditView.sys.mjs';
 import {describeSpatialObservation} from './EGDeskJointSpatialLabels.sys.mjs';
-import {createBoardStructure} from './EGDeskJointBoardStructure.sys.mjs';
+import {boardCardAction, boardMaterials, createBoardStructure} from './EGDeskJointBoardStructure.sys.mjs';
 const errors = {'invalid-app':'승인된 앱과 40자 이내의 항목 번호를 확인하세요.','app-unavailable':'팀 앱에 연결할 수 없습니다. 변경은 반영되지 않았습니다.','app-interrupted':'권한 또는 연결이 바뀌어 변경을 마치지 않았습니다. 현재 상태를 확인하세요.','app-busy':'이 항목의 다른 변경이 진행 중입니다.','invalid-transition':'현재 상태에서는 선택할 수 없는 변경입니다.',cycle:'서로를 기다리는 순환 관계는 만들 수 없습니다.',
   'invalid-address': 'HTTPS 주소 또는 이 컴퓨터의 loopback 주소를 입력하세요.',
   'invalid-key': '협업 서비스에서 발급한 계정 키를 입력하세요.',
@@ -29,6 +29,7 @@ export function createUI(h) {
   const { window: w, document: d, el } = h;
   let view = null,
     page = null,
+    materialsContext = null,
     refreshing = false,
     busy = false,
     closed = false,
@@ -140,6 +141,7 @@ export function createUI(h) {
     view = v;audit.sync();
     if (!v) {
       structure.clear();
+      if (materialsContext) hidePanel();
       for (const p of h.allProjections()) h.removeProjection(p);
       for (const el of d.querySelectorAll('[data-joint-managed]')) drop(el);
       drafts.clear();
@@ -201,14 +203,19 @@ export function createUI(h) {
         if (c.replied || !c.claimed || +root.dataset.jointVersion !== c.version) drop(root);
       } else renderItem(root, c);
     }
-    if (
+    if (!materialsContext && (
       (page?.board && !getB(page.board)) ||
       (page?.card && !findCard(page.card)) ||
       (page?.invite && !v.invites.some((i) => i.id === page.invite))
-    ) {
+    )) {
       page = { type: 'hub' };
     }
-    if (page && ['hub', 'board', 'card','appReview'].includes(page.type)) draw();
+    if (materialsContext) {
+      const b = activeMaterialsBoard();
+      if (!b) hidePanel();
+      else if (page.binding && !materialEntry(page.binding)) showMaterials();
+      else if (page.type === 'materials' && page.signature !== materialsSignature(b)) draw();
+    } else if (page && ['hub', 'board', 'card','appReview'].includes(page.type)) draw();
     h.updateRows();
     h.presentationSync?.();
     if (previous && v.invites.some((i) => !previous.invites.some((o) => o.id === i.id)))
@@ -393,12 +400,86 @@ export function createUI(h) {
       activityAt: 0,
     }));
   }
-  function hidePanel() {
+  const railMaterials = () => d.querySelector('[data-testid="joint-board-structure"]');
+  function selectedJointBoard(p = h.selected()) {
+    const b = api.connected && p?.jointAccess && getB(p.boardId);
+    return b && p.jointAccess === b.epoch && h.byId(p.boardId) === p ? b : null;
+  }
+  function activeMaterialsBoard() {
+    const p = h.selected(), b = selectedJointBoard(p);
+    return b && materialsContext?.projectionId === p.id && materialsContext.scope === instanceScope ? b : null;
+  }
+  function materialEntry(binding) {
+    const b = activeMaterialsBoard();
+    const c = b?.cards.find(x => x.id === binding.id && x.access === binding.access);
+    return c && JSON.stringify(c) === binding.snapshot && boardCardAction(c) === binding.action ? {b,c} : null;
+  }
+  const materialsSignature = b => JSON.stringify([b.title, b.cards.map(c => [c.id,c.title,c.access,c.version,boardCardAction(c)]), b.links]);
+  function syncMaterialsControl() {
+    if (materialsContext && !activeMaterialsBoard()) hidePanel();
+    const control = railMaterials(), b = selectedJointBoard();
+    if (!control) return;
+    if (!b && d.activeElement === control) d.querySelector('.egd-rail-switcher')?.focus({preventScroll:true});
+    control.hidden = !b;
+    control.setAttribute('aria-label', b ? b.title + ' · 구성/자료' : '구성/자료');
+    control.setAttribute('aria-expanded', String(!!materialsContext));
+  }
+  function showMaterials(focusCard = page?.binding?.id) {
+    page = {type:'materials'};
+    warn = '';
+    draw();
+    const rowAction = focusCard && [...d.querySelectorAll('[data-testid="joint-material-action"]')]
+      .find(n => n.dataset.materialId === focusCard);
+    (rowAction || d.querySelector('#egd-joint-panel h3'))?.focus({preventScroll:!rowAction});
+  }
+  async function openMaterials(p, anchor) {
+    if (!selectedJointBoard(p)) return;
+    h.select(p);
+    hidePanel({restoreFocus:false});
+    materialsContext = {projectionId:p.id,scope:instanceScope,anchor};
+    const context = materialsContext;
+    page = {type:'materials-loading'};
+    draw();
+    syncMaterialsControl();
+    try {
+      await fresh();
+      if (materialsContext === context && activeMaterialsBoard()) showMaterials();
+    } catch (error) {
+      if (materialsContext === context) hidePanel();
+      showError(error);
+    }
+  }
+  async function openMaterialAction(card, action) {
+    const currentPage = page;
+    const binding = {id:card.id,access:card.access,action,snapshot:JSON.stringify(card)};
+    await fresh();
+    if (page !== currentPage || !materialsContext) return;
+    if (!materialEntry(binding)) { showMaterials(card.id); return; }
+    form(action === 'manage' ? 'card' : 'material-' + action, {card:card.id,binding});
+  }
+  function hidePanel({restoreFocus = true} = {}) {
+    const context = materialsContext;
+    materialsContext = null;
     d.getElementById('egd-joint-panel')?.remove();
     page = null;
     warn = '';
+    if (context) {
+      syncMaterialsControl();
+      if (restoreFocus) {
+        const rail = railMaterials();
+        const original = context.anchor;
+        const r = original?.getBoundingClientRect();
+        const hit = r && d.elementFromPoint(r.left + r.width / 2, r.top + r.height / 2);
+        const anchor = hit && original.contains(hit) ? original : rail && !rail.hidden ? rail : d.querySelector('.egd-rail-switcher');
+        anchor?.focus({preventScroll:true});
+      }
+    }
   }
   function panel(type = 'hub', ref = null) {
+    if (materialsContext) {
+      if (type === 'card' && ref === page?.binding?.id) return form(type, {card:ref});
+      hidePanel({restoreFocus:false});
+    }
     warn = '';
     if (!view && type !== 'hub') {
       advance = type;
@@ -409,8 +490,10 @@ export function createUI(h) {
   }
   function form(type, info = {}) {
     warn = '';
-    page = { type, ...info };
+    const binding = page?.binding;
+    page = { type, ...(binding ? {binding} : {}), ...info };
     draw();
+    if (materialsContext) (d.querySelector('#egd-joint-panel h3') || d.querySelector('[data-testid="joint-panel-close"]'))?.focus();
   }
   const ptxt = (t) => el('p', { class: 'egd-joint-help' }, t),
     fld = (label, id, { multi = false, val = '', secret = false } = {}) => {
@@ -437,20 +520,43 @@ export function createUI(h) {
       d.documentElement.append(box);
       box.addEventListener('keydown', (ev) => {
         if (ev.key === 'Escape') {
+          ev.preventDefault();
           ev.stopPropagation();
           hidePanel();
         }
       });
     }
+    box.setAttribute('aria-label', materialsContext ? 'Board · 구성/자료' : '사람과 공유');
     const main = el('div', { class: 'egd-joint-panel-body' });
     box.replaceChildren(
-      el('header', {}, el('strong', {}, '사람과 공유'), btn('닫기', 'panel-close', hidePanel)),
+      el('header', {}, el('strong', {}, materialsContext ? '구성/자료' : '사람과 공유'), btn('닫기', 'panel-close', hidePanel)),
       main,
     );
     if (warn) main.append(el('p', { role: 'status' }, warn));
     const add = (...nodes) => main.append(...nodes.filter(Boolean));
-    const heading = (t) => el('h3', {}, t);
-    const back = () => panel('hub');
+    const heading = (t) => el('h3', materialsContext ? {tabindex:'-1'} : {}, t);
+    const back = () => materialsContext ? showMaterials() : panel('hub');
+    if (page.type === 'materials-loading') {
+      add(el('p', {role:'status'}, '현재 자료 권한 확인 중…'));
+      box.querySelector('[data-testid="joint-panel-close"]')?.focus({preventScroll:true});
+      return;
+    }
+    if (page.type === 'materials') {
+      const board = activeMaterialsBoard();
+      if (!board) { hidePanel(); return; }
+      const previousFocus = page.focusCard;
+      page.signature = materialsSignature(board);
+      add(heading(board.title), board.cards.length ? boardMaterials(el, board, (card, action) => {
+        const label = {manage:'공개·회신 관리',claim:'이 일 맡기',reply:'회신 쪽지 열기'}[action];
+        return btn(label, 'material-action', () => openMaterialAction(card, action), {
+          'aria-label':card.title + ' · ' + label,
+          onfocus: () => {page.focusCard = card.id;},
+          data:{testid:'joint-material-action',materialId:card.id,action},
+        });
+      }) : ptxt('현재 내게 열린 자료가 없습니다.'));
+      if (previousFocus) ([...main.querySelectorAll('[data-material-id]')].find(n => n.dataset.materialId === previousFocus) || main.querySelector('h3'))?.focus();
+      return;
+    }
     if (!view) {
       if (api.connected) {
         add(
@@ -484,12 +590,46 @@ export function createUI(h) {
       return;
     }
     const b = page.board ? getB(page.board) : null,
-      entry = page.card ? findCard(page.card) : null,
+      entry = page.binding ? materialEntry(page.binding) : page.card ? findCard(page.card) : null,
       c = entry?.c;
+    const drawnPage = page;
     const send = async (action, after = back) => {
+      const current = page;
+      if (drawnPage.binding && current !== drawnPage) return;
+      if (current.binding) {
+        await fresh();
+        if (page !== current) return;
+        if (!materialEntry(current.binding)) { showMaterials(); return; }
+      }
       await act(action);
-      after();
+      if (!current.binding || page === current) after();
+      return true;
     };
+    if (page.type === 'material-claim' && c) {
+      add(heading(c.title), ptxt(c.body), btn('확인하고 맡기', 'material-claim-confirm', () => send({action:'claim',grant:c.access,version:c.version})),
+        btn('취소', 'material-decline', back));
+      return;
+    }
+    if (page.type === 'material-reply' && c) {
+      const current = page;
+      const reply = fld('보낼 답', 'material-reply-text', {multi:true,val:drafts.get(draftKey(c)) || ''});
+      reply.input.maxLength = 2000;
+      reply.input.addEventListener('input', () => drafts.set(draftKey(c),reply.input.value));
+      const review = btn('회신 내용 확인', 'material-reply-review', () => {
+        if (page === current && reply.input.value.trim()) form('material-reply-review', {card:c.id,body:reply.input.value.trim()});
+      });
+      add(heading(c.title + '에 대한 회신'), ptxt('받는 사람: ' + c.author), reply.row, review, btn('취소', 'material-decline', back));
+      return;
+    }
+    if (page.type === 'material-reply-review' && c) {
+      const body = page.body;
+      add(heading(c.title + '에 대한 회신 확인'), ptxt('받는 사람: ' + c.author), el('p',{class:'egd-joint-text'},page.body),
+        btn('이 사람에게 회신', 'material-reply-send', async () => {
+          if (await send({action:'reply',grant:c.access,version:c.version,to:c.author,body})) drafts.delete(draftKey(c));
+        }), btn('다시 쓰기', 'material-reply-back', () => form('material-reply',{card:c.id})),
+        btn('취소', 'material-decline', back));
+      return;
+    }
     if (page.type === 'hub') {
       add(
         heading(view.self.name + ' · ' + view.self.id),
@@ -687,6 +827,7 @@ export function createUI(h) {
       add(
         heading(c.title),
         ptxt(c.body),
+        materialsContext ? btn('구성/자료로 돌아가기','material-back',back) : null,
         btn('공개할 사람 선택', 'share', () => form('share', { card: c.id })),
         btn('자료 연결 편집','link-edit',()=>form('relation',{card:c.id})),
         c.app?null:btn('내용 수정', 'edit', () => form('edit', { card: c.id })),
@@ -816,7 +957,7 @@ export function createUI(h) {
     { once: true },
   );
   return {
-    audit,structure,inspect,panel,fresh,presentationBoard(p){const b=api.connected&&p&&getB(p.boardId);return b&&b.epoch===p.jointAccess?{scope:instanceScope,board:b}:null;},
+    audit,structure,inspect,panel,fresh,openMaterials,syncMaterialsControl,presentationBoard(p){const b=api.connected&&p&&getB(p.boardId);return b&&b.epoch===p.jointAccess?{scope:instanceScope,board:b}:null;},
     propose(title) {
       proposalTitle = title || '';
       panel('propose');
