@@ -20500,7 +20500,7 @@ test('CU-01 the line under an answer, the activity record line, and the size-onl
   assert.equal(Chat.computerUseRunLine(run, { formatTime: () => '오후 3:30' }), '컴퓨터 조작 3번 · 마지막 오후 3:30 · cua_repl');
   assert.equal(Chat.computerUseRunLine(busy, { formatTime: () => '오후 3:30' }), '컴퓨터 조작 3번 · 마지막 오후 3:30 · 지금 조작 중 · cua_repl');
   assert.equal(Chat.computerUseRunLine({ computerControl: { policy: 'off' } }), '컴퓨터 조작 끈 채로 실행');
-  assert.equal(Chat.computerUseRunLine({ computerControl: { policy: 'inherit' } }), '컴퓨터 조작 켜 둠 · 이 실행에서는 조작 안 함');
+  assert.equal(Chat.computerUseRunLine({ computerControl: { policy: 'inherit' } }), '컴퓨터 조작은 Codex 설정 따름 · 이 실행에 기록된 조작 없음');
   assert.equal(Chat.computerUseRunLine({}), null, 'an older bridge says nothing');
 
   assert.equal(Chat.mcpCallDetailText(row('a', 'computer', { argumentsBytes: 120, resultImageCount: 1, resultTextBytes: 2150, durationMs: 1234 })),

@@ -2889,7 +2889,7 @@ export function computerUseRunLine(run, { formatTime = clockText } = {}) {
       use.active && isRunBusy(run) ? '지금 조작 중' : null, use.servers.length ? use.servers.join(', ') : null].filter(Boolean).join(' · ');
   }
   if (run?.computerControl?.policy === 'off') return '컴퓨터 조작 끈 채로 실행';
-  if (run?.computerControl?.policy === 'inherit') return '컴퓨터 조작 켜 둠 · 이 실행에서는 조작 안 함';
+  if (run?.computerControl?.policy === 'inherit') return '컴퓨터 조작은 Codex 설정 따름 · 이 실행에 기록된 조작 없음';
   return null;
 }
 const byteText = bytes => bytes < 1024 ? `${bytes}바이트`
