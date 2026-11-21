@@ -37,6 +37,7 @@ import { openBridgeSettings } from './egdesk-bridge-settings.mjs'
 import { createDecisionBudget, createDecisionClient, decisionTopicRecipient } from './egdesk-decision-client.mjs'
 import { openDecisionCredentialStore } from './egdesk-decision-credential.mjs'
 import { createDecisionHttpHandler } from './egdesk-decision-http.mjs'
+import { createBoardPresentationHttpHandler } from './egdesk-board-presentation-http.mjs'
 import { collectDecisionCandidates } from './egdesk-decision-candidates.mjs'
 import { MemoryEvidenceStore } from './egdesk-memory-evidence.mjs'
 import { createMemoryEvidenceHttpHandler } from './egdesk-memory-http.mjs'
@@ -487,9 +488,30 @@ const handleEngineProfilesHttp = createEngineProfilesHttpHandler({
   },
 })
 const handleHostControlHttp = createHostControlHttpHandler(hostControl, { port: BRIDGE_PORT })
+// Board arrangement gets a separate guarded client over the same isolated Decisions key and budget.
+const handleBoardPresentationHttp = createBoardPresentationHttpHandler({ credentials: decisionCredentials,
+  getMode: () => bridgeSettings.decisionContext.mode, budget: decisionBudget, port: BRIDGE_PORT })
+// Invalidate at the mutation itself, not after an awaited HTTP operation. Old grants
+// stay revoked even if mode is switched off and back on or a key revision collides.
+const revokeBoardAfter = operation => (...args) => {
+  const ok = operation(...args)
+  if (ok === true) handleBoardPresentationHttp.invalidate()
+  return ok
+}
+const decisionSettingsCredentials = {
+  get status() { return decisionCredentials.status },
+  get writable() { return decisionCredentials.writable },
+  getApiKey: () => decisionCredentials.getApiKey(), hint: () => decisionCredentials.hint(), savedAt: () => decisionCredentials.savedAt(),
+  save: revokeBoardAfter(key => decisionCredentials.save(key)), clear: revokeBoardAfter(() => decisionCredentials.clear()),
+}
+const decisionMode = bridgeSettings.decisionContext
+const decisionSettingsMode = {
+  get mode() { return decisionMode.mode }, get saved() { return decisionMode.saved }, get persisted() { return decisionMode.persisted },
+  save: revokeBoardAfter(mode => decisionMode.save(mode)),
+}
 // Settings → 결정 모델 · OpenAI Decisions: key status/save/remove and the mode (works signed out).
-const handleDecisionHttp = createDecisionHttpHandler({ store: decisionCredentials, verifyKey: key => decisionClient.verifyKey(key),
-  budget: decisionBudget, model: decisionClient.model, mode: bridgeSettings.decisionContext, port: BRIDGE_PORT })
+const handleDecisionHttp = createDecisionHttpHandler({ store: decisionSettingsCredentials, verifyKey: key => decisionClient.verifyKey(key),
+  budget: decisionBudget, model: decisionClient.model, mode: decisionSettingsMode, port: BRIDGE_PORT })
 const handleOntologyHttp = createOntologyHttpHandler({ binding: () => ontologyBinding, store: ensureOntologyStore, runtime: sqliteRuntime, port: BRIDGE_PORT })
 const handleMemoryEvidenceHttp = createMemoryEvidenceHttpHandler({ port: BRIDGE_PORT,
   ensureAuth: hints => ensureChatAuth(hints, { allowIsolated: true, requireClientPair: true }),
@@ -1036,6 +1058,7 @@ const bridgeServer = createServer(async (req, res) => {
         profiles: profileStore ? ['local-store', 'revisions', 'run-binding'] : ['local-store-unavailable'],
         engines: ['registry', 'thread-lock'],
         boardDeliveryIntent: true,
+        boardPresentation: true,
         channelContext: true,
         desk: deskStore ? ['local-store', 'generations', 'restore', 'board-revisions', 'board-revert', 'prefs-import'] : ['local-store-unavailable'],
         portable: [
@@ -1186,6 +1209,7 @@ const bridgeServer = createServer(async (req, res) => {
 
   if (await handleComputerControlHttp(req, res, url)) return
   if (await handleDecisionHttp(req, res, url)) return
+  if (await handleBoardPresentationHttp(req, res, url)) return
   if (await handleEngineProfilesHttp(req, res, url)) return
   if (await handleProfileHttp(req, res, url)) return
   if (await handleDeskHttp(req, res, url)) return

@@ -32,10 +32,13 @@
   const ProfileTransferView = ChromeUtils.importESModule('chrome://userchrome/content/EGDeskProfileTransferView.sys.mjs');
   const HostActivityView = ChromeUtils.importESModule('chrome://userchrome/content/EGDeskHostActivityView.sys.mjs');
   const MemoState = ChromeUtils.importESModule('chrome://userchrome/content/EGDeskMemoState.sys.mjs');
+  const DeskPhoto = ChromeUtils.importESModule('chrome://userchrome/content/EGDeskDeskPhoto.sys.mjs',{global:'current'});
   // DSN-04 · UX-05 · UX-06 keyboard rules and CNV-06 memo link rules (pure modules). Plain .mjs
   // loads into this window like the surface zones (SURFACE_MODULE_BASE); only .sys.mjs is shared.
   const JointUI = ChromeUtils.importESModule('chrome://userchrome/content/EGDeskJointBoardView.sys.mjs', { global: 'current' });
-  let jointDesk = null;
+  const WorkbenchArrange=ChromeUtils.importESModule('chrome://userchrome/content/EGDeskWorkbenchArrange.sys.mjs',{global:'current'});
+  let jointDesk = null,arrangeUI=null;
+  const arrange=()=>arrangeUI??=WorkbenchArrange.createWorkbenchArrange({window,document,canvas:()=>document.getElementById('egd-canvas-layer'),projections:()=>Object.values(state.boards.projections).filter(p=>p.jointAccess),meta:p=>jointDesk?.presentationBoard(p),verifyAuthority:()=>jointDesk?.fresh(),safe:safeViewportRect,camera:()=>({...state.pan,zoom:state.zoom,minZoom:ZOOM_MIN,maxZoom:ZOOM_MAX}),moving:()=>!!state.cardFullscreen?.cardId||Math.abs(state.zoom-state.zoomTarget)>.002||Math.abs(state.pan.x-state.panTarget.x)>1||Math.abs(state.pan.y-state.panTarget.y)>1,context:()=>state.boardSelectionRevision||0,geometry:persistentEntityGeometry,apply:applyPersistentEntityGeometry,setCamera:c=>state.setCanvasViewportTarget({pan:{x:c.x,y:c.y},zoom:c.zoom},{immediate:true}),record:n=>jointDesk?.recordPose(n),dirty:n=>markAgendaDirty('layout',n),refresh:()=>{for(const p of Object.values(state.boards.projections))refreshBoardRegion(p);refreshDeskMinimap();},http:deskStoreRequest,notice:boardNotice});
   const jointUI = () => jointDesk || (jointDesk = JointUI.createUI(jointHost()));
   const SurfaceKeys = ChromeUtils.importESModule('chrome://userchrome/content/surface/EGDeskSurfaceKeys.mjs', { global: 'current' });
   const MemoLink = ChromeUtils.importESModule('chrome://userchrome/content/surface/EGDeskSurfaceMemoLink.mjs', { global: 'current' });
@@ -5971,6 +5974,7 @@
       state.boardSelectionRevision = (state.boardSelectionRevision || 0) + 1;
       invalidateReviewContext();
     }
+    if(typeof jointDesk!=='undefined'&&jointDesk)jointDesk.structure.leave(projection);
     state.boards.activeProjectionId = projection.id;
     state.agenda.activeAgendaId = projection.boardId;
     state.agenda.activeTitle = projection.title;
@@ -6228,7 +6232,7 @@
         data: { boardId: projection.boardId, projectionId: projection.id, testid: 'board-projection' },
       }, el('div', { class: 'egd-board-region-head' },
         el('button', { type: 'button', class: 'egd-board-region-title', data: { testid: 'board-select', projectionId: projection.id },
-          onclick: () => selectBoardProjection(projection.id) },
+          onclick: () => { selectBoardProjection(projection.id); if(projection.jointAccess&&jointDesk)jointDesk.inspect(projection); } },
         deskIcon('board'), el('span', { class: 'egd-board-region-name' })),
         el('span', { class: 'egd-board-region-current', hidden: true }, '현재 Board'),
         el('span', { class: 'egd-board-region-unsaved', hidden: true }, '저장 안 됨'),
@@ -6249,8 +6253,9 @@
     syncBoardRegionMarks(region, projection);
     syncBoardRegionProject(region, projection);
     const rects = projection.members.map(m => document.getElementById(m.viewId)).filter(Boolean).map(persistentEntityGeometry);
-    const rect = SurfaceState.boardRegionRect(rects, { fallback: projection.offset });
+    const rect = SurfaceState.boardRegionRect(rects, { fallback: projection.offset,...(projection.jointAccess&&jointDesk?.structure.is(projection)?{titleHeight:82}:{}) });
     Object.assign(region.style, { left: `${rect.x}px`, top: `${rect.y}px`, width: `${rect.width}px`, height: `${rect.height}px` });
+    if(projection.jointAccess&&jointDesk)jointDesk.structure.draw(projection);
     scheduleViewportBoardSync();
     syncAllDeskWindowBoardMetadata();
     return region;
@@ -6282,6 +6287,8 @@
       },
     }, label);
     const items = projection.jointAccess ? [
+      item('이 보드 빠른 정리…','사진과 작업 목적을 검토해 내 배치만 정리','joint-presentation-open',()=>arrange().open(projection.id,anchor)),
+      item('화면 겹침·입력 검사', '이 보드 자료의 잘림과 입력 도달성을 이 컴퓨터에서만 검사', 'joint-inspect-render', () => jointUI().audit.open(projection.boardId)),
       item('카드·사람 관리', '이 공용 Board의 공개 자료와 사람 관리', 'joint-board-manage', () => jointUI().panel('board', projection.boardId)),
       item('Board 닫기', '이 Desk에서만 닫기', 'board-close', () => jointUI().closeBoard(projection.boardId))
     ] : [
@@ -6680,6 +6687,7 @@
       if (state.activeEntityId === node.id) setActiveEntity(null);
     }
     function removeProjection(p) {
+      arrangeUI?.close();
       for (const m of p.members) {
         const e = document.getElementById(m.viewId);
         if (e?.dataset.projectionId === p.id) dispose(e);
@@ -6750,6 +6758,7 @@
       notice: boardNotice,
       allProjections,
       byId,
+      select:p=>selectBoardProjection(p.id),presentationSync:()=>arrangeUI?.sync(),
       dispose,
       removeProjection,
       reconcile,
@@ -8944,6 +8953,7 @@
               createNewAgenda();
             },
           }, '새 Board'),
+          el('button',{class:'egd-agenda-switch-action',data:{testid:'desk-fast-arrange'},onclick:()=>{closeAgendaSwitcher();arrange().open('@desk',document.querySelector('[data-testid="rail-board-list"]'));}},'지금 책상 빠른 정리…'),
           typeof jointUI === 'function' ? el('button',{class:'egd-agenda-switch-action',data:{testid:'joint-hub'},onclick:()=>{closeAgendaSwitcher();jointUI().panel('hub');}},'사람과 공유') : null,
         ),
       ),
@@ -21026,7 +21036,7 @@
     }, '펼치기'));
 
     // Body: the user's text. Saving it never calls an Agent.
-    let saveTimer = 0;
+    let saveTimer = 0, composingMemoBody = false;
     const stageText = () => {
       const next = MemoState.editMemoText(root._memoRecord, textarea.value);
       if (next === root._memoRecord) return;
@@ -21060,6 +21070,11 @@
       onblur: () => { if (saveTimer) { clearTimeout(saveTimer); saveText(); } },
     });
     textarea.value = memo.text;
+    textarea.addEventListener('compositionstart', () => { composingMemoBody = true; });
+    textarea.addEventListener('compositionend', () => { composingMemoBody = false; });
+    // Bind the exact native editor and pending local-save/IME lifecycle, not a selector.
+    if (typeof DeskPhoto !== 'undefined') DeskPhoto.registerDeskMemoPhotoEditor(root, textarea,
+      () => composingMemoBody || saveTimer !== 0);
     const status = el('button', { type: 'button', class: 'egd-memo-status', hidden: true, data: { testid: 'memo-status' },
       onclick: (ev) => { ev.stopPropagation(); updateMemoRecord(root, MemoState.setMemoExpanded(root._memoRecord, true), 'memo-toggle'); } });
 
@@ -31200,6 +31215,11 @@
     // also keeps this Desk as a recovery point (offline, 503 or timeout: preferences only).
     const saved = writeSurfacePref(DESK_SESSION_PREF, snapshot);
     noteDeskRecord(saved);
+    if (saved && typeof DeskPhoto !== 'undefined') for (const card of snapshot.cards) {
+      if (card.type !== 'memo') continue;
+      const root = document.getElementById(card.id);
+      if (root) DeskPhoto.noteDeskMemoPhotoSaved(root, card.runtimeState);
+    }
     void deskStoreSync().saveDesk(snapshot, { reason: options?.reason === 'explicit' ? 'explicit' : 'autosave' });
     return saved;
   }

@@ -1,0 +1,11 @@
+{
+  "name": "egdesk-team-apps",
+  "version": "1.0.0",
+  "description": "First-party EG Desk loopback reducers for shipment and inspection",
+  "license": "UNLICENSED",
+  "private": true,
+  "type": "module",
+  "bin": { "egdesk-team-apps": "bin/egdesk-team-apps.mjs" },
+  "files": ["bin/egdesk-team-apps.mjs"],
+  "engines": { "node": ">=20.3.0" }
+}

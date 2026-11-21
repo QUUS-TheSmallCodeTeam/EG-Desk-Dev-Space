@@ -4,7 +4,11 @@ import {
   jointSnapshot,
   scrubJointSession,
 } from './EGDeskJointBoardClient.sys.mjs';
-const errors = {
+import {appLabels,appStates,nextAppStates,isAppRef} from './EGDeskJointMiniappSchema.sys.mjs';
+import {createJointAudit} from './EGDeskJointSpatialAuditView.sys.mjs';
+import {describeSpatialObservation} from './EGDeskJointSpatialLabels.sys.mjs';
+import {createBoardStructure} from './EGDeskJointBoardStructure.sys.mjs';
+const errors = {'invalid-app':'승인된 앱과 40자 이내의 항목 번호를 확인하세요.','app-unavailable':'팀 앱에 연결할 수 없습니다. 변경은 반영되지 않았습니다.','app-interrupted':'권한 또는 연결이 바뀌어 변경을 마치지 않았습니다. 현재 상태를 확인하세요.','app-busy':'이 항목의 다른 변경이 진행 중입니다.','invalid-transition':'현재 상태에서는 선택할 수 없는 변경입니다.',cycle:'서로를 기다리는 순환 관계는 만들 수 없습니다.',
   'invalid-address': 'HTTPS 주소 또는 이 컴퓨터의 loopback 주소를 입력하세요.',
   'invalid-key': '협업 서비스에서 발급한 계정 키를 입력하세요.',
   authentication: '키가 유효하지 않습니다. 다시 연결하세요.',
@@ -51,6 +55,8 @@ export function createUI(h) {
   const key = (b) => localBoardId(view.instance, b.id),
     boards = () => view?.boards || [],
     getB = (k) => boards().find((b) => key(b) === k || b.id === k);
+  const structure=createBoardStructure({...h,getBoard:getB});
+  const audit=createJointAudit({...h,getBoard:getB,identity:()=>instanceScope,describe:describeSpatialObservation});
   function findCard(id, scope = null) {
     for (const b of boards()) {
       const c = b.cards.find((c) => c.id === id);
@@ -100,7 +106,7 @@ export function createUI(h) {
       const q = panes.get(m.sourceId);
       if (q) h.dispose(q);
     }
-    h.removeProjection(p);
+    structure.removed(p);h.removeProjection(p);audit.sync();
     h.updateRows();
     d.querySelector('[data-testid="rail-board-list"]')?.focus();
     return true;
@@ -131,8 +137,9 @@ export function createUI(h) {
   }
   function apply(v) {
     const previous = view;
-    view = v;
+    view = v;audit.sync();
     if (!v) {
+      structure.clear();
       for (const p of h.allProjections()) h.removeProjection(p);
       for (const el of d.querySelectorAll('[data-joint-managed]')) drop(el);
       drafts.clear();
@@ -175,7 +182,7 @@ export function createUI(h) {
     for (const p of h.allProjections()) {
       const b = getB(p.boardId);
       if (!b || p.jointAccess !== b.epoch) {
-        h.removeProjection(p);
+        structure.removed(p);h.removeProjection(p);
         continue;
       }
       h.reconcile(p, snapshot(b));
@@ -201,8 +208,9 @@ export function createUI(h) {
     ) {
       page = { type: 'hub' };
     }
-    if (page && ['hub', 'board', 'card'].includes(page.type)) draw();
+    if (page && ['hub', 'board', 'card','appReview'].includes(page.type)) draw();
     h.updateRows();
+    h.presentationSync?.();
     if (previous && v.invites.some((i) => !previous.invites.some((o) => o.id === i.id)))
       h.notice('새 협업 초대가 있습니다. Desk → 사람과 공유에서 확인하세요.');
   }
@@ -240,7 +248,8 @@ export function createUI(h) {
     return root;
   }
   function renderItem(root, c) {
-    const signature = JSON.stringify(c);
+    const entry=findCard(c.id,c.scope),b=entry?.b,edge=b?.links.find(e=>e.child===c.id),parent=edge&&b.cards.find(x=>x.id===edge.parent);const order=b?b.cards.findIndex(x=>x.id===c.id)+1:0;
+    const signature = JSON.stringify([c,b?.title,order,edge,parent?.title]);
     if (root._jointSignature === signature) return;
     const sh = root._jointShell;
     if (!sh) return;
@@ -255,11 +264,14 @@ export function createUI(h) {
         ' · ' +
         (c.scope === 'single' ? '카드 단독 공유' : c.own ? '내가 제공한 자료' : '나에게 공개됨'),
     );
+    const work=c.app&&el('section',{class:'egd-joint-app-paper','aria-label':appLabels[c.app.type],data:{testid:'joint-app-paper',state:c.app.state}},el('div',{class:'egd-joint-app-meta'},el('small',{},appLabels[c.app.type]),el('code',{},c.app.ref)),el('strong',{class:'egd-joint-app-state',data:{testid:'joint-app-state'}},appStates[c.app.state]),el('small',{data:{testid:'joint-app-role'}},!c.app.available?'팀 앱 꺼짐 · 저장된 상태':c.app.mayEdit?'변경 허용':'읽기 전용'));
+    if(work&&c.app.mayEdit)for(const to of nextAppStates(c.app.type,c.app.state))work.append(btn(appStates[to]+'로 변경…','app-change',()=>{const live=findCard(c.id,c.scope)?.c;if(live?.app?.editStamp!==c.app.editStamp||live.version!==c.version)throw Error('changed');form('appReview',{card:c.id,operation:{action:'appStep',card:c.id,access:c.access,editStamp:c.app.editStamp,appRev:c.app.rev,version:c.version,to}});},{data:{testid:'joint-app-change',next:to}}));
     sh.slots.content.replaceChildren(
-      head,
-      el('h3', {}, c.title),
-      el('p', { class: 'egd-joint-text' }, c.body),
-      el('small', {}, '작성자: ' + c.author),
+      b ? el('button',{type:'button',class:'egd-joint-membership',data:{testid:'joint-membership'},title:'이 보드의 실제 구성 보기',onclick:on(()=>{const p=h.byId(key(b));if(p){h.select(p);inspect(p);}})},el('strong',{},'공용 보드'),el('span',{},b.title),el('small',{},'자료 '+String(order).padStart(2,'0'))) : el('small',{class:'egd-joint-private-label'},'카드 한 장만 공유됨'),
+      work||el('h3', {}, c.title),
+      parent?btn((edge.kind==='waits'?'선행 자료: ':'참조 자료: ')+parent.title,'relation-target',()=>structure.jump(key(b),parent.id)):head,
+      ...(c.own&&c.replies.length?[el('details',{class:'egd-joint-reply-slip',data:{testid:'joint-received-reply'}},el('summary',{},'이 전표에 온 회신 '+c.replies.length+'건'),el('small',{},c.replies[c.replies.length-1].src+' → '+c.title),el('p',{class:'egd-joint-text'},c.replies[c.replies.length-1].body))]:[]),
+      ...(work?[]:[el('p', { class: 'egd-joint-text' }, c.body),el('small', {}, '작성자: ' + c.author)]),
       el(
         'div',
         { class: 'egd-joint-actions' },
@@ -310,7 +322,7 @@ export function createUI(h) {
     root.dataset.jointVersion = String(c.version);
     root.dataset.testid = 'joint-reply-window';
     root.setAttribute('aria-label', '개인 회신 초안');
-    sh.slots.identity.append(el('strong', {}, '회신 쪽지 · 나만 보기'));
+    sh.slots.identity.append(el('strong', {}, '개인 회신 · '+c.title));
     const input = el('textarea', {
       'aria-label': '보낼 답',
       maxlength: 2000,
@@ -320,7 +332,7 @@ export function createUI(h) {
     input.addEventListener('input', () => drafts.set(draftKey(c), input.value));
     sh.slots.content.append(
       el('small', {}, '받는 사람: ' + c.author),
-      el('h3', {}, c.title),
+      el('h3', {data:{testid:'joint-reply-origin'}}, c.title+'에 대한 회신'),
       input,
       btn('회신 내용 확인', 'reply-review', () => {
         const body = input.value.trim();
@@ -570,6 +582,7 @@ export function createUI(h) {
         heading(b.title),
         ptxt('현재 내게 허용된 카드 ' + b.cards.length + '개'),
         btn('카드 추가', 'add', () => form('add', { board: key(b) })),
+        ...(view.appCatalog?.length?[btn('팀 앱 항목 놓기','add-app',()=>form('addApp',{board:key(b)}))]:[]),
         b.role === 'founder' ? btn('사람 초대', 'join', () => form('join', { board: key(b) })) : null,
       );
       for (const c of b.cards)
@@ -618,7 +631,9 @@ export function createUI(h) {
       );
       return;
     }
-    if ((page.type === 'add' && b) || (page.type === 'edit' && c)) {
+    if(page.type==='addApp'&&b){const ref=fld('업무 항목 번호','app-ref'),kind=el('select',{'aria-label':'승인된 팀 앱',data:{testid:'joint-app-type'}},...view.appCatalog.map(t=>el('option',{value:t},appLabels[t])));add(heading('팀 앱 항목을 책상에 놓기'),ptxt('운영자가 이미 실행한 팀 앱입니다. 새 항목은 이 서버에 저장됩니다. 다른 사람의 읽기·변경은 별도입니다.'),kind,ref.row,btn('업무 항목 놓기','save-app',()=>{if(!isAppRef(ref.input.value.trim()))throw Error('invalid-app');return send({action:'addApp',board:b.id,type:kind.value,ref:ref.input.value.trim()},()=>{hidePanel();openLocal(key(b));});}),btn('취소','back',()=>panel('board',key(b))));return;}
+    if(page.type==='appReview'&&c?.app){const a=page.operation;if(!c.app.mayEdit||c.app.rev!==a.appRev||c.app.editStamp!==a.editStamp||c.access!==a.access||c.version!==a.version){hidePanel();h.notice('권한이나 항목이 바뀌어 변경 요청을 닫았습니다.');return;}add(heading(c.app.ref+' 상태 변경'),ptxt(appStates[c.app.state]+' → '+appStates[a.to]),ptxt('이 한 항목이 팀 서버에 저장되고, 읽을 권한이 있는 사람에게 갱신됩니다.'),btn('이 변경 공유','app-commit',()=>send(a,hidePanel)),btn('취소','back',hidePanel));return;}
+    if ((page.type === 'add' && b) || (page.type === 'edit' && c&&!c.app)) {
       const editing = page.type === 'edit',
         t = fld('카드 제목', 'title', { val: editing ? c.title : '' }),
         body = fld('카드 본문', 'body', { multi: true, val: editing ? c.body : '' }),
@@ -673,7 +688,8 @@ export function createUI(h) {
         heading(c.title),
         ptxt(c.body),
         btn('공개할 사람 선택', 'share', () => form('share', { card: c.id })),
-        btn('내용 수정', 'edit', () => form('edit', { card: c.id })),
+        btn('자료 연결 편집','link-edit',()=>form('relation',{card:c.id})),
+        c.app?null:btn('내용 수정', 'edit', () => form('edit', { card: c.id })),
         btn('현재 위치를 공용 배치로 제안…', 'place', () => {
           const p = h.byId(key(entry.b)),
             m = p?.members.find((m) => m.sourceId === c.id),
@@ -700,6 +716,8 @@ export function createUI(h) {
             'div',
             { class: 'egd-joint-line' },
             ptxt(g.person + ' · ' + (g.scope === 'single' ? '카드 단독' : '보드 안')),
+            ...(g.scope==='board'?[btn(g.photo?'배치 사진 사용 허용 회수…':'배치 사진에서 사용 허용…','photo-permission',()=>form('confirm',{card:c.id,copy:g.person+' · '+c.title+'의 보이는 글자와 위치를 OpenAI Decisions용 배치 사진에 넣을 수 있는 권한을 '+(g.photo?'회수':'허용')+'합니다. 당사자가 사진을 확인하고 전송해야 하며, 이미 전송한 사진을 지우지는 못합니다.',operation:{action:'photoPermission',card:c.id,grant:g.id,version:c.version,allow:!g.photo}}))]:[]),
+            ...(c.app&&g.scope==='board'?[btn(g.appEdit?'변경 권한 회수…':'상태 변경 허용…','app-permission',()=>form('confirm',{card:c.id,copy:g.person+' · '+c.app.ref+' 한 건의 상태 변경만 '+(g.appEdit?'회수':'허용')+'합니다. 다른 자료에는 적용하지 않습니다.',operation:{action:'appPermission',card:c.id,grant:g.id,version:c.version,allow:!g.appEdit}}))]:[]),
             btn('공개 회수…', 'revoke', () =>
               form('confirm', {
                 card: c.id,
@@ -709,7 +727,7 @@ export function createUI(h) {
             ),
           ),
         );
-      if (c.replies.length) add(heading('받은 회신'));
+      if (c.replies.length) add(heading(c.title+'에 대한 회신'));
       for (const r of c.replies) add(ptxt(r.src + ': ' + r.body));
       add(
         btn('카드 제거…', 'remove', () =>
@@ -722,6 +740,7 @@ export function createUI(h) {
       );
       return;
     }
+    if(page.type==='relation'&&c?.own&&entry.b){const board=entry.b,prior=board.links.find(x=>x.child===c.id),others=board.cards.filter(x=>x.id!==c.id);const kind=el('select',{'aria-label':'연결 의미',data:{testid:'joint-link-kind'}},el('option',{value:'waits'},'이 카드 작업의 선행 자료'),el('option',{value:'refers'},'이 카드에서 참고하는 자료'));const target=el('select',{'aria-label':'같은 보드에서 연결할 자료',data:{testid:'joint-link-to'}},...others.map(x=>el('option',{value:x.id},x.title)));if(prior){target.value=prior.parent;kind.value=prior.kind;}add(heading(c.title+'의 자료 연결'),ptxt('내가 명시한 관계입니다. 두 자료를 모두 볼 수 있는 사람에게만 보이며, 열람권이나 자동 실행을 추가하지 않습니다.'),others.length?kind:null,others.length?target:ptxt('같은 보드에 열 수 있는 다른 카드가 없습니다.'),others.length?btn('관계 저장','link-save',()=>send({action:'linkCard',card:c.id,version:c.version,prior:prior?.stamp??null,parent:target.value,kind:kind.value},()=>panel('card',c.id))):null,prior?btn('이 관계 지우기','link-remove',()=>send({action:'unlinkCard',card:c.id,version:c.version,prior:prior.stamp},()=>panel('card',c.id))):null,btn('뒤로','back',()=>panel('card',c.id)));return;}
     if (page.type === 'share' && c?.own) {
       const to = fld('받는 사람의 계정 ID', 'to'),
         scope = el(
@@ -732,7 +751,7 @@ export function createUI(h) {
         );
       add(
         heading('공개 범위'),
-        ptxt('선택한 카드의 제목과 본문만 공개합니다.'),
+        ptxt(c.app?'선택한 앱 항목의 번호·현재 상태를 읽기 전용으로 공개합니다. 변경 권한은 보드 참가자에게만 따로 줄 수 있습니다.':'선택한 카드의 제목과 본문만 공개합니다.'),
         to.row,
         scope,
         btn('보내기 전 확인', 'share-preview', () => {
@@ -747,7 +766,7 @@ export function createUI(h) {
               '\n' +
               c.title +
               '\n' +
-              c.body,
+              (c.app?appLabels[c.app.type]+' · '+c.app.ref+' · '+appStates[c.app.state]+' · 읽기 전용':c.body),
             operation: { action: 'share', card: c.id, version: c.version, to: dst, scope: scope.value },
           });
         }),
@@ -775,6 +794,7 @@ export function createUI(h) {
     api.disconnect();
     draw();
   }
+  function inspect(p){structure.toggle(p);h.refreshRegion(p);}
   const timer = w.setInterval(() => {
     if (api.connected && !refreshing && !busy) {
       refreshing = true;
@@ -796,7 +816,7 @@ export function createUI(h) {
     { once: true },
   );
   return {
-    panel,
+    audit,structure,inspect,panel,fresh,presentationBoard(p){const b=api.connected&&p&&getB(p.boardId);return b&&b.epoch===p.jointAccess?{scope:instanceScope,board:b}:null;},
     propose(title) {
       proposalTitle = title || '';
       panel('propose');

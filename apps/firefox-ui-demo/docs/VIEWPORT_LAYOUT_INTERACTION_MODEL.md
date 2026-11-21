@@ -729,3 +729,7 @@ The model is aligned only if:
 - Snapping, arrange and groups change geometry only inside a user gesture or menu action, and every such change can be undone from the View bar.
 - Card presentation state does not overwrite saved CardState world geometry.
 - Run Playback can guide the viewport without flooding the canvas.
+
+### 렌더 결과의 기계 판독은 배치 명령과 분리한다
+
+[2D 작업면의 렌더 판정](./DESK_SPATIAL_AUDIT.md): 공용 Board의 화면 좌표 교차, 뷰포트/조상 잘림, 창과 동작별 포인터 표본을 구분한다. 구조화된 경고는 클릭·재배치·공개나 외부 Agent 전송 권한이 아니다.

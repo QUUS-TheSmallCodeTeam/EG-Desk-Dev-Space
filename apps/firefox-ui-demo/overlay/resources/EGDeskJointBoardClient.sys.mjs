@@ -1,3 +1,4 @@
+import {teamAppTypes,isAppState,isAppRef} from './EGDeskJointMiniappSchema.sys.mjs';
 // Remote authority is never consulted for ordinary local Boards. No cookies, Agent token or automatic retries.
 const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 const acct = /^[a-z][a-z0-9._-]{0,39}$/;
@@ -51,11 +52,13 @@ function checkedCard(raw, scope) {
     [raw.position.x, raw.position.y].every((v) => Number.isSafeInteger(v) && Math.abs(v) <= 20000)
   )
     c.position = { x: raw.position.x, y: raw.position.y };
+  if(scope==='board'&&raw.layoutPhotoGrant)c.layoutPhotoGrant=ident(raw.layoutPhotoGrant);
+  if(raw.app){const a=raw.app;if(!teamAppTypes.includes(a.type)||!isAppState(a.type,a.state)||!isAppRef(a.ref)||!Number.isSafeInteger(a.rev)||a.rev<1)bad();c.app={type:a.type,state:a.state,ref:a.ref,rev:a.rev,available:a.available===true,mayEdit:a.mayEdit===true&&scope==='board',...(a.editStamp&&scope==='board'?{editStamp:ident(a.editStamp)}:{})};}
   if (c.own) {
     c.grants = list(raw.grants).map((g) => ({
       id: ident(g.id),
       person: user(g.person),
-      scope: g.scope === 'single' ? 'single' : 'board',
+      scope: g.scope === 'single' ? 'single' : 'board',photo:g.photo===true,...(c.app?{appEdit:g.appEdit===true}:{}),
     }));
     c.replies = list(raw.replies, 5000).map((r) => ({
       id: ident(r.id),
@@ -79,18 +82,18 @@ export function checkedView(v) {
   return {
     version: 1,
     instance: ident(v.instance),
-    self: { id: user(v.self.id), name: str(v.self.name, 60) },
-    boards: list(v.boards).map((b) => ({
+    self: { id: user(v.self.id), name: str(v.self.name, 60) },appCatalog:list(v.appCatalog??[],2).filter(t=>teamAppTypes.includes(t)),
+    boards: list(v.boards).map((b) => {const cards=list(b.cards,120).map(c=>checkedCard(c,'board'));const members=new Set(cards.map(c=>c.id));const links=list(b.links??[],120).map(r=>{if(!members.has(r.child)||!members.has(r.parent)||r.child===r.parent||!['waits','refers'].includes(r.kind))bad();return {child:ident(r.child),parent:ident(r.parent),kind:r.kind,stamp:ident(r.stamp)};});return ({
       id: ident(b.id),
       title: str(b.title, 100),
       epoch: ident(b.epoch),
       role: b.role === 'founder' ? 'founder' : 'member',
-      cards: list(b.cards, 120).map((c) => checkedCard(c, 'board')),
+      cards,links,
       people: list(b.people).map((p) => ({
         person: user(p.person),
         role: p.role === 'founder' ? 'founder' : 'member',
       })),
-    })),
+    });}),
     singles: list(v.singles).map((c) => checkedCard(c, 'single')),
     invites: list(v.invites).map((i) => inv(i, false)),
     sent: list(v.sent).map((i) => inv(i, true)),

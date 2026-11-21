@@ -51,6 +51,7 @@ export function jointHttp(store, { tlsAuthority = null } = {}) {
         throw new JointError(400, 'invalid-json');
       }
       if (store.authentic(auth) !== actor) throw new JointError(401, 'authentication');
+      if(data?.action==='appStep'){const controller=new AbortController();const lost=()=>{if(!res.writableEnded)controller.abort();};res.once('close',lost);try{return send(200,await store.stepApp(actor,data,{current:()=>!res.destroyed&&store.authentic(auth)===actor,signal:controller.signal}));}finally{res.off('close',lost);}}
       return send(200, store.mutate(actor, data));
     } catch (e) {
       return send(e instanceof JointError ? e.status : 500, {
@@ -108,7 +109,8 @@ async function main(argv) {
     throw Error('use a private data directory (mode 0700)');
   const file = path.join(dir, 'joint.sqlite');
   if (fs.existsSync(file) && !fs.lstatSync(file).isFile()) throw Error('database must be a regular file');
-  const store = createJointStore(file);
+  let teamApps=null;const descriptor=process.env.EGDESK_TEAM_APPS_DESCRIPTOR;if(descriptor&&['serve','serve-tls'].includes(cmd)){const {loadTeamApps}=await import('./egdesk-joint-miniapp-runner.mjs');teamApps=await loadTeamApps(descriptor);await teamApps.verify();}
+  const store = createJointStore(file,{teamApps});
   if (cmd === 'serve' || cmd === 'serve-tls') {
     let h, label;
     if (cmd === 'serve') {

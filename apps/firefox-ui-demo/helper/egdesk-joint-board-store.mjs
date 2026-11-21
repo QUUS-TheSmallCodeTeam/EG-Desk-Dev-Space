@@ -1,5 +1,6 @@
 // A separate collaboration authority. Never reads the local Desk, Agent, or browser store.
 import { DatabaseSync } from 'node:sqlite';
+import {teamAppTypes,appLabels,nextAppStates,isAppState,isAppRef} from '../overlay/resources/EGDeskJointMiniappSchema.sys.mjs';
 import { randomUUID, randomBytes, createHash } from 'node:crypto';
 export class JointError extends Error {
   constructor(status, code) {
@@ -52,11 +53,16 @@ CREATE TABLE IF NOT EXISTS seats(board TEXT REFERENCES boards(id),person TEXT RE
 CREATE TABLE IF NOT EXISTS cards(id TEXT PRIMARY KEY,board TEXT NOT NULL REFERENCES boards(id),author TEXT NOT NULL,epoch TEXT NOT NULL,title TEXT NOT NULL,body TEXT NOT NULL,kind TEXT NOT NULL,rev INTEGER NOT NULL DEFAULT 1,x INTEGER,y INTEGER,removed INTEGER NOT NULL DEFAULT 0);
 CREATE TABLE IF NOT EXISTS invites(id TEXT PRIMARY KEY,kind TEXT NOT NULL,src TEXT NOT NULL,dst TEXT NOT NULL,ref TEXT,title TEXT,expires INTEGER NOT NULL,state TEXT NOT NULL DEFAULT 'pending',basis TEXT);
 CREATE TABLE IF NOT EXISTS grants(id TEXT PRIMARY KEY,card TEXT NOT NULL REFERENCES cards(id),person TEXT NOT NULL,scope TEXT NOT NULL,basis TEXT NOT NULL,UNIQUE(card,person));
+CREATE TABLE IF NOT EXISTS appitems(card TEXT PRIMARY KEY REFERENCES cards(id),type TEXT NOT NULL,ref TEXT NOT NULL,state TEXT NOT NULL,rev INTEGER NOT NULL DEFAULT 1);
+CREATE TABLE IF NOT EXISTS photogrants(grantId TEXT PRIMARY KEY REFERENCES grants(id) ON DELETE CASCADE,stamp TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS appedit(grantId TEXT PRIMARY KEY REFERENCES grants(id) ON DELETE CASCADE,stamp TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS appruns(actor TEXT NOT NULL,request TEXT NOT NULL,sig TEXT NOT NULL,card TEXT NOT NULL,state TEXT NOT NULL,PRIMARY KEY(actor,request));
+CREATE TABLE IF NOT EXISTS cardlinks(child TEXT PRIMARY KEY REFERENCES cards(id), parent TEXT NOT NULL REFERENCES cards(id), kind TEXT NOT NULL, parentAccess TEXT NOT NULL, stamp TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS claims(grantId TEXT PRIMARY KEY REFERENCES grants(id) ON DELETE CASCADE);
 CREATE TABLE IF NOT EXISTS replies(id TEXT PRIMARY KEY,card TEXT NOT NULL,src TEXT NOT NULL,dst TEXT NOT NULL,body TEXT NOT NULL,grantId TEXT NOT NULL,rev INTEGER NOT NULL,at INTEGER NOT NULL, UNIQUE(grantId,rev));
 CREATE TABLE IF NOT EXISTS ops(actor TEXT NOT NULL,request TEXT NOT NULL,signature TEXT NOT NULL,PRIMARY KEY(actor,request));
 CREATE INDEX IF NOT EXISTS invites_dst ON invites(dst,state);CREATE INDEX IF NOT EXISTS seat_person ON seats(person);CREATE INDEX IF NOT EXISTS card_board ON cards(board);CREATE INDEX IF NOT EXISTS grants_person ON grants(person);`;
-export function createJointStore(path, { now = Date.now } = {}) {
+export function createJointStore(path, { now = Date.now, teamApps=null } = {}) {
   const db = new DatabaseSync(path);
   db.exec(schema);
   // An earlier local MVP can keep its data. Old, unbound single-card offers fail closed.
@@ -98,6 +104,11 @@ export function createJointStore(path, { now = Date.now } = {}) {
     const c = activeCard(i.ref);
     return c?.author === i.src && c.epoch === i.basis && c.rev === i.cardRev;
   }
+  function boardAccess(c,p){if(!c||!seat(c.board,p))return null;if(c.author===p)return c.epoch;const g=grant(c.id,p);return g?.scope==='board'&&right(g,c)?g.id:null;}
+  function linkFor(child){const ref=one('SELECT parent,kind,parentAccess,stamp FROM cardlinks WHERE child=?',child.id);if(!ref)return null;const parent=activeCard(ref.parent);if(!parent||parent.board!==child.board||boardAccess(parent,child.author)!==ref.parentAccess)return null;return ref;}
+  const appCatalog=teamApps?teamAppTypes.filter(t=>teamApps.catalog?.includes(t)):[];
+  const appItem=k=>one('SELECT type,ref,state,rev FROM appitems WHERE card=?',k);
+  const editStamp=(c,p,g)=>c.author===p?c.epoch:(g?.scope==='board'&&right(g,c)?one('SELECT stamp FROM appedit WHERE grantId=?',g.id)?.stamp:null);
   function renderCard(c, p, g, scope) {
     const own = c.author === p,
       showPos = scope !== 'single' && c.x !== null;
@@ -115,10 +126,12 @@ export function createJointStore(path, { now = Date.now } = {}) {
       claimed: !own && !!one('SELECT 1 FROM claims WHERE grantId=?', g.id),
       replied: !own && !!one('SELECT 1 FROM replies WHERE grantId=? AND rev=?', g.id, c.rev),
     };
+    const app=appItem(c.id);if(app){const editor=editStamp(c,p,g);data.app={...app,mayEdit:!!editor&&appCatalog.includes(app.type),available:appCatalog.includes(app.type),...(editor?{editStamp:editor}:{})};}
+    if(scope==='board'&&g){const pg=one('SELECT stamp FROM photogrants WHERE grantId=?',g.id);if(pg)data.layoutPhotoGrant=pg.stamp;}
     if (scope === 'board') data.layoutVersion = c.layoutRev;
     if (showPos) data.position = { x: c.x, y: c.y };
     if (own) {
-      data.grants = all('SELECT id,person,scope FROM grants WHERE card=? ORDER BY person', c.id);
+      data.grants = all('SELECT id,person,scope FROM grants WHERE card=? ORDER BY person', c.id);for(const grant of data.grants)grant.photo=!!one('SELECT 1 FROM photogrants WHERE grantId=?',grant.id);if(app)for(const grant of data.grants)grant.appEdit=!!one('SELECT 1 FROM appedit WHERE grantId=?',grant.id);
       data.replies = all('SELECT id,src,body,at,rev FROM replies WHERE card=? AND dst=? ORDER BY at,id', c.id, p);
     }
     return data;
@@ -138,9 +151,11 @@ export function createJointStore(path, { now = Date.now } = {}) {
         const g = grant(c.id, p);
         if (c.author === p || (g?.scope === 'board' && right(g, c))) cards.push(renderCard(c, p, g, 'board'));
       }
+      // Even a relationship's existence is private unless both live endpoints are board-visible to this viewer.
+      const visible=new Set(cards.map(c=>c.id));const links=[];for(const c of cards){const ref=linkFor({...c,board:b.id});if(ref&&visible.has(ref.parent))links.push({child:c.id,parent:ref.parent,kind:ref.kind,stamp:ref.stamp});}
       return {
         ...b,
-        cards,
+        cards,links,
         people:
           b.role === 'founder' ? all('SELECT person,role FROM seats WHERE board=? ORDER BY person', b.id) : [],
       };
@@ -174,7 +189,7 @@ export function createJointStore(path, { now = Date.now } = {}) {
     return {
       version: 1,
       instance: one('SELECT instance FROM identity WHERE one=1').instance,
-      self,
+      self,appCatalog:[...appCatalog],
       boards,
       singles,
       invites,
@@ -304,6 +319,7 @@ export function createJointStore(path, { now = Date.now } = {}) {
       b,
       p,
     );
+    run('DELETE FROM cardlinks WHERE parent IN(SELECT id FROM cards WHERE board=? AND author=? AND epoch=?) OR child IN(SELECT id FROM cards WHERE board=? AND author=? AND epoch=?)',b,p,s.epoch,b,p,s.epoch);
     run('UPDATE cards SET removed=1 WHERE board=? AND author=? AND epoch=?', b, p, s.epoch);
     run('DELETE FROM seats WHERE board=? AND person=?', b, p);
   }
@@ -377,6 +393,9 @@ export function createJointStore(path, { now = Date.now } = {}) {
               .changes === 1,
           );
           break;
+        case 'addApp':{const board=id(a.board),member=seat(board,p);requireThat(member);requireThat(appCatalog.includes(a.type)&&isAppRef(a.ref),400,'invalid-app');requireThat(one('SELECT count(*) n FROM cards WHERE board=? AND removed=0',board).n<120,409,'limit');const k=uid(),title=appLabels[a.type]+' · '+a.ref;run('INSERT INTO cards(id,board,author,epoch,title,body,kind) VALUES(?,?,?,?,?,?,?)',k,board,p,member.epoch,title,'팀 앱 업무 항목: '+a.ref,'task');run('INSERT INTO appitems(card,type,ref,state) VALUES(?,?,?,?)',k,a.type,a.ref,a.type==='shipment'?'ready':'waiting');break;}
+        case 'photoPermission':{const c=own(p,a.card),g=one('SELECT * FROM grants WHERE id=? AND card=?',id(a.grant),c.id);requireThat(right(g,c)&&g.scope==='board');requireThat(c.rev===a.version,409,'changed');requireThat(typeof a.allow==='boolean',400,'invalid-role');if(a.allow)run('INSERT OR IGNORE INTO photogrants VALUES(?,?)',g.id,uid());else run('DELETE FROM photogrants WHERE grantId=?',g.id);break;}
+        case 'appPermission':{const c=own(p,a.card),g=one('SELECT * FROM grants WHERE id=? AND card=?',id(a.grant),c.id);requireThat(appItem(c.id)&&right(g,c)&&g.scope==='board');requireThat(c.rev===a.version,409,'changed');requireThat(typeof a.allow==='boolean',400,'invalid-role');if(a.allow)run('INSERT OR IGNORE INTO appedit VALUES(?,?)',g.id,uid());else run('DELETE FROM appedit WHERE grantId=?',g.id);break;}
         case 'addCard': {
           const b = id(a.board),
             s = seat(b, p);
@@ -402,6 +421,7 @@ export function createJointStore(path, { now = Date.now } = {}) {
           const c = own(p, a.card);
           requireThat(a.version === c.rev, 409, 'changed');
           if (a.action === 'editCard') {
+            requireThat(!appItem(c.id),403,'app-fields');
             run(
               'UPDATE cards SET title=?,body=?,rev=rev+1 WHERE id=?',
               oneLine(a.title, 120),
@@ -420,6 +440,12 @@ export function createJointStore(path, { now = Date.now } = {}) {
           }
           break;
         }
+        case 'linkCard':case 'unlinkCard':{const c=own(p,a.card);requireThat(c.rev===a.version,409,'changed');const prev=linkFor(c);requireThat((prev?.stamp||null)===(a.prior??null),409,'changed');
+          if(a.action==='unlinkCard'){requireThat(prev);run('DELETE FROM cardlinks WHERE child=?',c.id);break;}
+          const parent=activeCard(id(a.parent)),access=boardAccess(parent,p);requireThat(parent&&parent.board===c.board&&access&&parent.id!==c.id);requireThat(['waits','refers'].includes(a.kind),400,'invalid-kind');
+          // Each child has one named upstream. A structural link never executes, publishes or grants access to its parent.
+          if(a.kind==='waits'){const visited=new Set([c.id]);let cur=parent;while(cur){requireThat(!visited.has(cur.id),409,'cycle');visited.add(cur.id);const next=linkFor(cur);cur=next?.kind==='waits'?activeCard(next.parent):null;}}
+          run('INSERT INTO cardlinks VALUES(?,?,?,?,?) ON CONFLICT(child) DO UPDATE SET parent=excluded.parent,kind=excluded.kind,parentAccess=excluded.parentAccess,stamp=excluded.stamp',c.id,parent.id,a.kind,access,uid());break;}
         case 'share': {
           const c = own(p, a.card),
             dst = login(a.to);
@@ -451,7 +477,7 @@ export function createJointStore(path, { now = Date.now } = {}) {
           requireThat(a.version === c.rev, 409, 'changed');
           cancelSingle(c.id);
           run('DELETE FROM grants WHERE card=?', c.id);
-          run('UPDATE cards SET removed=1 WHERE id=?', c.id);
+          run('DELETE FROM cardlinks WHERE child=? OR parent=?',c.id,c.id);run('UPDATE cards SET removed=1 WHERE id=?', c.id);
           break;
         }
         case 'claim': {
@@ -494,5 +520,14 @@ export function createJointStore(path, { now = Date.now } = {}) {
     });
     return view(p);
   }
-  return { issueAccount, authentic, view, mutate, close: () => db.close() };
+  // This operator service has one process per DB. Interrupted pure computations are never replayed on restart.
+  if(teamApps)db.exec("UPDATE appruns SET state='interrupted' WHERE state='pending'");const pending=new Map();let stopped=false;
+  function appPermit(p,a){const c=activeCard(id(a.card)),app=c&&appItem(c.id),g=c&&grant(c.id,p);requireThat(c&&app&&appCatalog.includes(app.type));const actorStamp=editStamp(c,p,g);requireThat(actorStamp&&a.editStamp===actorStamp&&(c.author===p?c.epoch:g.id)===a.access);requireThat(app.rev===a.appRev&&c.rev===a.version,409,'changed');requireThat(isAppState(app.type,a.to)&&nextAppStates(app.type,app.state).includes(a.to),400,'invalid-transition');return {c,app,actorStamp};}
+  async function stepApp(p,a,{current=()=>true,signal=null}={}){requireThat(a?.action==='appStep'&&!!teamApps&&!stopped&&current());const request=id(a.request),k=p+'/'+request;const sig=digest(JSON.stringify([id(a.card),a.access,a.editStamp,a.version,a.appRev,a.to]));
+    const admission=transaction(()=>{const prior=one('SELECT sig,state FROM appruns WHERE actor=? AND request=?',p,request);if(prior){requireThat(prior.sig===sig,409,'request-conflict');if(prior.state==='done')return null;fail(409,prior.state==='pending'?'app-busy':'app-interrupted');}requireThat(!one('SELECT 1 FROM ops WHERE actor=? AND request=?',p,request),409,'request-conflict');const permit=appPermit(p,a);requireThat(pending.size<24&&!one("SELECT 1 FROM appruns WHERE card=? AND state='pending'",a.card),409,'app-busy');run("INSERT INTO appruns VALUES(?,?,?,?,'pending')",p,request,sig,a.card);return permit;});if(!admission)return view(p);
+    const controller=new AbortController();const abort=()=>controller.abort();if(signal?.aborted)abort();else signal?.addEventListener('abort',abort,{once:true});pending.set(k,{controller,actor:p,a});
+    try{requireThat(!controller.signal.aborted&&current(),409,'app-interrupted');const reply=await teamApps.step({type:admission.app.type,from:admission.app.state,to:a.to},{signal:controller.signal});transaction(()=>{requireThat(!stopped&&!controller.signal.aborted&&current()&&one('SELECT state FROM appruns WHERE actor=? AND request=?',p,request)?.state==='pending',409,'app-interrupted');const now=appPermit(p,a);requireThat(reply&&reply.type===now.app.type&&reply.state===a.to,503,'app-unavailable');run('UPDATE appitems SET state=?,rev=rev+1 WHERE card=?',reply.state,a.card);run('UPDATE cards SET rev=rev+1 WHERE id=?',a.card);cancelSingle(a.card);run("UPDATE appruns SET state='done' WHERE actor=? AND request=?",p,request);run('INSERT INTO ops VALUES(?,?,?)',p,request,sig);});return view(p);
+    }catch(err){if(!stopped)run("UPDATE appruns SET state='interrupted' WHERE actor=? AND request=? AND state='pending'",p,request);if(err instanceof JointError)throw err;if(stopped||controller.signal.aborted||!current())fail(409,'app-interrupted');fail(503,'app-unavailable');}finally{signal?.removeEventListener('abort',abort);pending.delete(k);}}
+  function cancelStale(){for(const rec of pending.values()) {try{appPermit(rec.actor,rec.a);}catch{rec.controller.abort();}}}
+  return {issueAccount,authentic,view,mutate(p,a){if(a?.request)requireThat(!one('SELECT 1 FROM appruns WHERE actor=? AND request=?',p,a.request),409,'request-conflict');const v=mutate(p,a);cancelStale();return v;},stepApp,close(){stopped=true;for(const rec of pending.values())rec.controller.abort();db.close();}};
 }

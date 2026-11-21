@@ -101,3 +101,27 @@ test('late, tied, missing, injected, invalid, or refused choice stays manual and
   ])
     assert.deepEqual(read(p, a, rev), { status: 'manual', preview: null, reasoningCalls: 0 });
 });
+
+const sampled = { overlap: 'selected', frame: 'inside', clip: 'inside', target: 'reply', reach: 'miss', obscured: true };
+const withScenes = (scene = {}, focusItem = {}) => [
+  { ...input.selection[0], ...focusItem, scene: { ...sampled, ...scene } },
+  { ...input.selection[1], scene: { ...sampled, target: 'title', reach: 'hit', obscured: false } },
+  { ...input.selection[2], scene: { blocker: 'PRIVATE_ID_C' } },
+];
+test('front needs sampled obscuration and viewport/clip access on the movable designated focus only', () => {
+  const allowed = ['keep', 'overview', 'focus', 'pair', 'front'];
+  for (const scene of [{}, { reach: 'partial', frame: 'partial', clip: 'partial' }, { overlap: 'none' }, { overlap: 'unknown' }]) {
+    const p = prepare({ ...input, selection: withScenes(scene) });
+    assert.deepEqual(p.options, allowed);
+    assert.doesNotMatch(JSON.stringify(p.packet), /PRIVATE_ID_|비공개 원가표|blocker/);
+  }
+  for (const scene of [{ obscured: false }, { reach: 'hit' }, { reach: 'unknown' }, { frame: 'offscreen' },
+    { frame: 'unknown' }, { clip: 'clipped' }, { clip: 'unknown' }]) {
+    assert.deepEqual(prepare({ ...input, selection: withScenes(scene) }).options, allowed.slice(0, -1));
+  }
+  assert.deepEqual(prepare({ ...input, focusId: null, selection: withScenes() }).options, ['keep', 'overview', 'pair']);
+  assert.deepEqual(prepare({ ...input, focusId: input.selection[1].id, selection: withScenes() }).options, allowed.slice(0, -1));
+  assert.deepEqual(prepare({ ...input, selection: withScenes({}, { movable: false }) }).options, ['keep', 'overview', 'focus']);
+  assert.equal(prepare({ ...input, selection: [withScenes()[0], input.selection[1]] }).packet, null);
+  assert.equal(prepare({ ...input, selection: withScenes({ obscured: 'true' }) }).packet, null);
+});

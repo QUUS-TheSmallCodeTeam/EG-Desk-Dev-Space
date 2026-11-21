@@ -11514,3 +11514,60 @@ button.egd-memo-ask-cancel:hover { text-decoration: underline; }
   justify-content: flex-end;
   margin-top: auto;
 }
+/* A shared Board is a named set and may show recorded edges; containment never follows overlap. */
+.egd-board-region[data-joint-board] .egd-board-region-title::before{content:'공용 보드';font-size:10px;font-weight:650;color:var(--egd-primary);border-inline-start:3px solid var(--egd-primary);padding-inline:6px}
+.egd-joint-board-count,.egd-joint-structure-strip button,.egd-joint-membership{appearance:none;font:inherit;color:var(--egd-primary-strong);border:1px solid var(--egd-outline);background:var(--egd-surface-elevated);border-radius:6px;cursor:pointer}
+.egd-joint-board-count{font-size:11px;padding:3px 7px}.egd-joint-board-count[aria-pressed="true"]{background:var(--egd-primary-container);border-color:var(--egd-primary)}
+.egd-joint-structure-strip{position:absolute;inset:36px 12px auto 12px;display:flex;align-items:center;gap:6px;overflow:auto;max-height:32px;white-space:nowrap;pointer-events:auto;font-size:12px;color:var(--egd-primary-strong)}.egd-joint-structure-strip button{padding:4px 8px;flex:none}.egd-joint-structure-strip strong{padding-inline:4px}
+.egd-joint-window[data-joint-inspected]{outline:2px solid var(--egd-primary);outline-offset:2px}.egd-joint-membership{display:flex;align-items:center;gap:6px;min-width:0;max-width:100%;align-self:flex-start;padding:2px 6px;border:0;background:var(--egd-primary-container);font-size:11px}.egd-joint-membership span{overflow:hidden;white-space:nowrap;text-overflow:ellipsis}.egd-joint-membership small{margin-inline-start:4px}.egd-joint-private-label{color:var(--egd-on-surface-variant)}.egd-joint-body [data-testid="joint-relation-target"]{font-size:12px;text-align:start;border-inline-start:3px solid var(--egd-primary);background:var(--egd-note-soft)}
+.egd-joint-link-layer{pointer-events:none;position:absolute;inset:0;overflow:visible}.egd-joint-connector{fill:none;stroke:var(--egd-primary);stroke-width:2.4;vector-effect:non-scaling-stroke}.egd-joint-connector.reference{stroke-dasharray:5 3}.egd-joint-arrowhead{fill:var(--egd-primary)}
+.egd-joint-app-paper{border-inline-start:3px solid var(--egd-primary);padding:4px 10px;display:grid;gap:4px;align-content:start}.egd-joint-app-meta{display:flex;align-items:center;justify-content:space-between;gap:8px}.egd-joint-app-meta code{font:600 12px/1.4 ui-monospace,monospace}.egd-joint-app-state{font-size:18px}.egd-joint-app-paper button{justify-self:start}
+#egd-joint-spatial-audit{position:fixed;z-index:2147483001;inset:72px 18px auto auto;width:min(340px,80vw);max-height:70vh;overflow:auto;background:var(--egd-window-surface,var(--egd-surface-elevated));color:var(--egd-on-surface);border:1px solid var(--egd-outline);padding:12px 14px;border-radius:10px;font:12px/1.4 system-ui}#egd-joint-spatial-audit header{display:flex;justify-content:space-between;align-items:center}#egd-joint-spatial-audit button{font:inherit;cursor:pointer}#egd-joint-spatial-audit pre{white-space:pre-wrap;overflow-wrap:anywhere;font:11px/1.35 ui-monospace,monospace}#egd-joint-spatial-audit [role="status"] p{margin:5px 0}
+/* Append to eg-desk-surface.uc.css. Only the contextual tool is interactive. */
+.egd-joint-presentation-world {
+  position: absolute; inset: 0; overflow: visible; z-index: 99990;
+  pointer-events: none !important; user-select: none;
+}
+.egd-joint-presentation-world * { pointer-events: none !important; }
+.egd-joint-presentation-world > div { position: absolute; box-sizing: border-box; color: var(--egd-primary); }
+.egd-joint-presentation-world > div > span {
+  position: absolute; inset: 3px auto auto 4px; padding: 2px 5px;
+  max-width: max-content; white-space: nowrap; transform-origin: top left;
+  transform: scale(var(--joint-presentation-label-scale));
+  background: var(--egd-surface-elevated); color: var(--egd-on-surface);
+  border: 1px solid currentColor; border-radius: 4px; font: 600 11px/1.25 var(--egd-font);
+}
+.egd-joint-presentation-world > .egd-joint-presentation-mark--frame { border: 2px dashed currentColor; background: color-mix(in srgb, currentColor 8%, transparent); }
+.egd-joint-presentation-world > .egd-joint-presentation-mark--target { border: 2px dashed currentColor; border-radius: 8px; background: color-mix(in srgb, currentColor 16%, transparent); }
+.egd-joint-presentation-world > .egd-joint-presentation-mark--selected { outline: 2px solid currentColor; outline-offset: 2px; border-radius: 6px; }
+.egd-joint-presentation-mark--selected > span { translate: 0 -100%; }
+.egd-joint-presentation {
+  position: fixed; z-index: 100020; box-sizing: border-box; overflow: auto; overscroll-behavior: contain;
+  display: grid; gap: 8px; padding: 10px; font: 400 12px/1.42 var(--egd-font);
+  color: var(--egd-on-surface); background: var(--egd-surface-elevated); border: 1px solid var(--egd-outline);
+  border-radius: 8px; box-shadow: var(--egd-shadow);
+}
+.egd-joint-presentation header, .egd-joint-presentation footer { display: flex; gap: 4px; align-items: center; flex-wrap: wrap; }
+.egd-joint-presentation header { justify-content: space-between; }
+.egd-joint-presentation :is(h2,h3,p,pre) { margin: 0; }
+.egd-joint-presentation h2 { font-size: 14px; }.egd-joint-presentation h3 { font-size: 12px; }
+.egd-joint-presentation fieldset { min-inline-size: 0; padding: 3px 6px 5px; margin: 0; border: 1px solid var(--egd-outline); border-radius: 5px; }
+.egd-joint-presentation legend { padding-inline: 3px; font-weight: 600; }
+.egd-joint-presentation-cards { max-block-size: 115px; overflow: auto; }
+.egd-joint-presentation-card-row { display: grid; grid-template-columns: minmax(0,1fr) auto; gap: 4px; align-items: start; }
+.egd-joint-presentation :is(label.egd-joint-presentation-choice,.egd-joint-presentation-card-row label) { display: flex; gap: 5px; align-items: start; min-height: 24px; overflow-wrap: anywhere; }
+.egd-joint-presentation input:is([type='checkbox'],[type='radio']) { flex: none; appearance: auto; margin: 3px 0 0; }
+.egd-joint-presentation button, .egd-joint-presentation input[type='text'] { box-sizing: border-box; min-height: 26px; font: inherit; color: inherit; background: transparent; border: 1px solid var(--egd-outline); border-radius: 5px; padding: 2px 6px; }
+.egd-joint-presentation button:not(:disabled) { cursor: pointer; }
+.egd-joint-presentation button:is(:hover,[aria-pressed='true']):not(:disabled) { background: var(--egd-hover); }
+.egd-joint-presentation button:disabled, .egd-joint-presentation label:has(input:disabled) { opacity: var(--egd-opacity-disabled); }
+.egd-joint-presentation :focus-visible { outline: var(--egd-focus-outline); outline-offset: var(--egd-focus-outline-offset); }
+.egd-joint-presentation [data-testid='joint-presentation-apply'] { font-weight: 650; }
+.egd-joint-presentation-decision { display: grid; gap: 5px; border-top: 1px solid var(--egd-outline); padding-top: 8px; }
+.egd-joint-presentation-decision input[type='text'] { width: 100%; }
+.egd-joint-presentation-decision pre { max-block-size: 15rem; overflow: auto; padding: 6px; border: 1px solid var(--egd-outline); border-radius: 5px; white-space: pre-wrap; overflow-wrap: anywhere; font: 11px/1.45 monospace; }
+@media (forced-colors: active) {
+  .egd-joint-presentation-world > div { color: Highlight; }
+  .egd-joint-presentation-world > div > span { background: Canvas; color: CanvasText; }
+}
+.egd-arrange-map{position:relative;aspect-ratio:16/9;background:var(--egd-surface);border:1px solid var(--egd-outline)}.egd-arrange-map span{box-sizing:border-box;position:absolute;border:1px dashed var(--egd-primary);background:var(--egd-primary-container);overflow:hidden}

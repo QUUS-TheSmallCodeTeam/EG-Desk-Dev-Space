@@ -15,6 +15,9 @@ import { validateQaFixtureIsolation } from './egdesk-qa-fixture-isolation.mjs';
 import { FirefoxMcpChatHarness } from './firefox-mcp-chat-harness.mjs';
 import { captureHeadlessScreenshot } from './verify-firefox-mcp-headless-ui-regression.mjs';
 import { createJointStore } from '../helper/egdesk-joint-board-store.mjs';
+import {createBoardPresentationHttpHandler} from '../helper/egdesk-board-presentation-http.mjs';
+import {createDecisionBudget} from '../helper/egdesk-decision-client.mjs';
+import {loadTeamApps} from '../helper/egdesk-joint-miniapp-runner.mjs';
 import { startJointServer } from '../helper/egdesk-joint-board-server.mjs';
 const wait = (ms) => new Promise((r) => setTimeout(r, ms));
 const bounded = async (fn, goal, label, ms = 18000) => {
@@ -83,7 +86,7 @@ export async function verify({ executable, loaderSource, evidence }) {
     checks.push(s);
     console.log('ok:', s);
   };
-  let providerCalls = 0;
+  let providerCalls = 0,fixtureDecisions=0,decisionHandler,fixtureMode='on';
   const qa = fs.mkdtempSync(path.join(os.tmpdir(), 'joint-board-proof-'));
   evidence = evidence || qa;
   fs.mkdirSync(evidence, { recursive: true });
@@ -243,13 +246,17 @@ export async function verify({ executable, loaderSource, evidence }) {
     fs.copyFileSync(caption.path, path.join(evidence, name + '.png'));
   }
   try {
-    stub = http.createServer((req, res) => {
+    stub = http.createServer(async (req, res) => {
+      if(req.method==='GET'&&req.url==='/decision/status'){res.writeHead(200,{'content-type':'application/json','cache-control':'no-store'});res.end(JSON.stringify({configured:true,mode:fixtureMode,model:'gpt-6-luna',savedAt:1}));return;}
+      if(req.url.startsWith('/decision/board-presentation/'))res.once('finish',()=>console.log('fixture transport:',req.url,res.statusCode));
+      if(decisionHandler&&await decisionHandler(req,res,new URL(req.url,'http://127.0.0.1')))return;
       if (req.method === 'POST' && /\/(chat\/send|chat\/board\/send|decisions|responses)(?:\?|$)/.test(req.url))
         providerCalls++;
       res.writeHead(503, { 'content-type': 'application/json' });
       res.end('{"available":false}');
     });
     const bridgePort = await listen(stub);
+    decisionHandler=createBoardPresentationHttpHandler({port:bridgePort,credentials:{getApiKey:()=> 'synthetic-not-a-provider-key',savedAt:()=>1},getMode:()=>fixtureMode,budget:createDecisionBudget({monthlyInputTokenCap:200}),fetchImpl:async(_neverNetwork,init)=>{fixtureDecisions++;const packet=JSON.parse(init.body);assert.ok(![taskTitle,boardTitle,privateTitle,'receiver','partner','sender','jb1.'].some(s=>init.body.includes(s)));assert.equal(packet.questions[0].name,'board_view');const choices=packet.questions[0].choices.map(x=>typeof x==='string'?x:x.value);const image=packet.input[0].content.find(x=>x.type==='input_image');assert.equal(image?.detail,'low');assert.ok(image.image_url.startsWith('data:image/png;base64,'));const content=packet.input[0].content.find(x=>x.type==='input_json').data;assert.ok(content.selected.every(x=>x.scene?.target));assert.ok(content.composition||content.visualComposition||JSON.stringify(content).includes('readability'));fs.writeFileSync(path.join(evidence,'joint-decision-input.png'),Buffer.from(image.image_url.split(',')[1],'base64'));const pick=choices.find(x=>x.includes('인계 보기'))||choices.find(x=>x.includes('작업과 참고'))||choices.find(x=>x.includes('전체 정돈'))||choices.find(x=>x.includes('나란히'))||choices.find(x=>x.includes('전체 보기'))||choices[0];return Response.json({answers:[{type:'choice',name:'board_view',choice:pick,confidence:.96,probabilities:[{value:pick,probability:.96},{value:choices.find(x=>x!==pick),probability:.04}]}],usage:{input_tokens:10}});}});
     const fixtureEnv = {
       EGDESK_QA_FIXTURE_TRANSPORT: '1',
       EGDESK_QA_FIXTURE_PORT: String(bridgePort),
@@ -269,7 +276,8 @@ export async function verify({ executable, loaderSource, evidence }) {
       prepareQaFirefox(p.profile, { mode: 'automation', marionette: m, remote: r, env: fixtureEnv });
       profiles.push({ profile: p.profile, env: fixtureEnv, marionette: m, remote: r });
     }
-    store = createJointStore(path.join(qa, 'service.sqlite'));
+    const appDescriptor=path.join(qa,'apps-private','runner.json');const appWorker=spawn(process.execPath,[fileURLToPath(new URL('./start-verified-team-apps.mjs',import.meta.url)),appDescriptor],{env:{PATH:path.dirname(process.execPath),HOME:qa},stdio:['ignore','ignore','inherit']});const appRun={child:appWorker,h:null,exited:once(appWorker,'exit')};owned.push(appRun);await bounded(()=>Promise.resolve(fs.existsSync(appDescriptor)),Boolean,'operator started local team runner');const teamApps=loadTeamApps(appDescriptor);assert.equal(await teamApps.verify(),true);
+    store = createJointStore(path.join(qa, 'service.sqlite'),{teamApps});
     const keys = {
       a: store.issueAccount('sender', '서윤'),
       b: store.issueAccount('partner', '민재'),
@@ -315,6 +323,8 @@ export async function verify({ executable, loaderSource, evidence }) {
     );
     await screenshot(a, 'joint-owner');
     mark('two independent card windows inside the owner Board; participant sees neither until grant');
+    if(process.env.EGDESK_QA_DESK_PHOTO_ONLY==='1'){const deskCases=await import('./egdesk-joint-spatial-live-cases.mjs');await deskCases.verifyDeskPhoto({a,id,j,bounded,decisions:()=>fixtureDecisions,mode:m=>{fixtureMode=m;decisionHandler.invalidate();},mark,evidence});await a.shut();await b.shut();return {checks,fixtureDecisions};}
+    if(process.env.EGDESK_QA_FAST_LAYOUT_ONLY==='1'){const x=await import('./egdesk-joint-spatial-live-cases.mjs');await x.verifySpatialCases({a,b,id,j,bounded,screenshot,boardTitle,store,mark,decisions:()=>fixtureDecisions,mode:m=>{fixtureMode=m;decisionHandler.invalidate();},resetByOpen:async n=>{await hub(n);await n.click(j('open'),boardTitle);},closePanel:async n=>{if(await n.has('#egd-joint-panel'))await n.click(j('panel-close'));}});await a.shut();await b.shut();return {checks,fixtureDecisions};}
     await manage(a);
     await a.click(j('board-item'), taskTitle);
     await a.click(j('share'));
@@ -423,6 +433,8 @@ export async function verify({ executable, loaderSource, evidence }) {
     await b.click(j('open'), boardTitle);
     assert.equal(await b.has(j('card')), false);
     mark('revoke removes live card and authenticated Board reopen cannot restore it');
+    const workspace=await import('./egdesk-joint-workspace-live-cases.mjs');await workspace.verifyWorkspace({a,b,id,j,manage,hub,bounded,screenshot,boardTitle,taskTitle,privateTitle,store,mark,decisions:()=>fixtureDecisions,mode:m=>{fixtureMode=m;decisionHandler.invalidate();}});
+    const deskCases=await import('./egdesk-joint-spatial-live-cases.mjs');await deskCases.verifyDeskPhoto({a,id,j,bounded,decisions:()=>fixtureDecisions,mode:m=>{fixtureMode=m;decisionHandler.invalidate();},mark,evidence});
     await hub(b);
     await b.click(j('disconnect'));
     await sign(b, origin, keys.c);
@@ -449,12 +461,13 @@ export async function verify({ executable, loaderSource, evidence }) {
       checks,
       profileCount: 2,
       syntheticPeople: 3,
-      providerCalls,
+      providerCalls,fixtureDecisions,
       evidence: ['joint-owner.png', 'joint-recipient.png'],
     };
     fs.writeFileSync(path.join(evidence, 'verification.json'), JSON.stringify(info, null, 2));
     return info;
   } finally {
+    decisionHandler?.invalidate();
     for (const p of owned.reverse()) {
       await p.h?.close().catch(() => {});
       if (p.child.exitCode === null && p.child.signalCode === null) {
