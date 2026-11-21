@@ -1306,8 +1306,8 @@ test('production engine popover reanchors to its fresh local chip across Canvas 
     const ui = surface(), clicked = {isConnected:true,getBoundingClientRect:()=>scene.anchor};
     const bridge = compile(`return {${toggleSource.slice(0,-1)}};`, {state:ui.state, emit:()=>{clicked.isConnected=false;},resolveFloatingMenuPlacement:geometry.place});
     bridge.toggleEngineMenu('ui', clicked);
-    const renderers = compile(`${renderSource}\nreturn {chip:renderEngineChip,panel:renderEnginePanel};`, {
-      ChatState, BoardThread, codex:ui.state.codex, codexBridge:bridge, el:ui.el, deskIcon:()=>ui.el('span'),
+    const renderers = compile(`${functionSource('codexRuns')}\n${functionSource('codexCurrentRun')}\n${renderSource}\nreturn {chip:renderEngineChip,panel:renderEnginePanel};`, {
+      ChatState, BoardThread, state:ui.state, codex:ui.state.codex, codexBridge:bridge, el:ui.el, deskIcon:()=>ui.el('span'),
     });
     const menu = renderers.panel(ui.thread()), freshChip = renderers.chip(ui.thread());
     const anchorRect = {...scene.anchor};

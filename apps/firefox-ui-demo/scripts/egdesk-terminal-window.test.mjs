@@ -95,7 +95,7 @@ function dispatch(target, type, init = {}) {
   return event;
 }
 
-async function terminalWindow({ api } = {}) {
+async function terminalWindow({ api, options = {}, windowOverrides = {} } = {}) {
   const { createTerminalZone } = await import(new URL('resources/surface/EGDeskSurfaceTerminal.mjs', overlay));
   const events = [], messages = new Map(), documentListeners = [];
   const host = makeNode('main'); host.isRoot = true;
@@ -143,20 +143,20 @@ async function terminalWindow({ api } = {}) {
     document: { getElementById: () => host,
       addEventListener: (type, fn, capture) => documentListeners.push({ type, fn, capture }),
       removeEventListener: (type, fn) => { const at = documentListeners.findIndex(item => item.type === type && item.fn === fn); if (at >= 0) documentListeners.splice(at, 1); } },
-    window: { addEventListener: (type, fn) => messages.set(type, fn), removeEventListener: type => messages.delete(type) },
+    window: { addEventListener: (type, fn) => messages.set(type, fn), removeEventListener: type => messages.delete(type), ...windowOverrides },
     console: { warn() {} }, setTimeout: fn => { fn(); return 0; },
   };
   const saved = new Map(Object.keys(globals).map(key => [key, Object.getOwnPropertyDescriptor(globalThis, key)]));
   for (const [key, value] of Object.entries(globals)) Object.defineProperty(globalThis, key, { configurable: true, writable: true, value });
   const restore = () => { for (const [key, descriptor] of saved) { if (descriptor) Object.defineProperty(globalThis, key, descriptor); else delete globalThis[key]; } };
   let card, zone;
-  try { zone = createTerminalZone(deps); card = zone.spawnTerminalCard({}); } catch (error) { restore(); throw error; }
+  try { zone = createTerminalZone(deps); card = zone.spawnTerminalCard(options); } catch (error) { restore(); throw error; }
   const frame = card.find('iframe');
   const hostEventKey = frameWindow.terminalAPI?.hostEventKey;
   const receiver = messages.get('message');
   const directMessage = (data, envelope = {}) => receiver({ source: frameWindow, origin: 'chrome://userchrome', ...envelope, data: { hostEventKey, ...data } });
   const message = (data, envelope = {}) => messages.get('message') && directMessage(data, envelope);
-  return { card, zone, host, events, state, shell, shellOptions, closeDot, documentListeners, message, restore, frame, hostEventKey, directMessage, boardCloseRequests: deps.boardCloseRequests,
+  return { card, zone, host, events, state, shell, shellOptions, closeDot, documentListeners, message, restore, frame, hostEventKey, directMessage, unload: () => messages.get('unload')?.(), boardCloseRequests: deps.boardCloseRequests,
     confirm: card.find('.egd-terminal-close-confirm'), cancel: card.find('.egd-terminal-close-confirm-cancel'),
     go: card.find('.egd-terminal-close-confirm-go') };
 }
@@ -520,4 +520,44 @@ test('explicit terminate does not close the view at the request ACK', async () =
     assert.equal(h.host.children.includes(h.card), false);
     assert.equal(h.events.includes('session-killed'), false);
   } finally { h.restore(); }
+});
+
+
+test('Terminal ownership begins only at authenticated API readiness, and never reopens after unload', async () => {
+  for (const idle of [true, false]) {
+    const configured = [], requests = [];
+    let identities = 0;
+    const configureLocal = (transport, idle) => configured.push({ transport, idle });
+    const h = await terminalWindow({ options: { idle }, api: { configureLocal }, windowOverrides: {
+      crypto: { randomUUID: () => 'id-' + (++identities) },
+      fetch: async (url, init) => { requests.push({ url, init }); return {}; },
+    } });
+    const ready = { type: 'terminal-api-ready' };
+    try {
+      assert.equal(new URL(h.frame.src).searchParams.get('managed'), '1');
+      assert.equal(identities, 0, 'import, factory, window and iframe assembly allocate no owner');
+      h.message(ready, { source: {} });
+      h.message({ ...ready, hostEventKey: 'different-document' });
+      assert.equal(identities, 0);
+      assert.deepEqual(configured, []);
+      h.message(ready, { source: null });
+      assert.equal(identities, 2, 'one owner and one view id for the current frame');
+      assert.deepEqual(configured.map(entry => entry.idle), [idle]);
+      assert.deepEqual(requests, [], 'parent does not start a PTY on ready');
+      const url = 'http://127.0.0.1:39218/terminal/shells';
+      await configured[0].transport(url, { method: 'GET' });
+      assert.deepEqual(requests[0].init.headers, { 'X-EGDesk-Terminal-Owner': 'id-1', 'X-EGDesk-Terminal-View': 'id-2' });
+      h.frame.contentWindow.terminalAPI = { hostEventKey: 'reload', configureLocal };
+      h.message(ready, { source: null });
+      assert.equal(identities, 2, 'prior document cannot rotate ownership');
+      h.message({ ...ready, hostEventKey: 'reload' }, { source: null });
+      await configured[1].transport(url);
+      assert.deepEqual(requests[1].init.headers, { 'X-EGDesk-Terminal-Owner': 'id-1', 'X-EGDesk-Terminal-View': 'id-3' });
+      h.unload();
+      assert.match(requests.at(-1).url, /close-local-scope$/);
+      h.message({ ...ready, hostEventKey: 'reload' });
+      assert.equal(identities, 3, 'no post-close ownership or view allocation');
+      assert.equal(configured.length, 2);
+    } finally { h.restore(); }
+  }
 });

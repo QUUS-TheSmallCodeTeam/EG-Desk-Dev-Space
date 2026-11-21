@@ -15551,9 +15551,9 @@ test('engine controls: header chip, new-room choices, locked-room panel and effo
   const text = value => typeof value === 'string' ? value : (value?.children || []).map(text).join('');
   const calls = [];
   const bridge = new Proxy({}, { get: (_target, name) => (...args) => calls.push([name, ...args.filter(arg => typeof arg !== 'object')]) });
-  const renderers = codex => compileFunction(`${surfaceSource.slice(start, end)}\nreturn { renderEngineBadge, renderEngineChip, renderEngineChoices, renderEnginePanel };`,
+  const renderers = codex => compileFunction(`${declaration('codexRuns')}\n${declaration('codexCurrentRun')}\nconst state = { codex };\n${surfaceSource.slice(start, end)}\nreturn { renderEngineBadge, renderEngineChip, renderEngineChoices, renderEnginePanel };`,
     ['codex', 'ChatState', 'el', 'deskIcon', 'codexBridge'])(codex, Chat, node, name => ({ tag: 'svg', icon: name }), bridge);
-  const codex = { recentEngineId: 'codex', engines: engineRowsFixture, authStatus: signedInPro, engineConfiguration: null, engineMenu: { threadId: 'new', left: 20, top: 40 } };
+  const codex = { chatProtocol: Chat.createChatProtocolState(), recentEngineId: 'codex', engines: engineRowsFixture, authStatus: signedInPro, engineConfiguration: null, engineMenu: { threadId: 'new', left: 20, top: 40 } };
   const ui = renderers(codex);
   const fresh = { id: 'new', messages: [] };
   const choices = ui.renderEngineChoices(fresh);
@@ -15575,7 +15575,7 @@ test('engine controls: header chip, new-room choices, locked-room panel and effo
   assert.equal(text(ui.renderEngineBadge({ id: 'old', messages: [{ id: 'm' }] })), 'Codex');
 
   const openPanel = ui.renderEnginePanel(fresh);
-  assert.deepEqual(openPanel.children.filter(child => child.className === 'egd-codex-engine-section-label').map(text), ['AI 엔진', '모델', '추론 강도']);
+  assert.deepEqual(openPanel.children.filter(child => child.className === 'egd-codex-engine-section-label').map(text), ['AI 엔진', '다음 실행 · 모델', '추론 강도']);
   assert.ok(openPanel.children.some(child => child.className === 'egd-codex-engine-choices'), 'a new room can still pick');
   assert.equal(text(openPanel.children.find(child => child.className === 'egd-codex-engine-model')), '기본 모델');
   const efforts = openPanel.children.find(child => child.className === 'egd-codex-engine-efforts');
@@ -15590,6 +15590,16 @@ test('engine controls: header chip, new-room choices, locked-room panel and effo
   lockedSection.children.at(-1).props.onclick();
   assert.deepEqual(calls.pop(), ['continueInNewThread', 'old']);
   assert.equal(locked.children.find(child => child.className === 'egd-codex-engine-efforts').children[2].props['aria-checked'], 'true');
+
+  assert.equal(openPanel.children.some(child => child.props.data?.testid === 'chat-running-settings'), false);
+  const liveRun = Chat.reduceChatEvent(codex.chatProtocol, envelope('run.started', 1, {}, { clientThreadId: fresh.id }));
+  liveRun.observedTurnSettings = { model: 'gpt-test-active', effort: 'low' };
+  const running = ui.renderEnginePanel(fresh);
+  const applied = running.children.find(child => child.props.data?.testid === 'chat-running-settings');
+  assert.ok(applied, 'production current-run lookup finds the live run for this room');
+  assert.match(text(applied), /진행 중인 실행 · 적용 기록.*모델: gpt-test-active.*추론 강도: 낮음/);
+  assert.equal(running.children.some(child => text(child) === '다음 실행 · 모델'), true, 'next-run settings remain separate');
+  assert.equal(ui.renderEnginePanel({ id: 'unrelated', messages: [] }).children.some(child => child.props.data?.testid === 'chat-running-settings'), false);
 
   const older = renderers({ ...codex, engines: null }).renderEnginePanel(fresh);
   assert.equal(older.children.some(child => child.className === 'egd-codex-engine-efforts'), false, 'no effort picker before capabilities are known');
@@ -15789,8 +15799,8 @@ test('engine panel: listed models as a radio list, the chosen model\'s efforts i
   const text = value => typeof value === 'string' ? value : (value?.children || []).map(text).join('');
   const calls = [];
   const bridge = new Proxy({}, { get: (_target, name) => (...args) => calls.push([name, ...args]) });
-  const ui = compileFunction(`${surfaceSource.slice(start, end)}\nreturn { renderEngineChip, renderEnginePanel };`,
-    ['codex', 'ChatState', 'el', 'deskIcon', 'codexBridge'])({ recentEngineId: 'codex', engines: listedEngines, authStatus: signedInPro,
+  const ui = compileFunction(`${declaration('codexRuns')}\n${declaration('codexCurrentRun')}\nconst state = { codex };\n${surfaceSource.slice(start, end)}\nreturn { renderEngineChip, renderEnginePanel };`,
+    ['codex', 'ChatState', 'el', 'deskIcon', 'codexBridge'])({ chatProtocol: Chat.createChatProtocolState(), recentEngineId: 'codex', engines: listedEngines, authStatus: signedInPro,
     engineConfiguration: null, engineMenu: { threadId: 'old', left: 0, top: 0 } }, Chat, node, name => ({ tag: 'svg', icon: name }), bridge);
   const room = { id: 'old', messages: [{ id: 'm' }], model: 'gpt-6-luna', effort: 'max' };
   const panel = ui.renderEnginePanel(room);
@@ -17208,7 +17218,22 @@ test('await task list: one line under the run state opens the list; \'계속\' a
   for (const internal of ['graph-a', 'login', 'sso', 'board-a', 'waiting-on-dependency', 'running', 'term-123', 'root-1']) {
     assert.equal(shown.includes(internal), false, `${internal} is not screen text`);
   }
-  assert.match(surfaceSource, /codexActivityButtonLabel\(run\)\)\)\);\n        \/\/ CHAT-06 Await: the task list line sits right under the run state\.\n        const taskBoard = renderChatTaskBoard\(codex, codexBridge, connectedFolderName\);\n        if \(taskBoard\) conversation\.appendChild\(taskBoard\);/);
+  const placementStart = surfaceSource.indexOf("        const answerNotice = run?.activities?.find");
+  const statusAppend = surfaceSource.lastIndexOf('codexActivityButtonLabel(run)', placementStart);
+  const placementEnd = surfaceSource.indexOf('        if (taskBoard) {', placementStart);
+  assert.ok(statusAppend >= 0 && statusAppend < placementStart && placementEnd > placementStart, 'run state precedes the task list');
+  const appendTaskBoard = compileFunction(surfaceSource.slice(placementStart, placementEnd),
+    ['run', 'conversation', 'el', 'renderChatTaskBoard', 'codex', 'codexBridge', 'connectedFolderName']);
+  for (const activities of [[], [{ kind: 'hostNotice', id: 'host:topic-answer-grounding', title: '응답 안내', detail: { text: '안내 내용' } }]]) {
+    for (const taskBoard of [undefined, board]) {
+      const appended = [];
+      appendTaskBoard({ runId: 'run', activities }, { appendChild: child => appended.push(child) }, node,
+        codex => draw(codex), { taskBoard }, actions, () => null);
+      assert.deepEqual(appended.map(child => child.props.data.testid), [
+        ...(activities.length ? ['chat-topic-answer-notice'] : []), ...(taskBoard ? ['chat-task-board'] : []),
+      ]);
+    }
+  }
 });
 
 test('await task list styles use approved tokens, stay small, and outrank the HUD button reset', () => {

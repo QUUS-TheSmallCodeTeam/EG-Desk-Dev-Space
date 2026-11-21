@@ -85,6 +85,7 @@ export function createTerminalZone(deps) {
     }).catch(() => {}); // Detached TTL is the fallback if the bridge is unreachable.
   }
   function ensureScope() {
+    if (scopeClosed) return null;
     if (!scope && window.crypto?.randomUUID) {
       scope = window.crypto.randomUUID();
       window.addEventListener('unload', closeScope, { once: true });
@@ -94,7 +95,6 @@ export function createTerminalZone(deps) {
   }
 
   function spawnTerminalCard(options = {}) {
-    const managed = !!ensureScope();
     const idle = options?.idle === true;
     const activate = options?.activate !== false;
     const reveal = options?.reveal !== false;
@@ -243,8 +243,9 @@ export function createTerminalZone(deps) {
       finally { attaching = false; }
     }
     renderHeld();
-    const query = [];
-    if (managed || idle) query.push('managed=1');
+    // Desk iframes cannot start an unowned PTY. Wait for the current frame's
+    // authenticated API before allocating this window's transport scope.
+    const query = ['managed=1'];
     if (requestedShellId) query.push('shellId=' + encodeURIComponent(requestedShellId));
     if (!activate) query.push('autofocus=0');
     const terminalUrl = TERMINAL_HTML_URL + (query.length ? '?' + query.join('&') : '');
@@ -314,9 +315,12 @@ export function createTerminalZone(deps) {
       if (ev.data?.type === 'terminal-api-ready') {
         everConnected = false;
         sessionText.textContent = idle ? '세션 없음' : '연결 중';
-        if (managed) {
+        const api = frameApi();
+        if (typeof api?.configureLocal === 'function' && ensureScope()) {
           const view = window.crypto.randomUUID();
-          frameApi()?.configureLocal?.((url, init) => terminalTransport(view, url, init), idle);
+          api.configureLocal((url, init) => terminalTransport(view, url, init), idle);
+        } else {
+          sessionText.textContent = '연결 실패';
         }
       }
       if (ev.data?.type === 'terminal-api-ready' || ev.data?.type === 'terminal-ready') {

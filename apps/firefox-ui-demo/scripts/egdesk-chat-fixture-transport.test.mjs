@@ -1792,12 +1792,12 @@ test('Chat artifact readiness resets on occlusion, clipping, drift, identity cha
   }
 });
 
-test('Chat artifact readiness is observation-only before the existing one native click, keeping all 72 assertions', () => {
+test('Chat artifact readiness is observation-only before the existing one native click, keeping all 73 assertions', () => {
   const stage = chatVerifierSource.slice(chatVerifierSource.indexOf('const artifactChip ='));
   assert.ok(stage.indexOf("await harness.scrollWithKey('.egd-codex-messages', 'End')") < stage.indexOf('const clickReady ='));
   assert.ok(stage.indexOf('}, clickReady,') < stage.indexOf('await harness.click(artifactChip)'));
   assert.equal((chatVerifierSource.match(/await harness\.click\(artifactChip\)/g) || []).length, 1);
-  assert.equal((chatVerifierSource.match(/check\(/g) || []).length, 72);
+  assert.equal((chatVerifierSource.match(/check\(/g) || []).length, 73);
   const observe = chatVerifierSource.slice(chatVerifierSource.indexOf('async function observeArtifactClickTarget('),
     chatVerifierSource.indexOf('async function beginArtifactClickDiagnostics('));
   assert.doesNotMatch(artifactReadinessSource + observe, /dispatchEvent|\.click\(|\.focus\(|scrollIntoView|scrollTop\s*=|\.style\.\w+\s*=/);
