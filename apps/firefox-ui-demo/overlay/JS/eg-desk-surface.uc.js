@@ -8875,7 +8875,7 @@
       typeof jointUI === 'function' ? el('button', { type: 'button', data: { testid: 'joint-form' },
         onclick: () => { close(); jointUI().propose(name.value.trim()); } }, '함께 만들기…') : null,
       el('p', {}, '체크한 화면의 배치와 다시 열기 참조를 저장합니다. Chat 대화·방, 브라우저 로그인, 터미널 세션은 저장하지 않습니다.'),
-      el('button', { type: 'button', onclick: () => { included.clear(); render(); } }, '빈 Board'),
+      el('button', { type: 'button', data: { testid: 'board-scope-clear' }, onclick: () => { included.clear(); render(); } }, '빈 Board'),
       el('button', { type: 'button', disabled: suggested.size ? null : 'true',
         onclick: () => { included.clear(); for (const id of suggested) included.add(id); render(); } }, '선택한 화면'),
       all, count,

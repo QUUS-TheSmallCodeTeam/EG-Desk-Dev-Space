@@ -935,7 +935,8 @@ export async function runPortableTransferFlow({ harness, result, check }, { prof
   await click(nameInput, 'name owned unsaved-to-SQLite Board');
   assertBeforeDeadline(deadlineMs); await harness.typeText(missingTitle, { selector: nameInput });
   result.actions.push({ kind: 'native-type', selector: nameInput, value: missingTitle, at: Date.now() });
-  await click('#egd-board-scope button[aria-label="빈 Board 저장"]', 'local Board creation; actual helper autosave remains refused');
+  await click('[data-testid="board-scope-clear"]', 'clear the local Board inclusion checklist without saving');
+  await click('[data-testid="board-scope-save"]', 'local Board creation; actual helper autosave remains refused');
   if (await chrome(harness, () => !!document.getElementById('egd-agenda-switcher'))) {
     await click('.egd-rail-switcher[aria-label="Board 목록"]', 'close preexisting Board catalog');
   }

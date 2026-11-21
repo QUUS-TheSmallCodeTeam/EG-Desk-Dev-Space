@@ -1748,7 +1748,8 @@ export async function runProjectFileFlow({ harness, result, check }, { profile, 
   await click('.egd-rail-switcher[aria-label="Board 목록"]', 'Board list');
   await click('button[aria-label="새 Board"]', 'new Board');
   await type('#egd-board-scope input[aria-label="Board 이름"]', BOARD_NAME);
-  await click('#egd-board-scope button[aria-label="빈 Board 저장"]', 'save empty owned Board');
+  await click('[data-testid="board-scope-clear"]', 'clear the local Board inclusion checklist without saving');
+  await click('[data-testid="board-scope-save"]', 'save empty owned Board');
   if (await chrome(harness, () => !!document.getElementById('egd-agenda-switcher'))) {
     await click('.egd-rail-switcher[aria-label="Board 목록"]', 'close stale Board list');
   }
