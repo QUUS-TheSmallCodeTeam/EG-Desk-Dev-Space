@@ -7014,7 +7014,8 @@
       restoreChatCardThreadBinding(runtime.threadBinding);
       card = spawnCodexChatCard();
     } else if (cardState.type === 'terminal') {
-      card = spawnTerminalCard();
+      // Desk restore restores the view, never authority over a PTY or a fresh shell.
+      card = spawnTerminalCard({ idle: true });
     } else if (cardState.type === 'result') {
       card = spawnResultCard({ restore: true, record: runtime });
     } else if (cardState.type === 'memo') {
@@ -11656,7 +11657,7 @@
               if (item.id === 'browser') {
                 spawnBrowserCard();
               } else if (item.id === 'terminal') {
-                spawnTerminalCard();
+                spawnTerminalCard({ idle: true });
               } else if (item.id === 'settings') {
                 spawnSettingsCard();
               } else if (item.id === 'shelf') {

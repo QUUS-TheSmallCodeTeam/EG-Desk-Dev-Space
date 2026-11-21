@@ -8159,7 +8159,11 @@ button.egd-codex-message-activity:focus-visible { outline: var(--egd-focus-outli
   font-size: 12px;
   font-family: var(--egd-font);
 }
-.egd-terminal-close-confirm[hidden] { display: none; }
+.egd-terminal-close-confirm[hidden],
+.egd-terminal-close-confirm button[hidden] { display: none; }
+.egd-terminal-held:not([hidden]) { display: block; }
+.egd-terminal-held p { margin: 4px 0; }
+.egd-terminal-held button { margin: 2px 6px 2px 0; }
 .egd-terminal-close-confirm-text { flex: 1 1 auto; min-width: 0; }
 .egd-terminal-close-confirm button {
   flex: 0 0 auto;

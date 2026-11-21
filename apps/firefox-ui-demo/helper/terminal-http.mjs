@@ -9,6 +9,9 @@ const POST_FIELDS = new Map([
   ['/terminal/read', ['sessionId']],
   ['/terminal/resize', ['sessionId', 'cols', 'rows']],
   ['/terminal/kill', ['sessionId']],
+  ['/terminal/detach', ['sessionId', 'bridgeInstance']],
+  ['/terminal/attach', ['sessionId', 'bridgeInstance']],
+  ['/terminal/close-local-scope', []],
 ])
 const bad = (code, message, httpStatus = 400) => Object.assign(new Error(message), { code, httpStatus })
 
@@ -16,6 +19,8 @@ export function createTerminalHttpHandler({ registry, factory, port = 39218 } = 
   if (!registry || !factory || typeof factory.create !== 'function' || typeof factory.catalog !== 'function') {
     throw new TypeError('Terminal HTTP requires a registry and session factory')
   }
+  const pendingScopes = new Map()
+  const key = /^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/
   return async (req, res, url) => {
     const route = url?.pathname || new URL(req.url, 'http://127.0.0.1').pathname
     if (route !== '/terminal/shells' && !POST_FIELDS.has(route)) return false
@@ -35,15 +40,50 @@ export function createTerminalHttpHandler({ registry, factory, port = 39218 } = 
       if (Object.keys(body).some(key => !POST_FIELDS.get(route).includes(key))) {
         throw bad('INVALID_TERMINAL_REQUEST', 'Terminal request has an unsupported field')
       }
+      const owner = req.headers['x-egdesk-terminal-owner']
+      const view = req.headers['x-egdesk-terminal-view']
+      if ((owner !== undefined || view !== undefined) &&
+          (typeof owner !== 'string' || !key.test(owner) || typeof view !== 'string' || !key.test(view) ||
+          (req.headers.origin !== undefined && !['chrome://browser', 'chrome://userchrome'].includes(req.headers.origin)))) {
+        throw bad('TERMINAL_SCOPE_REQUIRED', 'Verified local terminal scope required', 403)
+      }
+      const lifecycle = ['/terminal/detach', '/terminal/attach', '/terminal/close-local-scope'].includes(route)
+      if (lifecycle && !owner) throw bad('TERMINAL_SCOPE_REQUIRED', 'Verified local terminal scope required', 403)
+      if (route === '/terminal/close-local-scope') {
+        const pending = pendingScopes.get(owner)
+        if (pending) pending.closed = true
+        registry.closeLocalScope(owner)
+        sendJson(res, 200, { ok: true, status: 'CLOSE_REQUESTED', exitConfirmed: false })
+        return true
+      }
       let result
       if (route === '/terminal/spawn') {
-        const session = await factory.create(body)
-        result = registry.snapshot(session.id)
+        let pending
+        if (owner) {
+          pending = pendingScopes.get(owner) || { count: 0, closed: false }
+          if (pending.closed) throw bad('TERMINAL_SCOPE_CLOSED', 'Terminal scope is closing', 409)
+          pendingScopes.set(owner, pending)
+          pending.count++
+        }
+        try {
+          const session = await factory.create(body)
+          result = owner ? registry.ownLocal(session.id, owner, view) : registry.snapshot(session.id)
+          if (pending?.closed) registry.closeLocalScope(owner)
+        } finally {
+          if (pending && --pending.count === 0) pendingScopes.delete(owner)
+        }
       } else {
         if (typeof body.sessionId !== 'string' || !body.sessionId || body.sessionId.length > 160 || body.sessionId.includes('\0')) {
           throw bad('INVALID_TERMINAL_SESSION', 'A terminal session ID is required')
         }
-        if (route === '/terminal/write') {
+        if (lifecycle) {
+          if (typeof body.bridgeInstance !== 'string' || !key.test(body.bridgeInstance)) throw bad('INVALID_TERMINAL_BRIDGE', 'A bridge instance is required')
+          result = route === '/terminal/detach'
+            ? registry.detachLocal(body.sessionId, owner, view, body.bridgeInstance)
+            : registry.attachLocal(body.sessionId, owner, view, body.bridgeInstance)
+        } else if ((result = registry.authorizeLocal(body.sessionId, owner, view))) {
+          // Do not expose output or touch the native process on rejected ownership.
+        } else if (route === '/terminal/write') {
           if (typeof body.data !== 'string' || Buffer.byteLength(body.data, 'utf8') > 64 * 1024) {
             throw bad('INVALID_TERMINAL_INPUT', 'Terminal input must be bounded text')
           }

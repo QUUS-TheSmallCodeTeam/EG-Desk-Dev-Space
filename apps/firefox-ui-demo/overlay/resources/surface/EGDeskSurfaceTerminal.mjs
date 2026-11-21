@@ -47,8 +47,7 @@ export function createTerminalZone(deps) {
     } catch { return false; }
   }
 
-  // B31: closing the window ends the session with it, so only a session that
-  // is still running asks first. A frame that never connected has nothing to lose.
+  // Lost connectivity is not evidence of exit. A known PTY always asks first.
   function terminalCloseNeedsConfirm(api) {
     try {
       if (!api) return false;
@@ -59,8 +58,44 @@ export function createTerminalZone(deps) {
   // ============ Terminal Canvas Card ============
   const EGDESK_HELPER_PORT = 39218;
   const TERMINAL_HTML_URL = 'chrome://userchrome/content/terminal.html';
+  const bridgeOrigin = 'http://127.0.0.1:' + EGDESK_HELPER_PORT;
+  const heldSessions = new Map(); // Window memory only. Not a Desk restore record.
+  let scope = null, scopeClosed = false;
+  const reentryMessages = {
+    ORIGINAL_EXITED: '원래 터미널의 종료가 확인되었습니다.',
+    ORIGINAL_UNAVAILABLE: '원래 터미널을 이 브리지에서 찾을 수 없습니다. 종료 확인은 아닙니다.',
+    TERMINAL_IDENTITY_CHANGED: '소유 범위가 달라 다시 연결할 수 없습니다.',
+    TERMINAL_BRIDGE_RESTARTED: '로컬 브리지가 다시 시작되어 원래 터미널에 연결할 수 없습니다.',
+    TERMINAL_DETACH_EXPIRED: '유지 시간이 만료되었습니다. 종료가 확인된 것은 아닙니다.',
+    TERMINAL_NOT_HELD: '이 터미널은 더 이상 다시 연결할 수 있는 상태가 아닙니다.',
+    TERMINAL_REENTRY_UNCONFIRMED: '연결 여부를 확인하지 못했습니다. 같은 창에서 다시 시도하세요.',
+  };
+  function terminalTransport(view, url, init) {
+    if (!scope || !url.startsWith(bridgeOrigin + '/terminal/') || !/^\/terminal\/[a-z-]+$/.test(url.slice(bridgeOrigin.length))) throw new Error('Invalid terminal transport');
+    return window.fetch(url, { ...init, headers: { ...init?.headers,
+      'X-EGDesk-Terminal-Owner': scope, 'X-EGDesk-Terminal-View': view } });
+  }
+  function closeScope() {
+    if (scopeClosed || !scope) return;
+    scopeClosed = true;
+    try { globalThis.Services?.obs.removeObserver(closeScope, 'quit-application-granted'); } catch {}
+    heldSessions.clear();
+    void terminalTransport(scope, bridgeOrigin + '/terminal/close-local-scope', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}', keepalive: true,
+    }).catch(() => {}); // Detached TTL is the fallback if the bridge is unreachable.
+  }
+  function ensureScope() {
+    if (!scope && window.crypto?.randomUUID) {
+      scope = window.crypto.randomUUID();
+      window.addEventListener('unload', closeScope, { once: true });
+      try { globalThis.Services?.obs.addObserver(closeScope, 'quit-application-granted'); } catch {}
+    }
+    return scope;
+  }
 
   function spawnTerminalCard(options = {}) {
+    const managed = !!ensureScope();
+    const idle = options?.idle === true;
     const activate = options?.activate !== false;
     const reveal = options?.reveal !== false;
     const requestedShellId = typeof options?.shellId === 'string'
@@ -102,9 +137,9 @@ export function createTerminalZone(deps) {
     const sessionText = el('span', { class: 'egd-terminal-session', role: 'status', data: { testid: 'terminal-session' } }, '연결 중');
     shell.slots.identity.appendChild(title);
     shell.slots.identity.appendChild(sessionText);
-    // The red dot ends the session together with the window, and says so.
+    // The red dot opens the same choices as the close shortcut.
     const closeDot = shell.slots.topbar.querySelector?.('.egd-card-dot-close');
-    if (closeDot) { closeDot.title = '터미널 종료 후 닫기'; closeDot.setAttribute?.('aria-label', '터미널 종료 후 닫기'); }
+    if (closeDot) { closeDot.title = '터미널 닫기'; closeDot.setAttribute?.('aria-label', '터미널 닫기'); }
     // CODE-06: the latest test/build result of a command typed here, as a chip.
     const runChip = el('button', { type: 'button', class: 'egd-terminal-run-chip', hidden: true, 'aria-expanded': 'false',
       title: '최근 명령 결과 보기/숨기기', data: { testid: 'terminal-run-chip' },
@@ -159,17 +194,57 @@ export function createTerminalZone(deps) {
       onclick: (ev) => { ev.stopPropagation(); dismissCloseConfirm({ restoreFocus: true }); } }, '취소');
     const closeGo = el('button', { type: 'button', class: 'egd-terminal-close-confirm-go', title: '터미널 세션을 종료하고 창 닫기',
       data: { testid: 'terminal-close-go' },
-      onclick: (ev) => { ev.stopPropagation(); closeTerminalNow(); } }, '종료하고 닫기');
+      onclick: (ev) => { ev.stopPropagation(); void terminateAndClose(); } }, '종료하고 닫기');
+    const closeDetach = el('button', { type: 'button', hidden: true, class: 'egd-terminal-close-confirm-cancel',
+      title: '이 Desk 창에서 최대 10분 동안 실행 유지', data: { testid: 'terminal-close-detach' },
+      onclick: (ev) => { ev.stopPropagation(); void detachAndClose(); } }, '창만 닫고 실행 유지');
+    const closeMessage = el('span', { class: 'egd-terminal-close-confirm-text' }, '터미널 세션도 함께 종료됩니다. 닫을까요?');
     const closeConfirm = el('div', { class: 'egd-terminal-close-confirm', role: 'alertdialog', 'aria-label': '터미널 닫기 확인', hidden: true,
       data: { testid: 'terminal-close-confirm' } },
-      el('span', { class: 'egd-terminal-close-confirm-text' }, '터미널 세션도 함께 종료됩니다. 닫을까요?'),
-      closeCancel, closeGo);
+      closeMessage, closeCancel, closeGo, closeDetach);
 
     card.insertBefore(runResultPanel, body);
     card.insertBefore(closeConfirm, body);
 
     // ---- Use iframe for terminal.html to isolate keyboard events ----
+    const heldStatus = el('p', { role: 'status', data: { testid: 'terminal-held-status' } });
+    const heldRows = el('div', { data: { testid: 'terminal-held-rows' } });
+    const heldPanel = idle ? el('section', { class: 'egd-terminal-close-confirm egd-terminal-held', 'aria-label': '유지 중인 Terminal',
+      style: { maxHeight: '35%', overflow: 'auto' } },
+      el('strong', {}, '유지 중인 Terminal'), heldStatus, heldRows) : null;
+    if (heldPanel) card.insertBefore(heldPanel, body);
+    const renderHeld = () => {
+      if (!heldPanel) return;
+      let index = 0;
+      heldRows.replaceChildren(...[...heldSessions.values()].map(ref => {
+        const label = (ref.shellLabel || '터미널') + ' ' + (++index);
+        return el('button', { type: 'button', class: 'egd-terminal-close-confirm-cancel',
+          data: { testid: 'terminal-held-reconnect' }, onclick: (ev) => {
+            ev.stopPropagation(); void reconnectHeld(ref);
+          } }, label + ' · 다시 연결');
+      }));
+      heldStatus.textContent = heldSessions.size ? '원래 실행에 연결합니다. 이전 화면 전체는 복원되지 않습니다.' : '이 Desk 창에 유지 요청이 없습니다.';
+    };
+    let attaching = false;
+    async function reconnectHeld(ref) {
+      if (attaching || heldSessions.get(ref.sessionId) !== ref) return;
+      const api = frameApi();
+      if (!api?.attachLocal || api.ptyId) return;
+      attaching = true;
+      heldStatus.textContent = '같은 터미널에 다시 연결 중…';
+      try {
+        const result = await api.attachLocal(ref);
+        if (result.ok) { heldSessions.delete(ref.sessionId); heldPanel.hidden = true; return; }
+        if (['ORIGINAL_EXITED', 'ORIGINAL_UNAVAILABLE', 'TERMINAL_IDENTITY_CHANGED', 'TERMINAL_BRIDGE_RESTARTED',
+          'TERMINAL_DETACH_EXPIRED', 'TERMINAL_NOT_HELD'].includes(result.code)) heldSessions.delete(ref.sessionId);
+        renderHeld();
+        heldStatus.textContent = reentryMessages[result.code] || '원래 터미널에 다시 연결하지 못했습니다.';
+      } catch { heldStatus.textContent = reentryMessages.TERMINAL_REENTRY_UNCONFIRMED; }
+      finally { attaching = false; }
+    }
+    renderHeld();
     const query = [];
+    if (managed || idle) query.push('managed=1');
     if (requestedShellId) query.push('shellId=' + encodeURIComponent(requestedShellId));
     if (!activate) query.push('autofocus=0');
     const terminalUrl = TERMINAL_HTML_URL + (query.length ? '?' + query.join('&') : '');
@@ -236,7 +311,14 @@ export function createTerminalZone(deps) {
         if (typeof shellId === 'string' && /^[a-z][a-z0-9-]{0,31}$/.test(shellId)) spawnTerminalCard({ shellId });
         return;
       }
-      if (ev.data?.type === 'terminal-api-ready') { everConnected = false; sessionText.textContent = '연결 중'; }
+      if (ev.data?.type === 'terminal-api-ready') {
+        everConnected = false;
+        sessionText.textContent = idle ? '세션 없음' : '연결 중';
+        if (managed) {
+          const view = window.crypto.randomUUID();
+          frameApi()?.configureLocal?.((url, init) => terminalTransport(view, url, init), idle);
+        }
+      }
       if (ev.data?.type === 'terminal-api-ready' || ev.data?.type === 'terminal-ready') {
         try {
           termBrowser.contentWindow?.terminalAPI?.setWheelHandler?.(
@@ -248,7 +330,8 @@ export function createTerminalZone(deps) {
       if (ev.data?.type === 'terminal-ready') {
         everConnected = true;
         const label = ev.data.shellLabel;
-        sessionText.textContent = typeof label === 'string' && label && label.length <= 80 ? label : '실행 중';
+        if (heldPanel) heldPanel.hidden = true;
+        sessionText.textContent = ev.data.resumed ? '재연결 · 실행 중' : typeof label === 'string' && label && label.length <= 80 ? label : '실행 중';
         if (activate && state.activeEntityId === card.id) focusTerminal();
       }
       if (ev.data?.type === 'terminal-exit-confirmed') { sessionText.textContent = '종료됨'; dismissCloseConfirm(); }
@@ -276,13 +359,56 @@ export function createTerminalZone(deps) {
       document.removeEventListener('mousedown', onPressOutsideConfirm, true);
       if (restoreFocus) focusTerminal();
     }
+    let detaching = false, detached = false, terminating = false, terminated = false;
+    async function terminateAndClose() {
+      if (terminating || detaching) return;
+      const api = frameApi();
+      if (!api?.closeForBoard) { closeTerminalNow(); return; }
+      terminating = true;
+      closeGo.disabled = closeDetach.disabled = true;
+      closeMessage.textContent = '실행 종료 확인 중…';
+      try {
+        terminated = await api.closeForBoard() === true;
+        if (terminated) closeTerminalNow();
+        else closeMessage.textContent = '종료 요청과 실제 종료는 다릅니다. 종료를 확인하지 못했습니다.';
+      } catch { closeMessage.textContent = '실행 종료를 확인하지 못했습니다.'; }
+      finally { terminating = false; closeGo.disabled = closeDetach.disabled = false; if (!terminated) closeDetach.hidden = true; }
+    }
+    async function detachAndClose() {
+      if (terminating || detaching || terminalDisposed || !frameApi()?.canDetach?.()) return;
+      detaching = true;
+      closeGo.disabled = closeCancel.disabled = closeDetach.disabled = true;
+      closeMessage.textContent = '실행 유지 확인 중…';
+      try {
+        const result = await frameApi().detachLocal();
+        if (!result.ok) {
+          closeMessage.textContent = result.code === 'TERMINAL_DETACH_LIMIT' ? '유지 가능한 터미널 수를 초과했습니다.'
+            : '실행 유지를 확인하지 못했습니다. 닫지 않았습니다.';
+          return;
+        }
+        if (!scopeClosed) {
+          heldSessions.set(result.sessionId, result);
+          while (heldSessions.size > 16) heldSessions.delete(heldSessions.keys().next().value);
+        }
+        detached = true;
+        if (!terminalDisposed) {
+          boardNotice('실행 유지 중 · Dock의 터미널에서 다시 연결 (최대 10분)');
+          closeTerminalNow();
+        }
+      } catch { closeMessage.textContent = '실행 유지를 확인하지 못했습니다. 닫지 않았습니다.'; }
+      finally { detaching = false; closeGo.disabled = closeCancel.disabled = closeDetach.disabled = false; }
+    }
     function closeTerminalNow() {
+      if (detaching && !detached) return false;
       dismissCloseConfirm();
       return closeWindow();
     }
     function requestTerminalClose() {
+      if (detaching || attaching || terminating) return false;
       if (!terminalCloseNeedsConfirm(frameApi())) return closeTerminalNow();
       if (closeConfirm.hidden) {
+        closeDetach.hidden = !frameApi()?.canDetach?.();
+        closeMessage.textContent = closeDetach.hidden ? '터미널 세션도 함께 종료됩니다. 닫을까요?' : '창을 닫을 때 이 실행을 어떻게 할까요?';
         closeConfirm.hidden = false;
         document.addEventListener('mousedown', onPressOutsideConfirm, true);
       }
@@ -316,7 +442,7 @@ export function createTerminalZone(deps) {
       // Kill PTY session via the browser's terminalAPI
       try {
         const contentWin = termBrowser.contentWindow || termBrowser.contentDocument?.defaultView;
-        if (contentWin && contentWin.terminalAPI) {
+        if (!detached && !terminated && contentWin && contentWin.terminalAPI) {
           void contentWin.terminalAPI.kill().catch(error => {
             console.warn(TAG, 'terminal cleanup was not confirmed:', error);
           });

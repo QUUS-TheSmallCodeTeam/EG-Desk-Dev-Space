@@ -84,7 +84,7 @@
   // Initial fit
   requestAnimationFrame(() => {
     fitAddon.fit();
-    return connectBridge();
+    if (!managed) return connectBridge();
   });
 
   // ---- HTTP PTY bridge ----
@@ -104,6 +104,9 @@
     'WINDOWS_PTY_UNAVAILABLE', 'WINDOWS_CONPTY_UNSUPPORTED', 'INVALID_TERMINAL_SHELL',
     'TERMINAL_SHELL_UNAVAILABLE', 'INVALID_TERMINAL_SIZE',
   ].includes(error.code) && Number.isInteger(error.httpStatus) && error.httpStatus >= 400;
+  const managed = new URLSearchParams(window.location.search).get('managed') === '1';
+  let scopedFetch = null, bridgeInstance = null, detachSupported = false, detachPending = null, detachUnconfirmed = false;
+  let pendingAttach = null, resumed = false, renderingResumedOutput = 0;
   const requestedShellId = new URLSearchParams(window.location.search).get('shellId');
   const autoFocus = new URLSearchParams(window.location.search).get('autofocus') !== '0';
   const shellIdIsValid = value => typeof value === 'string' && /^[a-z][a-z0-9-]{0,31}$/.test(value);
@@ -113,7 +116,8 @@
     const controller = options.timeoutMs ? new AbortController() : null;
     const timeout = controller ? setTimeout(() => controller.abort(), options.timeoutMs) : null;
     try {
-      const response = await fetch(`${HELPER_ORIGIN}${path}`, {
+      if (managed && !scopedFetch) throw new Error('터미널 소유 범위를 확인하지 못했습니다.');
+      const response = await (scopedFetch || fetch)(`${HELPER_ORIGIN}${path}`, {
         method: options.method || 'POST', headers: { 'Content-Type': 'application/json' },
         ...(options.method === 'GET' ? {} : { body: JSON.stringify(body || {}) }),
         ...(controller ? { signal: controller.signal } : {}),
@@ -151,7 +155,10 @@
   // keyboard/input traffic, even when it happens to contain an exit marker.
   function receiveTerminalOutput(data, sessionId) {
     if (typeof data !== 'string' || !data) return;
-    term.write(data);
+    // xterm may emit device replies during output parsing. A restored view
+    // must never send those replies (or any previously queued input) to the PTY.
+    if (resumed) { renderingResumedOutput++; term.write(data, () => { renderingResumedOutput--; }); }
+    else term.write(data);
     if (activeScript && !activeScript.cancelled && activeScript.sessionId === sessionId
         && activeScript.generation === connectionGeneration) activeScript.run?.onData(data);
   }
@@ -182,6 +189,8 @@
       if (ptyId !== sessionAtRead || connectionGeneration !== generationAtRead || unloaded) return;
       if (result.sessionId !== sessionAtRead || result.status === 'UNKNOWN') throw new Error('터미널 출력의 세션을 확인하지 못했습니다.');
       receiveTerminalOutput(result.data, sessionAtRead);
+      if (result.outputTruncated && resumed) showOperationError('일부 출력은 보존 한도를 초과해 생략되었습니다.');
+      if (result.status !== 'RUNNING') detachSupported = false;
       // CODE-06: a test/build result the bridge read from this session's own output.
       if (result.runResult && typeof result.runResult === 'object') {
         try { notifyTerminalHost({ type: 'terminal-run-result', sessionId: sessionAtRead, runResult: result.runResult }); } catch {}
@@ -261,7 +270,79 @@
     },
   });
 
+  function canDetach() {
+    return !!(scopedFetch && bridgeInstance && detachSupported && ptyId && !closeRequested
+      && !unloaded && !activeScript && (connected || detachUnconfirmed));
+  }
+
+  function detachLocal() {
+    if (detachPending) return detachPending;
+    if (!canDetach()) return Promise.resolve({ ok: false, code: 'TERMINAL_DETACH_UNAVAILABLE' });
+    const sessionId = ptyId;
+    detachUnconfirmed = true;
+    connected = false;
+    term.options.disableStdin = true;
+    writeQueue.invalidate();
+    composition.invalidate();
+    connectionGeneration++;
+    stopPolling();
+    detachPending = (async () => {
+      try {
+        const result = await postTerminal('/terminal/detach', { sessionId, bridgeInstance }, { timeoutMs: 3000, passErrors: true });
+        if (result.httpStatus !== 200 || result.ok !== true || result.status !== 'HELD' ||
+            result.sessionId !== sessionId || result.bridgeInstance !== bridgeInstance || !Number.isFinite(result.expiresAt)) {
+          if (result.code === 'TERMINAL_DETACH_LIMIT') {
+            detachUnconfirmed = false;
+            markConnected();
+          }
+          return { ok: false, code: result.code || 'TERMINAL_DETACH_UNCONFIRMED' };
+        }
+        ptyId = null;
+        connected = false;
+        spawnPhase = 'idle';
+        return { ok: true, sessionId, bridgeInstance, expiresAt: result.expiresAt, shellLabel: sessionInfo?.shellLabel };
+      } catch { return { ok: false, code: 'TERMINAL_DETACH_UNCONFIRMED' }; }
+    })().finally(() => {
+      detachPending = null;
+      if (!ptyId || closeRequested || unloaded) return;
+      // A lost ACK may have left the original held. Do not enable input until
+      // a distinct retry/read has proved its attached channel is still owned.
+      showOperationError('창 분리 여부를 확인하지 못했습니다. 다시 시도할 수 있습니다.');
+    });
+    return detachPending;
+  }
+
+  async function attachLocal(ref) {
+    if (!managed || !scopedFetch || unloaded || closeRequested || ptyId || connectPending || spawnPhase !== 'idle'
+        || (pendingAttach && pendingAttach.sessionId !== ref.sessionId)) return { ok: false, code: 'TERMINAL_REENTRY_UNAVAILABLE' };
+    pendingAttach = ref;
+    shellButton.disabled = true;
+    try {
+      const result = await postTerminal('/terminal/attach', { sessionId: ref.sessionId, bridgeInstance: ref.bridgeInstance },
+        { timeoutMs: 3000, passErrors: true });
+      if (result.httpStatus !== 200 || result.ok !== true || result.status !== 'RUNNING' || result.usePty !== true ||
+          result.sessionId !== ref.sessionId || result.bridgeInstance !== ref.bridgeInstance) {
+        pendingAttach = null;
+        return { ok: false, code: result.code || 'TERMINAL_REENTRY_UNAVAILABLE' };
+      }
+      if (unloaded || closeRequested) {
+        void postTerminal('/terminal/kill', { sessionId: ref.sessionId }).catch(reportAsyncError);
+        return { ok: false, code: 'TERMINAL_REENTRY_UNAVAILABLE' };
+      }
+      pendingAttach = null;
+      ptyId = ref.sessionId;
+      setSessionInfo(result);
+      resumed = true;
+      spawnPhase = 'active';
+      // This is an explicit attach. No spawn path or queued writes are used.
+      markConnected();
+      return { ok: true };
+    } catch { return { ok: false, code: 'TERMINAL_REENTRY_UNCONFIRMED' }; }
+    finally { if (!closeRequested && !pendingAttach) shellButton.disabled = false; }
+  }
+
   async function closeForBoard() {
+    if (detachPending) return false;
     if (exitConfirmed) return true;
     closeRequested = true;
     invalidateScriptRun();
@@ -271,6 +352,12 @@
     writeQueue.invalidate();
     composition.invalidate();
     if (!ptyId) {
+      if (pendingAttach) {
+        // A lost attach ACK can have transferred ownership only to this view.
+        // Kill is view-scoped and cannot stop a session still held or elsewhere.
+        const prior = pendingAttach;
+        return terminalCloser.close(prior.sessionId);
+      }
       if (spawnPhase === 'idle' || spawnPhase === 'rejected') {
         noSessionClosed = true;
         statusEl.textContent = '실행된 터미널 세션이 없어 카드를 닫을 수 있습니다.';
@@ -371,6 +458,17 @@
     window.terminalAPI = {
       get hostEventKey() { return hostEventKey; },
       closeForBoard,
+      configureLocal: (transport, idle) => {
+        if (!managed || scopedFetch || typeof transport !== 'function') return;
+        scopedFetch = transport;
+        if (!idle) { void connectBridge(); return; }
+        statusEl.textContent = '유지 중인 Terminal에 다시 연결하거나 새 터미널을 열 수 있습니다.';
+        shellButton.textContent = '새 터미널 열기';
+        shellButton.disabled = true;
+        void loadShellCatalog().catch(error => showStatusDetail(error.message));
+        notifyTerminalHost({ type: 'terminal-no-session' });
+      },
+      canDetach, detachLocal, attachLocal,
       runScript,
       closeState: () => terminalCloser.snapshot(),
       get ptyId() {
@@ -480,8 +578,41 @@
     statusEl.appendChild(details);
   }
 
+  function setSessionInfo(result, shellId = null) {
+    bridgeInstance = typeof result.bridgeInstance === 'string' ? result.bridgeInstance : null;
+    detachSupported = result.detachSupported === true;
+    const build = result.windowsBuildNumber ?? shellCatalog?.windowsBuildNumber;
+    if (result.transport === 'conpty' && Number.isSafeInteger(build) && build > 0) {
+      term.options.windowsPty = { backend: 'conpty', buildNumber: build };
+    }
+    sessionInfo = { shellId: result.shellId || shellId,
+      shellLabel: result.shellLabel || shellCatalog?.shells.find(shell => shell.id === shellId)?.label || '터미널',
+      transport: result.transport || (result.usePty ? 'pty' : 'pipe'),
+      usePty: result.usePty === true, degraded: result.degraded === true,
+      windowsBuildNumber: Number.isSafeInteger(build) ? build : null };
+    shellLabel.textContent = sessionInfo.shellLabel + ' · ' + sessionInfo.transport;
+    if (!sessionInfo.usePty) showOperationError('파이프 연결: 대화형 PTY와 크기 변경을 지원하지 않습니다.');
+  }
+
+  function markConnected() {
+    connected = true;
+    term.options.disableStdin = false;
+    exitConfirmed = false;
+    confirmedExitSessionId = null;
+    composition.invalidate();
+    writeQueue.bind(ptyId);
+    statusEl.classList.add('hidden');
+    if (sessionInfo?.usePty) operationStatus.classList.add('hidden');
+    shellButton.textContent = '새 터미널 열기';
+    notifyTerminalHost({ type: 'terminal-ready', ptyId,
+      shellId: sessionInfo?.shellId, shellLabel: sessionInfo?.shellLabel, resumed });
+    readTimer = setInterval(readTerminalOutput, 80);
+    void readTerminalOutput();
+    if (autoFocus && window.parent === window) term.focus();
+  }
+
   async function connectBridge() {
-    if (unloaded || closeRequested) return false;
+    if (unloaded || closeRequested || pendingAttach || detachPending) return false;
     if (spawnPhase === 'unknown' && !ptyId) {
       showSpawnUnconfirmed();
       return false;
@@ -544,34 +675,10 @@
             await closeForBoard();
             return false;
           }
-          const windowsBuildNumber = result.windowsBuildNumber ?? shellCatalog.windowsBuildNumber;
-          if (shellCatalog.platform === 'win32' && Number.isSafeInteger(windowsBuildNumber) && windowsBuildNumber > 0) {
-            term.options.windowsPty = { backend: 'conpty', buildNumber: windowsBuildNumber };
-          }
-          sessionInfo = { shellId: result.shellId || shellId,
-            shellLabel: result.shellLabel || shellCatalog.shells.find(shell => shell.id === shellId).label,
-            transport: result.transport || (result.usePty ? 'pty' : 'pipe'),
-            usePty: result.usePty === true, degraded: result.degraded === true,
-            windowsBuildNumber: Number.isSafeInteger(windowsBuildNumber) ? windowsBuildNumber : null };
-          shellLabel.textContent = sessionInfo.shellLabel + ' · ' + sessionInfo.transport;
-          if (!sessionInfo.usePty) showOperationError('파이프 연결: 대화형 PTY와 크기 변경을 지원하지 않습니다.');
+          setSessionInfo(result, shellId);
         }
         if (!current() || !ptyId) return false;
-        connected = true;
-        term.options.disableStdin = false;
-        exitConfirmed = false;
-        confirmedExitSessionId = null;
-        composition.invalidate();
-        writeQueue.bind(ptyId);
-        statusEl.classList.add('hidden');
-        shellButton.textContent = '새 터미널 열기';
-        notifyTerminalHost({ type: 'terminal-ready', ptyId,
-          shellId: sessionInfo?.shellId, shellLabel: sessionInfo?.shellLabel });
-        readTimer = setInterval(readTerminalOutput, 80);
-        void readTerminalOutput();
-        // An embedded terminal must not steal focus from a different card while
-        // its asynchronous connection is opening. The owning card focuses it.
-        if (autoFocus && window.parent === window) term.focus();
+        markConnected();
         return true;
       } catch (error) {
         if (spawnPhase === 'pending') spawnPhase = definiteSpawnRejection(error) ? 'rejected' : 'unknown';
@@ -601,6 +708,7 @@
   }
 
   shellButton.addEventListener('click', () => {
+    if (pendingAttach || detachPending || detachUnconfirmed || closeRequested || unloaded) return;
     if (ptyId || sessionInfo) {
       if (!shellCatalog?.shells.some(shell => shell.id === shellSelect.value && shell.available)) return;
       notifyTerminalHost({ type: 'terminal-new-session', shellId: shellSelect.value });
@@ -615,6 +723,7 @@
   term.attachCustomKeyEventHandler(event => keyGuard.keyEvent(event));
   term.onKey(event => keyGuard.onKey(event));
   term.onData((data) => {
+    if (renderingResumedOutput) return;
     dataEvents += 1;
     void composition.data(data).catch(reportAsyncError);
   });
@@ -686,8 +795,9 @@
     composition.invalidate();
     clearTimeout(resizeTimeout);
     stopPolling();
-    if (ptyId) {
-      void postTerminal('/terminal/kill', { sessionId: ptyId }).catch(reportAsyncError);
+    const cleanupId = ptyId || pendingAttach?.sessionId;
+    if (cleanupId && !detachPending) {
+      void postTerminal('/terminal/kill', { sessionId: cleanupId }).catch(reportAsyncError);
     }
     try { ro.disconnect(); term.dispose?.(); } catch (error) { reportAsyncError(error); }
   });

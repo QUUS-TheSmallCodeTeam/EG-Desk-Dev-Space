@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto'
 import { publicText } from './codex-chat-values.mjs'
 
 const metadata = entry => ({
@@ -15,8 +16,10 @@ export class TerminalSessionRegistry {
   // confirmed exit (RT-06 terminal.exit); it never changes the receipt.
   // runWatch (CODE-06, egdesk-terminal-run-watch.mjs) reads output and typed
   // lines to prepare a test/build result that read() hands out once.
-  constructor({ now = Date.now, maxExitReceipts = 128, exitReceiptTtlMs = 10 * 60 * 1000, maxOutputBytes = 256 * 1024, onExit = null, runWatch = null } = {}) {
+  constructor({ now = Date.now, maxExitReceipts = 128, exitReceiptTtlMs = 10 * 60 * 1000, maxOutputBytes = 256 * 1024, onExit = null, runWatch = null,
+    detachedTtlMs = 10 * 60_000, maxDetached = 8, schedule = setTimeout, cancel = clearTimeout } = {}) {
     Object.assign(this, { now, maxExitReceipts, exitReceiptTtlMs, maxOutputBytes, onExit, runWatch })
+    Object.assign(this, { detachedTtlMs, maxDetached, schedule, cancel, bridgeInstance: randomUUID() })
     this.active = new Map()
     this.exitReceipts = new Map()
   }
@@ -89,12 +92,108 @@ export class TerminalSessionRegistry {
     return { id, ...metadata(entry) }
   }
 
+  ownLocal(id, owner, view) {
+    const entry = this.active.get(id) || this.exitReceipts.get(id)
+    if (entry) entry.local = { owner, view, phase: 'attached', timer: null, expiresAt: null }
+    return this.localSnapshot(id)
+  }
+
+  localSnapshot(id) {
+    const entry = this.active.get(id)
+    const { shell, ...state } = this.snapshot(id)
+    return { ...state, bridgeInstance: this.bridgeInstance,
+      detachSupported: !!(entry?.local && entry.usePty && typeof entry.process.kill === 'function'
+        && !entry.stopRequested && !entry.nativeError) }
+  }
+
+  localError(code) {
+    return { ok: false, code, status: 'UNKNOWN', exitConfirmed: false, error: code }
+  }
+
+  authorizeLocal(id, owner, view) {
+    const entry = this.active.get(id) || this.exitReceipts.get(id)
+    if (!entry?.local) return owner ? this.localError('ORIGINAL_UNAVAILABLE') : null
+    const lease = entry.local
+    if (lease.owner !== owner || lease.view !== view) return this.localError('TERMINAL_IDENTITY_CHANGED')
+    if (lease.phase !== 'attached') return this.localError('TERMINAL_NOT_ATTACHED')
+    return null
+  }
+
+  detachLocal(id, owner, view, bridgeInstance) {
+    if (bridgeInstance !== this.bridgeInstance) return this.localError('TERMINAL_BRIDGE_RESTARTED')
+    const entry = this.active.get(id)
+    if (!entry) return this.localError('ORIGINAL_UNAVAILABLE')
+    const lease = entry.local
+    if (!lease || lease.owner !== owner || lease.view !== view) return this.localError('TERMINAL_IDENTITY_CHANGED')
+    if (lease.phase === 'held' && this.now() >= lease.expiresAt) this.expireLocal(entry)
+    if (lease.phase === 'expired' || lease.phase === 'closing') return this.localError('TERMINAL_DETACH_EXPIRED')
+    if (!this.localSnapshot(id).detachSupported) return this.localError('TERMINAL_DETACH_UNAVAILABLE')
+    if (lease.phase !== 'held') {
+      const held = [...this.active.values()].filter(item => item.local && item.local.phase !== 'attached')
+      if (held.length >= this.maxDetached) return this.localError('TERMINAL_DETACH_LIMIT')
+      this.cancel(lease.timer)
+      lease.phase = 'held'
+      lease.expiresAt = this.now() + this.detachedTtlMs
+      this.runWatch?.forget?.(id)
+      lease.timer = this.schedule(() => this.expireLocal(entry), this.detachedTtlMs)
+      lease.timer?.unref?.()
+    }
+    return { ok: true, status: 'HELD', sessionId: id, bridgeInstance, expiresAt: lease.expiresAt,
+      shellLabel: entry.shellLabel, exitConfirmed: false }
+  }
+
+  attachLocal(id, owner, view, bridgeInstance) {
+    if (bridgeInstance !== this.bridgeInstance) return this.localError('TERMINAL_BRIDGE_RESTARTED')
+    this.pruneReceipts()
+    const entry = this.active.get(id)
+    const receipt = this.exitReceipts.get(id)
+    const lease = (entry || receipt)?.local
+    if (!lease) return this.localError('ORIGINAL_UNAVAILABLE')
+    if (lease.owner !== owner) return this.localError('TERMINAL_IDENTITY_CHANGED')
+    if (lease.phase === 'expired' || lease.phase === 'closing' || (lease.phase === 'held' && this.now() >= lease.expiresAt)) {
+      if (entry && lease.phase === 'held') this.expireLocal(entry)
+      return this.localError('TERMINAL_DETACH_EXPIRED')
+    }
+    if (!entry) return this.localError('ORIGINAL_EXITED')
+    if (entry.stopRequested || entry.nativeError || !entry.usePty) return this.localError('ORIGINAL_UNAVAILABLE')
+    // Retry only for the same destination view (lost response); an old view
+    // and a second destination cannot acquire a live attached channel.
+    if (lease.phase === 'attached' && lease.resumedView === view) return this.localSnapshot(id)
+    if (lease.phase !== 'held' || lease.view === view) return this.localError('TERMINAL_NOT_HELD')
+    this.cancel(lease.timer)
+    // Until the explicit claimant actually reads its channel, retain a short
+    // cleanup deadline in case the attach reply or destination view was lost.
+    const timer = this.schedule(() => this.expireLocal(entry), Math.min(15_000, lease.expiresAt - this.now()))
+    timer?.unref?.()
+    Object.assign(lease, { view, resumedView: view, phase: 'attached', timer, expiresAt: null })
+    return this.localSnapshot(id)
+  }
+
+  expireLocal(entry, phase = 'expired') {
+    if (this.active.get(entry.id) !== entry) return
+    const lease = entry.local
+    this.cancel(lease.timer)
+    lease.timer = null
+    lease.phase = phase
+    entry.output = Buffer.alloc(0)
+    this.runWatch?.forget?.(entry.id)
+    Promise.resolve(this.kill(entry.id)).then(result => {
+      if (this.active.get(entry.id) !== entry || result?.code !== 'KILL_FAILED' || lease.timer !== null) return
+      lease.timer = this.schedule(() => this.expireLocal(entry, lease.phase), 5000)
+      lease.timer?.unref?.()
+    })
+  }
+
+  closeLocalScope(owner) {
+    for (const entry of this.active.values()) if (entry.local?.owner === owner) this.expireLocal(entry, 'closing')
+  }
+
   appendOutput(id, data) {
     const entry = this.active.get(id) || this.exitReceipts.get(id)
-    if (!entry) return
+    if (!entry || ['expired', 'closing'].includes(entry.local?.phase)) return
     if (entry.process?.outputTruncated) entry.outputTruncated = true
     const incoming = Buffer.isBuffer(data) ? data : Buffer.from(String(data))
-    this.runWatch?.observeOutput?.(id, incoming)
+    if (!entry.local || entry.local.phase === 'attached') this.runWatch?.observeOutput?.(id, incoming)
     if (entry.output.length + incoming.length > this.maxOutputBytes) entry.outputTruncated = true
     const next = Buffer.concat([entry.output, incoming.subarray(Math.max(0, incoming.length - this.maxOutputBytes))])
     // Copy the retained suffix so a small receipt cannot keep a huge backing
@@ -106,11 +205,13 @@ export class TerminalSessionRegistry {
     if (this.active.get(entry.id) !== entry) return
     // This is the only active-registry deletion path. Kill acceptance, errors,
     // missing IDs, stream closure and bridge shutdown never synthesize an exit.
+    if (entry.local?.timer != null) this.cancel(entry.local.timer)
     this.active.delete(entry.id)
     this.exitReceipts.set(entry.id, {
-      id: entry.id, ...metadata(entry), transportReason: entry.transportReason,
+      id: entry.id, local: entry.local ? { ...entry.local, timer: null } : null,
+      ...metadata(entry), transportReason: entry.transportReason,
       createdAt: entry.createdAt, stopRequested: entry.stopRequested,
-      stopRequestedAt: entry.stopRequestedAt, output: entry.output,
+      stopRequestedAt: entry.stopRequestedAt, output: entry.local?.phase === 'held' ? Buffer.alloc(0) : entry.output,
       outputTruncated: entry.outputTruncated,
       exitCode: Number.isInteger(exitCode) ? exitCode : null,
       signal: typeof signal === 'string' || Number.isInteger(signal) ? signal : null,
@@ -159,6 +260,10 @@ export class TerminalSessionRegistry {
   read(id) {
     const state = this.snapshot(id)
     const entry = this.active.get(id) || this.exitReceipts.get(id)
+    if (entry?.local?.phase === 'attached' && entry.local.resumedView && entry.local.timer != null) {
+      this.cancel(entry.local.timer)
+      entry.local.timer = null
+    }
     const data = entry?.output.toString('utf8') || ''
     if (entry) entry.output = Buffer.alloc(0)
     const runResult = this.runWatch?.take?.(id) ?? null
@@ -252,6 +357,9 @@ export class TerminalSessionRegistry {
 }
 
 export function terminalResponseStatus(result) {
+  if (result.code === 'TERMINAL_IDENTITY_CHANGED') return 403
+  if (result.code === 'ORIGINAL_EXITED' || result.code === 'TERMINAL_DETACH_EXPIRED') return 410
+  if (result.code === 'ORIGINAL_UNAVAILABLE') return 404
   if (result.code === 'SESSION_STOPPING') return 409
   if (result.code === 'RESIZE_UNSUPPORTED') return 501
   if (result.code === 'UNKNOWN_SESSION') return 404

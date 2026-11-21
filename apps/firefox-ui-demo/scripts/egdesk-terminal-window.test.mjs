@@ -149,14 +149,14 @@ async function terminalWindow({ api } = {}) {
   const saved = new Map(Object.keys(globals).map(key => [key, Object.getOwnPropertyDescriptor(globalThis, key)]));
   for (const [key, value] of Object.entries(globals)) Object.defineProperty(globalThis, key, { configurable: true, writable: true, value });
   const restore = () => { for (const [key, descriptor] of saved) { if (descriptor) Object.defineProperty(globalThis, key, descriptor); else delete globalThis[key]; } };
-  let card;
-  try { card = createTerminalZone(deps).spawnTerminalCard({}); } catch (error) { restore(); throw error; }
+  let card, zone;
+  try { zone = createTerminalZone(deps); card = zone.spawnTerminalCard({}); } catch (error) { restore(); throw error; }
   const frame = card.find('iframe');
   const hostEventKey = frameWindow.terminalAPI?.hostEventKey;
   const receiver = messages.get('message');
   const directMessage = (data, envelope = {}) => receiver({ source: frameWindow, origin: 'chrome://userchrome', ...envelope, data: { hostEventKey, ...data } });
   const message = (data, envelope = {}) => messages.get('message') && directMessage(data, envelope);
-  return { card, host, events, state, shell, shellOptions, closeDot, documentListeners, message, restore, frame, hostEventKey, directMessage, boardCloseRequests: deps.boardCloseRequests,
+  return { card, zone, host, events, state, shell, shellOptions, closeDot, documentListeners, message, restore, frame, hostEventKey, directMessage, boardCloseRequests: deps.boardCloseRequests,
     confirm: card.find('.egd-terminal-close-confirm'), cancel: card.find('.egd-terminal-close-confirm-cancel'),
     go: card.find('.egd-terminal-close-confirm-go') };
 }
@@ -174,8 +174,8 @@ test('the Terminal window uses the shared Desk Window bar with a Korean name and
     assert.equal(identity.children[1].textContent, '연결 중');
     assert.equal(identity.children[1].getAttribute('role'), 'status');
     assert.equal(h.shell.slots.actions.children[0].className, 'egd-terminal-run-chip', 'the result chip sits with the bar actions');
-    assert.equal(h.closeDot.title, '터미널 종료 후 닫기', 'the red dot says that it also ends the session');
-    assert.equal(h.closeDot.getAttribute('aria-label'), '터미널 종료 후 닫기');
+    assert.equal(h.closeDot.title, '터미널 닫기', 'the red dot opens the close choices');
+    assert.equal(h.closeDot.getAttribute('aria-label'), '터미널 닫기');
     assert.deepEqual(h.card.children.map(child => child.className.split(' ').pop()),
       ['egd-terminal-header', 'egd-terminal-run-result', 'egd-terminal-close-confirm', 'egd-terminal-body']);
     h.message({ type: 'terminal-ready', shellLabel: 'zsh' });
@@ -188,7 +188,7 @@ test('the Terminal window uses the shared Desk Window bar with a Korean name and
     h.message({ type: 'terminal-no-session' });
     assert.equal(identity.children[1].textContent, '세션 없음');
   } finally { h.restore(); }
-  assert.doesNotMatch(terminalSource, />_ |Terminal'\)/, 'no English window name remains');
+  assert.doesNotMatch(terminalSource, /egd-terminal-title[^\n]+['"]Terminal['"]/, 'the actual window title is localized');
 });
 
 test('the red dot asks before closing a running session; 취소 keeps the window and the session', async () => {
@@ -473,5 +473,51 @@ test('cleanup revokes a captured terminal receiver even before a queued event ca
     h.directMessage({ type: 'terminal-new-session', shellId: 'cmd' }, { source: null });
     h.directMessage({ type: 'terminal-ready', shellLabel: 'stale' }, { source: null });
     assert.deepEqual(h.events, before); assert.equal(h.host.children.length, 0);
+  } finally { h.restore(); }
+});
+
+test('owned close keeps cancel, and detach closes only after a hold ACK without kill', async () => {
+  let acknowledge, calls = 0;
+  const ref = { ok: true, sessionId: 'live-pty', bridgeInstance: 'bridge', expiresAt: 12345, shellLabel: 'zsh' };
+  const h = await terminalWindow({ api: { ptyId: 'live-pty', isConnected: () => true, canDetach: () => true,
+    detachLocal: () => { calls++; return new Promise(resolve => { acknowledge = resolve; }); } } });
+  try {
+    const detach = h.confirm.children[3];
+    dispatch(h.closeDot, 'click');
+    assert.equal(detach.hidden, false);
+    assert.equal(detach.textContent, '창만 닫고 실행 유지');
+    dispatch(h.cancel, 'click');
+    assert.equal(calls, 0);
+    dispatch(h.closeDot, 'click');
+    dispatch(detach, 'click');
+    assert.equal(calls, 1);
+    assert.equal(h.host.children.includes(h.card), true);
+    acknowledge(ref); await Promise.resolve(); await Promise.resolve();
+    assert.equal(h.host.children.includes(h.card), false);
+    assert.equal(h.events.includes('session-killed'), false);
+    const picker = h.zone.spawnTerminalCard({ idle: true });
+    const held = picker.children.find(x => x.getAttribute('aria-label') === '유지 중인 Terminal');
+    assert.equal(held.children[2].children[0].textContent, 'zsh 1 · 다시 연결');
+    assert.match(surface, /cardState.type === 'terminal'\) \{[^}]+spawnTerminalCard\(\{ idle: true \}\)/);
+  } finally { h.restore(); }
+});
+
+test('explicit terminate does not close the view at the request ACK', async () => {
+  let confirmExit, attempts = 0;
+  const h = await terminalWindow({ api: { ptyId: 'live-pty', closeForBoard: () => {
+    attempts++; return new Promise(resolve => { confirmExit = resolve; });
+  } } });
+  try {
+    dispatch(h.closeDot, 'click');
+    assert.equal(h.confirm.children[3].hidden, true);
+    dispatch(h.go, 'click');
+    assert.equal(attempts, 1);
+    confirmExit(false); await Promise.resolve();
+    assert.equal(h.host.children.includes(h.card), true);
+    assert.match(h.confirm.children[0].textContent, /종료를 확인하지 못했습니다/);
+    dispatch(h.go, 'click');
+    confirmExit(true); await Promise.resolve();
+    assert.equal(h.host.children.includes(h.card), false);
+    assert.equal(h.events.includes('session-killed'), false);
   } finally { h.restore(); }
 });

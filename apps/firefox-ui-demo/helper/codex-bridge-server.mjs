@@ -974,7 +974,7 @@ const bridgeServer = createServer(async (req, res) => {
 
   if (req.method === 'OPTIONS') {
     res.writeHead(204, {
-      'Access-Control-Allow-Headers': 'Content-Type, X-EGDesk-Overlay-Build, X-EGDesk-Ontology-Profile, X-EGDesk-Ontology-Token',
+      'Access-Control-Allow-Headers': 'Content-Type, X-EGDesk-Overlay-Build, X-EGDesk-Ontology-Profile, X-EGDesk-Ontology-Token, X-EGDesk-Terminal-Owner, X-EGDesk-Terminal-View',
       'Access-Control-Allow-Methods': 'GET,POST,PUT,OPTIONS'
     })
     res.end()
