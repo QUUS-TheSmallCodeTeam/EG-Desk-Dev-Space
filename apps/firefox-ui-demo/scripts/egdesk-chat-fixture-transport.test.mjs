@@ -26,7 +26,7 @@ import { assertPublishedBriefing, assertContextCaptureBatch, assertStoredAgentDe
 const TOKEN = 'unit-fixture-token-no-credentials';
 const FIXTURE_ENV = { EGDESK_QA_FIXTURE_TRANSPORT: '1', EGDESK_QA_FIXTURE_PORT: '49318' };
 
-function setup(t, { claude = false, reader = false, projectFile = false, watch = false, runOutputs = false, portable = false, taskGate = false, originFile = false, stateFixtures = false, sourceChangeSeed = false, briefingComments = false, briefingMultiTarget = false, firstAuth = false, memoRoundTrip, memoRuntimeRoomId, fixturePort = FIXTURE_ENV.EGDESK_QA_FIXTURE_PORT } = {}) {
+function setup(t, { dayOne = false, claude = false, reader = false, projectFile = false, watch = false, runOutputs = false, portable = false, taskGate = false, originFile = false, stateFixtures = false, sourceChangeSeed = false, briefingComments = false, briefingMultiTarget = false, firstAuth = false, memoRoundTrip, memoRuntimeRoomId, fixturePort = FIXTURE_ENV.EGDESK_QA_FIXTURE_PORT } = {}) {
   const source = fs.mkdtempSync(path.join(canonicalTempRoot(), 'egdesk-loader-fixture-'));
   for (const name of LOADER_FILES) fs.writeFileSync(path.join(source, name), `unit fixture ${name}\n`);
   const { profile } = bootstrapQaProfile({ loaderSource: source });
@@ -40,6 +40,7 @@ function setup(t, { claude = false, reader = false, projectFile = false, watch =
   const fetchBefore = globalThis.fetch;
   const eventSourceBefore = globalThis.EventSource;
   const fixtureEnv = { ...FIXTURE_ENV, EGDESK_QA_FIXTURE_PORT: String(fixturePort), ...(projectFile ? { EGDESK_QA_PROJECT_FILE_FIXTURE: '1', EGDESK_QA_REAL_TURN: '0' } : {}),
+    ...(dayOne ? { EGDESK_QA_DAYONE_CONTEXT: '1', EGDESK_QA_REAL_TURN: '0' } : {}),
     ...(memoRoundTrip === undefined ? {} : { EGDESK_QA_REAL_TURN: '0' }),
     ...(watch ? { EGDESK_QA_PROJECT_FILE_WATCH: '1' } : {}),
     ...(firstAuth ? { EGDESK_QA_FIRST_CODEX_AUTH_FIXTURE: '1', EGDESK_QA_REAL_TURN: '0' } : {}),
@@ -3834,4 +3835,74 @@ test('SUBAGENT publishes bounded sub-agent rows with blocked reasons and never a
   assert.equal(state.observed.sends.length, 1);
   assert.equal((await request(handler, 'POST', '/chat/user-input', { userInputId: 'input:none', conversationId: id.conversationId,
     runId: id.runId, action: 'skip' })).status, 409);
+});
+
+test('day one: durable exact receipt, immutable Context, comment replay and alternate recipient refusal', async t => {
+  const { handler, info } = setup(t, { dayOne: true });
+  const http = (method, url, body, token) => request(handler, method, url, body ?? null, token, undefined,
+    { host: `127.0.0.1:${info.port}`, 'content-type': 'application/json' });
+  const status = async () => (await http('GET', '/__qa/state', null, TOKEN)).body;
+  const { artifactRoot } = await status();
+  const route = { clientThreadId: 'qa-dayone-authorized-room', engineId: 'codex', engineProfileId: 'codex-default' };
+  const originals = ['Editable source one', 'Separate source two'];
+  const files = originals.map((text, index) => {
+    const file = path.join(artifactRoot, `qa-dayone-${index}.txt`);
+    fs.writeFileSync(file, Array.from({ length: 22 }, (_, i) => `${text} ${i + 1}`).join('\n'), { mode: 0o600 });
+    return file;
+  });
+  const capture = await http('POST', '/context/captures', { ...route, attachments: files.map((file, i) => ({
+    id: `input-${i}`, kind: 'file', label: `QA file ${i}`, sourceRef: { path: file }, captureScope: { type: 'file' }, capturedAt: Date.now(),
+  })) });
+  assert.equal(capture.status, 201, JSON.stringify(capture.body));
+  const sourceIds = capture.body.captures.map(item => item.sourceId);
+  const send = { ...route, requestId: 'qa-explicit-request', message: 'EGDESK_QA_CONTEXT Day one: compare fixtures',
+    contextSnapshotIds: sourceIds, contextCapabilities: { read: true, reader: true, publishBriefing: true } };
+  const refused = await http('POST', '/chat/send', { ...send, clientThreadId: 'qa-other-recipient' });
+  assert.ok(refused.status >= 400, JSON.stringify(refused)); assert.deepEqual((await status()).dayOne.providerRpc, []);
+  const accepted = await http('POST', '/chat/send', send);
+  assert.equal(accepted.status, 202, JSON.stringify(accepted.body));
+  const receipt = accepted.body;
+  assert.equal(receipt.durable, true);
+  assert.equal(receipt.clientThreadId, route.clientThreadId); assert.notEqual(receipt.clientThreadId, receipt.conversationId);
+  for (const k of ['localConversationId', 'localRunId', 'localMessageId']) assert.ok(receipt[k]);
+  const replay = await http('POST', '/chat/send', send);
+  assert.equal(replay.status, 202, JSON.stringify(replay.body));
+  assert.equal(replay.body.runId, receipt.runId);
+  assert.equal(replay.body.localMessageId, receipt.localMessageId);
+  const wrongSend = await http('POST', '/chat/send', { ...send, clientThreadId: 'qa-other-recipient' });
+  assert.ok(wrongSend.status >= 400); assert.equal((await status()).observed.sends.length, 1);
+  const release = await http('POST', '/__qa/context-release', { runId: receipt.runId, phase: 'read' }, TOKEN);
+  assert.equal(release.status, 200, JSON.stringify(release.body));
+  const run = (await status()).runs[0];
+  assert.equal(run.status, 'completed'); assert.equal(run.contextPackets.length, 2);
+  const assigned = { ...route, conversationId: receipt.conversationId };
+  const url = (base, hints = assigned) => `${base}?${new URLSearchParams(hints)}`;
+  fs.writeFileSync(files[0], 'Changed current content');
+  const archivedUrl = url(`/context/captures/${sourceIds[0]}`, { ...assigned, packetId: run.contextPackets[0].packetId });
+  const archived = await http('GET', archivedUrl);
+  assert.equal(archived.status, 200, JSON.stringify(archived.body));
+  assert.match(archived.body.source.text, /Editable source one/); assert.doesNotMatch(archived.body.source.text, /Changed current/);
+  assert.equal(archived.body.delivered.binding.answerId, receipt.answerId);
+  const commentBase = `/context/briefings/${run.briefing.id}/comments`;
+  const payload = { stepId: run.briefing.steps[0].id, text: 'One historical comment', clientRequestId: '3a3919d4-6d88-4f8c-9441-1f3f2114f836' };
+  const crossRoom = { ...assigned, clientThreadId: 'qa-other-recipient' };
+  for (const other of [crossRoom, { ...assigned, conversationId: 'qa-other-conversation' }]) {
+    assert.ok((await http('GET', url(`/context/captures/${sourceIds[0]}`, other))).status >= 400);
+    assert.ok((await http('POST', url(commentBase, other), payload)).status >= 400);
+  }
+  assert.ok((await http('POST', url(commentBase), { ...payload, sourceIds: [sourceIds[1]] })).status >= 400);
+  const saved = await http('POST', url(commentBase), payload);
+  assert.equal(saved.status, 201, JSON.stringify(saved.body));
+  assert.deepEqual(saved.body.comment.sourceIds, [sourceIds[0]]);
+  assert.equal(saved.body.comment.answerId, receipt.answerId);
+  assert.deepEqual((await http('POST', url(commentBase), payload)).body.comment, saved.body.comment);
+  assert.equal((await http('POST', url(commentBase), { ...payload, text: 'Conflicting retry' })).status, 409);
+  assert.deepEqual((await http('GET', url(commentBase))).body.comments, [saved.body.comment]);
+  const thatState = await status();
+  assert.deepEqual(thatState.dayOne.providerRpc, ['thread/start', 'turn/start']);
+  assert.equal(thatState.dayOne.externalProviderCalls, 0);
+  assert.equal(thatState.observed.sends.length, 1);
+  await http('POST', '/__qa/account-change', { variant: 'b' }, TOKEN);
+  assert.ok((await http('GET', archivedUrl)).status >= 400, 'another owner cannot reopen the historical packet');
+  assert.ok((await http('GET', url(commentBase))).status >= 400, 'another owner cannot reopen the comment');
 });
