@@ -22,6 +22,7 @@ import { ImmutableContextStore, hashContent } from '../helper/egdesk-context-sto
 import { createContextHttpHandler } from '../helper/egdesk-context-http.mjs';
 import { createChatEngineAuth } from '../helper/codex-bridge-engine-auth.mjs';
 import { createChatHttpHandler } from '../helper/codex-bridge-http.mjs';
+import * as CanvasLayout from '../overlay/resources/EGDeskCanvasLayout.sys.mjs';
 import * as BoardThread from '../overlay/resources/EGDeskBoardThread.sys.mjs';
 
 // Execute the current production functions, including el() and the bridge
@@ -148,7 +149,7 @@ function surface({ run = null, thread = {}, auth = {}, fetchJson = async () => (
   const effects = { emits: 0, capture: [], requests: [], projectRequests: [], ready: 0, timers: 0, synced: [], logs: [], revoked: [] };
   const epochScope = ChatState.createChatEpochScope();
   const userInputDrafts = new Map();
-  const globals = { ChatState, BoardThread, ChatRunResult, ChatChangeReview, InputContext, document, state, protocol, userInputDrafts, epochScope, effects, realProjection,
+  const globals = { ChatState, BoardThread, CanvasLayout, ChatRunResult, ChatChangeReview, InputContext, document, state, protocol, userInputDrafts, epochScope, effects, realProjection,
     window: { AbortController, crypto: webcrypto, setTimeout: () => 1, clearTimeout() {} }, queueMicrotask,
     captureChatInputs, captureManagedFileInput, boardNotice: text => effects.logs.push(text),
     SELF_MEMBER: 'self', cloneJson: clone, formatMessageTime: String, contextBoardTitle: () => '',

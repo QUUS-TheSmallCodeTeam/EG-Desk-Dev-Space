@@ -1941,7 +1941,7 @@ test('annotation wiring: cards carry kept marks, every restore path puts them ba
   const mount = cnv05Block('  function mountBoardMember(projection, member, options = {}) {', '    view.dataset.boardId = projection.boardId;');
   assert.match(mount, /if \(!view\._savedBoardMember && typeof surfaceZones !== 'undefined'\) surfaceZones\.annotation\?\.restoreCardAnnotations\(view, record\.annotations\);/,
     'a Board or Desk member gets its marks back; a placeholder keeps them in its saved record');
-  assert.match(cnv05Block('  function serializeDeskSnapshot() {', '      groups: cloneJson('), /annotations: \(typeof surfaceZones === 'undefined' \? null : surfaceZones\.annotation\?\.annotationCanvasRecords\(\)\) \|\| \[\],/);
+  assert.match(cnv05Block('  function serializeDeskSnapshot() {', '      surface: { mode:'), /annotations: \(typeof surfaceZones === 'undefined' \? null : surfaceZones\.annotation\?\.annotationCanvasRecords\(\)\) \|\| \[\],/);
   assert.match(cnv05Core, /restoreShapeFromState\(shapeState, \{ reservedIds \}\)\);\n      if \(typeof surfaceZones !== 'undefined'\) surfaceZones\.annotation\?\.restoreCanvasAnnotations\(records\.annotations\);/);
 });
 

@@ -29639,7 +29639,7 @@
     document.documentElement.appendChild(guidesHost);
     let guideTimer = 0;
 
-    const cardOf = node => (node instanceof Element ? node.closest('.egd-canvas-card') : null);
+    const cardOf = node => node?.closest?.('.egd-canvas-card') || null;
     const liveCards = () => Array.from(layer.querySelectorAll(':scope > .egd-canvas-card')).filter(card => card.isConnected && card.id);
     const liveRegions = () => Array.from(layer.querySelectorAll(':scope > .egd-board-region')).filter(region => region.isConnected && region.id);
     const rectOf = node => (node?.isConnected ? CanvasLayout.toWorldRect(persistentEntityGeometry(node)) : null);
@@ -29759,6 +29759,7 @@
     };
     let preservedSelection = null;
     let shiftPick = null;
+    let suppressShiftClick = null;
     window.addEventListener('mousedown', ev => {
       if (ev.button !== 0 || state.panModifier) return;
       selectGroupMembers(cardOf(ev.target));
@@ -29839,11 +29840,15 @@
         return;
       }
       shiftPick = null;
-      if (ev.button !== 0 || ev.isPrimary === false || state.panModifier) return;
+      suppressShiftClick = null;
+      if (ev.button !== 0 || ev.isPrimary === false) return;
+      const shiftSelect = ev.shiftKey && !ev.altKey && !ev.ctrlKey && !ev.metaKey;
+      if (state.panModifier && !shiftSelect) return;
       const card = cardOf(ev.target);
       if (!card?.id || isCardFullscreen(card)) return;
       const hit = ev.target.closest('.egd-card-resize-hit');
       if (hit && card.contains(hit)) {
+        if (state.panModifier) return;
         let edges = null;
         try { edges = JSON.parse(hit.dataset.edges || 'null'); } catch {}
         if (edges && typeof edges === 'object') beginGesture(card, 'resize', { edges, free: ev.altKey });
@@ -29852,30 +29857,49 @@
       const header = ev.target.closest(HEADER_SELECTOR);
       if (header && card.contains(header)) {
         if (!ev.target.closest(NO_DRAG_SELECTOR)) {
-          // Shift+press on a View bar picks several Views. The press itself
-          // makes this View the only selected one, so the selection is read
-          // here and put together again on the click that follows.
-          shiftPick = ev.shiftKey
-            ? { card, ids: selectedCards().map(node => node.id), activeId: state.activeEntityId || null,
-              pressed: [card.id, ...CanvasLayout.expandCanvasGroupSelection(state.canvasGroups, [card.id])],
-              x: ev.clientX, y: ev.clientY }
-            : null;
-          beginGesture(card, 'move', { free: ev.altKey });
+          if (shiftSelect) {
+            // Shift remains a pan modifier elsewhere. On a draggable View
+            // header, reserve it for selection before the card's compatibility mousedown
+            // does ordinary activation/drag. Firefox may still emit a click;
+            // settle from the matched pointer release, not that later event.
+            shiftPick = { card, pointerId: ev.pointerId, ids: selectedCards().map(node => node.id),
+              activeId: state.activeEntityId || null, pressed: CanvasLayout.expandCanvasGroupSelection(state.canvasGroups, [card.id]),
+              x: ev.clientX, y: ev.clientY };
+            ev.preventDefault();
+            return;
+          }
+          if (!state.panModifier) beginGesture(card, 'move', { free: ev.altKey });
         }
         return;
       }
-      if (card.dataset.egdSemanticLevel === 'outline' && ev.target.closest('.egd-semantic-proxy')) beginGesture(card, 'move', { free: ev.altKey });
+      if (!state.panModifier && card.dataset.egdSemanticLevel === 'outline' && ev.target.closest('.egd-semantic-proxy')) beginGesture(card, 'move', { free: ev.altKey });
     }, true);
-    window.addEventListener('click', ev => {
+    const completeShiftPick = ev => {
       const pick = shiftPick;
+      if (!pick || ev.pointerId !== pick.pointerId || ev.button !== 0) return;
       shiftPick = null;
-      if (!pick || ev.button !== 0 || !pick.card.isConnected || cardOf(ev.target) !== pick.card) return;
-      // More than a few px between press and release was a drag, not a pick.
-      if (Math.hypot(ev.clientX - pick.x, ev.clientY - pick.y) > 4) return;
+      if (!pick.card.isConnected || cardOf(ev.target) !== pick.card) return;
+      suppressShiftClick = pick.card;
+      if (pick.moved || Math.hypot(ev.clientX - pick.x, ev.clientY - pick.y) > 4) return;
       const next = ViewportExtras.shiftClickSelection(pick.ids, pick.pressed, pick.activeId);
       const nodes = next.ids.map(id => document.getElementById(id)).filter(node => node?.isConnected);
-      if (!nodes.length) return;
-      setSelectedEntities(state.expandCanvasSelection(nodes), document.getElementById(next.activeId));
+      if (nodes.length) setSelectedEntities(state.expandCanvasSelection(nodes), document.getElementById(next.activeId));
+    };
+    window.addEventListener('pointerup', completeShiftPick, true);
+    window.addEventListener('pointermove', ev => {
+      if (shiftPick && shiftPick.pointerId === ev.pointerId && Math.hypot(ev.clientX - shiftPick.x, ev.clientY - shiftPick.y) > 4) shiftPick.moved = true;
+    }, true);
+    window.addEventListener('pointercancel', ev => { if (shiftPick?.pointerId === ev.pointerId) shiftPick = null; }, true);
+    window.addEventListener('blur', () => { shiftPick = null; suppressShiftClick = null; });
+    window.addEventListener('mousedown', ev => {
+      if (!shiftPick || ev.button !== 0 || cardOf(ev.target) !== shiftPick.card) return;
+      ev.preventDefault(); ev.stopImmediatePropagation();
+    }, true);
+    window.addEventListener('click', ev => {
+      const card = suppressShiftClick;
+      suppressShiftClick = null;
+      if (!card || ev.button !== 0 || !ev.shiftKey || cardOf(ev.target) !== card) return;
+      ev.preventDefault(); ev.stopImmediatePropagation();
     }, true);
     // UX-05 (D-V5): a focused window header moves its window with the arrow
     // keys on the 24px grid (Shift 5 cells, Option/Alt 1px without the grid),
