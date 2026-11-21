@@ -60,6 +60,7 @@ import { createContextHttpHandler } from './egdesk-context-http.mjs'
 import { buildCodexAppServerLaunch, inspectNativeCapabilities, preflightOwnedAppServer, resolveCodexExecutable, NATIVE_SCHEMA_VERSION } from './egdesk-native-capabilities.mjs'
 import { createEGDeskFileMount, requireEGDeskNodeRuntime } from './egdesk-file-mount.mjs'
 import { createSystemResourceMonitor } from './system-resource-monitor.mjs'
+import { createLocalCapacity } from './egdesk-local-capacity.mjs'
 import { WORKFLOW_OWNER, openWorkflowRuntime } from './egdesk-workflow-runtime.mjs'
 import { createPlanToolProvider } from './egdesk-plan-tool-provider.mjs'
 import { createAnnotationToolProvider } from './egdesk-annotation-tool-provider.mjs'
@@ -184,6 +185,7 @@ function ensureOntologyStore() {
 }
 ensureOntologyStore()
 const systemResourceMonitor = createSystemResourceMonitor({ profilePath: dataDir })
+const localCapacity = createLocalCapacity({ monitor: systemResourceMonitor })
 let chatStore = null
 let chatStoreError = null
 try {
@@ -397,6 +399,7 @@ const hostControl = createHostControl({
 let memoryEvidenceStore = null
 const getMemoryEvidence = () => memoryEvidenceStore ??= new MemoryEvidenceStore({ dataDir, captures: contextStore })
 const chat = new CodexChatRuntime({
+  localCapacity,
   engines: engineRegistry,
   contexts,
   resolveProjectWorkspace: request => localFiles.resolveProjectWorkspace(request),
@@ -546,7 +549,7 @@ const handlePortableHttp = createPortableHttpHandler({ desk: () => deskStore, ch
 // /events/recent; SSE workflow.event and task.graph frames on /events.
 workflow = await openWorkflowRuntime({
   dataDir, chat, port: BRIDGE_PORT, broadcast: event => broadcast(event),
-  ensureAuth: () => ensureChatAuth(), getOwnerKey: () => publicAuthIdentityKey(authState), maxConcurrency: 2,
+  ensureAuth: () => ensureChatAuth(), getOwnerKey: () => publicAuthIdentityKey(authState), maxConcurrency: 2, localCapacity,
 })
 const detachContextServices = contexts.attachServices({ bus: workflow.bus, settings: bridgeSettings.contextSuggest, boards: deskStore })
 for (const root of pendingFileRoots.values()) workflow.watchRoot(root)
@@ -1259,13 +1262,14 @@ async function shutdown() {
   try { detachContextServices() }
   catch { console.error('[egdesk-codex-bridge] context services did not detach cleanly') }
   bridgeServer.close()
+  localCapacity.close()
   systemResourceMonitor.close()
+  try { await workflow?.close() }
+  catch { console.error('[egdesk-codex-bridge] workflow runtime did not close cleanly') }
   try { await codexEngine.dispose() }
   catch { console.error('[egdesk-codex-bridge] Owned Codex conversations did not close cleanly') }
   try { await claudeEngine.dispose() }
   catch { console.error('[egdesk-codex-bridge] Claude conversations did not close cleanly') }
-  try { await workflow?.close() }
-  catch { console.error('[egdesk-codex-bridge] workflow runtime did not close cleanly') }
   try { await localFiles.close() }
   catch { console.error('[egdesk-codex-bridge] managed file store did not close cleanly') }
   try { memoryEvidenceStore?.close() } catch {}
@@ -1285,6 +1289,7 @@ process.on('exit', () => {
   acceptingFileRoots = false
   pendingFileRoots.clear()
   try { detachContextServices() } catch {}
+  localCapacity.close()
   systemResourceMonitor.close()
   workflow?.files.close()
   codexProfileServers.killAll()

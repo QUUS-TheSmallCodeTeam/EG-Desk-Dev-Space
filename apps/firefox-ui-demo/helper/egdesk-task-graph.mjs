@@ -45,6 +45,8 @@
  * only the manual continue (user.action) can still open it. Nothing fails or
  * advances by itself.
  *
+ * additionalLaunchReason() (optional, synchronous) is a host-owned soft gate
+ * for additional work only. onQueueChange(graphId) observes transient reasons.
  * canStart(context) (optional, synchronous) can hold a ready task back for a
  * moment, e.g. while the conversation it continues in is busy; call
  * reschedule() when that may have changed.
@@ -648,7 +650,7 @@ function visibleGates(graph, task) {
   return [...upstream, ...external, ...approval];
 }
 
-function visibleGraph(graph, recoveryHold) {
+function visibleGraph(graph, recoveryHold, queueReasons) {
   return {
     ...clone(graph.spec),
     activated: graph.activated,
@@ -657,6 +659,8 @@ function visibleGraph(graph, recoveryHold) {
     tasks: [...graph.tasks.values()].map((task) => ({
       ...clone(task.spec),
       status: taskStatus(graph, task),
+      ...(taskStatus(graph, task) === 'ready' && queueReasons?.has(task.spec.taskId)
+        ? { queueReason: queueReasons.get(task.spec.taskId) } : {}),
       blockedBy: task.spec.dependsOn.filter((dependency) => {
         const upstream = graph.tasks.get(dependency);
         return upstream.state !== 'completed' || !upstream.receipt;
@@ -678,7 +682,7 @@ function visibleGraph(graph, recoveryHold) {
 }
 
 export async function openTaskGraph({ store = null, maxConcurrency = 2, execute, interrupt,
-  requestApproval, verifyReceipt, canStart = null } = {}) {
+  requestApproval, verifyReceipt, canStart = null, additionalLaunchReason = null, onQueueChange = () => {} } = {}) {
   assert(Number.isSafeInteger(maxConcurrency) && maxConcurrency >= 1 && maxConcurrency <= 32,
     'E_TASK_INPUT', 'maxConcurrency must be 1–32');
   for (const [name, callback] of Object.entries({ execute, interrupt, requestApproval, verifyReceipt })) {
@@ -687,7 +691,7 @@ export async function openTaskGraph({ store = null, maxConcurrency = 2, execute,
   assert(canStart === null || typeof canStart === 'function', 'E_TASK_INPUT', 'canStart must be a function');
   const events = store ? await store.load() : [];
   return new TaskGraphRuntime({ events, store, maxConcurrency, execute, interrupt,
-    requestApproval, verifyReceipt, canStart });
+    requestApproval, verifyReceipt, canStart, additionalLaunchReason, onQueueChange });
 }
 
 class TaskGraphRuntime {
@@ -699,6 +703,9 @@ class TaskGraphRuntime {
   #requestApproval;
   #verifyReceipt;
   #canStart;
+  #additionalLaunchReason;
+  #onQueueChange;
+  #queueReasons = new Map();
   #maxConcurrency;
   #recoveryHolds;
   #expiryTimer = null;
@@ -712,7 +719,7 @@ class TaskGraphRuntime {
   // yet, can be proven never dispatched. Replayed running attempts are unknown.
   #pendingDispatch = new Set();
 
-  constructor({ events, store, maxConcurrency, execute, interrupt, requestApproval, verifyReceipt, canStart = null }) {
+  constructor({ events, store, maxConcurrency, execute, interrupt, requestApproval, verifyReceipt, canStart = null, additionalLaunchReason, onQueueChange }) {
     this.#events = clone(events);
     this.#projection = project(this.#events);
     this.#store = store;
@@ -722,6 +729,8 @@ class TaskGraphRuntime {
     this.#requestApproval = requestApproval;
     this.#verifyReceipt = verifyReceipt;
     this.#canStart = canStart;
+    this.#additionalLaunchReason = additionalLaunchReason;
+    this.#onQueueChange = onQueueChange;
     // A reloaded active graph never dispatches, even if its last status was ready.
     this.#recoveryHolds = new Set(this.#projection.graphs.keys());
     // Expiry only journals a gate's state; it never dispatches, so it also runs
@@ -812,7 +821,7 @@ class TaskGraphRuntime {
 
   getGraph(graphId) {
     const graph = this.#projection.graphs.get(graphId);
-    return graph ? visibleGraph(graph, this.#recoveryHolds.has(graphId)) : null;
+    return graph ? visibleGraph(graph, this.#recoveryHolds.has(graphId), this.#queueReasons.get(graphId)) : null;
   }
 
   #scope(input) {
@@ -1123,6 +1132,7 @@ class TaskGraphRuntime {
   }
 
   #nextAction() {
+    if (this.#closed) return null;
     for (const graph of this.#projection.graphs.values()) {
       if (this.#recoveryHolds.has(graph.spec.graphId) || graph.cancelRequested || !graph.activated) continue;
       for (const task of graph.tasks.values()) {
@@ -1133,11 +1143,33 @@ class TaskGraphRuntime {
     }
     const running = [...this.#projection.graphs.values()].reduce((count, graph) =>
       count + [...graph.tasks.values()].filter((task) => task.state === 'running').length, 0);
-    if (running >= this.#maxConcurrency) return null;
+    let pressure = false;
+    if (running > 0 && running < this.#maxConcurrency) {
+      try { pressure = this.#additionalLaunchReason?.() === 'local-host-pressure'; } catch { /* retain hard cap */ }
+    }
+    const queued = new Map();
     for (const graph of this.#projection.graphs.values()) {
-      if (this.#recoveryHolds.has(graph.spec.graphId) || graph.cancelRequested || !graph.activated) continue;
+      const { graphId } = graph.spec;
+      if (this.#recoveryHolds.has(graphId) || graph.cancelRequested || !graph.activated) continue;
       for (const task of graph.tasks.values()) {
-        if (taskStatus(graph, task) === 'ready' && this.#mayStart(graph, task)) return { kind: 'execute', graph, task };
+        if (taskStatus(graph, task) !== 'ready') continue;
+        const reason = running >= this.#maxConcurrency ? 'task-concurrency-limit'
+          : !this.#mayStart(graph, task) ? null : pressure ? 'local-host-pressure' : false;
+        if (reason === false) return { kind: 'execute', graph, task };
+        if (!reason) continue;
+        if (!queued.has(graphId)) queued.set(graphId, new Map());
+        queued.get(graphId).set(task.spec.taskId, reason);
+      }
+    }
+    const previous = this.#queueReasons;
+    this.#queueReasons = queued;
+    for (const graphId of new Set([...previous.keys(), ...queued.keys()])) {
+      const before = previous.get(graphId), after = queued.get(graphId);
+      if (before?.size !== after?.size || [...(after ?? [])].some(([id, reason]) => before?.get(id) !== reason)) {
+        try { this.#onQueueChange(graphId, after && [...after.values()].includes('local-host-pressure')); } catch {}
+      } else if (after && [...after.values()].includes('local-host-pressure')) {
+        // Re-arm a bounded retry even when the visible reason is unchanged.
+        try { this.#onQueueChange(null, true); } catch {}
       }
     }
     return null;
@@ -1210,8 +1242,8 @@ class TaskGraphRuntime {
   #launchExecute(graph, task, attemptId) {
     const context = this.#context(graph, task, attemptId);
     const current = this.#projection.graphs.get(graph.spec.graphId);
-    if (current.cancelRequested) return;
     this.#pendingDispatch.delete(attemptId);
+    if (this.#closed || current.cancelRequested) return;
     let nativeResult;
     try {
       nativeResult = this.#execute(context);
@@ -1228,7 +1260,7 @@ class TaskGraphRuntime {
   #launchApproval(graph, task) {
     const context = this.#context(graph, task);
     const current = this.#projection.graphs.get(graph.spec.graphId);
-    if (current.cancelRequested) return;
+    if (this.#closed || current.cancelRequested) return;
     let nativeResult;
     try {
       nativeResult = this.#requestApproval(context);

@@ -655,7 +655,7 @@ function cleanNotification(method, p, engineId = 'codex') {
 }
 
 export class CodexChatRuntime {
-  constructor({ request, respond, engines = null, emit = () => {}, emitLegacy = () => {}, verifyFile = verifyLocalFile, now = Date.now, contexts = null, toolProviders = [], expectedProcessConfiguration = null, store = null, requireStore = false, getOwnerKey = () => null, qaReady = () => true, getNativeContractFingerprint = () => null, getBoardPeerContract = () => null, profiles = null, resolveProjectWorkspace = null, resolveRunProjectOrigin = null, mcpServerKind = null, computerControlPolicy = null, computerControlStore = null, onComputerControlChange = () => {}, hostLease = null, setTimer = (fn, ms) => setTimeout(fn, ms), clearTimer = handle => clearTimeout(handle), decisionContext = null }) {
+  constructor({ request, respond, engines = null, localCapacity = null, emit = () => {}, emitLegacy = () => {}, verifyFile = verifyLocalFile, now = Date.now, contexts = null, toolProviders = [], expectedProcessConfiguration = null, store = null, requireStore = false, getOwnerKey = () => null, qaReady = () => true, getNativeContractFingerprint = () => null, getBoardPeerContract = () => null, profiles = null, resolveProjectWorkspace = null, resolveRunProjectOrigin = null, mcpServerKind = null, computerControlPolicy = null, computerControlStore = null, onComputerControlChange = () => {}, hostLease = null, setTimer = (fn, ms) => setTimeout(fn, ms), clearTimer = handle => clearTimeout(handle), decisionContext = null }) {
     Object.assign(this, { emitEvent: emit, emitLegacy, verifyFile, now, setTimer, clearTimer })
     if (resolveProjectWorkspace !== null && typeof resolveProjectWorkspace !== 'function') throw new TypeError('resolveProjectWorkspace must be a server-owned callback')
     this.resolveProjectWorkspace = resolveProjectWorkspace
@@ -779,6 +779,8 @@ export class CodexChatRuntime {
     this.threads = new Map()
     this.loadedThreads = new Set()
     this.runs = new Map()
+    this.localCapacity = localCapacity
+    this.boardStarts = new Map()
     // A native text delta is not evidence of speech. Per-run staging is bounded and
     // deliberately absent from SSE, history, copied DTOs and model inputs.
     this.channelOutput = new WeakMap()
@@ -1689,6 +1691,10 @@ export class CodexChatRuntime {
         throw chatError('PROFILE_MODEL_UNAVAILABLE', 'This Agent\'s model or reasoning effort is not offered to the signed-in account; choose a model for this chat or change the Agent', 409)
       }
     }
+    // A Board replay has already returned above; only a new launch reserves
+    // a slot. This callback is internal, never a send body field.
+    const boardQueueReason = internal?.board?.reserve?.()
+    if (boardQueueReason) return { accepted: false, deferred: true, code: boardQueueReason }
     const lock = conversationId || `client:${clientThreadId || 'legacy'}`
     if (this.locks.has(lock) || (conversationId && this.locks.has(`client:${clientThreadId}`))) throw chatError('RUN_IN_PROGRESS', 'A request is already starting for this conversation', 409)
     if (this.locks.size >= MAX_RUNS) throw chatError('RUNTIME_BUSY', 'Too many pending requests', 429)
@@ -2974,6 +2980,13 @@ export class CodexChatRuntime {
    *   profileId, memberKey, label, reason: 'mentioned'|'lead', clientThreadId,
    *   status: 'started'|'deferred'|'failed', requestId, conversationId, runId, code }] }
    */
+  boardOccupancy(room) {
+    const active = [...this.runs.values()].filter(run => run.board?.roomClientThreadId === room && !TERMINAL.has(run.status))
+    const pending = this.boardStarts.get(room)
+    return active.length + (pending ? [...pending].filter(slot => !active.some(run =>
+      run.requestId === slot.requestId && run.clientThreadId === slot.clientThreadId)).length : 0)
+  }
+
   async sendBoard(body, { authenticateRecipient } = {}) {
     if (body.replyDestination !== undefined) throw boardFailure('CHAT_CHANNEL_CHANGED')
     const room = idText(body.clientThreadId)
@@ -3021,7 +3034,7 @@ export class CodexChatRuntime {
     const recipients = chosen.map(id => ({ ...byId.get(id), lead: id === lead, reason: address.mentioned.length ? 'mentioned' : 'lead' }))
     if (boardHasScopedResources(body) && !(recipients.length === 1 && recipients[0].lead)) throw boardFailure('BOARD_CONTEXT_SCOPE')
     if (!recipients.length) throw chatError('BOARD_NO_RECIPIENT', 'Mention an Agent in this room, or choose the room\'s Lead Agent', 409)
-    let slots = MAX_BOARD_CONCURRENT - [...this.runs.values()].filter(run => run.board?.roomClientThreadId === room && !TERMINAL.has(run.status)).length
+    let slots = MAX_BOARD_CONCURRENT - this.boardOccupancy(room)
     // The object is an unforgeable, ephemeral join of this send invocation, not a
     // room-wide subscription. Replays, restored runs and overlapping sends never join.
     const peers = strict && observation.rosterSaved && this.storeHealthy && engineId === 'codex' && slots >= 2 && recipients.length === 2
@@ -3059,8 +3072,8 @@ export class CodexChatRuntime {
       const target = recipient.lead ? room : boardMemberThreadId(room, recipient.profileId)
       const memberRequestId = recipient.lead ? requestId : `${requestId.slice(0, 200)}~${createHash('sha256').update(recipient.profileId).digest('hex').slice(0, 16)}`
       const row = { profileId: recipient.profileId, memberKey: recipient.memberKey, label: recipient.label, reason: recipient.reason, clientThreadId: target, requestId: memberRequestId }
-      if (slots <= 0) { results.push({ ...row, status: 'deferred', code: 'BOARD_CONCURRENCY_LIMIT' }); continue }
       const record = { roomClientThreadId: room, memberKey: recipient.memberKey, profileId: recipient.profileId, label: recipient.label, reason: recipient.reason }
+      let releaseSlot
       try {
         checkBoard?.()
         const conversationId = this.boundConversation(target)
@@ -3075,7 +3088,24 @@ export class CodexChatRuntime {
         checkRecipient()
         await authenticateRecipient?.(recipientBody, profile.profileRun)
         checkRecipient()
-        const accepted = await this.send(recipientBody, { profileRun: profile.profileRun, checkBoard: checkRecipient, board: { record, peers, block: boardContextBlock({ members, recipient, leadProfileId: lead, recentMessages }) } })
+        const reserve = () => {
+          const occupied = this.boardOccupancy(room)
+          if (slots <= 0 || occupied >= MAX_BOARD_CONCURRENT) return 'BOARD_CONCURRENCY_LIMIT'
+          // Strict Board delivery only runs on this bridge's local Codex adapter.
+          if (strict && engineId === 'codex' && occupied > 0) {
+            try {
+              if (this.localCapacity?.additionalLaunchReason() === 'local-host-pressure') return 'local-host-pressure'
+            } catch { /* retain the existing hard cap */ }
+          }
+          const bucket = this.boardStarts.get(room) || new Set()
+          const slot = { requestId: memberRequestId, clientThreadId: target }
+          bucket.add(slot)
+          this.boardStarts.set(room, bucket)
+          releaseSlot = () => { bucket.delete(slot); if (!bucket.size) this.boardStarts.delete(room) }
+          return null
+        }
+        const accepted = await this.send(recipientBody, { profileRun: profile.profileRun, checkBoard: checkRecipient, board: { record, peers, reserve, block: boardContextBlock({ members, recipient, leadProfileId: lead, recentMessages }) } })
+        if (accepted?.deferred === true) { results.push({ ...row, status: 'deferred', code: accepted.code }); continue }
         // A durable replay returns its saved outcome, including refusals;
         // Promise fulfillment alone does not mean a native turn started.
         if (accepted?.accepted !== true || boardUncertain(accepted)) {
@@ -3088,11 +3118,11 @@ export class CodexChatRuntime {
           })
           continue
         }
-        slots--
+        if (releaseSlot) slots--
         results.push({ ...row, status: 'started', conversationId: accepted.conversationId || null, runId: accepted.runId || null, ...(accepted.duplicate ? { duplicate: true } : {}) })
       } catch (error) {
         results.push({ ...row, status: 'failed', code: typeof error.code === 'string' ? publicText(error.code, 80) : 'BOARD_SEND_FAILED', error: boardUncertain(error) ? BOARD_UNCERTAIN_MESSAGE : publicText(error.message, 500), ...boardFailureStatus(error) })
-      }
+      } finally { releaseSlot?.() }
     }
     const routed = this.recordBoardRoute(room, requestId, results)
     if (peers && routed && peers.entries.length === 2 && results.every(row => row.status === 'started' && !row.duplicate

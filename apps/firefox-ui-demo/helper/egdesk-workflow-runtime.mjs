@@ -54,7 +54,7 @@ const hashed = (prefix, value) => `${prefix}-${createHash('sha256').update(Strin
  */
 export async function openWorkflowRuntime({
   dataDir, chat, port = 39218, broadcast = () => {}, ensureAuth, getOwnerKey,
-  maxConcurrency = 2, owner = WORKFLOW_OWNER, watch, openStores = null,
+  maxConcurrency = 2, owner = WORKFLOW_OWNER, watch, openStores = null, localCapacity = null,
 } = {}) {
   if (typeof ensureAuth !== 'function' || typeof getOwnerKey !== 'function') throw new TypeError('ensureAuth and getOwnerKey are required')
   const bus = createWorkflowEventBus()
@@ -109,16 +109,18 @@ export async function openWorkflowRuntime({
   // retried on chat turn endings and, as a fallback, once a second.
   let heldTimer = null
   let kickQueued = false
+  let closed = false
   function holdRetry() {
-    if (heldTimer || !graph) return
+    if (closed || heldTimer || !graph) return
     heldTimer = setTimeout(() => { heldTimer = null; void graph?.reschedule().catch(() => {}) }, 1000)
     heldTimer.unref?.()
   }
   function kick() {
-    if (kickQueued) return
+    if (closed || kickQueued) return
     kickQueued = true
     setImmediate(() => {
       kickQueued = false
+      if (closed) return
       taskChat?.pump?.()
       if (heldTimer && graph) void graph.reschedule().catch(() => {})
     })
@@ -142,7 +144,12 @@ export async function openWorkflowRuntime({
       captureScope, assertDelegationCurrent })
     graph = await openTaskGraph({ store: stores.store, maxConcurrency, execute: adapter.execute, interrupt: adapter.interrupt,
       requestApproval: adapter.requestApproval, verifyReceipt: adapter.verifyReceipt,
-      canStart: context => plans ? plans.canStart(context) : true })
+      canStart: context => plans ? plans.canStart(context) : true,
+      additionalLaunchReason: () => localCapacity?.additionalLaunchReason(),
+      onQueueChange: (graphId, pressure) => {
+        if (pressure) holdRetry()
+        if (graphId) broadcast({ type: 'task.graph', v: 1, graphId, change: 'task-queue-changed', graph: publicGraph(graph.getGraph(graphId)), ts: Date.now() })
+      } })
     plans = createTaskPlanService({ store: planStore, sources, graph, adapter, chat, getOwnerKey: ownerKey,
       broadcast: frame => broadcast(frame), onBlocked: holdRetry })
     unsubscribeGraph = graph.subscribe(journalEvent => {
@@ -241,6 +248,7 @@ export async function openWorkflowRuntime({
       return { tasks: graph ? 'ready' : 'unavailable', taskError: tasksError, maxConcurrency, eventSeq: seq, droppedEvents: dropped, ...files.snapshot() }
     },
     async close() {
+      closed = true
       router?.close()
       graph?.close?.()
       taskChat?.close?.()

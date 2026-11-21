@@ -2900,6 +2900,9 @@ const taskTime = value => {
 /** Korean word for a task status; an unknown value never shows as the raw token. */
 export const taskStatusText = status => lookup(TASK_STATUS_TEXT, status) || '상태 확인 중';
 
+const TASK_QUEUE_TEXT = Object.freeze([['local-host-pressure', '대기 중 · 이 컴퓨터의 CPU 사용량이 높음'],
+  ['task-concurrency-limit', '대기 중 · 동시 실행 한도']]);
+
 // Only the fields the list shows are kept from a frame or state read.
 function taskGraphShape(graph) {
   if (!graph || typeof graph !== 'object' || !taskRef(graph.graphId) || !Array.isArray(graph.tasks) || graph.tasks.length > 256) return null;
@@ -2913,7 +2916,8 @@ function taskGraphShape(graph) {
         // explicit null sentinel; dropping them would turn a question into a
         // legacy no-answer gate. Never retain an answer or a private textRef.
         .map(key => [key, key === 'response' ? taskGateView(gate).response : gate[key]])));
-    tasks.push({ taskId: raw.taskId, status: typeof raw.status === 'string' ? raw.status : null, approvalRequested: raw.approvalRequested === true, gates });
+    tasks.push({ taskId: raw.taskId, status: typeof raw.status === 'string' ? raw.status : null, approvalRequested: raw.approvalRequested === true, gates,
+      ...(raw.status === 'ready' && lookup(TASK_QUEUE_TEXT, raw.queueReason) ? { queueReason: raw.queueReason } : {}) });
   }
   return {
     ...Object.fromEntries(TASK_SCOPE_KEYS.map(key => [key, graph[key] ?? null])),
@@ -3262,7 +3266,7 @@ export function taskBoardView(board, { folderName = null, continuing = null, app
     const graph = entry.graph;
     const taskNames = Object.fromEntries(graph.tasks.map((task, index) => [task.taskId, entry.titles?.[task.taskId] || `작업 ${index + 1}`]));
     const tasks = graph.tasks.map(task => ({
-      taskId: task.taskId, name: taskNames[task.taskId], status: task.status, statusText: taskStatusText(task.status),
+      taskId: task.taskId, name: taskNames[task.taskId], status: task.status, statusText: lookup(TASK_QUEUE_TEXT, task.queueReason) || taskStatusText(task.status),
       conditions: task.gates.map(gate => {
         const condition = taskGateView(gate, { taskNames, folderName, now });
         const here = continuing && continuing.graphId === entry.graphId && continuing.taskId === task.taskId && continuing.gateId === gate.gateId

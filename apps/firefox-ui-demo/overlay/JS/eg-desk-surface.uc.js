@@ -15305,17 +15305,21 @@
       const responseRows = Array.isArray(answer?.recipients) ? answer.recipients : [];
       const explicitlyUnknown = row => row?.dispatchStatus === 'unknown' || row?.resumeRequired === true;
       const definiteRoomRefusal = !responseRows.length && answer?.accepted === false && !explicitlyUnknown(answer);
+      let hostDeferred = false;
       for (const recipient of plannedRecipients) {
         if (definiteRoomRefusal) break;
         const route = outcome.routes[recipient.profileId];
         const status = explicitlyUnknown(route) || responseRows.some(row => row?.profileId === recipient.profileId && explicitlyUnknown(row)) ? 'unknown' : route?.status;
-        const label = status === 'started' ? '접수' : status === 'deferred' ? '보류' : status === 'failed' ? '거절' : '접수 미확인';
+        const pressure = status === 'deferred' && route?.code === 'local-host-pressure';
+        hostDeferred ||= pressure;
+        const label = status === 'started' ? '접수' : pressure ? 'CPU 포화로 미실행' : status === 'deferred' ? '보류' : status === 'failed' ? '거절' : '접수 미확인';
         if (!statusGroups.has(label)) statusGroups.set(label, []);
         statusGroups.get(label).push(recipient.label);
       }
       const uncertain = statusGroups.has('접수 미확인');
       const boardSubmitNotice = !statusGroups.size || (statusGroups.size === 1 && statusGroups.has('접수')) ? null
         : { unknown: uncertain, requestId, text: [...statusGroups].map(([label, names]) => `${label}: ${names.join(', ')}`).join(' · ')
+          + (hostDeferred ? ' · 자동으로 시작하지 않습니다. CPU 사용량이 줄면 미실행 Agent만 다시 @로 불러 주세요.' : '')
           + (uncertain ? ' · 같은 요청을 다시 보내기 전에 활동 기록을 확인하세요.' : '') };
       updateThreadById(threadId, current => ({ ...current, boardSubmitNotice, boardRoutes: { ...(current.boardRoutes || {}), ...outcome.routes } }));
       const recipients = responseRows;
