@@ -42,7 +42,7 @@ function derive(packet, style) {
 
 async function newWorld(t, { count, out } = {}) {
   const dir = await mkdtemp(path.join(os.tmpdir(), 'egdesk-memev-qa-')); await chmod(dir, 0o700)
-  const w = { dir, requestN: 0, clock: 1_000_000, turns: [], collected: [], events: [], decisionInputs: [], errors: [], threads: 0, turnN: 0, hooks: {}, mode: 'on', conv: {}, handles: {}, fx: fixtures({ count, out }) }
+  const w = { dir, requestN: 0, clock: 1_000_000, turns: [], collected: [], events: [], legacy: [], decisionInputs: [], errors: [], threads: 0, turnN: 0, hooks: {}, mode: 'on', conv: {}, handles: {}, fx: fixtures({ count, out }) }
   const boot = () => {
     w.captures = new ImmutableContextStore({ dataDir: path.join(dir, 'state'), allowedRoots: [dir], now: () => w.clock })
     w.evidence = new MemoryEvidenceStore({ dataDir: path.join(dir, 'state'), captures: w.captures, now: () => w.clock })
@@ -52,7 +52,7 @@ async function newWorld(t, { count, out } = {}) {
       request: async (method, params) => {
         await w.hooks.onNative?.(method)
         if (method === 'thread/start') return { thread: { id: `thread-${++w.threads}` }, cwd: '/work', model: 'synthetic' }
-        if (method === 'thread/resume') return { thread: { id: params.threadId, turns: [] }, cwd: '/work' }
+        if (method === 'thread/resume') return { thread: { id: params.threadId, turns: w.hooks.restoreTurns || [] }, cwd: '/work' }
         if (method === 'config/read') return { config: { developer_instructions: null } }
         if (method === 'thread/unsubscribe') return { status: 'unsubscribed' }
         if (method === 'turn/interrupt') return {}
@@ -64,6 +64,7 @@ async function newWorld(t, { count, out } = {}) {
         const terminal = w.hooks.nativeTerminal ?? 'completed'
         w.turns.push({ params, packet, fields, text })
         const timing = { threadId: params.threadId, turnId: id }
+        if (w.hooks.manualAnswer) { w.fixtureRun = timing; return { turn: { id, status: 'inProgress', items: [] } } }
         setTimeout(async () => {
           const n = (m, p) => chat.handleNotification({ method: m, params: p })
           await n('item/started', { ...timing, item: { id: `w${id}`, type: 'agentMessage', phase: 'commentary', text: '' } })
@@ -79,7 +80,7 @@ async function newWorld(t, { count, out } = {}) {
         }, 5)
         return { turn: { id, status: 'inProgress', items: [] } }
       },
-      respond: () => {}, emit: e => w.events.push(e), emitLegacy: () => {}, verifyFile: async () => null,
+      respond: () => {}, emit: e => w.events.push(e), emitLegacy: e => w.legacy.push(e), verifyFile: async () => null,
       decisionContext: { mode: () => w.mode, configured: () => true, budgetMs: 5000, memoryEvidence: w.evidence,
         topicRecipient: () => w.hooks.topicRecipient?.() ?? null,
         client: { model: 'synthetic-decision', async decide(request) {
@@ -1029,4 +1030,123 @@ test('the grant high-water mark survives reopen; a first successful but source-i
   assert.equal(w.liveWires.length, count)
   w.evidence.clearTopic(w.scope()); const next = topicEnable(w); assert.ok(next.startSeq > initial.startSeq)
   await topicSay(w, LIVE_ROOT); assertTopicAppend(w, next, LIVE_ROOT)
+})
+
+const ASSERTION = '동의 세대는 EG-Desk의 공식 설정입니다. PRIVATE_DRAFT_TOKEN'
+const RECOVERY_ASSERTION = '주제 기억은 철회 뒤 자동으로 복구됩니다. PRIVATE_DRAFT_TOKEN'
+const HOST_ANSWER = 'host:topic-answer-grounding'
+async function manualTopicRun(w, message) {
+  w.hooks.manualAnswer = true
+  const r = await w.chat.send({ message, clientThreadId: DM, requestId: `r-${++w.requestN}`,
+    conversationId: w.conv[DM], profileId: AGENT, replyDestination: 'direct' })
+  assert.equal(r.runId, w.fixtureRun.turnId)
+  const timing = { ...w.fixtureRun }
+  const notify = (method, params) => w.chat.handleNotification({ method, params: { ...timing, ...params } })
+  const item = (text, phase = 'final_answer') => ({ type:'agentMessage', id:`a${r.runId}`, phase, text })
+  return { r, item, start: text => notify('item/started', { item:item(text) }),
+    delta: delta => notify('item/agentMessage/delta', { itemId:item('').id, delta }),
+    complete: text => notify('item/completed', { item:item(text) }),
+    terminal: (items = [], status = 'completed') => notify('turn/completed', { turn:{ id:r.runId, status, items } }) }
+}
+async function assertNoGroundingDraft(w, runId) {
+  const events = w.events.filter(e => e.runId === runId)
+  assert.doesNotMatch(JSON.stringify([events, w.legacy, w.chat.snapshot(w.conv[DM]),
+    w.store.listRuns(DM), w.store.listMessages(DM), w.store.listEvents(DM)]), /PRIVATE_DRAFT_TOKEN/)
+  assert.ok(!events.some(e => e.event.startsWith('message.') && e.details?.role !== 'user'))
+  for (const file of await readdir(path.join(w.dir, 'chat'))) {
+    assert.equal((await readFile(path.join(w.dir, 'chat', file))).includes(Buffer.from('PRIVATE_DRAFT_TOKEN')), false)
+  }
+}
+
+test('scoped grounding: split draft never projects; blocked even with routing off and revoke before terminal; raw native restore stays private', async t => {
+  const w = await liveTopicWorld(t)
+  await w.ask('기존 대화'); topicEnable(w); w.mode = 'off'
+  const turn = await manualTopicRun(w, '주제 기억을 어떻게 쓰니?')
+  await turn.delta('동') // hold before an item or phase exists
+  await turn.start('동의 세'); await turn.delta('대는 EG-Desk의 공식 설정입니다. '); await turn.delta('PRIVATE_DRAFT_TOKEN ')
+  await assertNoGroundingDraft(w, turn.r.runId)
+  await turn.complete(ASSERTION)
+  await assertNoGroundingDraft(w, turn.r.runId)
+  assert.equal(w.evidence.clearTopic(w.scope()), true)
+  await turn.terminal()
+  const stored = w.store.getLatestRun(DM)
+  assert.equal(stored.status, 'completed'); assert.equal(stored.activities.filter(a => a.id === HOST_ANSWER).length, 1)
+  assert.ok(!stored.messages.some(m => m.role === 'assistant'))
+  assert.equal(topicState(w), null)
+  await assertNoGroundingDraft(w, turn.r.runId)
+  w.hooks.restoreTurns = [{ id: turn.r.runId, status:'completed', items:[turn.item(ASSERTION), turn.item(ASSERTION, 'commentary')] }]
+  w.restart()
+  const restored = await w.chat.resume({ clientThreadId:DM, conversationId:w.conv[DM] })
+  assert.equal(restored.runs[0].status, 'completed')
+  assert.ok(restored.runs[0].activities.some(a => a.id === HOST_ANSWER))
+  await assertNoGroundingDraft(w, turn.r.runId)
+})
+
+test('scoped grounding: late completion and terminal snapshots cannot bypass the hold; lost proof and size/time bounds fail closed', async t => {
+  const w = await liveTopicWorld(t)
+  await w.ask('기존 대화'); topicEnable(w)
+  const late = await manualTopicRun(w, 'late proof')
+  await late.start(RECOVERY_ASSERTION); await late.terminal(); await assertNoGroundingDraft(w, late.r.runId)
+  await late.complete(RECOVERY_ASSERTION); assert.ok(w.store.getLatestRun(DM).activities.some(a => a.id === HOST_ANSWER))
+  const snapshot = await manualTopicRun(w, 'snapshot proof')
+  await snapshot.terminal([snapshot.item(ASSERTION)]); await assertNoGroundingDraft(w, snapshot.r.runId)
+  assert.ok(w.store.getLatestRun(DM).activities.some(a => a.id === HOST_ANSWER))
+  const huge = await manualTopicRun(w, 'oversize proof')
+  await huge.complete('PRIVATE_DRAFT_TOKEN' + 'x'.repeat(33_000)); await huge.terminal(); await assertNoGroundingDraft(w, huge.r.runId)
+  assert.ok(w.store.getLatestRun(DM).activities.some(a => a.id === HOST_ANSWER))
+  const timeout = await manualTopicRun(w, 'expired proof')
+  await timeout.complete(ASSERTION); w.clock += 121_000
+  await timeout.terminal(); await assertNoGroundingDraft(w, timeout.r.runId)
+  assert.ok(w.store.getLatestRun(DM).activities.some(a => a.id === HOST_ANSWER))
+  const running = await manualTopicRun(w, 'lost proof')
+  await running.complete(ASSERTION)
+  w.hooks.restoreTurns = [{ id: running.r.runId, status:'completed', items:[running.item(ASSERTION)] }]
+  w.restart(); await w.chat.resume({ clientThreadId:DM, conversationId:w.conv[DM] })
+  await assertNoGroundingDraft(w, running.r.runId)
+  assert.equal(w.store.getLatestRun(DM).status, 'completed')
+  assert.ok(w.store.getLatestRun(DM).activities.some(a => a.id === HOST_ANSWER))
+})
+
+test('scoped grounding: valid contrasts are byte-for-byte unchanged; without consent, ordinary streaming is unchanged', async t => {
+  const w = await liveTopicWorld(t)
+  await w.ask('기존 대화'); topicEnable(w)
+  const valid = '동의 세대는 공식 설정이 아닙니다. “동의 세대”를 이 대화에서만 임시 이름으로 씁니다. 주제 기억은 이 DM에서 별도 허용이 필요합니다. 철회하면 주제 기억은 자동으로 복구되지 않습니다.'
+  const approved = await manualTopicRun(w, '정상 답변')
+  await approved.start(valid.slice(0, 10)); await approved.delta(valid.slice(10)); await approved.complete(valid)
+  assert.equal(w.events.some(e => e.runId === approved.r.runId && e.event === 'message.completed'), false)
+  await approved.terminal()
+  assert.equal(w.store.getLatestRun(DM).messages.find(m => m.role === 'assistant').text, valid)
+  assert.ok(w.legacy.some(e => e.type === 'assistant-delta' && e.delta === valid))
+  w.hooks.restoreTurns = [{ id: approved.r.runId, status:'completed', items:[approved.item('PRIVATE_DRAFT_TOKEN')] }]
+  w.restart()
+  const restored = await w.chat.resume({ clientThreadId:DM, conversationId:w.conv[DM] })
+  assert.equal(restored.runs[0].messages.find(m => m.role === 'assistant').text, valid)
+  assert.equal(w.evidence.clearTopic(w.scope()), true)
+  const ordinary = await manualTopicRun(w, '동의 없는 대화')
+  await ordinary.start('동의 세대는 EG-Desk의 공식 설정입니다. ')
+  await ordinary.delta('그대로 스트리밍합니다. ')
+  assert.ok(w.events.some(e => e.runId === ordinary.r.runId && e.event === 'message.delta'))
+  await ordinary.complete(ASSERTION.replace('PRIVATE_DRAFT_TOKEN', ''))
+  await ordinary.terminal()
+  assert.ok(w.store.getLatestRun(DM).messages.some(m => m.role === 'assistant'))
+})
+
+test('scoped grounding: an unresolved dispatch cannot restore an uncorrelated native draft', async t => {
+  const w = await liveTopicWorld(t)
+  await w.ask('기존 대화'); topicEnable(w)
+  w.hooks.onNative = method => { if (method === 'turn/start') throw Error('synthetic connection lost') }
+  await assert.rejects(manualTopicRun(w, 'lost reply'))
+  const pending = w.store.pendingTopicAnswer(DM)
+  assert.ok(pending)
+  const item = { id:'answer-lost', type:'agentMessage', phase:'final_answer', text:ASSERTION }
+  w.hooks.restoreTurns = [{ id:'turn-lost', status:'completed', items:[item] }]
+  w.restart()
+  await assert.rejects(w.chat.resume({ clientThreadId:DM, conversationId:w.conv[DM] }), { code:'TOPIC_ANSWER_BINDING' })
+  await assertNoGroundingDraft(w, 'turn-lost')
+  w.hooks.restoreTurns[0].items.unshift({ id:'user-lost', type:'userMessage', clientId:pending, content:[] })
+  const restored = await w.chat.resume({ clientThreadId:DM, conversationId:w.conv[DM] })
+  assert.equal(w.store.pendingTopicAnswer(DM), null)
+  assert.equal(restored.runs.at(-1).status, 'completed')
+  assert.ok(restored.runs.at(-1).activities.some(a => a.id === HOST_ANSWER))
+  await assertNoGroundingDraft(w, 'turn-lost')
 })

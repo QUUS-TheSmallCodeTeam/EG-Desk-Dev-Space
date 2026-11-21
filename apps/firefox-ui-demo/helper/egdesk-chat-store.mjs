@@ -4,7 +4,7 @@ import path from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
 import { isOwnedAndPrivate } from './egdesk-private-files.mjs'
 
-const VERSION = 4
+const VERSION = 5
 const MAX_RECORD_BYTES = 16 * 1024 * 1024
 const MAX_IMPORT_BYTES = 64 * 1024 * 1024
 const TERMINAL_RUN = new Set(['completed', 'failed', 'interrupted', 'cancelled'])
@@ -348,6 +348,17 @@ const V4_UPGRADE = `
 const V4_TABLES = [...V3_TABLES, 'run_project_origins']
 const V4_COLUMNS = { ...V3_COLUMNS, run_project_origins: ['local_conversation_id', 'local_run_id', 'conversation_id', 'run_id', 'private_json'] }
 
+// Scope-only metadata; no draft, consent generation or classifier output.
+const V5_UPGRADE = `
+    CREATE TABLE topic_answer_guards (
+      local_conversation_id TEXT NOT NULL, request_id TEXT NOT NULL, run_id TEXT,
+      PRIMARY KEY(local_conversation_id, request_id), UNIQUE(local_conversation_id, run_id),
+      FOREIGN KEY(local_conversation_id, request_id) REFERENCES requests(local_conversation_id, request_id)
+    );
+`
+const V5_TABLES = [...V4_TABLES, 'topic_answer_guards']
+const V5_COLUMNS = { ...V4_COLUMNS, topic_answer_guards: ['local_conversation_id', 'request_id', 'run_id'] }
+
 // Older builds refuse a newer file (closed, never reset), so the exact data is
 // kept beside it first. VACUUM INTO writes one consistent copy, WAL included,
 // into a new private file; nothing is migrated unless the copy completed.
@@ -382,15 +393,15 @@ function initialize(db, filename) {
     return names.every(name => found.has(name))
   })
   if (version === VERSION) {
-    if (!tablesPresent(V4_TABLES) || !columnsPresent(V4_COLUMNS)) fail('STORE_CORRUPT', 'Chat schema is incomplete; database was not reset', 500)
+    if (!tablesPresent(V5_TABLES) || !columnsPresent(V5_COLUMNS)) fail('STORE_CORRUPT', 'Chat schema is incomplete; database was not reset', 500)
     return
   }
-  if ([1, 2, 3].includes(version)) {
-    if (!tablesPresent(version === 3 ? V3_TABLES : REQUIRED_TABLES) || (version >= 2 && !columnsPresent(version === 3 ? V3_COLUMNS : V2_COLUMNS))) fail('STORE_CORRUPT', 'Chat schema is incomplete; database was not reset', 500)
+  if ([1, 2, 3, 4].includes(version)) {
+    if (!tablesPresent(version === 4 ? V4_TABLES : version === 3 ? V3_TABLES : REQUIRED_TABLES) || (version >= 2 && !columnsPresent(version === 4 ? V4_COLUMNS : version === 3 ? V3_COLUMNS : V2_COLUMNS))) fail('STORE_CORRUPT', 'Chat schema is incomplete; database was not reset', 500)
     backupVersion(db, filename, version)
     db.exec('BEGIN IMMEDIATE')
     try {
-      db.exec(`${version === 1 ? V2_UPGRADE : ''} ${version < 3 ? V3_UPGRADE : ''} ${V4_UPGRADE} PRAGMA user_version=${VERSION};`)
+      db.exec(`${version === 1 ? V2_UPGRADE : ''} ${version < 3 ? V3_UPGRADE : ''} ${version < 4 ? V4_UPGRADE : ''} ${V5_UPGRADE} PRAGMA user_version=${VERSION};`)
       db.exec('COMMIT')
     } catch (error) {
       try { db.exec('ROLLBACK') } catch { /* Preserve original failure. */ }
@@ -404,6 +415,7 @@ function initialize(db, filename) {
     ${V2_UPGRADE}
     ${V3_UPGRADE}
     ${V4_UPGRADE}
+    ${V5_UPGRADE}
     PRAGMA user_version=${VERSION};
     COMMIT;`)
 }
@@ -825,6 +837,35 @@ export function openChatStore({ dataDir, ownerScope } = {}) {
         if (checkpoint && result.inserted) checkpointMessages(row, eventKey, ts, localRunId, requestId, checkpoint, result.checkpointProjected)
         return result.record
       })
+    },
+    // Persist eligibility before calling the engine. Only a definite refusal
+    // may remove an unbound marker. An ambiguous reply needs exact correlation.
+    reserveTopicAnswer(clientThreadId, requestId) {
+      ensureOpen(); const row = requireThread(clientThreadId)
+      db.prepare('INSERT INTO topic_answer_guards(local_conversation_id, request_id) VALUES (?, ?)').run(row.local_conversation_id, identifier(requestId, 'requestId'))
+    },
+    bindTopicAnswer(clientThreadId, requestId, runId) {
+      ensureOpen(); const row = requireThread(clientThreadId)
+      const id = identifier(runId, 'runId')
+      const changed = db.prepare('UPDATE topic_answer_guards SET run_id=? WHERE local_conversation_id=? AND request_id=? AND (run_id IS NULL OR run_id=?)').run(id, row.local_conversation_id, identifier(requestId, 'requestId'), id)
+      if (changed.changes !== 1) fail('TOPIC_ANSWER_BINDING', 'Scoped answer binding is unavailable', 409)
+    },
+    cancelTopicAnswer(clientThreadId, requestId) {
+      ensureOpen(); const row = requireThread(clientThreadId)
+      db.prepare('DELETE FROM topic_answer_guards WHERE local_conversation_id=? AND request_id=? AND run_id IS NULL').run(row.local_conversation_id, identifier(requestId, 'requestId'))
+    },
+    pendingTopicAnswer(clientThreadId) {
+      ensureOpen(); const row = requireThread(clientThreadId)
+      return db.prepare('SELECT request_id FROM topic_answer_guards WHERE local_conversation_id=? AND run_id IS NULL LIMIT 1').get(row.local_conversation_id)?.request_id ?? null
+    },
+    guardedTopicAnswer(clientThreadId, runId) {
+      ensureOpen(); const row = requireThread(clientThreadId)
+      return !!db.prepare('SELECT 1 FROM topic_answer_guards WHERE local_conversation_id=? AND run_id=?').get(row.local_conversation_id, identifier(runId, 'runId'))
+    },
+    getNativeRunCheckpoint(clientThreadId, runId) {
+      ensureOpen(); const row = requireThread(clientThreadId)
+      const match = db.prepare('SELECT public_json FROM runs WHERE local_conversation_id=? AND run_id=? LIMIT 1').get(row.local_conversation_id, identifier(runId, 'runId'))
+      return match ? parse(match.public_json) : null
     },
     bindNative(input) { ensureOpen(); shape(input, ['clientThreadId', 'conversationId', 'engineId', 'engineProfileId', 'localRunId', 'runId', 'localMessageId', 'messageId']); return tx(() => bind(requireThread(input.clientThreadId), input)) },
     /**

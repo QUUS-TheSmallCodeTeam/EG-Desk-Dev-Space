@@ -14135,6 +14135,10 @@
         }, el('span', {}, ChatStatusView.uncertainStatusText(statusText, codex.bridgeCheckedAt),
           resultScope && !pending ? el('span', { class: 'egd-codex-run-scope', data: { testid: 'chat-run-scope', completeness: resultScope.completeness } }, `결과 범위: ${resultScope.text}`) : null),
         el('button', { 'aria-label': '활동 기록 열기', data: { testid: 'chat-activity-open', threadId: activeThread.id }, onclick: () => codexBridge.openActivity(activeThread.id) }, codexActivityButtonLabel(run))));
+        const answerNotice = run?.activities?.find(activity => activity.kind === 'hostNotice' && activity.id === 'host:topic-answer-grounding');
+        if (answerNotice?.detail?.text) conversation.appendChild(el('div', {
+          class: 'egd-codex-run-status', role: 'status', data: { testid: 'chat-topic-answer-notice', runId: run.runId },
+        }, el('strong', {}, answerNotice.title), el('span', {}, answerNotice.detail.text)));
         // CHAT-06 Await: the task list line sits right under the run state.
         const taskBoard = renderChatTaskBoard(codex, codexBridge, connectedFolderName);
         if (taskBoard) conversation.appendChild(taskBoard);

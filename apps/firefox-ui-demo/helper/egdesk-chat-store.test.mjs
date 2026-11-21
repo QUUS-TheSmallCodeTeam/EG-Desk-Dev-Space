@@ -84,7 +84,7 @@ test('accepted user message and request fingerprint commit together and survive 
   assert.equal(isOwnedAndPrivate(path.join(dataDir, filename), statSync(path.join(dataDir, filename)), 0o077), true)
   const raw = new DatabaseSync(path.join(dataDir, filename))
   assert.equal(raw.prepare('PRAGMA journal_mode').get().journal_mode, 'wal')
-  assert.equal(raw.prepare('PRAGMA user_version').get().user_version, 4)
+  assert.equal(raw.prepare('PRAGMA user_version').get().user_version, 5)
   raw.close()
 })
 
@@ -472,7 +472,7 @@ test('a v1 database is backed up, then opens as v4 with every conversation, run 
   assert.equal(store.getConversation('client-draft').engineId, 'codex')
   store.close()
   const raw = new DatabaseSync(filename)
-  assert.equal(raw.prepare('PRAGMA user_version').get().user_version, 4)
+  assert.equal(raw.prepare('PRAGMA user_version').get().user_version, 5)
   assert.equal(raw.prepare("SELECT engine_id FROM runs WHERE local_run_id='local-run-1'").get().engine_id, 'codex')
   raw.close()
   const backup = `${filename}.v1.bak`
@@ -567,7 +567,7 @@ test('a v2 database is backed up, then opens as v4 with every conversation kept 
   assert.deepEqual(store.listRoomMembers('client-sent'), { clientThreadId: 'client-sent', members: [] })
   store.close()
   const raw = new DatabaseSync(filename)
-  assert.equal(raw.prepare('PRAGMA user_version').get().user_version, 4)
+  assert.equal(raw.prepare('PRAGMA user_version').get().user_version, 5)
   raw.close()
   const backup = `${filename}.v2.bak`
   assert.equal(isOwnedAndPrivate(backup, statSync(backup), 0o077), true)
@@ -585,7 +585,7 @@ test('a v2 database is backed up, then opens as v4 with every conversation kept 
   assert.equal(readdirSync(other).some(name => name.includes('.bak')), false)
 })
 
-test('v3 to v4 backs up the full prior store and adds only private run origins; damaged v3/v4 fail closed', t => {
+test('v3 to v5 backs up the prior store and adds private metadata; damaged schemas fail closed', t => {
   const { dataDir, store } = opened(t)
   conversation(store)
   store.setRoomMembers({ clientThreadId: 'client-1', members: [{ kind: 'user', role: 'owner' }], ts: T })
@@ -593,7 +593,7 @@ test('v3 to v4 backs up the full prior store and adds only private run origins; 
   store.close()
   const filename = path.join(dataDir, readdirSync(dataDir).find(name => name.endsWith('.sqlite')))
   const v3 = new DatabaseSync(filename)
-  v3.exec('DROP TABLE run_project_origins; PRAGMA user_version=3;')
+  v3.exec('DROP TABLE topic_answer_guards; DROP TABLE run_project_origins; PRAGMA user_version=3;')
   v3.close()
   const reopened = openChatStore({ dataDir, ownerScope: 'desktop/profile-a' })
   assert.deepEqual(reopened.listRoomMembers('client-1'), members)
@@ -603,7 +603,7 @@ test('v3 to v4 backs up the full prior store and adds only private run origins; 
   assert.equal(backup.prepare("SELECT count(*) AS n FROM sqlite_master WHERE name='run_project_origins'").get().n, 0)
   backup.close()
   const current = new DatabaseSync(filename)
-  assert.equal(current.prepare('PRAGMA user_version').get().user_version, 4)
+  assert.equal(current.prepare('PRAGMA user_version').get().user_version, 5)
   current.exec('ALTER TABLE run_project_origins DROP COLUMN private_json;')
   current.close()
   assert.throws(() => openChatStore({ dataDir, ownerScope: 'desktop/profile-a' }), { code: 'STORE_CORRUPT' })

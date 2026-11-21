@@ -32,6 +32,7 @@ const BROWSER_INTERACTION_TOOL_NAMES = Object.freeze([...BROWSER_STEP_TOOL_NAMES
 // Fixture QA allows only observe/click/fill; a reflex could run other steps.
 const FIXTURE_BROWSER_TOOL_NAMES = Object.freeze(['egdesk_browser_observe', 'egdesk_browser_click', 'egdesk_browser_fill'])
 import { planSessionTopic, SESSION_TOPIC_LIMITS } from './egdesk-session-topic.mjs'
+import { TOPIC_ANSWER_LIMIT, TOPIC_ANSWER_HOLD_MS, topicAnswerContradiction } from './egdesk-topic-answer-grounding.mjs'
 import { speechSegments } from './egdesk-speech-grounding.mjs'
 import { DECISION_CONTEXT_KEY, decisionContextActivity, evidenceForSpeaker, prepareTurnContext } from './egdesk-context-setup.mjs'
 
@@ -757,6 +758,7 @@ export class CodexChatRuntime {
     // Decision model context setup (DECISION_MODEL_CONTEXT_SETUP.md §3.1):
     // { mode(): 'off'|'advisory'|'on', configured(): boolean, client, collect({ body, context }) → candidates, budgetMs? } or null.
     this.speechRuns = new WeakMap() // private runtime-only grants; never projected onto public runs
+    this.topicAnswerGuards = new WeakMap() // private, bounded proof; never checkpointed
     this.topicIntakes = new WeakMap() // accepted local request -> prospective generation, never copied to checkpoints
     this.topicRuns = new WeakMap() // live turn -> routing refs until one confirmed final + successful terminal event
     this.decisionContext = decisionContext
@@ -1379,6 +1381,8 @@ export class CodexChatRuntime {
       if (!globalProviders) for (const provider of this.toolProviders) try { provider.cancelRun?.(run) } catch {}
       // A child Agent can outlive its parent turn; its last state is now unknown.
       this.updateSubAgentRows(run, (run.subAgents || []).filter(row => !SUBAGENT_DONE.has(row.state) && row.state !== 'unknown').map(row => ({ threadId: row.threadId, state: 'unknown', nativeStatus: null })), true)
+      const guarded = this.topicAnswerGuards.get(run)
+      if (guarded?.state === 'holding') this.discardTopicAnswer(guarded, 'restart')
       if (TERMINAL.has(run.status)) continue
       this.closeHeldOutput(run, processLost ? 'failed' : 'unknown')
       run.status = processLost ? 'failed' : 'unknown'
@@ -1514,6 +1518,7 @@ export class CodexChatRuntime {
     }
     // Keep the already-observed start policy in fresh /v1/state snapshots too.
     if (context?.computerControl) run.computerControl = { policy: context.computerControl.policy };
+    if (context?.topicAnswerGuard === true) this.startTopicAnswerGuard(run)
     this.channelOutput.set(run, { notes: new Set(), held: new Map(), overflow: false, submittedText: context?.submittedText })
     this.runs.set(key, run)
     if (owned) this.ownedRuns.add(run)
@@ -1792,6 +1797,7 @@ export class CodexChatRuntime {
     if (acceptedLocal?.accepted) {
       // Synchronous with acceptRequest. Enabling or rotating a grant during later
       // workspace/tool preparation cannot make this already accepted turn eligible.
+      context.topicAnswerGuard = this.topicAnswerConsented(body, context)
       const intake = this.topicIntake(body, context)
       if (intake) this.topicIntakes.set(context, intake)
     }
@@ -2442,6 +2448,7 @@ export class CodexChatRuntime {
     const pending = { ...context, conversationId: cid, buffer: [] }
     this.pendingStarts.set(cid, pending)
     let turnStartAttempted = false
+    let reservedTopicAnswer = false
     try {
       await assertWorkspaceCurrent()
       assertPreparationActive()
@@ -2471,6 +2478,12 @@ export class CodexChatRuntime {
       // The synchronous reservation can still take time. After it we may only narrow
       // the original result, never acquire new sources or transfer an existing grant.
       if (reserve) topicRoute = narrowDecision()
+      if (context.topicAnswerGuard) {
+        if (!this.storeHealthy || this.store.pendingTopicAnswer(context.clientThreadId))
+          throw chatError('TOPIC_ANSWER_BINDING', 'Scoped answer needs native reconciliation before sending', 409)
+        this.store.reserveTopicAnswer(context.clientThreadId, context.requestId)
+        reservedTopicAnswer = true
+      }
       turnStartAttempted = context.turnStartAttempted = true
       const result = await engine.startTurn({
         threadId: cid,
@@ -2484,6 +2497,10 @@ export class CodexChatRuntime {
       }, slot)
       if (epoch !== this.epochOf(engine.id, slot)) throw chatError('ACCOUNT_CHANGED', 'Codex account changed', 409)
       context.nativeTurnId = idText(result?.turn?.id)
+      if (reservedTopicAnswer) {
+        if (!context.nativeTurnId) throw chatError('INVALID_TURN_RESPONSE', 'Codex did not return a turn ID', 502)
+        this.store.bindTopicAnswer(context.clientThreadId, context.requestId, context.nativeTurnId)
+      }
       // Update only after an accepted turn, never on a Board switch or while
       // a previous run is active. Its existing run snapshot keeps its cwd.
       if (workspace) this.threads.get(cid).cwd = workspace.absolutePath
@@ -2565,6 +2582,9 @@ export class CodexChatRuntime {
       // A native JSON-RPC error is a definite rejection. A lost/ambiguous reply
       // needs explicit reconciliation before another attempt can start a turn.
       const uncertain = Boolean(context.nativeTurnId || (turnStartAttempted && error.definite !== true && typeof error.code !== 'number'))
+      if (reservedTopicAnswer && !uncertain) {
+        try { this.store.cancelTopicAnswer(context.clientThreadId, context.requestId) } catch { this.storeHealthy = false }
+      }
       if (epoch === this.epochOf(engine.id, slot) && uncertain) this.uncertainThreads.add(cid)
       if (context.nativeTurnId && epoch === this.epochOf(engine.id, slot)) {
         for (const event of pending.buffer.splice(0)) if ((event.method === 'dynamic' || event.method === 'approval') && this.eventRouteMatches(event.inbound)) {
@@ -2662,13 +2682,21 @@ export class CodexChatRuntime {
         qaReceipt = await verifyQaMcpIsolation(this.scopedRequest(slot), cid, qaReceipt, { shellOff })
       }
       if (epoch !== this.epochOf(engineId, slot)) throw chatError('CONTEXT_CHANGED', 'Codex connection or account changed', 409)
+      const turns = Array.isArray(result.thread.turns) ? result.thread.turns : []
+      // Correlate an ambiguous native start only by the exact submitted ID.
+      const pendingGuard = engineId === 'codex' && clientThreadId && this.store?.pendingTopicAnswer?.(clientThreadId)
+      if (pendingGuard) {
+        const matches = turns.filter(turn => Array.isArray(turn.items) && turn.items.some(item => item.type === 'userMessage' && item.clientId === pendingGuard))
+        if (matches.length !== 1 || !idText(matches[0].id))
+          throw chatError('TOPIC_ANSWER_BINDING', 'Native answer identity is unavailable; saved local history is unchanged', 409)
+        this.store.bindTopicAnswer(clientThreadId, pendingGuard, matches[0].id)
+      }
       this.rememberThread(cid, result, clientThreadId)
       currentCatalog ||= this.collectToolSpecs(null, { forManifest: true, engineId, authority: contextAuthority })
       verifiedTools ||= verifiedManifestOwners(this.threadToolManifests.get(cid), currentCatalog.manifest, currentCatalog.owners)
       this.threadToolOwners.set(cid, verifiedTools.owners)
       this.threadToolManifestStatus.set(cid, verifiedTools.status)
       if (policy) Object.assign(this.threads.get(cid), { executionPolicy: policy, qaReceipt })
-      const turns = Array.isArray(result.thread.turns) ? result.thread.turns : []
       if (result.turnsBackwardsCursor || result.itemsBackwardsCursor) this.incompleteHistory.add(cid)
       else this.incompleteHistory.delete(cid)
       this.truncated ||= turns.length > MAX_RUNS
@@ -2677,6 +2705,11 @@ export class CodexChatRuntime {
         const retainedComplete = this.runs.get(runKey(cid, turn.id))?.historyComplete === true
         const run = this.ensureRun(cid, turn.id, null, false)
         if (!run) continue
+        const guarded = engineId === 'codex' && clientThreadId && this.store?.guardedTopicAnswer?.(clientThreadId, turn.id)
+        if (guarded) {
+          const checkpoint = this.store.getNativeRunCheckpoint(clientThreadId, turn.id)
+          this.restoreTopicAnswerGuard(run, checkpoint)
+        }
         run.clientThreadId = clientThreadId || run.clientThreadId
         if (policy && !TERMINAL.has(turn.status)) {
           // Current thread policy was reverified, but the original active
@@ -2685,6 +2718,7 @@ export class CodexChatRuntime {
           run.executionPolicy = { mode: policy, status: 'recovered-active-guard', approvalPolicy: 'never' }
         }
         for (const item of turn.items) {
+          if (guarded && item.type === 'agentMessage') continue
           // An active turn's history carries text snapshots, not item-completed
           // evidence. Preserve observed completions; otherwise keep accepting deltas.
           const ended = item.type !== 'agentMessage' || TERMINAL.has(turn.status)
@@ -2701,6 +2735,7 @@ export class CodexChatRuntime {
         run.error = turn.error
         run.truncated ||= Boolean(turn.truncated)
         run.historyComplete = retainedComplete || turn.itemsView === 'full'
+        if (this.topicAnswerGuards.get(run)?.state === 'restart' && TERMINAL.has(run.status)) this.rejectTopicAnswer(run)
         for (const provider of this.toolProviders) if (this.providerSupportsEngine(provider, engineId)) await this.callProvider(provider, 'restoreRun', run, provider === this.contexts ? contextAuthority : undefined)
         if (epoch !== this.epochOf(engineId, slot)) throw chatError('CONTEXT_CHANGED', 'Codex connection or account changed', 409)
         const persisted = this.persistedRunStates.get(runKey(cid, turn.id))
@@ -3572,6 +3607,22 @@ export class CodexChatRuntime {
 
   enqueue(event) {
     const pending = this.pendingStarts.get(event.threadId) || this.pendingResumes.get(event.threadId)
+    const live = this.runs.get(runKey(event.threadId, event.turnId))
+    if (pending?.topicAnswerGuard || (live && this.topicAnswerGuards.has(live))) {
+      const notes = live && this.channelOutput.get(live).notes
+      if (event.method === 'item/agentMessage/delta' && !notes?.has(event.itemId)) return Promise.resolve()
+      const bound = (item, ceiling, start = false) => item?.type === 'agentMessage' && item.phase !== 'commentary' && (start || item.text.length > ceiling)
+        ? { ...item, text: '', truncated: !start || item.truncated } : item
+      if (event.item) event.item = bound(event.item, TOPIC_ANSWER_LIMIT, event.method === 'item/started')
+      if (event.turn?.items) {
+        let remaining = TOPIC_ANSWER_LIMIT
+        event.turn.items = event.turn.items.map(item => {
+          const next = bound(item, remaining)
+          if (next.type === 'agentMessage' && next.phase !== 'commentary') remaining -= next.text.length
+          return next
+        })
+      }
+    }
     if (pending) {
       if (pending.buffer.length < 512) pending.buffer.push(event)
       // Output text has an authoritative copy on item completion; dropping a
@@ -3954,6 +4005,22 @@ export class CodexChatRuntime {
 
   // Local-only entry ticket. Saving ordinary history or selecting an Agent is not
   // permission to disclose past utterances to a second provider/project.
+  // Acceptance-time local grant, independent of Decision and its recipient.
+  topicAnswerConsented(body, context) {
+    const cid = context.conversationId, thread = context.clientThreadId
+    const agentId = context.profileRun?.binding?.profileId
+    if (!cid || !agentId || !context.localRunId || context.engine.id !== 'codex' || context.channelKind !== 'direct' ||
+        context.executionPolicy || context.stateless || context.board || body.boardId != null || Object.hasOwn(context, 'boardActor')) return false
+    let dm
+    try { dm = this.memoryDmAuthority({ clientThreadId: thread, conversationId: cid, expectedProfileId: agentId }) } catch { return false }
+    const evidence = this.decisionContext?.memoryEvidence
+    if (!evidence) return false
+    const allowed = evidence.topicConsentState(dm.scope)
+    if (allowed === false) return false
+    const grant = evidence.topicState(dm.scope)
+    return allowed !== true || !grant || grant.conversationId === cid
+  }
+
   topicIntake(body, context) {
     try {
       const setup = this.decisionContext, cid = context.conversationId, thread = context.clientThreadId
@@ -4478,7 +4545,84 @@ export class CodexChatRuntime {
     c.held.clear()
   }
 
+  startTopicAnswerGuard(run) {
+    const guard = { state: 'holding', items: new Map(), finalIds: new Set(), size: 0, until: this.now() + TOPIC_ANSWER_HOLD_MS }
+    this.topicAnswerGuards.set(run, guard)
+    const ref = new WeakRef(run)
+    guard.timer = setTimeout(() => {
+      const live = ref.deref()
+      if (!live || this.topicAnswerGuards.get(live) !== guard || guard.state !== 'holding') return
+      this.discardTopicAnswer(guard, 'expired')
+      if (TERMINAL.has(live.status) && this.runs.get(live.answerId) === live) this.rejectTopicAnswer(live)
+    }, TOPIC_ANSWER_HOLD_MS)
+    guard.timer.unref?.()
+  }
+
+  discardTopicAnswer(guard, state) {
+    clearTimeout(guard.timer)
+    guard.items?.clear()
+    guard.size = 0
+    guard.state = state
+  }
+
+  restoreTopicAnswerGuard(run, checkpoint) {
+    let guard = this.topicAnswerGuards.get(run)
+    if (!guard) this.topicAnswerGuards.set(run, guard = { state: 'restart' })
+    else if (guard.state !== 'released' && guard.state !== 'rejected') this.discardTopicAnswer(guard, 'restart')
+    // Native history is not a second answer channel. Restore only approved
+    // messages and the host notice from the already public SQLite checkpoint.
+    if (checkpoint) {
+      for (const activity of checkpoint.activities || []) if (activity.kind === 'workNote') this.put(run, 'activities', activity)
+      const notice = checkpoint.activities?.find(a => a.id === 'host:topic-answer-grounding' && a.kind === 'hostNotice')
+      const approved = checkpoint.messages?.filter(m => m.role === 'assistant' && m.phase === 'final_answer' && m.status === 'complete') || []
+      for (const message of approved) this.put(run, 'messages', message)
+      if (notice) this.put(run, 'activities', notice)
+      if (approved.length || notice) this.discardTopicAnswer(guard, approved.length ? 'released' : 'rejected')
+    }
+  }
+
+  rejectTopicAnswer(run) {
+    const guard = this.topicAnswerGuards.get(run)
+    if (!guard || guard.state === 'rejected' || guard.state === 'released') return
+    this.discardTopicAnswer(guard, 'rejected')
+    this.topicRuns.delete(run)
+    const activity = { id: 'host:topic-answer-grounding', kind: 'hostNotice', title: 'EG-Desk가 답변을 표시하지 않았습니다', status: 'completed',
+      detail: { text: '이 답변은 제한된 제품 안내 검사 또는 최종 답변 확인을 통과하지 못했습니다. 주제 기억의 상태는 이 DM에서 확인하세요.' } }
+    this.put(run, 'activities', activity)
+    this.emit(run, 'activity.completed', { activity }, activity.id)
+  }
+
+  holdTopicAnswer(run, item, authoritative, snapshot = false) {
+    const guard = this.topicAnswerGuards.get(run)
+    if (guard.state !== 'holding') return
+    if (this.now() >= guard.until) { this.discardTopicAnswer(guard, 'expired'); return }
+    if (item.phase !== 'final_answer' && !guard.finalIds.has(item.id)) return
+    if (guard.finalIds.size >= 8 && !guard.finalIds.has(item.id)) { this.discardTopicAnswer(guard, 'overflow'); return }
+    guard.finalIds.add(item.id)
+    if (!authoritative) return // no starts or deltas retained
+    const prior = guard.items.get(item.id)
+    if (snapshot && item.text === '' && !item.truncated) return // summary or omitted body
+    if (item.truncated || (prior && prior.text !== item.text) || guard.size + (prior ? 0 : item.text.length) > TOPIC_ANSWER_LIMIT) {
+      this.discardTopicAnswer(guard, 'overflow'); return
+    }
+    if (!prior) { guard.items.set(item.id, { ...item, phase: 'final_answer' }); guard.size += item.text.length }
+    else if (item.completionConfirmed === true) prior.completionConfirmed = true
+  }
+
+  async settleTopicAnswer(run, status) {
+    const guard = this.topicAnswerGuards.get(run)
+    if (!guard || guard.state === 'released' || guard.state === 'rejected') return
+    if (status !== 'completed' || guard.state !== 'holding' || this.now() >= guard.until) return this.rejectTopicAnswer(run)
+    const items = [...guard.items.values()]
+    if (!items.length || guard.finalIds.size !== items.length || items.some(item => !item.text.trim())) return // bounded late item/completed
+    const variants = items.length > 1 ? [items.map(item => item.text).join(''), items.map(item => item.text).join(' ')] : []
+    if ([...items.map(item => item.text), ...variants].some(topicAnswerContradiction)) return this.rejectTopicAnswer(run)
+    this.discardTopicAnswer(guard, 'released')
+    for (const item of items) await this.applyItem(run, item, true, true, true)
+  }
+
   messageDelta(run, itemId, delta) {
+    if (this.topicAnswerGuards.has(run) && !this.channelOutput.get(run).notes.has(itemId)) return
     const message = run.messages.find(m => m.id === itemId)
     const channel = this.channelOutput.get(run)
     if (message?.completionConfirmed) return
@@ -4507,7 +4651,7 @@ export class CodexChatRuntime {
     this.emitLegacy({ type: 'assistant-delta', conversationId: run.conversationId, messageId: run.answerId, delta: addition })
   }
 
-  async applyItem(run, item, completed, announce = true) {
+  async applyItem(run, item, completed, announce = true, approvedTopicAnswer = false) {
     const epoch = this.runEpoch(run)
     // The accepted request is the person's speech. Additional native inputs or
     // an adapter echo containing application context must not impersonate them.
@@ -4521,7 +4665,9 @@ export class CodexChatRuntime {
     let staged = ''
     if (item.type === 'agentMessage') {
       const channel = this.channelOutput.get(run)
-      if (item.phase === 'commentary' || channel.notes.has(item.id)) {
+      const guard = this.topicAnswerGuards.get(run)
+      const knownFinal = item.phase === 'final_answer' || guard?.finalIds?.has(item.id)
+      if ((!guard || !knownFinal) && (item.phase === 'commentary' || channel.notes.has(item.id))) {
         if (channel.notes.size < MAX_ITEMS) channel.notes.add(item.id)
         else channel.overflow = run.truncated = true
         if (completed) channel.held.delete(item.id)
@@ -4531,6 +4677,13 @@ export class CodexChatRuntime {
         if (prior?.status === 'completed' && (!completed || prior.detail?.text === a.detail.text)) return
         this.put(run, 'activities', a)
         if (announce) this.emit(run, completed ? 'activity.completed' : 'activity.started', { activity: a }, item.id)
+        return
+      }
+      if (this.topicAnswerGuards.has(run) && !approvedTopicAnswer) {
+        if (announce) {
+          this.holdTopicAnswer(run, item, item.completionConfirmed === true)
+          if (completed && TERMINAL.has(run.status)) await this.settleTopicAnswer(run, run.status)
+        }
         return
       }
       staged = channel.held.get(item.id) || ''
@@ -4691,9 +4844,17 @@ export class CodexChatRuntime {
   async finish(run, turn) {
     const epoch = this.runEpoch(run)
     if (TERMINAL.has(run.status) && run.error?.origin !== 'bridge') return
-    for (const item of turn.items) await this.applyItem(run, item, true)
+    const guard = this.topicAnswerGuards.get(run)
+    if (guard?.state === 'holding' && turn.truncated) this.discardTopicAnswer(guard, 'overflow')
+    for (const item of turn.items) {
+      if (guard && item.type === 'agentMessage' && (item.phase === 'final_answer' || guard.finalIds?.has(item.id) ||
+          item.phase !== 'commentary' && !this.channelOutput.get(run).notes.has(item.id))) {
+        this.holdTopicAnswer(run, item, TERMINAL.has(turn.status) && turn.itemsView === 'full', true)
+      } else await this.applyItem(run, item, true)
+    }
     if (epoch !== this.runEpoch(run)) return
     if (!TERMINAL.has(turn.status)) return
+    if (guard) await this.settleTopicAnswer(run, turn.status)
     this.closeHeldOutput(run, turn.status === 'completed' ? 'unknown' : turn.status)
     // A disconnect/interruption may omit item/completed. Retain received public
     // text, but never invent an answer or infer task success from that text.
