@@ -1512,6 +1512,8 @@ export class CodexChatRuntime {
       const toolCeiling = context?.profileRun ? context.profileRun.toolCeiling : recordedToolCeiling(context?.toolCeiling)
       if (toolCeiling) run.toolCeiling = { ...toolCeiling }
     }
+    // Keep the already-observed start policy in fresh /v1/state snapshots too.
+    if (context?.computerControl) run.computerControl = { policy: context.computerControl.policy };
     this.channelOutput.set(run, { notes: new Set(), held: new Map(), overflow: false, submittedText: context?.submittedText })
     this.runs.set(key, run)
     if (owned) this.ownedRuns.add(run)
@@ -1520,7 +1522,7 @@ export class CodexChatRuntime {
       // computerControl: the policy startTurn applied to this ordinary Codex
       // run (CU-01); absent for bounded, other-engine and history-only runs.
       // board: the Board member this answer belongs to (D-M2); absent otherwise.
-      this.emit(run, 'run.started', { status: 'inProgress', ...(run.profileBinding ? { profileBinding: run.profileBinding } : {}), ...(run.toolCeiling ? { toolCeiling: run.toolCeiling } : {}), ...(run.stateless ? { stateless: true } : {}), ...(context?.computerControl ? { computerControl: { policy: context.computerControl.policy } } : {}), ...(run.board ? { board: run.board } : {}) })
+      this.emit(run, 'run.started', { status: 'inProgress', ...(run.profileBinding ? { profileBinding: run.profileBinding } : {}), ...(run.toolCeiling ? { toolCeiling: run.toolCeiling } : {}), ...(run.stateless ? { stateless: true } : {}), ...(run.computerControl ? { computerControl: run.computerControl } : {}), ...(run.board ? { board: run.board } : {}) })
       this.emitLegacy({ type: 'assistant-start', conversationId: threadId, runId: turnId, message: { id: key, role: 'assistant', content: '', status: 'streaming', createdAt: run.createdAt } })
     }
     return run

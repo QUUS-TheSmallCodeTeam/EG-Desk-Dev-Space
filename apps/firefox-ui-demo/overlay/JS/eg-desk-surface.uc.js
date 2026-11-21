@@ -9724,10 +9724,7 @@
       }
     } else if (gadget) {
       const railRight = document.querySelector('#egd-desk-rail .egd-rail-right');
-      const avatar = railRight?.querySelector('.egd-rail-avatar');
-      if (avatar && (gadget.parentElement !== railRight || gadget.nextElementSibling !== avatar)) {
-        railRight.insertBefore(gadget, avatar);
-      }
+      if (railRight && gadget.parentElement !== railRight) railRight.appendChild(gadget);
     }
     syncViewportBoardName();
     syncAllBoardRegionMarks();
@@ -11432,7 +11429,6 @@
       // Notifications are not connected yet: the bell stays out of the bar until it has something to say.
       el('button', { class: 'egd-rail-icon egd-rail-notice-btn', title: '알림', 'aria-label': '알림', hidden: true, disabled: 'true' }, deskIcon('alert')),
       buildResourceGadget(),
-      el('div', { class: 'egd-rail-avatar', title: '로컬 Desk', 'aria-label': '로컬 Desk' }, deskIcon('account')),
     );
 
     rail.appendChild(left);
@@ -13089,6 +13085,7 @@
         const label = choice?.label || engineId;
         // The account's models when the bridge lists them; each model offers only its own efforts.
         const modelView = ChatState.chatModelView(thread, { ...engineContext, engineId });
+        const runningSettings = ChatState.nativeBindingHeld(thread) ? null : ChatState.chatRunningSettingsView(codexCurrentRun(thread));
         const effort = modelView.effort;
         const effortChoices = modelView.effortChoices;
         const modelSection = modelView.listed
@@ -13103,7 +13100,7 @@
             el('span', { class: 'egd-codex-engine-model-name' }, option.label),
             option.note ? el('span', { class: 'egd-codex-engine-model-note' }, option.note) : null,
             option.selected ? deskIcon('check', 'egd-codex-engine-model-check') : null)))
-          : el('div', { class: 'egd-codex-engine-model' }, ChatState.chatModelLabel(codex.engineConfiguration));
+          : el('div', { class: 'egd-codex-engine-model' }, ChatState.chatModelLabel(engineId === 'codex' ? codex.engineConfiguration : null));
         const effortColumns = effortChoices.length <= 4 ? effortChoices.length : effortChoices.length <= 6 ? 3 : 4;
         // D3: a room that has started keeps its engine; switching means a new room.
         const engineSection = ChatState.chatThreadEngineLocked(thread)
@@ -13112,11 +13109,11 @@
               deskIcon('lock', 'egd-codex-engine-locked-icon'),
               el('span', { class: 'egd-codex-engine-choice-name' }, label),
               choice?.account ? el('span', { class: 'egd-codex-engine-choice-note' }, choice.account) : null),
-            el('p', { class: 'egd-codex-engine-hint' }, `이 대화는 ${label}로 이어집니다. 다른 AI로 바꾸려면 새 대화로 이어가세요.`),
+            el('p', { class: 'egd-codex-engine-hint' }, ChatState.nativeBindingHoldText(thread) || `이 대화는 ${label}로 이어집니다. 다른 AI로 바꾸려면 새 대화로 이어가세요.`),
             el('button', {
               class: 'egd-codex-chip egd-codex-chip-subtle', data: { testid: 'chat-engine-continue' },
               onclick: () => codexBridge.continueInNewThread(thread.id),
-            }, '새 대화로 이어가기'))
+            }, ChatState.nativeBindingHeld(thread) ? '새 방' : '새 대화로 이어가기'))
           : renderEngineChoices(thread);
         return el('div', {
           class: 'egd-codex-engine-panel', role: 'dialog', 'aria-label': 'AI 엔진 설정',
@@ -13127,9 +13124,12 @@
           },
           onclick: (ev) => ev.stopPropagation(),
         },
+        runningSettings ? el('div', { data: { testid: 'chat-running-settings' } },
+          el('div', { class: 'egd-codex-engine-section-label' }, '진행 중인 실행 · 적용 기록'),
+          ...runningSettings.map(([name, value]) => el('p', { class: 'egd-codex-engine-hint' }, name + ': ' + value))) : null,
         el('div', { class: 'egd-codex-engine-section-label' }, 'AI 엔진'),
         engineSection,
-        el('div', { class: 'egd-codex-engine-section-label' }, '모델'),
+        el('div', { class: 'egd-codex-engine-section-label' }, '다음 실행 · 모델'),
         modelSection,
         effortChoices.length ? el('div', { class: 'egd-codex-engine-section-label' }, '추론 강도') : null,
         effortChoices.length ? el('div', { class: 'egd-codex-engine-efforts', role: 'radiogroup', 'aria-label': '추론 강도', data: { columns: String(effortColumns) } },
@@ -13140,7 +13140,7 @@
             data: { testid: 'chat-engine-effort', effort: option.value || 'default' },
             onclick: () => codexBridge.setThreadEffort(thread.id, option.value),
           }, option.label))) : null,
-        effortChoices.length || modelView.listed ? el('p', { class: 'egd-codex-engine-hint' }, '다음에 보내는 메시지부터 적용됩니다.') : null,
+        effortChoices.length || modelView.listed ? el('p', { class: 'egd-codex-engine-hint' }, '이 설정은 다음에 보낼 때 사용하며, 진행 중인 실행은 바꾸지 않습니다.') : null,
         thread.type === 'dm' && !ChatState.chatThreadEngineLocked(thread) ? renderStatelessStart(thread) : null);
       };
 
@@ -13184,8 +13184,8 @@
           }, runtime.agentProfile.label),
           el('span', {
             class: 'egd-codex-tool-mode-chip',
-            title: runtime.agentProfile.summary,
-          }, runtime.toolMode),
+            title: '다음 실행 도구 설정 · ' + runtime.agentProfile.summary,
+          }, '다음 실행 · ' + runtime.toolMode),
         );
       };
 
@@ -14067,8 +14067,13 @@
         const bindingHeld = ChatState.nativeBindingHeld(activeThread);
         if (bindingHeld) conversation.appendChild(el('div', {
           class: 'egd-codex-error', role: 'status', data: { testid: 'chat-binding-held', bindingState: activeThread.bindingState },
-        }, '이전 대화의 계정 소유가 확인되지 않아 연결을 보류했습니다. 로컬 기록은 유지됩니다.',
-        el('button', { class: 'egd-codex-chip', 'aria-label': '새 Agent DM 열기', data: { testid: 'chat-new-unbound-room' }, onclick: () => codexBridge.createThread('dm', { openConversation: true }) }, '새 Agent DM')));
+        }, el('p', {}, ChatState.nativeBindingHoldText(activeThread)),
+        el('button', { type: 'button', class: 'egd-codex-chip', 'aria-label': '이전 내용을 가져오지 않고 새 방 열기',
+          data: { testid: 'chat-new-unbound-room' }, onclick: () => {
+            if (codexBridge.openFreshRoomAfterAccountHold(activeThread.id)) {
+              body.querySelector('[data-testid="chat-composer"]')?.focus();
+            }
+          } }, '새 방')));
         // A stopped or missing Agent is named, not replaced; the room and draft stay.
         const roomAgent = activeThread.profileEnabled === true ? codexThreadAgentProfile(activeThread) : null;
         if (roomAgent && !roomAgent.server && roomAgent.lifecycle === 'unknown' && codexProfileCatalog.status === 'unavailable') {
@@ -17819,6 +17824,7 @@
       continueInNewThread(threadId) {
         const thread = getCodexThreadById(state.codex, threadId);
         if (!thread) return;
+        if (ChatState.nativeBindingHeld(thread)) return this.openFreshRoomAfterAccountHold(threadId);
         state.codex.engineMenu = null;
         this.createThread(thread.type, { agentProfileId: thread.agentProfileId, profileEnabled: thread.profileEnabled === true, openConversation: true });
         boardDoneNotice('새 대화를 열었습니다. 이전 대화 내용은 자동으로 옮겨지지 않습니다.');
@@ -18152,6 +18158,13 @@
         state.codex.draft = getCodexThreadDraft(state.codex, active?.id || null);
         emit();
       },
+      openFreshRoomAfterAccountHold(threadId) {
+        const thread = getCodexThreadById(state.codex, threadId);
+        if (!ChatState.nativeBindingHeld(thread)) return false;
+        state.codex.engineMenu = null;
+        this.createThread('dm', { engineId: 'codex', openConversation: true });
+        return true;
+      },
       createThread(type = 'dm', options = {}) {
         const normalizedType = type === 'group' ? 'group' : 'dm';
         const nextNonce = state.codex.threadNonce + 1;
@@ -18164,6 +18177,7 @@
           agentProfileId: options.agentProfileId,
           profileEnabled: options.profileEnabled === true,
         });
+        if (options.engineId === 'codex') thread.engineId = 'codex';
         state.codex.threadNonce = nextNonce;
         state.codex.threads = [thread, ...state.codex.threads];
         state.codex.activeThreadId = thread.id;
@@ -18292,7 +18306,7 @@
       },
       // SUB-11 Engine Profiles (Settings rows); the folder and login are the CLI's own.
       async addEngineProfile(engine, label) {
-        return fetchJson('/settings/engine-profiles', { method: 'POST', body: JSON.stringify({ engine, label }) });
+        return fetchJson('/settings/engine-profiles', { method: 'POST', body: JSON.stringify({ engine, label, intent: 'add-and-login' }) });
       },
       async removeEngineProfile(id) {
         return fetchJson(`/settings/engine-profiles?id=${encodeURIComponent(id)}`, { method: 'DELETE' });
@@ -21582,14 +21596,17 @@
     const runProfileAction = async (engineId, action, id, label) => {
       const api = bridge();
       if (!api || profileAction?.phase === 'running') return;
+      const canAdd = () => bridge() === api && AccountSettingsView.engineProfilesView(state.codex.engines, engineId, { connected: state.codex.connected }).canAdd;
+      if (action === 'add' && (!AccountSettingsView.engineProfileLabel(label) || !canAdd())) return;
       profileAction = { engineId, action, phase: 'running' };
       renderAccountTab();
       try {
         if (action === 'add') {
           const added = await api.addEngineProfile(engineId, label);
           const id = added.profile.id;
-          const outcome = added.profile.status === 'notYet' ? { phase: 'done', text: '계정을 추가했지만 이 계정의 실행은 아직 지원되지 않습니다.' }
-            : await AccountSettingsView.runEngineProfileLoginInTerminal({ engineId, profileId: id,
+          const canLogin = () => added.profile.engine === engineId && added.profile.runnable === true && added.profile.status === 'available' && canAdd();
+          const outcome = !canLogin() ? { phase: 'error', text: '계정 사용 가능 여부를 확인하지 못해 로그인을 시작하지 않았습니다.' }
+            : await AccountSettingsView.runEngineProfileLoginInTerminal({ engineId, profileId: id, isCurrent: canLogin,
               requestCommand: () => api.engineProfileLoginCommand(id), openTerminal: () => spawnTerminalCard() });
           profileAction = { engineId, action, ...outcome };
         } else if (action === 'login') {
@@ -21610,9 +21627,31 @@
     };
     const renderEngineProfiles = (engineId) => {
       const view = AccountSettingsView.engineProfilesView(state.codex.engines, engineId, { connected: state.codex.connected });
-      if (!view.rows.length && !view.canAdd) return null;
+      if (!view.rows.length && !view.canAdd && !view.addUnavailable) return null;
       const busy = profileAction?.phase === 'running';
-      const input = el('input', { class: 'egd-settings-input', type: 'text', maxlength: '60', placeholder: '새 계정 이름', data: { testid: `settings-profile-label-${engineId}` } });
+      const validationId = `${id}-profile-label-error-${engineId}`;
+      const name = engineId === 'codex' ? 'ChatGPT' : 'Claude';
+      const validation = el('div', { id: validationId, class: 'egd-settings-section-sub egd-settings-account-result-error', role: 'alert',
+        data: { testid: 'settings-profile-validation' } });
+      const input = el('input', { class: 'egd-settings-input', type: 'text', maxlength: '60', placeholder: '새 계정 이름',
+        'aria-label': `새 ${name} 계정 이름`, 'aria-required': 'true', 'aria-describedby': validationId,
+        disabled: busy ? 'true' : null, data: { testid: `settings-profile-label-${engineId}` },
+        oninput: () => {
+          if (!AccountSettingsView.engineProfileLabel(input.value)) return;
+          input.removeAttribute('aria-invalid');
+          validation.textContent = '';
+        } });
+      const submitAdd = (event) => {
+        event.preventDefault();
+        const label = AccountSettingsView.engineProfileLabel(input.value);
+        if (!label) {
+          input.setAttribute('aria-invalid', 'true');
+          validation.textContent = AccountSettingsView.ENGINE_PROFILE_LABEL_ERROR;
+          input.focus();
+          return;
+        }
+        void runProfileAction(engineId, 'add', null, label);
+      };
       const btn = (name, testid, onclick, primary) => el('button', { class: `egd-settings-btn${primary ? ' egd-settings-btn-primary' : ''}`, type: 'button', disabled: busy ? 'true' : null, data: { testid }, onclick }, name);
       return el('div', { class: 'egd-settings-profiles', data: { testid: `settings-profiles-${engineId}` } },
         ...view.rows.map((row) => el('div', { class: 'egd-settings-profile-row', data: { testid: 'settings-profile-row', profile: row.id, status: row.status } },
@@ -21624,8 +21663,11 @@
           engineId === 'codex' && row.owned && row.status !== 'notYet' && bridge()?.refreshEngineProfile
             ? btn('다시 확인', 'settings-profile-refresh', () => { void runProfileAction(engineId, 'refresh', row.id); }) : null,
           row.canRemove ? btn('삭제', 'settings-profile-remove', () => { void runProfileAction(engineId, 'remove', row.id); }) : null)),
-        view.canAdd ? el('div', { class: 'egd-settings-profile-add' }, input,
-          btn('계정 추가', 'settings-profile-add', () => { const label = input.value.trim(); if (label) void runProfileAction(engineId, 'add', null, label); }, true)) : null,
+        view.canAdd ? el('form', { 'aria-label': `${name} 계정 추가`, onsubmit: submitAdd },
+          el('div', { class: 'egd-settings-profile-add' }, input,
+            el('button', { class: 'egd-settings-btn egd-settings-btn-primary', type: 'submit', disabled: busy ? 'true' : null,
+              data: { testid: 'settings-profile-add' } }, '계정 추가 후 로그인')), validation)
+          : el('p', { class: 'egd-settings-section-sub' }, view.addUnavailable),
         el('p', { class: 'egd-settings-section-sub' }, view.note),
         profileAction && profileAction.engineId === engineId && profileAction.phase !== 'running' ? el('div', {
           class: `egd-settings-account-result egd-settings-account-result-${profileAction.phase}`, role: profileAction.phase === 'error' ? 'alert' : 'status',
@@ -21911,9 +21953,9 @@
         placeholder: 'sk-proj-…', 'aria-label': 'OpenAI API 키', disabled: !view.canSave || busy ? 'true' : null, data: { testid: 'settings-decision-key' },
         onkeydown: (event) => { if (event.key === 'Enter') { event.preventDefault(); void saveDecisionKey(input); } } });
       return el('section', { class: 'egd-settings-section egd-settings-decision', 'aria-label': AccountSettingsView.DECISION_SECTION_TITLE,
-        data: { testid: 'settings-decision', state: view.status, mode: view.mode } },
+        data: { testid: 'settings-decision', state: view.status, mode: view.mode || 'unknown' } },
         el('div', { class: 'egd-settings-section-title' }, AccountSettingsView.DECISION_SECTION_TITLE),
-        el('p', { class: 'egd-settings-section-sub' }, '자료 고르기 같은 객관식 판단을 맡는 별도 모델입니다. 답변은 지금처럼 Codex·Claude가 씁니다.'),
+        el('p', { class: 'egd-settings-section-sub' }, view.scopeNote),
         el('div', { class: 'egd-settings-decision-key-row' },
           el('span', { class: 'egd-settings-decision-hint', data: { testid: 'settings-decision-hint' } }, view.keyLine),
           view.canDelete ? el('button', { class: 'egd-settings-btn', type: 'button', disabled: busy ? 'true' : null, data: { testid: 'settings-decision-delete' },
@@ -21922,14 +21964,16 @@
         el('div', { class: 'egd-settings-decision-key-row' }, input,
           el('button', { class: 'egd-settings-btn egd-settings-btn-primary', type: 'button', disabled: !view.canSave || busy ? 'true' : null,
             data: { testid: 'settings-decision-save' }, onclick: () => { void saveDecisionKey(input); } }, busy ? '확인하는 중…' : '확인 후 저장')),
+        el('p', { class: 'egd-settings-section-sub' }, view.keyActionNote),
         decision.outcome ? el('div', { class: `egd-settings-decision-result egd-settings-decision-result-${decision.outcome.phase}`,
           role: decision.outcome.phase === 'error' ? 'alert' : 'status', data: { testid: 'settings-decision-result', phase: decision.outcome.phase } }, decision.outcome.text) : null,
-        el('div', { class: 'egd-settings-decision-modes', role: 'radiogroup', 'aria-label': '결정 모델 모드' },
+        el('div', { class: 'egd-settings-decision-modes', role: 'radiogroup', 'aria-label': '저장된 결정 모델 모드' },
           ...view.modes.map((choice) => el('button', { type: 'button', role: 'radio', 'aria-checked': String(choice.selected),
             class: `egd-settings-decision-mode${choice.selected ? ' egd-settings-decision-mode-on' : ''}`,
             disabled: !view.modeEnabled || busy ? 'true' : null, data: { testid: 'settings-decision-mode', mode: choice.value },
             onclick: () => { if (!choice.selected) void setDecisionMode(choice.value); } }, choice.label))),
         el('p', { class: 'egd-settings-section-sub', data: { testid: 'settings-decision-mode-note' } }, view.modeNote),
+        el('p', { class: 'egd-settings-section-sub', data: { testid: 'settings-decision-invocation-note' } }, view.invocationNote),
         view.budgetLine ? el('p', { class: 'egd-settings-section-sub', data: { testid: 'settings-decision-budget' } }, view.budgetLine) : null,
         el('p', { class: 'egd-settings-section-sub egd-settings-decision-note', data: { testid: 'settings-decision-credit-note' } }, view.creditNote));
     };

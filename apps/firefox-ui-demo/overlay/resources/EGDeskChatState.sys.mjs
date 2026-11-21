@@ -607,6 +607,13 @@ export function reconcileNativeThread(thread, authStatus) {
     reason: knownCodexAccountKey(retained.accountKey) && retained.accountKey !== key ? 'identity-mismatch' : 'ownership-unverified' } };
 }
 export const nativeBindingHeld = thread => !!thread?.retainedNativeBinding && !thread.conversationId;
+export function nativeBindingHoldText(thread) {
+  if (!nativeBindingHeld(thread)) return null;
+  const reason = thread.retainedNativeBinding.reason;
+  const why = reason === 'identity-mismatch' ? '이 방을 시작한 계정과 현재 계정이 달라 이어서 보낼 수 없습니다.'
+    : '이 방을 시작한 계정을 확인하지 못해 이어서 보낼 수 없습니다.';
+  return why + ' 기존 기록은 이 방에 남고, 새 방에는 대화나 초안을 가져가지 않습니다.';
+}
 export function canResumeNativeThread(thread, authStatus, context = {}) {
   // This permits the server check, never grants native ownership locally.
   if (thread?.engineId === 'claude') return !!thread.conversationId && chatThreadReadiness(thread, context).ready;
@@ -993,6 +1000,39 @@ function recordRunToolCeiling(run, value) {
 function recordRunComputerControl(run, value) {
   if (run && COMPUTER_CONTROL_POLICIES.includes(value?.policy)) run.computerControl = { policy: value.policy };
 }
+// Per-run evidence only: a request override is not a provider-observed value,
+// and the thread default does not prove which settings a specific turn used.
+function recordRunSettings(run, { configuration, profileBinding } = {}) {
+  if (!run) return;
+  const value = (field) => {
+    const text = configuration?.[field];
+    return configuration?.[field + 'Source'] === 'native-turn' && typeof text === 'string' && text.trim()
+      ? text.trim().slice(0, 120) : null;
+  };
+  for (const field of ['model', 'effort']) {
+    const observed = value(field);
+    if (observed) (run.observedTurnSettings ||= {})[field] ??= observed;
+  }
+  if (isProfileId(profileBinding?.profileId) && Number.isSafeInteger(profileBinding.revision) && profileBinding.revision > 0
+      && typeof profileBinding.hash === 'string' && profileBinding.hash) {
+    run.pinnedProfile ??= { id: profileBinding.profileId, revision: profileBinding.revision };
+  }
+}
+export function chatRunningSettingsView(run) {
+  if (!isRunBusy(run)) return null;
+  const unknown = '확인할 수 없음';
+  const profile = run.pinnedProfile;
+  const ceiling = run.toolCeiling ? toolCeilingSummary(run.toolCeiling) : null;
+  const policy = run.computerControl?.policy;
+  return [
+    ['엔진', run.engineId === 'codex' ? 'Codex' : run.engineId === 'claude' ? 'Claude' : unknown],
+    ['모델', run.observedTurnSettings?.model || unknown],
+    ['추론 강도', EFFORT_LABELS.find(([id]) => id === run.observedTurnSettings?.effort)?.[1] || run.observedTurnSettings?.effort || unknown],
+    ['Agent 버전', profile ? `${profile.id} · 버전 ${profile.revision}` : unknown],
+    ['도구 제한', ceiling || unknown],
+    ...(run.engineId === 'codex' ? [['컴퓨터 조작 정책', policy === 'off' ? '끔' : policy === 'inherit' ? 'Codex 설정 따름' : unknown]] : []),
+  ];
+}
 // SSE computer.used: the bridge's count and time; server names come from snapshots only.
 function computerUseWithEvent(current, details) {
   const before = publicComputerUse(current) || { calls: 0, lastAt: null, servers: [], active: false };
@@ -1020,6 +1060,7 @@ export function acceptChatRequest(state, response, requestId) {
   if (!response?.accepted) return null;
   const run = ensureRun(state, { ...response, requestId: response.requestId || requestId });
   recordRunToolCeiling(run, response.toolCeiling);
+  recordRunSettings(run, { profileBinding: response.profileBinding });
   return run;
 }
 function upsert(items, item, key = 'id') {
@@ -1055,7 +1096,9 @@ export function reduceChatEvent(state, event, engineIds = [DEFAULT_CHAT_ENGINE_I
   if (event.event === 'run.started') {
     recordRunToolCeiling(run, details.toolCeiling);
     recordRunComputerControl(run, details.computerControl);
+    recordRunSettings(run, { profileBinding: details.profileBinding });
   }
+  if (event.event === 'run.configuration') recordRunSettings(run, { configuration: details.configuration });
   if (event.event.startsWith('message.')) {
     const id = details.messageId || event.itemId;
     if (!id) return run;
@@ -1216,6 +1259,8 @@ export function mergeChatSnapshot(state, snapshot, clientThreadId) {
     }
     run.messages = run.messages.map(message => ({ ...message, content: message.content ?? message.text ?? '', status: message.status === 'completed' ? 'complete' : message.status, role: message.role || 'assistant', runId: run.runId, answerId: run.answerId }));
     recordRunToolCeiling(run, incoming.toolCeiling);
+    recordRunComputerControl(run, incoming.computerControl);
+    recordRunSettings(run, { configuration: incoming.parentTurnConfiguration, profileBinding: incoming.profileBinding });
     if (!preserve) {
       const localInputs = run.pendingUserInputs || [];
       for (const key of ['status', 'stopRequested', 'error', 'summary', 'plan', 'pendingApprovals', 'pendingUserInputs', 'subAgents', 'truncated', 'historyComplete', 'contextCaptures', 'contextEvents', 'briefing']) if (key in incoming) run[key] = copy(incoming[key]);

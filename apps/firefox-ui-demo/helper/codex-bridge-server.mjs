@@ -230,7 +230,7 @@ const recipientForDecisionKey = (key, endpoint, model) => decisionTopicRecipient
 const decisionClient = createDecisionClient({ getApiKey: () => decisionCredentials.getApiKey(), budget: decisionBudget, recipientForKey: recipientForDecisionKey })
 // SUB-11 Engine Profiles: the shared CLI logins plus EG-Desk-owned login
 // folders (<appData>/settings/engines/<id>, 0700). Claude runs the active
-// one (CLAUDE_CONFIG_DIR); Codex stays on its one shared app-server ('notYet').
+// one (CLAUDE_CONFIG_DIR); an owned Codex account uses its own app-server.
 const engineProfiles = openEngineProfiles({ dataDir: path.join(dataDir, 'settings'), isolatedCodex: true })
 const claudeProfileRows = () => engineProfiles.list('claude').map(row => ({ ...row, configDir: row.owned ? engineProfiles.configDir(row.id) : null }))
 const claudeProfileEnv = profileId => {
@@ -367,10 +367,13 @@ if (process.env.EGDESK_CLAUDE_READER === 'live') claudeReaderEvidence = createCl
 const engineRegistry = new EngineRegistry({ defaultEngineId: PROVIDER_ID })
 engineRegistry.register(codexEngine)
 engineRegistry.register(claudeEngine)
+const canAddEngineProfileAndLogin = (id, row = engineRegistry.publicEngines().find(engine => engine.id === id)) =>
+  engineProfiles.supportsAddAndLogin(id) && ['ready', 'loginRequired'].includes(row?.status) && row.versionStatus !== 'unsupported'
+const publicEngines = () => engineRegistry.publicEngines().map(row => ({ ...row, profileAddAndLogin: canAddEngineProfileAndLogin(row.id, row) }))
 // SSE engine.status (design §7): sent whenever a public engines[] row changes
 // (connection, sign-in or account change, model list), beside auth.status.
 const engineStatus = createEngineStatusEmitter({
-  engines: () => engineRegistry.publicEngines(),
+  engines: publicEngines,
   emit: event => broadcast(event),
   v: BRIDGE_PROTOCOL_VERSION,
 })
@@ -474,12 +477,12 @@ const handleComputerControlHttp = createComputerControlHttpHandler(chat, { port:
 // SUB-11: switching the Claude profile waits until no Claude turn runs (a
 // running Run never moves); a new static check then re-gates the adapter.
 const handleEngineProfilesHttp = createEngineProfilesHttpHandler({
-  profiles: engineProfiles, port: BRIDGE_PORT,
+  profiles: engineProfiles, port: BRIDGE_PORT, canAddAndLogin: canAddEngineProfileAndLogin,
   busy: engine => engine === 'claude' && claudeEngine.stats().activeTurns > 0,
   inUse: id => [...chat.threads].some(([cid, thread]) => thread.engineProfileId === id && chat.conversationBusy(cid)),
   refresh: async id => {
     await codexEngine.refresh(id)
-    return engineRegistry.publicEngines().find(row => row.id === 'codex') ?? null
+    return publicEngines().find(row => row.id === 'codex') ?? null
   },
   onChange: () => {
     codexProfileServers.reconcile()
@@ -1073,7 +1076,7 @@ const bridgeServer = createServer(async (req, res) => {
       bridge: bridgeBuildState(bridgeBuild, expectedOverlayBuild(req.headers, url.searchParams)),
       appServerReconnect: appServerBackoff.snapshot(),
       // Settings 'Accounts & AI engines' rows; the top-level Codex fields stay for older overlays.
-      engines: engineRegistry.publicEngines(),
+      engines: publicEngines(),
       // CU-07 rows { name, enabled, status, controlsExternal, kind }, or null when unknown.
       inheritedMcp: inheritedMcp.snapshot(),
       // RT-06/CHAT-06 { tasks, taskError, maxConcurrency, eventSeq, droppedEvents, watchedRoots, maxWatchedRoots, refusedRoots, droppedFileEvents }.
@@ -1149,7 +1152,7 @@ const bridgeServer = createServer(async (req, res) => {
   // terminal): one static check, coalesced, then the public row.
   if (req.method === 'POST' && route === '/engines/claude/refresh') {
     await claudeEngineStatus.refresh({ force: true })
-    sendJson(res, 200, { engine: engineRegistry.publicEngines().find(row => row.id === 'claude') ?? null })
+    sendJson(res, 200, { engine: publicEngines().find(row => row.id === 'claude') ?? null })
     return
   }
 
@@ -1174,7 +1177,7 @@ const bridgeServer = createServer(async (req, res) => {
         if (typeof body.confirm !== 'boolean') throw chatError('INVALID_CONFIRMATION', 'confirm must be true or false', 400)
         claudeEngine.confirmApiKeyEnv(body.confirm)
       }
-      sendJson(res, 200, { ...claudeEngine.apiKeyEnv(), engine: engineRegistry.publicEngines().find(row => row.id === 'claude') ?? null })
+      sendJson(res, 200, { ...claudeEngine.apiKeyEnv(), engine: publicEngines().find(row => row.id === 'claude') ?? null })
     } catch (error) {
       sendJson(res, error.httpStatus || 400, { code: error.code || 'INVALID_REQUEST', error: publicText(error.message, 300) })
     }

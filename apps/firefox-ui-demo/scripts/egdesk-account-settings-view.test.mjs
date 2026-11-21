@@ -320,23 +320,29 @@ test('decision model section: unknown offline, key hint only, Korean verificatio
   assert.equal(offline.status, 'unknown');
   assert.equal(offline.canSave, false);
   assert.equal(offline.modeEnabled, false);
-  assert.equal(offline.mode, 'off');
+  assert.equal(offline.mode, null);
+  assert.ok(offline.modes.every(choice => !choice.selected));
   const empty = View.decisionSettingsView({ configured: false, store: 'missing', keyHint: null, mode: 'off', budget: { month: '2026-11', inputTokens: 0, cap: null } }, { connected: true });
   assert.equal(empty.status, 'empty');
   assert.equal(empty.keyLine, '저장된 키 없음');
   assert.equal(empty.canSave, true);
   assert.equal(empty.canDelete, false);
+  assert.match(empty.scopeNote, /직접 고르거나 로컬 기록/);
+  assert.match(empty.invocationNote, /실행 기록이 아닙니다/);
+  assert.match(empty.keyActionNote, /키 확인을 위해 OpenAI에 요청/);
+  assert.match(empty.modeNote, /OpenAI Decisions를 사용하지 않습니다/);
+  assert.match(View.decisionSettingsView({ configured: true, mode: 'on', budget: { inputTokens: 10, cap: 10 } }, { connected: true }).modeNote, /한도에 도달/);
   assert.deepEqual(empty.modes.map(m => [m.label, m.selected]), [['끔', true], ['기록만', false], ['사용', false]]);
-  assert.equal(empty.budgetLine, '이번 달 입력 0 토큰');
+  assert.equal(empty.budgetLine, '이번 달 집계된 입력 0 토큰');
   assert.match(empty.creditNote, /Pro·Business.*API 조직의 project key/);
   const saved = View.decisionSettingsView({ configured: true, store: 'loaded', keyHint: '…WXYZ', mode: 'advisory' }, { connected: true });
   assert.equal(saved.keyLine, '저장된 키 …WXYZ');
   assert.equal(saved.canDelete, true);
   assert.equal(saved.mode, 'advisory');
   assert.equal(saved.modes.find(m => m.selected).label, '기록만');
-  assert.match(saved.modeNote, /OpenAI에 보내.*API 비용.*기록에만.*붙이지 않습니다/);
-  assert.match(View.decisionSettingsView({ configured: true, mode: 'on' }, { connected: true }).modeNote, /OpenAI에 보내.*API 비용.*허용된 선택 자료를 답변 입력에 붙입니다/);
-  assert.match(View.decisionSettingsView({ configured: false, mode: 'on' }, { connected: true }).modeNote, /키를 저장하면 적용됩니다/);
+  assert.match(saved.modeNote, /OpenAI에 보낼.*API 비용.*기록에만.*붙이지 않습니다/);
+  assert.match(View.decisionSettingsView({ configured: true, mode: 'on' }, { connected: true }).modeNote, /OpenAI에 보낼.*API 비용.*허용된 선택 자료를 답변 입력에 붙입니다/);
+  assert.match(View.decisionSettingsView({ configured: false, mode: 'on' }, { connected: true }).modeNote, /저장된 키가 없어 지금은 요청하지 않습니다/);
   assert.equal(View.decisionSettingsView({ configured: false, store: 'unavailable', mode: 'off' }, { connected: true }).canSave, false);
   assert.equal(View.decisionVerificationText('verified'), '확인됨');
   assert.match(View.decisionVerificationText('no_credit'), /^크레딧 없음/);
@@ -355,7 +361,7 @@ test('decision model section: unknown offline, key hint only, Korean verificatio
 
 test('SUB-11 profile list: label, shared/owned marker, remove only for owned inactive, Codex extras 준비 중', () => {
   const engines = [
-    { id: 'claude', profiles: [
+    { id: 'claude', profileAddAndLogin: true, profiles: [
       { id: 'claude-default', label: 'Claude', owned: false, active: true, auth: { status: 'signedIn' } },
       { id: 'claude-ab12', label: '회사', owned: true, active: false },
       { id: 'claude-ab12', label: '중복', owned: true },
@@ -372,6 +378,8 @@ test('SUB-11 profile list: label, shared/owned marker, remove only for owned ina
   const codex = View.engineProfilesView(engines, 'codex', { connected: true });
   assert.equal(codex.rows[1].authText, '준비 중');
   assert.equal(codex.rows[1].canActivate, false);
+  assert.equal(codex.canAdd, false);
+  assert.match(codex.addUnavailable, /추가해 로그인할 수 없습니다/);
   assert.equal(View.engineProfilesView(engines, 'claude', { connected: false }).rows.length, 0);
 });
 
@@ -420,4 +428,42 @@ test('isolated Codex terminal allowlist verifies slot metadata and the command h
     openTerminal: () => ({}), terminalApi: () => ({ isConnected: () => true, write: async value => { written.push(value); } }) });
   assert.equal(result.phase, 'started');
   assert.deepEqual(written, [`${line}\r`]);
+});
+
+test('account-add form localizes blank validation and focuses the named field before any API action', () => {
+  const source = readSurfaceSource();
+  const start = source.indexOf('    const renderEngineProfiles = (engineId) => {');
+  const fragment = source.slice(start, source.indexOf('    const renderAccountTab = () => {', start));
+  const el = (tag, props, ...children) => ({ tag, props, children, attrs: { ...props }, focused: false, textContent: '',
+    setAttribute(key, value) { this.attrs[key] = value; }, removeAttribute(key) { delete this.attrs[key]; }, focus() { this.focused = true; } });
+  const actions = [];
+  const state = { codex: { connected: true, engines: [{ id: 'codex', profileAddAndLogin: true }, { id: 'claude', profileAddAndLogin: false }] } };
+  const render = Function('AccountSettingsView', 'state', 'el', 'profileAction', 'runProfileAction', 'id', `${fragment}\nreturn renderEngineProfiles;`)(
+    View, state, el, null, (...args) => actions.push(args), 'settings');
+  const flatten = node => node?.tag ? [node, ...node.children.flatMap(flatten)] : [];
+  const all = flatten(render('codex'));
+  const form = all.find(node => node.tag === 'form');
+  const input = all.find(node => node.tag === 'input');
+  const alert = all.find(node => node.props.role === 'alert');
+  assert.equal(input.props['aria-label'], '새 ChatGPT 계정 이름');
+  assert.equal(input.props['aria-describedby'], alert.props.id);
+  assert.equal(input.props['aria-required'], 'true');
+  assert.equal(all.find(node => node.props.type === 'submit').children[0], '계정 추가 후 로그인');
+  input.value = '  ';
+  let prevented = false;
+  form.props.onsubmit({ preventDefault() { prevented = true; } });
+  assert.equal(prevented, true);
+  assert.equal(input.focused, true);
+  assert.equal(input.attrs['aria-invalid'], 'true');
+  assert.equal(alert.textContent, View.ENGINE_PROFILE_LABEL_ERROR);
+  assert.equal(actions.length, 0);
+  input.value = '  사내   계정  ';
+  input.props.oninput();
+  assert.equal(input.attrs['aria-invalid'], undefined);
+  assert.equal(alert.textContent, '');
+  form.props.onsubmit({ preventDefault() {} });
+  assert.deepEqual(actions, [['codex', 'add', null, '사내 계정']]);
+  const unsupported = flatten(render('claude'));
+  assert.ok(!unsupported.some(node => node.tag === 'form' || node.tag === 'input'));
+  assert.ok(unsupported.some(node => node.children.some(text => typeof text === 'string' && text.includes('추가해 로그인할 수 없습니다'))));
 });

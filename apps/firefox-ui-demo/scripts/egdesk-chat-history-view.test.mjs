@@ -206,7 +206,7 @@ test('both Chat heads and every room row carry the kind badge; DM words name the
   assert.equal(meta.group.longLabel, 'Board Thread');
   assert.doesNotMatch(source, /새 Codex 대화|'Codex 대화'/);
   assert.match(source, /class: 'egd-codex-thread-home-new',\n\s*title: '새 Agent DM',\n\s*'aria-label': '새 Agent DM',/, 'the list + button names what it opens');
-  assert.match(source, /'aria-label': '새 Agent DM 열기', data: \{ testid: 'chat-new-unbound-room' \}/);
+  assert.match(source, /'aria-label': '이전 내용을 가져오지 않고 새 방 열기',\s*data: \{ testid: 'chat-new-unbound-room' \}/);
   assert.match(source, /if \(role === 'system'\) return '시스템';/);
 });
 
@@ -292,4 +292,55 @@ test('day line and new-message button use tokens, show focus, and do not animate
   assert.doesNotMatch(button, /animation/, 'the log redraws on every streamed word, so the button never replays an entrance');
   assert.match(css, /@media \(prefers-reduced-motion: reduce\) \{\s*\.egd-codex-new-message \{ transition: none; \}/);
   for (const block of [day, dock, button]) assert.doesNotMatch(block, /#[0-9a-fA-F]{3,8}\b|rgba?\(/, 'no colors outside the tokens');
+});
+
+test('held room shows the specific account mismatch without naming identities, and fresh action copies no room context', async () => {
+  const Chat = await import('../overlay/resources/EGDeskChatState.sys.mjs');
+  const auth = (email) => ({ isLoggedIn: true, authMode: 'chatgpt', accountId: 'chatgpt', accountEmail: email });
+  const accountA = auth('a@egdesk.invalid');
+  const old = { id: 'old', type: 'dm', agentProfileId: 'a-private-agent', profileEnabled: true, model: 'original-model',
+    conversationId: 'old-native', messages: [{ content: 'private' }] };
+  const detached = Chat.detachNativeThread(old, Chat.codexAccountKey(accountA), 'new-binding');
+  assert.match(Chat.nativeBindingHoldText(detached), /시작한 계정을 확인하지 못해/);
+  const held = Chat.reconcileNativeThread(detached, auth('b@egdesk.invalid'));
+  assert.equal(held.conversationId, null);
+  assert.equal(Chat.canResumeNativeThread(held, auth('b@egdesk.invalid')), false);
+  assert.equal(held.retainedNativeBinding.conversationId, old.conversationId);
+  assert.deepEqual(held.messages, old.messages);
+  const label = Chat.nativeBindingHoldText(held);
+  assert.match(label, /현재 계정이 달라.*기존 기록은 이 방에 남고, 새 방에는 대화나 초안을 가져가지 않습니다/);
+  assert.doesNotMatch(label, /@/);
+  const method = between('      openFreshRoomAfterAccountHold(threadId) {', '      createThread(type =');
+  const state = { codex: { engineMenu: {}, threads: [held] } };
+  const created = [];
+  const api = Function('state', 'ChatState', 'getCodexThreadById', 'createThread', `return {${method} createThread}`)(
+    state, Chat, (codex, id) => codex.threads.find(thread => thread.id === id), (...args) => created.push(args));
+  assert.equal(api.openFreshRoomAfterAccountHold('other'), false);
+  assert.equal(api.openFreshRoomAfterAccountHold('old'), true);
+  assert.deepEqual(created, [['dm', { engineId: 'codex', openConversation: true }]]);
+  assert.deepEqual(held.messages, old.messages, 'the hold action does not mutate the old transcript');
+});
+
+test('running settings use only per-turn model/effort, pinned profile, and actual tool policy evidence', async () => {
+  const Chat = await import('../overlay/resources/EGDeskChatState.sys.mjs');
+  const proto = Chat.createChatProtocolState();
+  const event = (seq, name, details) => Chat.reduceChatEvent(proto, { type: 'chat.event', v: 2, engineId: 'codex', event: name,
+    streamId: 's1', conversationId: 'c1', runId: 'r1', seq, details });
+  const profileBinding = { profileId: 'pinned-agent', revision: 3, hash: 'fixture-hash' };
+  const run = event(1, 'run.started', { status: 'inProgress', profileBinding, computerControl: { policy: 'off' },
+    toolCeiling: { files: 'read', terminal: 'none' } });
+  event(2, 'run.configuration', { configuration: { model: 'requested-not-applied', modelSource: 'turn-request', effort: 'thread-default', effortSource: 'native-thread' } });
+  const settings = () => Object.fromEntries(Chat.chatRunningSettingsView(run));
+  assert.equal(settings()['Agent 버전'], 'pinned-agent · 버전 3');
+  assert.equal(settings()['컴퓨터 조작 정책'], '끔');
+  assert.match(settings()['도구 제한'], /파일 읽기만.*터미널 실행 안 함/);
+  assert.equal(settings()['모델'], '확인할 수 없음');
+  assert.equal(settings()['추론 강도'], '확인할 수 없음');
+  event(3, 'run.configuration', { configuration: { model: 'native-model', modelSource: 'native-turn', effort: 'low', effortSource: 'native-turn' } });
+  assert.equal(settings()['모델'], 'native-model');
+  assert.equal(settings()['추론 강도'], '낮음');
+  event(4, 'run.configuration', { configuration: { model: 'next-model', modelSource: 'turn-request' } });
+  assert.equal(settings()['모델'], 'native-model');
+  assert.equal(Chat.chatRunningSettingsView({ ...run, status: 'completed' }), null);
+  assert.equal(Chat.chatRunningSettingsView({ ...run, localHistory: true }), null);
 });

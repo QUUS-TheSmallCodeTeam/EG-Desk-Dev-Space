@@ -198,3 +198,27 @@ test('owned Codex slots remain Agent-only and produce separate checked login hom
   assert.equal(store.get(a).runnable, false)
   assert.equal(store.get(b).runnable, true)
 })
+
+test('production add-and-login rejects missing intent and unsupported engines before provisioning', async t => {
+  const { dataDir, open } = fixture(t)
+  const store = open()
+  let allowed = false, changes = 0
+  const handle = createEngineProfilesHttpHandler({ profiles: store, canAddAndLogin: () => allowed, onChange: () => { changes++ } })
+  const route = '/settings/engine-profiles'
+  const claude = { engine: 'claude', label: '테스트' }
+  assert.equal((await call(handle, 'POST', route, claude)).status, 409)
+  assert.equal((await call(handle, 'POST', route, { ...claude, intent: 'add-and-login' })).status, 409)
+  assert.equal(store.supportsAddAndLogin('codex'), false)
+  allowed = true
+  assert.equal((await call(handle, 'POST', route, { ...claude, intent: 'record-only' })).status, 409)
+  assert.equal((await call(handle, 'POST', route, { ...claude, engine: 'codex', intent: 'add-and-login' })).status, 409)
+  assert.equal((await call(handle, 'POST', route, { ...claude, label: ' ', intent: 'add-and-login' })).body.code, 'INVALID_PROFILE_LABEL')
+  assert.equal(changes, 0)
+  assert.equal(store.list().length, 2)
+  assert.equal(existsSync(path.join(dataDir, 'engines')), false)
+  const admitted = await call(handle, 'POST', route, { ...claude, intent: 'add-and-login' })
+  assert.equal(admitted.status, 200)
+  assert.equal(admitted.body.profile.runnable, true)
+  assert.equal(admitted.body.login.profileId, admitted.body.profile.id)
+  assert.equal(changes, 1)
+})

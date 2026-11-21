@@ -344,6 +344,12 @@ const PROFILE_ID = /^(codex|claude)-[a-z0-9]{1,40}$/;
  * engineProfilesView(engines, engineId, { connected }) → { engineId, rows, canAdd, note }
  * rows: [{ id, label, marker, owned, active, status, authText, canActivate, canRemove, canLogin }]
  */
+export const ENGINE_PROFILE_LABEL_ERROR = '계정 이름을 1~60자로 입력해 주세요.';
+export function engineProfileLabel(value) {
+  const label = typeof value === 'string' ? value.replace(/\s+/g, ' ').trim() : '';
+  return label && label.length <= 60 && !/[\u0000-\u001f\u007f]/.test(label) ? label : null;
+}
+
 export function engineProfilesView(engines, engineId, { connected = false } = {}) {
   const name = ENGINE_NAMES[engineId] || engineId;
   const row = connected === true ? (Array.isArray(engines) ? engines : []).find(candidate => object(candidate) && candidate.id === engineId) : null;
@@ -368,7 +374,8 @@ export function engineProfilesView(engines, engineId, { connected = false } = {}
       };
     });
   return {
-    engineId, rows, canAdd: connected === true && Boolean(row),
+    engineId, rows, canAdd: row?.profileAddAndLogin === true,
+    addUnavailable: row && row.profileAddAndLogin !== true ? '지금은 이 엔진에 새 계정을 추가해 로그인할 수 없습니다.' : null,
     note: engineId === 'codex'
       ? '추가한 ChatGPT 계정은 Agent별로 선택할 수 있습니다. 이 컴퓨터의 기본 로그인은 바뀌지 않습니다.'
       : '계정을 바꾸면 새 대화부터 적용됩니다. 진행 중인 대화는 시작한 계정에서 끝나고, 다른 계정으로 옮겨지지 않습니다.',
@@ -407,12 +414,12 @@ export function engineProfileErrorText(error) {
   const code = text(error?.code);
   return {
     ENGINE_PROFILE_BUSY: '진행 중인 대화가 있어 계정을 바꾸지 않았습니다. 끝난 뒤 다시 선택해 주세요.',
-    ENGINE_PROFILE_NOT_YET: 'Codex는 아직 계정을 하나만 쓸 수 있습니다.',
+    ENGINE_PROFILE_NOT_YET: '지금은 이 엔진에 새 계정을 추가해 로그인할 수 없습니다.',
     ENGINE_PROFILE_ACTIVE: '사용 중인 계정은 지울 수 없습니다. 다른 계정을 먼저 선택해 주세요.',
     ENGINE_PROFILE_DEFAULT: '이 컴퓨터 로그인은 지울 수 없습니다.',
     ENGINE_PROFILE_IN_USE: '이 계정으로 진행 중인 대화가 있어 지우지 않았습니다.',
     ENGINE_PROFILE_LIMIT: '이 엔진에는 계정을 더 추가할 수 없습니다.',
-    INVALID_PROFILE_LABEL: '이름은 1~60자로 적어 주세요.',
+    INVALID_PROFILE_LABEL: ENGINE_PROFILE_LABEL_ERROR,
     ENGINE_PROFILES_UNAVAILABLE: '이 컴퓨터에 계정 설정을 저장할 수 없습니다.',
   }[code] || `계정 설정을 바꾸지 못했습니다: ${text(error?.message) || '연결 프로그램 오류'}`;
 }
@@ -425,9 +432,9 @@ export function engineProfileErrorText(error) {
 // only the bridge's hint (…끝 4자) is ever shown.
 export const DECISION_SECTION_TITLE = '결정 모델 · OpenAI Decisions';
 export const DECISION_MODES = Object.freeze([
-  Object.freeze({ value: 'off', label: '끔', note: '지금처럼 추론 모델만 씁니다.' }),
-  Object.freeze({ value: 'advisory', label: '기록만', note: '메시지와 후보 설명을 OpenAI에 보내 선별합니다. API 비용이 들 수 있으며, 결과는 활동 기록에만 남기고 답변에 붙이지 않습니다.' }),
-  Object.freeze({ value: 'on', label: '사용', note: '메시지와 후보 설명을 OpenAI에 보내 선별합니다. API 비용이 들 수 있으며, 허용된 선택 자료를 답변 입력에 붙입니다. Codex DM의 이전 대화 원문을 주제 선별에 보내려면 그 DM의 기억 근거에서 별도로 허용해야 합니다.' }),
+  Object.freeze({ value: 'off', label: '끔', note: '자동 선별에 OpenAI Decisions를 사용하지 않습니다.' }),
+  Object.freeze({ value: 'advisory', label: '기록만', note: '지원되는 요청에서 메시지와 후보 설명을 OpenAI에 보낼 수 있습니다. API 비용이 들 수 있으며, 결과는 해당 실행의 활동 기록에만 남기고 답변 입력에는 붙이지 않습니다.' }),
+  Object.freeze({ value: 'on', label: '사용', note: '지원되는 요청에서 메시지와 후보 설명을 OpenAI에 보낼 수 있습니다. API 비용이 들 수 있으며, 선별에 성공하면 허용된 선택 자료를 답변 입력에 붙입니다. Codex DM의 이전 대화 원문을 주제 선별에 보내려면 그 DM의 기억 근거에서 별도로 허용해야 합니다.' }),
 ]);
 export const DECISION_CREDIT_NOTE = 'ChatGPT Pro·Business 요금제의 API 크레딧은 연결한 API 조직의 project key에만 적용됩니다. Plus는 대상이 아닙니다.';
 const DECISION_VERIFICATION_TEXT = Object.freeze({
@@ -452,11 +459,14 @@ export function decisionVerificationText(status) {
 export function decisionSettingsView(status, { connected = false } = {}) {
   const known = connected && object(status);
   const configured = known && status.configured === true;
-  const mode = known && DECISION_MODES.some(choice => choice.value === status.mode) ? status.mode : 'off';
+  const mode = known && DECISION_MODES.some(choice => choice.value === status.mode) ? status.mode : null;
   const storeBroken = known && ['unreadable', 'unsupported', 'unavailable'].includes(status.store);
   const hint = configured && typeof status.keyHint === 'string' ? status.keyHint : null;
   const budget = known && object(status.budget) && Number.isSafeInteger(status.budget.inputTokens) ? status.budget : null;
   return {
+    scopeNote: '일반 대화나 Board에서 일부 자동 선별에 쓰는 별도 API입니다. 이 설정과 관계없이 자료를 직접 고르거나 로컬 기록을 볼 수 있습니다.',
+    invocationNote: '저장된 모드와 키는 실행 기록이 아닙니다. 실제 선별 기록이 있으면 해당 실행의 활동 기록에서 볼 수 있습니다.',
+    keyActionNote: '확인 후 저장을 누르면 키 확인을 위해 OpenAI에 요청을 보냅니다.',
     status: !known ? 'unknown' : configured ? 'configured' : 'empty',
     keyLine: !known ? '확인할 수 없음 · 브리지 연결이 준비되면 다시 확인합니다.'
       : configured ? `저장된 키 ${hint || ''}`.trim() : '저장된 키 없음',
@@ -467,9 +477,10 @@ export function decisionSettingsView(status, { connected = false } = {}) {
     // Without a key only '끔' applies; the choice is kept for when one is saved.
     modeEnabled: known && status.mode !== null && status.mode !== undefined,
     modes: DECISION_MODES.map(choice => ({ ...choice, selected: choice.value === mode })),
-    modeNote: (DECISION_MODES.find(choice => choice.value === mode) || DECISION_MODES[0]).note
-      + (mode !== 'off' && known && !configured ? ' 키를 저장하면 적용됩니다.' : ''),
-    budgetLine: budget ? `이번 달 입력 ${budget.inputTokens.toLocaleString('en-US')} 토큰${Number.isSafeInteger(budget.cap) ? ` / 상한 ${budget.cap.toLocaleString('en-US')}` : ''}` : null,
+    modeNote: !mode ? '저장된 모드를 확인할 수 없습니다.' : DECISION_MODES.find(choice => choice.value === mode).note
+      + (mode !== 'off' && !configured ? ' 저장된 키가 없어 지금은 요청하지 않습니다.'
+        : mode !== 'off' && budget?.cap != null && budget.inputTokens >= budget.cap ? ' 이번 달 설정한 한도에 도달해 새 선별 요청을 보내지 않습니다.' : ''),
+    budgetLine: budget ? `이번 달 집계된 입력 ${budget.inputTokens.toLocaleString('en-US')} 토큰${Number.isSafeInteger(budget.cap) ? ` / 상한 ${budget.cap.toLocaleString('en-US')}` : ''}` : null,
     creditNote: DECISION_CREDIT_NOTE,
   };
 }

@@ -1205,20 +1205,14 @@ test('resource strip shows approved 22px rings only, with a neutral disk glyph',
   assert.match(surfaceCss, /\.egd-rail-right \{ flex: 0 1 auto; min-width: 0; overflow-x: auto;/);
 });
 
-test('top bar centres search on the window and paints the approved account circle', () => {
+test('top bar centres search on the window without a decorative account circle', () => {
   const wide = rule => rule.media.includes('(min-width: 1200px)');
   const center = new Map(rulesFor('.egd-rail-center').find(wide).declarations);
   assert.deepEqual([center.get('position'), center.get('left'), center.get('width'), center.get('transform')],
     ['absolute', '50%', 'min(420px, 42%)', 'translateX(-50%)']);
   assert.equal(new Map(rulesFor('.egd-rail-left').find(wide).declarations).get('max-width'), 'calc(50% - 224px)');
   assert.equal(new Map(rulesFor('.egd-rail-right').find(wide).declarations).get('margin-left'), 'auto');
-  const avatar = declarationsFor('.egd-rail-avatar', { scheme: 'light' });
-  assert.deepEqual([avatar.width, avatar.height, avatar.background, avatar.color],
-    ['28px', '28px', 'var(--egd-account)', 'var(--egd-surface-elevated)']);
-  assert.equal(readRootProperties(surfaceCss, { scheme: 'light' })['--egd-account'].toLowerCase(), '#496780');
-  assert.equal(readRootProperties(surfaceCss, { scheme: 'dark' })['--egd-account'].toLowerCase(), '#6c879b');
-  assert.equal(readRootProperties(surfaceCss, { forcedColors: true })['--egd-account'], 'CanvasText');
-  assert.ok(CONTRAST_REQUIREMENTS.some(([kind, fg, bg]) => kind === 'border' && fg === '--egd-surface-elevated' && bg === '--egd-account'));
+  assert.equal(rulesFor('.egd-rail-avatar').length, 0);
 });
 
 test('Focus resource layout reserves unscaled space and keeps its details inside the viewport', () => {

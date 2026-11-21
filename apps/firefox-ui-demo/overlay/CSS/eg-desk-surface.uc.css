@@ -4232,22 +4232,6 @@ button.egd-rail-focus-view {
   color: var(--egd-on-surface-variant);
 }
 
-.egd-rail-avatar {
-  flex: none;
-  width: 28px;
-  height: 28px;
-  border-radius: 50%;
-  background: var(--egd-account);
-  color: var(--egd-surface-elevated);
-  font-size: 12px;
-  font-weight: 600;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  -moz-window-dragging: no-drag;
-}
-.egd-rail-avatar .egd-ui-icon { width: 18px; height: 18px; }
-
 #egd-desk-minimap {
   position: fixed;
   top: 70px;

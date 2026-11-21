@@ -93,7 +93,8 @@ test('decision mode: read, saved through the settings adapter, bad values refuse
   let value = null, fail = false
   const mode = { get mode() { return value ?? 'off' }, get saved() { return value !== null }, persisted: true,
     save: next => { if (fail) return false; value = next; return true } }
-  const handler = createDecisionHttpHandler({ store, verifyKey: async () => ({ status: 'verified' }), mode })
+  let verificationCalls = 0
+  const handler = createDecisionHttpHandler({ store, verifyKey: async () => { verificationCalls++; return { status: 'verified' } }, mode })
   const call = async (method, url, body, h = handler) => {
     const res = fakeResponse()
     const handled = await h(fakeRequest(method, url, body), res, new URL(url, 'http://127.0.0.1:39218'))
@@ -109,6 +110,10 @@ test('decision mode: read, saved through the settings adapter, bad values refuse
   assert.equal((await call('GET', '/decision/status')).data.mode, 'advisory')
   assert.equal((await call('POST', '/decision/mode', { mode: 'always' })).status, 400)
   assert.equal((await call('DELETE', '/decision/mode')).status, 405)
+  assert.equal((await call('POST', '/decision/mode', { mode: 'on' })).data.mode, 'on')
+  assert.equal((await call('POST', '/decision/mode', { mode: 'off' })).data.mode, 'off')
+  assert.equal((await call('POST', '/decision/mode', { mode: 'advisory' })).data.mode, 'advisory')
+  assert.equal(verificationCalls, 0, 'status and all mode changes must not verify a key or contact a provider')
   fail = true
   const failed = await call('POST', '/decision/mode', { mode: 'on' })
   assert.equal(failed.status, 500)
