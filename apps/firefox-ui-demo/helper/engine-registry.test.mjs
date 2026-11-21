@@ -1,6 +1,7 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { readFile } from 'node:fs/promises'
+import vm from 'node:vm'
 import { CLAUDE_ENGINE_PROFILE_ID, EngineRegistry, createEngineStatusEmitter, describeClaudeEngine, publicEngineRow } from './engine-registry.mjs'
 import { CODEX_CAPABILITIES, createCodexEngineAdapter, describeCodexEngine } from './codex-engine-adapter.mjs'
 import { CLAUDE_CAPABILITIES, createClaudeEngineAdapter } from './claude-engine-adapter.mjs'
@@ -126,10 +127,10 @@ test('bridge registers Codex and Claude, authenticates the stored engine before 
   assert.match(resolve, /const pinned = binding \? binding\.recordedProfile :/)
   assert.match(resolve, /const engineId = this\.engines\.resolve\(\{ requested: requested \?\? agentEngine, bound \}\)/)
   assert.match(resolve, /if \(binding && verifyAccount\) this\.assertNativeAccount\(thread\.clientThreadId, boundCid, engineId, binding\)/)
-  assert.ok(at("route === '/v1/state'") < at('engines: engineRegistry.publicEngines(),'))
+  assert.ok(at("route === '/v1/state'") < at('engines: publicEngines(),'))
   at("engines: ['registry', 'thread-lock'],")
   // The top-level Codex fields remain for overlays that predate engines[].
-  assert.ok(at('provider: PROVIDER_ID,\n      appServerReady,') < at('engines: engineRegistry.publicEngines(),'))
+  assert.ok(at('provider: PROVIDER_ID,\n      appServerReady,') < at('engines: publicEngines(),'))
 })
 
 test('static bridge wiring: project lookup stays in the local file mount and context services attach after workflow construction', async () => {
@@ -224,6 +225,40 @@ test('engine.status is sent once per change of the public engines[] rows, in the
   assert.deepEqual(bridgeSent[0].engines, registry.publicEngines())
 })
 
+test('bridge publishes add-and-login capability over SSE using the same gate as profile provisioning', async () => {
+  const source = await readFile(new URL('./codex-bridge-server.mjs', import.meta.url), 'utf8')
+  const start = source.indexOf('const canAddEngineProfileAndLogin =')
+  const end = source.indexOf('const claudeEngineStatus =', start)
+  assert.ok(start >= 0 && end > start)
+  assert.match(source, /createEngineProfilesHttpHandler\(\{\s*profiles: engineProfiles, port: BRIDGE_PORT, canAddAndLogin: canAddEngineProfileAndLogin,/)
+  const { registry } = bridgeLikeRegistry()
+  let available = new Set(['codex', 'claude'])
+  const sent = []
+  const { publicEngines, canAddEngineProfileAndLogin, engineStatus } = vm.runInNewContext(
+    source.slice(start, end) + '\n;({ publicEngines, canAddEngineProfileAndLogin, engineStatus })', {
+      engineRegistry: registry, engineProfiles: { supportsAddAndLogin: id => available.has(id) },
+      createEngineStatusEmitter, broadcast: event => sent.push(event), BRIDGE_PROTOCOL_VERSION: 1,
+    })
+  const observe = expected => {
+    engineStatus.check()
+    const published = structuredClone(publicEngines())
+    assert.deepEqual(structuredClone(sent.at(-1).engines), published)
+    assert.deepEqual(published, registry.publicEngines().map((row, index) => ({ ...row, profileAddAndLogin: expected[index] })))
+    for (const row of published) assert.equal(row.profileAddAndLogin, canAddEngineProfileAndLogin(row.id))
+  }
+  observe([true, false]) // ready Codex; Claude is not connected yet
+  for (const [status, versionStatus, expected] of [
+    ['loginRequired', 'supported', true], ['ready', 'unsupported', false],
+    ['ready', 'supported', true], ['offline', 'supported', false], ['ready', 'supported', true],
+  ]) {
+    registry.updateListed({ ...describeClaudeEngine(), status, versionStatus })
+    observe([true, expected])
+  }
+  available = new Set()
+  observe([false, false]) // read-only or unavailable provisioning (even if ready)
+  assert.equal(canAddEngineProfileAndLogin('unknown'), false)
+})
+
 test('bridge reads the model list after each ready connection and account change, forgets it offline, and announces engine changes', async () => {
   const source = await readFile(new URL('./codex-bridge-server.mjs', import.meta.url), 'utf8')
   const at = text => { const index = source.indexOf(text); assert.notEqual(index, -1, `missing server marker: ${text}`); return index }
@@ -236,7 +271,7 @@ test('bridge reads the model list after each ready connection and account change
   at('    models: modelCatalog.snapshot(),')
   // engine.status rides the same SSE broadcast as auth.status and mcp.inherited.
   assert.ok(at('const engineStatus = createEngineStatusEmitter({') > at('engineRegistry.register(claudeEngine)'))
-  at('  engines: () => engineRegistry.publicEngines(),')
+  at('  engines: publicEngines,')
   at('  emit: event => broadcast(event),')
   at('  v: BRIDGE_PROTOCOL_VERSION,')
   const update = source.slice(at('function updateAuthState(patch, { broadcastStatus = true } = {}) {'), at('function authStatusTextFor(snapshot) {'))
@@ -324,7 +359,7 @@ test('bridge checks Claude statically at start, on /v1/state and on demand, and 
   assert.equal(state.includes('await claudeEngineStatus'), false)
   const route = source.slice(at("if (req.method === 'POST' && route === '/engines/claude/refresh') {"), at('if (await handleComputerControlHttp(req, res, url)) return'))
   assert.match(route, /await claudeEngineStatus\.refresh\(\{ force: true \}\)/)
-  assert.match(route, /engineRegistry\.publicEngines\(\)\.find\(row => row\.id === 'claude'\)/)
+  assert.match(route, /publicEngines\(\)\.find\(row => row\.id === 'claude'\)/)
   const listen = source.slice(at('bridgeServer.listen(BRIDGE_PORT'), at('let shuttingDown = false'))
   assert.ok(listen.indexOf('void connectToAppServer()') < listen.indexOf('void claudeEngineStatus.refresh()'))
   // Codex publishes its Chat version range beside the exact schema contract.

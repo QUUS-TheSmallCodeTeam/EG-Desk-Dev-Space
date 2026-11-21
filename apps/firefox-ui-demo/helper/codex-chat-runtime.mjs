@@ -1516,8 +1516,9 @@ export class CodexChatRuntime {
       const toolCeiling = context?.profileRun ? context.profileRun.toolCeiling : recordedToolCeiling(context?.toolCeiling)
       if (toolCeiling) run.toolCeiling = { ...toolCeiling }
     }
-    // Keep the already-observed start policy in fresh /v1/state snapshots too.
-    if (context?.computerControl) run.computerControl = { policy: context.computerControl.policy };
+    // Only a start bound to this native turn has evidence of an applied policy.
+    // The current setting and a history checkpoint do not establish that evidence.
+    if (announce && owned && context?.computerControl) run.computerControl = { policy: context.computerControl.policy }
     if (context?.topicAnswerGuard === true) this.startTopicAnswerGuard(run)
     this.channelOutput.set(run, { notes: new Set(), held: new Map(), overflow: false, submittedText: context?.submittedText })
     this.runs.set(key, run)
