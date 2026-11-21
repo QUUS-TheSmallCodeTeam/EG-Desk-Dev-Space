@@ -1,0 +1,16 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import {readFileSync} from 'node:fs';
+import vm from 'node:vm';
+const html=readFileSync(new URL('./index.html',import.meta.url),'utf8');
+const source=html.match(/<script id="desk-space">([\s\S]*?)<\/script>/)[1];
+const f=vm.runInNewContext(source+';({createDeskSpace,liftItem,placeItem,moveSet,trackStart,trackEnd,undoPlace,unfoldReply,noSharedGeometry,screenToWorldDelta,revealItem})',Object.create(null));
+const json=v=>JSON.parse(JSON.stringify(v));const rect=(d,k)=>{const {x,y,w}=d.objects[k];return {x,y,w};};
+const camera={x:-256,y:-91,z:.8},safe={left:60,right:710,top:18,bottom:500};
+test('working objects get independent world rectangles; a click only changes their stack',()=>{const d=f.createDeskSpace();const all=Object.keys(d.objects).map(k=>rect(d,k));f.liftItem(d,'note');assert.deepEqual(Object.keys(d.objects).map(k=>rect(d,k)),all);assert.ok(d.objects.note.z>d.objects.packet.z);});
+test('move one slip a non-grid distance, leave its Board tag, notebook and memo where placed; undo only that movement',()=>{const d=f.createDeskSpace(),before=json(d.objects),mark=f.trackStart(d,'packet');f.moveSet(d,'packet',-79.25,37.75);f.trackEnd(d,mark);for(const k of ['note','log','board'])assert.deepEqual(json(d.objects[k]),before[k]);assert.equal(d.objects.packet.x,before.packet.x-79.25);assert.equal(f.undoPlace(d,()=>true),'packet');assert.deepEqual(json(d.objects),before);});
+test('private draft unfolds where work is; a previously moved note is not stapled to the shipment',()=>{const d=f.createDeskSpace();f.moveSet(d,'packet',13,40);f.unfoldReply(d);assert.equal(d.objects.reply.x,d.objects.packet.x+181);f.moveSet(d,'reply',-45,19);const r=rect(d,'reply');f.moveSet(d,'packet',98,-20);f.unfoldReply(d);assert.deepEqual(rect(d,'reply'),r);});
+test('pan/viewport aperture are not world geometry; clicking visible work preserves zoom and camera',()=>{const d=f.createDeskSpace(),old=json(d.objects);const cam=f.revealItem(camera,d.objects.packet,{w:350,h:273},safe);assert.deepEqual(json(cam),camera);assert.deepEqual(json(d.objects),old);});
+test('offscreen item moves the viewport the minimum distance, never changes zoom',()=>{const p={x:910,y:160};const t=f.revealItem(camera,p,{w:350,h:273},safe);assert.equal(t.z,camera.z);assert.equal(t.y,camera.y);assert.equal(t.x+p.x*t.z+350*t.z,safe.right);assert.ok(t.x<camera.x);});
+test('screen drag is converted once at non-unity zoom',()=>{assert.deepEqual(json(f.screenToWorldDelta(40,-17.5,.5)),{x:80,y:-35});});
+test('no positioning side effect grants or carries private geometry between participants',()=>{const j=f.createDeskSpace(),m=f.createDeskSpace();f.moveSet(j,'note',103,88);assert.notEqual(j.objects.note.x,m.objects.note.x);const saved=rect(j,'note');for(const k of ['note','packet','reply']){const b=f.trackStart(j,k);f.moveSet(j,k,5,8);f.trackEnd(j,b);}j.lastBoard={...camera};f.noSharedGeometry(j);assert.equal(j.lastBoard,null);assert.equal(j.openedReply,false);assert.deepEqual(json(j.history.map(a=>a.k)),['note']);assert.equal(f.undoPlace(j,()=>true),'note');assert.deepEqual(rect(j,'note'),saved);});
