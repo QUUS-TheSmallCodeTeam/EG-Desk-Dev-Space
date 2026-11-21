@@ -34,6 +34,9 @@
   const MemoState = ChromeUtils.importESModule('chrome://userchrome/content/EGDeskMemoState.sys.mjs');
   // DSN-04 · UX-05 · UX-06 keyboard rules and CNV-06 memo link rules (pure modules). Plain .mjs
   // loads into this window like the surface zones (SURFACE_MODULE_BASE); only .sys.mjs is shared.
+  const JointUI = ChromeUtils.importESModule('chrome://userchrome/content/EGDeskJointBoardView.sys.mjs', { global: 'current' });
+  let jointDesk = null;
+  const jointUI = () => jointDesk || (jointDesk = JointUI.createUI(jointHost()));
   const SurfaceKeys = ChromeUtils.importESModule('chrome://userchrome/content/surface/EGDeskSurfaceKeys.mjs', { global: 'current' });
   const MemoLink = ChromeUtils.importESModule('chrome://userchrome/content/surface/EGDeskSurfaceMemoLink.mjs', { global: 'current' });
   // UX-06: which chat events need the person, one notice under the top bar (pure model).
@@ -1797,6 +1800,7 @@
   }
 
   function chatInputSourceForView(view) {
+    if (view?.dataset?.jointManaged) return null;
     if (!view?.isConnected || view.dataset.codexRole === 'auth' || view.classList.contains('egd-chat-card')) return null;
     const base = { id: `input-${chatBindingNonce()}`, label: cardLabelForViewportRail(view) || view.id,
       sourceRef: { viewId: view.id, boardId: state.boards.projections[view.dataset.projectionId]?.boardId || null } };
@@ -2229,6 +2233,7 @@
   }
 
   function buildBoardRegionProjectChip(projection) {
+    if (projection?.jointAccess) return null;
     const projectionId = projection.id;
     return el('button', { type: 'button', class: 'egd-board-region-project', hidden: true, data: { testid: 'board-project', projectionId }, onclick: event => {
       event.stopPropagation();
@@ -2242,6 +2247,7 @@
   // Cheap enough for every refreshBoardRegion: reads the cache and renders;
   // asks the bridge only once per Board, again after a failed answer settles.
   function syncBoardRegionProject(region, projection) {
+    if (projection?.jointAccess) return;
     const chip = region.querySelector('.egd-board-region-project');
     if (!chip) return;
     const boardId = projection.boardId;
@@ -5658,6 +5664,7 @@
 
   function serializeCardState(card) {
     if (!card || !card.isConnected || card.dataset.codexRole === 'auth') return null;
+    if (card.dataset?.jointManaged) return null; // Never cache restricted card bodies or private reply drafts in general Desk history.
     if (card._savedBoardMember) return { ...cloneJson(card._savedBoardMember), id: card.id, geometry: persistentEntityGeometry(card) };
     const type = cardKindForPersistence(card);
     if (type === 'card') return null;
@@ -5699,7 +5706,7 @@
   }
 
   function serializeDeskSnapshot() {
-    return {
+    const snapshot = {
       version: 1,
       savedAt: Date.now(),
       desk: {
@@ -5742,6 +5749,7 @@
         localHistoryBackupKey: state.codex.legacyChatBackupKey || null,
       },
     };
+    return typeof jointDesk !== 'undefined' && jointDesk ? jointDesk.scrub(snapshot) : snapshot;
   }
 
   // A notice that only reports finished work leaves on its own after a few
@@ -5789,6 +5797,7 @@
 
   function serializeAgendaSnapshot(options = {}) {
     const projection = !Array.isArray(options.memberIds) && state.boards.projections[options.projectionId || state.boards.activeProjectionId];
+    if (projection?.jointAccess) return null;
     if (projection) {
       const records = {};
       for (const member of projection.members) {
@@ -5805,7 +5814,7 @@
     }
     // A new Board requires an explicit member set, including an explicit empty set.
     if (!Array.isArray(options.memberIds) || !options.agendaId) return null;
-    const views = [...new Set(options.memberIds)].map(id => document.getElementById(id)).filter(Boolean);
+    const views = [...new Set(options.memberIds)].map(id => document.getElementById(id)).filter(v => v && !v.dataset?.jointManaged);
     return {
       version: 1, savedAt: Date.now(),
       agenda: { id: options.agendaId, title: options.title || 'Board', memberCardIds: views.filter(v => v.classList.contains('egd-canvas-card')).map(v => v.id), contextBindings: cloneJson(options.contextBindings || []) },
@@ -5886,6 +5895,7 @@
     let reason = '이 구성원은 연결 상태를 확인한 뒤 열 수 있습니다.';
     try {
       if (member.kind === 'shape') view = restoreShapeFromState({ ...record, id: member.viewId, geometry }, { reservedIds: options.reservedIds });
+      else if (record.type === 'joint-item' && projection.jointAccess && typeof jointDesk !== 'undefined' && jointDesk) view = jointDesk.mount(record.runtimeState, projection.boardId);
       else if (record.type === 'browser') {
         const uri = record.runtimeState?.uri || record.sourceRef?.uri;
         if (!uri) throw new Error('저장된 주소가 없습니다.');
@@ -6003,6 +6013,7 @@
   }
 
   function syncDeskWindowBoardMetadata(view, index = deskWindowBoardIndex()) {
+    if (view?.dataset?.jointManaged && view._deskWindowShell?.boardMenu) view._deskWindowShell.boardMenu.hidden = true;
     const label = view?._deskWindowShell?.boardMetadata;
     if (!label) return;
     const ownerId = index.owners.get(view.id);
@@ -6044,7 +6055,7 @@
   const BoardMembership = ChromeUtils.importESModule('chrome://userchrome/content/EGDeskBoardMembership.sys.mjs');
 
   function boardRegionsForMembership() {
-    return Object.values(state.boards.projections).map(projection => {
+    return Object.values(state.boards.projections).filter(projection => !projection.jointAccess).map(projection => {
       const region = projection?.id ? document.getElementById(projection.id) : null;
       return region ? { id: projection.id, rect: persistentEntityGeometry(region) } : null;
     }).filter(Boolean);
@@ -6099,7 +6110,7 @@
   // the same step (D-V1). Nothing opens anew.
   function addViewToBoard(view, projectionId) {
     const target = state.boards.projections[projectionId];
-    if (!view?.isConnected || !target) return false;
+    if (!view?.isConnected || !target || target.jointAccess || view.dataset?.jointManaged) return false;
     if (view.dataset.projectionId === target.id) return true;
     // CNV-03: a Canvas shape is never a Board member; inside a Board area it is
     // shown there by position only (see showBoardScopeChooser).
@@ -6122,6 +6133,7 @@
 
   // '○○에서 빼기': the View stays on the Desk and belongs to no Board.
   function removeViewFromBoard(view) {
+    if (view?.dataset?.jointManaged) return false;
     const owner = view?.dataset?.projectionId ? state.boards.projections[view.dataset.projectionId] : null;
     if (!view?.isConnected || !owner) return false;
     const change = BoardMembership.planMembershipChange(state.boards.projections,
@@ -6147,6 +6159,7 @@
   // leaves on '아니요', Esc, the next drop, or a membership change. Restored
   // Views keep their recorded membership and get no chip.
   function offerBoardMembershipSuggestion(view, trigger = 'drop') {
+    if (view?.dataset?.jointManaged) return false;
     if (!view?.isConnected || !view._deskWindowShell || isCardFullscreen(view)) return null;
     const quiet = !!(state.agenda.suppressDirty || state.agenda.restoreInProgress || state.surface.restoring);
     const suggestion = BoardMembership.membershipSuggestion({
@@ -6268,12 +6281,16 @@
         action();
       },
     }, label);
-    const items = [
+    const items = projection.jointAccess ? [
+      item('카드·사람 관리', '이 공용 Board의 공개 자료와 사람 관리', 'joint-board-manage', () => jointUI().panel('board', projection.boardId)),
+      item('Board 닫기', '이 Desk에서만 닫기', 'board-close', () => jointUI().closeBoard(projection.boardId))
+    ] : [
       item('저장', '이 Board 저장', 'board-save', () => saveBoardWithNotice({ projectionId })),
       item('다른 이름으로 저장…', '지금 구성을 새 이름의 Board로 저장', 'board-save-as', () => openBoardSaveAs(projectionId)),
       // CTX-01: only while the bridge's Desk store keeps Board versions.
       boardVersionHistoryReady() ? item('버전 기록', '이 Board의 버전 기록', 'board-history', () => openBoardHistoryPanel(projection.boardId)) : null,
       ...boardProjectMenuItems(projection, item),
+      typeof jointUI === 'function' ? item('공용 Board 제안…', '개인 원본을 옮기지 않고 새 공용 Board 제안', 'joint-propose-from-board', () => jointUI().propose(projection.title)) : null,
       item('Chat에 첨부', '이 Board의 요소를 Chat에 첨부', 'board-attach-chat',
         () => openChatInputPanel(state.codex.activeThreadId, { viewIds: projection.members.map(member => member.viewId) })),
       // RT-03: only while the bridge can write .egdesk files.
@@ -6649,6 +6666,155 @@
     }
   }
 
+  // Adapter onto the SAME Board projections, coordinate system and window manager as local work.
+  // Private memos never enter a projection from proximity; only explicit text excerpts can be uploaded.
+  function jointHost() {
+    const allProjections = () => Object.values(state.boards.projections).filter((p) => p.jointAccess);
+    const byId = (id) => allProjections().find((p) => p.boardId === id);
+    function dispose(node) {
+      if (!node) return;
+      if (isCardFullscreen(node)) exitCardFullscreen(node, { restoreRect: false });
+      node._cleanup?.();
+      unregisterSourceRefCard(node);
+      node.remove();
+      if (state.activeEntityId === node.id) setActiveEntity(null);
+    }
+    function removeProjection(p) {
+      for (const m of p.members) {
+        const e = document.getElementById(m.viewId);
+        if (e?.dataset.projectionId === p.id) dispose(e);
+      }
+      document.getElementById(p.id)?.remove();
+      delete state.boards.projections[p.id];
+      if (state.boards.activeProjectionId === p.id) {
+        state.boards.activeProjectionId = null;
+        state.agenda.activeAgendaId = 'agenda-default';
+        state.agenda.activeTitle = 'Desk';
+        state.agenda.dirty = false;
+        state.agenda.hasSavedState = false;
+      }
+      const i = recentBoardProjectionIds.indexOf(p.id);
+      if (i >= 0) recentBoardProjectionIds.splice(i, 1);
+      closeBoardRegionMenu();
+    }
+    function reconcile(p, snapshot) {
+      const allowed = new Map(snapshot.cards.map((c) => [c.id, c]));
+      for (const m of [...p.members]) {
+        const rec = allowed.get(m.sourceId);
+        if (rec && rec.runtimeState.access === m.record.runtimeState.access) {
+          const live = document.getElementById(m.viewId);
+          if (live && rec.runtimeState.published !== m.record.runtimeState.published && !rec.runtimeState.localPose)
+            applyPersistentEntityGeometry(live, { x: rec.geometry.x + p.offset.x, y: rec.geometry.y + p.offset.y });
+          m.record = rec;
+          continue;
+        }
+        const el = document.getElementById(m.viewId);
+        if (el?.dataset.projectionId === p.id) dispose(el);
+        p.members = p.members.filter((x) => x !== m);
+        delete p.idMap[m.sourceId];
+      }
+      const existing = new Set(p.members.map((m) => m.sourceId));
+      state.agenda.suppressDirty = true;
+      try {
+        for (const rec of snapshot.cards) {
+          if (existing.has(rec.id)) continue;
+          const viewId = allocateRestoredEntityId();
+          const m = { sourceId: rec.id, viewId, kind: 'card', record: rec };
+          p.idMap[rec.id] = viewId;
+          p.members.push(m);
+          const added = mountBoardMember(p, m);
+          if (added?.dataset.jointManaged) added.style.zIndex = String(++cardZ);
+        }
+      } finally {
+        state.agenda.suppressDirty = false;
+      }
+      p.source = cloneJson(snapshot);
+      p.title = snapshot.agenda.title;
+      refreshBoardRegion(p);
+    }
+    const reveal = (node) => {
+      if (!node) return;
+      focusCanvasCard(node);
+      state.setCanvasPanTarget?.(
+        SurfaceState.revealRectPan(persistentEntityGeometry(node), safeViewportRect(), {
+          pan: state.panTarget,
+          zoom: state.zoomTarget,
+        }),
+        { immediate: true },
+      );
+    };
+    return {
+      window,
+      document,
+      el,
+      notice: boardNotice,
+      allProjections,
+      byId,
+      dispose,
+      removeProjection,
+      reconcile,
+      reveal,
+      readLayout: () => readSurfacePref('egdesk.jointBoard.poses.v1') || {},
+      writeLayout: (v) => writeSurfacePref('egdesk.jointBoard.poses.v1', v),
+      geometry: persistentEntityGeometry,
+      applyGeometry: applyPersistentEntityGeometry,
+      open(snapshot, epoch, offset) {
+        const p = openBoardSnapshot(snapshot, { jointAccess: epoch, offset });
+        if (!p) return false;
+        // Opening the Board explicitly raises its windows together, never on a background poll. Preserve their relative stack.
+        const views = p.members
+          .map((m) => document.getElementById(m.viewId))
+          .filter((e) => e?.dataset.jointManaged === 'card')
+          .sort((a, b) => persistentEntityGeometry(a).zIndex - persistentEntityGeometry(b).zIndex);
+        for (const view of views) view.style.zIndex = String(++cardZ);
+        return p;
+      },
+      refreshRegion: (p) => refreshBoardRegion(p),
+      updateRows() {
+        syncViewportAgendaRail();
+        const panel = document.getElementById('egd-agenda-switcher');
+        if (panel) renderAgendaSwitcherPanel(panel);
+        renderRailSearchPanel();
+        syncBoardRail();
+        refreshDeskMinimap();
+      },
+      // Never serialize a whole memo record (links, other authors, conversations or Agent output).
+      memos: () =>
+        Array.from(document.querySelectorAll('.egd-memo-card'))
+          .filter((e) => !e.dataset.jointManaged && typeof e._memoRecord?.text === 'string')
+          .map((e) => ({ id: e.id, label: '메모 ' + (e._memoRecord.seq || ''), text: e._memoRecord.text })),
+      makeWindow(kind) {
+        const s = spawnDeskWindowShell({
+          id: 'egd-joint-view-' + ++cardSeq,
+          kind: 'joint-' + kind,
+          className: 'egd-joint-window',
+          bodyClassName: 'egd-joint-body',
+          minWidth: 230,
+          minHeight: 150,
+          collapsible: true,
+          activate: false,
+          createDirtyReason: 'restore-joint',
+          style: { width: '342px', height: '228px' },
+        });
+        s.root.dataset.jointManaged = kind;
+        s.boardMenu.hidden = true;
+        return s;
+      },
+      placeFree(root) {
+        const size = { width: 342, height: 228 };
+        const at = SurfaceState.placeCanvasView({
+          size,
+          safe: safeViewportWorldRect(),
+          occupied: Array.from(document.querySelectorAll('.egd-canvas-card,.egd-board-region'))
+            .filter((e) => e !== root)
+            .map(persistentEntityGeometry),
+          gap: 24,
+        });
+        applyPersistentEntityGeometry(root, { ...size, x: at.x, y: at.y, zIndex: ++cardZ });
+      },
+    };
+  }
+
   function openBoardSnapshot(snapshot, options = {}) {
     if (!snapshot?.agenda?.id) { boardNotice('저장된 Board를 읽을 수 없습니다.'); return false; }
     let projection = Object.values(state.boards.projections).find(p => p.boardId === snapshot.agenda.id);
@@ -6658,6 +6824,7 @@
       while (document.getElementById(projectionId) || Object.hasOwn(state.boards.projections, projectionId)
         || Object.values(state.boards.projections).some(projection => projection?.id === projectionId));
       projection = SurfaceState.planBoardProjection(snapshot, projectionId);
+      if (options.jointAccess && typeof jointDesk !== 'undefined' && jointDesk?.permits(snapshot.agenda.id,options.jointAccess)) projection.jointAccess=options.jointAccess;
       // The whole Board region keeps its saved layout and takes the closest
       // empty spot of the view, 24px clear of open Views and Boards.
       const occupied = Array.from(document.querySelectorAll('.egd-canvas-card, .egd-canvas-shape, .egd-board-region')).map(persistentEntityGeometry);
@@ -6665,6 +6832,7 @@
         || { x: 40, y: 80, width: 340, height: 180 }), { fallback: { x: 0, y: 0 } });
       const spot = SurfaceState.placeCanvasView({ size: saved, safe: safeViewportWorldRect(), occupied, gap: 24 });
       projection.offset = { x: spot.x - saved.x, y: spot.y - saved.y };
+      if (projection.jointAccess && options.offset && [options.offset.x,options.offset.y].every(Number.isFinite)) projection.offset={...options.offset};
       state.boards.projections[projection.id] = projection;
       state.agenda.suppressDirty = true;
       try { for (const member of projection.members) mountBoardMember(projection, member); }
@@ -7160,6 +7328,7 @@
 
   function closeCurrentAgenda(options = {}) {
     const projection = state.boards.projections[options.projectionId || state.boards.activeProjectionId];
+    if (projection?.jointAccess) return jointDesk?.closeBoard(projection.boardId);
     if (!projection) return false;
     selectBoardProjection(projection.id);
     if (projection.dirty && options.force !== true) return showAgendaCloseGuard();
@@ -7720,7 +7889,7 @@
         closedAt,
         activityAt: Math.max(updatedAt || 0, lastOpenedAt || 0, closedAt || 0),
       };
-    }).filter((entry) => (
+    }).concat(typeof jointDesk !== 'undefined' && jointDesk ? jointDesk.rows() : []).filter((entry) => (
       agendaEntryMatchesFilter(entry, filter) && agendaEntryMatchesQuery(entry, query)
     )).sort((a, b) => {
       if (a.current) return -1;
@@ -8549,6 +8718,7 @@
   }
 
   function switchAgenda(agendaId, options = {}) {
+    if (typeof jointDesk !== 'undefined' && jointDesk?.hasBoard(agendaId)) { closeAgendaSwitcher(); return jointDesk.openBoard(agendaId); }
     const store = coerceAgendaStore();
     const snapshot = store.agendas?.[agendaId] || null;
     if (BoardLifecycle.isBoardTrashed(store.meta?.[agendaId])) { boardNotice('휴지통에 있는 Board입니다. Board 목록의 휴지통에서 복구한 뒤 열어 주세요.'); return false; }
@@ -8567,6 +8737,7 @@
     const name = el('input', { 'aria-label': 'Board 이름', placeholder: 'Board 이름' });
     const dialog = el('div', { id: 'egd-board-scope', class: 'egd-edge egd-frosted', role: 'dialog', 'aria-label': '새 Board 저장 범위' },
       el('h3', {}, '새 Board'), name,
+      typeof jointUI === 'function' ? el('button',{data:{testid:'joint-form'},onclick:()=>{dialog.remove();jointUI().propose(name.value.trim());}},'함께 만들기…') : null,
       el('p', {}, '포함할 화면을 직접 선택하세요.'),
       el('button', { 'aria-label': '빈 Board 저장', onclick: () => commitScope([]) }, '빈 Board 저장'),
       el('button', { 'aria-label': '선택한 화면으로 Board 저장', disabled: selectedIds.length ? null : 'true', onclick: () => commitScope(selectedIds) }, `선택한 화면 ${selectedIds.length}개 저장`),
@@ -8627,7 +8798,7 @@
         input?.setSelectionRange?.(input.value.length, input.value.length);
       }
     };
-    const rows = entries.map((entry, _index, _all, archiveAction = BoardLifecycle.boardArchiveAction(entry)) => el('div', {
+    const rows = entries.map((entry, _index, _all, archiveAction = BoardLifecycle.boardArchiveAction(entry)) => entry.joint ? el('button',{class:'egd-agenda-switch-row',data:{testid:'board-open',boardId:entry.id},onclick:()=>switchAgenda(entry.id)},entry.title+' · 항목 '+entry.count+'개') : el('div', {
       class: 'egd-agenda-switch-row' + (entry.current ? ' egd-agenda-switch-row-current' : ''),
       role: 'button',
       tabindex: '0',
@@ -8773,6 +8944,7 @@
               createNewAgenda();
             },
           }, '새 Board'),
+          typeof jointUI === 'function' ? el('button',{class:'egd-agenda-switch-action',data:{testid:'joint-hub'},onclick:()=>{closeAgendaSwitcher();jointUI().panel('hub');}},'사람과 공유') : null,
         ),
       ),
       el('div', { class: 'egd-agenda-switch-search' },
@@ -8840,6 +9012,7 @@
   }
 
   function markAgendaDirty(reason = 'canvas-change', entity = null) {
+    if (entity?.dataset?.jointManaged && typeof jointDesk !== 'undefined' && jointDesk) { jointDesk.recordPose(entity); return; }
     if (state.agenda.suppressDirty || state.agenda.restoreInProgress) return;
     if (reason === 'file-view-state') observeFileProjectAssociation(entity);
     scheduleDeskSessionSave();
@@ -20136,7 +20309,7 @@
     // Resolve only on an explicit File Board connection or IDE entry.
     // This is not a Chat room association or a draft execution target.
     const projection = activeBoardProjection();
-    if (!projection || typeof projection.boardId !== 'string' || !projection.boardId) return null;
+    if (!projection || projection.jointAccess || typeof projection.boardId !== 'string' || !projection.boardId) return null;
     return { boardId: projection.boardId, title: projection.title, projectionId: projection.id,
       selectionRevision: state.boardSelectionRevision || 0 };
   }
@@ -20161,7 +20334,7 @@
     const layer = document.getElementById('egd-canvas-layer');
     if (!layer) return [];
     return Array.from(layer.children)
-      .filter(node => node.classList?.contains('egd-canvas-card') && !node.classList.contains('egd-memo-card') && !node.classList.contains('egd-board-missing'))
+      .filter(node => node.classList?.contains('egd-canvas-card') && !node.dataset?.jointManaged && !node.classList.contains('egd-memo-card') && !node.classList.contains('egd-board-missing'))
       .map(card => ({ id: card.id, label: cardLabelForViewportRail(card), geometry: persistentEntityGeometry(card) }))
       .sort((a, b) => a.geometry.zIndex - b.geometry.zIndex)
       .map(({ id, label, geometry }) => ({ id, label, rect: { x: geometry.x, y: geometry.y, width: geometry.width, height: geometry.height } }));
@@ -30248,6 +30421,7 @@
   let boardAgentAskFlowRef = null;
   let boardAgentAskOpener = null;
   function askBoard(projection) {
+    if (projection?.jointAccess) return null;
     if (!projection || BoardAgentAsk.boardAskLifecycleBusy(projection.boardId) || !coerceAgendaStore().agendas[projection.boardId]) return null;
     const board = reviewBoard(projection);
     return board && isReviewBoardCurrent(board) ? { id: projection.boardId, title: board.title, identity: board } : null;

@@ -1,6 +1,6 @@
 # 같은 Board에서 누구의 브라우저와 Agent로 일하는가
 
-**상태: 설계 제안, 원격 기능 미구현.** ‘작업 환경’은 일상어다. 별도의 Workspace 객체를 만들거나 `[초대]`의 기본값을 정하지 않는다. 사람에게 같은 Board를 보여 주는 일, 특정 기기에 로그인된 브라우저에서 일을 시키는 일, 그 화면을 보거나 조작하는 일은 조합할 수 있지만 서로를 허가하지 않는다. 구현 전 필요한 인프라·조직 정책 결정은 기존 [조직 실행 계약](../../../ideas/confirmed/EGDESK_INTERACTION_AND_ORCHESTRATION_CONTRACT.md#tech-org-execution)을 따른다.
+**상태: 텍스트 카드 협업은 별도 작업 브랜치의 실제 Firefox에 구현. 화면 공동 시청·입력·상대 Agent 실행은 설계.** [현재 실행 경로와 범위](./JOINT_BOARD_RUNTIME.md). 아래 C01~C15 전체가 통과한 것으로 보지 않는다. ‘작업 환경’은 일상어다. 별도의 Workspace 객체를 만들거나 `[초대]`의 기본값을 정하지 않는다. 사람에게 같은 Board를 보여 주는 일, 특정 기기에 로그인된 브라우저에서 일을 시키는 일, 그 화면을 보거나 조작하는 일은 조합할 수 있지만 서로를 허가하지 않는다. 구현 전 필요한 인프라·조직 정책 결정은 기존 [조직 실행 계약](../../../ideas/confirmed/EGDESK_INTERACTION_AND_ORCHESTRATION_CONTRACT.md#tech-org-execution)을 따른다.
 
 [사용 시나리오](../../../ideas/confirmed/EGDESK_PRODUCT_INTERACTION_TRACE_ATLAS.md#atlas-shared-card-agents) · [권한과 실행 예시](#cross-agent-requests) · [인수 사례](#collab-checks)
 
