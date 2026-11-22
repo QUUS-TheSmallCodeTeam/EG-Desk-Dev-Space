@@ -204,7 +204,7 @@ async function readBody(response) {
  *     budget_exceeded when the monthly input-token cap is reached.
  * client.decide({ input, questions, promptCacheKey?, safetyIdentifier?, timeoutMs?, signal? })
  *   → { answers, model, usage, latencyMs }   throws DecisionError
- * client.verifyKey(apiKey, { timeoutMs?, signal? }) → { status: 'verified' | DecisionError code, retryable }
+ * client.verifyKey(apiKey, { timeoutMs?, signal? }) → { status: 'verified' | 'not_verified' | DecisionError code, retryable }
  */
 export function createDecisionClient({ getApiKey, fetchImpl = globalThis.fetch, endpoint = DECISIONS_ENDPOINT, model = DECISION_MODEL,
   timeoutMs = DEFAULT_DECISION_TIMEOUT_MS, clock = () => performance.now(), budget = null, recipientForKey = null } = {}) {
@@ -281,10 +281,15 @@ export function createDecisionClient({ getApiKey, fetchImpl = globalThis.fetch, 
     async verifyKey(apiKey, options = {}) {
       if (!nonEmptyText(apiKey)) return { status: 'invalid_key', retryable: false }
       try {
-        await post(apiKey, { input: 'EG-Desk key check',
+        const { answers } = await post(apiKey, { input: 'EG-Desk key check',
           questions: [{ type: 'predicate', name: 'key_check', instructions: 'Is the input a key check message?' }] },
         { timeoutMs: options.timeoutMs ?? 5000, signal: options.signal })
-        return { status: 'verified', retryable: false }
+        const check = answers.key_check
+        // Only normalized predicates have a finite probability in [0, 1].
+        if (check?.type !== 'predicate') return { status: 'bad_response', retryable: false }
+        // This asks about the fixed probe message, not whether the key is valid.
+        // A tie or negative answer fails the probe without implying an HTTP 401.
+        return { status: check.probability > 0.5 ? 'verified' : 'not_verified', retryable: false }
       } catch (error) {
         if (error instanceof DecisionError) return { status: error.code, retryable: error.retryable }
         return { status: 'unreachable', retryable: true }

@@ -162,21 +162,48 @@ test('without a saved key nothing is sent', async () => {
 
 test('verifyKey checks a candidate key with one tiny request', async () => {
   const cases = [
-    [200, { answers: [{ type: 'predicate', name: 'key_check', probability: 0.9 }] }, 'verified'],
-    [401, {}, 'invalid_key'],
-    [429, { error: { code: 'credit_balance_exhausted' } }, 'no_credit'],
+    [200, { answers: [{ type: 'predicate', name: 'key_check', probability: 0.9 }] }, 'verified', false],
+    [401, {}, 'invalid_key', false],
+    [429, { error: { code: 'credit_balance_exhausted' } }, 'no_credit', false],
+    [429, { error: { code: 'rate_limit_exceeded' } }, 'rate_limited', true],
   ]
-  for (const [status, body, expected] of cases) {
+  for (const [status, body, expected, retryable] of cases) {
     const { fetchImpl, calls } = fakeFetch(() => respond(status, body))
     const client = createDecisionClient({ getApiKey: () => null, fetchImpl })
     const verdict = await client.verifyKey(KEY)
-    assert.equal(verdict.status, expected)
+    assert.deepEqual(verdict, { status: expected, retryable })
     assert.equal(calls.length, 1)
     assert.equal(calls[0].init.headers.authorization, `Bearer ${KEY}`)
     assert.equal(calls[0].body.questions.length, 1)
   }
   const client = createDecisionClient({ getApiKey: () => null, fetchImpl: async () => { throw new Error('must not be called') } })
   assert.deepEqual(await client.verifyKey(''), { status: 'invalid_key', retryable: false })
+})
+
+test('verifyKey distinguishes an HTTP 200 from confirmed key-check semantics', async t => {
+  const predicate = probability => ({ type: 'predicate', name: 'key_check', probability })
+  const cases = [
+    ['affirmative predicate', { answers: [predicate(0.9)] }, 'verified'],
+    ['missing predicate', { answers: [] }, 'bad_response'],
+    ['unrelated predicate', { answers: [{ ...predicate(0.99), name: 'different_question' }] }, 'bad_response'],
+    ['refusal', { answers: [{ type: 'refusal', name: 'key_check' }] }, 'bad_response'],
+    ['wrong type', { answers: [{ type: 'choice', name: 'key_check', choice: true, confidence: 1 }] }, 'bad_response'],
+    ['non-numeric probability', { answers: [predicate('0.99')] }, 'bad_response'],
+    ['out of range probability', { answers: [predicate(1.01)] }, 'bad_response'],
+    ['non-finite probability in JSON', '{"answers":[{"type":"predicate","name":"key_check","probability":1e999}]}', 'bad_response'],
+    ['confidently negative predicate', { answers: [predicate(0)] }, 'not_verified'],
+    ['ambiguous predicate', { answers: [predicate(0.5)] }, 'not_verified'],
+  ]
+  for (const [name, body, status] of cases) await t.test(name, async () => {
+    const { fetchImpl, calls } = fakeFetch(() => new Response(
+      typeof body === 'string' ? body : JSON.stringify(body),
+      { status: 200, headers: { 'content-type': 'application/json' } },
+    ))
+    const client = createDecisionClient({ getApiKey: () => null, fetchImpl })
+    const verdict = await client.verifyKey(KEY)
+    assert.equal(calls.length, 1)
+    assert.deepEqual(verdict, { status, retryable: false })
+  })
 })
 
 test('the local budget counts input tokens per month and refuses past the cap', async () => {
@@ -411,8 +438,11 @@ test('revocation during synchronous request preparation is caught at the last tr
 test('an authorized upstream failure is not retried or charged; successful topic, ordinary, and key-check calls keep prior accounting', async () => {
   let reads = 0, checked = 0, guards = 0, nextStatus = 500
   const budget = createDecisionBudget({ monthlyInputTokenCap: 100, now: () => SAVED_AT })
-  const { fetchImpl, calls } = fakeFetch(() => nextStatus === 500
-    ? respond(500, { error: { message: 'private upstream failure' }, usage: { input_tokens: 99 } }) : syntheticReply())
+  const { fetchImpl, calls } = fakeFetch(({ body }) => nextStatus === 500
+    ? respond(500, { error: { message: 'private upstream failure' }, usage: { input_tokens: 99 } })
+    : body.input === 'EG-Desk key check'
+      ? respond(200, { answers: [{ type: 'predicate', name: 'key_check', probability: 0.9 }], usage: { input_tokens: 17 } })
+      : syntheticReply())
   const client = createDecisionClient({ getApiKey: () => { reads++; return KEY }, fetchImpl, budget,
     recipientForKey: (key, endpoint, model) => { checked++; return decisionTopicRecipient(key, SAVED_AT, endpoint, model) } })
   const authorizeDispatch = actual => { guards++; return actual === decisionTopicRecipient(KEY, SAVED_AT) }
